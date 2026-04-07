@@ -1,6 +1,6 @@
 {
   "name": "kintone-sql-tools",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "kintone SQL plugin and CLI tools (ksql)",
   "license": "MIT",
   "repository": {
@@ -15,13 +15,13 @@
     "ksql": "dist-cli/ksql.js"
   },
   "scripts": {
-    "test":    "jest",
-    "build":   "npm run build:plugin && npm run build:cli",
+    "test": "jest",
+    "build": "npm run build:plugin && npm run build:cli",
     "build:plugin": "node build.mjs",
     "build:cli": "node build-cli.mjs",
-    "start":   "run-p develop upload",
+    "start": "run-p develop upload",
     "develop": "node build.mjs --watch",
-    "upload":  "rex0220-plugin-uploader -f dist/ksql-plugin1.zip --watch"
+    "upload": "rex0220-plugin-uploader -f dist/ksql-plugin1.zip --watch"
   },
   "devDependencies": {
     "@kintone/plugin-packer": "^9.1.0",

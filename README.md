@@ -55,6 +55,13 @@ $env:KSQL_PPK_PATH="private.ppk"
 npm run build:plugin
 ```
 
+CI (GitHub Actions) で署名付きプラグインをビルドする場合は、Repository Secrets に以下を設定してください。
+
+- `KSQL_PLUGIN_ID` (必須): kintone の Plugin ID
+- `KSQL_PLUGIN_PPK_BASE64` (必須): `.ppk` ファイルを base64 化した文字列
+
+この2つが設定されている場合のみ、`.github/workflows/ci.yml` の `Build plugin (signed)` ステップが実行されます。
+
 ### Install (npm)
 
 ```bash
@@ -313,10 +320,3 @@ CLI は以下の環境変数をサポートします。
 
 - `docs/README.md`
 - `docs/ksql_cli_console_spec.md`
-- `docs/implementation/cli_implementation_steps.md`
-- `docs/checklists/cli_test_acceptance_criteria.md`
-- `docs/archive/cli_mvp_completion_criteria.md`
-- `docs/implementation/cli_dml_phase1_spec.md`
-- `docs/checklists/cli_dml_phase1_acceptance_checklist.md`
-- `docs/checklists/cli_operation_start_checklist.md`
-- `docs/proposals/select_update_shared_optimization_spec.md`
