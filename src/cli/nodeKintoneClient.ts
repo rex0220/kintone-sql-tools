@@ -1,0 +1,257 @@
+import type {
+  KintoneAppInfo,
+  KintoneClient,
+  KintoneDeleteParams,
+  KintoneFieldInfo,
+  KintonePostParams,
+  KintonePutParams,
+  PageFetchParams,
+} from "../core";
+
+export interface TokenResolver {
+  timeoutMs?: number;
+  debug?: boolean;
+  debugHeaders?: boolean;
+  log?: (line: string) => void;
+  auth:
+    | { type: "token"; resolveToken: (appId: number) => string }
+    | { type: "userpass"; username: string; password: string };
+}
+
+export function createNodeKintoneClient(
+  baseUrl: string,
+  tokenResolver: TokenResolver
+): KintoneClient {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+
+  async function requestJson<T>(
+    path: string,
+    init: RequestInit,
+    appIdForToken: number
+  ): Promise<T> {
+    const headers = new Headers(init.headers ?? {});
+    if (tokenResolver.auth.type === "token") {
+      headers.set("X-Cybozu-API-Token", tokenResolver.auth.resolveToken(appIdForToken));
+    } else {
+      const credentials = `${tokenResolver.auth.username}:${tokenResolver.auth.password}`;
+      const encoded = Buffer.from(credentials, "utf-8").toString("base64");
+      headers.set("X-Cybozu-Authorization", encoded);
+    }
+    headers.set("Accept", "application/json");
+    const method = String(init.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      headers.set("Content-Type", "application/json");
+    }
+
+    const timeoutMs = tokenResolver.timeoutMs ?? 30000;
+    const url = `${normalizedBaseUrl}${path}`;
+    if (tokenResolver.debug) {
+      tokenResolver.log?.(`[debug] request ${String(init.method ?? "GET")} ${url}`);
+      if (tokenResolver.debugHeaders) {
+        const authHeader = headers.get("X-Cybozu-API-Token")
+          ? "X-Cybozu-API-Token=***"
+          : headers.get("X-Cybozu-Authorization")
+            ? "X-Cybozu-Authorization=***"
+            : "Auth=(none)";
+        tokenResolver.log?.(
+          `[debug] request-headers ${authHeader} Content-Type=${headers.get("Content-Type") ?? "(none)"} Accept=${headers.get("Accept") ?? "(none)"}`
+        );
+      }
+    }
+
+    const res = await fetch(url, {
+      ...init,
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (!res.ok) {
+      const bodyText = await res.text();
+      if (tokenResolver.debug) {
+        tokenResolver.log?.(`[debug] response status=${res.status} body=${bodyText}`);
+      }
+      throw new Error(`kintone API error ${res.status}: ${bodyText}`);
+    }
+    if (tokenResolver.debug) {
+      tokenResolver.log?.(`[debug] response status=${res.status}`);
+    }
+    return await res.json() as T;
+  }
+
+  function shouldRetryWithRecordNumberOrder(path: string, bodyText: string): boolean {
+    if (!path.includes("/k/v1/records.json?")) return false;
+    if (!bodyText.includes("\"code\":\"CB_IL02\"")) return false;
+    const queryPart = path.split("query=")[1] ?? "";
+    const query = decodeURIComponent(queryPart.split("&")[0] ?? "");
+    if (!query.includes("limit")) return false;
+    if (!query.includes("offset")) return false;
+    if (query.toLowerCase().includes("order by")) return false;
+    return true;
+  }
+
+  function rewriteQueryWithRecordNumberOrder(path: string): string {
+    const [base, rest] = path.split("query=");
+    if (!rest) return path;
+    const [encodedQuery, ...tail] = rest.split("&");
+    const query = decodeURIComponent(encodedQuery ?? "");
+    const rewritten = `order by レコード番号 asc ${query}`.trim();
+    const nextQuery = encodeURIComponent(rewritten);
+    return `${base}query=${nextQuery}${tail.length > 0 ? `&${tail.join("&")}` : ""}`;
+  }
+
+  return {
+    async getRecords(params: PageFetchParams) {
+      const queryPart = `query=${encodeURIComponent(params.query)}`;
+      const appPart = `app=${encodeURIComponent(String(params.app))}`;
+      const fieldParts = params.fields.map((f) => `fields[]=${encodeURIComponent(f)}`);
+      const qs = [appPart, queryPart, ...fieldParts].join("&");
+      if (tokenResolver.debug) {
+        tokenResolver.log?.(
+          `[debug] getRecords app=${params.app} query="${params.query}" fields=${params.fields.length > 0 ? params.fields.join(",") : "(all)"} auth=${tokenResolver.auth.type}`
+        );
+      }
+      const path = `/k/v1/records.json?${qs}`;
+      try {
+        return await requestJson<{ records: Record<string, { value: string }>[] }>(
+          path,
+          { method: "GET" },
+          params.app
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!shouldRetryWithRecordNumberOrder(path, msg)) throw err;
+        const retryPath = rewriteQueryWithRecordNumberOrder(path);
+        if (tokenResolver.debug) {
+          tokenResolver.log?.("[debug] retry with fallback query order by レコード番号 asc");
+        }
+        return await requestJson<{ records: Record<string, { value: string }>[] }>(
+          retryPath,
+          { method: "GET" },
+          params.app
+        );
+      }
+    },
+
+    async postRecords(_params: KintonePostParams) {
+      const res = await requestJson<{ ids: string[] }>(
+        "/k/v1/records.json",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            app: _params.app,
+            records: _params.records,
+          }),
+        },
+        _params.app
+      );
+      return { ids: res.ids };
+    },
+
+    async putRecords(_params: KintonePutParams) {
+      await requestJson<unknown>(
+        "/k/v1/records.json",
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            app: _params.app,
+            records: _params.records,
+          }),
+        },
+        _params.app
+      );
+    },
+
+    async deleteRecords(_params: KintoneDeleteParams) {
+      await requestJson<unknown>(
+        "/k/v1/records.json",
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            app: _params.app,
+            ids: _params.ids,
+          }),
+        },
+        _params.app
+      );
+    },
+
+    async getApps(): Promise<KintoneAppInfo[]> {
+      const PAGE = 100;
+      const all: KintoneAppInfo[] = [];
+      let offset = 0;
+      while (true) {
+        const qs = new URLSearchParams();
+        qs.set("limit", String(PAGE));
+        qs.set("offset", String(offset));
+        const res = await requestJson<{ apps: { appId: string; name: string; description: string }[] }>(
+          `/k/v1/apps.json?${qs.toString()}`,
+          { method: "GET" },
+          0
+        );
+        for (const app of res.apps) {
+          all.push({
+            appId: Number(app.appId),
+            name: app.name,
+            description: app.description,
+          });
+        }
+        if (res.apps.length < PAGE) break;
+        offset += PAGE;
+      }
+      return all;
+    },
+
+    async getFields(appId: number): Promise<KintoneFieldInfo[]> {
+      const qs = new URLSearchParams();
+      qs.set("app", String(appId));
+      const res = await requestJson<{
+        properties: Record<string, {
+          code: string;
+          label: string;
+          type: string;
+          format?: string;
+          options?: Record<string, { index?: string | number }>;
+        }>;
+      }>(
+        `/k/v1/app/form/fields.json?${qs.toString()}`,
+        { method: "GET" },
+        appId
+      );
+
+      return Object.values(res.properties).map((f) => ({
+        code: f.code,
+        label: f.label,
+        fieldType: f.type,
+        optionOrder: toOptionOrderMap(f.options),
+        sortKind: detectSortKind(f.type, f.format),
+      }));
+    },
+  };
+}
+
+function toOptionOrderMap(
+  options?: Record<string, { index?: string | number }>
+): Record<string, number> | undefined {
+  if (!options || typeof options !== "object") return undefined;
+  const order: Record<string, number> = {};
+  let hasAny = false;
+  for (const [label, meta] of Object.entries(options)) {
+    const n = Number(meta?.index);
+    if (!Number.isFinite(n)) continue;
+    order[label] = n;
+    hasAny = true;
+  }
+  return hasAny ? order : undefined;
+}
+
+function detectSortKind(
+  fieldType: string,
+  calcFormat?: string
+): "number" | "string" | undefined {
+  if (fieldType === "NUMBER" || fieldType === "RECORD_NUMBER") return "number";
+  if (fieldType === "CALC") {
+    if (calcFormat === "NUMBER" || calcFormat === "NUMBER_DIGIT") return "number";
+    return "string";
+  }
+  return undefined;
+}

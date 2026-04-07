@@ -1,0 +1,1 @@
+"use strict";(()=>{function n(){let e=document.getElementById("btn-cancel");e&&e.addEventListener("click",()=>history.back())}document.readyState==="loading"?document.addEventListener("DOMContentLoaded",n):n();})();

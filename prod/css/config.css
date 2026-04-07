@@ -1,0 +1,22 @@
+body { font-family: "Hiragino Sans", "Meiryo", sans-serif; background: #f5f7fa; margin: 0; padding: 24px; color: #2c3e50; }
+.config-wrap  { max-width: 680px; margin: 0 auto; background: #fff; border-radius: 4px; border: 1px solid #d0d4d9; padding: 28px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+h1            { font-size: 18px; margin: 0 0 20px; color: #1a3c5e; border-bottom: 2px solid #1a6fb5; padding-bottom: 10px; }
+.field-group  { margin-bottom: 20px; }
+label         { display: block; font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #37474f; }
+.hint         { font-size: 11px; color: #78909c; margin-bottom: 6px; }
+input[type=number] { width: 120px; padding: 6px 10px; border: 1px solid #b0bec5; border-radius: 3px; font-size: 13px; }
+.alias-table  { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.alias-table th { background: #f0f4f8; padding: 6px 10px; font-size: 12px; text-align: left; border-bottom: 2px solid #c9d4df; }
+.alias-table td { padding: 5px 8px; border-bottom: 1px solid #eceff1; }
+.alias-table input { width: 100%; box-sizing: border-box; padding: 4px 8px; border: 1px solid #b0bec5; border-radius: 3px; font-size: 13px; }
+.alias-table input.app-id  { width: 90px; }
+.btn-add-row, .btn-del-row { background: none; border: none; cursor: pointer; font-size: 13px; color: #1a6fb5; padding: 2px 6px; }
+.btn-add-row:hover { color: #1a3c5e; }
+.btn-del-row { color: #c62828; }
+.btn-del-row:hover { color: #7f0000; }
+.save-row     { display: flex; gap: 10px; margin-top: 24px; }
+.btn-save     { background: #1a6fb5; color: #fff; border: none; border-radius: 3px; padding: 8px 24px; font-size: 14px; font-weight: 700; cursor: pointer; }
+.btn-save:hover { background: #155a9a; }
+.btn-cancel   { background: #eceff1; color: #546e7a; border: none; border-radius: 3px; padding: 8px 18px; font-size: 14px; cursor: pointer; }
+.btn-cancel:hover { background: #cfd8dc; }
+#config-msg   { margin-top: 14px; font-size: 13px; }

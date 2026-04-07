@@ -1,0 +1,1558 @@
+/* ============================================================
+   kSQL プラグイン — スタイルシート
+   ============================================================ */
+
+/* ---- パネル全体 ----------------------------------------- */
+
+#ksql-panel {
+  margin: 0 0 16px;
+  width: calc(100vw - 40px);
+  max-width: calc(100vw - 40px);
+  min-width: 0;
+  overflow-x: hidden;
+  border: 1px solid #d0d4d9;
+  border-radius: 4px;
+  background: #fff;
+  font-family: "Hiragino Sans", "Meiryo", sans-serif;
+  font-size: 13px;
+  color: #2c3e50;
+  box-shadow: 0 1px 4px rgba(0,0,0,.08);
+  box-sizing: border-box;
+}
+
+.ksql-layout {
+  width: calc(100vw - 40px);
+  max-width: calc(100vw - 40px);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ksql-layout > #ksql-panel {
+  flex: 1;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+}
+
+/* ---- ヘッダー ------------------------------------------- */
+
+.ksql-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #d0d4d9;
+  border-radius: 4px 4px 0 0;
+  min-width: 1200px;
+  max-width: 1200px;
+}
+
+.ksql-panel-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: #1a3c5e;
+}
+
+.ksql-toggle-btn {
+  background: none;
+  border: none;
+  color: #5a8ab5;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+}
+.ksql-toggle-btn:hover { color: #1a3c5e; }
+
+/* ---- ボディ --------------------------------------------- */
+
+.ksql-panel-body {
+  padding: 12px;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.ksql-main-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+}
+
+.ksql-main-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.ksql-main-row .ksql-editor-row {
+  min-width: 0;
+  max-width: none;
+}
+
+/* ---- SQL エディタ --------------------------------------- */
+
+.ksql-editor {
+  width: 100%;
+  box-sizing: border-box;
+  height: 120px;
+  padding: 10px;
+  font-family: "Consolas", "Menlo", "Monaco", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  resize: vertical;
+  color: #1a1a2e;
+  background: #fafbfc;
+  outline: none;
+  transition: border-color .15s;
+}
+.ksql-editor:focus {
+  border-color: #4a90d9;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(74,144,217,.15);
+}
+
+/* ---- エディタ + サイドバー横並び ----------------------- */
+
+.ksql-editor-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 1200px;
+  max-width: 1200px;
+}
+
+.ksql-editor-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.ksql-side-col {
+  width: 520px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+}
+
+.ksql-index-record-pane {
+  width: 260px;
+  min-width: 260px;
+  max-width: 260px;
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #fafbfc;
+}
+
+.ksql-index-record-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 8px;
+  border-bottom: 1px solid #d0d4d9;
+  background: #f0f4f8;
+}
+
+.ksql-index-record-pane-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #37474f;
+}
+
+.ksql-index-record-pane-body {
+  padding: 6px;
+}
+
+.ksql-index-record-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.ksql-index-record-filter-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ksql-index-record-filter-row .ksql-index-record-filter {
+  margin-bottom: 0;
+  flex: 1;
+}
+
+.ksql-index-record-app-filter {
+  width: 80px;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.ksql-index-record-pane.is-collapsed {
+  width: 30px;
+  min-width: 30px;
+  max-width: 30px;
+}
+
+.ksql-index-record-pane.is-collapsed .ksql-index-record-pane-title,
+.ksql-index-record-pane.is-collapsed .ksql-index-record-pane-body {
+  display: none;
+}
+
+.ksql-index-record-pane.is-collapsed .ksql-index-record-pane-header {
+  height: 100%;
+  padding: 4px 2px;
+  border-bottom: none;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+.ksql-index-record-list {
+  max-height: calc(100vh - 360px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ksql-index-record-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border: 1px solid #d8e0e8;
+  border-radius: 3px;
+  background: #fff;
+  padding: 6px;
+  cursor: pointer;
+}
+
+.ksql-index-record-item:hover {
+  background: #e8f4fd;
+}
+
+.ksql-index-record-item.is-active {
+  border-color: #1a6fb5;
+  box-shadow: inset 0 0 0 1px #1a6fb5;
+}
+
+.ksql-index-record-item-main {
+  min-width: 0;
+}
+
+.ksql-index-record-text {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  color: #455a64;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-index-record-apps {
+  margin-top: 2px;
+  font-size: 10px;
+  color: #607d8b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-index-record-id {
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 11px;
+  color: #1a3c5e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-index-record-title {
+  font-size: 12px;
+  color: #455a64;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-index-record-link {
+  flex: 0 0 auto;
+  text-decoration: none;
+  color: #1a6fb5;
+  font-size: 13px;
+  padding: 2px 4px;
+}
+
+.ksql-index-record-empty {
+  color: #90a4ae;
+  text-align: center;
+  padding: 10px 4px;
+  font-size: 12px;
+}
+
+/* ---- 保存SQLサイドバー ------------------------------ */
+
+.ksql-saved-sidebar {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #fafbfc;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+}
+
+.ksql-saved-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  background: #f0f4f8;
+  border-bottom: 1px solid #d0d4d9;
+  border-radius: 3px 3px 0 0;
+}
+
+.ksql-saved-sidebar-title {
+  font-weight: 700;
+  color: #37474f;
+}
+
+.ksql-saved-sidebar-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.ksql-saved-list {
+  overflow-y: auto;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ksql-saved-item {
+  border: 1px solid #e0e5eb;
+  border-radius: 3px;
+  background: #fff;
+  padding: 6px;
+}
+
+.ksql-saved-meta {
+  margin-bottom: 4px;
+}
+
+.ksql-saved-title {
+  font-weight: 700;
+  color: #1a3c5e;
+}
+
+.ksql-saved-sub {
+  color: #78909c;
+  font-size: 11px;
+}
+
+.ksql-saved-preview {
+  margin: 0 0 6px;
+  padding: 4px;
+  background: #f8fafc;
+  border-radius: 2px;
+  max-height: 68px;
+  overflow: auto;
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 11px;
+  color: #37474f;
+  white-space: pre-wrap;
+}
+
+.ksql-saved-btn-row {
+  display: flex;
+  gap: 4px;
+}
+
+.ksql-saved-btn {
+  flex: 1;
+  border: none;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  background: #eceff1;
+  color: #455a64;
+}
+
+.ksql-saved-btn:hover:not(:disabled) {
+  background: #cfd8dc;
+}
+
+.ksql-saved-btn-run {
+  background: #1a6fb5;
+  color: #fff;
+}
+
+.ksql-saved-btn-run:hover:not(:disabled) {
+  background: #155a9a;
+}
+
+.ksql-saved-btn:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.ksql-saved-empty {
+  color: #90a4ae;
+  text-align: center;
+  padding: 12px 4px;
+}
+
+/* ---- フィールドサイドバー ------------------------------ */
+
+.ksql-field-sidebar {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #fafbfc;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+}
+
+.ksql-field-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 10px;
+  background: #f0f4f8;
+  border-bottom: 1px solid #d0d4d9;
+  border-radius: 3px 3px 0 0;
+}
+
+.ksql-field-sidebar-title {
+  font-weight: 700;
+  font-size: 12px;
+  color: #37474f;
+}
+
+.ksql-field-sidebar-body {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.ksql-side-toggle-btn {
+  background: none;
+  border: none;
+  color: #5a8ab5;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+
+.ksql-side-toggle-btn:hover {
+  color: #1a3c5e;
+}
+
+.ksql-field-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e0e5eb;
+}
+
+.ksql-field-app-input {
+  flex: 0 0 96px;
+  min-width: 96px;
+  max-width: 96px;
+  padding: 3px 6px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+  outline: none;
+}
+.ksql-field-app-input:focus {
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74,144,217,.15);
+}
+
+.ksql-field-fetch-btn {
+  padding: 3px 8px;
+  background: #1a6fb5;
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ksql-field-fetch-btn:hover:not(:disabled) { background: #155a9a; }
+.ksql-field-fetch-btn:disabled { opacity: .55; cursor: default; }
+
+.ksql-field-list-area {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 6px 8px;
+  color: #78909c;
+}
+
+.ksql-field-search {
+  flex: 1;
+  min-width: 120px;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+  outline: none;
+  margin-bottom: 0;
+}
+.ksql-field-search:focus {
+  border-color: #4a90d9;
+}
+
+.ksql-field-table {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.ksql-field-head {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.2fr) minmax(170px, 1.4fr) 120px minmax(220px, 2fr);
+  align-items: center;
+  column-gap: 10px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #d8e0e8;
+  background: #f5f8fb;
+  font-size: 11px;
+  font-weight: 700;
+  color: #546e7a;
+}
+.ksql-field-head .ksql-field-code,
+.ksql-field-head .ksql-field-label,
+.ksql-field-head .ksql-field-type,
+.ksql-field-head .ksql-field-choices {
+  font-family: inherit;
+  font-size: 11px;
+  color: inherit;
+  text-overflow: clip;
+}
+
+.ksql-field-list {
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.ksql-field-item {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.2fr) minmax(170px, 1.4fr) 120px minmax(220px, 2fr);
+  align-items: center;
+  column-gap: 10px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f4f8;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+.ksql-field-item:last-child { border-bottom: none; }
+.ksql-field-item:hover { background: #e8f4fd; }
+
+.ksql-field-code {
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 12px;
+  color: #1a3c5e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-field-label {
+  font-size: 11px;
+  color: #78909c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-field-type {
+  font-size: 10px;
+  color: #546e7a;
+  font-family: "Consolas", "Menlo", monospace;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.ksql-field-choices {
+  font-size: 10px;
+  color: #607d8b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-field-empty {
+  padding: 8px 6px;
+  color: #90a4ae;
+  font-size: 12px;
+  list-style: none;
+}
+
+/* ---- ボタン行 ------------------------------------------- */
+
+.ksql-button-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  margin-top: 8px;
+  overflow-x: auto;
+}
+
+.ksql-button-row > * {
+  flex: 0 0 auto;
+}
+
+.ksql-run-btn,
+.ksql-explain-btn,
+.ksql-clear-btn {
+  padding: 6px 18px;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .15s, opacity .15s;
+}
+
+.ksql-run-btn {
+  background: #1a6fb5;
+  color: #fff;
+}
+.ksql-run-btn:hover:not(:disabled) { background: #155a9a; }
+.ksql-run-btn:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.ksql-explain-btn {
+  background: #6a1eb0;
+  color: #fff;
+}
+.ksql-explain-btn:hover:not(:disabled) { background: #56188e; }
+.ksql-explain-btn:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+.ksql-clear-btn {
+  background: #eceff1;
+  color: #546e7a;
+}
+.ksql-clear-btn:hover { background: #cfd8dc; }
+
+/* ---- 履歴ボタン ----------------------------------------- */
+
+.ksql-hist-btn {
+  background: #eceff1;
+  color: #546e7a;
+  border: none;
+  border-radius: 3px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.ksql-hist-btn:hover { background: #cfd8dc; }
+
+/* ---- オプションボタン ----------------------------------- */
+
+.ksql-opt-btn {
+  background: #eceff1;
+  color: #546e7a;
+  border: none;
+  border-radius: 3px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+  margin-left: auto;
+}
+.ksql-opt-btn:hover { background: #cfd8dc; }
+
+.ksql-opt-summary {
+  font-size: 12px;
+  color: #607d8b;
+  align-self: center;
+}
+
+.ksql-opt-popover {
+  margin-top: 8px;
+  width: 760px;
+  max-width: 100%;
+  border: 1px solid #d0d4d9;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,.12);
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.ksql-opt-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ksql-opt-popover-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #455a64;
+}
+
+.ksql-opt-popover-close {
+  border: 1px solid #c7d3df;
+  background: #f8fafc;
+  color: #455a64;
+  border-radius: 3px;
+  width: 24px;
+  height: 24px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.ksql-opt-popover-close:hover {
+  background: #e6edf3;
+}
+
+.ksql-opt-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.ksql-opt-tab {
+  border: 1px solid #c7d3df;
+  border-radius: 3px;
+  background: #f3f7fb;
+  color: #455a64;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.ksql-opt-tab.is-active {
+  background: #1a6fb5;
+  border-color: #1a6fb5;
+  color: #fff;
+}
+
+.ksql-opt-tab-body {
+  min-height: 120px;
+}
+
+/* ---- 表示オプションパネル -------------------------------- */
+
+.ksql-opt-panel {
+  margin-top: 0;
+  padding: 8px;
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #f8fafc;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.ksql-fetch-panel {
+  border: 1px solid #d0d4d9;
+  border-radius: 4px;
+  background: #f8fafc;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ksql-fetch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ksql-fetch-label {
+  min-width: 90px;
+  font-size: 12px;
+  color: #546e7a;
+  font-weight: 700;
+}
+
+.ksql-fetch-input {
+  width: 120px;
+  padding: 4px 8px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.ksql-app-panel {
+  border: 1px solid #d0d4d9;
+  border-radius: 4px;
+  background: #f8fafc;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ksql-app-control-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.ksql-app-fetch-btn {
+  background: #1a6fb5;
+  border: none;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.ksql-app-fetch-btn:disabled {
+  opacity: .65;
+  cursor: default;
+}
+
+.ksql-app-search {
+  flex: 1;
+  min-width: 180px;
+  padding: 4px 8px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.ksql-app-insert-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #fff;
+  white-space: nowrap;
+}
+
+.ksql-app-status {
+  color: #607d8b;
+  font-size: 12px;
+}
+
+.ksql-app-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #dde5ed;
+  border-radius: 3px;
+  background: #fff;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.ksql-app-item,
+.ksql-app-empty {
+  padding: 7px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid #eef3f7;
+}
+.ksql-app-item:last-child,
+.ksql-app-empty:last-child {
+  border-bottom: none;
+}
+
+.ksql-app-item {
+  cursor: pointer;
+}
+.ksql-app-item:hover {
+  background: #e8f4fd;
+}
+
+.ksql-app-item-main {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.ksql-app-code {
+  color: #1a6fb5;
+  font-family: "Consolas", "Menlo", monospace;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ksql-app-name {
+  color: #37474f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 全体フォント微調整（+1px相当） --------------------- */
+.ksql-panel,
+.ksql-panel input,
+.ksql-panel select,
+.ksql-panel textarea,
+.ksql-panel button {
+  font-size: 13px;
+}
+
+.ksql-panel .ksql-field-label,
+.ksql-panel .ksql-field-type,
+.ksql-panel .ksql-field-choices,
+.ksql-panel .ksql-opt-summary,
+.ksql-panel .ksql-app-status {
+  font-size: 12px;
+}
+
+.ksql-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #d8e0e8;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.ksql-opt-label {
+  font-size: 12px;
+  color: #546e7a;
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 60px;
+}
+
+.ksql-opt-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #37474f;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ksql-opt-radio-label input[type="radio"] {
+  cursor: pointer;
+  margin: 0;
+}
+
+@media (max-width: 920px) {
+  .ksql-opt-panel {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- 履歴ドロップダウン --------------------------------- */
+
+.ksql-hist-dropdown {
+  position: relative;
+  margin-top: 6px;
+  width: 520px;
+  max-width: calc(100vw - 80px);
+  border: 1px solid #d0d4d9;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,.12);
+  z-index: 100;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.ksql-hist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 12px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #e0e5eb;
+  font-size: 12px;
+  color: #78909c;
+  position: sticky;
+  top: 0;
+}
+
+.ksql-hist-clear-all {
+  background: none;
+  border: none;
+  color: #c62828;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.ksql-hist-clear-all:hover { text-decoration: underline; }
+
+.ksql-hist-filter-row {
+  padding: 6px 12px;
+  border-bottom: 1px solid #eef2f6;
+  background: #fff;
+  position: sticky;
+  top: 31px;
+  z-index: 1;
+}
+
+.ksql-hist-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.ksql-hist-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ksql-hist-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px;
+  border-bottom: 1px solid #f0f4f8;
+  cursor: pointer;
+  gap: 8px;
+}
+.ksql-hist-item:last-child { border-bottom: none; }
+.ksql-hist-item:hover { background: #e8f4fd; }
+
+.ksql-hist-preview {
+  flex: 1;
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 12px;
+  color: #37474f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ksql-hist-run {
+  flex-shrink: 0;
+  background: #1a6fb5;
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ksql-hist-run:hover { background: #155a9a; }
+
+.ksql-hist-empty {
+  padding: 16px;
+  text-align: center;
+  color: #90a4ae;
+  font-size: 13px;
+}
+
+/* ---- 結果エリア ----------------------------------------- */
+
+.ksql-result {
+  margin-top: 14px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+.ksql-result-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #78909c;
+  margin-bottom: 6px;
+}
+
+.ksql-result-full-btn {
+  width: 28px;
+  height: 24px;
+  border: 1px solid #c7d3df;
+  border-radius: 3px;
+  background: #f3f7fb;
+  color: #455a64;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ksql-result-full-btn:hover {
+  background: #e8f4fd;
+  border-color: #8fb8dd;
+}
+
+.ksql-result-fullscreen {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1200;
+  margin-top: 0;
+  padding: 10px 14px 12px;
+  background: #fff;
+  border-top: 1px solid #d0d4d9;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, .12);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.ksql-result-fullscreen .ksql-table-wrapper {
+  flex: 1;
+  max-height: none;
+}
+
+.ksql-result-filter-row {
+  margin: 4px 0 6px;
+}
+
+.ksql-result-filter-input {
+  width: 100%;
+  max-width: 360px;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* ---- テーブル ------------------------------------------- */
+
+.ksql-table-wrapper {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid #e0e5eb;
+  border-radius: 3px;
+  box-sizing: border-box;
+}
+
+.ksql-table {
+  width: auto;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ksql-table thead {
+  position: sticky;
+  top: 0;
+  background: #f0f4f8;
+}
+
+.ksql-table th {
+  padding: 7px 12px;
+  text-align: left;
+  font-weight: 700;
+  border-bottom: 2px solid #c9d4df;
+  color: #37474f;
+}
+
+.ksql-sortable-th {
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  padding-right: 18px;
+}
+.ksql-sortable-th::after {
+  content: "↕";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: #90a4ae;
+}
+.ksql-sortable-th.is-sort-asc::after {
+  content: "▲";
+  color: #1a6fb5;
+}
+.ksql-sortable-th.is-sort-desc::after {
+  content: "▼";
+  color: #1a6fb5;
+}
+
+.ksql-rowno-th,
+.ksql-rowno-td {
+  width: 56px;
+  min-width: 56px;
+  text-align: right !important;
+  color: #607d8b;
+}
+
+.ksql-subtbl-count {
+  border: none;
+  background: none;
+  color: #1a6fb5;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.ksql-subtbl-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .4);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+.ksql-subtbl-modal {
+  width: min(1100px, 95vw);
+  height: min(80vh, 900px);
+  max-height: min(80vh, 900px);
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ksql-subtbl-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #d0d4d9;
+  background: #f5f7fa;
+}
+
+.ksql-subtbl-title {
+  font-weight: 700;
+  color: #37474f;
+}
+
+.ksql-subtbl-close {
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  background: #eceff1;
+  color: #455a64;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.ksql-subtbl-body {
+  padding: 10px 12px;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ksql-subtbl-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  border: 1px solid #b0bec5;
+  border-radius: 3px;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.ksql-subtbl-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.ksql-subtbl-filter-row .ksql-subtbl-filter {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.ksql-subtbl-count-info {
+  font-size: 12px;
+  color: #607d8b;
+  white-space: nowrap;
+}
+
+.ksql-subtbl-table-wrap {
+  overflow: auto;
+  border: 1px solid #e0e5eb;
+  flex: 1;
+  min-height: 200px;
+}
+
+.ksql-subtbl-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  white-space: nowrap;
+}
+
+.ksql-subtbl-table th,
+.ksql-subtbl-table td {
+  border-bottom: 1px solid #eceff1;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.ksql-subtbl-table th {
+  position: sticky;
+  top: 0;
+  background: #f0f4f8;
+  z-index: 1;
+}
+
+.ksql-subtbl-rowno-th,
+.ksql-subtbl-rowno-td {
+  width: 52px;
+  min-width: 52px;
+  text-align: right;
+  color: #607d8b;
+}
+
+.ksql-subtbl-sortable-th {
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  padding-right: 18px !important;
+}
+
+.ksql-subtbl-sortable-th::after {
+  content: "↕";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: #90a4ae;
+}
+
+.ksql-subtbl-sortable-th.is-sort-asc::after {
+  content: "▲";
+  color: #1a6fb5;
+}
+
+.ksql-subtbl-sortable-th.is-sort-desc::after {
+  content: "▼";
+  color: #1a6fb5;
+}
+
+.ksql-subtbl-empty,
+.ksql-subtbl-note {
+  font-size: 12px;
+  color: #607d8b;
+}
+
+.ksql-subtbl-note {
+  margin-top: 8px;
+}
+
+.ksql-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid #eceff1;
+  color: #263238;
+}
+
+.ksql-table tbody tr:last-child td { border-bottom: none; }
+
+.ksql-table tbody tr:nth-child(even) { background: #f8fafc; }
+.ksql-table tbody tr:hover           { background: #e8f4fd; }
+
+/* ---- メッセージ ----------------------------------------- */
+
+.ksql-success,
+.ksql-error,
+.ksql-info,
+.ksql-loading,
+.ksql-warn {
+  padding: 10px 14px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+.ksql-success {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border: 1px solid #a5d6a7;
+}
+.ksql-success-icon { margin-right: 6px; font-weight: 700; }
+
+.ksql-error {
+  background: #ffebee;
+  color: #c62828;
+  border: 1px solid #ef9a9a;
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 12px;
+}
+.ksql-error-icon { margin-right: 6px; }
+
+.ksql-info {
+  background: #e3f2fd;
+  color: #1565c0;
+  border: 1px solid #90caf9;
+}
+
+.ksql-loading {
+  background: #f5f5f5;
+  color: #607d8b;
+  font-style: italic;
+}
+
+.ksql-warn {
+  background: #fff8e1;
+  color: #8a6d1f;
+  border: 1px solid #f0d58a;
+  margin-bottom: 8px;
+}
+
+/* ---- カスタム確認ダイアログ ----------------------------- */
+
+.ksql-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+.ksql-dialog {
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .22);
+  padding: 28px 32px 20px;
+  min-width: 320px;
+  max-width: 480px;
+  font-family: "Hiragino Sans", "Meiryo", sans-serif;
+  font-size: 14px;
+  color: #2c3e50;
+}
+
+.ksql-dialog-message {
+  white-space: pre-wrap;
+  line-height: 1.7;
+  margin-bottom: 20px;
+}
+
+.ksql-dialog-btn-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.ksql-dialog-cancel {
+  padding: 7px 20px;
+  min-width: 100px;
+  border: 1px solid #b0bec5;
+  border-radius: 4px;
+  background: #eceff1;
+  color: #546e7a;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ksql-dialog-cancel:hover { background: #cfd8dc; }
+
+.ksql-dialog-ok {
+  padding: 7px 20px;
+  min-width: 100px;
+  border: none;
+  border-radius: 4px;
+  background: #1a6fb5;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ksql-dialog-ok:hover { background: #155a9a; }
+
+.ksql-dialog-ok--danger {
+  background: #c62828;
+}
+.ksql-dialog-ok--danger:hover { background: #a81f1f; }
+
+/* ---- 詳細/編集画面 -------------------------------------- */
+
+.ksql-record-runner {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.ksql-record-result {
+  margin-top: 0;
+}
+
+.field-13334588 .input-constraints-cybozu {
+  display: none;
+}
+
+@media (max-width: 1200px) {
+  .ksql-editor-row {
+    flex-direction: column;
+  }
+  .ksql-side-col {
+    width: 100%;
+    flex-direction: row;
+    align-items: flex-start;
+  }
+  .ksql-saved-sidebar,
+  .ksql-field-sidebar {
+    flex: 1;
+    min-width: 0;
+  }
+}

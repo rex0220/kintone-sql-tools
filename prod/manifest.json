@@ -1,0 +1,23 @@
+{
+  "manifest_version": 1,
+  "version": 1,
+  "type": "APP",
+  "name": {
+    "ja": "kSQL",
+    "en": "kSQL"
+  },
+  "description": {
+    "ja": "SQL で kintone アプリのレコードを取得・登録・更新・削除できるプラグインです。",
+    "en": "A plugin that lets you query and manipulate kintone records using SQL."
+  },
+  "icon": "image/icon.png",
+  "desktop": {
+    "js":  ["js/desktop.js"],
+    "css": ["css/desktop.css"]
+  },
+  "config": {
+    "html": "html/config.html",
+    "js":   ["js/config.js"],
+    "css":  ["css/config.css"]
+  }
+}

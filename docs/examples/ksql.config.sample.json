@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "defaultProfile": "dev",
+  "profiles": {
+    "dev": {
+      "baseUrl": "https://example.kintone.com",
+      "auth": "token",
+      "app": 100,
+      "tokenMap": {
+        "APP100": "env:KSQL_TOKEN_APP100",
+        "APP101": "env:KSQL_TOKEN_APP101"
+      },
+      "query": {
+        "maxRecords": 500,
+        "onLimit": "error",
+        "timeout": 30000
+      },
+      "output": {
+        "format": "table",
+        "pretty": false,
+        "noHeader": false,
+        "noColor": false,
+        "quiet": false,
+        "exitOnEmpty": false,
+        "userFormat": "name",
+        "arrayFormat": "join",
+        "tableFormat": "count",
+        "dateFormat": "local",
+        "attachmentFormat": "name"
+      }
+    }
+  }
+}
