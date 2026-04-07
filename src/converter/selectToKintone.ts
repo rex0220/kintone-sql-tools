@@ -220,14 +220,14 @@ function extractFields(columns: SelectColumn[]): string[] {
   const fields: string[] = [];
   for (const col of columns) {
     if (col.type === "FIELD") {
-      fields.push(col.field);
+      fields.push(normalizeSimpleFieldRef(col.field));
     } else if (col.type === "ARITH_COL") {
       collectArithNode(col.expr, fields);
     } else if (col.type === "STRFUNC_COL") {
       collectStringFuncFields(col.expr, fields);
     }
   }
-  return fields;
+  return [...new Set(fields)];
 }
 
 function collectArithFields(expr: ArithExpr, out: string[]): void {
@@ -236,9 +236,20 @@ function collectArithFields(expr: ArithExpr, out: string[]): void {
 }
 
 function collectArithNode(node: ArithNode, out: string[]): void {
-  if (node.type === "FIELD_REF")        out.push(node.field);
+  if (node.type === "FIELD_REF")        out.push(normalizeSimpleFieldRef(node.field));
   else if (node.type === "ARITH")       collectArithFields(node, out);
   else if (node.type === "STRING_FUNC") collectStringFuncFields(node, out);
+}
+
+/**
+ * SIMPLE モードでは単一テーブル参照のみのため、修飾付きフィールド参照
+ * (例: "a.金額" / "APP100.金額") は kintone フィールドコード ("金額") に正規化する。
+ */
+function normalizeSimpleFieldRef(field: string): string {
+  const dot = field.indexOf(".");
+  if (dot <= 0) return field;
+  const unqualified = field.slice(dot + 1);
+  return unqualified || field;
 }
 
 function collectStringFuncFields(expr: StringFuncExpr, out: string[]): void {
@@ -570,6 +581,8 @@ function collectRequiredFieldsByTable(
       case "FIELD":
         addFieldName(col.field, "select");
         break;
+      case "LITERAL_COL":
+        break;
       case "AGGREGATE":
         if (col.arg.type !== "WILDCARD") walkArith(col.arg, "select");
         break;
@@ -607,6 +620,10 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
   for (const col of columns) {
     if (col.type === "FIELD" && col.alias) {
       names.add(col.alias);
+      continue;
+    }
+    if (col.type === "LITERAL_COL") {
+      names.add(col.alias ?? `'${col.value}'`);
       continue;
     }
     if (col.type === "AGGREGATE") {

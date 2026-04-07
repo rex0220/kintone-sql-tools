@@ -99,7 +99,7 @@ WHERE 進捗率 >= 0.5
 
 ```sql
 SELECT [DISTINCT] カラムリスト
-FROM テーブル名 [AS エイリアス]
+[FROM テーブル名 [AS エイリアス]]
 [JOIN句]
 [WHERE 条件]
 [GROUP BY フィールドリスト]
@@ -107,6 +107,18 @@ FROM テーブル名 [AS エイリアス]
 [ORDER BY キーリスト]
 [LIMIT 件数 [OFFSET スキップ数]]
 ```
+
+`FROM` は省略可能です（式専用 SELECT）。
+
+```sql
+SELECT 'xxx' AS a
+```
+
+制約:
+
+- `FROM` 省略時は式列のみ対応（例: 文字列リテラル、数値演算、関数）
+- `SELECT *` / フィールド参照（例: `SELECT 顧客名`）は非対応
+- `FROM DUAL` は非対応
 
 ### 全フィールド取得
 
@@ -118,6 +130,18 @@ SELECT * FROM APP100
 
 ```sql
 SELECT 氏名, 金額, ステータス FROM APP100
+```
+
+### 文字列リテラル列
+
+```sql
+SELECT 顧客名, 'XXX' AS a FROM APP60
+```
+
+文字列リテラル列は `AS` でエイリアスを付けて利用できます。
+
+```sql
+SELECT 'XXX' AS a
 ```
 
 ### AS エイリアス
@@ -141,6 +165,14 @@ JOIN を使う場合、`エイリアス.フィールド名` の形式で指定�
 SELECT a.氏名, b.金額
 FROM APP100 AS a
 INNER JOIN APP200 AS b ON a.顧客ID = b.顧客ID
+```
+
+`FROM/JOIN` のテーブル alias は `AS` 省略形も使用できます。
+
+```sql
+SELECT a.氏名, b.金額
+FROM APP100 a
+INNER JOIN APP200 b ON a.顧客ID = b.顧客ID
 ```
 
 ---

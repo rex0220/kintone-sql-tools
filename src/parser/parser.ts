@@ -201,10 +201,12 @@ export class Parser {
     const distinct = this.consume(TokenKind.DISTINCT);
     const columns = this.parseSelectColumns();
 
-    this.expectKeyword(TokenKind.FROM, "「FROM」の後にテーブル名が必要です（例: FROM APP100）");
-    const from = this.parseTableRef();
+    const hasFrom = this.consume(TokenKind.FROM);
+    const from = hasFrom
+      ? this.parseTableRef()
+      : { appId: 0, alias: null, cteName: "__NO_FROM__" };
 
-    const joins = this.parseJoins();
+    const joins = hasFrom ? this.parseJoins() : [];
 
     const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
 
@@ -355,6 +357,13 @@ export class Parser {
       this.expect(TokenKind.RPAREN);
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "SCALAR_SUBQUERY_COL", query, alias };
+    }
+
+    // 文字列リテラル列: 'XXX' [AS alias]
+    if (this.peek().kind === TokenKind.STRING) {
+      const value = this.expect(TokenKind.STRING).value;
+      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return { type: "LITERAL_COL", value, alias };
     }
 
     // 算術式が ( または数値リテラルで始まる場合
@@ -831,18 +840,27 @@ export class Parser {
     const name = this.parseIdentifier();
     // CTE 参照（WITH 句で定義された名前）
     if (this.cteNames.has(name)) {
-      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : null;
+      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : this.tryParseImplicitAlias();
       return { appId: 0, alias, cteName: name };
     }
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {
-      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : null;
+      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : this.tryParseImplicitAlias();
       return { appId, alias, cteName: null, subtableCode };
     }
-    // エイリアス省略時はテーブル名をデフォルトエイリアスとする。
-    // これにより APP89.フィールド名 スタイルの修飾参照が alias なしでも機能する。
-    const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : name;
+    // `AS alias` のほか、`FROM APP100 a` 形式も許可する。
+    // 省略時はテーブル名をデフォルトエイリアスとする。
+    const implicit = this.tryParseImplicitAlias();
+    const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : (implicit ?? name);
     return { appId, alias, cteName: null };
+  }
+
+  private tryParseImplicitAlias(): string | null {
+    const k = this.peek().kind;
+    if (k === TokenKind.IDENT || k === TokenKind.BIDENT) {
+      return this.parseIdentifier();
+    }
+    return null;
   }
 
   private parseJoins(): JoinClause[] {

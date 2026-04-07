@@ -17,6 +17,9 @@
 - `kintone_sql_plugin_spec.md`
 - `ksql_language_reference.md`
 - `ksql_cli_console_spec.md`
+- `cli_app_profile_spec.md`
+- `cli_app_profile_implementation_guide.md`
+- `cli_app_profile_implementation_guide_scoped_cache.md`
 - `implementation/cli_dml_phase1_spec.md`
 - `proposals/select_update_shared_optimization_spec.md`
 

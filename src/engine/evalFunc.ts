@@ -18,7 +18,7 @@ import type { ProcessRow } from "./evalWhere";
 
 export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
   if (expr.type === "NUMBER")      return expr.value;
-  if (expr.type === "FIELD_REF")   return Number(row[expr.field] ?? "");
+  if (expr.type === "FIELD_REF")   return Number(resolveFieldRef(row, expr.field));
   if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row));
   const l = evalArithExpr(expr.left,  row);
   const r = evalArithExpr(expr.right, row);
@@ -285,10 +285,21 @@ function formatWithComma(num: number, digits: number): string {
 export function evalStringFuncArg(arg: StringFuncArg, row: ProcessRow): string {
   if (arg.type === "STRING")      return arg.value;
   if (arg.type === "STRING_FUNC") return evalStringFunc(arg, row);
-  if (arg.type === "FIELD_REF")   return row[arg.field] ?? "";
+  if (arg.type === "FIELD_REF")   return resolveFieldRef(row, arg.field);
   if (arg.type === "NUMBER")      return String(arg.value);
   // 集計引数は GROUP BY 評価側で事前解決される想定。
   // ここに到達した場合は行コンテキストのみのため空文字を返して安全側に倒す。
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
   return String(evalArithExpr(arg, row)); // ARITH
+}
+
+export function resolveFieldRef(row: ProcessRow, field: string): string {
+  const direct = row[field];
+  if (direct !== undefined) return direct;
+  const dot = field.indexOf(".");
+  if (dot > 0) {
+    const fallback = row[field.slice(dot + 1)];
+    if (fallback !== undefined) return fallback;
+  }
+  return "";
 }

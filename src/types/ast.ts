@@ -103,6 +103,7 @@ export type SelectColumn =
   | WildcardColumn          // *
   | ParentWildcardColumn    // _p.*
   | FieldColumn             // フィールド名 [AS alias]
+  | LiteralColumn           // 'text' [AS alias]
   | AggregateColumn         // COUNT(*) / SUM(f) / ...
   | AggArithColumn          // SUM(f) * 1.1 [AS alias]
   | ArithColumn             // field * 1.1 [AS alias]
@@ -122,6 +123,12 @@ export interface ParentWildcardColumn {
 export interface FieldColumn {
   type: "FIELD";
   field: Identifier;
+  alias: string | null;
+}
+
+export interface LiteralColumn {
+  type: "LITERAL_COL";
+  value: string;
   alias: string | null;
 }
 

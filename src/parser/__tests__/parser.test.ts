@@ -251,6 +251,25 @@ test("INNER JOIN", () => {
   });
 });
 
+test("INNER JOIN (implicit alias without AS)", () => {
+  const ast = parseSelect(
+    "SELECT * FROM APP100 a INNER JOIN APP200 b ON a.顧客ID = b.顧客ID"
+  );
+  expect(ast.from).toEqual({ appId: 100, alias: "a", cteName: null });
+  expect(ast.joins[0].table).toEqual({ appId: 200, alias: "b", cteName: null });
+});
+
+test("SELECT string literal column with alias", () => {
+  const ast = parseSelect("SELECT 顧客名, 'XXX' AS a FROM APP60");
+  expect(ast.columns[1]).toEqual({ type: "LITERAL_COL", value: "XXX", alias: "a" });
+});
+
+test("SELECT literal without FROM", () => {
+  const ast = parseSelect("SELECT 'xxx' AS a");
+  expect(ast.from).toEqual({ appId: 0, alias: null, cteName: "__NO_FROM__" });
+  expect(ast.columns[0]).toEqual({ type: "LITERAL_COL", value: "xxx", alias: "a" });
+});
+
 test("LEFT JOIN", () => {
   const ast = parseSelect(
     "SELECT * FROM APP100 AS a LEFT JOIN APP200 AS b ON a.ID = b.ID"
@@ -397,8 +416,9 @@ test("テーブル名が APP+数字でない → エラー", () => {
   expect(() => parse("SELECT * FROM CUSTOMERS")).toThrow(ParseError);
 });
 
-test("FROM なし → エラー", () => {
-  expect(() => parse("SELECT *")).toThrow(ParseError);
+test("FROM なし SELECT はパース可能", () => {
+  const ast = parseSelect("SELECT 'x' AS a");
+  expect(ast.from).toEqual({ appId: 0, alias: null, cteName: "__NO_FROM__" });
 });
 
 test("IN リストのカラム数不一致 → エラー", () => {

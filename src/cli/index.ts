@@ -375,6 +375,224 @@ export function extractAppIds(sql: string): number[] {
   return [...out];
 }
 
+interface SqlProfileParseResult {
+  normalizedSql: string;
+  hasProfileSyntax: boolean;
+  appBindingByMappedApp: Map<number, { appId: number; profile: string }>;
+}
+
+function isSqlIdentContinue(ch: string): boolean {
+  if (!ch) return false;
+  const cp = ch.codePointAt(0)!;
+  return (
+    (cp >= 0x41 && cp <= 0x5a) || // A-Z
+    (cp >= 0x61 && cp <= 0x7a) || // a-z
+    (cp >= 0x30 && cp <= 0x39) || // 0-9
+    cp === 0x5f || // _
+    cp === 0x24 || // $
+    (cp >= 0x3040 && cp <= 0x30ff) ||
+    (cp >= 0x3400 && cp <= 0x9fff) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xff01 && cp <= 0xff60)
+  );
+}
+
+function isProfileNameChar(ch: string): boolean {
+  if (!ch) return false;
+  const cp = ch.codePointAt(0)!;
+  return (
+    (cp >= 0x41 && cp <= 0x5a) || // A-Z
+    (cp >= 0x61 && cp <= 0x7a) || // a-z
+    (cp >= 0x30 && cp <= 0x39) || // 0-9
+    ch === "_" || ch === "-" || ch === "." || ch === "$"
+  );
+}
+
+interface ParsedAppProfileToken {
+  appId: number;
+  profile: string | null;
+  start: number;
+  digitStart: number;
+  digitEnd: number;
+  appEnd: number;
+  fullEnd: number;
+}
+
+function tryParseAppProfileToken(sql: string, start: number): ParsedAppProfileToken | null {
+  const head = sql.slice(start, start + 3);
+  if (head.toUpperCase() !== "APP") return null;
+
+  const prev = start > 0 ? sql[start - 1] : "";
+  if (isSqlIdentContinue(prev)) return null;
+
+  let i = start + 3;
+  const digitStart = i;
+  while (i < sql.length && /[0-9]/.test(sql[i])) i++;
+  const digitEnd = i;
+  if (digitEnd === digitStart) return null;
+
+  if (sql[i] === "$") {
+    i++;
+    const subStart = i;
+    while (i < sql.length && isSqlIdentContinue(sql[i])) i++;
+    if (i === subStart) return null;
+  }
+
+  const appEnd = i;
+  let profile: string | null = null;
+  if (sql[i] === "@") {
+    i++;
+    const pStart = i;
+    while (i < sql.length && isProfileNameChar(sql[i])) i++;
+    if (i === pStart) return null;
+    profile = sql.slice(pStart, i);
+  }
+
+  const next = i < sql.length ? sql[i] : "";
+  if (isSqlIdentContinue(next)) return null;
+
+  return {
+    appId: Number(sql.slice(digitStart, digitEnd)),
+    profile,
+    start,
+    digitStart,
+    digitEnd,
+    appEnd,
+    fullEnd: i,
+  };
+}
+
+function collectAppProfileTokens(sql: string): ParsedAppProfileToken[] {
+  const tokens: ParsedAppProfileToken[] = [];
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+
+    if (ch === "'") {
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === "'") {
+          i++;
+          if (i < sql.length && sql[i] === "'") { i++; continue; }
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === "`") {
+      i++;
+      while (i < sql.length && sql[i] !== "`") i++;
+      if (i < sql.length) i++;
+      continue;
+    }
+
+    if (ch === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+
+    if (ch === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length) {
+        if (sql[i] === "*" && sql[i + 1] === "/") { i += 2; break; }
+        i++;
+      }
+      continue;
+    }
+
+    const parsed = tryParseAppProfileToken(sql, i);
+    if (!parsed) {
+      i++;
+      continue;
+    }
+    tokens.push(parsed);
+    i = parsed.fullEnd;
+  }
+  return tokens;
+}
+
+function nextVirtualAppId(used: Set<number>): number {
+  let id = 900_000_000;
+  while (used.has(id)) id++;
+  used.add(id);
+  return id;
+}
+
+export function normalizeSqlAppProfiles(sql: string, defaultProfile = "dev"): SqlProfileParseResult {
+  const tokens = collectAppProfileTokens(sql);
+  const hasProfileSyntax = tokens.some((t) => t.profile !== null);
+
+  const profilesByApp = new Map<number, Set<string>>();
+  const normalizedProfile = (profile: string | null): string => profile ?? defaultProfile;
+  for (const t of tokens) {
+    const p = normalizedProfile(t.profile);
+    let set = profilesByApp.get(t.appId);
+    if (!set) {
+      set = new Set<string>();
+      profilesByApp.set(t.appId, set);
+    }
+    set.add(p.toLowerCase());
+  }
+
+  const usedAppIds = new Set<number>(tokens.map((t) => t.appId));
+  const pairToMapped = new Map<string, number>();
+  const appBindingByMappedApp = new Map<number, { appId: number; profile: string }>();
+
+  for (const [appId, pSet] of profilesByApp.entries()) {
+    const profiles = [...pSet].sort();
+    if (profiles.length <= 1) continue;
+    for (const pLower of profiles) {
+      const mapped = nextVirtualAppId(usedAppIds);
+      pairToMapped.set(`${appId}@${pLower}`, mapped);
+      appBindingByMappedApp.set(mapped, { appId, profile: pLower });
+    }
+  }
+
+  const out: string[] = [];
+  let cursor = 0;
+  for (const t of tokens) {
+    const p = normalizedProfile(t.profile);
+    const pLower = p.toLowerCase();
+    const mapped = pairToMapped.get(`${t.appId}@${pLower}`) ?? t.appId;
+    appBindingByMappedApp.set(mapped, { appId: t.appId, profile: pLower });
+
+    out.push(sql.slice(cursor, t.start));
+    out.push(sql.slice(t.start, t.digitStart));
+    out.push(String(mapped));
+    out.push(sql.slice(t.digitEnd, t.appEnd));
+    cursor = t.fullEnd;
+  }
+  out.push(sql.slice(cursor));
+
+  return {
+    normalizedSql: out.join(""),
+    hasProfileSyntax,
+    appBindingByMappedApp,
+  };
+}
+
+function buildCacheContext(
+  defaultProfile: string,
+  appBindingByMappedApp: Map<number, { appId: number; profile: string }>
+): string {
+  if (appBindingByMappedApp.size === 0) return `default:${defaultProfile.toLowerCase()}`;
+  const pairs = [...appBindingByMappedApp.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([mappedAppId, b]) => `M${mappedAppId}=APP${b.appId}@${b.profile}`);
+  return `apps:${pairs.join(",")}`;
+}
+
+function formatResolvedAppProfiles(sql: string, defaultProfile: string): string {
+  const parsed = normalizeSqlAppProfiles(sql, defaultProfile);
+  if (parsed.appBindingByMappedApp.size === 0) return "(none)";
+  return [...parsed.appBindingByMappedApp.values()]
+    .map((b) => `APP${b.appId}->${b.profile}`)
+    .join(", ");
+}
+
 function resolveTokenValue(raw: string): string {
   if (raw.startsWith("env:")) {
     const envKey = raw.slice(4);
@@ -443,6 +661,14 @@ function getStatementType(stmt: unknown): string {
   if (!stmt || typeof stmt !== "object") return "UNKNOWN";
   const obj = stmt as { type?: unknown };
   return typeof obj.type === "string" ? obj.type : "UNKNOWN";
+}
+
+function isNoFromSelectStatement(stmt: unknown): boolean {
+  if (!stmt || typeof stmt !== "object") return false;
+  const obj = stmt as { type?: unknown; from?: { appId?: unknown; cteName?: unknown } };
+  return obj.type === "SELECT"
+    && obj.from?.appId === 0
+    && obj.from?.cteName === "__NO_FROM__";
 }
 
 function getInsertValuesCount(stmt: unknown): number | null {
@@ -537,13 +763,22 @@ async function promptDmlConfirm(message: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
     throw new Error("ArgumentError: interactive confirmation requires TTY. Use --yes to skip confirmation.");
   }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
   try {
     const answer = await new Promise<string>((resolveQ) => rl.question(`${message}\nProceed? (yes/no): `, resolveQ));
-    return answer.trim().toLowerCase() === "yes";
+    return parseConfirmAnswer(answer);
   } finally {
     rl.close();
   }
+}
+
+export function parseConfirmAnswer(answer: string): boolean {
+  const normalized = answer.trim().toLowerCase().replace(/\s+/g, "");
+  if (normalized === "yes") return true;
+  if (normalized === "no") return false;
+  // 一部端末で同一キーが重複入力される事象対策（例: "yyeess"）
+  const deduped = normalized.replace(/(.)\1+/g, "$1");
+  return deduped === "yes";
 }
 
 export function buildOutput(
@@ -797,6 +1032,14 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   return argv;
 }
 
+function normalizeConsoleInputLine(line: string): string {
+  // 端末によっては前回ログ断片が先頭に混入することがあるため、既知パターンを除去する。
+  return line
+    .replace(/^\(last exit code:\s*\d+\)\s*/i, "")
+    .replace(/^ksql>\s*/i, "")
+    .replace(/^\.\.\.\s*/, "");
+}
+
 function buildReplExecArgvWithProfile(
   base: ParsedArgs,
   sql: string,
@@ -823,11 +1066,13 @@ type ConsolePromptResult =
   | { kind: "sigint" }
   | { kind: "eof" };
 
-function createConsoleEventQueue(rl: ReturnType<typeof createInterface>): {
+interface ConsoleEventQueue {
   hasBuffered: () => boolean;
   next: () => Promise<ConsolePromptResult>;
   dispose: () => void;
-} {
+}
+
+function createConsoleEventQueue(rl: ReturnType<typeof createInterface>): ConsoleEventQueue {
   const queue: ConsolePromptResult[] = [];
   let waiter: ((ev: ConsolePromptResult) => void) | null = null;
 
@@ -885,14 +1130,23 @@ async function runWithArgvCapture(argv: string[]): Promise<{ code: number; stdou
 
 async function confirmDmlInConsole(
   sql: string,
-  opts: { allowDml: boolean; yes: boolean; dryRun: boolean }
+  opts: { allowDml: boolean; yes: boolean; dryRun: boolean },
+  queue?: ConsoleEventQueue,
+  defaultProfile = "dev"
 ): Promise<boolean> {
   if (!opts.allowDml || opts.yes || opts.dryRun) return true;
   try {
-    const stmt = parseSqlStatement(sql);
+    const normalized = normalizeSqlAppProfiles(sql, defaultProfile);
+    const stmt = parseSqlStatement(normalized.normalizedSql);
     const stmtType = getStatementType(stmt);
     if (!isDmlType(stmtType)) return true;
     const compact = sql.replace(/\s+/g, " ").trim();
+    if (queue) {
+      process.stdout.write(`[DML Confirm] type=${stmtType}\nquery=${compact}\nProceed? (yes/no): `);
+      const input = await queue.next();
+      if (input.kind !== "line") return false;
+      return parseConfirmAnswer(input.line);
+    }
     return await promptDmlConfirm(`[DML Confirm] type=${stmtType}\nquery=${compact}`);
   } catch {
     return true;
@@ -957,6 +1211,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
   const history: string[] = loadHistory();
   let lastOutput = "";
   let lastSql = "";
+  let lastResolvedProfiles = "(none)";
   let buffer = "";
   let emptyPromptSigintArmed = false;
   const queue = createConsoleEventQueue(rl);
@@ -999,7 +1254,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
         continue;
       }
 
-      const line = input.line;
+      const line = normalizeConsoleInputLine(input.line);
       const t = line.trim();
       emptyPromptSigintArmed = false;
 
@@ -1048,8 +1303,13 @@ async function runConsole(base: ParsedArgs): Promise<number> {
           else process.stdout.write(`${buffer}\n`);
           continue;
         } else if (meta.kind === "edit-buffer") {
+          const seed = buffer.trim().length > 0 ? buffer : lastSql;
+          if (!seed.trim()) {
+            process.stdout.write("(buffer is empty)\n");
+            continue;
+          }
           try {
-            buffer = editBufferWithExternalEditor(buffer);
+            buffer = editBufferWithExternalEditor(seed);
             process.stdout.write("(buffer updated from editor)\n");
           } catch (err) {
             process.stderr.write(`EditorError: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -1064,6 +1324,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             `guest-space-id=${base.guestSpaceId ?? "(none)"}`,
             `auth=${base.auth ?? "(auto)"}`,
             `app=${base.app ?? "(from SQL or config)"}`,
+            `resolved-app-profiles=${lastResolvedProfiles}`,
             `allow-dml=${base.allowDml ? "on" : "off"}`,
             `dml-max-rows=${base.dmlMaxRows ?? "(default)"}`,
           ];
@@ -1096,12 +1357,13 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             allowDml: base.allowDml,
             yes: base.yes,
             dryRun,
-          });
+          }, queue, profile ?? "dev");
           if (!ok) {
             process.stderr.write("DML was cancelled by user.\n");
             continue;
           }
           lastSql = sql;
+          lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
           process.stdout.write(`rerun: ${sql.replace(/\s+/g, " ").trim()}\n`);
           const { code, stdout } = await runWithArgvCapture(buildReplExecArgvWithProfile(base, sql, dryRun, format, profile));
           lastOutput = stdout;
@@ -1153,13 +1415,14 @@ async function runConsole(base: ParsedArgs): Promise<number> {
           allowDml: base.allowDml,
           yes: base.yes,
           dryRun,
-        });
+        }, queue, profile ?? "dev");
         if (!ok) {
           process.stderr.write("DML was cancelled by user.\n");
           continue;
         }
       }
       lastSql = sql;
+      lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
       history.push(sql);
       appendHistory(sql);
 
@@ -1212,6 +1475,8 @@ async function run(): Promise<number> {
   const profile = config.profiles?.[profileName] ?? {};
 
   let sql: string | null = null;
+  let hasProfileSyntax = false;
+  let appBindingByMappedApp = new Map<number, { appId: number; profile: string }>();
   let parsedStmt: unknown = null;
   let stmtType = "SELECT";
   let hasWhere = true;
@@ -1222,6 +1487,16 @@ async function run(): Promise<number> {
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
     if (!sql || !sql.trim()) {
       process.stderr.write("ArgumentError: SQL is empty.\n");
+      return 2;
+    }
+
+    try {
+      const normalized = normalizeSqlAppProfiles(sql, profileName);
+      sql = normalized.normalizedSql;
+      hasProfileSyntax = normalized.hasProfileSyntax;
+      appBindingByMappedApp = normalized.appBindingByMappedApp;
+    } catch (err) {
+      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
       return 2;
     }
 
@@ -1272,12 +1547,17 @@ async function run(): Promise<number> {
   const appIds = sql ? extractAppIds(sql) : [];
   const defaultApp = args.app ?? envInt("KSQL_APP") ?? profile.app ?? null;
   if (appIds.length === 0 && defaultApp !== null) appIds.push(defaultApp);
-  if (appIds.length === 0 && !args.dryRun && args.diagRecordId === null) {
+  const allowNoFromSelect = isNoFromSelectStatement(parsedStmt);
+  if (appIds.length === 0 && !allowNoFromSelect && !args.dryRun && args.diagRecordId === null) {
     process.stderr.write("ArgumentError: no APPxxx found in SQL and --app is not set.\n");
     return 2;
   }
 
   if (isDmlStatement) {
+    if (hasProfileSyntax && stmtType === "DELETE") {
+      process.stderr.write("ArgumentError: @profile is not supported for DELETE yet.\n");
+      return 2;
+    }
     if (!allowDml) {
       process.stderr.write("ArgumentError: DML is disabled. Use --allow-dml to enable UPDATE/DELETE/INSERT/UPSERT.\n");
       return 2;
@@ -1293,126 +1573,95 @@ async function run(): Promise<number> {
   }
 
   let client: KintoneClient;
+  const appProfileByApp = new Map<number, string>();
+  for (const appId of appIds) {
+    appProfileByApp.set(appId, appBindingByMappedApp.get(appId)?.profile ?? profileName.toLowerCase());
+  }
+  const cacheContext = buildCacheContext(profileName, appBindingByMappedApp);
+
   if (args.dryRun) {
     client = createDryRunClient();
   } else {
-    const baseUrl = args.baseUrl ?? envString("KSQL_BASE_URL") ?? profile.baseUrl ?? "";
-    const guestSpaceId = args.guestSpaceId ?? envInt("KSQL_GUEST_SPACE_ID") ?? profile.guestSpaceId ?? null;
-    if (!baseUrl) {
-      process.stderr.write("AuthError: --base-url is required.\n");
-      return 3;
+    for (const explicitProfile of appProfileByApp.values()) {
+      if (!config.profiles || !config.profiles[explicitProfile]) {
+        process.stderr.write(`ArgumentError: profile "${explicitProfile}" is not defined.\n`);
+        return 2;
+      }
     }
-    const authReq = args.auth ?? envAuth("KSQL_AUTH") ?? profile.auth ?? "auto";
-    const username = args.username ?? envString("KSQL_USERNAME") ?? profile.username ?? null;
-    const passwordFromEnvRef = profile.passwordEnv ? envString(profile.passwordEnv) : null;
-    const password = args.password ?? envString("KSQL_PASSWORD") ?? passwordFromEnvRef ?? profile.password ?? null;
-    const hasUserPass = Boolean(username && password);
-    const auth = authReq === "auto" ? (hasUserPass ? "userpass" : "token") : authReq;
 
-    if (auth === "userpass") {
-      if (!username || !password) {
-        process.stderr.write("AuthError: --username/--password (or KSQL_USERNAME/KSQL_PASSWORD) are required for userpass auth.\n");
+    const mapFromEnv = envString("KSQL_TOKEN_MAP") ? parseTokenMap(envString("KSQL_TOKEN_MAP")!) : {};
+    const mapFromFile = args.tokenFile ? parseTokenFile(args.tokenFile) : {};
+    const mapFromArg = args.tokenMap;
+    const singleToken = args.token ?? envString("KSQL_TOKEN");
+
+    const profileClientMap = new Map<string, KintoneClient>();
+    const missingAppProfiles: string[] = [];
+    const usedProfiles = new Set<string>([...appProfileByApp.values(), profileName]);
+
+    for (const pName of usedProfiles) {
+      const p = pName === profileName ? profile : (config.profiles?.[pName] ?? null);
+      if (!p) {
+        process.stderr.write(`ArgumentError: profile "${pName}" is not defined.\n`);
+        return 2;
+      }
+
+      const baseUrl = args.baseUrl ?? envString("KSQL_BASE_URL") ?? p.baseUrl ?? "";
+      const guestSpaceId = args.guestSpaceId ?? envInt("KSQL_GUEST_SPACE_ID") ?? p.guestSpaceId ?? null;
+      if (!baseUrl) {
+        process.stderr.write(`AuthError: --base-url is required for profile "${pName}".\n`);
         return 3;
       }
-      if (args.diagRecordId !== null) {
-        if (defaultApp === null) {
-          process.stderr.write("ArgumentError: --app is required when --diag-record-id is specified.\n");
-          return 2;
+
+      const authReq = args.auth ?? envAuth("KSQL_AUTH") ?? p.auth ?? "auto";
+      const username = args.username ?? envString("KSQL_USERNAME") ?? p.username ?? null;
+      const passwordFromEnvRef = p.passwordEnv ? envString(p.passwordEnv) : null;
+      const password = args.password ?? envString("KSQL_PASSWORD") ?? passwordFromEnvRef ?? p.password ?? null;
+      const hasUserPass = Boolean(username && password);
+      const auth = authReq === "auto" ? (hasUserPass ? "userpass" : "token") : authReq;
+
+      if (auth === "userpass") {
+        if (!username || !password) {
+          process.stderr.write(`AuthError: username/password are required for profile "${pName}".\n`);
+          return 3;
         }
-        try {
-          await runDiagnosticRecordGet({
-            baseUrl,
-            guestSpaceId,
-            appId: defaultApp,
-            recordId: args.diagRecordId,
-            timeoutMs: timeout,
-            debug,
-            debugHeaders,
-            debugUrlOnly: args.debugUrl,
-            auth: { type: "userpass", username, password },
-          });
-          return 0;
-        } catch (err) {
-          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-          return toExitCodeFromError(err);
-        }
+        profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
+          guestSpaceId,
+          timeoutMs: timeout,
+          debug,
+          debugHeaders,
+          log: (line) => {
+            if (args.debugUrl && !line.startsWith("[debug] request")) return;
+            process.stderr.write(`${line}\n`);
+          },
+          auth: { type: "userpass", username, password },
+        }));
+        continue;
       }
-      client = createNodeKintoneClient(baseUrl, {
-        guestSpaceId,
-        timeoutMs: timeout,
-        debug,
-        debugHeaders,
-        log: (line) => {
-          if (args.debugUrl && !line.startsWith("[debug] request")) return;
-          process.stderr.write(`${line}\n`);
-        },
-        auth: {
-          type: "userpass",
-          username,
-          password,
-        },
-      });
-    } else {
-      const mapFromConfigRaw = profile.tokenMap ?? {};
+
+      const mapFromConfigRaw = p.tokenMap ?? {};
       const mapFromConfig = Object.fromEntries(
         Object.entries(mapFromConfigRaw).map(([k, v]) => [normalizeAppKey(k), resolveTokenValue(String(v))])
       );
-      const mapFromEnv = envString("KSQL_TOKEN_MAP") ? parseTokenMap(envString("KSQL_TOKEN_MAP")!) : {};
-      const mapFromFile = args.tokenFile ? parseTokenFile(args.tokenFile) : {};
-      const mapFromArg = args.tokenMap;
       const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv, ...mapFromFile, ...mapFromArg };
-      const singleToken = args.token ?? envString("KSQL_TOKEN");
 
-      const missingApps: string[] = [];
+      const assignedAppIds = appIds.filter((appId) => appProfileByApp.get(appId) === pName);
       const tokenByApp = new Map<number, string>();
-      for (const appId of appIds) {
-        const key = `APP${appId}`;
+      for (const mappedAppId of assignedAppIds) {
+        const realAppId = appBindingByMappedApp.get(mappedAppId)?.appId ?? mappedAppId;
+        const key = `APP${realAppId}`;
         const fromMap = effectiveTokenMap[key];
         if (fromMap) {
-          tokenByApp.set(appId, resolveTokenValue(fromMap));
+          tokenByApp.set(mappedAppId, resolveTokenValue(fromMap));
           continue;
         }
-        if (appIds.length === 1 && singleToken) {
-          tokenByApp.set(appId, singleToken);
+        if (assignedAppIds.length === 1 && singleToken) {
+          tokenByApp.set(mappedAppId, singleToken);
           continue;
         }
-        missingApps.push(key);
-      }
-      if (missingApps.length > 0) {
-        process.stderr.write(`AuthError: token is missing for ${missingApps.join(", ")}.\n`);
-        return 3;
+        missingAppProfiles.push(`APP${realAppId}@${pName}`);
       }
 
-      if (args.diagRecordId !== null) {
-        if (defaultApp === null) {
-          process.stderr.write("ArgumentError: --app is required when --diag-record-id is specified.\n");
-          return 2;
-        }
-        const diagToken = tokenByApp.get(defaultApp);
-        if (!diagToken) {
-          process.stderr.write(`AuthError: token is missing for APP${defaultApp}.\n`);
-          return 3;
-        }
-        try {
-          await runDiagnosticRecordGet({
-            baseUrl,
-            guestSpaceId,
-            appId: defaultApp,
-            recordId: args.diagRecordId,
-            timeoutMs: timeout,
-            debug,
-            debugHeaders,
-            debugUrlOnly: args.debugUrl,
-            auth: { type: "token", token: diagToken },
-          });
-          return 0;
-        } catch (err) {
-          process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-          return toExitCodeFromError(err);
-        }
-      }
-
-      client = createNodeKintoneClient(baseUrl, {
+      profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
         timeoutMs: timeout,
         debug,
@@ -1424,13 +1673,133 @@ async function run(): Promise<number> {
         auth: {
           type: "token",
           resolveToken(appId: number): string {
-            const token = tokenByApp.get(appId) ?? tokenByApp.get(appIds[0]);
-            if (!token) throw new Error(`AuthError: token is not resolved for APP${appId}.`);
+            const token = tokenByApp.get(appId) ?? tokenByApp.get(assignedAppIds[0]);
+            if (!token) throw new Error(`AuthError: token is not resolved for APP${appId}@${pName}.`);
             return token;
           },
         },
-      });
+      }));
     }
+
+    if (missingAppProfiles.length > 0) {
+      process.stderr.write(`AuthError: token is missing for ${missingAppProfiles.join(", ")}.\n`);
+      return 3;
+    }
+
+    if (args.diagRecordId !== null) {
+      if (defaultApp === null) {
+        process.stderr.write("ArgumentError: --app is required when --diag-record-id is specified.\n");
+        return 2;
+      }
+      const diagProfileName = appProfileByApp.get(defaultApp) ?? profileName;
+      const diagProfile = diagProfileName === profileName ? profile : config.profiles?.[diagProfileName];
+      if (!diagProfile) {
+        process.stderr.write(`ArgumentError: profile "${diagProfileName}" is not defined.\n`);
+        return 2;
+      }
+      const baseUrl = args.baseUrl ?? envString("KSQL_BASE_URL") ?? diagProfile.baseUrl ?? "";
+      const guestSpaceId = args.guestSpaceId ?? envInt("KSQL_GUEST_SPACE_ID") ?? diagProfile.guestSpaceId ?? null;
+      if (!baseUrl) {
+        process.stderr.write(`AuthError: --base-url is required for profile "${diagProfileName}".\n`);
+        return 3;
+      }
+      const authReq = args.auth ?? envAuth("KSQL_AUTH") ?? diagProfile.auth ?? "auto";
+      const username = args.username ?? envString("KSQL_USERNAME") ?? diagProfile.username ?? null;
+      const passwordFromEnvRef = diagProfile.passwordEnv ? envString(diagProfile.passwordEnv) : null;
+      const password = args.password ?? envString("KSQL_PASSWORD") ?? passwordFromEnvRef ?? diagProfile.password ?? null;
+      const hasUserPass = Boolean(username && password);
+      const auth = authReq === "auto" ? (hasUserPass ? "userpass" : "token") : authReq;
+      try {
+        if (auth === "userpass") {
+          if (!username || !password) {
+            process.stderr.write(`AuthError: username/password are required for profile "${diagProfileName}".\n`);
+            return 3;
+          }
+          await runDiagnosticRecordGet({
+            baseUrl,
+            guestSpaceId,
+            appId: defaultApp,
+            recordId: args.diagRecordId,
+            timeoutMs: timeout,
+            debug,
+            debugHeaders,
+            debugUrlOnly: args.debugUrl,
+            auth: { type: "userpass", username, password },
+          });
+        } else {
+          const mapFromConfigRaw = diagProfile.tokenMap ?? {};
+          const mapFromConfig = Object.fromEntries(
+            Object.entries(mapFromConfigRaw).map(([k, v]) => [normalizeAppKey(k), resolveTokenValue(String(v))])
+          );
+          const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv, ...mapFromFile, ...mapFromArg };
+          const diagToken = effectiveTokenMap[`APP${defaultApp}`] ?? (singleToken && appIds.length <= 1 ? singleToken : null);
+          if (!diagToken) {
+            process.stderr.write(`AuthError: token is missing for APP${defaultApp}@${diagProfileName}.\n`);
+            return 3;
+          }
+          await runDiagnosticRecordGet({
+            baseUrl,
+            guestSpaceId,
+            appId: defaultApp,
+            recordId: args.diagRecordId,
+            timeoutMs: timeout,
+            debug,
+            debugHeaders,
+            debugUrlOnly: args.debugUrl,
+            auth: { type: "token", token: resolveTokenValue(diagToken) },
+          });
+        }
+        return 0;
+      } catch (err) {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        return toExitCodeFromError(err);
+      }
+    }
+
+    const defaultClient = profileClientMap.get(profileName);
+    if (!defaultClient) {
+      process.stderr.write(`AuthError: profile client is not resolved for "${profileName}".\n`);
+      return 3;
+    }
+
+    client = {
+      getRecords: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
+        return routed.getRecords({ ...params, app: binding.appId });
+      },
+      postRecords: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
+        return routed.postRecords({ ...params, app: binding.appId });
+      },
+      putRecords: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
+        return routed.putRecords({ ...params, app: binding.appId });
+      },
+      deleteRecords: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
+        return routed.deleteRecords({ ...params, app: binding.appId });
+      },
+      getFields: (appId) => {
+        const binding = appBindingByMappedApp.get(appId) ?? { appId, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${appId}.`);
+        return routed.getFields(binding.appId);
+      },
+      getApps: () => defaultClient.getApps(),
+    };
   }
 
   try {
@@ -1463,11 +1832,12 @@ async function run(): Promise<number> {
     };
 
     const result = args.dryRun
-      ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit })
+      ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit, cacheContext })
       : await execute(sql!, client, {
         maxRecords,
         onLimitReached: onLimit,
         confirm: isDmlStatement ? confirm : undefined,
+        cacheContext,
       });
     if (result.type !== "SELECT") {
       const output = buildMutationOutput(result, format, noHeader, pretty);

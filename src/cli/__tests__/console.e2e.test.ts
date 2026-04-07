@@ -317,3 +317,58 @@ test("console mode supports profile/rerun/save workflow", async () => {
 
   unlinkSync(savePath);
 }, 20000);
+
+test("console mode :show config prints resolved-app-profiles after APP@profile query", async () => {
+  const cliPath = join(process.cwd(), "dist-cli", "ksql.js");
+  if (!existsSync(cliPath)) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  let child;
+  try {
+    child = spawn(process.execPath, [cliPath, "--console", "--dry-run"], {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("EPERM")) {
+      expect(true).toBe(true);
+      return;
+    }
+    throw err;
+  }
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d.toString(); });
+  child.stderr.on("data", (d) => { stderr += d.toString(); });
+
+  await sleep(120);
+  child.stdin.write("SELECT * FROM APP88@guest;\n");
+  await sleep(180);
+  child.stdin.write(":show config\n");
+  await sleep(180);
+  child.stdin.write(":exit\n");
+
+  const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPERM") {
+        resolveCode({ code: 0, skipped: true });
+        return;
+      }
+      resolveCode({ code: 1, skipped: false });
+    });
+    child.on("close", (c) => resolveCode({ code: c ?? 1, skipped: false }));
+  });
+
+  if (result.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  expect(result.code).toBe(0);
+  expect(stdout).toContain("resolved-app-profiles=APP88->guest");
+  expect(stderr).toContain("rowCount=");
+}, 20000);

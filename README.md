@@ -205,8 +205,8 @@ Console commands:
 - `:clear` (input buffer clear)
 - `:last` (show last executed SQL)
 - `:buffer` (show current input buffer)
-- `:edit` (open current input buffer in external editor)
-- `:show config`
+- `:edit` (open current input buffer in external editor; when empty, opens last SQL)
+- `:show config` (includes `resolved-app-profiles` for last SQL)
 - `:history`
 - `:history <n>`
 - `:history find <keyword>`
@@ -252,6 +252,30 @@ node dist-cli/ksql.js \
   --token-file ./tokens.json \
   -e "SELECT * FROM APP100 JOIN APP101 ON APP100.レコード番号 = APP101.レコード番号"
 ```
+
+### App Profile Suffix (CLI only)
+
+CLI ではテーブル参照末尾に `@profile` を指定できます。
+
+```bash
+node dist-cli/ksql.js --config ./ksql.config.json -e "SELECT * FROM APP100@dev"
+node dist-cli/ksql.js --config ./ksql.config.json -e "SELECT * FROM APP100 JOIN APP80@guest ON APP100.顧客ID = APP80.顧客ID"
+```
+
+補足:
+
+- `APP@profile` なしは既定 profile を使用します。
+- サブテーブルも `APP80$明細@guest` の形式で指定できます。
+- 同一 SQL 内で同一 APP の profile 混在（例: `APP88@dev` と `APP88@guest`）を許可します。
+- `@profile` は CLI 拡張です。plugin 側ではサポートしません。
+- `@profile` は `INSERT/UPDATE/UPSERT` で使用できます（`DELETE` は未対応）。
+
+SQL メモ:
+
+- `SELECT` 列で文字列リテラルを直接指定できます（例: `SELECT 顧客名, 'XXX' AS a FROM APP60`）。
+- `FROM` 省略の式SELECTを使用できます（例: `SELECT 'xxx' AS a`）。
+- `FROM/JOIN` の alias は `AS` を省略できます（例: `FROM APP80 a JOIN APP90 b ...`）。
+- `FROM DUAL` は非対応です。
 
 ### Config File
 

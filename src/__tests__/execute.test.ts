@@ -164,6 +164,46 @@ test("SELECT 算術式: alias なしはデフォルトキー名", async () => {
   expect(result.rows[0]["$id*1.1"]).toBe("5.5");
 });
 
+test("SELECT 文字列リテラル列", async () => {
+  const records = [makeRecord({ 顧客名: "A社" })];
+  const client = makeClient({ records });
+  const result = await execute(
+    "SELECT 顧客名, 'XXX' AS a FROM APP60",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]).toEqual({ 顧客名: "A社", a: "XXX" });
+});
+
+test("SELECT literal without FROM returns one row", async () => {
+  const client = makeClient({});
+  const result = await execute(
+    "SELECT 'xxx' AS a",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]).toEqual({ a: "xxx" });
+});
+
+test("SELECT field without FROM is rejected", async () => {
+  const client = makeClient({});
+  await expect(
+    execute("SELECT 顧客名", client)
+  ).rejects.toThrow("not supported without FROM");
+});
+
+test("SELECT: 未存在フィールドコードを指定するとエラー", async () => {
+  const records = [makeRecord({ 名前: "田中" })];
+  const client = makeClient({ records });
+  client.getFields = async (_appId) => ([
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ]);
+
+  await expect(
+    execute("SELECT 存在しない FROM APP100", client, { cacheContext: "unknown-field-test" })
+  ).rejects.toThrow("ArgumentError: unknown field code(s): 存在しない (APP100)");
+});
+
 test("SELECT COUNT(*) GROUP BY（FULL_SCAN モード）", async () => {
   const records = [
     makeRecord({ 種別: "A", 金額: "100" }),

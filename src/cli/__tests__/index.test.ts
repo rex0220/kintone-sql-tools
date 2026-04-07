@@ -1,6 +1,8 @@
 import {
   extractAppIds,
   normalizeAppKey,
+  normalizeSqlAppProfiles,
+  parseConfirmAnswer,
   parseArgs,
   parseConsoleMetaCommand,
   parseTokenMap,
@@ -22,6 +24,35 @@ describe("cli helpers", () => {
   test("extractAppIds scans SQL", () => {
     const ids = extractAppIds("SELECT * FROM APP100 JOIN APP101 ON APP100.レコード番号 = APP101.レコード番号");
     expect(ids).toEqual([100, 101]);
+  });
+
+  test("normalizeSqlAppProfiles strips @profile from app refs", () => {
+    const parsed = normalizeSqlAppProfiles("SELECT * FROM APP100@guest JOIN app80$明細@dev ON 1=1");
+    expect(parsed.normalizedSql).toContain("APP100");
+    expect(parsed.normalizedSql).toContain("app80$明細");
+    expect(parsed.normalizedSql).not.toContain("@guest");
+    expect(parsed.normalizedSql).not.toContain("@dev");
+    expect(parsed.hasProfileSyntax).toBe(true);
+    expect(parsed.appBindingByMappedApp.size).toBeGreaterThanOrEqual(2);
+  });
+
+  test("normalizeSqlAppProfiles ignores literals and comments", () => {
+    const sql = "SELECT 'APP100@guest' AS x FROM APP88 -- APP99@dev";
+    const parsed = normalizeSqlAppProfiles(sql);
+    expect(parsed.normalizedSql).toContain("'APP100@guest'");
+    expect(parsed.normalizedSql).toContain("-- APP99@dev");
+    expect(parsed.appBindingByMappedApp.size).toBe(1);
+  });
+
+  test("normalizeSqlAppProfiles allows same app with different profiles", () => {
+    const parsed = normalizeSqlAppProfiles("SELECT * FROM APP88@dev a JOIN APP88@guest b ON a.$id=b.$id", "dev");
+    expect(parsed.hasProfileSyntax).toBe(true);
+    expect(parsed.normalizedSql).not.toContain("@dev");
+    expect(parsed.normalizedSql).not.toContain("@guest");
+    const bindings = [...parsed.appBindingByMappedApp.values()];
+    const profiles = new Set(bindings.map((b) => b.profile));
+    expect(profiles.has("dev")).toBe(true);
+    expect(profiles.has("guest")).toBe(true);
   });
 
   test("parseArgs parses output and flags", () => {
@@ -126,5 +157,11 @@ describe("cli helpers", () => {
     expect(res.kind).toBe("error");
     const res2 = parseConsoleMetaCommand(":history nope");
     expect(res2.kind).toBe("error");
+  });
+
+  test("parseConfirmAnswer handles duplicated typing", () => {
+    expect(parseConfirmAnswer("yes")).toBe(true);
+    expect(parseConfirmAnswer(" yyeess ")).toBe(true);
+    expect(parseConfirmAnswer("no")).toBe(false);
   });
 });

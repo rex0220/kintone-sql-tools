@@ -14,8 +14,8 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr } from "./types/ast";
-import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc } from "./converter/selectToKintone";
+import type { SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg } from "./types/ast";
+import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
   insertToPostBatches,
@@ -158,6 +158,8 @@ export interface ExecuteOptions {
   onLimitReached?: "error" | "truncate";
   /** fetchAll の並列取得数（1 = 直列） */
   fetchParallel?: number;
+  /** フィールド関連キャッシュの文脈キー（例: CLI profile 名） */
+  cacheContext?: string;
 }
 
 // ============================================================
@@ -176,23 +178,24 @@ export async function execute(
   client: KintoneClient,
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
+  const cacheContext = options.cacheContext ?? "default";
   // 1. パース
   const stmt = parseSql(sql);
 
   // 2. 文の種別でルーティング
   switch (stmt.type) {
-    case "SELECT":        return executeSelect(stmt, client, options);
-    case "UNION":         return executeUnion(stmt, client, options);
-    case "WITH":          return executeWith(stmt, client, options);
-    case "INSERT":        return executeInsert(stmt, client);
-    case "INSERT_SELECT": return executeInsertSelect(stmt, client, options);
-    case "UPSERT":        return executeUpsert(stmt, client, options);
-    case "UPSERT_SELECT": return executeUpsertSelect(stmt, client, options);
-    case "UPDATE":        return executeUpdate(stmt, client, options);
-    case "DELETE":        return executeDelete(stmt, client, options);
-    case "REORDER":       return executeReorder(stmt, client, options);
+    case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
+    case "UNION":         return executeUnion(stmt, client, options, cacheContext);
+    case "WITH":          return executeWith(stmt, client, options, cacheContext);
+    case "INSERT":        return executeInsert(stmt, client, cacheContext);
+    case "INSERT_SELECT": return executeInsertSelect(stmt, client, options, cacheContext);
+    case "UPSERT":        return executeUpsert(stmt, client, options, cacheContext);
+    case "UPSERT_SELECT": return executeUpsertSelect(stmt, client, options, cacheContext);
+    case "UPDATE":        return executeUpdate(stmt, client, options, cacheContext);
+    case "DELETE":        return executeDelete(stmt, client, options, cacheContext);
+    case "REORDER":       return executeReorder(stmt, client, options, cacheContext);
     case "SHOW_APPS":     return executeShowApps(client);
-    case "DESCRIBE":      return executeDescribe(stmt, client);
+    case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":       return executeExplain(stmt);
   }
 }
@@ -204,22 +207,82 @@ export async function execute(
 async function executeSelect(
   stmt: SelectStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<SelectResult> {
+  if (isNoFromSelect(stmt)) {
+    return executeNoFromSelect(stmt);
+  }
   const mode = resolveSelectMode(stmt);
+  await validateSelectFieldCodes(stmt, mode, client, cacheContext);
 
   if (mode === "SIMPLE") {
-    return executeSimpleSelect(stmt, client, options);
+    return executeSimpleSelect(stmt, client, options, cacheContext);
   } else {
-    return executeFullScanSelect(stmt, client, options);
+    return executeFullScanSelect(stmt, client, options, cacheContext);
   }
+}
+
+function isNoFromSelect(stmt: SelectStatement): boolean {
+  return stmt.from.appId === 0 && stmt.from.cteName === "__NO_FROM__";
+}
+
+function arithHasFieldRef(node: ArithNode): boolean {
+  if (node.type === "FIELD_REF") return true;
+  if (node.type === "ARITH") return arithHasFieldRef(node.left) || arithHasFieldRef(node.right);
+  if (node.type === "STRING_FUNC") return stringFuncHasFieldRef(node);
+  return false;
+}
+
+function stringFuncArgHasFieldRef(arg: StringFuncArg): boolean {
+  if (arg.type === "FIELD_REF") return true;
+  if (arg.type === "ARITH") return arithHasFieldRef(arg);
+  if (arg.type === "STRING_FUNC") return stringFuncHasFieldRef(arg);
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+  return false;
+}
+
+function stringFuncHasFieldRef(expr: StringFuncExpr): boolean {
+  return expr.args.some((arg) => stringFuncArgHasFieldRef(arg));
+}
+
+function validateNoFromColumns(stmt: SelectStatement): void {
+  for (const col of stmt.columns) {
+    switch (col.type) {
+      case "LITERAL_COL":
+        break;
+      case "ARITH_COL":
+        if (arithHasFieldRef(col.expr)) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
+      case "STRFUNC_COL":
+        if (stringFuncHasFieldRef(col.expr)) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
+      default:
+        throw new Error(`ArgumentError: ${col.type} is not supported without FROM.`);
+    }
+  }
+}
+
+function executeNoFromSelect(stmt: SelectStatement): SelectResult {
+  if (stmt.joins.length > 0 || stmt.where || stmt.groupBy.length > 0 || stmt.having || stmt.orderBy.length > 0 || stmt.distinct) {
+    throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
+  }
+  validateNoFromColumns(stmt);
+  const { rows: projected, columns } = project([{}], stmt.columns);
+  const rows = applyLimit(projected, stmt.limit, stmt.offset);
+  return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
 
 /** SIMPLE モード: kintone クエリに変換して GET → project */
 async function executeSimpleSelect(
   stmt: SelectStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<SelectResult> {
   const params = selectToKintoneParams(stmt);
   const maxRecords = options.maxRecords ?? 10_000;
@@ -258,8 +321,8 @@ async function executeSimpleSelect(
 
   let rows = records.map((r) => flatten(r, null));
   if (!useSingleGet) {
-    const optionOrders = await buildOptionOrdersForSelect(stmt, client);
-    const sortKinds = await buildSortKindsForSelect(stmt, client);
+    const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
+    const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
     rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -268,19 +331,60 @@ async function executeSimpleSelect(
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
 }
 
+async function validateSelectFieldCodes(
+  stmt: SelectStatement,
+  mode: SelectMode,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  const appToFields = new Map<number, Set<string>>();
+  const addFields = (appId: number, fields: string[]) => {
+    if (fields.length === 0) return;
+    let target = appToFields.get(appId);
+    if (!target) {
+      target = new Set<string>();
+      appToFields.set(appId, target);
+    }
+    for (const f of fields) target.add(f);
+  };
+
+  if (mode === "SIMPLE") {
+    const params = selectToKintoneParams(stmt);
+    addFields(params.app, params.fields);
+  } else {
+    const tables = [stmt.from, ...stmt.joins.map((j) => j.table)].filter((t) => t.cteName === null);
+    for (const table of tables) {
+      addFields(table.appId, selectToFetchAllFields(stmt, table));
+    }
+  }
+
+  for (const [appId, fields] of appToFields.entries()) {
+    if (fields.size === 0) continue;
+    const defs = await getFieldsCached(appId, client, cacheContext);
+    // フィールド定義が取得できない環境（モック等）では検証をスキップする。
+    if (defs.length === 0) continue;
+    const validCodes = new Set(defs.map((d) => d.code));
+    const unknown = [...fields].filter((f) => !isSystemLikeFieldCode(f) && !validCodes.has(f));
+    if (unknown.length > 0) {
+      throw new Error(`ArgumentError: unknown field code(s): ${unknown.join(", ")} (APP${appId})`);
+    }
+  }
+}
+
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
 async function executeFullScanSelect(
   stmt: SelectStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
 
   // サブクエリを事前実行（IN (SELECT ...) の値セットを解決）
-  await resolveSubqueries(stmt.where,  client, options);
-  await resolveSubqueries(stmt.having, client, options);
+  await resolveSubqueries(stmt.where,  client, options, cacheContext);
+  await resolveSubqueries(stmt.having, client, options, cacheContext);
 
   // メインテーブルを取得
   const mainRecords = await fetchTableRecordsForFullScan(
@@ -324,9 +428,9 @@ async function executeFullScanSelect(
   await Promise.all(joinFetches);
 
   // スカラーサブクエリ列を事前実行してキャッシュ
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client);
-  const sortKinds = await buildSortKindsForSelect(stmt, client);
+  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
+  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
 
   // JS 集計パイプライン
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
@@ -341,14 +445,15 @@ async function executeFullScanSelect(
 async function executeUnion(
   stmt: UnionStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<SelectResult> {
   // 左辺を再帰的に実行（ネストした UNION 対応）
   const leftResult: SelectResult = stmt.left.type === "UNION"
-    ? await executeUnion(stmt.left, client, options)
-    : await executeSelect(stmt.left, client, options);
+    ? await executeUnion(stmt.left, client, options, cacheContext)
+    : await executeSelect(stmt.left, client, options, cacheContext);
 
-  const rightResult = await executeSelect(stmt.right, client, options);
+  const rightResult = await executeSelect(stmt.right, client, options, cacheContext);
 
   // 右辺の行を左辺のカラム名に位置対応でリマップ
   const leftCols  = leftResult.columns;
@@ -387,13 +492,14 @@ function deduplicateRows(rows: ProcessRow[], columns: string[]): ProcessRow[] {
 async function executeWith(
   stmt: WithStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<SelectResult> {
   // 単純 CTE のインライン化（WHERE プッシュダウン最適化）
   // CTE 本体が SIMPLE モードで最終クエリが単純 SELECT の場合、
   // CTE を展開して WHERE をまとめて REST API に渡す。
   if (canInlineSingleCte(stmt)) {
-    return executeSelect(buildInlinedQuery(stmt), client, options);
+    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
   }
 
   // CTE 名 → 結果行のキャッシュ
@@ -405,15 +511,15 @@ async function executeWith(
     if (cte.query.type === "SHOW_APPS") {
       result = await executeShowApps(client);
     } else if (cte.query.type === "DESCRIBE") {
-      result = await executeDescribe(cte.query, client);
+      result = await executeDescribe(cte.query, client, cacheContext);
     } else {
-      result = await executeQueryWithCte(cte.query, client, options, cteCache);
+      result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext);
     }
     cteCache.set(cte.name, result.rows);
   }
 
   // 最終クエリを CTE キャッシュ付きで実行
-  return executeQueryWithCte(stmt.query, client, options, cteCache);
+  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
 }
 
 // ------------------------------------------------------------
@@ -532,11 +638,12 @@ async function executeQueryWithCte(
   query: SelectStatement | UnionStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cteCache: Map<string, ProcessRow[]>
+  cteCache: Map<string, ProcessRow[]>,
+  cacheContext: string
 ): Promise<SelectResult> {
   if (query.type === "UNION") {
-    const leftResult  = await executeQueryWithCte(query.left,  client, options, cteCache);
-    const rightResult = await executeQueryWithCte(query.right, client, options, cteCache);
+    const leftResult  = await executeQueryWithCte(query.left,  client, options, cteCache, cacheContext);
+    const rightResult = await executeQueryWithCte(query.right, client, options, cteCache, cacheContext);
     const leftCols    = leftResult.columns;
     const rightCols   = rightResult.columns;
     const remapped    = rightResult.rows.map((row) => {
@@ -556,11 +663,11 @@ async function executeQueryWithCte(
 
   if (!hasCteRef) {
     // CTE 参照なし → 通常の SELECT 実行
-    return executeSelect(query, client, options);
+    return executeSelect(query, client, options, cacheContext);
   }
 
   // CTE 参照あり → FULL_SCAN で CTE 行を注入
-  return executeFullScanWithCte(query, client, options, cteCache);
+  return executeFullScanWithCte(query, client, options, cteCache, cacheContext);
 }
 
 /**
@@ -571,15 +678,16 @@ async function executeFullScanWithCte(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cteCache: Map<string, ProcessRow[]>
+  cteCache: Map<string, ProcessRow[]>,
+  cacheContext: string
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
 
   // サブクエリを事前実行
-  await resolveSubqueries(stmt.where,  client, options);
-  await resolveSubqueries(stmt.having, client, options);
+  await resolveSubqueries(stmt.where,  client, options, cacheContext);
+  await resolveSubqueries(stmt.having, client, options, cacheContext);
 
   const tables = new Map<string | null, KintoneRecord[]>();
 
@@ -632,9 +740,9 @@ async function executeFullScanWithCte(
   });
   await Promise.all(joinFetches);
 
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client);
-  const sortKinds = await buildSortKindsForSelect(stmt, client);
+  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
+  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -786,33 +894,62 @@ async function tryFetchJoinRecordsBySourceKeys(
 // フィールド型マップ（DESCRIBE キャッシュ）
 // ============================================================
 
-const fieldTypeCache = new Map<number, FieldTypeMap>();
-const optionOrderCache = new Map<number, Map<string, Map<string, number>>>();
-const sortKindCache = new Map<number, Map<string, "number" | "string">>();
-const fieldInfoCache = new Map<number, Promise<KintoneFieldInfo[]>>();
+const fieldTypeCache = new Map<string, Map<number, FieldTypeMap>>();
+const optionOrderCache = new Map<string, Map<number, Map<string, Map<string, number>>>>();
+const sortKindCache = new Map<string, Map<number, Map<string, "number" | "string">>>();
+const fieldInfoCache = new Map<string, Map<number, Promise<KintoneFieldInfo[]>>>();
 
-async function getFieldsCached(appId: number, client: KintoneClient): Promise<KintoneFieldInfo[]> {
-  const cached = fieldInfoCache.get(appId);
+function getScopedCacheValue<T>(
+  root: Map<string, Map<number, T>>,
+  cacheContext: string,
+  appId: number
+): T | undefined {
+  return root.get(cacheContext)?.get(appId);
+}
+
+function setScopedCacheValue<T>(
+  root: Map<string, Map<number, T>>,
+  cacheContext: string,
+  appId: number,
+  value: T
+): void {
+  let scoped = root.get(cacheContext);
+  if (!scoped) {
+    scoped = new Map<number, T>();
+    root.set(cacheContext, scoped);
+  }
+  scoped.set(appId, value);
+}
+
+function isSystemLikeFieldCode(code: string): boolean {
+  return code.startsWith("_") || code.startsWith("$");
+}
+
+async function getFieldsCached(appId: number, client: KintoneClient, cacheContext: string): Promise<KintoneFieldInfo[]> {
+  const cached = getScopedCacheValue(fieldInfoCache, cacheContext, appId);
   if (cached) return cached;
   const loading = client.getFields(appId);
-  fieldInfoCache.set(appId, loading);
+  setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
   return loading;
 }
 
-async function getFieldTypeMap(appId: number, client: KintoneClient): Promise<FieldTypeMap> {
-  if (fieldTypeCache.has(appId)) return fieldTypeCache.get(appId)!;
-  const fields = await getFieldsCached(appId, client);
+async function getFieldTypeMap(appId: number, client: KintoneClient, cacheContext: string): Promise<FieldTypeMap> {
+  const cached = getScopedCacheValue(fieldTypeCache, cacheContext, appId);
+  if (cached) return cached;
+  const fields = await getFieldsCached(appId, client, cacheContext);
   const map: FieldTypeMap = new Map(fields.map((f) => [f.code, f.fieldType]));
-  fieldTypeCache.set(appId, map);
+  setScopedCacheValue(fieldTypeCache, cacheContext, appId, map);
   return map;
 }
 
 async function getOptionOrderMapByApp(
   appId: number,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<Map<string, Map<string, number>>> {
-  if (optionOrderCache.has(appId)) return optionOrderCache.get(appId)!;
-  const fields = await getFieldsCached(appId, client);
+  const cached = getScopedCacheValue(optionOrderCache, cacheContext, appId);
+  if (cached) return cached;
+  const fields = await getFieldsCached(appId, client, cacheContext);
   const map = new Map<string, Map<string, number>>();
   for (const field of fields) {
     if (!field.optionOrder) continue;
@@ -820,28 +957,31 @@ async function getOptionOrderMapByApp(
     if (entries.length === 0) continue;
     map.set(field.code, new Map(entries));
   }
-  optionOrderCache.set(appId, map);
+  setScopedCacheValue(optionOrderCache, cacheContext, appId, map);
   return map;
 }
 
 async function getSortKindMapByApp(
   appId: number,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<Map<string, "number" | "string">> {
-  if (sortKindCache.has(appId)) return sortKindCache.get(appId)!;
-  const fields = await getFieldsCached(appId, client);
+  const cached = getScopedCacheValue(sortKindCache, cacheContext, appId);
+  if (cached) return cached;
+  const fields = await getFieldsCached(appId, client, cacheContext);
   const map = new Map<string, "number" | "string">();
   for (const field of fields) {
     if (!field.sortKind) continue;
     map.set(field.code, field.sortKind);
   }
-  sortKindCache.set(appId, map);
+  setScopedCacheValue(sortKindCache, cacheContext, appId, map);
   return map;
 }
 
 async function buildOptionOrdersForSelect(
   stmt: SelectStatement,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<OptionOrderMap> {
   const optionOrders: OptionOrderMap = new Map();
   const tables: TableRef[] = [stmt.from, ...stmt.joins.map((j) => j.table)];
@@ -852,7 +992,7 @@ async function buildOptionOrdersForSelect(
     if (appLoaded.has(table.appId)) continue;
     appLoaded.add(table.appId);
 
-    const appMap = await getOptionOrderMapByApp(table.appId, client);
+    const appMap = await getOptionOrderMapByApp(table.appId, client, cacheContext);
     for (const [fieldCode, orderMap] of appMap.entries()) {
       if (!optionOrders.has(fieldCode)) {
         optionOrders.set(fieldCode, orderMap);
@@ -862,7 +1002,7 @@ async function buildOptionOrdersForSelect(
 
   for (const table of tables) {
     if (table.cteName != null || !table.alias) continue;
-    const appMap = await getOptionOrderMapByApp(table.appId, client);
+    const appMap = await getOptionOrderMapByApp(table.appId, client, cacheContext);
     for (const [fieldCode, orderMap] of appMap.entries()) {
       optionOrders.set(`${table.alias}.${fieldCode}`, orderMap);
     }
@@ -873,7 +1013,8 @@ async function buildOptionOrdersForSelect(
 
 async function buildSortKindsForSelect(
   stmt: SelectStatement,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<FieldSortKindMap> {
   const sortKinds: FieldSortKindMap = new Map();
   const tables: TableRef[] = [stmt.from, ...stmt.joins.map((j) => j.table)];
@@ -884,7 +1025,7 @@ async function buildSortKindsForSelect(
     if (appLoaded.has(table.appId)) continue;
     appLoaded.add(table.appId);
 
-    const appMap = await getSortKindMapByApp(table.appId, client);
+    const appMap = await getSortKindMapByApp(table.appId, client, cacheContext);
     for (const [fieldCode, sortKind] of appMap.entries()) {
       if (!sortKinds.has(fieldCode)) {
         sortKinds.set(fieldCode, sortKind);
@@ -894,7 +1035,7 @@ async function buildSortKindsForSelect(
 
   for (const table of tables) {
     if (table.cteName != null || !table.alias) continue;
-    const appMap = await getSortKindMapByApp(table.appId, client);
+    const appMap = await getSortKindMapByApp(table.appId, client, cacheContext);
     for (const [fieldCode, sortKind] of appMap.entries()) {
       sortKinds.set(`${table.alias}.${fieldCode}`, sortKind);
     }
@@ -944,12 +1085,13 @@ function convertProcessRowValue(
 
 async function executeInsert(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<InsertResult> {
   if (stmt.subtableCode) {
-    return executeInsertSubtable(stmt, client);
+    return executeInsertSubtable(stmt, client, cacheContext);
   }
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
   const createdIds: string[][] = [];
 
@@ -972,10 +1114,11 @@ async function executeInsert(
 async function executeInsertSelect(
   stmt: InsertSelectStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<InsertResult> {
   // 1. SELECT を実行して結果行を取得
-  const selectResult = await executeSelect(stmt.select, client, options);
+  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
 
   // 2. 列数チェック
@@ -986,7 +1129,7 @@ async function executeInsertSelect(
   }
 
   // 3. 転送先フィールド型を取得（同型自動変換）
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   // 4. ProcessRow[] → KintoneRecord[]（列の位置で対応付け）
   const allRecords = rows.map((row) => {
@@ -1020,17 +1163,18 @@ async function executeInsertSelect(
 async function executeUpdate(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<UpdateResult> {
   if (stmt.subtableCode) {
-    return executeUpdateSubtable(stmt, client, options);
+    return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
   const maxRecords = options.maxRecords ?? 10_000;
 
   // SET のスカラーサブクエリを事前実行して StringLiteral に差し替え
-  await resolveSetSubqueries(stmt.assignments, client, options);
+  await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
 
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   if (hasArithAssignment(stmt)) {
     // ── 算術式あり: 現在値を取得してから計算 → PUT ──
@@ -1093,10 +1237,11 @@ async function executeUpdate(
 async function executeDelete(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "DELETE" }>,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<DeleteResult> {
   if (stmt.subtableCode) {
-    return executeDeleteSubtable(stmt, client, options);
+    return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
   // 1. 対象レコードの $id を取得
   const getParams = deleteToGetQuery(stmt);
@@ -1143,7 +1288,8 @@ async function executeDelete(
 async function executeUpsert(
   stmt: UpsertStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<UpsertResult> {
   const maxRecords = options.maxRecords ?? 10_000;
 
@@ -1152,7 +1298,7 @@ async function executeUpsert(
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
 
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   for (const row of stmt.values) {
     // キーフィールドの値を取り出す
@@ -1242,7 +1388,8 @@ interface ExpandedSubtableRow {
 
 async function executeInsertSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
-  client: KintoneClient
+  client: KintoneClient,
+  _cacheContext: string
 ): Promise<InsertResult> {
   const subtableCode = stmt.subtableCode!;
   const pidIndex = stmt.fields.indexOf("_pid");
@@ -1295,7 +1442,8 @@ async function executeInsertSubtable(
 async function executeUpdateSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  _cacheContext: string
 ): Promise<UpdateResult> {
   const subtableCode = stmt.subtableCode!;
   if (!hasRidCondition(stmt.where)) {
@@ -1359,7 +1507,8 @@ async function executeUpdateSubtable(
 async function executeDeleteSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "DELETE" }>,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  _cacheContext: string
 ): Promise<DeleteResult> {
   const subtableCode = stmt.subtableCode!;
   if (!hasRidCondition(stmt.where)) {
@@ -1555,7 +1704,8 @@ function hasRidCondition(where: WhereExpr): boolean {
 async function executeReorder(
   stmt: ReorderStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  _cacheContext: string
 ): Promise<ReorderResult> {
   const parents = await fetchAll(
     client.getRecords,
@@ -1642,12 +1792,13 @@ function evalOrderKeyForRow(key: OrderByKey, row: ProcessRow): string {
 async function executeUpsertSelect(
   stmt: UpsertSelectStatement,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<UpsertResult> {
   const maxRecords = options.maxRecords ?? 10_000;
 
   // 1. SELECT を実行して結果行を取得
-  const selectResult = await executeSelect(stmt.select, client, options);
+  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
 
   if (columns.length !== stmt.fields.length) {
@@ -1742,9 +1893,10 @@ async function executeShowApps(client: KintoneClient): Promise<SelectResult> {
 
 async function executeDescribe(
   stmt: DescribeStatement,
-  client: KintoneClient
+  client: KintoneClient,
+  cacheContext: string
 ): Promise<SelectResult> {
-  const fields = await client.getFields(stmt.appId);
+  const fields = await getFieldsCached(stmt.appId, client, cacheContext);
   const columns = ["フィールドコード", "ラベル", "タイプ"];
   const rows: ProcessRow[] = fields.map((f) => ({
     "フィールドコード": f.code,
@@ -1777,20 +1929,21 @@ function parseSql(sql: string) {
 async function resolveSubqueries(
   where: WhereExpr | null,
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<void> {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
-        const result = await executeSelect(right.query, client, options);
+        const result = await executeSelect(right.query, client, options, cacheContext);
         const col = right.column ?? (result.columns[0] ?? "");
         const resolved = new Set(result.rows.map((r) => r[col] ?? ""));
         (right as ResolvedSubqueryInList).resolved = resolved;
       }
       if (right.type === "SCALAR_SUBQUERY") {
-        const result = await executeSelect(right.query, client, options);
+        const result = await executeSelect(right.query, client, options, cacheContext);
         if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
         if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
         const col = result.columns[0] ?? "";
@@ -1799,15 +1952,15 @@ async function resolveSubqueries(
       break;
     }
     case "LOGICAL":
-      await resolveSubqueries(where.left,  client, options);
-      await resolveSubqueries(where.right, client, options);
+      await resolveSubqueries(where.left,  client, options, cacheContext);
+      await resolveSubqueries(where.right, client, options, cacheContext);
       break;
     case "NOT":
     case "GROUP":
-      await resolveSubqueries(where.expr, client, options);
+      await resolveSubqueries(where.expr, client, options, cacheContext);
       break;
     case "EXISTS": {
-      const result = await executeSelect(where.query, client, options);
+      const result = await executeSelect(where.query, client, options, cacheContext);
       (where as ResolvedExistsExpr).resolved = result.rowCount > 0;
       break;
     }
@@ -1822,11 +1975,12 @@ async function resolveSubqueries(
 async function resolveSetSubqueries(
   assignments: UpdateStatement["assignments"],
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<void> {
   for (const a of assignments) {
     if (a.value.type !== "SCALAR_SUBQUERY") continue;
-    const result = await executeSelect(a.value.query, client, options);
+    const result = await executeSelect(a.value.query, client, options, cacheContext);
     if (result.rowCount === 0) throw new Error(`SET サブクエリが値を返しませんでした（フィールド: ${a.field}）`);
     if (result.rowCount > 1)  throw new Error(`SET サブクエリが複数行を返しました（フィールド: ${a.field}）`);
     const col = result.columns[0] ?? "";
@@ -1843,13 +1997,14 @@ async function resolveSetSubqueries(
 async function resolveScalarColumns(
   columns: SelectStatement["columns"],
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  cacheContext: string
 ): Promise<Map<number, string>> {
   const cache = new Map<number, string>();
   for (let i = 0; i < columns.length; i++) {
     const col = columns[i];
     if (col.type !== "SCALAR_SUBQUERY_COL") continue;
-    const result = await executeSelect(col.query, client, options);
+    const result = await executeSelect(col.query, client, options, cacheContext);
     if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
     if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
     const firstCol = result.columns[0] ?? "";

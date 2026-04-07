@@ -40,6 +40,7 @@ import {
   evalArithExpr,
   evalStringFunc,
   applyRoundOp,
+  resolveFieldRef,
 } from "./evalFunc";
 
 export { ProcessRow };
@@ -543,7 +544,13 @@ export function project(
         }
         case "FIELD": {
           const key = col.alias ?? col.field;
-          out[key] = row[col.field] ?? "";
+          out[key] = resolveFieldRef(row, col.field);
+          if (rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
+        case "LITERAL_COL": {
+          const key = col.alias ?? `'${col.value}'`;
+          out[key] = col.value;
           if (rowIdx === 0) orderedKeys.push(key);
           break;
         }

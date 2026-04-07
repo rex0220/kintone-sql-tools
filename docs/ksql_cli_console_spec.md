@@ -33,30 +33,24 @@ Ver.1 では `SELECT` を既定とする。
 ## 3. 想定ディレクトリ構成
 
 ```text
-ksql/
+kintone-sql-tools/
   src/
     core/        # lexer/parser/AST/変換/実行ロジック（UI非依存）
     ui/          # kintone plugin UI 層
     cli/         # CLI 層（引数、REPL、表示）
+    api/ converter/ engine/ lexer/ parser/ types/
   docs/
-    README.md
     ksql_cli_console_spec.md
-    implementation/
-      cli_dml_phase1_spec.md
-      cli_implementation_steps.md
-    checklists/
-      cli_test_acceptance_criteria.md
-      cli_dml_phase1_acceptance_checklist.md
-      cli_operation_start_checklist.md
-      cli_live_e2e_checklist.md
-    proposals/
-      *.md
-    others/
-      *.md
-    archive/
-      *.md
+    examples/
+      ksql.config.sample.json
+  dist/          # plugin build 出力
+  dist-cli/      # CLI build 出力
+  prod/          # plugin pack 対象
+  plugin/
   build.mjs      # plugin build
-  build-cli.mjs  # cli build（新規）
+  build-cli.mjs  # cli build
+  package.json
+  tsconfig.json
 ```
 
 ## 4. CLI 基本仕様
@@ -74,12 +68,13 @@ ksql/
 接続系:
 
 1. `--base-url <url>`
-2. `--username <name>`
-3. `--password <pass>`
-4. `--token <token>`（単一APP向け）
-5. `--token-map <mapping>`（複数APP向け、例: `APP100=xxx,APP101=yyy`）
-6. `--token-file <path>`（複数APP向けJSON）
-7. `--auth <type>` (`userpass | token | auto`)
+2. `--guest-space-id <id>`（ゲストスペース指定。指定時は `/k/guest/<id>/v1` を利用）
+3. `--username <name>`
+4. `--password <pass>`
+5. `--token <token>`（単一APP向け）
+6. `--token-map <mapping>`（複数APP向け、例: `APP100=xxx,APP101=yyy`）
+7. `--token-file <path>`（複数APP向けJSON）
+8. `--auth <type>` (`userpass | token | auto`)
 
 実行系:
 
@@ -166,9 +161,24 @@ CLI 追加として以下を提供する。
 
 1. `--token-map`
 2. `--token-file`
-3. `--token`（単一APPのみ）
-4. `KSQL_TOKEN_MAP` 環境変数
-5. config (`profiles.<name>.tokenMap` など)
+3. `KSQL_TOKEN_MAP` 環境変数
+4. config (`profiles.<name>.tokenMap` など)
+5. `--token` / `KSQL_TOKEN`（単一APPのみ）
+
+## 4.6 APP@profile（CLI 拡張）
+
+1. CLI ではテーブル参照末尾に `@profile` を指定可能（例: `APP100@dev`, `APP80$明細@guest`）
+2. `@profile` なしの `APPxxx` は既定 profile を使用する
+3. 同一SQL内で同一APPに異なるprofileを指定しても許可する（別環境の別アプリとして扱う）
+4. plugin 側では `@profile` をサポートしない
+5. `@profile` は `INSERT/UPDATE/UPSERT` で使用可能、`DELETE` は未対応として実行前にエラー終了する
+
+## 4.7 FROM 省略 SELECT
+
+1. `SELECT 'xxx' AS a` のような `FROM` 省略を許可する
+2. `FROM` 省略時は1行評価として返す（API呼び出しなし）
+3. `SELECT *` / フィールド参照列は `FROM` 省略時はエラー
+4. `FROM DUAL` は非対応
 
 ## 5. コンソール（REPL）仕様
 
@@ -206,8 +216,8 @@ ksql>
 | `:clear` | 入力バッファをクリア |
 | `:last` | 直前に実行した SQL を表示 |
 | `:buffer` | 現在の入力バッファ内容を表示 |
-| `:edit` | 現在の入力バッファを外部エディタで編集して反映 |
-| `:show config` | 現在の実行設定（profile/format/dryrun など）を表示 |
+| `:edit` | 現在の入力バッファを外部エディタで編集して反映（空バッファ時は `:last` 相当を初期表示） |
+| `:show config` | 現在の実行設定（profile/format/dryrun など）と直近SQLの `resolved-app-profiles` を表示 |
 | `:history` | 実行履歴を表示 |
 | `:history <n>` | 直近 `n` 件の履歴を表示 |
 | `:history find <keyword>` | キーワードを含む履歴を表示 |
@@ -236,6 +246,8 @@ ksql>
 3. `--yes` 明示時のみ確認省略可とする
 4. `UPDATE` / `DELETE` の `WHERE` なしは既定で禁止する
 5. `--dml-max-rows` 超過時は実行前に拒否する
+6. 確認入力は `yes/no`（大小文字・前後空白は非区別）で判定する
+7. 端末依存で同一キー重複入力が起きるケース（例: `yyeess`）は `yes` と同値に扱う
 
 ## 5.6 Ver.1 安全ポリシー（DML Phase 1 反映）
 
@@ -283,6 +295,16 @@ ksql>
         "dateFormat": "local",
         "attachmentFormat": "name"
       }
+    },
+    "guest": {
+      "baseUrl": "https://example.kintone.com",
+      "guestSpaceId": 5,
+      "auth": "token",
+      "app": 200,
+      "tokenMap": {
+        "APP200": "env:KSQL_TOKEN_APP200",
+        "APP201": "env:KSQL_TOKEN_APP201"
+      }
     }
   }
 }
@@ -299,7 +321,7 @@ ksql>
 
 1. `tokenMap` では `env:KEY` 記法を許可する（機密値の直書き非推奨）
 2. `defaultProfile` 未指定時は `dev` を既定選択する
-3. 未知キーは警告扱いとし、実行は継続する
+3. `guestSpaceId` を指定した profile はゲストスペース API パスを使用する
 
 ## 7. エラー表示方針
 

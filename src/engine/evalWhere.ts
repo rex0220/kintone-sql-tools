@@ -16,7 +16,7 @@ import type {
   ExistsExpr,
   ScalarSubquery,
 } from "../types/ast";
-import { evalStringFunc, evalArithExpr } from "./evalFunc";
+import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -168,7 +168,7 @@ function resolveField(
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`
     : field.field;
-  return row[key] ?? "";
+  return resolveFieldRef(row, key);
 }
 
 function resolveValue(value: SqlValue, row: ProcessRow): string {

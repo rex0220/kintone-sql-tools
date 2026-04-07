@@ -375,6 +375,14 @@ test("project: SELECT *", () => {
   expect(result[0]).toEqual({ 名前: "田中", 金額: "1000" });
 });
 
+test("project: qualified field falls back to unqualified key", () => {
+  const rows: ProcessRow[] = [{ オーダー番号: "20260430" }];
+  const stmt = parseSelect("SELECT a.オーダー番号 FROM APP69 AS a");
+  const { rows: result, columns } = project(rows, stmt.columns);
+  expect(result[0]).toEqual({ "a.オーダー番号": "20260430" });
+  expect(columns).toEqual(["a.オーダー番号"]);
+});
+
 // ----------------------------------------------------------------
 // runFullScan: 統合テスト
 // ----------------------------------------------------------------
