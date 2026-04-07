@@ -38,6 +38,7 @@ Options:
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL
+  --guest-space-id <id>      Guest space ID (uses /k/guest/<id>/v1 APIs)
   --auth <type>              Auth type: token | userpass | auto
   --username <name>          Login username (for userpass auth)
   --password <pass>          Login password (for userpass auth)
@@ -45,7 +46,7 @@ Options:
   --token-map <mapping>      App token map (APP100=...,APP101=...)
   --token-file <path>        JSON file for app token map
   --app <id>                 Default app id context
-  --diag-record-id <id>      Diagnostic: GET /k/v1/record.json by app+id
+  --diag-record-id <id>      Diagnostic: GET record.json by app+id
   --no-header                Hide table header
   --pretty                   Pretty-print JSON output
   --user-format <mode>       User field format: full | name | code
@@ -76,6 +77,7 @@ interface CliConfig {
   defaultProfile?: string;
   profiles?: Record<string, {
     baseUrl?: string;
+    guestSpaceId?: number;
     auth?: AuthMode;
     username?: string;
     password?: string;
@@ -124,6 +126,7 @@ interface ParsedArgs {
   configPath: string | null;
   profile: string | null;
   baseUrl: string | null;
+  guestSpaceId: number | null;
   auth: AuthMode | null;
   username: string | null;
   password: string | null;
@@ -167,6 +170,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     configPath: null,
     profile: null,
     baseUrl: null,
+    guestSpaceId: null,
     auth: null,
     username: null,
     password: null,
@@ -219,6 +223,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (a === "--config") { out.configPath = v ?? ""; i++; continue; }
     if (a === "--profile") { out.profile = v ?? ""; i++; continue; }
     if (a === "--base-url") { out.baseUrl = v ?? ""; i++; continue; }
+    if (a === "--guest-space-id") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --guest-space-id must be a positive integer.");
+      out.guestSpaceId = n;
+      i++;
+      continue;
+    }
     if (a === "--auth") {
       if (v === "token" || v === "userpass" || v === "auto") out.auth = v;
       else throw new Error("ArgumentError: --auth must be token|userpass|auto.");
@@ -608,6 +619,7 @@ function createDryRunClient(): KintoneClient {
 
 async function runDiagnosticRecordGet(params: {
   baseUrl: string;
+  guestSpaceId: number | null;
   appId: number;
   recordId: number;
   timeoutMs: number;
@@ -619,7 +631,10 @@ async function runDiagnosticRecordGet(params: {
     | { type: "userpass"; username: string; password: string };
 }): Promise<void> {
   const qs = `app=${encodeURIComponent(String(params.appId))}&id=${encodeURIComponent(String(params.recordId))}`;
-  const url = `${params.baseUrl.replace(/\/+$/, "")}/k/v1/record.json?${qs}`;
+  const apiRoot = params.guestSpaceId !== null
+    ? `/k/guest/${params.guestSpaceId}/v1`
+    : "/k/v1";
+  const url = `${params.baseUrl.replace(/\/+$/, "")}${apiRoot}/record.json?${qs}`;
   const headers = new Headers();
   if (params.auth.type === "token") {
     headers.set("X-Cybozu-API-Token", params.auth.token);
@@ -746,6 +761,7 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   pushOpt(argv, "--config", base.configPath);
   pushOpt(argv, "--profile", base.profile);
   pushOpt(argv, "--base-url", base.baseUrl);
+  pushOpt(argv, "--guest-space-id", base.guestSpaceId);
   pushOpt(argv, "--auth", base.auth);
   pushOpt(argv, "--username", base.username);
   pushOpt(argv, "--password", base.password);
@@ -1045,6 +1061,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             `format=${format ?? "(default)"}`,
             `dryrun=${dryRun ? "on" : "off"}`,
             `base-url=${base.baseUrl ?? "(from env/config)"}`,
+            `guest-space-id=${base.guestSpaceId ?? "(none)"}`,
             `auth=${base.auth ?? "(auto)"}`,
             `app=${base.app ?? "(from SQL or config)"}`,
             `allow-dml=${base.allowDml ? "on" : "off"}`,
@@ -1280,6 +1297,7 @@ async function run(): Promise<number> {
     client = createDryRunClient();
   } else {
     const baseUrl = args.baseUrl ?? envString("KSQL_BASE_URL") ?? profile.baseUrl ?? "";
+    const guestSpaceId = args.guestSpaceId ?? envInt("KSQL_GUEST_SPACE_ID") ?? profile.guestSpaceId ?? null;
     if (!baseUrl) {
       process.stderr.write("AuthError: --base-url is required.\n");
       return 3;
@@ -1304,6 +1322,7 @@ async function run(): Promise<number> {
         try {
           await runDiagnosticRecordGet({
             baseUrl,
+            guestSpaceId,
             appId: defaultApp,
             recordId: args.diagRecordId,
             timeoutMs: timeout,
@@ -1319,6 +1338,7 @@ async function run(): Promise<number> {
         }
       }
       client = createNodeKintoneClient(baseUrl, {
+        guestSpaceId,
         timeoutMs: timeout,
         debug,
         debugHeaders,
@@ -1376,6 +1396,7 @@ async function run(): Promise<number> {
         try {
           await runDiagnosticRecordGet({
             baseUrl,
+            guestSpaceId,
             appId: defaultApp,
             recordId: args.diagRecordId,
             timeoutMs: timeout,
@@ -1392,6 +1413,7 @@ async function run(): Promise<number> {
       }
 
       client = createNodeKintoneClient(baseUrl, {
+        guestSpaceId,
         timeoutMs: timeout,
         debug,
         debugHeaders,

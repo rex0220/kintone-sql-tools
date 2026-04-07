@@ -9,6 +9,7 @@ import type {
 } from "../core";
 
 export interface TokenResolver {
+  guestSpaceId?: number | null;
   timeoutMs?: number;
   debug?: boolean;
   debugHeaders?: boolean;
@@ -23,6 +24,9 @@ export function createNodeKintoneClient(
   tokenResolver: TokenResolver
 ): KintoneClient {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const apiBasePath = tokenResolver.guestSpaceId && tokenResolver.guestSpaceId > 0
+    ? `/k/guest/${tokenResolver.guestSpaceId}/v1`
+    : "/k/v1";
 
   async function requestJson<T>(
     path: string,
@@ -79,7 +83,7 @@ export function createNodeKintoneClient(
   }
 
   function shouldRetryWithRecordNumberOrder(path: string, bodyText: string): boolean {
-    if (!path.includes("/k/v1/records.json?")) return false;
+    if (!path.includes("/v1/records.json?")) return false;
     if (!bodyText.includes("\"code\":\"CB_IL02\"")) return false;
     const queryPart = path.split("query=")[1] ?? "";
     const query = decodeURIComponent(queryPart.split("&")[0] ?? "");
@@ -110,7 +114,7 @@ export function createNodeKintoneClient(
           `[debug] getRecords app=${params.app} query="${params.query}" fields=${params.fields.length > 0 ? params.fields.join(",") : "(all)"} auth=${tokenResolver.auth.type}`
         );
       }
-      const path = `/k/v1/records.json?${qs}`;
+      const path = `${apiBasePath}/records.json?${qs}`;
       try {
         return await requestJson<{ records: Record<string, { value: string }>[] }>(
           path,
@@ -134,7 +138,7 @@ export function createNodeKintoneClient(
 
     async postRecords(_params: KintonePostParams) {
       const res = await requestJson<{ ids: string[] }>(
-        "/k/v1/records.json",
+        `${apiBasePath}/records.json`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -149,7 +153,7 @@ export function createNodeKintoneClient(
 
     async putRecords(_params: KintonePutParams) {
       await requestJson<unknown>(
-        "/k/v1/records.json",
+        `${apiBasePath}/records.json`,
         {
           method: "PUT",
           body: JSON.stringify({
@@ -163,7 +167,7 @@ export function createNodeKintoneClient(
 
     async deleteRecords(_params: KintoneDeleteParams) {
       await requestJson<unknown>(
-        "/k/v1/records.json",
+        `${apiBasePath}/records.json`,
         {
           method: "DELETE",
           body: JSON.stringify({
@@ -184,7 +188,7 @@ export function createNodeKintoneClient(
         qs.set("limit", String(PAGE));
         qs.set("offset", String(offset));
         const res = await requestJson<{ apps: { appId: string; name: string; description: string }[] }>(
-          `/k/v1/apps.json?${qs.toString()}`,
+          `${apiBasePath}/apps.json?${qs.toString()}`,
           { method: "GET" },
           0
         );
@@ -213,7 +217,7 @@ export function createNodeKintoneClient(
           options?: Record<string, { index?: string | number }>;
         }>;
       }>(
-        `/k/v1/app/form/fields.json?${qs.toString()}`,
+        `${apiBasePath}/app/form/fields.json?${qs.toString()}`,
         { method: "GET" },
         appId
       );

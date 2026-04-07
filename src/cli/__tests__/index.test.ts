@@ -35,6 +35,7 @@ describe("cli helpers", () => {
       "--debug",
       "--debug-url",
       "--debug-headers",
+      "--guest-space-id", "12",
       "--diag-record-id", "1",
       "--exit-on-empty",
       "--allow-dml",
@@ -54,6 +55,7 @@ describe("cli helpers", () => {
     expect(args.debug).toBe(true);
     expect(args.debugUrl).toBe(true);
     expect(args.debugHeaders).toBe(true);
+    expect(args.guestSpaceId).toBe(12);
     expect(args.diagRecordId).toBe(1);
     expect(args.exitOnEmpty).toBe(true);
     expect(args.allowDml).toBe(true);
@@ -83,6 +85,10 @@ describe("cli helpers", () => {
 
   test("parseArgs validates auth mode", () => {
     expect(() => parseArgs(["--auth", "invalid", "-e", "SELECT * FROM APP100"])).toThrow(/--auth/);
+  });
+
+  test("parseArgs validates guest space id", () => {
+    expect(() => parseArgs(["--guest-space-id", "0", "-e", "SELECT * FROM APP100"])).toThrow(/--guest-space-id/);
   });
 
   test("shouldExitOnEmpty ignores dry-run", () => {

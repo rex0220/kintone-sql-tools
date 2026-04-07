@@ -28,6 +28,34 @@
         "dateFormat": "local",
         "attachmentFormat": "name"
       }
+    },
+    "guest": {
+      "baseUrl": "https://example.kintone.com",
+      "guestSpaceId": 5,
+      "auth": "token",
+      "app": 200,
+      "tokenMap": {
+        "APP200": "env:KSQL_TOKEN_APP200",
+        "APP201": "env:KSQL_TOKEN_APP201"
+      },
+      "query": {
+        "maxRecords": 500,
+        "onLimit": "error",
+        "timeout": 30000
+      },
+      "output": {
+        "format": "table",
+        "pretty": false,
+        "noHeader": false,
+        "noColor": false,
+        "quiet": false,
+        "exitOnEmpty": false,
+        "userFormat": "name",
+        "arrayFormat": "join",
+        "tableFormat": "count",
+        "dateFormat": "local",
+        "attachmentFormat": "name"
+      }
     }
   }
 }
