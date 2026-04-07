@@ -21,7 +21,7 @@
     "build:cli": "node build-cli.mjs",
     "start": "run-p develop upload",
     "develop": "node build.mjs --watch",
-    "upload": "rex0220-plugin-uploader -f dist/ksql-plugin1.zip --watch"
+    "upload": "rex0220-plugin-uploader -f dist/ksql-plugin-v1.0.0.zip --watch"
   },
   "devDependencies": {
     "@kintone/plugin-packer": "^9.1.0",

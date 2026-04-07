@@ -20,3 +20,7 @@ yarn-error.log*
 
 # Local CLI runtime config
 ksql.config.json
+
+# plugin keys
+pluginId.txt
+private.ppk
