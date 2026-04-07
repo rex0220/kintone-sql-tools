@@ -96,6 +96,7 @@ Options:
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL
+  --guest-space-id <id>      Guest space ID (uses /k/guest/<id>/v1 APIs)
   --auth <type>              Auth type: token | userpass | auto
   --username <name>          Login username (for userpass auth)
   --password <pass>          Login password (for userpass auth)
@@ -103,7 +104,7 @@ Options:
   --token-map <mapping>      App token map (APP100=...,APP101=...)
   --token-file <path>        JSON file for app token map
   --app <id>                 Default app id context
-  --diag-record-id <id>      Diagnostic: GET /k/v1/record.json by app+id
+  --diag-record-id <id>      Diagnostic: GET record.json by app+id
   --no-header                Hide table header
   --pretty                   Pretty-print JSON output
   --user-format <mode>       User field format: full | name | code
@@ -269,6 +270,7 @@ node dist-cli/ksql.js --config ./ksql.config.json --profile dev -e "SELECT * FRO
     "dev": {
       "baseUrl": "https://example.cybozu.com",
       "auth": "userpass",
+      "guestSpaceId": 5,
       "username": "your_user",
       "passwordEnv": "KSQL_PASSWORD_DEV"
     }
@@ -283,6 +285,7 @@ CLI は以下の環境変数をサポートします。
 - `KSQL_CONFIG`
 - `KSQL_PROFILE`
 - `KSQL_BASE_URL`
+- `KSQL_GUEST_SPACE_ID`
 - `KSQL_AUTH`
 - `KSQL_USERNAME`
 - `KSQL_PASSWORD`
