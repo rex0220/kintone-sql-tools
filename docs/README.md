@@ -11,10 +11,13 @@
 ## CLI profile 拡張
 
 - `cli_app_profile_spec.md`
-- `cli_app_profile_implementation_guide.md`
-- `cli_app_profile_implementation_guide_scoped_cache.md`
 
 ## 公開・運用
 
-- `public_release_checklist.md`
 - `examples/ksql.config.sample.json`
+
+## 内部向け
+
+- `internal/cli_app_profile_implementation_guide.md`
+- `internal/cli_app_profile_implementation_guide_scoped_cache.md`
+- `internal/public_release_checklist.md`

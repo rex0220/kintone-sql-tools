@@ -15,7 +15,6 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
   - 同一 SQL 内で同一 APP の profile 混在を許可
   - `INSERT/UPDATE/UPSERT` 対応、`DELETE` は未対応
 - `FROM` 省略 SELECT（例: `SELECT 'xxx' AS a`）
-  - `FROM DUAL` は非対応
 
 ## インストール
 
@@ -179,7 +178,7 @@ Options:
 - [言語リファレンス](docs/ksql_language_reference.md)
 - [CLI / Console 仕様](docs/ksql_cli_console_spec.md)
 - [APP@profile 仕様](docs/cli_app_profile_spec.md)
-- [公開前チェックリスト](docs/public_release_checklist.md)
+- [公開前チェックリスト](docs/internal/public_release_checklist.md)
 
 ## ライセンス
 
