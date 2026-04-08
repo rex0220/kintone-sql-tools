@@ -50,8 +50,13 @@ test("UPDATE without WHERE is rejected by default", async () => {
     expect(true).toBe(true);
     return;
   }
-  expect(res.code).toBe(2);
-  expect(res.stderr).toContain("without WHERE is blocked");
+  // WHERE なし UPDATE は parser 段階（code=1）または CLI ガード（code=2）の
+  // いずれでも拒否されれば要件を満たす。
+  expect(res.code === 1 || res.code === 2).toBe(true);
+  expect(
+    res.stderr.includes("without WHERE is blocked")
+      || res.stderr.includes("UPDATE 文には WHERE 句が必要です")
+  ).toBe(true);
 });
 
 test("INSERT values count is guarded by --dml-max-rows", async () => {

@@ -1,7 +1,8 @@
 # kSQL CLI / Console モード仕様
 
 - 作成日: 2026-04-06
-- 版: Ver.1
+- 更新日: 2026-04-08
+- 版: Ver.1.1
 - 対象: `ksql` プロジェクト（kintone SQL プラグインと同一リポジトリ）
 - 目的: `cli-kintone` ライクな操作感で、SQL の単発実行と対話実行を提供する
 
@@ -11,7 +12,7 @@
 
 1. 非対話実行（`-e`, `-f`）
 2. 対話コンソール（REPL）実行（`--console`）
-3. 出力整形（table/json）
+3. 出力整形（table/json/jsonl/csv/markdown）
 4. 安全実行（`--dry-run`、取得件数ガード）
 5. 設定ファイルとプロファイル
 
@@ -88,7 +89,7 @@ kintone-sql-tools/
 
 出力系:
 
-1. `--format <table|json|jsonl|csv>`
+1. `--format <table|json|jsonl|csv|markdown|md>`
 2. `--no-header`
 3. `--pretty`
 4. `--output <path>`
@@ -144,10 +145,19 @@ kintone-sql-tools/
 CLI 追加として以下を提供する。
 
 1. `jsonl`/`csv` 出力
-2. ファイル出力（`--output`）
-3. ANSI色抑止（`--no-color`）
-4. ログ抑止（`--quiet`）
-5. 0件時終了コード制御（`--exit-on-empty`）
+2. `markdown` 出力（`md` は同義エイリアス）
+3. ファイル出力（`--output`）
+4. ANSI色抑止（`--no-color`）
+5. ログ抑止（`--quiet`）
+6. 0件時終了コード制御（`--exit-on-empty`）
+
+`markdown` / `md` 出力の仕様:
+
+1. ヘッダー行必須（GitHub Flavored Markdown の表形式）
+2. セル内の `|` は `\|` にエスケープする
+3. セル内改行（`\n` / `\r\n`）は `<br>` に変換する
+4. `--no-header` は `--format markdown|md` と併用不可とし、引数エラーで終了する
+5. DML 結果（1行要約）も SELECT と同じく Markdown 表で出力する
 
 ## 4.4 認証仕様（token）
 
@@ -226,7 +236,7 @@ ksql>
 | `:save <path>` | 直前の実行結果をファイル保存 |
 | `:save --append <path>` | 直前の実行結果を追記保存 |
 | `:profile <name>` | 実行時 profile を切替 |
-| `:format table|json|jsonl|csv` | 出力形式を切替 |
+| `:format table|json|jsonl|csv|markdown|md` | 出力形式を切替 |
 | `:dryrun on|off` | dry-run を切替 |
 
 `Ctrl+C` は入力バッファキャンセル（空バッファ時は 2 回で終了）、`Ctrl+D` は正常終了。
@@ -352,7 +362,7 @@ hint: Did you mean "FROM"?
 
 1. 非対話実行（`-e` / `-f`）
 2. 対話 console（`--console`）と複数行入力
-3. 表示形式切替（`table/json/jsonl/csv`）
+3. 表示形式切替（`table/json/jsonl/csv/markdown(md)`）
 4. dry-run（実API未実行）
 5. 認証（`token` / `userpass` / `auto`）
 6. profile / config 読み込み

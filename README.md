@@ -97,6 +97,7 @@ node dist-cli/ksql.js --config ./ksql.config.json --profile dev -e "SELECT * FRO
 
 ## CLI オプション
 
+<!-- BEGIN_HELP_SYNC -->
 ```text
 ksql - Execute SQL against kintone apps
 
@@ -110,7 +111,7 @@ Options:
   -f, --file <path>          Execute SQL file
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
-  --format <type>            Output format: table | json | jsonl | csv
+  --format <type>            Output format: table | json | jsonl | csv | markdown | md
   --max-records <n>          Max records to fetch (default: 500)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
@@ -147,6 +148,7 @@ Options:
   -h, --help                 Show help
   -v, --version              Show version
 ```
+<!-- END_HELP_SYNC -->
 
 ## 最低限のトラブルシュート
 

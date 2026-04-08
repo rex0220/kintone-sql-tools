@@ -48,4 +48,30 @@ describe("cli integration helpers", () => {
     expect(csv).toContain("担当者,タグ");
     expect(csv).toContain("田中,\"A, B\"");
   });
+
+  test("buildOutput renders markdown and escapes pipe/newline", () => {
+    const result = {
+      type: "SELECT" as const,
+      columns: ["A|B", "memo"],
+      rowCount: 1,
+      rows: [
+        {
+          "A|B": "x|y",
+          memo: "line1\nline2",
+        },
+      ],
+      warnings: [],
+    };
+    const markdown = buildOutput(result, "markdown", false, false, {
+      userFormat: "full",
+      arrayFormat: "full",
+      tableFormat: "full",
+      dateFormat: "full",
+      attachmentFormat: "full",
+    });
+
+    expect(markdown).toContain("| A\\|B | memo |");
+    expect(markdown).toContain("| --- | --- |");
+    expect(markdown).toContain("| x\\|y | line1<br>line2 |");
+  });
 });

@@ -98,6 +98,11 @@ describe("cli helpers", () => {
     expect(args.executeSql).toContain("SELECT");
   });
 
+  test("parseArgs normalizes markdown alias", () => {
+    const args = parseArgs(["--format", "md", "-e", "SELECT * FROM APP100"]);
+    expect(args.format).toBe("markdown");
+  });
+
   test("parseArgs parses query limits", () => {
     const args = parseArgs([
       "--max-records", "123",
@@ -130,6 +135,7 @@ describe("cli helpers", () => {
 
   test("parseConsoleMetaCommand handles format and dryrun", () => {
     expect(parseConsoleMetaCommand(":format json")).toEqual({ kind: "set-format", format: "json" });
+    expect(parseConsoleMetaCommand(":format md")).toEqual({ kind: "set-format", format: "markdown" });
     expect(parseConsoleMetaCommand(":dryrun on")).toEqual({ kind: "set-dryrun", enabled: true });
     expect(parseConsoleMetaCommand(":dryrun off")).toEqual({ kind: "set-dryrun", enabled: false });
   });

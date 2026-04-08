@@ -31,7 +31,7 @@ Options:
   -f, --file <path>          Execute SQL file
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
-  --format <type>            Output format: table | json | jsonl | csv
+  --format <type>            Output format: table | json | jsonl | csv | markdown | md
   --max-records <n>          Max records to fetch (default: 500)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
@@ -69,7 +69,7 @@ Options:
   -v, --version              Show version
 `;
 
-type OutputFormat = "table" | "json" | "jsonl" | "csv";
+type OutputFormat = "table" | "json" | "jsonl" | "csv" | "markdown";
 type OnLimitMode = "error" | "truncate";
 type AuthMode = "token" | "userpass" | "auto";
 
@@ -273,8 +273,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (a === "--format") {
-      if (v === "table" || v === "json" || v === "jsonl" || v === "csv") out.format = v;
-      else throw new Error("ArgumentError: --format must be table|json|jsonl|csv.");
+      const normalized = normalizeOutputFormat(v ?? "");
+      if (normalized) out.format = normalized;
+      else throw new Error("ArgumentError: --format must be table|json|jsonl|csv|markdown|md.");
       i++;
       continue;
     }
@@ -626,8 +627,7 @@ function envBool(name: string): boolean | null {
 
 function envFormat(name: string): OutputFormat | null {
   const v = envString(name);
-  if (v === "table" || v === "json" || v === "jsonl" || v === "csv") return v;
-  return null;
+  return normalizeOutputFormat(v);
 }
 
 function envOnLimit(name: string): OnLimitMode | null {
@@ -746,6 +746,13 @@ function buildMutationOutput(
   if (format === "jsonl") return JSON.stringify(row);
 
   const cols = Object.keys(row);
+  if (format === "markdown") {
+    const lines: string[] = [];
+    lines.push(`| ${cols.map(markdownEscapeCell).join(" | ")} |`);
+    lines.push(`| ${cols.map(() => "---").join(" | ")} |`);
+    lines.push(`| ${cols.map((k) => markdownEscapeCell(String(row[k]))).join(" | ")} |`);
+    return lines.join("\n");
+  }
   if (format === "csv") {
     const lines: string[] = [];
     if (!noHeader) lines.push(cols.join(","));
@@ -798,6 +805,16 @@ export function buildOutput(
     return JSON.stringify(obj, null, pretty ? 2 : 0);
   }
   if (format === "jsonl") return result.rows.map((r) => JSON.stringify(r)).join("\n");
+  if (format === "markdown") {
+    const cols = result.columns.length > 0 ? result.columns : Object.keys(result.rows[0] ?? {});
+    const lines: string[] = [];
+    lines.push(`| ${cols.map(markdownEscapeCell).join(" | ")} |`);
+    lines.push(`| ${cols.map(() => "---").join(" | ")} |`);
+    for (const row of result.rows) {
+      lines.push(`| ${cols.map((c) => markdownEscapeCell(toCellText(row[c], display))).join(" | ")} |`);
+    }
+    return lines.join("\n");
+  }
   if (format === "csv") {
     const cols = result.columns.length > 0 ? result.columns : Object.keys(result.rows[0] ?? {});
     const lines: string[] = [];
@@ -820,6 +837,22 @@ function toCellText(v: unknown, display: DisplayOptions): string {
 function csvEscape(v: string): string {
   if (!/[",\n]/.test(v)) return v;
   return `"${v.replace(/"/g, "\"\"")}"`;
+}
+
+function markdownEscapeCell(v: string): string {
+  return v
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\|/g, "\\|")
+    .replace(/\n/g, "<br>");
+}
+
+function normalizeOutputFormat(v: string | null | undefined): OutputFormat | null {
+  if (!v) return null;
+  const x = v.trim().toLowerCase();
+  if (x === "md") return "markdown";
+  if (x === "table" || x === "json" || x === "jsonl" || x === "csv" || x === "markdown") return x;
+  return null;
 }
 
 function toExitCodeFromError(err: unknown): number {
@@ -968,11 +1001,11 @@ export function parseConsoleMetaCommand(line: string): ConsoleMetaAction {
     return { kind: "set-profile", profile };
   }
   if (t.startsWith(":format ")) {
-    const v = t.slice(8).trim();
-    if (v === "table" || v === "json" || v === "jsonl" || v === "csv") {
+    const v = normalizeOutputFormat(t.slice(8).trim());
+    if (v) {
       return { kind: "set-format", format: v };
     }
-    return { kind: "error", message: "ArgumentError: :format must be table|json|jsonl|csv" };
+    return { kind: "error", message: "ArgumentError: :format must be table|json|jsonl|csv|markdown|md" };
   }
   if (t.startsWith(":dryrun ")) {
     const v = t.slice(8).trim();
@@ -1282,7 +1315,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
               "  :save <path>",
               "  :save --append <path>",
               "  :profile <name>",
-              "  :format <table|json|jsonl|csv>",
+              "  :format <table|json|jsonl|csv|markdown|md>",
               "  :dryrun <on|off>",
               "shortcuts:",
               "  Ctrl+C: cancel input buffer; press twice on empty buffer to exit",
@@ -1522,7 +1555,12 @@ async function run(): Promise<number> {
   const maxRecords = args.maxRecords ?? envInt("KSQL_MAX_RECORDS") ?? profile.query?.maxRecords ?? 500;
   const onLimit = args.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile.query?.onLimit ?? "error";
   const timeout = args.timeout ?? envInt("KSQL_TIMEOUT") ?? profile.query?.timeout ?? 30000;
-  const format = args.format ?? envFormat("KSQL_FORMAT") ?? profile.output?.format ?? "table";
+  const rawFormat = args.format ?? envFormat("KSQL_FORMAT") ?? profile.output?.format ?? "table";
+  const format = normalizeOutputFormat(rawFormat);
+  if (!format) {
+    process.stderr.write("ArgumentError: format must be table|json|jsonl|csv|markdown|md.\n");
+    return 2;
+  }
   const noHeader = args.noHeader || envBool("KSQL_NO_HEADER") === true || Boolean(profile.output?.noHeader);
   const pretty = args.pretty || envBool("KSQL_PRETTY") === true || Boolean(profile.output?.pretty);
   const noColor = args.noColor || envBool("KSQL_NO_COLOR") === true || Boolean(profile.output?.noColor);
@@ -1535,6 +1573,10 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
+  if (format === "markdown" && noHeader) {
+    process.stderr.write("ArgumentError: --no-header cannot be used with --format markdown|md.\n");
+    return 2;
+  }
   void noColor; // reserved for future colorized output
   const displayOptions: DisplayOptions = {
     userFormat: args.userFormat ?? profile.output?.userFormat ?? "full",

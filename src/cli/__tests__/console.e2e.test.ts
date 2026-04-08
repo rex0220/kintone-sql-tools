@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, unlinkSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "fs";
 import { join } from "path";
 import { spawn } from "child_process";
+import { tmpdir } from "os";
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
@@ -191,11 +192,13 @@ test("console mode shows session summary and supports history options", async ()
     return;
   }
 
+  const homeDir = mkdtempSync(join(tmpdir(), "ksql-home-"));
   let child;
   try {
     child = spawn(process.execPath, [cliPath, "--console", "--dry-run", "--format", "json"], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -237,6 +240,7 @@ test("console mode shows session summary and supports history options", async ()
 
   if (result.skipped) {
     expect(true).toBe(true);
+    rmSync(homeDir, { recursive: true, force: true });
     return;
   }
 
@@ -248,6 +252,7 @@ test("console mode shows session summary and supports history options", async ()
   expect(stdout).toContain("Ctrl+C: cancel input buffer");
   expect(stdout).toContain("Ctrl+D: exit console");
   expect(stderr).toContain("rowCount=4");
+  rmSync(homeDir, { recursive: true, force: true });
 }, 20000);
 
 test("console mode supports profile/rerun/save workflow", async () => {
@@ -259,12 +264,14 @@ test("console mode supports profile/rerun/save workflow", async () => {
 
   const savePath = join(process.cwd(), "temp-repl-output.txt");
   if (existsSync(savePath)) unlinkSync(savePath);
+  const homeDir = mkdtempSync(join(tmpdir(), "ksql-home-"));
 
   let child;
   try {
     child = spawn(process.execPath, [cliPath, "--console", "--dry-run"], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -304,6 +311,7 @@ test("console mode supports profile/rerun/save workflow", async () => {
 
   if (result.skipped) {
     expect(true).toBe(true);
+    rmSync(homeDir, { recursive: true, force: true });
     return;
   }
 
@@ -316,6 +324,7 @@ test("console mode supports profile/rerun/save workflow", async () => {
   expect(readFileSync(savePath, "utf-8")).toContain("plan");
 
   unlinkSync(savePath);
+  rmSync(homeDir, { recursive: true, force: true });
 }, 20000);
 
 test("console mode :show config prints resolved-app-profiles after APP@profile query", async () => {
