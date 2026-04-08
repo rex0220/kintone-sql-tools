@@ -156,7 +156,9 @@ export function selectToFetchAllParams(
 
   // WHERE に関数が含まれる場合は kintone クエリに変換できない
   // → 全件取得して JS 側でフィルタ（applyFilter が FULL_SCAN パイプラインで実行される）
-  if (stmt.where !== null && !hasWhereFunc(stmt.where)) {
+  // JOIN ありでは複数テーブル条件を単一アプリへ安全に押し込めないため、
+  // API 側 WHERE 変換は行わず JS 側フィルタに一任する。
+  if (stmt.where !== null && stmt.joins.length === 0 && !hasWhereFunc(stmt.where)) {
     queryParts.push(whereToKintone(stmt.where));
   }
 

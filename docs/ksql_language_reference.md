@@ -1,6 +1,6 @@
 # kSQL 言語リファレンス
 
-kSQL は kintone アプリを SQL ライクな構文で操作するプラグインです。  
+kSQL は kintone アプリを SQL ライクな構文で操作する言語です（プラグイン / CLI 対応）。  
 本ドキュメントでは利用できる構文・演算子・関数をすべて説明します。
 
 > 注記:
@@ -51,6 +51,23 @@ APP100$明細 -- アプリ ID 100 のサブテーブル「明細」
 ```
 
 大文字・小文字は区別しません（`app100` も有効）。
+
+### CLI 拡張: `APP@profile`
+
+CLI ではテーブル参照の末尾に `@profile` を指定できます。
+
+```sql
+APP100@dev       -- APP100 を dev プロファイルで実行
+APP80$明細@guest -- サブテーブル参照でも指定可能
+```
+
+ルール:
+
+- `@profile` なしの `APPxxx` は既定 profile（`--profile` / config）を使用
+- profile 名の大文字・小文字は区別しません（`APP100@Dev` も有効）
+- 同一 SQL 内で同一 APP に異なる profile を混在可能（別環境の別アプリとして扱う）
+- 文字列リテラル・コメント中の `APP100@dev` は `@profile` 構文として解釈しません
+- プラグイン側では `@profile` 非対応です（`APP100@dev` を含む SQL はエラー）
 
 ### フィールド名（識別子）
 
@@ -112,6 +129,7 @@ SELECT [DISTINCT] カラムリスト
 
 ```sql
 SELECT 'xxx' AS a
+SELECT 'ABC' as a;
 ```
 
 制約:
@@ -1429,6 +1447,10 @@ WHERE 作成日時 < '2020-01-01'
 > **確認ダイアログ:** 実行前に対象件数を表示して確認を求めます。  
 > キャンセルすると削除は行われません。
 
+> **CLI 拡張の制約:** `DELETE` での `APP@profile` 指定は未対応です。  
+> 例: `DELETE FROM APP100@guest WHERE ...` は  
+> `ArgumentError: @profile is not supported for DELETE yet.` で終了します。
+
 ---
 
 ## 19. サブテーブル仮想テーブル
@@ -1552,6 +1574,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | FULL OUTER JOIN | 非対応 |
 | UPDATE に JOIN | 非対応 |
 | トランザクション | kintone API の制約により非対応 |
+| `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
 
 ### 実行モード
@@ -1658,6 +1681,15 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 -- 基本 SELECT
 SELECT * FROM APP100 WHERE ステータス = '完了' LIMIT 100
 
+-- CLI 拡張: APP@profile
+SELECT * FROM APP100@guest
+SELECT * FROM APP80$明細@dev WHERE _pid = 123
+
+-- 同一 APP の profile 混在（CLI 拡張）
+SELECT a.$id, b.$id
+FROM APP88@dev a
+JOIN APP88@guest b ON a.$id = b.$id
+
 -- BETWEEN / NOT IN / NOT LIKE
 SELECT * FROM APP100
 WHERE 金額 BETWEEN 10000 AND 50000
@@ -1757,6 +1789,11 @@ SET 顧客ランク = CASE
     ELSE 'B'
   END
 WHERE ステータス = '対象'
+
+-- UPDATE + APP@profile（CLI 拡張）
+UPDATE APP100@qa
+SET ステータス = '確認済み'
+WHERE $id = 1
 
 -- DELETE
 DELETE FROM APP100

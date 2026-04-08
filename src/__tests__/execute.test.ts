@@ -318,6 +318,36 @@ test("FULL_SCAN: JOINキーが多い場合は IN 最適化をスキップして�
   }
 });
 
+test("FULL_SCAN: JOIN + WHERE（join側フィールド）は API WHERE に押し込まず JS で評価する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      4148: [
+        makeRecord({ $id: "1", 顧客No: "C001", 会社名: "A社", 顧客ランク: "A" }),
+        makeRecord({ $id: "2", 顧客No: "C002", 会社名: "B社", 顧客ランク: "B" }),
+      ],
+      4149: [
+        makeRecord({ $id: "10", 顧客No_: "C001", 案件No_: "K-10", 商談フェーズ: "提案中", 売上: "1000" }),
+        makeRecord({ $id: "11", 顧客No_: "C002", 案件No_: "K-11", 商談フェーズ: "失注", 売上: "2000" }),
+      ],
+    },
+  });
+
+  const result = await execute(
+    "SELECT a.顧客No AS 顧客No, a.会社名, a.顧客ランク, b.案件No_ AS 案件No, b.案件名, b.商談フェーズ, b.売上 " +
+    "FROM APP4148 AS a INNER JOIN APP4149 AS b ON a.顧客No = b.顧客No_ " +
+    "WHERE b.商談フェーズ IN ('提案中', '内示', '受注') " +
+    "ORDER BY b.案件No_ DESC LIMIT 50",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+
+  const mainCall = client.getCalls.find((c) => c.app === 4148);
+  expect(mainCall).toBeDefined();
+  expect(mainCall?.query).toContain("limit 500 offset 0");
+  expect(mainCall?.query).not.toContain("商談フェーズ");
+});
+
 test("FULL_SCAN: サブテーブルは $id / サブテーブル本体 / _p.参照親項目のみ取得", async () => {
   const client = makeClient({
     recordsByApp: {

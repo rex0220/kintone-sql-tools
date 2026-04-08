@@ -167,17 +167,19 @@ CLI 追加として以下を提供する。
 
 ## 4.6 APP@profile（CLI 拡張）
 
-1. CLI ではテーブル参照末尾に `@profile` を指定可能（例: `APP100@dev`, `APP80$明細@guest`）
+1. CLI ではテーブル参照末尾に `@profile` を指定可能（例: `APP100@dev`, `app100@dev`, `APP80$明細@guest`）
 2. `@profile` なしの `APPxxx` は既定 profile を使用する
 3. 同一SQL内で同一APPに異なるprofileを指定しても許可する（別環境の別アプリとして扱う）
 4. plugin 側では `@profile` をサポートしない
 5. `@profile` は `INSERT/UPDATE/UPSERT` で使用可能、`DELETE` は未対応として実行前にエラー終了する
+6. `app100@プロファイル名` のような指定は「`app100` をその profile で実行する」意味になる（APP 部分は大小文字非区別）
 
 ## 4.7 FROM 省略 SELECT
 
 1. `SELECT 'xxx' AS a` のような `FROM` 省略を許可する
-2. `FROM` 省略時は1行評価として返す（API呼び出しなし）
-3. `SELECT *` / フィールド参照列は `FROM` 省略時はエラー
+2. `SELECT 'ABC' as a;` のように `as` 小文字・末尾セミコロン付きでも許可する
+3. `FROM` 省略時は1行評価として返す（API呼び出しなし）
+4. `SELECT *` / フィールド参照列は `FROM` 省略時はエラー
 
 ## 5. コンソール（REPL）仕様
 
