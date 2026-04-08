@@ -14,6 +14,7 @@ await esbuild.build({
   platform: "node",
   target: ["node18"],
   format: "cjs",
+  banner: { js: "#!/usr/bin/env node" },
 });
 
 console.log("[kSQL] cli build complete -> dist-cli/ksql.js");
