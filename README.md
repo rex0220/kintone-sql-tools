@@ -21,7 +21,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 ## npm（グローバル）
 
 ```bash
-npm install -g kintone-sql-tools
+npm install -g @rex0220/kintone-sql-tools
 ksql --help
 ```
 
@@ -167,6 +167,9 @@ Options:
 
 5. `@profile` を使った DELETE が失敗する
 - 現在 `DELETE` の `@profile` は未対応です。
+
+6. Windows で `ksql --help` 実行時にエディタが開いてしまう
+- `.js` 関連付けの影響の可能性があります。`ksql.cmd --help` または `node dist-cli/ksql.js --help` で確認してください。
 
 ## 機密情報の取り扱い
 
