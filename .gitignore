@@ -24,4 +24,6 @@ ksql.config.json
 
 # plugin keys
 pluginId.txt
-private.ppk.npm-cache/
+private.ppk
+.npm-cache/
+.npm-cache/
