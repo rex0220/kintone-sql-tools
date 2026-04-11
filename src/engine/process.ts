@@ -583,7 +583,12 @@ export function project(
         }
         case "STRFUNC_COL": {
           const key = col.alias ?? stringFuncDefaultKey(col.expr);
-          out[key] = row[key] ?? evalStringFunc(col.expr, row);
+          if (hasAggregateInStringFuncExpr(col.expr)) {
+            const srcKey = stringFuncDefaultKey(col.expr);
+            out[key] = row[col.alias ?? srcKey] ?? row[srcKey] ?? evalStringFunc(col.expr, row);
+          } else {
+            out[key] = evalStringFunc(col.expr, row);
+          }
           if (rowIdx === 0) orderedKeys.push(key);
           break;
         }
