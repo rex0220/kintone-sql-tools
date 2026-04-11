@@ -526,6 +526,7 @@ export function project(
   }
 
   const orderedKeys: string[] = [];
+  const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
 
   const projected = rows.map((row, rowIdx) => {
     const out: ProcessRow = {};
@@ -543,7 +544,7 @@ export function project(
           break;
         }
         case "FIELD": {
-          const key = col.alias ?? col.field;
+          const key = col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
           out[key] = resolveFieldRef(row, col.field);
           if (rowIdx === 0) orderedKeys.push(key);
           break;
@@ -598,6 +599,34 @@ export function project(
   });
 
   return { rows: projected, columns: orderedKeys };
+}
+
+function buildDefaultFieldOutputKeys(columns: SelectColumn[]): Map<number, string> {
+  const qualifierCollisionCount = new Map<string, number>();
+
+  for (const col of columns) {
+    if (col.type !== "FIELD" || col.alias) continue;
+    const unqualified = stripTableQualifier(col.field);
+    qualifierCollisionCount.set(unqualified, (qualifierCollisionCount.get(unqualified) ?? 0) + 1);
+  }
+
+  const keys = new Map<number, string>();
+  for (const [idx, col] of columns.entries()) {
+    if (col.type !== "FIELD" || col.alias) continue;
+    const unqualified = stripTableQualifier(col.field);
+    const duplicate = (qualifierCollisionCount.get(unqualified) ?? 0) > 1;
+    const hasTableQualifier = col.field.includes(".") && !col.field.startsWith("_p.");
+    keys.set(idx, duplicate && hasTableQualifier ? col.field : unqualified);
+  }
+  return keys;
+}
+
+function stripTableQualifier(field: string): string {
+  if (field.startsWith("_p.")) return field;
+  const dot = field.indexOf(".");
+  if (dot <= 0) return field;
+  const unqualified = field.slice(dot + 1);
+  return unqualified || field;
 }
 
 function stripParentShortcutColumns(row: ProcessRow): ProcessRow {

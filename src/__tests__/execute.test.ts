@@ -292,6 +292,23 @@ test("FULL_SCAN: 単純 INNER JOIN は join 側を IN 条件で取得する", as
   expect(joinCall?.query).toContain("顧客名");
 });
 
+test("FULL_SCAN: JOIN の非 AS 列は結果ヘッダを非修飾名にする", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", 顧客名: "A" })],
+      101: [makeRecord({ $id: "10", 顧客名: "A", 金額: "1000" })],
+    },
+  });
+
+  const result = await execute(
+    "SELECT a.顧客名, b.金額 FROM APP100 AS a INNER JOIN APP101 AS b ON a.顧客名 = b.顧客名",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["顧客名", "金額"]);
+  expect(result.rows[0]).toEqual({ 顧客名: "A", 金額: "1000" });
+});
+
 test("FULL_SCAN: JOINキーが多い場合は IN 最適化をスキップして全件取得にフォールバック", async () => {
   const sourceRows = Array.from({ length: 301 }).map((_, i) =>
     makeRecord({ $id: String(i + 1), 顧客名: `C${i + 1}` })

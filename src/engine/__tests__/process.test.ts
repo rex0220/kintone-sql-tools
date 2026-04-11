@@ -379,8 +379,18 @@ test("project: qualified field falls back to unqualified key", () => {
   const rows: ProcessRow[] = [{ オーダー番号: "20260430" }];
   const stmt = parseSelect("SELECT a.オーダー番号 FROM APP69 AS a");
   const { rows: result, columns } = project(rows, stmt.columns);
-  expect(result[0]).toEqual({ "a.オーダー番号": "20260430" });
-  expect(columns).toEqual(["a.オーダー番号"]);
+  expect(result[0]).toEqual({ オーダー番号: "20260430" });
+  expect(columns).toEqual(["オーダー番号"]);
+});
+
+test("project: duplicate unqualified names fall back to qualified keys", () => {
+  const rows: ProcessRow[] = [{ "a.顧客ID": "C001", "b.顧客ID": "C001", 顧客ID: "C001" }];
+  const stmt = parseSelect(
+    "SELECT a.顧客ID, b.顧客ID FROM APP100 AS a INNER JOIN APP200 AS b ON a.顧客ID = b.顧客ID"
+  );
+  const { rows: result, columns } = project(rows, stmt.columns);
+  expect(result[0]).toEqual({ "a.顧客ID": "C001", "b.顧客ID": "C001" });
+  expect(columns).toEqual(["a.顧客ID", "b.顧客ID"]);
 });
 
 // ----------------------------------------------------------------
@@ -436,8 +446,8 @@ test("runFullScan: 3テーブル INNER JOIN", () => {
   const { rows: result } = runFullScan({ tables, stmt });
 
   expect(result).toHaveLength(2);
-  expect(result[0]).toEqual({ "a.金額": "1000", "b.顧客名": "田中", "c.配送先": "東京" });
-  expect(result[1]).toEqual({ "a.金額": "2000", "b.顧客名": "鈴木", "c.配送先": "大阪" });
+  expect(result[0]).toEqual({ 金額: "1000", 顧客名: "田中", 配送先: "東京" });
+  expect(result[1]).toEqual({ 金額: "2000", 顧客名: "鈴木", 配送先: "大阪" });
 });
 
 test("runFullScan: 3テーブル JOIN + LEFT JOIN 混在", () => {
@@ -468,10 +478,10 @@ test("runFullScan: 3テーブル JOIN + LEFT JOIN 混在", () => {
   const { rows: result } = runFullScan({ tables, stmt });
 
   expect(result).toHaveLength(2);
-  const o1 = result.find((r) => r["a.注文ID"] === "O1");
-  const o2 = result.find((r) => r["a.注文ID"] === "O2");
-  expect(o1!["c.配送先"]).toBe("東京");
-  expect(o2!["c.配送先"]).toBe(""); // LEFT JOIN → 空文字
+  const o1 = result.find((r) => r["注文ID"] === "O1");
+  const o2 = result.find((r) => r["注文ID"] === "O2");
+  expect(o1!["配送先"]).toBe("東京");
+  expect(o2!["配送先"]).toBe(""); // LEFT JOIN → 空文字
 });
 
 test("runFullScan: 3テーブル JOIN + WHERE", () => {
@@ -502,8 +512,8 @@ test("runFullScan: 3テーブル JOIN + WHERE", () => {
   const { rows: result } = runFullScan({ tables, stmt });
 
   expect(result).toHaveLength(1);
-  expect(result[0]["b.顧客名"]).toBe("田中");
-  expect(result[0]["c.配送先"]).toBe("東京");
+  expect(result[0]["顧客名"]).toBe("田中");
+  expect(result[0]["配送先"]).toBe("東京");
 });
 
 test("runFullScan: INNER JOIN + WHERE（JS 評価）", () => {
@@ -583,8 +593,8 @@ test("runFullScan: RIGHT JOIN — マッチなし左行は含まれない", () =
   const { rows: result } = runFullScan({ tables, stmt });
 
   expect(result).toHaveLength(2);
-  const b社 = result.find((r) => r["b.会社"] === "B社");
-  expect(b社!["a.備考"]).toBe(""); // 左が存在しない → 空文字
+  const b社 = result.find((r) => r["会社"] === "B社");
+  expect(b社!["備考"]).toBe(""); // 左が存在しない → 空文字
 });
 
 // ----------------------------------------------------------------
