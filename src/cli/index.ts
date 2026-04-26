@@ -1541,7 +1541,11 @@ async function run(): Promise<number> {
       hasWhere = hasWhereClause(stmt);
       insertValuesCount = getInsertValuesCount(stmt);
 
-      const supported = stmtType === "SELECT" || isDmlStatement;
+      const supported = stmtType === "SELECT"
+        || stmtType === "UNION"
+        || stmtType === "WITH"
+        || stmtType === "EXPLAIN"
+        || isDmlStatement;
       if (!supported) {
         process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
         return 2;
