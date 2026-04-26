@@ -5,7 +5,10 @@
       "Bash(npx tsc *)",
       "Bash(npx jest *)",
       "Bash(grep -r \"1\\\\.1\\\\.1\" package.json plugin/manifest.json)",
-      "Bash(find . -name \"manifest.json\" -not -path \"*/node_modules/*\")"
+      "Bash(find . -name \"manifest.json\" -not -path \"*/node_modules/*\")",
+      "Bash(npm whoami *)",
+      "Bash(cat .npmrc)",
+      "Bash(git merge --no-ff perf/where-pushdown-join -m ' *)"
     ]
   }
 }
