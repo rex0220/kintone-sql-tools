@@ -1541,7 +1541,13 @@ async function run(): Promise<number> {
       hasWhere = hasWhereClause(stmt);
       insertValuesCount = getInsertValuesCount(stmt);
 
-      const supported = stmtType === "SELECT" || isDmlStatement;
+      const supported = stmtType === "SELECT"
+        || stmtType === "UNION"
+        || stmtType === "WITH"
+        || stmtType === "EXPLAIN"
+        || stmtType === "SHOW_APPS"
+        || stmtType === "DESCRIBE"
+        || isDmlStatement;
       if (!supported) {
         process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
         return 2;
@@ -1589,7 +1595,7 @@ async function run(): Promise<number> {
   const appIds = sql ? extractAppIds(sql) : [];
   const defaultApp = args.app ?? envInt("KSQL_APP") ?? profile.app ?? null;
   if (appIds.length === 0 && defaultApp !== null) appIds.push(defaultApp);
-  const allowNoFromSelect = isNoFromSelectStatement(parsedStmt);
+  const allowNoFromSelect = isNoFromSelectStatement(parsedStmt) || stmtType === "SHOW_APPS";
   if (appIds.length === 0 && !allowNoFromSelect && !args.dryRun && args.diagRecordId === null) {
     process.stderr.write("ArgumentError: no APPxxx found in SQL and --app is not set.\n");
     return 2;

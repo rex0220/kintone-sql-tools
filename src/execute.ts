@@ -38,6 +38,7 @@ import {
   fetchRecordsForSharedPlan,
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
+import { extractTableCondition } from "./core/optimization/wherePredicatePushdown";
 import {
   runFullScan,
   project,
@@ -386,8 +387,24 @@ async function executeFullScanSelect(
   await resolveSubqueries(stmt.where,  client, options, cacheContext);
   await resolveSubqueries(stmt.having, client, options, cacheContext);
 
-  // メインテーブルを取得
-  const mainRecords = await fetchTableRecordsForFullScan(
+  // テーブルごとの push down 条件を計算
+  const tableConditions = new Map<string, WhereExpr>();
+  if (stmt.where !== null) {
+    if (stmt.from.alias) {
+      const cond = extractTableCondition(stmt.where, stmt.from.alias);
+      if (cond) tableConditions.set(stmt.from.alias, cond);
+    }
+    for (const join of stmt.joins) {
+      if (join.table.alias) {
+        const cond = extractTableCondition(stmt.where, join.table.alias);
+        if (cond) tableConditions.set(join.table.alias, cond);
+      }
+    }
+  }
+
+  // メインテーブルのフェッチを開始（await しない）
+  const mainPushDown = stmt.from.alias ? (tableConditions.get(stmt.from.alias) ?? null) : null;
+  const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
     client,
@@ -395,14 +412,51 @@ async function executeFullScanSelect(
     parallel,
     true,
     options.onLimitReached ?? "error",
-    warnings
+    warnings,
+    mainPushDown
   );
 
-  // JOIN テーブルを並列取得
+  // JOIN テーブルを push-down の有無で振り分け
+  //   push-down あり → 案1: ON 最適化スキップ、案2: メインと並列フェッチ開始
+  //   push-down なし → メイン完了後に ON 最適化（従来通り）
+  type JoinEntry = { join: (typeof stmt.joins)[number]; promise: Promise<KintoneRecord[]> };
+  const parallelJoins: JoinEntry[] = [];
+  const onOptJoins: (typeof stmt.joins) = [];
+
+  for (const join of stmt.joins) {
+    const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
+    if (jCond !== null) {
+      parallelJoins.push({
+        join,
+        promise: fetchTableRecordsForFullScan(
+          stmt,
+          join.table,
+          client,
+          maxRecords,
+          parallel,
+          false,
+          options.onLimitReached ?? "error",
+          warnings,
+          jCond
+        ),
+      });
+    } else {
+      onOptJoins.push(join);
+    }
+  }
+
+  // メインテーブルの完了を待つ
+  const mainRecords = await mainFetch;
   const tables = new Map<string | null, KintoneRecord[]>();
   tables.set(stmt.from.alias, mainRecords);
 
-  const joinFetches = stmt.joins.map(async (join) => {
+  // 並列フェッチ済み JOIN テーブルを回収
+  for (const { join, promise } of parallelJoins) {
+    tables.set(join.table.alias, await promise);
+  }
+
+  // ON 最適化が必要な JOIN テーブルを処理（メイン取得後）
+  await Promise.all(onOptJoins.map(async (join) => {
     const optimized = await tryFetchJoinRecordsBySourceKeys(
       stmt,
       join,
@@ -411,7 +465,8 @@ async function executeFullScanSelect(
       maxRecords,
       parallel,
       options.onLimitReached ?? "error",
-      warnings
+      warnings,
+      null
     );
     const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
       stmt,
@@ -421,11 +476,11 @@ async function executeFullScanSelect(
       parallel,
       false,
       options.onLimitReached ?? "error",
-      warnings
+      warnings,
+      null
     );
     tables.set(join.table.alias, joinRecords);
-  });
-  await Promise.all(joinFetches);
+  }));
 
   // スカラーサブクエリ列を事前実行してキャッシュ
   const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
@@ -762,14 +817,19 @@ async function fetchTableRecordsForFullScan(
   parallel: number,
   isMainTable: boolean,
   onLimit: "error" | "truncate",
-  warnings: Set<string>
+  warnings: Set<string>,
+  pushDownCond: WhereExpr | null = null
 ): Promise<KintoneRecord[]> {
   const fields = selectToFetchAllFields(stmt, table);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
   };
   if (!table.subtableCode) {
-    const query = isMainTable ? selectToFetchAllParams(stmt, table.appId).query : "";
+    const baseQuery = isMainTable ? selectToFetchAllParams(stmt, table.appId).query : "";
+    const pushQuery = pushDownCond !== null ? whereToKintone(pushDownCond) : "";
+    const query = baseQuery && pushQuery
+      ? `(${baseQuery}) and (${pushQuery})`
+      : baseQuery || pushQuery;
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, table.appId, query, fields, {
       parallel,
       maxRecords,
@@ -819,7 +879,8 @@ async function tryFetchJoinRecordsBySourceKeys(
   maxRecords: number,
   parallel: number,
   onLimit: "error" | "truncate",
-  warnings: Set<string>
+  warnings: Set<string>,
+  pushDownCond: WhereExpr | null = null
 ): Promise<KintoneRecord[] | null> {
   if (join.type !== "INNER") return null;
   if (!join.table.alias) return null;
@@ -857,7 +918,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   if (values.length === 0) return [];
   if (values.length > JOIN_IN_MAX_KEYS) {
     warnings.add(
-      `JOINキーが ${values.length} 件のため IN 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
+      `JOINキーが ${values.length} 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
     );
     return null;
   }
@@ -872,7 +933,10 @@ async function tryFetchJoinRecordsBySourceKeys(
   const seen = new Set<string>();
 
   for (const chunk of chunks) {
-    const query = `${joinField} in (${chunk.map(sqlQuote).join(",")})`;
+    const inClause = `${joinField} in (${chunk.map(sqlQuote).join(",")})`;
+    const query = pushDownCond !== null
+      ? `(${inClause}) and (${whereToKintone(pushDownCond)})`
+      : inClause;
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, join.table.appId, query, fields, {
       parallel,
       maxRecords,
@@ -2061,20 +2125,28 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
     // メインテーブル
-    const mainParams = selectToFetchAllParams(stmt, stmt.from.appId);
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
-    const mainAlias = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainQ = mainParams.query ? `${mainParams.query}  (残りは JS 評価)` : "(全件取得)";
-    lines.push(`  app:           APP${stmt.from.appId}${mainAlias} (${stmt.from.appId})`);
+    const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
+    const mainPushDown = stmt.from.alias && stmt.where
+      ? extractTableCondition(stmt.where, stmt.from.alias) : null;
+    const mainQ = mainPushDown !== null
+      ? whereToKintone(mainPushDown)
+      : "(全件取得)";
+    lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
     for (const join of stmt.joins) {
       const joinFields = selectToFetchAllFields(stmt, join.table);
-      const joinAlias = join.table.alias ? ` AS ${join.table.alias}` : "";
+      const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      lines.push(`  ${joinType}:        APP${join.table.appId}${joinAlias} (${join.table.appId})`);
-      lines.push(`  kintone query: (全件取得)`);
+      const joinPushDown = join.table.alias && stmt.where
+        ? extractTableCondition(stmt.where, join.table.alias) : null;
+      const joinQ = joinPushDown !== null
+        ? whereToKintone(joinPushDown)
+        : "(全件取得)";
+      lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
+      lines.push(`  kintone query: ${joinQ}`);
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
     }
   }

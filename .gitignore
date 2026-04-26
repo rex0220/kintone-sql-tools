@@ -3,6 +3,9 @@
 /dist
 /dist-cli
 
+# TypeScript build artifacts in src/
+src/**/*.js
+
 # IDEs and editors
 .idea/
 .vscode/
