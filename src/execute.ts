@@ -402,9 +402,9 @@ async function executeFullScanSelect(
     }
   }
 
-  // メインテーブルを取得
+  // メインテーブルのフェッチを開始（await しない）
   const mainPushDown = stmt.from.alias ? (tableConditions.get(stmt.from.alias) ?? null) : null;
-  const mainRecords = await fetchTableRecordsForFullScan(
+  const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
     client,
@@ -416,12 +416,47 @@ async function executeFullScanSelect(
     mainPushDown
   );
 
-  // JOIN テーブルを並列取得
+  // JOIN テーブルを push-down の有無で振り分け
+  //   push-down あり → 案1: ON 最適化スキップ、案2: メインと並列フェッチ開始
+  //   push-down なし → メイン完了後に ON 最適化（従来通り）
+  type JoinEntry = { join: (typeof stmt.joins)[number]; promise: Promise<KintoneRecord[]> };
+  const parallelJoins: JoinEntry[] = [];
+  const onOptJoins: (typeof stmt.joins) = [];
+
+  for (const join of stmt.joins) {
+    const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
+    if (jCond !== null) {
+      parallelJoins.push({
+        join,
+        promise: fetchTableRecordsForFullScan(
+          stmt,
+          join.table,
+          client,
+          maxRecords,
+          parallel,
+          false,
+          options.onLimitReached ?? "error",
+          warnings,
+          jCond
+        ),
+      });
+    } else {
+      onOptJoins.push(join);
+    }
+  }
+
+  // メインテーブルの完了を待つ
+  const mainRecords = await mainFetch;
   const tables = new Map<string | null, KintoneRecord[]>();
   tables.set(stmt.from.alias, mainRecords);
 
-  const joinFetches = stmt.joins.map(async (join) => {
-    const joinPushDown = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
+  // 並列フェッチ済み JOIN テーブルを回収
+  for (const { join, promise } of parallelJoins) {
+    tables.set(join.table.alias, await promise);
+  }
+
+  // ON 最適化が必要な JOIN テーブルを処理（メイン取得後）
+  await Promise.all(onOptJoins.map(async (join) => {
     const optimized = await tryFetchJoinRecordsBySourceKeys(
       stmt,
       join,
@@ -431,7 +466,7 @@ async function executeFullScanSelect(
       parallel,
       options.onLimitReached ?? "error",
       warnings,
-      joinPushDown
+      null
     );
     const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
       stmt,
@@ -442,11 +477,10 @@ async function executeFullScanSelect(
       false,
       options.onLimitReached ?? "error",
       warnings,
-      joinPushDown
+      null
     );
     tables.set(join.table.alias, joinRecords);
-  });
-  await Promise.all(joinFetches);
+  }));
 
   // スカラーサブクエリ列を事前実行してキャッシュ
   const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
