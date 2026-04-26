@@ -309,7 +309,7 @@ test("FULL_SCAN: JOIN の非 AS 列は結果ヘッダを非修飾名にする", 
   expect(result.rows[0]).toEqual({ 顧客名: "A", 金額: "1000" });
 });
 
-test("FULL_SCAN: JOINキーが多い場合は IN 最適化をスキップして全件取得にフォールバック", async () => {
+test("FULL_SCAN: JOINキーが多い場合は ON 最適化をスキップして全件取得にフォールバック", async () => {
   const sourceRows = Array.from({ length: 301 }).map((_, i) =>
     makeRecord({ $id: String(i + 1), 顧客名: `C${i + 1}` })
   );
@@ -331,7 +331,7 @@ test("FULL_SCAN: JOINキーが多い場合は IN 最適化をスキップして�
   expect(joinCall?.query).not.toContain(" in (");
   expect(result.type).toBe("SELECT");
   if (result.type === "SELECT") {
-    expect(result.warnings?.some((w) => w.includes("IN 最適化をスキップ"))).toBe(true);
+    expect(result.warnings?.some((w) => w.includes("ON 最適化をスキップ"))).toBe(true);
   }
 });
 

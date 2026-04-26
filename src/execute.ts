@@ -884,7 +884,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   if (values.length === 0) return [];
   if (values.length > JOIN_IN_MAX_KEYS) {
     warnings.add(
-      `JOINキーが ${values.length} 件のため IN 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
+      `JOINキーが ${values.length} 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
     );
     return null;
   }
