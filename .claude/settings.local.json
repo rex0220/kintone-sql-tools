@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git tag *)",
+      "Bash(gh release create v1.1.2 --title v1.1.2 --notes ' *)"
+    ]
+  }
+}
