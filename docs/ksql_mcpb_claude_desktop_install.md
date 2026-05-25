@@ -1,45 +1,58 @@
 # kSQL MCPB Claude Desktop インストール手順
 
-この手順は、`ksql-mcp.mcpb` を Claude Desktop の拡張機能としてインストールし、`ksql.config.json` のパスだけを設定して `ksql-mcp` を利用するためのものです。
+この手順は、一般ユーザー向けに `ksql-mcp.mcpb` を GitHub からダウンロードし、Claude Desktop の拡張機能として利用する方法をまとめたものです。
 
-MCPB 版では、Claude Desktop の `claude_desktop_config.json` に `node.exe` や `dist-mcp/ksql-mcp.js` を手動設定しない。
-Claude Desktop の拡張機能画面から `.mcpb` をインストールし、設定画面で `ksql.config.json` の絶対パスを指定する。
+MCPB 版では、`claude_desktop_config.json` を直接編集しない。
+Claude Desktop の拡張機能画面から `.mcpb` をインストールし、設定画面で `ksql.config.json` の絶対パスだけを指定する。
 
-## 1. 前提
+## 1. 用意するもの
 
 必要なもの:
 
 1. Claude Desktop
-2. このリポジトリの作業コピー
+2. GitHub からダウンロードした `ksql-mcp.mcpb`
 3. `ksql.config.json`
-4. kintone 接続に使う環境変数
+4. kintone 接続用の API トークン
 
-Windows では、Claude Desktop が参照できるユーザー環境変数またはシステム環境変数に API token を設定する。
-PowerShell セッション内だけの `$env:KSQL_TOKEN_APP100 = "..."` は、Claude Desktop を通常起動した場合には反映されない。
+Node.js や npm は通常不要。
+MCPB 版は Claude Desktop 側の Node.js 実行環境で起動する。
 
-例:
+## 2. ksql-mcp.mcpb をダウンロード
 
-```powershell
-[Environment]::SetEnvironmentVariable("KSQL_TOKEN_APP100", "your-api-token", "User")
+GitHub Releases から最新版をダウンロードする。
+
+```text
+https://github.com/rex0220/kintone-sql-tools/releases
 ```
 
-設定後、Claude Desktop を完全終了してから再起動する。
+ダウンロードするファイル:
 
-## 2. ksql.config.json を準備
+```text
+ksql-mcp.mcpb
+```
 
-`ksql.config.json` は任意のユーザー書き込み可能な場所に置く。
-Windows では Claude Desktop の作業ディレクトリが `C:\WINDOWS\system32` になることがあるため、MCPB の設定には必ず絶対パスを指定する。
+任意の場所に保存する。
 
 例:
 
 ```text
-C:\Users\rex02\Projects\kintone-sql-tools\ksql.config.json
+C:\Users\<ユーザー名>\Downloads\ksql-mcp.mcpb
 ```
 
-保存 SQL カタログを使う場合は、`mcp.savedQueries.path` を設定しておく。
-相対パスは `ksql.config.json` のあるディレクトリ基準で解決される。
+リポジトリを clone したり、`npm install` を実行したりする必要はない。
+
+## 3. ksql.config.json を作成
+
+`ksql.config.json` は、kintone の接続先や API トークンの参照方法を定義する設定ファイル。
+ユーザーが書き込みできる任意のフォルダに作成する。
 
 例:
+
+```text
+C:\Users\<ユーザー名>\Documents\ksql\ksql.config.json
+```
+
+最小例:
 
 ```json
 {
@@ -67,63 +80,94 @@ C:\Users\rex02\Projects\kintone-sql-tools\ksql.config.json
 }
 ```
 
-## 3. MCPB を作成
+変更する箇所:
 
-PowerShell:
+| 項目 | 内容 |
+| --- | --- |
+| `baseUrl` | 自分の kintone URL |
+| `APP100` | 接続したいアプリ ID |
+| `KSQL_TOKEN_APP100` | API トークンを入れる環境変数名 |
+| `defaultProfile` | 通常使う接続先名 |
 
-```powershell
-npm install
-npm run mcpb:verify
+複数アプリを使う場合は `tokenMap` に追加する。
+
+```json
+{
+  "tokenMap": {
+    "APP100": "env:KSQL_TOKEN_APP100",
+    "APP101": "env:KSQL_TOKEN_APP101"
+  }
+}
 ```
 
-成功すると次のファイルが生成される。
+保存 SQL を使う場合、`mcp.savedQueries.path` を設定しておく。
+相対パスは `ksql.config.json` のあるフォルダ基準で解決される。
+
+上の例では、保存先は次のようになる。
 
 ```text
-dist-mcpb\ksql-mcp.mcpb
+C:\Users\<ユーザー名>\Documents\ksql\.ksql\queries.json
 ```
 
-`mcpb:verify` は以下を確認する。
+## 4. API トークンを環境変数に設定
 
-1. `dist-mcp/ksql-mcp.js` の生成
-2. `dist-mcpb/ksql-mcp.mcpb` の生成
-3. MCPB manifest の `configPath` 設定
-4. MCPB 用 launcher の疎通確認
+`ksql.config.json` の `env:KSQL_TOKEN_APP100` は、Windows のユーザー環境変数 `KSQL_TOKEN_APP100` を参照する。
 
-MCPB だけ作成する場合:
+PowerShell で設定する例:
 
 ```powershell
-npm run build:mcp
-npm run build:mcpb
+[Environment]::SetEnvironmentVariable("KSQL_TOKEN_APP100", "your-api-token", "User")
 ```
 
-## 4. Claude Desktop にインストール
+複数アプリの場合:
+
+```powershell
+[Environment]::SetEnvironmentVariable("KSQL_TOKEN_APP100", "your-app100-token", "User")
+[Environment]::SetEnvironmentVariable("KSQL_TOKEN_APP101", "your-app101-token", "User")
+```
+
+設定後、Claude Desktop を完全終了してから再起動する。
+
+注意:
+
+- PowerShell で `$env:KSQL_TOKEN_APP100 = "..."` と設定しただけでは、Claude Desktop には通常反映されない
+- `.env` ファイルは Claude Desktop から自動では読み込まれない
+- API トークンは `.mcpb` や `ksql.config.json` に直書きしない運用を推奨
+
+API トークンには、実行したい操作に必要な権限を付与する。
+SELECT だけならレコード閲覧権限を中心にする。
+UPDATE / INSERT / DELETE を使う場合は、変更系の権限が必要になる。
+
+## 5. Claude Desktop にインストール
 
 1. Claude Desktop を開く
 2. `設定` を開く
 3. `デスクトップアプリ` の `拡張機能` を開く
-4. `拡張機能をインストール` または同等のボタンから `.mcpb` を選択する
-5. 次のファイルを選ぶ
-
-```text
-C:\Users\rex02\Projects\kintone-sql-tools\dist-mcpb\ksql-mcp.mcpb
-```
-
+4. `拡張機能をインストール` または同等のボタンを押す
+5. ダウンロードした `ksql-mcp.mcpb` を選択する
 6. `ksql-mcp` が拡張機能一覧に追加されたことを確認する
-7. `ksql.config.json` の入力欄に絶対パスを指定する
+
+## 6. ksql.config.json のパスを設定
+
+拡張機能 `ksql-mcp` の設定画面で、`ksql.config.json` の絶対パスを指定する。
+
+例:
 
 ```text
-C:\Users\rex02\Projects\kintone-sql-tools\ksql.config.json
+C:\Users\<ユーザー名>\Documents\ksql\ksql.config.json
 ```
 
-8. `保存` を押す
-9. 拡張機能を `有効` にする
+その後、`保存` を押して、拡張機能を `有効` にする。
 
-インストール後に `ksql.config.json` を変更しただけなら、通常は拡張機能の再インストールは不要。
-`.mcpb` を作り直した場合は、既存の `ksql-mcp` をアンインストールしてから新しい `.mcpb` をインストールする。
+重要:
 
-## 5. 動作確認
+- 相対パスではなく絶対パスを指定する
+- `C:\WINDOWS\system32` 配下には設定ファイルや保存 SQL を置かない
+- パスを変更した場合は、設定画面で保存し直す
 
-Claude Desktop のチャットで、次のように依頼する。
+## 7. 動作確認
+
+Claude Desktop のチャットで、まず API を呼ばない確認を行う。
 
 ```text
 kSQL MCP の ksql_validate で SELECT 'ok' AS result を検証して
@@ -143,7 +187,57 @@ kSQL MCP の ksql_query で SELECT $id FROM APP100@prod ORDER BY $id LIMIT 1 を
 
 `APP100` と `prod` は、自分の `ksql.config.json` に合わせて変更する。
 
-## 6. ログ確認
+集計の例:
+
+```text
+APP100@prod のステータス別件数を kSQL で集計して
+```
+
+複数環境比較の例:
+
+```text
+APP100@prod と APP100@stg を顧客コードで突き合わせて、金額が違うレコードを抽出して
+```
+
+## 8. 保存 SQL を使う場合
+
+SQL を保存したい場合は、Claude Desktop で次のように依頼する。
+
+```text
+このSQLを monthly_sales という名前で保存して
+```
+
+保存先は `ksql.config.json` の `mcp.savedQueries.path` で決まる。
+
+保存 SQL を一覧する例:
+
+```text
+kSQL MCP の保存 SQL 一覧を表示して
+```
+
+保存 SQL を実行する例:
+
+```text
+保存 SQL monthly_sales を実行して
+```
+
+## 9. 更新手順
+
+新しいバージョンの `ksql-mcp.mcpb` に更新する場合:
+
+1. GitHub Releases から新しい `ksql-mcp.mcpb` をダウンロードする
+2. Claude Desktop の拡張機能画面で既存の `ksql-mcp` をアンインストールする
+3. 新しい `ksql-mcp.mcpb` をインストールする
+4. `ksql.config.json` の絶対パスを再設定する
+5. Claude Desktop を完全終了して再起動する
+
+`ksql.config.json` だけを変更した場合:
+
+1. `.mcpb` の再ダウンロードは不要
+2. Claude Desktop の拡張機能設定で同じ `ksql.config.json` パスを保存し直す
+3. 必要に応じて拡張機能を無効化して再度有効化する
+
+## 10. ログ確認
 
 接続できない場合は Claude Desktop のログを見る。
 
@@ -174,10 +268,10 @@ Message from client: {"method":"initialize", ...}
 Message from server: {"jsonrpc":"2.0","id":0,"result": ...}
 ```
 
-`Message from client` の後に `Message from server` が出ず、`Request timed out` になる場合は、MCPB の entry point または launcher が正しく動いていない可能性がある。
-最新の `.mcpb` を再生成し、既存拡張機能をアンインストールしてから再インストールする。
+`Message from client` の後に `Message from server` が出ず、`Request timed out` になる場合は、古い `.mcpb` を使っている可能性がある。
+GitHub Releases から最新版をダウンロードし直し、既存拡張機能をアンインストールしてから再インストールする。
 
-## 7. よくあるエラー
+## 11. よくあるエラー
 
 ### 拡張機能サーバーに接続できません
 
@@ -189,12 +283,12 @@ Message from server: {"jsonrpc":"2.0","id":0,"result": ...}
 
 確認すること:
 
-1. `npm run mcpb:verify` が成功している
-2. 古い `.mcpb` ではなく、再生成後の `dist-mcpb\ksql-mcp.mcpb` をインストールしている
-3. 既存の `ksql-mcp` をアンインストールしてから再インストールしている
-4. `ksql.config.json` が絶対パスで指定されている
-5. `ksql.config.json` が存在し、JSON として正しい
-6. `env:` 参照している環境変数が Claude Desktop 起動環境に設定されている
+1. GitHub Releases からダウンロードした最新の `ksql-mcp.mcpb` を使っている
+2. 既存の `ksql-mcp` をアンインストールしてから再インストールしている
+3. `ksql.config.json` が絶対パスで指定されている
+4. `ksql.config.json` が存在し、JSON として正しい
+5. `env:` 参照している環境変数が Windows のユーザー環境変数またはシステム環境変数に設定されている
+6. 環境変数の設定後に Claude Desktop を完全再起動している
 
 ### Request timed out
 
@@ -204,20 +298,23 @@ Message from server: {"jsonrpc":"2.0","id":0,"result": ...}
 McpError: MCP error -32001: Request timed out
 ```
 
-`initialize` 応答前にタイムアウトしている場合、MCPB 内の launcher が正しく起動していない可能性がある。
-次を実行してから再インストールする。
+古い `.mcpb` では、MCPB の起動方式によって initialize 応答が返らずタイムアウトする場合がある。
+最新版をダウンロードして再インストールする。
 
-```powershell
-npm run mcpb:verify
-```
+### AuthError
 
-### Unexpected token 'P', "Please set"... is not valid JSON
+認証エラーが出る場合は、以下を確認する。
 
-このエラーは、stdio の stdout に JSON-RPC 以外の文字列が出た場合に発生する。
-手動 MCP 設定で Node version manager の shim を指定したときに起きやすい。
+1. `baseUrl` が正しい
+2. `tokenMap` の `APPxxx` が実際のアプリ ID と一致している
+3. 環境変数名が `ksql.config.json` と一致している
+4. API トークンに必要な権限がある
+5. Claude Desktop を再起動済み
 
-MCPB 版では Claude Desktop の built-in Node を使うため、通常この問題は避けられる。
-手動 `claude_desktop_config.json` 設定と MCPB 版を同時に有効化している場合は、切り分けのため手動設定側を一時的に無効化する。
+### unknown field code
+
+SQL に指定したフィールドコードが kintone 側と一致していない。
+kintone のフォーム設定でフィールドコードを確認する。
 
 ### 保存 SQL が C:\WINDOWS\system32 に保存されようとする
 
@@ -235,25 +332,23 @@ MCPB 版では Claude Desktop の built-in Node を使うため、通常この�
 }
 ```
 
-この設定があれば、相対パスは `ksql.config.json` のあるディレクトリ基準で解決される。
+この設定があれば、相対パスは `ksql.config.json` のあるフォルダ基準で解決される。
 
-## 8. 更新手順
+## 12. 開発者向け: 自分で MCPB を作成する場合
 
-`ksql-mcp` のコードを変更した場合:
-
-1. MCPB を再生成する
+ソースコードから自分で `.mcpb` を作成する場合のみ、Node.js と npm が必要。
 
 ```powershell
+git clone https://github.com/rex0220/kintone-sql-tools.git
+cd kintone-sql-tools
+npm install
 npm run mcpb:verify
 ```
 
-2. Claude Desktop で既存の `ksql-mcp` 拡張機能をアンインストールする
-3. 新しい `dist-mcpb\ksql-mcp.mcpb` をインストールする
-4. `ksql.config.json` の絶対パスを再設定する
-5. Claude Desktop を完全終了して再起動する
+生成されるファイル:
 
-`ksql.config.json` だけを変更した場合:
+```text
+dist-mcpb\ksql-mcp.mcpb
+```
 
-1. `.mcpb` の再生成は不要
-2. Claude Desktop の拡張機能設定で同じ `ksql.config.json` パスを保存し直す
-3. 必要に応じて拡張機能を無効化して再度有効化する
+通常の利用者はこの手順を実行する必要はない。
