@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "queries": [
+    {
+      "name": "monthly_sales_summary",
+      "title": "月別売上集計",
+      "description": "APP100 の金額を受注月ごとに集計する",
+      "sql": "SELECT DATE_FORMAT(受注日, 'YYYY-MM') AS 月, SUM(金額) AS 合計金額 FROM APP100@prod GROUP BY 月 ORDER BY 月",
+      "defaultProfile": "prod",
+      "readOnly": true,
+      "allowProfileOverride": false,
+      "createdAt": "2026-05-24T00:00:00.000Z",
+      "updatedAt": "2026-05-24T00:00:00.000Z",
+      "tags": ["sales", "monthly"]
+    }
+  ]
+}

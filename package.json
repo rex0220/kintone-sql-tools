@@ -1,6 +1,6 @@
 {
   "name": "@rex0220/kintone-sql-tools",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "kintone SQL plugin and CLI tools (ksql)",
   "publishConfig": {
     "access": "public"
@@ -15,32 +15,45 @@
   },
   "homepage": "https://github.com/rex0220/kintone-sql-tools#readme",
   "bin": {
-    "ksql": "dist-cli/ksql.js"
+    "ksql": "dist-cli/ksql.js",
+    "ksql-mcp": "dist-mcp/ksql-mcp.js"
   },
   "scripts": {
     "test": "jest",
-    "build": "npm run build:plugin && npm run build:cli",
+    "build": "npm run build:plugin && npm run build:cli && npm run build:mcp && npm run build:mcpb",
     "build:plugin": "node build.mjs",
     "build:cli": "node build-cli.mjs",
-    "prepack": "npm run build:cli",
+    "build:mcp": "node build-mcp.mjs",
+    "build:mcpb": "node build-mcpb.mjs",
+    "mcp:smoke": "node scripts/mcp-smoke.mjs",
+    "mcp:pack-smoke": "node scripts/mcp-pack-smoke.mjs",
+    "mcp:kintone-smoke": "node scripts/mcp-kintone-smoke.mjs",
+    "mcp:verify": "npm run build:mcp && npm run mcp:smoke && npm run mcp:pack-smoke",
+    "mcpb:verify": "npm run build:mcp && npm run build:mcpb && node scripts/mcpb-verify.mjs",
+    "mcp:inspector": "npx -y @modelcontextprotocol/inspector node dist-mcp/ksql-mcp.js",
+    "prepack": "npm run build:cli && npm run build:mcp && npm run build:mcpb",
     "start": "run-p develop upload",
     "develop": "node build.mjs --watch",
-    "upload": "rex0220-plugin-uploader -f dist/ksql-plugin-v1.1.2.zip --watch"
+    "upload": "rex0220-plugin-uploader -f dist/ksql-plugin-v1.2.0.zip --watch"
   },
   "files": [
     "dist-cli/",
+    "dist-mcp/",
+    "dist-mcpb/",
     "README.md",
     "LICENSE",
     "package.json"
   ],
   "devDependencies": {
     "@kintone/plugin-packer": "^9.1.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/jest": "^29.5.12",
     "esbuild": "^0.27.5",
     "jest": "^29.7.0",
     "npm-run-all": "^4.1.5",
     "ts-jest": "^29.1.4",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "zod": "^4.4.3"
   },
   "jest": {
     "preset": "ts-jest",

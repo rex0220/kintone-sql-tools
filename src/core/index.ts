@@ -7,6 +7,7 @@ export { parseSqlStatement } from "./sql";
 export { formatDisplayText } from "./displayFormat";
 
 export type {
+  ExecuteOptions,
   ExecuteResult,
   SelectResult,
   UpsertResult,

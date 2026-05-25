@@ -26,7 +26,8 @@ if (!PLUGIN_ID) {
 const ppkFromEnvPath = (process.env.KSQL_PPK_PATH ?? "").trim();
 const localPpkPath = "private.ppk";
 const PPK = ppkFromEnvPath || (existsSync(localPpkPath) ? localPpkPath : "");
-const OUT_ZIP   = "dist/ksql-plugin-v1.1.2.zip";
+const packageJson = JSON.parse(readFileSync("package.json", "utf-8"));
+const OUT_ZIP   = `dist/ksql-plugin-v${packageJson.version}.zip`;
 const PLUGIN_DIR = "prod";
 
 const sharedOpts = {

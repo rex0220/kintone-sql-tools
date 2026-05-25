@@ -8,7 +8,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 ## 機能概要
 
 - `SELECT`（JOIN/GROUP BY/HAVING/CTE/UNION）
-- `INSERT` / `UPDATE` / `UPSERT` / `DELETE`（`--allow-dml` 必須）
+- `INSERT` / `UPDATE` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
 - `EXPLAIN`
 - サブテーブル仮想テーブル（`APP100$明細`）
 - CLI 拡張 `APP@profile`
@@ -141,7 +141,7 @@ Options:
   --debug-url                Show only HTTP request URL debug logs
   --debug-headers            Show request headers in debug logs (masked)
   --exit-on-empty            Return exit code 1 when rowCount is 0
-  --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT execution
+  --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT/REORDER execution
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
   --dml-max-rows <n>         Max affected rows for DML guard (default: 100)

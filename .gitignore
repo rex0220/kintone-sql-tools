@@ -2,6 +2,8 @@
 /node_modules
 /dist
 /dist-cli
+/dist-mcp
+/dist-mcpb
 
 # TypeScript build artifacts in src/
 src/**/*.js
@@ -23,10 +25,12 @@ yarn-error.log*
 
 # Local CLI runtime config
 ksql.config.json
+/.ksql/queries.json
 /sample-app
 
 # plugin keys
 pluginId.txt
 private.ppk
 .npm-cache/
-.npm-cache/
+/.tmp/
+*.tgz

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "defaultProfile": "dev",
+  "mcp": {
+    "savedQueries": {
+      "path": ".ksql/queries.json"
+    }
+  },
+  "profiles": {
+    "dev": {
+      "baseUrl": "https://example-dev.cybozu.com",
+      "auth": "token",
+      "tokenMap": {
+        "APP100": "env:KSQL_TOKEN_APP100"
+      },
+      "query": {
+        "maxRecords": 500,
+        "onLimit": "error",
+        "timeout": 30000
+      }
+    },
+    "stg": {
+      "baseUrl": "https://example-stg.cybozu.com",
+      "auth": "token",
+      "tokenMap": {
+        "APP100": "env:KSQL_STG_TOKEN_APP100"
+      },
+      "query": {
+        "maxRecords": 500,
+        "onLimit": "error",
+        "timeout": 30000
+      }
+    },
+    "prod": {
+      "baseUrl": "https://example.cybozu.com",
+      "auth": "token",
+      "tokenMap": {
+        "APP100": "env:KSQL_PROD_TOKEN_APP100"
+      },
+      "query": {
+        "maxRecords": 500,
+        "onLimit": "error",
+        "timeout": 30000
+      }
+    }
+  }
+}

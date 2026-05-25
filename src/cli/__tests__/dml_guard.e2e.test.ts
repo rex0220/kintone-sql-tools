@@ -75,3 +75,32 @@ test("INSERT values count is guarded by --dml-max-rows", async () => {
   expect(res.code).toBe(2);
   expect(res.stderr).toContain("exceed --dml-max-rows");
 });
+
+test("REORDER is rejected without --allow-dml", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "-e",
+    "REORDER APP88$明細 BY 商品コード ASC WHERE _pid = 1",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("DML is disabled");
+});
+
+test("REORDER dry-run is allowed with --allow-dml", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "--allow-dml",
+    "-e",
+    "REORDER APP88$明細 BY 商品コード ASC WHERE _pid = 1",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain("[REORDER]");
+});

@@ -1,0 +1,48 @@
+{
+  "mcpServers": {
+    "ksql-local": {
+      "command": "C:\\Program Files (x86)\\Nodist\\v-x64\\24.14.0\\node.exe",
+      "args": [
+        "C:\\path\\to\\kintone-sql-tools\\dist-mcp\\ksql-mcp.js",
+        "--config",
+        "C:\\path\\to\\kintone-sql-tools\\.local\\ksql.config.json",
+        "--profile",
+        "dev"
+      ],
+      "env": {
+        "KSQL_TOKEN_APP100": "replace-with-dev-token",
+        "KSQL_STG_TOKEN_APP100": "replace-with-stg-token",
+        "KSQL_PROD_TOKEN_APP100": "replace-with-prod-token"
+      }
+    },
+    "ksql-local-node": {
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": [
+        "C:\\path\\to\\kintone-sql-tools\\dist-mcp\\ksql-mcp.js",
+        "--config",
+        "C:\\path\\to\\kintone-sql-tools\\.local\\ksql.config.json",
+        "--profile",
+        "dev"
+      ],
+      "env": {
+        "KSQL_TOKEN_APP100": "replace-with-dev-token"
+      }
+    },
+    "ksql-npm": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package",
+        "@rex0220/kintone-sql-tools",
+        "ksql-mcp",
+        "--config",
+        "C:\\path\\to\\ksql.config.json",
+        "--profile",
+        "dev"
+      ],
+      "env": {
+        "KSQL_TOKEN_APP100": "replace-with-dev-token"
+      }
+    }
+  }
+}
