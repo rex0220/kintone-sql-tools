@@ -9,6 +9,7 @@ export { formatDisplayText } from "./displayFormat";
 export type {
   ExecuteOptions,
   ExecuteResult,
+  ExecuteMetrics,
   SelectResult,
   UpsertResult,
   KintoneClient,

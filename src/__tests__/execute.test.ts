@@ -1533,3 +1533,66 @@ test("DELETE WHERE なしは ParseError", async () => {
   const { ParseError } = await import("../parser/parser");
   await expect(execute("DELETE FROM APP100", client)).rejects.toThrow(ParseError);
 });
+
+// ----------------------------------------------------------------
+// metrics（API 呼び出し計測）
+// ----------------------------------------------------------------
+
+test("metrics: SIMPLE SELECT は getCalls=1 / fetchedRows=取得件数", async () => {
+  const records = [
+    makeRecord({ 名前: "田中" }),
+    makeRecord({ 名前: "鈴木" }),
+  ];
+  const client = makeClient({ records });
+  const result = await execute("SELECT * FROM APP77001", client) as SelectResult;
+
+  expect(result.metrics).toBeDefined();
+  expect(result.metrics!.getCalls).toBe(1);
+  expect(result.metrics!.fetchedRows).toBe(2);
+  expect(result.metrics!.postCalls).toBe(0);
+  expect(result.metrics!.putCalls).toBe(0);
+  expect(result.metrics!.deleteCalls).toBe(0);
+  expect(result.metrics!.appsCalls).toBe(0);
+  expect(result.metrics!.elapsedMs).toBeGreaterThanOrEqual(0);
+});
+
+test("metrics: フィールド定義取得はキャッシュ込みで実呼び出し回数を数える", async () => {
+  const records = [makeRecord({ $id: "1", 名前: "田中" })];
+  const client = makeClient({ records });
+  // 検証 + 選択肢順 + ソート種別で getFieldsCached が複数回呼ばれるが、
+  // 同一アプリはキャッシュされるため実 API 呼び出しは 1 回
+  const result = await execute("SELECT 名前 FROM APP77002", client) as SelectResult;
+
+  expect(result.metrics!.fieldCalls).toBe(1);
+});
+
+test("metrics: INSERT は postCalls を数える", async () => {
+  const client = makeClient({ postIds: ["1"] });
+  const result = await execute(
+    "INSERT INTO APP77003 (名前) VALUES ('田中')",
+    client
+  ) as InsertResult;
+
+  expect(result.metrics!.postCalls).toBe(1);
+  expect(result.metrics!.getCalls).toBe(0);
+});
+
+test("metrics: UPDATE は getCalls（$id 取得）と putCalls を数える", async () => {
+  const records = [makeRecord({ $id: "10" })];
+  const client = makeClient({ records });
+  const result = await execute(
+    "UPDATE APP77004 SET ステータス = '完了' WHERE $id = 10",
+    client
+  ) as UpdateResult;
+
+  expect(result.metrics!.getCalls).toBe(1);
+  expect(result.metrics!.putCalls).toBe(1);
+});
+
+test("metrics: SHOW APPS は appsCalls を数える", async () => {
+  const client = makeClient();
+  const result = await execute("SHOW APPS", client) as SelectResult;
+
+  expect(result.metrics!.appsCalls).toBe(1);
+  expect(result.metrics!.getCalls).toBe(0);
+});

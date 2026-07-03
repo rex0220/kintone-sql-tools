@@ -103,6 +103,26 @@ export type ExecuteResult =
   | UpsertResult
   | ReorderResult;
 
+/** 1 回の execute() で発生した kintone API 呼び出しの計測値 */
+export interface ExecuteMetrics {
+  /** GET /k/v1/records.json の呼び出し回数 */
+  getCalls: number;
+  /** POST /k/v1/records.json の呼び出し回数 */
+  postCalls: number;
+  /** PUT /k/v1/records.json の呼び出し回数 */
+  putCalls: number;
+  /** DELETE /k/v1/records.json の呼び出し回数 */
+  deleteCalls: number;
+  /** GET /k/v1/app/form/fields.json の呼び出し回数（キャッシュヒット時は増えない） */
+  fieldCalls: number;
+  /** GET /k/v1/apps.json の呼び出し回数 */
+  appsCalls: number;
+  /** GET で取得したレコード総数（全ページ・サブクエリ含む） */
+  fetchedRows: number;
+  /** execute() 全体の所要時間（ミリ秒） */
+  elapsedMs: number;
+}
+
 export interface SelectResult {
   type: "SELECT";
   rows: ProcessRow[];
@@ -112,6 +132,8 @@ export interface SelectResult {
   rowCount: number;
   /** 実行時警告（例: 上限到達で打ち切り） */
   warnings?: string[];
+  /** API 呼び出し計測値（execute() 経由の実行時のみ付与） */
+  metrics?: ExecuteMetrics;
 }
 
 export interface InsertResult {
@@ -119,27 +141,32 @@ export interface InsertResult {
   /** 作成されたレコード ID（バッチごと） */
   createdIds: string[][];
   insertedCount: number;
+  metrics?: ExecuteMetrics;
 }
 
 export interface UpdateResult {
   type: "UPDATE";
   updatedCount: number;
+  metrics?: ExecuteMetrics;
 }
 
 export interface DeleteResult {
   type: "DELETE";
   deletedCount: number;
+  metrics?: ExecuteMetrics;
 }
 
 export interface UpsertResult {
   type: "UPSERT";
   insertedCount: number;
   updatedCount: number;
+  metrics?: ExecuteMetrics;
 }
 
 export interface ReorderResult {
   type: "REORDER";
   reorderedParentCount: number;
+  metrics?: ExecuteMetrics;
 }
 
 // ============================================================
@@ -169,6 +196,7 @@ export interface ExecuteOptions {
 
 /**
  * SQL 文字列を受け取り、kintone API を呼び出して結果を返す。
+ * API 呼び出し回数・取得行数・所要時間を計測し、結果の metrics に付与する。
  *
  * @param sql     SQL 文字列
  * @param client  kintone API クライアント
@@ -178,6 +206,68 @@ export async function execute(
   sql: string,
   client: KintoneClient,
   options: ExecuteOptions = {}
+): Promise<ExecuteResult> {
+  const metrics = createEmptyMetrics();
+  const countedClient = wrapClientWithMetrics(client, metrics);
+  const startedAt = Date.now();
+  const result = await executeStatement(sql, countedClient, options);
+  metrics.elapsedMs = Date.now() - startedAt;
+  return { ...result, metrics };
+}
+
+function createEmptyMetrics(): ExecuteMetrics {
+  return {
+    getCalls: 0,
+    postCalls: 0,
+    putCalls: 0,
+    deleteCalls: 0,
+    fieldCalls: 0,
+    appsCalls: 0,
+    fetchedRows: 0,
+    elapsedMs: 0,
+  };
+}
+
+/**
+ * KintoneClient の全メソッドを計測カウンタ付きでラップする。
+ * getFields はキャッシュ（fieldInfoCache）より内側で呼ばれるため、
+ * キャッシュヒット時は fieldCalls が増えない = 実際の API 呼び出し回数を表す。
+ */
+function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): KintoneClient {
+  return {
+    getRecords: async (params) => {
+      metrics.getCalls += 1;
+      const res = await client.getRecords(params);
+      metrics.fetchedRows += res.records.length;
+      return res;
+    },
+    postRecords: (params) => {
+      metrics.postCalls += 1;
+      return client.postRecords(params);
+    },
+    putRecords: (params) => {
+      metrics.putCalls += 1;
+      return client.putRecords(params);
+    },
+    deleteRecords: (params) => {
+      metrics.deleteCalls += 1;
+      return client.deleteRecords(params);
+    },
+    getApps: () => {
+      metrics.appsCalls += 1;
+      return client.getApps();
+    },
+    getFields: (appId) => {
+      metrics.fieldCalls += 1;
+      return client.getFields(appId);
+    },
+  };
+}
+
+async function executeStatement(
+  sql: string,
+  client: KintoneClient,
+  options: ExecuteOptions
 ): Promise<ExecuteResult> {
   const cacheContext = options.cacheContext ?? "default";
   // 1. パース
