@@ -278,7 +278,7 @@ async function executeStatement(
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
     case "WITH":          return executeWith(stmt, client, options, cacheContext);
-    case "INSERT":        return executeInsert(stmt, client, cacheContext);
+    case "INSERT":        return executeInsert(stmt, client, options, cacheContext);
     case "INSERT_SELECT": return executeInsertSelect(stmt, client, options, cacheContext);
     case "UPSERT":        return executeUpsert(stmt, client, options, cacheContext);
     case "UPSERT_SELECT": return executeUpsertSelect(stmt, client, options, cacheContext);
@@ -1402,10 +1402,11 @@ function convertProcessRowValue(
 async function executeInsert(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
   client: KintoneClient,
+  options: ExecuteOptions,
   cacheContext: string
 ): Promise<InsertResult> {
   if (stmt.subtableCode) {
-    return executeInsertSubtable(stmt, client, cacheContext);
+    return executeInsertSubtable(stmt, client, options, cacheContext);
   }
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
@@ -1694,6 +1695,7 @@ interface ExpandedSubtableRow {
 async function executeInsertSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
   client: KintoneClient,
+  options: ExecuteOptions,
   _cacheContext: string
 ): Promise<InsertResult> {
   const subtableCode = stmt.subtableCode!;
@@ -1702,12 +1704,11 @@ async function executeInsertSubtable(
     throw new Error("サブテーブル INSERT には _pid が必須です");
   }
 
-  const parents = await fetchAll(client.getRecords, stmt.appId, "", [], { maxRecords: 10_000, parallel: 1 });
-  const parentMap = new Map<string, KintoneRecord>();
-  for (const p of parents) {
-    const pid = String(p["$id"]?.value ?? "");
-    if (pid) parentMap.set(pid, p);
-  }
+  const parents = await fetchAll(client.getRecords, stmt.appId, "", [], {
+    maxRecords: options.maxRecords ?? 10_000,
+    parallel: options.fetchParallel ?? 1,
+  });
+  const parentMap = buildParentIdMap(parents);
 
   // 親IDごとに追加行を集約
   const insertsByParent = new Map<string, MutableTableRow[]>();
@@ -1790,8 +1791,9 @@ async function executeUpdateSubtable(
     byRid.set(t.rowId, updates);
   }
 
+  const parentById = buildParentIdMap(parents);
   for (const [pid, updateMap] of updatesByParent.entries()) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
     const currentRows = getMutableTableRows(parent, subtableCode);
     const payloadRows = currentRows.map((row) => {
@@ -1842,8 +1844,9 @@ async function executeDeleteSubtable(
     else byParent.set(t.parentId, [t.rowIndex]);
   }
 
+  const parentById = buildParentIdMap(parents);
   for (const [pid, idxs] of byParent.entries()) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
     const rows = getMutableTableRows(parent, subtableCode);
     const rm = new Set(idxs);
@@ -1852,6 +1855,16 @@ async function executeDeleteSubtable(
   }
 
   return { type: "DELETE", deletedCount: targets.length };
+}
+
+/** 親レコードの $id → レコードの索引（ループ内線形検索の回避） */
+function buildParentIdMap(parents: KintoneRecord[]): Map<string, KintoneRecord> {
+  const map = new Map<string, KintoneRecord>();
+  for (const p of parents) {
+    const pid = String(p["$id"]?.value ?? "");
+    if (pid) map.set(pid, p);
+  }
+  return map;
 }
 
 function expandRowsForSubtableDml(parents: KintoneRecord[], subtableCode: string): ExpandedSubtableRow[] {
@@ -2031,8 +2044,9 @@ async function executeReorder(
     if (!ok) throw new OperationCancelledError("UPDATE", targetParentIds.size);
   }
 
+  const parentById = buildParentIdMap(parents);
   for (const pid of targetParentIds) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
 
     const rows = getMutableTableRows(parent, stmt.subtableCode);
