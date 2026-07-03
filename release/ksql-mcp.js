@@ -33722,23 +33722,31 @@ function resolveKintoneFunc(name) {
       return "";
   }
 }
+var likeRegexCache = /* @__PURE__ */ new Map();
+var LIKE_REGEX_CACHE_MAX = 200;
 function matchLike(value, pattern) {
   if (!pattern.includes("%") && !pattern.includes("_")) {
     return value.includes(pattern);
   }
-  let regexStr = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === "%") {
-      regexStr += ".*";
-    } else if (ch === "_") {
-      regexStr += ".";
-    } else {
-      regexStr += ch.replace(/[.+*?^${}()|[\]\\]/g, "\\$&");
+  let regex = likeRegexCache.get(pattern);
+  if (!regex) {
+    let regexStr = "^";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i];
+      if (ch === "%") {
+        regexStr += ".*";
+      } else if (ch === "_") {
+        regexStr += ".";
+      } else {
+        regexStr += ch.replace(/[.+*?^${}()|[\]\\]/g, "\\$&");
+      }
     }
+    regexStr += "$";
+    regex = new RegExp(regexStr, "u");
+    if (likeRegexCache.size >= LIKE_REGEX_CACHE_MAX) likeRegexCache.clear();
+    likeRegexCache.set(pattern, regex);
   }
-  regexStr += "$";
-  return new RegExp(regexStr, "u").test(value);
+  return regex.test(value);
 }
 
 // src/converter/dmlToKintone.ts
@@ -34166,10 +34174,12 @@ async function fetchPage(fetcher, app, query, fields, pageSize, offset) {
   return fetcher({ app, query: pageQuery, fields });
 }
 function buildCursorQuery(baseQuery, cursorId) {
-  if (cursorId <= 0) return baseQuery.trimEnd();
-  const cursor = `$id > ${cursorId} order by $id asc`;
   const base = baseQuery.trimEnd();
-  return base ? `${base} and ${cursor}` : cursor;
+  if (cursorId <= 0) {
+    return base ? `${base} order by $id asc` : "order by $id asc";
+  }
+  const cursor = `$id > ${cursorId} order by $id asc`;
+  return base ? `(${base}) and ${cursor}` : cursor;
 }
 function buildPageQuery(query, pageSize, offset) {
   const base = query.trimEnd();
@@ -34322,6 +34332,8 @@ function applyJoin(leftRows, rightRows, join) {
     else rightIndex.set(k, [rRow]);
   }
   const result = [];
+  const emptyRight = {};
+  for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
   for (const lRow of leftRows) {
     const k = lRow[leftKey] ?? "";
     const matched = rightIndex.get(k) ?? [];
@@ -34330,8 +34342,6 @@ function applyJoin(leftRows, rightRows, join) {
         result.push({ ...lRow, ...rRow });
       }
     } else if (joinType === "LEFT") {
-      const emptyRight = {};
-      for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
       result.push({ ...lRow, ...emptyRight });
     }
   }
@@ -34407,11 +34417,22 @@ function evalAggregate(func, distinct, arg, rows) {
       return nums.reduce((a, b) => a + b, 0);
     case "AVG":
       return nums.length === 0 ? 0 : nums.reduce((a, b) => a + b, 0) / nums.length;
+    // Math.max(...nums) は要素数が多いと RangeError になるためループで求める
     case "MAX":
-      return nums.length === 0 ? 0 : Math.max(...nums);
+      return nums.length === 0 ? 0 : maxOf(nums);
     case "MIN":
-      return nums.length === 0 ? 0 : Math.min(...nums);
+      return nums.length === 0 ? 0 : minOf(nums);
   }
+}
+function maxOf(nums) {
+  let m = nums[0];
+  for (const n of nums) if (n > m) m = n;
+  return m;
+}
+function minOf(nums) {
+  let m = nums[0];
+  for (const n of nums) if (n < m) m = n;
+  return m;
 }
 function evalAggArithExpr(node, rows) {
   if (node.type === "NUMBER") return node.value;
@@ -34449,43 +34470,89 @@ function applyHaving(rows, having) {
   return rows.filter((row) => evalWhere(having, row));
 }
 function applyDistinct(rows, columns) {
+  if (rows.length === 0) return rows;
+  const keyFor = buildDistinctKeyBuilder(rows, columns);
   const seen = /* @__PURE__ */ new Set();
   return rows.filter((row) => {
-    const key = buildDistinctKey(row, columns);
+    const key = keyFor(row);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
-function buildDistinctKey(row, columns) {
+function buildDistinctKeyBuilder(rows, columns) {
   if (columns.some((c) => c.type === "WILDCARD")) {
-    return JSON.stringify(Object.entries(row).sort());
-  }
-  const values = [];
-  for (const col of columns) {
-    if (col.type === "FIELD") {
-      values.push(row[col.field] ?? "");
-      continue;
+    const allKeys = /* @__PURE__ */ new Set();
+    for (const row of rows) {
+      for (const k of Object.keys(row)) allKeys.add(k);
     }
-    if (col.type === "PARENT_WILDCARD") {
-      for (const key of Object.keys(row).filter((k) => k.startsWith("_p.")).sort()) {
-        values.push(row[key] ?? "");
+    const keys = [...allKeys].sort();
+    return (row) => JSON.stringify(keys.map((k) => row[k] !== void 0 ? row[k] : null));
+  }
+  let sortedParentKeys = [];
+  if (columns.some((c) => c.type === "PARENT_WILDCARD")) {
+    const parentKeys = /* @__PURE__ */ new Set();
+    for (const row of rows) {
+      for (const k of Object.keys(row)) {
+        if (k.startsWith("_p.")) parentKeys.add(k);
       }
     }
+    sortedParentKeys = [...parentKeys].sort();
   }
-  return values.join("\0");
+  return (row) => {
+    const values = [];
+    for (const col of columns) {
+      if (col.type === "FIELD") {
+        values.push(row[col.field] ?? "");
+        continue;
+      }
+      if (col.type === "PARENT_WILDCARD") {
+        for (const k of sortedParentKeys) {
+          values.push(row[k] !== void 0 ? row[k] : null);
+        }
+      }
+    }
+    return JSON.stringify(values);
+  };
 }
 function applyOrderBy(rows, orderBy, optionOrders, sortKinds) {
   if (orderBy.length === 0) return rows;
-  return [...rows].sort((a, b) => {
-    for (const { key, direction } of orderBy) {
-      const av = evalOrderKey(key, a);
-      const bv = evalOrderKey(key, b);
-      const cmp = compareOrderValues(av, bv, key, optionOrders, sortKinds);
-      if (cmp !== 0) return direction === "ASC" ? cmp : -cmp;
+  const keyMeta = orderBy.map(({ key }) => ({
+    orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : void 0,
+    sortKind: key.type === "FIELD_NAME" ? sortKinds?.get(key.name) : void 0
+  }));
+  const decorated = rows.map((row) => ({
+    row,
+    keys: orderBy.map(({ key }, i) => {
+      const s = evalOrderKey(key, row);
+      const n = Number(s);
+      const orderMap = keyMeta[i].orderMap;
+      return {
+        s,
+        n,
+        isNum: !Number.isNaN(n),
+        rank: orderMap ? minChoiceIndex(parseChoiceValues(s), orderMap) : 0
+      };
+    })
+  }));
+  decorated.sort((a, b) => {
+    for (let i = 0; i < orderBy.length; i++) {
+      const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
+      if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
     }
     return 0;
   });
+  return decorated.map((d) => d.row);
+}
+function compareSortKeys(a, b, meta3) {
+  if (meta3.orderMap) {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    return a.s.localeCompare(b.s, "ja");
+  }
+  if (meta3.sortKind === "string") {
+    return a.s.localeCompare(b.s, "ja");
+  }
+  return a.isNum && b.isNum ? a.n - b.n : a.s.localeCompare(b.s, "ja");
 }
 function evalOrderKey(key, row) {
   switch (key.type) {
@@ -34496,32 +34563,6 @@ function evalOrderKey(key, row) {
     case "FUNC_KEY":
       return evalStringFunc(key.expr, row);
   }
-}
-function compareOrderValues(av, bv, key, optionOrders, sortKinds) {
-  if (key.type === "FIELD_NAME") {
-    const orderMap = optionOrders?.get(key.name);
-    if (orderMap) {
-      const ac = compareByChoiceOrder(av, bv, orderMap);
-      if (ac !== 0) return ac;
-      return av.localeCompare(bv, "ja");
-    }
-    const sortKind = sortKinds?.get(key.name);
-    if (sortKind === "number") {
-      return compareAsNumber(av, bv);
-    }
-    if (sortKind === "string") {
-      return av.localeCompare(bv, "ja");
-    }
-  }
-  return compareAuto(av, bv);
-}
-function compareByChoiceOrder(av, bv, orderMap) {
-  const aValues = parseChoiceValues(av);
-  const bValues = parseChoiceValues(bv);
-  const aRank = minChoiceIndex(aValues, orderMap);
-  const bRank = minChoiceIndex(bValues, orderMap);
-  if (aRank !== bRank) return aRank - bRank;
-  return 0;
 }
 function parseChoiceValues(raw) {
   const trimmed = raw.trim();
@@ -34545,18 +34586,6 @@ function minChoiceIndex(values, orderMap) {
     if (rank < min) min = rank;
   }
   return min;
-}
-function compareAsNumber(av, bv) {
-  const an = Number(av);
-  const bn = Number(bv);
-  const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-  return numeric ? an - bn : av.localeCompare(bv, "ja");
-}
-function compareAuto(av, bv) {
-  const an = Number(av);
-  const bn = Number(bv);
-  const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-  return numeric ? an - bn : av.localeCompare(bv, "ja");
 }
 function applyLimit(rows, limit, offset) {
   const start = offset ?? 0;
@@ -34802,6 +34831,56 @@ function toFlatString(value) {
 
 // src/execute.ts
 async function execute(sql, client, options = {}) {
+  const metrics = createEmptyMetrics();
+  const countedClient = wrapClientWithMetrics(client, metrics);
+  const startedAt = Date.now();
+  const result = await executeStatement(sql, countedClient, options);
+  metrics.elapsedMs = Date.now() - startedAt;
+  return { ...result, metrics };
+}
+function createEmptyMetrics() {
+  return {
+    getCalls: 0,
+    postCalls: 0,
+    putCalls: 0,
+    deleteCalls: 0,
+    fieldCalls: 0,
+    appsCalls: 0,
+    fetchedRows: 0,
+    elapsedMs: 0
+  };
+}
+function wrapClientWithMetrics(client, metrics) {
+  return {
+    getRecords: async (params) => {
+      metrics.getCalls += 1;
+      const res = await client.getRecords(params);
+      metrics.fetchedRows += res.records.length;
+      return res;
+    },
+    postRecords: (params) => {
+      metrics.postCalls += 1;
+      return client.postRecords(params);
+    },
+    putRecords: (params) => {
+      metrics.putCalls += 1;
+      return client.putRecords(params);
+    },
+    deleteRecords: (params) => {
+      metrics.deleteCalls += 1;
+      return client.deleteRecords(params);
+    },
+    getApps: () => {
+      metrics.appsCalls += 1;
+      return client.getApps();
+    },
+    getFields: (appId) => {
+      metrics.fieldCalls += 1;
+      return client.getFields(appId);
+    }
+  };
+}
+async function executeStatement(sql, client, options) {
   const cacheContext = options.cacheContext ?? "default";
   const stmt = parseSql(sql);
   switch (stmt.type) {
@@ -34812,7 +34891,7 @@ async function execute(sql, client, options = {}) {
     case "WITH":
       return executeWith(stmt, client, options, cacheContext);
     case "INSERT":
-      return executeInsert(stmt, client, cacheContext);
+      return executeInsert(stmt, client, options, cacheContext);
     case "INSERT_SELECT":
       return executeInsertSelect(stmt, client, options, cacheContext);
     case "UPSERT":
@@ -34927,8 +35006,7 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
   }
   let rows = records.map((r) => flatten(r, null));
   if (!useSingleGet) {
-    const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-    const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+    const { optionOrders, sortKinds } = await buildOrderByMetaForSelect(stmt, client, cacheContext);
     rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -34956,11 +35034,12 @@ async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
     }
   }
   for (const [appId, fields] of appToFields.entries()) {
-    if (fields.size === 0) continue;
+    const userFields = [...fields].filter((f) => !isSystemLikeFieldCode(f));
+    if (userFields.length === 0) continue;
     const defs = await getFieldsCached(appId, client, cacheContext);
     if (defs.length === 0) continue;
     const validCodes = new Set(defs.map((d) => d.code));
-    const unknown2 = [...fields].filter((f) => !isSystemLikeFieldCode(f) && !validCodes.has(f));
+    const unknown2 = userFields.filter((f) => !validCodes.has(f));
     if (unknown2.length > 0) {
       throw new Error(`ArgumentError: unknown field code(s): ${unknown2.join(", ")} (APP${appId})`);
     }
@@ -34970,8 +35049,10 @@ async function executeFullScanSelect(stmt, client, options, cacheContext) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
-  await resolveSubqueries(stmt.where, client, options, cacheContext);
-  await resolveSubqueries(stmt.having, client, options, cacheContext);
+  await Promise.all([
+    resolveSubqueries(stmt.where, client, options, cacheContext),
+    resolveSubqueries(stmt.having, client, options, cacheContext)
+  ]);
   const tableConditions = /* @__PURE__ */ new Map();
   if (stmt.where !== null) {
     if (stmt.from.alias) {
@@ -35020,6 +35101,12 @@ async function executeFullScanSelect(stmt, client, options, cacheContext) {
       onOptJoins.push(join);
     }
   }
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  scalarCachePromise.catch(() => {
+  });
+  orderByMetaPromise.catch(() => {
+  });
   const mainRecords = await mainFetch;
   const tables = /* @__PURE__ */ new Map();
   tables.set(stmt.from.alias, mainRecords);
@@ -35051,15 +35138,16 @@ async function executeFullScanSelect(stmt, client, options, cacheContext) {
     );
     tables.set(join.table.alias, joinRecords);
   }));
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+  const scalarCache = await scalarCachePromise;
+  const { optionOrders, sortKinds } = await orderByMetaPromise;
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
 async function executeUnion(stmt, client, options, cacheContext) {
-  const leftResult = stmt.left.type === "UNION" ? await executeUnion(stmt.left, client, options, cacheContext) : await executeSelect(stmt.left, client, options, cacheContext);
-  const rightResult = await executeSelect(stmt.right, client, options, cacheContext);
+  const [leftResult, rightResult] = await Promise.all([
+    stmt.left.type === "UNION" ? executeUnion(stmt.left, client, options, cacheContext) : executeSelect(stmt.left, client, options, cacheContext),
+    executeSelect(stmt.right, client, options, cacheContext)
+  ]);
   const leftCols = leftResult.columns;
   const rightCols = rightResult.columns;
   const remappedRight = rightResult.rows.map((row) => {
@@ -35076,7 +35164,7 @@ async function executeUnion(stmt, client, options, cacheContext) {
 function deduplicateRows(rows, columns) {
   const seen = /* @__PURE__ */ new Set();
   return rows.filter((row) => {
-    const key = columns.map((c) => row[c] ?? "").join("\0");
+    const key = JSON.stringify(columns.map((c) => row[c] ?? ""));
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -35179,8 +35267,10 @@ function stripCteAliasFromFieldValue(fv, alias) {
 }
 async function executeQueryWithCte(query, client, options, cteCache, cacheContext) {
   if (query.type === "UNION") {
-    const leftResult = await executeQueryWithCte(query.left, client, options, cteCache, cacheContext);
-    const rightResult = await executeQueryWithCte(query.right, client, options, cteCache, cacheContext);
+    const [leftResult, rightResult] = await Promise.all([
+      executeQueryWithCte(query.left, client, options, cteCache, cacheContext),
+      executeQueryWithCte(query.right, client, options, cteCache, cacheContext)
+    ]);
     const leftCols = leftResult.columns;
     const rightCols = rightResult.columns;
     const remapped = rightResult.rows.map((row) => {
@@ -35204,8 +35294,16 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
-  await resolveSubqueries(stmt.where, client, options, cacheContext);
-  await resolveSubqueries(stmt.having, client, options, cacheContext);
+  await Promise.all([
+    resolveSubqueries(stmt.where, client, options, cacheContext),
+    resolveSubqueries(stmt.having, client, options, cacheContext)
+  ]);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  scalarCachePromise.catch(() => {
+  });
+  orderByMetaPromise.catch(() => {
+  });
   const tables = /* @__PURE__ */ new Map();
   if (stmt.from.cteName != null) {
     const rows2 = cteCache.get(stmt.from.cteName) ?? [];
@@ -35252,9 +35350,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     }
   });
   await Promise.all(joinFetches);
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+  const scalarCache = await scalarCachePromise;
+  const { optionOrders, sortKinds } = await orderByMetaPromise;
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -35289,6 +35386,78 @@ async function fetchTableRecordsForFullScan(stmt, table, client, maxRecords2, pa
   });
   const parentRecords = parentResolved.records;
   return expandSubtableRecords(parentRecords, table.subtableCode);
+}
+var UPSERT_IN_CHUNK_SIZE = 50;
+function normalizeKeyPart(v) {
+  const t = v.trim();
+  if (t !== "" && !Number.isNaN(Number(t))) return String(Number(t));
+  return v;
+}
+function upsertCompositeKey(parts) {
+  return JSON.stringify(parts);
+}
+function upsertNormalizedKey(parts, numericKey) {
+  return JSON.stringify(parts.map((p, i) => numericKey[i] ? normalizeKeyPart(p) : p));
+}
+function lookupUpsertTarget(index, keyParts) {
+  const exact = index.raw.get(upsertCompositeKey(keyParts));
+  if (exact !== void 0) return exact;
+  if (!index.numericKey.some(Boolean)) return void 0;
+  return index.normalized.get(upsertNormalizedKey(keyParts, index.numericKey));
+}
+async function resolveUpsertTargets(appId, keyFields, rowKeyValues, client, options, fieldTypes) {
+  const maxRecords2 = options.maxRecords ?? 1e4;
+  const parallel = options.fetchParallel ?? 1;
+  const numericKey = keyFields.map((f) => fieldTypes.get(f) === "NUMBER");
+  const index = { raw: /* @__PURE__ */ new Map(), normalized: /* @__PURE__ */ new Map(), numericKey };
+  const setMax = (map2, key, id) => {
+    const cur = map2.get(key);
+    if (cur === void 0 || id > cur) map2.set(key, id);
+  };
+  const addRecordToIndex = (parts, id) => {
+    setMax(index.raw, upsertCompositeKey(parts), id);
+    if (numericKey.some(Boolean)) {
+      setMax(index.normalized, upsertNormalizedKey(parts, numericKey), id);
+    }
+  };
+  const batchFirstKeys = /* @__PURE__ */ new Set();
+  const perRowKeys = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const parts of rowKeyValues) {
+    const composite = upsertCompositeKey(parts);
+    if (seen.has(composite)) continue;
+    seen.add(composite);
+    if (parts.some((p) => p === "")) perRowKeys.push(parts);
+    else batchFirstKeys.add(parts[0]);
+  }
+  const fields = ["$id", ...keyFields];
+  for (const chunk2 of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
+    const query = `${keyFields[0]} in (${chunk2.map(sqlQuote).join(",")})`;
+    const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords: maxRecords2, parallel });
+    for (const rec of records) {
+      const id = Number(rec["$id"]?.value);
+      if (!Number.isFinite(id)) continue;
+      addRecordToIndex(keyFields.map((f) => toScalarText(rec[f]?.value)), id);
+    }
+  }
+  for (const parts of perRowKeys) {
+    const query = keyFields.map((f, i) => `${f} = ${sqlQuote(parts[i])}`).join(" and ");
+    const existing = await fetchAll(client.getRecords, appId, query, ["$id"], { maxRecords: maxRecords2, parallel });
+    if (existing.length === 0) continue;
+    addRecordToIndex(parts, maxRecordId(existing));
+  }
+  return index;
+}
+function maxRecordId(records) {
+  let max = Number.NEGATIVE_INFINITY;
+  for (const r of records) {
+    const n = Number(r["$id"]?.value);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  if (!Number.isFinite(max)) {
+    throw new Error("\u30EC\u30B3\u30FC\u30C9\u306B\u6570\u5024\u306E $id \u304C\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093\u3002");
+  }
+  return max;
 }
 function toScalarText(value) {
   if (typeof value === "string") return value;
@@ -35427,6 +35596,16 @@ async function getSortKindMapByApp(appId, client, cacheContext) {
   setScopedCacheValue(sortKindCache, cacheContext, appId, map2);
   return map2;
 }
+async function buildOrderByMetaForSelect(stmt, client, cacheContext) {
+  if (stmt.orderBy.length === 0) {
+    return { optionOrders: /* @__PURE__ */ new Map(), sortKinds: /* @__PURE__ */ new Map() };
+  }
+  const [optionOrders, sortKinds] = await Promise.all([
+    buildOptionOrdersForSelect(stmt, client, cacheContext),
+    buildSortKindsForSelect(stmt, client, cacheContext)
+  ]);
+  return { optionOrders, sortKinds };
+}
 async function buildOptionOrdersForSelect(stmt, client, cacheContext) {
   const optionOrders = /* @__PURE__ */ new Map();
   const tables = [stmt.from, ...stmt.joins.map((j) => j.table)];
@@ -35500,9 +35679,9 @@ function convertProcessRowValue(raw, dstFieldType) {
   }
   return raw;
 }
-async function executeInsert(stmt, client, cacheContext) {
+async function executeInsert(stmt, client, options, cacheContext) {
   if (stmt.subtableCode) {
-    return executeInsertSubtable(stmt, client, cacheContext);
+    return executeInsertSubtable(stmt, client, options, cacheContext);
   }
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
@@ -35617,26 +35796,19 @@ async function executeDelete(stmt, client, options, cacheContext) {
   return { type: "DELETE", deletedCount: ids.length };
 }
 async function executeUpsert(stmt, client, options, cacheContext) {
-  const maxRecords2 = options.maxRecords ?? 1e4;
   const toInsert = [];
   const toUpdate = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  for (const row of stmt.values) {
-    const keyConditions = stmt.keyFields.map((key) => {
+  const rowKeyValues = stmt.values.map(
+    (row) => stmt.keyFields.map((key) => {
       const idx = stmt.fields.indexOf(key);
       if (idx === -1) throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C INSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
       const val = row[idx];
-      const valStr = val.type === "STRING" ? val.value : val.type === "NUMBER" ? String(val.value) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((e) => e.value).join(",");
-      return `${key} = "${valStr.replace(/"/g, '\\"')}"`;
-    });
-    const query = keyConditions.join(" and ");
-    const existing = await fetchAll(
-      client.getRecords,
-      stmt.appId,
-      query,
-      ["$id"],
-      { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1 }
-    );
+      return val.type === "STRING" ? val.value : val.type === "NUMBER" ? String(val.value) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((e) => e.value).join(",");
+    })
+  );
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
+  stmt.values.forEach((row, rowIdx) => {
     const record2 = {};
     stmt.fields.forEach((field, i) => {
       const val = row[i];
@@ -35646,13 +35818,13 @@ async function executeUpsert(stmt, client, options, cacheContext) {
         record2[field] = { value: toKintoneValue(val, fieldTypes.get(field)) };
       }
     });
-    if (existing.length > 0) {
-      const id = Number(existing[0]["$id"].value);
+    const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
+    if (id !== void 0) {
       toUpdate.push({ id, record: record2 });
     } else {
       toInsert.push(record2);
     }
-  }
+  });
   if (options.confirm && toInsert.length + toUpdate.length > 0) {
     const total = toInsert.length + toUpdate.length;
     const ok = await options.confirm(total, "UPDATE");
@@ -35672,18 +35844,17 @@ async function executeUpsert(stmt, client, options, cacheContext) {
     updatedCount: toUpdate.length
   };
 }
-async function executeInsertSubtable(stmt, client, _cacheContext) {
+async function executeInsertSubtable(stmt, client, options, _cacheContext) {
   const subtableCode = stmt.subtableCode;
   const pidIndex = stmt.fields.indexOf("_pid");
   if (pidIndex < 0) {
     throw new Error("\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u306F _pid \u304C\u5FC5\u9808\u3067\u3059");
   }
-  const parents = await fetchAll(client.getRecords, stmt.appId, "", [], { maxRecords: 1e4, parallel: 1 });
-  const parentMap = /* @__PURE__ */ new Map();
-  for (const p of parents) {
-    const pid = String(p["$id"]?.value ?? "");
-    if (pid) parentMap.set(pid, p);
-  }
+  const parents = await fetchAll(client.getRecords, stmt.appId, "", [], {
+    maxRecords: options.maxRecords ?? 1e4,
+    parallel: options.fetchParallel ?? 1
+  });
+  const parentMap = buildParentIdMap(parents);
   const insertsByParent = /* @__PURE__ */ new Map();
   for (const rowValues of stmt.values) {
     const pid = valueToString(rowValues[pidIndex]);
@@ -35750,8 +35921,9 @@ async function executeUpdateSubtable(stmt, client, options, _cacheContext) {
     }
     byRid.set(t.rowId, updates);
   }
+  const parentById = buildParentIdMap(parents);
   for (const [pid, updateMap] of updatesByParent.entries()) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
     const currentRows = getMutableTableRows(parent, subtableCode);
     const payloadRows = currentRows.map((row) => {
@@ -35791,8 +35963,9 @@ async function executeDeleteSubtable(stmt, client, options, _cacheContext) {
     if (bucket) bucket.push(t.rowIndex);
     else byParent.set(t.parentId, [t.rowIndex]);
   }
+  const parentById = buildParentIdMap(parents);
   for (const [pid, idxs] of byParent.entries()) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
     const rows = getMutableTableRows(parent, subtableCode);
     const rm = new Set(idxs);
@@ -35800,6 +35973,14 @@ async function executeDeleteSubtable(stmt, client, options, _cacheContext) {
     await client.putRecords(buildSubtablePutParams(stmt.appId, pid, getRevision(parent), subtableCode, nextRows));
   }
   return { type: "DELETE", deletedCount: targets.length };
+}
+function buildParentIdMap(parents) {
+  const map2 = /* @__PURE__ */ new Map();
+  for (const p of parents) {
+    const pid = String(p["$id"]?.value ?? "");
+    if (pid) map2.set(pid, p);
+  }
+  return map2;
 }
 function expandRowsForSubtableDml(parents, subtableCode) {
   const out = [];
@@ -35936,8 +36117,9 @@ async function executeReorder(stmt, client, options, _cacheContext) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", targetParentIds.size);
   }
+  const parentById = buildParentIdMap(parents);
   for (const pid of targetParentIds) {
-    const parent = parents.find((p) => String(p["$id"]?.value ?? "") === pid);
+    const parent = parentById.get(pid);
     if (!parent) continue;
     const rows = getMutableTableRows(parent, stmt.subtableCode);
     const sortable = rows.map((row, i) => ({ row, i, flat: buildFlatRowForSort(parent, stmt.subtableCode, row, i) }));
@@ -35985,7 +36167,6 @@ function evalOrderKeyForRow(key, row) {
   }
 }
 async function executeUpsertSelect(stmt, client, options, cacheContext) {
-  const maxRecords2 = options.maxRecords ?? 1e4;
   const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
@@ -36000,29 +36181,26 @@ async function executeUpsertSelect(stmt, client, options, cacheContext) {
   }
   const toInsert = [];
   const toUpdate = [];
-  for (const row of rows) {
+  const records = rows.map((row) => {
     const record2 = {};
     stmt.fields.forEach((field, i) => {
       record2[field] = { value: row[columns[i]] ?? "" };
     });
-    const keyConditions = stmt.keyFields.map((key) => {
-      const val = String(record2[key]?.value ?? "");
-      return `${key} = "${val.replace(/"/g, '\\"')}"`;
-    });
-    const query = keyConditions.join(" and ");
-    const existing = await fetchAll(
-      client.getRecords,
-      stmt.appId,
-      query,
-      ["$id"],
-      { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1 }
-    );
-    if (existing.length > 0) {
-      toUpdate.push({ id: Number(existing[0]["$id"].value), record: record2 });
+    return record2;
+  });
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const rowKeyValues = records.map(
+    (record2) => stmt.keyFields.map((key) => String(record2[key]?.value ?? ""))
+  );
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
+  records.forEach((record2, rowIdx) => {
+    const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
+    if (id !== void 0) {
+      toUpdate.push({ id, record: record2 });
     } else {
       toInsert.push(record2);
     }
-  }
+  });
   if (options.confirm && toInsert.length + toUpdate.length > 0) {
     const total = toInsert.length + toUpdate.length;
     const ok = await options.confirm(total, "UPDATE");
@@ -36074,36 +36252,44 @@ function parseSql(sql) {
   }
 }
 async function resolveSubqueries(where, client, options, cacheContext) {
+  const tasks = [];
+  collectSubqueryTasks(where, client, options, cacheContext, tasks);
+  await Promise.all(tasks);
+}
+function collectSubqueryTasks(where, client, options, cacheContext, tasks) {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
-        const result = await executeSelect(right.query, client, options, cacheContext);
-        const col = right.column ?? (result.columns[0] ?? "");
-        const resolved = new Set(result.rows.map((r) => r[col] ?? ""));
-        right.resolved = resolved;
+        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+          const col = right.column ?? (result.columns[0] ?? "");
+          right.resolved = new Set(result.rows.map((r) => r[col] ?? ""));
+        }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
-        const result = await executeSelect(right.query, client, options, cacheContext);
-        if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
-        if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
-        const col = result.columns[0] ?? "";
-        right.resolved = result.rows[0]?.[col] ?? "";
+        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+          if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
+          if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
+          const col = result.columns[0] ?? "";
+          right.resolved = result.rows[0]?.[col] ?? "";
+        }));
       }
       break;
     }
     case "LOGICAL":
-      await resolveSubqueries(where.left, client, options, cacheContext);
-      await resolveSubqueries(where.right, client, options, cacheContext);
+      collectSubqueryTasks(where.left, client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks);
       break;
     case "NOT":
     case "GROUP":
-      await resolveSubqueries(where.expr, client, options, cacheContext);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks);
       break;
     case "EXISTS": {
-      const result = await executeSelect(where.query, client, options, cacheContext);
-      where.resolved = result.rowCount > 0;
+      const node = where;
+      tasks.push(executeSelect(node.query, client, options, cacheContext).then((result) => {
+        node.resolved = result.rowCount > 0;
+      }));
       break;
     }
   }
@@ -36120,16 +36306,27 @@ async function resolveSetSubqueries(assignments, client, options, cacheContext) 
   }
 }
 async function resolveScalarColumns(columns, client, options, cacheContext) {
-  const cache = /* @__PURE__ */ new Map();
+  const byQuery = /* @__PURE__ */ new Map();
+  const pending = [];
   for (let i = 0; i < columns.length; i++) {
     const col = columns[i];
     if (col.type !== "SCALAR_SUBQUERY_COL") continue;
-    const result = await executeSelect(col.query, client, options, cacheContext);
-    if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
-    if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
-    const firstCol = result.columns[0] ?? "";
-    cache.set(i, result.rows[0]?.[firstCol] ?? "");
+    const key = JSON.stringify(col.query);
+    let promise2 = byQuery.get(key);
+    if (!promise2) {
+      promise2 = executeSelect(col.query, client, options, cacheContext).then((result) => {
+        if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
+        if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
+        const firstCol = result.columns[0] ?? "";
+        return result.rows[0]?.[firstCol] ?? "";
+      });
+      byQuery.set(key, promise2);
+    }
+    pending.push([i, promise2]);
   }
+  const values = await Promise.all(pending.map(([, promise2]) => promise2));
+  const cache = /* @__PURE__ */ new Map();
+  pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
 }
 function executeExplain(stmt) {
@@ -36920,6 +37117,10 @@ async function createKsqlRuntime(serverOptions, input) {
   const normalized = normalizeSqlAppProfiles(input.sql, profileName);
   const sql = normalized.normalizedSql;
   const maxRecords2 = input.maxRecords ?? envInt("KSQL_MAX_RECORDS") ?? profile2.query?.maxRecords ?? 500;
+  const fetchParallel2 = input.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile2.query?.fetchParallel ?? 3;
+  if (!Number.isInteger(fetchParallel2) || fetchParallel2 < 1 || fetchParallel2 > 10) {
+    throw new Error("ArgumentError: fetchParallel must be an integer between 1 and 10.");
+  }
   const onLimit2 = input.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile2.query?.onLimit ?? "error";
   const timeout2 = input.timeout ?? envInt("KSQL_TIMEOUT") ?? profile2.query?.timeout ?? 3e4;
   const appIds = extractAppIds(sql);
@@ -37051,6 +37252,7 @@ async function createKsqlRuntime(serverOptions, input) {
     client: routedClient,
     cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
     maxRecords: maxRecords2,
+    fetchParallel: fetchParallel2,
     onLimit: onLimit2,
     timeout: timeout2
   };
@@ -37434,11 +37636,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       sql: input.sql,
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext
     });
@@ -37466,11 +37670,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       sql: input.sql,
       profile: input.profile,
       maxRecords: dmlMaxRows2 + 1,
+      fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
       confirm: async (count, operation) => {
@@ -37490,6 +37696,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       sql: `DESCRIBE APP${input.app}`,
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout
     });
@@ -37499,6 +37706,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       sql: "SHOW APPS",
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout
     });
@@ -37564,6 +37772,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         sql: saved.sql,
         profile: profile2,
         maxRecords: input.maxRecords,
+        fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout
       });
@@ -37580,6 +37789,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: dmlMaxRows2,
+      fetchParallel: input.fetchParallel,
       timeout: input.timeout
     });
     return {
@@ -37628,6 +37838,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
 // src/mcp/schemas.ts
 var profile = external_exports.string().min(1).optional();
 var maxRecords = external_exports.number().int().positive().optional();
+var fetchParallel = external_exports.number().int().min(1).max(10).optional();
 var onLimit = external_exports.enum(["error", "truncate"]).optional();
 var timeout = external_exports.number().int().positive().optional();
 var dmlMaxRows = external_exports.number().int().positive();
@@ -37645,6 +37856,7 @@ var queryInputSchema = external_exports.object({
   sql: external_exports.string().min(1),
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout
 });
@@ -37654,18 +37866,21 @@ var mutateInputSchema = external_exports.object({
   allowDml: external_exports.literal(true),
   confirmText: external_exports.literal("yes"),
   dmlMaxRows,
+  fetchParallel,
   timeout
 });
 var describeAppInputSchema = external_exports.object({
   app: external_exports.number().int().positive(),
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout
 });
 var showAppsInputSchema = external_exports.object({
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout
 });
@@ -37687,6 +37902,7 @@ var runSavedQueryInputSchema = external_exports.object({
   name: savedQueryName,
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout,
   allowDml: external_exports.literal(true).optional(),
