@@ -1722,6 +1722,65 @@ test("UPSERT SELECT: 既存判定が一括検索になる", async () => {
   expect(client.postCalls).toHaveLength(1);
 });
 
+test("UPSERT: テキストキーは数値正規化しない（'001' と '1' を区別する）", async () => {
+  const client = makeClient({
+    records: [makeRecord({ $id: "1", 顧客コード: "1" })],
+    postIds: ["9"],
+  });
+  client.getFields = async () => ([
+    { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "ランク", label: "ランク", fieldType: "SINGLE_LINE_TEXT" },
+  ]);
+  await execute(
+    "UPSERT INTO APP77015 (顧客コード, ランク) VALUES ('001', 'A'), ('1', 'B') ON DUPLICATE (顧客コード)",
+    client,
+    { cacheContext: "upsert-text-key-test" }
+  );
+
+  // '1' → 既存 $id=1 を UPDATE、'001' → 別キーとして INSERT
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(1);
+  expect(client.postCalls).toHaveLength(1);
+});
+
+test("UPSERT: NUMBER キーは表記ゆれ（'5.0' と '5'）を同一視する", async () => {
+  const client = makeClient({
+    records: [makeRecord({ $id: "7", 商品番号: "5.0" })],
+    postIds: ["9"],
+  });
+  client.getFields = async () => ([
+    { code: "商品番号", label: "商品番号", fieldType: "NUMBER" },
+    { code: "ランク", label: "ランク", fieldType: "SINGLE_LINE_TEXT" },
+  ]);
+  await execute(
+    "UPSERT INTO APP77016 (商品番号, ランク) VALUES (5, 'A') ON DUPLICATE (商品番号)",
+    client,
+    { cacheContext: "upsert-number-key-test" }
+  );
+
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(7);
+  expect(client.postCalls).toHaveLength(0);
+});
+
+test("UPSERT SELECT: 複合キーの値に区切り文字（\\u0000）を含んでも誤同一視しない", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77033: [makeRecord({ $id: "1", k1: "a", k2: "b\u0000c" })],
+      77032: [makeRecord({ $id: "5", k1: "a\u0000b", k2: "c" })],
+    },
+    postIds: ["9"],
+  });
+  await execute(
+    "UPSERT INTO APP77032 (k1, k2) SELECT k1, k2 FROM APP77033 ON DUPLICATE (k1, k2)",
+    client
+  );
+
+  // ("a", "b\u0000c") と既存 ("a\u0000b", "c") は別キー → INSERT になる
+  expect(client.putCalls).toHaveLength(0);
+  expect(client.postCalls).toHaveLength(1);
+});
+
 // ----------------------------------------------------------------
 // サブクエリ / UNION の並列実行
 // ----------------------------------------------------------------

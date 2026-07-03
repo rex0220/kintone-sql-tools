@@ -972,10 +972,12 @@ async function fetchTableRecordsForFullScan(
 const UPSERT_IN_CHUNK_SIZE = 50;
 
 interface UpsertTargetIndex {
-  /** キー値そのまま（\0 結合）→ 最大 $id */
+  /** キー値そのまま → 最大 $id */
   raw: Map<string, number>;
   /** 数値正規化済みキー（"5.0" と "5" を同一視）→ 最大 $id */
   normalized: Map<string, number>;
+  /** キー成分ごとに数値正規化を適用するか（NUMBER フィールドのみ true） */
+  numericKey: boolean[];
 }
 
 /** 数値として解釈できるキー成分は正規形に揃える（数値フィールドの表記ゆれ対策） */
@@ -985,18 +987,25 @@ function normalizeKeyPart(v: string): string {
   return v;
 }
 
+// 複合キーは JSON.stringify で結合する（値に区切り文字を含む場合の衝突を防ぐ）
 function upsertCompositeKey(parts: string[]): string {
-  return parts.join("\0");
+  return JSON.stringify(parts);
 }
 
-function upsertNormalizedKey(parts: string[]): string {
-  return parts.map(normalizeKeyPart).join("\0");
+function upsertNormalizedKey(parts: string[], numericKey: boolean[]): string {
+  return JSON.stringify(parts.map((p, i) => (numericKey[i] ? normalizeKeyPart(p) : p)));
 }
 
-/** 行キーに対応する既存レコード $id を索引から引く（完全一致 → 数値正規化の順） */
+/**
+ * 行キーに対応する既存レコード $id を索引から引く。
+ * 完全一致を優先し、NUMBER フィールドのキーに限り数値正規化でフォールバックする
+ * （テキストフィールドの "001" と "1" を誤同一視しないため）。
+ */
 function lookupUpsertTarget(index: UpsertTargetIndex, keyParts: string[]): number | undefined {
-  return index.raw.get(upsertCompositeKey(keyParts))
-    ?? index.normalized.get(upsertNormalizedKey(keyParts));
+  const exact = index.raw.get(upsertCompositeKey(keyParts));
+  if (exact !== undefined) return exact;
+  if (!index.numericKey.some(Boolean)) return undefined;
+  return index.normalized.get(upsertNormalizedKey(keyParts, index.numericKey));
 }
 
 /**
@@ -1006,17 +1015,20 @@ function lookupUpsertTarget(index: UpsertTargetIndex, keyParts: string[]): numbe
  *   取得レコードの値で照合する（索引キーに全成分を含める）
  * - 空文字を含むキーは in (...) にまとめられないため従来どおり行ごとに検索
  * - キーが複数レコードにヒットした場合は最大 $id（最新）を採用
+ * - 数値正規化フォールバックは fieldType が NUMBER のキーのみ有効
  */
 async function resolveUpsertTargets(
   appId: number,
   keyFields: string[],
   rowKeyValues: string[][],
   client: KintoneClient,
-  options: ExecuteOptions
+  options: ExecuteOptions,
+  fieldTypes: FieldTypeMap
 ): Promise<UpsertTargetIndex> {
   const maxRecords = options.maxRecords ?? 10_000;
   const parallel = options.fetchParallel ?? 1;
-  const index: UpsertTargetIndex = { raw: new Map(), normalized: new Map() };
+  const numericKey = keyFields.map((f) => fieldTypes.get(f) === "NUMBER");
+  const index: UpsertTargetIndex = { raw: new Map(), normalized: new Map(), numericKey };
 
   const setMax = (map: Map<string, number>, key: string, id: number): void => {
     const cur = map.get(key);
@@ -1024,7 +1036,9 @@ async function resolveUpsertTargets(
   };
   const addRecordToIndex = (parts: string[], id: number): void => {
     setMax(index.raw, upsertCompositeKey(parts), id);
-    setMax(index.normalized, upsertNormalizedKey(parts), id);
+    if (numericKey.some(Boolean)) {
+      setMax(index.normalized, upsertNormalizedKey(parts, numericKey), id);
+    }
   };
 
   // ユニークなキー組を「in (...) でまとめられる行」と「行ごと検索の行」に振り分け
@@ -1626,7 +1640,7 @@ async function executeUpsert(
         : val.elements.map((e) => e.value).join(",");
     })
   );
-  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options);
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   stmt.values.forEach((row, rowIdx) => {
     // レコード全体を組み立て
@@ -2145,10 +2159,11 @@ async function executeUpsertSelect(
   });
 
   // キー値で既存レコードを一括検索（in (...) チャンク）
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const rowKeyValues: string[][] = records.map((record) =>
     stmt.keyFields.map((key) => String(record[key]?.value ?? ""))
   );
-  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options);
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   records.forEach((record, rowIdx) => {
     const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
