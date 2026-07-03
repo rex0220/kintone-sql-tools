@@ -31,18 +31,23 @@ test("buildPageQuery: ORDER BY あり・offset 500", () => {
 // buildCursorQuery
 // ----------------------------------------------------------------
 
-test("buildCursorQuery: baseQuery なし・cursorId=0", () => {
-  expect(buildCursorQuery("", 0)).toBe("");
+test("buildCursorQuery: baseQuery なし・cursorId=0 でも order by を付与する", () => {
+  expect(buildCursorQuery("", 0)).toBe("order by $id asc");
 });
 
-test("buildCursorQuery: baseQuery あり・cursorId=0", () => {
+test("buildCursorQuery: baseQuery あり・cursorId=0 でも order by を付与する", () => {
   expect(buildCursorQuery('ステータス = "完了"', 0))
-    .toBe('ステータス = "完了"');
+    .toBe('ステータス = "完了" order by $id asc');
 });
 
-test("buildCursorQuery: cursorId > 0（カーソルリセット後）", () => {
+test("buildCursorQuery: cursorId > 0（カーソルリセット後）は base を括弧で包む", () => {
   expect(buildCursorQuery('ステータス = "完了"', 9500))
-    .toBe('ステータス = "完了" and $id > 9500 order by $id asc');
+    .toBe('(ステータス = "完了") and $id > 9500 order by $id asc');
+});
+
+test("buildCursorQuery: OR 条件の baseQuery でも意味が変わらない（括弧付与）", () => {
+  expect(buildCursorQuery('区分 = "A" or 区分 = "B"', 9500))
+    .toBe('(区分 = "A" or 区分 = "B") and $id > 9500 order by $id asc');
 });
 
 // ----------------------------------------------------------------
@@ -130,9 +135,9 @@ test("offset がページごとに正しく付与される（カーソルクエ�
   );
   await fetchAll(fetcher, 100, 'ステータス = "完了"', [], { pageSize: 500 });
 
-  expect(calls[0]).toBe('ステータス = "完了" limit 500 offset 0');
-  expect(calls[1]).toBe('ステータス = "完了" limit 500 offset 500');
-  expect(calls[2]).toBe('ステータス = "完了" limit 500 offset 1000');
+  expect(calls[0]).toBe('ステータス = "完了" order by $id asc limit 500 offset 0');
+  expect(calls[1]).toBe('ステータス = "完了" order by $id asc limit 500 offset 500');
+  expect(calls[2]).toBe('ステータス = "完了" order by $id asc limit 500 offset 1000');
 });
 
 test("pageSize オプションを変更できる", async () => {
@@ -189,9 +194,9 @@ test("10000件超: offset リセット後に $id > lastId クエリが発行さ�
 
   expect(result).toHaveLength(10500);
 
-  // ページ 1〜20: baseQuery（空）で offset 0〜9500
-  expect(calls[0]).toBe("limit 500 offset 0");
-  expect(calls[19]).toBe("limit 500 offset 9500");
+  // ページ 1〜20: baseQuery（空）+ order by $id asc で offset 0〜9500
+  expect(calls[0]).toBe("order by $id asc limit 500 offset 0");
+  expect(calls[19]).toBe("order by $id asc limit 500 offset 9500");
 
   // ページ 21: カーソルが 10000 にリセットされ offset 0 から再開
   expect(calls[20]).toBe("$id > 10000 order by $id asc limit 500 offset 0");

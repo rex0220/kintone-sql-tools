@@ -102,7 +102,7 @@ test("SELECT ORDER BY（並列取得時）: API クエリに元の order by を�
   ) as SelectResult;
 
   expect(result.type).toBe("SELECT");
-  expect(client.getCalls[0].query).toBe("limit 500 offset 0");
+  expect(client.getCalls[0].query).toBe("order by $id asc limit 500 offset 0");
   expect(client.getCalls[0].query).not.toContain("担当者名 asc and");
 });
 
@@ -1595,4 +1595,36 @@ test("metrics: SHOW APPS は appsCalls を数える", async () => {
 
   expect(result.metrics!.appsCalls).toBe(1);
   expect(result.metrics!.getCalls).toBe(0);
+});
+
+// ----------------------------------------------------------------
+// UPSERT — 既存判定の挙動固定
+// ----------------------------------------------------------------
+
+test("UPSERT: キーが複数レコードにヒットした場合は最大 $id（最新）を更新する", async () => {
+  const records = [
+    makeRecord({ $id: "5", 顧客名: "X" }),
+    makeRecord({ $id: "9", 顧客名: "X" }),
+    makeRecord({ $id: "7", 顧客名: "X" }),
+  ];
+  const client = makeClient({ records });
+  await execute(
+    "UPSERT INTO APP77010 (顧客名, ランク) VALUES ('X', 'A') ON DUPLICATE (顧客名)",
+    client
+  );
+
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(9);
+  expect(client.postCalls).toHaveLength(0);
+});
+
+test("UPSERT: キーがヒットしない場合は INSERT する", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  await execute(
+    "UPSERT INTO APP77011 (顧客名, ランク) VALUES ('Y', 'B') ON DUPLICATE (顧客名)",
+    client
+  );
+
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.putCalls).toHaveLength(0);
 });

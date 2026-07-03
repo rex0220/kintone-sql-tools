@@ -941,6 +941,23 @@ async function fetchTableRecordsForFullScan(
   return expandSubtableRecords(parentRecords, table.subtableCode);
 }
 
+/**
+ * UPSERT の既存判定でキーが複数レコードにヒットした場合、最大 $id（最新レコード）を
+ * 更新対象に選ぶ。fetchAll のページングが $id 昇順になっても挙動が変わらないよう
+ * 明示的に選択する。
+ */
+function maxRecordId(records: KintoneRecord[]): number {
+  let max = Number.NEGATIVE_INFINITY;
+  for (const r of records) {
+    const n = Number(r["$id"]?.value);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  if (!Number.isFinite(max)) {
+    throw new Error("レコードに数値の $id が含まれていません。");
+  }
+  return max;
+}
+
 function toScalarText(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === null || value === undefined) return "";
@@ -1488,8 +1505,7 @@ async function executeUpsert(
     });
 
     if (existing.length > 0) {
-      const id = Number(existing[0]["$id"].value);
-      toUpdate.push({ id, record });
+      toUpdate.push({ id: maxRecordId(existing), record });
     } else {
       toInsert.push(record);
     }
@@ -1994,7 +2010,7 @@ async function executeUpsertSelect(
     );
 
     if (existing.length > 0) {
-      toUpdate.push({ id: Number(existing[0]["$id"].value), record });
+      toUpdate.push({ id: maxRecordId(existing), record });
     } else {
       toInsert.push(record);
     }

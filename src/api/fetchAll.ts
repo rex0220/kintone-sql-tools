@@ -222,19 +222,30 @@ async function fetchPage(
 }
 
 /**
- * カーソル条件（$id > cursorId order by $id asc）を baseQuery に付与する。
+ * カーソル条件を baseQuery に付与する。
+ *
+ * ページングの安定化のため、初回ウィンドウ（cursorId=0）から常に
+ * "order by $id asc" を付与する。順序保証のない offset ページングは
+ * 並列取得時の取りこぼし・カーソル切替時の重複取得の原因になる。
+ *
+ * カーソル条件を AND 結合する際は baseQuery を括弧で包む
+ * （"A or B and $id > N" への意味変化を防ぐ）。
  *
  * 例:
  *   buildCursorQuery("", 0)
- *     → "$id > 0 order by $id asc"
+ *     → "order by $id asc"
+ *   buildCursorQuery('ステータス = "完了"', 0)
+ *     → 'ステータス = "完了" order by $id asc'
  *   buildCursorQuery('ステータス = "完了"', 500)
- *     → 'ステータス = "完了" and $id > 500 order by $id asc'
+ *     → '(ステータス = "完了") and $id > 500 order by $id asc'
  */
 export function buildCursorQuery(baseQuery: string, cursorId: number): string {
-  if (cursorId <= 0) return baseQuery.trimEnd();
-  const cursor = `$id > ${cursorId} order by $id asc`;
   const base = baseQuery.trimEnd();
-  return base ? `${base} and ${cursor}` : cursor;
+  if (cursorId <= 0) {
+    return base ? `${base} order by $id asc` : "order by $id asc";
+  }
+  const cursor = `$id > ${cursorId} order by $id asc`;
+  return base ? `(${base}) and ${cursor}` : cursor;
 }
 
 /**
