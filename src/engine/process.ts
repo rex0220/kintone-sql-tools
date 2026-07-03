@@ -401,16 +401,64 @@ export function applyOrderBy(
 ): ProcessRow[] {
   if (orderBy.length === 0) return rows;
 
-  return [...rows].sort((a, b) => {
-    for (const { key, direction } of orderBy) {
-      const av = evalOrderKey(key, a);
-      const bv = evalOrderKey(key, b);
+  // キーごとの比較設定（選択肢順マップ / ソート種別）を 1 回だけ解決
+  const keyMeta: SortKeyMeta[] = orderBy.map(({ key }) => ({
+    orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : undefined,
+    sortKind: key.type === "FIELD_NAME" ? sortKinds?.get(key.name) : undefined,
+  }));
 
-      const cmp = compareOrderValues(av, bv, key, optionOrders, sortKinds);
-      if (cmp !== 0) return direction === "ASC" ? cmp : -cmp;
+  // ソートキーを行ごとに前計算する（比較のたびの式評価・数値変換を避ける）
+  const decorated = rows.map((row) => ({
+    row,
+    keys: orderBy.map(({ key }, i): SortKey => {
+      const s = evalOrderKey(key, row);
+      const n = Number(s);
+      const orderMap = keyMeta[i].orderMap;
+      return {
+        s,
+        n,
+        isNum: !Number.isNaN(n),
+        rank: orderMap ? minChoiceIndex(parseChoiceValues(s), orderMap) : 0,
+      };
+    }),
+  }));
+
+  decorated.sort((a, b) => {
+    for (let i = 0; i < orderBy.length; i++) {
+      const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
+      if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
     }
     return 0;
   });
+
+  return decorated.map((d) => d.row);
+}
+
+interface SortKey {
+  /** 文字列値 */
+  s: string;
+  /** 数値解釈（NaN の場合は isNum=false） */
+  n: number;
+  isNum: boolean;
+  /** 選択肢順ランク（orderMap がある場合のみ有効） */
+  rank: number;
+}
+
+interface SortKeyMeta {
+  orderMap?: Map<string, number>;
+  sortKind?: "number" | "string";
+}
+
+function compareSortKeys(a: SortKey, b: SortKey, meta: SortKeyMeta): number {
+  if (meta.orderMap) {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    return a.s.localeCompare(b.s, "ja");
+  }
+  if (meta.sortKind === "string") {
+    return a.s.localeCompare(b.s, "ja");
+  }
+  // sortKind="number" / 自動判定: 両辺とも数値のときだけ数値比較（従来と同じ規則）
+  return a.isNum && b.isNum ? a.n - b.n : a.s.localeCompare(b.s, "ja");
 }
 
 function evalOrderKey(key: OrderByKey, row: ProcessRow): string {
@@ -419,47 +467,6 @@ function evalOrderKey(key: OrderByKey, row: ProcessRow): string {
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
   }
-}
-
-function compareOrderValues(
-  av: string,
-  bv: string,
-  key: OrderByKey,
-  optionOrders?: OptionOrderMap,
-  sortKinds?: FieldSortKindMap
-): number {
-  if (key.type === "FIELD_NAME") {
-    const orderMap = optionOrders?.get(key.name);
-    if (orderMap) {
-      const ac = compareByChoiceOrder(av, bv, orderMap);
-      if (ac !== 0) return ac;
-      return av.localeCompare(bv, "ja");
-    }
-
-    const sortKind = sortKinds?.get(key.name);
-    if (sortKind === "number") {
-      return compareAsNumber(av, bv);
-    }
-    if (sortKind === "string") {
-      return av.localeCompare(bv, "ja");
-    }
-  }
-
-  // 数値比較が可能な場合は数値として比較
-  return compareAuto(av, bv);
-}
-
-function compareByChoiceOrder(
-  av: string,
-  bv: string,
-  orderMap: Map<string, number>
-): number {
-  const aValues = parseChoiceValues(av);
-  const bValues = parseChoiceValues(bv);
-  const aRank = minChoiceIndex(aValues, orderMap);
-  const bRank = minChoiceIndex(bValues, orderMap);
-  if (aRank !== bRank) return aRank - bRank;
-  return 0;
 }
 
 function parseChoiceValues(raw: string): string[] {
@@ -486,20 +493,6 @@ function minChoiceIndex(values: string[], orderMap: Map<string, number>): number
     if (rank < min) min = rank;
   }
   return min;
-}
-
-function compareAsNumber(av: string, bv: string): number {
-  const an = Number(av);
-  const bn = Number(bv);
-  const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-  return numeric ? an - bn : av.localeCompare(bv, "ja");
-}
-
-function compareAuto(av: string, bv: string): number {
-  const an = Number(av);
-  const bn = Number(bv);
-  const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-  return numeric ? an - bn : av.localeCompare(bv, "ja");
 }
 
 // ============================================================
