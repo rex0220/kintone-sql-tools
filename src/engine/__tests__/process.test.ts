@@ -1122,3 +1122,40 @@ test("MAX / MIN: 150,000 行でも RangeError にならない", () => {
   expect(result[0]["mx"]).toBe("150000");
   expect(result[0]["mn"]).toBe("1");
 });
+
+// ----------------------------------------------------------------
+// DISTINCT — キー同一性（区切り文字衝突・キー集合の差異）
+// ----------------------------------------------------------------
+
+test("DISTINCT: 値に区切り文字（\x00）を含んでも誤同一視しない", () => {
+  const rows: ProcessRow[] = [
+    { a: "1\x002", b: "3" },
+    { a: "1", b: "2\x003" },
+  ];
+  const stmt = parseSelect("SELECT DISTINCT a, b FROM APP100");
+  const result = applyDistinct(rows, stmt.columns);
+  expect(result).toHaveLength(2);
+});
+
+test("DISTINCT *: 後続行にのみ存在するキーも重複判定に含める", () => {
+  const rows: ProcessRow[] = [
+    { a: "1" },
+    { a: "1", b: "" },
+    { a: "1" },
+  ];
+  const stmt = parseSelect("SELECT DISTINCT * FROM APP100");
+  const result = applyDistinct(rows, stmt.columns);
+  // {a:"1"}（b 欠損）と {a:"1", b:""} は別の行、3 行目は 1 行目と重複
+  expect(result).toHaveLength(2);
+});
+
+test("DISTINCT *: 同一値の行は重複除去される", () => {
+  const rows: ProcessRow[] = [
+    { a: "1", b: "x" },
+    { a: "1", b: "x" },
+    { a: "2", b: "x" },
+  ];
+  const stmt = parseSelect("SELECT DISTINCT * FROM APP100");
+  const result = applyDistinct(rows, stmt.columns);
+  expect(result).toHaveLength(2);
+});

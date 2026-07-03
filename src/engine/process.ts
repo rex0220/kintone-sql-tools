@@ -357,33 +357,66 @@ export function applyDistinct(
   rows: ProcessRow[],
   columns: SelectColumn[]
 ): ProcessRow[] {
+  if (rows.length === 0) return rows;
+  const keyFor = buildDistinctKeyBuilder(rows, columns);
   const seen = new Set<string>();
   return rows.filter((row) => {
-    const key = buildDistinctKey(row, columns);
+    const key = keyFor(row);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-function buildDistinctKey(row: ProcessRow, columns: SelectColumn[]): string {
+/**
+ * DISTINCT 用のキー生成関数を構築する。
+ *
+ * 列リストの確定（WILDCARD / PARENT_WILDCARD は全行のキー集合の union）は
+ * 呼び出しごとに 1 回だけ行い、行ループでは値の収集のみ行う。
+ * 値は JSON.stringify で結合し、区切り文字の衝突（値に \x00 等を含むケース）と
+ * 「キー欠損（null）」と「空文字（""）」の区別を保証する。
+ */
+function buildDistinctKeyBuilder(
+  rows: ProcessRow[],
+  columns: SelectColumn[]
+): (row: ProcessRow) => string {
+  // SELECT * → 全行のキー集合の union（後続行にのみ存在するキーも判定に含める）
   if (columns.some((c) => c.type === "WILDCARD")) {
-    // SELECT * → 全フィールドを含むキー
-    return JSON.stringify(Object.entries(row).sort());
-  }
-  const values: string[] = [];
-  for (const col of columns) {
-    if (col.type === "FIELD") {
-      values.push(row[col.field] ?? "");
-      continue;
+    const allKeys = new Set<string>();
+    for (const row of rows) {
+      for (const k of Object.keys(row)) allKeys.add(k);
     }
-    if (col.type === "PARENT_WILDCARD") {
-      for (const key of Object.keys(row).filter((k) => k.startsWith("_p.")).sort()) {
-        values.push(row[key] ?? "");
+    const keys = [...allKeys].sort();
+    return (row) => JSON.stringify(keys.map((k) => (row[k] !== undefined ? row[k] : null)));
+  }
+
+  // _p.* の union（PARENT_WILDCARD がある場合のみ収集）
+  let sortedParentKeys: string[] = [];
+  if (columns.some((c) => c.type === "PARENT_WILDCARD")) {
+    const parentKeys = new Set<string>();
+    for (const row of rows) {
+      for (const k of Object.keys(row)) {
+        if (k.startsWith("_p.")) parentKeys.add(k);
       }
     }
+    sortedParentKeys = [...parentKeys].sort();
   }
-  return values.join("\x00");
+
+  return (row) => {
+    const values: Array<string | null> = [];
+    for (const col of columns) {
+      if (col.type === "FIELD") {
+        values.push(row[col.field] ?? "");
+        continue;
+      }
+      if (col.type === "PARENT_WILDCARD") {
+        for (const k of sortedParentKeys) {
+          values.push(row[k] !== undefined ? row[k] : null);
+        }
+      }
+    }
+    return JSON.stringify(values);
+  };
 }
 
 // ============================================================

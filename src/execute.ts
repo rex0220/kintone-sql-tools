@@ -634,7 +634,8 @@ async function executeUnion(
 function deduplicateRows(rows: ProcessRow[], columns: string[]): ProcessRow[] {
   const seen = new Set<string>();
   return rows.filter((row) => {
-    const key = columns.map((c) => row[c] ?? "").join("\0");
+    // JSON.stringify で結合し、値に区切り文字を含む場合の誤同一視を防ぐ
+    const key = JSON.stringify(columns.map((c) => row[c] ?? ""));
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
