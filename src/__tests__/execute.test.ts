@@ -1650,3 +1650,74 @@ test("SELECT 列の同一スカラーサブクエリは 1 回だけ実行され�
   const subqueryCalls = client.getCalls.filter((c) => c.app === 77021);
   expect(subqueryCalls).toHaveLength(1);
 });
+
+test("UPSERT: 既存判定はキーを 50 件ずつの in (...) チャンクでまとめて検索する", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  const values = Array.from({ length: 120 }, (_, i) => `('K${i}', 'v')`).join(", ");
+  await execute(
+    `UPSERT INTO APP77012 (顧客コード, ランク) VALUES ${values} ON DUPLICATE (顧客コード)`,
+    client
+  );
+
+  // 120 ユニークキー → 50 件チャンク × 3 回の GET
+  expect(client.getCalls).toHaveLength(3);
+  expect(client.getCalls[0].query).toContain("顧客コード in (");
+  expect(client.getCalls[0].fields).toEqual(["$id", "顧客コード"]);
+  // 全行 INSERT → 100 件バッチ × 2 回
+  expect(client.postCalls).toHaveLength(2);
+});
+
+test("UPSERT: 複合キーは第 1 キーで検索し残りキーをクライアント側で照合する", async () => {
+  const records = [
+    makeRecord({ $id: "1", k1: "A", k2: "1" }),
+    makeRecord({ $id: "2", k1: "A", k2: "2" }),
+  ];
+  const client = makeClient({ records, postIds: ["9"] });
+  await execute(
+    "UPSERT INTO APP77013 (k1, k2, v) VALUES ('A', '2', 'x'), ('A', '3', 'y') ON DUPLICATE (k1, k2)",
+    client
+  );
+
+  // (A,2) → $id=2 の UPDATE、(A,3) → INSERT
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(2);
+  expect(client.postCalls).toHaveLength(1);
+});
+
+test("UPSERT: 空文字キーは in にまとめず行ごとに検索する（従来挙動）", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  await execute(
+    "UPSERT INTO APP77014 (顧客コード, ランク) VALUES ('', 'v') ON DUPLICATE (顧客コード)",
+    client
+  );
+
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain('顧客コード = ""');
+  expect(client.getCalls[0].query).not.toContain("in (");
+});
+
+test("UPSERT SELECT: 既存判定が一括検索になる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77031: [
+        makeRecord({ $id: "1", 顧客名: "X" }),
+        makeRecord({ $id: "2", 顧客名: "Y" }),
+      ],
+      77030: [makeRecord({ $id: "3", 顧客名: "X" })],
+    },
+    postIds: ["9"],
+  });
+  await execute(
+    "UPSERT INTO APP77030 (顧客名) SELECT 顧客名 FROM APP77031 ON DUPLICATE (顧客名)",
+    client
+  );
+
+  // 転送先アプリへの既存判定 GET は 1 回だけ
+  const destGets = client.getCalls.filter((c) => c.app === 77030);
+  expect(destGets).toHaveLength(1);
+  expect(destGets[0].query).toContain("顧客名 in (");
+  // X → UPDATE($id=3)、Y → INSERT
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(3);
+  expect(client.postCalls).toHaveLength(1);
+});

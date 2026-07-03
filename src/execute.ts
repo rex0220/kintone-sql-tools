@@ -941,6 +941,106 @@ async function fetchTableRecordsForFullScan(
   return expandSubtableRecords(parentRecords, table.subtableCode);
 }
 
+// ============================================================
+// UPSERT 既存判定の一括解決
+//
+// 従来は 1 行ごとに GET を発行していた（N+1）。キー値を in (...) で
+// 50 件ずつまとめて取得し、「キー値 → 最大 $id」の索引を先に構築する。
+// ============================================================
+
+const UPSERT_IN_CHUNK_SIZE = 50;
+
+interface UpsertTargetIndex {
+  /** キー値そのまま（\0 結合）→ 最大 $id */
+  raw: Map<string, number>;
+  /** 数値正規化済みキー（"5.0" と "5" を同一視）→ 最大 $id */
+  normalized: Map<string, number>;
+}
+
+/** 数値として解釈できるキー成分は正規形に揃える（数値フィールドの表記ゆれ対策） */
+function normalizeKeyPart(v: string): string {
+  const t = v.trim();
+  if (t !== "" && !Number.isNaN(Number(t))) return String(Number(t));
+  return v;
+}
+
+function upsertCompositeKey(parts: string[]): string {
+  return parts.join("\0");
+}
+
+function upsertNormalizedKey(parts: string[]): string {
+  return parts.map(normalizeKeyPart).join("\0");
+}
+
+/** 行キーに対応する既存レコード $id を索引から引く（完全一致 → 数値正規化の順） */
+function lookupUpsertTarget(index: UpsertTargetIndex, keyParts: string[]): number | undefined {
+  return index.raw.get(upsertCompositeKey(keyParts))
+    ?? index.normalized.get(upsertNormalizedKey(keyParts));
+}
+
+/**
+ * UPSERT 対象行のキー値をまとめて検索し、既存レコードの索引を構築する。
+ *
+ * - 第 1 キーを in (...) で 50 件ずつチャンク検索し、複合キーの残りは
+ *   取得レコードの値で照合する（索引キーに全成分を含める）
+ * - 空文字を含むキーは in (...) にまとめられないため従来どおり行ごとに検索
+ * - キーが複数レコードにヒットした場合は最大 $id（最新）を採用
+ */
+async function resolveUpsertTargets(
+  appId: number,
+  keyFields: string[],
+  rowKeyValues: string[][],
+  client: KintoneClient,
+  options: ExecuteOptions
+): Promise<UpsertTargetIndex> {
+  const maxRecords = options.maxRecords ?? 10_000;
+  const parallel = options.fetchParallel ?? 1;
+  const index: UpsertTargetIndex = { raw: new Map(), normalized: new Map() };
+
+  const setMax = (map: Map<string, number>, key: string, id: number): void => {
+    const cur = map.get(key);
+    if (cur === undefined || id > cur) map.set(key, id);
+  };
+  const addRecordToIndex = (parts: string[], id: number): void => {
+    setMax(index.raw, upsertCompositeKey(parts), id);
+    setMax(index.normalized, upsertNormalizedKey(parts), id);
+  };
+
+  // ユニークなキー組を「in (...) でまとめられる行」と「行ごと検索の行」に振り分け
+  const batchFirstKeys = new Set<string>();
+  const perRowKeys: string[][] = [];
+  const seen = new Set<string>();
+  for (const parts of rowKeyValues) {
+    const composite = upsertCompositeKey(parts);
+    if (seen.has(composite)) continue;
+    seen.add(composite);
+    if (parts.some((p) => p === "")) perRowKeys.push(parts);
+    else batchFirstKeys.add(parts[0]);
+  }
+
+  // 第 1 キーの in (...) チャンク検索
+  const fields = ["$id", ...keyFields];
+  for (const chunk of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
+    const query = `${keyFields[0]} in (${chunk.map(sqlQuote).join(",")})`;
+    const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords, parallel });
+    for (const rec of records) {
+      const id = Number(rec["$id"]?.value);
+      if (!Number.isFinite(id)) continue;
+      addRecordToIndex(keyFields.map((f) => toScalarText(rec[f]?.value)), id);
+    }
+  }
+
+  // 空文字キーを含む行は従来どおり行ごとに検索
+  for (const parts of perRowKeys) {
+    const query = keyFields.map((f, i) => `${f} = ${sqlQuote(parts[i])}`).join(" and ");
+    const existing = await fetchAll(client.getRecords, appId, query, ["$id"], { maxRecords, parallel });
+    if (existing.length === 0) continue;
+    addRecordToIndex(parts, maxRecordId(existing));
+  }
+
+  return index;
+}
+
 /**
  * UPSERT の既存判定でキーが複数レコードにヒットした場合、最大 $id（最新レコード）を
  * 更新対象に選ぶ。fetchAll のページングが $id 昇順になっても挙動が変わらないよう
@@ -1462,37 +1562,26 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
-  const maxRecords = options.maxRecords ?? 10_000;
-
-  // 1. 各行のキー条件で既存レコードを一括検索
-  //    keyFields が複数の場合は AND 結合、行が複数の場合は OR 結合
+  // 1. 各行のキー値を評価し、既存レコードを一括検索（in (...) チャンク）
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
 
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
-  for (const row of stmt.values) {
-    // キーフィールドの値を取り出す
-    const keyConditions = stmt.keyFields.map((key) => {
+  const rowKeyValues: string[][] = stmt.values.map((row) =>
+    stmt.keyFields.map((key) => {
       const idx = stmt.fields.indexOf(key);
       if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
       const val = row[idx];
-      const valStr = val.type === "STRING" ? val.value
+      return val.type === "STRING" ? val.value
         : val.type === "NUMBER" ? String(val.value)
         : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
         : val.elements.map((e) => e.value).join(",");
-      return `${key} = "${valStr.replace(/"/g, '\\"')}"`;
-    });
-    const query = keyConditions.join(" and ");
+    })
+  );
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options);
 
-    const existing = await fetchAll(
-      client.getRecords,
-      stmt.appId,
-      query,
-      ["$id"],
-      { maxRecords, parallel: options.fetchParallel ?? 1 }
-    );
-
+  stmt.values.forEach((row, rowIdx) => {
     // レコード全体を組み立て
     const record: KintoneRecord = {};
     stmt.fields.forEach((field, i) => {
@@ -1504,12 +1593,13 @@ async function executeUpsert(
       }
     });
 
-    if (existing.length > 0) {
-      toUpdate.push({ id: maxRecordId(existing), record });
+    const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
+    if (id !== undefined) {
+      toUpdate.push({ id, record });
     } else {
       toInsert.push(record);
     }
-  }
+  });
 
   // 2. 確認ダイアログ（INSERT + UPDATE の合計）
   if (options.confirm && (toInsert.length + toUpdate.length) > 0) {
@@ -1965,8 +2055,6 @@ async function executeUpsertSelect(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
-  const maxRecords = options.maxRecords ?? 10_000;
-
   // 1. SELECT を実行して結果行を取得
   const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
@@ -1987,34 +2075,29 @@ async function executeUpsertSelect(
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
 
-  for (const row of rows) {
-    // レコードを組み立て（SELECT 列 → UPSERT フィールドに位置対応でマップ）
+  // レコードを組み立て（SELECT 列 → UPSERT フィールドに位置対応でマップ）
+  const records: KintoneRecord[] = rows.map((row) => {
     const record: KintoneRecord = {};
     stmt.fields.forEach((field, i) => {
       record[field] = { value: row[columns[i]] ?? "" };
     });
+    return record;
+  });
 
-    // キー条件で既存レコードを検索
-    const keyConditions = stmt.keyFields.map((key) => {
-      const val = String(record[key]?.value ?? "");
-      return `${key} = "${val.replace(/"/g, '\\"')}"`;
-    });
-    const query = keyConditions.join(" and ");
+  // キー値で既存レコードを一括検索（in (...) チャンク）
+  const rowKeyValues: string[][] = records.map((record) =>
+    stmt.keyFields.map((key) => String(record[key]?.value ?? ""))
+  );
+  const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options);
 
-    const existing = await fetchAll(
-      client.getRecords,
-      stmt.appId,
-      query,
-      ["$id"],
-      { maxRecords, parallel: options.fetchParallel ?? 1 }
-    );
-
-    if (existing.length > 0) {
-      toUpdate.push({ id: maxRecordId(existing), record });
+  records.forEach((record, rowIdx) => {
+    const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
+    if (id !== undefined) {
+      toUpdate.push({ id, record });
     } else {
       toInsert.push(record);
     }
-  }
+  });
 
   // 3. 確認ダイアログ
   if (options.confirm && (toInsert.length + toUpdate.length) > 0) {
