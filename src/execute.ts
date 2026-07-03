@@ -474,8 +474,10 @@ async function executeFullScanSelect(
   const parallel = options.fetchParallel ?? 1;
 
   // サブクエリを事前実行（IN (SELECT ...) の値セットを解決）
-  await resolveSubqueries(stmt.where,  client, options, cacheContext);
-  await resolveSubqueries(stmt.having, client, options, cacheContext);
+  await Promise.all([
+    resolveSubqueries(stmt.where,  client, options, cacheContext),
+    resolveSubqueries(stmt.having, client, options, cacheContext),
+  ]);
 
   // テーブルごとの push down 条件を計算
   const tableConditions = new Map<string, WhereExpr>();
@@ -593,12 +595,13 @@ async function executeUnion(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<SelectResult> {
-  // 左辺を再帰的に実行（ネストした UNION 対応）
-  const leftResult: SelectResult = stmt.left.type === "UNION"
-    ? await executeUnion(stmt.left, client, options, cacheContext)
-    : await executeSelect(stmt.left, client, options, cacheContext);
-
-  const rightResult = await executeSelect(stmt.right, client, options, cacheContext);
+  // 左辺（ネストした UNION 対応）と右辺を並列実行
+  const [leftResult, rightResult] = await Promise.all([
+    stmt.left.type === "UNION"
+      ? executeUnion(stmt.left, client, options, cacheContext)
+      : executeSelect(stmt.left, client, options, cacheContext),
+    executeSelect(stmt.right, client, options, cacheContext),
+  ]);
 
   // 右辺の行を左辺のカラム名に位置対応でリマップ
   const leftCols  = leftResult.columns;
@@ -787,8 +790,10 @@ async function executeQueryWithCte(
   cacheContext: string
 ): Promise<SelectResult> {
   if (query.type === "UNION") {
-    const leftResult  = await executeQueryWithCte(query.left,  client, options, cteCache, cacheContext);
-    const rightResult = await executeQueryWithCte(query.right, client, options, cteCache, cacheContext);
+    const [leftResult, rightResult] = await Promise.all([
+      executeQueryWithCte(query.left,  client, options, cteCache, cacheContext),
+      executeQueryWithCte(query.right, client, options, cteCache, cacheContext),
+    ]);
     const leftCols    = leftResult.columns;
     const rightCols   = rightResult.columns;
     const remapped    = rightResult.rows.map((row) => {
@@ -831,8 +836,10 @@ async function executeFullScanWithCte(
   const parallel = options.fetchParallel ?? 1;
 
   // サブクエリを事前実行
-  await resolveSubqueries(stmt.where,  client, options, cacheContext);
-  await resolveSubqueries(stmt.having, client, options, cacheContext);
+  await Promise.all([
+    resolveSubqueries(stmt.where,  client, options, cacheContext),
+    resolveSubqueries(stmt.having, client, options, cacheContext),
+  ]);
 
   const tables = new Map<string | null, KintoneRecord[]>();
 
@@ -2176,8 +2183,9 @@ function parseSql(sql: string) {
 }
 
 /**
- * WhereExpr を再帰的に走査し、SUBQUERY_IN_LIST ノードのサブクエリを実行して
- * resolved: Set<string> を埋める（破壊的変更）。
+ * WhereExpr を再帰的に走査し、SUBQUERY_IN_LIST / SCALAR_SUBQUERY / EXISTS の
+ * サブクエリを実行して resolved を埋める（破壊的変更）。
+ * 複数のサブクエリは収集後に並列実行する。
  */
 async function resolveSubqueries(
   where: WhereExpr | null,
@@ -2185,36 +2193,51 @@ async function resolveSubqueries(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<void> {
+  const tasks: Array<Promise<void>> = [];
+  collectSubqueryTasks(where, client, options, cacheContext, tasks);
+  await Promise.all(tasks);
+}
+
+function collectSubqueryTasks(
+  where: WhereExpr | null,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tasks: Array<Promise<void>>
+): void {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
-        const result = await executeSelect(right.query, client, options, cacheContext);
-        const col = right.column ?? (result.columns[0] ?? "");
-        const resolved = new Set(result.rows.map((r) => r[col] ?? ""));
-        (right as ResolvedSubqueryInList).resolved = resolved;
+        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+          const col = right.column ?? (result.columns[0] ?? "");
+          (right as ResolvedSubqueryInList).resolved = new Set(result.rows.map((r) => r[col] ?? ""));
+        }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
-        const result = await executeSelect(right.query, client, options, cacheContext);
-        if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
-        if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
-        const col = result.columns[0] ?? "";
-        (right as ResolvedScalarSubquery).resolved = result.rows[0]?.[col] ?? "";
+        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+          if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
+          if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
+          const col = result.columns[0] ?? "";
+          (right as ResolvedScalarSubquery).resolved = result.rows[0]?.[col] ?? "";
+        }));
       }
       break;
     }
     case "LOGICAL":
-      await resolveSubqueries(where.left,  client, options, cacheContext);
-      await resolveSubqueries(where.right, client, options, cacheContext);
+      collectSubqueryTasks(where.left,  client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks);
       break;
     case "NOT":
     case "GROUP":
-      await resolveSubqueries(where.expr, client, options, cacheContext);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks);
       break;
     case "EXISTS": {
-      const result = await executeSelect(where.query, client, options, cacheContext);
-      (where as ResolvedExistsExpr).resolved = result.rowCount > 0;
+      const node = where;
+      tasks.push(executeSelect(node.query, client, options, cacheContext).then((result) => {
+        (node as ResolvedExistsExpr).resolved = result.rowCount > 0;
+      }));
       break;
     }
   }

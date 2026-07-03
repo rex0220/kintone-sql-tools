@@ -1721,3 +1721,54 @@ test("UPSERT SELECT: 既存判定が一括検索になる", async () => {
   expect(client.putCalls[0].records[0].id).toBe(3);
   expect(client.postCalls).toHaveLength(1);
 });
+
+// ----------------------------------------------------------------
+// サブクエリ / UNION の並列実行
+// ----------------------------------------------------------------
+
+function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): KintoneClient & { maxActive: () => number } {
+  let active = 0;
+  let max = 0;
+  return {
+    async getRecords(params) {
+      active += 1;
+      max = Math.max(max, active);
+      await new Promise((r) => setTimeout(r, 10));
+      active -= 1;
+      return { records: recordsByApp[params.app] ?? [] };
+    },
+    async postRecords() { return { ids: [] }; },
+    async putRecords() { /* noop */ },
+    async deleteRecords() { /* noop */ },
+    async getApps() { return []; },
+    async getFields() { return []; },
+    maxActive: () => max,
+  };
+}
+
+test("WHERE の複数サブクエリは並列に実行される", async () => {
+  const client = makeConcurrencyClient({
+    77041: [makeRecord({ $id: "1", a: "1", b: "1" })],
+    77042: [makeRecord({ a: "1" })],
+    77043: [makeRecord({ b: "1" })],
+  });
+  await execute(
+    "SELECT * FROM APP77041 WHERE a in (SELECT a FROM APP77042) or b in (SELECT b FROM APP77043)",
+    client
+  );
+  expect(client.maxActive()).toBeGreaterThanOrEqual(2);
+});
+
+test("UNION ALL の左辺と右辺は並列に実行される", async () => {
+  const client = makeConcurrencyClient({
+    77044: [makeRecord({ x: "1" })],
+    77045: [makeRecord({ x: "2" })],
+  });
+  const result = await execute(
+    "SELECT x FROM APP77044 UNION ALL SELECT x FROM APP77045",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(2);
+  expect(result.rows.map((r) => r["x"])).toEqual(["1", "2"]);
+  expect(client.maxActive()).toBeGreaterThanOrEqual(2);
+});
