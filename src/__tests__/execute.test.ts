@@ -1772,3 +1772,32 @@ test("UNION ALL の左辺と右辺は並列に実行される", async () => {
   expect(result.rows.map((r) => r["x"])).toEqual(["1", "2"]);
   expect(client.maxActive()).toBeGreaterThanOrEqual(2);
 });
+
+// ----------------------------------------------------------------
+// ORDER BY なし時のフィールド定義取得スキップ
+// ----------------------------------------------------------------
+
+test("SIMPLE SELECT: ORDER BY なしならフィールド定義を取得しない", async () => {
+  const records = [makeRecord({ $id: "1", 名前: "田中" })];
+  const client = makeClient({ records });
+  const result = await execute("SELECT * FROM APP77060", client) as SelectResult;
+
+  expect(result.metrics!.fieldCalls).toBe(0);
+});
+
+test("FULL_SCAN SELECT: ORDER BY なしならフィールド定義を取得しない", async () => {
+  const records = [makeRecord({ $id: "1", 種別: "A" })];
+  const client = makeClient({ records });
+  const result = await execute("SELECT COUNT(*) AS c FROM APP77061", client) as SelectResult;
+
+  expect(result.rows[0]["c"]).toBe("1");
+  expect(result.metrics!.fieldCalls).toBe(0);
+});
+
+test("SIMPLE SELECT: ORDER BY ありならフィールド定義を取得する（従来動作）", async () => {
+  const records = [makeRecord({ $id: "1", 名前: "田中" })];
+  const client = makeClient({ records });
+  const result = await execute("SELECT * FROM APP77062 ORDER BY 名前", client) as SelectResult;
+
+  expect(result.metrics!.fieldCalls).toBe(1);
+});

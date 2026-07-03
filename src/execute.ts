@@ -412,8 +412,7 @@ async function executeSimpleSelect(
 
   let rows = records.map((r) => flatten(r, null));
   if (!useSingleGet) {
-    const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-    const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+    const { optionOrders, sortKinds } = await buildOrderByMetaForSelect(stmt, client, cacheContext);
     rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -450,12 +449,15 @@ async function validateSelectFieldCodes(
   }
 
   for (const [appId, fields] of appToFields.entries()) {
-    if (fields.size === 0) continue;
+    // システムフィールド（$id / _pid 等）は検証対象外のため、
+    // ユーザーフィールドが 1 つもなければフィールド定義の取得自体を省く
+    const userFields = [...fields].filter((f) => !isSystemLikeFieldCode(f));
+    if (userFields.length === 0) continue;
     const defs = await getFieldsCached(appId, client, cacheContext);
     // フィールド定義が取得できない環境（モック等）では検証をスキップする。
     if (defs.length === 0) continue;
     const validCodes = new Set(defs.map((d) => d.code));
-    const unknown = [...fields].filter((f) => !isSystemLikeFieldCode(f) && !validCodes.has(f));
+    const unknown = userFields.filter((f) => !validCodes.has(f));
     if (unknown.length > 0) {
       throw new Error(`ArgumentError: unknown field code(s): ${unknown.join(", ")} (APP${appId})`);
     }
@@ -537,6 +539,13 @@ async function executeFullScanSelect(
     }
   }
 
+  // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
+  // （レコードに依存しないため、フェッチ完了を待つ必要がない）
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
+  orderByMetaPromise.catch(() => { /* 同上 */ });
+
   // メインテーブルの完了を待つ
   const mainRecords = await mainFetch;
   const tables = new Map<string | null, KintoneRecord[]>();
@@ -574,10 +583,9 @@ async function executeFullScanSelect(
     tables.set(join.table.alias, joinRecords);
   }));
 
-  // スカラーサブクエリ列を事前実行してキャッシュ
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+  // 並行解決していたスカラーサブクエリ・ORDER BY メタ情報を回収
+  const scalarCache = await scalarCachePromise;
+  const { optionOrders, sortKinds } = await orderByMetaPromise;
 
   // JS 集計パイプライン
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
@@ -841,6 +849,12 @@ async function executeFullScanWithCte(
     resolveSubqueries(stmt.having, client, options, cacheContext),
   ]);
 
+  // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
+  orderByMetaPromise.catch(() => { /* 同上 */ });
+
   const tables = new Map<string | null, KintoneRecord[]>();
 
   // メインテーブル取得
@@ -892,9 +906,8 @@ async function executeFullScanWithCte(
   });
   await Promise.all(joinFetches);
 
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext);
-  const optionOrders = await buildOptionOrdersForSelect(stmt, client, cacheContext);
-  const sortKinds = await buildSortKindsForSelect(stmt, client, cacheContext);
+  const scalarCache = await scalarCachePromise;
+  const { optionOrders, sortKinds } = await orderByMetaPromise;
   const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -1254,6 +1267,31 @@ async function getSortKindMapByApp(
   }
   setScopedCacheValue(sortKindCache, cacheContext, appId, map);
   return map;
+}
+
+interface OrderByMeta {
+  optionOrders: OptionOrderMap;
+  sortKinds: FieldSortKindMap;
+}
+
+/**
+ * ORDER BY の比較に使う選択肢順・ソート種別マップを取得する。
+ * ORDER BY がない場合は applyOrderBy が即 return するため、
+ * フィールド定義の取得自体をスキップする。
+ */
+async function buildOrderByMetaForSelect(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<OrderByMeta> {
+  if (stmt.orderBy.length === 0) {
+    return { optionOrders: new Map(), sortKinds: new Map() };
+  }
+  const [optionOrders, sortKinds] = await Promise.all([
+    buildOptionOrdersForSelect(stmt, client, cacheContext),
+    buildSortKindsForSelect(stmt, client, cacheContext),
+  ]);
+  return { optionOrders, sortKinds };
 }
 
 async function buildOptionOrdersForSelect(
