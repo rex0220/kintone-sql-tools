@@ -2162,7 +2162,8 @@ async function resolveSetSubqueries(
 
 /**
  * SELECT 列のスカラーサブクエリを事前実行し、列インデックス → 値のマップを返す。
- * 同一クエリは 1 回だけ実行（非相関のため全行同一値）。
+ * 同一クエリ（AST が一致）は 1 回だけ実行し、異なるクエリは並列実行する。
+ * （非相関のため全行同一値）
  */
 async function resolveScalarColumns(
   columns: SelectStatement["columns"],
@@ -2170,16 +2171,27 @@ async function resolveScalarColumns(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<Map<number, string>> {
-  const cache = new Map<number, string>();
+  const byQuery = new Map<string, Promise<string>>();
+  const pending: Array<[number, Promise<string>]> = [];
   for (let i = 0; i < columns.length; i++) {
     const col = columns[i];
     if (col.type !== "SCALAR_SUBQUERY_COL") continue;
-    const result = await executeSelect(col.query, client, options, cacheContext);
-    if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
-    if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
-    const firstCol = result.columns[0] ?? "";
-    cache.set(i, result.rows[0]?.[firstCol] ?? "");
+    const key = JSON.stringify(col.query);
+    let promise = byQuery.get(key);
+    if (!promise) {
+      promise = executeSelect(col.query, client, options, cacheContext).then((result) => {
+        if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
+        if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
+        const firstCol = result.columns[0] ?? "";
+        return result.rows[0]?.[firstCol] ?? "";
+      });
+      byQuery.set(key, promise);
+    }
+    pending.push([i, promise]);
   }
+  const values = await Promise.all(pending.map(([, promise]) => promise));
+  const cache = new Map<number, string>();
+  pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
 }
 

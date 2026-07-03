@@ -1628,3 +1628,25 @@ test("UPSERT: キーがヒットしない場合は INSERT する", async () => {
   expect(client.postCalls).toHaveLength(1);
   expect(client.putCalls).toHaveLength(0);
 });
+
+// ----------------------------------------------------------------
+// スカラーサブクエリ列 — 重複排除
+// ----------------------------------------------------------------
+
+test("SELECT 列の同一スカラーサブクエリは 1 回だけ実行される", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77020: [makeRecord({ $id: "1", 名前: "田中" })],
+      77021: [makeRecord({ 金額: "9999" })],
+    },
+  });
+  const result = await execute(
+    "SELECT 名前, (SELECT MAX(金額) FROM APP77021) AS a, (SELECT MAX(金額) FROM APP77021) AS b FROM APP77020",
+    client
+  ) as SelectResult;
+
+  expect(result.rows[0]["a"]).toBe("9999");
+  expect(result.rows[0]["b"]).toBe("9999");
+  const subqueryCalls = client.getCalls.filter((c) => c.app === 77021);
+  expect(subqueryCalls).toHaveLength(1);
+});
