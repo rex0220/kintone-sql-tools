@@ -1108,3 +1108,17 @@ test("runFullScan: CASE WHEN THEN 文字列関数", () => {
   expect(result[0]["表示名"]).toBe("TANAKA");
   expect(result[1]["表示名"]).toBe("suzuki");
 });
+
+// ----------------------------------------------------------------
+// MAX / MIN — 大量要素（スプレッド起因の RangeError 回避）
+// ----------------------------------------------------------------
+
+test("MAX / MIN: 150,000 行でも RangeError にならない", () => {
+  const bigRows: ProcessRow[] = Array.from({ length: 150_000 }, (_, i) => ({
+    金額: String(i + 1),
+  }));
+  const stmt = parseSelect("SELECT MAX(金額) AS mx, MIN(金額) AS mn FROM APP100");
+  const result = applyGroupBy(bigRows, stmt.groupBy, stmt.columns);
+  expect(result[0]["mx"]).toBe("150000");
+  expect(result[0]["mn"]).toBe("1");
+});

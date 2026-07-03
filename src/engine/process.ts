@@ -136,6 +136,10 @@ export function applyJoin(
 
   const result: ProcessRow[] = [];
 
+  // LEFT JOIN: 右側が存在しない場合の空行テンプレート（RIGHT JOIN 側と同形）
+  const emptyRight: ProcessRow = {};
+  for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
+
   for (const lRow of leftRows) {
     const k = lRow[leftKey] ?? "";
     const matched = rightIndex.get(k) ?? [];
@@ -145,9 +149,6 @@ export function applyJoin(
         result.push({ ...lRow, ...rRow });
       }
     } else if (joinType === "LEFT") {
-      // LEFT JOIN: 右側が存在しない場合は空文字で埋める
-      const emptyRight: ProcessRow = {};
-      for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
       result.push({ ...lRow, ...emptyRight });
     }
     // INNER JOIN かつ非マッチ → 除外（何もしない）
@@ -275,9 +276,22 @@ function evalAggregate(
   switch (func) {
     case "SUM": return nums.reduce((a, b) => a + b, 0);
     case "AVG": return nums.length === 0 ? 0 : nums.reduce((a, b) => a + b, 0) / nums.length;
-    case "MAX": return nums.length === 0 ? 0 : Math.max(...nums);
-    case "MIN": return nums.length === 0 ? 0 : Math.min(...nums);
+    // Math.max(...nums) は要素数が多いと RangeError になるためループで求める
+    case "MAX": return nums.length === 0 ? 0 : maxOf(nums);
+    case "MIN": return nums.length === 0 ? 0 : minOf(nums);
   }
+}
+
+function maxOf(nums: number[]): number {
+  let m = nums[0];
+  for (const n of nums) if (n > m) m = n;
+  return m;
+}
+
+function minOf(nums: number[]): number {
+  let m = nums[0];
+  for (const n of nums) if (n < m) m = n;
+  return m;
 }
 
 /** 集計算術式を評価する（グループ行全体を受け取る） */

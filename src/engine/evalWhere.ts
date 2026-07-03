@@ -234,25 +234,36 @@ function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {
 // SQL の % → .* 、_ → . に変換して正規表現で評価
 // ------------------------------------------------------------
 
+// パターン → コンパイル済み正規表現のキャッシュ。
+// 全件フィルタでは同一パターンを行数分評価するため、行ごとのコンパイルを避ける。
+const likeRegexCache = new Map<string, RegExp>();
+const LIKE_REGEX_CACHE_MAX = 200;
+
 function matchLike(value: string, pattern: string): boolean {
   // kintone の LIKE はワイルドカード（% / _）なしでも部分一致（contains）
   // FULL_SCAN 時の JS 評価も同じ挙動にする
   if (!pattern.includes("%") && !pattern.includes("_")) {
     return value.includes(pattern);
   }
-  // パターン文字列を正規表現に変換
-  let regexStr = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const ch = pattern[i];
-    if (ch === "%") {
-      regexStr += ".*";
-    } else if (ch === "_") {
-      regexStr += ".";
-    } else {
-      // 正規表現特殊文字をエスケープ
-      regexStr += ch.replace(/[.+*?^${}()|[\]\\]/g, "\\$&");
+  let regex = likeRegexCache.get(pattern);
+  if (!regex) {
+    // パターン文字列を正規表現に変換
+    let regexStr = "^";
+    for (let i = 0; i < pattern.length; i++) {
+      const ch = pattern[i];
+      if (ch === "%") {
+        regexStr += ".*";
+      } else if (ch === "_") {
+        regexStr += ".";
+      } else {
+        // 正規表現特殊文字をエスケープ
+        regexStr += ch.replace(/[.+*?^${}()|[\]\\]/g, "\\$&");
+      }
     }
+    regexStr += "$";
+    regex = new RegExp(regexStr, "u");
+    if (likeRegexCache.size >= LIKE_REGEX_CACHE_MAX) likeRegexCache.clear();
+    likeRegexCache.set(pattern, regex);
   }
-  regexStr += "$";
-  return new RegExp(regexStr, "u").test(value);
+  return regex.test(value);
 }
