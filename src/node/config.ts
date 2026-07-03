@@ -25,6 +25,7 @@ export interface KsqlProfileConfig {
   tokenMap?: Record<string, string>;
   query?: {
     maxRecords?: number;
+    fetchParallel?: number;
     onLimit?: OnLimitMode;
     timeout?: number;
   };

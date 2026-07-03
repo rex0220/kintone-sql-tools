@@ -27,6 +27,7 @@ export interface CreateKsqlRuntimeInput {
   sql: string;
   profile?: string;
   maxRecords?: number;
+  fetchParallel?: number;
   onLimit?: OnLimitMode;
   timeout?: number;
   debug?: boolean;
@@ -40,6 +41,7 @@ export interface KsqlRuntime {
   client: KintoneClient;
   cacheContext: string;
   maxRecords: number;
+  fetchParallel: number;
   onLimit: OnLimitMode;
   timeout: number;
 }
@@ -71,6 +73,13 @@ export async function createKsqlRuntime(
     ?? envInt("KSQL_MAX_RECORDS")
     ?? profile.query?.maxRecords
     ?? 500;
+  const fetchParallel = input.fetchParallel
+    ?? envInt("KSQL_FETCH_PARALLEL")
+    ?? profile.query?.fetchParallel
+    ?? 3;
+  if (!Number.isInteger(fetchParallel) || fetchParallel < 1 || fetchParallel > 10) {
+    throw new Error("ArgumentError: fetchParallel must be an integer between 1 and 10.");
+  }
   const onLimit = input.onLimit
     ?? envOnLimit("KSQL_ON_LIMIT")
     ?? profile.query?.onLimit
@@ -223,6 +232,7 @@ export async function createKsqlRuntime(
     client: routedClient,
     cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
     maxRecords,
+    fetchParallel,
     onLimit,
     timeout,
   };

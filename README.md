@@ -113,6 +113,7 @@ Options:
   --dry-run                  Parse and show execution plan only
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
   --max-records <n>          Max records to fetch (default: 500)
+  --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --config <path>            Config file path (default: ./ksql.config.json)

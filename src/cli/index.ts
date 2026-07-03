@@ -58,6 +58,7 @@ Options:
   --dry-run                  Parse and show execution plan only
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
   --max-records <n>          Max records to fetch (default: 500)
+  --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --config <path>            Config file path (default: ./ksql.config.json)
@@ -111,6 +112,7 @@ interface CliConfig {
     tokenMap?: Record<string, string>;
     query?: {
       maxRecords?: number;
+      fetchParallel?: number;
       onLimit?: OnLimitMode;
       timeout?: number;
     };
@@ -146,6 +148,7 @@ interface ParsedArgs {
   dryRun: boolean;
   format: OutputFormat | null;
   maxRecords: number | null;
+  fetchParallel: number | null;
   onLimit: OnLimitMode | null;
   timeout: number | null;
   configPath: string | null;
@@ -190,6 +193,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     dryRun: false,
     format: null,
     maxRecords: null,
+    fetchParallel: null,
     onLimit: null,
     timeout: null,
     configPath: null,
@@ -314,6 +318,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(v);
       if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --max-records must be a positive integer.");
       out.maxRecords = n;
+      i++;
+      continue;
+    }
+    if (a === "--fetch-parallel") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 10) throw new Error("ArgumentError: --fetch-parallel must be an integer between 1 and 10.");
+      out.fetchParallel = n;
       i++;
       continue;
     }
@@ -751,6 +762,7 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   pushOpt(argv, "--token-file", base.tokenFile);
   pushOpt(argv, "--app", base.app);
   pushOpt(argv, "--max-records", base.maxRecords);
+  pushOpt(argv, "--fetch-parallel", base.fetchParallel);
   pushOpt(argv, "--on-limit", base.onLimit);
   pushOpt(argv, "--timeout", base.timeout);
   pushOpt(argv, "--output", base.outputPath);
@@ -1273,8 +1285,13 @@ async function run(): Promise<number> {
   }
 
   const maxRecords = args.maxRecords ?? envInt("KSQL_MAX_RECORDS") ?? profile.query?.maxRecords ?? 500;
+  const fetchParallel = args.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? 3;
   const onLimit = args.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile.query?.onLimit ?? "error";
   const timeout = args.timeout ?? envInt("KSQL_TIMEOUT") ?? profile.query?.timeout ?? 30000;
+  if (!Number.isInteger(fetchParallel) || fetchParallel < 1 || fetchParallel > 10) {
+    process.stderr.write("ArgumentError: fetch-parallel must be an integer between 1 and 10.\n");
+    return 2;
+  }
   const rawFormat = args.format ?? envFormat("KSQL_FORMAT") ?? profile.output?.format ?? "table";
   const format = normalizeOutputFormat(rawFormat);
   if (!format) {
@@ -1597,6 +1614,7 @@ async function run(): Promise<number> {
       ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit, cacheContext })
       : await execute(sql!, client, {
         maxRecords,
+        fetchParallel,
         onLimitReached: onLimit,
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,

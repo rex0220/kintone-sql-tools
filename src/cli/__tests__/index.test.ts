@@ -115,6 +115,17 @@ describe("cli helpers", () => {
     expect(args.timeout).toBe(45000);
   });
 
+  test("parseArgs parses fetch-parallel", () => {
+    const args = parseArgs(["--fetch-parallel", "5", "-e", "SELECT * FROM APP100"]);
+    expect(args.fetchParallel).toBe(5);
+  });
+
+  test("parseArgs validates fetch-parallel range", () => {
+    expect(() => parseArgs(["--fetch-parallel", "0", "-e", "SELECT * FROM APP100"])).toThrow(/--fetch-parallel/);
+    expect(() => parseArgs(["--fetch-parallel", "11", "-e", "SELECT * FROM APP100"])).toThrow(/--fetch-parallel/);
+    expect(() => parseArgs(["--fetch-parallel", "1.5", "-e", "SELECT * FROM APP100"])).toThrow(/--fetch-parallel/);
+  });
+
   test("parseArgs throws for unknown option", () => {
     expect(() => parseArgs(["--unknown"])).toThrow(/unknown option/);
   });

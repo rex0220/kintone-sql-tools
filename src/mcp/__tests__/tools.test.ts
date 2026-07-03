@@ -95,6 +95,7 @@ describe("MCP tools", () => {
         client: makeClient(),
         cacheContext: "test",
         maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
         onLimit: input.onLimit ?? "error",
         timeout: input.timeout ?? 30000,
       };
@@ -150,6 +151,7 @@ describe("MCP tools", () => {
         client: makeClient(),
         cacheContext: "test",
         maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
         onLimit: input.onLimit ?? "error",
         timeout: input.timeout ?? 30000,
       };
@@ -196,6 +198,7 @@ describe("MCP tools", () => {
       "allowDml",
       "confirmText",
       "dmlMaxRows",
+      "fetchParallel",
       "profile",
       "sql",
       "timeout",
@@ -282,6 +285,7 @@ describe("MCP tools", () => {
         client: makeClient(),
         cacheContext: "test",
         maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
         onLimit: input.onLimit ?? "error",
         timeout: input.timeout ?? 30000,
       };
@@ -333,6 +337,7 @@ describe("MCP tools", () => {
       client: makeClient(),
       cacheContext: "test",
       maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
       onLimit: input.onLimit ?? "error",
       timeout: input.timeout ?? 30000,
     });
@@ -528,6 +533,112 @@ describe("MCP tools", () => {
           updatedCount: 1,
         },
       });
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("query maps fetchParallel to runtime and execute options", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    let executeOptions: ExecuteOptions | undefined;
+
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql,
+        profileName: input.profile ?? "prod",
+        client: makeClient(),
+        cacheContext: "test",
+        maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
+        onLimit: input.onLimit ?? "error",
+        timeout: input.timeout ?? 30000,
+      };
+    };
+    const executeSql = async (
+      _sql: string,
+      _client: KintoneClient,
+      options?: ExecuteOptions
+    ): Promise<ExecuteResult> => {
+      executeOptions = options;
+      return {
+        type: "SELECT",
+        columns: ["x"],
+        rows: [{ x: "1" }],
+        rowCount: 1,
+        warnings: [],
+      };
+    };
+
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      { createRuntime, executeSql }
+    );
+    await tools.query({
+      sql: "SELECT * FROM APP100",
+      fetchParallel: 7,
+    });
+
+    expect(runtimeInputs[0]?.fetchParallel).toBe(7);
+    expect(executeOptions?.fetchParallel).toBe(7);
+  });
+
+  test("runSavedQuery forwards fetchParallel to read-only and DML paths", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-tools-"));
+    process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
+    const executeOptionsList: (ExecuteOptions | undefined)[] = [];
+    const executeSql = async (
+      sql: string,
+      _client: KintoneClient,
+      options?: ExecuteOptions
+    ): Promise<ExecuteResult> => {
+      executeOptionsList.push(options);
+      if (sql.startsWith("UPDATE")) {
+        await options?.confirm?.(1, "UPDATE");
+        return { type: "UPDATE", updatedCount: 1 };
+      }
+      return {
+        type: "SELECT",
+        columns: ["x"],
+        rows: [{ x: "1" }],
+        rowCount: 1,
+        warnings: [],
+      };
+    };
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      { executeSql }
+    );
+
+    try {
+      await tools.saveQuery({
+        name: "ro_query",
+        sql: "SELECT * FROM APP100",
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      await tools.saveQuery({
+        name: "dml_query",
+        sql: "UPDATE APP100 SET ステータス = '完了' WHERE 顧客コード = 'C001'",
+        defaultProfile: "prod",
+        readOnly: false,
+      });
+
+      await tools.runSavedQuery({ name: "ro_query", fetchParallel: 7 });
+      await tools.runSavedQuery({
+        name: "dml_query",
+        allowDml: true,
+        confirmText: "yes",
+        dmlMaxRows: 1,
+        fetchParallel: 7,
+      });
+
+      expect(executeOptionsList).toHaveLength(2);
+      expect(executeOptionsList[0]?.fetchParallel).toBe(7);
+      expect(executeOptionsList[1]?.fetchParallel).toBe(7);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }

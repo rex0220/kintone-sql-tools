@@ -325,11 +325,13 @@ export function createKsqlMcpTools(
       sql: input.sql,
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout,
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
     });
@@ -360,11 +362,13 @@ export function createKsqlMcpTools(
       sql: input.sql,
       profile: input.profile,
       maxRecords: dmlMaxRows + 1,
+      fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
       confirm: async (count, operation) => {
@@ -385,6 +389,7 @@ export function createKsqlMcpTools(
       sql: `DESCRIBE APP${input.app}`,
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout,
     });
@@ -395,6 +400,7 @@ export function createKsqlMcpTools(
       sql: "SHOW APPS",
       profile: input.profile,
       maxRecords: input.maxRecords,
+      fetchParallel: input.fetchParallel,
       onLimit: input.onLimit,
       timeout: input.timeout,
     });
@@ -466,6 +472,7 @@ export function createKsqlMcpTools(
         sql: saved.sql,
         profile,
         maxRecords: input.maxRecords,
+        fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout,
       });
@@ -484,6 +491,7 @@ export function createKsqlMcpTools(
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows,
+      fetchParallel: input.fetchParallel,
       timeout: input.timeout,
     });
     return {

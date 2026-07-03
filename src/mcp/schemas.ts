@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const profile = z.string().min(1).optional();
 const maxRecords = z.number().int().positive().optional();
+const fetchParallel = z.number().int().min(1).max(10).optional();
 const onLimit = z.enum(["error", "truncate"]).optional();
 const timeout = z.number().int().positive().optional();
 const dmlMaxRows = z.number().int().positive();
@@ -22,6 +23,7 @@ export const queryInputSchema = z.object({
   sql: z.string().min(1),
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout,
 });
@@ -32,6 +34,7 @@ export const mutateInputSchema = z.object({
   allowDml: z.literal(true),
   confirmText: z.literal("yes"),
   dmlMaxRows,
+  fetchParallel,
   timeout,
 });
 
@@ -39,6 +42,7 @@ export const describeAppInputSchema = z.object({
   app: z.number().int().positive(),
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout,
 });
@@ -46,6 +50,7 @@ export const describeAppInputSchema = z.object({
 export const showAppsInputSchema = z.object({
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout,
 });
@@ -71,6 +76,7 @@ export const runSavedQueryInputSchema = z.object({
   name: savedQueryName,
   profile,
   maxRecords,
+  fetchParallel,
   onLimit,
   timeout,
   allowDml: z.literal(true).optional(),
