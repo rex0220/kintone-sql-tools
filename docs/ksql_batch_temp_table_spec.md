@@ -15,7 +15,8 @@
   - 2026-07-09 R11(S2 実装後): §4.3 に単文入力での一時テーブル参照の拒否を明記(単文 = 1文のバッチとして未定義参照と同じ扱い)
   - 2026-07-09 R14(S3 実装後): §4.3 の再定義エラーを「生存中の同名のみ」と明確化(DROP 後の再 CREATE は許容、個数上限は同時数)
   - 2026-07-09 R15(S3 実装後): 空入力(空文字列・`;` のみ)を `ArgumentError: SQL is empty.` として拒否(§9 に追加)
-- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S4 実装済み)
+  - 2026-07-09 R18(S5 実装後): `ksql_validate` のバッチ対応を実装(§7.1)。外部から見える変更: ①バッチ入力が ParseError ではなくサマリ + `statements[]` の正常応答になる、②単文入力にも `statements[]`(要素1)が付く、③単文の CREATE/DROP TEMP TABLE は validate 段階で ArgumentError、④`appIds` が文字列走査から AST ベース(文ごと)に変わり文字列リテラル内の誤検出がなくなる。`ksql_query` / `ksql_mutate` へのバッチ入力は S6 / フェーズ2 対応まで `ArgumentError: batch SQL ... not supported ... yet.` で明示的に拒否
+- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S5 実装済み)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 
