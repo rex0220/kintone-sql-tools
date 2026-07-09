@@ -559,17 +559,17 @@ async function runWithDeadline<T>(work: Promise<T>, remainingMs: number | null):
   }
 }
 
-/** エラーを文ごとの報告形式に変換する（code は name または "XxxError:" 接頭辞から抽出） */
 /**
- * エラーを文ごとの報告形式に変換する（code は name または "XxxError:" 接頭辞から抽出）。
+ * エラーを文ごとの報告形式に変換する。
+ * code の優先順: Error の name / オブジェクトの code プロパティ
+ * → message の "XxxError:" 接頭辞 → "Error"。
  * プラグインの kintone.api は Error ではなく素のオブジェクト（{ code, message, id }）で
  * reject するため、オブジェクト形式も解釈する（String(e) だと "[object Object]" になる）
  */
 function toBatchStatementError(e: unknown): BatchStatementError {
   if (e instanceof Error) {
     const name = e.name !== "Error" ? e.name : null;
-    const prefix = e.message.match(/^([A-Za-z]+Error):/);
-    return { code: name ?? prefix?.[1] ?? "Error", message: e.message };
+    return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
   }
   if (e !== null && typeof e === "object") {
     const obj = e as { message?: unknown; code?: unknown };
@@ -577,10 +577,19 @@ function toBatchStatementError(e: unknown): BatchStatementError {
       typeof obj.message === "string" && obj.message.length > 0
         ? obj.message
         : safeJsonStringify(e);
-    const code = typeof obj.code === "string" && obj.code.length > 0 ? obj.code : "Error";
+    const code =
+      typeof obj.code === "string" && obj.code.length > 0
+        ? obj.code
+        : codeFromMessagePrefix(message);
     return { code, message };
   }
-  return { code: "Error", message: String(e) };
+  const message = String(e);
+  return { code: codeFromMessagePrefix(message), message };
+}
+
+/** message の "XxxError:" 接頭辞をコードとして抽出する（なければ "Error"） */
+function codeFromMessagePrefix(message: string): string {
+  return message.match(/^([A-Za-z]+Error):/)?.[1] ?? "Error";
 }
 
 function safeJsonStringify(v: unknown): string {

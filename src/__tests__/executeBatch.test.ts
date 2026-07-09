@@ -438,3 +438,18 @@ test("kintone.api 形式のオブジェクト reject が code/message に整形�
   expect(r.statements[0].error?.message).not.toContain("[object Object]");
   expect(r.statements[1].status).toBe("skipped");
 });
+
+test("非 Error でも message の XxxError: 接頭辞から code を抽出する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  client.getRecords = async (params) => {
+    if (params.app === 300) throw "ArgumentError: string reject"; // 文字列 throw
+    if (params.app === 400) throw { message: "ParseError: object without code" }; // code なしオブジェクト
+    return { records: APP1 as never };
+  };
+
+  const r1 = await executeBatch("SELECT x FROM APP300; SELECT x FROM APP100", client, { continueOnError: true });
+  expect(r1.statements[0].error).toEqual({ code: "ArgumentError", message: "ArgumentError: string reject" });
+
+  const r2 = await executeBatch("SELECT x FROM APP400; SELECT x FROM APP100", client, { continueOnError: true });
+  expect(r2.statements[0].error).toEqual({ code: "ParseError", message: "ParseError: object without code" });
+});
