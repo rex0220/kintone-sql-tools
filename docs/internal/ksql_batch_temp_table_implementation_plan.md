@@ -24,6 +24,8 @@
   - 2026-07-09 R20(S7 実装後): S7 実装済み。判定ロジックは `cli/consoleInput.ts` の純関数(`decideConsoleInput` / `decideRun`)+ユニットテスト21件。**仕様修正**: 「完結単文の `;` なし即実行」は現行 console の実挙動(`;` 終端)の誤認に基づくため撤回し、`;` ゲート維持の6段判定に変更(spec R20)。`@profile` は判定用パース前に正規化。console e2e は dist-cli を再ビルドして検証
   - 2026-07-09 R21(S8): 公開ドキュメント反映(言語リファレンス §25 新設・制限事項表更新 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5)。実機検証は未実施(ユーザー実施待ち)
   - 2026-07-09 R22(S8): 公開ドキュメントの「v1.4.0 で追加」を「v1.4.0 予定・フェーズ1 実装時点」に統一(v1.4.0 最終仕様との混同防止)。リリース時に確定表記へ変える箇所を M6 のチェックリストに列挙
+  - 2026-07-09 R34(実機検証 E-6 で発見): バッチの文エラーで非 Error の reject(プラグインの kintone.api 形式 `{code, message, id}`)が `[object Object]` 表示になるバグを修正(`toBatchStatementError` でオブジェクト形式から code/message を抽出。単文経路の `formatErrorMessage` は従来から対応済みだった)
+  - 2026-07-09 R33(プラグイン対応): §8.4 実装(desktop.ts。詳細は spec R33)
   - 2026-07-09 R32(実機検証 A-3 で発見): **既存バグ修正** — 集計列に alias を付けると HAVING が常に偽になる(v1.3.0 から存在。HAVING の合成名参照とグループ行の alias キーの不一致。`Number("") = 0` により無言で全滅するため気づきにくかった)。`applyGroupBy` で合成名キーを併記して修正、回帰テスト3件
   - 2026-07-09 R31(実機検証準備で発見): プラグインの `confirmDialog` が M4 の confirm("INSERT") 拡張に未追従で、INSERT_SELECT の確認が「削除します」と誤表示される実バグを修正。型エラーとして検出されていたが「desktop.ts の既存エラー除外」フィルタが新規1件を隠していた(以降は件数比較で運用: 既存10件)
   - 2026-07-09 R30(M2 レビュー反映・High×2): console の**全バッチ実行経路**に REPL 確認を差し込み — ①`:run` 経路(確認なしで子実行に `--yes` が渡っていた)、②`;` 完結の複文経路(`isBatchExec` で確認をスキップしていた)。`:run` キャンセル時はバッファ保持。③確認一覧の `app=` を `appIds`(参照先込み)から `targetAppId`(書き込み先のみ)に変更(`StatementAnalysis.targetAppId` を新設、MCP validate にも公開)。console e2e で :run / 1行複文の両経路の確認・キャンセル・バッファ保持を検証
