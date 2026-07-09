@@ -19,7 +19,10 @@ export class LexError extends Error {
   constructor(
     message: string,
     public readonly pos: number,
-    public readonly input: string
+    public readonly input: string,
+    /** 入力が途中で終わったことによるエラー（未終端の文字列・バッククォート・ブロックコメント）。
+     *  pos は開始位置を指すため、「入力の続きがあれば解消し得るか」の判定にはこのフラグを使う */
+    public readonly unterminated: boolean = false
   ) {
     const around = input.slice(Math.max(0, pos - 10), pos + 10);
     super(`${message}（位置 ${pos}、前後: 「${around}」）`);
@@ -80,6 +83,9 @@ export class Lexer {
     // 識別子 / キーワード（日本語含む）
     if (isIdentStart(ch)) return this.readIdentOrKeyword(start);
 
+    // 一時テーブル識別子: #temp（# は先頭のみ有効）
+    if (ch === "#") return this.readHashIdent(start);
+
     throw new LexError(
       `予期しない文字 「${ch}」 です`,
       this.pos,
@@ -112,7 +118,7 @@ export class Lexer {
         this.pos++;
       }
     }
-    throw new LexError("文字列リテラルが閉じられていません", start, this.input);
+    throw new LexError("文字列リテラルが閉じられていません", start, this.input, true);
   }
 
   // ----------------------------------------------------------
@@ -134,7 +140,8 @@ export class Lexer {
     throw new LexError(
       "バッククォート識別子が閉じられていません",
       start,
-      this.input
+      this.input,
+      true
     );
   }
 
@@ -221,6 +228,37 @@ export class Lexer {
   }
 
   // ----------------------------------------------------------
+  // 一時テーブル識別子: #temp
+  // # は先頭のみ有効。isIdentStart に # を加えると isIdentContinue 経由で
+  // 識別子の途中（APP#x 等）にも許容されてしまうため、専用分岐で読む。
+  // ----------------------------------------------------------
+
+  private readHashIdent(start: number): Token {
+    this.pos++; // #
+    const next = this.input[this.pos] ?? "";
+    if (!isIdentStart(next)) {
+      throw new LexError("「#」 の直後には識別子が必要です", start, this.input);
+    }
+    while (
+      this.pos < this.input.length &&
+      isIdentContinue(this.input[this.pos])
+    ) {
+      this.pos++;
+    }
+    const value = this.input.slice(start, this.pos);
+    // 一時テーブル名に @profile は付与できない（APP@profile の正規化は
+    // APP<数字> のみが対象で、#t@dev はここまで素通しされる）
+    if (this.input[this.pos] === "@") {
+      throw new LexError(
+        `@profile is not allowed on temp table ${value}.`,
+        this.pos,
+        this.input
+      );
+    }
+    return this.makeToken(TokenKind.IDENT, value, start);
+  }
+
+  // ----------------------------------------------------------
   // 空白・コメントをスキップ
   // ----------------------------------------------------------
 
@@ -244,16 +282,27 @@ export class Lexer {
 
       // ブロックコメント: /* ... */
       if (ch === "/" && this.input[this.pos + 1] === "*") {
+        const commentStart = this.pos;
         this.pos += 2;
+        let closed = false;
         while (this.pos < this.input.length) {
           if (
             this.input[this.pos] === "*" &&
             this.input[this.pos + 1] === "/"
           ) {
             this.pos += 2;
+            closed = true;
             break;
           }
           this.pos++;
+        }
+        if (!closed) {
+          throw new LexError(
+            "ブロックコメントが閉じられていません",
+            commentStart,
+            this.input,
+            true
+          );
         }
         continue;
       }

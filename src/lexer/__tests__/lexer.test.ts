@@ -169,3 +169,74 @@ test("未閉じバッククォートはエラー", () => {
 test("未知の文字はエラー", () => {
   expect(() => new Lexer("@").tokenize()).toThrow(LexError);
 });
+
+test("未終端ブロックコメントはエラー", () => {
+  expect(() => new Lexer("SELECT /* 未終端").tokenize())
+    .toThrow(/ブロックコメントが閉じられていません/);
+});
+
+test("未終端エラーは unterminated フラグを持つ（通常の LexError は持たない）", () => {
+  const catchLexError = (sql: string): LexError => {
+    try {
+      new Lexer(sql).tokenize();
+    } catch (e) {
+      if (e instanceof LexError) return e;
+    }
+    throw new Error("LexError が発生しませんでした");
+  };
+  expect(catchLexError("'未閉じ").unterminated).toBe(true);
+  expect(catchLexError("`未閉じ").unterminated).toBe(true);
+  expect(catchLexError("SELECT /* 未終端").unterminated).toBe(true);
+  expect(catchLexError("@").unterminated).toBe(false);
+  expect(catchLexError("#1").unterminated).toBe(false);
+});
+
+// ----------------------------------------------------------------
+// 一時テーブル識別子（#temp）
+// ----------------------------------------------------------------
+
+test("# 識別子を IDENT として読める", () => {
+  const toks = tokens("SELECT * FROM #temp");
+  expect(toks[3]).toEqual({ k: TokenKind.IDENT, v: "#temp" });
+});
+
+test("# + 日本語識別子", () => {
+  const toks = tokens("#集計結果");
+  expect(toks[0]).toEqual({ k: TokenKind.IDENT, v: "#集計結果" });
+});
+
+test("# + キーワード相当の名前は IDENT のまま", () => {
+  const toks = tokens("#select");
+  expect(toks[0]).toEqual({ k: TokenKind.IDENT, v: "#select" });
+});
+
+test("# 単独はエラー", () => {
+  expect(() => new Lexer("#").tokenize()).toThrow(LexError);
+});
+
+test("# の直後が数字はエラー（#1）", () => {
+  expect(() => new Lexer("#1").tokenize()).toThrow(LexError);
+});
+
+test("# は識別子の途中に入らない（APP#x は分割される）", () => {
+  const toks = tokens("APP#x");
+  expect(toks).toEqual([
+    { k: TokenKind.IDENT, v: "APP" },
+    { k: TokenKind.IDENT, v: "#x" },
+    { k: TokenKind.EOF,   v: "" },
+  ]);
+});
+
+test("#a#b は 2 トークンに分割される", () => {
+  const toks = tokens("#a#b");
+  expect(toks).toEqual([
+    { k: TokenKind.IDENT, v: "#a" },
+    { k: TokenKind.IDENT, v: "#b" },
+    { k: TokenKind.EOF,   v: "" },
+  ]);
+});
+
+test("#t@dev（@profile 付き一時テーブル名）は明示メッセージのエラー", () => {
+  expect(() => new Lexer("SELECT * FROM #t@dev").tokenize())
+    .toThrow(/@profile is not allowed on temp table #t/);
+});
