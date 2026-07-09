@@ -2692,6 +2692,87 @@ async function resolveScalarColumns(
 // EXPLAIN
 // ============================================================
 
+// ------------------------------------------------------------
+// バッチ EXPLAIN（フェーズ2 M3）
+// 全文のプランを配列で返す（dry-run 用途。kintone アクセスなし）。
+// 一時テーブル参照文は既存の buildSelectPlan に通さず temp-aware に組む
+// （resolveSelectMode が cteName 参照を SIMPLE と誤判定し APP0 表示になるため）。
+// ------------------------------------------------------------
+
+export interface BatchStatementPlan {
+  index: number;
+  type: string;
+  plan: string[];
+}
+
+/** `;` 区切りバッチの全文プランを生成する（静的検証込み。実行はしない） */
+export function buildBatchExplainPlans(sql: string): {
+  statementCount: number;
+  statements: BatchStatementPlan[];
+} {
+  const statements = parseSqlBatch(sql);
+  const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+  return {
+    statementCount: statements.length,
+    statements: statements.map((stmt, i) => ({
+      index: i,
+      type: analysis.statements[i].statementType,
+      plan: buildBatchStatementPlan(stmt, analysis.statements[i]),
+    })),
+  };
+}
+
+function buildBatchStatementPlan(
+  stmt: Statement,
+  info: BatchAnalysis["statements"][number]
+): string[] {
+  if (stmt.type === "CREATE_TEMP_TABLE") {
+    return [
+      `CREATE TEMP TABLE ${stmt.name}`,
+      `  scope:         batch（バッチ終了時に自動破棄）`,
+      `  rows:          実体化前のため不明（上限 ${TEMP_TABLE_MAX_ROWS} 行、超過はエラー）`,
+      ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`),
+    ];
+  }
+  if (stmt.type === "DROP_TEMP_TABLE") {
+    return [
+      `DROP TEMP TABLE ${stmt.name}`,
+      "  一時テーブルストアの解放のみ（kintone アクセスなし）",
+    ];
+  }
+  if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
+  if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
+  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  return buildPlanForBatchQuery(stmt, info);
+}
+
+function buildPlanForBatchQuery(
+  query: Statement | ExplainStatement["query"],
+  info: BatchAnalysis["statements"][number]
+): string[] {
+  // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
+  if (info.tempTablesReferenced.length === 0) {
+    return buildExplainPlan(query as ExplainStatement["query"]);
+  }
+  // 一時テーブル参照あり → FULL_SCAN（インメモリ）であることを明示する
+  const lines: string[] = [];
+  if (query.type === "INSERT_SELECT") {
+    lines.push(
+      `INSERT INTO APP${query.appId} ... SELECT（一時テーブルソース。実行時に件数確定 → dmlMaxRows 適用）`
+    );
+  }
+  lines.push("  mode:          FULL_SCAN（一時テーブル参照）");
+  lines.push(
+    `  temp:          ${info.tempTablesReferenced.join(", ")}（インメモリ走査。実体化前のため行数不明）`
+  );
+  const apps = info.appIds.filter((a) => query.type !== "INSERT_SELECT" || a !== query.appId);
+  if (apps.length > 0) {
+    lines.push(`  app:           ${apps.map((a) => `APP${a}`).join(", ")}`);
+  }
+  lines.push("  note:          一時テーブルへの WHERE プッシュダウンは行われない");
+  return lines;
+}
+
 function executeExplain(stmt: ExplainStatement): SelectResult {
   const lines = buildExplainPlan(stmt.query);
   return {

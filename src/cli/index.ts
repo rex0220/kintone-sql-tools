@@ -10,6 +10,7 @@ import { spawnSync } from "child_process";
 import {
   execute,
   executeBatch,
+  buildBatchExplainPlans,
   formatDisplayText,
   OperationCancelledError,
   parseSqlStatement,
@@ -1339,6 +1340,7 @@ async function run(): Promise<number> {
   let insertValuesCount: number | null = null;
   let isDmlStatement = false;
   let isBatchSql = false;
+  let batchContainsDml = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1361,16 +1363,11 @@ async function run(): Promise<number> {
       const statements = parseSqlStatements(sql);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
+        // バッチのガード（--allow-dml / dry-run / DML 実行可否）は
+        // 設定解決後にまとめて判定する（allowDml がここでは未解決のため）
         const analysis = analyzeBatch(statements);
-        if (analysis.containsDml) {
-          process.stderr.write("ArgumentError: DML in batch is not supported by CLI yet.\n");
-          return 2;
-        }
-        if (args.dryRun) {
-          process.stderr.write("ArgumentError: --dry-run for batch SQL is not supported yet.\n");
-          return 2;
-        }
         isBatchSql = true;
+        batchContainsDml = analysis.containsDml;
       } else {
         const stmt = parseSqlStatement(sql);
         parsedStmt = stmt;
@@ -1443,6 +1440,31 @@ async function run(): Promise<number> {
   if (appIds.length === 0 && !allowNoFromSelect && !args.dryRun && args.diagRecordId === null) {
     process.stderr.write("ArgumentError: no APPxxx found in SQL and --app is not set.\n");
     return 2;
+  }
+
+  if (isBatchSql) {
+    // 単文の DML と同じく、DML を含むバッチは dry-run でも --allow-dml を要求する
+    if (batchContainsDml && !allowDml) {
+      process.stderr.write("ArgumentError: DML is disabled. Use --allow-dml to enable UPDATE/DELETE/INSERT/UPSERT/REORDER.\n");
+      return 2;
+    }
+    if (args.dryRun) {
+      // バッチ dry-run: 全文のプランを表示して終了（kintone アクセスなし。DML 込みでも可）
+      const plans = buildBatchExplainPlans(sql!);
+      const out: string[] = [];
+      plans.statements.forEach((p) => {
+        if (p.index > 0) out.push("");
+        out.push(`[${p.index + 1}] ${p.type}`);
+        out.push(...p.plan);
+      });
+      process.stdout.write(`${out.join("\n")}\n`);
+      return 0;
+    }
+    if (batchContainsDml) {
+      // DML バッチの実行（確認プロンプト含む）はフェーズ2 M2 で対応
+      process.stderr.write("ArgumentError: DML in batch is not supported by CLI yet.\n");
+      return 2;
+    }
   }
 
   if (isDmlStatement) {

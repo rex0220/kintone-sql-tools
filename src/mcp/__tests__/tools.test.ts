@@ -1002,6 +1002,37 @@ describe("MCP tools", () => {
   });
 
   // ----------------------------------------------------------------
+  // バッチ EXPLAIN（フェーズ2 M3）
+  // ----------------------------------------------------------------
+
+  test("explain: バッチ入力は全文プランの配列を返す（実行なし）", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.explain({
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "SELECT 顧客名 FROM #t",
+    }) as {
+      ok: boolean;
+      batch: boolean;
+      statementCount: number;
+      statements: Array<{ index: number; type: string; plan: string[] }>;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.batch).toBe(true);
+    expect(result.statementCount).toBe(2);
+    expect(result.statements[0].type).toBe("CREATE_TEMP_TABLE");
+    expect(result.statements[1].plan.join("\n")).toMatch(/FULL_SCAN（一時テーブル参照）/);
+  });
+
+  test("explain: 単文入力は従来ペイロードのまま", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.explain({ sql: "SELECT 顧客名 FROM APP100" });
+    expect(result.ok).toBe(true);
+    expect(result.type).toBe("SELECT"); // 従来の SelectResult 形
+  });
+
+  // ----------------------------------------------------------------
   // 一時テーブル経由の INSERT_SELECT（フェーズ2 M4）— 2段階 DML フロー
   // ----------------------------------------------------------------
 

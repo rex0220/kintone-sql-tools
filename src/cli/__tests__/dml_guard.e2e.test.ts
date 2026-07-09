@@ -104,3 +104,52 @@ test("REORDER dry-run is allowed with --allow-dml", async () => {
   expect(res.code).toBe(0);
   expect(res.stdout).toContain("[REORDER]");
 });
+
+// ----------------------------------------------------------------
+// バッチ dry-run と DML ガード（M3 レビュー反映）
+// ----------------------------------------------------------------
+
+test("DML を含むバッチの dry-run は --allow-dml なしで拒否", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "-e",
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88; INSERT INTO APP89 (名前) SELECT 顧客名 FROM #t",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("DML is disabled");
+});
+
+test("DML を含むバッチの dry-run は --allow-dml ありでプラン表示に成功", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "--allow-dml",
+    "-e",
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88; INSERT INTO APP89 (名前) SELECT 顧客名 FROM #t",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain("CREATE TEMP TABLE #t");
+  expect(res.stdout).toContain("INSERT INTO APP89");
+  expect(res.stdout).toContain("dmlMaxRows 適用");
+});
+
+test("read-only バッチの dry-run は --allow-dml なしで成功", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "-e",
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88; SELECT 顧客名 FROM #t",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain("FULL_SCAN（一時テーブル参照）");
+});

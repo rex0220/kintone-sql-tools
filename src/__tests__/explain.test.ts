@@ -321,3 +321,64 @@ test("EXPLAIN DML 以外のキーワード — エラー", async () => {
     execute("EXPLAIN SHOW APPS", client)
   ).rejects.toThrow();
 });
+
+// ----------------------------------------------------------------
+// バッチ EXPLAIN（フェーズ2 M3）
+// ----------------------------------------------------------------
+
+import { buildBatchExplainPlans } from "../execute";
+
+test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数不明・内側の SELECT プラン）", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100 WHERE 売上 > 100;" +
+    "SELECT 顧客名 FROM #t"
+  );
+  expect(plans.statementCount).toBe(2);
+
+  const create = plans.statements[0];
+  expect(create.type).toBe("CREATE_TEMP_TABLE");
+  expect(create.plan[0]).toBe("CREATE TEMP TABLE #t");
+  expect(create.plan.join("\n")).toMatch(/scope:\s+batch/);
+  expect(create.plan.join("\n")).toMatch(/実体化前のため不明/);
+  expect(create.plan.join("\n")).toMatch(/mode:\s+SIMPLE/); // 内側 SELECT のプラン
+});
+
+test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不明を明示", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "SELECT a.顧客名 FROM APP200 a INNER JOIN #t b ON a.顧客名 = b.顧客名"
+  );
+  const select = plans.statements[1];
+  const text = select.plan.join("\n");
+  expect(text).toMatch(/mode:\s+FULL_SCAN（一時テーブル参照）/);
+  expect(text).toMatch(/temp:\s+#t（インメモリ走査。実体化前のため行数不明）/);
+  expect(text).toMatch(/APP200/);
+  expect(text).toMatch(/WHERE プッシュダウンは行われない/);
+});
+
+test("バッチ EXPLAIN: 一時テーブル無関係の文は既存プラン、DROP は解放のみ", () => {
+  const plans = buildBatchExplainPlans(
+    "SELECT 顧客名 FROM APP100;" +
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "DROP TEMP TABLE #t"
+  );
+  expect(plans.statements[0].plan.join("\n")).toMatch(/mode:\s+SIMPLE/);
+  expect(plans.statements[2].type).toBe("DROP_TEMP_TABLE");
+  expect(plans.statements[2].plan.join("\n")).toMatch(/kintone アクセスなし/);
+});
+
+test("バッチ EXPLAIN: temp ソースの INSERT_SELECT は件数確定と dmlMaxRows 適用を明示", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #t"
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toMatch(/INSERT INTO APP200/);
+  expect(text).toMatch(/実行時に件数確定 → dmlMaxRows 適用/);
+  expect(text).not.toMatch(/app:\s+.*APP200/); // 書き込み先は app 行に混ぜない
+});
+
+test("バッチ EXPLAIN: 静的検証違反（未定義参照）は拒否される", () => {
+  expect(() => buildBatchExplainPlans("SELECT 1 FROM APP100; SELECT * FROM #t"))
+    .toThrow(/temp table #t is not defined in this batch/);
+});

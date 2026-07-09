@@ -3,6 +3,7 @@ import type { z } from "zod";
 import {
   execute,
   executeBatch,
+  buildBatchExplainPlans,
   parseSqlStatement,
   parseSqlStatements,
   analyzeBatch,
@@ -445,6 +446,19 @@ export function createKsqlMcpTools(
 
   async function explain(input: ExplainInput): Promise<Record<string, unknown>> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+
+    // バッチ入力: 全文のプランを配列で返す（フェーズ2 M3。実行はしない）
+    const statements = parseSqlStatements(normalized.normalizedSql);
+    if (statements.length > 1) {
+      const plans = buildBatchExplainPlans(normalized.normalizedSql);
+      return {
+        ok: true,
+        batch: true,
+        statementCount: plans.statementCount,
+        statements: plans.statements,
+      };
+    }
+
     const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
       cacheContext: normalized.cacheContext,
     });
