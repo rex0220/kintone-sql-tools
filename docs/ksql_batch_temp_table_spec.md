@@ -12,7 +12,8 @@
   - 2026-07-09 R8: エイリアス位置(明示 AS・暗黙とも)の `#` 識別子を拒否と明記(暗黙 alias が `APP#x` を受理してしまう抜け道を封鎖)
   - 2026-07-09 R9: alias 拒否の対象に列 alias(`SELECT ... AS #x`)を含むと明確化
   - 2026-07-09 R10(S1 実装後): §8.2 の継続可能判定を `LexError.unterminated` フラグ + `ParseError` の EOF トークン基準に変更(位置ベースを廃止、実装計画 R10 と同期)
-- ステータス: ドラフト(実装未着手)
+  - 2026-07-09 R11(S2 実装後): §4.3 に単文入力での一時テーブル参照の拒否を明記(単文 = 1文のバッチとして未定義参照と同じ扱い)
+- ステータス: ドラフト(実装中 — フェーズ1 の S1・S2 実装済み)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 
@@ -98,6 +99,7 @@ DROP TEMP TABLE #name;
 - `DROP TEMP TABLE`: 実体化済みの一時テーブルを破棄する。未定義名の DROP はエラー。バッチ終了時に全一時テーブルは自動破棄されるため、`DROP` は主にメモリの早期解放用
 - 文タイプ(statementType)は `CREATE_TEMP_TABLE` / `DROP_TEMP_TABLE`。両者とも **read-only 扱い**(kintone に書き込まないため)
 - 単文(バッチでない入力)としての `CREATE TEMP TABLE` / `DROP TEMP TABLE` は、作成直後に破棄されて無意味なため **`ArgumentError` として拒否**する(§9)。これにより単文入力の結果ペイロードは既存の文タイプのみとなり、後方互換(§6.1)と衝突しない
+- 同様に、単文入力での**一時テーブル参照**(`SELECT ... FROM #t` 等。JOIN・サブクエリ・WITH 内・`INSERT_SELECT` のソースを含む)は、参照先が存在し得ないため `ParseError: temp table #t is not defined in this batch.` として拒否する(単文 = 1文のバッチであり、未定義参照の静的検証と同じ扱い)
 
 ---
 

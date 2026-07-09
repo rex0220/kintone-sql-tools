@@ -12,7 +12,10 @@
   - 2026-07-09 R8: S2 に alias 位置の `#` 識別子拒否を追加(`tryParseImplicitAlias` が `APP#x` を alias として受理する抜け道への対策)
   - 2026-07-09 R9: S2 の alias 拒否に列 alias(`parseAliasName`)を追加、テストに `SELECT 顧客名 AS #x` を追加
   - 2026-07-09 R10(S1 実装後): 継続可能判定を位置ベースから `LexError.unterminated` フラグベースに変更(未終端系の `pos` は開始位置を指すため)。S1 実装済み
-- ステータス: ドラフト
+  - 2026-07-09 R11(S2 実装後): 単文 API `parse()` での一時テーブル参照拒否ガードを追加(`FROM #t` が単文実行経路へ漏れて APP0 読み取り・WITH の無言空結果になる穴の対策)/ `parseSqlStatements` を `core/index.ts` から re-export。S2 実装済み
+  - 2026-07-09 R12(S2 実装後): temp マーカー判定を `IDENT` に限定(バッククォートの `` `#field` `` を通常フィールド名として維持)/ `REORDER #t` の拒否テストを追加
+  - 2026-07-09 R13(S2 実装後): テーブル alias 専用の `parseTableAliasName()` を新設し明示 AS(4経路)・暗黙 alias を統一(R12 の IDENT 限定化でテーブル alias の BIDENT `#x` が素通りするようになっていた穴の修正)
+- ステータス: 実装中(S1・S2 完了。次は S3: バッチ静的検証)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -66,9 +69,11 @@
 | 項目 | 内容 |
 |---|---|
 | 変更 | `src/types/ast.ts` — `CreateTempTableStatement` / `DropTempTableStatement` を追加。`src/parser/parser.ts` — `parseStatements(): Statement[]` を新設(`;` 区切りループ、空文スキップ、20文上限)。既存 `parse()` は `parseStatements()` の結果が1文であることを検証する形に置き換え(単文 API の互換維持) |
-| 変更 | `CREATE TEMP TABLE #name AS <select>` / `DROP TEMP TABLE #name` のパース。`#` 識別子はテーブル参照位置(FROM / JOIN / CREATE / DROP)以外で `ParseError`(`#name@profile` の拒否は S1 のレキサで対応済み)。**エイリアス位置の `#` 識別子は明示的に拒否する** — `tryParseImplicitAlias()`(`src/parser/parser.ts:853-861`)は次の `IDENT` を無条件に alias として消費するため、対策しないと `APP#x`(レキサで `APP` + `#x` に分割)が「`APP` の alias `#x`」として受理されてしまう。`parseIdentifier` / `tryParseImplicitAlias` の alias 経路で値が `#` 始まりなら `ParseError`。**列 alias も同様** — `parseAliasName()`(`src/parser/parser.ts:1724-1734`)も `IDENT` を無条件受理するため、`#` 始まりを `ParseError` にする。**注意: `parseIdentifier` 自体に一律の `#` 拒否を入れないこと** — テーブル参照経路(`parseTableRef` / CREATE / DROP)は `#` を受理する必要があるため、「`#` 可(テーブル名)」と「`#` 不可(alias・その他)」の受理関数を分ける |
+| 変更 | `CREATE TEMP TABLE #name AS <select>` / `DROP TEMP TABLE #name` のパース。`#` 識別子はテーブル参照位置(FROM / JOIN / CREATE / DROP)以外で `ParseError`(`#name@profile` の拒否は S1 のレキサで対応済み)。**エイリアス位置の `#` 識別子は明示的に拒否する** — `tryParseImplicitAlias()`(`src/parser/parser.ts:853-861`)は次の `IDENT` を無条件に alias として消費するため、対策しないと `APP#x`(レキサで `APP` + `#x` に分割)が「`APP` の alias `#x`」として受理されてしまう。`parseIdentifier` / `tryParseImplicitAlias` の alias 経路で値が `#` 始まりなら `ParseError`。**列 alias も同様** — `parseAliasName()`(`src/parser/parser.ts:1724-1734`)も `IDENT` を無条件受理するため、`#` 始まりを `ParseError` にする。**注意: `parseIdentifier` 自体に一律の `#` 拒否を入れないこと** — テーブル参照経路(`parseTableRef` / CREATE / DROP)は `#` を受理する必要があるため、「`#` 可(テーブル名)」と「`#` 不可(alias・その他)」の受理関数を分ける。**temp マーカーの判定はレキサが生成する `IDENT` に限定する** — バッククォート識別子(`BIDENT`)の `` `#field` `` は「# で始まる通常フィールド名」であり、フィールド位置・テーブル参照位置とも temp 扱いしない(alias 位置のみ BIDENT でも `#` 拒否) |
 | テスト(alias 拒否) | `FROM APP100 #x`(暗黙 alias)/ `FROM APP100 AS #x`(明示 alias)/ `SELECT 顧客名 AS #x FROM APP100`(列 alias)/ `APP#x`・`#a#b`(レキサ分割後にパーサで拒否されること) |
-| 新規 | `src/core/sql.ts` — `parseSqlStatements(sql): Statement[]` を公開(既存 `parseSqlStatement` は維持) |
+| 新規 | `src/core/sql.ts` — `parseSqlStatements(sql): Statement[]` を公開し、**`src/core/index.ts` からも re-export** する(CLI/MCP は `../core` 経由で import するため。既存 `parseSqlStatement` は維持) |
+| ガード | **単文 API `parse()` は一時テーブル参照を含む文を拒否する**(`temp table #t is not defined in this batch.`)。S4 のバッチ実行器が入るまで、`FROM #t` が既存の単文実行経路に漏れると `executeSelect` が APP0 を読みに行く / `executeWith` が `cteCache.get(...) ?? []` で無言の空結果を返すため。実装は `parseTableRef` の `#` 分岐で参照トークンを記録し、`parse()` の最後で検査(バッチ API `parseStatements()` は通す)。あわせて `execute()` の文タイプ switch に単文 CREATE/DROP の `ArgumentError` ガードを追加(仕様 §4.3) |
+| 進め方 | 変更面が広いため次の順で小刻みに入れる: ①**既存単文互換を固定するテストを先に置く**(代表的な単文の `parse()` AST 出力をスナップショット化)→ ②`parseStatements()` 導入と `parse()` の置き換え(①が回帰を検出)→ ③`CREATE/DROP TEMP TABLE` のパース → ④alias の `#` 拒否 |
 | テスト | `parser.test.ts` — 複文分割 / 空文 / 文数上限 / CREATE・DROP の構文 / `#` の位置違反 / `@profile` 拒否 |
 
 ### S3: バッチ静的検証
