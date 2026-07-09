@@ -36,7 +36,7 @@
   - 2026-07-09 R25(M1 レビュー反映): バッチ合計タイムアウトに未解決の `input.timeout` ではなく解決済みの `runtime.timeout`(env / profile / 既定 30000ms)を渡すよう修正(S6 の query バッチ側も同修正。timeout 未指定時に合計 deadline が無効になっていた)
   - 2026-07-09 R24(M1 実装後): M1 実装済み。`mutateBatch` は静的ガード(validate-all-first)→ `executeBatch`(fail-fast 固定、confirm で文ごと dmlMaxRows + 合計 dmlTotalMaxRows を加算検査)。WHERE なし UPDATE/DELETE はパーサ段階で拒否されるため tools 層のガードは防御的併設。影響件数は `statements[]` に展開(`toMutationSummary`)
   - 2026-07-09 R23(P0-1 実装後): P0-1 実装済み。`api/requestGate.ts`(セマフォ + GET 系のみ 408/429/502/503/504・一時ネットワークエラーの指数バックオフリトライ、sleep/random 注入可能)。`withRequestGate` で MCP runtime と CLI(dry-run 除く)の client を包む。素の 500 はリトライ対象外。CB_IL02 フォールバックは統合せず併存。書き込み系はセマフォのみ(二重実行防止)。設定は `KSQL_MAX_CONCURRENT` env > `profile.query.maxConcurrent` > 既定10(プロセス内グローバルで初回固定)
-- ステータス: **フェーズ1・フェーズ2 のコードステップ(S1〜S8, M1〜M4)+ P0-1 完了**。残りは実機検証(未実施)、P0-2(随時)、P0-3・M5(実機必要)、M6(v1.4.0 リリース: 実機検証後に「予定」表記の確定と一括リリース)
+- ステータス: **v1.4.0 実装・実機検証完了**(S1〜S8 / M1〜M4 / P0-1 / プラグイン §8.4)。「予定」表記の確定済み。残り: リリース作業(release コミット・npm publish・配布 = ユーザー操作)、P0-2(v1.4.0 に含めず随時)、P0-3・M5(bulkRequest — v1.5 以降で判断)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 

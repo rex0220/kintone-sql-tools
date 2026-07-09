@@ -1575,7 +1575,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | FULL OUTER JOIN | 非対応 |
 | UPDATE に JOIN | 非対応 |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
-| DML を含むバッチ（複文） | 対応（v1.4.0 予定。`ksql_mutate` / CLI `--allow-dml`。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
+| DML を含むバッチ（複文） | 対応（v1.4.0。`ksql_mutate` / CLI `--allow-dml`。常に fail-fast。プラグインは read-only バッチのみ。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
@@ -1680,7 +1680,7 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 
 ## 25. バッチ実行と一時テーブル（CLI / MCP）
 
-> **v1.4.0 で追加予定**（本節は開発版の記述です）。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI は **read-only バッチのみ**対応で、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します（DML を含むバッチは CLI / MCP で）。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
+> **v1.4.0 で追加**。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI は **read-only バッチのみ**対応で、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します（DML を含むバッチは CLI / MCP で）。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
 
 ### 複文（バッチ）
 
