@@ -288,6 +288,11 @@ async function executeStatement(
     case "SHOW_APPS":     return executeShowApps(client);
     case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":       return executeExplain(stmt);
+    // 一時テーブルはバッチスコープのため単文実行では拒否する（バッチ実行器はフェーズ1 S4 で追加）
+    case "CREATE_TEMP_TABLE":
+      throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "DROP_TEMP_TABLE":
+      throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
   }
 }
 

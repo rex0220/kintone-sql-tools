@@ -78,7 +78,12 @@ import type {
   FuncFieldValue,
   OrderByKey,
   ArrayLiteral,
+  CreateTempTableStatement,
+  DropTempTableStatement,
 } from "../types/ast";
+
+/** バッチ(複文)の文数上限 */
+const MAX_BATCH_STATEMENTS = 20;
 
 // BETWEEN 展開用の型エイリアス（ローカル）
 type ExpandedBetween = LogicalExpr;
@@ -102,6 +107,8 @@ export class Parser {
   private pos = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
+  /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
+  private tempTableRefs: Token[] = [];
 
   constructor(private readonly tokens: Token[]) {}
 
@@ -109,12 +116,55 @@ export class Parser {
   // 公開 API
   // ----------------------------------------------------------
 
+  /** 単文をパースする（従来 API。複文が渡されたらエラー） */
   parse(): Statement {
-    const stmt = this.parseStatement();
-    // セミコロンは任意
-    if (this.peek().kind === TokenKind.SEMICOLON) this.advance();
+    const stmts = this.parseStatements();
+    if (stmts.length === 0) {
+      throw new ParseError("SQL 文がありません", this.peek());
+    }
+    if (stmts.length > 1) {
+      throw new ParseError(
+        "この API は単文のみ受け付けます（複文はバッチ実行 API を使用してください）",
+        this.peek()
+      );
+    }
+    // 一時テーブルはバッチスコープのため、単文では参照先が存在し得ない。
+    // バッチ実行器（parseStatements 経由）が入るまで、既存の単文実行経路
+    // （executeSelect が APP0 を読む / executeWith が空結果を返す）へ漏らさない
+    if (this.tempTableRefs.length > 0) {
+      const tok = this.tempTableRefs[0];
+      throw new ParseError(
+        `temp table ${tok.value} is not defined in this batch.`,
+        tok
+      );
+    }
+    return stmts[0];
+  }
+
+  /** 複文（`;` 区切り）をパースする。空文はスキップする */
+  parseStatements(): Statement[] {
+    const stmts: Statement[] = [];
+    while (true) {
+      // 空文（連続する ;）をスキップ
+      while (this.peek().kind === TokenKind.SEMICOLON) this.advance();
+      if (this.peek().kind === TokenKind.EOF) break;
+
+      const startTok = this.peek();
+      stmts.push(this.parseStatement());
+      if (stmts.length > MAX_BATCH_STATEMENTS) {
+        throw new ParseError(
+          `batch exceeds ${MAX_BATCH_STATEMENTS} statements.`,
+          startTok
+        );
+      }
+      // 文の直後は ; または EOF
+      const after = this.peek();
+      if (after.kind !== TokenKind.SEMICOLON && after.kind !== TokenKind.EOF) {
+        throw new ParseError("文の区切りには ; が必要です", after);
+      }
+    }
     this.expect(TokenKind.EOF);
-    return stmt;
+    return stmts;
   }
 
   // ----------------------------------------------------------
@@ -135,12 +185,71 @@ export class Parser {
       case TokenKind.DESCRIBE:
       case TokenKind.DESC:     return this.parseDescribe();
       case TokenKind.EXPLAIN:  return this.parseExplain();
+      case TokenKind.IDENT: {
+        // CREATE / DROP は予約語にせずソフトキーワードで扱う
+        //（既存アプリのフィールド名・テーブル名を潰さないため）
+        const upper = tok.value.toUpperCase();
+        if (upper === "CREATE") return this.parseCreateTempTable();
+        if (upper === "DROP")   return this.parseDropTempTable();
+        break;
+      }
       default:
-        throw new ParseError(
-          "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN のいずれかで始まる SQL 文が必要です",
-          tok
-        );
+        break;
     }
+    throw new ParseError(
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE のいずれかで始まる SQL 文が必要です",
+      tok
+    );
+  }
+
+  // ----------------------------------------------------------
+  // CREATE TEMP TABLE / DROP TEMP TABLE（バッチ内一時テーブル）
+  // CREATE / DROP / TEMP / TABLE は予約語にしない（ソフトキーワード）
+  // ----------------------------------------------------------
+
+  private parseCreateTempTable(): CreateTempTableStatement {
+    this.advance(); // CREATE
+    this.expectSoftKeyword("TEMP", "CREATE の後には TEMP TABLE が必要です（例: CREATE TEMP TABLE #temp AS SELECT ...）");
+    this.expectSoftKeyword("TABLE", "CREATE TEMP の後には TABLE が必要です");
+    const name = this.parseTempTableName();
+    this.expect(TokenKind.AS, "CREATE TEMP TABLE には AS SELECT が必要です");
+
+    const tok = this.peek();
+    let query: CreateTempTableStatement["query"];
+    if (tok.kind === TokenKind.WITH) {
+      query = this.parseWith();
+    } else if (tok.kind === TokenKind.SELECT) {
+      query = this.tryParseUnionChain(this.parseSelect());
+    } else {
+      throw new ParseError("CREATE TEMP TABLE ... AS の後には SELECT / WITH が必要です", tok);
+    }
+    return { type: "CREATE_TEMP_TABLE", name, query };
+  }
+
+  private parseDropTempTable(): DropTempTableStatement {
+    this.advance(); // DROP
+    this.expectSoftKeyword("TEMP", "DROP の後には TEMP TABLE が必要です（例: DROP TEMP TABLE #temp）");
+    this.expectSoftKeyword("TABLE", "DROP TEMP の後には TABLE が必要です");
+    const name = this.parseTempTableName();
+    return { type: "DROP_TEMP_TABLE", name };
+  }
+
+  private expectSoftKeyword(word: string, msg: string): void {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.IDENT && tok.value.toUpperCase() === word) {
+      this.advance();
+      return;
+    }
+    throw new ParseError(msg, tok);
+  }
+
+  private parseTempTableName(): string {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.IDENT && tok.value.startsWith("#")) {
+      this.advance();
+      return tok.value;
+    }
+    throw new ParseError("一時テーブル名は # で始まる必要があります（例: #temp）", tok);
   }
 
   private parseShow(): ShowAppsStatement {
@@ -837,28 +946,48 @@ export class Parser {
   // ----------------------------------------------------------
 
   private parseTableRef(): TableRef {
-    const name = this.parseIdentifier();
+    const nameTok = this.peek();
+    const name = this.parseTableName();
+    // 一時テーブル参照（#name）: CTE と同じ機構（FULL_SCAN 注入）で実行される
+    //（temp マーカーは IDENT のみ。バッククォートの `#x` は通常識別子として後段へ）
+    if (nameTok.kind === TokenKind.IDENT && name.startsWith("#")) {
+      this.tempTableRefs.push(this.prev());
+      const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
+      return { appId: 0, alias, cteName: name };
+    }
     // CTE 参照（WITH 句で定義された名前）
     if (this.cteNames.has(name)) {
-      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : this.tryParseImplicitAlias();
+      const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
       return { appId: 0, alias, cteName: name };
     }
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {
-      const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : this.tryParseImplicitAlias();
+      const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
       return { appId, alias, cteName: null, subtableCode };
     }
     // `AS alias` のほか、`FROM APP100 a` 形式も許可する。
     // 省略時はテーブル名をデフォルトエイリアスとする。
     const implicit = this.tryParseImplicitAlias();
-    const alias = this.consume(TokenKind.AS) ? this.parseIdentifier() : (implicit ?? name);
+    const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : (implicit ?? name);
     return { appId, alias, cteName: null };
+  }
+
+  // テーブル alias 名を読む（IDENT / BIDENT）。alias 位置の # は BIDENT でも拒否
+  private parseTableAliasName(): string {
+    const tok = this.peek();
+    if (
+      (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) &&
+      tok.value.startsWith("#")
+    ) {
+      throw new ParseError("エイリアス名に # で始まる名前は使用できません", tok);
+    }
+    return this.parseIdentifier();
   }
 
   private tryParseImplicitAlias(): string | null {
     const k = this.peek().kind;
     if (k === TokenKind.IDENT || k === TokenKind.BIDENT) {
-      return this.parseIdentifier();
+      return this.parseTableAliasName();
     }
     return null;
   }
@@ -1357,6 +1486,7 @@ export class Parser {
     this.expect(TokenKind.INSERT);
     this.expect(TokenKind.INTO);
 
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
 
@@ -1393,6 +1523,7 @@ export class Parser {
     this.expect(TokenKind.UPSERT);
     this.expect(TokenKind.INTO);
 
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {
@@ -1493,6 +1624,7 @@ export class Parser {
   private parseUpdate(): UpdateStatement {
     this.expect(TokenKind.UPDATE);
 
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
 
@@ -1587,6 +1719,7 @@ export class Parser {
     this.expect(TokenKind.DELETE);
     this.expect(TokenKind.FROM);
 
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
 
@@ -1612,6 +1745,7 @@ export class Parser {
     this.expect(TokenKind.REORDER);
     const all = this.consume(TokenKind.ALL);
 
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (!subtableCode) {
@@ -1706,8 +1840,30 @@ export class Parser {
     return n;
   }
 
-  // 識別子（IDENT / BIDENT）を読む
+  // 識別子（IDENT / BIDENT）を読む。# 始まりの一時テーブル名は不可
+  //（temp マーカーはレキサが生成する IDENT のみ。`#field` のような
+  //  バッククォート識別子は # で始まる通常フィールド名として許容する）
   private parseIdentifier(): string {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
+      if (tok.kind === TokenKind.IDENT && tok.value.startsWith("#")) {
+        throw new ParseError(
+          "一時テーブル名（# で始まる名前）は FROM / JOIN / CREATE / DROP TEMP TABLE でのみ使用できます",
+          tok
+        );
+      }
+      this.advance();
+      return tok.value;
+    }
+    throw new ParseError(
+      "フィールド名またはテーブル名が必要です",
+      tok
+    );
+  }
+
+  // テーブル名（IDENT / BIDENT）を読む。# 始まりの一時テーブル名を許容する
+  //（一時テーブルを受理してよいのはテーブル参照位置のみ。他は parseIdentifier を使う）
+  private parseTableName(): string {
     const tok = this.peek();
     if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
       this.advance();
@@ -1719,10 +1875,24 @@ export class Parser {
     );
   }
 
+  // DML の対象テーブル位置に一時テーブルが指定されていたら拒否する
+  private rejectTempTableDml(): void {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.IDENT && tok.value.startsWith("#")) {
+      throw new ParseError(
+        `DML on temp table ${tok.value} is not supported.`,
+        tok
+      );
+    }
+  }
+
   // エイリアス名: IDENT / BIDENT に加え、キーワードも許容する
   // 例: SELECT SUM(金額) AS avg → "avg" は AVG キーワードだが alias として有効
   private parseAliasName(): string {
     const tok = this.peek();
+    if (tok.value.startsWith("#")) {
+      throw new ParseError("エイリアス名に # で始まる名前は使用できません", tok);
+    }
     if (
       tok.kind === TokenKind.IDENT ||
       tok.kind === TokenKind.BIDENT ||

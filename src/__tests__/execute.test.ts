@@ -1860,3 +1860,29 @@ test("SIMPLE SELECT: ORDER BY ありならフィールド定義を取得する�
 
   expect(result.metrics!.fieldCalls).toBe(1);
 });
+
+// ----------------------------------------------------------------
+// 一時テーブル（バッチスコープ）: 単文実行では拒否
+// ----------------------------------------------------------------
+
+test("単文の CREATE TEMP TABLE は ArgumentError", async () => {
+  const client = makeClient();
+  await expect(
+    execute("CREATE TEMP TABLE #t AS SELECT * FROM APP100", client)
+  ).rejects.toThrow(/CREATE TEMP TABLE requires a batch/);
+});
+
+test("単文の DROP TEMP TABLE は ArgumentError", async () => {
+  const client = makeClient();
+  await expect(
+    execute("DROP TEMP TABLE #t", client)
+  ).rejects.toThrow(/DROP TEMP TABLE requires a batch/);
+});
+
+test("単文実行の FROM #t は APP0 に到達せず拒否される", async () => {
+  const client = makeClient();
+  await expect(
+    execute("SELECT * FROM #t", client)
+  ).rejects.toThrow(/temp table #t is not defined in this batch/);
+  expect(client.getCalls).toHaveLength(0);
+});

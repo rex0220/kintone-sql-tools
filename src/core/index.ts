@@ -3,7 +3,7 @@
 // ============================================================
 
 export { execute, OperationCancelledError } from "../execute";
-export { parseSqlStatement } from "./sql";
+export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { formatDisplayText } from "./displayFormat";
 
 export type {

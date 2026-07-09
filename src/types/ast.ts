@@ -20,7 +20,9 @@ export type Statement =
   | ReorderStatement
   | ShowAppsStatement
   | DescribeStatement
-  | ExplainStatement;
+  | ExplainStatement
+  | CreateTempTableStatement
+  | DropTempTableStatement;
 
 // ------------------------------------------------------------
 // SHOW / DESCRIBE
@@ -51,6 +53,23 @@ export interface ExplainStatement {
     | UpdateStatement
     | DeleteStatement
     | ReorderStatement;
+}
+
+// ------------------------------------------------------------
+// 一時テーブル（バッチ内スコープ）
+// ------------------------------------------------------------
+
+/** CREATE TEMP TABLE #name AS SELECT ... — SELECT 結果をバッチ内一時テーブルとして実体化 */
+export interface CreateTempTableStatement {
+  type: "CREATE_TEMP_TABLE";
+  name: string; // "#" を含む一時テーブル名（例: "#temp"）
+  query: SelectStatement | UnionStatement | WithStatement;
+}
+
+/** DROP TEMP TABLE #name — 一時テーブルの明示破棄（バッチ終了時は自動破棄） */
+export interface DropTempTableStatement {
+  type: "DROP_TEMP_TABLE";
+  name: string;
 }
 
 // ------------------------------------------------------------

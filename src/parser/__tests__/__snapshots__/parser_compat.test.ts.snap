@@ -1,0 +1,492 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`単文互換: DELETE 1`] = `
+{
+  "appId": 100,
+  "type": "DELETE",
+  "where": {
+    "left": {
+      "field": "ステータス",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": "=",
+    "right": {
+      "type": "STRING",
+      "value": "無効",
+    },
+    "type": "BINARY",
+  },
+}
+`;
+
+exports[`単文互換: DESCRIBE 1`] = `
+{
+  "appId": 100,
+  "type": "DESCRIBE",
+}
+`;
+
+exports[`単文互換: EXPLAIN 1`] = `
+{
+  "query": {
+    "columns": [
+      {
+        "type": "WILDCARD",
+      },
+    ],
+    "distinct": false,
+    "from": {
+      "alias": "APP100",
+      "appId": 100,
+      "cteName": null,
+    },
+    "groupBy": [],
+    "having": null,
+    "joins": [],
+    "limit": null,
+    "offset": null,
+    "orderBy": [],
+    "type": "SELECT",
+    "where": null,
+  },
+  "type": "EXPLAIN",
+}
+`;
+
+exports[`単文互換: INSERT SELECT 1`] = `
+{
+  "appId": 100,
+  "fields": [
+    "顧客名",
+  ],
+  "select": {
+    "columns": [
+      {
+        "alias": null,
+        "field": "顧客名",
+        "type": "FIELD",
+      },
+    ],
+    "distinct": false,
+    "from": {
+      "alias": "APP200",
+      "appId": 200,
+      "cteName": null,
+    },
+    "groupBy": [],
+    "having": null,
+    "joins": [],
+    "limit": null,
+    "offset": null,
+    "orderBy": [],
+    "type": "SELECT",
+    "where": null,
+  },
+  "type": "INSERT_SELECT",
+}
+`;
+
+exports[`単文互換: INSERT VALUES 1`] = `
+{
+  "appId": 100,
+  "fields": [
+    "顧客名",
+    "売上",
+  ],
+  "type": "INSERT",
+  "values": [
+    [
+      {
+        "type": "STRING",
+        "value": "A",
+      },
+      {
+        "type": "NUMBER",
+        "value": 100,
+      },
+    ],
+    [
+      {
+        "type": "STRING",
+        "value": "B",
+      },
+      {
+        "type": "NUMBER",
+        "value": 200,
+      },
+    ],
+  ],
+}
+`;
+
+exports[`単文互換: JOIN + 暗黙 alias 1`] = `
+{
+  "columns": [
+    {
+      "alias": null,
+      "field": "a.顧客名",
+      "type": "FIELD",
+    },
+    {
+      "alias": null,
+      "field": "b.部署名",
+      "type": "FIELD",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "a",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "having": null,
+  "joins": [
+    {
+      "on": {
+        "left": {
+          "field": "部署ID",
+          "tableAlias": "a",
+        },
+        "right": {
+          "field": "$id",
+          "tableAlias": "b",
+        },
+      },
+      "table": {
+        "alias": "b",
+        "appId": 200,
+        "cteName": null,
+      },
+      "type": "INNER",
+    },
+  ],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
+exports[`単文互換: REORDER 1`] = `
+{
+  "all": false,
+  "appId": 100,
+  "by": [
+    {
+      "direction": "ASC",
+      "key": {
+        "name": "商品コード",
+        "type": "FIELD_NAME",
+      },
+    },
+  ],
+  "subtableCode": "明細",
+  "type": "REORDER",
+  "where": {
+    "left": {
+      "field": "_pid",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": "=",
+    "right": {
+      "type": "NUMBER",
+      "value": 1,
+    },
+    "type": "BINARY",
+  },
+}
+`;
+
+exports[`単文互換: SELECT フル句 1`] = `
+{
+  "columns": [
+    {
+      "alias": null,
+      "field": "顧客名",
+      "type": "FIELD",
+    },
+    {
+      "alias": "合計",
+      "arg": {
+        "field": "売上",
+        "type": "FIELD_REF",
+      },
+      "distinct": false,
+      "func": "SUM",
+      "type": "AGGREGATE",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP100",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [
+    {
+      "name": "顧客名",
+      "type": "FIELD_NAME",
+    },
+  ],
+  "having": {
+    "left": {
+      "field": "SUM(売上)",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": ">",
+    "right": {
+      "type": "NUMBER",
+      "value": 100,
+    },
+    "type": "BINARY",
+  },
+  "joins": [],
+  "limit": 10,
+  "offset": 5,
+  "orderBy": [
+    {
+      "direction": "DESC",
+      "key": {
+        "name": "合計",
+        "type": "FIELD_NAME",
+      },
+    },
+  ],
+  "type": "SELECT",
+  "where": {
+    "left": {
+      "field": "ステータス",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": "=",
+    "right": {
+      "type": "STRING",
+      "value": "完了",
+    },
+    "type": "BINARY",
+  },
+}
+`;
+
+exports[`単文互換: SELECT 単純 1`] = `
+{
+  "columns": [
+    {
+      "type": "WILDCARD",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP100",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
+exports[`単文互換: SHOW APPS 1`] = `
+{
+  "type": "SHOW_APPS",
+}
+`;
+
+exports[`単文互換: UNION ALL 1`] = `
+{
+  "all": true,
+  "left": {
+    "columns": [
+      {
+        "alias": null,
+        "field": "顧客名",
+        "type": "FIELD",
+      },
+    ],
+    "distinct": false,
+    "from": {
+      "alias": "APP100",
+      "appId": 100,
+      "cteName": null,
+    },
+    "groupBy": [],
+    "having": null,
+    "joins": [],
+    "limit": null,
+    "offset": null,
+    "orderBy": [],
+    "type": "SELECT",
+    "where": null,
+  },
+  "right": {
+    "columns": [
+      {
+        "alias": null,
+        "field": "顧客名",
+        "type": "FIELD",
+      },
+    ],
+    "distinct": false,
+    "from": {
+      "alias": "APP200",
+      "appId": 200,
+      "cteName": null,
+    },
+    "groupBy": [],
+    "having": null,
+    "joins": [],
+    "limit": null,
+    "offset": null,
+    "orderBy": [],
+    "type": "SELECT",
+    "where": null,
+  },
+  "type": "UNION",
+}
+`;
+
+exports[`単文互換: UPDATE 1`] = `
+{
+  "appId": 100,
+  "assignments": [
+    {
+      "field": "ステータス",
+      "value": {
+        "type": "STRING",
+        "value": "完了",
+      },
+    },
+  ],
+  "type": "UPDATE",
+  "where": {
+    "left": {
+      "field": "$id",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": "=",
+    "right": {
+      "type": "NUMBER",
+      "value": 1,
+    },
+    "type": "BINARY",
+  },
+}
+`;
+
+exports[`単文互換: UPSERT 1`] = `
+{
+  "appId": 100,
+  "fields": [
+    "顧客コード",
+    "ランク",
+  ],
+  "keyFields": [
+    "顧客コード",
+  ],
+  "type": "UPSERT",
+  "values": [
+    [
+      {
+        "type": "STRING",
+        "value": "C1",
+      },
+      {
+        "type": "STRING",
+        "value": "A",
+      },
+    ],
+  ],
+}
+`;
+
+exports[`単文互換: WITH CTE 1`] = `
+{
+  "ctes": [
+    {
+      "name": "c1",
+      "query": {
+        "columns": [
+          {
+            "alias": null,
+            "field": "顧客ID",
+            "type": "FIELD",
+          },
+        ],
+        "distinct": false,
+        "from": {
+          "alias": "APP100",
+          "appId": 100,
+          "cteName": null,
+        },
+        "groupBy": [],
+        "having": null,
+        "joins": [],
+        "limit": null,
+        "offset": null,
+        "orderBy": [],
+        "type": "SELECT",
+        "where": null,
+      },
+    },
+  ],
+  "query": {
+    "columns": [
+      {
+        "type": "WILDCARD",
+      },
+    ],
+    "distinct": false,
+    "from": {
+      "alias": null,
+      "appId": 0,
+      "cteName": "c1",
+    },
+    "groupBy": [],
+    "having": null,
+    "joins": [],
+    "limit": null,
+    "offset": null,
+    "orderBy": [],
+    "type": "SELECT",
+    "where": null,
+  },
+  "type": "WITH",
+}
+`;
+
+exports[`単文互換: 末尾セミコロン 1`] = `
+{
+  "columns": [
+    {
+      "type": "WILDCARD",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP100",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "type": "SELECT",
+  "where": null,
+}
+`;
