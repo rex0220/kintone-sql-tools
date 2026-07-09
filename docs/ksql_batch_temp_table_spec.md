@@ -19,6 +19,7 @@
   - 2026-07-09 R19(S6 実装後): `ksql_query` の read-only バッチ受理を実装(§6.2・§7.2)。`maxTotalRecords` 超過時の挙動を ArgumentError と確定(§6.2 に追記)。バッチでは `timeout` を合計タイムアウトとして扱う(§5.7。HTTP クライアントの per-request タイムアウトにも同値が渡る)。DML 混在バッチは `ArgumentError: batch contains DML statements. Use ksql_mutate.`
   - 2026-07-09 R20(S7 実装後): CLI 実装(`-f` 複文・`--continue-on-error`・console)。§8.2 の「完結単文の `;` なし即実行」を撤回し **`;` ゲートを維持**(R3〜R4 の前提「現行 console は改行=実行」が誤りで、現行は従来から `;` 終端実行のため。撤回により複数行入力の途中実行という退行を回避)。判定順を6段に再構成(メタ → バッチ構築 → `;` まで蓄積 → 完結実行 → 継続可能失敗 → 即エラー)。`:run` エラー時はバッファ保持、`@profile` 構文は判定用パース前に正規化
   - 2026-07-09 R21(S8): 公開ドキュメントへ反映(言語リファレンス §25 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5 / console spec)。フェーズ1 実装完了
+  - 2026-07-09 R26(M4 実装後): 一時テーブル経由の `INSERT_SELECT` を解禁(§7.3 の実装)。ソース判定は「SELECT 側に APP 参照がなく一時テーブル参照が1つ以上」(`tempOnlySource`)。実体化済み行数は confirm("INSERT") 経由で `dmlMaxRows` / `dmlTotalMaxRows` の対象になる(§7.3 の集計対象に明記)。§9 に APP 混在ソースのエラーメッセージを追加
   - 2026-07-09 R24(M1 実装後): `ksql_mutate` の DML バッチ受理を実装(§7.3)。静的ガード(INSERT_SELECT 拒否・WHERE なし・文ごと insertValuesCount)は validate-all-first で実行前に適用。`dmlTotalMaxRows` の集計対象(INSERT 静的 + UPDATE/DELETE 実行時、UPSERT 対象外)と混在バッチの取得上限・影響件数の文ごと展開を §7.3 に明記
 - ステータス: フェーズ1 実装完了(S1〜S8。実機検証は未実施、リリースはフェーズ2 完了後に v1.4.0 一括)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
@@ -240,7 +241,7 @@ DROP TEMP TABLE #name;
 - DML バッチを受理する。`allowDml` / `confirmText` / `dmlMaxRows` は現行どおり必須
 - `dmlMaxRows` は**文ごと**に適用。任意の `dmlTotalMaxRows` でバッチ合計影響行数の上限も指定できる(既定はガードなし = 文ごとガードのみ)
 - DML バッチでは `continueOnError` は**指定不可**(常に fail-fast)。DML の続行判断を機械任せにしない
-- `dmlTotalMaxRows` の集計対象は INSERT(VALUES 行数を静的に加算)と UPDATE / DELETE(実行時の対象件数を加算)。**UPSERT の影響行数は対象外**(単文 `ksql_mutate` の挙動と同等。将来課題)
+- `dmlTotalMaxRows` の集計対象は INSERT(VALUES 行数を静的に加算)、UPDATE / DELETE(実行時の対象件数を加算)、および**一時テーブル経由の `INSERT_SELECT`(実体化済み行数を書き込み前に実行時加算)**。**UPSERT の影響行数は対象外**(単文 `ksql_mutate` の挙動と同等。将来課題)
 - DML バッチに read-only 文を混在させた場合、その取得上限も `dmlMaxRows + 1` になる(ksql_mutate は DML 用ツールであり、大きな SELECT は `ksql_query` を使う)
 - DML の影響件数(insertedCount / updatedCount / deletedCount 等)は `statements[]` の各エントリに展開する。途中失敗時に「どこまで反映されたか」を文ごとに読み取れる
 - 一時テーブル経由の `INSERT_SELECT` を解禁する: `INSERT INTO APPxxx SELECT ... FROM #t` は SELECT ソースが**一時テーブルのみ**の場合に受理する。一時テーブルはバッチスコープのため、**`CREATE TEMP TABLE` は同一の `ksql_mutate` バッチ内に含める必要がある**(呼び出しをまたぐ参照は不可)。書き込み前に実体化済み行数が確定するため、`dmlMaxRows` が実行時の確実なガードとして機能する。kintone アプリを直接ソースとする `INSERT_SELECT` は引き続き拒否
@@ -298,6 +299,7 @@ DROP TEMP TABLE #name;
 | `@profile` 付き一時テーブル名 | `LexError: @profile is not allowed on temp table #t.`(レキサで検出。§4.2) |
 | 文数超過 | `ParseError: batch exceeds 20 statements.` |
 | 単文の `CREATE TEMP TABLE` / `DROP TEMP TABLE` | `ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).` |
+| APP をソースに含む `INSERT_SELECT`(バッチ内) | `ArgumentError: INSERT_SELECT in a batch must select from temp tables only. (statement N)` |
 | 空入力(空文字列・`;` のみ) | `ArgumentError: SQL is empty.` |
 | 一時テーブル行数超過 | `FetchAllLimitError`(既存を流用) |
 
