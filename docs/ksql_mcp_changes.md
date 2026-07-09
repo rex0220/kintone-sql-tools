@@ -288,8 +288,8 @@ Claude Desktop 設定例:
 ## 11.5 バッチ実行・一時テーブル対応（v1.4.0 予定）
 
 `;` 区切りの複文（バッチ）と一時テーブル（`CREATE TEMP TABLE #t AS SELECT ...`）に対応した。
-MCP 側はフェーズ2 の M1（DML バッチ）・M3（バッチ EXPLAIN）・M4（temp 経由 INSERT_SELECT）まで実装済み。
-残りは CLI の DML バッチ確認（M2）と v1.4.0 リリース（M6）。
+フェーズ2 の M1（DML バッチ）・M2（CLI の DML バッチ確認）・M3（バッチ EXPLAIN）・
+M4（temp 経由 INSERT_SELECT）まで実装済み。残りは v1.4.0 リリース（M6。実機検証と表記確定）。
 詳細仕様は `docs/ksql_batch_temp_table_spec.md`。
 
 対応ツールと変更点:

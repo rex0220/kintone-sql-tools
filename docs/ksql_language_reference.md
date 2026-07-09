@@ -1575,7 +1575,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | FULL OUTER JOIN | 非対応 |
 | UPDATE に JOIN | 非対応 |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
-| DML を含むバッチ（複文） | フェーズ1 実装時点では未対応（**v1.4.0 リリース時にフェーズ2で対応予定 — リリース時にこの行を更新**。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
+| DML を含むバッチ（複文） | 対応（v1.4.0 予定。`ksql_mutate` / CLI `--allow-dml`。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
@@ -1680,7 +1680,7 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 
 ## 25. バッチ実行と一時テーブル（CLI / MCP）
 
-> **v1.4.0 で追加予定**（本節は開発版・フェーズ1 実装時点の記述です）。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate`）で利用可能**です。プラグイン UI は単文のみです。DML を含むバッチはフェーズ2（v1.4.0 リリースまで）で対応予定です。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
+> **v1.4.0 で追加予定**（本節は開発版の記述です）。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI は単文のみです。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
 
 ### 複文（バッチ）
 
@@ -1691,7 +1691,8 @@ SELECT 部門 FROM APP100;
 SELECT 部門 FROM APP200;
 ```
 
-- **read-only 文のみ**（SELECT / UNION / WITH / SHOW APPS / DESCRIBE / EXPLAIN / 一時テーブルの CREATE・DROP）。DML を含むバッチは**フェーズ2（v1.4.0 リリースまで）で対応予定**で、フェーズ1 実装時点では拒否されます
+- read-only 文のみのバッチは `ksql_query` / CLI がそのまま実行します。**DML を含むバッチ**は `ksql_mutate`（`dmlMaxRows` は文ごと + 任意の `dmlTotalMaxRows` で合計ガード）または CLI `--allow-dml`（確認プロンプトはバッチ全体で1回、`--yes` でスキップ）で実行します。DML バッチは常に fail-fast です
+- 一時テーブル経由の `INSERT INTO APPxxx ... SELECT ... FROM #t` に対応（ソースが一時テーブルのみの場合。実体化済み行数に `dmlMaxRows` が書き込み前に適用されます）
 - 実行前に全文を検証し、1文でも不正ならバッチ全体を拒否します（validate-all-first）
 - 既定は fail-fast（エラー文以降はスキップ）。`--continue-on-error`（CLI）/ `continueOnError`（MCP）でエラー後の続行を選べます
 - 結果は文ごとに `success` / `error` / `skipped` として報告されます
