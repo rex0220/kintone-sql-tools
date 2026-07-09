@@ -16,7 +16,8 @@
   - 2026-07-09 R14(S3 実装後): §4.3 の再定義エラーを「生存中の同名のみ」と明確化(DROP 後の再 CREATE は許容、個数上限は同時数)
   - 2026-07-09 R15(S3 実装後): 空入力(空文字列・`;` のみ)を `ArgumentError: SQL is empty.` として拒否(§9 に追加)
   - 2026-07-09 R18(S5 実装後): `ksql_validate` のバッチ対応を実装(§7.1)。外部から見える変更: ①バッチ入力が ParseError ではなくサマリ + `statements[]` の正常応答になる、②単文入力にも `statements[]`(要素1)が付く、③単文の CREATE/DROP TEMP TABLE は validate 段階で ArgumentError、④`appIds` が文字列走査から AST ベース(文ごと)に変わり文字列リテラル内の誤検出がなくなる。`ksql_query` / `ksql_mutate` へのバッチ入力は S6 / フェーズ2 対応まで `ArgumentError: batch SQL ... not supported ... yet.` で明示的に拒否
-- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S5 実装済み)
+  - 2026-07-09 R19(S6 実装後): `ksql_query` の read-only バッチ受理を実装(§6.2・§7.2)。`maxTotalRecords` 超過時の挙動を ArgumentError と確定(§6.2 に追記)。バッチでは `timeout` を合計タイムアウトとして扱う(§5.7。HTTP クライアントの per-request タイムアウトにも同値が渡る)。DML 混在バッチは `ArgumentError: batch contains DML statements. Use ksql_mutate.`
+- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S6 実装済み)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 
@@ -192,7 +193,7 @@ DROP TEMP TABLE #name;
 ```
 
 - `results` の対象は**結果セットを返す read-only 文**(SELECT / SHOW 系 / DESCRIBE / EXPLAIN — いずれも既存実装で `SelectResult` として返る)。ただし **`CREATE TEMP TABLE` の実体化結果(AS 句の SELECT)は含めない**(返すのは `tempTable` 名と `rowCount` のみ)。中間結果を LLM のコンテキストに載せないことが一時テーブルの主目的であるため
-- `maxRecords` は `results` に入る各結果セットに**文ごと**に適用する(MCP 既定 500。EXPLAIN のプラン行にも一律適用されるが実質影響しない)。任意の `maxTotalRecords` でバッチ合計行数の上限も指定できる(既定なし)
+- `maxRecords` は `results` に入る各結果セットに**文ごと**に適用する(MCP 既定 500。EXPLAIN のプラン行にも一律適用されるが実質影響しない)。任意の `maxTotalRecords` でバッチ合計行数の上限も指定できる(既定なし。超過時は `ArgumentError: batch total rows (N) exceed maxTotalRecords (M).`)
 - `skippedReason` は `"fail-fast"` / `"dependency: #name"`(依存スキップ)/ `"timeout"` のいずれか
 
 ---

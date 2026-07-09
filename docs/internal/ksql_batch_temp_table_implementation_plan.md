@@ -20,7 +20,8 @@
   - 2026-07-09 R16(S4 実装後): S4 実装済み。`executeBatch()` は実行時エラーを throw せず文ごと status で返すエンベロープ方式。DML 文内の一時テーブル参照は実行前に一括拒否(フェーズ2 M1/M4 で解禁)。timeout は Promise.race 方式で進行中リクエスト自体は中断されない(AbortSignal 伝播は P0-1 とあわせて対応)。WITH の CTE インライン化は一時テーブル注入時は無効化
   - 2026-07-09 R17(S4 実装後): サブクエリ解決(`resolveSubqueries` / `resolveScalarColumns`)へ `cteCache` を貫通(IN / EXISTS / スカラーサブクエリ内の `FROM #t` が `executeSelect` 直呼びで注入経路を外れる穴の修正。同構造だった「サブクエリ内の CTE 参照」も同時に解決)
   - 2026-07-09 R18(S5 実装後): S5 実装済み。`ValidationResult` は単文/バッチの判別可能ユニオン(バッチ側はスカラーを `undefined` 型で宣言し既存テストの型互換を維持)。`appIds` は文字列正規表現(`extractAppIds`)から AST ディープウォーク(文ごと)に変更。単文 CREATE/DROP TEMP TABLE は validate 段階で ArgumentError に(従来は ok:true で素通り)。query/mutate/saveQuery/runSavedQuery に `requireSingleStatement` ガード(S6/M1 で解除)
-- ステータス: 実装中(S1〜S5 完了。次は S6: ksql_query のバッチ受理)
+  - 2026-07-09 R19(S6 実装後): S6 実装済み。query のガードを解除し read-only バッチを `executeBatch` で実行、§6.2 エンベロープ(`toBatchQueryPayload`)。`maxTotalRecords` 超過は ArgumentError。バッチの `timeout` は合計タイムアウト(executeBatch の timeoutMs)と HTTP per-request の両方に同値を渡す。テスト用に `executeBatchSql` を DI 可能に
+- ステータス: 実装中(S1〜S6 完了。次は S7: CLI)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
