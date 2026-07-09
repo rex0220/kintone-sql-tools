@@ -26,6 +26,10 @@ export const queryInputSchema = z.object({
   fetchParallel,
   onLimit,
   timeout,
+  /** バッチ(複文)専用: 実行時エラー後も後続文を実行する(既定 false = fail-fast) */
+  continueOnError: z.boolean().optional(),
+  /** バッチ(複文)専用: 返却する結果セットの合計行数上限(既定なし) */
+  maxTotalRecords: z.number().int().positive().optional(),
 });
 
 export const mutateInputSchema = z.object({

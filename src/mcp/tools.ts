@@ -2,9 +2,11 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 import {
   execute,
+  executeBatch,
   parseSqlStatement,
   parseSqlStatements,
   analyzeBatch,
+  type BatchExecuteResult,
   type ExecuteOptions,
   type ExecuteResult,
   type KintoneClient,
@@ -67,6 +69,7 @@ export interface KsqlMcpToolDependencies {
     client: KintoneClient,
     options?: ExecuteOptions
   ) => Promise<ExecuteResult>;
+  executeBatchSql?: typeof executeBatch;
 }
 
 /** 文ごとの検証結果（仕様 §7.1 の statements[]） */
@@ -207,6 +210,61 @@ function toSelectPayload(result: SelectResult) {
   };
 }
 
+/**
+ * バッチ実行結果を仕様 §6.2 のエンベロープに整形する。
+ * - results には結果セットを返した read-only 文の結果のみ入れる
+ *   （CREATE TEMP TABLE の実体化結果は tempTable / rowCount のみ）
+ * - maxTotalRecords 指定時は返却合計行数を超えた時点でエラー
+ */
+function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number) {
+  const results: Array<{
+    columns: string[];
+    rows: SelectResult["rows"];
+    rowCount: number;
+    warnings: string[];
+  }> = [];
+  let totalRows = 0;
+
+  const statements = batch.statements.map((s) => {
+    const entry: Record<string, unknown> = {
+      index: s.index,
+      type: s.type,
+      status: s.status,
+    };
+    if (s.status === "error" && s.error) entry.error = s.error;
+    if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
+    if (s.tempTable !== undefined) entry.tempTable = s.tempTable;
+    if (s.rowCount !== undefined) entry.rowCount = s.rowCount;
+
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      totalRows += s.result.rowCount;
+      if (maxTotalRecords !== undefined && totalRows > maxTotalRecords) {
+        throw new Error(
+          `ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`
+        );
+      }
+      entry.resultIndex = results.length;
+      results.push({
+        columns: s.result.columns,
+        rows: s.result.rows,
+        rowCount: s.result.rowCount,
+        warnings: s.result.warnings ?? [],
+      });
+    }
+    return entry;
+  });
+
+  return {
+    ok: batch.ok,
+    batch: true,
+    statementCount: batch.statementCount,
+    statements,
+    results,
+    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
+    warnings: [] as string[],
+  };
+}
+
 function toMutationPayload(result: Exclude<ExecuteResult, SelectResult>) {
   if (result.type === "INSERT") {
     return {
@@ -305,6 +363,7 @@ export function createKsqlMcpTools(
 ) {
   const createRuntime = deps.createRuntime ?? createKsqlRuntime;
   const executeSql = deps.executeSql ?? execute;
+  const executeBatchSql = deps.executeBatchSql ?? executeBatch;
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
@@ -376,8 +435,34 @@ export function createKsqlMcpTools(
   }
 
   async function query(input: QueryInput): Promise<Record<string, unknown>> {
-    // バッチ受理は S6 で対応（対応時に requireSingleStatement を外す）
-    const validation = requireSingleStatement(await validate(input), "ksql_query");
+    const validation = await validate(input);
+
+    // read-only バッチ（複文）の実行（フェーズ1 S6）
+    if (validation.batch) {
+      if (validation.containsDml) {
+        throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
+      }
+      const runtime = await createRuntime(serverOptions, {
+        sql: input.sql,
+        profile: input.profile,
+        maxRecords: input.maxRecords,
+        fetchParallel: input.fetchParallel,
+        onLimit: input.onLimit,
+        timeout: input.timeout,
+      });
+      const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
+        maxRecords: runtime.maxRecords,
+        fetchParallel: runtime.fetchParallel,
+        onLimitReached: runtime.onLimit,
+        cacheContext: runtime.cacheContext,
+        continueOnError: input.continueOnError,
+        // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
+        // runtime（HTTP クライアント）側の per-request タイムアウトにも同値が渡る
+        timeoutMs: input.timeout,
+      });
+      return toBatchQueryPayload(batchResult, input.maxTotalRecords);
+    }
+
     if (!validation.isReadOnly) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }

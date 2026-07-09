@@ -730,11 +730,122 @@ describe("MCP tools", () => {
     ).rejects.toThrow(/CREATE TEMP TABLE requires a batch/);
   });
 
-  test("query: バッチ入力は S6 対応まで拒否", async () => {
+  // ----------------------------------------------------------------
+  // ksql_query のバッチ受理（フェーズ1 S6）
+  // ----------------------------------------------------------------
+
+  function makeBatchRuntimeDeps(recordsByApp: Record<number, Array<Record<string, { value: string }>>>) {
+    const client: KintoneClient = {
+      async getRecords(params) {
+        const records = recordsByApp[params.app];
+        if (records === undefined) {
+          throw new Error(`FetchError: mock failure for APP${params.app}`);
+        }
+        return { records: records as never };
+      },
+      async postRecords() { return { ids: [] }; },
+      async putRecords() { },
+      async deleteRecords() { },
+      async getApps() { return []; },
+      async getFields() { return []; },
+    };
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client,
+      cacheContext: "batch-test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    return { createRuntime };
+  }
+
+  const BATCH_APP100 = [
+    { $id: { value: "1" }, 顧客名: { value: "A社" }, 売上: { value: "100" } },
+    { $id: { value: "2" }, 顧客名: { value: "B社" }, 売上: { value: "300" } },
+  ];
+
+  test("query: read-only バッチを実行し §6.2 エンベロープを返す", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 })
+    );
+    const result = await tools.query({
+      sql: "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100; SELECT 顧客名 FROM #t WHERE 売上 > 200",
+    }) as {
+      ok: boolean;
+      batch: boolean;
+      statementCount: number;
+      statements: Array<Record<string, unknown>>;
+      results: Array<{ rows: Array<Record<string, string>>; rowCount: number }>;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.batch).toBe(true);
+    expect(result.statementCount).toBe(2);
+    // CREATE は実体化結果を返さない（tempTable / rowCount のみ）
+    expect(result.statements[0]).toEqual({
+      index: 0,
+      type: "CREATE_TEMP_TABLE",
+      status: "success",
+      tempTable: "#t",
+      rowCount: 2,
+    });
+    // 素の SELECT は resultIndex で results[] に対応付く
+    expect(result.statements[1]).toMatchObject({
+      index: 1,
+      type: "SELECT",
+      status: "success",
+      resultIndex: 0,
+    });
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].rows).toEqual([{ 顧客名: "B社" }]);
+    expect((result as unknown as { warnings: string[] }).warnings).toEqual([]);
+  });
+
+  test("query: DML 混在バッチは ksql_mutate へ誘導", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     await expect(
-      tools.query({ sql: "SELECT * FROM APP100; SELECT * FROM APP200" })
-    ).rejects.toThrow(/batch SQL \(multiple statements\) is not supported by ksql_query yet/);
+      tools.query({ sql: "SELECT * FROM APP100; DELETE FROM APP100 WHERE $id = 1" })
+    ).rejects.toThrow(/batch contains DML statements\. Use ksql_mutate\./);
+  });
+
+  test("query: maxTotalRecords 超過はエラー", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 })
+    );
+    await expect(
+      tools.query({
+        sql: "SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM APP100",
+        maxTotalRecords: 3, // 2 + 2 = 4 で超過
+      })
+    ).rejects.toThrow(/batch total rows \(4\) exceed maxTotalRecords \(3\)/);
+  });
+
+  test("query: continueOnError でエラー文以降も実行され文ごとに報告される", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 }) // APP999 は失敗する
+    );
+    const result = await tools.query({
+      sql: "SELECT 顧客名 FROM APP999; SELECT 顧客名 FROM APP100",
+      continueOnError: true,
+    }) as {
+      ok: boolean;
+      statements: Array<{ status: string; error?: { code: string } }>;
+      results: unknown[];
+    };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements.map((s) => s.status)).toEqual(["error", "success"]);
+    expect(result.statements[0].error?.code).toBe("FetchError");
+    expect(result.results).toHaveLength(1);
   });
 
   test("mutate: バッチ入力はフェーズ2対応まで拒否", async () => {
