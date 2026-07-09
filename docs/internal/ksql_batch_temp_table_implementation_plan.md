@@ -15,7 +15,9 @@
   - 2026-07-09 R11(S2 実装後): 単文 API `parse()` での一時テーブル参照拒否ガードを追加(`FROM #t` が単文実行経路へ漏れて APP0 読み取り・WITH の無言空結果になる穴の対策)/ `parseSqlStatements` を `core/index.ts` から re-export。S2 実装済み
   - 2026-07-09 R12(S2 実装後): temp マーカー判定を `IDENT` に限定(バッククォートの `` `#field` `` を通常フィールド名として維持)/ `REORDER #t` の拒否テストを追加
   - 2026-07-09 R13(S2 実装後): テーブル alias 専用の `parseTableAliasName()` を新設し明示 AS(4経路)・暗黙 alias を統一(R12 の IDENT 限定化でテーブル alias の BIDENT `#x` が素通りするようになっていた穴の修正)
-- ステータス: 実装中(S1・S2 完了。次は S3: バッチ静的検証)
+  - 2026-07-09 R14(S3 実装後): S3 実装済み。分類ヘルパ(dmlGuard)を core へ移動し node は再エクスポートに(core→node 依存を作らないため)。参照収集は AST 汎用ディープウォーク(`cteName` の `#` 判定)。再定義エラーは生存中のみ・DROP 後再 CREATE 許容・上限16は同時数と確定
+  - 2026-07-09 R15(S3 実装後): 空バッチ(空入力・`;` のみ)を `analyzeBatch` で `ArgumentError: SQL is empty.` として拒否(`parseStatements()` が空配列を返す設計との噛み合わせ)
+- ステータス: 実装中(S1〜S3 完了。次は S4: バッチ実行器 + 一時テーブルストア)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -81,6 +83,7 @@
 | 項目 | 内容 |
 |---|---|
 | 新規 | `src/core/batch.ts` — `analyzeBatch(statements)`: 文ごとの分類(既存 validate ロジックの流用)+ 一時テーブルの静的解決(未定義参照・再定義・DROP 後参照・個数上限 16)+ 依存グラフ(文 index → 依存する一時テーブル)。結果は仕様 §7.1 の `statements[]` 構造。**単文(1文のみの入力)の `CREATE_TEMP_TABLE` / `DROP_TEMP_TABLE` は `ArgumentError` として拒否**(仕様 §4.3) |
+| 進め方 | 純追加モジュールのため、①`analyzeBatch()` の入力/出力型(`BatchAnalysis` / `StatementAnalysis`)とエラー分類(どの違反がどのエラー種別・メッセージになるか)を先に小さく固める → ②未定義参照・再定義・DROP 後参照・個数上限16 をテスト先行で1ルールずつ実装 → ③依存グラフ → ④文ごと分類(validate 流用)の順 |
 | テスト | 未定義参照 / 再定義 / DROP 後参照 / 個数上限 / 依存グラフの正しさ / 単文 CREATE・DROP TEMP TABLE の拒否 |
 
 ### S4: 実行器 — バッチランナー + 一時テーブルストア

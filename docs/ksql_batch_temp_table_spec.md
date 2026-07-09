@@ -13,7 +13,9 @@
   - 2026-07-09 R9: alias 拒否の対象に列 alias(`SELECT ... AS #x`)を含むと明確化
   - 2026-07-09 R10(S1 実装後): §8.2 の継続可能判定を `LexError.unterminated` フラグ + `ParseError` の EOF トークン基準に変更(位置ベースを廃止、実装計画 R10 と同期)
   - 2026-07-09 R11(S2 実装後): §4.3 に単文入力での一時テーブル参照の拒否を明記(単文 = 1文のバッチとして未定義参照と同じ扱い)
-- ステータス: ドラフト(実装中 — フェーズ1 の S1・S2 実装済み)
+  - 2026-07-09 R14(S3 実装後): §4.3 の再定義エラーを「生存中の同名のみ」と明確化(DROP 後の再 CREATE は許容、個数上限は同時数)
+  - 2026-07-09 R15(S3 実装後): 空入力(空文字列・`;` のみ)を `ArgumentError: SQL is empty.` として拒否(§9 に追加)
+- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S3 実装済み)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 
@@ -95,7 +97,7 @@ DROP TEMP TABLE #name;
 ```
 
 - `CREATE TEMP TABLE`: `AS` 以降の SELECT を即時実行し、結果を一時テーブルとして実体化する
-- 同名の再定義は**エラー**(`OR REPLACE` は非対応。需要が出てから検討)
+- 同名の再定義は**エラー**(`OR REPLACE` は非対応。需要が出てから検討)。エラーになるのは**生存中の同名**のみで、`DROP TEMP TABLE` で破棄した後の同名再 CREATE は許容する(個数上限 §5.6 も「同時」数で数え、DROP で枠が空く)
 - `DROP TEMP TABLE`: 実体化済みの一時テーブルを破棄する。未定義名の DROP はエラー。バッチ終了時に全一時テーブルは自動破棄されるため、`DROP` は主にメモリの早期解放用
 - 文タイプ(statementType)は `CREATE_TEMP_TABLE` / `DROP_TEMP_TABLE`。両者とも **read-only 扱い**(kintone に書き込まないため)
 - 単文(バッチでない入力)としての `CREATE TEMP TABLE` / `DROP TEMP TABLE` は、作成直後に破棄されて無意味なため **`ArgumentError` として拒否**する(§9)。これにより単文入力の結果ペイロードは既存の文タイプのみとなり、後方互換(§6.1)と衝突しない
@@ -285,6 +287,7 @@ DROP TEMP TABLE #name;
 | `@profile` 付き一時テーブル名 | `LexError: @profile is not allowed on temp table #t.`(レキサで検出。§4.2) |
 | 文数超過 | `ParseError: batch exceeds 20 statements.` |
 | 単文の `CREATE TEMP TABLE` / `DROP TEMP TABLE` | `ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).` |
+| 空入力(空文字列・`;` のみ) | `ArgumentError: SQL is empty.` |
 | 一時テーブル行数超過 | `FetchAllLimitError`(既存を流用) |
 
 ---
