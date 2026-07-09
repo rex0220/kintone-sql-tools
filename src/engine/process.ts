@@ -210,8 +210,14 @@ export function applyGroupBy(
     // 集計カラムを評価
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
-        const outputKey = col.alias ?? aggregateSyntheticName(col.func, col.distinct, col.arg);
-        outRow[outputKey] = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        outRow[col.alias ?? syntheticKey] = value;
+        // HAVING / ORDER BY は集計を合成名（例: SUM(売上)）のフィールド参照として
+        // 解決するため、alias 付きでも合成名キーを併記する（project で出力からは落ちる）。
+        // これがないと「集計列に alias を付けると HAVING が常に偽になる」
+        // （row["SUM(売上)"] → "" → Number("") = 0 → 0 > 0 = false）
+        if (col.alias) outRow[syntheticKey] = value;
       } else if (col.type === "ARITH_AGG_COL") {
         const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
         outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows));

@@ -1886,3 +1886,61 @@ test("単文実行の FROM #t は APP0 に到達せず拒否される", async ()
   ).rejects.toThrow(/temp table #t is not defined in this batch/);
   expect(client.getCalls).toHaveLength(0);
 });
+
+// ----------------------------------------------------------------
+// HAVING × 集計列 alias（v1.4.0 実機検証で発見した既存バグの回帰テスト）
+// 集計列に alias を付けると HAVING の合成名参照（SUM(売上) 等）が
+// 解決できず常に偽になっていた
+// ----------------------------------------------------------------
+
+test("HAVING: 集計列に alias があっても SUM(field) 参照が解決される", async () => {
+  const records = [
+    makeRecord({ $id: "1", 商談フェーズ: "受注", 売上: "40800000" }),
+    makeRecord({ $id: "2", 商談フェーズ: "受注", 売上: "0" }),
+    makeRecord({ $id: "3", 商談フェーズ: "提案中", 売上: "28250000" }),
+    makeRecord({ $id: "4", 商談フェーズ: "内示", 売上: "12750000" }),
+  ];
+  const client = makeClient({ records });
+  const result = await execute(
+    "SELECT 商談フェーズ, COUNT(*) AS 件数, SUM(売上) AS 売上合計 FROM APP77070 GROUP BY 商談フェーズ HAVING SUM(売上) > 0 ORDER BY 売上合計 DESC",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(3);
+  expect(result.rows[0]["商談フェーズ"]).toBe("受注");
+  expect(result.rows[0]["売上合計"]).toBe("40800000");
+  // 合成名キー（SUM(売上)）が出力に漏れていないこと
+  expect(result.columns).toEqual(["商談フェーズ", "件数", "売上合計"]);
+  expect(Object.keys(result.rows[0])).not.toContain("SUM(売上)");
+});
+
+test("HAVING: alias 付き COUNT(*) の参照と閾値での絞り込み", async () => {
+  const records = [
+    makeRecord({ $id: "1", 商談フェーズ: "受注" }),
+    makeRecord({ $id: "2", 商談フェーズ: "受注" }),
+    makeRecord({ $id: "3", 商談フェーズ: "提案中" }),
+  ];
+  const client = makeClient({ records });
+  const result = await execute(
+    "SELECT 商談フェーズ, COUNT(*) AS 件数 FROM APP77071 GROUP BY 商談フェーズ HAVING COUNT(*) >= 2",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]["商談フェーズ"]).toBe("受注");
+});
+
+test("HAVING: alias なし集計（従来から動作していた形）の回帰確認", async () => {
+  const records = [
+    makeRecord({ $id: "1", 商談フェーズ: "受注", 売上: "100" }),
+    makeRecord({ $id: "2", 商談フェーズ: "提案中", 売上: "0" }),
+  ];
+  const client = makeClient({ records });
+  const result = await execute(
+    "SELECT 商談フェーズ, SUM(売上) FROM APP77072 GROUP BY 商談フェーズ HAVING SUM(売上) > 0",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]["商談フェーズ"]).toBe("受注");
+});
