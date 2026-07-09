@@ -21,7 +21,8 @@
   - 2026-07-09 R17(S4 実装後): サブクエリ解決(`resolveSubqueries` / `resolveScalarColumns`)へ `cteCache` を貫通(IN / EXISTS / スカラーサブクエリ内の `FROM #t` が `executeSelect` 直呼びで注入経路を外れる穴の修正。同構造だった「サブクエリ内の CTE 参照」も同時に解決)
   - 2026-07-09 R18(S5 実装後): S5 実装済み。`ValidationResult` は単文/バッチの判別可能ユニオン(バッチ側はスカラーを `undefined` 型で宣言し既存テストの型互換を維持)。`appIds` は文字列正規表現(`extractAppIds`)から AST ディープウォーク(文ごと)に変更。単文 CREATE/DROP TEMP TABLE は validate 段階で ArgumentError に(従来は ok:true で素通り)。query/mutate/saveQuery/runSavedQuery に `requireSingleStatement` ガード(S6/M1 で解除)
   - 2026-07-09 R19(S6 実装後): S6 実装済み。query のガードを解除し read-only バッチを `executeBatch` で実行、§6.2 エンベロープ(`toBatchQueryPayload`)。`maxTotalRecords` 超過は ArgumentError。バッチの `timeout` は合計タイムアウト(executeBatch の timeoutMs)と HTTP per-request の両方に同値を渡す。テスト用に `executeBatchSql` を DI 可能に
-- ステータス: 実装中(S1〜S6 完了。次は S7: CLI)
+  - 2026-07-09 R20(S7 実装後): S7 実装済み。判定ロジックは `cli/consoleInput.ts` の純関数(`decideConsoleInput` / `decideRun`)+ユニットテスト21件。**仕様修正**: 「完結単文の `;` なし即実行」は現行 console の実挙動(`;` 終端)の誤認に基づくため撤回し、`;` ゲート維持の6段判定に変更(spec R20)。`@profile` は判定用パース前に正規化。console e2e は dist-cli を再ビルドして検証
+- ステータス: 実装中(S1〜S7 完了。次は S8: ドキュメント・フェーズ1 検証)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -117,7 +118,8 @@
 
 | 項目 | 内容 |
 |---|---|
-| 変更 | `src/cli/index.ts` — `-f` の複文実行(結果セットごとの区切り表示)、`--continue-on-error` フラグ。`--console` は仕様 §8.2 の5段判定に変更: ①バッチ構築モード(下記判定)は `:run` まで蓄積→バッチ実行(バッファ内空行は保持)、②完結1文は即実行(従来互換)、③完結複文は即バッチ実行、④継続可能な失敗は蓄積、⑤それ以外は即エラー + バッファ破棄。メタコマンド `:run` を既存体系(`src/cli/index.ts:688-735`)に追加。破棄は既存 `:clear` を流用 |
+| 変更 | `src/cli/index.ts` — `-f` の複文実行(結果セットごとの区切り表示)、`--continue-on-error` フラグ(console の子実行 argv にも伝播)。`--console` は仕様 §8.2 の**6段判定**に変更(R20 で「完結1文の `;` なし即実行」を撤回し `;` ゲート維持): ①メタコマンドはバッファ状態問わず解釈、②バッチ構築モードは `:run` まで蓄積→バッチ実行(バッファ内空行は保持)、③行末 `;` までは蓄積(従来互換)、④`;` 終端で完結したら単文/複文を実行、⑤継続可能な失敗は蓄積、⑥それ以外は即エラー + バッファ破棄。メタコマンド `:run` を既存体系に追加。破棄は既存 `:clear` を流用 |
+| 進め方 | ①console の入力判定(6段)を**純関数として切り出す**(入力: バッファ + 新規行 → 出力: 実行/蓄積/エラー/メタコマンドの判定結果)— console の状態機械が最も事故りやすいためユニットテストで固める → ②`:run` とバッファ非空メタコマンド解釈を小さく確定 → ③`-f` の複文実行は `executeBatch` の既存 payload を CLI 表示へ落とすだけに寄せる |
 | 実装メモ1 | **メタコマンドはバッファ非空でも解釈する**。現行はバッファ空のときのみ解釈(`src/cli/index.ts:1020` の `buffer.length === 0` ガード)のため、`:` 始まりの行はバッファ状態に関わらず `parseConsoleMetaCommand` に通す構造へ変更する。`:run` / `:clear` / `:buffer` / `:edit` が SQL としてバッファに混入してはならない |
 | 実装メモ2 | バッチ構築モードの判定は文字列前方一致ではなく、①レキサでバッファ先頭をトークン化し(空白・コメントは自動スキップされる)先頭3トークンが `CREATE TEMP TABLE` か、②`parseStatements()` 成功時に `CREATE_TEMP_TABLE` 文を含むか、の**いずれか**。先頭コメント付きの貼り付けは①で、先頭以外の `CREATE TEMP TABLE` は②で拾う |
 | 実装メモ3 | 「継続可能な失敗」の判定は2系統: ①`LexError` は **`unterminated` フラグ**(S1 で導入済み。未終端の文字列・バッククォート・ブロックコメントで true。これらの `pos` は開始位置を指すため**位置では判定しない**)、②`ParseError` は**エラートークンが EOF を指すこと**(句の途中・閉じ括弧待ちなど)。それ以外の `LexError` / `ParseError` は即エラー |
