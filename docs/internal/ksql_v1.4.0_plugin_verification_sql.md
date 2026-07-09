@@ -71,10 +71,13 @@ ORDER BY b.売上 DESC
 ### A-5. UNION ALL
 
 ```sql
-SELECT 案件名, 売上 FROM APP4149 WHERE 商談フェーズ = '受注'
+SELECT 案件名, 売上 FROM APP4149 WHERE 商談フェーズ IN ('受注')
 UNION ALL
-SELECT 案件名, 売上 FROM APP4149 WHERE 商談フェーズ = '内示'
+SELECT 案件名, 売上 FROM APP4149 WHERE 商談フェーズ IN ('内示')
 ```
+
+期待: 受注案件(8件)+ 内示案件(2件)= 10 行(A-3 の件数と整合)。
+選択系フィールド(商談フェーズ / 顧客ランク)は kintone クエリの制約で `=` が使えないため、本書の SQL はすべて `IN (...)` を使用している。
 
 ### A-6. EXPLAIN(実 API なし)
 
@@ -110,7 +113,7 @@ ORDER BY 案件No_ DESC
 SELECT 会社名,
   (SELECT MAX(売上) AS m FROM APP4149) AS 全体最大売上
 FROM APP4148
-WHERE 顧客No IN (SELECT 顧客No_ FROM APP4149 WHERE 商談フェーズ = '受注')
+WHERE 顧客No IN (SELECT 顧客No_ FROM APP4149 WHERE 商談フェーズ IN ('受注'))
 ```
 
 期待: 受注案件を持つ顧客のみ。`全体最大売上` は全行同値。
@@ -157,10 +160,10 @@ SELECT 会社名, 顧客No FROM APP4148 WHERE 顧客ランク IN ('A') LIMIT 1
 後片付け:
 
 ```sql
-DELETE FROM APP4149 WHERE 案件名 = '<D-2 で入った会社名>' AND 商談フェーズ = ''
+DELETE FROM APP4149 WHERE $id = <D-2 で追加されたレコード番号>
 ```
 
-(条件はテスト環境の実データに合わせて調整。DELETE 時は「削除します」ダイアログが出ることも同時に確認)
+(`$id` は D-2 実行後にレコードで確認。DELETE 時は「削除します」ダイアログが出ることも同時に確認)
 
 ---
 
