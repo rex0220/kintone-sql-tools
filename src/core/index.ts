@@ -2,7 +2,7 @@
 // core index — UI/CLI から利用する公開API
 // ============================================================
 
-export { execute, OperationCancelledError } from "../execute";
+export { execute, executeBatch, TEMP_TABLE_MAX_ROWS, OperationCancelledError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES } from "./batch";
 export type { BatchAnalysis, StatementAnalysis } from "./batch";
@@ -17,6 +17,10 @@ export type {
   KintoneClient,
   KintoneAppInfo,
   KintoneFieldInfo,
+  BatchExecuteOptions,
+  BatchExecuteResult,
+  BatchStatementResult,
+  BatchStatementError,
 } from "../execute";
 
 export type { ProcessRow } from "../engine/process";

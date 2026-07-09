@@ -14,7 +14,8 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg } from "./types/ast";
+import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -270,10 +271,17 @@ async function executeStatement(
   options: ExecuteOptions
 ): Promise<ExecuteResult> {
   const cacheContext = options.cacheContext ?? "default";
-  // 1. パース
   const stmt = parseSql(sql);
+  return executeParsedStatement(stmt, client, options, cacheContext);
+}
 
-  // 2. 文の種別でルーティング
+/** パース済み Statement を種別でルーティングして実行する（単文・バッチ共通の入口） */
+async function executeParsedStatement(
+  stmt: Statement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<ExecuteResult> {
   switch (stmt.type) {
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
@@ -288,12 +296,272 @@ async function executeStatement(
     case "SHOW_APPS":     return executeShowApps(client);
     case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":       return executeExplain(stmt);
-    // 一時テーブルはバッチスコープのため単文実行では拒否する（バッチ実行器はフェーズ1 S4 で追加）
+    // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
   }
+}
+
+// ============================================================
+// バッチ実行（フェーズ1 S4）
+//
+// `;` 区切りの複文を validate-all-first（analyzeBatch）で検証した後、
+// 順次実行する。一時テーブル（#name）はバッチ内スコープの
+// Map<string, ProcessRow[]> に実体化し、CTE キャッシュと同じ機構で
+// FULL_SCAN エンジンに注入する。
+// ============================================================
+
+/** 一時テーブル1個の実体化行数上限（仕様 §5.6）。onLimitReached は適用せず常に error */
+export const TEMP_TABLE_MAX_ROWS = 10_000;
+
+export interface BatchExecuteOptions extends ExecuteOptions {
+  /** 実行時エラー後も後続文を実行する（read-only バッチのみ指定可。既定 false = fail-fast） */
+  continueOnError?: boolean;
+  /** バッチ合計のタイムアウト（ミリ秒）。到達時: 実行中の文 = error(TimeoutError)、未実行の文 = skipped("timeout") */
+  timeoutMs?: number;
+  /** 一時テーブル実体化の行数上限（既定 TEMP_TABLE_MAX_ROWS） */
+  tempTableMaxRows?: number;
+}
+
+export interface BatchStatementError {
+  code: string;
+  message: string;
+}
+
+export interface BatchStatementResult {
+  index: number;
+  type: string;
+  status: "success" | "error" | "skipped";
+  /** success した文の実行結果（CREATE / DROP TEMP TABLE は持たない） */
+  result?: ExecuteResult;
+  /** CREATE / DROP TEMP TABLE の対象一時テーブル名 */
+  tempTable?: string;
+  /** CREATE_TEMP_TABLE の実体化行数 */
+  rowCount?: number;
+  error?: BatchStatementError;
+  /** "fail-fast" / "dependency: #name" / "timeout" */
+  skippedReason?: string;
+}
+
+export interface BatchExecuteResult {
+  /** 全文 success のときのみ true */
+  ok: boolean;
+  statementCount: number;
+  statements: BatchStatementResult[];
+  /** 静的解析結果（isReadOnlyBatch / containsDml 等。呼び出し層の検証・整形用） */
+  analysis: BatchAnalysis;
+  metrics?: ExecuteMetrics;
+}
+
+/** バッチタイムアウト。message 接頭辞で code = TimeoutError として報告される */
+class BatchTimeoutError extends Error {
+  constructor() {
+    super("TimeoutError: batch timeout exceeded.");
+  }
+}
+
+/**
+ * `;` 区切りの複文バッチを順次実行する。
+ *
+ * - validate-all-first: 静的検証（analyzeBatch）に違反があれば1文も実行せずに throw
+ * - 実行時エラーは throw せず、文ごとの status（success / error / skipped）で返す
+ * - fail-fast（既定）: エラー文以降は skipped("fail-fast")
+ * - continueOnError: エラー文を記録して続行。ただし失敗した CREATE に依存する文は
+ *   skipped("dependency: #name")（S3 の依存グラフを使用）
+ */
+export async function executeBatch(
+  sql: string,
+  client: KintoneClient,
+  options: BatchExecuteOptions = {}
+): Promise<BatchExecuteResult> {
+  const statements = parseSqlBatch(sql);
+  const analysis = analyzeBatch(statements);
+
+  if (options.continueOnError && analysis.containsDml) {
+    throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
+  }
+  // DML 文内の一時テーブル参照（サブクエリ・INSERT_SELECT ソース）はフェーズ2で対応
+  for (const s of analysis.statements) {
+    if (s.isDml && s.tempTablesReferenced.length > 0) {
+      throw new BatchAnalysisError(
+        `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+        s.index
+      );
+    }
+  }
+
+  const metrics = createEmptyMetrics();
+  const countedClient = wrapClientWithMetrics(client, metrics);
+  const startedAt = Date.now();
+  const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
+  const cacheContext = options.cacheContext ?? "default";
+
+  const tempTables = new Map<string, ProcessRow[]>();
+  const results: BatchStatementResult[] = [];
+  /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
+  const failed = new Set<number>();
+  /** fail-fast / timeout で中断済みなら以降の文の skippedReason */
+  let aborted: "fail-fast" | "timeout" | null = null;
+
+  for (let i = 0; i < statements.length; i++) {
+    const info = analysis.statements[i];
+    const base = { index: i, type: info.statementType };
+
+    if (aborted) {
+      results.push({ ...base, status: "skipped", skippedReason: aborted });
+      failed.add(i);
+      continue;
+    }
+
+    // 依存スキップ: 依存先（一時テーブルを CREATE した文）が success していない
+    const brokenDep = info.dependsOn.find((d) => failed.has(d));
+    if (brokenDep !== undefined) {
+      const depName =
+        analysis.statements[brokenDep].tempTablesCreated[0] ?? `statement ${brokenDep}`;
+      results.push({ ...base, status: "skipped", skippedReason: `dependency: ${depName}` });
+      failed.add(i);
+      continue;
+    }
+
+    if (deadline !== null && Date.now() >= deadline) {
+      results.push({ ...base, status: "skipped", skippedReason: "timeout" });
+      failed.add(i);
+      aborted = "timeout";
+      continue;
+    }
+
+    try {
+      const remaining = deadline !== null ? deadline - Date.now() : null;
+      const outcome = await runWithDeadline(
+        executeBatchStatement(statements[i], info, countedClient, options, cacheContext, tempTables),
+        remaining
+      );
+      results.push({ ...base, status: "success", ...outcome });
+    } catch (e) {
+      results.push({ ...base, status: "error", error: toBatchStatementError(e) });
+      failed.add(i);
+      if (e instanceof BatchTimeoutError) {
+        aborted = "timeout";
+      } else if (!options.continueOnError) {
+        aborted = "fail-fast";
+      }
+    }
+  }
+
+  metrics.elapsedMs = Date.now() - startedAt;
+  return {
+    ok: results.every((r) => r.status === "success"),
+    statementCount: statements.length,
+    statements: results,
+    analysis,
+    metrics,
+  };
+}
+
+/** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
+async function executeBatchStatement(
+  stmt: Statement,
+  info: BatchAnalysis["statements"][number],
+  client: KintoneClient,
+  options: BatchExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, ProcessRow[]>
+): Promise<Partial<BatchStatementResult>> {
+  if (stmt.type === "CREATE_TEMP_TABLE") {
+    // 実体化は onLimitReached を適用せず常に error
+    //（truncate による暗黙の欠損が後続文の結果を静かに歪めるため。仕様 §5.6）
+    const materializeOptions: ExecuteOptions = {
+      ...options,
+      maxRecords: options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      onLimitReached: "error",
+    };
+    const result = await runSelectLike(stmt.query, client, materializeOptions, cacheContext, tempTables);
+    tempTables.set(stmt.name, result.rows);
+    return { tempTable: stmt.name, rowCount: result.rows.length };
+  }
+
+  if (stmt.type === "DROP_TEMP_TABLE") {
+    tempTables.delete(stmt.name); // ストアの解放（存在は analyzeBatch が検証済み）
+    return { tempTable: stmt.name };
+  }
+
+  // EXPLAIN はプラン表示のみ（kintone アクセスなし）のため一時テーブル参照を含んでも安全
+  if (stmt.type === "EXPLAIN") {
+    return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  }
+
+  // 一時テーブルを参照する read-only 文はストアを注入して実行
+  if (info.tempTablesReferenced.length > 0) {
+    if (stmt.type === "SELECT" || stmt.type === "UNION") {
+      return { result: await executeQueryWithCte(stmt, client, options, tempTables, cacheContext) };
+    }
+    if (stmt.type === "WITH") {
+      return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
+    }
+    // ここに来るのは想定外（DML の参照は事前チェックで拒否済み）
+    throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
+  }
+
+  // 一時テーブルと無関係な文は既存の単文実行経路をそのまま使う
+  return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+}
+
+/** CREATE TEMP TABLE の AS 句（SELECT / UNION / WITH）を一時テーブルストア付きで実行する */
+async function runSelectLike(
+  query: SelectStatement | UnionStatement | WithStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, ProcessRow[]>
+): Promise<SelectResult> {
+  if (query.type === "WITH") {
+    return executeWith(query, client, options, cacheContext, tempTables);
+  }
+  return executeQueryWithCte(query, client, options, tempTables, cacheContext);
+}
+
+/**
+ * 文の実行に残り時間の期限を課す。到達時は BatchTimeoutError を投げる。
+ * 注意: 進行中の kintone リクエスト自体は中断されない（AbortSignal の
+ * 伝播はレート制御基盤 P0-1 とあわせて対応する）。
+ */
+async function runWithDeadline<T>(work: Promise<T>, remainingMs: number | null): Promise<T> {
+  if (remainingMs === null) return work;
+  if (remainingMs <= 0) {
+    void work.catch(() => { /* 破棄する実行の未処理拒否を抑止 */ });
+    throw new BatchTimeoutError();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new BatchTimeoutError()), remainingMs);
+      }),
+    ]);
+  } catch (e) {
+    if (e instanceof BatchTimeoutError) {
+      void work.catch(() => { /* 同上 */ });
+    }
+    throw e;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** エラーを文ごとの報告形式に変換する（code は name または "XxxError:" 接頭辞から抽出） */
+function toBatchStatementError(e: unknown): BatchStatementError {
+  const message = e instanceof Error ? e.message : String(e);
+  const name = e instanceof Error && e.name !== "Error" ? e.name : null;
+  const prefix = message.match(/^([A-Za-z]+Error):/);
+  return { code: name ?? prefix?.[1] ?? "Error", message };
+}
+
+function parseSqlBatch(sql: string): Statement[] {
+  const tokens = new Lexer(sql).tokenize();
+  return new Parser(tokens).parseStatements();
 }
 
 // ============================================================
@@ -304,7 +572,10 @@ async function executeSelect(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  /** CTE / 一時テーブルのキャッシュ。サブクエリ解決に引き継ぐ（トップレベルの
+   *  FROM / JOIN 参照は executeQueryWithCte 側で処理済みの前提） */
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<SelectResult> {
   if (isNoFromSelect(stmt)) {
     return executeNoFromSelect(stmt);
@@ -315,7 +586,7 @@ async function executeSelect(
   if (mode === "SIMPLE") {
     return executeSimpleSelect(stmt, client, options, cacheContext);
   } else {
-    return executeFullScanSelect(stmt, client, options, cacheContext);
+    return executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
   }
 }
 
@@ -474,7 +745,8 @@ async function executeFullScanSelect(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -482,8 +754,8 @@ async function executeFullScanSelect(
 
   // サブクエリを事前実行（IN (SELECT ...) の値セットを解決）
   await Promise.all([
-    resolveSubqueries(stmt.where,  client, options, cacheContext),
-    resolveSubqueries(stmt.having, client, options, cacheContext),
+    resolveSubqueries(stmt.where,  client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
   // テーブルごとの push down 条件を計算
@@ -546,7 +818,7 @@ async function executeFullScanSelect(
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   // （レコードに依存しないため、フェッチ完了を待つ必要がない）
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
@@ -655,17 +927,20 @@ async function executeWith(
   stmt: WithStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  /** バッチ実行時の一時テーブルストア（#name → 行）。CTE キャッシュの初期値として合流する */
+  seed?: ReadonlyMap<string, ProcessRow[]>
 ): Promise<SelectResult> {
   // 単純 CTE のインライン化（WHERE プッシュダウン最適化）
   // CTE 本体が SIMPLE モードで最終クエリが単純 SELECT の場合、
   // CTE を展開して WHERE をまとめて REST API に渡す。
-  if (canInlineSingleCte(stmt)) {
+  // 一時テーブル注入時はインライン化しない（CTE 本体が #temp を参照し得るため）
+  if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
     return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
   }
 
-  // CTE 名 → 結果行のキャッシュ
-  const cteCache = new Map<string, ProcessRow[]>();
+  // CTE 名 → 結果行のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
+  const cteCache = new Map<string, ProcessRow[]>(seed ?? []);
 
   // 各 CTE を順番に実行し、結果をキャッシュ
   for (const cte of stmt.ctes) {
@@ -826,8 +1101,9 @@ async function executeQueryWithCte(
     query.joins.some((j) => j.table.cteName != null);
 
   if (!hasCteRef) {
-    // CTE 参照なし → 通常の SELECT 実行
-    return executeSelect(query, client, options, cacheContext);
+    // トップレベルに CTE 参照なし → 通常の SELECT 実行。
+    // ただしサブクエリ内の CTE / 一時テーブル参照があり得るため cteCache は引き継ぐ
+    return executeSelect(query, client, options, cacheContext, cteCache);
   }
 
   // CTE 参照あり → FULL_SCAN で CTE 行を注入
@@ -849,14 +1125,14 @@ async function executeFullScanWithCte(
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
 
-  // サブクエリを事前実行
+  // サブクエリを事前実行（サブクエリ内の CTE / 一時テーブル参照にも cteCache を引き継ぐ）
   await Promise.all([
-    resolveSubqueries(stmt.where,  client, options, cacheContext),
-    resolveSubqueries(stmt.having, client, options, cacheContext),
+    resolveSubqueries(stmt.where,  client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
@@ -2264,11 +2540,29 @@ async function resolveSubqueries(
   where: WhereExpr | null,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<void> {
   const tasks: Array<Promise<void>> = [];
-  collectSubqueryTasks(where, client, options, cacheContext, tasks);
+  collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
   await Promise.all(tasks);
+}
+
+/**
+ * サブクエリ1個を実行する。cteCache がある場合は executeQueryWithCte 経由にし、
+ * サブクエリの FROM / JOIN にある CTE / 一時テーブル参照（#name）を解決する。
+ */
+function runSubquery(
+  query: SelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  cteCache?: Map<string, ProcessRow[]>
+): Promise<SelectResult> {
+  if (cteCache !== undefined && cteCache.size > 0) {
+    return executeQueryWithCte(query, client, options, cteCache, cacheContext);
+  }
+  return executeSelect(query, client, options, cacheContext);
 }
 
 function collectSubqueryTasks(
@@ -2276,20 +2570,21 @@ function collectSubqueryTasks(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tasks: Array<Promise<void>>
+  tasks: Array<Promise<void>>,
+  cteCache?: Map<string, ProcessRow[]>
 ): void {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
-        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+        tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
           const col = right.column ?? (result.columns[0] ?? "");
           (right as ResolvedSubqueryInList).resolved = new Set(result.rows.map((r) => r[col] ?? ""));
         }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
-        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+        tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
           if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
           if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
           const col = result.columns[0] ?? "";
@@ -2299,16 +2594,16 @@ function collectSubqueryTasks(
       break;
     }
     case "LOGICAL":
-      collectSubqueryTasks(where.left,  client, options, cacheContext, tasks);
-      collectSubqueryTasks(where.right, client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.left,  client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, cteCache);
       break;
     case "NOT":
     case "GROUP":
-      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, cteCache);
       break;
     case "EXISTS": {
       const node = where;
-      tasks.push(executeSelect(node.query, client, options, cacheContext).then((result) => {
+      tasks.push(runSubquery(node.query, client, options, cacheContext, cteCache).then((result) => {
         (node as ResolvedExistsExpr).resolved = result.rowCount > 0;
       }));
       break;
@@ -2348,7 +2643,8 @@ async function resolveScalarColumns(
   columns: SelectStatement["columns"],
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<Map<number, string>> {
   const byQuery = new Map<string, Promise<string>>();
   const pending: Array<[number, Promise<string>]> = [];
@@ -2358,7 +2654,7 @@ async function resolveScalarColumns(
     const key = JSON.stringify(col.query);
     let promise = byQuery.get(key);
     if (!promise) {
-      promise = executeSelect(col.query, client, options, cacheContext).then((result) => {
+      promise = runSubquery(col.query, client, options, cacheContext, cteCache).then((result) => {
         if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
         if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
         const firstCol = result.columns[0] ?? "";
