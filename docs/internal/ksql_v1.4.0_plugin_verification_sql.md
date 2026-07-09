@@ -36,7 +36,7 @@ ORDER BY b.案件No_ DESC
 ```sql
 SELECT 顧客No, 会社名, 顧客ランク
 FROM APP4148
-WHERE 顧客ランク = 'A'
+WHERE 顧客ランク IN ('A')
 ORDER BY 顧客No ASC
 LIMIT 100
 ```
@@ -57,7 +57,7 @@ ORDER BY 売上合計 DESC
 WITH ranked AS (
   SELECT 顧客No, 会社名
   FROM APP4148
-  WHERE 顧客ランク = 'A'
+  WHERE 顧客ランク IN ('A')
 )
 SELECT r.会社名, b.案件名, b.売上
 FROM ranked r
@@ -91,7 +91,7 @@ WHERE a.顧客ランク = 'A'
 
 ```sql
 WITH high AS (
-  SELECT 顧客No FROM APP4148 WHERE 顧客ランク = 'A'
+  SELECT 顧客No FROM APP4148 WHERE 顧客ランク IN ('A')
 )
 SELECT 案件No_, 案件名, 売上
 FROM APP4149
@@ -143,7 +143,7 @@ UPDATE APP4149 SET 商談フェーズ = '提案中' WHERE 案件No_ = '<テス�
 
 ```sql
 INSERT INTO APP4149 (案件名, 顧客No_)
-SELECT 会社名, 顧客No FROM APP4148 WHERE 顧客ランク = 'A' LIMIT 1
+SELECT 会社名, 顧客No FROM APP4148 WHERE 顧客ランク IN ('A') LIMIT 1
 ```
 
 期待: 「1 件のレコードを**登録**します。」ダイアログが出ること。
