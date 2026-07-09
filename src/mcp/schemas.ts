@@ -40,6 +40,9 @@ export const mutateInputSchema = z.object({
   dmlMaxRows,
   fetchParallel,
   timeout,
+  /** バッチ(複文)専用: バッチ合計の影響行数上限(既定なし = 文ごとの dmlMaxRows のみ)。
+   *  なお DML バッチに continueOnError は存在しない(常に fail-fast) */
+  dmlTotalMaxRows: dmlMaxRows.optional(),
 });
 
 export const describeAppInputSchema = z.object({

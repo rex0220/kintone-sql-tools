@@ -198,12 +198,15 @@ describe("MCP tools", () => {
       "allowDml",
       "confirmText",
       "dmlMaxRows",
+      "dmlTotalMaxRows",
       "fetchParallel",
       "profile",
       "sql",
       "timeout",
     ]);
     expect("allowWithoutWhere" in mutateInputSchema.shape).toBe(false);
+    // DML バッチに続行オプションは存在しない（常に fail-fast）
+    expect("continueOnError" in mutateInputSchema.shape).toBe(false);
   });
 
   test("explain schema exposes only sql and profile", () => {
@@ -828,6 +831,41 @@ describe("MCP tools", () => {
     ).rejects.toThrow(/batch total rows \(4\) exceed maxTotalRecords \(3\)/);
   });
 
+  test("query: timeout 未指定でも runtime 解決値がバッチ合計タイムアウトとして効く", async () => {
+    const slowClient: KintoneClient = {
+      async getRecords() {
+        await new Promise((r) => setTimeout(r, 200));
+        return { records: [] };
+      },
+      async postRecords() { return { ids: [] }; },
+      async putRecords() { },
+      async deleteRecords() { },
+      async getApps() { return []; },
+      async getFields() { return []; },
+    };
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client: slowClient,
+      cacheContext: "timeout-test",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30, // profile/env 由来の解決値を想定（入力では未指定）
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+    const result = await tools.query({
+      sql: "SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM APP100",
+    }) as { ok: boolean; statements: Array<{ status: string; error?: { code: string } }> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0].error?.code).toBe("TimeoutError");
+    expect(result.statements[1].status).toBe("skipped");
+  });
+
   test("query: continueOnError でエラー文以降も実行され文ごとに報告される", async () => {
     const tools = createKsqlMcpTools(
       { profile: "prod" },
@@ -848,15 +886,156 @@ describe("MCP tools", () => {
     expect(result.results).toHaveLength(1);
   });
 
-  test("mutate: バッチ入力はフェーズ2対応まで拒否", async () => {
+  // ----------------------------------------------------------------
+  // ksql_mutate の DML バッチ受理（フェーズ2 M1）
+  // ----------------------------------------------------------------
+
+  function makeMutateRuntimeDeps(recordsByApp: Record<number, Array<Record<string, { value: string }>>>) {
+    const calls = { post: 0, put: 0, del: 0, get: 0 };
+    const client: KintoneClient = {
+      async getRecords(params) {
+        calls.get += 1;
+        return { records: (recordsByApp[params.app] ?? []) as never };
+      },
+      async postRecords(params) {
+        calls.post += 1;
+        return { ids: params.records.map((_r, i) => String(100 + i)) };
+      },
+      async putRecords() { calls.put += 1; },
+      async deleteRecords() { calls.del += 1; },
+      async getApps() { return []; },
+      async getFields() { return []; },
+    };
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client,
+      cacheContext: "mutate-batch-test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    return { deps: { createRuntime }, calls };
+  }
+
+  const MUTATE_BASE = { allowDml: true as const, confirmText: "yes" as const };
+
+  test("mutate: DML バッチを実行し文ごとの影響件数を返す", async () => {
+    const { deps } = makeMutateRuntimeDeps({
+      100: [{ $id: { value: "1" }, ステータス: { value: "対応中" } }],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: "INSERT INTO APP100 (顧客名) VALUES ('A社'), ('B社'); UPDATE APP100 SET ステータス = '完了' WHERE $id = 1",
+      dmlMaxRows: 10,
+    }) as {
+      ok: boolean;
+      batch: boolean;
+      statements: Array<Record<string, unknown>>;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.batch).toBe(true);
+    expect(result.statements[0]).toMatchObject({
+      type: "INSERT",
+      status: "success",
+      insertedCount: 2,
+    });
+    expect(result.statements[1]).toMatchObject({
+      type: "UPDATE",
+      status: "success",
+      updatedCount: 1,
+    });
+  });
+
+  test("mutate: read-only のみのバッチは ksql_query へ誘導", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     await expect(
       tools.mutate({
-        sql: "DELETE FROM APP100 WHERE $id = 1; DELETE FROM APP100 WHERE $id = 2",
-        allowDml: true,
-        confirmText: "yes",
+        ...MUTATE_BASE,
+        sql: "SELECT * FROM APP100; SELECT * FROM APP200",
         dmlMaxRows: 10,
       })
-    ).rejects.toThrow(/batch SQL \(multiple statements\) is not supported by ksql_mutate yet/);
+    ).rejects.toThrow(/batch contains no DML statements\. Use ksql_query\./);
+  });
+
+  test("mutate: 静的ガードは validate-all-first で効く（違反があれば1文も実行しない）", async () => {
+    // WHERE なし UPDATE / DELETE はパーサ段階で拒否されるため（tools 層のガードは防御的併設）、
+    // ここでは INSERT 行数超過（statement 1）で「先頭文すら実行されない」ことを検証する
+    const { deps, calls } = makeMutateRuntimeDeps({});
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    await expect(
+      tools.mutate({
+        ...MUTATE_BASE,
+        sql: "INSERT INTO APP100 (x) VALUES ('a'); INSERT INTO APP100 (x) VALUES ('b'), ('c'), ('d')",
+        dmlMaxRows: 2,
+      })
+    ).rejects.toThrow(/INSERT rows \(3\) exceed dmlMaxRows \(2\)\. \(statement 1\)/);
+    expect(calls.post).toBe(0);
+  });
+
+  test("mutate: バッチ内の INSERT_SELECT は M4 まで文番号付きで拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.mutate({
+        ...MUTATE_BASE,
+        sql: "DELETE FROM APP100 WHERE $id = 1; INSERT INTO APP100 (x) SELECT x FROM APP200",
+        dmlMaxRows: 10,
+      })
+    ).rejects.toThrow(/INSERT_SELECT is not supported by ksql_mutate yet\. \(statement 1\)/);
+  });
+
+  test("mutate: 文ごとの dmlMaxRows 超過(INSERT 行数)は実行前に拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.mutate({
+        ...MUTATE_BASE,
+        sql: "UPDATE APP100 SET x = '1' WHERE $id = 1; INSERT INTO APP100 (x) VALUES ('a'), ('b'), ('c')",
+        dmlMaxRows: 2,
+      })
+    ).rejects.toThrow(/INSERT rows \(3\) exceed dmlMaxRows \(2\)\. \(statement 1\)/);
+  });
+
+  test("mutate: dmlTotalMaxRows の静的超過(INSERT 合計)は実行前に拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.mutate({
+        ...MUTATE_BASE,
+        sql: "INSERT INTO APP100 (x) VALUES ('a'), ('b'); INSERT INTO APP100 (x) VALUES ('c'), ('d')",
+        dmlMaxRows: 3,
+        dmlTotalMaxRows: 3,
+      })
+    ).rejects.toThrow(/batch INSERT rows \(4\) exceed dmlTotalMaxRows \(3\)/);
+  });
+
+  test("mutate: dmlTotalMaxRows の実行時超過は fail-fast し反映済みが読み取れる", async () => {
+    const { deps } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, x: { value: "a" } },
+        { $id: { value: "2" }, x: { value: "b" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // INSERT 2 行(静的) + UPDATE 2 行(実行時) = 4 > dmlTotalMaxRows 3
+      sql: "INSERT INTO APP100 (x) VALUES ('a'), ('b'); UPDATE APP200 SET x = 'z' WHERE $id > 0",
+      dmlMaxRows: 10,
+      dmlTotalMaxRows: 3,
+    }) as {
+      ok: boolean;
+      statements: Array<Record<string, unknown>>;
+    };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", insertedCount: 2 });
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
   });
 });

@@ -210,10 +210,25 @@ function toSelectPayload(result: SelectResult) {
   };
 }
 
+/** ミューテーション結果から影響件数フィールドを取り出す（文ごとエンベロープ用） */
+function toMutationSummary(result: Exclude<ExecuteResult, SelectResult>): Record<string, unknown> {
+  if (result.type === "INSERT") {
+    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
+  }
+  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
+  if (result.type === "DELETE") return { deletedCount: result.deletedCount };
+  if (result.type === "UPSERT") {
+    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
+  }
+  return { reorderedParentCount: result.reorderedParentCount };
+}
+
 /**
  * バッチ実行結果を仕様 §6.2 のエンベロープに整形する。
  * - results には結果セットを返した read-only 文の結果のみ入れる
  *   （CREATE TEMP TABLE の実体化結果は tempTable / rowCount のみ）
+ * - DML 文の影響件数は statements[] のエントリに展開する（途中失敗時に
+ *   「どこまで反映されたか」を文ごとに読み取れるようにする）
  * - maxTotalRecords 指定時は返却合計行数を超えた時点でエラー
  */
 function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number) {
@@ -250,6 +265,8 @@ function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? [],
       });
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT") {
+      Object.assign(entry, toMutationSummary(s.result));
     }
     return entry;
   });
@@ -457,8 +474,9 @@ export function createKsqlMcpTools(
         cacheContext: runtime.cacheContext,
         continueOnError: input.continueOnError,
         // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
-        // runtime（HTTP クライアント）側の per-request タイムアウトにも同値が渡る
-        timeoutMs: input.timeout,
+        // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
+        // HTTP クライアント側の per-request タイムアウトと同値になる
+        timeoutMs: runtime.timeout,
       });
       return toBatchQueryPayload(batchResult, input.maxTotalRecords);
     }
@@ -502,11 +520,87 @@ export function createKsqlMcpTools(
     return toSelectPayload(result);
   }
 
+  /**
+   * DML バッチ（フェーズ2 M1）。
+   * - 静的ガードを文ごとに適用してから実行（validate-all-first）
+   * - 常に fail-fast（continueOnError は存在しない）
+   * - dmlMaxRows は文ごと、dmlTotalMaxRows（任意）はバッチ合計の影響行数に適用
+   */
+  async function mutateBatch(
+    input: MutateInput,
+    validation: BatchValidationResult,
+    dmlMaxRows: number
+  ): Promise<Record<string, unknown>> {
+    if (!validation.containsDml) {
+      throw new Error("ArgumentError: batch contains no DML statements. Use ksql_query.");
+    }
+
+    // 静的ガード（1文でも違反すればバッチ全体を実行前に拒否）
+    let staticInsertTotal = 0;
+    for (const s of validation.statements) {
+      if (!s.isDml) continue;
+      const at = ` (statement ${s.index})`;
+      if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") {
+        throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
+      }
+      if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
+        throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
+      }
+      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
+        throw new Error(
+          `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).${at}`
+        );
+      }
+      staticInsertTotal += s.insertValuesCount ?? 0;
+    }
+    const dmlTotalMaxRows = input.dmlTotalMaxRows;
+    if (dmlTotalMaxRows !== undefined && staticInsertTotal > dmlTotalMaxRows) {
+      throw new Error(
+        `ArgumentError: batch INSERT rows (${staticInsertTotal}) exceed dmlTotalMaxRows (${dmlTotalMaxRows}).`
+      );
+    }
+
+    const runtime = await createRuntime(serverOptions, {
+      sql: input.sql,
+      profile: input.profile,
+      maxRecords: dmlMaxRows + 1,
+      fetchParallel: input.fetchParallel,
+      onLimit: DEFAULT_ON_LIMIT,
+      timeout: input.timeout,
+    });
+
+    // バッチ合計の影響行数（INSERT は静的、UPDATE / DELETE は confirm で加算）
+    let totalAffected = staticInsertTotal;
+    const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
+      maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
+      onLimitReached: runtime.onLimit,
+      cacheContext: runtime.cacheContext,
+      // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
+      timeoutMs: runtime.timeout,
+      confirm: async (count, operation) => {
+        if (count > dmlMaxRows) {
+          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
+        }
+        totalAffected += count;
+        if (dmlTotalMaxRows !== undefined && totalAffected > dmlTotalMaxRows) {
+          throw new Error(
+            `ArgumentError: batch affected rows (${totalAffected}) exceed dmlTotalMaxRows (${dmlTotalMaxRows}).`
+          );
+        }
+        return true;
+      },
+    });
+    return toBatchQueryPayload(batchResult);
+  }
+
   async function mutate(input: MutateInput): Promise<Record<string, unknown>> {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
 
-    // DML バッチの受理はフェーズ2 M1 で対応
-    const validation = requireSingleStatement(await validate(input), "ksql_mutate");
+    const validation = await validate(input);
+    if (validation.batch) {
+      return mutateBatch(input, validation, dmlMaxRows);
+    }
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
