@@ -2342,9 +2342,12 @@ function showConfirmDialog(message: string, danger = false): Promise<boolean> {
 
 async function confirmDialog(
   count: number,
-  operation: "UPDATE" | "DELETE"
+  operation: "UPDATE" | "DELETE" | "INSERT"
 ): Promise<boolean> {
-  const label = operation === "UPDATE" ? "更新" : "削除";
+  const label =
+    operation === "UPDATE" ? "更新"
+    : operation === "DELETE" ? "削除"
+    : "登録"; // INSERT ... SELECT（書き込み前に件数確定）
   return showConfirmDialog(
     `${count} 件のレコードを${label}します。よろしいですか？\nこの操作は元に戻せません。`,
     true
