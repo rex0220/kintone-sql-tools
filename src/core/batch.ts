@@ -47,8 +47,9 @@ export class BatchAnalysisError extends Error {
 // 解析結果の型
 // ------------------------------------------------------------
 
-/** 文ごとの静的解析結果（仕様 §7.1 の statements[] に対応する core 部分。
- *  appIds は profile 正規化を要するため node/MCP 層（S5）で付与する） */
+/** 文ごとの静的解析結果（仕様 §7.1 の statements[] に対応する core 部分）。
+ *  appIds も AST から収集してここで埋める。@profile の正規化自体は呼び出し側
+ *  （node/MCP 層）がパース前の SQL 文字列に対して行う前提 */
 export interface StatementAnalysis {
   index: number;
   statementType: string;
@@ -56,6 +57,9 @@ export interface StatementAnalysis {
   isReadOnly: boolean;
   hasWhere: boolean;
   insertValuesCount: number | null;
+  /** この文が参照するアプリ ID（FROM / JOIN / サブクエリ / DML 対象を含む、昇順）。
+   *  @profile 正規化後の SQL をパースした場合はマップ済み擬似 ID を含む */
+  appIds: number[];
   /** この文が CREATE する一時テーブル名（CREATE_TEMP_TABLE のみ、それ以外は空） */
   tempTablesCreated: string[];
   /** この文が参照する一時テーブル名（FROM / JOIN / サブクエリ / WITH 内 / DML の SELECT ソースを含む） */
@@ -83,22 +87,28 @@ export interface BatchAnalysis {
 // ------------------------------------------------------------
 
 /**
- * AST を深さ優先で走査し、`cteName` が "#" で始まるノード（一時テーブル参照）を集める。
- * 参照はテーブル参照位置（parseTableRef）でのみ生成され、常に cteName フィールドに
- * 格納されるため、埋め込み位置（サブクエリ / JOIN / WITH 内 / UNION の枝 /
- * INSERT_SELECT のソース等）を列挙せずに拾える。
- * CTE 名は "#" で始められない（パーサで拒否）ため誤検出しない。
+ * AST を深さ優先で走査し、一時テーブル参照とアプリ ID を集める。
+ *
+ * - 一時テーブル参照: `cteName` が "#" で始まるノード。参照はテーブル参照位置
+ *   （parseTableRef）でのみ生成され常に cteName フィールドに格納されるため、
+ *   埋め込み位置（サブクエリ / JOIN / WITH 内 / UNION の枝 / INSERT_SELECT の
+ *   ソース等）を列挙せずに拾える。CTE 名は "#" で始められない（パーサで拒否）
+ *   ため誤検出しない。
+ * - アプリ ID: `appId` が正の数値のノード（0 は CTE / 一時テーブル / FROM なし
+ *   SELECT のプレースホルダのため除外）
  */
-function collectTempRefs(node: unknown, out: Set<string>): void {
+function collectRefs(node: unknown, tempRefs: Set<string>, appIds: Set<number>): void {
   if (Array.isArray(node)) {
-    for (const v of node) collectTempRefs(v, out);
+    for (const v of node) collectRefs(v, tempRefs, appIds);
     return;
   }
   if (node !== null && typeof node === "object") {
     const obj = node as Record<string, unknown>;
     const cte = obj["cteName"];
-    if (typeof cte === "string" && cte.startsWith("#")) out.add(cte);
-    for (const v of Object.values(obj)) collectTempRefs(v, out);
+    if (typeof cte === "string" && cte.startsWith("#")) tempRefs.add(cte);
+    const appId = obj["appId"];
+    if (typeof appId === "number" && appId > 0) appIds.add(appId);
+    for (const v of Object.values(obj)) collectRefs(v, tempRefs, appIds);
   }
 }
 
@@ -143,15 +153,16 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     const created: string[] = [];
     const dropped: string[] = [];
     const refs = new Set<string>();
+    const stmtAppIds = new Set<number>();
     const dependsOn = new Set<number>();
 
     if (stmt.type === "CREATE_TEMP_TABLE") {
       // AS 句の SELECT が他の一時テーブルを参照し得る（name は cteName ではないので拾われない）
-      collectTempRefs(stmt.query, refs);
+      collectRefs(stmt.query, refs, stmtAppIds);
     } else if (stmt.type === "DROP_TEMP_TABLE") {
       // DROP は参照ではないが、対象の CREATE に依存する
     } else {
-      collectTempRefs(stmt, refs);
+      collectRefs(stmt, refs, stmtAppIds);
     }
 
     // 参照の解決（DROP 済みは defined から消えているため「DROP 後参照」もここで落ちる）
@@ -204,6 +215,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       isReadOnly: isReadOnlyType(statementType),
       hasWhere: hasWhereClause(stmt),
       insertValuesCount: getInsertValuesCount(stmt),
+      appIds: [...stmtAppIds].sort((a, b) => a - b),
       tempTablesCreated: created,
       tempTablesReferenced: [...refs],
       tempTablesDropped: dropped,

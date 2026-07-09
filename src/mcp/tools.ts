@@ -3,6 +3,8 @@ import type { z } from "zod";
 import {
   execute,
   parseSqlStatement,
+  parseSqlStatements,
+  analyzeBatch,
   type ExecuteOptions,
   type ExecuteResult,
   type KintoneClient,
@@ -10,17 +12,9 @@ import {
 } from "../core";
 import {
   buildCacheContext,
-  extractAppIds,
   normalizeSqlAppProfiles,
 } from "../node/appProfiles";
-import {
-  getInsertValuesCount,
-  getStatementType,
-  hasWhereClause,
-  isDmlType,
-  isNoFromSelectStatement,
-  isReadOnlyType,
-} from "../node/dmlGuard";
+import { isNoFromSelectStatement } from "../node/dmlGuard";
 import { envString, loadOptionalKsqlConfig, type OnLimitMode } from "../node/config";
 import {
   createKsqlRuntime,
@@ -75,20 +69,72 @@ export interface KsqlMcpToolDependencies {
   ) => Promise<ExecuteResult>;
 }
 
-export interface ValidationResult {
-  ok: true;
+/** 文ごとの検証結果（仕様 §7.1 の statements[]） */
+export interface StatementValidation {
+  index: number;
   statementType: string;
   isDml: boolean;
   isReadOnly: boolean;
   hasWhere: boolean;
   insertValuesCount: number | null;
   appIds: number[];
+  tempTablesCreated: string[];
+  tempTablesReferenced: string[];
+  tempTablesDropped: string[];
+}
+
+interface ValidationCommon {
+  ok: true;
+  /** 2文以上のバッチ入力か */
+  batch: boolean;
+  statementCount: number;
+  isReadOnlyBatch: boolean;
+  containsDml: boolean;
+  tempTables: string[];
   canRunWithQueryTool: boolean;
   requiresMutationTool: boolean;
+  statements: StatementValidation[];
   normalizedSql: string;
   hasProfileSyntax: boolean;
   cacheContext: string;
   appBindings: Array<{ mappedAppId: number; appId: number; profile: string }>;
+}
+
+/** 単文入力の検証結果。トップレベルのスカラーフィールドは従来互換 */
+export interface SingleValidationResult extends ValidationCommon {
+  batch: false;
+  statementType: string;
+  isDml: boolean;
+  isReadOnly: boolean;
+  hasWhere: boolean;
+  insertValuesCount: number | null;
+  appIds: number[];
+}
+
+/** バッチ入力の検証結果。文ごとの情報は statements[] で表す */
+export interface BatchValidationResult extends ValidationCommon {
+  batch: true;
+  statementType?: undefined;
+  isDml?: undefined;
+  isReadOnly?: undefined;
+  hasWhere?: undefined;
+  insertValuesCount?: undefined;
+  appIds?: undefined;
+}
+
+export type ValidationResult = SingleValidationResult | BatchValidationResult;
+
+/** バッチ未対応のツールで単文入力を要求する（対応時にこのガードを外す） */
+function requireSingleStatement(
+  validation: ValidationResult,
+  toolName: string
+): SingleValidationResult {
+  if (validation.batch) {
+    throw new Error(
+      `ArgumentError: batch SQL (multiple statements) is not supported by ${toolName} yet.`
+    );
+  }
+  return validation;
 }
 
 const DEFAULT_MAX_RECORDS = 500;
@@ -262,30 +308,59 @@ export function createKsqlMcpTools(
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
-    const stmt = parseSqlStatement(normalized.normalizedSql);
-    const statementType = getStatementType(stmt);
-    const isDml = isDmlType(statementType);
-    const isReadOnly = isReadOnlyType(statementType);
+    // validate-all-first: 全文をパース・分類し、1文でも不正なら全体を拒否
+    //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
+    const statements = parseSqlStatements(normalized.normalizedSql);
+    const analysis = analyzeBatch(statements);
     const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => ({
       mappedAppId,
       appId: binding.appId,
       profile: binding.profile,
     }));
 
-    return {
-      ok: true,
-      statementType,
-      isDml,
-      isReadOnly,
-      hasWhere: hasWhereClause(stmt),
-      insertValuesCount: getInsertValuesCount(stmt),
-      appIds: extractAppIds(normalized.normalizedSql),
-      canRunWithQueryTool: isReadOnly,
-      requiresMutationTool: isDml,
+    const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
+      index: s.index,
+      statementType: s.statementType,
+      isDml: s.isDml,
+      isReadOnly: s.isReadOnly,
+      hasWhere: s.hasWhere,
+      insertValuesCount: s.insertValuesCount,
+      appIds: s.appIds,
+      tempTablesCreated: s.tempTablesCreated,
+      tempTablesReferenced: s.tempTablesReferenced,
+      tempTablesDropped: s.tempTablesDropped,
+    }));
+
+    const common = {
+      ok: true as const,
+      statementCount: analysis.statementCount,
+      isReadOnlyBatch: analysis.isReadOnlyBatch,
+      containsDml: analysis.containsDml,
+      tempTables: analysis.tempTables,
+      canRunWithQueryTool: analysis.isReadOnlyBatch,
+      requiresMutationTool: analysis.containsDml,
+      statements: statementValidations,
       normalizedSql: normalized.normalizedSql,
       hasProfileSyntax: normalized.hasProfileSyntax,
       cacheContext: normalized.cacheContext,
       appBindings,
+    };
+
+    if (analysis.statementCount > 1) {
+      return { ...common, batch: true };
+    }
+
+    // 単文: 従来のスカラー形を維持（後方互換）
+    const s = statementValidations[0];
+    return {
+      ...common,
+      batch: false,
+      statementType: s.statementType,
+      isDml: s.isDml,
+      isReadOnly: s.isReadOnly,
+      hasWhere: s.hasWhere,
+      insertValuesCount: s.insertValuesCount,
+      appIds: s.appIds,
     };
   }
 
@@ -301,7 +376,8 @@ export function createKsqlMcpTools(
   }
 
   async function query(input: QueryInput): Promise<Record<string, unknown>> {
-    const validation = await validate(input);
+    // バッチ受理は S6 で対応（対応時に requireSingleStatement を外す）
+    const validation = requireSingleStatement(await validate(input), "ksql_query");
     if (!validation.isReadOnly) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }
@@ -344,7 +420,8 @@ export function createKsqlMcpTools(
   async function mutate(input: MutateInput): Promise<Record<string, unknown>> {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
 
-    const validation = await validate(input);
+    // DML バッチの受理はフェーズ2 M1 で対応
+    const validation = requireSingleStatement(await validate(input), "ksql_mutate");
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
@@ -407,10 +484,13 @@ export function createKsqlMcpTools(
   }
 
   async function saveQuery(input: SaveQueryInput): Promise<Record<string, unknown>> {
-    const validation = await validate({
-      sql: input.sql,
-      profile: input.defaultProfile,
-    });
+    const validation = requireSingleStatement(
+      await validate({
+        sql: input.sql,
+        profile: input.defaultProfile,
+      }),
+      "ksql_save_query"
+    );
     assertSavedQuerySafety(input, {
       isDml: validation.isDml,
       statementType: validation.statementType,
@@ -458,10 +538,13 @@ export function createKsqlMcpTools(
     const saved = getSavedQuery(catalog, input.name);
     assertProfileOverrideAllowed(saved, input.profile);
     const profile = input.profile ?? saved.defaultProfile;
-    const validation = await validate({
-      sql: saved.sql,
-      profile,
-    });
+    const validation = requireSingleStatement(
+      await validate({
+        sql: saved.sql,
+        profile,
+      }),
+      "ksql_run_saved_query"
+    );
     assertSavedQuerySafety(saved, {
       isDml: validation.isDml,
       statementType: validation.statementType,

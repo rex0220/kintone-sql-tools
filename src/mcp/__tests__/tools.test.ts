@@ -656,4 +656,96 @@ describe("MCP tools", () => {
     expect(payload.ok).toBe(false);
     expect(payload.error.code).toBe("ParseError");
   });
+
+  // ----------------------------------------------------------------
+  // バッチ validate（フェーズ1 S5）
+  // ----------------------------------------------------------------
+
+  test("validate: バッチ入力は statements[] とサマリを返す", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql: "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM #t",
+    });
+
+    expect(result.batch).toBe(true);
+    expect(result.statementCount).toBe(2);
+    expect(result.isReadOnlyBatch).toBe(true);
+    expect(result.containsDml).toBe(false);
+    expect(result.canRunWithQueryTool).toBe(true);
+    expect(result.requiresMutationTool).toBe(false);
+    expect(result.tempTables).toEqual(["#t"]);
+    expect(result.statements[0]).toMatchObject({
+      index: 0,
+      statementType: "CREATE_TEMP_TABLE",
+      isReadOnly: true,
+      appIds: [100],
+      tempTablesCreated: ["#t"],
+    });
+    expect(result.statements[1]).toMatchObject({
+      index: 1,
+      statementType: "SELECT",
+      tempTablesReferenced: ["#t"],
+      appIds: [],
+    });
+    // バッチではトップレベルのスカラーは持たない
+    expect(result.statementType).toBeUndefined();
+  });
+
+  test("validate: 単文は従来スカラー形を維持しつつ statements[]（要素1）も持つ", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({ sql: "SELECT * FROM APP100" });
+
+    expect(result.batch).toBe(false);
+    expect(result.statementType).toBe("SELECT");
+    expect(result.appIds).toEqual([100]);
+    expect(result.statements).toHaveLength(1);
+    expect(result.statements[0].statementType).toBe("SELECT");
+  });
+
+  test("validate: DML 混在バッチは containsDml / requiresMutationTool が立つ", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql: "SELECT * FROM APP100; UPDATE APP200 SET x = '1' WHERE $id = 1",
+    });
+
+    expect(result.batch).toBe(true);
+    expect(result.containsDml).toBe(true);
+    expect(result.isReadOnlyBatch).toBe(false);
+    expect(result.canRunWithQueryTool).toBe(false);
+    expect(result.requiresMutationTool).toBe(true);
+    expect(result.statements[1]).toMatchObject({ isDml: true, hasWhere: true, appIds: [200] });
+  });
+
+  test("validate: 未定義の一時テーブル参照はバッチ全体を拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.validate({ sql: "SELECT * FROM APP100; SELECT * FROM #t" })
+    ).rejects.toThrow(/temp table #t is not defined in this batch/);
+  });
+
+  test("validate: 単文の CREATE TEMP TABLE は ArgumentError", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.validate({ sql: "CREATE TEMP TABLE #t AS SELECT * FROM APP100" })
+    ).rejects.toThrow(/CREATE TEMP TABLE requires a batch/);
+  });
+
+  test("query: バッチ入力は S6 対応まで拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.query({ sql: "SELECT * FROM APP100; SELECT * FROM APP200" })
+    ).rejects.toThrow(/batch SQL \(multiple statements\) is not supported by ksql_query yet/);
+  });
+
+  test("mutate: バッチ入力はフェーズ2対応まで拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.mutate({
+        sql: "DELETE FROM APP100 WHERE $id = 1; DELETE FROM APP100 WHERE $id = 2",
+        allowDml: true,
+        confirmText: "yes",
+        dmlMaxRows: 10,
+      })
+    ).rejects.toThrow(/batch SQL \(multiple statements\) is not supported by ksql_mutate yet/);
+  });
 });
