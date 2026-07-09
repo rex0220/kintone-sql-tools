@@ -19,6 +19,7 @@
   - 2026-07-09 R19(S6 実装後): `ksql_query` の read-only バッチ受理を実装(§6.2・§7.2)。`maxTotalRecords` 超過時の挙動を ArgumentError と確定(§6.2 に追記)。バッチでは `timeout` を合計タイムアウトとして扱う(§5.7。HTTP クライアントの per-request タイムアウトにも同値が渡る)。DML 混在バッチは `ArgumentError: batch contains DML statements. Use ksql_mutate.`
   - 2026-07-09 R20(S7 実装後): CLI 実装(`-f` 複文・`--continue-on-error`・console)。§8.2 の「完結単文の `;` なし即実行」を撤回し **`;` ゲートを維持**(R3〜R4 の前提「現行 console は改行=実行」が誤りで、現行は従来から `;` 終端実行のため。撤回により複数行入力の途中実行という退行を回避)。判定順を6段に再構成(メタ → バッチ構築 → `;` まで蓄積 → 完結実行 → 継続可能失敗 → 即エラー)。`:run` エラー時はバッファ保持、`@profile` 構文は判定用パース前に正規化
   - 2026-07-09 R21(S8): 公開ドキュメントへ反映(言語リファレンス §25 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5 / console spec)。フェーズ1 実装完了
+  - 2026-07-09 R27(M3 実装後): バッチ EXPLAIN を実装(§7.4)。`ksql_explain` のバッチ入力は全文プランの配列(`statements[]` の `plan: string[]`)を返し、CLI の `--dry-run` もバッチ対応。一時テーブル参照文は既存プラン生成に通さず「FULL_SCAN(一時テーブル参照)/ 実体化前のため行数不明 / プッシュダウンなし」を明示(既存 `resolveSelectMode` が cteName 参照を SIMPLE と誤表示するため)
   - 2026-07-09 R26(M4 実装後): 一時テーブル経由の `INSERT_SELECT` を解禁(§7.3 の実装)。ソース判定は「SELECT 側に APP 参照がなく一時テーブル参照が1つ以上」(`tempOnlySource`)。実体化済み行数は confirm("INSERT") 経由で `dmlMaxRows` / `dmlTotalMaxRows` の対象になる(§7.3 の集計対象に明記)。§9 に APP 混在ソースのエラーメッセージを追加
   - 2026-07-09 R24(M1 実装後): `ksql_mutate` の DML バッチ受理を実装(§7.3)。静的ガード(INSERT_SELECT 拒否・WHERE なし・文ごと insertValuesCount)は validate-all-first で実行前に適用。`dmlTotalMaxRows` の集計対象(INSERT 静的 + UPDATE/DELETE 実行時、UPSERT 対象外)と混在バッチの取得上限・影響件数の文ごと展開を §7.3 に明記
 - ステータス: フェーズ1 実装完了(S1〜S8。実機検証は未実施、リリースはフェーズ2 完了後に v1.4.0 一括)

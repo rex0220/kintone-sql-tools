@@ -24,11 +24,13 @@
   - 2026-07-09 R20(S7 実装後): S7 実装済み。判定ロジックは `cli/consoleInput.ts` の純関数(`decideConsoleInput` / `decideRun`)+ユニットテスト21件。**仕様修正**: 「完結単文の `;` なし即実行」は現行 console の実挙動(`;` 終端)の誤認に基づくため撤回し、`;` ゲート維持の6段判定に変更(spec R20)。`@profile` は判定用パース前に正規化。console e2e は dist-cli を再ビルドして検証
   - 2026-07-09 R21(S8): 公開ドキュメント反映(言語リファレンス §25 新設・制限事項表更新 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5)。実機検証は未実施(ユーザー実施待ち)
   - 2026-07-09 R22(S8): 公開ドキュメントの「v1.4.0 で追加」を「v1.4.0 予定・フェーズ1 実装時点」に統一(v1.4.0 最終仕様との混同防止)。リリース時に確定表記へ変える箇所を M6 のチェックリストに列挙
+  - 2026-07-09 R28(M3 レビュー反映): CLI バッチのガード順を修正 — ①DML 含みバッチは dry-run でも `--allow-dml` を要求(単文と同等)→ ②dry-run はプラン表示(DML 込み可)→ ③DML バッチ実行は M2 まで拒否、の順に。従来は containsDml 拒否が先で DML バッチの dry-run が M3 のプラン生成に到達できなかった。ガード判定は allowDml 解決後に移動(分類ブロック内では未解決だった)
+  - 2026-07-09 R27(M3 実装後): M3 実装済み。`buildBatchExplainPlans(sql)` を core に新設(静的検証込み・実行なし)。temp 参照文は temp-aware プラン(`resolveSelectMode` の SIMPLE 誤判定・APP0 表示を回避)。MCP `ksql_explain` バッチ分岐 + CLI `--dry-run` バッチのガード解除
   - 2026-07-09 R26(M4 実装後): M4 実装済み。`StatementAnalysis.tempOnlySource`(SELECT 側の AST 走査で APP 参照なし + temp 参照あり)で判定し、executeBatch の事前拒否と mutateBatch の静的ガードに例外を通す。`executeInsertSelect` に `cteCache` 注入 + 書き込み前の `confirm(count, "INSERT")` を追加(`ExecuteOptions.confirm` の operation に "INSERT" を拡張)。**副次的な挙動変化**: CLI の単文 INSERT_SELECT(--allow-dml)も confirm 経由の件数確認・--dml-max-rows ガードの対象になった(安全側の変化。従来は無ガード)
   - 2026-07-09 R25(M1 レビュー反映): バッチ合計タイムアウトに未解決の `input.timeout` ではなく解決済みの `runtime.timeout`(env / profile / 既定 30000ms)を渡すよう修正(S6 の query バッチ側も同修正。timeout 未指定時に合計 deadline が無効になっていた)
   - 2026-07-09 R24(M1 実装後): M1 実装済み。`mutateBatch` は静的ガード(validate-all-first)→ `executeBatch`(fail-fast 固定、confirm で文ごと dmlMaxRows + 合計 dmlTotalMaxRows を加算検査)。WHERE なし UPDATE/DELETE はパーサ段階で拒否されるため tools 層のガードは防御的併設。影響件数は `statements[]` に展開(`toMutationSummary`)
   - 2026-07-09 R23(P0-1 実装後): P0-1 実装済み。`api/requestGate.ts`(セマフォ + GET 系のみ 408/429/502/503/504・一時ネットワークエラーの指数バックオフリトライ、sleep/random 注入可能)。`withRequestGate` で MCP runtime と CLI(dry-run 除く)の client を包む。素の 500 はリトライ対象外。CB_IL02 フォールバックは統合せず併存。書き込み系はセマフォのみ(二重実行防止)。設定は `KSQL_MAX_CONCURRENT` env > `profile.query.maxConcurrent` > 既定10(プロセス内グローバルで初回固定)
-- ステータス: フェーズ1 + P0-1 + フェーズ2 M1・M4 実装済み(**実機検証は未実施**。リリースはフェーズ2 完了後に v1.4.0 一括)。次は M3(バッチ EXPLAIN)/ M2(CLI の DML バッチ確認)。P0-2 は随時、P0-3・M5 は実機必要
+- ステータス: フェーズ1 + P0-1 + フェーズ2 M1・M3・M4 実装済み(**実機検証は未実施**。リリースはフェーズ2 完了後に v1.4.0 一括)。次は M2(CLI の DML バッチ確認)。P0-2 は随時、P0-3・M5 は実機必要、M6 はリリース時
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 

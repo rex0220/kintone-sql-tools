@@ -285,10 +285,11 @@ Claude Desktop 設定例:
 }
 ```
 
-## 11.5 バッチ実行・一時テーブル対応（v1.4.0 予定・フェーズ1 実装時点）
+## 11.5 バッチ実行・一時テーブル対応（v1.4.0 予定）
 
 `;` 区切りの複文（バッチ）と一時テーブル（`CREATE TEMP TABLE #t AS SELECT ...`）に対応した。
-本節はフェーズ1 実装時点の記述で、DML バッチはフェーズ2（v1.4.0 リリースまで）で対応予定。
+MCP 側はフェーズ2 の M1（DML バッチ）・M3（バッチ EXPLAIN）・M4（temp 経由 INSERT_SELECT）まで実装済み。
+残りは CLI の DML バッチ確認（M2）と v1.4.0 リリース（M6）。
 詳細仕様は `docs/ksql_batch_temp_table_spec.md`。
 
 対応ツールと変更点:
@@ -297,7 +298,8 @@ Claude Desktop 設定例:
 | --- | --- |
 | `ksql_validate` | バッチ入力を受理し、サマリ + 文ごとの `statements[]` を返す。単文は従来スカラー形を維持（`statements[]` が追加）。一時テーブルの静的検証・単文 CREATE/DROP の拒否・空入力の拒否を実施。`appIds` は AST ベース（文ごと）に変更 |
 | `ksql_query` | read-only バッチを実行しバッチエンベロープ（`statements[]` + `results[]`）を返す。入力に `continueOnError` / `maxTotalRecords` を追加。DML 混在バッチは `ksql_mutate` へ誘導するエラー。バッチの `timeout` は合計タイムアウト |
-| `ksql_mutate` | DML バッチはフェーズ1 実装時点では明示エラー（`batch SQL ... not supported ... yet.`）。**v1.4.0 リリースまでにフェーズ2で対応予定（対応時にこの行を更新）** |
+| `ksql_mutate` | DML バッチを受理（フェーズ2 M1）。dmlMaxRows は文ごと + 任意の dmlTotalMaxRows で合計ガード。常に fail-fast。一時テーブル経由の INSERT_SELECT に対応（M4。ソースが一時テーブルのみの場合） |
+| `ksql_explain` | バッチ入力で全文プランの配列を返す（M3）。一時テーブル参照文は FULL_SCAN（インメモリ）と行数不明を明示 |
 | `ksql_save_query` / `ksql_run_saved_query` | 保存 SQL は単文のみ（バッチは明示エラー） |
 
 安全制御の要点:
