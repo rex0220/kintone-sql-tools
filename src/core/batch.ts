@@ -69,6 +69,9 @@ export interface StatementAnalysis {
   /** 依存する先行文の index（参照・DROP する一時テーブルを CREATE した文）。
    *  S4 の continue-on-error 時の依存スキップに使う */
   dependsOn: number[];
+  /** INSERT_SELECT / UPSERT_SELECT の SELECT ソースが一時テーブルのみか
+   *  （kintone アプリを一切読まない）。M4 の解禁判定に使う。他の文タイプでは false */
+  tempOnlySource: boolean;
 }
 
 /** バッチ全体の静的解析結果 */
@@ -165,6 +168,16 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       collectRefs(stmt, refs, stmtAppIds);
     }
 
+    // INSERT_SELECT / UPSERT_SELECT: SELECT ソースが一時テーブルのみか
+    //（書き込み先アプリは含めず、SELECT 側だけを走査する）
+    let tempOnlySource = false;
+    if (stmt.type === "INSERT_SELECT" || stmt.type === "UPSERT_SELECT") {
+      const srcTemp = new Set<string>();
+      const srcApps = new Set<number>();
+      collectRefs(stmt.select, srcTemp, srcApps);
+      tempOnlySource = srcTemp.size > 0 && srcApps.size === 0;
+    }
+
     // 参照の解決（DROP 済みは defined から消えているため「DROP 後参照」もここで落ちる）
     for (const name of refs) {
       const at = defined.get(name);
@@ -220,6 +233,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       tempTablesReferenced: [...refs],
       tempTablesDropped: dropped,
       dependsOn: [...dependsOn].sort((a, b) => a - b),
+      tempOnlySource,
     });
   });
 

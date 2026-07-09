@@ -29,10 +29,13 @@ interface MockOptions {
 
 function makeClient(opts: MockOptions = {}): KintoneClient & {
   getCalls: { app: number; query: string }[];
+  postCalls: { app: number; records: unknown[] }[];
 } {
   const getCalls: { app: number; query: string }[] = [];
+  const postCalls: { app: number; records: unknown[] }[] = [];
   return {
     getCalls,
+    postCalls,
     async getRecords(params) {
       getCalls.push({ app: params.app, query: params.query ?? "" });
       if (opts.delayMs) {
@@ -43,7 +46,10 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
       }
       return { records: opts.recordsByApp?.[params.app] ?? [] };
     },
-    async postRecords() { return { ids: [] }; },
+    async postRecords(params) {
+      postCalls.push({ app: params.app, records: [...params.records] });
+      return { ids: params.records.map((_r, i) => String(i + 1)) };
+    },
     async putRecords() { /* noop */ },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
@@ -230,7 +236,7 @@ test("静的検証違反は1文も実行せずに throw する", async () => {
   expect(client.getCalls).toHaveLength(0);
 });
 
-test("DML 文内の一時テーブル参照はフェーズ2まで拒否（実行前）", async () => {
+test("DML 文内の一時テーブル参照（UPDATE のサブクエリ等）は拒否（実行前）", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   await expect(
     executeBatch(
@@ -239,6 +245,60 @@ test("DML 文内の一時テーブル参照はフェーズ2まで拒否（実行
       client
     )
   ).rejects.toThrow(/temp table references in UPDATE are not supported yet/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+// ----------------------------------------------------------------
+// 一時テーブル経由の INSERT_SELECT（M4）
+// ----------------------------------------------------------------
+
+test("INSERT_SELECT: ソースが一時テーブルのみなら実行できる", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
+    "INSERT INTO APP200 (名前, 金額) SELECT 顧客名, 売上 FROM #t",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(r.statements[1].status).toBe("success");
+  expect(r.statements[1].result).toMatchObject({ type: "INSERT", insertedCount: 3 });
+  // 書き込みは一時テーブルの実体化行から行われる（APP200 の読み取りは発生しない）
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].app).toBe(200);
+  expect(client.getCalls.every((c) => c.app === 100)).toBe(true);
+});
+
+test("INSERT_SELECT: 実体化済み行数に confirm(dmlMaxRows 相当)が適用される", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const confirmCalls: Array<{ count: number; operation: string }> = [];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #t",
+    client,
+    {
+      confirm: async (count, operation) => {
+        confirmCalls.push({ count, operation });
+        if (count > 2) throw new Error("ArgumentError: INSERT affected rows exceed limit.");
+        return true;
+      },
+    }
+  );
+  // #t は 3 行 → confirm(3, "INSERT") → ガードで拒否 → 文エラー(fail-fast)
+  expect(confirmCalls).toEqual([{ count: 3, operation: "INSERT" }]);
+  expect(r.ok).toBe(false);
+  expect(r.statements[1].status).toBe("error");
+  expect(client.postCalls).toHaveLength(0); // 書き込み前に止まる
+});
+
+test("INSERT_SELECT: APP ソース混在（JOIN）は拒否（実行前）", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  await expect(
+    executeBatch(
+      "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+      "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      client
+    )
+  ).rejects.toThrow(/INSERT_SELECT in a batch must select from temp tables only\. \(statement 1\)/);
   expect(client.getCalls).toHaveLength(0);
 });
 

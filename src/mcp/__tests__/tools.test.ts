@@ -979,7 +979,7 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(0);
   });
 
-  test("mutate: バッチ内の INSERT_SELECT は M4 まで文番号付きで拒否", async () => {
+  test("mutate: APP をソースとする INSERT_SELECT は文番号付きで拒否（temp のみ許可）", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     await expect(
       tools.mutate({
@@ -987,7 +987,77 @@ describe("MCP tools", () => {
         sql: "DELETE FROM APP100 WHERE $id = 1; INSERT INTO APP100 (x) SELECT x FROM APP200",
         dmlMaxRows: 10,
       })
-    ).rejects.toThrow(/INSERT_SELECT is not supported by ksql_mutate yet\. \(statement 1\)/);
+    ).rejects.toThrow(/INSERT_SELECT in a batch must select from temp tables only\. \(statement 1\)/);
+  });
+
+  test("mutate: UPSERT_SELECT はバッチでも引き続き拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(
+      tools.mutate({
+        ...MUTATE_BASE,
+        sql: "DELETE FROM APP100 WHERE $id = 1; UPSERT INTO APP100 (x) SELECT x FROM APP200 ON DUPLICATE (x)",
+        dmlMaxRows: 10,
+      })
+    ).rejects.toThrow(/UPSERT_SELECT is not supported by ksql_mutate yet\. \(statement 1\)/);
+  });
+
+  // ----------------------------------------------------------------
+  // 一時テーブル経由の INSERT_SELECT（フェーズ2 M4）— 2段階 DML フロー
+  // ----------------------------------------------------------------
+
+  test("mutate: CREATE TEMP → INSERT_SELECT の2段階 DML フローが動く", async () => {
+    const { deps } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #targets AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #targets",
+      dmlMaxRows: 5,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[0]).toMatchObject({
+      type: "CREATE_TEMP_TABLE",
+      status: "success",
+      tempTable: "#targets",
+      rowCount: 2,
+    });
+    expect(result.statements[1]).toMatchObject({
+      type: "INSERT_SELECT",
+      status: "success",
+      insertedCount: 2,
+    });
+  });
+
+  test("mutate: INSERT_SELECT の実体化済み行数に dmlMaxRows が効く（fail-fast）", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #targets AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #targets",
+      dmlMaxRows: 2, // 実体化 3 行 > 2
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", rowCount: 3 });
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/INSERT affected rows \(3\) exceed dmlMaxRows \(2\)/);
+    expect(calls.post).toBe(0); // 書き込み前に止まる
   });
 
   test("mutate: 文ごとの dmlMaxRows 超過(INSERT 行数)は実行前に拒否", async () => {

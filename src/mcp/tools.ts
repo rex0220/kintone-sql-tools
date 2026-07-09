@@ -84,6 +84,8 @@ export interface StatementValidation {
   tempTablesCreated: string[];
   tempTablesReferenced: string[];
   tempTablesDropped: string[];
+  /** INSERT_SELECT / UPSERT_SELECT の SELECT ソースが一時テーブルのみか */
+  tempOnlySource: boolean;
 }
 
 interface ValidationCommon {
@@ -405,6 +407,7 @@ export function createKsqlMcpTools(
       tempTablesCreated: s.tempTablesCreated,
       tempTablesReferenced: s.tempTablesReferenced,
       tempTablesDropped: s.tempTablesDropped,
+      tempOnlySource: s.tempOnlySource,
     }));
 
     const common = {
@@ -540,7 +543,14 @@ export function createKsqlMcpTools(
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") {
+      // INSERT_SELECT はソースが一時テーブルのみの場合に許可（M4。実体化済みで
+      // 書き込み前に件数が確定し、confirm 経由の dmlMaxRows ガードが効く）
+      if (s.statementType === "INSERT_SELECT" && !s.tempOnlySource) {
+        throw new Error(
+          `ArgumentError: INSERT_SELECT in a batch must select from temp tables only.${at}`
+        );
+      }
+      if (s.statementType === "UPSERT_SELECT") {
         throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
       }
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {

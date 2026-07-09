@@ -176,11 +176,11 @@ export interface ReorderResult {
 
 export interface ExecuteOptions {
   /**
-   * UPDATE / DELETE 実行前に呼ばれる確認コールバック。
+   * UPDATE / DELETE（および INSERT_SELECT の書き込み）実行前に呼ばれる確認コールバック。
    * false を返すとキャンセルして OperationCancelledError を投げる。
    * 省略時は確認なしで実行。
    */
-  confirm?: (count: number, operation: "UPDATE" | "DELETE") => Promise<boolean>;
+  confirm?: (count: number, operation: "UPDATE" | "DELETE" | "INSERT") => Promise<boolean>;
   /** 全件取得の上限（デフォルト: 10_000） */
   maxRecords?: number;
   /** 取得上限到達時の動作（SELECT系のみ） */
@@ -382,14 +382,18 @@ export async function executeBatch(
   if (options.continueOnError && analysis.containsDml) {
     throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
   }
-  // DML 文内の一時テーブル参照（サブクエリ・INSERT_SELECT ソース）はフェーズ2で対応
+  // DML 文内の一時テーブル参照は、INSERT_SELECT の「ソースが一時テーブルのみ」の
+  // 場合だけ許可する（M4。実体化済みで書き込み前に件数確定するため dmlMaxRows と整合）。
+  // それ以外（UPDATE のサブクエリ等・APP 混在ソースの INSERT_SELECT）は拒否
   for (const s of analysis.statements) {
-    if (s.isDml && s.tempTablesReferenced.length > 0) {
-      throw new BatchAnalysisError(
-        `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
-        s.index
-      );
-    }
+    if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
+    if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
+    throw new BatchAnalysisError(
+      s.statementType === "INSERT_SELECT"
+        ? `ArgumentError: INSERT_SELECT in a batch must select from temp tables only. (statement ${s.index})`
+        : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+      s.index
+    );
   }
 
   const metrics = createEmptyMetrics();
@@ -492,7 +496,7 @@ async function executeBatchStatement(
     return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
   }
 
-  // 一時テーブルを参照する read-only 文はストアを注入して実行
+  // 一時テーブルを参照する文はストアを注入して実行
   if (info.tempTablesReferenced.length > 0) {
     if (stmt.type === "SELECT" || stmt.type === "UNION") {
       return { result: await executeQueryWithCte(stmt, client, options, tempTables, cacheContext) };
@@ -500,7 +504,11 @@ async function executeBatchStatement(
     if (stmt.type === "WITH") {
       return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
     }
-    // ここに来るのは想定外（DML の参照は事前チェックで拒否済み）
+    // INSERT_SELECT（ソースが一時テーブルのみ。事前チェックで検証済み）
+    if (stmt.type === "INSERT_SELECT") {
+      return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    }
+    // ここに来るのは想定外（他の DML 参照は事前チェックで拒否済み）
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
   }
 
@@ -1728,10 +1736,14 @@ async function executeInsertSelect(
   stmt: InsertSelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  /** バッチ実行時の一時テーブルストア（#name → 行）。SELECT ソースの解決に使う */
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<InsertResult> {
-  // 1. SELECT を実行して結果行を取得
-  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
+  // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
+  const selectResult = cteCache !== undefined && cteCache.size > 0
+    ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
+    : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
 
   // 2. 列数チェック
@@ -1739,6 +1751,12 @@ async function executeInsertSelect(
     throw new Error(
       `SELECT の列数（${columns.length}）と INSERT のフィールド数（${stmt.fields.length}）が一致しません`
     );
+  }
+
+  // 2.5 書き込み前に件数が確定するため、確認コールバック（dmlMaxRows ガード等）を通す
+  if (options.confirm) {
+    const ok = await options.confirm(rows.length, "INSERT");
+    if (!ok) throw new OperationCancelledError("INSERT", rows.length);
   }
 
   // 3. 転送先フィールド型を取得（同型自動変換）
@@ -3022,7 +3040,7 @@ function formatArithNodeStr(node: ArithNode): string {
 
 export class OperationCancelledError extends Error {
   constructor(
-    public readonly operation: "UPDATE" | "DELETE",
+    public readonly operation: "UPDATE" | "DELETE" | "INSERT",
     public readonly affectedCount: number
   ) {
     super(

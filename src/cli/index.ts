@@ -1718,7 +1718,7 @@ async function run(): Promise<number> {
       }
     }
 
-    const confirm = async (count: number, operation: "UPDATE" | "DELETE"): Promise<boolean> => {
+    const confirm = async (count: number, operation: "UPDATE" | "DELETE" | "INSERT"): Promise<boolean> => {
       if (count > dmlMaxRows) {
         throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
       }
