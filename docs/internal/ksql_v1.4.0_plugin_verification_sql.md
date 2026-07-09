@@ -41,7 +41,7 @@ ORDER BY 顧客No ASC
 LIMIT 100
 ```
 
-### A-3. 集計(GROUP BY + HAVING)
+### A-3. 集計(GROUP BY + HAVING)— **v1.4.0 のバグ修正確認**
 
 ```sql
 SELECT 商談フェーズ, COUNT(*) AS 件数, SUM(売上) AS 売上合計
@@ -50,6 +50,9 @@ GROUP BY 商談フェーズ
 HAVING SUM(売上) > 0
 ORDER BY 売上合計 DESC
 ```
+
+期待: HAVING なし版と同じグループが返る(売上合計 > 0 のグループのみ)。
+**v1.3.0 以前は「集計列に alias を付けると HAVING が常に偽になる」既存バグにより0件になっていた**(実機検証で発見・v1.4.0 で修正)。0件になったら不具合再発。
 
 ### A-4. WITH(CTE)+ JOIN
 
