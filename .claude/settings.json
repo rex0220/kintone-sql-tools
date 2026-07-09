@@ -8,7 +8,12 @@
       "Bash(find . -name \"manifest.json\" -not -path \"*/node_modules/*\")",
       "Bash(npm whoami *)",
       "Bash(cat .npmrc)",
-      "Bash(git merge --no-ff perf/where-pushdown-join -m ' *)"
+      "Bash(git merge --no-ff perf/where-pushdown-join -m ' *)",
+      "Bash(node dist-cli/ksql.js -v)",
+      "Bash(git worktree *)",
+      "Bash(grep -n \"EXPLAIN \\\\${item.sql}\\\\|EXPLAIN \\\\\" + item\\\\|\\\\`EXPLAIN \" src/ui/desktop.ts)",
+      "Bash(rm -f jest-out.txt)",
+      "PowerShell($j = Get-Content \"C:\\\\Users\\\\rex02\\\\.claude\\\\projects\\\\c--Users-rex02-Projects-kintone-sql-tools\\\\fb1be961-fb80-46cd-a36b-e67ed6770fe2\\\\tool-results\\\\mcp-ksql-ksql_show_apps-1783600150947.txt\" -Raw | ConvertFrom-Json; $j.columns; $j.rows | Where-Object { $_.PSObject.Properties.Value -match '顧客|取引先' } | Format-Table -AutoSize | Out-String)"
     ]
   }
 }
