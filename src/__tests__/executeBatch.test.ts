@@ -412,3 +412,29 @@ test("analysis と metrics がエンベロープに含まれる", async () => {
   expect(r.analysis.tempTables).toEqual(["#t"]);
   expect(r.metrics!.getCalls).toBeGreaterThan(0);
 });
+
+// ----------------------------------------------------------------
+// 非 Error の reject（プラグインの kintone.api 形式）のエラー整形
+// ----------------------------------------------------------------
+
+test("kintone.api 形式のオブジェクト reject が code/message に整形される", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  client.getRecords = async (params) => {
+    if (params.app === 9999999) {
+      // kintone.api は Error ではなく素のオブジェクトで reject する
+      throw { code: "GAIA_AP01", message: "指定したアプリ（id: 9999999）が見つかりません。", id: "x" };
+    }
+    return { records: APP1 as never };
+  };
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP9999999; SELECT * FROM #t",
+    client
+  );
+  expect(r.ok).toBe(false);
+  expect(r.statements[0].error).toEqual({
+    code: "GAIA_AP01",
+    message: "指定したアプリ（id: 9999999）が見つかりません。",
+  });
+  expect(r.statements[0].error?.message).not.toContain("[object Object]");
+  expect(r.statements[1].status).toBe("skipped");
+});

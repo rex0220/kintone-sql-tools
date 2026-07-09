@@ -560,11 +560,35 @@ async function runWithDeadline<T>(work: Promise<T>, remainingMs: number | null):
 }
 
 /** エラーを文ごとの報告形式に変換する（code は name または "XxxError:" 接頭辞から抽出） */
+/**
+ * エラーを文ごとの報告形式に変換する（code は name または "XxxError:" 接頭辞から抽出）。
+ * プラグインの kintone.api は Error ではなく素のオブジェクト（{ code, message, id }）で
+ * reject するため、オブジェクト形式も解釈する（String(e) だと "[object Object]" になる）
+ */
 function toBatchStatementError(e: unknown): BatchStatementError {
-  const message = e instanceof Error ? e.message : String(e);
-  const name = e instanceof Error && e.name !== "Error" ? e.name : null;
-  const prefix = message.match(/^([A-Za-z]+Error):/);
-  return { code: name ?? prefix?.[1] ?? "Error", message };
+  if (e instanceof Error) {
+    const name = e.name !== "Error" ? e.name : null;
+    const prefix = e.message.match(/^([A-Za-z]+Error):/);
+    return { code: name ?? prefix?.[1] ?? "Error", message: e.message };
+  }
+  if (e !== null && typeof e === "object") {
+    const obj = e as { message?: unknown; code?: unknown };
+    const message =
+      typeof obj.message === "string" && obj.message.length > 0
+        ? obj.message
+        : safeJsonStringify(e);
+    const code = typeof obj.code === "string" && obj.code.length > 0 ? obj.code : "Error";
+    return { code, message };
+  }
+  return { code: "Error", message: String(e) };
+}
+
+function safeJsonStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    return String(v);
+  }
 }
 
 function parseSqlBatch(sql: string): Statement[] {
