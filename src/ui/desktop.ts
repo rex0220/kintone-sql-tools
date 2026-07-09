@@ -2,8 +2,15 @@
 // desktop.ts — kintone プラグインのエントリポイント
 // ============================================================
 
-import { execute, OperationCancelledError } from "../core";
-import type { ExecuteResult, KintoneAppInfo } from "../core";
+import {
+  execute,
+  executeBatch,
+  buildBatchExplainPlans,
+  parseSqlStatements,
+  analyzeBatch,
+  OperationCancelledError,
+} from "../core";
+import type { ExecuteResult, KintoneAppInfo, SelectResult } from "../core";
 import { createKintoneClient } from "./kintoneClient";
 import { renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
@@ -496,7 +503,10 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   explainBtn.addEventListener("click", () => {
     const sql = editor.value.trim();
     if (sql) {
-      void runSql("EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached()).then((r) => {
+      // バッチ入力は EXPLAIN を前置せず、プラン表示モードで渡す
+      //（前置すると2文目以降が実行されてしまうため）
+      const isBatch = isMultiStatementSql(sql);
+      void runSql(isBatch ? sql : "EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), isBatch).then((r) => {
         if (r) panelLastResult = r;
       });
     }
@@ -1027,7 +1037,9 @@ function buildSavedSqlSidebar(
       });
     });
     explainBtn.addEventListener("click", () => {
-      void runSql(`EXPLAIN ${item.sql}`, resultArea, true, [runBtn, explainBtn], item.resultOptions, item.maxRecords, item.onLimitReached).then((r) => {
+      // バッチ入力は EXPLAIN を前置せず、プラン表示モードで渡す
+      const isBatch = isMultiStatementSql(item.sql);
+      void runSql(isBatch ? item.sql : `EXPLAIN ${item.sql}`, resultArea, true, [runBtn, explainBtn], item.resultOptions, item.maxRecords, item.onLimitReached, isBatch).then((r) => {
         if (r && onExecuted) onExecuted(r);
       });
     });
@@ -1705,6 +1717,81 @@ function closeHistoryDropdown(): void {
 // SQL 実行
 // ============================================================
 
+/** 複文（バッチ）入力かどうか（パース不能な入力は false = 従来経路でエラー表示） */
+function isMultiStatementSql(sql: string): boolean {
+  try {
+    return parseSqlStatements(sql).length > 1;
+  } catch {
+    return false;
+  }
+}
+
+/** バッチ EXPLAIN のプランを既存のテーブル描画に載せるための SelectResult を組む */
+function batchPlansToSelectResult(sql: string): SelectResult {
+  const plans = buildBatchExplainPlans(sql);
+  const rows: Array<{ plan: string }> = [];
+  plans.statements.forEach((p) => {
+    if (p.index > 0) rows.push({ plan: "" });
+    rows.push({ plan: `[${p.index + 1}] ${p.type}` });
+    p.plan.forEach((line) => rows.push({ plan: line }));
+  });
+  return { type: "SELECT", columns: ["plan"], rows, rowCount: rows.length };
+}
+
+/**
+ * 複文バッチを実行し、表示用の結果を返す（プラグインは read-only バッチのみ・
+ * 最終の結果セットのみ表示。仕様 §8.4）。
+ * - DML を含むバッチは拒否（CLI / MCP を案内）
+ * - 先頭文が EXPLAIN のバッチは全文プラン表示（実行しない）
+ */
+async function runBatchSql(
+  sql: string,
+  client: Parameters<typeof executeBatch>[1],
+  options: { maxRecords: number; onLimitReached: "error" | "truncate" },
+  explainOnly: boolean
+): Promise<{ result: SelectResult | null; note: string | null }> {
+  const statements = parseSqlStatements(sql);
+  const analysis = analyzeBatch(statements);
+
+  // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
+  // → バッチ全体のプラン表示（kintone アクセスなし。2文目以降も実行しない）
+  if (explainOnly || statements[0].type === "EXPLAIN") {
+    return { result: batchPlansToSelectResult(sql), note: null };
+  }
+
+  if (analysis.containsDml) {
+    throw new Error(
+      "ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています（DML を含むバッチは CLI / MCP を使用してください）。"
+    );
+  }
+
+  const batch = await executeBatch(sql, client, {
+    maxRecords: options.maxRecords,
+    onLimitReached: options.onLimitReached,
+    fetchParallel: FETCH_PARALLEL_DEFAULT,
+  });
+
+  if (!batch.ok) {
+    const failed = batch.statements.find((s) => s.status === "error");
+    throw new Error(
+      failed?.error
+        ? `[${failed.index + 1}] ${failed.error.message}`
+        : "バッチ実行に失敗しました"
+    );
+  }
+
+  // 最後に結果セットを返した文（通常は最終 SELECT）のみ表示する。
+  // 途中の SELECT 結果は表示しない（最終結果のみ、が本 UI の契約）
+  const lastSelect = [...batch.statements].reverse().find((s) => s.result?.type === "SELECT");
+  if (lastSelect?.result?.type === "SELECT") {
+    return { result: lastSelect.result, note: null };
+  }
+  return {
+    result: null,
+    note: `バッチ ${batch.statementCount} 文を実行しました（結果セットなし）。`,
+  };
+}
+
 async function runSql(
   sql: string,
   resultArea: HTMLElement,
@@ -1712,7 +1799,9 @@ async function runSql(
   extraButtons: HTMLButtonElement[] = [],
   resultOptions?: DisplayOptions,
   maxRecords = 3000,
-  onLimitReached: "error" | "truncate" = "error"
+  onLimitReached: "error" | "truncate" = "error",
+  /** バッチ入力を実行せずプラン表示する（EXPLAIN ボタン経由。単文には影響しない） */
+  batchExplainOnly = false
 ): Promise<ExecuteResult | null> {
   if (!sql) {
     resultArea.innerHTML = `<div class="ksql-info">SQL が空のため実行できません。</div>`;
@@ -1736,6 +1825,25 @@ async function runSql(
     resultArea.innerHTML = renderLoading();
 
     const client = createKintoneClient();
+    const resolvedOptions = resultOptions ?? displayOptions;
+
+    // 複文バッチ（v1.4.0）: read-only のみ・最終結果のみ表示（仕様 §8.4）
+    if (isMultiStatementSql(sql)) {
+      const { result: batchResult, note } = await runBatchSql(sql, client, {
+        maxRecords: runtimeFetch.maxRecords,
+        onLimitReached: runtimeFetch.onLimitReached,
+      }, batchExplainOnly);
+      if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
+      if (batchResult) {
+        lastResult = batchResult;
+        resultArea.innerHTML = renderResult(batchResult, resolvedOptions);
+        bindResultTableFeatures(resultArea);
+        return batchResult;
+      }
+      resultArea.innerHTML = `<div class="ksql-info">${note ?? ""}</div>`;
+      return null;
+    }
+
     const result = await execute(sql, client, {
       confirm: confirmDialog,
       maxRecords: runtimeFetch.maxRecords,
@@ -1743,7 +1851,6 @@ async function runSql(
       fetchParallel: FETCH_PARALLEL_DEFAULT,
     });
 
-    const resolvedOptions = resultOptions ?? displayOptions;
     lastResult = result;
     if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
     resultArea.innerHTML = renderResult(result, resolvedOptions);

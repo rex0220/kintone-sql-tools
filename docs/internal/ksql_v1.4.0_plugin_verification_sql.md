@@ -124,7 +124,7 @@ WHERE 顧客No IN (SELECT 顧客No_ FROM APP4149 WHERE 商談フェーズ IN ('�
 
 | # | SQL | 期待するエラー |
 |---|---|---|
-| C-1 | `SELECT 会社名 FROM APP4148; SELECT 案件名 FROM APP4149` | `この API は単文のみ受け付けます`(プラグインは複文非対応の明示) |
+| ~~C-1~~ | ~~複文はエラー~~ | **削除** — read-only バッチ対応(E 系)により、複文は最終結果のみ表示で実行される |
 | C-2 | `CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP4148` | `ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).` |
 | C-3 | `SELECT * FROM #t` | `ParseError: temp table #t is not defined in this batch.` |
 | C-4 | `SELECT 会社名 AS #x FROM APP4148` | `エイリアス名に # で始まる名前は使用できません` |
@@ -167,9 +167,75 @@ DELETE FROM APP4149 WHERE $id = <D-2 で追加されたレコード番号>
 
 ---
 
+## E. プラグインのバッチ実行(read-only・最終結果のみ表示)
+
+> v1.4.0 でプラグインも read-only バッチ + 一時テーブルに対応(仕様 §8.4)。表示されるのは**最後に結果セットを返した文**のみ。
+
+### E-1. 一時テーブル経由の2段クエリ(最終 SELECT のみ表示)
+
+```sql
+CREATE TEMP TABLE #a顧客 AS
+SELECT 顧客No, 会社名 FROM APP4148 WHERE 顧客ランク IN ('A');
+
+SELECT t.会社名, b.案件名, b.売上
+FROM #a顧客 t
+INNER JOIN APP4149 b ON t.顧客No = b.顧客No_
+ORDER BY b.売上 DESC;
+```
+
+期待: 最終 SELECT の結果のみ表示(A-4 と同等の結果)。CREATE の実体化結果は表示されない。
+
+### E-2. 一時テーブルの連鎖 + 集計
+
+```sql
+CREATE TEMP TABLE #受注 AS
+SELECT 顧客No_, 売上 FROM APP4149 WHERE 商談フェーズ IN ('受注');
+
+CREATE TEMP TABLE #顧客別 AS
+SELECT 顧客No_, SUM(売上) AS 合計 FROM #受注 GROUP BY 顧客No_;
+
+SELECT * FROM #顧客別 ORDER BY 合計 DESC;
+```
+
+期待: 顧客別の受注合計のみ表示(2つの CREATE は表示されない)。
+
+### E-3. 最終文が DROP のバッチ
+
+```sql
+CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP4148;
+DROP TEMP TABLE #t;
+```
+
+期待: 「バッチ 2 文を実行しました(結果セットなし)。」の情報表示。
+
+### E-4. DML を含むバッチは拒否
+
+```sql
+CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP4148 WHERE 顧客ランク IN ('A');
+INSERT INTO APP4149 (顧客No_) SELECT 顧客No FROM #t;
+```
+
+期待: `ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています(DML を含むバッチは CLI / MCP を使用してください)。`(実行されない)
+
+### E-5. バッチの EXPLAIN(実行されないこと)
+
+E-1 の SQL を入力したまま **EXPLAIN ボタン**を押す。
+
+期待: 全文のプラン(`[1] CREATE_TEMP_TABLE` のスコープ・行数不明、`[2] SELECT` の FULL_SCAN(一時テーブル参照))が表示され、**クエリは実行されない**(結果テーブルではなくプラン行が出る)。
+
+### E-6. 途中文の実行時エラー(fail-fast の番号付き表示)
+
+```sql
+CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP9999999;
+SELECT * FROM #t;
+```
+
+期待: `[1] ...`(存在しないアプリのエラー)が表示され、2文目は実行されない。
+
 ## 判定基準まとめ
 
-- A 系: v1.3.0 と結果一致(回帰なし)
+- A 系: v1.3.0 と結果一致(回帰なし)。A-3 は HAVING バグ修正の確認
 - B-1: 旧版で空/エラーだった形が正しい結果を返す
-- C 系: 表のエラーメッセージが表示される(silent 失敗・誤実行がない)
+- C 系: 表のエラーメッセージが表示される(silent 失敗・誤実行がない)。※C-1(複文エラー)は E 系対応により**該当しなくなった**ため削除 — 複文は E 系の挙動が正
 - D-2: **「登録します」**(「削除します」なら不具合再発)
+- E 系: 最終結果のみ表示 / DML 混在拒否 / EXPLAIN ボタンで実行されない
