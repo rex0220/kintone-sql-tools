@@ -1,4 +1,5 @@
 import type { KintoneClient } from "../core";
+import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "../cli/nodeKintoneClient";
 import {
   buildCacheContext,
@@ -226,10 +227,17 @@ export async function createKsqlRuntime(
     getApps: () => defaultClient.getApps(),
   };
 
+  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ。
+  // プロセス内グローバルのため、上限は最初に解決された値で固定される
+  const gatedClient = withRequestGate(
+    routedClient,
+    getGlobalRequestGate(profile.query?.maxConcurrent)
+  );
+
   return {
     sql,
     profileName,
-    client: routedClient,
+    client: gatedClient,
     cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
     maxRecords,
     fetchParallel,

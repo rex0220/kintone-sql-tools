@@ -23,6 +23,7 @@ import {
   type SelectResult,
 } from "../core";
 import { decideConsoleInput, decideRun } from "./consoleInput";
+import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
 import {
   buildCacheContext,
@@ -122,6 +123,8 @@ interface CliConfig {
       fetchParallel?: number;
       onLimit?: OnLimitMode;
       timeout?: number;
+      /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
+      maxConcurrent?: number;
     };
     output?: {
       format?: OutputFormat;
@@ -1689,6 +1692,11 @@ async function run(): Promise<number> {
       },
       getApps: () => defaultClient.getApps(),
     };
+  }
+
+  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ
+  if (!args.dryRun) {
+    client = withRequestGate(client, getGlobalRequestGate(profile.query?.maxConcurrent));
   }
 
   try {

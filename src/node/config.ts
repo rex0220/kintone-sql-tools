@@ -28,6 +28,8 @@ export interface KsqlProfileConfig {
     fetchParallel?: number;
     onLimit?: OnLimitMode;
     timeout?: number;
+    /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
+    maxConcurrent?: number;
   };
   output?: {
     format?: OutputFormat;
