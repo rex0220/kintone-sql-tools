@@ -31052,11 +31052,12 @@ var KEYWORDS = /* @__PURE__ */ new Map([
 
 // src/lexer/lexer.ts
 var LexError = class extends Error {
-  constructor(message, pos, input) {
+  constructor(message, pos, input, unterminated = false) {
     const around = input.slice(Math.max(0, pos - 10), pos + 10);
     super(`${message}\uFF08\u4F4D\u7F6E ${pos}\u3001\u524D\u5F8C: \u300C${around}\u300D\uFF09`);
     this.pos = pos;
     this.input = input;
+    this.unterminated = unterminated;
     this.name = "LexError";
   }
 };
@@ -31093,6 +31094,7 @@ var Lexer = class {
     const opTok = this.tryReadOperator(start);
     if (opTok) return opTok;
     if (isIdentStart(ch)) return this.readIdentOrKeyword(start);
+    if (ch === "#") return this.readHashIdent(start);
     throw new LexError(
       `\u4E88\u671F\u3057\u306A\u3044\u6587\u5B57 \u300C${ch}\u300D \u3067\u3059`,
       this.pos,
@@ -31121,7 +31123,7 @@ var Lexer = class {
         this.pos++;
       }
     }
-    throw new LexError("\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u9589\u3058\u3089\u308C\u3066\u3044\u307E\u305B\u3093", start, this.input);
+    throw new LexError("\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u9589\u3058\u3089\u308C\u3066\u3044\u307E\u305B\u3093", start, this.input, true);
   }
   // ----------------------------------------------------------
   // バッククォート識別子: `field name`
@@ -31141,7 +31143,8 @@ var Lexer = class {
     throw new LexError(
       "\u30D0\u30C3\u30AF\u30AF\u30A9\u30FC\u30C8\u8B58\u5225\u5B50\u304C\u9589\u3058\u3089\u308C\u3066\u3044\u307E\u305B\u3093",
       start,
-      this.input
+      this.input,
+      true
     );
   }
   // ----------------------------------------------------------
@@ -31248,6 +31251,30 @@ var Lexer = class {
     return this.makeToken(kind, value, start);
   }
   // ----------------------------------------------------------
+  // 一時テーブル識別子: #temp
+  // # は先頭のみ有効。isIdentStart に # を加えると isIdentContinue 経由で
+  // 識別子の途中（APP#x 等）にも許容されてしまうため、専用分岐で読む。
+  // ----------------------------------------------------------
+  readHashIdent(start) {
+    this.pos++;
+    const next = this.input[this.pos] ?? "";
+    if (!isIdentStart(next)) {
+      throw new LexError("\u300C#\u300D \u306E\u76F4\u5F8C\u306B\u306F\u8B58\u5225\u5B50\u304C\u5FC5\u8981\u3067\u3059", start, this.input);
+    }
+    while (this.pos < this.input.length && isIdentContinue(this.input[this.pos])) {
+      this.pos++;
+    }
+    const value = this.input.slice(start, this.pos);
+    if (this.input[this.pos] === "@") {
+      throw new LexError(
+        `@profile is not allowed on temp table ${value}.`,
+        this.pos,
+        this.input
+      );
+    }
+    return this.makeToken("IDENT" /* IDENT */, value, start);
+  }
+  // ----------------------------------------------------------
   // 空白・コメントをスキップ
   // ----------------------------------------------------------
   skipWhitespaceAndComments() {
@@ -31264,13 +31291,24 @@ var Lexer = class {
         continue;
       }
       if (ch === "/" && this.input[this.pos + 1] === "*") {
+        const commentStart = this.pos;
         this.pos += 2;
+        let closed = false;
         while (this.pos < this.input.length) {
           if (this.input[this.pos] === "*" && this.input[this.pos + 1] === "/") {
             this.pos += 2;
+            closed = true;
             break;
           }
           this.pos++;
+        }
+        if (!closed) {
+          throw new LexError(
+            "\u30D6\u30ED\u30C3\u30AF\u30B3\u30E1\u30F3\u30C8\u304C\u9589\u3058\u3089\u308C\u3066\u3044\u307E\u305B\u3093",
+            commentStart,
+            this.input,
+            true
+          );
         }
         continue;
       }
@@ -31305,6 +31343,7 @@ function isJapanese(cp) {
 }
 
 // src/parser/parser.ts
+var MAX_BATCH_STATEMENTS = 20;
 var ParseError = class extends Error {
   constructor(message, token) {
     super(`${message}\uFF08\u4F4D\u7F6E ${token.pos}\u3001\u30C8\u30FC\u30AF\u30F3: \u300C${token.value}\u300D\uFF09`);
@@ -31318,15 +31357,54 @@ var Parser = class {
     this.pos = 0;
     /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
     this.cteNames = /* @__PURE__ */ new Set();
+    /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
+    this.tempTableRefs = [];
   }
   // ----------------------------------------------------------
   // 公開 API
   // ----------------------------------------------------------
+  /** 単文をパースする（従来 API。複文が渡されたらエラー） */
   parse() {
-    const stmt = this.parseStatement();
-    if (this.peek().kind === ";" /* SEMICOLON */) this.advance();
+    const stmts = this.parseStatements();
+    if (stmts.length === 0) {
+      throw new ParseError("SQL \u6587\u304C\u3042\u308A\u307E\u305B\u3093", this.peek());
+    }
+    if (stmts.length > 1) {
+      throw new ParseError(
+        "\u3053\u306E API \u306F\u5358\u6587\u306E\u307F\u53D7\u3051\u4ED8\u3051\u307E\u3059\uFF08\u8907\u6587\u306F\u30D0\u30C3\u30C1\u5B9F\u884C API \u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044\uFF09",
+        this.peek()
+      );
+    }
+    if (this.tempTableRefs.length > 0) {
+      const tok = this.tempTableRefs[0];
+      throw new ParseError(
+        `temp table ${tok.value} is not defined in this batch.`,
+        tok
+      );
+    }
+    return stmts[0];
+  }
+  /** 複文（`;` 区切り）をパースする。空文はスキップする */
+  parseStatements() {
+    const stmts = [];
+    while (true) {
+      while (this.peek().kind === ";" /* SEMICOLON */) this.advance();
+      if (this.peek().kind === "EOF" /* EOF */) break;
+      const startTok = this.peek();
+      stmts.push(this.parseStatement());
+      if (stmts.length > MAX_BATCH_STATEMENTS) {
+        throw new ParseError(
+          `batch exceeds ${MAX_BATCH_STATEMENTS} statements.`,
+          startTok
+        );
+      }
+      const after = this.peek();
+      if (after.kind !== ";" /* SEMICOLON */ && after.kind !== "EOF" /* EOF */) {
+        throw new ParseError("\u6587\u306E\u533A\u5207\u308A\u306B\u306F ; \u304C\u5FC5\u8981\u3067\u3059", after);
+      }
+    }
     this.expect("EOF" /* EOF */);
-    return stmt;
+    return stmts;
   }
   // ----------------------------------------------------------
   // Statement ディスパッチ
@@ -31355,12 +31433,63 @@ var Parser = class {
         return this.parseDescribe();
       case "EXPLAIN" /* EXPLAIN */:
         return this.parseExplain();
+      case "IDENT" /* IDENT */: {
+        const upper = tok.value.toUpperCase();
+        if (upper === "CREATE") return this.parseCreateTempTable();
+        if (upper === "DROP") return this.parseDropTempTable();
+        break;
+      }
       default:
-        throw new ParseError(
-          "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
-          tok
-        );
+        break;
     }
+    throw new ParseError(
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      tok
+    );
+  }
+  // ----------------------------------------------------------
+  // CREATE TEMP TABLE / DROP TEMP TABLE（バッチ内一時テーブル）
+  // CREATE / DROP / TEMP / TABLE は予約語にしない（ソフトキーワード）
+  // ----------------------------------------------------------
+  parseCreateTempTable() {
+    this.advance();
+    this.expectSoftKeyword("TEMP", "CREATE \u306E\u5F8C\u306B\u306F TEMP TABLE \u304C\u5FC5\u8981\u3067\u3059\uFF08\u4F8B: CREATE TEMP TABLE #temp AS SELECT ...\uFF09");
+    this.expectSoftKeyword("TABLE", "CREATE TEMP \u306E\u5F8C\u306B\u306F TABLE \u304C\u5FC5\u8981\u3067\u3059");
+    const name = this.parseTempTableName();
+    this.expect("AS" /* AS */, "CREATE TEMP TABLE \u306B\u306F AS SELECT \u304C\u5FC5\u8981\u3067\u3059");
+    const tok = this.peek();
+    let query;
+    if (tok.kind === "WITH" /* WITH */) {
+      query = this.parseWith();
+    } else if (tok.kind === "SELECT" /* SELECT */) {
+      query = this.tryParseUnionChain(this.parseSelect());
+    } else {
+      throw new ParseError("CREATE TEMP TABLE ... AS \u306E\u5F8C\u306B\u306F SELECT / WITH \u304C\u5FC5\u8981\u3067\u3059", tok);
+    }
+    return { type: "CREATE_TEMP_TABLE", name, query };
+  }
+  parseDropTempTable() {
+    this.advance();
+    this.expectSoftKeyword("TEMP", "DROP \u306E\u5F8C\u306B\u306F TEMP TABLE \u304C\u5FC5\u8981\u3067\u3059\uFF08\u4F8B: DROP TEMP TABLE #temp\uFF09");
+    this.expectSoftKeyword("TABLE", "DROP TEMP \u306E\u5F8C\u306B\u306F TABLE \u304C\u5FC5\u8981\u3067\u3059");
+    const name = this.parseTempTableName();
+    return { type: "DROP_TEMP_TABLE", name };
+  }
+  expectSoftKeyword(word, msg) {
+    const tok = this.peek();
+    if (tok.kind === "IDENT" /* IDENT */ && tok.value.toUpperCase() === word) {
+      this.advance();
+      return;
+    }
+    throw new ParseError(msg, tok);
+  }
+  parseTempTableName() {
+    const tok = this.peek();
+    if (tok.kind === "IDENT" /* IDENT */ && tok.value.startsWith("#")) {
+      this.advance();
+      return tok.value;
+    }
+    throw new ParseError("\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\u306F # \u3067\u59CB\u307E\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\uFF08\u4F8B: #temp\uFF09", tok);
   }
   parseShow() {
     this.advance();
@@ -31917,24 +32046,38 @@ var Parser = class {
   // FROM / JOIN
   // ----------------------------------------------------------
   parseTableRef() {
-    const name = this.parseIdentifier();
+    const nameTok = this.peek();
+    const name = this.parseTableName();
+    if (nameTok.kind === "IDENT" /* IDENT */ && name.startsWith("#")) {
+      this.tempTableRefs.push(this.prev());
+      const alias2 = this.consume("AS" /* AS */) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
+      return { appId: 0, alias: alias2, cteName: name };
+    }
     if (this.cteNames.has(name)) {
-      const alias2 = this.consume("AS" /* AS */) ? this.parseIdentifier() : this.tryParseImplicitAlias();
+      const alias2 = this.consume("AS" /* AS */) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
       return { appId: 0, alias: alias2, cteName: name };
     }
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {
-      const alias2 = this.consume("AS" /* AS */) ? this.parseIdentifier() : this.tryParseImplicitAlias();
+      const alias2 = this.consume("AS" /* AS */) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
       return { appId, alias: alias2, cteName: null, subtableCode };
     }
     const implicit = this.tryParseImplicitAlias();
-    const alias = this.consume("AS" /* AS */) ? this.parseIdentifier() : implicit ?? name;
+    const alias = this.consume("AS" /* AS */) ? this.parseTableAliasName() : implicit ?? name;
     return { appId, alias, cteName: null };
+  }
+  // テーブル alias 名を読む（IDENT / BIDENT）。alias 位置の # は BIDENT でも拒否
+  parseTableAliasName() {
+    const tok = this.peek();
+    if ((tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) && tok.value.startsWith("#")) {
+      throw new ParseError("\u30A8\u30A4\u30EA\u30A2\u30B9\u540D\u306B # \u3067\u59CB\u307E\u308B\u540D\u524D\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    }
+    return this.parseIdentifier();
   }
   tryParseImplicitAlias() {
     const k = this.peek().kind;
     if (k === "IDENT" /* IDENT */ || k === "BIDENT" /* BIDENT */) {
-      return this.parseIdentifier();
+      return this.parseTableAliasName();
     }
     return null;
   }
@@ -32339,6 +32482,7 @@ var Parser = class {
   parseInsert() {
     this.expect("INSERT" /* INSERT */);
     this.expect("INTO" /* INTO */);
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     this.expect("(" /* LPAREN */);
@@ -32364,6 +32508,7 @@ var Parser = class {
   parseUpsert() {
     this.expect("UPSERT" /* UPSERT */);
     this.expect("INTO" /* INTO */);
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {
@@ -32448,6 +32593,7 @@ var Parser = class {
   // ----------------------------------------------------------
   parseUpdate() {
     this.expect("UPDATE" /* UPDATE */);
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     this.expect("SET" /* SET */);
@@ -32523,6 +32669,7 @@ var Parser = class {
   parseDelete() {
     this.expect("DELETE" /* DELETE */);
     this.expect("FROM" /* FROM */);
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     const whereTok = this.peek();
@@ -32541,6 +32688,7 @@ var Parser = class {
   parseReorder() {
     this.expect("REORDER" /* REORDER */);
     const all = this.consume("ALL" /* ALL */);
+    this.rejectTempTableDml();
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (!subtableCode) {
@@ -32622,8 +32770,29 @@ var Parser = class {
     }
     return n;
   }
-  // 識別子（IDENT / BIDENT）を読む
+  // 識別子（IDENT / BIDENT）を読む。# 始まりの一時テーブル名は不可
+  //（temp マーカーはレキサが生成する IDENT のみ。`#field` のような
+  //  バッククォート識別子は # で始まる通常フィールド名として許容する）
   parseIdentifier() {
+    const tok = this.peek();
+    if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) {
+      if (tok.kind === "IDENT" /* IDENT */ && tok.value.startsWith("#")) {
+        throw new ParseError(
+          "\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\uFF08# \u3067\u59CB\u307E\u308B\u540D\u524D\uFF09\u306F FROM / JOIN / CREATE / DROP TEMP TABLE \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059",
+          tok
+        );
+      }
+      this.advance();
+      return tok.value;
+    }
+    throw new ParseError(
+      "\u30D5\u30A3\u30FC\u30EB\u30C9\u540D\u307E\u305F\u306F\u30C6\u30FC\u30D6\u30EB\u540D\u304C\u5FC5\u8981\u3067\u3059",
+      tok
+    );
+  }
+  // テーブル名（IDENT / BIDENT）を読む。# 始まりの一時テーブル名を許容する
+  //（一時テーブルを受理してよいのはテーブル参照位置のみ。他は parseIdentifier を使う）
+  parseTableName() {
     const tok = this.peek();
     if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) {
       this.advance();
@@ -32634,10 +32803,23 @@ var Parser = class {
       tok
     );
   }
+  // DML の対象テーブル位置に一時テーブルが指定されていたら拒否する
+  rejectTempTableDml() {
+    const tok = this.peek();
+    if (tok.kind === "IDENT" /* IDENT */ && tok.value.startsWith("#")) {
+      throw new ParseError(
+        `DML on temp table ${tok.value} is not supported.`,
+        tok
+      );
+    }
+  }
   // エイリアス名: IDENT / BIDENT に加え、キーワードも許容する
   // 例: SELECT SUM(金額) AS avg → "avg" は AVG キーワードだが alias として有効
   parseAliasName() {
     const tok = this.peek();
+    if (tok.value.startsWith("#")) {
+      throw new ParseError("\u30A8\u30A4\u30EA\u30A2\u30B9\u540D\u306B # \u3067\u59CB\u307E\u308B\u540D\u524D\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    }
     if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */ || KEYWORDS.has(tok.value.toUpperCase())) {
       this.advance();
       return tok.value.toLowerCase();
@@ -32692,6 +32874,159 @@ function extractTableRef(name, tok) {
     );
   }
   return { appId: Number(m[1]), subtableCode: m[2] ?? null };
+}
+
+// src/core/dmlGuard.ts
+function getStatementType(stmt) {
+  if (!stmt || typeof stmt !== "object") return "UNKNOWN";
+  const obj = stmt;
+  return typeof obj.type === "string" ? obj.type : "UNKNOWN";
+}
+function isDmlType(type) {
+  return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
+}
+function isReadOnlyType(type) {
+  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE";
+}
+function hasWhereClause(stmt) {
+  if (!stmt || typeof stmt !== "object") return false;
+  const obj = stmt;
+  return obj.where !== null && obj.where !== void 0;
+}
+function isNoFromSelectStatement(stmt) {
+  if (!stmt || typeof stmt !== "object") return false;
+  const obj = stmt;
+  return obj.type === "SELECT" && obj.from?.appId === 0 && obj.from?.cteName === "__NO_FROM__";
+}
+function getInsertValuesCount(stmt) {
+  if (!stmt || typeof stmt !== "object") return null;
+  const obj = stmt;
+  if (obj.type !== "INSERT") return null;
+  return Array.isArray(obj.values) ? obj.values.length : null;
+}
+
+// src/core/batch.ts
+var MAX_TEMP_TABLES = 16;
+var BatchAnalysisError = class extends Error {
+  constructor(message, statementIndex) {
+    super(message);
+    this.statementIndex = statementIndex;
+  }
+};
+function collectRefs(node, tempRefs, appIds) {
+  if (Array.isArray(node)) {
+    for (const v of node) collectRefs(v, tempRefs, appIds);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    const cte = obj["cteName"];
+    if (typeof cte === "string" && cte.startsWith("#")) tempRefs.add(cte);
+    const appId = obj["appId"];
+    if (typeof appId === "number" && appId > 0) appIds.add(appId);
+    for (const v of Object.values(obj)) collectRefs(v, tempRefs, appIds);
+  }
+}
+function analyzeBatch(statements) {
+  if (statements.length === 0) {
+    throw new BatchAnalysisError("ArgumentError: SQL is empty.", 0);
+  }
+  if (statements.length === 1) {
+    const t = statements[0].type;
+    if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
+      const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
+      throw new BatchAnalysisError(
+        `ArgumentError: ${verb} requires a batch (temp tables are batch-scoped).`,
+        0
+      );
+    }
+  }
+  const defined = /* @__PURE__ */ new Map();
+  const createdOrder = [];
+  const results = [];
+  statements.forEach((stmt, index) => {
+    const statementType = getStatementType(stmt);
+    const created = [];
+    const dropped = [];
+    const refs = /* @__PURE__ */ new Set();
+    const stmtAppIds = /* @__PURE__ */ new Set();
+    const dependsOn = /* @__PURE__ */ new Set();
+    if (stmt.type === "CREATE_TEMP_TABLE") {
+      collectRefs(stmt.query, refs, stmtAppIds);
+    } else if (stmt.type === "DROP_TEMP_TABLE") {
+    } else {
+      collectRefs(stmt, refs, stmtAppIds);
+    }
+    let tempOnlySource = false;
+    if (stmt.type === "INSERT_SELECT" || stmt.type === "UPSERT_SELECT") {
+      const srcTemp = /* @__PURE__ */ new Set();
+      const srcApps = /* @__PURE__ */ new Set();
+      collectRefs(stmt.select, srcTemp, srcApps);
+      tempOnlySource = srcTemp.size > 0 && srcApps.size === 0;
+    }
+    for (const name of refs) {
+      const at = defined.get(name);
+      if (at === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${name} is not defined in this batch.`,
+          index
+        );
+      }
+      dependsOn.add(at);
+    }
+    if (stmt.type === "CREATE_TEMP_TABLE") {
+      if (defined.has(stmt.name)) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${stmt.name} is already defined.`,
+          index
+        );
+      }
+      defined.set(stmt.name, index);
+      createdOrder.push(stmt.name);
+      created.push(stmt.name);
+      if (defined.size > MAX_TEMP_TABLES) {
+        throw new BatchAnalysisError(
+          `ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`,
+          index
+        );
+      }
+    }
+    if (stmt.type === "DROP_TEMP_TABLE") {
+      const at = defined.get(stmt.name);
+      if (at === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${stmt.name} is not defined in this batch.`,
+          index
+        );
+      }
+      dependsOn.add(at);
+      dropped.push(stmt.name);
+      defined.delete(stmt.name);
+    }
+    results.push({
+      index,
+      statementType,
+      isDml: isDmlType(statementType),
+      isReadOnly: isReadOnlyType(statementType),
+      hasWhere: hasWhereClause(stmt),
+      insertValuesCount: getInsertValuesCount(stmt),
+      appIds: [...stmtAppIds].sort((a, b) => a - b),
+      tempTablesCreated: created,
+      tempTablesReferenced: [...refs],
+      tempTablesDropped: dropped,
+      dependsOn: [...dependsOn].sort((a, b) => a - b),
+      tempOnlySource,
+      targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null
+    });
+  });
+  const containsDml = results.some((r) => r.isDml);
+  return {
+    statementCount: statements.length,
+    isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
+    containsDml,
+    tempTables: createdOrder,
+    statements: results
+  };
 }
 
 // src/engine/pushDownNot.ts
@@ -34371,8 +34706,10 @@ function applyGroupBy(rows, groupByKeys, columns) {
     }
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
-        const outputKey = col.alias ?? aggregateSyntheticName2(col.func, col.distinct, col.arg);
-        outRow[outputKey] = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        const syntheticKey = aggregateSyntheticName2(col.func, col.distinct, col.arg);
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        outRow[col.alias ?? syntheticKey] = value;
+        if (col.alias) outRow[syntheticKey] = value;
       } else if (col.type === "ARITH_AGG_COL") {
         const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
         outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows));
@@ -34883,6 +35220,9 @@ function wrapClientWithMetrics(client, metrics) {
 async function executeStatement(sql, client, options) {
   const cacheContext = options.cacheContext ?? "default";
   const stmt = parseSql(sql);
+  return executeParsedStatement(stmt, client, options, cacheContext);
+}
+async function executeParsedStatement(stmt, client, options, cacheContext) {
   switch (stmt.type) {
     case "SELECT":
       return executeSelect(stmt, client, options, cacheContext);
@@ -34910,9 +35250,181 @@ async function executeStatement(sql, client, options) {
       return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":
       return executeExplain(stmt);
+    // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
+    case "CREATE_TEMP_TABLE":
+      throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "DROP_TEMP_TABLE":
+      throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
   }
 }
-async function executeSelect(stmt, client, options, cacheContext) {
+var TEMP_TABLE_MAX_ROWS = 1e4;
+var BatchTimeoutError = class extends Error {
+  constructor() {
+    super("TimeoutError: batch timeout exceeded.");
+  }
+};
+async function executeBatch(sql, client, options = {}) {
+  const statements = parseSqlBatch(sql);
+  const analysis = analyzeBatch(statements);
+  if (options.continueOnError && analysis.containsDml) {
+    throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
+  }
+  for (const s of analysis.statements) {
+    if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
+    if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
+    throw new BatchAnalysisError(
+      s.statementType === "INSERT_SELECT" ? `ArgumentError: INSERT_SELECT in a batch must select from temp tables only. (statement ${s.index})` : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+      s.index
+    );
+  }
+  const metrics = createEmptyMetrics();
+  const countedClient = wrapClientWithMetrics(client, metrics);
+  const startedAt = Date.now();
+  const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
+  const cacheContext = options.cacheContext ?? "default";
+  const tempTables = /* @__PURE__ */ new Map();
+  const results = [];
+  const failed = /* @__PURE__ */ new Set();
+  let aborted2 = null;
+  for (let i = 0; i < statements.length; i++) {
+    const info = analysis.statements[i];
+    const base = { index: i, type: info.statementType };
+    if (aborted2) {
+      results.push({ ...base, status: "skipped", skippedReason: aborted2 });
+      failed.add(i);
+      continue;
+    }
+    const brokenDep = info.dependsOn.find((d) => failed.has(d));
+    if (brokenDep !== void 0) {
+      const depName = analysis.statements[brokenDep].tempTablesCreated[0] ?? `statement ${brokenDep}`;
+      results.push({ ...base, status: "skipped", skippedReason: `dependency: ${depName}` });
+      failed.add(i);
+      continue;
+    }
+    if (deadline !== null && Date.now() >= deadline) {
+      results.push({ ...base, status: "skipped", skippedReason: "timeout" });
+      failed.add(i);
+      aborted2 = "timeout";
+      continue;
+    }
+    try {
+      const remaining = deadline !== null ? deadline - Date.now() : null;
+      const outcome = await runWithDeadline(
+        executeBatchStatement(statements[i], info, countedClient, options, cacheContext, tempTables),
+        remaining
+      );
+      results.push({ ...base, status: "success", ...outcome });
+    } catch (e) {
+      results.push({ ...base, status: "error", error: toBatchStatementError(e) });
+      failed.add(i);
+      if (e instanceof BatchTimeoutError) {
+        aborted2 = "timeout";
+      } else if (!options.continueOnError) {
+        aborted2 = "fail-fast";
+      }
+    }
+  }
+  metrics.elapsedMs = Date.now() - startedAt;
+  return {
+    ok: results.every((r) => r.status === "success"),
+    statementCount: statements.length,
+    statements: results,
+    analysis,
+    metrics
+  };
+}
+async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables) {
+  if (stmt.type === "CREATE_TEMP_TABLE") {
+    const materializeOptions = {
+      ...options,
+      maxRecords: options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      onLimitReached: "error"
+    };
+    const result = await runSelectLike(stmt.query, client, materializeOptions, cacheContext, tempTables);
+    tempTables.set(stmt.name, result.rows);
+    return { tempTable: stmt.name, rowCount: result.rows.length };
+  }
+  if (stmt.type === "DROP_TEMP_TABLE") {
+    tempTables.delete(stmt.name);
+    return { tempTable: stmt.name };
+  }
+  if (stmt.type === "EXPLAIN") {
+    return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  }
+  if (info.tempTablesReferenced.length > 0) {
+    if (stmt.type === "SELECT" || stmt.type === "UNION") {
+      return { result: await executeQueryWithCte(stmt, client, options, tempTables, cacheContext) };
+    }
+    if (stmt.type === "WITH") {
+      return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
+    }
+    if (stmt.type === "INSERT_SELECT") {
+      return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    }
+    throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
+  }
+  return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+}
+async function runSelectLike(query, client, options, cacheContext, tempTables) {
+  if (query.type === "WITH") {
+    return executeWith(query, client, options, cacheContext, tempTables);
+  }
+  return executeQueryWithCte(query, client, options, tempTables, cacheContext);
+}
+async function runWithDeadline(work, remainingMs) {
+  if (remainingMs === null) return work;
+  if (remainingMs <= 0) {
+    void work.catch(() => {
+    });
+    throw new BatchTimeoutError();
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new BatchTimeoutError()), remainingMs);
+      })
+    ]);
+  } catch (e) {
+    if (e instanceof BatchTimeoutError) {
+      void work.catch(() => {
+      });
+    }
+    throw e;
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
+}
+function toBatchStatementError(e) {
+  if (e instanceof Error) {
+    const name = e.name !== "Error" ? e.name : null;
+    return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
+  }
+  if (e !== null && typeof e === "object") {
+    const obj = e;
+    const message2 = typeof obj.message === "string" && obj.message.length > 0 ? obj.message : safeJsonStringify(e);
+    const code = typeof obj.code === "string" && obj.code.length > 0 ? obj.code : codeFromMessagePrefix(message2);
+    return { code, message: message2 };
+  }
+  const message = String(e);
+  return { code: codeFromMessagePrefix(message), message };
+}
+function codeFromMessagePrefix(message) {
+  return message.match(/^([A-Za-z]+Error):/)?.[1] ?? "Error";
+}
+function safeJsonStringify(v) {
+  try {
+    return JSON.stringify(v) ?? String(v);
+  } catch {
+    return String(v);
+  }
+}
+function parseSqlBatch(sql) {
+  const tokens = new Lexer(sql).tokenize();
+  return new Parser(tokens).parseStatements();
+}
+async function executeSelect(stmt, client, options, cacheContext, cteCache) {
   if (isNoFromSelect(stmt)) {
     return executeNoFromSelect(stmt);
   }
@@ -34921,7 +35433,7 @@ async function executeSelect(stmt, client, options, cacheContext) {
   if (mode === "SIMPLE") {
     return executeSimpleSelect(stmt, client, options, cacheContext);
   } else {
-    return executeFullScanSelect(stmt, client, options, cacheContext);
+    return executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
   }
 }
 function isNoFromSelect(stmt) {
@@ -35045,13 +35557,13 @@ async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
     }
   }
 }
-async function executeFullScanSelect(stmt, client, options, cacheContext) {
+async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
   await Promise.all([
-    resolveSubqueries(stmt.where, client, options, cacheContext),
-    resolveSubqueries(stmt.having, client, options, cacheContext)
+    resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
   const tableConditions = /* @__PURE__ */ new Map();
   if (stmt.where !== null) {
@@ -35101,7 +35613,7 @@ async function executeFullScanSelect(stmt, client, options, cacheContext) {
       onOptJoins.push(join);
     }
   }
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => {
   });
@@ -35170,11 +35682,11 @@ function deduplicateRows(rows, columns) {
     return true;
   });
 }
-async function executeWith(stmt, client, options, cacheContext) {
-  if (canInlineSingleCte(stmt)) {
+async function executeWith(stmt, client, options, cacheContext, seed) {
+  if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
     return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
   }
-  const cteCache = /* @__PURE__ */ new Map();
+  const cteCache = new Map(seed ?? []);
   for (const cte of stmt.ctes) {
     let result;
     if (cte.query.type === "SHOW_APPS") {
@@ -35286,7 +35798,7 @@ async function executeQueryWithCte(query, client, options, cteCache, cacheContex
   }
   const hasCteRef = query.from.cteName != null || query.joins.some((j) => j.table.cteName != null);
   if (!hasCteRef) {
-    return executeSelect(query, client, options, cacheContext);
+    return executeSelect(query, client, options, cacheContext, cteCache);
   }
   return executeFullScanWithCte(query, client, options, cteCache, cacheContext);
 }
@@ -35295,10 +35807,10 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
   await Promise.all([
-    resolveSubqueries(stmt.where, client, options, cacheContext),
-    resolveSubqueries(stmt.having, client, options, cacheContext)
+    resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => {
   });
@@ -35696,13 +36208,17 @@ async function executeInsert(stmt, client, options, cacheContext) {
     insertedCount: createdIds.flat().length
   };
 }
-async function executeInsertSelect(stmt, client, options, cacheContext) {
-  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
+async function executeInsertSelect(stmt, client, options, cacheContext, cteCache) {
+  const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
     throw new Error(
       `SELECT \u306E\u5217\u6570\uFF08${columns.length}\uFF09\u3068 INSERT \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u6570\uFF08${stmt.fields.length}\uFF09\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093`
     );
+  }
+  if (options.confirm) {
+    const ok = await options.confirm(rows.length, "INSERT");
+    if (!ok) throw new OperationCancelledError("INSERT", rows.length);
   }
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const allRecords = rows.map((row) => {
@@ -36251,24 +36767,30 @@ function parseSql(sql) {
     throw e;
   }
 }
-async function resolveSubqueries(where, client, options, cacheContext) {
+async function resolveSubqueries(where, client, options, cacheContext, cteCache) {
   const tasks = [];
-  collectSubqueryTasks(where, client, options, cacheContext, tasks);
+  collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
   await Promise.all(tasks);
 }
-function collectSubqueryTasks(where, client, options, cacheContext, tasks) {
+function runSubquery(query, client, options, cacheContext, cteCache) {
+  if (cteCache !== void 0 && cteCache.size > 0) {
+    return executeQueryWithCte(query, client, options, cteCache, cacheContext);
+  }
+  return executeSelect(query, client, options, cacheContext);
+}
+function collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache) {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
-        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+        tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
           const col = right.column ?? (result.columns[0] ?? "");
           right.resolved = new Set(result.rows.map((r) => r[col] ?? ""));
         }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
-        tasks.push(executeSelect(right.query, client, options, cacheContext).then((result) => {
+        tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
           if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
           if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
           const col = result.columns[0] ?? "";
@@ -36278,16 +36800,16 @@ function collectSubqueryTasks(where, client, options, cacheContext, tasks) {
       break;
     }
     case "LOGICAL":
-      collectSubqueryTasks(where.left, client, options, cacheContext, tasks);
-      collectSubqueryTasks(where.right, client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.left, client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, cteCache);
       break;
     case "NOT":
     case "GROUP":
-      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, cteCache);
       break;
     case "EXISTS": {
       const node = where;
-      tasks.push(executeSelect(node.query, client, options, cacheContext).then((result) => {
+      tasks.push(runSubquery(node.query, client, options, cacheContext, cteCache).then((result) => {
         node.resolved = result.rowCount > 0;
       }));
       break;
@@ -36305,7 +36827,7 @@ async function resolveSetSubqueries(assignments, client, options, cacheContext) 
     a.value = { type: "STRING", value: resolved };
   }
 }
-async function resolveScalarColumns(columns, client, options, cacheContext) {
+async function resolveScalarColumns(columns, client, options, cacheContext, cteCache) {
   const byQuery = /* @__PURE__ */ new Map();
   const pending = [];
   for (let i = 0; i < columns.length; i++) {
@@ -36314,7 +36836,7 @@ async function resolveScalarColumns(columns, client, options, cacheContext) {
     const key = JSON.stringify(col.query);
     let promise2 = byQuery.get(key);
     if (!promise2) {
-      promise2 = executeSelect(col.query, client, options, cacheContext).then((result) => {
+      promise2 = runSubquery(col.query, client, options, cacheContext, cteCache).then((result) => {
         if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
         if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
         const firstCol = result.columns[0] ?? "";
@@ -36328,6 +36850,59 @@ async function resolveScalarColumns(columns, client, options, cacheContext) {
   const cache = /* @__PURE__ */ new Map();
   pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
+}
+function buildBatchExplainPlans(sql) {
+  const statements = parseSqlBatch(sql);
+  const analysis = analyzeBatch(statements);
+  return {
+    statementCount: statements.length,
+    statements: statements.map((stmt, i) => ({
+      index: i,
+      type: analysis.statements[i].statementType,
+      plan: buildBatchStatementPlan(stmt, analysis.statements[i])
+    }))
+  };
+}
+function buildBatchStatementPlan(stmt, info) {
+  if (stmt.type === "CREATE_TEMP_TABLE") {
+    return [
+      `CREATE TEMP TABLE ${stmt.name}`,
+      `  scope:         batch\uFF08\u30D0\u30C3\u30C1\u7D42\u4E86\u6642\u306B\u81EA\u52D5\u7834\u68C4\uFF09`,
+      `  rows:          \u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u4E0D\u660E\uFF08\u4E0A\u9650 ${TEMP_TABLE_MAX_ROWS} \u884C\u3001\u8D85\u904E\u306F\u30A8\u30E9\u30FC\uFF09`,
+      ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`)
+    ];
+  }
+  if (stmt.type === "DROP_TEMP_TABLE") {
+    return [
+      `DROP TEMP TABLE ${stmt.name}`,
+      "  \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u30B9\u30C8\u30A2\u306E\u89E3\u653E\u306E\u307F\uFF08kintone \u30A2\u30AF\u30BB\u30B9\u306A\u3057\uFF09"
+    ];
+  }
+  if (stmt.type === "SHOW_APPS") return ["SHOW APPS\uFF08\u30A2\u30D7\u30EA\u4E00\u89A7\u306E\u53D6\u5F97\uFF09"];
+  if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u5B9A\u7FA9\u306E\u53D6\u5F97\uFF09`];
+  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  return buildPlanForBatchQuery(stmt, info);
+}
+function buildPlanForBatchQuery(query, info) {
+  if (info.tempTablesReferenced.length === 0) {
+    return buildExplainPlan(query);
+  }
+  const lines = [];
+  if (query.type === "INSERT_SELECT") {
+    lines.push(
+      `INSERT INTO APP${query.appId} ... SELECT\uFF08\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u30BD\u30FC\u30B9\u3002\u5B9F\u884C\u6642\u306B\u4EF6\u6570\u78BA\u5B9A \u2192 dmlMaxRows \u9069\u7528\uFF09`
+    );
+  }
+  lines.push("  mode:          FULL_SCAN\uFF08\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u53C2\u7167\uFF09");
+  lines.push(
+    `  temp:          ${info.tempTablesReferenced.join(", ")}\uFF08\u30A4\u30F3\u30E1\u30E2\u30EA\u8D70\u67FB\u3002\u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u884C\u6570\u4E0D\u660E\uFF09`
+  );
+  const apps = info.appIds.filter((a) => query.type !== "INSERT_SELECT" || a !== query.appId);
+  if (apps.length > 0) {
+    lines.push(`  app:           ${apps.map((a) => `APP${a}`).join(", ")}`);
+  }
+  lines.push("  note:          \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3078\u306E WHERE \u30D7\u30C3\u30B7\u30E5\u30C0\u30A6\u30F3\u306F\u884C\u308F\u308C\u306A\u3044");
+  return lines;
 }
 function executeExplain(stmt) {
   const lines = buildExplainPlan(stmt.query);
@@ -36649,6 +37224,10 @@ function parseSqlStatement(sql) {
   const tokens = new Lexer(sql).tokenize();
   return new Parser(tokens).parse();
 }
+function parseSqlStatements(sql) {
+  const tokens = new Lexer(sql).tokenize();
+  return new Parser(tokens).parseStatements();
+}
 
 // src/node/appProfiles.ts
 function parseTokenMap(raw) {
@@ -36834,35 +37413,6 @@ function buildCacheContext(defaultProfile, appBindingByMappedApp) {
   return `apps:${pairs.join(",")}`;
 }
 
-// src/node/dmlGuard.ts
-function getStatementType(stmt) {
-  if (!stmt || typeof stmt !== "object") return "UNKNOWN";
-  const obj = stmt;
-  return typeof obj.type === "string" ? obj.type : "UNKNOWN";
-}
-function isDmlType(type) {
-  return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
-}
-function isReadOnlyType(type) {
-  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE";
-}
-function hasWhereClause(stmt) {
-  if (!stmt || typeof stmt !== "object") return false;
-  const obj = stmt;
-  return obj.where !== null && obj.where !== void 0;
-}
-function isNoFromSelectStatement(stmt) {
-  if (!stmt || typeof stmt !== "object") return false;
-  const obj = stmt;
-  return obj.type === "SELECT" && obj.from?.appId === 0 && obj.from?.cteName === "__NO_FROM__";
-}
-function getInsertValuesCount(stmt) {
-  if (!stmt || typeof stmt !== "object") return null;
-  const obj = stmt;
-  if (obj.type !== "INSERT") return null;
-  return Array.isArray(obj.values) ? obj.values.length : null;
-}
-
 // src/node/config.ts
 var import_fs = require("fs");
 function loadKsqlConfig(configPath) {
@@ -36902,6 +37452,107 @@ function resolveTokenValue(raw) {
     return envVal;
   }
   return raw;
+}
+
+// src/api/requestGate.ts
+var DEFAULT_MAX_CONCURRENT = 10;
+var DEFAULT_MAX_RETRIES = 3;
+var DEFAULT_BASE_DELAY_MS = 500;
+var DEFAULT_MAX_DELAY_MS = 8e3;
+var RETRYABLE_STATUSES = /* @__PURE__ */ new Set([408, 429, 502, 503, 504]);
+function isRetryableError(err) {
+  if (!(err instanceof Error)) return false;
+  const status = err.message.match(/^kintone API error (\d{3}):/);
+  if (status) return RETRYABLE_STATUSES.has(Number(status[1]));
+  if (err.name === "AbortError" || err.name === "TimeoutError") return true;
+  if (/fetch failed/i.test(err.message)) return true;
+  return false;
+}
+var RequestGate = class {
+  constructor(options = {}) {
+    this.active = 0;
+    this.waiters = [];
+    this.maxConcurrent = clampInt(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, 1, 50);
+    this.maxRetries = clampInt(options.maxRetries ?? DEFAULT_MAX_RETRIES, 0, 10);
+    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
+    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.random = options.random ?? Math.random;
+  }
+  /** 現在の同時実行数（テスト・診断用） */
+  get activeCount() {
+    return this.active;
+  }
+  get limit() {
+    return this.maxConcurrent;
+  }
+  /** GET 系: セマフォ + リトライ付きで実行する */
+  async runReadOnly(fn) {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await this.withSlot(fn);
+      } catch (err) {
+        if (attempt >= this.maxRetries || !isRetryableError(err)) throw err;
+        await this.sleep(this.backoffDelay(attempt));
+        attempt += 1;
+      }
+    }
+  }
+  /** 書き込み系: セマフォのみ（リトライしない — 二重実行防止） */
+  async runMutation(fn) {
+    return this.withSlot(fn);
+  }
+  async withSlot(fn) {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+  async acquire() {
+    if (this.active < this.maxConcurrent) {
+      this.active += 1;
+      return;
+    }
+    await new Promise((resolve2) => this.waiters.push(resolve2));
+    this.active += 1;
+  }
+  release() {
+    this.active -= 1;
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+  /** 指数バックオフ + ジッタ（attempt: 0 始まり） */
+  backoffDelay(attempt) {
+    const base = Math.min(this.baseDelayMs * 2 ** attempt, this.maxDelayMs);
+    const jitter = 1 + (this.random() - 0.5) * 0.5;
+    return Math.round(base * jitter);
+  }
+};
+function withRequestGate(client, gate) {
+  return {
+    getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
+    getApps: () => gate.runReadOnly(() => client.getApps()),
+    getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
+    postRecords: (params) => gate.runMutation(() => client.postRecords(params)),
+    putRecords: (params) => gate.runMutation(() => client.putRecords(params)),
+    deleteRecords: (params) => gate.runMutation(() => client.deleteRecords(params))
+  };
+}
+var globalGate = null;
+function getGlobalRequestGate(limitHint) {
+  if (globalGate === null) {
+    const envValue = Number(process.env.KSQL_MAX_CONCURRENT);
+    const limit = Number.isInteger(envValue) && envValue > 0 ? envValue : limitHint;
+    globalGate = new RequestGate({ maxConcurrent: limit });
+  }
+  return globalGate;
+}
+function clampInt(v, min, max) {
+  if (!Number.isFinite(v)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(v)));
 }
 
 // src/cli/nodeKintoneClient.ts
@@ -37246,10 +37897,14 @@ async function createKsqlRuntime(serverOptions, input) {
     },
     getApps: () => defaultClient.getApps()
   };
+  const gatedClient = withRequestGate(
+    routedClient,
+    getGlobalRequestGate(profile2.query?.maxConcurrent)
+  );
   return {
     sql,
     profileName,
-    client: routedClient,
+    client: gatedClient,
     cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
     maxRecords: maxRecords2,
     fetchParallel: fetchParallel2,
@@ -37438,6 +38093,14 @@ function deleteSavedQuery(catalog, name) {
 }
 
 // src/mcp/tools.ts
+function requireSingleStatement(validation, toolName) {
+  if (validation.batch) {
+    throw new Error(
+      `ArgumentError: batch SQL (multiple statements) is not supported by ${toolName} yet.`
+    );
+  }
+  return validation;
+}
 var DEFAULT_MAX_RECORDS = 500;
 var DEFAULT_ON_LIMIT = "error";
 function noOpClient() {
@@ -37491,6 +38154,59 @@ function toSelectPayload(result) {
     rows: result.rows,
     rowCount: result.rowCount,
     warnings: result.warnings ?? []
+  };
+}
+function toMutationSummary(result) {
+  if (result.type === "INSERT") {
+    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
+  }
+  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
+  if (result.type === "DELETE") return { deletedCount: result.deletedCount };
+  if (result.type === "UPSERT") {
+    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
+  }
+  return { reorderedParentCount: result.reorderedParentCount };
+}
+function toBatchQueryPayload(batch, maxTotalRecords) {
+  const results = [];
+  let totalRows = 0;
+  const statements = batch.statements.map((s) => {
+    const entry = {
+      index: s.index,
+      type: s.type,
+      status: s.status
+    };
+    if (s.status === "error" && s.error) entry.error = s.error;
+    if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
+    if (s.tempTable !== void 0) entry.tempTable = s.tempTable;
+    if (s.rowCount !== void 0) entry.rowCount = s.rowCount;
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      totalRows += s.result.rowCount;
+      if (maxTotalRecords !== void 0 && totalRows > maxTotalRecords) {
+        throw new Error(
+          `ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`
+        );
+      }
+      entry.resultIndex = results.length;
+      results.push({
+        columns: s.result.columns,
+        rows: s.result.rows,
+        rowCount: s.result.rowCount,
+        warnings: s.result.warnings ?? []
+      });
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT") {
+      Object.assign(entry, toMutationSummary(s.result));
+    }
+    return entry;
+  });
+  return {
+    ok: batch.ok,
+    batch: true,
+    statementCount: batch.statementCount,
+    statements,
+    results,
+    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
+    warnings: []
   };
 }
 function toMutationPayload(result) {
@@ -37577,35 +38293,71 @@ async function runSafely(fn) {
 function createKsqlMcpTools(serverOptions, deps = {}) {
   const createRuntime = deps.createRuntime ?? createKsqlRuntime;
   const executeSql = deps.executeSql ?? execute;
+  const executeBatchSql = deps.executeBatchSql ?? executeBatch;
   async function validate(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
-    const stmt = parseSqlStatement(normalized.normalizedSql);
-    const statementType = getStatementType(stmt);
-    const isDml = isDmlType(statementType);
-    const isReadOnly = isReadOnlyType(statementType);
+    const statements = parseSqlStatements(normalized.normalizedSql);
+    const analysis = analyzeBatch(statements);
     const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => ({
       mappedAppId,
       appId: binding.appId,
       profile: binding.profile
     }));
-    return {
+    const statementValidations = analysis.statements.map((s2) => ({
+      index: s2.index,
+      statementType: s2.statementType,
+      isDml: s2.isDml,
+      isReadOnly: s2.isReadOnly,
+      hasWhere: s2.hasWhere,
+      insertValuesCount: s2.insertValuesCount,
+      appIds: s2.appIds,
+      tempTablesCreated: s2.tempTablesCreated,
+      tempTablesReferenced: s2.tempTablesReferenced,
+      tempTablesDropped: s2.tempTablesDropped,
+      tempOnlySource: s2.tempOnlySource,
+      targetAppId: s2.targetAppId
+    }));
+    const common = {
       ok: true,
-      statementType,
-      isDml,
-      isReadOnly,
-      hasWhere: hasWhereClause(stmt),
-      insertValuesCount: getInsertValuesCount(stmt),
-      appIds: extractAppIds(normalized.normalizedSql),
-      canRunWithQueryTool: isReadOnly,
-      requiresMutationTool: isDml,
+      statementCount: analysis.statementCount,
+      isReadOnlyBatch: analysis.isReadOnlyBatch,
+      containsDml: analysis.containsDml,
+      tempTables: analysis.tempTables,
+      canRunWithQueryTool: analysis.isReadOnlyBatch,
+      requiresMutationTool: analysis.containsDml,
+      statements: statementValidations,
       normalizedSql: normalized.normalizedSql,
       hasProfileSyntax: normalized.hasProfileSyntax,
       cacheContext: normalized.cacheContext,
       appBindings
     };
+    if (analysis.statementCount > 1) {
+      return { ...common, batch: true };
+    }
+    const s = statementValidations[0];
+    return {
+      ...common,
+      batch: false,
+      statementType: s.statementType,
+      isDml: s.isDml,
+      isReadOnly: s.isReadOnly,
+      hasWhere: s.hasWhere,
+      insertValuesCount: s.insertValuesCount,
+      appIds: s.appIds
+    };
   }
   async function explain(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const statements = parseSqlStatements(normalized.normalizedSql);
+    if (statements.length > 1) {
+      const plans = buildBatchExplainPlans(normalized.normalizedSql);
+      return {
+        ok: true,
+        batch: true,
+        statementCount: plans.statementCount,
+        statements: plans.statements
+      };
+    }
     const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
       cacheContext: normalized.cacheContext
     });
@@ -37616,6 +38368,31 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   }
   async function query(input) {
     const validation = await validate(input);
+    if (validation.batch) {
+      if (validation.containsDml) {
+        throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
+      }
+      const runtime2 = await createRuntime(serverOptions, {
+        sql: input.sql,
+        profile: input.profile,
+        maxRecords: input.maxRecords,
+        fetchParallel: input.fetchParallel,
+        onLimit: input.onLimit,
+        timeout: input.timeout
+      });
+      const batchResult = await executeBatchSql(runtime2.sql, runtime2.client, {
+        maxRecords: runtime2.maxRecords,
+        fetchParallel: runtime2.fetchParallel,
+        onLimitReached: runtime2.onLimit,
+        cacheContext: runtime2.cacheContext,
+        continueOnError: input.continueOnError,
+        // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
+        // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
+        // HTTP クライアント側の per-request タイムアウトと同値になる
+        timeoutMs: runtime2.timeout
+      });
+      return toBatchQueryPayload(batchResult, input.maxTotalRecords);
+    }
     if (!validation.isReadOnly) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }
@@ -37651,9 +38428,75 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     return toSelectPayload(result);
   }
+  async function mutateBatch(input, validation, dmlMaxRows2) {
+    if (!validation.containsDml) {
+      throw new Error("ArgumentError: batch contains no DML statements. Use ksql_query.");
+    }
+    let staticInsertTotal = 0;
+    for (const s of validation.statements) {
+      if (!s.isDml) continue;
+      const at = ` (statement ${s.index})`;
+      if (s.statementType === "INSERT_SELECT" && !s.tempOnlySource) {
+        throw new Error(
+          `ArgumentError: INSERT_SELECT in a batch must select from temp tables only.${at}`
+        );
+      }
+      if (s.statementType === "UPSERT_SELECT") {
+        throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
+      }
+      if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
+        throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
+      }
+      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows2) {
+        throw new Error(
+          `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows2}).${at}`
+        );
+      }
+      staticInsertTotal += s.insertValuesCount ?? 0;
+    }
+    const dmlTotalMaxRows = input.dmlTotalMaxRows;
+    if (dmlTotalMaxRows !== void 0 && staticInsertTotal > dmlTotalMaxRows) {
+      throw new Error(
+        `ArgumentError: batch INSERT rows (${staticInsertTotal}) exceed dmlTotalMaxRows (${dmlTotalMaxRows}).`
+      );
+    }
+    const runtime = await createRuntime(serverOptions, {
+      sql: input.sql,
+      profile: input.profile,
+      maxRecords: dmlMaxRows2 + 1,
+      fetchParallel: input.fetchParallel,
+      onLimit: DEFAULT_ON_LIMIT,
+      timeout: input.timeout
+    });
+    let totalAffected = staticInsertTotal;
+    const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
+      maxRecords: runtime.maxRecords,
+      fetchParallel: runtime.fetchParallel,
+      onLimitReached: runtime.onLimit,
+      cacheContext: runtime.cacheContext,
+      // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
+      timeoutMs: runtime.timeout,
+      confirm: async (count, operation) => {
+        if (count > dmlMaxRows2) {
+          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows2}).`);
+        }
+        totalAffected += count;
+        if (dmlTotalMaxRows !== void 0 && totalAffected > dmlTotalMaxRows) {
+          throw new Error(
+            `ArgumentError: batch affected rows (${totalAffected}) exceed dmlTotalMaxRows (${dmlTotalMaxRows}).`
+          );
+        }
+        return true;
+      }
+    });
+    return toBatchQueryPayload(batchResult);
+  }
   async function mutate(input) {
     const dmlMaxRows2 = requireDmlApproval(input, "ksql_mutate");
     const validation = await validate(input);
+    if (validation.batch) {
+      return mutateBatch(input, validation, dmlMaxRows2);
+    }
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
@@ -37712,10 +38555,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     });
   }
   async function saveQuery(input) {
-    const validation = await validate({
-      sql: input.sql,
-      profile: input.defaultProfile
-    });
+    const validation = requireSingleStatement(
+      await validate({
+        sql: input.sql,
+        profile: input.defaultProfile
+      }),
+      "ksql_save_query"
+    );
     assertSavedQuerySafety(input, {
       isDml: validation.isDml,
       statementType: validation.statementType
@@ -37759,10 +38605,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const saved = getSavedQuery(catalog, input.name);
     assertProfileOverrideAllowed(saved, input.profile);
     const profile2 = input.profile ?? saved.defaultProfile;
-    const validation = await validate({
-      sql: saved.sql,
-      profile: profile2
-    });
+    const validation = requireSingleStatement(
+      await validate({
+        sql: saved.sql,
+        profile: profile2
+      }),
+      "ksql_run_saved_query"
+    );
     assertSavedQuerySafety(saved, {
       isDml: validation.isDml,
       statementType: validation.statementType
@@ -37858,7 +38707,11 @@ var queryInputSchema = external_exports.object({
   maxRecords,
   fetchParallel,
   onLimit,
-  timeout
+  timeout,
+  /** バッチ(複文)専用: 実行時エラー後も後続文を実行する(既定 false = fail-fast) */
+  continueOnError: external_exports.boolean().optional(),
+  /** バッチ(複文)専用: 返却する結果セットの合計行数上限(既定なし) */
+  maxTotalRecords: external_exports.number().int().positive().optional()
 });
 var mutateInputSchema = external_exports.object({
   sql: external_exports.string().min(1),
@@ -37867,7 +38720,10 @@ var mutateInputSchema = external_exports.object({
   confirmText: external_exports.literal("yes"),
   dmlMaxRows,
   fetchParallel,
-  timeout
+  timeout,
+  /** バッチ(複文)専用: バッチ合計の影響行数上限(既定なし = 文ごとの dmlMaxRows のみ)。
+   *  なお DML バッチに continueOnError は存在しない(常に fail-fast) */
+  dmlTotalMaxRows: dmlMaxRows.optional()
 });
 var describeAppInputSchema = external_exports.object({
   app: external_exports.number().int().positive(),
