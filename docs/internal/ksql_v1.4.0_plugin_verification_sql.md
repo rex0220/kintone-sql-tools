@@ -78,7 +78,7 @@ SELECT 案件名, 売上 FROM APP4149 WHERE 商談フェーズ = '内示'
 ```sql
 EXPLAIN SELECT a.会社名, b.案件名
 FROM APP4148 a INNER JOIN APP4149 b ON a.顧客No = b.顧客No_
-WHERE a.顧客ランク = 'A'
+WHERE a.顧客ランク IN ('A')
 ```
 
 期待: `mode: FULL_SCAN` / `reason: JOIN あり` / 両アプリの取得計画。実行はされない。
