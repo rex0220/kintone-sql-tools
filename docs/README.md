@@ -24,8 +24,14 @@
 - `examples/mcp-client.sample.json`
 - `examples/mcp-verification.env.sample`
 
+## 検討・評価
+
+- `multi-statement-temp-table-evaluation.md`
+- `ksql_batch_temp_table_spec.md`(バッチ実行・一時テーブル 仕様書、ドラフト)
+
 ## 内部向け
 
+- `internal/ksql_batch_temp_table_implementation_plan.md`
 - `internal/cli_app_profile_implementation_guide.md`
 - `internal/cli_app_profile_implementation_guide_scoped_cache.md`
 - `internal/ksql_mcp_server_implementation_steps.md`
