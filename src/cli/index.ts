@@ -9,14 +9,20 @@ import { homedir, tmpdir } from "os";
 import { spawnSync } from "child_process";
 import {
   execute,
+  executeBatch,
   formatDisplayText,
   OperationCancelledError,
   parseSqlStatement,
+  parseSqlStatements,
+  analyzeBatch,
+  type BatchExecuteResult,
+  type BatchStatementResult,
   type DisplayOptions,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { decideConsoleInput, decideRun } from "./consoleInput";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
 import {
   buildCacheContext,
@@ -91,6 +97,7 @@ Options:
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
   --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
+  --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
 `;
@@ -175,6 +182,7 @@ interface ParsedArgs {
   allowDml: boolean;
   yes: boolean;
   allowWithoutWhere: boolean;
+  continueOnError: boolean;
   dmlMaxRows: number | null;
   userFormat: DisplayOptions["userFormat"] | null;
   arrayFormat: DisplayOptions["arrayFormat"] | null;
@@ -220,6 +228,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     allowDml: false,
     yes: false,
     allowWithoutWhere: false,
+    continueOnError: false,
     dmlMaxRows: null,
     userFormat: null,
     arrayFormat: null,
@@ -245,6 +254,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (a === "--allow-dml") { out.allowDml = true; continue; }
     if (a === "--yes") { out.yes = true; continue; }
     if (a === "--allow-without-where") { out.allowWithoutWhere = true; continue; }
+    if (a === "--continue-on-error") { out.continueOnError = true; continue; }
 
     const v = argv[i + 1];
     if (a === "-e" || a === "--execute") { out.executeSql = v ?? ""; i++; continue; }
@@ -587,6 +597,51 @@ function toExitCodeFromError(err: unknown): number {
   return 1;
 }
 
+// ------------------------------------------------------------
+// バッチ実行結果の表示（フェーズ1 S7）
+//   - 結果セット（素の SELECT 等）は stdout（結果間は空行区切り）
+//   - 文ごとのサマリ行は stderr（--quiet で抑止）
+// ------------------------------------------------------------
+
+export function buildBatchStatementSummary(s: BatchStatementResult): string {
+  const parts = [`[${s.index + 1}] ${s.type}`, s.status];
+  if (s.tempTable) parts.push(`temp=${s.tempTable}`);
+  if (s.rowCount !== undefined) parts.push(`rows=${s.rowCount}`);
+  if (s.status === "success" && s.result?.type === "SELECT") parts.push(`rowCount=${s.result.rowCount}`);
+  if (s.status === "error" && s.error) parts.push(s.error.message);
+  if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
+  return parts.join(" ");
+}
+
+function writeBatchOutput(
+  batch: BatchExecuteResult,
+  opts: {
+    format: OutputFormat;
+    noHeader: boolean;
+    pretty: boolean;
+    displayOptions: DisplayOptions;
+    outputPath: string | null;
+    quiet: boolean;
+  }
+): number {
+  const outputs: string[] = [];
+  for (const s of batch.statements) {
+    if (!opts.quiet) process.stderr.write(`${buildBatchStatementSummary(s)}\n`);
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
+    }
+  }
+  const output = outputs.join("\n\n");
+  if (opts.outputPath) writeFileSync(opts.outputPath, `${output}\n`, "utf-8");
+  else if (output) process.stdout.write(`${output}\n`);
+
+  if (batch.ok) return 0;
+  const firstError = batch.statements.find((s) => s.status === "error");
+  return firstError?.error
+    ? toExitCodeFromError(new Error(firstError.error.message))
+    : 1;
+}
+
 export function shouldExitOnEmpty(
   dryRun: boolean,
   exitOnEmpty: boolean,
@@ -670,6 +725,7 @@ type ConsoleMetaAction =
   | { kind: "none" }
   | { kind: "help" }
   | { kind: "exit" }
+  | { kind: "run" }
   | { kind: "clear" }
   | { kind: "show-last" }
   | { kind: "show-buffer" }
@@ -688,6 +744,7 @@ export function parseConsoleMetaCommand(line: string): ConsoleMetaAction {
   if (!t.startsWith(":")) return { kind: "none" };
   if (t === ":help") return { kind: "help" };
   if (t === ":exit" || t === ":quit") return { kind: "exit" };
+  if (t === ":run") return { kind: "run" };
   if (t === ":clear") return { kind: "clear" };
   if (t === ":last") return { kind: "show-last" };
   if (t === ":buffer") return { kind: "show-buffer" };
@@ -788,6 +845,7 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   if (base.allowDml) argv.push("--yes");
   if (base.allowDml) argv.push("--allow-dml");
   if (base.allowWithoutWhere) argv.push("--allow-without-where");
+  if (base.continueOnError) argv.push("--continue-on-error");
   return argv;
 }
 
@@ -1017,18 +1075,37 @@ async function runConsole(base: ParsedArgs): Promise<number> {
       const t = line.trim();
       emptyPromptSigintArmed = false;
 
-      if (buffer.length === 0) {
+      // メタコマンドはバッファ非空でも解釈する（SQL としてバッファに混入させない）
+      if (t.startsWith(":")) {
         const meta = parseConsoleMetaCommand(t);
         if (meta.kind === "none") {
-          // continue to SQL handling
+          // unreachable（":" 始まりは必ずメタとして解釈される）
         } else if (meta.kind === "exit") {
           return 0;
+        } else if (meta.kind === "run") {
+          const runDecision = decideRun(buffer);
+          if (runDecision.kind === "error") {
+            // バッファは保持する（:edit / :clear で修正できるように）
+            process.stderr.write(`${runDecision.message}\n`);
+            continue;
+          }
+          const sql = runDecision.sql.trim();
+          buffer = "";
+          lastSql = sql;
+          lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
+          history.push(sql);
+          appendHistory(sql);
+          const { code, stdout } = await runWithArgvCapture(buildReplExecArgvWithProfile(base, sql, dryRun, format, profile));
+          lastOutput = stdout;
+          if (code !== 0) process.stderr.write(`(last exit code: ${code})\n`);
+          continue;
         } else if (meta.kind === "help") {
           process.stdout.write(
             [
               "console commands:",
               "  :help",
               "  :exit | :quit",
+              "  :run",
               "  :clear",
               "  :last",
               "  :buffer",
@@ -1163,13 +1240,30 @@ async function runConsole(base: ParsedArgs): Promise<number> {
         }
       }
 
-      buffer = buffer.length > 0 ? `${buffer}\n${line}` : line;
-      if (!t.endsWith(";")) continue;
+      // 6段判定（仕様 §8.2。メタコマンドは上で処理済み）: バッチ構築モード /
+      // `;` 終端までの蓄積（従来互換）/ 完結時の単文・複文実行 /
+      // 継続可能な失敗の蓄積 / typo の即エラー + バッファ破棄
+      const decision = decideConsoleInput(buffer, line);
+      if (decision.kind === "ignore") continue;
+      if (decision.kind === "continue") {
+        buffer = decision.buffer;
+        continue;
+      }
+      if (decision.kind === "error") {
+        buffer = "";
+        process.stderr.write(`${decision.message}\n(input buffer cleared)\n`);
+        continue;
+      }
+      if (decision.kind === "meta") continue; // unreachable（":" 始まりは上で処理済み）
 
-      const sql = buffer.replace(/;\s*$/, "").trim();
+      const isBatchExec = decision.kind === "execute-batch";
+      const sql = isBatchExec
+        ? decision.sql.trim()
+        : decision.sql.replace(/;\s*$/, "").trim();
       buffer = "";
       if (!sql) continue;
-      {
+      if (!isBatchExec) {
+        // 単文のみ DML 確認（バッチは read-only のみ受理されるため不要）
         const ok = await confirmDmlInConsole(sql, {
           allowDml: base.allowDml,
           yes: base.yes,
@@ -1241,6 +1335,7 @@ async function run(): Promise<number> {
   let hasWhere = true;
   let insertValuesCount: number | null = null;
   let isDmlStatement = false;
+  let isBatchSql = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1260,23 +1355,38 @@ async function run(): Promise<number> {
     }
 
     try {
-      const stmt = parseSqlStatement(sql);
-      parsedStmt = stmt;
-      stmtType = getStatementType(stmt);
-      isDmlStatement = isDmlType(stmtType);
-      hasWhere = hasWhereClause(stmt);
-      insertValuesCount = getInsertValuesCount(stmt);
+      const statements = parseSqlStatements(sql);
+      if (statements.length > 1) {
+        // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
+        const analysis = analyzeBatch(statements);
+        if (analysis.containsDml) {
+          process.stderr.write("ArgumentError: DML in batch is not supported by CLI yet.\n");
+          return 2;
+        }
+        if (args.dryRun) {
+          process.stderr.write("ArgumentError: --dry-run for batch SQL is not supported yet.\n");
+          return 2;
+        }
+        isBatchSql = true;
+      } else {
+        const stmt = parseSqlStatement(sql);
+        parsedStmt = stmt;
+        stmtType = getStatementType(stmt);
+        isDmlStatement = isDmlType(stmtType);
+        hasWhere = hasWhereClause(stmt);
+        insertValuesCount = getInsertValuesCount(stmt);
 
-      const supported = stmtType === "SELECT"
-        || stmtType === "UNION"
-        || stmtType === "WITH"
-        || stmtType === "EXPLAIN"
-        || stmtType === "SHOW_APPS"
-        || stmtType === "DESCRIBE"
-        || isDmlStatement;
-      if (!supported) {
-        process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
-        return 2;
+        const supported = stmtType === "SELECT"
+          || stmtType === "UNION"
+          || stmtType === "WITH"
+          || stmtType === "EXPLAIN"
+          || stmtType === "SHOW_APPS"
+          || stmtType === "DESCRIBE"
+          || isDmlStatement;
+        if (!supported) {
+          process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
+          return 2;
+        }
       }
     } catch (err) {
       process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
@@ -1609,6 +1719,19 @@ async function run(): Promise<number> {
       const label = sql?.replace(/\s+/g, " ").trim() ?? operation;
       return await promptDmlConfirm(`[DML Confirm] type=${operation} estimatedRows=${count}\nquery=${label}`);
     };
+
+    if (isBatchSql) {
+      // read-only バッチ実行（フェーズ1 S7）。timeout はバッチ合計として扱う（仕様 §5.7）
+      const batchResult = await executeBatch(sql!, client, {
+        maxRecords,
+        fetchParallel,
+        onLimitReached: onLimit,
+        cacheContext,
+        continueOnError: args.continueOnError,
+        timeoutMs: timeout,
+      });
+      return writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
+    }
 
     const result = args.dryRun
       ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit, cacheContext })

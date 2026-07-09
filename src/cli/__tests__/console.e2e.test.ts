@@ -381,3 +381,70 @@ test("console mode :show config prints resolved-app-profiles after APP@profile q
   expect(stdout).toContain("resolved-app-profiles=APP88->guest");
   expect(stderr).toContain("rowCount=");
 }, 20000);
+
+test("console: batch construction mode with :run/:buffer/:clear (S7)", async () => {
+  const cliPath = join(process.cwd(), "dist-cli", "ksql.js");
+  if (!existsSync(cliPath)) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  let child;
+  try {
+    child = spawn(process.execPath, [cliPath, "--console", "--dry-run"], {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("EPERM")) {
+      expect(true).toBe(true);
+      return;
+    }
+    throw err;
+  }
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d.toString(); });
+  child.stderr.on("data", (d) => { stderr += d.toString(); });
+
+  await sleep(120);
+  // 空バッファで :run はエラー
+  child.stdin.write(":run\n");
+  await sleep(150);
+  // CREATE TEMP TABLE 開始 → ; 終端でも実行されずバッチ構築モードで蓄積
+  child.stdin.write("CREATE TEMP TABLE #t AS SELECT * FROM APP100;\n");
+  await sleep(150);
+  // バッファ非空でもメタコマンドが解釈される
+  child.stdin.write(":buffer\n");
+  await sleep(150);
+  child.stdin.write(":clear\n");
+  await sleep(150);
+  // typo は ; 終端で即エラー + バッファ破棄
+  child.stdin.write("SELEC * FROM APP100;\n");
+  await sleep(150);
+  child.stdin.write(":exit\n");
+
+  const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPERM") {
+        resolveCode({ code: 0, skipped: true });
+        return;
+      }
+      resolveCode({ code: 1, skipped: false });
+    });
+    child.on("close", (c) => resolveCode({ code: c ?? 1, skipped: false }));
+  });
+
+  if (result.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  expect(result.code).toBe(0);
+  expect(stderr).toContain("input buffer is empty");           // :run 空エラー
+  expect(stdout).toContain("CREATE TEMP TABLE #t");            // :buffer が蓄積内容を表示
+  expect(stdout).toContain("(input buffer cleared)");          // :clear
+  expect(stderr).toContain("(input buffer cleared)");          // typo 即エラー時の破棄通知
+}, 20000);

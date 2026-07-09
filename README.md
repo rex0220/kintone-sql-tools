@@ -146,6 +146,7 @@ Options:
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
   --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
+  --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
 ```
