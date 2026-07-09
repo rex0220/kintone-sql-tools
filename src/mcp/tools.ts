@@ -87,6 +87,8 @@ export interface StatementValidation {
   tempTablesDropped: string[];
   /** INSERT_SELECT / UPSERT_SELECT の SELECT ソースが一時テーブルのみか */
   tempOnlySource: boolean;
+  /** DML の書き込み対象アプリ ID（DML 以外は null。appIds は参照先も含む） */
+  targetAppId: number | null;
 }
 
 interface ValidationCommon {
@@ -409,6 +411,7 @@ export function createKsqlMcpTools(
       tempTablesReferenced: s.tempTablesReferenced,
       tempTablesDropped: s.tempTablesDropped,
       tempOnlySource: s.tempOnlySource,
+      targetAppId: s.targetAppId,
     }));
 
     const common = {

@@ -72,6 +72,10 @@ export interface StatementAnalysis {
   /** INSERT_SELECT / UPSERT_SELECT の SELECT ソースが一時テーブルのみか
    *  （kintone アプリを一切読まない）。M4 の解禁判定に使う。他の文タイプでは false */
   tempOnlySource: boolean;
+  /** DML の書き込み対象アプリ ID（DML 以外は null）。
+   *  appIds は SELECT ソースやサブクエリの参照先も含むため、
+   *  確認プロンプト等で「変更されるアプリ」を示す用途にはこちらを使う */
+  targetAppId: number | null;
 }
 
 /** バッチ全体の静的解析結果 */
@@ -234,6 +238,10 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       tempTablesDropped: dropped,
       dependsOn: [...dependsOn].sort((a, b) => a - b),
       tempOnlySource,
+      targetAppId:
+        isDmlType(statementType) && typeof (stmt as { appId?: unknown }).appId === "number"
+          ? (stmt as { appId: number }).appId
+          : null,
     });
   });
 

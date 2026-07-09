@@ -16,6 +16,7 @@ import {
   parseSqlStatement,
   parseSqlStatements,
   analyzeBatch,
+  type BatchAnalysis,
   type BatchExecuteResult,
   type BatchStatementResult,
   type DisplayOptions,
@@ -612,9 +613,33 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
   if (s.tempTable) parts.push(`temp=${s.tempTable}`);
   if (s.rowCount !== undefined) parts.push(`rows=${s.rowCount}`);
   if (s.status === "success" && s.result?.type === "SELECT") parts.push(`rowCount=${s.result.rowCount}`);
+  if (s.status === "success" && s.result && s.result.type !== "SELECT") {
+    const r = s.result;
+    if (r.type === "INSERT") parts.push(`inserted=${r.insertedCount}`);
+    else if (r.type === "UPDATE") parts.push(`updated=${r.updatedCount}`);
+    else if (r.type === "DELETE") parts.push(`deleted=${r.deletedCount}`);
+    else if (r.type === "UPSERT") parts.push(`inserted=${r.insertedCount} updated=${r.updatedCount}`);
+    else parts.push(`reordered=${r.reorderedParentCount}`);
+  }
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
   return parts.join(" ");
+}
+
+/**
+ * DML バッチの確認プロンプト本文（仕様 §8.3: バッチ全体で1回、
+ * 全 DML 文の一覧 — タイプ / 対象アプリ / WHERE 有無 — を表示）
+ */
+export function buildBatchDmlConfirmMessage(analysis: BatchAnalysis): string {
+  const lines = ["[DML Confirm] batch"];
+  for (const s of analysis.statements) {
+    if (!s.isDml) continue;
+    // 表示するのは書き込み対象アプリのみ（appIds は SELECT ソースや
+    // サブクエリの参照先も含むため、変更対象と誤認させない）
+    const app = s.targetAppId !== null ? `APP${s.targetAppId}` : "-";
+    lines.push(`  [${s.index + 1}] ${s.statementType} app=${app} where=${s.hasWhere ? "yes" : "no"}`);
+  }
+  return lines.join("\n");
 }
 
 function writeBatchOutput(
@@ -958,7 +983,23 @@ async function confirmDmlInConsole(
   if (!opts.allowDml || opts.yes || opts.dryRun) return true;
   try {
     const normalized = normalizeSqlAppProfiles(sql, defaultProfile);
-    const stmt = parseSqlStatement(normalized.normalizedSql);
+    const statements = parseSqlStatements(normalized.normalizedSql);
+
+    // バッチ: DML を含む場合はバッチ全体で1回の確認（全 DML 文の一覧を表示。仕様 §8.3）
+    if (statements.length > 1) {
+      const analysis = analyzeBatch(statements);
+      if (!analysis.containsDml) return true;
+      const message = buildBatchDmlConfirmMessage(analysis);
+      if (queue) {
+        process.stdout.write(`${message}\nProceed? (yes/no): `);
+        const input = await queue.next();
+        if (input.kind !== "line") return false;
+        return parseConfirmAnswer(input.line);
+      }
+      return await promptDmlConfirm(message);
+    }
+
+    const stmt = statements[0];
     const stmtType = getStatementType(stmt);
     if (!isDmlType(stmtType)) return true;
     const compact = sql.replace(/\s+/g, " ").trim();
@@ -1094,6 +1135,20 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             continue;
           }
           const sql = runDecision.sql.trim();
+          // DML を含むバッチは REPL 側でバッチ全体の確認を行う（子実行には
+          // --yes が付与されるため、ここで確認しないと無確認実行になる）。
+          // キャンセル時はバッファを保持する（:edit / :clear で修正可能）
+          {
+            const ok = await confirmDmlInConsole(sql, {
+              allowDml: base.allowDml,
+              yes: base.yes,
+              dryRun,
+            }, queue, profile ?? "dev");
+            if (!ok) {
+              process.stderr.write("DML was cancelled by user.\n");
+              continue;
+            }
+          }
           buffer = "";
           lastSql = sql;
           lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
@@ -1266,8 +1321,9 @@ async function runConsole(base: ParsedArgs): Promise<number> {
         : decision.sql.replace(/;\s*$/, "").trim();
       buffer = "";
       if (!sql) continue;
-      if (!isBatchExec) {
-        // 単文のみ DML 確認（バッチは read-only のみ受理されるため不要）
+      {
+        // DML 確認（単文は従来形式、バッチは全 DML 文の一覧で1回。
+        // confirmDmlInConsole が DML を含まない入力には true を返す）
         const ok = await confirmDmlInConsole(sql, {
           allowDml: base.allowDml,
           yes: base.yes,
@@ -1341,6 +1397,7 @@ async function run(): Promise<number> {
   let isDmlStatement = false;
   let isBatchSql = false;
   let batchContainsDml = false;
+  let batchAnalysis: BatchAnalysis | null = null;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1363,11 +1420,11 @@ async function run(): Promise<number> {
       const statements = parseSqlStatements(sql);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
-        // バッチのガード（--allow-dml / dry-run / DML 実行可否）は
+        // バッチのガード（--allow-dml / dry-run / 確認プロンプト）は
         // 設定解決後にまとめて判定する（allowDml がここでは未解決のため）
-        const analysis = analyzeBatch(statements);
+        batchAnalysis = analyzeBatch(statements);
         isBatchSql = true;
-        batchContainsDml = analysis.containsDml;
+        batchContainsDml = batchAnalysis.containsDml;
       } else {
         const stmt = parseSqlStatement(sql);
         parsedStmt = stmt;
@@ -1459,11 +1516,6 @@ async function run(): Promise<number> {
       });
       process.stdout.write(`${out.join("\n")}\n`);
       return 0;
-    }
-    if (batchContainsDml) {
-      // DML バッチの実行（確認プロンプト含む）はフェーズ2 M2 で対応
-      process.stderr.write("ArgumentError: DML in batch is not supported by CLI yet.\n");
-      return 2;
     }
   }
 
@@ -1751,7 +1803,18 @@ async function run(): Promise<number> {
     };
 
     if (isBatchSql) {
-      // read-only バッチ実行（フェーズ1 S7）。timeout はバッチ合計として扱う（仕様 §5.7）
+      // DML バッチの確認はバッチ全体で1回（仕様 §8.3。--yes でスキップ。
+      // console 子実行は REPL 側で確認済みのため --yes が付与されている）
+      if (batchContainsDml && !yes && batchAnalysis) {
+        const ok = await promptDmlConfirm(buildBatchDmlConfirmMessage(batchAnalysis));
+        if (!ok) {
+          process.stderr.write("DML was cancelled by user.\n");
+          return 2;
+        }
+      }
+      // バッチ実行。timeout はバッチ合計として扱う（仕様 §5.7）。
+      // DML 文には文ごとの --dml-max-rows ガードを confirm 経由で適用
+      //（バッチ全体の確認は上で済んでいるため、ここでは件数ガードのみ）
       const batchResult = await executeBatch(sql!, client, {
         maxRecords,
         fetchParallel,
@@ -1759,6 +1822,14 @@ async function run(): Promise<number> {
         cacheContext,
         continueOnError: args.continueOnError,
         timeoutMs: timeout,
+        confirm: batchContainsDml
+          ? async (count, operation) => {
+            if (count > dmlMaxRows) {
+              throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
+            }
+            return true;
+          }
+          : undefined,
       });
       return writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
     }

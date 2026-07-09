@@ -448,3 +448,77 @@ test("console: batch construction mode with :run/:buffer/:clear (S7)", async () 
   expect(stdout).toContain("(input buffer cleared)");          // :clear
   expect(stderr).toContain("(input buffer cleared)");          // typo 即エラー時の破棄通知
 }, 20000);
+
+test("console: DML バッチは :run 時と ; 完結時に REPL で確認され、no でキャンセルできる（M2）", async () => {
+  const cliPath = join(process.cwd(), "dist-cli", "ksql.js");
+  if (!existsSync(cliPath)) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  let child;
+  try {
+    child = spawn(process.execPath, [cliPath, "--console", "--allow-dml"], {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("EPERM")) {
+      expect(true).toBe(true);
+      return;
+    }
+    throw err;
+  }
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => { stdout += d.toString(); });
+  child.stderr.on("data", (d) => { stderr += d.toString(); });
+
+  await sleep(150);
+  // :run 経路: バッチ構築モードで DML バッチを組み、:run → 確認 → no
+  child.stdin.write("CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88;\n");
+  await sleep(120);
+  child.stdin.write("INSERT INTO APP89 (名前) SELECT 顧客名 FROM #t;\n");
+  await sleep(120);
+  child.stdin.write(":run\n");
+  await sleep(200);
+  child.stdin.write("no\n");
+  await sleep(200);
+  // キャンセル後もバッファは保持されている
+  child.stdin.write(":buffer\n");
+  await sleep(150);
+  child.stdin.write(":clear\n");
+  await sleep(120);
+  // ; 完結の1行複文経路: DML を含むバッチ → 確認 → no
+  child.stdin.write("SELECT 顧客名 FROM APP88; DELETE FROM APP90 WHERE $id = 1;\n");
+  await sleep(200);
+  child.stdin.write("no\n");
+  await sleep(200);
+  child.stdin.write(":exit\n");
+
+  const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPERM") {
+        resolveCode({ code: 0, skipped: true });
+        return;
+      }
+      resolveCode({ code: 1, skipped: false });
+    });
+    child.on("close", (c) => resolveCode({ code: c ?? 1, skipped: false }));
+  });
+
+  if (result.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+
+  expect(result.code).toBe(0);
+  expect(stdout).toContain("[DML Confirm] batch");
+  expect(stdout).toContain("INSERT_SELECT app=APP89 where=no"); // :run 経路の一覧
+  expect(stdout).toContain("DELETE app=APP90 where=yes");        // ; 完結経路の一覧
+  expect(stdout.match(/\[DML Confirm\] batch/g)?.length).toBe(2);
+  expect(stderr.match(/DML was cancelled by user\./g)?.length).toBe(2);
+  expect(stdout).toContain("CREATE TEMP TABLE #t");              // キャンセル後の :buffer 表示
+});

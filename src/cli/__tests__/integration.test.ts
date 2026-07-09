@@ -75,3 +75,38 @@ describe("cli integration helpers", () => {
     expect(markdown).toContain("| x\\|y | line1<br>line2 |");
   });
 });
+
+// ----------------------------------------------------------------
+// DML バッチ確認プロンプト本文（フェーズ2 M2、仕様 §8.3）
+// ----------------------------------------------------------------
+
+import { buildBatchDmlConfirmMessage } from "../index";
+import { parseSqlStatements, analyzeBatch } from "../../core";
+
+test("buildBatchDmlConfirmMessage: 全 DML 文の一覧（タイプ/対象アプリ/WHERE 有無）", () => {
+  const analysis = analyzeBatch(parseSqlStatements(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88;" +
+    "SELECT 顧客名 FROM #t;" +
+    "INSERT INTO APP89 (名前) SELECT 顧客名 FROM #t;" +
+    "DELETE FROM APP90 WHERE $id = 1"
+  ));
+  const message = buildBatchDmlConfirmMessage(analysis);
+  const lines = message.split("\n");
+
+  expect(lines[0]).toBe("[DML Confirm] batch");
+  // read-only 文（CREATE / SELECT）は一覧に含まれない
+  expect(message).not.toContain("CREATE_TEMP_TABLE");
+  expect(lines[1]).toBe("  [3] INSERT_SELECT app=APP89 where=no");
+  expect(lines[2]).toBe("  [4] DELETE app=APP90 where=yes");
+  expect(lines).toHaveLength(3);
+});
+
+test("buildBatchDmlConfirmMessage: app= は書き込み先のみ（サブクエリの参照アプリを混ぜない）", () => {
+  const analysis = analyzeBatch(parseSqlStatements(
+    "SELECT 顧客名 FROM APP88;" +
+    "UPDATE APP89 SET 状態 = '完了' WHERE $id IN (SELECT $id FROM APP88)"
+  ));
+  const message = buildBatchDmlConfirmMessage(analysis);
+  expect(message).toContain("[2] UPDATE app=APP89 where=yes");
+  expect(message).not.toContain("APP88");
+});

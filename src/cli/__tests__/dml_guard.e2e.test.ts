@@ -153,3 +153,20 @@ test("read-only バッチの dry-run は --allow-dml なしで成功", async () 
   expect(res.code).toBe(0);
   expect(res.stdout).toContain("FULL_SCAN（一時テーブル参照）");
 });
+
+test("DML バッチ実行は --yes なしなら確認を要求する（非 TTY では明示エラー）", async () => {
+  const res = await runCli([
+    "--allow-dml",
+    "-e",
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP88; INSERT INTO APP89 (名前) SELECT 顧客名 FROM #t",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  // M2 で実行が解禁され、確認プロンプト経路に到達する
+  //（非 TTY のため「interactive confirmation requires TTY」で止まる = ガード健在）
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("interactive confirmation requires TTY");
+  expect(res.stderr).not.toContain("DML in batch is not supported");
+});
