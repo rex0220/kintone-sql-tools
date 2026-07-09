@@ -2337,7 +2337,7 @@ function showConfirmDialog(message: string, danger = false): Promise<boolean> {
 }
 
 // ============================================================
-// UPDATE / DELETE 確認ダイアログ
+// DML 確認ダイアログ（UPDATE / DELETE / INSERT_SELECT の登録）
 // ============================================================
 
 async function confirmDialog(
