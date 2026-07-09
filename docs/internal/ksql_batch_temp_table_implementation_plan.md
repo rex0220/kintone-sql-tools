@@ -24,7 +24,8 @@
   - 2026-07-09 R20(S7 実装後): S7 実装済み。判定ロジックは `cli/consoleInput.ts` の純関数(`decideConsoleInput` / `decideRun`)+ユニットテスト21件。**仕様修正**: 「完結単文の `;` なし即実行」は現行 console の実挙動(`;` 終端)の誤認に基づくため撤回し、`;` ゲート維持の6段判定に変更(spec R20)。`@profile` は判定用パース前に正規化。console e2e は dist-cli を再ビルドして検証
   - 2026-07-09 R21(S8): 公開ドキュメント反映(言語リファレンス §25 新設・制限事項表更新 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5)。実機検証は未実施(ユーザー実施待ち)
   - 2026-07-09 R22(S8): 公開ドキュメントの「v1.4.0 で追加」を「v1.4.0 予定・フェーズ1 実装時点」に統一(v1.4.0 最終仕様との混同防止)。リリース時に確定表記へ変える箇所を M6 のチェックリストに列挙
-- ステータス: フェーズ1 完了(S1〜S8 のドキュメント反映まで。**実機検証は未実施** — `ksql_mcp_verification_setup.md` の手順で要実施。リリースはフェーズ2 完了後に v1.4.0 一括)。次はフェーズ2(M1〜M6)または P0 系
+  - 2026-07-09 R23(P0-1 実装後): P0-1 実装済み。`api/requestGate.ts`(セマフォ + GET 系のみ 408/429/502/503/504・一時ネットワークエラーの指数バックオフリトライ、sleep/random 注入可能)。`withRequestGate` で MCP runtime と CLI(dry-run 除く)の client を包む。素の 500 はリトライ対象外。CB_IL02 フォールバックは統合せず併存。書き込み系はセマフォのみ(二重実行防止)。設定は `KSQL_MAX_CONCURRENT` env > `profile.query.maxConcurrent` > 既定10(プロセス内グローバルで初回固定)
+- ステータス: フェーズ1 完了 + P0-1(レートゲート)実装済み(**実機検証は未実施** — `ksql_mcp_verification_setup.md` の手順で要実施。リリースはフェーズ2 完了後に v1.4.0 一括)。次はフェーズ2 M1(P0-2 は随時、P0-3 は実機必要)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -42,8 +43,12 @@
 
 | 項目 | 内容 |
 |---|---|
-| 新規 | `src/api/requestGate.ts` — プロセス全体のセマフォ(同時リクエスト上限、既定 10)+ 429/503 と一時的ネットワークエラーの指数バックオフリトライ(既定 3回)。既存の `CB_IL02` リトライ(`src/cli/nodeKintoneClient.ts:85-136`)をここへ統合 |
-| 変更 | `src/cli/nodeKintoneClient.ts` — 全 API 呼び出しを requestGate 経由に。`src/node/runtime.ts` — 設定読み込み(`KSQL_MAX_CONCURRENT` / `profile.query.maxConcurrent`) |
+| 新規 | `src/api/requestGate.ts` — プロセス全体のセマフォ(同時リクエスト上限、既定 10)+ 429/503 と一時的ネットワークエラーの指数バックオフリトライ(既定 3回)。既存の `CB_IL02` リトライ(`src/cli/nodeKintoneClient.ts:85-136`)は**意味論が異なる(クエリ書き換え)ため統合せず併存**させ、requestGate はステータスコード/一時エラーのみを担当する |
+| 進め方 | ①`requestGate.ts` を純モジュールとして作る(セマフォ + リトライ判定 + バックオフ。時計・sleep は注入可能にしてテスト容易性を確保)→ ②`KintoneClient` ラッパー関数(`withRequestGate(client, gate)`)として全メソッドに適用 → ③CLI(`nodeKintoneClient` 利用側)と MCP runtime の client 生成箇所に組み込み、設定解決(`KSQL_MAX_CONCURRENT` / `profile.query.maxConcurrent`)を追加 → ④疑似クライアントでの並行数・リトライ・バックオフのユニットテスト |
+| 設計メモ | **リトライ分類(GET 系のみ)**: 対象 = `408` / `429` / `502` / `503` / `504` + ネットワーク層の一時エラー(fetch failed・タイムアウト中断)。対象外 = その他の 4xx(400/401/403/404 等 — 認証・バリデーションは再試行しても無駄)、`CB_IL02`(クエリ書き換えの既存フォールバックが担当)。エラー判定は `nodeKintoneClient` のエラーメッセージ形式(`kintone API error <status>: ...`)からステータスを抽出する。バックオフは指数 + ジッタ(500ms → 1s → 2s、上限 8s)。DML(POST/PUT/DELETE)のリトライは**冪等性に注意** — kintone の書き込みはリクエスト成功後の応答喪失で二重実行になり得るため、フェーズ1 時点では **GET 系のみリトライし、書き込み系はセマフォのみ適用**(リトライ解禁は bulkRequest 検証 P0-3 とあわせて判断) |
+| 適用単位 | ゲートは**プロセス内グローバル1個**(profile / baseUrl 横断)。目的が `Promise.all` × `fetchParallel` の乗算による過剰同時リクエストの抑制であるため、複数 profile 同時利用でも合計で上限を掛ける安全側に倒す。ドメイン(baseUrl)単位に分けて緩めるのは将来の改善とし P0-1 では行わない。上限はプロセスで最初に解決された値で固定(優先順: `KSQL_MAX_CONCURRENT` env > profile 設定 > 既定 10) |
+| 変更 | `nodeKintoneClient` 自体は変更せず、**CLI(`src/cli/index.ts`、dry-run 除く)と MCP runtime(`src/node/runtime.ts`)の合成済み `KintoneClient` に `withRequestGate()` を適用**する(HTTP 層と保護層の責務分離)。設定解決は `KSQL_MAX_CONCURRENT` env > `profile.query.maxConcurrent` > 既定 10 |
+| 既知の制約 | `getApps()` は `KintoneClient` 抽象の内側でページングするため、途中ページの 429 で `getApps()` 全体が再実行される(SHOW APPS が巨大な環境では読み直しが発生)。現状の抽象では自然な実装として許容 |
 | テスト | 疑似クライアントで同時実行数の上限・リトライ回数・バックオフを検証。既存 `fetchAll.test.ts` の全ケースが無変更で通ること |
 | 完了条件 | `fetchParallel: 10` のクエリを複数同時に流しても同時リクエスト数が上限を超えない |
 
