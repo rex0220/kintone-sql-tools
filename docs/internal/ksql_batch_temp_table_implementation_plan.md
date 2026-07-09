@@ -17,7 +17,9 @@
   - 2026-07-09 R13(S2 実装後): テーブル alias 専用の `parseTableAliasName()` を新設し明示 AS(4経路)・暗黙 alias を統一(R12 の IDENT 限定化でテーブル alias の BIDENT `#x` が素通りするようになっていた穴の修正)
   - 2026-07-09 R14(S3 実装後): S3 実装済み。分類ヘルパ(dmlGuard)を core へ移動し node は再エクスポートに(core→node 依存を作らないため)。参照収集は AST 汎用ディープウォーク(`cteName` の `#` 判定)。再定義エラーは生存中のみ・DROP 後再 CREATE 許容・上限16は同時数と確定
   - 2026-07-09 R15(S3 実装後): 空バッチ(空入力・`;` のみ)を `analyzeBatch` で `ArgumentError: SQL is empty.` として拒否(`parseStatements()` が空配列を返す設計との噛み合わせ)
-- ステータス: 実装中(S1〜S3 完了。次は S4: バッチ実行器 + 一時テーブルストア)
+  - 2026-07-09 R16(S4 実装後): S4 実装済み。`executeBatch()` は実行時エラーを throw せず文ごと status で返すエンベロープ方式。DML 文内の一時テーブル参照は実行前に一括拒否(フェーズ2 M1/M4 で解禁)。timeout は Promise.race 方式で進行中リクエスト自体は中断されない(AbortSignal 伝播は P0-1 とあわせて対応)。WITH の CTE インライン化は一時テーブル注入時は無効化
+  - 2026-07-09 R17(S4 実装後): サブクエリ解決(`resolveSubqueries` / `resolveScalarColumns`)へ `cteCache` を貫通(IN / EXISTS / スカラーサブクエリ内の `FROM #t` が `executeSelect` 直呼びで注入経路を外れる穴の修正。同構造だった「サブクエリ内の CTE 参照」も同時に解決)
+- ステータス: 実装中(S1〜S4 完了。次は S5: MCP validate 拡張)
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -92,6 +94,7 @@
 |---|---|
 | 変更 | `src/execute.ts` — `executeBatch(statements, client, options)` を新設。`tempTables: Map<string, ProcessRow[]>` を全文に引き回す。`CREATE_TEMP_TABLE` は AS 句の SELECT を実行して格納(行数上限 10,000、`onLimit` 不適用で常に error)、`DROP_TEMP_TABLE` は削除。SELECT 実行時は `cteCache` と同様に `tempTables` を `executeQueryWithCte` 系へ合流させる(名前に `#` を含むため CTE と衝突しない) |
 | 変更 | fail-fast / continueOnError / 依存スキップ(S3 の依存グラフ使用)、文ごとの `success` / `error` / `skipped` 記録、バッチ合計 `timeout` |
+| 進め方 | ①`executeBatch` の結果エンベロープ型(`BatchExecuteResult` / 文ごとの `BatchStatementResult`)を先に固める → ②tempTables を `executeQueryWithCte` 系へ注入する最小経路(CREATE → 素の SELECT 参照)を通す → ③fail-fast → ④continueOnError + 依存スキップ → ⑤バッチ合計 timeout、の順で1機能ずつテストを付けて積む(実行面はテスト粒度を細かく保つ) |
 | テスト | `execute.test.ts`(モッククライアント注入)— CREATE→参照→JOIN / fail-fast / continueOnError + 依存スキップ / 行数上限 / DROP がストアを解放すること(DROP 後参照の拒否は S3 の静的検証でテスト済み)/ タイムアウト時の文状態(中断文 = `error` + `TimeoutError`、未実行文 = `skipped: "timeout"`) |
 
 ### S5: MCP — validate 拡張
