@@ -350,7 +350,7 @@ tool input として受ける場合も、`execute()` ではなく runtime/client
 }
 ```
 
-### 7.2.1 バッチ（複文）入力（v1.4.0 予定・フェーズ1 実装時点）
+### 7.2.1 バッチ（複文）入力（v1.4.0 予定）
 
 `;` 区切りの複文を **read-only バッチ**として受理する（DML を1文でも含む場合は
 `ArgumentError: batch contains DML statements. Use ksql_mutate.`）。
@@ -479,7 +479,7 @@ SQL を解析し、実行前チェックのみ行う。
 }
 ```
 
-### 7.5.1 バッチ（複文）対応（v1.4.0 予定・フェーズ1 実装時点）
+### 7.5.1 バッチ（複文）対応（v1.4.0 予定）
 
 - 単文入力は従来のスカラー形を維持しつつ、`statements[]`（要素1）が追加される
 - バッチ入力は ParseError にならず、サマリ（`batch: true` / `statementCount` /

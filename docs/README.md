@@ -27,11 +27,15 @@
 ## 検討・評価
 
 - `multi-statement-temp-table-evaluation.md`
-- `ksql_batch_temp_table_spec.md`(バッチ実行・一時テーブル 仕様書、ドラフト)
+
+## 主要仕様(v1.4.0 追加分)
+
+- `ksql_batch_temp_table_spec.md`(バッチ実行・一時テーブル 仕様書 — フェーズ1・2 実装済み、実機検証中)
 
 ## 内部向け
 
 - `internal/ksql_batch_temp_table_implementation_plan.md`
+- `internal/ksql_v1.4.0_plugin_verification_sql.md`(v1.4.0 プラグイン実機テスト SQL)
 - `internal/cli_app_profile_implementation_guide.md`
 - `internal/cli_app_profile_implementation_guide_scoped_cache.md`
 - `internal/ksql_mcp_server_implementation_steps.md`

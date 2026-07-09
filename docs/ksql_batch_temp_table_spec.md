@@ -24,7 +24,7 @@
   - 2026-07-09 R27(M3 実装後): バッチ EXPLAIN を実装(§7.4)。`ksql_explain` のバッチ入力は全文プランの配列(`statements[]` の `plan: string[]`)を返し、CLI の `--dry-run` もバッチ対応。一時テーブル参照文は既存プラン生成に通さず「FULL_SCAN(一時テーブル参照)/ 実体化前のため行数不明 / プッシュダウンなし」を明示(既存 `resolveSelectMode` が cteName 参照を SIMPLE と誤表示するため)
   - 2026-07-09 R26(M4 実装後): 一時テーブル経由の `INSERT_SELECT` を解禁(§7.3 の実装)。ソース判定は「SELECT 側に APP 参照がなく一時テーブル参照が1つ以上」(`tempOnlySource`)。実体化済み行数は confirm("INSERT") 経由で `dmlMaxRows` / `dmlTotalMaxRows` の対象になる(§7.3 の集計対象に明記)。§9 に APP 混在ソースのエラーメッセージを追加
   - 2026-07-09 R24(M1 実装後): `ksql_mutate` の DML バッチ受理を実装(§7.3)。静的ガード(INSERT_SELECT 拒否・WHERE なし・文ごと insertValuesCount)は validate-all-first で実行前に適用。`dmlTotalMaxRows` の集計対象(INSERT 静的 + UPDATE/DELETE 実行時、UPSERT 対象外)と混在バッチの取得上限・影響件数の文ごと展開を §7.3 に明記
-- ステータス: フェーズ1 実装完了(S1〜S8。実機検証は未実施、リリースはフェーズ2 完了後に v1.4.0 一括)
+- ステータス: **フェーズ1(S1〜S8)・フェーズ2(M1〜M4)・プラグイン対応(§8.4)実装済み**。実機検証を実施中(v1.4.0 検証ビルド)。リリース(M6)は検証完了後
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 

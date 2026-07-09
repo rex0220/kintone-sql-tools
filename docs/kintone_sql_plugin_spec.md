@@ -49,6 +49,8 @@ AST type ごとに実行分岐
 
 ## 2. 対応 SQL 構文（Ver.1）
 
+> **v1.4.0 追加**: `;` 区切りの **read-only バッチ**と**一時テーブル**（`CREATE TEMP TABLE #t AS SELECT ...`）に対応。最後に結果セットを返した文のみを表示する。DML を含むバッチは非対応（CLI / MCP を使用）。EXPLAIN ボタンはバッチ入力を全文プラン表示する（実行しない）。詳細は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) §8.4。
+
 凡例: ✅ 対応 / ❌ 非対応 / 🟣 kintone 拡張
 
 ### 2.1 SELECT / FROM / WHERE

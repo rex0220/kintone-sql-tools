@@ -4,12 +4,16 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 
 - kintone プラグイン（UI）
 - CLI（`ksql`）
+- MCP サーバー（AI クライアントから kintone を SQL 操作。Claude Desktop 用 MCPB 同梱）
 
 ## 機能概要
 
 - `SELECT`（JOIN/GROUP BY/HAVING/CTE/UNION）
 - `INSERT` / `UPDATE` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
 - `EXPLAIN`
+- **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
+  - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）
+  - プラグイン: read-only バッチのみ（最終結果を表示）
 - サブテーブル仮想テーブル（`APP100$明細`）
 - CLI 拡張 `APP@profile`
   - 同一 SQL 内で同一 APP の profile 混在を許可
@@ -42,15 +46,19 @@ npm run build:plugin
 ## 使い分け（CLI / Plugin）
 
 - CLI を使うケース:
-  - バッチ実行
+  - DML を含むバッチ実行・SQL ファイル実行（`-f`）
   - CI/CD 連携
   - `APP@profile` を使った環境切替
   - `--dry-run` / `EXPLAIN` による安全確認
 
 - Plugin を使うケース:
-  - kintone 画面内での対話操作
+  - kintone 画面内での対話操作（read-only バッチ + 一時テーブルも利用可）
   - 非エンジニア向けの運用
   - UI で結果確認したい場合
+
+- MCP を使うケース:
+  - Claude 等の AI クライアントから kintone を照会・更新
+  - 一時テーブルで中間結果をサーバー内に保持し、AI のコンテキスト消費を抑えたい場合
 
 注意:
 
@@ -184,6 +192,8 @@ Options:
 - [Docs Index](docs/README.md)
 - [言語リファレンス](docs/ksql_language_reference.md)
 - [CLI / Console 仕様](docs/ksql_cli_console_spec.md)
+- [バッチ実行・一時テーブル仕様](docs/ksql_batch_temp_table_spec.md)
+- [MCP サーバー仕様](docs/ksql_mcp_server_spec.md) / [Claude Desktop への導入（MCPB）](docs/ksql_mcpb_claude_desktop_install.md)
 - [APP@profile 仕様](docs/cli_app_profile_spec.md)
 - [公開前チェックリスト](docs/internal/public_release_checklist.md)
 
