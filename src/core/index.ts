@@ -4,6 +4,8 @@
 
 export { execute, OperationCancelledError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
+export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES } from "./batch";
+export type { BatchAnalysis, StatementAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
 
 export type {
