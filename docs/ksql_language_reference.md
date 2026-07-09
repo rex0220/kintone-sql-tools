@@ -35,6 +35,7 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 22. [制限事項](#22-制限事項)
 23. [UI 機能](#23-ui-機能)
 24. [EXPLAIN](#24-explain)
+25. [バッチ実行と一時テーブル（CLI / MCP）](#25-バッチ実行と一時テーブルcli--mcp)
 
 ---
 
@@ -1573,7 +1574,9 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | 再帰 CTE | 非対応 |
 | FULL OUTER JOIN | 非対応 |
 | UPDATE に JOIN | 非対応 |
-| トランザクション | kintone API の制約により非対応 |
+| トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
+| DML を含むバッチ（複文） | フェーズ1 実装時点では未対応（**v1.4.0 リリース時にフェーズ2で対応予定 — リリース時にこの行を更新**。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
+| 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
 
@@ -1672,6 +1675,61 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 
 - `EXPLAIN SHOW APPS` など、上記以外の文は非対応です
 - 実データ更新は行いません（計画表示のみ）
+
+---
+
+## 25. バッチ実行と一時テーブル（CLI / MCP）
+
+> **v1.4.0 で追加予定**（本節は開発版・フェーズ1 実装時点の記述です）。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate`）で利用可能**です。プラグイン UI は単文のみです。DML を含むバッチはフェーズ2（v1.4.0 リリースまで）で対応予定です。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
+
+### 複文（バッチ）
+
+`;` 区切りで複数の SQL 文を1回の呼び出しで**順次**実行できます（最大 20 文）。
+
+```sql
+SELECT 部門 FROM APP100;
+SELECT 部門 FROM APP200;
+```
+
+- **read-only 文のみ**（SELECT / UNION / WITH / SHOW APPS / DESCRIBE / EXPLAIN / 一時テーブルの CREATE・DROP）。DML を含むバッチは**フェーズ2（v1.4.0 リリースまで）で対応予定**で、フェーズ1 実装時点では拒否されます
+- 実行前に全文を検証し、1文でも不正ならバッチ全体を拒否します（validate-all-first）
+- 既定は fail-fast（エラー文以降はスキップ）。`--continue-on-error`（CLI）/ `continueOnError`（MCP）でエラー後の続行を選べます
+- 結果は文ごとに `success` / `error` / `skipped` として報告されます
+
+### 一時テーブル
+
+`CREATE TEMP TABLE #名前 AS SELECT ...` で SELECT 結果をバッチ内に実体化し、後続の文から `FROM` / `JOIN` / サブクエリで参照できます。
+
+```sql
+-- 相関サブクエリの回避例
+CREATE TEMP TABLE #latest AS
+SELECT 顧客ID, MAX(受注日) AS 最新受注日
+FROM APP300
+GROUP BY 顧客ID;
+
+SELECT a.顧客名, t.最新受注日
+FROM APP100 a
+INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
+```
+
+| 規則 | 内容 |
+|---|---|
+| 名前 | `#` + 識別子（例: `#temp` / `#集計`）。`#` は一時テーブル名の先頭のみで有効。エイリアスには使用不可 |
+| 寿命 | **バッチ内のみ**。呼び出し終了で自動破棄（呼び出しをまたぐ参照は不可） |
+| 破棄 | `DROP TEMP TABLE #名前`（主にメモリの早期解放用。DROP 後の同名再 CREATE は可） |
+| 上限 | 同時 16 個・1個あたり 10,000 行（超過は常にエラー） |
+| DML | 一時テーブルへの INSERT / UPDATE / DELETE は非対応 |
+| 実行 | 参照は常にインメモリ FULL_SCAN（kintone クエリへの WHERE プッシュダウンは効かない） |
+
+### コンソール（`--console`）での入力
+
+- 単文は従来どおり行末 `;` で実行されます
+- `CREATE TEMP TABLE` で始まる入力は**バッチ構築モード**になり、`;` では実行されず **`:run`** でバッファ全体をバッチ実行します（破棄は `:clear`）
+
+### 注意
+
+- **トランザクションはありません**。バッチも非アトミックです（DML バッチ対応後も、途中失敗時に前半のみ反映された状態が起こり得ます）
+- MCP では `CREATE TEMP TABLE` の実体化結果は返却されません（`tempTable` 名と `rowCount` のみ）。中間結果をコンテキストに載せないための設計です
 
 ---
 

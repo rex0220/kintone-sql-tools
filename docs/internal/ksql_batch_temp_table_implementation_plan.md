@@ -22,7 +22,9 @@
   - 2026-07-09 R18(S5 実装後): S5 実装済み。`ValidationResult` は単文/バッチの判別可能ユニオン(バッチ側はスカラーを `undefined` 型で宣言し既存テストの型互換を維持)。`appIds` は文字列正規表現(`extractAppIds`)から AST ディープウォーク(文ごと)に変更。単文 CREATE/DROP TEMP TABLE は validate 段階で ArgumentError に(従来は ok:true で素通り)。query/mutate/saveQuery/runSavedQuery に `requireSingleStatement` ガード(S6/M1 で解除)
   - 2026-07-09 R19(S6 実装後): S6 実装済み。query のガードを解除し read-only バッチを `executeBatch` で実行、§6.2 エンベロープ(`toBatchQueryPayload`)。`maxTotalRecords` 超過は ArgumentError。バッチの `timeout` は合計タイムアウト(executeBatch の timeoutMs)と HTTP per-request の両方に同値を渡す。テスト用に `executeBatchSql` を DI 可能に
   - 2026-07-09 R20(S7 実装後): S7 実装済み。判定ロジックは `cli/consoleInput.ts` の純関数(`decideConsoleInput` / `decideRun`)+ユニットテスト21件。**仕様修正**: 「完結単文の `;` なし即実行」は現行 console の実挙動(`;` 終端)の誤認に基づくため撤回し、`;` ゲート維持の6段判定に変更(spec R20)。`@profile` は判定用パース前に正規化。console e2e は dist-cli を再ビルドして検証
-- ステータス: 実装中(S1〜S7 完了。次は S8: ドキュメント・フェーズ1 検証)
+  - 2026-07-09 R21(S8): 公開ドキュメント反映(言語リファレンス §25 新設・制限事項表更新 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5)。実機検証は未実施(ユーザー実施待ち)
+  - 2026-07-09 R22(S8): 公開ドキュメントの「v1.4.0 で追加」を「v1.4.0 予定・フェーズ1 実装時点」に統一(v1.4.0 最終仕様との混同防止)。リリース時に確定表記へ変える箇所を M6 のチェックリストに列挙
+- ステータス: フェーズ1 完了(S1〜S8 のドキュメント反映まで。**実機検証は未実施** — `ksql_mcp_verification_setup.md` の手順で要実施。リリースはフェーズ2 完了後に v1.4.0 一括)。次はフェーズ2(M1〜M6)または P0 系
 - 仕様: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)
 - 評価資料: [../multi-statement-temp-table-evaluation.md](../multi-statement-temp-table-evaluation.md)
 
@@ -171,6 +173,7 @@
 ### M6: ドキュメント・リリース(v1.4.0)
 
 - フェーズ2 分のドキュメント反映(`ksql_language_reference.md` / `ksql_mcp_server_spec.md` / `ksql_mcp_changes.md`)
+- **フェーズ1 時点の「フェーズ2で対応予定」文言の更新**: `ksql_language_reference.md` §25 冒頭注記と §22 制限事項表の「DML を含むバッチ」行 / `ksql_mcp_changes.md` 11.5 の見出しと `ksql_mutate` 行 / `ksql_mcp_server_spec.md` 7.2.1・7.5.1 見出し / `ksql_cli_console_spec.md` §5.2 注記(いずれも「予定」表記を確定に変える)
 - `ksql_mcp_verification_setup.md` の手順で実機検証(DML バッチを含む)
 - **フェーズ1・2 を合わせて v1.4.0 として一括リリース**
 

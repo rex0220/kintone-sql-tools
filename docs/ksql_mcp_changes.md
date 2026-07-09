@@ -285,6 +285,29 @@ Claude Desktop 設定例:
 }
 ```
 
+## 11.5 バッチ実行・一時テーブル対応（v1.4.0 予定・フェーズ1 実装時点）
+
+`;` 区切りの複文（バッチ）と一時テーブル（`CREATE TEMP TABLE #t AS SELECT ...`）に対応した。
+本節はフェーズ1 実装時点の記述で、DML バッチはフェーズ2（v1.4.0 リリースまで）で対応予定。
+詳細仕様は `docs/ksql_batch_temp_table_spec.md`。
+
+対応ツールと変更点:
+
+| Tool | 変更 |
+| --- | --- |
+| `ksql_validate` | バッチ入力を受理し、サマリ + 文ごとの `statements[]` を返す。単文は従来スカラー形を維持（`statements[]` が追加）。一時テーブルの静的検証・単文 CREATE/DROP の拒否・空入力の拒否を実施。`appIds` は AST ベース（文ごと）に変更 |
+| `ksql_query` | read-only バッチを実行しバッチエンベロープ（`statements[]` + `results[]`）を返す。入力に `continueOnError` / `maxTotalRecords` を追加。DML 混在バッチは `ksql_mutate` へ誘導するエラー。バッチの `timeout` は合計タイムアウト |
+| `ksql_mutate` | DML バッチはフェーズ1 実装時点では明示エラー（`batch SQL ... not supported ... yet.`）。**v1.4.0 リリースまでにフェーズ2で対応予定（対応時にこの行を更新）** |
+| `ksql_save_query` / `ksql_run_saved_query` | 保存 SQL は単文のみ（バッチは明示エラー） |
+
+安全制御の要点:
+
+- validate-all-first: 1文でも不正ならバッチ全体を拒否（実行前）
+- `ksql_query` が受けるのは read-only 文のみのバッチ（ツール分離の維持）
+- `CREATE TEMP TABLE` の実体化結果は返却しない（`tempTable` / `rowCount` のみ）。
+  中間結果を LLM のコンテキストに載せないための設計
+- 一時テーブルはバッチ内スコープ（呼び出し終了で破棄）。同時 16 個・1個 10,000 行上限
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
@@ -298,6 +321,8 @@ CLI:
 ```text
 共通化した dmlGuard / config / runtime の一部を利用。
 REORDER は共有 DML 判定に含まれる。
+v1.4.0: dmlGuard の実体は src/core/ へ移動（src/node/ は再エクスポートで互換維持）。
+CLI も -e / -f / --console でバッチ実行に対応（docs/ksql_cli_console_spec.md 参照）。
 ```
 
 MCP SDK と zod は bundle 用 devDependencies であり、npm package の runtime dependencies には追加しない方針。
@@ -341,5 +366,6 @@ npm run mcp:kintone-smoke -- --config .\ksql.config.json --profile prod --app 10
 ```text
 docs/ksql_mcp_server_spec.md
 docs/ksql_mcp_verification_setup.md
+docs/ksql_batch_temp_table_spec.md
 docs/internal/ksql_mcp_server_implementation_steps.md
 ```

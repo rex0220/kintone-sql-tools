@@ -18,7 +18,8 @@
   - 2026-07-09 R18(S5 実装後): `ksql_validate` のバッチ対応を実装(§7.1)。外部から見える変更: ①バッチ入力が ParseError ではなくサマリ + `statements[]` の正常応答になる、②単文入力にも `statements[]`(要素1)が付く、③単文の CREATE/DROP TEMP TABLE は validate 段階で ArgumentError、④`appIds` が文字列走査から AST ベース(文ごと)に変わり文字列リテラル内の誤検出がなくなる。`ksql_query` / `ksql_mutate` へのバッチ入力は S6 / フェーズ2 対応まで `ArgumentError: batch SQL ... not supported ... yet.` で明示的に拒否
   - 2026-07-09 R19(S6 実装後): `ksql_query` の read-only バッチ受理を実装(§6.2・§7.2)。`maxTotalRecords` 超過時の挙動を ArgumentError と確定(§6.2 に追記)。バッチでは `timeout` を合計タイムアウトとして扱う(§5.7。HTTP クライアントの per-request タイムアウトにも同値が渡る)。DML 混在バッチは `ArgumentError: batch contains DML statements. Use ksql_mutate.`
   - 2026-07-09 R20(S7 実装後): CLI 実装(`-f` 複文・`--continue-on-error`・console)。§8.2 の「完結単文の `;` なし即実行」を撤回し **`;` ゲートを維持**(R3〜R4 の前提「現行 console は改行=実行」が誤りで、現行は従来から `;` 終端実行のため。撤回により複数行入力の途中実行という退行を回避)。判定順を6段に再構成(メタ → バッチ構築 → `;` まで蓄積 → 完結実行 → 継続可能失敗 → 即エラー)。`:run` エラー時はバッファ保持、`@profile` 構文は判定用パース前に正規化
-- ステータス: ドラフト(実装中 — フェーズ1 の S1〜S7 実装済み)
+  - 2026-07-09 R21(S8): 公開ドキュメントへ反映(言語リファレンス §25 / MCP server spec 7.2.1・7.5.1 / ksql_mcp_changes 11.5 / console spec)。フェーズ1 実装完了
+- ステータス: フェーズ1 実装完了(S1〜S8。実機検証は未実施、リリースはフェーズ2 完了後に v1.4.0 一括)
 - 対象バージョン: v1.4.0(フェーズ1・2 を同時リリース。フェーズは実装・マージの順序であり、リリース単位ではない)
 - 前提資料: [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)(採否評価・コード調査)
 

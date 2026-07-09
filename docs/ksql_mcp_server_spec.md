@@ -350,6 +350,38 @@ tool input として受ける場合も、`execute()` ではなく runtime/client
 }
 ```
 
+### 7.2.1 バッチ（複文）入力（v1.4.0 予定・フェーズ1 実装時点）
+
+`;` 区切りの複文を **read-only バッチ**として受理する（DML を1文でも含む場合は
+`ArgumentError: batch contains DML statements. Use ksql_mutate.`）。
+一時テーブル（`CREATE TEMP TABLE #t AS SELECT ...`）を含められる。
+詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) §6〜§7 を参照。
+
+追加の入力パラメーター（バッチ専用・任意）:
+
+- `continueOnError`: 実行時エラー後も後続文を実行する（既定 false = fail-fast）
+- `maxTotalRecords`: 返却する結果セットの合計行数上限（超過はエラー）
+
+バッチ時の `timeout` は**バッチ合計**のタイムアウトとして扱う。
+
+出力はバッチエンベロープになる（単文入力の出力は従来と不変）:
+
+```json
+{
+  "ok": true,
+  "batch": true,
+  "statementCount": 2,
+  "statements": [
+    { "index": 0, "type": "CREATE_TEMP_TABLE", "status": "success", "tempTable": "#t", "rowCount": 120 },
+    { "index": 1, "type": "SELECT", "status": "success", "resultIndex": 0 }
+  ],
+  "results": [
+    { "columns": ["顧客名"], "rows": [{ "顧客名": "A社" }], "rowCount": 1, "warnings": [] }
+  ],
+  "warnings": []
+}
+```
+
 ## 7.3 `ksql_describe_app`
 
 指定アプリのフィールド一覧を返す。
@@ -446,6 +478,20 @@ SQL を解析し、実行前チェックのみ行う。
   "requiresMutationTool": true
 }
 ```
+
+### 7.5.1 バッチ（複文）対応（v1.4.0 予定・フェーズ1 実装時点）
+
+- 単文入力は従来のスカラー形を維持しつつ、`statements[]`（要素1）が追加される
+- バッチ入力は ParseError にならず、サマリ（`batch: true` / `statementCount` /
+  `isReadOnlyBatch` / `containsDml` / `tempTables` / `canRunWithQueryTool` /
+  `requiresMutationTool`）と文ごとの `statements[]`（`statementType` / `isDml` /
+  `hasWhere` / `insertValuesCount` / `appIds` / `tempTablesCreated` /
+  `tempTablesReferenced` / `tempTablesDropped`）を返す
+- 一時テーブルの静的検証（未定義参照・再定義・DROP 後参照・同時16個上限）と
+  単文 `CREATE / DROP TEMP TABLE` の拒否をここで行う
+- `appIds` は文字列走査から AST ベース（文ごと）に変更（文字列リテラル内の誤検出を解消）
+
+詳細は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) §7.1 を参照。
 
 ## 7.6 `ksql_mutate`
 
