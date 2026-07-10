@@ -17,6 +17,7 @@
 // ============================================================
 
 import type { KintoneClient } from "../execute";
+import { envInt, envNonNegativeInt } from "../node/config";
 
 export interface RequestGateOptions {
   /** 同時リクエスト数の上限（既定 10、1〜50） */
@@ -82,6 +83,21 @@ export class RequestGate {
 
   get limit(): number {
     return this.maxConcurrent;
+  }
+
+  /** 解決済みの GET リトライ回数（テスト・診断用） */
+  get retries(): number {
+    return this.maxRetries;
+  }
+
+  /** 解決済みのバックオフ初期値ミリ秒（テスト・診断用） */
+  get retryBaseDelayMs(): number {
+    return this.baseDelayMs;
+  }
+
+  /** 解決済みのバックオフ上限ミリ秒（テスト・診断用） */
+  get retryMaxDelayMs(): number {
+    return this.maxDelayMs;
   }
 
   /** GET 系: セマフォ + リトライ付きで実行する */
@@ -161,14 +177,26 @@ let globalGate: RequestGate | null = null;
 
 /**
  * プロセス内グローバルのゲートを返す（初回呼び出し時に生成）。
- * 上限は最初に解決された値で固定される。優先順:
- * `KSQL_MAX_CONCURRENT` env > limitHint（profile 設定など）> 既定 10
+ * 全設定は最初に解決された値で固定される。優先順:
+ * env（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`）> options（CLI フラグ・profile 設定
+ * のマージ済み値）> 既定。バックオフ系（baseDelayMs / maxDelayMs）に env はない。
+ *
+ * 後方互換: 数値1個の渡し方（旧 limitHint = maxConcurrent）も受け付ける。
  */
-export function getGlobalRequestGate(limitHint?: number): RequestGate {
+export function getGlobalRequestGate(
+  options?: number | Partial<RequestGateOptions>
+): RequestGate {
   if (globalGate === null) {
-    const envValue = Number(process.env.KSQL_MAX_CONCURRENT);
-    const limit = Number.isInteger(envValue) && envValue > 0 ? envValue : limitHint;
-    globalGate = new RequestGate({ maxConcurrent: limit });
+    const hint: Partial<RequestGateOptions> =
+      typeof options === "number" ? { maxConcurrent: options } : options ?? {};
+    // KSQL_RETRY=0（リトライ無効）は有効値のため envNonNegativeInt で読む
+    //（envInt は 0 を無効値として捨てる）
+    globalGate = new RequestGate({
+      maxConcurrent: envInt("KSQL_MAX_CONCURRENT") ?? hint.maxConcurrent,
+      maxRetries: envNonNegativeInt("KSQL_RETRY") ?? hint.maxRetries,
+      baseDelayMs: hint.baseDelayMs,
+      maxDelayMs: hint.maxDelayMs,
+    });
   }
   return globalGate;
 }

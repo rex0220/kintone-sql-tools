@@ -76,6 +76,19 @@ export function envInt(name: string): number | null {
   return n;
 }
 
+/**
+ * 0 を有効値として受け付ける整数 env の解決。
+ * `KSQL_RETRY=0`（リトライ無効）のように「0 に意味がある」設定に使う
+ * （envInt は n <= 0 を無効値として捨てるため 0 を読めない）
+ */
+export function envNonNegativeInt(name: string): number | null {
+  const v = envString(name);
+  if (v === null) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
 export function envOnLimit(name: string): OnLimitMode | null {
   const v = envString(name);
   if (v === "error" || v === "truncate") return v;
