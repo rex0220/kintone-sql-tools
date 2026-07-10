@@ -13,7 +13,23 @@
       "Bash(git worktree *)",
       "Bash(grep -n \"EXPLAIN \\\\${item.sql}\\\\|EXPLAIN \\\\\" + item\\\\|\\\\`EXPLAIN \" src/ui/desktop.ts)",
       "Bash(rm -f jest-out.txt)",
-      "PowerShell($j = Get-Content \"C:\\\\Users\\\\rex02\\\\.claude\\\\projects\\\\c--Users-rex02-Projects-kintone-sql-tools\\\\fb1be961-fb80-46cd-a36b-e67ed6770fe2\\\\tool-results\\\\mcp-ksql-ksql_show_apps-1783600150947.txt\" -Raw | ConvertFrom-Json; $j.columns; $j.rows | Where-Object { $_.PSObject.Properties.Value -match '顧客|取引先' } | Format-Table -AutoSize | Out-String)"
+      "PowerShell($j = Get-Content \"C:\\\\Users\\\\rex02\\\\.claude\\\\projects\\\\c--Users-rex02-Projects-kintone-sql-tools\\\\fb1be961-fb80-46cd-a36b-e67ed6770fe2\\\\tool-results\\\\mcp-ksql-ksql_show_apps-1783600150947.txt\" -Raw | ConvertFrom-Json; $j.columns; $j.rows | Where-Object { $_.PSObject.Properties.Value -match '顧客|取引先' } | Format-Table -AutoSize | Out-String)",
+      "Bash(gh release *)",
+      "PowerShell(npm run mcp:pack-smoke 2>&1)",
+      "PowerShell(Get-Content docs\\\\ksql_mcp_changes.md | Select-String -Pattern \"^## \" | Select-Object -Last 8; \\(Get-Content docs\\\\ksql_mcp_changes.md | Measure-Object -Line\\).Lines)",
+      "PowerShell(git check-ignore dist-mcp/ksql-mcp.js; \"check-ignore exit: $LASTEXITCODE\"; \\(Get-Item dist-mcp\\\\ksql-mcp.js\\).LastWriteTime)",
+      "PowerShell(\"---\")",
+      "PowerShell(Copy-Item dist-mcp\\\\ksql-mcp.js release\\\\ksql-mcp.js -Force)",
+      "PowerShell(Copy-Item dist-mcpb\\\\ksql-mcp.mcpb release\\\\ksql-mcp.mcpb -Force)",
+      "PowerShell(git push -u origin fix/mcp-tool-descriptions)",
+      "Bash(exit 0)",
+      "Bash(cp dist-mcp/ksql-mcp.js release/ksql-mcp.js)",
+      "Bash(cp dist-mcpb/ksql-mcp.mcpb release/ksql-mcp.mcpb)",
+      "Bash(printf 'v1.5.0\\\\n')",
+      "Bash(node -e \"const s=require\\('node:child_process'\\).execSync\\('node release/ksql-mcp.js --version 2>&1 || true'\\).toString\\(\\); console.log\\(s.slice\\(0,200\\)\\)\")",
+      "Bash(git restore *)",
+      "Bash(awk -F: '$1 > 1900 && $1 < 2550')",
+      "Bash(npm audit *)"
     ]
   }
 }

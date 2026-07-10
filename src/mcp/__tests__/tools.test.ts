@@ -331,14 +331,115 @@ describe("MCP tools", () => {
       .toContain("confirmText");
   });
 
-  test("mutate: 単文 UPSERT_SELECT は引き続き拒否", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
-    await expect(tools.mutate({
-      sql: "UPSERT INTO APP200 (name) SELECT name FROM APP100 ON DUPLICATE (name)",
+  // ----------------------------------------------------------------
+  // 単文 UPSERT_SELECT(APP ソース)の解禁(v1.6.0)
+  // ----------------------------------------------------------------
+
+  test("mutate: 単文 UPSERT_SELECT(APP ソース)を実行でき insert / update が混在する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } }, // C001 のみ既存 → update
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 10,
-    })).rejects.toThrow(/UPSERT_SELECT is not supported/);
+    });
+
+    expect(result).toMatchObject({ ok: true, type: "UPSERT", insertedCount: 1, updatedCount: 1 });
+    expect(calls.post).toBe(1); // C003 の INSERT
+    expect(calls.put).toBe(1); // C001 の UPDATE
+  });
+
+  test("mutate: 単文 UPSERT_SELECT は insert + update 合計が dmlMaxRows 超過なら書き込み前に拒否", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C002" } },
+        { $id: { value: "3" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // update 1 + insert 2 = 3 > dmlMaxRows 2。超過メッセージは operation("UPDATE")表記
+    await expect(tools.mutate({
+      sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/UPDATE affected rows \(3\) exceed dmlMaxRows \(2\)/);
+    expect(calls.post).toBe(0); // POST / PUT とも書き込み前に止まる
+    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: 単文 UPSERT_SELECT の source 読み取りは dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C002" } },
+        { $id: { value: "3" }, 顧客コード: { value: "C003" } },
+        { $id: { value: "4" }, 顧客コード: { value: "C004" } },
+      ],
+      300: [],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // dmlMaxRows = 2 → maxRecords = 3。source 4 行は読み取り段階(onLimit = error)で失敗
+    await expect(tools.mutate({
+      sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    expect(calls.post).toBe(0);
+    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: 単文 UPSERT_SELECT は照合読み取り(第1キー低選択性)も上限で書き込み前に失敗", async () => {
+    // 仕様 R2: 照合は第1キーのみの in (...) 検索のため、target 側で第1キー一致行が
+    // 多いと source 1 行でも読み取り上限エラーになり得る(安全側)。モック client は
+    // クエリを無視して target 全行を返すため、dmlMaxRows + 2 行置くだけで再現できる
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+      ],
+      300: [
+        { $id: { value: "11" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "12" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "13" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "14" }, 顧客コード: { value: "C001" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    await expect(tools.mutate({
+      sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    expect(calls.post).toBe(0);
+    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: 単文 UPSERT_SELECT でも DML 承認3点セットは必須", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.mutateTool({
+      sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
+      allowDml: true,
+      dmlMaxRows: 10,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { error: { message: string } }).error.message)
+      .toContain("confirmText");
   });
 
   test("mutate maps dmlMaxRows to runtime and returns mutation payload", async () => {
@@ -1109,15 +1210,80 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(1); // INSERT_SELECT の書き込み前に止まる
   });
 
-  test("mutate: UPSERT_SELECT はバッチでも引き続き拒否", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
+  test("mutate: バッチ内の APP ソース UPSERT_SELECT を実行できる(v1.6.0 解禁)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } }, // update 対象
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "INSERT INTO APP100 (x) VALUES ('a'); " +
+        "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP200 ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 10,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[0]).toMatchObject({ type: "INSERT", status: "success", insertedCount: 1 });
+    expect(result.statements[1]).toMatchObject({
+      type: "UPSERT_SELECT",
+      status: "success",
+      insertedCount: 1,
+      updatedCount: 1,
+    });
+    expect(calls.put).toBe(1);
+  });
+
+  test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と UPSERT_SELECT(confirm)を二重計上なしで合算する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // INSERT VALUES 2 行(静的) + UPSERT_SELECT 2 行(update 1 + insert 1、confirm 加算) = 4 > 3
+      sql:
+        "INSERT INTO APP100 (x) VALUES ('a'), ('b'); " +
+        "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP200 ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 10,
+      dmlTotalMaxRows: 3,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", insertedCount: 2 });
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
+    expect(calls.put).toBe(0); // UPSERT_SELECT の書き込み前に止まる
+    expect(calls.post).toBe(1); // 先行 INSERT の1回のみ
+  });
+
+  test("mutate: 一時テーブルソースの UPSERT_SELECT はエンジン層で実行前に拒否(エンジン未対応)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({});
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
     await expect(
       tools.mutate({
         ...MUTATE_BASE,
-        sql: "DELETE FROM APP100 WHERE $id = 1; UPSERT INTO APP100 (x) SELECT x FROM APP200 ON DUPLICATE (x)",
+        sql:
+          "CREATE TEMP TABLE #t AS SELECT 顧客コード FROM APP100;" +
+          "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM #t ON DUPLICATE (顧客コード)",
         dmlMaxRows: 10,
       })
-    ).rejects.toThrow(/UPSERT_SELECT is not supported by ksql_mutate yet\. \(statement 1\)/);
+    ).rejects.toThrow(/temp table references in UPSERT_SELECT are not supported yet\./);
+    expect(calls.get).toBe(0); // validate-all-first: 1文も実行されない
+    expect(calls.post).toBe(0);
   });
 
   // ----------------------------------------------------------------

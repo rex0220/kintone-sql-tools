@@ -502,15 +502,16 @@ Phase 1.5 / Phase 2 で初期実装する。
 
 1. `INSERT`（VALUES 形式）
 2. `INSERT_SELECT`（v1.5.0 で解禁。単文・バッチとも。ソースは APP のみ、または一時テーブルのみ）
-3. `UPDATE`
-4. `UPSERT`
-5. `DELETE`
-6. `REORDER`
+3. `UPSERT_SELECT`（v1.6.0 で解禁。単文・バッチとも。**ソースは APP のみ** — 一時テーブルソースはエンジン未対応）
+4. `UPDATE`
+5. `UPSERT`
+6. `DELETE`
+7. `REORDER`
 
-拒否する文:
+拒否する文（いずれも実行前拒否）:
 
-1. `UPSERT_SELECT`（insert / update 件数が既存レコード照合後まで確定しないため。§7.6.2）
-2. ソースに APP と一時テーブルが混在する `INSERT_SELECT`（実行エンジン層の validate-all-first が実行前に拒否）
+1. ソースに APP と一時テーブルが混在する `INSERT_SELECT`（実行エンジン層の validate-all-first）
+2. 一時テーブルソースの `UPSERT_SELECT`（実行エンジン層。`executeUpsertSelect` が一時テーブル注入に未対応）
 
 `INSERT_SELECT` は初期実装（〜v1.4.1）では拒否していたが、v1.4.0（M4）で `executeInsertSelect()` に
 書き込み前 confirm hook が実装された（source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")`）
@@ -521,41 +522,53 @@ source SELECT の読み取りは `maxRecords = dmlMaxRows + 1`（`onLimit = "err
 （`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）に収まる場合のみで、それを超える大規模集計は非対応。
 経緯と安全モデルの詳細は `docs/internal/ksql_mcp_insert_select_app_source_spec.md` を参照。
 
-### 7.6.1 SELECT-based DML のリスク（v1.5.0 時点の再評価）
+`UPSERT_SELECT` は v1.6.0 で解禁した。`executeUpsertSelect()` は source SELECT → 列数・キー検証 →
+既存レコード照合 → `confirm(toInsert + toUpdate, "UPDATE")` → POST / PUT の順で実行し、confirm は
+**照合後・書き込み前**に呼ばれるため `dmlMaxRows` は確定件数（insert + update 合計）に対して効く。
+留意点: ①一時テーブルソースはエンジン未対応のため、大きい集計ソースの迂回路は INSERT_SELECT と異なり
+**存在しない**（read-only SELECT で事前確認して dmlMaxRows を設定する運用のみ）。②照合読み取りは
+第1キーのみの `in (...)` 検索のため、target 側で第1キーの重複が多いと source 行数が少なくても
+読み取り上限エラーになり得る（書き込み前の安全側の失敗）。③超過時のエラーは confirm の operation
+表記により `UPDATE affected rows ...` となる（UPSERT VALUES 形式と同じ）。
+経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md` を参照。
 
-`INSERT_SELECT` / `UPSERT_SELECT` は、通常の `INSERT VALUES` / `UPDATE` / `UPSERT` よりも MCP での安全制御が難しいとして初期実装では拒否していた。当初挙げたリスクの v1.5.0 時点の評価:
+### 7.6.1 SELECT-based DML のリスク（v1.6.0 時点の再評価）
 
-| リスク | 当初の内容 | v1.5.0 時点の評価 |
+`INSERT_SELECT` / `UPSERT_SELECT` は、通常の `INSERT VALUES` / `UPDATE` / `UPSERT` よりも MCP での安全制御が難しいとして初期実装では拒否していた。当初挙げたリスクの v1.6.0 時点の評価:
+
+| リスク | 当初の内容 | v1.6.0 時点の評価 |
 | --- | --- | --- |
-| 確認前の API 読み取り | source SELECT が書き込み確認より前に実行される | `ksql_mutate` 呼び出し自体が承認（`allowDml` / `confirmText`）であり、推奨していた一時テーブル経由のバッチ形も同じ承認の下で同じ読み取りを行うため、実質差なし |
+| 確認前の API 読み取り | source SELECT が書き込み確認より前に実行される | `ksql_mutate` 呼び出し自体が承認（`allowDml` / `confirmText`）であり、推奨していた一時テーブル経由のバッチ形も同じ承認の下で同じ読み取りを行うため、実質差なし。UPSERT（VALUES 形式・許可済み）も confirm 前に照合読み取りを行っており性質は同等 |
 | `INSERT_SELECT` の confirm 不足 | `executeInsertSelect()` が書き込み前に confirm を呼ばない | **v1.4.0（M4）で解消**。source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")` が呼ばれる |
-| `UPSERT_SELECT` の照合コスト | source SELECT 後、既存レコード照合が必要 | **未解決**。`UPSERT_SELECT` を拒否し続ける理由 |
+| `UPSERT_SELECT` の照合コスト | source SELECT 後、既存レコード照合が必要 | **v1.6.0 で解禁時に評価済み**。照合はユニークキー組（≦ source 行数 ≦ dmlMaxRows + 1）の第1キー `in (...)` チャンク検索で、各 fetch は `maxRecords = dmlMaxRows + 1` 拘束（超過は安全側エラー）。第1キーが低選択性の場合は source が少なくても上限エラーになり得る |
 | MCP 側 preflight の二重実行 / TOCTOU | 件数確認 SELECT と本実行の二重化・不一致 | preflight を行わない方式（エンジン内 confirm）を採用したため発生しない。SELECT 結果を実体化してから POST するため confirm 時点の件数と書き込み件数は一致する |
-| 件数の意味の曖昧さ | `UPSERT_SELECT` は insert / update 件数が混在 | `UPSERT_SELECT` のみの問題。別フェーズで整理 |
+| 件数の意味の曖昧さ | `UPSERT_SELECT` は insert / update 件数が混在 | **v1.6.0 で明文化により解消**。`dmlMaxRows` は insert + update **合計**に適用（実装は従来から合計を confirm に渡しており、UPSERT VALUES 形式と同じ意味論） |
 | 大量読み取り | — | source SELECT は `maxRecords = dmlMaxRows + 1`・`onLimit = "error"` で拘束される |
 
 ### 7.6.2 SELECT-based DML の対応方針（達成状況）
 
-当初の段階対応と v1.5.0 時点の状況:
+当初の段階対応と v1.6.0 時点の状況:
 
 1. `executeInsertSelect()` に source SELECT 後・POST 前の confirm hook を追加する — **済（v1.4.0 M4）**
-2. `ExecuteOptions.confirm` を operation 種別付きの object 引数へ拡張する — 未着手（現行の `(count, operation)` 形式で `INSERT_SELECT` は成立。`UPSERT_SELECT` 対応時に §7.6.3 とあわせて検討）
+2. `ExecuteOptions.confirm` を operation 種別付きの object 引数へ拡張する — **見送り**（現行の `(count, operation)` 形式で INSERT_SELECT / UPSERT_SELECT とも成立。operation の `"UPSERT"` 表記を導入する場合の将来課題として残す）
 3. MCP の `ksql_mutate` に `allowSelectBasedDml: true` を追加する — **不採用（v1.5.0）**。フラグ案は confirm 未実装時代の前提であり、既存の `allowDml` + `confirmText` + `dmlMaxRows` で書き込み承認は表現済み。入力仕様の分岐を増やすことは MCP クライアントの誤用・誤学習の温床になる
-4. `INSERT_SELECT` のみ先に解禁する — **済（v1.5.0 本対応）**
-5. `UPSERT_SELECT` は API call 数・insert/update 内訳・rate limit の扱いを整理してから別フェーズで解禁する — 未着手
+4. `INSERT_SELECT` のみ先に解禁する — **済（v1.5.0）**
+5. `UPSERT_SELECT` を解禁する — **済（v1.6.0）**。照合コスト・insert/update 内訳の扱いは §7.6.1 の再評価と `dmlMaxRows` の合計適用の明文化で整理した
 
-`UPSERT_SELECT` は、source SELECT 件数だけでは実際の insert/update 件数が確定しない。
-既存レコード照合後に `toInsert.length + toUpdate.length` を確認する必要があるため、`INSERT_SELECT` より後のフェーズで扱う。
+`UPSERT_SELECT` の件数は source SELECT 件数だけでは確定しないが、`executeUpsertSelect()` は
+既存レコード照合後に `toInsert.length + toUpdate.length` を confirm に渡すため、
+`dmlMaxRows` ガードは確定件数に対して書き込み前に機能する。
 
-### 7.6.3 将来の confirm hook 仕様案（`UPSERT_SELECT` 対応時の課題）
+### 7.6.3 confirm hook の現行仕様と将来の拡張案
 
-現行の `ExecuteOptions.confirm` は以下の形で、`INSERT_SELECT` はこの形式のまま対応済み。
+現行の `ExecuteOptions.confirm` は以下の形で、`INSERT_SELECT` / `UPSERT_SELECT` ともこの形式のまま対応済み
+（UPSERT 系は operation `"UPDATE"` で合計件数を渡す）。
 
 ```ts
 confirm?: (count: number, operation: "UPDATE" | "DELETE" | "INSERT") => Promise<boolean>;
 ```
 
-`UPSERT_SELECT` を安全に扱うには、operation と statement type をより明示できる object 型へ拡張する。
+operation と statement type をより明示できる object 型への拡張は、`"UPSERT"` 表記の導入とセットの将来課題。
 
 ```ts
 confirm?: (info: {
@@ -592,18 +605,18 @@ confirmMutation?: (info: {
 4. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST は行われない）
 5. 確認成功後に転送先フィールド型を解決し、100 件ごとに POST する
 
-`UPSERT_SELECT` 対応時の想定フロー:
+`UPSERT_SELECT` の実装済みフロー（confirm hook は初回公開実装から存在、v1.6.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行する
-2. key field を検証する
-3. 既存レコード照合を行い、`toInsert` / `toUpdate` を確定する
-4. `confirmMutation({ count: toInsert.length + toUpdate.length, operation: "UPSERT", statementType: "UPSERT_SELECT", phase: "beforeWrite" })` を呼ぶ
-5. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる
-6. 確認成功後に POST / PUT する
+1. source SELECT を実行する（`maxRecords = dmlMaxRows + 1`・`onLimit = "error"`）
+2. SELECT 列数と UPSERT フィールド数の一致・key field を検証する
+3. 既存レコード照合（第1キーの `in (...)` チャンク検索、各 fetch は同 maxRecords 拘束）で `toInsert` / `toUpdate` を確定する
+4. `confirm(toInsert.length + toUpdate.length, "UPDATE")` を呼ぶ
+5. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST / PUT は行われない）
+6. 確認成功後に 100 件ごとに POST / PUT する
 
-### 7.6.4 SELECT-based DML の MCP 入力（v1.5.0）
+### 7.6.4 SELECT-based DML の MCP 入力（v1.5.0 / v1.6.0）
 
-`INSERT_SELECT` は通常 DML と同じ承認入力で実行する。当初案にあった追加フラグ
+`INSERT_SELECT` / `UPSERT_SELECT` は通常 DML と同じ承認入力で実行する。当初案にあった追加フラグ
 `allowSelectBasedDml` は**不採用**（理由は §7.6.2-3）。
 
 ```json
@@ -619,8 +632,8 @@ confirmMutation?: (info: {
 解禁後も、以下は必須とする。
 
 1. `dmlMaxRows` による上限確認（confirm hook 経由。書き込み前）
-2. confirm hook が呼ばれない文種は実行しない（`UPSERT_SELECT` を拒否し続ける理由）
-3. `UPSERT_SELECT` を将来解禁する場合は insert/update 合計件数を `dmlMaxRows` と比較する
+2. confirm hook が呼ばれない文種は実行しない
+3. `UPSERT_SELECT` は insert/update **合計**件数を `dmlMaxRows` と比較する（v1.6.0 で明文化。実装は従来から合計を渡す）
 4. `ksql_explain` または read-only SELECT による事前確認を推奨する
 
 安全条件:
@@ -634,7 +647,7 @@ confirmMutation?: (info: {
 7. `EXPLAIN` 結果または直前の validation 結果を要求するモードを検討する
 
 DML の対象件数確認は、`execute()` の `ExecuteOptions.confirm` コールバックで行う。
-`UPDATE` / `DELETE` / `UPSERT` / `REORDER` / `INSERT_SELECT` は実行エンジンが対象 ID または対象件数を解決した後（`INSERT_SELECT` は source SELECT 実行後・POST 前）に `confirm(count, operation)` を呼ぶため、MCP 側ではこの `count` を `dmlMaxRows` と比較し、超過時は false ではなく `ArgumentError` として拒否する。
+`UPDATE` / `DELETE` / `UPSERT` / `REORDER` / `INSERT_SELECT` / `UPSERT_SELECT` は実行エンジンが対象 ID または対象件数を解決した後（SELECT-based DML は source SELECT 実行後・書き込み前）に `confirm(count, operation)` を呼ぶため、MCP 側ではこの `count` を `dmlMaxRows` と比較し、超過時は false ではなく `ArgumentError` として拒否する。
 
 `INSERT`（VALUES 形式）は `confirm` が呼ばれないため、`execute()` を呼ぶ前に `parseSqlStatement()` の結果から `stmt.values.length` を取得し、`dmlMaxRows` と比較する。
 

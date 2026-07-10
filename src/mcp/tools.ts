@@ -560,11 +560,10 @@ export function createKsqlMcpTools(
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      // INSERT_SELECT は v1.5.0 で APP ソースも解禁。件数判定は confirm フック（POST 前）が担い、
-      // 混在ソース（APP + 一時テーブル）はエンジン層 executeBatch の validate-all-first が実行前に拒否する
-      if (s.statementType === "UPSERT_SELECT") {
-        throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
-      }
+      // SELECT-based DML は解禁済み（INSERT_SELECT: v1.5.0 / UPSERT_SELECT: v1.6.0）。
+      // 件数判定は書き込み前の confirm フックが担い、一時テーブル参照の可否
+      // （INSERT_SELECT の混在ソース拒否・UPSERT_SELECT の temp ソース未対応）は
+      // エンジン層 executeBatch の validate-all-first が実行前に拒否する
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }
@@ -592,7 +591,7 @@ export function createKsqlMcpTools(
     });
 
     // バッチ合計の影響行数（INSERT(VALUES) は静的、confirm を呼ぶ文種
-    // = UPDATE / DELETE / UPSERT / INSERT_SELECT / REORDER は実行時加算）
+    // = UPDATE / DELETE / UPSERT / INSERT_SELECT / UPSERT_SELECT / REORDER は実行時加算）
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
@@ -627,11 +626,9 @@ export function createKsqlMcpTools(
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
-    // INSERT_SELECT は v1.5.0 で解禁(単文・バッチとも)。書き込み前の件数判定は
-    // executeInsertSelect の confirm フック(source SELECT 実行後・POST 前)が担う
-    if (validation.statementType === "UPSERT_SELECT") {
-      throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
-    }
+    // SELECT-based DML は解禁済み(INSERT_SELECT: v1.5.0 / UPSERT_SELECT: v1.6.0)。
+    // 書き込み前の件数判定は実行エンジンの confirm フックが担う
+    // (INSERT_SELECT: source 行数、UPSERT_SELECT: 照合後の insert + update 合計)
     if ((validation.statementType === "UPDATE" || validation.statementType === "DELETE") && !validation.hasWhere) {
       throw new Error(`ArgumentError: ${validation.statementType} without WHERE is blocked by ksql_mutate.`);
     }

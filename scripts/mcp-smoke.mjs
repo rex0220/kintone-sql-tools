@@ -89,9 +89,11 @@ function assertToolDescriptions(tools) {
   const queryKeys = ["multi-statement batches with temp tables"];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
-    // v1.5.0: APP ソース INSERT_SELECT 解禁(単文・バッチ)。UPSERT_SELECT のみ拒否が残る
+    // v1.5.0: APP ソース INSERT_SELECT 解禁(単文・バッチ)
     "INSERT INTO app ... SELECT is supported",
-    "UPSERT ... SELECT is rejected",
+    // v1.6.0: APP ソース UPSERT_SELECT 解禁(temp ソースはエンジン未対応、dmlMaxRows は insert + update 合計)
+    "UPSERT INTO app ... SELECT is supported",
+    "counts inserts + updates",
   ];
   const query = getTool(tools, "ksql_query");
   for (const key of queryKeys) {
@@ -127,7 +129,8 @@ function assertParamDescriptions(tools) {
     }
   }
 
-  // v1.5.0: dmlMaxRows が INSERT_SELECT の source SELECT 読み取り上限を兼ねることを describe で宣言する
+  // v1.5.0: dmlMaxRows が SELECT-based DML の source SELECT 読み取り上限を兼ねること、
+  // v1.6.0: UPSERT_SELECT では insert + update 合計を数えることを describe で宣言する
   //（ksql_run_saved_query の DML 経路は mutate() 委譲のため同じ制約が効く。両ツールで固定する）
   for (const toolName of ["ksql_mutate", "ksql_run_saved_query"]) {
     const dmlMaxRowsDesc =
@@ -135,6 +138,10 @@ function assertParamDescriptions(tools) {
     assert(
       dmlMaxRowsDesc.includes("caps the source SELECT read"),
       `${toolName}.dmlMaxRows description must mention the source SELECT read cap.`
+    );
+    assert(
+      dmlMaxRowsDesc.includes("counts inserts + updates"),
+      `${toolName}.dmlMaxRows description must mention the UPSERT inserts + updates total.`
     );
   }
 }
