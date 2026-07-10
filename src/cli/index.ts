@@ -68,6 +68,7 @@ Options:
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
+                             (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
