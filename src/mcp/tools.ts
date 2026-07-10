@@ -14,6 +14,7 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { buildBatchEnvelope } from "../output/batchEnvelope";
 import {
   buildCacheContext,
   normalizeSqlAppProfiles,
@@ -222,80 +223,6 @@ function toAssertPayload(result: AssertResult) {
     ok: true,
     type: result.type,
     condition: result.condition,
-  };
-}
-
-/** ミューテーション結果から影響件数フィールドを取り出す（文ごとエンベロープ用） */
-function toMutationSummary(result: Exclude<ExecuteResult, SelectResult | AssertResult>): Record<string, unknown> {
-  if (result.type === "INSERT") {
-    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
-  }
-  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
-  if (result.type === "DELETE") return { deletedCount: result.deletedCount };
-  if (result.type === "UPSERT") {
-    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
-  }
-  return { reorderedParentCount: result.reorderedParentCount };
-}
-
-/**
- * バッチ実行結果を仕様 §6.2 のエンベロープに整形する。
- * - results には結果セットを返した read-only 文の結果のみ入れる
- *   （CREATE TEMP TABLE の実体化結果は tempTable / rowCount のみ）
- * - DML 文の影響件数は statements[] のエントリに展開する（途中失敗時に
- *   「どこまで反映されたか」を文ごとに読み取れるようにする）
- * - maxTotalRecords 指定時は返却合計行数を超えた時点でエラー
- */
-function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number) {
-  const results: Array<{
-    columns: string[];
-    rows: SelectResult["rows"];
-    rowCount: number;
-    warnings: string[];
-  }> = [];
-  let totalRows = 0;
-
-  const statements = batch.statements.map((s) => {
-    const entry: Record<string, unknown> = {
-      index: s.index,
-      type: s.type,
-      status: s.status,
-    };
-    if (s.status === "error" && s.error) entry.error = s.error;
-    if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
-    if (s.tempTable !== undefined) entry.tempTable = s.tempTable;
-    if (s.rowCount !== undefined) entry.rowCount = s.rowCount;
-
-    if (s.status === "success" && s.result?.type === "SELECT") {
-      totalRows += s.result.rowCount;
-      if (maxTotalRecords !== undefined && totalRows > maxTotalRecords) {
-        throw new Error(
-          `ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`
-        );
-      }
-      entry.resultIndex = results.length;
-      results.push({
-        columns: s.result.columns,
-        rows: s.result.rows,
-        rowCount: s.result.rowCount,
-        warnings: s.result.warnings ?? [],
-      });
-    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
-      // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない
-      //（ExecuteResult 型上は含まれるため型の除外も兼ねる）
-      Object.assign(entry, toMutationSummary(s.result));
-    }
-    return entry;
-  });
-
-  return {
-    ok: batch.ok,
-    batch: true,
-    statementCount: batch.statementCount,
-    statements,
-    results,
-    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
-    warnings: [] as string[],
   };
 }
 
@@ -550,7 +477,7 @@ export function createKsqlMcpTools(
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime.timeout,
       });
-      return toBatchQueryPayload(batchResult, input.maxTotalRecords);
+      return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
 
     if (!validation.isReadOnly) {
@@ -669,7 +596,7 @@ export function createKsqlMcpTools(
         return true;
       },
     });
-    const payload = toBatchQueryPayload(batchResult);
+    const payload = buildBatchEnvelope(batchResult);
     // SELECT-based DML 文の読み取り上限エラー（バッチでは文ごとの結果に埋め込まれる）
     // にヒントを付与する
     if (selectBasedDml) {
@@ -681,7 +608,7 @@ export function createKsqlMcpTools(
         entry.error = { ...error, message: `${error.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}` };
       }
     }
-    return payload;
+    return { ...payload };
   }
 
   async function mutate(input: MutateInput): Promise<Record<string, unknown>> {
