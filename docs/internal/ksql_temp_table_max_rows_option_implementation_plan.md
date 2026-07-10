@@ -2,10 +2,11 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R4(実装完了): T1〜T7 実装済み(ブランチ `feat/temp-table-max-rows-option`、ステップごとにコミット)。T5 は計画どおり assertion 先行 → 旧バンドル(v1.10.0 dist-mcp)で `ksql_query.tempTableMaxRows input is missing.` の fail を確認してから T6 を適用(regression ガード証明済み)。テスト: runtime 解決チェーン5件 / MCP スキーマ・受け渡し・不変条件7件(10,001 行実体化の成功・未指定回帰・truncate 不適用・dmlMaxRows 独立)/ CLI パース・console 伝搬3件。jest 731 件パス(console.e2e の1件は既知の並列コールドラン・フレークで単独再実行 green)・tsc 既存10件のみ・`npm run build` 全成果物・mcp:smoke / mcp:pack-smoke / mcpb:verify ok・dist-cli 直実行でフラグ受理 + 新 EXPLAIN 文言を確認。テスト都合の変更: `buildReplExecArgv` を export(パターン: parseArgs 等のテスト用 export と同型)。残り: T8-4 実機確認(ユーザー実施)・PR 作成・リリース(バージョン bump はリリース時)
   - 2026-07-11 R3(codex レビュー反映): ①T8 — 成果物再生成を `npm run build` 全体に明示(`bin.ksql` は `dist-cli/ksql.js` を指すため T3 のフラグ追加は **build:cli 必須**。加えて T4 の EXPLAIN 文言変更で `src/execute.ts` → `prod/js/desktop.js` も変わるため、v1.7.0 の教訓どおりプラグイン zip の再パッケージ・release/ 同梱も対象)②T2 設計メモ — `resolveMutateRuntimeMaxRecords` の表現を R2 後の仕様に整合(「dmlMaxRows 連動」→「現行分岐を維持。SELECT-based DML では undefined = runtime maxRecords」)
   - 2026-07-11 R2(codex レビュー反映・仕様 R2 追従): ①T6 — `run_saved_query` の `dmlMaxRows` describe は「adjustable via tempTableMaxRows」に**しない**(存在しない入力の示唆防止。temp table 節を削除し単文限定を明示)②T3 — CLI ヘルプ変更時に README の HELP_SYNC ブロックを同時更新 ③T7 — `ksql_mcp_server_spec.md` / `ksql_cli_console_spec.md` / README HELP_SYNC を必須更新対象に明示
   - 2026-07-11 R1: 初版(仕様案 R1 ドラフトを受けて作成)
-- ステータス: **確定(codex レビュー完了)・実装着手**
+- ステータス: **実装済み(T1〜T7 + T8 検証)**。残り: 実機確認(ユーザー実施)・PR・リリース
 - 対象バージョン: **v1.11.0**(機能追加のため minor バンプ)
 - 仕様: [ksql_temp_table_max_rows_option_spec.md](ksql_temp_table_max_rows_option_spec.md)
 - 推奨ブランチ: `feat/temp-table-max-rows-option`(単一ブランチ・単一 PR)
