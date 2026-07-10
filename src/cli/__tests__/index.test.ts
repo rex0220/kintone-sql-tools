@@ -1,4 +1,5 @@
 import {
+  buildReplExecArgv,
   extractAppIds,
   normalizeAppKey,
   normalizeSqlAppProfiles,
@@ -149,6 +150,29 @@ describe("cli helpers", () => {
   test("parseArgs parses fetch-parallel", () => {
     const args = parseArgs(["--fetch-parallel", "5", "-e", "SELECT * FROM APP100"]);
     expect(args.fetchParallel).toBe(5);
+  });
+
+  test("parseArgs parses temp-table-max-rows", () => {
+    const args = parseArgs(["--temp-table-max-rows", "20000", "-e", "SELECT * FROM APP100"]);
+    expect(args.tempTableMaxRows).toBe(20000);
+  });
+
+  test("parseArgs validates temp-table-max-rows as positive integer", () => {
+    for (const invalid of ["0", "-1", "1.5", "abc"]) {
+      expect(() => parseArgs(["--temp-table-max-rows", invalid, "-e", "SELECT 1"]))
+        .toThrow(/--temp-table-max-rows must be a positive integer/);
+    }
+  });
+
+  test("buildReplExecArgv propagates temp-table-max-rows to console child exec", () => {
+    const base = parseArgs(["--console", "--temp-table-max-rows", "20000"]);
+    const argv = buildReplExecArgv(base, "SELECT 1", false, null);
+    const idx = argv.indexOf("--temp-table-max-rows");
+    expect(idx).toBeGreaterThan(-1);
+    expect(argv[idx + 1]).toBe("20000");
+    // 未指定なら子実行 argv に現れない
+    const argvDefault = buildReplExecArgv(parseArgs(["--console"]), "SELECT 1", false, null);
+    expect(argvDefault).not.toContain("--temp-table-max-rows");
   });
 
   test("parseArgs validates fetch-parallel range", () => {

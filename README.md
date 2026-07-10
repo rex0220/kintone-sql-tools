@@ -125,6 +125,7 @@ Options:
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
+  --temp-table-max-rows <n>  Max rows per temp table (default: 10000, always errors on overflow)
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
                              (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)

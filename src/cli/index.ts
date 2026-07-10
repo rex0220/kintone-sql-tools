@@ -73,6 +73,7 @@ Options:
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
+  --temp-table-max-rows <n>  Max rows per temp table (default: 10000, always errors on overflow)
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
                              (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
@@ -134,6 +135,8 @@ interface CliConfig {
       fetchParallel?: number;
       onLimit?: OnLimitMode;
       timeout?: number;
+      /** 一時テーブル1個の実体化行数上限（既定 10,000。超過は onLimit 設定によらず常に error） */
+      tempTableMaxRows?: number;
       /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
       maxConcurrent?: number;
       /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
@@ -177,6 +180,7 @@ interface ParsedArgs {
   maxRecords: number | null;
   fetchParallel: number | null;
   onLimit: OnLimitMode | null;
+  tempTableMaxRows: number | null;
   timeout: number | null;
   configPath: string | null;
   profile: string | null;
@@ -227,6 +231,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     maxRecords: null,
     fetchParallel: null,
     onLimit: null,
+    tempTableMaxRows: null,
     timeout: null,
     configPath: null,
     profile: null,
@@ -356,6 +361,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(v);
       if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --max-records must be a positive integer.");
       out.maxRecords = n;
+      i++;
+      continue;
+    }
+    if (a === "--temp-table-max-rows") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --temp-table-max-rows must be a positive integer.");
+      out.tempTableMaxRows = n;
       i++;
       continue;
     }
@@ -906,7 +918,7 @@ function pushOpt(argv: string[], key: string, value: string | number | null | un
   argv.push(key, String(value));
 }
 
-function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, format: OutputFormat | null): string[] {
+export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, format: OutputFormat | null): string[] {
   const argv: string[] = ["-e", sql];
   if (dryRun) argv.push("--dry-run");
   if (format) argv.push("--format", format);
@@ -924,6 +936,7 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   pushOpt(argv, "--max-records", base.maxRecords);
   pushOpt(argv, "--fetch-parallel", base.fetchParallel);
   pushOpt(argv, "--on-limit", base.onLimit);
+  pushOpt(argv, "--temp-table-max-rows", base.tempTableMaxRows);
   pushOpt(argv, "--timeout", base.timeout);
   pushOpt(argv, "--output", base.outputPath);
   pushOpt(argv, "--user-format", base.userFormat);
@@ -1534,6 +1547,11 @@ async function run(): Promise<number> {
   const fetchParallel = args.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? 3;
   const onLimit = args.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile.query?.onLimit ?? "error";
   const timeout = args.timeout ?? envInt("KSQL_TIMEOUT") ?? profile.query?.timeout ?? 30000;
+  // 一時テーブル実体化上限。既定（10,000）はエンジン層 TEMP_TABLE_MAX_ROWS に委ねる（undefined のまま）
+  const tempTableMaxRows = args.tempTableMaxRows
+    ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS")
+    ?? profile.query?.tempTableMaxRows
+    ?? undefined;
   if (!Number.isInteger(fetchParallel) || fetchParallel < 1 || fetchParallel > 10) {
     process.stderr.write("ArgumentError: fetch-parallel must be an integer between 1 and 10.\n");
     return 2;
@@ -1907,6 +1925,7 @@ async function run(): Promise<number> {
         onLimitReached: onLimit,
         cacheContext,
         continueOnError: args.continueOnError,
+        tempTableMaxRows,
         timeoutMs: timeout,
         confirm: batchContainsDml
           ? async (count, operation) => {
