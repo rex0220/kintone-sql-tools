@@ -1699,7 +1699,7 @@ SELECT 部門 FROM APP200;
 
 - read-only 文のみのバッチは `ksql_query` / CLI / プラグインがそのまま実行します。**DML を含むバッチ**は `ksql_mutate`（`dmlMaxRows` は文ごと + 任意の `dmlTotalMaxRows` で合計ガード）、CLI `--allow-dml`（確認プロンプトはバッチ全体で1回、`--yes` でスキップ）、またはプラグイン（文ごとの確認ダイアログ — v1.9.0）で実行します。DML バッチは常に fail-fast です
 - SELECT-based DML（`INSERT INTO APPxxx ... SELECT` / `UPSERT INTO APPxxx ... SELECT ... ON DUPLICATE`）のソースは **APP・一時テーブル・両者の混在（JOIN・サブクエリ）のいずれも指定できます**（v1.5.0〜v1.7.0 で段階解禁）。件数には書き込み前の確認で `dmlMaxRows` が適用され（UPSERT は insert + update の**合計**）、超過時は当該文ゼロ書き込みでエラーになります
-- SELECT-based DML の読み取り上限はソース種類ごとに異なります: **APP ソースの読み取りは `maxRecords` の通常解決値（`KSQL_MAX_RECORDS` / profile の `query.maxRecords`、既定 500 件）**（超過は書き込み前の安全側エラー。JOIN の APP 側も同様。`dmlMaxRows` は影響行数ガード専用で読み取りを絞りません — v1.8.0）、**一時テーブルは実体化上限 10,000 行**。UPSERT 系では書き込み先アプリへの既存レコード照合読み取りが**ソース種類に関わらず**発生します（一時テーブルに実体化しても回避されません）
+- SELECT-based DML の読み取り上限はソース種類ごとに異なります: **APP ソースの読み取りは `maxRecords` の通常解決値（`KSQL_MAX_RECORDS` / profile の `query.maxRecords`、既定 500 件）**（超過は書き込み前の安全側エラー。JOIN の APP 側も同様。`dmlMaxRows` は影響行数ガード専用で読み取りを絞りません — v1.8.0）、**一時テーブルは実体化上限 既定 10,000 行（`tempTableMaxRows` で変更可 — v1.11.0）**。UPSERT 系では書き込み先アプリへの既存レコード照合読み取りが**ソース種類に関わらず**発生します（一時テーブルに実体化しても回避されません）
 - 実行前に全文を検証し、1文でも不正ならバッチ全体を拒否します（validate-all-first）
 - 既定は fail-fast（エラー文以降はスキップ）。`--continue-on-error`（CLI）/ `continueOnError`（MCP）でエラー後の続行を選べます
 - 結果は文ごとに `success` / `error` / `skipped` として報告されます
@@ -1725,7 +1725,7 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 | 名前 | `#` + 識別子（例: `#temp` / `#集計`）。`#` は一時テーブル名の先頭のみで有効。エイリアスには使用不可 |
 | 寿命 | **バッチ内のみ**。呼び出し終了で自動破棄（呼び出しをまたぐ参照は不可） |
 | 破棄 | `DROP TEMP TABLE #名前`（主にメモリの早期解放用。DROP 後の同名再 CREATE は可） |
-| 上限 | 同時 16 個・1個あたり 10,000 行（超過は常にエラー） |
+| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。行数上限は v1.11.0 から `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows`）。変更しても超過時は truncate されず常にエラー |
 | DML | 一時テーブルへの INSERT / UPDATE / DELETE は非対応 |
 | 実行 | 参照は常にインメモリ FULL_SCAN（kintone クエリへの WHERE プッシュダウンは効かない） |
 

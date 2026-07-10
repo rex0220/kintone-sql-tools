@@ -378,6 +378,12 @@ tool input として受ける場合も、`execute()` ではなく runtime/client
 
 - `continueOnError`: 実行時エラー後も後続文を実行する（既定 false = fail-fast）
 - `maxTotalRecords`: 返却する結果セットの合計行数上限（超過はエラー）
+- `tempTableMaxRows`（v1.11.0）: 一時テーブル1個の実体化行数上限。解決順は
+  tool input → env `KSQL_TEMP_TABLE_MAX_ROWS` → profile `query.tempTableMaxRows` →
+  エンジン既定 `TEMP_TABLE_MAX_ROWS`（10,000）。**超過は `onLimit` 設定によらず常にエラー**
+  （truncate による暗黙の欠損が後続文を静かに歪めるため。batch spec §5.6）。
+  `ksql_mutate` でも同名 input を受ける。上限を引き上げるとバッチ内最大16テーブル ×
+  指定値がメモリに滞留し得る点に注意
 
 バッチ時の `timeout` は**バッチ合計**のタイムアウトとして扱う。
 
@@ -539,7 +545,9 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 APP テーブルの fetch は **runtime の通常 `maxRecords` 解決**（`KSQL_MAX_RECORDS` →
 profile `query.maxRecords` → 既定 500。`onLimit = "error"` 固定）に従い、
 `dmlMaxRows` はソース読み取りを**絞らない**（影響行数ガード専用）。
-一時テーブルは実体化上限（`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）の下にある。
+一時テーブルは実体化上限（既定 `TEMP_TABLE_MAX_ROWS` = 10,000 行。v1.11.0 から tool input
+`tempTableMaxRows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` で変更可。
+超過は常にエラー）の下にある。
 〜v1.7.0 は APP fetch も `maxRecords = dmlMaxRows + 1` で拘束していたが、
 「書き込みは少数だがソース読み取りは大量」という JOIN・集計ソースで、
 MCP クライアントが影響行数基準で小さい `dmlMaxRows` を選ぶと読み取り上限エラーになる
@@ -635,7 +643,7 @@ confirmMutation?: (info: {
 
 `INSERT_SELECT` の実装済みフロー（v1.4.0 M4 で confirm hook 実装、v1.5.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行して行数を確定する（**APP ソースの fetch は runtime `maxRecords`（既定 500）・`onLimit = "error"`**（v1.8.0。〜v1.7.0 は `dmlMaxRows + 1`）。一時テーブルソースは実体化済み行のメモリ注入で追加読み取りなし — 実体化自体は 10,000 行上限。v1.7.0 以降は両者の混在も可）
+1. source SELECT を実行して行数を確定する（**APP ソースの fetch は runtime `maxRecords`（既定 500）・`onLimit = "error"`**（v1.8.0。〜v1.7.0 は `dmlMaxRows + 1`）。一時テーブルソースは実体化済み行のメモリ注入で追加読み取りなし — 実体化自体は `tempTableMaxRows`（既定 10,000 行）上限。v1.7.0 以降は両者の混在も可）
 2. SELECT 列数と INSERT フィールド数の一致を検証する
 3. `confirm(rows.length, "INSERT")` を呼ぶ
 4. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST は行われない）

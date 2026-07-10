@@ -86,6 +86,10 @@ kintone-sql-tools/
 5. `--diag-record-id <id>`
 6. `--max-records <n>`
 7. `--on-limit <error|truncate>`
+8. `--temp-table-max-rows <n>`（v1.11.0。一時テーブル1個の実体化行数上限。既定 10,000 =
+   エンジン `TEMP_TABLE_MAX_ROWS`。解決順はフラグ → env `KSQL_TEMP_TABLE_MAX_ROWS` →
+   profile `query.tempTableMaxRows` → 既定。超過は `--on-limit` 設定によらず常にエラー。
+   console の `:run` 子実行にも自動伝搬する）
 
 出力系:
 
