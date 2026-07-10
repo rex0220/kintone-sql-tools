@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-09
 - 更新履歴:
-  - 2026-07-11 R41(v1.11.0): 一時テーブル行数上限を可変化(§5.6 改訂)。エンジン既存の `tempTableMaxRows` を MCP `ksql_query`/`ksql_mutate` の tool input・CLI `--temp-table-max-rows`・env `KSQL_TEMP_TABLE_MAX_ROWS`・profile `query.tempTableMaxRows` として公開。既定 10,000・「超過は常に error(truncate 不適用)」は不変。仕様は `docs/internal/ksql_temp_table_max_rows_option_spec.md`
+  - 2026-07-11 R41(v1.11.0): 一時テーブル行数上限を可変化(§5.6 改訂)。エンジン既存の `tempTableMaxRows` を MCP `ksql_query`/`ksql_mutate` の tool input・CLI `--temp-table-max-rows`・env `KSQL_TEMP_TABLE_MAX_ROWS`・profile `query.tempTableMaxRows`・プラグイン実行画面の取得オプションパネル(空欄 = 既定)として公開。既定 10,000・「超過は常に error(truncate 不適用)」は不変。仕様は `docs/internal/ksql_temp_table_max_rows_option_spec.md`
   - 2026-07-10 R40(v1.9.0): プラグイン UI の DML バッチを解禁(§8.4 改訂)。文ごとの確認ダイアログ(confirm フックに optional 第3引数 `DmlConfirmContext` を追加 — CLI / MCP は後方互換で無影響)、INSERT VALUES の実行前静的確認(単文も併修)、DML サマリ行、キャンセル表示。設計経緯は `docs/internal/ksql_plugin_dml_batch_spec.md`
   - 2026-07-10 R39(v1.7.0): SELECT-based DML のソース制限を最終解消 — `INSERT_SELECT` の混在ソース(APP + 一時テーブルの JOIN・サブクエリ)と `UPSERT_SELECT` の一時テーブル・混在ソースを解禁(§7.3・§9 を更新)。実行は read-only バッチと同じ FULL_SCAN 注入経路(`executeQueryWithCte`)。書き込み側ガードは不変。読み取り側上限はソース種類ごとに異なる(APP = `dmlMaxRows + 1` / temp = 実体化 10,000 行 / UPSERT 系は書き込み先照合が加わる)。経緯は `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`
   - 2026-07-10 R38(v1.6.0): APP ソースの `UPSERT_SELECT` を解禁(単文・バッチとも。§7.3・§9 を更新)。`dmlMaxRows` / `dmlTotalMaxRows` は照合後の insert + update 合計に適用。一時テーブルソースはエンジン未対応のため引き続き拒否(迂回路なし)。経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`
@@ -168,7 +168,7 @@ DROP TEMP TABLE #name;
 |---|---|---|
 | バッチ内の文数 | 20 | validate で拒否 |
 | 一時テーブル個数(バッチ内同時) | 16 | validate で拒否 |
-| 一時テーブル1個の行数 | 既定 10,000(`fetchAll` の既定上限と同値)。**v1.11.0 から `tempTableMaxRows` で変更可**(MCP tool input / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows`) | 実行時エラー。**`onLimit: truncate` は一時テーブルの実体化には適用しない**(暗黙の欠損が後続文の結果を静かに歪めるため、上限値を変更しても常に error)。上限引き上げ時はバッチ内最大16テーブル × 指定値がメモリに滞留し得る点に注意(参照は常にインメモリ FULL_SCAN。§5.4) |
+| 一時テーブル1個の行数 | 既定 10,000(`fetchAll` の既定上限と同値)。**v1.11.0 から `tempTableMaxRows` で変更可**(MCP tool input / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグイン取得オプションパネル) | 実行時エラー。**`onLimit: truncate` は一時テーブルの実体化には適用しない**(暗黙の欠損が後続文の結果を静かに歪めるため、上限値を変更しても常に error)。上限引き上げ時はバッチ内最大16テーブル × 指定値がメモリに滞留し得る点に注意(参照は常にインメモリ FULL_SCAN。§5.4) |
 
 ### 5.7 タイムアウト
 

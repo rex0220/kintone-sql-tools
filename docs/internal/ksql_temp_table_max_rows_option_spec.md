@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R3(プラグイン対応の追加・ユーザー決定): §2.2 の「プラグイン見送り」を撤回し、**案A(実行画面の取得オプションパネルに実行ごと指定を追加)** を v1.11.0 に同乗させる(§4.5 新設)。選定理由: 既存 `maxRecords` のモデル(パネルで実行ごと自由変更・localStorage 永続・clamp なし)と一貫し、`maxRecords` 自体が既に無制限に引き上げ可能なため一時テーブルだけ統制しても防御にならない。管理者設定(案B)・二段構え(案C)は不採用(実行ごとの柔軟性欠如 / 新統制モデルの持ち込みで一貫性が崩れるため)。保存SQL の kintone レコード連携フィールドは対象外(アプリ側のフィールド追加が必要になるため)
   - 2026-07-11 R2(codex レビュー反映): ①§5.2 の自己矛盾を修正 — `run_saved_query` の `dmlMaxRows` describe は「tempTableMaxRows で調整可」ではなく「単文限定のため一時テーブル非対応」の明示に変更(存在しない入力をモデルに示唆しない)②§2.2 の「dmlMaxRows + 1 超〜tempTableMaxRows 以内の迂回幅」記述を撤回 — v1.8.0 案A 以降、SELECT-based DML のソース読み取りは runtime maxRecords 解決(`resolveMutateRuntimeMaxRecords`、`src/mcp/tools.ts:314-319`)であり `dmlMaxRows + 1` では絞られない ③§3.3・§7-6 に env(envInt が不正値を null で無視しフォールスルー)/ profile(検証なし)の扱いを明記 ④§6 に `ksql_mcp_server_spec.md` / `ksql_cli_console_spec.md` / README HELP_SYNC ブロックを必須更新対象として明示
   - 2026-07-11 R1: 初版(ドラフト)
 - ステータス: **レビュー済み・確定(codex R1〜R2 反映、R3 で指摘なし)**。実装は実装計画に従う
@@ -49,6 +50,7 @@ onLimitReached: "error",
 | MCP | `ksql_query` / `ksql_mutate` の入力に `tempTableMaxRows`(optional・正整数)を追加し、バッチ実行(`executeBatch`)へ受け渡す |
 | ランタイム | `createKsqlRuntime` に解決チェーン(引数 → `KSQL_TEMP_TABLE_MAX_ROWS` → `profile.query.tempTableMaxRows` → undefined)を追加 |
 | CLI | `--temp-table-max-rows` フラグを追加(env / profile の解決は MCP と対称) |
+| プラグイン(R3) | 実行画面の「取得オプション」パネルに「一時テーブル上限(行)」入力を追加(§4.5)。空欄 = 既定 10,000。localStorage 永続 + SQL 履歴スナップショット |
 | メタデータ | `dmlMaxRows` describe 等の「temp tables hold at most 10000 rows」を「既定 10,000・変更可」に更新し、mcp-smoke assertion で固定 |
 | EXPLAIN | `src/execute.ts:2961` の行数上限表示を「既定」と明示する文言に変更 |
 | ドキュメント | `ksql_batch_temp_table_spec.md` §5.6 改訂(R 追記)、`ksql_mcp_changes.md`、CHANGELOG |
@@ -60,7 +62,8 @@ onLimitReached: "error",
 | 既定値の変更 | しない(10,000 のまま) | 既定挙動の互換維持。§5.6 の値の根拠(fetchAll 既定との整合)も不変 |
 | 超過時 truncate の許可 | しない(常に error のまま) | 暗黙の欠損が後続文を静かに歪める(§5.6 の核心)。本オプションは**数値の天井のみ**を変える |
 | 上限キャップ(最大値制限) | 設けない | `maxRecords` が無制限である以上、ここだけキャップすると非対称。メモリリスクは describe・仕様書の注記で伝える(§3.4) |
-| プラグイン(設定画面・desktop.ts)への公開 | 見送り | ブラウザ環境はメモリ天井が最も厳しく、設定画面に常設する価値も薄い。需要が出てから別提案 |
+| プラグイン設定画面(管理者設定)への追加 | しない(R3 で案B 不採用) | 実行ごとの柔軟性がなく MCP/CLI とモデルが揃わない。実行画面パネルへの追加(§4.5)で対応 |
+| 保存SQL レコード連携フィールドへの追加 | しない(R3) | 保存SQL アプリ側のフィールド追加が必要になる。保存SQL 実行時は未指定扱い(パネル現在値にフォールバック) |
 | `ksql_run_saved_query` への追加 | しない | `requireSingleStatement`(`src/mcp/tools.ts:746-752`)により保存クエリは単文限定で、一時テーブルが出現し得ない |
 | `ksql_explain` / `ksql_validate` / `ksql_describe_app` / `ksql_show_apps` への追加 | しない | 実体化を行わない(explain のバッチプランは静的生成) |
 | `buildBatchExplainPlans` のシグネチャ変更 | しない | SQL のみを受ける静的関数(実行時オプションを知らない)。表示文言の修正のみで対応(§4.4) |
@@ -142,6 +145,17 @@ onLimitReached: "error",
   - 変更後: `` rows: 実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー） ``
   - `buildBatchExplainPlans` は SQL のみを受ける静的関数のため実効値は表示できない。「既定」と明示することで虚偽表示を避ける(実効値表示が必要になったらシグネチャ変更を別提案)
 
+### 4.5 src/ui/desktop.ts(プラグイン実行画面。R3)
+
+- **取得オプションパネル**(`buildFetchOptionsPanel`): 「最大取得件数」の下に「一時テーブル上限(行)」の数値入力を追加(id: `ksql-temp-table-max-rows-input`)。placeholder は「10000（既定）」、注記に「空欄 = 既定 10,000。超過は常にエラー（『打ち切って続行』は適用されません）」を表示
+- **値の意味**: 空欄・不正値(0以下・非整数)は `undefined` = エンジン既定に復帰(`sanitizeMaxRecords` の「3000 に戻す」とは異なり、既定復帰が正しい挙動)
+- **永続化**: `FETCH_OPTIONS_KEY` の localStorage 形式に `tempTableMaxRows?: number` を追加(旧形式は undefined 扱いで後方互換)
+- **実行時解決**: `resolveRuntimeFetchOptions` が「取得」タブ表示中は DOM 現在値、非表示時は呼び出し元フォールバック値を使う(maxRecords と同じ2段構え)
+- **受け渡し**: バッチ経路(`runBatchSql` → `executeBatch`)のみに渡す。単文経路は一時テーブルが出現しないため変更なし
+- **SQL 履歴**: `SqlHistoryItem` に `tempTableMaxRows?` をスナップショット保存し、履歴からの再実行時に復元(undefined 許容)
+- **オプションサマリ表示**(`refreshOptSummary`): 指定時のみ「/ 一時 20000」のように付記(未指定時は非表示 = 既定)
+- **不変条件**: DML バッチの `onLimitReached: "error"` 固定(v1.9.0 §3.6)とは独立・無干渉。一時テーブル実体化はエンジン層で常に error(パネルの「上限到達時」ラジオの対象外)
+
 ## 5. モデル向けメタデータ(v1.4.1 の教訓: コードと同時に更新し smoke で固定)
 
 ### 5.1 新規 describe 案(`src/mcp/schemas.ts` 共有定義)
@@ -182,3 +196,5 @@ onLimitReached: "error",
 5. CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` が §3.2 の優先順で解決される(console 子実行にも伝搬)
 6. `tempTableMaxRows: 0` / 負数 / 非整数は zod(ツール引数)/ CLI パーサ(フラグ)で拒否される。**env は不正値を無視してフォールスルー、profile 値は検証対象外**(§3.3。`maxRecords` の前例どおり)
 7. mcp-smoke が新メタデータで green(旧バンドルでは red)
+8. プラグイン(R3): 取得オプションパネルで一時テーブル上限を指定したバッチ実行が `executeBatch` に値を渡す。空欄なら undefined(既定 10,000)。localStorage への保存・復元、履歴スナップショットからの復元が機能する
+9. プラグイン(R3): 「上限到達時: 打ち切って続行」を選んでいても一時テーブルの実体化超過はエラー(§3.5-2 と同じ不変条件が UI 経路でも成立)

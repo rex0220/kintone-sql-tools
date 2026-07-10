@@ -11,6 +11,9 @@
   env `KSQL_TEMP_TABLE_MAX_ROWS`、profile `query.tempTableMaxRows` で指定できる
   （優先順は引数 → env → profile → 既定 10,000）。console の `:run` 子実行にも伝搬する。
   `ksql_run_saved_query` は単文限定（一時テーブルが出現しない）のため対象外
+- **プラグイン: 一時テーブル上限の実行画面指定**: 「⚙ オプション → 取得」に
+  「一時テーブル上限(行)」入力を追加（空欄 = 既定 10,000）。localStorage に永続化し、
+  SQL 履歴にもスナップショット保存。超過は「打ち切って続行」設定でも常にエラー
 
 ### 互換性
 

@@ -135,6 +135,8 @@ interface SqlHistoryItem {
   displayOptions?: DisplayOptions;
   maxRecords?: number;
   onLimitReached?: "error" | "truncate";
+  /** 一時テーブル1個の実体化行数上限。undefined = エンジン既定（10,000） */
+  tempTableMaxRows?: number;
   savedAt?: string;
 }
 
@@ -158,6 +160,7 @@ let latestPanelDisplayOptions: DisplayOptions = {
 };
 let latestPanelMaxRecords = 3000;
 let latestPanelOnLimit: "error" | "truncate" = "error";
+let latestPanelTempTableMaxRows: number | undefined = undefined;
 
 // ============================================================
 // SQL 履歴（localStorage）
@@ -175,6 +178,7 @@ function normalizeHistoryItem(raw: unknown): SqlHistoryItem | null {
     displayOptions?: unknown;
     maxRecords?: unknown;
     onLimitReached?: unknown;
+    tempTableMaxRows?: unknown;
     savedAt?: unknown;
   };
   const sql = typeof obj.sql === "string" ? obj.sql.trim() : "";
@@ -184,8 +188,9 @@ function normalizeHistoryItem(raw: unknown): SqlHistoryItem | null {
     : undefined;
   const max = sanitizeMaxRecords(String(obj.maxRecords ?? ""));
   const mode = obj.onLimitReached === "truncate" ? "truncate" : "error";
+  const tempRows = sanitizeTempTableMaxRows(obj.tempTableMaxRows);
   const savedAt = typeof obj.savedAt === "string" ? obj.savedAt : undefined;
-  return { sql, displayOptions: display, maxRecords: max, onLimitReached: mode, savedAt };
+  return { sql, displayOptions: display, maxRecords: max, onLimitReached: mode, tempTableMaxRows: tempRows, savedAt };
 }
 
 function loadHistory(): SqlHistoryItem[] {
@@ -214,13 +219,15 @@ function saveHistory(
   sql: string,
   displayOptions?: DisplayOptions,
   maxRecords = 3000,
-  onLimitReached: "error" | "truncate" = "error"
+  onLimitReached: "error" | "truncate" = "error",
+  tempTableMaxRows?: number
 ): void {
   const item: SqlHistoryItem = {
     sql,
     displayOptions: normalizeDisplayOptions(displayOptions),
     maxRecords: sanitizeMaxRecords(String(maxRecords)),
     onLimitReached,
+    tempTableMaxRows: sanitizeTempTableMaxRows(tempTableMaxRows),
     savedAt: new Date().toISOString(),
   };
   const key = JSON.stringify({
@@ -228,12 +235,14 @@ function saveHistory(
     display: item.displayOptions,
     max: item.maxRecords,
     mode: item.onLimitReached,
+    tempRows: item.tempTableMaxRows ?? null,
   });
   const list = loadHistory().filter((h) => JSON.stringify({
     sql: h.sql,
     display: normalizeDisplayOptions(h.displayOptions),
     max: sanitizeMaxRecords(String(h.maxRecords ?? 3000)),
     mode: h.onLimitReached === "truncate" ? "truncate" : "error",
+    tempRows: sanitizeTempTableMaxRows(h.tempTableMaxRows) ?? null,
   }) !== key);
   list.unshift(item);
   localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, HISTORY_MAX)));
@@ -449,13 +458,16 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     : null;
   let panelMaxRecordsState = options.initialMaxRecords ?? storedFetch?.maxRecords ?? 3000;
   let panelOnLimitState: "error" | "truncate" = options.initialOnLimitReached ?? storedFetch?.onLimitReached ?? "error";
+  let panelTempTableMaxRowsState: number | undefined = storedFetch?.tempTableMaxRows;
   // 実行時は常にパネルの現在UI状態を優先する。
   // （レコード保存前に options.resolve* 側の値が古い場合でも、直近入力値で実行できるようにする）
   const resolveMaxRecords = (): number => panelMaxRecordsState;
   const resolveOnLimitReached = (): "error" | "truncate" => panelOnLimitState;
+  const resolveTempTableMaxRows = (): number | undefined => panelTempTableMaxRowsState;
   latestPanelDisplayOptions = { ...panelOptions };
   latestPanelMaxRecords = panelMaxRecordsState;
   latestPanelOnLimit = panelOnLimitState;
+  latestPanelTempTableMaxRows = panelTempTableMaxRowsState;
 
   let panelLastResult: ExecuteResult | null = null;
   const panel = el("div", "ksql-panel", { id: "ksql-panel" });
@@ -491,7 +503,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   editor.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached()).then((r) => {
+      void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), false, resolveTempTableMaxRows()).then((r) => {
         if (r) panelLastResult = r;
       });
     }
@@ -503,7 +515,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   const runBtn = el("button", "ksql-run-btn", { id: "ksql-run-btn" });
   runBtn.textContent = "実行（Ctrl+Enter）";
   runBtn.addEventListener("click", () => {
-    void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached()).then((r) => {
+    void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), false, resolveTempTableMaxRows()).then((r) => {
       if (r) panelLastResult = r;
     });
   });
@@ -516,7 +528,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
       // バッチ入力は EXPLAIN を前置せず、プラン表示モードで渡す
       //（前置すると2文目以降が実行されてしまうため）
       const isBatch = isMultiStatementSql(sql);
-      void runSql(isBatch ? sql : "EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), isBatch).then((r) => {
+      void runSql(isBatch ? sql : "EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), isBatch, resolveTempTableMaxRows()).then((r) => {
         if (r) panelLastResult = r;
       });
     }
@@ -540,6 +552,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
       panelOptions,
       resolveMaxRecords(),
       resolveOnLimitReached(),
+      resolveTempTableMaxRows(),
       (r) => { panelLastResult = r; }
     );
   });
@@ -550,7 +563,10 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   const optSummary = el("span", "ksql-opt-summary");
   const refreshOptSummary = (): void => {
     const mode = resolveOnLimitReached() === "truncate" ? "打ち切り" : "エラー";
-    optSummary.textContent = `取得: ${resolveMaxRecords()} / ${mode}`;
+    const tempRows = resolveTempTableMaxRows();
+    // 一時テーブル上限は指定時のみ表示（未指定 = エンジン既定 10,000）
+    const tempPart = tempRows !== undefined ? ` / 一時 ${tempRows}` : "";
+    optSummary.textContent = `取得: ${resolveMaxRecords()} / ${mode}${tempPart}`;
   };
   refreshOptSummary();
 
@@ -572,14 +588,17 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   const optFetchPanel = buildFetchOptionsPanel(
     panelMaxRecordsState,
     panelOnLimitState,
-    (maxRecords, mode) => {
+    panelTempTableMaxRowsState,
+    (maxRecords, mode, tempTableMaxRows) => {
       panelMaxRecordsState = maxRecords;
       panelOnLimitState = mode;
+      panelTempTableMaxRowsState = tempTableMaxRows;
       latestPanelMaxRecords = maxRecords;
       latestPanelOnLimit = mode;
+      latestPanelTempTableMaxRows = tempTableMaxRows;
       // 一覧ページ（initialMaxRecords 未指定）は設定を localStorage に永続化する
       if (options.initialMaxRecords === undefined) {
-        saveFetchOptions(FETCH_OPTIONS_KEY, maxRecords, mode);
+        saveFetchOptions(FETCH_OPTIONS_KEY, maxRecords, mode, tempTableMaxRows);
       }
       refreshOptSummary();
     }
@@ -839,6 +858,8 @@ function buildOptionPopover(
 interface StoredFetchOptions {
   maxRecords: number;
   onLimitReached: "error" | "truncate";
+  /** 一時テーブル上限。undefined = エンジン既定（旧形式の保存データも undefined 扱いで後方互換） */
+  tempTableMaxRows?: number;
 }
 
 function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
@@ -847,18 +868,24 @@ function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
     if (!raw) return null;
     const obj = JSON.parse(raw) as unknown;
     if (typeof obj !== "object" || obj === null) return null;
-    const { maxRecords, onLimitReached } = obj as Record<string, unknown>;
+    const { maxRecords, onLimitReached, tempTableMaxRows } = obj as Record<string, unknown>;
     if (typeof maxRecords !== "number" || maxRecords <= 0) return null;
     if (onLimitReached !== "error" && onLimitReached !== "truncate") return null;
-    return { maxRecords, onLimitReached };
+    return { maxRecords, onLimitReached, tempTableMaxRows: sanitizeTempTableMaxRows(tempTableMaxRows) };
   } catch {
     return null;
   }
 }
 
-function saveFetchOptions(storageKey: string, maxRecords: number, onLimitReached: "error" | "truncate"): void {
+function saveFetchOptions(
+  storageKey: string,
+  maxRecords: number,
+  onLimitReached: "error" | "truncate",
+  tempTableMaxRows?: number
+): void {
   try {
-    localStorage.setItem(storageKey, JSON.stringify({ maxRecords, onLimitReached }));
+    // tempTableMaxRows が undefined のときは JSON.stringify がキーごと省略する（旧形式と同形）
+    localStorage.setItem(storageKey, JSON.stringify({ maxRecords, onLimitReached, tempTableMaxRows }));
   } catch {
     // noop
   }
@@ -885,7 +912,8 @@ function saveLastOptionTab(storageKey: string, key: string): void {
 function buildFetchOptionsPanel(
   initialMaxRecords: number,
   initialMode: "error" | "truncate",
-  onChange: (maxRecords: number, mode: "error" | "truncate") => void
+  initialTempTableMaxRows: number | undefined,
+  onChange: (maxRecords: number, mode: "error" | "truncate", tempTableMaxRows: number | undefined) => void
 ): HTMLElement {
   const panel = el("div", "ksql-fetch-panel");
 
@@ -900,6 +928,22 @@ function buildFetchOptionsPanel(
     id: "ksql-max-records-input",
   }) as HTMLInputElement;
   maxRow.append(maxLabel, maxInput);
+
+  // 一時テーブル1個の実体化行数上限（バッチのみ有効。空欄 = エンジン既定 10,000）
+  const tempRow = el("div", "ksql-fetch-row");
+  const tempLabel = el("label", "ksql-fetch-label");
+  tempLabel.textContent = "一時テーブル上限(行):";
+  const tempInput = el("input", "ksql-fetch-input", {
+    type: "number",
+    min: "1",
+    step: "1000",
+    placeholder: "10000（既定）",
+    id: "ksql-temp-table-max-rows-input",
+  }) as HTMLInputElement;
+  if (initialTempTableMaxRows !== undefined) tempInput.value = String(initialTempTableMaxRows);
+  tempRow.append(tempLabel, tempInput);
+  const tempNote = el("div", "ksql-fetch-note");
+  tempNote.textContent = "空欄 = 既定 10,000。超過は常にエラー（「打ち切って続行」は適用されません）";
 
   const modeRow = el("div", "ksql-fetch-row");
   const modeLabel = el("span", "ksql-fetch-label");
@@ -929,7 +973,9 @@ function buildFetchOptionsPanel(
     lastMaxValue = max;
     maxInput.value = String(max);
     const mode = readCheckedRadio(panel, "ksql-limit-mode") === "truncate" ? "truncate" : "error";
-    onChange(max, mode);
+    // 空欄 = undefined（エンジン既定 10,000）。入力値は書き戻さない（空欄を維持できるように）
+    const tempRows = sanitizeTempTableMaxRows(tempInput.value);
+    onChange(max, mode, tempRows);
   };
 
   // 一部ブラウザで number スピナーが 1 刻みになるため、100 刻みに補正する
@@ -957,8 +1003,10 @@ function buildFetchOptionsPanel(
     sync();
   });
   maxInput.addEventListener("blur", sync);
+  tempInput.addEventListener("input", sync);
+  tempInput.addEventListener("blur", sync);
 
-  panel.append(maxRow, modeRow);
+  panel.append(maxRow, modeRow, tempRow, tempNote);
   panel.addEventListener("change", sync);
   sync();
 
@@ -1090,6 +1138,16 @@ function parseOnLimitReachedFromRecord(record: KintoneUiRecord): "error" | "trun
 function sanitizeMaxRecords(raw: string): number {
   const n = parseInt(String(raw).replace(/,/g, "").trim(), 10);
   if (!Number.isFinite(n) || n <= 0) return 3000;
+  return n;
+}
+
+/** 一時テーブル上限の入力値。空・不正値（0以下・非数値）は undefined = エンジン既定（10,000）に復帰 */
+function sanitizeTempTableMaxRows(raw: unknown): number | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const s = String(raw).replace(/,/g, "").trim();
+  if (s === "") return undefined;
+  const n = parseInt(s, 10);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
   return n;
 }
 
@@ -1623,6 +1681,7 @@ function toggleHistoryDropdown(
   resultOptions?: DisplayOptions,
   maxRecords = 3000,
   onLimitReached: "error" | "truncate" = "error",
+  tempTableMaxRows?: number,
   onExecuted?: (result: ExecuteResult) => void
 ): void {
   const dropdown = document.getElementById("ksql-hist-dropdown");
@@ -1672,7 +1731,8 @@ function toggleHistoryDropdown(
           const histOptions = item.displayOptions ?? resultOptions;
           const histMax = sanitizeMaxRecords(String(item.maxRecords ?? maxRecords));
           const histMode = item.onLimitReached === "truncate" ? "truncate" : onLimitReached;
-          void runSql(sql, resultArea, false, [], histOptions, histMax, histMode).then((r) => {
+          const histTempRows = sanitizeTempTableMaxRows(item.tempTableMaxRows) ?? tempTableMaxRows;
+          void runSql(sql, resultArea, false, [], histOptions, histMax, histMode, false, histTempRows).then((r) => {
             if (r && onExecuted) onExecuted(r);
           });
         }
@@ -1811,7 +1871,7 @@ function buildDmlSummary(batch: BatchExecuteResult): string[] {
 async function runBatchSql(
   sql: string,
   client: Parameters<typeof executeBatch>[1],
-  options: { maxRecords: number; onLimitReached: "error" | "truncate" },
+  options: { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number },
   explainOnly: boolean
 ): Promise<BatchRunOutcome> {
   const statements = parseSqlStatements(sql);
@@ -1848,6 +1908,9 @@ async function runBatchSql(
     // 読み取りが黙って切り捨てられ、切り捨て後の件数で confirm → 部分書き込みに
     // なるため。MCP の ksql_mutate と同じ固定。仕様 §3.6）
     onLimitReached: analysis.containsDml ? "error" : options.onLimitReached,
+    // 一時テーブル実体化上限（未指定 = エンジン既定 10,000）。実体化は
+    // onLimitReached 設定によらずエンジン層で常に error（batch spec §5.6）
+    tempTableMaxRows: options.tempTableMaxRows,
     fetchParallel: FETCH_PARALLEL_DEFAULT,
     confirm: analysis.containsDml ? batchConfirmDialog : undefined,
   });
@@ -1899,7 +1962,9 @@ async function runSql(
   maxRecords = 3000,
   onLimitReached: "error" | "truncate" = "error",
   /** バッチ入力を実行せずプラン表示する（EXPLAIN ボタン経由。単文には影響しない） */
-  batchExplainOnly = false
+  batchExplainOnly = false,
+  /** 一時テーブル実体化上限。undefined = パネル現在値（それも未指定ならエンジン既定 10,000） */
+  tempTableMaxRows?: number
 ): Promise<ExecuteResult | null> {
   if (!sql) {
     resultArea.innerHTML = `<div class="ksql-info">SQL が空のため実行できません。</div>`;
@@ -1913,9 +1978,14 @@ async function runSql(
   const panel = resultArea.closest(".ksql-panel") as HTMLElement | null;
   const editor = panel?.querySelector("#ksql-editor") as HTMLTextAreaElement | null;
   const snapshotOptions = normalizeDisplayOptions(resultOptions ?? displayOptions);
-  const runtimeFetch = resolveRuntimeFetchOptions(resultArea, maxRecords, onLimitReached);
+  // 明示指定（パネル・履歴スナップショット）がなければ直近のパネル状態にフォールバック
+  //（保存SQL サイドバー等、tempTableMaxRows を渡さない経路のため）
+  const runtimeFetch = resolveRuntimeFetchOptions(
+    resultArea, maxRecords, onLimitReached, tempTableMaxRows ?? latestPanelTempTableMaxRows
+  );
   const snapshotMax = runtimeFetch.maxRecords;
   const snapshotMode = runtimeFetch.onLimitReached;
+  const snapshotTempRows = runtimeFetch.tempTableMaxRows;
 
   try {
     buttons.forEach((b) => { b.disabled = true; });
@@ -1931,9 +2001,10 @@ async function runSql(
       const { result: batchResult, note, dmlSummary, cancelled } = await runBatchSql(sql, client, {
         maxRecords: runtimeFetch.maxRecords,
         onLimitReached: runtimeFetch.onLimitReached,
+        tempTableMaxRows: runtimeFetch.tempTableMaxRows,
       }, batchExplainOnly);
       // キャンセル時は単文 DML キャンセルと同様、履歴に保存しない
-      if (!skipHistory && !cancelled) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
+      if (!skipHistory && !cancelled) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows);
       const infoParts = [note, ...dmlSummary].filter((s): s is string => !!s);
       const infoHtml = infoParts.length > 0
         ? `<div class="ksql-info">${infoParts.join("<br>")}</div>`
@@ -1983,7 +2054,7 @@ async function runSql(
     });
 
     lastResult = result;
-    if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
+    if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows);
     resultArea.innerHTML = renderResult(result, resolvedOptions);
     bindResultTableFeatures(resultArea);
     return result;
@@ -1991,7 +2062,7 @@ async function runSql(
     if (e instanceof OperationCancelledError) {
       resultArea.innerHTML = `<div class="ksql-info">キャンセルしました（対象: ${e.affectedCount} 件）</div>`;
     } else {
-      if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode); // エラー時も履歴に保存
+      if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows); // エラー時も履歴に保存
       resultArea.innerHTML = renderError(e);
     }
     return null;
@@ -2004,8 +2075,9 @@ async function runSql(
 function resolveRuntimeFetchOptions(
   resultArea: HTMLElement,
   fallbackMax: number,
-  fallbackMode: "error" | "truncate"
-): { maxRecords: number; onLimitReached: "error" | "truncate" } {
+  fallbackMode: "error" | "truncate",
+  fallbackTempTableMaxRows?: number
+): { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number } {
   const panel = resultArea.closest(".ksql-panel") as HTMLElement | null;
   const maxInput = panel?.querySelector("#ksql-max-records-input") as HTMLInputElement | null;
 
@@ -2015,14 +2087,17 @@ function resolveRuntimeFetchOptions(
     return {
       maxRecords: sanitizeMaxRecords(String(fallbackMax)),
       onLimitReached: fallbackMode,
+      tempTableMaxRows: sanitizeTempTableMaxRows(fallbackTempTableMaxRows),
     };
   }
 
   // "取得" タブが表示中 → DOM の現在値を読み取る
   const mode = readCheckedRadio(panel!, "ksql-limit-mode");
+  const tempInput = panel!.querySelector("#ksql-temp-table-max-rows-input") as HTMLInputElement | null;
   return {
     maxRecords: sanitizeMaxRecords(maxInput.value),
     onLimitReached: mode === "truncate" ? "truncate" : "error",
+    tempTableMaxRows: sanitizeTempTableMaxRows(tempInput?.value),
   };
 }
 

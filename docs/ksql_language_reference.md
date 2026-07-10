@@ -1725,7 +1725,7 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 | 名前 | `#` + 識別子（例: `#temp` / `#集計`）。`#` は一時テーブル名の先頭のみで有効。エイリアスには使用不可 |
 | 寿命 | **バッチ内のみ**。呼び出し終了で自動破棄（呼び出しをまたぐ参照は不可） |
 | 破棄 | `DROP TEMP TABLE #名前`（主にメモリの早期解放用。DROP 後の同名再 CREATE は可） |
-| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。行数上限は v1.11.0 から `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows`）。変更しても超過時は truncate されず常にエラー |
+| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。行数上限は v1.11.0 から `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグインは「⚙ オプション → 取得」の「一時テーブル上限(行)」。空欄 = 既定）。変更しても超過時は truncate されず常にエラー |
 | DML | 一時テーブルへの INSERT / UPDATE / DELETE は非対応 |
 | 実行 | 参照は常にインメモリ FULL_SCAN（kintone クエリへの WHERE プッシュダウンは効かない） |
 
