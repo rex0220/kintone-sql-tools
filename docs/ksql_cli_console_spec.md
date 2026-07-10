@@ -159,6 +159,36 @@ CLI 追加として以下を提供する。
 4. `--no-header` は `--format markdown|md` と併用不可とし、引数エラーで終了する
 5. DML 結果（1行要約）も SELECT と同じく Markdown 表で出力する
 
+バッチ（複文）+ `--format json` の仕様（v1.10.0）:
+
+1. **MCP と同一のエンベロープ**（バッチ仕様 §6.2: `ok` / `batch` / `statementCount` / `statements[]` / `results[]` / `warnings`）を **stdout に単一 JSON ドキュメント**として出力する。`--pretty` / `--output` 対応
+2. `table` / `csv` / `markdown` / `jsonl` のバッチ出力は従来どおり（SELECT 結果を結果セットごとに整形し空行区切り。jsonl は「結果行のストリーム」の契約を維持）
+3. 単文入力の `--format json` は従来どおり（互換不変）
+4. stderr の文ごとサマリ行は従来どおり出力する（`--quiet` で抑止）
+5. exit code は不変: 0 = 全文 success / 1 = 実行時エラー（部分失敗含む）/ 2 = ArgumentError / 3 = AuthError。`--continue-on-error` 時の部分失敗は exit code ではなく JSON の `ok: false` + `statements[]` で判別する
+6. **破壊的変更**: 従来のバッチ + `json`（SELECT 結果 JSON の空行区切り連結）は v1.10.0 で置き換え。従来の「結果セットだけ欲しい」用途は `jq '.results[].rows'` で代替できる
+
+単文 `ASSERT` の出力（v1.10.0）:
+
+1. 成功時は stdout に `assertion ok: <条件>` の1行（`json` / `jsonl` は `{ "ok": true, "type": "ASSERT", "condition": "<条件>" }`）。`affected=` は出力しない
+2. 不成立時は `AssertError: assertion failed: <条件> (actual: <実測値>).` で exit code 1（ヘルスチェック・CI ゲート用途）
+
+## 4.6 レート制御（requestGate）設定（v1.10.0 で公開）
+
+kintone API 呼び出しには、プロセス内グローバルのレートゲート（セマフォ + GET 系リトライ）が適用される。
+
+| 項目 | CLI フラグ | config（`profile.query`） | env | 既定 |
+|---|---|---|---|---|
+| 同時リクエスト上限 | `--max-concurrent <n>`（1〜50） | `maxConcurrent` | `KSQL_MAX_CONCURRENT` | 10 |
+| GET リトライ回数 | `--retry <n>`（0〜10。0 で無効） | `retry` | `KSQL_RETRY` | 3 |
+| バックオフ初期値（ミリ秒） | `--retry-base-delay <ms>` | `retryBaseDelayMs` | — | 500 |
+| バックオフ上限（ミリ秒） | `--retry-max-delay <ms>` | `retryMaxDelayMs` | — | 8000 |
+
+1. 解決優先順は **env > CLI フラグ > config > 既定**
+2. ゲートはプロセス内グローバル1個で、**初回に解決された値で固定**される（複数 profile 同時利用では最初に解決された値が使われる）。config 経由の不正値・範囲外値はゲート側で安全側に clamp される（同時上限 1〜50 / リトライ 0〜10 / バックオフ初期値 1〜60,000ms / 上限 1〜600,000ms かつ初期値以上）
+3. リトライは **GET 系（レコード・アプリ一覧・フィールド情報の取得）限定**。対象は HTTP **408 / 429 / 502 / 503 / 504** とネットワーク層の一時エラー（fetch failed / タイムアウト中断）で、指数バックオフ + ジッタで再試行する
+4. **書き込み系（POST / PUT / DELETE）はリトライしない**（応答喪失時の二重実行を避けるため。セマフォのみ適用）。再実行が必要な場合は呼び出し側で冪等な再実行（UPSERT 等）を設計する
+
 ## 4.4 認証仕様（token）
 
 1. kintone API token はアプリ単位として扱う

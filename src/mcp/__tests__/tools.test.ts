@@ -81,6 +81,46 @@ describe("MCP tools", () => {
     expect(result.rows).toEqual([{ sample: "APP100@stg" }]);
   });
 
+  test("query: 単文 ASSERT は非 SELECT 拒否ガードを通らず専用 payload を返す", async () => {
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client: makeClient(),
+      cacheContext: "test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    const result = await tools.query({ sql: "ASSERT 1 = 1" });
+    expect(result).toEqual({ ok: true, type: "ASSERT", condition: "1 = 1" });
+  });
+
+  test("query: 単文 ASSERT の不成立は AssertError で reject する", async () => {
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client: makeClient(),
+      cacheContext: "test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    await expect(tools.query({ sql: "ASSERT 1 = 2" }))
+      .rejects.toThrow(/^AssertError: assertion failed: 1 = 2 \(actual: 1\)\./);
+  });
+
   test("describeApp and showApps delegate to query SQL", async () => {
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     const executedSql: string[] = [];
@@ -949,6 +989,39 @@ describe("MCP tools", () => {
     await expect(
       tools.validate({ sql: "CREATE TEMP TABLE #t AS SELECT * FROM APP100" })
     ).rejects.toThrow(/CREATE TEMP TABLE requires a batch/);
+  });
+
+  test("validate: バッチ内 ASSERT は statementType / isReadOnly / tempTablesReferenced が入る", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+        "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500",
+    });
+
+    expect(result.batch).toBe(true);
+    expect(result.isReadOnlyBatch).toBe(true);
+    expect(result.canRunWithQueryTool).toBe(true);
+    expect(result.statements[1]).toMatchObject({
+      index: 1,
+      statementType: "ASSERT",
+      isDml: false,
+      isReadOnly: true,
+      tempTablesReferenced: ["#t"],
+      appIds: [],
+    });
+  });
+
+  test("validate: 単文 ASSERT は従来スカラー形（statementType: ASSERT / isReadOnly: true）", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql: "ASSERT (SELECT COUNT(*) FROM APP100) = 0",
+    });
+
+    expect(result.batch).toBe(false);
+    expect(result.statementType).toBe("ASSERT");
+    expect(result.isReadOnly).toBe(true);
+    expect(result.appIds).toEqual([100]);
   });
 
   // ----------------------------------------------------------------

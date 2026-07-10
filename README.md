@@ -14,6 +14,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
   - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）
   - プラグイン: read-only バッチのみ（最終結果を表示）
+- **`ASSERT`（実行時ゲート。DML 前の件数ガード / CLI ヘルスチェック）**（v1.10.0）
 - サブテーブル仮想テーブル（`APP100$明細`）
 - CLI 拡張 `APP@profile`
   - 同一 SQL 内で同一 APP の profile 混在を許可
@@ -120,10 +121,16 @@ Options:
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
+                             (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
+  --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
+                             (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
+  --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
+  --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL

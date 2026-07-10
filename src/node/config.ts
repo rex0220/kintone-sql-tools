@@ -30,6 +30,12 @@ export interface KsqlProfileConfig {
     timeout?: number;
     /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
     maxConcurrent?: number;
+    /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
+    retry?: number;
+    /** リトライバックオフ初期値ミリ秒（既定 500） */
+    retryBaseDelayMs?: number;
+    /** リトライバックオフ上限ミリ秒（既定 8000） */
+    retryMaxDelayMs?: number;
   };
   output?: {
     format?: OutputFormat;
@@ -74,6 +80,42 @@ export function envInt(name: string): number | null {
   const n = Number(v);
   if (!Number.isInteger(n) || n <= 0) return null;
   return n;
+}
+
+/**
+ * 0 を有効値として受け付ける整数 env の解決。
+ * `KSQL_RETRY=0`（リトライ無効）のように「0 に意味がある」設定に使う
+ * （envInt は n <= 0 を無効値として捨てるため 0 を読めない）
+ */
+export function envNonNegativeInt(name: string): number | null {
+  const v = envString(name);
+  if (v === null) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+
+/** リクエストゲートに渡す設定（api/requestGate の RequestGateOptions の設定項目部分） */
+export interface RequestGateSettings {
+  maxConcurrent?: number;
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+}
+
+/**
+ * リクエストゲート設定の env 解決（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY` > base）。
+ * base には CLI フラグ > profile 設定のマージ済み値を渡す（優先順は env > CLI > config > 既定）。
+ * api/requestGate は browser/plugin にも近い層のため env 解決を持たない — Node 側の
+ * 呼び出し元（cli/index.ts / node/runtime.ts）がこの関数を通してから渡す。
+ */
+export function resolveRequestGateOptions(base: RequestGateSettings): RequestGateSettings {
+  return {
+    ...base,
+    maxConcurrent: envInt("KSQL_MAX_CONCURRENT") ?? base.maxConcurrent,
+    // KSQL_RETRY=0（リトライ無効）は有効値のため envNonNegativeInt で読む
+    maxRetries: envNonNegativeInt("KSQL_RETRY") ?? base.maxRetries,
+  };
 }
 
 export function envOnLimit(name: string): OnLimitMode | null {

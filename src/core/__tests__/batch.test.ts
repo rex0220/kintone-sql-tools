@@ -193,6 +193,61 @@ test("単文の SELECT は通常どおり解析される", () => {
 });
 
 // ----------------------------------------------------------------
+// ASSERT（バッチ強化第1弾 A2）
+// ----------------------------------------------------------------
+
+test("ASSERT は read-only 扱い（read-only バッチを維持する）", () => {
+  const a = analyze("SELECT * FROM APP100; ASSERT (SELECT COUNT(*) FROM APP100) > 0");
+  expect(a.isReadOnlyBatch).toBe(true);
+  expect(a.containsDml).toBe(false);
+  expect(a.statements[1]).toMatchObject({
+    statementType: "ASSERT",
+    isDml: false,
+    isReadOnly: true,
+    hasWhere: false,
+    targetAppId: null,
+  });
+});
+
+test("ASSERT のサブクエリから appIds を収集する", () => {
+  const a = analyze("SELECT * FROM APP100; ASSERT (SELECT COUNT(*) FROM APP200) = 0");
+  expect(a.statements[1].appIds).toEqual([200]);
+});
+
+test("ASSERT の一時テーブル参照は tempTablesReferenced / dependsOn に入る", () => {
+  const a = analyze(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+    "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500"
+  );
+  expect(a.statements[1].tempTablesReferenced).toEqual(["#t"]);
+  expect(a.statements[1].dependsOn).toEqual([0]);
+});
+
+test("ASSERT の未定義一時テーブル参照はエラー", () => {
+  expect(() => analyze("SELECT * FROM APP100; ASSERT (SELECT COUNT(*) FROM #t) = 0"))
+    .toThrow(/temp table #t is not defined in this batch/);
+});
+
+test("単文の ASSERT は許可される（CREATE / DROP TEMP TABLE と異なる）", () => {
+  const a = analyze("ASSERT (SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1') = 0");
+  expect(a.statementCount).toBe(1);
+  expect(a.isReadOnlyBatch).toBe(true);
+  expect(a.statements[0].statementType).toBe("ASSERT");
+});
+
+test("DML バッチ内の ASSERT: バッチは DML 扱いのまま・ASSERT 文自体は read-only", () => {
+  const a = analyze(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP100 WHERE 売上 > 100;" +
+    "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500;" +
+    "UPDATE APP100 SET 状態 = '対象' WHERE $id IN (SELECT $id FROM #t)"
+  );
+  expect(a.containsDml).toBe(true);
+  expect(a.isReadOnlyBatch).toBe(false);
+  expect(a.statements[1].isReadOnly).toBe(true);
+  expect(a.statements[2].dependsOn).toEqual([0]);
+});
+
+// ----------------------------------------------------------------
 // 空バッチの拒否
 // ----------------------------------------------------------------
 

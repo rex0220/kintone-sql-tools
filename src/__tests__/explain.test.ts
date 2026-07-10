@@ -395,3 +395,41 @@ test("バッチ EXPLAIN: 静的検証違反（未定義参照）は拒否され�
   expect(() => buildBatchExplainPlans("SELECT 1 FROM APP100; SELECT * FROM #t"))
     .toThrow(/temp table #t is not defined in this batch/);
 });
+
+// ----------------------------------------------------------------
+// バッチ EXPLAIN: ASSERT（バッチ強化第1弾 A4）
+// ----------------------------------------------------------------
+
+test("バッチ EXPLAIN: ASSERT はサブクエリのプラン + 実行時評価の注記を表示", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+    "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500"
+  );
+  const assert = plans.statements[1];
+  expect(assert.type).toBe("ASSERT");
+  const text = assert.plan.join("\n");
+  expect(assert.plan[0]).toBe("ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500");
+  expect(text).toMatch(/実行時に条件評価/);
+  expect(text).toMatch(/AssertError でバッチ停止/);
+  expect(text).toMatch(/subquery:/);
+  expect(text).toMatch(/mode:\s+FULL_SCAN（一時テーブル参照）/);
+});
+
+test("バッチ EXPLAIN: ASSERT の APP 参照サブクエリは通常プラン（FULL_SCAN 表示にしない）", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+    "ASSERT (SELECT COUNT(*) FROM APP200) = 0"
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toMatch(/subquery:/);
+  expect(text).not.toMatch(/一時テーブル参照/);
+  expect(text).toMatch(/APP200/);
+});
+
+test("バッチ EXPLAIN: リテラルのみの ASSERT はサブクエリ行を持たない", () => {
+  const plans = buildBatchExplainPlans("SELECT 顧客名 FROM APP100; ASSERT 1 = 1");
+  const text = plans.statements[1].plan.join("\n");
+  expect(plans.statements[1].type).toBe("ASSERT");
+  expect(text).toMatch(/実行時に条件評価/);
+  expect(text).not.toMatch(/subquery/);
+});

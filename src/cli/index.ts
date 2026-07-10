@@ -20,10 +20,13 @@ import {
   type BatchExecuteResult,
   type BatchStatementResult,
   type DisplayOptions,
+  type AssertResult,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { buildBatchEnvelope } from "../output/batchEnvelope";
+import { resolveRequestGateOptions } from "../node/config";
 import { decideConsoleInput, decideRun } from "./consoleInput";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
@@ -66,10 +69,16 @@ Options:
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
+                             (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
+  --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
+                             (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
+  --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
+  --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL
@@ -127,6 +136,12 @@ interface CliConfig {
       timeout?: number;
       /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
       maxConcurrent?: number;
+      /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
+      retry?: number;
+      /** リトライバックオフ初期値ミリ秒（既定 500） */
+      retryBaseDelayMs?: number;
+      /** リトライバックオフ上限ミリ秒（既定 8000） */
+      retryMaxDelayMs?: number;
     };
     output?: {
       format?: OutputFormat;
@@ -189,6 +204,10 @@ interface ParsedArgs {
   allowWithoutWhere: boolean;
   continueOnError: boolean;
   dmlMaxRows: number | null;
+  maxConcurrent: number | null;
+  retry: number | null;
+  retryBaseDelay: number | null;
+  retryMaxDelay: number | null;
   userFormat: DisplayOptions["userFormat"] | null;
   arrayFormat: DisplayOptions["arrayFormat"] | null;
   tableFormat: DisplayOptions["tableFormat"] | null;
@@ -235,6 +254,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     allowWithoutWhere: false,
     continueOnError: false,
     dmlMaxRows: null,
+    maxConcurrent: null,
+    retry: null,
+    retryBaseDelay: null,
+    retryMaxDelay: null,
     userFormat: null,
     arrayFormat: null,
     tableFormat: null,
@@ -371,6 +394,34 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
       continue;
     }
+    if (a === "--max-concurrent") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("ArgumentError: --max-concurrent must be an integer between 1 and 50.");
+      out.maxConcurrent = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0 || n > 10) throw new Error("ArgumentError: --retry must be an integer between 0 and 10 (0 disables retry).");
+      out.retry = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry-base-delay") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --retry-base-delay must be a positive integer (ms).");
+      out.retryBaseDelay = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry-max-delay") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --retry-max-delay must be a positive integer (ms).");
+      out.retryMaxDelay = n;
+      i++;
+      continue;
+    }
 
     throw new Error(`ArgumentError: unknown option ${a}`);
   }
@@ -453,7 +504,7 @@ function isSystemLikeFieldCode(code: string): boolean {
   return code.startsWith("_") || code.startsWith("$");
 }
 
-function getAffectedCount(result: Exclude<ExecuteResult, SelectResult>): number {
+function getAffectedCount(result: Exclude<ExecuteResult, SelectResult | AssertResult>): number {
   if (result.type === "INSERT") return result.insertedCount;
   if (result.type === "UPDATE") return result.updatedCount;
   if (result.type === "DELETE") return result.deletedCount;
@@ -462,8 +513,16 @@ function getAffectedCount(result: Exclude<ExecuteResult, SelectResult>): number 
   return 0;
 }
 
+/** 単文 ASSERT 成功時の出力。json / jsonl は MCP と同じ payload、他は1行メッセージ */
+function buildAssertOutput(result: AssertResult, format: OutputFormat, pretty: boolean): string {
+  const payload = { ok: true, type: result.type, condition: result.condition };
+  if (format === "json") return JSON.stringify(payload, null, pretty ? 2 : 0);
+  if (format === "jsonl") return JSON.stringify(payload);
+  return `assertion ok: ${result.condition}`;
+}
+
 function buildMutationOutput(
-  result: Exclude<ExecuteResult, SelectResult>,
+  result: Exclude<ExecuteResult, SelectResult | AssertResult>,
   format: OutputFormat,
   noHeader: boolean,
   pretty: boolean
@@ -619,7 +678,7 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     else if (r.type === "UPDATE") parts.push(`updated=${r.updatedCount}`);
     else if (r.type === "DELETE") parts.push(`deleted=${r.deletedCount}`);
     else if (r.type === "UPSERT") parts.push(`inserted=${r.insertedCount} updated=${r.updatedCount}`);
-    else parts.push(`reordered=${r.reorderedParentCount}`);
+    else if (r.type === "REORDER") parts.push(`reordered=${r.reorderedParentCount}`);
   }
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
@@ -642,7 +701,7 @@ export function buildBatchDmlConfirmMessage(analysis: BatchAnalysis): string {
   return lines.join("\n");
 }
 
-function writeBatchOutput(
+export function writeBatchOutput(
   batch: BatchExecuteResult,
   opts: {
     format: OutputFormat;
@@ -653,14 +712,15 @@ function writeBatchOutput(
     quiet: boolean;
   }
 ): number {
-  const outputs: string[] = [];
-  for (const s of batch.statements) {
-    if (!opts.quiet) process.stderr.write(`${buildBatchStatementSummary(s)}\n`);
-    if (s.status === "success" && s.result?.type === "SELECT") {
-      outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
-    }
+  // json はバッチ全体を MCP と同一のエンベロープ（§6.2）で単一 JSON として出力する
+  //（v1.10.0。従来の「SELECT 結果 JSON の空行区切り連結」は廃止 — CHANGELOG 参照）。
+  // table / csv / markdown / jsonl は従来出力を維持（jsonl は行ストリームの契約を守る）
+  const output = opts.format === "json"
+    ? JSON.stringify(buildBatchEnvelope(batch), null, opts.pretty ? 2 : 0)
+    : buildBatchResultsOutput(batch, opts);
+  if (!opts.quiet) {
+    for (const s of batch.statements) process.stderr.write(`${buildBatchStatementSummary(s)}\n`);
   }
-  const output = outputs.join("\n\n");
   if (opts.outputPath) writeFileSync(opts.outputPath, `${output}\n`, "utf-8");
   else if (output) process.stdout.write(`${output}\n`);
 
@@ -669,6 +729,20 @@ function writeBatchOutput(
   return firstError?.error
     ? toExitCodeFromError(new Error(firstError.error.message))
     : 1;
+}
+
+/** 従来のバッチ出力: SELECT 結果を結果セットごとに整形し空行区切りで連結する */
+function buildBatchResultsOutput(
+  batch: BatchExecuteResult,
+  opts: { format: OutputFormat; noHeader: boolean; pretty: boolean; displayOptions: DisplayOptions }
+): string {
+  const outputs: string[] = [];
+  for (const s of batch.statements) {
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
+    }
+  }
+  return outputs.join("\n\n");
 }
 
 export function shouldExitOnEmpty(
@@ -858,6 +932,10 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   pushOpt(argv, "--date-format", base.dateFormat);
   pushOpt(argv, "--attachment-format", base.attachmentFormat);
   pushOpt(argv, "--dml-max-rows", base.dmlMaxRows);
+  pushOpt(argv, "--max-concurrent", base.maxConcurrent);
+  pushOpt(argv, "--retry", base.retry);
+  pushOpt(argv, "--retry-base-delay", base.retryBaseDelay);
+  pushOpt(argv, "--retry-max-delay", base.retryMaxDelay);
 
   const tokenMapArg = buildTokenMapArg(base.tokenMap);
   if (tokenMapArg) argv.push("--token-map", tokenMapArg);
@@ -1439,6 +1517,7 @@ async function run(): Promise<number> {
           || stmtType === "EXPLAIN"
           || stmtType === "SHOW_APPS"
           || stmtType === "DESCRIBE"
+          || stmtType === "ASSERT"
           || isDmlStatement;
         if (!supported) {
           process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
@@ -1768,9 +1847,16 @@ async function run(): Promise<number> {
     };
   }
 
-  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ
+  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ。
+  // 解決優先順: env（KSQL_MAX_CONCURRENT / KSQL_RETRY — resolveRequestGateOptions で適用）
+  // > CLI フラグ > profile 設定 > 既定。プロセス内グローバル1個・初回解決値で固定
   if (!args.dryRun) {
-    client = withRequestGate(client, getGlobalRequestGate(profile.query?.maxConcurrent));
+    client = withRequestGate(client, getGlobalRequestGate(resolveRequestGateOptions({
+      maxConcurrent: args.maxConcurrent ?? profile.query?.maxConcurrent,
+      maxRetries: args.retry ?? profile.query?.retry,
+      baseDelayMs: args.retryBaseDelay ?? profile.query?.retryBaseDelayMs,
+      maxDelayMs: args.retryMaxDelay ?? profile.query?.retryMaxDelayMs,
+    })));
   }
 
   try {
@@ -1843,6 +1929,13 @@ async function run(): Promise<number> {
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
       });
+    // ASSERT は mutation 出力（affected=）に流さない専用経路（バッチ強化第1弾 §2.5）
+    if (result.type === "ASSERT") {
+      const output = buildAssertOutput(result, format, pretty);
+      if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
+      else if (output) process.stdout.write(`${output}\n`);
+      return 0;
+    }
     if (result.type !== "SELECT") {
       const output = buildMutationOutput(result, format, noHeader, pretty);
       if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");

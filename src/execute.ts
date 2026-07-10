@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
@@ -102,7 +102,8 @@ export type ExecuteResult =
   | UpdateResult
   | DeleteResult
   | UpsertResult
-  | ReorderResult;
+  | ReorderResult
+  | AssertResult;
 
 /** 1 回の execute() で発生した kintone API 呼び出しの計測値 */
 export interface ExecuteMetrics {
@@ -167,6 +168,13 @@ export interface UpsertResult {
 export interface ReorderResult {
   type: "REORDER";
   reorderedParentCount: number;
+  metrics?: ExecuteMetrics;
+}
+
+export interface AssertResult {
+  type: "ASSERT";
+  /** 評価した条件（パーサが再構成した正規化テキスト） */
+  condition: string;
   metrics?: ExecuteMetrics;
 }
 
@@ -323,6 +331,7 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "ASSERT":        return executeAssert(stmt, client, options, cacheContext);
   }
 }
 
@@ -363,7 +372,7 @@ export interface BatchStatementResult {
   /** CREATE_TEMP_TABLE の実体化行数 */
   rowCount?: number;
   error?: BatchStatementError;
-  /** "fail-fast" / "dependency: #name" / "timeout" */
+  /** "fail-fast" / "dependency: #name" / "timeout" / "assertion" */
   skippedReason?: string;
 }
 
@@ -427,8 +436,8 @@ export async function executeBatch(
   const results: BatchStatementResult[] = [];
   /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
   const failed = new Set<number>();
-  /** fail-fast / timeout で中断済みなら以降の文の skippedReason */
-  let aborted: "fail-fast" | "timeout" | null = null;
+  /** fail-fast / timeout / assertion で中断済みなら以降の文の skippedReason */
+  let aborted: "fail-fast" | "timeout" | "assertion" | null = null;
 
   for (let i = 0; i < statements.length; i++) {
     const info = analysis.statements[i];
@@ -483,6 +492,10 @@ export async function executeBatch(
       failed.add(i);
       if (e instanceof BatchTimeoutError) {
         aborted = "timeout";
+      } else if (e instanceof AssertError) {
+        // ASSERT 失敗は continueOnError を無視して常に停止する（設計判断 D3:
+        // ASSERT は後続実行のゲートであり、続行を許すと存在意義が消える）
+        aborted = "assertion";
       } else if (!options.continueOnError) {
         aborted = "fail-fast";
       }
@@ -529,6 +542,13 @@ async function executeBatchStatement(
   // EXPLAIN はプラン表示のみ（kintone アクセスなし）のため一時テーブル参照を含んでも安全
   if (stmt.type === "EXPLAIN") {
     return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  }
+
+  // ASSERT: 成功時は result を持たせない no-result 文として扱う
+  //（`result.type !== "SELECT"` → mutation summary 経路への流入を構造的に防ぐ。仕様 §2.3）
+  if (stmt.type === "ASSERT") {
+    await executeAssert(stmt, client, options, cacheContext, tempTables);
+    return {};
   }
 
   // 一時テーブルを参照する文はストアを注入して実行
@@ -641,6 +661,139 @@ function safeJsonStringify(v: unknown): string {
 function parseSqlBatch(sql: string): Statement[] {
   const tokens = new Lexer(sql).tokenize();
   return new Parser(tokens).parseStatements();
+}
+
+// ============================================================
+// ASSERT（バッチ強化第1弾 §2）
+// ============================================================
+
+/** ASSERT 失敗。message 接頭辞で code = AssertError として報告される */
+export class AssertError extends Error {
+  constructor(message: string) {
+    super(`AssertError: ${message}`);
+    this.name = "AssertError";
+  }
+}
+
+/**
+ * ASSERT 文を評価する。条件が false なら AssertError を投げる。
+ * サブクエリの一時テーブル参照はバッチ実行時のみ解決できる（tempTables 経由）。
+ */
+async function executeAssert(
+  stmt: AssertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, ProcessRow[]>
+): Promise<AssertResult> {
+  const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
+
+  if (stmt.op === "BETWEEN") {
+    if (stmt.low === null || stmt.high === null) {
+      throw new Error("ArgumentError: malformed ASSERT statement.");
+    }
+    const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
+    const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
+    // WHERE の BETWEEN と同じ >= AND <= 展開
+    if (!compareAssertValues(">=", left, low) || !compareAssertValues("<=", left, high)) {
+      throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
+    }
+    return { type: "ASSERT", condition: stmt.text };
+  }
+
+  if (stmt.right === null) {
+    throw new Error("ArgumentError: malformed ASSERT statement.");
+  }
+  const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
+  if (!compareAssertValues(stmt.op, left, right)) {
+    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
+  }
+  return { type: "ASSERT", condition: stmt.text };
+}
+
+/** ASSERT のオペランドを文字列値に評価する（サブクエリは 1行1列を実行時検証） */
+async function evalAssertOperand(
+  operand: AssertOperand,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, ProcessRow[]>
+): Promise<string> {
+  switch (operand.type) {
+    case "NUMBER": return String(operand.value);
+    case "STRING": return operand.value;
+    case "ARITH":  return String(evalAssertArith(operand));
+    case "SCALAR_SUBQUERY": {
+      const { query, probed } = withScalarProbeLimit(operand.query);
+      const result = await runSubquery(query, client, options, cacheContext, tempTables);
+      // SELECT * 等でパース時に列数を静的判定できなかった場合の実行時検証（仕様 §2.2）
+      if (result.columns.length > 1) {
+        throw new AssertError(
+          `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+        );
+      }
+      if (result.rowCount === 0) {
+        throw new AssertError("scalar subquery returned no rows (expected 1 row).");
+      }
+      if (result.rowCount > 1) {
+        // probe（LIMIT 2 打ち切り）時は総行数が分からない
+        const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
+        throw new AssertError(`scalar subquery returned ${rows} (expected 1 row).`);
+      }
+      const col = result.columns[0] ?? "";
+      return result.rows[0]?.[col] ?? "";
+    }
+  }
+}
+
+/**
+ * 非集計・非 GROUP BY・非 DISTINCT のスカラー検証は 2 行取得できた時点で
+ * 「複数行」と確定するため LIMIT 2 で打ち切る（仕様 §2.3）。
+ * 集計は結果が 1 行でも計算に全対象行の取得が必要なため適用しない。
+ * ユーザーが LIMIT を明示した場合はそれを尊重する。
+ */
+function withScalarProbeLimit(query: SelectStatement): { query: SelectStatement; probed: boolean } {
+  const hasAgg =
+    query.groupBy.length > 0 ||
+    query.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL");
+  if (hasAgg || query.distinct || query.limit !== null) return { query, probed: false };
+  return { query: { ...query, limit: 2 }, probed: true };
+}
+
+/** ASSERT の算術式を評価する（葉は数値リテラルのみ — パーサで検証済み） */
+function evalAssertArith(node: ArithNode): number {
+  if (node.type === "NUMBER") return node.value;
+  if (node.type === "ARITH") {
+    const left  = evalAssertArith(node.left);
+    const right = evalAssertArith(node.right);
+    switch (node.op) {
+      case "+": return left + right;
+      case "-": return left - right;
+      case "*": return left * right;
+      case "/": return left / right;
+      case "%": return left % right;
+    }
+  }
+  throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
+}
+
+/**
+ * ASSERT の比較。型規則は既存の WHERE 句比較（evalWhere の evalOp）と同一:
+ * = / <> は文字列比較、大小比較は双方が数値に解釈できる場合のみ数値比較。
+ */
+function compareAssertValues(op: AssertCompareOp, leftStr: string, rightStr: string): boolean {
+  const leftNum  = Number(leftStr);
+  const rightNum = Number(rightStr);
+  const numeric  = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
+  switch (op) {
+    case "=":    return leftStr === rightStr;
+    case "!=":
+    case "<>":   return leftStr !== rightStr;
+    case ">":    return numeric ? leftNum > rightNum  : leftStr > rightStr;
+    case "<":    return numeric ? leftNum < rightNum  : leftStr < rightStr;
+    case ">=":   return numeric ? leftNum >= rightNum : leftStr >= rightStr;
+    case "<=":   return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
 }
 
 // ============================================================
@@ -2818,7 +2971,36 @@ function buildBatchStatementPlan(
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
   if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  if (stmt.type === "ASSERT") {
+    const lines: string[] = [
+      `ASSERT ${stmt.text}`,
+      "  check:         実行時に条件評価（不成立は AssertError でバッチ停止、以降の文は skipped）",
+    ];
+    const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
+      (o): o is ScalarSubquery => o !== null && o.type === "SCALAR_SUBQUERY"
+    );
+    subqueries.forEach((sq, i) => {
+      lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
+      // 参照先で経路が変わるため per-subquery に判定する
+      //（temp 参照なしの側を FULL_SCAN 表示にしない）
+      const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo).map((l) => `  ${l}`));
+    });
+    return lines;
+  }
   return buildPlanForBatchQuery(stmt, info);
+}
+
+/** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
+function hasTempTableRef(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasTempTableRef);
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    const cte = obj["cteName"];
+    if (typeof cte === "string" && cte.startsWith("#")) return true;
+    return Object.values(obj).some(hasTempTableRef);
+  }
+  return false;
 }
 
 function buildPlanForBatchQuery(

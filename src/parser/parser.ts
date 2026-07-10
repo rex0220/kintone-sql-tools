@@ -80,6 +80,9 @@ import type {
   ArrayLiteral,
   CreateTempTableStatement,
   DropTempTableStatement,
+  AssertStatement,
+  AssertOperand,
+  AssertCompareOp,
 } from "../types/ast";
 
 /** バッチ(複文)の文数上限 */
@@ -87,6 +90,40 @@ const MAX_BATCH_STATEMENTS = 20;
 
 // BETWEEN 展開用の型エイリアス（ローカル）
 type ExpandedBetween = LogicalExpr;
+
+// ------------------------------------------------------------
+// トークン列 → テキスト再構成（ASSERT のエラーメッセージ用）
+// ------------------------------------------------------------
+
+/** この種別の直後の "(" は関数呼び出しとして詰めて表示する（COUNT( / ROUND( 等） */
+const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
+  TokenKind.IDENT, TokenKind.BIDENT,
+  TokenKind.COUNT, TokenKind.SUM, TokenKind.AVG, TokenKind.MAX, TokenKind.MIN,
+  TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
+  TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
+  TokenKind.LENGTH, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
+  TokenKind.REPLACE, TokenKind.COALESCE, TokenKind.NULLIF, TokenKind.ISNULL,
+  TokenKind.CAST, TokenKind.CONVERT, TokenKind.FORMAT,
+  TokenKind.ROUND, TokenKind.FLOOR, TokenKind.CEIL, TokenKind.CEILING,
+  TokenKind.ABS, TokenKind.MOD, TokenKind.POWER, TokenKind.POW, TokenKind.SQRT,
+  TokenKind.YEAR, TokenKind.MONTH, TokenKind.DAY,
+  TokenKind.DATE_FORMAT, TokenKind.DATEDIFF, TokenKind.DATE_ADD,
+  TokenKind.IF,
+]);
+
+/** 再構成テキストでトークン間に空白を入れるか */
+function needsSpaceBetween(prev: Token, cur: Token): boolean {
+  if (prev.kind === TokenKind.LPAREN || prev.kind === TokenKind.DOT) return false;
+  if (
+    cur.kind === TokenKind.RPAREN ||
+    cur.kind === TokenKind.COMMA  ||
+    cur.kind === TokenKind.DOT
+  ) return false;
+  if (cur.kind === TokenKind.LPAREN) {
+    return !FUNC_CALL_PREFIX_KINDS.has(prev.kind);
+  }
+  return true;
+}
 
 // ------------------------------------------------------------
 // エラー
@@ -185,6 +222,7 @@ export class Parser {
       case TokenKind.DESCRIBE:
       case TokenKind.DESC:     return this.parseDescribe();
       case TokenKind.EXPLAIN:  return this.parseExplain();
+      case TokenKind.ASSERT:   return this.parseAssert();
       case TokenKind.IDENT: {
         // CREATE / DROP は予約語にせずソフトキーワードで扱う
         //（既存アプリのフィールド名・テーブル名を潰さないため）
@@ -197,7 +235,7 @@ export class Parser {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE のいずれかで始まる SQL 文が必要です",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / ASSERT のいずれかで始まる SQL 文が必要です",
       tok
     );
   }
@@ -298,6 +336,173 @@ export class Parser {
       throw new ParseError("EXPLAIN の後には SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER が必要です", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+
+  // ----------------------------------------------------------
+  // ASSERT
+  //
+  //   ASSERT <式> <比較演算子> <式>
+  //   ASSERT <式> BETWEEN <式> AND <式>
+  //
+  // 式: リテラル / 算術式 / スカラーサブクエリ。
+  // フィールド参照（FROM コンテキストがない）・AND / OR 複合条件・
+  // 裸の値のみ（ASSERT 1）は ParseError。
+  // ----------------------------------------------------------
+
+  private parseAssert(): AssertStatement {
+    this.expect(TokenKind.ASSERT);
+    const condStart = this.pos;
+    const left = this.parseAssertOperand();
+
+    const opTok = this.peek();
+    if (this.consume(TokenKind.BETWEEN)) {
+      const low = this.parseAssertOperand();
+      this.expect(
+        TokenKind.AND,
+        "ASSERT の BETWEEN には AND が必要です（例: ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500）"
+      );
+      const high = this.parseAssertOperand();
+      this.rejectAssertCompound();
+      return {
+        type: "ASSERT", left, op: "BETWEEN", right: null, low, high,
+        text: this.renderTokenRange(condStart, this.pos),
+      };
+    }
+
+    const op = this.tryAssertCompareOp();
+    if (op === null) {
+      throw new ParseError(
+        "ASSERT には比較演算子（= <> < <= > >=）または BETWEEN が必要です（値のみの ASSERT は不可）",
+        opTok
+      );
+    }
+    const right = this.parseAssertOperand();
+    this.rejectAssertCompound();
+    return {
+      type: "ASSERT", left, op, right, low: null, high: null,
+      text: this.renderTokenRange(condStart, this.pos),
+    };
+  }
+
+  /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
+  private parseAssertOperand(): AssertOperand {
+    const tok = this.peek();
+
+    // 文字列リテラル
+    if (tok.kind === TokenKind.STRING) {
+      this.advance();
+      return { type: "STRING", value: tok.value } satisfies StringLiteral;
+    }
+
+    // スカラーサブクエリ: (SELECT ...)
+    if (tok.kind === TokenKind.LPAREN && this.peekAt(1).kind === TokenKind.SELECT) {
+      this.advance(); // ( を消費
+      const query = this.parseSelect();
+      this.expect(TokenKind.RPAREN);
+      if (this.isArithOp(this.peek().kind)) {
+        throw new ParseError(
+          "スカラーサブクエリの後に算術演算子は使用できません。サブクエリ内で計算してください（例: ASSERT (SELECT COUNT(*) * 2 FROM APP100) > 10）",
+          this.peek()
+        );
+      }
+      // 複数列は静的に拒否する。SELECT * / _p.* は列数を静的判定できないため
+      // 実行時の 1行1列検証に委ねる（仕様 §2.2）
+      const hasWildcard = query.columns.some(
+        (c) => c.type === "WILDCARD" || c.type === "PARENT_WILDCARD"
+      );
+      if (!hasWildcard && query.columns.length > 1) {
+        throw new ParseError("scalar subquery in ASSERT must return exactly 1 column.", tok);
+      }
+      return { type: "SCALAR_SUBQUERY", query };
+    }
+
+    // 数値・括弧・単項マイナス → 算術式（葉は数値リテラルのみ）
+    if (
+      tok.kind === TokenKind.NUMBER ||
+      tok.kind === TokenKind.LPAREN ||
+      tok.kind === TokenKind.MINUS
+    ) {
+      const expr = this.parseArithAddSub();
+      this.rejectNonLiteralArith(expr, tok);
+      if (expr.type === "NUMBER") return expr;
+      return expr as ArithExpr;
+    }
+
+    // 関数呼び出し（ROUND / LENGTH / TODAY 等）は初期版では非対応
+    if (this.tryStringFuncName() !== null) {
+      throw new ParseError(
+        "ASSERT の式では関数は使用できません（スカラーサブクエリ内で計算してください）",
+        tok
+      );
+    }
+
+    throw new ParseError(
+      "ASSERT の式にはリテラル・算術式・スカラーサブクエリを指定してください（フィールド参照は使用できません）",
+      tok
+    );
+  }
+
+  /** ASSERT の算術式にフィールド参照・関数呼び出しが含まれていたら拒否する */
+  private rejectNonLiteralArith(node: ArithNode, tok: Token): void {
+    if (node.type === "FIELD_REF") {
+      throw new ParseError(
+        `ASSERT ではフィールド参照は使用できません（FROM コンテキストがありません）: ${node.field}`,
+        tok
+      );
+    }
+    if (node.type === "STRING_FUNC") {
+      throw new ParseError(
+        "ASSERT の式では関数は使用できません（スカラーサブクエリ内で計算してください）",
+        tok
+      );
+    }
+    if (node.type === "ARITH") {
+      this.rejectNonLiteralArith(node.left, tok);
+      this.rejectNonLiteralArith(node.right, tok);
+    }
+  }
+
+  /** ASSERT の比較演算子を読む（該当しなければ null・消費しない） */
+  private tryAssertCompareOp(): AssertCompareOp | null {
+    switch (this.peek().kind) {
+      case TokenKind.EQ:    this.advance(); return "=";
+      case TokenKind.NEQ:   this.advance(); return "!=";
+      case TokenKind.LT_GT: this.advance(); return "<>";
+      case TokenKind.GT:    this.advance(); return ">";
+      case TokenKind.LT:    this.advance(); return "<";
+      case TokenKind.GTE:   this.advance(); return ">=";
+      case TokenKind.LTE:   this.advance(); return "<=";
+      default: return null;
+    }
+  }
+
+  /** ASSERT は AND / OR による複合条件に対応しない（初期版仕様） */
+  private rejectAssertCompound(): void {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.AND || tok.kind === TokenKind.OR) {
+      throw new ParseError(
+        "ASSERT は AND / OR による複合条件に対応していません（複数の ASSERT 文に分けてください）",
+        tok
+      );
+    }
+  }
+
+  /**
+   * トークン列 [fromIdx, toIdx) を SQL 風テキストに再構成する。
+   * AssertError の "assertion failed: <条件>" メッセージ用（正規化表示で十分）。
+   */
+  private renderTokenRange(fromIdx: number, toIdx: number): string {
+    let out = "";
+    for (let i = fromIdx; i < toIdx; i++) {
+      const t = this.tokens[i];
+      let text: string;
+      if (t.kind === TokenKind.STRING)      text = `'${t.value.replace(/'/g, "''")}'`;
+      else if (t.kind === TokenKind.BIDENT) text = `\`${t.value}\``;
+      else                                  text = t.value;
+      if (out.length > 0 && needsSpaceBetween(this.tokens[i - 1], t)) out += " ";
+      out += text;
+    }
+    return out;
   }
 
   // ----------------------------------------------------------

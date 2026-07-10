@@ -35,7 +35,8 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 22. [制限事項](#22-制限事項)
 23. [UI 機能](#23-ui-機能)
 24. [EXPLAIN](#24-explain)
-25. [バッチ実行と一時テーブル（CLI / MCP）](#25-バッチ実行と一時テーブルcli--mcp)
+25. [バッチ実行と一時テーブル](#25-バッチ実行と一時テーブル)
+26. [ASSERT](#26-assert)
 
 ---
 
@@ -1040,6 +1041,9 @@ VALUES ('田中 太郎', 50000),
 
 > **バッチ処理:** 100件ごとに API リクエストを分割して送信します。
 
+> **確認ダイアログ（プラグイン）:** `INSERT INTO ... VALUES` も実行前に登録件数を表示して確認を求めます（v1.9.0）。  
+> キャンセルすると登録は行われません。
+
 ### INSERT INTO ... SELECT
 
 別アプリのデータをコピー登録します。
@@ -1575,8 +1579,10 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | FULL OUTER JOIN | 非対応 |
 | UPDATE に JOIN | 非対応 |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
-| DML を含むバッチ（複文） | 対応（v1.4.0。`ksql_mutate` / CLI `--allow-dml`。常に fail-fast。プラグインは read-only バッチのみ。→ [§25](#25-バッチ実行と一時テーブルcli--mcp)） |
+| DML を含むバッチ（複文） | 対応（CLI / MCP は v1.4.0、プラグインは v1.9.0。`ksql_mutate` / CLI `--allow-dml` / プラグインは文ごとの確認ダイアログ。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブル)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
+| `ASSERT` の複合条件（`AND` / `OR`） | 非対応（複数の `ASSERT` 文に分けて書く。→ [§26](#26-assert)） |
+| 書き込み系 API（POST / PUT / DELETE）の自動リトライ | 非対応（応答喪失時の二重実行を避けるため。リトライは GET 系限定 — 対象: 408/429/502/503/504。必要なら呼び出し側で冪等な再実行（UPSERT 等）を設計する） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
 
@@ -1678,9 +1684,9 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 
 ---
 
-## 25. バッチ実行と一時テーブル（CLI / MCP）
+## 25. バッチ実行と一時テーブル
 
-> **v1.4.0 で追加**。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI は **read-only バッチのみ**対応で、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します（DML を含むバッチは CLI / MCP で）。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
+> **v1.4.0 で追加**。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI もバッチに対応し（**v1.9.0 で DML を含むバッチも解禁**。v1.4.0〜v1.8.0 は read-only バッチのみ）、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
 
 ### 複文（バッチ）
 
@@ -1691,7 +1697,7 @@ SELECT 部門 FROM APP100;
 SELECT 部門 FROM APP200;
 ```
 
-- read-only 文のみのバッチは `ksql_query` / CLI がそのまま実行します。**DML を含むバッチ**は `ksql_mutate`（`dmlMaxRows` は文ごと + 任意の `dmlTotalMaxRows` で合計ガード）または CLI `--allow-dml`（確認プロンプトはバッチ全体で1回、`--yes` でスキップ）で実行します。DML バッチは常に fail-fast です
+- read-only 文のみのバッチは `ksql_query` / CLI / プラグインがそのまま実行します。**DML を含むバッチ**は `ksql_mutate`（`dmlMaxRows` は文ごと + 任意の `dmlTotalMaxRows` で合計ガード）、CLI `--allow-dml`（確認プロンプトはバッチ全体で1回、`--yes` でスキップ）、またはプラグイン（文ごとの確認ダイアログ — v1.9.0）で実行します。DML バッチは常に fail-fast です
 - SELECT-based DML（`INSERT INTO APPxxx ... SELECT` / `UPSERT INTO APPxxx ... SELECT ... ON DUPLICATE`）のソースは **APP・一時テーブル・両者の混在（JOIN・サブクエリ）のいずれも指定できます**（v1.5.0〜v1.7.0 で段階解禁）。件数には書き込み前の確認で `dmlMaxRows` が適用され（UPSERT は insert + update の**合計**）、超過時は当該文ゼロ書き込みでエラーになります
 - SELECT-based DML の読み取り上限はソース種類ごとに異なります: **APP ソースの読み取りは `maxRecords` の通常解決値（`KSQL_MAX_RECORDS` / profile の `query.maxRecords`、既定 500 件）**（超過は書き込み前の安全側エラー。JOIN の APP 側も同様。`dmlMaxRows` は影響行数ガード専用で読み取りを絞りません — v1.8.0）、**一時テーブルは実体化上限 10,000 行**。UPSERT 系では書き込み先アプリへの既存レコード照合読み取りが**ソース種類に関わらず**発生します（一時テーブルに実体化しても回避されません）
 - 実行前に全文を検証し、1文でも不正ならバッチ全体を拒否します（validate-all-first）
@@ -1728,10 +1734,79 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 - 単文は従来どおり行末 `;` で実行されます
 - `CREATE TEMP TABLE` で始まる入力は**バッチ構築モード**になり、`;` では実行されず **`:run`** でバッファ全体をバッチ実行します（破棄は `:clear`）
 
+### プラグインでの DML バッチ（v1.9.0）
+
+プラグイン UI でも DML を含むバッチを実行できます。
+
+- DML 文は**文ごとの確認ダイアログ**（文番号 `[N/M]`・書き込み先アプリ・確定件数付き）で書き込み直前に確認します
+- `INSERT INTO ... VALUES` は静的に件数が確定するため、**バッチ実行前**にまとめて確認します（キャンセル時は 1 文も実行されません）
+- 実行時確認をキャンセルした場合は文 `[N/M]` で中断し、それ以前の文の実行結果は反映済みのまま残ります（トランザクションなし）
+- 成功した DML 文の影響件数はサマリ行（`[N] タイプ: inserted=... updated=...`）として結果の上に表示されます
+- DML を含む実行（単文・バッチとも）では取得上限到達時の動作が UI 設定に関わらず **error に固定**されます（truncate だと SELECT-based DML のソース読み取りが黙って切り捨てられ、部分書き込みになるため）
+
 ### 注意
 
 - **トランザクションはありません**。バッチも非アトミックです（DML バッチ対応後も、途中失敗時に前半のみ反映された状態が起こり得ます）
 - MCP では `CREATE TEMP TABLE` の実体化結果は返却されません（`tempTable` 名と `rowCount` のみ）。中間結果をコンテキストに載せないための設計です
+
+---
+
+## 26. ASSERT
+
+> **v1.10.0 で追加**。条件が成立しなければ `AssertError` で実行を止める**実行時ゲート**です。DML 前の件数ガードや CLI ヘルスチェック（exit code 監視）に使います。
+
+```sql
+ASSERT <式> <比較演算子> <式>;
+ASSERT <式> BETWEEN <式> AND <式>;
+```
+
+- 比較演算子: `=` `<>` `!=` `<` `<=` `>` `>=` および `BETWEEN`（境界を含む）
+- 式に使えるもの: **リテラル**（数値・文字列）、**算術式**（数値リテラルのみ）、**スカラーサブクエリ**（`(SELECT ...)`。APP・一時テーブルとも参照可）
+- 比較の型規則は WHERE 句と同一（`=` / `<>` は文字列比較、大小比較は双方が数値なら数値比較）
+
+```sql
+-- 典型例1: UPDATE 前の件数ガード
+-- （UPDATE のサブクエリは一時テーブルを参照できないため、ASSERT で直接件数を検証し
+--   UPDATE には同じ条件を書く）
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 売上 > 1000000) BETWEEN 1 AND 500;
+
+UPDATE APP100 SET 状態 = '対象' WHERE 売上 > 1000000;
+```
+
+```sql
+-- 典型例2: 一時テーブルをゲート + SELECT-based DML のソースに使う
+-- （INSERT/UPSERT ... SELECT は一時テーブルソース対応のため、検証した #src をそのまま書き込める）
+CREATE TEMP TABLE #src AS
+SELECT 顧客名, SUM(金額) AS 合計 FROM APP200 GROUP BY 顧客名;
+
+ASSERT (SELECT COUNT(*) FROM #src) BETWEEN 1 AND 500;
+
+INSERT INTO APP300 (顧客名, 合計金額) SELECT 顧客名, 合計 FROM #src;
+```
+
+```bash
+# CLI ヘルスチェック（不成立なら exit code 1）
+ksql -e "ASSERT (SELECT COUNT(*) FROM APP1 WHERE 異常フラグ = '1') = 0"
+```
+
+### 動作
+
+- **read-only 扱い**です（kintone に書き込まない）。read-only バッチ・DML バッチのどちらにも書けます。単文でも実行できます
+- 不成立の場合は `AssertError: assertion failed: <条件> (actual: <実測値>).` でその文がエラーになり、**バッチは常に停止**します（`continueOnError` 指定も無視。以降の文は `skipped` / `skippedReason: "assertion"`）
+- バッチ成功時の ASSERT は結果を持たない文として扱われます（`statements[]` は `status: "success"` のみ）
+- スカラーサブクエリは**必ず 1行1列**を要求します。0行・複数行は実行時 `AssertError`（0行を NULL 扱いにしません）。複数列は select list が明示的ならパース時に拒否、`SELECT *` 等は実行時に検証します
+
+### 制限（初期版）
+
+| 項目 | 内容 |
+|---|---|
+| `AND` / `OR` の複合条件 | 非対応（複数の `ASSERT` 文に分けて書く） |
+| 裸の値のみ（`ASSERT 1`） | 非対応（比較演算子または BETWEEN が必須） |
+| フィールド参照 | 非対応（FROM コンテキストがないため。サブクエリ内では使用可） |
+| 関数呼び出し | 式の直下では非対応（サブクエリ内で計算する） |
+| サブクエリ直後の算術 | 非対応（`(SELECT ...) * 2` は不可。サブクエリ内で計算する） |
+
+> **注意（既存制限との組み合わせ）**: `UPDATE` / `DELETE` のサブクエリでは一時テーブルを参照できません（`ArgumentError: temp table references in UPDATE are not supported yet.` — §25）。`ASSERT` 自体は一時テーブルを参照できるため、一時テーブルで件数を検証しつつ後続の `UPDATE` / `DELETE` には同じ WHERE 条件を直接書くか、後続を一時テーブルソース対応の `INSERT` / `UPSERT ... SELECT` にしてください。
 
 ---
 
@@ -1940,4 +2015,7 @@ SELECT *, CURRENT_DATE() AS 今日 FROM APP100
 -- 日付関数
 SELECT YEAR(作成日時) AS 年, MONTH(作成日時) AS 月, DAY(作成日時) AS 日 FROM APP100
 SELECT DATEDIFF(TODAY(), 期限日) AS 残日数 FROM APP100 WHERE 期限日 != ''
+
+-- ASSERT（実行時ゲート。不成立なら AssertError で停止）
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1') = 0
 ```

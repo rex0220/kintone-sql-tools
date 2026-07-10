@@ -86,7 +86,13 @@ function assertSchemas(tools) {
 // 「実装は正しいが tools/list のメタデータだけ古い」ズレを検出する。
 // 全文一致は文言調整のたびに壊れるため、実装能力を表すキー部分文字列のみを固定する。
 function assertToolDescriptions(tools) {
-  const queryKeys = ["multi-statement batches with temp tables"];
+  const queryKeys = [
+    "multi-statement batches with temp tables",
+    // v1.10.0: ASSERT は ksql_query で実行できる read-only 文
+    "ASSERT",
+    // v1.10.0: ASSERT 失敗は常にバッチ停止(continueOnError 無視)
+    "always stops the batch",
+  ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
     // v1.7.0: SELECT-based DML のソース制限を最終解消(APP / temp / 混在とも可)

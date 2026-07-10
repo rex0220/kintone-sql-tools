@@ -69,8 +69,12 @@ export class RequestGate {
   constructor(options: RequestGateOptions = {}) {
     this.maxConcurrent = clampInt(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, 1, 50);
     this.maxRetries = clampInt(options.maxRetries ?? DEFAULT_MAX_RETRIES, 0, 10);
-    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    // profile 設定（JSON）から無検証で流れてくるため、CLI フラグと同様にここで clamp する
+    this.baseDelayMs = clampInt(options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, 1, 60_000);
+    this.maxDelayMs = Math.max(
+      clampInt(options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS, 1, 600_000),
+      this.baseDelayMs
+    );
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.random = options.random ?? Math.random;
   }
@@ -82,6 +86,21 @@ export class RequestGate {
 
   get limit(): number {
     return this.maxConcurrent;
+  }
+
+  /** 解決済みの GET リトライ回数（テスト・診断用） */
+  get retries(): number {
+    return this.maxRetries;
+  }
+
+  /** 解決済みのバックオフ初期値ミリ秒（テスト・診断用） */
+  get retryBaseDelayMs(): number {
+    return this.baseDelayMs;
+  }
+
+  /** 解決済みのバックオフ上限ミリ秒（テスト・診断用） */
+  get retryMaxDelayMs(): number {
+    return this.maxDelayMs;
   }
 
   /** GET 系: セマフォ + リトライ付きで実行する */
@@ -161,14 +180,22 @@ let globalGate: RequestGate | null = null;
 
 /**
  * プロセス内グローバルのゲートを返す（初回呼び出し時に生成）。
- * 上限は最初に解決された値で固定される。優先順:
- * `KSQL_MAX_CONCURRENT` env > limitHint（profile 設定など）> 既定 10
+ * 全設定は最初に解決された値で固定される。
+ *
+ * env（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`）の解決はこのモジュールでは行わない —
+ * 呼び出し側（Node 層）が `resolveRequestGateOptions()`（node/config.ts）で
+ * env > CLI > config を解決してから渡す。src/api は browser/plugin にも近い層の
+ * ため、Node/fs 依存（node/config）をここに持ち込まない。
+ *
+ * 後方互換: 数値1個の渡し方（旧 limitHint = maxConcurrent）も受け付ける。
  */
-export function getGlobalRequestGate(limitHint?: number): RequestGate {
+export function getGlobalRequestGate(
+  options?: number | Partial<RequestGateOptions>
+): RequestGate {
   if (globalGate === null) {
-    const envValue = Number(process.env.KSQL_MAX_CONCURRENT);
-    const limit = Number.isInteger(envValue) && envValue > 0 ? envValue : limitHint;
-    globalGate = new RequestGate({ maxConcurrent: limit });
+    globalGate = new RequestGate(
+      typeof options === "number" ? { maxConcurrent: options } : options ?? {}
+    );
   }
   return globalGate;
 }

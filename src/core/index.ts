@@ -2,7 +2,7 @@
 // core index — UI/CLI から利用する公開API
 // ============================================================
 
-export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError } from "../execute";
+export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError, AssertError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES } from "./batch";
 export { getInsertValuesCount, getStatementType, isDmlType } from "./dmlGuard";
@@ -16,6 +16,7 @@ export type {
   ExecuteMetrics,
   SelectResult,
   UpsertResult,
+  AssertResult,
   KintoneClient,
   KintoneAppInfo,
   KintoneFieldInfo,

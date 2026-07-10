@@ -30999,6 +30999,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["AVG", "AVG" /* AVG */],
   ["MAX", "MAX" /* MAX */],
   ["MIN", "MIN" /* MIN */],
+  ["ASSERT", "ASSERT" /* ASSERT */],
   ["AND", "AND" /* AND */],
   ["OR", "OR" /* OR */],
   ["NOT", "NOT" /* NOT */],
@@ -31344,6 +31345,58 @@ function isJapanese(cp) {
 
 // src/parser/parser.ts
 var MAX_BATCH_STATEMENTS = 20;
+var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
+  "IDENT" /* IDENT */,
+  "BIDENT" /* BIDENT */,
+  "COUNT" /* COUNT */,
+  "SUM" /* SUM */,
+  "AVG" /* AVG */,
+  "MAX" /* MAX */,
+  "MIN" /* MIN */,
+  "TODAY" /* TODAY */,
+  "NOW" /* NOW */,
+  "LOGINUSER" /* LOGINUSER */,
+  "UPPER" /* UPPER */,
+  "LOWER" /* LOWER */,
+  "TRIM" /* TRIM */,
+  "LTRIM" /* LTRIM */,
+  "RTRIM" /* RTRIM */,
+  "LENGTH" /* LENGTH */,
+  "SUBSTRING" /* SUBSTRING */,
+  "SUBSTR" /* SUBSTR */,
+  "CONCAT" /* CONCAT */,
+  "REPLACE" /* REPLACE */,
+  "COALESCE" /* COALESCE */,
+  "NULLIF" /* NULLIF */,
+  "ISNULL" /* ISNULL */,
+  "CAST" /* CAST */,
+  "CONVERT" /* CONVERT */,
+  "FORMAT" /* FORMAT */,
+  "ROUND" /* ROUND */,
+  "FLOOR" /* FLOOR */,
+  "CEIL" /* CEIL */,
+  "CEILING" /* CEILING */,
+  "ABS" /* ABS */,
+  "MOD" /* MOD */,
+  "POWER" /* POWER */,
+  "POW" /* POW */,
+  "SQRT" /* SQRT */,
+  "YEAR" /* YEAR */,
+  "MONTH" /* MONTH */,
+  "DAY" /* DAY */,
+  "DATE_FORMAT" /* DATE_FORMAT */,
+  "DATEDIFF" /* DATEDIFF */,
+  "DATE_ADD" /* DATE_ADD */,
+  "IF" /* IF */
+]);
+function needsSpaceBetween(prev, cur) {
+  if (prev.kind === "(" /* LPAREN */ || prev.kind === "." /* DOT */) return false;
+  if (cur.kind === ")" /* RPAREN */ || cur.kind === "," /* COMMA */ || cur.kind === "." /* DOT */) return false;
+  if (cur.kind === "(" /* LPAREN */) {
+    return !FUNC_CALL_PREFIX_KINDS.has(prev.kind);
+  }
+  return true;
+}
 var ParseError = class extends Error {
   constructor(message, token) {
     super(`${message}\uFF08\u4F4D\u7F6E ${token.pos}\u3001\u30C8\u30FC\u30AF\u30F3: \u300C${token.value}\u300D\uFF09`);
@@ -31433,6 +31486,8 @@ var Parser = class {
         return this.parseDescribe();
       case "EXPLAIN" /* EXPLAIN */:
         return this.parseExplain();
+      case "ASSERT" /* ASSERT */:
+        return this.parseAssert();
       case "IDENT" /* IDENT */: {
         const upper = tok.value.toUpperCase();
         if (upper === "CREATE") return this.parseCreateTempTable();
@@ -31443,7 +31498,7 @@ var Parser = class {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
       tok
     );
   }
@@ -31535,6 +31590,174 @@ var Parser = class {
       throw new ParseError("EXPLAIN \u306E\u5F8C\u306B\u306F SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER \u304C\u5FC5\u8981\u3067\u3059", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+  // ----------------------------------------------------------
+  // ASSERT
+  //
+  //   ASSERT <式> <比較演算子> <式>
+  //   ASSERT <式> BETWEEN <式> AND <式>
+  //
+  // 式: リテラル / 算術式 / スカラーサブクエリ。
+  // フィールド参照（FROM コンテキストがない）・AND / OR 複合条件・
+  // 裸の値のみ（ASSERT 1）は ParseError。
+  // ----------------------------------------------------------
+  parseAssert() {
+    this.expect("ASSERT" /* ASSERT */);
+    const condStart = this.pos;
+    const left = this.parseAssertOperand();
+    const opTok = this.peek();
+    if (this.consume("BETWEEN" /* BETWEEN */)) {
+      const low = this.parseAssertOperand();
+      this.expect(
+        "AND" /* AND */,
+        "ASSERT \u306E BETWEEN \u306B\u306F AND \u304C\u5FC5\u8981\u3067\u3059\uFF08\u4F8B: ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500\uFF09"
+      );
+      const high = this.parseAssertOperand();
+      this.rejectAssertCompound();
+      return {
+        type: "ASSERT",
+        left,
+        op: "BETWEEN",
+        right: null,
+        low,
+        high,
+        text: this.renderTokenRange(condStart, this.pos)
+      };
+    }
+    const op = this.tryAssertCompareOp();
+    if (op === null) {
+      throw new ParseError(
+        "ASSERT \u306B\u306F\u6BD4\u8F03\u6F14\u7B97\u5B50\uFF08= <> < <= > >=\uFF09\u307E\u305F\u306F BETWEEN \u304C\u5FC5\u8981\u3067\u3059\uFF08\u5024\u306E\u307F\u306E ASSERT \u306F\u4E0D\u53EF\uFF09",
+        opTok
+      );
+    }
+    const right = this.parseAssertOperand();
+    this.rejectAssertCompound();
+    return {
+      type: "ASSERT",
+      left,
+      op,
+      right,
+      low: null,
+      high: null,
+      text: this.renderTokenRange(condStart, this.pos)
+    };
+  }
+  /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
+  parseAssertOperand() {
+    const tok = this.peek();
+    if (tok.kind === "STRING" /* STRING */) {
+      this.advance();
+      return { type: "STRING", value: tok.value };
+    }
+    if (tok.kind === "(" /* LPAREN */ && this.peekAt(1).kind === "SELECT" /* SELECT */) {
+      this.advance();
+      const query = this.parseSelect();
+      this.expect(")" /* RPAREN */);
+      if (this.isArithOp(this.peek().kind)) {
+        throw new ParseError(
+          "\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u306E\u5F8C\u306B\u7B97\u8853\u6F14\u7B97\u5B50\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002\u30B5\u30D6\u30AF\u30A8\u30EA\u5185\u3067\u8A08\u7B97\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u4F8B: ASSERT (SELECT COUNT(*) * 2 FROM APP100) > 10\uFF09",
+          this.peek()
+        );
+      }
+      const hasWildcard = query.columns.some(
+        (c) => c.type === "WILDCARD" || c.type === "PARENT_WILDCARD"
+      );
+      if (!hasWildcard && query.columns.length > 1) {
+        throw new ParseError("scalar subquery in ASSERT must return exactly 1 column.", tok);
+      }
+      return { type: "SCALAR_SUBQUERY", query };
+    }
+    if (tok.kind === "NUMBER" /* NUMBER */ || tok.kind === "(" /* LPAREN */ || tok.kind === "-" /* MINUS */) {
+      const expr = this.parseArithAddSub();
+      this.rejectNonLiteralArith(expr, tok);
+      if (expr.type === "NUMBER") return expr;
+      return expr;
+    }
+    if (this.tryStringFuncName() !== null) {
+      throw new ParseError(
+        "ASSERT \u306E\u5F0F\u3067\u306F\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u5185\u3067\u8A08\u7B97\u3057\u3066\u304F\u3060\u3055\u3044\uFF09",
+        tok
+      );
+    }
+    throw new ParseError(
+      "ASSERT \u306E\u5F0F\u306B\u306F\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u30FB\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF09",
+      tok
+    );
+  }
+  /** ASSERT の算術式にフィールド参照・関数呼び出しが含まれていたら拒否する */
+  rejectNonLiteralArith(node, tok) {
+    if (node.type === "FIELD_REF") {
+      throw new ParseError(
+        `ASSERT \u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08FROM \u30B3\u30F3\u30C6\u30AD\u30B9\u30C8\u304C\u3042\u308A\u307E\u305B\u3093\uFF09: ${node.field}`,
+        tok
+      );
+    }
+    if (node.type === "STRING_FUNC") {
+      throw new ParseError(
+        "ASSERT \u306E\u5F0F\u3067\u306F\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u5185\u3067\u8A08\u7B97\u3057\u3066\u304F\u3060\u3055\u3044\uFF09",
+        tok
+      );
+    }
+    if (node.type === "ARITH") {
+      this.rejectNonLiteralArith(node.left, tok);
+      this.rejectNonLiteralArith(node.right, tok);
+    }
+  }
+  /** ASSERT の比較演算子を読む（該当しなければ null・消費しない） */
+  tryAssertCompareOp() {
+    switch (this.peek().kind) {
+      case "=" /* EQ */:
+        this.advance();
+        return "=";
+      case "!=" /* NEQ */:
+        this.advance();
+        return "!=";
+      case "<>" /* LT_GT */:
+        this.advance();
+        return "<>";
+      case ">" /* GT */:
+        this.advance();
+        return ">";
+      case "<" /* LT */:
+        this.advance();
+        return "<";
+      case ">=" /* GTE */:
+        this.advance();
+        return ">=";
+      case "<=" /* LTE */:
+        this.advance();
+        return "<=";
+      default:
+        return null;
+    }
+  }
+  /** ASSERT は AND / OR による複合条件に対応しない（初期版仕様） */
+  rejectAssertCompound() {
+    const tok = this.peek();
+    if (tok.kind === "AND" /* AND */ || tok.kind === "OR" /* OR */) {
+      throw new ParseError(
+        "ASSERT \u306F AND / OR \u306B\u3088\u308B\u8907\u5408\u6761\u4EF6\u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093\uFF08\u8907\u6570\u306E ASSERT \u6587\u306B\u5206\u3051\u3066\u304F\u3060\u3055\u3044\uFF09",
+        tok
+      );
+    }
+  }
+  /**
+   * トークン列 [fromIdx, toIdx) を SQL 風テキストに再構成する。
+   * AssertError の "assertion failed: <条件>" メッセージ用（正規化表示で十分）。
+   */
+  renderTokenRange(fromIdx, toIdx) {
+    let out = "";
+    for (let i = fromIdx; i < toIdx; i++) {
+      const t = this.tokens[i];
+      let text;
+      if (t.kind === "STRING" /* STRING */) text = `'${t.value.replace(/'/g, "''")}'`;
+      else if (t.kind === "BIDENT" /* BIDENT */) text = `\`${t.value}\``;
+      else text = t.value;
+      if (out.length > 0 && needsSpaceBetween(this.tokens[i - 1], t)) out += " ";
+      out += text;
+    }
+    return out;
   }
   // ----------------------------------------------------------
   // SELECT
@@ -32886,7 +33109,7 @@ function isDmlType(type) {
   return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
 }
 function isReadOnlyType(type) {
-  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE";
+  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "ASSERT";
 }
 function hasWhereClause(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
@@ -35255,6 +35478,8 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "ASSERT":
+      return executeAssert(stmt, client, options, cacheContext);
   }
 }
 var TEMP_TABLE_MAX_ROWS = 1e4;
@@ -35329,6 +35554,8 @@ async function executeBatch(sql, client, options = {}) {
       failed.add(i);
       if (e instanceof BatchTimeoutError) {
         aborted2 = "timeout";
+      } else if (e instanceof AssertError) {
+        aborted2 = "assertion";
       } else if (!options.continueOnError) {
         aborted2 = "fail-fast";
       }
@@ -35360,6 +35587,10 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
   }
   if (stmt.type === "EXPLAIN") {
     return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  }
+  if (stmt.type === "ASSERT") {
+    await executeAssert(stmt, client, options, cacheContext, tempTables);
+    return {};
   }
   if (info.tempTablesReferenced.length > 0) {
     if (stmt.type === "SELECT" || stmt.type === "UNION") {
@@ -35436,6 +35667,107 @@ function safeJsonStringify(v) {
 function parseSqlBatch(sql) {
   const tokens = new Lexer(sql).tokenize();
   return new Parser(tokens).parseStatements();
+}
+var AssertError = class extends Error {
+  constructor(message) {
+    super(`AssertError: ${message}`);
+    this.name = "AssertError";
+  }
+};
+async function executeAssert(stmt, client, options, cacheContext, tempTables) {
+  const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
+  if (stmt.op === "BETWEEN") {
+    if (stmt.low === null || stmt.high === null) {
+      throw new Error("ArgumentError: malformed ASSERT statement.");
+    }
+    const low = await evalAssertOperand(stmt.low, client, options, cacheContext, tempTables);
+    const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
+    if (!compareAssertValues(">=", left, low) || !compareAssertValues("<=", left, high)) {
+      throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
+    }
+    return { type: "ASSERT", condition: stmt.text };
+  }
+  if (stmt.right === null) {
+    throw new Error("ArgumentError: malformed ASSERT statement.");
+  }
+  const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
+  if (!compareAssertValues(stmt.op, left, right)) {
+    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
+  }
+  return { type: "ASSERT", condition: stmt.text };
+}
+async function evalAssertOperand(operand, client, options, cacheContext, tempTables) {
+  switch (operand.type) {
+    case "NUMBER":
+      return String(operand.value);
+    case "STRING":
+      return operand.value;
+    case "ARITH":
+      return String(evalAssertArith(operand));
+    case "SCALAR_SUBQUERY": {
+      const { query, probed } = withScalarProbeLimit(operand.query);
+      const result = await runSubquery(query, client, options, cacheContext, tempTables);
+      if (result.columns.length > 1) {
+        throw new AssertError(
+          `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+        );
+      }
+      if (result.rowCount === 0) {
+        throw new AssertError("scalar subquery returned no rows (expected 1 row).");
+      }
+      if (result.rowCount > 1) {
+        const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
+        throw new AssertError(`scalar subquery returned ${rows} (expected 1 row).`);
+      }
+      const col = result.columns[0] ?? "";
+      return result.rows[0]?.[col] ?? "";
+    }
+  }
+}
+function withScalarProbeLimit(query) {
+  const hasAgg = query.groupBy.length > 0 || query.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL");
+  if (hasAgg || query.distinct || query.limit !== null) return { query, probed: false };
+  return { query: { ...query, limit: 2 }, probed: true };
+}
+function evalAssertArith(node) {
+  if (node.type === "NUMBER") return node.value;
+  if (node.type === "ARITH") {
+    const left = evalAssertArith(node.left);
+    const right = evalAssertArith(node.right);
+    switch (node.op) {
+      case "+":
+        return left + right;
+      case "-":
+        return left - right;
+      case "*":
+        return left * right;
+      case "/":
+        return left / right;
+      case "%":
+        return left % right;
+    }
+  }
+  throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
+}
+function compareAssertValues(op, leftStr, rightStr) {
+  const leftNum = Number(leftStr);
+  const rightNum = Number(rightStr);
+  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
+  switch (op) {
+    case "=":
+      return leftStr === rightStr;
+    case "!=":
+    case "<>":
+      return leftStr !== rightStr;
+    case ">":
+      return numeric ? leftNum > rightNum : leftStr > rightStr;
+    case "<":
+      return numeric ? leftNum < rightNum : leftStr < rightStr;
+    case ">=":
+      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
+    case "<=":
+      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
 }
 async function executeSelect(stmt, client, options, cacheContext, cteCache) {
   if (isNoFromSelect(stmt)) {
@@ -36894,7 +37226,32 @@ function buildBatchStatementPlan(stmt, info) {
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS\uFF08\u30A2\u30D7\u30EA\u4E00\u89A7\u306E\u53D6\u5F97\uFF09"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u5B9A\u7FA9\u306E\u53D6\u5F97\uFF09`];
   if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  if (stmt.type === "ASSERT") {
+    const lines = [
+      `ASSERT ${stmt.text}`,
+      "  check:         \u5B9F\u884C\u6642\u306B\u6761\u4EF6\u8A55\u4FA1\uFF08\u4E0D\u6210\u7ACB\u306F AssertError \u3067\u30D0\u30C3\u30C1\u505C\u6B62\u3001\u4EE5\u964D\u306E\u6587\u306F skipped\uFF09"
+    ];
+    const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
+      (o) => o !== null && o.type === "SCALAR_SUBQUERY"
+    );
+    subqueries.forEach((sq, i) => {
+      lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
+      const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo).map((l) => `  ${l}`));
+    });
+    return lines;
+  }
   return buildPlanForBatchQuery(stmt, info);
+}
+function hasTempTableRef(node) {
+  if (Array.isArray(node)) return node.some(hasTempTableRef);
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    const cte = obj["cteName"];
+    if (typeof cte === "string" && cte.startsWith("#")) return true;
+    return Object.values(obj).some(hasTempTableRef);
+  }
+  return false;
 }
 function buildPlanForBatchQuery(query, info) {
   if (info.tempTablesReferenced.length === 0) {
@@ -37248,6 +37605,62 @@ function parseSqlStatements(sql) {
   return new Parser(tokens).parseStatements();
 }
 
+// src/output/batchEnvelope.ts
+function toMutationSummary(result) {
+  if (result.type === "INSERT") {
+    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
+  }
+  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
+  if (result.type === "DELETE") return { deletedCount: result.deletedCount };
+  if (result.type === "UPSERT") {
+    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
+  }
+  return { reorderedParentCount: result.reorderedParentCount };
+}
+function buildBatchEnvelope(batch, options = {}) {
+  const { maxTotalRecords } = options;
+  const results = [];
+  let totalRows = 0;
+  const statements = batch.statements.map((s) => {
+    const entry = {
+      index: s.index,
+      type: s.type,
+      status: s.status
+    };
+    if (s.status === "error" && s.error) entry.error = s.error;
+    if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
+    if (s.tempTable !== void 0) entry.tempTable = s.tempTable;
+    if (s.rowCount !== void 0) entry.rowCount = s.rowCount;
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      totalRows += s.result.rowCount;
+      if (maxTotalRecords !== void 0 && totalRows > maxTotalRecords) {
+        throw new Error(
+          `ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`
+        );
+      }
+      entry.resultIndex = results.length;
+      results.push({
+        columns: s.result.columns,
+        rows: s.result.rows,
+        rowCount: s.result.rowCount,
+        warnings: s.result.warnings ?? []
+      });
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
+      Object.assign(entry, toMutationSummary(s.result));
+    }
+    return entry;
+  });
+  return {
+    ok: batch.ok,
+    batch: true,
+    statementCount: batch.statementCount,
+    statements,
+    results,
+    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
+    warnings: []
+  };
+}
+
 // src/node/appProfiles.ts
 function parseTokenMap(raw) {
   const out = {};
@@ -37453,6 +37866,21 @@ function envInt(name) {
   if (!Number.isInteger(n) || n <= 0) return null;
   return n;
 }
+function envNonNegativeInt(name) {
+  const v = envString(name);
+  if (v === null) return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
+}
+function resolveRequestGateOptions(base) {
+  return {
+    ...base,
+    maxConcurrent: envInt("KSQL_MAX_CONCURRENT") ?? base.maxConcurrent,
+    // KSQL_RETRY=0（リトライ無効）は有効値のため envNonNegativeInt で読む
+    maxRetries: envNonNegativeInt("KSQL_RETRY") ?? base.maxRetries
+  };
+}
 function envOnLimit(name) {
   const v = envString(name);
   if (v === "error" || v === "truncate") return v;
@@ -37493,8 +37921,11 @@ var RequestGate = class {
     this.waiters = [];
     this.maxConcurrent = clampInt(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, 1, 50);
     this.maxRetries = clampInt(options.maxRetries ?? DEFAULT_MAX_RETRIES, 0, 10);
-    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.baseDelayMs = clampInt(options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, 1, 6e4);
+    this.maxDelayMs = Math.max(
+      clampInt(options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS, 1, 6e5),
+      this.baseDelayMs
+    );
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.random = options.random ?? Math.random;
   }
@@ -37504,6 +37935,18 @@ var RequestGate = class {
   }
   get limit() {
     return this.maxConcurrent;
+  }
+  /** 解決済みの GET リトライ回数（テスト・診断用） */
+  get retries() {
+    return this.maxRetries;
+  }
+  /** 解決済みのバックオフ初期値ミリ秒（テスト・診断用） */
+  get retryBaseDelayMs() {
+    return this.baseDelayMs;
+  }
+  /** 解決済みのバックオフ上限ミリ秒（テスト・診断用） */
+  get retryMaxDelayMs() {
+    return this.maxDelayMs;
   }
   /** GET 系: セマフォ + リトライ付きで実行する */
   async runReadOnly(fn) {
@@ -37561,11 +38004,11 @@ function withRequestGate(client, gate) {
   };
 }
 var globalGate = null;
-function getGlobalRequestGate(limitHint) {
+function getGlobalRequestGate(options) {
   if (globalGate === null) {
-    const envValue = Number(process.env.KSQL_MAX_CONCURRENT);
-    const limit = Number.isInteger(envValue) && envValue > 0 ? envValue : limitHint;
-    globalGate = new RequestGate({ maxConcurrent: limit });
+    globalGate = new RequestGate(
+      typeof options === "number" ? { maxConcurrent: options } : options ?? {}
+    );
   }
   return globalGate;
 }
@@ -37918,7 +38361,12 @@ async function createKsqlRuntime(serverOptions, input) {
   };
   const gatedClient = withRequestGate(
     routedClient,
-    getGlobalRequestGate(profile2.query?.maxConcurrent)
+    getGlobalRequestGate(resolveRequestGateOptions({
+      maxConcurrent: profile2.query?.maxConcurrent,
+      maxRetries: profile2.query?.retry,
+      baseDelayMs: profile2.query?.retryBaseDelayMs,
+      maxDelayMs: profile2.query?.retryMaxDelayMs
+    }))
   );
   return {
     sql,
@@ -38175,57 +38623,11 @@ function toSelectPayload(result) {
     warnings: result.warnings ?? []
   };
 }
-function toMutationSummary(result) {
-  if (result.type === "INSERT") {
-    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
-  }
-  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
-  if (result.type === "DELETE") return { deletedCount: result.deletedCount };
-  if (result.type === "UPSERT") {
-    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
-  }
-  return { reorderedParentCount: result.reorderedParentCount };
-}
-function toBatchQueryPayload(batch, maxTotalRecords) {
-  const results = [];
-  let totalRows = 0;
-  const statements = batch.statements.map((s) => {
-    const entry = {
-      index: s.index,
-      type: s.type,
-      status: s.status
-    };
-    if (s.status === "error" && s.error) entry.error = s.error;
-    if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
-    if (s.tempTable !== void 0) entry.tempTable = s.tempTable;
-    if (s.rowCount !== void 0) entry.rowCount = s.rowCount;
-    if (s.status === "success" && s.result?.type === "SELECT") {
-      totalRows += s.result.rowCount;
-      if (maxTotalRecords !== void 0 && totalRows > maxTotalRecords) {
-        throw new Error(
-          `ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`
-        );
-      }
-      entry.resultIndex = results.length;
-      results.push({
-        columns: s.result.columns,
-        rows: s.result.rows,
-        rowCount: s.result.rowCount,
-        warnings: s.result.warnings ?? []
-      });
-    } else if (s.status === "success" && s.result && s.result.type !== "SELECT") {
-      Object.assign(entry, toMutationSummary(s.result));
-    }
-    return entry;
-  });
+function toAssertPayload(result) {
   return {
-    ok: batch.ok,
-    batch: true,
-    statementCount: batch.statementCount,
-    statements,
-    results,
-    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
-    warnings: []
+    ok: true,
+    type: result.type,
+    condition: result.condition
   };
 }
 function toMutationPayload(result) {
@@ -38428,7 +38830,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime2.timeout
       });
-      return toBatchQueryPayload(batchResult, input.maxTotalRecords);
+      return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
     if (!validation.isReadOnly) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
@@ -38441,6 +38843,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         onLimitReached: input.onLimit ?? DEFAULT_ON_LIMIT,
         cacheContext: validation.cacheContext
       });
+      if (result2.type === "ASSERT") return toAssertPayload(result2);
       if (result2.type !== "SELECT") {
         throw new Error(`ArgumentError: read-only query returned unexpected result type ${result2.type}.`);
       }
@@ -38460,6 +38863,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext
     });
+    if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
     }
@@ -38521,7 +38925,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         return true;
       }
     });
-    const payload = toBatchQueryPayload(batchResult);
+    const payload = buildBatchEnvelope(batchResult);
     if (selectBasedDml) {
       for (const entry of payload.statements) {
         if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT") continue;
@@ -38531,7 +38935,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         entry.error = { ...error51, message: `${error51.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}` };
       }
     }
-    return payload;
+    return { ...payload };
   }
   async function mutate(input) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
@@ -38576,7 +38980,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     } catch (err) {
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
     }
-    if (result.type === "SELECT") {
+    if (result.type === "SELECT" || result.type === "ASSERT") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
     return toMutationPayload(result);
@@ -38854,7 +39258,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.9.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.10.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -38876,7 +39280,7 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). ASSERT <expr> <op> <expr> (or BETWEEN) is a runtime gate: on failure it raises AssertError and always stops the batch. DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
