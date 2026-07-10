@@ -631,7 +631,15 @@ export function createKsqlMcpTools(
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
-    if (validation.statementType === "INSERT_SELECT" || validation.statementType === "UPSERT_SELECT") {
+    // 単文の INSERT_SELECT は拒否するが、一時テーブル経由のバッチは対応済み(M4)のため
+    // 誘導ヒントを添える(ヒントが無いと MCP クライアントの LLM が「非対応」と誤学習する)
+    if (validation.statementType === "INSERT_SELECT") {
+      throw new Error(
+        "ArgumentError: INSERT_SELECT is not supported by ksql_mutate as a single statement. " +
+          "Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"
+      );
+    }
+    if (validation.statementType === "UPSERT_SELECT") {
       throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
     }
     if ((validation.statementType === "UPDATE" || validation.statementType === "DELETE") && !validation.hasWhere) {

@@ -8,6 +8,8 @@ import { resolve } from "path";
 
 if (!existsSync("dist-mcp")) mkdirSync("dist-mcp");
 
+const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+
 await esbuild.build({
   entryPoints: [resolve("src/mcp/index.ts")],
   outfile: resolve("dist-mcp/ksql-mcp.js"),
@@ -15,6 +17,8 @@ await esbuild.build({
   platform: "node",
   target: ["node18"],
   format: "cjs",
+  // サーバー申告バージョン(serverInfo.version)を package.json と同期する
+  define: { __KSQL_VERSION__: JSON.stringify(pkg.version) },
 });
 
 const outPath = "dist-mcp/ksql-mcp.js";

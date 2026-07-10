@@ -257,15 +257,18 @@ describe("MCP tools", () => {
     })).rejects.toThrow(/INSERT rows \(2\) exceed dmlMaxRows \(1\)/);
   });
 
-  test("mutate rejects SELECT-based DML in the initial implementation", async () => {
+  test("mutate rejects standalone SELECT-based DML with a batch hint for INSERT_SELECT", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
 
+    // 単文 INSERT_SELECT の拒否メッセージは対応済みのバッチ経路(M4)へ誘導する
     await expect(tools.mutate({
       sql: "INSERT INTO APP200 (name) SELECT name FROM APP100",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 10,
-    })).rejects.toThrow(/INSERT_SELECT is not supported/);
+    })).rejects.toThrow(
+      /INSERT_SELECT is not supported by ksql_mutate as a single statement\. Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT/
+    );
     await expect(tools.mutate({
       sql: "UPSERT INTO APP200 (name) SELECT name FROM APP100 ON DUPLICATE (name)",
       allowDml: true,

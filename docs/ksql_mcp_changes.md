@@ -310,6 +310,21 @@ Claude Desktop 設定例:
   中間結果を LLM のコンテキストに載せないための設計
 - 一時テーブルはバッチ内スコープ（呼び出し終了で破棄）。同時 16 個・1個 10,000 行上限
 
+## 11.6 ツールメタデータの実態合わせ（v1.4.1）
+
+Claude Desktop が `ksql_mutate` の description（「INSERT_SELECT and UPSERT_SELECT are rejected」）を根拠に、
+対応済みの一時テーブル経由バッチ INSERT_SELECT を「非対応」と誤判定してツールを呼ばない事象への対応。
+実装は v1.4.0 のままで、モデルに見えるメタデータのみを実態に合わせた。
+計画: `docs/internal/ksql_mcp_tool_description_fix_plan.md`
+
+| 変更 | 内容 |
+| --- | --- |
+| description 修正 | `ksql_query` / `ksql_mutate` にバッチ + 一時テーブル対応を明記し SQL 例を埋め込み。mutate は「Standalone INSERT_SELECT and UPSERT_SELECT are rejected」に限定 |
+| エラーメッセージ | 単文 INSERT_SELECT の拒否時に、対応済みのバッチ経路（CREATE TEMP TABLE を挟む書き方）への誘導ヒントを追加 |
+| パラメータ説明 | 全入力スキーマに zod `.describe()` を追加（従来は TypeScript コメントのみで MCP クライアントに渡っていなかった） |
+| serverInfo.version | `"1.0.0"` 固定を廃止し、esbuild define で package.json の version を埋め込み |
+| smoke 回帰ガード | `scripts/mcp-smoke.mjs` に description キー部分文字列・パラメータ説明の存在・version 一致の機械的 assertion を追加（メタデータだけ古くなるズレを検出） |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
