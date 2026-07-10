@@ -59,10 +59,15 @@ Options:
 `);
 }
 
+/** esbuild の define(build-mcp.mjs)で package.json の version が埋め込まれる。
+ *  バンドル外(ts-jest 等)では未定義のため typeof ガードでフォールバックする */
+declare const __KSQL_VERSION__: string;
+const SERVER_VERSION = typeof __KSQL_VERSION__ === "string" ? __KSQL_VERSION__ : "0.0.0-dev";
+
 export function createServer(args: ServerArgs): McpServer {
   const server = new McpServer({
     name: "ksql-mcp",
-    version: "1.0.0",
+    version: SERVER_VERSION,
   });
   const tools = createKsqlMcpTools({
     configPath: args.configPath,
@@ -83,13 +88,13 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL statements such as SELECT, WITH, UNION, EXPLAIN, SHOW APPS, and DESCRIBE. DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). DML is rejected.",
     inputSchema: queryInputShape,
   }, tools.queryTool);
 
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. INSERT_SELECT and UPSERT_SELECT are rejected.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is allowed in a batch when it selects only from temp tables (CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;). Standalone INSERT_SELECT and UPSERT_SELECT are rejected.",
     inputSchema: mutateInputShape,
   }, tools.mutateTool);
 

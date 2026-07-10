@@ -8,6 +8,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = resolve(rootDir, "dist-mcp", "ksql-mcp.js");
+const packageVersion = JSON.parse(
+  readFileSync(resolve(rootDir, "package.json"), "utf8")
+).version;
 const smokeSavedQueriesPath = resolve(rootDir, ".tmp", "mcp-smoke-queries.json");
 const expectedTools = [
   "ksql_validate",
@@ -79,6 +82,51 @@ function assertSchemas(tools) {
   assert(!("catalogPath" in runSavedQueryProps), "ksql_run_saved_query must not expose per-call catalogPath.");
 }
 
+// description regression guard(fix_plan D5):
+// 「実装は正しいが tools/list のメタデータだけ古い」ズレを検出する。
+// 全文一致は文言調整のたびに壊れるため、実装能力を表すキー部分文字列のみを固定する。
+function assertToolDescriptions(tools) {
+  const queryKeys = ["multi-statement batches with temp tables"];
+  const mutateKeys = [
+    "multi-statement DML batches with temp tables",
+    "SELECT ... FROM #t",
+    "Standalone INSERT_SELECT and UPSERT_SELECT are rejected",
+  ];
+  const query = getTool(tools, "ksql_query");
+  for (const key of queryKeys) {
+    assert(
+      typeof query.description === "string" && query.description.includes(key),
+      `ksql_query.description must mention "${key}".`
+    );
+  }
+  const mutate = getTool(tools, "ksql_mutate");
+  for (const key of mutateKeys) {
+    assert(
+      typeof mutate.description === "string" && mutate.description.includes(key),
+      `ksql_mutate.description must mention "${key}".`
+    );
+  }
+}
+
+// inputSchema のパラメータ説明(fix_plan D3/D5): zod .describe() が
+// JSON Schema の description に変換されて MCP クライアントへ届くことを固定する
+function assertParamDescriptions(tools) {
+  const described = {
+    ksql_query: ["sql", "profile", "maxRecords", "fetchParallel", "onLimit", "timeout", "continueOnError", "maxTotalRecords"],
+    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "fetchParallel", "timeout", "dmlTotalMaxRows"],
+  };
+  for (const [toolName, params] of Object.entries(described)) {
+    const props = getTool(tools, toolName).inputSchema?.properties ?? {};
+    for (const param of params) {
+      const description = props[param]?.description;
+      assert(
+        typeof description === "string" && description.length > 0,
+        `${toolName}.${param} must have a non-empty schema description.`
+      );
+    }
+  }
+}
+
 async function main() {
   assertBundleIsSelfContained();
 
@@ -111,6 +159,15 @@ async function main() {
       `Unexpected tool list: ${toolNames.join(", ")}`
     );
     assertSchemas(listed.tools);
+    assertToolDescriptions(listed.tools);
+    assertParamDescriptions(listed.tools);
+
+    // サーバー申告バージョンの package.json 同期(fix_plan D4/D5)
+    const serverVersion = client.getServerVersion()?.version;
+    assert(
+      serverVersion === packageVersion,
+      `serverInfo.version (${serverVersion}) must match package.json version (${packageVersion}).`
+    );
 
     const validated = await client.callTool({
       name: "ksql_validate",

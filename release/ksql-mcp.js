@@ -38428,7 +38428,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     return toSelectPayload(result);
   }
-  async function mutateBatch(input, validation, dmlMaxRows2) {
+  async function mutateBatch(input, validation, dmlMaxRows) {
     if (!validation.containsDml) {
       throw new Error("ArgumentError: batch contains no DML statements. Use ksql_query.");
     }
@@ -38447,9 +38447,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }
-      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows2) {
+      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
         throw new Error(
-          `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows2}).${at}`
+          `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).${at}`
         );
       }
       staticInsertTotal += s.insertValuesCount ?? 0;
@@ -38463,7 +38463,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows2 + 1,
+      maxRecords: dmlMaxRows + 1,
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout
@@ -38477,8 +38477,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
       confirm: async (count, operation) => {
-        if (count > dmlMaxRows2) {
-          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows2}).`);
+        if (count > dmlMaxRows) {
+          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
         }
         totalAffected += count;
         if (dmlTotalMaxRows !== void 0 && totalAffected > dmlTotalMaxRows) {
@@ -38492,27 +38492,32 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     return toBatchQueryPayload(batchResult);
   }
   async function mutate(input) {
-    const dmlMaxRows2 = requireDmlApproval(input, "ksql_mutate");
+    const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
     const validation = await validate(input);
     if (validation.batch) {
-      return mutateBatch(input, validation, dmlMaxRows2);
+      return mutateBatch(input, validation, dmlMaxRows);
     }
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
-    if (validation.statementType === "INSERT_SELECT" || validation.statementType === "UPSERT_SELECT") {
+    if (validation.statementType === "INSERT_SELECT") {
+      throw new Error(
+        "ArgumentError: INSERT_SELECT is not supported by ksql_mutate as a single statement. Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"
+      );
+    }
+    if (validation.statementType === "UPSERT_SELECT") {
       throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
     }
     if ((validation.statementType === "UPDATE" || validation.statementType === "DELETE") && !validation.hasWhere) {
       throw new Error(`ArgumentError: ${validation.statementType} without WHERE is blocked by ksql_mutate.`);
     }
-    if (validation.insertValuesCount !== null && validation.insertValuesCount > dmlMaxRows2) {
-      throw new Error(`ArgumentError: INSERT rows (${validation.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows2}).`);
+    if (validation.insertValuesCount !== null && validation.insertValuesCount > dmlMaxRows) {
+      throw new Error(`ArgumentError: INSERT rows (${validation.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).`);
     }
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows2 + 1,
+      maxRecords: dmlMaxRows + 1,
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout
@@ -38523,8 +38528,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
       confirm: async (count, operation) => {
-        if (count > dmlMaxRows2) {
-          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows2}).`);
+        if (count > dmlMaxRows) {
+          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
         }
         return true;
       }
@@ -38631,13 +38636,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         result: result2
       };
     }
-    const dmlMaxRows2 = requireDmlApproval(input, "ksql_run_saved_query", "for DML saved queries");
+    const dmlMaxRows = requireDmlApproval(input, "ksql_run_saved_query", "for DML saved queries");
     const result = await mutate({
       sql: saved.sql,
       profile: profile2,
       allowDml: true,
       confirmText: "yes",
-      dmlMaxRows: dmlMaxRows2,
+      dmlMaxRows,
       fetchParallel: input.fetchParallel,
       timeout: input.timeout
     });
@@ -38685,48 +38690,43 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
 }
 
 // src/mcp/schemas.ts
-var profile = external_exports.string().min(1).optional();
-var maxRecords = external_exports.number().int().positive().optional();
-var fetchParallel = external_exports.number().int().min(1).max(10).optional();
-var onLimit = external_exports.enum(["error", "truncate"]).optional();
-var timeout = external_exports.number().int().positive().optional();
-var dmlMaxRows = external_exports.number().int().positive();
-var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
-var savedQueryTags = external_exports.array(external_exports.string().min(1)).optional();
+var profile = external_exports.string().min(1).describe("kintone connection profile name from ksql.config.json (default: the server's default profile).").optional();
+var maxRecords = external_exports.number().int().positive().describe("Maximum records fetched per SELECT (default 500).").optional();
+var fetchParallel = external_exports.number().int().min(1).max(10).describe("Number of parallel kintone record-fetch requests (1-10).").optional();
+var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error').").optional();
+var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
+var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
+var savedQueryTags = external_exports.array(external_exports.string().min(1)).describe("Tags for organizing saved queries.").optional();
 var validateInputSchema = external_exports.object({
-  sql: external_exports.string().min(1),
+  sql: external_exports.string().min(1).describe("kSQL text to validate. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
   profile
 });
 var explainInputSchema = external_exports.object({
-  sql: external_exports.string().min(1),
+  sql: external_exports.string().min(1).describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
   profile
 });
 var queryInputSchema = external_exports.object({
-  sql: external_exports.string().min(1),
+  sql: external_exports.string().min(1).describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;"),
   profile,
   maxRecords,
   fetchParallel,
   onLimit,
   timeout,
-  /** バッチ(複文)専用: 実行時エラー後も後続文を実行する(既定 false = fail-fast) */
-  continueOnError: external_exports.boolean().optional(),
-  /** バッチ(複文)専用: 返却する結果セットの合計行数上限(既定なし) */
-  maxTotalRecords: external_exports.number().int().positive().optional()
+  continueOnError: external_exports.boolean().describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).").optional(),
+  maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional()
 });
 var mutateInputSchema = external_exports.object({
-  sql: external_exports.string().min(1),
+  sql: external_exports.string().min(1).describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"),
   profile,
-  allowDml: external_exports.literal(true),
-  confirmText: external_exports.literal("yes"),
-  dmlMaxRows,
+  allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
+  confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it."),
   fetchParallel,
   timeout,
-  /** バッチ(複文)専用: バッチ合計の影響行数上限(既定なし = 文ごとの dmlMaxRows のみ)。
-   *  なお DML バッチに continueOnError は存在しない(常に fail-fast) */
-  dmlTotalMaxRows: dmlMaxRows.optional()
+  dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
 });
 var describeAppInputSchema = external_exports.object({
-  app: external_exports.number().int().positive(),
+  app: external_exports.number().int().positive().describe("kintone app ID to describe."),
   profile,
   maxRecords,
   fetchParallel,
@@ -38743,12 +38743,12 @@ var showAppsInputSchema = external_exports.object({
 var listQueriesInputSchema = external_exports.object({});
 var saveQueryInputSchema = external_exports.object({
   name: savedQueryName,
-  title: external_exports.string().min(1).optional(),
-  description: external_exports.string().min(1).optional(),
-  sql: external_exports.string().min(1),
-  defaultProfile: external_exports.string().min(1),
-  readOnly: external_exports.boolean(),
-  allowProfileOverride: external_exports.boolean().optional(),
+  title: external_exports.string().min(1).describe("Human-readable title.").optional(),
+  description: external_exports.string().min(1).describe("What the query does and when to use it.").optional(),
+  sql: external_exports.string().min(1).describe("kSQL text to save (single statement only)."),
+  defaultProfile: external_exports.string().min(1).describe("Profile the saved query runs against by default."),
+  readOnly: external_exports.boolean().describe("true for read-only queries; false marks the saved query as DML (requires mutate safety inputs at run time)."),
+  allowProfileOverride: external_exports.boolean().describe("Allow overriding the profile at run time (default false).").optional(),
   tags: savedQueryTags
 });
 var savedQueryNameInputSchema = external_exports.object({
@@ -38761,9 +38761,9 @@ var runSavedQueryInputSchema = external_exports.object({
   fetchParallel,
   onLimit,
   timeout,
-  allowDml: external_exports.literal(true).optional(),
-  confirmText: external_exports.literal("yes").optional(),
-  dmlMaxRows: dmlMaxRows.optional()
+  allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
+  confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -38812,10 +38812,11 @@ Options:
   -h, --help         Show help
 `);
 }
+var SERVER_VERSION = true ? "1.4.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
-    version: "1.0.0"
+    version: SERVER_VERSION
   });
   const tools = createKsqlMcpTools({
     configPath: args.configPath,
@@ -38833,12 +38834,12 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL statements such as SELECT, WITH, UNION, EXPLAIN, SHOW APPS, and DESCRIBE. DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. INSERT_SELECT and UPSERT_SELECT are rejected.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is allowed in a batch when it selects only from temp tables (CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;). Standalone INSERT_SELECT and UPSERT_SELECT are rejected.",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {
