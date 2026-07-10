@@ -17,7 +17,6 @@
 // ============================================================
 
 import type { KintoneClient } from "../execute";
-import { envInt, envNonNegativeInt } from "../node/config";
 
 export interface RequestGateOptions {
   /** 同時リクエスト数の上限（既定 10、1〜50） */
@@ -70,8 +69,12 @@ export class RequestGate {
   constructor(options: RequestGateOptions = {}) {
     this.maxConcurrent = clampInt(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT, 1, 50);
     this.maxRetries = clampInt(options.maxRetries ?? DEFAULT_MAX_RETRIES, 0, 10);
-    this.baseDelayMs = options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS;
-    this.maxDelayMs = options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    // profile 設定（JSON）から無検証で流れてくるため、CLI フラグと同様にここで clamp する
+    this.baseDelayMs = clampInt(options.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, 1, 60_000);
+    this.maxDelayMs = Math.max(
+      clampInt(options.maxDelayMs ?? DEFAULT_MAX_DELAY_MS, 1, 600_000),
+      this.baseDelayMs
+    );
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.random = options.random ?? Math.random;
   }
@@ -177,9 +180,12 @@ let globalGate: RequestGate | null = null;
 
 /**
  * プロセス内グローバルのゲートを返す（初回呼び出し時に生成）。
- * 全設定は最初に解決された値で固定される。優先順:
- * env（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`）> options（CLI フラグ・profile 設定
- * のマージ済み値）> 既定。バックオフ系（baseDelayMs / maxDelayMs）に env はない。
+ * 全設定は最初に解決された値で固定される。
+ *
+ * env（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`）の解決はこのモジュールでは行わない —
+ * 呼び出し側（Node 層）が `resolveRequestGateOptions()`（node/config.ts）で
+ * env > CLI > config を解決してから渡す。src/api は browser/plugin にも近い層の
+ * ため、Node/fs 依存（node/config）をここに持ち込まない。
  *
  * 後方互換: 数値1個の渡し方（旧 limitHint = maxConcurrent）も受け付ける。
  */
@@ -187,16 +193,9 @@ export function getGlobalRequestGate(
   options?: number | Partial<RequestGateOptions>
 ): RequestGate {
   if (globalGate === null) {
-    const hint: Partial<RequestGateOptions> =
-      typeof options === "number" ? { maxConcurrent: options } : options ?? {};
-    // KSQL_RETRY=0（リトライ無効）は有効値のため envNonNegativeInt で読む
-    //（envInt は 0 を無効値として捨てる）
-    globalGate = new RequestGate({
-      maxConcurrent: envInt("KSQL_MAX_CONCURRENT") ?? hint.maxConcurrent,
-      maxRetries: envNonNegativeInt("KSQL_RETRY") ?? hint.maxRetries,
-      baseDelayMs: hint.baseDelayMs,
-      maxDelayMs: hint.maxDelayMs,
-    });
+    globalGate = new RequestGate(
+      typeof options === "number" ? { maxConcurrent: options } : options ?? {}
+    );
   }
   return globalGate;
 }

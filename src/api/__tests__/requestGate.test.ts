@@ -10,6 +10,7 @@ import {
   getGlobalRequestGate,
   resetGlobalRequestGate,
 } from "../requestGate";
+import { resolveRequestGateOptions } from "../../node/config";
 import type { KintoneClient } from "../../execute";
 
 /** sleep を記録だけして即解決する注入 */
@@ -239,10 +240,10 @@ describe("getGlobalRequestGate", () => {
     expect(g2.limit).toBe(5);
   });
 
-  test("KSQL_MAX_CONCURRENT env がヒントより優先される", () => {
+  test("KSQL_MAX_CONCURRENT env がヒントより優先される（resolveRequestGateOptions 経由）", () => {
     process.env.KSQL_MAX_CONCURRENT = "7";
     resetGlobalRequestGate();
-    expect(getGlobalRequestGate(3).limit).toBe(7);
+    expect(getGlobalRequestGate(resolveRequestGateOptions({ maxConcurrent: 3 })).limit).toBe(7);
   });
 
   test("ヒントなし・env なしは既定 10", () => {
@@ -297,27 +298,48 @@ describe("getGlobalRequestGate（RequestGateOptions 拡張）", () => {
   test("KSQL_RETRY=0 でリトライ無効にできる（envNonNegativeInt 経由）", () => {
     process.env.KSQL_RETRY = "0";
     resetGlobalRequestGate();
-    const g = getGlobalRequestGate({ maxRetries: 5 });
+    const g = getGlobalRequestGate(resolveRequestGateOptions({ maxRetries: 5 }));
     expect(g.retries).toBe(0);
   });
 
   test("KSQL_RETRY env がオプションより優先される", () => {
     process.env.KSQL_RETRY = "6";
     resetGlobalRequestGate();
-    expect(getGlobalRequestGate({ maxRetries: 2 }).retries).toBe(6);
+    expect(getGlobalRequestGate(resolveRequestGateOptions({ maxRetries: 2 })).retries).toBe(6);
   });
 
   test("KSQL_RETRY が不正値（負数・非整数）なら無視してオプションを使う", () => {
     process.env.KSQL_RETRY = "-1";
     resetGlobalRequestGate();
-    expect(getGlobalRequestGate({ maxRetries: 2 }).retries).toBe(2);
+    expect(getGlobalRequestGate(resolveRequestGateOptions({ maxRetries: 2 })).retries).toBe(2);
     process.env.KSQL_RETRY = "abc";
     resetGlobalRequestGate();
-    expect(getGlobalRequestGate({ maxRetries: 4 }).retries).toBe(4);
+    expect(getGlobalRequestGate(resolveRequestGateOptions({ maxRetries: 4 })).retries).toBe(4);
+  });
+
+  test("resolveRequestGateOptions はバックオフ系（env なし）をそのまま通す", () => {
+    const resolved = resolveRequestGateOptions({ baseDelayMs: 100, maxDelayMs: 2000 });
+    expect(resolved.baseDelayMs).toBe(100);
+    expect(resolved.maxDelayMs).toBe(2000);
   });
 
   test("maxRetries はクランプされる（0〜10）", () => {
     expect(getGlobalRequestGate({ maxRetries: 99 }).retries).toBe(10);
+  });
+
+  test("バックオフ系は constructor で clamp される（profile JSON の無検証値対策）", () => {
+    // 非正・負値は下限 1 に
+    expect(new RequestGate({ baseDelayMs: 0 }).retryBaseDelayMs).toBe(1);
+    expect(new RequestGate({ maxDelayMs: -5 }).retryMaxDelayMs).toBe(500); // 下限 1 → base(500) まで引き上げ
+    // 過大値は上限に
+    expect(new RequestGate({ baseDelayMs: 999_999 }).retryBaseDelayMs).toBe(60_000);
+    expect(new RequestGate({ maxDelayMs: 10 ** 9 }).retryMaxDelayMs).toBe(600_000);
+    // maxDelay < baseDelay は baseDelay まで引き上げ（バックオフが逆転しない）
+    const g = new RequestGate({ baseDelayMs: 3000, maxDelayMs: 100 });
+    expect(g.retryBaseDelayMs).toBe(3000);
+    expect(g.retryMaxDelayMs).toBe(3000);
+    // 非数（JSON 由来の不正型）は既定へフォールバックせず下限 1（clampInt の非有限値扱い）
+    expect(new RequestGate({ baseDelayMs: Number.NaN }).retryBaseDelayMs).toBe(1);
   });
 
   test("旧シグネチャ（数値 = maxConcurrent）も引き続き使える", () => {

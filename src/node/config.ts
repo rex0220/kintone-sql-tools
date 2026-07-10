@@ -95,6 +95,29 @@ export function envNonNegativeInt(name: string): number | null {
   return n;
 }
 
+/** リクエストゲートに渡す設定（api/requestGate の RequestGateOptions の設定項目部分） */
+export interface RequestGateSettings {
+  maxConcurrent?: number;
+  maxRetries?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+}
+
+/**
+ * リクエストゲート設定の env 解決（`KSQL_MAX_CONCURRENT` / `KSQL_RETRY` > base）。
+ * base には CLI フラグ > profile 設定のマージ済み値を渡す（優先順は env > CLI > config > 既定）。
+ * api/requestGate は browser/plugin にも近い層のため env 解決を持たない — Node 側の
+ * 呼び出し元（cli/index.ts / node/runtime.ts）がこの関数を通してから渡す。
+ */
+export function resolveRequestGateOptions(base: RequestGateSettings): RequestGateSettings {
+  return {
+    ...base,
+    maxConcurrent: envInt("KSQL_MAX_CONCURRENT") ?? base.maxConcurrent,
+    // KSQL_RETRY=0（リトライ無効）は有効値のため envNonNegativeInt で読む
+    maxRetries: envNonNegativeInt("KSQL_RETRY") ?? base.maxRetries,
+  };
+}
+
 export function envOnLimit(name: string): OnLimitMode | null {
   const v = envString(name);
   if (v === "error" || v === "truncate") return v;

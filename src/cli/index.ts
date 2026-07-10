@@ -26,6 +26,7 @@ import {
   type SelectResult,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
+import { resolveRequestGateOptions } from "../node/config";
 import { decideConsoleInput, decideRun } from "./consoleInput";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
@@ -1846,15 +1847,15 @@ async function run(): Promise<number> {
   }
 
   // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ。
-  // 解決優先順: env（KSQL_MAX_CONCURRENT / KSQL_RETRY はゲート生成部で適用）
+  // 解決優先順: env（KSQL_MAX_CONCURRENT / KSQL_RETRY — resolveRequestGateOptions で適用）
   // > CLI フラグ > profile 設定 > 既定。プロセス内グローバル1個・初回解決値で固定
   if (!args.dryRun) {
-    client = withRequestGate(client, getGlobalRequestGate({
+    client = withRequestGate(client, getGlobalRequestGate(resolveRequestGateOptions({
       maxConcurrent: args.maxConcurrent ?? profile.query?.maxConcurrent,
       maxRetries: args.retry ?? profile.query?.retry,
       baseDelayMs: args.retryBaseDelay ?? profile.query?.retryBaseDelayMs,
       maxDelayMs: args.retryMaxDelay ?? profile.query?.retryMaxDelayMs,
-    }));
+    })));
   }
 
   try {
