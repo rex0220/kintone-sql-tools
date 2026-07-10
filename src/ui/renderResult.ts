@@ -42,7 +42,9 @@ export function renderError(err: unknown): string {
   const lines: string[] = [];
 
   if (err instanceof Error) {
-    lines.push(err.message);
+    // kintoneClient.toDetailedApiError はフィールド単位の詳細を改行区切りで
+    // message に畳み込む（バッチ経由では message しか運ばれないため）。行に展開する
+    lines.push(...err.message.split("\n"));
   } else if (isKintoneApiError(err)) {
     lines.push(err.message);
     for (const [field, detail] of Object.entries(err.errors ?? {})) {

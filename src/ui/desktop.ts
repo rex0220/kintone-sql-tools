@@ -6,11 +6,21 @@ import {
   execute,
   executeBatch,
   buildBatchExplainPlans,
+  parseSqlStatement,
   parseSqlStatements,
   analyzeBatch,
+  getInsertValuesCount,
+  getStatementType,
+  isDmlType,
   OperationCancelledError,
 } from "../core";
-import type { ExecuteResult, KintoneAppInfo, SelectResult } from "../core";
+import type {
+  BatchExecuteResult,
+  DmlConfirmContext,
+  ExecuteResult,
+  KintoneAppInfo,
+  SelectResult,
+} from "../core";
 import { createKintoneClient } from "./kintoneClient";
 import { renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
@@ -1738,10 +1748,64 @@ function batchPlansToSelectResult(sql: string): SelectResult {
   return { type: "SELECT", columns: ["plan"], rows, rowCount: rows.length };
 }
 
+/** バッチ実行の表示用結果（result = 最終結果セット、note = 情報行、dmlSummary = success した DML の影響件数） */
+interface BatchRunOutcome {
+  result: SelectResult | null;
+  note: string | null;
+  dmlSummary: string[];
+  /** 確認ダイアログでキャンセルされた（履歴保存をスキップし note を情報表示する） */
+  cancelled: boolean;
+}
+
+/** バッチ内 DML の確認ダイアログ見出し（"UPSERT_SELECT INTO APP4149" 等の SQL 風表記） */
+function dmlDialogHead(statementType: string, targetAppId: number | null): string {
+  const app = targetAppId !== null ? `APP${targetAppId}` : "";
+  if (statementType === "UPDATE" || statementType === "REORDER") return `${statementType} ${app}`;
+  if (statementType === "DELETE") return `DELETE FROM ${app}`;
+  return `${statementType} INTO ${app}`;
+}
+
+/** バッチ内 DML の実行時確認（文番号・書き込み先付き。confirm フックの文コンテキストを使用） */
+async function batchConfirmDialog(
+  count: number,
+  operation: "UPDATE" | "DELETE" | "INSERT",
+  context?: DmlConfirmContext
+): Promise<boolean> {
+  if (!context) return confirmDialog(count, operation);
+  const label = context.statementType.startsWith("UPSERT")
+    ? "登録/更新"
+    : operation === "UPDATE" ? "更新"
+    : operation === "DELETE" ? "削除"
+    : "登録";
+  return showConfirmDialog(
+    `[${context.statementIndex + 1}/${context.statementCount}] ${dmlDialogHead(context.statementType, context.targetAppId)}\n`
+    + `${count} 件のレコードを${label}します。よろしいですか？\nこの操作は元に戻せません。`,
+    true
+  );
+}
+
+/** success した DML 文の影響件数サマリ（"[2] UPSERT_SELECT: inserted=1 updated=1" 等） */
+function buildDmlSummary(batch: BatchExecuteResult): string[] {
+  const lines: string[] = [];
+  for (const s of batch.statements) {
+    if (s.status !== "success" || !s.result) continue;
+    const r = s.result;
+    let detail: string | null = null;
+    if (r.type === "INSERT") detail = `inserted=${r.insertedCount}`;
+    else if (r.type === "UPDATE") detail = `updated=${r.updatedCount}`;
+    else if (r.type === "DELETE") detail = `deleted=${r.deletedCount}`;
+    else if (r.type === "UPSERT") detail = `inserted=${r.insertedCount} updated=${r.updatedCount}`;
+    else if (r.type === "REORDER") detail = `reordered=${r.reorderedParentCount}`;
+    if (detail) lines.push(`[${s.index + 1}] ${s.type}: ${detail}`);
+  }
+  return lines;
+}
+
 /**
- * 複文バッチを実行し、表示用の結果を返す（プラグインは read-only バッチのみ・
- * 最終の結果セットのみ表示。仕様 §8.4）。
- * - DML を含むバッチは拒否（CLI / MCP を案内）
+ * 複文バッチを実行し、表示用の結果を返す（最終の結果セットのみ表示。仕様 §8.4）。
+ * - DML を含むバッチは文ごとの確認ダイアログ付きで実行（v1.9.0 仕様
+ *   docs/internal/ksql_plugin_dml_batch_spec.md）
+ * - INSERT VALUES は confirm 非経由（コア実態）のため、静的確定件数で実行前に確認する
  * - 先頭文が EXPLAIN のバッチは全文プラン表示（実行しない）
  */
 async function runBatchSql(
@@ -1749,30 +1813,57 @@ async function runBatchSql(
   client: Parameters<typeof executeBatch>[1],
   options: { maxRecords: number; onLimitReached: "error" | "truncate" },
   explainOnly: boolean
-): Promise<{ result: SelectResult | null; note: string | null }> {
+): Promise<BatchRunOutcome> {
   const statements = parseSqlStatements(sql);
   const analysis = analyzeBatch(statements);
 
   // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
   // → バッチ全体のプラン表示（kintone アクセスなし。2文目以降も実行しない）
   if (explainOnly || statements[0].type === "EXPLAIN") {
-    return { result: batchPlansToSelectResult(sql), note: null };
+    return { result: batchPlansToSelectResult(sql), note: null, dmlSummary: [], cancelled: false };
   }
 
-  if (analysis.containsDml) {
-    throw new Error(
-      "ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています（DML を含むバッチは CLI / MCP を使用してください）。"
+  // INSERT VALUES の実行前静的確認（仕様 §3.3。件数は静的に正確。
+  // キャンセル時は1文も実行しない）
+  for (const s of analysis.statements) {
+    if (s.insertValuesCount === null) continue;
+    const ok = await showConfirmDialog(
+      `[${s.index + 1}/${analysis.statementCount}] ${dmlDialogHead(s.statementType, s.targetAppId)}\n`
+      + `${s.insertValuesCount} 件のレコードを登録します。よろしいですか？\nこの操作は元に戻せません。`,
+      true
     );
+    if (!ok) {
+      return {
+        result: null,
+        note: `キャンセルしました（文 [${s.index + 1}/${analysis.statementCount}] の実行前確認。バッチは実行されていません）`,
+        dmlSummary: [],
+        cancelled: true,
+      };
+    }
   }
 
   const batch = await executeBatch(sql, client, {
     maxRecords: options.maxRecords,
-    onLimitReached: options.onLimitReached,
+    // DML を含むバッチでは常に error（truncate だと SELECT-based DML のソース
+    // 読み取りが黙って切り捨てられ、切り捨て後の件数で confirm → 部分書き込みに
+    // なるため。MCP の ksql_mutate と同じ固定。仕様 §3.6）
+    onLimitReached: analysis.containsDml ? "error" : options.onLimitReached,
     fetchParallel: FETCH_PARALLEL_DEFAULT,
+    confirm: analysis.containsDml ? batchConfirmDialog : undefined,
   });
+
+  const dmlSummary = buildDmlSummary(batch);
 
   if (!batch.ok) {
     const failed = batch.statements.find((s) => s.status === "error");
+    // 実行時確認のキャンセル: エラーではなく情報表示（先行文は反映済み。仕様 §3.4）
+    if (failed?.error?.code === "OperationCancelledError") {
+      const pos = `[${failed.index + 1}/${batch.statementCount}]`;
+      const note = failed.index === 0
+        ? `キャンセルしました（文 ${pos} で中断。実行された文はありません）`
+        : `キャンセルしました（文 ${pos} で中断。[${failed.index}] までの実行結果は反映済みです）`;
+      return { result: null, note, dmlSummary, cancelled: true };
+    }
     throw new Error(
       failed?.error
         ? `[${failed.index + 1}] ${failed.error.message}`
@@ -1784,11 +1875,18 @@ async function runBatchSql(
   // 途中の SELECT 結果は表示しない（最終結果のみ、が本 UI の契約）
   const lastSelect = [...batch.statements].reverse().find((s) => s.result?.type === "SELECT");
   if (lastSelect?.result?.type === "SELECT") {
-    return { result: lastSelect.result, note: null };
+    return {
+      result: lastSelect.result,
+      note: dmlSummary.length > 0 ? `バッチ ${batch.statementCount} 文を実行しました。` : null,
+      dmlSummary,
+      cancelled: false,
+    };
   }
   return {
     result: null,
     note: `バッチ ${batch.statementCount} 文を実行しました（結果セットなし）。`,
+    dmlSummary,
+    cancelled: false,
   };
 }
 
@@ -1827,27 +1925,60 @@ async function runSql(
     const client = createKintoneClient();
     const resolvedOptions = resultOptions ?? displayOptions;
 
-    // 複文バッチ（v1.4.0）: read-only のみ・最終結果のみ表示（仕様 §8.4）
+    // 複文バッチ: 最終結果のみ表示（仕様 §8.4）。DML を含むバッチは
+    // 文ごとの確認ダイアログ付きで実行（v1.9.0）
     if (isMultiStatementSql(sql)) {
-      const { result: batchResult, note } = await runBatchSql(sql, client, {
+      const { result: batchResult, note, dmlSummary, cancelled } = await runBatchSql(sql, client, {
         maxRecords: runtimeFetch.maxRecords,
         onLimitReached: runtimeFetch.onLimitReached,
       }, batchExplainOnly);
-      if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
+      // キャンセル時は単文 DML キャンセルと同様、履歴に保存しない
+      if (!skipHistory && !cancelled) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode);
+      const infoParts = [note, ...dmlSummary].filter((s): s is string => !!s);
+      const infoHtml = infoParts.length > 0
+        ? `<div class="ksql-info">${infoParts.join("<br>")}</div>`
+        : "";
       if (batchResult) {
         lastResult = batchResult;
-        resultArea.innerHTML = renderResult(batchResult, resolvedOptions);
+        resultArea.innerHTML = infoHtml + renderResult(batchResult, resolvedOptions);
         bindResultTableFeatures(resultArea);
         return batchResult;
       }
-      resultArea.innerHTML = `<div class="ksql-info">${note ?? ""}</div>`;
+      resultArea.innerHTML = infoHtml || `<div class="ksql-info"></div>`;
       return null;
+    }
+
+    // 単文 INSERT VALUES: コアの confirm を通らないため、静的確定件数で実行前に確認する
+    //（v1.9.0 仕様 §3.3。パース不能な入力はそのまま execute のエラー表示に任せる）
+    let insertValuesConfirm: { count: number; appId: number | null } | null = null;
+    let isDmlSql = false;
+    try {
+      const stmt = parseSqlStatement(sql);
+      isDmlSql = isDmlType(getStatementType(stmt));
+      const count = getInsertValuesCount(stmt);
+      if (count !== null) {
+        const appId = (stmt as { appId?: unknown }).appId;
+        insertValuesConfirm = { count, appId: typeof appId === "number" ? appId : null };
+      }
+    } catch { /* 単文として不正な入力は execute に任せる */ }
+    if (insertValuesConfirm) {
+      const app = insertValuesConfirm.appId !== null ? `APP${insertValuesConfirm.appId}` : "";
+      const ok = await showConfirmDialog(
+        `INSERT INTO ${app}\n${insertValuesConfirm.count} 件のレコードを登録します。よろしいですか？\nこの操作は元に戻せません。`,
+        true
+      );
+      if (!ok) {
+        resultArea.innerHTML = `<div class="ksql-info">キャンセルしました（対象: ${insertValuesConfirm.count} 件）</div>`;
+        return null;
+      }
     }
 
     const result = await execute(sql, client, {
       confirm: confirmDialog,
       maxRecords: runtimeFetch.maxRecords,
-      onLimitReached: runtimeFetch.onLimitReached,
+      // DML では常に error（truncate だと SELECT-based DML のソース読み取りが
+      // 黙って切り捨てられ部分書き込みになるため。バッチ側と同じ固定。仕様 §3.6）
+      onLimitReached: isDmlSql ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
     });
 

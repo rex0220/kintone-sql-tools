@@ -1,11 +1,14 @@
-ksql 配布パッケージ (v1.8.0)
+ksql 配布パッケージ (v1.9.0)
 
-1. ksql-plugin-v1.7.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v1.9.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.0.0.zip をアプリ作成時にテンプレートとして読み込む
 3. アプリにプラグインを適用して利用開始する
 
-v1.8.0: MCP サーバー(ksql-mcp.js / ksql-mcp.mcpb)で SELECT-based DML の
-ソース読み取り上限を dmlMaxRows から分離(読み取りは maxRecords 解決値・既定 500、
-dmlMaxRows は影響行数ガード専用)。JOIN・集計ソースの INSERT/UPSERT ... SELECT が
-小さい dmlMaxRows でも読み取り上限エラーにならなくなりました。
-プラグイン・アプリテンプレートに変更はありません(zip は v1.7.0 のまま利用してください)。
+v1.9.0: プラグインで DML を含むバッチ実行を解禁。文ごとの確認ダイアログ
+(文番号・書き込み先・確定件数付き)で実行し、成功した DML の影響件数を
+サマリ行で表示します。INSERT INTO ... VALUES は実行前に静的件数で確認
+(単文も同様)。DML を含む実行では取得上限到達時は常にエラー(truncate に
+よる部分書き込みを防止)。kintone API エラーはフィールド単位の詳細
+(errors)まで表示するようになりました。
+MCP サーバー(ksql-mcp.js / ksql-mcp.mcpb)は内部変更のみ(confirm フックの
+後方互換拡張)で、ツールの入出力・挙動に変更はありません。

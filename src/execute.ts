@@ -174,13 +174,35 @@ export interface ReorderResult {
 // オプション
 // ============================================================
 
+/**
+ * confirm コールバックに渡される文コンテキスト（バッチ実行時のみ）。
+ * executeBatch が文ごとに confirm をラップして注入する。単文実行では undefined。
+ * confirm の呼び出し有無は文タイプに依存する（INSERT VALUES は confirm 非経由・
+ * UPSERT 系は対象 0 件で呼ばれない）ため、呼び出し回数から文番号を推測せず
+ * このコンテキストを使うこと。
+ */
+export interface DmlConfirmContext {
+  /** バッチ内の文 index（0 始まり） */
+  statementIndex: number;
+  /** バッチの総文数 */
+  statementCount: number;
+  /** DML 文タイプ（"UPDATE" / "UPSERT_SELECT" 等。operation より細粒度） */
+  statementType: string;
+  /** 書き込み先アプリ ID（StatementAnalysis.targetAppId の転記。DML では実質非 null） */
+  targetAppId: number | null;
+}
+
 export interface ExecuteOptions {
   /**
    * UPDATE / DELETE（および INSERT_SELECT の書き込み）実行前に呼ばれる確認コールバック。
    * false を返すとキャンセルして OperationCancelledError を投げる。
-   * 省略時は確認なしで実行。
+   * 省略時は確認なしで実行。context はバッチ実行時のみ渡される（後方互換の optional）。
    */
-  confirm?: (count: number, operation: "UPDATE" | "DELETE" | "INSERT") => Promise<boolean>;
+  confirm?: (
+    count: number,
+    operation: "UPDATE" | "DELETE" | "INSERT",
+    context?: DmlConfirmContext
+  ) => Promise<boolean>;
   /** 全件取得の上限（デフォルト: 10_000） */
   maxRecords?: number;
   /** 取得上限到達時の動作（SELECT系のみ） */
@@ -437,8 +459,22 @@ export async function executeBatch(
 
     try {
       const remaining = deadline !== null ? deadline - Date.now() : null;
+      // confirm に文コンテキストを注入する（呼び出し回数からの文番号推測は
+      // INSERT VALUES 非経由・0 件 UPSERT スキップで崩れるため、ここで束縛する）
+      const userConfirm = options.confirm;
+      const stmtOptions: BatchExecuteOptions = userConfirm
+        ? {
+          ...options,
+          confirm: (count, operation) => userConfirm(count, operation, {
+            statementIndex: i,
+            statementCount: statements.length,
+            statementType: info.statementType,
+            targetAppId: info.targetAppId,
+          }),
+        }
+        : options;
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, options, cacheContext, tempTables),
+        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables),
         remaining
       );
       results.push({ ...base, status: "success", ...outcome });
