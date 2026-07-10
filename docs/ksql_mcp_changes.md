@@ -356,10 +356,10 @@ npm audit --omit dev
 git diff --check
 ```
 
-直近の確認結果:
+直近の確認結果(v1.4.1 時点):
 
 ```text
-npm test -- --runInBand: 374 tests passed
+npm test: 594 tests passed
 npm run build: passed
 npm run mcp:verify: passed
 npm audit --omit dev: 0 vulnerabilities

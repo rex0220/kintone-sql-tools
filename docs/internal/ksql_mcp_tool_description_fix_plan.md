@@ -4,6 +4,7 @@
 - 更新履歴:
   - 2026-07-10 R1: 初版(Claude Desktop の「INSERT_SELECT 非対応」誤回答の原因調査に基づく)
   - 2026-07-10 R2(codex レビュー反映・Medium): D1・D3 の検証を smoke の目視確認から**機械的 assertion** に変更(D5 として独立ステップ化)。現行 `scripts/mcp-smoke.mjs` は tool 名と schema プロパティの存在確認のみで description を固定しておらず、目視では「実装は正しいがメタデータだけ古い」ズレの再発を防げないため
+  - 2026-07-10 R4(codex レビュー反映・Low): `ksql_mcp_changes.md` §13 の検証結果が旧値(374 tests)のままだったため v1.4.1 時点の実測値(594 tests / build / mcp:verify / audit / diff --check すべてパス)に更新
   - 2026-07-10 R3(実装完了): D1〜D5 実装済み(ブランチ `fix/mcp-tool-descriptions`)。リリース版番は **1.4.1** に確定(package.json bump 済み)。D5 は計画どおり assertion を先に追加し、旧 description のバンドルで smoke が失敗することを確認してから D1 を適用(regression テストとして機能する証明済み)。D4 は esbuild `define`(`__KSQL_VERSION__`)+ ts-jest 用 typeof フォールバック方式。D3 は「最低限」の範囲を広げ全入力スキーマに `.describe()` を付与(JSDoc コメントは削除し一本化)。検証: jest 594 件 / mcp:smoke / mcp:pack-smoke すべてパス
 - ステータス: **実装済み(v1.4.1)**。残り: release/ 配布物の更新と npm publish(ユーザー操作)、Claude Desktop 実機確認(§4 仕上げ 4)
 - 関連: [../ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md)(M4: バッチ INSERT_SELECT 対応)
