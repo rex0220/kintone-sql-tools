@@ -591,7 +591,7 @@ export function createKsqlMcpTools(
     });
 
     // バッチ合計の影響行数（INSERT(VALUES) は静的、confirm を呼ぶ文種
-    // = UPDATE / DELETE / UPSERT / INSERT_SELECT / REORDER は実行時加算）
+    // = UPDATE / DELETE / UPSERT / INSERT_SELECT / UPSERT_SELECT / REORDER は実行時加算）
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,

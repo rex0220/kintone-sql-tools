@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R5(codex レビュー反映・Low): mutateBatch の confirm 文種コメント(A2 で修正したもの)に v1.6.0 で解禁した `UPSERT_SELECT` を追記。コメントのみの drift(実装は operation を問わず加算するため正しい)。バンドルへの影響なし(esbuild がコメントを除去するため)
   - 2026-07-10 R4(提案B 実装完了): B1〜B5 実装済み(ブランチ `feat/mcp-upsert-select-app-source`)。B4 は計画どおり assertion を先に差し替え、v1.5.0 バンドルで smoke が失敗することを確認してから B3 を適用。description は確定文言の語順を一部調整(`for app sources only (temp-table sources are not supported); dmlMaxRows counts inserts + updates.` — temp 不可の掛かり先を UPSERT_SELECT に限定するため括弧内へ移動。キー文字列は維持)。テスト追加8本(単文5 + バッチ3。照合第1キー低選択性ケースを含む)
   - 2026-07-10 R3(codex レビュー完了): 追加指摘なし。進め方確定 — ①提案A を v1.5.0 ブランチに独立コミット → ②v1.5.0 を固める(PR・実機確認)→ ③提案B を v1.6.0 別ブランチで実装
   - 2026-07-10 R2(codex レビュー反映): A2 の mutateBatch コメント修正案に `REORDER` を追加(Low。`executeReorder` も confirm を呼ぶため、confirm 文種の列挙として一貫させる)。仕様案 §1.1 の R2 前表現の残存も同時修正(仕様 R4)
