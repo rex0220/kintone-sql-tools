@@ -379,7 +379,7 @@ git diff --check
 直近の確認結果(v1.5.0 時点):
 
 ```text
-npm test: 600 tests passed
+npm test: 602 tests passed
 npm run build: passed
 npm run mcp:verify: passed
 npm audit --omit dev: 0 vulnerabilities

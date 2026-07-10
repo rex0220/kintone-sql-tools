@@ -1258,4 +1258,58 @@ describe("MCP tools", () => {
     expect((result.statements[1].error as { message: string }).message)
       .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
   });
+
+  // ----------------------------------------------------------------
+  // UPSERT のガード対象の回帰(doc-drift 修正 提案A)
+  // 実装は従来から confirm(insert + update 合計)経由で dmlMaxRows /
+  // dmlTotalMaxRows の対象。ドキュメント修正の裏付けとして固定する
+  // ----------------------------------------------------------------
+
+  test("mutate: 単文 UPSERT は照合後の insert + update 合計に dmlMaxRows が効く(書き込み前拒否)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" }, ステータス: { value: "旧" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C002" }, ステータス: { value: "旧" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // C001 は既存(update)、C003 / C004 は新規(insert) → 合計 3 > dmlMaxRows 2
+    // 超過メッセージは confirm の operation("UPDATE")表記になる(仕様 §3.4 の既知課題)
+    await expect(tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "UPSERT INTO APP100 (顧客コード, ステータス) VALUES ('C001', '新'), ('C003', '新'), ('C004', '新') " +
+        "ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/UPDATE affected rows \(3\) exceed dmlMaxRows \(2\)/);
+    expect(calls.post).toBe(0); // POST / PUT とも書き込み前に止まる
+    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と UPSERT(confirm)を二重計上なしで合算する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // INSERT VALUES 2 行(静的) + UPSERT 2 行(C001 = update / C003 = insert、confirm 加算) = 4 > 3
+      // (UPSERT が静的にも計上される二重計上があれば合計は 6 と報告される)
+      sql:
+        "INSERT INTO APP100 (顧客コード) VALUES ('A'), ('B'); " +
+        "UPSERT INTO APP200 (顧客コード) VALUES ('C001'), ('C003') ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 10,
+      dmlTotalMaxRows: 3,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", insertedCount: 2 });
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
+    expect(calls.put).toBe(0); // UPSERT の書き込み(POST / PUT)は実行されない
+    expect(calls.post).toBe(1); // 先行 INSERT の1回のみ
+  });
 });
