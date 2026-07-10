@@ -35,6 +35,7 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
     case "UPSERT": return renderSuccess(
       `登録 ${result.insertedCount} 件 / 更新 ${result.updatedCount} 件`
     );
+    case "ASSERT": return renderSuccess(`アサーション成立: ${result.condition}`);
   }
 }
 

@@ -9,6 +9,7 @@ import {
   analyzeBatch,
   type BatchExecuteResult,
   type ExecuteOptions,
+  type AssertResult,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
@@ -215,8 +216,17 @@ function toSelectPayload(result: SelectResult) {
   };
 }
 
+/** 単文 ASSERT 成功時の専用 payload（バッチ強化第1弾 §2.3） */
+function toAssertPayload(result: AssertResult) {
+  return {
+    ok: true,
+    type: result.type,
+    condition: result.condition,
+  };
+}
+
 /** ミューテーション結果から影響件数フィールドを取り出す（文ごとエンベロープ用） */
-function toMutationSummary(result: Exclude<ExecuteResult, SelectResult>): Record<string, unknown> {
+function toMutationSummary(result: Exclude<ExecuteResult, SelectResult | AssertResult>): Record<string, unknown> {
   if (result.type === "INSERT") {
     return { insertedCount: result.insertedCount, createdIds: result.createdIds };
   }
@@ -270,7 +280,9 @@ function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? [],
       });
-    } else if (s.status === "success" && s.result && s.result.type !== "SELECT") {
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
+      // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない
+      //（ExecuteResult 型上は含まれるため型の除外も兼ねる）
       Object.assign(entry, toMutationSummary(s.result));
     }
     return entry;
@@ -287,7 +299,7 @@ function toBatchQueryPayload(batch: BatchExecuteResult, maxTotalRecords?: number
   };
 }
 
-function toMutationPayload(result: Exclude<ExecuteResult, SelectResult>) {
+function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertResult>) {
   if (result.type === "INSERT") {
     return {
       ok: true,
@@ -554,6 +566,7 @@ export function createKsqlMcpTools(
         onLimitReached: input.onLimit ?? DEFAULT_ON_LIMIT,
         cacheContext: validation.cacheContext,
       });
+      if (result.type === "ASSERT") return toAssertPayload(result);
       if (result.type !== "SELECT") {
         throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
       }
@@ -574,6 +587,7 @@ export function createKsqlMcpTools(
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
     });
+    if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
     }
@@ -718,7 +732,8 @@ export function createKsqlMcpTools(
     } catch (err) {
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
     }
-    if (result.type === "SELECT") {
+    // 単文 ASSERT は validate の isReadOnly ガードで ksql_query 誘導済みのため来ない
+    if (result.type === "SELECT" || result.type === "ASSERT") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
     return toMutationPayload(result);

@@ -81,6 +81,46 @@ describe("MCP tools", () => {
     expect(result.rows).toEqual([{ sample: "APP100@stg" }]);
   });
 
+  test("query: 単文 ASSERT は非 SELECT 拒否ガードを通らず専用 payload を返す", async () => {
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client: makeClient(),
+      cacheContext: "test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    const result = await tools.query({ sql: "ASSERT 1 = 1" });
+    expect(result).toEqual({ ok: true, type: "ASSERT", condition: "1 = 1" });
+  });
+
+  test("query: 単文 ASSERT の不成立は AssertError で reject する", async () => {
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client: makeClient(),
+      cacheContext: "test",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30000,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    await expect(tools.query({ sql: "ASSERT 1 = 2" }))
+      .rejects.toThrow(/^AssertError: assertion failed: 1 = 2 \(actual: 1\)\./);
+  });
+
   test("describeApp and showApps delegate to query SQL", async () => {
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     const executedSql: string[] = [];

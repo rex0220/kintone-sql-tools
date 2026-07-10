@@ -20,6 +20,7 @@ import {
   type BatchExecuteResult,
   type BatchStatementResult,
   type DisplayOptions,
+  type AssertResult,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
@@ -453,7 +454,7 @@ function isSystemLikeFieldCode(code: string): boolean {
   return code.startsWith("_") || code.startsWith("$");
 }
 
-function getAffectedCount(result: Exclude<ExecuteResult, SelectResult>): number {
+function getAffectedCount(result: Exclude<ExecuteResult, SelectResult | AssertResult>): number {
   if (result.type === "INSERT") return result.insertedCount;
   if (result.type === "UPDATE") return result.updatedCount;
   if (result.type === "DELETE") return result.deletedCount;
@@ -462,8 +463,16 @@ function getAffectedCount(result: Exclude<ExecuteResult, SelectResult>): number 
   return 0;
 }
 
+/** 単文 ASSERT 成功時の出力。json / jsonl は MCP と同じ payload、他は1行メッセージ */
+function buildAssertOutput(result: AssertResult, format: OutputFormat, pretty: boolean): string {
+  const payload = { ok: true, type: result.type, condition: result.condition };
+  if (format === "json") return JSON.stringify(payload, null, pretty ? 2 : 0);
+  if (format === "jsonl") return JSON.stringify(payload);
+  return `assertion ok: ${result.condition}`;
+}
+
 function buildMutationOutput(
-  result: Exclude<ExecuteResult, SelectResult>,
+  result: Exclude<ExecuteResult, SelectResult | AssertResult>,
   format: OutputFormat,
   noHeader: boolean,
   pretty: boolean
@@ -619,7 +628,7 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     else if (r.type === "UPDATE") parts.push(`updated=${r.updatedCount}`);
     else if (r.type === "DELETE") parts.push(`deleted=${r.deletedCount}`);
     else if (r.type === "UPSERT") parts.push(`inserted=${r.insertedCount} updated=${r.updatedCount}`);
-    else parts.push(`reordered=${r.reorderedParentCount}`);
+    else if (r.type === "REORDER") parts.push(`reordered=${r.reorderedParentCount}`);
   }
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
@@ -1843,6 +1852,13 @@ async function run(): Promise<number> {
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
       });
+    // ASSERT は mutation 出力（affected=）に流さない専用経路（バッチ強化第1弾 §2.5）
+    if (result.type === "ASSERT") {
+      const output = buildAssertOutput(result, format, pretty);
+      if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
+      else if (output) process.stdout.write(`${output}\n`);
+      return 0;
+    }
     if (result.type !== "SELECT") {
       const output = buildMutationOutput(result, format, noHeader, pretty);
       if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
