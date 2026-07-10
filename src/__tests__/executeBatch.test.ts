@@ -298,7 +298,9 @@ test("INSERT_SELECT: APP ソース混在（JOIN）は拒否（実行前）", asy
       "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
       client
     )
-  ).rejects.toThrow(/INSERT_SELECT in a batch must select from temp tables only\. \(statement 1\)/);
+  ).rejects.toThrow(
+    /INSERT_SELECT mixing app and temp table sources is not supported\. .*temp tables hold at most 10000 rows.*\(statement 1\)/
+  );
   expect(client.getCalls).toHaveLength(0);
 });
 

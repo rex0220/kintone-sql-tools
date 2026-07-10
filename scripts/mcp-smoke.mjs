@@ -89,8 +89,9 @@ function assertToolDescriptions(tools) {
   const queryKeys = ["multi-statement batches with temp tables"];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
-    "SELECT ... FROM #t",
-    "Standalone INSERT_SELECT and UPSERT_SELECT are rejected",
+    // v1.5.0: APP ソース INSERT_SELECT 解禁(単文・バッチ)。UPSERT_SELECT のみ拒否が残る
+    "INSERT INTO app ... SELECT is supported",
+    "UPSERT ... SELECT is rejected",
   ];
   const query = getTool(tools, "ksql_query");
   for (const key of queryKeys) {
@@ -125,6 +126,14 @@ function assertParamDescriptions(tools) {
       );
     }
   }
+
+  // v1.5.0: dmlMaxRows が INSERT_SELECT の source SELECT 読み取り上限を兼ねることを describe で宣言する
+  const dmlMaxRowsDesc =
+    getTool(tools, "ksql_mutate").inputSchema?.properties?.dmlMaxRows?.description ?? "";
+  assert(
+    dmlMaxRowsDesc.includes("caps the source SELECT read"),
+    "ksql_mutate.dmlMaxRows description must mention the source SELECT read cap."
+  );
 }
 
 async function main() {

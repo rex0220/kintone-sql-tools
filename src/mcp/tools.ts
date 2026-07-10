@@ -560,13 +560,8 @@ export function createKsqlMcpTools(
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      // INSERT_SELECT はソースが一時テーブルのみの場合に許可（M4。実体化済みで
-      // 書き込み前に件数が確定し、confirm 経由の dmlMaxRows ガードが効く）
-      if (s.statementType === "INSERT_SELECT" && !s.tempOnlySource) {
-        throw new Error(
-          `ArgumentError: INSERT_SELECT in a batch must select from temp tables only.${at}`
-        );
-      }
+      // INSERT_SELECT は v1.5.0 で APP ソースも解禁。件数判定は confirm フック（POST 前）が担い、
+      // 混在ソース（APP + 一時テーブル）はエンジン層 executeBatch の validate-all-first が実行前に拒否する
       if (s.statementType === "UPSERT_SELECT") {
         throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
       }
@@ -631,14 +626,8 @@ export function createKsqlMcpTools(
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
     }
-    // 単文の INSERT_SELECT は拒否するが、一時テーブル経由のバッチは対応済み(M4)のため
-    // 誘導ヒントを添える(ヒントが無いと MCP クライアントの LLM が「非対応」と誤学習する)
-    if (validation.statementType === "INSERT_SELECT") {
-      throw new Error(
-        "ArgumentError: INSERT_SELECT is not supported by ksql_mutate as a single statement. " +
-          "Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"
-      );
-    }
+    // INSERT_SELECT は v1.5.0 で解禁(単文・バッチとも)。書き込み前の件数判定は
+    // executeInsertSelect の confirm フック(source SELECT 実行後・POST 前)が担う
     if (validation.statementType === "UPSERT_SELECT") {
       throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
     }

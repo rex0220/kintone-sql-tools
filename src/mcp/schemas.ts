@@ -60,7 +60,7 @@ export const mutateInputSchema = z.object({
   confirmText: z.literal("yes")
     .describe('Must be the literal string "yes" to confirm execution.'),
   dmlMaxRows: z.number().int().positive()
-    .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it."),
+    .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records)."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: z.number().int().positive()

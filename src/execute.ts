@@ -390,7 +390,7 @@ export async function executeBatch(
     if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
     throw new BatchAnalysisError(
       s.statementType === "INSERT_SELECT"
-        ? `ArgumentError: INSERT_SELECT in a batch must select from temp tables only. (statement ${s.index})`
+        ? `ArgumentError: INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows). (statement ${s.index})`
         : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
     );

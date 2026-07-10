@@ -257,18 +257,82 @@ describe("MCP tools", () => {
     })).rejects.toThrow(/INSERT rows \(2\) exceed dmlMaxRows \(1\)/);
   });
 
-  test("mutate rejects standalone SELECT-based DML with a batch hint for INSERT_SELECT", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
+  // ----------------------------------------------------------------
+  // 単文 INSERT_SELECT(APP ソース)の解禁(v1.5.0)
+  // ----------------------------------------------------------------
 
-    // 単文 INSERT_SELECT の拒否メッセージは対応済みのバッチ経路(M4)へ誘導する
-    await expect(tools.mutate({
-      sql: "INSERT INTO APP200 (name) SELECT name FROM APP100",
+  test("mutate: 単文 INSERT_SELECT(APP ソース)を実行できる", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 10,
-    })).rejects.toThrow(
-      /INSERT_SELECT is not supported by ksql_mutate as a single statement\. Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT/
-    );
+    });
+
+    expect(result).toMatchObject({ ok: true, type: "INSERT", insertedCount: 2 });
+    expect(calls.post).toBe(1);
+  });
+
+  test("mutate: 単文 INSERT_SELECT は source 件数が dmlMaxRows 超過なら書き込み前に拒否", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    await expect(tools.mutate({
+      sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/INSERT affected rows \(3\) exceed dmlMaxRows \(2\)/);
+    expect(calls.post).toBe(0); // confirm(POST 前)で止まる
+  });
+
+  test("mutate: 単文 INSERT_SELECT の source 読み取りは dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+        { $id: { value: "4" }, 顧客名: { value: "D社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // dmlMaxRows = 2 → maxRecords = 3。source 4 行は読み取り段階(onLimit = error)で失敗
+    await expect(tools.mutate({
+      sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    expect(calls.post).toBe(0);
+  });
+
+  test("mutate: 単文 INSERT_SELECT でも DML 承認3点セットは必須", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.mutateTool({
+      sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
+      allowDml: true,
+      dmlMaxRows: 10,
+    } as never);
+
+    expect(result.isError).toBe(true);
+    expect((result.structuredContent as { error: { message: string } }).error.message)
+      .toContain("confirmText");
+  });
+
+  test("mutate: 単文 UPSERT_SELECT は引き続き拒否", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
     await expect(tools.mutate({
       sql: "UPSERT INTO APP200 (name) SELECT name FROM APP100 ON DUPLICATE (name)",
       allowDml: true,
@@ -982,15 +1046,67 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(0);
   });
 
-  test("mutate: APP をソースとする INSERT_SELECT は文番号付きで拒否（temp のみ許可）", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
+  test("mutate: バッチ内の APP ソース INSERT_SELECT を実行できる(v1.5.0 解禁)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: "INSERT INTO APP100 (x) VALUES ('a'); INSERT INTO APP300 (名前) SELECT 顧客名 FROM APP200",
+      dmlMaxRows: 10,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[0]).toMatchObject({ type: "INSERT", status: "success", insertedCount: 1 });
+    expect(result.statements[1]).toMatchObject({ type: "INSERT_SELECT", status: "success", insertedCount: 2 });
+    expect(calls.post).toBe(2);
+  });
+
+  test("mutate: 混在ソース(APP + temp)の INSERT_SELECT はエンジン層で実行前に拒否", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({});
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
     await expect(
       tools.mutate({
         ...MUTATE_BASE,
-        sql: "DELETE FROM APP100 WHERE $id = 1; INSERT INTO APP100 (x) SELECT x FROM APP200",
+        sql:
+          "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+          "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
         dmlMaxRows: 10,
       })
-    ).rejects.toThrow(/INSERT_SELECT in a batch must select from temp tables only\. \(statement 1\)/);
+    ).rejects.toThrow(
+      /INSERT_SELECT mixing app and temp table sources is not supported\. .*\(statement 1\)/
+    );
+    expect(calls.get).toBe(0); // validate-all-first: 1文も実行されない
+    expect(calls.post).toBe(0);
+  });
+
+  test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と APP ソース INSERT_SELECT(confirm)を二重計上なしで合算する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      200: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // INSERT VALUES 2 行(静的) + INSERT_SELECT 2 行(confirm 加算) = 4 > dmlTotalMaxRows 3
+      // (二重計上があれば合計は 6 と報告されるため、メッセージの (4) が非二重計上の証明になる)
+      sql: "INSERT INTO APP100 (x) VALUES ('a'), ('b'); INSERT INTO APP300 (名前) SELECT 顧客名 FROM APP200",
+      dmlMaxRows: 10,
+      dmlTotalMaxRows: 3,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", insertedCount: 2 });
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
+    expect(calls.post).toBe(1); // INSERT_SELECT の書き込み前に止まる
   });
 
   test("mutate: UPSERT_SELECT はバッチでも引き続き拒否", async () => {
