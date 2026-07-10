@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R3(実装後レビュー反映): C1 の「env 解決をゲート生成部に集約」を変更 — `src/api/requestGate.ts` に `node/config`(fs 依存)を import させない。env 解決は `resolveRequestGateOptions()`(node/config.ts)として Node 層に置き、呼び出し側 2 箇所で適用(§4.3。優先順 env > CLI > config > 既定は不変)。あわせて `RequestGate` constructor で backoff 値を clamp(profile JSON 経由の無検証値対策)
   - 2026-07-10 R2: 再レビュー反映。プラグイン UI の「自動対応」を訂正 — `renderResult()` は `ExecuteResult` の網羅 switch のため `case "ASSERT"` の追加が必須(§2.5)/ §5 実装ステップ表 B1 の抽出先を `src/output/batchEnvelope.ts` に修正(§3.3 との不整合解消)
   - 2026-07-10 R1: レビュー反映。単文 ASSERT の出力ルートを明示 — MCP `ksql_query` の非 SELECT 拒否ガードと CLI の mutation 出力分岐に `AssertResult` 専用経路が必要(§2.3・§2.5)/ バッチ成功時の ASSERT は「result を持たない no-result 文」と規定 — 現行の `result.type !== "SELECT"` → mutation summary 経路への流入を防止(§2.3・§2.5)/ エンベロープ抽出先を `src/output/` に変更 — `core` → `execute.ts` の値 import 循環を回避(§3.3)/ サブクエリ 2 行打ち切りを非集計限定に条件化(§2.3)/ `KSQL_RETRY=0` と `envInt()` の `n <= 0` 無効扱いの衝突に対応 — `envNonNegativeInt` 追加を計画に明記(§4.3)
 - ステータス: 実装完了(A1〜A4 / B1〜B3 / C1〜C3。v1.10.0 リリース待ち — 残: プラグイン実機確認)
