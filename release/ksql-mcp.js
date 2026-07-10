@@ -35273,7 +35273,7 @@ async function executeBatch(sql, client, options = {}) {
     if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
     if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
     throw new BatchAnalysisError(
-      s.statementType === "INSERT_SELECT" ? `ArgumentError: INSERT_SELECT in a batch must select from temp tables only. (statement ${s.index})` : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+      s.statementType === "INSERT_SELECT" ? `ArgumentError: INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows). (statement ${s.index})` : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
     );
   }
@@ -38436,11 +38436,6 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      if (s.statementType === "INSERT_SELECT" && !s.tempOnlySource) {
-        throw new Error(
-          `ArgumentError: INSERT_SELECT in a batch must select from temp tables only.${at}`
-        );
-      }
       if (s.statementType === "UPSERT_SELECT") {
         throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
       }
@@ -38499,11 +38494,6 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
-    }
-    if (validation.statementType === "INSERT_SELECT") {
-      throw new Error(
-        "ArgumentError: INSERT_SELECT is not supported by ksql_mutate as a single statement. Wrap it in a batch: CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"
-      );
     }
     if (validation.statementType === "UPSERT_SELECT") {
       throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
@@ -38720,7 +38710,7 @@ var mutateInputSchema = external_exports.object({
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
-  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it."),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records)."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
@@ -38763,7 +38753,7 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows.").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records).").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -38812,7 +38802,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.4.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.5.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -38839,7 +38829,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is allowed in a batch when it selects only from temp tables (CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;). Standalone INSERT_SELECT and UPSERT_SELECT are rejected.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is supported (single statement or batch); the source may be apps or temp tables, but not both in one statement. The source SELECT reads at most dmlMaxRows + 1 records. UPSERT ... SELECT is rejected.",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

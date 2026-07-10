@@ -325,6 +325,26 @@ Claude Desktop が `ksql_mutate` の description（「INSERT_SELECT and UPSERT_S
 | serverInfo.version | `"1.0.0"` 固定を廃止し、esbuild define で package.json の version を埋め込み |
 | smoke 回帰ガード | `scripts/mcp-smoke.mjs` に description キー部分文字列・パラメータ説明の存在・version 一致の機械的 assertion を追加（メタデータだけ古くなるズレを検出） |
 
+## 11.7 APP ソース INSERT_SELECT の解禁（v1.5.0）
+
+`INSERT INTO APPx (...) SELECT ... FROM APPy ...`（APP ソースの INSERT_SELECT）を
+`ksql_mutate` で実行可能にした（単文・バッチとも）。
+v1.4.0（M4）で `executeInsertSelect()` に書き込み前 confirm フックが実装済みで、
+拒否を続ける根拠が失効していたための解禁。変更の本体はガード削除2箇所のみで、新規の安全機構はない。
+仕様・経緯: `docs/internal/ksql_mcp_insert_select_app_source_spec.md`（codex レビュー R1〜R3）
+
+| 変更 | 内容 |
+| --- | --- |
+| 単文 INSERT_SELECT | 拒否を削除。既存の単文 DML 経路で実行（source SELECT 実行後・POST 前に confirm で `dmlMaxRows` 判定。超過時はゼロ書き込みで ArgumentError） |
+| バッチ INSERT_SELECT | 「ソースが一時テーブルのみ」の制限を削除。APP のみソースも実行可能。source 行数は confirm 経由で `dmlTotalMaxRows` にも合算される |
+| 混在ソース（APP + 一時テーブル） | 引き続き拒否（エンジン層）。メッセージを実態に合わせて変更: `INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most 10000 rows). (statement N)` |
+| 読み取り上限 | source SELECT は `maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）で実行。集計等で読み取りが多いソースは一時テーブル経由（実体化上限 10,000 行）でのみ回避可能。それを超える大規模集計は非対応 |
+| description / describe | `ksql_mutate` description を「INSERT INTO app ... SELECT is supported (single statement or batch); ... UPSERT ... SELECT is rejected.」に更新。`dmlMaxRows` の describe に source SELECT 読み取り上限を兼ねる旨を追記（`ksql_run_saved_query` も同様 — DML 保存クエリは `mutate()` 委譲のため保存済み INSERT_SELECT に同じ上限が効く） |
+| smoke 回帰ガード | `mcp-smoke.mjs` の description キーを新文言に差し替え（旧バンドルで失敗することを確認してから適用）。`dmlMaxRows` describe のキー assertion を `ksql_mutate` / `ksql_run_saved_query` の両ツールに追加 |
+| 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースの挙動・レスポンス形式は不変 |
+
+`UPSERT_SELECT` は引き続き拒否（insert / update 件数が既存レコード照合後まで確定しないため。将来課題）。
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
@@ -356,14 +376,15 @@ npm audit --omit dev
 git diff --check
 ```
 
-直近の確認結果(v1.4.1 時点):
+直近の確認結果(v1.5.0 時点):
 
 ```text
-npm test: 594 tests passed
+npm test: 602 tests passed
 npm run build: passed
 npm run mcp:verify: passed
 npm audit --omit dev: 0 vulnerabilities
 git diff --check: passed
+tsc --noEmit: 既存 10 件のみ(src/ui/desktop.ts。新規エラーなし)
 ```
 
 `mcp:verify` では以下を確認する。
