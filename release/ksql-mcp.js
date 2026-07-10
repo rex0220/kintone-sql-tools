@@ -39280,7 +39280,7 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). ASSERT <expr> <op> <expr> (or BETWEEN) is a runtime gate: on failure it raises AssertError and always stops the batch. DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
