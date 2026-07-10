@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R5(codex 実装後レビュー反映): ①(Medium)公開向け言語リファレンス §25 の SELECT-based DML 記述が M4 時点(temp のみソース)のまま v1.5.0〜v1.7.0 の解禁を反映していなかったため更新(ソース種類・dmlMaxRows 適用・読み取り上限・UPSERT 照合の残存まで記載)。X5 の対象ファイル一覧に言語リファレンスが漏れていた反省 — 公開ドキュメントの網羅確認は grep(`INSERT.*SELECT` / `一時テーブル`)で行うこと。②(Low)MCP 仕様書の「拒否する文: なし」を「SELECT-based DML のソース制限としての拒否はなし」に限定し、UPDATE 等の temp 参照拒否との衝突読みを解消
   - 2026-07-10 R4(実装完了): X1〜X5 実装済み(ブランチ `feat/mcp-select-dml-mixed-sources`。v1.6.0 は PR #6 でマージ済み)。X4 は計画どおり assertion を先に差し替え、v1.6.0 バンドルで smoke が失敗することを確認してから X3 を適用。テスト: エンジン層6本(混在 INSERT_SELECT / サブクエリ temp 参照 / temp・混在 UPSERT_SELECT / confirm ゼロ書き込み / EXPLAIN)+ MCP 層5本(置換2 + 新規3)。サブクエリテストは SIMPLE モードの WHERE 押し下げ(教訓①)を踏まえ FROM を temp にして in-memory 評価で観測する形に調整
   - 2026-07-10 R3(codex レビュー完了): 追加指摘なし。describe 両ツール更新 + smoke キー差し替え、サブクエリ temp 参照テストの追加を確認済み。進め方確定 — v1.6.0 を main に入れてから v1.7.0 ブランチを切る
   - 2026-07-10 R2(codex 計画レビュー反映): ①(Medium)X3 の `dmlMaxRows` describe「変更不要」を撤回 — temp / 混在解禁後は「caps the source SELECT read (dmlMaxRows + 1)」が過大になるため、mutate / runSavedQuery 両方の describe を「APP ソース読み取り cap / temp 実体化 10,000 行 / UPSERT 合計」の文言に更新し、X4 の smoke キー(`"caps the source SELECT read"` → `"caps app-source reads"`)も差し替え対象に追加(仕様 R5 と同期)。②(Low)X1 テストにサブクエリ内 temp 参照(`WHERE ... IN (SELECT ... FROM #t)`)の明示成功テストを追加(受け入れ基準 §5-1 の固定)

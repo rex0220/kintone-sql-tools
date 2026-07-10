@@ -508,8 +508,9 @@ Phase 1.5 / Phase 2 で初期実装する。
 6. `DELETE`
 7. `REORDER`
 
-拒否する文: なし（SELECT-based DML のソース制限は v1.7.0 で最終解消。
-DML(UPDATE / DELETE / UPSERT)内の一時テーブル参照のみエンジン未実装として実行前拒否が残る）
+拒否する文（**SELECT-based DML のソース制限としての拒否**）: なし — v1.7.0 で最終解消。
+なお、これとは別に **SELECT-based DML 以外の DML（UPDATE / DELETE / UPSERT）内の一時テーブル参照**は、
+エンジン未実装（`temp table references in X are not supported yet.`）として引き続き実行前拒否される。
 
 `INSERT_SELECT` は初期実装（〜v1.4.1）では拒否していたが、v1.4.0（M4）で `executeInsertSelect()` に
 書き込み前 confirm hook が実装された（source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")`）
