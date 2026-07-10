@@ -323,6 +323,9 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    // TODO(A3): ASSERT の実行（単文・バッチ）を実装する（phase1 仕様 §2.3）
+    case "ASSERT":
+      throw new Error("ArgumentError: ASSERT is not supported yet.");
   }
 }
 

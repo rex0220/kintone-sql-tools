@@ -22,7 +22,8 @@ export type Statement =
   | DescribeStatement
   | ExplainStatement
   | CreateTempTableStatement
-  | DropTempTableStatement;
+  | DropTempTableStatement
+  | AssertStatement;
 
 // ------------------------------------------------------------
 // SHOW / DESCRIBE
@@ -70,6 +71,40 @@ export interface CreateTempTableStatement {
 export interface DropTempTableStatement {
   type: "DROP_TEMP_TABLE";
   name: string;
+}
+
+// ------------------------------------------------------------
+// ASSERT（アサーション — 実行時ゲート）
+// ------------------------------------------------------------
+
+/** ASSERT の比較演算子（BETWEEN は AssertStatement.op で表現） */
+export type AssertCompareOp = "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=";
+
+/**
+ * ASSERT のオペランド。
+ * リテラル・算術式・スカラーサブクエリのみ（FROM コンテキストが無いため
+ * フィールド参照は不可。ArithExpr の葉も NUMBER に限る — パーサで検証）
+ */
+export type AssertOperand =
+  | NumberLiteral
+  | StringLiteral
+  | ScalarSubquery
+  | ArithExpr;
+
+/**
+ * ASSERT <式> <比較演算子> <式> / ASSERT <式> BETWEEN <式> AND <式>
+ *
+ * op が比較演算子のとき right を使い、BETWEEN のとき low / high を使う。
+ */
+export interface AssertStatement {
+  type: "ASSERT";
+  left: AssertOperand;
+  op: AssertCompareOp | "BETWEEN";
+  right: AssertOperand | null;
+  low: AssertOperand | null;
+  high: AssertOperand | null;
+  /** 条件部の正規化テキスト（AssertError の "assertion failed: ..." メッセージ用） */
+  text: string;
 }
 
 // ------------------------------------------------------------

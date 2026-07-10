@@ -70,6 +70,9 @@ export const enum TokenKind {
   MAX   = "MAX",
   MIN   = "MIN",
 
+  // キーワード ― アサーション
+  ASSERT = "ASSERT",
+
   // キーワード ― 条件
   AND     = "AND",
   OR      = "OR",
@@ -210,6 +213,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["AVG",       TokenKind.AVG],
   ["MAX",       TokenKind.MAX],
   ["MIN",       TokenKind.MIN],
+  ["ASSERT",    TokenKind.ASSERT],
   ["AND",       TokenKind.AND],
   ["OR",        TokenKind.OR],
   ["NOT",       TokenKind.NOT],
