@@ -30,12 +30,15 @@ interface MockOptions {
 function makeClient(opts: MockOptions = {}): KintoneClient & {
   getCalls: { app: number; query: string }[];
   postCalls: { app: number; records: unknown[] }[];
+  putCalls: { app: number; records: unknown[] }[];
 } {
   const getCalls: { app: number; query: string }[] = [];
   const postCalls: { app: number; records: unknown[] }[] = [];
+  const putCalls: { app: number; records: unknown[] }[] = [];
   return {
     getCalls,
     postCalls,
+    putCalls,
     async getRecords(params) {
       getCalls.push({ app: params.app, query: params.query ?? "" });
       if (opts.delayMs) {
@@ -50,7 +53,9 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
       postCalls.push({ app: params.app, records: [...params.records] });
       return { ids: params.records.map((_r, i) => String(i + 1)) };
     },
-    async putRecords() { /* noop */ },
+    async putRecords(params) {
+      putCalls.push({ app: params.app, records: [...params.records] });
+    },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
     async getFields() { return []; },
@@ -290,18 +295,139 @@ test("INSERT_SELECT: 実体化済み行数に confirm(dmlMaxRows 相当)が適�
   expect(client.postCalls).toHaveLength(0); // 書き込み前に止まる
 });
 
-test("INSERT_SELECT: APP ソース混在（JOIN）は拒否（実行前）", async () => {
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
-  await expect(
-    executeBatch(
-      "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
-      "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
-      client
-    )
-  ).rejects.toThrow(
-    /INSERT_SELECT mixing app and temp table sources is not supported\. .*temp tables hold at most 10000 rows.*\(statement 1\)/
+test("INSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0 解禁）", async () => {
+  // #t は APP100 の3社。APP300 には A社・C社のみ存在 → JOIN 結果は2行
+  const client = makeClient({
+    recordsByApp: {
+      100: APP1,
+      300: [
+        makeRecord({ $id: "1", 顧客名: "A社", 地域: "東京" }),
+        makeRecord({ $id: "2", 顧客名: "C社", 地域: "大阪" }),
+      ],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "INSERT INTO APP200 (名前, 地域) SELECT a.顧客名, b.地域 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+    client
   );
-  expect(client.getCalls).toHaveLength(0);
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[1]).toMatchObject({ type: "INSERT_SELECT", status: "success" });
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].app).toBe(200);
+  expect(client.postCalls[0].records).toEqual([
+    { 名前: { value: "A社" }, 地域: { value: "東京" } },
+    { 名前: { value: "C社" }, 地域: { value: "大阪" } },
+  ]);
+});
+
+test("INSERT_SELECT: サブクエリ内の一時テーブル参照（WHERE ... IN (SELECT ... FROM #t)）を実行できる", async () => {
+  // #all は APP100 の3社、#hi は APP300 由来の B社・C社（SIMPLE モードの WHERE は
+  // REST 押し下げでモックに効かないため、絞り込みはアプリ別データで作る。教訓①）。
+  // FROM #all の FULL_SCAN でサブクエリ結果によるインメモリ絞り込みを観測する
+  const client = makeClient({
+    recordsByApp: {
+      100: APP1,
+      300: [
+        makeRecord({ $id: "1", 顧客名: "B社" }),
+        makeRecord({ $id: "2", 顧客名: "C社" }),
+      ],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #all AS SELECT 顧客名 FROM APP100;" +
+    "CREATE TEMP TABLE #hi AS SELECT 顧客名 FROM APP300;" +
+    "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #all WHERE 顧客名 IN (SELECT 顧客名 FROM #hi)",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[2]).toMatchObject({ type: "INSERT_SELECT", status: "success" });
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].records).toEqual([
+    { 名前: { value: "B社" } },
+    { 名前: { value: "C社" } },
+  ]);
+});
+
+test("UPSERT_SELECT: 一時テーブルソースを実行でき insert / update が振り分けられる（v1.7.0 解禁）", async () => {
+  // #t は APP100 の3社。書き込み先 APP400 には B社のみ既存 → update 1 + insert 2
+  const client = makeClient({
+    recordsByApp: {
+      100: APP1,
+      400: [makeRecord({ $id: "9", 顧客名: "B社" })],
+    },
+  });
+  const confirmCalls: Array<{ count: number; operation: string }> = [];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名)",
+    client,
+    {
+      confirm: async (count, operation) => {
+        confirmCalls.push({ count, operation });
+        return true;
+      },
+    }
+  );
+
+  expect(r.ok).toBe(true);
+  expect(confirmCalls).toEqual([{ count: 3, operation: "UPDATE" }]); // 照合後の合計
+  expect(r.statements[1]).toMatchObject({ type: "UPSERT_SELECT", status: "success" });
+  expect(r.statements[1].result).toMatchObject({
+    type: "UPSERT",
+    insertedCount: 2,
+    updatedCount: 1,
+  });
+  expect(client.postCalls).toHaveLength(1); // A社・C社の INSERT
+  expect(client.putCalls).toHaveLength(1); // B社の UPDATE
+});
+
+test("UPSERT_SELECT: 一時テーブルソースでも confirm 拒否で当該文ゼロ書き込み", async () => {
+  const client = makeClient({
+    recordsByApp: { 100: APP1, 400: [] },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名)",
+    client,
+    {
+      confirm: async (count) => {
+        if (count > 2) throw new Error("ArgumentError: UPDATE affected rows exceed limit.");
+        return true;
+      },
+    }
+  );
+
+  expect(r.ok).toBe(false);
+  expect(r.statements[1].status).toBe("error");
+  expect(client.postCalls).toHaveLength(0); // 書き込み前に止まる
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0 解禁）", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: APP1,
+      300: [makeRecord({ $id: "1", 顧客名: "A社", 地域: "東京" })],
+      400: [makeRecord({ $id: "9", 顧客名: "A社" })],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名, 地域) SELECT a.顧客名, b.地域 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名 ON DUPLICATE (顧客名)",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[1]).toMatchObject({ type: "UPSERT_SELECT", status: "success" });
+  expect(r.statements[1].result).toMatchObject({
+    type: "UPSERT",
+    insertedCount: 0,
+    updatedCount: 1, // A社は APP400 に既存 → update
+  });
+  expect(client.putCalls).toHaveLength(1);
 });
 
 // ----------------------------------------------------------------

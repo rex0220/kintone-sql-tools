@@ -364,6 +364,24 @@ v1.4.0（M4）で `executeInsertSelect()` に書き込み前 confirm フック�
 | smoke 回帰ガード | description キーを新文言に差し替え（旧バンドルで失敗確認後に適用）。dmlMaxRows describe の「counts inserts + updates」assertion を両ツールに追加 |
 | 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースは不変 |
 
+## 11.9 SELECT-based DML のソース制限 最終解消（v1.7.0）
+
+`INSERT_SELECT` の混在ソース（APP + 一時テーブルの JOIN・サブクエリ）と、
+`UPSERT_SELECT` の一時テーブル・混在ソースを解禁した。
+実行は read-only バッチで実戦投入済みの FULL_SCAN 注入経路（`executeQueryWithCte`）で、
+エンジン変更はガード緩和 + `executeUpsertSelect` への cteCache 配管（INSERT_SELECT 経路の鏡写し）のみ。
+仕様・経緯: `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（codex R1〜R5）
+
+| 変更 | 内容 |
+| --- | --- |
+| 混在 INSERT_SELECT | `FROM #t JOIN APPx` / サブクエリ内 temp 参照とも実行可能。v1.5.0 の混在拒否エラー（`mixing app and temp table sources ...`）は発生しなくなった |
+| temp / 混在 UPSERT_SELECT | 実行可能。v1.6.0 の「temp 迂回路なし」制約は source 側について解消 |
+| 読み取り側の上限（ソース種類別） | APP fetch = `dmlMaxRows + 1`（JOIN の APP 側も同様。大きい APP は安全側の上限エラーになり得る）/ temp = 実体化上限 10,000 行 / UPSERT 系はこれに書き込み先 APP の照合読み取りが加わる（**temp 化では回避されない**） |
+| 書き込み側ガード | 不変（書き込み前 confirm / `dmlMaxRows` / `dmlTotalMaxRows`。超過時は当該文ゼロ書き込み。DML バッチは非アトミックのため前段の成功文は残る） |
+| description / describe | 「but not both in one statement」「for app sources only」を撤回し統合文言へ。`dmlMaxRows` describe（mutate / run_saved_query 両方）を「caps app-source reads（temp は実体化 10,000 行で別建て）」に更新 |
+| smoke 回帰ガード | description キーを新文言に差し替え（旧バンドルで失敗確認後に適用）。describe キーも `"caps app-source reads"` に差し替え |
+| 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースは不変 |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
@@ -395,10 +413,10 @@ npm audit --omit dev
 git diff --check
 ```
 
-直近の確認結果(v1.6.0 時点):
+直近の確認結果(v1.7.0 時点):
 
 ```text
-npm test: 608 tests passed
+npm test: 616 tests passed
 npm run build: passed
 npm run mcp:verify: passed
 npm audit --omit dev: 0 vulnerabilities

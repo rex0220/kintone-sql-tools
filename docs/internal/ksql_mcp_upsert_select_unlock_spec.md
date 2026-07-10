@@ -100,6 +100,7 @@ MCP 仕様書 §7.6 の拒否理由と現状:
 **既知の制約(重要)**:
 
 1. INSERT_SELECT と異なり一時テーブルソースがエンジン未対応のため、**集計・JOIN で読み取りが `dmlMaxRows + 1` を超えるソースに迂回路がない**。エラーメッセージ・ツール説明文で「一時テーブルに逃がす」案内を**書いてはならない**(UPSERT_SELECT では嘘になる)。回避したい場合の運用は「read-only SELECT で事前確認 → dmlMaxRows を適切に設定」のみ
+   > **v1.7.0 注記**: 一時テーブル・混在ソースの UPSERT_SELECT は v1.7.0 で解禁され、この制約は **source / JOIN 側について解消**した(書き込み先 APP への照合読み取りはソース種類に関わらず残る)。`docs/internal/ksql_mcp_insert_select_mixed_source_spec.md` 参照
 2. **照合読み取りは第1キーのみで検索する**(`resolveUpsertTargets`、`src/execute.ts:1380-1382`。複合キーの残りは取得後にメモリ上で照合)。そのため **target アプリ側で第1キーの重複が多い(低選択性)場合、source が1行でも照合 fetch が `dmlMaxRows + 1` を超えて読み取り上限エラーになり得る**。書き込み前の安全側の失敗であり解禁のブロッカーではないが、「ソース行数が少ないのに上限エラーになる」ケースとして利用者・MCP クライアントが遭遇し得る。第1キーには選択性の高いフィールド(コード・ID 等)を使うのが前提(UPSERT VALUES 形式でも同じ特性)
 
 **表記上の既知課題**: confirm の operation が `"UPDATE"` のため、超過時のエラーは `UPDATE affected rows (N) exceed dmlMaxRows (M)` となる(UPSERT なのに UPDATE 表記)。VALUES 形式の UPSERT で既に同じ表記であり、本提案では許容する(§3.5)。

@@ -35271,9 +35271,9 @@ async function executeBatch(sql, client, options = {}) {
   }
   for (const s of analysis.statements) {
     if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
-    if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
+    if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") continue;
     throw new BatchAnalysisError(
-      s.statementType === "INSERT_SELECT" ? `ArgumentError: INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows). (statement ${s.index})` : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+      `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
     );
   }
@@ -35360,6 +35360,9 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     }
     if (stmt.type === "INSERT_SELECT") {
       return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    }
+    if (stmt.type === "UPSERT_SELECT") {
+      return { result: await executeUpsertSelect(stmt, client, options, cacheContext, tempTables) };
     }
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
   }
@@ -36682,8 +36685,8 @@ function evalOrderKeyForRow(key, row) {
       return evalStringFunc(key.expr, row);
   }
 }
-async function executeUpsertSelect(stmt, client, options, cacheContext) {
-  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
+async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache) {
+  const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
     throw new Error(
@@ -36892,12 +36895,18 @@ function buildPlanForBatchQuery(query, info) {
     lines.push(
       `INSERT INTO APP${query.appId} ... SELECT\uFF08\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u30BD\u30FC\u30B9\u3002\u5B9F\u884C\u6642\u306B\u4EF6\u6570\u78BA\u5B9A \u2192 dmlMaxRows \u9069\u7528\uFF09`
     );
+  } else if (query.type === "UPSERT_SELECT") {
+    lines.push(
+      `UPSERT INTO APP${query.appId} ... SELECT\uFF08\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u30BD\u30FC\u30B9\u3002\u7167\u5408\u5F8C\u306B insert + update \u5408\u8A08\u78BA\u5B9A \u2192 dmlMaxRows \u9069\u7528\uFF09`
+    );
   }
   lines.push("  mode:          FULL_SCAN\uFF08\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u53C2\u7167\uFF09");
   lines.push(
     `  temp:          ${info.tempTablesReferenced.join(", ")}\uFF08\u30A4\u30F3\u30E1\u30E2\u30EA\u8D70\u67FB\u3002\u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u884C\u6570\u4E0D\u660E\uFF09`
   );
-  const apps = info.appIds.filter((a) => query.type !== "INSERT_SELECT" || a !== query.appId);
+  const apps = info.appIds.filter(
+    (a) => query.type !== "INSERT_SELECT" && query.type !== "UPSERT_SELECT" || a !== query.appId
+  );
   if (apps.length > 0) {
     lines.push(`  app:           ${apps.map((a) => `APP${a}`).join(", ")}`);
   }
@@ -38704,7 +38713,7 @@ var mutateInputSchema = external_exports.object({
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
-  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates."),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
@@ -38747,7 +38756,7 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates.").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -38796,7 +38805,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.6.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.7.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -38823,7 +38832,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is supported (single statement or batch); the source may be apps or temp tables, but not both in one statement. UPSERT INTO app ... SELECT is supported for app sources only (temp-table sources are not supported); dmlMaxRows counts inserts + updates. The source SELECT reads at most dmlMaxRows + 1 records.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. The source SELECT reads at most dmlMaxRows + 1 app records; temp tables hold at most 10000 rows.",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

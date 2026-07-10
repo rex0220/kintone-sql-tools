@@ -501,36 +501,40 @@ Phase 1.5 / Phase 2 で初期実装する。
 許可する文:
 
 1. `INSERT`（VALUES 形式）
-2. `INSERT_SELECT`（v1.5.0 で解禁。単文・バッチとも。ソースは APP のみ、または一時テーブルのみ）
-3. `UPSERT_SELECT`（v1.6.0 で解禁。単文・バッチとも。**ソースは APP のみ** — 一時テーブルソースはエンジン未対応）
+2. `INSERT_SELECT`（v1.5.0 で APP ソース解禁 → **v1.7.0 でソース制限なし**。APP / 一時テーブル / 混在（JOIN・サブクエリ）とも可）
+3. `UPSERT_SELECT`（v1.6.0 で APP ソース解禁 → **v1.7.0 でソース制限なし**。同上）
 4. `UPDATE`
 5. `UPSERT`
 6. `DELETE`
 7. `REORDER`
 
-拒否する文（いずれも実行前拒否）:
-
-1. ソースに APP と一時テーブルが混在する `INSERT_SELECT`（実行エンジン層の validate-all-first）
-2. 一時テーブルソースの `UPSERT_SELECT`（実行エンジン層。`executeUpsertSelect` が一時テーブル注入に未対応）
+拒否する文: なし（SELECT-based DML のソース制限は v1.7.0 で最終解消。
+DML(UPDATE / DELETE / UPSERT)内の一時テーブル参照のみエンジン未実装として実行前拒否が残る）
 
 `INSERT_SELECT` は初期実装（〜v1.4.1）では拒否していたが、v1.4.0（M4）で `executeInsertSelect()` に
 書き込み前 confirm hook が実装された（source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")`）
 ことで `dmlMaxRows` ガードが書き込み前に効くようになり、v1.5.0 で解禁した。
-source SELECT の読み取りは `maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）の下で実行されるため、
-読み取り増幅も書き込み上限に拘束される。集計・JOIN で「読み取りは多いが結果行は少ない」ソースは
-この上限に当たり得る。一時テーブル経由のバッチ形で回避できるのは読み取りが実体化上限
-（`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）に収まる場合のみで、それを超える大規模集計は非対応。
-経緯と安全モデルの詳細は `docs/internal/ksql_mcp_insert_select_app_source_spec.md` を参照。
+v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ）も解禁 — 実行は read-only バッチで
+実戦投入済みの FULL_SCAN 注入経路（`executeQueryWithCte`）で、APP テーブルの fetch は
+`maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）、一時テーブルは実体化上限
+（`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）の下にある。
+集計・JOIN で「読み取りは多いが結果行は少ない」APP ソースはこの上限に当たり得る。
+その場合は APP 側を一時テーブルに実体化すれば **source / JOIN 側の読み取り上限を回避できる**
+（実体化上限 10,000 行に収まる場合のみ）。
+経緯は `docs/internal/ksql_mcp_insert_select_app_source_spec.md`（v1.5.0）と
+`docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（v1.7.0）を参照。
 
-`UPSERT_SELECT` は v1.6.0 で解禁した。`executeUpsertSelect()` は source SELECT → 列数・キー検証 →
-既存レコード照合 → `confirm(toInsert + toUpdate, "UPDATE")` → POST / PUT の順で実行し、confirm は
+`UPSERT_SELECT` は v1.6.0 で APP ソースを、v1.7.0 で一時テーブル・混在ソースを解禁した。
+`executeUpsertSelect()` は source SELECT → 列数・キー検証 → 既存レコード照合 →
+`confirm(toInsert + toUpdate, "UPDATE")` → POST / PUT の順で実行し、confirm は
 **照合後・書き込み前**に呼ばれるため `dmlMaxRows` は確定件数（insert + update 合計）に対して効く。
-留意点: ①一時テーブルソースはエンジン未対応のため、大きい集計ソースの迂回路は INSERT_SELECT と異なり
-**存在しない**（read-only SELECT で事前確認して dmlMaxRows を設定する運用のみ）。②照合読み取りは
+留意点: ①一時テーブルに実体化して回避できるのは **source / JOIN 側の APP 読み取り上限のみ**で、
+書き込み先 APP への既存レコード照合読み取りはソース種類に関わらず残る。②照合読み取りは
 第1キーのみの `in (...)` 検索のため、target 側で第1キーの重複が多いと source 行数が少なくても
 読み取り上限エラーになり得る（書き込み前の安全側の失敗）。③超過時のエラーは confirm の operation
 表記により `UPDATE affected rows ...` となる（UPSERT VALUES 形式と同じ）。
-経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md` を参照。
+経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`（v1.6.0）と
+`docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（v1.7.0）を参照。
 
 ### 7.6.1 SELECT-based DML のリスク（v1.6.0 時点の再評価）
 
@@ -554,6 +558,7 @@ source SELECT の読み取りは `maxRecords = dmlMaxRows + 1`（`onLimit = "err
 3. MCP の `ksql_mutate` に `allowSelectBasedDml: true` を追加する — **不採用（v1.5.0）**。フラグ案は confirm 未実装時代の前提であり、既存の `allowDml` + `confirmText` + `dmlMaxRows` で書き込み承認は表現済み。入力仕様の分岐を増やすことは MCP クライアントの誤用・誤学習の温床になる
 4. `INSERT_SELECT` のみ先に解禁する — **済（v1.5.0）**
 5. `UPSERT_SELECT` を解禁する — **済（v1.6.0）**。照合コスト・insert/update 内訳の扱いは §7.6.1 の再評価と `dmlMaxRows` の合計適用の明文化で整理した
+6. （追加）SELECT-based DML のソース制限（混在 INSERT_SELECT / temp・混在 UPSERT_SELECT）を解消する — **済（v1.7.0）**。実行は read-only バッチと同じ FULL_SCAN 注入経路で、書き込み側ガードは不変
 
 `UPSERT_SELECT` の件数は source SELECT 件数だけでは確定しないが、`executeUpsertSelect()` は
 既存レコード照合後に `toInsert.length + toUpdate.length` を confirm に渡すため、
