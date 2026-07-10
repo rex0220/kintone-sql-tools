@@ -356,6 +356,19 @@ test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不�
   expect(text).toMatch(/WHERE プッシュダウンは行われない/);
 });
 
+test("バッチ EXPLAIN: 一時テーブルソースの UPSERT_SELECT はヘッダ行 + FULL_SCAN を明示（v1.7.0）", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名)"
+  );
+  const upsert = plans.statements[1];
+  const text = upsert.plan.join("\n");
+  expect(upsert.type).toBe("UPSERT_SELECT");
+  expect(text).toMatch(/UPSERT INTO APP400 \.\.\. SELECT（一時テーブルソース。照合後に insert \+ update 合計確定 → dmlMaxRows 適用）/);
+  expect(text).toMatch(/mode:\s+FULL_SCAN（一時テーブル参照）/);
+  expect(text).not.toMatch(/app:\s+.*APP400/); // 書き込み先アプリはソース一覧から除外
+});
+
 test("バッチ EXPLAIN: 一時テーブル無関係の文は既存プラン、DROP は解放のみ", () => {
   const plans = buildBatchExplainPlans(
     "SELECT 顧客名 FROM APP100;" +

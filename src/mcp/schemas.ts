@@ -60,7 +60,7 @@ export const mutateInputSchema = z.object({
   confirmText: z.literal("yes")
     .describe('Must be the literal string "yes" to confirm execution.'),
   dmlMaxRows: z.number().int().positive()
-    .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates."),
+    .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: z.number().int().positive()
@@ -122,7 +122,7 @@ export const runSavedQueryInputSchema = z.object({
     .describe('Required for DML saved queries: must be the literal string "yes".')
     .optional(),
   dmlMaxRows: z.number().int().positive()
-    .describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates.")
+    .describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates.")
     .optional(),
 });
 

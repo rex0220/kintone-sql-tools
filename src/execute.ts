@@ -382,16 +382,15 @@ export async function executeBatch(
   if (options.continueOnError && analysis.containsDml) {
     throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
   }
-  // DML 文内の一時テーブル参照は、INSERT_SELECT の「ソースが一時テーブルのみ」の
-  // 場合だけ許可する（M4。実体化済みで書き込み前に件数確定するため dmlMaxRows と整合）。
-  // それ以外（UPDATE のサブクエリ等・APP 混在ソースの INSERT_SELECT）は拒否
+  // DML 文内の一時テーブル参照は SELECT-based DML（INSERT_SELECT / UPSERT_SELECT）
+  // でのみ許可する（temp のみ・APP 混在とも。v1.7.0）。件数判定は書き込み前の
+  // confirm フックが担うため dmlMaxRows と整合する。
+  // それ以外（UPDATE のサブクエリ等）は引き続き拒否
   for (const s of analysis.statements) {
     if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
-    if (s.statementType === "INSERT_SELECT" && s.tempOnlySource) continue;
+    if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") continue;
     throw new BatchAnalysisError(
-      s.statementType === "INSERT_SELECT"
-        ? `ArgumentError: INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows). (statement ${s.index})`
-        : `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
+      `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
     );
   }
@@ -504,9 +503,12 @@ async function executeBatchStatement(
     if (stmt.type === "WITH") {
       return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
     }
-    // INSERT_SELECT（ソースが一時テーブルのみ。事前チェックで検証済み）
+    // SELECT-based DML（ソースは temp のみ / APP 混在とも。事前チェックで検証済み）
     if (stmt.type === "INSERT_SELECT") {
       return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    }
+    if (stmt.type === "UPSERT_SELECT") {
+      return { result: await executeUpsertSelect(stmt, client, options, cacheContext, tempTables) };
     }
     // ここに来るのは想定外（他の DML 参照は事前チェックで拒否済み）
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
@@ -2459,10 +2461,14 @@ async function executeUpsertSelect(
   stmt: UpsertSelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  /** バッチ実行時の一時テーブルストア（#name → 行）。SELECT ソースの解決に使う */
+  cteCache?: Map<string, ProcessRow[]>
 ): Promise<UpsertResult> {
-  // 1. SELECT を実行して結果行を取得
-  const selectResult = await executeSelect(stmt.select, client, options, cacheContext);
+  // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
+  const selectResult = cteCache !== undefined && cteCache.size > 0
+    ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
+    : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
 
   if (columns.length !== stmt.fields.length) {
@@ -2793,12 +2799,18 @@ function buildPlanForBatchQuery(
     lines.push(
       `INSERT INTO APP${query.appId} ... SELECT（一時テーブルソース。実行時に件数確定 → dmlMaxRows 適用）`
     );
+  } else if (query.type === "UPSERT_SELECT") {
+    lines.push(
+      `UPSERT INTO APP${query.appId} ... SELECT（一時テーブルソース。照合後に insert + update 合計確定 → dmlMaxRows 適用）`
+    );
   }
   lines.push("  mode:          FULL_SCAN（一時テーブル参照）");
   lines.push(
     `  temp:          ${info.tempTablesReferenced.join(", ")}（インメモリ走査。実体化前のため行数不明）`
   );
-  const apps = info.appIds.filter((a) => query.type !== "INSERT_SELECT" || a !== query.appId);
+  const apps = info.appIds.filter(
+    (a) => (query.type !== "INSERT_SELECT" && query.type !== "UPSERT_SELECT") || a !== query.appId
+  );
   if (apps.length > 0) {
     lines.push(`  app:           ${apps.map((a) => `APP${a}`).join(", ")}`);
   }

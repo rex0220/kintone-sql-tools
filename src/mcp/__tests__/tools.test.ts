@@ -1167,22 +1167,88 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(2);
   });
 
-  test("mutate: 混在ソース(APP + temp)の INSERT_SELECT はエンジン層で実行前に拒否", async () => {
-    const { deps, calls } = makeMutateRuntimeDeps({});
+  test("mutate: 混在ソース(#t JOIN APP)の INSERT_SELECT を実行できる(v1.7.0 解禁)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+      300: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" }, 地域: { value: "東京" } }, // A社のみ JOIN 一致
+      ],
+    });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    await expect(
-      tools.mutate({
-        ...MUTATE_BASE,
-        sql:
-          "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
-          "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
-        dmlMaxRows: 10,
-      })
-    ).rejects.toThrow(
-      /INSERT_SELECT mixing app and temp table sources is not supported\. .*\(statement 1\)/
-    );
-    expect(calls.get).toBe(0); // validate-all-first: 1文も実行されない
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前, 地域) SELECT a.顧客名, b.地域 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      dmlMaxRows: 10,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[1]).toMatchObject({ type: "INSERT_SELECT", status: "success", insertedCount: 1 });
+    expect(calls.post).toBe(1);
+  });
+
+  test("mutate: 混在ソース INSERT_SELECT の dmlMaxRows 超過は当該文 POST ゼロ件", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+      300: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // JOIN 結果 3 行 > dmlMaxRows 2 → confirm で書き込み前拒否(fail-fast)
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      dmlMaxRows: 2,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/INSERT affected rows \(3\) exceed dmlMaxRows \(2\)/);
     expect(calls.post).toBe(0);
+  });
+
+  test("mutate: 混在ソースの JOIN APP 側 fetch は dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+      ],
+      300: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+        { $id: { value: "4" }, 顧客名: { value: "D社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // dmlMaxRows = 2 → maxRecords = 3。JOIN の APP300 側 4 行は読み取り段階で失敗(安全側)
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      dmlMaxRows: 2,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect((result.statements[1].error as { message: string }).message)
+      .toMatch(/取得件数が上限（3 件）を超えました/);
+    expect(calls.post).toBe(0);
+    expect(calls.put).toBe(0);
   });
 
   test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と APP ソース INSERT_SELECT(confirm)を二重計上なしで合算する", async () => {
@@ -1270,20 +1336,63 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(1); // 先行 INSERT の1回のみ
   });
 
-  test("mutate: 一時テーブルソースの UPSERT_SELECT はエンジン層で実行前に拒否(エンジン未対応)", async () => {
-    const { deps, calls } = makeMutateRuntimeDeps({});
+  test("mutate: 一時テーブルソースの UPSERT_SELECT を実行できる(v1.7.0 解禁)", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } }, // update 対象
+      ],
+    });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    await expect(
-      tools.mutate({
-        ...MUTATE_BASE,
-        sql:
-          "CREATE TEMP TABLE #t AS SELECT 顧客コード FROM APP100;" +
-          "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM #t ON DUPLICATE (顧客コード)",
-        dmlMaxRows: 10,
-      })
-    ).rejects.toThrow(/temp table references in UPSERT_SELECT are not supported yet\./);
-    expect(calls.get).toBe(0); // validate-all-first: 1文も実行されない
-    expect(calls.post).toBe(0);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客コード FROM APP100;" +
+        "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM #t ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 10,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[1]).toMatchObject({
+      type: "UPSERT_SELECT",
+      status: "success",
+      insertedCount: 1,
+      updatedCount: 1,
+    });
+    expect(calls.put).toBe(1);
+  });
+
+  test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と temp ソース UPSERT_SELECT(confirm)を合算する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客コード: { value: "C001" } },
+        { $id: { value: "2" }, 顧客コード: { value: "C003" } },
+      ],
+      300: [
+        { $id: { value: "9" }, 顧客コード: { value: "C001" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      // INSERT VALUES 2 行(静的) + UPSERT_SELECT 2 行(confirm 加算) = 4 > 3
+      sql:
+        "INSERT INTO APP200 (x) VALUES ('a'), ('b'); " +
+        "CREATE TEMP TABLE #t AS SELECT 顧客コード FROM APP100;" +
+        "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM #t ON DUPLICATE (顧客コード)",
+      dmlMaxRows: 10,
+      dmlTotalMaxRows: 3,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "success", insertedCount: 2 });
+    expect(result.statements[2]).toMatchObject({ status: "error" });
+    expect((result.statements[2].error as { message: string }).message)
+      .toMatch(/batch affected rows \(4\) exceed dmlTotalMaxRows \(3\)/);
+    expect(calls.put).toBe(0); // UPSERT_SELECT の書き込み前に止まる
   });
 
   // ----------------------------------------------------------------
