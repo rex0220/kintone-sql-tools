@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R6(codex レビュー反映・Low): T8-2 の「`build:mcp` → dist-mcp + release/ksql-mcp.js」が実態と不一致だった — `build-mcp.mjs` の outfile は `dist-mcp/ksql-mcp.js` のみで release/ へは書き出さない(コードで裏取り)。T8-2 を dist 系の再生成のみに修正し、release/ へのコピーは T8-3 の「bump 後の明示手順」として分離(自動反映されないことを明記)
   - 2026-07-11 R5(codex 実装後レビュー反映): ①`prod/js/desktop.js`(T4 の EXPLAIN 文言によるバンドル差分)が未コミットだった → tracked バンドルはソースと同期させる方針でブランチにコミット(9534b3f。リリース時の bump 再ビルドで再更新される)②`release/ksql-mcp.js` / `.mcpb` の stale は**意図的な繰り延べ** — 今差し替えると VERSION.txt 1.10.0 の release/ に v1.11.0 機能入りバンドルという不整合が生じるため、慣例どおりリリース時にバージョン bump と同時に差し替える(T8-3)。npm publish は `prepack` が再ビルドするため release/ の古さは直撃しない(codex 確認と一致)
   - 2026-07-11 R4(実装完了): T1〜T7 実装済み(ブランチ `feat/temp-table-max-rows-option`、ステップごとにコミット)。T5 は計画どおり assertion 先行 → 旧バンドル(v1.10.0 dist-mcp)で `ksql_query.tempTableMaxRows input is missing.` の fail を確認してから T6 を適用(regression ガード証明済み)。テスト: runtime 解決チェーン5件 / MCP スキーマ・受け渡し・不変条件7件(10,001 行実体化の成功・未指定回帰・truncate 不適用・dmlMaxRows 独立)/ CLI パース・console 伝搬3件。jest 731 件パス(console.e2e の1件は既知の並列コールドラン・フレークで単独再実行 green)・tsc 既存10件のみ・`npm run build` 全成果物・mcp:smoke / mcp:pack-smoke / mcpb:verify ok・dist-cli 直実行でフラグ受理 + 新 EXPLAIN 文言を確認。テスト都合の変更: `buildReplExecArgv` を export(パターン: parseArgs 等のテスト用 export と同型)。残り: T8-4 実機確認(ユーザー実施)・PR 作成・リリース(バージョン bump はリリース時)
   - 2026-07-11 R3(codex レビュー反映): ①T8 — 成果物再生成を `npm run build` 全体に明示(`bin.ksql` は `dist-cli/ksql.js` を指すため T3 のフラグ追加は **build:cli 必須**。加えて T4 の EXPLAIN 文言変更で `src/execute.ts` → `prod/js/desktop.js` も変わるため、v1.7.0 の教訓どおりプラグイン zip の再パッケージ・release/ 同梱も対象)②T2 設計メモ — `resolveMutateRuntimeMaxRecords` の表現を R2 後の仕様に整合(「dmlMaxRows 連動」→「現行分岐を維持。SELECT-based DML では undefined = runtime maxRecords」)
@@ -118,8 +119,8 @@ v1.4.1 以来の方式: **assertion を先に差し替え、旧バンドル(`rel
 ### T8: 実機検証・リリース準備
 
 1. `npm test` 全 green
-2. **`npm run build` で全成果物を再生成**(R3): `build:cli` → `dist-cli/ksql.js`(**npm 版 CLI の実体。`package.json` の `bin.ksql` が指すため、ここが古いと `--temp-table-max-rows` が npm 版に入らない**)/ `build:mcp` → `dist-mcp` + `release/ksql-mcp.js` / `build:mcpb` / `build:plugin` → `prod/js/desktop.js`(T4 の EXPLAIN 文言変更が core 経由で反映される)。`mcp:verify` / `mcpb:verify` green
-3. リリース時の release/ 差し替え対象(R3): `ksql-mcp.js` / `ksql-mcp.mcpb` に加え、**prod/ が変わるため v1.7.0 の教訓どおり `dist/ksql-plugin-vX.zip` の生成確認 → release/ へ zip 同梱**(manifest.json の version bump も忘れない)
+2. **`npm run build` で全成果物を再生成**(R3・R6): `build:cli` → `dist-cli/ksql.js`(**npm 版 CLI の実体。`package.json` の `bin.ksql` が指すため、ここが古いと `--temp-table-max-rows` が npm 版に入らない**)/ `build:mcp` → `dist-mcp/ksql-mcp.js`(**release/ へは書き出さない** — `build-mcp.mjs` の outfile は dist-mcp のみ)/ `build:mcpb` → `dist-mcpb/ksql-mcp.mcpb` / `build:plugin` → `prod/js/desktop.js`(T4 の EXPLAIN 文言変更が core 経由で反映される)。`mcp:verify` / `mcpb:verify` green
+3. **リリース時(bump 後)の release/ 差し替えは明示手順**(R3・R5・R6 — ビルドでは自動反映されない): ①`dist-mcp/ksql-mcp.js` → `release/ksql-mcp.js`、`dist-mcpb/ksql-mcp.mcpb` → `release/ksql-mcp.mcpb` を手動コピー ②**prod/ が変わるため v1.7.0 の教訓どおり `dist/ksql-plugin-vX.zip` の生成確認 → release/ へ zip 同梱**(manifest.json の version bump も忘れない)③`release/VERSION.txt` / `README.txt` を更新
 4. 実機(ユーザー実施): 10,000 行超のアプリで `ksql_query` バッチ + `tempTableMaxRows` を指定し、実体化成功と未指定時エラーの両方を確認。CLI は **`dist-cli/ksql.js` 直実行**で `--temp-table-max-rows` を確認(v1.10.0 の教訓: 単体テストは run 関数のゲートを通らないことがあり、ビルド成果物の実機実行で漏れが見つかる)
 5. PR 作成 → codex レビュー → マージ → タグ・GitHub Release・npm publish(ユーザー操作)
 
