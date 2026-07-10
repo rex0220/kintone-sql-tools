@@ -36,6 +36,7 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 23. [UI 機能](#23-ui-機能)
 24. [EXPLAIN](#24-explain)
 25. [バッチ実行と一時テーブル](#25-バッチ実行と一時テーブル)
+26. [ASSERT](#26-assert)
 
 ---
 
@@ -1580,6 +1581,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
 | DML を含むバッチ（複文） | 対応（CLI / MCP は v1.4.0、プラグインは v1.9.0。`ksql_mutate` / CLI `--allow-dml` / プラグインは文ごとの確認ダイアログ。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブル)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
+| `ASSERT` の複合条件（`AND` / `OR`） | 非対応（複数の `ASSERT` 文に分けて書く。→ [§26](#26-assert)） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
 
@@ -1745,6 +1747,53 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 
 - **トランザクションはありません**。バッチも非アトミックです（DML バッチ対応後も、途中失敗時に前半のみ反映された状態が起こり得ます）
 - MCP では `CREATE TEMP TABLE` の実体化結果は返却されません（`tempTable` 名と `rowCount` のみ）。中間結果をコンテキストに載せないための設計です
+
+---
+
+## 26. ASSERT
+
+> **v1.10.0 で追加**。条件が成立しなければ `AssertError` で実行を止める**実行時ゲート**です。DML 前の件数ガードや CLI ヘルスチェック（exit code 監視）に使います。
+
+```sql
+ASSERT <式> <比較演算子> <式>;
+ASSERT <式> BETWEEN <式> AND <式>;
+```
+
+- 比較演算子: `=` `<>` `!=` `<` `<=` `>` `>=` および `BETWEEN`（境界を含む）
+- 式に使えるもの: **リテラル**（数値・文字列）、**算術式**（数値リテラルのみ）、**スカラーサブクエリ**（`(SELECT ...)`。APP・一時テーブルとも参照可）
+- 比較の型規則は WHERE 句と同一（`=` / `<>` は文字列比較、大小比較は双方が数値なら数値比較）
+
+```sql
+-- 典型例: DML 前の件数ガード
+CREATE TEMP TABLE #targets AS
+SELECT $id FROM APP100 WHERE 売上 > 1000000;
+
+ASSERT (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500;
+
+UPDATE APP100 SET 状態 = '対象' WHERE $id IN (SELECT $id FROM #targets);
+```
+
+```bash
+# CLI ヘルスチェック（不成立なら exit code 1）
+ksql -e "ASSERT (SELECT COUNT(*) FROM APP1 WHERE 異常フラグ = '1') = 0"
+```
+
+### 動作
+
+- **read-only 扱い**です（kintone に書き込まない）。read-only バッチ・DML バッチのどちらにも書けます。単文でも実行できます
+- 不成立の場合は `AssertError: assertion failed: <条件> (actual: <実測値>).` でその文がエラーになり、**バッチは常に停止**します（`continueOnError` 指定も無視。以降の文は `skipped` / `skippedReason: "assertion"`）
+- バッチ成功時の ASSERT は結果を持たない文として扱われます（`statements[]` は `status: "success"` のみ）
+- スカラーサブクエリは**必ず 1行1列**を要求します。0行・複数行は実行時 `AssertError`（0行を NULL 扱いにしません）。複数列は select list が明示的ならパース時に拒否、`SELECT *` 等は実行時に検証します
+
+### 制限（初期版）
+
+| 項目 | 内容 |
+|---|---|
+| `AND` / `OR` の複合条件 | 非対応（複数の `ASSERT` 文に分けて書く） |
+| 裸の値のみ（`ASSERT 1`） | 非対応（比較演算子または BETWEEN が必須） |
+| フィールド参照 | 非対応（FROM コンテキストがないため。サブクエリ内では使用可） |
+| 関数呼び出し | 式の直下では非対応（サブクエリ内で計算する） |
+| サブクエリ直後の算術 | 非対応（`(SELECT ...) * 2` は不可。サブクエリ内で計算する） |
 
 ---
 
@@ -1953,4 +2002,7 @@ SELECT *, CURRENT_DATE() AS 今日 FROM APP100
 -- 日付関数
 SELECT YEAR(作成日時) AS 年, MONTH(作成日時) AS 月, DAY(作成日時) AS 日 FROM APP100
 SELECT DATEDIFF(TODAY(), 期限日) AS 残日数 FROM APP100 WHERE 期限日 != ''
+
+-- ASSERT（実行時ゲート。不成立なら AssertError で停止）
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1') = 0
 ```

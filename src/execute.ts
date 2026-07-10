@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
@@ -2971,7 +2971,36 @@ function buildBatchStatementPlan(
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
   if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  if (stmt.type === "ASSERT") {
+    const lines: string[] = [
+      `ASSERT ${stmt.text}`,
+      "  check:         実行時に条件評価（不成立は AssertError でバッチ停止、以降の文は skipped）",
+    ];
+    const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
+      (o): o is ScalarSubquery => o !== null && o.type === "SCALAR_SUBQUERY"
+    );
+    subqueries.forEach((sq, i) => {
+      lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
+      // 参照先で経路が変わるため per-subquery に判定する
+      //（temp 参照なしの側を FULL_SCAN 表示にしない）
+      const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo).map((l) => `  ${l}`));
+    });
+    return lines;
+  }
   return buildPlanForBatchQuery(stmt, info);
+}
+
+/** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
+function hasTempTableRef(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasTempTableRef);
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    const cte = obj["cteName"];
+    if (typeof cte === "string" && cte.startsWith("#")) return true;
+    return Object.values(obj).some(hasTempTableRef);
+  }
+  return false;
 }
 
 function buildPlanForBatchQuery(

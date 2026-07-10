@@ -207,7 +207,7 @@ DROP TEMP TABLE #name;
 
 - `results` の対象は**結果セットを返す read-only 文**(SELECT / SHOW 系 / DESCRIBE / EXPLAIN — いずれも既存実装で `SelectResult` として返る)。ただし **`CREATE TEMP TABLE` の実体化結果(AS 句の SELECT)は含めない**(返すのは `tempTable` 名と `rowCount` のみ)。中間結果を LLM のコンテキストに載せないことが一時テーブルの主目的であるため
 - `maxRecords` は `results` に入る各結果セットに**文ごと**に適用する(MCP 既定 500。EXPLAIN のプラン行にも一律適用されるが実質影響しない)。任意の `maxTotalRecords` でバッチ合計行数の上限も指定できる(既定なし。超過時は `ArgumentError: batch total rows (N) exceed maxTotalRecords (M).`)
-- `skippedReason` は `"fail-fast"` / `"dependency: #name"`(依存スキップ)/ `"timeout"` のいずれか
+- `skippedReason` は `"fail-fast"` / `"dependency: #name"`(依存スキップ)/ `"timeout"` / `"assertion"`(ASSERT 失敗による停止 — v1.10.0)のいずれか
 
 ---
 
@@ -328,6 +328,8 @@ DROP TEMP TABLE #name;
 > 旧制限(v1.5.0〜v1.6.0)の注記: 混在ソースの `INSERT_SELECT`(`... mixing app and temp table sources is not supported ...`)と一時テーブルソースの `UPSERT_SELECT`(`temp table references in UPSERT_SELECT are not supported yet.`)は **v1.7.0 で解禁**され、これらのエラーは発生しなくなった(SELECT-based DML のソース制限は最終解消)。
 | 空入力(空文字列・`;` のみ) | `ArgumentError: SQL is empty.` |
 | 一時テーブル行数超過 | `FetchAllLimitError`(既存を流用) |
+| ASSERT の条件不成立(v1.10.0) | `AssertError: assertion failed: (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500 (actual: 812).` — continueOnError 指定でも常に停止し、以降の文は `skipped`(`skippedReason: "assertion"`) |
+| ASSERT のサブクエリが 0 行 / 複数行(v1.10.0) | `AssertError: scalar subquery returned no rows (expected 1 row).` / `AssertError: scalar subquery returned 3 rows (expected 1 row).` |
 
 ---
 
