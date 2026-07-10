@@ -5,10 +5,12 @@
 export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES } from "./batch";
+export { getInsertValuesCount, getStatementType, isDmlType } from "./dmlGuard";
 export type { BatchAnalysis, StatementAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
 
 export type {
+  DmlConfirmContext,
   ExecuteOptions,
   ExecuteResult,
   ExecuteMetrics,

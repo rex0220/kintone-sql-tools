@@ -7,6 +7,7 @@
 // ============================================================
 
 import {
+  execute,
   executeBatch,
   KintoneClient,
   SelectResult,
@@ -580,4 +581,130 @@ test("非 Error でも message の XxxError: 接頭辞から code を抽出す�
 
   const r2 = await executeBatch("SELECT x FROM APP400; SELECT x FROM APP100", client, { continueOnError: true });
   expect(r2.statements[0].error).toEqual({ code: "ParseError", message: "ParseError: object without code" });
+});
+
+// ----------------------------------------------------------------
+// confirm の文コンテキスト（v1.9.0 プラグイン DML バッチ対応）
+// ----------------------------------------------------------------
+
+test("confirm に文コンテキスト（statementIndex / targetAppId 等）が渡る", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: APP1,
+      400: [makeRecord({ $id: "9", 顧客名: "B社" })],
+    },
+  });
+  const contexts: unknown[] = [];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名);" +
+    "SELECT 顧客名 FROM #t",
+    client,
+    {
+      confirm: async (_count, _operation, context) => {
+        contexts.push(context);
+        return true;
+      },
+    }
+  );
+  expect(r.ok).toBe(true);
+  expect(contexts).toEqual([
+    {
+      statementIndex: 1,
+      statementCount: 3,
+      statementType: "UPSERT_SELECT",
+      targetAppId: 400,
+    },
+  ]);
+});
+
+test("INSERT VALUES（confirm 非経由）が混在しても文コンテキストはずれない", async () => {
+  // 文0: CREATE（confirm なし）
+  // 文1: INSERT VALUES（confirm 非経由で書き込まれる — コア実態の回帰固定）
+  // 文2: DELETE（confirm 呼び出し）→ statementIndex = 2 が正しく渡ること
+  //（confirm 呼び出し回数から文番号を推測すると1回目 = 文1 と誤る）
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const contexts: unknown[] = [];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "INSERT INTO APP200 (名前) VALUES ('X'), ('Y');" +
+    "DELETE FROM APP100 WHERE 顧客名 = 'A社'",
+    client,
+    {
+      confirm: async (_count, _operation, context) => {
+        contexts.push(context);
+        return true;
+      },
+    }
+  );
+  expect(r.ok).toBe(true);
+  expect(contexts).toEqual([
+    {
+      statementIndex: 2,
+      statementCount: 3,
+      statementType: "DELETE",
+      targetAppId: 100,
+    },
+  ]);
+  // INSERT VALUES は confirm なしで書き込まれている（コア実態。
+  // プラグインはこれを実行前静的確認で塞ぐ — 仕様 §3.3）
+  expect(client.postCalls.filter((c) => c.app === 200)).toHaveLength(1);
+});
+
+test("confirm 拒否（キャンセル）は OperationCancelledError code の文エラーになり後続は fail-fast", async () => {
+  const client = makeClient({
+    recordsByApp: { 100: APP1, 400: [makeRecord({ $id: "9", 顧客名: "B社" })] },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名);" +
+    "SELECT 顧客名 FROM #t",
+    client,
+    { confirm: async () => false }
+  );
+  expect(r.ok).toBe(false);
+  expect(r.statements[1].status).toBe("error");
+  expect(r.statements[1].error?.code).toBe("OperationCancelledError");
+  expect(r.statements[2].status).toBe("skipped");
+  expect(r.statements[2].skippedReason).toBe("fail-fast");
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("単文実行（execute）では confirm の context は undefined（後方互換）", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const contexts: unknown[] = [];
+  await execute("DELETE FROM APP100 WHERE 顧客名 = 'A社'", client, {
+    confirm: async (_count, _operation, context) => {
+      contexts.push(context);
+      return true;
+    },
+  });
+  expect(contexts).toEqual([undefined]);
+});
+
+test("SELECT-based DML のソース読み取りは onLimitReached=truncate に従う（UI/CLI 層が DML で error 固定にすべき根拠）", async () => {
+  // APP100 は 3 行。maxRecords=2 + truncate だとソースが黙って 2 行に切り捨てられ、
+  // 切り捨て後の件数で confirm → 部分書き込みになる。
+  // プラグインは DML を含む実行で onLimitReached を "error" に固定してこれを防ぐ
+  //（v1.9.0 仕様 §3.6。MCP ksql_mutate は DEFAULT_ON_LIMIT="error" 固定で従来から安全）
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const confirmCounts: number[] = [];
+  const r = await executeBatch(
+    "SELECT 顧客名 FROM APP100;" +
+    "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
+    client,
+    {
+      maxRecords: 2,
+      onLimitReached: "truncate",
+      confirm: async (count) => {
+        confirmCounts.push(count);
+        return true;
+      },
+    }
+  );
+  expect(r.ok).toBe(true);
+  expect(confirmCounts).toEqual([2]); // 3 行のソースが切り捨て後の件数で confirm される
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].records).toHaveLength(2); // 部分書き込み
 });

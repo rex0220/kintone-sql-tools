@@ -35309,8 +35309,18 @@ async function executeBatch(sql, client, options = {}) {
     }
     try {
       const remaining = deadline !== null ? deadline - Date.now() : null;
+      const userConfirm = options.confirm;
+      const stmtOptions = userConfirm ? {
+        ...options,
+        confirm: (count, operation) => userConfirm(count, operation, {
+          statementIndex: i,
+          statementCount: statements.length,
+          statementType: info.statementType,
+          targetAppId: info.targetAppId
+        })
+      } : options;
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, options, cacheContext, tempTables),
+        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables),
         remaining
       );
       results.push({ ...base, status: "success", ...outcome });
@@ -38844,7 +38854,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.8.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.9.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

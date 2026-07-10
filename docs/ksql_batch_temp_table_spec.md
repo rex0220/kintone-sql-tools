@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-09
 - 更新履歴:
+  - 2026-07-10 R40(v1.9.0): プラグイン UI の DML バッチを解禁(§8.4 改訂)。文ごとの確認ダイアログ(confirm フックに optional 第3引数 `DmlConfirmContext` を追加 — CLI / MCP は後方互換で無影響)、INSERT VALUES の実行前静的確認(単文も併修)、DML サマリ行、キャンセル表示。設計経緯は `docs/internal/ksql_plugin_dml_batch_spec.md`
   - 2026-07-10 R39(v1.7.0): SELECT-based DML のソース制限を最終解消 — `INSERT_SELECT` の混在ソース(APP + 一時テーブルの JOIN・サブクエリ)と `UPSERT_SELECT` の一時テーブル・混在ソースを解禁(§7.3・§9 を更新)。実行は read-only バッチと同じ FULL_SCAN 注入経路(`executeQueryWithCte`)。書き込み側ガードは不変。読み取り側上限はソース種類ごとに異なる(APP = `dmlMaxRows + 1` / temp = 実体化 10,000 行 / UPSERT 系は書き込み先照合が加わる)。経緯は `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`
   - 2026-07-10 R38(v1.6.0): APP ソースの `UPSERT_SELECT` を解禁(単文・バッチとも。§7.3・§9 を更新)。`dmlMaxRows` / `dmlTotalMaxRows` は照合後の insert + update 合計に適用。一時テーブルソースはエンジン未対応のため引き続き拒否(迂回路なし)。経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`
   - 2026-07-10 R37(doc-drift 修正): §7.3 の「UPSERT の影響行数は dmlTotalMaxRows 対象外」を実装準拠に訂正 — `executeUpsert` は照合後・書き込み前に confirm(insert + update 合計)を呼ぶため、実際は `dmlMaxRows` / `dmlTotalMaxRows` とも**対象**(初回公開コミットから)。回帰テスト2本で固定。経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md` 提案A
@@ -293,15 +294,19 @@ DROP TEMP TABLE #name;
 - 確認プロンプトはバッチ全体で1回とし、含まれる**全 DML 文の一覧**(タイプ・対象アプリ・WHERE 有無)を表示して確認を取る
 - `--yes` は現行どおり確認をスキップする
 
-### 8.4 プラグイン UI(read-only バッチ・最終結果のみ)
+### 8.4 プラグイン UI(バッチ・最終結果のみ)
 
-プラグインは**read-only バッチのみ**を受理し、**最後に結果セットを返した文(通常は最終 SELECT)だけを表示**する。
+プラグインはバッチを受理し(**v1.9.0 で DML を含むバッチも解禁**。それまでは read-only のみ)、**最後に結果セットを返した文(通常は最終 SELECT)だけを表示**する。
 
 - 表示 UI は単一結果セットのまま(途中の SELECT 結果は表示しない — 一時テーブル経由の「CREATE → 加工 → 最終 SELECT」フローを想定した契約)
-- DML を含むバッチは `ArgumentError`(CLI / MCP を案内)。DML バッチの確認 UI はプラグインには持たせない
+- DML を含むバッチは**文ごとの確認ダイアログ**(文番号 `[N/M]`・書き込み先アプリ・確定件数付き)で実行する。confirm フックの文コンテキスト(`DmlConfirmContext`)を使用。`INSERT INTO ... VALUES` はコアの confirm 非経由のため、静的確定件数(`insertValuesCount`)で**バッチ実行前**に確認する(キャンセル時は1文も実行しない)。単文の INSERT VALUES にも同じ実行前確認を適用する。詳細は `docs/internal/ksql_plugin_dml_batch_spec.md`(v1.9.0)
+- 実行時確認のキャンセルは「キャンセルしました(文 [N/M] で中断。[N-1] までの実行結果は反映済みです)」を表示(トランザクションは無い — §10)
+- DML を含む実行(バッチ・単文とも)では取得上限モード(`onLimitReached`)を UI 設定に関わらず **"error" に固定**する(truncate だと SELECT-based DML のソース読み取りが黙って切り捨てられ部分書き込みになるため。MCP `ksql_mutate` の固定と同じ扱い)
+- success した DML 文の影響件数はサマリ行(`[N] タイプ: inserted=... updated=...`)として結果テーブルの上(結果セットなしの場合は note)に表示する
 - 最終文が結果セットを返さない場合(`DROP TEMP TABLE` で終わる等)は「バッチ N 文を実行しました(結果セットなし)」を表示
 - **EXPLAIN ボタン**、または先頭文が `EXPLAIN` のバッチは、**全文プランの表示のみ**を行い実行しない(`EXPLAIN` を単純に前置すると2文目以降が実行されてしまうため、バッチではプラン表示モードに切り替える)
 - 実行時エラーは失敗した文の番号付きメッセージ(`[N] ...`)で表示(fail-fast)
+- 旧制限(v1.4.0〜v1.8.0)の注記: DML を含むバッチは `ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています(DML を含むバッチは CLI / MCP を使用してください)。` で拒否されていた。**v1.9.0 で解禁**され、このエラーは発生しなくなった
 
 ---
 

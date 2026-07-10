@@ -208,14 +208,43 @@ DROP TEMP TABLE #t;
 
 期待: 「バッチ 2 文を実行しました(結果セットなし)。」の情報表示。
 
-### E-4. DML を含むバッチは拒否
+### E-4. DML を含むバッチ(v1.9.0 で解禁 — 文ごとの確認ダイアログ付きで実行)
+
+> v1.4.0〜v1.8.0 は `ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています(...)` で拒否。v1.9.0 から以下の挙動に変更(仕様: `docs/internal/ksql_plugin_dml_batch_spec.md`)。
+
+#### E-4a. SELECT-based DML バッチ(実行時確認・確定件数)
+
+```sql
+CREATE TEMP TABLE #targets AS SELECT 会社名, $id AS 顧客No FROM APP4148 WHERE 顧客ランク IN ('A') LIMIT 2;
+UPSERT INTO APP4149 (案件名, 顧客No_) SELECT 会社名, 顧客No FROM #targets ON DUPLICATE (案件名);
+SELECT 案件名, 顧客No_ FROM APP4149 WHERE 顧客No_ <> '' ORDER BY 顧客No_
+```
+
+期待: `[2/3] UPSERT_SELECT INTO APP4149` + 「2 件のレコードを登録/更新します」の確認ダイアログ → OK で実行 → 最終 SELECT の結果テーブルの上に「バッチ 3 文を実行しました。」+ `[2] UPSERT_SELECT: inserted=... updated=...` のサマリ行。
+
+#### E-4b. 実行時確認のキャンセル(先行文は反映済み)
+
+E-4a のダイアログで**キャンセル**を押す。
+
+期待: 「キャンセルしました(文 [2/3] で中断。[1] までの実行結果は反映済みです)」の情報表示(エラー表示ではない)。3文目は実行されない。履歴には保存されない。
+
+#### E-4c. INSERT VALUES を含むバッチ(実行前静的確認)
 
 ```sql
 CREATE TEMP TABLE #t AS SELECT 顧客No FROM APP4148 WHERE 顧客ランク IN ('A');
-INSERT INTO APP4149 (顧客No_) SELECT 顧客No FROM #t;
+INSERT INTO APP4149 (案件名) VALUES ('検証案件X'), ('検証案件Y');
+SELECT 案件名 FROM APP4149 WHERE 案件名 LIKE '検証案件%'
 ```
 
-期待: `ArgumentError: プラグインのバッチ実行は read-only 文のみ対応しています(DML を含むバッチは CLI / MCP を使用してください)。`(実行されない)
+期待: **バッチ実行前**に `[2/3] INSERT INTO APP4149` + 「2 件のレコードを登録します」の確認ダイアログ。キャンセルすると**1文も実行されない**(「キャンセルしました(文 [2/3] の実行前確認。バッチは実行されていません)」)。
+
+#### E-4d. 単文 INSERT VALUES の確認(v1.9.0 併修)
+
+```sql
+INSERT INTO APP4149 (案件名) VALUES ('検証案件Z')
+```
+
+期待: `INSERT INTO APP4149` + 「1 件のレコードを登録します」の確認ダイアログが出る(v1.8.0 以前は確認なしで書き込まれていた)。キャンセルで「キャンセルしました(対象: 1 件)」。
 
 ### E-5. バッチの EXPLAIN(実行されないこと)
 
@@ -238,4 +267,4 @@ SELECT * FROM #t;
 - B-1: 旧版で空/エラーだった形が正しい結果を返す
 - C 系: 表のエラーメッセージが表示される(silent 失敗・誤実行がない)。※C-1(複文エラー)は E 系対応により**該当しなくなった**ため削除 — 複文は E 系の挙動が正
 - D-2: **「登録します」**(「削除します」なら不具合再発)
-- E 系: 最終結果のみ表示 / DML 混在拒否 / EXPLAIN ボタンで実行されない
+- E 系: 最終結果のみ表示 / DML バッチは文ごと確認付きで実行(E-4a〜d。v1.9.0) / EXPLAIN ボタンで実行されない
