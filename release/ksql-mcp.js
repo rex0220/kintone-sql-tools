@@ -38436,9 +38436,6 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      if (s.statementType === "UPSERT_SELECT") {
-        throw new Error(`ArgumentError: ${s.statementType} is not supported by ksql_mutate yet.${at}`);
-      }
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }
@@ -38494,9 +38491,6 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     if (!validation.isDml) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_mutate. Use ksql_query.`);
-    }
-    if (validation.statementType === "UPSERT_SELECT") {
-      throw new Error(`ArgumentError: ${validation.statementType} is not supported by ksql_mutate yet.`);
     }
     if ((validation.statementType === "UPDATE" || validation.statementType === "DELETE") && !validation.hasWhere) {
       throw new Error(`ArgumentError: ${validation.statementType} without WHERE is blocked by ksql_mutate.`);
@@ -38710,7 +38704,7 @@ var mutateInputSchema = external_exports.object({
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
-  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records)."),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
@@ -38753,7 +38747,7 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records).").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records); for UPSERT it counts inserts + updates.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -38802,7 +38796,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.5.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.6.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -38829,7 +38823,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is supported (single statement or batch); the source may be apps or temp tables, but not both in one statement. The source SELECT reads at most dmlMaxRows + 1 records. UPSERT ... SELECT is rejected.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT INTO app ... SELECT is supported (single statement or batch); the source may be apps or temp tables, but not both in one statement. UPSERT INTO app ... SELECT is supported for app sources only (temp-table sources are not supported); dmlMaxRows counts inserts + updates. The source SELECT reads at most dmlMaxRows + 1 records.",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

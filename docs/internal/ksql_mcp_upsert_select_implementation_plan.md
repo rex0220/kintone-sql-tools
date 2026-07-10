@@ -2,10 +2,11 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R4(提案B 実装完了): B1〜B5 実装済み(ブランチ `feat/mcp-upsert-select-app-source`)。B4 は計画どおり assertion を先に差し替え、v1.5.0 バンドルで smoke が失敗することを確認してから B3 を適用。description は確定文言の語順を一部調整(`for app sources only (temp-table sources are not supported); dmlMaxRows counts inserts + updates.` — temp 不可の掛かり先を UPSERT_SELECT に限定するため括弧内へ移動。キー文字列は維持)。テスト追加8本(単文5 + バッチ3。照合第1キー低選択性ケースを含む)
   - 2026-07-10 R3(codex レビュー完了): 追加指摘なし。進め方確定 — ①提案A を v1.5.0 ブランチに独立コミット → ②v1.5.0 を固める(PR・実機確認)→ ③提案B を v1.6.0 別ブランチで実装
   - 2026-07-10 R2(codex レビュー反映): A2 の mutateBatch コメント修正案に `REORDER` を追加(Low。`executeReorder` も confirm を呼ぶため、confirm 文種の列挙として一貫させる)。仕様案 §1.1 の R2 前表現の残存も同時修正(仕様 R4)
   - 2026-07-10 R1: 初版(仕様案 R3 確定を受けて作成)
-- ステータス: **提案A 実装済み(v1.5.0 ブランチ同乗)/ 提案B 未着手(v1.6.0)**。実装順: 提案A → v1.5.0 確定 → 提案B
+- ステータス: **提案A・提案B とも実装済み**。残り: B6 実機確認(ユーザー実施)・npm publish
 - 仕様: [ksql_mcp_upsert_select_unlock_spec.md](ksql_mcp_upsert_select_unlock_spec.md)(codex R1〜R3 レビュー済み・確定)
 - 搭載先(仕様 §4 で確定):
   - **提案A**: v1.5.0 ブランチ `feat/mcp-insert-select-app-source` に独立コミットで同乗(コード変更なし。ドキュメント + 回帰テストのみ)

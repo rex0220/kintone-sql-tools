@@ -345,6 +345,25 @@ v1.4.0（M4）で `executeInsertSelect()` に書き込み前 confirm フック�
 
 `UPSERT_SELECT` は引き続き拒否（insert / update 件数が既存レコード照合後まで確定しないため。将来課題）。
 
+## 11.8 APP ソース UPSERT_SELECT の解禁（v1.6.0）
+
+`UPSERT INTO APPx (...) SELECT ... FROM APPy ON DUPLICATE (...)`（APP ソースの UPSERT_SELECT）を
+`ksql_mutate` で実行可能にした（単文・バッチとも）。
+`executeUpsertSelect()` は初回公開実装から照合後・書き込み前に confirm（insert + update 合計）を
+呼んでおり、v1.5.0 の INSERT_SELECT と同型の「根拠が失効した拒否」だったための解禁。
+変更の本体はガード削除2箇所のみ。
+仕様・経緯: `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`（codex R1〜R4）
+
+| 変更 | 内容 |
+| --- | --- |
+| 単文 / バッチ UPSERT_SELECT | 拒否を削除。照合後の insert + update **合計**が `dmlMaxRows` 超過なら POST / PUT ともゼロ書き込みで ArgumentError。合計は confirm 経由で `dmlTotalMaxRows` にも合算 |
+| 一時テーブルソース | 引き続きエンジン層で実行前拒否（`executeUpsertSelect` が temp 注入に未対応）。**INSERT_SELECT と異なり大きい集計ソースの temp 迂回路はない**（read-only SELECT で事前確認 → dmlMaxRows 設定の運用のみ） |
+| 読み取り上限 | source SELECT・既存レコード照合とも `maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）。照合は第1キーのみの `in (...)` 検索のため、target 側で第1キーの重複が多いと source 行数が少なくても安全側の上限エラーになり得る |
+| エラー表記 | 超過時は confirm の operation 表記により `UPDATE affected rows ...`（UPSERT VALUES 形式と同じ。既知の表記課題として許容） |
+| description / describe | `ksql_mutate` description に「UPSERT INTO app ... SELECT is supported for app sources only (temp-table sources are not supported); dmlMaxRows counts inserts + updates.」を追加。`dmlMaxRows` describe（mutate / run_saved_query 両方）を INSERT/UPSERT 共通表現に更新 |
+| smoke 回帰ガード | description キーを新文言に差し替え（旧バンドルで失敗確認後に適用）。dmlMaxRows describe の「counts inserts + updates」assertion を両ツールに追加 |
+| 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースは不変 |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
@@ -376,10 +395,10 @@ npm audit --omit dev
 git diff --check
 ```
 
-直近の確認結果(v1.5.0 時点):
+直近の確認結果(v1.6.0 時点):
 
 ```text
-npm test: 602 tests passed
+npm test: 608 tests passed
 npm run build: passed
 npm run mcp:verify: passed
 npm audit --omit dev: 0 vulnerabilities
