@@ -176,7 +176,7 @@ CLI バッチ実行(`src/cli/index.ts` `writeBatchOutput`)は、SELECT 結果の
 
 | ステップ | 内容 |
 |---|---|
-| C1 | `getGlobalRequestGate(limitHint?)` を `getGlobalRequestGate(options?: Partial<RequestGateOptions>)` に拡張(後方互換のオーバーロード or 呼び出し側2箇所を同時修正)。env 解決(`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`)をゲート生成部に集約。**注意: `KSQL_RETRY=0`(リトライ無効)は既存 `envInt()` が `n <= 0` を無効値として捨てるため読めない** — `envNonNegativeInt()` を `node/config.ts` に追加し、`KSQL_RETRY` の解決に使う(`KSQL_MAX_CONCURRENT` は 1 以上のため既存 `envInt` のまま) |
+| C1 | `getGlobalRequestGate(limitHint?)` を `getGlobalRequestGate(options?: number \| Partial<RequestGateOptions>)` に拡張(数値渡しは後方互換)。env 解決(`KSQL_MAX_CONCURRENT` / `KSQL_RETRY`)は **`resolveRequestGateOptions()`(`node/config.ts`)として Node 層に置き、呼び出し側2箇所が解決済み options を渡す**(R3: `src/api` に fs 依存の `node/config` を import させない。`getGlobalRequestGate()` 自体は env を読まない)。**注意: `KSQL_RETRY=0`(リトライ無効)は既存 `envInt()` が `n <= 0` を無効値として捨てるため読めない** — `envNonNegativeInt()` を `node/config.ts` に追加し、`KSQL_RETRY` の解決に使う(`KSQL_MAX_CONCURRENT` は 1 以上のため既存 `envInt` のまま)。あわせて `RequestGate` constructor で backoff 値を clamp(R3: profile JSON 経由の無検証値対策) |
 | C2 | `node/config.ts` の `query` に `retry` / `retryBaseDelayMs` / `retryMaxDelayMs` 追加。`cli/index.ts` にフラグ4件 + ヘルプ追記。`node/runtime.ts` / `cli/index.ts` の `getGlobalRequestGate` 呼び出し(計2箇所)に新オプションを配線 |
 | C3 | ドキュメント明文化(§4.2)。README の CLI オプション表は HELP_SYNC で自動反映 |
 
@@ -199,7 +199,7 @@ Phase C(requestGate)    C1 → C2 → C3
 | B1 | エンベロープビルダーの抽出(`src/output/batchEnvelope.ts`。§3.3 の層の理由参照)+ MCP 回帰テスト | — |
 | B2 | CLI `--format json` バッチ分岐 + テスト | B1 |
 | B3 | ヘルプ / CLI 仕様書 / CHANGELOG(破壊的変更の明記) | B2 |
-| C1 | `RequestGateOptions` の全項目を `getGlobalRequestGate` で解決可能に + env 解決集約 + テスト | — |
+| C1 | `RequestGateOptions` の全項目を `getGlobalRequestGate` で受け付け + env 解決は `resolveRequestGateOptions()`(Node 層)に集約 + テスト | — |
 | C2 | config スキーマ + CLI フラグ + 配線(2箇所) | C1 |
 | C3 | 「書き込み非リトライ」方針の公開仕様化(3ドキュメント) | — |
 
