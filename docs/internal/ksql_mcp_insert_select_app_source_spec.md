@@ -178,6 +178,7 @@ v1.4.1 の説明文修正(PR #4)と同様、実装と説明文の同期を必須
 
 ## 更新履歴
 
+- R4(2026-07-10、codex・Medium、実装後レビュー): `ksql_run_saved_query` の `dmlMaxRows` describe が読み取り上限に追従していなかった点を修正。DML 保存クエリ経路は `mutate()` 委譲(`src/mcp/tools.ts` runSavedQuery)のため保存済み INSERT_SELECT にも `dmlMaxRows + 1` の source 読み取り上限が効く。describe に同文言を追記し、smoke の dmlMaxRows assertion を `ksql_mutate` / `ksql_run_saved_query` の両ツールに拡張(§4.3・§4.5 の対象漏れ)
 - R3(2026-07-10、codex・Medium): §4.2 の混在ソース拒否メッセージが §3.4 のルール(迂回案内には実体化上限を併記)に自己矛盾していたため修正。`materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows)` 形式に変更し、定数補間・経路非依存の注記を追加(`tempTableMaxRows` を渡す本番経路がないことをコードで裏取り済み)
 - R2(2026-07-10、codex レビュー完了): 追加指摘なし。未決事項3点を確定(フラグ不採用 / dmlMaxRows describe 追記必須 / 読み取り上限分離は将来課題)。ステータスを「レビュー済み・確定」に変更し、実装計画ドキュメントを作成
 - R1(2026-07-10、codex): §3.4 の迂回路説明を修正 — 一時テーブル経由も実体化が `TEMP_TABLE_MAX_ROWS = 10,000` 行・error 固定(`src/execute.ts:479-483`)かつ MCP からは上限変更不可のため、「一時テーブルなら解決」ではなく 10,000 行以内に限る旨を明記し、10 万行例を非対応側に移動。§4.5 の `mcp-smoke.mjs` 計画を撤回 — 同 smoke は API なし(stdio 起動 + description/schema assertion のみ)のため DML 実行を追加せず、実行系は `tools.test.ts`(DI)・実機は `mcp-kintone-smoke.mjs` に寄せる。§4.3-3(dmlMaxRows describe への読み取り上限追記)を任意から必須へ格上げ。

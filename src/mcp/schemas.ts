@@ -122,7 +122,7 @@ export const runSavedQueryInputSchema = z.object({
     .describe('Required for DML saved queries: must be the literal string "yes".')
     .optional(),
   dmlMaxRows: z.number().int().positive()
-    .describe("Required for DML saved queries: per-statement cap on affected rows.")
+    .describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT ... SELECT this also caps the source SELECT read (at most dmlMaxRows + 1 records).")
     .optional(),
 });
 

@@ -128,12 +128,15 @@ function assertParamDescriptions(tools) {
   }
 
   // v1.5.0: dmlMaxRows が INSERT_SELECT の source SELECT 読み取り上限を兼ねることを describe で宣言する
-  const dmlMaxRowsDesc =
-    getTool(tools, "ksql_mutate").inputSchema?.properties?.dmlMaxRows?.description ?? "";
-  assert(
-    dmlMaxRowsDesc.includes("caps the source SELECT read"),
-    "ksql_mutate.dmlMaxRows description must mention the source SELECT read cap."
-  );
+  //（ksql_run_saved_query の DML 経路は mutate() 委譲のため同じ制約が効く。両ツールで固定する）
+  for (const toolName of ["ksql_mutate", "ksql_run_saved_query"]) {
+    const dmlMaxRowsDesc =
+      getTool(tools, toolName).inputSchema?.properties?.dmlMaxRows?.description ?? "";
+    assert(
+      dmlMaxRowsDesc.includes("caps the source SELECT read"),
+      `${toolName}.dmlMaxRows description must mention the source SELECT read cap.`
+    );
+  }
 }
 
 async function main() {

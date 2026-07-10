@@ -339,8 +339,8 @@ v1.4.0（M4）で `executeInsertSelect()` に書き込み前 confirm フック�
 | バッチ INSERT_SELECT | 「ソースが一時テーブルのみ」の制限を削除。APP のみソースも実行可能。source 行数は confirm 経由で `dmlTotalMaxRows` にも合算される |
 | 混在ソース（APP + 一時テーブル） | 引き続き拒否（エンジン層）。メッセージを実態に合わせて変更: `INSERT_SELECT mixing app and temp table sources is not supported. Select from apps only, or materialize the app data into a temp table first (temp tables hold at most 10000 rows). (statement N)` |
 | 読み取り上限 | source SELECT は `maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）で実行。集計等で読み取りが多いソースは一時テーブル経由（実体化上限 10,000 行）でのみ回避可能。それを超える大規模集計は非対応 |
-| description / describe | `ksql_mutate` description を「INSERT INTO app ... SELECT is supported (single statement or batch); ... UPSERT ... SELECT is rejected.」に更新。`dmlMaxRows` の describe に source SELECT 読み取り上限を兼ねる旨を追記 |
-| smoke 回帰ガード | `mcp-smoke.mjs` の description キーを新文言に差し替え（旧バンドルで失敗することを確認してから適用）。`dmlMaxRows` describe のキー assertion を追加 |
+| description / describe | `ksql_mutate` description を「INSERT INTO app ... SELECT is supported (single statement or batch); ... UPSERT ... SELECT is rejected.」に更新。`dmlMaxRows` の describe に source SELECT 読み取り上限を兼ねる旨を追記（`ksql_run_saved_query` も同様 — DML 保存クエリは `mutate()` 委譲のため保存済み INSERT_SELECT に同じ上限が効く） |
+| smoke 回帰ガード | `mcp-smoke.mjs` の description キーを新文言に差し替え（旧バンドルで失敗することを確認してから適用）。`dmlMaxRows` describe のキー assertion を `ksql_mutate` / `ksql_run_saved_query` の両ツールに追加 |
 | 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースの挙動・レスポンス形式は不変 |
 
 `UPSERT_SELECT` は引き続き拒否（insert / update 件数が既存レコード照合後まで確定しないため。将来課題）。
