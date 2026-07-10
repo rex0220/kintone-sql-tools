@@ -560,10 +560,9 @@ export function createKsqlMcpTools(
     for (const s of validation.statements) {
       if (!s.isDml) continue;
       const at = ` (statement ${s.index})`;
-      // SELECT-based DML は解禁済み（INSERT_SELECT: v1.5.0 / UPSERT_SELECT: v1.6.0）。
-      // 件数判定は書き込み前の confirm フックが担い、一時テーブル参照の可否
-      // （INSERT_SELECT の混在ソース拒否・UPSERT_SELECT の temp ソース未対応）は
-      // エンジン層 executeBatch の validate-all-first が実行前に拒否する
+      // SELECT-based DML はソース制限なし（APP / temp / 混在とも可。v1.5.0〜v1.7.0 で段階解禁）。
+      // 件数判定は書き込み前の confirm フックが担う。DML（UPDATE / DELETE / UPSERT）内の
+      // 一時テーブル参照はエンジン層 executeBatch の validate-all-first が実行前に拒否する
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }

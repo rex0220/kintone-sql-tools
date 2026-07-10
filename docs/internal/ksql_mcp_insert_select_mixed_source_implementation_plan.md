@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R6(codex 実装後レビュー2回目・Medium×2 / Low×2): ①batch spec §7.3 の INSERT_SELECT bullet に M4 時点の「一時テーブルのみの場合に受理」が残り1文内で矛盾 → bullet 全体を段階解禁の到達点(制限なし)で書き直し。②同 §7.3 の「read-only 文の取得上限も dmlMaxRows + 1」に CREATE TEMP TABLE 実体化(10,000 行)の例外を明記。③MCP 仕様書 §7.6.3 実装済みフロー2箇所の source SELECT 上限をソース種類別(APP = dmlMaxRows + 1 / temp = 実体化注入)に精密化、UPSERT の照合はソース種類に関わらず発生と明記。④§7.6.1/7.6.2/7.6.4 の時点表記を v1.7.0 に更新。⑤tools.ts mutateBatch 静的ガードのコメント(混在拒否・temp 未対応)を現行仕様に更新
   - 2026-07-10 R5(codex 実装後レビュー反映): ①(Medium)公開向け言語リファレンス §25 の SELECT-based DML 記述が M4 時点(temp のみソース)のまま v1.5.0〜v1.7.0 の解禁を反映していなかったため更新(ソース種類・dmlMaxRows 適用・読み取り上限・UPSERT 照合の残存まで記載)。X5 の対象ファイル一覧に言語リファレンスが漏れていた反省 — 公開ドキュメントの網羅確認は grep(`INSERT.*SELECT` / `一時テーブル`)で行うこと。②(Low)MCP 仕様書の「拒否する文: なし」を「SELECT-based DML のソース制限としての拒否はなし」に限定し、UPDATE 等の temp 参照拒否との衝突読みを解消
   - 2026-07-10 R4(実装完了): X1〜X5 実装済み(ブランチ `feat/mcp-select-dml-mixed-sources`。v1.6.0 は PR #6 でマージ済み)。X4 は計画どおり assertion を先に差し替え、v1.6.0 バンドルで smoke が失敗することを確認してから X3 を適用。テスト: エンジン層6本(混在 INSERT_SELECT / サブクエリ temp 参照 / temp・混在 UPSERT_SELECT / confirm ゼロ書き込み / EXPLAIN)+ MCP 層5本(置換2 + 新規3)。サブクエリテストは SIMPLE モードの WHERE 押し下げ(教訓①)を踏まえ FROM を temp にして in-memory 評価で観測する形に調整
   - 2026-07-10 R3(codex レビュー完了): 追加指摘なし。describe 両ツール更新 + smoke キー差し替え、サブクエリ temp 参照テストの追加を確認済み。進め方確定 — v1.6.0 を main に入れてから v1.7.0 ブランチを切る

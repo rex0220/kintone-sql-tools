@@ -537,11 +537,11 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`（v1.6.0）と
 `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（v1.7.0）を参照。
 
-### 7.6.1 SELECT-based DML のリスク（v1.6.0 時点の再評価）
+### 7.6.1 SELECT-based DML のリスク（v1.7.0 時点の再評価）
 
-`INSERT_SELECT` / `UPSERT_SELECT` は、通常の `INSERT VALUES` / `UPDATE` / `UPSERT` よりも MCP での安全制御が難しいとして初期実装では拒否していた。当初挙げたリスクの v1.6.0 時点の評価:
+`INSERT_SELECT` / `UPSERT_SELECT` は、通常の `INSERT VALUES` / `UPDATE` / `UPSERT` よりも MCP での安全制御が難しいとして初期実装では拒否していた。当初挙げたリスクの v1.7.0 時点の評価:
 
-| リスク | 当初の内容 | v1.6.0 時点の評価 |
+| リスク | 当初の内容 | v1.7.0 時点の評価 |
 | --- | --- | --- |
 | 確認前の API 読み取り | source SELECT が書き込み確認より前に実行される | `ksql_mutate` 呼び出し自体が承認（`allowDml` / `confirmText`）であり、推奨していた一時テーブル経由のバッチ形も同じ承認の下で同じ読み取りを行うため、実質差なし。UPSERT（VALUES 形式・許可済み）も confirm 前に照合読み取りを行っており性質は同等 |
 | `INSERT_SELECT` の confirm 不足 | `executeInsertSelect()` が書き込み前に confirm を呼ばない | **v1.4.0（M4）で解消**。source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")` が呼ばれる |
@@ -552,7 +552,7 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 
 ### 7.6.2 SELECT-based DML の対応方針（達成状況）
 
-当初の段階対応と v1.6.0 時点の状況:
+当初の段階対応と v1.7.0 時点の状況:
 
 1. `executeInsertSelect()` に source SELECT 後・POST 前の confirm hook を追加する — **済（v1.4.0 M4）**
 2. `ExecuteOptions.confirm` を operation 種別付きの object 引数へ拡張する — **見送り**（現行の `(count, operation)` 形式で INSERT_SELECT / UPSERT_SELECT とも成立。operation の `"UPSERT"` 表記を導入する場合の将来課題として残す）
@@ -605,7 +605,7 @@ confirmMutation?: (info: {
 
 `INSERT_SELECT` の実装済みフロー（v1.4.0 M4 で confirm hook 実装、v1.5.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行して行数を確定する（`maxRecords = dmlMaxRows + 1`・`onLimit = "error"`）
+1. source SELECT を実行して行数を確定する（**APP ソースの fetch は `maxRecords = dmlMaxRows + 1`・`onLimit = "error"`**。一時テーブルソースは実体化済み行のメモリ注入で追加読み取りなし — 実体化自体は 10,000 行上限。v1.7.0 以降は両者の混在も可）
 2. SELECT 列数と INSERT フィールド数の一致を検証する
 3. `confirm(rows.length, "INSERT")` を呼ぶ
 4. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST は行われない）
@@ -613,14 +613,14 @@ confirmMutation?: (info: {
 
 `UPSERT_SELECT` の実装済みフロー（confirm hook は初回公開実装から存在、v1.6.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行する（`maxRecords = dmlMaxRows + 1`・`onLimit = "error"`）
+1. source SELECT を実行する（読み取り上限は INSERT_SELECT と同じ: APP ソース = `dmlMaxRows + 1`、一時テーブルソース = 実体化済み注入。v1.7.0 以降は混在も可）
 2. SELECT 列数と UPSERT フィールド数の一致・key field を検証する
-3. 既存レコード照合（第1キーの `in (...)` チャンク検索、各 fetch は同 maxRecords 拘束）で `toInsert` / `toUpdate` を確定する
+3. 既存レコード照合（**書き込み先 APP** への第1キー `in (...)` チャンク検索、各 fetch は `dmlMaxRows + 1` 拘束。**ソース種類に関わらず発生する**）で `toInsert` / `toUpdate` を確定する
 4. `confirm(toInsert.length + toUpdate.length, "UPDATE")` を呼ぶ
 5. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST / PUT は行われない）
 6. 確認成功後に 100 件ごとに POST / PUT する
 
-### 7.6.4 SELECT-based DML の MCP 入力（v1.5.0 / v1.6.0）
+### 7.6.4 SELECT-based DML の MCP 入力（v1.5.0〜v1.7.0）
 
 `INSERT_SELECT` / `UPSERT_SELECT` は通常 DML と同じ承認入力で実行する。当初案にあった追加フラグ
 `allowSelectBasedDml` は**不採用**（理由は §7.6.2-3）。
