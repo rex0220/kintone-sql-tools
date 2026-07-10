@@ -951,6 +951,39 @@ describe("MCP tools", () => {
     ).rejects.toThrow(/CREATE TEMP TABLE requires a batch/);
   });
 
+  test("validate: バッチ内 ASSERT は statementType / isReadOnly / tempTablesReferenced が入る", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+        "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500",
+    });
+
+    expect(result.batch).toBe(true);
+    expect(result.isReadOnlyBatch).toBe(true);
+    expect(result.canRunWithQueryTool).toBe(true);
+    expect(result.statements[1]).toMatchObject({
+      index: 1,
+      statementType: "ASSERT",
+      isDml: false,
+      isReadOnly: true,
+      tempTablesReferenced: ["#t"],
+      appIds: [],
+    });
+  });
+
+  test("validate: 単文 ASSERT は従来スカラー形（statementType: ASSERT / isReadOnly: true）", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql: "ASSERT (SELECT COUNT(*) FROM APP100) = 0",
+    });
+
+    expect(result.batch).toBe(false);
+    expect(result.statementType).toBe("ASSERT");
+    expect(result.isReadOnly).toBe(true);
+    expect(result.appIds).toEqual([100]);
+  });
+
   // ----------------------------------------------------------------
   // ksql_query のバッチ受理（フェーズ1 S6）
   // ----------------------------------------------------------------

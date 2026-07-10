@@ -36,7 +36,9 @@ export function isReadOnlyType(type: string): boolean {
     || type === "DESCRIBE"
     // 一時テーブルの CREATE / DROP は kintone に書き込まないため read-only 扱い（仕様 §4.3）
     || type === "CREATE_TEMP_TABLE"
-    || type === "DROP_TEMP_TABLE";
+    || type === "DROP_TEMP_TABLE"
+    // ASSERT は条件評価のみで kintone に書き込まない（バッチ強化第1弾 §2.3）
+    || type === "ASSERT";
 }
 
 export function hasWhereClause(stmt: unknown): boolean {
