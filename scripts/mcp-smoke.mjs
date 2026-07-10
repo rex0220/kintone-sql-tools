@@ -93,7 +93,9 @@ function assertToolDescriptions(tools) {
     "supports app sources, temp tables, or joins of both",
     // v1.6.0: dmlMaxRows は UPSERT では insert + update 合計
     "counts inserts + updates",
-    // v1.7.0: 読み取り上限はソース種類ごとに異なる(APP = dmlMaxRows + 1 / temp = 実体化 10,000 行)
+    // v1.8.0: dmlMaxRows は影響行数専用(ソース読み取りは runtime maxRecords 解決)
+    "caps affected rows only, not source reads",
+    // v1.7.0: temp ソースの読み取りは実体化 10,000 行で別建て
     "temp tables hold at most 10000 rows",
   ];
   const query = getTool(tools, "ksql_query");
@@ -130,15 +132,20 @@ function assertParamDescriptions(tools) {
     }
   }
 
-  // v1.7.0: dmlMaxRows が APP ソース読み取りの上限を兼ねること(temp は実体化 10,000 行で別建て)、
+  // v1.8.0: dmlMaxRows は影響行数ガード専用で SELECT-based DML のソース読み取りを
+  // 絞らない(読み取りは runtime の maxRecords 解決に従う)こと、
   // v1.6.0: UPSERT_SELECT では insert + update 合計を数えることを describe で宣言する
   //（ksql_run_saved_query の DML 経路は mutate() 委譲のため同じ制約が効く。両ツールで固定する）
   for (const toolName of ["ksql_mutate", "ksql_run_saved_query"]) {
     const dmlMaxRowsDesc =
       getTool(tools, toolName).inputSchema?.properties?.dmlMaxRows?.description ?? "";
     assert(
-      dmlMaxRowsDesc.includes("caps app-source reads"),
-      `${toolName}.dmlMaxRows description must mention the app-source read cap.`
+      dmlMaxRowsDesc.includes("does NOT limit source reads"),
+      `${toolName}.dmlMaxRows description must state that it does not limit SELECT-based DML source reads.`
+    );
+    assert(
+      dmlMaxRowsDesc.includes("runtime maxRecords resolution"),
+      `${toolName}.dmlMaxRows description must mention the runtime maxRecords resolution for source reads.`
     );
     assert(
       dmlMaxRowsDesc.includes("counts inserts + updates"),

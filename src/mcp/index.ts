@@ -94,7 +94,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. The source SELECT reads at most dmlMaxRows + 1 app records; temp tables hold at most 10000 rows.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: the source SELECT reads up to the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows.",
     inputSchema: mutateInputShape,
   }, tools.mutateTool);
 

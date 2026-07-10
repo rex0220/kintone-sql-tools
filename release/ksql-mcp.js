@@ -38280,6 +38280,24 @@ function requireDmlApproval(input, toolName, suffix = "") {
   }
   return Number(input.dmlMaxRows);
 }
+function containsSelectBasedDml(statements) {
+  return statements.some(
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT"
+  );
+}
+function resolveMutateRuntimeMaxRecords(statements, dmlMaxRows) {
+  return containsSelectBasedDml(statements) ? void 0 : dmlMaxRows + 1;
+}
+var READ_LIMIT_MESSAGE_FRAGMENT = "\u53D6\u5F97\u4EF6\u6570\u304C\u4E0A\u9650";
+var SELECT_BASED_DML_READ_LIMIT_HINT = "SELECT-based DML \u306E\u30BD\u30FC\u30B9\u8AAD\u307F\u53D6\u308A\u4E0A\u9650\u306F dmlMaxRows \u3067\u306F\u306A\u304F maxRecords \u89E3\u6C7A\u5024(KSQL_MAX_RECORDS / profile \u306E query.maxRecords\u3001\u65E2\u5B9A 500)\u3067\u5236\u5FA1\u3055\u308C\u307E\u3059\u3002dmlMaxRows \u306F\u5F71\u97FF\u884C\u6570\u30AC\u30FC\u30C9\u3067\u3059\u3002";
+function appendSelectBasedDmlReadLimitHint(err) {
+  if (err instanceof Error && err.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) {
+    const hinted = new Error(`${err.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}`);
+    hinted.name = err.name;
+    return hinted;
+  }
+  return err;
+}
 function toToolResult(payload, isError = false) {
   return {
     content: [
@@ -38461,10 +38479,13 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         `ArgumentError: batch INSERT rows (${staticInsertTotal}) exceed dmlTotalMaxRows (${dmlTotalMaxRows}).`
       );
     }
+    const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows + 1,
+      // SELECT-based DML を含む場合は dmlMaxRows で読み取りを絞らない（案A。
+      // resolveMutateRuntimeMaxRecords の doc コメント参照）
+      maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout
@@ -38490,7 +38511,17 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         return true;
       }
     });
-    return toBatchQueryPayload(batchResult);
+    const payload = toBatchQueryPayload(batchResult);
+    if (selectBasedDml) {
+      for (const entry of payload.statements) {
+        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT") continue;
+        const error51 = entry.error;
+        if (typeof error51?.message !== "string") continue;
+        if (!error51.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) continue;
+        entry.error = { ...error51, message: `${error51.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}` };
+      }
+    }
+    return payload;
   }
   async function mutate(input) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
@@ -38507,26 +38538,34 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     if (validation.insertValuesCount !== null && validation.insertValuesCount > dmlMaxRows) {
       throw new Error(`ArgumentError: INSERT rows (${validation.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).`);
     }
+    const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows + 1,
+      // SELECT-based DML は dmlMaxRows で読み取りを絞らない（案A。
+      // resolveMutateRuntimeMaxRecords の doc コメント参照）
+      maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout
     });
-    const result = await executeSql(runtime.sql, runtime.client, {
-      maxRecords: runtime.maxRecords,
-      fetchParallel: runtime.fetchParallel,
-      onLimitReached: runtime.onLimit,
-      cacheContext: runtime.cacheContext,
-      confirm: async (count, operation) => {
-        if (count > dmlMaxRows) {
-          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
+    let result;
+    try {
+      result = await executeSql(runtime.sql, runtime.client, {
+        maxRecords: runtime.maxRecords,
+        fetchParallel: runtime.fetchParallel,
+        onLimitReached: runtime.onLimit,
+        cacheContext: runtime.cacheContext,
+        confirm: async (count, operation) => {
+          if (count > dmlMaxRows) {
+            throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
+          }
+          return true;
         }
-        return true;
-      }
-    });
+      });
+    } catch (err) {
+      throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
+    }
     if (result.type === "SELECT") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
@@ -38713,7 +38752,7 @@ var mutateInputSchema = external_exports.object({
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
-  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates."),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows), so choose it by intended write count only."),
   fetchParallel,
   timeout,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
@@ -38756,7 +38795,7 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows. For INSERT/UPSERT ... SELECT it also caps app-source reads (at most dmlMaxRows + 1 records; temp-table sources are bounded by materialization, max 10000 rows); for UPSERT it counts inserts + updates.").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows). Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -38805,7 +38844,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.7.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.8.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -38832,7 +38871,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. The source SELECT reads at most dmlMaxRows + 1 app records; temp tables hold at most 10000 rows.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: the source SELECT reads up to the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows.",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

@@ -382,6 +382,24 @@ v1.4.0（M4）で `executeInsertSelect()` に書き込み前 confirm フック�
 | smoke 回帰ガード | description キーを新文言に差し替え（旧バンドルで失敗確認後に適用）。describe キーも `"caps app-source reads"` に差し替え |
 | 挙動変化 | 従来 `ArgumentError` だった呼び出しが成功（= 書き込み発生）するようになる。既存の成功ケースは不変 |
 
+## 11.10 SELECT-based DML のソース読み取り上限を dmlMaxRows から分離（v1.8.0）
+
+v1.7.0 の実機確認で、MCP クライアントが影響行数基準で小さい `dmlMaxRows`（例: 2）を
+選んだ結果、UPSERT_SELECT の JOIN ソース読み取り（APP 全件走査）が
+`maxRecords = dmlMaxRows + 1` で上限エラーになる実害を確認した。
+`dmlMaxRows` の describe に読み取りキャップの記載があっても誤設定は防げなかったため、
+説明改善ではなく上限自体を分離した（案A。経緯・対策比較:
+`docs/internal/ksql_mcp_dml_source_read_limit_issue.md`）。
+
+| 変更 | 内容 |
+| --- | --- |
+| 読み取り上限の分岐 | SELECT-based DML（INSERT_SELECT / UPSERT_SELECT）を含む `ksql_mutate` は `createRuntime` へ `maxRecords` を上書きせず、runtime の通常解決（`KSQL_MAX_RECORDS` → profile `query.maxRecords` → 500）に委ねる。含まない DML は従来どおり `dmlMaxRows + 1`。CLI の `--max-records` / `--dml-max-rows` 分離と同じモデル |
+| dmlMaxRows の意味 | 影響行数ガード専用に純化（confirm フック。UPSERT 系は insert + update 合計）。ソース読み取り・UPSERT 照合読み取りを絞らない |
+| エラーヒント | SELECT-based DML の読み取り上限超過エラー（`取得件数が上限...`）に「読み取り上限は maxRecords 解決値で制御され、dmlMaxRows は影響行数ガード」のヒントを付与（単文 = 例外メッセージ、バッチ = 当該文の error.message） |
+| description / describe | ツール description を「dmlMaxRows caps affected rows only, not source reads」へ、`dmlMaxRows` describe（mutate / run_saved_query 両方）を「does NOT limit source reads ... runtime maxRecords resolution」へ更新。run_saved_query 側には「maxRecords / onLimit 入力は read-only 保存 SQL のみ有効」も明記 |
+| smoke 回帰ガード | describe キーを `"does NOT limit source reads"` / `"runtime maxRecords resolution"` に、description キーに `"caps affected rows only, not source reads"` を追加（旧バンドル相当の文言で失敗することを確認後に適用） |
+| 挙動変化 | ①従来読み取り上限エラーだった JOIN・集計ソースの SELECT-based DML が、影響行数が `dmlMaxRows` 以内なら成功する。②UPSERT_SELECT の照合読み取り（第1キー低選択性）も runtime `maxRecords` に従い、「source 1 行でも安全側エラー」が解消。③書き込みガード（confirm / dmlMaxRows / dmlTotalMaxRows）は不変 |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
