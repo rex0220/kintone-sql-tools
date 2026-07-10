@@ -1582,6 +1582,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | DML を含むバッチ（複文） | 対応（CLI / MCP は v1.4.0、プラグインは v1.9.0。`ksql_mutate` / CLI `--allow-dml` / プラグインは文ごとの確認ダイアログ。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブル)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
 | `ASSERT` の複合条件（`AND` / `OR`） | 非対応（複数の `ASSERT` 文に分けて書く。→ [§26](#26-assert)） |
+| 書き込み系 API（POST / PUT / DELETE）の自動リトライ | 非対応（応答喪失時の二重実行を避けるため。リトライは GET 系限定 — 対象: 408/429/502/503/504。必要なら呼び出し側で冪等な再実行（UPSERT 等）を設計する） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
 

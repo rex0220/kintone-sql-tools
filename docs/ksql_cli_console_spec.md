@@ -173,6 +173,22 @@ CLI 追加として以下を提供する。
 1. 成功時は stdout に `assertion ok: <条件>` の1行（`json` / `jsonl` は `{ "ok": true, "type": "ASSERT", "condition": "<条件>" }`）。`affected=` は出力しない
 2. 不成立時は `AssertError: assertion failed: <条件> (actual: <実測値>).` で exit code 1（ヘルスチェック・CI ゲート用途）
 
+## 4.6 レート制御（requestGate）設定（v1.10.0 で公開）
+
+kintone API 呼び出しには、プロセス内グローバルのレートゲート（セマフォ + GET 系リトライ）が適用される。
+
+| 項目 | CLI フラグ | config（`profile.query`） | env | 既定 |
+|---|---|---|---|---|
+| 同時リクエスト上限 | `--max-concurrent <n>`（1〜50） | `maxConcurrent` | `KSQL_MAX_CONCURRENT` | 10 |
+| GET リトライ回数 | `--retry <n>`（0〜10。0 で無効） | `retry` | `KSQL_RETRY` | 3 |
+| バックオフ初期値（ミリ秒） | `--retry-base-delay <ms>` | `retryBaseDelayMs` | — | 500 |
+| バックオフ上限（ミリ秒） | `--retry-max-delay <ms>` | `retryMaxDelayMs` | — | 8000 |
+
+1. 解決優先順は **env > CLI フラグ > config > 既定**
+2. ゲートはプロセス内グローバル1個で、**初回に解決された値で固定**される（複数 profile 同時利用では最初に解決された値が使われる）
+3. リトライは **GET 系（レコード・アプリ一覧・フィールド情報の取得）限定**。対象は HTTP **408 / 429 / 502 / 503 / 504** とネットワーク層の一時エラー（fetch failed / タイムアウト中断）で、指数バックオフ + ジッタで再試行する
+4. **書き込み系（POST / PUT / DELETE）はリトライしない**（応答喪失時の二重実行を避けるため。セマフォのみ適用）。再実行が必要な場合は呼び出し側で冪等な再実行（UPSERT 等）を設計する
+
 ## 4.4 認証仕様（token）
 
 1. kintone API token はアプリ単位として扱う
