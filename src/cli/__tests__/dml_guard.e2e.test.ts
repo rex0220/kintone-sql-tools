@@ -154,6 +154,36 @@ test("read-only バッチの dry-run は --allow-dml なしで成功", async () 
   expect(res.stdout).toContain("FULL_SCAN（一時テーブル参照）");
 });
 
+// ----------------------------------------------------------------
+// 単文 ASSERT の CLI ゲート通過（v1.10.0 A3 回帰: 許可リスト漏れで
+// "unsupported statement type in CLI: ASSERT" になっていた）
+// リテラル比較は kintone API を呼ばないためダミー認証で実行できる
+// ----------------------------------------------------------------
+
+// --app はトークン解決のアプリ文脈用（ASSERT のリテラル比較は API を呼ばない）
+const DUMMY_AUTH = ["--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy", "--app", "1"];
+
+test("単文 ASSERT 成立は exit 0 + assertion ok", async () => {
+  const res = await runCli([...DUMMY_AUTH, "-e", "ASSERT 1 = 1"]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.stderr).not.toContain("unsupported statement type");
+  expect(res.code).toBe(0);
+  expect(res.stdout).toContain("assertion ok: 1 = 1");
+});
+
+test("単文 ASSERT 不成立は exit 1 + AssertError", async () => {
+  const res = await runCli([...DUMMY_AUTH, "-e", "ASSERT 1 = 2"]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(1);
+  expect(res.stderr).toContain("AssertError: assertion failed: 1 = 2 (actual: 1).");
+});
+
 test("DML バッチ実行は --yes なしなら確認を要求する（非 TTY では明示エラー）", async () => {
   const res = await runCli([
     "--allow-dml",

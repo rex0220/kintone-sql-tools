@@ -1517,6 +1517,7 @@ async function run(): Promise<number> {
           || stmtType === "EXPLAIN"
           || stmtType === "SHOW_APPS"
           || stmtType === "DESCRIBE"
+          || stmtType === "ASSERT"
           || isDmlStatement;
         if (!supported) {
           process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
