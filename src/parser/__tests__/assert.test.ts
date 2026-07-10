@@ -221,10 +221,12 @@ test("text: 算術式", () => {
 // ----------------------------------------------------------------
 
 test("DML バッチ内の ASSERT（DML 直前のゲート配置）", () => {
+  // UPDATE のサブクエリは一時テーブルを参照できない（実行時の既存拒否）ため、
+  // 実行可能な形（ASSERT が temp を検証し UPDATE は同条件を直接書く）でパースを確認する
   const stmts = parseBatch(
     "CREATE TEMP TABLE #t AS SELECT $id FROM APP100 WHERE 売上 > 100;" +
     "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500;" +
-    "UPDATE APP100 SET 状態 = '対象' WHERE $id IN (SELECT $id FROM #t);"
+    "UPDATE APP100 SET 状態 = '対象' WHERE 売上 > 100;"
   );
   expect(stmts.map((s) => s.type)).toEqual(["CREATE_TEMP_TABLE", "ASSERT", "UPDATE"]);
 });

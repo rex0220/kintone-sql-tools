@@ -1765,13 +1765,23 @@ ASSERT <式> BETWEEN <式> AND <式>;
 - 比較の型規則は WHERE 句と同一（`=` / `<>` は文字列比較、大小比較は双方が数値なら数値比較）
 
 ```sql
--- 典型例: DML 前の件数ガード
-CREATE TEMP TABLE #targets AS
-SELECT $id FROM APP100 WHERE 売上 > 1000000;
+-- 典型例1: UPDATE 前の件数ガード
+-- （UPDATE のサブクエリは一時テーブルを参照できないため、ASSERT で直接件数を検証し
+--   UPDATE には同じ条件を書く）
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 売上 > 1000000) BETWEEN 1 AND 500;
 
-ASSERT (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500;
+UPDATE APP100 SET 状態 = '対象' WHERE 売上 > 1000000;
+```
 
-UPDATE APP100 SET 状態 = '対象' WHERE $id IN (SELECT $id FROM #targets);
+```sql
+-- 典型例2: 一時テーブルをゲート + SELECT-based DML のソースに使う
+-- （INSERT/UPSERT ... SELECT は一時テーブルソース対応のため、検証した #src をそのまま書き込める）
+CREATE TEMP TABLE #src AS
+SELECT 顧客名, SUM(金額) AS 合計 FROM APP200 GROUP BY 顧客名;
+
+ASSERT (SELECT COUNT(*) FROM #src) BETWEEN 1 AND 500;
+
+INSERT INTO APP300 (顧客名, 合計金額) SELECT 顧客名, 合計 FROM #src;
 ```
 
 ```bash
@@ -1795,6 +1805,8 @@ ksql -e "ASSERT (SELECT COUNT(*) FROM APP1 WHERE 異常フラグ = '1') = 0"
 | フィールド参照 | 非対応（FROM コンテキストがないため。サブクエリ内では使用可） |
 | 関数呼び出し | 式の直下では非対応（サブクエリ内で計算する） |
 | サブクエリ直後の算術 | 非対応（`(SELECT ...) * 2` は不可。サブクエリ内で計算する） |
+
+> **注意（既存制限との組み合わせ）**: `UPDATE` / `DELETE` のサブクエリでは一時テーブルを参照できません（`ArgumentError: temp table references in UPDATE are not supported yet.` — §25）。`ASSERT` 自体は一時テーブルを参照できるため、一時テーブルで件数を検証しつつ後続の `UPDATE` / `DELETE` には同じ WHERE 条件を直接書くか、後続を一時テーブルソース対応の `INSERT` / `UPSERT ... SELECT` にしてください。
 
 ---
 

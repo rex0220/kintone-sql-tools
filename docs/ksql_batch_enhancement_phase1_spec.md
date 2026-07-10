@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-10 R4(実機確認で発覚): §2.1 の典型例が既存制限と矛盾していたのを修正 — `UPDATE ... WHERE $id IN (SELECT $id FROM #targets)` は「DML(UPDATE / DELETE / UPSERT)内の一時テーブル参照」の既存拒否(`ArgumentError: temp table references in UPDATE are not supported yet.` — v1.7.0 の解禁は SELECT-based DML のソースのみ)に当たり実行不能。ASSERT 自体の一時テーブル参照は可のため、実行可能な形(ASSERT 直接検証 + UPDATE は同条件、または後続を temp ソースの INSERT/UPSERT ... SELECT)に差し替え。言語リファレンス §26 の同例も修正
   - 2026-07-10 R3(実装後レビュー反映): C1 の「env 解決をゲート生成部に集約」を変更 — `src/api/requestGate.ts` に `node/config`(fs 依存)を import させない。env 解決は `resolveRequestGateOptions()`(node/config.ts)として Node 層に置き、呼び出し側 2 箇所で適用(§4.3。優先順 env > CLI > config > 既定は不変)。あわせて `RequestGate` constructor で backoff 値を clamp(profile JSON 経由の無検証値対策)
   - 2026-07-10 R2: 再レビュー反映。プラグイン UI の「自動対応」を訂正 — `renderResult()` は `ExecuteResult` の網羅 switch のため `case "ASSERT"` の追加が必須(§2.5)/ §5 実装ステップ表 B1 の抽出先を `src/output/batchEnvelope.ts` に修正(§3.3 との不整合解消)
   - 2026-07-10 R1: レビュー反映。単文 ASSERT の出力ルートを明示 — MCP `ksql_query` の非 SELECT 拒否ガードと CLI の mutation 出力分岐に `AssertResult` 専用経路が必要(§2.3・§2.5)/ バッチ成功時の ASSERT は「result を持たない no-result 文」と規定 — 現行の `result.type !== "SELECT"` → mutation summary 経路への流入を防止(§2.3・§2.5)/ エンベロープ抽出先を `src/output/` に変更 — `core` → `execute.ts` の値 import 循環を回避(§3.3)/ サブクエリ 2 行打ち切りを非集計限定に条件化(§2.3)/ `KSQL_RETRY=0` と `envInt()` の `n <= 0` 無効扱いの衝突に対応 — `envNonNegativeInt` 追加を計画に明記(§4.3)
@@ -42,12 +43,12 @@ ASSERT <式> BETWEEN <式> AND <式>;
 
 ```sql
 -- 典型例: DML 前の件数ガード
-CREATE TEMP TABLE #targets AS
-SELECT $id FROM APP100 WHERE 売上 > 1000000;
+-- （R4: UPDATE のサブクエリは一時テーブルを参照できない既存制限があるため、
+--   ASSERT で直接検証し UPDATE には同じ条件を書く。一時テーブルをゲートに使う場合は
+--   後続を temp ソース対応の INSERT/UPSERT ... SELECT にする）
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 売上 > 1000000) BETWEEN 1 AND 500;
 
-ASSERT (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500;
-
-UPDATE APP100 SET 状態 = '対象' WHERE $id IN (SELECT $id FROM #targets);
+UPDATE APP100 SET 状態 = '対象' WHERE 売上 > 1000000;
 ```
 
 ### 2.2 真値規則(提案書 §2.1 で確定済み)
