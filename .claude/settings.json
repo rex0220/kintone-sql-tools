@@ -29,7 +29,21 @@
       "Bash(node -e \"const s=require\\('node:child_process'\\).execSync\\('node release/ksql-mcp.js --version 2>&1 || true'\\).toString\\(\\); console.log\\(s.slice\\(0,200\\)\\)\")",
       "Bash(git restore *)",
       "Bash(awk -F: '$1 > 1900 && $1 < 2550')",
-      "Bash(npm audit *)"
+      "Bash(npm audit *)",
+      "PowerShell(git rm .github/workflows/ci.yml && \\(Get-ChildItem .github -Recurse -File | Measure-Object\\).Count)",
+      "Bash(npm pkg *)",
+      "Bash(node release/ksql-mcp.js --version)",
+      "Bash(gh release create v1.8.0 release/ksql-mcp.js release/ksql-mcp.mcpb --title v1.8.0 --notes ' *)",
+      "Bash(git branch *)",
+      "PowerShell(\\(Get-Content \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\\\\src\\\\__tests__\\\\executeBatch.test.ts\" | Measure-Object -Line\\).Lines)",
+      "PowerShell(npx tsc --noEmit 2>&1)",
+      "PowerShell(npx tsc --noEmit 2>&1 | ForEach-Object { $_ -replace '\\\\\\(\\\\d+,\\\\d+\\\\\\)', '' } | Sort-Object | Out-File \"$env:TEMP\\\\tsc-now.txt\"; git -C \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\" stash push -q -m tmp2; npx tsc --noEmit 2>&1 | ForEach-Object { $_ -replace '\\\\\\(\\\\d+,\\\\d+\\\\\\)', '' } | Sort-Object | Out-File \"$env:TEMP\\\\tsc-head.txt\"; git -C \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\" stash pop -q; Compare-Object \\(Get-Content \"$env:TEMP\\\\tsc-head.txt\"\\) \\(Get-Content \"$env:TEMP\\\\tsc-now.txt\"\\))",
+      "PowerShell(npx jest src/__tests__/executeBatch.test.ts 2>&1)",
+      "PowerShell(Copy-Item \"C:\\\\Users\\\\rex02\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-rex02-Projects-kintone-sql-tools\\\\547e4cec-a17c-4aeb-a025-93b348ad5936\\\\scratchpad\\\\debug-batch.test.ts\" \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\\\\src\\\\__tests__\\\\__debug.test.ts\"; \\(Get-Content \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\\\\src\\\\__tests__\\\\__debug.test.ts\"\\) -replace 'from \"../../../../../../Projects/kintone-sql-tools/src/execute\"', 'from \"../execute\"' | Set-Content \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\\\\src\\\\__tests__\\\\__debug.test.ts\"; npx jest src/__tests__/__debug.test.ts 2>&1 | Select-Object -First 60; Remove-Item \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\\\\src\\\\__tests__\\\\__debug.test.ts\")",
+      "PowerShell(npx jest 2>&1)",
+      "PowerShell(npm run build:plugin 2>&1)",
+      "PowerShell(\\(npx tsc --noEmit 2>&1 | Measure-Object -Line\\).Lines)",
+      "PowerShell(git -C \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\" status --short)"
     ]
   }
 }
