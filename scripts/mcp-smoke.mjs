@@ -80,6 +80,12 @@ function assertSchemas(tools) {
   assert("allowDml" in runSavedQueryProps, "ksql_run_saved_query.allowDml input is missing.");
   assert("dmlMaxRows" in runSavedQueryProps, "ksql_run_saved_query.dmlMaxRows input is missing.");
   assert(!("catalogPath" in runSavedQueryProps), "ksql_run_saved_query must not expose per-call catalogPath.");
+
+  // v1.11.0: tempTableMaxRows はバッチを受けるツールのみ。保存クエリは単文限定で
+  // 一時テーブルが出現し得ないため公開しない(存在しない入力を describe で示唆もしない)
+  assert("tempTableMaxRows" in queryProps, "ksql_query.tempTableMaxRows input is missing.");
+  assert("tempTableMaxRows" in mutateProps, "ksql_mutate.tempTableMaxRows input is missing.");
+  assert(!("tempTableMaxRows" in runSavedQueryProps), "ksql_run_saved_query must not expose tempTableMaxRows.");
 }
 
 // description regression guard(fix_plan D5):
@@ -102,7 +108,8 @@ function assertToolDescriptions(tools) {
     // v1.8.0: dmlMaxRows は影響行数専用(ソース読み取りは runtime maxRecords 解決)
     "caps affected rows only, not source reads",
     // v1.7.0: temp ソースの読み取りは実体化 10,000 行で別建て
-    "temp tables hold at most 10000 rows",
+    // v1.11.0: 10,000 は既定値になり tempTableMaxRows で変更可
+    "temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows)",
   ];
   const query = getTool(tools, "ksql_query");
   for (const key of queryKeys) {
@@ -124,8 +131,8 @@ function assertToolDescriptions(tools) {
 // JSON Schema の description に変換されて MCP クライアントへ届くことを固定する
 function assertParamDescriptions(tools) {
   const described = {
-    ksql_query: ["sql", "profile", "maxRecords", "fetchParallel", "onLimit", "timeout", "continueOnError", "maxTotalRecords"],
-    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "fetchParallel", "timeout", "dmlTotalMaxRows"],
+    ksql_query: ["sql", "profile", "maxRecords", "fetchParallel", "onLimit", "tempTableMaxRows", "timeout", "continueOnError", "maxTotalRecords"],
+    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "fetchParallel", "tempTableMaxRows", "timeout", "dmlTotalMaxRows"],
   };
   for (const [toolName, params] of Object.entries(described)) {
     const props = getTool(tools, toolName).inputSchema?.properties ?? {};
@@ -158,6 +165,25 @@ function assertParamDescriptions(tools) {
       `${toolName}.dmlMaxRows description must mention the UPSERT inserts + updates total.`
     );
   }
+
+  // v1.11.0: tempTableMaxRows への言及は「その入力を実際に受け付けるツール」のみ。
+  // ksql_run_saved_query は単文限定のため、存在しない入力を describe で示唆しない
+  const mutateDmlMaxRowsDesc =
+    getTool(tools, "ksql_mutate").inputSchema?.properties?.dmlMaxRows?.description ?? "";
+  assert(
+    mutateDmlMaxRowsDesc.includes("adjustable via tempTableMaxRows"),
+    "ksql_mutate.dmlMaxRows description must state the temp table cap is adjustable via tempTableMaxRows."
+  );
+  const savedDmlMaxRowsDesc =
+    getTool(tools, "ksql_run_saved_query").inputSchema?.properties?.dmlMaxRows?.description ?? "";
+  assert(
+    !savedDmlMaxRowsDesc.includes("tempTableMaxRows"),
+    "ksql_run_saved_query.dmlMaxRows description must not mention tempTableMaxRows (input does not exist there)."
+  );
+  assert(
+    savedDmlMaxRowsDesc.includes("single-statement"),
+    "ksql_run_saved_query.dmlMaxRows description must state saved queries are single-statement."
+  );
 }
 
 async function main() {
