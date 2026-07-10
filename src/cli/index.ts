@@ -25,6 +25,7 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { buildBatchEnvelope } from "../output/batchEnvelope";
 import { decideConsoleInput, decideRun } from "./consoleInput";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
@@ -651,7 +652,7 @@ export function buildBatchDmlConfirmMessage(analysis: BatchAnalysis): string {
   return lines.join("\n");
 }
 
-function writeBatchOutput(
+export function writeBatchOutput(
   batch: BatchExecuteResult,
   opts: {
     format: OutputFormat;
@@ -662,14 +663,15 @@ function writeBatchOutput(
     quiet: boolean;
   }
 ): number {
-  const outputs: string[] = [];
-  for (const s of batch.statements) {
-    if (!opts.quiet) process.stderr.write(`${buildBatchStatementSummary(s)}\n`);
-    if (s.status === "success" && s.result?.type === "SELECT") {
-      outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
-    }
+  // json はバッチ全体を MCP と同一のエンベロープ（§6.2）で単一 JSON として出力する
+  //（v1.10.0。従来の「SELECT 結果 JSON の空行区切り連結」は廃止 — CHANGELOG 参照）。
+  // table / csv / markdown / jsonl は従来出力を維持（jsonl は行ストリームの契約を守る）
+  const output = opts.format === "json"
+    ? JSON.stringify(buildBatchEnvelope(batch), null, opts.pretty ? 2 : 0)
+    : buildBatchResultsOutput(batch, opts);
+  if (!opts.quiet) {
+    for (const s of batch.statements) process.stderr.write(`${buildBatchStatementSummary(s)}\n`);
   }
-  const output = outputs.join("\n\n");
   if (opts.outputPath) writeFileSync(opts.outputPath, `${output}\n`, "utf-8");
   else if (output) process.stdout.write(`${output}\n`);
 
@@ -678,6 +680,20 @@ function writeBatchOutput(
   return firstError?.error
     ? toExitCodeFromError(new Error(firstError.error.message))
     : 1;
+}
+
+/** 従来のバッチ出力: SELECT 結果を結果セットごとに整形し空行区切りで連結する */
+function buildBatchResultsOutput(
+  batch: BatchExecuteResult,
+  opts: { format: OutputFormat; noHeader: boolean; pretty: boolean; displayOptions: DisplayOptions }
+): string {
+  const outputs: string[] = [];
+  for (const s of batch.statements) {
+    if (s.status === "success" && s.result?.type === "SELECT") {
+      outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
+    }
+  }
+  return outputs.join("\n\n");
 }
 
 export function shouldExitOnEmpty(
