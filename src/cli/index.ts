@@ -73,6 +73,11 @@ Options:
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
+  --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
+                             (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
+  --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
+  --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL
@@ -130,6 +135,12 @@ interface CliConfig {
       timeout?: number;
       /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
       maxConcurrent?: number;
+      /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
+      retry?: number;
+      /** リトライバックオフ初期値ミリ秒（既定 500） */
+      retryBaseDelayMs?: number;
+      /** リトライバックオフ上限ミリ秒（既定 8000） */
+      retryMaxDelayMs?: number;
     };
     output?: {
       format?: OutputFormat;
@@ -192,6 +203,10 @@ interface ParsedArgs {
   allowWithoutWhere: boolean;
   continueOnError: boolean;
   dmlMaxRows: number | null;
+  maxConcurrent: number | null;
+  retry: number | null;
+  retryBaseDelay: number | null;
+  retryMaxDelay: number | null;
   userFormat: DisplayOptions["userFormat"] | null;
   arrayFormat: DisplayOptions["arrayFormat"] | null;
   tableFormat: DisplayOptions["tableFormat"] | null;
@@ -238,6 +253,10 @@ export function parseArgs(argv: string[]): ParsedArgs {
     allowWithoutWhere: false,
     continueOnError: false,
     dmlMaxRows: null,
+    maxConcurrent: null,
+    retry: null,
+    retryBaseDelay: null,
+    retryMaxDelay: null,
     userFormat: null,
     arrayFormat: null,
     tableFormat: null,
@@ -371,6 +390,34 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(v);
       if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --dml-max-rows must be a positive integer.");
       out.dmlMaxRows = n;
+      i++;
+      continue;
+    }
+    if (a === "--max-concurrent") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("ArgumentError: --max-concurrent must be an integer between 1 and 50.");
+      out.maxConcurrent = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0 || n > 10) throw new Error("ArgumentError: --retry must be an integer between 0 and 10 (0 disables retry).");
+      out.retry = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry-base-delay") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --retry-base-delay must be a positive integer (ms).");
+      out.retryBaseDelay = n;
+      i++;
+      continue;
+    }
+    if (a === "--retry-max-delay") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --retry-max-delay must be a positive integer (ms).");
+      out.retryMaxDelay = n;
       i++;
       continue;
     }
@@ -884,6 +931,10 @@ function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean, forma
   pushOpt(argv, "--date-format", base.dateFormat);
   pushOpt(argv, "--attachment-format", base.attachmentFormat);
   pushOpt(argv, "--dml-max-rows", base.dmlMaxRows);
+  pushOpt(argv, "--max-concurrent", base.maxConcurrent);
+  pushOpt(argv, "--retry", base.retry);
+  pushOpt(argv, "--retry-base-delay", base.retryBaseDelay);
+  pushOpt(argv, "--retry-max-delay", base.retryMaxDelay);
 
   const tokenMapArg = buildTokenMapArg(base.tokenMap);
   if (tokenMapArg) argv.push("--token-map", tokenMapArg);
@@ -1794,9 +1845,16 @@ async function run(): Promise<number> {
     };
   }
 
-  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ
+  // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ。
+  // 解決優先順: env（KSQL_MAX_CONCURRENT / KSQL_RETRY はゲート生成部で適用）
+  // > CLI フラグ > profile 設定 > 既定。プロセス内グローバル1個・初回解決値で固定
   if (!args.dryRun) {
-    client = withRequestGate(client, getGlobalRequestGate(profile.query?.maxConcurrent));
+    client = withRequestGate(client, getGlobalRequestGate({
+      maxConcurrent: args.maxConcurrent ?? profile.query?.maxConcurrent,
+      maxRetries: args.retry ?? profile.query?.retry,
+      baseDelayMs: args.retryBaseDelay ?? profile.query?.retryBaseDelayMs,
+      maxDelayMs: args.retryMaxDelay ?? profile.query?.retryMaxDelayMs,
+    }));
   }
 
   try {

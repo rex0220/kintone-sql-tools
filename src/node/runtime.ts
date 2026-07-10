@@ -228,10 +228,16 @@ export async function createKsqlRuntime(
   };
 
   // レートゲート（P0-1）: 同時リクエスト上限 + GET 系の 429/5xx リトライ。
-  // プロセス内グローバルのため、上限は最初に解決された値で固定される
+  // プロセス内グローバルのため、設定は最初に解決された値で固定される。
+  // MCP ツール入力には公開しない（設計判断 D4: レート制御は運用者の環境設定）
   const gatedClient = withRequestGate(
     routedClient,
-    getGlobalRequestGate(profile.query?.maxConcurrent)
+    getGlobalRequestGate({
+      maxConcurrent: profile.query?.maxConcurrent,
+      maxRetries: profile.query?.retry,
+      baseDelayMs: profile.query?.retryBaseDelayMs,
+      maxDelayMs: profile.query?.retryMaxDelayMs,
+    })
   );
 
   return {

@@ -30,6 +30,12 @@ export interface KsqlProfileConfig {
     timeout?: number;
     /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
     maxConcurrent?: number;
+    /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
+    retry?: number;
+    /** リトライバックオフ初期値ミリ秒（既定 500） */
+    retryBaseDelayMs?: number;
+    /** リトライバックオフ上限ミリ秒（既定 8000） */
+    retryMaxDelayMs?: number;
   };
   output?: {
     format?: OutputFormat;

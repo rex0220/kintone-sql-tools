@@ -125,6 +125,11 @@ Options:
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
   --on-limit <mode>          On record limit: error | truncate
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
+  --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
+                             (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
+  --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
+  --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)
   --config <path>            Config file path (default: ./ksql.config.json)
   --profile <name>           Profile name in config
   --base-url <url>           kintone base URL
