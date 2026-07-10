@@ -465,6 +465,7 @@ export function createKsqlMcpTools(
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout,
+        tempTableMaxRows: input.tempTableMaxRows,
       });
       const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
         maxRecords: runtime.maxRecords,
@@ -472,6 +473,9 @@ export function createKsqlMcpTools(
         onLimitReached: runtime.onLimit,
         cacheContext: runtime.cacheContext,
         continueOnError: input.continueOnError,
+        // 一時テーブル実体化上限（未指定 = エンジン既定 TEMP_TABLE_MAX_ROWS）。
+        // 実体化は onLimit 設定によらず常に error（src/execute.ts の実体化経路で固定）
+        tempTableMaxRows: runtime.tempTableMaxRows,
         // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
@@ -571,6 +575,7 @@ export function createKsqlMcpTools(
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
+      tempTableMaxRows: input.tempTableMaxRows,
     });
 
     // バッチ合計の影響行数（INSERT(VALUES) は静的、confirm を呼ぶ文種
@@ -581,6 +586,8 @@ export function createKsqlMcpTools(
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
+      // 一時テーブル実体化上限（未指定 = エンジン既定 TEMP_TABLE_MAX_ROWS）
+      tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
       confirm: async (count, operation) => {

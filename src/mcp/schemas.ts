@@ -14,6 +14,9 @@ const fetchParallel = z.number().int().min(1).max(10)
 const onLimit = z.enum(["error", "truncate"])
   .describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error').")
   .optional();
+const tempTableMaxRows = z.number().int().positive()
+  .describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors — 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.")
+  .optional();
 const timeout = z.number().int().positive()
   .describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.")
   .optional();
@@ -42,6 +45,7 @@ export const queryInputSchema = z.object({
   maxRecords,
   fetchParallel,
   onLimit,
+  tempTableMaxRows,
   timeout,
   continueOnError: z.boolean()
     .describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).")
@@ -62,6 +66,7 @@ export const mutateInputSchema = z.object({
   dmlMaxRows: z.number().int().positive()
     .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows), so choose it by intended write count only."),
   fetchParallel,
+  tempTableMaxRows,
   timeout,
   dmlTotalMaxRows: z.number().int().positive()
     .describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.")
