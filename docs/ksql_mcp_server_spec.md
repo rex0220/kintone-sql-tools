@@ -516,12 +516,22 @@ Phase 1.5 / Phase 2 で初期実装する。
 書き込み前 confirm hook が実装された（source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")`）
 ことで `dmlMaxRows` ガードが書き込み前に効くようになり、v1.5.0 で解禁した。
 v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ）も解禁 — 実行は read-only バッチで
-実戦投入済みの FULL_SCAN 注入経路（`executeQueryWithCte`）で、APP テーブルの fetch は
-`maxRecords = dmlMaxRows + 1`（`onLimit = "error"`）、一時テーブルは実体化上限
-（`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）の下にある。
-集計・JOIN で「読み取りは多いが結果行は少ない」APP ソースはこの上限に当たり得る。
-その場合は APP 側を一時テーブルに実体化すれば **source / JOIN 側の読み取り上限を回避できる**
-（実体化上限 10,000 行に収まる場合のみ）。
+実戦投入済みの FULL_SCAN 注入経路（`executeQueryWithCte`）による。
+
+**読み取り上限（v1.8.0 で dmlMaxRows から分離）**: SELECT-based DML を含む `ksql_mutate` では、
+APP テーブルの fetch は **runtime の通常 `maxRecords` 解決**（`KSQL_MAX_RECORDS` →
+profile `query.maxRecords` → 既定 500。`onLimit = "error"` 固定）に従い、
+`dmlMaxRows` はソース読み取りを**絞らない**（影響行数ガード専用）。
+一時テーブルは実体化上限（`TEMP_TABLE_MAX_ROWS` = 10,000 行。MCP からは変更不可）の下にある。
+〜v1.7.0 は APP fetch も `maxRecords = dmlMaxRows + 1` で拘束していたが、
+「書き込みは少数だがソース読み取りは大量」という JOIN・集計ソースで、
+MCP クライアントが影響行数基準で小さい `dmlMaxRows` を選ぶと読み取り上限エラーになる
+実害が確認されたため分離した（CLI は当初から `--max-records` と `--dml-max-rows` を
+分離しており、同じモデルに揃えた形。経緯は
+`docs/internal/ksql_mcp_dml_source_read_limit_issue.md` を参照）。
+なお SELECT-based DML を**含まない** DML（UPDATE / DELETE / INSERT VALUES / UPSERT VALUES /
+REORDER のみ）では、対象読み取り件数 ≒ 影響行数が成立するため、従来どおり
+`maxRecords = dmlMaxRows + 1`（超過検出用に 1 件多く読む）を維持する。
 経緯は `docs/internal/ksql_mcp_insert_select_app_source_spec.md`（v1.5.0）と
 `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（v1.7.0）を参照。
 
@@ -529,11 +539,13 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 `executeUpsertSelect()` は source SELECT → 列数・キー検証 → 既存レコード照合 →
 `confirm(toInsert + toUpdate, "UPDATE")` → POST / PUT の順で実行し、confirm は
 **照合後・書き込み前**に呼ばれるため `dmlMaxRows` は確定件数（insert + update 合計）に対して効く。
-留意点: ①一時テーブルに実体化して回避できるのは **source / JOIN 側の APP 読み取り上限のみ**で、
-書き込み先 APP への既存レコード照合読み取りはソース種類に関わらず残る。②照合読み取りは
-第1キーのみの `in (...)` 検索のため、target 側で第1キーの重複が多いと source 行数が少なくても
-読み取り上限エラーになり得る（書き込み前の安全側の失敗）。③超過時のエラーは confirm の operation
-表記により `UPDATE affected rows ...` となる（UPSERT VALUES 形式と同じ）。
+留意点: ①書き込み先 APP への既存レコード照合読み取りはソース種類に関わらず発生する
+（一時テーブルに実体化しても回避されない）。②照合読み取りは第1キーのみの `in (...)` 検索のため、
+target 側で第1キーの重複が多いと読み取り件数が膨らむ。v1.8.0 で照合読み取りも runtime
+`maxRecords`（既定 500）に従うようになり、〜v1.7.0 の「source 1 行でも `dmlMaxRows + 1`
+超過で安全側エラー」は解消されたが、`maxRecords` を超える照合はなお安全側エラーになる。
+③超過時のエラーは confirm の operation 表記により `UPDATE affected rows ...` となる
+（UPSERT VALUES 形式と同じ）。
 経緯は `docs/internal/ksql_mcp_upsert_select_unlock_spec.md`（v1.6.0）と
 `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`（v1.7.0）を参照。
 
@@ -545,10 +557,10 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 | --- | --- | --- |
 | 確認前の API 読み取り | source SELECT が書き込み確認より前に実行される | `ksql_mutate` 呼び出し自体が承認（`allowDml` / `confirmText`）であり、推奨していた一時テーブル経由のバッチ形も同じ承認の下で同じ読み取りを行うため、実質差なし。UPSERT（VALUES 形式・許可済み）も confirm 前に照合読み取りを行っており性質は同等 |
 | `INSERT_SELECT` の confirm 不足 | `executeInsertSelect()` が書き込み前に confirm を呼ばない | **v1.4.0（M4）で解消**。source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")` が呼ばれる |
-| `UPSERT_SELECT` の照合コスト | source SELECT 後、既存レコード照合が必要 | **v1.6.0 で解禁時に評価済み**。照合はユニークキー組（≦ source 行数 ≦ dmlMaxRows + 1）の第1キー `in (...)` チャンク検索で、各 fetch は `maxRecords = dmlMaxRows + 1` 拘束（超過は安全側エラー）。第1キーが低選択性の場合は source が少なくても上限エラーになり得る |
+| `UPSERT_SELECT` の照合コスト | source SELECT 後、既存レコード照合が必要 | **v1.6.0 で解禁時に評価済み**。照合はユニークキー組の第1キー `in (...)` チャンク検索。各 fetch は v1.8.0 以降 runtime `maxRecords`（既定 500）拘束（超過は安全側エラー。〜v1.7.0 は `dmlMaxRows + 1` 拘束で、第1キーが低選択性だと source が少なくても上限エラーになり得た） |
 | MCP 側 preflight の二重実行 / TOCTOU | 件数確認 SELECT と本実行の二重化・不一致 | preflight を行わない方式（エンジン内 confirm）を採用したため発生しない。SELECT 結果を実体化してから POST するため confirm 時点の件数と書き込み件数は一致する |
 | 件数の意味の曖昧さ | `UPSERT_SELECT` は insert / update 件数が混在 | **v1.6.0 で明文化により解消**。`dmlMaxRows` は insert + update **合計**に適用（実装は従来から合計を confirm に渡しており、UPSERT VALUES 形式と同じ意味論） |
-| 大量読み取り | — | source SELECT は `maxRecords = dmlMaxRows + 1`・`onLimit = "error"` で拘束される |
+| 大量読み取り | — | source SELECT は runtime `maxRecords`（`KSQL_MAX_RECORDS` / profile `query.maxRecords`、既定 500）・`onLimit = "error"` で拘束される（v1.8.0。〜v1.7.0 は `dmlMaxRows + 1`） |
 
 ### 7.6.2 SELECT-based DML の対応方針（達成状況）
 
@@ -560,6 +572,7 @@ v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ�
 4. `INSERT_SELECT` のみ先に解禁する — **済（v1.5.0）**
 5. `UPSERT_SELECT` を解禁する — **済（v1.6.0）**。照合コスト・insert/update 内訳の扱いは §7.6.1 の再評価と `dmlMaxRows` の合計適用の明文化で整理した
 6. （追加）SELECT-based DML のソース制限（混在 INSERT_SELECT / temp・混在 UPSERT_SELECT）を解消する — **済（v1.7.0）**。実行は read-only バッチと同じ FULL_SCAN 注入経路で、書き込み側ガードは不変
+7. （追加）SELECT-based DML のソース読み取り上限を `dmlMaxRows` から分離する — **済（v1.8.0）**。読み取りは runtime `maxRecords` 解決（既定 500）、`dmlMaxRows` は影響行数ガード専用。読み取り上限超過エラーには「`dmlMaxRows` は読み取り上限ではない」旨のヒントを付与する
 
 `UPSERT_SELECT` の件数は source SELECT 件数だけでは確定しないが、`executeUpsertSelect()` は
 既存レコード照合後に `toInsert.length + toUpdate.length` を confirm に渡すため、
@@ -605,7 +618,7 @@ confirmMutation?: (info: {
 
 `INSERT_SELECT` の実装済みフロー（v1.4.0 M4 で confirm hook 実装、v1.5.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行して行数を確定する（**APP ソースの fetch は `maxRecords = dmlMaxRows + 1`・`onLimit = "error"`**。一時テーブルソースは実体化済み行のメモリ注入で追加読み取りなし — 実体化自体は 10,000 行上限。v1.7.0 以降は両者の混在も可）
+1. source SELECT を実行して行数を確定する（**APP ソースの fetch は runtime `maxRecords`（既定 500）・`onLimit = "error"`**（v1.8.0。〜v1.7.0 は `dmlMaxRows + 1`）。一時テーブルソースは実体化済み行のメモリ注入で追加読み取りなし — 実体化自体は 10,000 行上限。v1.7.0 以降は両者の混在も可）
 2. SELECT 列数と INSERT フィールド数の一致を検証する
 3. `confirm(rows.length, "INSERT")` を呼ぶ
 4. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST は行われない）
@@ -613,9 +626,9 @@ confirmMutation?: (info: {
 
 `UPSERT_SELECT` の実装済みフロー（confirm hook は初回公開実装から存在、v1.6.0 で MCP 解禁。object 拡張は不要だった）:
 
-1. source SELECT を実行する（読み取り上限は INSERT_SELECT と同じ: APP ソース = `dmlMaxRows + 1`、一時テーブルソース = 実体化済み注入。v1.7.0 以降は混在も可）
+1. source SELECT を実行する（読み取り上限は INSERT_SELECT と同じ: APP ソース = runtime `maxRecords`（既定 500。v1.8.0）、一時テーブルソース = 実体化済み注入。v1.7.0 以降は混在も可）
 2. SELECT 列数と UPSERT フィールド数の一致・key field を検証する
-3. 既存レコード照合（**書き込み先 APP** への第1キー `in (...)` チャンク検索、各 fetch は `dmlMaxRows + 1` 拘束。**ソース種類に関わらず発生する**）で `toInsert` / `toUpdate` を確定する
+3. 既存レコード照合（**書き込み先 APP** への第1キー `in (...)` チャンク検索、各 fetch は runtime `maxRecords` 拘束（v1.8.0）。**ソース種類に関わらず発生する**）で `toInsert` / `toUpdate` を確定する
 4. `confirm(toInsert.length + toUpdate.length, "UPDATE")` を呼ぶ
 5. `dmlMaxRows` 超過なら MCP 側 confirm 実装が `ArgumentError` を投げる（POST / PUT は行われない）
 6. 確認成功後に 100 件ごとに POST / PUT する
@@ -716,6 +729,10 @@ DML の対象件数確認は、`execute()` の `ExecuteOptions.confirm` コー�
 保存済み SQL を実行する。
 `readOnly: true` の保存 SQL は `ksql_query` と同じ安全条件で実行する。
 `readOnly: false` の保存 SQL は `ksql_mutate` と同じく `allowDml: true`、`confirmText: "yes"`、`dmlMaxRows` を実行時に要求する。
+注意: このツールの入力 `maxRecords` / `onLimit` は **read-only 保存 SQL の実行時のみ有効**。
+DML 保存 SQL は `ksql_mutate` へ委譲され、読み取り上限は `ksql_mutate` と同じ規則
+（SELECT-based DML を含む場合は runtime `maxRecords` 解決、それ以外は `dmlMaxRows + 1`。§7.6）、
+`onLimit` は `"error"` 固定となる。
 
 ### `ksql_delete_query`
 
@@ -978,6 +995,18 @@ MCP では `maxRecords` の既定値を CLI と同じく 500 とする。
 
 実装上は、MCP tool input の `onLimit` を `execute()` の `onLimitReached` にマッピングする。
 また、`execute()` 内部の既定値に依存せず、MCP 層から `maxRecords: input.maxRecords ?? 500` を必ず渡す。
+
+DML（`ksql_mutate`）の読み取り上限は文種で異なる（v1.8.0。詳細は §7.6）:
+
+1. SELECT-based DML（`INSERT_SELECT` / `UPSERT_SELECT`）を含む場合: runtime の通常
+   `maxRecords` 解決（`KSQL_MAX_RECORDS` → profile `query.maxRecords` → 500）。
+   `dmlMaxRows` は影響行数ガード専用でソース読み取りを絞らない
+2. それ以外の DML のみの場合: `maxRecords = dmlMaxRows + 1`（対象読み取り ≒ 影響行数のため。
+   超過検出用に 1 件多く読む）
+
+いずれも `onLimit` は `"error"` 固定（DML 実行での truncate は暗黙の部分書き込みを生むため提供しない）。
+SELECT-based DML の読み取り上限超過エラーには、`dmlMaxRows` ではなく `maxRecords` 側の調整を
+促すヒントを付与する。
 
 AI が集計結果を誤認しないよう、上限到達時は以下のいずれかとする。
 

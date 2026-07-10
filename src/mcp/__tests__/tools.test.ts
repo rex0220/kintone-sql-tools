@@ -298,8 +298,8 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(0); // confirm(POST 前)で止まる
   });
 
-  test("mutate: 単文 INSERT_SELECT の source 読み取りは dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
-    const { deps, calls } = makeMutateRuntimeDeps({
+  test("mutate: 単文 INSERT_SELECT の source 読み取りは dmlMaxRows で絞られない(読み取り成功→影響行数ガードで拒否)", async () => {
+    const { deps, calls, runtimeInputs } = makeMutateRuntimeDeps({
       100: [
         { $id: { value: "1" }, 顧客名: { value: "A社" } },
         { $id: { value: "2" }, 顧客名: { value: "B社" } },
@@ -308,13 +308,59 @@ describe("MCP tools", () => {
       ],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    // dmlMaxRows = 2 → maxRecords = 3。source 4 行は読み取り段階(onLimit = error)で失敗
+    // 案A(v1.8.0): SELECT-based DML では maxRecords を dmlMaxRows + 1 で上書きしない。
+    // source 4 行は読み取れて、書き込み前の confirm(影響行数ガード)で拒否される
     await expect(tools.mutate({
       sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 2,
-    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    })).rejects.toThrow(/INSERT affected rows \(4\) exceed dmlMaxRows \(2\)/);
+    expect(runtimeInputs[0]?.maxRecords).toBeUndefined(); // runtime の通常解決に委ねる
+    expect(calls.post).toBe(0);
+  });
+
+  test("mutate: 単文 INSERT_SELECT(JOIN)は source 読み取り > dmlMaxRows でも影響行数が収まれば成功", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+      ],
+      300: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+        { $id: { value: "4" }, 顧客名: { value: "D社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    // 旧仕様では APP300 の読み取り(4 行 > dmlMaxRows + 1 = 3)で失敗していたケース。
+    // JOIN 結果(影響行数)は 2 行 ≦ dmlMaxRows なので新仕様では成功する
+    const result = await tools.mutate({
+      sql: "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM APP100 a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    });
+
+    expect(result).toMatchObject({ ok: true, type: "INSERT", insertedCount: 2 });
+    expect(calls.post).toBe(1);
+  });
+
+  test("mutate: 単文 INSERT_SELECT の source が runtime maxRecords(既定 500)を超えるとヒント付きで失敗", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: Array.from({ length: 501 }, (_v, i) => ({
+        $id: { value: String(i + 1) },
+        顧客名: { value: `会社${i + 1}` },
+      })),
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    await expect(tools.mutate({
+      sql: "INSERT INTO APP200 (名前) SELECT 顧客名 FROM APP100",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 2,
+    })).rejects.toThrow(/取得件数が上限（500 件）を超えました.*dmlMaxRows は影響行数ガードです/);
     expect(calls.post).toBe(0);
   });
 
@@ -381,8 +427,8 @@ describe("MCP tools", () => {
     expect(calls.put).toBe(0);
   });
 
-  test("mutate: 単文 UPSERT_SELECT の source 読み取りは dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
-    const { deps, calls } = makeMutateRuntimeDeps({
+  test("mutate: 単文 UPSERT_SELECT の source 読み取りは dmlMaxRows で絞られない(読み取り成功→影響行数ガードで拒否)", async () => {
+    const { deps, calls, runtimeInputs } = makeMutateRuntimeDeps({
       100: [
         { $id: { value: "1" }, 顧客コード: { value: "C001" } },
         { $id: { value: "2" }, 顧客コード: { value: "C002" } },
@@ -392,21 +438,23 @@ describe("MCP tools", () => {
       300: [],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    // dmlMaxRows = 2 → maxRecords = 3。source 4 行は読み取り段階(onLimit = error)で失敗
+    // 案A(v1.8.0): source 4 行は読み取れて、照合後の insert + update 合計(4)が
+    // dmlMaxRows(2)を超えるため confirm で書き込み前に拒否される
     await expect(tools.mutate({
       sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 2,
-    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    })).rejects.toThrow(/UPDATE affected rows \(4\) exceed dmlMaxRows \(2\)/);
+    expect(runtimeInputs[0]?.maxRecords).toBeUndefined(); // runtime の通常解決に委ねる
     expect(calls.post).toBe(0);
     expect(calls.put).toBe(0);
   });
 
-  test("mutate: 単文 UPSERT_SELECT は照合読み取り(第1キー低選択性)も上限で書き込み前に失敗", async () => {
-    // 仕様 R2: 照合は第1キーのみの in (...) 検索のため、target 側で第1キー一致行が
-    // 多いと source 1 行でも読み取り上限エラーになり得る(安全側)。モック client は
-    // クエリを無視して target 全行を返すため、dmlMaxRows + 2 行置くだけで再現できる
+  test("mutate: 単文 UPSERT_SELECT は照合読み取り(第1キー低選択性)が dmlMaxRows 超でも成功する", async () => {
+    // 旧仕様(〜v1.7.0)では照合読み取りが dmlMaxRows + 1 で上限され source 1 行でも
+    // 安全側エラーになり得た(R2)。案A(v1.8.0)では照合読み取りも runtime maxRecords
+    // (既定 500)に従うため成功する。重複キーは最大 $id を採用して 1 件の update になる
     const { deps, calls } = makeMutateRuntimeDeps({
       100: [
         { $id: { value: "1" }, 顧客コード: { value: "C001" } },
@@ -419,14 +467,16 @@ describe("MCP tools", () => {
       ],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    await expect(tools.mutate({
+    const result = await tools.mutate({
       sql: "UPSERT INTO APP300 (顧客コード) SELECT 顧客コード FROM APP100 ON DUPLICATE (顧客コード)",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 2,
-    })).rejects.toThrow(/取得件数が上限（3 件）を超えました/);
+    });
+
+    expect(result).toMatchObject({ ok: true, type: "UPSERT", insertedCount: 0, updatedCount: 1 });
     expect(calls.post).toBe(0);
-    expect(calls.put).toBe(0);
+    expect(calls.put).toBe(1);
   });
 
   test("mutate: 単文 UPSERT_SELECT でも DML 承認3点セットは必須", async () => {
@@ -1060,6 +1110,7 @@ describe("MCP tools", () => {
 
   function makeMutateRuntimeDeps(recordsByApp: Record<number, Array<Record<string, { value: string }>>>) {
     const calls = { post: 0, put: 0, del: 0, get: 0 };
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     const client: KintoneClient = {
       async getRecords(params) {
         calls.get += 1;
@@ -1077,17 +1128,21 @@ describe("MCP tools", () => {
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
       input: CreateKsqlRuntimeInput
-    ): Promise<KsqlRuntime> => ({
-      sql: input.sql,
-      profileName: input.profile ?? "prod",
-      client,
-      cacheContext: "mutate-batch-test",
-      maxRecords: input.maxRecords ?? 500,
-      fetchParallel: input.fetchParallel ?? 3,
-      onLimit: input.onLimit ?? "error",
-      timeout: input.timeout ?? 30000,
-    });
-    return { deps: { createRuntime }, calls };
+    ): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql,
+        profileName: input.profile ?? "prod",
+        client,
+        cacheContext: "mutate-batch-test",
+        // 実 runtime(createKsqlRuntime)と同じく、input 未指定なら既定 500 を解決する
+        maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
+        onLimit: input.onLimit ?? "error",
+        timeout: input.timeout ?? 30000,
+      };
+    };
+    return { deps: { createRuntime }, calls, runtimeInputs };
   }
 
   const MUTATE_BASE = { allowDml: true as const, confirmText: "yes" as const };
@@ -1221,8 +1276,12 @@ describe("MCP tools", () => {
     expect(calls.post).toBe(0);
   });
 
-  test("mutate: 混在ソースの JOIN APP 側 fetch は dmlMaxRows + 1 で上限され書き込み前に失敗", async () => {
-    const { deps, calls } = makeMutateRuntimeDeps({
+  test("mutate: 混在ソースの JOIN APP 側 fetch は dmlMaxRows で絞られず、影響行数が収まれば成功", async () => {
+    // v1.7.0 実機確認で発覚した再現シナリオ(CREATE TEMP TABLE ... LIMIT n; UPSERT ... JOIN)。
+    // 旧仕様では JOIN の APP300 側 4 行が dmlMaxRows + 1 = 3 で読み取り失敗していた。
+    // 案A(v1.8.0)では読み取りは runtime maxRecords(既定 500)に従い、JOIN 結果 1 行 ≦
+    // dmlMaxRows で成功する
+    const { deps, calls, runtimeInputs } = makeMutateRuntimeDeps({
       100: [
         { $id: { value: "1" }, 顧客名: { value: "A社" } },
       ],
@@ -1234,7 +1293,36 @@ describe("MCP tools", () => {
       ],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, deps);
-    // dmlMaxRows = 2 → maxRecords = 3。JOIN の APP300 側 4 行は読み取り段階で失敗(安全側)
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT a.顧客名 FROM #t a INNER JOIN APP300 b ON a.顧客名 = b.顧客名",
+      dmlMaxRows: 2,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[1]).toMatchObject({
+      type: "INSERT_SELECT",
+      status: "success",
+      insertedCount: 1,
+    });
+    expect(runtimeInputs[0]?.maxRecords).toBeUndefined(); // runtime の通常解決に委ねる
+    expect(calls.post).toBe(1);
+    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: バッチの SELECT-based DML が runtime maxRecords 超で失敗した場合はヒントを付与する", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+      ],
+      300: Array.from({ length: 501 }, (_v, i) => ({
+        $id: { value: String(i + 1) },
+        顧客名: { value: `会社${i + 1}` },
+      })),
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
     const result = await tools.mutate({
       ...MUTATE_BASE,
       sql:
@@ -1244,11 +1332,25 @@ describe("MCP tools", () => {
     }) as { ok: boolean; statements: Array<Record<string, unknown>> };
 
     expect(result.ok).toBe(false);
-    expect(result.statements[1]).toMatchObject({ status: "error" });
+    expect(result.statements[1]).toMatchObject({ type: "INSERT_SELECT", status: "error" });
     expect((result.statements[1].error as { message: string }).message)
-      .toMatch(/取得件数が上限（3 件）を超えました/);
+      .toMatch(/取得件数が上限（500 件）を超えました.*dmlMaxRows は影響行数ガードです/);
     expect(calls.post).toBe(0);
-    expect(calls.put).toBe(0);
+  });
+
+  test("mutate: SELECT-based DML を含まないバッチの読み取り上限は従来どおり dmlMaxRows + 1", async () => {
+    const { deps, runtimeInputs } = makeMutateRuntimeDeps({
+      100: [{ $id: { value: "1" }, ステータス: { value: "対応中" } }],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: "INSERT INTO APP100 (顧客名) VALUES ('A社'); UPDATE APP100 SET ステータス = '完了' WHERE $id = 1",
+      dmlMaxRows: 2,
+    }) as { ok: boolean };
+
+    expect(result.ok).toBe(true);
+    expect(runtimeInputs[0]?.maxRecords).toBe(3); // dmlMaxRows + 1(超過検出用)
   });
 
   test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と APP ソース INSERT_SELECT(confirm)を二重計上なしで合算する", async () => {

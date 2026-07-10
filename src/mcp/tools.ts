@@ -356,6 +356,46 @@ function requireDmlApproval(
   return Number(input.dmlMaxRows);
 }
 
+/** SELECT-based DML(INSERT_SELECT / UPSERT_SELECT)を含むか */
+function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: string }>): boolean {
+  return statements.some(
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT"
+  );
+}
+
+/**
+ * ksql_mutate が createRuntime に渡す読み取り上限。
+ * - SELECT-based DML を含む場合: undefined(runtime の通常解決
+ *   KSQL_MAX_RECORDS → profile.query.maxRecords → 500 に委ねる)。
+ *   ソース読み取り件数は影響行数と一致しない(JOIN の FULL_SCAN や UPSERT の
+ *   照合読み取り等)ため dmlMaxRows で絞らない。影響行数ガードは confirm フックが担う
+ * - それ以外(UPDATE / DELETE / INSERT / UPSERT / REORDER): 対象読み取り ≒ 影響行数
+ *   のため dmlMaxRows + 1(超過検出用に 1 件多く読む)
+ */
+function resolveMutateRuntimeMaxRecords(
+  statements: ReadonlyArray<{ statementType: string }>,
+  dmlMaxRows: number
+): number | undefined {
+  return containsSelectBasedDml(statements) ? undefined : dmlMaxRows + 1;
+}
+
+// 読み取り上限エラー(api/fetchAll.ts の onLimit = error 時メッセージ)への文脈付与。
+// SELECT-based DML では「dmlMaxRows を上げる」が正しい対処ではないことを案内する
+const READ_LIMIT_MESSAGE_FRAGMENT = "取得件数が上限";
+const SELECT_BASED_DML_READ_LIMIT_HINT =
+  "SELECT-based DML のソース読み取り上限は dmlMaxRows ではなく maxRecords 解決値" +
+  "(KSQL_MAX_RECORDS / profile の query.maxRecords、既定 500)で制御されます。" +
+  "dmlMaxRows は影響行数ガードです。";
+
+function appendSelectBasedDmlReadLimitHint(err: unknown): unknown {
+  if (err instanceof Error && err.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) {
+    const hinted = new Error(`${err.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}`);
+    hinted.name = err.name;
+    return hinted;
+  }
+  return err;
+}
+
 export function toToolResult(payload: object, isError = false): CallToolResult {
   return {
     content: [
@@ -580,10 +620,13 @@ export function createKsqlMcpTools(
       );
     }
 
+    const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows + 1,
+      // SELECT-based DML を含む場合は dmlMaxRows で読み取りを絞らない（案A。
+      // resolveMutateRuntimeMaxRecords の doc コメント参照）
+      maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
@@ -612,7 +655,19 @@ export function createKsqlMcpTools(
         return true;
       },
     });
-    return toBatchQueryPayload(batchResult);
+    const payload = toBatchQueryPayload(batchResult);
+    // SELECT-based DML 文の読み取り上限エラー（バッチでは文ごとの結果に埋め込まれる）
+    // にヒントを付与する
+    if (selectBasedDml) {
+      for (const entry of payload.statements) {
+        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT") continue;
+        const error = entry.error as { code?: string; message?: string } | undefined;
+        if (typeof error?.message !== "string") continue;
+        if (!error.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) continue;
+        entry.error = { ...error, message: `${error.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}` };
+      }
+    }
+    return payload;
   }
 
   async function mutate(input: MutateInput): Promise<Record<string, unknown>> {
@@ -635,26 +690,34 @@ export function createKsqlMcpTools(
       throw new Error(`ArgumentError: INSERT rows (${validation.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).`);
     }
 
+    const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
       profile: input.profile,
-      maxRecords: dmlMaxRows + 1,
+      // SELECT-based DML は dmlMaxRows で読み取りを絞らない（案A。
+      // resolveMutateRuntimeMaxRecords の doc コメント参照）
+      maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
     });
-    const result = await executeSql(runtime.sql, runtime.client, {
-      maxRecords: runtime.maxRecords,
-      fetchParallel: runtime.fetchParallel,
-      onLimitReached: runtime.onLimit,
-      cacheContext: runtime.cacheContext,
-      confirm: async (count, operation) => {
-        if (count > dmlMaxRows) {
-          throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
-        }
-        return true;
-      },
-    });
+    let result: ExecuteResult;
+    try {
+      result = await executeSql(runtime.sql, runtime.client, {
+        maxRecords: runtime.maxRecords,
+        fetchParallel: runtime.fetchParallel,
+        onLimitReached: runtime.onLimit,
+        cacheContext: runtime.cacheContext,
+        confirm: async (count, operation) => {
+          if (count > dmlMaxRows) {
+            throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
+          }
+          return true;
+        },
+      });
+    } catch (err) {
+      throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
+    }
     if (result.type === "SELECT") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
