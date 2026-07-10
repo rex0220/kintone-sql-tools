@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R4(実機確認で発覚): プラグインの一時テーブル上限入力のスピナーが 1, 1001, 2001... と刻まれる問題を修正 — `min="10000"` / `step="10000"` に変更(min がステップの整列基準のため既定値に揃える。§4.5)
   - 2026-07-11 R3(プラグイン対応の追加・ユーザー決定): §2.2 の「プラグイン見送り」を撤回し、**案A(実行画面の取得オプションパネルに実行ごと指定を追加)** を v1.11.0 に同乗させる(§4.5 新設)。選定理由: 既存 `maxRecords` のモデル(パネルで実行ごと自由変更・localStorage 永続・clamp なし)と一貫し、`maxRecords` 自体が既に無制限に引き上げ可能なため一時テーブルだけ統制しても防御にならない。管理者設定(案B)・二段構え(案C)は不採用(実行ごとの柔軟性欠如 / 新統制モデルの持ち込みで一貫性が崩れるため)。保存SQL の kintone レコード連携フィールドは対象外(アプリ側のフィールド追加が必要になるため)
   - 2026-07-11 R2(codex レビュー反映): ①§5.2 の自己矛盾を修正 — `run_saved_query` の `dmlMaxRows` describe は「tempTableMaxRows で調整可」ではなく「単文限定のため一時テーブル非対応」の明示に変更(存在しない入力をモデルに示唆しない)②§2.2 の「dmlMaxRows + 1 超〜tempTableMaxRows 以内の迂回幅」記述を撤回 — v1.8.0 案A 以降、SELECT-based DML のソース読み取りは runtime maxRecords 解決(`resolveMutateRuntimeMaxRecords`、`src/mcp/tools.ts:314-319`)であり `dmlMaxRows + 1` では絞られない ③§3.3・§7-6 に env(envInt が不正値を null で無視しフォールスルー)/ profile(検証なし)の扱いを明記 ④§6 に `ksql_mcp_server_spec.md` / `ksql_cli_console_spec.md` / README HELP_SYNC ブロックを必須更新対象として明示
   - 2026-07-11 R1: 初版(ドラフト)
@@ -148,6 +149,7 @@ onLimitReached: "error",
 ### 4.5 src/ui/desktop.ts(プラグイン実行画面。R3)
 
 - **取得オプションパネル**(`buildFetchOptionsPanel`): 「最大取得件数」の下に「一時テーブル上限(行)」の数値入力を追加(id: `ksql-temp-table-max-rows-input`)。placeholder は「10000（既定）」、注記に「空欄 = 既定 10,000。超過は常にエラー（『打ち切って続行』は適用されません）」を表示
+- **スピナー刻み**(R4): `min="10000"` / `step="10000"` — number input のステップは min を整列基準にするため、既定値と同じ 10000 に揃える(空欄から ▲ で 10000 に入り、以降 20000, 30000...)。当初の `min="1"` / `step="1000"` は空欄 → 1 → 1001 → 2001... となり実用に反した。10000 未満はスピナーでは選べないが手入力は可能(`sanitizeTempTableMaxRows` が受理)
 - **値の意味**: 空欄・不正値(0以下・非整数)は `undefined` = エンジン既定に復帰(`sanitizeMaxRecords` の「3000 に戻す」とは異なり、既定復帰が正しい挙動)
 - **永続化**: `FETCH_OPTIONS_KEY` の localStorage 形式に `tempTableMaxRows?: number` を追加(旧形式は undefined 扱いで後方互換)
 - **実行時解決**: `resolveRuntimeFetchOptions` が「取得」タブ表示中は DOM 現在値、非表示時は呼び出し元フォールバック値を使う(maxRecords と同じ2段構え)

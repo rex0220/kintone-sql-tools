@@ -933,10 +933,13 @@ function buildFetchOptionsPanel(
   const tempRow = el("div", "ksql-fetch-row");
   const tempLabel = el("label", "ksql-fetch-label");
   tempLabel.textContent = "一時テーブル上限(行):";
+  // min はスピナーの整列基準になるため既定値と同じ 10000 に揃える
+  //（空欄から ▲ で 10000 に入り、以降 20000, 30000... と刻む。min=1 だと 1, 1001, ... になる）。
+  // 10000 未満はスピナーでは選べないが、手入力は可能（sanitizeTempTableMaxRows が受理する）
   const tempInput = el("input", "ksql-fetch-input", {
     type: "number",
-    min: "1",
-    step: "1000",
+    min: "10000",
+    step: "10000",
     placeholder: "10000（既定）",
     id: "ksql-temp-table-max-rows-input",
   }) as HTMLInputElement;
