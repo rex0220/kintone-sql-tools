@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R7(codex レビュー反映・Medium): R6 の明示スナップショットが**取得タブ表示中**は `resolveRuntimeFetchOptions` の DOM 優先で上書きされ残存していた → codex 提案どおり `tempTableMaxRowsIsExplicit` フラグを追加し、**temp のみ明示指定(number | null)を DOM より優先**(maxRecords / onLimit は従来どおり DOM 優先のまま)。あわせて `runSql` の `tempTableMaxRows` 引数を「明示スナップショット専用」に純化 — パネル経路(実行ボタン・Ctrl+Enter・EXPLAIN・旧履歴)は undefined を渡し `latestPanelTempTableMaxRows` / DOM にフォールバック(`toggleHistoryDropdown` の temp 引数は不要になり削除)
   - 2026-07-11 R6(codex レビュー反映・プラグイン3件): ①一覧ページのレコード選択(`applyRecordConfig`)が「一時テーブル上限行」をパネルに反映していなかった → フィールドを持つレコードのみ DOM 入力へ反映(空欄 = 既定に復帰)、フィールドなしは従来どおりパネル現在値維持。保存SQLタブ(`SavedSqlItem`/`toSavedSqlItem`)にもスナップショットを追加し実行時に明示受け渡し ②SQL 履歴の「空欄 = 既定」が JSON でキー消失しパネル現在値で再実行されていた → **null を「明示的な既定」として常に保存**する3値セマンティクスに変更(number = 明示値 / null = 空欄スナップショット / undefined = 旧履歴・未指定経路 → パネル現在値フォールバック)。`runSql` の引数型も `number | null | undefined` に拡張 ③`sanitizeTempTableMaxRows` の parseInt 部分解釈("123abc" → 123、"10000.5" → 10000)を排除し `Number()` + `Number.isInteger()` で CLI/MCP の正整数検証と整合
   - 2026-07-11 R5(実機確認・ユーザー決定): レコード編集画面で一時テーブル上限が保持されない問題に対応 — R3 の「保存SQL レコード連携フィールド対象外」を撤回し、任意フィールド `一時テーブル上限行`(数値)との連携を追加(§4.5)。フィールドがないアプリでは従来どおり(ガード付き)
   - 2026-07-11 R4(実機確認で発覚): プラグインの一時テーブル上限入力のスピナーが 1, 1001, 2001... と刻まれる問題を修正 — `min="10000"` / `step="10000"` に変更(min がステップの整列基準のため既定値に揃える。§4.5)

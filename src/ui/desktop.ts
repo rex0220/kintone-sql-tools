@@ -519,7 +519,8 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   editor.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
-      void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), false, resolveTempTableMaxRows()).then((r) => {
+      // tempTableMaxRows は渡さない（undefined = パネル現在値/DOM を優先する通常経路）
+      void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached()).then((r) => {
         if (r) panelLastResult = r;
       });
     }
@@ -531,7 +532,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   const runBtn = el("button", "ksql-run-btn", { id: "ksql-run-btn" });
   runBtn.textContent = "実行（Ctrl+Enter）";
   runBtn.addEventListener("click", () => {
-    void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), false, resolveTempTableMaxRows()).then((r) => {
+    void runSql(editor.value.trim(), resultArea, false, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached()).then((r) => {
       if (r) panelLastResult = r;
     });
   });
@@ -544,7 +545,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
       // バッチ入力は EXPLAIN を前置せず、プラン表示モードで渡す
       //（前置すると2文目以降が実行されてしまうため）
       const isBatch = isMultiStatementSql(sql);
-      void runSql(isBatch ? sql : "EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), isBatch, resolveTempTableMaxRows()).then((r) => {
+      void runSql(isBatch ? sql : "EXPLAIN " + sql, resultArea, true, [], panelOptions, resolveMaxRecords(), resolveOnLimitReached(), isBatch).then((r) => {
         if (r) panelLastResult = r;
       });
     }
@@ -568,7 +569,6 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
       panelOptions,
       resolveMaxRecords(),
       resolveOnLimitReached(),
-      resolveTempTableMaxRows(),
       (r) => { panelLastResult = r; }
     );
   });
@@ -1733,7 +1733,6 @@ function toggleHistoryDropdown(
   resultOptions?: DisplayOptions,
   maxRecords = 3000,
   onLimitReached: "error" | "truncate" = "error",
-  tempTableMaxRows?: number,
   onExecuted?: (result: ExecuteResult) => void
 ): void {
   const dropdown = document.getElementById("ksql-hist-dropdown");
@@ -1783,10 +1782,9 @@ function toggleHistoryDropdown(
           const histOptions = item.displayOptions ?? resultOptions;
           const histMax = sanitizeMaxRecords(String(item.maxRecords ?? maxRecords));
           const histMode = item.onLimitReached === "truncate" ? "truncate" : onLimitReached;
-          // 新履歴はスナップショットどおり（null = 空欄 = 既定 10,000）、
-          // 旧履歴（記録なし = undefined）のみパネル現在値にフォールバック
-          const histTempRows = item.tempTableMaxRows !== undefined ? item.tempTableMaxRows : tempTableMaxRows;
-          void runSql(sql, resultArea, false, [], histOptions, histMax, histMode, false, histTempRows).then((r) => {
+          // 新履歴はスナップショットどおり明示指定（null = 空欄 = 既定 10,000。取得タブ表示中でも DOM で上書きしない）、
+          // 旧履歴（記録なし = undefined）は runSql 側でパネル現在値にフォールバック
+          void runSql(sql, resultArea, false, [], histOptions, histMax, histMode, false, item.tempTableMaxRows).then((r) => {
             if (r && onExecuted) onExecuted(r);
           });
         }
@@ -2017,8 +2015,9 @@ async function runSql(
   onLimitReached: "error" | "truncate" = "error",
   /** バッチ入力を実行せずプラン表示する（EXPLAIN ボタン経由。単文には影響しない） */
   batchExplainOnly = false,
-  /** 一時テーブル実体化上限。number = 明示値 / null = 明示的にエンジン既定（履歴・レコードのスナップショット）/
-   *  undefined = 未指定（パネル現在値にフォールバック） */
+  /** 一時テーブル実体化上限。**履歴・保存SQL・レコードの明示スナップショット専用**（パネル経路は渡さない）。
+   *  number = 明示値 / null = 明示的にエンジン既定 — いずれも取得タブ表示中でも DOM 値で上書きしない。
+   *  undefined = 未指定（パネル現在値 / DOM にフォールバック） */
   tempTableMaxRows?: number | null
 ): Promise<ExecuteResult | null> {
   if (!sql) {
@@ -2033,12 +2032,16 @@ async function runSql(
   const panel = resultArea.closest(".ksql-panel") as HTMLElement | null;
   const editor = panel?.querySelector("#ksql-editor") as HTMLTextAreaElement | null;
   const snapshotOptions = normalizeDisplayOptions(resultOptions ?? displayOptions);
-  // undefined（未指定の経路）のみ直近のパネル状態にフォールバック。
-  // null は「明示的に既定」のスナップショットなので undefined（エンジン既定）に写し、パネル値では上書きしない
-  const fallbackTempRows = tempTableMaxRows === undefined
-    ? latestPanelTempTableMaxRows
-    : tempTableMaxRows ?? undefined;
-  const runtimeFetch = resolveRuntimeFetchOptions(resultArea, maxRecords, onLimitReached, fallbackTempRows);
+  // 明示スナップショット（number | null）は取得タブ表示中でも DOM 値で上書きしない。
+  // null は「明示的に既定」なので undefined（エンジン既定）に写す。
+  // undefined（未指定 = パネル経路・保存SQLのフィールドなし等）のみ直近のパネル状態 / DOM にフォールバック
+  const tempRowsExplicit = tempTableMaxRows !== undefined;
+  const fallbackTempRows = tempRowsExplicit
+    ? tempTableMaxRows ?? undefined
+    : latestPanelTempTableMaxRows;
+  const runtimeFetch = resolveRuntimeFetchOptions(
+    resultArea, maxRecords, onLimitReached, fallbackTempRows, tempRowsExplicit
+  );
   const snapshotMax = runtimeFetch.maxRecords;
   const snapshotMode = runtimeFetch.onLimitReached;
   const snapshotTempRows = runtimeFetch.tempTableMaxRows;
@@ -2132,7 +2135,10 @@ function resolveRuntimeFetchOptions(
   resultArea: HTMLElement,
   fallbackMax: number,
   fallbackMode: "error" | "truncate",
-  fallbackTempTableMaxRows?: number
+  fallbackTempTableMaxRows?: number,
+  /** true = 履歴・保存SQL・レコードの明示スナップショット。取得タブ表示中でも DOM 値で上書きしない
+   *（maxRecords / onLimit は従来どおり DOM 優先のまま） */
+  tempTableMaxRowsIsExplicit = false
 ): { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number } {
   const panel = resultArea.closest(".ksql-panel") as HTMLElement | null;
   const maxInput = panel?.querySelector("#ksql-max-records-input") as HTMLInputElement | null;
@@ -2153,7 +2159,9 @@ function resolveRuntimeFetchOptions(
   return {
     maxRecords: sanitizeMaxRecords(maxInput.value),
     onLimitReached: mode === "truncate" ? "truncate" : "error",
-    tempTableMaxRows: sanitizeTempTableMaxRows(tempInput?.value),
+    tempTableMaxRows: tempTableMaxRowsIsExplicit
+      ? sanitizeTempTableMaxRows(fallbackTempTableMaxRows)
+      : sanitizeTempTableMaxRows(tempInput?.value),
   };
 }
 
