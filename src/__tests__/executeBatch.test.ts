@@ -98,6 +98,19 @@ test("CREATE → SELECT 参照の最小経路", async () => {
   expect(client.getCalls.every((c) => c.app === 100)).toBe(true);
 });
 
+test("0 件集計の CREATE TEMP TABLE は 1 行実体化される（v1.12.0）", async () => {
+  const client = makeClient({ recordsByApp: { 300: [] } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT COUNT(*) AS 件数 FROM APP300;" +
+    "SELECT 件数 FROM #t",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(r.statements[0].rowCount).toBe(1); // 旧: 0 行（列も導出されない）
+  const rows = (r.statements[1].result as SelectResult).rows;
+  expect(rows).toEqual([{ 件数: "0" }]);
+});
+
 test("JOIN で一時テーブルを参照できる", async () => {
   const client = makeClient({
     recordsByApp: {

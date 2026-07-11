@@ -34909,6 +34909,11 @@ function applyFilter(rows, where) {
   if (where === null) return rows;
   return rows.filter((row) => evalWhere(where, row));
 }
+function hasAggregateColumns(columns) {
+  return columns.some(
+    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr)
+  );
+}
 function applyGroupBy(rows, groupByKeys, columns) {
   const groups = /* @__PURE__ */ new Map();
   for (const row of rows) {
@@ -34916,6 +34921,9 @@ function applyGroupBy(rows, groupByKeys, columns) {
     const bucket = groups.get(key);
     if (bucket) bucket.push(row);
     else groups.set(key, [row]);
+  }
+  if (groups.size === 0 && groupByKeys.length === 0 && hasAggregateColumns(columns)) {
+    groups.set("", []);
   }
   const result = [];
   for (const groupRows of groups.values()) {
@@ -35332,10 +35340,7 @@ function runFullScan(input) {
     rows = applyJoin(rows, rightRows, join);
   }
   rows = applyFilter(rows, stmt.where);
-  const hasAggregate = stmt.columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr)
-  );
-  if (stmt.groupBy.length > 0 || hasAggregate) {
+  if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
   }
   rows = applyHaving(rows, stmt.having);
@@ -39270,7 +39275,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.11.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.12.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

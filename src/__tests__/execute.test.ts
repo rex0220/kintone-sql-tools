@@ -1481,14 +1481,37 @@ test("UPDATE SET スカラーサブクエリ — サブクエリの値で全件 
   expect(client.putCalls[0].records[1].record["上限費用"].value).toBe("5000");
 });
 
-test("UPDATE SET スカラーサブクエリ — 0 行返す場合はエラー", async () => {
+test("UPDATE SET スカラーサブクエリ — 非集計で 0 行返す場合はエラー", async () => {
+  // v1.12.0: 集計サブクエリ（MAX 等）は 0 件でも 1 行（0）を返すため、
+  // 0 行エラーが残るのは非集計プローブの空振りのみ
   const client = makeClient({ records: [] }); // サブクエリが 0 件
   await expect(
     execute(
-      "UPDATE APP88 SET 上限費用 = (SELECT MAX(合計費用) FROM APP88) WHERE 確度 in ('80%')",
+      "UPDATE APP88 SET 上限費用 = (SELECT 合計費用 FROM APP88) WHERE 確度 in ('80%')",
       client
     )
   ).rejects.toThrow("値を返しませんでした");
+});
+
+test("UPDATE SET スカラーサブクエリ — 0 件集計は 0 に解決される（v1.12.0）", async () => {
+  // GET 1回目: MAX(合計費用) のサブクエリ → 0 件 → 0 に解決
+  // GET 2回目: UPDATE 対象の $id 取得
+  const updateRecords = [makeRecord({ $id: "1" })];
+  let getCallCount = 0;
+  const client = makeClient();
+  (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
+    getCallCount++;
+    if (getCallCount === 1) return { records: [] }; // SELECT MAX(合計費用) — 0 件
+    return { records: updateRecords };
+  };
+
+  await execute(
+    "UPDATE APP88 SET 上限費用 = (SELECT MAX(合計費用) FROM APP88) WHERE 確度 in ('80%')",
+    client
+  ) as UpdateResult;
+
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].record["上限費用"].value).toBe("0");
 });
 
 test("UPDATE SET スカラーサブクエリ — 通常 SET との混在", async () => {
@@ -1510,6 +1533,104 @@ test("UPDATE SET スカラーサブクエリ — 通常 SET との混在", async
   const record = client.putCalls[0].records[0].record;
   expect(record["ステータス"].value).toBe("完了");
   expect(record["上限費用"].value).toBe("9999");
+});
+
+// ----------------------------------------------------------------
+// 0 件集計サブクエリ — GROUP BY なし集計は常に 1 行を返す（v1.12.0）
+// ----------------------------------------------------------------
+
+test("WHERE スカラーサブクエリ — 0 件集計は 0 として比較される", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ $id: "1", 名前: "田中", 金額: "100" }),
+        makeRecord({ $id: "2", 名前: "鈴木", 金額: "0" }),
+      ],
+      300: [], // 空アプリ
+    },
+  });
+  // サブクエリ入り WHERE は FULL_SCAN → JS 評価。金額 > 0 の行のみ残る
+  const result = await execute(
+    "SELECT 名前 FROM APP100 WHERE 金額 > (SELECT COUNT(*) FROM APP300)",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]["名前"]).toBe("田中");
+});
+
+test("SELECT 列スカラーサブクエリ — 0 件集計は 0 が出力される", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", 名前: "田中" })],
+      300: [],
+    },
+  });
+  const result = await execute(
+    "SELECT 名前, (SELECT COUNT(*) FROM APP300) AS 件数 FROM APP100",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]["件数"]).toBe("0");
+});
+
+test("IN サブクエリ — 0 件集計は {0} との照合になる（旧: 空集合）", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ $id: "1", 名前: "田中", 金額: "100" }),
+        makeRecord({ $id: "2", 名前: "鈴木", 金額: "0" }),
+      ],
+      300: [],
+    },
+  });
+  const result = await execute(
+    "SELECT 名前 FROM APP100 WHERE 金額 IN (SELECT COUNT(*) FROM APP300)",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1); // 金額 "0" のみ一致（v1.11.0 では空集合 → 0 行）
+  expect(result.rows[0]["名前"]).toBe("鈴木");
+});
+
+test("EXISTS サブクエリ — 0 件集計は常に真になる（v1.11.0 の false から反転）", async () => {
+  // 標準 SQL でも EXISTS(SELECT COUNT(*)...) は常に真（集計が 1 行返すため）
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", 名前: "田中" })],
+      300: [],
+    },
+  });
+  const result = await execute(
+    "SELECT 名前 FROM APP100 WHERE EXISTS (SELECT COUNT(*) FROM APP300)",
+    client
+  ) as SelectResult;
+  expect(result.rowCount).toBe(1);
+});
+
+test("INSERT INTO ... SELECT COUNT(*) — 0 件でも 1 行書き込まれる（旧: 列数 0 エラー）", async () => {
+  const client = makeClient({
+    recordsByApp: { 300: [] },
+    postIds: ["1"],
+  });
+  // confirm / dmlMaxRows の件数判定に 1 行として乗ることも固定する
+  // （dmlMaxRows は上位層が confirm を構成する仕組みのため、件数伝播の検証で足りる）
+  let confirmedCount = -1;
+  let confirmedOp = "";
+  const result = await execute(
+    "INSERT INTO APP200 (件数) SELECT COUNT(*) FROM APP300",
+    client,
+    {
+      confirm: async (count, op) => {
+        confirmedCount = count;
+        confirmedOp = op;
+        return true;
+      },
+    }
+  ) as InsertResult;
+  expect(confirmedCount).toBe(1);
+  expect(confirmedOp).toBe("INSERT");
+  expect(result.insertedCount).toBe(1);
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].records[0]["件数"].value).toBe("0");
 });
 
 // ----------------------------------------------------------------

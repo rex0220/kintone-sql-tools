@@ -142,6 +142,31 @@ test("単文: SELECT * サブクエリの複数列は実行時 AssertError", asy
 });
 
 // ----------------------------------------------------------------
+// 単文: 0 件集計は 1 行（COUNT = 0）を返す（v1.12.0）
+// ----------------------------------------------------------------
+
+test("単文: 0 件集計の = 0 健全性チェックが成立する（空アプリ）", async () => {
+  const client = makeClient({ 300: [] });
+  const result = await execute("ASSERT (SELECT COUNT(*) FROM APP300) = 0", client);
+  expect(result.type).toBe("ASSERT");
+});
+
+test("単文: JS 側 WHERE で全滅した集計も 0 として成立する", async () => {
+  // LENGTH は kintone クエリに変換できず JS 側でフィルタされる（全滅 → COUNT = 0）
+  const client = makeClient({ 100: APP1 });
+  const result = await execute(
+    "ASSERT (SELECT COUNT(*) FROM APP100 WHERE LENGTH(顧客名) > 100) = 0", client
+  );
+  expect(result.type).toBe("ASSERT");
+});
+
+test("単文: 0 件集計の不成立は no-rows ではなく actual: 0 になる", async () => {
+  const client = makeClient({ 300: [] });
+  await expect(execute("ASSERT (SELECT COUNT(*) FROM APP300) BETWEEN 1 AND 500", client))
+    .rejects.toThrow(/assertion failed: .+ \(actual: 0\)\./);
+});
+
+// ----------------------------------------------------------------
 // バッチ: 一時テーブル参照・no-result 文
 // ----------------------------------------------------------------
 
@@ -169,6 +194,19 @@ test("バッチ: APP 参照の ASSERT も実行できる", async () => {
   );
   expect(r.ok).toBe(true);
   expect(r.statements[1].status).toBe("success");
+});
+
+test("バッチ: 異常 0 件の = 0 ゲートが成立し後続文が実行される（v1.12.0）", async () => {
+  // 言語リファレンスの CLI ヘルスチェック例と同形（健全時に成立するゲート）
+  const client = makeClient({ 100: APP1, 300: [] });
+  const r = await executeBatch(
+    "ASSERT (SELECT COUNT(*) FROM APP300) = 0;" +
+    "SELECT 顧客名 FROM APP100",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(r.statements[0].status).toBe("success");
+  expect((r.statements[1].result as SelectResult).rowCount).toBe(3);
 });
 
 // ----------------------------------------------------------------

@@ -547,6 +547,7 @@ WHERE 金額 >= (SELECT MAX(上限金額) FROM APP200 WHERE 区分 = '標準')
 ```
 
 - サブクエリは 1 行 1 列を返す必要があります（0 行または 2 行以上はエラー）
+- GROUP BY なしの集計サブクエリ（`AVG(...)` 等）は対象 0 件でも 1 行（値 `0`）を返すためエラーになりません（§8「0 件時の挙動」— v1.12.0）
 - **相関サブクエリは非対応**（外側テーブルのフィールドをサブクエリ内で参照不可）
 - 自動的に FULL_SCAN モードで実行されます
 
@@ -730,6 +731,24 @@ WHERE ステータス = '完了'
 SELECT COUNT(DISTINCT 担当者) AS 担当者数 FROM APP100
 SELECT COUNT(DISTINCT 都道府県) AS 都道府県数 FROM APP100
 ```
+
+### 0 件時の挙動（v1.12.0）
+
+GROUP BY のない集計クエリは、対象が 0 件でも**常に 1 行**を返します（SQL 標準準拠）。
+
+```sql
+-- 該当 0 件でも「COUNT(*) = 0」の 1 行が返る
+SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
+```
+
+| 集計 | 0 件時の値 |
+|------|-----------|
+| `COUNT(*)` / `COUNT(f)` / `COUNT(DISTINCT f)` | `0` |
+| `SUM` / `AVG` / `MAX` / `MIN` | `0`（**標準 SQL の NULL とは異なります**） |
+
+- 「対象なし（COUNT = 0）」と「合計が 0」を区別したい場合は COUNT を併用してください
+- GROUP BY が**ある**場合は従来どおり 0 行を返します（グループが存在しないため）
+- これにより ASSERT の健全性チェック `ASSERT (SELECT COUNT(*) ... WHERE 異常条件) = 0` が該当 0 件（健全時）に成立します（§26 ASSERT）
 
 ---
 
@@ -1231,7 +1250,7 @@ WHERE 確度 in ('80%', '100%')
 
 | 項目 | 内容 |
 |---|---|
-| 返却行数 | 1 行 1 列のみ（0 行・2 行以上はエラー） |
+| 返却行数 | 1 行 1 列のみ（0 行・2 行以上はエラー。GROUP BY なしの集計サブクエリは 0 件でも 1 行 = `0` を返すためエラーになりません — §8） |
 | 相関サブクエリ | 非対応（外側テーブルのフィールドを参照不可） |
 | サブクエリ後の算術 | 非対応 — 算術はサブクエリ内で行う |
 
@@ -1557,7 +1576,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | `NOT IN (SELECT ...)` | WHERE | 除外条件 |
 | `EXISTS (SELECT ...)` | WHERE | 1 件以上返せば真 |
 | `NOT EXISTS (SELECT ...)` | WHERE | 0 件なら真 |
-| `(SELECT ...)` | WHERE 右辺・SELECT 列・HAVING 右辺 | スカラーサブクエリ（1 行 1 列） |
+| `(SELECT ...)` | WHERE 右辺・SELECT 列・HAVING 右辺 | スカラーサブクエリ（1 行 1 列。GROUP BY なしの集計は 0 件でも 1 行 = `0` を返す — §8） |
 
 **共通制約:**
 - **非相関のみ対応** — 外側テーブルのフィールドをサブクエリ内で参照することはできません
@@ -1815,6 +1834,7 @@ ksql -e "ASSERT (SELECT COUNT(*) FROM APP1 WHERE 異常フラグ = '1') = 0"
 - 不成立の場合は `AssertError: assertion failed: <条件> (actual: <実測値>).` でその文がエラーになり、**バッチは常に停止**します（`continueOnError` 指定も無視。以降の文は `skipped` / `skippedReason: "assertion"`）
 - バッチ成功時の ASSERT は結果を持たない文として扱われます（`statements[]` は `status: "success"` のみ）
 - スカラーサブクエリは**必ず 1行1列**を要求します。0行・複数行は実行時 `AssertError`（0行を NULL 扱いにしません）。複数列は select list が明示的ならパース時に拒否、`SELECT *` 等は実行時に検証します
+- **GROUP BY なしの集計サブクエリは対象 0 件でも 1 行（COUNT は `0`）を返す**（§8「0 件時の挙動」— v1.12.0）ため、上の CLI 例のような `ASSERT (SELECT COUNT(*) ... WHERE 異常条件) = 0` の健全性チェックが該当 0 件（健全時）に成立します。0 行エラーが起きるのは、非集計プローブの空振り（`SELECT フィールド FROM ... WHERE ...` が 0 件）や GROUP BY 付き集計が 0 行になる場合です
 
 ### 制限（初期版）
 

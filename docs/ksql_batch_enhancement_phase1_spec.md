@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-10
 - 更新履歴:
+  - 2026-07-11 R5(v1.12.0): §2.4 エラー表の「サブクエリ 0 行」に注記 — GROUP BY なしの集計サブクエリは 0 件でも 1 行(COUNT = 0 等)を返すようになったため、0 行エラーは非集計プローブの空振り・GROUP BY 付き集計が 0 行になる場合に限られる。これにより `ASSERT (SELECT COUNT(*) ... WHERE 異常条件) = 0` の健全性チェックが健全時(該当 0 件)に成立する。仕様は `docs/internal/ksql_ungrouped_aggregate_empty_result_spec.md`
   - 2026-07-10 R4(実機確認で発覚): §2.1 の典型例が既存制限と矛盾していたのを修正 — `UPDATE ... WHERE $id IN (SELECT $id FROM #targets)` は「DML(UPDATE / DELETE / UPSERT)内の一時テーブル参照」の既存拒否(`ArgumentError: temp table references in UPDATE are not supported yet.` — v1.7.0 の解禁は SELECT-based DML のソースのみ)に当たり実行不能。ASSERT 自体の一時テーブル参照は可のため、実行可能な形(ASSERT 直接検証 + UPDATE は同条件、または後続を temp ソースの INSERT/UPSERT ... SELECT)に差し替え。言語リファレンス §26 の同例も修正
   - 2026-07-10 R3(実装後レビュー反映): C1 の「env 解決をゲート生成部に集約」を変更 — `src/api/requestGate.ts` に `node/config`(fs 依存)を import させない。env 解決は `resolveRequestGateOptions()`(node/config.ts)として Node 層に置き、呼び出し側 2 箇所で適用(§4.3。優先順 env > CLI > config > 既定は不変)。あわせて `RequestGate` constructor で backoff 値を clamp(profile JSON 経由の無検証値対策)
   - 2026-07-10 R2: 再レビュー反映。プラグイン UI の「自動対応」を訂正 — `renderResult()` は `ExecuteResult` の網羅 switch のため `case "ASSERT"` の追加が必須(§2.5)/ §5 実装ステップ表 B1 の抽出先を `src/output/batchEnvelope.ts` に修正(§3.3 との不整合解消)
@@ -84,7 +85,7 @@ UPDATE APP100 SET 状態 = '対象' WHERE 売上 > 1000000;
 | 状況 | メッセージ例 |
 |---|---|
 | 条件不成立 | `AssertError: assertion failed: (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500 (actual: 812).` |
-| サブクエリ 0行 | `AssertError: scalar subquery returned no rows (expected 1 row).` |
+| サブクエリ 0行 | `AssertError: scalar subquery returned no rows (expected 1 row).` — **v1.12.0 以降、GROUP BY なしの集計サブクエリは 0 件でも 1 行(COUNT = 0 等)を返すため、このエラーは非集計プローブの空振り・GROUP BY 付き集計が 0 行になる場合に限られる**(言語リファレンス §8「0 件時の挙動」) |
 | サブクエリ複数行 | `AssertError: scalar subquery returned 3 rows (expected 1 row).` |
 | サブクエリ複数列(静的) | `ParseError: scalar subquery in ASSERT must return exactly 1 column.` |
 | 複合条件・裸の値 | `ParseError`(構文エラーとして既存規約どおり) |

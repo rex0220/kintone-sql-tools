@@ -416,6 +416,19 @@ v1.7.0 の実機確認で、MCP クライアントが影響行数基準で小さ
 | smoke 回帰ガード | schema に `tempTableMaxRows`（query / mutate）、description キーに `"by default (adjustable via tempTableMaxRows)"`、run_saved_query の非公開・非言及 assertion を追加（旧バンドルで失敗することを確認後に適用） |
 | 注意 | 上限を引き上げるとバッチ内最大16テーブル × 指定値がメモリに滞留し得る（参照は常にインメモリ FULL_SCAN）。まず WHERE での絞り込みを推奨 |
 
+## 11.12 GROUP BY なし集計の 0 件時「1 行」返却（v1.12.0）
+
+GROUP BY のない集計 SELECT が対象 0 件のとき「0 行」ではなく「1 行（COUNT = 0、
+SUM/AVG/MAX/MIN = 0）」を返すようにした（SQL 標準準拠化。エンジン層の変更で
+MCP のスキーマ・ツール実装は無変更。仕様: `docs/internal/ksql_ungrouped_aggregate_empty_result_spec.md`）。
+
+| 変更 | 内容 |
+| --- | --- |
+| 動機 | 健全性チェックの定番 `ASSERT (SELECT COUNT(*) ... WHERE 異常条件) = 0` が健全時（該当 0 件）にこそ `AssertError: scalar subquery returned no rows` で失敗していた（言語リファレンス自身の CLI 例が実行不能だった） |
+| `ksql_query` / `ksql_mutate` で観測可能な変化 | 0 件集計 SELECT が 1 行を返す / ASSERT `= 0` ゲートが成立 / WHERE・SELECT 列・UPDATE SET のスカラーサブクエリが `0` に解決 / `IN (SELECT COUNT(*)...)` が `{0}` 照合 / **`EXISTS (SELECT COUNT(*)...)` が常に真**（従来 0 件で偽） / `CREATE TEMP TABLE ... AS SELECT COUNT(*)` が 0 件でも 1 行実体化 / `INSERT ... SELECT COUNT(*)` が 0 件でも 1 行書き込み（confirm / `dmlMaxRows` 判定に 1 行として乗る） |
+| 不変 | GROUP BY ありの空入力は 0 行のまま。ASSERT の 0 行 / 複数行 / 複数列エラーは維持（0 行エラーは非集計プローブの空振り等に限られる） |
+| メタデータ | 更新なし（grep で確認 — 旧挙動を前提にした describe / description は存在せず、新挙動は標準 SQL でモデルの既定想定と一致） |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:
