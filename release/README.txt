@@ -1,28 +1,23 @@
-ksql 配布パッケージ (v1.11.0)
+ksql 配布パッケージ (v1.12.0)
 
-1. ksql-plugin-v1.11.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v1.12.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
+   (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-v1.11.0: 一時テーブル上限(tempTableMaxRows)の公開。
-- 一時テーブル1個の実体化行数上限(従来 10,000 固定)を変更可能に。
-  未指定時の挙動は従来どおりで、超過は設定によらず常にエラーです
-  (打ち切りは適用されません — 欠けたデータを後続文に渡さないため)。
-- MCP: ksql_query / ksql_mutate のツール引数 tempTableMaxRows。
-  環境変数 KSQL_TEMP_TABLE_MAX_ROWS / ksql.config.json の
-  query.tempTableMaxRows でも既定値を変更できます。
-- CLI: --temp-table-max-rows フラグ(console の :run 子実行にも伝搬)。
-- プラグイン: 「⚙ オプション → 取得」の「一時テーブル上限(行)」
-  (空欄 = 既定 10,000)。一覧ページは localStorage に保存、
-  レコード編集画面は保存SQLアプリの任意フィールド
-  「一時テーブル上限行」(数値)があればレコードに保持されます。
-- アプリテンプレートを v1.11.0 に更新(「一時テーブル上限行」
-  フィールドを追加。既存アプリはフィールド追加なしでも従来どおり
-  動作します)。
-  既存アプリに追加する場合: 設定 → フォームで「数値」フィールドを
-  配置し、フィールドコードを「一時テーブル上限行」(完全一致)に
-  してアプリを更新してください。詳細手順は
-  docs/ksql_language_reference.md 「プラグインでの一時テーブル
-  上限指定」を参照。
-上限を引き上げるとメモリ使用量が増えます(バッチ内最大16テーブル ×
-指定値)。まず WHERE での絞り込みをご検討ください。
+v1.12.0: GROUP BY なし集計の 0 件時挙動を SQL 標準に準拠(挙動変更)。
+- GROUP BY のない集計 SELECT は対象 0 件でも常に 1 行を返します
+  (COUNT は 0、SUM / AVG / MAX / MIN も 0。GROUP BY がある場合は
+  従来どおり 0 行)。
+- これにより健全性チェックの定番
+  ASSERT (SELECT COUNT(*) FROM ... WHERE 異常条件) = 0
+  が該当 0 件(健全時)に成立するようになりました(従来は
+  「scalar subquery returned no rows」エラーで失敗)。
+- 波及する挙動変更(いずれも標準準拠化):
+  WHERE / SELECT 列 / UPDATE SET のスカラーサブクエリが 0 に解決、
+  IN (SELECT COUNT(*)...) は {0} との照合、
+  EXISTS (SELECT COUNT(*)...) は常に真、
+  CREATE TEMP TABLE ... AS SELECT COUNT(*) は 0 件でも 1 行実体化、
+  INSERT ... SELECT COUNT(*) は 0 件でも 1 行書き込み。
+- 詳細は docs/ksql_language_reference.md §8「0 件時の挙動」と
+  CHANGELOG.md を参照してください。
