@@ -290,6 +290,9 @@ kintone.events.on(
     "app.record.create.change.上限到達時の動作",
     "app.record.edit.change.最大取得件数",
     "app.record.create.change.最大取得件数",
+    // 「一時テーブル上限」はアプリ側の任意フィールド（なければイベントは発火しないだけで無害）
+    "app.record.edit.change.一時テーブル上限",
+    "app.record.create.change.一時テーブル上限",
   ],
   (event) => {
     const e = event as RecordShowEvent;
@@ -439,6 +442,8 @@ interface PanelBuildOptions {
   initialDisplayOptions?: DisplayOptions;
   initialMaxRecords?: number;
   initialOnLimitReached?: "error" | "truncate";
+  /** レコードページ: 保存SQL アプリの「一時テーブル上限」フィールドからの復元値（フィールドなし・空欄 = undefined） */
+  initialTempTableMaxRows?: number;
   resolveMaxRecords?: () => number;
   resolveOnLimitReached?: () => "error" | "truncate";
   panelId?: string;
@@ -458,7 +463,9 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     : null;
   let panelMaxRecordsState = options.initialMaxRecords ?? storedFetch?.maxRecords ?? 3000;
   let panelOnLimitState: "error" | "truncate" = options.initialOnLimitReached ?? storedFetch?.onLimitReached ?? "error";
-  let panelTempTableMaxRowsState: number | undefined = storedFetch?.tempTableMaxRows;
+  // レコードページはフィールド復元値（initialTempTableMaxRows）、一覧ページは localStorage
+  let panelTempTableMaxRowsState: number | undefined =
+    options.initialTempTableMaxRows ?? storedFetch?.tempTableMaxRows;
   // 実行時は常にパネルの現在UI状態を優先する。
   // （レコード保存前に options.resolve* 側の値が古い場合でも、直近入力値で実行できるようにする）
   const resolveMaxRecords = (): number => panelMaxRecordsState;
@@ -1138,6 +1145,11 @@ function parseOnLimitReachedFromRecord(record: KintoneUiRecord): "error" | "trun
   return (raw.includes("打ち切") || raw.includes("続行")) ? "truncate" : "error";
 }
 
+/** 保存SQL アプリの「一時テーブル上限」フィールド（任意）。なし・空欄・不正値は undefined = エンジン既定 */
+function parseTempTableMaxRowsFromRecord(record: KintoneUiRecord): number | undefined {
+  return sanitizeTempTableMaxRows(getFieldText(record, "一時テーブル上限"));
+}
+
 function sanitizeMaxRecords(raw: string): number {
   const n = parseInt(String(raw).replace(/,/g, "").trim(), 10);
   if (!Number.isFinite(n) || n <= 0) return 3000;
@@ -1232,6 +1244,7 @@ function mountRecordPanel(event: RecordShowEvent): void {
   const initialDisplayOptions = current ? parseDisplayOptionsFromRecord(current) : undefined;
   const initialMaxRecords = current ? parseMaxRecordsFromRecord(current) : 3000;
   const initialOnLimitReached = current ? parseOnLimitReachedFromRecord(current) : "error";
+  const initialTempTableMaxRows = current ? parseTempTableMaxRowsFromRecord(current) : undefined;
 
   space.innerHTML = "";
   const panel = buildPanel(records, {
@@ -1239,6 +1252,7 @@ function mountRecordPanel(event: RecordShowEvent): void {
     initialDisplayOptions,
     initialMaxRecords,
     initialOnLimitReached,
+    initialTempTableMaxRows,
     resolveMaxRecords: () => {
       const rec = latestRecordForForm;
       return rec ? parseMaxRecordsFromRecord(rec) : initialMaxRecords;
@@ -1280,6 +1294,11 @@ function syncRecordFieldsFromSpacePanel(event: RecordShowEvent): void {
   if (record["ファイル"]) record["ファイル"].value = mapAttachmentFormatToLabel(file);
   if (record["最大取得件数"]) record["最大取得件数"].value = String(latestPanelMaxRecords);
   if (record["上限到達時の動作"]) record["上限到達時の動作"].value = mapLimitModeToLabel(latestPanelOnLimit);
+  // 「一時テーブル上限」フィールドはアプリ側に任意追加（なければスキップ）。未指定 = 空欄で保存
+  if (record["一時テーブル上限"]) {
+    record["一時テーブル上限"].value =
+      latestPanelTempTableMaxRows !== undefined ? String(latestPanelTempTableMaxRows) : "";
+  }
 }
 
 function lockSqlIdOnEdit(event: RecordShowEvent): void {
