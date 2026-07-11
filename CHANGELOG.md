@@ -2,6 +2,21 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v1.12.1（2026-07-11）
+
+### 修正（バグ）
+
+- **SQL コメント・文字列リテラル・バッククォート識別子の中に書いた `APPxxxx` を、トークン解決の対象から除外**。
+  従来は `extractAppIds` が生 SQL を素の正規表現で走査していたため、
+  `-- 通知(APP4206)` のようなコメントや `'APP4206の件'` のような文字列に現れた
+  アプリ番号まで「参照アプリ」とみなし、profile の tokenMap に無いと
+  `AuthError: token is missing for APPxxxx@profile.` で実行不能になっていた。
+  `@profile` 正規化と同じスキャナ（`collectAppProfileTokens`）に統一し、
+  コメント・文字列・バッククォートを除外してから APP 参照を拾うようにした。
+  本文の `FROM APPxxxx`（`@profile` / `$subtable` 付き含む）は従来どおり解決する。
+  誤って要求していたトークンを要求しなくなる方向のみの変更で、後方互換。
+  （詳細: `docs/internal/ksql_extract_app_ids_comment_string_issue.md`）
+
 ## v1.12.0（2026-07-11）
 
 ### 変更（挙動変更）

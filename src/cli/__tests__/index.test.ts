@@ -27,6 +27,26 @@ describe("cli helpers", () => {
     expect(ids).toEqual([100, 101]);
   });
 
+  test("extractAppIds はコメント内の APPxxx を無視する", () => {
+    expect(extractAppIds("-- 通知(APP4206)\nSELECT * FROM APP4205")).toEqual([4205]);
+    expect(extractAppIds("/* APP4207 */ SELECT * FROM APP4205")).toEqual([4205]);
+  });
+
+  test("extractAppIds は文字列リテラル内の APPxxx を無視する", () => {
+    expect(extractAppIds("SELECT 'APP4206の件' AS x FROM APP4205")).toEqual([4205]);
+  });
+
+  test("extractAppIds はバッククォート識別子内の APPxxx を無視する", () => {
+    expect(extractAppIds("SELECT `APP4206` FROM APP4205")).toEqual([4205]);
+  });
+
+  test("extractAppIds は @profile / $subtable を含む有効な APP 参照も従来どおり拾う", () => {
+    // 修正前の正規表現でも AppId を取得できるため回帰検出ではなく、
+    // 境界判定を collectAppProfileTokens に一本化した後も有効参照が壊れないことの固定
+    expect(extractAppIds("SELECT * FROM APP100@dev")).toEqual([100]);
+    expect(extractAppIds("SELECT * FROM APP100$明細")).toEqual([100]);
+  });
+
   test("normalizeSqlAppProfiles strips @profile from app refs", () => {
     const parsed = normalizeSqlAppProfiles("SELECT * FROM APP100@guest JOIN app80$明細@dev ON 1=1");
     expect(parsed.normalizedSql).toContain("APP100");
