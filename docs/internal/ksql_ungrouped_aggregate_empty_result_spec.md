@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-11
 - 更新履歴:
+  - 2026-07-11 R3(S1 実装で発覚・2件): ①§3.2 の HAVING 例 `SELECT COUNT(*) FROM t HAVING COUNT(*) > 0` は **ksql 文法では書けない**(HAVING は GROUP BY 節の内部でのみパースされる — `parser.ts` parseSelect 節で裏取り)。合成行が HAVING で消えるケースは SQL としては到達不能のため、§3.2 を「パイプライン順序の整合(applyHaving 直接検証)」に修正し、§7.1-8 のテストも同形に変更。v1.10.0 R4 の教訓(仕様書の SQL 例は実行可能性を検証してから書く)の再発 ②テスト作成で**スコープ外の既存パーサバグを発見**: 末尾オペランドが集計関数の集計算術式(`SUM(a) - SUM(b) AS x`)は、右オペランドの `parseAggregateColumn`(`parser.ts:1144`)が `AS x` を消費し AGG_REF 変換(`:785`)で捨てるため **alias が静かに消える**(`SUM(a) * 1.1 AS x` は末尾が数値のため無事)。本件では扱わない(§7.1-3 のテストは合成名キーを使用)。別課題として起票判断はユーザーに委ねる
   - 2026-07-11 R2(codex レビュー反映・3件): ①(中)§4.1 の仮想グループ合成条件に**集計列の存在**を追加 — 旧条件では公開関数 `applyGroupBy` を非集計列のみで直接呼んだ場合も 1 行合成された(実経路 `runFullScan:806` は hasAggregate ゲート後のみ呼ぶため実害なしだが、関数単独の契約として脆弱)。判定述語は runFullScan `:801-805` と共有ヘルパに抽出し、§3.4 不変条件 7・§7.1 テストを追加 ②(中)§3.3 で CHANGELOG 個別告知とした高リスク挙動変更(EXISTS false→true / IN `{0}` / INSERT ... SELECT 1 行書き込み / LIMIT 0・OFFSET による合成行除去)の回帰テストを §7 に明記 ③(低)§3.1 の非集計 FIELD 混在の根拠を修正 — 標準 SQL では「未定義値」ではなく**クエリ自体が不正**(ksql が独自に許容している形)
   - 2026-07-11 R1: 初版(ドラフト)
 - ステータス: **codex レビュー済み・R2 反映済み(指摘3件。反映を条件に「実装へ進める品質」判定)**
@@ -96,7 +97,7 @@ WHERE(および JOIN)適用後の入力が 0 行で、GROUP BY がなく、SELEC
 
 合成は `applyGroupBy` 内(パイプライン第 4 段)で行い、後段(HAVING → DISTINCT → ORDER BY → LIMIT/OFFSET → project)は合成行を通常の 1 行として処理する。
 
-- **HAVING**: 合成行にも適用される。例: `SELECT COUNT(*) FROM t HAVING COUNT(*) > 0` は 0 件時に 1 行合成 → HAVING で除外 → **0 行**。これは SQL 標準と同じ挙動であり、この場合にスカラーサブクエリ消費側(§1.4)がエラーになるのは正当(意図的に行を消しているため)
+- **HAVING**: パイプライン順序としては合成行にも適用される(applyHaving は applyGroupBy の直後段)。ただし **ksql 文法では HAVING は GROUP BY とセットでのみ書ける**(`parser.ts` parseSelect 節 — R3)ため、「GROUP BY なし集計 + HAVING」は SQL としては到達不能であり、合成行が HAVING で消えるケースは実 SQL では発生しない。順序の整合は applyHaving 直接検証で固定する(§7.1-8)。なお GROUP BY **あり**の集計が 0 行になる(グループなし・HAVING 全滅)ケースでスカラーサブクエリ消費側(§1.4)がエラーになるのは従来どおり正当
 - **ORDER BY / LIMIT / OFFSET**: 1 行に対する自明な適用(`LIMIT 0` なら 0 行 — 既存どおり)
 - **columns 導出**: `project` の `orderedKeys` は先頭行から構築されるため、従来 0 行時に `columns: []` だった集計クエリが正しい列名リストを返すようになる(サブクエリ・temp table 実体化の列導出も同時に正常化)
 
@@ -177,7 +178,7 @@ if (groups.size === 0 && groupByKeys.length === 0 && hasAggregateColumns(columns
 | ファイル | 内容 |
 |---|---|
 | `docs/ksql_language_reference.md` §8(集計関数) | 「0 件時の挙動」小節を追加: GROUP BY なし集計は常に 1 行(COUNT → 0、SUM/AVG/MIN/MAX → 0。**標準 SQL の NULL と異なる**こと、「対象なし」と「合計 0」の区別には COUNT を併用することを明記)。GROUP BY ありは 0 行 |
-| `docs/ksql_language_reference.md` ASSERT 節 | 「0 行を NULL 扱いにしません」の段落に「集計サブクエリ(GROUP BY なし)は 0 件でも 1 行を返すため、`= 0` 型の健全性チェックが成立する(v1.12.0)。0 行エラーは非集計プローブの空振り・HAVING で行が消えた場合に発生」と追記。§サブクエリ(スカラー 1 行 1 列)の記述も同様に更新 |
+| `docs/ksql_language_reference.md` ASSERT 節 | 「0 行を NULL 扱いにしません」の段落に「集計サブクエリ(GROUP BY なし)は 0 件でも 1 行を返すため、`= 0` 型の健全性チェックが成立する(v1.12.0)。0 行エラーは非集計プローブの空振り・GROUP BY 付き集計が 0 行になる場合(グループなし・HAVING 全滅)に発生」と追記。§サブクエリ(スカラー 1 行 1 列)の記述も同様に更新 |
 | `docs/ksql_batch_enhancement_phase1_spec.md` | §2.2 エラー表に注記 + 更新履歴 R 追記: 0 行エラーは v1.12.0 以降、非集計プローブ等に限られる |
 | `docs/ksql_batch_temp_table_spec.md` | §(ASSERT エラー表)同上の注記 + R 追記。0 件集計ソースの temp table が 1 行実体化になる点(§3.3)も追記 |
 | `docs/ksql_mcp_changes.md` | v1.12.0 エントリ追加(MCP 経由で観測可能な挙動変更のため) |
@@ -194,7 +195,7 @@ if (groups.size === 0 && groupByKeys.length === 0 && hasAggregateColumns(columns
 5. `applyGroupBy`: 空入力 + GROUP BY **あり** → 0 行(不変条件 2)
 6. `applyGroupBy`: 空入力 + GROUP BY なし + **非集計列のみ**の直接呼び出し → 0 行(不変条件 7・R2)
 7. `runFullScan` 統合: `WHERE` 全滅 + `COUNT(*)` → 1 行、columns に列名が入る(§3.2)
-8. `runFullScan`: `HAVING COUNT(*) > 0` + 空入力 → 0 行(§3.2)
+8. 合成行 → `applyHaving` 直接適用で除外できる(パイプライン順序の整合。GROUP BY なし + HAVING は文法上書けないため SQL レベルでは到達不能 — R3)
 9. `runFullScan`: 合成行への `LIMIT 0` → 0 行、`OFFSET 1` → 0 行(§3.2 の後段適用・R2)
 10. 既存テスト全件 green(入力 1 行以上の回帰なし — 不変条件 1)
 

@@ -173,6 +173,15 @@ export function applyFilter(
 // 4. groupBy + 集計
 // ============================================================
 
+/** SELECT 句に集計（AGGREGATE / ARITH_AGG_COL / 集計入り STRFUNC_COL）が含まれるか */
+export function hasAggregateColumns(columns: SelectColumn[]): boolean {
+  return columns.some((c) =>
+    c.type === "AGGREGATE" ||
+    c.type === "ARITH_AGG_COL" ||
+    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr))
+  );
+}
+
 /**
  * GROUP BY フィールドでグループ化し、SELECT 句の集計関数を評価する。
  * 出力行のキー:
@@ -193,9 +202,18 @@ export function applyGroupBy(
     else groups.set(key, [row]);
   }
 
+  // GROUP BY なし集計は入力 0 行でも 1 行返す（SQL 標準準拠。COUNT=0、SUM/AVG/MIN/MAX は
+  // 全値空グループと同じ 0 — 空集合だけ NULL にすると ksql 内の既存規約と不整合になる）。
+  // 集計列の存在を条件に含めるのは applyGroupBy 単独の契約のため（runFullScan 経由では
+  // hasAggregate ゲート後のみ呼ばれ常に真だが、非集計列のみの直接呼び出しで合成しない）
+  if (groups.size === 0 && groupByKeys.length === 0 && hasAggregateColumns(columns)) {
+    groups.set("", []);
+  }
+
   const result: ProcessRow[] = [];
   for (const groupRows of groups.values()) {
-    // 元行の全フィールドをコピー（式の再評価やフィールド参照のため）
+    // 元行の全フィールドをコピー（式の再評価やフィールド参照のため）。
+    // 空の仮想グループでは groupRows[0] が undefined だが、undefined のスプレッドは {} になる
     const outRow: ProcessRow = { ...groupRows[0] };
 
     // 式キーの計算値を確定値として上書き
@@ -798,12 +816,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
-  const hasAggregate = stmt.columns.some((c) =>
-    c.type === "AGGREGATE" ||
-    c.type === "ARITH_AGG_COL" ||
-    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr))
-  );
-  if (stmt.groupBy.length > 0 || hasAggregate) {
+  if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
   }
 

@@ -179,6 +179,92 @@ test("COUNT(DISTINCT フィールド)", () => {
 });
 
 // ----------------------------------------------------------------
+// applyGroupBy: 空入力の非グループ集計は 1 行を返す（v1.12.0）
+// ----------------------------------------------------------------
+
+test("空入力 + GROUP BY なし + COUNT(*) → 0 の 1 行", () => {
+  const stmt = parseSelect("SELECT COUNT(*) AS cnt FROM APP100");
+  const result = applyGroupBy([], stmt.groupBy, stmt.columns);
+  expect(result).toHaveLength(1);
+  expect(result[0]["cnt"]).toBe("0");
+});
+
+test("空入力 + GROUP BY なし: 全集計関数が 0 を返す", () => {
+  const stmt = parseSelect(
+    "SELECT COUNT(金額) AS c, COUNT(DISTINCT 金額) AS cd, SUM(金額) AS s, AVG(金額) AS a, MAX(金額) AS mx, MIN(金額) AS mn FROM APP100"
+  );
+  const result = applyGroupBy([], stmt.groupBy, stmt.columns);
+  expect(result).toHaveLength(1);
+  for (const key of ["c", "cd", "s", "a", "mx", "mn"]) {
+    expect(result[0][key]).toBe("0");
+  }
+});
+
+test("空入力 + 集計算術式: SUM(a) - SUM(b) → 0、0 除算は既存 NaN 挙動", () => {
+  // 出力キーは合成名（末尾オペランドが集計関数の ARITH_AGG_COL は AS alias が
+  // パーサで落ちる既存の別問題があるため、ここでは alias を使わない）
+  const stmt = parseSelect(
+    "SELECT SUM(売上) - SUM(原価), SUM(売上) / COUNT(*) FROM APP100"
+  );
+  const result = applyGroupBy([], stmt.groupBy, stmt.columns);
+  expect(result).toHaveLength(1);
+  expect(result[0]["SUM(売上)-SUM(原価)"]).toBe("0");
+  expect(result[0]["SUM(売上)/COUNT(*)"]).toBe("NaN"); // 0 / 0 — 非空入力の 0 除算と同じ既存挙動
+});
+
+test("空入力 + 集計入り文字列関数 / 非集計 FIELD 混在", () => {
+  const stmt = parseSelect(
+    "SELECT 種別, COUNT(*) AS cnt, FORMAT(SUM(金額), '#,##0') AS 合計 FROM APP100"
+  );
+  const result = runFullScan({ tables: new Map([[null, []]]), stmt });
+  expect(result.rows).toHaveLength(1);
+  expect(result.rows[0]["種別"]).toBe(""); // コピー元行なし → 空文字（ksql 独自許容の形）
+  expect(result.rows[0]["cnt"]).toBe("0");
+  expect(result.rows[0]["合計"]).toBe("0");
+});
+
+test("空入力 + GROUP BY あり → 0 行のまま（SQL 標準どおり）", () => {
+  const stmt = parseSelect("SELECT 種別, COUNT(*) AS cnt FROM APP100 GROUP BY 種別");
+  expect(applyGroupBy([], stmt.groupBy, stmt.columns)).toHaveLength(0);
+});
+
+test("空入力 + 非集計列のみの直接呼び出し → 0 行（applyGroupBy 単独の契約）", () => {
+  const stmt = parseSelect("SELECT 名前 FROM APP100");
+  expect(applyGroupBy([], stmt.groupBy, stmt.columns)).toHaveLength(0);
+});
+
+test("runFullScan: WHERE 全滅 + COUNT(*) → 1 行 + columns に列名", () => {
+  const tables = new Map([[null, groupRows.map((r) => makeRecord(r as Record<string, string>))]]);
+  const stmt = parseSelect("SELECT COUNT(*) AS cnt FROM APP100 WHERE 金額 > 999999");
+  const { rows, columns } = runFullScan({ tables, stmt });
+  expect(rows).toHaveLength(1);
+  expect(rows[0]["cnt"]).toBe("0");
+  expect(columns).toEqual(["cnt"]);
+});
+
+test("合成行はパイプライン後段の applyHaving で除外できる", () => {
+  // ksql 文法では HAVING は GROUP BY とセットでのみ書けるため（parser.ts の
+  // parseSelect 節）、GROUP BY なし集計 + HAVING は SQL としては到達不能。
+  // ここではパイプライン順序（合成 → HAVING）の整合のみを直接検証する
+  const stmt = parseSelect("SELECT COUNT(*) AS cnt FROM APP100");
+  const synthesized = applyGroupBy([], stmt.groupBy, stmt.columns);
+  expect(synthesized).toHaveLength(1);
+  const having: WhereExpr = {
+    type: "BINARY", op: ">",
+    left: { type: "FIELD", tableAlias: null, field: "cnt" },
+    right: { type: "NUMBER", value: 0 },
+  };
+  expect(applyHaving(synthesized, having)).toHaveLength(0);
+});
+
+test("runFullScan: 合成行にも LIMIT 0 / OFFSET が適用される", () => {
+  const limit0 = parseSelect("SELECT COUNT(*) AS cnt FROM APP100 LIMIT 0");
+  expect(runFullScan({ tables: new Map([[null, []]]), stmt: limit0 }).rows).toHaveLength(0);
+  const offset1 = parseSelect("SELECT COUNT(*) AS cnt FROM APP100 LIMIT 10 OFFSET 1");
+  expect(runFullScan({ tables: new Map([[null, []]]), stmt: offset1 }).rows).toHaveLength(0);
+});
+
+// ----------------------------------------------------------------
 // applyHaving
 // ----------------------------------------------------------------
 
