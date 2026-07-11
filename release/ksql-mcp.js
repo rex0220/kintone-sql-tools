@@ -37213,7 +37213,7 @@ function buildBatchStatementPlan(stmt, info) {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch\uFF08\u30D0\u30C3\u30C1\u7D42\u4E86\u6642\u306B\u81EA\u52D5\u7834\u68C4\uFF09`,
-      `  rows:          \u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u4E0D\u660E\uFF08\u4E0A\u9650 ${TEMP_TABLE_MAX_ROWS} \u884C\u3001\u8D85\u904E\u306F\u30A8\u30E9\u30FC\uFF09`,
+      `  rows:          \u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u4E0D\u660E\uFF08\u65E2\u5B9A\u4E0A\u9650 ${TEMP_TABLE_MAX_ROWS} \u884C\u3001tempTableMaxRows \u3067\u5909\u66F4\u53EF\u3001\u8D85\u904E\u306F\u30A8\u30E9\u30FC\uFF09`,
       ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`)
     ];
   }
@@ -38236,6 +38236,7 @@ async function createKsqlRuntime(serverOptions, input) {
   }
   const onLimit2 = input.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile2.query?.onLimit ?? "error";
   const timeout2 = input.timeout ?? envInt("KSQL_TIMEOUT") ?? profile2.query?.timeout ?? 3e4;
+  const tempTableMaxRows2 = input.tempTableMaxRows ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS") ?? profile2.query?.tempTableMaxRows;
   const appIds = extractAppIds(sql);
   const defaultApp = envInt("KSQL_APP") ?? profile2.app ?? null;
   if (appIds.length === 0 && defaultApp !== null) appIds.push(defaultApp);
@@ -38376,7 +38377,8 @@ async function createKsqlRuntime(serverOptions, input) {
     maxRecords: maxRecords2,
     fetchParallel: fetchParallel2,
     onLimit: onLimit2,
-    timeout: timeout2
+    timeout: timeout2,
+    tempTableMaxRows: tempTableMaxRows2
   };
 }
 
@@ -38817,7 +38819,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
-        timeout: input.timeout
+        timeout: input.timeout,
+        tempTableMaxRows: input.tempTableMaxRows
       });
       const batchResult = await executeBatchSql(runtime2.sql, runtime2.client, {
         maxRecords: runtime2.maxRecords,
@@ -38825,6 +38828,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         onLimitReached: runtime2.onLimit,
         cacheContext: runtime2.cacheContext,
         continueOnError: input.continueOnError,
+        // 一時テーブル実体化上限（未指定 = エンジン既定 TEMP_TABLE_MAX_ROWS）。
+        // 実体化は onLimit 設定によらず常に error（src/execute.ts の実体化経路で固定）
+        tempTableMaxRows: runtime2.tempTableMaxRows,
         // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
@@ -38902,7 +38908,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
-      timeout: input.timeout
+      timeout: input.timeout,
+      tempTableMaxRows: input.tempTableMaxRows
     });
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
@@ -38910,6 +38917,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
+      // 一時テーブル実体化上限（未指定 = エンジン既定 TEMP_TABLE_MAX_ROWS）
+      tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
       confirm: async (count, operation) => {
@@ -39140,6 +39149,7 @@ var profile = external_exports.string().min(1).describe("kintone connection prof
 var maxRecords = external_exports.number().int().positive().describe("Maximum records fetched per SELECT (default 500).").optional();
 var fetchParallel = external_exports.number().int().min(1).max(10).describe("Number of parallel kintone record-fetch requests (1-10).").optional();
 var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error').").optional();
+var tempTableMaxRows = external_exports.number().int().positive().describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors \u2014 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.").optional();
 var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
 var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
 var savedQueryTags = external_exports.array(external_exports.string().min(1)).describe("Tags for organizing saved queries.").optional();
@@ -39157,6 +39167,7 @@ var queryInputSchema = external_exports.object({
   maxRecords,
   fetchParallel,
   onLimit,
+  tempTableMaxRows,
   timeout,
   continueOnError: external_exports.boolean().describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).").optional(),
   maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional()
@@ -39166,8 +39177,9 @@ var mutateInputSchema = external_exports.object({
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
-  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows), so choose it by intended write count only."),
+  dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows by default, adjustable via tempTableMaxRows), so choose it by intended write count only."),
   fetchParallel,
+  tempTableMaxRows,
   timeout,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
 });
@@ -39209,7 +39221,7 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows). Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500). Saved queries are single-statement, so temp tables do not apply here. Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -39258,7 +39270,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.10.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.11.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -39285,7 +39297,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: the source SELECT reads up to the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: the source SELECT reads up to the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {
