@@ -1611,10 +1611,23 @@ test("INSERT INTO ... SELECT COUNT(*) — 0 件でも 1 行書き込まれる（
     recordsByApp: { 300: [] },
     postIds: ["1"],
   });
+  // confirm / dmlMaxRows の件数判定に 1 行として乗ることも固定する
+  // （dmlMaxRows は上位層が confirm を構成する仕組みのため、件数伝播の検証で足りる）
+  let confirmedCount = -1;
+  let confirmedOp = "";
   const result = await execute(
     "INSERT INTO APP200 (件数) SELECT COUNT(*) FROM APP300",
-    client
+    client,
+    {
+      confirm: async (count, op) => {
+        confirmedCount = count;
+        confirmedOp = op;
+        return true;
+      },
+    }
   ) as InsertResult;
+  expect(confirmedCount).toBe(1);
+  expect(confirmedOp).toBe("INSERT");
   expect(result.insertedCount).toBe(1);
   expect(client.postCalls).toHaveLength(1);
   expect(client.postCalls[0].records[0]["件数"].value).toBe("0");
