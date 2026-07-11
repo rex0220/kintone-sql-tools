@@ -1,19 +1,23 @@
-ksql 配布パッケージ (v1.10.0)
+ksql 配布パッケージ (v1.11.0)
 
-1. ksql-plugin-v1.10.0.zip を kintone のプラグイン画面で読み込む
-2. ksql-app-template-v1.0.0.zip をアプリ作成時にテンプレートとして読み込む
+1. ksql-plugin-v1.11.0.zip を kintone のプラグイン画面で読み込む
+2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
 3. アプリにプラグインを適用して利用開始する
 
-v1.10.0: バッチ強化第1弾。
-- ASSERT 文を追加(全ツール共通)。条件が成立しなければ AssertError で
-  停止する実行時ゲートで、DML 前の件数ガードや CLI ヘルスチェック
-  (exit code 監視)に使えます。バッチ内の ASSERT 失敗は continueOnError
-  指定でも常に停止します(以降の文は skipped)。
-- CLI: バッチ入力 + --format json で、MCP と同一のエンベロープ
-  (ok / statements[] / results[])を単一 JSON で出力(破壊的変更 —
-  従来の結果セット連結出力は廃止。詳細は CHANGELOG.md)。
-- レート制御(同時リクエスト上限・GET リトライ回数・バックオフ)を
-  CLI フラグ / ksql.config.json / 環境変数で調整可能に。書き込み系
-  (POST/PUT/DELETE)は二重実行回避のためリトライしない仕様を明文化。
-MCP サーバー(ksql-mcp.js / ksql-mcp.mcpb)は ksql_query が ASSERT を
-実行できるようになりました(read-only 扱い)。
+v1.11.0: 一時テーブル上限(tempTableMaxRows)の公開。
+- 一時テーブル1個の実体化行数上限(従来 10,000 固定)を変更可能に。
+  未指定時の挙動は従来どおりで、超過は設定によらず常にエラーです
+  (打ち切りは適用されません — 欠けたデータを後続文に渡さないため)。
+- MCP: ksql_query / ksql_mutate のツール引数 tempTableMaxRows。
+  環境変数 KSQL_TEMP_TABLE_MAX_ROWS / ksql.config.json の
+  query.tempTableMaxRows でも既定値を変更できます。
+- CLI: --temp-table-max-rows フラグ(console の :run 子実行にも伝搬)。
+- プラグイン: 「⚙ オプション → 取得」の「一時テーブル上限(行)」
+  (空欄 = 既定 10,000)。一覧ページは localStorage に保存、
+  レコード編集画面は保存SQLアプリの任意フィールド
+  「一時テーブル上限行」(数値)があればレコードに保持されます。
+- アプリテンプレートを v1.11.0 に更新(「一時テーブル上限行」
+  フィールドを追加。既存アプリはフィールド追加なしでも従来どおり
+  動作します)。
+上限を引き上げるとメモリ使用量が増えます(バッチ内最大16テーブル ×
+指定値)。まず WHERE での絞り込みをご検討ください。

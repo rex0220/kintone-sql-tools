@@ -178,6 +178,7 @@ v1.4.1 の説明文修正(PR #4)と同様、実装と説明文の同期を必須
 
 ## 更新履歴
 
+- R5(2026-07-11、v1.11.0 追従): §3.4 の「MCP 経由では 10,000 行上限を変更できない」が v1.11.0 で失効 — `tempTableMaxRows` が MCP `ksql_query`/`ksql_mutate` の tool input・CLI・env・profile として公開された(既定 10,000・超過は常に error は不変)。仕様は `docs/internal/ksql_temp_table_max_rows_option_spec.md`。本文 §3.4 は歴史的経緯として当時のまま(v1.5.0 時点の記述)
 - R4(2026-07-10、codex・Medium、実装後レビュー): `ksql_run_saved_query` の `dmlMaxRows` describe が読み取り上限に追従していなかった点を修正。DML 保存クエリ経路は `mutate()` 委譲(`src/mcp/tools.ts` runSavedQuery)のため保存済み INSERT_SELECT にも `dmlMaxRows + 1` の source 読み取り上限が効く。describe に同文言を追記し、smoke の dmlMaxRows assertion を `ksql_mutate` / `ksql_run_saved_query` の両ツールに拡張(§4.3・§4.5 の対象漏れ)
 - R3(2026-07-10、codex・Medium): §4.2 の混在ソース拒否メッセージが §3.4 のルール(迂回案内には実体化上限を併記)に自己矛盾していたため修正。`materialize the app data into a temp table first (temp tables hold at most ${TEMP_TABLE_MAX_ROWS} rows)` 形式に変更し、定数補間・経路非依存の注記を追加(`tempTableMaxRows` を渡す本番経路がないことをコードで裏取り済み)
 - R2(2026-07-10、codex レビュー完了): 追加指摘なし。未決事項3点を確定(フラグ不採用 / dmlMaxRows describe 追記必須 / 読み取り上限分離は将来課題)。ステータスを「レビュー済み・確定」に変更し、実装計画ドキュメントを作成

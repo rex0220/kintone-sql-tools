@@ -32,6 +32,7 @@ export interface CreateKsqlRuntimeInput {
   fetchParallel?: number;
   onLimit?: OnLimitMode;
   timeout?: number;
+  tempTableMaxRows?: number;
   debug?: boolean;
   debugHeaders?: boolean;
   log?: (line: string) => void;
@@ -46,6 +47,8 @@ export interface KsqlRuntime {
   fetchParallel: number;
   onLimit: OnLimitMode;
   timeout: number;
+  /** 一時テーブル実体化上限。undefined = エンジン既定（TEMP_TABLE_MAX_ROWS = 10,000）に委ねる */
+  tempTableMaxRows?: number;
 }
 
 export function resolveDefaultProfile(
@@ -90,6 +93,11 @@ export async function createKsqlRuntime(
     ?? envInt("KSQL_TIMEOUT")
     ?? profile.query?.timeout
     ?? 30000;
+  // 一時テーブル実体化上限。既定値（10,000）はエンジン層 TEMP_TABLE_MAX_ROWS の
+  // 1箇所に保つため、ここでは undefined のまま流す（?? 10_000 を書かない）
+  const tempTableMaxRows = input.tempTableMaxRows
+    ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS")
+    ?? profile.query?.tempTableMaxRows;
 
   const appIds = extractAppIds(sql);
   const defaultApp = envInt("KSQL_APP") ?? profile.app ?? null;
@@ -251,5 +259,6 @@ export async function createKsqlRuntime(
     fetchParallel,
     onLimit,
     timeout,
+    tempTableMaxRows,
   };
 }

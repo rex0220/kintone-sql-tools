@@ -827,6 +827,11 @@
   font-size: 12px;
 }
 
+.ksql-fetch-note {
+  font-size: 11px;
+  color: #78909c;
+}
+
 .ksql-app-panel {
   border: 1px solid #d0d4d9;
   border-radius: 4px;

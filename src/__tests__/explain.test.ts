@@ -340,6 +340,9 @@ test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数�
   expect(create.plan[0]).toBe("CREATE TEMP TABLE #t");
   expect(create.plan.join("\n")).toMatch(/scope:\s+batch/);
   expect(create.plan.join("\n")).toMatch(/実体化前のため不明/);
+  // 上限は既定値であること（tempTableMaxRows で変更可）を明示する。静的プランは
+  // 実行時オプションを知らないため実効値ではなく「既定上限」と表示する
+  expect(create.plan.join("\n")).toMatch(/既定上限 10000 行、tempTableMaxRows で変更可、超過はエラー/);
   expect(create.plan.join("\n")).toMatch(/mode:\s+SIMPLE/); // 内側 SELECT のプラン
 });
 

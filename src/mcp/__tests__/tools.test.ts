@@ -242,11 +242,24 @@ describe("MCP tools", () => {
       "fetchParallel",
       "profile",
       "sql",
+      "tempTableMaxRows",
       "timeout",
     ]);
     expect("allowWithoutWhere" in mutateInputSchema.shape).toBe(false);
     // DML バッチに続行オプションは存在しない（常に fail-fast）
     expect("continueOnError" in mutateInputSchema.shape).toBe(false);
+  });
+
+  test("tempTableMaxRows schema rejects 0 / negative / non-integer", () => {
+    for (const schema of [queryInputSchema, mutateInputSchema]) {
+      const base = schema === queryInputSchema
+        ? { sql: "SELECT 1" }
+        : { sql: "UPDATE APP100 SET x = '1' WHERE $id = 1", allowDml: true, confirmText: "yes", dmlMaxRows: 1 };
+      expect(schema.safeParse({ ...base, tempTableMaxRows: 20000 }).success).toBe(true);
+      for (const invalid of [0, -1, 1.5]) {
+        expect(schema.safeParse({ ...base, tempTableMaxRows: invalid }).success).toBe(false);
+      }
+    }
   });
 
   test("explain schema exposes only sql and profile", () => {
@@ -1055,6 +1068,8 @@ describe("MCP tools", () => {
       fetchParallel: input.fetchParallel ?? 3,
       onLimit: input.onLimit ?? "error",
       timeout: input.timeout ?? 30000,
+      // 実 runtime と同じく input をそのまま解決（env / profile はテスト対象外）
+      tempTableMaxRows: input.tempTableMaxRows,
     });
     return { createRuntime };
   }
@@ -1100,6 +1115,108 @@ describe("MCP tools", () => {
     expect(result.results).toHaveLength(1);
     expect(result.results[0].rows).toEqual([{ 顧客名: "B社" }]);
     expect((result as unknown as { warnings: string[] }).warnings).toEqual([]);
+  });
+
+  test("query: tempTableMaxRows が一時テーブルの実体化上限に効く（超過は error・後続 skipped）", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 }) // 実体化 2 行
+    );
+    const result = await tools.query({
+      sql: "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM #t",
+      tempTableMaxRows: 1,
+    }) as {
+      ok: boolean;
+      statements: Array<{ status: string; error?: { message: string } }>;
+    };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0].status).toBe("error");
+    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
+    expect(result.statements[1].status).toBe("skipped");
+  });
+
+  test("query: tempTableMaxRows 指定で既定 10,000 を超える実体化が可能・未指定は従来どおりエラー", async () => {
+    // fetchAll のページング（limit/offset + $id カーソル）に応答するモック。
+    // makeBatchRuntimeDeps は全件を毎回返すため 10,000 件超のテストには使えない
+    const manyRows = Array.from({ length: 10001 }, (_v, i) => ({
+      $id: { value: String(i + 1) },
+      顧客名: { value: `会社${i + 1}` },
+    }));
+    function makePagingDeps() {
+      const client: KintoneClient = {
+        async getRecords(params) {
+          const limitMatch = /limit (\d+) offset (\d+)/.exec(params.query);
+          const limit = limitMatch ? Number(limitMatch[1]) : 500;
+          const offset = limitMatch ? Number(limitMatch[2]) : 0;
+          const cursorMatch = /\$id > (\d+)/.exec(params.query);
+          const cursor = cursorMatch ? Number(cursorMatch[1]) : 0;
+          const filtered = manyRows.filter((r) => Number(r.$id.value) > cursor);
+          return { records: filtered.slice(offset, offset + limit) as never };
+        },
+        async postRecords() { return { ids: [] }; },
+        async putRecords() { },
+        async deleteRecords() { },
+        async getApps() { return []; },
+        async getFields() { return []; },
+      };
+      const createRuntime = async (
+        _serverOptions: KsqlRuntimeServerOptions,
+        input: CreateKsqlRuntimeInput
+      ): Promise<KsqlRuntime> => ({
+        sql: input.sql,
+        profileName: input.profile ?? "prod",
+        client,
+        cacheContext: "paging-batch-test",
+        maxRecords: input.maxRecords ?? 500,
+        fetchParallel: input.fetchParallel ?? 3,
+        onLimit: input.onLimit ?? "error",
+        timeout: input.timeout ?? 30000,
+        tempTableMaxRows: input.tempTableMaxRows,
+      });
+      return { createRuntime };
+    }
+    const sql = "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100; SELECT COUNT(*) AS 件数 FROM #t";
+
+    // 未指定: エンジン既定 TEMP_TABLE_MAX_ROWS(10,000)で従来どおりエラー（回帰）
+    const toolsDefault = createKsqlMcpTools({ profile: "prod" }, makePagingDeps());
+    const defaultResult = await toolsDefault.query({ sql }) as {
+      ok: boolean;
+      statements: Array<{ status: string; error?: { message: string } }>;
+    };
+    expect(defaultResult.ok).toBe(false);
+    expect(defaultResult.statements[0].error?.message).toMatch(/取得件数が上限（10000 件）を超えました/);
+
+    // 指定: 10,001 行の実体化が成功する
+    const toolsRaised = createKsqlMcpTools({ profile: "prod" }, makePagingDeps());
+    const raisedResult = await toolsRaised.query({ sql, tempTableMaxRows: 20000 }) as {
+      ok: boolean;
+      statements: Array<Record<string, unknown>>;
+      results: Array<{ rows: Array<Record<string, string>> }>;
+    };
+    expect(raisedResult.ok).toBe(true);
+    expect(raisedResult.statements[0]).toMatchObject({ status: "success", rowCount: 10001 });
+    expect(raisedResult.results[0].rows).toEqual([{ 件数: "10001" }]);
+  });
+
+  test("query: onLimit truncate を指定しても一時テーブルの実体化は error のまま（§5.6 不変条件）", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 }) // 実体化 2 行
+    );
+    const result = await tools.query({
+      sql: "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM #t",
+      tempTableMaxRows: 1,
+      onLimit: "truncate",
+    }) as {
+      ok: boolean;
+      statements: Array<{ status: string; error?: { message: string } }>;
+    };
+
+    // truncate で 1 行に切り詰められることはなく、実体化は常に error
+    expect(result.ok).toBe(false);
+    expect(result.statements[0].status).toBe("error");
+    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
   });
 
   test("query: DML 混在バッチは ksql_mutate へ誘導", async () => {
@@ -1213,6 +1330,7 @@ describe("MCP tools", () => {
         fetchParallel: input.fetchParallel ?? 3,
         onLimit: input.onLimit ?? "error",
         timeout: input.timeout ?? 30000,
+        tempTableMaxRows: input.tempTableMaxRows,
       };
     };
     return { deps: { createRuntime }, calls, runtimeInputs };
@@ -1383,6 +1501,74 @@ describe("MCP tools", () => {
     expect(runtimeInputs[0]?.maxRecords).toBeUndefined(); // runtime の通常解決に委ねる
     expect(calls.post).toBe(1);
     expect(calls.put).toBe(0);
+  });
+
+  test("mutate: tempTableMaxRows 超過は実体化で error・書き込みゼロ件", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql:
+        "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+        "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #t",
+      dmlMaxRows: 10,
+      tempTableMaxRows: 2, // 実体化 3 行 > 2
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(false);
+    expect(result.statements[0]).toMatchObject({ status: "error" });
+    expect((result.statements[0].error as { message: string }).message)
+      .toMatch(/取得件数が上限（2 件）を超えました/);
+    expect(result.statements[1]).toMatchObject({ status: "skipped" });
+    expect(calls.post).toBe(0);
+  });
+
+  test("mutate: tempTableMaxRows で実体化が通っても dmlMaxRows / 書き込みガードは不変", async () => {
+    const records = {
+      100: [
+        { $id: { value: "1" }, 顧客名: { value: "A社" } },
+        { $id: { value: "2" }, 顧客名: { value: "B社" } },
+        { $id: { value: "3" }, 顧客名: { value: "C社" } },
+      ],
+    };
+    const sql =
+      "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+      "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #t";
+
+    // 実体化 3 行 ≦ tempTableMaxRows 5 だが、INSERT 3 行 > dmlMaxRows 2 → confirm で書き込み前拒否
+    const guarded = makeMutateRuntimeDeps(records);
+    const guardedResult = await createKsqlMcpTools({ profile: "prod" }, guarded.deps).mutate({
+      ...MUTATE_BASE,
+      sql,
+      dmlMaxRows: 2,
+      tempTableMaxRows: 5,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+    expect(guardedResult.ok).toBe(false);
+    expect((guardedResult.statements[1].error as { message: string }).message)
+      .toMatch(/INSERT affected rows \(3\) exceed dmlMaxRows \(2\)/);
+    expect(guarded.calls.post).toBe(0);
+
+    // dmlMaxRows 内なら成功
+    const allowed = makeMutateRuntimeDeps(records);
+    const allowedResult = await createKsqlMcpTools({ profile: "prod" }, allowed.deps).mutate({
+      ...MUTATE_BASE,
+      sql,
+      dmlMaxRows: 10,
+      tempTableMaxRows: 5,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>> };
+    expect(allowedResult.ok).toBe(true);
+    expect(allowedResult.statements[1]).toMatchObject({
+      type: "INSERT_SELECT",
+      status: "success",
+      insertedCount: 3,
+    });
+    expect(allowed.calls.post).toBe(1);
   });
 
   test("mutate: バッチの SELECT-based DML が runtime maxRecords 超で失敗した場合はヒントを付与する", async () => {

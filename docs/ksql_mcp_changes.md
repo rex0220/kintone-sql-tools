@@ -400,6 +400,22 @@ v1.7.0 の実機確認で、MCP クライアントが影響行数基準で小さ
 | smoke 回帰ガード | describe キーを `"does NOT limit source reads"` / `"runtime maxRecords resolution"` に、description キーに `"caps affected rows only, not source reads"` を追加（旧バンドル相当の文言で失敗することを確認後に適用） |
 | 挙動変化 | ①従来読み取り上限エラーだった JOIN・集計ソースの SELECT-based DML が、影響行数が `dmlMaxRows` 以内なら成功する。②UPSERT_SELECT の照合読み取り（第1キー低選択性）も runtime `maxRecords` に従い、「source 1 行でも安全側エラー」が解消。③書き込みガード（confirm / dmlMaxRows / dmlTotalMaxRows）は不変 |
 
+## 11.11 一時テーブル実体化上限の可変化 — tempTableMaxRows（v1.11.0）
+
+一時テーブル1個の実体化行数上限（従来 10,000 固定）を、エンジン既存の
+`BatchExecuteOptions.tempTableMaxRows` を入口公開する形で変更可能にした
+（仕様: `docs/internal/ksql_temp_table_max_rows_option_spec.md`）。
+
+| 変更 | 内容 |
+| --- | --- |
+| MCP tool input | `ksql_query` / `ksql_mutate` に `tempTableMaxRows`（正整数・任意）を追加。解決順は tool input → env `KSQL_TEMP_TABLE_MAX_ROWS` → profile `query.tempTableMaxRows` → エンジン既定 `TEMP_TABLE_MAX_ROWS`（10,000） |
+| 非公開ツール | `ksql_run_saved_query` には追加しない（保存クエリは単文限定で一時テーブルが出現し得ない）。同ツールの `dmlMaxRows` describe から temp table 節を削除し「saved queries are single-statement」を明示（存在しない入力をモデルに示唆しない） |
+| CLI | `--temp-table-max-rows <n>` を追加（env / profile の解決は MCP と対称）。console の `:run` 子実行にも伝搬 |
+| セマンティクス不変 | 既定 10,000・**超過は `onLimit` 設定によらず常にエラー**（truncate 不適用）は変更なし。素の SELECT の `maxRecords` / `onLimit` とは独立 |
+| EXPLAIN | CREATE TEMP TABLE のプラン行を「既定上限 10,000 行、tempTableMaxRows で変更可」表記に変更（静的プランのため実効値は表示しない） |
+| smoke 回帰ガード | schema に `tempTableMaxRows`（query / mutate）、description キーに `"by default (adjustable via tempTableMaxRows)"`、run_saved_query の非公開・非言及 assertion を追加（旧バンドルで失敗することを確認後に適用） |
+| 注意 | 上限を引き上げるとバッチ内最大16テーブル × 指定値がメモリに滞留し得る（参照は常にインメモリ FULL_SCAN）。まず WHERE での絞り込みを推奨 |
+
 ## 12. CLI / Plugin への影響
 
 Plugin:

@@ -2958,7 +2958,7 @@ function buildBatchStatementPlan(
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch（バッチ終了時に自動破棄）`,
-      `  rows:          実体化前のため不明（上限 ${TEMP_TABLE_MAX_ROWS} 行、超過はエラー）`,
+      `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
       ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`),
     ];
   }

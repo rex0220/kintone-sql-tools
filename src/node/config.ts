@@ -28,6 +28,8 @@ export interface KsqlProfileConfig {
     fetchParallel?: number;
     onLimit?: OnLimitMode;
     timeout?: number;
+    /** 一時テーブル1個の実体化行数上限（既定 10,000。超過は onLimit 設定によらず常に error） */
+    tempTableMaxRows?: number;
     /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
     maxConcurrent?: number;
     /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
