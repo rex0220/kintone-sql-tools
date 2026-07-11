@@ -37690,7 +37690,7 @@ function normalizeAppKey(v) {
 }
 function extractAppIds(sql) {
   const out = /* @__PURE__ */ new Set();
-  for (const m of sql.matchAll(/\bAPP(\d+)\b/gi)) out.add(Number(m[1]));
+  for (const t of collectAppProfileTokens(sql)) out.add(t.appId);
   return [...out];
 }
 function isSqlIdentContinue(ch) {
@@ -39275,7 +39275,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.12.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.12.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

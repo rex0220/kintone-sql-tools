@@ -38,8 +38,12 @@ export function normalizeAppKey(v: string): string {
 }
 
 export function extractAppIds(sql: string): number[] {
+  // collectAppProfileTokens は文字列リテラル・バッククォート識別子・行/ブロック
+  // コメントをスキップしてから APP 参照を拾う。素の正規表現で生 SQL をなめると
+  // コメントや文字列中の "APPxxxx" まで認可判定に混入するため（token is missing
+  // 誤検知の原因）、@profile 正規化と同じスキャナに統一する。
   const out = new Set<number>();
-  for (const m of sql.matchAll(/\bAPP(\d+)\b/gi)) out.add(Number(m[1]));
+  for (const t of collectAppProfileTokens(sql)) out.add(t.appId);
   return [...out];
 }
 
