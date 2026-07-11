@@ -129,6 +129,9 @@ const TAB_KEY          = `ksql_option_tab_${PLUGIN_ID}`;
 const FETCH_OPTIONS_KEY = `ksql_fetch_options_${PLUGIN_ID}`;
 const HISTORY_MAX = 60;
 const FETCH_PARALLEL_DEFAULT = 5;
+/** 保存SQL アプリの一時テーブル上限フィールド（数値・任意）。
+ *  アプリに存在しない場合はすべての参照がガード付きで無害（保持されないだけ） */
+const TEMP_TABLE_MAX_ROWS_FIELD_CODE = "一時テーブル上限行";
 
 interface SqlHistoryItem {
   sql: string;
@@ -290,9 +293,9 @@ kintone.events.on(
     "app.record.create.change.上限到達時の動作",
     "app.record.edit.change.最大取得件数",
     "app.record.create.change.最大取得件数",
-    // 「一時テーブル上限」はアプリ側の任意フィールド（なければイベントは発火しないだけで無害）
-    "app.record.edit.change.一時テーブル上限",
-    "app.record.create.change.一時テーブル上限",
+    // 「一時テーブル上限行」はアプリ側の任意フィールド（なければイベントは発火しないだけで無害）
+    `app.record.edit.change.${TEMP_TABLE_MAX_ROWS_FIELD_CODE}`,
+    `app.record.create.change.${TEMP_TABLE_MAX_ROWS_FIELD_CODE}`,
   ],
   (event) => {
     const e = event as RecordShowEvent;
@@ -442,7 +445,7 @@ interface PanelBuildOptions {
   initialDisplayOptions?: DisplayOptions;
   initialMaxRecords?: number;
   initialOnLimitReached?: "error" | "truncate";
-  /** レコードページ: 保存SQL アプリの「一時テーブル上限」フィールドからの復元値（フィールドなし・空欄 = undefined） */
+  /** レコードページ: 保存SQL アプリの「一時テーブル上限行」フィールドからの復元値（フィールドなし・空欄 = undefined） */
   initialTempTableMaxRows?: number;
   resolveMaxRecords?: () => number;
   resolveOnLimitReached?: () => "error" | "truncate";
@@ -1145,9 +1148,9 @@ function parseOnLimitReachedFromRecord(record: KintoneUiRecord): "error" | "trun
   return (raw.includes("打ち切") || raw.includes("続行")) ? "truncate" : "error";
 }
 
-/** 保存SQL アプリの「一時テーブル上限」フィールド（任意）。なし・空欄・不正値は undefined = エンジン既定 */
+/** 保存SQL アプリの「一時テーブル上限行」フィールド（任意）。なし・空欄・不正値は undefined = エンジン既定 */
 function parseTempTableMaxRowsFromRecord(record: KintoneUiRecord): number | undefined {
-  return sanitizeTempTableMaxRows(getFieldText(record, "一時テーブル上限"));
+  return sanitizeTempTableMaxRows(getFieldText(record, TEMP_TABLE_MAX_ROWS_FIELD_CODE));
 }
 
 function sanitizeMaxRecords(raw: string): number {
@@ -1294,9 +1297,10 @@ function syncRecordFieldsFromSpacePanel(event: RecordShowEvent): void {
   if (record["ファイル"]) record["ファイル"].value = mapAttachmentFormatToLabel(file);
   if (record["最大取得件数"]) record["最大取得件数"].value = String(latestPanelMaxRecords);
   if (record["上限到達時の動作"]) record["上限到達時の動作"].value = mapLimitModeToLabel(latestPanelOnLimit);
-  // 「一時テーブル上限」フィールドはアプリ側に任意追加（なければスキップ）。未指定 = 空欄で保存
-  if (record["一時テーブル上限"]) {
-    record["一時テーブル上限"].value =
+  // 「一時テーブル上限行」フィールドはアプリ側に任意追加（なければスキップ）。未指定 = 空欄で保存
+  const tempField = record[TEMP_TABLE_MAX_ROWS_FIELD_CODE];
+  if (tempField) {
+    tempField.value =
       latestPanelTempTableMaxRows !== undefined ? String(latestPanelTempTableMaxRows) : "";
   }
 }
