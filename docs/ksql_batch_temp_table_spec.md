@@ -2,6 +2,7 @@
 
 - 作成日: 2026-07-09
 - 更新履歴:
+  - 2026-07-11 R42(v1.12.0): §9 エラー表の「ASSERT のサブクエリが 0 行」に注記 — GROUP BY なしの集計 SELECT は対象 0 件でも 1 行(COUNT = 0 等)を返すようになった(SQL 標準準拠化)。`CREATE TEMP TABLE ... AS SELECT COUNT(*)` も 0 件で 1 行実体化される。仕様は `docs/internal/ksql_ungrouped_aggregate_empty_result_spec.md`
   - 2026-07-11 R41(v1.11.0): 一時テーブル行数上限を可変化(§5.6 改訂)。エンジン既存の `tempTableMaxRows` を MCP `ksql_query`/`ksql_mutate` の tool input・CLI `--temp-table-max-rows`・env `KSQL_TEMP_TABLE_MAX_ROWS`・profile `query.tempTableMaxRows`・プラグイン実行画面の取得オプションパネル(空欄 = 既定)として公開。既定 10,000・「超過は常に error(truncate 不適用)」は不変。仕様は `docs/internal/ksql_temp_table_max_rows_option_spec.md`
   - 2026-07-10 R40(v1.9.0): プラグイン UI の DML バッチを解禁(§8.4 改訂)。文ごとの確認ダイアログ(confirm フックに optional 第3引数 `DmlConfirmContext` を追加 — CLI / MCP は後方互換で無影響)、INSERT VALUES の実行前静的確認(単文も併修)、DML サマリ行、キャンセル表示。設計経緯は `docs/internal/ksql_plugin_dml_batch_spec.md`
   - 2026-07-10 R39(v1.7.0): SELECT-based DML のソース制限を最終解消 — `INSERT_SELECT` の混在ソース(APP + 一時テーブルの JOIN・サブクエリ)と `UPSERT_SELECT` の一時テーブル・混在ソースを解禁(§7.3・§9 を更新)。実行は read-only バッチと同じ FULL_SCAN 注入経路(`executeQueryWithCte`)。書き込み側ガードは不変。読み取り側上限はソース種類ごとに異なる(APP = `dmlMaxRows + 1` / temp = 実体化 10,000 行 / UPSERT 系は書き込み先照合が加わる)。経緯は `docs/internal/ksql_mcp_insert_select_mixed_source_spec.md`
@@ -330,7 +331,7 @@ DROP TEMP TABLE #name;
 | 空入力(空文字列・`;` のみ) | `ArgumentError: SQL is empty.` |
 | 一時テーブル行数超過 | `FetchAllLimitError`(既存を流用) |
 | ASSERT の条件不成立(v1.10.0) | `AssertError: assertion failed: (SELECT COUNT(*) FROM #targets) BETWEEN 1 AND 500 (actual: 812).` — continueOnError 指定でも常に停止し、以降の文は `skipped`(`skippedReason: "assertion"`) |
-| ASSERT のサブクエリが 0 行 / 複数行(v1.10.0) | `AssertError: scalar subquery returned no rows (expected 1 row).` / `AssertError: scalar subquery returned 3 rows (expected 1 row).` |
+| ASSERT のサブクエリが 0 行 / 複数行(v1.10.0) | `AssertError: scalar subquery returned no rows (expected 1 row).` / `AssertError: scalar subquery returned 3 rows (expected 1 row).` — 0 行エラーは **v1.12.0 以降、非集計プローブの空振り・GROUP BY 付き集計が 0 行になる場合に限られる**(GROUP BY なしの集計は 0 件でも 1 行 = COUNT 0 を返す。`CREATE TEMP TABLE ... AS SELECT COUNT(*)` も 0 件で 1 行実体化される — 言語リファレンス §8) |
 
 ---
 
