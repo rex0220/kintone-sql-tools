@@ -151,6 +151,70 @@ test("logical DELETE は明示 profile 付きを拒否し、省略時は許可�
   }
 }, 20000);
 
+test.each([
+  ["-e", false],
+  ["-f", true],
+])("CLI %s は logical parse error を元SQLの位置・表記へ復元する", async (_label, useFile) => {
+  const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-error-"));
+  const configPath = join(dir, "ksql.config.json");
+  const sqlPath = join(dir, "invalid.sql");
+  const sourceSql = "SELECT * FROM LAPP_ORDERS WHERE )";
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "prod",
+    profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+  }));
+  writeFileSync(sqlPath, sourceSql);
+  try {
+    const inputArgs = useFile ? ["-f", sqlPath] : ["-e", sourceSql];
+    const res = await runCli(["--config", configPath, "--dry-run", ...inputArgs]);
+    if (res.skipped) return;
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain(`位置 ${sourceSql.indexOf(")")}`);
+    expect(res.stderr).not.toContain("APP900000000");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20000);
+
+test("CLI batch parse error も元SQL位置へ復元する", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-batch-error-"));
+  const configPath = join(dir, "ksql.config.json");
+  const sourceSql = "SELECT * FROM LAPP_ORDERS; SELECT * FROM LAPP_ORDERS WHERE )";
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "prod",
+    profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+  }));
+  try {
+    const res = await runCli(["--config", configPath, "--dry-run", "-e", sourceSql]);
+    if (res.skipped) return;
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain(`位置 ${sourceSql.indexOf(")")}`);
+    expect(res.stderr).not.toContain("APP900000000");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20000);
+
+test("CLI stderr はmapped table tokenを元のLAPP表記へ復元する", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-token-error-"));
+  const configPath = join(dir, "ksql.config.json");
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "prod",
+    profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+  }));
+  try {
+    const res = await runCli([
+      "--config", configPath, "--dry-run", "-e", "DESCRIBE LAPP_ORDERS$明細",
+    ]);
+    if (res.skipped) return;
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("LAPP_ORDERS$明細");
+    expect(res.stderr).not.toContain("APP900000000");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20000);
+
 // ----------------------------------------------------------------
 // バッチ dry-run と DML ガード（M3 レビュー反映）
 // ----------------------------------------------------------------
