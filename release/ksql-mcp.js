@@ -37666,195 +37666,119 @@ function buildBatchEnvelope(batch, options = {}) {
   };
 }
 
-// src/node/appProfiles.ts
-function parseTokenMap(raw) {
-  const out = {};
-  if (!raw.trim()) return out;
-  const pairs = raw.split(",");
-  for (const pair of pairs) {
-    const idx = pair.indexOf("=");
-    if (idx <= 0) throw new Error("ArgumentError: --token-map must be APPxxx=token pairs.");
-    const key = normalizeAppKey(pair.slice(0, idx).trim());
-    const value = pair.slice(idx + 1).trim();
-    if (!value) throw new Error(`ArgumentError: token is empty for ${key}.`);
-    out[key] = value;
-  }
-  return out;
-}
-function normalizeAppKey(v) {
-  const m1 = v.match(/^APP(\d+)$/i);
-  if (m1) return `APP${m1[1]}`;
-  const m2 = v.match(/^(\d+)$/);
-  if (m2) return `APP${m2[1]}`;
-  throw new Error(`ArgumentError: invalid app key "${v}"`);
-}
-function extractAppIds(sql) {
-  const out = /* @__PURE__ */ new Set();
-  for (const t of collectAppProfileTokens(sql)) out.add(t.appId);
-  return [...out];
-}
-function isSqlIdentContinue(ch) {
-  if (!ch) return false;
-  const cp = ch.codePointAt(0);
-  return cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122 || cp >= 48 && cp <= 57 || cp === 95 || cp === 36 || cp >= 12352 && cp <= 12543 || cp >= 13312 && cp <= 40959 || cp >= 63744 && cp <= 64255 || cp >= 65281 && cp <= 65376;
-}
-function isProfileNameChar(ch) {
-  if (!ch) return false;
-  const cp = ch.codePointAt(0);
-  return cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122 || cp >= 48 && cp <= 57 || ch === "_" || ch === "-" || ch === "." || ch === "$";
-}
-function tryParseAppProfileToken(sql, start) {
-  const head = sql.slice(start, start + 3);
-  if (head.toUpperCase() !== "APP") return null;
-  const prev = start > 0 ? sql[start - 1] : "";
-  if (isSqlIdentContinue(prev)) return null;
-  let i = start + 3;
-  const digitStart = i;
-  while (i < sql.length && /[0-9]/.test(sql[i])) i++;
-  const digitEnd = i;
-  if (digitEnd === digitStart) return null;
-  if (sql[i] === "$") {
-    i++;
-    const subStart = i;
-    while (i < sql.length && isSqlIdentContinue(sql[i])) i++;
-    if (i === subStart) return null;
-  }
-  const appEnd = i;
-  let profile2 = null;
-  if (sql[i] === "@") {
-    i++;
-    const pStart = i;
-    while (i < sql.length && isProfileNameChar(sql[i])) i++;
-    if (i === pStart) return null;
-    profile2 = sql.slice(pStart, i);
-  }
-  const next = i < sql.length ? sql[i] : "";
-  if (isSqlIdentContinue(next)) return null;
-  return {
-    appId: Number(sql.slice(digitStart, digitEnd)),
-    profile: profile2,
-    start,
-    digitStart,
-    digitEnd,
-    appEnd,
-    fullEnd: i
-  };
-}
-function collectAppProfileTokens(sql) {
-  const tokens = [];
-  let i = 0;
-  while (i < sql.length) {
-    const ch = sql[i];
-    if (ch === "'") {
-      i++;
-      while (i < sql.length) {
-        if (sql[i] === "'") {
-          i++;
-          if (i < sql.length && sql[i] === "'") {
-            i++;
-            continue;
-          }
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    if (ch === "`") {
-      i++;
-      while (i < sql.length && sql[i] !== "`") i++;
-      if (i < sql.length) i++;
-      continue;
-    }
-    if (ch === "-" && sql[i + 1] === "-") {
-      i += 2;
-      while (i < sql.length && sql[i] !== "\n") i++;
-      continue;
-    }
-    if (ch === "/" && sql[i + 1] === "*") {
-      i += 2;
-      while (i < sql.length) {
-        if (sql[i] === "*" && sql[i + 1] === "/") {
-          i += 2;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    const parsed = tryParseAppProfileToken(sql, i);
-    if (!parsed) {
-      i++;
-      continue;
-    }
-    tokens.push(parsed);
-    i = parsed.fullEnd;
-  }
-  return tokens;
-}
-function nextVirtualAppId(used) {
-  let id = 9e8;
-  while (used.has(id)) id++;
-  used.add(id);
-  return id;
-}
-function normalizeSqlAppProfiles(sql, defaultProfile = "dev") {
-  const tokens = collectAppProfileTokens(sql);
-  const hasProfileSyntax = tokens.some((t) => t.profile !== null);
-  const profilesByApp = /* @__PURE__ */ new Map();
-  const normalizedProfile = (profile2) => profile2 ?? defaultProfile;
-  for (const t of tokens) {
-    const p = normalizedProfile(t.profile);
-    let set2 = profilesByApp.get(t.appId);
-    if (!set2) {
-      set2 = /* @__PURE__ */ new Set();
-      profilesByApp.set(t.appId, set2);
-    }
-    set2.add(p.toLowerCase());
-  }
-  const usedAppIds = new Set(tokens.map((t) => t.appId));
-  const pairToMapped = /* @__PURE__ */ new Map();
-  const appBindingByMappedApp = /* @__PURE__ */ new Map();
-  for (const [appId, pSet] of profilesByApp.entries()) {
-    const profiles = [...pSet].sort();
-    if (profiles.length <= 1) continue;
-    for (const pLower of profiles) {
-      const mapped = nextVirtualAppId(usedAppIds);
-      pairToMapped.set(`${appId}@${pLower}`, mapped);
-      appBindingByMappedApp.set(mapped, { appId, profile: pLower });
-    }
-  }
-  const out = [];
-  let cursor = 0;
-  for (const t of tokens) {
-    const p = normalizedProfile(t.profile);
-    const pLower = p.toLowerCase();
-    const mapped = pairToMapped.get(`${t.appId}@${pLower}`) ?? t.appId;
-    appBindingByMappedApp.set(mapped, { appId: t.appId, profile: pLower });
-    out.push(sql.slice(cursor, t.start));
-    out.push(sql.slice(t.start, t.digitStart));
-    out.push(String(mapped));
-    out.push(sql.slice(t.digitEnd, t.appEnd));
-    cursor = t.fullEnd;
-  }
-  out.push(sql.slice(cursor));
-  return {
-    normalizedSql: out.join(""),
-    hasProfileSyntax,
-    appBindingByMappedApp
-  };
-}
-function buildCacheContext(defaultProfile, appBindingByMappedApp) {
-  if (appBindingByMappedApp.size === 0) return `default:${defaultProfile.toLowerCase()}`;
-  const pairs = [...appBindingByMappedApp.entries()].sort((a, b) => a[0] - b[0]).map(([mappedAppId, b]) => `M${mappedAppId}=APP${b.appId}@${b.profile}`);
-  return `apps:${pairs.join(",")}`;
-}
-
 // src/node/config.ts
 var import_fs = require("fs");
+var LOGICAL_APP_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+var PHYSICAL_APP_KEY_RE = /^APP\d+$/i;
+var NUMERIC_APP_KEY_RE = /^\d+$/;
+var LOGICAL_SQL_KEY_RE = /^LAPP_/i;
+function argumentError(message) {
+  return new Error(`ArgumentError: ${message}`);
+}
+function normalizeLogicalApps(profileName, value) {
+  if (value === void 0) return void 0;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw argumentError(`logicalApps for profile "${profileName}" must be an object.`);
+  }
+  const normalized = {};
+  const physicalIdOwners = /* @__PURE__ */ new Map();
+  for (const [rawName, rawAppId] of Object.entries(value)) {
+    if (PHYSICAL_APP_KEY_RE.test(rawName) || NUMERIC_APP_KEY_RE.test(rawName) || LOGICAL_SQL_KEY_RE.test(rawName)) {
+      throw argumentError(
+        `logical app key "${rawName}" in profile "${profileName}" must be a logical name without APP, numeric, or LAPP_ syntax.`
+      );
+    }
+    if (!LOGICAL_APP_NAME_RE.test(rawName)) {
+      throw argumentError(
+        `logical app key "${rawName}" in profile "${profileName}" must match [A-Z][A-Z0-9_]{0,63}.`
+      );
+    }
+    const logicalName = rawName.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(normalized, logicalName)) {
+      throw argumentError(
+        `logical app name "${logicalName}" is duplicated after case normalization in profile "${profileName}".`
+      );
+    }
+    if (typeof rawAppId !== "number" || !Number.isSafeInteger(rawAppId) || rawAppId <= 0) {
+      throw argumentError(
+        `physical app ID for logical app "${logicalName}" in profile "${profileName}" must be a positive safe integer.`
+      );
+    }
+    const existingName = physicalIdOwners.get(rawAppId);
+    if (existingName !== void 0) {
+      throw argumentError(
+        `logical apps "${existingName}" and "${logicalName}" in profile "${profileName}" map to the same physical app ID ${rawAppId}; physical app aliases are not supported yet.`
+      );
+    }
+    physicalIdOwners.set(rawAppId, logicalName);
+    normalized[logicalName] = rawAppId;
+  }
+  return normalized;
+}
+function validateKsqlConfig(config2) {
+  if (config2 === null || typeof config2 !== "object" || Array.isArray(config2)) {
+    throw argumentError("config must be an object.");
+  }
+  if (config2.profiles === void 0) return config2;
+  if (config2.profiles === null || typeof config2.profiles !== "object" || Array.isArray(config2.profiles)) {
+    throw argumentError("profiles must be an object.");
+  }
+  for (const [profileName, profile2] of Object.entries(config2.profiles)) {
+    if (profile2 === null || typeof profile2 !== "object" || Array.isArray(profile2)) {
+      throw argumentError(`profile "${profileName}" must be an object.`);
+    }
+    if (profile2.allowPhysicalAppRefs !== void 0 && typeof profile2.allowPhysicalAppRefs !== "boolean") {
+      throw argumentError(`allowPhysicalAppRefs for profile "${profileName}" must be boolean.`);
+    }
+    const logicalApps = normalizeLogicalApps(profileName, profile2.logicalApps);
+    if (logicalApps !== void 0) profile2.logicalApps = logicalApps;
+  }
+  return config2;
+}
+function createAppResolutionContext(config2, defaultProfile) {
+  const profiles = Object.fromEntries(
+    Object.entries(config2.profiles ?? {}).map(([name, profile2]) => [
+      name,
+      {
+        logicalApps: profile2.logicalApps === void 0 ? void 0 : { ...profile2.logicalApps },
+        allowPhysicalAppRefs: profile2.allowPhysicalAppRefs
+      }
+    ])
+  );
+  const implicitDefaultProfile = {};
+  function requireProfile(profileName) {
+    const profile2 = profiles[profileName];
+    if (!profile2 && profileName === defaultProfile) return implicitDefaultProfile;
+    if (!profile2) throw argumentError(`profile "${profileName}" is not defined.`);
+    return profile2;
+  }
+  return {
+    resolveLogicalApp(name, profile2) {
+      if (!LOGICAL_APP_NAME_RE.test(name)) {
+        throw argumentError(`logical app name "${name}" must match [A-Z][A-Z0-9_]{0,63}.`);
+      }
+      const profileName = profile2 || defaultProfile;
+      const logicalName = name.toUpperCase();
+      const appId = requireProfile(profileName).logicalApps?.[logicalName];
+      if (appId === void 0) {
+        throw argumentError(`logical app LAPP_${logicalName}@${profileName} is not defined.`);
+      }
+      return appId;
+    },
+    assertPhysicalAppAllowed(profile2) {
+      const profileName = profile2 || defaultProfile;
+      if (!profiles[profileName]) return;
+      if (requireProfile(profileName).allowPhysicalAppRefs === false) {
+        throw argumentError(
+          `physical app references are not allowed for profile "${profileName}"; use LAPP_<NAME>.`
+        );
+      }
+    }
+  };
+}
 function loadKsqlConfig(configPath) {
   const raw = (0, import_fs.readFileSync)(configPath, "utf-8");
-  return JSON.parse(raw);
+  return validateKsqlConfig(JSON.parse(raw));
 }
 function loadOptionalKsqlConfig(configPath) {
   if (!(0, import_fs.existsSync)(configPath)) return {};
@@ -38051,11 +37975,19 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
         );
       }
     }
-    const res = await fetch(url2, {
-      ...init,
-      headers,
-      signal: AbortSignal.timeout(timeoutMs)
-    });
+    const controller = new AbortController();
+    const timeout2 = setTimeout(() => controller.abort(), timeoutMs);
+    timeout2.unref?.();
+    let res;
+    try {
+      res = await fetch(url2, {
+        ...init,
+        headers,
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout2);
+    }
     if (!res.ok) {
       const bodyText = await res.text();
       if (tokenResolver.debug) {
@@ -38223,17 +38155,376 @@ function detectSortKind(fieldType, calcFormat) {
   return void 0;
 }
 
+// src/node/appProfiles.ts
+function parseTokenMap(raw) {
+  const out = {};
+  if (!raw.trim()) return out;
+  const pairs = raw.split(",");
+  for (const pair of pairs) {
+    const idx = pair.indexOf("=");
+    if (idx <= 0) throw new Error("ArgumentError: --token-map must be APPxxx=token pairs.");
+    const key = normalizeAppKey(pair.slice(0, idx).trim());
+    const value = pair.slice(idx + 1).trim();
+    if (!value) throw new Error(`ArgumentError: token is empty for ${key}.`);
+    out[key] = value;
+  }
+  return out;
+}
+function normalizeAppKey(v) {
+  const m1 = v.match(/^APP(\d+)$/i);
+  if (m1) return `APP${m1[1]}`;
+  const m2 = v.match(/^(\d+)$/);
+  if (m2) return `APP${m2[1]}`;
+  throw new Error(`ArgumentError: invalid app key "${v}"`);
+}
+function extractAppIds(sql) {
+  const out = /* @__PURE__ */ new Set();
+  for (const t of collectAppProfileTokens(sql)) {
+    if (t.source === "physical") out.add(t.appId);
+  }
+  return [...out];
+}
+function isSqlIdentContinue(ch) {
+  if (!ch) return false;
+  const cp = ch.codePointAt(0);
+  return cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122 || cp >= 48 && cp <= 57 || cp === 95 || cp === 36 || cp >= 12352 && cp <= 12543 || cp >= 13312 && cp <= 40959 || cp >= 63744 && cp <= 64255 || cp >= 65281 && cp <= 65376;
+}
+function isProfileNameChar(ch) {
+  if (!ch) return false;
+  const cp = ch.codePointAt(0);
+  return cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122 || cp >= 48 && cp <= 57 || ch === "_" || ch === "-" || ch === "." || ch === "$";
+}
+function isAsciiLogicalNameStart(ch) {
+  return /^[A-Za-z]$/.test(ch);
+}
+function isAsciiLogicalNameContinue(ch) {
+  return /^[A-Za-z0-9_]$/.test(ch);
+}
+function tryParseAppProfileToken(sql, start) {
+  const prev = start > 0 ? sql[start - 1] : "";
+  if (isSqlIdentContinue(prev)) return null;
+  let source;
+  let appId;
+  let logicalName;
+  let referenceValueStart;
+  let referenceValueEnd;
+  let i;
+  if (sql.slice(start, start + 5).toUpperCase() === "LAPP_") {
+    source = "logical";
+    i = start + 5;
+    referenceValueStart = i;
+    if (!isAsciiLogicalNameStart(sql[i] ?? "")) return null;
+    i++;
+    while (i < sql.length && isAsciiLogicalNameContinue(sql[i])) i++;
+    referenceValueEnd = i;
+    if (referenceValueEnd - referenceValueStart > 64) return null;
+    logicalName = sql.slice(referenceValueStart, referenceValueEnd).toUpperCase();
+  } else if (sql.slice(start, start + 3).toUpperCase() === "APP") {
+    source = "physical";
+    i = start + 3;
+    referenceValueStart = i;
+    while (i < sql.length && /[0-9]/.test(sql[i])) i++;
+    referenceValueEnd = i;
+    if (referenceValueEnd === referenceValueStart) return null;
+    appId = Number(sql.slice(referenceValueStart, referenceValueEnd));
+  } else {
+    return null;
+  }
+  if (sql[i] === "$") {
+    i++;
+    const subStart = i;
+    while (i < sql.length && isSqlIdentContinue(sql[i])) i++;
+    if (i === subStart) return null;
+  }
+  const appEnd = i;
+  let profile2 = null;
+  if (sql[i] === "@") {
+    i++;
+    const pStart = i;
+    while (i < sql.length && isProfileNameChar(sql[i])) i++;
+    if (i === pStart) return null;
+    profile2 = sql.slice(pStart, i);
+  }
+  const next = i < sql.length ? sql[i] : "";
+  if (isSqlIdentContinue(next)) return null;
+  const common = {
+    profile: profile2,
+    start,
+    referenceValueStart,
+    referenceValueEnd,
+    appEnd,
+    fullEnd: i
+  };
+  return source === "physical" ? { ...common, source, appId } : { ...common, source, logicalName };
+}
+function collectAppProfileTokens(sql) {
+  const tokens = [];
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === "'") {
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === "'") {
+          i++;
+          if (i < sql.length && sql[i] === "'") {
+            i++;
+            continue;
+          }
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === "`") {
+      i++;
+      while (i < sql.length && sql[i] !== "`") i++;
+      if (i < sql.length) i++;
+      continue;
+    }
+    if (ch === "-" && sql[i + 1] === "-") {
+      i += 2;
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && sql[i + 1] === "*") {
+      i += 2;
+      while (i < sql.length) {
+        if (sql[i] === "*" && sql[i + 1] === "/") {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    const parsed = tryParseAppProfileToken(sql, i);
+    if (!parsed) {
+      i++;
+      continue;
+    }
+    tokens.push(parsed);
+    i = parsed.fullEnd;
+  }
+  return tokens;
+}
+function nextVirtualAppId(used) {
+  let id = 9e8;
+  while (used.has(id)) id++;
+  used.add(id);
+  return id;
+}
+function normalizeSqlAppProfiles(sql, defaultProfile = "dev", resolutionContext) {
+  const tokens = collectAppProfileTokens(sql);
+  const hasProfileSyntax = tokens.some((t) => t.profile !== null);
+  const profilesByApp = /* @__PURE__ */ new Map();
+  const normalizedProfile = (profile2) => profile2 ?? defaultProfile;
+  for (const t of tokens) {
+    if (t.source !== "physical") continue;
+    const p = normalizedProfile(t.profile);
+    let set2 = profilesByApp.get(t.appId);
+    if (!set2) {
+      set2 = /* @__PURE__ */ new Set();
+      profilesByApp.set(t.appId, set2);
+    }
+    set2.add(p.toLowerCase());
+  }
+  const usedAppIds = new Set(
+    tokens.filter((t) => t.source === "physical").map((t) => t.appId)
+  );
+  const resolvedLogicalApps = /* @__PURE__ */ new Map();
+  for (const t of tokens) {
+    if (t.source !== "logical") continue;
+    const pLower = normalizedProfile(t.profile).toLowerCase();
+    const logicalKey = `logical:${t.logicalName}@${pLower}`;
+    if (resolvedLogicalApps.has(logicalKey)) continue;
+    if (!resolutionContext) {
+      throw new Error(
+        `ArgumentError: logical app LAPP_${t.logicalName}@${pLower} requires logicalApps configuration.`
+      );
+    }
+    const resolvedAppId = resolutionContext.resolveLogicalApp(t.logicalName, pLower);
+    resolvedLogicalApps.set(logicalKey, resolvedAppId);
+    usedAppIds.add(resolvedAppId);
+  }
+  const pairToMapped = /* @__PURE__ */ new Map();
+  const appBindingByMappedApp = /* @__PURE__ */ new Map();
+  for (const [appId, pSet] of profilesByApp.entries()) {
+    const profiles = [...pSet].sort();
+    if (profiles.length <= 1) continue;
+    for (const pLower of profiles) {
+      const mapped = nextVirtualAppId(usedAppIds);
+      pairToMapped.set(`physical:${appId}@${pLower}`, mapped);
+      appBindingByMappedApp.set(mapped, {
+        source: "physical",
+        mappedAppId: mapped,
+        appId,
+        profile: pLower
+      });
+    }
+  }
+  const out = [];
+  const rewriteSegments = [];
+  let normalizedLength = 0;
+  let cursor = 0;
+  const appendSegment = (text, sourceStart, sourceEnd, bindingMappedAppId) => {
+    if (!text && sourceStart === sourceEnd) return;
+    const normalizedStart = normalizedLength;
+    out.push(text);
+    normalizedLength += text.length;
+    rewriteSegments.push({
+      normalizedStart,
+      normalizedEnd: normalizedLength,
+      sourceStart,
+      sourceEnd,
+      ...bindingMappedAppId === void 0 ? {} : { bindingMappedAppId }
+    });
+  };
+  for (const t of tokens) {
+    const p = normalizedProfile(t.profile);
+    const pLower = p.toLowerCase();
+    let binding;
+    if (t.source === "physical") {
+      const mapped = pairToMapped.get(`physical:${t.appId}@${pLower}`) ?? t.appId;
+      binding = {
+        source: "physical",
+        mappedAppId: mapped,
+        appId: t.appId,
+        profile: pLower
+      };
+    } else {
+      const logicalKey = `logical:${t.logicalName}@${pLower}`;
+      let mapped = pairToMapped.get(logicalKey);
+      if (mapped === void 0) {
+        mapped = nextVirtualAppId(usedAppIds);
+        pairToMapped.set(logicalKey, mapped);
+      }
+      binding = {
+        source: "logical",
+        logicalName: t.logicalName,
+        mappedAppId: mapped,
+        appId: resolvedLogicalApps.get(logicalKey),
+        profile: pLower
+      };
+    }
+    appBindingByMappedApp.set(binding.mappedAppId, binding);
+    appendSegment(sql.slice(cursor, t.start), cursor, t.start);
+    const subtableSuffix = sql.slice(t.referenceValueEnd, t.appEnd);
+    const normalizedReference = t.source === "physical" ? `${sql.slice(t.start, t.referenceValueStart)}${binding.mappedAppId}${subtableSuffix}` : `APP${binding.mappedAppId}${subtableSuffix}`;
+    appendSegment(
+      normalizedReference,
+      t.start,
+      t.fullEnd,
+      binding.mappedAppId
+    );
+    cursor = t.fullEnd;
+  }
+  appendSegment(sql.slice(cursor), cursor, sql.length);
+  return {
+    normalizedSql: out.join(""),
+    hasProfileSyntax,
+    appBindingByMappedApp,
+    rewriteSegments
+  };
+}
+function buildCacheContext(defaultProfile, appBindingByMappedApp) {
+  if (appBindingByMappedApp.size === 0) return `default:${defaultProfile.toLowerCase()}`;
+  const pairs = [...appBindingByMappedApp.entries()].sort((a, b) => a[0] - b[0]).map(([mappedAppId, b]) => b.source === "logical" ? `M${mappedAppId}=logical:${b.logicalName}:APP${b.appId}@${b.profile}` : `M${mappedAppId}=physical:APP${b.appId}@${b.profile}`);
+  return `apps:${pairs.join(",")}`;
+}
+
 // src/node/runtime.ts
+var privateConfigSnapshots = /* @__PURE__ */ new WeakMap();
+function cloneConfigSnapshot(config2) {
+  return JSON.parse(JSON.stringify(config2));
+}
+function toConfigView(config2) {
+  const profiles = Object.fromEntries(Object.entries(config2.profiles ?? {}).map(([name, p]) => [name, {
+    baseUrl: p.baseUrl,
+    logicalApps: p.logicalApps === void 0 ? void 0 : Object.freeze({ ...p.logicalApps }),
+    allowPhysicalAppRefs: p.allowPhysicalAppRefs,
+    passwordEnv: p.passwordEnv,
+    tokenMapSources: p.tokenMap === void 0 ? void 0 : Object.freeze(Object.fromEntries(
+      Object.entries(p.tokenMap).map(([key, value]) => [key, String(value).startsWith("env:") ? String(value).slice(4) : "inline"])
+    ))
+  }]));
+  return Object.freeze({ defaultProfile: config2.defaultProfile, profiles: Object.freeze(profiles) });
+}
+function resolveSqlContext(serverOptions, sql, inputProfile) {
+  const configPath = serverOptions.configPath ?? envString("KSQL_CONFIG") ?? "./ksql.config.json";
+  const config2 = cloneConfigSnapshot(loadOptionalKsqlConfig(configPath));
+  const profileName = resolveDefaultProfile(config2, serverOptions, inputProfile);
+  const resolutionContext = createAppResolutionContext(config2, profileName);
+  const normalized = normalizeSqlAppProfiles(sql, profileName, resolutionContext);
+  const bindings = normalized.appBindingByMappedApp;
+  for (const binding of bindings.values()) {
+    if (binding.source === "physical") resolutionContext.assertPhysicalAppAllowed(binding.profile);
+  }
+  const context = {
+    normalizedSql: normalized.normalizedSql,
+    bindings,
+    cacheContext: buildCacheContext(profileName, bindings),
+    profileName,
+    rewriteSegments: Object.freeze(normalized.rewriteSegments.map((segment) => Object.freeze({ ...segment }))),
+    hasProfileSyntax: normalized.hasProfileSyntax,
+    configSnapshot: toConfigView(config2),
+    logicalBindingLabels: new Map(
+      [...bindings.values()].filter((b) => b.source === "logical").map((b) => [b.mappedAppId, `LAPP_${b.logicalName}@${b.profile}`])
+    )
+  };
+  Object.freeze(context);
+  privateConfigSnapshots.set(context, config2);
+  return context;
+}
+function resolveTokenByMappedApp(args) {
+  const tokenByMappedApp = /* @__PURE__ */ new Map();
+  const tokenByPhysicalApp = /* @__PURE__ */ new Map();
+  const missing = [];
+  for (const mappedAppId of args.mappedAppIds) {
+    const binding = args.bindings.get(mappedAppId);
+    if (!binding && args.logicalBindingLabels.has(mappedAppId)) {
+      throw new Error(`InternalError: binding is missing for logical app ${args.logicalBindingLabels.get(mappedAppId)}.`);
+    }
+    const appId = binding?.appId ?? mappedAppId;
+    const profile2 = binding?.profile ?? args.profileName;
+    const fromMap = args.effectiveTokenMap[`APP${appId}`];
+    if (fromMap) {
+      const token = resolveTokenValue(fromMap);
+      tokenByMappedApp.set(mappedAppId, token);
+      tokenByPhysicalApp.set(appId, token);
+      continue;
+    }
+    if (binding?.source !== "logical" && args.mappedAppIds.length === 1 && args.singleToken) {
+      tokenByMappedApp.set(mappedAppId, args.singleToken);
+      tokenByPhysicalApp.set(appId, args.singleToken);
+      continue;
+    }
+    missing.push(binding?.source === "logical" ? `LAPP_${binding.logicalName} (APP${appId})@${profile2}` : `APP${appId}@${profile2}`);
+  }
+  return { tokenByMappedApp, tokenByPhysicalApp, missing };
+}
+function resolveRuntimeBinding(context, mappedAppId) {
+  const binding = context.bindings.get(mappedAppId);
+  if (binding) return binding;
+  const logicalLabel = context.logicalBindingLabels.get(mappedAppId);
+  if (logicalLabel) {
+    throw new Error(`InternalError: binding is missing for logical app ${logicalLabel}.`);
+  }
+  return { appId: mappedAppId, profile: context.profileName.toLowerCase() };
+}
 function resolveDefaultProfile(config2, serverOptions, inputProfile) {
   return inputProfile ?? serverOptions.profile ?? envString("KSQL_PROFILE") ?? config2.defaultProfile ?? "dev";
 }
 async function createKsqlRuntime(serverOptions, input) {
-  const configPath = serverOptions.configPath ?? envString("KSQL_CONFIG") ?? "./ksql.config.json";
-  const config2 = loadOptionalKsqlConfig(configPath);
-  const profileName = resolveDefaultProfile(config2, serverOptions, input.profile);
+  const sqlContext = input.sqlContext ?? resolveSqlContext(serverOptions, input.sql, input.profile);
+  const config2 = privateConfigSnapshots.get(sqlContext);
+  if (!config2) {
+    throw new Error("InternalError: private config snapshot is missing for resolved SQL context.");
+  }
+  const profileName = sqlContext.profileName;
   const profile2 = config2.profiles?.[profileName] ?? {};
-  const normalized = normalizeSqlAppProfiles(input.sql, profileName);
-  const sql = normalized.normalizedSql;
+  const sql = sqlContext.normalizedSql;
   const maxRecords2 = input.maxRecords ?? envInt("KSQL_MAX_RECORDS") ?? profile2.query?.maxRecords ?? 500;
   const fetchParallel2 = input.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile2.query?.fetchParallel ?? 3;
   if (!Number.isInteger(fetchParallel2) || fetchParallel2 < 1 || fetchParallel2 > 10) {
@@ -38249,11 +38540,12 @@ async function createKsqlRuntime(serverOptions, input) {
   for (const appId of appIds) {
     appProfileByApp.set(
       appId,
-      normalized.appBindingByMappedApp.get(appId)?.profile ?? profileName.toLowerCase()
+      sqlContext.bindings.get(appId)?.profile ?? profileName.toLowerCase()
     );
   }
   const usedProfiles = /* @__PURE__ */ new Set([...appProfileByApp.values(), profileName]);
   const profileClientMap = /* @__PURE__ */ new Map();
+  const allTokenByMappedApp = /* @__PURE__ */ new Map();
   const missingAppProfiles = [];
   const tokenMapEnv = envString("KSQL_TOKEN_MAP");
   const mapFromEnv = tokenMapEnv ? parseTokenMap(tokenMapEnv) : {};
@@ -38291,21 +38583,19 @@ async function createKsqlRuntime(serverOptions, input) {
     );
     const effectiveTokenMap = { ...mapFromConfig, ...mapFromEnv };
     const assignedAppIds = appIds.filter((appId) => appProfileByApp.get(appId) === pName);
-    const tokenByApp = /* @__PURE__ */ new Map();
-    for (const mappedAppId of assignedAppIds) {
-      const realAppId = normalized.appBindingByMappedApp.get(mappedAppId)?.appId ?? mappedAppId;
-      const key = `APP${realAppId}`;
-      const fromMap = effectiveTokenMap[key];
-      if (fromMap) {
-        tokenByApp.set(mappedAppId, resolveTokenValue(fromMap));
-        continue;
-      }
-      if (assignedAppIds.length === 1 && singleToken) {
-        tokenByApp.set(mappedAppId, singleToken);
-        continue;
-      }
-      missingAppProfiles.push(`APP${realAppId}@${pName}`);
+    const resolvedTokens = resolveTokenByMappedApp({
+      mappedAppIds: assignedAppIds,
+      profileName: pName,
+      bindings: sqlContext.bindings,
+      logicalBindingLabels: sqlContext.logicalBindingLabels,
+      effectiveTokenMap,
+      singleToken
+    });
+    const tokenByApp = resolvedTokens.tokenByPhysicalApp;
+    for (const [mappedAppId, token] of resolvedTokens.tokenByMappedApp) {
+      allTokenByMappedApp.set(mappedAppId, token);
     }
+    missingAppProfiles.push(...resolvedTokens.missing);
     if (assignedAppIds.length === 0 && singleToken) {
       tokenByApp.set(0, singleToken);
     }
@@ -38328,38 +38618,43 @@ async function createKsqlRuntime(serverOptions, input) {
   if (missingAppProfiles.length > 0) {
     throw new Error(`AuthError: token is missing for ${missingAppProfiles.join(", ")}.`);
   }
-  const defaultClient = profileClientMap.get(profileName);
+  const runtimeContext = {
+    sqlContext,
+    tokenByMappedApp: allTokenByMappedApp,
+    clientsByProfile: profileClientMap
+  };
+  const defaultClient = runtimeContext.clientsByProfile.get(profileName);
   if (!defaultClient) {
     throw new Error(`AuthError: profile client is not resolved for "${profileName}".`);
   }
   const routedClient = {
     getRecords: (params) => {
-      const binding = normalized.appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
-      const routed = profileClientMap.get(binding.profile);
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.getRecords({ ...params, app: binding.appId });
     },
     postRecords: (params) => {
-      const binding = normalized.appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
-      const routed = profileClientMap.get(binding.profile);
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.postRecords({ ...params, app: binding.appId });
     },
     putRecords: (params) => {
-      const binding = normalized.appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
-      const routed = profileClientMap.get(binding.profile);
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.putRecords({ ...params, app: binding.appId });
     },
     deleteRecords: (params) => {
-      const binding = normalized.appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
-      const routed = profileClientMap.get(binding.profile);
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.deleteRecords({ ...params, app: binding.appId });
     },
     getFields: (appId) => {
-      const binding = normalized.appBindingByMappedApp.get(appId) ?? { appId, profile: profileName.toLowerCase() };
-      const routed = profileClientMap.get(binding.profile);
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, appId);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
       return routed.getFields(binding.appId);
     },
@@ -38378,7 +38673,7 @@ async function createKsqlRuntime(serverOptions, input) {
     sql,
     profileName,
     client: gatedClient,
-    cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
+    cacheContext: sqlContext.cacheContext,
     maxRecords: maxRecords2,
     fetchParallel: fetchParallel2,
     onLimit: onLimit2,
@@ -38590,11 +38885,6 @@ function noOpClient() {
     getFields: fail
   };
 }
-function getToolProfile(serverOptions, inputProfile) {
-  const configPath = getServerConfigPath(serverOptions);
-  const config2 = loadOptionalKsqlConfig(configPath);
-  return resolveDefaultProfile(config2, serverOptions, inputProfile);
-}
 function getServerConfigPath(serverOptions) {
   return serverOptions.configPath ?? envString("KSQL_CONFIG") ?? "./ksql.config.json";
 }
@@ -38607,15 +38897,80 @@ function getSavedQueryCatalogPath(serverOptions) {
   });
 }
 function normalizeSqlForTool(serverOptions, sql, inputProfile) {
-  const profileName = getToolProfile(serverOptions, inputProfile);
-  const normalized = normalizeSqlAppProfiles(sql, profileName);
+  const sqlContext = resolveSqlContext(serverOptions, sql, inputProfile);
   return {
-    profileName,
-    normalizedSql: normalized.normalizedSql,
-    hasProfileSyntax: normalized.hasProfileSyntax,
-    appBindingByMappedApp: normalized.appBindingByMappedApp,
-    cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp)
+    profileName: sqlContext.profileName,
+    normalizedSql: sqlContext.normalizedSql,
+    hasProfileSyntax: sqlContext.hasProfileSyntax,
+    appBindingByMappedApp: sqlContext.bindings,
+    cacheContext: sqlContext.cacheContext,
+    sqlContext,
+    sourceSql: sql
   };
+}
+function toValidationBinding(mappedAppId, binding) {
+  return binding.source === "logical" ? {
+    source: binding.source,
+    logicalName: binding.logicalName,
+    mappedAppId,
+    appId: binding.appId,
+    profile: binding.profile
+  } : {
+    source: binding.source,
+    mappedAppId,
+    appId: binding.appId,
+    profile: binding.profile
+  };
+}
+function toExplainBindings(bindings) {
+  return [...bindings.values()].map((binding) => binding.source === "logical" ? { source: binding.source, logicalName: binding.logicalName, appId: binding.appId, profile: binding.profile } : { source: binding.source, appId: binding.appId, profile: binding.profile });
+}
+function restoreExplainValue(value, bindings) {
+  if (typeof value === "string") {
+    let restored = value;
+    for (const binding of bindings.values()) {
+      const internal = `APP${binding.mappedAppId}`;
+      const display = binding.source === "logical" ? `LAPP_${binding.logicalName}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
+      restored = restored.split(`${internal} (${binding.mappedAppId})`).join(display).split(internal).join(display);
+    }
+    return restored;
+  }
+  if (Array.isArray(value)) return value.map((item) => restoreExplainValue(item, bindings));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, restoreExplainValue(item, bindings)])
+    );
+  }
+  return value;
+}
+function restoreContextError(err, sourceSql, context) {
+  if (!(err instanceof Error)) throw err;
+  let message = err.message;
+  for (const binding of context.bindings.values()) {
+    if (binding.source === "logical") {
+      message = message.split(`APP${binding.mappedAppId}`).join(`LAPP_${binding.logicalName}@${binding.profile}`);
+    }
+  }
+  const token = err.token;
+  if (typeof token?.pos === "number") {
+    const segment = context.rewriteSegments.find(
+      (candidate) => token.pos >= candidate.normalizedStart && token.pos < candidate.normalizedEnd
+    );
+    if (segment) {
+      const sourcePos = segment.sourceStart + Math.min(
+        token.pos - segment.normalizedStart,
+        Math.max(0, segment.sourceEnd - segment.sourceStart - 1)
+      );
+      message = message.replace(/\uff08位置 \d+、トークン:/, `\uFF08\u4F4D\u7F6E ${sourcePos}\u3001\u30C8\u30FC\u30AF\u30F3:`);
+      const originalRef = sourceSql.slice(segment.sourceStart, segment.sourceEnd);
+      if (segment.bindingMappedAppId !== void 0 && originalRef) {
+        message = message.replace(/(トークン: 「)[^」]*(」)/, `$1${originalRef}$2`);
+      }
+    }
+  }
+  const restored = new Error(message);
+  restored.name = err.name;
+  throw restored;
 }
 function explainSql(sql) {
   return /^\s*EXPLAIN\b/i.test(sql) ? sql : `EXPLAIN ${sql}`;
@@ -38740,15 +39095,17 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   const createRuntime = deps.createRuntime ?? createKsqlRuntime;
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
+  const validationContexts = /* @__PURE__ */ new WeakMap();
   async function validate(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
-    const statements = parseSqlStatements(normalized.normalizedSql);
-    const analysis = analyzeBatch(statements);
-    const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => ({
-      mappedAppId,
-      appId: binding.appId,
-      profile: binding.profile
-    }));
+    let analysis;
+    try {
+      const statements = parseSqlStatements(normalized.normalizedSql);
+      analysis = analyzeBatch(statements);
+    } catch (err) {
+      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+    }
+    const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
     const statementValidations = analysis.statements.map((s2) => ({
       index: s2.index,
       statementType: s2.statementType,
@@ -38778,10 +39135,12 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       appBindings
     };
     if (analysis.statementCount > 1) {
-      return { ...common, batch: true };
+      const result2 = { ...common, batch: true };
+      validationContexts.set(result2, normalized.sqlContext);
+      return result2;
     }
     const s = statementValidations[0];
-    return {
+    const result = {
       ...common,
       batch: false,
       statementType: s.statementType,
@@ -38791,17 +39150,26 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       insertValuesCount: s.insertValuesCount,
       appIds: s.appIds
     };
+    validationContexts.set(result, normalized.sqlContext);
+    return result;
   }
   async function explain(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
-    const statements = parseSqlStatements(normalized.normalizedSql);
+    const appBindings = toExplainBindings(normalized.appBindingByMappedApp);
+    let statements;
+    try {
+      statements = parseSqlStatements(normalized.normalizedSql);
+    } catch (err) {
+      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+    }
     if (statements.length > 1) {
       const plans = buildBatchExplainPlans(normalized.normalizedSql);
       return {
         ok: true,
         batch: true,
         statementCount: plans.statementCount,
-        statements: plans.statements
+        statements: restoreExplainValue(plans.statements, normalized.appBindingByMappedApp),
+        appBindings
       };
     }
     const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
@@ -38810,16 +39178,20 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
     }
-    return toSelectPayload(result);
+    return restoreExplainValue(
+      { ...toSelectPayload(result), appBindings },
+      normalized.appBindingByMappedApp
+    );
   }
-  async function query(input) {
-    const validation = await validate(input);
+  async function query(input, validated) {
+    const validation = validated ?? await validate(input);
     if (validation.batch) {
       if (validation.containsDml) {
         throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
       }
       const runtime2 = await createRuntime(serverOptions, {
         sql: input.sql,
+        sqlContext: validationContexts.get(validation),
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
@@ -38862,6 +39234,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
@@ -38907,6 +39280,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       // SELECT-based DML を含む場合は dmlMaxRows で読み取りを絞らない（案A。
       // resolveMutateRuntimeMaxRecords の doc コメント参照）
@@ -38951,9 +39325,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     return { ...payload };
   }
-  async function mutate(input) {
+  async function mutate(input, validated) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
-    const validation = await validate(input);
+    const validation = validated ?? await validate(input);
     if (validation.batch) {
       return mutateBatch(input, validation, dmlMaxRows);
     }
@@ -38969,6 +39343,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       // SELECT-based DML は dmlMaxRows で読み取りを絞らない（案A。
       // resolveMutateRuntimeMaxRecords の doc コメント参照）
@@ -39089,7 +39464,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout
-      });
+      }, validation);
       return {
         ok: true,
         name: saved.name,
@@ -39105,7 +39480,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       dmlMaxRows,
       fetchParallel: input.fetchParallel,
       timeout: input.timeout
-    });
+    }, validation);
     return {
       ok: true,
       name: saved.name,
@@ -39275,7 +39650,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.12.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.13.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

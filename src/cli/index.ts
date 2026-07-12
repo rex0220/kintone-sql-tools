@@ -26,7 +26,13 @@ import {
   type SelectResult,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
-import { resolveRequestGateOptions } from "../node/config";
+import {
+  createAppResolutionContext,
+  resolveRequestGateOptions,
+  validateKsqlConfig,
+  type KsqlConfig,
+} from "../node/config";
+import { resolveTokenByMappedApp } from "../node/runtime";
 import { decideConsoleInput, decideRun } from "./consoleInput";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
@@ -38,6 +44,7 @@ import {
   normalizeSqlAppProfiles,
   parseTokenFile,
   parseTokenMap,
+  type AppBinding,
 } from "../node/appProfiles";
 import {
   collectDmlTargetFields,
@@ -130,6 +137,8 @@ interface CliConfig {
     passwordEnv?: string;
     app?: number;
     tokenMap?: Record<string, string>;
+    logicalApps?: Record<string, number>;
+    allowPhysicalAppRefs?: boolean;
     query?: {
       maxRecords?: number;
       fetchParallel?: number;
@@ -988,7 +997,7 @@ function buildReplExecArgvWithProfile(
   return buildReplExecArgv(next, sql, dryRun, format);
 }
 
-async function runWithArgv(argv: string[]): Promise<number> {
+export async function runWithArgv(argv: string[]): Promise<number> {
   const savedArgv = process.argv;
   process.argv = [savedArgv[0], savedArgv[1], ...argv];
   try {
@@ -1069,11 +1078,12 @@ async function confirmDmlInConsole(
   sql: string,
   opts: { allowDml: boolean; yes: boolean; dryRun: boolean },
   queue?: ConsoleEventQueue,
-  defaultProfile = "dev"
+  defaultProfile = "dev",
+  resolutionContext?: ReturnType<typeof createAppResolutionContext>
 ): Promise<boolean> {
   if (!opts.allowDml || opts.yes || opts.dryRun) return true;
   try {
-    const normalized = normalizeSqlAppProfiles(sql, defaultProfile);
+    const normalized = normalizeSqlAppProfiles(sql, defaultProfile, resolutionContext);
     const statements = parseSqlStatements(normalized.normalizedSql);
 
     // バッチ: DML を含む場合はバッチ全体で1回の確認（全 DML 文の一覧を表示。仕様 §8.3）
@@ -1168,6 +1178,12 @@ async function runConsole(base: ParsedArgs): Promise<number> {
   let buffer = "";
   let emptyPromptSigintArmed = false;
   const queue = createConsoleEventQueue(rl);
+  const consoleConfigPath = base.configPath ?? envString("KSQL_CONFIG") ?? "./ksql.config.json";
+  let consoleConfig: KsqlConfig = {};
+  try { consoleConfig = validateKsqlConfig(loadConfig(consoleConfigPath) as KsqlConfig); } catch { /* optional */ }
+  const consoleResolutionContext = () => createAppResolutionContext(consoleConfig, profile ?? "dev");
+  const formatConsoleProfiles = (sql: string) =>
+    formatResolvedAppProfiles(sql, profile ?? "dev", consoleResolutionContext());
 
   process.stdout.write("kSQL Console (type :help)\n");
   process.stdout.write(
@@ -1234,7 +1250,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
               allowDml: base.allowDml,
               yes: base.yes,
               dryRun,
-            }, queue, profile ?? "dev");
+            }, queue, profile ?? "dev", consoleResolutionContext());
             if (!ok) {
               process.stderr.write("DML was cancelled by user.\n");
               continue;
@@ -1242,7 +1258,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
           }
           buffer = "";
           lastSql = sql;
-          lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
+          lastResolvedProfiles = formatConsoleProfiles(sql);
           history.push(sql);
           appendHistory(sql);
           const { code, stdout } = await runWithArgvCapture(buildReplExecArgvWithProfile(base, sql, dryRun, format, profile));
@@ -1343,13 +1359,13 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             allowDml: base.allowDml,
             yes: base.yes,
             dryRun,
-          }, queue, profile ?? "dev");
+          }, queue, profile ?? "dev", consoleResolutionContext());
           if (!ok) {
             process.stderr.write("DML was cancelled by user.\n");
             continue;
           }
           lastSql = sql;
-          lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
+          lastResolvedProfiles = formatConsoleProfiles(sql);
           process.stdout.write(`rerun: ${sql.replace(/\s+/g, " ").trim()}\n`);
           const { code, stdout } = await runWithArgvCapture(buildReplExecArgvWithProfile(base, sql, dryRun, format, profile));
           lastOutput = stdout;
@@ -1419,14 +1435,14 @@ async function runConsole(base: ParsedArgs): Promise<number> {
           allowDml: base.allowDml,
           yes: base.yes,
           dryRun,
-        }, queue, profile ?? "dev");
+        }, queue, profile ?? "dev", consoleResolutionContext());
         if (!ok) {
           process.stderr.write("DML was cancelled by user.\n");
           continue;
         }
       }
       lastSql = sql;
-      lastResolvedProfiles = formatResolvedAppProfiles(sql, profile ?? "dev");
+      lastResolvedProfiles = formatConsoleProfiles(sql);
       history.push(sql);
       appendHistory(sql);
 
@@ -1480,7 +1496,7 @@ async function run(): Promise<number> {
 
   let sql: string | null = null;
   let hasProfileSyntax = false;
-  let appBindingByMappedApp = new Map<number, { appId: number; profile: string }>();
+  let appBindingByMappedApp = new Map<number, AppBinding>();
   let parsedStmt: unknown = null;
   let stmtType = "SELECT";
   let hasWhere = true;
@@ -1498,7 +1514,12 @@ async function run(): Promise<number> {
     }
 
     try {
-      const normalized = normalizeSqlAppProfiles(sql, profileName);
+      const validatedConfig = validateKsqlConfig(config as KsqlConfig);
+      const resolutionContext = createAppResolutionContext(validatedConfig, profileName);
+      const normalized = normalizeSqlAppProfiles(sql, profileName, resolutionContext);
+      for (const binding of normalized.appBindingByMappedApp.values()) {
+        if (binding.source === "physical") resolutionContext.assertPhysicalAppAllowed(binding.profile);
+      }
       sql = normalized.normalizedSql;
       hasProfileSyntax = normalized.hasProfileSyntax;
       appBindingByMappedApp = normalized.appBindingByMappedApp;
@@ -1708,21 +1729,20 @@ async function run(): Promise<number> {
       const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv, ...mapFromFile, ...mapFromArg };
 
       const assignedAppIds = appIds.filter((appId) => appProfileByApp.get(appId) === pName);
-      const tokenByApp = new Map<number, string>();
-      for (const mappedAppId of assignedAppIds) {
-        const realAppId = appBindingByMappedApp.get(mappedAppId)?.appId ?? mappedAppId;
-        const key = `APP${realAppId}`;
-        const fromMap = effectiveTokenMap[key];
-        if (fromMap) {
-          tokenByApp.set(mappedAppId, resolveTokenValue(fromMap));
-          continue;
-        }
-        if (assignedAppIds.length === 1 && singleToken) {
-          tokenByApp.set(mappedAppId, singleToken);
-          continue;
-        }
-        missingAppProfiles.push(`APP${realAppId}@${pName}`);
-      }
+      const resolvedTokens = resolveTokenByMappedApp({
+        mappedAppIds: assignedAppIds,
+        profileName: pName,
+        bindings: appBindingByMappedApp,
+        logicalBindingLabels: new Map(
+          [...appBindingByMappedApp.values()]
+            .filter((b): b is Extract<AppBinding, { source: "logical" }> => b.source === "logical")
+            .map((b) => [b.mappedAppId, `LAPP_${b.logicalName}@${b.profile}`])
+        ),
+        effectiveTokenMap,
+        singleToken,
+      });
+      const tokenByApp = resolvedTokens.tokenByPhysicalApp;
+      missingAppProfiles.push(...resolvedTokens.missing);
 
       profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
@@ -1736,7 +1756,7 @@ async function run(): Promise<number> {
         auth: {
           type: "token",
           resolveToken(appId: number): string {
-            const token = tokenByApp.get(appId) ?? tokenByApp.get(assignedAppIds[0]);
+            const token = tokenByApp.get(appId);
             if (!token) throw new Error(`AuthError: token is not resolved for APP${appId}@${pName}.`);
             return token;
           },

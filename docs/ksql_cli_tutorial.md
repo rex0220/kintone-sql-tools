@@ -179,6 +179,46 @@ SELECT * FROM APP4149@guest LIMIT 10;
 - `DELETE` での `@profile` は未対応
 - profile 名が未定義だと `ArgumentError: profile "..." is not defined.` になる
 
+### 論理アプリ名で環境差を吸収する
+
+開発・本番でアプリ ID が異なる場合は `LAPP_<NAME>` を使います。profile設定のキーには `LAPP_` を付けません。
+
+```json
+{
+  "defaultProfile": "dev",
+  "profiles": {
+    "dev": {
+      "baseUrl": "https://example.cybozu.com",
+      "logicalApps": { "CUSTOMERS": 4148 },
+      "tokenMap": { "APP4148": "env:DEV_CUSTOMERS_TOKEN" }
+    },
+    "prod": {
+      "baseUrl": "https://example.cybozu.com",
+      "allowPhysicalAppRefs": false,
+      "logicalApps": { "CUSTOMERS": 5148 },
+      "tokenMap": { "APP5148": "env:PROD_CUSTOMERS_TOKEN" }
+    }
+  }
+}
+```
+
+```powershell
+node .\dist-cli\ksql.js --config .\ksql.config.json --profile dev `
+  -e "SELECT 顧客No, 会社名 FROM LAPP_CUSTOMERS LIMIT 10"
+
+node .\dist-cli\ksql.js --config .\ksql.config.json --profile prod `
+  -e "SELECT 顧客No, 会社名 FROM LAPP_CUSTOMERS LIMIT 10"
+```
+
+同じ SQL が `dev` では APP4148、`prod` では APP5148 へ解決されます。`--dry-run` または `EXPLAIN` で解決先を確認してからDMLを実行してください。
+
+注意:
+
+- `APP4148` は常に物理 APP4148。`logicalApps` を追加しても意味は変わらない
+- `logicalApps` にない `LAPP_UNKNOWN` は fallback せず失敗する
+- `allowPhysicalAppRefs: false` の profile では `APP5148` の直接参照を拒否する
+- CLIの `DELETE` は `LAPP_CUSTOMERS@prod` のような明示 profile を拒否する。`--profile prod` と `LAPP_CUSTOMERS` を使う
+
 ## 9. エクスポート
 
 JSON で保存:
@@ -228,6 +268,10 @@ node dist-cli/ksql.js ^
   - `--profile` 名と設定ファイル定義を確認
 - `ArgumentError: @profile is not supported for DELETE yet.`
   - `DELETE` では `APP@profile` を使わず、既定 profile 側で実行
+- `ArgumentError: logical app LAPP_... is not defined.`
+  - 実効 profile の `logicalApps` と論理名を確認
+- `ArgumentError: physical app references are not allowed...`
+  - 対象 profile は論理参照専用。対応する `LAPP_<NAME>` を使用
 
 ## 11. 次のステップ
 

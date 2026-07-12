@@ -6,6 +6,11 @@
       "baseUrl": "https://example.kintone.com",
       "auth": "token",
       "app": 100,
+      "allowPhysicalAppRefs": true,
+      "logicalApps": {
+        "ORDERS": 100,
+        "CUSTOMERS": 101
+      },
       "tokenMap": {
         "APP100": "env:KSQL_TOKEN_APP100",
         "APP101": "env:KSQL_TOKEN_APP101"
@@ -35,6 +40,11 @@
       "guestSpaceId": 5,
       "auth": "token",
       "app": 200,
+      "allowPhysicalAppRefs": true,
+      "logicalApps": {
+        "ORDERS": 200,
+        "CUSTOMERS": 201
+      },
       "tokenMap": {
         "APP200": "env:KSQL_TOKEN_APP200",
         "APP201": "env:KSQL_TOKEN_APP201"

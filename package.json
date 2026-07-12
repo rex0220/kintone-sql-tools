@@ -1,6 +1,6 @@
 {
   "name": "@rex0220/kintone-sql-tools",
-  "version": "1.12.1",
+  "version": "1.13.0",
   "description": "kintone SQL plugin, CLI, and MCP tools (ksql)",
   "publishConfig": {
     "access": "public"
@@ -19,7 +19,9 @@
     "ksql-mcp": "dist-mcp/ksql-mcp.js"
   },
   "scripts": {
-    "test": "jest",
+    "test": "node scripts/run-tests.mjs",
+    "test:parallel": "jest --maxWorkers=2 --testPathIgnorePatterns=console\\.e2e\\.test\\.ts dml_guard\\.e2e\\.test\\.ts",
+    "test:subprocess": "jest --runInBand src/cli/__tests__/console.e2e.test.ts src/cli/__tests__/dml_guard.e2e.test.ts",
     "build": "npm run build:plugin && npm run build:cli && npm run build:mcp && npm run build:mcpb",
     "build:plugin": "node build.mjs",
     "build:cli": "node build-cli.mjs",

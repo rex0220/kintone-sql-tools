@@ -1,6 +1,9 @@
-import { existsSync } from "fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
+
+jest.setTimeout(20000);
 
 async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string; skipped: boolean }> {
   const cliPath = join(process.cwd(), "dist-cli", "ksql.js");
@@ -22,6 +25,7 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   let stderr = "";
   child.stdout.on("data", (d) => { stdout += d.toString(); });
   child.stderr.on("data", (d) => { stderr += d.toString(); });
+  child.stdin.end();
 
   const code = await new Promise<number>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -104,6 +108,48 @@ test("REORDER dry-run is allowed with --allow-dml", async () => {
   expect(res.code).toBe(0);
   expect(res.stdout).toContain("[REORDER]");
 });
+
+test("DELETE + @profile is rejected by the CLI", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "--allow-dml",
+    "-e",
+    "DELETE FROM APP88@prod WHERE $id = 1",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("@profile is not supported for DELETE yet");
+});
+
+test("logical DELETE は明示 profile 付きを拒否し、省略時は許可する", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-delete-"));
+  const configPath = join(dir, "ksql.config.json");
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "prod",
+    profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+  }));
+  try {
+    const explicit = await runCli([
+      "--config", configPath, "--dry-run", "--allow-dml", "-e",
+      "DELETE FROM LAPP_ORDERS@prod WHERE $id = 1",
+    ]);
+    if (explicit.skipped) return;
+    expect(explicit.code).toBe(2);
+    expect(explicit.stderr).toContain("@profile is not supported for DELETE yet");
+
+    const implicit = await runCli([
+      "--config", configPath, "--dry-run", "--allow-dml", "-e",
+      "DELETE FROM LAPP_ORDERS WHERE $id = 1",
+    ]);
+    expect(implicit.code).toBe(0);
+    expect(implicit.stderr).not.toContain("@profile is not supported");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20000);
 
 // ----------------------------------------------------------------
 // バッチ dry-run と DML ガード（M3 レビュー反映）

@@ -15,18 +15,16 @@ import {
   type SelectResult,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
-import {
-  buildCacheContext,
-  normalizeSqlAppProfiles,
-} from "../node/appProfiles";
+import type { AppBinding } from "../node/appProfiles";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
 import { envString, loadOptionalKsqlConfig, type OnLimitMode } from "../node/config";
 import {
   createKsqlRuntime,
-  resolveDefaultProfile,
+  resolveSqlContext,
   type CreateKsqlRuntimeInput,
   type KsqlRuntime,
   type KsqlRuntimeServerOptions,
+  type ResolvedSqlContext,
 } from "../node/runtime";
 import {
   describeAppInputSchema,
@@ -107,7 +105,13 @@ interface ValidationCommon {
   normalizedSql: string;
   hasProfileSyntax: boolean;
   cacheContext: string;
-  appBindings: Array<{ mappedAppId: number; appId: number; profile: string }>;
+  appBindings: Array<{
+    source: "logical" | "physical";
+    logicalName?: string;
+    mappedAppId: number;
+    appId: number;
+    profile: string;
+  }>;
 }
 
 /** 単文入力の検証結果。トップレベルのスカラーフィールドは従来互換 */
@@ -164,15 +168,6 @@ function noOpClient(): KintoneClient {
   };
 }
 
-function getToolProfile(
-  serverOptions: KsqlRuntimeServerOptions,
-  inputProfile?: string
-): string {
-  const configPath = getServerConfigPath(serverOptions);
-  const config = loadOptionalKsqlConfig(configPath);
-  return resolveDefaultProfile(config, serverOptions, inputProfile);
-}
-
 function getServerConfigPath(serverOptions: KsqlRuntimeServerOptions): string {
   return serverOptions.configPath ?? envString("KSQL_CONFIG") ?? "./ksql.config.json";
 }
@@ -191,15 +186,92 @@ function normalizeSqlForTool(
   sql: string,
   inputProfile?: string
 ) {
-  const profileName = getToolProfile(serverOptions, inputProfile);
-  const normalized = normalizeSqlAppProfiles(sql, profileName);
+  const sqlContext = resolveSqlContext(serverOptions, sql, inputProfile);
   return {
-    profileName,
-    normalizedSql: normalized.normalizedSql,
-    hasProfileSyntax: normalized.hasProfileSyntax,
-    appBindingByMappedApp: normalized.appBindingByMappedApp,
-    cacheContext: buildCacheContext(profileName, normalized.appBindingByMappedApp),
+    profileName: sqlContext.profileName,
+    normalizedSql: sqlContext.normalizedSql,
+    hasProfileSyntax: sqlContext.hasProfileSyntax,
+    appBindingByMappedApp: sqlContext.bindings,
+    cacheContext: sqlContext.cacheContext,
+    sqlContext,
+    sourceSql: sql,
   };
+}
+
+function toValidationBinding(mappedAppId: number, binding: AppBinding) {
+  return binding.source === "logical"
+    ? {
+        source: binding.source,
+        logicalName: binding.logicalName,
+        mappedAppId,
+        appId: binding.appId,
+        profile: binding.profile,
+      }
+    : {
+        source: binding.source,
+        mappedAppId,
+        appId: binding.appId,
+        profile: binding.profile,
+      };
+}
+
+function toExplainBindings(bindings: ReadonlyMap<number, AppBinding>) {
+  return [...bindings.values()].map((binding) => binding.source === "logical"
+    ? { source: binding.source, logicalName: binding.logicalName, appId: binding.appId, profile: binding.profile }
+    : { source: binding.source, appId: binding.appId, profile: binding.profile });
+}
+
+function restoreExplainValue(value: unknown, bindings: ReadonlyMap<number, AppBinding>): unknown {
+  if (typeof value === "string") {
+    let restored = value;
+    for (const binding of bindings.values()) {
+      const internal = `APP${binding.mappedAppId}`;
+      const display = binding.source === "logical"
+        ? `LAPP_${binding.logicalName}@${binding.profile}`
+        : `APP${binding.appId}@${binding.profile}`;
+      restored = restored
+        .split(`${internal} (${binding.mappedAppId})`).join(display)
+        .split(internal).join(display);
+    }
+    return restored;
+  }
+  if (Array.isArray(value)) return value.map((item) => restoreExplainValue(item, bindings));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, restoreExplainValue(item, bindings)])
+    );
+  }
+  return value;
+}
+
+function restoreContextError(err: unknown, sourceSql: string, context: ResolvedSqlContext): never {
+  if (!(err instanceof Error)) throw err;
+  let message = err.message;
+  for (const binding of context.bindings.values()) {
+    if (binding.source === "logical") {
+      message = message.split(`APP${binding.mappedAppId}`).join(`LAPP_${binding.logicalName}@${binding.profile}`);
+    }
+  }
+  const token = (err as Error & { token?: { pos?: number } }).token;
+  if (typeof token?.pos === "number") {
+    const segment = context.rewriteSegments.find(
+      (candidate) => token.pos! >= candidate.normalizedStart && token.pos! < candidate.normalizedEnd
+    );
+    if (segment) {
+      const sourcePos = segment.sourceStart + Math.min(
+        token.pos - segment.normalizedStart,
+        Math.max(0, segment.sourceEnd - segment.sourceStart - 1)
+      );
+      message = message.replace(/\uff08位置 \d+、トークン:/, `（位置 ${sourcePos}、トークン:`);
+      const originalRef = sourceSql.slice(segment.sourceStart, segment.sourceEnd);
+      if (segment.bindingMappedAppId !== undefined && originalRef) {
+        message = message.replace(/(トークン: 「)[^」]*(」)/, `$1${originalRef}$2`);
+      }
+    }
+  }
+  const restored = new Error(message);
+  restored.name = err.name;
+  throw restored;
 }
 
 function explainSql(sql: string): string {
@@ -365,18 +437,21 @@ export function createKsqlMcpTools(
   const createRuntime = deps.createRuntime ?? createKsqlRuntime;
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
+  const validationContexts = new WeakMap<ValidationResult, ResolvedSqlContext>();
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
     // validate-all-first: 全文をパース・分類し、1文でも不正なら全体を拒否
     //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
-    const statements = parseSqlStatements(normalized.normalizedSql);
-    const analysis = analyzeBatch(statements);
-    const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => ({
-      mappedAppId,
-      appId: binding.appId,
-      profile: binding.profile,
-    }));
+    let analysis: ReturnType<typeof analyzeBatch>;
+    try {
+      const statements = parseSqlStatements(normalized.normalizedSql);
+      analysis = analyzeBatch(statements);
+    } catch (err) {
+      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+    }
+    const appBindings = [...normalized.appBindingByMappedApp.entries()]
+      .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
       index: s.index,
@@ -409,12 +484,14 @@ export function createKsqlMcpTools(
     };
 
     if (analysis.statementCount > 1) {
-      return { ...common, batch: true };
+      const result: BatchValidationResult = { ...common, batch: true };
+      validationContexts.set(result, normalized.sqlContext);
+      return result;
     }
 
     // 単文: 従来のスカラー形を維持（後方互換）
     const s = statementValidations[0];
-    return {
+    const result: SingleValidationResult = {
       ...common,
       batch: false,
       statementType: s.statementType,
@@ -424,20 +501,29 @@ export function createKsqlMcpTools(
       insertValuesCount: s.insertValuesCount,
       appIds: s.appIds,
     };
+    validationContexts.set(result, normalized.sqlContext);
+    return result;
   }
 
   async function explain(input: ExplainInput): Promise<Record<string, unknown>> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const appBindings = toExplainBindings(normalized.appBindingByMappedApp);
 
     // バッチ入力: 全文のプランを配列で返す（フェーズ2 M3。実行はしない）
-    const statements = parseSqlStatements(normalized.normalizedSql);
+    let statements: ReturnType<typeof parseSqlStatements>;
+    try {
+      statements = parseSqlStatements(normalized.normalizedSql);
+    } catch (err) {
+      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+    }
     if (statements.length > 1) {
       const plans = buildBatchExplainPlans(normalized.normalizedSql);
       return {
         ok: true,
         batch: true,
         statementCount: plans.statementCount,
-        statements: plans.statements,
+        statements: restoreExplainValue(plans.statements, normalized.appBindingByMappedApp),
+        appBindings,
       };
     }
 
@@ -447,11 +533,17 @@ export function createKsqlMcpTools(
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
     }
-    return toSelectPayload(result);
+    return restoreExplainValue(
+      { ...toSelectPayload(result), appBindings },
+      normalized.appBindingByMappedApp
+    ) as Record<string, unknown>;
   }
 
-  async function query(input: QueryInput): Promise<Record<string, unknown>> {
-    const validation = await validate(input);
+  async function query(
+    input: QueryInput,
+    validated?: ValidationResult
+  ): Promise<Record<string, unknown>> {
+    const validation = validated ?? await validate(input);
 
     // read-only バッチ（複文）の実行（フェーズ1 S6）
     if (validation.batch) {
@@ -460,6 +552,7 @@ export function createKsqlMcpTools(
       }
       const runtime = await createRuntime(serverOptions, {
         sql: input.sql,
+        sqlContext: validationContexts.get(validation),
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
@@ -506,6 +599,7 @@ export function createKsqlMcpTools(
 
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
@@ -568,6 +662,7 @@ export function createKsqlMcpTools(
     const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       // SELECT-based DML を含む場合は dmlMaxRows で読み取りを絞らない（案A。
       // resolveMutateRuntimeMaxRecords の doc コメント参照）
@@ -618,10 +713,13 @@ export function createKsqlMcpTools(
     return { ...payload };
   }
 
-  async function mutate(input: MutateInput): Promise<Record<string, unknown>> {
+  async function mutate(
+    input: MutateInput,
+    validated?: ValidationResult
+  ): Promise<Record<string, unknown>> {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
 
-    const validation = await validate(input);
+    const validation = validated ?? await validate(input);
     if (validation.batch) {
       return mutateBatch(input, validation, dmlMaxRows);
     }
@@ -641,6 +739,7 @@ export function createKsqlMcpTools(
     const selectBasedDml = containsSelectBasedDml(validation.statements);
     const runtime = await createRuntime(serverOptions, {
       sql: input.sql,
+      sqlContext: validationContexts.get(validation),
       profile: input.profile,
       // SELECT-based DML は dmlMaxRows で読み取りを絞らない（案A。
       // resolveMutateRuntimeMaxRecords の doc コメント参照）
@@ -770,7 +869,7 @@ export function createKsqlMcpTools(
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout,
-      });
+      }, validation);
       return {
         ok: true,
         name: saved.name,
@@ -788,7 +887,7 @@ export function createKsqlMcpTools(
       dmlMaxRows,
       fetchParallel: input.fetchParallel,
       timeout: input.timeout,
-    });
+    }, validation);
     return {
       ok: true,
       name: saved.name,

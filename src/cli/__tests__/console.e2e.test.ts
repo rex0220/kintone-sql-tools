@@ -3,6 +3,8 @@ import { join } from "path";
 import { spawn } from "child_process";
 import { tmpdir } from "os";
 
+jest.setTimeout(20000);
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
@@ -45,6 +47,7 @@ test("console mode accepts meta commands and exits", async () => {
   child.stdin.write(":show config\n");
   await sleep(120);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -226,6 +229,7 @@ test("console mode shows session summary and supports history options", async ()
   child.stdin.write(":help\n");
   await sleep(160);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -297,6 +301,7 @@ test("console mode supports profile/rerun/save workflow", async () => {
   child.stdin.write(`:save ${savePath}\n`);
   await sleep(160);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -360,6 +365,7 @@ test("console mode :show config prints resolved-app-profiles after APP@profile q
   child.stdin.write(":show config\n");
   await sleep(180);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -425,6 +431,7 @@ test("console: batch construction mode with :run/:buffer/:clear (S7)", async () 
   child.stdin.write("SELEC * FROM APP100;\n");
   await sleep(150);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
@@ -497,6 +504,7 @@ test("console: DML バッチは :run 時と ; 完結時に REPL で確認され�
   child.stdin.write("no\n");
   await sleep(200);
   child.stdin.write(":exit\n");
+  child.stdin.end();
 
   const result = await new Promise<{ code: number; skipped: boolean }>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {

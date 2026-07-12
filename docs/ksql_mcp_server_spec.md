@@ -195,6 +195,11 @@ AI クライアント
     "prod": {
       "baseUrl": "https://example.cybozu.com",
       "auth": "token",
+      "allowPhysicalAppRefs": true,
+      "logicalApps": {
+        "ORDERS": 100,
+        "CUSTOMERS": 200
+      },
       "tokenMap": {
         "APP100": "env:KSQL_TOKEN_APP100",
         "APP200": "env:KSQL_TOKEN_APP200"
@@ -208,6 +213,9 @@ AI クライアント
     "stg": {
       "baseUrl": "https://example-stg.cybozu.com",
       "auth": "token",
+      "logicalApps": {
+        "ORDERS": 100
+      },
       "tokenMap": {
         "APP100": "env:KSQL_STG_TOKEN_APP100"
       }
@@ -215,6 +223,8 @@ AI クライアント
   }
 }
 ```
+
+`logicalApps` は `LAPP_<NAME>` をprofileごとの物理アプリ IDへ解決する。キーは `LAPP_` を除いたASCII論理名で、`APP100`、`100`、`LAPP_ORDERS`は拒否される。`allowPhysicalAppRefs` の既定は `true`。`false` にすると、そのprofileに対する物理 `APPxxx` 参照をkSQL SQL surfaceで拒否するが、他ツールやREST APIの物理ID指定までは制限しない。
 
 ### 6.1.1 レート制御（requestGate）設定（v1.10.0 で公開）
 
@@ -268,6 +278,7 @@ MCP サーバーでは、config path は原則としてサーバー起動時に�
 1. MCP サーバーは起動時設定に基づいて安定して動作するほうが単純で安全
 2. tool call ごとに config を切り替えると、AI が意図せず接続先を変更するリスクがある
 3. 複数環境は config path の差し替えではなく `APP@profile` と `profile` 入力で扱う
+4. 配置先ごとに物理 ID が異なる同型アプリは `LAPP_<NAME>` と profile 内 `logicalApps` で扱う。mappingはtool inputから変更できない
 
 将来、複数 config を扱う必要が出た場合は、明示的な multi-config mode として別途設計する。
 
@@ -282,7 +293,7 @@ kintone API は呼ばない。
 
 ```json
 {
-  "sql": "SELECT 顧客コード, SUM(金額) AS 合計 FROM APP100 GROUP BY 顧客コード",
+  "sql": "SELECT 顧客コード, SUM(金額) AS 合計 FROM LAPP_ORDERS GROUP BY 顧客コード",
   "profile": "prod"
 }
 ```
@@ -299,6 +310,21 @@ kintone API は呼ばない。
   ],
   "rowCount": 1,
   "warnings": []
+}
+```
+
+論理参照を含む場合、`appBindings` は最終解決先を返す。EXPLAINでは内部 `mappedAppId` を公開しない。
+
+```json
+{
+  "appBindings": [
+    {
+      "source": "logical",
+      "logicalName": "ORDERS",
+      "appId": 100,
+      "profile": "prod"
+    }
+  ]
 }
 ```
 
@@ -472,7 +498,7 @@ SQL を解析し、実行前チェックのみ行う。
 
 1. 構文解析
 2. 文種別判定
-3. `APP@profile` 正規化
+3. `APP@profile` / `LAPP_<NAME>[@profile]` 正規化と論理解決
 4. 参照 APP 抽出
 5. DML かどうか
 6. read-only ツールで実行可能か
@@ -483,7 +509,7 @@ SQL を解析し、実行前チェックのみ行う。
 
 ```json
 {
-  "sql": "UPDATE APP100 SET ステータス = '完了' WHERE 顧客コード = 'C001'",
+  "sql": "UPDATE LAPP_ORDERS SET ステータス = '完了' WHERE 顧客コード = 'C001'",
   "profile": "prod"
 }
 ```
@@ -496,11 +522,22 @@ SQL を解析し、実行前チェックのみ行う。
   "statementType": "UPDATE",
   "isDml": true,
   "hasWhere": true,
-  "appIds": [100],
+  "appIds": [900000000],
   "canRunWithQueryTool": false,
-  "requiresMutationTool": true
+  "requiresMutationTool": true,
+  "appBindings": [
+    {
+      "source": "logical",
+      "logicalName": "ORDERS",
+      "mappedAppId": 900000000,
+      "appId": 100,
+      "profile": "prod"
+    }
+  ]
 }
 ```
+
+`mappedAppId` はparser/runtime内部の参照をvalidationで対応付けるための値であり、物理アプリ IDではない。論理参照を含む場合、従来互換の `appIds` にもこの内部IDが現れるため、実際の接続先は必ず `appBindings[].appId` と `profile` で確認する。EXPLAIN、ログ、利用者向けエラーには内部IDを公開しない。物理参照では `source: "physical"` となり `logicalName` は省略される。
 
 ### 7.5.1 バッチ（複文）対応（v1.4.0）
 
@@ -530,6 +567,8 @@ Phase 1.5 / Phase 2 で初期実装する。
 5. `UPSERT`
 6. `DELETE`
 7. `REORDER`
+
+`DELETE FROM LAPP_ORDERS@prod ...` はMCPでは既存runtimeの挙動どおり許可される。CLIでは同じSQLを明示profile制約により拒否するため、surface差を前提にすること。
 
 拒否する文（**SELECT-based DML のソース制限としての拒否**）: なし — v1.7.0 で最終解消。
 なお、これとは別に **SELECT-based DML 以外の DML（UPDATE / DELETE / UPSERT）内の一時テーブル参照**は、

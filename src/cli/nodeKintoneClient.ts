@@ -63,11 +63,20 @@ export function createNodeKintoneClient(
       }
     }
 
-    const res = await fetch(url, {
-      ...init,
-      headers,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    // CLI/MCP worker の終了をタイムアウト期限まで阻害しない。
+    timeout.unref?.();
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...init,
+        headers,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!res.ok) {
       const bodyText = await res.text();
