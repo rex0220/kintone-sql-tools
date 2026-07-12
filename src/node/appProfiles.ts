@@ -405,10 +405,16 @@ export function buildCacheContext(
   return `apps:${pairs.join(",")}`;
 }
 
-export function formatResolvedAppProfiles(sql: string, defaultProfile: string): string {
-  const parsed = normalizeSqlAppProfiles(sql, defaultProfile);
+export function formatResolvedAppProfiles(
+  sql: string,
+  defaultProfile: string,
+  resolutionContext?: Pick<AppResolutionContext, "resolveLogicalApp">
+): string {
+  const parsed = normalizeSqlAppProfiles(sql, defaultProfile, resolutionContext);
   if (parsed.appBindingByMappedApp.size === 0) return "(none)";
   return [...parsed.appBindingByMappedApp.values()]
-    .map((b) => `APP${b.appId}->${b.profile}`)
+    .map((b) => b.source === "logical"
+      ? `LAPP_${b.logicalName}@${b.profile}->APP${b.appId}@${b.profile}`
+      : `APP${b.appId}->${b.profile}`)
     .join(", ");
 }

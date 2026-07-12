@@ -110,7 +110,7 @@ describe("AppResolutionContext", () => {
   test("config 未設定の既定 profile は物理参照を従来どおり許可する", () => {
     const emptyContext = createAppResolutionContext({}, "dev");
     expect(() => emptyContext.assertPhysicalAppAllowed("dev")).not.toThrow();
-    expect(() => emptyContext.assertPhysicalAppAllowed("other")).toThrow(/profile "other" is not defined/);
+    expect(() => emptyContext.assertPhysicalAppAllowed("other")).not.toThrow();
   });
 
   test("factory 作成後の config 変更で解決結果が変わらない", () => {

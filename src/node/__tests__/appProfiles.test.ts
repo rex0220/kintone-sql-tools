@@ -1,4 +1,4 @@
-import { normalizeSqlAppProfiles, type SqlRewriteSegment } from "../appProfiles";
+import { formatResolvedAppProfiles, normalizeSqlAppProfiles, type SqlRewriteSegment } from "../appProfiles";
 import { createAppResolutionContext, validateKsqlConfig } from "../config";
 
 function context() {
@@ -155,5 +155,13 @@ describe("normalizeSqlAppProfiles: logical app scanner/rewrite", () => {
     });
     expect(result.normalizedSql.slice(rewritten!.normalizedStart, rewritten!.normalizedEnd))
       .toBe("APP900000000$明細");
+  });
+
+  test("診断表示は論理名と物理IDを示し mapped IDを露出しない", () => {
+    const text = formatResolvedAppProfiles("SELECT * FROM LAPP_ORDERS@prod", "dev", context());
+    expect(text).toBe("LAPP_ORDERS@prod->APP1234@prod");
+    expect(text).not.toContain("900000000");
+    expect(formatResolvedAppProfiles("SELECT * FROM APP899@prod", "dev", context()))
+      .toBe("APP899->prod");
   });
 });

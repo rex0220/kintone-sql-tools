@@ -106,6 +106,10 @@ export function resolveSqlContext(
   const resolutionContext = createAppResolutionContext(config, profileName);
   const normalized = normalizeSqlAppProfiles(sql, profileName, resolutionContext);
   const bindings = normalized.appBindingByMappedApp;
+  // rewrite 後の APP<id> ではなく、scanner が付与した source で物理参照を判定する。
+  for (const binding of bindings.values()) {
+    if (binding.source === "physical") resolutionContext.assertPhysicalAppAllowed(binding.profile);
+  }
   const context: ResolvedSqlContext = {
     normalizedSql: normalized.normalizedSql,
     bindings,

@@ -203,6 +203,9 @@ export function createAppResolutionContext(
     },
     assertPhysicalAppAllowed(profile) {
       const profileName = profile || defaultProfile;
+      // このメソッドは物理参照ポリシーだけを判定する。未知 profile の
+      // 存在確認は runtime の接続解決に委ね、従来の静的 validation を変えない。
+      if (!profiles[profileName]) return;
       if (requireProfile(profileName).allowPhysicalAppRefs === false) {
         throw argumentError(
           `physical app references are not allowed for profile "${profileName}"; use LAPP_<NAME>.`

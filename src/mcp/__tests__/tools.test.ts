@@ -27,6 +27,99 @@ describe("MCP tools", () => {
     }
   });
 
+  test("logical validation payload は source/binding を公開し、EXPLAIN はmappedAppIdを公開しない", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-logical-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: { logicalApps: { ORDERS: 1234 }, allowPhysicalAppRefs: false },
+      },
+    }), "utf8");
+    const tools = createKsqlMcpTools({ configPath, profile: "prod" });
+    try {
+      const validation = await tools.validate({ sql: "SELECT * FROM LAPP_ORDERS" });
+      expect(validation.appBindings).toEqual([{
+        source: "logical",
+        logicalName: "ORDERS",
+        mappedAppId: 900_000_000,
+        appId: 1234,
+        profile: "prod",
+      }]);
+
+      const explanation = await tools.explain({
+        sql: "SELECT * FROM LAPP_ORDERS; SELECT * FROM LAPP_ORDERS",
+      });
+      expect(explanation.appBindings).toEqual([{
+        source: "logical",
+        logicalName: "ORDERS",
+        appId: 1234,
+        profile: "prod",
+      }]);
+      expect(JSON.stringify(explanation)).not.toContain("mappedAppId");
+      expect(JSON.stringify(explanation)).not.toContain("APP900000000");
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("allowPhysicalAppRefs:false はrewrite後APPではなく binding source=physical だけを拒否する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-logical-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: { logicalApps: { ORDERS: 1234 }, allowPhysicalAppRefs: false },
+      },
+    }), "utf8");
+    const tools = createKsqlMcpTools({ configPath, profile: "prod" });
+    try {
+      await expect(tools.validate({ sql: "SELECT * FROM APP1234" }))
+        .rejects.toThrow(/physical app references are not allowed/);
+      await expect(tools.validate({ sql: "SELECT * FROM LAPP_ORDERS" })).resolves.toMatchObject({ ok: true });
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("parser error の table表記と位置を offset map から元 LAPP へ復元する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-logical-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+    }), "utf8");
+    const tools = createKsqlMcpTools({ configPath, profile: "prod" });
+    try {
+      await expect(tools.validate({ sql: "DESCRIBE LAPP_ORDERS$明細" }))
+        .rejects.toThrow(/LAPP_ORDERS\$明細/);
+      await expect(tools.validate({ sql: "DESCRIBE LAPP_ORDERS$明細" }))
+        .rejects.not.toThrow(/APP900000000/);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("physical multi-profile の parser error も元 APP@profile 表記へ復元する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-physical-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      profiles: { dev: {}, prod: {} },
+    }), "utf8");
+    const tools = createKsqlMcpTools({ configPath, profile: "dev" });
+    try {
+      const promise = tools.validate({
+        sql: "SELECT * FROM APP88@dev; DESCRIBE APP88$明細@prod",
+      });
+      await expect(promise).rejects.toThrow(/APP88\$明細@prod/);
+      await expect(tools.validate({
+        sql: "SELECT * FROM APP88@dev; DESCRIBE APP88$明細@prod",
+      })).rejects.not.toThrow(/APP90000000/);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
   test("MCP validation allows DELETE + @profile", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     const result = await tools.validate({
@@ -54,7 +147,7 @@ describe("MCP tools", () => {
     expect(result.hasWhere).toBe(true);
     expect(result.normalizedSql).not.toContain("@stg");
     expect(result.appBindings).toEqual([
-      { mappedAppId: 100, appId: 100, profile: "stg" },
+      { source: "physical", mappedAppId: 100, appId: 100, profile: "stg" },
     ]);
   });
 
@@ -67,7 +160,7 @@ describe("MCP tools", () => {
     expect(result.statementType).toBe("SELECT");
     expect(result.normalizedSql).toBe("SELECT * FROM APP100");
     expect(result.appBindings).toEqual([
-      { mappedAppId: 100, appId: 100, profile: "prod" },
+      { source: "physical", mappedAppId: 100, appId: 100, profile: "prod" },
     ]);
   });
 
@@ -762,6 +855,51 @@ describe("MCP tools", () => {
 
       const raw = await readFile(join(dir, "config", "catalog", "queries.json"), "utf8");
       expect(raw).toContain("config_path_query");
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("LAPP saved query は defaultProfile と override profile で別の物理 app へ解決する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-logical-saved-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "dev",
+      mcp: { savedQueries: { path: "queries.json" } },
+      profiles: {
+        dev: { logicalApps: { ORDERS: 899 } },
+        prod: { logicalApps: { ORDERS: 1234 } },
+      },
+    }), "utf8");
+    const resolvedApps: number[] = [];
+    const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => {
+      resolvedApps.push([...input.sqlContext!.bindings.values()][0].appId);
+      return {
+        sql: input.sqlContext!.normalizedSql,
+        profileName: input.sqlContext!.profileName,
+        client: makeClient(),
+        cacheContext: input.sqlContext!.cacheContext,
+        maxRecords: 500,
+        fetchParallel: 1,
+        onLimit: "error",
+        timeout: 30000,
+      };
+    };
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "SELECT", columns: [], rows: [], rowCount: 0,
+    });
+    const tools = createKsqlMcpTools({ configPath }, { createRuntime, executeSql });
+    try {
+      await tools.saveQuery({
+        name: "logical_orders",
+        sql: "SELECT * FROM LAPP_ORDERS",
+        defaultProfile: "dev",
+        readOnly: true,
+        allowProfileOverride: true,
+      });
+      await tools.runSavedQuery({ name: "logical_orders" });
+      await tools.runSavedQuery({ name: "logical_orders", profile: "prod" });
+      expect(resolvedApps).toEqual([899, 1234]);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }

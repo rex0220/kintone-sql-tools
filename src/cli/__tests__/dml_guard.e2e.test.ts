@@ -120,6 +120,33 @@ test("DELETE + @profile is rejected by the CLI", async () => {
   expect(res.stderr).toContain("@profile is not supported for DELETE yet");
 });
 
+test("logical DELETE は明示 profile 付きを拒否し、省略時は許可する", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-delete-"));
+  const configPath = join(dir, "ksql.config.json");
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "prod",
+    profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+  }));
+  try {
+    const explicit = await runCli([
+      "--config", configPath, "--dry-run", "--allow-dml", "-e",
+      "DELETE FROM LAPP_ORDERS@prod WHERE $id = 1",
+    ]);
+    if (explicit.skipped) return;
+    expect(explicit.code).toBe(2);
+    expect(explicit.stderr).toContain("@profile is not supported for DELETE yet");
+
+    const implicit = await runCli([
+      "--config", configPath, "--dry-run", "--allow-dml", "-e",
+      "DELETE FROM LAPP_ORDERS WHERE $id = 1",
+    ]);
+    expect(implicit.code).toBe(0);
+    expect(implicit.stderr).not.toContain("@profile is not supported");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 20000);
+
 // ----------------------------------------------------------------
 // バッチ dry-run と DML ガード（M3 レビュー反映）
 // ----------------------------------------------------------------
