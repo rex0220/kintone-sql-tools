@@ -2,6 +2,18 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v1.13.1（2026-07-12）
+
+### 修正（バグ）
+
+- **CLIで`LAPP_<NAME>`を含むSQLが失敗した際、parser・実行エラーの位置とテーブル表記を元SQLへ復元**。
+  v1.13.0ではMCPだけがoffset mapを適用し、CLI stderrは正規化後SQLの位置や内部mapped APP表記を
+  表示する場合があった。診断復元を`src/node/`の共通実装へ移し、CLI/MCPのparse・EXPLAIN・
+  実行エラーで共有する。元Errorの型・token等は維持し、利用者向けstderrへ内部mapped IDを露出しない。
+- **`runSavedQuery`の2テストをリポジトリ直下の`ksql.config.json`から独立**。
+  各テスト専用の一時configを`configPath`で明示し、configが存在しないclean checkout／CIでも
+  保存クエリのDML承認・`fetchParallel`転送テストが安定して実行されるようにした。
+
 ## v1.13.0（2026-07-12）
 
 ### 追加（機能）
