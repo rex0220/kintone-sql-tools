@@ -23,6 +23,10 @@ export interface KsqlProfileConfig {
   passwordEnv?: string;
   app?: number;
   tokenMap?: Record<string, string>;
+  /** SQL 内の LAPP_<NAME> から物理アプリ ID への profile 単位 mapping。読込時にキーを ASCII 大文字化する。 */
+  logicalApps?: Record<string, number>;
+  /** false の場合、この profile に対する物理 APP<id> 参照を禁止する。 */
+  allowPhysicalAppRefs?: boolean;
   query?: {
     maxRecords?: number;
     fetchParallel?: number;
@@ -61,9 +65,156 @@ export interface KsqlProfileConfig {
   };
 }
 
+const LOGICAL_APP_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const PHYSICAL_APP_KEY_RE = /^APP\d+$/i;
+const NUMERIC_APP_KEY_RE = /^\d+$/;
+const LOGICAL_SQL_KEY_RE = /^LAPP_/i;
+
+function argumentError(message: string): Error {
+  return new Error(`ArgumentError: ${message}`);
+}
+
+function normalizeLogicalApps(
+  profileName: string,
+  value: unknown
+): Record<string, number> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw argumentError(`logicalApps for profile "${profileName}" must be an object.`);
+  }
+
+  const normalized: Record<string, number> = {};
+  const physicalIdOwners = new Map<number, string>();
+  for (const [rawName, rawAppId] of Object.entries(value)) {
+    if (
+      PHYSICAL_APP_KEY_RE.test(rawName)
+      || NUMERIC_APP_KEY_RE.test(rawName)
+      || LOGICAL_SQL_KEY_RE.test(rawName)
+    ) {
+      throw argumentError(
+        `logical app key "${rawName}" in profile "${profileName}" must be a logical name without APP, numeric, or LAPP_ syntax.`
+      );
+    }
+    if (!LOGICAL_APP_NAME_RE.test(rawName)) {
+      throw argumentError(
+        `logical app key "${rawName}" in profile "${profileName}" must match [A-Z][A-Z0-9_]{0,63}.`
+      );
+    }
+
+    const logicalName = rawName.toUpperCase();
+    if (Object.prototype.hasOwnProperty.call(normalized, logicalName)) {
+      throw argumentError(
+        `logical app name "${logicalName}" is duplicated after case normalization in profile "${profileName}".`
+      );
+    }
+    if (typeof rawAppId !== "number" || !Number.isSafeInteger(rawAppId) || rawAppId <= 0) {
+      throw argumentError(
+        `physical app ID for logical app "${logicalName}" in profile "${profileName}" must be a positive safe integer.`
+      );
+    }
+
+    const existingName = physicalIdOwners.get(rawAppId);
+    if (existingName !== undefined) {
+      throw argumentError(
+        `logical apps "${existingName}" and "${logicalName}" in profile "${profileName}" map to the same physical app ID ${rawAppId}; physical app aliases are not supported yet.`
+      );
+    }
+    physicalIdOwners.set(rawAppId, logicalName);
+    normalized[logicalName] = rawAppId;
+  }
+  return normalized;
+}
+
+/**
+ * 追加の論理アプリ設定を検証し、logicalApps のキーを ASCII 大文字に正規化する。
+ * 既存設定項目の受理範囲はこの機能追加で変更しない。
+ */
+export function validateKsqlConfig(config: KsqlConfig): KsqlConfig {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    throw argumentError("config must be an object.");
+  }
+  if (config.profiles === undefined) return config;
+  if (config.profiles === null || typeof config.profiles !== "object" || Array.isArray(config.profiles)) {
+    throw argumentError("profiles must be an object.");
+  }
+
+  for (const [profileName, profile] of Object.entries(config.profiles)) {
+    if (profile === null || typeof profile !== "object" || Array.isArray(profile)) {
+      throw argumentError(`profile "${profileName}" must be an object.`);
+    }
+    if (
+      profile.allowPhysicalAppRefs !== undefined
+      && typeof profile.allowPhysicalAppRefs !== "boolean"
+    ) {
+      throw argumentError(`allowPhysicalAppRefs for profile "${profileName}" must be boolean.`);
+    }
+    const logicalApps = normalizeLogicalApps(profileName, profile.logicalApps);
+    if (logicalApps !== undefined) profile.logicalApps = logicalApps;
+  }
+  return config;
+}
+
+export interface AppResolutionContext {
+  /** 未定義論理名または未知 profile では undefined を返さず throw する。 */
+  resolveLogicalApp(name: string, profile: string): number;
+  /** allowPhysicalAppRefs:false の profile への物理参照を拒否する。 */
+  assertPhysicalAppAllowed(profile: string): void;
+}
+
+/** config snapshot を閉じ込めた CLI/MCP 共通の論理アプリ resolver factory。 */
+export function createAppResolutionContext(
+  config: Readonly<KsqlConfig>,
+  defaultProfile: string
+): AppResolutionContext {
+  // factory 作成後に呼び出し元の config が書き換わっても解決結果を変えない。
+  // token/password などの認証情報はこの resolver にはコピーしない。
+  const profiles: Readonly<Record<string, Readonly<KsqlProfileConfig>>> = Object.fromEntries(
+    Object.entries(config.profiles ?? {}).map(([name, profile]) => [
+      name,
+      {
+        logicalApps: profile.logicalApps === undefined ? undefined : { ...profile.logicalApps },
+        allowPhysicalAppRefs: profile.allowPhysicalAppRefs,
+      },
+    ])
+  );
+  const implicitDefaultProfile: Readonly<KsqlProfileConfig> = {};
+
+  function requireProfile(profileName: string): Readonly<KsqlProfileConfig> {
+    const profile = profiles[profileName];
+    // config 未設定の従来フローでは既定 profile を暗黙に許可する。
+    // その場合も logicalApps は空、allowPhysicalAppRefs は既定 true となる。
+    if (!profile && profileName === defaultProfile) return implicitDefaultProfile;
+    if (!profile) throw argumentError(`profile "${profileName}" is not defined.`);
+    return profile;
+  }
+
+  return {
+    resolveLogicalApp(name, profile) {
+      if (!LOGICAL_APP_NAME_RE.test(name)) {
+        throw argumentError(`logical app name "${name}" must match [A-Z][A-Z0-9_]{0,63}.`);
+      }
+      const profileName = profile || defaultProfile;
+      const logicalName = name.toUpperCase();
+      const appId = requireProfile(profileName).logicalApps?.[logicalName];
+      if (appId === undefined) {
+        throw argumentError(`logical app LAPP_${logicalName}@${profileName} is not defined.`);
+      }
+      return appId;
+    },
+    assertPhysicalAppAllowed(profile) {
+      const profileName = profile || defaultProfile;
+      if (requireProfile(profileName).allowPhysicalAppRefs === false) {
+        throw argumentError(
+          `physical app references are not allowed for profile "${profileName}"; use LAPP_<NAME>.`
+        );
+      }
+    },
+  };
+}
+
 export function loadKsqlConfig(configPath: string): KsqlConfig {
   const raw = readFileSync(configPath, "utf-8");
-  return JSON.parse(raw) as KsqlConfig;
+  return validateKsqlConfig(JSON.parse(raw) as KsqlConfig);
 }
 
 export function loadOptionalKsqlConfig(configPath: string): KsqlConfig {
