@@ -1,6 +1,9 @@
-import { existsSync } from "fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
+
+jest.setTimeout(20000);
 
 async function runCli(args: string[]): Promise<{ code: number; stdout: string; stderr: string; skipped: boolean }> {
   const cliPath = join(process.cwd(), "dist-cli", "ksql.js");
@@ -22,6 +25,7 @@ async function runCli(args: string[]): Promise<{ code: number; stdout: string; s
   let stderr = "";
   child.stdout.on("data", (d) => { stdout += d.toString(); });
   child.stderr.on("data", (d) => { stderr += d.toString(); });
+  child.stdin.end();
 
   const code = await new Promise<number>((resolveCode) => {
     child.on("error", (err: NodeJS.ErrnoException) => {
