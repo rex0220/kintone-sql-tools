@@ -2,13 +2,15 @@
 
 - 作成日: 2026-07-12
 - 更新履歴:
+  - 2026-07-12 R8: mapped IDの公開範囲をstructured validation payloadに限定して明確化。ステータスを実装着手可能へ更新
+  - 2026-07-12 R7: `LAPP_`構文・ASCII論理名を確定。元SQLoffset map、内部mapped ID非露出、binding欠落時fallback禁止、物理参照制限のSQL surface限定を実装着手条件として追加
   - 2026-07-12 R6: 効果評価を追加。安全性はconfig管理と実装ゲートに依存すること、値parameter化との優先関係は技術依存ではなくプロダクト上の順序であることを明記
   - 2026-07-12 R5: token要求導出順、CLI/MCP共通resolver、DELETEのsurface別制約、mapped ID allocator共有、物理・論理同一実体の別binding方針、per-profile mappingのトレードオフを明記
   - 2026-07-12 R4: 既存`APPxxx`の暗黙変換を撤回。物理参照`APPxxx`と論理参照`LAPP_<NAME>`を構文上分離し、`logicalApps`の未定義参照を必ずエラーに変更
   - 2026-07-12 R3: 同一環境内の部門別同型アプリを切替・比較する適用事例と、多数部門時の拡張論点を追加
   - 2026-07-12 R2: 同一kintone環境内の本番アプリ／テストアプリ切替・比較を適用事例として追加
   - 2026-07-12 R1: 初版
-- ステータス: **ドラフト（R4で安全モデルを変更）**
+- ステータス: **仕様レビュー完了・実装着手可能（実装計画待ち）**
 - 対象: Node.js runtimeを利用するCLI / MCP
 - 関連機能: `APP@profile`、profile config、tokenMap、保存クエリ
 - 関連実装: `src/node/config.ts`、`src/node/appProfiles.ts`、`src/node/runtime.ts`、`src/mcp/tools.ts`、`src/cli/index.ts`
@@ -93,7 +95,7 @@ APP899@prod → 物理APP899@prod（変換なし）
 
 ```text
 LogicalAppRef ::= "LAPP_" LogicalName [ "$" SubtableCode ] [ "@" ProfileName ]
-LogicalName   ::= [A-Z][A-Z0-9_]{0,63}
+LogicalName   ::= [A-Za-z][A-Za-z0-9_]{0,63}
 ```
 
 例:
@@ -104,7 +106,9 @@ LAPP_ORDERS@prod
 LAPP_ORDERS$明細@prod
 ```
 
-論理名はASCII大文字へ正規化し、大文字小文字を区別しない。予約接頭辞`LAPP_`だけ、または65文字以上の名前は拒否する。
+`LAPP_`接頭辞と論理名はASCIIの範囲で大文字小文字を区別せず、内部では論理名をASCII大文字へ正規化する。`lapp_orders`、`LAPP_Orders`、`LAPP_ORDERS`は同じ論理名`ORDERS`を表す。予約接頭辞`LAPP_`だけ、数字開始、65文字以上、日本語を含む名前は初回リリースでは拒否する。
+
+初回リリースはscanner境界、config正規化、識別子の視認性を単純に保つためASCIIに限定する。日本語論理名はUnicode正規化、許可文字、大小文字、紛らわしい文字の規約を別仕様で定めた後に拡張する。
 
 ### 5.3 物理・論理の混在
 
@@ -209,7 +213,7 @@ ArgumentError: logicalApps key "APP899" is invalid. Use a logical name such as "
 - `APP` + 数字、数字だけ、`LAPP_`付きのキーを拒否すること
 - 物理IDが正のsafe integerであること
 - 大文字正規化後の論理名が重複しないこと
-- 同一profile内で複数論理名が同じ物理IDを指す設定は初回リリースでは拒否すること
+- 同一profile内で複数論理名が同じ物理IDを指す設定は初回リリースでは拒否すること。エラーには「physical app aliases are not supported yet」の趣旨を含め、将来aliasを許可する場合は別仕様で緩和する
 - `allowPhysicalAppRefs`がbooleanであること
 
 環境変数やCLI引数からの`logicalApps`指定は初回リリースでは提供しない。
@@ -368,6 +372,20 @@ LAPP_ORDERS$明細@prod → APP900000000$明細
 
 `allowPhysicalAppRefs`の判定はrewrite後のSQL文字列では行わず、rewrite前にscannerが付与した`source: "logical" | "physical"`を使用する。これにより、mapped`APP<id>`へ変換された正当な論理参照を物理参照と誤判定しない。
 
+scannerはrewriteと同時に、正規化SQLの各範囲を元SQLの範囲へ戻すoffset mapを必ず生成する。parser / validation / engineから返る位置情報とエラー内のテーブル表記は、このmapとbindingを使って元SQLへ復元する。
+
+```ts
+interface SqlRewriteSegment {
+  normalizedStart: number;
+  normalizedEnd: number;
+  sourceStart: number;
+  sourceEnd: number;
+  bindingMappedAppId?: number;
+}
+```
+
+内部mapped ID（例: `APP900000000`）はdebug専用情報と§9.1の機械可読なstructured validation payloadを除き、利用者向けのCLI stderr、MCP error、validation messageへ露出させない。structured payloadの`mappedAppId`はbinding相関用に残すが、人間向けテキストでは必ず元の`LAPP_ORDERS@prod`へ復元する。例えばparserがmapped table付近で失敗した場合も、元の論理参照と元SQL上の位置を表示する。offset mapは後付けせずscanner初回実装から必須とする。
+
 ### 8.2 mapped ID
 
 論理参照には内部mapped IDを割り当てる。物理IDと衝突しない既存の仮想ID名前空間を利用し、同じ論理名・profileの組み合わせは同一SQL内で同じmapped IDを使う。
@@ -398,6 +416,14 @@ LAPP_ORDERS@prod
 ```
 
 runtime作成時に物理IDのtokenをmapped IDへ関連付ける。エラーには論理名、物理ID、profileを含めるがtoken値は含めない。LAPPだけを含むSQLでも、default appやsingle-tokenの偶然のfallbackに依存せず正しいtoken要求が立つことを必須とする。
+
+LAPP由来のmapped IDについてbinding lookupが失敗した場合、`binding?.appId ?? mappedAppId`のような物理IDfallbackやsingle-token fallbackを行わず、API呼び出し前に内部不整合として停止する。
+
+```text
+InternalError: binding is missing for logical app LAPP_ORDERS@prod.
+```
+
+利用者向けエラーには元の論理参照を表示し、内部mapped IDは含めない。物理APP参照に対する既存fallbackとの整理は実装計画で行うが、logical sourceに対するfallback禁止は変更しない。
 
 ### 8.4 cacheContext
 
@@ -511,11 +537,13 @@ CLIの拒否判定では、rewrite前tokenが明示`@profile`を持っていた�
 - configの`logicalApps`だけがmappingを定義できる
 - MCP tool input、値parameter、SQL literalからmappingを上書きできない
 - 未定義論理名にfallbackしない
-- 必要なprofileでは`allowPhysicalAppRefs: false`により物理ID bypassを防ぐ
+- 必要なprofileでは`allowPhysicalAppRefs: false`により**kSQL SQL surface経由**の物理ID直接参照を防ぐ
 - validationと実行で同じconfig snapshot・resolverを使用する
 - token、passwordを結果、ログ、エラーへ含めない
 
 configを書き換えられる主体はmappingを変更できるため、config自体を信頼境界内の運用設定として保護する。
+
+`allowPhysicalAppRefs`はkSQLが解析するSQLだけを制御する。同じMCPホスト上の別ツール、kintone REST API、管理画面、または他プロセスからの物理ID直接指定を禁止するアクセス制御ではない。システム全体のbypass防止には、MCPホストのtool公開範囲とkintone側権限を別途管理する。
 
 ## 14. 効果評価
 
@@ -607,6 +635,8 @@ WHERE 登録日 >= :since
 1. **binding起点のtoken要求導出**: mapped IDを収集し、bindingから物理ID・profileを取得してtokenをmapped IDへ関連付ける。物理IDをengine appIdsへ混ぜない
 2. **CLI/MCPの共通resolver**: scanner、resolver、allocator、binding生成、token要求導出、cacheContext生成を共通実装とし、片方だけ異なるroute・認可結果になることを防ぐ
 3. **source-awareな物理参照制限**: `allowPhysicalAppRefs`をrewrite後SQLではなくscannerが保持するsource情報で判定する
+4. **binding欠落時のfail closed**: logical sourceのmapped IDにbindingがなければ、物理ID・single-tokenへfallbackせずAPI呼び出し前に停止する
+5. **元SQL診断の維持**: scannerがoffset mapを生成し、内部mapped IDを利用者向けエラーへ露出させない
 
 加えて、configのレビュー・変更管理、validation / EXPLAINによるresolved target確認を運用上の着手条件とする。
 
@@ -641,6 +671,7 @@ WHERE 登録日 >= :since
 - `LAPP_<NAME>[$subtable][@profile]`を認識するscanner拡張
 - 物理APP scannerの既存挙動を維持
 - bindingに`source`と`logicalName`を追加
+- rewrite結果から元SQL位置・表記へ戻すoffset mapを追加
 - logical resolverとmapped ID割当
 - 既存profile仮想IDと論理mapped IDで共有するallocator
 - bindingからtoken要求を導出する共通helper
@@ -650,6 +681,7 @@ WHERE 登録日 >= :since
 
 - logical bindingから物理ID・profileへのrouting
 - tokenMapの物理ID解決
+- logical binding欠落時のfallback禁止
 - 全KintoneClientメソッドで共通bindingを使用
 
 ### 15.4 `src/mcp/tools.ts` / CLI
@@ -675,9 +707,10 @@ WHERE 登録日 >= :since
 
 1. `ORDERS: 1234`を受理
 2. `APP899`、`899`、`LAPP_ORDERS`キーを拒否
-3. 無効名、重複名、0・負数・非整数・safe integer外の物理IDを拒否
-4. 同一profile内の物理ID重複を拒否
-5. `allowPhysicalAppRefs`型検証
+3. config logical nameはASCII大小文字を受理し、大文字へ正規化する
+4. 日本語、数字開始、無効記号、重複名、0・負数・非整数・safe integer外の物理IDを拒否
+5. 同一profile内の物理ID重複をalias未対応の明示メッセージで拒否
+6. `allowPhysicalAppRefs`型検証
 
 ### 16.2 SQL・resolver
 
@@ -693,6 +726,9 @@ WHERE 登録日 >= :since
 10. 既存`APP@profile`用とLAPP用のmapped IDが同一SQLで衝突しない
 11. `LAPP_ORDERS$明細@prod`をparser互換の`APP<mapped>$明細`へrewriteする
 12. rewrite後もbindingのsourceと明示profile情報が保持される
+13. `lapp_orders` / `LAPP_Orders` / `LAPP_ORDERS`を同じ論理名として解決する
+14. rewrite後のparser error位置・table表記をoffset mapで元SQLの`LAPP_`へ復元する
+15. 利用者向けエラーに内部mapped IDを含めない
 
 ### 16.3 runtime・表示
 
@@ -707,6 +743,7 @@ WHERE 登録日 >= :since
 9. LAPPと物理APPが同じphysical+profileを指しても別bindingを維持し、重複取得を許容する
 10. CLIは`DELETE FROM LAPP_ORDERS@prod`を拒否し、明示profileなしを許可する
 11. MCPは既存挙動どおり明示profile付きLAPP DELETEを処理できる
+12. logical mapped IDのbindingを意図的に欠落させると、物理ID・single-tokenへfallbackせずAPI呼び出し前に失敗する
 
 ### 16.4 回帰
 
@@ -731,21 +768,21 @@ WHERE 登録日 >= :since
 11. token要求は解決済みbindingから導出され、LAPPのみのSQLでも認可漏れ・誤ったtoken不足判定がない
 12. CLI/MCPが同一のscanner・resolver・allocator・binding生成・token要求導出を使用する
 13. DELETEの明示profile制約がsurfaceごとの既存挙動を維持する
+14. scannerのoffset mapにより、エラー位置とテーブル表記が元SQLを指し、内部mapped IDが利用者へ露出しない
+15. `allowPhysicalAppRefs`の保証範囲がkSQL SQL surfaceに限定されている
+16. logical binding欠落時に物理IDまたはsingle-tokenへfallbackしない
 
 ## 18. 実装前の未決事項
 
-1. SQL構文を`LAPP_ORDERS`で確定するか、別の明示記法を採用するか
-2. logical nameをASCII大文字に限定するか、小文字・日本語を許可するか
-3. `allowPhysicalAppRefs`をprofile単位とするか、server全体にも既定を設けるか
-4. 同一profileで複数論理名から同一物理IDへのaliasを将来許可するか
-5. scanner-rewrite方式で必要なエラー位置精度を確保できるか（不足する場合のみ位置metadataをbindingへ追加する。AST node方式へ戻す未決ではない）
-6. EXPLAINとMCP structured payloadの正式なフィールド名
-7. 多数部門向けmapping setを将来どの層で選択するか
+1. `allowPhysicalAppRefs`をprofile単位だけとするか、server全体にも既定値を設けるか
+2. 同一profileで複数論理名から同一物理IDへのaliasを将来許可するか
+3. EXPLAINとMCP structured payloadの正式なフィールド名
+4. 多数部門向けmapping setを将来どの層で選択するか
 
 ## 19. 推奨実装順序
 
 1. `logicalApps` schema・検証とCLI/MCP共通の純粋resolver
-2. scanner、共有allocator、binding拡張（物理APP回帰テストを先に固定）
+2. scanner、offset map、共有allocator、binding拡張（物理APP回帰テストを先に固定）
 3. binding由来のtoken要求導出、runtime routing、token、cacheContext
 4. validation / EXPLAINの可視化
 5. MCP query / mutate / saved query
