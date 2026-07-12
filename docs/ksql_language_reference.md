@@ -71,6 +71,38 @@ APP80$明細@guest -- サブテーブル参照でも指定可能
 - 文字列リテラル・コメント中の `APP100@dev` は `@profile` 構文として解釈しません
 - プラグイン側では `@profile` 非対応です（`APP100@dev` を含む SQL はエラー）
 
+### CLI / MCP 拡張: 論理アプリ参照 `LAPP_<NAME>`
+
+同じ用途・同じフィールド構成のアプリで物理 ID だけが環境ごとに異なる場合、論理名を使用できます。
+
+```sql
+SELECT * FROM LAPP_ORDERS
+SELECT * FROM LAPP_ORDERS@prod
+SELECT * FROM LAPP_ORDERS$明細@prod
+```
+
+`LAPP_ORDERS` は実効 profile の `logicalApps.ORDERS` に設定された物理アプリ IDへ、実行前に解決されます。`APP100` は従来どおり常に物理 ID 100 であり、暗黙に論理解決されません。
+
+```json
+{
+  "profiles": {
+    "dev": { "logicalApps": { "ORDERS": 100 } },
+    "prod": { "logicalApps": { "ORDERS": 1200 } }
+  }
+}
+```
+
+構文と制約:
+
+- `LAPP_` と論理名は ASCII の範囲で大小文字を区別しない
+- 論理名は `[A-Za-z][A-Za-z0-9_]{0,63}`
+- config のキーは裸の論理名（`ORDERS`）。`APP100`、`100`、`LAPP_ORDERS` は禁止
+- 未定義論理名、未知 profile、`allowPhysicalAppRefs: false` の profile に対する物理参照は API 呼び出し前にエラー
+- validation は `source`、`logicalName`、内部 `mappedAppId`、最終 `appId`、`profile` を返す
+- EXPLAIN と利用者向け診断は論理名・最終物理 ID・profile を表示し、内部 mapped ID は表示しない
+- CLI の `DELETE FROM LAPP_ORDERS@prod ...` は明示 profile 制約により拒否。MCPでは許可
+- Node.js runtime（CLI / MCP）の機能であり、プラグインでは非対応
+
 ### フィールド名（識別子）
 
 - 日本語フィールドコードをクォートなしで使用できます

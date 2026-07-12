@@ -19,6 +19,10 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - CLI 拡張 `APP@profile`
   - 同一 SQL 内で同一 APP の profile 混在を許可
   - `INSERT/UPDATE/UPSERT` 対応、`DELETE` は未対応
+- CLI / MCP の論理アプリ参照 `LAPP_<NAME>`
+  - profile ごとの `logicalApps` で、同じ SQL を異なる物理アプリ ID へ安全に解決
+  - `APP100` は常に物理 ID 100 のまま（暗黙変換なし）
+  - `allowPhysicalAppRefs: false` で、その profile の物理 `APPxxx` 直接参照を禁止可能
 - `FROM` 省略 SELECT（例: `SELECT 'xxx' AS a`）
 
 ## インストール
@@ -50,6 +54,7 @@ npm run build:plugin
   - DML を含むバッチ実行・SQL ファイル実行（`-f`）
   - CI/CD 連携
   - `APP@profile` を使った環境切替
+  - `LAPP_<NAME>` を使った配置非依存 SQL
   - `--dry-run` / `EXPLAIN` による安全確認
 
 - Plugin を使うケース:
@@ -60,10 +65,11 @@ npm run build:plugin
 - MCP を使うケース:
   - Claude 等の AI クライアントから kintone を照会・更新
   - 一時テーブルで中間結果をサーバー内に保持し、AI のコンテキスト消費を抑えたい場合
+  - validation / EXPLAIN で論理名から最終的な物理アプリ ID への解決を確認したい場合
 
 注意:
 
-- `@profile` は CLI 拡張です。plugin 側では非対応です。
+- `APP@profile` と `LAPP_<NAME>[@profile]` は Node.js runtime（CLI / MCP）の拡張です。plugin 側では非対応です。
 
 ## 最短実行例（CLI）
 
@@ -103,6 +109,34 @@ node dist-cli/ksql.js --console --base-url https://example.cybozu.com --token xx
 ```bash
 node dist-cli/ksql.js --config ./ksql.config.json --profile dev -e "SELECT * FROM APP100"
 ```
+
+論理アプリ参照を使う場合、profile ごとに論理名と物理 ID を定義します。
+
+```json
+{
+  "defaultProfile": "dev",
+  "profiles": {
+    "dev": {
+      "baseUrl": "https://dev.example.cybozu.com",
+      "logicalApps": { "ORDERS": 100 },
+      "tokenMap": { "APP100": "env:DEV_ORDERS_TOKEN" }
+    },
+    "prod": {
+      "baseUrl": "https://prod.example.cybozu.com",
+      "allowPhysicalAppRefs": false,
+      "logicalApps": { "ORDERS": 1200 },
+      "tokenMap": { "APP1200": "env:PROD_ORDERS_TOKEN" }
+    }
+  }
+}
+```
+
+```bash
+node dist-cli/ksql.js --config ./ksql.config.json --profile dev -e "SELECT * FROM LAPP_ORDERS"
+node dist-cli/ksql.js --config ./ksql.config.json --profile prod -e "SELECT * FROM LAPP_ORDERS"
+```
+
+どちらも同じ SQL ですが、前者は `APP100`、後者は `APP1200` に解決されます。`logicalApps` のキーは `LAPP_` を付けない ASCII 論理名です。`APP100`、`100`、`LAPP_ORDERS` は設定キーとして拒否されます。
 
 ## CLI オプション
 

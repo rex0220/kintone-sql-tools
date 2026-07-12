@@ -1,6 +1,6 @@
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { join } from "path";
+import { join, resolve } from "path";
 import {
   createAppResolutionContext,
   loadKsqlConfig,
@@ -76,6 +76,24 @@ describe("logical app config", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test("公開 config sample の論理アプリ設定がschemaと一致する", () => {
+    const sample = JSON.parse(readFileSync(
+      resolve(process.cwd(), "docs/examples/ksql.config.sample.json"),
+      "utf8"
+    )) as KsqlConfig;
+    const validated = validateKsqlConfig(sample);
+
+    expect(validated.profiles?.dev.logicalApps).toEqual({
+      ORDERS: 100,
+      CUSTOMERS: 101,
+    });
+    expect(validated.profiles?.guest.logicalApps).toEqual({
+      ORDERS: 200,
+      CUSTOMERS: 201,
+    });
+    expect(validated.profiles?.guest.allowPhysicalAppRefs).toBe(true);
   });
 });
 
