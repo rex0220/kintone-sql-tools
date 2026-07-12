@@ -2,6 +2,43 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v1.13.0（2026-07-12）
+
+### 追加（機能）
+
+- **論理アプリ参照 `LAPP_<NAME>` を CLI / MCP に追加**（Node.js runtime のみ。プラグインは非対象）。
+  環境や配置先（開発・本番・テスト・部門）で物理アプリ ID だけが異なる同用途・同スキーマの
+  アプリに対し、`FROM LAPP_ORDERS` のような論理名で同じ SQL・保存クエリを再利用できる。
+  論理名は実効 profile の config `logicalApps` で物理アプリ ID へ実行前に解決される
+  （例: `dev` → `APP899` / `prod` → `APP1234`）。
+  - **設定**: `KsqlProfileConfig` に `logicalApps?: Record<string, number>`（キーは `LAPP_` を除いた
+    ASCII 論理名 `[A-Za-z][A-Za-z0-9_]{0,63}`、値は物理アプリ ID）と `allowPhysicalAppRefs?: boolean`
+    を追加。`APP100`・`100`・`LAPP_ORDERS` のようなキーは読み込み時に拒否する。
+  - **構文**: `LAPP_<NAME>[$サブテーブル][@profile]`。`LAPP_` と論理名は ASCII の大小文字を区別せず、
+    内部で大文字へ正規化する。既存の `APPxxx` は常に物理 ID のままで、暗黙に論理解決しない。
+  - **安全性**: 未定義論理名・未知 profile は API 呼び出し前にエラー（fail closed、誤 route しない）。
+    `allowPhysicalAppRefs: false`（既定 `true`）を指定した profile では、その profile を使う
+    kSQL SQL 内の物理 `APPxxx` 直接参照を拒否する（他ツールや REST API までは制限しない）。
+    token 要求は解決済み binding から物理 ID・profile 経由で導出し、logical binding 欠落時に
+    物理 ID や single token へ fallback しない。
+  - **可視化**: validation は `source`／`logicalName`／`mappedAppId`／`appId`／`profile` を返し、
+    EXPLAIN・利用者向け診断・エラーは論理名・物理 ID・profile を表示して内部 mapped ID を露出しない。
+  - **DELETE**: CLI は `DELETE FROM LAPP_ORDERS@prod ...` の明示 `@profile` を従来どおり拒否し、
+    profile 省略時は許可する。MCP は既存 runtime の挙動どおり許可する。
+  - **保存クエリ**: 論理参照をそのまま保存し、`defaultProfile` と profile override で別の物理アプリへ
+    解決する。値パラメータ化とは独立。
+  - 既存の `APPxxx` SQL の意味・挙動に回帰はなく、`logicalApps` を追加しただけでは既存 SQL が
+    別アプリへ向くことはない（opt-in）。
+  - 詳細は `docs/ksql_language_reference.md`・`docs/cli_app_profile_spec.md`・
+    `docs/ksql_mcp_server_spec.md` を参照。
+
+### 内部
+
+- `nodeKintoneClient` の fetch タイムアウトを `AbortSignal.timeout()` から
+  `AbortController` + `clearTimeout` へ変更し、リクエスト完了時にタイマーを確実に破棄する。
+- subprocess を起動する E2E テストを `--runInBand` の別フェーズへ隔離し、`npm test` を
+  決定的に green にする（並列プールとの競合による稀な timeout を解消）。
+
 ## v1.12.1（2026-07-11）
 
 ### 修正（バグ）
