@@ -148,3 +148,44 @@ describe("createKsqlRuntime: コメント内 APPxxx は token 要求に混入し
     ).rejects.toThrow(/token is missing/);
   });
 });
+
+describe("createKsqlRuntime: baseline auth/config flows", () => {
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.env.KSQL_BASE_URL = "https://example.cybozu.com";
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  test("config 未設定でも env の single token で構築できる", async () => {
+    process.env.KSQL_TOKEN = "single-token";
+    await expect(
+      createKsqlRuntime(
+        { configPath: join(tmpdir(), "ksql-config-that-does-not-exist.json") },
+        { sql: "SELECT * FROM APP4205" }
+      )
+    ).resolves.toMatchObject({ profileName: "dev" });
+  });
+
+  test("env の userpass 認証で構築できる", async () => {
+    process.env.KSQL_AUTH = "userpass";
+    process.env.KSQL_USERNAME = "user1";
+    process.env.KSQL_PASSWORD = "pass1";
+    await expect(
+      createKsqlRuntime(
+        { configPath: join(tmpdir(), "ksql-config-that-does-not-exist.json") },
+        { sql: "SELECT * FROM APP4205" }
+      )
+    ).resolves.toMatchObject({ profileName: "dev" });
+  });
+});

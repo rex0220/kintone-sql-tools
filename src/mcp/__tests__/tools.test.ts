@@ -27,6 +27,20 @@ describe("MCP tools", () => {
     }
   });
 
+  test("MCP validation allows DELETE + @profile", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({
+      sql: "DELETE FROM APP100@stg WHERE $id = 1",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      statementType: "DELETE",
+      isDml: true,
+      hasProfileSyntax: true,
+    });
+  });
+
   test("validate detects DML and normalizes APP@profile", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     const result = await tools.validate({

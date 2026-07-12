@@ -105,6 +105,21 @@ test("REORDER dry-run is allowed with --allow-dml", async () => {
   expect(res.stdout).toContain("[REORDER]");
 });
 
+test("DELETE + @profile is rejected by the CLI", async () => {
+  const res = await runCli([
+    "--dry-run",
+    "--allow-dml",
+    "-e",
+    "DELETE FROM APP88@prod WHERE $id = 1",
+  ]);
+  if (res.skipped) {
+    expect(true).toBe(true);
+    return;
+  }
+  expect(res.code).toBe(2);
+  expect(res.stderr).toContain("@profile is not supported for DELETE yet");
+});
+
 // ----------------------------------------------------------------
 // バッチ dry-run と DML ガード（M3 レビュー反映）
 // ----------------------------------------------------------------
