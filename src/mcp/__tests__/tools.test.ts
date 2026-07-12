@@ -907,6 +907,13 @@ describe("MCP tools", () => {
 
   test("runSavedQuery requires profile override opt-in and DML approval", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-tools-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      profiles: {
+        prod: { baseUrl: "https://example.invalid", tokenMap: { APP100: "test-token" } },
+        stg: { baseUrl: "https://example.invalid", tokenMap: { APP100: "test-token" } },
+      },
+    }), "utf8");
     process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
     const executeSql = async (
       _sql: string,
@@ -920,7 +927,7 @@ describe("MCP tools", () => {
       };
     };
     const tools = createKsqlMcpTools(
-      { profile: "prod" },
+      { configPath, profile: "prod" },
       { executeSql }
     );
 
@@ -1014,6 +1021,12 @@ describe("MCP tools", () => {
 
   test("runSavedQuery forwards fetchParallel to read-only and DML paths", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-tools-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      profiles: {
+        prod: { baseUrl: "https://example.invalid", tokenMap: { APP100: "test-token" } },
+      },
+    }), "utf8");
     process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
     const executeOptionsList: (ExecuteOptions | undefined)[] = [];
     const executeSql = async (
@@ -1035,7 +1048,7 @@ describe("MCP tools", () => {
       };
     };
     const tools = createKsqlMcpTools(
-      { profile: "prod" },
+      { configPath, profile: "prod" },
       { executeSql }
     );
 
