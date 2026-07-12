@@ -162,7 +162,7 @@ test("EXPLAIN INSERT — 単一行", async () => {
     "EXPLAIN INSERT INTO APP89 (顧客名, 部署名, 顧客ランク) VALUES ('株式会社テスト', '営業部', 'B')"
   );
   expect(plan.some((l) => l.includes("[INSERT]"))).toBe(true);
-  expect(plan.find((l) => l.includes("app:"))).toContain("APP89 (89)");
+  expect(plan.find((l) => l.includes("target:"))).toContain("APP89 (89)");
   expect(plan.find((l) => l.includes("records:"))).toContain("1 件");
   expect(plan.find((l) => l.includes("api:"))).toContain("POST /k/v1/records.json × 1");
   expect(plan.find((l) => l.includes("fields:"))).toContain("顧客名");
@@ -183,7 +183,7 @@ test("EXPLAIN INSERT SELECT — SELECT 部分のプランも表示", async () =>
     "EXPLAIN INSERT INTO APP88 (顧客名, 案件名) SELECT 顧客名, 案件名 FROM APP88 WHERE 確度 in ('0%')"
   );
   expect(plan.some((l) => l.includes("[INSERT SELECT]"))).toBe(true);
-  expect(plan.find((l) => l.includes("app:"))).toContain("APP88 (88)");
+  expect(plan.find((l) => l.includes("target:"))).toContain("APP88 (88)");
   expect(plan.some((l) => l.includes("[source SELECT]"))).toBe(true);
   // source SELECT は SIMPLE モード
   const srcIdx = plan.findIndex((l) => l.includes("[source SELECT]"));
@@ -199,7 +199,7 @@ test("EXPLAIN UPDATE — 単純 SET", async () => {
     "EXPLAIN UPDATE APP89 SET 顧客ランク = 'A' WHERE 顧客名 = '株式会社テスト'"
   );
   expect(plan.some((l) => l.includes("[UPDATE]"))).toBe(true);
-  expect(plan.find((l) => l.includes("app:"))).toContain("APP89 (89)");
+  expect(plan.find((l) => l.includes("target:"))).toContain("APP89 (89)");
   expect(plan.find((l) => l.includes("kintone query:"))).toContain("顧客名");
   expect(plan.find((l) => l.includes("api:"))).toContain("GET /k/v1/records.json → PUT");
   expect(plan.find((l) => l.includes("set type:"))).toContain("単純 SET");
@@ -246,7 +246,7 @@ test("EXPLAIN DELETE — 基本", async () => {
     "EXPLAIN DELETE FROM APP89 WHERE 顧客名 = '株式会社テスト'"
   );
   expect(plan.some((l) => l.includes("[DELETE]"))).toBe(true);
-  expect(plan.find((l) => l.includes("app:"))).toContain("APP89 (89)");
+  expect(plan.find((l) => l.includes("target:"))).toContain("APP89 (89)");
   expect(plan.find((l) => l.includes("kintone query:"))).toContain("顧客名");
   expect(plan.find((l) => l.includes("api:"))).toContain("GET /k/v1/records.json → DELETE");
 });
@@ -269,7 +269,7 @@ test("EXPLAIN UPSERT — VALUES（単一行）", async () => {
     "EXPLAIN UPSERT INTO APP89 (顧客名, 顧客ランク) VALUES ('株式会社テスト', 'A') ON DUPLICATE (顧客名)"
   );
   expect(plan.some((l) => l.includes("[UPSERT]"))).toBe(true);
-  expect(plan.find((l) => l.includes("app:"))).toContain("APP89 (89)");
+  expect(plan.find((l) => l.includes("target:"))).toContain("APP89 (89)");
   expect(plan.find((l) => l.includes("records:"))).toContain("1 件");
   expect(plan.find((l) => l.includes("key fields:"))).toContain("顧客名");
   expect(plan.find((l) => /^\s+fields:/.test(l))).toContain("顧客ランク");

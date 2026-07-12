@@ -3211,7 +3211,7 @@ function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT]`);
-  lines.push(`  app:     APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:  APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  records: ${totalRows} 件（バッチ ${batchCount} 回 × 最大 100 件）`);
   lines.push(`  api:     POST /k/v1/records.json × ${batchCount}`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
@@ -3222,7 +3222,7 @@ function buildInsertSelectPlan(stmt: InsertSelectStatement, label?: string): str
   const lines: string[] = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT SELECT]`);
-  lines.push(`  app:     APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:  APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
@@ -3236,7 +3236,7 @@ function buildUpdatePlan(stmt: UpdateStatement, label?: string): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
   lines.push(`  [UPDATE]`);
-  lines.push(`  app:           APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   lines.push(`  api:           GET /k/v1/records.json → PUT /k/v1/records.json`);
 
@@ -3272,7 +3272,7 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
   lines.push(`  [DELETE]`);
-  lines.push(`  app:           APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   lines.push(`  api:           GET /k/v1/records.json → DELETE /k/v1/records.json`);
   return lines;
@@ -3284,7 +3284,7 @@ function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
   return [
     ...(label ? [label] : []),
     `  [UPSERT]`,
-    `  app:        APP${stmt.appId} (${stmt.appId})`,
+    `  target:     APP${stmt.appId} (${stmt.appId})`,
     `  records:    ${totalRows} 件（バッチ ${batchCount} 回 × 最大 100 件）`,
     `  key fields: ${stmt.keyFields.join(", ")}`,
     `  fields:     ${stmt.fields.join(", ")}`,
@@ -3296,7 +3296,7 @@ function buildUpsertSelectPlan(stmt: UpsertSelectStatement, label?: string): str
   const lines: string[] = [
     ...(label ? [label] : []),
     `  [UPSERT SELECT]`,
-    `  app:        APP${stmt.appId} (${stmt.appId})`,
+    `  target:     APP${stmt.appId} (${stmt.appId})`,
     `  key fields: ${stmt.keyFields.join(", ")}`,
     `  fields:     ${stmt.fields.join(", ")}`,
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
@@ -3313,7 +3313,7 @@ function buildReorderPlan(stmt: ReorderStatement, label?: string): string[] {
   const lines: string[] = [
     ...(label ? [label] : []),
     `  [REORDER]`,
-    `  app:    APP${stmt.appId} (${stmt.appId})`,
+    `  target: APP${stmt.appId} (${stmt.appId})`,
     `  table:  ${target}`,
     `  scope:  ${scope}`,
     `  by:     ${byStr}`,

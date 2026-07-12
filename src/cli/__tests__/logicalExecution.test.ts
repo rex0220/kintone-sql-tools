@@ -58,4 +58,46 @@ describe("CLI logical app execution", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test.each([
+    // SELECT のソース app: 行は論理名 + profile（仕様 §9.2 の app 参照）
+    ["SELECT", "SELECT $id FROM LAPP_ORDERS LIMIT 1", "app:", "LAPP_ORDERS@prod"],
+    // DML の書き込み先 target: 行は論理名 -> 物理ID@profile を併記（仕様 §9.2）
+    ["UPSERT", "UPSERT INTO LAPP_ORDERS (顧客コード, 名前) VALUES ('C001','b') ON DUPLICATE (顧客コード)", "target:", "LAPP_ORDERS -> APP1234@prod"],
+    ["UPDATE", "UPDATE LAPP_ORDERS SET 名前='x' WHERE $id=1", "target:", "LAPP_ORDERS -> APP1234@prod"],
+  ])("dry-run %s プランは内部 mapped ID を露出せず仕様 §9.2 の参照へ復元する", async (_type, sql, label, expected) => {
+    const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-plan-"));
+    const configPath = join(dir, "ksql.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: {
+          baseUrl: "https://example.cybozu.com",
+          logicalApps: { ORDERS: 1234 },
+          tokenMap: { APP1234: "physical-1234-token" },
+        },
+      },
+    }));
+    const out: string[] = [];
+    jest.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out.push(String(chunk));
+      return true;
+    });
+    try {
+      const code = await runWithArgv([
+        "--config", configPath,
+        "--allow-dml",
+        "--dry-run",
+        "-e", sql,
+      ]);
+      expect(code).toBe(0);
+      const lines = out.join("").split("\n");
+      const header = lines.find((l) => l.includes(label)) ?? "";
+      expect(header).toContain(expected);
+      // 内部 mapped APP 表記（APP9xxxxxxxx）を出力してはならない（仕様 §8.1 / §9.2）
+      expect(out.join("")).not.toMatch(/APP9\d{8}/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
