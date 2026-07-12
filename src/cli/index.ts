@@ -27,6 +27,7 @@ import {
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import { resolveRequestGateOptions } from "../node/config";
+import { resolveTokenByMappedApp } from "../node/runtime";
 import { decideConsoleInput, decideRun } from "./consoleInput";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
 import { createNodeKintoneClient } from "./nodeKintoneClient";
@@ -38,6 +39,7 @@ import {
   normalizeSqlAppProfiles,
   parseTokenFile,
   parseTokenMap,
+  type AppBinding,
 } from "../node/appProfiles";
 import {
   collectDmlTargetFields,
@@ -1480,7 +1482,7 @@ async function run(): Promise<number> {
 
   let sql: string | null = null;
   let hasProfileSyntax = false;
-  let appBindingByMappedApp = new Map<number, { appId: number; profile: string }>();
+  let appBindingByMappedApp = new Map<number, AppBinding>();
   let parsedStmt: unknown = null;
   let stmtType = "SELECT";
   let hasWhere = true;
@@ -1708,21 +1710,20 @@ async function run(): Promise<number> {
       const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv, ...mapFromFile, ...mapFromArg };
 
       const assignedAppIds = appIds.filter((appId) => appProfileByApp.get(appId) === pName);
-      const tokenByApp = new Map<number, string>();
-      for (const mappedAppId of assignedAppIds) {
-        const realAppId = appBindingByMappedApp.get(mappedAppId)?.appId ?? mappedAppId;
-        const key = `APP${realAppId}`;
-        const fromMap = effectiveTokenMap[key];
-        if (fromMap) {
-          tokenByApp.set(mappedAppId, resolveTokenValue(fromMap));
-          continue;
-        }
-        if (assignedAppIds.length === 1 && singleToken) {
-          tokenByApp.set(mappedAppId, singleToken);
-          continue;
-        }
-        missingAppProfiles.push(`APP${realAppId}@${pName}`);
-      }
+      const resolvedTokens = resolveTokenByMappedApp({
+        mappedAppIds: assignedAppIds,
+        profileName: pName,
+        bindings: appBindingByMappedApp,
+        logicalBindingLabels: new Map(
+          [...appBindingByMappedApp.values()]
+            .filter((b): b is Extract<AppBinding, { source: "logical" }> => b.source === "logical")
+            .map((b) => [b.mappedAppId, `LAPP_${b.logicalName}@${b.profile}`])
+        ),
+        effectiveTokenMap,
+        singleToken,
+      });
+      const tokenByApp = resolvedTokens.tokenByPhysicalApp;
+      missingAppProfiles.push(...resolvedTokens.missing);
 
       profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
