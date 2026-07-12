@@ -45,7 +45,9 @@ import {
   parseTokenFile,
   parseTokenMap,
   type AppBinding,
+  type SqlProfileParseResult,
 } from "../node/appProfiles";
+import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import {
   collectDmlTargetFields,
   getInsertValuesCount,
@@ -1495,6 +1497,8 @@ async function run(): Promise<number> {
   const profile = config.profiles?.[profileName] ?? {};
 
   let sql: string | null = null;
+  let sourceSql: string | null = null;
+  let sqlDiagnosticContext: SqlProfileParseResult | null = null;
   let hasProfileSyntax = false;
   let appBindingByMappedApp = new Map<number, AppBinding>();
   let parsedStmt: unknown = null;
@@ -1512,6 +1516,7 @@ async function run(): Promise<number> {
       process.stderr.write("ArgumentError: SQL is empty.\n");
       return 2;
     }
+    sourceSql = sql;
 
     try {
       const validatedConfig = validateKsqlConfig(config as KsqlConfig);
@@ -1521,6 +1526,7 @@ async function run(): Promise<number> {
         if (binding.source === "physical") resolutionContext.assertPhysicalAppAllowed(binding.profile);
       }
       sql = normalized.normalizedSql;
+      sqlDiagnosticContext = normalized;
       hasProfileSyntax = normalized.hasProfileSyntax;
       appBindingByMappedApp = normalized.appBindingByMappedApp;
     } catch (err) {
@@ -1559,7 +1565,13 @@ async function run(): Promise<number> {
         }
       }
     } catch (err) {
-      process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+      const restored = sourceSql && sqlDiagnosticContext
+        ? restoreSqlContextError(err, sourceSql, {
+            bindings: sqlDiagnosticContext.appBindingByMappedApp,
+            rewriteSegments: sqlDiagnosticContext.rewriteSegments,
+          })
+        : err;
+      process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
       return 1;
     }
   }
@@ -1625,9 +1637,24 @@ async function run(): Promise<number> {
     }
     if (args.dryRun) {
       // バッチ dry-run: 全文のプランを表示して終了（kintone アクセスなし。DML 込みでも可）
-      const plans = buildBatchExplainPlans(sql!);
+      let plans: ReturnType<typeof buildBatchExplainPlans>;
+      try {
+        plans = buildBatchExplainPlans(sql!);
+      } catch (err) {
+        const restored = sourceSql && sqlDiagnosticContext
+          ? restoreSqlContextError(err, sourceSql, {
+              bindings: sqlDiagnosticContext.appBindingByMappedApp,
+              rewriteSegments: sqlDiagnosticContext.rewriteSegments,
+            })
+          : err;
+        process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
+        return toExitCodeFromError(restored);
+      }
       const out: string[] = [];
-      plans.statements.forEach((p) => {
+      const restoredStatements = sqlDiagnosticContext
+        ? restoreSqlDiagnosticValue(plans.statements, sqlDiagnosticContext.appBindingByMappedApp) as typeof plans.statements
+        : plans.statements;
+      restoredStatements.forEach((p) => {
         if (p.index > 0) out.push("");
         out.push(`[${p.index + 1}] ${p.type}`);
         out.push(...p.plan);
@@ -1992,12 +2019,18 @@ async function run(): Promise<number> {
     if (shouldExitOnEmpty(args.dryRun, exitOnEmpty, result.rowCount)) return 1;
     return 0;
   } catch (err) {
-    if (err instanceof OperationCancelledError) {
-      process.stderr.write(`${err.message}\n`);
+    const restored = sourceSql && sqlDiagnosticContext
+      ? restoreSqlContextError(err, sourceSql, {
+          bindings: sqlDiagnosticContext.appBindingByMappedApp,
+          rewriteSegments: sqlDiagnosticContext.rewriteSegments,
+        })
+      : err;
+    if (restored instanceof OperationCancelledError) {
+      process.stderr.write(`${restored.message}\n`);
       return 2;
     }
-    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-    return toExitCodeFromError(err);
+    process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
+    return toExitCodeFromError(restored);
   }
 }
 

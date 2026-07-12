@@ -37666,6 +37666,56 @@ function buildBatchEnvelope(batch, options = {}) {
   };
 }
 
+// src/node/sqlDiagnostics.ts
+function restoreSqlDiagnosticValue(value, bindings) {
+  if (typeof value === "string") {
+    let restored = value;
+    for (const binding of bindings.values()) {
+      const internal = `APP${binding.mappedAppId}`;
+      const display = binding.source === "logical" ? `LAPP_${binding.logicalName}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
+      restored = restored.split(`${internal} (${binding.mappedAppId})`).join(display).split(internal).join(display);
+    }
+    return restored;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => restoreSqlDiagnosticValue(item, bindings));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, restoreSqlDiagnosticValue(item, bindings)])
+    );
+  }
+  return value;
+}
+function restoreSqlContextError(err, sourceSql, context) {
+  if (!(err instanceof Error)) return err;
+  let message = err.message;
+  for (const binding of context.bindings.values()) {
+    if (binding.source === "logical") {
+      message = message.split(`APP${binding.mappedAppId}`).join(`LAPP_${binding.logicalName}@${binding.profile}`);
+    }
+  }
+  const token = err.token;
+  if (typeof token?.pos === "number") {
+    const segment = context.rewriteSegments.find(
+      (candidate) => token.pos >= candidate.normalizedStart && token.pos < candidate.normalizedEnd
+    );
+    if (segment) {
+      const sourcePos = segment.sourceStart + Math.min(
+        token.pos - segment.normalizedStart,
+        Math.max(0, segment.sourceEnd - segment.sourceStart - 1)
+      );
+      message = message.replace(/（位置 \d+、トークン:/, `\uFF08\u4F4D\u7F6E ${sourcePos}\u3001\u30C8\u30FC\u30AF\u30F3:`);
+      const originalRef = sourceSql.slice(segment.sourceStart, segment.sourceEnd);
+      if (segment.bindingMappedAppId !== void 0 && originalRef) {
+        message = message.replace(/(トークン: 「)[^」]*(」)/, `$1${originalRef}$2`);
+      }
+    }
+  }
+  err.message = message;
+  return err;
+}
+
 // src/node/config.ts
 var import_fs = require("fs");
 var LOGICAL_APP_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
@@ -38925,53 +38975,6 @@ function toValidationBinding(mappedAppId, binding) {
 function toExplainBindings(bindings) {
   return [...bindings.values()].map((binding) => binding.source === "logical" ? { source: binding.source, logicalName: binding.logicalName, appId: binding.appId, profile: binding.profile } : { source: binding.source, appId: binding.appId, profile: binding.profile });
 }
-function restoreExplainValue(value, bindings) {
-  if (typeof value === "string") {
-    let restored = value;
-    for (const binding of bindings.values()) {
-      const internal = `APP${binding.mappedAppId}`;
-      const display = binding.source === "logical" ? `LAPP_${binding.logicalName}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
-      restored = restored.split(`${internal} (${binding.mappedAppId})`).join(display).split(internal).join(display);
-    }
-    return restored;
-  }
-  if (Array.isArray(value)) return value.map((item) => restoreExplainValue(item, bindings));
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, restoreExplainValue(item, bindings)])
-    );
-  }
-  return value;
-}
-function restoreContextError(err, sourceSql, context) {
-  if (!(err instanceof Error)) throw err;
-  let message = err.message;
-  for (const binding of context.bindings.values()) {
-    if (binding.source === "logical") {
-      message = message.split(`APP${binding.mappedAppId}`).join(`LAPP_${binding.logicalName}@${binding.profile}`);
-    }
-  }
-  const token = err.token;
-  if (typeof token?.pos === "number") {
-    const segment = context.rewriteSegments.find(
-      (candidate) => token.pos >= candidate.normalizedStart && token.pos < candidate.normalizedEnd
-    );
-    if (segment) {
-      const sourcePos = segment.sourceStart + Math.min(
-        token.pos - segment.normalizedStart,
-        Math.max(0, segment.sourceEnd - segment.sourceStart - 1)
-      );
-      message = message.replace(/\uff08位置 \d+、トークン:/, `\uFF08\u4F4D\u7F6E ${sourcePos}\u3001\u30C8\u30FC\u30AF\u30F3:`);
-      const originalRef = sourceSql.slice(segment.sourceStart, segment.sourceEnd);
-      if (segment.bindingMappedAppId !== void 0 && originalRef) {
-        message = message.replace(/(トークン: 「)[^」]*(」)/, `$1${originalRef}$2`);
-      }
-    }
-  }
-  const restored = new Error(message);
-  restored.name = err.name;
-  throw restored;
-}
 function explainSql(sql) {
   return /^\s*EXPLAIN\b/i.test(sql) ? sql : `EXPLAIN ${sql}`;
 }
@@ -39103,7 +39106,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       const statements = parseSqlStatements(normalized.normalizedSql);
       analysis = analyzeBatch(statements);
     } catch (err) {
-      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
     const statementValidations = analysis.statements.map((s2) => ({
@@ -39160,7 +39163,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     try {
       statements = parseSqlStatements(normalized.normalizedSql);
     } catch (err) {
-      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
     if (statements.length > 1) {
       const plans = buildBatchExplainPlans(normalized.normalizedSql);
@@ -39168,7 +39171,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         ok: true,
         batch: true,
         statementCount: plans.statementCount,
-        statements: restoreExplainValue(plans.statements, normalized.appBindingByMappedApp),
+        statements: restoreSqlDiagnosticValue(plans.statements, normalized.appBindingByMappedApp),
         appBindings
       };
     }
@@ -39178,7 +39181,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
     }
-    return restoreExplainValue(
+    return restoreSqlDiagnosticValue(
       { ...toSelectPayload(result), appBindings },
       normalized.appBindingByMappedApp
     );
@@ -39650,7 +39653,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.13.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.13.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

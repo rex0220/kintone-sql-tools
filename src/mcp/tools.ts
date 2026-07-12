@@ -16,6 +16,7 @@ import {
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
+import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
 import { envString, loadOptionalKsqlConfig, type OnLimitMode } from "../node/config";
 import {
@@ -221,59 +222,6 @@ function toExplainBindings(bindings: ReadonlyMap<number, AppBinding>) {
     : { source: binding.source, appId: binding.appId, profile: binding.profile });
 }
 
-function restoreExplainValue(value: unknown, bindings: ReadonlyMap<number, AppBinding>): unknown {
-  if (typeof value === "string") {
-    let restored = value;
-    for (const binding of bindings.values()) {
-      const internal = `APP${binding.mappedAppId}`;
-      const display = binding.source === "logical"
-        ? `LAPP_${binding.logicalName}@${binding.profile}`
-        : `APP${binding.appId}@${binding.profile}`;
-      restored = restored
-        .split(`${internal} (${binding.mappedAppId})`).join(display)
-        .split(internal).join(display);
-    }
-    return restored;
-  }
-  if (Array.isArray(value)) return value.map((item) => restoreExplainValue(item, bindings));
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, restoreExplainValue(item, bindings)])
-    );
-  }
-  return value;
-}
-
-function restoreContextError(err: unknown, sourceSql: string, context: ResolvedSqlContext): never {
-  if (!(err instanceof Error)) throw err;
-  let message = err.message;
-  for (const binding of context.bindings.values()) {
-    if (binding.source === "logical") {
-      message = message.split(`APP${binding.mappedAppId}`).join(`LAPP_${binding.logicalName}@${binding.profile}`);
-    }
-  }
-  const token = (err as Error & { token?: { pos?: number } }).token;
-  if (typeof token?.pos === "number") {
-    const segment = context.rewriteSegments.find(
-      (candidate) => token.pos! >= candidate.normalizedStart && token.pos! < candidate.normalizedEnd
-    );
-    if (segment) {
-      const sourcePos = segment.sourceStart + Math.min(
-        token.pos - segment.normalizedStart,
-        Math.max(0, segment.sourceEnd - segment.sourceStart - 1)
-      );
-      message = message.replace(/\uff08位置 \d+、トークン:/, `（位置 ${sourcePos}、トークン:`);
-      const originalRef = sourceSql.slice(segment.sourceStart, segment.sourceEnd);
-      if (segment.bindingMappedAppId !== undefined && originalRef) {
-        message = message.replace(/(トークン: 「)[^」]*(」)/, `$1${originalRef}$2`);
-      }
-    }
-  }
-  const restored = new Error(message);
-  restored.name = err.name;
-  throw restored;
-}
-
 function explainSql(sql: string): string {
   return /^\s*EXPLAIN\b/i.test(sql) ? sql : `EXPLAIN ${sql}`;
 }
@@ -448,7 +396,7 @@ export function createKsqlMcpTools(
       const statements = parseSqlStatements(normalized.normalizedSql);
       analysis = analyzeBatch(statements);
     } catch (err) {
-      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()]
       .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
@@ -514,7 +462,7 @@ export function createKsqlMcpTools(
     try {
       statements = parseSqlStatements(normalized.normalizedSql);
     } catch (err) {
-      restoreContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
     if (statements.length > 1) {
       const plans = buildBatchExplainPlans(normalized.normalizedSql);
@@ -522,7 +470,7 @@ export function createKsqlMcpTools(
         ok: true,
         batch: true,
         statementCount: plans.statementCount,
-        statements: restoreExplainValue(plans.statements, normalized.appBindingByMappedApp),
+        statements: restoreSqlDiagnosticValue(plans.statements, normalized.appBindingByMappedApp),
         appBindings,
       };
     }
@@ -533,7 +481,7 @@ export function createKsqlMcpTools(
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
     }
-    return restoreExplainValue(
+    return restoreSqlDiagnosticValue(
       { ...toSelectPayload(result), appBindings },
       normalized.appBindingByMappedApp
     ) as Record<string, unknown>;
