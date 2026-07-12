@@ -37441,7 +37441,7 @@ function buildInsertPlan(stmt, label) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT]`);
-  lines.push(`  app:     APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:  APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  records: ${totalRows} \u4EF6\uFF08\u30D0\u30C3\u30C1 ${batchCount} \u56DE \xD7 \u6700\u5927 100 \u4EF6\uFF09`);
   lines.push(`  api:     POST /k/v1/records.json \xD7 ${batchCount}`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
@@ -37451,7 +37451,7 @@ function buildInsertSelectPlan(stmt, label) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT SELECT]`);
-  lines.push(`  app:     APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:  APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json\uFF08\u4EF6\u6570\u306F SELECT \u7D50\u679C\u306B\u4F9D\u5B58\u3001100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`);
   lines.push("");
@@ -37464,7 +37464,7 @@ function buildUpdatePlan(stmt, label) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  [UPDATE]`);
-  lines.push(`  app:           APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   lines.push(`  api:           GET /k/v1/records.json \u2192 PUT /k/v1/records.json`);
   const setTypes = [];
@@ -37494,7 +37494,7 @@ function buildDeletePlan(stmt, label) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  [DELETE]`);
-  lines.push(`  app:           APP${stmt.appId} (${stmt.appId})`);
+  lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   lines.push(`  api:           GET /k/v1/records.json \u2192 DELETE /k/v1/records.json`);
   return lines;
@@ -37505,7 +37505,7 @@ function buildUpsertPlan(stmt, label) {
   return [
     ...label ? [label] : [],
     `  [UPSERT]`,
-    `  app:        APP${stmt.appId} (${stmt.appId})`,
+    `  target:     APP${stmt.appId} (${stmt.appId})`,
     `  records:    ${totalRows} \u4EF6\uFF08\u30D0\u30C3\u30C1 ${batchCount} \u56DE \xD7 \u6700\u5927 100 \u4EF6\uFF09`,
     `  key fields: ${stmt.keyFields.join(", ")}`,
     `  fields:     ${stmt.fields.join(", ")}`,
@@ -37516,7 +37516,7 @@ function buildUpsertSelectPlan(stmt, label) {
   const lines = [
     ...label ? [label] : [],
     `  [UPSERT SELECT]`,
-    `  app:        APP${stmt.appId} (${stmt.appId})`,
+    `  target:     APP${stmt.appId} (${stmt.appId})`,
     `  key fields: ${stmt.keyFields.join(", ")}`,
     `  fields:     ${stmt.fields.join(", ")}`,
     `  api:        GET /k/v1/records.json\uFF08\u91CD\u8907\u5224\u5B9A\uFF09\u2192 POST \u307E\u305F\u306F PUT /k/v1/records.json\uFF08100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`,
@@ -37532,7 +37532,7 @@ function buildReorderPlan(stmt, label) {
   const lines = [
     ...label ? [label] : [],
     `  [REORDER]`,
-    `  app:    APP${stmt.appId} (${stmt.appId})`,
+    `  target: APP${stmt.appId} (${stmt.appId})`,
     `  table:  ${target}`,
     `  scope:  ${scope}`,
     `  by:     ${byStr}`,
@@ -37669,6 +37669,14 @@ function buildBatchEnvelope(batch, options = {}) {
 // src/node/sqlDiagnostics.ts
 function restoreSqlDiagnosticValue(value, bindings) {
   if (typeof value === "string") {
+    const dmlTarget = value.match(/^(\s*target:\s*)APP(\d+) \((\d+)\)\s*$/);
+    if (dmlTarget && dmlTarget[2] === dmlTarget[3]) {
+      const binding = bindings.get(Number(dmlTarget[2]));
+      if (binding) {
+        const target = binding.source === "logical" ? `LAPP_${binding.logicalName} -> APP${binding.appId}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
+        return `${dmlTarget[1]}${target}`;
+      }
+    }
     let restored = value;
     for (const binding of bindings.values()) {
       const internal = `APP${binding.mappedAppId}`;
@@ -39653,7 +39661,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.13.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "1.13.2" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
