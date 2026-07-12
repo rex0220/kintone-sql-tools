@@ -59,3 +59,26 @@ test("EXPLAIN値は再帰的に復元し内部mapped IDを公開しない", () =
 
   expect(restored).toEqual({ plan: ["scan LAPP_ORDERS@prod"] });
 });
+
+test("DML target 行は論理名と物理ID・profileを併記する（仕様 §9.2）", () => {
+  const { result } = normalized("UPDATE LAPP_ORDERS SET 名前='x' WHERE $id=1");
+  const restored = restoreSqlDiagnosticValue({
+    plan: ["  [UPDATE]", "  target:        APP900000000 (900000000)"],
+  }, result.appBindingByMappedApp);
+
+  expect(restored).toEqual({
+    plan: ["  [UPDATE]", "  target:        LAPP_ORDERS -> APP1234@prod"],
+  });
+});
+
+test("物理参照の DML target 行は APP<id>@profile（矢印なし）", () => {
+  const resolution = createAppResolutionContext(validateKsqlConfig({
+    profiles: { prod: { allowPhysicalAppRefs: true } },
+  }), "prod");
+  const result = normalizeSqlAppProfiles("UPDATE APP89@prod SET 名前='x' WHERE $id=1", "prod", resolution);
+  const restored = restoreSqlDiagnosticValue({
+    plan: ["  target:        APP89 (89)"],
+  }, result.appBindingByMappedApp);
+
+  expect(restored).toEqual({ plan: ["  target:        APP89@prod"] });
+});

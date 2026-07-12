@@ -14,6 +14,19 @@ export function restoreSqlDiagnosticValue(
   bindings: ReadonlyMap<number, AppBinding>
 ): unknown {
   if (typeof value === "string") {
+    // DML プランの書き込み先ヘッダ（target: APP<mapped> (<mapped>)）は、仕様 §9.2 に従い
+    // 論理名と物理ID・profile を併記する（LAPP_ORDERS -> APP1234@prod）。
+    // 物理参照は APP<id>@profile。汎用置換より前に処理し、内部 mapped ID を露出しない。
+    const dmlTarget = value.match(/^(\s*target:\s*)APP(\d+) \((\d+)\)\s*$/);
+    if (dmlTarget && dmlTarget[2] === dmlTarget[3]) {
+      const binding = bindings.get(Number(dmlTarget[2]));
+      if (binding) {
+        const target = binding.source === "logical"
+          ? `LAPP_${binding.logicalName} -> APP${binding.appId}@${binding.profile}`
+          : `APP${binding.appId}@${binding.profile}`;
+        return `${dmlTarget[1]}${target}`;
+      }
+    }
     let restored = value;
     for (const binding of bindings.values()) {
       const internal = `APP${binding.mappedAppId}`;

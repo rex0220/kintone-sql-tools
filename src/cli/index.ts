@@ -1986,7 +1986,7 @@ async function run(): Promise<number> {
       return writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
     }
 
-    const result = args.dryRun
+    let result = args.dryRun
       ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit, cacheContext })
       : await execute(sql!, client, {
         maxRecords,
@@ -1995,6 +1995,11 @@ async function run(): Promise<number> {
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
       });
+    // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
+    // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）
+    if (args.dryRun && sqlDiagnosticContext) {
+      result = restoreSqlDiagnosticValue(result, sqlDiagnosticContext.appBindingByMappedApp) as typeof result;
+    }
     // ASSERT は mutation 出力（affected=）に流さない専用経路（バッチ強化第1弾 §2.5）
     if (result.type === "ASSERT") {
       const output = buildAssertOutput(result, format, pretty);

@@ -2,6 +2,26 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v1.13.2（2026-07-12）
+
+### 修正（バグ）
+
+- **単文 `--dry-run`（EXPLAIN）のプラン出力に内部mapped APP表記が露出していた問題を修正**。
+  v1.13.1ではバッチdry-runのみ`restoreSqlDiagnosticValue`で復元しており、単文dry-runは
+  SELECT・DMLとも`APP900000000 (900000000)`のような内部mapped IDを表示していた。バッチdry-runと
+  同じ復元を単文経路にも適用し、利用者向け出力へ内部mapped IDを露出しない（仕様§8.1）。
+
+### 変更（表示）
+
+- **DMLの実行計画ヘッダを仕様§9.2準拠へ**。書き込み先ラベルを`app:`から`target:`へ変更し、
+  論理参照は`target: LAPP_ORDERS -> APP1234@prod`、物理参照は`target: APP1234@prod`と、
+  論理名・物理ID・profileを実行前に明示する。SELECTのソース`app:`行・一時テーブルソースの
+  `app:`行は従来どおり。対象は INSERT / INSERT SELECT / UPDATE / DELETE / UPSERT /
+  UPSERT SELECT / REORDER。ルーティングは従来どおり物理IDへ解決され、変更は表示のみ。
+  プラグインもEXPLAINエンジンをバンドルするため、クライアント側EXPLAINのDMLヘッダが
+  `app:`から`target:`へ変わる（プラグインは論理アプリ非対応のため矢印形は出さず
+  `target: APP<id> (<id>)`表記。挙動はEXPLAIN表示のみの変更）。
+
 ## v1.13.1（2026-07-12）
 
 ### 修正（バグ）

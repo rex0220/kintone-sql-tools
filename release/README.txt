@@ -1,9 +1,22 @@
-ksql 配布パッケージ (v1.13.1)
+ksql 配布パッケージ (v1.13.2)
 
-1. ksql-plugin-v1.13.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v1.13.2.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v1.13.2: CLI / MCP の表示修正(プラグインは EXPLAIN 表示のみ変更)。
+- 単文 --dry-run(EXPLAIN)のプラン出力に内部 mapped アプリ表記が
+  露出していた問題を修正。v1.13.1 ではバッチ dry-run のみ復元しており、
+  単文では SELECT / DML とも内部 mapped ID を表示する場合がありました。
+- DML の実行計画ヘッダを仕様 §9.2 準拠にし、書き込み先ラベルを app: から
+  target: へ変更。CLI / MCP の論理参照は target: LAPP_ORDERS -> APP1234@prod
+  のように論理名と物理 ID・profile を明示します(物理参照は target: APP1234@prod)。
+- プラグインも EXPLAIN エンジンをバンドルするため、クライアント側 EXPLAIN の
+  DML ヘッダが app: から target: へ変わります(プラグインは論理アプリ非対応の
+  ため矢印形は出さず target: APP<id> (<id>) 表記。EXPLAIN 表示のみの変更で
+  ルーティング等の挙動は変わりません)。
+- 詳細は CHANGELOG.md を参照。
 
 v1.13.1: CLI / MCP のバグ修正(プラグインの挙動変更なし)。
 - CLI で LAPP_<NAME> を含む SQL が失敗した際、parser / 実行エラーの
