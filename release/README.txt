@@ -1,9 +1,22 @@
-ksql 配布パッケージ (v1.12.1)
+ksql 配布パッケージ (v1.13.0)
 
-1. ksql-plugin-v1.12.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v1.13.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v1.13.0: CLI / MCP に論理アプリ参照 LAPP_<NAME> を追加(プラグインの挙動変更なし)。
+- 環境や配置先で物理アプリ ID が異なる同用途アプリに対し、
+  FROM LAPP_ORDERS のような論理名で SQL / 保存クエリを再利用できます。
+  論理名は profile ごとの config logicalApps で物理 ID へ解決されます
+  (例: dev→APP899 / prod→APP1234)。
+- 既存の APPxxx は常に物理 ID のままで、暗黙に論理解決されません。
+  未定義論理名は API 呼び出し前にエラーとなり、誤 route しません。
+- profile 単位で allowPhysicalAppRefs: false を指定すると、その profile の
+  kSQL SQL 内で物理 APPxxx 直接参照を拒否できます(既定 true・後方互換)。
+- validation / EXPLAIN が論理名・物理 ID・profile を表示します。
+- 論理アプリ参照は CLI / MCP のみの機能で、プラグインの挙動は変わりません。
+- 詳細は CHANGELOG.md と docs/ksql_language_reference.md を参照。
 
 v1.12.1: CLI / MCP のトークン解決バグを修正(プラグインの挙動変更なし)。
 - SQL コメント・文字列リテラル・バッククォート識別子の中に書いた
