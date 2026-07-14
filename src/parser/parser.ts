@@ -272,7 +272,13 @@ export class Parser {
       this.advance();
       return { type: "STRING", value: tok.value };
     }
-    if (tok.kind === TokenKind.TODAY || tok.kind === TokenKind.NOW || tok.kind === TokenKind.LOGINUSER) {
+    if (tok.kind === TokenKind.LOGINUSER) {
+      throw new ParseError(
+        "SET の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）",
+        tok
+      );
+    }
+    if (tok.kind === TokenKind.TODAY || tok.kind === TokenKind.NOW) {
       return this.parseSqlValue() as KintoneFunction;
     }
     const expr = this.parseArithAddSub();

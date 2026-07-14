@@ -5,7 +5,7 @@
   - 2026-07-14 R1: 初版（ドラフト）。外部提案 `kSQL仕様案_バッチ変数.md` の Phase 1a を現行コードへ接地
   - 2026-07-14 R2: codex レビュー反映（7点）。①SET RHS に専用 `ScalarExpr` を定義（現行 AST では表現不能：算術 `+` は数値加算・文字列関数引数に `NOW()` 不可）。②**NULL を 1a から除外**（現行言語に `NullLiteral` なし・`@x IS NULL` 構文もなし → 後続機能）。③変数解決を**実行前 AST 置換**へ（既存スカラーサブクエリ [execute.ts:2861](../../src/execute.ts#L2861) と同設計。`VarValue` は判別 union）。④`@` 曖昧性は **High → 設計で解決可能**（Node は正規化が APP/LAPP 起点で `@var` 非検出・lexer は生 `@` がエラー・プラグインは @profile 非対応。検証済み）。⑤**単文 `SET` はエラー**。⑥**SET 失敗は `continueOnError` に関わらずバッチ停止**。⑦**結果メタへの `variables` 公開は 1a では見送り**（1c のマスキング仕様と同時に）
   - 2026-07-14 R2 実装: Phase 1a を実装。#10 の関数引数 `KINTONE_FUNC` 拡張は 1a では見送り、後続へ確定
-  - 2026-07-14 R3（実装レビュー反映）: **`LOGINUSER()` は SET RHS で不可**（`resolveKintoneFunc` が常に空文字 → サイレント空値の罠）。`parseScalarExpr` で拒否＋テスト追加が**リリースブロッカー**。言語リファレンスは修正済み（LOGINUSER 削除・`APP_差分`→`APP100`・上限 64 と最大20文の関係・`SET` 右辺の変数参照不可/`+`=数値/`CONCAT`）
+  - 2026-07-14 R3（実装レビュー反映）: **`LOGINUSER()` は SET RHS で不可**（`resolveKintoneFunc` が常に空文字 → サイレント空値の罠）。`parseScalarExpr` で明示拒否し、parser/execute 回帰テストを追加済み。言語リファレンスも修正済み（LOGINUSER 削除・`APP_差分`→`APP100`・上限 64 と最大20文の関係・`SET` 右辺の変数参照不可/`+`=数値/`CONCAT`）
 - ステータス: **R2 仕様に基づく Phase 1a 実装済み・テスト/全成果物ビルド確認済み**
 - 対象バージョン: **v2.1.0 候補（後方互換・加算的）**
 - 位置づけ: post-2.0 バッチ機能ロードマップの最初の一手（改善案 Phase 1）。1b（スカラーサブクエリ代入）・1c（`DECLARE` + 外部パラメータ）は本書のスコープ外・後続
@@ -48,7 +48,7 @@ type ScalarExpr =
   | ScalarArithExpr;         // フィールド参照を含まない算術（数値）
 ```
 
-- **`LOGINUSER()` は SET RHS で不可（R2 実装レビューで判明・要コード修正）**: `resolveKintoneFunc`（[evalWhere.ts:214-230](../../src/engine/evalWhere.ts#L214)）は `LOGINUSER` に**常に空文字**を返す（JS 側で解決不能）。よって `SET @user = LOGINUSER()` は成功したように見えて空値を保存する罠になる。`parseScalarExpr`（現状 `TODAY`/`NOW`/`LOGINUSER` を受理）で **`LOGINUSER()` を明示拒否**し、parser/execute テストを追加する。**リリースブロッカー**。実行環境共通のログインユーザー解決手段が設計できた段階で後続対応。
+- **`LOGINUSER()` は SET RHS で不可（R2 実装レビューで判明・R3 で修正済み）**: `resolveKintoneFunc`（[evalWhere.ts:214-230](../../src/engine/evalWhere.ts#L214)）は `LOGINUSER` に**常に空文字**を返す（JS 側で解決不能）。サイレントに空値を保存しないよう、`parseScalarExpr` で **`LOGINUSER()` を明示拒否**し、parser/execute 回帰テストで固定した。実行環境共通のログインユーザー解決手段が設計できた段階で後続対応。
 - **`+` は数値加算**。文字列連結は **`CONCAT()` のみ**（現行 `evalArithExpr` の `+` は数値・[evalFunc.ts:19-32](../../src/engine/evalFunc.ts#L19)）。R1 例の `'B' + FORMAT(NOW(), ...)` は成立しないため撤回。
 - **スカラーサブクエリ `SET @x = (SELECT ...)` は Phase 1b**（1a では明示パースエラー）。
 - **SET RHS 内での他変数参照（`SET @b = @a + 1`）は 1a では禁止**と明記（実装を小さく保つ・codex 推奨）。

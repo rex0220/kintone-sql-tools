@@ -82,6 +82,8 @@ test("SET RHS のフィールド・他変数・NULL・スカラーサブクエ�
   expect(() => parseOne("SET @x = field + 1")).toThrow(/フィールド参照/);
   expect(() => parseOne("SET @x = @other")).toThrow(/他の変数/);
   expect(() => parseOne("SET @x = NULL")).toThrow(/NULL/);
+  expect(() => parseOne("SET @user = LOGINUSER()"))
+    .toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
   expect(() => parseOne("SET @x = (SELECT COUNT(*) FROM APP100)")).toThrow(/Phase 1b/);
 });
 

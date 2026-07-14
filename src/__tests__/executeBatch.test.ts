@@ -104,6 +104,15 @@ test("単文 SET と単文の変数参照は execute で拒否する", async () 
     .rejects.toThrow(/variable @x is not defined in a batch/);
 });
 
+test("SET LOGINUSER() は実行前に拒否し、空文字変数を作らない", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  await expect(executeBatch(
+    "SET @user = LOGINUSER(); SELECT * FROM APP100 WHERE 作成者 = @user",
+    client
+  )).rejects.toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
 // ----------------------------------------------------------------
 // 最小経路: CREATE → 参照
 // ----------------------------------------------------------------
