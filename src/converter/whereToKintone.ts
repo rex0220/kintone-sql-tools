@@ -178,6 +178,8 @@ function convertField(field: FieldValue): string {
 
 function convertValue(value: SqlValue, op: CompareOp): string {
   switch (value.type) {
+    case "VARIABLE":
+      throw new KintoneQueryError(`未解決のバッチ変数 @${value.name} があります`);
     case "STRING":        return convertString(value);
     case "NUMBER":        return String(value.value);
     case "KINTONE_FUNC":  return convertKintoneFunc(value);

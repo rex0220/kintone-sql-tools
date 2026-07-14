@@ -192,6 +192,29 @@ test("単文の SELECT は通常どおり解析される", () => {
   expect(a.isReadOnlyBatch).toBe(true);
 });
 
+test("SET_VARIABLE は read-only で、参照索引と未使用警告を返す", () => {
+  const a = analyze("SET @Used = 10; SET @unused = 'x'; SELECT * FROM APP100 WHERE 売上 > @used");
+  expect(a.isReadOnlyBatch).toBe(true);
+  expect(a.variables).toEqual([
+    { name: "used", referencedBy: [2] },
+    { name: "unused", referencedBy: [] },
+  ]);
+  expect(a.warnings).toEqual(["variable @unused is never used."]);
+});
+
+test("変数の未定義・前方参照・再代入を静的に拒否する", () => {
+  expect(() => analyze("SELECT * FROM APP100; SELECT * FROM APP100 WHERE 売上 > @missing"))
+    .toThrow(/variable @missing is not defined/);
+  expect(() => analyze("SELECT * FROM APP100 WHERE 売上 > @x; SET @x = 1"))
+    .toThrow(/variable @x is not defined/);
+  expect(() => analyze("SET @x = 1; SET @X = 2"))
+    .toThrow(/variable @x is already defined/);
+});
+
+test("単文 SET はエラー", () => {
+  expect(() => analyze("SET @x = 1")).toThrow(/SET variable requires a batch/);
+});
+
 // ----------------------------------------------------------------
 // ASSERT（バッチ強化第1弾 A2）
 // ----------------------------------------------------------------

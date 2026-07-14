@@ -174,6 +174,7 @@ function resolveField(
 
 function resolveValue(value: SqlValue, row: ProcessRow): string {
   switch (value.type) {
+    case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
     case "STRING":       return value.value;
     case "NUMBER":       return String(value.value);
     case "KINTONE_FUNC": return resolveKintoneFunc(value.name);
@@ -215,7 +216,7 @@ function evalCaseResult(result: CaseResult, row: ProcessRow): string {
   return String(evalArithExpr(result, row));
 }
 
-function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {
+export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {
   const now = new Date();
   switch (name) {
     case "TODAY": {

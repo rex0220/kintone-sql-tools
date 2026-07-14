@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
@@ -53,7 +53,7 @@ import {
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery } from "./engine/evalWhere";
-import { evalWhere, evalCaseWhen } from "./engine/evalWhere";
+import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
@@ -313,6 +313,10 @@ async function executeParsedStatement(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<ExecuteResult> {
+  const unresolved = findVariableRef(stmt);
+  if (unresolved !== null) {
+    throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
+  }
   switch (stmt.type) {
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
@@ -332,6 +336,8 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "SET_VARIABLE":
+      throw new Error("ArgumentError: SET variable requires a batch.");
     case "ASSERT":        return executeAssert(stmt, client, options, cacheContext);
   }
 }
@@ -387,6 +393,10 @@ export interface BatchExecuteResult {
   metrics?: ExecuteMetrics;
 }
 
+type VarValue =
+  | { type: "string"; value: string }
+  | { type: "number"; value: number };
+
 /** バッチタイムアウト。message 接頭辞で code = TimeoutError として報告される */
 class BatchTimeoutError extends Error {
   constructor() {
@@ -434,6 +444,7 @@ export async function executeBatch(
   const cacheContext = options.cacheContext ?? "default";
 
   const tempTables = new Map<string, ProcessRow[]>();
+  const variables = new Map<string, VarValue>();
   const results: BatchStatementResult[] = [];
   /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
   const failed = new Set<number>();
@@ -484,7 +495,7 @@ export async function executeBatch(
         }
         : options;
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables),
+        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
       );
       results.push({ ...base, status: "success", ...outcome });
@@ -497,6 +508,9 @@ export async function executeBatch(
         // ASSERT 失敗は continueOnError を無視して常に停止する（設計判断 D3:
         // ASSERT は後続実行のゲートであり、続行を許すと存在意義が消える）
         aborted = "assertion";
+      } else if (info.statementType === "SET_VARIABLE") {
+        // 変数値が欠けた状態で後続を実行しない（continueOnError より優先）
+        aborted = "fail-fast";
       } else if (!options.continueOnError) {
         aborted = "fail-fast";
       }
@@ -520,9 +534,17 @@ async function executeBatchStatement(
   client: KintoneClient,
   options: BatchExecuteOptions,
   cacheContext: string,
-  tempTables: Map<string, ProcessRow[]>
+  tempTables: Map<string, ProcessRow[]>,
+  variables: Map<string, VarValue>
 ): Promise<Partial<BatchStatementResult>> {
-  if (stmt.type === "CREATE_TEMP_TABLE") {
+  if (stmt.type === "SET_VARIABLE") {
+    variables.set(stmt.name, evaluateScalarExpr(stmt.expr));
+    return {};
+  }
+
+  const resolvedStmt = resolveVariableRefs(stmt, variables);
+
+  if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     // 実体化は onLimitReached を適用せず常に error
     //（truncate による暗黙の欠損が後続文の結果を静かに歪めるため。仕様 §5.6）
     const materializeOptions: ExecuteOptions = {
@@ -530,9 +552,9 @@ async function executeBatchStatement(
       maxRecords: options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
       onLimitReached: "error",
     };
-    const result = await runSelectLike(stmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(stmt.name, result.rows);
-    return { tempTable: stmt.name, rowCount: result.rows.length };
+    const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+    tempTables.set(resolvedStmt.name, result.rows);
+    return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
 
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -542,37 +564,37 @@ async function executeBatchStatement(
 
   // EXPLAIN はプラン表示のみ（kintone アクセスなし）のため一時テーブル参照を含んでも安全
   if (stmt.type === "EXPLAIN") {
-    return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+    return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
   }
 
   // ASSERT: 成功時は result を持たせない no-result 文として扱う
   //（`result.type !== "SELECT"` → mutation summary 経路への流入を構造的に防ぐ。仕様 §2.3）
-  if (stmt.type === "ASSERT") {
-    await executeAssert(stmt, client, options, cacheContext, tempTables);
+  if (resolvedStmt.type === "ASSERT") {
+    await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
     return {};
   }
 
   // 一時テーブルを参照する文はストアを注入して実行
   if (info.tempTablesReferenced.length > 0) {
-    if (stmt.type === "SELECT" || stmt.type === "UNION") {
-      return { result: await executeQueryWithCte(stmt, client, options, tempTables, cacheContext) };
+    if (resolvedStmt.type === "SELECT" || resolvedStmt.type === "UNION") {
+      return { result: await executeQueryWithCte(resolvedStmt, client, options, tempTables, cacheContext) };
     }
-    if (stmt.type === "WITH") {
-      return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "WITH") {
+      return { result: await executeWith(resolvedStmt, client, options, cacheContext, tempTables) };
     }
     // SELECT-based DML（ソースは temp のみ / APP 混在とも。事前チェックで検証済み）
-    if (stmt.type === "INSERT_SELECT") {
-      return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "INSERT_SELECT") {
+      return { result: await executeInsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
     }
-    if (stmt.type === "UPSERT_SELECT") {
-      return { result: await executeUpsertSelect(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "UPSERT_SELECT") {
+      return { result: await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
     }
     // ここに来るのは想定外（他の DML 参照は事前チェックで拒否済み）
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
   }
 
   // 一時テーブルと無関係な文は既存の単文実行経路をそのまま使う
-  return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
 }
 
 /** CREATE TEMP TABLE の AS 句（SELECT / UNION / WITH）を一時テーブルストア付きで実行する */
@@ -664,6 +686,68 @@ function parseSqlBatch(sql: string): Statement[] {
   return new Parser(tokens).parseStatements();
 }
 
+function evaluateScalarExpr(expr: ScalarExpr): VarValue {
+  switch (expr.type) {
+    case "STRING":
+      return { type: "string", value: expr.value };
+    case "NUMBER":
+      return { type: "number", value: expr.value };
+    case "KINTONE_FUNC":
+      return { type: "string", value: resolveKintoneFunc(expr.name) };
+    case "STRING_FUNC":
+      return { type: "string", value: evalStringFunc(expr, {}) };
+    case "ARITH": {
+      const value = evalArithExpr(expr, {});
+      if (!Number.isFinite(value)) {
+        throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
+      }
+      return { type: "number", value };
+    }
+  }
+}
+
+/** 文実行前に VariableRef を型付きリテラルへ置換し、既存実行経路へ渡す。 */
+function resolveVariableRefs<T>(node: T, variables: Map<string, VarValue>): T {
+  if (Array.isArray(node)) {
+    return node.map((v) => resolveVariableRefs(v, variables)) as T;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
+      const value = variables.get(obj["name"]);
+      if (value === undefined) {
+        throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+      }
+      return (value.type === "number"
+        ? { type: "NUMBER", value: value.value }
+        : { type: "STRING", value: value.value }) as T;
+    }
+    return Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, resolveVariableRefs(value, variables)])
+    ) as T;
+  }
+  return node;
+}
+
+function findVariableRef(node: unknown): string | null {
+  if (Array.isArray(node)) {
+    for (const value of node) {
+      const found = findVariableRef(value);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") return obj["name"];
+    for (const value of Object.values(obj)) {
+      const found = findVariableRef(value);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
 // ============================================================
 // ASSERT（バッチ強化第1弾 §2）
 // ============================================================
@@ -721,6 +805,8 @@ async function evalAssertOperand(
   tempTables?: Map<string, ProcessRow[]>
 ): Promise<string> {
   switch (operand.type) {
+    case "VARIABLE":
+      throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
     case "NUMBER": return String(operand.value);
     case "STRING": return operand.value;
     case "ARITH":  return String(evalAssertArith(operand));
@@ -2941,13 +3027,22 @@ export function buildBatchExplainPlans(sql: string): {
 } {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+  const variables = new Map<string, VarValue>();
   return {
     statementCount: statements.length,
-    statements: statements.map((stmt, i) => ({
-      index: i,
-      type: analysis.statements[i].statementType,
-      plan: buildBatchStatementPlan(stmt, analysis.statements[i]),
-    })),
+    statements: statements.map((stmt, i) => {
+      const planStmt = stmt.type === "SET_VARIABLE" ? stmt : resolveVariableRefs(stmt, variables);
+      const result = {
+        index: i,
+        type: analysis.statements[i].statementType,
+        plan: buildBatchStatementPlan(planStmt, analysis.statements[i]),
+      };
+      if (stmt.type === "SET_VARIABLE") {
+        // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
+        variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
+      }
+      return result;
+    }),
   };
 }
 
@@ -2967,6 +3062,12 @@ function buildBatchStatementPlan(
     return [
       `DROP TEMP TABLE ${stmt.name}`,
       "  一時テーブルストアの解放のみ（kintone アクセスなし）",
+    ];
+  }
+  if (stmt.type === "SET_VARIABLE") {
+    return [
+      `SET @${stmt.name} = <scalar expression>`,
+      "  value:         実行時に1回評価（バッチ内定数・結果メタデータには非公開）",
     ];
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];

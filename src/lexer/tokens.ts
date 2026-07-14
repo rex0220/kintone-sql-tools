@@ -14,6 +14,7 @@ export const enum TokenKind {
   // 識別子
   IDENT   = "IDENT",   // フィールド名・テーブル名（日本語含む）
   BIDENT  = "BIDENT",  // `バッククォート識別子`
+  VARIABLE = "VARIABLE", // @name（バッチ変数）
 
   // キーワード ― 集合演算
   UNION = "UNION",

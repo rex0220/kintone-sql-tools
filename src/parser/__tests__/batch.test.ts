@@ -12,6 +12,8 @@ import type {
   SelectStatement,
   CreateTempTableStatement,
   DropTempTableStatement,
+  UpdateStatement,
+  AssertStatement,
 } from "../../types/ast";
 
 function parseAll(sql: string) {
@@ -57,6 +59,30 @@ test("20 文まで受理し、21 文でエラー", () => {
 test("単文 API parse() は複文を拒否する", () => {
   expect(() => parseOne("SELECT * FROM APP100; SELECT * FROM APP200"))
     .toThrow(/単文のみ/);
+});
+
+test("SET @name は専用 ScalarExpr としてパースし、名前を小文字化する", () => {
+  const stmts = parseAll("SET @Rate = 2 + 3 * 4; SET @label = CONCAT('A', 'B'); SET @now = NOW()");
+  expect(stmts[0]).toMatchObject({
+    type: "SET_VARIABLE", name: "rate", expr: { type: "ARITH", op: "+" },
+  });
+  expect(stmts[1]).toMatchObject({ type: "SET_VARIABLE", name: "label", expr: { type: "STRING_FUNC" } });
+  expect(stmts[2]).toEqual({ type: "SET_VARIABLE", name: "now", expr: { type: "KINTONE_FUNC", name: "NOW" } });
+});
+
+test("変数参照を WHERE / UPDATE SET / ASSERT の直接値で受理する", () => {
+  const stmts = parseAll("SET @x = 10; UPDATE APP100 SET 金額 = @x WHERE $id = @x; ASSERT @x BETWEEN 1 AND 20");
+  const update = stmts[1] as UpdateStatement;
+  expect(update.assignments[0].value).toEqual({ type: "VARIABLE", name: "x" });
+  expect(update.where).toMatchObject({ type: "BINARY", right: { type: "VARIABLE", name: "x" } });
+  expect((stmts[2] as AssertStatement).left).toEqual({ type: "VARIABLE", name: "x" });
+});
+
+test("SET RHS のフィールド・他変数・NULL・スカラーサブクエリを拒否する", () => {
+  expect(() => parseOne("SET @x = field + 1")).toThrow(/フィールド参照/);
+  expect(() => parseOne("SET @x = @other")).toThrow(/他の変数/);
+  expect(() => parseOne("SET @x = NULL")).toThrow(/NULL/);
+  expect(() => parseOne("SET @x = (SELECT COUNT(*) FROM APP100)")).toThrow(/Phase 1b/);
 });
 
 // ----------------------------------------------------------------

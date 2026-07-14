@@ -1,5 +1,6 @@
 import { formatResolvedAppProfiles, normalizeSqlAppProfiles, type SqlRewriteSegment } from "../appProfiles";
 import { createAppResolutionContext, validateKsqlConfig } from "../config";
+import { parseSqlStatements } from "../../core/sql";
 
 function context() {
   return createAppResolutionContext(validateKsqlConfig({
@@ -22,6 +23,17 @@ function expectContiguousSegments(segments: SqlRewriteSegment[], normalizedLengt
 }
 
 describe("normalizeSqlAppProfiles: logical app scanner/rewrite", () => {
+  test("@profile とバッチ変数が同居しても profile だけを正規化する", () => {
+    const result = normalizeSqlAppProfiles(
+      "SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now",
+      "dev"
+    );
+    expect(result.normalizedSql).toContain("SET @now = NOW()");
+    expect(result.normalizedSql).toContain("APP100 WHERE 作成日時 = @now");
+    expect(parseSqlStatements(result.normalizedSql).map((s) => s.type))
+      .toEqual(["SET_VARIABLE", "SELECT"]);
+  });
+
   test("LAPP を mapped APP へ rewrite し logical binding を生成する", () => {
     const sql = "SELECT * FROM LAPP_ORDERS@prod";
     const result = normalizeSqlAppProfiles(sql, "dev", context());

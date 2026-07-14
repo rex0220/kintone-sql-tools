@@ -500,6 +500,8 @@ export function evalCaseWhenValue(
  */
 export function toKintoneValue(value: SqlValue, fieldType?: string): KintoneValue {
   switch (value.type) {
+    case "VARIABLE":
+      throw new DmlConvertError(`未解決のバッチ変数 @${value.name} があります`);
     case "STRING":
       return convertString(value.value, fieldType);
     case "NUMBER":

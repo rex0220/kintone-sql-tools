@@ -442,3 +442,14 @@ test("バッチ EXPLAIN: リテラルのみの ASSERT はサブクエリ行を�
   expect(text).toMatch(/実行時に条件評価/);
   expect(text).not.toMatch(/subquery/);
 });
+
+test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化できる", () => {
+  const plans = buildBatchExplainPlans(
+    "SET @min = 10; SELECT 顧客名 FROM APP100 WHERE 売上 > @min"
+  );
+  expect(plans.statements[0]).toMatchObject({
+    type: "SET_VARIABLE",
+    plan: expect.arrayContaining([expect.stringContaining("SET @min")]),
+  });
+  expect(plans.statements[1].plan.join("\n")).toContain("@min");
+});

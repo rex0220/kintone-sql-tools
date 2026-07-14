@@ -86,6 +86,9 @@ export class Lexer {
     // 一時テーブル識別子: #temp（# は先頭のみ有効）
     if (ch === "#") return this.readHashIdent(start);
 
+    // バッチ変数: @name
+    if (ch === "@") return this.readVariable(start);
+
     throw new LexError(
       `予期しない文字 「${ch}」 です`,
       this.pos,
@@ -256,6 +259,24 @@ export class Lexer {
       );
     }
     return this.makeToken(TokenKind.IDENT, value, start);
+  }
+
+  /** バッチ変数: @[A-Za-z_][A-Za-z0-9_]{0,63} */
+  private readVariable(start: number): Token {
+    this.pos++; // @
+    const first = this.input[this.pos] ?? "";
+    if (!/[A-Za-z_]/.test(first)) {
+      throw new LexError("「@」 の直後には英字または _ で始まる変数名が必要です", start, this.input);
+    }
+    this.pos++;
+    while (this.pos < this.input.length && /[A-Za-z0-9_]/.test(this.input[this.pos])) {
+      this.pos++;
+    }
+    const nameLength = this.pos - start - 1;
+    if (nameLength > 64) {
+      throw new LexError("変数名は 64 文字以内で指定してください", start, this.input);
+    }
+    return this.makeToken(TokenKind.VARIABLE, this.input.slice(start, this.pos), start);
   }
 
   // ----------------------------------------------------------

@@ -23,6 +23,8 @@ import {
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
 export const MAX_TEMP_TABLES = 16;
+/** バッチ内で定義できる変数の総数上限。現行の文数上限20では実質的な将来予約。 */
+export const MAX_BATCH_VARIABLES = 64;
 
 // ------------------------------------------------------------
 // エラー
@@ -78,6 +80,11 @@ export interface StatementAnalysis {
   targetAppId: number | null;
 }
 
+export interface BatchVariableAnalysis {
+  name: string;
+  referencedBy: number[];
+}
+
 /** バッチ全体の静的解析結果 */
 export interface BatchAnalysis {
   statementCount: number;
@@ -86,6 +93,9 @@ export interface BatchAnalysis {
   containsDml: boolean;
   /** バッチ内で CREATE される一時テーブル名（出現順。DROP 後の再 CREATE も含む） */
   tempTables: string[];
+  variables: BatchVariableAnalysis[];
+  /** 現在は未使用変数のみ。実行可否には影響しない。 */
+  warnings: string[];
   statements: StatementAnalysis[];
 }
 
@@ -119,6 +129,21 @@ function collectRefs(node: unknown, tempRefs: Set<string>, appIds: Set<number>):
   }
 }
 
+function collectVariableRefs(node: unknown, refs: Set<string>): void {
+  if (Array.isArray(node)) {
+    for (const v of node) collectVariableRefs(v, refs);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
+      refs.add(obj["name"]);
+      return;
+    }
+    for (const v of Object.values(obj)) collectVariableRefs(v, refs);
+  }
+}
+
 // ------------------------------------------------------------
 // 本体
 // ------------------------------------------------------------
@@ -141,6 +166,9 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   // 単文入力の CREATE / DROP TEMP TABLE は無意味なため拒否（仕様 §4.3）
   if (statements.length === 1) {
     const t = statements[0].type;
+    if (t === "SET_VARIABLE") {
+      throw new BatchAnalysisError("ArgumentError: SET variable requires a batch.", 0);
+    }
     if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
       const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
       throw new BatchAnalysisError(
@@ -154,6 +182,8 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const defined = new Map<string, number>();
   const createdOrder: string[] = [];
   const results: StatementAnalysis[] = [];
+  const variableDefs = new Map<string, { index: number; referencedBy: number[] }>();
+  const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
     const statementType = getStatementType(stmt);
@@ -162,6 +192,33 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     const refs = new Set<string>();
     const stmtAppIds = new Set<number>();
     const dependsOn = new Set<number>();
+    const variableRefs = new Set<string>();
+    collectVariableRefs(stmt, variableRefs);
+
+    for (const name of variableRefs) {
+      const def = variableDefs.get(name);
+      if (def === undefined) {
+        throw new BatchAnalysisError(
+          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
+          index
+        );
+      }
+      def.referencedBy.push(index);
+    }
+
+    if (stmt.type === "SET_VARIABLE") {
+      if (variableDefs.has(stmt.name)) {
+        throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
+      }
+      variableDefs.set(stmt.name, { index, referencedBy: [] });
+      variableOrder.push(stmt.name);
+      if (variableOrder.length > MAX_BATCH_VARIABLES) {
+        throw new BatchAnalysisError(
+          `ParseError: batch exceeds ${MAX_BATCH_VARIABLES} variables.`,
+          index
+        );
+      }
+    }
 
     if (stmt.type === "CREATE_TEMP_TABLE") {
       // AS 句の SELECT が他の一時テーブルを参照し得る（name は cteName ではないので拾われない）
@@ -246,11 +303,19 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   });
 
   const containsDml = results.some((r) => r.isDml);
+  const variables = variableOrder.map((name) => ({
+    name,
+    referencedBy: [...variableDefs.get(name)!.referencedBy],
+  }));
   return {
     statementCount: statements.length,
     isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
     containsDml,
     tempTables: createdOrder,
+    variables,
+    warnings: variables
+      .filter((v) => v.referencedBy.length === 0)
+      .map((v) => `variable @${v.name} is never used.`),
     statements: results,
   };
 }
