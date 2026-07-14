@@ -526,6 +526,69 @@ test("project: duplicate unqualified names fall back to qualified keys", () => {
   expect(columns).toEqual(["a.顧客ID", "b.顧客ID"]);
 });
 
+test("project: 明示列は 0 行でも AST 由来の列名を全 8 型で返す", () => {
+  const stmt = parseSelect(
+    "SELECT a, 'x', COUNT(*), SUM(a) * 2, a + 1, " +
+    "CASE WHEN a = '1' THEN 'yes' ELSE 'no' END, UPPER(a), " +
+    "(SELECT b FROM APP200) FROM APP100"
+  );
+  const expected = [
+    "a",
+    "'x'",
+    "COUNT(*)",
+    "SUM(a)*2",
+    "a+1",
+    "case",
+    "UPPER(a)",
+    "(subquery)",
+  ];
+
+  const empty = project([], stmt.columns);
+  const populated = project(
+    [{ a: "1", "COUNT(*)": "1", "SUM(a)*2": "2" }],
+    stmt.columns,
+    new Map([[7, "scalar"]])
+  );
+
+  expect(empty).toEqual({ rows: [], columns: expected });
+  expect(populated.columns).toEqual(expected);
+});
+
+test("project: 明示列の alias は 0 行でも列定義順に返す", () => {
+  const stmt = parseSelect(
+    "SELECT a AS f, 'x' AS lit, COUNT(*) AS agg, SUM(a) * 2 AS agg_arith, " +
+    "a + 1 AS arith, CASE WHEN a = '1' THEN 'yes' END AS c, " +
+    "UPPER(a) AS fn, (SELECT b FROM APP200) AS sq FROM APP100"
+  );
+
+  expect(project([], stmt.columns)).toEqual({
+    rows: [],
+    columns: ["f", "lit", "agg", "agg_arith", "arith", "c", "fn", "sq"],
+  });
+});
+
+test("project: 修飾名衝突の列名は 0 行と 1 行以上で一致する", () => {
+  const stmt = parseSelect(
+    "SELECT a.顧客ID, b.顧客ID FROM APP100 AS a INNER JOIN APP200 AS b ON a.顧客ID = b.顧客ID"
+  );
+  const nonEmpty = project(
+    [{ "a.顧客ID": "C001", "b.顧客ID": "C001", 顧客ID: "C001" }],
+    stmt.columns
+  );
+
+  expect(project([], stmt.columns).columns).toEqual(nonEmpty.columns);
+  expect(nonEmpty.columns).toEqual(["a.顧客ID", "b.顧客ID"]);
+});
+
+test.each([
+  "SELECT * FROM APP100",
+  "SELECT *, a FROM APP100",
+  "SELECT _p.* FROM APP100$明細",
+])("project: ワイルドカードを含む空結果は既存どおり列を推定しない — %s", (sql) => {
+  const stmt = parseSelect(sql);
+  expect(project([], stmt.columns)).toEqual({ rows: [], columns: [] });
+});
+
 // ----------------------------------------------------------------
 // runFullScan: 統合テスト
 // ----------------------------------------------------------------
