@@ -1,9 +1,21 @@
-ksql 配布パッケージ (v2.1.1)
+ksql 配布パッケージ (v2.1.2)
 
-1. ksql-plugin-v2.1.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.1.2.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.1.2: 集計算術式の alias 消失を修正(バグ修正)。
+- SUM(x) / COUNT(*) AS 平均 のように、集計算術式の末尾(や中間)が集計関数だと
+  AS alias が静かに捨てられ、出力列名・HAVING / ORDER BY・後段参照・UNION 結果列が
+  合成名(SUM(x)/COUNT(*))になっていた問題を修正。alias を式全体に保持します。
+- これにより HAVING 平均 / ORDER BY 平均 / CTE・一時テーブル後段の SELECT 平均 が
+  意図どおり alias で解決されます(従来は空参照で HAVING が全落ち・ORDER BY が無並び)。
+- 併せて、式の途中に置いた不正な alias(SUM(x) AS y - COUNT(*))を ParseError で
+  拒否します(従来は静かに受理し alias を無視)。
+- 末尾が数値リテラルの既存ケース(SUM(金額) * 1.1 AS x)・alias 無しの合成名出力・
+  単独集計列(SUM(a) AS x)は不変です。プラグインのクライアント側 SELECT にも反映。
+  詳細は CHANGELOG.md を参照。
 
 v2.1.1: 0 行 SELECT の列欠落を修正(バグ修正・後方互換)。
 - 明示列(例: SELECT a, b)の SELECT が結果 0 行のとき出力列を失い、空ソースの

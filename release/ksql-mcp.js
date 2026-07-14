@@ -31946,14 +31946,20 @@ var Parser = class {
     }
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      const aggCol = this.parseAggregateColumn(aggFunc);
+      const ref = this.parseAggregateRef(aggFunc);
       if (this.isArithOp(this.peek().kind)) {
-        const left = { type: "AGG_REF", func: aggCol.func, distinct: aggCol.distinct, arg: aggCol.arg };
-        const expr = this.continueAggArith(left);
-        const alias2 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
-        return { type: "ARITH_AGG_COL", expr, alias: alias2 };
+        const expr = this.continueAggArith(ref);
+        const alias3 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
+        return { type: "ARITH_AGG_COL", expr, alias: alias3 };
       }
-      return aggCol;
+      const alias2 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
+      return {
+        type: "AGGREGATE",
+        func: ref.func,
+        distinct: ref.distinct,
+        arg: ref.arg,
+        alias: alias2
+      };
     }
     if (this.peek().kind === "(" /* LPAREN */ && this.peekAt(1).kind === "SELECT" /* SELECT */) {
       this.advance();
@@ -32037,8 +32043,7 @@ var Parser = class {
     }
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      const aggCol = this.parseAggregateColumn(aggFunc);
-      return { type: "AGG_REF", func: aggCol.func, distinct: aggCol.distinct, arg: aggCol.arg };
+      return this.parseAggregateRef(aggFunc);
     }
     throw new ParseError("\u96C6\u8A08\u7B97\u8853\u5F0F\u306B\u306F\u96C6\u8A08\u95A2\u6570\u307E\u305F\u306F\u6570\u5024\u304C\u5FC5\u8981\u3067\u3059", this.peek());
   }
@@ -32329,7 +32334,8 @@ var Parser = class {
     const kind = this.peek().kind;
     return map2[kind] ?? null;
   }
-  parseAggregateColumn(func) {
+  /** 集計関数参照を読む。SELECT 列の alias は呼び出し側で式全体の後に処理する。 */
+  parseAggregateRef(func) {
     this.advance();
     this.expect("(" /* LPAREN */);
     const distinct = this.consume("DISTINCT" /* DISTINCT */);
@@ -32340,8 +32346,7 @@ var Parser = class {
       arg = this.parseArithAddSub();
     }
     this.expect(")" /* RPAREN */);
-    const alias = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
-    return { type: "AGGREGATE", func, distinct, arg, alias };
+    return { type: "AGG_REF", func, distinct, arg };
   }
   // ----------------------------------------------------------
   // FROM / JOIN
@@ -39977,7 +39982,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.1.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.1.2" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

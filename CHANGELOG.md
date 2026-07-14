@@ -2,6 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.1.2（2026-07-15）
+
+### 修正（バグ）
+
+- **集計算術式の末尾（や中間）が集計関数だと `AS alias` が静かに消える問題を修正**。`SUM(x) / COUNT(*) AS 平均` や `SUM(a) - SUM(b) AS diff` の `AS …` が右オペランドを読むパーサに横取りされて捨てられ、出力列名・`HAVING`/`ORDER BY`・CTE/一時テーブル後段参照・`UNION` 結果列が合成名（`SUM(x)/COUNT(*)`）になっていた。集計オペランドを alias 非消費で読む共通処理に統一し、`AS alias` は式全体を読み終えた後にだけ消費するよう修正した。
+  - これにより `HAVING 平均` / `ORDER BY 平均` / 後段 `SELECT 平均` が **alias で正しく解決**される（従来は空参照で `HAVING` が常に偽＝全落ち、`ORDER BY` が無並び替え）。
+  - 併せて、式の途中に置いた**不正な中間 alias**（`SUM(a) AS x - SUM(b)` / `FORMAT(SUM(a) AS x, '#')` / `SUM(c) + (SUM(a) AS x - SUM(b))`）を **`ParseError` で拒否**する（従来は静かに受理し alias を無視）。
+  - **不変**: 末尾が数値リテラルの既存ケース（`SUM(金額) * 1.1 AS x`）、alias 無しの合成名出力、単独集計列（`SUM(a) AS x`）。実行側（`GROUP BY` 集約）は変更なし。
+  - alias を付けない集計算術式の合成名を `HAVING`/`ORDER BY` で参照する場合は、記号を含むためバッククォートで囲む（例: `` ORDER BY `SUM(a)-SUM(b)` ``）。詳細は `docs/internal/ksql_agg_arith_alias_dropped_issue.md` / `..._fix_spec.md` を参照。
+
 ## v2.1.1（2026-07-14）
 
 ### 修正（バグ）

@@ -223,6 +223,89 @@ test("SELECT COUNT(*) GROUP BY（FULL_SCAN モード）", async () => {
   ]);
 });
 
+test("集計算術式: 末尾が集計関数でも alias と値を保持する", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ a: "10", b: "3", c: "2" }),
+      makeRecord({ a: "10", b: "2", c: "3" }),
+    ],
+  });
+
+  const result = await execute(
+    "SELECT SUM(a) - SUM(b) AS diff, SUM(a) / COUNT(*) AS ratio, " +
+    "SUM(DISTINCT a) - SUM(b) AS distinct_diff, " +
+    "SUM(c) + (SUM(a) - SUM(b)) AS nested, SUM(c) + -SUM(a) AS negated " +
+    "FROM APP77100",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["diff", "ratio", "distinct_diff", "nested", "negated"]);
+  expect(result.rows).toEqual([{
+    diff: "15",
+    ratio: "10",
+    distinct_diff: "5",
+    nested: "20",
+    negated: "-15",
+  }]);
+});
+
+test("集計算術式 alias: HAVING と ORDER BY が alias 値で解決される", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ 種別: "A", a: "10", b: "3" }),
+      makeRecord({ 種別: "B", a: "5", b: "10" }),
+      makeRecord({ 種別: "C", a: "20", b: "1" }),
+    ],
+  });
+
+  const result = await execute(
+    "SELECT 種別, SUM(a) - SUM(b) AS diff FROM APP77101 " +
+    "GROUP BY 種別 HAVING diff > 0 ORDER BY diff DESC",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["種別", "diff"]);
+  expect(result.rows).toEqual([
+    { 種別: "C", diff: "19" },
+    { 種別: "A", diff: "7" },
+  ]);
+  expect(client.getCalls[0].fields).not.toContain("diff");
+});
+
+test("集計算術式 alias: CTE 後段から alias で参照できる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77102: [makeRecord({ 種別: "A", a: "10", b: "3" })],
+    },
+  });
+
+  const result = await execute(
+    "WITH g AS (SELECT 種別, SUM(a) - SUM(b) AS diff FROM APP77102 GROUP BY 種別) " +
+    "SELECT diff FROM g",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["diff"]);
+  expect(result.rows).toEqual([{ diff: "7" }]);
+});
+
+test("集計算術式 alias: UNION の左辺列名として使われる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77103: [makeRecord({ a: "10", b: "3" })],
+      77104: [makeRecord({ value: "9" })],
+    },
+  });
+
+  const result = await execute(
+    "SELECT SUM(a) - SUM(b) AS diff FROM APP77103 UNION ALL SELECT value FROM APP77104",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["diff"]);
+  expect(result.rows).toEqual([{ diff: "7" }, { diff: "9" }]);
+});
+
 test("SELECT DISTINCT（FULL_SCAN モード）", async () => {
   const records = [
     makeRecord({ 種別: "B" }),

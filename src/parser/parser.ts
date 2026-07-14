@@ -721,14 +721,20 @@ export class Parser {
     // 後続に算術演算子があれば → ARITH_AGG_COL (例: SUM(金額) * 1.1)
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      const aggCol = this.parseAggregateColumn(aggFunc);
+      const ref = this.parseAggregateRef(aggFunc);
       if (this.isArithOp(this.peek().kind)) {
-        const left: AggOperand = { type: "AGG_REF", func: aggCol.func, distinct: aggCol.distinct, arg: aggCol.arg };
-        const expr = this.continueAggArith(left);
+        const expr = this.continueAggArith(ref);
         const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
         return { type: "ARITH_AGG_COL", expr, alias } satisfies AggArithColumn;
       }
-      return aggCol;
+      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return {
+        type: "AGGREGATE",
+        func: ref.func,
+        distinct: ref.distinct,
+        arg: ref.arg,
+        alias,
+      } satisfies AggregateColumn;
     }
 
     // スカラーサブクエリ: ( SELECT ... ) [AS alias]
@@ -848,8 +854,7 @@ export class Parser {
     // 集計関数
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      const aggCol = this.parseAggregateColumn(aggFunc);
-      return { type: "AGG_REF", func: aggCol.func, distinct: aggCol.distinct, arg: aggCol.arg } satisfies AggregateRef;
+      return this.parseAggregateRef(aggFunc);
     }
     throw new ParseError("集計算術式には集計関数または数値が必要です", this.peek());
   }
@@ -1194,7 +1199,8 @@ export class Parser {
     return map[kind] ?? null;
   }
 
-  private parseAggregateColumn(func: AggregateFunc): AggregateColumn {
+  /** 集計関数参照を読む。SELECT 列の alias は呼び出し側で式全体の後に処理する。 */
+  private parseAggregateRef(func: AggregateFunc): AggregateRef {
     this.advance(); // 関数名トークンを消費
     this.expect(TokenKind.LPAREN);
 
@@ -1208,9 +1214,7 @@ export class Parser {
     }
 
     this.expect(TokenKind.RPAREN);
-    const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-
-    return { type: "AGGREGATE", func, distinct, arg, alias };
+    return { type: "AGG_REF", func, distinct, arg };
   }
 
   // ----------------------------------------------------------
