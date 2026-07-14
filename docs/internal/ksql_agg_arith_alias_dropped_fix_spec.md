@@ -2,9 +2,12 @@
 
 - 作成日: 2026-07-15
 - 対象課題: [ksql_agg_arith_alias_dropped_issue.md](./ksql_agg_arith_alias_dropped_issue.md)（codex レビュー済み R2）
-- ステータス: **仕様案（codex 実装レビュー前）**
+- ステータス: **仕様案 R2（codex 仕様レビューの条件付き承認を反映 → Codex 実装へ）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
-- SemVer: **バグ修正**。alias が効くようになる挙動変更＋中間 alias を新たに拒否（従来は誤受理）。後者は「これまで通っていた不正 SQL がエラーになる」ため、厳密には**互換性のある不正入力の是正**。→ 版数は実装後に確定（minor 相当を想定）。
+- 更新履歴:
+  - 2026-07-15 R1: 初版
+  - 2026-07-15 R2: codex 仕様レビュー反映（受入テストを集計関数始まりの形へ差し替え＝括弧/単項マイナス/中間 alias を実際に修正経路で検証／SemVer を patch v2.1.2 に訂正／合成名参照のバッククォート形式を明示）
+- SemVer: **バグ修正 → v2.1.2（patch）**。不正構文（中間 alias）の**誤受理を正す**バグ修正として CHANGELOG に明記する。alias が効くようになるのは既存の壊れた挙動の是正。中間 alias の新規拒否を厳密に互換性破壊とみなすなら major だが、**minor ではない**（minor は後方互換の機能追加が前提）。
 
 ## 1. 目的とスコープ
 
@@ -23,7 +26,13 @@
 | ケース | 出力キー | 参照 |
 |---|---|---|
 | alias あり（`… AS diff`） | `diff` | `HAVING diff` / `ORDER BY diff` / 後段 `SELECT diff` が `diff` で解決 |
-| alias なし | 合成名（`aggArithDefaultKey`、例 `SUM(a)-SUM(b)`）※従来どおり | 合成名で参照 |
+| alias なし | 合成名（`aggArithDefaultKey`、例 `SUM(a)-SUM(b)`）※従来どおり | 合成名を**バッククォート**で参照 |
+
+- alias を付けない場合、出力キーは合成名（例 `SUM(a)-SUM(b)`）。これを `HAVING`/`ORDER BY`/後段で参照するときは、記号を含む識別子のため**バッククォートで囲む**:
+  ```sql
+  ORDER BY `SUM(a)-SUM(b)`
+  ```
+  （alias を付ければ `ORDER BY diff` で済む。バッククォート参照は alias 無し時の手段。）
 
 - **`ARITH_AGG_COL` に合成名キーは併記しない。** 根拠: 現行文法では **`HAVING` に集計算術式そのものを書けない**（[parseFieldValue:1499-1511](../../src/parser/parser.ts#L1499) の集計分岐は `func(識別子|*)` の**単一集計のみ**を合成名化する。`SUM(a) - SUM(b)` を `HAVING` 左辺に直接は書けない）。したがって「合成名でも alias でも引ける」二重解決は不要で、内部キー追加による別の挙動変化（列衝突・UNION 列順など）も避けられる。
 - plain `AGGREGATE` の合成名併記（[process.ts:238](../../src/engine/process.ts#L238)）は既存の別修正（alias 付き集計で HAVING が常に偽になる問題）由来で、そのまま維持。`ARITH_AGG_COL` には拡張しない。
@@ -96,16 +105,22 @@ if (aggFunc !== null) {
 - **`AS` は SELECT 列全体を読み終えた後だけ**消費する（§3.2 の 2 箇所：単独集計列の後、集計算術式全体の後）。
 - オペランド解析中（`parseAggregateRef` / `continueAggArith` / 括弧内 / 文字列関数引数内）は `AS` を消費しない。その結果、途中に現れた `AS` は次の `expect`/分岐で**未消費のまま残り、構文エラーになる**。具体例:
   - `SUM(a) AS x - SUM(b)`: 先頭 `parseAggregateRef` が `SUM(a)` を読み、`AS` は算術演算子でないので単独集計列と判定 → `AS x` を alias として読む → 続く `- SUM(b)` が SELECT 列の後の余剰トークンとなり **ParseError**。
-  - `FORMAT(SUM(a) AS x, '#')`: 関数引数内で `parseAggregateRef` が `SUM(a)` を読み、`AS` は算術演算子でないので集計式終了 → 引数の後に `,` を期待するが `AS` を検出し **ParseError**。
-  - `(SUM(a) AS x - SUM(b))`: 括弧内で `SUM(a)` を読んだ後 `)` を期待するが `AS` を検出し **ParseError**。
+  - `FORMAT(SUM(a) AS x, '#') AS y`: 関数引数内で `parseAggregateRef` が `SUM(a)` を読み、`AS` は算術演算子でないので集計式終了 → 引数の後に `,` を期待するが `AS` を検出し **ParseError**。
+  - `SUM(c) + (SUM(a) AS x - SUM(b)) AS d`: 括弧内で `parseAggregateRef` が `SUM(a)` を読んだ後 `)` を期待するが `AS` を検出し **ParseError**（列先頭が集計関数なので `parseAggPrimary` の括弧再帰を通る。列先頭が `(` の場合は汎用算術経路のため対象外）。
 - いずれも「不正な中間 alias を静かに受理」から「明示的な構文エラー」へ変わる（現状 fail=誤受理 → 修正後=ParseError）。
 
 ## 4. 受入テスト（修正前 fail → 修正後 pass）
 
 - **通常ケース**: `SELECT SUM(a) - SUM(b) AS diff FROM APP` の結果列名が `diff`（現状は `SUM(a)-SUM(b)`）。`SUM(a) / COUNT(*) AS r` も同様。
 - **DISTINCT**: `SUM(DISTINCT a) - SUM(b) AS d` で alias が効き、DISTINCT が保持される。
-- **括弧・単項マイナス**: `(SUM(a) - SUM(b)) * 2 AS d`、`-SUM(a) AS n` で alias が効き、括弧内・単項マイナス配下の集計 alias を横取りしない。
-- **中間 alias 拒否**: `SUM(a) AS x - SUM(b)` / `FORMAT(SUM(a) AS x, '#')` / `(SUM(a) AS x - SUM(b))` が **ParseError**（現状は誤受理）。
+- **括弧・単項マイナス（集計関数始まりで修正経路を通す）**: 列先頭が集計関数のとき、`parseAggPrimary` の括弧/単項マイナス再帰を通る。alias が効くことを次で確認:
+  - `SUM(c) + (SUM(a) - SUM(b)) AS d` … 括弧内オペランドの alias 横取りなし。
+  - `SUM(c) + -SUM(a) AS n` … 単項マイナス配下のオペランドの alias 横取りなし。
+  > 注: SELECT 列が **`(` や `-` で始まる**場合（`(SUM(a) - SUM(b)) * 2 AS d`、`-SUM(a) AS n`）は、列入口が汎用算術経路（[parser.ts:750-757](../../src/parser/parser.ts#L750) の `parseArithAddSub`）へ進み、`parseAggPrimary`/`parseAggregateRef` を通らない（現状も ParseError で誤受理ではない）。**本修正のスコープ外**。テストは上記の集計関数始まりの形で行う。
+- **中間 alias 拒否**: 次が **ParseError**（現状は誤受理 → 修正後エラー。いずれも集計関数始まりで修正経路を通る）:
+  - `SUM(c) + (SUM(a) AS x - SUM(b)) AS d` … 括弧内オペランドの中間 alias。
+  - `SUM(a) AS x - SUM(b)` … 左端直後の中間 alias（単独集計列として `AS x` を読んだ後の余剰 `- SUM(b)` で構文エラー）。
+  - `FORMAT(SUM(a) AS x, '#') AS y` … 文字列関数引数内の集計式の中間 alias（引数後に `,`/`)` を期待して `AS` で構文エラー）。
 - **HAVING（alias 参照）**: `SELECT 種別, SUM(a)-SUM(b) AS diff FROM APP GROUP BY 種別 HAVING diff > 0` がしきい値で正しく絞り込む（現状は `row["diff"]` 空で常に偽側）。
 - **ORDER BY（alias 参照）**: `… ORDER BY diff DESC` が値順に並ぶ（現状は全行同値）。
 - **CTE / 一時テーブル後段**: `WITH g AS (SELECT 種別, SUM(a)-SUM(b) AS diff FROM APP GROUP BY 種別) SELECT diff FROM g` / `CREATE TEMP TABLE #g AS …; SELECT diff FROM #g` が値を返す。
