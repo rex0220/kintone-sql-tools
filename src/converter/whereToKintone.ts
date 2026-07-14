@@ -15,6 +15,7 @@
 // ============================================================
 
 import { pushDownNot } from "../engine/pushDownNot";
+import { isLike } from "../core/like";
 import type {
   WhereExpr,
   BinaryExpr,
@@ -55,6 +56,11 @@ export function whereToKintone(expr: WhereExpr): string {
 // ------------------------------------------------------------
 
 function convertBinary(expr: BinaryExpr): string {
+  if (isLike(expr)) {
+    throw new KintoneQueryError(
+      "LIKE / NOT LIKE は kintone クエリに変換できません（常に JS 評価が必要です）"
+    );
+  }
   const left = convertField(expr.left);
   const op = convertOp(expr.op);
   const right = convertValue(expr.right, expr.op);

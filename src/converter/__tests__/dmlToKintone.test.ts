@@ -143,11 +143,29 @@ test("DELETE 101件 → DELETE が 2バッチに分割", () => {
 // WHERE 変換（DML 側の確認）
 // ----------------------------------------------------------------
 
-test("UPDATE WHERE LIKE → kintone クエリ", () => {
+test("UPDATE WHERE ワイルドカード LIKE → 安全のため拒否", () => {
   const stmt = parse(
     "UPDATE APP100 SET f = 'v' WHERE 件名 LIKE '%報告%'"
   ) as UpdateStatement;
-  expect(updateToGetQuery(stmt).query).toBe('件名 like "%報告%"');
+  expect(() => updateToGetQuery(stmt)).toThrow(DmlConvertError);
+  expect(() => updateToGetQuery(stmt)).toThrow("SELECT で対象レコード番号を確認");
+});
+
+test("算術式 UPDATE / DELETE もワイルドカード LIKE を拒否", () => {
+  const update = parse(
+    "UPDATE APP100 SET 金額 = 金額 * 2 WHERE 件名 LIKE '報告%'"
+  ) as UpdateStatement;
+  const del = parse("DELETE FROM APP100 WHERE 件名 NOT LIKE '_一時'") as DeleteStatement;
+  expect(() => updateToGetQueryForArith(update)).toThrow(DmlConvertError);
+  expect(() => deleteToGetQuery(del)).toThrow(DmlConvertError);
+});
+
+test("UPDATE WHERE ワイルドカードなし LIKE も安全のため拒否", () => {
+  const stmt = parse(
+    "UPDATE APP100 SET f = 'v' WHERE 件名 LIKE '報告'"
+  ) as UpdateStatement;
+  expect(() => updateToGetQuery(stmt)).toThrow(DmlConvertError);
+  expect(() => updateToGetQuery(stmt)).toThrow("親レコード DML には JS 評価経路がない");
 });
 
 test("UPDATE WHERE IN → kintone クエリ", () => {

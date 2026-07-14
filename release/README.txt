@@ -1,9 +1,38 @@
-ksql 配布パッケージ (v1.13.2)
+ksql 配布パッケージ (v2.0.0)
 
-1. ksql-plugin-v1.13.2.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.0.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.0.0: LIKE を JavaScript 評価のみに統一(Breaking)。
+- LIKE / NOT LIKE はワイルドカードの有無にかかわらず kintone へ送らず、
+  JavaScript で評価します。ワイルドカードなしは kSQL 独自の部分一致です。
+- LIKE を含む SELECT は FULL_SCAN です。一致件数にかかわらず全走査件数が
+  maxRecords に到達し得ます。既定は上限エラーで、truncate を選ぶと上限以降の
+  一致行を欠落させる可能性があります。
+- 通常の親 UPDATE / DELETE では全 LIKE を拒否します。上限エラーのない SELECT で
+  対象レコード番号を確認し、IN / 完全一致で対象を指定してください。
+  サブテーブル DML は従来どおり JavaScript で評価します。
+
+v1.14.0: WHERE 右辺フィールド比較の誤結果と LIKE のモード依存を修正(挙動変更・安全上の制限)。
+- WHERE 右辺のフィールド参照・文字列関数が数値化されて文字列比較が
+  誤っていた問題を修正(例: 文字列 = 文字列 が一致しない、JOIN の
+  != 突き合わせで完全一致行が残る)。右辺も文字列のまま比較します。
+  数値フィールド同士・算術式(税込 = 金額 * 1.1)は従来どおりです。
+- ワイルドカード(% / _)付き LIKE / NOT LIKE を kintone へ送らず
+  JavaScript で言語仕様どおり(田% は「田で始まる」等)評価するよう
+  統一。従来は実行モード(SIMPLE / FULL_SCAN)で同じ SQL の結果が
+  食い違うことがありました。該当 SELECT は FULL_SCAN(全件取得)に
+  なります。部分一致が必要な場合は %会社% のように明示してください。
+- 安全上の制限: 通常の親レコードへの UPDATE / DELETE で
+  ワイルドカード付き LIKE を拒否(誤更新・誤削除防止)。先に SELECT で
+  対象レコード番号を確認し、IN / 完全一致で対象を指定してください。
+  サブテーブル DML は JavaScript 評価のため従来どおり使用できます。
+- これらの修正はプラグインにもバンドルされており、クライアント側の
+  WHERE 評価・EXPLAIN に反映されます。
+- 詳細は CHANGELOG.md と
+  docs/internal/ksql_where_rhs_field_and_like_mode_divergence_issue.md を参照。
 
 v1.13.2: CLI / MCP の表示修正(プラグインは EXPLAIN 表示のみ変更)。
 - 単文 --dry-run(EXPLAIN)のプラン出力に内部 mapped アプリ表記が

@@ -33308,6 +33308,29 @@ function negateOp(op) {
   }
 }
 
+// src/core/like.ts
+function likePatternHasWildcard(pattern) {
+  return pattern.includes("%") || pattern.includes("_");
+}
+function isLike(where) {
+  return where.type === "BINARY" && (where.op === "LIKE" || where.op === "NOT_LIKE");
+}
+function whereHasLike(where) {
+  if (where === null) return false;
+  if (isLike(where)) return true;
+  switch (where.type) {
+    case "LOGICAL":
+      return whereHasLike(where.left) || whereHasLike(where.right);
+    case "NOT":
+    case "GROUP":
+      return whereHasLike(where.expr);
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS":
+      return false;
+  }
+}
+
 // src/converter/whereToKintone.ts
 function whereToKintone(expr) {
   switch (expr.type) {
@@ -33326,6 +33349,11 @@ function whereToKintone(expr) {
   }
 }
 function convertBinary(expr) {
+  if (isLike(expr)) {
+    throw new KintoneQueryError(
+      "LIKE / NOT LIKE \u306F kintone \u30AF\u30A8\u30EA\u306B\u5909\u63DB\u3067\u304D\u307E\u305B\u3093\uFF08\u5E38\u306B JS \u8A55\u4FA1\u304C\u5FC5\u8981\u3067\u3059\uFF09"
+    );
+  }
   const left = convertField(expr.left);
   const op = convertOp(expr.op);
   const right = convertValue(expr.right, expr.op);
@@ -33451,22 +33479,22 @@ function resolveSelectMode(stmt) {
   if (stmt.columns.some(
     (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)
   )) return "FULL_SCAN";
-  if (hasWhereFunc(stmt.where)) return "FULL_SCAN";
+  if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME")) return "FULL_SCAN";
   return "SIMPLE";
 }
-function hasWhereFunc(where) {
+function whereRequiresJsEval(where) {
   if (where === null) return false;
   switch (where.type) {
     case "BINARY":
-      return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY";
+      return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY" || isLike(where);
     case "NULL_CHECK":
       return isFunc(where.field);
     case "LOGICAL":
-      return hasWhereFunc(where.left) || hasWhereFunc(where.right);
+      return whereRequiresJsEval(where.left) || whereRequiresJsEval(where.right);
     case "NOT":
     case "GROUP":
-      return hasWhereFunc(where.expr);
+      return whereRequiresJsEval(where.expr);
     case "EXISTS":
       return true;
   }
@@ -33502,7 +33530,7 @@ function selectToKintoneParams(stmt) {
 }
 function selectToFetchAllParams(stmt, appId) {
   const queryParts = [];
-  if (stmt.where !== null && stmt.joins.length === 0 && !hasWhereFunc(stmt.where)) {
+  if (stmt.where !== null && stmt.joins.length === 0 && !whereRequiresJsEval(stmt.where)) {
     queryParts.push(whereToKintone(stmt.where));
   }
   return {
@@ -34240,6 +34268,8 @@ function resolveValue(value, row) {
     case "SCALAR_SUBQUERY":
       return value.resolved;
     case "ARITH_VALUE":
+      if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
+      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
       return String(evalArithExpr(value.expr, row));
     case "CASE_VALUE":
       return evalCaseWhen(value.expr, row);
@@ -34283,7 +34313,7 @@ function resolveKintoneFunc(name) {
 var likeRegexCache = /* @__PURE__ */ new Map();
 var LIKE_REGEX_CACHE_MAX = 200;
 function matchLike(value, pattern) {
-  if (!pattern.includes("%") && !pattern.includes("_")) {
+  if (!likePatternHasWildcard(pattern)) {
     return value.includes(pattern);
   }
   let regex = likeRegexCache.get(pattern);
@@ -34308,6 +34338,12 @@ function matchLike(value, pattern) {
 }
 
 // src/converter/dmlToKintone.ts
+function assertDmlWhereIsSafe(where) {
+  if (!whereHasLike(where)) return;
+  throw new DmlConvertError(
+    "UPDATE / DELETE \u306E WHERE \u306B LIKE / NOT LIKE \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002LIKE \u306F kSQL \u306E\u610F\u5473\u8AD6\u306B\u5F93\u3063\u3066 JS \u3067\u8A55\u4FA1\u3059\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\u304C\u3001\u89AA\u30EC\u30B3\u30FC\u30C9 DML \u306B\u306F JS \u8A55\u4FA1\u7D4C\u8DEF\u304C\u306A\u3044\u305F\u3081\u3001\u5B89\u5168\u4E0A\u62D2\u5426\u3057\u307E\u3057\u305F\u3002SELECT \u3067\u5BFE\u8C61\u30EC\u30B3\u30FC\u30C9\u756A\u53F7\u3092\u78BA\u8A8D\u3057\u3001IN \u307E\u305F\u306F\u5B8C\u5168\u4E00\u81F4\u3067\u5BFE\u8C61\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+  );
+}
 var USER_TYPES = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
 var ARRAY_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
 function insertToPostBatches(stmt, fieldTypes = /* @__PURE__ */ new Map()) {
@@ -34332,6 +34368,7 @@ function buildInsertRecord(fields, row, fieldTypes) {
   return record2;
 }
 function updateToGetQuery(stmt) {
+  assertDmlWhereIsSafe(stmt.where);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -34360,6 +34397,7 @@ function hasArithAssignment(stmt) {
   );
 }
 function updateToGetQueryForArith(stmt) {
+  assertDmlWhereIsSafe(stmt.where);
   const refFields = /* @__PURE__ */ new Set();
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
@@ -34505,6 +34543,7 @@ function resolveArithOperand(operand, raw) {
   return n;
 }
 function deleteToGetQuery(stmt) {
+  assertDmlWhereIsSafe(stmt.where);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -34789,6 +34828,7 @@ async function resolveDmlTargetIds(getRecords, app, query, options) {
 function extractTableCondition(where, tableAlias) {
   switch (where.type) {
     case "BINARY":
+      if (isLike(where)) return null;
       if (!isSingleTableField(where.left, tableAlias)) return null;
       if (!isPushDownableRight(where.right)) return null;
       return where;
@@ -34828,7 +34868,7 @@ function isPushDownableRight(value) {
 function referencesOnlyTable(expr, tableAlias) {
   switch (expr.type) {
     case "BINARY":
-      return isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
+      return !isLike(expr) && isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
     case "NULL_CHECK":
       return isSingleTableField(expr.field, tableAlias);
     case "LOGICAL":
@@ -37387,8 +37427,10 @@ function collectFullScanReasons(stmt) {
     r.push("\u96C6\u8A08\u95A2\u6570\uFF08COUNT / SUM \u7B49\uFF09\u3042\u308A");
   if (stmt.columns.some((c) => c.type === "SCALAR_SUBQUERY_COL"))
     r.push("SELECT \u5217\u306B\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA");
-  if (hasWhereFunc(stmt.where))
+  if (whereRequiresJsEval(stmt.where))
     r.push("WHERE \u53E5\u306B JS \u8A55\u4FA1\u304C\u5FC5\u8981\u306A\u5F0F");
+  if (whereHasLike(stmt.where))
+    r.push("LIKE \u306F\u5E38\u306B JS \u8A55\u4FA1\u306E\u305F\u3081\u5168\u4EF6\u53D6\u5F97");
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME"))
     r.push("ORDER BY \u306B\u5F0F");
   return r;
@@ -39661,7 +39703,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "1.13.2" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.0.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

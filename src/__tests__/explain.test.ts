@@ -72,6 +72,12 @@ test("EXPLAIN FULL_SCAN — WHERE 関数", async () => {
   expect(plan.find((l) => l.includes("reason"))).toContain("WHERE 句に JS 評価が必要な式");
 });
 
+test("EXPLAIN FULL_SCAN — LIKE はワイルドカードの有無にかかわらず JS 評価理由を表示", async () => {
+  const plan = await explain("EXPLAIN SELECT * FROM APP100 WHERE 件名 LIKE '報告'");
+  expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
+  expect(plan.find((l) => l.includes("reason"))).toContain("LIKE は常に JS 評価のため全件取得");
+});
+
 test("EXPLAIN FULL_SCAN — JOIN", async () => {
   const plan = await explain("EXPLAIN SELECT * FROM APP100 JOIN APP200 ON APP100.顧客ID = APP200.顧客ID");
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");

@@ -16,7 +16,7 @@ import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
-import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, hasWhereFunc, SelectMode } from "./converter/selectToKintone";
+import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
   insertToPostBatches,
@@ -40,6 +40,7 @@ import {
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
 import { extractTableCondition } from "./core/optimization/wherePredicatePushdown";
+import { whereHasLike } from "./core/like";
 import {
   runFullScan,
   project,
@@ -3156,8 +3157,10 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
     r.push("集計関数（COUNT / SUM 等）あり");
   if (stmt.columns.some((c) => c.type === "SCALAR_SUBQUERY_COL"))
     r.push("SELECT 列にスカラーサブクエリ");
-  if (hasWhereFunc(stmt.where))
+  if (whereRequiresJsEval(stmt.where))
     r.push("WHERE 句に JS 評価が必要な式");
+  if (whereHasLike(stmt.where))
+    r.push("LIKE は常に JS 評価のため全件取得");
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME"))
     r.push("ORDER BY に式");
   return r;

@@ -104,6 +104,33 @@ test("applyFilter: null は全件通過", () => {
   expect(applyFilter(filterRows, null)).toHaveLength(3);
 });
 
+test("applyFilter: 右辺フィールド参照を文字列のまま比較する", () => {
+  const stmt = parseSelect("SELECT * FROM APP100 WHERE 左 = 右");
+  expect(applyFilter([{ 左: "りんご", 右: "りんご" }, { 左: "01", 右: "01" }], stmt.where)).toHaveLength(2);
+});
+
+test("applyFilter: 右辺文字列関数を文字列のまま比較する", () => {
+  const stmt = parseSelect("SELECT * FROM APP100 WHERE 略称 = REPLACE(正式名, '株式会社', '')");
+  const rows = [{ 略称: "テスト", 正式名: "株式会社テスト" }];
+  expect(applyFilter(rows, stmt.where)).toHaveLength(1);
+});
+
+test("applyFilter: 右辺算術式は従来どおり数値評価する", () => {
+  const stmt = parseSelect("SELECT * FROM APP100 WHERE 税込 = 金額 * 1.1");
+  expect(applyFilter([{ 税込: "1100", 金額: "1000" }], stmt.where)).toHaveLength(1);
+});
+
+test.each([
+  ["田中", "田%", true],
+  ["山田", "%田", true],
+  ["山田中", "%田%", true],
+  ["A12", "A__", true],
+  ["てすと２０", "すと%", false],
+])("applyFilter: LIKE %s LIKE %s → %s", (value, pattern, expected) => {
+  const stmt = parseSelect(`SELECT * FROM APP100 WHERE 文字列 LIKE '${pattern}'`);
+  expect(applyFilter([{ 文字列: value }], stmt.where)).toHaveLength(expected ? 1 : 0);
+});
+
 // ----------------------------------------------------------------
 // applyGroupBy
 // ----------------------------------------------------------------

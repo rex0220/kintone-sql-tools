@@ -25,6 +25,7 @@ import type {
   TableRef,
 } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
+import { isLike } from "../core/like";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -68,24 +69,24 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
     c.type === "SCALAR_SUBQUERY_COL" ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr))
   )) return "FULL_SCAN";
-  if (hasWhereFunc(stmt.where)) return "FULL_SCAN";
+  if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME")) return "FULL_SCAN";
   return "SIMPLE";
 }
 
 /**
- * WHERE 式のいずれかの左辺に関数（FUNC_FIELD）が含まれるかを再帰的に判定する。
- * 含まれる場合は kintone クエリに変換できないため FULL_SCAN が必要。
+ * WHERE 式に、kintone へ安全に押し下げられず JS 評価が必要な要素があるかを判定する。
+ * 左辺の関数・算術式、右辺式・サブクエリ、LIKE / NOT LIKE などを再帰的に検出する。
  */
-export function hasWhereFunc(where: WhereExpr | null): boolean {
+export function whereRequiresJsEval(where: WhereExpr | null): boolean {
   if (where === null) return false;
   switch (where.type) {
     case "BINARY":
-      return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY";
+      return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY" || isLike(where);
     case "NULL_CHECK": return isFunc(where.field);
-    case "LOGICAL":   return hasWhereFunc(where.left) || hasWhereFunc(where.right);
+    case "LOGICAL":   return whereRequiresJsEval(where.left) || whereRequiresJsEval(where.right);
     case "NOT":
-    case "GROUP":     return hasWhereFunc(where.expr);
+    case "GROUP":     return whereRequiresJsEval(where.expr);
     case "EXISTS":    return true; // 常に FULL_SCAN
   }
 }
@@ -158,7 +159,7 @@ export function selectToFetchAllParams(
   // → 全件取得して JS 側でフィルタ（applyFilter が FULL_SCAN パイプラインで実行される）
   // JOIN ありでは複数テーブル条件を単一アプリへ安全に押し込めないため、
   // API 側 WHERE 変換は行わず JS 側フィルタに一任する。
-  if (stmt.where !== null && stmt.joins.length === 0 && !hasWhereFunc(stmt.where)) {
+  if (stmt.where !== null && stmt.joins.length === 0 && !whereRequiresJsEval(stmt.where)) {
     queryParts.push(whereToKintone(stmt.where));
   }
 

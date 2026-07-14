@@ -2,6 +2,37 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.0.0（2026-07-14）
+
+### Breaking
+
+- **すべての`LIKE` / `NOT LIKE`をJavaScript評価へ統一**。ワイルドカードなしのLIKEもkintoneの単語検索へ委譲せず、kSQL独自の部分一致（`includes`）として評価する。同じSQLが実行モードによって異なる結果を返す可能性を解消した。
+- LIKEを含むSELECTは常にFULL_SCANになる。LIKE以外の安全な絞り込み条件をANDで併記しても、現時点ではWHERE全体を押し下げず全件取得する。大規模アプリでは一致件数にかかわらず全走査件数が`maxRecords`へ到達し、既定の`onLimitReached = "error"`では明示的に停止する。`truncate`を選ぶと上限以降の一致行を欠落させる可能性がある。
+- **通常の親レコードに対する`UPDATE` / `DELETE`では、すべてのLIKEを拒否**。親DMLにはkSQLのLIKEをJavaScript評価する経路がないため、安全上fail-closedとする。上限エラーのないSELECTで対象レコード番号を確認し、`IN`または完全一致条件へ移行する。サブテーブルDMLは従来どおりJavaScriptで評価する。
+
+### 変更
+
+- `whereToKintone`はすべてのLIKE変換を拒否し、JOINのWHERE押し下げからもLIKEを除外する。
+- EXPLAINはLIKE起因のFULL_SCANを「LIKEは常にJS評価のため全件取得」と表示する。
+- 安全なAND述語だけをプレフィルタとして押し下げる最適化は、包含性を検証してからv2.xで別途追加する。
+
+## v1.14.0（2026-07-14）
+
+### Safety（互換性に影響する安全上の制限）
+
+- **通常の親レコードに対する`UPDATE` / `DELETE`で、`%`または`_`を含む`LIKE` / `NOT LIKE`を拒否**。
+  kintoneの`like`はSQLワイルドカードではなく単語検索であり、従来は意図しないレコードを更新・削除する恐れがあったため、安全上エラーに変更した。先に`SELECT`で対象レコード番号を確認し、`IN`または完全一致条件で対象を指定する。サブテーブルDMLはJavaScriptでWHEREを評価するため従来どおり使用できる。
+
+### 修正（バグ）
+
+- **WHERE右辺のフィールド参照・文字列関数が数値化され、文字列比較が誤結果になる問題を修正**。`文字列 = 文字列`、JOIN後の文字列突き合わせ、右辺`REPLACE(...)`を文字列のまま評価する。真の算術式と`=` / `!=`の文字列一致セマンティクスは変更しない。
+- **ワイルドカード付きLIKEの結果がSIMPLEとFULL_SCANで異なる問題を修正**。`%` / `_`を含むLIKEはkintoneへ押し下げず、JavaScriptで言語仕様どおり評価する。JOINのWHERE押し下げからも除外する。
+
+### 変更
+
+- ワイルドカード付きLIKEを含むSELECTはFULL_SCANになる。前方一致を含め全件取得が必要になる場合があり、従来より取得量が増える可能性がある。
+- EXPLAINのFULL_SCAN理由に、ワイルドカード付きLIKEなど「WHERE句にJS評価が必要な式」を表示する。
+
 ## v1.13.2（2026-07-12）
 
 ### 修正（バグ）
