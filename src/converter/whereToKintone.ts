@@ -26,6 +26,7 @@ import type {
   SqlValue,
   FieldValue,
   StringLiteral,
+  NumberLiteral,
   KintoneFunction,
   InList,
   CompareOp,
@@ -212,6 +213,7 @@ function convertInList(v: InList, op: CompareOp): string {
   if (op !== "IN" && op !== "NOT_IN") {
     throw new KintoneQueryError("IN_LIST は IN / NOT IN 演算子でのみ使用できます");
   }
+  assertResolvedInListValues(v.values);
   const values = v.values
     .map((item) =>
       item.type === "STRING"
@@ -220,6 +222,15 @@ function convertInList(v: InList, op: CompareOp): string {
     )
     .join(",");
   return `(${values})`;
+}
+
+function assertResolvedInListValues(
+  values: InList["values"]
+): asserts values is (StringLiteral | NumberLiteral)[] {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new KintoneQueryError(`未解決のバッチ変数 @${unresolved.name} があります`);
+  }
 }
 
 // ------------------------------------------------------------

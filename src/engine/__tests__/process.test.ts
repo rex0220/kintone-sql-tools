@@ -100,6 +100,26 @@ test("applyFilter: WHERE 条件でフィルタ", () => {
   expect(result).toHaveLength(2);
 });
 
+test.each(["IN", "NOT_IN"] as const)(
+  "applyFilter: %s は短絡前に IN リスト全体の未解決変数を拒否する",
+  (op) => {
+    const unresolved: WhereExpr = {
+      type: "BINARY",
+      op,
+      left: { type: "FIELD", tableAlias: null, field: "ステータス" },
+      right: {
+        type: "IN_LIST",
+        values: [
+          { type: "STRING", value: "完了" },
+          { type: "VARIABLE", name: "missing" },
+        ],
+      },
+    };
+    expect(() => applyFilter([{ ステータス: "完了" }], unresolved))
+      .toThrow(/unresolved batch variable @missing/);
+  }
+);
+
 test("applyFilter: null は全件通過", () => {
   expect(applyFilter(filterRows, null)).toHaveLength(3);
 });

@@ -6,7 +6,8 @@
   - 2026-07-14 R2: codex レビュー反映（7点）。①SET RHS に専用 `ScalarExpr` を定義（現行 AST では表現不能：算術 `+` は数値加算・文字列関数引数に `NOW()` 不可）。②**NULL を 1a から除外**（現行言語に `NullLiteral` なし・`@x IS NULL` 構文もなし → 後続機能）。③変数解決を**実行前 AST 置換**へ（既存スカラーサブクエリ [execute.ts:2861](../../src/execute.ts#L2861) と同設計。`VarValue` は判別 union）。④`@` 曖昧性は **High → 設計で解決可能**（Node は正規化が APP/LAPP 起点で `@var` 非検出・lexer は生 `@` がエラー・プラグインは @profile 非対応。検証済み）。⑤**単文 `SET` はエラー**。⑥**SET 失敗は `continueOnError` に関わらずバッチ停止**。⑦**結果メタへの `variables` 公開は 1a では見送り**（1c のマスキング仕様と同時に）
   - 2026-07-14 R2 実装: Phase 1a を実装。#10 の関数引数 `KINTONE_FUNC` 拡張は 1a では見送り、後続へ確定
   - 2026-07-14 R3（実装レビュー反映）: **`LOGINUSER()` は SET RHS で不可**（`resolveKintoneFunc` が常に空文字 → サイレント空値の罠）。`parseScalarExpr` で明示拒否し、parser/execute 回帰テストを追加済み。言語リファレンスも修正済み（LOGINUSER 削除・`APP_差分`→`APP100`・上限 64 と最大20文の関係・`SET` 右辺の変数参照不可/`+`=数値/`CONCAT`）
-- ステータス: **R2 仕様に基づく Phase 1a 実装済み・テスト/全成果物ビルド確認済み**
+  - 2026-07-14 R4（IN 要素対応を追加・v2.1.0 同梱）: 実機検証でチェックボックス/複数選択フィールド（`=` 不可・`in` 必須）の需要が判明。**`WHERE k IN (@a, @b)` のように IN リスト要素へスカラー変数を書けるように**する（§2.6）。AST の `InList.values` に `VariableRef` を追加し `parseInValues` が `VARIABLE` を受理するだけ（静的解析・実行前置換は既に汎用で対応）。**`IN (@list)` の配列展開（1 変数＝複数値）は別物で後続**（配列型が必要・§6）
+- ステータス: **R4（IN 要素対応）= 仕様追記。実装は codex レビュー後**
 - 対象バージョン: **v2.1.0 候補（後方互換・加算的）**
 - 位置づけ: post-2.0 バッチ機能ロードマップの最初の一手（改善案 Phase 1）。1b（スカラーサブクエリ代入）・1c（`DECLARE` + 外部パラメータ）は本書のスコープ外・後続
 - 全体提案: `C:\Users\rex02\Projects\ksql-batch\kSQL仕様案_バッチ変数.md`（本書はその Phase 1a のみを実装仕様化）
@@ -61,8 +62,9 @@ type ScalarExpr =
 - WHERE 右辺の値（`parseSqlValue` 経由）
 - UPDATE の SET 値（[parser.ts:1865-1901](../../src/parser/parser.ts#L1865)）
 - ASSERT のオペランド（[parser.ts:400-445](../../src/parser/parser.ts#L400)）
+- **IN リスト要素**（`WHERE k IN (@a, @b, 'c')`。§2.6・R4 で追加）
 
-> **1a では対象外（後続サブフェーズ）**: IN リスト要素（`WHERE k IN (@a, @b)`）、LIMIT / OFFSET、SELECT 句の定数列（`SELECT @x AS c`）。全体提案 §10 も IN 配列展開を将来課題としている。1a は上記 3 経路に絞ってパーサ改修面を最小化する。
+> **対象外（後続サブフェーズ）**: `IN (@list)` の**配列展開**（1 変数が複数値を持つ・全体提案 §10）、LIMIT / OFFSET、SELECT 句の定数列（`SELECT @x AS c`）。
 
 ### 2.3 セマンティクス
 
@@ -107,6 +109,39 @@ WHERE 処理ステータス = '未処理';
 > **`ASSERT @cnt BETWEEN 1 AND 10000`（件数ゲート）** の `@cnt` は `SET @cnt = (SELECT COUNT(*) ...)` を要し **Phase 1b**。1a では ASSERT オペランドに `@var` を書ける準備（§2.2）はするが、件数を入れる SET 自体は 1b。
 
 **SET 失敗時（codex #6）**: read-only バッチでは `continueOnError` が許可されるが、SET 評価が失敗した場合は**後続を続行せずバッチ停止**する（`continueOnError` の値に関わらず）。temp table の `dependsOn` skip（[execute.ts:453](../../src/execute.ts#L453)）のような依存グラフを変数へ広げるより、1a は「SET 失敗＝常に停止」が簡潔。
+
+### 2.6 IN リスト要素での変数参照（R4・v2.1.0 同梱）
+
+チェックボックス/複数選択フィールドは kintone で `=` を使えず `in` が必要（`WHERE 顧客ランク IN ('A')`）。**IN リストの各要素にスカラー変数を書けるようにする**:
+
+```sql
+SET @rank = 'A';
+SELECT 顧客No FROM APP4148 WHERE 顧客ランク IN (@rank);          -- 単一
+-- 混在も可
+SET @a = 'A'; SET @b = 'B';
+SELECT 顧客No FROM APP4148 WHERE 顧客ランク IN (@a, @b, 'C');
+```
+
+- **各要素は独立したスカラー変数（またはリテラル）**。`IN (@a, @b)` は「@a と @b の 2 値」。混在（`IN (@a, 'b', 5)`）可。`NOT IN` も同様。
+- **`IN (@x)` は Phase 1a では常に「スカラー 1 要素」**（codex #1）。1a には**配列値を作る代入構文が無い**ため、`IN (@x)` が「1 変数＝複数値」に化けることは構文上あり得ない。将来、配列型変数を導入する際に「同じ `IN (@x)` 構文で展開するか、別構文にするか」を決める（それまで曖昧さは生じない）。
+- 型: 変数の型（string / number）に従って解決。kintone `in` の型混在の扱いはリテラル IN と同じ（新規の懸念なし）。
+- 変数は NULL を取らない（1a）ため IN 内 NULL の問題は生じない。
+
+**実装（極小）**:
+1. AST: `InList.values` を `(StringLiteral | NumberLiteral | VariableRef)[]` に（[ast.ts:475-478](../../src/types/ast.ts#L475)）。
+2. パーサ: `parseInValues`（[parser.ts:1646](../../src/parser/parser.ts#L1646) から呼ばれる）に `VARIABLE` トークン受理を追加（`{ type:"VARIABLE", name: slice(1).toLowerCase() }`）。
+3. **静的解析・実行前置換は無改修**: `collectVariableRefs`（[batch.ts](../../src/core/batch.ts) の汎用走査）が IN 内の `VariableRef` を検出、`resolveVariableRefs`（[execute.ts:709](../../src/execute.ts#L709) の汎用置換）が IN 内をリテラルへ置換。よって未定義参照・前方参照・上限などの検査、値の置換は自動で効く。
+4. **後段は置換後リテラル前提＋防御ガード**: `convertInList`（[whereToKintone.ts](../../src/converter/whereToKintone.ts)）と `evalOp` の IN 評価（[evalWhere.ts:91-99](../../src/engine/evalWhere.ts#L91)）は、実行前置換で `VariableRef` が消えている前提で動く。**両者に「未置換 VARIABLE があれば例外」ガードを追加**（正常系では到達しない fail-loud）。
+   - **`evalOp` のガードは比較の前にリスト全体を事前走査する（codex #2）**。`evalOp` の IN は `.some(...)`、NOT IN は `.every(...)` で**短絡評価**するため、コールバック内で VARIABLE を検出すると `IN ('一致値', @unresolved)` のように先頭一致で `some` が止まり `@unresolved` を見逃す。`const bad = right.values.find(v => v.type === "VARIABLE"); if (bad) throw ...;` を **IN / NOT IN 共通の事前ガード**として `some`/`every` の前に置く。
+
+**テスト（経路別に固定・codex 要件）**:
+- parser: 単一 `IN (@a)` / 混在 `IN (@a, 'b', 5)` / `NOT IN (@a, @b)`。
+- 静的解析: IN 内の**未定義参照・前方参照**がエラー、`referencedBy` に IN 参照が乗る。
+- SIMPLE: kintone クエリが `顧客ランク in ("A","B")` になる（置換後リテラル）。
+- FULL_SCAN: `IN` / `NOT IN` の JS 評価が正しい（短絡ケース含む）。
+- 防御: **未置換 `VARIABLE` を含む手組み AST**を `convertInList` / `evalOp` に渡すと必ず例外（事前ガード）。
+- `IN (@x)` がスカラー 1 要素として成功。
+- **配列風の SET 代入**（`SET @l = ('A','B')` 等）は拒否される（1a に配列代入構文が無い）。
 
 ---
 
@@ -209,10 +244,11 @@ type VarValue =
 
 - **Phase 1b**: `SET @x = (SELECT ...)` スカラーサブクエリ代入（0 行=NULL、2 行以上=実行時エラー）。実行エンジン連携。
 - **Phase 1c**: `DECLARE @param [DEFAULT ...]` + 外部注入（保存クエリのパラメータ化、MCP/CLI インターフェース変更、機密マスク）。
-- IN リスト要素・LIMIT/OFFSET・SELECT 定数列での `@var` 参照。
+- LIMIT/OFFSET・SELECT 定数列での `@var` 参照。（IN リスト要素は §2.6・R4 で対応済み）
+- **`IN (@list)` の配列展開**（1 変数が複数値を持つ）。配列型 `VarValue`・`SET @l=(...)` 代入構文・展開ロジックが必要（全体提案 §10）。
 - **NULL**（`NullLiteral` AST・`@x IS NULL` 構文・kintone 空値との対応・WHERE/UPDATE/ASSERT での null 意味論）を独立機能として（codex #2）。
 - 整形/接頭辞付きバッチ ID（`CONCAT` + `StringFuncArg` への `KINTONE_FUNC` 追加）。
-- 再代入（可変変数）、IN への配列展開、識別子のパラメータ化。
+- 再代入（可変変数）、識別子のパラメータ化。
 
 ---
 
@@ -238,7 +274,7 @@ type VarValue =
 | 2 | `@name` 解決方式 | **文実行直前の型付きリテラル AST 置換**（§3.3・**確定**） |
 | 3 | 単文 `SET` | **エラー**（§2.4・**確定**） |
 | 4 | 変数上限 | **64**。定義総数で数え、再代入とは別エラー（**確定**） |
-| 5 | 参照位置の 1a スコープ | **WHERE 右辺 / UPDATE SET 直接値 / ASSERT 直接オペランド**。IN は後続（**確定**） |
+| 5 | 参照位置の 1a スコープ | **WHERE 右辺 / UPDATE SET 直接値 / ASSERT 直接オペランド / IN リストのスカラー要素（R4 で追加・§2.6）**。`IN (@list)` の配列展開は後続（**確定**） |
 | 6 | 型表現 | **string / number のみ**。date/time/datetime は string 一括。**null は後続**（§2.3・**確定**） |
 | 7 | SET RHS からの変数参照 | **1a では禁止**（実装を小さく保つ・**確定**） |
 | 8 | SET 失敗 | **常にバッチ停止**（§2.5・**確定**） |

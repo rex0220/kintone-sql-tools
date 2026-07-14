@@ -32697,8 +32697,10 @@ var Parser = class {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === "NUMBER" /* NUMBER */) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === "VARIABLE" /* VARIABLE */) {
+        values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u307E\u305F\u306F\u6570\u5024\u304C\u5FC5\u8981\u3067\u3059", tok);
+        throw new ParseError("IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u3001\u6570\u5024\u3001\u307E\u305F\u306F\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059", tok);
       }
     } while (this.consume("," /* COMMA */));
     return values;
@@ -33584,10 +33586,17 @@ function convertInList(v, op) {
   if (op !== "IN" && op !== "NOT_IN") {
     throw new KintoneQueryError("IN_LIST \u306F IN / NOT IN \u6F14\u7B97\u5B50\u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059");
   }
+  assertResolvedInListValues(v.values);
   const values = v.values.map(
     (item) => item.type === "STRING" ? convertString(item) : String(item.value)
   ).join(",");
   return `(${values})`;
+}
+function assertResolvedInListValues(values) {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new KintoneQueryError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${unresolved.name} \u304C\u3042\u308A\u307E\u3059`);
+  }
 }
 function quoteIdentifier(name) {
   if (/^[\w$\u3000-\u9FFF]+$/u.test(name)) {
@@ -34332,15 +34341,17 @@ function evalBinary(expr, row) {
   return evalOp(expr.op, left, expr.right, row);
 }
 function evalOp(op, leftStr, right, row) {
-  if (op === "IN") {
-    if (right.type === "IN_LIST") return right.values.some((v) => leftStr === String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return right.resolved.has(leftStr);
-    return false;
-  }
-  if (op === "NOT_IN") {
-    if (right.type === "IN_LIST") return right.values.every((v) => leftStr !== String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return !right.resolved.has(leftStr);
-    return true;
+  if (op === "IN" || op === "NOT_IN") {
+    if (right.type === "IN_LIST") {
+      assertResolvedInListValues2(right.values);
+      const contains = right.values.some((v) => leftStr === String(v.value));
+      return op === "IN" ? contains : !contains;
+    }
+    if (right.type === "SUBQUERY_IN_LIST") {
+      const contains = right.resolved.has(leftStr);
+      return op === "IN" ? contains : !contains;
+    }
+    return op === "NOT_IN";
   }
   if (op === "LIKE") {
     const pattern = resolveValue(right, row);
@@ -34368,6 +34379,12 @@ function evalOp(op, leftStr, right, row) {
       return numeric ? leftNum >= rightNum : leftStr >= rightStr;
     case "<=":
       return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
+}
+function assertResolvedInListValues2(values) {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new Error(`ParseError: unresolved batch variable @${unresolved.name}.`);
   }
 }
 function evalNullCheck(expr, row) {

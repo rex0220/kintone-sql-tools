@@ -474,7 +474,7 @@ export interface KintoneFunction {
 /** IN (v1, v2, ...) */
 export interface InList {
   type: "IN_LIST";
-  values: (StringLiteral | NumberLiteral)[];
+  values: (StringLiteral | NumberLiteral | VariableRef)[];
 }
 
 /** IN (SELECT ...) / NOT IN (SELECT ...) */

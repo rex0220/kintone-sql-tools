@@ -1655,8 +1655,10 @@ export class Parser {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === TokenKind.NUMBER) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === TokenKind.VARIABLE) {
+        values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN リストには文字列または数値が必要です", tok);
+        throw new ParseError("IN リストには文字列、数値、またはバッチ変数が必要です", tok);
       }
     } while (this.consume(TokenKind.COMMA));
     return values;

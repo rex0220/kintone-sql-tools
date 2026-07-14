@@ -12,6 +12,9 @@ import type {
   CompareOp,
   CaseWhenExpr,
   CaseResult,
+  InList,
+  StringLiteral,
+  NumberLiteral,
   SubqueryInList,
   ExistsExpr,
   ScalarSubquery,
@@ -88,16 +91,18 @@ function evalOp(
   right: SqlValue,
   row: ProcessRow
 ): boolean {
-  if (op === "IN") {
-    if (right.type === "IN_LIST") return right.values.some((v) => leftStr === String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return (right as ResolvedSubqueryInList).resolved.has(leftStr);
-    return false;
-  }
-
-  if (op === "NOT_IN") {
-    if (right.type === "IN_LIST") return right.values.every((v) => leftStr !== String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return !(right as ResolvedSubqueryInList).resolved.has(leftStr);
-    return true;
+  if (op === "IN" || op === "NOT_IN") {
+    if (right.type === "IN_LIST") {
+      // 比較前に全要素を検査し、some/every の短絡で未解決変数を見逃さない。
+      assertResolvedInListValues(right.values);
+      const contains = right.values.some((v) => leftStr === String(v.value));
+      return op === "IN" ? contains : !contains;
+    }
+    if (right.type === "SUBQUERY_IN_LIST") {
+      const contains = (right as ResolvedSubqueryInList).resolved.has(leftStr);
+      return op === "IN" ? contains : !contains;
+    }
+    return op === "NOT_IN";
   }
 
   if (op === "LIKE") {
@@ -125,6 +130,15 @@ function evalOp(
     case "<":    return numeric ? leftNum < rightNum  : leftStr < rightStr;
     case ">=":   return numeric ? leftNum >= rightNum : leftStr >= rightStr;
     case "<=":   return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
+}
+
+function assertResolvedInListValues(
+  values: InList["values"]
+): asserts values is (StringLiteral | NumberLiteral)[] {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new Error(`ParseError: unresolved batch variable @${unresolved.name}.`);
   }
 }
 

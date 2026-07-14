@@ -211,6 +211,18 @@ test("変数の未定義・前方参照・再代入を静的に拒否する", ()
     .toThrow(/variable @x is already defined/);
 });
 
+test("IN リスト内の変数を静的解析し、参照索引・未定義・前方参照を扱う", () => {
+  const a = analyze("SET @a = 'A'; SET @b = 'B'; SELECT * FROM APP100 WHERE 種別 IN (@a, @b, 'C')");
+  expect(a.variables).toEqual([
+    { name: "a", referencedBy: [2] },
+    { name: "b", referencedBy: [2] },
+  ]);
+  expect(() => analyze("SET @a = 'A'; SELECT * FROM APP100 WHERE 種別 IN (@a, @missing)"))
+    .toThrow(/variable @missing is not defined/);
+  expect(() => analyze("SELECT * FROM APP100 WHERE 種別 IN (@later); SET @later = 'A'"))
+    .toThrow(/variable @later is not defined/);
+});
+
 test("単文 SET はエラー", () => {
   expect(() => analyze("SET @x = 1")).toThrow(/SET variable requires a batch/);
 });

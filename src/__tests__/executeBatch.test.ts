@@ -91,6 +91,32 @@ test("SET の文字列関数を UPDATE SET と WHERE に置換する", async () 
   expect(client.putCalls[0].records[0]).toMatchObject({ record: { 顧客名: { value: "AB" } } });
 });
 
+test("IN リストのスカラー変数を SIMPLE 経路でリテラルへ置換する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @a = 'A社'; SET @b = 'B社'; SELECT 顧客名 FROM APP100 WHERE 顧客名 IN (@a, @b, 'C社')",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(client.getCalls[0].query).toContain('顧客名 in ("A社","B社","C社")');
+});
+
+test("IN (@x) と NOT IN (@x) を FULL_SCAN 経路でスカラー1要素として評価する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @x = 'B社';" +
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "SELECT 顧客名 FROM #t WHERE 顧客名 IN (@x);" +
+    "SELECT 顧客名 FROM #t WHERE 顧客名 NOT IN (@x)",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect((r.statements[2].result as SelectResult).rows.map((row) => row["顧客名"]))
+    .toEqual(["B社"]);
+  expect((r.statements[3].result as SelectResult).rows.map((row) => row["顧客名"]))
+    .toEqual(["A社", "C社"]);
+});
+
 test("SET の失敗は continueOnError=true でも後続を停止する", async () => {
   const r = await executeBatch("SET @bad = 1 / 0; SELECT * FROM APP100", makeClient(), { continueOnError: true });
   expect(r.ok).toBe(false);

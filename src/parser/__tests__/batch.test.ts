@@ -85,6 +85,7 @@ test("SET RHS のフィールド・他変数・NULL・スカラーサブクエ�
   expect(() => parseOne("SET @user = LOGINUSER()"))
     .toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
   expect(() => parseOne("SET @x = (SELECT COUNT(*) FROM APP100)")).toThrow(/Phase 1b/);
+  expect(() => parseOne("SET @list = ('A', 'B')")).toThrow(ParseError);
 });
 
 // ----------------------------------------------------------------

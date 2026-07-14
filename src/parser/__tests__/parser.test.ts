@@ -134,6 +134,21 @@ test("WHERE IN", () => {
   ]);
 });
 
+test("WHERE IN / NOT IN は変数を単一要素・リテラル混在で受理する", () => {
+  const inAst = parseSelect("SELECT * FROM APP100 WHERE 種別 IN (@Rank, 'B')");
+  expect((inAst.where as any).right.values).toEqual([
+    { type: "VARIABLE", name: "rank" },
+    { type: "STRING", value: "B" },
+  ]);
+
+  const notInAst = parseSelect("SELECT * FROM APP100 WHERE 種別 NOT IN (@only)");
+  expect(notInAst.where).toMatchObject({
+    type: "BINARY",
+    op: "NOT_IN",
+    right: { type: "IN_LIST", values: [{ type: "VARIABLE", name: "only" }] },
+  });
+});
+
 test("WHERE IS NULL / IS NOT NULL", () => {
   const ast1 = parseSelect("SELECT * FROM APP100 WHERE 担当者 IS NULL");
   expect(ast1.where).toEqual({ type: "NULL_CHECK", field: { type: "FIELD", tableAlias: null, field: "担当者" }, not: false });
