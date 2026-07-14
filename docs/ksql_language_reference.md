@@ -1741,6 +1741,8 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 ## 25. バッチ実行と一時テーブル
 
 > **v1.4.0 で追加**。**CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI もバッチに対応し（**v1.9.0 で DML を含むバッチも解禁**。v1.4.0〜v1.8.0 は read-only バッチのみ）、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します。詳細仕様は [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) を参照してください。
+>
+> **リラン可能な差分更新バッチの設計パターン**（ステータス駆動・件数ゲート・スナップショット・バッチ変数の活用）は [ksql_batch_recipes.md](ksql_batch_recipes.md) にまとめています。
 
 ### 複文（バッチ）
 

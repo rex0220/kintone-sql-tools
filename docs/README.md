@@ -5,6 +5,7 @@
 ## 主要仕様
 
 - `ksql_language_reference.md`
+- `ksql_batch_recipes.md` — バッチ設計レシピ集（リラン可能な差分更新・件数ゲート・スナップショット・バッチ変数）
 - `ksql_cli_console_spec.md`
 - `kintone_sql_plugin_spec.md`
 - `ksql_mcp_server_spec.md`
