@@ -2,7 +2,10 @@
 
 - 作成日: 2026-07-14
 - 対象課題: [ksql_empty_select_columns_issue.md](./ksql_empty_select_columns_issue.md)（codex レビュー済み R2）
-- ステータス: **仕様案（codex 実装レビュー前）**
+- ステータス: **仕様案 R2（codex 仕様レビューの条件付き承認を反映 → Codex 実装へ）**
+- 更新履歴:
+  - 2026-07-14 R1: 初版
+  - 2026-07-14 R2: codex 仕様レビュー反映（メッセージ条件に `rows.length===0`／`computeOutputKeys` の型絞り込み固定／テスト計画に `ARITH_AGG_COL`・通常 `UNION` を追加）
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: **バグ修正・後方互換（0 行以外の既存出力は不変）→ patch 相当**（リリース版数は実装後に確定）
 
@@ -103,12 +106,33 @@ project(rows, columns, scalarCache):
       return 現行の rows.map + rowIdx===0 push 経路
 
   // (C) 明示列のみ: 列名を行ループ前に AST から確定（本修正）
-  outputKeys = computeOutputKeys(columns, defaultFieldKeys)   // string[]（null を含まない）
+  keys = computeOutputKeys(columns, defaultFieldKeys)   // (string | null)[]
+  outputKeys = narrowKeys(keys)                          // string[] へ絞り込み（§3.3.1）
   projected = rows.map(row => 各列を outputKeys[colIdx] へ充填)   // 値充填のみ、push しない
   return { rows: projected, columns: outputKeys }
 ```
 
 - **(C) の値充填は現行と同じ式**（`STRFUNC_COL` の集計分岐、`AGGREGATE` の `row[alias??src] ?? row[src] ?? "0"` 等）を、キーだけ `outputKeys[colIdx]` に置き換えて使う。**キーは充填と columns で必ず同一物**を使うため、1 行以上の既存出力は列名・列順・値ともに不変。
+
+#### 3.3.1 型絞り込み（strict TypeScript 対応）
+
+`computeOutputKeys()` は `(string | null)[]` を返す（`null` は `WILDCARD`/`PARENT_WILDCARD`）。分岐 (C) は直前の `hasWildcard === false` により `null` を含まないことが保証されるが、**strict TS の型としては `string[]` に自動で狭まらない**。無根拠な `as string[]` は使わず、次のいずれかで固定する（実装者はどちらでもよい）:
+
+- **案 a（推奨）: 型ガードで内部エラー化**
+  ```ts
+  const keys = computeOutputKeys(columns, defaultFieldKeys);
+  if (keys.some((k) => k === null)) {
+    // hasWildcard=false の後で null が出るのは AST 分類の不整合＝実装バグ
+    throw new Error("internal: computeOutputKeys returned null for a non-wildcard column list");
+  }
+  const outputKeys = keys as string[]; // 上のガード後は安全（narrowing 済み）
+  ```
+  もしくは `.filter((k): k is string => k !== null)` ではなく、**長さを崩さない**ため上記の「null 検出→throw」を用いる（`filter` は列とインデックス対応が崩れるため不可）。
+
+- **案 b: シグネチャで分離**
+  `computeOutputKeys()` はワイルドカードを含まない列リスト専用として **`string[]` を返す**（呼び出し側が (B)/(C) を先に分岐し、(C) でのみ呼ぶ）。(A)/(B) はこの関数を呼ばない。この場合 `null` を返す経路自体が無くなり `as` 不要。
+
+いずれも **`as string[]` の無条件キャストは禁止**。案 a はガードで、案 b は呼び出し制約で `null` 不在を保証する。
 - **(B) を残す理由**: `WILDCARD`/`PARENT_WILDCARD` は 0 行だと列を出せず、混在時に明示列だけ AST 確定してもワイルドカード分の列が抜け、順序も壊れる。今回は触らず現状維持（対象外の宣言と一致）。
 
 ### 3.4 空行でも `columns` が確定する契約（明示列）
@@ -129,8 +153,14 @@ project(rows, columns, scalarCache):
 
 本修正後、明示列で `columns.length === 0` になるのは **対象外のワイルドカード×0 行**のみ。列数不一致エラー（[execute.ts:2060-2063](../../src/execute.ts#L2060)）を次の条件で改善する:
 
-- **発動条件**: `columns.length !== stmt.fields.length` **かつ** `columns.length === 0`。
+- **発動条件**: 3 条件すべて。`columns.length === 0` だけでは「0 行が原因」と断定できない（非空行でもワイルドカード展開後に可視列が 0 になり得るため、`rows.length === 0` を必須にする）。
+  ```ts
+  columns.length !== stmt.fields.length &&
+  columns.length === 0 &&
+  rows.length === 0
+  ```
 - **文言**: 現行に加え「結果が 0 行のため列を特定できませんでした（`SELECT *` を空ソースに使うと列を決定できません。明示列で指定してください）」の趣旨を付記。
+- **上記に該当しない `columns.length === 0`**（非空行でワイルドカード可視列 0 など）は**現行文言のまま**（0 行と誤断定しない）。
 - 明示列 SELECT では本条件に到達しなくなるため、実質「空 `SELECT *`」専用の案内となる。
 
 ## 6. 受入条件（実装で満たすこと）
@@ -140,7 +170,7 @@ project(rows, columns, scalarCache):
 - [ ] `WILDCARD` / `PARENT_WILDCARD` を検出した列リスト（単独・混在）は**既存経路を維持**し挙動不変。
 - [ ] **空行でも明示列の `columns` が確定**（列数＝明示列数、順序一致）。
 - [ ] `INSERT` 結果 `insertedCount = 0`、**`UPSERT` 結果 `insertedCount = 0 / updatedCount = 0`**（0 行ソース）。
-- [ ] **左辺が空の `UNION` で結果列が左辺由来、右辺の値が正しく載る**。
+- [ ] **左辺が空の `UNION`／`UNION ALL` で結果列が左辺由来、右辺の値が正しく載る**（通常 `UNION` は `deduplicateRows` も `leftCols` で機能する）。
 - [ ] **POST / PUT（kintone 書き込み API）が呼ばれない**ことを検証（0 行 no-op が無通信）。
 - [ ] メッセージ改善が **`columns.length === fields 数不一致 かつ 0`** のときだけ発動する。
 - [ ] 空 `SELECT *`・空 CTE・混在ワイルドカードは**今回対象外**である（挙動不変を確認）。
@@ -152,7 +182,7 @@ project(rows, columns, scalarCache):
 - `project([], [FIELD a, FIELD b])` → `columns === ['a','b']`、`rows === []`。
 - 別名: `project([], [FIELD a AS x])` → `columns === ['x']`。
 - 修飾名衝突: `SELECT t1.f, t2.f`（別名なし）で 1 行以上と 0 行で `columns` が同一（衝突時は修飾名）。
-- 各型（`LITERAL_COL`/`AGGREGATE`/`ARITH_COL`/`CASE_COL`/`STRFUNC_COL`/`SCALAR_SUBQUERY_COL`）で 0 行時に既定キー/別名が出る。
+- 各型（`LITERAL_COL`/`AGGREGATE`/`ARITH_AGG_COL`/`ARITH_COL`/`CASE_COL`/`STRFUNC_COL`/`SCALAR_SUBQUERY_COL`）で 0 行時に既定キー/別名が出る（全 8 型を網羅）。
 - **回帰**: 代表的な複数行 SELECT で、修正前後の `{rows, columns}` が完全一致。
 - **対象外維持**: `SELECT *`（単独）・`SELECT *, a`（混在）・`SELECT _p.*` が 0 行で現行どおり空列（挙動不変）。
 
@@ -160,7 +190,9 @@ project(rows, columns, scalarCache):
 
 - 空直接 SELECT: `INSERT INTO x (a,b) SELECT a,b FROM APP WHERE (0 件)` → `insertedCount=0`・**POST 未呼び出し**。
 - 空一時テーブル: `CREATE TEMP TABLE #t AS SELECT a,b FROM APP WHERE (0 件); UPSERT INTO x (a,b) SELECT a,b FROM #t ON DUPLICATE (a)` → `inserted=0,updated=0`・**POST/PUT 未呼び出し**。
-- 左辺空 UNION: `SELECT a FROM APP1 WHERE (0 件) UNION ALL SELECT b FROM APP2` → `columns===['a']`、`rows` に APP2 の値が `a` 列で入る。
+- 左辺空 UNION（**`UNION ALL` と 通常 `UNION` の両方**）:
+  - `SELECT a FROM APP1 WHERE (0 件) UNION ALL SELECT b FROM APP2` → `columns===['a']`、`rows` に APP2 の値が `a` 列で入る。
+  - `SELECT a FROM APP1 WHERE (0 件) UNION SELECT b FROM APP2`（重複排除）→ `columns===['a']`、`deduplicateRows(combined, leftCols)`（[execute.ts:1224/1230](../../src/execute.ts#L1224)）が `leftCols` を使って正しく重複判定する（左辺 0 行でも列キーで dedup が機能し、右辺値が保持される）。
 - メッセージ: 空 `SELECT *` を空ソースに使った `INSERT` で改善文言が出る。
 
 ## 8. リスク・非対象
