@@ -101,6 +101,45 @@ test("FORMAT(100+SUM(...))", () => {
   }
 });
 
+test("集計算術式: 末尾が集計関数でも AS alias を式全体に保持する", () => {
+  const ast = parseSelect(
+    "SELECT SUM(a) - SUM(b) AS diff, SUM(a) / COUNT(*) AS ratio FROM APP100"
+  );
+
+  expect(ast.columns[0]).toMatchObject({ type: "ARITH_AGG_COL", alias: "diff" });
+  expect(ast.columns[1]).toMatchObject({ type: "ARITH_AGG_COL", alias: "ratio" });
+});
+
+test("集計算術式: DISTINCT・括弧・単項マイナス配下を alias 非消費で読む", () => {
+  const ast = parseSelect(
+    "SELECT SUM(DISTINCT a) - SUM(b) AS distinct_diff, " +
+    "SUM(c) + (SUM(a) - SUM(b)) AS nested, " +
+    "SUM(c) + -SUM(a) AS negated FROM APP100"
+  );
+
+  expect(ast.columns.map((col) => col.type === "ARITH_AGG_COL" ? col.alias : null)).toEqual([
+    "distinct_diff",
+    "nested",
+    "negated",
+  ]);
+  expect(ast.columns[0]).toMatchObject({
+    type: "ARITH_AGG_COL",
+    expr: {
+      type: "AGG_ARITH",
+      left: { type: "AGG_REF", func: "SUM", distinct: true },
+      right: { type: "AGG_REF", func: "SUM", distinct: false },
+    },
+  });
+});
+
+test.each([
+  "SELECT SUM(a) AS x - SUM(b) FROM APP100",
+  "SELECT SUM(c) + (SUM(a) AS x - SUM(b)) AS d FROM APP100",
+  "SELECT FORMAT(SUM(a) AS x, '#') AS y FROM APP100",
+])("集計算術式: オペランド途中の alias を拒否する — %s", (sql) => {
+  expect(() => parseSelect(sql)).toThrow(ParseError);
+});
+
 // ----------------------------------------------------------------
 // WHERE 句
 // ----------------------------------------------------------------

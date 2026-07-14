@@ -313,6 +313,26 @@ test("SELECT 列のスカラーサブクエリ内の一時テーブル参照が�
   expect(rows[0]["最大"]).toBe("500");
 });
 
+test("集計算術式 alias: 一時テーブル後段から alias で参照できる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77105: [makeRecord({ 種別: "A", a: "10", b: "3" })],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #g AS " +
+    "SELECT 種別, SUM(a) - SUM(b) AS diff FROM APP77105 GROUP BY 種別;" +
+    "SELECT diff FROM #g",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult)).toMatchObject({
+    columns: ["diff"],
+    rows: [{ diff: "7" }],
+  });
+});
+
 // ----------------------------------------------------------------
 // validate-all-first
 // ----------------------------------------------------------------
