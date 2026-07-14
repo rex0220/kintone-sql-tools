@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v2.0.0)
+ksql 配布パッケージ (v2.1.0)
 
-1. ksql-plugin-v2.0.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.1.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.1.0: バッチ変数 SET @var を追加(後方互換)。
+- ; 区切りのバッチ内で SET @名前 = <式> により値を一度定義し、後続の文から
+  @名前 で参照できます。時刻の固定(SET @now = NOW())・バッチ ID・条件値の
+  共通化(DRY)に使えます。
+- 式はリテラル・関数(NOW() / TODAY() / 文字列・数値関数)・数値算術。参照位置は
+  WHERE 右辺 / UPDATE の SET 値 / ASSERT オペランド。2 文以上のバッチでのみ使用可。
+- 現時点で非対応(後続): サブクエリ代入・DECLARE 外部注入・NULL 代入・LOGINUSER()。
+- 詳細は言語リファレンス §25 と CHANGELOG.md を参照。
 
 v2.0.0: LIKE を JavaScript 評価のみに統一(Breaking)。
 - LIKE / NOT LIKE はワイルドカードの有無にかかわらず kintone へ送らず、

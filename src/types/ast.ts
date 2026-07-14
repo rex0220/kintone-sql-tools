@@ -23,6 +23,7 @@ export type Statement =
   | ExplainStatement
   | CreateTempTableStatement
   | DropTempTableStatement
+  | SetVariableStatement
   | AssertStatement;
 
 // ------------------------------------------------------------
@@ -74,6 +75,27 @@ export interface DropTempTableStatement {
 }
 
 // ------------------------------------------------------------
+// バッチ変数
+// ------------------------------------------------------------
+
+export interface SetVariableStatement {
+  type: "SET_VARIABLE";
+  /** @ を除き、小文字へ正規化した名前 */
+  name: string;
+  expr: ScalarExpr;
+}
+
+/** SET RHS 専用。ScalarArithExpr はパーサーがフィールド参照を拒否する。 */
+export type ScalarExpr =
+  | StringLiteral
+  | NumberLiteral
+  | KintoneFunction
+  | StringFuncExpr
+  | ScalarArithExpr;
+
+export type ScalarArithExpr = ArithExpr;
+
+// ------------------------------------------------------------
 // ASSERT（アサーション — 実行時ゲート）
 // ------------------------------------------------------------
 
@@ -88,6 +110,7 @@ export type AssertCompareOp = "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=";
 export type AssertOperand =
   | NumberLiteral
   | StringLiteral
+  | VariableRef
   | ScalarSubquery
   | ArithExpr;
 
@@ -398,6 +421,7 @@ export interface CaseFieldValue {
 export type SqlValue =
   | StringLiteral
   | NumberLiteral
+  | VariableRef
   | ArrayLiteral
   | KintoneFunction
   | InList
@@ -405,6 +429,12 @@ export type SqlValue =
   | ArithSqlValue
   | CaseSqlValue
   | ScalarSubquery;
+
+/** バッチ変数参照。name は @ を除いた小文字。 */
+export interface VariableRef {
+  type: "VARIABLE";
+  name: string;
+}
 
 /** 配列リテラル: ['val1', 'val2'] — INSERT VALUES / UPDATE SET 専用 */
 export interface ArrayLiteral {
@@ -444,7 +474,7 @@ export interface KintoneFunction {
 /** IN (v1, v2, ...) */
 export interface InList {
   type: "IN_LIST";
-  values: (StringLiteral | NumberLiteral)[];
+  values: (StringLiteral | NumberLiteral | VariableRef)[];
 }
 
 /** IN (SELECT ...) / NOT IN (SELECT ...) */

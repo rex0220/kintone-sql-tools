@@ -4,9 +4,9 @@
 
 export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError, AssertError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
-export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES } from "./batch";
+export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES, MAX_BATCH_VARIABLES } from "./batch";
 export { getInsertValuesCount, getStatementType, isDmlType } from "./dmlGuard";
-export type { BatchAnalysis, StatementAnalysis } from "./batch";
+export type { BatchAnalysis, StatementAnalysis, BatchVariableAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
 
 export type {

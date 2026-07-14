@@ -31096,6 +31096,7 @@ var Lexer = class {
     if (opTok) return opTok;
     if (isIdentStart(ch)) return this.readIdentOrKeyword(start);
     if (ch === "#") return this.readHashIdent(start);
+    if (ch === "@") return this.readVariable(start);
     throw new LexError(
       `\u4E88\u671F\u3057\u306A\u3044\u6587\u5B57 \u300C${ch}\u300D \u3067\u3059`,
       this.pos,
@@ -31274,6 +31275,23 @@ var Lexer = class {
       );
     }
     return this.makeToken("IDENT" /* IDENT */, value, start);
+  }
+  /** バッチ変数: @[A-Za-z_][A-Za-z0-9_]{0,63} */
+  readVariable(start) {
+    this.pos++;
+    const first = this.input[this.pos] ?? "";
+    if (!/[A-Za-z_]/.test(first)) {
+      throw new LexError("\u300C@\u300D \u306E\u76F4\u5F8C\u306B\u306F\u82F1\u5B57\u307E\u305F\u306F _ \u3067\u59CB\u307E\u308B\u5909\u6570\u540D\u304C\u5FC5\u8981\u3067\u3059", start, this.input);
+    }
+    this.pos++;
+    while (this.pos < this.input.length && /[A-Za-z0-9_]/.test(this.input[this.pos])) {
+      this.pos++;
+    }
+    const nameLength = this.pos - start - 1;
+    if (nameLength > 64) {
+      throw new LexError("\u5909\u6570\u540D\u306F 64 \u6587\u5B57\u4EE5\u5185\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", start, this.input);
+    }
+    return this.makeToken("VARIABLE" /* VARIABLE */, this.input.slice(start, this.pos), start);
   }
   // ----------------------------------------------------------
   // 空白・コメントをスキップ
@@ -31486,6 +31504,8 @@ var Parser = class {
         return this.parseDescribe();
       case "EXPLAIN" /* EXPLAIN */:
         return this.parseExplain();
+      case "SET" /* SET */:
+        return this.parseSetVariable();
       case "ASSERT" /* ASSERT */:
         return this.parseAssert();
       case "IDENT" /* IDENT */: {
@@ -31498,9 +31518,63 @@ var Parser = class {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
       tok
     );
+  }
+  // ----------------------------------------------------------
+  // SET @name = <ScalarExpr>
+  // ----------------------------------------------------------
+  parseSetVariable() {
+    this.expect("SET" /* SET */);
+    const variable = this.expect("VARIABLE" /* VARIABLE */, "SET \u306E\u5F8C\u306B\u306F\u5909\u6570\u540D\uFF08\u4F8B: @name\uFF09\u304C\u5FC5\u8981\u3067\u3059");
+    this.expect("=" /* EQ */);
+    const expr = this.parseScalarExpr();
+    return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
+  }
+  /** SET RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
+  parseScalarExpr() {
+    const tok = this.peek();
+    if (tok.kind === "VARIABLE" /* VARIABLE */) {
+      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067\u306F\u4ED6\u306E\u5909\u6570\u3092\u53C2\u7167\u3067\u304D\u307E\u305B\u3093\uFF08Phase 1a\uFF09", tok);
+    }
+    if (tok.kind === "NULL" /* NULL */) {
+      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067 NULL \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08Phase 1a\uFF09", tok);
+    }
+    if (tok.kind === "(" /* LPAREN */ && this.peekAt(1).kind === "SELECT" /* SELECT */) {
+      throw new ParseError("SET \u306E\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u4EE3\u5165\u306F Phase 1b \u3067\u5BFE\u5FDC\u4E88\u5B9A\u3067\u3059", tok);
+    }
+    if (tok.kind === "STRING" /* STRING */) {
+      this.advance();
+      return { type: "STRING", value: tok.value };
+    }
+    if (tok.kind === "LOGINUSER" /* LOGINUSER */) {
+      throw new ParseError(
+        "SET \u306E\u53F3\u8FBA\u3067 LOGINUSER() \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08\u5B9F\u884C\u74B0\u5883\u5171\u901A\u306E\u30ED\u30B0\u30A4\u30F3\u30E6\u30FC\u30B6\u30FC\u89E3\u6C7A\u306F\u672A\u5BFE\u5FDC\u3067\u3059\uFF09",
+        tok
+      );
+    }
+    if (tok.kind === "TODAY" /* TODAY */ || tok.kind === "NOW" /* NOW */) {
+      return this.parseSqlValue();
+    }
+    const expr = this.parseArithAddSub();
+    this.rejectNonScalarExpr(expr, tok);
+    if (expr.type === "NUMBER" || expr.type === "STRING_FUNC" || expr.type === "ARITH") return expr;
+    throw new ParseError("SET \u306E\u53F3\u8FBA\u306B\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u542B\u307E\u306A\u3044\u30B9\u30AB\u30E9\u30FC\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", tok);
+  }
+  rejectNonScalarExpr(node, tok) {
+    if (node.type === "STRING" || node.type === "NUMBER") return;
+    if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
+      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u30FB\u96C6\u8A08\u95A2\u6570\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    }
+    if (node.type === "ARITH" || node.type === "AGG_ARITH") {
+      this.rejectNonScalarExpr(node.left, tok);
+      this.rejectNonScalarExpr(node.right, tok);
+      return;
+    }
+    if (node.type === "STRING_FUNC") {
+      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok);
+    }
   }
   // ----------------------------------------------------------
   // CREATE TEMP TABLE / DROP TEMP TABLE（バッチ内一時テーブル）
@@ -31646,6 +31720,10 @@ var Parser = class {
   /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
   parseAssertOperand() {
     const tok = this.peek();
+    if (tok.kind === "VARIABLE" /* VARIABLE */) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
+    }
     if (tok.kind === "STRING" /* STRING */) {
       this.advance();
       return { type: "STRING", value: tok.value };
@@ -32553,6 +32631,10 @@ var Parser = class {
   // 右辺の値
   parseSqlValue() {
     const tok = this.peek();
+    if (tok.kind === "VARIABLE" /* VARIABLE */) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
+    }
     if (tok.kind === "STRING" /* STRING */) {
       this.advance();
       return { type: "STRING", value: tok.value };
@@ -32615,8 +32697,10 @@ var Parser = class {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === "NUMBER" /* NUMBER */) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === "VARIABLE" /* VARIABLE */) {
+        values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u307E\u305F\u306F\u6570\u5024\u304C\u5FC5\u8981\u3067\u3059", tok);
+        throw new ParseError("IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u3001\u6570\u5024\u3001\u307E\u305F\u306F\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059", tok);
       }
     } while (this.consume("," /* COMMA */));
     return values;
@@ -32848,6 +32932,7 @@ var Parser = class {
    */
   parseAssignmentValue() {
     const tok = this.peek();
+    if (tok.kind === "VARIABLE" /* VARIABLE */) return this.parseSqlValue();
     if (tok.kind === "STRING" /* STRING */) return this.parseSqlValue();
     if (tok.kind === "TODAY" /* TODAY */ || tok.kind === "NOW" /* NOW */ || tok.kind === "LOGINUSER" /* LOGINUSER */) return this.parseSqlValue();
     if (tok.kind === "IN" /* IN */) return this.parseSqlValue();
@@ -33109,7 +33194,7 @@ function isDmlType(type) {
   return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
 }
 function isReadOnlyType(type) {
-  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "ASSERT";
+  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "ASSERT";
 }
 function hasWhereClause(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
@@ -33130,6 +33215,7 @@ function getInsertValuesCount(stmt) {
 
 // src/core/batch.ts
 var MAX_TEMP_TABLES = 16;
+var MAX_BATCH_VARIABLES = 64;
 var BatchAnalysisError = class extends Error {
   constructor(message, statementIndex) {
     super(message);
@@ -33150,12 +33236,29 @@ function collectRefs(node, tempRefs, appIds) {
     for (const v of Object.values(obj)) collectRefs(v, tempRefs, appIds);
   }
 }
+function collectVariableRefs(node, refs) {
+  if (Array.isArray(node)) {
+    for (const v of node) collectVariableRefs(v, refs);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
+      refs.add(obj["name"]);
+      return;
+    }
+    for (const v of Object.values(obj)) collectVariableRefs(v, refs);
+  }
+}
 function analyzeBatch(statements) {
   if (statements.length === 0) {
     throw new BatchAnalysisError("ArgumentError: SQL is empty.", 0);
   }
   if (statements.length === 1) {
     const t = statements[0].type;
+    if (t === "SET_VARIABLE") {
+      throw new BatchAnalysisError("ArgumentError: SET variable requires a batch.", 0);
+    }
     if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
       const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
       throw new BatchAnalysisError(
@@ -33167,6 +33270,8 @@ function analyzeBatch(statements) {
   const defined = /* @__PURE__ */ new Map();
   const createdOrder = [];
   const results = [];
+  const variableDefs = /* @__PURE__ */ new Map();
+  const variableOrder = [];
   statements.forEach((stmt, index) => {
     const statementType = getStatementType(stmt);
     const created = [];
@@ -33174,6 +33279,31 @@ function analyzeBatch(statements) {
     const refs = /* @__PURE__ */ new Set();
     const stmtAppIds = /* @__PURE__ */ new Set();
     const dependsOn = /* @__PURE__ */ new Set();
+    const variableRefs = /* @__PURE__ */ new Set();
+    collectVariableRefs(stmt, variableRefs);
+    for (const name of variableRefs) {
+      const def = variableDefs.get(name);
+      if (def === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
+          index
+        );
+      }
+      def.referencedBy.push(index);
+    }
+    if (stmt.type === "SET_VARIABLE") {
+      if (variableDefs.has(stmt.name)) {
+        throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
+      }
+      variableDefs.set(stmt.name, { index, referencedBy: [] });
+      variableOrder.push(stmt.name);
+      if (variableOrder.length > MAX_BATCH_VARIABLES) {
+        throw new BatchAnalysisError(
+          `ParseError: batch exceeds ${MAX_BATCH_VARIABLES} variables.`,
+          index
+        );
+      }
+    }
     if (stmt.type === "CREATE_TEMP_TABLE") {
       collectRefs(stmt.query, refs, stmtAppIds);
     } else if (stmt.type === "DROP_TEMP_TABLE") {
@@ -33243,11 +33373,17 @@ function analyzeBatch(statements) {
     });
   });
   const containsDml = results.some((r) => r.isDml);
+  const variables = variableOrder.map((name) => ({
+    name,
+    referencedBy: [...variableDefs.get(name).referencedBy]
+  }));
   return {
     statementCount: statements.length,
     isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
     containsDml,
     tempTables: createdOrder,
+    variables,
+    warnings: variables.filter((v) => v.referencedBy.length === 0).map((v) => `variable @${v.name} is never used.`),
     statements: results
   };
 }
@@ -33418,6 +33554,8 @@ function convertField(field) {
 }
 function convertValue(value, op) {
   switch (value.type) {
+    case "VARIABLE":
+      throw new KintoneQueryError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
     case "STRING":
       return convertString(value);
     case "NUMBER":
@@ -33448,10 +33586,17 @@ function convertInList(v, op) {
   if (op !== "IN" && op !== "NOT_IN") {
     throw new KintoneQueryError("IN_LIST \u306F IN / NOT IN \u6F14\u7B97\u5B50\u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059");
   }
+  assertResolvedInListValues(v.values);
   const values = v.values.map(
     (item) => item.type === "STRING" ? convertString(item) : String(item.value)
   ).join(",");
   return `(${values})`;
+}
+function assertResolvedInListValues(values) {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new KintoneQueryError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${unresolved.name} \u304C\u3042\u308A\u307E\u3059`);
+  }
 }
 function quoteIdentifier(name) {
   if (/^[\w$\u3000-\u9FFF]+$/u.test(name)) {
@@ -34196,15 +34341,17 @@ function evalBinary(expr, row) {
   return evalOp(expr.op, left, expr.right, row);
 }
 function evalOp(op, leftStr, right, row) {
-  if (op === "IN") {
-    if (right.type === "IN_LIST") return right.values.some((v) => leftStr === String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return right.resolved.has(leftStr);
-    return false;
-  }
-  if (op === "NOT_IN") {
-    if (right.type === "IN_LIST") return right.values.every((v) => leftStr !== String(v.value));
-    if (right.type === "SUBQUERY_IN_LIST") return !right.resolved.has(leftStr);
-    return true;
+  if (op === "IN" || op === "NOT_IN") {
+    if (right.type === "IN_LIST") {
+      assertResolvedInListValues2(right.values);
+      const contains = right.values.some((v) => leftStr === String(v.value));
+      return op === "IN" ? contains : !contains;
+    }
+    if (right.type === "SUBQUERY_IN_LIST") {
+      const contains = right.resolved.has(leftStr);
+      return op === "IN" ? contains : !contains;
+    }
+    return op === "NOT_IN";
   }
   if (op === "LIKE") {
     const pattern = resolveValue(right, row);
@@ -34234,6 +34381,12 @@ function evalOp(op, leftStr, right, row) {
       return numeric ? leftNum <= rightNum : leftStr <= rightStr;
   }
 }
+function assertResolvedInListValues2(values) {
+  const unresolved = values.find((item) => item.type === "VARIABLE");
+  if (unresolved?.type === "VARIABLE") {
+    throw new Error(`ParseError: unresolved batch variable @${unresolved.name}.`);
+  }
+}
 function evalNullCheck(expr, row) {
   const val = resolveField(expr.field, row);
   return expr.not ? val !== "" : val === "";
@@ -34253,6 +34406,8 @@ function resolveField(field, row) {
 }
 function resolveValue(value, row) {
   switch (value.type) {
+    case "VARIABLE":
+      throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
     case "STRING":
       return value.value;
     case "NUMBER":
@@ -34616,6 +34771,8 @@ function evalCaseWhenValue(expr, row, fieldType) {
 }
 function toKintoneValue(value, fieldType) {
   switch (value.type) {
+    case "VARIABLE":
+      throw new DmlConvertError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
     case "STRING":
       return convertString2(value.value, fieldType);
     case "NUMBER":
@@ -35491,6 +35648,10 @@ async function executeStatement(sql, client, options) {
   return executeParsedStatement(stmt, client, options, cacheContext);
 }
 async function executeParsedStatement(stmt, client, options, cacheContext) {
+  const unresolved = findVariableRef(stmt);
+  if (unresolved !== null) {
+    throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
+  }
   switch (stmt.type) {
     case "SELECT":
       return executeSelect(stmt, client, options, cacheContext);
@@ -35523,6 +35684,8 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "DROP_TEMP_TABLE":
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
+    case "SET_VARIABLE":
+      throw new Error("ArgumentError: SET variable requires a batch.");
     case "ASSERT":
       return executeAssert(stmt, client, options, cacheContext);
   }
@@ -35553,6 +35716,7 @@ async function executeBatch(sql, client, options = {}) {
   const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
   const cacheContext = options.cacheContext ?? "default";
   const tempTables = /* @__PURE__ */ new Map();
+  const variables = /* @__PURE__ */ new Map();
   const results = [];
   const failed = /* @__PURE__ */ new Set();
   let aborted2 = null;
@@ -35590,7 +35754,7 @@ async function executeBatch(sql, client, options = {}) {
         })
       } : options;
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables),
+        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
       );
       results.push({ ...base, status: "success", ...outcome });
@@ -35601,6 +35765,8 @@ async function executeBatch(sql, client, options = {}) {
         aborted2 = "timeout";
       } else if (e instanceof AssertError) {
         aborted2 = "assertion";
+      } else if (info.statementType === "SET_VARIABLE") {
+        aborted2 = "fail-fast";
       } else if (!options.continueOnError) {
         aborted2 = "fail-fast";
       }
@@ -35615,44 +35781,49 @@ async function executeBatch(sql, client, options = {}) {
     metrics
   };
 }
-async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables) {
-  if (stmt.type === "CREATE_TEMP_TABLE") {
+async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables) {
+  if (stmt.type === "SET_VARIABLE") {
+    variables.set(stmt.name, evaluateScalarExpr(stmt.expr));
+    return {};
+  }
+  const resolvedStmt = resolveVariableRefs(stmt, variables);
+  if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     const materializeOptions = {
       ...options,
       maxRecords: options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
       onLimitReached: "error"
     };
-    const result = await runSelectLike(stmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(stmt.name, result.rows);
-    return { tempTable: stmt.name, rowCount: result.rows.length };
+    const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+    tempTables.set(resolvedStmt.name, result.rows);
+    return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
     tempTables.delete(stmt.name);
     return { tempTable: stmt.name };
   }
   if (stmt.type === "EXPLAIN") {
-    return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+    return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
   }
-  if (stmt.type === "ASSERT") {
-    await executeAssert(stmt, client, options, cacheContext, tempTables);
+  if (resolvedStmt.type === "ASSERT") {
+    await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
     return {};
   }
   if (info.tempTablesReferenced.length > 0) {
-    if (stmt.type === "SELECT" || stmt.type === "UNION") {
-      return { result: await executeQueryWithCte(stmt, client, options, tempTables, cacheContext) };
+    if (resolvedStmt.type === "SELECT" || resolvedStmt.type === "UNION") {
+      return { result: await executeQueryWithCte(resolvedStmt, client, options, tempTables, cacheContext) };
     }
-    if (stmt.type === "WITH") {
-      return { result: await executeWith(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "WITH") {
+      return { result: await executeWith(resolvedStmt, client, options, cacheContext, tempTables) };
     }
-    if (stmt.type === "INSERT_SELECT") {
-      return { result: await executeInsertSelect(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "INSERT_SELECT") {
+      return { result: await executeInsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
     }
-    if (stmt.type === "UPSERT_SELECT") {
-      return { result: await executeUpsertSelect(stmt, client, options, cacheContext, tempTables) };
+    if (resolvedStmt.type === "UPSERT_SELECT") {
+      return { result: await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
     }
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
   }
-  return { result: await executeParsedStatement(stmt, client, options, cacheContext) };
+  return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
 }
 async function runSelectLike(query, client, options, cacheContext, tempTables) {
   if (query.type === "WITH") {
@@ -35713,6 +35884,62 @@ function parseSqlBatch(sql) {
   const tokens = new Lexer(sql).tokenize();
   return new Parser(tokens).parseStatements();
 }
+function evaluateScalarExpr(expr) {
+  switch (expr.type) {
+    case "STRING":
+      return { type: "string", value: expr.value };
+    case "NUMBER":
+      return { type: "number", value: expr.value };
+    case "KINTONE_FUNC":
+      return { type: "string", value: resolveKintoneFunc(expr.name) };
+    case "STRING_FUNC":
+      return { type: "string", value: evalStringFunc(expr, {}) };
+    case "ARITH": {
+      const value = evalArithExpr(expr, {});
+      if (!Number.isFinite(value)) {
+        throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
+      }
+      return { type: "number", value };
+    }
+  }
+}
+function resolveVariableRefs(node, variables) {
+  if (Array.isArray(node)) {
+    return node.map((v) => resolveVariableRefs(v, variables));
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
+      const value = variables.get(obj["name"]);
+      if (value === void 0) {
+        throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+      }
+      return value.type === "number" ? { type: "NUMBER", value: value.value } : { type: "STRING", value: value.value };
+    }
+    return Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, resolveVariableRefs(value, variables)])
+    );
+  }
+  return node;
+}
+function findVariableRef(node) {
+  if (Array.isArray(node)) {
+    for (const value of node) {
+      const found = findVariableRef(value);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") return obj["name"];
+    for (const value of Object.values(obj)) {
+      const found = findVariableRef(value);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
 var AssertError = class extends Error {
   constructor(message) {
     super(`AssertError: ${message}`);
@@ -35743,6 +35970,8 @@ async function executeAssert(stmt, client, options, cacheContext, tempTables) {
 }
 async function evalAssertOperand(operand, client, options, cacheContext, tempTables) {
   switch (operand.type) {
+    case "VARIABLE":
+      throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
     case "NUMBER":
       return String(operand.value);
     case "STRING":
@@ -37244,13 +37473,21 @@ async function resolveScalarColumns(columns, client, options, cacheContext, cteC
 function buildBatchExplainPlans(sql) {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
+  const variables = /* @__PURE__ */ new Map();
   return {
     statementCount: statements.length,
-    statements: statements.map((stmt, i) => ({
-      index: i,
-      type: analysis.statements[i].statementType,
-      plan: buildBatchStatementPlan(stmt, analysis.statements[i])
-    }))
+    statements: statements.map((stmt, i) => {
+      const planStmt = stmt.type === "SET_VARIABLE" ? stmt : resolveVariableRefs(stmt, variables);
+      const result = {
+        index: i,
+        type: analysis.statements[i].statementType,
+        plan: buildBatchStatementPlan(planStmt, analysis.statements[i])
+      };
+      if (stmt.type === "SET_VARIABLE") {
+        variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
+      }
+      return result;
+    })
   };
 }
 function buildBatchStatementPlan(stmt, info) {
@@ -37266,6 +37503,12 @@ function buildBatchStatementPlan(stmt, info) {
     return [
       `DROP TEMP TABLE ${stmt.name}`,
       "  \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u30B9\u30C8\u30A2\u306E\u89E3\u653E\u306E\u307F\uFF08kintone \u30A2\u30AF\u30BB\u30B9\u306A\u3057\uFF09"
+    ];
+  }
+  if (stmt.type === "SET_VARIABLE") {
+    return [
+      `SET @${stmt.name} = <scalar expression>`,
+      "  value:         \u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF08\u30D0\u30C3\u30C1\u5185\u5B9A\u6570\u30FB\u7D50\u679C\u30E1\u30BF\u30C7\u30FC\u30BF\u306B\u306F\u975E\u516C\u958B\uFF09"
     ];
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS\uFF08\u30A2\u30D7\u30EA\u4E00\u89A7\u306E\u53D6\u5F97\uFF09"];
@@ -39703,7 +39946,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.0.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.1.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

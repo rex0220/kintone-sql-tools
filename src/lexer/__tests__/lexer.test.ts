@@ -41,6 +41,22 @@ test("バッククォート識別子", () => {
   expect(toks[1]).toEqual({ k: TokenKind.BIDENT, v: "担当者 名前" });
 });
 
+test("バッチ変数を専用トークンとして読む", () => {
+  expect(tokens("SET @Batch_ID = @x")).toEqual([
+    { k: TokenKind.SET,      v: "SET" },
+    { k: TokenKind.VARIABLE, v: "@Batch_ID" },
+    { k: TokenKind.EQ,       v: "=" },
+    { k: TokenKind.VARIABLE, v: "@x" },
+    { k: TokenKind.EOF,      v: "" },
+  ]);
+});
+
+test("バッチ変数名の形式と64文字上限を検証する", () => {
+  expect(() => tokens("@1x")).toThrow(LexError);
+  expect(() => tokens(`@${"a".repeat(65)}`)).toThrow(/64 文字以内/);
+  expect(tokens(`@${"a".repeat(64)}`)[0].k).toBe(TokenKind.VARIABLE);
+});
+
 // ----------------------------------------------------------------
 // リテラル
 // ----------------------------------------------------------------

@@ -69,6 +69,76 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("SET の数値式を ASSERT と WHERE へ型付きリテラルとして置換する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @min = 2 + 3 * 4; ASSERT @min = 14; SELECT 顧客名 FROM APP100 WHERE 売上 > @min",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(r.statements.map((s) => s.type)).toEqual(["SET_VARIABLE", "ASSERT", "SELECT"]);
+  expect(client.getCalls[0].query).toContain("売上 > 14");
+});
+
+test("SET の文字列関数を UPDATE SET と WHERE に置換する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @name = CONCAT('A', 'B'); SET @id = 2; UPDATE APP100 SET 顧客名 = @name WHERE $id = @id",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(client.getCalls[0].query).toContain("$id = 2");
+  expect(client.putCalls[0].records[0]).toMatchObject({ record: { 顧客名: { value: "AB" } } });
+});
+
+test("IN リストのスカラー変数を SIMPLE 経路でリテラルへ置換する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @a = 'A社'; SET @b = 'B社'; SELECT 顧客名 FROM APP100 WHERE 顧客名 IN (@a, @b, 'C社')",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect(client.getCalls[0].query).toContain('顧客名 in ("A社","B社","C社")');
+});
+
+test("IN (@x) と NOT IN (@x) を FULL_SCAN 経路でスカラー1要素として評価する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const r = await executeBatch(
+    "SET @x = 'B社';" +
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
+    "SELECT 顧客名 FROM #t WHERE 顧客名 IN (@x);" +
+    "SELECT 顧客名 FROM #t WHERE 顧客名 NOT IN (@x)",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect((r.statements[2].result as SelectResult).rows.map((row) => row["顧客名"]))
+    .toEqual(["B社"]);
+  expect((r.statements[3].result as SelectResult).rows.map((row) => row["顧客名"]))
+    .toEqual(["A社", "C社"]);
+});
+
+test("SET の失敗は continueOnError=true でも後続を停止する", async () => {
+  const r = await executeBatch("SET @bad = 1 / 0; SELECT * FROM APP100", makeClient(), { continueOnError: true });
+  expect(r.ok).toBe(false);
+  expect(r.statements[0].status).toBe("error");
+  expect(r.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+});
+
+test("単文 SET と単文の変数参照は execute で拒否する", async () => {
+  await expect(execute("SET @x = 1", makeClient())).rejects.toThrow(/SET variable requires a batch/);
+  await expect(execute("SELECT * FROM APP100 WHERE 売上 > @x", makeClient()))
+    .rejects.toThrow(/variable @x is not defined in a batch/);
+});
+
+test("SET LOGINUSER() は実行前に拒否し、空文字変数を作らない", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  await expect(executeBatch(
+    "SET @user = LOGINUSER(); SELECT * FROM APP100 WHERE 作成者 = @user",
+    client
+  )).rejects.toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
 // ----------------------------------------------------------------
 // 最小経路: CREATE → 参照
 // ----------------------------------------------------------------

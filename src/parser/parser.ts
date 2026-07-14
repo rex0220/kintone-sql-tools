@@ -83,6 +83,9 @@ import type {
   AssertStatement,
   AssertOperand,
   AssertCompareOp,
+  SetVariableStatement,
+  ScalarExpr,
+  VariableRef,
 } from "../types/ast";
 
 /** バッチ(複文)の文数上限 */
@@ -222,6 +225,7 @@ export class Parser {
       case TokenKind.DESCRIBE:
       case TokenKind.DESC:     return this.parseDescribe();
       case TokenKind.EXPLAIN:  return this.parseExplain();
+      case TokenKind.SET:      return this.parseSetVariable();
       case TokenKind.ASSERT:   return this.parseAssert();
       case TokenKind.IDENT: {
         // CREATE / DROP は予約語にせずソフトキーワードで扱う
@@ -235,9 +239,67 @@ export class Parser {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / ASSERT のいずれかで始まる SQL 文が必要です",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / ASSERT のいずれかで始まる SQL 文が必要です",
       tok
     );
+  }
+
+  // ----------------------------------------------------------
+  // SET @name = <ScalarExpr>
+  // ----------------------------------------------------------
+
+  private parseSetVariable(): SetVariableStatement {
+    this.expect(TokenKind.SET);
+    const variable = this.expect(TokenKind.VARIABLE, "SET の後には変数名（例: @name）が必要です");
+    this.expect(TokenKind.EQ);
+    const expr = this.parseScalarExpr();
+    return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
+  }
+
+  /** SET RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
+  private parseScalarExpr(): ScalarExpr {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.VARIABLE) {
+      throw new ParseError("SET の右辺では他の変数を参照できません（Phase 1a）", tok);
+    }
+    if (tok.kind === TokenKind.NULL) {
+      throw new ParseError("SET の右辺で NULL は使用できません（Phase 1a）", tok);
+    }
+    if (tok.kind === TokenKind.LPAREN && this.peekAt(1).kind === TokenKind.SELECT) {
+      throw new ParseError("SET のスカラーサブクエリ代入は Phase 1b で対応予定です", tok);
+    }
+    if (tok.kind === TokenKind.STRING) {
+      this.advance();
+      return { type: "STRING", value: tok.value };
+    }
+    if (tok.kind === TokenKind.LOGINUSER) {
+      throw new ParseError(
+        "SET の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）",
+        tok
+      );
+    }
+    if (tok.kind === TokenKind.TODAY || tok.kind === TokenKind.NOW) {
+      return this.parseSqlValue() as KintoneFunction;
+    }
+    const expr = this.parseArithAddSub();
+    this.rejectNonScalarExpr(expr, tok);
+    if (expr.type === "NUMBER" || expr.type === "STRING_FUNC" || expr.type === "ARITH") return expr;
+    throw new ParseError("SET の右辺にはフィールド参照を含まないスカラー式を指定してください", tok);
+  }
+
+  private rejectNonScalarExpr(node: StringFuncArg, tok: Token): void {
+    if (node.type === "STRING" || node.type === "NUMBER") return;
+    if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
+      throw new ParseError("SET の右辺ではフィールド参照・集計関数を使用できません", tok);
+    }
+    if (node.type === "ARITH" || node.type === "AGG_ARITH") {
+      this.rejectNonScalarExpr(node.left, tok);
+      this.rejectNonScalarExpr(node.right, tok);
+      return;
+    }
+    if (node.type === "STRING_FUNC") {
+      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok);
+    }
   }
 
   // ----------------------------------------------------------
@@ -387,6 +449,11 @@ export class Parser {
   /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
   private parseAssertOperand(): AssertOperand {
     const tok = this.peek();
+
+    if (tok.kind === TokenKind.VARIABLE) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+    }
 
     // 文字列リテラル
     if (tok.kind === TokenKind.STRING) {
@@ -1489,6 +1556,11 @@ export class Parser {
   private parseSqlValue(): SqlValue {
     const tok = this.peek();
 
+    if (tok.kind === TokenKind.VARIABLE) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+    }
+
     // 文字列リテラル
     if (tok.kind === TokenKind.STRING) {
       this.advance();
@@ -1583,8 +1655,10 @@ export class Parser {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === TokenKind.NUMBER) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === TokenKind.VARIABLE) {
+        values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN リストには文字列または数値が必要です", tok);
+        throw new ParseError("IN リストには文字列、数値、またはバッチ変数が必要です", tok);
       }
     } while (this.consume(TokenKind.COMMA));
     return values;
@@ -1868,6 +1942,7 @@ export class Parser {
    */
   private parseAssignmentValue(): SqlValue | ArithExpr {
     const tok = this.peek();
+    if (tok.kind === TokenKind.VARIABLE) return this.parseSqlValue();
     // 文字列リテラルは算術不可
     if (tok.kind === TokenKind.STRING) return this.parseSqlValue();
     // kintone 専用関数（TODAY / NOW / LOGINUSER）

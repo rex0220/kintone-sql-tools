@@ -1715,7 +1715,7 @@ test("構文エラーは ParseError として伝播する", async () => {
 test("未知の文字は LexError として伝播する", async () => {
   const client = makeClient();
   const { LexError } = await import("../lexer/lexer");
-  await expect(execute("@invalid", client)).rejects.toThrow(LexError);
+  await expect(execute("^invalid", client)).rejects.toThrow(LexError);
 });
 
 test("DELETE WHERE なしは ParseError", async () => {
