@@ -2059,8 +2059,11 @@ async function executeInsertSelect(
 
   // 2. 列数チェック
   if (columns.length !== stmt.fields.length) {
+    const emptySourceHint = columns.length === 0 && rows.length === 0
+      ? "。結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
+      : "";
     throw new Error(
-      `SELECT の列数（${columns.length}）と INSERT のフィールド数（${stmt.fields.length}）が一致しません`
+      `SELECT の列数（${columns.length}）と INSERT のフィールド数（${stmt.fields.length}）が一致しません${emptySourceHint}`
     );
   }
 
@@ -2748,8 +2751,11 @@ async function executeUpsertSelect(
   const { rows, columns } = selectResult;
 
   if (columns.length !== stmt.fields.length) {
+    const emptySourceHint = columns.length === 0 && rows.length === 0
+      ? "。結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
+      : "";
     throw new Error(
-      `SELECT の列数（${columns.length}）と UPSERT のフィールド数（${stmt.fields.length}）が一致しません`
+      `SELECT の列数（${columns.length}）と UPSERT のフィールド数（${stmt.fields.length}）が一致しません${emptySourceHint}`
     );
   }
 

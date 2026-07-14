@@ -2,6 +2,17 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.1.1（2026-07-14）
+
+### 修正（バグ）
+
+- **0 行の `SELECT` が出力列を失い、空ソースの `INSERT` / `UPSERT … SELECT` が誤メッセージで失敗する問題を修正**。明示列（例: `SELECT a, b`）の SELECT でも結果が 0 行のとき列名リストが空になり、`SELECT の列数（0）と INSERT/UPSERT のフィールド数が一致しません` で停止していた。列名を行データではなく `SelectColumn`（AST）から行ループ前に確定するようにした。
+  - これにより**差分バッチの「差分 0 件の日」**でも、空の一時テーブルや空ソースからの `INSERT` / `UPSERT … SELECT` が **`insertedCount=0`（`UPSERT` は `insertedCount=0 / updatedCount=0`）の no-op** として正常に完走する。書き込み API（POST / PUT）も呼ばれない。
+  - **左辺が 0 行の `UNION` / `UNION ALL`** も、結果列が左辺由来の列名で確定し、右辺の値が正しく載る（通常 `UNION` の重複排除も左辺列で機能する）。
+  - 全 8 列型（`FIELD` / `LITERAL_COL` / `AGGREGATE` / `ARITH_AGG_COL` / `ARITH_COL` / `CASE_COL` / `STRFUNC_COL` / `SCALAR_SUBQUERY_COL`）が対象。**1 行以上の既存結果（列名・列順・値）は不変**。
+  - **対象外（別課題）**: 空の `SELECT *`・空 CTE・混在ワイルドカード（`SELECT *, a`）は列がデータ依存のため今回は対象外。空の `SELECT *` を空ソースに使った場合は「結果が 0 行のため列を特定できません（明示列で指定してください）」と案内する。
+  - この修正はプラグインの `project()` にもバンドルされ、クライアント側 SELECT の列表示にも反映される。詳細は `docs/internal/ksql_empty_select_columns_issue.md` / `..._fix_spec.md` を参照。
+
 ## v2.1.0（2026-07-14）
 
 ### 追加

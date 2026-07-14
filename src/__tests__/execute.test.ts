@@ -977,6 +977,52 @@ test("INSERT INTO ... SELECT — 101行 → POST 2回", async () => {
   expect(client.postCalls[1].records).toHaveLength(1);
 });
 
+test("INSERT INTO ... SELECT — 明示列の空ソースは insertedCount=0 の no-op", async () => {
+  const client = makeClient({ recordsByApp: { 100: [] } });
+
+  const result = await execute(
+    "INSERT INTO APP200 (顧客名, 単価) SELECT 名前, 金額 FROM APP100",
+    client,
+    { cacheContext: "empty-insert-select" }
+  ) as InsertResult;
+
+  expect(result).toMatchObject({ type: "INSERT", insertedCount: 0 });
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("INSERT INTO ... SELECT * — 空ソースの列数エラーは明示列を案内する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [] } });
+
+  await expect(
+    execute(
+      "INSERT INTO APP200 (顧客名) SELECT * FROM APP100",
+      client,
+      { cacheContext: "empty-insert-wildcard-message" }
+    )
+  ).rejects.toThrow(
+    "結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
+  );
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("INSERT INTO ... SELECT * — 非空結果の 0 列エラーでは 0 行と誤案内しない", async () => {
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ "_p.hidden": "x" })] } });
+  const execution = execute(
+    "INSERT INTO APP200 (顧客名) SELECT * FROM APP100",
+    client,
+    { cacheContext: "nonempty-zero-column-message" }
+  );
+
+  await expect(execution).rejects.toThrow(
+    "SELECT の列数（0）と INSERT のフィールド数（1）が一致しません"
+  );
+  await expect(execution).rejects.not.toThrow("結果が 0 行のため");
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("INSERT INTO ... SELECT — 列数不一致はエラー", async () => {
   const client = makeClient({
     recordsByApp: { 100: [makeRecord({ 名前: "田中" })] },
@@ -1076,6 +1122,26 @@ test("UNION — 右辺の列名を左辺の列名に位置対応でリマップ"
   expect(result.columns).toEqual(["n", "amt"]);
   expect(result.rows[0]).toEqual({ n: "田中", amt: "1000" });
   expect(result.rows[1]).toEqual({ n: "鈴木", amt: "2000" });
+});
+
+test.each([
+  { operator: "UNION ALL", expected: ["X", "X", "Y"] },
+  { operator: "UNION", expected: ["X", "Y"] },
+])("$operator — 左辺が空でも左辺列名で右辺を保持する", async ({ operator, expected }) => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [],
+      200: [makeRecord({ b: "X" }), makeRecord({ b: "X" }), makeRecord({ b: "Y" })],
+    },
+  });
+
+  const result = await execute(
+    `SELECT a FROM APP100 ${operator} SELECT b FROM APP200`,
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["a"]);
+  expect(result.rows.map((row) => row.a)).toEqual(expected);
 });
 
 test("UNION 3ウェイチェーン — 左結合で順番通り結合", async () => {

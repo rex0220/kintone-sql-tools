@@ -468,6 +468,43 @@ test("UPSERT_SELECT: 一時テーブルソースを実行でき insert / update 
   expect(client.putCalls).toHaveLength(1); // B社の UPDATE
 });
 
+test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで成功する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
+    "UPSERT INTO APP400 (顧客名, 売上) SELECT 顧客名, 売上 FROM #t ON DUPLICATE (顧客名)",
+    client,
+    { cacheContext: "empty-temp-upsert-select" }
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[0]).toMatchObject({ status: "success", rowCount: 0 });
+  expect(r.statements[1]).toMatchObject({ type: "UPSERT_SELECT", status: "success" });
+  expect(r.statements[1].result).toMatchObject({
+    type: "UPSERT",
+    insertedCount: 0,
+    updatedCount: 0,
+  });
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const r = await executeBatch(
+    "UPSERT INTO APP400 (顧客名) SELECT * FROM APP100 ON DUPLICATE (顧客名)",
+    client,
+    { cacheContext: "empty-upsert-wildcard-message" }
+  );
+
+  expect(r.ok).toBe(false);
+  expect(r.statements[0].error?.message).toContain(
+    "結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
+  );
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("UPSERT_SELECT: 一時テーブルソースでも confirm 拒否で当該文ゼロ書き込み", async () => {
   const client = makeClient({
     recordsByApp: { 100: APP1, 400: [] },

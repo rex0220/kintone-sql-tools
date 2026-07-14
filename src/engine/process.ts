@@ -589,8 +589,12 @@ export function project(
     return { rows: projected, columns: cols };
   }
 
-  const orderedKeys: string[] = [];
   const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
+  const hasWildcard = columns.some(
+    (col) => col.type === "WILDCARD" || col.type === "PARENT_WILDCARD"
+  );
+  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys);
+  const orderedKeys: string[] = outputKeys ?? [];
 
   const projected = rows.map((row, rowIdx) => {
     const out: ProcessRow = {};
@@ -608,58 +612,58 @@ export function project(
           break;
         }
         case "FIELD": {
-          const key = col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
           out[key] = resolveFieldRef(row, col.field);
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "LITERAL_COL": {
-          const key = col.alias ?? `'${col.value}'`;
+          const key = outputKeys?.[colIdx] ?? col.alias ?? `'${col.value}'`;
           out[key] = col.value;
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "AGGREGATE": {
           const srcKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
-          const dstKey = col.alias ?? srcKey;
+          const dstKey = outputKeys?.[colIdx] ?? col.alias ?? srcKey;
           out[dstKey] = row[col.alias ?? srcKey] ?? row[srcKey] ?? "0";
-          if (rowIdx === 0) orderedKeys.push(dstKey);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(dstKey);
           break;
         }
         case "ARITH_AGG_COL": {
-          const key = col.alias ?? aggArithDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? aggArithDefaultKey(col.expr);
           out[key] = row[key] ?? "0";
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "ARITH_COL": {
           const val = evalArithExpr(col.expr, row);
-          const key = col.alias ?? arithColDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? arithColDefaultKey(col.expr);
           out[key] = String(val);
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "CASE_COL": {
-          const key = col.alias ?? "case";
+          const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
           out[key] = evalCaseWhen(col.expr, row);
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "STRFUNC_COL": {
-          const key = col.alias ?? stringFuncDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? stringFuncDefaultKey(col.expr);
           if (hasAggregateInStringFuncExpr(col.expr)) {
             const srcKey = stringFuncDefaultKey(col.expr);
             out[key] = row[col.alias ?? srcKey] ?? row[srcKey] ?? evalStringFunc(col.expr, row);
           } else {
             out[key] = evalStringFunc(col.expr, row);
           }
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "SCALAR_SUBQUERY_COL": {
-          const key = col.alias ?? "(subquery)";
+          const key = outputKeys?.[colIdx] ?? col.alias ?? "(subquery)";
           out[key] = scalarCache?.get(colIdx) ?? "";
-          if (rowIdx === 0) orderedKeys.push(key);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
       }
@@ -668,6 +672,36 @@ export function project(
   });
 
   return { rows: projected, columns: orderedKeys };
+}
+
+/** ワイルドカードを含まない SELECT 列の出力キーを AST から算出する。 */
+function computeOutputKeys(
+  columns: SelectColumn[],
+  defaultFieldKeys: Map<number, string>
+): string[] {
+  return columns.map((col, colIdx) => {
+    switch (col.type) {
+      case "FIELD":
+        return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
+      case "LITERAL_COL":
+        return col.alias ?? `'${col.value}'`;
+      case "AGGREGATE":
+        return col.alias ?? aggregateSyntheticName(col.func, col.distinct, col.arg);
+      case "ARITH_AGG_COL":
+        return col.alias ?? aggArithDefaultKey(col.expr);
+      case "ARITH_COL":
+        return col.alias ?? arithColDefaultKey(col.expr);
+      case "CASE_COL":
+        return col.alias ?? "case";
+      case "STRFUNC_COL":
+        return col.alias ?? stringFuncDefaultKey(col.expr);
+      case "SCALAR_SUBQUERY_COL":
+        return col.alias ?? "(subquery)";
+      case "WILDCARD":
+      case "PARENT_WILDCARD":
+        throw new Error("internal: computeOutputKeys received a wildcard column");
+    }
+  });
 }
 
 function buildDefaultFieldOutputKeys(columns: SelectColumn[]): Map<number, string> {
