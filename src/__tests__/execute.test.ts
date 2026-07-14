@@ -365,6 +365,44 @@ test("FULL_SCAN: JOIN + WHERE（join側フィールド）は API WHERE に押し
   expect(mainCall?.query).not.toContain("商談フェーズ");
 });
 
+test("ワイルドカードなし LIKE も押し下げず JS の部分一致で評価する", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ 会社名: "東京支店" }),
+    makeRecord({ 会社名: "大阪支店" }),
+  ] });
+  const result = await execute(
+    "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '東京'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows.map((row) => row["会社名"])).toEqual(["東京支店"]);
+  expect(client.getCalls.every((call) => !call.query.toLowerCase().includes("like"))).toBe(true);
+});
+
+test("FULL_SCAN: JOIN + ワイルドカード LIKE は押し下げず JS で評価する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ $id: "1", 顧客ID: "C1", 文字列: "てすと２０" }),
+        makeRecord({ $id: "2", 顧客ID: "C2", 文字列: "すと２０" }),
+      ],
+      101: [
+        makeRecord({ $id: "10", 顧客ID: "C1" }),
+        makeRecord({ $id: "11", 顧客ID: "C2" }),
+      ],
+    },
+  });
+
+  const result = await execute(
+    "SELECT a.文字列 FROM APP100 AS a INNER JOIN APP101 AS b ON a.顧客ID = b.顧客ID " +
+    "WHERE a.文字列 LIKE 'すと%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 文字列: "すと２０" }]);
+  expect(client.getCalls.every((call) => !call.query.toLowerCase().includes("like"))).toBe(true);
+});
+
 test("FULL_SCAN: サブテーブルは $id / サブテーブル本体 / _p.参照親項目のみ取得", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -691,6 +729,37 @@ test("UPDATE サブテーブル行（_rid 条件）", async () => {
   expect(table[1].id).toBe("r2");
   expect(table[1].value?.["数量"].value).toBe("5");
   expect(table[1].value?.["商品コード"]).toBeUndefined();
+});
+
+test("UPDATE サブテーブル行はワイルドカード LIKE を JS 評価する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 商品コード: { value: "A-001" }, 数量: { value: "1" } } },
+      { id: "r2", value: { 商品コード: { value: "B-001" }, 数量: { value: "2" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  const result = await execute(
+    "UPDATE APP100$明細 SET 数量 = 9 WHERE _rid LIKE 'r_' AND 商品コード LIKE 'A%'",
+    client
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(1);
+  expect(client.putCalls).toHaveLength(1);
+});
+
+test("UPDATE サブテーブルの取得上限は truncate 指定でも error のまま", async () => {
+  const row = (id: string) => ({
+    $id: { value: id }, $revision: { value: "1" },
+    明細: { value: [{ id: `r${id}`, value: { 商品コード: { value: "A-001" }, 数量: { value: "1" } } }] },
+  } as unknown as KintoneRecord);
+  const client = makeClient({ recordsByApp: { 100: [row("1"), row("2")] } });
+
+  await expect(execute(
+    "UPDATE APP100$明細 SET 数量 = 9 WHERE _rid LIKE 'r'",
+    client,
+    { maxRecords: 1, onLimitReached: "truncate" }
+  )).rejects.toThrow("取得件数が上限（1 件）を超えました");
+  expect(client.putCalls).toHaveLength(0);
 });
 
 test("UPDATE サブテーブルは _rid 条件必須", async () => {

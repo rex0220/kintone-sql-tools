@@ -1,4 +1,5 @@
 import type { WhereExpr, FieldValue, SqlValue } from "../../types/ast";
+import { isLike } from "../like";
 
 /**
  * WHERE 式から指定テーブルエイリアスの push down 可能な条件を抽出する。
@@ -13,6 +14,7 @@ export function extractTableCondition(
 ): WhereExpr | null {
   switch (where.type) {
     case "BINARY":
+      if (isLike(where)) return null;
       if (!isSingleTableField(where.left, tableAlias)) return null;
       if (!isPushDownableRight(where.right)) return null;
       return where;
@@ -64,7 +66,7 @@ function isPushDownableRight(value: SqlValue): boolean {
 function referencesOnlyTable(expr: WhereExpr, tableAlias: string): boolean {
   switch (expr.type) {
     case "BINARY":
-      return isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
+      return !isLike(expr) && isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
     case "NULL_CHECK":
       return isSingleTableField(expr.field, tableAlias);
     case "LOGICAL":

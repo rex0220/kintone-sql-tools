@@ -26,6 +26,16 @@ import type {
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr } from "../engine/evalFunc";
+import { whereHasLike } from "../core/like";
+
+function assertDmlWhereIsSafe(where: WhereExpr): void {
+  if (!whereHasLike(where)) return;
+  throw new DmlConvertError(
+    "UPDATE / DELETE の WHERE に LIKE / NOT LIKE は使用できません。" +
+    "LIKE は kSQL の意味論に従って JS で評価する必要がありますが、親レコード DML には JS 評価経路がないため、安全上拒否しました。" +
+    "SELECT で対象レコード番号を確認し、IN または完全一致で対象を指定してください。"
+  );
+}
 
 // ============================================================
 // kintone API リクエスト型
@@ -128,6 +138,7 @@ function buildInsertRecord(
  * kintone GET クエリを生成する。
  */
 export function updateToGetQuery(stmt: UpdateStatement): KintoneGetForDmlParams {
+  assertDmlWhereIsSafe(stmt.where);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -184,6 +195,7 @@ export function hasArithAssignment(stmt: UpdateStatement): boolean {
  * $id に加えて、算術式で参照されるフィールド名も取得対象に含める。
  */
 export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDmlParams {
+  assertDmlWhereIsSafe(stmt.where);
   const refFields = new Set<string>();
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
@@ -351,6 +363,7 @@ function resolveArithOperand(operand: ArithNode, raw: KintoneRecord): number {
  * kintone GET クエリを生成する。
  */
 export function deleteToGetQuery(stmt: DeleteStatement): KintoneGetForDmlParams {
+  assertDmlWhereIsSafe(stmt.where);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),

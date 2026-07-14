@@ -17,6 +17,7 @@ import type {
   ScalarSubquery,
 } from "../types/ast";
 import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
+import { likePatternHasWildcard } from "../core/like";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -179,7 +180,10 @@ function resolveValue(value: SqlValue, row: ProcessRow): string {
     case "IN_LIST":           return ""; // IN は evalOp で別処理
     case "SUBQUERY_IN_LIST":  return ""; // IN (SELECT) は evalOp で別処理
     case "SCALAR_SUBQUERY":   return (value as ResolvedScalarSubquery).resolved;
-    case "ARITH_VALUE":       return String(evalArithExpr(value.expr, row));
+    case "ARITH_VALUE":
+      if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
+      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
+      return String(evalArithExpr(value.expr, row));
     case "CASE_VALUE":        return evalCaseWhen(value.expr, row);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
@@ -242,7 +246,7 @@ const LIKE_REGEX_CACHE_MAX = 200;
 function matchLike(value: string, pattern: string): boolean {
   // kintone の LIKE はワイルドカード（% / _）なしでも部分一致（contains）
   // FULL_SCAN 時の JS 評価も同じ挙動にする
-  if (!pattern.includes("%") && !pattern.includes("_")) {
+  if (!likePatternHasWildcard(pattern)) {
     return value.includes(pattern);
   }
   let regex = likeRegexCache.get(pattern);

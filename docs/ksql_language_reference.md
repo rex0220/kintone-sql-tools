@@ -607,9 +607,10 @@ WHERE 氏名 NOT LIKE '田%'    -- 「田」で始まらない
 WHERE 顧客名 LIKE '会社'     -- 「会社」を含む（ワイルドカードなし＝部分一致）
 ```
 
-> **ワイルドカードなしの LIKE は部分一致（contains）です。**  
-> `LIKE '会社'` は kintone API の挙動に合わせ「会社を含む」として評価されます。  
-> `LIKE '%会社%'` と同等です。
+> **v2.0.0以降の評価経路（Breaking）**<br>
+> `LIKE` / `NOT LIKE`はワイルドカードの有無にかかわらずkintoneへ渡さず、全件取得後にJavaScriptで評価します。`%` / `_`付きは上表のSQLワイルドカード、ワイルドカードなしの`LIKE '会社'`はkSQL独自仕様の部分一致（`includes`）です。kintoneの単語（トークン）検索には委譲しません。<br>
+> LIKEを含むSELECTはFULL_SCANになります。LIKE以外の絞り込み条件をANDで併記しても、現時点ではWHERE全体を押し下げず全件取得します。大規模アプリでは一致件数にかかわらず全走査件数が`maxRecords`へ到達し、既定ではエラーになります。`onLimitReached = "truncate"`を選ぶと上限以降の一致行を欠落させる可能性があります。<br>
+> 通常の親レコードに対する`UPDATE` / `DELETE`では、すべての`LIKE` / `NOT LIKE`を拒否します。先に上限エラーのないSELECTで対象レコード番号を確認し、`IN`または完全一致条件で対象を指定してください。サブテーブルDMLはJavaScript評価経路のため従来どおり使用できます。
 
 ### IS NULL / IS NOT NULL
 
@@ -1684,8 +1685,7 @@ ON a.金額 > b.下限金額
 
 ### LIKE の挙動
 
-ワイルドカードなし（`LIKE 'keyword'`）は kintone API と同様に**部分一致（contains）**として評価されます。  
-`LIKE 'keyword'` と `LIKE '%keyword%'` は同等です。
+v2.0.0以降、LIKEはワイルドカードの有無にかかわらず常にJavaScriptで評価し、kintoneへ押し下げません。ワイルドカードなしはkSQL独自の部分一致（`includes`）です。通常の親レコードDMLではLIKEを使用できません。詳細は「LIKE / NOT LIKE（部分一致・除外）」を参照してください。
 
 ---
 
