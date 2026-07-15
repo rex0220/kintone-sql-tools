@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v2.9.0)
+ksql 配布パッケージ (v2.10.0)
 
-1. ksql-plugin-v2.9.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.10.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.10.0: 検索打ち切り検出と FROM なし SELECT 実体化の修正(後方互換)。
+- FROM なし SELECT/UNION(SELECT 'A' UNION ALL SELECT 'B' 等)を CREATE TEMP TABLE AS で
+  実体化すると 0 行になる不具合を修正。リテラル値リストを一時テーブル化して
+  IN (SELECT ... FROM #t) で使えるように(レシピ集 R5)。
+- kintone の検索打ち切り(10万件・like/not like/KLIKE)を検出。SELECT は警告付き、
+  DML・SELECT ベース DML・一時テーブル実体化は書き込み前に SearchAbortedError で停止
+  (サイレントな一部更新/削除を防止)。X-Cybozu-Warning を Node/CLI/MCP で判定
+  (プラグインは非検出)。将来 KLIKE 親 DML 解禁の安全基盤。
+- レシピ集に R5 と検索打ち切りの注意を追記。
+- 詳細は CHANGELOG.md を参照。
 
 v2.9.0: KLIKE プレフィルタ押し下げ(最適化・後方互換)。
 - FULL_SCAN の SELECT でも、KLIKE / NOT KLIKE が安全な AND リーフなら kintone へ

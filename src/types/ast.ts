@@ -7,6 +7,9 @@
 // トップレベル
 // ------------------------------------------------------------
 
+/** FROM なし SELECT を AST 上で表す予約 cteName。 */
+export const NO_FROM_CTE_NAME = "__NO_FROM__";
+
 export type Statement =
   | SelectStatement
   | UnionStatement

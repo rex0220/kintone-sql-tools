@@ -31362,6 +31362,9 @@ function isJapanese(cp) {
   return cp >= 12352 && cp <= 12543 || cp >= 13312 && cp <= 40959 || cp >= 63744 && cp <= 64255 || cp >= 65281 && cp <= 65376;
 }
 
+// src/types/ast.ts
+var NO_FROM_CTE_NAME = "__NO_FROM__";
+
 // src/parser/parser.ts
 var MAX_BATCH_STATEMENTS = 20;
 var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
@@ -31875,7 +31878,7 @@ var Parser = class {
     const distinct = this.consume("DISTINCT" /* DISTINCT */);
     const columns = this.parseSelectColumns();
     const hasFrom = this.consume("FROM" /* FROM */);
-    const from = hasFrom ? this.parseTableRef() : { appId: 0, alias: null, cteName: "__NO_FROM__" };
+    const from = hasFrom ? this.parseTableRef() : { appId: 0, alias: null, cteName: NO_FROM_CTE_NAME };
     const joins = hasFrom ? this.parseJoins() : [];
     const where = this.consume("WHERE" /* WHERE */) ? this.parseWhereExpr() : null;
     let groupBy = [];
@@ -33263,7 +33266,7 @@ function hasWhereClause(stmt) {
 function isNoFromSelectStatement(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
   const obj = stmt;
-  return obj.type === "SELECT" && obj.from?.appId === 0 && obj.from?.cteName === "__NO_FROM__";
+  return obj.type === "SELECT" && obj.from?.appId === 0 && obj.from?.cteName === NO_FROM_CTE_NAME;
 }
 function getInsertValuesCount(stmt) {
   if (!stmt || typeof stmt !== "object") return null;
@@ -35420,6 +35423,7 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
   let windowOffset = 0;
   const cursorQuery0 = buildCursorQuery(query, cursorId);
   const first = await fetchPage(fetcher, app, cursorQuery0, fetchFields, pageSize, windowOffset);
+  notifySearchAborted(first, options);
   allRecords.push(...first.records);
   if (allRecords.length > maxRecords2) {
     if (onLimit2 === "truncate") {
@@ -35463,6 +35467,7 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
         (offset) => fetchPage(fetcher, app, cq, fetchFields, pageSize, offset)
       )
     );
+    for (const response of responses) notifySearchAborted(response, options);
     let done = false;
     for (const res of responses) {
       allRecords.push(...res.records);
@@ -35490,6 +35495,9 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
     }
   }
   return allRecords;
+}
+function notifySearchAborted(response, options) {
+  if (response.searchAborted) options.onSearchAborted?.();
 }
 function extractIds(records) {
   return records.map((r) => {
@@ -35547,7 +35555,8 @@ async function fetchRecordsForSharedPlan(getRecords, app, query, fields, options
     maxRecords: options.maxRecords,
     parallel: options.parallel,
     onLimit: options.onLimit ?? "error",
-    onTruncate: options.onTruncate
+    onTruncate: options.onTruncate,
+    onSearchAborted: options.onSearchAborted
   });
   return {
     records,
@@ -36160,13 +36169,32 @@ function toFlatString(value) {
 }
 
 // src/execute.ts
+var SEARCH_ABORTED_WARNING = "\u691C\u7D22\u304C 10 \u4E07\u4EF6\u3067\u6253\u3061\u5207\u3089\u308C\u3001\u7D50\u679C\u304C\u6B20\u843D\u3057\u305F\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002";
+var SearchAbortedError = class extends Error {
+  constructor() {
+    super("SearchAbortedError: kintone \u306E\u691C\u7D22\u304C 10 \u4E07\u4EF6\u3067\u6253\u3061\u5207\u3089\u308C\u305F\u305F\u3081\u3001\u5B8C\u5168\u306A\u5BFE\u8C61\u96C6\u5408\u3092\u78BA\u5B9A\u3067\u304D\u307E\u305B\u3093\u3002");
+    this.name = "SearchAbortedError";
+  }
+};
 async function execute(sql, client, options = {}) {
+  const startedAt = Date.now();
+  const stmt = parseSql(sql);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
-  const startedAt = Date.now();
-  const result = await executeStatement(sql, countedClient, options);
+  const collector = { aborted: false };
+  const guardedClient = wrapClientWithSearchAbort(
+    countedClient,
+    collector,
+    !isSelectLikeStatement(stmt)
+  );
+  const result = await executeParsedStatement(
+    stmt,
+    guardedClient,
+    options,
+    options.cacheContext ?? "default"
+  );
   metrics.elapsedMs = Date.now() - startedAt;
-  return { ...result, metrics };
+  return { ...attachSearchAbortWarning(result, collector), metrics };
 }
 function createEmptyMetrics() {
   return {
@@ -36215,10 +36243,27 @@ function wrapClientWithMetrics(client, metrics) {
     }
   };
 }
-async function executeStatement(sql, client, options) {
-  const cacheContext = options.cacheContext ?? "default";
-  const stmt = parseSql(sql);
-  return executeParsedStatement(stmt, client, options, cacheContext);
+function wrapClientWithSearchAbort(client, collector, failClosed) {
+  return {
+    ...client,
+    getRecords: async (params) => {
+      const response = await client.getRecords(params);
+      if (response.searchAborted) {
+        collector.aborted = true;
+        if (failClosed) throw new SearchAbortedError();
+      }
+      return response;
+    }
+  };
+}
+function isSelectLikeStatement(stmt) {
+  return stmt.type === "SELECT" || stmt.type === "UNION" || stmt.type === "WITH";
+}
+function attachSearchAbortWarning(result, collector) {
+  if (!collector.aborted || result.type !== "SELECT") return result;
+  const warnings = new Set(result.warnings ?? []);
+  warnings.add(SEARCH_ABORTED_WARNING);
+  return { ...result, warnings: [...warnings] };
 }
 async function executeParsedStatement(stmt, client, options, cacheContext) {
   const unresolved = findVariableRef(stmt);
@@ -36331,10 +36376,19 @@ async function executeBatch(sql, client, options = {}) {
           targetAppId: info.targetAppId
         })
       } : batchOptions;
+      const searchAbortCollector = { aborted: false };
+      const statementClient = wrapClientWithSearchAbort(
+        countedClient,
+        searchAbortCollector,
+        info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
+      );
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
+        executeBatchStatement(statements[i], info, statementClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
       );
+      if (outcome.result) {
+        outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+      }
       results.push({ ...base, status: "success", ...outcome });
     } catch (e) {
       results.push({ ...base, status: "error", error: toBatchStatementError(e) });
@@ -36665,7 +36719,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache) {
   }
 }
 function isNoFromSelect(stmt) {
-  return stmt.from.appId === 0 && stmt.from.cteName === "__NO_FROM__";
+  return stmt.from.appId === 0 && stmt.from.cteName === NO_FROM_CTE_NAME;
 }
 function arithHasFieldRef(node) {
   if (node.type === "FIELD_REF") return true;
@@ -37126,7 +37180,7 @@ async function executeQueryWithCte(query, client, options, cteCache, cacheContex
     const rows = query.all ? combined : deduplicateRows(combined, leftCols);
     return { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
   }
-  const hasCteRef = query.from.cteName != null || query.joins.some((j) => j.table.cteName != null);
+  const hasCteRef = query.from.cteName != null && query.from.cteName !== NO_FROM_CTE_NAME || query.joins.some((j) => j.table.cteName != null);
   if (!hasCteRef) {
     return executeSelect(query, client, options, cacheContext, cteCache);
   }
@@ -39163,10 +39217,11 @@ function detectSortKind(fieldType, calcFormat) {
 }
 
 // src/cli/nodeKintoneClient.ts
+var SEARCH_ABORTED_HEADER_VALUE = "Filter aborted because of too many search results";
 function createNodeKintoneClient(baseUrl, tokenResolver) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const apiBasePath = tokenResolver.guestSpaceId && tokenResolver.guestSpaceId > 0 ? `/k/guest/${tokenResolver.guestSpaceId}/v1` : "/k/v1";
-  async function requestJson(path, init, appIdForToken) {
+  async function requestJsonResponse(path, init, appIdForToken) {
     const headers = new Headers(init.headers ?? {});
     if (tokenResolver.auth.type === "token") {
       headers.set("X-Cybozu-API-Token", tokenResolver.auth.resolveToken(appIdForToken));
@@ -39214,7 +39269,14 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
     if (tokenResolver.debug) {
       tokenResolver.log?.(`[debug] response status=${res.status}`);
     }
-    return await res.json();
+    const warning = res.headers.get("X-Cybozu-Warning") ?? "";
+    return {
+      body: await res.json(),
+      searchAborted: warning.includes(SEARCH_ABORTED_HEADER_VALUE)
+    };
+  }
+  async function requestJson(path, init, appIdForToken) {
+    return (await requestJsonResponse(path, init, appIdForToken)).body;
   }
   function shouldRetryWithRecordNumberOrder(path, bodyText) {
     if (!path.includes("/v1/records.json?")) return false;
@@ -39248,11 +39310,12 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
       }
       const path = `${apiBasePath}/records.json?${qs}`;
       try {
-        return await requestJson(
+        const response = await requestJsonResponse(
           path,
           { method: "GET" },
           params.app
         );
+        return response.searchAborted ? { ...response.body, searchAborted: true } : response.body;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!shouldRetryWithRecordNumberOrder(path, msg)) throw err;
@@ -39260,11 +39323,12 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
         if (tokenResolver.debug) {
           tokenResolver.log?.("[debug] retry with fallback query order by \u30EC\u30B3\u30FC\u30C9\u756A\u53F7 asc");
         }
-        return await requestJson(
+        const response = await requestJsonResponse(
           retryPath,
           { method: "GET" },
           params.app
         );
+        return response.searchAborted ? { ...response.body, searchAborted: true } : response.body;
       }
     },
     async postRecords(_params) {
@@ -40822,7 +40886,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.9.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.10.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
