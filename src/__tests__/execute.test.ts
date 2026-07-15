@@ -717,6 +717,67 @@ test("FULL_SCAN: MULTI_SELECT NOT IN を押し下げ、空配列は最終JS評�
   expect(result.rows).toEqual([{ $id: "1" }]);
 });
 
+test("FULL_SCAN: 選択系の空スカラー・空配列を IN ('') と投影・CASEで一貫して扱う", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ドロップダウン: null, 複数選択: [], 件名: "empty" }),
+    makeTypedRecord({ $id: "2", ドロップダウン: "A", 複数選択: ["A"], 件名: "set" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ドロップダウン", label: "ドロップダウン", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+    { code: "複数選択", label: "複数選択", fieldType: "MULTI_SELECT", optionOrder: { A: 0 } },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id, ドロップダウン, " +
+      "CASE WHEN 複数選択 IN ('') THEN 'empty' ELSE 'set' END AS 配列状態 " +
+      "FROM APP98107 WHERE ドロップダウン IN ('') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-empty-scalar-array" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1", ドロップダウン: "", 配列状態: "empty" }]);
+  expect(client.getCalls[0].query).not.toContain("ドロップダウン in");
+});
+
+test("FULL_SCAN: 選択系 NOT IN ('') は非空セルだけを返す", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", 選択: [], 件名: "empty" }),
+    makeTypedRecord({ $id: "2", 選択: ["A"], 件名: "set" }),
+  ] });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX", optionOrder: { A: 0 } },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id FROM APP98108 WHERE 選択 NOT IN ('') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-empty-not-in" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ $id: "2" }]);
+});
+
+test("FULL_SCAN: IN (SELECT ...) の空文字は空配列選択に一致する", async () => {
+  const client = makeClient({ recordsByApp: {
+    98109: [makeTypedRecord({ $id: "1", 選択: [], 件名: "empty" })],
+    98110: [makeRecord({ code: "" })],
+  } });
+  client.getFields = async (appId) => appId === 98109
+    ? [
+      { code: "選択", label: "選択", fieldType: "USER_SELECT" },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const result = await execute(
+    "SELECT $id FROM APP98109 WHERE 選択 IN (SELECT code FROM APP98110) AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-empty-subquery" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ $id: "1" }]);
+});
+
 test.each(["'X'", "''"])(
   "FULL_SCAN: 非実在または空の選択肢 %s はリーフだけ非押し下げにする",
   async (literal) => {
@@ -1293,6 +1354,35 @@ test("UPDATE サブテーブル: CHECK_BOX IN の要素一致を対象件数・�
 
   expect(confirmedCount).toBe(1);
   expect(result.updatedCount).toBe(1);
+});
+
+test("UPDATE サブテーブル: 空 CHECK_BOX は IN ('') の対象になる", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 選択: { value: [] }, 数量: { value: "1" } } },
+      { id: "r2", value: { 選択: { value: ["A"] }, 数量: { value: "2" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX" },
+    { code: "数量", label: "数量", fieldType: "NUMBER" },
+  ];
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "UPDATE APP100$明細 SET 数量 = 9 WHERE _rid LIKE '%' AND 選択 IN ('')",
+    client,
+    { cacheContext: "typed-in-empty-subtable-update", confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as UpdateResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.updatedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{
+    id?: string; value?: Record<string, { value: string }>;
+  }>;
+  expect(table.find((row) => row.id === "r1")?.value?.["数量"].value).toBe("9");
+  expect(table.find((row) => row.id === "r2")?.value).toBeUndefined();
 });
 
 test("UPDATE サブテーブル: 空数値セルを >= の対象から外し、確認件数と更新件数を揃える", async () => {

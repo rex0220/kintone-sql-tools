@@ -66,7 +66,9 @@ export function flatten(record: KintoneRecord, alias: string | null): ProcessRow
   for (const [field, fv] of Object.entries(record)) {
     // ユーザー選択・サブテーブル等は value が配列/オブジェクトになる場合がある
     const val = (fv as { value: unknown }).value;
-    const strVal = typeof val === "string" ? val : JSON.stringify(val ?? "");
+    const strVal = val == null
+      ? ""
+      : (typeof val === "string" ? val : JSON.stringify(val));
     if (alias) {
       row[`${alias}.${field}`] = strVal; // 修飾キー: "APP89.顧客名"
       row[field]               = strVal; // 非修飾フォールバック: "顧客名"

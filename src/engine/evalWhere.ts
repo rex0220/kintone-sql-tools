@@ -176,11 +176,13 @@ function typedInContains(
     if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
       return fallback();
     }
+    if (parsed.length === 0 && values.has("")) return true;
     return parsed.some((item) => values.has(item));
   }
 
   if (OBJECT_ARRAY_FIELD_TYPES.has(fieldType)) {
     if (!Array.isArray(parsed) || !parsed.every(hasStringCode)) return fallback();
+    if (parsed.length === 0 && values.has("")) return true;
     return parsed.some((item) => values.has(item.code));
   }
 
