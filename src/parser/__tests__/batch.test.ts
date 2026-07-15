@@ -78,13 +78,32 @@ test("変数参照を WHERE / UPDATE SET / ASSERT の直接値で受理する", 
   expect((stmts[2] as AssertStatement).left).toEqual({ type: "VARIABLE", name: "x" });
 });
 
-test("SET RHS のフィールド・他変数・NULL・スカラーサブクエリを拒否する", () => {
+test("SET RHS のスカラーサブクエリを受理する", () => {
+  const stmts = parseAll(
+    "SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE 売上 > 0); ASSERT @cnt >= 0"
+  );
+  expect(stmts[0]).toMatchObject({
+    type: "SET_VARIABLE",
+    name: "cnt",
+    expr: { type: "SCALAR_SUBQUERY", query: { type: "SELECT" } },
+  });
+});
+
+test("SET スカラーサブクエリの後置算術と静的な複数列を拒否する", () => {
+  expect(() => parseAll(
+    "SET @x = (SELECT COUNT(*) FROM APP100) * 2; ASSERT @x > 0"
+  )).toThrow(/サブクエリ内で計算/);
+  expect(() => parseAll(
+    "SET @x = (SELECT 顧客名, 売上 FROM APP100); ASSERT @x > 0"
+  )).toThrow(/exactly 1 column/);
+});
+
+test("SET RHS のフィールド・他変数・NULLを拒否する", () => {
   expect(() => parseOne("SET @x = field + 1")).toThrow(/フィールド参照/);
   expect(() => parseOne("SET @x = @other")).toThrow(/他の変数/);
   expect(() => parseOne("SET @x = NULL")).toThrow(/NULL/);
   expect(() => parseOne("SET @user = LOGINUSER()"))
     .toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
-  expect(() => parseOne("SET @x = (SELECT COUNT(*) FROM APP100)")).toThrow(/Phase 1b/);
   expect(() => parseOne("SET @list = ('A', 'B')")).toThrow(ParseError);
 });
 

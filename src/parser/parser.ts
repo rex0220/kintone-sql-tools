@@ -266,7 +266,23 @@ export class Parser {
       throw new ParseError("SET の右辺で NULL は使用できません（Phase 1a）", tok);
     }
     if (tok.kind === TokenKind.LPAREN && this.peekAt(1).kind === TokenKind.SELECT) {
-      throw new ParseError("SET のスカラーサブクエリ代入は Phase 1b で対応予定です", tok);
+      this.advance(); // ( を消費
+      const query = this.parseSelect();
+      this.expect(TokenKind.RPAREN);
+      if (this.isArithOp(this.peek().kind)) {
+        throw new ParseError(
+          "スカラーサブクエリの後に算術演算子は使用できません。サブクエリ内で計算してください",
+          this.peek()
+        );
+      }
+      // SELECT * / _p.* は列数を静的判定できないため実行時検証に委ねる。
+      const hasWildcard = query.columns.some(
+        (c) => c.type === "WILDCARD" || c.type === "PARENT_WILDCARD"
+      );
+      if (!hasWildcard && query.columns.length !== 1) {
+        throw new ParseError("scalar subquery in SET must return exactly 1 column.", tok);
+      }
+      return { type: "SCALAR_SUBQUERY", query };
     }
     if (tok.kind === TokenKind.STRING) {
       this.advance();

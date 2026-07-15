@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v2.2.0)
+ksql 配布パッケージ (v2.3.0)
 
-1. ksql-plugin-v2.2.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.3.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.3.0: バッチ変数のスカラーサブクエリ代入 SET @x = (SELECT ...) を追加
+        (Phase 1b・後方互換)。
+- ; 区切りバッチ内で、サブクエリの結果(1 行 1 列)を変数へ代入できる。件数
+  ゲートの DRY 化が主用途(例: SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE
+  ...); ASSERT @cnt BETWEEN 0 AND 10000;)。
+- SET 時に一度だけ評価しバッチ内定数に。先行の一時テーブル・変数を参照可。
+  1 行 1 列でなければエラー。後置算術は不可(サブクエリ内で計算)。
+- SET の評価失敗は continueOnError に関わらずバッチ停止(fail-fast)。EXPLAIN は
+  SET サブクエリの計画を表示。参照位置は WHERE / UPDATE SET / ASSERT / IN。
+- 詳細は CHANGELOG.md を参照。
 
 v2.2.0: 述語押し下げの安全化と数値対応。
 - FULL_SCAN の数値範囲比較で空の数値セルを 0 扱いしていた問題を修正。kintone

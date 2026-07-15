@@ -542,7 +542,26 @@ async function executeBatchStatement(
   variables: Map<string, VarValue>
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
-    variables.set(stmt.name, evaluateScalarExpr(stmt.expr));
+    const resolvedStmt = resolveVariableRefs(stmt, variables);
+    if (resolvedStmt.expr.type === "SCALAR_SUBQUERY") {
+      try {
+        const value = await evaluateScalarSubquery(
+          resolvedStmt.expr.query,
+          client,
+          options,
+          cacheContext,
+          tempTables
+        );
+        variables.set(stmt.name, { type: "string", value });
+      } catch (e) {
+        if (e instanceof ScalarSubqueryError) {
+          throw new Error(`ArgumentError: ${e.message}`);
+        }
+        throw e;
+      }
+    } else {
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr));
+    }
     return {};
   }
 
@@ -690,7 +709,7 @@ function parseSqlBatch(sql: string): Statement[] {
   return new Parser(tokens).parseStatements();
 }
 
-function evaluateScalarExpr(expr: ScalarExpr): VarValue {
+function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): VarValue {
   switch (expr.type) {
     case "STRING":
       return { type: "string", value: expr.value };
@@ -764,6 +783,14 @@ export class AssertError extends Error {
   }
 }
 
+/** ASSERT / SET に依存しないスカラーサブクエリの形状エラー。 */
+class ScalarSubqueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScalarSubqueryError";
+  }
+}
+
 /**
  * ASSERT 文を評価する。条件が false なら AssertError を投げる。
  * サブクエリの一時テーブル参照はバッチ実行時のみ解決できる（tempTables 経由）。
@@ -815,26 +842,46 @@ async function evalAssertOperand(
     case "STRING": return operand.value;
     case "ARITH":  return String(evalAssertArith(operand));
     case "SCALAR_SUBQUERY": {
-      const { query, probed } = withScalarProbeLimit(operand.query);
-      const result = await runSubquery(query, client, options, cacheContext, tempTables);
-      // SELECT * 等でパース時に列数を静的判定できなかった場合の実行時検証（仕様 §2.2）
-      if (result.columns.length > 1) {
-        throw new AssertError(
-          `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+      try {
+        return await evaluateScalarSubquery(
+          operand.query,
+          client,
+          options,
+          cacheContext,
+          tempTables
         );
+      } catch (e) {
+        if (e instanceof ScalarSubqueryError) throw new AssertError(e.message);
+        throw e;
       }
-      if (result.rowCount === 0) {
-        throw new AssertError("scalar subquery returned no rows (expected 1 row).");
-      }
-      if (result.rowCount > 1) {
-        // probe（LIMIT 2 打ち切り）時は総行数が分からない
-        const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
-        throw new AssertError(`scalar subquery returned ${rows} (expected 1 row).`);
-      }
-      const col = result.columns[0] ?? "";
-      return result.rows[0]?.[col] ?? "";
     }
   }
+}
+
+/** スカラーサブクエリを1回実行し、厳密に1行1列の文字列値へ変換する。 */
+async function evaluateScalarSubquery(
+  sourceQuery: SelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, ProcessRow[]>
+): Promise<string> {
+  const { query, probed } = withScalarProbeLimit(sourceQuery);
+  const result = await runSubquery(query, client, options, cacheContext, tempTables);
+  if (result.columns.length !== 1) {
+    throw new ScalarSubqueryError(
+      `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+    );
+  }
+  if (result.rowCount === 0) {
+    throw new ScalarSubqueryError("scalar subquery returned no rows (expected 1 row).");
+  }
+  if (result.rowCount > 1) {
+    // probe（LIMIT 2 打ち切り）時は総行数が分からない
+    const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
+    throw new ScalarSubqueryError(`scalar subquery returned ${rows} (expected 1 row).`);
+  }
+  return result.rows[0]?.[result.columns[0]] ?? "";
 }
 
 /**
@@ -3082,7 +3129,11 @@ export function buildBatchExplainPlans(sql: string): {
   return {
     statementCount: statements.length,
     statements: statements.map((stmt, i) => {
-      const planStmt = stmt.type === "SET_VARIABLE" ? stmt : resolveVariableRefs(stmt, variables);
+      const planStmt = stmt.type === "SET_VARIABLE"
+        ? (stmt.expr.type === "SCALAR_SUBQUERY"
+          ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) }
+          : stmt)
+        : resolveVariableRefs(stmt, variables);
       const result = {
         index: i,
         type: analysis.statements[i].statementType,
@@ -3116,6 +3167,17 @@ function buildBatchStatementPlan(
     ];
   }
   if (stmt.type === "SET_VARIABLE") {
+    if (stmt.expr.type === "SCALAR_SUBQUERY") {
+      const subInfo = hasTempTableRef(stmt.expr.query)
+        ? info
+        : { ...info, tempTablesReferenced: [] };
+      return [
+        `SET @${stmt.name} = (SELECT ...)`,
+        "  value:         サブクエリを実行時に1回評価（1行1列・バッチ内定数・結果メタデータには非公開）",
+        "  subquery:",
+        ...buildPlanForBatchQuery(stmt.expr.query, subInfo).map((l) => `  ${l}`),
+      ];
+    }
     return [
       `SET @${stmt.name} = <scalar expression>`,
       "  value:         実行時に1回評価（バッチ内定数・結果メタデータには非公開）",
