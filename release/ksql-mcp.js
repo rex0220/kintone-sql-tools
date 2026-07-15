@@ -31542,7 +31542,22 @@ var Parser = class {
       throw new ParseError("SET \u306E\u53F3\u8FBA\u3067 NULL \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08Phase 1a\uFF09", tok);
     }
     if (tok.kind === "(" /* LPAREN */ && this.peekAt(1).kind === "SELECT" /* SELECT */) {
-      throw new ParseError("SET \u306E\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u4EE3\u5165\u306F Phase 1b \u3067\u5BFE\u5FDC\u4E88\u5B9A\u3067\u3059", tok);
+      this.advance();
+      const query = this.parseSelect();
+      this.expect(")" /* RPAREN */);
+      if (this.isArithOp(this.peek().kind)) {
+        throw new ParseError(
+          "\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u306E\u5F8C\u306B\u7B97\u8853\u6F14\u7B97\u5B50\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002\u30B5\u30D6\u30AF\u30A8\u30EA\u5185\u3067\u8A08\u7B97\u3057\u3066\u304F\u3060\u3055\u3044",
+          this.peek()
+        );
+      }
+      const hasWildcard = query.columns.some(
+        (c) => c.type === "WILDCARD" || c.type === "PARENT_WILDCARD"
+      );
+      if (!hasWildcard && query.columns.length !== 1) {
+        throw new ParseError("scalar subquery in SET must return exactly 1 column.", tok);
+      }
+      return { type: "SCALAR_SUBQUERY", query };
     }
     if (tok.kind === "STRING" /* STRING */) {
       this.advance();
@@ -35821,7 +35836,26 @@ async function executeBatch(sql, client, options = {}) {
 }
 async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables) {
   if (stmt.type === "SET_VARIABLE") {
-    variables.set(stmt.name, evaluateScalarExpr(stmt.expr));
+    const resolvedStmt2 = resolveVariableRefs(stmt, variables);
+    if (resolvedStmt2.expr.type === "SCALAR_SUBQUERY") {
+      try {
+        const value = await evaluateScalarSubquery(
+          resolvedStmt2.expr.query,
+          client,
+          options,
+          cacheContext,
+          tempTables
+        );
+        variables.set(stmt.name, { type: "string", value });
+      } catch (e) {
+        if (e instanceof ScalarSubqueryError) {
+          throw new Error(`ArgumentError: ${e.message}`);
+        }
+        throw e;
+      }
+    } else {
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr));
+    }
     return {};
   }
   const resolvedStmt = resolveVariableRefs(stmt, variables);
@@ -35984,6 +36018,12 @@ var AssertError = class extends Error {
     this.name = "AssertError";
   }
 };
+var ScalarSubqueryError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ScalarSubqueryError";
+  }
+};
 async function executeAssert(stmt, client, options, cacheContext, tempTables) {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
   if (stmt.op === "BETWEEN") {
@@ -36017,24 +36057,37 @@ async function evalAssertOperand(operand, client, options, cacheContext, tempTab
     case "ARITH":
       return String(evalAssertArith(operand));
     case "SCALAR_SUBQUERY": {
-      const { query, probed } = withScalarProbeLimit(operand.query);
-      const result = await runSubquery(query, client, options, cacheContext, tempTables);
-      if (result.columns.length > 1) {
-        throw new AssertError(
-          `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+      try {
+        return await evaluateScalarSubquery(
+          operand.query,
+          client,
+          options,
+          cacheContext,
+          tempTables
         );
+      } catch (e) {
+        if (e instanceof ScalarSubqueryError) throw new AssertError(e.message);
+        throw e;
       }
-      if (result.rowCount === 0) {
-        throw new AssertError("scalar subquery returned no rows (expected 1 row).");
-      }
-      if (result.rowCount > 1) {
-        const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
-        throw new AssertError(`scalar subquery returned ${rows} (expected 1 row).`);
-      }
-      const col = result.columns[0] ?? "";
-      return result.rows[0]?.[col] ?? "";
     }
   }
+}
+async function evaluateScalarSubquery(sourceQuery, client, options, cacheContext, tempTables) {
+  const { query, probed } = withScalarProbeLimit(sourceQuery);
+  const result = await runSubquery(query, client, options, cacheContext, tempTables);
+  if (result.columns.length !== 1) {
+    throw new ScalarSubqueryError(
+      `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
+    );
+  }
+  if (result.rowCount === 0) {
+    throw new ScalarSubqueryError("scalar subquery returned no rows (expected 1 row).");
+  }
+  if (result.rowCount > 1) {
+    const rows = probed && result.rowCount === 2 ? "2 or more rows" : `${result.rowCount} rows`;
+    throw new ScalarSubqueryError(`scalar subquery returned ${rows} (expected 1 row).`);
+  }
+  return result.rows[0]?.[result.columns[0]] ?? "";
 }
 function withScalarProbeLimit(query) {
   const hasAgg = query.groupBy.length > 0 || query.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL");
@@ -37537,7 +37590,7 @@ function buildBatchExplainPlans(sql) {
   return {
     statementCount: statements.length,
     statements: statements.map((stmt, i) => {
-      const planStmt = stmt.type === "SET_VARIABLE" ? stmt : resolveVariableRefs(stmt, variables);
+      const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
       const result = {
         index: i,
         type: analysis.statements[i].statementType,
@@ -37566,6 +37619,15 @@ function buildBatchStatementPlan(stmt, info) {
     ];
   }
   if (stmt.type === "SET_VARIABLE") {
+    if (stmt.expr.type === "SCALAR_SUBQUERY") {
+      const subInfo = hasTempTableRef(stmt.expr.query) ? info : { ...info, tempTablesReferenced: [] };
+      return [
+        `SET @${stmt.name} = (SELECT ...)`,
+        "  value:         \u30B5\u30D6\u30AF\u30A8\u30EA\u3092\u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF081\u884C1\u5217\u30FB\u30D0\u30C3\u30C1\u5185\u5B9A\u6570\u30FB\u7D50\u679C\u30E1\u30BF\u30C7\u30FC\u30BF\u306B\u306F\u975E\u516C\u958B\uFF09",
+        "  subquery:",
+        ...buildPlanForBatchQuery(stmt.expr.query, subInfo).map((l) => `  ${l}`)
+      ];
+    }
     return [
       `SET @${stmt.name} = <scalar expression>`,
       "  value:         \u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF08\u30D0\u30C3\u30C1\u5185\u5B9A\u6570\u30FB\u7D50\u679C\u30E1\u30BF\u30C7\u30FC\u30BF\u306B\u306F\u975E\u516C\u958B\uFF09"
@@ -40014,7 +40076,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.2.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.3.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
