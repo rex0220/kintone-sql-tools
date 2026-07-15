@@ -488,3 +488,38 @@ test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化
   });
   expect(plans.statements[1].plan.join("\n")).toContain("@min");
 });
+
+test("バッチ EXPLAIN: SET の APP スカラーサブクエリ計画と1回評価を表示する", () => {
+  const plans = buildBatchExplainPlans(
+    "SET @cnt = (SELECT COUNT(*) FROM APP8201); ASSERT @cnt >= 0"
+  );
+  const set = plans.statements[0];
+  const text = set.plan.join("\n");
+  expect(set.type).toBe("SET_VARIABLE");
+  expect(set.plan[0]).toBe("SET @cnt = (SELECT ...)");
+  expect(text).toMatch(/実行時に1回評価/);
+  expect(text).toMatch(/subquery:/);
+  expect(text).toMatch(/APP8201/);
+});
+
+test("バッチ EXPLAIN: SET の一時テーブル参照を FULL_SCAN 計画で表示する", () => {
+  const plans = buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP8202;" +
+    "SET @cnt = (SELECT COUNT(*) FROM #t); ASSERT @cnt >= 0"
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toMatch(/subquery:/);
+  expect(text).toMatch(/mode:\s+FULL_SCAN（一時テーブル参照）/);
+  expect(text).toMatch(/temp:\s+#t/);
+});
+
+test("バッチ EXPLAIN: SET サブクエリ内の先行変数をプレースホルダー解決する", () => {
+  const plans = buildBatchExplainPlans(
+    "SET @target = 1;" +
+    "SET @amount = (SELECT 売上 FROM APP8203 WHERE $id = @target LIMIT 1);" +
+    "ASSERT @amount >= 0"
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toContain("@target");
+  expect(text).not.toMatch(/variable @target is not defined/);
+});

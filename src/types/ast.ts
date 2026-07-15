@@ -91,7 +91,8 @@ export type ScalarExpr =
   | NumberLiteral
   | KintoneFunction
   | StringFuncExpr
-  | ScalarArithExpr;
+  | ScalarArithExpr
+  | ScalarSubquery;
 
 export type ScalarArithExpr = ArithExpr;
 

@@ -223,6 +223,28 @@ test("IN リスト内の変数を静的解析し、参照索引・未定義・�
     .toThrow(/variable @later is not defined/);
 });
 
+test("SET スカラーサブクエリ内の先行変数を汎用再帰で参照索引へ収集する", () => {
+  const a = analyze(
+    "SET @cutoff = 100;" +
+    "SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE 売上 > @cutoff);" +
+    "ASSERT @cnt >= 0"
+  );
+  expect(a.variables).toEqual([
+    { name: "cutoff", referencedBy: [1] },
+    { name: "cnt", referencedBy: [2] },
+  ]);
+});
+
+test("SET スカラーサブクエリ内の一時テーブル参照を依存関係へ収集する", () => {
+  const a = analyze(
+    "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
+    "SET @cnt = (SELECT COUNT(*) FROM #t);" +
+    "ASSERT @cnt >= 0"
+  );
+  expect(a.statements[1].tempTablesReferenced).toEqual(["#t"]);
+  expect(a.statements[1].dependsOn).toEqual([0]);
+});
+
 test("単文 SET はエラー", () => {
   expect(() => analyze("SET @x = 1")).toThrow(/SET variable requires a batch/);
 });

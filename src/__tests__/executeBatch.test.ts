@@ -139,6 +139,123 @@ test("SET LOGINUSER() は実行前に拒否し、空文字変数を作らない"
   expect(client.getCalls).toHaveLength(0);
 });
 
+test("SET スカラーサブクエリを1回だけ評価し、COUNT結果を複数のASSERTで再利用する", async () => {
+  const client = makeClient({ recordsByApp: { 8101: APP1 } });
+  const r = await executeBatch(
+    "SET @cnt = (SELECT COUNT(*) FROM APP8101 WHERE 売上 > 0);" +
+    "ASSERT @cnt = 3;" +
+    "ASSERT @cnt BETWEEN 1 AND 10",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements.map((s) => s.status)).toEqual(["success", "success", "success"]);
+  expect(client.getCalls.filter((call) => call.app === 8101)).toHaveLength(1);
+});
+
+test("SET スカラーサブクエリは先行変数をWHEREで参照できる", async () => {
+  const client = makeClient({ recordsByApp: { 8102: APP1 } });
+  const r = await executeBatch(
+    "SET @cutoff = 200;" +
+    "SET @cnt = (SELECT COUNT(*) FROM APP8102 WHERE 売上 > @cutoff);" +
+    "ASSERT @cnt = 2",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(client.getCalls[0].query).not.toContain("@cutoff");
+});
+
+test("SET スカラーサブクエリ内の未定義・前方変数参照は実行前に拒否する", async () => {
+  const client = makeClient();
+  await expect(executeBatch(
+    "SET @cnt = (SELECT COUNT(*) FROM APP8103 WHERE 売上 > @cutoff);" +
+    "SET @cutoff = 200; ASSERT @cnt >= 0",
+    client
+  )).rejects.toThrow(/variable @cutoff is not defined before statement 1/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("SET スカラーサブクエリは先行一時テーブルを参照できる", async () => {
+  const client = makeClient({ recordsByApp: { 8104: APP1 } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP8104;" +
+    "SET @cnt = (SELECT COUNT(*) FROM #t);" +
+    "ASSERT @cnt = 3",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(client.getCalls.filter((call) => call.app === 8104)).toHaveLength(1);
+});
+
+test("SET スカラー違反は ArgumentError かつ continueOnError=true でも fail-fast", async () => {
+  const client = makeClient({ recordsByApp: { 8105: [] } });
+  const r = await executeBatch(
+    "SET @x = (SELECT 売上 FROM APP8105); SELECT * FROM APP8106",
+    client,
+    { continueOnError: true }
+  );
+
+  expect(r.ok).toBe(false);
+  expect(r.statements[0]).toMatchObject({
+    status: "error",
+    error: { code: "ArgumentError" },
+  });
+  expect(r.statements[0].error?.message).toContain("scalar subquery returned no rows");
+  expect(r.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+});
+
+test("ASSERT スカラー違反は従来どおり AssertError かつ assertion 停止", async () => {
+  const client = makeClient({ recordsByApp: { 8107: [] } });
+  const r = await executeBatch(
+    "ASSERT (SELECT 売上 FROM APP8107) = 1; SELECT * FROM APP8108",
+    client,
+    { continueOnError: true }
+  );
+
+  expect(r.statements[0]).toMatchObject({
+    status: "error",
+    error: { code: "AssertError" },
+  });
+  expect(r.statements[1]).toMatchObject({ status: "skipped", skippedReason: "assertion" });
+});
+
+test("SET スカラーサブクエリの複数行・ワイルドカード複数列を実行時に拒否する", async () => {
+  const multiRows = await executeBatch(
+    "SET @x = (SELECT 売上 FROM APP8109); ASSERT @x > 0",
+    makeClient({ recordsByApp: { 8109: APP1 } })
+  );
+  expect(multiRows.statements[0].error?.message).toMatch(/(?:2 or more|3) rows/);
+
+  const multiColumns = await executeBatch(
+    "SET @x = (SELECT * FROM APP8110); ASSERT @x > 0",
+    makeClient({ recordsByApp: { 8110: [makeRecord({ $id: "1", a: "x", b: "y" })] } })
+  );
+  expect(multiColumns.statements[0].error?.message).toMatch(/3 columns/);
+
+  const zeroColumns = await executeBatch(
+    "SET @x = (SELECT * FROM APP8113); ASSERT @x > 0",
+    makeClient({ recordsByApp: { 8113: [makeRecord({})] } })
+  );
+  expect(zeroColumns.statements[0].error?.message).toMatch(/0 columns/);
+});
+
+test("SET COUNT は対象0件でも文字列0として束縛できる", async () => {
+  const r = await executeBatch(
+    "SET @cnt = (SELECT COUNT(*) FROM APP8111); ASSERT @cnt = 0",
+    makeClient({ recordsByApp: { 8111: [] } })
+  );
+  expect(r.ok).toBe(true);
+});
+
+test("単文のSETスカラーサブクエリはバッチ必須として拒否する", async () => {
+  await expect(execute(
+    "SET @cnt = (SELECT COUNT(*) FROM APP8112)",
+    makeClient()
+  )).rejects.toThrow(/SET variable requires a batch/);
+});
+
 // ----------------------------------------------------------------
 // 最小経路: CREATE → 参照
 // ----------------------------------------------------------------
