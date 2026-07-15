@@ -76,6 +76,30 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("FROM なし SELECT/UNION を一時テーブルに実体化できる", async () => {
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #ids AS SELECT '4' AS id UNION ALL SELECT '7' AS id; "
+      + "SELECT COUNT(*) AS n FROM #ids",
+    makeClient()
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[0]).toMatchObject({ status: "success", rowCount: 2 });
+  const selected = result.statements[1].result as SelectResult;
+  expect(selected.rows).toEqual([{ n: "2" }]);
+});
+
+test("単一の FROM なし SELECT 実体化と実 CTE 参照は両立する", async () => {
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #x AS SELECT 'A' AS v; "
+      + "WITH c AS (SELECT * FROM #x) SELECT v FROM c",
+    makeClient()
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[0]).toMatchObject({ status: "success", rowCount: 1 });
+  const selected = result.statements[1].result as SelectResult;
+  expect(selected.rows).toEqual([{ v: "A" }]);
+});
+
 test("SET の数値式を ASSERT と WHERE へ型付きリテラルとして置換する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const r = await executeBatch(

@@ -15,6 +15,7 @@
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import { NO_FROM_CTE_NAME } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
@@ -90,6 +91,20 @@ export interface KintoneProcessStatuses {
   enable: boolean;
   /** 実行ユーザーの表示言語に対応する状態名 */
   states: string[];
+}
+
+const SEARCH_ABORTED_WARNING =
+  "検索が 10 万件で打ち切られ、結果が欠落した可能性があります。";
+
+interface SearchAbortCollector {
+  aborted: boolean;
+}
+
+export class SearchAbortedError extends Error {
+  constructor() {
+    super("SearchAbortedError: kintone の検索が 10 万件で打ち切られたため、完全な対象集合を確定できません。");
+    this.name = "SearchAbortedError";
+  }
 }
 
 export interface KintoneAppInfo {
@@ -256,12 +271,24 @@ export async function execute(
   client: KintoneClient,
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
+  const startedAt = Date.now();
+  const stmt = parseSql(sql);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
-  const startedAt = Date.now();
-  const result = await executeStatement(sql, countedClient, options);
+  const collector: SearchAbortCollector = { aborted: false };
+  const guardedClient = wrapClientWithSearchAbort(
+    countedClient,
+    collector,
+    !isSelectLikeStatement(stmt)
+  );
+  const result = await executeParsedStatement(
+    stmt,
+    guardedClient,
+    options,
+    options.cacheContext ?? "default"
+  );
   metrics.elapsedMs = Date.now() - startedAt;
-  return { ...result, metrics };
+  return { ...attachSearchAbortWarning(result, collector), metrics };
 }
 
 function createEmptyMetrics(): ExecuteMetrics {
@@ -318,14 +345,36 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
   };
 }
 
-async function executeStatement(
-  sql: string,
+function wrapClientWithSearchAbort(
   client: KintoneClient,
-  options: ExecuteOptions
-): Promise<ExecuteResult> {
-  const cacheContext = options.cacheContext ?? "default";
-  const stmt = parseSql(sql);
-  return executeParsedStatement(stmt, client, options, cacheContext);
+  collector: SearchAbortCollector,
+  failClosed: boolean
+): KintoneClient {
+  return {
+    ...client,
+    getRecords: async (params) => {
+      const response = await client.getRecords(params);
+      if (response.searchAborted) {
+        collector.aborted = true;
+        if (failClosed) throw new SearchAbortedError();
+      }
+      return response;
+    },
+  };
+}
+
+function isSelectLikeStatement(stmt: Statement): boolean {
+  return stmt.type === "SELECT" || stmt.type === "UNION" || stmt.type === "WITH";
+}
+
+function attachSearchAbortWarning(
+  result: ExecuteResult,
+  collector: SearchAbortCollector
+): ExecuteResult {
+  if (!collector.aborted || result.type !== "SELECT") return result;
+  const warnings = new Set(result.warnings ?? []);
+  warnings.add(SEARCH_ABORTED_WARNING);
+  return { ...result, warnings: [...warnings] };
 }
 
 /** パース済み Statement を種別でルーティングして実行する（単文・バッチ共通の入口） */
@@ -524,10 +573,19 @@ export async function executeBatch(
           }),
         }
         : batchOptions;
+      const searchAbortCollector: SearchAbortCollector = { aborted: false };
+      const statementClient = wrapClientWithSearchAbort(
+        countedClient,
+        searchAbortCollector,
+        info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
+      );
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
+        executeBatchStatement(statements[i], info, statementClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
       );
+      if (outcome.result) {
+        outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+      }
       results.push({ ...base, status: "success", ...outcome });
     } catch (e) {
       results.push({ ...base, status: "error", error: toBatchStatementError(e) });
@@ -983,7 +1041,7 @@ async function executeSelect(
 }
 
 function isNoFromSelect(stmt: SelectStatement): boolean {
-  return stmt.from.appId === 0 && stmt.from.cteName === "__NO_FROM__";
+  return stmt.from.appId === 0 && stmt.from.cteName === NO_FROM_CTE_NAME;
 }
 
 function arithHasFieldRef(node: ArithNode): boolean {
@@ -1624,7 +1682,10 @@ async function executeQueryWithCte(
 
   // CTE 参照が FROM か JOIN に含まれるか確認
   const hasCteRef =
-    query.from.cteName != null ||
+    (
+      query.from.cteName != null &&
+      query.from.cteName !== NO_FROM_CTE_NAME
+    ) ||
     query.joins.some((j) => j.table.cteName != null);
 
   if (!hasCteRef) {

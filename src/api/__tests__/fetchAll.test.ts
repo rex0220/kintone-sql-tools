@@ -99,6 +99,46 @@ test("1ページで収まる場合（499件）", async () => {
   expect(result).toHaveLength(499);
 });
 
+test("先頭の短いページの検索打ち切りを early return 前に通知する", async () => {
+  const onSearchAborted = jest.fn();
+  const fetcher: PageFetcher = async () => ({
+    records: makeRecords(1),
+    searchAborted: true,
+  });
+  await fetchAll(fetcher, 100, "", [], { onSearchAborted });
+  expect(onSearchAborted).toHaveBeenCalledTimes(1);
+});
+
+test("後続ページの検索打ち切りを通知する", async () => {
+  const onSearchAborted = jest.fn();
+  let call = 0;
+  const fetcher: PageFetcher = async () => {
+    call++;
+    return call === 1
+      ? { records: makeRecords(500) }
+      : { records: [], searchAborted: true };
+  };
+  await fetchAll(fetcher, 100, "", [], { onSearchAborted });
+  expect(onSearchAborted).toHaveBeenCalledTimes(1);
+});
+
+test("並列バッチの短いページより後ろのレスポンスも検査する", async () => {
+  const onSearchAborted = jest.fn();
+  let call = 0;
+  const fetcher: PageFetcher = async () => {
+    call++;
+    if (call === 1) return { records: makeRecords(500) };
+    if (call === 2) return { records: [] };
+    return { records: [], searchAborted: true };
+  };
+  await fetchAll(fetcher, 100, "", [], {
+    parallel: 2,
+    maxRecords: 2_000,
+    onSearchAborted,
+  });
+  expect(onSearchAborted).toHaveBeenCalledTimes(1);
+});
+
 test("ちょうど500件 → 2回目の取得（0件）で終了", async () => {
   const fetcher = mockFetcher([makeRecords(500), []]);
   const result = await fetchAll(fetcher, 100, "", []);

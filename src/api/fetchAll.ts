@@ -26,6 +26,8 @@ import type { KintoneRecord } from "../converter/dmlToKintone";
 /** kintone GET /k/v1/records.json のレスポンス */
 export interface KintoneGetResponse {
   records: KintoneRecord[];
+  /** like / not like の 10 万件検索打ち切りを検出した場合に true */
+  searchAborted?: boolean;
 }
 
 /** 1ページ分の GET を実行する関数 */
@@ -52,6 +54,8 @@ export interface FetchAllOptions {
   onLimit?: "error" | "truncate";
   /** truncate 時に通知されるコールバック */
   onTruncate?: (maxRecords: number) => void;
+  /** ページレスポンスで検索打ち切りを検出したときに通知 */
+  onSearchAborted?: () => void;
 }
 
 /**
@@ -93,6 +97,7 @@ export async function fetchAll(
   // ---- 先頭ページ ----
   const cursorQuery0 = buildCursorQuery(query, cursorId);
   const first = await fetchPage(fetcher, app, cursorQuery0, fetchFields, pageSize, windowOffset);
+  notifySearchAborted(first, options);
   allRecords.push(...first.records);
 
   // 上限チェック
@@ -144,6 +149,10 @@ export async function fetchAll(
       )
     );
 
+    // 短い最終ページや上限による early return より前に、
+    // 並列バッチの全レスポンスを検査する。
+    for (const response of responses) notifySearchAborted(response, options);
+
     // offset 順に結合して順序を安定化
     let done = false;
     for (const res of responses) {
@@ -173,6 +182,10 @@ export async function fetchAll(
   }
 
   return allRecords;
+}
+
+function notifySearchAborted(response: KintoneGetResponse, options: FetchAllOptions): void {
+  if (response.searchAborted) options.onSearchAborted?.();
 }
 
 // ------------------------------------------------------------

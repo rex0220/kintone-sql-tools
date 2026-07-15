@@ -8,6 +8,7 @@ import type {
   UpsertSelectStatement,
   UpsertStatement,
 } from "../types/ast";
+import { NO_FROM_CTE_NAME } from "../types/ast";
 
 export type StatementType = Statement["type"] | "UNKNOWN";
 
@@ -55,7 +56,7 @@ export function isNoFromSelectStatement(stmt: unknown): boolean {
   const obj = stmt as { type?: unknown; from?: { appId?: unknown; cteName?: unknown } };
   return obj.type === "SELECT"
     && obj.from?.appId === 0
-    && obj.from?.cteName === "__NO_FROM__";
+    && obj.from?.cteName === NO_FROM_CTE_NAME;
 }
 
 export function getInsertValuesCount(stmt: unknown): number | null {

@@ -24,6 +24,13 @@ export interface TokenResolver {
     | { type: "userpass"; username: string; password: string };
 }
 
+const SEARCH_ABORTED_HEADER_VALUE = "Filter aborted because of too many search results";
+
+interface JsonResponse<T> {
+  body: T;
+  searchAborted: boolean;
+}
+
 export function createNodeKintoneClient(
   baseUrl: string,
   tokenResolver: TokenResolver
@@ -33,11 +40,11 @@ export function createNodeKintoneClient(
     ? `/k/guest/${tokenResolver.guestSpaceId}/v1`
     : "/k/v1";
 
-  async function requestJson<T>(
+  async function requestJsonResponse<T>(
     path: string,
     init: RequestInit,
     appIdForToken: number
-  ): Promise<T> {
+  ): Promise<JsonResponse<T>> {
     const headers = new Headers(init.headers ?? {});
     if (tokenResolver.auth.type === "token") {
       headers.set("X-Cybozu-API-Token", tokenResolver.auth.resolveToken(appIdForToken));
@@ -93,7 +100,19 @@ export function createNodeKintoneClient(
     if (tokenResolver.debug) {
       tokenResolver.log?.(`[debug] response status=${res.status}`);
     }
-    return await res.json() as T;
+    const warning = res.headers.get("X-Cybozu-Warning") ?? "";
+    return {
+      body: await res.json() as T,
+      searchAborted: warning.includes(SEARCH_ABORTED_HEADER_VALUE),
+    };
+  }
+
+  async function requestJson<T>(
+    path: string,
+    init: RequestInit,
+    appIdForToken: number
+  ): Promise<T> {
+    return (await requestJsonResponse<T>(path, init, appIdForToken)).body;
   }
 
   function shouldRetryWithRecordNumberOrder(path: string, bodyText: string): boolean {
@@ -130,11 +149,14 @@ export function createNodeKintoneClient(
       }
       const path = `${apiBasePath}/records.json?${qs}`;
       try {
-        return await requestJson<{ records: Record<string, { value: string }>[] }>(
+        const response = await requestJsonResponse<{ records: Record<string, { value: string }>[] }>(
           path,
           { method: "GET" },
           params.app
         );
+        return response.searchAborted
+          ? { ...response.body, searchAborted: true }
+          : response.body;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (!shouldRetryWithRecordNumberOrder(path, msg)) throw err;
@@ -142,11 +164,14 @@ export function createNodeKintoneClient(
         if (tokenResolver.debug) {
           tokenResolver.log?.("[debug] retry with fallback query order by レコード番号 asc");
         }
-        return await requestJson<{ records: Record<string, { value: string }>[] }>(
+        const response = await requestJsonResponse<{ records: Record<string, { value: string }>[] }>(
           retryPath,
           { method: "GET" },
           params.app
         );
+        return response.searchAborted
+          ? { ...response.body, searchAborted: true }
+          : response.body;
       }
     },
 

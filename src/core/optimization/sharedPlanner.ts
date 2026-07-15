@@ -6,6 +6,7 @@ export interface SharedFetchOptions {
   parallel: number;
   onLimit?: "error" | "truncate";
   onTruncate?: (max: number) => void;
+  onSearchAborted?: () => void;
 }
 
 export interface SharedFetchMetrics {
@@ -29,6 +30,7 @@ export async function fetchRecordsForSharedPlan(
     parallel: options.parallel,
     onLimit: options.onLimit ?? "error",
     onTruncate: options.onTruncate,
+    onSearchAborted: options.onSearchAborted,
   });
   return {
     records,

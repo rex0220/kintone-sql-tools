@@ -88,6 +88,7 @@ import type {
   ScalarExpr,
   VariableRef,
 } from "../types/ast";
+import { NO_FROM_CTE_NAME } from "../types/ast";
 
 /** バッチ(複文)の文数上限 */
 const MAX_BATCH_STATEMENTS = 20;
@@ -618,7 +619,7 @@ export class Parser {
     const hasFrom = this.consume(TokenKind.FROM);
     const from = hasFrom
       ? this.parseTableRef()
-      : { appId: 0, alias: null, cteName: "__NO_FROM__" };
+      : { appId: 0, alias: null, cteName: NO_FROM_CTE_NAME };
 
     const joins = hasFrom ? this.parseJoins() : [];
 

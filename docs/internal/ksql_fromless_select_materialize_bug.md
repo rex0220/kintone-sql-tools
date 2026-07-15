@@ -1,7 +1,7 @@
 # 課題+仕様: FROM なし SELECT/UNION を一時テーブル化・CTE 文脈で実行すると 0 行になる
 
 - 作成日: 2026-07-15
-- ステータス: **課題+仕様案 R2（codex レビュー反映・センチネル共有を修正・実装着手可）**
+- ステータス: **課題+仕様 R2・実装済み（センチネル共有・一時テーブル非退行テスト済み、実機レビュー待ち）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 位置づけ: [[fromless-union-temp-table-empty-bug]]。P0（[ksql_search_abort_warning_issue.md](ksql_search_abort_warning_issue.md)）と**同一バージョンで対応**（ユーザー指示）。
 - 関連コード: `src/execute.ts`（`executeQueryWithCte`:1601 / `isNoFromSelect`:985 / `executeNoFromSelect`:1029 / `executeUnion`:1512 / `executeFullScanWithCte`:1644）、`src/parser/parser.ts`:618（`__NO_FROM__` 生成）
