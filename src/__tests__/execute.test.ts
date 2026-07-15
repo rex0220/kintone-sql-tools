@@ -486,6 +486,196 @@ test("FULL_SCAN: JOIN + ワイルドカード LIKE は押し下げず JS で評�
   expect(client.getCalls.every((call) => !call.query.toLowerCase().includes("like"))).toBe(true);
 });
 
+test("FULL_SCAN: 単一テーブル無エイリアスで $id 条件だけをプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "999", 会社名: "A社" }),
+    makeRecord({ $id: "1000", 会社名: "A社" }),
+    makeRecord({ $id: "1001", 会社名: "B社" }),
+  ] });
+
+  const result = await execute(
+    "SELECT $id, 会社名 FROM APP100 WHERE $id >= 1000 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1000", 会社名: "A社" }]);
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+  expect(client.getCalls[0].query.toLowerCase()).not.toContain("like");
+});
+
+test("FULL_SCAN: 単一テーブルの正しいエイリアス付き $id 条件をプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "999", 会社名: "A社" }),
+    makeRecord({ $id: "1000", 会社名: "A社" }),
+  ] });
+
+  const result = await execute(
+    "SELECT a.$id, a.会社名 FROM APP100 AS a WHERE a.$id >= 1000 AND a.会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ "$id": "1000", "会社名": "A社" }]);
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+});
+
+test("FULL_SCAN: 第0段の $id 押し下げは型メタデータを取得しない", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1000" })] });
+  let getFieldsCount = 0;
+  client.getFields = async () => {
+    getFieldsCount += 1;
+    return [];
+  };
+
+  await execute(
+    "SELECT $id FROM APP100 WHERE $id >= 1000 AND LENGTH($id) >= 1",
+    client
+  );
+
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+  expect(getFieldsCount).toBe(0);
+});
+
+test("FULL_SCAN: NUMBER フィールドの strict 比較を型確認後にプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 金額: "", 会社名: "A空" }),
+    makeRecord({ $id: "2", 金額: "-2", 会社名: "A負" }),
+    makeRecord({ $id: "3", 金額: "0", 会社名: "A零" }),
+    makeRecord({ $id: "4", 金額: "5", 会社名: "B正" }),
+  ] });
+  let getFieldsCount = 0;
+  client.getFields = async () => {
+    getFieldsCount += 1;
+    return [
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  };
+
+  const result = await execute(
+    "SELECT $id, 金額, 会社名 FROM APP99101 WHERE 金額 > -1 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "3", 金額: "0", 会社名: "A零" }]);
+  expect(client.getCalls[0].query).toContain("金額 > -1");
+  expect(client.getCalls[0].query.toLowerCase()).not.toContain("like");
+  expect(getFieldsCount).toBe(1);
+});
+
+test("FULL_SCAN: NUMBER 等値は押し下げても JS の文字列表現で再評価する", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 金額: "100.0", 会社名: "A社" }),
+    makeRecord({ $id: "2", 金額: "100", 会社名: "A社" }),
+  ] });
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP99102 WHERE 金額 = 100 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(client.getCalls[0].query).toContain("金額 = 100");
+  expect(result.rows).toEqual([{ $id: "2", 金額: "100" }]);
+});
+
+test.each([">=", "<="])(
+  "FULL_SCAN: 一般 NUMBER の %s は型が確定しても押し下げない",
+  async (op) => {
+    const client = makeClient({ records: [makeRecord({ $id: "1", 金額: "1", 会社名: "A社" })] });
+    client.getFields = async () => [
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+    await execute(
+      `SELECT $id, 金額 FROM APP99103 WHERE 金額 ${op} 1 AND 会社名 LIKE '%A%'`,
+      client,
+      { cacheContext: `numeric-inclusive-${op}` }
+    );
+
+    expect(client.getCalls[0].query).not.toContain(`金額 ${op} 1`);
+  }
+);
+
+test("FULL_SCAN: 数値候補の型が NUMBER でなければ押し下げない", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1", 金額: "2", 会社名: "A社" })] });
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  await execute(
+    "SELECT $id FROM APP99104 WHERE 金額 > 1 AND 会社名 LIKE '%A%'",
+    client
+  );
+
+  expect(client.getCalls[0].query).not.toContain("金額 > 1");
+});
+
+test("FULL_SCAN: 数値候補の型メタ取得失敗を伝播する", async () => {
+  const client = makeClient();
+  client.getFields = async () => {
+    throw new Error("getFields failed");
+  };
+
+  await expect(execute(
+    "SELECT $id FROM APP99105 WHERE 金額 > 1 AND 会社名 LIKE '%A%'",
+    client
+  )).rejects.toThrow("getFields failed");
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("FULL_SCAN: JOIN は各アプリの NUMBER 候補だけをプレフィルタする", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      99106: [makeRecord({ $id: "1", 顧客ID: "C1", 金額: "2", 会社名: "A社" })],
+      99107: [makeRecord({ $id: "10", 顧客ID: "C1", 数量: "3" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 99106
+    ? [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "数量", label: "数量", fieldType: "NUMBER" },
+    ];
+
+  const result = await execute(
+    "SELECT a.$id FROM APP99106 AS a INNER JOIN APP99107 AS b ON a.顧客ID = b.顧客ID " +
+    "WHERE a.金額 > 1 AND b.数量 = 3 AND a.会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(client.getCalls.find((call) => call.app === 99106)?.query).toContain("金額 > 1");
+  expect(client.getCalls.find((call) => call.app === 99107)?.query).toContain("数量 = 3");
+});
+
+test("FULL_SCAN: JOIN の $id 条件は維持し、テキスト等値は押し下げない", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", 顧客ID: "C1", 文字列: "A社" })],
+      101: [makeRecord({ $id: "10", 顧客ID: "C1", 状態: "完了" })],
+    },
+  });
+
+  await execute(
+    "SELECT a.$id FROM APP100 AS a INNER JOIN APP101 AS b ON a.顧客ID = b.顧客ID " +
+    "WHERE b.$id >= 10 AND b.状態 = '完了' AND a.文字列 LIKE '%A%'",
+    client
+  );
+
+  const joinCall = client.getCalls.find((call) => call.app === 101);
+  expect(joinCall?.query).toContain("$id >= 10");
+  expect(joinCall?.query).not.toContain("状態");
+});
+
 test("FULL_SCAN: サブテーブルは $id / サブテーブル本体 / _p.参照親項目のみ取得", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -830,6 +1020,29 @@ test("UPDATE サブテーブル行はワイルドカード LIKE を JS 評価す
   expect(client.putCalls).toHaveLength(1);
 });
 
+test("UPDATE サブテーブル: 空数値セルを >= の対象から外し、確認件数と更新件数を揃える", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 商品コード: { value: "A" }, 数量: { value: "" } } },
+      { id: "r2", value: { 商品コード: { value: "B" }, 数量: { value: "0" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "UPDATE APP100$明細 SET 商品コード = '更新' WHERE _rid LIKE '%' AND 数量 >= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as UpdateResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.updatedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id?: string; value?: Record<string, { value: string }> }>;
+  expect(table.find((row) => row.id === "r1")?.value).toBeUndefined();
+  expect(table.find((row) => row.id === "r2")?.value?.["商品コード"].value).toBe("更新");
+});
+
 test("UPDATE サブテーブルの取得上限は truncate 指定でも error のまま", async () => {
   const row = (id: string) => ({
     $id: { value: id }, $revision: { value: "1" },
@@ -919,6 +1132,28 @@ test("DELETE サブテーブル行（_rid 条件）", async () => {
   expect(table[0].id).toBe("r2");
 });
 
+test("DELETE サブテーブル: 空数値セルを <= の対象に含め、確認件数と削除件数を揃える", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 商品コード: { value: "A" }, 数量: { value: "" } } },
+      { id: "r2", value: { 商品コード: { value: "B" }, 数量: { value: "0" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "DELETE FROM APP100$明細 WHERE _rid LIKE '%' AND 数量 <= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as DeleteResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.deletedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id?: string }>;
+  expect(table.map((row) => row.id)).toEqual(["r2"]);
+});
+
 test("REORDER サブテーブル行（親単位）", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -949,6 +1184,31 @@ test("REORDER サブテーブル行（親単位）", async () => {
   expect(table[0].id).toBe("r2");
   expect(table[1].id).toBe("r1");
   expect(table.every((r) => r.value === undefined)).toBe(true);
+});
+
+test("REORDER: 空数値セルだけの親を >= の対象から外し、確認件数と親件数を揃える", async () => {
+  const parent = (id: string, quantity: string, rowId: string) => ({
+    $id: { value: id }, $revision: { value: "1" },
+    明細: { value: [
+      { id: rowId, value: { 商品コード: { value: `P-${id}` }, 数量: { value: quantity } } },
+    ] },
+  } as unknown as KintoneRecord);
+  const client = makeClient({ recordsByApp: { 100: [
+    parent("1", "", "r1"),
+    parent("2", "0", "r2"),
+  ] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "REORDER APP100$明細 BY 商品コード ASC WHERE 数量 >= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as any;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.reorderedParentCount).toBe(1);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(2);
 });
 
 test("REORDER は WHERE 必須", async () => {

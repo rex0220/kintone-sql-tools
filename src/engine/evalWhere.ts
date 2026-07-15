@@ -21,6 +21,7 @@ import type {
 } from "../types/ast";
 import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
+import { compareScalarValues } from "../core/scalarCompare";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -117,20 +118,7 @@ function evalOp(
 
   const rightStr = resolveValue(right, row);
 
-  // 数値比較が可能な場合は数値として比較する
-  const leftNum  = Number(leftStr);
-  const rightNum = Number(rightStr);
-  const numeric  = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-
-  switch (op) {
-    case "=":    return leftStr === rightStr;
-    case "!=":
-    case "<>":   return leftStr !== rightStr;
-    case ">":    return numeric ? leftNum > rightNum  : leftStr > rightStr;
-    case "<":    return numeric ? leftNum < rightNum  : leftStr < rightStr;
-    case ">=":   return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":   return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
+  return compareScalarValues(op, leftStr, rightStr);
 }
 
 function assertResolvedInListValues(

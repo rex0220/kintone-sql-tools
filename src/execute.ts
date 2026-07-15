@@ -14,8 +14,9 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
+import { compareScalarValues } from "./core/scalarCompare";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -39,7 +40,10 @@ import {
   fetchRecordsForSharedPlan,
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
-import { extractTableCondition } from "./core/optimization/wherePredicatePushdown";
+import {
+  extractNumericPushdownCandidates,
+  extractSafePushdownLeaves,
+} from "./core/optimization/wherePredicatePushdown";
 import { whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -780,7 +784,7 @@ async function executeAssert(
     const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
-    if (!compareAssertValues(">=", left, low) || !compareAssertValues("<=", left, high)) {
+    if (!compareScalarValues(">=", left, low) || !compareScalarValues("<=", left, high)) {
       throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
     }
     return { type: "ASSERT", condition: stmt.text };
@@ -790,7 +794,7 @@ async function executeAssert(
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareAssertValues(stmt.op, left, right)) {
+  if (!compareScalarValues(stmt.op, left, right)) {
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
   }
   return { type: "ASSERT", condition: stmt.text };
@@ -862,25 +866,6 @@ function evalAssertArith(node: ArithNode): number {
     }
   }
   throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
-}
-
-/**
- * ASSERT の比較。型規則は既存の WHERE 句比較（evalWhere の evalOp）と同一:
- * = / <> は文字列比較、大小比較は双方が数値に解釈できる場合のみ数値比較。
- */
-function compareAssertValues(op: AssertCompareOp, leftStr: string, rightStr: string): boolean {
-  const leftNum  = Number(leftStr);
-  const rightNum = Number(rightStr);
-  const numeric  = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-  switch (op) {
-    case "=":    return leftStr === rightStr;
-    case "!=":
-    case "<>":   return leftStr !== rightStr;
-    case ">":    return numeric ? leftNum > rightNum  : leftStr > rightStr;
-    case "<":    return numeric ? leftNum < rightNum  : leftStr < rightStr;
-    case ">=":   return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":   return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
 }
 
 // ============================================================
@@ -1059,6 +1044,62 @@ async function validateSelectFieldCodes(
   }
 }
 
+function extractMainSafePushdown(
+  stmt: SelectStatement,
+  fieldTypes?: ReadonlyMap<string, string>
+): WhereExpr | null {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+
+  if (stmt.joins.length === 0) {
+    return extractSafePushdownLeaves(stmt.where, {
+      tableAlias: stmt.from.alias ?? undefined,
+      allowUnqualifiedFields: true,
+      fieldTypes,
+    });
+  }
+
+  if (!stmt.from.alias) return null;
+  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias, fieldTypes });
+}
+
+function extractMainNumericPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+
+  if (stmt.joins.length === 0) {
+    return extractNumericPushdownCandidates(stmt.where, {
+      tableAlias: stmt.from.alias ?? undefined,
+      allowUnqualifiedFields: true,
+    });
+  }
+
+  if (!stmt.from.alias) return null;
+  return extractNumericPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
+}
+
+async function loadNumericPushdownFieldTypes(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<Map<number, FieldTypeMap>> {
+  const appIds = new Set<number>();
+  if (extractMainNumericPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+
+  if (stmt.where !== null) {
+    for (const join of stmt.joins) {
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const candidate = extractNumericPushdownCandidates(stmt.where, {
+        tableAlias: join.table.alias,
+      });
+      if (candidate !== null) appIds.add(join.table.appId);
+    }
+  }
+
+  const entries = await Promise.all([...appIds].map(async (appId) => (
+    [appId, await getFieldTypeMap(appId, client, cacheContext)] as const
+  )));
+  return new Map(entries);
+}
+
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
 async function executeFullScanSelect(
   stmt: SelectStatement,
@@ -1077,23 +1118,27 @@ async function executeFullScanSelect(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
-  // テーブルごとの push down 条件を計算
+  // 一般数値フィールドの候補がある物理アプリだけ型メタを取得する。
+  const pushdownFieldTypes = await loadNumericPushdownFieldTypes(stmt, client, cacheContext);
+
+  // テーブルごとの安全な push down 条件を計算する。
+  const mainPushDown = extractMainSafePushdown(
+    stmt,
+    pushdownFieldTypes.get(stmt.from.appId)
+  );
   const tableConditions = new Map<string, WhereExpr>();
   if (stmt.where !== null) {
-    if (stmt.from.alias) {
-      const cond = extractTableCondition(stmt.where, stmt.from.alias);
-      if (cond) tableConditions.set(stmt.from.alias, cond);
-    }
     for (const join of stmt.joins) {
-      if (join.table.alias) {
-        const cond = extractTableCondition(stmt.where, join.table.alias);
-        if (cond) tableConditions.set(join.table.alias, cond);
-      }
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const cond = extractSafePushdownLeaves(stmt.where, {
+        tableAlias: join.table.alias,
+        fieldTypes: pushdownFieldTypes.get(join.table.appId),
+      });
+      if (cond) tableConditions.set(join.table.alias, cond);
     }
   }
 
   // メインテーブルのフェッチを開始（await しない）
-  const mainPushDown = stmt.from.alias ? (tableConditions.get(stmt.from.alias) ?? null) : null;
   const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
@@ -3190,26 +3235,34 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     // メインテーブル
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainPushDown = stmt.from.alias && stmt.where
-      ? extractTableCondition(stmt.where, stmt.from.alias) : null;
+    const mainPushDown = extractMainSafePushdown(stmt);
+    const mainCandidate = extractMainNumericPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
       : "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
+    if (mainCandidate !== null) {
+      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型確認待ち）`);
+    }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
     for (const join of stmt.joins) {
       const joinFields = selectToFetchAllFields(stmt, join.table);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      const joinPushDown = join.table.alias && stmt.where
-        ? extractTableCondition(stmt.where, join.table.alias) : null;
+      const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
+        ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
+        ? extractNumericPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null
         ? whereToKintone(joinPushDown)
         : "(全件取得)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
+      if (joinCandidate !== null) {
+        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型確認待ち）`);
+      }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
     }
   }

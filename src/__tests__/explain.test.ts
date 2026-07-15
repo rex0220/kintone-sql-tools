@@ -78,6 +78,41 @@ test("EXPLAIN FULL_SCAN — LIKE はワイルドカードの有無にかかわ�
   expect(plan.find((l) => l.includes("reason"))).toContain("LIKE は常に JS 評価のため全件取得");
 });
 
+test("EXPLAIN FULL_SCAN — 単一テーブルの $id 条件だけを確定押し下げ表示する", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id, 会社名 FROM APP100 WHERE ($id >= 1000 AND 会社名 LIKE '%A%')"
+  );
+  const query = plan.find((l) => l.includes("kintone query:")) ?? "";
+  expect(query).toContain("$id >= 1000");
+  expect(query.toLowerCase()).not.toContain("like");
+});
+
+test("EXPLAIN FULL_SCAN — エイリアス経路のテキスト等値は押し下げない", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT a.$id FROM APP100 AS a WHERE a.状態 = '完了' AND a.会社名 LIKE '%A%'"
+  );
+  expect(plan.find((l) => l.includes("kintone query:"))).toContain("(全件取得)");
+});
+
+test("EXPLAIN FULL_SCAN — 一般数値比較は確定 query と分離して候補表示する", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id, 金額 FROM APP100 WHERE $id >= 10 AND 金額 > 1000 AND 会社名 LIKE '%A%'"
+  );
+  const query = plan.find((l) => l.includes("kintone query:")) ?? "";
+  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
+  expect(query).toContain("$id >= 10");
+  expect(query).not.toContain("金額");
+  expect(candidate).toContain("金額 > 1000");
+  expect(candidate).toContain("実行時の型確認待ち");
+});
+
+test("EXPLAIN FULL_SCAN — 一般 NUMBER の包含比較は候補表示しない", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id, 金額 FROM APP100 WHERE 金額 >= 1000 AND 会社名 LIKE '%A%'"
+  );
+  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
+});
+
 test("EXPLAIN FULL_SCAN — JOIN", async () => {
   const plan = await explain("EXPLAIN SELECT * FROM APP100 JOIN APP200 ON APP100.顧客ID = APP200.顧客ID");
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
