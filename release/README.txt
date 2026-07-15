@@ -1,9 +1,24 @@
-ksql 配布パッケージ (v2.5.0)
+ksql 配布パッケージ (v2.6.0)
 
-1. ksql-plugin-v2.5.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.6.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.6.0: 選択系 IN 押し下げと空セル評価(最適化＋バグ修正・後方互換)。
+- 選択系 IN/NOT IN の押し下げ(述語分割 第2段): LIKE 等で FULL_SCAN になる
+  クエリでも、AND 併記した選択系フィールドの IN/NOT IN を kintone の事前絞り込みに
+  使い取得件数を削減(取得後に同じ型付き規則で再評価)。対象は DROP_DOWN/
+  RADIO_BUTTON/CHECK_BOX/MULTI_SELECT で、型と選択肢の実在(optionOrder・追加
+  API なし)を確認できた空でない文字列リテラルのみ。非実在値・空文字・メタ未取得は
+  非押し下げ(kintone のクエリエラー化を回避)。ユーザー/組織/グループ選択・ステータスは
+  対象外(従来どおり JS 評価)。EXPLAIN は pushdown candidate 行に表示。
+- 選択系 IN('')/NOT IN('') の空セル評価を修正(バグ): kintone は 選択 in ("") を
+  空/未設定セルに一致させるが、FULL_SCAN の JS は空スカラー=""(2文字)・空配列=[]
+  のため一致していなかった。flatten の null/undefined を 0 文字の空文字へ正規化し
+  (サブテーブルと整合)、空配列を IN('') に一致させて SIMPLE/FULL_SCAN を揃えた。
+  副次で空スカラー選択の投影も ""(2文字)→空 に是正。テキスト/数値/非空は不変。
+- 詳細は CHANGELOG.md と言語リファレンス § IN / NOT IN を参照。
 
 v2.5.0: FULL_SCAN の IN / NOT IN を型メタ付きで評価(バグ修正・後方互換)。
         最適化ではなく SIMPLE / FULL_SCAN 間の結果不一致の修正。
