@@ -1110,7 +1110,7 @@ async function executeSimpleSelect(
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useSingleGet = params.query.includes("limit") || (stmt.limit !== null && stmt.limit <= 500);
+  const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
 
   // kintone は最大 500 件なので LIMIT が 500 以下ならページングは不要
   // LIMIT 指定なし or 500 超の場合は fetchAll を使う

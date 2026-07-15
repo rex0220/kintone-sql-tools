@@ -80,6 +80,27 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
   };
 }
 
+/** kintone の limit / offset と $id の昇降順を再現するページング用クライアント。 */
+function makePagedClient(
+  records: KintoneRecord[],
+  options: { searchAborted?: boolean } = {}
+): ReturnType<typeof makeClient> {
+  const client = makeClient();
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query, fields: [...params.fields] });
+    const limit = Number(params.query.match(/\blimit\s+(\d+)/i)?.[1] ?? "100");
+    const offset = Number(params.query.match(/\boffset\s+(\d+)/i)?.[1] ?? "0");
+    const ordered = /order by \$id desc/i.test(params.query)
+      ? [...records].reverse()
+      : records;
+    return {
+      records: ordered.slice(offset, offset + limit),
+      searchAborted: options.searchAborted,
+    };
+  };
+  return client;
+}
+
 // ----------------------------------------------------------------
 // SELECT
 // ----------------------------------------------------------------
@@ -95,6 +116,92 @@ test("SELECT * FROM APP100（SIMPLE モード）", async () => {
   expect(result.type).toBe("SELECT");
   expect(result.rowCount).toBe(2);
   expect(result.rows[0]["名前"]).toBe("田中");
+});
+
+test("SIMPLE LIMIT 500 は単発 GET を維持する", async () => {
+  const records = Array.from({ length: 501 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute("SELECT $id FROM APP100 LIMIT 500", client) as SelectResult;
+
+  expect(result.rowCount).toBe(500);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain("limit 500");
+});
+
+test("SIMPLE LIMIT 501 は limit 500 以下でページングする", async () => {
+  const records = Array.from({ length: 501 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 LIMIT 501",
+    client,
+    { maxRecords: 100_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(501);
+  expect(client.getCalls).toHaveLength(2);
+  expect(client.getCalls.map((call) => call.query)).toEqual([
+    "order by $id asc limit 500 offset 0",
+    "order by $id asc limit 500 offset 500",
+  ]);
+  expect(client.getCalls.every((call) => !/\blimit\s+(?:50[1-9]|[6-9]\d{2}|\d{4,})\b/.test(call.query))).toBe(true);
+});
+
+test("SIMPLE LIMIT 1000 は実対象 1000 件をページングして返す", async () => {
+  const records = Array.from({ length: 1_000 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 LIMIT 1000",
+    client,
+    { maxRecords: 100_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1_000);
+  // 500件×2ページの後、空ページで終端を確認する。
+  expect(client.getCalls).toHaveLength(3);
+  expect(client.getCalls.every((call) => !call.query.includes("limit 1000"))).toBe(true);
+});
+
+test("SIMPLE ORDER BY は LIMIT 500 / 501 境界で同じ先頭 500 行を返す", async () => {
+  const records = Array.from({ length: 501 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const singleClient = makePagedClient(records);
+  const pagedClient = makePagedClient(records);
+
+  const single = await execute(
+    "SELECT $id FROM APP100 ORDER BY $id DESC LIMIT 500",
+    singleClient
+  ) as SelectResult;
+  const paged = await execute(
+    "SELECT $id FROM APP100 ORDER BY $id DESC LIMIT 501",
+    pagedClient,
+    { maxRecords: 100_000 }
+  ) as SelectResult;
+
+  expect(paged.rows.slice(0, 500)).toEqual(single.rows);
+  expect(singleClient.getCalls).toHaveLength(1);
+  expect(pagedClient.getCalls.length).toBeGreaterThan(1);
+});
+
+test("SIMPLE KLIKE LIMIT 501 はページングし、クライアント層の検索打ち切り捕捉を維持する", async () => {
+  const records = Array.from({ length: 501 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    件名: "至急",
+  }));
+  const client = makePagedClient(records, { searchAborted: true });
+
+  const result = await execute(
+    "SELECT $id FROM APP100 WHERE 件名 KLIKE '至急' LIMIT 501",
+    client,
+    { maxRecords: 100_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(501);
+  expect(client.getCalls.length).toBeGreaterThan(1);
+  expect(client.getCalls.every((call) => call.query.includes('件名 like "至急"'))).toBe(true);
+  // fetchAll の個別 callback ではなく wrapClientWithSearchAbort が全 GET を捕捉する。
+  expect(result.warnings).toEqual([expect.stringContaining("10 万件で打ち切られ")]);
 });
 
 test("SELECT ORDER BY（並列取得時）: API クエリに元の order by を混在させない", async () => {
