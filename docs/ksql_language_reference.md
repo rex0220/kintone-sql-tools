@@ -534,6 +534,12 @@ FULL_SCAN で複数値フィールドを評価する場合も、kintone の `in`
 
 この規則はリテラル／バッチ変数の IN リストと `IN (SELECT ...)` の両方、およびサブテーブルを JavaScript 側で評価する経路に適用されます。
 
+v2.6.0 以降、FULL_SCAN の `WHERE` では、フィールド型と選択肢の実在を確認できた
+`DROP_DOWN`／`RADIO_BUTTON`／`CHECK_BOX`／`MULTI_SELECT` の `IN`／`NOT IN`
+（空でない文字列リテラルのみ）を kintone の事前絞り込みにも使用します。結果は取得後に同じ型付き規則で再評価します。
+存在しない選択肢、空文字、型情報・選択肢情報を取得できない場合は押し下げず、JavaScript 評価だけを行います。
+ユーザー・組織・グループ選択とステータスはこの最適化の対象外です。
+
 ### IN (SELECT ...) / NOT IN (SELECT ...)（サブクエリ）
 
 別アプリの検索結果を IN リストとして使用できます。
@@ -620,7 +626,7 @@ WHERE 顧客名 LIKE '会社'     -- 「会社」を含む（ワイルドカー�
 
 > **v2.0.0以降の評価経路（Breaking）**<br>
 > `LIKE` / `NOT LIKE`はワイルドカードの有無にかかわらずkintoneへ渡さず、全件取得後にJavaScriptで評価します。`%` / `_`付きは上表のSQLワイルドカード、ワイルドカードなしの`LIKE '会社'`はkSQL独自仕様の部分一致（`includes`）です。kintoneの単語（トークン）検索には委譲しません。<br>
-> LIKEを含むSELECTはFULL_SCANになります。LIKE以外の絞り込み条件をANDで併記しても、現時点ではWHERE全体を押し下げず全件取得します。大規模アプリでは一致件数にかかわらず全走査件数が`maxRecords`へ到達し、既定ではエラーになります。`onLimitReached = "truncate"`を選ぶと上限以降の一致行を欠落させる可能性があります。<br>
+> LIKEを含むSELECTはFULL_SCANになります。ANDで併記した安全な`$id`条件、型確認済みNUMBER条件、実在確認済み選択系`IN`／`NOT IN`は事前絞り込みに使われますが、それ以外は全件取得になります。大量レコードでは走査件数が`maxRecords`へ到達し、既定ではエラーになります。`onLimitReached = "truncate"`を選ぶと上限以降の一致行を欠落させる可能性があります。<br>
 > 通常の親レコードに対する`UPDATE` / `DELETE`では、すべての`LIKE` / `NOT LIKE`を拒否します。先に上限エラーのないSELECTで対象レコード番号を確認し、`IN`または完全一致条件で対象を指定してください。サブテーブルDMLはJavaScript評価経路のため従来どおり使用できます。
 
 ### IS NULL / IS NOT NULL

@@ -42,8 +42,8 @@ import {
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
 import {
-  extractNumericPushdownCandidates,
   extractSafePushdownLeaves,
+  extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { whereHasLike } from "./core/like";
 import {
@@ -1122,7 +1122,8 @@ async function validateSelectFieldCodes(
 
 function extractMainSafePushdown(
   stmt: SelectStatement,
-  fieldTypes?: ReadonlyMap<string, string>
+  fieldTypes?: ReadonlyMap<string, string>,
+  fieldOptions?: ReadonlyMap<string, ReadonlySet<string>>
 ): WhereExpr | null {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
 
@@ -1131,49 +1132,68 @@ function extractMainSafePushdown(
       tableAlias: stmt.from.alias ?? undefined,
       allowUnqualifiedFields: true,
       fieldTypes,
+      fieldOptions,
     });
   }
 
   if (!stmt.from.alias) return null;
-  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias, fieldTypes });
+  return extractSafePushdownLeaves(stmt.where, {
+    tableAlias: stmt.from.alias,
+    fieldTypes,
+    fieldOptions,
+  });
 }
 
-function extractMainNumericPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
+function extractMainTypedPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
 
   if (stmt.joins.length === 0) {
-    return extractNumericPushdownCandidates(stmt.where, {
+    return extractTypedPushdownCandidates(stmt.where, {
       tableAlias: stmt.from.alias ?? undefined,
       allowUnqualifiedFields: true,
     });
   }
 
   if (!stmt.from.alias) return null;
-  return extractNumericPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
+  return extractTypedPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
 }
 
-async function loadNumericPushdownFieldTypes(
+type FieldOptionsMap = Map<string, ReadonlySet<string>>;
+
+interface TypedPushdownMeta {
+  fieldTypesByApp: Map<number, FieldTypeMap>;
+  fieldOptionsByApp: Map<number, FieldOptionsMap>;
+}
+
+async function loadTypedPushdownMeta(
   stmt: SelectStatement,
   client: KintoneClient,
   cacheContext: string
-): Promise<Map<number, FieldTypeMap>> {
+): Promise<TypedPushdownMeta> {
   const appIds = new Set<number>();
-  if (extractMainNumericPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+  if (extractMainTypedPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
 
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const candidate = extractNumericPushdownCandidates(stmt.where, {
+      const candidate = extractTypedPushdownCandidates(stmt.where, {
         tableAlias: join.table.alias,
       });
       if (candidate !== null) appIds.add(join.table.appId);
     }
   }
 
-  const entries = await Promise.all([...appIds].map(async (appId) => (
-    [appId, await getFieldTypeMap(appId, client, cacheContext)] as const
-  )));
-  return new Map(entries);
+  const entries = await Promise.all([...appIds].map(async (appId) => {
+    const [fieldTypes, fieldOptions] = await Promise.all([
+      getFieldTypeMap(appId, client, cacheContext),
+      getFieldOptionSetMapByApp(appId, client, cacheContext),
+    ]);
+    return [appId, fieldTypes, fieldOptions] as const;
+  }));
+  return {
+    fieldTypesByApp: new Map(entries.map(([appId, fieldTypes]) => [appId, fieldTypes])),
+    fieldOptionsByApp: new Map(entries.map(([appId, , fieldOptions]) => [appId, fieldOptions])),
+  };
 }
 
 /** IN / NOT IN の左辺にある直接フィールド参照を、CASE 条件を含めて収集する。 */
@@ -1336,9 +1356,10 @@ async function executeFullScanSelect(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
-  // 一般数値フィールドの候補がある物理アプリだけ型メタを取得する。
-  const [pushdownFieldTypes, typedInFieldTypes] = await Promise.all([
-    loadNumericPushdownFieldTypes(stmt, client, cacheContext),
+  // 一般 NUMBER 比較または選択系 IN 候補がある物理アプリだけ、押し下げ用メタを取得する。
+  // typedInFieldTypes は最終 JS 評価用で役割が異なるため、統合しない。
+  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+    loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
@@ -1346,7 +1367,8 @@ async function executeFullScanSelect(
   // テーブルごとの安全な push down 条件を計算する。
   const mainPushDown = extractMainSafePushdown(
     stmt,
-    pushdownFieldTypes.get(stmt.from.appId)
+    pushdownMeta.fieldTypesByApp.get(stmt.from.appId),
+    pushdownMeta.fieldOptionsByApp.get(stmt.from.appId)
   );
   const tableConditions = new Map<string, WhereExpr>();
   if (stmt.where !== null) {
@@ -1354,7 +1376,8 @@ async function executeFullScanSelect(
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
       const cond = extractSafePushdownLeaves(stmt.where, {
         tableAlias: join.table.alias,
-        fieldTypes: pushdownFieldTypes.get(join.table.appId),
+        fieldTypes: pushdownMeta.fieldTypesByApp.get(join.table.appId),
+        fieldOptions: pushdownMeta.fieldOptionsByApp.get(join.table.appId),
       });
       if (cond) tableConditions.set(join.table.alias, cond);
     }
@@ -2152,6 +2175,21 @@ async function getOptionOrderMapByApp(
   }
   setScopedCacheValue(optionOrderCache, cacheContext, appId, map);
   return map;
+}
+
+/** 押し下げ時の実在検証用に、選択肢順マップをキー集合へ射影する。 */
+async function getFieldOptionSetMapByApp(
+  appId: number,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<FieldOptionsMap> {
+  const optionOrders = await getOptionOrderMapByApp(appId, client, cacheContext);
+  return new Map(
+    [...optionOrders.entries()].map(([fieldCode, order]) => [
+      fieldCode,
+      new Set(order.keys()),
+    ])
+  );
 }
 
 async function getSortKindMapByApp(
@@ -3569,14 +3607,14 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = extractMainSafePushdown(stmt);
-    const mainCandidate = extractMainNumericPushdownCandidate(stmt);
+    const mainCandidate = extractMainTypedPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
       : "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     if (mainCandidate !== null) {
-      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型確認待ち）`);
+      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型・実在確認待ち）`);
     }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
@@ -3587,14 +3625,14 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
       const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
         ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
-        ? extractNumericPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
+        ? extractTypedPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null
         ? whereToKintone(joinPushDown)
         : "(全件取得)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
       if (joinCandidate !== null) {
-        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型確認待ち）`);
+        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
       }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
     }

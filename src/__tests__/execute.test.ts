@@ -667,6 +667,146 @@ test("FULL_SCAN: NUMBER 等値は押し下げても JS の文字列表現で再�
   expect(result.rows).toEqual([{ $id: "2", 金額: "100" }]);
 });
 
+test.each([
+  ["DROP_DOWN", "A"],
+  ["RADIO_BUTTON", "A"],
+  ["CHECK_BOX", ["A", "B"]],
+  ["MULTI_SELECT", ["A", "B"]],
+] as const)("FULL_SCAN: %s の実在 IN を型・選択肢確認後に押し下げる", async (fieldType, value) => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", 選択: value, 件名: "one" }),
+  ] });
+  let getFieldsCount = 0;
+  client.getFields = async () => {
+    getFieldsCount += 1;
+    return [
+      { code: "選択", label: "選択", fieldType, optionOrder: { A: 0, B: 1 } },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  };
+
+  const result = await execute(
+    "SELECT $id FROM APP99201 WHERE 選択 IN ('A') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: `selection-pushdown-${fieldType}` }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1" }]);
+  expect(client.getCalls[0].query).toContain('選択 in ("A")');
+  expect(client.getCalls[0].query.toLowerCase()).not.toContain("like");
+  expect(getFieldsCount).toBe(1);
+});
+
+test("FULL_SCAN: MULTI_SELECT NOT IN を押し下げ、空配列は最終JS評価でも包含する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", 選択: [], 件名: "empty" }),
+    makeTypedRecord({ $id: "2", 選択: ["A"], 件名: "selected" }),
+  ] });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "MULTI_SELECT", optionOrder: { A: 0 } },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id FROM APP99202 WHERE 選択 NOT IN ('A') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-pushdown-not-in" }
+  ) as SelectResult;
+
+  expect(client.getCalls[0].query).toContain('選択 not in ("A")');
+  expect(result.rows).toEqual([{ $id: "1" }]);
+});
+
+test.each(["'X'", "''"])(
+  "FULL_SCAN: 非実在または空の選択肢 %s はリーフだけ非押し下げにする",
+  async (literal) => {
+    const client = makeClient({ records: [
+      makeTypedRecord({ $id: "10", 選択: literal === "'X'" ? "X" : "", 件名: "one" }),
+    ] });
+    client.getFields = async () => [
+      { code: "選択", label: "選択", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+    await execute(
+      `SELECT $id FROM APP99203 WHERE $id >= 1 AND 選択 IN (${literal}) AND 件名 LIKE '%'`,
+      client,
+      { cacheContext: `selection-pushdown-invalid-${literal}` }
+    );
+
+    expect(client.getCalls[0].query).toContain("$id >= 1");
+    expect(client.getCalls[0].query).not.toContain("選択 in");
+  }
+);
+
+test.each(["USER_SELECT", "STATUS"])(
+  "FULL_SCAN: %s の IN は押し下げず最終JS評価に残す",
+  async (fieldType) => {
+    const value = fieldType === "USER_SELECT" ? [{ code: "A", name: "Alice" }] : "A";
+    const client = makeClient({ records: [makeTypedRecord({ $id: "1", 選択: value, 件名: "one" })] });
+    client.getFields = async () => [
+      { code: "選択", label: "選択", fieldType, optionOrder: { A: 0 } },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+    const result = await execute(
+      "SELECT $id FROM APP99204 WHERE 選択 IN ('A') AND 件名 LIKE '%'",
+      client,
+      { cacheContext: `selection-pushdown-excluded-${fieldType}` }
+    ) as SelectResult;
+
+    expect(client.getCalls[0].query).not.toContain("選択 in");
+    expect(result.rows).toEqual([{ $id: "1" }]);
+  }
+);
+
+test("FULL_SCAN: 選択系候補の型メタ取得失敗をレコード取得前に伝播する", async () => {
+  const client = makeClient();
+  client.getFields = async () => {
+    throw new Error("selection metadata failed");
+  };
+
+  await expect(execute(
+    "SELECT $id FROM APP99205 WHERE 選択 IN ('A') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-pushdown-reject" }
+  )).rejects.toThrow("selection metadata failed");
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("FULL_SCAN JOIN: 各アプリの実在選択系 IN を別々に押し下げる", async () => {
+  const client = makeClient({ recordsByApp: {
+    99206: [makeTypedRecord({ $id: "1", 顧客ID: "C1", 選択A: "A", 件名: "one" })],
+    99207: [makeTypedRecord({ $id: "2", 顧客ID: "C1", 選択B: ["B"] })],
+  } });
+  const getFieldsCount = new Map<number, number>();
+  client.getFields = async (appId) => {
+    getFieldsCount.set(appId, (getFieldsCount.get(appId) ?? 0) + 1);
+    return appId === 99206
+      ? [
+        { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "選択A", label: "選択A", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+        { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+      ]
+      : [
+        { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "選択B", label: "選択B", fieldType: "CHECK_BOX", optionOrder: { B: 0 } },
+      ];
+  };
+
+  const result = await execute(
+    "SELECT a.$id FROM APP99206 a JOIN APP99207 b ON a.顧客ID = b.顧客ID " +
+      "WHERE a.選択A IN ('A') AND b.選択B IN ('B') AND a.件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-pushdown-join" }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(client.getCalls.find((call) => call.app === 99206)?.query).toContain('選択A in ("A")');
+  expect(client.getCalls.find((call) => call.app === 99207)?.query).toContain('選択B in ("B")');
+  expect(getFieldsCount).toEqual(new Map([[99206, 1], [99207, 1]]));
+});
+
 test.each([">=", "<="])(
   "FULL_SCAN: 一般 NUMBER の %s は型が確定しても押し下げない",
   async (op) => {

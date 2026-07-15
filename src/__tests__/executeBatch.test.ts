@@ -172,6 +172,65 @@ test("変数置換後の USER_SELECT IN は code 単位で型付き評価する"
   expect((result.statements[1].result as SelectResult).rows).toEqual([{ $id: "1" }]);
 });
 
+test.each([
+  ["SET @choice = 'A'", undefined],
+  ["DECLARE @choice = 'B'", { Choice: "A" }],
+] as const)("変数解決後の選択系 IN を実在文字列として押し下げる: %s", async (declaration, variables) => {
+  const client = makeClient({ recordsByApp: { 98201: [
+    makeTypedRecord({ $id: "1", 選択: ["A"], 件名: "one" }),
+  ] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX", optionOrder: { A: 0, B: 1 } },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await executeBatch(
+    `${declaration}; SELECT $id FROM APP98201 WHERE 選択 IN (@choice) AND 件名 LIKE '%'`,
+    client,
+    { variables, cacheContext: `selection-variable-${declaration.slice(0, 3)}` }
+  );
+
+  expect(result.ok).toBe(true);
+  expect(client.getCalls[0].query).toContain('選択 in ("A")');
+});
+
+test("数値変数へ置換された選択系 IN は候補にせず押し下げない", async () => {
+  const client = makeClient({ recordsByApp: { 98202: [
+    makeTypedRecord({ $id: "1", 選択: "1", 件名: "one" }),
+  ] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "DROP_DOWN", optionOrder: { "1": 0 } },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  await executeBatch(
+    "SET @choice = 1; SELECT $id FROM APP98202 WHERE 選択 IN (@choice) AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "selection-variable-number" }
+  );
+
+  expect(client.getCalls[0].query).not.toContain("選択 in");
+});
+
+test.each(["X", ""])(
+  "DECLARE 外部注入の非実在・空文字 %j は選択系 IN を押し下げない",
+  async (choice) => {
+    const client = makeClient({ recordsByApp: { 98203: [] } });
+    client.getFields = async () => [
+      { code: "選択", label: "選択", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+    await executeBatch(
+      "DECLARE @choice = 'A'; SELECT $id FROM APP98203 WHERE 選択 IN (@choice) AND 件名 LIKE '%'",
+      client,
+      { variables: { choice }, cacheContext: `selection-variable-invalid-${choice}` }
+    );
+
+    expect(client.getCalls[0].query).not.toContain("選択 in");
+  }
+);
+
 test("SET の失敗は continueOnError=true でも後続を停止する", async () => {
   const r = await executeBatch("SET @bad = 1 / 0; SELECT * FROM APP100", makeClient(), { continueOnError: true });
   expect(r.ok).toBe(false);
