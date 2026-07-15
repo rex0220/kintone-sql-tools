@@ -193,6 +193,36 @@ SELECT * FROM #before;
 
 ---
 
+## R5. リテラル値リストを一時テーブル化して一括処理
+
+外部（承認リスト・CSV・別システム）由来の **ID / コードの集合**を対象に、ゲート → 一括処理する。値リストを **`FROM` なしの `SELECT … UNION ALL …`** で一時テーブルに実体化し、以降は **`IN (SELECT id FROM #t)`** で **1 箇所参照**する（リストの重複記述を避ける）。
+
+```sql
+-- 1) 対象 ID を一時テーブルに実体化（リストはここ1箇所だけ）
+CREATE TEMP TABLE #targets AS
+  SELECT '1001' AS id
+  UNION ALL SELECT '1005'
+  UNION ALL SELECT '1012';
+
+-- 2) 事前ゲート: 対象に「取消」状態が混ざっていないことを確認
+ASSERT (SELECT COUNT(*) FROM APP100
+        WHERE $id IN (SELECT id FROM #targets) AND 状態 = '取消') = 0;
+
+-- 3) 本処理: 対象だけを一括更新
+UPDATE APP100 SET 状態 = '完了' WHERE $id IN (SELECT id FROM #targets);
+
+-- 4) 監査ログへ対象を記録（同じ #targets を再利用）
+INSERT INTO APP_LOG (対象ID) SELECT id FROM #targets;
+```
+
+- **DRY**: 対象リストを `#targets` の 1 箇所に集約し、`ASSERT` / `UPDATE` / `INSERT … SELECT` から再利用する（リストを各文に繰り返さない）。
+- **安全**: 値はリテラルとしてバインドされ、文字列連結による SQL インジェクションは起きない。
+- **kintone 内から導ける集合**なら `#targets` を使わず直接 `IN (SELECT … FROM APPxxx WHERE …)` の方が簡単。R5 は **kintone 外由来の固定リスト**が対象。
+- **`UPDATE` / `DELETE` は一時テーブルを直接 `FROM` にできない**ため、対象指定は必ず **サブクエリ `IN (SELECT id FROM #t)`** で書く（注意の「一時テーブル参照の非対称」参照）。
+- **前提バージョン**: `CREATE TEMP TABLE AS <FROM なし SELECT / UNION>` の実体化は **v2.10.0 以降**（それ以前は 0 行になる不具合があった）。
+
+---
+
 ## 適用限界（スケール指針）
 
 判断基準は総レコード数ではなく **「日次の実変更件数が API 制限と実行時間に収まるか」** です。
@@ -215,3 +245,4 @@ SELECT * FROM #before;
 - 一時テーブルは**同時 16 個・1 個あたり既定 10,000 行**（`tempTableMaxRows` で変更可）。バッチは**最大 20 文**。
 - DML バッチは常に **fail-fast**（`ASSERT` 失敗・エラーで停止）。`continueOnError` は read-only バッチのみ。
 - **一時テーブル参照の非対称**: `UPDATE` / `DELETE` から一時テーブルをサブクエリ参照すると実行前に拒否。一方 `INSERT … SELECT` / `UPSERT … SELECT`、および `CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照できる（R3 が成立する根拠）。
+- **検索打ち切り（10 万件）と DML の fail-closed（v2.10.0 以降）**: `like` / `not like`（`KLIKE` 含む）を使う WHERE で一致候補が **10 万件に達すると kintone が検索を打ち切る**。この打ち切りを検出した場合、**DML・SELECT ベース DML・一時テーブル実体化は書き込み前にエラー（`SearchAbortedError`）で停止**し、サイレントな一部更新/削除を防ぐ。`SELECT` は**警告付き**で返る（結果が欠落し得る）。大規模アプリを対象にする場合は、**`$id` 範囲・`IN`・完全一致などで 10 万件未満に絞って**から処理する（プラグイン経路はこの打ち切りを検出しない）。
