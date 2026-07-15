@@ -18,7 +18,8 @@ import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
-import { validateKlikeStatement } from "./core/klikeValidation";
+import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
+import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -43,9 +44,9 @@ import {
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
 import {
-  extractSafePushdownLeaves,
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
+import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
 import { whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -1140,30 +1141,6 @@ async function validateSelectFieldCodes(
   }
 }
 
-function extractMainSafePushdown(
-  stmt: SelectStatement,
-  fieldTypes?: ReadonlyMap<string, string>,
-  fieldOptions?: ReadonlyMap<string, ReadonlySet<string>>
-): WhereExpr | null {
-  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
-
-  if (stmt.joins.length === 0) {
-    return extractSafePushdownLeaves(stmt.where, {
-      tableAlias: stmt.from.alias ?? undefined,
-      allowUnqualifiedFields: true,
-      fieldTypes,
-      fieldOptions,
-    });
-  }
-
-  if (!stmt.from.alias) return null;
-  return extractSafePushdownLeaves(stmt.where, {
-    tableAlias: stmt.from.alias,
-    fieldTypes,
-    fieldOptions,
-  });
-}
-
 function extractMainTypedPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
 
@@ -1417,24 +1394,11 @@ async function executeFullScanSelect(
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
 
-  // テーブルごとの安全な push down 条件を計算する。
-  const mainPushDown = extractMainSafePushdown(
-    stmt,
-    pushdownMeta.fieldTypesByApp.get(stmt.from.appId),
-    pushdownMeta.fieldOptionsByApp.get(stmt.from.appId)
-  );
-  const tableConditions = new Map<string, WhereExpr>();
-  if (stmt.where !== null) {
-    for (const join of stmt.joins) {
-      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const cond = extractSafePushdownLeaves(stmt.where, {
-        tableAlias: join.table.alias,
-        fieldTypes: pushdownMeta.fieldTypesByApp.get(join.table.appId),
-        fieldOptions: pushdownMeta.fieldOptionsByApp.get(join.table.appId),
-      });
-      if (cond) tableConditions.set(join.table.alias, cond);
-    }
-  }
+  // 同じ計画を検証・fetch・JS 評価で共有する。
+  const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
+  validateKlikePushdownPlan(pushdownPlan);
+  const mainPushDown = pushdownPlan.mainCondition;
+  const tableConditions = pushdownPlan.joinConditions;
 
   // メインテーブルのフェッチを開始（await しない）
   const mainFetch = fetchTableRecordsForFullScan(
@@ -1535,6 +1499,7 @@ async function executeFullScanSelect(
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    appliedKlikes: pushdownPlan.appliedKlikes,
   });
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
@@ -1629,114 +1594,6 @@ async function executeWith(
   return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
 }
 
-// ------------------------------------------------------------
-// CTE インライン化ヘルパー
-// ------------------------------------------------------------
-
-/**
- * WITH 文が単純 CTE インライン化の条件を満たすか判定する。
- *
- * 条件（すべて満たす場合に true）:
- *   - CTE が 1 つだけ
- *   - CTE 本体が SelectStatement（UNION でない）かつ SIMPLE モード
- *   - 最終クエリが SelectStatement（UNION でない）
- *   - 最終クエリの FROM が CTE 参照のみ（JOIN なし）
- *   - 最終クエリに GROUP BY・集計・DISTINCT がない
- */
-function canInlineSingleCte(stmt: WithStatement): boolean {
-  if (stmt.ctes.length !== 1) return false;
-  const cteDef = stmt.ctes[0];
-  if (cteDef.query.type !== "SELECT") return false;
-  if (resolveSelectMode(cteDef.query) !== "SIMPLE") return false;
-
-  const finalQuery = stmt.query;
-  if (finalQuery.type !== "SELECT") return false;
-  if (finalQuery.from.cteName !== cteDef.name) return false;
-  if (finalQuery.joins.length > 0) return false;
-  if (finalQuery.groupBy.length > 0) return false;
-  if (finalQuery.distinct) return false;
-  if (finalQuery.columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"
-  )) return false;
-
-  return true;
-}
-
-/**
- * CTE をインライン化した SelectStatement を構築する。
- *
- * CTE 本体の WHERE と最終クエリの WHERE を AND で結合し、
- * 最終クエリの ORDER BY / LIMIT / OFFSET を優先して使用する。
- * 最終クエリで CTE に付けたエイリアス（AS c 等）はフィールド参照から除去する。
- */
-function buildInlinedQuery(stmt: WithStatement): SelectStatement {
-  const cteBody  = stmt.ctes[0].query as SelectStatement;
-  const final    = stmt.query as SelectStatement;
-  const cteAlias = final.from.alias; // FROM cte AS alias の alias
-
-  // 最終 WHERE の CTE エイリアスを除去
-  const finalWhere = stripCteAlias(final.where, cteAlias);
-
-  // CTE 本体の WHERE と最終 WHERE を AND でマージ
-  let mergedWhere: WhereExpr | null;
-  if      (cteBody.where === null) mergedWhere = finalWhere;
-  else if (finalWhere    === null) mergedWhere = cteBody.where;
-  else mergedWhere = { type: "LOGICAL", op: "AND", left: cteBody.where, right: finalWhere };
-
-  // 列: 最終クエリが WILDCARD のみなら CTE 本体の列を継承
-  const columns = final.columns.every((c) => c.type === "WILDCARD")
-    ? cteBody.columns
-    : final.columns;
-
-  return {
-    type:     "SELECT",
-    from:     cteBody.from,
-    joins:    [],
-    columns,
-    where:    mergedWhere,
-    groupBy:  [],
-    having:   null,
-    orderBy:  final.orderBy.length > 0 ? final.orderBy : cteBody.orderBy,
-    limit:    final.limit  ?? cteBody.limit,
-    offset:   final.offset ?? cteBody.offset,
-    distinct: false,
-  };
-}
-
-/**
- * WHERE 式に含まれる FieldRef の tableAlias が指定エイリアスと一致する場合に
- * tableAlias を null に置き換えて返す（CTE エイリアスの除去）。
- */
-function stripCteAlias(where: WhereExpr | null, alias: string | null): WhereExpr | null {
-  if (where === null || alias === null) return where;
-  switch (where.type) {
-    case "BINARY":
-      return { type: "BINARY", op: where.op,
-        left:  stripCteAliasFromFieldValue(where.left, alias),
-        right: where.right };
-    case "NULL_CHECK":
-      return { type: "NULL_CHECK", not: where.not,
-        field: stripCteAliasFromFieldValue(where.field, alias) };
-    case "LOGICAL":
-      return { type: "LOGICAL", op: where.op,
-        left:  stripCteAlias(where.left,  alias)!,
-        right: stripCteAlias(where.right, alias)! };
-    case "NOT":
-      return { type: "NOT",   expr: stripCteAlias(where.expr, alias)! };
-    case "GROUP":
-      return { type: "GROUP", expr: stripCteAlias(where.expr, alias)! };
-    case "EXISTS":
-      return where; // サブクエリはエイリアス除去対象外
-  }
-}
-
-function stripCteAliasFromFieldValue(fv: FieldValue, alias: string): FieldValue {
-  if (fv.type === "FIELD" && fv.tableAlias === alias) {
-    return { type: "FIELD", field: fv.field, tableAlias: null };
-  }
-  return fv;
-}
-
 /**
  * SelectStatement | UnionStatement を CTE キャッシュ付きで実行する。
  * FROM / JOIN が CTE 参照を含む場合は FULL_SCAN モードで CTE 行を注入する。
@@ -1802,8 +1659,13 @@ async function executeFullScanWithCte(
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
   ]);
 
-  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+    loadTypedPushdownMeta(stmt, client, cacheContext),
+    loadTypedInFieldTypes(stmt, client, cacheContext),
+  ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
+  validateKlikePushdownPlan(pushdownPlan);
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
@@ -1826,7 +1688,8 @@ async function executeFullScanWithCte(
       parallel,
       true,
       options.onLimitReached ?? "error",
-      warnings
+      warnings,
+      pushdownPlan.mainCondition
     );
     tables.set(stmt.from.alias, mainRecords);
   }
@@ -1837,6 +1700,9 @@ async function executeFullScanWithCte(
       const rows = cteCache.get(join.table.cteName) ?? [];
       tables.set(join.table.alias, rows.map(processRowToKintoneRecord));
     } else {
+      const pushDownCond = join.table.alias
+        ? (pushdownPlan.joinConditions.get(join.table.alias) ?? null)
+        : null;
       const optimized = await tryFetchJoinRecordsBySourceKeys(
         stmt,
         join,
@@ -1845,7 +1711,8 @@ async function executeFullScanWithCte(
         maxRecords,
         parallel,
         options.onLimitReached ?? "error",
-        warnings
+        warnings,
+        pushDownCond
       );
       const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
         stmt,
@@ -1855,7 +1722,8 @@ async function executeFullScanWithCte(
         parallel,
         false,
         options.onLimitReached ?? "error",
-        warnings
+        warnings,
+        pushDownCond
       );
       tables.set(join.table.alias, joinRecords);
     }
@@ -1872,6 +1740,7 @@ async function executeFullScanWithCte(
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    appliedKlikes: pushdownPlan.appliedKlikes,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -3672,10 +3541,11 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     lines.push(`  kintone query: ${params.query || "(なし)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
+    const pushdownPlan = buildKlikePushdownPlan(stmt);
     // メインテーブル
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainPushDown = extractMainSafePushdown(stmt);
+    const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
@@ -3691,8 +3561,9 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
       const joinFields = selectToFetchAllFields(stmt, join.table);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
-        ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinPushDown = join.table.alias
+        ? (pushdownPlan.joinConditions.get(join.table.alias) ?? null)
+        : null;
       const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
         ? extractTypedPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null
@@ -3739,6 +3610,10 @@ function buildWithPlan(stmt: WithStatement): string[] {
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
     lines.push(...buildExplainPlan(stmt.query, "[main]"));
+  }
+  if (canInlineSingleCte(stmt)) {
+    lines.push("");
+    lines.push(...buildSelectPlan(buildInlinedQuery(stmt), "[effective: inlined CTE]"));
   }
   return lines;
 }

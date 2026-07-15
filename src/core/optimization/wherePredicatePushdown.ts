@@ -12,6 +12,10 @@ export interface SafePushdownOptions {
   fieldTypes?: ReadonlyMap<string, string>;
   /** 選択系フィールドの実在選択肢集合。未指定・対象フィールドなしなら IN は抽出しない。 */
   fieldOptions?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** KLIKE を安全リーフ候補に含める。外部結合などでは false にする。 */
+  allowKlike?: boolean;
+  /** 静的検証時だけ、未解決のバッチ変数を KLIKE 候補として扱う。 */
+  allowUnresolvedKlikeVariables?: boolean;
 }
 
 type PushdownCandidateOptions = Pick<
@@ -86,11 +90,23 @@ function isSafeComparison(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
   options: SafePushdownOptions
 ): boolean {
+  if (isKlikeComparison(expr, options)) return true;
   if (isSafeIdComparison(expr, options)) return true;
   if (isNumericCandidate(expr, options)) {
     return options.fieldTypes?.get(expr.left.field) === "NUMBER";
   }
   return isSelectionInComparison(expr, options);
+}
+
+function isKlikeComparison(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: SafePushdownOptions
+): boolean {
+  if (options.allowKlike === false) return false;
+  if (expr.op !== "KLIKE" && expr.op !== "NOT_KLIKE") return false;
+  if (expr.left.type !== "FIELD" || !isTargetField(expr.left, options)) return false;
+  return expr.right.type === "STRING"
+    || (options.allowUnresolvedKlikeVariables === true && expr.right.type === "VARIABLE");
 }
 
 const SELECTION_IN_FIELD_TYPES = new Set([

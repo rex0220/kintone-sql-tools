@@ -2,6 +2,19 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased — KLIKE プレフィルタ押し下げ
+
+### 追加（最適化）
+
+- FULL_SCAN SELECTでも、`KLIKE` / `NOT KLIKE` が安全なANDリーフならkintoneへプレフィルタ押し下げする。`KLIKE`で候補を絞り、`LIKE`・関数・集計・`DISTINCT`などをJavaScriptで精製できる。
+  ```sql
+  SELECT 件名 FROM APP100
+  WHERE 件名 KLIKE '至急' AND 備考 LIKE '%緊急%'
+  ```
+- 押し下げ計画を検証・取得・JavaScript評価・EXPLAINで共有し、実際に押し下げたKLIKEだけを適用済みとして扱う。集合外のKLIKEはエラーにしてfail-closedを維持する。
+- JOINとの併用は全JOINが`INNER JOIN`の場合だけ許可する。`LEFT JOIN` / `RIGHT JOIN`を含むSELECT、OR・`NOT (...)`配下、CTE／一時テーブル上のKLIKEは拒否する。直接の`NOT KLIKE`は使用できる。
+- 全DML拒否と、kintone検索の10万件打ち切りによる完全結果非保証は従来どおり。
+
 ## v2.8.0（2026-07-15）— KLIKE（kintone キーワード検索）
 
 ### 追加

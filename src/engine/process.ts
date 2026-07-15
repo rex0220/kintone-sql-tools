@@ -171,10 +171,11 @@ export function applyJoin(
 export function applyFilter(
   rows: ProcessRow[],
   where: WhereExpr | null,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  appliedKlikes?: ReadonlySet<object>
 ): ProcessRow[] {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row, resolveFieldType));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes));
 }
 
 // ============================================================
@@ -831,6 +832,8 @@ export interface FullScanInput {
   fieldTypeResolver?: FieldTypeResolver;
   /** HAVING 用。集計列 alias を物理フィールドと誤認しない解決器 */
   havingFieldTypeResolver?: FieldTypeResolver;
+  /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
+  appliedKlikes?: ReadonlySet<object>;
 }
 
 /**
@@ -849,6 +852,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     sortKinds,
     fieldTypeResolver,
     havingFieldTypeResolver,
+    appliedKlikes,
   } = input;
 
   // 1. flatten
@@ -868,7 +872,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 3. filter — JS 側 WHERE 評価
   // JOIN があれば常に適用（kintone クエリでは複数テーブルの結合条件を表現不可）
   // JOIN がなくても WHERE に関数が含まれる場合は kintone 側でフィルタできないため JS で評価
-  rows = applyFilter(rows, stmt.where, fieldTypeResolver);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes);
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する

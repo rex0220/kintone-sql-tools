@@ -1,7 +1,7 @@
 # 仕様案: KLIKE プレフィルタ押し下げ（v2）
 
 - 作成日: 2026-07-15
-- ステータス: **仕様案 R2（codex レビュー反映・コードで裏取り・実装着手可）**
+- ステータス: **R2確定・v2実装済み（実機検証前）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 更新履歴:
   - 2026-07-15 R1: 初版（検討）。
@@ -10,9 +10,10 @@
     - **[答1] 共有押し下げ計画**: 検証で同じ関数を呼ぶだけでなく、**テーブル別押し下げ計画を一度生成し、検証・fetch・JS 評価・EXPLAIN で共有**する（§2.1）。
     - **[答2] グローバル `return true` は不採用**: `evalWhere` へ**実際に押し下げた KLIKE ノード集合**を渡し、集合内なら true・集合外なら**従来どおり throw**（検証漏れを fail-open にしない・§2.2）。
     - **[答3] `NOT (KLIKE)` は v2 minimal では拒否**（直接の `NOT KLIKE` で代替可・正規化採用は全経路で正規化済み AST 共有が必要・§2.5）。
-    - **[P1] CTE インライン化後の AST で計画を作る**。検証側 `buildEffectiveInlineSelect`（[klikeValidation.ts:145](../../src/core/klikeValidation.ts#L145)）と実行側 `buildInlinedQuery`（[execute.ts:1672](../../src/execute.ts#L1672)・`stripCteAlias` で CTE エイリアス除去）が別実装で、実行側だけがエイリアス除去する。ノード同一性・対象テーブル判定を使うと乖離する → **共通インライン化関数へ集約するか、実インライン化後の AST で再検証・計画生成**（§2.7）。
+    - **[P1] CTE インライン化後の AST で計画を作る**。R1時点では検証側 `buildEffectiveInlineSelect` と実行側 `buildInlinedQuery` が別実装で、実行側だけが CTE エイリアスを除去していた。ノード同一性・対象テーブル判定の乖離を避けるため、**共通インライン化関数へ集約**する（§2.7）。
+  - 2026-07-15 v2実装: 共有計画、INNER限定、集合ゲート、共通CTEインライン化、EXPLAIN、単体・統合テストを実装。全1100テスト＋CLI subprocess 25テスト green。実機検証待ち。
 - 前提: KLIKE v1（[ksql_klike_native_search_spec.md](ksql_klike_native_search_spec.md)・**v2.8.0 リリース済**）。v1 は KLIKE を **SIMPLE SELECT の WHERE 限定**とし、FULL_SCAN になる SELECT では拒否している。
-- 関連コード: `src/core/optimization/wherePredicatePushdown.ts`（`extractSafePushdownLeaves` / `isSafeComparison` / `extractAndLeaves`）、`src/engine/evalWhere.ts`（KLIKE の評価）、`src/core/klikeValidation.ts`（静的検証）、`src/execute.ts`（FULL_SCAN の押し下げ配線）
+- 関連コード: `src/core/optimization/klikePushdownPlan.ts`（共有計画）、`src/core/optimization/wherePredicatePushdown.ts`（安全リーフ抽出）、`src/core/cteInlining.ts`（共通CTEインライン化）、`src/engine/evalWhere.ts`（集合ゲート）、`src/core/klikeValidation.ts`（静的検証）、`src/execute.ts`（FULL_SCAN・EXPLAIN配線）
 
 ## 0. 目的
 
@@ -59,7 +60,7 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 - `extractAndLeaves` は AND/GROUP 経由のみ抽出（OR/NOT は `null`）＝KLIKE の安全位置と一致。数値・選択系・$id の既存押し下げと**併存**。
 
 ### 2.5 実行配線（`execute.ts`）
-- FULL_SCAN 経路で `extractMainSafePushdown` / 各 JOIN の `extractSafePushdownLeaves` が KLIKE を含む安全リーフを抽出 → `pushQuery` に乗る（既存の数値/選択系押し下げと同じ配線）。
+- FULL_SCAN 経路は共有計画の `mainCondition` / `joinConditions` をそのまま `pushQuery` に使う（既存の数値/選択系押し下げも同じ計画に含む）。
 - `baseQuery`（`selectToFetchAllParams` の丸ごと変換）と併存: KLIKE は `whereRequiresJsEval` 非該当なので、`GROUP BY` 等で FULL_SCAN・WHERE 変換可能な経路では `baseQuery` にも KLIKE が乗る（冗長だが無害）。`LIKE` 併用経路では `baseQuery` 空・`pushQuery` に KLIKE。
 - EXPLAIN: KLIKE を含む押し下げクエリを表示。
 
@@ -73,8 +74,8 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 - 将来: nullable 側判定（結合順・保存側/nullable 側の解析）や取得行への KLIKE 適用済み来歴付与で、非 nullable 側の KLIKE を解禁。
 
 ### 2.7 CTE インライン化後の AST で計画を作る（[P1]）
-検証側 `buildEffectiveInlineSelect`（[klikeValidation.ts:145](../../src/core/klikeValidation.ts#L145)）と実行側 `buildInlinedQuery`（[execute.ts:1672](../../src/execute.ts#L1672)）が別実装で、**実行側だけが `stripCteAlias` で CTE エイリアスを除去**する。ノード同一性・対象テーブル判定（§2.1/2.2）を使う v2 では、この差で検証・抽出の集合が乖離する。
-- **対応**: 両者を**共通インライン化関数に集約**するか、**実インライン化後（`buildInlinedQuery` 相当）の AST に対して**押し下げ計画（§2.1）を生成し、その同一 AST を検証・fetch・JS 評価・EXPLAIN が共有する。
+R1時点では検証用と実行用のインライン化が別実装で、実行側だけが `stripCteAlias` 相当の処理を行っていた。ノード同一性・対象テーブル判定（§2.1/2.2）を使う v2 では、この差で検証・抽出の集合が乖離する。
+- **実装**: `src/core/cteInlining.ts` の `canInlineSingleCte` / `buildInlinedQuery` に集約し、インライン化後の AST に対して押し下げ計画（§2.1）を生成する。同じ AST をfetch・JS評価へ渡し、EXPLAINにも`effective: inlined CTE`として表示する。
 - 押し下げ済み KLIKE ノード集合の参照同一性は、この**インライン化後 AST 上のノード**で保持する（インライン前 AST とは別オブジェクトになるため）。
 
 ## 3. P0（10 万件打ち切り）との関係
@@ -98,4 +99,4 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 - **v2 = SELECT の KLIKE プレフィルタ押し下げのみ**（AND リーフ位置・**INNER JOIN 限定**・`NOT`ノード配下不可・DML 非対象・P0 は継承）。
 - **確定事項（R2）**: (1) 検証は**共有押し下げ計画ベース**（§2.1・独立ロジック再実装しない）／(2) `evalWhere` は**集合ゲート**（集合外は throw・fail-closed・§2.2）／(3) `NOT (KLIKE)` は**拒否**（§2.5）／外部結合は **INNER 限定**（§2.6）／CTE は**インライン化後 AST で計画生成**（§2.7）。
 - 受入（実装後）: KLIKE＋LIKE で kintone 絞り込み＋JS 精製が正しい・KLIKE＋COUNT(*)/DISTINCT・INNER JOIN の KLIKE 押下・**LEFT/RIGHT JOIN の KLIKE は拒否**・OR/`NOT`ノード配下の KLIKE 拒否・押し下げ集合外 KLIKE が評価到達で throw・CTE インライン後も検証/評価一致・EXPLAIN 表示・バッチ変数置換後・v1 の SIMPLE KLIKE と既存押し下げが非退行。
-- 進め方: R2 を codex 再確認 → 実装 → 実機（上記受入）→ minor リリース。将来: 外部結合の非 nullable 側解禁・P0 検出基盤・DML 解禁は別課題。
+- 進め方: R2確定 → **実装・自動テスト完了** → 実機（上記受入）→ minor リリース。将来: 外部結合の非 nullable 側解禁・P0 検出基盤・DML 解禁は別課題。
