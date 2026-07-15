@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
@@ -57,7 +57,7 @@ import {
   FieldSortKindMap,
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
-import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery } from "./engine/evalWhere";
+import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver } from "./engine/evalWhere";
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
@@ -950,6 +950,7 @@ async function executeSelect(
   if (isNoFromSelect(stmt)) {
     return executeNoFromSelect(stmt);
   }
+  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const mode = resolveSelectMode(stmt);
   await validateSelectFieldCodes(stmt, mode, client, cacheContext);
 
@@ -1022,6 +1023,10 @@ async function executeSimpleSelect(
   cacheContext: string
 ): Promise<SelectResult> {
   const params = selectToKintoneParams(stmt);
+  // SELECT CASE は SIMPLE モードでも JS 側で射影されるため、CASE 条件内の
+  // IN / NOT IN に限って型 resolver を用意する（フィールド定義キャッシュを再利用）。
+  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
@@ -1062,7 +1067,12 @@ async function executeSimpleSelect(
     rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
-  const { rows: projected, columns } = project(rows, stmt.columns);
+  const { rows: projected, columns } = project(
+    rows,
+    stmt.columns,
+    undefined,
+    fieldTypeResolvers.row
+  );
 
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
 }
@@ -1166,6 +1176,148 @@ async function loadNumericPushdownFieldTypes(
   return new Map(entries);
 }
 
+/** IN / NOT IN の左辺にある直接フィールド参照を、CASE 条件を含めて収集する。 */
+function collectTypedInFieldRefs(
+  expr: WhereExpr | null,
+  out: FieldRef[]
+): void {
+  if (expr === null) return;
+  switch (expr.type) {
+    case "BINARY":
+      if ((expr.op === "IN" || expr.op === "NOT_IN") && expr.left.type === "FIELD") {
+        out.push(expr.left);
+      }
+      if (expr.left.type === "CASE_FIELD") collectCaseTypedInFieldRefs(expr.left.expr, out);
+      if (expr.right.type === "CASE_VALUE") collectCaseTypedInFieldRefs(expr.right.expr, out);
+      return;
+    case "LOGICAL":
+      collectTypedInFieldRefs(expr.left, out);
+      collectTypedInFieldRefs(expr.right, out);
+      return;
+    case "NOT":
+    case "GROUP":
+      collectTypedInFieldRefs(expr.expr, out);
+      return;
+    case "NULL_CHECK":
+    case "EXISTS":
+      return;
+  }
+}
+
+function collectCaseTypedInFieldRefs(expr: CaseWhenExpr, out: FieldRef[]): void {
+  for (const branch of expr.branches) collectTypedInFieldRefs(branch.condition, out);
+}
+
+function collectSelectTypedInFieldRefs(stmt: SelectStatement): FieldRef[] {
+  const refs: FieldRef[] = [];
+  collectTypedInFieldRefs(stmt.where, refs);
+  collectTypedInFieldRefs(stmt.having, refs);
+  for (const column of stmt.columns) {
+    if (column.type === "CASE_COL") collectCaseTypedInFieldRefs(column.expr, refs);
+  }
+  return refs;
+}
+
+function findTableForAlias(stmt: SelectStatement, alias: string): TableRef | undefined {
+  return [stmt.from, ...stmt.joins.map((join) => join.table)]
+    .find((table) => table.alias === alias);
+}
+
+function physicalSelectTables(stmt: SelectStatement): TableRef[] {
+  return [stmt.from, ...stmt.joins.map((join) => join.table)]
+    .filter((table) => table.cteName === null);
+}
+
+/** 型付き IN 候補を持ち得る物理アプリだけ、既存キャッシュ経由で型を読む。 */
+async function loadTypedInFieldTypes(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<Map<number, FieldTypeMap>> {
+  const refs = collectSelectTypedInFieldRefs(stmt);
+  if (refs.length === 0) return new Map();
+
+  const appIds = new Set<number>();
+  const physicalTables = physicalSelectTables(stmt);
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        appIds.add(stmt.from.appId);
+        continue;
+      }
+      const table = findTableForAlias(stmt, ref.tableAlias);
+      if (table && table.cteName === null) appIds.add(table.appId);
+      continue;
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
+      continue;
+    }
+    // JOIN の非修飾参照は衝突判定に全物理テーブルの定義が必要。
+    for (const table of physicalTables) appIds.add(table.appId);
+  }
+
+  const entries = await Promise.all([...appIds].map(async (appId) => (
+    [appId, await getFieldTypeMap(appId, client, cacheContext)] as const
+  )));
+  return new Map(entries);
+}
+
+function fieldCodeForTypeLookup(table: TableRef, field: string): string {
+  if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
+  return field;
+}
+
+interface SelectFieldTypeResolvers {
+  row: FieldTypeResolver;
+  having: FieldTypeResolver;
+}
+
+/** AST の FieldRef を物理テーブルへ安全に結び付ける resolver を構築する。 */
+function buildSelectFieldTypeResolvers(
+  stmt: SelectStatement,
+  fieldTypesByApp: ReadonlyMap<number, FieldTypeMap>
+): SelectFieldTypeResolvers {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const physicalTables = tables.filter((table) => table.cteName === null);
+  const outputAliases = new Set(
+    stmt.columns
+      .map((column) => ("alias" in column ? column.alias : null))
+      .filter((alias): alias is string => alias !== null)
+  );
+
+  const row: FieldTypeResolver = (field) => {
+    if (field.tableAlias !== null) {
+      if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        return fieldTypesByApp.get(stmt.from.appId)?.get(field.field);
+      }
+      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      if (!table || table.cteName !== null) return undefined;
+      return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+    }
+
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return undefined;
+      return fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
+    }
+
+    // CTE は列型来歴を持たないため、混在 JOIN の非修飾参照は一意と証明できない。
+    if (tables.some((table) => table.cteName !== null)) return undefined;
+    const matches = physicalTables.filter((table) =>
+      fieldTypesByApp.get(table.appId)?.has(fieldCodeForTypeLookup(table, field.field))
+    );
+    if (matches.length !== 1) return undefined;
+    const table = matches[0];
+    return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+  };
+
+  const having: FieldTypeResolver = (field) => {
+    if (field.tableAlias === null && outputAliases.has(field.field)) return undefined;
+    return row(field);
+  };
+  return { row, having };
+}
+
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
 async function executeFullScanSelect(
   stmt: SelectStatement,
@@ -1185,7 +1337,11 @@ async function executeFullScanSelect(
   ]);
 
   // 一般数値フィールドの候補がある物理アプリだけ型メタを取得する。
-  const pushdownFieldTypes = await loadNumericPushdownFieldTypes(stmt, client, cacheContext);
+  const [pushdownFieldTypes, typedInFieldTypes] = await Promise.all([
+    loadNumericPushdownFieldTypes(stmt, client, cacheContext),
+    loadTypedInFieldTypes(stmt, client, cacheContext),
+  ]);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
 
   // テーブルごとの安全な push down 条件を計算する。
   const mainPushDown = extractMainSafePushdown(
@@ -1295,7 +1451,15 @@ async function executeFullScanSelect(
   const { optionOrders, sortKinds } = await orderByMetaPromise;
 
   // JS 集計パイプライン
-  const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
+  const { rows, columns } = runFullScan({
+    tables,
+    stmt,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver: fieldTypeResolvers.row,
+    havingFieldTypeResolver: fieldTypeResolvers.having,
+  });
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -1559,7 +1723,11 @@ async function executeFullScanWithCte(
   await Promise.all([
     resolveSubqueries(stmt.where,  client, options, cacheContext, cteCache),
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
+    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
   ]);
+
+  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
@@ -1620,7 +1788,15 @@ async function executeFullScanWithCte(
 
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds } = await orderByMetaPromise;
-  const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
+  const { rows, columns } = runFullScan({
+    tables,
+    stmt,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver: fieldTypeResolvers.row,
+    havingFieldTypeResolver: fieldTypeResolvers.having,
+  });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
 
@@ -2431,6 +2607,22 @@ interface ExpandedSubtableRow {
   flat: ProcessRow;
 }
 
+async function buildSubtableFieldTypeResolver(
+  appId: number,
+  typedInRefs: readonly FieldRef[],
+  client: KintoneClient,
+  cacheContext: string
+): Promise<FieldTypeResolver | undefined> {
+  if (typedInRefs.length === 0) return undefined;
+  const fieldTypes = await getFieldTypeMap(appId, client, cacheContext);
+  return (field) => {
+    if (field.tableAlias !== null && field.tableAlias !== "_p") return undefined;
+    if (field.tableAlias === "_p") return fieldTypes.get(field.field);
+    const code = field.field.startsWith("_p.") ? field.field.slice(3) : field.field;
+    return fieldTypes.get(code);
+  };
+}
+
 async function executeInsertSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
   client: KintoneClient,
@@ -2488,12 +2680,26 @@ async function executeUpdateSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>,
   client: KintoneClient,
   options: ExecuteOptions,
-  _cacheContext: string
+  cacheContext: string
 ): Promise<UpdateResult> {
   const subtableCode = stmt.subtableCode!;
   if (!hasRidCondition(stmt.where)) {
     throw new Error("サブテーブル UPDATE には _rid 条件が必須です");
   }
+
+  const typedInRefs: FieldRef[] = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  for (const assignment of stmt.assignments) {
+    if (assignment.value.type === "CASE_VALUE") {
+      collectCaseTypedInFieldRefs(assignment.value.expr, typedInRefs);
+    }
+  }
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
 
   const parents = await fetchAll(
     client.getRecords,
@@ -2503,7 +2709,7 @@ async function executeUpdateSubtable(
     { maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat));
+  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
 
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "UPDATE");
@@ -2525,7 +2731,7 @@ async function executeUpdateSubtable(
       if (a.field.startsWith("_")) {
         throw new Error(`サブテーブル UPDATE でシステム列「${a.field}」は更新できません`);
       }
-      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat) };
+      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat, resolveFieldType) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -2554,12 +2760,21 @@ async function executeDeleteSubtable(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "DELETE" }>,
   client: KintoneClient,
   options: ExecuteOptions,
-  _cacheContext: string
+  cacheContext: string
 ): Promise<DeleteResult> {
   const subtableCode = stmt.subtableCode!;
   if (!hasRidCondition(stmt.where)) {
     throw new Error("サブテーブル DELETE には _rid 条件が必須です");
   }
+
+  const typedInRefs: FieldRef[] = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
 
   const parents = await fetchAll(
     client.getRecords,
@@ -2569,7 +2784,7 @@ async function executeDeleteSubtable(
     { maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat));
+  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
 
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "DELETE");
@@ -2717,12 +2932,13 @@ function buildSubtableReorderPutParams(
 
 function evalAssignmentValueForSubtable(
   value: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>["assignments"][number]["value"],
-  row: ProcessRow
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
 ): string {
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return String(value.value);
   if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row);
+  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
   throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
@@ -2762,8 +2978,16 @@ async function executeReorder(
   stmt: ReorderStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  _cacheContext: string
+  cacheContext: string
 ): Promise<ReorderResult> {
+  const typedInRefs: FieldRef[] = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -2776,7 +3000,7 @@ async function executeReorder(
   // WHERE に一致する行を1件でも持つ親を対象とする
   const targetParentIds = stmt.all
     ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== ""))
-    : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat)).map((r) => r.parentId));
+    : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat, resolveFieldType)).map((r) => r.parentId));
 
   if (options.confirm) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
@@ -2995,6 +3219,24 @@ async function resolveSubqueries(
 ): Promise<void> {
   const tasks: Array<Promise<void>> = [];
   collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
+  await Promise.all(tasks);
+}
+
+/** SELECT 列 CASE WHEN 内のサブクエリも、射影前に一度だけ解決する。 */
+async function resolveSelectCaseSubqueries(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  cteCache?: Map<string, ProcessRow[]>
+): Promise<void> {
+  const tasks: Promise<void>[] = [];
+  for (const column of stmt.columns) {
+    if (column.type !== "CASE_COL") continue;
+    for (const branch of column.expr.branches) {
+      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, cteCache));
+    }
+  }
   await Promise.all(tasks);
 }
 

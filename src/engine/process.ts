@@ -35,7 +35,12 @@ import type {
   StringFuncExpr,
 } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
-import { evalWhere, evalCaseWhen, ProcessRow } from "./evalWhere";
+import {
+  evalWhere,
+  evalCaseWhen,
+  ProcessRow,
+  type FieldTypeResolver,
+} from "./evalWhere";
 import {
   evalArithExpr,
   evalStringFunc,
@@ -163,10 +168,11 @@ export function applyJoin(
 
 export function applyFilter(
   rows: ProcessRow[],
-  where: WhereExpr | null
+  where: WhereExpr | null,
+  resolveFieldType?: FieldTypeResolver
 ): ProcessRow[] {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType));
 }
 
 // ============================================================
@@ -363,10 +369,11 @@ function aggregateSyntheticName(
 
 export function applyHaving(
   rows: ProcessRow[],
-  having: WhereExpr | null
+  having: WhereExpr | null,
+  resolveFieldType?: FieldTypeResolver
 ): ProcessRow[] {
   if (having === null) return rows;
-  return rows.filter((row) => evalWhere(having, row));
+  return rows.filter((row) => evalWhere(having, row, resolveFieldType));
 }
 
 // ============================================================
@@ -580,7 +587,8 @@ export function applyLimit(
 export function project(
   rows: ProcessRow[],
   columns: SelectColumn[],
-  scalarCache?: Map<number, string>
+  scalarCache?: Map<number, string>,
+  resolveFieldType?: FieldTypeResolver
 ): { rows: ProcessRow[]; columns: string[] } {
   // SELECT * → そのまま全フィールド
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
@@ -645,7 +653,7 @@ export function project(
         }
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
-          out[key] = evalCaseWhen(col.expr, row);
+          out[key] = evalCaseWhen(col.expr, row, resolveFieldType);
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -817,6 +825,10 @@ export interface FullScanInput {
   optionOrders?: OptionOrderMap;
   /** フィールドごとの強制ソート種別 */
   sortKinds?: FieldSortKindMap;
+  /** WHERE / SELECT CASE 等、物理行を評価する際のフィールド型解決器 */
+  fieldTypeResolver?: FieldTypeResolver;
+  /** HAVING 用。集計列 alias を物理フィールドと誤認しない解決器 */
+  havingFieldTypeResolver?: FieldTypeResolver;
 }
 
 /**
@@ -827,7 +839,15 @@ export interface FullScanInput {
  * JOIN:        Map に alias ごとのエントリを複数
  */
 export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns: string[] } {
-  const { stmt, tables, scalarCache, optionOrders, sortKinds } = input;
+  const {
+    stmt,
+    tables,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver,
+    havingFieldTypeResolver,
+  } = input;
 
   // 1. flatten
   let rows: ProcessRow[] = [];
@@ -846,7 +866,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 3. filter — JS 側 WHERE 評価
   // JOIN があれば常に適用（kintone クエリでは複数テーブルの結合条件を表現不可）
   // JOIN がなくても WHERE に関数が含まれる場合は kintone 側でフィルタできないため JS で評価
-  rows = applyFilter(rows, stmt.where);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver);
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
@@ -855,7 +875,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 5. HAVING
-  rows = applyHaving(rows, stmt.having);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
 
   // 6. DISTINCT
   if (stmt.distinct) {
@@ -869,5 +889,5 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   rows = applyLimit(rows, stmt.limit, stmt.offset);
 
   // 9. project
-  return project(rows, stmt.columns, scalarCache);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver);
 }

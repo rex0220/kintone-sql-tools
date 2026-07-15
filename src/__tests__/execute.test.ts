@@ -24,6 +24,12 @@ function makeRecord(fields: Record<string, string>): KintoneRecord {
   );
 }
 
+function makeTypedRecord(fields: Record<string, unknown>): KintoneRecord {
+  return Object.fromEntries(
+    Object.entries(fields).map(([k, v]) => [k, { value: v }])
+  ) as KintoneRecord;
+}
+
 interface MockClientOptions {
   records?: KintoneRecord[];          // GET で返すレコード（全アプリ共通）
   recordsByApp?: Record<number, KintoneRecord[]>; // アプリ ID ごとにレコードを分ける
@@ -135,6 +141,86 @@ test("SELECT WHERE = 文字列", async () => {
 
   expect(result.rowCount).toBe(1);
   expect(result.rows[0]).toEqual({ ステータス: "完了", 金額: "500" });
+});
+
+test("FULL_SCAN: CHECK_BOX IN は JSON 全体でなく選択要素を評価する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", 選択: ["A", "B"], 件名: "one" }),
+    makeTypedRecord({ $id: "2", 選択: ["B"], 件名: "two" }),
+  ] });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id FROM APP98101 WHERE 選択 IN ('A') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "typed-in-checkbox" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1" }]);
+});
+
+test("FULL_SCAN: SELECT CASE WHEN 内の USER_SELECT IN も code 評価する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ 主担当: [{ code: "rex0220", name: "開発太郎" }] }),
+  ] });
+  client.getFields = async () => [
+    { code: "主担当", label: "主担当", fieldType: "USER_SELECT" },
+  ];
+
+  const result = await execute(
+    "SELECT CASE WHEN 主担当 IN ('rex0220') THEN 'yes' ELSE 'no' END AS hit FROM APP98102",
+    client,
+    { cacheContext: "typed-in-case" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ hit: "yes" }]);
+});
+
+test("FULL_SCAN: USER_SELECT IN (SELECT ...) は解決済み code 集合を評価する", async () => {
+  const client = makeClient({ recordsByApp: {
+    98103: [makeTypedRecord({ $id: "1", 主担当: [{ code: "rex0220", name: "開発太郎" }] })],
+    98104: [makeRecord({ code: "rex0220" })],
+  } });
+  client.getFields = async (appId) => appId === 98103
+    ? [{ code: "主担当", label: "主担当", fieldType: "USER_SELECT" }]
+    : [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const result = await execute(
+    "SELECT $id FROM APP98103 WHERE 主担当 IN (SELECT code FROM APP98104) AND $id LIKE '%'",
+    client,
+    { cacheContext: "typed-in-subquery" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1" }]);
+});
+
+test("FULL_SCAN JOIN: 修飾列は各型、衝突する非修飾列は従来比較を使う", async () => {
+  const client = makeClient({ recordsByApp: {
+    98105: [makeTypedRecord({ $id: "1", 共通: ["A"] })],
+    98106: [makeRecord({ $id: "1", 共通: '["A"]' })],
+  } });
+  client.getFields = async (appId) => appId === 98105
+    ? [{ code: "共通", label: "共通", fieldType: "CHECK_BOX" }]
+    : [{ code: "共通", label: "共通", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const qualified = await execute(
+    "SELECT a.$id FROM APP98105 a JOIN APP98106 b ON a.$id = b.$id " +
+      "WHERE a.共通 IN ('A') AND b.共通 IN ('[\"A\"]')",
+    client,
+    { cacheContext: "typed-in-join-qualified" }
+  ) as SelectResult;
+  expect(qualified.rowCount).toBe(1);
+
+  const unqualified = await execute(
+    "SELECT a.$id FROM APP98105 a JOIN APP98106 b ON a.$id = b.$id " +
+      "WHERE 共通 IN ('[\"A\"]')",
+    client,
+    { cacheContext: "typed-in-join-unqualified" }
+  ) as SelectResult;
+  expect(unqualified.rowCount).toBe(1);
 });
 
 test("SELECT 算術式: field * number AS alias", async () => {
@@ -1020,6 +1106,55 @@ test("UPDATE サブテーブル行はワイルドカード LIKE を JS 評価す
   expect(client.putCalls).toHaveLength(1);
 });
 
+test("SELECT サブテーブル: 子 CHECK_BOX と _p.親 CHECK_BOX を型付き IN 評価する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" },
+    親選択: { value: ["P"] },
+    明細: { value: [
+      { id: "r1", value: { 子選択: { value: ["A", "B"] }, 商品コード: { value: "A-001" } } },
+      { id: "r2", value: { 子選択: { value: ["B"] }, 商品コード: { value: "A-002" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  client.getFields = async () => [
+    { code: "明細", label: "明細", fieldType: "SUBTABLE" },
+    { code: "親選択", label: "親選択", fieldType: "CHECK_BOX" },
+    { code: "子選択", label: "子選択", fieldType: "CHECK_BOX" },
+    { code: "商品コード", label: "商品コード", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT _rid FROM APP100$明細 WHERE 子選択 IN ('A') AND _p.親選択 IN ('P')",
+    client,
+    { cacheContext: "typed-in-subtable-select" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ _rid: "r1" }]);
+});
+
+test("UPDATE サブテーブル: CHECK_BOX IN の要素一致を対象件数・確認件数へ反映する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 選択: { value: ["A", "B"] }, 数量: { value: "1" } } },
+      { id: "r2", value: { 選択: { value: ["B"] }, 数量: { value: "2" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX" },
+    { code: "数量", label: "数量", fieldType: "NUMBER" },
+  ];
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "UPDATE APP100$明細 SET 数量 = 9 WHERE _rid LIKE '%' AND 選択 IN ('A')",
+    client,
+    { cacheContext: "typed-in-subtable-update", confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as UpdateResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.updatedCount).toBe(1);
+});
+
 test("UPDATE サブテーブル: 空数値セルを >= の対象から外し、確認件数と更新件数を揃える", async () => {
   const client = makeClient({ recordsByApp: { 100: [{
     $id: { value: "1" }, $revision: { value: "1" },
@@ -1154,6 +1289,29 @@ test("DELETE サブテーブル: 空数値セルを <= の対象に含め、確�
   expect(table.map((row) => row.id)).toEqual(["r2"]);
 });
 
+test("DELETE サブテーブル: MULTI_SELECT NOT IN の要素一致を反映する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 選択: { value: ["A"] } } },
+      { id: "r2", value: { 選択: { value: ["B"] } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "MULTI_SELECT" },
+  ];
+
+  const result = await execute(
+    "DELETE FROM APP100$明細 WHERE _rid LIKE '%' AND 選択 NOT IN ('A')",
+    client,
+    { cacheContext: "typed-in-subtable-delete" }
+  ) as DeleteResult;
+
+  expect(result.deletedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id?: string }>;
+  expect(table.map((row) => row.id)).toEqual(["r1"]);
+});
+
 test("REORDER サブテーブル行（親単位）", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -1209,6 +1367,35 @@ test("REORDER: 空数値セルだけの親を >= の対象から外し、確認�
   expect(result.reorderedParentCount).toBe(1);
   expect(client.putCalls).toHaveLength(1);
   expect(client.putCalls[0].records[0].id).toBe(2);
+});
+
+test("REORDER: CHECK_BOX IN の要素一致を親件数・確認件数へ反映する", async () => {
+  const parent = (id: string, selected: string, rowId: string) => ({
+    $id: { value: id }, $revision: { value: "1" },
+    明細: { value: [
+      { id: rowId, value: { 商品コード: { value: `P-${id}` }, 選択: { value: [selected] } } },
+    ] },
+  } as unknown as KintoneRecord);
+  const client = makeClient({ recordsByApp: { 100: [
+    parent("1", "A", "r1"),
+    parent("2", "B", "r2"),
+  ] } });
+  client.getFields = async () => [
+    { code: "選択", label: "選択", fieldType: "CHECK_BOX" },
+    { code: "商品コード", label: "商品コード", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "REORDER APP100$明細 BY 商品コード ASC WHERE 選択 IN ('A')",
+    client,
+    { cacheContext: "typed-in-subtable-reorder", confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as any;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.reorderedParentCount).toBe(1);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(1);
 });
 
 test("REORDER は WHERE 必須", async () => {

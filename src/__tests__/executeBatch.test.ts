@@ -20,6 +20,12 @@ function makeRecord(fields: Record<string, string>): KintoneRecord {
   );
 }
 
+function makeTypedRecord(fields: Record<string, unknown>): KintoneRecord {
+  return Object.fromEntries(
+    Object.entries(fields).map(([k, v]) => [k, { value: v }])
+  ) as KintoneRecord;
+}
+
 interface MockOptions {
   recordsByApp?: Record<number, KintoneRecord[]>;
   /** このアプリへの getRecords を失敗させる */
@@ -146,6 +152,24 @@ test("IN (@x) と NOT IN (@x) を FULL_SCAN 経路でスカラー1要素とし�
     .toEqual(["B社"]);
   expect((r.statements[3].result as SelectResult).rows.map((row) => row["顧客名"]))
     .toEqual(["A社", "C社"]);
+});
+
+test("変数置換後の USER_SELECT IN は code 単位で型付き評価する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeTypedRecord({ $id: "1", 主担当: [{ code: "rex0220", name: "開発太郎" }] }),
+  ] } });
+  client.getFields = async () => [
+    { code: "主担当", label: "主担当", fieldType: "USER_SELECT" },
+  ];
+
+  const result = await executeBatch(
+    "SET @user = 'rex0220'; SELECT $id FROM APP100 WHERE 主担当 IN (@user) AND $id LIKE '%'",
+    client,
+    { cacheContext: "typed-in-variable" }
+  );
+
+  expect(result.ok).toBe(true);
+  expect((result.statements[1].result as SelectResult).rows).toEqual([{ $id: "1" }]);
 });
 
 test("SET の失敗は continueOnError=true でも後続を停止する", async () => {
