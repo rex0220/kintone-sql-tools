@@ -48,7 +48,7 @@ SELECT * FROM APP100 WHERE 登録日 >= @since;
 - **`ExecuteOptions.variables?: Readonly<Record<string, string>>`** を追加。実行時にバッチ変数 Map（[execute.ts:451](../src/execute.ts#L451)）へ `DECLARE` 解決時に反映する。
 - **MCP**: `ksql_query` / `ksql_mutate` のスキーマ（`src/mcp/schemas.ts`）に `variables?: Record<string, string>`（値は文字列）を追加し、`ExecuteOptions.variables` へ渡す。
 - **CLI**: `--var name=value`（繰り返し可）を追加し、`Record<string,string>` に集約して渡す。`=` 前が変数名、後が値。
-- **プラグイン**: 対象外（注入 UI を持たない）。プラグインで `DECLARE` を含む SQL は**既定値のみ**で動作する（注入経路がないため）。
+- **プラグイン**: **`DECLARE` 文自体は実行可能**（バッチ実行エンジンをバンドルするため）。ただし**外部注入の経路は持たない**ため、プラグインでは常に**既定値のみ**で評価される（注入で上書きされない）。＝「プラグインは注入対象外だが `DECLARE` は既定値で動く」。同じ SQL が「プラグイン＝既定値／CLI・MCP＝注入で差し替え」と一貫して動作する。
 - **注入値のバインド**: 値としてバインド（識別子化しない）。**SQL インジェクションは発生しない**（1a と同じ）。
 
 ### 3.3 単文での参照（[execute.ts:320](../src/execute.ts#L320) の緩和）
