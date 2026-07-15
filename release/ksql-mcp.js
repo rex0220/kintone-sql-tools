@@ -34409,51 +34409,90 @@ function resolveFieldRef(row, field) {
 }
 
 // src/engine/evalWhere.ts
-function evalWhere(expr, row) {
+function evalWhere(expr, row, resolveFieldType) {
   switch (expr.type) {
     case "BINARY":
-      return evalBinary(expr, row);
+      return evalBinary(expr, row, resolveFieldType);
     case "NULL_CHECK":
       return evalNullCheck(expr, row);
     case "LOGICAL":
-      return evalLogical(expr, row);
+      return evalLogical(expr, row, resolveFieldType);
     case "NOT":
-      return !evalWhere(expr.expr, row);
+      return !evalWhere(expr.expr, row, resolveFieldType);
     case "GROUP":
-      return evalWhere(expr.expr, row);
+      return evalWhere(expr.expr, row, resolveFieldType);
     case "EXISTS": {
       const exists = expr.resolved;
       return expr.not ? !exists : exists;
     }
   }
 }
-function evalBinary(expr, row) {
-  const left = resolveField(expr.left, row);
-  return evalOp(expr.op, left, expr.right, row);
+function evalBinary(expr, row, resolveFieldType) {
+  const left = resolveField(expr.left, row, resolveFieldType);
+  const fieldType = expr.left.type === "FIELD" ? resolveFieldType?.(expr.left) : void 0;
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType);
 }
-function evalOp(op, leftStr, right, row) {
+function evalOp(op, leftStr, right, row, fieldType, resolveFieldType) {
   if (op === "IN" || op === "NOT_IN") {
+    let values = null;
     if (right.type === "IN_LIST") {
       assertResolvedInListValues2(right.values);
-      const contains = right.values.some((v) => leftStr === String(v.value));
-      return op === "IN" ? contains : !contains;
+      values = new Set(right.values.map((v) => String(v.value)));
     }
     if (right.type === "SUBQUERY_IN_LIST") {
-      const contains = right.resolved.has(leftStr);
-      return op === "IN" ? contains : !contains;
+      values = right.resolved;
     }
-    return op === "NOT_IN";
+    if (values === null) return op === "NOT_IN";
+    const contains = typedInContains(leftStr, values, fieldType);
+    return op === "IN" ? contains : !contains;
   }
   if (op === "LIKE") {
-    const pattern = resolveValue(right, row);
+    const pattern = resolveValue(right, row, resolveFieldType);
     return matchLike(leftStr, pattern);
   }
   if (op === "NOT_LIKE") {
-    const pattern = resolveValue(right, row);
+    const pattern = resolveValue(right, row, resolveFieldType);
     return !matchLike(leftStr, pattern);
   }
-  const rightStr = resolveValue(right, row);
+  const rightStr = resolveValue(right, row, resolveFieldType);
   return compareScalarValues(op, leftStr, rightStr);
+}
+var STRING_ARRAY_FIELD_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var OBJECT_ARRAY_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "STATUS_ASSIGNEE"
+]);
+var SINGLE_OBJECT_FIELD_TYPES = /* @__PURE__ */ new Set(["CREATOR", "MODIFIER"]);
+function typedInContains(leftStr, values, fieldType) {
+  const fallback = () => values.has(leftStr);
+  if (fieldType === void 0) return fallback();
+  let parsed;
+  if (STRING_ARRAY_FIELD_TYPES.has(fieldType) || OBJECT_ARRAY_FIELD_TYPES.has(fieldType) || SINGLE_OBJECT_FIELD_TYPES.has(fieldType)) {
+    try {
+      parsed = JSON.parse(leftStr);
+    } catch {
+      return fallback();
+    }
+  } else {
+    return fallback();
+  }
+  if (STRING_ARRAY_FIELD_TYPES.has(fieldType)) {
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+      return fallback();
+    }
+    return parsed.some((item) => values.has(item));
+  }
+  if (OBJECT_ARRAY_FIELD_TYPES.has(fieldType)) {
+    if (!Array.isArray(parsed) || !parsed.every(hasStringCode)) return fallback();
+    return parsed.some((item) => values.has(item.code));
+  }
+  if (!hasStringCode(parsed)) return fallback();
+  return values.has(parsed.code);
+}
+function hasStringCode(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && typeof value.code === "string";
 }
 function assertResolvedInListValues2(values) {
   const unresolved = values.find((item) => item.type === "VARIABLE");
@@ -34465,20 +34504,20 @@ function evalNullCheck(expr, row) {
   const val = resolveField(expr.field, row);
   return expr.not ? val !== "" : val === "";
 }
-function evalLogical(expr, row) {
+function evalLogical(expr, row, resolveFieldType) {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row) && evalWhere(expr.right, row);
+    return evalWhere(expr.left, row, resolveFieldType) && evalWhere(expr.right, row, resolveFieldType);
   }
-  return evalWhere(expr.left, row) || evalWhere(expr.right, row);
+  return evalWhere(expr.left, row, resolveFieldType) || evalWhere(expr.right, row, resolveFieldType);
 }
-function resolveField(field, row) {
+function resolveField(field, row, resolveFieldType) {
   if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row);
+  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType);
   const key = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
   return resolveFieldRef(row, key);
 }
-function resolveValue(value, row) {
+function resolveValue(value, row, resolveFieldType) {
   switch (value.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
@@ -34501,14 +34540,14 @@ function resolveValue(value, row) {
       if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
       return String(evalArithExpr(value.expr, row));
     case "CASE_VALUE":
-      return evalCaseWhen(value.expr, row);
+      return evalCaseWhen(value.expr, row, resolveFieldType);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
 }
-function evalCaseWhen(expr, row) {
+function evalCaseWhen(expr, row, resolveFieldType) {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row)) {
+    if (evalWhere(branch.condition, row, resolveFieldType)) {
       return evalCaseResult(branch.result, row);
     }
   }
@@ -35175,9 +35214,9 @@ function applyJoin(leftRows, rightRows, join) {
   }
   return result;
 }
-function applyFilter(rows, where) {
+function applyFilter(rows, where, resolveFieldType) {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType));
 }
 function hasAggregateColumns(columns) {
   return columns.some(
@@ -35303,9 +35342,9 @@ function aggregateSyntheticName2(func, distinct, arg) {
   const argStr = aggregateArgLabel(arg);
   return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
 }
-function applyHaving(rows, having) {
+function applyHaving(rows, having, resolveFieldType) {
   if (having === null) return rows;
-  return rows.filter((row) => evalWhere(having, row));
+  return rows.filter((row) => evalWhere(having, row, resolveFieldType));
 }
 function applyDistinct(rows, columns) {
   if (rows.length === 0) return rows;
@@ -35430,7 +35469,7 @@ function applyLimit(rows, limit, offset) {
   if (limit === null) return rows.slice(start);
   return rows.slice(start, start + limit);
 }
-function project(rows, columns, scalarCache) {
+function project(rows, columns, scalarCache, resolveFieldType) {
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
     const projected2 = rows.map((row) => stripParentShortcutColumns(row));
     const cols = projected2.length > 0 ? Object.keys(projected2[0]) : [];
@@ -35491,7 +35530,7 @@ function project(rows, columns, scalarCache) {
         }
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
-          out[key] = evalCaseWhen(col.expr, row);
+          out[key] = evalCaseWhen(col.expr, row, resolveFieldType);
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -35627,7 +35666,15 @@ function resolveAggInStringFuncExpr(expr, rows) {
   };
 }
 function runFullScan(input) {
-  const { stmt, tables, scalarCache, optionOrders, sortKinds } = input;
+  const {
+    stmt,
+    tables,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver,
+    havingFieldTypeResolver
+  } = input;
   let rows = [];
   const mainAlias = stmt.from.alias;
   const mainRecords = tables.get(mainAlias) ?? tables.get(null) ?? [];
@@ -35638,17 +35685,17 @@ function runFullScan(input) {
     const rightRows = rightRecords.map((r) => flatten(r, rightAlias));
     rows = applyJoin(rows, rightRows, join);
   }
-  rows = applyFilter(rows, stmt.where);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver);
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
   }
-  rows = applyHaving(rows, stmt.having);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
   if (stmt.distinct) {
     rows = applyDistinct(rows, stmt.columns);
   }
   rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
   rows = applyLimit(rows, stmt.limit, stmt.offset);
-  return project(rows, stmt.columns, scalarCache);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver);
 }
 
 // src/converter/subtableAdapter.ts
@@ -36181,6 +36228,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache) {
   if (isNoFromSelect(stmt)) {
     return executeNoFromSelect(stmt);
   }
+  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const mode = resolveSelectMode(stmt);
   await validateSelectFieldCodes(stmt, mode, client, cacheContext);
   if (mode === "SIMPLE") {
@@ -36239,6 +36287,8 @@ function executeNoFromSelect(stmt) {
 }
 async function executeSimpleSelect(stmt, client, options, cacheContext) {
   const params = selectToKintoneParams(stmt);
+  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const onLimit2 = options.onLimitReached ?? "error";
@@ -36275,7 +36325,12 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
     rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
-  const { rows: projected, columns } = project(rows, stmt.columns);
+  const { rows: projected, columns } = project(
+    rows,
+    stmt.columns,
+    void 0,
+    fieldTypeResolvers.row
+  );
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
 }
 async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
@@ -36348,6 +36403,108 @@ async function loadNumericPushdownFieldTypes(stmt, client, cacheContext) {
   const entries = await Promise.all([...appIds].map(async (appId) => [appId, await getFieldTypeMap(appId, client, cacheContext)]));
   return new Map(entries);
 }
+function collectTypedInFieldRefs(expr, out) {
+  if (expr === null) return;
+  switch (expr.type) {
+    case "BINARY":
+      if ((expr.op === "IN" || expr.op === "NOT_IN") && expr.left.type === "FIELD") {
+        out.push(expr.left);
+      }
+      if (expr.left.type === "CASE_FIELD") collectCaseTypedInFieldRefs(expr.left.expr, out);
+      if (expr.right.type === "CASE_VALUE") collectCaseTypedInFieldRefs(expr.right.expr, out);
+      return;
+    case "LOGICAL":
+      collectTypedInFieldRefs(expr.left, out);
+      collectTypedInFieldRefs(expr.right, out);
+      return;
+    case "NOT":
+    case "GROUP":
+      collectTypedInFieldRefs(expr.expr, out);
+      return;
+    case "NULL_CHECK":
+    case "EXISTS":
+      return;
+  }
+}
+function collectCaseTypedInFieldRefs(expr, out) {
+  for (const branch of expr.branches) collectTypedInFieldRefs(branch.condition, out);
+}
+function collectSelectTypedInFieldRefs(stmt) {
+  const refs = [];
+  collectTypedInFieldRefs(stmt.where, refs);
+  collectTypedInFieldRefs(stmt.having, refs);
+  for (const column of stmt.columns) {
+    if (column.type === "CASE_COL") collectCaseTypedInFieldRefs(column.expr, refs);
+  }
+  return refs;
+}
+function findTableForAlias(stmt, alias) {
+  return [stmt.from, ...stmt.joins.map((join) => join.table)].find((table) => table.alias === alias);
+}
+function physicalSelectTables(stmt) {
+  return [stmt.from, ...stmt.joins.map((join) => join.table)].filter((table) => table.cteName === null);
+}
+async function loadTypedInFieldTypes(stmt, client, cacheContext) {
+  const refs = collectSelectTypedInFieldRefs(stmt);
+  if (refs.length === 0) return /* @__PURE__ */ new Map();
+  const appIds = /* @__PURE__ */ new Set();
+  const physicalTables = physicalSelectTables(stmt);
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        appIds.add(stmt.from.appId);
+        continue;
+      }
+      const table = findTableForAlias(stmt, ref.tableAlias);
+      if (table && table.cteName === null) appIds.add(table.appId);
+      continue;
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
+      continue;
+    }
+    for (const table of physicalTables) appIds.add(table.appId);
+  }
+  const entries = await Promise.all([...appIds].map(async (appId) => [appId, await getFieldTypeMap(appId, client, cacheContext)]));
+  return new Map(entries);
+}
+function fieldCodeForTypeLookup(table, field) {
+  if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
+  return field;
+}
+function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const physicalTables = tables.filter((table) => table.cteName === null);
+  const outputAliases = new Set(
+    stmt.columns.map((column) => "alias" in column ? column.alias : null).filter((alias) => alias !== null)
+  );
+  const row = (field) => {
+    if (field.tableAlias !== null) {
+      if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        return fieldTypesByApp.get(stmt.from.appId)?.get(field.field);
+      }
+      const table2 = tables.find((candidate) => candidate.alias === field.tableAlias);
+      if (!table2 || table2.cteName !== null) return void 0;
+      return fieldTypesByApp.get(table2.appId)?.get(fieldCodeForTypeLookup(table2, field.field));
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return void 0;
+      return fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
+    }
+    if (tables.some((table2) => table2.cteName !== null)) return void 0;
+    const matches = physicalTables.filter(
+      (table2) => fieldTypesByApp.get(table2.appId)?.has(fieldCodeForTypeLookup(table2, field.field))
+    );
+    if (matches.length !== 1) return void 0;
+    const table = matches[0];
+    return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+  };
+  const having = (field) => {
+    if (field.tableAlias === null && outputAliases.has(field.field)) return void 0;
+    return row(field);
+  };
+  return { row, having };
+}
 async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
@@ -36356,7 +36513,11 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
-  const pushdownFieldTypes = await loadNumericPushdownFieldTypes(stmt, client, cacheContext);
+  const [pushdownFieldTypes, typedInFieldTypes] = await Promise.all([
+    loadNumericPushdownFieldTypes(stmt, client, cacheContext),
+    loadTypedInFieldTypes(stmt, client, cacheContext)
+  ]);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const mainPushDown = extractMainSafePushdown(
     stmt,
     pushdownFieldTypes.get(stmt.from.appId)
@@ -36445,7 +36606,15 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   }));
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds } = await orderByMetaPromise;
-  const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
+  const { rows, columns } = runFullScan({
+    tables,
+    stmt,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver: fieldTypeResolvers.row,
+    havingFieldTypeResolver: fieldTypeResolvers.having
+  });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
 async function executeUnion(stmt, client, options, cacheContext) {
@@ -36601,8 +36770,11 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   const parallel = options.fetchParallel ?? 1;
   await Promise.all([
     resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
-    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
+    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
+    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache)
   ]);
+  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => {
@@ -36657,7 +36829,15 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   await Promise.all(joinFetches);
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds } = await orderByMetaPromise;
-  const { rows, columns } = runFullScan({ tables, stmt, scalarCache, optionOrders, sortKinds });
+  const { rows, columns } = runFullScan({
+    tables,
+    stmt,
+    scalarCache,
+    optionOrders,
+    sortKinds,
+    fieldTypeResolver: fieldTypeResolvers.row,
+    havingFieldTypeResolver: fieldTypeResolvers.having
+  });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
 function processRowToKintoneRecord(row) {
@@ -37154,6 +37334,16 @@ async function executeUpsert(stmt, client, options, cacheContext) {
     updatedCount: toUpdate.length
   };
 }
+async function buildSubtableFieldTypeResolver(appId, typedInRefs, client, cacheContext) {
+  if (typedInRefs.length === 0) return void 0;
+  const fieldTypes = await getFieldTypeMap(appId, client, cacheContext);
+  return (field) => {
+    if (field.tableAlias !== null && field.tableAlias !== "_p") return void 0;
+    if (field.tableAlias === "_p") return fieldTypes.get(field.field);
+    const code = field.field.startsWith("_p.") ? field.field.slice(3) : field.field;
+    return fieldTypes.get(code);
+  };
+}
 async function executeInsertSubtable(stmt, client, options, _cacheContext) {
   const subtableCode = stmt.subtableCode;
   const pidIndex = stmt.fields.indexOf("_pid");
@@ -37194,11 +37384,24 @@ async function executeInsertSubtable(stmt, client, options, _cacheContext) {
   }
   return { type: "INSERT", createdIds: [], insertedCount: stmt.values.length };
 }
-async function executeUpdateSubtable(stmt, client, options, _cacheContext) {
+async function executeUpdateSubtable(stmt, client, options, cacheContext) {
   const subtableCode = stmt.subtableCode;
   if (!hasRidCondition(stmt.where)) {
     throw new Error("\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u306F _rid \u6761\u4EF6\u304C\u5FC5\u9808\u3067\u3059");
   }
+  const typedInRefs = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  for (const assignment of stmt.assignments) {
+    if (assignment.value.type === "CASE_VALUE") {
+      collectCaseTypedInFieldRefs(assignment.value.expr, typedInRefs);
+    }
+  }
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -37207,7 +37410,7 @@ async function executeUpdateSubtable(stmt, client, options, _cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat));
+  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", targets.length);
@@ -37227,7 +37430,7 @@ async function executeUpdateSubtable(stmt, client, options, _cacheContext) {
       if (a.field.startsWith("_")) {
         throw new Error(`\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u3067\u30B7\u30B9\u30C6\u30E0\u5217\u300C${a.field}\u300D\u306F\u66F4\u65B0\u3067\u304D\u307E\u305B\u3093`);
       }
-      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat) };
+      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat, resolveFieldType) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -37249,11 +37452,19 @@ async function executeUpdateSubtable(stmt, client, options, _cacheContext) {
   }
   return { type: "UPDATE", updatedCount: targets.length };
 }
-async function executeDeleteSubtable(stmt, client, options, _cacheContext) {
+async function executeDeleteSubtable(stmt, client, options, cacheContext) {
   const subtableCode = stmt.subtableCode;
   if (!hasRidCondition(stmt.where)) {
     throw new Error("\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB DELETE \u306B\u306F _rid \u6761\u4EF6\u304C\u5FC5\u9808\u3067\u3059");
   }
+  const typedInRefs = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -37262,7 +37473,7 @@ async function executeDeleteSubtable(stmt, client, options, _cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat));
+  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "DELETE");
     if (!ok) throw new OperationCancelledError("DELETE", targets.length);
@@ -37377,11 +37588,11 @@ function buildSubtableReorderPutParams(appId, parentId, revision, subtableCode, 
     ]
   };
 }
-function evalAssignmentValueForSubtable(value, row) {
+function evalAssignmentValueForSubtable(value, row, resolveFieldType) {
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return String(value.value);
   if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row);
+  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
   throw new Error(`${value.type} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306E\u5024\u3068\u3057\u3066\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
 }
 function valueToString(value) {
@@ -37413,7 +37624,15 @@ function hasRidCondition(where) {
       return false;
   }
 }
-async function executeReorder(stmt, client, options, _cacheContext) {
+async function executeReorder(stmt, client, options, cacheContext) {
+  const typedInRefs = [];
+  collectTypedInFieldRefs(stmt.where, typedInRefs);
+  const resolveFieldType = await buildSubtableFieldTypeResolver(
+    stmt.appId,
+    typedInRefs,
+    client,
+    cacheContext
+  );
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -37422,7 +37641,7 @@ async function executeReorder(stmt, client, options, _cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, stmt.subtableCode);
-  const targetParentIds = stmt.all ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== "")) : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat)).map((r) => r.parentId));
+  const targetParentIds = stmt.all ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== "")) : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat, resolveFieldType)).map((r) => r.parentId));
   if (options.confirm) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", targetParentIds.size);
@@ -37565,6 +37784,16 @@ function parseSql(sql) {
 async function resolveSubqueries(where, client, options, cacheContext, cteCache) {
   const tasks = [];
   collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
+  await Promise.all(tasks);
+}
+async function resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache) {
+  const tasks = [];
+  for (const column of stmt.columns) {
+    if (column.type !== "CASE_COL") continue;
+    for (const branch of column.expr.branches) {
+      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, cteCache));
+    }
+  }
   await Promise.all(tasks);
 }
 function runSubquery(query, client, options, cacheContext, cteCache) {
@@ -38489,6 +38718,42 @@ function clampInt(v, min, max) {
   return Math.max(min, Math.min(max, Math.trunc(v)));
 }
 
+// src/core/formFieldInfo.ts
+function flattenFormFieldProperties(properties) {
+  const out = [];
+  for (const field of Object.values(properties)) {
+    out.push({
+      code: field.code,
+      label: field.label,
+      fieldType: field.type,
+      optionOrder: toOptionOrderMap(field.options),
+      sortKind: detectSortKind(field.type, field.format)
+    });
+    if (field.fields) out.push(...flattenFormFieldProperties(field.fields));
+  }
+  return out;
+}
+function toOptionOrderMap(options) {
+  if (!options || typeof options !== "object") return void 0;
+  const order = {};
+  let hasAny = false;
+  for (const [label, meta3] of Object.entries(options)) {
+    const n = Number(meta3?.index);
+    if (!Number.isFinite(n)) continue;
+    order[label] = n;
+    hasAny = true;
+  }
+  return hasAny ? order : void 0;
+}
+function detectSortKind(fieldType, calcFormat) {
+  if (fieldType === "NUMBER" || fieldType === "RECORD_NUMBER") return "number";
+  if (fieldType === "CALC") {
+    if (calcFormat === "NUMBER" || calcFormat === "NUMBER_DIGIT") return "number";
+    return "string";
+  }
+  return void 0;
+}
+
 // src/cli/nodeKintoneClient.ts
 function createNodeKintoneClient(baseUrl, tokenResolver) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
@@ -38667,35 +38932,9 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
         { method: "GET" },
         appId
       );
-      return Object.values(res.properties).map((f) => ({
-        code: f.code,
-        label: f.label,
-        fieldType: f.type,
-        optionOrder: toOptionOrderMap(f.options),
-        sortKind: detectSortKind(f.type, f.format)
-      }));
+      return flattenFormFieldProperties(res.properties);
     }
   };
-}
-function toOptionOrderMap(options) {
-  if (!options || typeof options !== "object") return void 0;
-  const order = {};
-  let hasAny = false;
-  for (const [label, meta3] of Object.entries(options)) {
-    const n = Number(meta3?.index);
-    if (!Number.isFinite(n)) continue;
-    order[label] = n;
-    hasAny = true;
-  }
-  return hasAny ? order : void 0;
-}
-function detectSortKind(fieldType, calcFormat) {
-  if (fieldType === "NUMBER" || fieldType === "RECORD_NUMBER") return "number";
-  if (fieldType === "CALC") {
-    if (calcFormat === "NUMBER" || calcFormat === "NUMBER_DIGIT") return "number";
-    return "string";
-  }
-  return void 0;
 }
 
 // src/node/appProfiles.ts
@@ -40156,7 +40395,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.4.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.5.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
