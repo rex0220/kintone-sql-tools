@@ -1,7 +1,7 @@
 # 仕様案: 選択系 `IN` の型メタ付きプレフィルタ（述語分割 第2段）
 
 - 作成日: 2026-07-15
-- ステータス: **仕様案 R4（STATUS は `enabled` 検出で対応可・全 in 可能型を 2 フェーズで。実装可否は要判断）**
+- ステータス: **仕様案 R4（フェーズ2 親仕様。2 フェーズ構成は確定。フェーズ1＝[ksql_fullscan_in_typed_eval_spec.md](ksql_fullscan_in_typed_eval_spec.md) 完成後にフェーズ2 を詳細化）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 更新履歴:
   - 2026-07-15 R1: 初版
@@ -22,7 +22,7 @@
 | `顧客ランク IN ('存在しない')`（RADIO・APP4148） | **エラー GAIA_IQ10** | 0 件 |
 | `ステータス IN ('')` / `IN ('存在しない')`（STATUS・APP4221） | **エラー GAIA_ST02**（プロセス管理無効） | 4 件 / 0 件 |
 
-→ **押し下げの条件に「全 IN 値がフィールドの選択肢に実在する」検証を追加**しないと、FULL_SCAN で 0 件になるクエリがエラーに化ける。**STATUS はプロセス管理状態依存で危険なため除外**。
+→ **押し下げの条件に「全 IN 値がフィールドの選択肢に実在する」検証を追加**しないと、FULL_SCAN で 0 件になるクエリがエラーに化ける。**STATUS は R4 で対応方針を確定**（`enabled` で有効/無効を検出し、有効時のみ状態一覧で実在検証。無効なら非押し下げ。§9）＝**除外ではなく条件付き対応**。
 - SemVer: **後方互換の最適化 → minor（v2.5.0 想定）**
 - 位置づけ: 述語分割の続き。① 第0段（`$id`・`5c987e0`）／② 空セル −∞（`1c73828`）／③ 型メタ付き**数値**プレフィルタ（`30ff297`）に続く**選択系 `IN`**。親仕様 [ksql_like_predicate_pushdown_spec.md](ksql_like_predicate_pushdown_spec.md) R3 の「第1段（選択系 in）」の詳細。
 - 関連コード: `src/core/optimization/wherePredicatePushdown.ts`（`extractSafePushdownLeaves` / `extractNumericPushdownCandidates`）、`src/execute.ts`（`extractMainSafePushdown` / `loadNumericPushdownFieldTypes` / EXPLAIN）、`src/converter/whereToKintone.ts`（`convertInList`）
@@ -93,8 +93,7 @@ STATUS 対応は横断的:
 | STATUS | 不要（スカラー） | `enabled` ＋ 状態一覧 | `enabled`（form fields・**要追加**）＋ 状態一覧（プロセス管理設定 API・**追加取得**） |
 | USER / 組織 / グループ | **要**（JSON→code） | 固定選択肢なし | 実機で未知コード挙動を確認（エラーなら非押下） |
 
-## 10. 実装可否・進め方（R4・要ユーザー確認）
-- ユーザー方針（in/not in 可能な全型サポート・選択肢定義型は値チェック）は妥当。**STATUS も `enabled` 検出で対応可**（R3 の「除外」は撤回）。
-- ただし実体は**「フェーズ1＝FULL_SCAN の `in`/`not in` 正しさ修正（複数値/オブジェクト型の JSON 要素判定）」という独立した正しさ改善**が土台で、その上に**フェーズ2＝実在検証付き押し下げ**が載る構成。
-- **推奨の進め方**: まず**フェーズ1を課題化・実装**（現状の `主担当 IN` 20 vs 0 等の実バグを解消・`SIMPLE==FULL_SCAN` 回復＝押し下げなしでも価値）。次にフェーズ2を optionOrder のある型（DROP_DOWN/RADIO/CHECK_BOX/MULTI_SELECT）から解禁し、STATUS（enabled＋状態一覧）・USER 系（実機確認）を順次。
-- この段階構成でよいか、フェーズ1から着手してよいかを確認して進める。
+## 10. 進め方（確定）
+- **2 フェーズ構成は確定**（ユーザー賛成）。STATUS は `enabled` 検出で条件付き対応（R3 の「除外」は撤回）。
+- **フェーズ1**（独立仕様 [ksql_fullscan_in_typed_eval_spec.md](ksql_fullscan_in_typed_eval_spec.md)）を**独立コミットで完成・実機確認**（`主担当 IN` の 20 vs 20 一致等）してから、本文書（フェーズ2）を詳細化して押し下げを実装する。
+- フェーズ2 は optionOrder のある型（DROP_DOWN/RADIO/CHECK_BOX/MULTI_SELECT）から解禁し、STATUS（enabled＋状態一覧）・USER 系（実機確認）を順次。
