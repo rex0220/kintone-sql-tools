@@ -195,7 +195,7 @@ SELECT * FROM #before;
 
 ## R5. リテラル値リストを一時テーブル化して一括処理
 
-外部（承認リスト・CSV・別システム）由来の **ID / コードの集合**を対象に、ゲート → 一括処理する。値リストを **`FROM` なしの `SELECT … UNION ALL …`** で一時テーブルに実体化し、以降は **`IN (SELECT id FROM #t)`** で **1 箇所参照**する（リストの重複記述を避ける）。
+外部（承認リスト・CSV・別システム）由来の **ID / コードの集合**を対象に、ゲート → 書き込みする。値リストを **`FROM` なしの `SELECT … UNION ALL …`** で一時テーブルに実体化し、`ASSERT` と **`INSERT … SELECT` / `UPSERT … SELECT`** から **`IN (SELECT id FROM #t)`** で参照する（リストを 1 箇所に集約）。
 
 ```sql
 -- 1) 対象 ID を一時テーブルに実体化（リストはここ1箇所だけ）
@@ -204,21 +204,18 @@ CREATE TEMP TABLE #targets AS
   UNION ALL SELECT '1005'
   UNION ALL SELECT '1012';
 
--- 2) 事前ゲート: 対象に「取消」状態が混ざっていないことを確認
+-- 2) 事前ゲート: 対象に「取消」状態が混ざっていないことを確認（ASSERT のサブクエリは #t 参照可）
 ASSERT (SELECT COUNT(*) FROM APP100
         WHERE $id IN (SELECT id FROM #targets) AND 状態 = '取消') = 0;
 
--- 3) 本処理: 対象だけを一括更新
-UPDATE APP100 SET 状態 = '完了' WHERE $id IN (SELECT id FROM #targets);
-
--- 4) 監査ログへ対象を記録（同じ #targets を再利用）
-INSERT INTO APP_LOG (対象ID) SELECT id FROM #targets;
+-- 3) 書き込み: 対象を処理ログへ UPSERT（INSERT/UPSERT … SELECT は #t を参照できる）
+UPSERT INTO APP_LOG (対象ID, 状態) SELECT id, '完了' FROM #targets;
 ```
 
-- **DRY**: 対象リストを `#targets` の 1 箇所に集約し、`ASSERT` / `UPDATE` / `INSERT … SELECT` から再利用する（リストを各文に繰り返さない）。
-- **安全**: 値はリテラルとしてバインドされ、文字列連結による SQL インジェクションは起きない。
+- **DRY**: 対象リストを `#targets` の 1 箇所に集約し、`ASSERT` と `INSERT … SELECT` / `UPSERT … SELECT` から再利用する。
+- **重要な制約 — `UPDATE` / `DELETE` は一時テーブルをサブクエリ参照できない**（`… WHERE $id IN (SELECT id FROM #t)` は実行前に拒否。注意の「一時テーブル参照の非対称」参照）。**対象アプリの行を直接書き換える場合**は、(a) `INSERT … SELECT` / `UPSERT … SELECT` でモデル化する（推奨・上記）か、(b) `UPDATE APP100 SET 状態='完了' WHERE $id IN ('1001','1005','1012')` のように **`UPDATE` 側ではリストを直接 `IN (...)` に再掲**する。
+- **セキュリティ（自動バインドではない）**: 上記の値は **SQL 文中にリテラルとして記述**しており、kSQL が外部リストを自動でバインドする機能ではない。外部値から SQL を生成する場合は、**ID を数字だけに検証**するか、**文字列リテラルの `'` を `''` にエスケープ**すること（誤ればインジェクションが起こり得る）。
 - **kintone 内から導ける集合**なら `#targets` を使わず直接 `IN (SELECT … FROM APPxxx WHERE …)` の方が簡単。R5 は **kintone 外由来の固定リスト**が対象。
-- **`UPDATE` / `DELETE` は一時テーブルを直接 `FROM` にできない**ため、対象指定は必ず **サブクエリ `IN (SELECT id FROM #t)`** で書く（注意の「一時テーブル参照の非対称」参照）。
 - **前提バージョン**: `CREATE TEMP TABLE AS <FROM なし SELECT / UNION>` の実体化は **v2.10.0 以降**（それ以前は 0 行になる不具合があった）。
 
 ---
@@ -245,4 +242,9 @@ INSERT INTO APP_LOG (対象ID) SELECT id FROM #targets;
 - 一時テーブルは**同時 16 個・1 個あたり既定 10,000 行**（`tempTableMaxRows` で変更可）。バッチは**最大 20 文**。
 - DML バッチは常に **fail-fast**（`ASSERT` 失敗・エラーで停止）。`continueOnError` は read-only バッチのみ。
 - **一時テーブル参照の非対称**: `UPDATE` / `DELETE` から一時テーブルをサブクエリ参照すると実行前に拒否。一方 `INSERT … SELECT` / `UPSERT … SELECT`、および `CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照できる（R3 が成立する根拠）。
-- **検索打ち切り（10 万件）と DML の fail-closed（v2.10.0 以降）**: `like` / `not like`（`KLIKE` 含む）を使う WHERE で一致候補が **10 万件に達すると kintone が検索を打ち切る**。この打ち切りを検出した場合、**DML・SELECT ベース DML・一時テーブル実体化は書き込み前にエラー（`SearchAbortedError`）で停止**し、サイレントな一部更新/削除を防ぐ。`SELECT` は**警告付き**で返る（結果が欠落し得る）。大規模アプリを対象にする場合は、**`$id` 範囲・`IN`・完全一致などで 10 万件未満に絞って**から処理する（プラグイン経路はこの打ち切りを検出しない）。
+- **検索打ち切り（10 万件）の扱い（v2.10.0 以降）**: kintone は `like` / `not like` の一致候補が **10 万件に達すると検索を打ち切る**。現行の挙動を整理すると:
+  - **現在**: CLI/MCP の `SELECT` はこの打ち切りを検出すると**警告付き**で返る（結果が欠落し得る）。プラグイン経路は検出しない。
+  - **現在**: DML の対象取得（読取）が打ち切り信号を受けたら、**書き込み前に `SearchAbortedError` で停止**（fail-closed）＝サイレントな一部更新/削除の防止。一時テーブル実体化も同様にエラー。
+  - **現在**: `UPDATE` / `DELETE` の WHERE に `LIKE` / `NOT LIKE` は使えず、`KLIKE` は**全 DML で使用不可**（いずれも**別の静的制約で実行前に拒否**される）。したがって「`LIKE` / `KLIKE` を直接含む DML」は今は書けない。
+  - **将来**: 上記 fail-closed は、`KLIKE` 親レコード DML を解禁する際の安全基盤になる。
+  - 実務では、大規模アプリを対象にする DML は **`$id` 範囲・`IN`・完全一致などで 10 万件未満に絞って**から処理する。
