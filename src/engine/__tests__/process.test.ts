@@ -41,6 +41,46 @@ test("flatten: alias あり", () => {
   expect(flatten(rec, "a")).toEqual({ "a.名前": "田中", "名前": "田中" });
 });
 
+test("flatten: null / undefined は空文字へ正規化し、他の値形式は維持する", () => {
+  const rec = {
+    null値: { value: null },
+    undefined値: { value: undefined },
+    数値: { value: 10 },
+    配列: { value: ["A"] },
+    文字列: { value: '""' },
+  } as unknown as KintoneRecord;
+  expect(flatten(rec, null)).toEqual({
+    null値: "",
+    undefined値: "",
+    数値: "10",
+    配列: '["A"]',
+    文字列: '""',
+  });
+});
+
+test("flatten: null キーは JOIN / GROUP BY / DISTINCT で通常の空文字として扱う", () => {
+  const left = [flatten({ key: { value: null }, value: { value: "L" } } as unknown as KintoneRecord, "a")];
+  const right = [flatten({ key: { value: null }, value: { value: "R" } } as unknown as KintoneRecord, "b")];
+  const join: JoinClause = {
+    type: "INNER",
+    table: { appId: 2, alias: "b", cteName: null },
+    on: {
+      left: { tableAlias: "a", field: "key" },
+      right: { tableAlias: "b", field: "key" },
+    },
+  };
+  expect(applyJoin(left, right, join)).toHaveLength(1);
+
+  const rows = [
+    flatten({ key: { value: null } } as unknown as KintoneRecord, null),
+    flatten({ key: { value: "" } } as KintoneRecord, null),
+  ];
+  const grouped = parseSelect("SELECT key, COUNT(*) AS cnt FROM APP1 GROUP BY key");
+  expect(applyGroupBy(rows, grouped.groupBy, grouped.columns)).toHaveLength(1);
+  const distinct = parseSelect("SELECT DISTINCT key FROM APP1");
+  expect(applyDistinct(rows, distinct.columns)).toHaveLength(1);
+});
+
 // ----------------------------------------------------------------
 // applyJoin
 // ----------------------------------------------------------------
@@ -77,6 +117,15 @@ test("LEFT JOIN: 右に存在しない行は空文字で残る", () => {
   expect(result).toHaveLength(3);
   const unmatched = result.find((r) => r["a.名前"] === "佐藤")!;
   expect(unmatched["b.会社"]).toBe("");
+});
+
+test("LEFT JOIN: 欠損側の選択値は IN ('') に一致する", () => {
+  const leftJoin: JoinClause = { ...joinClause, type: "LEFT" };
+  const joined = applyJoin(leftRows, rightRows, leftJoin);
+  const stmt = parseSelect("SELECT * FROM APP100 WHERE b.会社 IN ('')");
+  const resolveType = () => "DROP_DOWN";
+  expect(applyFilter(joined, stmt.where, resolveType).map((row) => row["a.名前"]))
+    .toEqual(["佐藤"]);
 });
 
 test("LEFT JOIN: 欠損側の空値は有限数との範囲比較で −∞ として評価する", () => {

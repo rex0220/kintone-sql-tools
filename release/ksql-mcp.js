@@ -34482,10 +34482,12 @@ function typedInContains(leftStr, values, fieldType) {
     if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
       return fallback();
     }
+    if (parsed.length === 0 && values.has("")) return true;
     return parsed.some((item) => values.has(item));
   }
   if (OBJECT_ARRAY_FIELD_TYPES.has(fieldType)) {
     if (!Array.isArray(parsed) || !parsed.every(hasStringCode)) return fallback();
+    if (parsed.length === 0 && values.has("")) return true;
     return parsed.some((item) => values.has(item.code));
   }
   if (!hasStringCode(parsed)) return fallback();
@@ -35098,8 +35100,11 @@ async function resolveDmlTargetIds(getRecords, app, query, options) {
 function extractSafePushdownLeaves(where, options = {}) {
   return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
 }
-function extractNumericPushdownCandidates(where, options = {}) {
-  return extractAndLeaves(where, (expr) => isNumericCandidate(expr, options));
+function extractTypedPushdownCandidates(where, options = {}) {
+  return extractAndLeaves(
+    where,
+    (expr) => isNumericCandidate(expr, options) || isSelectionInCandidate(expr, options)
+  );
 }
 function extractAndLeaves(where, accept) {
   switch (where.type) {
@@ -35123,8 +35128,27 @@ function extractAndLeaves(where, accept) {
 }
 function isSafeComparison(expr, options) {
   if (isSafeIdComparison(expr, options)) return true;
-  if (!isNumericCandidate(expr, options)) return false;
-  return options.fieldTypes?.get(expr.left.field) === "NUMBER";
+  if (isNumericCandidate(expr, options)) {
+    return options.fieldTypes?.get(expr.left.field) === "NUMBER";
+  }
+  return isSelectionInComparison(expr, options);
+}
+var SELECTION_IN_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "CHECK_BOX",
+  "MULTI_SELECT"
+]);
+function isSelectionInComparison(expr, options) {
+  if (!isSelectionInCandidate(expr, options)) return false;
+  if (expr.left.type !== "FIELD" || expr.right.type !== "IN_LIST") return false;
+  const fieldType = options.fieldTypes?.get(expr.left.field);
+  if (fieldType === void 0 || !SELECTION_IN_FIELD_TYPES.has(fieldType)) return false;
+  const validOptions = options.fieldOptions?.get(expr.left.field);
+  if (validOptions === void 0) return false;
+  return expr.right.values.every(
+    (value) => value.type === "STRING" && value.value !== "" && validOptions.has(value.value)
+  );
 }
 function isSafeIdComparison(expr, options) {
   if (!isTargetIdField(expr.left, options)) return false;
@@ -35144,6 +35168,13 @@ function isNumericCandidate(expr, options) {
   if (expr.op === "=") return true;
   return (expr.op === "<" || expr.op === ">") && Number.isSafeInteger(expr.right.value);
 }
+function isSelectionInCandidate(expr, options) {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.op !== "IN" && expr.op !== "NOT_IN") return false;
+  if (expr.right.type !== "IN_LIST" || expr.right.values.length === 0) return false;
+  return expr.right.values.every((value) => value.type === "STRING" && value.value !== "");
+}
 function isTargetField(field, options) {
   const targetAlias = options.tableAlias ?? null;
   if (field.tableAlias === targetAlias) return true;
@@ -35155,7 +35186,7 @@ function flatten(record2, alias) {
   const row = {};
   for (const [field, fv] of Object.entries(record2)) {
     const val = fv.value;
-    const strVal = typeof val === "string" ? val : JSON.stringify(val ?? "");
+    const strVal = val == null ? "" : typeof val === "string" ? val : JSON.stringify(val);
     if (alias) {
       row[`${alias}.${field}`] = strVal;
       row[field] = strVal;
@@ -36365,43 +36396,57 @@ async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
     }
   }
 }
-function extractMainSafePushdown(stmt, fieldTypes) {
+function extractMainSafePushdown(stmt, fieldTypes, fieldOptions) {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
   if (stmt.joins.length === 0) {
     return extractSafePushdownLeaves(stmt.where, {
       tableAlias: stmt.from.alias ?? void 0,
       allowUnqualifiedFields: true,
-      fieldTypes
+      fieldTypes,
+      fieldOptions
     });
   }
   if (!stmt.from.alias) return null;
-  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias, fieldTypes });
+  return extractSafePushdownLeaves(stmt.where, {
+    tableAlias: stmt.from.alias,
+    fieldTypes,
+    fieldOptions
+  });
 }
-function extractMainNumericPushdownCandidate(stmt) {
+function extractMainTypedPushdownCandidate(stmt) {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
   if (stmt.joins.length === 0) {
-    return extractNumericPushdownCandidates(stmt.where, {
+    return extractTypedPushdownCandidates(stmt.where, {
       tableAlias: stmt.from.alias ?? void 0,
       allowUnqualifiedFields: true
     });
   }
   if (!stmt.from.alias) return null;
-  return extractNumericPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
+  return extractTypedPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
 }
-async function loadNumericPushdownFieldTypes(stmt, client, cacheContext) {
+async function loadTypedPushdownMeta(stmt, client, cacheContext) {
   const appIds = /* @__PURE__ */ new Set();
-  if (extractMainNumericPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+  if (extractMainTypedPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const candidate = extractNumericPushdownCandidates(stmt.where, {
+      const candidate = extractTypedPushdownCandidates(stmt.where, {
         tableAlias: join.table.alias
       });
       if (candidate !== null) appIds.add(join.table.appId);
     }
   }
-  const entries = await Promise.all([...appIds].map(async (appId) => [appId, await getFieldTypeMap(appId, client, cacheContext)]));
-  return new Map(entries);
+  const entries = await Promise.all([...appIds].map(async (appId) => {
+    const [fieldTypes, fieldOptions] = await Promise.all([
+      getFieldTypeMap(appId, client, cacheContext),
+      getFieldOptionSetMapByApp(appId, client, cacheContext)
+    ]);
+    return [appId, fieldTypes, fieldOptions];
+  }));
+  return {
+    fieldTypesByApp: new Map(entries.map(([appId, fieldTypes]) => [appId, fieldTypes])),
+    fieldOptionsByApp: new Map(entries.map(([appId, , fieldOptions]) => [appId, fieldOptions]))
+  };
 }
 function collectTypedInFieldRefs(expr, out) {
   if (expr === null) return;
@@ -36513,14 +36558,15 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
-  const [pushdownFieldTypes, typedInFieldTypes] = await Promise.all([
-    loadNumericPushdownFieldTypes(stmt, client, cacheContext),
+  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+    loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const mainPushDown = extractMainSafePushdown(
     stmt,
-    pushdownFieldTypes.get(stmt.from.appId)
+    pushdownMeta.fieldTypesByApp.get(stmt.from.appId),
+    pushdownMeta.fieldOptionsByApp.get(stmt.from.appId)
   );
   const tableConditions = /* @__PURE__ */ new Map();
   if (stmt.where !== null) {
@@ -36528,7 +36574,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
       const cond = extractSafePushdownLeaves(stmt.where, {
         tableAlias: join.table.alias,
-        fieldTypes: pushdownFieldTypes.get(join.table.appId)
+        fieldTypes: pushdownMeta.fieldTypesByApp.get(join.table.appId),
+        fieldOptions: pushdownMeta.fieldOptionsByApp.get(join.table.appId)
       });
       if (cond) tableConditions.set(join.table.alias, cond);
     }
@@ -37068,6 +37115,15 @@ async function getOptionOrderMapByApp(appId, client, cacheContext) {
   }
   setScopedCacheValue(optionOrderCache, cacheContext, appId, map2);
   return map2;
+}
+async function getFieldOptionSetMapByApp(appId, client, cacheContext) {
+  const optionOrders = await getOptionOrderMapByApp(appId, client, cacheContext);
+  return new Map(
+    [...optionOrders.entries()].map(([fieldCode, order]) => [
+      fieldCode,
+      new Set(order.keys())
+    ])
+  );
 }
 async function getSortKindMapByApp(appId, client, cacheContext) {
   const cached2 = getScopedCacheValue(sortKindCache, cacheContext, appId);
@@ -38028,12 +38084,12 @@ function buildSelectPlan(stmt, label) {
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = extractMainSafePushdown(stmt);
-    const mainCandidate = extractMainNumericPushdownCandidate(stmt);
+    const mainCandidate = extractMainTypedPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null ? whereToKintone(mainPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     if (mainCandidate !== null) {
-      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u78BA\u8A8D\u5F85\u3061\uFF09`);
+      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u30FB\u5B9F\u5728\u78BA\u8A8D\u5F85\u3061\uFF09`);
     }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : mainFields.join(", ")}`);
     for (const join of stmt.joins) {
@@ -38041,12 +38097,12 @@ function buildSelectPlan(stmt, label) {
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
       const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
-      const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractNumericPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractTypedPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null ? whereToKintone(joinPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
       if (joinCandidate !== null) {
-        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u78BA\u8A8D\u5F85\u3061\uFF09`);
+        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u30FB\u5B9F\u5728\u78BA\u8A8D\u5F85\u3061\uFF09`);
       }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : joinFields.join(", ")}`);
     }
@@ -40395,7 +40451,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.5.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

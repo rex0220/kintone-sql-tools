@@ -4,6 +4,7 @@ import type { SelectStatement } from "../../../types/ast";
 import {
   extractNumericPushdownCandidates,
   extractSafePushdownLeaves,
+  extractTypedPushdownCandidates,
 } from "../wherePredicatePushdown";
 
 function where(sql: string) {
@@ -117,8 +118,52 @@ test("一般数値候補も JOIN では対象エイリアスの明示参照だ�
   expect(candidate.left.tableAlias).toBe("a");
 });
 
-test("選択系フィールドは型メタが渡されても押し下げない", () => {
+test("選択系フィールドは型メタだけでは押し下げない", () => {
   const expr = where("SELECT * FROM APP100 WHERE 状態 IN ('完了')");
   const fieldTypes = new Map([["状態", "DROP_DOWN"]]);
   expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();
+});
+
+test.each(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"])(
+  "%s の IN / NOT IN は全値が実在するときだけ押し下げる",
+  (fieldType) => {
+    const fieldTypes = new Map([["選択", fieldType]]);
+    const fieldOptions = new Map([["選択", new Set(["A", "B"])]]);
+    for (const op of ["IN", "NOT IN"]) {
+      const expr = where(`SELECT * FROM APP100 WHERE 選択 ${op} ('A', 'B')`);
+      expect(extractSafePushdownLeaves(expr, { fieldTypes, fieldOptions })).toEqual(expr);
+    }
+  }
+);
+
+test.each([
+  "SELECT * FROM APP100 WHERE 選択 IN ('A', 'X')",
+  "SELECT * FROM APP100 WHERE 選択 IN ('')",
+  "SELECT * FROM APP100 WHERE 選択 IN (1)",
+])("選択系 IN の非実在値・空値・非文字列は押し下げない: %s", (sql) => {
+  const expr = where(sql);
+  expect(extractSafePushdownLeaves(expr, {
+    fieldTypes: new Map([["選択", "CHECK_BOX"]]),
+    fieldOptions: new Map([["選択", new Set(["A"])]]),
+  })).toBeNull();
+});
+
+test.each(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT", "STATUS"])(
+  "%s は選択肢集合があっても押し下げない",
+  (fieldType) => {
+    const expr = where("SELECT * FROM APP100 WHERE 選択 IN ('A')");
+    expect(extractSafePushdownLeaves(expr, {
+      fieldTypes: new Map([["選択", fieldType]]),
+      fieldOptions: new Map([["選択", new Set(["A"])]]),
+    })).toBeNull();
+  }
+);
+
+test("選択系 IN は型メタなしの候補抽出に含め、対象外リーフは除く", () => {
+  const expr = where(
+    "SELECT * FROM APP100 WHERE 選択 IN ('A') AND 他 NOT IN ('B') AND 数量 IN (1)"
+  );
+  const candidate = extractTypedPushdownCandidates(expr) as any;
+  expect(candidate.left.left.field).toBe("選択");
+  expect(candidate.right.left.field).toBe("他");
 });

@@ -10,7 +10,14 @@ export interface SafePushdownOptions {
   allowUnqualifiedFields?: boolean;
   /** 一般フィールドの型別ホワイトリスト。未指定・型不明なら一般フィールドは抽出しない。 */
   fieldTypes?: ReadonlyMap<string, string>;
+  /** 選択系フィールドの実在選択肢集合。未指定・対象フィールドなしなら IN は抽出しない。 */
+  fieldOptions?: ReadonlyMap<string, ReadonlySet<string>>;
 }
+
+type PushdownCandidateOptions = Pick<
+  SafePushdownOptions,
+  "tableAlias" | "allowUnqualifiedFields"
+>;
 
 /**
  * WHERE から kintone へ安全に押し下げられる AND リーフだけを抽出する。
@@ -32,9 +39,20 @@ export function extractSafePushdownLeaves(
  */
 export function extractNumericPushdownCandidates(
   where: WhereExpr,
-  options: Omit<SafePushdownOptions, "fieldTypes"> = {}
+  options: PushdownCandidateOptions = {}
 ): WhereExpr | null {
   return extractAndLeaves(where, (expr) => isNumericCandidate(expr, options));
+}
+
+/** 数値比較と選択系 IN / NOT IN の、型メタ非依存な構文候補を抽出する。 */
+export function extractTypedPushdownCandidates(
+  where: WhereExpr,
+  options: PushdownCandidateOptions = {}
+): WhereExpr | null {
+  return extractAndLeaves(
+    where,
+    (expr) => isNumericCandidate(expr, options) || isSelectionInCandidate(expr, options)
+  );
 }
 
 function extractAndLeaves(
@@ -69,8 +87,32 @@ function isSafeComparison(
   options: SafePushdownOptions
 ): boolean {
   if (isSafeIdComparison(expr, options)) return true;
-  if (!isNumericCandidate(expr, options)) return false;
-  return options.fieldTypes?.get(expr.left.field) === "NUMBER";
+  if (isNumericCandidate(expr, options)) {
+    return options.fieldTypes?.get(expr.left.field) === "NUMBER";
+  }
+  return isSelectionInComparison(expr, options);
+}
+
+const SELECTION_IN_FIELD_TYPES = new Set([
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "CHECK_BOX",
+  "MULTI_SELECT",
+]);
+
+function isSelectionInComparison(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: SafePushdownOptions
+): boolean {
+  if (!isSelectionInCandidate(expr, options)) return false;
+  if (expr.left.type !== "FIELD" || expr.right.type !== "IN_LIST") return false;
+  const fieldType = options.fieldTypes?.get(expr.left.field);
+  if (fieldType === undefined || !SELECTION_IN_FIELD_TYPES.has(fieldType)) return false;
+  const validOptions = options.fieldOptions?.get(expr.left.field);
+  if (validOptions === undefined) return false;
+  return expr.right.values.every((value) =>
+    value.type === "STRING" && value.value !== "" && validOptions.has(value.value)
+  );
 }
 
 function isSafeIdComparison(
@@ -99,7 +141,7 @@ function isTargetIdField(
 
 function isNumericCandidate(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
-  options: Omit<SafePushdownOptions, "fieldTypes">
+  options: PushdownCandidateOptions
 ): expr is typeof expr & { left: Extract<FieldValue, { type: "FIELD" }> } {
   if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
   if (!isTargetField(expr.left, options)) return false;
@@ -109,9 +151,20 @@ function isNumericCandidate(
     && Number.isSafeInteger(expr.right.value);
 }
 
+function isSelectionInCandidate(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: PushdownCandidateOptions
+): boolean {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.op !== "IN" && expr.op !== "NOT_IN") return false;
+  if (expr.right.type !== "IN_LIST" || expr.right.values.length === 0) return false;
+  return expr.right.values.every((value) => value.type === "STRING" && value.value !== "");
+}
+
 function isTargetField(
   field: Extract<FieldValue, { type: "FIELD" }>,
-  options: Omit<SafePushdownOptions, "fieldTypes">
+  options: PushdownCandidateOptions
 ): boolean {
   const targetAlias = options.tableAlias ?? null;
   if (field.tableAlias === targetAlias) return true;

@@ -103,7 +103,30 @@ test("EXPLAIN FULL_SCAN — 一般数値比較は確定 query と分離して候
   expect(query).toContain("$id >= 10");
   expect(query).not.toContain("金額");
   expect(candidate).toContain("金額 > 1000");
-  expect(candidate).toContain("実行時の型確認待ち");
+  expect(candidate).toContain("実行時の型・実在確認待ち");
+});
+
+test("EXPLAIN FULL_SCAN — 選択系 IN は実行時確認前の候補として分離表示する", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id FROM APP100 WHERE 選択 IN ('A', 'B') AND 件名 LIKE '%'"
+  );
+  const query = plan.find((l) => l.includes("kintone query:")) ?? "";
+  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
+  expect(query).toContain("(全件取得)");
+  expect(candidate).toContain('選択 in ("A","B")');
+  expect(candidate).toContain("実行時の型・実在確認待ち");
+});
+
+test.each([
+  "選択 IN (1)",
+  "選択 IN ('A', 1)",
+  "選択 IN ('')",
+  "選択 IN (SELECT 値 FROM APP101)",
+])("EXPLAIN FULL_SCAN — 選択系候補にならない形: %s", async (predicate) => {
+  const plan = await explain(
+    `EXPLAIN SELECT $id FROM APP100 WHERE ${predicate} AND 件名 LIKE '%'`
+  );
+  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
 });
 
 test("EXPLAIN FULL_SCAN — 一般 NUMBER の包含比較は候補表示しない", async () => {
@@ -487,6 +510,18 @@ test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化
     plan: expect.arrayContaining([expect.stringContaining("SET @min")]),
   });
   expect(plans.statements[1].plan.join("\n")).toContain("@min");
+});
+
+test("バッチ EXPLAIN: 選択系 IN の文字列変数を候補表示し、値は実行しない", () => {
+  const plans = buildBatchExplainPlans(
+    "DECLARE @choice = 'A'; " +
+      "SELECT $id FROM APP100 WHERE 選択 IN (@choice) AND 件名 LIKE '%'",
+    { choice: "secret-option" }
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toContain("pushdown candidate:");
+  expect(text).toContain('選択 in ("@choice")');
+  expect(text).not.toContain("secret-option");
 });
 
 test("バッチ EXPLAIN: SET の APP スカラーサブクエリ計画と1回評価を表示する", () => {
