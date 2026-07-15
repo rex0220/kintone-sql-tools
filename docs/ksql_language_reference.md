@@ -547,9 +547,15 @@ WHERE 件名 NOT KLIKE '保留'
     > 上記は観測された例であり、kintoneの一致規則を網羅的に定義するものではありません。半角・全角、大小文字、記号の扱い等はkintoneの仕様に従います。
   - 迷ったら、確実に部分一致させたい場合は `LIKE`（JavaScript評価・FULL_SCAN）を、kintone側で高速に絞り込みたい場合は `KLIKE` を使い分けてください。
 - **性能**: `LIKE` はFULL_SCANになり、AND条件に押し下げ可能な安全述語（`$id`・型確認済みNUMBERの `=` と安全整数との厳密な `<` / `>`・選択系 `IN` など）がなければ全件取得になります。大規模アプリでは取得上限（`maxRecords`）に達してエラーになりがちです。`KLIKE` はSIMPLEのままkintone側で検索するため、大規模アプリでも高速です（例: 数十万件規模のアプリで `都道府県 LIKE '%東京%'` は上限エラー、`都道府県 KLIKE '東京都'` は即応）。ただし下記の10万件打ち切りに注意。
-- v1では **SIMPLE SELECTのWHERE句だけ**で使用できます。JOIN、GROUP BY、DISTINCT、集計、式を使うORDER BY、サブテーブル、または `LIKE`・関数・算術式等との混在によってFULL_SCANになるSELECTでは使用できません。
+- SIMPLE SELECTでは従来どおりWHERE全体をkintoneへ渡します。FULL_SCAN SELECTでも、KLIKEがWHEREルートからANDと括弧だけを経由する安全なリーフなら、kintoneへプレフィルタ押し下げして残りの条件をJavaScriptで精製します。これによりKLIKEと`LIKE`・関数・集計・`DISTINCT`を併用できます。
+  ```sql
+  -- 件名はkintoneで粗く絞り、備考はkSQLの部分一致で精製
+  SELECT 件名, 備考 FROM APP100
+  WHERE 件名 KLIKE '至急' AND 備考 LIKE '%緊急%'
+  ```
+- FULL_SCANでの制約: ORまたは`NOT (...)`配下、サブテーブル、CTE／一時テーブル上のKLIKEは使用できません。JOINとの併用は、すべてのJOINが`INNER JOIN`で、KLIKEのフィールドをテーブルエイリアスで明示した場合だけ許可します。`LEFT JOIN` / `RIGHT JOIN`を含むSELECTでは、安全側にKLIKEを拒否します。直接の`NOT KLIKE`はANDリーフとして使用できます。
 - 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
-- v1ではUPDATE、DELETE、INSERT ... SELECT、UPSERT ... SELECT、REORDERを含むすべてのDMLで使用できません。
+- UPDATE、DELETE、INSERT ... SELECT、UPSERT ... SELECT、REORDERを含むすべてのDMLでは引き続き使用できません。
 - 利用可能なフィールドは[kintone公式の演算子対応表](https://cybozu.dev/ja/kintone/docs/overview/query/)に従います。文字列1行・複数行、リッチエディター、リンク、添付ファイルなどが対象です。非対応フィールドはkintone APIエラーになります。
 - kintoneはキーワード一致が10万件に達すると検索を打ち切ります。現在のkSQLはそのレスポンス警告を検出しないため、該当時は結果が欠落しても警告されず、完全な結果を保証できません。十分に絞り込めるキーワードを指定してください。
 - `KLIKE` は予約語です。同名フィールドを参照するときは `` `KLIKE` `` と記述します。

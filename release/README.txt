@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v2.8.0)
+ksql 配布パッケージ (v2.9.0)
 
-1. ksql-plugin-v2.8.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.9.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.9.0: KLIKE プレフィルタ押し下げ(最適化・後方互換)。
+- FULL_SCAN の SELECT でも、KLIKE / NOT KLIKE が安全な AND リーフなら kintone へ
+  プレフィルタ押し下げ。KLIKE で候補を絞り、LIKE・関数・集計・DISTINCT を JS で精製できる
+  (例: 件名 KLIKE '至急' AND 備考 LIKE '%緊急%')。v1 で拒否だった併用が可能に。
+- 押し下げ計画を検証・取得・JS 評価・EXPLAIN で共有し、実際に押し下げた KLIKE だけを
+  適用済み扱い。集合外 KLIKE はエラー(fail-closed)。
+- JOIN 併用は全 JOIN が INNER のときだけ許可。LEFT/RIGHT JOIN・OR/NOT(...)配下・
+  CTE/一時テーブル上の KLIKE は拒否(外部結合の未一致行による誤結果を防止)。直接 NOT KLIKE は可。
+- 全 DML 拒否・10万件打ち切りによる完全結果非保証は従来どおり。
+- 詳細は CHANGELOG.md と言語リファレンス § KLIKE を参照。
 
 v2.8.0: KLIKE(kintone キーワード検索)演算子を追加(後方互換)。
 - KLIKE / NOT KLIKE は SQL LIKE(JS 部分一致)とは別演算子で、kintone の like/

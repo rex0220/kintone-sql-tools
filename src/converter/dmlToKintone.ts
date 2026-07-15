@@ -32,7 +32,7 @@ function assertDmlWhereIsSafe(where: WhereExpr): void {
   if (whereHasKlike(where)) {
     throw new DmlConvertError(
       "UPDATE / DELETE の WHERE に KLIKE / NOT KLIKE は使用できません。" +
-      "kintone キーワード検索の打ち切りを検出できないため、v1 では全 DML で安全上拒否しました。"
+      "kintone キーワード検索の打ち切りを検出できないため、全 DML で安全上拒否しています。"
     );
   }
   if (!whereHasLike(where)) return;

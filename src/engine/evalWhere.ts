@@ -67,14 +67,15 @@ export type FieldTypeResolver = (field: FieldRef) => string | undefined;
 export function evalWhere(
   expr: WhereExpr,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  appliedKlikes?: ReadonlySet<object>
 ): boolean {
   switch (expr.type) {
-    case "BINARY":    return evalBinary(expr, row, resolveFieldType);
+    case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes);
     case "NULL_CHECK": return evalNullCheck(expr, row);
-    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType);
-    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType);
-    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType);
+    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes);
+    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
+    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
     case "EXISTS": {
       const exists = (expr as ResolvedExistsExpr).resolved;
       return expr.not ? !exists : exists;
@@ -89,8 +90,13 @@ export function evalWhere(
 function evalBinary(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  appliedKlikes?: ReadonlySet<object>
 ): boolean {
+  if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
+    if (appliedKlikes?.has(expr)) return true;
+    throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
+  }
   const left = resolveField(expr.left, row, resolveFieldType);
   const fieldType = expr.left.type === "FIELD"
     ? resolveFieldType?.(expr.left)
@@ -229,12 +235,15 @@ function evalNullCheck(
 function evalLogical(
   expr: Extract<WhereExpr, { type: "LOGICAL" }>,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  appliedKlikes?: ReadonlySet<object>
 ): boolean {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType) && evalWhere(expr.right, row, resolveFieldType);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes)
+      && evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
   }
-  return evalWhere(expr.left, row, resolveFieldType) || evalWhere(expr.right, row, resolveFieldType);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes)
+    || evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
 }
 
 // ------------------------------------------------------------

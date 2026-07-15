@@ -1,5 +1,7 @@
 import { resolveSelectMode } from "../converter/selectToKintone";
 import { isKlike, whereHasKlike } from "./like";
+import { buildInlinedQuery, canInlineSingleCte } from "./cteInlining";
+import { buildKlikePushdownPlan, unappliedKlikes, type KlikePushdownPlan } from "./optimization/klikePushdownPlan";
 import type {
   SelectStatement,
   Statement,
@@ -8,7 +10,7 @@ import type {
   WithStatement,
 } from "../types/ast";
 
-/** KLIKE v1 の AST 後・実行前制約違反。 */
+/** KLIKE の AST 後・実行前制約違反。 */
 export class KlikeValidationError extends Error {
   constructor(message: string) {
     super(`ArgumentError: ${message}`);
@@ -18,15 +20,24 @@ export class KlikeValidationError extends Error {
 }
 
 /**
- * KLIKE v1 の共通静的検証。
+ * KLIKE の共通静的検証。
  *
- * - KLIKE は SIMPLE SELECT の WHERE だけで使用可能
+ * - KLIKE は WHERE だけで使用可能。FULL_SCAN では共有計画に入る AND リーフに限定
  * - 右辺は文字列または未解決のバッチ変数だけ
  * - kintone が検索語から除外する % は拒否
  * - DML はネストした SELECT を含めて全面拒否
  */
 export function validateKlikeStatement(stmt: Statement): void {
   validateStatement(stmt);
+}
+
+/** 実行時に生成した共有計画が全 KLIKE を包含することを最終確認する。 */
+export function validateKlikePushdownPlan(plan: KlikePushdownPlan): void {
+  if (unappliedKlikes(plan).length > 0) {
+    throw new KlikeValidationError(
+      "FULL_SCAN の KLIKE / NOT KLIKE を安全に押し下げられません。OR / NOT 配下、CTE・一時テーブル、LEFT / RIGHT JOIN を確認してください"
+    );
+  }
 }
 
 function validateStatement(stmt: Statement): void {
@@ -60,7 +71,7 @@ function validateStatement(stmt: Statement): void {
     case "REORDER":
       if (containsKlike(stmt)) {
         throw new KlikeValidationError(
-          "KLIKE / NOT KLIKE は v1 では全 DML（UPDATE / DELETE / INSERT / UPSERT / REORDER）で使用できません"
+          "KLIKE / NOT KLIKE は全 DML（UPDATE / DELETE / INSERT / UPSERT / REORDER）で使用できません"
         );
       }
       return;
@@ -83,11 +94,9 @@ function validateUnion(stmt: UnionStatement): void {
 }
 
 function validateWith(stmt: WithStatement): void {
-  const inlined = buildEffectiveInlineSelect(stmt);
-  if (inlined !== null) {
-    // 実行時も同じ形へインライン化される。CTE 本体と最終 WHERE の混在を
-    // 結合後に判定し、KLIKE + LIKE 等による FULL_SCAN 化を見逃さない。
-    validateSelect(inlined);
+  if (canInlineSingleCte(stmt)) {
+    // 実行時と同じ共通変換後の AST を検証する。
+    validateSelect(buildInlinedQuery(stmt));
     return;
   }
 
@@ -102,11 +111,17 @@ function validateSelect(stmt: SelectStatement): void {
   validateOwnKlikeExpressions(stmt);
 
   if (whereHasKlike(stmt.where)) {
-    const inMemorySource = stmt.from.cteName !== null
-      || stmt.joins.some((join) => join.table.cteName !== null);
-    if (inMemorySource || resolveSelectMode(stmt) === "FULL_SCAN") {
+    const directKintoneSimple = resolveSelectMode(stmt) === "SIMPLE"
+      && stmt.from.cteName === null
+      && stmt.joins.every((join) => join.table.cteName === null);
+    if (!directKintoneSimple) {
+      const plan = buildKlikePushdownPlan(stmt, { allowUnresolvedVariables: true });
+      if (unappliedKlikes(plan).length === 0) {
+        validateNestedSelects(stmt);
+        return;
+      }
       throw new KlikeValidationError(
-        "KLIKE / NOT KLIKE は kintone へ押し下げる SIMPLE SELECT でのみ使用できます。この SELECT は FULL_SCAN になります"
+        "FULL_SCAN の KLIKE / NOT KLIKE は、物理テーブルに対する AND リーフとして必ず押し下げられる必要があります。OR / NOT 配下、CTE・一時テーブル、LEFT / RIGHT JOIN では使用できません"
       );
     }
   }
@@ -139,43 +154,6 @@ function validateNestedSelects(node: unknown): void {
   walkObjects(node, (obj) => {
     if (obj.type === "SELECT") validateSelect(obj as unknown as SelectStatement);
   }, true);
-}
-
-/** WITH の実行時インライン化と同じ主要条件で、実効 SELECT を構築する。 */
-function buildEffectiveInlineSelect(stmt: WithStatement): SelectStatement | null {
-  if (stmt.ctes.length !== 1) return null;
-  const cte = stmt.ctes[0];
-  if (cte.query.type !== "SELECT" || resolveSelectMode(cte.query) !== "SIMPLE") return null;
-  if (stmt.query.type !== "SELECT") return null;
-  const final = stmt.query;
-  if (final.from.cteName !== cte.name || final.joins.length > 0) return null;
-  if (final.groupBy.length > 0 || final.distinct) return null;
-  if (final.columns.some((column) =>
-    column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
-  )) return null;
-
-  const where = cte.query.where === null
-    ? final.where
-    : final.where === null
-      ? cte.query.where
-      : { type: "LOGICAL" as const, op: "AND" as const, left: cte.query.where, right: final.where };
-  const columns = final.columns.every((column) => column.type === "WILDCARD")
-    ? cte.query.columns
-    : final.columns;
-
-  return {
-    type: "SELECT",
-    from: cte.query.from,
-    joins: [],
-    columns,
-    where,
-    groupBy: [],
-    having: null,
-    orderBy: final.orderBy.length > 0 ? final.orderBy : cte.query.orderBy,
-    limit: final.limit ?? cte.query.limit,
-    offset: final.offset ?? cte.query.offset,
-    distinct: false,
-  };
 }
 
 function containsKlike(node: unknown): boolean {
