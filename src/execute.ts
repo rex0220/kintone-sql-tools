@@ -80,6 +80,14 @@ export interface KintoneClient {
   getApps: () => Promise<KintoneAppInfo[]>;
   /** GET /k/v1/app/form/fields.json（DESCRIBE） */
   getFields: (appId: number) => Promise<KintoneFieldInfo[]>;
+  /** GET /k/v1/app/status.json（プロセス管理設定） */
+  getProcessStatuses: (appId: number) => Promise<KintoneProcessStatuses>;
+}
+
+export interface KintoneProcessStatuses {
+  enable: boolean;
+  /** 実行ユーザーの表示言語に対応する状態名 */
+  states: string[];
 }
 
 export interface KintoneAppInfo {
@@ -125,6 +133,8 @@ export interface ExecuteMetrics {
   fieldCalls: number;
   /** GET /k/v1/apps.json の呼び出し回数 */
   appsCalls: number;
+  /** GET /k/v1/app/status.json の呼び出し回数（キャッシュヒット時は増えない） */
+  processStatusCalls: number;
   /** GET で取得したレコード総数（全ページ・サブクエリ含む） */
   fetchedRows: number;
   /** execute() 全体の所要時間（ミリ秒） */
@@ -260,6 +270,7 @@ function createEmptyMetrics(): ExecuteMetrics {
     deleteCalls: 0,
     fieldCalls: 0,
     appsCalls: 0,
+    processStatusCalls: 0,
     fetchedRows: 0,
     elapsedMs: 0,
   };
@@ -297,6 +308,10 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
     getFields: (appId) => {
       metrics.fieldCalls += 1;
       return client.getFields(appId);
+    },
+    getProcessStatuses: (appId) => {
+      metrics.processStatusCalls += 1;
+      return client.getProcessStatuses(appId);
     },
   };
 }
@@ -1170,8 +1185,14 @@ async function loadTypedPushdownMeta(
   client: KintoneClient,
   cacheContext: string
 ): Promise<TypedPushdownMeta> {
-  const appIds = new Set<number>();
-  if (extractMainTypedPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+  const candidatesByApp = new Map<number, WhereExpr[]>();
+  const addCandidate = (appId: number, candidate: WhereExpr | null): void => {
+    if (candidate === null) return;
+    const existing = candidatesByApp.get(appId);
+    if (existing) existing.push(candidate);
+    else candidatesByApp.set(appId, [candidate]);
+  };
+  addCandidate(stmt.from.appId, extractMainTypedPushdownCandidate(stmt));
 
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
@@ -1179,21 +1200,48 @@ async function loadTypedPushdownMeta(
       const candidate = extractTypedPushdownCandidates(stmt.where, {
         tableAlias: join.table.alias,
       });
-      if (candidate !== null) appIds.add(join.table.appId);
+      addCandidate(join.table.appId, candidate);
     }
   }
 
-  const entries = await Promise.all([...appIds].map(async (appId) => {
+  const entries = await Promise.all([...candidatesByApp.entries()].map(async ([appId, candidates]) => {
     const [fieldTypes, fieldOptions] = await Promise.all([
       getFieldTypeMap(appId, client, cacheContext),
       getFieldOptionSetMapByApp(appId, client, cacheContext),
     ]);
+    const statusFields = collectCandidateFieldCodes(candidates)
+      .filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
+    if (statusFields.length > 0) {
+      const process = await getProcessStatusesCached(appId, client, cacheContext);
+      if (process.enable && process.states.length > 0) {
+        const states = new Set(process.states);
+        for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
+      }
+    }
     return [appId, fieldTypes, fieldOptions] as const;
   }));
   return {
     fieldTypesByApp: new Map(entries.map(([appId, fieldTypes]) => [appId, fieldTypes])),
     fieldOptionsByApp: new Map(entries.map(([appId, , fieldOptions]) => [appId, fieldOptions])),
   };
+}
+
+function collectCandidateFieldCodes(candidates: readonly WhereExpr[]): string[] {
+  const fields = new Set<string>();
+  const visit = (expr: WhereExpr): void => {
+    if (expr.type === "BINARY") {
+      if (expr.left.type === "FIELD") fields.add(expr.left.field);
+      return;
+    }
+    if (expr.type === "LOGICAL") {
+      visit(expr.left);
+      visit(expr.right);
+      return;
+    }
+    if (expr.type === "GROUP" || expr.type === "NOT") visit(expr.expr);
+  };
+  for (const candidate of candidates) visit(candidate);
+  return [...fields];
 }
 
 /** IN / NOT IN の左辺にある直接フィールド参照を、CASE 条件を含めて収集する。 */
@@ -2114,6 +2162,7 @@ const fieldTypeCache = new Map<string, Map<number, FieldTypeMap>>();
 const optionOrderCache = new Map<string, Map<number, Map<string, Map<string, number>>>>();
 const sortKindCache = new Map<string, Map<number, Map<string, "number" | "string">>>();
 const fieldInfoCache = new Map<string, Map<number, Promise<KintoneFieldInfo[]>>>();
+const processStatusCache = new Map<string, Map<number, Promise<KintoneProcessStatuses>>>();
 
 function getScopedCacheValue<T>(
   root: Map<string, Map<number, T>>,
@@ -2146,6 +2195,18 @@ async function getFieldsCached(appId: number, client: KintoneClient, cacheContex
   if (cached) return cached;
   const loading = client.getFields(appId);
   setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
+  return loading;
+}
+
+async function getProcessStatusesCached(
+  appId: number,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<KintoneProcessStatuses> {
+  const cached = getScopedCacheValue(processStatusCache, cacheContext, appId);
+  if (cached) return cached;
+  const loading = client.getProcessStatuses(appId);
+  setScopedCacheValue(processStatusCache, cacheContext, appId, loading);
   return loading;
 }
 

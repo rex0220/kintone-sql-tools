@@ -166,6 +166,7 @@ function noOpClient(): KintoneClient {
     deleteRecords: fail,
     getApps: fail,
     getFields: fail,
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 

@@ -806,6 +806,7 @@ function createDryRunClient(): KintoneClient {
     deleteRecords: notUsed,
     getApps: notUsed,
     getFields: notUsed,
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 
@@ -1930,6 +1931,13 @@ async function run(): Promise<number> {
         const routed = profileClientMap.get(pName);
         if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${appId}.`);
         return routed.getFields(binding.appId);
+      },
+      getProcessStatuses: (appId) => {
+        const binding = appBindingByMappedApp.get(appId) ?? { appId, profile: profileName.toLowerCase() };
+        const pName = binding.profile;
+        const routed = profileClientMap.get(pName);
+        if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${appId}.`);
+        return routed.getProcessStatuses(binding.appId);
       },
       getApps: () => defaultClient.getApps(),
     };

@@ -59,6 +59,56 @@ describe("CLI logical app execution", () => {
     }
   });
 
+  test("LAPP STATUS候補は物理APPへrouteし status.json?lang=user の表示名を使う", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-status-"));
+    const configPath = join(dir, "ksql.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: {
+          baseUrl: "https://example.cybozu.com",
+          logicalApps: { ORDERS: 1234 },
+          tokenMap: { APP1234: "status-token" },
+        },
+      },
+    }));
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      let body: unknown;
+      if (url.includes("/app/form/fields.json")) {
+        body = { properties: {
+          "$id": { code: "$id", label: "Record ID", type: "__ID__" },
+          ステータス: { code: "ステータス", label: "ステータス", type: "STATUS" },
+          件名: { code: "件名", label: "件名", type: "SINGLE_LINE_TEXT" },
+        } };
+      } else if (url.includes("/app/status.json")) {
+        body = { enable: true, states: { internal: { name: "処理中" } } };
+      } else {
+        body = { records: [{ $id: { value: "1" }, ステータス: { value: "処理中" }, 件名: { value: "one" } }] };
+      }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    jest.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const code = await runWithArgv([
+        "--config", configPath,
+        "--format", "json",
+        "-e", "SELECT $id FROM LAPP_ORDERS WHERE ステータス IN ('処理中') AND 件名 LIKE '%'",
+      ]);
+      expect(code).toBe(0);
+      const statusCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/app/status.json"));
+      expect(statusCall).toBeDefined();
+      expect(String(statusCall?.[0])).toContain("app=1234");
+      expect(String(statusCall?.[0])).toContain("lang=user");
+      expect(new Headers(statusCall?.[1]?.headers).get("X-Cybozu-API-Token")).toBe("status-token");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test.each([
     // SELECT のソース app: 行は論理名 + profile（仕様 §9.2 の app 参照）
     ["SELECT", "SELECT $id FROM LAPP_ORDERS LIMIT 1", "app:", "LAPP_ORDERS@prod"],

@@ -76,6 +76,7 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
     async getFields(_appId) {
       return [];
     },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 
@@ -800,10 +801,10 @@ test.each(["'X'", "''"])(
   }
 );
 
-test.each(["USER_SELECT", "STATUS"])(
+test.each(["USER_SELECT", "STATUS_ASSIGNEE"])(
   "FULL_SCAN: %s の IN は押し下げず最終JS評価に残す",
   async (fieldType) => {
-    const value = fieldType === "USER_SELECT" ? [{ code: "A", name: "Alice" }] : "A";
+    const value = [{ code: "A", name: "Alice" }];
     const client = makeClient({ records: [makeTypedRecord({ $id: "1", 選択: value, 件名: "one" })] });
     client.getFields = async () => [
       { code: "選択", label: "選択", fieldType, optionOrder: { A: 0 } },
@@ -820,6 +821,169 @@ test.each(["USER_SELECT", "STATUS"])(
     expect(result.rows).toEqual([{ $id: "1" }]);
   }
 );
+
+test.each(["IN", "NOT IN"])(
+  "FULL_SCAN: 有効な STATUS の実在値を %s で押し下げる",
+  async (op) => {
+    const client = makeClient({ records: [
+      makeTypedRecord({ $id: "1", ステータス: "処理中", 件名: "one" }),
+      makeTypedRecord({ $id: "2", ステータス: "完了", 件名: "two" }),
+    ] });
+    client.getFields = async () => [
+      { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+    let statusCalls = 0;
+    client.getProcessStatuses = async () => {
+      statusCalls += 1;
+      return { enable: true, states: ["処理中", "完了"] };
+    };
+
+    const result = await execute(
+      `SELECT $id FROM APP99301 WHERE ステータス ${op} ('処理中') AND 件名 LIKE '%'`,
+      client,
+      { cacheContext: `status-pushdown-${op}` }
+    ) as SelectResult;
+
+    expect(client.getCalls[0].query).toContain(`ステータス ${op === "IN" ? "in" : "not in"} ("処理中")`);
+    expect(result.rows).toEqual(op === "IN" ? [{ $id: "1" }] : [{ $id: "2" }]);
+    expect(statusCalls).toBe(1);
+    expect(result.metrics?.processStatusCalls).toBe(1);
+  }
+);
+
+test.each([
+  ["非実在", true, ["処理中"]],
+  ["処理中", false, ["処理中"]],
+  ["処理中", true, []],
+] as const)(
+  "FULL_SCAN: STATUS値=%s enable=%s states=%j は非押し下げ",
+  async (value, enable, states) => {
+    const client = makeClient({ records: [
+      makeTypedRecord({ $id: "10", ステータス: value, 件名: "one" }),
+    ] });
+    client.getFields = async () => [
+      { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+      { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+    client.getProcessStatuses = async () => ({ enable, states: [...states] });
+
+    const result = await execute(
+      `SELECT $id FROM APP99302 WHERE $id >= 1 AND ステータス IN ('${value}') AND 件名 LIKE '%'`,
+      client,
+      { cacheContext: `status-pushdown-disabled-${value}-${enable}-${states.length}` }
+    ) as SelectResult;
+
+    expect(client.getCalls[0].query).toContain("$id >= 1");
+    expect(client.getCalls[0].query).not.toContain("ステータス in");
+    expect(result.rows).toEqual([{ $id: "10" }]);
+  }
+);
+
+test("FULL_SCAN: NUMBER / DROP_DOWN候補だけなら status.json を呼ばない", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", 金額: "2", 区分: "A", 件名: "one" }),
+  ] });
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "区分", label: "区分", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return { enable: true, states: ["処理中"] };
+  };
+
+  await execute(
+    "SELECT $id FROM APP99303 WHERE 金額 > 1 AND 区分 IN ('A') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "status-candidate-two-stage" }
+  );
+  expect(statusCalls).toBe(0);
+
+  await execute(
+    "SELECT $id FROM APP99303 WHERE ステータス IN ('') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "status-empty-not-candidate" }
+  );
+  expect(statusCalls).toBe(0);
+});
+
+test("FULL_SCAN: status.json の reject をレコード取得前に伝播する", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  client.getProcessStatuses = async () => {
+    throw new Error("status metadata failed");
+  };
+
+  await expect(execute(
+    "SELECT $id FROM APP99304 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "status-pushdown-reject" }
+  )).rejects.toThrow("status metadata failed");
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("FULL_SCAN: status.json は同一APP/profileの同時実行でも1回だけ取得する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "処理中", 件名: "one" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return { enable: true, states: ["処理中"] };
+  };
+  const sql = "SELECT $id FROM APP99305 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'";
+
+  await Promise.all([
+    execute(sql, client, { cacheContext: "status-cache-profile-a" }),
+    execute(sql, client, { cacheContext: "status-cache-profile-a" }),
+  ]);
+  expect(statusCalls).toBe(1);
+});
+
+test("FULL_SCAN JOIN: STATUS候補のある側だけ status.json を取得して押し下げる", async () => {
+  const client = makeClient({ recordsByApp: {
+    99306: [makeTypedRecord({ $id: "1", 顧客ID: "C1", ステータス: "処理中" })],
+    99307: [makeTypedRecord({ $id: "2", 顧客ID: "C1", 区分: "A" })],
+  } });
+  client.getFields = async (appId) => appId === 99306
+    ? [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    ]
+    : [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "区分", label: "区分", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+    ];
+  const statusApps: number[] = [];
+  client.getProcessStatuses = async (appId) => {
+    statusApps.push(appId);
+    return { enable: true, states: ["処理中"] };
+  };
+
+  const result = await execute(
+    "SELECT a.$id FROM APP99306 a JOIN APP99307 b ON a.顧客ID = b.顧客ID " +
+      "WHERE a.ステータス IN ('処理中') AND b.区分 IN ('A')",
+    client,
+    { cacheContext: "status-pushdown-join" }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(statusApps).toEqual([99306]);
+  expect(client.getCalls.find((call) => call.app === 99306)?.query).toContain('ステータス in ("処理中")');
+  expect(client.getCalls.find((call) => call.app === 99307)?.query).toContain('区分 in ("A")');
+});
 
 test("FULL_SCAN: 選択系候補の型メタ取得失敗をレコード取得前に伝播する", async () => {
   const client = makeClient();
@@ -2817,6 +2981,7 @@ function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): K
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
     async getFields() { return []; },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
     maxActive: () => max,
   };
 }

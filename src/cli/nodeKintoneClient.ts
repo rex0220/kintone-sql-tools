@@ -4,6 +4,7 @@ import type {
   KintoneDeleteParams,
   KintoneFieldInfo,
   KintonePostParams,
+  KintoneProcessStatuses,
   KintonePutParams,
   PageFetchParams,
 } from "../core";
@@ -228,6 +229,20 @@ export function createNodeKintoneClient(
       );
 
       return flattenFormFieldProperties(res.properties);
+    },
+
+    async getProcessStatuses(appId: number): Promise<KintoneProcessStatuses> {
+      const qs = new URLSearchParams();
+      qs.set("app", String(appId));
+      qs.set("lang", "user");
+      const res = await requestJson<{
+        enable: boolean;
+        states: Record<string, { name: string }> | null;
+      }>(`${apiBasePath}/app/status.json?${qs.toString()}`, { method: "GET" }, appId);
+      return {
+        enable: res.enable,
+        states: Object.values(res.states ?? {}).map((state) => state.name),
+      };
     },
   };
 }

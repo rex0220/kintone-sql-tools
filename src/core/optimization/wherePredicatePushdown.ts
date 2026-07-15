@@ -98,6 +98,7 @@ const SELECTION_IN_FIELD_TYPES = new Set([
   "RADIO_BUTTON",
   "CHECK_BOX",
   "MULTI_SELECT",
+  "STATUS",
 ]);
 
 function isSelectionInComparison(

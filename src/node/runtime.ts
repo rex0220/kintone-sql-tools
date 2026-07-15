@@ -385,6 +385,12 @@ export async function createKsqlRuntime(
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
       return routed.getFields(binding.appId);
     },
+    getProcessStatuses: (appId) => {
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, appId);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
+      if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
+      return routed.getProcessStatuses(binding.appId);
+    },
     getApps: () => defaultClient.getApps(),
   };
 

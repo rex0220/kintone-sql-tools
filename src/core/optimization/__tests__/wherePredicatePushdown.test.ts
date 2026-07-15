@@ -124,7 +124,7 @@ test("選択系フィールドは型メタだけでは押し下げない", () =>
   expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();
 });
 
-test.each(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"])(
+test.each(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT", "STATUS"])(
   "%s の IN / NOT IN は全値が実在するときだけ押し下げる",
   (fieldType) => {
     const fieldTypes = new Map([["選択", fieldType]]);
@@ -148,7 +148,7 @@ test.each([
   })).toBeNull();
 });
 
-test.each(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT", "STATUS"])(
+test.each(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT", "STATUS_ASSIGNEE"])(
   "%s は選択肢集合があっても押し下げない",
   (fieldType) => {
     const expr = where("SELECT * FROM APP100 WHERE 選択 IN ('A')");

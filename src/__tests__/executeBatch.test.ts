@@ -66,6 +66,7 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
     async getFields() { return []; },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 

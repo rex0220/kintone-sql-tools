@@ -13,6 +13,7 @@ function makeClient(): KintoneClient {
     async deleteRecords() { },
     async getApps() { return []; },
     async getFields() { return []; },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 
@@ -1221,6 +1222,7 @@ describe("MCP tools", () => {
       async deleteRecords() { },
       async getApps() { return []; },
       async getFields() { return []; },
+      async getProcessStatuses() { return { enable: false, states: [] }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
@@ -1350,6 +1352,7 @@ describe("MCP tools", () => {
         async deleteRecords() { },
         async getApps() { return []; },
         async getFields() { return []; },
+        async getProcessStatuses() { return { enable: false, states: [] }; },
       };
       const createRuntime = async (
         _serverOptions: KsqlRuntimeServerOptions,
@@ -1441,6 +1444,7 @@ describe("MCP tools", () => {
       async deleteRecords() { },
       async getApps() { return []; },
       async getFields() { return []; },
+      async getProcessStatuses() { return { enable: false, states: [] }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
@@ -1505,6 +1509,7 @@ describe("MCP tools", () => {
       async deleteRecords() { calls.del += 1; },
       async getApps() { return []; },
       async getFields() { return []; },
+      async getProcessStatuses() { return { enable: false, states: [] }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,

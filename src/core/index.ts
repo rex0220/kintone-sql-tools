@@ -21,6 +21,7 @@ export type {
   KintoneClient,
   KintoneAppInfo,
   KintoneFieldInfo,
+  KintoneProcessStatuses,
   BatchExecuteOptions,
   BatchExecuteResult,
   BatchStatementResult,
