@@ -16,6 +16,7 @@ import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
+import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
@@ -342,6 +343,8 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "SET_VARIABLE":
       throw new Error("ArgumentError: SET variable requires a batch.");
+    case "DECLARE_VARIABLE":
+      throw new Error("ArgumentError: DECLARE variable requires a batch.");
     case "ASSERT":        return executeAssert(stmt, client, options, cacheContext);
   }
 }
@@ -359,6 +362,8 @@ async function executeParsedStatement(
 export const TEMP_TABLE_MAX_ROWS = 10_000;
 
 export interface BatchExecuteOptions extends ExecuteOptions {
+  /** DECLARE されたバッチ変数の外部注入値（キーは @ なし、大文字小文字を区別しない） */
+  variables?: Readonly<Record<string, string>>;
   /** 実行時エラー後も後続文を実行する（read-only バッチのみ指定可。既定 false = fail-fast） */
   continueOnError?: boolean;
   /** バッチ合計のタイムアウト（ミリ秒）。到達時: 実行中の文 = error(TimeoutError)、未実行の文 = skipped("timeout") */
@@ -424,6 +429,9 @@ export async function executeBatch(
 ): Promise<BatchExecuteResult> {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
+  // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
+  const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
+  const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
 
   if (options.continueOnError && analysis.containsDml) {
     throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
@@ -486,10 +494,10 @@ export async function executeBatch(
       const remaining = deadline !== null ? deadline - Date.now() : null;
       // confirm に文コンテキストを注入する（呼び出し回数からの文番号推測は
       // INSERT VALUES 非経由・0 件 UPSERT スキップで崩れるため、ここで束縛する）
-      const userConfirm = options.confirm;
+      const userConfirm = batchOptions.confirm;
       const stmtOptions: BatchExecuteOptions = userConfirm
         ? {
-          ...options,
+          ...batchOptions,
           confirm: (count, operation) => userConfirm(count, operation, {
             statementIndex: i,
             statementCount: statements.length,
@@ -497,7 +505,7 @@ export async function executeBatch(
             targetAppId: info.targetAppId,
           }),
         }
-        : options;
+        : batchOptions;
       const outcome = await runWithDeadline(
         executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
@@ -512,7 +520,7 @@ export async function executeBatch(
         // ASSERT 失敗は continueOnError を無視して常に停止する（設計判断 D3:
         // ASSERT は後続実行のゲートであり、続行を許すと存在意義が消える）
         aborted = "assertion";
-      } else if (info.statementType === "SET_VARIABLE") {
+      } else if (info.statementType === "SET_VARIABLE" || info.statementType === "DECLARE_VARIABLE") {
         // 変数値が欠けた状態で後続を実行しない（continueOnError より優先）
         aborted = "fail-fast";
       } else if (!options.continueOnError) {
@@ -561,6 +569,17 @@ async function executeBatchStatement(
       }
     } else {
       variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr));
+    }
+    return {};
+  }
+
+  if (stmt.type === "DECLARE_VARIABLE") {
+    const injected = options.variables ?? {};
+    if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
+      variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
+    } else {
+      const value = evaluateScalarExpr(stmt.default);
+      variables.set(stmt.name, { type: "string", value: String(value.value) });
     }
     return {};
   }
@@ -3119,12 +3138,16 @@ export interface BatchStatementPlan {
 }
 
 /** `;` 区切りバッチの全文プランを生成する（静的検証込み。実行はしない） */
-export function buildBatchExplainPlans(sql: string): {
+export function buildBatchExplainPlans(
+  sql: string,
+  injectedVariables?: Readonly<Record<string, string>>
+): {
   statementCount: number;
   statements: BatchStatementPlan[];
 } {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+  validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = new Map<string, VarValue>();
   return {
     statementCount: statements.length,
@@ -3139,7 +3162,7 @@ export function buildBatchExplainPlans(sql: string): {
         type: analysis.statements[i].statementType,
         plan: buildBatchStatementPlan(planStmt, analysis.statements[i]),
       };
-      if (stmt.type === "SET_VARIABLE") {
+      if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
         variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
       }
@@ -3181,6 +3204,12 @@ function buildBatchStatementPlan(
     return [
       `SET @${stmt.name} = <scalar expression>`,
       "  value:         実行時に1回評価（バッチ内定数・結果メタデータには非公開）",
+    ];
+  }
+  if (stmt.type === "DECLARE_VARIABLE") {
+    return [
+      `DECLARE @${stmt.name} = <default scalar expression>`,
+      "  value:         外部注入があれば採用、なければ既定値を実行時に1回評価（値は非公開）",
     ];
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];

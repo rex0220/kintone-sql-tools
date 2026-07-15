@@ -166,8 +166,9 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   // 単文入力の CREATE / DROP TEMP TABLE は無意味なため拒否（仕様 §4.3）
   if (statements.length === 1) {
     const t = statements[0].type;
-    if (t === "SET_VARIABLE") {
-      throw new BatchAnalysisError("ArgumentError: SET variable requires a batch.", 0);
+    if (t === "SET_VARIABLE" || t === "DECLARE_VARIABLE") {
+      const verb = t === "SET_VARIABLE" ? "SET" : "DECLARE";
+      throw new BatchAnalysisError(`ArgumentError: ${verb} variable requires a batch.`, 0);
     }
     if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
       const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
@@ -206,7 +207,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       def.referencedBy.push(index);
     }
 
-    if (stmt.type === "SET_VARIABLE") {
+    if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
       if (variableDefs.has(stmt.name)) {
         throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
       }

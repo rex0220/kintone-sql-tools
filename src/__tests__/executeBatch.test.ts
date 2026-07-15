@@ -80,6 +80,37 @@ test("SET の数値式を ASSERT と WHERE へ型付きリテラルとして置�
   expect(client.getCalls[0].query).toContain("売上 > 14");
 });
 
+test("DECLARE は既定値を使い、外部注入を大小無視で上書きする", async () => {
+  const sql = "DECLARE @min = '100'; SELECT 顧客名 FROM APP100 WHERE 売上 > @min";
+  const defaultClient = makeClient({ recordsByApp: { 100: APP1 } });
+  await executeBatch(sql, defaultClient);
+  expect(defaultClient.getCalls[0].query).toContain('売上 > "100"');
+
+  const injectedClient = makeClient({ recordsByApp: { 100: APP1 } });
+  await executeBatch(sql, injectedClient, { variables: { Min: "300" } });
+  expect(injectedClient.getCalls[0].query).toContain('売上 > "300"');
+});
+
+test("DECLARE の未宣言注入・重複キー・SET への注入を実行前に拒否する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  await expect(executeBatch(
+    "DECLARE @x = 'A'; SELECT * FROM APP100 WHERE 顧客名 = @x",
+    client,
+    { variables: { typo: "A" } }
+  )).rejects.toThrow(/@typo is not declared/);
+  expect(client.getCalls).toHaveLength(0);
+  await expect(executeBatch(
+    "DECLARE @x = 'A'; SELECT * FROM APP100 WHERE 顧客名 = @x",
+    client,
+    { variables: { x: "A", X: "B" } }
+  )).rejects.toThrow(/specified more than once/);
+  await expect(executeBatch(
+    "SET @x = 'A'; SELECT * FROM APP100 WHERE 顧客名 = @x",
+    client,
+    { variables: { x: "B" } }
+  )).rejects.toThrow(/@x is not declared/);
+});
+
 test("SET の文字列関数を UPDATE SET と WHERE に置換する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const r = await executeBatch(

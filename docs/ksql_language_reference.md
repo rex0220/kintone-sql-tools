@@ -1636,7 +1636,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | DML を含むバッチ（複文） | 対応（CLI / MCP は v1.4.0、プラグインは v1.9.0。`ksql_mutate` / CLI `--allow-dml` / プラグインは文ごとの確認ダイアログ。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブル)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
 | `ASSERT` の複合条件（`AND` / `OR`） | 非対応（複数の `ASSERT` 文に分けて書く。→ [§26](#26-assert)） |
-| バッチ変数の高度な利用 | `SET @x = (SELECT ...)` のスカラーサブクエリ代入は **v2.3.0（Phase 1b）で対応**。`DECLARE` 外部注入・`NULL` 代入・1 変数が複数値を持つ配列展開（`IN (@list)`）・サブクエリ結果への算術は現時点で非対応（`IN (@a, @b)` のスカラー変数並べは対応。→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)） |
+| バッチ変数の高度な利用 | `SET @x = (SELECT ...)` は **v2.3.0**、`DECLARE @x = default` と CLI/MCP 外部注入は **v2.4.0** で対応。`NULL` 代入・1 変数が複数値を持つ配列展開（`IN (@list)`）・サブクエリ結果への算術は現時点で非対応（→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)） |
 | 書き込み系 API（POST / PUT / DELETE）の自動リトライ | 非対応（応答喪失時の二重実行を避けるため。リトライは GET 系限定 — 対象: 408/429/502/503/504。必要なら呼び出し側で冪等な再実行（UPSERT 等）を設計する） |
 | `DELETE` での `APP@profile`（CLI 拡張） | 未対応（`ArgumentError: @profile is not supported for DELETE yet.`） |
 | **プロセス管理のステータス・作業者の UPDATE** | **対象外**（`/k/v1/records/status.json` が必要なため） |
@@ -1867,7 +1867,20 @@ UPDATE APP100 SET 対象件数メモ = @cnt WHERE 処理ステータス IN ('未
 | エラー | 評価失敗（0 行・複数行・複数列・API エラー）は `ArgumentError` で、**`continueOnError` に関わらずバッチを停止**（fail-fast。`ASSERT` 失敗の停止＝`assertion` とは区別） |
 | EXPLAIN | バッチ EXPLAIN が `SET @x = (SELECT ...)` のサブクエリ計画（APP／一時テーブル参照・1 回評価）を表示 |
 
-**現時点で非対応（今後のフェーズ）**: 外部パラメータ注入（`DECLARE`）・`NULL` の代入・**1 つの変数が複数値を持つ配列展開**（`SET @l = ('A','B'); IN (@l)`。※`IN (@a, @b)` のようにスカラー変数を並べるのは対応）・`SET` 右辺での別変数参照（`SET @b = @a + 1`）・スカラーサブクエリ結果への算術・`SELECT` の列での変数参照・関数引数への `NOW()` 直接指定（整形バッチ ID）・`LOGINUSER()`（実行環境共通のログインユーザー解決が未整備のため。SET では使用不可）。
+#### 外部パラメータ注入 `DECLARE @x = default`（v2.4.0・Phase 1c）
+
+```sql
+DECLARE @since = '2026-01-01';
+SELECT * FROM APP100 WHERE 登録日 >= @since;
+```
+
+- 未注入時は既定値を実行時に1回評価。CLI の `--var since=2026-07-01`、MCP `variables: { "since": "2026-07-01" }` で文字列値を上書きできる。注入時は既定値式を評価しない。
+- プラグインでも `DECLARE` 文は実行できるが注入 UI はなく、常に既定値を使う。
+- キーは `@` なし・大文字小文字を区別しない。未宣言キー、重複、不正名は API 呼び出しや DML より前にエラー。`SET` で定義した名前は注入対象にならない。
+- 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術。サブクエリ、別変数、`NULL`、`LOGINUSER()` は不可。採用値は文字列として束縛する。
+- `DECLARE` と使用文を含む2文以上のバッチが必要。値は EXPLAIN、結果メタデータに表示しない。CLI `--var` はプロセス一覧やシェル履歴に残り得るため秘密情報には使わない。
+
+**現時点で非対応（今後のフェーズ）**: `NULL` の代入・**1 つの変数が複数値を持つ配列展開**（`SET @l = ('A','B'); IN (@l)`。※`IN (@a, @b)` のようにスカラー変数を並べるのは対応）・`SET` 右辺での別変数参照（`SET @b = @a + 1`）・スカラーサブクエリ結果への算術・`SELECT` の列での変数参照・関数引数への `NOW()` 直接指定（整形バッチ ID）・`LOGINUSER()`（実行環境共通のログインユーザー解決が未整備のため）。
 
 > **`APP@profile` との併用**: `SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now` のように、`@profile`（アプリ指定）と `@変数` は同居できます（CLI / MCP が profile だけを先に正規化するため混同しません）。
 

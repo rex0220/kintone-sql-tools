@@ -182,6 +182,12 @@ SELECT * FROM #before;
     SET @cnt = (SELECT COUNT(*) FROM #tgt);
     ASSERT @cnt BETWEEN 1 AND 10000;
     ```
+- **定型バッチの外部パラメータ化（v2.4.0＝Phase 1c）**: SQL 側で既定値を宣言し、CLI/MCP だけ必要時に差し替える。
+  ```sql
+  DECLARE @since = '2026-01-01';
+  SELECT 顧客No FROM APP100 WHERE 登録日 >= @since;
+  ```
+  CLI は `--var since=2026-07-01`、MCP は `variables: { "since": "2026-07-01" }`。プラグインは既定値で同じ SQL を実行する。`--var` は秘密情報には使用しない。
 
 変数の詳細・制約は言語リファレンス [§25 バッチ変数](ksql_language_reference.md#25-バッチ実行と一時テーブル) を参照。
 

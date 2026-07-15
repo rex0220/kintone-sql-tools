@@ -107,6 +107,21 @@ test("SET RHS のフィールド・他変数・NULLを拒否する", () => {
   expect(() => parseOne("SET @list = ('A', 'B')")).toThrow(ParseError);
 });
 
+test("DECLARE はソフトキーワードとして既定値をパースし、既存フィールド名を保護する", () => {
+  expect(parseAll("DECLARE @Since = '2026-01-01'; SELECT * FROM APP100 WHERE 登録日 >= @since")[0])
+    .toEqual({ type: "DECLARE_VARIABLE", name: "since", default: { type: "STRING", value: "2026-01-01" } });
+  expect(parseOne("SELECT declare FROM APP100")).toMatchObject({ type: "SELECT" });
+});
+
+test("DECLARE の既定値はサブクエリ・変数・LOGINUSER を拒否する", () => {
+  expect(() => parseAll("DECLARE @x = (SELECT COUNT(*) FROM APP100); ASSERT @x > 0"))
+    .toThrow(/スカラーサブクエリ/);
+  expect(() => parseAll("DECLARE @x = @y; ASSERT @x = 'x'"))
+    .toThrow(/他の変数/);
+  expect(() => parseAll("DECLARE @x = LOGINUSER(); ASSERT @x = 'x'"))
+    .toThrow(/DECLARE の右辺で LOGINUSER/);
+});
+
 // ----------------------------------------------------------------
 // CREATE TEMP TABLE / DROP TEMP TABLE
 // ----------------------------------------------------------------
