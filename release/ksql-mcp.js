@@ -36774,7 +36774,7 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
   const warnings = /* @__PURE__ */ new Set();
   const onLimit2 = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useSingleGet = params.query.includes("limit") || stmt.limit !== null && stmt.limit <= 500;
+  const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
   let records;
   if (useSingleGet) {
     const res = await client.getRecords({
@@ -40886,7 +40886,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.10.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.10.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

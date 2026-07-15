@@ -1,9 +1,16 @@
-ksql 配布パッケージ (v2.10.0)
+ksql 配布パッケージ (v2.10.1)
 
-1. ksql-plugin-v2.10.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.10.1.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.10.1: SIMPLE SELECT の LIMIT > 500 が API エラー(GAIA_QU01)になる不具合を修正。
+- 単発 GET/ページング判定を AST の LIMIT 値(<=500)で行うよう修正。LIMIT > 500 は
+  fetchAll で 500 件ずつページングし取得後に LIMIT を適用。LIMIT <= 500 は単発 GET 維持。
+- 注意: fetchAll は一致を maxRecords まで取得してから LIMIT を適用するため、
+  LIMIT > 500 は一致総数が maxRecords 以下である必要がある(取得打ち切り最適化は別課題)。
+- 詳細は CHANGELOG.md を参照。
 
 v2.10.0: 検索打ち切り検出と FROM なし SELECT 実体化の修正(後方互換)。
 - FROM なし SELECT/UNION(SELECT 'A' UNION ALL SELECT 'B' 等)を CREATE TEMP TABLE AS で

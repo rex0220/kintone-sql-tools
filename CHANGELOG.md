@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.10.1（2026-07-16）
+
+### 修正（バグ）
+
+- **SIMPLE SELECT の `LIMIT > 500` が kintone API エラー（`GAIA_QU01`）になる不具合を修正**。単発 GET かページングかの判定が「変換後クエリに `limit` を含むか」で行われており、`LIMIT` を明示すると値にかかわらず単発 GET になっていた。kintone の `limit` 上限は 500 のため、`LIMIT 501` 以上が不正なクエリとして送られエラーになっていた。判定を **AST の `LIMIT` 値（`<= 500`）**に修正し、`LIMIT > 500` は `fetchAll` で 500 件ずつページングして取得後に `LIMIT` を適用するようにした。
+  - `LIMIT <= 500` は従来どおり単発 GET。`FULL_SCAN`・`ORDER BY`・`OFFSET`・`maxRecords` の挙動は不変。
+  - **注意**: `fetchAll` は一致レコードを（`maxRecords` まで）取得してから `LIMIT` を適用するため、`LIMIT > 500` を使う場合は一致総数が `maxRecords` 以下である必要がある（取得打ち切りの最適化は別課題）。
+
 ## v2.10.0（2026-07-15）— 検索打ち切り検出と FROM なし SELECT 実体化の修正
 
 ### 修正（バグ）
