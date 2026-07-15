@@ -158,7 +158,7 @@ export class RequestGate {
 
 /**
  * KintoneClient の全メソッドをゲート経由にする。
- * GET 系（getRecords / getApps / getFields）はリトライ付き、
+ * GET 系（getRecords / getApps / getFields / getProcessStatuses）はリトライ付き、
  * 書き込み系（postRecords / putRecords / deleteRecords）はセマフォのみ。
  */
 export function withRequestGate(client: KintoneClient, gate: RequestGate): KintoneClient {
@@ -166,6 +166,7 @@ export function withRequestGate(client: KintoneClient, gate: RequestGate): Kinto
     getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
     getApps: () => gate.runReadOnly(() => client.getApps()),
     getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
+    getProcessStatuses: (appId) => gate.runReadOnly(() => client.getProcessStatuses(appId)),
     postRecords: (params) => gate.runMutation(() => client.postRecords(params)),
     putRecords: (params) => gate.runMutation(() => client.putRecords(params)),
     deleteRecords: (params) => gate.runMutation(() => client.deleteRecords(params)),

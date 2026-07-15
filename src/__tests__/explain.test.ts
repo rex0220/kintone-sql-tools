@@ -12,6 +12,7 @@ function makeClient(): KintoneClient {
     async deleteRecords() { },
     async getApps()     { return []; },
     async getFields()   { return []; },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 
@@ -114,6 +115,15 @@ test("EXPLAIN FULL_SCAN — 選択系 IN は実行時確認前の候補として
   const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
   expect(query).toContain("(全件取得)");
   expect(candidate).toContain('選択 in ("A","B")');
+  expect(candidate).toContain("実行時の型・実在確認待ち");
+});
+
+test("EXPLAIN FULL_SCAN — STATUS IN もAPIなしで候補表示する", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id FROM APP100 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'"
+  );
+  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
+  expect(candidate).toContain('ステータス in ("処理中")');
   expect(candidate).toContain("実行時の型・実在確認待ち");
 });
 

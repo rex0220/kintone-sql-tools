@@ -184,6 +184,7 @@ test("書き込み系は 429 でもリトライしない", async () => {
 
 function makeFailThenOkClient(failures: { getRecords: number }) {
   let getRecordsCalls = 0;
+  let processStatusCalls = 0;
   let postCalls = 0;
   const client: KintoneClient = {
     async getRecords() {
@@ -199,8 +200,13 @@ function makeFailThenOkClient(failures: { getRecords: number }) {
     async deleteRecords() { },
     async getApps() { return []; },
     async getFields() { return []; },
+    async getProcessStatuses() {
+      processStatusCalls += 1;
+      if (processStatusCalls === 1) throw httpError(429);
+      return { enable: true, states: ["In Progress"] };
+    },
   };
-  return { client, calls: () => ({ getRecordsCalls, postCalls }) };
+  return { client, calls: () => ({ getRecordsCalls, postCalls, processStatusCalls }) };
 }
 
 test("withRequestGate: GET 系はリトライ付き、書き込み系はリトライなし", async () => {
@@ -212,6 +218,12 @@ test("withRequestGate: GET 系はリトライ付き、書き込み系はリト�
   const res = await gated.getRecords({ app: 1, query: "", fields: [] });
   expect(res.records).toEqual([]);
   expect(calls().getRecordsCalls).toBe(2); // 1回失敗 → リトライで成功
+
+  await expect(gated.getProcessStatuses(1)).resolves.toEqual({
+    enable: true,
+    states: ["In Progress"],
+  });
+  expect(calls().processStatusCalls).toBe(2);
 
   await expect(gated.postRecords({ app: 1, records: [] })).rejects.toThrow(/429/);
   expect(calls().postCalls).toBe(1); // リトライしない

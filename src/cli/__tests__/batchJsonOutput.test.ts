@@ -31,6 +31,7 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
     async deleteRecords() { },
     async getApps() { return []; },
     async getFields() { return []; },
+    async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
 

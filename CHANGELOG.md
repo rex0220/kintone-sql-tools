@@ -2,6 +2,21 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.7.0（2026-07-15）— STATUS（ワークフロー状態）の IN 押し下げ
+
+### 追加（最適化）
+
+- **STATUS（プロセス管理の状態）の `IN` / `NOT IN` プレフィルタ押し下げ（述語分割 第2段・フェーズ2b）**。v2.6.0 で対象外としていた STATUS を、**プロセス管理設定 API による状態検証付き**で kintone の事前絞り込みに使う。
+  ```sql
+  SELECT 件名 FROM APP100 WHERE ステータス IN ('処理中','保留') AND 件名 LIKE '%至急%'
+  -- ステータス IN (...) を kintone に押し下げ → 該当状態だけ取得 → LIKE は JS 評価
+  ```
+  - **安全性（2 条件）**: プロセス管理が **`enable=true`** かつ **全 IN 値が実在状態名**のときだけ押し下げる。プロセス管理無効（`GAIA_ST02`）・非実在状態（`GAIA_IQ10`）・空文字は**押し下げず** JavaScript 評価のみ（kintone のクエリエラー化を回避）。
+  - **状態一覧**: `GET /k/v1/app/status.json?lang=user` の `enable` と状態名（`states.*.name`）を実在検証に使う。**実行ユーザーの表示言語**で状態名を取得するため、多言語アプリでも `IN` リテラルと一致する。**フィールドコードに依存せず**、フィールド型が `STATUS` のフィールドを対象にする（`ステータス`／`Status`／任意のカスタムコードで動作）。
+  - **API 消費の抑制**: 型メタ確定後の 2 段階判定で、**IN 候補に STATUS フィールドがあるアプリだけ** status.json を取得する（NUMBER 比較・選択系 IN しかないアプリでは呼ばない）。APP/profile 別にキャッシュし、同時実行でも 1 回。論理アプリ参照（`LAPP_`）も物理 APP＋profile へ正しくルーティングする。
+  - **対象外**: `STATUS_ASSIGNEE`（作業者・USER 系と同じくディレクトリ照合のため非対象）。フェーズ2a の 4 型（DROP_DOWN/RADIO/CHECK_BOX/MULTI_SELECT）・数値・`$id` の押し下げは不変。
+  - `EXPLAIN` は STATUS IN も `pushdown candidate`（実行時の型・実在確認待ち）行に表示する（API 非呼び出し）。
+
 ## v2.6.0（2026-07-15）— 選択系 IN 押し下げと空セル評価
 
 ### 追加（最適化）

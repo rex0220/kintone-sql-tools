@@ -302,6 +302,53 @@ describe("logical app runtime context and token routing", () => {
     expect(new Headers(init?.headers).get("X-Cybozu-API-Token")).toBe("snapshot-token");
   });
 
+  test("logical status routing は physical app ID と lang=user を使い states.name を返す", async () => {
+    writeLogicalConfig();
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({
+        enable: true,
+        states: { internal: { name: "In Progress" } },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const context = resolveSqlContext({ configPath }, "SELECT * FROM LAPP_ORDERS", "prod");
+    const [binding] = [...context.bindings.values()];
+    const runtime = await createKsqlRuntime(
+      { configPath },
+      { sql: "SELECT * FROM LAPP_ORDERS", profile: "prod", sqlContext: context }
+    );
+
+    await expect(runtime.client.getProcessStatuses(binding.mappedAppId)).resolves.toEqual({
+      enable: true,
+      states: ["In Progress"],
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("app/status.json?app=1234&lang=user");
+    expect(new Headers(init?.headers).get("X-Cybozu-API-Token")).toBe("snapshot-token");
+  });
+
+  test("status.json の states=null はクライアント境界で空配列へ正規化する", async () => {
+    writeLogicalConfig();
+    jest.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ enable: false, states: null }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const context = resolveSqlContext({ configPath }, "SELECT * FROM LAPP_ORDERS", "prod");
+    const [binding] = [...context.bindings.values()];
+    const runtime = await createKsqlRuntime(
+      { configPath },
+      { sql: "SELECT * FROM LAPP_ORDERS", profile: "prod", sqlContext: context }
+    );
+    await expect(runtime.client.getProcessStatuses(binding.mappedAppId)).resolves.toEqual({
+      enable: false,
+      states: [],
+    });
+  });
+
   test("multi-profile physical routing も実 API 直前に profileごとの physical token を使う", async () => {
     writeFileSync(configPath, JSON.stringify({
       defaultProfile: "dev",
