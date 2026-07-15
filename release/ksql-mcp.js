@@ -1811,7 +1811,7 @@ var require_code2 = __commonJS({
       }
     }
     exports2.validateArray = validateArray;
-    function validateUnion(cxt) {
+    function validateUnion2(cxt) {
       const { gen, schema, keyword, it } = cxt;
       if (!Array.isArray(schema))
         throw new Error("ajv implementation error");
@@ -1833,7 +1833,7 @@ var require_code2 = __commonJS({
       }));
       cxt.result(valid, () => cxt.reset(), () => cxt.error(true));
     }
-    exports2.validateUnion = validateUnion;
+    exports2.validateUnion = validateUnion2;
   }
 });
 
@@ -31007,6 +31007,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["IS", "IS" /* IS */],
   ["NULL", "NULL" /* NULL */],
   ["LIKE", "LIKE" /* LIKE */],
+  ["KLIKE", "KLIKE" /* KLIKE */],
   ["IN", "IN" /* IN */],
   ["BETWEEN", "BETWEEN" /* BETWEEN */],
   ["TODAY", "TODAY" /* TODAY */],
@@ -32532,7 +32533,7 @@ var Parser = class {
     }
     return false;
   }
-  // 比較演算子: =, !=, <>, >, <, >=, <=, LIKE, IN, IS NULL
+  // 比較演算子: =, !=, <>, >, <, >=, <=, LIKE, KLIKE, IN, IS NULL
   parseCompareExpr() {
     if (this.peek().kind === "(" /* LPAREN */ && !this.isArithParen()) {
       this.advance();
@@ -32568,8 +32569,12 @@ var Parser = class {
         const pattern = this.parseSqlValue();
         return { type: "BINARY", op: "NOT_LIKE", left: field, right: pattern };
       }
+      if (this.consume("KLIKE" /* KLIKE */)) {
+        const pattern = this.parseKlikePattern();
+        return { type: "BINARY", op: "NOT_KLIKE", left: field, right: pattern };
+      }
       throw new ParseError(
-        "NOT \u306E\u5F8C\u306B\u306F IN \u307E\u305F\u306F LIKE \u304C\u5FC5\u8981\u3067\u3059",
+        "NOT \u306E\u5F8C\u306B\u306F IN\u3001LIKE\u3001KLIKE \u306E\u3044\u305A\u308C\u304B\u304C\u5FC5\u8981\u3067\u3059",
         this.peek()
       );
     }
@@ -32578,6 +32583,10 @@ var Parser = class {
       const right2 = this.parseInListOrSubquery();
       this.expect(")" /* RPAREN */);
       return { type: "BINARY", op: "IN", left: field, right: right2 };
+    }
+    if (this.consume("KLIKE" /* KLIKE */)) {
+      const pattern = this.parseKlikePattern();
+      return { type: "BINARY", op: "KLIKE", left: field, right: pattern };
     }
     const op = this.parseCompareOp();
     const right = this.parseSqlValue();
@@ -32604,10 +32613,26 @@ var Parser = class {
         return "LIKE";
       default:
         throw new ParseError(
-          "\u6BD4\u8F03\u6F14\u7B97\u5B50\uFF08=, !=, >, <, >=, <=, LIKE, IN, IS\uFF09\u304C\u5FC5\u8981\u3067\u3059",
+          "\u6BD4\u8F03\u6F14\u7B97\u5B50\uFF08=, !=, >, <, >=, <=, LIKE, KLIKE, IN, IS\uFF09\u304C\u5FC5\u8981\u3067\u3059",
           tok
         );
     }
+  }
+  /** KLIKE / NOT KLIKE の右辺。kintone キーワードは文字列値だけを受け付ける。 */
+  parseKlikePattern() {
+    const tok = this.peek();
+    if (tok.kind === "STRING" /* STRING */) {
+      this.advance();
+      return { type: "STRING", value: tok.value };
+    }
+    if (tok.kind === "VARIABLE" /* VARIABLE */) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
+    }
+    throw new ParseError(
+      "KLIKE / NOT KLIKE \u306E\u53F3\u8FBA\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u307E\u305F\u306F\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059",
+      tok
+    );
   }
   // WHERE / HAVING の左辺
   // - 文字列・数値関数: UPPER(f) / LENGTH(f) / ROUND(f, 2) ...
@@ -33247,238 +33272,6 @@ function getInsertValuesCount(stmt) {
   return Array.isArray(obj.values) ? obj.values.length : null;
 }
 
-// src/core/batch.ts
-var MAX_TEMP_TABLES = 16;
-var MAX_BATCH_VARIABLES = 64;
-var BatchAnalysisError = class extends Error {
-  constructor(message, statementIndex) {
-    super(message);
-    this.statementIndex = statementIndex;
-  }
-};
-function collectRefs(node, tempRefs, appIds) {
-  if (Array.isArray(node)) {
-    for (const v of node) collectRefs(v, tempRefs, appIds);
-    return;
-  }
-  if (node !== null && typeof node === "object") {
-    const obj = node;
-    const cte = obj["cteName"];
-    if (typeof cte === "string" && cte.startsWith("#")) tempRefs.add(cte);
-    const appId = obj["appId"];
-    if (typeof appId === "number" && appId > 0) appIds.add(appId);
-    for (const v of Object.values(obj)) collectRefs(v, tempRefs, appIds);
-  }
-}
-function collectVariableRefs(node, refs) {
-  if (Array.isArray(node)) {
-    for (const v of node) collectVariableRefs(v, refs);
-    return;
-  }
-  if (node !== null && typeof node === "object") {
-    const obj = node;
-    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
-      refs.add(obj["name"]);
-      return;
-    }
-    for (const v of Object.values(obj)) collectVariableRefs(v, refs);
-  }
-}
-function analyzeBatch(statements) {
-  if (statements.length === 0) {
-    throw new BatchAnalysisError("ArgumentError: SQL is empty.", 0);
-  }
-  if (statements.length === 1) {
-    const t = statements[0].type;
-    if (t === "SET_VARIABLE" || t === "DECLARE_VARIABLE") {
-      const verb = t === "SET_VARIABLE" ? "SET" : "DECLARE";
-      throw new BatchAnalysisError(`ArgumentError: ${verb} variable requires a batch.`, 0);
-    }
-    if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
-      const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
-      throw new BatchAnalysisError(
-        `ArgumentError: ${verb} requires a batch (temp tables are batch-scoped).`,
-        0
-      );
-    }
-  }
-  const defined = /* @__PURE__ */ new Map();
-  const createdOrder = [];
-  const results = [];
-  const variableDefs = /* @__PURE__ */ new Map();
-  const variableOrder = [];
-  statements.forEach((stmt, index) => {
-    const statementType = getStatementType(stmt);
-    const created = [];
-    const dropped = [];
-    const refs = /* @__PURE__ */ new Set();
-    const stmtAppIds = /* @__PURE__ */ new Set();
-    const dependsOn = /* @__PURE__ */ new Set();
-    const variableRefs = /* @__PURE__ */ new Set();
-    collectVariableRefs(stmt, variableRefs);
-    for (const name of variableRefs) {
-      const def = variableDefs.get(name);
-      if (def === void 0) {
-        throw new BatchAnalysisError(
-          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
-          index
-        );
-      }
-      def.referencedBy.push(index);
-    }
-    if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
-      if (variableDefs.has(stmt.name)) {
-        throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
-      }
-      variableDefs.set(stmt.name, { index, referencedBy: [] });
-      variableOrder.push(stmt.name);
-      if (variableOrder.length > MAX_BATCH_VARIABLES) {
-        throw new BatchAnalysisError(
-          `ParseError: batch exceeds ${MAX_BATCH_VARIABLES} variables.`,
-          index
-        );
-      }
-    }
-    if (stmt.type === "CREATE_TEMP_TABLE") {
-      collectRefs(stmt.query, refs, stmtAppIds);
-    } else if (stmt.type === "DROP_TEMP_TABLE") {
-    } else {
-      collectRefs(stmt, refs, stmtAppIds);
-    }
-    let tempOnlySource = false;
-    if (stmt.type === "INSERT_SELECT" || stmt.type === "UPSERT_SELECT") {
-      const srcTemp = /* @__PURE__ */ new Set();
-      const srcApps = /* @__PURE__ */ new Set();
-      collectRefs(stmt.select, srcTemp, srcApps);
-      tempOnlySource = srcTemp.size > 0 && srcApps.size === 0;
-    }
-    for (const name of refs) {
-      const at = defined.get(name);
-      if (at === void 0) {
-        throw new BatchAnalysisError(
-          `ParseError: temp table ${name} is not defined in this batch.`,
-          index
-        );
-      }
-      dependsOn.add(at);
-    }
-    if (stmt.type === "CREATE_TEMP_TABLE") {
-      if (defined.has(stmt.name)) {
-        throw new BatchAnalysisError(
-          `ParseError: temp table ${stmt.name} is already defined.`,
-          index
-        );
-      }
-      defined.set(stmt.name, index);
-      createdOrder.push(stmt.name);
-      created.push(stmt.name);
-      if (defined.size > MAX_TEMP_TABLES) {
-        throw new BatchAnalysisError(
-          `ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`,
-          index
-        );
-      }
-    }
-    if (stmt.type === "DROP_TEMP_TABLE") {
-      const at = defined.get(stmt.name);
-      if (at === void 0) {
-        throw new BatchAnalysisError(
-          `ParseError: temp table ${stmt.name} is not defined in this batch.`,
-          index
-        );
-      }
-      dependsOn.add(at);
-      dropped.push(stmt.name);
-      defined.delete(stmt.name);
-    }
-    results.push({
-      index,
-      statementType,
-      isDml: isDmlType(statementType),
-      isReadOnly: isReadOnlyType(statementType),
-      hasWhere: hasWhereClause(stmt),
-      insertValuesCount: getInsertValuesCount(stmt),
-      appIds: [...stmtAppIds].sort((a, b) => a - b),
-      tempTablesCreated: created,
-      tempTablesReferenced: [...refs],
-      tempTablesDropped: dropped,
-      dependsOn: [...dependsOn].sort((a, b) => a - b),
-      tempOnlySource,
-      targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null
-    });
-  });
-  const containsDml = results.some((r) => r.isDml);
-  const variables = variableOrder.map((name) => ({
-    name,
-    referencedBy: [...variableDefs.get(name).referencedBy]
-  }));
-  return {
-    statementCount: statements.length,
-    isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
-    containsDml,
-    tempTables: createdOrder,
-    variables,
-    warnings: variables.filter((v) => v.referencedBy.length === 0).map((v) => `variable @${v.name} is never used.`),
-    statements: results
-  };
-}
-
-// src/core/batchVariables.ts
-var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-function normalizeBatchVariableName(name) {
-  if (!VARIABLE_NAME_RE.test(name)) {
-    throw new Error(
-      `ArgumentError: invalid variable name "${name}". Use a name without @ matching [A-Za-z_][A-Za-z0-9_]{0,63}.`
-    );
-  }
-  return name.toLowerCase();
-}
-function normalizeBatchVariables(input) {
-  const normalized = /* @__PURE__ */ Object.create(null);
-  for (const [rawName, value] of Object.entries(input ?? {})) {
-    const name = normalizeBatchVariableName(rawName);
-    if (Object.prototype.hasOwnProperty.call(normalized, name)) {
-      throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
-    }
-    normalized[name] = value;
-  }
-  return normalized;
-}
-function validateDeclaredBatchVariables(statements, input) {
-  const normalized = normalizeBatchVariables(input);
-  const declared = new Set(
-    statements.filter((stmt) => stmt.type === "DECLARE_VARIABLE").map((stmt) => stmt.name)
-  );
-  for (const name of Object.keys(normalized)) {
-    if (!declared.has(name)) {
-      throw new Error(`ArgumentError: injected variable @${name} is not declared.`);
-    }
-  }
-  return normalized;
-}
-
-// src/core/scalarCompare.ts
-function compareScalarValues(op, leftStr, rightStr) {
-  if (op === "=") return leftStr === rightStr;
-  if (op === "!=" || op === "<>") return leftStr !== rightStr;
-  const rightNum = Number(rightStr);
-  if (leftStr === "" && rightStr !== "" && Number.isFinite(rightNum)) {
-    return op === "<" || op === "<=";
-  }
-  const leftNum = Number(leftStr);
-  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-  switch (op) {
-    case ">":
-      return numeric ? leftNum > rightNum : leftStr > rightStr;
-    case "<":
-      return numeric ? leftNum < rightNum : leftStr < rightStr;
-    case ">=":
-      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":
-      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
-}
-
 // src/engine/pushDownNot.ts
 function pushDownNot(expr) {
   switch (expr.type) {
@@ -33528,6 +33321,10 @@ function negateOp(op) {
       return "NOT_LIKE";
     case "NOT_LIKE":
       return "LIKE";
+    case "KLIKE":
+      return "NOT_KLIKE";
+    case "NOT_KLIKE":
+      return "KLIKE";
     case "IN":
       return "NOT_IN";
     case "NOT_IN":
@@ -33542,6 +33339,9 @@ function likePatternHasWildcard(pattern) {
 function isLike(where) {
   return where.type === "BINARY" && (where.op === "LIKE" || where.op === "NOT_LIKE");
 }
+function isKlike(where) {
+  return where.type === "BINARY" && (where.op === "KLIKE" || where.op === "NOT_KLIKE");
+}
 function whereHasLike(where) {
   if (where === null) return false;
   if (isLike(where)) return true;
@@ -33551,6 +33351,21 @@ function whereHasLike(where) {
     case "NOT":
     case "GROUP":
       return whereHasLike(where.expr);
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS":
+      return false;
+  }
+}
+function whereHasKlike(where) {
+  if (where === null) return false;
+  if (isKlike(where)) return true;
+  switch (where.type) {
+    case "LOGICAL":
+      return whereHasKlike(where.left) || whereHasKlike(where.right);
+    case "NOT":
+    case "GROUP":
+      return whereHasKlike(where.expr);
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
@@ -33604,6 +33419,10 @@ function convertOp(op) {
     case "LIKE":
       return "like";
     case "NOT_LIKE":
+      return "not like";
+    case "KLIKE":
+      return "like";
+    case "NOT_KLIKE":
       return "not like";
     case "IN":
       return "in";
@@ -34198,6 +34017,434 @@ function isAggregateSyntheticName(name) {
   return /^(COUNT|SUM|AVG|MAX|MIN)\(/i.test(name);
 }
 
+// src/core/klikeValidation.ts
+var KlikeValidationError = class extends Error {
+  constructor(message) {
+    super(`ArgumentError: ${message}`);
+    this.name = "ArgumentError";
+  }
+};
+function validateKlikeStatement(stmt) {
+  validateStatement(stmt);
+}
+function validateStatement(stmt) {
+  switch (stmt.type) {
+    case "SELECT":
+      validateSelect(stmt);
+      return;
+    case "UNION":
+      validateUnion(stmt);
+      return;
+    case "WITH":
+      validateWith(stmt);
+      return;
+    case "EXPLAIN":
+      validateStatement(stmt.query);
+      return;
+    case "CREATE_TEMP_TABLE":
+      validateSelectLike(stmt.query);
+      return;
+    case "SET_VARIABLE":
+    case "DECLARE_VARIABLE":
+    case "ASSERT":
+      validateNestedSelects(stmt);
+      return;
+    case "INSERT":
+    case "INSERT_SELECT":
+    case "UPSERT":
+    case "UPSERT_SELECT":
+    case "UPDATE":
+    case "DELETE":
+    case "REORDER":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE \u306F v1 \u3067\u306F\u5168 DML\uFF08UPDATE / DELETE / INSERT / UPSERT / REORDER\uFF09\u3067\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093"
+        );
+      }
+      return;
+    case "SHOW_APPS":
+    case "DESCRIBE":
+    case "DROP_TEMP_TABLE":
+      return;
+  }
+}
+function validateSelectLike(query) {
+  if (query.type === "SELECT") validateSelect(query);
+  else if (query.type === "UNION") validateUnion(query);
+  else validateWith(query);
+}
+function validateUnion(stmt) {
+  validateSelectLike(stmt.left);
+  validateSelect(stmt.right);
+}
+function validateWith(stmt) {
+  const inlined = buildEffectiveInlineSelect(stmt);
+  if (inlined !== null) {
+    validateSelect(inlined);
+    return;
+  }
+  for (const cte of stmt.ctes) {
+    if (cte.query.type === "SELECT") validateSelect(cte.query);
+    else if (cte.query.type === "UNION") validateUnion(cte.query);
+  }
+  validateSelectLike(stmt.query);
+}
+function validateSelect(stmt) {
+  validateOwnKlikeExpressions(stmt);
+  if (whereHasKlike(stmt.where)) {
+    const inMemorySource = stmt.from.cteName !== null || stmt.joins.some((join) => join.table.cteName !== null);
+    if (inMemorySource || resolveSelectMode(stmt) === "FULL_SCAN") {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE \u306F kintone \u3078\u62BC\u3057\u4E0B\u3052\u308B SIMPLE SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059\u3002\u3053\u306E SELECT \u306F FULL_SCAN \u306B\u306A\u308A\u307E\u3059"
+      );
+    }
+  }
+  validateNestedSelects(stmt);
+}
+function validateOwnKlikeExpressions(stmt) {
+  walkWithoutNestedSelects(stmt, (where) => {
+    if (!isKlike(where)) return;
+    if (!isDescendantOf(stmt.where, where)) {
+      throw new KlikeValidationError("KLIKE / NOT KLIKE \u306F SELECT \u306E WHERE \u53E5\u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059");
+    }
+    const right = where.right;
+    if (right.type !== "STRING" && right.type !== "VARIABLE") {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE \u306E\u53F3\u8FBA\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u307E\u305F\u306F\u6587\u5B57\u5217\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059"
+      );
+    }
+    if (right.type === "STRING" && right.value.includes("%")) {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE \u306E\u691C\u7D22\u8A9E\u306B % \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002SQL \u30EF\u30A4\u30EB\u30C9\u30AB\u30FC\u30C9\u691C\u7D22\u306B\u306F LIKE \u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044"
+      );
+    }
+  });
+}
+function validateNestedSelects(node) {
+  walkObjects(node, (obj) => {
+    if (obj.type === "SELECT") validateSelect(obj);
+  }, true);
+}
+function buildEffectiveInlineSelect(stmt) {
+  if (stmt.ctes.length !== 1) return null;
+  const cte = stmt.ctes[0];
+  if (cte.query.type !== "SELECT" || resolveSelectMode(cte.query) !== "SIMPLE") return null;
+  if (stmt.query.type !== "SELECT") return null;
+  const final = stmt.query;
+  if (final.from.cteName !== cte.name || final.joins.length > 0) return null;
+  if (final.groupBy.length > 0 || final.distinct) return null;
+  if (final.columns.some(
+    (column) => column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
+  )) return null;
+  const where = cte.query.where === null ? final.where : final.where === null ? cte.query.where : { type: "LOGICAL", op: "AND", left: cte.query.where, right: final.where };
+  const columns = final.columns.every((column) => column.type === "WILDCARD") ? cte.query.columns : final.columns;
+  return {
+    type: "SELECT",
+    from: cte.query.from,
+    joins: [],
+    columns,
+    where,
+    groupBy: [],
+    having: null,
+    orderBy: final.orderBy.length > 0 ? final.orderBy : cte.query.orderBy,
+    limit: final.limit ?? cte.query.limit,
+    offset: final.offset ?? cte.query.offset,
+    distinct: false
+  };
+}
+function containsKlike(node) {
+  let found = false;
+  walkObjects(node, (obj) => {
+    if (obj.type === "BINARY" && (obj.op === "KLIKE" || obj.op === "NOT_KLIKE")) found = true;
+  });
+  return found;
+}
+function isDescendantOf(root, target) {
+  if (root === null) return false;
+  if (root === target) return true;
+  switch (root.type) {
+    case "LOGICAL":
+      return isDescendantOf(root.left, target) || isDescendantOf(root.right, target);
+    case "NOT":
+    case "GROUP":
+      return isDescendantOf(root.expr, target);
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS":
+      return false;
+  }
+}
+function walkWithoutNestedSelects(node, visitWhere) {
+  if (Array.isArray(node)) {
+    for (const value of node) walkWithoutNestedSelects(value, visitWhere);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const obj = node;
+  if (obj.type === "BINARY" || obj.type === "NULL_CHECK" || obj.type === "LOGICAL" || obj.type === "NOT" || obj.type === "GROUP" || obj.type === "EXISTS") {
+    visitWhere(obj);
+  }
+  for (const value of Object.values(obj)) {
+    if (value !== node && isSelectObject(value)) continue;
+    walkWithoutNestedSelects(value, visitWhere);
+  }
+}
+function walkObjects(node, visit, skipRoot = false) {
+  if (Array.isArray(node)) {
+    for (const value of node) walkObjects(value, visit);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const obj = node;
+  if (!skipRoot) visit(obj);
+  for (const value of Object.values(obj)) walkObjects(value, visit);
+}
+function isSelectObject(value) {
+  return value !== null && typeof value === "object" && value.type === "SELECT";
+}
+
+// src/core/batch.ts
+var MAX_TEMP_TABLES = 16;
+var MAX_BATCH_VARIABLES = 64;
+var BatchAnalysisError = class extends Error {
+  constructor(message, statementIndex) {
+    super(message);
+    this.statementIndex = statementIndex;
+  }
+};
+function collectRefs(node, tempRefs, appIds) {
+  if (Array.isArray(node)) {
+    for (const v of node) collectRefs(v, tempRefs, appIds);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    const cte = obj["cteName"];
+    if (typeof cte === "string" && cte.startsWith("#")) tempRefs.add(cte);
+    const appId = obj["appId"];
+    if (typeof appId === "number" && appId > 0) appIds.add(appId);
+    for (const v of Object.values(obj)) collectRefs(v, tempRefs, appIds);
+  }
+}
+function collectVariableRefs(node, refs) {
+  if (Array.isArray(node)) {
+    for (const v of node) collectVariableRefs(v, refs);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node;
+    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
+      refs.add(obj["name"]);
+      return;
+    }
+    for (const v of Object.values(obj)) collectVariableRefs(v, refs);
+  }
+}
+function analyzeBatch(statements) {
+  if (statements.length === 0) {
+    throw new BatchAnalysisError("ArgumentError: SQL is empty.", 0);
+  }
+  statements.forEach((stmt, index) => {
+    try {
+      validateKlikeStatement(stmt);
+    } catch (error51) {
+      if (error51 instanceof KlikeValidationError) {
+        throw new BatchAnalysisError(error51.message, index);
+      }
+      throw error51;
+    }
+  });
+  if (statements.length === 1) {
+    const t = statements[0].type;
+    if (t === "SET_VARIABLE" || t === "DECLARE_VARIABLE") {
+      const verb = t === "SET_VARIABLE" ? "SET" : "DECLARE";
+      throw new BatchAnalysisError(`ArgumentError: ${verb} variable requires a batch.`, 0);
+    }
+    if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
+      const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
+      throw new BatchAnalysisError(
+        `ArgumentError: ${verb} requires a batch (temp tables are batch-scoped).`,
+        0
+      );
+    }
+  }
+  const defined = /* @__PURE__ */ new Map();
+  const createdOrder = [];
+  const results = [];
+  const variableDefs = /* @__PURE__ */ new Map();
+  const variableOrder = [];
+  statements.forEach((stmt, index) => {
+    const statementType = getStatementType(stmt);
+    const created = [];
+    const dropped = [];
+    const refs = /* @__PURE__ */ new Set();
+    const stmtAppIds = /* @__PURE__ */ new Set();
+    const dependsOn = /* @__PURE__ */ new Set();
+    const variableRefs = /* @__PURE__ */ new Set();
+    collectVariableRefs(stmt, variableRefs);
+    for (const name of variableRefs) {
+      const def = variableDefs.get(name);
+      if (def === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
+          index
+        );
+      }
+      def.referencedBy.push(index);
+    }
+    if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
+      if (variableDefs.has(stmt.name)) {
+        throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
+      }
+      variableDefs.set(stmt.name, { index, referencedBy: [] });
+      variableOrder.push(stmt.name);
+      if (variableOrder.length > MAX_BATCH_VARIABLES) {
+        throw new BatchAnalysisError(
+          `ParseError: batch exceeds ${MAX_BATCH_VARIABLES} variables.`,
+          index
+        );
+      }
+    }
+    if (stmt.type === "CREATE_TEMP_TABLE") {
+      collectRefs(stmt.query, refs, stmtAppIds);
+    } else if (stmt.type === "DROP_TEMP_TABLE") {
+    } else {
+      collectRefs(stmt, refs, stmtAppIds);
+    }
+    let tempOnlySource = false;
+    if (stmt.type === "INSERT_SELECT" || stmt.type === "UPSERT_SELECT") {
+      const srcTemp = /* @__PURE__ */ new Set();
+      const srcApps = /* @__PURE__ */ new Set();
+      collectRefs(stmt.select, srcTemp, srcApps);
+      tempOnlySource = srcTemp.size > 0 && srcApps.size === 0;
+    }
+    for (const name of refs) {
+      const at = defined.get(name);
+      if (at === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${name} is not defined in this batch.`,
+          index
+        );
+      }
+      dependsOn.add(at);
+    }
+    if (stmt.type === "CREATE_TEMP_TABLE") {
+      if (defined.has(stmt.name)) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${stmt.name} is already defined.`,
+          index
+        );
+      }
+      defined.set(stmt.name, index);
+      createdOrder.push(stmt.name);
+      created.push(stmt.name);
+      if (defined.size > MAX_TEMP_TABLES) {
+        throw new BatchAnalysisError(
+          `ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`,
+          index
+        );
+      }
+    }
+    if (stmt.type === "DROP_TEMP_TABLE") {
+      const at = defined.get(stmt.name);
+      if (at === void 0) {
+        throw new BatchAnalysisError(
+          `ParseError: temp table ${stmt.name} is not defined in this batch.`,
+          index
+        );
+      }
+      dependsOn.add(at);
+      dropped.push(stmt.name);
+      defined.delete(stmt.name);
+    }
+    results.push({
+      index,
+      statementType,
+      isDml: isDmlType(statementType),
+      isReadOnly: isReadOnlyType(statementType),
+      hasWhere: hasWhereClause(stmt),
+      insertValuesCount: getInsertValuesCount(stmt),
+      appIds: [...stmtAppIds].sort((a, b) => a - b),
+      tempTablesCreated: created,
+      tempTablesReferenced: [...refs],
+      tempTablesDropped: dropped,
+      dependsOn: [...dependsOn].sort((a, b) => a - b),
+      tempOnlySource,
+      targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null
+    });
+  });
+  const containsDml = results.some((r) => r.isDml);
+  const variables = variableOrder.map((name) => ({
+    name,
+    referencedBy: [...variableDefs.get(name).referencedBy]
+  }));
+  return {
+    statementCount: statements.length,
+    isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
+    containsDml,
+    tempTables: createdOrder,
+    variables,
+    warnings: variables.filter((v) => v.referencedBy.length === 0).map((v) => `variable @${v.name} is never used.`),
+    statements: results
+  };
+}
+
+// src/core/batchVariables.ts
+var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+function normalizeBatchVariableName(name) {
+  if (!VARIABLE_NAME_RE.test(name)) {
+    throw new Error(
+      `ArgumentError: invalid variable name "${name}". Use a name without @ matching [A-Za-z_][A-Za-z0-9_]{0,63}.`
+    );
+  }
+  return name.toLowerCase();
+}
+function normalizeBatchVariables(input) {
+  const normalized = /* @__PURE__ */ Object.create(null);
+  for (const [rawName, value] of Object.entries(input ?? {})) {
+    const name = normalizeBatchVariableName(rawName);
+    if (Object.prototype.hasOwnProperty.call(normalized, name)) {
+      throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
+    }
+    normalized[name] = value;
+  }
+  return normalized;
+}
+function validateDeclaredBatchVariables(statements, input) {
+  const normalized = normalizeBatchVariables(input);
+  const declared = new Set(
+    statements.filter((stmt) => stmt.type === "DECLARE_VARIABLE").map((stmt) => stmt.name)
+  );
+  for (const name of Object.keys(normalized)) {
+    if (!declared.has(name)) {
+      throw new Error(`ArgumentError: injected variable @${name} is not declared.`);
+    }
+  }
+  return normalized;
+}
+
+// src/core/scalarCompare.ts
+function compareScalarValues(op, leftStr, rightStr) {
+  if (op === "=") return leftStr === rightStr;
+  if (op === "!=" || op === "<>") return leftStr !== rightStr;
+  const rightNum = Number(rightStr);
+  if (leftStr === "" && rightStr !== "" && Number.isFinite(rightNum)) {
+    return op === "<" || op === "<=";
+  }
+  const leftNum = Number(leftStr);
+  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
+  switch (op) {
+    case ">":
+      return numeric ? leftNum > rightNum : leftStr > rightStr;
+    case "<":
+      return numeric ? leftNum < rightNum : leftStr < rightStr;
+    case ">=":
+      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
+    case "<=":
+      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
+}
+
 // src/engine/evalFunc.ts
 function evalArithExpr(expr, row) {
   if (expr.type === "NUMBER") return expr.value;
@@ -34454,6 +34701,9 @@ function evalOp(op, leftStr, right, row, fieldType, resolveFieldType) {
     const pattern = resolveValue(right, row, resolveFieldType);
     return !matchLike(leftStr, pattern);
   }
+  if (op === "KLIKE" || op === "NOT_KLIKE") {
+    throw new Error("KLIKE / NOT KLIKE \u306F JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093\uFF08SIMPLE SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059\uFF09");
+  }
   const rightStr = resolveValue(right, row, resolveFieldType);
   return compareScalarValues(op, leftStr, rightStr);
 }
@@ -34609,6 +34859,11 @@ function matchLike(value, pattern) {
 
 // src/converter/dmlToKintone.ts
 function assertDmlWhereIsSafe(where) {
+  if (whereHasKlike(where)) {
+    throw new DmlConvertError(
+      "UPDATE / DELETE \u306E WHERE \u306B KLIKE / NOT KLIKE \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002kintone \u30AD\u30FC\u30EF\u30FC\u30C9\u691C\u7D22\u306E\u6253\u3061\u5207\u308A\u3092\u691C\u51FA\u3067\u304D\u306A\u3044\u305F\u3081\u3001v1 \u3067\u306F\u5168 DML \u3067\u5B89\u5168\u4E0A\u62D2\u5426\u3057\u307E\u3057\u305F\u3002"
+    );
+  }
   if (!whereHasLike(where)) return;
   throw new DmlConvertError(
     "UPDATE / DELETE \u306E WHERE \u306B LIKE / NOT LIKE \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002LIKE \u306F kSQL \u306E\u610F\u5473\u8AD6\u306B\u5F93\u3063\u3066 JS \u3067\u8A55\u4FA1\u3059\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\u304C\u3001\u89AA\u30EC\u30B3\u30FC\u30C9 DML \u306B\u306F JS \u8A55\u4FA1\u7D4C\u8DEF\u304C\u306A\u3044\u305F\u3081\u3001\u5B89\u5168\u4E0A\u62D2\u5426\u3057\u307E\u3057\u305F\u3002SELECT \u3067\u5BFE\u8C61\u30EC\u30B3\u30FC\u30C9\u756A\u53F7\u3092\u78BA\u8A8D\u3057\u3001IN \u307E\u305F\u306F\u5B8C\u5168\u4E00\u81F4\u3067\u5BFE\u8C61\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
@@ -35838,6 +36093,7 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
+  validateKlikeStatement(stmt);
   switch (stmt.type) {
     case "SELECT":
       return executeSelect(stmt, client, options, cacheContext);
@@ -35974,6 +36230,7 @@ async function executeBatch(sql, client, options = {}) {
 async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables) {
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt2 = resolveVariableRefs(stmt, variables);
+    validateKlikeStatement(resolvedStmt2);
     if (resolvedStmt2.expr.type === "SCALAR_SUBQUERY") {
       try {
         const value = await evaluateScalarSubquery(
@@ -36006,6 +36263,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     return {};
   }
   const resolvedStmt = resolveVariableRefs(stmt, variables);
+  validateKlikeStatement(resolvedStmt);
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     const materializeOptions = {
       ...options,
@@ -37874,7 +38132,9 @@ async function executeDescribe(stmt, client, cacheContext) {
 function parseSql(sql) {
   try {
     const tokens = new Lexer(sql).tokenize();
-    return new Parser(tokens).parse();
+    const stmt = new Parser(tokens).parse();
+    validateKlikeStatement(stmt);
+    return stmt;
   } catch (e) {
     if (e instanceof LexError || e instanceof ParseError) {
       throw e;
@@ -37985,6 +38245,7 @@ function buildBatchExplainPlans(sql, injectedVariables) {
     statementCount: statements.length,
     statements: statements.map((stmt, i) => {
       const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
+      validateKlikeStatement(planStmt);
       const result = {
         index: i,
         type: analysis.statements[i].statementType,
@@ -38418,11 +38679,15 @@ var OperationCancelledError = class extends Error {
 // src/core/sql.ts
 function parseSqlStatement(sql) {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens).parse();
+  const stmt = new Parser(tokens).parse();
+  validateKlikeStatement(stmt);
+  return stmt;
 }
 function parseSqlStatements(sql) {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens).parseStatements();
+  const statements = new Parser(tokens).parseStatements();
+  statements.forEach(validateKlikeStatement);
+  return statements;
 }
 
 // src/output/batchEnvelope.ts
@@ -40516,7 +40781,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.7.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.8.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

@@ -82,6 +82,7 @@ export const enum TokenKind {
   IS      = "IS",
   NULL    = "NULL",
   LIKE    = "LIKE",
+  KLIKE   = "KLIKE",
   IN      = "IN",
   BETWEEN = "BETWEEN",
 
@@ -222,6 +223,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["IS",        TokenKind.IS],
   ["NULL",      TokenKind.NULL],
   ["LIKE",      TokenKind.LIKE],
+  ["KLIKE",     TokenKind.KLIKE],
   ["IN",        TokenKind.IN],
   ["BETWEEN",   TokenKind.BETWEEN],
   ["TODAY",     TokenKind.TODAY],

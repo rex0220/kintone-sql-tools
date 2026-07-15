@@ -131,6 +131,10 @@ function evalOp(
     return !matchLike(leftStr, pattern);
   }
 
+  if (op === "KLIKE" || op === "NOT_KLIKE") {
+    throw new Error("KLIKE / NOT KLIKE は JavaScript 側では評価できません（SIMPLE SELECT でのみ使用できます）");
+  }
+
   const rightStr = resolveValue(right, row, resolveFieldType);
 
   return compareScalarValues(op, leftStr, rightStr);

@@ -1,0 +1,242 @@
+import { resolveSelectMode } from "../converter/selectToKintone";
+import { isKlike, whereHasKlike } from "./like";
+import type {
+  SelectStatement,
+  Statement,
+  UnionStatement,
+  WhereExpr,
+  WithStatement,
+} from "../types/ast";
+
+/** KLIKE v1 の AST 後・実行前制約違反。 */
+export class KlikeValidationError extends Error {
+  constructor(message: string) {
+    super(`ArgumentError: ${message}`);
+    // バッチ/MCP の既存エラーコード規約に合わせ、外部コードは ArgumentError に統一する。
+    this.name = "ArgumentError";
+  }
+}
+
+/**
+ * KLIKE v1 の共通静的検証。
+ *
+ * - KLIKE は SIMPLE SELECT の WHERE だけで使用可能
+ * - 右辺は文字列または未解決のバッチ変数だけ
+ * - kintone が検索語から除外する % は拒否
+ * - DML はネストした SELECT を含めて全面拒否
+ */
+export function validateKlikeStatement(stmt: Statement): void {
+  validateStatement(stmt);
+}
+
+function validateStatement(stmt: Statement): void {
+  switch (stmt.type) {
+    case "SELECT":
+      validateSelect(stmt);
+      return;
+    case "UNION":
+      validateUnion(stmt);
+      return;
+    case "WITH":
+      validateWith(stmt);
+      return;
+    case "EXPLAIN":
+      validateStatement(stmt.query);
+      return;
+    case "CREATE_TEMP_TABLE":
+      validateSelectLike(stmt.query);
+      return;
+    case "SET_VARIABLE":
+    case "DECLARE_VARIABLE":
+    case "ASSERT":
+      validateNestedSelects(stmt);
+      return;
+    case "INSERT":
+    case "INSERT_SELECT":
+    case "UPSERT":
+    case "UPSERT_SELECT":
+    case "UPDATE":
+    case "DELETE":
+    case "REORDER":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE は v1 では全 DML（UPDATE / DELETE / INSERT / UPSERT / REORDER）で使用できません"
+        );
+      }
+      return;
+    case "SHOW_APPS":
+    case "DESCRIBE":
+    case "DROP_TEMP_TABLE":
+      return;
+  }
+}
+
+function validateSelectLike(query: SelectStatement | UnionStatement | WithStatement): void {
+  if (query.type === "SELECT") validateSelect(query);
+  else if (query.type === "UNION") validateUnion(query);
+  else validateWith(query);
+}
+
+function validateUnion(stmt: UnionStatement): void {
+  validateSelectLike(stmt.left);
+  validateSelect(stmt.right);
+}
+
+function validateWith(stmt: WithStatement): void {
+  const inlined = buildEffectiveInlineSelect(stmt);
+  if (inlined !== null) {
+    // 実行時も同じ形へインライン化される。CTE 本体と最終 WHERE の混在を
+    // 結合後に判定し、KLIKE + LIKE 等による FULL_SCAN 化を見逃さない。
+    validateSelect(inlined);
+    return;
+  }
+
+  for (const cte of stmt.ctes) {
+    if (cte.query.type === "SELECT") validateSelect(cte.query);
+    else if (cte.query.type === "UNION") validateUnion(cte.query);
+  }
+  validateSelectLike(stmt.query);
+}
+
+function validateSelect(stmt: SelectStatement): void {
+  validateOwnKlikeExpressions(stmt);
+
+  if (whereHasKlike(stmt.where)) {
+    const inMemorySource = stmt.from.cteName !== null
+      || stmt.joins.some((join) => join.table.cteName !== null);
+    if (inMemorySource || resolveSelectMode(stmt) === "FULL_SCAN") {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE は kintone へ押し下げる SIMPLE SELECT でのみ使用できます。この SELECT は FULL_SCAN になります"
+      );
+    }
+  }
+
+  validateNestedSelects(stmt);
+}
+
+/** 現在の SELECT スコープに属する KLIKE を検証する（内側 SELECT は別途検証）。 */
+function validateOwnKlikeExpressions(stmt: SelectStatement): void {
+  walkWithoutNestedSelects(stmt, (where) => {
+    if (!isKlike(where)) return;
+    if (!isDescendantOf(stmt.where, where)) {
+      throw new KlikeValidationError("KLIKE / NOT KLIKE は SELECT の WHERE 句でのみ使用できます");
+    }
+    const right = where.right;
+    if (right.type !== "STRING" && right.type !== "VARIABLE") {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE の右辺には文字列リテラルまたは文字列バッチ変数が必要です"
+      );
+    }
+    if (right.type === "STRING" && right.value.includes("%")) {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE の検索語に % は使用できません。SQL ワイルドカード検索には LIKE を使用してください"
+      );
+    }
+  });
+}
+
+function validateNestedSelects(node: unknown): void {
+  walkObjects(node, (obj) => {
+    if (obj.type === "SELECT") validateSelect(obj as unknown as SelectStatement);
+  }, true);
+}
+
+/** WITH の実行時インライン化と同じ主要条件で、実効 SELECT を構築する。 */
+function buildEffectiveInlineSelect(stmt: WithStatement): SelectStatement | null {
+  if (stmt.ctes.length !== 1) return null;
+  const cte = stmt.ctes[0];
+  if (cte.query.type !== "SELECT" || resolveSelectMode(cte.query) !== "SIMPLE") return null;
+  if (stmt.query.type !== "SELECT") return null;
+  const final = stmt.query;
+  if (final.from.cteName !== cte.name || final.joins.length > 0) return null;
+  if (final.groupBy.length > 0 || final.distinct) return null;
+  if (final.columns.some((column) =>
+    column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
+  )) return null;
+
+  const where = cte.query.where === null
+    ? final.where
+    : final.where === null
+      ? cte.query.where
+      : { type: "LOGICAL" as const, op: "AND" as const, left: cte.query.where, right: final.where };
+  const columns = final.columns.every((column) => column.type === "WILDCARD")
+    ? cte.query.columns
+    : final.columns;
+
+  return {
+    type: "SELECT",
+    from: cte.query.from,
+    joins: [],
+    columns,
+    where,
+    groupBy: [],
+    having: null,
+    orderBy: final.orderBy.length > 0 ? final.orderBy : cte.query.orderBy,
+    limit: final.limit ?? cte.query.limit,
+    offset: final.offset ?? cte.query.offset,
+    distinct: false,
+  };
+}
+
+function containsKlike(node: unknown): boolean {
+  let found = false;
+  walkObjects(node, (obj) => {
+    if (obj.type === "BINARY" && (obj.op === "KLIKE" || obj.op === "NOT_KLIKE")) found = true;
+  });
+  return found;
+}
+
+function isDescendantOf(root: WhereExpr | null, target: object): boolean {
+  if (root === null) return false;
+  if (root === target) return true;
+  switch (root.type) {
+    case "LOGICAL": return isDescendantOf(root.left, target) || isDescendantOf(root.right, target);
+    case "NOT":
+    case "GROUP": return isDescendantOf(root.expr, target);
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS": return false;
+  }
+}
+
+function walkWithoutNestedSelects(
+  node: unknown,
+  visitWhere: (where: WhereExpr) => void
+): void {
+  if (Array.isArray(node)) {
+    for (const value of node) walkWithoutNestedSelects(value, visitWhere);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  if (
+    obj.type === "BINARY" || obj.type === "NULL_CHECK" || obj.type === "LOGICAL"
+    || obj.type === "NOT" || obj.type === "GROUP" || obj.type === "EXISTS"
+  ) {
+    visitWhere(obj as unknown as WhereExpr);
+  }
+  for (const value of Object.values(obj)) {
+    if (value !== node && isSelectObject(value)) continue;
+    walkWithoutNestedSelects(value, visitWhere);
+  }
+}
+
+function walkObjects(
+  node: unknown,
+  visit: (obj: Record<string, unknown>) => void,
+  skipRoot = false
+): void {
+  if (Array.isArray(node)) {
+    for (const value of node) walkObjects(value, visit);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  if (!skipRoot) visit(obj);
+  for (const value of Object.values(obj)) walkObjects(value, visit);
+}
+
+function isSelectObject(value: unknown): boolean {
+  return value !== null && typeof value === "object"
+    && (value as { type?: unknown }).type === "SELECT";
+}

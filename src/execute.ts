@@ -18,6 +18,7 @@ import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
+import { validateKlikeStatement } from "./core/klikeValidation";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -337,6 +338,7 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
+  validateKlikeStatement(stmt);
   switch (stmt.type) {
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
@@ -566,6 +568,7 @@ async function executeBatchStatement(
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveVariableRefs(stmt, variables);
+    validateKlikeStatement(resolvedStmt);
     if (resolvedStmt.expr.type === "SCALAR_SUBQUERY") {
       try {
         const value = await evaluateScalarSubquery(
@@ -600,6 +603,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveVariableRefs(stmt, variables);
+  // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
+  validateKlikeStatement(resolvedStmt);
 
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     // 実体化は onLimitReached を適用せず常に error
@@ -3295,7 +3300,9 @@ async function executeDescribe(
 function parseSql(sql: string) {
   try {
     const tokens = new Lexer(sql).tokenize();
-    return new Parser(tokens).parse();
+    const stmt = new Parser(tokens).parse();
+    validateKlikeStatement(stmt);
+    return stmt;
   } catch (e) {
     if (e instanceof LexError || e instanceof ParseError) {
       throw e; // 日本語エラーメッセージをそのまま伝播
@@ -3498,6 +3505,7 @@ export function buildBatchExplainPlans(
           ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) }
           : stmt)
         : resolveVariableRefs(stmt, variables);
+      validateKlikeStatement(planStmt);
       const result = {
         index: i,
         type: analysis.statements[i].statementType,

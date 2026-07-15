@@ -366,7 +366,7 @@ export interface BinaryExpr {
 
 export type CompareOp =
   | "=" | "!=" | "<>" | ">" | "<" | ">=" | "<="
-  | "LIKE" | "NOT_LIKE" | "IN" | "NOT_IN";
+  | "LIKE" | "NOT_LIKE" | "KLIKE" | "NOT_KLIKE" | "IN" | "NOT_IN";
 
 /** IS NULL / IS NOT NULL */
 export interface NullCheckExpr {

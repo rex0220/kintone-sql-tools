@@ -20,6 +20,7 @@ import {
   isDmlType,
   isReadOnlyType,
 } from "./dmlGuard";
+import { KlikeValidationError, validateKlikeStatement } from "./klikeValidation";
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
 export const MAX_TEMP_TABLES = 16;
@@ -162,6 +163,17 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   if (statements.length === 0) {
     throw new BatchAnalysisError("ArgumentError: SQL is empty.", 0);
   }
+
+  statements.forEach((stmt, index) => {
+    try {
+      validateKlikeStatement(stmt);
+    } catch (error) {
+      if (error instanceof KlikeValidationError) {
+        throw new BatchAnalysisError(error.message, index);
+      }
+      throw error;
+    }
+  });
 
   // 単文入力の CREATE / DROP TEMP TABLE は無意味なため拒否（仕様 §4.3）
   if (statements.length === 1) {

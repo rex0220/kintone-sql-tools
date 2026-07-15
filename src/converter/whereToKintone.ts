@@ -90,6 +90,8 @@ function convertOp(op: CompareOp): string {
     case "<=":   return "<=";
     case "LIKE":     return "like";
     case "NOT_LIKE": return "not like";
+    case "KLIKE":     return "like";
+    case "NOT_KLIKE": return "not like";
     case "IN":       return "in";
     case "NOT_IN":   return "not in";
   }

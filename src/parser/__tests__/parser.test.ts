@@ -163,6 +163,32 @@ test("WHERE LIKE", () => {
   expect((ast.where as any).op).toBe("LIKE");
 });
 
+test("WHERE KLIKE / NOT KLIKE は専用演算子として文字列・変数を受理する", () => {
+  const klike = parseSelect("SELECT * FROM APP100 WHERE 件名 KLIKE 'foo_bar'");
+  expect(klike.where).toMatchObject({
+    type: "BINARY", op: "KLIKE", right: { type: "STRING", value: "foo_bar" },
+  });
+  const notKlike = parseSelect("SELECT * FROM APP100 WHERE 件名 NOT KLIKE @keyword");
+  expect(notKlike.where).toMatchObject({
+    type: "BINARY", op: "NOT_KLIKE", right: { type: "VARIABLE", name: "keyword" },
+  });
+});
+
+test.each([
+  "SELECT * FROM APP100 WHERE 件名 KLIKE 1",
+  "SELECT * FROM APP100 WHERE 件名 KLIKE TODAY()",
+  "SELECT * FROM APP100 WHERE 件名 NOT KLIKE UPPER(件名)",
+])("KLIKE の非文字列右辺を構文段階で拒否する — %s", (sql) => {
+  expect(() => parseSelect(sql)).toThrow(/文字列リテラルまたはバッチ変数/);
+});
+
+test("KLIKE は予約語になり、同名フィールドはバッククォートで参照できる", () => {
+  expect(() => parseSelect("SELECT KLIKE FROM APP100")).toThrow(ParseError);
+  expect(parseSelect("SELECT `KLIKE` FROM APP100").columns[0]).toMatchObject({
+    type: "FIELD", field: "KLIKE",
+  });
+});
+
 test("WHERE IN", () => {
   const ast = parseSelect("SELECT * FROM APP100 WHERE 種別 IN ('A', 'B')");
   const w = ast.where as any;

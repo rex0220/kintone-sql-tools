@@ -1435,7 +1435,7 @@ export class Parser {
     return false;
   }
 
-  // 比較演算子: =, !=, <>, >, <, >=, <=, LIKE, IN, IS NULL
+  // 比較演算子: =, !=, <>, >, <, >=, <=, LIKE, KLIKE, IN, IS NULL
   private parseCompareExpr(): WhereExpr {
     // ( expr ) グループ — ただし算術括弧（例: (単価 + 送料) * 数量）は除く
     if (this.peek().kind === TokenKind.LPAREN && !this.isArithParen()) {
@@ -1467,7 +1467,7 @@ export class Parser {
       } satisfies ExpandedBetween;
     }
 
-    // NOT IN / NOT LIKE
+    // NOT IN / NOT LIKE / NOT KLIKE
     if (this.consume(TokenKind.NOT)) {
       if (this.consume(TokenKind.IN)) {
         this.expect(TokenKind.LPAREN);
@@ -1479,8 +1479,12 @@ export class Parser {
         const pattern = this.parseSqlValue();
         return { type: "BINARY", op: "NOT_LIKE", left: field, right: pattern } satisfies BinaryExpr;
       }
+      if (this.consume(TokenKind.KLIKE)) {
+        const pattern = this.parseKlikePattern();
+        return { type: "BINARY", op: "NOT_KLIKE", left: field, right: pattern } satisfies BinaryExpr;
+      }
       throw new ParseError(
-        "NOT の後には IN または LIKE が必要です",
+        "NOT の後には IN、LIKE、KLIKE のいずれかが必要です",
         this.peek()
       );
     }
@@ -1491,6 +1495,12 @@ export class Parser {
       const right = this.parseInListOrSubquery();
       this.expect(TokenKind.RPAREN);
       return { type: "BINARY", op: "IN", left: field, right } satisfies BinaryExpr;
+    }
+
+    // KLIKE は kintone キーワード検索。右辺は文字列またはバッチ変数だけ。
+    if (this.consume(TokenKind.KLIKE)) {
+      const pattern = this.parseKlikePattern();
+      return { type: "BINARY", op: "KLIKE", left: field, right: pattern } satisfies BinaryExpr;
     }
 
     // 比較演算子
@@ -1512,10 +1522,27 @@ export class Parser {
       case TokenKind.LIKE:  return "LIKE";
       default:
         throw new ParseError(
-          "比較演算子（=, !=, >, <, >=, <=, LIKE, IN, IS）が必要です",
+          "比較演算子（=, !=, >, <, >=, <=, LIKE, KLIKE, IN, IS）が必要です",
           tok
         );
     }
+  }
+
+  /** KLIKE / NOT KLIKE の右辺。kintone キーワードは文字列値だけを受け付ける。 */
+  private parseKlikePattern(): StringLiteral | VariableRef {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.STRING) {
+      this.advance();
+      return { type: "STRING", value: tok.value } satisfies StringLiteral;
+    }
+    if (tok.kind === TokenKind.VARIABLE) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+    }
+    throw new ParseError(
+      "KLIKE / NOT KLIKE の右辺には文字列リテラルまたはバッチ変数が必要です",
+      tok
+    );
   }
 
   // WHERE / HAVING の左辺
