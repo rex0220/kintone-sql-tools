@@ -90,6 +90,18 @@ describe("cli helpers", () => {
     expect(args.retryMaxDelay).toBe(2000);
   });
 
+  test("parseArgs は --var を正規化し、最初の = だけで分割する", () => {
+    const args = parseArgs(["--var", "Since=2026-07-01 12:00", "--var", "empty=", "--var", "x=a=b", "--var", "__proto__=safe"]);
+    expect(args.variables.since).toBe("2026-07-01 12:00");
+    expect(args.variables.empty).toBe("");
+    expect(args.variables.x).toBe("a=b");
+    expect(args.variables.__proto__).toBe("safe");
+    expect(Object.prototype.hasOwnProperty.call(args.variables, "__proto__")).toBe(true);
+    expect(() => parseArgs(["--var", "x=1", "--var", "X=2"])).toThrow(/specified more than once/);
+    expect(() => parseArgs(["--var", "@x=1"])).toThrow(/invalid variable name/);
+    expect(() => parseArgs(["--var", "x"])).toThrow(/name=value/);
+  });
+
   test("parseArgs requestGate flags のデフォルトは null（未指定 = profile / 既定に委ねる）", () => {
     const args = parseArgs(["-e", "SELECT 1"]);
     expect(args.maxConcurrent).toBeNull();

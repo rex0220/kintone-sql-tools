@@ -39,6 +39,7 @@ export function isReadOnlyType(type: string): boolean {
     || type === "DROP_TEMP_TABLE"
     // SET はバッチ内メモリだけを更新し、kintone には書き込まない
     || type === "SET_VARIABLE"
+    || type === "DECLARE_VARIABLE"
     // ASSERT は条件評価のみで kintone に書き込まない（バッチ強化第1弾 §2.3）
     || type === "ASSERT";
 }

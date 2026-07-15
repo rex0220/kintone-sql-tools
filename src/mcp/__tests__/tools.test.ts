@@ -351,6 +351,7 @@ describe("MCP tools", () => {
       "sql",
       "tempTableMaxRows",
       "timeout",
+      "variables",
     ]);
     expect("allowWithoutWhere" in mutateInputSchema.shape).toBe(false);
     // DML バッチに続行オプションは存在しない（常に fail-fast）
@@ -1282,6 +1283,31 @@ describe("MCP tools", () => {
     expect((result as unknown as { warnings: string[] }).warnings).toEqual([]);
   });
 
+  test("query: DECLARE 変数を MCP variables で上書きする", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 })
+    );
+    const result = await tools.query({
+      sql: "DECLARE @min = '0'; CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100; SELECT 顧客名 FROM #t WHERE 売上 > @min",
+      variables: { Min: "200" },
+    }) as { results: Array<{ rows: Array<Record<string, string>> }> };
+    expect(result.results[0].rows).toEqual([{ 顧客名: "B社" }]);
+  });
+
+  test("query/mutate は単文への純粋変数注入を拒否する", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(tools.query({ sql: "SELECT * FROM APP100", variables: { x: "1" } }))
+      .rejects.toThrow(/variables require a batch containing DECLARE/);
+    await expect(tools.mutate({
+      sql: "UPDATE APP100 SET x = '1' WHERE $id = 1",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 1,
+      variables: { x: "1" },
+    })).rejects.toThrow(/variables require a batch containing DECLARE/);
+  });
+
   test("query: tempTableMaxRows が一時テーブルの実体化上限に効く（超過は error・後続 skipped）", async () => {
     const tools = createKsqlMcpTools(
       { profile: "prod" },
@@ -1530,6 +1556,21 @@ describe("MCP tools", () => {
       status: "success",
       updatedCount: 1,
     });
+  });
+
+  test("mutate: DECLARE 変数を MCP variables から UPDATE SET へ渡す", async () => {
+    const { deps, calls } = makeMutateRuntimeDeps({
+      100: [{ $id: { value: "1" }, ステータス: { value: "対応中" } }],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: "DECLARE @status = '既定'; UPDATE APP100 SET ステータス = @status WHERE $id = 1",
+      variables: { STATUS: "完了" },
+      dmlMaxRows: 10,
+    }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(calls.put).toBe(1);
   });
 
   test("mutate: read-only のみのバッチは ksql_query へ誘導", async () => {

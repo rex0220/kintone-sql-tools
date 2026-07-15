@@ -84,6 +84,7 @@ import type {
   AssertOperand,
   AssertCompareOp,
   SetVariableStatement,
+  DeclareVariableStatement,
   ScalarExpr,
   VariableRef,
 } from "../types/ast";
@@ -233,13 +234,14 @@ export class Parser {
         const upper = tok.value.toUpperCase();
         if (upper === "CREATE") return this.parseCreateTempTable();
         if (upper === "DROP")   return this.parseDropTempTable();
+        if (upper === "DECLARE") return this.parseDeclareVariable();
         break;
       }
       default:
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / ASSERT のいずれかで始まる SQL 文が必要です",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT のいずれかで始まる SQL 文が必要です",
       tok
     );
   }
@@ -252,20 +254,35 @@ export class Parser {
     this.expect(TokenKind.SET);
     const variable = this.expect(TokenKind.VARIABLE, "SET の後には変数名（例: @name）が必要です");
     this.expect(TokenKind.EQ);
-    const expr = this.parseScalarExpr();
+    const expr = this.parseScalarExpr("SET", true);
     return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
   }
 
-  /** SET RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
-  private parseScalarExpr(): ScalarExpr {
+  private parseDeclareVariable(): DeclareVariableStatement {
+    this.advance(); // DECLARE（ソフトキーワード）
+    const variable = this.expect(TokenKind.VARIABLE, "DECLARE の後には変数名（例: @name）が必要です");
+    this.expect(TokenKind.EQ);
+    const expr = this.parseScalarExpr("DECLARE", false);
+    if (expr.type === "SCALAR_SUBQUERY") {
+      // allowScalarSubquery=false で到達しないが、型の絞り込みを明示する。
+      throw new ParseError("DECLARE の既定値にスカラーサブクエリは使用できません", this.peek());
+    }
+    return { type: "DECLARE_VARIABLE", name: variable.value.slice(1).toLowerCase(), default: expr };
+  }
+
+  /** SET / DECLARE RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
+  private parseScalarExpr(context: "SET" | "DECLARE", allowScalarSubquery: boolean): ScalarExpr {
     const tok = this.peek();
     if (tok.kind === TokenKind.VARIABLE) {
-      throw new ParseError("SET の右辺では他の変数を参照できません（Phase 1a）", tok);
+      throw new ParseError(`${context} の右辺では他の変数を参照できません`, tok);
     }
     if (tok.kind === TokenKind.NULL) {
-      throw new ParseError("SET の右辺で NULL は使用できません（Phase 1a）", tok);
+      throw new ParseError(`${context} の右辺で NULL は使用できません`, tok);
     }
     if (tok.kind === TokenKind.LPAREN && this.peekAt(1).kind === TokenKind.SELECT) {
+      if (!allowScalarSubquery) {
+        throw new ParseError("DECLARE の既定値にスカラーサブクエリは使用できません", tok);
+      }
       this.advance(); // ( を消費
       const query = this.parseSelect();
       this.expect(TokenKind.RPAREN);
@@ -290,7 +307,7 @@ export class Parser {
     }
     if (tok.kind === TokenKind.LOGINUSER) {
       throw new ParseError(
-        "SET の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）",
+        `${context} の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）`,
         tok
       );
     }
@@ -298,23 +315,23 @@ export class Parser {
       return this.parseSqlValue() as KintoneFunction;
     }
     const expr = this.parseArithAddSub();
-    this.rejectNonScalarExpr(expr, tok);
+    this.rejectNonScalarExpr(expr, tok, context);
     if (expr.type === "NUMBER" || expr.type === "STRING_FUNC" || expr.type === "ARITH") return expr;
-    throw new ParseError("SET の右辺にはフィールド参照を含まないスカラー式を指定してください", tok);
+    throw new ParseError(`${context} の右辺にはフィールド参照を含まないスカラー式を指定してください`, tok);
   }
 
-  private rejectNonScalarExpr(node: StringFuncArg, tok: Token): void {
+  private rejectNonScalarExpr(node: StringFuncArg, tok: Token, context: "SET" | "DECLARE"): void {
     if (node.type === "STRING" || node.type === "NUMBER") return;
     if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
-      throw new ParseError("SET の右辺ではフィールド参照・集計関数を使用できません", tok);
+      throw new ParseError(`${context} の右辺ではフィールド参照・集計関数を使用できません`, tok);
     }
     if (node.type === "ARITH" || node.type === "AGG_ARITH") {
-      this.rejectNonScalarExpr(node.left, tok);
-      this.rejectNonScalarExpr(node.right, tok);
+      this.rejectNonScalarExpr(node.left, tok, context);
+      this.rejectNonScalarExpr(node.right, tok, context);
       return;
     }
     if (node.type === "STRING_FUNC") {
-      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok);
+      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok, context);
     }
   }
 

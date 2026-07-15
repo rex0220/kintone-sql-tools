@@ -202,6 +202,15 @@ test("SET_VARIABLE は read-only で、参照索引と未使用警告を返す",
   expect(a.warnings).toEqual(["variable @unused is never used."]);
 });
 
+test("DECLARE_VARIABLE は SET と名前空間・参照解析を共有する", () => {
+  const a = analyze("DECLARE @p = 'x'; SELECT * FROM APP100 WHERE 顧客名 = @p");
+  expect(a.isReadOnlyBatch).toBe(true);
+  expect(a.variables).toEqual([{ name: "p", referencedBy: [1] }]);
+  expect(a.statements[0]).toMatchObject({ statementType: "DECLARE_VARIABLE", isReadOnly: true });
+  expect(() => analyze("DECLARE @x = 1; SET @X = 2")).toThrow(/already defined/);
+  expect(() => analyze("DECLARE @x = 1")).toThrow(/DECLARE variable requires a batch/);
+});
+
 test("変数の未定義・前方参照・再代入を静的に拒否する", () => {
   expect(() => analyze("SELECT * FROM APP100; SELECT * FROM APP100 WHERE 売上 > @missing"))
     .toThrow(/variable @missing is not defined/);

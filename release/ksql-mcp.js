@@ -31512,13 +31512,14 @@ var Parser = class {
         const upper = tok.value.toUpperCase();
         if (upper === "CREATE") return this.parseCreateTempTable();
         if (upper === "DROP") return this.parseDropTempTable();
+        if (upper === "DECLARE") return this.parseDeclareVariable();
         break;
       }
       default:
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
       tok
     );
   }
@@ -31529,19 +31530,32 @@ var Parser = class {
     this.expect("SET" /* SET */);
     const variable = this.expect("VARIABLE" /* VARIABLE */, "SET \u306E\u5F8C\u306B\u306F\u5909\u6570\u540D\uFF08\u4F8B: @name\uFF09\u304C\u5FC5\u8981\u3067\u3059");
     this.expect("=" /* EQ */);
-    const expr = this.parseScalarExpr();
+    const expr = this.parseScalarExpr("SET", true);
     return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
   }
-  /** SET RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
-  parseScalarExpr() {
+  parseDeclareVariable() {
+    this.advance();
+    const variable = this.expect("VARIABLE" /* VARIABLE */, "DECLARE \u306E\u5F8C\u306B\u306F\u5909\u6570\u540D\uFF08\u4F8B: @name\uFF09\u304C\u5FC5\u8981\u3067\u3059");
+    this.expect("=" /* EQ */);
+    const expr = this.parseScalarExpr("DECLARE", false);
+    if (expr.type === "SCALAR_SUBQUERY") {
+      throw new ParseError("DECLARE \u306E\u65E2\u5B9A\u5024\u306B\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
+    return { type: "DECLARE_VARIABLE", name: variable.value.slice(1).toLowerCase(), default: expr };
+  }
+  /** SET / DECLARE RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */
+  parseScalarExpr(context, allowScalarSubquery) {
     const tok = this.peek();
     if (tok.kind === "VARIABLE" /* VARIABLE */) {
-      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067\u306F\u4ED6\u306E\u5909\u6570\u3092\u53C2\u7167\u3067\u304D\u307E\u305B\u3093\uFF08Phase 1a\uFF09", tok);
+      throw new ParseError(`${context} \u306E\u53F3\u8FBA\u3067\u306F\u4ED6\u306E\u5909\u6570\u3092\u53C2\u7167\u3067\u304D\u307E\u305B\u3093`, tok);
     }
     if (tok.kind === "NULL" /* NULL */) {
-      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067 NULL \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08Phase 1a\uFF09", tok);
+      throw new ParseError(`${context} \u306E\u53F3\u8FBA\u3067 NULL \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`, tok);
     }
     if (tok.kind === "(" /* LPAREN */ && this.peekAt(1).kind === "SELECT" /* SELECT */) {
+      if (!allowScalarSubquery) {
+        throw new ParseError("DECLARE \u306E\u65E2\u5B9A\u5024\u306B\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      }
       this.advance();
       const query = this.parseSelect();
       this.expect(")" /* RPAREN */);
@@ -31565,7 +31579,7 @@ var Parser = class {
     }
     if (tok.kind === "LOGINUSER" /* LOGINUSER */) {
       throw new ParseError(
-        "SET \u306E\u53F3\u8FBA\u3067 LOGINUSER() \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08\u5B9F\u884C\u74B0\u5883\u5171\u901A\u306E\u30ED\u30B0\u30A4\u30F3\u30E6\u30FC\u30B6\u30FC\u89E3\u6C7A\u306F\u672A\u5BFE\u5FDC\u3067\u3059\uFF09",
+        `${context} \u306E\u53F3\u8FBA\u3067 LOGINUSER() \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\uFF08\u5B9F\u884C\u74B0\u5883\u5171\u901A\u306E\u30ED\u30B0\u30A4\u30F3\u30E6\u30FC\u30B6\u30FC\u89E3\u6C7A\u306F\u672A\u5BFE\u5FDC\u3067\u3059\uFF09`,
         tok
       );
     }
@@ -31573,22 +31587,22 @@ var Parser = class {
       return this.parseSqlValue();
     }
     const expr = this.parseArithAddSub();
-    this.rejectNonScalarExpr(expr, tok);
+    this.rejectNonScalarExpr(expr, tok, context);
     if (expr.type === "NUMBER" || expr.type === "STRING_FUNC" || expr.type === "ARITH") return expr;
-    throw new ParseError("SET \u306E\u53F3\u8FBA\u306B\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u542B\u307E\u306A\u3044\u30B9\u30AB\u30E9\u30FC\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", tok);
+    throw new ParseError(`${context} \u306E\u53F3\u8FBA\u306B\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u542B\u307E\u306A\u3044\u30B9\u30AB\u30E9\u30FC\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044`, tok);
   }
-  rejectNonScalarExpr(node, tok) {
+  rejectNonScalarExpr(node, tok, context) {
     if (node.type === "STRING" || node.type === "NUMBER") return;
     if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
-      throw new ParseError("SET \u306E\u53F3\u8FBA\u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u30FB\u96C6\u8A08\u95A2\u6570\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      throw new ParseError(`${context} \u306E\u53F3\u8FBA\u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u30FB\u96C6\u8A08\u95A2\u6570\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`, tok);
     }
     if (node.type === "ARITH" || node.type === "AGG_ARITH") {
-      this.rejectNonScalarExpr(node.left, tok);
-      this.rejectNonScalarExpr(node.right, tok);
+      this.rejectNonScalarExpr(node.left, tok, context);
+      this.rejectNonScalarExpr(node.right, tok, context);
       return;
     }
     if (node.type === "STRING_FUNC") {
-      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok);
+      for (const arg of node.args) this.rejectNonScalarExpr(arg, tok, context);
     }
   }
   // ----------------------------------------------------------
@@ -33214,7 +33228,7 @@ function isDmlType(type) {
   return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
 }
 function isReadOnlyType(type) {
-  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "ASSERT";
+  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
 }
 function hasWhereClause(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
@@ -33276,8 +33290,9 @@ function analyzeBatch(statements) {
   }
   if (statements.length === 1) {
     const t = statements[0].type;
-    if (t === "SET_VARIABLE") {
-      throw new BatchAnalysisError("ArgumentError: SET variable requires a batch.", 0);
+    if (t === "SET_VARIABLE" || t === "DECLARE_VARIABLE") {
+      const verb = t === "SET_VARIABLE" ? "SET" : "DECLARE";
+      throw new BatchAnalysisError(`ArgumentError: ${verb} variable requires a batch.`, 0);
     }
     if (t === "CREATE_TEMP_TABLE" || t === "DROP_TEMP_TABLE") {
       const verb = t === "CREATE_TEMP_TABLE" ? "CREATE TEMP TABLE" : "DROP TEMP TABLE";
@@ -33311,7 +33326,7 @@ function analyzeBatch(statements) {
       }
       def.referencedBy.push(index);
     }
-    if (stmt.type === "SET_VARIABLE") {
+    if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
       if (variableDefs.has(stmt.name)) {
         throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
       }
@@ -33406,6 +33421,40 @@ function analyzeBatch(statements) {
     warnings: variables.filter((v) => v.referencedBy.length === 0).map((v) => `variable @${v.name} is never used.`),
     statements: results
   };
+}
+
+// src/core/batchVariables.ts
+var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+function normalizeBatchVariableName(name) {
+  if (!VARIABLE_NAME_RE.test(name)) {
+    throw new Error(
+      `ArgumentError: invalid variable name "${name}". Use a name without @ matching [A-Za-z_][A-Za-z0-9_]{0,63}.`
+    );
+  }
+  return name.toLowerCase();
+}
+function normalizeBatchVariables(input) {
+  const normalized = /* @__PURE__ */ Object.create(null);
+  for (const [rawName, value] of Object.entries(input ?? {})) {
+    const name = normalizeBatchVariableName(rawName);
+    if (Object.prototype.hasOwnProperty.call(normalized, name)) {
+      throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
+    }
+    normalized[name] = value;
+  }
+  return normalized;
+}
+function validateDeclaredBatchVariables(statements, input) {
+  const normalized = normalizeBatchVariables(input);
+  const declared = new Set(
+    statements.filter((stmt) => stmt.type === "DECLARE_VARIABLE").map((stmt) => stmt.name)
+  );
+  for (const name of Object.keys(normalized)) {
+    if (!declared.has(name)) {
+      throw new Error(`ArgumentError: injected variable @${name} is not declared.`);
+    }
+  }
+  return normalized;
 }
 
 // src/core/scalarCompare.ts
@@ -35739,6 +35788,8 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
       throw new Error("ArgumentError: DROP TEMP TABLE requires a batch (temp tables are batch-scoped).");
     case "SET_VARIABLE":
       throw new Error("ArgumentError: SET variable requires a batch.");
+    case "DECLARE_VARIABLE":
+      throw new Error("ArgumentError: DECLARE variable requires a batch.");
     case "ASSERT":
       return executeAssert(stmt, client, options, cacheContext);
   }
@@ -35752,6 +35803,8 @@ var BatchTimeoutError = class extends Error {
 async function executeBatch(sql, client, options = {}) {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
+  const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
+  const batchOptions = { ...options, variables: injectedVariables };
   if (options.continueOnError && analysis.containsDml) {
     throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
   }
@@ -35796,16 +35849,16 @@ async function executeBatch(sql, client, options = {}) {
     }
     try {
       const remaining = deadline !== null ? deadline - Date.now() : null;
-      const userConfirm = options.confirm;
+      const userConfirm = batchOptions.confirm;
       const stmtOptions = userConfirm ? {
-        ...options,
+        ...batchOptions,
         confirm: (count, operation) => userConfirm(count, operation, {
           statementIndex: i,
           statementCount: statements.length,
           statementType: info.statementType,
           targetAppId: info.targetAppId
         })
-      } : options;
+      } : batchOptions;
       const outcome = await runWithDeadline(
         executeBatchStatement(statements[i], info, countedClient, stmtOptions, cacheContext, tempTables, variables),
         remaining
@@ -35818,7 +35871,7 @@ async function executeBatch(sql, client, options = {}) {
         aborted2 = "timeout";
       } else if (e instanceof AssertError) {
         aborted2 = "assertion";
-      } else if (info.statementType === "SET_VARIABLE") {
+      } else if (info.statementType === "SET_VARIABLE" || info.statementType === "DECLARE_VARIABLE") {
         aborted2 = "fail-fast";
       } else if (!options.continueOnError) {
         aborted2 = "fail-fast";
@@ -35855,6 +35908,16 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
       }
     } else {
       variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr));
+    }
+    return {};
+  }
+  if (stmt.type === "DECLARE_VARIABLE") {
+    const injected = options.variables ?? {};
+    if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
+      variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
+    } else {
+      const value = evaluateScalarExpr(stmt.default);
+      variables.set(stmt.name, { type: "string", value: String(value.value) });
     }
     return {};
   }
@@ -37583,9 +37646,10 @@ async function resolveScalarColumns(columns, client, options, cacheContext, cteC
   pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
 }
-function buildBatchExplainPlans(sql) {
+function buildBatchExplainPlans(sql, injectedVariables) {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
+  validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = /* @__PURE__ */ new Map();
   return {
     statementCount: statements.length,
@@ -37596,7 +37660,7 @@ function buildBatchExplainPlans(sql) {
         type: analysis.statements[i].statementType,
         plan: buildBatchStatementPlan(planStmt, analysis.statements[i])
       };
-      if (stmt.type === "SET_VARIABLE") {
+      if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
       }
       return result;
@@ -37631,6 +37695,12 @@ function buildBatchStatementPlan(stmt, info) {
     return [
       `SET @${stmt.name} = <scalar expression>`,
       "  value:         \u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF08\u30D0\u30C3\u30C1\u5185\u5B9A\u6570\u30FB\u7D50\u679C\u30E1\u30BF\u30C7\u30FC\u30BF\u306B\u306F\u975E\u516C\u958B\uFF09"
+    ];
+  }
+  if (stmt.type === "DECLARE_VARIABLE") {
+    return [
+      `DECLARE @${stmt.name} = <default scalar expression>`,
+      "  value:         \u5916\u90E8\u6CE8\u5165\u304C\u3042\u308C\u3070\u63A1\u7528\u3001\u306A\u3051\u308C\u3070\u65E2\u5B9A\u5024\u3092\u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF08\u5024\u306F\u975E\u516C\u958B\uFF09"
     ];
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS\uFF08\u30A2\u30D7\u30EA\u4E00\u89A7\u306E\u53D6\u5F97\uFF09"];
@@ -39611,6 +39681,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   }
   async function query(input, validated) {
     const validation = validated ?? await validate(input);
+    if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
+      throw new Error("ArgumentError: variables require a batch containing DECLARE.");
+    }
     if (validation.batch) {
       if (validation.containsDml) {
         throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
@@ -39637,7 +39710,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         // バッチでは timeout を合計タイムアウトとして扱う（仕様 §5.7）。
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
-        timeoutMs: runtime2.timeout
+        timeoutMs: runtime2.timeout,
+        variables: input.variables
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
@@ -39726,6 +39800,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
+      variables: input.variables,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
           throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
@@ -39754,6 +39829,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   async function mutate(input, validated) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
     const validation = validated ?? await validate(input);
+    if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
+      throw new Error("ArgumentError: variables require a batch containing DECLARE.");
+    }
     if (validation.batch) {
       return mutateBatch(input, validation, dmlMaxRows);
     }
@@ -39976,7 +40054,8 @@ var queryInputSchema = external_exports.object({
   tempTableMaxRows,
   timeout,
   continueOnError: external_exports.boolean().describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).").optional(),
-  maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional()
+  maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional(),
+  variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
 var mutateInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"),
@@ -39987,7 +40066,8 @@ var mutateInputSchema = external_exports.object({
   fetchParallel,
   tempTableMaxRows,
   timeout,
-  dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional()
+  dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional(),
+  variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
 var describeAppInputSchema = external_exports.object({
   app: external_exports.number().int().positive().describe("kintone app ID to describe."),
@@ -40076,7 +40156,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.3.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.4.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

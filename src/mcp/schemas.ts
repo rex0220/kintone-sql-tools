@@ -53,6 +53,9 @@ export const queryInputSchema = z.object({
   maxTotalRecords: z.number().int().positive()
     .describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).")
     .optional(),
+  variables: z.record(z.string(), z.string())
+    .describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.")
+    .optional(),
 });
 
 export const mutateInputSchema = z.object({
@@ -70,6 +73,9 @@ export const mutateInputSchema = z.object({
   timeout,
   dmlTotalMaxRows: z.number().int().positive()
     .describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.")
+    .optional(),
+  variables: z.record(z.string(), z.string())
+    .describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.")
     .optional(),
 });
 

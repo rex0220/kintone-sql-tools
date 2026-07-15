@@ -523,3 +523,18 @@ test("バッチ EXPLAIN: SET サブクエリ内の先行変数をプレースホ
   expect(text).toContain("@target");
   expect(text).not.toMatch(/variable @target is not defined/);
 });
+
+test("バッチ EXPLAIN: DECLARE は値を表示せず、注入名を事前照合する", () => {
+  const plans = buildBatchExplainPlans(
+    "DECLARE @since = '2026-01-01'; SELECT * FROM APP100 WHERE 登録日 >= @since",
+    { Since: "secret-value" }
+  );
+  const text = plans.statements[0].plan.join("\n");
+  expect(plans.statements[0].type).toBe("DECLARE_VARIABLE");
+  expect(text).toContain("DECLARE @since");
+  expect(text).not.toContain("secret-value");
+  expect(() => buildBatchExplainPlans(
+    "DECLARE @since = '2026-01-01'; SELECT * FROM APP100 WHERE 登録日 >= @since",
+    { typo: "x" }
+  )).toThrow(/@typo is not declared/);
+});

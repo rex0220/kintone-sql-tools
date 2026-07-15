@@ -24,6 +24,7 @@ export type Statement =
   | CreateTempTableStatement
   | DropTempTableStatement
   | SetVariableStatement
+  | DeclareVariableStatement
   | AssertStatement;
 
 // ------------------------------------------------------------
@@ -83,6 +84,14 @@ export interface SetVariableStatement {
   /** @ を除き、小文字へ正規化した名前 */
   name: string;
   expr: ScalarExpr;
+}
+
+export interface DeclareVariableStatement {
+  type: "DECLARE_VARIABLE";
+  /** @ を除き、小文字へ正規化した名前 */
+  name: string;
+  /** 外部注入が無い場合だけ評価する既定値式 */
+  default: Exclude<ScalarExpr, ScalarSubquery>;
 }
 
 /** SET RHS 専用。ScalarArithExpr はパーサーがフィールド参照を拒否する。 */

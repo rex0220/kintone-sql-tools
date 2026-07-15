@@ -492,6 +492,9 @@ export function createKsqlMcpTools(
     validated?: ValidationResult
   ): Promise<Record<string, unknown>> {
     const validation = validated ?? await validate(input);
+    if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
+      throw new Error("ArgumentError: variables require a batch containing DECLARE.");
+    }
 
     // read-only バッチ（複文）の実行（フェーズ1 S6）
     if (validation.batch) {
@@ -521,6 +524,7 @@ export function createKsqlMcpTools(
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime.timeout,
+        variables: input.variables,
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
@@ -633,6 +637,7 @@ export function createKsqlMcpTools(
       tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
+      variables: input.variables,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
           throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
@@ -668,6 +673,9 @@ export function createKsqlMcpTools(
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
 
     const validation = validated ?? await validate(input);
+    if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
+      throw new Error("ArgumentError: variables require a batch containing DECLARE.");
+    }
     if (validation.batch) {
       return mutateBatch(input, validation, dmlMaxRows);
     }

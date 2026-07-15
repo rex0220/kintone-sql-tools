@@ -16,6 +16,7 @@ import {
   parseSqlStatement,
   parseSqlStatements,
   analyzeBatch,
+  normalizeBatchVariableName,
   type BatchAnalysis,
   type BatchExecuteResult,
   type BatchStatementResult,
@@ -77,6 +78,7 @@ Options:
   -f, --file <path>          Execute SQL file
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
+  --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
@@ -202,6 +204,7 @@ interface ParsedArgs {
   password: string | null;
   token: string | null;
   tokenMap: Record<string, string>;
+  variables: Record<string, string>;
   tokenFile: string | null;
   app: number | null;
   diagRecordId: number | null;
@@ -253,6 +256,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     password: null,
     token: null,
     tokenMap: {},
+    // `__proto__` も有効な変数名なので prototype のない辞書で保持する。
+    variables: Object.create(null) as Record<string, string>,
     tokenFile: null,
     app: null,
     diagRecordId: null,
@@ -301,6 +306,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (a === "--continue-on-error") { out.continueOnError = true; continue; }
 
     const v = argv[i + 1];
+    if (a === "--var") {
+      const raw = v ?? "";
+      const eq = raw.indexOf("=");
+      if (eq < 0) throw new Error("ArgumentError: --var must use name=value.");
+      const rawName = raw.slice(0, eq);
+      const name = normalizeBatchVariableName(rawName);
+      if (Object.prototype.hasOwnProperty.call(out.variables, name)) {
+        throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
+      }
+      out.variables[name] = raw.slice(eq + 1);
+      i++;
+      continue;
+    }
     if (a === "-e" || a === "--execute") { out.executeSql = v ?? ""; i++; continue; }
     if (a === "-f" || a === "--file") { out.filePath = v ?? ""; i++; continue; }
     if (a === "--config") { out.configPath = v ?? ""; i++; continue; }
@@ -933,6 +951,7 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   const argv: string[] = ["-e", sql];
   if (dryRun) argv.push("--dry-run");
   if (format) argv.push("--format", format);
+  for (const [name, value] of Object.entries(base.variables)) argv.push("--var", `${name}=${value}`);
 
   pushOpt(argv, "--config", base.configPath);
   pushOpt(argv, "--profile", base.profile);
@@ -1621,6 +1640,10 @@ async function run(): Promise<number> {
   };
 
   const appIds = sql ? extractAppIds(sql) : [];
+  if (!isBatchSql && Object.keys(args.variables).length > 0) {
+    process.stderr.write("ArgumentError: --var requires a batch containing DECLARE.\n");
+    return 2;
+  }
   const defaultApp = args.app ?? envInt("KSQL_APP") ?? profile.app ?? null;
   if (appIds.length === 0 && defaultApp !== null) appIds.push(defaultApp);
   const allowNoFromSelect = isNoFromSelectStatement(parsedStmt) || stmtType === "SHOW_APPS";
@@ -1639,7 +1662,7 @@ async function run(): Promise<number> {
       // バッチ dry-run: 全文のプランを表示して終了（kintone アクセスなし。DML 込みでも可）
       let plans: ReturnType<typeof buildBatchExplainPlans>;
       try {
-        plans = buildBatchExplainPlans(sql!);
+        plans = buildBatchExplainPlans(sql!, args.variables);
       } catch (err) {
         const restored = sourceSql && sqlDiagnosticContext
           ? restoreSqlContextError(err, sourceSql, {
@@ -1974,6 +1997,7 @@ async function run(): Promise<number> {
         continueOnError: args.continueOnError,
         tempTableMaxRows,
         timeoutMs: timeout,
+        variables: args.variables,
         confirm: batchContainsDml
           ? async (count, operation) => {
             if (count > dmlMaxRows) {

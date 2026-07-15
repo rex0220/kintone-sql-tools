@@ -154,6 +154,7 @@ Options:
   -f, --file <path>          Execute SQL file
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
+  --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
