@@ -1,9 +1,10 @@
 # 課題: kintone 検索打ち切り（10 万件）警告 `X-Cybozu-Warning` の検出（P0）
 
 - 作成日: 2026-07-15
-- ステータス: **課題（独立・KLIKE v1 をブロックしない）**
+- ステータス: **仕様案 R2（実装着手可）。FROM なし実体化バグ（[ksql_fromless_select_materialize_bug.md](ksql_fromless_select_materialize_bug.md)）と同一 minor バージョンで対応（ユーザー指示）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
-- 位置づけ: **KLIKE（[ksql_klike_native_search_spec.md](ksql_klike_native_search_spec.md)）の親 DML 解禁の必須ゲート**、かつ **SELECT の安全性強化**。KLIKE v1（SIMPLE SELECT 限定・全 DML 拒否）は本課題の完成を待たずにリリース可。
+- 位置づけ: **KLIKE（v2.8/v2.9 リリース済）の親 DML 解禁の必須ゲート**、かつ **SELECT の安全性強化**（現状 KLIKE は大規模アプリで 10 万件超の一致がサイレントに欠落する）。KLIKE v1/v2 はこの検出なしでもリリース済（SELECT は完全結果非保証を文書化・DML は全拒否で安全）。
+- **plugin 方針（確定）**: `kintone.api()` はヘッダー非露出のため、**まず Node/CLI/MCP で検出**（`X-Cybozu-Warning`）、**plugin は当面「検索打ち切りを検出しない」と明記**（案b）。plugin の raw fetch 化（案a）は後続の別作業。
 - 関連コード: `src/api/fetchAll.ts`（`KintoneGetResponse` / `fetchAll`）、`src/cli/nodeKintoneClient.ts`（`requestJson`・`getRecords`）、`src/ui/kintoneClient.ts`（`api()` / `getRecords`）、SELECT の警告伝播（`executeFullScanSelect` / SIMPLE 取得経路の `warnings`）
 
 ## 0. 課題
