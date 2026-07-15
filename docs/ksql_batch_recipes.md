@@ -195,27 +195,29 @@ SELECT * FROM #before;
 
 ## R5. リテラル値リストを一時テーブル化して一括処理
 
-外部（承認リスト・CSV・別システム）由来の **ID / コードの集合**を対象に、ゲート → 書き込みする。値リストを **`FROM` なしの `SELECT … UNION ALL …`** で一時テーブルに実体化し、`ASSERT` と **`INSERT … SELECT` / `UPSERT … SELECT`** から **`IN (SELECT id FROM #t)`** で参照する（リストを 1 箇所に集約）。
+外部（CSV・別システム）由来の **固定リスト**を **`FROM` なしの `SELECT … UNION ALL …`** で一時テーブルに実体化し、ゲート → 取り込み（`UPSERT … SELECT`）する。一時テーブルは、**`ASSERT` からは `IN` サブクエリ／`COUNT`** で、**`INSERT … SELECT` / `UPSERT … SELECT` からは `FROM` ソース**として再利用する。
 
 ```sql
--- 1) 対象 ID を一時テーブルに実体化（リストはここ1箇所だけ）
-CREATE TEMP TABLE #targets AS
-  SELECT '1001' AS id
-  UNION ALL SELECT '1005'
-  UNION ALL SELECT '1012';
+-- 1) 外部リストを一時テーブルに実体化（書き込み可能キー「取引先コード」と値を持つ）
+CREATE TEMP TABLE #incoming AS
+  SELECT '1001' AS 取引先コード, '完了' AS 状態
+  UNION ALL SELECT '1005', '完了'
+  UNION ALL SELECT '1012', '完了';
 
--- 2) 事前ゲート: 対象に「取消」状態が混ざっていないことを確認（ASSERT のサブクエリは #t 参照可）
-ASSERT (SELECT COUNT(*) FROM APP100
-        WHERE $id IN (SELECT id FROM #targets) AND 状態 = '取消') = 0;
+-- 2) 事前ゲート: 取り込み件数を確認（ASSERT は COUNT で #t を参照）
+ASSERT (SELECT COUNT(*) FROM #incoming) BETWEEN 1 AND 1000;
 
--- 3) 書き込み: 対象を処理ログへ UPSERT（INSERT/UPSERT … SELECT は #t を参照できる）
-UPSERT INTO APP_LOG (対象ID, 状態) SELECT id, '完了' FROM #targets;
+-- 3) 取り込み: 書き込み可能キーで登録/更新（UPSERT … SELECT は #t を FROM ソースに）
+UPSERT INTO APP100 (取引先コード, 状態)
+  SELECT 取引先コード, 状態 FROM #incoming
+  ON DUPLICATE (取引先コード);
 ```
 
-- **DRY**: 対象リストを `#targets` の 1 箇所に集約し、`ASSERT` と `INSERT … SELECT` / `UPSERT … SELECT` から再利用する。
-- **重要な制約 — `UPDATE` / `DELETE` は一時テーブルをサブクエリ参照できない**（`… WHERE $id IN (SELECT id FROM #t)` は実行前に拒否。注意の「一時テーブル参照の非対称」参照）。**対象アプリの行を直接書き換える場合**は、(a) `INSERT … SELECT` / `UPSERT … SELECT` でモデル化する（推奨・上記）か、(b) `UPDATE APP100 SET 状態='完了' WHERE $id IN ('1001','1005','1012')` のように **`UPDATE` 側ではリストを直接 `IN (...)` に再掲**する。
+- **DRY**: 外部リストを `#incoming` の 1 箇所に集約し、`ASSERT`（`COUNT` / `IN` サブクエリ）と `UPSERT … SELECT`（`FROM` ソース）から再利用する。
+- **`UPSERT` にはキーが必須**: `ON DUPLICATE (キーフィールド)` が必要で、キーは**アプリ側の書き込み可能フィールド**（例: `取引先コード` / `外部ID`）。**システムフィールド `$id` は UPSERT キーにできない**。
+- **重要な制約 — `UPDATE` / `DELETE` は一時テーブルをサブクエリ参照できない**（`… WHERE $id IN (SELECT id FROM #t)` は実行前に拒否。注意の「一時テーブル参照の非対称」参照）。**対象アプリの既存行を `$id` で更新/削除**したい場合は、`UPDATE APP100 SET 状態='完了' WHERE $id IN ('1001','1005','1012')` のように **`UPDATE` / `DELETE` 側ではリストを直接 `IN (...)` に再掲**する（この経路では一時テーブルの DRY は効かない）。
 - **セキュリティ（自動バインドではない）**: 上記の値は **SQL 文中にリテラルとして記述**しており、kSQL が外部リストを自動でバインドする機能ではない。外部値から SQL を生成する場合は、**ID を数字だけに検証**するか、**文字列リテラルの `'` を `''` にエスケープ**すること（誤ればインジェクションが起こり得る）。
-- **kintone 内から導ける集合**なら `#targets` を使わず直接 `IN (SELECT … FROM APPxxx WHERE …)` の方が簡単。R5 は **kintone 外由来の固定リスト**が対象。
+- **kintone 内から導ける集合**なら `#incoming` を使わず直接 `IN (SELECT … FROM APPxxx WHERE …)` の方が簡単。R5 は **kintone 外由来の固定リスト**が対象。
 - **前提バージョン**: `CREATE TEMP TABLE AS <FROM なし SELECT / UNION>` の実体化は **v2.10.0 以降**（それ以前は 0 行になる不具合があった）。
 
 ---
