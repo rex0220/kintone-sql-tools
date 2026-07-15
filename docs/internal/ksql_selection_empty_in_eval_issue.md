@@ -1,7 +1,7 @@
 # 課題+仕様: 選択系フィールドの `IN ('')` / `NOT IN ('')` 空セル評価の SIMPLE/FULL_SCAN 乖離
 
 - 作成日: 2026-07-15
-- ステータス: **課題+仕様案 R1（codex レビュー前）**
+- ステータス: **課題+仕様案 R2（codex レビュー反映・案B 採用で実装着手可）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 位置づけ: フェーズ1（[ksql_fullscan_in_typed_eval_spec.md](ksql_fullscan_in_typed_eval_spec.md)・v2.5.0）の空セル意味論の隙間。空セル数値 −∞（[evalwhere-empty-cell-numeric] v2.2.0）と同種の「SIMPLE/FULL_SCAN 空セル乖離」。選択系 IN 押し下げ フェーズ2a（[ksql_selection_in_pushdown_spec.md](ksql_selection_in_pushdown_spec.md)）と**同じ v2.6.0 に束ねる**（ユーザー指示）。
 - 関連コード: `src/engine/evalWhere.ts`（`typedInContains`:152 / `evalOp` の IN 経路:109）、`src/engine/process.ts`（`flatten`:64・69）
@@ -34,36 +34,49 @@ kintone は選択系フィールドの `field in ("")` を**空/未設定セル�
 
 選択系フィールドで、**空/未設定セルは `IN ('')` に一致し、`NOT IN ('')` に一致しない**（kintone SIMPLE と同一）。非空セルは不変。テキスト/数値は不変。
 
-## 3. 修正案（2 案・要 codex 判断）
+## 3. 修正方式（**案B 採用**・codex レビュー R2）
 
-### 案A（`typedInContains` に局所化・projection 不変）
-`typedInContains` に「空セル判定」を追加し、IN 値集合が空文字 `""` を含むときだけ空セルを一致させる:
-- **配列選択型**: `parsed` が空配列 `[]` かつ `values.has("")` → true。
-- **スカラー選択型**（DROP_DOWN/RADIO/STATUS）: 空表現（`leftStr === '""'`＝JSON 化された空、または `leftStr === ""`）かつ `values.has("")` → true。
-- 長所: 変更が IN 評価に閉じる。SELECT 投影・他比較は不変。
-- 短所: スカラー空を `leftStr === '""'`（2 文字）で判定するのがやや脆い（選択肢値が文字通り `""` の稀ケースと衝突し得るが、実用上ほぼ無い）。
+### 採用: 案B ＝ `flatten` の null 正規化 ＋ `typedInContains` の空配列補完
+- **`flatten`（[process.ts:69](../../src/engine/process.ts#L69)）を `val == null ? "" : (typeof val === "string" ? val : JSON.stringify(val))` に変更**＝**null/undefined を `""`(0 文字)へ正規化**（現状 `JSON.stringify(null ?? "")` が `""`(2 文字)を生む点を是正）。空スカラー → `""`(0 文字) → スカラー経路 `values.has("")` が自然に真。
+- **配列空は `typedInContains`（[evalWhere.ts:152](../../src/engine/evalWhere.ts#L152)）で補完**（空配列は kintone が `[]` を返し null でないため flatten 変更の影響外）。**JSON parse と型別の形検証を通した後にのみ** `if (parsed.length === 0 && values.has("")) return true;` を適用（点3）。`NOT IN` は既存 `!contains` で自然反転。
 
-### 案B（`flatten` の null 正規化 ＋ `typedInContains` 配列空）
-- `flatten` を `val == null ? "" : (typeof val === "string" ? val : JSON.stringify(val))` に変更＝**null/undefined を `""`(0 文字)へ正規化**（現状 `JSON.stringify(null ?? "")` が `""`(2 文字)を生む点を是正）。これでスカラー空 → `""`(0 文字) → `values.has("")` が自然に真。
-- 配列空は案A と同じく `typedInContains` で対応（配列は null でなく `[]` のため flatten 変更の影響外）。
-- 長所: 空スカラーの **SELECT 投影も `""`(2 文字)→空** に是正され、より正しい表示。スカラー IN が自然に解決。
-- 短所: **投影・他経路への波及**（null 値フィールドの表示が `""`→空に変わる）。回帰確認が広い。空配列の別扱いは依然必要。
+### 案A を採らない理由（codex 点1・Medium）
+案A のスカラー空判定 `leftStr === '""'`(2 文字) は、**実際の選択肢コードが文字通り 2 文字の `""` だった場合と区別できない**（flatten で null が `""`(2 文字)へ変換された後は実値と空セルが同一表現）。案A はその実値まで `IN ('')` に誤一致させる。案B は **null のうちに 0 文字へ正規化**するため、この曖昧性を作らない。
 
-**推奨**: まず **案A**（局所・低リスク）で SIMPLE/FULL_SCAN 乖離を解消。flatten の null→`""`(2 文字)是正（案B の投影改善）は**別の表示課題**として切り出す（IN 乖離修正のクリティカルパスに載せない）。
+### 案B は「新意味論」でなく「整合修正」（codex 点2・Medium）
+`flatten` の値は投影だけでなく **JOIN / GROUP BY / DISTINCT / ORDER BY / CASE / WHERE / CTE・一時テーブル化** に使われる（[execute.ts:1064](../../src/execute.ts#L1064) / [process.ts:856,862](../../src/engine/process.ts#L856)）。一方、**サブテーブル側 `toFlatString`（[subtableAdapter.ts:56](../../src/converter/subtableAdapter.ts#L56)）は既に null/undefined を 0 文字の空文字へ正規化済み**。よって案B は新しい意味論ではなく、**トップレベルとサブテーブルの表現不整合の是正**。§5 の回帰固定で安全に採用できる。
+
+### 空配列補完の位置（codex 点3・Low）
+`typedInContains` の各型分岐で、**`JSON.parse` 成功 ＋ `Array.isArray` ＋ 要素形検証を通した後**に `parsed.length === 0 && values.has("")` を判定する。これにより malformed JSON のフォールバックや、テキスト値 `"[]"`（型メタなし＝フォールバック経路）を壊さない。
 
 ## 4. スコープと非対象
 - **対象**: DROP_DOWN / RADIO_BUTTON / CHECK_BOX / MULTI_SELECT / USER / 組織 / グループ / 作業者（STATUS_ASSIGNEE）の `IN ('')` / `NOT IN ('')` 空セル一致。`evalWhere` の全 JS 評価経路（WHERE/HAVING/CASE WHEN/サブテーブル DML）。
 - **STATUS**: スカラー同様に扱うが、プロセス管理無効時は SIMPLE 側が GAIA_ST02 で基準を取れない（有効アプリでの確認は将来）。
-- **非対象**: テキスト/数値の `IN ('')`（既に一致・不変）。空文字以外の値（フェーズ1 のまま）。押し下げ（`IN ('')` は Phase 2a で非押下のまま＝`''` は optionOrder 非在・STATUS は GAIA_ST02 回避。JS 側が正しく評価するので機能欠落なし）。flatten の投影是正（案B・別課題化）。
+- **含む（案B の副次的是正）**: flatten の null→0 文字正規化により、空スカラー選択の **SELECT 投影が `""`(2 文字)→空** に是正される（サブテーブルと整合）。§5.9-14 で回帰固定。
+- **非対象**: テキスト/数値の `IN ('')`（既に一致・不変）。空文字以外の値（フェーズ1 のまま）。押し下げ（`IN ('')` は Phase 2a で非押下のまま＝`''` は optionOrder 非在・STATUS は GAIA_ST02 回避。JS 側が正しく評価するので機能欠落なし）。
 
 ## 5. 受入
+
+### IN 空セル一致（本題）
 1. **`IN ('')` == 空/未設定セル**（DROP_DOWN/RADIO/CHECK_BOX/MULTI_SELECT/USER 系）で SIMPLE==FULL_SCAN（APP4221: 1,2,3,4）。
 2. **`NOT IN ('')` == 非空セル**で SIMPLE==FULL_SCAN（5,6）。空セルは NOT IN で除外。
 3. **混在** `IN ('', 'd1')` は空セル ∪ d1（1,2,3,4,5）。
 4. **非空値の IN/NOT IN は不変**（フェーズ1 の全型評価が回帰なし）。
 5. **テキスト/数値の `IN ('')` は不変**（空テキスト一致・型メタなしフォールバック維持）。
 6. **NOT IN の空配列包含**（フェーズ1）と両立（`複数選択 NOT IN ('M2')` は空も含む）。
-7. Phase 2a 非退行: `IN ('')` は EXPLAIN 候補にならず非押下のまま（`value.value !== ""` ガード）。
+7. **`IN (SELECT ...)` の結果集合に空文字 `""` を含む**場合も、空セルが一致（`typedInContains` の空配列補完・スカラー `values.has("")` が SUBQUERY_IN_LIST 経路でも効く）。
+8. **CASE / サブテーブル DML の空セル**（`evalWhere` の全 JS 評価経路）で同じ空セル意味論。
+
+### flatten null 正規化の回帰固定（案B の波及・codex 点2）
+9. **null の SELECT 投影が 0 文字の空文字**（空スカラー選択が `""`(2 文字)→空表示）。
+10. **null 同士の JOIN・GROUP BY・DISTINCT**（空キー同士が正しくグルーピング/結合。`""`(2 文字) 依存の既存挙動がないこと）。
+11. **空セルの CASE / WHERE**（`= ''` 等の比較・条件分岐が空を空として扱う）。
+12. **サブテーブルとトップレベルで同じ表現**（`toFlatString` と `flatten` が null を同一の 0 文字へ）。
+13. **LEFT JOIN 欠損側**（右側が存在しない行の値が 0 文字の空文字で、`IN ('')`/比較が一貫）。
+14. **テキスト・数値・非空値は不変**（string/number/array 値は従来どおり）。
+
+### Phase 2a 非退行
+15. `IN ('')` は EXPLAIN 候補にならず非押下のまま（`value.value !== ""` ガード）。JS 側でこの修正が効き、押し下げと独立に SIMPLE==FULL_SCAN が回復。
 
 ## 6. 進め方
-- 案A/案B を codex レビューで確定 → 実装（`typedInContains` に空セル一致・案A）→ 実装レビュー（コードで裏取り）→ 実機（APP4221 で SIMPLE==FULL_SCAN）→ **v2.6.0 に Phase 2a と束ねてリリース**。
+- **案B 確定**（codex R2 承認）→ codex 実装（`flatten` の null→0 文字正規化 ＋ `typedInContains` の空配列補完・形検証後）→ 実装レビュー（コードで裏取り・§5 回帰固定）→ 実機（APP4221 で `IN ('')`/`NOT IN ('')` の SIMPLE==FULL_SCAN・投影是正）→ **v2.6.0 に Phase 2a と束ねてリリース**。
