@@ -533,7 +533,18 @@ FROM APP100
 WHERE 件名 NOT KLIKE '保留'
 ```
 
-- `LIKE` はkSQLのワイルドカード／部分一致をJavaScriptで評価します。`KLIKE` はkintoneのキーワード検索であり、半角・全角、大小文字、単語分割などの一致規則はkintoneに準拠します。
+- `LIKE` はkSQLのワイルドカード／部分一致をJavaScriptで評価します。`KLIKE` はkintoneのキーワード検索であり、半角・全角、大小文字、単語分割などの一致規則はkintoneに準拠します。**SQLの部分一致とは異なる**点に注意してください。
+  - **一致はスクリプト依存**（実機挙動の例）。**英数字は単語（トークン）単位**で、語の一部では一致しません。**空白は語の区切り**です。**日本語は部分／前方一致**が効きます。
+
+    | 検索 | 対象の値 | 一致 |
+    |---|---|---|
+    | `KLIKE 'TOKYO'` | `TOKYO TO` | ○（空白区切りの語 `TOKYO`） |
+    | `KLIKE 'TOK'` | `TOKYO TO` | ×（語の一部では一致しない） |
+    | `KLIKE 'A'` | `A1` | ×（`A1` で1語） |
+    | `KLIKE '丸の'` | `丸の内` / `丸の内町` | ○（日本語は部分一致） |
+
+  - 迷ったら、確実に部分一致させたい場合は `LIKE`（JavaScript評価・FULL_SCAN）を、kintone側で高速に絞り込みたい場合は `KLIKE` を使い分けてください。
+- **性能**: `LIKE` を含むSELECTは全件取得（FULL_SCAN）になり、大規模アプリでは取得上限（`maxRecords`）に達してエラーになりがちです。`KLIKE` はSIMPLEのままkintone側で検索するため、大規模アプリでも高速です（例: 数十万件規模のアプリで `都道府県 LIKE '%東京%'` は上限エラー、`都道府県 KLIKE '東京都'` は即応）。ただし下記の10万件打ち切りに注意。
 - v1では **SIMPLE SELECTのWHERE句だけ**で使用できます。JOIN、GROUP BY、DISTINCT、集計、式を使うORDER BY、サブテーブル、または `LIKE`・関数・算術式等との混在によってFULL_SCANになるSELECTでは使用できません。
 - 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
 - v1ではUPDATE、DELETE、INSERT ... SELECT、UPSERT ... SELECT、REORDERを含むすべてのDMLで使用できません。
