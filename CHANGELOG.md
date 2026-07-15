@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## Unreleased — KLIKE プレフィルタ押し下げ
+## v2.9.0（2026-07-15）— KLIKE プレフィルタ押し下げ
 
 ### 追加（最適化）
 

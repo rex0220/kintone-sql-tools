@@ -34017,6 +34017,235 @@ function isAggregateSyntheticName(name) {
   return /^(COUNT|SUM|AVG|MAX|MIN)\(/i.test(name);
 }
 
+// src/core/cteInlining.ts
+function canInlineSingleCte(stmt) {
+  if (stmt.ctes.length !== 1) return false;
+  const cteDef = stmt.ctes[0];
+  if (cteDef.query.type !== "SELECT" || resolveSelectMode(cteDef.query) !== "SIMPLE") return false;
+  const finalQuery = stmt.query;
+  if (finalQuery.type !== "SELECT") return false;
+  if (finalQuery.from.cteName !== cteDef.name || finalQuery.joins.length > 0) return false;
+  if (finalQuery.groupBy.length > 0 || finalQuery.distinct) return false;
+  return !finalQuery.columns.some(
+    (column) => column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
+  );
+}
+function buildInlinedQuery(stmt) {
+  const cteBody = stmt.ctes[0].query;
+  const final = stmt.query;
+  const finalWhere = stripCteAlias(final.where, final.from.alias);
+  const where = cteBody.where === null ? finalWhere : finalWhere === null ? cteBody.where : { type: "LOGICAL", op: "AND", left: cteBody.where, right: finalWhere };
+  const columns = final.columns.every((column) => column.type === "WILDCARD") ? cteBody.columns : final.columns;
+  return {
+    type: "SELECT",
+    from: cteBody.from,
+    joins: [],
+    columns,
+    where,
+    groupBy: [],
+    having: null,
+    orderBy: final.orderBy.length > 0 ? final.orderBy : cteBody.orderBy,
+    limit: final.limit ?? cteBody.limit,
+    offset: final.offset ?? cteBody.offset,
+    distinct: false
+  };
+}
+function stripCteAlias(where, alias) {
+  if (where === null || alias === null) return where;
+  switch (where.type) {
+    case "BINARY":
+      return { ...where, left: stripCteAliasFromFieldValue(where.left, alias) };
+    case "NULL_CHECK":
+      return { ...where, field: stripCteAliasFromFieldValue(where.field, alias) };
+    case "LOGICAL":
+      return {
+        ...where,
+        left: stripCteAlias(where.left, alias),
+        right: stripCteAlias(where.right, alias)
+      };
+    case "NOT":
+    case "GROUP":
+      return { ...where, expr: stripCteAlias(where.expr, alias) };
+    case "EXISTS":
+      return where;
+  }
+}
+function stripCteAliasFromFieldValue(value, alias) {
+  if (value.type === "FIELD" && value.tableAlias === alias) {
+    return { ...value, tableAlias: null };
+  }
+  return value;
+}
+
+// src/core/optimization/wherePredicatePushdown.ts
+function extractSafePushdownLeaves(where, options = {}) {
+  return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
+}
+function extractTypedPushdownCandidates(where, options = {}) {
+  return extractAndLeaves(
+    where,
+    (expr) => isNumericCandidate(expr, options) || isSelectionInCandidate(expr, options)
+  );
+}
+function extractAndLeaves(where, accept) {
+  switch (where.type) {
+    case "BINARY":
+      return accept(where) ? where : null;
+    case "LOGICAL":
+      if (where.op !== "AND") return null;
+      {
+        const left = extractAndLeaves(where.left, accept);
+        const right = extractAndLeaves(where.right, accept);
+        if (left && right) return { ...where, left, right };
+        return left ?? right ?? null;
+      }
+    case "GROUP":
+      return extractAndLeaves(where.expr, accept);
+    case "NULL_CHECK":
+    case "NOT":
+    case "EXISTS":
+      return null;
+  }
+}
+function isSafeComparison(expr, options) {
+  if (isKlikeComparison(expr, options)) return true;
+  if (isSafeIdComparison(expr, options)) return true;
+  if (isNumericCandidate(expr, options)) {
+    return options.fieldTypes?.get(expr.left.field) === "NUMBER";
+  }
+  return isSelectionInComparison(expr, options);
+}
+function isKlikeComparison(expr, options) {
+  if (options.allowKlike === false) return false;
+  if (expr.op !== "KLIKE" && expr.op !== "NOT_KLIKE") return false;
+  if (expr.left.type !== "FIELD" || !isTargetField(expr.left, options)) return false;
+  return expr.right.type === "STRING" || options.allowUnresolvedKlikeVariables === true && expr.right.type === "VARIABLE";
+}
+var SELECTION_IN_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "STATUS"
+]);
+function isSelectionInComparison(expr, options) {
+  if (!isSelectionInCandidate(expr, options)) return false;
+  if (expr.left.type !== "FIELD" || expr.right.type !== "IN_LIST") return false;
+  const fieldType = options.fieldTypes?.get(expr.left.field);
+  if (fieldType === void 0 || !SELECTION_IN_FIELD_TYPES.has(fieldType)) return false;
+  const validOptions = options.fieldOptions?.get(expr.left.field);
+  if (validOptions === void 0) return false;
+  return expr.right.values.every(
+    (value) => value.type === "STRING" && value.value !== "" && validOptions.has(value.value)
+  );
+}
+function isSafeIdComparison(expr, options) {
+  if (!isTargetIdField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  return expr.op === "=" || expr.op === ">" || expr.op === "<" || expr.op === ">=" || expr.op === "<=";
+}
+function isTargetIdField(field, options) {
+  if (field.type !== "FIELD" || field.field !== "$id") return false;
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
+}
+function isNumericCandidate(expr, options) {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  if (expr.op === "=") return true;
+  return (expr.op === "<" || expr.op === ">") && Number.isSafeInteger(expr.right.value);
+}
+function isSelectionInCandidate(expr, options) {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.op !== "IN" && expr.op !== "NOT_IN") return false;
+  if (expr.right.type !== "IN_LIST" || expr.right.values.length === 0) return false;
+  return expr.right.values.every((value) => value.type === "STRING" && value.value !== "");
+}
+function isTargetField(field, options) {
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
+}
+
+// src/core/optimization/klikePushdownPlan.ts
+function buildKlikePushdownPlan(stmt, options = {}) {
+  const joinsAreSafeForKlike = stmt.joins.every((join) => join.type === "INNER");
+  const common = {
+    allowKlike: joinsAreSafeForKlike,
+    allowUnresolvedKlikeVariables: options.allowUnresolvedVariables
+  };
+  let mainCondition = null;
+  if (stmt.where !== null && !stmt.from.subtableCode && stmt.from.cteName === null) {
+    if (stmt.joins.length === 0) {
+      mainCondition = extractSafePushdownLeaves(stmt.where, {
+        ...common,
+        tableAlias: stmt.from.alias ?? void 0,
+        allowUnqualifiedFields: true,
+        fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
+        fieldOptions: options.fieldOptionsByApp?.get(stmt.from.appId)
+      });
+    } else if (stmt.from.alias) {
+      mainCondition = extractSafePushdownLeaves(stmt.where, {
+        ...common,
+        tableAlias: stmt.from.alias,
+        fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
+        fieldOptions: options.fieldOptionsByApp?.get(stmt.from.appId)
+      });
+    }
+  }
+  const joinConditions = /* @__PURE__ */ new Map();
+  if (stmt.where !== null) {
+    for (const join of stmt.joins) {
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const condition = extractSafePushdownLeaves(stmt.where, {
+        ...common,
+        tableAlias: join.table.alias,
+        fieldTypes: options.fieldTypesByApp?.get(join.table.appId),
+        fieldOptions: options.fieldOptionsByApp?.get(join.table.appId)
+      });
+      if (condition !== null) joinConditions.set(join.table.alias, condition);
+    }
+  }
+  const appliedKlikes = /* @__PURE__ */ new Set();
+  collectKlikes(mainCondition, appliedKlikes);
+  for (const condition of joinConditions.values()) collectKlikes(condition, appliedKlikes);
+  const allKlikes = /* @__PURE__ */ new Set();
+  collectKlikes(stmt.where, allKlikes);
+  return {
+    mainCondition,
+    joinConditions,
+    appliedKlikes,
+    allKlikes: [...allKlikes]
+  };
+}
+function unappliedKlikes(plan) {
+  return plan.allKlikes.filter((expr) => !plan.appliedKlikes.has(expr));
+}
+function collectKlikes(where, out) {
+  if (where === null) return;
+  if (isKlike(where)) {
+    out.add(where);
+    return;
+  }
+  switch (where.type) {
+    case "LOGICAL":
+      collectKlikes(where.left, out);
+      collectKlikes(where.right, out);
+      return;
+    case "NOT":
+    case "GROUP":
+      collectKlikes(where.expr, out);
+      return;
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS":
+      return;
+  }
+}
+
 // src/core/klikeValidation.ts
 var KlikeValidationError = class extends Error {
   constructor(message) {
@@ -34026,6 +34255,13 @@ var KlikeValidationError = class extends Error {
 };
 function validateKlikeStatement(stmt) {
   validateStatement(stmt);
+}
+function validateKlikePushdownPlan(plan) {
+  if (unappliedKlikes(plan).length > 0) {
+    throw new KlikeValidationError(
+      "FULL_SCAN \u306E KLIKE / NOT KLIKE \u3092\u5B89\u5168\u306B\u62BC\u3057\u4E0B\u3052\u3089\u308C\u307E\u305B\u3093\u3002OR / NOT \u914D\u4E0B\u3001CTE\u30FB\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3001LEFT / RIGHT JOIN \u3092\u78BA\u8A8D\u3057\u3066\u304F\u3060\u3055\u3044"
+    );
+  }
 }
 function validateStatement(stmt) {
   switch (stmt.type) {
@@ -34058,7 +34294,7 @@ function validateStatement(stmt) {
     case "REORDER":
       if (containsKlike(stmt)) {
         throw new KlikeValidationError(
-          "KLIKE / NOT KLIKE \u306F v1 \u3067\u306F\u5168 DML\uFF08UPDATE / DELETE / INSERT / UPSERT / REORDER\uFF09\u3067\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093"
+          "KLIKE / NOT KLIKE \u306F\u5168 DML\uFF08UPDATE / DELETE / INSERT / UPSERT / REORDER\uFF09\u3067\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093"
         );
       }
       return;
@@ -34078,9 +34314,8 @@ function validateUnion(stmt) {
   validateSelect(stmt.right);
 }
 function validateWith(stmt) {
-  const inlined = buildEffectiveInlineSelect(stmt);
-  if (inlined !== null) {
-    validateSelect(inlined);
+  if (canInlineSingleCte(stmt)) {
+    validateSelect(buildInlinedQuery(stmt));
     return;
   }
   for (const cte of stmt.ctes) {
@@ -34092,10 +34327,15 @@ function validateWith(stmt) {
 function validateSelect(stmt) {
   validateOwnKlikeExpressions(stmt);
   if (whereHasKlike(stmt.where)) {
-    const inMemorySource = stmt.from.cteName !== null || stmt.joins.some((join) => join.table.cteName !== null);
-    if (inMemorySource || resolveSelectMode(stmt) === "FULL_SCAN") {
+    const directKintoneSimple = resolveSelectMode(stmt) === "SIMPLE" && stmt.from.cteName === null && stmt.joins.every((join) => join.table.cteName === null);
+    if (!directKintoneSimple) {
+      const plan = buildKlikePushdownPlan(stmt, { allowUnresolvedVariables: true });
+      if (unappliedKlikes(plan).length === 0) {
+        validateNestedSelects(stmt);
+        return;
+      }
       throw new KlikeValidationError(
-        "KLIKE / NOT KLIKE \u306F kintone \u3078\u62BC\u3057\u4E0B\u3052\u308B SIMPLE SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059\u3002\u3053\u306E SELECT \u306F FULL_SCAN \u306B\u306A\u308A\u307E\u3059"
+        "FULL_SCAN \u306E KLIKE / NOT KLIKE \u306F\u3001\u7269\u7406\u30C6\u30FC\u30D6\u30EB\u306B\u5BFE\u3059\u308B AND \u30EA\u30FC\u30D5\u3068\u3057\u3066\u5FC5\u305A\u62BC\u3057\u4E0B\u3052\u3089\u308C\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\u3002OR / NOT \u914D\u4E0B\u3001CTE\u30FB\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3001LEFT / RIGHT JOIN \u3067\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093"
       );
     }
   }
@@ -34124,33 +34364,6 @@ function validateNestedSelects(node) {
   walkObjects(node, (obj) => {
     if (obj.type === "SELECT") validateSelect(obj);
   }, true);
-}
-function buildEffectiveInlineSelect(stmt) {
-  if (stmt.ctes.length !== 1) return null;
-  const cte = stmt.ctes[0];
-  if (cte.query.type !== "SELECT" || resolveSelectMode(cte.query) !== "SIMPLE") return null;
-  if (stmt.query.type !== "SELECT") return null;
-  const final = stmt.query;
-  if (final.from.cteName !== cte.name || final.joins.length > 0) return null;
-  if (final.groupBy.length > 0 || final.distinct) return null;
-  if (final.columns.some(
-    (column) => column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
-  )) return null;
-  const where = cte.query.where === null ? final.where : final.where === null ? cte.query.where : { type: "LOGICAL", op: "AND", left: cte.query.where, right: final.where };
-  const columns = final.columns.every((column) => column.type === "WILDCARD") ? cte.query.columns : final.columns;
-  return {
-    type: "SELECT",
-    from: cte.query.from,
-    joins: [],
-    columns,
-    where,
-    groupBy: [],
-    having: null,
-    orderBy: final.orderBy.length > 0 ? final.orderBy : cte.query.orderBy,
-    limit: final.limit ?? cte.query.limit,
-    offset: final.offset ?? cte.query.offset,
-    distinct: false
-  };
 }
 function containsKlike(node) {
   let found = false;
@@ -34656,25 +34869,29 @@ function resolveFieldRef(row, field) {
 }
 
 // src/engine/evalWhere.ts
-function evalWhere(expr, row, resolveFieldType) {
+function evalWhere(expr, row, resolveFieldType, appliedKlikes) {
   switch (expr.type) {
     case "BINARY":
-      return evalBinary(expr, row, resolveFieldType);
+      return evalBinary(expr, row, resolveFieldType, appliedKlikes);
     case "NULL_CHECK":
       return evalNullCheck(expr, row);
     case "LOGICAL":
-      return evalLogical(expr, row, resolveFieldType);
+      return evalLogical(expr, row, resolveFieldType, appliedKlikes);
     case "NOT":
-      return !evalWhere(expr.expr, row, resolveFieldType);
+      return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
     case "GROUP":
-      return evalWhere(expr.expr, row, resolveFieldType);
+      return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
     case "EXISTS": {
       const exists = expr.resolved;
       return expr.not ? !exists : exists;
     }
   }
 }
-function evalBinary(expr, row, resolveFieldType) {
+function evalBinary(expr, row, resolveFieldType, appliedKlikes) {
+  if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
+    if (appliedKlikes?.has(expr)) return true;
+    throw new Error("KLIKE / NOT KLIKE \u306F\u62BC\u3057\u4E0B\u3052\u6E08\u307F\u96C6\u5408\u306B\u542B\u307E\u308C\u306A\u3044\u305F\u3081 JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093");
+  }
   const left = resolveField(expr.left, row, resolveFieldType);
   const fieldType = expr.left.type === "FIELD" ? resolveFieldType?.(expr.left) : void 0;
   return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType);
@@ -34756,11 +34973,11 @@ function evalNullCheck(expr, row) {
   const val = resolveField(expr.field, row);
   return expr.not ? val !== "" : val === "";
 }
-function evalLogical(expr, row, resolveFieldType) {
+function evalLogical(expr, row, resolveFieldType, appliedKlikes) {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType) && evalWhere(expr.right, row, resolveFieldType);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes) && evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
   }
-  return evalWhere(expr.left, row, resolveFieldType) || evalWhere(expr.right, row, resolveFieldType);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes) || evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
 }
 function resolveField(field, row, resolveFieldType) {
   if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row);
@@ -34861,7 +35078,7 @@ function matchLike(value, pattern) {
 function assertDmlWhereIsSafe(where) {
   if (whereHasKlike(where)) {
     throw new DmlConvertError(
-      "UPDATE / DELETE \u306E WHERE \u306B KLIKE / NOT KLIKE \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002kintone \u30AD\u30FC\u30EF\u30FC\u30C9\u691C\u7D22\u306E\u6253\u3061\u5207\u308A\u3092\u691C\u51FA\u3067\u304D\u306A\u3044\u305F\u3081\u3001v1 \u3067\u306F\u5168 DML \u3067\u5B89\u5168\u4E0A\u62D2\u5426\u3057\u307E\u3057\u305F\u3002"
+      "UPDATE / DELETE \u306E WHERE \u306B KLIKE / NOT KLIKE \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002kintone \u30AD\u30FC\u30EF\u30FC\u30C9\u691C\u7D22\u306E\u6253\u3061\u5207\u308A\u3092\u691C\u51FA\u3067\u304D\u306A\u3044\u305F\u3081\u3001\u5168 DML \u3067\u5B89\u5168\u4E0A\u62D2\u5426\u3057\u3066\u3044\u307E\u3059\u3002"
     );
   }
   if (!whereHasLike(where)) return;
@@ -35351,92 +35568,6 @@ async function resolveDmlTargetIds(getRecords, app, query, options) {
   };
 }
 
-// src/core/optimization/wherePredicatePushdown.ts
-function extractSafePushdownLeaves(where, options = {}) {
-  return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
-}
-function extractTypedPushdownCandidates(where, options = {}) {
-  return extractAndLeaves(
-    where,
-    (expr) => isNumericCandidate(expr, options) || isSelectionInCandidate(expr, options)
-  );
-}
-function extractAndLeaves(where, accept) {
-  switch (where.type) {
-    case "BINARY":
-      return accept(where) ? where : null;
-    case "LOGICAL":
-      if (where.op !== "AND") return null;
-      {
-        const left = extractAndLeaves(where.left, accept);
-        const right = extractAndLeaves(where.right, accept);
-        if (left && right) return { ...where, left, right };
-        return left ?? right ?? null;
-      }
-    case "GROUP":
-      return extractAndLeaves(where.expr, accept);
-    case "NULL_CHECK":
-    case "NOT":
-    case "EXISTS":
-      return null;
-  }
-}
-function isSafeComparison(expr, options) {
-  if (isSafeIdComparison(expr, options)) return true;
-  if (isNumericCandidate(expr, options)) {
-    return options.fieldTypes?.get(expr.left.field) === "NUMBER";
-  }
-  return isSelectionInComparison(expr, options);
-}
-var SELECTION_IN_FIELD_TYPES = /* @__PURE__ */ new Set([
-  "DROP_DOWN",
-  "RADIO_BUTTON",
-  "CHECK_BOX",
-  "MULTI_SELECT",
-  "STATUS"
-]);
-function isSelectionInComparison(expr, options) {
-  if (!isSelectionInCandidate(expr, options)) return false;
-  if (expr.left.type !== "FIELD" || expr.right.type !== "IN_LIST") return false;
-  const fieldType = options.fieldTypes?.get(expr.left.field);
-  if (fieldType === void 0 || !SELECTION_IN_FIELD_TYPES.has(fieldType)) return false;
-  const validOptions = options.fieldOptions?.get(expr.left.field);
-  if (validOptions === void 0) return false;
-  return expr.right.values.every(
-    (value) => value.type === "STRING" && value.value !== "" && validOptions.has(value.value)
-  );
-}
-function isSafeIdComparison(expr, options) {
-  if (!isTargetIdField(expr.left, options)) return false;
-  if (expr.right.type !== "NUMBER") return false;
-  return expr.op === "=" || expr.op === ">" || expr.op === "<" || expr.op === ">=" || expr.op === "<=";
-}
-function isTargetIdField(field, options) {
-  if (field.type !== "FIELD" || field.field !== "$id") return false;
-  const targetAlias = options.tableAlias ?? null;
-  if (field.tableAlias === targetAlias) return true;
-  return options.allowUnqualifiedFields === true && field.tableAlias === null;
-}
-function isNumericCandidate(expr, options) {
-  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
-  if (!isTargetField(expr.left, options)) return false;
-  if (expr.right.type !== "NUMBER") return false;
-  if (expr.op === "=") return true;
-  return (expr.op === "<" || expr.op === ">") && Number.isSafeInteger(expr.right.value);
-}
-function isSelectionInCandidate(expr, options) {
-  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
-  if (!isTargetField(expr.left, options)) return false;
-  if (expr.op !== "IN" && expr.op !== "NOT_IN") return false;
-  if (expr.right.type !== "IN_LIST" || expr.right.values.length === 0) return false;
-  return expr.right.values.every((value) => value.type === "STRING" && value.value !== "");
-}
-function isTargetField(field, options) {
-  const targetAlias = options.tableAlias ?? null;
-  if (field.tableAlias === targetAlias) return true;
-  return options.allowUnqualifiedFields === true && field.tableAlias === null;
-}
-
 // src/engine/process.ts
 function flatten(record2, alias) {
   const row = {};
@@ -35501,9 +35632,9 @@ function applyJoin(leftRows, rightRows, join) {
   }
   return result;
 }
-function applyFilter(rows, where, resolveFieldType) {
+function applyFilter(rows, where, resolveFieldType, appliedKlikes) {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row, resolveFieldType));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes));
 }
 function hasAggregateColumns(columns) {
   return columns.some(
@@ -35960,7 +36091,8 @@ function runFullScan(input) {
     optionOrders,
     sortKinds,
     fieldTypeResolver,
-    havingFieldTypeResolver
+    havingFieldTypeResolver,
+    appliedKlikes
   } = input;
   let rows = [];
   const mainAlias = stmt.from.alias;
@@ -35972,7 +36104,7 @@ function runFullScan(input) {
     const rightRows = rightRecords.map((r) => flatten(r, rightAlias));
     rows = applyJoin(rows, rightRows, join);
   }
-  rows = applyFilter(rows, stmt.where, fieldTypeResolver);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes);
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
   }
@@ -36660,23 +36792,6 @@ async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
     }
   }
 }
-function extractMainSafePushdown(stmt, fieldTypes, fieldOptions) {
-  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
-  if (stmt.joins.length === 0) {
-    return extractSafePushdownLeaves(stmt.where, {
-      tableAlias: stmt.from.alias ?? void 0,
-      allowUnqualifiedFields: true,
-      fieldTypes,
-      fieldOptions
-    });
-  }
-  if (!stmt.from.alias) return null;
-  return extractSafePushdownLeaves(stmt.where, {
-    tableAlias: stmt.from.alias,
-    fieldTypes,
-    fieldOptions
-  });
-}
 function extractMainTypedPushdownCandidate(stmt) {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
   if (stmt.joins.length === 0) {
@@ -36858,23 +36973,10 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     loadTypedInFieldTypes(stmt, client, cacheContext)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
-  const mainPushDown = extractMainSafePushdown(
-    stmt,
-    pushdownMeta.fieldTypesByApp.get(stmt.from.appId),
-    pushdownMeta.fieldOptionsByApp.get(stmt.from.appId)
-  );
-  const tableConditions = /* @__PURE__ */ new Map();
-  if (stmt.where !== null) {
-    for (const join of stmt.joins) {
-      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const cond = extractSafePushdownLeaves(stmt.where, {
-        tableAlias: join.table.alias,
-        fieldTypes: pushdownMeta.fieldTypesByApp.get(join.table.appId),
-        fieldOptions: pushdownMeta.fieldOptionsByApp.get(join.table.appId)
-      });
-      if (cond) tableConditions.set(join.table.alias, cond);
-    }
-  }
+  const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
+  validateKlikePushdownPlan(pushdownPlan);
+  const mainPushDown = pushdownPlan.mainCondition;
+  const tableConditions = pushdownPlan.joinConditions;
   const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
@@ -36955,7 +37057,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     optionOrders,
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
-    havingFieldTypeResolver: fieldTypeResolvers.having
+    havingFieldTypeResolver: fieldTypeResolvers.having,
+    appliedKlikes: pushdownPlan.appliedKlikes
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -37004,83 +37107,6 @@ async function executeWith(stmt, client, options, cacheContext, seed) {
   }
   return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
 }
-function canInlineSingleCte(stmt) {
-  if (stmt.ctes.length !== 1) return false;
-  const cteDef = stmt.ctes[0];
-  if (cteDef.query.type !== "SELECT") return false;
-  if (resolveSelectMode(cteDef.query) !== "SIMPLE") return false;
-  const finalQuery = stmt.query;
-  if (finalQuery.type !== "SELECT") return false;
-  if (finalQuery.from.cteName !== cteDef.name) return false;
-  if (finalQuery.joins.length > 0) return false;
-  if (finalQuery.groupBy.length > 0) return false;
-  if (finalQuery.distinct) return false;
-  if (finalQuery.columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"
-  )) return false;
-  return true;
-}
-function buildInlinedQuery(stmt) {
-  const cteBody = stmt.ctes[0].query;
-  const final = stmt.query;
-  const cteAlias = final.from.alias;
-  const finalWhere = stripCteAlias(final.where, cteAlias);
-  let mergedWhere;
-  if (cteBody.where === null) mergedWhere = finalWhere;
-  else if (finalWhere === null) mergedWhere = cteBody.where;
-  else mergedWhere = { type: "LOGICAL", op: "AND", left: cteBody.where, right: finalWhere };
-  const columns = final.columns.every((c) => c.type === "WILDCARD") ? cteBody.columns : final.columns;
-  return {
-    type: "SELECT",
-    from: cteBody.from,
-    joins: [],
-    columns,
-    where: mergedWhere,
-    groupBy: [],
-    having: null,
-    orderBy: final.orderBy.length > 0 ? final.orderBy : cteBody.orderBy,
-    limit: final.limit ?? cteBody.limit,
-    offset: final.offset ?? cteBody.offset,
-    distinct: false
-  };
-}
-function stripCteAlias(where, alias) {
-  if (where === null || alias === null) return where;
-  switch (where.type) {
-    case "BINARY":
-      return {
-        type: "BINARY",
-        op: where.op,
-        left: stripCteAliasFromFieldValue(where.left, alias),
-        right: where.right
-      };
-    case "NULL_CHECK":
-      return {
-        type: "NULL_CHECK",
-        not: where.not,
-        field: stripCteAliasFromFieldValue(where.field, alias)
-      };
-    case "LOGICAL":
-      return {
-        type: "LOGICAL",
-        op: where.op,
-        left: stripCteAlias(where.left, alias),
-        right: stripCteAlias(where.right, alias)
-      };
-    case "NOT":
-      return { type: "NOT", expr: stripCteAlias(where.expr, alias) };
-    case "GROUP":
-      return { type: "GROUP", expr: stripCteAlias(where.expr, alias) };
-    case "EXISTS":
-      return where;
-  }
-}
-function stripCteAliasFromFieldValue(fv, alias) {
-  if (fv.type === "FIELD" && fv.tableAlias === alias) {
-    return { type: "FIELD", field: fv.field, tableAlias: null };
-  }
-  return fv;
-}
 async function executeQueryWithCte(query, client, options, cteCache, cacheContext) {
   if (query.type === "UNION") {
     const [leftResult, rightResult] = await Promise.all([
@@ -37115,8 +37141,13 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache)
   ]);
-  const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
+  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+    loadTypedPushdownMeta(stmt, client, cacheContext),
+    loadTypedInFieldTypes(stmt, client, cacheContext)
+  ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
+  validateKlikePushdownPlan(pushdownPlan);
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
   const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
   scalarCachePromise.catch(() => {
@@ -37136,7 +37167,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
       parallel,
       true,
       options.onLimitReached ?? "error",
-      warnings
+      warnings,
+      pushdownPlan.mainCondition
     );
     tables.set(stmt.from.alias, mainRecords);
   }
@@ -37145,6 +37177,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
       const rows2 = cteCache.get(join.table.cteName) ?? [];
       tables.set(join.table.alias, rows2.map(processRowToKintoneRecord));
     } else {
+      const pushDownCond = join.table.alias ? pushdownPlan.joinConditions.get(join.table.alias) ?? null : null;
       const optimized = await tryFetchJoinRecordsBySourceKeys(
         stmt,
         join,
@@ -37153,7 +37186,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
         maxRecords2,
         parallel,
         options.onLimitReached ?? "error",
-        warnings
+        warnings,
+        pushDownCond
       );
       const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
         stmt,
@@ -37163,7 +37197,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
         parallel,
         false,
         options.onLimitReached ?? "error",
-        warnings
+        warnings,
+        pushDownCond
       );
       tables.set(join.table.alias, joinRecords);
     }
@@ -37178,7 +37213,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     optionOrders,
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
-    havingFieldTypeResolver: fieldTypeResolvers.having
+    havingFieldTypeResolver: fieldTypeResolvers.having,
+    appliedKlikes: pushdownPlan.appliedKlikes
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -38387,9 +38423,10 @@ function buildSelectPlan(stmt, label) {
     lines.push(`  kintone query: ${params.query || "(\u306A\u3057)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : params.fields.join(", ")}`);
   } else {
+    const pushdownPlan = buildKlikePushdownPlan(stmt);
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainPushDown = extractMainSafePushdown(stmt);
+    const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null ? whereToKintone(mainPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
@@ -38402,7 +38439,7 @@ function buildSelectPlan(stmt, label) {
       const joinFields = selectToFetchAllFields(stmt, join.table);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinPushDown = join.table.alias ? pushdownPlan.joinConditions.get(join.table.alias) ?? null : null;
       const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractTypedPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null ? whereToKintone(joinPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
@@ -38444,6 +38481,10 @@ function buildWithPlan(stmt) {
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
     lines.push(...buildExplainPlan(stmt.query, "[main]"));
+  }
+  if (canInlineSingleCte(stmt)) {
+    lines.push("");
+    lines.push(...buildSelectPlan(buildInlinedQuery(stmt), "[effective: inlined CTE]"));
   }
   return lines;
 }
@@ -40781,7 +40822,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.8.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.9.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
