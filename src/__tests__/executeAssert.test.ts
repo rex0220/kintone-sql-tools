@@ -95,6 +95,14 @@ test("単文: 大小比較は数値として評価される（'9' < '10'）", as
   expect(result.type).toBe("ASSERT");
 });
 
+test("単文: 空左辺と有限数の範囲比較は WHERE と同じ −∞ 規則を使う", async () => {
+  expect((await execute("ASSERT '' < -1000000", makeClient())).type).toBe("ASSERT");
+  await expect(execute("ASSERT '' >= -1000000", makeClient()))
+    .rejects.toThrow(/assertion failed/);
+  await expect(execute("ASSERT '' BETWEEN 0 AND 100", makeClient()))
+    .rejects.toThrow(/assertion failed/);
+});
+
 // ----------------------------------------------------------------
 // 単文: スカラーサブクエリ（APP 参照）
 // ----------------------------------------------------------------

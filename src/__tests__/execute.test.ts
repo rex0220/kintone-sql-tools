@@ -898,6 +898,29 @@ test("UPDATE サブテーブル行はワイルドカード LIKE を JS 評価す
   expect(client.putCalls).toHaveLength(1);
 });
 
+test("UPDATE サブテーブル: 空数値セルを >= の対象から外し、確認件数と更新件数を揃える", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 商品コード: { value: "A" }, 数量: { value: "" } } },
+      { id: "r2", value: { 商品コード: { value: "B" }, 数量: { value: "0" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "UPDATE APP100$明細 SET 商品コード = '更新' WHERE _rid LIKE '%' AND 数量 >= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as UpdateResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.updatedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id?: string; value?: Record<string, { value: string }> }>;
+  expect(table.find((row) => row.id === "r1")?.value).toBeUndefined();
+  expect(table.find((row) => row.id === "r2")?.value?.["商品コード"].value).toBe("更新");
+});
+
 test("UPDATE サブテーブルの取得上限は truncate 指定でも error のまま", async () => {
   const row = (id: string) => ({
     $id: { value: id }, $revision: { value: "1" },
@@ -987,6 +1010,28 @@ test("DELETE サブテーブル行（_rid 条件）", async () => {
   expect(table[0].id).toBe("r2");
 });
 
+test("DELETE サブテーブル: 空数値セルを <= の対象に含め、確認件数と削除件数を揃える", async () => {
+  const client = makeClient({ recordsByApp: { 100: [{
+    $id: { value: "1" }, $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { 商品コード: { value: "A" }, 数量: { value: "" } } },
+      { id: "r2", value: { 商品コード: { value: "B" }, 数量: { value: "0" } } },
+    ] },
+  } as unknown as KintoneRecord] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "DELETE FROM APP100$明細 WHERE _rid LIKE '%' AND 数量 <= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as DeleteResult;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.deletedCount).toBe(1);
+  const table = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id?: string }>;
+  expect(table.map((row) => row.id)).toEqual(["r2"]);
+});
+
 test("REORDER サブテーブル行（親単位）", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -1017,6 +1062,31 @@ test("REORDER サブテーブル行（親単位）", async () => {
   expect(table[0].id).toBe("r2");
   expect(table[1].id).toBe("r1");
   expect(table.every((r) => r.value === undefined)).toBe(true);
+});
+
+test("REORDER: 空数値セルだけの親を >= の対象から外し、確認件数と親件数を揃える", async () => {
+  const parent = (id: string, quantity: string, rowId: string) => ({
+    $id: { value: id }, $revision: { value: "1" },
+    明細: { value: [
+      { id: rowId, value: { 商品コード: { value: `P-${id}` }, 数量: { value: quantity } } },
+    ] },
+  } as unknown as KintoneRecord);
+  const client = makeClient({ recordsByApp: { 100: [
+    parent("1", "", "r1"),
+    parent("2", "0", "r2"),
+  ] } });
+  let confirmedCount = -1;
+
+  const result = await execute(
+    "REORDER APP100$明細 BY 商品コード ASC WHERE 数量 >= -1000000",
+    client,
+    { confirm: async (count) => { confirmedCount = count; return true; } }
+  ) as any;
+
+  expect(confirmedCount).toBe(1);
+  expect(result.reorderedParentCount).toBe(1);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records[0].id).toBe(2);
 });
 
 test("REORDER は WHERE 必須", async () => {

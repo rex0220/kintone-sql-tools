@@ -79,6 +79,16 @@ test("LEFT JOIN: 右に存在しない行は空文字で残る", () => {
   expect(unmatched["b.会社"]).toBe("");
 });
 
+test("LEFT JOIN: 欠損側の空値は有限数との範囲比較で −∞ として評価する", () => {
+  const leftJoin: JoinClause = { ...joinClause, type: "LEFT" };
+  const joined = applyJoin(leftRows, rightRows, leftJoin);
+  const gte = parseSelect("SELECT * FROM APP100 WHERE b.金額 >= -1000000");
+  const lte = parseSelect("SELECT * FROM APP100 WHERE b.金額 <= -1000000");
+
+  expect(applyFilter(joined, gte.where).some((row) => row["a.名前"] === "佐藤")).toBe(false);
+  expect(applyFilter(joined, lte.where).some((row) => row["a.名前"] === "佐藤")).toBe(true);
+});
+
 // ----------------------------------------------------------------
 // applyFilter
 // ----------------------------------------------------------------
@@ -98,6 +108,17 @@ const whereCompleted: WhereExpr = {
 test("applyFilter: WHERE 条件でフィルタ", () => {
   const result = applyFilter(filterRows, whereCompleted);
   expect(result).toHaveLength(2);
+});
+
+test("applyFilter: 空セルを有限数との範囲比較で −∞ として扱う", () => {
+  const rows = [{ 金額: "" }, { 金額: "0" }, { 金額: "-1" }, { 金額: "1" }];
+  const gte = parseSelect("SELECT * FROM APP100 WHERE 金額 >= -1000000");
+  const lte = parseSelect("SELECT * FROM APP100 WHERE 金額 <= -1000000");
+
+  expect(applyFilter(rows, gte.where).map((row) => row["金額"]))
+    .toEqual(["0", "-1", "1"]);
+  expect(applyFilter(rows, lte.where).map((row) => row["金額"]))
+    .toEqual([""]);
 });
 
 test.each(["IN", "NOT_IN"] as const)(
@@ -327,6 +348,19 @@ test("HAVING: 集計後フィルタ", () => {
     right: { type: "NUMBER", value: 2 },
   };
   expect(applyHaving(rows, having)).toEqual([{ 種別: "B", cnt: "5" }]);
+});
+
+test("HAVING: 空の集計値は有限数との範囲比較で −∞ として扱う", () => {
+  const rows: ProcessRow[] = [{ 種別: "空", total: "" }, { 種別: "値あり", total: "0" }];
+  const gte = parseSelect(
+    "SELECT 種別, COUNT(*) AS total FROM APP100 GROUP BY 種別 HAVING total >= -1000000"
+  );
+  const lte = parseSelect(
+    "SELECT 種別, COUNT(*) AS total FROM APP100 GROUP BY 種別 HAVING total <= -1000000"
+  );
+
+  expect(applyHaving(rows, gte.having).map((row) => row["種別"])).toEqual(["値あり"]);
+  expect(applyHaving(rows, lte.having).map((row) => row["種別"])).toEqual(["空"]);
 });
 
 // ----------------------------------------------------------------
@@ -812,6 +846,15 @@ test("project: CASE WHEN — 条件に一致した THEN 値を返す", () => {
   expect(result[0]["状態"]).toBe("済");
   expect(result[1]["状態"]).toBe("未");
   expect(result[2]["状態"]).toBe("未");
+});
+
+test("project: CASE WHEN — 空セルの有限数範囲比較に −∞ 規則を使う", () => {
+  const stmt = parseSelect(
+    "SELECT CASE WHEN 金額 >= -1000000 THEN '値あり' ELSE '空' END AS 判定 FROM APP100"
+  );
+  const { rows } = project([{ 金額: "" }, { 金額: "0" }], stmt.columns);
+
+  expect(rows.map((row) => row["判定"])).toEqual(["空", "値あり"]);
 });
 
 test("project: CASE WHEN — 複数 WHEN 分岐", () => {

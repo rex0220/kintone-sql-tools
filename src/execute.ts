@@ -14,8 +14,9 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, AssertCompareOp, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
+import { compareScalarValues } from "./core/scalarCompare";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -780,7 +781,7 @@ async function executeAssert(
     const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
-    if (!compareAssertValues(">=", left, low) || !compareAssertValues("<=", left, high)) {
+    if (!compareScalarValues(">=", left, low) || !compareScalarValues("<=", left, high)) {
       throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
     }
     return { type: "ASSERT", condition: stmt.text };
@@ -790,7 +791,7 @@ async function executeAssert(
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareAssertValues(stmt.op, left, right)) {
+  if (!compareScalarValues(stmt.op, left, right)) {
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
   }
   return { type: "ASSERT", condition: stmt.text };
@@ -862,25 +863,6 @@ function evalAssertArith(node: ArithNode): number {
     }
   }
   throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
-}
-
-/**
- * ASSERT の比較。型規則は既存の WHERE 句比較（evalWhere の evalOp）と同一:
- * = / <> は文字列比較、大小比較は双方が数値に解釈できる場合のみ数値比較。
- */
-function compareAssertValues(op: AssertCompareOp, leftStr: string, rightStr: string): boolean {
-  const leftNum  = Number(leftStr);
-  const rightNum = Number(rightStr);
-  const numeric  = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-  switch (op) {
-    case "=":    return leftStr === rightStr;
-    case "!=":
-    case "<>":   return leftStr !== rightStr;
-    case ">":    return numeric ? leftNum > rightNum  : leftStr > rightStr;
-    case "<":    return numeric ? leftNum < rightNum  : leftStr < rightStr;
-    case ">=":   return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":   return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
 }
 
 // ============================================================
