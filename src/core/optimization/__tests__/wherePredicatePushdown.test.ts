@@ -1,7 +1,10 @@
 import { Lexer } from "../../../lexer/lexer";
 import { Parser } from "../../../parser/parser";
 import type { SelectStatement } from "../../../types/ast";
-import { extractSafePushdownLeaves } from "../wherePredicatePushdown";
+import {
+  extractNumericPushdownCandidates,
+  extractSafePushdownLeaves,
+} from "../wherePredicatePushdown";
 
 function where(sql: string) {
   return (new Parser(new Lexer(sql).tokenize()).parse() as SelectStatement).where!;
@@ -67,7 +70,54 @@ test.each([
   expect(extractSafePushdownLeaves(where(sql))).toBeNull();
 });
 
-test("fieldTypes が渡されても第0段では一般フィールドを押し下げない", () => {
+test.each(["=", ">", "<"])(
+  "NUMBER フィールドの安全な %s 比較を抽出する",
+  (op) => {
+    const expr = where(`SELECT * FROM APP100 WHERE 金額 ${op} 1000`);
+    const fieldTypes = new Map([["金額", "NUMBER"]]);
+    expect(extractSafePushdownLeaves(expr, { fieldTypes })).toEqual(expr);
+  }
+);
+
+test.each([
+  "SELECT * FROM APP100 WHERE 金額 >= 1000",
+  "SELECT * FROM APP100 WHERE 金額 <= 1000",
+  "SELECT * FROM APP100 WHERE 金額 != 1000",
+  "SELECT * FROM APP100 WHERE 金額 > 1.5",
+  "SELECT * FROM APP100 WHERE 金額 > 9007199254740992",
+])("NUMBER 型でも対象外の一般数値比較を押し下げない: %s", (sql) => {
+  const expr = where(sql);
+  const fieldTypes = new Map([["金額", "NUMBER"]]);
+  expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();
+});
+
+test("一般フィールドは NUMBER 型が確定した場合だけ押し下げる", () => {
+  const expr = where("SELECT * FROM APP100 WHERE 金額 > 1000");
+  expect(extractSafePushdownLeaves(expr)).toBeNull();
+  expect(extractSafePushdownLeaves(expr, { fieldTypes: new Map() })).toBeNull();
+  expect(extractSafePushdownLeaves(expr, {
+    fieldTypes: new Map([["金額", "SINGLE_LINE_TEXT"]]),
+  })).toBeNull();
+});
+
+test("一般数値候補は型メタなしで抽出し、$id と対象外演算子を除外する", () => {
+  const expr = where(
+    "SELECT * FROM APP100 WHERE $id >= 1 AND 金額 > 1000 AND 数量 >= 2 AND 状態 = '完了'"
+  );
+  const candidate = extractNumericPushdownCandidates(expr) as any;
+  expect(candidate.type).toBe("BINARY");
+  expect(candidate.left.field).toBe("金額");
+  expect(candidate.op).toBe(">");
+});
+
+test("一般数値候補も JOIN では対象エイリアスの明示参照だけを抽出する", () => {
+  const expr = where("SELECT * FROM APP100 AS a WHERE a.金額 > 1 AND b.金額 > 2 AND 数量 > 3");
+  const candidate = extractNumericPushdownCandidates(expr, { tableAlias: "a" }) as any;
+  expect(candidate.left.field).toBe("金額");
+  expect(candidate.left.tableAlias).toBe("a");
+});
+
+test("選択系フィールドは型メタが渡されても押し下げない", () => {
   const expr = where("SELECT * FROM APP100 WHERE 状態 IN ('完了')");
   const fieldTypes = new Map([["状態", "DROP_DOWN"]]);
   expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();

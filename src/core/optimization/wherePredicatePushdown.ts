@@ -8,41 +8,69 @@ export interface SafePushdownOptions {
    * JOIN 時は false のままにし、対象エイリアスの明示参照だけを許可する。
    */
   allowUnqualifiedFields?: boolean;
-  /** 将来の型別ホワイトリスト用。第0段では参照しない。 */
+  /** 一般フィールドの型別ホワイトリスト。未指定・型不明なら一般フィールドは抽出しない。 */
   fieldTypes?: ReadonlyMap<string, string>;
 }
 
 /**
  * WHERE から kintone へ安全に押し下げられる AND リーフだけを抽出する。
  *
- * 第0段では、必ず存在して型も静的に確定する `$id` の肯定数値比較だけを許可する。
+ * `$id` の肯定数値比較に加え、型メタで NUMBER と確定した一般フィールドの
+ * `=` と strict `<` / `>`（安全整数境界）だけを許可する。
  * GROUP は透過するが、OR / NOT / NULL 判定 / EXISTS はサブツリーごと除外する。
  */
 export function extractSafePushdownLeaves(
   where: WhereExpr,
   options: SafePushdownOptions = {}
 ): WhereExpr | null {
+  return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
+}
+
+/**
+ * EXPLAIN と実行前の型メタ取得判定に使う、一般数値フィールドの構文上の候補抽出。
+ * 型は未確定なので `$id` を除外し、実際の kintone query には直接使わない。
+ */
+export function extractNumericPushdownCandidates(
+  where: WhereExpr,
+  options: Omit<SafePushdownOptions, "fieldTypes"> = {}
+): WhereExpr | null {
+  return extractAndLeaves(where, (expr) => isNumericCandidate(expr, options));
+}
+
+function extractAndLeaves(
+  where: WhereExpr,
+  accept: (expr: Extract<WhereExpr, { type: "BINARY" }>) => boolean
+): WhereExpr | null {
   switch (where.type) {
     case "BINARY":
-      return isSafeIdComparison(where, options) ? where : null;
+      return accept(where) ? where : null;
 
     case "LOGICAL":
       if (where.op !== "AND") return null;
       {
-        const left = extractSafePushdownLeaves(where.left, options);
-        const right = extractSafePushdownLeaves(where.right, options);
+        const left = extractAndLeaves(where.left, accept);
+        const right = extractAndLeaves(where.right, accept);
         if (left && right) return { ...where, left, right };
         return left ?? right ?? null;
       }
 
     case "GROUP":
-      return extractSafePushdownLeaves(where.expr, options);
+      return extractAndLeaves(where.expr, accept);
 
     case "NULL_CHECK":
     case "NOT":
     case "EXISTS":
       return null;
   }
+}
+
+function isSafeComparison(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: SafePushdownOptions
+): boolean {
+  if (isSafeIdComparison(expr, options)) return true;
+  if (!isNumericCandidate(expr, options)) return false;
+  return options.fieldTypes?.get(expr.left.field) === "NUMBER";
 }
 
 function isSafeIdComparison(
@@ -64,6 +92,27 @@ function isTargetIdField(
 ): boolean {
   if (field.type !== "FIELD" || field.field !== "$id") return false;
 
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
+}
+
+function isNumericCandidate(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: Omit<SafePushdownOptions, "fieldTypes">
+): expr is typeof expr & { left: Extract<FieldValue, { type: "FIELD" }> } {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  if (expr.op === "=") return true;
+  return (expr.op === "<" || expr.op === ">")
+    && Number.isSafeInteger(expr.right.value);
+}
+
+function isTargetField(
+  field: Extract<FieldValue, { type: "FIELD" }>,
+  options: Omit<SafePushdownOptions, "fieldTypes">
+): boolean {
   const targetAlias = options.tableAlias ?? null;
   if (field.tableAlias === targetAlias) return true;
   return options.allowUnqualifiedFields === true && field.tableAlias === null;

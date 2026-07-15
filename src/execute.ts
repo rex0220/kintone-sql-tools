@@ -40,7 +40,10 @@ import {
   fetchRecordsForSharedPlan,
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
-import { extractSafePushdownLeaves } from "./core/optimization/wherePredicatePushdown";
+import {
+  extractNumericPushdownCandidates,
+  extractSafePushdownLeaves,
+} from "./core/optimization/wherePredicatePushdown";
 import { whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -1041,18 +1044,60 @@ async function validateSelectFieldCodes(
   }
 }
 
-function extractMainSafePushdown(stmt: SelectStatement): WhereExpr | null {
+function extractMainSafePushdown(
+  stmt: SelectStatement,
+  fieldTypes?: ReadonlyMap<string, string>
+): WhereExpr | null {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
 
   if (stmt.joins.length === 0) {
     return extractSafePushdownLeaves(stmt.where, {
       tableAlias: stmt.from.alias ?? undefined,
       allowUnqualifiedFields: true,
+      fieldTypes,
     });
   }
 
   if (!stmt.from.alias) return null;
-  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias });
+  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias, fieldTypes });
+}
+
+function extractMainNumericPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+
+  if (stmt.joins.length === 0) {
+    return extractNumericPushdownCandidates(stmt.where, {
+      tableAlias: stmt.from.alias ?? undefined,
+      allowUnqualifiedFields: true,
+    });
+  }
+
+  if (!stmt.from.alias) return null;
+  return extractNumericPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
+}
+
+async function loadNumericPushdownFieldTypes(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<Map<number, FieldTypeMap>> {
+  const appIds = new Set<number>();
+  if (extractMainNumericPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+
+  if (stmt.where !== null) {
+    for (const join of stmt.joins) {
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const candidate = extractNumericPushdownCandidates(stmt.where, {
+        tableAlias: join.table.alias,
+      });
+      if (candidate !== null) appIds.add(join.table.appId);
+    }
+  }
+
+  const entries = await Promise.all([...appIds].map(async (appId) => (
+    [appId, await getFieldTypeMap(appId, client, cacheContext)] as const
+  )));
+  return new Map(entries);
 }
 
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
@@ -1073,14 +1118,22 @@ async function executeFullScanSelect(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
+  // 一般数値フィールドの候補がある物理アプリだけ型メタを取得する。
+  const pushdownFieldTypes = await loadNumericPushdownFieldTypes(stmt, client, cacheContext);
+
   // テーブルごとの安全な push down 条件を計算する。
-  // 第0段は型メタデータを使わず、$id の肯定数値比較だけを対象にする。
-  const mainPushDown = extractMainSafePushdown(stmt);
+  const mainPushDown = extractMainSafePushdown(
+    stmt,
+    pushdownFieldTypes.get(stmt.from.appId)
+  );
   const tableConditions = new Map<string, WhereExpr>();
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const cond = extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias });
+      const cond = extractSafePushdownLeaves(stmt.where, {
+        tableAlias: join.table.alias,
+        fieldTypes: pushdownFieldTypes.get(join.table.appId),
+      });
       if (cond) tableConditions.set(join.table.alias, cond);
     }
   }
@@ -3183,11 +3236,15 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = extractMainSafePushdown(stmt);
+    const mainCandidate = extractMainNumericPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
       : "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
+    if (mainCandidate !== null) {
+      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型確認待ち）`);
+    }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
     for (const join of stmt.joins) {
@@ -3196,11 +3253,16 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
       const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
         ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
+        ? extractNumericPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null
         ? whereToKintone(joinPushDown)
         : "(全件取得)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
+      if (joinCandidate !== null) {
+        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型確認待ち）`);
+      }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
     }
   }

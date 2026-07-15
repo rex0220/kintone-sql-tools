@@ -535,6 +535,128 @@ test("FULL_SCAN: 第0段の $id 押し下げは型メタデータを取得しな
   expect(getFieldsCount).toBe(0);
 });
 
+test("FULL_SCAN: NUMBER フィールドの strict 比較を型確認後にプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 金額: "", 会社名: "A空" }),
+    makeRecord({ $id: "2", 金額: "-2", 会社名: "A負" }),
+    makeRecord({ $id: "3", 金額: "0", 会社名: "A零" }),
+    makeRecord({ $id: "4", 金額: "5", 会社名: "B正" }),
+  ] });
+  let getFieldsCount = 0;
+  client.getFields = async () => {
+    getFieldsCount += 1;
+    return [
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  };
+
+  const result = await execute(
+    "SELECT $id, 金額, 会社名 FROM APP99101 WHERE 金額 > -1 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "3", 金額: "0", 会社名: "A零" }]);
+  expect(client.getCalls[0].query).toContain("金額 > -1");
+  expect(client.getCalls[0].query.toLowerCase()).not.toContain("like");
+  expect(getFieldsCount).toBe(1);
+});
+
+test("FULL_SCAN: NUMBER 等値は押し下げても JS の文字列表現で再評価する", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 金額: "100.0", 会社名: "A社" }),
+    makeRecord({ $id: "2", 金額: "100", 会社名: "A社" }),
+  ] });
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP99102 WHERE 金額 = 100 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(client.getCalls[0].query).toContain("金額 = 100");
+  expect(result.rows).toEqual([{ $id: "2", 金額: "100" }]);
+});
+
+test.each([">=", "<="])(
+  "FULL_SCAN: 一般 NUMBER の %s は型が確定しても押し下げない",
+  async (op) => {
+    const client = makeClient({ records: [makeRecord({ $id: "1", 金額: "1", 会社名: "A社" })] });
+    client.getFields = async () => [
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+    await execute(
+      `SELECT $id, 金額 FROM APP99103 WHERE 金額 ${op} 1 AND 会社名 LIKE '%A%'`,
+      client,
+      { cacheContext: `numeric-inclusive-${op}` }
+    );
+
+    expect(client.getCalls[0].query).not.toContain(`金額 ${op} 1`);
+  }
+);
+
+test("FULL_SCAN: 数値候補の型が NUMBER でなければ押し下げない", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1", 金額: "2", 会社名: "A社" })] });
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  await execute(
+    "SELECT $id FROM APP99104 WHERE 金額 > 1 AND 会社名 LIKE '%A%'",
+    client
+  );
+
+  expect(client.getCalls[0].query).not.toContain("金額 > 1");
+});
+
+test("FULL_SCAN: 数値候補の型メタ取得失敗を伝播する", async () => {
+  const client = makeClient();
+  client.getFields = async () => {
+    throw new Error("getFields failed");
+  };
+
+  await expect(execute(
+    "SELECT $id FROM APP99105 WHERE 金額 > 1 AND 会社名 LIKE '%A%'",
+    client
+  )).rejects.toThrow("getFields failed");
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("FULL_SCAN: JOIN は各アプリの NUMBER 候補だけをプレフィルタする", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      99106: [makeRecord({ $id: "1", 顧客ID: "C1", 金額: "2", 会社名: "A社" })],
+      99107: [makeRecord({ $id: "10", 顧客ID: "C1", 数量: "3" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 99106
+    ? [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "金額", label: "金額", fieldType: "NUMBER" },
+      { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "数量", label: "数量", fieldType: "NUMBER" },
+    ];
+
+  const result = await execute(
+    "SELECT a.$id FROM APP99106 AS a INNER JOIN APP99107 AS b ON a.顧客ID = b.顧客ID " +
+    "WHERE a.金額 > 1 AND b.数量 = 3 AND a.会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1);
+  expect(client.getCalls.find((call) => call.app === 99106)?.query).toContain("金額 > 1");
+  expect(client.getCalls.find((call) => call.app === 99107)?.query).toContain("数量 = 3");
+});
+
 test("FULL_SCAN: JOIN の $id 条件は維持し、テキスト等値は押し下げない", async () => {
   const client = makeClient({
     recordsByApp: {

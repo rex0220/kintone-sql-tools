@@ -26,3 +26,8 @@ test("等値・非等値は空セルの範囲規則に影響されない", () =>
   expect(compareScalarValues("!=", "", "0")).toBe(true);
   expect(compareScalarValues("=", "", "")).toBe(true);
 });
+
+test("包含境界は高精度小数が安全整数へ丸まるため数値プレフィルタに使えない", () => {
+  expect(compareScalarValues(">=", "0.99999999999999999", "1")).toBe(true);
+  expect(compareScalarValues("<=", "1.00000000000000001", "1")).toBe(true);
+});
