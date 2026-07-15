@@ -46,6 +46,8 @@ function negateOp(op: CompareOp): CompareOp | null {
     case "<=":   return ">";
     case "LIKE":     return "NOT_LIKE";
     case "NOT_LIKE": return "LIKE";
+    case "KLIKE":     return "NOT_KLIKE";
+    case "NOT_KLIKE": return "KLIKE";
     case "IN":       return "NOT_IN";
     case "NOT_IN":   return "IN";
   }

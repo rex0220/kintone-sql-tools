@@ -168,6 +168,14 @@ test("UPDATE WHERE ワイルドカードなし LIKE も安全のため拒否", (
   expect(() => updateToGetQuery(stmt)).toThrow("親レコード DML には JS 評価経路がない");
 });
 
+test("親 UPDATE / DELETE でも KLIKE を v1 の中央ガードで拒否する", () => {
+  const update = parse("UPDATE APP100 SET f = 'v' WHERE 件名 KLIKE '報告'") as UpdateStatement;
+  const del = parse("DELETE FROM APP100 WHERE 件名 NOT KLIKE '一時'") as DeleteStatement;
+  expect(() => updateToGetQuery(update)).toThrow(DmlConvertError);
+  expect(() => updateToGetQuery(update)).toThrow(/v1 では全 DML/);
+  expect(() => deleteToGetQuery(del)).toThrow(DmlConvertError);
+});
+
 test("UPDATE WHERE IN → kintone クエリ", () => {
   const stmt = parse(
     "UPDATE APP100 SET f = 'v' WHERE 種別 IN ('A', 'B')"

@@ -2,6 +2,24 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased — KLIKE（kintone キーワード検索）
+
+### 追加
+
+- **`KLIKE` / `NOT KLIKE` 演算子**を追加。SQL `LIKE` の JavaScript 部分一致とは分離し、kintone の `like` / `not like` キーワード検索を明示的に呼び出す。
+  ```sql
+  SELECT 件名 FROM APP100 WHERE 件名 KLIKE '至急'
+  SELECT 件名 FROM APP100 WHERE 件名 NOT KLIKE '保留'
+  ```
+  - v1 は **SIMPLE SELECT の WHERE 限定**。JOIN、GROUP BY、DISTINCT、集計、式 ORDER BY、サブテーブル、`LIKE` 等との混在によって対象 SELECT が FULL_SCAN になる場合は、API 呼び出し前に拒否する。CTE・UNION・サブクエリも SELECT スコープごとに検証する。
+  - 右辺は文字列リテラルまたは文字列バッチ変数だけ。`%` はSQLワイルドカードの誤用として拒否し、`_` は許可するがワイルドカードではなくkintoneの単語構成文字として扱われる。
+  - v1 は **全 DML で使用不可**。kintone検索の10万件打ち切りを検出できるようになるまで、親レコードDMLも安全上拒否する。
+  - kintoneのキーワード検索は一致挙動・対象フィールド・10万件打ち切り制約を含めkintone仕様に準拠する。現時点では `X-Cybozu-Warning` を取得しないため、一致候補が10万件に達した場合にSELECT結果の完全性を保証できない。
+
+### 互換性
+
+- `KLIKE` を予約語に追加。既存のフィールドコードが `KLIKE` の場合は、 `` `KLIKE` `` のようにバッククォートで囲む。
+
 ## v2.7.0（2026-07-15）— STATUS（ワークフロー状態）の IN 押し下げ
 
 ### 追加（最適化）

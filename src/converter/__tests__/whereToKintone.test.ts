@@ -29,3 +29,10 @@ test("IN リストへ未解決 VARIABLE が到達したら変換前に拒否す�
   };
   expect(() => whereToKintone(unresolved)).toThrow(/未解決のバッチ変数 @missing/);
 });
+
+test("KLIKE / NOT KLIKE を kintone like / not like へ変換する", () => {
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE 件名 KLIKE '至急'")))
+    .toBe('件名 like "至急"');
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE NOT (件名 KLIKE '至急')")))
+    .toBe('(件名 not like "至急")');
+});

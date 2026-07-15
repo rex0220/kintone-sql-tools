@@ -508,6 +508,8 @@ SELECT ROUND(金額 * 1.1, 0) AS 税込金額 FROM APP100
 | `<`    | より小さい |
 | `>=`   | 以上 |
 | `<=`   | 以下 |
+| `KLIKE` | kintone のキーワードを含む |
+| `NOT KLIKE` | kintone のキーワードを含まない |
 
 ```sql
 WHERE ステータス = '完了'
@@ -516,6 +518,28 @@ WHERE 担当者 != '山田'
 ```
 
 > 右辺の値にはバッチ変数 `@名前` も指定できます（→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)）。
+
+### KLIKE / NOT KLIKE（kintoneキーワード検索）
+
+`KLIKE` はSQL `LIKE`とは別の演算子です。条件をkintoneの `like` / `not like` へ変換し、kintone側でキーワード検索します。
+
+```sql
+SELECT 件名, 担当者
+FROM APP100
+WHERE 件名 KLIKE '至急'
+
+SELECT 件名
+FROM APP100
+WHERE 件名 NOT KLIKE '保留'
+```
+
+- `LIKE` はkSQLのワイルドカード／部分一致をJavaScriptで評価します。`KLIKE` はkintoneのキーワード検索であり、半角・全角、大小文字、単語分割などの一致規則はkintoneに準拠します。
+- v1では **SIMPLE SELECTのWHERE句だけ**で使用できます。JOIN、GROUP BY、DISTINCT、集計、式を使うORDER BY、サブテーブル、または `LIKE`・関数・算術式等との混在によってFULL_SCANになるSELECTでは使用できません。
+- 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
+- v1ではUPDATE、DELETE、INSERT ... SELECT、UPSERT ... SELECT、REORDERを含むすべてのDMLで使用できません。
+- 利用可能なフィールドは[kintone公式の演算子対応表](https://cybozu.dev/ja/kintone/docs/overview/query/)に従います。文字列1行・複数行、リッチエディター、リンク、添付ファイルなどが対象です。非対応フィールドはkintone APIエラーになります。
+- kintoneはキーワード一致が10万件に達すると検索を打ち切ります。現在のkSQLはそのレスポンス警告を検出しないため、該当時は結果が欠落しても警告されず、完全な結果を保証できません。十分に絞り込めるキーワードを指定してください。
+- `KLIKE` は予約語です。同名フィールドを参照するときは `` `KLIKE` `` と記述します。
 
 ### IN / NOT IN（複数値一致・除外）
 

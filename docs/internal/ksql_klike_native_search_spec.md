@@ -1,12 +1,13 @@
 # 仕様案: `KLIKE` — kintone ネイティブ `like` 検索オペレータ
 
 - 作成日: 2026-07-15
-- ステータス: **仕様案 R2（codex レビュー反映・コードで裏取り・実装着手可）**
+- ステータス: **R2確定・KLIKE v1 実装済み（実機検証前）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 中核の再定義（codex 総括）: KLIKE は「**高速な LIKE**」ではなく「**kintone のキーワード検索を明示的に呼び出す演算子**」。意味論・上限・制約は kintone に準ずる。
 - 更新履歴:
   - 2026-07-15 R1: 初版（検討）。
   - 2026-07-15 R2: codex レビュー反映（全点コードで裏取り）。
+  - 2026-07-15 v1実装: lexer/AST/parser、kintone変換、共通静的検証、変数置換後検証、全DML拒否、EXPLAIN、単体・統合テストを実装。実機検証待ち。
     - **[P0] kintone `like` の 10 万件打ち切りを現クライアントが検出不能**。`X-Cybozu-Warning: Filter aborted…` ヘッダーを返すが、`KintoneGetResponse`（[fetchAll.ts:27](../../src/api/fetchAll.ts#L27)）は `records` のみ・Node の `requestJson`（[nodeKintoneClient.ts:36](../../src/cli/nodeKintoneClient.ts#L36)）と plugin の `kintone.api()`（[kintoneClient.ts:58](../../src/ui/kintoneClient.ts#L58)）は本文しか読まない → **サイレントな過少一致**（SELECT で結果欠落・DML で一部だけ変更）。§3.7・§4 に主要リスクとして追加。
     - **[P1a] SIMPLE 限定判定は `whereRequiresJsEval` では不十分**。`resolveSelectMode`（[selectToKintone.ts:60](../../src/converter/selectToKintone.ts#L60)）は JOIN/GROUP BY/DISTINCT/集計/式 ORDER BY でも FULL_SCAN。FULL_SCAN は取得後に WHERE 全体を JS 再評価（[process.ts:843](../../src/engine/process.ts#L843)）。→ 不変条件を「**WHERE に KLIKE があり、対象 SELECT の `resolveSelectMode===FULL_SCAN` なら実行前に拒否**」に。CTE・UNION 各枝・IN/EXISTS/スカラーサブクエリ内 SELECT にも適用。**パーサーでなく AST 後の共通静的検証**で（単文/バッチ/EXPLAIN で統一）。
     - **[P1b] `%`/`_` は別扱い・「リテラル」は不正確**。kintone 検索では `%`=キーワードから除外される記号／`_`=英数字単語の構成文字。→ **`%` は拒否（静的・変数置換後とも）／`_` は許可＋非ワイルドカードと明記**。KLIKE 右辺は `STRING | VARIABLE` に限定（`parseSqlValue`（[parser.ts:1593](../../src/parser/parser.ts#L1593)）は数値/関数/算術/サブクエリまで受理するため専用の限定パース）。**警告でなく拒否**（DML result 型に `warnings` が無い＝[execute.ts:165](../../src/execute.ts#L165) の `UpdateResult`/`DeleteResult`）。
@@ -122,10 +123,10 @@ kintone の `like`/`not like` は一致が **10 万件で検索打ち切り**に
 - **v1 は全 DML で使用不可**（サブテーブルは恒久・親は P0 解消まで）。
 
 ## 5. リスク・エッジ
-- `%`/`_` 混入の誤用（LIKE のつもり）→ 警告 or 拒否で救済。
+- `%` 混入の誤用（LIKE のつもり）→ 静的リテラル・変数置換後とも拒否。`_` は許可するが非ワイルドカード。
 - 非対応フィールド → kintone エラー（v1 は委譲・将来 型メタで事前検証）。
 - OR/NOT 文脈：SIMPLE なら可・FULL_SCAN 化する場合のみ拒否（v1）。
-- DML 過剰一致 → ドキュメント警告＋事前 SELECT 推奨。
+- DML の過剰／過少一致 → v1 は全 DML で拒否。親DMLはP0解消後に別仕様で再検討。
 - 保存クエリ・バッチ変数・EXPLAIN との整合。
 
 ## 6. 3 論点の確定（codex R2）
@@ -137,7 +138,7 @@ kintone の `like`/`not like` は一致が **10 万件で検索打ち切り**に
 
 ## 7. 進め方（提案）
 1. R2 を codex 再確認（必要なら）。
-2. **v1 実装**: KLIKE トークン/AST/parser（右辺 STRING|VARIABLE・`%` 拒否）・`convertOp` で `like`/`not like`・`negateOp` に KLIKE↔NOT_KLIKE・`whereRequiresJsEval` 非該当化・**AST 後の静的検証で「KLIKE ∧ FULL_SCAN」拒否**（全 SELECT スコープ）・**全 DML で KLIKE 拒否**・互換注記（フィールドコード `KLIKE`）。
+2. **v1 実装（完了）**: KLIKE トークン/AST/parser（右辺 STRING|VARIABLE・`%` 拒否）・`convertOp` で `like`/`not like`・`negateOp` に KLIKE↔NOT_KLIKE・`whereRequiresJsEval` 非該当化・**AST 後の静的検証で「KLIKE ∧ FULL_SCAN」拒否**（全 SELECT スコープ）・**全 DML で KLIKE 拒否**・互換注記（フィールドコード `KLIKE`）。
 3. **実機**: kintone `like` の実挙動（半角全角/単語分割/`_` の扱い/10 万件打ち切り）を APP4221 等で観測しドキュメント化。SIMPLE で `件名 KLIKE '…'` が kintone クエリに乗ることを EXPLAIN/結果で確認。
 4. リリース（minor）。
 5. **後続（別作業）**: [P0] レスポンスヘッダー（`X-Cybozu-Warning`）検出基盤 → SELECT 警告表示・親 DML 解禁の前提。**v2**（KLIKE プレフィルタ押し下げ）。

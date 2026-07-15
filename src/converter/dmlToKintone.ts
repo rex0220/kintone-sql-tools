@@ -26,9 +26,15 @@ import type {
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr } from "../engine/evalFunc";
-import { whereHasLike } from "../core/like";
+import { whereHasKlike, whereHasLike } from "../core/like";
 
 function assertDmlWhereIsSafe(where: WhereExpr): void {
+  if (whereHasKlike(where)) {
+    throw new DmlConvertError(
+      "UPDATE / DELETE の WHERE に KLIKE / NOT KLIKE は使用できません。" +
+      "kintone キーワード検索の打ち切りを検出できないため、v1 では全 DML で安全上拒否しました。"
+    );
+  }
   if (!whereHasLike(where)) return;
   throw new DmlConvertError(
     "UPDATE / DELETE の WHERE に LIKE / NOT LIKE は使用できません。" +

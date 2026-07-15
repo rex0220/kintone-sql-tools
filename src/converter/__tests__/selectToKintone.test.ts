@@ -27,3 +27,9 @@ test("LIKE はワイルドカードの有無にかかわらず FULL_SCAN にな�
   expect(resolveSelectMode(bare)).toBe("FULL_SCAN");
   expect(selectToFetchAllParams(bare, 100).query).toBe("");
 });
+
+test("KLIKE は JS 評価を要求せず SIMPLE の kintone query へ押し下げる", () => {
+  const stmt = parseSelect("SELECT 文字列 FROM APP100 WHERE 文字列 KLIKE '会社'");
+  expect(resolveSelectMode(stmt)).toBe("SIMPLE");
+  expect(selectToKintoneParams(stmt).query).toBe('文字列 like "会社"');
+});
