@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-15
 - 対象課題: [ksql_agg_arith_alias_dropped_issue.md](./ksql_agg_arith_alias_dropped_issue.md)（codex レビュー済み R2）
-- ステータス: **仕様案 R2（codex 仕様レビューの条件付き承認を反映 → Codex 実装へ）**
+- ステータス: **実装済み・v2.1.2 リリース済**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 更新履歴:
   - 2026-07-15 R1: 初版

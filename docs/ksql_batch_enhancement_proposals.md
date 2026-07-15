@@ -4,7 +4,7 @@
 - 更新履歴:
   - 2026-07-10 R2: 再レビュー反映(精度調整)。`dmlMaxRows` の説明を上限ガードに訂正(§2.1)/ Undo ログの「追加読み取りコストなし」を撤回 — 現行は `$id` のみ取得のため pre-image には追加フィールド取得が必要(§2.3)/ 部分失敗の exit code 2 案を撤回 — 既存 `ArgumentError` 等と衝突するため `1` + JSON 判定を基本に(§3.2)/ bulkRequest 対象のステータス更新を kSQL 現行対象外として切り分け(§2.2)/ §4.4 の再評価条件を §3.1 の分類変更に合わせて整合
   - 2026-07-10 R1: レビュー反映。ASSERT の真値定義を明確化(§2.1)/ リトライ・レート制御を「新規機能」から「既存 requestGate の設定公開」に分類変更(§3.1)/ bulkRequest の実装難度を上方修正 — DML 文をリクエスト計画に変換する層が必要(§2.2)/ CLI 構造化出力・保存クエリの現状実装を明記(§3.2・§4.2)/ 推奨優先順位を改訂(§5)
-- ステータス: 第1弾(ASSERT / CLI バッチ JSON 出力 / requestGate 設定公開)は**実装完了**(v1.10.0 リリース待ち。仕様は [ksql_batch_enhancement_phase1_spec.md](ksql_batch_enhancement_phase1_spec.md))。第2弾以降は提案(未着手)
+- ステータス: 第1弾(ASSERT / CLI バッチ JSON 出力 / requestGate 設定公開)は**v1.10.0 リリース済**(仕様は [ksql_batch_enhancement_phase1_spec.md](ksql_batch_enhancement_phase1_spec.md))。第2弾以降は提案(未着手)
 - 前提バージョン: v1.9.0(バッチ実行・一時テーブル・DML バッチ・プラグイン DML バッチまで実装済み)
 - 関連資料: [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) / [multi-statement-temp-table-evaluation.md](multi-statement-temp-table-evaluation.md)
 

@@ -10,7 +10,7 @@
   - 2026-07-12 R3: 同一環境内の部門別同型アプリを切替・比較する適用事例と、多数部門時の拡張論点を追加
   - 2026-07-12 R2: 同一kintone環境内の本番アプリ／テストアプリ切替・比較を適用事例として追加
   - 2026-07-12 R1: 初版
-- ステータス: **仕様レビュー完了・実装着手可能（実装計画待ち）**
+- ステータス: **実装済み・v1.13.0 リリース済（LAPP_<NAME> 解決・CLI/MCP。v1.13.1 CLI エラー復元・v1.13.2 単文 dry-run 露出修正）。プラグインは論理アプリ非対応**
 - 対象: Node.js runtimeを利用するCLI / MCP
 - 関連機能: `APP@profile`、profile config、tokenMap、保存クエリ
 - 関連実装: `src/node/config.ts`、`src/node/appProfiles.ts`、`src/node/runtime.ts`、`src/mcp/tools.ts`、`src/cli/index.ts`

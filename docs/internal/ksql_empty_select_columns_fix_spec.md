@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-14
 - 対象課題: [ksql_empty_select_columns_issue.md](./ksql_empty_select_columns_issue.md)（codex レビュー済み R2）
-- ステータス: **仕様案 R2（codex 仕様レビューの条件付き承認を反映 → Codex 実装へ）**
+- ステータス: **明示列は実装済み・v2.1.1 リリース済。空 `SELECT *`／空 CTE／混在ワイルドカードは対象外（残課題）**
 - 更新履歴:
   - 2026-07-14 R1: 初版
   - 2026-07-14 R2: codex 仕様レビュー反映（メッセージ条件に `rows.length===0`／`computeOutputKeys` の型絞り込み固定／テスト計画に `ARITH_AGG_COL`・通常 `UNION` を追加）
