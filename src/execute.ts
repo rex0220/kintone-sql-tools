@@ -39,7 +39,7 @@ import {
   fetchRecordsForSharedPlan,
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
-import { extractTableCondition } from "./core/optimization/wherePredicatePushdown";
+import { extractSafePushdownLeaves } from "./core/optimization/wherePredicatePushdown";
 import { whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -1059,6 +1059,20 @@ async function validateSelectFieldCodes(
   }
 }
 
+function extractMainSafePushdown(stmt: SelectStatement): WhereExpr | null {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+
+  if (stmt.joins.length === 0) {
+    return extractSafePushdownLeaves(stmt.where, {
+      tableAlias: stmt.from.alias ?? undefined,
+      allowUnqualifiedFields: true,
+    });
+  }
+
+  if (!stmt.from.alias) return null;
+  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias });
+}
+
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
 async function executeFullScanSelect(
   stmt: SelectStatement,
@@ -1077,23 +1091,19 @@ async function executeFullScanSelect(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
   ]);
 
-  // テーブルごとの push down 条件を計算
+  // テーブルごとの安全な push down 条件を計算する。
+  // 第0段は型メタデータを使わず、$id の肯定数値比較だけを対象にする。
+  const mainPushDown = extractMainSafePushdown(stmt);
   const tableConditions = new Map<string, WhereExpr>();
   if (stmt.where !== null) {
-    if (stmt.from.alias) {
-      const cond = extractTableCondition(stmt.where, stmt.from.alias);
-      if (cond) tableConditions.set(stmt.from.alias, cond);
-    }
     for (const join of stmt.joins) {
-      if (join.table.alias) {
-        const cond = extractTableCondition(stmt.where, join.table.alias);
-        if (cond) tableConditions.set(join.table.alias, cond);
-      }
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const cond = extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias });
+      if (cond) tableConditions.set(join.table.alias, cond);
     }
   }
 
   // メインテーブルのフェッチを開始（await しない）
-  const mainPushDown = stmt.from.alias ? (tableConditions.get(stmt.from.alias) ?? null) : null;
   const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
@@ -3190,8 +3200,7 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     // メインテーブル
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainPushDown = stmt.from.alias && stmt.where
-      ? extractTableCondition(stmt.where, stmt.from.alias) : null;
+    const mainPushDown = extractMainSafePushdown(stmt);
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
       : "(全件取得)";
@@ -3203,8 +3212,8 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
       const joinFields = selectToFetchAllFields(stmt, join.table);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      const joinPushDown = join.table.alias && stmt.where
-        ? extractTableCondition(stmt.where, join.table.alias) : null;
+      const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
+        ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null
         ? whereToKintone(joinPushDown)
         : "(全件取得)";

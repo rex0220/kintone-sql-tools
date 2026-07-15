@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 安全性・性能
+
+- **FULL_SCAN の述語プレフィルタを、安全性を確認できる `$id` の肯定数値比較（`= < > <= >=`）だけに限定**。既存の JOIN／エイリアス経路がテキスト等値・`!=`・`IS NULL`・`NOT`・`KINTONE_FUNC` 等を kintone へ押し下げていた挙動を停止し、kintone と JavaScript の評価差による結果取りこぼしリスクを除去した。これらの条件を使う一部クエリでは取得件数が増え、性能が低下する場合がある。
+- LIKE などJavaScript評価が必要な条件と `$id` の肯定比較を AND で併記した場合、単一テーブルの無エイリアス／エイリアス経路と JOIN 経路のいずれでも `$id` 条件だけをkintoneへプレフィルタとして押し下げる。WHERE全体は取得後にJavaScriptで再評価する。
+
 ## v2.1.2（2026-07-15）
 
 ### 修正（バグ）

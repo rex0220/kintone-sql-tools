@@ -486,6 +486,74 @@ test("FULL_SCAN: JOIN + ワイルドカード LIKE は押し下げず JS で評�
   expect(client.getCalls.every((call) => !call.query.toLowerCase().includes("like"))).toBe(true);
 });
 
+test("FULL_SCAN: 単一テーブル無エイリアスで $id 条件だけをプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "999", 会社名: "A社" }),
+    makeRecord({ $id: "1000", 会社名: "A社" }),
+    makeRecord({ $id: "1001", 会社名: "B社" }),
+  ] });
+
+  const result = await execute(
+    "SELECT $id, 会社名 FROM APP100 WHERE $id >= 1000 AND 会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1000", 会社名: "A社" }]);
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+  expect(client.getCalls[0].query.toLowerCase()).not.toContain("like");
+});
+
+test("FULL_SCAN: 単一テーブルの正しいエイリアス付き $id 条件をプレフィルタする", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "999", 会社名: "A社" }),
+    makeRecord({ $id: "1000", 会社名: "A社" }),
+  ] });
+
+  const result = await execute(
+    "SELECT a.$id, a.会社名 FROM APP100 AS a WHERE a.$id >= 1000 AND a.会社名 LIKE '%A%'",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ "$id": "1000", "会社名": "A社" }]);
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+});
+
+test("FULL_SCAN: 第0段の $id 押し下げは型メタデータを取得しない", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1000" })] });
+  let getFieldsCount = 0;
+  client.getFields = async () => {
+    getFieldsCount += 1;
+    return [];
+  };
+
+  await execute(
+    "SELECT $id FROM APP100 WHERE $id >= 1000 AND LENGTH($id) >= 1",
+    client
+  );
+
+  expect(client.getCalls[0].query).toContain("$id >= 1000");
+  expect(getFieldsCount).toBe(0);
+});
+
+test("FULL_SCAN: JOIN の $id 条件は維持し、テキスト等値は押し下げない", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", 顧客ID: "C1", 文字列: "A社" })],
+      101: [makeRecord({ $id: "10", 顧客ID: "C1", 状態: "完了" })],
+    },
+  });
+
+  await execute(
+    "SELECT a.$id FROM APP100 AS a INNER JOIN APP101 AS b ON a.顧客ID = b.顧客ID " +
+    "WHERE b.$id >= 10 AND b.状態 = '完了' AND a.文字列 LIKE '%A%'",
+    client
+  );
+
+  const joinCall = client.getCalls.find((call) => call.app === 101);
+  expect(joinCall?.query).toContain("$id >= 10");
+  expect(joinCall?.query).not.toContain("状態");
+});
+
 test("FULL_SCAN: サブテーブルは $id / サブテーブル本体 / _p.参照親項目のみ取得", async () => {
   const client = makeClient({
     recordsByApp: {

@@ -1,80 +1,70 @@
-import type { WhereExpr, FieldValue, SqlValue } from "../../types/ast";
-import { isLike } from "../like";
+import type { WhereExpr, FieldValue } from "../../types/ast";
+
+export interface SafePushdownOptions {
+  /** JOIN 時に抽出対象とするテーブルエイリアス。 */
+  tableAlias?: string;
+  /**
+   * 単一テーブルでは、正しいエイリアス付き参照に加えて非修飾参照も安全に扱える。
+   * JOIN 時は false のままにし、対象エイリアスの明示参照だけを許可する。
+   */
+  allowUnqualifiedFields?: boolean;
+  /** 将来の型別ホワイトリスト用。第0段では参照しない。 */
+  fieldTypes?: ReadonlyMap<string, string>;
+}
 
 /**
- * WHERE 式から指定テーブルエイリアスの push down 可能な条件を抽出する。
+ * WHERE から kintone へ安全に押し下げられる AND リーフだけを抽出する。
  *
- * AND ノードは分解して各テーブルに振り分ける。
- * OR / NOT / GROUP は全体が同一テーブルのみを参照する場合のみ push down。
- * クロステーブル・関数付き・EXISTS は null を返す。
+ * 第0段では、必ず存在して型も静的に確定する `$id` の肯定数値比較だけを許可する。
+ * GROUP は透過するが、OR / NOT / NULL 判定 / EXISTS はサブツリーごと除外する。
  */
-export function extractTableCondition(
+export function extractSafePushdownLeaves(
   where: WhereExpr,
-  tableAlias: string
+  options: SafePushdownOptions = {}
 ): WhereExpr | null {
   switch (where.type) {
     case "BINARY":
-      if (isLike(where)) return null;
-      if (!isSingleTableField(where.left, tableAlias)) return null;
-      if (!isPushDownableRight(where.right)) return null;
-      return where;
-
-    case "NULL_CHECK":
-      if (!isSingleTableField(where.field, tableAlias)) return null;
-      return where;
+      return isSafeIdComparison(where, options) ? where : null;
 
     case "LOGICAL":
-      if (where.op === "AND") {
-        const left  = extractTableCondition(where.left,  tableAlias);
-        const right = extractTableCondition(where.right, tableAlias);
+      if (where.op !== "AND") return null;
+      {
+        const left = extractSafePushdownLeaves(where.left, options);
+        const right = extractSafePushdownLeaves(where.right, options);
         if (left && right) return { ...where, left, right };
         return left ?? right ?? null;
       }
-      // OR: 全体が同一テーブルのみ参照する場合のみ push down
-      return referencesOnlyTable(where, tableAlias) ? where : null;
 
-    case "NOT":
     case "GROUP":
-      return referencesOnlyTable(where, tableAlias) ? where : null;
+      return extractSafePushdownLeaves(where.expr, options);
 
+    case "NULL_CHECK":
+    case "NOT":
     case "EXISTS":
       return null;
   }
 }
 
-/** フィールド参照が指定テーブルエイリアスのみを参照する FieldRef かどうか */
-function isSingleTableField(field: FieldValue, tableAlias: string): boolean {
-  // FUNC_FIELD / ARITH_FIELD / CASE_FIELD は kintone API 変換不可
-  if (field.type !== "FIELD") return false;
-  return field.tableAlias === tableAlias;
+function isSafeIdComparison(
+  expr: Extract<WhereExpr, { type: "BINARY" }>,
+  options: SafePushdownOptions
+): boolean {
+  if (!isTargetIdField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  return expr.op === "="
+    || expr.op === ">"
+    || expr.op === "<"
+    || expr.op === ">="
+    || expr.op === "<=";
 }
 
-/** WHERE 右辺が kintone API に渡せるリテラル値かどうか */
-function isPushDownableRight(value: SqlValue): boolean {
-  switch (value.type) {
-    case "STRING":
-    case "NUMBER":
-    case "KINTONE_FUNC":
-    case "IN_LIST":
-      return true;
-    default:
-      return false;
-  }
-}
+function isTargetIdField(
+  field: FieldValue,
+  options: SafePushdownOptions
+): boolean {
+  if (field.type !== "FIELD" || field.field !== "$id") return false;
 
-/** 式全体が指定テーブルエイリアスのみを参照するかどうか */
-function referencesOnlyTable(expr: WhereExpr, tableAlias: string): boolean {
-  switch (expr.type) {
-    case "BINARY":
-      return !isLike(expr) && isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
-    case "NULL_CHECK":
-      return isSingleTableField(expr.field, tableAlias);
-    case "LOGICAL":
-      return referencesOnlyTable(expr.left, tableAlias) && referencesOnlyTable(expr.right, tableAlias);
-    case "NOT":
-    case "GROUP":
-      return referencesOnlyTable(expr.expr, tableAlias);
-    case "EXISTS":
-      return false;
-  }
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
 }
