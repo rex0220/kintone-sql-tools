@@ -1,9 +1,26 @@
-ksql 配布パッケージ (v2.1.2)
+ksql 配布パッケージ (v2.2.0)
 
-1. ksql-plugin-v2.1.2.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.2.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.2.0: 述語押し下げの安全化と数値対応。
+- FULL_SCAN の数値範囲比較で空の数値セルを 0 扱いしていた問題を修正。kintone
+  (SIMPLE)は空を -infinity 相当(< /<= は含む・> />= は除外)として扱うため、
+  同じ SQL が実行モードで異なる結果を返していた。JavaScript 評価も同じ規則へ
+  統一(範囲比較で左辺が空・右辺が有限数のとき < /<= は真・> />= は偽)。
+  WHERE / HAVING / CASE WHEN / サブテーブル UPDATE・DELETE・REORDER / ASSERT・
+  BETWEEN に反映。= / != ・右辺空・非数値・非有限・文字列範囲は不変。
+- FULL_SCAN のプレフィルタ押し下げを、超集合性を確認できる述語だけに限定
+  (安全化)。従来 JOIN/エイリアス経路で押し下げていたテキスト等値・!=・IS NULL・
+  NOT・KINTONE_FUNC 等を停止(結果取りこぼしの回避。一部クエリで取得件数増)。
+- LIKE 等 JS 評価が必要な条件と AND 併記された安全述語を kintone へプレフィルタ
+  押し下げして取得件数を削減(WHERE 全体は取得後 JS で再評価)。対象は $id の肯定
+  比較と、NUMBER フィールド(型情報で確定)の = と厳密な < / >(右辺が安全整数)。
+  境界丸めで壊れる <= / >= は押し下げず FULL_SCAN で評価。EXPLAIN は確定分を
+  kintone query、型確認待ちの数値候補を pushdown candidate 行に分けて表示。
+- 詳細は CHANGELOG.md を参照。
 
 v2.1.2: 集計算術式の alias 消失を修正(バグ修正)。
 - SUM(x) / COUNT(*) AS 平均 のように、集計算術式の末尾(や中間)が集計関数だと

@@ -33393,6 +33393,28 @@ function analyzeBatch(statements) {
   };
 }
 
+// src/core/scalarCompare.ts
+function compareScalarValues(op, leftStr, rightStr) {
+  if (op === "=") return leftStr === rightStr;
+  if (op === "!=" || op === "<>") return leftStr !== rightStr;
+  const rightNum = Number(rightStr);
+  if (leftStr === "" && rightStr !== "" && Number.isFinite(rightNum)) {
+    return op === "<" || op === "<=";
+  }
+  const leftNum = Number(leftStr);
+  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
+  switch (op) {
+    case ">":
+      return numeric ? leftNum > rightNum : leftStr > rightStr;
+    case "<":
+      return numeric ? leftNum < rightNum : leftStr < rightStr;
+    case ">=":
+      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
+    case "<=":
+      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+  }
+}
+
 // src/engine/pushDownNot.ts
 function pushDownNot(expr) {
   switch (expr.type) {
@@ -34367,24 +34389,7 @@ function evalOp(op, leftStr, right, row) {
     return !matchLike(leftStr, pattern);
   }
   const rightStr = resolveValue(right, row);
-  const leftNum = Number(leftStr);
-  const rightNum = Number(rightStr);
-  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-  switch (op) {
-    case "=":
-      return leftStr === rightStr;
-    case "!=":
-    case "<>":
-      return leftStr !== rightStr;
-    case ">":
-      return numeric ? leftNum > rightNum : leftStr > rightStr;
-    case "<":
-      return numeric ? leftNum < rightNum : leftStr < rightStr;
-    case ">=":
-      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":
-      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
+  return compareScalarValues(op, leftStr, rightStr);
 }
 function assertResolvedInListValues2(values) {
   const unresolved = values.find((item) => item.type === "VARIABLE");
@@ -34987,60 +34992,59 @@ async function resolveDmlTargetIds(getRecords, app, query, options) {
 }
 
 // src/core/optimization/wherePredicatePushdown.ts
-function extractTableCondition(where, tableAlias) {
+function extractSafePushdownLeaves(where, options = {}) {
+  return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
+}
+function extractNumericPushdownCandidates(where, options = {}) {
+  return extractAndLeaves(where, (expr) => isNumericCandidate(expr, options));
+}
+function extractAndLeaves(where, accept) {
   switch (where.type) {
     case "BINARY":
-      if (isLike(where)) return null;
-      if (!isSingleTableField(where.left, tableAlias)) return null;
-      if (!isPushDownableRight(where.right)) return null;
-      return where;
-    case "NULL_CHECK":
-      if (!isSingleTableField(where.field, tableAlias)) return null;
-      return where;
+      return accept(where) ? where : null;
     case "LOGICAL":
-      if (where.op === "AND") {
-        const left = extractTableCondition(where.left, tableAlias);
-        const right = extractTableCondition(where.right, tableAlias);
+      if (where.op !== "AND") return null;
+      {
+        const left = extractAndLeaves(where.left, accept);
+        const right = extractAndLeaves(where.right, accept);
         if (left && right) return { ...where, left, right };
         return left ?? right ?? null;
       }
-      return referencesOnlyTable(where, tableAlias) ? where : null;
-    case "NOT":
     case "GROUP":
-      return referencesOnlyTable(where, tableAlias) ? where : null;
+      return extractAndLeaves(where.expr, accept);
+    case "NULL_CHECK":
+    case "NOT":
     case "EXISTS":
       return null;
   }
 }
-function isSingleTableField(field, tableAlias) {
-  if (field.type !== "FIELD") return false;
-  return field.tableAlias === tableAlias;
+function isSafeComparison(expr, options) {
+  if (isSafeIdComparison(expr, options)) return true;
+  if (!isNumericCandidate(expr, options)) return false;
+  return options.fieldTypes?.get(expr.left.field) === "NUMBER";
 }
-function isPushDownableRight(value) {
-  switch (value.type) {
-    case "STRING":
-    case "NUMBER":
-    case "KINTONE_FUNC":
-    case "IN_LIST":
-      return true;
-    default:
-      return false;
-  }
+function isSafeIdComparison(expr, options) {
+  if (!isTargetIdField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  return expr.op === "=" || expr.op === ">" || expr.op === "<" || expr.op === ">=" || expr.op === "<=";
 }
-function referencesOnlyTable(expr, tableAlias) {
-  switch (expr.type) {
-    case "BINARY":
-      return !isLike(expr) && isSingleTableField(expr.left, tableAlias) && isPushDownableRight(expr.right);
-    case "NULL_CHECK":
-      return isSingleTableField(expr.field, tableAlias);
-    case "LOGICAL":
-      return referencesOnlyTable(expr.left, tableAlias) && referencesOnlyTable(expr.right, tableAlias);
-    case "NOT":
-    case "GROUP":
-      return referencesOnlyTable(expr.expr, tableAlias);
-    case "EXISTS":
-      return false;
-  }
+function isTargetIdField(field, options) {
+  if (field.type !== "FIELD" || field.field !== "$id") return false;
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
+}
+function isNumericCandidate(expr, options) {
+  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
+  if (!isTargetField(expr.left, options)) return false;
+  if (expr.right.type !== "NUMBER") return false;
+  if (expr.op === "=") return true;
+  return (expr.op === "<" || expr.op === ">") && Number.isSafeInteger(expr.right.value);
+}
+function isTargetField(field, options) {
+  const targetAlias = options.tableAlias ?? null;
+  if (field.tableAlias === targetAlias) return true;
+  return options.allowUnqualifiedFields === true && field.tableAlias === null;
 }
 
 // src/engine/process.ts
@@ -35988,7 +35992,7 @@ async function executeAssert(stmt, client, options, cacheContext, tempTables) {
     }
     const low = await evalAssertOperand(stmt.low, client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
-    if (!compareAssertValues(">=", left, low) || !compareAssertValues("<=", left, high)) {
+    if (!compareScalarValues(">=", left, low) || !compareScalarValues("<=", left, high)) {
       throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
     }
     return { type: "ASSERT", condition: stmt.text };
@@ -35997,7 +36001,7 @@ async function executeAssert(stmt, client, options, cacheContext, tempTables) {
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareAssertValues(stmt.op, left, right)) {
+  if (!compareScalarValues(stmt.op, left, right)) {
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
   }
   return { type: "ASSERT", condition: stmt.text };
@@ -36056,26 +36060,6 @@ function evalAssertArith(node) {
     }
   }
   throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
-}
-function compareAssertValues(op, leftStr, rightStr) {
-  const leftNum = Number(leftStr);
-  const rightNum = Number(rightStr);
-  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
-  switch (op) {
-    case "=":
-      return leftStr === rightStr;
-    case "!=":
-    case "<>":
-      return leftStr !== rightStr;
-    case ">":
-      return numeric ? leftNum > rightNum : leftStr > rightStr;
-    case "<":
-      return numeric ? leftNum < rightNum : leftStr < rightStr;
-    case ">=":
-      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
-    case "<=":
-      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
-  }
 }
 async function executeSelect(stmt, client, options, cacheContext, cteCache) {
   if (isNoFromSelect(stmt)) {
@@ -36210,6 +36194,44 @@ async function validateSelectFieldCodes(stmt, mode, client, cacheContext) {
     }
   }
 }
+function extractMainSafePushdown(stmt, fieldTypes) {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+  if (stmt.joins.length === 0) {
+    return extractSafePushdownLeaves(stmt.where, {
+      tableAlias: stmt.from.alias ?? void 0,
+      allowUnqualifiedFields: true,
+      fieldTypes
+    });
+  }
+  if (!stmt.from.alias) return null;
+  return extractSafePushdownLeaves(stmt.where, { tableAlias: stmt.from.alias, fieldTypes });
+}
+function extractMainNumericPushdownCandidate(stmt) {
+  if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
+  if (stmt.joins.length === 0) {
+    return extractNumericPushdownCandidates(stmt.where, {
+      tableAlias: stmt.from.alias ?? void 0,
+      allowUnqualifiedFields: true
+    });
+  }
+  if (!stmt.from.alias) return null;
+  return extractNumericPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
+}
+async function loadNumericPushdownFieldTypes(stmt, client, cacheContext) {
+  const appIds = /* @__PURE__ */ new Set();
+  if (extractMainNumericPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+  if (stmt.where !== null) {
+    for (const join of stmt.joins) {
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const candidate = extractNumericPushdownCandidates(stmt.where, {
+        tableAlias: join.table.alias
+      });
+      if (candidate !== null) appIds.add(join.table.appId);
+    }
+  }
+  const entries = await Promise.all([...appIds].map(async (appId) => [appId, await getFieldTypeMap(appId, client, cacheContext)]));
+  return new Map(entries);
+}
 async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
@@ -36218,20 +36240,22 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
+  const pushdownFieldTypes = await loadNumericPushdownFieldTypes(stmt, client, cacheContext);
+  const mainPushDown = extractMainSafePushdown(
+    stmt,
+    pushdownFieldTypes.get(stmt.from.appId)
+  );
   const tableConditions = /* @__PURE__ */ new Map();
   if (stmt.where !== null) {
-    if (stmt.from.alias) {
-      const cond = extractTableCondition(stmt.where, stmt.from.alias);
-      if (cond) tableConditions.set(stmt.from.alias, cond);
-    }
     for (const join of stmt.joins) {
-      if (join.table.alias) {
-        const cond = extractTableCondition(stmt.where, join.table.alias);
-        if (cond) tableConditions.set(join.table.alias, cond);
-      }
+      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const cond = extractSafePushdownLeaves(stmt.where, {
+        tableAlias: join.table.alias,
+        fieldTypes: pushdownFieldTypes.get(join.table.appId)
+      });
+      if (cond) tableConditions.set(join.table.alias, cond);
     }
   }
-  const mainPushDown = stmt.from.alias ? tableConditions.get(stmt.from.alias) ?? null : null;
   const mainFetch = fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
@@ -37642,19 +37666,27 @@ function buildSelectPlan(stmt, label) {
   } else {
     const mainFields = selectToFetchAllFields(stmt, stmt.from);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
-    const mainPushDown = stmt.from.alias && stmt.where ? extractTableCondition(stmt.where, stmt.from.alias) : null;
+    const mainPushDown = extractMainSafePushdown(stmt);
+    const mainCandidate = extractMainNumericPushdownCandidate(stmt);
     const mainQ = mainPushDown !== null ? whereToKintone(mainPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
+    if (mainCandidate !== null) {
+      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u78BA\u8A8D\u5F85\u3061\uFF09`);
+    }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : mainFields.join(", ")}`);
     for (const join of stmt.joins) {
       const joinFields = selectToFetchAllFields(stmt, join.table);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
-      const joinPushDown = join.table.alias && stmt.where ? extractTableCondition(stmt.where, join.table.alias) : null;
+      const joinPushDown = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractSafePushdownLeaves(stmt.where, { tableAlias: join.table.alias }) : null;
+      const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where ? extractNumericPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
       const joinQ = joinPushDown !== null ? whereToKintone(joinPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
+      if (joinCandidate !== null) {
+        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}\uFF08\u5B9F\u884C\u6642\u306E\u578B\u78BA\u8A8D\u5F85\u3061\uFF09`);
+      }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : joinFields.join(", ")}`);
     }
   }
@@ -39982,7 +40014,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.1.2" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.2.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
