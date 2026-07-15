@@ -8,6 +8,7 @@
 import type {
   WhereExpr,
   FieldValue,
+  FieldRef,
   SqlValue,
   CompareOp,
   CaseWhenExpr,
@@ -56,17 +57,24 @@ export interface ResolvedScalarSubquery extends ScalarSubquery {
 // ------------------------------------------------------------
 export type ProcessRow = Record<string, string>;
 
+/** 物理フィールド参照から kintone フィールド型を解決する。 */
+export type FieldTypeResolver = (field: FieldRef) => string | undefined;
+
 // ------------------------------------------------------------
 // エントリポイント
 // ------------------------------------------------------------
 
-export function evalWhere(expr: WhereExpr, row: ProcessRow): boolean {
+export function evalWhere(
+  expr: WhereExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
+): boolean {
   switch (expr.type) {
-    case "BINARY":    return evalBinary(expr, row);
+    case "BINARY":    return evalBinary(expr, row, resolveFieldType);
     case "NULL_CHECK": return evalNullCheck(expr, row);
-    case "LOGICAL":   return evalLogical(expr, row);
-    case "NOT":       return !evalWhere(expr.expr, row);
-    case "GROUP":     return evalWhere(expr.expr, row);
+    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType);
+    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType);
+    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType);
     case "EXISTS": {
       const exists = (expr as ResolvedExistsExpr).resolved;
       return expr.not ? !exists : exists;
@@ -80,45 +88,111 @@ export function evalWhere(expr: WhereExpr, row: ProcessRow): boolean {
 
 function evalBinary(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
-  row: ProcessRow
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
 ): boolean {
-  const left = resolveField(expr.left, row);
-  return evalOp(expr.op, left, expr.right, row);
+  const left = resolveField(expr.left, row, resolveFieldType);
+  const fieldType = expr.left.type === "FIELD"
+    ? resolveFieldType?.(expr.left)
+    : undefined;
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType);
 }
 
 function evalOp(
   op: CompareOp,
   leftStr: string,
   right: SqlValue,
-  row: ProcessRow
+  row: ProcessRow,
+  fieldType?: string,
+  resolveFieldType?: FieldTypeResolver
 ): boolean {
   if (op === "IN" || op === "NOT_IN") {
+    let values: Set<string> | null = null;
     if (right.type === "IN_LIST") {
       // 比較前に全要素を検査し、some/every の短絡で未解決変数を見逃さない。
       assertResolvedInListValues(right.values);
-      const contains = right.values.some((v) => leftStr === String(v.value));
-      return op === "IN" ? contains : !contains;
+      values = new Set(right.values.map((v) => String(v.value)));
     }
     if (right.type === "SUBQUERY_IN_LIST") {
-      const contains = (right as ResolvedSubqueryInList).resolved.has(leftStr);
-      return op === "IN" ? contains : !contains;
+      values = (right as ResolvedSubqueryInList).resolved;
     }
-    return op === "NOT_IN";
+    if (values === null) return op === "NOT_IN";
+    const contains = typedInContains(leftStr, values, fieldType);
+    return op === "IN" ? contains : !contains;
   }
 
   if (op === "LIKE") {
-    const pattern = resolveValue(right, row);
+    const pattern = resolveValue(right, row, resolveFieldType);
     return matchLike(leftStr, pattern);
   }
 
   if (op === "NOT_LIKE") {
-    const pattern = resolveValue(right, row);
+    const pattern = resolveValue(right, row, resolveFieldType);
     return !matchLike(leftStr, pattern);
   }
 
-  const rightStr = resolveValue(right, row);
+  const rightStr = resolveValue(right, row, resolveFieldType);
 
   return compareScalarValues(op, leftStr, rightStr);
+}
+
+const STRING_ARRAY_FIELD_TYPES = new Set(["CHECK_BOX", "MULTI_SELECT"]);
+const OBJECT_ARRAY_FIELD_TYPES = new Set([
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "STATUS_ASSIGNEE",
+]);
+const SINGLE_OBJECT_FIELD_TYPES = new Set(["CREATOR", "MODIFIER"]);
+
+/**
+ * kintone の複数値・ユーザー系フィールドを、値/code 単位で IN 評価する。
+ * 型不明・JSON 形不一致では従来の文字列完全一致へフォールバックする。
+ */
+function typedInContains(
+  leftStr: string,
+  values: ReadonlySet<string>,
+  fieldType: string | undefined
+): boolean {
+  const fallback = () => values.has(leftStr);
+  if (fieldType === undefined) return fallback();
+
+  let parsed: unknown;
+  if (
+    STRING_ARRAY_FIELD_TYPES.has(fieldType) ||
+    OBJECT_ARRAY_FIELD_TYPES.has(fieldType) ||
+    SINGLE_OBJECT_FIELD_TYPES.has(fieldType)
+  ) {
+    try {
+      parsed = JSON.parse(leftStr) as unknown;
+    } catch {
+      return fallback();
+    }
+  } else {
+    return fallback();
+  }
+
+  if (STRING_ARRAY_FIELD_TYPES.has(fieldType)) {
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
+      return fallback();
+    }
+    return parsed.some((item) => values.has(item));
+  }
+
+  if (OBJECT_ARRAY_FIELD_TYPES.has(fieldType)) {
+    if (!Array.isArray(parsed) || !parsed.every(hasStringCode)) return fallback();
+    return parsed.some((item) => values.has(item.code));
+  }
+
+  if (!hasStringCode(parsed)) return fallback();
+  return values.has(parsed.code);
+}
+
+function hasStringCode(value: unknown): value is { code: string } {
+  return value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof (value as { code?: unknown }).code === "string";
 }
 
 function assertResolvedInListValues(
@@ -148,12 +222,13 @@ function evalNullCheck(
 
 function evalLogical(
   expr: Extract<WhereExpr, { type: "LOGICAL" }>,
-  row: ProcessRow
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
 ): boolean {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row) && evalWhere(expr.right, row);
+    return evalWhere(expr.left, row, resolveFieldType) && evalWhere(expr.right, row, resolveFieldType);
   }
-  return evalWhere(expr.left, row) || evalWhere(expr.right, row);
+  return evalWhere(expr.left, row, resolveFieldType) || evalWhere(expr.right, row, resolveFieldType);
 }
 
 // ------------------------------------------------------------
@@ -162,11 +237,12 @@ function evalLogical(
 
 function resolveField(
   field: FieldValue,
-  row: ProcessRow
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
 ): string {
   if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row);
+  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType);
   // エイリアス付き: "a.フィールド"
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`
@@ -174,7 +250,11 @@ function resolveField(
   return resolveFieldRef(row, key);
 }
 
-function resolveValue(value: SqlValue, row: ProcessRow): string {
+function resolveValue(
+  value: SqlValue,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
+): string {
   switch (value.type) {
     case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
     case "STRING":       return value.value;
@@ -187,7 +267,7 @@ function resolveValue(value: SqlValue, row: ProcessRow): string {
       if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
       if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
       return String(evalArithExpr(value.expr, row));
-    case "CASE_VALUE":        return evalCaseWhen(value.expr, row);
+    case "CASE_VALUE":        return evalCaseWhen(value.expr, row, resolveFieldType);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
@@ -197,9 +277,13 @@ function resolveValue(value: SqlValue, row: ProcessRow): string {
 // CASE WHEN 評価（process.ts と dmlToKintone.ts からも使う）
 // ============================================================
 
-export function evalCaseWhen(expr: CaseWhenExpr, row: ProcessRow): string {
+export function evalCaseWhen(
+  expr: CaseWhenExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver
+): string {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row)) {
+    if (evalWhere(branch.condition, row, resolveFieldType)) {
       return evalCaseResult(branch.result, row);
     }
   }

@@ -7,6 +7,10 @@ import type {
   KintonePutParams,
   PageFetchParams,
 } from "../core";
+import {
+  flattenFormFieldProperties,
+  type FormFieldProperty,
+} from "../core/formFieldInfo";
 
 export interface TokenResolver {
   guestSpaceId?: number | null;
@@ -217,54 +221,13 @@ export function createNodeKintoneClient(
     async getFields(appId: number): Promise<KintoneFieldInfo[]> {
       const qs = new URLSearchParams();
       qs.set("app", String(appId));
-      const res = await requestJson<{
-        properties: Record<string, {
-          code: string;
-          label: string;
-          type: string;
-          format?: string;
-          options?: Record<string, { index?: string | number }>;
-        }>;
-      }>(
+      const res = await requestJson<{ properties: Record<string, FormFieldProperty> }>(
         `${apiBasePath}/app/form/fields.json?${qs.toString()}`,
         { method: "GET" },
         appId
       );
 
-      return Object.values(res.properties).map((f) => ({
-        code: f.code,
-        label: f.label,
-        fieldType: f.type,
-        optionOrder: toOptionOrderMap(f.options),
-        sortKind: detectSortKind(f.type, f.format),
-      }));
+      return flattenFormFieldProperties(res.properties);
     },
   };
-}
-
-function toOptionOrderMap(
-  options?: Record<string, { index?: string | number }>
-): Record<string, number> | undefined {
-  if (!options || typeof options !== "object") return undefined;
-  const order: Record<string, number> = {};
-  let hasAny = false;
-  for (const [label, meta] of Object.entries(options)) {
-    const n = Number(meta?.index);
-    if (!Number.isFinite(n)) continue;
-    order[label] = n;
-    hasAny = true;
-  }
-  return hasAny ? order : undefined;
-}
-
-function detectSortKind(
-  fieldType: string,
-  calcFormat?: string
-): "number" | "string" | undefined {
-  if (fieldType === "NUMBER" || fieldType === "RECORD_NUMBER") return "number";
-  if (fieldType === "CALC") {
-    if (calcFormat === "NUMBER" || calcFormat === "NUMBER_DIGIT") return "number";
-    return "string";
-  }
-  return undefined;
 }
