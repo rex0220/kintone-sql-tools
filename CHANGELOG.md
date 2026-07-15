@@ -2,6 +2,25 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.10.0（2026-07-15）— 検索打ち切り検出と FROM なし SELECT 実体化の修正
+
+### 修正（バグ）
+
+- **`CREATE TEMP TABLE AS <FROM なし SELECT / UNION>` が 0 行で実体化される不具合を修正**。`SELECT 'A' AS v UNION ALL SELECT 'B'` のような `FROM` なしクエリを一時テーブルへ実体化すると常に 0 行になっていた（直接実行は正常）。`executeQueryWithCte` が `__NO_FROM__` センチネルを実 CTE 参照と誤認していたのが原因。`NO_FROM_CTE_NAME` を共通化し判定を修正。**リテラル値リストを一時テーブル化して `IN (SELECT … FROM #t)` で使う**パターンが使えるようになった（レシピ集 R5）。
+
+### 追加（安全性）
+
+- **kintone の検索打ち切り（10 万件）を検出して安全側に倒す**。`like` / `not like`（`KLIKE` 含む）の一致候補が 10 万件に達すると kintone は検索を打ち切りヘッダー `X-Cybozu-Warning` を返すが、従来これを読まず**結果がサイレントに欠落**していた。
+  - **SELECT（CLI/MCP）**: 打ち切りを検出すると**警告付き**で返す（結果が欠落し得ることを明示）。
+  - **DML・SELECT ベース DML・一時テーブル実体化**: 対象取得（読取）が打ち切りを受けたら、**書き込み前に `SearchAbortedError` で停止**（fail-closed）＝サイレントな一部更新/削除を防ぐ。通常 UPDATE・算術式 UPDATE・DELETE の全読取後書込経路を含む。
+  - `KintoneGetResponse.searchAborted` と `fetchAll` の `onSearchAborted` を追加。Node クライアントがヘッダーを判定し、実行エンジンには型付き boolean だけを渡す。先頭・最終・並列取得の全レスポンスを早期 return より先に検査する。
+  - **プラグイン経路は検出しない**（`kintone.api()` がレスポンスヘッダーを露出しないため）。将来の課題。
+  - 将来、`KLIKE` の親レコード DML 解禁時の安全基盤になる。
+
+### ドキュメント
+
+- レシピ集に **R5「リテラル値リストを一時テーブル化して一括処理」**（`FROM` なし UNION → `ASSERT` ゲート → `UPSERT … SELECT`）と、検索打ち切りの注意（現行の SELECT 警告・DML fail-closed・`LIKE`/`KLIKE` DML の静的拒否・将来用途）を追記。
+
 ## v2.9.0（2026-07-15）— KLIKE プレフィルタ押し下げ
 
 ### 追加（最適化）
