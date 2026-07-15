@@ -1,9 +1,22 @@
-ksql 配布パッケージ (v2.7.0)
+ksql 配布パッケージ (v2.8.0)
 
-1. ksql-plugin-v2.7.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.8.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.8.0: KLIKE(kintone キーワード検索)演算子を追加(後方互換)。
+- KLIKE / NOT KLIKE は SQL LIKE(JS 部分一致)とは別演算子で、kintone の like/
+  not like キーワード検索を明示的に呼び出す。大規模アプリのテキスト検索を高速化
+  (LIKE は FULL_SCAN で取得上限に達しがち・KLIKE は SIMPLE で kintone 側検索)。
+- v1 は SIMPLE SELECT の WHERE 限定(FULL_SCAN になる SELECT は実行前拒否・CTE/UNION/
+  サブクエリも検証)。=/IN/数値比較等との AND/OR は SIMPLE で結合押し下げ。
+- 右辺は文字列/文字列バッチ変数のみ(置換後も検証)。% は拒否・_ は kintone の単語
+  構成文字。全 DML で使用不可(10万件打ち切り検出まで親 DML も拒否)。
+- 一致挙動は kintone 仕様準拠で SQL 部分一致とは異なる(文字種で挙動が異なる。観測では
+  英数字=語単位・日本語=2文字以上の部分一致)。10万件打ち切りは検出せず完全性非保証。
+- KLIKE は予約語。同名フィールドはバッククォート(`KLIKE`)で参照。
+- 詳細は CHANGELOG.md と言語リファレンス § KLIKE を参照。
 
 v2.7.0: STATUS(ワークフロー状態)の IN 押し下げ(最適化・後方互換)。
 - v2.6.0 で対象外とした STATUS の IN/NOT IN を、プロセス管理設定 API による
