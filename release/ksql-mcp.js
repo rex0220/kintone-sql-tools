@@ -35137,7 +35137,8 @@ var SELECTION_IN_FIELD_TYPES = /* @__PURE__ */ new Set([
   "DROP_DOWN",
   "RADIO_BUTTON",
   "CHECK_BOX",
-  "MULTI_SELECT"
+  "MULTI_SELECT",
+  "STATUS"
 ]);
 function isSelectionInComparison(expr, options) {
   if (!isSelectionInCandidate(expr, options)) return false;
@@ -35788,6 +35789,7 @@ function createEmptyMetrics() {
     deleteCalls: 0,
     fieldCalls: 0,
     appsCalls: 0,
+    processStatusCalls: 0,
     fetchedRows: 0,
     elapsedMs: 0
   };
@@ -35819,6 +35821,10 @@ function wrapClientWithMetrics(client, metrics) {
     getFields: (appId) => {
       metrics.fieldCalls += 1;
       return client.getFields(appId);
+    },
+    getProcessStatuses: (appId) => {
+      metrics.processStatusCalls += 1;
+      return client.getProcessStatuses(appId);
     }
   };
 }
@@ -36425,28 +36431,59 @@ function extractMainTypedPushdownCandidate(stmt) {
   return extractTypedPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
 }
 async function loadTypedPushdownMeta(stmt, client, cacheContext) {
-  const appIds = /* @__PURE__ */ new Set();
-  if (extractMainTypedPushdownCandidate(stmt) !== null) appIds.add(stmt.from.appId);
+  const candidatesByApp = /* @__PURE__ */ new Map();
+  const addCandidate = (appId, candidate) => {
+    if (candidate === null) return;
+    const existing = candidatesByApp.get(appId);
+    if (existing) existing.push(candidate);
+    else candidatesByApp.set(appId, [candidate]);
+  };
+  addCandidate(stmt.from.appId, extractMainTypedPushdownCandidate(stmt));
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
       if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
       const candidate = extractTypedPushdownCandidates(stmt.where, {
         tableAlias: join.table.alias
       });
-      if (candidate !== null) appIds.add(join.table.appId);
+      addCandidate(join.table.appId, candidate);
     }
   }
-  const entries = await Promise.all([...appIds].map(async (appId) => {
+  const entries = await Promise.all([...candidatesByApp.entries()].map(async ([appId, candidates]) => {
     const [fieldTypes, fieldOptions] = await Promise.all([
       getFieldTypeMap(appId, client, cacheContext),
       getFieldOptionSetMapByApp(appId, client, cacheContext)
     ]);
+    const statusFields = collectCandidateFieldCodes(candidates).filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
+    if (statusFields.length > 0) {
+      const process4 = await getProcessStatusesCached(appId, client, cacheContext);
+      if (process4.enable && process4.states.length > 0) {
+        const states = new Set(process4.states);
+        for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
+      }
+    }
     return [appId, fieldTypes, fieldOptions];
   }));
   return {
     fieldTypesByApp: new Map(entries.map(([appId, fieldTypes]) => [appId, fieldTypes])),
     fieldOptionsByApp: new Map(entries.map(([appId, , fieldOptions]) => [appId, fieldOptions]))
   };
+}
+function collectCandidateFieldCodes(candidates) {
+  const fields = /* @__PURE__ */ new Set();
+  const visit = (expr) => {
+    if (expr.type === "BINARY") {
+      if (expr.left.type === "FIELD") fields.add(expr.left.field);
+      return;
+    }
+    if (expr.type === "LOGICAL") {
+      visit(expr.left);
+      visit(expr.right);
+      return;
+    }
+    if (expr.type === "GROUP" || expr.type === "NOT") visit(expr.expr);
+  };
+  for (const candidate of candidates) visit(candidate);
+  return [...fields];
 }
 function collectTypedInFieldRefs(expr, out) {
   if (expr === null) return;
@@ -37073,6 +37110,7 @@ var fieldTypeCache = /* @__PURE__ */ new Map();
 var optionOrderCache = /* @__PURE__ */ new Map();
 var sortKindCache = /* @__PURE__ */ new Map();
 var fieldInfoCache = /* @__PURE__ */ new Map();
+var processStatusCache = /* @__PURE__ */ new Map();
 function getScopedCacheValue(root, cacheContext, appId) {
   return root.get(cacheContext)?.get(appId);
 }
@@ -37092,6 +37130,13 @@ async function getFieldsCached(appId, client, cacheContext) {
   if (cached2) return cached2;
   const loading = client.getFields(appId);
   setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
+  return loading;
+}
+async function getProcessStatusesCached(appId, client, cacheContext) {
+  const cached2 = getScopedCacheValue(processStatusCache, cacheContext, appId);
+  if (cached2) return cached2;
+  const loading = client.getProcessStatuses(appId);
+  setScopedCacheValue(processStatusCache, cacheContext, appId, loading);
   return loading;
 }
 async function getFieldTypeMap(appId, client, cacheContext) {
@@ -38755,6 +38800,7 @@ function withRequestGate(client, gate) {
     getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
     getApps: () => gate.runReadOnly(() => client.getApps()),
     getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
+    getProcessStatuses: (appId) => gate.runReadOnly(() => client.getProcessStatuses(appId)),
     postRecords: (params) => gate.runMutation(() => client.postRecords(params)),
     putRecords: (params) => gate.runMutation(() => client.putRecords(params)),
     deleteRecords: (params) => gate.runMutation(() => client.deleteRecords(params))
@@ -38989,6 +39035,16 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
         appId
       );
       return flattenFormFieldProperties(res.properties);
+    },
+    async getProcessStatuses(appId) {
+      const qs = new URLSearchParams();
+      qs.set("app", String(appId));
+      qs.set("lang", "user");
+      const res = await requestJson(`${apiBasePath}/app/status.json?${qs.toString()}`, { method: "GET" }, appId);
+      return {
+        enable: res.enable,
+        states: Object.values(res.states ?? {}).map((state) => state.name)
+      };
     }
   };
 }
@@ -39496,6 +39552,12 @@ async function createKsqlRuntime(serverOptions, input) {
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
       return routed.getFields(binding.appId);
     },
+    getProcessStatuses: (appId) => {
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, appId);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
+      if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
+      return routed.getProcessStatuses(binding.appId);
+    },
     getApps: () => defaultClient.getApps()
   };
   const gatedClient = withRequestGate(
@@ -39720,7 +39782,10 @@ function noOpClient() {
     putRecords: fail,
     deleteRecords: fail,
     getApps: fail,
-    getFields: fail
+    getFields: fail,
+    async getProcessStatuses() {
+      return { enable: false, states: [] };
+    }
   };
 }
 function getServerConfigPath(serverOptions) {
@@ -40451,7 +40516,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.6.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.7.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
