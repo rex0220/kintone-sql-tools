@@ -168,6 +168,20 @@ SELECT * FROM #before;
   SET @a = 'A'; SET @b = 'B';
   SELECT 顧客No FROM APP100 WHERE 顧客ランク IN (@a, @b);
   ```
+- **件数ゲートの DRY 化（スカラーサブクエリ代入・v2.3.0＝Phase 1b）**: `SET @cnt = (SELECT COUNT(*) ...)` で件数を**一度だけ**取得し、ゲート・記録・後続条件で使い回す。
+  ```sql
+  SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE 処理ステータス IN ('未処理'));
+  ASSERT @cnt BETWEEN 0 AND 10000;                    -- 想定外件数なら停止
+  UPDATE APP100 SET 対象件数メモ = @cnt WHERE 処理ステータス IN ('未処理');
+  ```
+  - サブクエリは **SET 時に 1 回だけ実行**（複数文で `@cnt` を参照しても再実行しない）。**先行して作成した一時テーブル**（`SET @cnt = (SELECT COUNT(*) FROM #tgt)`）や**先行変数**（`... WHERE 期限 < @cutoff`）も参照可。
+  - **1 行 1 列**が必須。`GROUP BY` なしの集計は 0 件でも 1 行（`COUNT` は `0`）を返すため、件数取得は差分 0 件でも成立する（§8）。SET の評価失敗は `continueOnError` に関わらずバッチ停止（fail-fast）。
+  - **R2 の事前ゲートを DRY 化**する例（`(SELECT COUNT(*) FROM #tgt)` を直接書く代わりに）:
+    ```sql
+    CREATE TEMP TABLE #tgt AS SELECT 顧客コード, 顧客名 FROM APP100 WHERE 処理ステータス IN ('未処理');
+    SET @cnt = (SELECT COUNT(*) FROM #tgt);
+    ASSERT @cnt BETWEEN 1 AND 10000;
+    ```
 
 変数の詳細・制約は言語リファレンス [§25 バッチ変数](ksql_language_reference.md#25-バッチ実行と一時テーブル) を参照。
 
