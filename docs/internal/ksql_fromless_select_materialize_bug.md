@@ -1,7 +1,7 @@
 # 課題+仕様: FROM なし SELECT/UNION を一時テーブル化・CTE 文脈で実行すると 0 行になる
 
 - 作成日: 2026-07-15
-- ステータス: **課題+仕様案 R1（根本原因コードで特定・codex レビュー前）**
+- ステータス: **課題+仕様案 R2（codex レビュー反映・センチネル共有を修正・実装着手可）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 位置づけ: [[fromless-union-temp-table-empty-bug]]。P0（[ksql_search_abort_warning_issue.md](ksql_search_abort_warning_issue.md)）と**同一バージョンで対応**（ユーザー指示）。
 - 関連コード: `src/execute.ts`（`executeQueryWithCte`:1601 / `isNoFromSelect`:985 / `executeNoFromSelect`:1029 / `executeUnion`:1512 / `executeFullScanWithCte`:1644）、`src/parser/parser.ts`:618（`__NO_FROM__` 生成）
@@ -33,9 +33,24 @@ FROM なし SELECT は parser（[parser.ts:621](../../src/parser/parser.ts#L621)
 
 `executeQueryWithCte` の CTE 参照判定から **`__NO_FROM__` を除外**する（FROM なし SELECT は CTE 参照ではない）。
 
-- 案A（最小）: `hasCteRef` を `query.from.cteName != null && query.from.cteName !== "__NO_FROM__" || joins…` に修正。→ `hasCteRef=false` となり [1630](../../src/execute.ts#L1630) の `executeSelect(query, …)` へ → `isNoFromSelect` → `executeNoFromSelect`。単一 FROM なし SELECT・UNION 各枝の両方が直る。
-- 案B（明示）: `executeQueryWithCte` の冒頭で `if (query.type==="SELECT" && isNoFromSelect(query)) return executeNoFromSelect(query);` を追加。
-- 推奨: **案A**（`hasCteRef` の判定を正すのが本質。既存の `isNoFromSelect` ヘルパーで sentinel 定数を共有し重複を避ける）。
+### 案A（採用）: `hasCteRef` から sentinel を除外＋括弧で優先順位明示
+```ts
+const hasCteRef =
+  (
+    query.from.cteName != null &&
+    query.from.cteName !== NO_FROM_CTE_NAME
+  ) ||
+  query.joins.some((j) => j.table.cteName != null);
+```
+→ `hasCteRef=false` となり [1630](../../src/execute.ts#L1630) の `executeSelect(query, …)` へ → `isNoFromSelect` → `executeNoFromSelect`。単一 FROM なし SELECT・UNION 各枝の両方が直る。
+
+### [P1] センチネルは中立モジュールへ集約（**「isNoFromSelect で共有」は不可**）
+`__NO_FROM__` 文字列は現在**少なくとも 3 か所**に重複している:
+- Parser: [parser.ts:621](../../src/parser/parser.ts#L621)
+- Execute: `isNoFromSelect`（[execute.ts:985](../../src/execute.ts#L985)）
+- DML guard: [dmlGuard.ts:53](../../src/core/dmlGuard.ts#L53)
+
+`isNoFromSelect` は execute ローカル関数で、parser がそれに依存すべきでない（依存方向が逆）。→ **`NO_FROM_CTE_NAME` を `src/types/ast.ts` 等の中立モジュールに定義**し、parser・execute（`isNoFromSelect`・`executeQueryWithCte`）・dmlGuard の 3 か所すべてがそれを参照する。案A の条件式もこの定数を使う。
 
 ## 3. スコープ・受入
 - **対象**: `CREATE TEMP TABLE AS <FROM なし SELECT / FROM なし UNION>` の実体化・および CTE 文脈（`executeQueryWithCte`）を通る FROM なし SELECT。
@@ -48,4 +63,4 @@ FROM なし SELECT は parser（[parser.ts:621](../../src/parser/parser.ts#L621)
 - **非対象**: FROM なし SELECT の機能拡張（列式・複数行生成など）。本件は「実体化経路の 0 行化バグ修正」のみ。
 
 ## 4. 進め方
-- 本仕様を codex レビュー → 実装（`executeQueryWithCte` の判定修正・`isNoFromSelect`/sentinel 共有）→ 実機（上記受入）→ **P0 と同一の minor バージョンでリリース**。
+- 実装: `NO_FROM_CTE_NAME` を `src/types/ast.ts` に定義 → parser・execute・dmlGuard の 3 か所を差し替え → `executeQueryWithCte` の `hasCteRef` を案A（括弧付き・定数使用）に修正 → 実機（上記受入・FROM なし単一/UNION 各枝・実 CTE 参照の非退行）→ **P0 と同一の minor バージョンでリリース**。
