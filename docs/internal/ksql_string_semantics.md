@@ -12,10 +12,11 @@
 
 文字列の扱い（文字数の定義・サロゲートペア・比較順序）は **B12-A / B13 / B14 / B16 / B19 / B22 / B23 / B24 の複数の課題にまたがる**。各文書が同じ事実を書き写していると、**必ず食い違う**。
 
-実際、本書の起票時点で**既に食い違いが 2 件見つかっている**:
+実際、本書の起票時点で**既に食い違いが 3 件見つかっている**（すべて実機実測）:
 
-- **`MIN`/`MAX` と `ORDER BY` が同じデータで正反対の答えを返す**（§4.2・実機実測）
-- **`LIKE '_'` だけ文字の単位が違う**（§3.4・実機実測）
+- **`ORDER BY` が `LIMIT` の値でソート主体を変える**（§4.3・**バグ**）。`LIMIT 500` と `LIMIT 501` で並びが違う。kSQL が major version を切ってまで潰した「モード不一致」と同じ構造
+- **`MIN`/`MAX` と `ORDER BY` が同じデータで違う答えを返す**（§4.4・**バグ**）
+- **`LIKE '_'` だけ文字の単位が違う**（§3.5）
 
 **運用ルール:**
 
@@ -162,74 +163,100 @@ LENGTH('😀')    = 2       ← コードユニット
 
 ---
 
-## 4. 文字列の比較
+## 4. 文字列の比較・並び順
 
-**kSQL の文字列比較は 2 系統に分かれており、同じデータで異なる答えを返す。** 本節が唯一の正。
+**kSQL には文字列の順序が 2 種類あり、一致しない。** 本節が唯一の正。
 
-### 4.1 系統の一覧（実装確認済み）
+### 4.1 kintone REST API の並び順は **バイナリ順**（実機実測・確定）
+
+`order by <テキストフィールド> asc` を kintone へ押し下げたときの並び:
+
+```
+データ: 'a' 'B' 'あ' 'ア' 'ｱ' '亜'（挿入順は逆順にして $id 順との混同を排除）
+
+kintone が返す順: B, a, あ, ア, 亜, ｱ
+符号位置:        0x42 < 0x61 < 0x3042 < 0x30A2 < 0x4E9C < 0xFF71
+```
+
+> **kintone REST API はコードポイントのバイナリ順で並べる。日本語の「辞書順」ではない。**
+> **大文字小文字も区別する**（`'B'` < `'a'`）。ひらがな・カタカナ・半角カナは**等価にならない**。
+
+### 4.2 kSQL の JS 経路は ICU 照合（`localeCompare(_, "ja")`）
 
 | 用途 | 比較 | 実装 |
 |---|---|---|
-| **`ORDER BY`（トップレベル・ウィンドウ内）** | **ICU 照合 `localeCompare(_, "ja")`** | `process.ts:597` / `:600` / `:603` |
+| **`ORDER BY`（JS 経路）** | **ICU 照合 `localeCompare(_, "ja")`** | `process.ts:597` / `:600` / `:603` |
 | **`ORDER BY`（別経路）** | **ICU 照合** | `execute.ts:4117` |
-| **`MIN` / `MAX`** | **コードユニット順（`>` / `<`）** | `process.ts:344` / `:350` |
-| **`GREATEST` / `LEAST`** | **コードユニット順** | `core/scalarCompare.ts`（B19） |
-| **`WHERE` の `<` / `>` / `=`** | **コードユニット順** | `core/scalarCompare.ts` |
+| `MIN` / `MAX` | **コードユニット順**（`>` / `<`） | `process.ts:344` / `:350` |
+| `GREATEST` / `LEAST` | **コードユニット順** | `core/scalarCompare.ts`（B19） |
+| `WHERE` の `<` / `>` / `=` | **コードユニット順** | `core/scalarCompare.ts` |
 
-> **`ORDER BY` だけが ICU 照合。他はすべてコードユニット順。**
-
-### 4.2 実害: `MAX` と `ORDER BY` が正反対の答えを返す（実機実測）
-
-```sql
-CREATE TEMP TABLE #c AS SELECT 'a' AS s UNION ALL SELECT 'B';
-
-SELECT MAX(s) FROM #c;                    → 'a'   （コードユニット: 'a'=97 > 'B'=66）
-SELECT s FROM #c ORDER BY s DESC LIMIT 1; → 'B'   （ICU 照合: 'a' < 'B'）
-
-SELECT MIN(s) FROM #c;                    → 'B'
-SELECT s FROM #c ORDER BY s ASC LIMIT 1;  → 'a'
+```
+同じデータの JS 順: a, B, ｱ, ア, あ, 亜
 ```
 
-**「最大値」を 2 通りの書き方で求めると、逆の答えが返る。**
+**ICU は `'a' < 'B'`（大文字小文字を主要素にしない）とし、`'あ'`/`'ア'`/`'ｱ'` を「等しい」と判定する**（順序が比較器で決まらず、入力順とソートの安定性に委ねられる）。
 
-### 4.3 割れる組（実測・8 組中 5 組）
+**つまり `MIN`/`MAX`・`GREATEST`・`WHERE` のコードユニット順は kintone のバイナリ順とほぼ一致し、`ORDER BY` の JS 経路だけが違う。**
 
-| a | b | コードユニット | ICU(ja) |
-|---|---|---|---|
-| `あ` | `ア` | `a<b` | **`a=b`（等しい）** |
-| `ｱ` | `ア` | `a>b` | **`a=b`（等しい）** |
-| `a` | `B` | `a>b` | **`a<b`** |
-| `ばか` | `はく` | `a>b` | **`a<b`** |
-| `は` | `ば` | `a<b` | `a<b` ✓ |
-| `東京` | `大阪` | `a>b` | `a>b` ✓ |
+### 4.3 `ORDER BY` は `LIMIT` の値でソート主体が変わる（**バグ**・実機実測）
 
-**ICU が「等しい」と判定する組がある**（ひらがな/カタカナ・半角/全角カナ）。その場合 `ORDER BY` の順序は**比較器では決まらず、入力順とソートの安定性に委ねられる**。
+`executeSimpleSelect`（`execute.ts:1288` / `:1328`）:
 
-### 4.4 `ORDER BY` はホスト依存である（既存）
+```ts
+const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+…
+let rows = records.map((r) => flatten(r, null));
+if (!useSingleGet) {                       // ← 単発 GET のときは JS で並べ直さない
+  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
+  rows = applyLimit(rows, stmt.limit, stmt.offset);
+}
+```
 
-**`localeCompare(_, "ja")` は ICU の照合データに依存する。** ICU のバージョンはエンジンごとに異なるため、**プラグイン（ブラウザ）と CLI/MCP（Node）で `ORDER BY` の結果が変わり得る**。
+**`LIMIT` が 500 以下（単発 GET）なら kintone の並びをそのまま採用し、それ以外（ページング）は JS で並べ直す。**
 
-> **kSQL の「同じ SQL は実行モードによらず同じ結果」（v1.14.0 / v2.0.0 で major を切ってまで守った原則）は、文字列の `ORDER BY` では既に成立していない。**
+```
+ORDER BY 文字列 ASC LIMIT 1     → 'B'   （kintone のバイナリ順）
+ORDER BY 文字列 ASC LIMIT 500   → B, a, あ, ア, 亜, ｱ   （kintone のバイナリ順）
+ORDER BY 文字列 ASC             → a, B, ｱ, ア, あ, 亜   （JS の ICU 順）
+```
 
-[B20](ksql_regexp_function_spec.md) §3.1 で「正規表現がこの原則に反する最初の機能になる」と書いたが、**誤りだった。既に `ORDER BY` で起きている**（B20 側を訂正すること）。
+> **`LIMIT 500` と `LIMIT 501` で並び順が変わる。`LIMIT` を外しても変わる。**
 
-### 4.5 どう扱うか（未決・別課題として起票が要る）
+**これは v1.14.0 / v2.0.0 が major version を切ってまで潰した「LIKE のモード不一致」とまったく同じ構造**（同じ SQL が実行経路によって違う結果を返す）。**[B26](../ksql_issue_tracker.md) として起票済み。**
 
-**本書では現状を記録するに留める。** 統一するかどうかは重い判断で、本書の役目を超える:
+FULL_SCAN は常に JS 経路（`process.ts:1072`）なので、**`WHERE` に `LIKE` を 1 つ足すだけでも並びが変わる**。
+
+### 4.4 `MIN`/`MAX` と `ORDER BY` が食い違う（**バグ**・実機実測）
+
+```
+データ: 'a' 'B' 'あ' 'ア' 'ｱ' '亜'
+
+MAX(文字列)                      → 'ｱ'   （コードユニット順の最大＝kintone の最後と一致）
+ORDER BY 文字列 ASC LIMIT 500    → 最後は 'ｱ'   ← 一致
+ORDER BY 文字列（JS 経路）        → 最後は '亜'  ← 食い違う
+```
+
+**浮いているのは `MIN`/`MAX` ではなく `ORDER BY` の JS 経路**である。`MIN`/`MAX`・`GREATEST`・`WHERE` はいずれもコードユニット順で、**kintone のバイナリ順と整合している**。
+
+**[B25](../ksql_issue_tracker.md) として起票済み。**
+
+### 4.5 どう扱うか（未決・B25 / B26 で判断する）
+
+**本書は現状を記録するに留める。** 統一の判断は重い:
 
 | 案 | 影響 |
 |---|---|
-| **`ORDER BY` をコードユニット順へ揃える** | 日本語の並びが「辞書順」でなくなる（`あ` と `ア` が離れる）。**利用者の期待を裏切る可能性**。既存クエリの結果が変わる＝ major |
-| **`MIN`/`MAX`/`GREATEST` を ICU 照合へ揃える** | ホスト依存が全体へ広がる。`GREATEST` の全順序（B19 で 4 回改稿して確定）が ICU の「等しい」で崩れる |
-| **現状維持＋文書化** | 食い違いが残るが、影響範囲は明確 |
+| **JS 経路を kintone のバイナリ順へ揃える**（`localeCompare` を `<` へ） | **全体が一貫する**（kintone・`MIN`/`MAX`・`GREATEST`・`WHERE` と一致）。`LIMIT` によるモード不一致（§4.3）も消える。**ただし日本語の並びが「辞書順」でなくなり、既存クエリの結果が変わる＝ major**。`'a'` と `'B'` が離れ、`'ｱ'` が `'亜'` の後ろへ行く |
+| **`MIN`/`MAX`/`GREATEST` を ICU 照合へ揃える** | **kintone のバイナリ順と食い違ったままになり、§4.3 のモード不一致も残る**（kintone 側は変えられない）。B19 の `GREATEST` は**全順序**が要件（畳み込むため）だが、ICU は「等しい」を返すため**同値の一意性が崩れる**。**採れない** |
+| **現状維持＋文書化** | §4.3 の「`LIMIT` で並びが変わる」が残る。**これは正しさの問題であり、放置は難しい** |
 
-**起票時の観点:**
+**観点:**
 
-- B13（文字列 `MIN`/`MAX`）は「UTF-16 辞書順」と書いた。**`ORDER BY` がそうでないことは書いていない**
-- B19 の `GREATEST` は**全順序**が要件（畳み込むため）。ICU は「等しい」を返すため**同値の一意性が崩れる**
-- `optionOrders`（選択肢の定義順）は `ORDER BY` にしか無い。`MIN`/`MAX` には効かない
-
----
+- **`ORDER BY` の JS 経路が ICU なのは意図的な設計か、`localeCompare` を既定で選んだ結果かが不明。** ここが分かると方針が決まる
+- `optionOrders`（選択肢の定義順）・`sortKinds` は `ORDER BY` にしか無い。`MIN`/`MAX` には効かない
+- **ICU 照合はホスト依存**（ICU のバージョンがエンジンごとに異なる）。バイナリ順へ揃えると**この依存も消える**（§6）
+- B13（文字列 `MIN`/`MAX`）は「UTF-16 辞書順」と書いた。**正しいが、`ORDER BY` がそうでないことは書いていない**
 
 ## 5. 文字列リテラルと識別子
 
@@ -272,7 +299,7 @@ SELECT 顧客No AS ABC, 顧客No AS PLAIN FROM APP4148
 | **`LENGTH_CHAR`**（`[...s]`） | **なし** | ES6 のイテレータ仕様でコードポイント単位と定義 |
 | **`TRANSLATE`** | **なし** | 単純な写像 |
 | **`LENGTHB`**（`TextEncoder`） | **なし** | UTF-8 の符号化は WHATWG 仕様で一意。**ただし `TextEncoder` は UTF-8 しか出力できない**（`TextEncoder('shift_jis')` は引数を無視して `encoding="utf-8"`。Node もブラウザも同じ）→ **Shift_JIS のバイト数は Web 標準では実現不能** |
-| **`ORDER BY`**（`localeCompare(_, "ja")`） | **あり** | ICU の照合データがエンジン/バージョンで異なる（§4.4） |
+| **`ORDER BY` の JS 経路**（`localeCompare(_, "ja")`） | **あり** | ICU の照合データがエンジン/バージョンで異なる（§4.2）。**kintone のバイナリ順へ揃えればこの依存は消える**（§4.5） |
 | **`Intl.Segmenter`**（書記素） | **あり** | ①**Firefox 125（2024-04）で初対応**＝未対応環境は `TypeError` ②対応していても**エンジンの Unicode バージョン差**で区切りが変わり得る |
 | **正規表現**（[B20](ksql_regexp_function_spec.md)） | **あり** | `new RegExp(利用者の文字列)` の解釈はホスト任せ。後読みは Safari 16.4 未満で `SyntaxError` |
 
@@ -292,7 +319,8 @@ SELECT 顧客No AS ABC, 顧客No AS PLAIN FROM APP4148
 | [B20](ksql_regexp_function_spec.md) | 正規表現関数 | §5.1 / §6 |
 | [B13](ksql_string_min_max_aggregate_spec.md) | 文字列 `MIN`/`MAX` | §4（**「UTF-16 辞書順」と書いたが `ORDER BY` との差は未記載**） |
 | [B12-A](ksql_validate_only_implementation_plan.md) | `VALIDATE ONLY` | §2.1（UTF-16 計数・空文字 = 未設定） |
-| **未起票** | **`ORDER BY` と `MIN`/`MAX` の比較不整合** | **§4.5。本書の起票で発見** |
+| **B25** | **`ORDER BY` と `MIN`/`MAX` の比較不整合** | **§4.4。本書の起票で発見** |
+| **B26** | **`ORDER BY` が `LIMIT` の値でソート主体を変える** | **§4.3。本書の起票で発見・正しさのバグ** |
 | **未起票** | `LIKE '_'` の単位不整合 | §3.5 |
 
 ---
@@ -301,5 +329,19 @@ SELECT 顧客No AS ABC, 顧客No AS PLAIN FROM APP4148
 
 | 文書 | 誤り | 正 |
 |---|---|---|
-| [B20](ksql_regexp_function_spec.md) §3.1 | 「正規表現が『同じ SQL は同じ結果』の原則に構造的に反する**最初の**機能になる」 | **既に `ORDER BY` で起きている**（§4.4）。正規表現は最初ではない |
-| [B13](ksql_string_min_max_aggregate_spec.md) | `MIN`/`MAX` は「UTF-16 辞書順」 | 正しい。**ただし `ORDER BY` は ICU 照合であり両者が食い違うことを記載していない**（§4.2） |
+| [B20](ksql_regexp_function_spec.md) §3.1 | 「正規表現が『同じ SQL は同じ結果』の原則に構造的に反する**最初の**機能になる」 | **既に `ORDER BY` で起きている**（§4.3 は `LIMIT` でソート主体が変わる実バグ）。正規表現は最初ではない |
+| [B13](ksql_string_min_max_aggregate_spec.md) | `MIN`/`MAX` は「UTF-16 辞書順」 | 正しい。**ただし `ORDER BY` の JS 経路は ICU 照合であり両者が食い違うことを記載していない**（§4.4） |
+
+### 8.1 本書 R1 初稿自身の誤り（R2 で訂正）
+
+**本書の R1 初稿は §4 をほぼ全面的に誤っていた。** 記録として残す:
+
+| R1 の記述 | 実際 |
+|---|---|
+| 「`ORDER BY` は ICU 照合」 | **`LIMIT` ≤ 500 のときは kintone のバイナリ順**。JS 経路のときだけ ICU（§4.3） |
+| 「`ORDER BY` はホスト依存＝プラグインと CLI で結果が変わり得る」 | JS 経路については正しいが、**より重大なのは同一環境でも `LIMIT` で変わること** |
+| 「浮いているのは `MIN`/`MAX`」 | **逆。`MIN`/`MAX`・`GREATEST`・`WHERE` は kintone のバイナリ順と整合しており、`ORDER BY` の JS 経路だけが浮いている**（§4.4） |
+
+**原因**: 検証で **`LIMIT` を軸として振らなかった**こと。「`ORDER BY` の全件」と「`WHERE ... LIKE` 付きの全件」を比較して「kintone と JS は一致」と結論したが、**どちらも JS 経路**だった（`LIMIT` が無いためページング経路＝`applyOrderBy` を通る）。**比較しているつもりの 2 つが同じ経路だった。**
+
+**教訓**: 「A と B が一致するか」を確かめるときは、**A と B が本当に別経路を通っているかを先に確認する**（EXPLAIN・コードで）。
