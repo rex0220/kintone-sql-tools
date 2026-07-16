@@ -223,7 +223,7 @@ CLI・MCP は**変更なし**（confirm 第3引数は optional のため既存�
 
 別課題（本仕様の範囲外・起案済み）:
 
-- **CLI の DML × `--on-limit truncate`**: CLI は単文・バッチとも `onLimitReached` にユーザー設定（`--on-limit` / `KSQL_ON_LIMIT` / profile）をそのまま渡しており、truncate 指定時は SELECT-based DML のソースが黙って切り捨てられる同種の問題がある（MCP は `DEFAULT_ON_LIMIT = "error"` 固定で安全）。**`ksql_cli_dml_on_limit_truncate_issue.md` に別課題として起案済み**（対策案 A〜C・推奨は「DML では error 強制 + stderr 注記」）
+- **CLI の DML × `--on-limit truncate`**: CLI は単文・バッチとも `onLimitReached` にユーザー設定（`--on-limit` / `KSQL_ON_LIMIT` / profile）をそのまま渡しており、truncate 指定時は SELECT-based DML のソースが黙って切り捨てられる同種の問題があった（MCP は `DEFAULT_ON_LIMIT = "error"` 固定で安全）。**解消済み**: 案A（DML では `error` 強制 + `truncate` 指定時のみ stderr 注記）を実装（[ksql_cli_dml_on_limit_truncate_issue.md](ksql_cli_dml_on_limit_truncate_issue.md)・v2.11.0 予定①）。
 
 ---
 

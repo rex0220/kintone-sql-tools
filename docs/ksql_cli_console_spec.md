@@ -85,7 +85,7 @@ kintone-sql-tools/
 4. `--app <id>`
 5. `--diag-record-id <id>`
 6. `--max-records <n>`
-7. `--on-limit <error|truncate>`
+7. `--on-limit <error|truncate>`（DML 実行では安全のため常に `error` として扱う。`truncate` 指定は無視）
 8. `--temp-table-max-rows <n>`（v1.11.0。一時テーブル1個の実体化行数上限。既定 10,000 =
    エンジン `TEMP_TABLE_MAX_ROWS`。解決順はフラグ → env `KSQL_TEMP_TABLE_MAX_ROWS` →
    profile `query.tempTableMaxRows` → 既定。超過は `--on-limit` 設定によらず常にエラー。
