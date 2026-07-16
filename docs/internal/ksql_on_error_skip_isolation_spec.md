@@ -187,13 +187,23 @@ FROM #err GROUP BY 顧客コード;
 UPDATE APP4220 SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容
 FROM #err_summary e WHERE APP4220.顧客コード = e.顧客コード;
 
--- 正常行のみ処理済みへ
-UPDATE APP4220 SET 処理ステータス = '処理済', 処理日時 = NOW()
-WHERE $id IN (SELECT 差分ID FROM #tgt)
-  AND 顧客コード NOT IN (SELECT 顧客コード FROM #err);
+-- 正常行（= 対象のうち #err に無い業務キー）を temp に確定してから書き戻す
+CREATE TEMP TABLE #ok AS
+SELECT 顧客コード FROM #tgt
+WHERE 顧客コード NOT IN (SELECT 顧客コード FROM #err);
+
+UPDATE APP4220 SET 処理ステータス = '処理済', 処理日時 = @now
+FROM #ok o WHERE APP4220.顧客コード = o.顧客コード;
 ```
 
 APP4220＝差分アプリ、APP4219＝顧客マスタ。この例のエラー書き戻しは、`#err` が UPSERT 入力ペイロードだけを保持して差分アプリの `$id` / `差分ID` を持たないため、構造的に業務キー結合を必要とする。B11 v1 の `$id` 単一等値では代替できない。
+
+> **訂正（2026-07-16・実機確認）**: R7 まで最後の文を
+> `UPDATE APP4220 … WHERE $id IN (SELECT 差分ID FROM #tgt) AND 顧客コード NOT IN (SELECT 顧客コード FROM #err)`
+> と書いていたが、**これは実行できない**。DML の `WHERE` にある `IN (SELECT …)` は kintone クエリへ変換できず、実行時に
+> `KintoneQueryError: IN (SELECT ...) は kintone クエリに変換できません` となる（一時テーブル参照に限らず、実アプリのサブクエリでも同じ。レシピ集の「一時テーブルをサブクエリ参照する UPDATE / DELETE は拒否」と整合）。
+> **`ksql_validate` は `ok:true` を返す**ため静的検査では捕捉できず、実行して初めて判明した。
+> 上記のとおり **`#ok` を SELECT で確定してから `UPDATE … FROM` の業務キー結合で書き戻す**形に修正した（`NOT IN (SELECT …)` は **SELECT 文なら**一時テーブル参照でも動く）。実機で検証済み（`#tgt`=4 → `#err`=2 → `#ok`=2、`UPDATE … FROM #ok` が `validatedRows=2`）。
 
 事前チェック STEP（不正データ隔離の UPDATE 群）がこの 1 句に吸収され、バッチが「本処理＋検証」の 2 STEP に簡素化される。
 
