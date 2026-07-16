@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §3 T2-1 / T2-4（「効果:中／コスト:小」でまとめて 1 リリースが効率的と評価）。
-- ステータス: **仕様案 R1（codex レビュー前）。未実装。**
+- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -117,15 +117,134 @@ kSQL の `DATE_ADD` は **`INTERVAL` 構文ではなく 3 引数**（`applyDateA
 
 | 規則 | 内容 |
 |---|---|
-| **文字数の単位** | 既存 `LENGTH`/`SUBSTRING` と**同じ単位**に揃える（実装を共有する）。B12-A の実測で kintone は **UTF-16 code unit** 計数だが、既存関数の挙動と食い違わせないことを最優先とし、受入条件で既存関数との一致を固定する |
-| **空値** | 空文字入力は空文字を返す（既存関数と同じ）。`GREATEST`/`LEAST` の空値は §3.1 |
-| **型** | kSQL のスカラー関数は**型メタを参照しない**（`MIN`/`MAX` の集約と異なる）。`GREATEST`/`LEAST` は**値ベース判定**（両辺が数値なら数値比較・でなければ辞書順）とし、`compareSortKeys`（[process.ts:559](../../src/engine/process.ts#L559)）の**自動判定と同じ規則**を使う |
+| **文字数の単位** | 既存 `LENGTH`/`SUBSTRING` と**同じ単位**に揃える（実装を共有する）。受入条件で既存関数との一致を固定する |
 | **1-indexed** | `INSTR` の戻り値・`LEFT`/`RIGHT` の n は既存 `SUBSTRING` に合わせる |
 | **数値化** | 数値引数は既存関数と同じく `Number()` 化。非数値は `NaN` 伝播（既存 `ROUND` 等と同じ） |
+| **比較** | `GREATEST`/`LEAST` は **既存の `compareScalarValues` を再利用**（§3.1） |
+| **空文字** | **関数ごとに規定**する（§3.2）。「一律に空文字を返す」とはしない |
 
-### 3.1 `GREATEST` / `LEAST` の空値
+### 3.1 `GREATEST` / `LEAST` の比較規則（R2 で確定）
 
-MySQL は引数に NULL があると **NULL を返す**が、kSQL に NULL は無い（空文字が相当）。**空文字はスキップせず 1 つの値として比較する**（辞書順で最小になる）。`COALESCE` と組み合わせて回避できるため、独自の NULL 伝播規則は導入しない。
+> **R1 の誤り**: 「`compareSortKeys` の自動判定と同じ規則」＋「空文字は辞書順で最小」と書いたが**両立しない**。`Number("") === 0` のため、`compareSortKeys` の自動判定では `GREATEST('', '-1')` が `''`（0 として `-1` より大きい）になり、「辞書順で最小」と矛盾する。
+
+**既存の `compareScalarValues`（[core/scalarCompare.ts](../../src/core/scalarCompare.ts)）を再利用する。**
+
+```ts
+// GREATEST: compareScalarValues(">", cand, best) が true なら best = cand
+// LEAST:    compareScalarValues("<", cand, best) が true なら best = cand
+```
+
+理由:
+
+- **`WHERE a > b` と同じ規則になる**。`GREATEST(a,b)` が「WHERE で大きい方」と食い違わないのが利用者にとって最も自然。
+- **v2.2.0 で決めた空セル意味論をそのまま引き継ぐ**（空文字 vs 有限数は **−∞ 相当**）。独自規則を作らない。
+- **既に `core/` にある leaf モジュール**なので §3.3 の循環参照が起きない。
+
+#### 空文字は「常に最小」として**比較前に確定させる**（順序依存の回避）
+
+`compareScalarValues` の空文字規則は**左辺が空のときだけ発火する**（[scalarCompare.ts](../../src/core/scalarCompare.ts) の `leftStr === "" && …`）。そのまま畳み込むと**引数順で結果が変わる**:
+
+| 式 | `compareScalarValues` を素直に使った場合 | 経路 |
+|---|---|---|
+| `GREATEST('-1', '')` | `'-1'` | `compareScalarValues(">", "", "-1")` → 空文字は −∞ → false → `-1` が残る |
+| `GREATEST('', '-1')` | **`''`** ← 不一致 | `compareScalarValues(">", "-1", "")` → 左辺が空でないので −∞ 規則が**発火せず**、`Number("") = 0` で `-1 > 0` が false → `''` が残る |
+
+→ **空文字は常に最小**（`GREATEST` では決して勝たず、`LEAST` では必ず勝つ）と**先に判定**し、非空同士のみ `compareScalarValues` へ渡す。これで**順序非依存**になり、`compareScalarValues` の 2 つの分岐（−∞ 規則・文字列比較）とも**結論が一致**する:
+
+- `'' vs 有限数` → −∞ 規則で空文字が小さい ✅ 一致
+- `'' vs 非数値文字列` → 文字列比較で `'' < 'a'` ✅ 一致
+
+**全引数が空文字なら空文字を返す。**
+
+確定する挙動（**受入条件に固定**）:
+
+| 式 | 結果 |
+|---|---|
+| `LEAST('', '5')` / `LEAST('5', '')` | `''`（順序非依存） |
+| `GREATEST('', '5')` / `GREATEST('5', '')` | `'5'`（順序非依存） |
+| `GREATEST('', '-1')` / `GREATEST('-1', '')` | `'-1'`（順序非依存・上表の不一致を解消） |
+| `LEAST('', 'a')` | `''` |
+| `GREATEST('', '')` | `''` |
+
+### 3.2 空文字の扱い（関数ごとに規定・R2 で追加）
+
+「空文字入力は空文字を返す」という一律規則は**採らない**（`LPAD('', 3, '0')` や `INSTR('', '')` で一般的な意味論と衝突するため）。
+
+| 関数 | 空文字の扱い | 期待結果 |
+|---|---|---|
+| `LPAD('', 3, '0')` | **パディング対象として扱う**（空文字を返さない） | `'000'` |
+| `RPAD('', 3, '0')` | 同上 | `'000'` |
+| `LEFT('', 3)` / `RIGHT('', 3)` | 切り出し元が空 | `''` |
+| `INSTR('', 'a')` | 見つからない | `0` |
+| `INSTR('abc', '')` | **空文字は先頭で見つかる**（MySQL 準拠） | `1` |
+| `INSTR('', '')` | 同上 | `1` |
+| `GREATEST`/`LEAST` の空文字引数 | §3.1 の比較規則に従う（スキップしない） | 上表 |
+| `TRUNCATE('', n)` | 既存 `ROUND('')` と同じ（`Number('') = 0`） | `0`（既存関数と一致させる） |
+| `LAST_DAY('')` | 既存 `DATE_ADD('')` と同じ（`dateStr.length < 10` で入力をそのまま返す） | `''` |
+
+> `TRUNCATE`/`LAST_DAY` は**既存の同系関数と挙動を揃える**ことを優先する（新規則を作らない）。受入条件で既存関数との一致を固定する。
+
+### 3.3 比較ロジックの共有と循環参照（R2 で追加）
+
+**`compareSortKeys` を `evalFunc` から呼んではいけない**。
+
+- `compareSortKeys` は **`process.ts:594` の非 export 関数**（R1 の `process.ts:559` は誤り）。
+- import の向きは **`process.ts` → `evalFunc.ts`** および **`evalWhere.ts` → `evalFunc.ts`**（`evalFunc` が最下層）。`evalFunc` から `process` を import すると**循環参照**になる。
+
+**解決**: 新規抽出は不要。**既存の `core/scalarCompare.ts` を使う**（`core/` は leaf で、`evalWhere.ts` / `execute.ts` が既に import 済み）。`evalFunc.ts` から追加で import しても循環しない。
+
+**`compareSortKeys` と統合しない理由**（規則が違ってよい根拠）:
+
+| | 入力 | 使えるメタ |
+|---|---|---|
+| `compareSortKeys`（ORDER BY） | **フィールド参照**のソートキー | `optionOrders`（選択肢の定義順）・`sortKinds`（型メタ） |
+| `GREATEST`/`LEAST` | **値**（式の評価結果） | **なし** |
+
+`GREATEST` は値しか受け取らないため**選択肢の定義順を使いようがない**。両者の差は**メタの有無という本質的なもの**であり、無理に統合すると ORDER BY 側の最適化（キー前計算）まで巻き込む。→ **統合しない**方針を明記する。
+
+### 3.4 引数の個数と境界値（R2 で追加）
+
+#### 3.4.1 現状: **arity は一切検証されていない**（実機実測）
+
+```sql
+SUBSTRING(会社名)        -- → 株式会社サイボウズ商事（引数不足でも全文が返る）
+ROUND(顧客No, 1, 99)     -- → 1（過剰引数は黙って無視）
+LENGTH(会社名, 'x')      -- → 11（同上）
+```
+
+評価器が `args[0] ?? ""` の形で既定値を補うため、**仕様を書かないと実装ごとに結果が割れる**。
+
+#### 3.4.2 方針: **本仕様の追加関数は arity を検証する**
+
+既存関数の arity 検証は**本仕様では変更しない**（挙動変更の範囲を最小化）。追加分のみ**実行時 `ArgumentError`** とする（§6.2 と同じエラー方式に統一）。
+
+| 関数 | 許容 arity | 不正時 |
+|---|---|---|
+| `TRUNCATE(x [, n])` / `TRUNC` | 1〜2 | `ArgumentError` |
+| `LEFT(x, n)` / `RIGHT(x, n)` | **2 のみ** | `ArgumentError` |
+| `INSTR(str, sub)` | **2 のみ** | `ArgumentError` |
+| `GREATEST(a, b, …)` / `LEAST` | **2 以上**（可変長） | 0〜1 引数は `ArgumentError` |
+| `LPAD(x, n [, pad])` / `RPAD` | 2〜3 | `ArgumentError` |
+| `LAST_DAY(d)` | **1 のみ** | `ArgumentError` |
+
+> `GREATEST` の 1 引数を「その値を返す」としない理由: 引数の書き忘れを静かに通すため。`COALESCE`/`CONCAT` は 1 引数を許すが、あちらは「先頭の非空値」「連結」という意味が 1 引数でも成立する。`GREATEST(a)` は**意味を成さない**。
+
+#### 3.4.3 数値引数の境界値
+
+| ケース | 規定 | 根拠 |
+|---|---|---|
+| `LEFT(x, 0)` / `RIGHT(x, 0)` | `''` | 0 文字の切り出し |
+| **`LEFT(x, -1)` / `RIGHT(x, -1)`** | **`''`**（エラーにしない） | `SUBSTRING(x, 1, -1)` 相当。負の長さは空 |
+| **`LEFT(x, 2.7)`** | **`2` 文字**（`Math.trunc` で切り捨て） | 既存 `SUBSTRING` の小数引数と揃える（受入条件で一致を固定） |
+| `LEFT(x, n)`（n ≥ 長さ） | 全文 | |
+| **`LPAD(x, 0, '0')`** | `''` | 長さ 0 |
+| **`LPAD(x, -1, '0')`** | **`''`**（エラーにしない） | MySQL は NULL だが kSQL に NULL は無い |
+| **`LPAD('7', 5, '')`**（空 pad） | **`'7'`**（パディング不能なので原文） | **MySQL は空文字を返す**が、**入力を失う方が有害**なので採らない（B1 の「暗黙のデータ欠落を作らない」と同じ判断）。受入条件に明記 |
+| `LPAD('12345', 3, '0')` | `'123'` | 長い場合は**先頭 n 文字へ切り詰め**（MySQL 準拠） |
+| `TRUNCATE(x, 2.7)` | 既存 `ROUND(x, 2.7)` と同じ | 既存関数と揃える（新規則を作らない） |
+| `INSTR` の n | — | 位置指定の第3引数は**持たない**（MySQL の `INSTR` も 2 引数） |
+
+> **`LPAD('7', 5, '')` の判断**: MySQL 準拠なら `''`（入力が消える）。本プロジェクトは B1 で「暗黙の部分書き込み」を排し、B16 で「暗黙の切り捨て」を排した。**入力を黙って捨てる方向は採らない**ため、パディング不能時は原文を返す。
 
 ## 4. 実装差分
 
@@ -134,7 +253,9 @@ MySQL は引数に NULL があると **NULL を返す**が、kSQL に NULL は�
 | `src/lexer/tokens.ts` | `TRUNCATE` `TRUNC` `INSTR` `GREATEST` `LEAST` `LPAD` `RPAD` `LAST_DAY` を予約語へ追加。**`LEFT`/`RIGHT` は既存トークン**（新規登録なし） |
 | `src/types/ast.ts` | `StringFuncName` に 10 個を追加 |
 | `src/parser/parser.ts` | 関数呼び出しの写像へ追加。**`LEFT`/`RIGHT` は `(` の先読みで JOIN と曖昧性解消**（§4.1） |
-| `src/engine/evalFunc.ts` | 各関数の評価を実装。`TRUNCATE` は既存 `applyRoundOp`（round/floor/ceil）へ `trunc` を足す形が自然。`LEFT`/`RIGHT`/`LPAD`/`RPAD`/`INSTR` は既存 `SUBSTRING`/`LENGTH` と**同じ文字数単位**を使う |
+| `src/engine/evalFunc.ts` | 各関数の評価を実装。`TRUNCATE` は既存 `applyRoundOp`（round/floor/ceil）へ `trunc` を足す形が自然。`LEFT`/`RIGHT`/`LPAD`/`RPAD`/`INSTR` は既存 `SUBSTRING`/`LENGTH` と**同じ文字数単位**を使う。**追加関数のみ arity を検証**し不正は `ArgumentError`（§3.4.2） |
+| **`evalFunc.ts` の import** | **`core/scalarCompare.ts` の `compareScalarValues` を import**して `GREATEST`/`LEAST` に使う（§3.1）。`core/` は leaf のため循環しない。**`process.ts` の `compareSortKeys` は import しない**（非 export かつ `process → evalFunc` の逆向きで循環する・§3.3） |
+| `src/engine/evalFunc.ts`（`DATE_ADD`） | `applyDateAdd` の `switch` から `default: DAY` を廃し、`YEAR`/`MONTH`/`DAY` 以外は **実行時 `ArgumentError`**（§6.2）。大文字小文字は不問を維持 |
 | 言語リファレンス §5 | 関数表へ追加。`GREATEST`/`LEAST` は**集約の `MAX`/`MIN` と別物**である旨を明記 |
 
 ### 4.1 `LEFT` / `RIGHT` の曖昧性解消（実装上の注意）
@@ -161,9 +282,38 @@ SELECT LEFT(会社名, 4) FROM APP100 LEFT JOIN APP200 ON …
 - [ ] `LPAD('7', 5, '0')` = `'00007'`／`RPAD('7', 3)` = `'7  '`（既定は空白）／`LPAD('12345', 3, '0')` = `'123'`（長い場合は切り詰め）。
 - [ ] `LAST_DAY('2026-02-10')` = `'2026-02-28'`（うるう年 `2024-02-10` → `2024-02-29`）。
 - [ ] **文字数の単位が既存 `LENGTH`/`SUBSTRING` と一致**（サロゲートペアを含む文字列で `LEFT`/`RIGHT`/`LPAD` が既存関数と矛盾しない）。
-- [ ] 空文字入力は空文字を返す。数値引数の非数値は既存関数と同じ扱い。
 - [ ] 追加関数が**予約語**であること、および `` `TRUNCATE` `` 等バッククォートで同名フィールドを参照できること。
 - [ ] 既存関数（`ROUND`/`FLOOR`/`CEIL`/`SUBSTRING`/`LENGTH`/`DATE_ADD` 等）に回帰なし。
+
+### 5.1 空文字（§3.2）
+
+- [ ] `LPAD('', 3, '0')` = `'000'`／`RPAD('', 3, '0')` = `'000'`（**空文字を返さない**）。
+- [ ] `LEFT('', 3)` = `''`／`RIGHT('', 3)` = `''`。
+- [ ] `INSTR('', 'a')` = `0`／**`INSTR('abc', '')` = `1`**／`INSTR('', '')` = `1`。
+- [ ] `TRUNCATE('', 1)` が**既存 `ROUND('', 1)` と一致**／`LAST_DAY('')` が**既存 `DATE_ADD('', 1, 'DAY')` と一致**（新規則を作らない）。
+
+### 5.2 `GREATEST` / `LEAST` の比較（§3.1）
+
+- [ ] **順序非依存**: `GREATEST('', '-1')` = `GREATEST('-1', '')` = `'-1'`／`LEAST('', '5')` = `LEAST('5', '')` = `''`。
+- [ ] `GREATEST('', '5')` = `'5'`／`LEAST('', 'a')` = `''`／`GREATEST('', '')` = `''`。
+- [ ] **`WHERE a > b` と結論が一致**する（同じ 2 値で `GREATEST` の勝者と `WHERE` の真偽が矛盾しない）。
+- [ ] 数値は数値比較（`GREATEST('9', '10')` = `'10'`）／非数値は文字列比較（`GREATEST('a', 'b')` = `'b'`）。
+
+### 5.3 引数の個数・境界値（§3.4）
+
+- [ ] **arity 違反が `ArgumentError`**: `LEFT('x')`／`LEFT('x',1,2)`／`INSTR('x')`／`GREATEST('a')`／`GREATEST()`／`LAST_DAY()`／`LPAD('x')`。
+- [ ] `LEFT(x, 0)` = `''`／**`LEFT(x, -1)` = `''`**（エラーにしない）／**`LEFT(x, 2.7)` が既存 `SUBSTRING` の小数扱いと一致**。
+- [ ] `LPAD(x, -1, '0')` = `''`／**`LPAD('7', 5, '')` = `'7'`**（空 pad は原文を返す。**入力を捨てない**）。
+- [ ] `TRUNCATE(x, 2.7)` が**既存 `ROUND(x, 2.7)` と同じ小数扱い**。
+
+### 5.4 第2部（§6）
+
+- [ ] **`DATE_ADD` の不正単位が実行時 `ArgumentError`**（メッセージに `YEAR, MONTH, or DAY` を含む）: `'HOUR'`／`'WEEK'`／`'xxx'`。
+- [ ] **`DATE_ADD(日付, 1, 単位フィールド)`（非リテラル）でも同じ `ArgumentError`**（parse 時検証との二重仕様にしない・§6.2）。
+- [ ] **小文字・混在は有効**: `DATE_ADD(d, 1, 'day')` / `'Day'` が `'DAY'` と同結果。
+- [ ] `DATE_ADD(d, -1, 'MONTH')` に回帰なし（負数が引き続き動く）。
+- [ ] 言語リファレンスの `DATE_ADD` が**3 引数形**で記載され、`INTERVAL n UNIT` の記述が消えている（§6.1）。
+- [ ] 言語リファレンスに `SUBSTRING` の**開始位置は 1 以上・0 以下は先頭扱い・負数は末尾切り出しにならない**旨が記載されている（§6.3・挙動は変更しない）。
 
 ## 6. 第2部: 既存関数の文書誤り・静かな誤動作（実機で発見）
 
@@ -199,9 +349,23 @@ switch (unit) {
 
 **サポートするのは `YEAR`/`MONTH`/`DAY` のみ**（実装コメントにも明記）だが、`'HOUR'` と書いた利用者は**日単位で加算された結果を正しいと誤認する**。
 
-**修正方針**: `YEAR`/`MONTH`/`DAY` 以外は **`ParseError`（または実行時エラー）** とする。
-- **SemVer: 挙動変更**（従来「通っていた」`DATE_ADD(x, 1, 'HOUR')` がエラーになる）。ただし**その結果は誤り**（HOUR 加算になっていない）であり、**誤った成功を失敗へ変える**方向なので許容する。B1（`truncate` の暗黙部分書き込みを `error` 固定）と同じ判断。
-- 大文字小文字は不問（実装コメントどおり）。
+**修正方針（R2 で確定）**: `YEAR`/`MONTH`/`DAY` 以外は **実行時 `ArgumentError`** とする。
+
+> **R1 の「`ParseError`（または実行時エラー）」は受入条件が一意にならないため撤回。**
+
+**なぜ parse 時でなく実行時か**:
+
+第 3 引数は**文字列リテラルとは限らない**。`StringFuncArg` はフィールド参照・式も取れるため、`DATE_ADD(日付, 1, 単位フィールド)` のように**パーサが単位を確定できない**ケースがある。リテラルのときだけ parse 時に弾くと**二重仕様**（同じ誤りがリテラルなら ParseError・フィールドなら別扱い）になり、利用者にもテストにも一貫しない。
+
+→ **すべて実行時に検証する 1 本の規則**にする:
+
+```
+ArgumentError: DATE_ADD unit must be YEAR, MONTH, or DAY.
+```
+
+- **大文字小文字は不問**（実装コメントの「大文字・小文字不問」を維持。`'day'` / `'Day'` は有効）。
+- **SemVer: 挙動変更**（従来「通っていた」`DATE_ADD(x, 1, 'HOUR')` がエラーになる）。ただし**その結果は誤り**（HOUR 加算になっていない・日単位で加算されている）であり、**誤った成功を失敗へ変える**方向。B1（`truncate` の暗黙部分書き込みを `error` 固定）と同じ判断。
+- **受入条件にエラー型・メッセージ・小文字許容を固定**（§5）。
 
 ### 6.3 🐞 `SUBSTRING` の負数・0 開始が MySQL と異なる（**文書のみ**）
 
