@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §3 T1-1 で「**最大の欠落**」と評価した機能。
-- ステータス: **R2 実装済み（codex 自動テスト pass・コードレビュー／実機確認待ち）。**
+- ステータス: **v2.16.0 でリリース済み**（R2 実装・コードレビュー承認・実機 全9項目 pass・1,352 テスト green）。実機の決定的証拠＝①看板 CTE 1 文形で 7 業種すべての最新行を `会社名` まで取得②`顧客No` が 208/214/207/209/205 と**数値順**（トップレベル `ORDER BY` は `業種` のみ＝§2.3 のゲート修正が効いている）③EXPLAIN が `[cte: ranked] mode: FULL_SCAN / reason: ウィンドウ関数あり` ＋ `[main] kintone query: rn in (1)`（§0.3 のインライン化防止）。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

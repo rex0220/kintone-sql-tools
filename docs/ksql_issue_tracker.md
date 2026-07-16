@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-16
-- 現在の最新リリース: **v2.15.0**（B14＋B16＋B18＋レシピ刷新・npm publish 済み・latest 2.15.0）
+- 現在の最新リリース: **v2.16.0**（B17 ウィンドウ関数・tag/GitHub Release 公開・npm publish 待ち）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -32,7 +32,6 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `OVER (PARTITION BY … ORDER BY …)`） | 改善 | 🛠️ R2 実装済み（codex 自動テスト pass・コードレビュー／実機確認待ち）。比較評価 T1-1・最大の欠落。**「各グループ最新1件を全列付きで取得」は現状表現不可能**（複合キー JOIN・派生テーブルとも非対応）→ B17 で初めて可能（**CTE で1文**） | 機能 | 中 | [spec](internal/ksql_window_function_spec.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
@@ -49,6 +48,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v2.16.0** | **B17 順位系ウィンドウ関数**。`ROW_NUMBER()`/`RANK()`/`DENSE_RANK()` ＋ `OVER ([PARTITION BY …] [ORDER BY …]) AS alias`。**「各グループ最新1件をその行の全列とともに取得」を初めて可能に**（`MAX()` の結果を元行へ結合し直すには複合等値が要るが JOIN は単一等値のみ・派生テーブルも無いため従来は表現不可能）。CTE で1文。評価は HAVING 後・DISTINCT 前（SQL 標準）でウィンドウ列は FULL_SCAN 強制（CTE 誤インライン化＝`WHERE rn=1` の押し込みを防ぐ正しさの前提）。ウィンドウ内 `ORDER BY` はトップレベルと比較器・ソートメタを共有。`AS alias` 必須・`GROUP BY`/集計との同一 SELECT 併用は v1 非対応・予約語 | 機能 | [spec](internal/ksql_window_function_spec.md) |
 | **v2.15.0** | **B14** 一時テーブル/CTE 列の型メタ伝播（temp 経由でもテキスト・日時の `MIN`/`MAX` が効く。`#err` の列は DML 対象アプリの定義から宣言・`$id` は RECORD_NUMBER 相当。推論は素通し/集約/算術/リテラルのみで「迷ったら載せない」）／**B16** 文字列集約 `GROUP_CONCAT([DISTINCT] 引数 [SEPARATOR '区切り'])`（暗黙の切り捨てなし・空値スキップ・`DISTINCT` 初出順・予約語・`GROUP_CONCAT(*)` は ParseError・**B14 とは独立**）／**B18** 事前検証がミリ秒付き ISO 日時（`NOW()` の形式）を誤って拒否し `ON ERROR SKIP` が正常行を誤隔離していた不具合を修正／バッチレシピ集に **R6「不良データを隔離して残りを流す」**新設・R2 に `VALIDATE ONLY` 追記・**実行できなかった B12 の例を修正** | 機能・正しさ・安全性 | [B14](internal/ksql_temp_column_type_meta_spec.md) / [B16](internal/ksql_group_concat_spec.md) / [B18](internal/ksql_validate_datetime_millisecond_issue.md) / [recipes](ksql_batch_recipes.md) |
 | **v2.14.1** | B15 `IN`/`NOT IN` の負数リテラル受理。`= -1` / `BETWEEN` は受理するのに `IN (-1)` が `ParseError` になる非対称を解消（`parseInValues` が単項 `-`/`+` を受理）。`IN (+1)`≡`IN (1)`・`IN ('-1')` は文字列のまま・押し下げは `in (-1,1,"-1")`。受理範囲の拡大のみ（patch） | 正しさ | [issue](internal/ksql_in_list_negative_number_issue.md) |
 | **v2.14.0** | B13 文字列・日時 `MIN`/`MAX`。実アプリのテキスト・選択・日時（正規化済み DATE/TIME/DATETIME・作成/更新日時）と文字列 CALC を UTF-16 辞書順で集約。NUMBER・数値 CALC は従来の数値比較を維持（回帰なし）。専用 `AggregateSortKindResolver`（sortKind 一次＋fieldType 補完）で型解決し `getFieldsCached` 共有。JOIN 修飾列・一意な非修飾列に対応。同名競合・非対応複合型・temp/CTE は従来の数値経路（フェーズ2で別途） | 正しさ | [spec](internal/ksql_string_min_max_aggregate_spec.md) |
