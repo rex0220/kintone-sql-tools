@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-16
-- 現在の最新リリース: **v2.12.0**（tag/GitHub Release 公開・npm publish 待ち）
+- 現在の最新リリース: **v2.13.0**（B12 バンドル・tag/GitHub Release 公開・npm publish 待ち）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -30,18 +30,9 @@
 
 進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。
 
-### 次期リリース計画: v2.13.0（B12 バンドル）
-
-2026-07-16 決定。**B12 をまとめて 1 バージョンでリリース**する。
-
-1. **B12-A `VALIDATE ONLY`** — ✅ 実装・実機確認完了（PR #47 マージ済み・main に未リリースで滞留・実機バグ3件修正込み）
-2. **B11.1 業務キー結合**（`target.field = source.field`） — ✅ 実装・実機確認完了（PR #51 マージ済み・main に未リリースで滞留。65文字キー/数値正規化/ターゲット重複全件更新/VALIDATE ONLY 一致性を実機証明）
-3. **B12-B `ON ERROR SKIP INTO #err`** — ✅ **codex 実装完了・全テスト／全build通過、コードレビュー／実機確認待ち**
-
-3 件そろって v2.13.0（CHANGELOG は「v2.13.0（未リリース）」で積み上げ）。SemVer は機能追加の minor。
-
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
+| B13 | `MIN`/`MAX` の文字列・日時対応（テキスト列で `NaN` になる） | バグ/改善 | 📝 仕様案 R1（codex レビュー前）・実機で発見 | 正しさ | 中 | [spec](internal/ksql_string_min_max_aggregate_spec.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
@@ -49,8 +40,6 @@
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
-| B11.1 | `UPDATE … FROM` 業務キー結合（`target.field = source.field`） | 改善 | ✅ **v2.13.0 予定②**（実装・実機確認完了=main 滞留・PR #51） | 機能 | 中 | [spec §12](internal/ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
-| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 🚧 **v2.13.0 バンドル**（①B12-A 済／②B11.1 済／③B12-B=codex実装済み・レビュー/実機待ち） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [plan](internal/ksql_validate_only_implementation_plan.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
 
@@ -60,6 +49,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v2.13.0** | B12 バンドル。B12-A `VALIDATE ONLY`（Tier 0 事前検証・書き込みゼロ・複数エラー収集・`INTO #err`）／B11.1 `UPDATE … FROM` 業務キー結合（`target.field = source.field` 単一等値・数値/文字列キー正規化・ターゲット重複全件更新・64 文字超は全文一致逆引き）／B12-B `ON ERROR SKIP INTO #err [REJECT LIMIT n]`（NG 行を隔離し合格行のみ書き込み・REJECT LIMIT 超過は書き込みゼロで診断返却） | 機能・安全性・正しさ | [validate](internal/ksql_validate_only_implementation_plan.md) / [update-from §12](internal/ksql_update_from_spec.md) / [on-error-skip](internal/ksql_on_error_skip_isolation_spec.md) |
 | **v2.12.0** | B11 `UPDATE … FROM`（アプリ間・一時テーブル転記）。SET 値に他テーブル（`#temp`/実アプリ `APP<n>`）のフィールドを参照・`$id` 単一等値・複数マッチ/不正キー/列欠落/複合型/上限は PUT 前 fail-closed・50 件チャンク・MCP は `maxRecords` で読み取り | 機能 | [spec](internal/ksql_update_from_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | **v2.11.0** | B1 CLI DML×`truncate` 暗黙部分書き込み防止（`error` 固定）／B2 空 `SELECT *` の列スキーマをパイプライン伝播（0 行 no-op 完走）／B8 `LIMIT>500` の安全な取得打ち切り（`ORDER BY` なし・KLIKE なし限定）＋`maxRecords` 意味論変更 | 安全性・正しさ・性能 | [B1](internal/ksql_cli_dml_on_limit_truncate_issue.md) / [B2](internal/ksql_empty_select_wildcard_pipeline_spec.md) / [B8](internal/ksql_limit_over_500_fetch_truncation_spec.md) |
 | **v2.10.1** | SIMPLE SELECT の `LIMIT` > 500 が API エラーになる不具合を修正（案A ＝ `fetchAll` でページング） | 正しさ | [issue](internal/ksql_simple_select_limit_over_500_issue.md) |

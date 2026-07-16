@@ -32416,6 +32416,7 @@ var Parser = class {
   tryParseImplicitAlias() {
     const k = this.peek().kind;
     if (k === "IDENT" /* IDENT */ || k === "BIDENT" /* BIDENT */) {
+      if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "VALIDATE" && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "ONLY") return null;
       return this.parseTableAliasName();
     }
     return null;
@@ -32862,7 +32863,8 @@ var Parser = class {
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u4EEE\u60F3\u30C6\u30FC\u30D6\u30EB\u3067\u306F\u672A\u5BFE\u5FDC\u3067\u3059", this.prev());
       }
-      return { type: "INSERT_SELECT", appId, fields, select };
+      const validation2 = this.parseDmlControlSuffix();
+      return { type: "INSERT_SELECT", appId, fields, select, ...validation2 };
     }
     this.expect("VALUES" /* VALUES */);
     const values = [];
@@ -32872,7 +32874,11 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
       values.push(row);
     } while (this.consume("," /* COMMA */));
-    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values } : { type: "INSERT", appId, fields, values };
+    const validation = this.parseDmlControlSuffix();
+    if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
+      throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+    }
+    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values, ...validation } : { type: "INSERT", appId, fields, values, ...validation };
   }
   parseUpsert() {
     this.expect("UPSERT" /* UPSERT */);
@@ -32889,7 +32895,8 @@ var Parser = class {
     if (this.peek().kind === "SELECT" /* SELECT */) {
       const select = this.parseSelect();
       const keyFields2 = this.parseOnDuplicate();
-      return { type: "UPSERT_SELECT", appId, fields, select, keyFields: keyFields2 };
+      const validation2 = this.parseDmlControlSuffix();
+      return { type: "UPSERT_SELECT", appId, fields, select, keyFields: keyFields2, ...validation2 };
     }
     this.expect("VALUES" /* VALUES */);
     const values = [];
@@ -32899,7 +32906,8 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
     } while (this.consume("," /* COMMA */));
     const keyFields = this.parseOnDuplicate();
-    return { type: "UPSERT", appId, fields, values, keyFields };
+    const validation = this.parseDmlControlSuffix();
+    return { type: "UPSERT", appId, fields, values, keyFields, ...validation };
   }
   parseOnDuplicate() {
     this.expectKeyword("ON" /* ON */, "UPSERT \u306B\u306F ON DUPLICATE (\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9) \u304C\u5FC5\u8981\u3067\u3059");
@@ -32979,10 +32987,14 @@ var Parser = class {
       if (!table.alias) {
         throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u306B\u306F\u30A8\u30A4\u30EA\u30A2\u30B9\u304C\u5FC5\u8981\u3067\u3059", this.prev());
       }
+      if (table.alias.toLowerCase() === `app${appId}`.toLowerCase()) {
+        throw new ParseError(`UPDATE ... FROM \u306E\u30BD\u30FC\u30B9 alias \u306F\u66F4\u65B0\u5148 APP${appId} \u3068\u540C\u540D\u306B\u3067\u304D\u307E\u305B\u3093`, this.prev());
+      }
       from = {
         appId: table.appId,
         cteName: table.cteName,
         alias: table.alias,
+        targetJoinField: "",
         joinKeyField: "",
         targetFilter: null
       };
@@ -33001,6 +33013,7 @@ var Parser = class {
       }
       this.validateUpdateFromAssignments(assignments, from.alias, whereTok);
       const decomposed = this.decomposeUpdateFromWhere(where, appId, from.alias, whereTok);
+      from.targetJoinField = decomposed.targetJoinField;
       from.joinKeyField = decomposed.joinKeyField;
       from.targetFilter = decomposed.targetFilter;
     } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
@@ -33009,8 +33022,66 @@ var Parser = class {
         whereTok
       );
     }
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from };
-    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where } : { type: "UPDATE", appId, assignments, where };
+    const validation = this.parseDmlControlSuffix();
+    if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
+      throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+    }
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...validation };
+    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where, ...validation } : { type: "UPDATE", appId, assignments, where, ...validation };
+  }
+  /** DML末尾の VALIDATE ONLY または ON ERROR SKIP。各語はsoft keyword。 */
+  parseDmlControlSuffix() {
+    if (this.peek().kind === "ON" /* ON */) return this.parseOnErrorSkipSuffix();
+    if (this.isSoftKeyword("REJECT")) {
+      throw new ParseError("REJECT LIMIT \u306B\u306F ON ERROR SKIP INTO \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    if (!this.isSoftKeyword("VALIDATE")) return {};
+    const validateTok = this.advance();
+    if (!this.isSoftKeyword("ONLY")) {
+      throw new ParseError("VALIDATE \u306E\u5F8C\u306B\u306F ONLY \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    this.advance();
+    let validationErrorTable = null;
+    if (this.consume("INTO" /* INTO */)) {
+      const tok = this.peek();
+      if (tok.kind !== "IDENT" /* IDENT */ || !tok.value.startsWith("#")) {
+        throw new ParseError("VALIDATE ONLY INTO \u306B\u306F # \u3067\u59CB\u307E\u308B\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\u304C\u5FC5\u8981\u3067\u3059", tok);
+      }
+      validationErrorTable = this.parseTableName();
+    }
+    if (this.peek().kind === "ON" /* ON */ || this.isSoftKeyword("REJECT")) {
+      throw new ParseError("VALIDATE ONLY \u3068 ON ERROR / REJECT LIMIT \u306F\u4F75\u8A18\u3067\u304D\u307E\u305B\u3093", validateTok);
+    }
+    return { validateOnly: true, validationErrorTable };
+  }
+  parseOnErrorSkipSuffix() {
+    const onTok = this.advance();
+    if (!this.isSoftKeyword("ERROR")) throw new ParseError("ON \u306E\u5F8C\u306B\u306F ERROR \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    this.advance();
+    if (!this.isSoftKeyword("SKIP")) throw new ParseError("ON ERROR \u306E\u5F8C\u306B\u306F SKIP \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    this.advance();
+    this.expect("INTO" /* INTO */, "ON ERROR SKIP \u306B\u306F INTO #\u4E00\u6642\u30C6\u30FC\u30D6\u30EB \u304C\u5FC5\u8981\u3067\u3059");
+    const tableTok = this.peek();
+    if (tableTok.kind !== "IDENT" /* IDENT */ || !tableTok.value.startsWith("#")) {
+      throw new ParseError("ON ERROR SKIP INTO \u306B\u306F # \u3067\u59CB\u307E\u308B\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\u304C\u5FC5\u8981\u3067\u3059", tableTok);
+    }
+    const errorTable = this.parseTableName();
+    let rejectLimit = null;
+    if (this.isSoftKeyword("REJECT")) {
+      this.advance();
+      this.expect("LIMIT" /* LIMIT */, "REJECT \u306E\u5F8C\u306B\u306F LIMIT \u304C\u5FC5\u8981\u3067\u3059");
+      const tok = this.expect("NUMBER" /* NUMBER */, "REJECT LIMIT \u306B\u306F 0 \u4EE5\u4E0A\u306E\u6574\u6570\u304C\u5FC5\u8981\u3067\u3059");
+      if (!/^\d+$/.test(tok.value)) throw new ParseError("REJECT LIMIT \u306F 0 \u4EE5\u4E0A\u306E\u5B89\u5168\u306A\u6574\u6570\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", tok);
+      rejectLimit = Number(tok.value);
+      if (!Number.isSafeInteger(rejectLimit)) throw new ParseError("REJECT LIMIT \u306F 0 \u4EE5\u4E0A\u306E\u5B89\u5168\u306A\u6574\u6570\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", tok);
+    }
+    if (this.isSoftKeyword("REJECT") || this.isSoftKeyword("VALIDATE") || this.peek().kind === "ON" /* ON */) {
+      throw new ParseError("ON ERROR SKIP \u306E\u53E5\u304C\u91CD\u8907\u307E\u305F\u306F\u7AF6\u5408\u3057\u3066\u3044\u307E\u3059", onTok);
+    }
+    return { onErrorSkip: true, errorTable, rejectLimit };
+  }
+  isSoftKeyword(value) {
+    return this.peek().kind === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === value;
   }
   validateUpdateFromAssignments(assignments, sourceAlias, tok) {
     for (const assignment of assignments) {
@@ -33035,11 +33106,11 @@ var Parser = class {
     const leaves = this.flattenTopLevelAnd(where);
     const joins = [];
     leaves.forEach((leaf, index) => {
-      const sourceField = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
-      if (sourceField !== null) joins.push({ index, sourceField });
+      const matched = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
+      if (matched !== null) joins.push({ index, ...matched });
     });
     if (joins.length !== 1) {
-      throw new ParseError("UPDATE ... FROM \u306E WHERE \u306B\u306F target.$id = source.key \u306E\u7D50\u5408\u7B49\u5024\u304C\u3061\u3087\u3046\u30691\u3064\u5FC5\u8981\u3067\u3059", tok);
+      throw new ParseError("UPDATE ... FROM \u306E WHERE \u306B\u306F target.key = source.key \u306E\u7D50\u5408\u7B49\u5024\u304C\u3061\u3087\u3046\u30691\u3064\u5FC5\u8981\u3067\u3059", tok);
     }
     const join = joins[0];
     for (let i = 0; i < leaves.length; i++) {
@@ -33055,7 +33126,7 @@ var Parser = class {
       (acc, expr) => acc === null ? expr : { type: "LOGICAL", op: "AND", left: acc, right: expr },
       null
     );
-    return { joinKeyField: join.sourceField, targetFilter };
+    return { targetJoinField: join.targetField, joinKeyField: join.sourceField, targetFilter };
   }
   flattenTopLevelAnd(expr) {
     if (expr.type === "GROUP") return this.flattenTopLevelAnd(expr.expr);
@@ -33069,16 +33140,20 @@ var Parser = class {
     const right = expr.right.type === "ARITH_VALUE" && expr.right.expr.type === "FIELD_REF" ? this.splitQualifiedField(expr.right.expr.field) : null;
     if (right === null) return null;
     const left = { alias: expr.left.tableAlias, field: expr.left.field };
-    if (this.isTargetIdRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) return right.field;
-    if (this.isSourceRef(left, sourceAlias) && this.isTargetIdRef(right, targetAppId)) return left.field;
+    if (this.isTargetRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) {
+      return { targetField: left.field, sourceField: right.field };
+    }
+    if (this.isSourceRef(left, sourceAlias) && this.isTargetRef(right, targetAppId)) {
+      return { targetField: right.field, sourceField: left.field };
+    }
     return null;
   }
   splitQualifiedField(field) {
     const dot = field.indexOf(".");
     return dot < 0 ? { alias: null, field } : { alias: field.slice(0, dot), field: field.slice(dot + 1) };
   }
-  isTargetIdRef(ref, appId) {
-    return ref.field === "$id" && (ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase());
+  isTargetRef(ref, appId) {
+    return ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase();
   }
   isSourceRef(ref, alias) {
     return ref.alias?.toLowerCase() === alias.toLowerCase();
@@ -33404,6 +33479,15 @@ function isDmlType(type) {
 }
 function isReadOnlyType(type) {
   return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
+}
+function writesKintone(stmt) {
+  return isDmlType(stmt.type) && !("validateOnly" in stmt && stmt.validateOnly === true);
+}
+function isReadOnlyStatement(stmt) {
+  return !writesKintone(stmt) && (isReadOnlyType(stmt.type) || isDmlType(stmt.type));
+}
+function requiresCompleteInput(stmt) {
+  return isDmlType(stmt.type);
 }
 function hasWhereClause(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
@@ -34632,11 +34716,17 @@ function analyzeBatch(statements) {
     }
   }
   const defined = /* @__PURE__ */ new Map();
+  const validationSchemas = /* @__PURE__ */ new Map();
   const createdOrder = [];
   const results = [];
   const variableDefs = /* @__PURE__ */ new Map();
   const variableOrder = [];
   statements.forEach((stmt, index) => {
+    const validationTable = "validationErrorTable" in stmt && stmt.validationErrorTable ? stmt.validationErrorTable : "onErrorSkip" in stmt && stmt.onErrorSkip ? stmt.errorTable ?? null : null;
+    if (statements.length === 1 && validationTable) {
+      const message = "onErrorSkip" in stmt && stmt.onErrorSkip ? "ArgumentError: ON ERROR SKIP requires a batch." : "ArgumentError: VALIDATE ONLY INTO requires a batch.";
+      throw new BatchAnalysisError(message, index);
+    }
     const statementType = getStatementType(stmt);
     const created = [];
     const dropped = [];
@@ -34691,6 +34781,28 @@ function analyzeBatch(statements) {
       }
       dependsOn.add(at);
     }
+    if (validationTable) {
+      const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
+      const signature = JSON.stringify(payloadFields);
+      const at = defined.get(validationTable);
+      if (at === void 0) {
+        defined.set(validationTable, index);
+        validationSchemas.set(validationTable, signature);
+        createdOrder.push(validationTable);
+        created.push(validationTable);
+        if (defined.size > MAX_TEMP_TABLES) {
+          throw new BatchAnalysisError(`ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`, index);
+        }
+      } else {
+        if (validationSchemas.get(validationTable) !== signature) {
+          throw new BatchAnalysisError(
+            `ParseError: validation error table ${validationTable} has a different payload schema.`,
+            index
+          );
+        }
+        dependsOn.add(at);
+      }
+    }
     if (stmt.type === "CREATE_TEMP_TABLE") {
       if (defined.has(stmt.name)) {
         throw new BatchAnalysisError(
@@ -34723,8 +34835,8 @@ function analyzeBatch(statements) {
     results.push({
       index,
       statementType,
-      isDml: isDmlType(statementType),
-      isReadOnly: isReadOnlyType(statementType),
+      isDml: writesKintone(stmt),
+      isReadOnly: isReadOnlyStatement(stmt),
       hasWhere: hasWhereClause(stmt),
       insertValuesCount: getInsertValuesCount(stmt),
       appIds: [...stmtAppIds].sort((a, b) => a - b),
@@ -34734,10 +34846,15 @@ function analyzeBatch(statements) {
       dependsOn: [...dependsOn].sort((a, b) => a - b),
       tempOnlySource,
       targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null,
-      isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null
+      isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null,
+      isValidationOnly: "validateOnly" in stmt && stmt.validateOnly === true,
+      isOnErrorSkip: "onErrorSkip" in stmt && stmt.onErrorSkip === true,
+      requiresCompleteInput: requiresCompleteInput(stmt)
     });
   });
   const containsDml = results.some((r) => r.isDml);
+  const containsValidationOnly = results.some((r) => r.isValidationOnly);
+  const needsCompleteInput = results.some((r) => r.requiresCompleteInput);
   const variables = variableOrder.map((name) => ({
     name,
     referencedBy: [...variableDefs.get(name).referencedBy]
@@ -34746,6 +34863,8 @@ function analyzeBatch(statements) {
     statementCount: statements.length,
     isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
     containsDml,
+    containsValidationOnly,
+    requiresCompleteInput: needsCompleteInput,
     tempTables: createdOrder,
     variables,
     warnings: variables.filter((v) => v.referencedBy.length === 0).map((v) => `variable @${v.name} is never used.`),
@@ -35555,6 +35674,18 @@ function evalCaseWhenValue(expr, row, fieldType) {
   return "";
 }
 function toKintoneValue(value, fieldType) {
+  const result = normalizeDmlSqlValue(value, fieldType);
+  if (!result.ok) throw new DmlConvertError(result.message);
+  return result.value;
+}
+function normalizeDmlSqlValue(value, fieldType) {
+  try {
+    return { ok: true, value: convertDmlSqlValue(value, fieldType) };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+function convertDmlSqlValue(value, fieldType) {
   switch (value.type) {
     case "VARIABLE":
       throw new DmlConvertError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
@@ -36395,6 +36526,228 @@ function toFlatString(value) {
   }
 }
 
+// src/core/dmlValidation.ts
+var ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var CHOICE_TYPES = /* @__PURE__ */ new Set(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"]);
+function validateAndNormalizeDmlValue(raw, field) {
+  if (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME") {
+    const original = rawScalarText(raw);
+    if (original !== "" && !isValidTemporalInput(original, field.fieldType)) {
+      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
+    }
+  }
+  let value;
+  try {
+    value = normalizeRaw(raw, field.fieldType);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, code: typeCode(field.fieldType), message };
+  }
+  if (field.required && isEmpty(value)) {
+    return { ok: false, code: "ERR_REQUIRED", message: `${field.code} \u306F\u5FC5\u9808\u3067\u3059` };
+  }
+  if (!isEmpty(value) && field.fieldType === "NUMBER") {
+    const text = String(value);
+    if (!isFiniteDecimal(text)) {
+      return { ok: false, code: "ERR_TYPE_NUMBER", message: `${field.code} \u306F\u6570\u5024\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (field.minValue != null && compareDecimal(text, field.minValue) < 0) {
+      return { ok: false, code: "ERR_RANGE_MIN", message: `${field.code} \u306F ${field.minValue} \u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (field.maxValue != null && compareDecimal(text, field.maxValue) > 0) {
+      return { ok: false, code: "ERR_RANGE_MAX", message: `${field.code} \u306F ${field.maxValue} \u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+  }
+  if (!isEmpty(value) && (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME")) {
+    if (!isValidTemporal(String(value), field.fieldType)) {
+      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
+    }
+  }
+  if (typeof value === "string") {
+    const length = value.length;
+    const min = field.minLength == null ? null : Number(field.minLength);
+    const max = field.maxLength == null ? null : Number(field.maxLength);
+    if (Number.isFinite(min) && length < min) {
+      return { ok: false, code: "ERR_LENGTH_MIN", message: `${field.code} \u306F ${min} \u6587\u5B57\u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (Number.isFinite(max) && length > max) {
+      return { ok: false, code: "ERR_LENGTH_MAX", message: `${field.code} \u306F ${max} \u6587\u5B57\u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+  }
+  if (CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
+    const selected = Array.isArray(value) ? value.map(String) : [String(value)];
+    if (selected.some((choice) => !(choice in field.optionOrder))) {
+      return { ok: false, code: "ERR_CHOICE_INVALID", message: `${field.code} \u306B\u5B9A\u7FA9\u5916\u306E\u9078\u629E\u80A2\u304C\u3042\u308A\u307E\u3059` };
+    }
+  }
+  return { ok: true, value };
+}
+function rawScalarText(raw) {
+  if (raw == null) return "";
+  if (isSqlValue(raw) && (raw.type === "STRING" || raw.type === "NUMBER")) return String(raw.value);
+  return typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
+}
+function isValidTemporalInput(value, type) {
+  if (type === "DATE") return isValidTemporal(value.replace(/\//g, "-"), "DATE");
+  if (type === "TIME") return isValidTemporal(value, "TIME");
+  let normalized = value.replace(/\//g, "-").replace(" ", "T");
+  if (/T\d{2}:\d{2}$/.test(normalized)) normalized += ":00";
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized)) {
+    return isValidTemporal(normalized.slice(0, 10), "DATE") && isValidTemporal(normalized.slice(11), "TIME");
+  }
+  return isValidTemporal(normalized, "DATETIME");
+}
+function normalizeRaw(raw, fieldType) {
+  if (isSqlValue(raw)) {
+    const normalized = normalizeDmlSqlValue(raw, fieldType);
+    if (!normalized.ok) throw new Error(normalized.message);
+    return normalized.value;
+  }
+  if (Array.isArray(raw)) return raw.map((v) => typeof v === "object" && v !== null && "code" in v ? String(v.code) : String(v));
+  const text = raw == null ? "" : String(raw);
+  if (ARRAY_TYPES2.has(fieldType)) {
+    if (text === "") return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {
+    }
+    return text.split(",").map((v) => v.trim());
+  }
+  return text;
+}
+function isSqlValue(value) {
+  return typeof value === "object" && value !== null && typeof value.type === "string";
+}
+function isEmptyDmlValue(value) {
+  if (value == null || value === "") return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (isSqlValue(value)) {
+    if (value.type === "STRING") return value.value === "";
+    if (value.type === "ARRAY") return value.elements.length === 0;
+  }
+  return false;
+}
+function isEmpty(value) {
+  return value === "" || Array.isArray(value) && value.length === 0;
+}
+function typeCode(type) {
+  return type === "NUMBER" ? "ERR_TYPE_NUMBER" : "ERR_TYPE_DATE";
+}
+function isFiniteDecimal(value) {
+  return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim());
+}
+function compareDecimal(left, right) {
+  const normalize = (input) => {
+    let s = input.trim();
+    let sign = 1;
+    if (s.startsWith("-")) {
+      sign = -1;
+      s = s.slice(1);
+    } else if (s.startsWith("+")) s = s.slice(1);
+    let [whole, fraction = ""] = s.split(".");
+    whole = (whole || "0").replace(/^0+(?=\d)/, "");
+    fraction = fraction.replace(/0+$/, "");
+    if (/^0*$/.test(whole) && fraction === "") sign = 1;
+    return { sign, whole, fraction };
+  };
+  const a = normalize(left);
+  const b = normalize(right);
+  if (a.sign !== b.sign) return a.sign < b.sign ? -1 : 1;
+  const direction = a.sign;
+  if (a.whole.length !== b.whole.length) return a.whole.length < b.whole.length ? -direction : direction;
+  if (a.whole !== b.whole) return a.whole < b.whole ? -direction : direction;
+  const width = Math.max(a.fraction.length, b.fraction.length);
+  const af = a.fraction.padEnd(width, "0");
+  const bf = b.fraction.padEnd(width, "0");
+  return af === bf ? 0 : af < bf ? -direction : direction;
+}
+function isValidTemporal(value, type) {
+  if (type === "TIME") {
+    const m2 = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+    return m2 !== null && Number(m2[1]) <= 23 && Number(m2[2]) <= 59 && Number(m2[3] ?? 0) <= 59;
+  }
+  const datePart = type === "DATE" ? value : value.slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const date5 = new Date(Date.UTC(year, month - 1, day));
+  if (date5.getUTCFullYear() !== year || date5.getUTCMonth() !== month - 1 || date5.getUTCDate() !== day) return false;
+  if (type === "DATE") return true;
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValidTemporal(value.slice(11, value.endsWith("Z") ? -1 : value.length - 6), "TIME");
+}
+
+// src/core/dmlValidationCandidates.ts
+var VALIDATION_META_COLUMNS = [
+  "$err_statement",
+  "$err_operation",
+  "$err_row",
+  "$err_field",
+  "$err_code",
+  "$err_message"
+];
+function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber) {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const errors = [];
+  const invalid = /* @__PURE__ */ new Set();
+  for (const candidate of candidates) {
+    candidate.record ??= {};
+    const rowErrors = [...candidate.preErrors];
+    for (const code of targetFields) {
+      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code));
+      if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
+      else candidate.record[code] = { value: result.value };
+    }
+    if (candidate.mode === "create") {
+      for (const info of fieldInfos) {
+        if (info.inSubtable) continue;
+        if (candidate.payload.has(info.code)) continue;
+        const emptyDefault = isEmptyDmlValue(info.defaultValue);
+        if (!emptyDefault) {
+          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);
+          if (!defaultResult.ok) rowErrors.push({
+            field: info.code,
+            code: defaultResult.code,
+            message: `\u65E2\u5B9A\u5024: ${defaultResult.message}`
+          });
+        } else {
+          const emptyResult = validateAndNormalizeDmlValue("", info);
+          if (!emptyResult.ok) {
+            rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
+          } else if (info.required) {
+            rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} \u306F\u5FC5\u9808\u3067\u3059` });
+          }
+        }
+      }
+    }
+    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
+    for (const error51 of rowErrors) {
+      const row = {};
+      for (const field of payloadFields) row[field] = renderValidationValue(candidate.payload.get(field));
+      row["$err_statement"] = String(statementNumber);
+      row["$err_operation"] = operation;
+      row["$err_row"] = String(candidate.rowNumber);
+      row["$err_field"] = error51.field;
+      row["$err_code"] = error51.code;
+      row["$err_message"] = error51.message;
+      errors.push(row);
+    }
+  }
+  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
+}
+function renderValidationValue(value) {
+  if (value == null) return "";
+  if (typeof value === "object" && "type" in value) {
+    const sql = value;
+    if (sql.type === "STRING" || sql.type === "NUMBER") return String(sql.value ?? "");
+    if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
+  }
+  if (Array.isArray(value)) return JSON.stringify(value);
+  return String(value);
+}
+
 // src/execute.ts
 var SEARCH_ABORTED_WARNING = "\u691C\u7D22\u304C 10 \u4E07\u4EF6\u3067\u6253\u3061\u5207\u3089\u308C\u3001\u7D50\u679C\u304C\u6B20\u843D\u3057\u305F\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002";
 var SearchAbortedError = class extends Error {
@@ -36498,6 +36851,15 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   validateKlikeStatement(stmt);
+  if ("validateOnly" in stmt && stmt.validateOnly === true) {
+    if (stmt.validationErrorTable) {
+      throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    }
+    return executeDmlValidation(stmt, client, { ...options, onLimitReached: "error" }, cacheContext, void 0, 1);
+  }
+  if ("onErrorSkip" in stmt && stmt.onErrorSkip === true) {
+    throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
+  }
   switch (stmt.type) {
     case "SELECT":
       return executeSelect(stmt, client, options, cacheContext);
@@ -36539,6 +36901,17 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
   }
 }
 var TEMP_TABLE_MAX_ROWS = 1e4;
+function appendValidationErrors(tempTables, name, columns, rows, maxRows) {
+  const current = tempTables.get(name);
+  if (current && (current.columns.length !== columns.length || current.columns.some((c, i) => c !== columns[i]))) {
+    throw new Error(`ArgumentError: validation error table ${name} has a different schema.`);
+  }
+  const existingRows = current?.rows ?? [];
+  if (existingRows.length + rows.length > maxRows) {
+    throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
+  }
+  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows] });
+}
 var BatchTimeoutError = class extends Error {
   constructor() {
     super("TimeoutError: batch timeout exceeded.");
@@ -36620,7 +36993,12 @@ async function executeBatch(sql, client, options = {}) {
       }
       results.push({ ...base, status: "success", ...outcome });
     } catch (e) {
-      results.push({ ...base, status: "error", error: toBatchStatementError(e) });
+      results.push({
+        ...base,
+        status: "error",
+        error: toBatchStatementError(e),
+        ...e instanceof RejectLimitExceededError ? { result: e.diagnostic } : {}
+      });
       failed.add(i);
       if (e instanceof BatchTimeoutError) {
         aborted2 = "timeout";
@@ -36679,6 +37057,38 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
   }
   const resolvedStmt = resolveVariableRefs(stmt, variables);
   validateKlikeStatement(resolvedStmt);
+  if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
+    const result = await executeDmlValidation(
+      resolvedStmt,
+      client,
+      { ...options, onLimitReached: "error" },
+      cacheContext,
+      tempTables,
+      info.index + 1
+    );
+    if (resolvedStmt.validationErrorTable) {
+      appendValidationErrors(
+        tempTables,
+        resolvedStmt.validationErrorTable,
+        result.columns,
+        result.errors,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+      );
+    }
+    return { result };
+  }
+  if ("onErrorSkip" in resolvedStmt && resolvedStmt.onErrorSkip === true) {
+    return {
+      result: await executeOnErrorSkip(
+        resolvedStmt,
+        client,
+        { ...options, onLimitReached: "error" },
+        cacheContext,
+        tempTables,
+        info.index + 1
+      )
+    };
+  }
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     const materializeOptions = {
       ...options,
@@ -37827,7 +38237,7 @@ async function buildSortKindsForSelect(stmt, client, cacheContext) {
 }
 function convertProcessRowValue(raw, dstFieldType) {
   const USER_TYPES2 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
-  const ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+  const ARRAY_TYPES3 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
   if (USER_TYPES2.has(dstFieldType ?? "")) {
     if (raw === "") return [];
     try {
@@ -37839,7 +38249,7 @@ function convertProcessRowValue(raw, dstFieldType) {
     }
     return raw.split(",").map((c) => ({ code: c.trim() }));
   }
-  if (ARRAY_TYPES2.has(dstFieldType ?? "")) {
+  if (ARRAY_TYPES3.has(dstFieldType ?? "")) {
     if (raw === "") return [];
     try {
       const parsed = JSON.parse(raw);
@@ -37849,6 +38259,396 @@ function convertProcessRowValue(raw, dstFieldType) {
     return raw.split(",").map((v) => v.trim());
   }
   return raw;
+}
+var NON_WRITABLE_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "CALC",
+  "RECORD_NUMBER",
+  "CREATOR",
+  "CREATED_TIME",
+  "MODIFIER",
+  "UPDATED_TIME",
+  "STATUS",
+  "STATUS_ASSIGNEE",
+  "CATEGORY",
+  "REFERENCE_TABLE"
+]);
+async function executeDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
+  return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
+}
+var RejectLimitExceededError = class extends Error {
+  constructor(message, diagnostic) {
+    super(`RejectLimitExceededError: ${message}`);
+    this.diagnostic = diagnostic;
+    this.name = "RejectLimitExceededError";
+  }
+};
+async function prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
+  const operation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
+  const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
+  if (new Set(payloadFields).size !== payloadFields.length) {
+    throw new Error("ArgumentError: DML target fields contain duplicates.");
+  }
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const targetFields = stmt.type === "UPDATE" ? stmt.assignments.map((a) => a.field) : stmt.fields;
+  for (const code of targetFields) {
+    const info = infoByCode.get(code);
+    if (!info) throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
+    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
+      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
+    }
+  }
+  const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
+  const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
+    candidates,
+    operation,
+    payloadFields,
+    targetFields,
+    fieldInfos,
+    statementNumber
+  );
+  const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
+  const result = {
+    type: "VALIDATION",
+    operation,
+    validatedRows: candidates.length,
+    validRows: candidates.length - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : stmt.onErrorSkip && stmt.errorTable ? { errTable: stmt.errorTable } : {}
+  };
+  return { result, candidates, invalidRowNumbers };
+}
+async function executeOnErrorSkip(stmt, client, options, cacheContext, tempTables, statementNumber) {
+  const prepared = await prepareDmlValidation(
+    stmt,
+    client,
+    options,
+    cacheContext,
+    tempTables,
+    statementNumber
+  );
+  const errTable = stmt.errorTable;
+  if (!errTable) throw new Error("ArgumentError: ON ERROR SKIP requires INTO #error_table.");
+  appendValidationErrors(
+    tempTables,
+    errTable,
+    prepared.result.columns,
+    prepared.result.errors,
+    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+  );
+  const rejectLimit = stmt.rejectLimit ?? null;
+  if (rejectLimit !== null && prepared.result.invalidRows > rejectLimit) {
+    throw new RejectLimitExceededError(
+      `rejected rows (${prepared.result.invalidRows}) exceed REJECT LIMIT (${rejectLimit}).`,
+      prepared.result
+    );
+  }
+  const valid = prepared.candidates.filter((candidate) => !prepared.invalidRowNumbers.has(candidate.rowNumber));
+  if (options.confirm) {
+    const operation = stmt.type.startsWith("INSERT") ? "INSERT" : "UPDATE";
+    const ok = await options.confirm(valid.length, operation);
+    if (!ok) throw new OperationCancelledError(operation, valid.length);
+  }
+  const common = {
+    affectedRows: valid.length,
+    skippedRows: prepared.result.invalidRows,
+    rejectLimit,
+    errTable
+  };
+  if (stmt.type === "INSERT" || stmt.type === "INSERT_SELECT") {
+    const createdIds = [];
+    for (let i = 0; i < valid.length; i += 100) {
+      const response = await client.postRecords({ app: stmt.appId, records: valid.slice(i, i + 100).map((c) => c.record) });
+      createdIds.push(response.ids);
+    }
+    return { type: "INSERT", createdIds, insertedCount: createdIds.flat().length, ...common };
+  }
+  if (stmt.type === "UPDATE") {
+    const updates2 = valid.map((candidate) => {
+      if (candidate.targetId === void 0) throw new Error("InternalError: prepared UPDATE candidate has no targetId.");
+      return { id: candidate.targetId, record: candidate.record };
+    });
+    for (let i = 0; i < updates2.length; i += 100) {
+      await client.putRecords({ app: stmt.appId, records: updates2.slice(i, i + 100) });
+    }
+    return { type: "UPDATE", updatedCount: updates2.length, ...common };
+  }
+  const inserts = valid.filter((candidate) => candidate.mode === "create");
+  const updates = valid.filter((candidate) => candidate.mode === "update").map((candidate) => {
+    if (candidate.targetId === void 0) throw new Error("InternalError: prepared UPSERT candidate has no targetId.");
+    return { id: candidate.targetId, record: candidate.record };
+  });
+  let insertedCount = 0;
+  for (let i = 0; i < inserts.length; i += 100) {
+    const response = await client.postRecords({ app: stmt.appId, records: inserts.slice(i, i + 100).map((c) => c.record) });
+    insertedCount += response.ids.length;
+  }
+  for (let i = 0; i < updates.length; i += 100) {
+    await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  }
+  return { type: "UPSERT", insertedCount, updatedCount: updates.length, ...common };
+}
+async function materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode) {
+  if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
+  let rows;
+  if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
+    rows = stmt.values.map((row) => row.map(
+      (value, i) => value.type === "CASE_VALUE" ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType) : value
+    ));
+  } else {
+    const selectResult = tempTables && tempTables.size > 0 ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext) : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext);
+    if (selectResult.columns.length !== stmt.fields.length) {
+      throw new Error(`SELECT \u306E\u5217\u6570\uFF08${selectResult.columns.length}\uFF09\u3068 DML \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u6570\uFF08${stmt.fields.length}\uFF09\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093`);
+    }
+    rows = selectResult.rows.map((row) => selectResult.columns.map((column) => row[column] ?? ""));
+  }
+  const candidates = rows.map((values, index) => ({
+    rowNumber: index + 1,
+    operation,
+    mode: "create",
+    payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
+    preErrors: [],
+    record: {}
+  }));
+  if (stmt.type !== "UPSERT" && stmt.type !== "UPSERT_SELECT") return candidates;
+  for (const key of stmt.keyFields) {
+    if (!stmt.fields.includes(key)) throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C UPSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
+  }
+  const fieldTypes = new Map([...infoByCode].map(([code, info]) => [code, info.fieldType]));
+  const rowKeys = candidates.map((candidate) => stmt.keyFields.map((key) => renderValidationValue(candidate.payload.get(key))));
+  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
+  const numeric = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
+  const keyCounts = /* @__PURE__ */ new Map();
+  for (const parts of rowKeys) {
+    const key = upsertNormalizedKey(parts, numeric);
+    keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
+  }
+  candidates.forEach((candidate, index) => {
+    const parts = rowKeys[index];
+    const targetId = lookupUpsertTarget(targets, parts);
+    candidate.mode = targetId === void 0 ? "create" : "update";
+    if (targetId !== void 0) candidate.targetId = targetId;
+    stmt.keyFields.forEach((key, keyIndex) => {
+      if (parts[keyIndex] === "") candidate.preErrors.push({ field: key, code: "ERR_KEY_EMPTY", message: `UPSERT \u30AD\u30FC ${key} \u306F\u7A7A\u306B\u3067\u304D\u307E\u305B\u3093` });
+    });
+    if ((keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
+      candidate.preErrors.push({ field: stmt.keyFields[0], code: "ERR_KEY_DUP_SOURCE", message: "UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059" });
+    }
+  });
+  return candidates;
+}
+async function materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables) {
+  if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
+  await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  let records;
+  if (hasArithAssignment(stmt)) {
+    const getParams = updateToGetQueryForArith(stmt);
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
+      maxRecords: options.maxRecords ?? 1e4,
+      parallel: options.fetchParallel ?? 1,
+      onLimit: "error"
+    });
+    records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
+  } else {
+    const getParams = updateToGetQuery(stmt);
+    const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
+      maxRecords: options.maxRecords ?? 1e4,
+      parallel: options.fetchParallel ?? 1
+    });
+    records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+  }
+  return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
+    rowNumber: index + 1,
+    operation: "UPDATE",
+    mode: "update",
+    payload: new Map([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""])]),
+    preErrors: [],
+    record: entry.record,
+    targetId: entry.id
+  }));
+}
+async function materializeUpdateFromValidationCandidates(stmt, from, client, options, cacheContext, tempTables) {
+  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
+    rowNumber: index + 1,
+    operation: "UPDATE",
+    mode: "update",
+    payload: new Map([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""])]),
+    preErrors: [],
+    record: entry.record,
+    targetId: entry.id
+  }));
+}
+var UPDATE_FROM_KEY_CHUNK_SIZE = UPSERT_IN_CHUNK_SIZE;
+var UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE"
+]);
+async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables) {
+  const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
+  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const requiredSourceFields = [.../* @__PURE__ */ new Set([from.joinKeyField, ...sourceFields])];
+  const sourceRows = await loadUpdateFromSourceRows(
+    from,
+    requiredSourceFields,
+    sourceFields,
+    client,
+    options,
+    cacheContext,
+    tempTables
+  );
+  const sourceByKey = /* @__PURE__ */ new Map();
+  for (const row of sourceRows) {
+    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+    }
+    const key = normalizeUpdateFromJoinKey(row[from.joinKeyField], joinKind, "source");
+    if (sourceByKey.has(key)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for normalized key ${key}.`);
+    }
+    sourceByKey.set(key, row);
+  }
+  if (sourceByKey.size === 0) return [];
+  const maxRecords2 = options.maxRecords ?? 1e4;
+  const targetFields = collectUpdateFromTargetFields(stmt);
+  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetRecords = [];
+  const seenTargetIds = /* @__PURE__ */ new Set();
+  let fetchedTargetCount = 0;
+  for (const keys of splitChunks([...sourceByKey.keys()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
+    const keyQuery = `${from.targetJoinField} in (${keys.map(sqlQuote).join(",")})`;
+    const query = filterQuery ? `(${keyQuery}) and (${filterQuery})` : keyQuery;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      stmt.appId,
+      query,
+      targetFields,
+      { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    fetchedTargetCount += resolved.records.length;
+    if (fetchedTargetCount > maxRecords2) {
+      throw new FetchAllLimitError(
+        `\u53D6\u5F97\u4EF6\u6570\u304C\u4E0A\u9650\uFF08${maxRecords2} \u4EF6\uFF09\u3092\u8D85\u3048\u307E\u3057\u305F\u3002WHERE \u53E5\u3067\u7D5E\u308A\u8FBC\u3080\u304B\u3001maxRecords \u3092\u5F15\u304D\u4E0A\u3052\u3066\u304F\u3060\u3055\u3044\u3002`
+      );
+    }
+    for (const record2 of resolved.records) {
+      const id = record2["$id"]?.value;
+      if (typeof id !== "string" || id === "") {
+        throw new Error("ArgumentError: UPDATE ... FROM target record does not contain a valid $id.");
+      }
+      if (seenTargetIds.has(id)) continue;
+      seenTargetIds.add(id);
+      targetRecords.push(record2);
+    }
+  }
+  const matched = [];
+  for (const target of targetRecords) {
+    const raw = target[from.targetJoinField]?.value;
+    const key = normalizeUpdateFromJoinKey(raw, joinKind, "target");
+    if (key === null) continue;
+    const source = sourceByKey.get(key);
+    if (source !== void 0) matched.push({ target, source });
+  }
+  return matched;
+}
+async function resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext) {
+  if (from.targetJoinField === "$id") return "id";
+  const info = (await getFieldsCached(stmt.appId, client, cacheContext)).find((field) => field.code === from.targetJoinField);
+  if (!info) {
+    throw new Error(`ArgumentError: UPDATE ... FROM target column ${from.targetJoinField} does not exist.`);
+  }
+  if (info.inSubtable || info.writable === false || info.fieldType !== "SINGLE_LINE_TEXT" && info.fieldType !== "NUMBER") {
+    throw new Error(
+      `ArgumentError: UPDATE ... FROM does not support target join field type ${info.fieldType} (${from.targetJoinField}).`
+    );
+  }
+  return info.fieldType === "NUMBER" ? "number" : "string";
+}
+async function loadUpdateFromSourceRows(from, requiredSourceFields, sourceValueFields, client, options, cacheContext, tempTables) {
+  if (from.cteName !== null) {
+    const table = tempTables?.get(from.cteName);
+    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
+    for (const field of requiredSourceFields) {
+      if (!table.columns.includes(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+    }
+    return table.rows;
+  }
+  const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
+  const joinType = from.joinKeyField === "$id" ? "RECORD_NUMBER" : sourceTypes.get(from.joinKeyField);
+  if (joinType === void 0) {
+    throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+  }
+  if (from.joinKeyField !== "$id" && joinType !== "SINGLE_LINE_TEXT" && joinType !== "NUMBER") {
+    throw new Error(
+      `ArgumentError: UPDATE ... FROM does not support source join field type ${joinType} (${from.joinKeyField}).`
+    );
+  }
+  for (const field of sourceValueFields) {
+    if (field !== "$id" && !sourceTypes.has(field)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+    }
+    const type = field === "$id" ? "RECORD_NUMBER" : sourceTypes.get(field);
+    if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
+      throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
+    }
+  }
+  const resolved = await fetchRecordsForSharedPlan(
+    client.getRecords,
+    from.appId,
+    "",
+    requiredSourceFields,
+    { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+  );
+  return resolved.records.map((record2) => flatten(record2, null));
+}
+function normalizeUpdateFromJoinKey(raw, kind, side) {
+  if (typeof raw !== "string") {
+    throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a scalar string: ${String(raw)}`);
+  }
+  if (kind === "string") {
+    if (raw === "") {
+      if (side === "target") return null;
+      throw new Error("ArgumentError: UPDATE ... FROM source key must not be empty.");
+    }
+    return raw;
+  }
+  if (kind === "number" && side === "target" && raw === "") return null;
+  if (kind === "id") {
+    const text2 = raw.trim();
+    const id = Number(text2);
+    if (text2 === "" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a positive safe integer: ${raw}`);
+    }
+    return String(id);
+  }
+  const text = raw.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+    throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a finite decimal: ${raw}`);
+  }
+  let unsigned = text;
+  let negative = false;
+  if (unsigned.startsWith("-") || unsigned.startsWith("+")) {
+    negative = unsigned[0] === "-";
+    unsigned = unsigned.slice(1);
+  }
+  let [whole, fraction = ""] = unsigned.split(".");
+  whole = (whole || "0").replace(/^0+(?=\d)/, "");
+  fraction = fraction.replace(/0+$/, "");
+  const zero = /^0*$/.test(whole) && fraction === "";
+  const canonical = fraction === "" ? whole : `${whole}.${fraction}`;
+  return negative && !zero ? `-${canonical}` : canonical;
 }
 async function executeInsert(stmt, client, options, cacheContext) {
   if (stmt.subtableCode) {
@@ -37949,98 +38749,20 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
   }
   return { type: "UPDATE", updatedCount: ids.length };
 }
-var UPDATE_FROM_ID_CHUNK_SIZE = 50;
-var UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = /* @__PURE__ */ new Set([
-  "CHECK_BOX",
-  "MULTI_SELECT",
-  "USER_SELECT",
-  "ORGANIZATION_SELECT",
-  "GROUP_SELECT",
-  "FILE"
-]);
 async function executeUpdateFrom(stmt, from, client, options, cacheContext, tempTables) {
-  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
-  const requiredSourceFields = [.../* @__PURE__ */ new Set([from.joinKeyField, ...sourceFields])];
-  let sourceRows;
-  if (from.cteName !== null) {
-    const table = tempTables?.get(from.cteName);
-    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
-    for (const field of requiredSourceFields) {
-      if (!table.columns.includes(field)) {
-        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
-      }
-    }
-    sourceRows = table.rows;
-  } else {
-    const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
-    for (const field of requiredSourceFields) {
-      if (field !== "$id" && !sourceTypes.has(field)) {
-        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
-      }
-      const type = sourceTypes.get(field);
-      if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
-        throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
-      }
-    }
-    const maxRecords2 = options.maxRecords ?? 1e4;
-    const resolved = await fetchRecordsForSharedPlan(
-      client.getRecords,
-      from.appId,
-      "",
-      requiredSourceFields,
-      { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1, onLimit: "error" }
-    );
-    sourceRows = resolved.records.map((record2) => flatten(record2, null));
-  }
-  const sourceById = /* @__PURE__ */ new Map();
-  for (const row of sourceRows) {
-    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
-    }
-    const raw = row[from.joinKeyField];
-    const text = typeof raw === "string" ? raw.trim() : "";
-    const id = Number(text);
-    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
-    }
-    if (sourceById.has(id)) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
-    }
-    sourceById.set(id, row);
-  }
-  const targetIds = [...sourceById.keys()];
-  const targetFields = collectUpdateFromTargetFields(stmt);
-  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
-  const targetRecords = [];
-  for (const ids of splitChunks(targetIds, UPDATE_FROM_ID_CHUNK_SIZE)) {
-    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
-    const query = filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery;
-    const resolved = await fetchRecordsForSharedPlan(
-      client.getRecords,
-      stmt.appId,
-      query,
-      targetFields,
-      { maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error" }
-    );
-    targetRecords.push(...resolved.records);
-  }
+  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   if (options.confirm) {
-    const ok = await options.confirm(targetRecords.length, "UPDATE");
-    if (!ok) throw new OperationCancelledError("UPDATE", targetRecords.length);
+    const ok = await options.confirm(matched.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", matched.length);
   }
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const matched = targetRecords.map((target) => {
-    const id = Number(target["$id"]?.value);
-    const source = sourceById.get(id);
-    if (!source) throw new Error(`ArgumentError: UPDATE ... FROM could not resolve source row for target $id ${id}.`);
-    return { target, source };
-  });
   const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
   for (const batch of batches) await client.putRecords(batch);
-  return { type: "UPDATE", updatedCount: targetRecords.length };
+  return { type: "UPDATE", updatedCount: matched.length };
 }
 function collectUpdateFromTargetFields(stmt) {
   const fields = /* @__PURE__ */ new Set(["$id"]);
+  if (stmt.from) fields.add(stmt.from.targetJoinField);
   const visit = (node) => {
     if (Array.isArray(node)) {
       node.forEach(visit);
@@ -38986,7 +39708,7 @@ function buildUpdatePlan(stmt, label) {
   if (stmt.from) {
     const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
     lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
-    lines.push(`  join:          APP${stmt.appId}.$id = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
+    lines.push(`  join:          APP${stmt.appId}.${stmt.from.targetJoinField} = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
     lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
@@ -39143,12 +39865,32 @@ function parseSqlStatements(sql) {
 // src/output/batchEnvelope.ts
 function toMutationSummary(result) {
   if (result.type === "INSERT") {
-    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
+    return {
+      insertedCount: result.insertedCount,
+      createdIds: result.createdIds,
+      ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+      ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+      ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+      ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
+    };
   }
-  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
+  if (result.type === "UPDATE") return {
+    updatedCount: result.updatedCount,
+    ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+    ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+    ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+    ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
+  };
   if (result.type === "DELETE") return { deletedCount: result.deletedCount };
   if (result.type === "UPSERT") {
-    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
+    return {
+      insertedCount: result.insertedCount,
+      updatedCount: result.updatedCount,
+      ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+      ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+      ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+      ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
+    };
   }
   return { reorderedParentCount: result.reorderedParentCount };
 }
@@ -39175,10 +39917,30 @@ function buildBatchEnvelope(batch, options = {}) {
       }
       entry.resultIndex = results.length;
       results.push({
+        type: "SELECT",
         columns: s.result.columns,
         rows: s.result.rows,
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? []
+      });
+    } else if (s.result?.type === "VALIDATION") {
+      totalRows += s.result.errorCount;
+      if (maxTotalRecords !== void 0 && totalRows > maxTotalRecords) {
+        throw new Error(`ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`);
+      }
+      entry.resultIndex = results.length;
+      results.push({
+        type: "VALIDATION",
+        columns: s.result.columns,
+        rows: s.result.errors,
+        rowCount: s.result.errorCount,
+        warnings: [],
+        operation: s.result.operation,
+        validatedRows: s.result.validatedRows,
+        validRows: s.result.validRows,
+        invalidRows: s.result.invalidRows,
+        errorCount: s.result.errorCount,
+        ...s.result.errTable ? { errTable: s.result.errTable } : {}
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       Object.assign(entry, toMutationSummary(s.result));
@@ -39537,6 +40299,9 @@ function clampInt(v, min, max) {
 
 // src/core/formFieldInfo.ts
 function flattenFormFieldProperties(properties) {
+  return flattenFields(properties, collectLookupCopyFields(properties));
+}
+function flattenFields(properties, lookupCopyFields, inSubtable = false) {
   const out = [];
   for (const field of Object.values(properties)) {
     out.push({
@@ -39544,11 +40309,48 @@ function flattenFormFieldProperties(properties) {
       label: field.label,
       fieldType: field.type,
       optionOrder: toOptionOrderMap(field.options),
-      sortKind: detectSortKind(field.type, field.format)
+      sortKind: detectSortKind(field.type, field.format),
+      required: field.required,
+      minValue: normalizeConstraintValue(field.minValue),
+      maxValue: normalizeConstraintValue(field.maxValue),
+      minLength: normalizeConstraintValue(field.minLength),
+      maxLength: normalizeConstraintValue(field.maxLength),
+      defaultValue: field.defaultValue,
+      inSubtable,
+      writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES2.has(field.type)
     });
-    if (field.fields) out.push(...flattenFormFieldProperties(field.fields));
+    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
   }
   return out;
+}
+var NON_WRITABLE_FIELD_TYPES2 = /* @__PURE__ */ new Set([
+  "CALC",
+  "RECORD_NUMBER",
+  "CREATOR",
+  "CREATED_TIME",
+  "MODIFIER",
+  "UPDATED_TIME",
+  "STATUS",
+  "STATUS_ASSIGNEE",
+  "CATEGORY",
+  "REFERENCE_TABLE",
+  "SUBTABLE"
+]);
+function collectLookupCopyFields(properties) {
+  const result = /* @__PURE__ */ new Set();
+  const visit = (fields) => {
+    for (const field of Object.values(fields)) {
+      for (const mapping of field.lookup?.fieldMappings ?? []) {
+        if (mapping.field) result.add(mapping.field);
+      }
+      if (field.fields) visit(field.fields);
+    }
+  };
+  visit(properties);
+  return result;
+}
+function normalizeConstraintValue(value) {
+  return value == null || value === "" ? void 0 : value;
 }
 function toOptionOrderMap(options) {
   if (!options || typeof options !== "object") return void 0;
@@ -40573,20 +41375,42 @@ function toAssertPayload(result) {
     condition: result.condition
   };
 }
+function toDmlValidationPayload(result) {
+  return {
+    ok: true,
+    type: result.type,
+    operation: result.operation,
+    validatedRows: result.validatedRows,
+    validRows: result.validRows,
+    invalidRows: result.invalidRows,
+    errorCount: result.errorCount,
+    columns: result.columns,
+    errors: result.errors,
+    ...result.errTable ? { errTable: result.errTable } : {}
+  };
+}
 function toMutationPayload(result) {
   if (result.type === "INSERT") {
     return {
       ok: true,
       type: result.type,
       insertedCount: result.insertedCount,
-      createdIds: result.createdIds
+      createdIds: result.createdIds,
+      ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+      ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+      ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+      ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
     };
   }
   if (result.type === "UPDATE") {
     return {
       ok: true,
       type: result.type,
-      updatedCount: result.updatedCount
+      updatedCount: result.updatedCount,
+      ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+      ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+      ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+      ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
     };
   }
   if (result.type === "DELETE") {
@@ -40601,7 +41425,11 @@ function toMutationPayload(result) {
       ok: true,
       type: result.type,
       insertedCount: result.insertedCount,
-      updatedCount: result.updatedCount
+      updatedCount: result.updatedCount,
+      ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
+      ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
+      ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
+      ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
     };
   }
   return {
@@ -40637,7 +41465,7 @@ function requireDmlApproval(input, toolName, suffix = "") {
 }
 function containsSelectBasedDml(statements) {
   return statements.some(
-    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT" || s.isUpdateFrom === true
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT" || s.isUpdateFrom === true || s.isOnErrorSkip === true
   );
 }
 function resolveMutateRuntimeMaxRecords(statements, dmlMaxRows) {
@@ -40700,13 +41528,18 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       tempTablesDropped: s2.tempTablesDropped,
       tempOnlySource: s2.tempOnlySource,
       targetAppId: s2.targetAppId,
-      isUpdateFrom: s2.isUpdateFrom
+      isUpdateFrom: s2.isUpdateFrom,
+      isValidationOnly: s2.isValidationOnly,
+      isOnErrorSkip: s2.isOnErrorSkip,
+      requiresCompleteInput: s2.requiresCompleteInput
     }));
     const common = {
       ok: true,
       statementCount: analysis.statementCount,
       isReadOnlyBatch: analysis.isReadOnlyBatch,
       containsDml: analysis.containsDml,
+      containsValidationOnly: analysis.containsValidationOnly,
+      requiresCompleteInput: analysis.requiresCompleteInput,
       tempTables: analysis.tempTables,
       canRunWithQueryTool: analysis.isReadOnlyBatch,
       requiresMutationTool: analysis.containsDml,
@@ -40780,7 +41613,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: input.onLimit,
+        onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows
       });
@@ -40813,6 +41646,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         cacheContext: validation.cacheContext
       });
       if (result2.type === "ASSERT") return toAssertPayload(result2);
+      if (result2.type === "VALIDATION") return toDmlValidationPayload(result2);
       if (result2.type !== "SELECT") {
         throw new Error(`ArgumentError: read-only query returned unexpected result type ${result2.type}.`);
       }
@@ -40824,7 +41658,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: input.onLimit,
+      onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
       timeout: input.timeout
     });
     const result = await executeSql(runtime.sql, runtime.client, {
@@ -40834,6 +41668,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       cacheContext: runtime.cacheContext
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
+    if (result.type === "VALIDATION") return toDmlValidationPayload(result);
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
     }
@@ -40850,12 +41685,12 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }
-      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
+      if (!s.isOnErrorSkip && s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
         throw new Error(
           `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).${at}`
         );
       }
-      staticInsertTotal += s.insertValuesCount ?? 0;
+      if (!s.isOnErrorSkip) staticInsertTotal += s.insertValuesCount ?? 0;
     }
     const dmlTotalMaxRows = input.dmlTotalMaxRows;
     if (dmlTotalMaxRows !== void 0 && staticInsertTotal > dmlTotalMaxRows) {
@@ -40960,7 +41795,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     } catch (err) {
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
     }
-    if (result.type === "SELECT" || result.type === "ASSERT") {
+    if (result.type === "SELECT" || result.type === "ASSERT" || result.type === "VALIDATION") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
     return toMutationPayload(result);
@@ -41119,7 +41954,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
 var profile = external_exports.string().min(1).describe("kintone connection profile name from ksql.config.json (default: the server's default profile).").optional();
 var maxRecords = external_exports.number().int().positive().describe("Maximum records fetched per SELECT (default 500).").optional();
 var fetchParallel = external_exports.number().int().min(1).max(10).describe("Number of parallel kintone record-fetch requests (1-10).").optional();
-var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error').").optional();
+var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). VALIDATE ONLY always requires complete input and therefore overrides 'truncate' to 'error'.").optional();
 var tempTableMaxRows = external_exports.number().int().positive().describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors \u2014 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.").optional();
 var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
 var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
@@ -41243,7 +42078,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.12.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.13.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -41265,12 +42100,12 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT. Supports multi-statement batches with temp tables (CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;). ASSERT <expr> <op> <expr> (or BETWEEN) is a runtime gate: on failure it raises AssertError and always stops the batch. DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. VALIDATE ONLY performs local Tier-0 validation with zero write API calls; it always requires complete input, so onLimit=truncate is ignored and treated as error. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

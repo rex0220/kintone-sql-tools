@@ -1,9 +1,28 @@
-ksql 配布パッケージ (v2.12.0)
+ksql 配布パッケージ (v2.13.0)
 
-1. ksql-plugin-v2.12.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.13.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.13.0: バッチのエラー行隔離と事前検証(B12 バンドル・機能追加)。
+- VALIDATE ONLY: 親 INSERT / UPSERT / UPDATE(VALUES / SELECT / UPDATE ... FROM)を
+  kintone へ書き込まずに全候補行を検証。必須・型・範囲・文字列長・選択肢・UPSERT
+  キーを安定エラーコードで収集し、1 行に複数エラーを返す。複文では INTO #err に
+  原子的に作成・追記して後続文から参照できる。書き込みゼロのため DML 承認不要
+  (read-only 扱い)だが、完全入力を要求するため truncate 設定は常に error へ上書き。
+- UPDATE ... FROM 業務キー結合(B11.1): 従来の $id = source.key に加え、更新先と
+  ソースの文字列(1 行)/数値フィールドを単一等値で結合できる。ソース重複は PUT 前
+  エラー、ターゲット重複は同じソース値で全件更新。数値キーは Number() を使わず
+  10 進文字列として正規化し、64 文字超の文字列キーは kintone の前方一致による
+  過剰取得をローカル全文一致で除外する。
+- ON ERROR SKIP INTO #err [REJECT LIMIT n]: VALIDATE ONLY と同一の検証に失敗した
+  行を一時テーブルへ隔離し、合格行だけを 100 件チャンクで書き込む。隔離後の件数へ
+  dmlMaxRows / dmlTotalMaxRows を適用し、REJECT LIMIT 超過時は書き込みゼロのまま
+  診断結果を返す。API 書き込みエラーは従来どおり fail-fast。
+- 注意: MIN / MAX はテキスト・日時列を数値化するため NaN になります(数値列専用)。
+  #err のメッセージ集約等は当面 SELECT DISTINCT キー, '定数' を使ってください。
+- 詳細は CHANGELOG.md と言語リファレンスを参照。
 
 v2.12.0: UPDATE ... FROM によるアプリ間・一時テーブルからの転記に対応（機能追加）。
 - SET 値に他テーブル(実アプリ APP<n> / バッチ内 #temp)のフィールドを参照し 1 文で転記。
