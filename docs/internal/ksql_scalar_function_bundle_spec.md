@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §3 T2-1 / T2-4（「効果:中／コスト:小」でまとめて 1 リリースが効率的と評価）。
-- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
+- ステータス: **仕様案 R3（codex レビュー反映済み・実装着手可）。未実装。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -120,41 +120,74 @@ kSQL の `DATE_ADD` は **`INTERVAL` 構文ではなく 3 引数**（`applyDateA
 | **文字数の単位** | 既存 `LENGTH`/`SUBSTRING` と**同じ単位**に揃える（実装を共有する）。受入条件で既存関数との一致を固定する |
 | **1-indexed** | `INSTR` の戻り値・`LEFT`/`RIGHT` の n は既存 `SUBSTRING` に合わせる |
 | **数値化** | 数値引数は既存関数と同じく `Number()` 化。非数値は `NaN` 伝播（既存 `ROUND` 等と同じ） |
-| **比較** | `GREATEST`/`LEAST` は **既存の `compareScalarValues` を再利用**（§3.1） |
+| **比較** | `GREATEST`/`LEAST` は **引数集合でモードを 1 回決めてから**最大/最小を取る（§3.1）。判定規則は `compareScalarValues` と同一だが、**そのまま畳み込まない**（推移律が無い） |
 | **空文字** | **関数ごとに規定**する（§3.2）。「一律に空文字を返す」とはしない |
 
 ### 3.1 `GREATEST` / `LEAST` の比較規則（R2 で確定）
 
 > **R1 の誤り**: 「`compareSortKeys` の自動判定と同じ規則」＋「空文字は辞書順で最小」と書いたが**両立しない**。`Number("") === 0` のため、`compareSortKeys` の自動判定では `GREATEST('', '-1')` が `''`（0 として `-1` より大きい）になり、「辞書順で最小」と矛盾する。
 
-**既存の `compareScalarValues`（[core/scalarCompare.ts](../../src/core/scalarCompare.ts)）を再利用する。**
+> **R2 の誤り（R3 で修正）**: 「`compareScalarValues` をそのまま畳み込む」としたが、**`compareScalarValues` は全順序ではない**（推移律が成り立たない）。`GREATEST` は畳み込みなので、順序が定まらないと**引数順で結果が変わる**。
 
-```ts
-// GREATEST: compareScalarValues(">", cand, best) が true なら best = cand
-// LEAST:    compareScalarValues("<", cand, best) が true なら best = cand
+#### なぜ畳み込めないか（推移律の破れ・R3 で追加）
+
+`compareScalarValues` は**比較する 2 値ごと**にモードを決める（[scalarCompare.ts:26](../../src/core/scalarCompare.ts#L26) の `numeric = !isNaN(leftNum) && !isNaN(rightNum)`）。このため**非空値だけでも循環する**:
+
+| 比較 | モード | 結果 |
+|---|---|---|
+| `'2' < '10'` | 両方数値 → **数値比較** | ✅ true（2 < 10） |
+| `'10' < '1a'` | `Number('1a')` = NaN → **文字列比較** | ✅ true（`'0'`(0x30) < `'a'`(0x61)） |
+| `'1a' < '2'` | 同上 → **文字列比較** | ✅ true（`'1'` < `'2'`） |
+
+→ **`2 < 10 < 1a < 2`**。`GREATEST('2','10','1a')` は畳み込み順で `'1a'` / `'10'` / `'2'` の**いずれにもなる**。
+
+> **§3.1 の「空文字は先に処理」では防げない**。循環は**非空値の間**で起きる。
+
+#### 確定する規則: **引数集合でモードを 1 回だけ決める**
+
 ```
+GREATEST(args):
+  1. 全引数が "" なら "" を返す
+  2. nonEmpty = 空文字を除いた引数          ← 空文字は常に最小（GREATEST では勝たない）
+  3. numeric = nonEmpty が全て数値か        ← 集合単位で 1 回だけ判定
+  4. numeric ? Number で最大 : 文字列で最大
+
+LEAST(args):
+  1. 引数に "" が 1 つでもあれば "" を返す   ← 空文字は常に最小
+  2. numeric = args が全て数値か
+  3. numeric ? Number で最小 : 文字列で最小
+```
+
+- 「数値か」の判定は **`!Number.isNaN(Number(x))`**（`compareScalarValues:26` と同じ規則）。
+- **モードが集合で 1 つに固まるため全順序になり、引数順に依存しない**。
+
+#### `compareScalarValues` との関係（R3 で明確化）
+
+**これは `compareScalarValues` の n 項への自然な一般化**であり、別規則ではない:
+
+- `compareScalarValues` の `numeric` フラグは**「両オペランドが数値」**＝ **2 項における「集合が全て数値」そのもの**。
+- したがって **引数 2 個なら本規則は `compareScalarValues` と完全に一致する**（`WHERE a > b` との整合は保たれる）。
+- **3 項以上で混在した場合のみ差が出る**が、そこは `compareScalarValues` の畳み込み自体が**循環して答えを持たない**領域なので、失うものは無い。
+
+例: `GREATEST('2','10','1a')` = **`'2'`**（`'1a'` が非数値 → 集合全体を文字列比較 → `'2' > '1a' > '10'`）。
 
 理由:
 
-- **`WHERE a > b` と同じ規則になる**。`GREATEST(a,b)` が「WHERE で大きい方」と食い違わないのが利用者にとって最も自然。
-- **v2.2.0 で決めた空セル意味論をそのまま引き継ぐ**（空文字 vs 有限数は **−∞ 相当**）。独自規則を作らない。
-- **既に `core/` にある leaf モジュール**なので §3.3 の循環参照が起きない。
+- **2 項では `WHERE a > b` と同じ規則**（上記のとおり `compareScalarValues` と一致）。
+- **v2.2.0 で決めた空セル意味論をそのまま引き継ぐ**（空文字は最小＝ −∞ 相当）。独自規則を作らない。
+- **既に `core/` にある leaf モジュール**の判定規則を流用するため §3.3 の循環参照が起きない。
 
-#### 空文字は「常に最小」として**比較前に確定させる**（順序依存の回避）
+#### なぜ空文字を「先に」処理するのか（集合モードだけでは足りない）
 
-`compareScalarValues` の空文字規則は**左辺が空のときだけ発火する**（[scalarCompare.ts](../../src/core/scalarCompare.ts) の `leftStr === "" && …`）。そのまま畳み込むと**引数順で結果が変わる**:
+上の手順 1〜2 で空文字を先に確定させるのは、**集合モードに空文字を混ぜると −∞ 意味論が壊れる**ため:
 
-| 式 | `compareScalarValues` を素直に使った場合 | 経路 |
-|---|---|---|
-| `GREATEST('-1', '')` | `'-1'` | `compareScalarValues(">", "", "-1")` → 空文字は −∞ → false → `-1` が残る |
-| `GREATEST('', '-1')` | **`''`** ← 不一致 | `compareScalarValues(">", "-1", "")` → 左辺が空でないので −∞ 規則が**発火せず**、`Number("") = 0` で `-1 > 0` が false → `''` が残る |
+- `GREATEST('', '-1')` を集合モードにかけると、`Number('') = 0`・`Number('-1') = -1` でどちらも数値 → 数値比較 → `max(0, -1) = 0` → **`''` が返る**（0 として `-1` に勝ってしまう）。
+- v2.2.0 の空セル意味論では**空文字は最小**（−∞ 相当）。よって**空文字は比較に参加させず先に確定**させる。
 
-→ **空文字は常に最小**（`GREATEST` では決して勝たず、`LEAST` では必ず勝つ）と**先に判定**し、非空同士のみ `compareScalarValues` へ渡す。これで**順序非依存**になり、`compareScalarValues` の 2 つの分岐（−∞ 規則・文字列比較）とも**結論が一致**する:
+これは `compareScalarValues` の 2 分岐とも結論が一致する:
 
-- `'' vs 有限数` → −∞ 規則で空文字が小さい ✅ 一致
-- `'' vs 非数値文字列` → 文字列比較で `'' < 'a'` ✅ 一致
-
-**全引数が空文字なら空文字を返す。**
+- `'' vs 有限数` → −∞ 規則で空文字が小さい ✅
+- `'' vs 非数値文字列` → 文字列比較で `'' < 'a'` ✅
 
 確定する挙動（**受入条件に固定**）:
 
@@ -162,9 +195,12 @@ kSQL の `DATE_ADD` は **`INTERVAL` 構文ではなく 3 引数**（`applyDateA
 |---|---|
 | `LEAST('', '5')` / `LEAST('5', '')` | `''`（順序非依存） |
 | `GREATEST('', '5')` / `GREATEST('5', '')` | `'5'`（順序非依存） |
-| `GREATEST('', '-1')` / `GREATEST('-1', '')` | `'-1'`（順序非依存・上表の不一致を解消） |
+| `GREATEST('', '-1')` / `GREATEST('-1', '')` | `'-1'`（順序非依存。空文字を先に除くため 0 として勝たない） |
 | `LEAST('', 'a')` | `''` |
 | `GREATEST('', '')` | `''` |
+| **`GREATEST('2','10','1a')`**（全 6 順列） | **`'2'`**（非数値が 1 つでもあれば集合全体を文字列比較） |
+| **`LEAST('2','10','1a')`**（全 6 順列） | **`'10'`**（同上） |
+| `GREATEST('2','10')` | `'10'`（全て数値 → 数値比較） |
 
 ### 3.2 空文字の扱い（関数ごとに規定・R2 で追加）
 
@@ -254,7 +290,7 @@ LENGTH(会社名, 'x')      -- → 11（同上）
 | `src/types/ast.ts` | `StringFuncName` に 10 個を追加 |
 | `src/parser/parser.ts` | 関数呼び出しの写像へ追加。**`LEFT`/`RIGHT` は `(` の先読みで JOIN と曖昧性解消**（§4.1） |
 | `src/engine/evalFunc.ts` | 各関数の評価を実装。`TRUNCATE` は既存 `applyRoundOp`（round/floor/ceil）へ `trunc` を足す形が自然。`LEFT`/`RIGHT`/`LPAD`/`RPAD`/`INSTR` は既存 `SUBSTRING`/`LENGTH` と**同じ文字数単位**を使う。**追加関数のみ arity を検証**し不正は `ArgumentError`（§3.4.2） |
-| **`evalFunc.ts` の import** | **`core/scalarCompare.ts` の `compareScalarValues` を import**して `GREATEST`/`LEAST` に使う（§3.1）。`core/` は leaf のため循環しない。**`process.ts` の `compareSortKeys` は import しない**（非 export かつ `process → evalFunc` の逆向きで循環する・§3.3） |
+| **`GREATEST`/`LEAST` の比較** | **`compareScalarValues` を畳み込まない**（推移律が無く順序依存になる・§3.1）。**引数集合でモードを 1 回決めてから**最大/最小を取る。判定規則（`!Number.isNaN(Number(x))`）は `compareScalarValues:26` と同一にし、**2 引数では同じ結論**になることをテストで固定する。`core/scalarCompare.ts` へ n 項版のヘルパを置く（`core/` は leaf のため `evalFunc` から import しても循環しない）。**`process.ts` の `compareSortKeys` は import しない**（非 export かつ `process → evalFunc` の逆向きで循環・§3.3） |
 | `src/engine/evalFunc.ts`（`DATE_ADD`） | `applyDateAdd` の `switch` から `default: DAY` を廃し、`YEAR`/`MONTH`/`DAY` 以外は **実行時 `ArgumentError`**（§6.2）。大文字小文字は不問を維持 |
 | 言語リファレンス §5 | 関数表へ追加。`GREATEST`/`LEAST` は**集約の `MAX`/`MIN` と別物**である旨を明記 |
 
@@ -294,10 +330,12 @@ SELECT LEFT(会社名, 4) FROM APP100 LEFT JOIN APP200 ON …
 
 ### 5.2 `GREATEST` / `LEAST` の比較（§3.1）
 
-- [ ] **順序非依存**: `GREATEST('', '-1')` = `GREATEST('-1', '')` = `'-1'`／`LEAST('', '5')` = `LEAST('5', '')` = `''`。
+- [ ] **順序非依存（空文字）**: `GREATEST('', '-1')` = `GREATEST('-1', '')` = `'-1'`／`LEAST('', '5')` = `LEAST('5', '')` = `''`。
 - [ ] `GREATEST('', '5')` = `'5'`／`LEAST('', 'a')` = `''`／`GREATEST('', '')` = `''`。
-- [ ] **`WHERE a > b` と結論が一致**する（同じ 2 値で `GREATEST` の勝者と `WHERE` の真偽が矛盾しない）。
-- [ ] 数値は数値比較（`GREATEST('9', '10')` = `'10'`）／非数値は文字列比較（`GREATEST('a', 'b')` = `'b'`）。
+- [ ] **順序非依存（数値・非数値の混在）＝推移律の破れの回帰テスト**: **`GREATEST('2','10','1a')` が全 6 順列で `'2'`**／**`LEAST('2','10','1a')` が全 6 順列で `'10'`**（集合単位でモードを決めるため）。
+  - この 3 値は `compareScalarValues` の**ペア判定では循環する**（`'2'<'10'` は数値・`'10'<'1a'` と `'1a'<'2'` は文字列）。畳み込み実装では順列ごとに `'1a'`/`'10'`/`'2'` と割れるため、**この 3 値を必ずテストに含める**。
+- [ ] **2 引数では `WHERE a > b` と結論が一致**する（`compareScalarValues` と同じ規則になること）。3 引数以上の混在は集合モードが優先する。
+- [ ] 全て数値なら数値比較（`GREATEST('9', '10')` = `'10'`）／1 つでも非数値なら**全体を**文字列比較（`GREATEST('a', 'b')` = `'b'`）。
 
 ### 5.3 引数の個数・境界値（§3.4）
 
