@@ -31035,6 +31035,11 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["COALESCE", "COALESCE" /* COALESCE */],
   ["NULLIF", "NULLIF" /* NULLIF */],
   ["ISNULL", "ISNULL" /* ISNULL */],
+  ["INSTR", "INSTR" /* INSTR */],
+  ["GREATEST", "GREATEST" /* GREATEST */],
+  ["LEAST", "LEAST" /* LEAST */],
+  ["LPAD", "LPAD" /* LPAD */],
+  ["RPAD", "RPAD" /* RPAD */],
   ["CAST", "CAST" /* CAST */],
   ["CONVERT", "CONVERT" /* CONVERT */],
   ["FORMAT", "FORMAT" /* FORMAT */],
@@ -31042,6 +31047,8 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["FLOOR", "FLOOR" /* FLOOR */],
   ["CEIL", "CEIL" /* CEIL */],
   ["CEILING", "CEILING" /* CEILING */],
+  ["TRUNCATE", "TRUNCATE" /* TRUNCATE */],
+  ["TRUNC", "TRUNC" /* TRUNC */],
   ["ABS", "ABS" /* ABS */],
   ["MOD", "MOD" /* MOD */],
   ["POWER", "POWER" /* POWER */],
@@ -31053,6 +31060,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["DATE_FORMAT", "DATE_FORMAT" /* DATE_FORMAT */],
   ["DATEDIFF", "DATEDIFF" /* DATEDIFF */],
   ["DATE_ADD", "DATE_ADD" /* DATE_ADD */],
+  ["LAST_DAY", "LAST_DAY" /* LAST_DAY */],
   ["IF", "IF" /* IF */]
 ]);
 
@@ -31398,6 +31406,13 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "COALESCE" /* COALESCE */,
   "NULLIF" /* NULLIF */,
   "ISNULL" /* ISNULL */,
+  "LEFT" /* LEFT */,
+  "RIGHT" /* RIGHT */,
+  "INSTR" /* INSTR */,
+  "GREATEST" /* GREATEST */,
+  "LEAST" /* LEAST */,
+  "LPAD" /* LPAD */,
+  "RPAD" /* RPAD */,
   "CAST" /* CAST */,
   "CONVERT" /* CONVERT */,
   "FORMAT" /* FORMAT */,
@@ -31405,6 +31420,8 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "FLOOR" /* FLOOR */,
   "CEIL" /* CEIL */,
   "CEILING" /* CEILING */,
+  "TRUNCATE" /* TRUNCATE */,
+  "TRUNC" /* TRUNC */,
   "ABS" /* ABS */,
   "MOD" /* MOD */,
   "POWER" /* POWER */,
@@ -31416,6 +31433,7 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "DATE_FORMAT" /* DATE_FORMAT */,
   "DATEDIFF" /* DATEDIFF */,
   "DATE_ADD" /* DATE_ADD */,
+  "LAST_DAY" /* LAST_DAY */,
   "IF" /* IF */
 ]);
 function needsSpaceBetween(prev, cur) {
@@ -32288,6 +32306,10 @@ var Parser = class {
   // arg: 文字列リテラル / 算術式（フィールド参照・数値含む）/ ネスト文字列関数
   // ──────────────────────────────────────────────────
   tryStringFuncName() {
+    if (this.peekAt(1).kind === "(" /* LPAREN */) {
+      if (this.peek().kind === "LEFT" /* LEFT */) return "LEFT";
+      if (this.peek().kind === "RIGHT" /* RIGHT */) return "RIGHT";
+    }
     const map2 = {
       ["UPPER" /* UPPER */]: "UPPER",
       ["LOWER" /* LOWER */]: "LOWER",
@@ -32302,6 +32324,11 @@ var Parser = class {
       ["COALESCE" /* COALESCE */]: "COALESCE",
       ["NULLIF" /* NULLIF */]: "NULLIF",
       ["ISNULL" /* ISNULL */]: "ISNULL",
+      ["INSTR" /* INSTR */]: "INSTR",
+      ["GREATEST" /* GREATEST */]: "GREATEST",
+      ["LEAST" /* LEAST */]: "LEAST",
+      ["LPAD" /* LPAD */]: "LPAD",
+      ["RPAD" /* RPAD */]: "RPAD",
       ["CAST" /* CAST */]: "CAST",
       ["CONVERT" /* CONVERT */]: "CAST",
       // CONVERT → CAST に正規化
@@ -32311,12 +32338,16 @@ var Parser = class {
       ["CEIL" /* CEIL */]: "CEIL",
       ["CEILING" /* CEILING */]: "CEIL",
       // CEILING → CEIL に正規化
+      ["TRUNCATE" /* TRUNCATE */]: "TRUNCATE",
+      ["TRUNC" /* TRUNC */]: "TRUNCATE",
+      // TRUNC → TRUNCATE に正規化
       ["YEAR" /* YEAR */]: "YEAR",
       ["MONTH" /* MONTH */]: "MONTH",
       ["DAY" /* DAY */]: "DAY",
       ["DATE_FORMAT" /* DATE_FORMAT */]: "DATE_FORMAT",
       ["DATEDIFF" /* DATEDIFF */]: "DATEDIFF",
       ["DATE_ADD" /* DATE_ADD */]: "DATE_ADD",
+      ["LAST_DAY" /* LAST_DAY */]: "LAST_DAY",
       ["ABS" /* ABS */]: "ABS",
       ["MOD" /* MOD */]: "MOD",
       ["POWER" /* POWER */]: "POWER",
@@ -35043,6 +35074,25 @@ function compareScalarValues(op, leftStr, rightStr) {
       return numeric ? leftNum <= rightNum : leftStr <= rightStr;
   }
 }
+function selectScalarExtreme(values, extreme) {
+  if (extreme === "least" && values.includes("")) return "";
+  const candidates = extreme === "greatest" ? values.filter((value) => value !== "") : [...values];
+  if (candidates.length === 0) return "";
+  const numeric = candidates.every((value) => !Number.isNaN(Number(value)));
+  const compare = (left, right) => {
+    if (numeric) {
+      const leftNum = Number(left);
+      const rightNum = Number(right);
+      if (leftNum < rightNum) return -1;
+      if (leftNum > rightNum) return 1;
+    }
+    return left < right ? -1 : left > right ? 1 : 0;
+  };
+  return candidates.reduce((best, candidate) => {
+    const cmp = compare(candidate, best);
+    return extreme === "greatest" ? cmp > 0 ? candidate : best : cmp < 0 ? candidate : best;
+  });
+}
 
 // src/engine/evalFunc.ts
 function evalArithExpr(expr, row) {
@@ -35091,6 +35141,36 @@ function evalStringFunc(expr, row) {
       const len = args[2] !== void 0 ? Number(args[2]) : void 0;
       return len !== void 0 ? str.slice(start, start + len) : str.slice(start);
     }
+    case "LEFT": {
+      assertArity("LEFT", args, 2, 2);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      return Number.isNaN(n) || n <= 0 ? "" : str.slice(0, n);
+    }
+    case "RIGHT": {
+      assertArity("RIGHT", args, 2, 2);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      return Number.isNaN(n) || n <= 0 ? "" : str.slice(Math.max(0, str.length - n));
+    }
+    case "INSTR":
+      assertArity("INSTR", args, 2, 2);
+      return String(args[0].indexOf(args[1]) + 1);
+    case "LPAD":
+    case "RPAD": {
+      assertArity(expr.func, args, 2, 3);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      if (Number.isNaN(n) || n <= 0) return "";
+      if (str.length >= n) return str.slice(0, n);
+      const pad = args[2] ?? " ";
+      if (pad === "") return str;
+      return expr.func === "LPAD" ? str.padStart(n, pad) : str.padEnd(n, pad);
+    }
+    case "GREATEST":
+    case "LEAST":
+      assertArity(expr.func, args, 2);
+      return selectScalarExtreme(args, expr.func === "GREATEST" ? "greatest" : "least");
     case "CONCAT":
       return args.join("");
     case "REPLACE": {
@@ -35111,6 +35191,9 @@ function evalStringFunc(expr, row) {
       return applyRoundOp("floor", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "CEIL":
       return applyRoundOp("ceil", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
+    case "TRUNCATE":
+      assertArity("TRUNCATE", args, 1, 2);
+      return applyRoundOp("trunc", Number(args[0]), Number(args[1] ?? "0"));
     case "CAST": {
       const val = args[0] ?? "";
       const castType = args[1] ?? "TEXT";
@@ -35143,6 +35226,9 @@ function evalStringFunc(expr, row) {
       return applyDateDiff(args[0] ?? "", args[1] ?? "");
     case "DATE_ADD":
       return applyDateAdd(args[0] ?? "", Number(args[1] ?? "0"), (args[2] ?? "DAY").toUpperCase());
+    case "LAST_DAY":
+      assertArity("LAST_DAY", args, 1, 1);
+      return applyLastDay(args[0]);
     case "ABS":
       return String(Math.abs(Number(args[0] ?? "0")));
     case "MOD": {
@@ -35164,6 +35250,11 @@ function evalStringFunc(expr, row) {
     case "CURRENT_TIMESTAMP":
       return (/* @__PURE__ */ new Date()).toISOString();
   }
+}
+function assertArity(func, args, min, max = Number.POSITIVE_INFINITY) {
+  if (args.length >= min && args.length <= max) return;
+  const expected = min === max ? String(min) : max === Number.POSITIVE_INFINITY ? `${min} or more` : `${min} to ${max}`;
+  throw new Error(`ArgumentError: ${func} expects ${expected} argument(s).`);
 }
 function parseDateParts(s) {
   return {
@@ -35189,6 +35280,9 @@ function applyDateDiff(date1, date22) {
   return String(Math.round((d1 - d2) / 864e5));
 }
 function applyDateAdd(dateStr, n, unit) {
+  if (unit !== "YEAR" && unit !== "MONTH" && unit !== "DAY") {
+    throw new Error("ArgumentError: DATE_ADD unit must be YEAR, MONTH, or DAY.");
+  }
   if (!dateStr || dateStr.length < 10) return dateStr;
   const { y, mo, d } = parseDateParts(dateStr);
   const dt = new Date(Date.UTC(+y, +mo - 1, +d));
@@ -35199,10 +35293,19 @@ function applyDateAdd(dateStr, n, unit) {
     case "MONTH":
       dt.setUTCMonth(dt.getUTCMonth() + n);
       break;
-    default:
+    case "DAY":
       dt.setUTCDate(dt.getUTCDate() + n);
       break;
   }
+  const ry = String(dt.getUTCFullYear()).padStart(4, "0");
+  const rmo = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const rd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${ry}-${rmo}-${rd}`;
+}
+function applyLastDay(dateStr) {
+  if (!dateStr || dateStr.length < 10) return dateStr;
+  const { y, mo } = parseDateParts(dateStr);
+  const dt = new Date(Date.UTC(+y, +mo, 0));
   const ry = String(dt.getUTCFullYear()).padStart(4, "0");
   const rmo = String(dt.getUTCMonth() + 1).padStart(2, "0");
   const rd = String(dt.getUTCDate()).padStart(2, "0");
@@ -42554,7 +42657,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.16.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.17.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

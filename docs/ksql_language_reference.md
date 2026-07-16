@@ -371,22 +371,40 @@ WHERE 担当者 = 'user1'
 | `LTRIM` | `LTRIM(フィールド)` | 左側の空白を除去 |
 | `RTRIM` | `RTRIM(フィールド)` | 右側の空白を除去 |
 | `LENGTH` | `LENGTH(フィールド)` | 文字数を返す |
-| `SUBSTRING` | `SUBSTRING(フィールド, 開始, [長さ])` | 部分文字列（1-indexed） |
+| `SUBSTRING` | `SUBSTRING(フィールド, 開始 [, 長さ])` | 部分文字列（1-indexed） |
+| `LEFT` | `LEFT(値, 文字数)` | 先頭から指定文字数を返す |
+| `RIGHT` | `RIGHT(値, 文字数)` | 末尾から指定文字数を返す |
+| `INSTR` | `INSTR(値, 検索文字列)` | 検索位置を 1-indexed で返す（見つからなければ `0`） |
 | `CONCAT` | `CONCAT(値1, 値2, ...)` | 文字列の連結（可変長引数） |
 | `REPLACE` | `REPLACE(フィールド, 検索, 置換)` | 文字列置換 |
 | `COALESCE` | `COALESCE(値1, 値2, ...)` | 最初の非空値を返す |
 | `ISNULL` | `ISNULL(値, 代替値)` | 値が空なら代替値、それ以外は値（`COALESCE` の 2 引数版） |
 | `NULLIF` | `NULLIF(値1, 値2)` | 値1 と 値2 が等しければ空文字、それ以外は 値1 |
+| `GREATEST` | `GREATEST(値1, 値2, ...)` | 行内の最大値（2 引数以上） |
+| `LEAST` | `LEAST(値1, 値2, ...)` | 行内の最小値（2 引数以上） |
+| `LPAD` | `LPAD(値, 長さ [, 埋め文字列])` | 左側を埋める（既定は半角スペース） |
+| `RPAD` | `RPAD(値, 長さ [, 埋め文字列])` | 右側を埋める（既定は半角スペース） |
 
 ```sql
 SELECT UPPER(ステータス) AS ステータス FROM APP100
 SELECT CONCAT(姓, '　', 名) AS 氏名 FROM APP100
 SELECT SUBSTRING(郵便番号, 1, 3) AS 市外局番 FROM APP100
+SELECT LEFT(顧客コード, 2) AS 分類, RIGHT(顧客コード, 4) AS 連番 FROM APP100
+SELECT LPAD(顧客No, 5, '0') AS 顧客コード FROM APP100
+SELECT GREATEST(見積額, 受注額, 請求額) AS 最大額 FROM APP100
 SELECT REPLACE(電話番号, '-', '') AS 電話番号 FROM APP100
 SELECT COALESCE(メモ, '（なし）') AS メモ FROM APP100
 SELECT ISNULL(建物名, '（なし）') AS 建物名 FROM APP100
 SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空にする
 ```
+
+> `SUBSTRING` の開始位置は 1 以上です。`0` 以下は `1` と同じく先頭から扱います。MySQL のような「負数＝末尾から」の切り出しには対応していないため、末尾から取得する場合は `RIGHT` を使用してください。
+
+`GREATEST` / `LEAST` は、列方向の集約関数 `MAX` / `MIN` とは異なり、同じ行の引数同士を比較します。空文字は常に最小です。空文字を除いた集合がすべて数値なら数値比較し、1 つでも非数値なら集合全体を文字列比較します。数値が同値なら元の文字列表記を二次キーにするため、引数順によって結果は変わりません。
+
+`LEFT` / `RIGHT` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は引数の個数を検証し、不正な場合は `ArgumentError` になります。`LPAD` / `RPAD` で埋め文字列が空の場合は、入力値をそのまま返します。
+
+- `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は予約語です。同名フィールドは `` `LEAST` `` のようにバッククォートで囲みます。`LEFT` / `RIGHT` は `LEFT JOIN` / `RIGHT JOIN` の予約語を兼ねており、直後に `(` がある場合のみ関数として扱います。
 
 > **`ISNULL` は 2 引数（SQL Server 系）です。** MySQL の 1 引数 `ISNULL(式)`（真偽を返す）とは**別物**です。空判定には `IS NULL` / `IS NOT NULL`（→ [§6](#6-where-句)）を使ってください。
 
@@ -410,6 +428,7 @@ SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空
 | `ROUND` | `ROUND(フィールド [, 桁])` | 四捨五入 |
 | `FLOOR` | `FLOOR(フィールド [, 桁])` | 切り捨て |
 | `CEIL` | `CEIL(フィールド [, 桁])` | 切り上げ（`CEILING` も可） |
+| `TRUNCATE` | `TRUNCATE(フィールド [, 桁])` | 0 方向へ切り捨て（`TRUNC` も可） |
 
 桁数の指定:
 - 正の整数: 小数点以下 n 桁で丸める
@@ -421,7 +440,12 @@ SELECT ROUND(金額, 2)  AS 金額   FROM APP100   -- 例: 1234.567 → 1234.57
 SELECT ROUND(金額)     AS 金額   FROM APP100   -- 例: 1234.5   → 1235
 SELECT ROUND(金額, -3) AS 千単位 FROM APP100   -- 例: 1234567  → 1235000
 SELECT FLOOR(金額, -2) AS 百未満切捨 FROM APP100
+SELECT TRUNCATE(金額, 2) AS 小数2桁切捨 FROM APP100
 ```
+
+`FLOOR` が常に小さい方へ丸めるのに対し、`TRUNCATE` は 0 方向へ丸めます。負数で差が出ます（`FLOOR(-1.5)` = `-2`、`TRUNCATE(-1.5)` = `-1`）。
+
+- `TRUNCATE` / `TRUNC` は予約語です。同名フィールドは `` `TRUNCATE` `` とバッククォートで囲みます。
 
 ### 数学関数
 
@@ -484,7 +508,8 @@ SELECT CAST(コード AS NUMBER) AS コード数値 FROM APP100
 | `DAY` | `DAY(フィールド)` | 日を返す（1〜31） |
 | `DATE_FORMAT` | `DATE_FORMAT(フィールド, フォーマット)` | 日付を書式化 |
 | `DATEDIFF` | `DATEDIFF(日付1, 日付2)` | 日数差（日付1 − 日付2） |
-| `DATE_ADD` | `DATE_ADD(フィールド, INTERVAL n UNIT)` | 日付加算 |
+| `DATE_ADD` | `DATE_ADD(日付, 加算値, 単位)` | 日付加算（単位は `'YEAR'` / `'MONTH'` / `'DAY'`） |
+| `LAST_DAY` | `LAST_DAY(日付)` | 月末日を `YYYY-MM-DD` で返す |
 | `CURRENT_DATE()` | `CURRENT_DATE()` | 今日の日付（`YYYY-MM-DD`）を JS で取得 |
 | `CURRENT_TIMESTAMP()` | `CURRENT_TIMESTAMP()` | 現在日時（ISO 8601）を JS で取得 |
 
@@ -492,6 +517,7 @@ SELECT CAST(コード AS NUMBER) AS コード数値 FROM APP100
 SELECT YEAR(作成日時) AS 年, MONTH(作成日時) AS 月 FROM APP100
 SELECT DATEDIFF(TODAY(), 期限日) AS 残日数 FROM APP100
 SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 年月 FROM APP100
+SELECT DATE_ADD(期限日, -1, 'MONTH') AS 前月, LAST_DAY(期限日) AS 月末日 FROM APP100
 
 -- SELECT 列で現在日時を付加（常に JS 評価）
 SELECT 顧客名, 金額, CURRENT_TIMESTAMP() AS 取得日時 FROM APP100
@@ -500,6 +526,10 @@ SELECT *, CURRENT_DATE() AS 今日 FROM APP100
 -- WHERE でも使用可能（FULL_SCAN）
 SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
 ```
+
+`DATE_ADD` の単位は大文字小文字を区別しません。`YEAR` / `MONTH` / `DAY` 以外を指定すると、リテラル・フィールド参照のどちらでも実行時に `ArgumentError` になります。`DATE_SUB` はありません。減算は加算値に負数を指定してください（`DATE_ADD(期限日, -1, 'MONTH')`）。
+
+- `LAST_DAY` は予約語です。同名フィールドは `` `LAST_DAY` `` とバッククォートで囲みます。
 
 > **`CURRENT_DATE()` / `CURRENT_TIMESTAMP()` はキーワードではありません。**  
 > `()` があれば関数、なければフィールド参照として扱われます。  

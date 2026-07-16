@@ -259,11 +259,12 @@ export interface ArithColumn {
 export type StringFuncName =
   | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM"
   | "LENGTH" | "SUBSTRING" | "CONCAT" | "REPLACE" | "COALESCE"
-  | "NULLIF" | "ISNULL"
-  | "ROUND" | "FLOOR" | "CEIL"
+  | "NULLIF" | "ISNULL" | "LEFT" | "RIGHT" | "INSTR" | "LPAD" | "RPAD"
+  | "GREATEST" | "LEAST"
+  | "ROUND" | "FLOOR" | "CEIL" | "TRUNCATE"
   | "CAST"  | "FORMAT"
   | "YEAR"  | "MONTH" | "DAY"
-  | "DATE_FORMAT" | "DATEDIFF" | "DATE_ADD"
+  | "DATE_FORMAT" | "DATEDIFF" | "DATE_ADD" | "LAST_DAY"
   | "ABS" | "MOD" | "POWER" | "SQRT"
   | "CURRENT_DATE" | "CURRENT_TIMESTAMP";
 

@@ -118,12 +118,19 @@ export const enum TokenKind {
   COALESCE  = "COALESCE",
   NULLIF    = "NULLIF",
   ISNULL    = "ISNULL",
+  INSTR     = "INSTR",
+  GREATEST  = "GREATEST",
+  LEAST     = "LEAST",
+  LPAD      = "LPAD",
+  RPAD      = "RPAD",
 
   // 数値関数
   ROUND   = "ROUND",
   FLOOR   = "FLOOR",
   CEIL    = "CEIL",
   CEILING = "CEILING",
+  TRUNCATE = "TRUNCATE",
+  TRUNC    = "TRUNC",
 
   // 数学関数
   ABS   = "ABS",
@@ -144,6 +151,7 @@ export const enum TokenKind {
   DATE_FORMAT = "DATE_FORMAT",
   DATEDIFF    = "DATEDIFF",
   DATE_ADD    = "DATE_ADD",
+  LAST_DAY    = "LAST_DAY",
 
   // 条件関数
   IF = "IF",
@@ -257,6 +265,11 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["COALESCE",  TokenKind.COALESCE],
   ["NULLIF",    TokenKind.NULLIF],
   ["ISNULL",    TokenKind.ISNULL],
+  ["INSTR",     TokenKind.INSTR],
+  ["GREATEST",  TokenKind.GREATEST],
+  ["LEAST",     TokenKind.LEAST],
+  ["LPAD",      TokenKind.LPAD],
+  ["RPAD",      TokenKind.RPAD],
   ["CAST",      TokenKind.CAST],
   ["CONVERT",   TokenKind.CONVERT],
   ["FORMAT",    TokenKind.FORMAT],
@@ -264,6 +277,8 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["FLOOR",     TokenKind.FLOOR],
   ["CEIL",      TokenKind.CEIL],
   ["CEILING",   TokenKind.CEILING],
+  ["TRUNCATE",  TokenKind.TRUNCATE],
+  ["TRUNC",     TokenKind.TRUNC],
   ["ABS",       TokenKind.ABS],
   ["MOD",       TokenKind.MOD],
   ["POWER",     TokenKind.POWER],
@@ -275,6 +290,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["DATE_FORMAT", TokenKind.DATE_FORMAT],
   ["DATEDIFF",    TokenKind.DATEDIFF],
   ["DATE_ADD",    TokenKind.DATE_ADD],
+  ["LAST_DAY",    TokenKind.LAST_DAY],
   ["IF",          TokenKind.IF],
 ]);
 
