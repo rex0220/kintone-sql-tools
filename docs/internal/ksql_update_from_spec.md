@@ -2,13 +2,14 @@
 
 - 作成日: 2026-07-16
 - 親ロードマップ: [ksql_batch_processing_roadmap.md](ksql_batch_processing_roadmap.md)（Phase 2）
-- 後続依存先: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md)（B12・`#err` の書き戻しに本機能が必要）
+- 後続依存先: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md)（B12-A は非依存。B12-B の `#err` 書き戻しには v1.1 業務キー結合が必要）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B11
-- ステータス: **R4 実装済み（codex）。自動テスト済み・コードレビュー／実機確認待ち。**
+- ステータス: **v1（`$id` 結合）は R4 実装済み・v2.12.0。v1.1（業務キー結合）は B12-B 前提として仕様追加・未実装。**
 - 更新履歴:
   - 2026-07-16 R1: 初版（ソース temp/CTE 限定）
   - 2026-07-16 R2: **ソースに実アプリを追加**（ユーザー判断・案X）。結合・複数マッチ・per-record PUT は共通で、ソース取得だけ分岐。app ソースは maxRecords 準拠・上限超過は fail-closed
   - 2026-07-16 R4: codex 再レビュー反映（コードで裏取り）。**High＝`tempName` を `cteName` へ戻す**（`collectRefs`（batch.ts:125）は `cteName`（先頭 #）と `appId` を汎用走査で拾うため、`tempName` だと `tempTablesReferenced`/`dependsOn`/静的検証/ストア注入が全て抜ける）。R2 の `cteName`＋`appId` が正しく R3 の改名が誤り。バッチ解析の受入・テストを明記。軽微＝目的文/AST コメント/ロードマップ例の `APP<n>` 化
+  - 2026-07-16 R5: B12 R3レビュー反映。B12 の `#err` はUPSERT入力列だけを保持し差分アプリ `$id` を持たないため、看板ユースケースは非 `$id` 結合を必要とする。v1.1 業務キー結合を §12 に追加し、リリース順を B12-A → B11 v1.1 → B12-B と確定
   - 2026-07-16 R3: codex レビュー反映（コードで裏取り）。**High①CTE を v1 スコープ外**（`WithStatement.query` は SELECT|UNION のみ・`WITH … UPDATE` 不可のため。v1 ソース = **#temp ＋ APP\<n\>**）②**MCP 読み取り上限**＝UPDATE_FROM を SELECT-based DML 扱いにして `maxRecords` で読む（既存は plain UPDATE に `dmlMaxRows+1` を渡す）・`containsSelectBasedDml`/`resolveMutateRuntimeMaxRecords`/案内文/単文・バッチ MCP テストを実装範囲に追加③**対象取得を 50 件チャンク**化（`$id IN` 単発は件数増に耐えない。既存 `UPSERT_IN_CHUNK_SIZE=50` に倣う）。Medium④WHERE 分解の論理形を限定（結合式はトップレベル AND 連鎖の原子・ソース alias は結合式のみ・OR/NOT 配下の結合式は ParseError）⑤ソース値の正規化・列欠落・型変換を確定⑥ソースキー扱いを §7 で確定。Low⑦例を `APP<n>` へ修正
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: 後方互換の構文追加（`FROM` 句なしの既存 `UPDATE` は不変）→ minor
@@ -30,7 +31,7 @@
 ### スコープ外（将来拡張・本 v1 では非対応）
 
 - **CTE ソース `WITH cte AS (…) UPDATE … FROM cte`**（High①）。現行 `WithStatement.query` は `SelectStatement | UnionStatement` のみ（[ast.ts:159](../../src/types/ast.ts#L159)）・`CteDefinition.query` も UPDATE を持てないため、`WITH … UPDATE` は parser/dispatch/cteCache を横断する別実装。**ソースの絞り込みが要る場合は先に `CREATE TEMP TABLE #src AS SELECT …` で #temp 化して渡す**運用（バッチ内で完結）。将来 `WithStatement.query` を UPDATE まで拡張する場合は別課題。
-- `$id` 以外の結合キー（`target.顧客コード = src.code` 等）や複数等値・不等値結合。
+- `$id` 以外の結合キー（`target.顧客コード = src.code` 等）は **v1.1（§12）で追加予定**。複数等値・不等値結合は引き続き対象外。
 - サブテーブル `UPDATE … FROM`。
 - app ソースへの `WHERE` フィルタ（`FROM APP200 s WHERE s.区分 = 'X'` のような**ソース側絞り込み**）。v1 は結合等値のみ＝ソース全件を対象に結合（ソースの絞り込みは事前に #temp 化して渡す）。
 - `DELETE … FROM` / `UPSERT … FROM`（本 v1 は UPDATE のみ）。
@@ -212,7 +213,7 @@ export type AssignmentValue =
 
 ---
 
-## 8. 受入条件
+## 8. v1 受入条件（実装済み）
 
 - [ ] **temp ソース**: `UPDATE app SET c = e.f FROM #e WHERE app.$id = e.k` が、`#e` の各行のキー `k`（=対象 $id）の対象を `e.f` の値で更新する。
 - [ ] **app ソース**: `UPDATE app SET c = s.f FROM APP200 s WHERE app.$id = s.k` が、APP200 の各行のキー `k` の対象を `s.f` で更新する（アプリ間転記）。
@@ -222,7 +223,7 @@ export type AssignmentValue =
 - [ ] **ターゲット側フィルタ**（`AND app.状態 = '有効'`）で外れた対象は更新されず `updatedCount` に含まれない。
 - [ ] ソース 0 行 → `updatedCount = 0` の no-op・PUT 未実行。
 - [ ] `FROM` 句なしの既存 `UPDATE`（一律・算術・スカラーサブクエリ）は**完全に不変**（回帰）。
-- [ ] `FROM` にサブクエリ／CTE 名／`$id` 以外の結合キー／複数等値／ソース alias をフィルタに含む／ソース側 WHERE／結合式が `OR`・`NOT` 配下 → **ParseError**（v1 非対応の明確なメッセージ）。
+- [ ] `FROM` にサブクエリ／CTE 名／`$id` 以外の結合キー（v1時点）／複数等値／ソース alias をフィルタに含む／ソース側 WHERE／結合式が `OR`・`NOT` 配下 → **ParseError**（v1 非対応の明確なメッセージ）。
 - [ ] **50 件超の対象**（例 targetIds 130 件）→ 3 チャンクに分割取得し全件更新（1 クエリに詰め込まない）。
 - [ ] **ソースキー**: 空/非整数/0 以下 → `ArgumentError`（PUT ゼロ）。`"1"` と `1` の混在 → 複数マッチエラー。存在しない `$id` → 無視。
 - [ ] **ソース列欠落**（SET 参照列がソースにない）→ 最初の PUT 前に `ArgumentError`。
@@ -231,7 +232,7 @@ export type AssignmentValue =
 - [ ] `confirm`／`dmlMaxRows` は matched 件数で発火（超過で PUT 未実行）。
 - [ ] サブテーブル `UPDATE … FROM` は ParseError（対象外）。
 - [ ] **バッチ解析**: `UPDATE … FROM #e` が `tempTablesReferenced=['#e']` を持ち、CREATE #e への `dependsOn`・未定義参照/DROP 後参照の静的エラーが働く（`cteName` 採用で `collectRefs` が自動検出）。
-- [ ] B12 書き戻し例（`SET エラー内容 = e.$err_message FROM #err WHERE APP4220.$id = e.差分ID`）が動作。
+- [ ] `$id` を明示的に持つソースからの書き戻し例（`... WHERE APP4220.$id = e.差分ID`）が動作。B12標準 `#err` は差分IDを持たないため、看板ユースケースはv1.1 §12で受け入れる。
 
 ## 9. テスト計画（修正前 fail → 修正後 pass）
 
@@ -272,4 +273,36 @@ export type AssignmentValue =
 
 ## 11. 未決事項（codex / ユーザー判断）
 
-- **なし**（R3 で High 3・Medium 3・Low 1 を確定）。§スコープ外の項目（CTE ソース＝`WithStatement.query` の UPDATE 拡張、`$id` 以外の結合キー、複合型 SOURCE_FIELD）は将来拡張として別課題化する。
+- **なし**（R5 で B12-B に必要な業務キー結合を v1.1 として採用）。CTE ソース、複数等値・不等値結合、複合型 SOURCE_FIELD は将来拡張として別課題化する。
+
+## 12. v1.1：業務キー結合（B12-B リリースゲート）
+
+### 12.1 構文と範囲
+
+```sql
+UPDATE APP4220
+SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容
+FROM #err_summary e
+WHERE APP4220.顧客コード = e.顧客コード;
+```
+
+- 結合は v1 と同じくトップレベル AND 内の**単一等値1個**。`target.<scalar-field> = source.<scalar-field>`（左右反転可）を追加する
+- v1.1 対象は kintone query の `in` と安定した等値正規化が可能なスカラーキー（文字列1行・数値）。配列、ユーザー等の複合型、計算/ルックアップコピー先は対象外
+- ソースキーはターゲット型へ正規化してから索引化する。同じ正規化キーを持つソース行が複数あれば、対象 PUT 前に複数マッチエラー
+- ターゲット側に同じ業務キーの行が複数ある場合は、それぞれが同じ1ソース行へ対応するため全行を更新する。1件限定を求める場合は利用者がkintone側で「値の重複を禁止する」を設定する
+- 空のソースキーは `ArgumentError` とし、黙って非一致にしない。対象側の空値は一致対象外
+- target filter、confirm、`dmlMaxRows`、全PUT構築後に送信、app sourceのmaxRecords fail-closedはv1規則を維持する
+
+### 12.2 AST・実行差分
+
+- `UpdateFromSource` に `targetJoinField: string` を追加。v1の `$id` 結合も `targetJoinField="$id"` として同じ形へ寄せる
+- parser の `isTargetIdRef()` 固定判定を、許可型を静的/実行前検証する target field 抽出へ拡張する
+- 実行器はソースキー集合を確定・重複検査後、ターゲットを `<targetJoinField> in (...) AND <targetFilter>` でチャンク取得し、取得行の `$id` をPUTキーに使う
+- 型・選択肢等のフィールド情報はB12-Aで拡張する `KintoneFieldInfo` を共有する
+
+### 12.3 受入条件
+
+- §12.1 のB12書き戻し例が動作する
+- 文字列/数値キーの正常系、左右反転、target filterを受理する
+- 正規化後のソースキー重複、空キー、非対応型、複数結合、OR/NOT配下の結合は PUT 0 回でエラー
+- `$id` 結合のv1テストとAPI回数に回帰がない

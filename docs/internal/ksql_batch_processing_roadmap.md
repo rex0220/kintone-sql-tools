@@ -1,7 +1,7 @@
 # kSQL 改善案：バッチ処理向け機能（改訂版）
 
 - 出典: 設計メモ `ksql-batch/kSQL改善案_バッチ処理機能.md`（2026-07-16 に repo へ移設）
-- ステータス: **バッチ強化の親ロードマップ**。Phase 0 レシピ集・Phase 1 バッチ変数は**実装済み**（v1.x／v2.1.0〜v2.4.0）。**Phase 2 UPDATE … FROM（B11）・Phase 3 エラー行隔離（B12）は未実装・採用済み**。ONLY CHANGED ほかは保留/取下げ。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1（B11/B12）・§3 参照。
+- ステータス: **バッチ強化の親ロードマップ**。Phase 0 レシピ集・Phase 1 バッチ変数・Phase 2 B11 v1（`$id` 結合）は**実装済み**（B11 v1はv2.12.0）。Phase 3は **B12-A VALIDATE ONLY → B11 v1.1 業務キー結合 → B12-B ON ERROR SKIP** の順で未実装・採用済み。ONLY CHANGED ほかは保留/取下げ。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) 参照。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
 ## この文書の目的
@@ -20,8 +20,10 @@
 |---|---|---|---|---|
 | Phase 0 | レシピ集（ドキュメント整備） | 中 | 即着手 | 本書末尾 |
 | Phase 1 | バッチ変数（SET → DECLARE） | 大 | 採用 | kSQL仕様案_バッチ変数.md |
-| Phase 2 | UPDATE ... FROM（SET への他テーブル参照） | 大 | 採用（エラー行隔離の依存機能を単体先行） | Tier 0 仕様案 §7 |
-| Phase 3 | 事前検証エラー行隔離（VALIDATE ONLY → ON ERROR SKIP） | **最大** | 採用 | kSQL仕様案_Tier0エラー行隔離.md |
+| Phase 2 | UPDATE ... FROM v1（`$id` 結合） | 大 | **v2.12.0 実装済み** | [B11 spec](ksql_update_from_spec.md) |
+| Phase 3-A | `VALIDATE ONLY` | **最大** | 採用・次候補（B11非依存） | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
+| Phase 3-B | UPDATE ... FROM v1.1（業務キー結合） | 大 | 採用・B12-Bのリリースゲート | [B11 spec §12](ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
+| Phase 3-C | `ON ERROR SKIP INTO #err` | **最大** | 採用 | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
 | 機会的 | HTTP 層の透過リトライ（429 のみ） | 小（夜間バッチでは発動条件がほぼない） | HTTP クライアント改修時に同梱 | 本書内 |
 | 保留 | 実行ログ自動記録 | 中 | バッチ変数の @batch_id 連携で再評価 | — |
 | 保留 | UPSERT 変更行スキップ（ONLY CHANGED） | 小（差分型では効果がリラン時限定） | 需要立証後に再評価 | kSQL仕様案_ONLY-CHANGED変更行スキップ.md |
@@ -63,14 +65,18 @@
 
 ### 依存機能: UPDATE ... FROM
 
-現行パーサーは UPDATE の SET 値にフィールド参照を許可しない（確認済みエラー: 「SET の値にはリテラル・算術式を指定してください」）。エラー行隔離の `#err` からエラーメッセージを差分アプリへ書き戻すユースケースに必須の前提機能。単体でも「アプリ間転記」の頻出ニーズに応えるため Phase 2 として先行実装する。
+B11 v1（v2.12.0）で SET 値の他テーブル参照と `target.$id = source.key` は実装済み。ただしB12の `#err` はUPSERT入力列だけを保持し、差分アプリの `$id` を持たない。エラーメッセージを書き戻す看板ユースケースには `target.業務キー = source.業務キー` が必要なため、B11 v1.1をB12-Bの前に実装する。B12-A `VALIDATE ONLY` は書き戻し非依存なので先行できる。
 
 **複数マッチはエラーに固定する**: FROM 句の結合結果が更新対象 1 行につき複数行になった場合、DML 実行前にエラーとする。「先勝ち」は行順・取得順に依存して結果の決定性を失い、不正な結合条件やデータ重複を静かに隠すため採用しない（本バッチ設計の原則「冪等・リラン可能・判断分岐なし」と整合させる）。1 行化が必要な場合は利用者側で集約してから結合する。
 
 ```sql
--- 差分アプリ = APP4220（kSQL 構文は APP<n>。以降のパターン図の APP_差分/APP_マスタ は概念名）
-UPDATE APP4220 SET 処理ステータス = 'エラー', エラー内容 = e.$err_message
-FROM #err e WHERE APP4220.$id = e.差分ID;
+-- B11 v1.1。差分アプリ = APP4220
+CREATE TEMP TABLE #err_summary AS
+SELECT 顧客コード, MIN($err_message) AS エラー内容
+FROM #err GROUP BY 顧客コード;
+
+UPDATE APP4220 SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容
+FROM #err_summary e WHERE APP4220.顧客コード = e.顧客コード;
 ```
 
 ## 取り下げ・保留の理由（検討経緯）
@@ -127,14 +133,17 @@ kSQL バッチの想定スケールと、超えた場合の判断:
 |---|---|---|---|
 | レシピ集 | 極小（文書のみ） | 中: 現行機能の価値を顕在化 | ◎ |
 | バッチ変数 | 小〜中 | 大: バッチ外にも効く汎用機能 | ◎ |
-| UPDATE ... FROM | 中 | 大: 転記処理は頻出ニーズ。エラー行隔離の前提 | ○ |
+| UPDATE ... FROM v1 | 中 | 大: 転記処理は頻出ニーズ | **実装済み** |
+| UPDATE ... FROM v1.1 | 中 | 大: B12エラー書き戻しの前提 | ○ |
 | エラー行隔離 | 大（型別検証エンジン） | 大: ただしバッチ用途に集中 | ○ |
 | 429 バックオフ | 極小 | **ほぼゼロ**（下記） | 機会的 |
 
 - **Phase 0（即着手）**: レシピ集。リスクゼロ・即効
 - **Phase 1**: バッチ変数。`SET` のみ先行（パーサー+評価器で閉じる）→ `DECLARE` + 外部パラメータ（MCP/CLI インターフェース変更を伴う）は後続。保存クエリのパラメータ化は候補中最大の汎用リターン
-- **Phase 2**: UPDATE ... FROM。エラー行隔離の依存機能だが、単体でも「アプリ間転記」の頻出ニーズに応える独立リリース価値がある。複数マッチは DML 実行前エラーに固定（採用機能の節参照）
-- **Phase 3**: エラー行隔離。まず **VALIDATE ONLY を先行リリース**（書き込みセマンティクスに触れず低リスク。検証エンジンへの需要を市場で確認）→ 需要立証後に `ON ERROR SKIP INTO #err`。検証エンジンは保留中の ONLY CHANGED・将来の DRY RUN 復活の土台となるため投資が無駄にならない
+- **Phase 2（完了）**: UPDATE ... FROM v1（`$id` 結合）。複数マッチは DML 実行前エラーに固定
+- **Phase 3-A**: **VALIDATE ONLY を先行リリース**。書き込みセマンティクスに触れず、B11にも依存しない
+- **Phase 3-B**: B11 v1.1（業務キー結合）。`#err` から差分アプリへの書き戻しを成立させる
+- **Phase 3-C**: `ON ERROR SKIP INTO #err`。検証エンジンは保留中の ONLY CHANGED・将来の DRY RUN 復活の土台にもなる
 
 **429 バックオフの格下げ理由**: kintone にはリクエスト毎秒のスロットリングがなく、制限は同時アクセス数（100/ドメイン）と 1 日 10,000 req/アプリ（即遮断なし）のみ。kSQL の並列度は fetchParallel 最大 10 で、想定する夜間単独実行では 429 が発生する可能性は低い。日中実行・他連携との同居ドメインへの保険と位置づけ、HTTP クライアント改修の機会があれば同梱する「機会的改善」とする。
 
