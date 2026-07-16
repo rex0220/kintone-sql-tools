@@ -29,6 +29,24 @@ test("DML を含むバッチ: containsDml = true / isReadOnlyBatch = false", () 
   expect(a.statements[1].hasWhere).toBe(true);
 });
 
+test("UPDATE FROM #temp は collectRefs により依存と参照が自動配線される", () => {
+  const a = analyze(
+    "CREATE TEMP TABLE #e AS SELECT $id AS k, name AS f FROM APP200; " +
+    "UPDATE APP100 SET name = e.f FROM #e e WHERE APP100.$id = e.k"
+  );
+  expect(a.statements[1].tempTablesReferenced).toEqual(["#e"]);
+  expect(a.statements[1].dependsOn).toEqual([0]);
+  expect(a.statements[1].isUpdateFrom).toBe(true);
+});
+
+test("UPDATE FROM の未定義・DROP 後 #temp 参照を拒否する", () => {
+  expect(() => analyze("UPDATE APP100 SET name = e.f FROM #e e WHERE APP100.$id = e.k")).toThrow(BatchAnalysisError);
+  expect(() => analyze(
+    "CREATE TEMP TABLE #e AS SELECT $id AS k, name AS f FROM APP200; DROP TEMP TABLE #e; " +
+    "UPDATE APP100 SET name = e.f FROM #e e WHERE APP100.$id = e.k"
+  )).toThrow(BatchAnalysisError);
+});
+
 test("CREATE / DROP TEMP TABLE は read-only 扱い", () => {
   const a = analyze("CREATE TEMP TABLE #t AS SELECT * FROM APP100; SELECT * FROM #t; DROP TEMP TABLE #t");
   expect(a.isReadOnlyBatch).toBe(true);

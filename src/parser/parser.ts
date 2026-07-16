@@ -1975,6 +1975,27 @@ export class Parser {
     this.expect(TokenKind.SET);
     const assignments = this.parseAssignments();
 
+    let from: UpdateStatement["from"] = null;
+    if (this.consume(TokenKind.FROM)) {
+      const table = this.parseTableRef();
+      if (table.subtableCode) {
+        throw new ParseError("UPDATE ... FROM のソースにサブテーブルは指定できません", this.prev());
+      }
+      if (table.cteName !== null && !table.cteName.startsWith("#")) {
+        throw new ParseError("UPDATE ... FROM のソースは #temp または APP<n> を指定してください（CTE は非対応）", this.prev());
+      }
+      if (!table.alias) {
+        throw new ParseError("UPDATE ... FROM のソースにはエイリアスが必要です", this.prev());
+      }
+      from = {
+        appId: table.appId,
+        cteName: table.cteName,
+        alias: table.alias,
+        joinKeyField: "",
+        targetFilter: null,
+      };
+    }
+
     const whereTok = this.peek();
     if (!this.consume(TokenKind.WHERE)) {
       throw new ParseError(
@@ -1984,9 +2005,152 @@ export class Parser {
     }
     const where = this.parseWhereExpr();
 
+    if (from !== null) {
+      if (subtableCode) {
+        throw new ParseError("サブテーブル UPDATE ... FROM はサポートしていません", whereTok);
+      }
+      this.validateUpdateFromAssignments(assignments, from.alias, whereTok);
+      const decomposed = this.decomposeUpdateFromWhere(where, appId, from.alias, whereTok);
+      from.joinKeyField = decomposed.joinKeyField;
+      from.targetFilter = decomposed.targetFilter;
+    } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
+      throw new ParseError(
+        "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",
+        whereTok
+      );
+    }
+
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from };
     return subtableCode
       ? { type: "UPDATE", appId, subtableCode, assignments, where }
       : { type: "UPDATE", appId, assignments, where };
+  }
+
+  private validateUpdateFromAssignments(
+    assignments: Assignment[],
+    sourceAlias: string,
+    tok: Token
+  ): void {
+    for (const assignment of assignments) {
+      if (assignment.value.type === "SOURCE_FIELD") {
+        if (assignment.value.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
+          throw new ParseError(`UPDATE ... FROM の SET 参照はソース alias ${sourceAlias} で修飾してください`, tok);
+        }
+        continue;
+      }
+      if (this.nodeContainsQualifiedField(assignment.value, sourceAlias)) {
+        throw new ParseError("UPDATE ... FROM のソース列は SET の直接値としてのみ参照できます", tok);
+      }
+      if (assignment.value.type === "SCALAR_SUBQUERY") {
+        throw new ParseError("UPDATE ... FROM の SET ではスカラーサブクエリを使用できません", tok);
+      }
+      if (this.nodeContainsAnyQualifier(assignment.value)) {
+        throw new ParseError("UPDATE ... FROM のターゲット式ではフィールドを修飾しないでください", tok);
+      }
+    }
+  }
+
+  private decomposeUpdateFromWhere(
+    where: WhereExpr,
+    targetAppId: number,
+    sourceAlias: string,
+    tok: Token
+  ): { joinKeyField: string; targetFilter: WhereExpr | null } {
+    const leaves = this.flattenTopLevelAnd(where);
+    const joins: Array<{ index: number; sourceField: string }> = [];
+    leaves.forEach((leaf, index) => {
+      const sourceField = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
+      if (sourceField !== null) joins.push({ index, sourceField });
+    });
+    if (joins.length !== 1) {
+      throw new ParseError("UPDATE ... FROM の WHERE には target.$id = source.key の結合等値がちょうど1つ必要です", tok);
+    }
+    const join = joins[0];
+    for (let i = 0; i < leaves.length; i++) {
+      if (i !== join.index && this.nodeContainsQualifiedField(leaves[i], sourceAlias)) {
+        throw new ParseError("UPDATE ... FROM のソース alias は結合等値以外の WHERE 条件では参照できません", tok);
+      }
+      if (i !== join.index && this.nodeContainsForeignQualifier(leaves[i], targetAppId)) {
+        throw new ParseError(`UPDATE ... FROM のターゲットフィルタは APP${targetAppId} のフィールドだけを参照できます`, tok);
+      }
+    }
+    const filters = leaves.filter((_, index) => index !== join.index);
+    const targetFilter = filters.reduce<WhereExpr | null>(
+      (acc, expr) => acc === null ? expr : { type: "LOGICAL", op: "AND", left: acc, right: expr },
+      null
+    );
+    return { joinKeyField: join.sourceField, targetFilter };
+  }
+
+  private flattenTopLevelAnd(expr: WhereExpr): WhereExpr[] {
+    if (expr.type === "GROUP") return this.flattenTopLevelAnd(expr.expr);
+    if (expr.type === "LOGICAL" && expr.op === "AND") {
+      return [...this.flattenTopLevelAnd(expr.left), ...this.flattenTopLevelAnd(expr.right)];
+    }
+    return [expr];
+  }
+
+  private matchUpdateFromJoin(expr: WhereExpr, targetAppId: number, sourceAlias: string): string | null {
+    if (expr.type !== "BINARY" || expr.op !== "=" || expr.left.type !== "FIELD") return null;
+    const right = expr.right.type === "ARITH_VALUE" && expr.right.expr.type === "FIELD_REF"
+      ? this.splitQualifiedField(expr.right.expr.field)
+      : null;
+    if (right === null) return null;
+    const left = { alias: expr.left.tableAlias, field: expr.left.field };
+    if (this.isTargetIdRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) return right.field;
+    if (this.isSourceRef(left, sourceAlias) && this.isTargetIdRef(right, targetAppId)) return left.field;
+    return null;
+  }
+
+  private splitQualifiedField(field: string): { alias: string | null; field: string } {
+    const dot = field.indexOf(".");
+    return dot < 0 ? { alias: null, field } : { alias: field.slice(0, dot), field: field.slice(dot + 1) };
+  }
+
+  private isTargetIdRef(ref: { alias: string | null; field: string }, appId: number): boolean {
+    return ref.field === "$id" && (ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase());
+  }
+
+  private isSourceRef(ref: { alias: string | null; field: string }, alias: string): boolean {
+    return ref.alias?.toLowerCase() === alias.toLowerCase();
+  }
+
+  private nodeContainsQualifiedField(node: unknown, alias: string): boolean {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsQualifiedField(v, alias));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string" && obj["tableAlias"].toLowerCase() === alias.toLowerCase()) return true;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (this.isSourceRef(ref, alias)) return true;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsQualifiedField(v, alias));
+  }
+
+  private nodeContainsForeignQualifier(node: unknown, targetAppId: number): boolean {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsForeignQualifier(v, targetAppId));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node as Record<string, unknown>;
+    const expected = `app${targetAppId}`.toLowerCase();
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") {
+      return obj["tableAlias"].toLowerCase() !== expected;
+    }
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (ref.alias !== null) return ref.alias.toLowerCase() !== expected;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsForeignQualifier(v, targetAppId));
+  }
+
+  private nodeContainsAnyQualifier(node: unknown): boolean {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsAnyQualifier(v));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") return true;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      if (this.splitQualifiedField(obj["field"]).alias !== null) return true;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsAnyQualifier(v));
   }
 
   private parseAssignments(): Assignment[] {
@@ -2005,7 +2169,7 @@ export class Parser {
    * 文字列・kintone 関数はそのまま SqlValue として処理し、
    * 数値・フィールド参照・括弧が先頭なら算術式パーサーに渡す。
    */
-  private parseAssignmentValue(): SqlValue | ArithExpr {
+  private parseAssignmentValue(): Assignment["value"] {
     const tok = this.peek();
     if (tok.kind === TokenKind.VARIABLE) return this.parseSqlValue();
     // 文字列リテラルは算術不可
@@ -2036,6 +2200,12 @@ export class Parser {
     const node = this.parseArithAddSub();
     if (node.type === "NUMBER") return node;   // 数値単独 → SqlValue
     if (node.type === "ARITH")  return node;   // 算術式
+    if (node.type === "FIELD_REF") {
+      const dot = node.field.indexOf(".");
+      if (dot > 0 && dot < node.field.length - 1) {
+        return { type: "SOURCE_FIELD", alias: node.field.slice(0, dot), field: node.field.slice(dot + 1) };
+      }
+    }
     // FIELD_REF 単独（SET f = other_field）は未サポート
     throw new ParseError(
       "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",

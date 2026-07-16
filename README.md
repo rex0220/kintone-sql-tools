@@ -9,7 +9,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 ## 機能概要
 
 - `SELECT`（JOIN/GROUP BY/HAVING/CTE/UNION）
-- `INSERT` / `UPDATE` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
+- `INSERT` / `UPDATE` / `UPDATE ... FROM` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
 - `EXPLAIN`
 - **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
   - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）

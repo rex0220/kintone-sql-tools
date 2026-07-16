@@ -589,12 +589,34 @@ export interface UpdateStatement {
   subtableCode?: string | null;
   assignments: Assignment[];
   where: WhereExpr;   // WHERE 必須（UI で警告）
+  /** UPDATE ... FROM source。未指定時は従来の UPDATE。 */
+  from?: UpdateFromSource | null;
 }
 
 export interface Assignment {
   field: string;
-  value: SqlValue | ArithExpr;
+  value: AssignmentValue;
 }
+
+/** UPDATE ... FROM のソース（v1 は #temp または実アプリのみ）。 */
+export interface UpdateFromSource {
+  /** 実アプリ ID。#temp の場合は 0。 */
+  appId: number;
+  /** #temp 名。実アプリの場合は null。collectRefs が参照を検出する既存キー名を踏襲。 */
+  cteName: string | null;
+  alias: string;
+  joinKeyField: string;
+  targetFilter: WhereExpr | null;
+}
+
+/** UPDATE ... FROM の SET 右辺で参照するソース列。 */
+export interface SourceFieldValue {
+  type: "SOURCE_FIELD";
+  alias: string;
+  field: string;
+}
+
+export type AssignmentValue = SqlValue | ArithExpr | SourceFieldValue;
 
 // ------------------------------------------------------------
 // 算術式（UPDATE SET のみ）

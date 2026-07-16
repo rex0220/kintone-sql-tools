@@ -30,6 +30,7 @@ import {
   hasArithAssignment,
   updateToGetQueryForArith,
   updateToPutBatchesArith,
+  updateFromToPutBatches,
   deleteToGetQuery,
   deleteToDeleteBatches,
   toKintoneValue,
@@ -516,6 +517,8 @@ export async function executeBatch(
   for (const s of analysis.statements) {
     if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
     if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") continue;
+    const parsed = statements[s.index];
+    if (parsed?.type === "UPDATE" && parsed.from?.cteName != null) continue;
     throw new BatchAnalysisError(
       `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
@@ -715,6 +718,9 @@ async function executeBatchStatement(
     }
     if (resolvedStmt.type === "UPSERT_SELECT") {
       return { result: await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
+    }
+    if (resolvedStmt.type === "UPDATE" && resolvedStmt.from?.cteName != null) {
+      return { result: await executeUpdate(resolvedStmt, client, options, cacheContext, tempTables) };
     }
     // ここに来るのは想定外（他の DML 参照は事前チェックで拒否済み）
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
@@ -2450,10 +2456,14 @@ async function executeUpdate(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
   if (stmt.subtableCode) {
     return executeUpdateSubtable(stmt, client, options, cacheContext);
+  }
+  if (stmt.from != null) {
+    return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
   const maxRecords = options.maxRecords ?? 10_000;
 
@@ -2514,6 +2524,128 @@ async function executeUpdate(
   }
 
   return { type: "UPDATE", updatedCount: ids.length };
+}
+
+const UPDATE_FROM_ID_CHUNK_SIZE = 50;
+const UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE",
+]);
+
+async function executeUpdateFrom(
+  stmt: UpdateStatement,
+  from: NonNullable<UpdateStatement["from"]>,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpdateResult> {
+  const sourceFields = [...new Set(stmt.assignments
+    .filter((a) => a.value.type === "SOURCE_FIELD")
+    .map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
+  let sourceRows: ProcessRow[];
+
+  if (from.cteName !== null) {
+    const table = tempTables?.get(from.cteName);
+    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
+    for (const field of requiredSourceFields) {
+      if (!table.columns.includes(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+    }
+    sourceRows = table.rows;
+  } else {
+    const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
+    for (const field of requiredSourceFields) {
+      if (field !== "$id" && !sourceTypes.has(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+      const type = sourceTypes.get(field);
+      if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
+        throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
+      }
+    }
+    const maxRecords = options.maxRecords ?? 10_000;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      from.appId,
+      "",
+      requiredSourceFields,
+      { maxRecords, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    sourceRows = resolved.records.map((record) => flatten(record, null));
+  }
+
+  const sourceById = new Map<number, ProcessRow>();
+  for (const row of sourceRows) {
+    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+    }
+    const raw = row[from.joinKeyField];
+    const text = typeof raw === "string" ? raw.trim() : "";
+    const id = Number(text);
+    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
+    }
+    if (sourceById.has(id)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
+    }
+    sourceById.set(id, row);
+  }
+
+  const targetIds = [...sourceById.keys()];
+  const targetFields = collectUpdateFromTargetFields(stmt);
+  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetRecords: KintoneRecord[] = [];
+  for (const ids of splitChunks(targetIds, UPDATE_FROM_ID_CHUNK_SIZE)) {
+    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
+    const query = filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      stmt.appId,
+      query,
+      targetFields,
+      { maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    targetRecords.push(...resolved.records);
+  }
+
+  if (options.confirm) {
+    const ok = await options.confirm(targetRecords.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", targetRecords.length);
+  }
+
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const matched = targetRecords.map((target) => {
+    const id = Number(target["$id"]?.value);
+    const source = sourceById.get(id);
+    if (!source) throw new Error(`ArgumentError: UPDATE ... FROM could not resolve source row for target $id ${id}.`);
+    return { target, source };
+  });
+  // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
+  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  for (const batch of batches) await client.putRecords(batch);
+  return { type: "UPDATE", updatedCount: targetRecords.length };
+}
+
+function collectUpdateFromTargetFields(stmt: UpdateStatement): string[] {
+  const fields = new Set<string>(["$id"]);
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (node === null || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") fields.add(obj["field"]);
+    for (const value of Object.values(obj)) visit(value);
+  };
+  for (const assignment of stmt.assignments) {
+    if (assignment.value.type !== "SOURCE_FIELD") visit(assignment.value);
+  }
+  return [...fields];
 }
 
 // ============================================================
@@ -3794,9 +3926,16 @@ function buildUpdatePlan(stmt: UpdateStatement, label?: string): string[] {
   const isSubq   = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines: string[] = [];
   if (label) lines.push(label);
-  lines.push(`  [UPDATE]`);
+  lines.push(stmt.from ? `  [UPDATE FROM]` : `  [UPDATE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
-  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  if (stmt.from) {
+    const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
+    lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
+    lines.push(`  join:          APP${stmt.appId}.$id = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
+    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
+  } else {
+    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  }
   lines.push(`  api:           GET /k/v1/records.json → PUT /k/v1/records.json`);
 
   const setTypes: string[] = [];
@@ -3923,6 +4062,7 @@ function formatAssignment(a: Assignment): string {
   if (v.type === "ARITH")           return `${a.field} = ${formatArithExprStr(v)}`;
   if (v.type === "CASE_VALUE")      return `${a.field} = CASE WHEN ...`;
   if (v.type === "SCALAR_SUBQUERY") return `${a.field} = (SELECT ...)`;
+  if (v.type === "SOURCE_FIELD")    return `${a.field} = ${v.alias}.${v.field}`;
   return `${a.field} = (${v.type})`;
 }
 

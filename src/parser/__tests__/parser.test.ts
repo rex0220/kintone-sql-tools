@@ -6,6 +6,10 @@ function parse(sql: string) {
   const tokens = new Lexer(sql).tokenize();
   return new Parser(tokens).parse();
 }
+function parseBatch(sql: string) {
+  const tokens = new Lexer(sql).tokenize();
+  return new Parser(tokens).parseStatements();
+}
 function parseSelect(sql: string) { return parse(sql) as SelectStatement; }
 
 // ----------------------------------------------------------------
@@ -432,6 +436,40 @@ test("UPDATE サブテーブル仮想テーブル", () => {
     "UPDATE APP100$明細 SET 数量 = 5 WHERE _rid = 'r1'"
   ) as UpdateStatement;
   expect(ast.subtableCode).toBe("明細");
+});
+
+test("UPDATE FROM #temp: ソース参照と結合条件を分解する", () => {
+  const ast = parseBatch(
+    "UPDATE APP100 SET c = e.f, status = 'ok', total = amount * 2 FROM #e e WHERE APP100.$id = e.k AND (status = 'A' OR status = 'B')"
+  )[0] as UpdateStatement;
+  expect(ast.from).toMatchObject({ appId: 0, cteName: "#e", alias: "e", joinKeyField: "k" });
+  expect(ast.assignments[0]).toEqual({ field: "c", value: { type: "SOURCE_FIELD", alias: "e", field: "f" } });
+  expect(ast.from?.targetFilter).toMatchObject({ type: "LOGICAL", op: "OR" });
+});
+
+test("UPDATE FROM APP: 左右反転した結合条件を分解する", () => {
+  const ast = parse(
+    "UPDATE APP100 SET c = s.f FROM APP200 s WHERE s.k = APP100.$id"
+  ) as UpdateStatement;
+  expect(ast.from).toEqual({ appId: 200, cteName: null, alias: "s", joinKeyField: "k", targetFilter: null });
+});
+
+test.each([
+  "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k OR status = 'A'",
+  "UPDATE APP100 SET c = s.f FROM APP200 s WHERE NOT (APP100.$id = s.k)",
+  "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k AND status = s.status",
+  "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k AND APP100.$id = s.k2",
+  "UPDATE APP100 SET c = x.f FROM APP200 s WHERE APP100.$id = s.k",
+  "UPDATE APP100 SET c = APP999.f * 2 FROM APP200 s WHERE APP100.$id = s.k",
+  "UPDATE APP100 SET c = (SELECT MAX(f) FROM APP300) FROM APP200 s WHERE APP100.$id = s.k",
+  "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k AND APP999.status = 'A'",
+  "UPDATE APP100$rows SET c = s.f FROM APP200 s WHERE APP100.$id = s.k",
+])("UPDATE FROM の非対応形を拒否する: %s", (sql) => {
+  expect(() => parse(sql)).toThrow(ParseError);
+});
+
+test("FROM なし UPDATE の修飾フィールド単独 SET は従来どおり拒否する", () => {
+  expect(() => parse("UPDATE APP100 SET c = s.f WHERE $id = 1")).toThrow(ParseError);
 });
 
 // ----------------------------------------------------------------

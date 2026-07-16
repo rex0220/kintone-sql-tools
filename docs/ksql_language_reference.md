@@ -1318,6 +1318,39 @@ SET 優先度 = '高', 期限日 = '2025-03-31'
 WHERE 担当者 = '田中' AND 完了フラグ = '0'
 ```
 
+### 別テーブルの値で更新（UPDATE ... FROM）
+
+`#temp` または別アプリの行を、更新先の `$id` と対応付けて転記できます。
+
+```sql
+UPDATE APP100
+SET 転記値 = s.元値,
+    処理状態 = '完了',
+    金額 = 金額 * 1.1
+FROM APP200 AS s
+WHERE APP100.$id = s.転記先ID
+  AND APP100.有効 = '1';
+```
+
+一時テーブルを使う場合は同じバッチ内で先に実体化します。
+
+```sql
+CREATE TEMP TABLE #src AS
+SELECT 転記先ID, エラー内容 FROM APP200 WHERE 処理状態 = 'エラー';
+
+UPDATE APP100
+SET エラー内容 = e.エラー内容
+FROM #src AS e
+WHERE APP100.$id = e.転記先ID;
+```
+
+- ソースは `#temp` または `APP<n>[@profile]`。CTE・サブクエリは非対応です。
+- 結合条件は更新先 `$id` とソース列の単一等値を1つだけ指定します。
+- ソースキーは正の安全整数。空・非整数・重複キーは書き込み前にエラーになります。
+- ソース alias は結合条件と `SET alias.field` 以外では参照できません。
+- `SOURCE_FIELD` はスカラー型のみ対応します。配列・ユーザー/組織/グループ選択・添付ファイルは非対応です。
+- 実アプリソースは `maxRecords` 超過時に常にエラーとなり、暗黙の一部更新を行いません。
+
 ### SET での算術式
 
 ```sql
@@ -1701,7 +1734,7 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 | INTERSECT / EXCEPT | 非対応 |
 | 再帰 CTE | 非対応 |
 | FULL OUTER JOIN | 非対応 |
-| UPDATE に JOIN | 非対応 |
+| UPDATE の汎用 JOIN | 非対応（`UPDATE ... FROM` の `$id = source.key` 単一等値のみ対応） |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
 | DML を含むバッチ（複文） | 対応（CLI / MCP は v1.4.0、プラグインは v1.9.0。`ksql_mutate` / CLI `--allow-dml` / プラグインは文ごとの確認ダイアログ。常に fail-fast。→ [§25](#25-バッチ実行と一時テーブル)） |
 | 一時テーブルへの DML | 非対応（`CREATE TEMP TABLE ... AS SELECT` / `DROP TEMP TABLE` のみ） |
