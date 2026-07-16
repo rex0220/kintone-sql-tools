@@ -23,6 +23,14 @@ test("ASCII キーワードは大文字小文字を区別しない", () => {
   ]);
 });
 
+test("GROUP_CONCAT は予約語、SEPARATOR は通常の識別子として読む", () => {
+  expect(tokens("group_concat separator")).toEqual([
+    { k: TokenKind.GROUP_CONCAT, v: "GROUP_CONCAT" },
+    { k: TokenKind.IDENT, v: "separator" },
+    { k: TokenKind.EOF, v: "" },
+  ]);
+});
+
 test("日本語識別子をそのまま読める", () => {
   const toks = tokens("SELECT 担当者, 金額 FROM APP100");
   expect(toks).toEqual([

@@ -224,13 +224,14 @@ export interface LiteralColumn {
 
 export interface AggregateColumn {
   type: "AGGREGATE";
-  func: AggregateFunc;    // COUNT / SUM / AVG / MAX / MIN
+  func: AggregateFunc;    // COUNT / SUM / AVG / MAX / MIN / GROUP_CONCAT
   distinct: boolean;      // COUNT(DISTINCT f)
   arg: WildcardColumn | ArithNode;  // COUNT(*) → WILDCARD、それ以外は算術式
+  separator?: string;     // GROUP_CONCAT の区切り文字（未指定時は ","）
   alias: string | null;
 }
 
-export type AggregateFunc = "COUNT" | "SUM" | "AVG" | "MAX" | "MIN";
+export type AggregateFunc = "COUNT" | "SUM" | "AVG" | "MAX" | "MIN" | "GROUP_CONCAT";
 
 /** SELECT 句の算術式カラム: field * 1.1 AS alias / 2 * field / (a+b)*c */
 export interface ArithColumn {
@@ -715,6 +716,7 @@ export interface AggregateRef {
   func: AggregateFunc;
   distinct: boolean;
   arg: WildcardColumn | ArithNode;
+  separator?: string;
 }
 
 /** 集計結果を含む算術式（再帰型） */

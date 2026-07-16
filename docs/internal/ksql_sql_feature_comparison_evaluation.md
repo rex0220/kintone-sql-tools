@@ -109,7 +109,7 @@ kSQL の実装済み関数（コード確認済み・`src/types/ast.ts:246`）:
 
 #### T1-2. 文字列集約（`GROUP_CONCAT` / `STRING_AGG` / `LISTAGG`）
 
-- **効果: 大**。1対多の集約表示（「顧客ごとの担当者一覧」「明細の商品名連結」）が書けない。**B12 の `#err` メッセージ集約の本命**でもある（`MIN($err_message)` で代用しようとして v2.13.0 で NaN 化が発覚したのが B13 の発端＝[B13 spec §7](ksql_string_min_max_aggregate_spec.md)）。現在の回避策は `DISTINCT` + 定数フラグで**具体的メッセージを捨てている**。
+- **効果: 大**。1対多の集約表示（「顧客ごとの担当者一覧」「明細の商品名連結」）を可能にする。**B12 の `#err` メッセージ集約の本命**でもある（`MIN($err_message)` で代用しようとして v2.13.0 で NaN 化が発覚したのが B13 の発端＝[B13 spec §7](ksql_string_min_max_aggregate_spec.md)）。B16 実装前の回避策は `DISTINCT` + 定数フラグで**具体的メッセージを捨てていた**。
 - **コスト: 小**。`evalAggregate`（process.ts:280）に集約関数を1つ足すだけ。区切り文字・`DISTINCT` は既存の集約基盤に乗る。返り値 `number|string` 化は **v2.14.0 で完了済み**＝**下地ができている**。
 - **適合性: 高**。
 - **推奨: 高**。**T1-1 より安い**ので先に入れる価値あり。
@@ -165,7 +165,7 @@ kSQL の実装済み関数（コード確認済み・`src/types/ast.ts:246`）:
 
 | 順 | 機能 | 効果 | コスト | 根拠 |
 |---|---|:--:|:--:|---|
-| 1 | **文字列集約 `GROUP_CONCAT`** | 大 | 小 | 最良の費用対効果。B12 看板レシピの本命。v2.14.0 で `number\|string` 化済み＝下地あり。**B14 と併せて完結** |
+| 1 | **文字列集約 `GROUP_CONCAT`** | 大 | 小 | 最良の費用対効果。B12 看板レシピの本命。v2.14.0 で `number\|string` 化済み＝下地あり。B14 とは独立 |
 | 2 | **ウィンドウ関数サブセット**（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`/`ORDER BY`） | 大 | 中 | 最大の欠落。「各グループ最新1件」を1文化。`MAX()` 回避策は他列を取れず真の代替になっていない。v2.14.0 の型解決を再利用可 |
 | 3 | **関数拡充バンドル**（日付 `LAST_DAY`/`DATE_SUB`/`EXTRACT` ＋ `GREATEST`/`LEAST`/`LEFT`/`RIGHT`/`INSTR`） | 中 | 小 | 低コスト・確実。1リリースに束ねる |
 | 4 | `INTERSECT` / `EXCEPT` ＋ `FULL OUTER JOIN` | 中 | 小〜中 | 差分バッチの表現力。代替手段はあるが安い |
@@ -182,7 +182,7 @@ kSQL の実装済み関数（コード確認済み・`src/types/ast.ts:246`）:
 - kSQL の欠落で**業務価値が大きいのは 2 つ**: **ウィンドウ関数**と**文字列集約**。いずれも kintone API 制約ではなく「未実装」であり、FULL_SCAN 前提と整合するため**技術的障害はない**。
 - 逆に**トランザクション・ビュー・ストアド系は原理的に対象外**であり、比較上の「欠落」として扱うべきでない。
 - `MERGE`・PIVOT・ROLLUP は kintone 側機能や既存構文でカバー済み/代替可であり、追加価値は小さい。
-- kSQL は kintone 特化機能（`KLIKE`・`VALIDATE ONLY`・`ON ERROR SKIP`・サブテーブル仮想テーブル・`ASSERT`）で主要 RDB に無い価値を持つ。**汎用 SQL 機能の網羅より、バッチ実務の完成度（B12→B14→GROUP_CONCAT）を優先する方が費用対効果が高い**。
+- kSQL は kintone 特化機能（`KLIKE`・`VALIDATE ONLY`・`ON ERROR SKIP`・サブテーブル仮想テーブル・`ASSERT`）で主要 RDB に無い価値を持つ。**汎用 SQL 機能の網羅より、バッチ実務の完成度（B12・B14・GROUP_CONCAT）を優先する方が費用対効果が高い**。
 
 ## 6. 副次: 文書の是正（本評価で発見）
 

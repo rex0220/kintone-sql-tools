@@ -244,7 +244,7 @@ export function applyGroupBy(
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
         const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
-        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows, resolveAggSortKind));
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
         outRow[col.alias ?? syntheticKey] = value;
         // HAVING / ORDER BY は集計を合成名（例: SUM(売上)）のフィールド参照として
         // 解決するため、alias 付きでも合成名キーを併記する（project で出力からは落ちる）。
@@ -281,6 +281,7 @@ function evalAggregate(
   func: AggregateFunc,
   distinct: boolean,
   arg: WildcardColumn | ArithNode,
+  separator: string | undefined,
   rows: ProcessRow[],
   resolveAggSortKind?: AggregateSortKindResolver
 ): number | string {
@@ -311,6 +312,7 @@ function evalAggregate(
   const eff = distinct ? [...new Set(strValues)] : strValues;
 
   if (func === "COUNT") return eff.length;
+  if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
 
   const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF"
     ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
@@ -368,7 +370,7 @@ function evalAggArithExpr(
   resolveAggSortKind?: AggregateSortKindResolver
 ): number {
   if (node.type === "NUMBER")    return node.value;
-  if (node.type === "AGG_REF")   return Number(evalAggregate(node.func, node.distinct, node.arg, rows, resolveAggSortKind));
+  if (node.type === "AGG_REF")   return Number(evalAggregate(node.func, node.distinct, node.arg, node.separator, rows, resolveAggSortKind));
   // AGG_ARITH
   const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
   const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
@@ -866,7 +868,7 @@ function resolveAggInStringFuncArg(
   resolveAggSortKind?: AggregateSortKindResolver
 ): StringFuncArg {
   if (arg.type === "AGG_REF") {
-    const value = evalAggregate(arg.func, arg.distinct, arg.arg, rows, resolveAggSortKind);
+    const value = evalAggregate(arg.func, arg.distinct, arg.arg, arg.separator, rows, resolveAggSortKind);
     return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {

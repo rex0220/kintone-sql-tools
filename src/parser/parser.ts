@@ -751,7 +751,7 @@ export class Parser {
       return { type: "STRFUNC_COL", expr: funcExpr, alias } satisfies StringFuncColumn;
     }
 
-    // 集計関数: COUNT / SUM / AVG / MAX / MIN
+    // 集計関数: COUNT / SUM / AVG / MAX / MIN / GROUP_CONCAT
     // 後続に算術演算子があれば → ARITH_AGG_COL (例: SUM(金額) * 1.1)
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
@@ -767,6 +767,7 @@ export class Parser {
         func: ref.func,
         distinct: ref.distinct,
         arg: ref.arg,
+        ...(ref.separator !== undefined ? { separator: ref.separator } : {}),
         alias,
       } satisfies AggregateColumn;
     }
@@ -1228,6 +1229,7 @@ export class Parser {
       [TokenKind.AVG]:   "AVG",
       [TokenKind.MAX]:   "MAX",
       [TokenKind.MIN]:   "MIN",
+      [TokenKind.GROUP_CONCAT]: "GROUP_CONCAT",
     };
     const kind = this.peek().kind;
     return map[kind] ?? null;
@@ -1242,13 +1244,31 @@ export class Parser {
 
     let arg: AggregateColumn["arg"];
     if (this.consume(TokenKind.STAR)) {
+      if (func === "GROUP_CONCAT") {
+        throw new ParseError("GROUP_CONCAT(*) は使用できません。フィールドまたは式を指定してください", this.prev());
+      }
       arg = { type: "WILDCARD" };
     } else {
       arg = this.parseArithAddSub(); // フィールド名・算術式・関数呼び出し
     }
 
+    let separator: string | undefined;
+    if (this.isSoftKeyword("SEPARATOR")) {
+      const separatorToken = this.advance();
+      if (func !== "GROUP_CONCAT") {
+        throw new ParseError("SEPARATOR は GROUP_CONCAT でのみ使用できます", separatorToken);
+      }
+      separator = this.expect(TokenKind.STRING, "SEPARATOR の後には文字列リテラルが必要です").value;
+    }
+
     this.expect(TokenKind.RPAREN);
-    return { type: "AGG_REF", func, distinct, arg };
+    return {
+      type: "AGG_REF",
+      func,
+      distinct,
+      arg,
+      ...(separator !== undefined ? { separator } : {}),
+    };
   }
 
   // ----------------------------------------------------------
@@ -1575,9 +1595,19 @@ export class Parser {
       const distinct = this.consume(TokenKind.DISTINCT);
       let argStr: string;
       if (this.consume(TokenKind.STAR)) {
+        if (aggFunc === "GROUP_CONCAT") {
+          throw new ParseError("GROUP_CONCAT(*) は使用できません。フィールドまたは式を指定してください", this.prev());
+        }
         argStr = "*";
       } else {
         argStr = this.parseIdentifier();
+      }
+      if (this.isSoftKeyword("SEPARATOR")) {
+        const separatorToken = this.advance();
+        if (aggFunc !== "GROUP_CONCAT") {
+          throw new ParseError("SEPARATOR は GROUP_CONCAT でのみ使用できます", separatorToken);
+        }
+        this.expect(TokenKind.STRING, "SEPARATOR の後には文字列リテラルが必要です");
       }
       this.expect(TokenKind.RPAREN);
       const syntheticName = distinct

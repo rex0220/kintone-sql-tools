@@ -17,13 +17,18 @@ kSQL の現行機能（バッチ実行・一時テーブル・ASSERT・UPSERT・
 
 > **`バッチID` は文字列フィールドにする（重要）**: `NOW()` は**ミリ秒付き ISO 文字列**（`2026-07-14T12:34:56.789Z`）ですが、kintone の**日時フィールドは分精度**で秒・ミリ秒が丸められます。`バッチID` を日時フィールドにすると `WHERE バッチID = @now` が一致せず（0 件）、確保・突合が成立しません。**`バッチID` は文字列（1行）フィールド**にして ISO 文字列をそのまま完全一致させます。`確保日時`・`処理日時` は日時フィールドで可（丸めは無害）。
 
-> **一時テーブルを参照できる DML は `INSERT … SELECT` / `UPSERT … SELECT` だけ**（v1.7.0）。`UPDATE … WHERE $id IN (SELECT … FROM #tmp)` のように**一時テーブルをサブクエリ参照する UPDATE / DELETE は実行前に拒否**されます（`CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照可）。そのため「処理した対象だけを後で更新する」には、**先にバッチ ID で対象を確保**し、**その直接条件（`WHERE バッチID = @now`）で更新**します（R1）。
+> **DML の `WHERE` に `IN (SELECT …)` は書けません**。`UPDATE … WHERE $id IN (SELECT … FROM #tmp)` は実行時に `KintoneQueryError: IN (SELECT ...) は kintone クエリに変換できません` となります（**一時テーブルに限らず実アプリのサブクエリでも同じ**。`CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照可）。**`ksql_validate` は `ok` を返す**ので静的検査では気づけません。そのため「処理した対象だけを後で更新する」には次の 2 通りを使います。
+>
+> 1. **バッチ ID で確保 → 直接条件で更新**（`WHERE バッチID = @now`）… R1。一時テーブルを一切参照しない
+> 2. **`UPDATE … FROM #tmp`（v2.12.0 / 業務キー結合は v2.13.0）**… 一時テーブルの値を転記でき、`WHERE 対象.キー = t.キー AND 対象.バッチID = @now` のように**結合等値＋ターゲット絞り込み**を併記できる（R6）。ただし**複数マッチは実行前エラー**なので、ソース側は業務キー単位に 1 行化しておく
+>
+> `INSERT … SELECT` / `UPSERT … SELECT` は従来どおり一時テーブルを `FROM` ソースにできます（v1.7.0）。
 
 > **選択系フィールドの WHERE 比較は `IN` を使う（`=` 不可）**: `処理ステータス` を**ドロップダウン・ラジオボタン・チェックボックス・複数選択**にした場合、WHERE の比較に `=` / `!=` は使えません（`フィールドタイプには演算子 = を使用できません（GAIA_IQ03）`）。**`WHERE 処理ステータス IN ('未処理')`** のように `IN` で書きます。**値の書き込みは `SET 処理ステータス = '処理済'` のように `=` のままで可**（本レシピの SQL はこの規則で書いています）。`処理ステータス` を**文字列（1行）**にすれば `=` も使えますが、選択系でも動くよう本レシピは **WHERE を `IN` で統一**します。
 
 > **突合キー（`顧客コード`）はルックアップにしない**: UPSERT のキー `顧客コード` を**ルックアップ**フィールドにすると、マスタ（ルックアップ元）に存在しない値の書き込みで `値「…」が…（GAIA_LO04）` エラーになります。`顧客コード` は差分・マスタとも**文字列（1行）**にして、UPSERT のキー照合（`ON DUPLICATE (顧客コード)`）に使います。
 
-> **前提バージョン**: 本レシピはバッチ変数を使うため **v2.1.0 以降**。さらに**差分 0 件の日**（空ソースからの `UPSERT … SELECT`）を no-op でそのまま完走させるには、明示列なら **v2.1.1 以降**、実体化済み一時テーブル/CTE の `SELECT *` なら **v2.11.0 以降**が必要です。主な機能の追加版 — バッチ実行・一時テーブル `v1.4.0`／ASSERT `v1.10.0`／プラグインの DML バッチ `v1.9.0`／`tempTableMaxRows` `v1.11.0`／バッチ変数・IN リストの変数 `v2.1.0`／0 行明示列 SELECT の no-op 化 `v2.1.1`／0 行実体化 `SELECT *` の列伝播 `v2.11.0`。
+> **前提バージョン**: 本レシピはバッチ変数を使うため **v2.1.0 以降**。さらに**差分 0 件の日**（空ソースからの `UPSERT … SELECT`）を no-op でそのまま完走させるには、明示列なら **v2.1.1 以降**、実体化済み一時テーブル/CTE の `SELECT *` なら **v2.11.0 以降**が必要です。主な機能の追加版 — バッチ実行・一時テーブル `v1.4.0`／ASSERT `v1.10.0`／プラグインの DML バッチ `v1.9.0`／`tempTableMaxRows` `v1.11.0`／バッチ変数・IN リストの変数 `v2.1.0`／0 行明示列 SELECT の no-op 化 `v2.1.1`／0 行実体化 `SELECT *` の列伝播 `v2.11.0`／**`UPDATE … FROM`（アプリ間・一時テーブル転記）`v2.12.0`**／**`VALIDATE ONLY`・`ON ERROR SKIP INTO #err`・`UPDATE … FROM` の業務キー結合 `v2.13.0`**（R2・R6）／**文字列・日時の `MIN`/`MAX` `v2.14.0`**／**`GROUP_CONCAT`・一時テーブル列の型伝播 `v2.15.0`**（R6）。
 
 ---
 
@@ -124,8 +129,33 @@ FROM #tgt t LEFT JOIN APP200 m ON t.顧客コード = m.顧客コード;
 ```
 
 > **1 結果セットにまとめる理由**: プラグイン UI は**最後に結果を返した文だけ**を表示するため、`SELECT COUNT(*)` を 2 本並べると両方を同時に見られません。LEFT JOIN で 1 行にまとめると全入口で同じ見え方になります。`COUNT(m.顧客コード)` が「マスタにマッチした件数（＝updates）」になるのは [§8 集計関数](ksql_language_reference.md#8-group-by--集計関数) の「`COUNT(フィールド)` は空文字・NULL をスキップ」仕様によります。
+
+### 値の妥当性も先に見る（`VALIDATE ONLY`・v2.13.0）
+
+件数ゲートは「何件か」しか見ません。**必須・型・範囲・文字列長・選択肢・UPSERT キー**が通るかは `VALIDATE ONLY` で書き込みゼロのまま全行検証できます（[§17.1](ksql_language_reference.md#171-validate-only書き込み前検証)）。
+
+```sql
+CREATE TEMP TABLE #tgt AS
+SELECT 顧客コード, 顧客名 FROM APP100 WHERE 処理ステータス IN ('未処理');
+
+-- 書き込まずに全行検証。#err に 1 行 = 1 エラー（1 行に複数エラーなら複数行）
+UPSERT INTO APP200 (顧客コード, 顧客名)
+SELECT 顧客コード, 顧客名 FROM #tgt
+ON DUPLICATE (顧客コード)
+VALIDATE ONLY INTO #err;
+
+-- どのキーがなぜ落ちるかを 1 行にまとめて確認（GROUP_CONCAT は v2.15.0）
+SELECT 顧客コード, GROUP_CONCAT($err_message SEPARATOR ' / ') AS エラー内容
+FROM #err GROUP BY 顧客コード;
+```
+
+- `VALIDATE ONLY` は **read-only 扱い**で、`ksql_query` / CLI から DML 承認なしに実行できます（書き込み 0 件）。
+- ただし**完全な入力を要求**するため、`truncate` 設定は常に `error` へ上書きされます。
+- **通過は kintone の書き込み成功を保証しません**（権限・競合・カスタマイズ JS など、ローカルで判定できない要因があるため）。
+
+> **確認手段の役割分担**: 構文・静的検査 → `ksql_validate`／実行計画のみ（**kintone 非アクセス・実件数なし**）→ `ksql_explain` / `--dry-run`／実データの件数 → 上の R2 を `ksql_query` / CLI で**実行**（read-only）／**値の妥当性** → `VALIDATE ONLY`。
 >
-> **確認手段の役割分担**: 構文・静的検査 → `ksql_validate`／実行計画のみ（**kintone 非アクセス・実件数なし**）→ `ksql_explain` / `--dry-run`／実データの件数 → 上の R2 を `ksql_query` / CLI で**実行**（read-only）。
+> **`ksql_validate` は「実行できること」を保証しません**（構文・静的解析のみ）。たとえば `UPDATE … WHERE $id IN (SELECT … FROM #tmp)` は `ksql_validate` が `ok` を返しますが、実行時に `IN (SELECT ...) は kintone クエリに変換できません` で失敗します（下記の注記）。実行可否は read-only（`VALIDATE ONLY`・`SELECT`）で確かめてください。
 
 ---
 
@@ -216,10 +246,71 @@ UPSERT INTO APP100 (取引先コード, 状態)
 
 - **DRY**: 外部リストを `#incoming` の 1 箇所に集約し、`ASSERT`（`COUNT` / `IN` サブクエリ）と `UPSERT … SELECT`（`FROM` ソース）から再利用する。
 - **`UPSERT` にはキーが必須**: `ON DUPLICATE (キーフィールド)` が必要で、キーは**アプリ側の書き込み可能フィールド**（例: `取引先コード` / `外部ID`）。**システムフィールド `$id` は UPSERT キーにできない**。
-- **重要な制約 — `UPDATE` / `DELETE` は一時テーブルをサブクエリ参照できない**（`… WHERE $id IN (SELECT id FROM #t)` は実行前に拒否。注意の「一時テーブル参照の非対称」参照）。**対象アプリの既存行を `$id` で更新/削除**したい場合は、`UPDATE APP100 SET 状態='完了' WHERE $id IN ('1001','1005','1012')` のように **`UPDATE` / `DELETE` 側ではリストを直接 `IN (...)` に再掲**する（この経路では一時テーブルの DRY は効かない）。
+- **重要な制約 — `UPDATE` / `DELETE` の `WHERE` に `IN (SELECT …)` は書けない**（`… WHERE $id IN (SELECT id FROM #t)` は**実行時**に `IN (SELECT ...) は kintone クエリに変換できません`。注意の「サブクエリ参照の非対称」参照）。**対象アプリの既存行を `$id` で更新/削除**したい場合は、`UPDATE APP100 SET 状態='完了' WHERE $id IN ('1001','1005','1012')` のように **`UPDATE` / `DELETE` 側ではリストを直接 `IN (...)` に再掲**する（この経路では一時テーブルの DRY は効かない）。**一時テーブルの値で更新する**なら `UPDATE … FROM`（v2.12.0・R6）が使える。
 - **セキュリティ（自動バインドではない）**: 上記の値は **SQL 文中にリテラルとして記述**しており、kSQL が外部リストを自動でバインドする機能ではない。外部値から SQL を生成する場合は、**ID を数字だけに検証**するか、**文字列リテラルの `'` を `''` にエスケープ**すること（誤ればインジェクションが起こり得る）。
 - **kintone 内から導ける集合**なら `#incoming` を使わず直接 `IN (SELECT … FROM APPxxx WHERE …)` の方が簡単。R5 は **kintone 外由来の固定リスト**が対象。
 - **前提バージョン**: `CREATE TEMP TABLE AS <FROM なし SELECT / UNION>` の実体化は **v2.10.0 以降**（それ以前は 0 行になる不具合があった）。
+
+---
+
+## R6. 不良データを隔離して残りを流す（`ON ERROR SKIP`・v2.13.0）
+
+R1 は fail-fast で、**1 件の不良データがバッチ全体を止めます**。夜間の無人バッチでは「不良行だけ除けて残りは流し、翌朝に原因を見る」ほうが望ましいことがあります。`ON ERROR SKIP INTO #err` は、**書き込み前のローカル検証（必須・型・範囲・文字列長・選択肢・キー）に落ちた行だけ**を `#err` へ隔離し、合格行だけを書き込みます。
+
+```sql
+SET @now = NOW();
+
+-- 1) 確保（R1 と同じ claim-first。直接条件で更新）
+UPDATE APP100
+SET 処理ステータス = '処理中', バッチID = @now, 確保日時 = @now
+WHERE 処理ステータス IN ('未処理');
+
+CREATE TEMP TABLE #tgt AS
+SELECT 顧客コード, 顧客名, 住所 FROM APP100
+WHERE バッチID = @now AND 処理ステータス IN ('処理中');
+
+ASSERT (SELECT COUNT(*) FROM #tgt) BETWEEN 0 AND 10000;
+
+-- 2) 本処理: NG 行は #err へ隔離し、合格行だけ書く。隔離が 100 行を超えたら何も書かず停止
+UPSERT INTO APP200 (顧客コード, 顧客名, 住所)
+SELECT 顧客コード, 顧客名, 住所 FROM #tgt
+ON DUPLICATE (顧客コード)
+ON ERROR SKIP INTO #err REJECT LIMIT 100;
+
+-- 3) エラー行の書き戻し: 業務キー単位に全メッセージを連結して 1 行化
+CREATE TEMP TABLE #err_summary AS
+SELECT 顧客コード, GROUP_CONCAT($err_message SEPARATOR ' / ') AS エラー内容
+FROM #err GROUP BY 顧客コード;
+
+UPDATE APP100
+SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容, 処理日時 = @now
+FROM #err_summary e
+WHERE APP100.顧客コード = e.顧客コード AND APP100.バッチID = @now;
+
+-- 4) 正常行の完了: #err に無い業務キーを temp で確定してから更新
+CREATE TEMP TABLE #ok AS
+SELECT 顧客コード FROM #tgt
+WHERE 顧客コード NOT IN (SELECT 顧客コード FROM #err);
+
+UPDATE APP100
+SET 処理ステータス = '処理済', 処理日時 = @now
+FROM #ok o
+WHERE APP100.顧客コード = o.顧客コード AND APP100.バッチID = @now;
+```
+
+**なぜこの形か**
+
+- **3) と 4) が `UPDATE … FROM`（v2.12.0 / 業務キー結合は v2.13.0）**: `#err` は UPSERT の**入力ペイロード列しか持たず**、差分アプリの `$id` を持ちません。そのため `$id` 結合では書き戻せず、**業務キー結合**が必要です。
+- **`AND APP100.バッチID = @now` を必ず付ける**: `UPDATE … FROM` は結合等値とターゲット絞り込みを両方書けます。これが無いと、**今回のバッチが確保していない同一キーの行まで更新**され得ます。
+- **4) は `#ok` を `SELECT` で先に確定させる**: `UPDATE … WHERE 顧客コード NOT IN (SELECT … FROM #err)` と書きたくなりますが、**DML の `WHERE` に `IN (SELECT …)` は書けません**（下記の注記）。`NOT IN (SELECT …)` は **`SELECT` 文（`CREATE TEMP TABLE … AS SELECT`）なら使えます**。
+- **`GROUP_CONCAT` で全メッセージを残す（v2.15.0）**: 1 行に複数エラーがあると `#err` は複数行になります。`UPDATE … FROM` は**複数マッチを実行前エラー**にするため、業務キー単位へ 1 行化が必須です。`MIN($err_message)` だと代表 1 件しか残りませんが、`GROUP_CONCAT` なら全件を連結できます。
+- **`REJECT LIMIT n`**: 隔離が n 行を超えたら**全行検証を終えたうえで書き込みゼロで停止**します（部分書き込みは起きません）。`#err` は結果として返るので原因調査に使えます。「不良が大量＝上流の異常」を検知するゲートです。
+
+**隔離される範囲（重要）**
+
+- 隔離できるのは **kSQL が API 送信前にローカルで判定できるエラーだけ**（Tier 0）です。**kintone API の実行時エラー**（権限・競合・カスタマイズ JS による保存拒否など）は**従来どおり fail-fast**で、行単位に隔離されません。
+- 逆に、ローカル検証は**書き込み経路より厳しいことがあります**。検証を通っても書き込み成功は保証されません。
+- **前提バージョン**: `ON ERROR SKIP` / `VALIDATE ONLY` / 業務キー結合は **v2.13.0 以降**、`GROUP_CONCAT` と `#err` 列の型伝播は **v2.15.0 以降**。
 
 ---
 
@@ -244,7 +335,7 @@ UPSERT INTO APP100 (取引先コード, 状態)
 - **トランザクションはありません**。非アトミックで、途中失敗時に前半のみ反映され得ます（だからこそ R1 の「復旧・確保・冪等」設計にします）。
 - 一時テーブルは**同時 16 個・1 個あたり既定 10,000 行**（`tempTableMaxRows` で変更可）。バッチは**最大 20 文**。
 - DML バッチは常に **fail-fast**（`ASSERT` 失敗・エラーで停止）。`continueOnError` は read-only バッチのみ。
-- **一時テーブル参照の非対称**: `UPDATE` / `DELETE` から一時テーブルをサブクエリ参照すると実行前に拒否。一方 `INSERT … SELECT` / `UPSERT … SELECT`、および `CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照できる（R3 が成立する根拠）。
+- **サブクエリ参照の非対称**: `UPDATE` / `DELETE` の `WHERE` に `IN (SELECT …)` は書けず、**実行時**に `KintoneQueryError: IN (SELECT ...) は kintone クエリに変換できません` となる（一時テーブル・実アプリのどちらのサブクエリでも同じ）。**`ksql_validate` は `ok` を返す**ため静的検査では検出できない。一方 `INSERT … SELECT` / `UPSERT … SELECT`、および `CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照できる（R3 が成立する根拠）。一時テーブルの値で更新したい場合は **`UPDATE … FROM`（v2.12.0 / 業務キー結合は v2.13.0・R6）** を使う。
 - **検索打ち切り（10 万件）の扱い（v2.10.0 以降）**: kintone は `like` / `not like` の一致候補が **10 万件に達すると検索を打ち切る**。現行の挙動を整理すると:
   - **現在**: CLI/MCP の `SELECT` はこの打ち切りを検出すると**警告付き**で返る（結果が欠落し得る）。プラグイン経路は検出しない。
   - **現在**: DML の対象取得（読取）が打ち切り信号を受けたら、**書き込み前に `SearchAbortedError` で停止**（fail-closed）＝サイレントな一部更新/削除の防止。一時テーブル実体化も同様にエラー。

@@ -1783,7 +1783,9 @@ async function inferSelectColumnMeta(
       if (column.type === "FIELD") {
         meta = resolveField(aggregateFieldRef(column.field));
       } else if (column.type === "AGGREGATE") {
-        if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+        if (column.func === "GROUP_CONCAT") {
+          meta = { sortKind: "string" };
+        } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
           meta = { sortKind: "number" };
         } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
           const source = resolveField(aggregateFieldRef(column.arg.field));

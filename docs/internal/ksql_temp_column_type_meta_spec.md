@@ -1,7 +1,7 @@
 # 仕様案: 一時テーブル / CTE 列の型メタ伝播（B14・B13 フェーズ2）
 
 - 作成日: 2026-07-16
-- 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。**B16 `GROUP_CONCAT` の前提**（[機能比較評価](ksql_sql_feature_comparison_evaluation.md) §4）。
+- 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。B16 `GROUP_CONCAT` とは独立（[B16 仕様](ksql_group_concat_spec.md) §0）。
 - ステータス: **R2 実装済み（codex・コードレビュー待ち）。1,294 テスト green。v2.15.0 予定。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
@@ -61,7 +61,7 @@ interface MaterializedTable {
 ```
 ＋ 入力ペイロード列（UPSERT/INSERT の対象列）。
 
-したがって **§4.3 の SELECT 型推論では `#err` の型は決まらない**。合成側で**明示宣言**する必要がある（§4.2）。**B16 が必要とするのはまさにこの経路**。
+したがって **§4.3 の SELECT 型推論では `#err` の型は決まらない**。合成側で**明示宣言**する必要がある（§4.2）。これは `MIN`/`MAX` の比較種別に必要であり、型メタを参照しない B16 `GROUP_CONCAT` には不要である。
 
 ### 2.3 消費側が temp/CTE で降参している箇所
 
@@ -145,7 +145,7 @@ const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 - 既存 `#err` への append 時は、現行のスキーマ一致検査（[execute.ts:515](../../src/execute.ts#L515)）と同様に `columnMeta` の一致も要求する。
 - **一致は Map の参照一致ではなく構造一致**（キー集合と各エントリの `sortKind` / `fieldType` が等しいこと）で判定する。矛盾したら現行と同じく `ArgumentError`。
 
-これにより `GROUP_CONCAT($err_message)`（B16）と `MIN($err_message)`（B13）が `#err` で機能する。
+これにより `MIN($err_message)`（B13）が `#err` で機能する。`GROUP_CONCAT($err_message)`（B16）は型メタに依存せず機能する。
 
 ### 4.3 供給源B: SELECT 由来の推論
 
@@ -155,7 +155,7 @@ const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 |---|---|
 | `FieldColumn`（素通し） | **ソースの型を継承**。物理アプリ → `getFieldsCached` の `KintoneFieldInfo`（`fieldType` ＋ B13 の分類で `sortKind`）。temp/CTE → **その列の `columnMeta` を継承**（＝チェーン・§4.4） |
 | `WildcardColumn` / `ParentWildcardColumn` | 展開後の各列に上記を適用（**フォーム定義の取得が要る**・§4.5） |
-| `AggregateColumn` | `COUNT`/`SUM`/`AVG` → `number`／`MIN`/`MAX` → **引数の解決結果**（B13 のリゾルバ）／（将来 `GROUP_CONCAT` → `string`） |
+| `AggregateColumn` | `COUNT`/`SUM`/`AVG` → `number`／`MIN`/`MAX` → **引数の解決結果**（B13 のリゾルバ）／`GROUP_CONCAT` → `string` |
 | `AggArithColumn` / `ArithColumn` | `number`（評価が `Number()` 化するため確定） |
 | `LiteralColumn` | `string`（文字列リテラル） |
 | `StringFuncColumn` | **本仕様では推論しない（型不明）**。関数ごとの戻り型表（`LENGTH`→number・`CAST`→引数依存・`COALESCE`→引数依存…）は面が広く、誤ると静かに壊れるため**別課題**（§8） |

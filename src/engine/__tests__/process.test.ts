@@ -340,6 +340,54 @@ test("COUNT(DISTINCT フィールド)", () => {
   expect(result[0]["cnt"]).toBe("2"); // 田中・鈴木の 2人
 });
 
+test("GROUP_CONCAT: 収集順・既定区切り・空値スキップ・DISTINCT 初出順", () => {
+  const rows: ProcessRow[] = [
+    { 種別: "X", 担当者: "田中" },
+    { 種別: "X", 担当者: "" },
+    { 種別: "X", 担当者: "鈴木" },
+    { 種別: "X", 担当者: "田中" },
+  ];
+  const stmt = parseSelect(
+    "SELECT 種別, GROUP_CONCAT(担当者) AS all_members, " +
+    "GROUP_CONCAT(DISTINCT 担当者 SEPARATOR ' / ') AS unique_members " +
+    "FROM APP100 GROUP BY 種別"
+  );
+  const result = applyGroupBy(rows, stmt.groupBy, stmt.columns);
+  expect(result[0]).toMatchObject({
+    all_members: "田中,鈴木,田中",
+    unique_members: "田中 / 鈴木",
+  });
+});
+
+test("GROUP_CONCAT: 空区切り・算術引数・長い結果を切り捨てない", () => {
+  const long = "x".repeat(5000);
+  const rows: ProcessRow[] = [{ 値: "1", 名前: long }, { 値: "2", 名前: long }];
+  const stmt = parseSelect(
+    "SELECT GROUP_CONCAT(値 * 2 SEPARATOR '') AS doubled, GROUP_CONCAT(名前) AS names FROM APP100"
+  );
+  const result = applyGroupBy(rows, stmt.groupBy, stmt.columns);
+  expect(result[0].doubled).toBe("24");
+  expect(result[0].names).toBe(`${long},${long}`);
+});
+
+test("GROUP_CONCAT: 文字列関数内へカスタム区切りを伝播し、算術では Number() 化する", () => {
+  const tables = new Map([[null, [makeRecord({ 値: "a" }), makeRecord({ 値: "b" })]]]);
+  const stringStmt = parseSelect(
+    "SELECT UPPER(GROUP_CONCAT(値 SEPARATOR ' / ')) AS joined FROM APP100"
+  );
+  expect(runFullScan({ tables, stmt: stringStmt }).rows[0].joined).toBe("A / B");
+
+  const arithmeticStmt = parseSelect("SELECT GROUP_CONCAT(値 SEPARATOR ' / ') + 1 AS result FROM APP100");
+  expect(runFullScan({ tables, stmt: arithmeticStmt }).rows[0].result).toBe("NaN");
+});
+
+test("GROUP_CONCAT: 入力 0 行・GROUP BY なしでは空文字を 1 行返す", () => {
+  const stmt = parseSelect("SELECT GROUP_CONCAT(担当者) AS members FROM APP100");
+  const result = applyGroupBy([], stmt.groupBy, stmt.columns);
+  expect(result).toHaveLength(1);
+  expect(result[0].members).toBe("");
+});
+
 // ----------------------------------------------------------------
 // applyGroupBy: 空入力の非グループ集計は 1 行を返す（v1.12.0）
 // ----------------------------------------------------------------
