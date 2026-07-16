@@ -71,9 +71,11 @@ B11 v1（v2.12.0）で SET 値の他テーブル参照と `target.$id = source.k
 
 ```sql
 -- B11 v1.1。差分アプリ = APP4220
+-- 注: MIN/MAX はテキスト列を数値強制するため $err_message では NaN 化する
+-- （別課題 ksql_string_min_max_aggregate_spec.md）。当面は DISTINCT + 定数フラグで 1 行化する
 CREATE TEMP TABLE #err_summary AS
-SELECT 顧客コード, MIN($err_message) AS エラー内容
-FROM #err GROUP BY 顧客コード;
+SELECT DISTINCT 顧客コード, '検証エラー' AS エラー内容
+FROM #err;
 
 UPDATE APP4220 SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容
 FROM #err_summary e WHERE APP4220.顧客コード = e.顧客コード;
