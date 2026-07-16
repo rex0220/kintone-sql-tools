@@ -55,6 +55,37 @@ test("VALIDATE ONLY用のフォーム制約メタデータを保持する", () =
   });
 });
 
+test("未設定制約は空文字ではなく undefined に正規化する", () => {
+  const [field] = flattenFormFieldProperties({
+    title: {
+      code: "title", label: "タイトル", type: "SINGLE_LINE_TEXT",
+      minLength: "", maxLength: "", minValue: "", maxValue: "",
+    },
+  });
+  expect(field.minLength).toBeUndefined();
+  expect(field.maxLength).toBeUndefined();
+  expect(field.minValue).toBeUndefined();
+  expect(field.maxValue).toBeUndefined();
+});
+
+test("サブテーブルの子フィールドに inSubtable マークを付ける", () => {
+  const fields = flattenFormFieldProperties({
+    テーブル: {
+      code: "テーブル",
+      label: "テーブル",
+      type: "SUBTABLE",
+      fields: {
+        数値T1: {
+          code: "数値T1",
+          label: "数値T1",
+          type: "NUMBER",
+        },
+      },
+    },
+  });
+  expect(fields.find((field) => field.code === "数値T1")?.inSubtable).toBe(true);
+});
+
 test("ルックアップコピー先を書込不可として展開する", () => {
   const fields = flattenFormFieldProperties({
     customer: {

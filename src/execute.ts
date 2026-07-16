@@ -135,6 +135,8 @@ export interface KintoneFieldInfo {
   minLength?: string;
   maxLength?: string;
   defaultValue?: unknown;
+  /** true の場合、サブテーブルの子フィールドとして create 検証の必須/既定値走査から除外する。 */
+  inSubtable?: boolean;
   /** false は計算・システム・ルックアップコピー先等の書込不可フィールド。 */
   writable?: boolean;
 }

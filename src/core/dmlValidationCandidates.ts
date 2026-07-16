@@ -35,6 +35,7 @@ export function validateDmlCandidates(
     }
     if (candidate.mode === "create") {
       for (const info of fieldInfos) {
+        if (info.inSubtable) continue;
         if (candidate.payload.has(info.code)) continue;
         if (!isEmptyDmlValue(info.defaultValue)) {
           const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);

@@ -1,4 +1,5 @@
 import { compareDecimal, validateAndNormalizeDmlValue } from "../dmlValidation";
+import { validateDmlCandidates } from "../dmlValidationCandidates";
 
 const field = (fieldType: string, extra: Record<string, unknown> = {}) => ({
   code: "f", label: "f", fieldType, ...extra,
@@ -22,4 +23,21 @@ test("DATE/TIME/DATETIMEの実在性を検証する", () => {
 test("10進文字列を浮動小数化せず比較する", () => {
   expect(compareDecimal("9007199254740993", "9007199254740992")).toBe(1);
   expect(compareDecimal("-1.20", "-1.2")).toBe(0);
+});
+
+test("create バリデーションではサブテーブル子フィールドを必須/既定値走査から除外する", () => {
+  const candidates = [{
+    rowNumber: 1,
+    operation: "INSERT" as const,
+    mode: "create" as const,
+    payload: new Map<string, unknown>([["title", "abc"]]),
+    preErrors: [],
+  }];
+  const fieldInfos = [
+    { code: "title", label: "タイトル", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "子文字列", label: "子文字列", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true },
+  ];
+  const result = validateDmlCandidates(candidates, "INSERT", ["title"], ["title"], fieldInfos, 1);
+  expect(result.errors).toHaveLength(0);
+  expect(result.invalidRows).toBe(0);
 });

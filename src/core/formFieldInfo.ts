@@ -26,7 +26,8 @@ export function flattenFormFieldProperties(
 
 function flattenFields(
   properties: Record<string, FormFieldProperty>,
-  lookupCopyFields: Set<string>
+  lookupCopyFields: Set<string>,
+  inSubtable = false
 ): KintoneFieldInfo[] {
   const out: KintoneFieldInfo[] = [];
   for (const field of Object.values(properties)) {
@@ -37,14 +38,15 @@ function flattenFields(
       optionOrder: toOptionOrderMap(field.options),
       sortKind: detectSortKind(field.type, field.format),
       required: field.required,
-      minValue: field.minValue,
-      maxValue: field.maxValue,
-      minLength: field.minLength,
-      maxLength: field.maxLength,
+      minValue: normalizeConstraintValue(field.minValue),
+      maxValue: normalizeConstraintValue(field.maxValue),
+      minLength: normalizeConstraintValue(field.minLength),
+      maxLength: normalizeConstraintValue(field.maxLength),
       defaultValue: field.defaultValue,
+      inSubtable,
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES.has(field.type),
     });
-    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields));
+    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
   }
   return out;
 }
@@ -66,6 +68,10 @@ function collectLookupCopyFields(properties: Record<string, FormFieldProperty>):
   };
   visit(properties);
   return result;
+}
+
+function normalizeConstraintValue(value?: string): string | undefined {
+  return value == null || value === "" ? undefined : value;
 }
 
 function toOptionOrderMap(
