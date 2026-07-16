@@ -212,6 +212,111 @@ test("parallel オプションで複数ページを同時取得しても offset 
 });
 
 // ----------------------------------------------------------------
+// fetchAll — stopAfter 軟停止
+// ----------------------------------------------------------------
+
+test("stopAfter 到達時は追加ページを取得せず正常終了する", async () => {
+  const calls: string[] = [];
+  const onTruncate = jest.fn();
+  const fetcher = recordingFetcher([
+    makeRecords(500, 1),
+    makeRecords(500, 501),
+    makeRecords(500, 1001),
+  ], calls);
+
+  const result = await fetchAll(fetcher, 100, "", [], {
+    maxRecords: 10_000,
+    stopAfter: 1_000,
+    onLimit: "truncate",
+    onTruncate,
+  });
+
+  expect(result).toHaveLength(1_000);
+  expect(calls).toHaveLength(2);
+  expect(onTruncate).not.toHaveBeenCalled();
+});
+
+test("stopAfter 未到達で最終ページになれば実件数を返す", async () => {
+  const calls: string[] = [];
+  const fetcher = recordingFetcher([makeRecords(300)], calls);
+
+  const result = await fetchAll(fetcher, 100, "", [], {
+    maxRecords: 10_000,
+    stopAfter: 1_000,
+  });
+
+  expect(result).toHaveLength(300);
+  expect(calls).toHaveLength(1);
+});
+
+test("stopAfter はページ途中の余分な受信行を返却せず切り詰める", async () => {
+  const calls: string[] = [];
+  const fetcher = recordingFetcher([
+    makeRecords(500, 1),
+    makeRecords(500, 501),
+    makeRecords(500, 1001),
+  ], calls);
+
+  const result = await fetchAll(fetcher, 100, "", [], {
+    maxRecords: 10_000,
+    stopAfter: 1_200,
+  });
+
+  expect(result).toHaveLength(1_200);
+  expect(result[1_199].$id.value).toBe("1200");
+  expect(calls).toHaveLength(3);
+});
+
+test("stopAfter は parallel の先読みページ数も必要量に制限する", async () => {
+  const calls: string[] = [];
+  const fetcher = recordingFetcher([
+    makeRecords(500, 1),
+    makeRecords(500, 501),
+    makeRecords(500, 1001),
+  ], calls);
+
+  const result = await fetchAll(fetcher, 100, "", [], {
+    maxRecords: 10_000,
+    stopAfter: 1_000,
+    parallel: 5,
+  });
+
+  expect(result).toHaveLength(1_000);
+  expect(calls).toHaveLength(2);
+});
+
+test("stopAfter 到達前に受信した検索打ち切りは通知する", async () => {
+  const onSearchAborted = jest.fn();
+  let call = 0;
+  const fetcher: PageFetcher = async () => {
+    call += 1;
+    return {
+      records: makeRecords(500, (call - 1) * 500 + 1),
+      searchAborted: call === 1,
+    };
+  };
+
+  await fetchAll(fetcher, 100, "", [], {
+    maxRecords: 10_000,
+    stopAfter: 1_000,
+    onSearchAborted,
+  });
+
+  expect(onSearchAborted).toHaveBeenCalledTimes(1);
+});
+
+test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 1_001])(
+  "不正な stopAfter=%p は取得前に RangeError",
+  async (stopAfter) => {
+    const fetcher: PageFetcher = jest.fn();
+    await expect(
+      fetchAll(fetcher, 100, "", [], { maxRecords: 1_000, stopAfter })
+    ).rejects.toThrow(new RangeError("stopAfter must be a positive safe integer <= maxRecords"));
+    expect(fetcher).not.toHaveBeenCalled();
+  }
+);
+
+// ----------------------------------------------------------------
 // fetchAll — offset 10000 超のカーソルリセット
 // ----------------------------------------------------------------
 

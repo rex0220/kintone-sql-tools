@@ -2,6 +2,22 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.11.0（予定）
+
+### 修正（バグ）
+
+- **0 行の `SELECT *` が一時テーブル・CTE 経由で出力列を失う問題を修正**（正しさ）。一時テーブル・CTE を行だけでなく**列スキーマも保持**して実体化するようにし、`JOIN` なし単一ソースの 0 行 `SELECT *` に保存列を伝播する。これにより**差分バッチの空日**に `INSERT/UPSERT … SELECT * FROM #empty_temp` が `insertedCount=0` の no-op として正常完走する（従来は「SELECT の列数（0）と一致しません」で停止）。明示列は v2.1.1 で対応済み。混在ワイルドカード（`SELECT *, a`）は 0 行でも明示列を復元する（`*` は列に寄与しない＝1 行以上と同じ）。`JOIN` を伴う 0 行 `SELECT *`・実アプリ直参照の bare `SELECT *`・`_p.*` は対象外（現状維持）。
+
+### 安全性
+
+- **CLI の DML 実行で `--on-limit truncate` によるソースの暗黙切り捨てを防止**。SELECT ベース DML（`INSERT/UPSERT … SELECT`）の CLI 実行で、`--on-limit`（/ `KSQL_ON_LIMIT` / profile `query.onLimit`）が `truncate` のとき、ソース SELECT が `maxRecords` で黙って切り捨てられ**部分書き込み**になっていた。CLI の DML 実行（単文・バッチとも）では `onLimitReached` を常に `error` に固定する（MCP・プラグインと同じ扱い）。`truncate` が明示されていたときのみ stderr に注記を出す。read-only SELECT の `truncate` は従来どおり。
+
+### 性能改善
+
+- **SIMPLE SELECT の `LIMIT > 500` を安全な範囲で早期停止**。`ORDER BY` がなく KLIKE を含まないクエリは、`OFFSET + LIMIT` 件を取得した時点で正常終了する。たとえば一致 10,000 件の `LIMIT 1000` は、500 件ずつの GET 20 回相当から 2 回へ削減される。
+  - `ORDER BY` 付き、KLIKE、`LIMIT` なし、`OFFSET + LIMIT > maxRecords` は従来どおり全件取得または上限判定を行う。`LIMIT <= 500` の単発 GET も不変。
+  - **上限の意味論変更**: `maxRecords` は実際に取得する行数の上限として扱う。安全な早期停止対象では `OFFSET + LIMIT <= maxRecords` なら、一致総数が `maxRecords` を超えていても上限エラーや truncate 警告を出さず、LIMIT 窓を返して正常終了する。
+
 ## v2.10.1（2026-07-16）
 
 ### 修正（バグ）

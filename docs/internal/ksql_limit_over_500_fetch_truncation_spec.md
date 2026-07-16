@@ -3,11 +3,12 @@
 - 作成日: 2026-07-16
 - 対象課題: [perf-sql-execution-improvements.md](../perf-sql-execution-improvements.md) §A-8 / [perf-sql-execution-implementation-plan.md](../perf-sql-execution-implementation-plan.md) フェーズ3 A-8
 - 前提修正: [ksql_simple_select_limit_over_500_issue.md](ksql_simple_select_limit_over_500_issue.md)（`LIMIT>500` を `fetchAll` へ送る機能バグ＝v2.10.1 で解消済み）
-- ステータス: **仕様案 R3・codex 再レビュー承認（追加 Finding なし）・実装着手可。v2.11.0 予定③（B1・B2 の後）**
+- ステータス: **R3 実装済み・codex 検証済み。v2.11.0 予定③（リリース待ち）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
   - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①「完全後方互換・API 呼び出し数のみ変更」を撤回＝`stopAfter` は `maxRecords/onLimit` の意味論を変える（総数>`maxRecords` でも `offset+limit<=maxRecords` なら従来のエラー/警告なしで成功）と明示（§1.1）②検索打ち切り警告の保証を「実際に取得したレスポンス」に限定③受入の「N 件取得」を「返却/保持 N 件・GET 数 ceil(N/pageSize)・最終ページで最大 pageSize−1 の余分受信は許容」へ厳密化。`stopAfter` の実行時検証（正の安全整数 && `<= maxRecords`）を追加
   - 2026-07-16 R3: codex 再レビュー反映（コードで裏取り）。①**ブロッカー＝KLIKE を安全サブセットから除外**（`whereHasKlike(stmt.where)` true なら `stopAfter` 非適用・§1.2）。検索打ち切りは kintone `like`＝KLIKE のみで起き、除外により `stopAfter` 経路では原理的に発生しない＝見逃し構造的に解消（§6.1）②§1 目的の「性能だけ改善」を「両方成功するケースの返却行は同一・ただし §1.1 の上限意味論変更を含む」へ訂正③`stopAfter` 検証は `ExecuteOptions` に項目がなく結合注入不可のため `fetchAll` 単体のみに置くと明記
+  - 2026-07-16 実装: `FetchAllOptions.stopAfter`、安全サブセット判定、過大並列取得防止、単体／結合回帰テスト、利用者向け上限説明を実装。対象テスト・全テスト・ビルドで検証
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: 性能改善だが **`maxRecords/onLimit` の意味論変更を含む**（§1.1・返却行は現行と一致するが従来エラーだったクエリが成功し得る）→ minor バンドル v2.11.0 の一部
 
@@ -172,16 +173,16 @@ KLIKE を含むクエリは `stopAfter` 非適用で全取得するため、検�
 
 ## 7. 受入条件
 
-- [ ] `ORDER BY` なし `LIMIT 1000`・一致 5,000 件・`maxRecords=10000`: **GET は 2 回**・**返却/保持 1,000 行**が現行（全取得→LIMIT）と一致。`onTruncate` 未通知。
-- [ ] **意味論変更（§1.1）**: `ORDER BY` なし `LIMIT 1000`・一致 **20,000 件**・`maxRecords=10000`（`offset+limit ≤ maxRecords`）: **正常終了で 1,000 行**。**従来はここで `onLimit=error`→例外／`onLimit=truncate`→警告だったが、本仕様では出ない**ことを固定（両 `onLimit` 値で確認）。
-- [ ] `ORDER BY <field>` あり `LIMIT 1000`・一致 5,000 件: **現状どおり全件取得後に JS ソート→LIMIT**（GET 回数・結果が現行と一致・`stopAfter` 不適用）。
-- [ ] `ORDER BY` なし `LIMIT 1000 OFFSET 200`（`stopAfter=1200`・`pageSize=500`）: **GET 3 回（最大 1,500 件受信）→ 保持 1,200 件 → `applyLimit` で 1,000 行**。結果が現行と一致。「1,200 件ちょうど受信」ではない。
-- [ ] `ORDER BY` なし `LIMIT 1000`・一致 300 件: 早期打ち切りに到達せず（最終ページで終了）300 行。現行と一致。
-- [ ] `offset + limit > maxRecords`（例 `LIMIT 100000`・`maxRecords=10000`）: `stopAfter` 不適用。現状どおり `maxRecords` 到達で `onLimit`（error/truncate）挙動。
-- [ ] `LIMIT <= 500`: 単発 GET のまま（`stopAfter` 経路に入らない）。
-- [ ] **KLIKE を含む `ORDER BY` なし `LIMIT 1000`: `stopAfter` を適用しない＝全取得（現状維持）**。GET 回数・結果・検索打ち切り警告が現行と一致（§1.2）。
-- [ ] `fetchAll` 単体: `stopAfter=N`（`N ≤ maxRecords`）で **返却 N 行・`onTruncate` 未通知・GET 数 = `ceil(N/pageSize)`**（最終ページの余分受信は許容・不要な追加ページは発行しない）。
-- [ ] `fetchAll` 単体（検証）: `stopAfter <= 0` / 非安全整数 / `stopAfter > maxRecords` は `RangeError`。**注**: `ExecuteOptions` に `stopAfter` はないため、`executeSimpleSelect` 経由での不正注入は不可能。この検証は `fetchAll` 単体テストにのみ置く（結合テストには置かない）。
+- [x] `ORDER BY` なし `LIMIT 1000`・一致 5,000 件・`maxRecords=10000`: **GET は 2 回**・**返却/保持 1,000 行**が現行（全取得→LIMIT）と一致。`onTruncate` 未通知。
+- [x] **意味論変更（§1.1）**: `ORDER BY` なし `LIMIT 1000`・一致 **20,000 件**・`maxRecords=10000`（`offset+limit ≤ maxRecords`）: **正常終了で 1,000 行**。**従来はここで `onLimit=error`→例外／`onLimit=truncate`→警告だったが、本仕様では出ない**ことを固定（両 `onLimit` 値で確認）。
+- [x] `ORDER BY <field>` あり `LIMIT 1000`・一致 5,000 件: **現状どおり全件取得後に JS ソート→LIMIT**（GET 回数・結果が現行と一致・`stopAfter` 不適用）。
+- [x] `ORDER BY` なし `LIMIT 1000 OFFSET 200`（`stopAfter=1200`・`pageSize=500`）: **GET 3 回（最大 1,500 件受信）→ 保持 1,200 件 → `applyLimit` で 1,000 行**。結果が現行と一致。「1,200 件ちょうど受信」ではない。
+- [x] `ORDER BY` なし `LIMIT 1000`・一致 300 件: 早期打ち切りに到達せず（最終ページで終了）300 行。現行と一致。
+- [x] `offset + limit > maxRecords`（例 `LIMIT 100000`・`maxRecords=10000`）: `stopAfter` 不適用。現状どおり `maxRecords` 到達で `onLimit`（error/truncate）挙動。
+- [x] `LIMIT <= 500`: 単発 GET のまま（`stopAfter` 経路に入らない）。
+- [x] **KLIKE を含む `ORDER BY` なし `LIMIT 1000`: `stopAfter` を適用しない＝全取得（現状維持）**。GET 回数・結果・検索打ち切り警告が現行と一致（§1.2）。
+- [x] `fetchAll` 単体: `stopAfter=N`（`N ≤ maxRecords`）で **返却 N 行・`onTruncate` 未通知・GET 数 = `ceil(N/pageSize)`**（最終ページの余分受信は許容・不要な追加ページは発行しない）。
+- [x] `fetchAll` 単体（検証）: `stopAfter <= 0` / 非安全整数 / `stopAfter > maxRecords` は `RangeError`。**注**: `ExecuteOptions` に `stopAfter` はないため、`executeSimpleSelect` 経由での不正注入は不可能。この検証は `fetchAll` 単体テストにのみ置く（結合テストには置かない）。
 
 ## 8. テスト計画（修正前=全取得 / 修正後=早期停止）
 

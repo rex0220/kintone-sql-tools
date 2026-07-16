@@ -48,7 +48,7 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
-import { whereHasLike } from "./core/like";
+import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
   project,
@@ -1117,6 +1117,14 @@ async function executeSimpleSelect(
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
   const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
+  const stopAfter =
+    stmt.orderBy.length === 0 &&
+    needed !== null &&
+    needed <= maxRecords &&
+    !whereHasKlike(stmt.where)
+      ? needed
+      : undefined;
 
   // kintone は最大 500 件なので LIMIT が 500 以下ならページングは不要
   // LIMIT 指定なし or 500 超の場合は fetchAll を使う
@@ -1138,6 +1146,7 @@ async function executeSimpleSelect(
       {
         parallel,
         maxRecords,
+        stopAfter,
         onLimit,
         onTruncate: (max) => {
           warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
