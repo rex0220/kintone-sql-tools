@@ -3424,6 +3424,135 @@ test("metrics: フィールド定義取得はキャッシュ込みで実呼び�
   expect(result.metrics!.fieldCalls).toBe(1);
 });
 
+test("MIN / MAX: 物理テキスト列は辞書順、NUMBER 列は従来の数値順で集約する", async () => {
+  const client = makeClient({
+    records: [makeRecord({ text: "9", amount: "9" }), makeRecord({ text: "10", amount: "10" })],
+  });
+  client.getFields = async () => [
+    { code: "text", label: "text", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "amount", label: "amount", fieldType: "NUMBER" },
+  ];
+  const result = await execute(
+    "SELECT MIN(text) AS textMin, MAX(text) AS textMax, MIN(amount) AS numberMin, MAX(amount) AS numberMax FROM APP77005",
+    client,
+    { cacheContext: "aggregate-sort-physical" }
+  ) as SelectResult;
+
+  expect(result.rows[0]).toMatchObject({ textmin: "10", textmax: "9", numbermin: "9", numbermax: "10" });
+  expect(result.metrics!.fieldCalls).toBe(1);
+});
+
+test("MIN / MAX: フォーム定義は既存 cacheContext キャッシュを共有する", async () => {
+  const client = makeClient({ records: [makeRecord({ text: "B" }), makeRecord({ text: "A" })] });
+  client.getFields = async () => [
+    { code: "text", label: "text", fieldType: "MULTI_LINE_TEXT" },
+  ];
+  const options = { cacheContext: "aggregate-sort-cache" };
+  const first = await execute("SELECT MIN(text) AS value FROM APP77006", client, options) as SelectResult;
+  const second = await execute("SELECT MAX(text) AS value FROM APP77006", client, options) as SelectResult;
+
+  expect(first.rows[0].value).toBe("A");
+  expect(second.rows[0].value).toBe("B");
+  expect(first.metrics!.fieldCalls).toBe(1);
+  expect(second.metrics!.fieldCalls).toBe(0);
+});
+
+test("MIN / MAX: CALC は sortKind を一次判定に使う", async () => {
+  const client = makeClient({
+    records: [makeRecord({ calcText: "9", calcNumber: "9" }), makeRecord({ calcText: "10", calcNumber: "10" })],
+  });
+  client.getFields = async () => [
+    { code: "calcText", label: "calcText", fieldType: "CALC", sortKind: "string" },
+    { code: "calcNumber", label: "calcNumber", fieldType: "CALC", sortKind: "number" },
+  ];
+  const result = await execute(
+    "SELECT MIN(calcText) AS textMin, MIN(calcNumber) AS numberMin FROM APP77007",
+    client,
+    { cacheContext: "aggregate-sort-calc" }
+  ) as SelectResult;
+
+  expect(result.rows[0]).toMatchObject({ textmin: "10", numbermin: "9" });
+});
+
+test("MIN / MAX: 日時・RICH_TEXT は文字列、CREATOR は型不明の従来経路になる", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ 日付: "2026-07-16", 更新日時: "2026-07-16T02:00:00Z", リッチ: "B", 作成者: "B" }),
+      makeRecord({ 日付: "2025-12-31", 更新日時: "2026-07-16T01:00:00Z", リッチ: "A", 作成者: "A" }),
+    ],
+  });
+  client.getFields = async () => [
+    { code: "日付", label: "日付", fieldType: "DATE" },
+    { code: "更新日時", label: "更新日時", fieldType: "UPDATED_TIME" },
+    { code: "リッチ", label: "リッチ", fieldType: "RICH_TEXT" },
+    { code: "作成者", label: "作成者", fieldType: "CREATOR" },
+  ];
+  const result = await execute(
+    "SELECT MIN(日付) AS oldest, MAX(更新日時) AS latest, MIN(リッチ) AS richmin, MIN(作成者) AS unsupported FROM APP77010",
+    client,
+    { cacheContext: "aggregate-sort-field-types" }
+  ) as SelectResult;
+
+  expect(result.rows[0]).toMatchObject({
+    oldest: "2025-12-31",
+    latest: "2026-07-16T02:00:00Z",
+    richmin: "A",
+    unsupported: "NaN",
+  });
+});
+
+test("MIN / MAX: JOIN の修飾フィールドを各物理アプリの型へ解決する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77008: [makeRecord({ key: "1", value: "9" }), makeRecord({ key: "2", value: "10" })],
+      77009: [makeRecord({ key: "1", amount: "9" }), makeRecord({ key: "2", amount: "10" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 77008
+    ? [
+        { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "value", label: "value", fieldType: "SINGLE_LINE_TEXT" },
+      ]
+    : [
+        { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "amount", label: "amount", fieldType: "NUMBER" },
+      ];
+  const result = await execute(
+    "SELECT MIN(a.value) AS textMin, MIN(b.amount) AS numberMin FROM APP77008 a JOIN APP77009 b ON a.key = b.key",
+    client,
+    { cacheContext: "aggregate-sort-join" }
+  ) as SelectResult;
+
+  expect(result.rows[0]).toMatchObject({ textmin: "10", numbermin: "9" });
+  expect(result.metrics!.fieldCalls).toBe(2);
+});
+
+test("MIN / MAX: JOIN 非修飾名は一意なら型解決し、同名競合なら従来経路へ戻す", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      77011: [makeRecord({ key: "1", uniqueText: "9", shared: "9" }), makeRecord({ key: "2", uniqueText: "10", shared: "10" })],
+      77012: [makeRecord({ key: "1", shared: "B" }), makeRecord({ key: "2", shared: "A" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 77011
+    ? [
+        { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "uniqueText", label: "uniqueText", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "shared", label: "shared", fieldType: "SINGLE_LINE_TEXT" },
+      ]
+    : [
+        { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "shared", label: "shared", fieldType: "SINGLE_LINE_TEXT" },
+      ];
+  const result = await execute(
+    "SELECT MIN(uniqueText) AS uniqueMin, MIN(shared) AS collision FROM APP77011 a JOIN APP77012 b ON a.key = b.key",
+    client,
+    { cacheContext: "aggregate-sort-unqualified-join" }
+  ) as SelectResult;
+
+  expect(result.rows[0]).toMatchObject({ uniquemin: "10", collision: "NaN" });
+});
+
 test("metrics: INSERT は postCalls を数える", async () => {
   const client = makeClient({ postIds: ["1"] });
   const result = await execute(

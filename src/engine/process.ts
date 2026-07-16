@@ -33,6 +33,7 @@ import type {
   StringFuncArg,
   CaseWhenExpr,
   StringFuncExpr,
+  FieldRef,
 } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import {
@@ -49,6 +50,10 @@ import {
 } from "./evalFunc";
 
 export { ProcessRow };
+
+/** MIN/MAX の直接フィールド参照を数値順・文字列順へ分類する。 */
+export type AggregateSortKindResolver =
+  (field: FieldRef) => "number" | "string" | undefined;
 
 // ============================================================
 // 1. flatten — KintoneRecord → ProcessRow
@@ -200,7 +205,8 @@ export function hasAggregateColumns(columns: SelectColumn[]): boolean {
 export function applyGroupBy(
   rows: ProcessRow[],
   groupByKeys: GroupByKey[],
-  columns: SelectColumn[]
+  columns: SelectColumn[],
+  resolveAggSortKind?: AggregateSortKindResolver
 ): ProcessRow[] {
   // グループキー → 行リスト
   const groups = new Map<string, ProcessRow[]>();
@@ -238,7 +244,7 @@ export function applyGroupBy(
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
         const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
-        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows, resolveAggSortKind));
         outRow[col.alias ?? syntheticKey] = value;
         // HAVING / ORDER BY は集計を合成名（例: SUM(売上)）のフィールド参照として
         // 解決するため、alias 付きでも合成名キーを併記する（project で出力からは落ちる）。
@@ -247,10 +253,10 @@ export function applyGroupBy(
         if (col.alias) outRow[syntheticKey] = value;
       } else if (col.type === "ARITH_AGG_COL") {
         const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
-        outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows));
+        outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
       } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
         const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
-        const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows);
+        const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
         outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
       }
     }
@@ -275,8 +281,9 @@ function evalAggregate(
   func: AggregateFunc,
   distinct: boolean,
   arg: WildcardColumn | ArithNode,
-  rows: ProcessRow[]
-): number {
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): number | string {
   // COUNT(*)
   if (arg.type === "WILDCARD") {
     return func === "COUNT" ? rows.length : 0;
@@ -305,6 +312,14 @@ function evalAggregate(
 
   if (func === "COUNT") return eff.length;
 
+  const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF"
+    ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
+    : undefined;
+  if (sortKind === "string") {
+    if (eff.length === 0) return "";
+    return func === "MAX" ? maxStringOf(eff) : minStringOf(eff);
+  }
+
   const nums = eff.map(Number);
   switch (func) {
     case "SUM": return nums.reduce((a, b) => a + b, 0);
@@ -313,6 +328,25 @@ function evalAggregate(
     case "MAX": return nums.length === 0 ? 0 : maxOf(nums);
     case "MIN": return nums.length === 0 ? 0 : minOf(nums);
   }
+}
+
+function toAggregateFieldRef(field: string): FieldRef {
+  const dot = field.indexOf(".");
+  return dot > 0
+    ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) }
+    : { type: "FIELD", tableAlias: null, field };
+}
+
+function maxStringOf(values: string[]): string {
+  let value = values[0];
+  for (const candidate of values) if (candidate > value) value = candidate;
+  return value;
+}
+
+function minStringOf(values: string[]): string {
+  let value = values[0];
+  for (const candidate of values) if (candidate < value) value = candidate;
+  return value;
 }
 
 function maxOf(nums: number[]): number {
@@ -328,12 +362,16 @@ function minOf(nums: number[]): number {
 }
 
 /** 集計算術式を評価する（グループ行全体を受け取る） */
-function evalAggArithExpr(node: AggOperand, rows: ProcessRow[]): number {
+function evalAggArithExpr(
+  node: AggOperand,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): number {
   if (node.type === "NUMBER")    return node.value;
-  if (node.type === "AGG_REF")   return evalAggregate(node.func, node.distinct, node.arg, rows);
+  if (node.type === "AGG_REF")   return Number(evalAggregate(node.func, node.distinct, node.arg, rows, resolveAggSortKind));
   // AGG_ARITH
-  const l = evalAggArithExpr(node.left, rows);
-  const r = evalAggArithExpr(node.right, rows);
+  const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
+  const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
   switch (node.op) {
     case "+": return l + r;
     case "-": return l - r;
@@ -822,27 +860,33 @@ function hasAggregateInStringFuncExpr(expr: StringFuncExpr): boolean {
   return expr.args.some((arg) => hasAggregateInStringFuncArg(arg));
 }
 
-function resolveAggInStringFuncArg(arg: StringFuncArg, rows: ProcessRow[]): StringFuncArg {
+function resolveAggInStringFuncArg(
+  arg: StringFuncArg,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): StringFuncArg {
   if (arg.type === "AGG_REF") {
-    return {
-      type: "NUMBER",
-      value: evalAggregate(arg.func, arg.distinct, arg.arg, rows),
-    };
+    const value = evalAggregate(arg.func, arg.distinct, arg.arg, rows, resolveAggSortKind);
+    return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {
-    return { type: "NUMBER", value: evalAggArithExpr(arg, rows) };
+    return { type: "NUMBER", value: evalAggArithExpr(arg, rows, resolveAggSortKind) };
   }
   if (arg.type === "STRING_FUNC") {
-    return resolveAggInStringFuncExpr(arg, rows);
+    return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);
   }
   return arg;
 }
 
-function resolveAggInStringFuncExpr(expr: StringFuncExpr, rows: ProcessRow[]): StringFuncExpr {
+function resolveAggInStringFuncExpr(
+  expr: StringFuncExpr,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): StringFuncExpr {
   return {
     type: "STRING_FUNC",
     func: expr.func,
-    args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows)),
+    args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows, resolveAggSortKind)),
   };
 }
 
@@ -864,6 +908,8 @@ export interface FullScanInput {
   fieldTypeResolver?: FieldTypeResolver;
   /** HAVING 用。集計列 alias を物理フィールドと誤認しない解決器 */
   havingFieldTypeResolver?: FieldTypeResolver;
+  /** MIN/MAX の直接フィールド参照用ソート種別解決器。 */
+  aggregateSortKindResolver?: AggregateSortKindResolver;
   /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
   appliedKlikes?: ReadonlySet<object>;
   /** 単一の実体化ソースが保持する出力列。0 行の単独 SELECT * にのみ使う。 */
@@ -886,6 +932,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     sortKinds,
     fieldTypeResolver,
     havingFieldTypeResolver,
+    aggregateSortKindResolver,
     appliedKlikes,
     sourceColumns,
   } = input;
@@ -912,7 +959,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
-    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
+    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
   }
 
   // 5. HAVING

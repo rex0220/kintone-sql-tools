@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { NO_FROM_CTE_NAME } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
@@ -59,6 +59,7 @@ import {
   applyLimit,
   OptionOrderMap,
   FieldSortKindMap,
+  type AggregateSortKindResolver,
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver } from "./engine/evalWhere";
@@ -1502,6 +1503,134 @@ async function loadTypedInFieldTypes(
   return new Map(entries);
 }
 
+function aggregateFieldRef(field: string): FieldRef {
+  const dot = field.indexOf(".");
+  return dot > 0
+    ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) }
+    : { type: "FIELD", tableAlias: null, field };
+}
+
+function collectAggregateRef(
+  func: string,
+  arg: { type: string; field?: string },
+  out: FieldRef[]
+): void {
+  if ((func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" && arg.field) {
+    out.push(aggregateFieldRef(arg.field));
+  }
+}
+
+function collectAggregateOperandRefs(node: AggOperand, out: FieldRef[]): void {
+  if (node.type === "AGG_REF") {
+    collectAggregateRef(node.func, node.arg, out);
+    return;
+  }
+  if (node.type === "AGG_ARITH") {
+    collectAggregateOperandRefs(node.left, out);
+    collectAggregateOperandRefs(node.right, out);
+  }
+}
+
+function collectStringFuncAggregateRefs(expr: StringFuncExpr, out: FieldRef[]): void {
+  for (const arg of expr.args) {
+    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+      collectAggregateOperandRefs(arg, out);
+    } else if (arg.type === "STRING_FUNC") {
+      collectStringFuncAggregateRefs(arg, out);
+    }
+  }
+}
+
+function collectSelectAggregateSortRefs(columns: SelectColumn[]): FieldRef[] {
+  const refs: FieldRef[] = [];
+  for (const column of columns) {
+    if (column.type === "AGGREGATE") {
+      collectAggregateRef(column.func, column.arg, refs);
+    } else if (column.type === "ARITH_AGG_COL") {
+      collectAggregateOperandRefs(column.expr, refs);
+    } else if (column.type === "STRFUNC_COL") {
+      collectStringFuncAggregateRefs(column.expr, refs);
+    }
+  }
+  return refs;
+}
+
+const AGGREGATE_STRING_FIELD_TYPES = new Set([
+  "SINGLE_LINE_TEXT", "MULTI_LINE_TEXT", "RICH_TEXT", "LINK",
+  "DROP_DOWN", "RADIO_BUTTON", "STATUS",
+  "DATE", "TIME", "DATETIME", "CREATED_TIME", "UPDATED_TIME",
+]);
+
+function aggregateSortKind(info: KintoneFieldInfo): "number" | "string" | undefined {
+  if (info.sortKind !== undefined) return info.sortKind;
+  if (info.fieldType === "NUMBER" || info.fieldType === "RECORD_NUMBER") return "number";
+  return AGGREGATE_STRING_FIELD_TYPES.has(info.fieldType) ? "string" : undefined;
+}
+
+/** MIN/MAX の直接フィールド参照だけに必要なフォーム定義を読み、集約専用resolverを返す。 */
+async function loadAggregateSortKindResolver(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<AggregateSortKindResolver | undefined> {
+  const refs = collectSelectAggregateSortRefs(stmt.columns);
+  if (refs.length === 0) return undefined;
+
+  const appIds = new Set<number>();
+  const physicalTables = physicalSelectTables(stmt);
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        appIds.add(stmt.from.appId);
+        continue;
+      }
+      const table = findTableForAlias(stmt, ref.tableAlias);
+      if (table && table.cteName === null) appIds.add(table.appId);
+    } else if (stmt.joins.length === 0) {
+      if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
+    } else {
+      // CTE/temp を含む JOIN の非修飾参照は一意性を型メタで確定できない。
+      // resolver も undefined を返すため、物理側だけの不要な API 呼び出しを避ける。
+      if ([stmt.from, ...stmt.joins.map((join) => join.table)]
+        .some((table) => table.cteName !== null)) continue;
+      for (const table of physicalTables) appIds.add(table.appId);
+    }
+  }
+  if (appIds.size === 0) return undefined;
+
+  const fieldInfosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
+    await Promise.all([...appIds].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
+    }))
+  );
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+
+  return (ref) => {
+    let info: KintoneFieldInfo | undefined;
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
+      } else {
+        const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+        if (!table || table.cteName !== null) return undefined;
+        info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      }
+    } else if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return undefined;
+      info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+    } else {
+      if (tables.some((table) => table.cteName !== null)) return undefined;
+      const matches = physicalTables
+        .map((table) => fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field)))
+        .filter((candidate): candidate is KintoneFieldInfo => candidate !== undefined);
+      if (matches.length !== 1) return undefined;
+      info = matches[0];
+    }
+    return info ? aggregateSortKind(info) : undefined;
+  };
+}
+
 function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
@@ -1577,9 +1706,10 @@ async function executeFullScanSelect(
 
   // 一般 NUMBER 比較または選択系 IN 候補がある物理アプリだけ、押し下げ用メタを取得する。
   // typedInFieldTypes は最終 JS 評価用で役割が異なるため、統合しない。
-  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
 
@@ -1688,6 +1818,7 @@ async function executeFullScanSelect(
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
   });
 
@@ -1852,9 +1983,10 @@ async function executeFullScanWithCte(
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
   ]);
 
-  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -1936,6 +2068,7 @@ async function executeFullScanWithCte(
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
     sourceColumns,
   });
