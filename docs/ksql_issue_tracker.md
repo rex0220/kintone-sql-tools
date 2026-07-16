@@ -39,7 +39,7 @@
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
-| B11 | `UPDATE … FROM`（SET 値に他テーブルのフィールド参照＝アプリ間転記） | 改善 | 📝 採用・未実装（バッチ強化 Phase 2・B12 の依存・複数マッチは実行前エラー固定） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) §7 / [roadmap](internal/ksql_batch_processing_roadmap.md) |
+| B11 | `UPDATE … FROM`（SET 値に他テーブルのフィールド参照＝アプリ間転記） | 改善 | 📋 仕様 R1・codex レビュー前（Phase 2・B12 の依存・temp/CTE ソース・`$id` 単一等値・複数マッチ実行前エラー・親のみ） | 機能 | 中 | [spec](internal/ksql_update_from_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 📝 採用・未実装（バッチ強化 Phase 3・価値最大。VALIDATE ONLY 先行→ON ERROR SKIP。B11 依存） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
