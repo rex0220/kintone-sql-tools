@@ -1,9 +1,25 @@
-ksql 配布パッケージ (v2.10.1)
+ksql 配布パッケージ (v2.11.0)
 
-1. ksql-plugin-v2.10.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.11.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.11.0: 残バグ修正（正しさ・安全性）と LIMIT > 500 の取得打ち切り最適化（性能）。
+- 正しさ: 0 行の SELECT * が一時テーブル・CTE 経由で出力列を失う問題を修正。列スキーマも
+  保持して実体化し、JOIN なし単一ソースの 0 行 SELECT * に伝播。差分バッチの空日に
+  INSERT/UPSERT ... SELECT * FROM #empty_temp が no-op で完走(明示列は v2.1.1 済)。
+  混在ワイルドカードは 0 行でも明示列を復元。JOIN 付き 0 行 SELECT */実アプリ bare
+  SELECT */_p.* は対象外。
+- 安全性: CLI の DML 実行で --on-limit truncate によるソースの暗黙切り捨て(部分書き込み)を
+  防止。CLI の DML(単文・バッチ)は onLimit を常に error 固定(MCP・プラグインと同型)。
+  read-only SELECT の truncate は従来どおり。
+- 性能: SIMPLE SELECT の LIMIT > 500 を安全な範囲で早期停止。ORDER BY なし・KLIKE なしの
+  クエリは OFFSET + LIMIT 件を取得した時点で正常終了(GET 回数を削減)。上限の意味論変更=
+  maxRecords は取得行数の上限。安全対象では OFFSET + LIMIT <= maxRecords なら一致総数が
+  maxRecords 超でも上限エラー/truncate 警告を出さず LIMIT 窓を返す。ORDER BY 付き・KLIKE・
+  LIMIT なし・OFFSET + LIMIT > maxRecords は従来どおり。
+- 詳細は CHANGELOG.md を参照。
 
 v2.10.1: SIMPLE SELECT の LIMIT > 500 が API エラー(GAIA_QU01)になる不具合を修正。
 - 単発 GET/ページング判定を AST の LIMIT 値(<=500)で行うよう修正。LIMIT > 500 は
