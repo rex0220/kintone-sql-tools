@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 発見経緯: `NULLIF`/`ISNULL` の実機確認中（APP4221・2026-07-16）に `WHERE 金額 IN (0, 1000, -1)` が ParseError となり判明。
-- ステータス: **課題（原因特定済み・修正方針あり）。codex レビュー前・未実装。**
+- ステータス: **v2.14.1 でリリース済み**（実装・コードレビュー承認・1,289 テスト green・実機確認 全11項目 pass）。
 - 分担: Claude=課題/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

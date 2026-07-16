@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-16
-- 現在の最新リリース: **v2.14.0**（B13 文字列・日時 MIN/MAX・tag/GitHub Release 公開・npm publish 待ち）
+- 現在の最新リリース: **v2.14.1**（B15 `IN` 負数リテラル・tag/GitHub Release 公開・npm publish 待ち）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -32,7 +32,6 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B15 | `IN`/`NOT IN` が負数リテラルを拒否（`=`/`BETWEEN` とは非対称） | バグ | 🐞 実機で発見・原因特定済み（`parseInValues` が単項マイナス非受理）・修正方針あり | 正しさ | 中 | [issue](internal/ksql_in_list_negative_number_issue.md) |
 | B14 | 一時テーブル/CTE 列の型メタ伝播（B13 フェーズ2・temp のテキスト `MIN`/`MAX`） | 改善 | 📝 提案（B13 §7/§9 で分離。`MaterializedTable` に列型メタを付与） | 正しさ | 中 | [B13 spec §7](internal/ksql_string_min_max_aggregate_spec.md) |
 | B16 | 文字列集約 `GROUP_CONCAT`（1対多の連結・`#err` メッセージ集約） | 改善 | 📝 評価済み（比較評価 T1-2 で最優先。**B14 が前提**・v2.14.0 で下地あり） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
 | B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`） | 改善 | 📝 評価済み（比較評価 T1-1・最大の欠落。「各グループ最新1件」を1文化） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
@@ -52,6 +51,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v2.14.1** | B15 `IN`/`NOT IN` の負数リテラル受理。`= -1` / `BETWEEN` は受理するのに `IN (-1)` が `ParseError` になる非対称を解消（`parseInValues` が単項 `-`/`+` を受理）。`IN (+1)`≡`IN (1)`・`IN ('-1')` は文字列のまま・押し下げは `in (-1,1,"-1")`。受理範囲の拡大のみ（patch） | 正しさ | [issue](internal/ksql_in_list_negative_number_issue.md) |
 | **v2.14.0** | B13 文字列・日時 `MIN`/`MAX`。実アプリのテキスト・選択・日時（正規化済み DATE/TIME/DATETIME・作成/更新日時）と文字列 CALC を UTF-16 辞書順で集約。NUMBER・数値 CALC は従来の数値比較を維持（回帰なし）。専用 `AggregateSortKindResolver`（sortKind 一次＋fieldType 補完）で型解決し `getFieldsCached` 共有。JOIN 修飾列・一意な非修飾列に対応。同名競合・非対応複合型・temp/CTE は従来の数値経路（フェーズ2で別途） | 正しさ | [spec](internal/ksql_string_min_max_aggregate_spec.md) |
 | **v2.13.0** | B12 バンドル。B12-A `VALIDATE ONLY`（Tier 0 事前検証・書き込みゼロ・複数エラー収集・`INTO #err`）／B11.1 `UPDATE … FROM` 業務キー結合（`target.field = source.field` 単一等値・数値/文字列キー正規化・ターゲット重複全件更新・64 文字超は全文一致逆引き）／B12-B `ON ERROR SKIP INTO #err [REJECT LIMIT n]`（NG 行を隔離し合格行のみ書き込み・REJECT LIMIT 超過は書き込みゼロで診断返却） | 機能・安全性・正しさ | [validate](internal/ksql_validate_only_implementation_plan.md) / [update-from §12](internal/ksql_update_from_spec.md) / [on-error-skip](internal/ksql_on_error_skip_isolation_spec.md) |
 | **v2.12.0** | B11 `UPDATE … FROM`（アプリ間・一時テーブル転記）。SET 値に他テーブル（`#temp`/実アプリ `APP<n>`）のフィールドを参照・`$id` 単一等値・複数マッチ/不正キー/列欠落/複合型/上限は PUT 前 fail-closed・50 件チャンク・MCP は `maxRecords` で読み取り | 機能 | [spec](internal/ksql_update_from_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
