@@ -32,7 +32,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`） | 改善 | 📝 評価済み（比較評価 T1-1・最大の欠落。「各グループ最新1件」を1文化） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
+| B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `OVER (PARTITION BY … ORDER BY …)`） | 改善 | 📋 仕様案 R2（codex レビュー反映・実装着手可）。比較評価 T1-1・最大の欠落。**「各グループ最新1件を全列付きで取得」は現状表現不可能**（複合キー JOIN・派生テーブルとも非対応）→ B17 で初めて可能（**CTE で1文**） | 機能 | 中 | [spec](internal/ksql_window_function_spec.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
