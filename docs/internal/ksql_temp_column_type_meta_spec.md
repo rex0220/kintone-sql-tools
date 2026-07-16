@@ -108,7 +108,7 @@ interface MaterializedTable {
 
 - **`columnMeta` は optional**。持たない実体化は従来どおり型不明＝**後方互換**。
 - **確定できるものだけ載せる**。不明な列はエントリを作らない（B13 と同じ fail-safe）。
-- `fieldType` は**物理フィールドの素通し列のみ**に付ける（計算列には型がない）。本仕様では格納するだけで消費しない（§8 の前提）。
+- `fieldType` は**kintone の物理フィールドに対応する列のみ**に付ける（SELECT の素通し列＝§4.3、`#err` の DML 対象列＝§4.2）。計算列・メタ列には型がないため付けない。本仕様では格納するだけで消費しない（§8 の前提）。
 
 ### 4.2 供給源A: 合成テーブル `#err`（明示宣言）
 
@@ -164,6 +164,12 @@ const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 
 **`WITH` 内の `SHOW APPS` / `DESCRIBE`**（言語リファレンス §13）は SELECT 由来ではなく列が合成されるため、本仕様では**型不明として保存**する（`#err` のような明示宣言は行わない）。
 
+### 4.4 チェーン・UNION・JOIN
+
+- **チェーン**（`#t2 AS SELECT x FROM #t1`）: `#t1` の `columnMeta` を引き継ぐ。実体化は文の順に行われるため、参照時点で上流の meta は確定済み。
+- **JOIN**: 出力列は**その列のソース表**で解決する（修飾 `a.x` はその表、非修飾は一意なときのみ＝B13 の既存規則と同じ。衝突は載せない）。
+- **UNION / UNION ALL**: 出力列名は左辺（現行 `leftCols`・[execute.ts:1862](../../src/execute.ts#L1862)）。型は**左右の推論が一致した列のみ**載せる。**不一致・片側不明は載せない**（例: `SELECT 会社名 FROM APP4148 UNION ALL SELECT 金額 FROM APP4221` は string と number の衝突 → 型不明）。
+
 ### 4.5 フォーム定義 API の増加（R2 で訂正）
 
 > **R1 の「API 呼び出しは増えない」は誤り。** 現行の `validateSelectFieldCodes`（[execute.ts:1321-1322](../../src/execute.ts#L1321)）は**明示のユーザーフィールドが 1 つも無ければフォーム定義を取得しない**（`userFields.length === 0` で `continue`）。つまり `SELECT *` のアプリでは現在フォーム定義を取っていない。
@@ -172,12 +178,6 @@ const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 - 正しい表現は「**アプリごと最大 1 回。`getFieldsCached` を共有するため既取得なら追加なし**」。同一 `cacheContext` 内の再実行でも増えない。
 - ワイルドカード推論を落として「増加ゼロ」を守る選択肢もあるが、`CREATE TEMP TABLE #t AS SELECT * FROM APP…` は常用パターンで**型が付かない穴が大きい**ため、**取得を許容する方を採る**。
 - **0 行の bare `SELECT *`（実アプリ）は対象外**。B2 の既存制限（列自体を復元できない）に従い、列が無いので型メタも無い。
-
-### 4.4 チェーン・UNION・JOIN
-
-- **チェーン**（`#t2 AS SELECT x FROM #t1`）: `#t1` の `columnMeta` を引き継ぐ。実体化は文の順に行われるため、参照時点で上流の meta は確定済み。
-- **JOIN**: 出力列は**その列のソース表**で解決する（修飾 `a.x` はその表、非修飾は一意なときのみ＝B13 の既存規則と同じ。衝突は載せない）。
-- **UNION / UNION ALL**: 出力列名は左辺（現行 `leftCols`・[execute.ts:1862](../../src/execute.ts#L1862)）。型は**左右の推論が一致した列のみ**載せる。**不一致・片側不明は載せない**（例: `SELECT 会社名 FROM APP4148 UNION ALL SELECT 金額 FROM APP4221` は string と number の衝突 → 型不明）。
 
 ## 5. 消費側の配線
 
