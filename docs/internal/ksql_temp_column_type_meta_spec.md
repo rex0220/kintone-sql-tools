@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。**B16 `GROUP_CONCAT` の前提**（[機能比較評価](ksql_sql_feature_comparison_evaluation.md) §4）。
-- ステータス: **仕様案 R1（codex レビュー前）。未実装。**
+- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -94,7 +94,7 @@ if (stmt.from.cteName !== null) return undefined;            // 非修飾・JOIN
 export interface MaterializedColumnMeta {
   /** 集約・ソートの種別。B13 の AggregateSortKindResolver と同じ意味論 */
   readonly sortKind?: "number" | "string";
-  /** 物理フィールドの素通し列のみ。将来の typed IN 配線（§8）で使う */
+  /** kintone の物理フィールドに対応する列のみ（SELECT の素通し列・`#err` の DML 対象列）。将来の typed IN 配線（§8）で使う */
   readonly fieldType?: string;
 }
 
@@ -112,17 +112,38 @@ interface MaterializedTable {
 
 ### 4.2 供給源A: 合成テーブル `#err`（明示宣言）
 
-`appendValidationErrors` が `$err_*` 列の型を宣言する:
+`#err` の列は `columns = [...payloadFields, ...VALIDATION_META_COLUMNS]`（[execute.ts:2668](../../src/execute.ts#L2668)）で構成される。両者を**別々の供給元**から宣言する。
+
+#### メタ列（`VALIDATION_META_COLUMNS`）
 
 | 列 | sortKind | 根拠 |
 |---|---|---|
-| `$err_statement` | `number` | `String(statementNumber)` |
+| `$err_statement` | `number` | `String(statementNumber)`（[dmlValidationCandidates.ts:67](../../src/core/dmlValidationCandidates.ts#L67)） |
 | `$err_row` | `number` | `String(candidate.rowNumber)` |
 | `$err_operation` / `$err_field` / `$err_code` / `$err_message` | `string` | テキスト |
-| 入力ペイロード列 | **元 SELECT の推論結果を引き継ぐ**（§4.3）。不明なら載せない | |
 
-- 追記時（既存 `#err` に append）は**スキーマ一致検査（現行 execute.ts:515）と同様に columnMeta も一致を要求**する。矛盾したら現行と同じく `ArgumentError`。
-- これにより `GROUP_CONCAT($err_message)`（B16）と `MIN($err_message)`（B13）が `#err` で機能する。
+#### ペイロード列（`payloadFields`）— **R2 で訂正**
+
+> **R1 の「元 SELECT の推論結果を引き継ぐ」は誤り。** `#err` は `INSERT`/`UPSERT … VALUES` や `UPDATE` でも生成され、**元 SELECT が存在しない**。`INSERT`/`UPSERT … SELECT` の場合も SELECT 列は**位置対応で DML 対象フィールドへ割り当てられる**ため、SELECT の出力列名と `#err` の列名は一致しない。
+
+**供給元は書き込み先アプリのフィールド定義**とする。`prepareDmlValidation`（[execute.ts:2648-2664](../../src/execute.ts#L2648)）が**既に取得済み**:
+
+```ts
+const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
+const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+```
+
+- 各ペイロード列の型は `infoByCode.get(列名)` の `KintoneFieldInfo` から §4.3 と同じ分類（B13 の `sortKind` ＋ `fieldType`）で宣言する。
+- **`$id`（UPDATE 経路の先頭列）は `RECORD_NUMBER` 相当**＝`sortKind: "number"`・`fieldType: "RECORD_NUMBER"`。`infoByCode` には無いため個別に扱う。
+- これで **VALUES / SELECT / UPDATE の全経路**を一様に覆える。**追加 API は不要**（2653 で取得済みのものを使う）。
+
+#### 追記時の一致検査
+
+- 既存 `#err` への append 時は、現行のスキーマ一致検査（[execute.ts:515](../../src/execute.ts#L515)）と同様に `columnMeta` の一致も要求する。
+- **一致は Map の参照一致ではなく構造一致**（キー集合と各エントリの `sortKind` / `fieldType` が等しいこと）で判定する。矛盾したら現行と同じく `ArgumentError`。
+
+これにより `GROUP_CONCAT($err_message)`（B16）と `MIN($err_message)`（B13）が `#err` で機能する。
 
 ### 4.3 供給源B: SELECT 由来の推論
 
@@ -131,7 +152,7 @@ interface MaterializedTable {
 | 列種別（`SelectColumn`） | 推論 |
 |---|---|
 | `FieldColumn`（素通し） | **ソースの型を継承**。物理アプリ → `getFieldsCached` の `KintoneFieldInfo`（`fieldType` ＋ B13 の分類で `sortKind`）。temp/CTE → **その列の `columnMeta` を継承**（＝チェーン・§4.4） |
-| `WildcardColumn` / `ParentWildcardColumn` | 展開後の各列に上記を適用 |
+| `WildcardColumn` / `ParentWildcardColumn` | 展開後の各列に上記を適用（**フォーム定義の取得が要る**・§4.5） |
 | `AggregateColumn` | `COUNT`/`SUM`/`AVG` → `number`／`MIN`/`MAX` → **引数の解決結果**（B13 のリゾルバ）／（将来 `GROUP_CONCAT` → `string`） |
 | `AggArithColumn` / `ArithColumn` | `number`（評価が `Number()` 化するため確定） |
 | `LiteralColumn` | `string`（文字列リテラル） |
@@ -140,6 +161,17 @@ interface MaterializedTable {
 | `ScalarSubqueryColumn` | **推論しない** |
 
 > **原則**: 迷ったら載せない。載せないことは「従来どおり数値経路」を意味し、**現状（NaN）から悪化しない**。逆に誤った型を載せると**静かに誤った集約結果**を生む（NaN より悪い）。
+
+**`WITH` 内の `SHOW APPS` / `DESCRIBE`**（言語リファレンス §13）は SELECT 由来ではなく列が合成されるため、本仕様では**型不明として保存**する（`#err` のような明示宣言は行わない）。
+
+### 4.5 フォーム定義 API の増加（R2 で訂正）
+
+> **R1 の「API 呼び出しは増えない」は誤り。** 現行の `validateSelectFieldCodes`（[execute.ts:1321-1322](../../src/execute.ts#L1321)）は**明示のユーザーフィールドが 1 つも無ければフォーム定義を取得しない**（`userFields.length === 0` で `continue`）。つまり `SELECT *` のアプリでは現在フォーム定義を取っていない。
+
+- ワイルドカード展開列の型推論には**フォーム定義が必要**なので、`SELECT *` を実体化するアプリでは**新たに取得が発生する**。
+- 正しい表現は「**アプリごと最大 1 回。`getFieldsCached` を共有するため既取得なら追加なし**」。同一 `cacheContext` 内の再実行でも増えない。
+- ワイルドカード推論を落として「増加ゼロ」を守る選択肢もあるが、`CREATE TEMP TABLE #t AS SELECT * FROM APP…` は常用パターンで**型が付かない穴が大きい**ため、**取得を許容する方を採る**。
+- **0 行の bare `SELECT *`（実アプリ）は対象外**。B2 の既存制限（列自体を復元できない）に従い、列が無いので型メタも無い。
 
 ### 4.4 チェーン・UNION・JOIN
 
@@ -152,25 +184,29 @@ interface MaterializedTable {
 `loadAggregateSortKindResolver`（B13）の temp/CTE 降参箇所（§2.3）を、**`columnMeta` 参照へ差し替える**:
 
 - リゾルバに `tempTables` / `cteCache`（`ReadonlyMap<string, MaterializedTable>`）を渡す（呼び出し元 `executeFullScanSelect` / `executeFullScanWithCte` は既に保持）。
-- 修飾参照 `#t.x` / 非修飾（JOIN なし）: 参照先の `columnMeta.get(列名)?.sortKind` を返す。無ければ `undefined`（従来）。
+- **修飾参照は `FROM #t AS t` の `t.x` 形**（R2 で訂正）: 参照先の `columnMeta.get(列名)?.sortKind` を返す。無ければ `undefined`（従来）。
+  > **`#t.x` は書けない。** `parseTableRef`（[parser.ts:1263-1266](../../src/parser/parser.ts#L1263)）は temp/CTE の alias を「`AS` 指定 → 暗黙 alias → **無ければ null**」とする。物理アプリ（[:1281](../../src/parser/parser.ts#L1281)）だけが `?? name` でテーブル名を既定 alias にするため `APP100.x` は解決するが、`FROM #t` は `alias = null` で `#t.x` は照合できない（リゾルバは `table.alias === ref.tableAlias` で照合）。**この非対称の解消は名前解決の変更であり B14 の対象外**（§8）。
+- 非修飾（JOIN なし）: `stmt.from` が temp/CTE ならその `columnMeta` を引く。
 - **JOIN の非修飾参照**: 物理側と temp 側を**同じ土俵で一意性判定**する。現行は「CTE/temp が1つでもあれば即 `undefined`」だが、B14 後は temp の列名も候補に含めて数え、**候補が1つのときだけ**その meta を返す（0 個・2 個以上＝衝突は `undefined`）。
   - これは現行より**受理範囲が広がる**方向のみ（`undefined` だったものが確定する）。
-- API 呼び出しは**増えない**（temp の meta は実体化時に確定済み。物理アプリ側は B13 の既存キャッシュ経路のまま）。
+- **消費側での API 増加はない**（temp の meta は実体化時に確定済み。物理アプリ側は B13 の既存キャッシュ経路のまま）。実体化側の増加は §4.5 のとおり。
 
 ## 6. 受入条件
 
 - [ ] `CREATE TEMP TABLE #t AS SELECT 会社名 FROM APP4148; SELECT MIN(会社名) FROM #t;` が**辞書順の文字列**を返す（現在 `NaN`）。
 - [ ] 同じく日時列（`CREATED_TIME` 等）の temp 経由 `MIN`/`MAX` が最古/最新を返す。
 - [ ] **数値列の temp 経由 `MIN`/`MAX` は数値比較を維持**（回帰ゼロ。`顧客No` max=214 が `"99"` にならない）。
-- [ ] `MIN($err_message) FROM #err` が文字列を返す（`$err_row` は数値のまま）。
+- [ ] `MIN($err_message) FROM #err` が文字列を返す（`$err_row` / `$err_statement` は数値のまま）。
+- [ ] **`#err` のペイロード列が DML 対象アプリのフィールド定義から型付く**（`INSERT`/`UPSERT … VALUES`・`… SELECT`・`UPDATE` の**全経路**）。`UPDATE` 経路の `$id` は数値（`RECORD_NUMBER` 相当）。**元 SELECT の列名には依存しない**。
 - [ ] **チェーン**: `#t1 → #t2` の 2 段でも型が伝播する。
 - [ ] **CTE**（`WITH c AS (SELECT 会社名 FROM APP4148) SELECT MIN(会社名) FROM c`）でも効く。
 - [ ] **UNION の型衝突**（string と number）は型不明＝従来経路。左右一致なら伝播。
-- [ ] **JOIN**: 修飾 `#t.x` が解決し、物理×temp の同名衝突は型不明。物理側のみ一意なら解決。
+- [ ] **JOIN**: `FROM #t AS t` の修飾参照 `t.x` が解決し、物理×temp の同名衝突は型不明。物理側のみ一意なら解決。
 - [ ] 推論しない列種別（`StringFuncColumn` / `CaseColumn` / `ScalarSubqueryColumn`）は型不明＝従来経路（**現状維持**）。
+- [ ] `WITH` 内の `SHOW APPS` / `DESCRIBE` 由来の列は型不明。
 - [ ] `columnMeta` を持たない実体化（既存経路）は完全に従来動作。
-- [ ] `#err` への追記でスキーマ／`columnMeta` が矛盾したら `ArgumentError`（現行のスキーマ検査と同型）。
-- [ ] **フォーム定義 API の呼び出し回数が増えない**（temp の meta は実体化時に確定・計測テストで固定）。
+- [ ] `#err` への追記で `columnMeta` が矛盾したら `ArgumentError`。一致判定は**構造一致**（キー集合と `sortKind`/`fieldType`）で、Map の参照一致ではない。
+- [ ] **フォーム定義 API はアプリごと最大 1 回**（`getFieldsCached` 共有・既取得なら追加なし・同一 `cacheContext` の再実行で増えない）を計測テストで固定。`SELECT *` の実体化では**新規取得が 1 回発生してよい**（§4.5）。
 - [ ] `ORDER BY` の `sortKinds`・typed `IN` 評価に**回帰なし**（本仕様では配線しない）。
 
 ## 7. リスク・SemVer
@@ -178,11 +214,13 @@ interface MaterializedTable {
 - **SemVer: minor**。挙動変更は「temp 経由のテキスト・日時 `MIN`/`MAX` が `NaN` → 正しい値」の方向のみ。数値は不変。
 - **最大のリスク＝誤った型の伝播**。誤ると NaN でなく**静かに誤った集約結果**になる（例: テキストを number と誤判定 → 全て NaN、数値を string と誤判定 → `"10" < "9"`）。→ §4.3 の「迷ったら載せない」を厳守し、推論する列種別を**素通し・集約・算術・リテラルに限定**する。
 - **リスク（メモリ）**: `columnMeta` は列数ぶんの小さな Map（行数に比例しない）。一時テーブル上限（1万行）に対して無視できる。
-- **リスク（スキーマ検査）**: `#err` の追記で `columnMeta` 一致を要求すると、同一 `#err` へ**異なる文**から追記する既存パターン（B12-A/B12-B の複文）で不一致が起きないか要確認 → 受入条件に含める。
+- **リスク（スキーマ検査）**: `#err` の追記で `columnMeta` 一致を要求すると、同一 `#err` へ**異なる文**から追記する既存パターン（B12-A/B12-B の複文）で不一致が起きないか要確認 → 受入条件に含める。判定は**構造一致**（§4.2）。
+- **リスク（API 増）**: `SELECT *` を実体化するアプリでフォーム定義取得が新規に 1 回発生する（§4.5）。アプリごと 1 回・キャッシュ共有のため上限は明確だが、「増加ゼロ」ではない点を計測テストで固定する。
 
 ## 8. スコープ外・後続
 
 - **型メタ付き `IN`/`NOT IN`（v2.5.0）への配線**: 本仕様で `fieldType` は保存するが**消費しない**。配線すると temp 経由の `IN` が文字列比較 → 配列/オブジェクト要素比較へ**挙動変更**するため、独立した課題として仕様・実機検証を行う（言語リファレンス §11 の「一時テーブル/CTE 経由は文字列比較（別課題）」の解消）。
 - **`StringFuncColumn` の戻り型推論**: 関数ごとの戻り型表（`LENGTH`/`DATEDIFF`/`YEAR`→number・`CAST`→引数依存・`COALESCE`/`ISNULL`/`NULLIF`→引数依存）。面が広く誤りが静かに効くため別課題。
 - **`CaseColumn` の型推論**（全分岐が同型のときのみ確定、など）。
+- **`#t.x`（alias なしの temp 修飾参照）**: `parseTableRef` が temp/CTE には既定 alias を与えない（物理アプリだけ `?? name`）ため現状 `#t.x` は解決できない（§5）。**名前解決の変更**であり本仕様とは別課題。当面は `FROM #t AS t` の `t.x` を使う。
 - **B16 `GROUP_CONCAT`**: 本仕様の完了後に実装し、**同一リリース（v2.15.0）で束ねる**（片方だけでは `#err` 集約が成立せず成果が出ないため）。
