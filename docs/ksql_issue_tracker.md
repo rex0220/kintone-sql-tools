@@ -42,7 +42,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B1 | CLI の DML × `truncate` で暗黙の部分書き込み | バグ | 🐞 **v2.11.0 予定①**（仕様完成・案A） | 安全性 | **高** | [issue](internal/ksql_cli_dml_on_limit_truncate_issue.md) |
+| B1 | CLI の DML × `truncate` で暗黙の部分書き込み | バグ | 🐞 **v2.11.0 予定①**（案A・codex 承認・実装着手可） | 安全性 | **高** | [issue](internal/ksql_cli_dml_on_limit_truncate_issue.md) |
 | B2 | 空 `SELECT *` / 空 CTE / 混在ワイルドカードの 0 行列欠落 | バグ | 🐞 **v2.11.0 予定②**（仕様案 R1・codex レビュー前） | 正しさ | 中 | [issue](internal/ksql_empty_select_columns_issue.md) / [spec](internal/ksql_empty_select_wildcard_pipeline_spec.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
