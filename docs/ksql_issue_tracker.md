@@ -8,6 +8,7 @@
 
 - **本書は一覧（インデックス）**。仕様・診断・受入条件などの本文は各文書に置く。
 - 各文書の先頭 `- ステータス:` 行が正（single source of truth）。本書はそれを集約する。
+- **複数の課題にまたがる意味論は「横断仕様」を正とし、個別文書はそれを参照する**（事実を書き写さない）。現在: [文字列の扱い](internal/ksql_string_semantics.md)。実測で覆ったら**まず横断仕様を直し**、個別文書はそれに従う。
 - 状態が変わったら **本書・各文書のステータス行・`CHANGELOG.md`・auto-memory** を揃えて更新する。
 - リリース時は「§2 リリース済み履歴」に版数・効果を1行追記し、「§1 バックログ」から該当行を落とす。
 
@@ -36,6 +37,7 @@
 | B22 | **切り出し・桁揃え関数がサロゲートペアを分割する** | **バグ** | 📝 課題 R1（codex レビュー前・**13,905 ケース / 入力 18 種で網羅検証済み**）。`LEFT`/`RIGHT`/`SUBSTRING`/`LPAD`/`RPAD` が**孤立サロゲート**を返す（`LEFT('𩸽あ😀',1)`=`"\ud867"`）。**`LPAD`/`RPAD` は 2 経路**＝切り詰めと**埋め文字列そのもの**（`LPAD('7',4,'😀')`=`"😀\ud83d7"`）。**B19 で追加した関数が書き込み用途で壊れた値を生む**。対策＝**UTF-16 のまま割る位置では短い方へ寄せる**（コードポイント化は `LEFT(x,64)` が 80 ユニットを返し `ERR_LENGTH_MAX` ＝上限に収める用途が壊れる／`Intl.Segmenter` は Firefox 125 以降でホスト依存。**`LENGTH` は kintone が UTF-16 で数えるため動かせない**＝実測確定） | **正しさ** | 中 | [issue](internal/ksql_surrogate_pair_split_issue.md) |
 | B23 | `LENGTH_CHAR`（コードポイント単位の文字数）を追加 | 改善 | 📝 仕様案 R1（codex レビュー前）。**`LENGTH` は変更しない**＝kintone 本体が UTF-16 で数えそれを「文字」と呼ぶことを**素の INSERT で実測確定**（`😀`×6 → 「11文字より短くなければなりません」）。**`𠮟`（2010 年の常用漢字）がサロゲートペア**で `LENGTH` は 2 と数える＝記事の文字数制限で誤判定する。**「正しい文字数」は用途で変わる**（Web フォームの JS は UTF-16／Python・Go はコードポイント）ため両方要る。副産物＝**`LENGTH - LENGTH_CHAR` がサロゲートペアの個数**（`LENGTHB` では `'😀'` と `'éé'` が同値で原理的に判定不能）。実装は `[...x].length` の 1 行・ホスト依存なし | 機能 | 中 | [spec](internal/ksql_length_char_spec.md) |
 | B24 | `TRANSLATE(x, from, to)`（1 対 1 の文字写像）を追加 | 改善 | 📝 仕様案 R1（codex レビュー前）。**実需＝Shift_JIS(CP932) で保存できない表外漢字 40 字の変換**（cli-kintone の CSV 出力エラー対策・[計算式プラグインの実装](https://qiita.com/rex0220/items/9db98b2cf027b686e0b5)の kSQL 版）。**主要 4 RDB のうち 3 つにある**（Oracle/PostgreSQL/**SQL Server 2017**。MySQL のみ無し）。**コードポイント整列が必須**＝`𠮟` がサロゲートペアのため変換表が UTF-16 では 41 vs 40 で不一致になり、素朴な実装だと**実データ 40 字中 25 字が誤変換**（実測）。長さ不一致は**エラー**（Oracle/PG は黙って削除するが kSQL の fail-closed 方針に反する）。`REGEXP_REPLACE`(B20) とは守備範囲が重ならず補完的（1文字→1文字 vs 1パターン→1文字列）。**B23 と同じ土台**（コードポイント） | 機能 | 中 | [spec](internal/ksql_translate_spec.md) |
+| B25 | **`ORDER BY` と `MIN`/`MAX` の文字列比較が食い違う** | **バグ**（一貫性） | 📝 課題 R1（codex レビュー前）。**同じデータで正反対の答え**（実機: `'a','B'` に対し `MAX`=`'a'`／`ORDER BY DESC LIMIT 1`=`'B'`）。`ORDER BY` だけ **ICU 照合 `localeCompare(_,'ja')`**（`process.ts:597`/`execute.ts:4117`）で、`MIN`/`MAX`（`process.ts:344`）・`GREATEST`/`LEAST`・`WHERE` の `<`/`>` は**コードユニット順**。8 組中 5 組で割れ、ICU は `'あ'`/`'ア'` を**等しい**と判定（順序が比較器で決まらない）。**さらに `ORDER BY` は ICU データ依存＝ホスト依存**で、プラグイン(ブラウザ)と CLI(Node) で結果が変わり得る＝**「同じ SQL は同じ結果」原則が既に破れている**（B20 §3.1 の「正規表現が最初」は誤り）。統一は重い判断（どちらへ揃えても影響大） | **正しさ** | 中 | [semantics §4](internal/ksql_string_semantics.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
@@ -98,6 +100,8 @@
 
 ## 関連文書
 
+- **横断仕様（正・single source of truth）**
+  - **文字列の扱い**（文字数の定義・サロゲートペア・比較順序・ホスト依存）: [`ksql_string_semantics.md`](internal/ksql_string_semantics.md) — **個別文書は事実を書き写さず本書を参照する**
 - リリース履歴の一次情報: [`CHANGELOG.md`](../CHANGELOG.md)
 - 主要 RDB（MySQL/Oracle/SQL Server）との機能比較・欠落機能の効果評価: [`ksql_sql_feature_comparison_evaluation.md`](internal/ksql_sql_feature_comparison_evaluation.md)
 - 言語仕様: [`ksql_language_reference.md`](ksql_language_reference.md)
