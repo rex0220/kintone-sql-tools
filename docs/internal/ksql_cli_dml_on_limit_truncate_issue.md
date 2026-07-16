@@ -1,7 +1,7 @@
 # CLI: DML × `--on-limit truncate` で SELECT-based DML のソースが黙って切り捨てられる問題
 
 - 作成日: 2026-07-10
-- ステータス: **起案（未着手）**
+- ステータス: **v2.11.0 予定①（仕様完成・案A で実装着手可）。2026-07-16 に B1+B2+B8 を v2.11.0 へ束ねる方針決定、本課題を先行実装**
 - 発端: プラグイン DML バッチ対応（`ksql_plugin_dml_batch_spec.md` R4）のレビューで、UI の `onLimitReached: "truncate"` が SELECT-based DML のソース読み取りに継承される問題が見つかり、プラグインは「DML では error 固定」で修正済み。**同種の経路が CLI に残っている**（コード裏取り済み）
 - 関連資料:
   - [ksql_plugin_dml_batch_spec.md](ksql_plugin_dml_batch_spec.md) R4（発端。プラグイン側の修正と経路の裏取り）
