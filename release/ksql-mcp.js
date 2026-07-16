@@ -35990,7 +35990,7 @@ function hasAggregateColumns(columns) {
     (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr)
   );
 }
-function applyGroupBy(rows, groupByKeys, columns) {
+function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind) {
   const groups = /* @__PURE__ */ new Map();
   for (const row of rows) {
     const key = groupByKeys.map((k) => evalGroupByKey(k, row)).join("\0");
@@ -36014,15 +36014,15 @@ function applyGroupBy(rows, groupByKeys, columns) {
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
         const syntheticKey = aggregateSyntheticName2(col.func, col.distinct, col.arg);
-        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows));
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows, resolveAggSortKind));
         outRow[col.alias ?? syntheticKey] = value;
         if (col.alias) outRow[syntheticKey] = value;
       } else if (col.type === "ARITH_AGG_COL") {
         const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
-        outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows));
+        outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
       } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(col.expr)) {
         const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
-        const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows);
+        const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
         outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
       }
     }
@@ -36035,7 +36035,7 @@ function evalGroupByKey(key, row) {
   if (key.type === "FUNC_KEY") return evalStringFunc(key.expr, row);
   return String(evalArithExpr(key.expr, row));
 }
-function evalAggregate(func, distinct, arg, rows) {
+function evalAggregate(func, distinct, arg, rows, resolveAggSortKind) {
   if (arg.type === "WILDCARD") {
     return func === "COUNT" ? rows.length : 0;
   }
@@ -36055,6 +36055,11 @@ function evalAggregate(func, distinct, arg, rows) {
   }
   const eff = distinct ? [...new Set(strValues)] : strValues;
   if (func === "COUNT") return eff.length;
+  const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" ? resolveAggSortKind?.(toAggregateFieldRef(arg.field)) : void 0;
+  if (sortKind === "string") {
+    if (eff.length === 0) return "";
+    return func === "MAX" ? maxStringOf(eff) : minStringOf(eff);
+  }
   const nums = eff.map(Number);
   switch (func) {
     case "SUM":
@@ -36068,6 +36073,20 @@ function evalAggregate(func, distinct, arg, rows) {
       return nums.length === 0 ? 0 : minOf(nums);
   }
 }
+function toAggregateFieldRef(field) {
+  const dot = field.indexOf(".");
+  return dot > 0 ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field };
+}
+function maxStringOf(values) {
+  let value = values[0];
+  for (const candidate of values) if (candidate > value) value = candidate;
+  return value;
+}
+function minStringOf(values) {
+  let value = values[0];
+  for (const candidate of values) if (candidate < value) value = candidate;
+  return value;
+}
 function maxOf(nums) {
   let m = nums[0];
   for (const n of nums) if (n > m) m = n;
@@ -36078,11 +36097,11 @@ function minOf(nums) {
   for (const n of nums) if (n < m) m = n;
   return m;
 }
-function evalAggArithExpr(node, rows) {
+function evalAggArithExpr(node, rows, resolveAggSortKind) {
   if (node.type === "NUMBER") return node.value;
-  if (node.type === "AGG_REF") return evalAggregate(node.func, node.distinct, node.arg, rows);
-  const l = evalAggArithExpr(node.left, rows);
-  const r = evalAggArithExpr(node.right, rows);
+  if (node.type === "AGG_REF") return Number(evalAggregate(node.func, node.distinct, node.arg, rows, resolveAggSortKind));
+  const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
+  const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
   switch (node.op) {
     case "+":
       return l + r;
@@ -36427,26 +36446,24 @@ function hasAggregateInStringFuncArg(arg) {
 function hasAggregateInStringFuncExpr2(expr) {
   return expr.args.some((arg) => hasAggregateInStringFuncArg(arg));
 }
-function resolveAggInStringFuncArg(arg, rows) {
+function resolveAggInStringFuncArg(arg, rows, resolveAggSortKind) {
   if (arg.type === "AGG_REF") {
-    return {
-      type: "NUMBER",
-      value: evalAggregate(arg.func, arg.distinct, arg.arg, rows)
-    };
+    const value = evalAggregate(arg.func, arg.distinct, arg.arg, rows, resolveAggSortKind);
+    return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {
-    return { type: "NUMBER", value: evalAggArithExpr(arg, rows) };
+    return { type: "NUMBER", value: evalAggArithExpr(arg, rows, resolveAggSortKind) };
   }
   if (arg.type === "STRING_FUNC") {
-    return resolveAggInStringFuncExpr(arg, rows);
+    return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);
   }
   return arg;
 }
-function resolveAggInStringFuncExpr(expr, rows) {
+function resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind) {
   return {
     type: "STRING_FUNC",
     func: expr.func,
-    args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows))
+    args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows, resolveAggSortKind))
   };
 }
 function runFullScan(input) {
@@ -36458,6 +36475,7 @@ function runFullScan(input) {
     sortKinds,
     fieldTypeResolver,
     havingFieldTypeResolver,
+    aggregateSortKindResolver,
     appliedKlikes,
     sourceColumns
   } = input;
@@ -36473,7 +36491,7 @@ function runFullScan(input) {
   }
   rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes);
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
-    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns);
+    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
   }
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
   if (stmt.distinct) {
@@ -37622,6 +37640,116 @@ async function loadTypedInFieldTypes(stmt, client, cacheContext) {
   const entries = await Promise.all([...appIds].map(async (appId) => [appId, await getFieldTypeMap(appId, client, cacheContext)]));
   return new Map(entries);
 }
+function aggregateFieldRef(field) {
+  const dot = field.indexOf(".");
+  return dot > 0 ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field };
+}
+function collectAggregateRef(func, arg, out) {
+  if ((func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" && arg.field) {
+    out.push(aggregateFieldRef(arg.field));
+  }
+}
+function collectAggregateOperandRefs(node, out) {
+  if (node.type === "AGG_REF") {
+    collectAggregateRef(node.func, node.arg, out);
+    return;
+  }
+  if (node.type === "AGG_ARITH") {
+    collectAggregateOperandRefs(node.left, out);
+    collectAggregateOperandRefs(node.right, out);
+  }
+}
+function collectStringFuncAggregateRefs(expr, out) {
+  for (const arg of expr.args) {
+    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+      collectAggregateOperandRefs(arg, out);
+    } else if (arg.type === "STRING_FUNC") {
+      collectStringFuncAggregateRefs(arg, out);
+    }
+  }
+}
+function collectSelectAggregateSortRefs(columns) {
+  const refs = [];
+  for (const column of columns) {
+    if (column.type === "AGGREGATE") {
+      collectAggregateRef(column.func, column.arg, refs);
+    } else if (column.type === "ARITH_AGG_COL") {
+      collectAggregateOperandRefs(column.expr, refs);
+    } else if (column.type === "STRFUNC_COL") {
+      collectStringFuncAggregateRefs(column.expr, refs);
+    }
+  }
+  return refs;
+}
+var AGGREGATE_STRING_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "SINGLE_LINE_TEXT",
+  "MULTI_LINE_TEXT",
+  "RICH_TEXT",
+  "LINK",
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "STATUS",
+  "DATE",
+  "TIME",
+  "DATETIME",
+  "CREATED_TIME",
+  "UPDATED_TIME"
+]);
+function aggregateSortKind(info) {
+  if (info.sortKind !== void 0) return info.sortKind;
+  if (info.fieldType === "NUMBER" || info.fieldType === "RECORD_NUMBER") return "number";
+  return AGGREGATE_STRING_FIELD_TYPES.has(info.fieldType) ? "string" : void 0;
+}
+async function loadAggregateSortKindResolver(stmt, client, cacheContext) {
+  const refs = collectSelectAggregateSortRefs(stmt.columns);
+  if (refs.length === 0) return void 0;
+  const appIds = /* @__PURE__ */ new Set();
+  const physicalTables = physicalSelectTables(stmt);
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        appIds.add(stmt.from.appId);
+        continue;
+      }
+      const table = findTableForAlias(stmt, ref.tableAlias);
+      if (table && table.cteName === null) appIds.add(table.appId);
+    } else if (stmt.joins.length === 0) {
+      if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
+    } else {
+      if ([stmt.from, ...stmt.joins.map((join) => join.table)].some((table) => table.cteName !== null)) continue;
+      for (const table of physicalTables) appIds.add(table.appId);
+    }
+  }
+  if (appIds.size === 0) return void 0;
+  const fieldInfosByApp = new Map(
+    await Promise.all([...appIds].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))];
+    }))
+  );
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  return (ref) => {
+    let info;
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
+      } else {
+        const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+        if (!table || table.cteName !== null) return void 0;
+        info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      }
+    } else if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return void 0;
+      info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+    } else {
+      if (tables.some((table) => table.cteName !== null)) return void 0;
+      const matches = physicalTables.map((table) => fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field))).filter((candidate) => candidate !== void 0);
+      if (matches.length !== 1) return void 0;
+      info = matches[0];
+    }
+    return info ? aggregateSortKind(info) : void 0;
+  };
+}
 function fieldCodeForTypeLookup(table, field) {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
@@ -37667,9 +37795,10 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
   ]);
-  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
-    loadTypedInFieldTypes(stmt, client, cacheContext)
+    loadTypedInFieldTypes(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -37757,6 +37886,7 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
@@ -37840,9 +37970,10 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache)
   ]);
-  const [pushdownMeta, typedInFieldTypes] = await Promise.all([
+  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
-    loadTypedInFieldTypes(stmt, client, cacheContext)
+    loadTypedInFieldTypes(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -37914,6 +38045,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
     sourceColumns
   });
@@ -42078,7 +42210,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.13.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.14.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
