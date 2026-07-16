@@ -465,7 +465,7 @@ test("UPDATE FROM #temp: ソース参照と結合条件を分解する", () => {
   const ast = parseBatch(
     "UPDATE APP100 SET c = e.f, status = 'ok', total = amount * 2 FROM #e e WHERE APP100.$id = e.k AND (status = 'A' OR status = 'B')"
   )[0] as UpdateStatement;
-  expect(ast.from).toMatchObject({ appId: 0, cteName: "#e", alias: "e", joinKeyField: "k" });
+  expect(ast.from).toMatchObject({ appId: 0, cteName: "#e", alias: "e", targetJoinField: "$id", joinKeyField: "k" });
   expect(ast.assignments[0]).toEqual({ field: "c", value: { type: "SOURCE_FIELD", alias: "e", field: "f" } });
   expect(ast.from?.targetFilter).toMatchObject({ type: "LOGICAL", op: "OR" });
 });
@@ -474,7 +474,20 @@ test("UPDATE FROM APP: 左右反転した結合条件を分解する", () => {
   const ast = parse(
     "UPDATE APP100 SET c = s.f FROM APP200 s WHERE s.k = APP100.$id"
   ) as UpdateStatement;
-  expect(ast.from).toEqual({ appId: 200, cteName: null, alias: "s", joinKeyField: "k", targetFilter: null });
+  expect(ast.from).toEqual({ appId: 200, cteName: null, alias: "s", targetJoinField: "$id", joinKeyField: "k", targetFilter: null });
+});
+
+test("UPDATE FROM APP: 業務キー結合と左右反転を分解する", () => {
+  const direct = parse(
+    "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.顧客コード = s.code AND status = 'A'"
+  ) as UpdateStatement;
+  expect(direct.from).toMatchObject({ targetJoinField: "顧客コード", joinKeyField: "code" });
+  expect(direct.from?.targetFilter).toMatchObject({ type: "BINARY", op: "=", left: { field: "status" } });
+
+  const reversed = parse(
+    "UPDATE APP100 SET c = s.f FROM APP200 s WHERE s.code = 顧客コード"
+  ) as UpdateStatement;
+  expect(reversed.from).toMatchObject({ targetJoinField: "顧客コード", joinKeyField: "code" });
 });
 
 test.each([
@@ -487,6 +500,7 @@ test.each([
   "UPDATE APP100 SET c = (SELECT MAX(f) FROM APP300) FROM APP200 s WHERE APP100.$id = s.k",
   "UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k AND APP999.status = 'A'",
   "UPDATE APP100$rows SET c = s.f FROM APP200 s WHERE APP100.$id = s.k",
+  "UPDATE APP100 SET c = APP100.f FROM APP200 APP100 WHERE APP100.code = APP100.k",
 ])("UPDATE FROM の非対応形を拒否する: %s", (sql) => {
   expect(() => parse(sql)).toThrow(ParseError);
 });

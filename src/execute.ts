@@ -40,7 +40,7 @@ import {
   KintoneDeleteParams,
   FieldTypeMap,
 } from "./converter/dmlToKintone";
-import { fetchAll, PageFetcher } from "./api/fetchAll";
+import { fetchAll, FetchAllLimitError, PageFetcher } from "./api/fetchAll";
 import {
   fetchRecordsForSharedPlan,
   resolveDmlTargetIds,
@@ -2588,45 +2588,233 @@ async function materializeUpdateFromValidationCandidates(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<DmlValidationCandidate[]> {
-  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
-  const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
-  let sourceRows: ProcessRow[];
-  if (from.cteName !== null) {
-    const table = tempTables?.get(from.cteName);
-    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
-    for (const field of requiredSourceFields) if (!table.columns.includes(field)) throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
-    sourceRows = table.rows;
-  } else {
-    const resolved = await fetchRecordsForSharedPlan(client.getRecords, from.appId, "", requiredSourceFields, {
-      maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
-    });
-    sourceRows = resolved.records.map((record) => flatten(record, null));
-  }
-  const sourceById = new Map<number, ProcessRow>();
-  for (const row of sourceRows) {
-    const raw = row[from.joinKeyField]; const text = typeof raw === "string" ? raw.trim() : ""; const id = Number(text);
-    if (text === "" || !Number.isSafeInteger(id) || id <= 0) throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
-    if (sourceById.has(id)) throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
-    sourceById.set(id, row);
-  }
-  const targetFields = collectUpdateFromTargetFields(stmt);
-  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
-  const targetRecords: KintoneRecord[] = [];
-  for (const ids of splitChunks([...sourceById.keys()], UPDATE_FROM_ID_CHUNK_SIZE)) {
-    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
-    const resolved = await fetchRecordsForSharedPlan(client.getRecords, stmt.appId, filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery, targetFields, {
-      maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error",
-    });
-    targetRecords.push(...resolved.records);
-  }
+  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const matched = targetRecords.map((target) => ({ target, source: sourceById.get(Number(target["$id"]?.value))! }));
   const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1, operation: "UPDATE", mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
   }));
+}
+
+const UPDATE_FROM_KEY_CHUNK_SIZE = UPSERT_IN_CHUNK_SIZE;
+const UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE",
+]);
+
+type UpdateFromJoinKeyKind = "id" | "string" | "number";
+
+async function resolveUpdateFromMatchedRecords(
+  stmt: UpdateStatement,
+  from: NonNullable<UpdateStatement["from"]>,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<Array<{ target: KintoneRecord; source: ProcessRow }>> {
+  const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
+  const sourceFields = [...new Set(stmt.assignments
+    .filter((a) => a.value.type === "SOURCE_FIELD")
+    .map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
+  const sourceRows = await loadUpdateFromSourceRows(
+    from,
+    requiredSourceFields,
+    sourceFields,
+    client,
+    options,
+    cacheContext,
+    tempTables
+  );
+
+  const sourceByKey = new Map<string, ProcessRow>();
+  for (const row of sourceRows) {
+    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+    }
+    const key = normalizeUpdateFromJoinKey(row[from.joinKeyField], joinKind, "source");
+    if (sourceByKey.has(key)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for normalized key ${key}.`);
+    }
+    sourceByKey.set(key, row);
+  }
+
+  if (sourceByKey.size === 0) return [];
+
+  const maxRecords = options.maxRecords ?? 10_000;
+  const targetFields = collectUpdateFromTargetFields(stmt);
+  const filterQuery = from.targetFilter === null
+    ? ""
+    : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetRecords: KintoneRecord[] = [];
+  const seenTargetIds = new Set<string>();
+  let fetchedTargetCount = 0;
+  for (const keys of splitChunks([...sourceByKey.keys()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
+    const keyQuery = `${from.targetJoinField} in (${keys.map(sqlQuote).join(",")})`;
+    const query = filterQuery ? `(${keyQuery}) and (${filterQuery})` : keyQuery;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      stmt.appId,
+      query,
+      targetFields,
+      { maxRecords, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    fetchedTargetCount += resolved.records.length;
+    if (fetchedTargetCount > maxRecords) {
+      throw new FetchAllLimitError(
+        `取得件数が上限（${maxRecords} 件）を超えました。WHERE 句で絞り込むか、maxRecords を引き上げてください。`
+      );
+    }
+    for (const record of resolved.records) {
+      const id = record["$id"]?.value;
+      if (typeof id !== "string" || id === "") {
+        throw new Error("ArgumentError: UPDATE ... FROM target record does not contain a valid $id.");
+      }
+      // 64文字前方一致の過剰取得で同じ行が複数チャンクに現れても、PUT対象は1回にする。
+      if (seenTargetIds.has(id)) continue;
+      seenTargetIds.add(id);
+      targetRecords.push(record);
+    }
+  }
+
+  const matched: Array<{ target: KintoneRecord; source: ProcessRow }> = [];
+  for (const target of targetRecords) {
+    const raw = target[from.targetJoinField]?.value;
+    const key = normalizeUpdateFromJoinKey(raw, joinKind, "target");
+    if (key === null) continue;
+    const source = sourceByKey.get(key);
+    // SINGLE_LINE_TEXT の in は先頭64文字で過剰取得し得るため、全文一致しない行を除外する。
+    if (source !== undefined) matched.push({ target, source });
+  }
+  return matched;
+}
+
+async function resolveUpdateFromTargetJoinKind(
+  stmt: UpdateStatement,
+  from: NonNullable<UpdateStatement["from"]>,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<UpdateFromJoinKeyKind> {
+  if (from.targetJoinField === "$id") return "id";
+  const info = (await getFieldsCached(stmt.appId, client, cacheContext))
+    .find((field) => field.code === from.targetJoinField);
+  if (!info) {
+    throw new Error(`ArgumentError: UPDATE ... FROM target column ${from.targetJoinField} does not exist.`);
+  }
+  if (info.inSubtable || info.writable === false ||
+      (info.fieldType !== "SINGLE_LINE_TEXT" && info.fieldType !== "NUMBER")) {
+    throw new Error(
+      `ArgumentError: UPDATE ... FROM does not support target join field type ${info.fieldType} (${from.targetJoinField}).`
+    );
+  }
+  return info.fieldType === "NUMBER" ? "number" : "string";
+}
+
+async function loadUpdateFromSourceRows(
+  from: NonNullable<UpdateStatement["from"]>,
+  requiredSourceFields: string[],
+  sourceValueFields: string[],
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<ProcessRow[]> {
+  if (from.cteName !== null) {
+    const table = tempTables?.get(from.cteName);
+    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
+    for (const field of requiredSourceFields) {
+      if (!table.columns.includes(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+    }
+    return table.rows;
+  }
+
+  const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
+  const joinType = from.joinKeyField === "$id" ? "RECORD_NUMBER" : sourceTypes.get(from.joinKeyField);
+  if (joinType === undefined) {
+    throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+  }
+  if (from.joinKeyField !== "$id" && joinType !== "SINGLE_LINE_TEXT" && joinType !== "NUMBER") {
+    throw new Error(
+      `ArgumentError: UPDATE ... FROM does not support source join field type ${joinType} (${from.joinKeyField}).`
+    );
+  }
+  for (const field of sourceValueFields) {
+    if (field !== "$id" && !sourceTypes.has(field)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+    }
+    const type = field === "$id" ? "RECORD_NUMBER" : sourceTypes.get(field);
+    if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
+      throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
+    }
+  }
+  const resolved = await fetchRecordsForSharedPlan(
+    client.getRecords,
+    from.appId,
+    "",
+    requiredSourceFields,
+    { maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+  );
+  return resolved.records.map((record) => flatten(record, null));
+}
+
+function normalizeUpdateFromJoinKey(
+  raw: unknown,
+  kind: UpdateFromJoinKeyKind,
+  side: "source"
+): string;
+function normalizeUpdateFromJoinKey(
+  raw: unknown,
+  kind: UpdateFromJoinKeyKind,
+  side: "target"
+): string | null;
+function normalizeUpdateFromJoinKey(
+  raw: unknown,
+  kind: UpdateFromJoinKeyKind,
+  side: "source" | "target"
+): string | null {
+  if (typeof raw !== "string") {
+    throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a scalar string: ${String(raw)}`);
+  }
+  if (kind === "string") {
+    if (raw === "") {
+      if (side === "target") return null;
+      throw new Error("ArgumentError: UPDATE ... FROM source key must not be empty.");
+    }
+    return raw;
+  }
+  if (kind === "number" && side === "target" && raw === "") return null;
+  if (kind === "id") {
+    const text = raw.trim();
+    const id = Number(text);
+    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a positive safe integer: ${raw}`);
+    }
+    return String(id);
+  }
+  const text = raw.trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+    throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a finite decimal: ${raw}`);
+  }
+  let unsigned = text;
+  let negative = false;
+  if (unsigned.startsWith("-") || unsigned.startsWith("+")) {
+    negative = unsigned[0] === "-";
+    unsigned = unsigned.slice(1);
+  }
+  let [whole, fraction = ""] = unsigned.split(".");
+  whole = (whole || "0").replace(/^0+(?=\d)/, "");
+  fraction = fraction.replace(/0+$/, "");
+  const zero = /^0*$/.test(whole) && fraction === "";
+  const canonical = fraction === "" ? whole : `${whole}.${fraction}`;
+  return negative && !zero ? `-${canonical}` : canonical;
 }
 
 async function executeInsert(
@@ -2794,16 +2982,6 @@ async function executeUpdate(
   return { type: "UPDATE", updatedCount: ids.length };
 }
 
-const UPDATE_FROM_ID_CHUNK_SIZE = 50;
-const UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = new Set([
-  "CHECK_BOX",
-  "MULTI_SELECT",
-  "USER_SELECT",
-  "ORGANIZATION_SELECT",
-  "GROUP_SELECT",
-  "FILE",
-]);
-
 async function executeUpdateFrom(
   stmt: UpdateStatement,
   from: NonNullable<UpdateStatement["from"]>,
@@ -2812,97 +2990,23 @@ async function executeUpdateFrom(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
-  const sourceFields = [...new Set(stmt.assignments
-    .filter((a) => a.value.type === "SOURCE_FIELD")
-    .map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
-  const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
-  let sourceRows: ProcessRow[];
-
-  if (from.cteName !== null) {
-    const table = tempTables?.get(from.cteName);
-    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
-    for (const field of requiredSourceFields) {
-      if (!table.columns.includes(field)) {
-        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
-      }
-    }
-    sourceRows = table.rows;
-  } else {
-    const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
-    for (const field of requiredSourceFields) {
-      if (field !== "$id" && !sourceTypes.has(field)) {
-        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
-      }
-      const type = sourceTypes.get(field);
-      if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
-        throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
-      }
-    }
-    const maxRecords = options.maxRecords ?? 10_000;
-    const resolved = await fetchRecordsForSharedPlan(
-      client.getRecords,
-      from.appId,
-      "",
-      requiredSourceFields,
-      { maxRecords, parallel: options.fetchParallel ?? 1, onLimit: "error" }
-    );
-    sourceRows = resolved.records.map((record) => flatten(record, null));
-  }
-
-  const sourceById = new Map<number, ProcessRow>();
-  for (const row of sourceRows) {
-    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
-    }
-    const raw = row[from.joinKeyField];
-    const text = typeof raw === "string" ? raw.trim() : "";
-    const id = Number(text);
-    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
-    }
-    if (sourceById.has(id)) {
-      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
-    }
-    sourceById.set(id, row);
-  }
-
-  const targetIds = [...sourceById.keys()];
-  const targetFields = collectUpdateFromTargetFields(stmt);
-  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
-  const targetRecords: KintoneRecord[] = [];
-  for (const ids of splitChunks(targetIds, UPDATE_FROM_ID_CHUNK_SIZE)) {
-    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
-    const query = filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery;
-    const resolved = await fetchRecordsForSharedPlan(
-      client.getRecords,
-      stmt.appId,
-      query,
-      targetFields,
-      { maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error" }
-    );
-    targetRecords.push(...resolved.records);
-  }
+  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
 
   if (options.confirm) {
-    const ok = await options.confirm(targetRecords.length, "UPDATE");
-    if (!ok) throw new OperationCancelledError("UPDATE", targetRecords.length);
+    const ok = await options.confirm(matched.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", matched.length);
   }
 
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const matched = targetRecords.map((target) => {
-    const id = Number(target["$id"]?.value);
-    const source = sourceById.get(id);
-    if (!source) throw new Error(`ArgumentError: UPDATE ... FROM could not resolve source row for target $id ${id}.`);
-    return { target, source };
-  });
   // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
   const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
   for (const batch of batches) await client.putRecords(batch);
-  return { type: "UPDATE", updatedCount: targetRecords.length };
+  return { type: "UPDATE", updatedCount: matched.length };
 }
 
 function collectUpdateFromTargetFields(stmt: UpdateStatement): string[] {
   const fields = new Set<string>(["$id"]);
+  if (stmt.from) fields.add(stmt.from.targetJoinField);
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) { node.forEach(visit); return; }
     if (node === null || typeof node !== "object") return;
@@ -4199,7 +4303,7 @@ function buildUpdatePlan(stmt: UpdateStatement, label?: string): string[] {
   if (stmt.from) {
     const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
     lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
-    lines.push(`  join:          APP${stmt.appId}.$id = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
+    lines.push(`  join:          APP${stmt.appId}.${stmt.from.targetJoinField} = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
     lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);

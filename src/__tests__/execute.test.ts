@@ -1828,6 +1828,264 @@ test("UPDATE FROM APP: 130 IDs は50件ずつ3クエリで対象取得する", a
   expect(client.putCalls.flatMap((c) => c.records)).toHaveLength(130);
 });
 
+test("UPDATE FROM APP: 文字列業務キーでtarget重複を全件更新しconfirmへ実件数を渡す", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "C001", src: "updated" })],
+    100: [
+      makeRecord({ $id: "1", 顧客コード: "C001" }),
+      makeRecord({ $id: "2", 顧客コード: "C001" }),
+    ],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  const confirms: number[] = [];
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.顧客コード = s.code",
+    client,
+    { cacheContext: "update-from-business-duplicate-target", confirm: async (count) => { confirms.push(count); return true; } }
+  ) as UpdateResult;
+
+  expect(result.updatedCount).toBe(2);
+  expect(confirms).toEqual([2]);
+  expect(client.putCalls.flatMap((call) => call.records).map((record) => record.id)).toEqual([1, 2]);
+  expect(client.getCalls.find((call) => call.app === 100)?.fields).toContain("顧客コード");
+});
+
+test("UPDATE FROM APP: 65文字キーの先頭64文字だけ一致する過剰取得行を更新しない", async () => {
+  const prefix = "A".repeat(64);
+  const exact = `${prefix}X`;
+  const overFetched = `${prefix}Y`;
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: exact, src: "updated" })],
+    100: [
+      makeRecord({ $id: "1", 顧客コード: exact }),
+      makeRecord({ $id: "2", 顧客コード: overFetched }),
+    ],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客コード = s.code",
+    client,
+    { cacheContext: "update-from-65-char" }
+  ) as UpdateResult;
+
+  expect(result.updatedCount).toBe(1);
+  expect(client.putCalls.flatMap((call) => call.records).map((record) => record.id)).toEqual([1]);
+});
+
+test("UPDATE FROM APP: 64文字過剰取得分も全チャンク合計maxRecordsを消費する", async () => {
+  const prefix = "A".repeat(64);
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: `${prefix}X`, src: "updated" })],
+    100: [
+      makeRecord({ $id: "1", 顧客コード: `${prefix}X` }),
+      makeRecord({ $id: "2", 顧客コード: `${prefix}Y` }),
+    ],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客コード = s.code",
+    client,
+    { maxRecords: 1, cacheContext: "update-from-65-char-limit" }
+  )).rejects.toThrow(/上限/);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: NUMBER業務キーはNumber変換せず高精度値を区別する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [
+      makeRecord({ code: "9007199254740992.10", src: "A" }),
+      makeRecord({ code: "9007199254740993.1", src: "B" }),
+    ],
+    100: [
+      makeRecord({ $id: "1", 顧客番号: "9007199254740992.1" }),
+      makeRecord({ $id: "2", 顧客番号: "9007199254740993.10" }),
+    ],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客番号", label: "顧客番号", fieldType: "NUMBER" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客番号 = s.code",
+    client,
+    { cacheContext: "update-from-exact-decimal" }
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(2);
+  expect(client.putCalls.flatMap((call) => call.records)).toEqual([
+    { id: 1, record: { dest: { value: "A" } } },
+    { id: 2, record: { dest: { value: "B" } } },
+  ]);
+});
+
+test("UPDATE FROM APP: NUMBERターゲットの空値は非一致として除外する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "1", src: "A" })],
+    100: [makeRecord({ $id: "1", 顧客番号: "" }), makeRecord({ $id: "2", 顧客番号: "1" })],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客番号", label: "顧客番号", fieldType: "NUMBER" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客番号 = s.code",
+    client,
+    { cacheContext: "update-from-empty-number-target" }
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(1);
+  expect(client.putCalls.flatMap((call) => call.records).map((record) => record.id)).toEqual([2]);
+});
+
+test("UPDATE FROM APP: NUMBER業務キーの正規化後source重複をtarget取得前に拒否する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "+01.0", src: "A" }), makeRecord({ code: "1", src: "B" })],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客番号", label: "顧客番号", fieldType: "NUMBER" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客番号 = s.code",
+    client,
+    { cacheContext: "update-from-normalized-duplicate" }
+  )).rejects.toThrow(/multiple rows/);
+  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test.each(["", "1e3", "NaN", "Infinity"])(
+  "UPDATE FROM APP: NUMBER source業務キー %p を有限10進表記として拒否する",
+  async (key) => {
+    const client = makeClient({ recordsByApp: { 200: [makeRecord({ code: key, src: "A" })] } });
+    client.getFields = async (appId) => appId === 200
+      ? [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+      : [{ code: "顧客番号", label: "顧客番号", fieldType: "NUMBER" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+    await expect(execute(
+      "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客番号 = s.code",
+      client,
+      { cacheContext: `update-from-invalid-decimal-${key}` }
+    )).rejects.toThrow(/finite decimal/);
+    expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(0);
+    expect(client.putCalls).toHaveLength(0);
+  }
+);
+
+test("UPDATE FROM APP: target/sourceの非対応業務キー型をtarget取得前に拒否する", async () => {
+  const targetClient = makeClient();
+  targetClient.getFields = async (appId) => appId === 100
+    ? [{ code: "計算キー", label: "計算キー", fieldType: "CALC", writable: false }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }];
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 計算キー = s.code",
+    targetClient,
+    { cacheContext: "update-from-invalid-target-type" }
+  )).rejects.toThrow(/target join field type CALC/);
+  expect(targetClient.getCalls).toHaveLength(0);
+
+  const sourceClient = makeClient();
+  sourceClient.getFields = async (appId) => appId === 100
+    ? [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "code", label: "code", fieldType: "DROP_DOWN" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }];
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客コード = s.code",
+    sourceClient,
+    { cacheContext: "update-from-invalid-source-join-type" }
+  )).rejects.toThrow(/source join field type DROP_DOWN/);
+  expect(sourceClient.getCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP VALIDATE ONLY: 通常実行と同じ業務キーmatchedだけを検証する", async () => {
+  const prefix = "A".repeat(64);
+  const exact = `${prefix}X`;
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: exact, src: "11" })],
+    100: [
+      makeRecord({ $id: "1", 顧客コード: exact }),
+      makeRecord({ $id: "2", 顧客コード: `${prefix}Y` }),
+    ],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" }];
+
+  const result = await execute(
+    "UPDATE APP100 SET amount = s.src FROM APP200 s WHERE 顧客コード = s.code VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-update-from-business" }
+  );
+  expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 1, invalidRows: 1, errorCount: 1 });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors.map((row) => row.$id)).toEqual(["1"]);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: 複数チャンクのtarget取得合計がmaxRecordsを超えるとPUT前に拒否する", async () => {
+  const source = Array.from({ length: 51 }, (_, i) => makeRecord({ code: `K${i + 1}`, src: "x" }));
+  const target = [
+    ...Array.from({ length: 50 }, (_, i) => makeRecord({ $id: String(i + 1), 顧客コード: `K${i + 1}` })),
+    ...Array.from({ length: 11 }, (_, i) => makeRecord({ $id: String(51 + i), 顧客コード: "K51" })),
+  ];
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    if (params.app === 200) return { records: source };
+    const keys = new Set([...params.query.matchAll(/"(K\d+)"/g)].map((match) => match[1]));
+    return { records: target.filter((record) => keys.has(String(record.顧客コード.value))) };
+  };
+
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客コード = s.code",
+    client,
+    { maxRecords: 60, cacheContext: "update-from-global-target-limit" }
+  )).rejects.toThrow(/上限（60 件）/);
+  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(2);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: 64文字前方一致で複数チャンクに現れるtargetを二重更新しない", async () => {
+  const prefix = "Z".repeat(64);
+  const source = [
+    makeRecord({ code: `${prefix}X`, src: "X" }),
+    ...Array.from({ length: 49 }, (_, i) => makeRecord({ code: `K${i + 2}`, src: "other" })),
+    makeRecord({ code: `${prefix}Y`, src: "Y" }),
+  ];
+  const target = [
+    makeRecord({ $id: "1", 顧客コード: `${prefix}X` }),
+    makeRecord({ $id: "2", 顧客コード: `${prefix}Y` }),
+  ];
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    if (params.app === 200) return { records: source };
+    // kintoneの先頭64文字比較を再現し、どちらのチャンクにも同じ2行を返す。
+    return { records: params.query.includes(prefix) ? target : [] };
+  };
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客コード = s.code",
+    client,
+    { maxRecords: 100, cacheContext: "update-from-cross-chunk-prefix" }
+  ) as UpdateResult;
+  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(2);
+  expect(result.updatedCount).toBe(2);
+  expect(client.putCalls.flatMap((call) => call.records)).toEqual([
+    { id: 1, record: { dest: { value: "X" } } },
+    { id: 2, record: { dest: { value: "Y" } } },
+  ]);
+});
+
 test("UPDATE サブテーブル行（_rid 条件）", async () => {
   const client = makeClient({
     recordsByApp: {

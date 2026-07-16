@@ -8,6 +8,7 @@
 
 - **B12-A `VALIDATE ONLY` を追加**。親レコードの `INSERT` / `UPSERT` / `UPDATE`（VALUES、SELECT、`UPDATE ... FROM`を含む）をkintoneへ書き込まず全候補行検証できる。必須、型、範囲、文字列長、選択肢、UPSERTキーを安定エラーコードで収集し、1行複数エラーを返す。複文では `INTO #err` に原子的に作成・追記して後続文から参照できる。
 - `VALIDATE ONLY` はread-onlyとしてMCP `ksql_query`、CLI、プラグインからDML承認なしで実行できる一方、完全入力を要求するためtruncate設定を常にerrorへ上書きする。通常DMLのAST・変換・確認・書き込み経路は維持する。
+- **B11.1 `UPDATE ... FROM` の業務キー結合を追加**。従来の `$id = source.key` に加えて、更新先とソースの文字列（1行）／数値フィールドを単一等値で結合できる。ソース重複はPUT前エラー、ターゲット重複は同じソース値で全件更新する。数値キーは `Number()` を使わず10進文字列として正規化し、64文字超の文字列キーはkintoneの前方一致による過剰取得をローカル全文一致で除外する。通常実行と `VALIDATE ONLY` は同じ照合処理を共有し、ターゲット取得は全チャンク合計 `maxRecords` を超えるとfail-closedで停止する。
 
 ## v2.12.0（2026-07-16）
 
