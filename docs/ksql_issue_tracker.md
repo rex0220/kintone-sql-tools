@@ -39,6 +39,8 @@
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
+| B11 | `UPDATE … FROM`（SET 値に他テーブルのフィールド参照＝アプリ間転記） | 改善 | 📝 採用・未実装（バッチ強化 Phase 2・B12 の依存・複数マッチは実行前エラー固定） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) §7 / [roadmap](internal/ksql_batch_processing_roadmap.md) |
+| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 📝 採用・未実装（バッチ強化 Phase 3・価値最大。VALIDATE ONLY 先行→ON ERROR SKIP。B11 依存） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
 
@@ -78,6 +80,8 @@
 | 項目 | 状態 | 理由 | 文書 |
 |---|---|---|---|
 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | ⏸ 保留 | ユーザー判断で 16 桁クラス数値アプリは当面対象外。案A の `Number.isSafeInteger` ゲートで 16 桁超は押し下げないため実害は低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
+| UPSERT 変更行スキップ `ONLY CHANGED` | ⏸ 保留 | 差分型では効果がリラン時の監査情報保護に限定・実装コスト重（既存値読み取り戦略/型別正規化/64 文字キー問題）。エラー行隔離（B12）の検証エンジンが先・需要立証後に再評価 | [spec](internal/ksql_only_changed_upsert_spec.md) |
+| 実行ログ自動記録 / 更新前スナップショット退避 / チャンク実行・レジューム | ⏸ 保留 | ログは `@batch_id`＋現行 INSERT で運用可・スナップショットは `#before` レシピで代替・チャンクは適用限界の外（数十万件級は連携方式見直しが先）。バッチ強化 [roadmap](internal/ksql_batch_processing_roadmap.md) | [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | 複数 SQL の並列実行 | ⏸ 対象外 | 順次バッチのみ採用。並列は評価時に対象外化 | [eval](multi-statement-temp-table-evaluation.md) |
 | `bulkRequest`（M5） | ⏸ 保留 | v1.4.0 では見送り。実機スパイクとセットで判断 | [temp-table](ksql_batch_temp_table_spec.md) |
 
