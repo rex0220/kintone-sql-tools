@@ -192,10 +192,22 @@ export interface SelectResult {
 }
 
 /** CTE / 一時テーブルの実体化結果。空結果でも出力列を保持する。 */
+export interface MaterializedColumnMeta {
+  readonly sortKind?: "number" | "string";
+  readonly fieldType?: string;
+}
+
+type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
+
 interface MaterializedTable {
   readonly rows: ProcessRow[];
   readonly columns: string[];
+  readonly columnMeta?: MaterializedColumnMetaMap;
 }
+
+/** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
+const materializedMetaBySelectResult = new WeakMap<SelectResult, MaterializedColumnMetaMap>();
+const materializedMetaByValidationResult = new WeakMap<DmlValidationResult, MaterializedColumnMetaMap>();
 
 export interface InsertResult {
   type: "INSERT";
@@ -509,10 +521,15 @@ function appendValidationErrors(
   name: string,
   columns: string[],
   rows: ProcessRow[],
-  maxRows: number
+  maxRows: number,
+  columnMeta: MaterializedColumnMetaMap
 ): void {
   const current = tempTables.get(name);
-  if (current && (current.columns.length !== columns.length || current.columns.some((c, i) => c !== columns[i]))) {
+  if (current && (
+    current.columns.length !== columns.length
+    || current.columns.some((c, i) => c !== columns[i])
+    || !materializedColumnMetaEqual(current.columnMeta, columnMeta)
+  )) {
     throw new Error(`ArgumentError: validation error table ${name} has a different schema.`);
   }
   const existingRows = current?.rows ?? [];
@@ -520,7 +537,20 @@ function appendValidationErrors(
     throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
   }
   // schema・件数を先に検査し、既存値を変更せず単一setで反映する。
-  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows] });
+  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows], columnMeta });
+}
+
+function materializedColumnMetaEqual(
+  left: MaterializedColumnMetaMap | undefined,
+  right: MaterializedColumnMetaMap | undefined
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.size !== right.size) return false;
+  for (const [column, meta] of left) {
+    const candidate = right.get(column);
+    if (!candidate || candidate.sortKind !== meta.sortKind || candidate.fieldType !== meta.fieldType) return false;
+  }
+  return true;
 }
 
 export interface BatchStatementResult {
@@ -766,7 +796,8 @@ async function executeBatchStatement(
         resolvedStmt.validationErrorTable,
         result.columns,
         result.errors,
-        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaByValidationResult.get(result) ?? new Map()
       );
     }
     return { result };
@@ -794,7 +825,11 @@ async function executeBatchStatement(
       onLimitReached: "error",
     };
     const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(resolvedStmt.name, { rows: result.rows, columns: result.columns });
+    tempTables.set(resolvedStmt.name, {
+      rows: result.rows,
+      columns: result.columns,
+      columnMeta: materializedMetaBySelectResult.get(result),
+    });
     return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
 
@@ -850,9 +885,9 @@ async function runSelectLike(
   tempTables: Map<string, MaterializedTable>
 ): Promise<SelectResult> {
   if (query.type === "WITH") {
-    return executeWith(query, client, options, cacheContext, tempTables);
+    return executeWith(query, client, options, cacheContext, tempTables, true);
   }
-  return executeQueryWithCte(query, client, options, tempTables, cacheContext);
+  return executeQueryWithCte(query, client, options, tempTables, cacheContext, true);
 }
 
 /**
@@ -1147,20 +1182,30 @@ async function executeSelect(
   cacheContext: string,
   /** CTE / 一時テーブルのキャッシュ。サブクエリ解決に引き継ぐ（トップレベルの
    *  FROM / JOIN 参照は executeQueryWithCte 側で処理済みの前提） */
-  cteCache?: Map<string, MaterializedTable>
+  cteCache?: Map<string, MaterializedTable>,
+  captureColumnMeta = false
 ): Promise<SelectResult> {
+  let result: SelectResult;
   if (isNoFromSelect(stmt)) {
-    return executeNoFromSelect(stmt);
+    result = executeNoFromSelect(stmt);
+    if (captureColumnMeta) {
+      materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+    }
+    return result;
   }
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const mode = resolveSelectMode(stmt);
   await validateSelectFieldCodes(stmt, mode, client, cacheContext);
 
   if (mode === "SIMPLE") {
-    return executeSimpleSelect(stmt, client, options, cacheContext);
+    result = await executeSimpleSelect(stmt, client, options, cacheContext);
   } else {
-    return executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
+    result = await executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
   }
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+  }
+  return result;
 }
 
 function isNoFromSelect(stmt: SelectStatement): boolean {
@@ -1571,7 +1616,8 @@ function aggregateSortKind(info: KintoneFieldInfo): "number" | "string" | undefi
 async function loadAggregateSortKindResolver(
   stmt: SelectStatement,
   client: KintoneClient,
-  cacheContext: string
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<AggregateSortKindResolver | undefined> {
   const refs = collectSelectAggregateSortRefs(stmt.columns);
   if (refs.length === 0) return undefined;
@@ -1589,14 +1635,9 @@ async function loadAggregateSortKindResolver(
     } else if (stmt.joins.length === 0) {
       if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
     } else {
-      // CTE/temp を含む JOIN の非修飾参照は一意性を型メタで確定できない。
-      // resolver も undefined を返すため、物理側だけの不要な API 呼び出しを避ける。
-      if ([stmt.from, ...stmt.joins.map((join) => join.table)]
-        .some((table) => table.cteName !== null)) continue;
       for (const table of physicalTables) appIds.add(table.appId);
     }
   }
-  if (appIds.size === 0) return undefined;
 
   const fieldInfosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
     await Promise.all([...appIds].map(async (appId) => {
@@ -1613,19 +1654,30 @@ async function loadAggregateSortKindResolver(
         info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
       } else {
         const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
-        if (!table || table.cteName !== null) return undefined;
+        if (!table) return undefined;
+        if (table.cteName !== null) {
+          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+        }
         info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       }
     } else if (stmt.joins.length === 0) {
-      if (stmt.from.cteName !== null) return undefined;
+      if (stmt.from.cteName !== null) {
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+      }
       info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
     } else {
-      if (tables.some((table) => table.cteName !== null)) return undefined;
-      const matches = physicalTables
-        .map((table) => fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field)))
-        .filter((candidate): candidate is KintoneFieldInfo => candidate !== undefined);
+      const matches = tables.flatMap((table): Array<"number" | "string" | undefined> => {
+        if (table.cteName !== null) {
+          const materialized = materializedTables?.get(table.cteName);
+          return materialized?.columns.includes(ref.field)
+            ? [materialized.columnMeta?.get(ref.field)?.sortKind]
+            : [];
+        }
+        const candidate = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+        return candidate ? [aggregateSortKind(candidate)] : [];
+      });
       if (matches.length !== 1) return undefined;
-      info = matches[0];
+      return matches[0];
     }
     return info ? aggregateSortKind(info) : undefined;
   };
@@ -1634,6 +1686,130 @@ async function loadAggregateSortKindResolver(
 function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
+}
+
+function materializedMetaFromFieldInfo(info: KintoneFieldInfo): MaterializedColumnMeta {
+  return { sortKind: aggregateSortKind(info), fieldType: info.fieldType };
+}
+
+function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
+  return stmt.columns.some((column) =>
+    column.type === "FIELD"
+    || column.type === "WILDCARD"
+    || column.type === "PARENT_WILDCARD"
+    || (column.type === "AGGREGATE"
+      && (column.func === "MIN" || column.func === "MAX")
+      && column.arg.type === "FIELD_REF")
+  );
+}
+
+async function inferSelectColumnMeta(
+  stmt: SelectStatement,
+  outputColumns: readonly string[],
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<MaterializedColumnMetaMap> {
+  const physicalInfos = new Map<number, Map<string, KintoneFieldInfo>>();
+  if (selectNeedsSourceColumnMeta(stmt)) {
+    await Promise.all(physicalSelectTables(stmt).map(async (table) => {
+      if (physicalInfos.has(table.appId)) return;
+      const infos = await getFieldsCached(table.appId, client, cacheContext);
+      physicalInfos.set(table.appId, new Map(infos.map((info) => [info.code, info])));
+    }));
+  }
+
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const resolveField = (ref: FieldRef): MaterializedColumnMeta | undefined => {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        const info = physicalInfos.get(stmt.from.appId)?.get(ref.field);
+        return info ? materializedMetaFromFieldInfo(info) : undefined;
+      }
+      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      if (!table) return undefined;
+      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? materializedMetaFromFieldInfo(info) : undefined;
+    }
+
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+      return info ? materializedMetaFromFieldInfo(info) : undefined;
+    }
+
+    const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
+      if (table.cteName !== null) {
+        const materialized = materializedTables?.get(table.cteName);
+        if (!materialized?.columns.includes(ref.field)) return [];
+        return [materialized.columnMeta?.get(ref.field)];
+      }
+      const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? [materializedMetaFromFieldInfo(info)] : [];
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
+  const inferred = new Map<string, MaterializedColumnMeta>();
+  const hasWildcard = stmt.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD");
+
+  if (stmt.columns.length === 1
+    && (stmt.columns[0].type === "WILDCARD" || stmt.columns[0].type === "PARENT_WILDCARD")) {
+    for (const output of outputColumns) {
+      const meta = resolveField(aggregateFieldRef(output));
+      if (meta) inferred.set(output, meta);
+    }
+    return inferred;
+  }
+
+  if (hasWildcard) {
+    // ワイルドカード展開済みの実列名だけを解決する。別名・計算列は下の明示列処理で補う。
+    for (const output of outputColumns) {
+      const meta = resolveField(aggregateFieldRef(output));
+      if (meta) inferred.set(output, meta);
+    }
+  }
+
+  const explicitColumns = stmt.columns.filter(
+    (column) => column.type !== "WILDCARD" && column.type !== "PARENT_WILDCARD"
+  );
+  explicitColumns.forEach((column, index) => {
+      const output = hasWildcard
+        ? ("alias" in column && column.alias ? column.alias : undefined)
+        : outputColumns[index];
+      if (!output) return;
+      let meta: MaterializedColumnMeta | undefined;
+      if (column.type === "FIELD") {
+        meta = resolveField(aggregateFieldRef(column.field));
+      } else if (column.type === "AGGREGATE") {
+        if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+          meta = { sortKind: "number" };
+        } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
+          const source = resolveField(aggregateFieldRef(column.arg.field));
+          if (source?.sortKind) meta = { sortKind: source.sortKind };
+        }
+      } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
+        meta = { sortKind: "number" };
+      } else if (column.type === "LITERAL_COL") {
+        meta = { sortKind: "string" };
+      }
+      if (meta) inferred.set(output, meta);
+    });
+  return inferred;
+}
+
+function mergeUnionColumnMeta(left: SelectResult, right: SelectResult): MaterializedColumnMetaMap {
+  const leftMeta = materializedMetaBySelectResult.get(left);
+  const rightMeta = materializedMetaBySelectResult.get(right);
+  const merged = new Map<string, MaterializedColumnMeta>();
+  left.columns.forEach((column, index) => {
+    const a = leftMeta?.get(column);
+    const rightColumn = right.columns[index];
+    const b = rightColumn === undefined ? undefined : rightMeta?.get(rightColumn);
+    if (a && b && a.sortKind === b.sortKind && a.fieldType === b.fieldType) merged.set(column, a);
+  });
+  return merged;
 }
 
 interface SelectFieldTypeResolvers {
@@ -1709,7 +1885,7 @@ async function executeFullScanSelect(
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
-    loadAggregateSortKindResolver(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
 
@@ -1884,14 +2060,15 @@ async function executeWith(
   options: ExecuteOptions,
   cacheContext: string,
   /** バッチ実行時の一時テーブルストア（#name → 行＋列）。CTE キャッシュの初期値として合流する */
-  seed?: ReadonlyMap<string, MaterializedTable>
+  seed?: ReadonlyMap<string, MaterializedTable>,
+  captureColumnMeta = false
 ): Promise<SelectResult> {
   // 単純 CTE のインライン化（WHERE プッシュダウン最適化）
   // CTE 本体が SIMPLE モードで最終クエリが単純 SELECT の場合、
   // CTE を展開して WHERE をまとめて REST API に渡す。
   // 一時テーブル注入時はインライン化しない（CTE 本体が #temp を参照し得るため）
   if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
-    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
+    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext, undefined, captureColumnMeta);
   }
 
   // CTE 名 → 実体化結果のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
@@ -1905,13 +2082,17 @@ async function executeWith(
     } else if (cte.query.type === "DESCRIBE") {
       result = await executeDescribe(cte.query, client, cacheContext);
     } else {
-      result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext);
+      result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext, true);
     }
-    cteCache.set(cte.name, { rows: result.rows, columns: result.columns });
+    cteCache.set(cte.name, {
+      rows: result.rows,
+      columns: result.columns,
+      columnMeta: materializedMetaBySelectResult.get(result),
+    });
   }
 
   // 最終クエリを CTE キャッシュ付きで実行
-  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
+  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext, captureColumnMeta);
 }
 
 /**
@@ -1923,12 +2104,13 @@ async function executeQueryWithCte(
   client: KintoneClient,
   options: ExecuteOptions,
   cteCache: Map<string, MaterializedTable>,
-  cacheContext: string
+  cacheContext: string,
+  captureColumnMeta = false
 ): Promise<SelectResult> {
   if (query.type === "UNION") {
     const [leftResult, rightResult] = await Promise.all([
-      executeQueryWithCte(query.left,  client, options, cteCache, cacheContext),
-      executeQueryWithCte(query.right, client, options, cteCache, cacheContext),
+      executeQueryWithCte(query.left,  client, options, cteCache, cacheContext, captureColumnMeta),
+      executeQueryWithCte(query.right, client, options, cteCache, cacheContext, captureColumnMeta),
     ]);
     const leftCols    = leftResult.columns;
     const rightCols   = rightResult.columns;
@@ -1939,7 +2121,11 @@ async function executeQueryWithCte(
     });
     const combined = [...leftResult.rows, ...remapped];
     const rows = query.all ? combined : deduplicateRows(combined, leftCols);
-    return { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    if (captureColumnMeta) {
+      materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
+    }
+    return result;
   }
 
   // CTE 参照が FROM か JOIN に含まれるか確認
@@ -1953,11 +2139,15 @@ async function executeQueryWithCte(
   if (!hasCteRef) {
     // トップレベルに CTE 参照なし → 通常の SELECT 実行。
     // ただしサブクエリ内の CTE / 一時テーブル参照があり得るため cteCache は引き継ぐ
-    return executeSelect(query, client, options, cacheContext, cteCache);
+    return executeSelect(query, client, options, cacheContext, cteCache, captureColumnMeta);
   }
 
   // CTE 参照あり → FULL_SCAN で CTE 行を注入
-  return executeFullScanWithCte(query, client, options, cteCache, cacheContext);
+  const result = await executeFullScanWithCte(query, client, options, cteCache, cacheContext);
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(query, result.columns, client, cacheContext, cteCache));
+  }
+  return result;
 }
 
 /**
@@ -1986,7 +2176,7 @@ async function executeFullScanWithCte(
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
-    loadAggregateSortKindResolver(stmt, client, cacheContext),
+    loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -2635,6 +2825,7 @@ interface PreparedDmlValidation {
   result: DmlValidationResult;
   candidates: DmlValidationCandidate[];
   invalidRowNumbers: Set<number>;
+  columnMeta: MaterializedColumnMetaMap;
 }
 
 async function prepareDmlValidation(
@@ -2679,7 +2870,23 @@ async function prepareDmlValidation(
       ? { errTable: stmt.validationErrorTable }
       : stmt.onErrorSkip && stmt.errorTable ? { errTable: stmt.errorTable } : {}),
   };
-  return { result, candidates, invalidRowNumbers };
+  const columnMeta = new Map<string, MaterializedColumnMeta>();
+  for (const column of payloadFields) {
+    if (column === "$id") {
+      columnMeta.set(column, { sortKind: "number", fieldType: "RECORD_NUMBER" });
+      continue;
+    }
+    const info = infoByCode.get(column);
+    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info));
+  }
+  columnMeta.set("$err_statement", { sortKind: "number" });
+  columnMeta.set("$err_operation", { sortKind: "string" });
+  columnMeta.set("$err_row", { sortKind: "number" });
+  columnMeta.set("$err_field", { sortKind: "string" });
+  columnMeta.set("$err_code", { sortKind: "string" });
+  columnMeta.set("$err_message", { sortKind: "string" });
+  materializedMetaByValidationResult.set(result, columnMeta);
+  return { result, candidates, invalidRowNumbers, columnMeta };
 }
 
 async function executeOnErrorSkip(
@@ -2701,7 +2908,8 @@ async function executeOnErrorSkip(
     errTable,
     prepared.result.columns,
     prepared.result.errors,
-    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+    prepared.columnMeta
   );
 
   const rejectLimit = stmt.rejectLimit ?? null;

@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 発見経緯: B12-B `ON ERROR SKIP` の実機確認（APP4221・2026-07-16）。看板レシピ（[ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md) §6）の `SELECT 顧客コード, MIN($err_message) … GROUP BY 顧客コード` が **`NaN` を返し**、業務キー単位のエラーメッセージ集約（B11.1 書き戻しの前段）が機能しないことが判明。
-- ステータス: **v2.14.0 でリリース済み**（R2 実装・コードレビュー承認・実機確認 全15項目 pass・1,282 テスト green）。temp/CTE 列のテキスト集約はフェーズ2（§9）で別途。
+- ステータス: **v2.14.0 でリリース済み**（R2 実装・コードレビュー承認・実機確認 全15項目 pass・1,282 テスト green）。temp/CTE 列のテキスト集約は B14 で実装済み（v2.15.0 予定）。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -144,14 +144,14 @@ type AggregateSortKindResolver = (field: FieldRef) => "number" | "string" | unde
 - [ ] フォーム定義 API は**キャッシュミス時1回**、同一 context 再実行では増えない（計測）。
 - [ ] JOIN：`MIN(a.name)`（修飾）と、フィールド名が一意な JOIN での `MIN(name)` は文字列。**同名フィールドが競合する JOIN は型不明経路**（従来数値）。
 - [ ] 算術・文字列関数混在：`UPPER(MIN(text))`・`LENGTH(MAX(text))` が正しく動作。`MIN(text)+1 → NaN`。
-- [ ] temp/CTE 経由は従来どおり NaN（型不明）。
+- [ ] v2.14.0 では temp/CTE 経由は従来どおり NaN（型不明）。B14（v2.15.0 予定）で確定可能な列の型メタ伝播に対応。
 - [ ] 空グループ: 数値=`0`／文字列=`""`。`DISTINCT` 併用でテキスト重複除去が効く。
 - [ ] `HAVING` / `ORDER BY` / 後段 SELECT / UNION 左辺列でテキスト集約の alias が文字列として参照できる。
 - [ ] `SUM`/`AVG`/`COUNT` に回帰なし。
 
 ## 7. B12 書き戻しレシピとの関係
 
-本仕様が入っても、**B12 の `#err` は一時テーブル**で型メタを持たないため、`MIN($err_message) FROM #err` は §4.2 の契約上「型不明＝従来数値＝NaN」のままになる。したがって:
+v2.14.0 時点では、**B12 の `#err` は一時テーブル**で型メタを持たないため、`MIN($err_message) FROM #err` は §4.2 の契約上「型不明＝従来数値＝NaN」になる。B14（v2.15.0 予定）では `#err` の合成列を明示宣言し、この制限を解消する。
 
 - **短期（本仕様と独立・v2.13.0 で対応済み）**: B12 レシピ（§6・roadmap）を**定数フラグ 1 行化**（`SELECT DISTINCT 業務キー, '検証エラー' AS flag FROM #err`）へ修正し、`MIN($err_message)` を使わない。言語リファレンスに「`MIN`/`MAX` はテキスト非対応（本仕様まで）」を注記済み。
 - **本仕様の適用範囲**: まずは**型メタを持つ実アプリ列**のテキスト min/max を対象にする。一時テーブル/CTE 列へ広げるには、実体化時に列型メタを保持する拡張（`MaterializedTable` に型情報を足す）が別途必要＝**フェーズ2**として分離。

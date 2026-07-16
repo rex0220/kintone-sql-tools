@@ -32,7 +32,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B14 | 一時テーブル/CTE 列の型メタ伝播（B13 フェーズ2・temp のテキスト `MIN`/`MAX`・**B16 の前提**） | 改善 | 📋 仕様案 R2（codex レビュー反映・実装着手可）。`MaterializedTable` に列型メタを付与し B13 リゾルバへ配線 | 正しさ | 中 | [spec](internal/ksql_temp_column_type_meta_spec.md) |
+| B14 | 一時テーブル/CTE 列の型メタ伝播（B13 フェーズ2・temp のテキスト `MIN`/`MAX`） | 改善 | ✅ R2 実装・コードレビュー承認・実機 全13項目 pass（1,294 テスト green）。v2.15.0 予定。`MaterializedTable` に列型メタを付与し B13 リゾルバへ配線 | 正しさ | 中 | [spec](internal/ksql_temp_column_type_meta_spec.md) |
 | B16 | 文字列集約 `GROUP_CONCAT`（1対多の連結・`#err` メッセージ集約） | 改善 | 📝 評価済み（比較評価 T1-2 で最優先。**B14 が前提**・v2.14.0 で下地あり） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
 | B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`） | 改善 | 📝 評価済み（比較評価 T1-1・最大の欠落。「各グループ最新1件」を1文化） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
