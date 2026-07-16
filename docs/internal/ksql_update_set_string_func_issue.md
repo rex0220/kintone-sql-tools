@@ -84,32 +84,38 @@ throw new ParseError("SET の値にはリテラル・算術式を指定してく
 
 **`parseArithAddSub()` は `STRING_FUNC` ノードも返す**（`UPPER(建物名)` は正しく解析される）。しかし accept list が `NUMBER` / `ARITH` / `FIELD_REF`(ドット付き) の 3 つしかないため、**`STRING_FUNC` は末尾のエラーへ落ちる**。
 
-**設計上の制約ではなく列挙漏れ。** 根拠:
+**parser の accept list に無いことは事実だが、「parser だけ直せば動く」は誤り**（R1 初稿の誤り・codex レビューで判明・§3.1 で訂正）:
 
 | 事実 | 意味 |
 |---|---|
-| `dmlToKintone.ts:539` が `if (result.type === "STRING_FUNC") return evalStringFunc(result, row);` | **DML の書き込み経路は STRING_FUNC を評価できる**（CASE WHEN の結果として通っている経路がこれ） |
-| 「算術 SET（現在値を取得して計算）」の経路が既にある | **現在値を GET してから計算する機構が既にある**（`SET x = x + 1` が動く）。`UPPER(x)` も同じ機構で足りる |
-| `CASE WHEN … THEN UPPER(x) ELSE x END` が実機で書き込める（§1.2） | **やりたいことは既に全部できている**。入口だけが塞がっている |
+| `dmlToKintone.ts:539` が `if (result.type === "STRING_FUNC") return evalStringFunc(result, row);` | **CASE の結果としてなら STRING_FUNC を評価できる。ただしこれは `row` を渡す別経路** |
+| **`buildUpdateRecord`（`dmlToKintone.ts:172`）は `(assignments, fieldTypes)` しか受け取らず、`row` を持たない** | **単純 UPDATE の経路では STRING_FUNC を評価できない。** 変換 switch（`:585`）にも `STRING_FUNC` のケースが無い |
+| 「算術 SET（現在値を取得して計算）」の経路がある | **算術専用の別経路**（`updateToPutBatchesArith`）であり、単純 SET はここを通らない |
+
+> **したがって「評価機構は完成済み・parser 側が主」は誤り。** 行取得を伴う assignment として扱う経路の追加が要る（§3.1）。
 
 ---
 
 ## 3. 対策案
 
-### 3.1 案 A（推奨）: accept list へ `STRING_FUNC` を追加する
+### 3.1 設計は codex に委ねる（R2 で変更）
 
-```ts
-if (node.type === "ARITH")       return node;
-if (node.type === "STRING_FUNC") return node;   // ← 追加
-```
+**R1 初稿は「accept list へ 1 行足せばよい」としていたが誤りだった**（§2）。単純 UPDATE の経路は行を持たないため、**評価経路の設計が本体**である。
 
-`SqlValue` 型が `StringFuncExpr` を含むかの確認が要る（含まなければ型追加）。書き込み経路（`dmlToKintone.ts:539`）は既に対応済みのため、**変更は parser 側が主**と見込む。
+**Claude 側が示す制約:**
 
-**要確認（codex への申し送り）**:
+- **`SqlValue` 全体ではなく `AssignmentValue` に限定する**（codex 提案）。`INSERT VALUES` / `UPSERT` / サブテーブル DML / `ASSERT` への波及を抑える。**B13 の「消費 3 系統を洗う」・B16 の「HAVING は別経路」と同型のリスクを最小化する**
+- **`CASE WHEN … THEN UPPER(x) ELSE x END` は引き続き動くこと**（非回帰・実書き込みで確認済み）
+- **`VALIDATE ONLY`（B12-A）/ `ON ERROR SKIP`（B12-B）が評価済みの値を検証すること**
+- **算術式内の `STRING_FUNC` は従来どおり `DmlConvertError` で拒否**（§3.2・差分最小）
+- `UPDATE … FROM`（B11）の `SET x = t.field`（`SOURCE_FIELD` 分岐）を壊さないこと。**`SET x = UPPER(t.field)` を許すかは codex の判断**（v1 で許さない方が安全に見えるが、ソース行の解決順序を知っているのは実装側）
 
-- `SqlValue` に `STRING_FUNC` を足したとき、**他の `SqlValue` 消費側が全て対応しているか**。`INSERT VALUES` / `UPSERT` / サブテーブル DML / `ASSERT` など、同じ型を使う経路を洗う。**B13 の教訓「消費 3 系統を洗う」・B16 の教訓「HAVING は別経路でパースされる」と同型のリスク。**
-- **`VALIDATE ONLY`（B12-A）が新経路の値を検証できるか。** §1.2 の CASE 版は `VALIDATE ONLY` を通ったので、同じ値解決を通るなら問題ないはずだが要確認。
-- **`UPDATE … FROM`（B11）との衝突**。`SET x = t.field` は `SOURCE_FIELD` へ分岐する。`SET x = UPPER(t.field)` を許すか（**v1 では許さない**方が安全。ソース行の解決順序が絡む）。
+**codex に設計してほしいこと**（レビュー指摘より）:
+
+- `STRING_FUNC` を**行取得が必要な assignment** として判定する仕組み
+- **参照フィールドを GET 対象へ収集**する経路
+- レコードごとの評価経路で `evalStringFunc` を呼ぶ形
+- `UPDATE … FROM` で target/source のどちらを参照できるか
 
 ### 3.2 §1.3 の算術式内 `STRING_FUNC` はどうするか
 
