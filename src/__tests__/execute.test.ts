@@ -416,6 +416,46 @@ test("SELECT WHERE = 文字列", async () => {
   expect(result.rows[0]).toEqual({ ステータス: "完了", 金額: "500" });
 });
 
+test("負数の IN は SIMPLE で引用符なしに押し下げ、FULL_SCAN と同じ結果になる", async () => {
+  const records = [
+    makeRecord({ 金額: "-1" }),
+    makeRecord({ 金額: "0" }),
+    makeRecord({ 金額: "1" }),
+  ];
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+  ];
+  client.getRecords = async (params) => {
+    client.getCalls.push({
+      app: params.app,
+      query: params.query ?? "",
+      fields: [...(params.fields ?? [])],
+    });
+    return {
+      records: params.query?.includes("金額 in (-1)") ? [records[0]] : records,
+    };
+  };
+
+  const simple = await execute(
+    "SELECT 金額 FROM APP100 WHERE 金額 IN (-1)",
+    client,
+    { cacheContext: "negative-in-simple" }
+  ) as SelectResult;
+  const fullScan = await execute(
+    "SELECT DISTINCT 金額 FROM APP100 WHERE 金額 IN (-1)",
+    client,
+    { cacheContext: "negative-in-full-scan" }
+  ) as SelectResult;
+
+  expect(simple.rows).toEqual([{ 金額: "-1" }]);
+  expect(fullScan.rows).toEqual(simple.rows);
+  expect(client.getCalls[0].query).toContain("金額 in (-1)");
+  expect(client.getCalls[0].query).not.toContain('"-1"');
+  expect(client.getCalls[1].query).toContain("金額 in (-1)");
+  expect(client.getCalls[1].query).not.toContain('"-1"');
+});
+
 test("FULL_SCAN: CHECK_BOX IN は JSON 全体でなく選択要素を評価する", async () => {
   const client = makeClient({ records: [
     makeTypedRecord({ $id: "1", 選択: ["A", "B"], 件名: "one" }),

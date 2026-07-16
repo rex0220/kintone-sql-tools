@@ -1720,16 +1720,25 @@ export class Parser {
   // IN リストの値
   private parseInValues(): InList["values"] {
     const values: InList["values"] = [];
+    const invalidValueMessage = "IN リストには文字列、数値、またはバッチ変数が必要です";
     do {
       const tok = this.advance();
       if (tok.kind === TokenKind.STRING) {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === TokenKind.NUMBER) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === TokenKind.MINUS || tok.kind === TokenKind.PLUS) {
+        const number = this.peek();
+        if (number.kind !== TokenKind.NUMBER) {
+          throw new ParseError(invalidValueMessage, tok);
+        }
+        this.advance();
+        const sign = tok.kind === TokenKind.MINUS ? -1 : 1;
+        values.push({ type: "NUMBER", value: sign * Number(number.value) });
       } else if (tok.kind === TokenKind.VARIABLE) {
         values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN リストには文字列、数値、またはバッチ変数が必要です", tok);
+        throw new ParseError(invalidValueMessage, tok);
       }
     } while (this.consume(TokenKind.COMMA));
     return values;

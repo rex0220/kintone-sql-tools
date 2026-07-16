@@ -30,6 +30,11 @@ test("IN リストへ未解決 VARIABLE が到達したら変換前に拒否す�
   expect(() => whereToKintone(unresolved)).toThrow(/未解決のバッチ変数 @missing/);
 });
 
+test("IN の負数は引用符なし、文字列の負数は引用符付きで変換する", () => {
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 IN (-1, +1, '-1')")))
+    .toBe('金額 in (-1,1,"-1")');
+});
+
 test("KLIKE / NOT KLIKE を kintone like / not like へ変換する", () => {
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 件名 KLIKE '至急'")))
     .toBe('件名 like "至急"');
