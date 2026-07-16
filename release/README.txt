@@ -1,9 +1,40 @@
-ksql 配布パッケージ (v2.16.0)
+ksql 配布パッケージ (v2.17.0)
 
-1. ksql-plugin-v2.16.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.17.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.17.0: スカラー関数の拡充(B19・機能追加)と DATE_ADD の不具合修正(B19・バグ修正)。
+- TRUNCATE(TRUNC) / LEFT / RIGHT / INSTR / GREATEST / LEAST / LPAD / RPAD /
+  LAST_DAY を追加。
+- TRUNCATE は FLOOR と違い 0 方向へ丸めるため負数で結果が変わる
+  (FLOOR(-1.5)=-2 に対し TRUNCATE(-1.5)=-1)。
+- RIGHT は SUBSTRING では代替できない。SUBSTRING は引数に算術式を書けず
+  (SUBSTRING(s, LENGTH(s)-3) は ParseError)、負数の開始位置は MySQL と異なり
+  全文を返すため。末尾の切り出しには RIGHT を使う。
+- GREATEST / LEAST は列方向の集約 MAX / MIN と違い、同じ行の引数同士を比較する。
+  空文字は常に最小。空文字を除いた集合がすべて数値なら数値比較、1 つでも非数値
+  なら集合全体を文字列比較する。数値が同値なら元の文字列表記を二次キーにするため
+  引数の順序で結果は変わらず、LPAD による 0 埋め等の表記も保持する
+  (GREATEST('007','008') は '008')。
+- TRUNCATE / TRUNC / INSTR / GREATEST / LEAST / LPAD / RPAD / LAST_DAY は新しい
+  予約語。同名フィールドはバッククォート(`LEAST`)で参照。LEFT / RIGHT は
+  LEFT JOIN / RIGHT JOIN で既に予約語のため新規追加はなく、直後に ( がある
+  場合のみ関数として扱う。
+- 追加した関数は引数の個数を検証し ArgumentError を返す(既存関数は不変)。
+- 修正: DATE_ADD の構文が言語リファレンスと実装で食い違っていた。記載していた
+  DATE_ADD(フィールド, INTERVAL n UNIT) は INTERVAL がトークンとして存在せず、
+  記載どおりに書くと必ず ParseError になっていた。正しくは
+  DATE_ADD(日付, 加算値, 単位) で、減算は DATE_ADD(期限日, -1, 'MONTH') のように
+  負数を渡す(DATE_SUB は無い)。
+- 修正(挙動変更): DATE_ADD に YEAR / MONTH / DAY 以外の単位を渡すと、黙って DAY
+  として加算していた。'HOUR' や単位の誤記がエラーにならず日単位で成功していた
+  ため、実行時に ArgumentError とする。従来「成功していた」呼び出しが失敗へ
+  変わるが、その結果は元々誤っていた。
+- SUBSTRING の開始位置に負数を指定すると MySQL と異なり全文を返すことを
+  言語リファレンスへ明記(挙動は変更なし)。
+- 詳細は CHANGELOG.md と言語リファレンスを参照。
 
 v2.16.0: 順位系ウィンドウ関数に対応(B17・機能追加)。
 - ROW_NUMBER() / RANK() / DENSE_RANK() と
