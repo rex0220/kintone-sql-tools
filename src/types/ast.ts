@@ -535,6 +535,9 @@ export interface InsertStatement {
   values: InsertRow[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
 }
 
 /** 1 行分の値リスト */
@@ -558,6 +561,9 @@ export interface UpsertStatement {
   keyFields: string[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
 }
 
 // ------------------------------------------------------------
@@ -572,6 +578,9 @@ export interface UpsertSelectStatement {
   keyFields: string[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
 }
 
 // ------------------------------------------------------------
@@ -585,6 +594,9 @@ export interface InsertSelectStatement {
   select: SelectStatement;   // ソースクエリ
   validateOnly?: boolean;
   validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
 }
 
 // ------------------------------------------------------------
@@ -601,6 +613,9 @@ export interface UpdateStatement {
   from?: UpdateFromSource | null;
   validateOnly?: boolean;
   validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
 }
 
 export interface Assignment {

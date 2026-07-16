@@ -85,6 +85,7 @@ export interface StatementAnalysis {
   /** UPDATE ... FROM。ソース読み取り上限を影響行数から分離するために使う。 */
   isUpdateFrom: boolean;
   isValidationOnly: boolean;
+  isOnErrorSkip: boolean;
   requiresCompleteInput: boolean;
 }
 
@@ -209,9 +210,14 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
-    const validationTable = "validationErrorTable" in stmt ? stmt.validationErrorTable : null;
+    const validationTable = "validationErrorTable" in stmt && stmt.validationErrorTable
+      ? stmt.validationErrorTable
+      : ("onErrorSkip" in stmt && stmt.onErrorSkip ? stmt.errorTable ?? null : null);
     if (statements.length === 1 && validationTable) {
-      throw new BatchAnalysisError("ArgumentError: VALIDATE ONLY INTO requires a batch.", index);
+      const message = "onErrorSkip" in stmt && stmt.onErrorSkip
+        ? "ArgumentError: ON ERROR SKIP requires a batch."
+        : "ArgumentError: VALIDATE ONLY INTO requires a batch.";
+      throw new BatchAnalysisError(message, index);
     }
     const statementType = getStatementType(stmt);
     const created: string[] = [];
@@ -353,6 +359,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
           : null,
       isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null,
       isValidationOnly: "validateOnly" in stmt && stmt.validateOnly === true,
+      isOnErrorSkip: "onErrorSkip" in stmt && stmt.onErrorSkip === true,
       requiresCompleteInput: requiresCompleteInput(stmt),
     });
   });

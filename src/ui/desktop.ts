@@ -1912,6 +1912,9 @@ function buildDmlSummary(batch: BatchExecuteResult): string[] {
     else if (r.type === "UPSERT") detail = `inserted=${r.insertedCount} updated=${r.updatedCount}`;
     else if (r.type === "REORDER") detail = `reordered=${r.reorderedParentCount}`;
     else if (r.type === "VALIDATION") detail = `validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`;
+    if (detail && (r.type === "INSERT" || r.type === "UPDATE" || r.type === "UPSERT") && r.skippedRows !== undefined) {
+      detail += ` affected=${r.affectedRows} skipped=${r.skippedRows} errTable=${r.errTable}`;
+    }
     if (detail) lines.push(`[${s.index + 1}] ${s.type}: ${detail}`);
   }
   return lines;

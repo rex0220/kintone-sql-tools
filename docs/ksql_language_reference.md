@@ -1640,6 +1640,25 @@ SELECT * FROM #err;
 - 検証通過は書き込み成功を保証しません。権限、競合、ユーザー実在性、既存レコードとの一意制約衝突などAPI実行時の問題は対象外です
 - `UPDATE ... VALIDATE ONLY` はSET対象列だけを検証します。一方、kintoneはPUT時にレコード全体を再検証するため、制約を後から追加したアプリなどでは、既存レコードのSET対象外フィールド（サブテーブル子を含む）に残る必須・文字列長等の違反値によって本実行が失敗することがあります。この場合はAPI実行時エラーとしてfail-fastになります
 
+## 17.2 ON ERROR SKIP（事前検証エラー行の隔離）
+
+複文バッチ内の親レコード `INSERT` / `UPSERT` / `UPDATE` に `ON ERROR SKIP INTO #err` を付けると、`VALIDATE ONLY` と同じTier 0検証で不正になった行を `#err` へ隔離し、合格行だけを書き込みます。書き込みを行うため、MCPでは `ksql_mutate` とDML承認、CLIでは `--allow-dml` が必要です。
+
+```sql
+INSERT INTO APP100 (顧客コード, 金額)
+SELECT 顧客コード, 金額 FROM #source
+ON ERROR SKIP INTO #err REJECT LIMIT 100;
+
+SELECT * FROM #err;
+```
+
+- `REJECT LIMIT n` は隔離されたユニーク入力行数へ適用します。n行までは許容し、n+1行以上なら全候補の検証完了後に書き込みゼロで停止します。省略時は無制限です
+- 超過文は `RejectLimitExceededError` になりますが、全診断行は応答の結果セットに含まれます。後続文はfail-fastでskipされるため、超過時は後続SQLから `#err` を参照できません
+- `ON ERROR SKIP` は `INTO #err` 必須のバッチ専用構文です。単文では使用できません
+- 結果には既存のoperation別件数に加えて `affectedRows` / `skippedRows` / `rejectLimit` / `errTable` が含まれます
+- `dmlMaxRows` と `dmlTotalMaxRows` は隔離後に実際に書き込む行数へ適用されます。ソース取得は通常の `maxRecords` で制御されます
+- kintone APIが書き込み時に返す権限・競合・一意制約・既存レコード全体の再検証エラーなどは隔離せず、従来どおりfail-fastです
+
 ---
 
 ## 18. DELETE

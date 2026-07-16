@@ -583,7 +583,7 @@ function buildMutationOutput(
   noHeader: boolean,
   pretty: boolean
 ): string {
-  const row: Record<string, string | number> = { type: result.type };
+  const row: Record<string, string | number | null> = { type: result.type };
   if (result.type === "INSERT") {
     row.insertedCount = result.insertedCount;
   } else if (result.type === "UPDATE") {
@@ -595,6 +595,12 @@ function buildMutationOutput(
     row.updatedCount = result.updatedCount;
   } else if (result.type === "REORDER") {
     row.reorderedParentCount = result.reorderedParentCount;
+  }
+  if (result.type === "INSERT" || result.type === "UPDATE" || result.type === "UPSERT") {
+    if (result.affectedRows !== undefined) row.affectedRows = result.affectedRows;
+    if (result.skippedRows !== undefined) row.skippedRows = result.skippedRows;
+    if (result.rejectLimit !== undefined) row.rejectLimit = result.rejectLimit;
+    if (result.errTable !== undefined) row.errTable = result.errTable;
   }
 
   if (format === "json") return JSON.stringify(row, null, pretty ? 2 : 0);
@@ -736,6 +742,13 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     else if (r.type === "UPSERT") parts.push(`inserted=${r.insertedCount} updated=${r.updatedCount}`);
     else if (r.type === "REORDER") parts.push(`reordered=${r.reorderedParentCount}`);
     else if (r.type === "VALIDATION") parts.push(`validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`);
+    if ((r.type === "INSERT" || r.type === "UPDATE" || r.type === "UPSERT") && r.skippedRows !== undefined) {
+      parts.push(`affected=${r.affectedRows} skipped=${r.skippedRows} errTable=${r.errTable}`);
+    }
+  }
+  if (s.status === "error" && s.result?.type === "VALIDATION") {
+    const r = s.result;
+    parts.push(`validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`);
   }
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
@@ -797,7 +810,7 @@ function buildBatchResultsOutput(
   for (const s of batch.statements) {
     if (s.status === "success" && s.result?.type === "SELECT") {
       outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
-    } else if (s.status === "success" && s.result?.type === "VALIDATION") {
+    } else if (s.result?.type === "VALIDATION") {
       outputs.push(buildValidationOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
     }
   }

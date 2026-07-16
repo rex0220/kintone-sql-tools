@@ -1,7 +1,7 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **仕様 R7（B12-B 実装着手可）。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。R6 で kintone PUT 全レコード再検証（B11.1 実機発見）の Tier 0 境界を §9 へ追記。**R7 で B12-B の codex レビュー P1×3 を反映（§7.4 実装契約）＝実装着手可。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **仕様 R7・B12-B codex 実装完了（コードレビュー／実機確認待ち）。B12-A `VALIDATE ONLY` と B11.1 業務キー結合は実装・実機確認完了、v2.13.0 未リリース。** B12-B は Tier 0 厳格、REJECT LIMIT診断契約、prepared write plan、隔離後DMLガードを §7.3〜§7.4 の契約どおり実装した。看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
 - B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)（R4・残存ゲートなし）
 - 2026-07-16 R5: **B12-B 実装前ゲート（隔離厳格度）を解消**（§7.3 新設）。`ON ERROR SKIP` の隔離集合は `VALIDATE ONLY` と同一基準（Tier 0 厳格）で確定。書き込み経路相当への緩和（案A）はプレビュー→本実行の 1:1 対応を壊し、lenient 通過値の API 拒否が全体 fail-fast を招くため不採用。B12-A の実機合わせ込み（UTF-16 計数・空文字 minLength・未設定制約）で主要な過剰厳格は解消済みという実測根拠を記録
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。

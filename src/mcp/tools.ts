@@ -93,6 +93,7 @@ export interface StatementValidation {
   targetAppId: number | null;
   isUpdateFrom: boolean;
   isValidationOnly: boolean;
+  isOnErrorSkip: boolean;
   requiresCompleteInput: boolean;
 }
 
@@ -275,6 +276,10 @@ function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertR
       type: result.type,
       insertedCount: result.insertedCount,
       createdIds: result.createdIds,
+      ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+      ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+      ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+      ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
     };
   }
   if (result.type === "UPDATE") {
@@ -282,6 +287,10 @@ function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertR
       ok: true,
       type: result.type,
       updatedCount: result.updatedCount,
+      ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+      ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+      ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+      ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
     };
   }
   if (result.type === "DELETE") {
@@ -297,6 +306,10 @@ function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertR
       type: result.type,
       insertedCount: result.insertedCount,
       updatedCount: result.updatedCount,
+      ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+      ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+      ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+      ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
     };
   }
   return {
@@ -338,9 +351,14 @@ function requireDmlApproval(
 }
 
 /** ソース読み取り件数が影響行数と一致しない DML を含むか。 */
-function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: string; isUpdateFrom?: boolean }>): boolean {
+function containsSelectBasedDml(statements: ReadonlyArray<{
+  statementType: string;
+  isUpdateFrom?: boolean;
+  isOnErrorSkip?: boolean;
+}>): boolean {
   return statements.some(
-    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT" || s.isUpdateFrom === true
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT"
+      || s.isUpdateFrom === true || s.isOnErrorSkip === true
   );
 }
 
@@ -354,7 +372,7 @@ function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: strin
  *   のため dmlMaxRows + 1(超過検出用に 1 件多く読む)
  */
 function resolveMutateRuntimeMaxRecords(
-  statements: ReadonlyArray<{ statementType: string; isUpdateFrom?: boolean }>,
+  statements: ReadonlyArray<{ statementType: string; isUpdateFrom?: boolean; isOnErrorSkip?: boolean }>,
   dmlMaxRows: number
 ): number | undefined {
   return containsSelectBasedDml(statements) ? undefined : dmlMaxRows + 1;
@@ -438,6 +456,7 @@ export function createKsqlMcpTools(
       targetAppId: s.targetAppId,
       isUpdateFrom: s.isUpdateFrom,
       isValidationOnly: s.isValidationOnly,
+      isOnErrorSkip: s.isOnErrorSkip,
       requiresCompleteInput: s.requiresCompleteInput,
     }));
 
@@ -626,12 +645,12 @@ export function createKsqlMcpTools(
       if ((s.statementType === "UPDATE" || s.statementType === "DELETE") && !s.hasWhere) {
         throw new Error(`ArgumentError: ${s.statementType} without WHERE is blocked by ksql_mutate.${at}`);
       }
-      if (s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
+      if (!s.isOnErrorSkip && s.insertValuesCount !== null && s.insertValuesCount > dmlMaxRows) {
         throw new Error(
           `ArgumentError: INSERT rows (${s.insertValuesCount}) exceed dmlMaxRows (${dmlMaxRows}).${at}`
         );
       }
-      staticInsertTotal += s.insertValuesCount ?? 0;
+      if (!s.isOnErrorSkip) staticInsertTotal += s.insertValuesCount ?? 0;
     }
     const dmlTotalMaxRows = input.dmlTotalMaxRows;
     if (dmlTotalMaxRows !== undefined && staticInsertTotal > dmlTotalMaxRows) {

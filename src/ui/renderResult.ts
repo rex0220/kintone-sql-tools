@@ -28,12 +28,12 @@ export interface DisplayOptions {
 export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): string {
   switch (result.type) {
     case "SELECT": return renderSelect(result, opts);
-    case "INSERT": return renderSuccess(`${result.insertedCount} 件のレコードを登録しました。`);
-    case "UPDATE": return renderSuccess(`${result.updatedCount} 件のレコードを更新しました。`);
+    case "INSERT": return renderSuccess(`${result.insertedCount} 件のレコードを登録しました。${isolationSuffix(result)}`);
+    case "UPDATE": return renderSuccess(`${result.updatedCount} 件のレコードを更新しました。${isolationSuffix(result)}`);
     case "DELETE": return renderSuccess(`${result.deletedCount} 件のレコードを削除しました。`);
     case "REORDER": return renderSuccess(`${result.reorderedParentCount} 件の親レコードで並び順を更新しました。`);
     case "UPSERT": return renderSuccess(
-      `登録 ${result.insertedCount} 件 / 更新 ${result.updatedCount} 件`
+      `登録 ${result.insertedCount} 件 / 更新 ${result.updatedCount} 件${isolationSuffix(result)}`
     );
     case "ASSERT": return renderSuccess(`アサーション成立: ${result.condition}`);
     case "VALIDATION": {
@@ -42,6 +42,10 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
       return `${summary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
     }
   }
+}
+
+function isolationSuffix(result: { skippedRows?: number; errTable?: string }): string {
+  return result.skippedRows === undefined ? "" : ` 隔離 ${result.skippedRows} 件（${result.errTable}）`;
 }
 
 export function renderError(err: unknown): string {

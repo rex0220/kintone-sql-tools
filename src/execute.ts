@@ -201,12 +201,20 @@ export interface InsertResult {
   /** 作成されたレコード ID（バッチごと） */
   createdIds: string[][];
   insertedCount: number;
+  affectedRows?: number;
+  skippedRows?: number;
+  rejectLimit?: number | null;
+  errTable?: string;
   metrics?: ExecuteMetrics;
 }
 
 export interface UpdateResult {
   type: "UPDATE";
   updatedCount: number;
+  affectedRows?: number;
+  skippedRows?: number;
+  rejectLimit?: number | null;
+  errTable?: string;
   metrics?: ExecuteMetrics;
 }
 
@@ -220,6 +228,10 @@ export interface UpsertResult {
   type: "UPSERT";
   insertedCount: number;
   updatedCount: number;
+  affectedRows?: number;
+  skippedRows?: number;
+  rejectLimit?: number | null;
+  errTable?: string;
   metrics?: ExecuteMetrics;
 }
 
@@ -432,6 +444,9 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
     }
     return executeDmlValidation(stmt, client, { ...options, onLimitReached: "error" }, cacheContext, undefined, 1);
+  }
+  if ("onErrorSkip" in stmt && stmt.onErrorSkip === true) {
+    throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
   }
   switch (stmt.type) {
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
@@ -653,7 +668,12 @@ export async function executeBatch(
       }
       results.push({ ...base, status: "success", ...outcome });
     } catch (e) {
-      results.push({ ...base, status: "error", error: toBatchStatementError(e) });
+      results.push({
+        ...base,
+        status: "error",
+        error: toBatchStatementError(e),
+        ...(e instanceof RejectLimitExceededError ? { result: e.diagnostic } : {}),
+      });
       failed.add(i);
       if (e instanceof BatchTimeoutError) {
         aborted = "timeout";
@@ -749,6 +769,19 @@ async function executeBatchStatement(
       );
     }
     return { result };
+  }
+
+  if ("onErrorSkip" in resolvedStmt && resolvedStmt.onErrorSkip === true) {
+    return {
+      result: await executeOnErrorSkip(
+        resolvedStmt,
+        client,
+        { ...options, onLimitReached: "error" },
+        cacheContext,
+        tempTables,
+        info.index + 1
+      ),
+    };
   }
 
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
@@ -2451,6 +2484,34 @@ async function executeDmlValidation(
   tempTables: Map<string, MaterializedTable> | undefined,
   statementNumber: number
 ): Promise<DmlValidationResult> {
+  return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
+}
+
+/** REJECT LIMIT 超過。診断結果を batch envelope へ残したまま fail-fast する。 */
+export class RejectLimitExceededError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostic: DmlValidationResult
+  ) {
+    super(`RejectLimitExceededError: ${message}`);
+    this.name = "RejectLimitExceededError";
+  }
+}
+
+interface PreparedDmlValidation {
+  result: DmlValidationResult;
+  candidates: DmlValidationCandidate[];
+  invalidRowNumbers: Set<number>;
+}
+
+async function prepareDmlValidation(
+  stmt: ValidationStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable> | undefined,
+  statementNumber: number
+): Promise<PreparedDmlValidation> {
   const operation: ValidationOperation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
@@ -2468,11 +2529,11 @@ async function executeDmlValidation(
   }
 
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
-  const { errors, invalidRows } = validateDmlCandidates(
+  const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
     candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber
   );
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
-  return {
+  const result: DmlValidationResult = {
     type: "VALIDATION",
     operation,
     validatedRows: candidates.length,
@@ -2481,8 +2542,91 @@ async function executeDmlValidation(
     errorCount: errors.length,
     columns,
     errors,
-    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    ...(stmt.validationErrorTable
+      ? { errTable: stmt.validationErrorTable }
+      : stmt.onErrorSkip && stmt.errorTable ? { errTable: stmt.errorTable } : {}),
   };
+  return { result, candidates, invalidRowNumbers };
+}
+
+async function executeOnErrorSkip(
+  stmt: ValidationStatement & { onErrorSkip?: boolean; errorTable?: string; rejectLimit?: number | null },
+  client: KintoneClient,
+  options: BatchExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable>,
+  statementNumber: number
+): Promise<InsertResult | UpdateResult | UpsertResult> {
+  const prepared = await prepareDmlValidation(
+    stmt, client, options, cacheContext, tempTables, statementNumber
+  );
+  const errTable = stmt.errorTable;
+  if (!errTable) throw new Error("ArgumentError: ON ERROR SKIP requires INTO #error_table.");
+
+  appendValidationErrors(
+    tempTables,
+    errTable,
+    prepared.result.columns,
+    prepared.result.errors,
+    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+  );
+
+  const rejectLimit = stmt.rejectLimit ?? null;
+  if (rejectLimit !== null && prepared.result.invalidRows > rejectLimit) {
+    throw new RejectLimitExceededError(
+      `rejected rows (${prepared.result.invalidRows}) exceed REJECT LIMIT (${rejectLimit}).`,
+      prepared.result
+    );
+  }
+
+  const valid = prepared.candidates.filter((candidate) => !prepared.invalidRowNumbers.has(candidate.rowNumber));
+  if (options.confirm) {
+    const operation = stmt.type.startsWith("INSERT") ? "INSERT" : "UPDATE";
+    const ok = await options.confirm(valid.length, operation);
+    if (!ok) throw new OperationCancelledError(operation, valid.length);
+  }
+
+  const common = {
+    affectedRows: valid.length,
+    skippedRows: prepared.result.invalidRows,
+    rejectLimit,
+    errTable,
+  };
+
+  if (stmt.type === "INSERT" || stmt.type === "INSERT_SELECT") {
+    const createdIds: string[][] = [];
+    for (let i = 0; i < valid.length; i += 100) {
+      const response = await client.postRecords({ app: stmt.appId, records: valid.slice(i, i + 100).map((c) => c.record!) });
+      createdIds.push(response.ids);
+    }
+    return { type: "INSERT", createdIds, insertedCount: createdIds.flat().length, ...common };
+  }
+
+  if (stmt.type === "UPDATE") {
+    const updates = valid.map((candidate) => {
+      if (candidate.targetId === undefined) throw new Error("InternalError: prepared UPDATE candidate has no targetId.");
+      return { id: candidate.targetId, record: candidate.record! };
+    });
+    for (let i = 0; i < updates.length; i += 100) {
+      await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+    }
+    return { type: "UPDATE", updatedCount: updates.length, ...common };
+  }
+
+  const inserts = valid.filter((candidate) => candidate.mode === "create");
+  const updates = valid.filter((candidate) => candidate.mode === "update").map((candidate) => {
+    if (candidate.targetId === undefined) throw new Error("InternalError: prepared UPSERT candidate has no targetId.");
+    return { id: candidate.targetId, record: candidate.record! };
+  });
+  let insertedCount = 0;
+  for (let i = 0; i < inserts.length; i += 100) {
+    const response = await client.postRecords({ app: stmt.appId, records: inserts.slice(i, i + 100).map((c) => c.record!) });
+    insertedCount += response.ids.length;
+  }
+  for (let i = 0; i < updates.length; i += 100) {
+    await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  }
+  return { type: "UPSERT", insertedCount, updatedCount: updates.length, ...common };
 }
 
 async function materializeValidationCandidates(
@@ -2519,6 +2663,7 @@ async function materializeValidationCandidates(
     mode: "create",
     payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
     preErrors: [],
+    record: {},
   }));
   if (stmt.type !== "UPSERT" && stmt.type !== "UPSERT_SELECT") return candidates;
 
@@ -2536,7 +2681,9 @@ async function materializeValidationCandidates(
   }
   candidates.forEach((candidate, index) => {
     const parts = rowKeys[index];
-    candidate.mode = lookupUpsertTarget(targets, parts) === undefined ? "create" : "update";
+    const targetId = lookupUpsertTarget(targets, parts);
+    candidate.mode = targetId === undefined ? "create" : "update";
+    if (targetId !== undefined) candidate.targetId = targetId;
     stmt.keyFields.forEach((key, keyIndex) => {
       if (parts[keyIndex] === "") candidate.preErrors.push({ field: key, code: "ERR_KEY_EMPTY", message: `UPSERT キー ${key} は空にできません` });
     });
@@ -2577,6 +2724,8 @@ async function materializeUpdateValidationCandidates(
     mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
+    record: entry.record,
+    targetId: entry.id,
   }));
 }
 
@@ -2595,6 +2744,8 @@ async function materializeUpdateFromValidationCandidates(
     rowNumber: index + 1, operation: "UPDATE", mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
+    record: entry.record,
+    targetId: entry.id,
   }));
 }
 
