@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §3 T1-1 で「**最大の欠落**」と評価した機能。
-- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
+- ステータス: **R2 実装済み（codex 自動テスト pass・コードレビュー／実機確認待ち）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

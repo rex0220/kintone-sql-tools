@@ -57,6 +57,7 @@ import {
   ProcessRow,
   applyOrderBy,
   applyLimit,
+  applyWindow,
   OptionOrderMap,
   FieldSortKindMap,
   type AggregateSortKindResolver,
@@ -1246,6 +1247,11 @@ function validateNoFromColumns(stmt: SelectStatement): void {
           throw new Error("ArgumentError: field reference is not allowed without FROM.");
         }
         break;
+      case "WINDOW_COL":
+        if (col.partitionBy.length > 0 || col.orderBy.length > 0) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
       default:
         throw new Error(`ArgumentError: ${col.type} is not supported without FROM.`);
     }
@@ -1257,7 +1263,8 @@ function executeNoFromSelect(stmt: SelectStatement): SelectResult {
     throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
   }
   validateNoFromColumns(stmt);
-  const { rows: projected, columns } = project([{}], stmt.columns);
+  const windowed = applyWindow([{}], stmt.columns);
+  const { rows: projected, columns } = project(windowed, stmt.columns);
   const rows = applyLimit(projected, stmt.limit, stmt.offset);
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
@@ -1795,6 +1802,8 @@ async function inferSelectColumnMeta(
         meta = { sortKind: "number" };
       } else if (column.type === "LITERAL_COL") {
         meta = { sortKind: "string" };
+      } else if (column.type === "WINDOW_COL") {
+        meta = { sortKind: "number" };
       }
       if (meta) inferred.set(output, meta);
     });
@@ -2681,7 +2690,10 @@ async function buildOrderByMetaForSelect(
   client: KintoneClient,
   cacheContext: string
 ): Promise<OrderByMeta> {
-  if (stmt.orderBy.length === 0) {
+  const hasWindowOrderBy = stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+  if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
     return { optionOrders: new Map(), sortKinds: new Map() };
   }
   const [optionOrders, sortKinds] = await Promise.all([
@@ -4709,6 +4721,8 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
     r.push("DISTINCT あり");
   if (stmt.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"))
     r.push("集計関数（COUNT / SUM 等）あり");
+  if (stmt.columns.some((c) => c.type === "WINDOW_COL"))
+    r.push("ウィンドウ関数あり");
   if (stmt.columns.some((c) => c.type === "SCALAR_SUBQUERY_COL"))
     r.push("SELECT 列にスカラーサブクエリ");
   if (whereRequiresJsEval(stmt.where))

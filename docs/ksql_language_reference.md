@@ -21,6 +21,7 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 8. [GROUP BY / 集計関数](#8-group-by--集計関数)
 9. [HAVING](#9-having)
 10. [ORDER BY](#10-order-by)
+10.1. [ウィンドウ関数](#101-ウィンドウ関数v2160)
 11. [LIMIT / OFFSET](#11-limit--offset)
 12. [UNION / UNION ALL](#12-union--union-all)
 13. [WITH 句（CTE）](#13-with-句cte)
@@ -965,6 +966,57 @@ ORDER BY ROUND(金額, -3) DESC
 
 ---
 
+## 10.1 ウィンドウ関数（v2.16.0）
+
+順位付けとグループ内連番に、次の3関数を使用できます。ウィンドウ関数を含むSELECTは全件を取得してJSで評価するため、常にFULL_SCANモードです。
+
+```sql
+ROW_NUMBER() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
+RANK()       OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
+DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
+```
+
+- `ROW_NUMBER` — 同順位を作らず、1から連番を付ける
+- `RANK` — 同値は同順位。次の順位を飛ばす（`1, 1, 3`）
+- `DENSE_RANK` — 同値は同順位。次の順位を飛ばさない（`1, 1, 2`）
+- `PARTITION BY` 省略時は全行を1グループとして扱う
+- `ORDER BY` 省略時、`RANK` / `DENSE_RANK` は全行1。`ROW_NUMBER` は取得順で採番する
+- `AS alias` は必須。引数、フレーム句、集計関数の `OVER` は未対応
+
+```sql
+-- 顧客ごとの受注を新しい順に採番
+SELECT 顧客ID, 受注日, 金額,
+       ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn
+FROM APP300
+```
+
+`WHERE` はウィンドウ関数より先に評価されるため、同じSELECTの `WHERE rn = 1` では絞り込めません。CTEでスコープを分けると、各顧客の最新行を全列付きで1文取得できます。
+
+```sql
+WITH ranked AS (
+  SELECT 顧客ID, 受注日, 金額,
+         ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn
+  FROM APP300
+)
+SELECT 顧客ID, 受注日, 金額
+FROM ranked
+WHERE rn = 1
+```
+
+ウィンドウ内の `ORDER BY` はトップレベルの `ORDER BY` と同じ比較規則を使用します。物理アプリでは数値型と選択肢定義順を反映します。CTE／一時テーブル由来の列は既存のトップレベル `ORDER BY` と同じ制限があり、選択肢定義順を引き継がず、値ベースの数値／文字列自動判定になります。
+
+同じSELECT内での `GROUP BY`／集計関数との併用は未対応です。集約結果へ順位を付ける場合はCTEでスコープを分けます。
+
+```sql
+WITH agg AS (
+  SELECT 部署, SUM(売上) AS 合計 FROM APP300 GROUP BY 部署
+)
+SELECT 部署, 合計, RANK() OVER (ORDER BY 合計 DESC) AS 順位
+FROM agg
+```
+
+---
+
 ## 11. LIMIT / OFFSET
 
 取得件数の上限とスキップ件数を指定します。
@@ -1869,6 +1921,7 @@ kSQL は以下の条件に応じて自動的に実行モードを切り替えま
 | JOIN あり / GROUP BY あり / DISTINCT / WHERE に関数・算術式・CASE WHEN / ORDER BY に算術式 | **FULL_SCAN**（全件取得して JS 処理） |
 | WHERE に IN (SELECT) / EXISTS / NOT EXISTS / スカラーサブクエリ | **FULL_SCAN** |
 | SELECT 列にスカラーサブクエリ | **FULL_SCAN** |
+| SELECT 列にウィンドウ関数 | **FULL_SCAN** |
 | UNION / UNION ALL | **FULL_SCAN** |
 | WITH 句（単純 CTE）— インライン化される | **SIMPLE**（kintone クエリに変換） |
 | WITH 句（GROUP BY ありの CTE・複数 CTE・CTE JOIN） | **FULL_SCAN** |

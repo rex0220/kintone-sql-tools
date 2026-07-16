@@ -6,6 +6,7 @@ import {
   applyHaving,
   applyDistinct,
   applyOrderBy,
+  applyWindow,
   applyLimit,
   project,
   runFullScan,
@@ -56,6 +57,61 @@ test("flatten: null / undefined は空文字へ正規化し、他の値形式は
     配列: '["A"]',
     文字列: '""',
   });
+});
+
+// ----------------------------------------------------------------
+// applyWindow
+// ----------------------------------------------------------------
+
+test("ROW_NUMBER はパーティションごとに数値順で採番する", () => {
+  const stmt = parseSelect(
+    "SELECT k, ROW_NUMBER() OVER (PARTITION BY k ORDER BY n DESC) AS rn FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { k: "A", n: "99" }, { k: "A", n: "214" }, { k: "B", n: "10" }, { k: "A", n: "100" },
+  ];
+  applyWindow(rows, stmt.columns, undefined, new Map([["n", "number"]]));
+  expect(rows.map((row) => [row.k, row.n, row.rn])).toEqual([
+    ["A", "99", "3"], ["A", "214", "1"], ["B", "10", "1"], ["A", "100", "2"],
+  ]);
+});
+
+test("RANK / DENSE_RANK は applyOrderBy と同じ peer 比較を使う", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (ORDER BY n) AS r, DENSE_RANK() OVER (ORDER BY n) AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [{ n: "01" }, { n: "1" }, { n: "2" }, { n: "3" }, { n: "3" }];
+  applyWindow(rows, stmt.columns, undefined, new Map([["n", "number"]]));
+  expect(rows.map((row) => [row.r, row.dr])).toEqual([
+    ["1", "1"], ["1", "1"], ["3", "2"], ["4", "3"], ["4", "3"],
+  ]);
+});
+
+test("選択肢定義順を使い、複数ウィンドウ列を同じ入力順から独立評価する", () => {
+  const stmt = parseSelect(
+    "SELECT ROW_NUMBER() OVER (ORDER BY status) AS by_status, ROW_NUMBER() OVER () AS original FROM APP1"
+  );
+  const rows: ProcessRow[] = [{ status: "中" }, { status: "高" }, { status: "低" }];
+  const optionOrders = new Map([["status", new Map([["高", 0], ["中", 1], ["低", 2]])]]);
+  applyWindow(rows, stmt.columns, optionOrders);
+  expect(rows.map((row) => [row.status, row.by_status, row.original])).toEqual([
+    ["中", "2", "1"], ["高", "1", "2"], ["低", "3", "3"],
+  ]);
+});
+
+test("ORDER BY 省略時は RANK / DENSE_RANK が全行 1、空文字も同一パーティション", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (PARTITION BY k) AS r, DENSE_RANK() OVER () AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [{ k: "" }, { k: "" }, { k: "A" }];
+  applyWindow(rows, stmt.columns);
+  expect(rows.map((row) => [row.r, row.dr])).toEqual([["1", "1"], ["1", "1"], ["1", "1"]]);
+});
+
+test("DISTINCT はウィンドウ列の値をキーへ含める", () => {
+  const stmt = parseSelect("SELECT DISTINCT RANK() OVER (ORDER BY n) AS r FROM APP1");
+  const rows = [{ r: "1" }, { r: "1" }, { r: "3" }];
+  expect(applyDistinct(rows, stmt.columns)).toEqual([{ r: "1" }, { r: "3" }]);
 });
 
 test("flatten: null キーは JOIN / GROUP BY / DISTINCT で通常の空文字として扱う", () => {
