@@ -32754,16 +32754,25 @@ var Parser = class {
   // IN リストの値
   parseInValues() {
     const values = [];
+    const invalidValueMessage = "IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u3001\u6570\u5024\u3001\u307E\u305F\u306F\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059";
     do {
       const tok = this.advance();
       if (tok.kind === "STRING" /* STRING */) {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === "NUMBER" /* NUMBER */) {
         values.push({ type: "NUMBER", value: Number(tok.value) });
+      } else if (tok.kind === "-" /* MINUS */ || tok.kind === "+" /* PLUS */) {
+        const number4 = this.peek();
+        if (number4.kind !== "NUMBER" /* NUMBER */) {
+          throw new ParseError(invalidValueMessage, tok);
+        }
+        this.advance();
+        const sign = tok.kind === "-" /* MINUS */ ? -1 : 1;
+        values.push({ type: "NUMBER", value: sign * Number(number4.value) });
       } else if (tok.kind === "VARIABLE" /* VARIABLE */) {
         values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
-        throw new ParseError("IN \u30EA\u30B9\u30C8\u306B\u306F\u6587\u5B57\u5217\u3001\u6570\u5024\u3001\u307E\u305F\u306F\u30D0\u30C3\u30C1\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059", tok);
+        throw new ParseError(invalidValueMessage, tok);
       }
     } while (this.consume("," /* COMMA */));
     return values;
@@ -42210,7 +42219,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.14.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.14.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
