@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 発見経緯: B12-B `ON ERROR SKIP` の実機確認（APP4221・2026-07-16）。看板レシピ（[ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md) §6）の `SELECT 顧客コード, MIN($err_message) … GROUP BY 顧客コード` が **`NaN` を返し**、業務キー単位のエラーメッセージ集約（B11.1 書き戻しの前段）が機能しないことが判明。
-- ステータス: **R2 実装・自動テスト完了。コードレビュー／実機確認／リリース待ち。**
+- ステータス: **v2.14.0 でリリース済み**（R2 実装・コードレビュー承認・実機確認 全15項目 pass・1,282 テスト green）。temp/CTE 列のテキスト集約はフェーズ2（§9）で別途。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
