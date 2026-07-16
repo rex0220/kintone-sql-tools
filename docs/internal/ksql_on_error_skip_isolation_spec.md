@@ -1,14 +1,14 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **仕様 R5。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **仕様 R6。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。R6 で kintone PUT 全レコード再検証（B11.1 実機発見）の Tier 0 境界を §9 へ追記。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
 - B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)（R4・残存ゲートなし）
 - 2026-07-16 R5: **B12-B 実装前ゲート（隔離厳格度）を解消**（§7.3 新設）。`ON ERROR SKIP` の隔離集合は `VALIDATE ONLY` と同一基準（Tier 0 厳格）で確定。書き込み経路相当への緩和（案A）はプレビュー→本実行の 1:1 対応を壊し、lenient 通過値の API 拒否が全体 fail-fast を招くため不採用。B12-A の実機合わせ込み（UTF-16 計数・空文字 minLength・未設定制約）で主要な過剰厳格は解消済みという実測根拠を記録
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。
 - 2026-07-16 R2: Oracle / Snowflake / PostgreSQL / SQL Server / Db2 の公式仕様と比較し、採用点・非採用点・kSQL 固有の安全性判断を §8 に追記。
 - 2026-07-16 R3: Claude レビューをコードで再確認して反映。B12-B の前提を B11 v1.1（非 `$id` 業務キー結合）へ修正。B12-A の必須実装としてフィールド制約メタ拡張、collect 型検証器、`#err` 追記、文単位 read-only 判定を確定。例を実在構文 `APP<n>` へ修正。
 - 2026-07-16 R4: B12-A の厳密なローカル検証が通常書き込み経路より厳しい場合を明記。B12-B の隔離厳格度を実装前の設計ゲートとし、false isolation の扱いを確定事項から分離。
-- 2026-07-16 R5: B11.1 実機確認で判明した kintone PUT の全レコード再検証を §9 に追記。UPDATE の SET 対象外に既存の制約違反値がある場合は `VALIDATE ONLY` で検出できず、API実行時に fail-fast となる Tier 0 境界を明文化。
+- 2026-07-16 R6: B11.1 実機確認で判明した kintone PUT の全レコード再検証を §9 に追記。UPDATE の SET 対象外に既存の制約違反値がある場合は `VALIDATE ONLY` で検出できず、API実行時に fail-fast となる Tier 0 境界を明文化。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
 ## 1. 目的と定義
