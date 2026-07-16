@@ -74,7 +74,7 @@ UPDATE <app> SET ... WHERE ...
 ```
 1. ソース確定（スナップショット）
 2. 全行をローカル検証（API コストゼロ）
-   └ NG 行 → #err へ。REJECT LIMIT 超過なら AssertError 相当で停止（何も書かない）
+   └ NG 行 → #err へ。REJECT LIMIT 超過なら RejectLimitExceededError で停止（何も書かない・§7.4.1）
 3. 合格行のみ従来通りバルク書き込み（100件チャンク）
    └ ここでの API エラーは従来通り fail-fast（Tier 0 では扱わない）
 4. 結果メタデータに skippedRows / errTable を返す
