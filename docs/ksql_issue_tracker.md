@@ -35,7 +35,7 @@
 2026-07-16 決定。3 件を 1 バージョンに束ね、内部順序を固定して進める。
 
 1. **B1（先行）** — 実装済み（案A）。コア不変・呼び出し層のみ。CLI 経路テストと docs 反映まで完了。
-2. **B2** — 残スコープ（空 `SELECT *`／空 CTE／混在ワイルドカード）は列メタをパイプラインへ伝播する新規設計が必要。**仕様作成済み**（[wildcard-pipeline spec](internal/ksql_empty_select_wildcard_pipeline_spec.md)・R1・codex レビュー前）→ codex レビュー → 実装。
+2. **B2** — 残スコープ（空 `SELECT *`／空 CTE／混在ワイルドカード）は列メタをパイプラインへ伝播する新規設計が必要。**仕様 R2・codex 承認済み → 実装着手可**（[wildcard-pipeline spec](internal/ksql_empty_select_wildcard_pipeline_spec.md)）。
 3. **B8（安全サブセットのみ）** — JS `ORDER BY` なし等「フェッチ順＝返却順」が保証される場合だけ早期打ち切り。ソート再ソートを伴うケースは従来どおり全取得（正しさ優先）。
 
 3 件そろって v2.11.0。SemVer は正しさ/安全性/性能改善のまとめ minor。
@@ -43,7 +43,7 @@
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
 | B1 | CLI の DML × `truncate` で暗黙の部分書き込み | バグ | ✅ **v2.11.0 予定①**（案A・実装済み） | 安全性 | **高** | [issue](internal/ksql_cli_dml_on_limit_truncate_issue.md) |
-| B2 | 空 `SELECT *` / 空 CTE / 混在ワイルドカードの 0 行列欠落 | バグ | 🐞 **v2.11.0 予定②**（仕様案 R1・codex レビュー前） | 正しさ | 中 | [issue](internal/ksql_empty_select_columns_issue.md) / [spec](internal/ksql_empty_select_wildcard_pipeline_spec.md) |
+| B2 | 空 `SELECT *` / 空 CTE / 混在ワイルドカードの 0 行列欠落 | バグ | 🐞 **v2.11.0 予定②**（仕様案 R2・codex 承認・実装着手可） | 正しさ | 中 | [issue](internal/ksql_empty_select_columns_issue.md) / [spec](internal/ksql_empty_select_wildcard_pipeline_spec.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
