@@ -4,10 +4,11 @@
 - 親ロードマップ: [ksql_batch_processing_roadmap.md](ksql_batch_processing_roadmap.md)（Phase 2）
 - 後続依存先: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md)（B12・`#err` の書き戻しに本機能が必要）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B11
-- ステータス: **仕様案 R3（codex レビュー反映・実装着手可）。採用・未実装。現行コードとのギャップ精査を反映**
+- ステータス: **仕様案 R4（codex 再レビュー反映・実装着手可）。採用・未実装。現行コードとのギャップ精査を反映**
 - 更新履歴:
   - 2026-07-16 R1: 初版（ソース temp/CTE 限定）
   - 2026-07-16 R2: **ソースに実アプリを追加**（ユーザー判断・案X）。結合・複数マッチ・per-record PUT は共通で、ソース取得だけ分岐。app ソースは maxRecords 準拠・上限超過は fail-closed
+  - 2026-07-16 R4: codex 再レビュー反映（コードで裏取り）。**High＝`tempName` を `cteName` へ戻す**（`collectRefs`（batch.ts:125）は `cteName`（先頭 #）と `appId` を汎用走査で拾うため、`tempName` だと `tempTablesReferenced`/`dependsOn`/静的検証/ストア注入が全て抜ける）。R2 の `cteName`＋`appId` が正しく R3 の改名が誤り。バッチ解析の受入・テストを明記。軽微＝目的文/AST コメント/ロードマップ例の `APP<n>` 化
   - 2026-07-16 R3: codex レビュー反映（コードで裏取り）。**High①CTE を v1 スコープ外**（`WithStatement.query` は SELECT|UNION のみ・`WITH … UPDATE` 不可のため。v1 ソース = **#temp ＋ APP\<n\>**）②**MCP 読み取り上限**＝UPDATE_FROM を SELECT-based DML 扱いにして `maxRecords` で読む（既存は plain UPDATE に `dmlMaxRows+1` を渡す）・`containsSelectBasedDml`/`resolveMutateRuntimeMaxRecords`/案内文/単文・バッチ MCP テストを実装範囲に追加③**対象取得を 50 件チャンク**化（`$id IN` 単発は件数増に耐えない。既存 `UPSERT_IN_CHUNK_SIZE=50` に倣う）。Medium④WHERE 分解の論理形を限定（結合式はトップレベル AND 連鎖の原子・ソース alias は結合式のみ・OR/NOT 配下の結合式は ParseError）⑤ソース値の正規化・列欠落・型変換を確定⑥ソースキー扱いを §7 で確定。Low⑦例を `APP<n>` へ修正
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: 後方互換の構文追加（`FROM` 句なしの既存 `UPDATE` は不変）→ minor
@@ -16,7 +17,7 @@
 
 ## 1. 目的とスコープ
 
-`UPDATE` の `SET` 値に**他テーブル（一時テーブル/CTE）のフィールド**を参照できるようにし、**アプリ間・テーブル間の転記**を1文で行う。主用途は B12 のエラー行 `#err` を差分アプリへ書き戻すユースケースだが、単体でも「別テーブルの値で更新する」頻出ニーズに応える。
+`UPDATE` の `SET` 値に**他テーブル（一時テーブル `#temp` ／実アプリ `APP<n>`）のフィールド**を参照できるようにし、**アプリ間・テーブル間の転記**を1文で行う。主用途は B12 のエラー行 `#err` を差分アプリへ書き戻すユースケースだが、単体でも「別テーブルの値で更新する」頻出ニーズに応える。
 
 ### スコープ（v1）
 
@@ -86,23 +87,30 @@ export interface UpdateStatement {
   subtableCode?: string | null;
   assignments: Assignment[];
   where: WhereExpr;
-  /** UPDATE … FROM のソース（一時テーブル/CTE のみ・v1）。null で従来 UPDATE */
+  /** UPDATE … FROM のソース（v1 は #temp または実アプリ APP<n>）。null で従来 UPDATE */
   from?: UpdateFromSource | null;
 }
 
 export interface UpdateFromSource {
   /** 実アプリソースの APP 番号（#temp のときは 0）。既存 FROM の appId と同形 */
   appId: number;
-  /** 一時テーブル名 #src（実アプリのときは null）。バッチ temp ストアのキー。
-   *  v1 では WITH-CTE は非対応のため、これは常に #temp を指す */
-  tempName: string | null;
+  /** 一時テーブル名 #src（実アプリのときは null）。**プロパティ名は既存 FROM と
+   *  同じ `cteName`**（先頭 `#`）にすること＝`collectRefs`（batch.ts:125）が
+   *  汎用走査で temp 参照を自動検出し、tempTablesReferenced / dependsOn /
+   *  未定義・DROP 後参照検証 / バッチ実行のストア注入が既存機構で働く。
+   *  v1 では WITH-CTE 非対応のため値は常に #temp を指す（CTE 名は入らない） */
+  cteName: string | null;
   alias: string;
   /** 結合等値のソース側キー列（WHERE から抽出した <alias>.<key> の key） */
   joinKeyField: string;
   /** WHERE から結合等値を除いたターゲット側フィルタ（null 可・target-only） */
   targetFilter: WhereExpr | null;
 }
+```
 
+> **重要（codex R3 再レビュー・High）**: 一時テーブル参照の検出は [`collectRefs`](../../src/core/batch.ts#L118) が **`cteName` プロパティ（先頭 `#`）と `appId`** を AST 全走査で拾う汎用実装。`UpdateFromSource` も **`cteName` を使う**ことで、`UPDATE … FROM #e` の temp 参照・app ソースの `appId`（トークン要求）が**追加コードなしで自動配線**される（`tempName` 等の別名にすると `tempTablesReferenced`・`dependsOn`・静的検証・ストア注入が全て抜ける）。実行側のバッチガード緩和（§6）は別途必要。
+
+```ts
 /** SET 値にソースの修飾フィールド参照を追加 */
 export type AssignmentValue =
   | SqlValue
@@ -117,7 +125,7 @@ export type AssignmentValue =
 
 ## 5. パーサー変更
 
-1. `parseUpdate`（[parser.ts:222](../../src/parser/parser.ts#L222) 経由）で `SET` リスト解析後に **任意の `FROM <#src | APP<n>[@profile]> [AS] alias`** を解析（既存 `FROM` のテーブル参照パーサーを流用し appId/tempName を確定。**CTE 名は非対応**＝#temp または APP のみ）。
+1. `parseUpdate`（[parser.ts:222](../../src/parser/parser.ts#L222) 経由）で `SET` リスト解析後に **任意の `FROM <#src | APP<n>[@profile]> [AS] alias`** を解析（既存 `FROM` のテーブル参照パーサーを流用し appId/cteName を確定。**CTE 名は非対応**＝#temp または APP のみ）。
 2. `SET` 値パーサーに **`alias.field` 修飾参照**を追加（`FROM` 句がある UPDATE でのみ許可。alias はその `FROM` の alias に一致）。`FROM` なしで `alias.field` を書いたら ParseError（従来メッセージ「SET の値にはリテラル・算術式を指定してください」を踏襲）。
 
 ### 5.1 WHERE 分解の論理形（Medium④・厳密規則）
@@ -140,7 +148,7 @@ export type AssignmentValue =
 
 ```
 1. ソース行を取得（出自で分岐）:
-     #temp (from.tempName != null): tempTables/cteCache.get(from.tempName) の rows（実体化済み・上限 tempTableMaxRows）
+     #temp (from.cteName != null): tempTables/cteCache.get(from.cteName) の rows（実体化済み・上限 tempTableMaxRows）
      実アプリ (from.appId != 0):     from.appId を fetchAll で取得（joinKeyField + SET 参照列）
                                      ・maxRecords 準拠。上限超過は onLimit に依らず error（fail-closed・下記）
 2. ソースキー正規化＋targetId → sourceRow マップ構築（§7 の規則）:
@@ -181,7 +189,7 @@ export type AssignmentValue =
 ### その他
 - **app ソースの取得上限は fail-closed**: 複数マッチ検出には**全ソース行**が必要なため、app ソースが maxRecords を超えたら `onLimit=truncate` でも**打ち切らずエラー**（truncate すると重複キーを見逃し＝決定性喪失）。#temp は実体化時に上限確定済みで問題なし。巨大な app ソースは事前に #temp 化して渡す。
 - **ソースのトークン/プロファイル**: app ソース `APP<n>[@profile]` は `extractAppIds` がトークンを解決（既存 FROM と同経路）。
-- **バッチガード緩和**（[execute.ts:516-522](../../src/execute.ts#L516)）: `UPDATE` かつ `from.tempName != null`（#temp 参照）を許可対象に追加。従来の「UPDATE のサブクエリ temp 参照は拒否」は維持（`from` 経路とサブクエリ経路を区別）。app ソース `UPDATE … FROM APP<n>` は temp 非参照のためガード対象外（単文でも実行可）。
+- **バッチガード緩和**（[execute.ts:516-522](../../src/execute.ts#L516)）: `UPDATE` かつ `from.cteName != null`（#temp 参照）を許可対象に追加。`collectRefs` により `tempTablesReferenced` に `#src` が入る前提で、dependsOn（CREATE への依存）・未定義/DROP 後参照検証は既存経路で働く。従来の「UPDATE のサブクエリ temp 参照は拒否」は維持（`from` 経路とサブクエリ経路を区別）。app ソース `UPDATE … FROM APP<n>` は temp 非参照のためガード対象外（単文でも実行可）。
 - `executeUpdate` のシグネチャに tempTables/cteCache を追加し、[execute.ts:406](../../src/execute.ts#L406) の dispatch・バッチ経路（[executeBatchStatement](../../src/execute.ts#L619)）から注入。#temp ソースはバッチスコープ、app ソースは単文でも可。
 
 ---
@@ -222,13 +230,14 @@ export type AssignmentValue =
 - [ ] **MCP**: ソース件数 > `dmlMaxRows` でも `UPDATE … FROM` が成立（単文・バッチ）。読み取り上限は `maxRecords`。
 - [ ] `confirm`／`dmlMaxRows` は matched 件数で発火（超過で PUT 未実行）。
 - [ ] サブテーブル `UPDATE … FROM` は ParseError（対象外）。
+- [ ] **バッチ解析**: `UPDATE … FROM #e` が `tempTablesReferenced=['#e']` を持ち、CREATE #e への `dependsOn`・未定義参照/DROP 後参照の静的エラーが働く（`cteName` 採用で `collectRefs` が自動検出）。
 - [ ] B12 書き戻し例（`SET エラー内容 = e.$err_message FROM #err WHERE APP4220.$id = e.差分ID`）が動作。
 
 ## 9. テスト計画（修正前 fail → 修正後 pass）
 
 ### パーサー
-- temp: `UPDATE APP100 SET c = e.f FROM #e WHERE APP100.$id = e.k` → `from` に appId=0/tempName=`#e`/alias/joinKeyField、targetFilter=null。
-- app: `UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k` → `from` に appId=200/tempName=null/alias/joinKeyField。
+- temp: `UPDATE APP100 SET c = e.f FROM #e WHERE APP100.$id = e.k` → `from` に appId=0/cteName=`#e`/alias/joinKeyField、targetFilter=null。**analyzeBatch で `tempTablesReferenced=['#e']`・CREATE #e への dependsOn** が入る。
+- app: `UPDATE APP100 SET c = s.f FROM APP200 s WHERE APP100.$id = s.k` → `from` に appId=200/cteName=null/alias/joinKeyField。**appId=200 が collectRefs で拾われトークン要求**。
 - ターゲットフィルタあり → targetFilter に格納・結合等値は除外。target-only 括弧 OR（`AND (状態='A' OR 状態='B')`）は許可。
 - **境界値（Medium④）**: `WHERE …$id=s.k OR …`（結合式が OR 配下）→ ParseError。`NOT (…$id=s.k)` → ParseError。結合等値 2 個 → ParseError。ソース alias が結合式外に出現 → ParseError。
 - ParseError: 結合等値 0/複数、`$id` 以外の結合、サブクエリ FROM、CTE 名 FROM、フィルタにソース alias、ソース側 WHERE、サブテーブル、`FROM` なしの `SET c = e.f`。
