@@ -32,7 +32,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B18 | 事前検証がミリ秒付き ISO 日時を誤って拒否（`ON ERROR SKIP` の false isolation） | バグ | 🐞 実機で確定・原因特定済み（`dmlValidation.ts:181` が `.sss` 非対応）・修正方針あり。v2.15.0 予定 | 正しさ・安全性 | **高** | [issue](internal/ksql_validate_datetime_millisecond_issue.md) |
+| B18 | 事前検証がミリ秒付き ISO 日時を誤って拒否（`ON ERROR SKIP` の false isolation） | バグ | 🛠️ Codex 実装済み。コードレビュー・実機再確認待ち。v2.15.0 予定 | 正しさ・安全性 | **高** | [issue](internal/ksql_validate_datetime_millisecond_issue.md) |
 | B14 | 一時テーブル/CTE 列の型メタ伝播（B13 フェーズ2・temp のテキスト `MIN`/`MAX`） | 改善 | ✅ R2 実装・コードレビュー承認・実機 全13項目 pass（1,294 テスト green）。v2.15.0 予定。`MaterializedTable` に列型メタを付与し B13 リゾルバへ配線 | 正しさ | 中 | [spec](internal/ksql_temp_column_type_meta_spec.md) |
 | B16 | 文字列集約 `GROUP_CONCAT`（1対多の連結・`#err` メッセージ集約） | 改善 | ✅ R2 codex 実装・テスト完了（1,311 テスト green、コードレビュー・実機確認待ち）。**B14 とは独立**（型メタ不要）。v2.15.0 予定 | 機能 | 中 | [spec](internal/ksql_group_concat_spec.md) |
 | B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`） | 改善 | 📝 評価済み（比較評価 T1-1・最大の欠落。「各グループ最新1件」を1文化） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
