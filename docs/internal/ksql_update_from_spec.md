@@ -4,8 +4,10 @@
 - 親ロードマップ: [ksql_batch_processing_roadmap.md](ksql_batch_processing_roadmap.md)（Phase 2）
 - 後続依存先: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md)（B12-A は非依存。B12-B の `#err` 書き戻しには v1.1 業務キー結合が必要）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B11
-- ステータス: **v1（`$id` 結合）は R4 実装済み・v2.12.0。v1.1（業務キー結合）は B12-B 前提として仕様追加・未実装。**
+- ステータス: **v1（`$id` 結合）は R4 実装済み・v2.12.0。v1.1（業務キー結合）は R7 仕様確定・実装着手可・B12-B 前提。**
 - 更新履歴:
+  - 2026-07-16 R7: R6レビュー反映。kintoneの文字列（1行）`=` / `in` が先頭64文字で判定される制約に対し、取得後の全文字完全一致逆引きで過剰取得行を除外する契約と `maxRecords` 消費、65文字キーの受入テストを追加。`in` チャンクは既存UPSERT照合へ準拠
+  - 2026-07-16 R6: v1.1 業務キー結合の codex レビュー反映。通常実行と `VALIDATE ONLY` の照合共通化、ターゲット重複時の全件取得と全チャンク合計 `maxRecords`、文字列/NUMBER の厳密なキー正規化、target/source の許可型・列検証を §12 に固定
   - 2026-07-16 R1: 初版（ソース temp/CTE 限定）
   - 2026-07-16 R2: **ソースに実アプリを追加**（ユーザー判断・案X）。結合・複数マッチ・per-record PUT は共通で、ソース取得だけ分岐。app ソースは maxRecords 準拠・上限超過は fail-closed
   - 2026-07-16 R4: codex 再レビュー反映（コードで裏取り）。**High＝`tempName` を `cteName` へ戻す**（`collectRefs`（batch.ts:125）は `cteName`（先頭 #）と `appId` を汎用走査で拾うため、`tempName` だと `tempTablesReferenced`/`dependsOn`/静的検証/ストア注入が全て抜ける）。R2 の `cteName`＋`appId` が正しく R3 の改名が誤り。バッチ解析の受入・テストを明記。軽微＝目的文/AST コメント/ロードマップ例の `APP<n>` 化
@@ -287,22 +289,43 @@ WHERE APP4220.顧客コード = e.顧客コード;
 ```
 
 - 結合は v1 と同じくトップレベル AND 内の**単一等値1個**。`target.<scalar-field> = source.<scalar-field>`（左右反転可）を追加する
-- v1.1 対象は kintone query の `in` と安定した等値正規化が可能なスカラーキー（文字列1行・数値）。配列、ユーザー等の複合型、計算/ルックアップコピー先は対象外
+- ターゲット結合キーは `$id`（v1互換）／`SINGLE_LINE_TEXT`／`NUMBER` のみ。フィールド不存在、サブテーブル子フィールド、`CALC`、ルックアップコピー先、配列・ユーザー等の複合型は対象外とし、ターゲット取得前に `ArgumentError`
+- app source の結合キーも `SINGLE_LINE_TEXT`／`NUMBER`（`$id` を含む）のみ。フィールド不存在・非対応型はターゲット取得前に `ArgumentError`。#temp source は型メタを持たないため、全行の結合キーがスカラー文字列であることを実行時に検査する
 - ソースキーはターゲット型へ正規化してから索引化する。同じ正規化キーを持つソース行が複数あれば、対象 PUT 前に複数マッチエラー
 - ターゲット側に同じ業務キーの行が複数ある場合は、それぞれが同じ1ソース行へ対応するため全行を更新する。1件限定を求める場合は利用者がkintone側で「値の重複を禁止する」を設定する
-- 空のソースキーは `ArgumentError` とし、黙って非一致にしない。対象側の空値は一致対象外
+- 空のソースキーは `ArgumentError` とし、黙って非一致にしない。対象側の空値は一致対象外。文字列キーの空判定は値が厳密に `""` の場合だけとし、空白だけの値は空とはみなさない
 - target filter、confirm、`dmlMaxRows`、全PUT構築後に送信、app sourceのmaxRecords fail-closedはv1規則を維持する
+
+#### 12.1.1 キー正規化（通常実行・VALIDATE ONLY 共通）
+
+正規化は source 重複検査、ターゲット検索値、取得したターゲット行の source 逆引きで**同じ共通関数**を使う。JavaScript の `Number()` を索引キー生成に使わず、IEEE 754 の丸めで異なる業務キーを衝突させない。
+
+- ターゲットが `SINGLE_LINE_TEXT`: source を文字列のまま使用する。trim・大文字小文字変換・Unicode正規化を行わず完全一致。したがって `"001"` と `"1"`、`" A "` と `"A"` は別キー
+- ターゲットが `NUMBER`: 前後空白を除いた有限10進表記（符号、整数部、小数部）だけを受理し、指数表記・`NaN`・`Infinity` は拒否する。符号、先頭ゼロ、小数末尾ゼロを文字列演算で正規化し、`+1`／`01.0`／`1` は同一、`-0`／`0` は同一とする。安全整数を超える整数・高精度小数も文字列精度を保持する
+- `$id`: v1どおり前後空白を除いた正の安全整数だけを受理する
+- source の正規化後キーが重複した場合は、対応するターゲットが0件でも `ArgumentError`。すべての source key を検証し終えるまでターゲット取得を開始しない
 
 ### 12.2 AST・実行差分
 
 - `UpdateFromSource` に `targetJoinField: string` を追加。v1の `$id` 結合も `targetJoinField="$id"` として同じ形へ寄せる
 - parser の `isTargetIdRef()` 固定判定を、許可型を静的/実行前検証する target field 抽出へ拡張する
-- 実行器はソースキー集合を確定・重複検査後、ターゲットを `<targetJoinField> in (...) AND <targetFilter>` でチャンク取得し、取得行の `$id` をPUTキーに使う
-- 型・選択肢等のフィールド情報はB12-Aで拡張する `KintoneFieldInfo` を共有する
+- **通常実行と `VALIDATE ONLY [INTO #err]` の両方**を対象とする。source取得、許可型・列検証、キー正規化、target取得、`target + source` の matched 生成を共通ヘルパーへ集約し、通常実行と検証候補生成で別実装を持たない
+- 共通照合器はソースキー集合を確定・重複検査後、ターゲットを `<targetJoinField> in (...) AND <targetFilter>` でチャンク取得する。取得フィールドには `$id`、`targetJoinField`、SET のターゲット算術参照列を含め、取得行の正規化済み `targetJoinField` で source を逆引きし、`$id` をPUTキーに使う
+- kintone の文字列（1行）`=` / `in` 比較は先頭64文字で判定される（[ONLY CHANGED spec §8](ksql_only_changed_upsert_spec.md#8-制限事項)）ため、64文字超のキーでは同じ先頭64文字を持つ行が過剰取得され得る。`in` の取得結果をそのまま matched とせず、取得した `targetJoinField` 全文を §12.1.1 の文字列規則で source 索引へ完全一致逆引きし、一致しない過剰取得行は除外する。完全一致行は必ず候補に含まれるため取りこぼしはなく、誤更新もしない
+- 64文字制約による過剰取得行も読み取り済みレコードとして全チャンク合計 `maxRecords` を消費する。過剰取得を除外した matched 件数だけを `confirm`／`dmlMaxRows`／`updatedCount`／検証候補件数へ用いる
+- `in` の生成は既存 `resolveUpsertTargets` の第1キー照合（`UPSERT_IN_CHUNK_SIZE=50`、`splitChunks`、`sqlQuote`）と同じクエリ長・エスケープ制約および50件上限へ準拠する
+- ターゲット取得の1チャンクあたり `maxRecords` をキー数に固定しない。同じ業務キーを持つ複数ターゲットを全件取得し、**全チャンク合計**に実行時 `maxRecords` を適用する。上限超過は `onLimit` にかかわらず PUT 0回で fail-closed
+- 全ターゲット取得と matched 生成の完了後に `confirm(matched件数, "UPDATE")` を呼び、`dmlMaxRows` を実際の更新対象行数へ適用する。その後、全PUTを構築・検証してから最初のPUTを送る
+- `VALIDATE ONLY` も同じ matched 集合から候補を生成するため、通常実行と対象行・順序・照合エラーが一致する。`VALIDATE ONLY` は従来どおり PUT と confirm を呼ばない
+- 型・書込可否等のフィールド情報はB12-Aで拡張した `KintoneFieldInfo` を共有する。`$id` 結合はターゲット業務キーメタ取得を追加せず、v1 のAPI回数を維持する
 
 ### 12.3 受入条件
 
 - §12.1 のB12書き戻し例が動作する
 - 文字列/数値キーの正常系、左右反転、target filterを受理する
-- 正規化後のソースキー重複、空キー、非対応型、複数結合、OR/NOT配下の結合は PUT 0 回でエラー
+- 文字列キーは完全一致（`001`≠`1`、前後空白を保持）。数値キーは `+1`／`01.0`／`1` と `-0`／`0` を同一視し、安全整数超過・高精度小数でも精度を失わない。指数表記・非有限値は PUT 0回でエラー
+- source 1行に同じキーのtargetが2件以上ある場合、全targetを更新する。全チャンク合計 `maxRecords` 超過、または実対象件数の `dmlMaxRows` 超過は PUT 0回でエラー
+- 65文字以上の文字列キーについて、先頭64文字が同じで全文が異なるtarget行をkintoneの `in` 結果へ含めても、その行はローカル完全一致で除外され更新されない。全文一致行は更新される。過剰取得行を含めた取得件数が `maxRecords` を超えた場合は PUT 0回でエラー
+- 正規化後のソースキー重複（target 0件の場合を含む）、空キー、target/source列欠落、非対応型、複数結合、OR/NOT配下の結合は PUT 0 回でエラー
+- 通常実行と `VALIDATE ONLY`／`VALIDATE ONLY INTO #err` で、業務キー照合後の対象集合と照合エラーが一致する。検証経路は PUT・confirm 0回
 - `$id` 結合のv1テストとAPI回数に回帰がない
