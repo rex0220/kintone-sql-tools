@@ -32,7 +32,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B19 | スカラー関数の拡充バンドル（`TRUNCATE`/`LEFT`/`RIGHT`/`INSTR`/`GREATEST`/`LEAST`/`LPAD`/`RPAD`/`LAST_DAY`）＋**既存関数の文書誤り修正** | 改善＋**バグ** | 📋 仕様案 R3（codex レビュー反映・実装着手可）。第2部＝**`DATE_ADD` の構文が文書と実装で食い違い**（文書どおり書くと必ず ParseError）・**不正な単位が黙って DAY 扱い**・`SUBSTRING` の負数開始が MySQL と異なる | 機能・**正しさ** | 中 | [spec](internal/ksql_scalar_function_bundle_spec.md) |
+| B19 | スカラー関数の拡充バンドル（`TRUNCATE`/`LEFT`/`RIGHT`/`INSTR`/`GREATEST`/`LEAST`/`LPAD`/`RPAD`/`LAST_DAY`）＋**既存関数の文書誤り修正** | 改善＋**バグ** | 📋 仕様案 R4（codex レビュー反映・実装着手可）。第2部＝**`DATE_ADD` の構文が文書と実装で食い違い**（文書どおり書くと必ず ParseError）・**不正な単位が黙って DAY 扱い**・`SUBSTRING` の負数開始が MySQL と異なる | 機能・**正しさ** | 中 | [spec](internal/ksql_scalar_function_bundle_spec.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
