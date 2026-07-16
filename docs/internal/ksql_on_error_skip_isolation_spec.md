@@ -1,10 +1,12 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **未実装・採用（B12・Phase 3）。仕様レビュー R3。** **B12-A `VALIDATE ONLY` は B11 非依存で先行可能**。B12-B の看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **未実装・採用（B12・Phase 3）。仕様レビュー R4。** **B12-A `VALIDATE ONLY` は B11 非依存で先行可能**。B12-B の看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。
 - 2026-07-16 R2: Oracle / Snowflake / PostgreSQL / SQL Server / Db2 の公式仕様と比較し、採用点・非採用点・kSQL 固有の安全性判断を §8 に追記。
 - 2026-07-16 R3: Claude レビューをコードで再確認して反映。B12-B の前提を B11 v1.1（非 `$id` 業務キー結合）へ修正。B12-A の必須実装としてフィールド制約メタ拡張、collect 型検証器、`#err` 追記、文単位 read-only 判定を確定。例を実在構文 `APP<n>` へ修正。
+- 2026-07-16 R4: B12-A の厳密なローカル検証が通常書き込み経路より厳しい場合を明記。B12-B の隔離厳格度を実装前の設計ゲートとし、false isolation の扱いを確定事項から分離。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
 ## 1. 目的と定義
@@ -100,10 +102,12 @@ validateAndNormalizeDmlValue(value, fieldInfo): DmlValueValidation; // throw し
 toKintoneValue(value, fieldInfo): KintoneValue;                     // 上記を呼び、NGなら従来どおり throw
 ```
 
-- `VALIDATE ONLY` / `ON ERROR SKIP` は全行・全対象列に `validateAndNormalizeDmlValue` を適用してエラーを収集する
+- `VALIDATE ONLY` は全行・全対象列に `validateAndNormalizeDmlValue` を適用してエラーを収集する
 - 句なし DML は既存の `toKintoneValue` 経路を維持し、最初のエラーで停止する後方互換を保つ
 - required / length / range / choice も同じ `fieldInfo` と正規化済み値を入力にする。UPSERT のソース内キー重複など行間検証は別レイヤーで収集する
 - エラー文言は変更可能だが `DmlValidationErrorCode` は §5 の安定コードへ対応させる
+- `VALIDATE ONLY` は日付の実在性やフォーム制約まで厳密に確認するため、変換失敗値をrawのままAPIへ委ねる句なしDMLより厳しい場合がある。したがって検証エラーはローカル Tier 0 問題の検出であり、API拒否の保証ではない
+- **B12-B 実装前ゲート**: `ON ERROR SKIP` の隔離条件を (A) 通常書き込み経路と同じ厳格度へ合わせて false isolation を避ける、または (B) B12-A と同じTier 0厳格検証を採用する、のどちらにするかを実装前に確定する。B12-A R2では決めない
 
 ### 3.3 フィールド制約メタデータ（B12-A 必須）
 
