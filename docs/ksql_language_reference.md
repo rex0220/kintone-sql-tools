@@ -940,7 +940,9 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 > CLI 既定値は `--max-records=500` のため、CLI 実行時は 500 件で制御されます。  
 > 超過した場合はエラーになります。
 
-> **SIMPLE モード（JOIN なし）:** OFFSET は kintone API に直接渡されます。  
+> **`LIMIT > 500` の早期停止（v2.11.0）:** SIMPLE モードで `ORDER BY` がなく KLIKE を含まない場合、`OFFSET + LIMIT` 件を取得した時点で正常終了します。`maxRecords` は実際に取得する行数の上限であるため、`OFFSET + LIMIT <= maxRecords` なら一致総数が上限を超えていても上限エラー／truncate 警告は出ません。`ORDER BY` 付き・KLIKE・`OFFSET + LIMIT > maxRecords` は従来どおりです。
+
+> **SIMPLE モード（JOIN なし）:** `LIMIT <= 500` の OFFSET は kintone API に直接渡されます。`LIMIT > 500` はページング取得後に適用されます。
 > **FULL_SCAN モード（JOIN あり等）:** JS 側でスライス処理します。
 
 ---

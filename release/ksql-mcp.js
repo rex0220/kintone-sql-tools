@@ -35415,6 +35415,11 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
   const parallel = Math.max(1, options.parallel ?? PARALLEL_DEFAULT);
   const maxRecords2 = options.maxRecords ?? MAX_RECORDS_DEFAULT;
   const onLimit2 = options.onLimit ?? "error";
+  const stopAfter = options.stopAfter;
+  if (stopAfter !== void 0 && (!Number.isSafeInteger(stopAfter) || stopAfter <= 0 || stopAfter > maxRecords2)) {
+    throw new RangeError("stopAfter must be a positive safe integer <= maxRecords");
+  }
+  const fetchCap = stopAfter ?? maxRecords2;
   const fetchFields = fields.length > 0 && !fields.includes("$id") ? [...fields, "$id"] : fields;
   const allRecords = [];
   let notified = false;
@@ -35425,6 +35430,9 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
   const first = await fetchPage(fetcher, app, cursorQuery0, fetchFields, pageSize, windowOffset);
   notifySearchAborted(first, options);
   allRecords.push(...first.records);
+  if (stopAfter !== void 0 && allRecords.length >= stopAfter) {
+    return allRecords.slice(0, stopAfter);
+  }
   if (allRecords.length > maxRecords2) {
     if (onLimit2 === "truncate") {
       if (!notified && options.onTruncate) {
@@ -35442,6 +35450,9 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
     windowOffset = 0;
   }
   while (true) {
+    if (stopAfter !== void 0 && allRecords.length >= stopAfter) {
+      return allRecords.slice(0, stopAfter);
+    }
     if (allRecords.length >= maxRecords2) {
       if (onLimit2 === "truncate") {
         if (!notified && options.onTruncate) {
@@ -35452,7 +35463,7 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
       }
       throw new FetchAllLimitError(limitMessage);
     }
-    const remaining = maxRecords2 - allRecords.length;
+    const remaining = fetchCap - allRecords.length;
     const maxPagesByLimit = Math.ceil(remaining / pageSize);
     const batchParallel = Math.max(1, Math.min(parallel, maxPagesByLimit));
     const batchOffsets = [];
@@ -35471,6 +35482,9 @@ async function fetchAll(fetcher, app, query, fields, options = {}) {
     let done = false;
     for (const res of responses) {
       allRecords.push(...res.records);
+      if (stopAfter !== void 0 && allRecords.length >= stopAfter) {
+        return allRecords.slice(0, stopAfter);
+      }
       if (allRecords.length > maxRecords2) {
         if (onLimit2 === "truncate") {
           if (!notified && options.onTruncate) {
@@ -35896,10 +35910,10 @@ function applyLimit(rows, limit, offset) {
   if (limit === null) return rows.slice(start);
   return rows.slice(start, start + limit);
 }
-function project(rows, columns, scalarCache, resolveFieldType) {
+function project(rows, columns, scalarCache, resolveFieldType, sourceColumns) {
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
     const projected2 = rows.map((row) => stripParentShortcutColumns(row));
-    const cols = projected2.length > 0 ? Object.keys(projected2[0]) : [];
+    const cols = projected2.length > 0 ? Object.keys(projected2[0]) : [...sourceColumns ?? []];
     return { rows: projected2, columns: cols };
   }
   const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
@@ -35908,6 +35922,9 @@ function project(rows, columns, scalarCache, resolveFieldType) {
   );
   const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys);
   const orderedKeys = outputKeys ?? [];
+  if (hasWildcard && rows.length === 0) {
+    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys) };
+  }
   const projected = rows.map((row, rowIdx) => {
     const out = {};
     for (const [colIdx, col] of columns.entries()) {
@@ -35985,29 +36002,43 @@ function project(rows, columns, scalarCache, resolveFieldType) {
   return { rows: projected, columns: orderedKeys };
 }
 function computeOutputKeys(columns, defaultFieldKeys) {
-  return columns.map((col, colIdx) => {
-    switch (col.type) {
-      case "FIELD":
-        return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
-      case "LITERAL_COL":
-        return col.alias ?? `'${col.value}'`;
-      case "AGGREGATE":
-        return col.alias ?? aggregateSyntheticName2(col.func, col.distinct, col.arg);
-      case "ARITH_AGG_COL":
-        return col.alias ?? aggArithDefaultKey(col.expr);
-      case "ARITH_COL":
-        return col.alias ?? arithColDefaultKey(col.expr);
-      case "CASE_COL":
-        return col.alias ?? "case";
-      case "STRFUNC_COL":
-        return col.alias ?? stringFuncDefaultKey(col.expr);
-      case "SCALAR_SUBQUERY_COL":
-        return col.alias ?? "(subquery)";
-      case "WILDCARD":
-      case "PARENT_WILDCARD":
-        throw new Error("internal: computeOutputKeys received a wildcard column");
+  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys));
+}
+function computeExplicitOutputKeys(columns, defaultFieldKeys) {
+  const keys = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const [colIdx, col] of columns.entries()) {
+    if (col.type === "WILDCARD" || col.type === "PARENT_WILDCARD") continue;
+    const key = computeOutputKey(col, colIdx, defaultFieldKeys);
+    if (!seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
     }
-  });
+  }
+  return keys;
+}
+function computeOutputKey(col, colIdx, defaultFieldKeys) {
+  switch (col.type) {
+    case "FIELD":
+      return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
+    case "LITERAL_COL":
+      return col.alias ?? `'${col.value}'`;
+    case "AGGREGATE":
+      return col.alias ?? aggregateSyntheticName2(col.func, col.distinct, col.arg);
+    case "ARITH_AGG_COL":
+      return col.alias ?? aggArithDefaultKey(col.expr);
+    case "ARITH_COL":
+      return col.alias ?? arithColDefaultKey(col.expr);
+    case "CASE_COL":
+      return col.alias ?? "case";
+    case "STRFUNC_COL":
+      return col.alias ?? stringFuncDefaultKey(col.expr);
+    case "SCALAR_SUBQUERY_COL":
+      return col.alias ?? "(subquery)";
+    case "WILDCARD":
+    case "PARENT_WILDCARD":
+      throw new Error("internal: computeOutputKey received a wildcard column");
+  }
 }
 function buildDefaultFieldOutputKeys(columns) {
   const qualifierCollisionCount = /* @__PURE__ */ new Map();
@@ -36101,7 +36132,8 @@ function runFullScan(input) {
     sortKinds,
     fieldTypeResolver,
     havingFieldTypeResolver,
-    appliedKlikes
+    appliedKlikes,
+    sourceColumns
   } = input;
   let rows = [];
   const mainAlias = stmt.from.alias;
@@ -36123,7 +36155,7 @@ function runFullScan(input) {
   }
   rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
   rows = applyLimit(rows, stmt.limit, stmt.offset);
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns);
 }
 
 // src/converter/subtableAdapter.ts
@@ -36457,7 +36489,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
       onLimitReached: "error"
     };
     const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(resolvedStmt.name, result.rows);
+    tempTables.set(resolvedStmt.name, { rows: result.rows, columns: result.columns });
     return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -36775,6 +36807,8 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
   const onLimit2 = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
   const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
+  const stopAfter = stmt.orderBy.length === 0 && needed !== null && needed <= maxRecords2 && !whereHasKlike(stmt.where) ? needed : void 0;
   let records;
   if (useSingleGet) {
     const res = await client.getRecords({
@@ -36793,6 +36827,7 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
       {
         parallel,
         maxRecords: maxRecords2,
+        stopAfter,
         onLimit: onLimit2,
         onTruncate: (max) => {
           warnings.add(`\u53D6\u5F97\u4E0A\u9650\uFF08${max} \u4EF6\uFF09\u306B\u9054\u3057\u305F\u305F\u3081\u3001${max} \u4EF6\u3067\u6253\u3061\u5207\u3063\u3066\u8868\u793A\u3057\u3066\u3044\u307E\u3059\u3002`);
@@ -37157,7 +37192,7 @@ async function executeWith(stmt, client, options, cacheContext, seed) {
     } else {
       result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext);
     }
-    cteCache.set(cte.name, result.rows);
+    cteCache.set(cte.name, { rows: result.rows, columns: result.columns });
   }
   return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
 }
@@ -37210,8 +37245,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   });
   const tables = /* @__PURE__ */ new Map();
   if (stmt.from.cteName != null) {
-    const rows2 = cteCache.get(stmt.from.cteName) ?? [];
-    tables.set(stmt.from.alias, rows2.map(processRowToKintoneRecord));
+    const table = cteCache.get(stmt.from.cteName);
+    tables.set(stmt.from.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
   } else {
     const mainRecords = await fetchTableRecordsForFullScan(
       stmt,
@@ -37228,8 +37263,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   }
   const joinFetches = stmt.joins.map(async (join) => {
     if (join.table.cteName != null) {
-      const rows2 = cteCache.get(join.table.cteName) ?? [];
-      tables.set(join.table.alias, rows2.map(processRowToKintoneRecord));
+      const table = cteCache.get(join.table.cteName);
+      tables.set(join.table.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
     } else {
       const pushDownCond = join.table.alias ? pushdownPlan.joinConditions.get(join.table.alias) ?? null : null;
       const optimized = await tryFetchJoinRecordsBySourceKeys(
@@ -37260,6 +37295,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   await Promise.all(joinFetches);
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null ? cteCache.get(stmt.from.cteName)?.columns : void 0;
   const { rows, columns } = runFullScan({
     tables,
     stmt,
@@ -37268,7 +37304,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     sortKinds,
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
-    appliedKlikes: pushdownPlan.appliedKlikes
+    appliedKlikes: pushdownPlan.appliedKlikes,
+    sourceColumns
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -40886,7 +40923,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.10.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.11.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

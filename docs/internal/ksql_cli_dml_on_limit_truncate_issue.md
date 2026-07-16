@@ -1,7 +1,7 @@
 # CLI: DML × `--on-limit truncate` で SELECT-based DML のソースが黙って切り捨てられる問題
 
 - 作成日: 2026-07-10
-- ステータス: **起案（未着手）**
+- ステータス: **v2.11.0 予定①（案A・実装済み / codex 検証済み）。2026-07-16 に B1+B2+B8 を v2.11.0 へ束ねる方針決定、本課題を先行実装。codex 指摘3点（注記の発火条件を `onLimit==="truncate"` 限定・テスト配置を CLI 経路へ・docs §8.3/CLI docs 追記）を §3.1/§4 に明記し、CLI 実装・テスト・docs へ反映済み**
 - 発端: プラグイン DML バッチ対応（`ksql_plugin_dml_batch_spec.md` R4）のレビューで、UI の `onLimitReached: "truncate"` が SELECT-based DML のソース読み取りに継承される問題が見つかり、プラグインは「DML では error 固定」で修正済み。**同種の経路が CLI に残っている**（コード裏取り済み）
 - 関連資料:
   - [ksql_plugin_dml_batch_spec.md](ksql_plugin_dml_batch_spec.md) R4（発端。プラグイン側の修正と経路の裏取り）
@@ -39,7 +39,7 @@ CLI は単文・バッチとも、解決済みの `onLimit`（`--on-limit` / `KS
 
 | 案 | 内容 | 論点 |
 |---|---|---|
-| 案A: DML では `error` に強制（プラグイン・MCP と同型） | 単文 = DML 文のとき / バッチ = `containsDml` のとき、`onLimitReached` を `"error"` にして渡す。`--quiet` でなければ stderr に1行注記: `note: onLimit=truncate is ignored for DML (forced to error)`（truncate の由来は `--on-limit` に限らず `KSQL_ON_LIMIT` / profile もあるため、フラグ名でなく設定名で表記する — レビュー指摘） | ユーザー明示のフラグを黙って上書きする点が CLI 的に議論。注記で緩和 |
+| 案A: DML では `error` に強制（プラグイン・MCP と同型） | 単文 = DML 文のとき / バッチ = `containsDml` のとき、`onLimitReached` を `"error"` にして渡す。**注記は解決後 `onLimit === "truncate"` のときだけ** stderr に1行: `note: onLimit=truncate is ignored for DML (forced to error)`（truncate の由来は `--on-limit` に限らず `KSQL_ON_LIMIT` / profile もあるため、フラグ名でなく設定名で表記する — レビュー指摘）。詳細な発火条件は §3.1 | ユーザー明示のフラグを黙って上書きする点が CLI 的に議論。注記で緩和 |
 | 案B: DML × truncate を `ArgumentError` で拒否 | 競合を明示エラーにする（`ArgumentError: --on-limit truncate is not allowed with DML.`） | 最も明示的だが、profile で truncate 常用のユーザーは DML のたびにエラー。`--on-limit error` の明示で回避可能とはいえ摩擦が大きい |
 | 案C: SELECT-based DML を含む場合のみ強制（または拒否） | 影響経路に限定した最小変更。判定は単文 = `stmtType`、バッチ = 文タイプ走査（MCP の `containsSelectBasedDml` と同型） | 「truncate が効く DML と効かない DML がある」という説明の複雑さが残る |
 
@@ -47,13 +47,35 @@ CLI は単文・バッチとも、解決済みの `onLimit`（`--on-limit` / `KS
 
 **起案者の推奨は案A（注記付き）**: UPDATE / DELETE ではもともと truncate が無効（伝播しない）ため、「DML では truncate に意味のある正当なユースケースがない」。一律 error 化で失うものがなく、挙動の説明も「DML は常に error」で単純。`--allow-dml` フラグ基準（codex 案前段）は、`--allow-dml` を付けて read-only 文を流すケースで SELECT の truncate まで変わってしまうため、文タイプ基準を推す。
 
+### 3.1 注記の発火条件と参照実装（codex レビュー反映・裏取り済み）
+
+`onLimit` は [src/cli/index.ts:1601](../../src/cli/index.ts#L1601) で `args.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile.query?.onLimit ?? "error"` と解決される。既定は `"error"`。注記は**この解決後の値が `"truncate"` のときだけ**出す。既定 `error` や明示 `--on-limit error` の DML で注記が出ると誤報になる（codex 指摘）。
+
+**発火条件（4 条件すべて）**: `(isDmlStatement || batchContainsDml)` かつ `onLimit === "truncate"` かつ `!quiet` かつ `!args.dryRun`。
+- `isDmlStatement`（[src/cli/index.ts:2027](../../src/cli/index.ts#L2027) 近傍）と `batchContainsDml`（[src/cli/index.ts:1990](../../src/cli/index.ts#L1990) 近傍）は既存の変数。
+- dry-run 単文は `EXPLAIN` 経路（[:2021-2022](../../src/cli/index.ts#L2021)）で実書き込みなし → 注記抑制。
+
+**参照実装**（`execute.ts` は触らない）:
+
+```ts
+const dmlForcesOnLimitError = isDmlStatement || batchContainsDml;
+const effectiveOnLimit = dmlForcesOnLimitError ? "error" : onLimit;
+
+if (dmlForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
+  process.stderr.write("note: onLimit=truncate is ignored for DML (forced to error)\n");
+}
+```
+
+`executeBatch`（[:2000-2003](../../src/cli/index.ts#L2000)）と `execute`（[:2023-2026](../../src/cli/index.ts#L2023)）の `onLimitReached` に `onLimit` ではなく **`effectiveOnLimit`** を渡す。コア（`src/execute.ts`）の truncate 挙動は意図的に残し（[回帰テスト executeBatch.test.ts:1082](../../src/__tests__/executeBatch.test.ts#L1082) が設計を支える）、防御は呼び出し層の責務とする。
+
 ## 4. 実装時の変更対象（案A の場合）
 
 | 区分 | 内容 |
 |---|---|
-| `src/cli/index.ts` | 単文 `execute` / バッチ `executeBatch` 呼び出しの `onLimitReached` を DML 判定で `"error"` に固定 + stderr 注記（`--quiet` 抑制） |
-| `src/cli/__tests__/integration.test.ts` | `--on-limit truncate` + INSERT_SELECT（単文・バッチ）で error 固定になること・注記が出ることを固定 |
-| `docs/ksql_batch_temp_table_spec.md` §8.3 / CLI ドキュメント | 「DML では `--on-limit` は常に error」を明記 |
+| `src/cli/index.ts` | 単文 `execute` / バッチ `executeBatch` 呼び出しの `onLimitReached` を `effectiveOnLimit`（§3.1）に差し替え + stderr 注記（発火条件は §3.1） |
+| **CLI 経路のテスト**（`src/cli/__tests__/dml_guard.e2e.test.ts` もしくは `runWithArgv` 系。**`integration.test.ts` は不可**＝ヘルパー中心で CLI 引数経路を通らない — codex 指摘） | 最低4本を固定: ①単文 `INSERT_SELECT` + `--on-limit truncate` で error 固定②バッチ `INSERT_SELECT` + 同 で error 固定③`--quiet` で注記抑制④**read-only `SELECT` + `--on-limit truncate` は従来どおり truncate**（回帰＝DML 以外は不変）。①②では注記が出ること、④では注記が出ないことも確認 |
+| `docs/ksql_batch_temp_table_spec.md` §8.3（[:294](../../docs/ksql_batch_temp_table_spec.md#L294)） | 「**CLI の DML バッチ・単文では `--on-limit` / env `KSQL_ON_LIMIT` / profile `query.onLimit` に関わらず `onLimitReached: "error"` に固定**」を追記（プラグインの §8.4:306 と対になる CLI 版がないため） |
+| `docs/ksql_cli_console_spec.md` の `--on-limit` 説明（[:88](../../docs/ksql_cli_console_spec.md#L88)） | 「**DML では常に error（truncate 指定は無視）**」を追記し利用者向けに閉じる |
 | `docs/internal/ksql_plugin_dml_batch_spec.md` §6 | 別課題の解消を記録 |
 
-コア（`src/execute.ts`）は変更不要（回帰テストで truncate 挙動は固定済み。防御は呼び出し層の責務とする現行設計を維持）。
+コア（`src/execute.ts`）は変更不要（[回帰テスト executeBatch.test.ts:1082](../../src/__tests__/executeBatch.test.ts#L1082) で truncate 挙動は固定済み。防御は呼び出し層の責務とする現行設計を維持）。

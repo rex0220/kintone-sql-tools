@@ -1627,6 +1627,11 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
+  const dmlForcesOnLimitError = isDmlStatement || batchContainsDml;
+  const effectiveOnLimit: OnLimitMode = dmlForcesOnLimitError ? "error" : onLimit;
+  if (dmlForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
+    process.stderr.write("note: onLimit=truncate is ignored for DML (forced to error)\n");
+  }
   if (format === "markdown" && noHeader) {
     process.stderr.write("ArgumentError: --no-header cannot be used with --format markdown|md.\n");
     return 2;
@@ -2000,7 +2005,7 @@ async function run(): Promise<number> {
       const batchResult = await executeBatch(sql!, client, {
         maxRecords,
         fetchParallel,
-        onLimitReached: onLimit,
+        onLimitReached: effectiveOnLimit,
         cacheContext,
         continueOnError: args.continueOnError,
         tempTableMaxRows,
@@ -2023,7 +2028,7 @@ async function run(): Promise<number> {
       : await execute(sql!, client, {
         maxRecords,
         fetchParallel,
-        onLimitReached: onLimit,
+        onLimitReached: effectiveOnLimit,
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
       });

@@ -298,7 +298,7 @@ decorated.sort((a, b) => { /* keys[i] 同士を compareOrderValues 相当で比�
 
 ## フェーズ 3 設計メモ（計測後に着手判断）
 
-- **A-8（LIMIT>500 打ち切り）**: `executeSimpleSelect` に「ORDER BY 対象フィールドに optionOrders / sortKinds 補正が不要」かつ `limit + offset <= 10_000` のときだけ kintone order by + 逐次ページングで打ち切る分岐を追加する。判定には フィールド定義が必要なため、A-5 のオーバーラップ実装と組み合わせる
+- **A-8（LIMIT>500 打ち切り）— v2.11.0 実装済み**: `ORDER BY` 空・`LIMIT` 明示・`offset + limit <= maxRecords`・KLIKE なしの SIMPLE SELECT に限定し、`fetchAll.stopAfter` で必要件数に達した時点で正常終了する。`ORDER BY` 付きの押し下げやフィールド定義判定は不要な安全サブセットへ絞った。詳細は [B8 仕様](internal/ksql_limit_over_500_fetch_truncation_spec.md)
 - **A-7（bulkRequest）**: `KintoneClient` に `bulkRequest?: (requests) => Promise<...>` を optional 追加し、実装があるクライアントのみ利用。全成功/全失敗の挙動差があるため `ExecuteOptions.useBulkRequest`（デフォルト off）のオプトイン。エラー時のメッセージ（何件目のバッチで失敗したか）の再設計が必要
 - **A-6 絞り込み本体**: `extractTableCondition` の親フィールド（`_p.` プレフィックス）版を実装し、サブテーブル DML の WHERE から親条件をプッシュダウン。`_pid in (...)` は `$id in (...)` に変換
 - **B-4（flatten 二重キー削減）**: `resolveFieldRef` に「非修飾名 → alias 付きキー」の逆引きを追加してから flatten の二重書き込みを外す。ProcessRow を参照する全箇所（evalWhere / evalFunc / project / groupBy / orderBy）の網羅テストが前提。ヒープスナップショットで効果を計測してから

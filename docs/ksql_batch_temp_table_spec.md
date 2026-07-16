@@ -295,6 +295,7 @@ DROP TEMP TABLE #name;
 
 - 確認プロンプトはバッチ全体で1回とし、含まれる**全 DML 文の一覧**(タイプ・対象アプリ・WHERE 有無)を表示して確認を取る
 - `--yes` は現行どおり確認をスキップする
+- CLI の DML 実行(単文・バッチとも)では `--on-limit` / `KSQL_ON_LIMIT` / profile `query.onLimit` に関わらず `onLimitReached` を **"error" に固定**する。`truncate` 指定時は SELECT-based DML のソース読み取りが黙って切り捨てられるため、`--quiet` でなければ stderr に注記を出す
 
 ### 8.4 プラグイン UI(バッチ・最終結果のみ)
 

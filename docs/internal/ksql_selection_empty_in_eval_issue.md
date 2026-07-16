@@ -1,7 +1,7 @@
 # 課題+仕様: 選択系フィールドの `IN ('')` / `NOT IN ('')` 空セル評価の SIMPLE/FULL_SCAN 乖離
 
 - 作成日: 2026-07-15
-- ステータス: **課題+仕様案 R2（codex レビュー反映・案B 採用で実装着手可）**
+- ステータス: **実装済み・v2.6.0 リリース済（案B ＝ flatten の null 正規化＋空配列補完）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 位置づけ: フェーズ1（[ksql_fullscan_in_typed_eval_spec.md](ksql_fullscan_in_typed_eval_spec.md)・v2.5.0）の空セル意味論の隙間。空セル数値 −∞（[evalwhere-empty-cell-numeric] v2.2.0）と同種の「SIMPLE/FULL_SCAN 空セル乖離」。選択系 IN 押し下げ フェーズ2a（[ksql_selection_in_pushdown_spec.md](ksql_selection_in_pushdown_spec.md)）と**同じ v2.6.0 に束ねる**（ユーザー指示）。
 - 関連コード: `src/engine/evalWhere.ts`（`typedInContains`:152 / `evalOp` の IN 経路:109）、`src/engine/process.ts`（`flatten`:64・69）

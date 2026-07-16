@@ -159,9 +159,68 @@ test("SIMPLE LIMIT 1000 は実対象 1000 件をページングして返す", as
   ) as SelectResult;
 
   expect(result.rowCount).toBe(1_000);
-  // 500件×2ページの後、空ページで終端を確認する。
-  expect(client.getCalls).toHaveLength(3);
+  // ORDER BY なしでは LIMIT 窓を満たした時点で軟停止する。
+  expect(client.getCalls).toHaveLength(2);
   expect(client.getCalls.every((call) => !call.query.includes("limit 1000"))).toBe(true);
+});
+
+test("SIMPLE OFFSET + LIMIT は必要件数で軟停止し、OFFSET 適用後の行を返す", async () => {
+  const records = Array.from({ length: 5_000 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 LIMIT 1000 OFFSET 200",
+    client,
+    { maxRecords: 10_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1_000);
+  expect(result.rows[0].$id).toBe("201");
+  expect(result.rows[999].$id).toBe("1200");
+  expect(client.getCalls).toHaveLength(3);
+});
+
+test.each(["error", "truncate"] as const)(
+  "SIMPLE LIMIT 窓を満たせば対象総数が maxRecords 超でも %s モードで成功する",
+  async (onLimitReached) => {
+    const records = Array.from({ length: 20_000 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+    const client = makePagedClient(records);
+
+    const result = await execute(
+      "SELECT $id FROM APP100 LIMIT 1000",
+      client,
+      { maxRecords: 10_000, onLimitReached }
+    ) as SelectResult;
+
+    expect(result.rowCount).toBe(1_000);
+    expect(result.warnings).toEqual([]);
+    expect(client.getCalls).toHaveLength(2);
+  }
+);
+
+test("SIMPLE OFFSET + LIMIT が maxRecords を超える場合は従来どおり上限エラー", async () => {
+  const records = Array.from({ length: 2_000 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  await expect(execute(
+    "SELECT $id FROM APP100 LIMIT 1000 OFFSET 200",
+    client,
+    { maxRecords: 1_000 }
+  )).rejects.toThrow("取得件数が上限");
+});
+
+test("SIMPLE OFFSET + LIMIT が maxRecords を超える truncate は従来どおり警告する", async () => {
+  const records = Array.from({ length: 2_000 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 LIMIT 1000 OFFSET 200",
+    client,
+    { maxRecords: 1_000, onLimitReached: "truncate" }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(800);
+  expect(result.warnings).toEqual([expect.stringContaining("取得上限")]);
 });
 
 test("SIMPLE ORDER BY は LIMIT 500 / 501 境界で同じ先頭 500 行を返す", async () => {
@@ -202,6 +261,40 @@ test("SIMPLE KLIKE LIMIT 501 はページングし、クライアント層の検
   expect(client.getCalls.every((call) => call.query.includes('件名 like "至急"'))).toBe(true);
   // fetchAll の個別 callback ではなく wrapClientWithSearchAbort が全 GET を捕捉する。
   expect(result.warnings).toEqual([expect.stringContaining("10 万件で打ち切られ")]);
+});
+
+test("SIMPLE KLIKE は LIMIT 窓で軟停止せず全ページを検査する", async () => {
+  const records = Array.from({ length: 1_500 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    件名: "至急",
+  }));
+  const client = makePagedClient(records, { searchAborted: true });
+
+  const result = await execute(
+    "SELECT $id FROM APP100 WHERE 件名 KLIKE '至急' LIMIT 1000",
+    client,
+    { maxRecords: 10_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1_000);
+  expect(client.getCalls).toHaveLength(4);
+  expect(result.warnings).toEqual([expect.stringContaining("10 万件で打ち切られ")]);
+});
+
+test("SIMPLE ORDER BY は LIMIT 窓で軟停止せず全件を取得してから並べ替える", async () => {
+  const records = Array.from({ length: 1_500 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 ORDER BY $id DESC LIMIT 1000",
+    client,
+    { maxRecords: 10_000 }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(1_000);
+  expect(result.rows[0].$id).toBe("1500");
+  expect(result.rows[999].$id).toBe("501");
+  expect(client.getCalls).toHaveLength(4);
 });
 
 test("SELECT ORDER BY（並列取得時）: API クエリに元の order by を混在させない", async () => {
@@ -2514,6 +2607,20 @@ test("WITH — CTE 内で UNION ALL", async () => {
 
   // UNION ALL なので重複保持: 田中, 田中, 鈴木
   expect(result.rowCount).toBe(3);
+});
+
+test("WITH: 非インライン CTE の空 SELECT * は実体化時の列を返す", async () => {
+  const client = makeClient({ recordsByApp: { 100: [] } });
+  const result = await execute(
+    `WITH c AS (
+       SELECT a, COUNT(*) AS cnt FROM APP100 GROUP BY a
+     )
+     SELECT * FROM c`,
+    client
+  ) as SelectResult;
+
+  // CTE 本体が GROUP BY のため canInlineSingleCte=false。MaterializedTable 経路を通る。
+  expect(result).toMatchObject({ rows: [], columns: ["a", "cnt"], rowCount: 0 });
 });
 
 // ----------------------------------------------------------------

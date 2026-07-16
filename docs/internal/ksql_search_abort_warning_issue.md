@@ -1,7 +1,7 @@
 # 課題: kintone 検索打ち切り（10 万件）警告 `X-Cybozu-Warning` の検出（P0）
 
 - 作成日: 2026-07-15
-- ステータス: **仕様 R3・実装済み（Codex モック/回帰テスト済み、実機レビュー待ち）。FROM なし実体化バグ（[ksql_fromless_select_materialize_bug.md](ksql_fromless_select_materialize_bug.md)）と同一 minor バージョンで対応（ユーザー指示）**
+- ステータス: **実装済み・v2.10.0 リリース済（検索打ち切り 10万件検出・X-Cybozu-Warning・SELECT は警告／DML・一時テーブル実体化は fail-closed）。FROM なし実体化バグ（[ksql_fromless_select_materialize_bug.md](ksql_fromless_select_materialize_bug.md)）と同一 v2.10.0 で対応**
 - 更新履歴: R2=独立起票・plugin (b) 方針。R3=codex レビュー反映（[P0-1] 単発 GET・合成境界の取りこぼし→実行単位コレクター／[P0-2] 算術 UPDATE 経路も fail-closed／[P1] 契約を `searchAborted?:boolean`＋`onSearchAborted` に確定・一時テーブル実体化はエラー・INSERT/UPSERT SELECT の扱い明記／[P2] plugin (b) を全文統一／受入テスト拡充）。実装=Node ヘッダー検出・実行文単位コレクター・読取後書込の fail-closed・plugin 非検出ドキュメントを反映。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 位置づけ: **KLIKE（v2.8/v2.9 リリース済）の親 DML 解禁の必須ゲート**、かつ **SELECT の安全性強化**（現状 KLIKE は大規模アプリで 10 万件超の一致がサイレントに欠落する）。KLIKE v1/v2 はこの検出なしでもリリース済（SELECT は完全結果非保証を文書化・DML は全拒否で安全）。

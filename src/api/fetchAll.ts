@@ -50,6 +50,8 @@ export interface FetchAllOptions {
   parallel?: number;
   /** 全件取得の上限（デフォルト: 10_000）。超えたら FetchAllLimitError */
   maxRecords?: number;
+  /** この件数を保持した時点で正常終了する軟停止上限（maxRecords 以下） */
+  stopAfter?: number;
   /** 上限到達時の動作（error=例外 / truncate=上限で打ち切って返す） */
   onLimit?: "error" | "truncate";
   /** truncate 時に通知されるコールバック */
@@ -78,6 +80,15 @@ export async function fetchAll(
   const parallel   = Math.max(1, options.parallel ?? PARALLEL_DEFAULT);
   const maxRecords = options.maxRecords ?? MAX_RECORDS_DEFAULT;
   const onLimit    = options.onLimit    ?? "error";
+  const stopAfter  = options.stopAfter;
+
+  if (
+    stopAfter !== undefined &&
+    (!Number.isSafeInteger(stopAfter) || stopAfter <= 0 || stopAfter > maxRecords)
+  ) {
+    throw new RangeError("stopAfter must be a positive safe integer <= maxRecords");
+  }
+  const fetchCap = stopAfter ?? maxRecords;
 
   // カーソルページングには $id が必要。fields 指定時に含まれていない場合は追加
   const fetchFields = fields.length > 0 && !fields.includes("$id")
@@ -100,6 +111,10 @@ export async function fetchAll(
   notifySearchAborted(first, options);
   allRecords.push(...first.records);
 
+  if (stopAfter !== undefined && allRecords.length >= stopAfter) {
+    return allRecords.slice(0, stopAfter);
+  }
+
   // 上限チェック
   if (allRecords.length > maxRecords) {
     if (onLimit === "truncate") {
@@ -121,6 +136,10 @@ export async function fetchAll(
 
   // ---- 2ページ目以降 ----
   while (true) {
+    if (stopAfter !== undefined && allRecords.length >= stopAfter) {
+      return allRecords.slice(0, stopAfter);
+    }
+
     // 上限に達した時点で次バッチを投げない（parallel 過剰取得を防止）
     if (allRecords.length >= maxRecords) {
       if (onLimit === "truncate") {
@@ -130,7 +149,7 @@ export async function fetchAll(
       throw new FetchAllLimitError(limitMessage);
     }
 
-    const remaining = maxRecords - allRecords.length;
+    const remaining = fetchCap - allRecords.length;
     const maxPagesByLimit = Math.ceil(remaining / pageSize);
     const batchParallel = Math.max(1, Math.min(parallel, maxPagesByLimit));
 
@@ -157,6 +176,10 @@ export async function fetchAll(
     let done = false;
     for (const res of responses) {
       allRecords.push(...res.records);
+
+      if (stopAfter !== undefined && allRecords.length >= stopAfter) {
+        return allRecords.slice(0, stopAfter);
+      }
 
       // 上限チェック
       if (allRecords.length > maxRecords) {

@@ -48,7 +48,7 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
-import { whereHasLike } from "./core/like";
+import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
   project,
@@ -169,6 +169,12 @@ export interface SelectResult {
   warnings?: string[];
   /** API 呼び出し計測値（execute() 経由の実行時のみ付与） */
   metrics?: ExecuteMetrics;
+}
+
+/** CTE / 一時テーブルの実体化結果。空結果でも出力列を保持する。 */
+interface MaterializedTable {
+  readonly rows: ProcessRow[];
+  readonly columns: string[];
 }
 
 export interface InsertResult {
@@ -421,7 +427,7 @@ async function executeParsedStatement(
 //
 // `;` 区切りの複文を validate-all-first（analyzeBatch）で検証した後、
 // 順次実行する。一時テーブル（#name）はバッチ内スコープの
-// Map<string, ProcessRow[]> に実体化し、CTE キャッシュと同じ機構で
+// Map<string, MaterializedTable> に行と列を実体化し、CTE キャッシュと同じ機構で
 // FULL_SCAN エンジンに注入する。
 // ============================================================
 
@@ -522,7 +528,7 @@ export async function executeBatch(
   const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
   const cacheContext = options.cacheContext ?? "default";
 
-  const tempTables = new Map<string, ProcessRow[]>();
+  const tempTables = new Map<string, MaterializedTable>();
   const variables = new Map<string, VarValue>();
   const results: BatchStatementResult[] = [];
   /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
@@ -622,7 +628,7 @@ async function executeBatchStatement(
   client: KintoneClient,
   options: BatchExecuteOptions,
   cacheContext: string,
-  tempTables: Map<string, ProcessRow[]>,
+  tempTables: Map<string, MaterializedTable>,
   variables: Map<string, VarValue>
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
@@ -674,7 +680,7 @@ async function executeBatchStatement(
       onLimitReached: "error",
     };
     const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(resolvedStmt.name, result.rows);
+    tempTables.set(resolvedStmt.name, { rows: result.rows, columns: result.columns });
     return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
 
@@ -724,7 +730,7 @@ async function runSelectLike(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables: Map<string, ProcessRow[]>
+  tempTables: Map<string, MaterializedTable>
 ): Promise<SelectResult> {
   if (query.type === "WITH") {
     return executeWith(query, client, options, cacheContext, tempTables);
@@ -898,7 +904,7 @@ async function executeAssert(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, ProcessRow[]>
+  tempTables?: Map<string, MaterializedTable>
 ): Promise<AssertResult> {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
 
@@ -931,7 +937,7 @@ async function evalAssertOperand(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, ProcessRow[]>
+  tempTables?: Map<string, MaterializedTable>
 ): Promise<string> {
   switch (operand.type) {
     case "VARIABLE":
@@ -962,7 +968,7 @@ async function evaluateScalarSubquery(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, ProcessRow[]>
+  tempTables?: Map<string, MaterializedTable>
 ): Promise<string> {
   const { query, probed } = withScalarProbeLimit(sourceQuery);
   const result = await runSubquery(query, client, options, cacheContext, tempTables);
@@ -1024,7 +1030,7 @@ async function executeSelect(
   cacheContext: string,
   /** CTE / 一時テーブルのキャッシュ。サブクエリ解決に引き継ぐ（トップレベルの
    *  FROM / JOIN 参照は executeQueryWithCte 側で処理済みの前提） */
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<SelectResult> {
   if (isNoFromSelect(stmt)) {
     return executeNoFromSelect(stmt);
@@ -1111,6 +1117,14 @@ async function executeSimpleSelect(
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
   const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
+  const stopAfter =
+    stmt.orderBy.length === 0 &&
+    needed !== null &&
+    needed <= maxRecords &&
+    !whereHasKlike(stmt.where)
+      ? needed
+      : undefined;
 
   // kintone は最大 500 件なので LIMIT が 500 以下ならページングは不要
   // LIMIT 指定なし or 500 超の場合は fetchAll を使う
@@ -1132,6 +1146,7 @@ async function executeSimpleSelect(
       {
         parallel,
         maxRecords,
+        stopAfter,
         onLimit,
         onTruncate: (max) => {
           warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
@@ -1432,7 +1447,7 @@ async function executeFullScanSelect(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -1621,8 +1636,8 @@ async function executeWith(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  /** バッチ実行時の一時テーブルストア（#name → 行）。CTE キャッシュの初期値として合流する */
-  seed?: ReadonlyMap<string, ProcessRow[]>
+  /** バッチ実行時の一時テーブルストア（#name → 行＋列）。CTE キャッシュの初期値として合流する */
+  seed?: ReadonlyMap<string, MaterializedTable>
 ): Promise<SelectResult> {
   // 単純 CTE のインライン化（WHERE プッシュダウン最適化）
   // CTE 本体が SIMPLE モードで最終クエリが単純 SELECT の場合、
@@ -1632,8 +1647,8 @@ async function executeWith(
     return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
   }
 
-  // CTE 名 → 結果行のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
-  const cteCache = new Map<string, ProcessRow[]>(seed ?? []);
+  // CTE 名 → 実体化結果のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
+  const cteCache = new Map<string, MaterializedTable>(seed ?? []);
 
   // 各 CTE を順番に実行し、結果をキャッシュ
   for (const cte of stmt.ctes) {
@@ -1645,7 +1660,7 @@ async function executeWith(
     } else {
       result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext);
     }
-    cteCache.set(cte.name, result.rows);
+    cteCache.set(cte.name, { rows: result.rows, columns: result.columns });
   }
 
   // 最終クエリを CTE キャッシュ付きで実行
@@ -1660,7 +1675,7 @@ async function executeQueryWithCte(
   query: SelectStatement | UnionStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cteCache: Map<string, ProcessRow[]>,
+  cteCache: Map<string, MaterializedTable>,
   cacheContext: string
 ): Promise<SelectResult> {
   if (query.type === "UNION") {
@@ -1700,13 +1715,14 @@ async function executeQueryWithCte(
 
 /**
  * FROM / JOIN に CTE 参照を含む SELECT を FULL_SCAN モードで実行する。
- * CTE 行は ProcessRow[] → KintoneRecord[] に変換してから runFullScan に渡す。
+ * CTE 行は ProcessRow[] → KintoneRecord[] に変換して runFullScan に渡し、
+ * JOIN なしの単一実体化ソースでは保存列も sourceColumns として渡す。
  */
 async function executeFullScanWithCte(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cteCache: Map<string, ProcessRow[]>,
+  cteCache: Map<string, MaterializedTable>,
   cacheContext: string
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
@@ -1738,8 +1754,8 @@ async function executeFullScanWithCte(
 
   // メインテーブル取得
   if (stmt.from.cteName != null) {
-    const rows = cteCache.get(stmt.from.cteName) ?? [];
-    tables.set(stmt.from.alias, rows.map(processRowToKintoneRecord));
+    const table = cteCache.get(stmt.from.cteName);
+    tables.set(stmt.from.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
   } else {
     const mainRecords = await fetchTableRecordsForFullScan(
       stmt,
@@ -1758,8 +1774,8 @@ async function executeFullScanWithCte(
   // JOIN テーブル取得
   const joinFetches = stmt.joins.map(async (join) => {
     if (join.table.cteName != null) {
-      const rows = cteCache.get(join.table.cteName) ?? [];
-      tables.set(join.table.alias, rows.map(processRowToKintoneRecord));
+      const table = cteCache.get(join.table.cteName);
+      tables.set(join.table.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
     } else {
       const pushDownCond = join.table.alias
         ? (pushdownPlan.joinConditions.get(join.table.alias) ?? null)
@@ -1793,6 +1809,9 @@ async function executeFullScanWithCte(
 
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
+    ? cteCache.get(stmt.from.cteName)?.columns
+    : undefined;
   const { rows, columns } = runFullScan({
     tables,
     stmt,
@@ -1802,6 +1821,7 @@ async function executeFullScanWithCte(
     fieldTypeResolver: fieldTypeResolvers.row,
     havingFieldTypeResolver: fieldTypeResolvers.having,
     appliedKlikes: pushdownPlan.appliedKlikes,
+    sourceColumns,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -2369,8 +2389,8 @@ async function executeInsertSelect(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  /** バッチ実行時の一時テーブルストア（#name → 行）。SELECT ソースの解決に使う */
-  cteCache?: Map<string, ProcessRow[]>
+  /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<InsertResult> {
   // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
@@ -3110,8 +3130,8 @@ async function executeUpsertSelect(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  /** バッチ実行時の一時テーブルストア（#name → 行）。SELECT ソースの解決に使う */
-  cteCache?: Map<string, ProcessRow[]>
+  /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<UpsertResult> {
   // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
@@ -3251,7 +3271,7 @@ async function resolveSubqueries(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<void> {
   const tasks: Array<Promise<void>> = [];
   collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
@@ -3264,7 +3284,7 @@ async function resolveSelectCaseSubqueries(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
   for (const column of stmt.columns) {
@@ -3285,7 +3305,7 @@ function runSubquery(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<SelectResult> {
   if (cteCache !== undefined && cteCache.size > 0) {
     return executeQueryWithCte(query, client, options, cteCache, cacheContext);
@@ -3299,7 +3319,7 @@ function collectSubqueryTasks(
   options: ExecuteOptions,
   cacheContext: string,
   tasks: Array<Promise<void>>,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): void {
   if (where === null) return;
   switch (where.type) {
@@ -3372,7 +3392,7 @@ async function resolveScalarColumns(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, ProcessRow[]>
+  cteCache?: Map<string, MaterializedTable>
 ): Promise<Map<number, string>> {
   const byQuery = new Map<string, Promise<string>>();
   const pending: Array<[number, Promise<string>]> = [];

@@ -4,7 +4,7 @@
 - 更新履歴:
   - 2026-07-14 R1: 起票（v2.1.0 バッチレシピ R1 の実機テスト STEP 4＝差分 0 件のリランで発覚）
   - 2026-07-14 R2: codex レビュー反映（UNION 波及・二次対応の適用範囲・CLI 記述の精緻化・受入条件）。**codex レビュー済み → 仕様案へ**
-- ステータス: **未着手**
+- ステータス: **明示列は v2.1.1 リリース済。残スコープ（空 `SELECT *`／空 CTE／混在ワイルドカード）も R3 実装・codex 検証済み、v2.11.0 予定②。**
 - 発見経緯: `docs/ksql_batch_recipes.md` の R1（差分更新バッチ）を実アプリで実行 → 差分 0 件の再実行で、空の一時テーブルに対する `UPSERT … SELECT` が下記エラーで停止
 
 ## 事象（実機で確認済み）
@@ -92,4 +92,4 @@ if (columns.length !== stmt.fields.length) {
 - **POST / PUT（kintone 書き込み API）が呼ばれないこと**も検証する（0 行 no-op が本当に無通信であること）。
 - **混在ワイルドカード（例: `SELECT *, a`）** が本修正の対象か明示する。→ **本課題では対象外**（`SELECT *` を含む時点でデータ依存の列決定が必要なため。空 `SELECT *`／空 CTE と同じ別課題スコープ）。明示列のみ（`WILDCARD`/`PARENT_WILDCARD` を含まない SELECT）を対象とする。
 - （補助）列数不一致メッセージが 0 列時に原因（0 行）を示す。
-- （スコープ外・別課題）`SELECT * FROM #empty_temp`／空 CTE がスキーマから列を返す（列メタデータのパイプライン伝播）。
+- （残スコープ・別仕様）`SELECT * FROM #empty_temp`／空 CTE がスキーマから列を返す（列メタデータのパイプライン伝播）。→ [ksql_empty_select_wildcard_pipeline_spec.md](ksql_empty_select_wildcard_pipeline_spec.md)（R3 実装・codex 検証済み、v2.11.0 予定②）。

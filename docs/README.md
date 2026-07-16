@@ -2,6 +2,10 @@
 
 公開向けの主要ドキュメント一覧です。
 
+## 課題・改善案・Issue の管理
+
+- **[`ksql_issue_tracker.md`](ksql_issue_tracker.md)** — 課題・改善案・Issue の一括管理台帳（進捗 / 効果 / リリースバージョン）。個別文書のステータスをここに集約する。
+
 ## 主要仕様
 
 - `ksql_language_reference.md`
