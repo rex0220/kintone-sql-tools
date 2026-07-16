@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.16.0（未リリース）
+
+### 機能追加
+
+- **B17 順位系ウィンドウ関数を追加**。`ROW_NUMBER()` / `RANK()` / `DENSE_RANK()` と `OVER ([PARTITION BY ...] [ORDER BY ...]) AS alias` に対応する。ウィンドウ関数はFULL_SCANでHAVING後・DISTINCT前に評価し、CTEを使って「各グループの最新1件を全列付きで取得」を1文で記述できる。
+- ウィンドウ内のORDER BYはトップレベルORDER BYと比較器を共有し、物理アプリの数値型と選択肢定義順を反映する。CTE／一時テーブル由来のソートメタ制限は既存ORDER BYと同じ。
+- `ROW_NUMBER` / `RANK` / `DENSE_RANK` は新しい予約語。同名フィールドはバッククォートで参照できる。`OVER` / `PARTITION` はソフトキーワードで、ウィンドウ列の `AS alias` は必須。
+
 ## v2.15.0（2026-07-16）
 
 ### 機能追加

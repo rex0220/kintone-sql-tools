@@ -11,10 +11,11 @@
 //   3. filter   — JS 側 WHERE（JOIN 後フィルタ）
 //   4. groupBy  — GROUP BY + 集計関数
 //   5. having   — HAVING フィルタ
-//   6. distinct — DISTINCT 重複除去
-//   7. orderBy  — ORDER BY ソート
-//   8. limit    — LIMIT 件数制限
-//   9. project  — SELECT 列プロジェクション（フィールド選択・AS alias）
+//   6. window   — ウィンドウ関数
+//   7. distinct — DISTINCT 重複除去
+//   8. orderBy  — ORDER BY ソート
+//   9. limit    — LIMIT 件数制限
+//  10. project  — SELECT 列プロジェクション（フィールド選択・AS alias）
 // ============================================================
 
 import type {
@@ -34,6 +35,7 @@ import type {
   CaseWhenExpr,
   StringFuncExpr,
   FieldRef,
+  WindowColumn,
 } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import {
@@ -420,7 +422,7 @@ export function applyHaving(
 }
 
 // ============================================================
-// 6. distinct
+// distinct
 // ============================================================
 
 /**
@@ -483,6 +485,10 @@ function buildDistinctKeyBuilder(
         values.push(row[col.field] ?? "");
         continue;
       }
+      if (col.type === "WINDOW_COL") {
+        values.push(row[col.alias] ?? "");
+        continue;
+      }
       if (col.type === "PARENT_WILDCARD") {
         for (const k of sortedParentKeys) {
           values.push(row[k] !== undefined ? row[k] : null);
@@ -494,7 +500,7 @@ function buildDistinctKeyBuilder(
 }
 
 // ============================================================
-// 7. orderBy
+// orderBy（ウィンドウ内ソートと比較器を共有）
 // ============================================================
 
 export type OptionOrderMap = Map<string, Map<string, number>>;
@@ -508,6 +514,26 @@ export function applyOrderBy(
 ): ProcessRow[] {
   if (orderBy.length === 0) return rows;
 
+  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds).rows.map((item) => item.row);
+}
+
+interface DecoratedSortRow {
+  row: ProcessRow;
+  keys: SortKey[];
+}
+
+interface DecoratedSortResult {
+  rows: DecoratedSortRow[];
+  compare: (a: DecoratedSortRow, b: DecoratedSortRow) => number;
+}
+
+function sortDecoratedRows(
+  rows: ProcessRow[],
+  orderBy: OrderByItem[],
+  optionOrders?: OptionOrderMap,
+  sortKinds?: FieldSortKindMap
+): DecoratedSortResult {
+
   // キーごとの比較設定（選択肢順マップ / ソート種別）を 1 回だけ解決
   const keyMeta: SortKeyMeta[] = orderBy.map(({ key }) => ({
     orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : undefined,
@@ -515,7 +541,7 @@ export function applyOrderBy(
   }));
 
   // ソートキーを行ごとに前計算する（比較のたびの式評価・数値変換を避ける）
-  const decorated = rows.map((row) => ({
+  const decorated: DecoratedSortRow[] = rows.map((row) => ({
     row,
     keys: orderBy.map(({ key }, i): SortKey => {
       const s = evalOrderKey(key, row);
@@ -530,15 +556,24 @@ export function applyOrderBy(
     }),
   }));
 
-  decorated.sort((a, b) => {
-    for (let i = 0; i < orderBy.length; i++) {
-      const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
-      if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
-    }
-    return 0;
-  });
+  const compare = (a: DecoratedSortRow, b: DecoratedSortRow) =>
+    compareDecoratedRows(a, b, orderBy, keyMeta);
+  decorated.sort(compare);
 
-  return decorated.map((d) => d.row);
+  return { rows: decorated, compare };
+}
+
+function compareDecoratedRows(
+  a: DecoratedSortRow,
+  b: DecoratedSortRow,
+  orderBy: OrderByItem[],
+  keyMeta: SortKeyMeta[]
+): number {
+  for (let i = 0; i < orderBy.length; i++) {
+    const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
+    if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
+  }
+  return 0;
 }
 
 interface SortKey {
@@ -603,7 +638,57 @@ function minChoiceIndex(values: string[], orderMap: Map<string, number>): number
 }
 
 // ============================================================
-// 8. limit / offset
+// window（パイプラインでは HAVING 後・DISTINCT 前）
+// ============================================================
+
+/** HAVING 後の同じ入力行集合に対し、各ウィンドウ列を独立に評価する。 */
+export function applyWindow(
+  rows: ProcessRow[],
+  columns: SelectColumn[],
+  optionOrders?: OptionOrderMap,
+  sortKinds?: FieldSortKindMap
+): ProcessRow[] {
+  const windows = columns.filter((column): column is WindowColumn => column.type === "WINDOW_COL");
+  if (rows.length === 0 || windows.length === 0) return rows;
+
+  for (const window of windows) {
+    const partitions = new Map<string, ProcessRow[]>();
+    for (const row of rows) {
+      const key = JSON.stringify(window.partitionBy.map((ref) => resolveWindowField(row, ref)));
+      const partition = partitions.get(key);
+      if (partition) partition.push(row);
+      else partitions.set(key, [row]);
+    }
+
+    for (const partition of partitions.values()) {
+      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds);
+      const sorted = sortedResult.rows;
+      let rank = 1;
+      let denseRank = 1;
+      for (let index = 0; index < sorted.length; index++) {
+        if (index > 0 && sortedResult.compare(sorted[index - 1], sorted[index]) !== 0) {
+          rank = index + 1;
+          denseRank++;
+        }
+        const value = window.func === "ROW_NUMBER"
+          ? index + 1
+          : window.func === "RANK"
+            ? rank
+            : denseRank;
+        sorted[index].row[window.alias] = String(value);
+      }
+    }
+  }
+  return rows;
+}
+
+function resolveWindowField(row: ProcessRow, ref: FieldRef): string {
+  const name = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
+  return resolveFieldRef(row, name);
+}
+
+// ============================================================
+// limit / offset
 // ============================================================
 
 export function applyLimit(
@@ -617,7 +702,7 @@ export function applyLimit(
 }
 
 // ============================================================
-// 9. project — SELECT 列プロジェクション
+// project — SELECT 列プロジェクション
 // ============================================================
 
 /**
@@ -725,6 +810,12 @@ export function project(
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
+        case "WINDOW_COL": {
+          const key = outputKeys?.[colIdx] ?? col.alias;
+          out[key] = row[col.alias] ?? "";
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
       }
     }
     return out;
@@ -781,6 +872,8 @@ function computeOutputKey(
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
+    case "WINDOW_COL":
+      return col.alias;
     case "WILDCARD":
     case "PARENT_WILDCARD":
       throw new Error("internal: computeOutputKey received a wildcard column");
@@ -967,17 +1060,20 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 5. HAVING
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
 
-  // 6. DISTINCT
+  // 6. ウィンドウ関数
+  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds);
+
+  // 7. DISTINCT
   if (stmt.distinct) {
     rows = applyDistinct(rows, stmt.columns);
   }
 
-  // 7. ORDER BY
+  // 8. ORDER BY
   rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
 
-  // 8. LIMIT / OFFSET
+  // 9. LIMIT / OFFSET
   rows = applyLimit(rows, stmt.limit, stmt.offset);
 
-  // 9. project
+  // 10. project
   return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns);
 }

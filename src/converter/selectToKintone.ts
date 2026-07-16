@@ -47,6 +47,10 @@ export type SelectMode =
   | "SIMPLE"     // kintone クエリに直接変換（API 側でソート・件数制限）
   | "FULL_SCAN"; // 全件取得 → JS 側で GROUP BY / JOIN / DISTINCT 処理
 
+export function hasWindowColumns(columns: SelectColumn[]): boolean {
+  return columns.some((column) => column.type === "WINDOW_COL");
+}
+
 /**
  * SELECT 文が SIMPLE モードか FULL_SCAN モードかを判定する。
  *
@@ -64,6 +68,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
   if (stmt.joins.length > 0) return "FULL_SCAN";
   if (stmt.groupBy.length > 0) return "FULL_SCAN";
   if (stmt.distinct) return "FULL_SCAN";
+  if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
@@ -562,16 +567,16 @@ function collectRequiredFieldsByTable(
     walkStringFunc(k.expr, "groupBy");
   };
 
-  const walkOrderByKey = (k: OrderByKey) => {
+  const walkOrderByKey = (k: OrderByKey, phase: "orderBy" | "select" = "orderBy") => {
     if (k.type === "FIELD_NAME") {
-      addFieldName(k.name, "orderBy");
+      addFieldName(k.name, phase);
       return;
     }
     if (k.type === "ARITH_KEY") {
-      walkArith(k.expr, "orderBy");
+      walkArith(k.expr, phase);
       return;
     }
-    walkStringFunc(k.expr, "orderBy");
+    walkStringFunc(k.expr, phase);
   };
 
   for (const col of stmt.columns) {
@@ -603,6 +608,10 @@ function collectRequiredFieldsByTable(
         walkStringFunc(col.expr, "select");
         break;
       case "SCALAR_SUBQUERY_COL":
+        break;
+      case "WINDOW_COL":
+        for (const ref of col.partitionBy) addFieldRef(ref.field, ref.tableAlias, "select");
+        for (const item of col.orderBy) walkOrderByKey(item.key, "select");
         break;
     }
   }
@@ -653,6 +662,10 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
     }
     if (col.type === "SCALAR_SUBQUERY_COL") {
       names.add(col.alias ?? "(subquery)");
+      continue;
+    }
+    if (col.type === "WINDOW_COL") {
+      names.add(col.alias);
     }
   }
   return names;

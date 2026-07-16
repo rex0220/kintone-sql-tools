@@ -199,6 +199,7 @@ export type SelectColumn =
   | ArithColumn             // field * 1.1 [AS alias]
   | CaseColumn              // CASE WHEN ... END [AS alias]
   | StringFuncColumn        // UPPER(f) / CONCAT(a,b) / ... [AS alias]
+  | WindowColumn            // ROW_NUMBER() OVER (...) AS alias
   | ScalarSubqueryColumn;   // (SELECT ...) [AS alias]
 
 export interface WildcardColumn {
@@ -232,6 +233,17 @@ export interface AggregateColumn {
 }
 
 export type AggregateFunc = "COUNT" | "SUM" | "AVG" | "MAX" | "MIN" | "GROUP_CONCAT";
+
+export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
+
+/** 順位系ウィンドウ関数。v1 は出力名の衝突を避けるため alias 必須。 */
+export interface WindowColumn {
+  type: "WINDOW_COL";
+  func: WindowFunc;
+  partitionBy: FieldRef[];
+  orderBy: OrderByItem[];
+  alias: string;
+}
 
 /** SELECT 句の算術式カラム: field * 1.1 AS alias / 2 * field / (a+b)*c */
 export interface ArithColumn {

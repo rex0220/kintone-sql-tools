@@ -1,7 +1,7 @@
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
 import type { SelectStatement } from "../../types/ast";
-import { resolveSelectMode, selectToFetchAllParams, selectToKintoneParams } from "../selectToKintone";
+import { resolveSelectMode, selectToFetchAllFields, selectToFetchAllParams, selectToKintoneParams } from "../selectToKintone";
 
 function parseSelect(sql: string): SelectStatement {
   return new Parser(new Lexer(sql).tokenize()).parse() as SelectStatement;
@@ -32,4 +32,16 @@ test("KLIKE は JS 評価を要求せず SIMPLE の kintone query へ押し下�
   const stmt = parseSelect("SELECT 文字列 FROM APP100 WHERE 文字列 KLIKE '会社'");
   expect(resolveSelectMode(stmt)).toBe("SIMPLE");
   expect(selectToKintoneParams(stmt).query).toBe('文字列 like "会社"');
+});
+
+test("ウィンドウ列は FULL_SCAN を強制する", () => {
+  const stmt = parseSelect("SELECT k, ROW_NUMBER() OVER (PARTITION BY k ORDER BY d DESC) AS rn FROM APP100");
+  expect(resolveSelectMode(stmt)).toBe("FULL_SCAN");
+});
+
+test("SELECT しないウィンドウキーも取得フィールドへ含める", () => {
+  const stmt = parseSelect(
+    "SELECT a.k, ROW_NUMBER() OVER (PARTITION BY a.k ORDER BY a.d DESC, a.n + 1) AS rn FROM APP100 a"
+  );
+  expect(selectToFetchAllFields(stmt, stmt.from)).toEqual(expect.arrayContaining(["k", "d", "n"]));
 });

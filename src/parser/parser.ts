@@ -38,6 +38,7 @@ import type {
   GroupExpr,
   ExistsExpr,
   FieldValue,
+  FieldRef,
   SqlValue,
   StringLiteral,
   NumberLiteral,
@@ -87,6 +88,8 @@ import type {
   DeclareVariableStatement,
   ScalarExpr,
   VariableRef,
+  WindowColumn,
+  WindowFunc,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -104,6 +107,7 @@ type ExpandedBetween = LogicalExpr;
 const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.IDENT, TokenKind.BIDENT,
   TokenKind.COUNT, TokenKind.SUM, TokenKind.AVG, TokenKind.MAX, TokenKind.MIN,
+  TokenKind.ROW_NUMBER, TokenKind.RANK, TokenKind.DENSE_RANK,
   TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
   TokenKind.LENGTH, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
@@ -647,6 +651,12 @@ export class Parser {
       ? this.parseUnsignedInt()
       : null;
 
+    const hasWindow = columns.some((column) => column.type === "WINDOW_COL");
+    const hasAggregate = columns.some((column) => this.selectColumnHasAggregate(column));
+    if (hasWindow && (groupBy.length > 0 || hasAggregate)) {
+      throw new ParseError("ウィンドウ関数は GROUP BY / 集計関数と同じ SELECT では使用できません", this.peek());
+    }
+
     return {
       type: "SELECT",
       distinct,
@@ -722,6 +732,11 @@ export class Parser {
     // *
     if (this.consume(TokenKind.STAR)) {
       return { type: "WILDCARD" };
+    }
+
+    const windowFunc = this.tryWindowFunc();
+    if (windowFunc !== null) {
+      return this.parseWindowColumn(windowFunc);
     }
 
     // CASE WHEN ... END [AS alias]
@@ -818,6 +833,61 @@ export class Parser {
 
     const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
     return { type: "FIELD", field, alias };
+  }
+
+  private tryWindowFunc(): WindowFunc | null {
+    switch (this.peek().kind) {
+      case TokenKind.ROW_NUMBER: return "ROW_NUMBER";
+      case TokenKind.RANK: return "RANK";
+      case TokenKind.DENSE_RANK: return "DENSE_RANK";
+      default: return null;
+    }
+  }
+
+  private parseWindowColumn(func: WindowFunc): WindowColumn {
+    this.advance();
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind !== TokenKind.RPAREN) {
+      throw new ParseError(`${func} は引数を受け付けません`, this.peek());
+    }
+    this.expect(TokenKind.RPAREN);
+    this.expectSoftKeyword("OVER", `${func} には OVER (...) が必要です`);
+    this.expect(TokenKind.LPAREN);
+
+    const partitionBy: FieldRef[] = [];
+    if (this.isSoftKeyword("PARTITION")) {
+      this.advance();
+      this.expect(TokenKind.BY, "PARTITION の後には BY が必要です");
+      do {
+        const ref = this.parseQualifiedIdent();
+        partitionBy.push({ type: "FIELD", tableAlias: ref.tableAlias, field: ref.field });
+      } while (this.consume(TokenKind.COMMA));
+    }
+
+    const orderBy = this.consume(TokenKind.ORDER)
+      ? (this.expect(TokenKind.BY), this.parseOrderBy())
+      : [];
+    this.expect(TokenKind.RPAREN);
+
+    if (!this.consume(TokenKind.AS)) {
+      throw new ParseError("ウィンドウ関数には AS alias が必要です", this.peek());
+    }
+    const alias = this.parseAliasName();
+    return { type: "WINDOW_COL", func, partitionBy, orderBy, alias };
+  }
+
+  private selectColumnHasAggregate(column: SelectColumn): boolean {
+    if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
+    if (column.type !== "STRFUNC_COL") return false;
+    return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+  }
+
+  private stringFuncArgHasAggregate(arg: StringFuncArg): boolean {
+    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+    if (arg.type === "STRING_FUNC") {
+      return arg.args.some((nested) => this.stringFuncArgHasAggregate(nested));
+    }
+    return false;
   }
 
   private isArithOp(kind: TokenKind): boolean {
