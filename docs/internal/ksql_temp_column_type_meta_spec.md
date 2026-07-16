@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。**B16 `GROUP_CONCAT` の前提**（[機能比較評価](ksql_sql_feature_comparison_evaluation.md) §4）。
-- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
+- ステータス: **R2 実装済み（codex・コードレビュー待ち）。1,294 テスト green。v2.15.0 予定。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

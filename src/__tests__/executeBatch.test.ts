@@ -83,13 +83,18 @@ test("VALIDATE ONLY INTO #err は空schemaを保持し後続SELECTから参照�
     { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
   ];
   const batch = await executeBatch(
-    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err;" +
+    "SELECT * FROM #err;" +
+    "SELECT MIN($err_message) AS message, MIN(code) AS payload FROM #err",
     client,
     { cacheContext: "validate-batch" }
   );
   expect(batch.ok).toBe(true);
   expect(batch.statements[0].result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errTable: "#err" });
   expect(batch.statements[1].result).toMatchObject({ type: "SELECT", rowCount: 1 });
+  const aggregate = batch.statements[2].result as SelectResult;
+  expect(aggregate.rows[0].message).not.toBe("NaN");
+  expect(aggregate.rows[0].payload).toBe("");
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
 });
@@ -106,6 +111,44 @@ test("エラー0件のVALIDATE ONLY INTOも列schemaを保持する", async () =
   expect(selected).toMatchObject({ type: "SELECT", rowCount: 0 });
   if (selected?.type !== "SELECT") throw new Error("unexpected result");
   expect(selected.columns).toContain("$err_code");
+});
+
+test("#err ペイロード型は元SELECTではなくDML対象フィールドから宣言する", async () => {
+  const client = makeClient({ recordsByApp: {
+    100: [makeRecord({ sourceNumber: "9" }), makeRecord({ sourceNumber: "10" })],
+  } });
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "sourceNumber", label: "sourceNumber", fieldType: "NUMBER" }]
+    : [
+      { code: "amount", label: "amount", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "required", label: "required", fieldType: "SINGLE_LINE_TEXT", required: true },
+    ];
+  const batch = await executeBatch(
+    "INSERT INTO APP200 (amount, required) SELECT sourceNumber, '' FROM APP100 VALIDATE ONLY INTO #err;" +
+    "SELECT MAX(amount) AS maxAmount FROM #err",
+    client,
+    { cacheContext: "validate-target-column-meta" }
+  );
+
+  expect(batch.statements[0].result).toMatchObject({ type: "VALIDATION", invalidRows: 2 });
+  // 対象 amount は文字列なので辞書順。元SELECTの NUMBER を誤継承すると 10 になる。
+  expect((batch.statements[1].result as SelectResult).rows[0].maxamount).toBe("9");
+});
+
+test("UPDATE の #err.$id は RECORD_NUMBER 相当の数値型で宣言する", async () => {
+  const client = makeClient({ recordsByApp: {
+    100: [makeRecord({ $id: "9", amount: "1" }), makeRecord({ $id: "10", amount: "2" })],
+  } });
+  client.getFields = async () => [{ code: "amount", label: "amount", fieldType: "NUMBER" }];
+  const batch = await executeBatch(
+    "UPDATE APP100 SET amount = 'bad' WHERE $id >= 1 VALIDATE ONLY INTO #err;" +
+    "SELECT MAX($id) AS maxId FROM #err",
+    client,
+    { cacheContext: "validate-update-id-column-meta" }
+  );
+
+  expect(batch.statements[0].result).toMatchObject({ type: "VALIDATION", invalidRows: 2 });
+  expect((batch.statements[1].result as SelectResult).rows[0].maxid).toBe("10");
 });
 
 test("ON ERROR SKIP は不正行を隔離し合格 prepared plan だけを書き込む", async () => {
@@ -837,7 +880,7 @@ test("WITH（CTE）から一時テーブルを参照できる", async () => {
   expect(rows.map((row) => row["顧客名"])).toEqual(["B社", "C社"]);
 });
 
-test("MIN / MAX: 一時テーブルと CTE は型メタを持たず従来の数値経路を維持する", async () => {
+test("MIN / MAX: 一時テーブルと CTE に文字列型メタが伝播する", async () => {
   const client = makeClient({
     recordsByApp: { 100: [makeRecord({ name: "B" }), makeRecord({ name: "A" })] },
   });
@@ -852,11 +895,11 @@ test("MIN / MAX: 一時テーブルと CTE は型メタを持たず従来の数�
     { cacheContext: "aggregate-sort-materialized" }
   );
 
-  expect((r.statements[1].result as SelectResult).rows[0].tempmin).toBe("NaN");
-  expect((r.statements[2].result as SelectResult).rows[0].ctemin).toBe("NaN");
+  expect((r.statements[1].result as SelectResult).rows[0].tempmin).toBe("A");
+  expect((r.statements[2].result as SelectResult).rows[0].ctemin).toBe("A");
 });
 
-test("MIN / MAX: CTE/temp 混在 JOIN の非修飾列では物理側の型メタも取得しない", async () => {
+test("MIN / MAX: CTE/temp 混在 JOIN の非修飾同名列は衝突として型不明にする", async () => {
   const client = makeClient({
     recordsByApp: {
       100: [makeRecord({ key: "1", value: "B" })],
@@ -881,6 +924,80 @@ test("MIN / MAX: CTE/temp 混在 JOIN の非修飾列では物理側の型メタ
   expect(r.statements[0].error).toBeUndefined();
   expect(r.statements[1].error).toBeUndefined();
   expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("NaN");
+  expect(fieldCalls).toBe(2);
+});
+
+test("MIN / MAX: 数値型・チェーン・temp alias 修飾参照を維持する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ key: "1", amount: "9", name: "B", date: "2026-07-16" }),
+        makeRecord({ key: "2", amount: "10", name: "A", date: "2026-01-02" }),
+      ],
+      200: [makeRecord({ key: "1" }), makeRecord({ key: "2" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 100
+    ? [
+      { code: "key", label: "key", fieldType: "NUMBER" },
+      { code: "amount", label: "amount", fieldType: "NUMBER" },
+      { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "date", label: "date", fieldType: "DATE" },
+    ]
+    : [{ code: "key", label: "key", fieldType: "NUMBER" }];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t1 AS SELECT key, amount, name, date FROM APP100;" +
+    "CREATE TEMP TABLE #t2 AS SELECT key, amount, name, date FROM #t1;" +
+    "SELECT MAX(amount) AS numericMax, MIN(name) AS textMin, MIN(date) AS oldest FROM #t2;" +
+    "SELECT MIN(t.name) AS qualifiedMin FROM APP200 a JOIN #t2 AS t ON a.key = t.key",
+    client,
+    { cacheContext: "aggregate-sort-chain" }
+  );
+
+  expect((r.statements[2].result as SelectResult).rows[0]).toMatchObject({
+    numericmax: "10", textmin: "A", oldest: "2026-01-02",
+  });
+  expect((r.statements[3].result as SelectResult).rows[0].qualifiedmin).toBe("A");
+});
+
+test("MIN / MAX: UNION は左右の型一致時だけメタを伝播する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ value: "B" })],
+      200: [makeRecord({ value: "A" })],
+      300: [makeRecord({ value: "10" })],
+    },
+  });
+  client.getFields = async (appId) => [{
+    code: "value", label: "value", fieldType: appId === 300 ? "NUMBER" : "SINGLE_LINE_TEXT",
+  }];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #same AS SELECT value FROM APP100 UNION ALL SELECT value FROM APP200;" +
+    "SELECT MIN(value) AS sameMin FROM #same;" +
+    "CREATE TEMP TABLE #mixed AS SELECT value FROM APP100 UNION ALL SELECT value FROM APP300;" +
+    "SELECT MIN(value) AS mixedMin FROM #mixed",
+    client,
+    { cacheContext: "aggregate-sort-union" }
+  );
+
+  expect((r.statements[1].result as SelectResult).rows[0].samemin).toBe("A");
+  expect((r.statements[3].result as SelectResult).rows[0].mixedmin).toBe("NaN");
+});
+
+test("MIN / MAX: SELECT * 実体化でも型を付けフォーム定義は1回だけ取得する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ name: "B" }), makeRecord({ name: "A" })] } });
+  let fieldCalls = 0;
+  client.getFields = async () => {
+    fieldCalls += 1;
+    return [{ code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" }];
+  };
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT * FROM APP100; SELECT MIN(name) AS result FROM #t",
+    client,
+    { cacheContext: "aggregate-sort-wildcard" }
+  );
+
+  expect((r.statements[1].result as SelectResult).rows[0].result).toBe("A");
   expect(fieldCalls).toBe(1);
 });
 
