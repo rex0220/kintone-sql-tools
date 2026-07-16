@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-16
-- 現在の最新リリース: **v2.11.0**（npm publish 済み・latest）
+- 現在の最新リリース: **v2.12.0**（tag/GitHub Release 公開・npm publish 待ち）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -39,7 +39,6 @@
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
-| B11 | `UPDATE … FROM`（SET 値に他テーブルのフィールド参照＝アプリ間転記） | 改善 | 🚧 R4 実装済み・自動テスト済み・コードレビュー／実機確認待ち（**#temp＋APP**・`cteName` 自動配線・`$id` 単一等値・50件チャンク・MCP maxRecords・fail-closed） | 機能 | 中 | [spec](internal/ksql_update_from_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 📝 採用・未実装（バッチ強化 Phase 3・価値最大。VALIDATE ONLY 先行→ON ERROR SKIP。B11 依存） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
@@ -50,6 +49,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v2.12.0** | B11 `UPDATE … FROM`（アプリ間・一時テーブル転記）。SET 値に他テーブル（`#temp`/実アプリ `APP<n>`）のフィールドを参照・`$id` 単一等値・複数マッチ/不正キー/列欠落/複合型/上限は PUT 前 fail-closed・50 件チャンク・MCP は `maxRecords` で読み取り | 機能 | [spec](internal/ksql_update_from_spec.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | **v2.11.0** | B1 CLI DML×`truncate` 暗黙部分書き込み防止（`error` 固定）／B2 空 `SELECT *` の列スキーマをパイプライン伝播（0 行 no-op 完走）／B8 `LIMIT>500` の安全な取得打ち切り（`ORDER BY` なし・KLIKE なし限定）＋`maxRecords` 意味論変更 | 安全性・正しさ・性能 | [B1](internal/ksql_cli_dml_on_limit_truncate_issue.md) / [B2](internal/ksql_empty_select_wildcard_pipeline_spec.md) / [B8](internal/ksql_limit_over_500_fetch_truncation_spec.md) |
 | **v2.10.1** | SIMPLE SELECT の `LIMIT` > 500 が API エラーになる不具合を修正（案A ＝ `fetchAll` でページング） | 正しさ | [issue](internal/ksql_simple_select_limit_over_500_issue.md) |
 | **v2.10.0** | 検索打ち切り（10 万件）検出＋`FROM` なし SELECT の実体化バグ修正。SELECT は警告 / DML・一時テーブル実体化は fail-closed | 正しさ・安全性 | [abort](internal/ksql_search_abort_warning_issue.md) / [fromless](internal/ksql_fromless_select_materialize_bug.md) |
