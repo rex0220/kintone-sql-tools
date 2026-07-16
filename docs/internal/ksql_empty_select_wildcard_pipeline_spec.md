@@ -3,10 +3,11 @@
 - 作成日: 2026-07-16
 - 対象課題: [ksql_empty_select_columns_issue.md](ksql_empty_select_columns_issue.md) の残スコープ（§95 「スコープ外・別課題」）
 - 先行修正: [ksql_empty_select_columns_fix_spec.md](ksql_empty_select_columns_fix_spec.md)（明示列＝v2.1.1 リリース済）
-- ステータス: **仕様案 R2（codex レビュー反映・実装着手可）。v2.11.0 予定②（B1 の後・B8 の前）**
+- ステータス: **仕様案 R3（codex 再レビュー反映・実装着手可）。v2.11.0 予定②（B1 の後・B8 の前）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
   - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①非インライン CTE のテストを必須化（`canInlineSingleCte` で単純 CTE は MaterializedTable 経路を踏まない）②混在ワイルドカードの semantics を修正＝`sourceColumns` 展開は**単独 `SELECT *` 限定**・混在は明示列のみ返す（現行 1 行以上と一致）・「先勝ち」表現を撤回③`PARENT_WILDCARD` を1つでも含む列リストは `sourceColumns` 展開を使わない。未決事項3点を確定（実アプリ bare `SELECT *`＝案ア／`MaterializedTable`＝execute.ts ローカル private／ストア＝単一構造体マップ）
+  - 2026-07-16 R3: codex 再レビュー反映（コードで裏取り）。①§5 の非インライン CTE 成功例から「最終クエリが JOIN」を除外（JOIN は `sourceColumns` 非供給＝空列維持で受入条件と衝突）②§3.5 UNION は `executeUnion`（1580）に加え **temp/CTE が通る `executeQueryWithCte` の UNION 分岐（1666-1681）** も `leftResult.columns` ベースで自動波及・両者変更不要と明記③§2「自動的に正しい」を「実体化時点で `result.columns` が確定している複合クエリに限る」へ限定（空 bare `SELECT *`/空 JOIN で `result.columns` が空なら保存後も空＝対象外）
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: バグ修正・後方互換（1 行以上の既存出力・明示列 0 行は不変）→ minor バンドル v2.11.0 の一部
 
@@ -34,7 +35,7 @@
 - **JOIN を伴う `SELECT *`（0 行）** — 複数ソースの列合成順が行依存で、0 行では確定不能。`sourceColumns` 非供給で現状維持（空列＋メッセージ）。
 - **単独 `SELECT _p.*`（`PARENT_WILDCARD`）0 行** — サブテーブル親ショートカットは行依存。現状維持（空列）。混在に `_p.*` を含む場合は §3.4(c)（明示列のみ）。
 - **混在 `SELECT *, extra` の `*` 分の列**（0 行でスキーマ展開して `*` を列に載せること）— 1 行以上でも `*` は `columns` に寄与しない現行仕様に合わせ、行わない。
-- **CTE/temp が JOIN・GROUP BY 等を含む複合クエリで実体化された場合の列**は、実体化時の `result.columns`（＝ project 出力）をそのまま保存するので**自動的に正しい**（追加設計不要）。
+- **実体化時点で `result.columns` が確定している複合クエリ**（JOIN・GROUP BY 等を含む CTE/temp で、実体化 SELECT が明示列 or 1 行以上の `SELECT *`）は、その `result.columns` をそのまま保存できる（追加設計不要）。**ただし実体化 SELECT 自体が空 bare `SELECT *`・空 JOIN 等で `result.columns` が空なら、保存後も空のまま**（今回の対象外＝連鎖の起点で列が確定しないケース）。
 
 ---
 
@@ -155,7 +156,12 @@ const cols = projected.length > 0 ? Object.keys(projected[0]) : (sourceColumns ?
 
 ### 3.5 UNION は自動波及
 
-`executeUnion`（[execute.ts:1580-1600](../../src/execute.ts#L1580)）は `leftResult.columns` を結果列とし、右辺行を左辺列へリマップする。左辺が `SELECT * FROM #empty`（§3.3-3.4 で列が復活）なら `leftCols` が非空になり、右辺値が正しく載る。**UNION 自体の変更は不要**。回帰テストで固定する（§6）。
+UNION の実装は 2 経路あり、**どちらも `leftResult.columns`（`leftCols`）ベース**で結果列を決め、右辺行を左辺列へリマップする:
+
+- 通常実行の `executeUnion`（[execute.ts:1580-1600](../../src/execute.ts#L1580)）。
+- **temp/CTE を含む UNION が通る `executeQueryWithCte` の UNION 分岐**（[execute.ts:1666-1681](../../src/execute.ts#L1666)）。本仕様の受入テスト（`SELECT * FROM #empty UNION …`）は実際にこちらを通る。
+
+左辺が `SELECT * FROM #empty`（§3.3-3.4 で列が復活）なら両分岐とも `leftCols` が非空になり、右辺値が正しく載る。**どちらも UNION 側のコード変更は不要**。両経路を回帰テストで固定する（§6）。
 
 ### 3.6 実アプリ直参照の 0 行 `SELECT *`（決定点）
 
@@ -185,7 +191,11 @@ const cols = projected.length > 0 ? Object.keys(projected[0]) : (sourceColumns ?
 ## 5. 受入条件
 
 - [ ] `SELECT * FROM #empty_temp`（実体化元＝明示列・0 行）が実体化時スキーマの列を返す。
-- [ ] **非インライン CTE の空 `SELECT *`**（下記のいずれか。単純 CTE は `canInlineSingleCte` でインライン化され MaterializedTable 経路を踏まないため必須 — codex Finding 1）: 本体が GROUP BY／`UNION`／JOIN 等で **FULL_SCAN になる CTE**、または最終クエリが JOIN/GROUP BY を持つ、または複数 CTE。0 行で CTE 実体化スキーマの列を返す。
+- [ ] **非インライン CTE の空 `SELECT *`**（下記のいずれか。単純 CTE は `canInlineSingleCte` でインライン化され MaterializedTable 経路を踏まないため必須 — codex Finding 1）。0 行で CTE 実体化スキーマの列を返す:
+  - **CTE 本体が GROUP BY／`UNION`／JOIN 等で非 SIMPLE**、かつ実体化結果の列が確定するもの（§6 の GROUP BY 本体の例）。
+  - **複数 CTE**。
+  - **最終クエリが JOIN なしの非インライン条件を持つもの**（例: 最終側に GROUP BY／DISTINCT）。
+  - ※「最終クエリが JOIN」は成功例から除外する。JOIN 時は `sourceColumns` を供給せず空列を維持する仕様（§3.3・JOIN 非対象の受入条件）と衝突するため。
 - [ ] `UPSERT INTO x (a,b) SELECT * FROM #empty_temp ON DUPLICATE (a)` が `inserted=0/updated=0` の no-op（**POST/PUT 未呼び出し**）。
 - [ ] `INSERT INTO x (a,b) SELECT * FROM #empty_temp` が `inserted=0`（**POST 未呼び出し**）。
 - [ ] **混在 `SELECT *, extra FROM #empty_temp`（0 行）は明示列 `['extra']` のみを返す**（`*` は列に寄与しない＝1 行以上と一致・§3.4(b)）。現状の `columns=[]`（明示列すら失う）からの回復が主目的。
