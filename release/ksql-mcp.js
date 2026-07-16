@@ -32967,6 +32967,26 @@ var Parser = class {
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     this.expect("SET" /* SET */);
     const assignments = this.parseAssignments();
+    let from = null;
+    if (this.consume("FROM" /* FROM */)) {
+      const table = this.parseTableRef();
+      if (table.subtableCode) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u306B\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u306F\u6307\u5B9A\u3067\u304D\u307E\u305B\u3093", this.prev());
+      }
+      if (table.cteName !== null && !table.cteName.startsWith("#")) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u306F #temp \u307E\u305F\u306F APP<n> \u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08CTE \u306F\u975E\u5BFE\u5FDC\uFF09", this.prev());
+      }
+      if (!table.alias) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u306B\u306F\u30A8\u30A4\u30EA\u30A2\u30B9\u304C\u5FC5\u8981\u3067\u3059", this.prev());
+      }
+      from = {
+        appId: table.appId,
+        cteName: table.cteName,
+        alias: table.alias,
+        joinKeyField: "",
+        targetFilter: null
+      };
+    }
     const whereTok = this.peek();
     if (!this.consume("WHERE" /* WHERE */)) {
       throw new ParseError(
@@ -32975,7 +32995,128 @@ var Parser = class {
       );
     }
     const where = this.parseWhereExpr();
+    if (from !== null) {
+      if (subtableCode) {
+        throw new ParseError("\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE ... FROM \u306F\u30B5\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u305B\u3093", whereTok);
+      }
+      this.validateUpdateFromAssignments(assignments, from.alias, whereTok);
+      const decomposed = this.decomposeUpdateFromWhere(where, appId, from.alias, whereTok);
+      from.joinKeyField = decomposed.joinKeyField;
+      from.targetFilter = decomposed.targetFilter;
+    } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
+      throw new ParseError(
+        "SET \u306E\u5024\u306B\u306F\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306E\u307F\u306F\u4E0D\u53EF\uFF09",
+        whereTok
+      );
+    }
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from };
     return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where } : { type: "UPDATE", appId, assignments, where };
+  }
+  validateUpdateFromAssignments(assignments, sourceAlias, tok) {
+    for (const assignment of assignments) {
+      if (assignment.value.type === "SOURCE_FIELD") {
+        if (assignment.value.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
+          throw new ParseError(`UPDATE ... FROM \u306E SET \u53C2\u7167\u306F\u30BD\u30FC\u30B9 alias ${sourceAlias} \u3067\u4FEE\u98FE\u3057\u3066\u304F\u3060\u3055\u3044`, tok);
+        }
+        continue;
+      }
+      if (this.nodeContainsQualifiedField(assignment.value, sourceAlias)) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u5217\u306F SET \u306E\u76F4\u63A5\u5024\u3068\u3057\u3066\u306E\u307F\u53C2\u7167\u3067\u304D\u307E\u3059", tok);
+      }
+      if (assignment.value.type === "SCALAR_SUBQUERY") {
+        throw new ParseError("UPDATE ... FROM \u306E SET \u3067\u306F\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      }
+      if (this.nodeContainsAnyQualifier(assignment.value)) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BF\u30FC\u30B2\u30C3\u30C8\u5F0F\u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u3092\u4FEE\u98FE\u3057\u306A\u3044\u3067\u304F\u3060\u3055\u3044", tok);
+      }
+    }
+  }
+  decomposeUpdateFromWhere(where, targetAppId, sourceAlias, tok) {
+    const leaves = this.flattenTopLevelAnd(where);
+    const joins = [];
+    leaves.forEach((leaf, index) => {
+      const sourceField = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
+      if (sourceField !== null) joins.push({ index, sourceField });
+    });
+    if (joins.length !== 1) {
+      throw new ParseError("UPDATE ... FROM \u306E WHERE \u306B\u306F target.$id = source.key \u306E\u7D50\u5408\u7B49\u5024\u304C\u3061\u3087\u3046\u30691\u3064\u5FC5\u8981\u3067\u3059", tok);
+    }
+    const join = joins[0];
+    for (let i = 0; i < leaves.length; i++) {
+      if (i !== join.index && this.nodeContainsQualifiedField(leaves[i], sourceAlias)) {
+        throw new ParseError("UPDATE ... FROM \u306E\u30BD\u30FC\u30B9 alias \u306F\u7D50\u5408\u7B49\u5024\u4EE5\u5916\u306E WHERE \u6761\u4EF6\u3067\u306F\u53C2\u7167\u3067\u304D\u307E\u305B\u3093", tok);
+      }
+      if (i !== join.index && this.nodeContainsForeignQualifier(leaves[i], targetAppId)) {
+        throw new ParseError(`UPDATE ... FROM \u306E\u30BF\u30FC\u30B2\u30C3\u30C8\u30D5\u30A3\u30EB\u30BF\u306F APP${targetAppId} \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u3060\u3051\u3092\u53C2\u7167\u3067\u304D\u307E\u3059`, tok);
+      }
+    }
+    const filters = leaves.filter((_, index) => index !== join.index);
+    const targetFilter = filters.reduce(
+      (acc, expr) => acc === null ? expr : { type: "LOGICAL", op: "AND", left: acc, right: expr },
+      null
+    );
+    return { joinKeyField: join.sourceField, targetFilter };
+  }
+  flattenTopLevelAnd(expr) {
+    if (expr.type === "GROUP") return this.flattenTopLevelAnd(expr.expr);
+    if (expr.type === "LOGICAL" && expr.op === "AND") {
+      return [...this.flattenTopLevelAnd(expr.left), ...this.flattenTopLevelAnd(expr.right)];
+    }
+    return [expr];
+  }
+  matchUpdateFromJoin(expr, targetAppId, sourceAlias) {
+    if (expr.type !== "BINARY" || expr.op !== "=" || expr.left.type !== "FIELD") return null;
+    const right = expr.right.type === "ARITH_VALUE" && expr.right.expr.type === "FIELD_REF" ? this.splitQualifiedField(expr.right.expr.field) : null;
+    if (right === null) return null;
+    const left = { alias: expr.left.tableAlias, field: expr.left.field };
+    if (this.isTargetIdRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) return right.field;
+    if (this.isSourceRef(left, sourceAlias) && this.isTargetIdRef(right, targetAppId)) return left.field;
+    return null;
+  }
+  splitQualifiedField(field) {
+    const dot = field.indexOf(".");
+    return dot < 0 ? { alias: null, field } : { alias: field.slice(0, dot), field: field.slice(dot + 1) };
+  }
+  isTargetIdRef(ref, appId) {
+    return ref.field === "$id" && (ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase());
+  }
+  isSourceRef(ref, alias) {
+    return ref.alias?.toLowerCase() === alias.toLowerCase();
+  }
+  nodeContainsQualifiedField(node, alias) {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsQualifiedField(v, alias));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node;
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string" && obj["tableAlias"].toLowerCase() === alias.toLowerCase()) return true;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (this.isSourceRef(ref, alias)) return true;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsQualifiedField(v, alias));
+  }
+  nodeContainsForeignQualifier(node, targetAppId) {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsForeignQualifier(v, targetAppId));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node;
+    const expected = `app${targetAppId}`.toLowerCase();
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") {
+      return obj["tableAlias"].toLowerCase() !== expected;
+    }
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (ref.alias !== null) return ref.alias.toLowerCase() !== expected;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsForeignQualifier(v, targetAppId));
+  }
+  nodeContainsAnyQualifier(node) {
+    if (Array.isArray(node)) return node.some((v) => this.nodeContainsAnyQualifier(v));
+    if (node === null || typeof node !== "object") return false;
+    const obj = node;
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") return true;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      if (this.splitQualifiedField(obj["field"]).alias !== null) return true;
+    }
+    return Object.values(obj).some((v) => this.nodeContainsAnyQualifier(v));
   }
   parseAssignments() {
     const assignments = [];
@@ -33011,6 +33152,12 @@ var Parser = class {
     const node = this.parseArithAddSub();
     if (node.type === "NUMBER") return node;
     if (node.type === "ARITH") return node;
+    if (node.type === "FIELD_REF") {
+      const dot = node.field.indexOf(".");
+      if (dot > 0 && dot < node.field.length - 1) {
+        return { type: "SOURCE_FIELD", alias: node.field.slice(0, dot), field: node.field.slice(dot + 1) };
+      }
+    }
     throw new ParseError(
       "SET \u306E\u5024\u306B\u306F\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306E\u307F\u306F\u4E0D\u53EF\uFF09",
       tok
@@ -34586,7 +34733,8 @@ function analyzeBatch(statements) {
       tempTablesDropped: dropped,
       dependsOn: [...dependsOn].sort((a, b) => a - b),
       tempOnlySource,
-      targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null
+      targetAppId: isDmlType(statementType) && typeof stmt.appId === "number" ? stmt.appId : null,
+      isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null
     });
   });
   const containsDml = results.some((r) => r.isDml);
@@ -35131,7 +35279,7 @@ function updateToPutBatches(stmt, ids, fieldTypes = /* @__PURE__ */ new Map()) {
 function buildUpdateRecord(assignments, fieldTypes) {
   const record2 = {};
   for (const { field, value } of assignments) {
-    if (value.type === "ARITH" || value.type === "CASE_VALUE") continue;
+    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "SOURCE_FIELD") continue;
     record2[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record2;
@@ -35235,6 +35383,8 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
         record2[field] = { value: String(evalArith(value, raw)) };
       } else if (value.type === "CASE_VALUE") {
         record2[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
+      } else if (value.type === "SOURCE_FIELD") {
+        throw new DmlConvertError("SOURCE_FIELD \u306F UPDATE ... FROM \u5C02\u7528\u3067\u3059");
       } else {
         record2[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
       }
@@ -35245,6 +35395,51 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     app: stmt.appId,
     records: batch
   }));
+}
+var UPDATE_FROM_UNSUPPORTED_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE"
+]);
+function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new Map()) {
+  const updateRecords = matched.map(({ target, source }) => {
+    const id = Number(target["$id"]?.value);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new DmlConvertError("UPDATE ... FROM \u306E\u5BFE\u8C61\u30EC\u30B3\u30FC\u30C9\u756A\u53F7\u304C\u4E0D\u6B63\u3067\u3059");
+    }
+    const targetRow = kintoneRecordToProcessRow(target);
+    const record2 = {};
+    for (const { field, value } of stmt.assignments) {
+      const fieldType = fieldTypes.get(field);
+      if (value.type === "SOURCE_FIELD") {
+        if (UPDATE_FROM_UNSUPPORTED_TYPES.has(fieldType ?? "")) {
+          throw new DmlConvertError(`UPDATE ... FROM \u306E SOURCE_FIELD \u306F ${fieldType} \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9: ${field}\uFF09`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(source, value.field)) {
+          throw new DmlConvertError(`UPDATE ... FROM \u306E\u30BD\u30FC\u30B9\u5217 ${value.field} \u304C\u5B58\u5728\u3057\u307E\u305B\u3093`);
+        }
+        const raw = source[value.field];
+        if (typeof raw !== "string") {
+          throw new DmlConvertError(`UPDATE ... FROM \u306E SOURCE_FIELD \u306F\u30B9\u30AB\u30E9\u30FC\u5024\u306E\u307F\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u3059\uFF08\u5217: ${value.field}\uFF09`);
+        }
+        if ((fieldType === "NUMBER" || fieldType === "CALC") && raw !== "" && !Number.isFinite(Number(raw))) {
+          throw new DmlConvertError(`\u6570\u5024\u30D5\u30A3\u30FC\u30EB\u30C9 ${field} \u306B\u5909\u63DB\u3067\u304D\u306A\u3044\u5024\u3067\u3059: ${raw}`);
+        }
+        record2[field] = { value: toKintoneValue({ type: "STRING", value: raw }, fieldType) };
+      } else if (value.type === "ARITH") {
+        record2[field] = { value: String(evalArith(value, target)) };
+      } else if (value.type === "CASE_VALUE") {
+        record2[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
+      } else {
+        record2[field] = { value: toKintoneValue(value, fieldType) };
+      }
+    }
+    return { id, record: record2 };
+  });
+  return chunk(updateRecords, 100).map((records) => ({ app: stmt.appId, records }));
 }
 function kintoneRecordToProcessRow(raw) {
   return Object.fromEntries(
@@ -36360,6 +36555,8 @@ async function executeBatch(sql, client, options = {}) {
   for (const s of analysis.statements) {
     if (!s.isDml || s.tempTablesReferenced.length === 0) continue;
     if (s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT") continue;
+    const parsed = statements[s.index];
+    if (parsed?.type === "UPDATE" && parsed.from?.cteName != null) continue;
     throw new BatchAnalysisError(
       `ArgumentError: temp table references in ${s.statementType} are not supported yet.`,
       s.index
@@ -36515,6 +36712,9 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     }
     if (resolvedStmt.type === "UPSERT_SELECT") {
       return { result: await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
+    }
+    if (resolvedStmt.type === "UPDATE" && resolvedStmt.from?.cteName != null) {
+      return { result: await executeUpdate(resolvedStmt, client, options, cacheContext, tempTables) };
     }
     throw new Error(`ArgumentError: temp table references in ${stmt.type} are not supported yet.`);
   }
@@ -37701,9 +37901,12 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
     insertedCount: createdIds.flat().length
   };
 }
-async function executeUpdate(stmt, client, options, cacheContext) {
+async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
   if (stmt.subtableCode) {
     return executeUpdateSubtable(stmt, client, options, cacheContext);
+  }
+  if (stmt.from != null) {
+    return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
   const maxRecords2 = options.maxRecords ?? 1e4;
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
@@ -37745,6 +37948,113 @@ async function executeUpdate(stmt, client, options, cacheContext) {
     await client.putRecords(batch);
   }
   return { type: "UPDATE", updatedCount: ids.length };
+}
+var UPDATE_FROM_ID_CHUNK_SIZE = 50;
+var UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE"
+]);
+async function executeUpdateFrom(stmt, from, client, options, cacheContext, tempTables) {
+  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const requiredSourceFields = [.../* @__PURE__ */ new Set([from.joinKeyField, ...sourceFields])];
+  let sourceRows;
+  if (from.cteName !== null) {
+    const table = tempTables?.get(from.cteName);
+    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
+    for (const field of requiredSourceFields) {
+      if (!table.columns.includes(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+    }
+    sourceRows = table.rows;
+  } else {
+    const sourceTypes = await getFieldTypeMap(from.appId, client, cacheContext);
+    for (const field of requiredSourceFields) {
+      if (field !== "$id" && !sourceTypes.has(field)) {
+        throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+      }
+      const type = sourceTypes.get(field);
+      if (UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES.has(type ?? "")) {
+        throw new Error(`ArgumentError: UPDATE ... FROM does not support source field type ${type} (${field}).`);
+      }
+    }
+    const maxRecords2 = options.maxRecords ?? 1e4;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      from.appId,
+      "",
+      requiredSourceFields,
+      { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    sourceRows = resolved.records.map((record2) => flatten(record2, null));
+  }
+  const sourceById = /* @__PURE__ */ new Map();
+  for (const row of sourceRows) {
+    if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
+    }
+    const raw = row[from.joinKeyField];
+    const text = typeof raw === "string" ? raw.trim() : "";
+    const id = Number(text);
+    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
+    }
+    if (sourceById.has(id)) {
+      throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
+    }
+    sourceById.set(id, row);
+  }
+  const targetIds = [...sourceById.keys()];
+  const targetFields = collectUpdateFromTargetFields(stmt);
+  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetRecords = [];
+  for (const ids of splitChunks(targetIds, UPDATE_FROM_ID_CHUNK_SIZE)) {
+    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
+    const query = filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery;
+    const resolved = await fetchRecordsForSharedPlan(
+      client.getRecords,
+      stmt.appId,
+      query,
+      targetFields,
+      { maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error" }
+    );
+    targetRecords.push(...resolved.records);
+  }
+  if (options.confirm) {
+    const ok = await options.confirm(targetRecords.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", targetRecords.length);
+  }
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const matched = targetRecords.map((target) => {
+    const id = Number(target["$id"]?.value);
+    const source = sourceById.get(id);
+    if (!source) throw new Error(`ArgumentError: UPDATE ... FROM could not resolve source row for target $id ${id}.`);
+    return { target, source };
+  });
+  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  for (const batch of batches) await client.putRecords(batch);
+  return { type: "UPDATE", updatedCount: targetRecords.length };
+}
+function collectUpdateFromTargetFields(stmt) {
+  const fields = /* @__PURE__ */ new Set(["$id"]);
+  const visit = (node) => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const obj = node;
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") fields.add(obj["field"]);
+    for (const value of Object.values(obj)) visit(value);
+  };
+  for (const assignment of stmt.assignments) {
+    if (assignment.value.type !== "SOURCE_FIELD") visit(assignment.value);
+  }
+  return [...fields];
 }
 async function executeDelete(stmt, client, options, cacheContext) {
   if (stmt.subtableCode) {
@@ -38671,9 +38981,16 @@ function buildUpdatePlan(stmt, label) {
   const isSubq = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines = [];
   if (label) lines.push(label);
-  lines.push(`  [UPDATE]`);
+  lines.push(stmt.from ? `  [UPDATE FROM]` : `  [UPDATE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
-  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  if (stmt.from) {
+    const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
+    lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
+    lines.push(`  join:          APP${stmt.appId}.$id = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
+    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
+  } else {
+    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  }
   lines.push(`  api:           GET /k/v1/records.json \u2192 PUT /k/v1/records.json`);
   const setTypes = [];
   if (isArith) setTypes.push("\u7B97\u8853 SET\uFF08\u73FE\u5728\u5024\u3092\u53D6\u5F97\u3057\u3066\u8A08\u7B97\uFF09");
@@ -38786,6 +39103,7 @@ function formatAssignment(a) {
   if (v.type === "ARITH") return `${a.field} = ${formatArithExprStr(v)}`;
   if (v.type === "CASE_VALUE") return `${a.field} = CASE WHEN ...`;
   if (v.type === "SCALAR_SUBQUERY") return `${a.field} = (SELECT ...)`;
+  if (v.type === "SOURCE_FIELD") return `${a.field} = ${v.alias}.${v.field}`;
   return `${a.field} = (${v.type})`;
 }
 function formatArithExprStr(expr) {
@@ -40319,14 +40637,14 @@ function requireDmlApproval(input, toolName, suffix = "") {
 }
 function containsSelectBasedDml(statements) {
   return statements.some(
-    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT"
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT" || s.isUpdateFrom === true
   );
 }
 function resolveMutateRuntimeMaxRecords(statements, dmlMaxRows) {
   return containsSelectBasedDml(statements) ? void 0 : dmlMaxRows + 1;
 }
 var READ_LIMIT_MESSAGE_FRAGMENT = "\u53D6\u5F97\u4EF6\u6570\u304C\u4E0A\u9650";
-var SELECT_BASED_DML_READ_LIMIT_HINT = "SELECT-based DML \u306E\u30BD\u30FC\u30B9\u8AAD\u307F\u53D6\u308A\u4E0A\u9650\u306F dmlMaxRows \u3067\u306F\u306A\u304F maxRecords \u89E3\u6C7A\u5024(KSQL_MAX_RECORDS / profile \u306E query.maxRecords\u3001\u65E2\u5B9A 500)\u3067\u5236\u5FA1\u3055\u308C\u307E\u3059\u3002dmlMaxRows \u306F\u5F71\u97FF\u884C\u6570\u30AC\u30FC\u30C9\u3067\u3059\u3002";
+var SELECT_BASED_DML_READ_LIMIT_HINT = "SELECT-based DML\uFF08UPDATE \u2026 FROM \u3092\u542B\u3080\uFF09\u306E\u30BD\u30FC\u30B9\u8AAD\u307F\u53D6\u308A\u4E0A\u9650\u306F dmlMaxRows \u3067\u306F\u306A\u304F maxRecords \u89E3\u6C7A\u5024(KSQL_MAX_RECORDS / profile \u306E query.maxRecords\u3001\u65E2\u5B9A 500)\u3067\u5236\u5FA1\u3055\u308C\u307E\u3059\u3002dmlMaxRows \u306F\u5F71\u97FF\u884C\u6570\u30AC\u30FC\u30C9\u3067\u3059\u3002";
 function appendSelectBasedDmlReadLimitHint(err) {
   if (err instanceof Error && err.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) {
     const hinted = new Error(`${err.message} ${SELECT_BASED_DML_READ_LIMIT_HINT}`);
@@ -40381,7 +40699,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       tempTablesReferenced: s2.tempTablesReferenced,
       tempTablesDropped: s2.tempTablesDropped,
       tempOnlySource: s2.tempOnlySource,
-      targetAppId: s2.targetAppId
+      targetAppId: s2.targetAppId,
+      isUpdateFrom: s2.isUpdateFrom
     }));
     const common = {
       ok: true,
@@ -40584,7 +40903,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const payload = buildBatchEnvelope(batchResult);
     if (selectBasedDml) {
       for (const entry of payload.statements) {
-        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT") continue;
+        const statement = validation.statements.find((s) => s.index === entry.index);
+        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT" && statement?.isUpdateFrom !== true) continue;
         const error51 = entry.error;
         if (typeof error51?.message !== "string") continue;
         if (!error51.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) continue;
@@ -40923,7 +41243,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.11.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.12.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -40950,7 +41270,7 @@ function createServer(args) {
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: the source SELECT reads up to the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {
