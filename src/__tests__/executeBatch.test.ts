@@ -175,6 +175,39 @@ test("ON ERROR SKIP は不正行を隔離し合格 prepared plan だけを書き
   expect(batch.statements[1].result).toMatchObject({ type: "SELECT", rowCount: 1 });
 });
 
+test("NOW()のミリ秒付きDATETIMEはVALIDATE ONLYとON ERROR SKIPの両方で合格する", async () => {
+  const client = makeClient({ recordsByApp: {
+    100: [makeRecord({ $id: "1", 日時: "2026-07-16T11:20:00Z" })],
+  } });
+  client.getFields = async () => [
+    { code: "日時", label: "日時", fieldType: "DATETIME" },
+  ];
+
+  const validation = await executeBatch(
+    "SET @now = NOW(); UPDATE APP100 SET 日時 = @now WHERE $id = 1 VALIDATE ONLY",
+    client,
+    { cacheContext: "datetime-milliseconds-validate" }
+  );
+  expect(validation.statements[1].result).toMatchObject({
+    type: "VALIDATION", validRows: 1, invalidRows: 0, errorCount: 0,
+  });
+  expect(client.putCalls).toHaveLength(0);
+
+  const isolation = await executeBatch(
+    "INSERT INTO APP100 (日時) VALUES ('2026-07-16T11:21:25.174Z') " +
+    "ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "datetime-milliseconds-isolation" }
+  );
+  expect(isolation.statements[0].result).toMatchObject({
+    type: "INSERT", insertedCount: 1, skippedRows: 0,
+  });
+  expect(isolation.statements[1].result).toMatchObject({ type: "SELECT", rowCount: 0 });
+  expect(client.postCalls[0].records).toEqual([
+    { 日時: { value: "2026-07-16T11:21:25.174Z" } },
+  ]);
+});
+
 test("REJECT LIMIT 超過は error と診断結果を両立し書き込みゼロで fail-fast", async () => {
   const client = makeClient();
   client.getFields = async () => [

@@ -4,6 +4,7 @@ import { validateDmlCandidates } from "../dmlValidationCandidates";
 const field = (fieldType: string, extra: Record<string, unknown> = {}) => ({
   code: "f", label: "f", fieldType, ...extra,
 });
+const sqlString = (value: string) => ({ type: "STRING" as const, value });
 
 test("required / number range / length / choice を安定codeで返す", () => {
   expect(validateAndNormalizeDmlValue("", field("SINGLE_LINE_TEXT", { required: true }))).toMatchObject({ ok: false, code: "ERR_REQUIRED" });
@@ -18,6 +19,40 @@ test("DATE/TIME/DATETIMEの実在性を検証する", () => {
   expect(validateAndNormalizeDmlValue("23:59:59", field("TIME"))).toMatchObject({ ok: true });
   expect(validateAndNormalizeDmlValue("2024-02-29T12:00:00Z", field("DATETIME"))).toMatchObject({ ok: true });
   expect(validateAndNormalizeDmlValue("2025-02-29 12:00", field("DATETIME"))).toMatchObject({ ok: false, code: "ERR_TYPE_DATE" });
+});
+
+test.each([
+  "2026-07-16T11:21:25.1Z",
+  "2026-07-16T11:21:25.174Z",
+  "2026-07-16T11:21:25.123456Z",
+  "2026-07-16T11:21:25.174+09:00",
+  "2026-07-16T11:21Z",
+  "2026-07-16T11:21:25Z",
+  "2026-07-16 11:21:25",
+  "2026/07/16 11:21:25",
+])("DATETIMEの有効形式を受理する: %s", (value) => {
+  expect(validateAndNormalizeDmlValue(sqlString(value), field("DATETIME"))).toMatchObject({ ok: true });
+});
+
+test.each([
+  "2026-13-01T00:00Z",
+  "2026-07-16T25:00Z",
+  "2026-07-16T99:99:99.1Z",
+  "abc",
+])("DATETIMEの無効形式を拒否する: %s", (value) => {
+  expect(validateAndNormalizeDmlValue(sqlString(value), field("DATETIME"))).toMatchObject({
+    ok: false,
+    code: "ERR_TYPE_DATE",
+  });
+});
+
+test("DATE/TIMEでは小数秒の受理範囲を広げない", () => {
+  expect(validateAndNormalizeDmlValue("2026-07-16", field("DATE"))).toMatchObject({ ok: true });
+  expect(validateAndNormalizeDmlValue("11:21:25", field("TIME"))).toMatchObject({ ok: true });
+  expect(validateAndNormalizeDmlValue("11:21:25.174", field("TIME"))).toMatchObject({
+    ok: false,
+    code: "ERR_TYPE_DATE",
+  });
 });
 
 test("10進文字列を浮動小数化せず比較する", () => {

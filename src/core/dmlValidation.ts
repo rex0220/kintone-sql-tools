@@ -178,6 +178,9 @@ function isValidTemporal(value: string, type: string): boolean {
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return false;
   if (type === "DATE") return true;
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
-    isValidTemporal(value.slice(11, value.endsWith("Z") ? -1 : value.length - 6), "TIME");
+  const timePart = value
+    .slice(11, value.endsWith("Z") ? -1 : value.length - 6)
+    .replace(/\.\d+$/, "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    isValidTemporal(timePart, "TIME");
 }
