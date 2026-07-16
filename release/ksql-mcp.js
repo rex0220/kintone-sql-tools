@@ -31000,6 +31000,9 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["MAX", "MAX" /* MAX */],
   ["MIN", "MIN" /* MIN */],
   ["GROUP_CONCAT", "GROUP_CONCAT" /* GROUP_CONCAT */],
+  ["ROW_NUMBER", "ROW_NUMBER" /* ROW_NUMBER */],
+  ["RANK", "RANK" /* RANK */],
+  ["DENSE_RANK", "DENSE_RANK" /* DENSE_RANK */],
   ["ASSERT", "ASSERT" /* ASSERT */],
   ["AND", "AND" /* AND */],
   ["OR", "OR" /* OR */],
@@ -31376,6 +31379,9 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "AVG" /* AVG */,
   "MAX" /* MAX */,
   "MIN" /* MIN */,
+  "ROW_NUMBER" /* ROW_NUMBER */,
+  "RANK" /* RANK */,
+  "DENSE_RANK" /* DENSE_RANK */,
   "TODAY" /* TODAY */,
   "NOW" /* NOW */,
   "LOGINUSER" /* LOGINUSER */,
@@ -31894,6 +31900,11 @@ var Parser = class {
     const orderBy = this.consume("ORDER" /* ORDER */) ? (this.expect("BY" /* BY */), this.parseOrderBy()) : [];
     const limit = this.consume("LIMIT" /* LIMIT */) ? this.parseUnsignedInt() : null;
     const offset = this.consume("OFFSET" /* OFFSET */) ? this.parseUnsignedInt() : null;
+    const hasWindow = columns.some((column) => column.type === "WINDOW_COL");
+    const hasAggregate = columns.some((column) => this.selectColumnHasAggregate(column));
+    if (hasWindow && (groupBy.length > 0 || hasAggregate)) {
+      throw new ParseError("\u30A6\u30A3\u30F3\u30C9\u30A6\u95A2\u6570\u306F GROUP BY / \u96C6\u8A08\u95A2\u6570\u3068\u540C\u3058 SELECT \u3067\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
     return {
       type: "SELECT",
       distinct,
@@ -31957,6 +31968,10 @@ var Parser = class {
   parseSelectColumn() {
     if (this.consume("*" /* STAR */)) {
       return { type: "WILDCARD" };
+    }
+    const windowFunc = this.tryWindowFunc();
+    if (windowFunc !== null) {
+      return this.parseWindowColumn(windowFunc);
     }
     if (this.peek().kind === "CASE" /* CASE */) {
       const expr = this.parseCaseWhenExpr();
@@ -32028,6 +32043,56 @@ var Parser = class {
     }
     const alias = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
     return { type: "FIELD", field, alias };
+  }
+  tryWindowFunc() {
+    switch (this.peek().kind) {
+      case "ROW_NUMBER" /* ROW_NUMBER */:
+        return "ROW_NUMBER";
+      case "RANK" /* RANK */:
+        return "RANK";
+      case "DENSE_RANK" /* DENSE_RANK */:
+        return "DENSE_RANK";
+      default:
+        return null;
+    }
+  }
+  parseWindowColumn(func) {
+    this.advance();
+    this.expect("(" /* LPAREN */);
+    if (this.peek().kind !== ")" /* RPAREN */) {
+      throw new ParseError(`${func} \u306F\u5F15\u6570\u3092\u53D7\u3051\u4ED8\u3051\u307E\u305B\u3093`, this.peek());
+    }
+    this.expect(")" /* RPAREN */);
+    this.expectSoftKeyword("OVER", `${func} \u306B\u306F OVER (...) \u304C\u5FC5\u8981\u3067\u3059`);
+    this.expect("(" /* LPAREN */);
+    const partitionBy = [];
+    if (this.isSoftKeyword("PARTITION")) {
+      this.advance();
+      this.expect("BY" /* BY */, "PARTITION \u306E\u5F8C\u306B\u306F BY \u304C\u5FC5\u8981\u3067\u3059");
+      do {
+        const ref = this.parseQualifiedIdent();
+        partitionBy.push({ type: "FIELD", tableAlias: ref.tableAlias, field: ref.field });
+      } while (this.consume("," /* COMMA */));
+    }
+    const orderBy = this.consume("ORDER" /* ORDER */) ? (this.expect("BY" /* BY */), this.parseOrderBy()) : [];
+    this.expect(")" /* RPAREN */);
+    if (!this.consume("AS" /* AS */)) {
+      throw new ParseError("\u30A6\u30A3\u30F3\u30C9\u30A6\u95A2\u6570\u306B\u306F AS alias \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    const alias = this.parseAliasName();
+    return { type: "WINDOW_COL", func, partitionBy, orderBy, alias };
+  }
+  selectColumnHasAggregate(column) {
+    if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
+    if (column.type !== "STRFUNC_COL") return false;
+    return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+  }
+  stringFuncArgHasAggregate(arg) {
+    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+    if (arg.type === "STRING_FUNC") {
+      return arg.args.some((nested) => this.stringFuncArgHasAggregate(nested));
+    }
+    return false;
   }
   isArithOp(kind) {
     return kind === "+" /* PLUS */ || kind === "-" /* MINUS */ || kind === "*" /* STAR */ || kind === "/" /* SLASH */ || kind === "%" /* PERCENT */;
@@ -33798,12 +33863,16 @@ var KintoneQueryError = class extends Error {
 };
 
 // src/converter/selectToKintone.ts
+function hasWindowColumns(columns) {
+  return columns.some((column) => column.type === "WINDOW_COL");
+}
 function resolveSelectMode(stmt) {
   if (stmt.from.subtableCode) return "FULL_SCAN";
   if (stmt.joins.some((j) => j.table.subtableCode)) return "FULL_SCAN";
   if (stmt.joins.length > 0) return "FULL_SCAN";
   if (stmt.groupBy.length > 0) return "FULL_SCAN";
   if (stmt.distinct) return "FULL_SCAN";
+  if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some(
     (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)
   )) return "FULL_SCAN";
@@ -34175,16 +34244,16 @@ function collectRequiredFieldsByTable(stmt) {
     }
     walkStringFunc(k.expr, "groupBy");
   };
-  const walkOrderByKey = (k) => {
+  const walkOrderByKey = (k, phase = "orderBy") => {
     if (k.type === "FIELD_NAME") {
-      addFieldName(k.name, "orderBy");
+      addFieldName(k.name, phase);
       return;
     }
     if (k.type === "ARITH_KEY") {
-      walkArith(k.expr, "orderBy");
+      walkArith(k.expr, phase);
       return;
     }
-    walkStringFunc(k.expr, "orderBy");
+    walkStringFunc(k.expr, phase);
   };
   for (const col of stmt.columns) {
     switch (col.type) {
@@ -34215,6 +34284,10 @@ function collectRequiredFieldsByTable(stmt) {
         walkStringFunc(col.expr, "select");
         break;
       case "SCALAR_SUBQUERY_COL":
+        break;
+      case "WINDOW_COL":
+        for (const ref of col.partitionBy) addFieldRef(ref.field, ref.tableAlias, "select");
+        for (const item of col.orderBy) walkOrderByKey(item.key, "select");
         break;
     }
   }
@@ -34262,6 +34335,10 @@ function collectSelectOutputNames(columns) {
     }
     if (col.type === "SCALAR_SUBQUERY_COL") {
       names.add(col.alias ?? "(subquery)");
+      continue;
+    }
+    if (col.type === "WINDOW_COL") {
+      names.add(col.alias);
     }
   }
   return names;
@@ -36209,6 +36286,10 @@ function buildDistinctKeyBuilder(rows, columns) {
         values.push(row[col.field] ?? "");
         continue;
       }
+      if (col.type === "WINDOW_COL") {
+        values.push(row[col.alias] ?? "");
+        continue;
+      }
       if (col.type === "PARENT_WILDCARD") {
         for (const k of sortedParentKeys) {
           values.push(row[k] !== void 0 ? row[k] : null);
@@ -36220,6 +36301,9 @@ function buildDistinctKeyBuilder(rows, columns) {
 }
 function applyOrderBy(rows, orderBy, optionOrders, sortKinds) {
   if (orderBy.length === 0) return rows;
+  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds).rows.map((item) => item.row);
+}
+function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds) {
   const keyMeta = orderBy.map(({ key }) => ({
     orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : void 0,
     sortKind: key.type === "FIELD_NAME" ? sortKinds?.get(key.name) : void 0
@@ -36238,14 +36322,16 @@ function applyOrderBy(rows, orderBy, optionOrders, sortKinds) {
       };
     })
   }));
-  decorated.sort((a, b) => {
-    for (let i = 0; i < orderBy.length; i++) {
-      const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
-      if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
-    }
-    return 0;
-  });
-  return decorated.map((d) => d.row);
+  const compare = (a, b) => compareDecoratedRows(a, b, orderBy, keyMeta);
+  decorated.sort(compare);
+  return { rows: decorated, compare };
+}
+function compareDecoratedRows(a, b, orderBy, keyMeta) {
+  for (let i = 0; i < orderBy.length; i++) {
+    const cmp = compareSortKeys(a.keys[i], b.keys[i], keyMeta[i]);
+    if (cmp !== 0) return orderBy[i].direction === "ASC" ? cmp : -cmp;
+  }
+  return 0;
 }
 function compareSortKeys(a, b, meta3) {
   if (meta3.orderMap) {
@@ -36289,6 +36375,38 @@ function minChoiceIndex(values, orderMap) {
     if (rank < min) min = rank;
   }
   return min;
+}
+function applyWindow(rows, columns, optionOrders, sortKinds) {
+  const windows = columns.filter((column) => column.type === "WINDOW_COL");
+  if (rows.length === 0 || windows.length === 0) return rows;
+  for (const window of windows) {
+    const partitions = /* @__PURE__ */ new Map();
+    for (const row of rows) {
+      const key = JSON.stringify(window.partitionBy.map((ref) => resolveWindowField(row, ref)));
+      const partition = partitions.get(key);
+      if (partition) partition.push(row);
+      else partitions.set(key, [row]);
+    }
+    for (const partition of partitions.values()) {
+      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds);
+      const sorted = sortedResult.rows;
+      let rank = 1;
+      let denseRank = 1;
+      for (let index = 0; index < sorted.length; index++) {
+        if (index > 0 && sortedResult.compare(sorted[index - 1], sorted[index]) !== 0) {
+          rank = index + 1;
+          denseRank++;
+        }
+        const value = window.func === "ROW_NUMBER" ? index + 1 : window.func === "RANK" ? rank : denseRank;
+        sorted[index].row[window.alias] = String(value);
+      }
+    }
+  }
+  return rows;
+}
+function resolveWindowField(row, ref) {
+  const name = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
+  return resolveFieldRef(row, name);
 }
 function applyLimit(rows, limit, offset) {
   const start = offset ?? 0;
@@ -36380,6 +36498,12 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns) {
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
+        case "WINDOW_COL": {
+          const key = outputKeys?.[colIdx] ?? col.alias;
+          out[key] = row[col.alias] ?? "";
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
       }
     }
     return out;
@@ -36420,6 +36544,8 @@ function computeOutputKey(col, colIdx, defaultFieldKeys) {
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
+    case "WINDOW_COL":
+      return col.alias;
     case "WILDCARD":
     case "PARENT_WILDCARD":
       throw new Error("internal: computeOutputKey received a wildcard column");
@@ -36534,6 +36660,7 @@ function runFullScan(input) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
   }
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
+  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds);
   if (stmt.distinct) {
     rows = applyDistinct(rows, stmt.columns);
   }
@@ -37478,6 +37605,11 @@ function validateNoFromColumns(stmt) {
           throw new Error("ArgumentError: field reference is not allowed without FROM.");
         }
         break;
+      case "WINDOW_COL":
+        if (col.partitionBy.length > 0 || col.orderBy.length > 0) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
       default:
         throw new Error(`ArgumentError: ${col.type} is not supported without FROM.`);
     }
@@ -37488,7 +37620,8 @@ function executeNoFromSelect(stmt) {
     throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
   }
   validateNoFromColumns(stmt);
-  const { rows: projected, columns } = project([{}], stmt.columns);
+  const windowed = applyWindow([{}], stmt.columns);
+  const { rows: projected, columns } = project(windowed, stmt.columns);
   const rows = applyLimit(projected, stmt.limit, stmt.offset);
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
@@ -37912,6 +38045,8 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
       meta3 = { sortKind: "number" };
     } else if (column.type === "LITERAL_COL") {
       meta3 = { sortKind: "string" };
+    } else if (column.type === "WINDOW_COL") {
+      meta3 = { sortKind: "number" };
     }
     if (meta3) inferred.set(output, meta3);
   });
@@ -38497,7 +38632,10 @@ async function getSortKindMapByApp(appId, client, cacheContext) {
   return map2;
 }
 async function buildOrderByMetaForSelect(stmt, client, cacheContext) {
-  if (stmt.orderBy.length === 0) {
+  const hasWindowOrderBy = stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+  if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
     return { optionOrders: /* @__PURE__ */ new Map(), sortKinds: /* @__PURE__ */ new Map() };
   }
   const [optionOrders, sortKinds] = await Promise.all([
@@ -39959,6 +40097,8 @@ function collectFullScanReasons(stmt) {
     r.push("DISTINCT \u3042\u308A");
   if (stmt.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"))
     r.push("\u96C6\u8A08\u95A2\u6570\uFF08COUNT / SUM \u7B49\uFF09\u3042\u308A");
+  if (stmt.columns.some((c) => c.type === "WINDOW_COL"))
+    r.push("\u30A6\u30A3\u30F3\u30C9\u30A6\u95A2\u6570\u3042\u308A");
   if (stmt.columns.some((c) => c.type === "SCALAR_SUBQUERY_COL"))
     r.push("SELECT \u5217\u306B\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA");
   if (whereRequiresJsEval(stmt.where))
@@ -42414,7 +42554,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.15.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.16.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

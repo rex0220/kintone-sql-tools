@@ -1,9 +1,32 @@
-ksql 配布パッケージ (v2.15.0)
+ksql 配布パッケージ (v2.16.0)
 
-1. ksql-plugin-v2.15.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v2.16.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v2.16.0: 順位系ウィンドウ関数に対応(B17・機能追加)。
+- ROW_NUMBER() / RANK() / DENSE_RANK() と
+  OVER ([PARTITION BY ...] [ORDER BY ...]) AS alias を追加。
+- これまで書けなかった「各グループの最新1件を、その行の全列とともに取得する」が
+  CTE を使って 1 文で書ける(MAX() では最大値しか取れず、その行の他の列を得るには
+  複合キー結合が必要だが JOIN は単一等値のみのため表現できなかった)。
+    WITH ranked AS (
+      SELECT 顧客ID, 受注日, 金額,
+             ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn
+      FROM APP300
+    )
+    SELECT 顧客ID, 受注日, 金額 FROM ranked WHERE rn IN (1);
+- ROW_NUMBER は同値でも連番、RANK は同順位で次を飛ばし、DENSE_RANK は飛ばさない。
+- ウィンドウ関数を含む SELECT は FULL_SCAN。評価は HAVING の後・DISTINCT の前
+  (SQL 標準)。同じ SELECT の WHERE では絞り込めないため、CTE か一時テーブルを挟む。
+- ウィンドウ内の ORDER BY はトップレベル ORDER BY と同じ比較規則(数値順・選択肢の
+  定義順)で並ぶ。一時テーブル / CTE 由来の列の制限も既存 ORDER BY と同じ。
+- ROW_NUMBER / RANK / DENSE_RANK は新しい予約語。同名フィールドはバッククォート
+  (`ROW_NUMBER`)で参照。OVER / PARTITION はソフトキーワードのため同名フィールドを
+  壊さない。ウィンドウ列の AS alias は必須。
+- GROUP BY / 集計関数との同一 SELECT 併用は v1 では非対応(CTE で分ければ可)。
+- 詳細は CHANGELOG.md と言語リファレンスを参照。
 
 v2.15.0: 文字列集約 GROUP_CONCAT と一時テーブル列の型伝播(B16/B14・機能追加)、
          事前検証のミリ秒日時 誤判定を修正(B18・バグ修正)。

@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## v2.16.0（未リリース）
+## v2.16.0（2026-07-16）
 
 ### 機能追加
 
