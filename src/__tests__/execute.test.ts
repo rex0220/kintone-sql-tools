@@ -2516,6 +2516,20 @@ test("WITH — CTE 内で UNION ALL", async () => {
   expect(result.rowCount).toBe(3);
 });
 
+test("WITH: 非インライン CTE の空 SELECT * は実体化時の列を返す", async () => {
+  const client = makeClient({ recordsByApp: { 100: [] } });
+  const result = await execute(
+    `WITH c AS (
+       SELECT a, COUNT(*) AS cnt FROM APP100 GROUP BY a
+     )
+     SELECT * FROM c`,
+    client
+  ) as SelectResult;
+
+  // CTE 本体が GROUP BY のため canInlineSingleCte=false。MaterializedTable 経路を通る。
+  expect(result).toMatchObject({ rows: [], columns: ["a", "cnt"], rowCount: 0 });
+});
+
 // ----------------------------------------------------------------
 // CASE WHEN — WHERE フィルタ / UPDATE SET
 // ----------------------------------------------------------------

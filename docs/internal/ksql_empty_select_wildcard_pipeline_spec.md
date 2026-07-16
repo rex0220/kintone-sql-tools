@@ -3,11 +3,12 @@
 - 作成日: 2026-07-16
 - 対象課題: [ksql_empty_select_columns_issue.md](ksql_empty_select_columns_issue.md) の残スコープ（§95 「スコープ外・別課題」）
 - 先行修正: [ksql_empty_select_columns_fix_spec.md](ksql_empty_select_columns_fix_spec.md)（明示列＝v2.1.1 リリース済）
-- ステータス: **仕様案 R3・codex 再レビュー承認（追加 Finding なし）・実装着手可。v2.11.0 予定②（B1 の後・B8 の前）**
+- ステータス: **R3 実装済み・codex 検証済み。v2.11.0 予定②（B1 の後・B8 の前）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
   - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①非インライン CTE のテストを必須化（`canInlineSingleCte` で単純 CTE は MaterializedTable 経路を踏まない）②混在ワイルドカードの semantics を修正＝`sourceColumns` 展開は**単独 `SELECT *` 限定**・混在は明示列のみ返す（現行 1 行以上と一致）・「先勝ち」表現を撤回③`PARENT_WILDCARD` を1つでも含む列リストは `sourceColumns` 展開を使わない。未決事項3点を確定（実アプリ bare `SELECT *`＝案ア／`MaterializedTable`＝execute.ts ローカル private／ストア＝単一構造体マップ）
   - 2026-07-16 R3: codex 再レビュー反映（コードで裏取り）。①§5 の非インライン CTE 成功例から「最終クエリが JOIN」を除外（JOIN は `sourceColumns` 非供給＝空列維持で受入条件と衝突）②§3.5 UNION は `executeUnion`（1580）に加え **temp/CTE が通る `executeQueryWithCte` の UNION 分岐（1666-1681）** も `leftResult.columns` ベースで自動波及・両者変更不要と明記③§2「自動的に正しい」を「実体化時点で `result.columns` が確定している複合クエリに限る」へ限定（空 bare `SELECT *`/空 JOIN で `result.columns` が空なら保存後も空＝対象外）
+  - 2026-07-16 実装: `MaterializedTable` で temp/CTE の行と列を保持し、JOIN なし単一ソースの 0 行 `SELECT *` へ列を伝播。混在ワイルドカードは明示列のみ復元。全 1,145 単体/結合テスト＋25 CLI e2e 通過。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: バグ修正・後方互換（1 行以上の既存出力・明示列 0 行は不変）→ minor バンドル v2.11.0 の一部
 
@@ -190,23 +191,23 @@ UNION の実装は 2 経路あり、**どちらも `leftResult.columns`（`leftC
 
 ## 5. 受入条件
 
-- [ ] `SELECT * FROM #empty_temp`（実体化元＝明示列・0 行）が実体化時スキーマの列を返す。
-- [ ] **非インライン CTE の空 `SELECT *`**（下記のいずれか。単純 CTE は `canInlineSingleCte` でインライン化され MaterializedTable 経路を踏まないため必須 — codex Finding 1）。0 行で CTE 実体化スキーマの列を返す:
+- [x] `SELECT * FROM #empty_temp`（実体化元＝明示列・0 行）が実体化時スキーマの列を返す。
+- [x] **非インライン CTE の空 `SELECT *`**（下記のいずれか。単純 CTE は `canInlineSingleCte` でインライン化され MaterializedTable 経路を踏まないため必須 — codex Finding 1）。0 行で CTE 実体化スキーマの列を返す:
   - **CTE 本体が GROUP BY／`UNION`／JOIN 等で非 SIMPLE**、かつ実体化結果の列が確定するもの（§6 の GROUP BY 本体の例）。
   - **複数 CTE**。
   - **最終クエリが JOIN なしの非インライン条件を持つもの**（例: 最終側に GROUP BY／DISTINCT）。
   - ※「最終クエリが JOIN」は成功例から除外する。JOIN 時は `sourceColumns` を供給せず空列を維持する仕様（§3.3・JOIN 非対象の受入条件）と衝突するため。
-- [ ] `UPSERT INTO x (a,b) SELECT * FROM #empty_temp ON DUPLICATE (a)` が `inserted=0/updated=0` の no-op（**POST/PUT 未呼び出し**）。
-- [ ] `INSERT INTO x (a,b) SELECT * FROM #empty_temp` が `inserted=0`（**POST 未呼び出し**）。
-- [ ] **混在 `SELECT *, extra FROM #empty_temp`（0 行）は明示列 `['extra']` のみを返す**（`*` は列に寄与しない＝1 行以上と一致・§3.4(b)）。現状の `columns=[]`（明示列すら失う）からの回復が主目的。
-- [ ] **1 行以上の `SELECT *, a` は `columns` が現行どおり（`['a']`・`*` は寄与しない）で不変**（回帰の要・codex Finding 2）。
-- [ ] 左辺が空 `SELECT *` の `UNION ALL` / `UNION` で結果列が左辺スキーマ由来、右辺値が正しく載る（`deduplicateRows` も `leftCols` で機能）。
-- [ ] **1 行以上の `SELECT *`（temp/CTE/実アプリ）は列・列順・値ともに不変**（回帰の要）。
-- [ ] **JOIN を伴う 0 行 `SELECT *` は現状どおり**（`sourceColumns` 非供給＝空列＋メッセージ・挙動不変）。
-- [ ] **`_p.*` を含む列リスト（0 行）は `sourceColumns` 展開を使わない**（単独 `_p.*`＝空列／混在＝明示列のみ・codex Finding 3）。
-- [ ] `sourceColumns == null` の 0 行単独 `SELECT *` は従来どおり空列（実アプリ bare `SELECT *`・案ア）。
-- [ ] メッセージ改善: 列数不一致 かつ `columns.length===0` かつ `rows.length===0` のときだけ「0 行が原因」を示す（v2.1.1 の条件を踏襲・実アプリ bare `SELECT *` 救済）。
-- [ ] ストア型変更後も既存のバッチ／CTE／スカラーサブクエリ／`IN (SELECT … FROM #temp)` が回帰なし。
+- [x] `UPSERT INTO x (a,b) SELECT * FROM #empty_temp ON DUPLICATE (a)` が `inserted=0/updated=0` の no-op（**POST/PUT 未呼び出し**）。
+- [x] `INSERT INTO x (a,b) SELECT * FROM #empty_temp` が `inserted=0`（**POST 未呼び出し**）。
+- [x] **混在 `SELECT *, extra FROM #empty_temp`（0 行）は明示列 `['extra']` のみを返す**（`*` は列に寄与しない＝1 行以上と一致・§3.4(b)）。現状の `columns=[]`（明示列すら失う）からの回復が主目的。
+- [x] **1 行以上の `SELECT *, a` は `columns` が現行どおり（`['a']`・`*` は寄与しない）で不変**（回帰の要・codex Finding 2）。
+- [x] 左辺が空 `SELECT *` の `UNION ALL` / `UNION` で結果列が左辺スキーマ由来、右辺値が正しく載る（`deduplicateRows` も `leftCols` で機能）。
+- [x] **1 行以上の `SELECT *`（temp/CTE/実アプリ）は列・列順・値ともに不変**（回帰の要）。
+- [x] **JOIN を伴う 0 行 `SELECT *` は現状どおり**（`sourceColumns` 非供給＝空列＋メッセージ・挙動不変）。
+- [x] **`_p.*` を含む列リスト（0 行）は `sourceColumns` 展開を使わない**（単独 `_p.*`＝空列／混在＝明示列のみ・codex Finding 3）。
+- [x] `sourceColumns == null` の 0 行単独 `SELECT *` は従来どおり空列（実アプリ bare `SELECT *`・案ア）。
+- [x] メッセージ改善: 列数不一致 かつ `columns.length===0` かつ `rows.length===0` のときだけ「0 行が原因」を示す（v2.1.1 の条件を踏襲・実アプリ bare `SELECT *` 救済）。
+- [x] ストア型変更後も既存のバッチ／CTE／スカラーサブクエリ／`IN (SELECT … FROM #temp)` が回帰なし。
 
 ## 6. テスト計画（修正前 fail → 修正後 pass）
 

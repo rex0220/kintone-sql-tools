@@ -424,6 +424,98 @@ test("CREATE → SELECT 参照の最小経路", async () => {
   expect(client.getCalls.every((c) => c.app === 100)).toBe(true);
 });
 
+test("空の一時テーブルの SELECT * は実体化時の列を返す", async () => {
+  const client = makeClient({ recordsByApp: { 300: [] } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP300; SELECT * FROM #t",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[0]).toMatchObject({ status: "success", rowCount: 0 });
+  expect(r.statements[1].result).toMatchObject({
+    type: "SELECT",
+    rows: [],
+    columns: ["顧客名", "売上"],
+    rowCount: 0,
+  });
+});
+
+test("空の一時テーブルの混在 SELECT *, extra は明示列だけ返す", async () => {
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT a, b FROM APP300; SELECT *, extra FROM #t",
+    makeClient({ recordsByApp: { 300: [] } })
+  );
+
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult).columns).toEqual(["extra"]);
+});
+
+test("空の一時テーブルの SELECT * は INSERT/UPSERT を no-op で完了する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
+    "INSERT INTO APP200 (顧客名, 売上) SELECT * FROM #t;" +
+    "UPSERT INTO APP400 (顧客名, 売上) SELECT * FROM #t ON DUPLICATE (顧客名)",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect(r.statements[1].result).toMatchObject({ type: "INSERT", insertedCount: 0 });
+  expect(r.statements[2].result).toMatchObject({
+    type: "UPSERT",
+    insertedCount: 0,
+    updatedCount: 0,
+  });
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test.each([
+  { operator: "UNION ALL", expected: ["X", "X", "Y"] },
+  { operator: "UNION", expected: ["X", "Y"] },
+])("$operator: temp/CTE 経路の空 SELECT * 左辺が列名と右辺値を保持する", async ({ operator, expected }) => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [],
+      200: [makeRecord({ b: "X" }), makeRecord({ b: "X" }), makeRecord({ b: "Y" })],
+    },
+  });
+  const r = await executeBatch(
+    `CREATE TEMP TABLE #empty AS SELECT a FROM APP100; ` +
+    `SELECT * FROM #empty ${operator} SELECT b FROM APP200`,
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  const selected = r.statements[1].result as SelectResult;
+  expect(selected.columns).toEqual(["a"]);
+  expect(selected.rows.map((row) => row.a)).toEqual(expected);
+});
+
+test("空 SELECT * でも JOIN 時は保存スキーマを使わない", async () => {
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT a FROM APP100;" +
+    "SELECT * FROM #t t INNER JOIN APP200 u ON t.a = u.a",
+    makeClient({ recordsByApp: { 100: [], 200: [] } })
+  );
+
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult)).toMatchObject({ rows: [], columns: [] });
+});
+
+test("1 行以上の一時テーブル SELECT * は列順と値が従来どおり", async () => {
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100; SELECT * FROM #t",
+    makeClient({ recordsByApp: { 100: [makeRecord({ 顧客名: "A社", 売上: "100" })] } })
+  );
+
+  expect((r.statements[1].result as SelectResult)).toMatchObject({
+    columns: ["顧客名", "売上"],
+    rows: [{ 顧客名: "A社", 売上: "100" }],
+  });
+});
+
 test("0 件集計の CREATE TEMP TABLE は 1 行実体化される（v1.12.0）", async () => {
   const client = makeClient({ recordsByApp: { 300: [] } });
   const r = await executeBatch(

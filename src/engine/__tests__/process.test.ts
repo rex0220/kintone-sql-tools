@@ -665,11 +665,47 @@ test("project: 修飾名衝突の列名は 0 行と 1 行以上で一致する",
 
 test.each([
   "SELECT * FROM APP100",
-  "SELECT *, a FROM APP100",
   "SELECT _p.* FROM APP100$明細",
 ])("project: ワイルドカードを含む空結果は既存どおり列を推定しない — %s", (sql) => {
   const stmt = parseSelect(sql);
   expect(project([], stmt.columns)).toEqual({ rows: [], columns: [] });
+});
+
+test("project: 0 行の単独 SELECT * は sourceColumns を列順どおり返す", () => {
+  const stmt = parseSelect("SELECT * FROM APP100");
+  expect(project([], stmt.columns, undefined, undefined, ["a", "b"])).toEqual({
+    rows: [],
+    columns: ["a", "b"],
+  });
+});
+
+test.each([
+  { sourceColumns: undefined, label: "sourceColumns なし" },
+  { sourceColumns: ["a", "b"], label: "sourceColumns あり" },
+])("project: 0 行の混在 SELECT *, extra は明示列だけ返す — $label", ({ sourceColumns }) => {
+  const stmt = parseSelect("SELECT *, extra FROM APP100");
+  expect(project([], stmt.columns, undefined, undefined, sourceColumns)).toEqual({
+    rows: [],
+    columns: ["extra"],
+  });
+});
+
+test("project: 0 行の混在列は明示列キーを出現順で重複排除する", () => {
+  const stmt = parseSelect("SELECT a, *, a FROM APP100");
+  expect(project([], stmt.columns, undefined, undefined, ["a", "b"]).columns).toEqual(["a"]);
+});
+
+test("project: _p.* を含む0行の混在投影は sourceColumns を使わない", () => {
+  const stmt = parseSelect("SELECT *, _p.*, extra FROM APP100$明細");
+  expect(project([], stmt.columns, undefined, undefined, ["a", "b"]).columns).toEqual(["extra"]);
+});
+
+test("project: 1 行以上の混在 SELECT *, a は従来どおり明示列だけ columns に載せる", () => {
+  const stmt = parseSelect("SELECT *, a FROM APP100");
+  expect(project([{ a: "A", b: "B" }], stmt.columns)).toEqual({
+    rows: [{ a: "A", b: "B" }],
+    columns: ["a"],
+  });
 });
 
 // ----------------------------------------------------------------

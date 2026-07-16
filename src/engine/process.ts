@@ -591,12 +591,13 @@ export function project(
   rows: ProcessRow[],
   columns: SelectColumn[],
   scalarCache?: Map<number, string>,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  sourceColumns?: readonly string[]
 ): { rows: ProcessRow[]; columns: string[] } {
   // SELECT * → そのまま全フィールド
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
     const projected = rows.map((row) => stripParentShortcutColumns(row));
-    const cols = projected.length > 0 ? Object.keys(projected[0]) : [];
+    const cols = projected.length > 0 ? Object.keys(projected[0]) : [...(sourceColumns ?? [])];
     return { rows: projected, columns: cols };
   }
 
@@ -606,6 +607,13 @@ export function project(
   );
   const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys);
   const orderedKeys: string[] = outputKeys ?? [];
+
+  // 複数列の投影にワイルドカードが混在する場合、実データがあれば従来どおり
+  // 行から列を決める。0 行では行ループが回らないため、非ワイルドカード列だけを
+  // AST から復元する。* / _p.* は列リストに寄与させない。
+  if (hasWildcard && rows.length === 0) {
+    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys) };
+  }
 
   const projected = rows.map((row, rowIdx) => {
     const out: ProcessRow = {};
@@ -690,29 +698,53 @@ function computeOutputKeys(
   columns: SelectColumn[],
   defaultFieldKeys: Map<number, string>
 ): string[] {
-  return columns.map((col, colIdx) => {
-    switch (col.type) {
-      case "FIELD":
-        return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
-      case "LITERAL_COL":
-        return col.alias ?? `'${col.value}'`;
-      case "AGGREGATE":
-        return col.alias ?? aggregateSyntheticName(col.func, col.distinct, col.arg);
-      case "ARITH_AGG_COL":
-        return col.alias ?? aggArithDefaultKey(col.expr);
-      case "ARITH_COL":
-        return col.alias ?? arithColDefaultKey(col.expr);
-      case "CASE_COL":
-        return col.alias ?? "case";
-      case "STRFUNC_COL":
-        return col.alias ?? stringFuncDefaultKey(col.expr);
-      case "SCALAR_SUBQUERY_COL":
-        return col.alias ?? "(subquery)";
-      case "WILDCARD":
-      case "PARENT_WILDCARD":
-        throw new Error("internal: computeOutputKeys received a wildcard column");
+  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys));
+}
+
+/** ワイルドカード混在の 0 行投影で、明示列の出力キーだけを復元する。 */
+function computeExplicitOutputKeys(
+  columns: SelectColumn[],
+  defaultFieldKeys: Map<number, string>
+): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  for (const [colIdx, col] of columns.entries()) {
+    if (col.type === "WILDCARD" || col.type === "PARENT_WILDCARD") continue;
+    const key = computeOutputKey(col, colIdx, defaultFieldKeys);
+    if (!seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
     }
-  });
+  }
+  return keys;
+}
+
+function computeOutputKey(
+  col: SelectColumn,
+  colIdx: number,
+  defaultFieldKeys: Map<number, string>
+): string {
+  switch (col.type) {
+    case "FIELD":
+      return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
+    case "LITERAL_COL":
+      return col.alias ?? `'${col.value}'`;
+    case "AGGREGATE":
+      return col.alias ?? aggregateSyntheticName(col.func, col.distinct, col.arg);
+    case "ARITH_AGG_COL":
+      return col.alias ?? aggArithDefaultKey(col.expr);
+    case "ARITH_COL":
+      return col.alias ?? arithColDefaultKey(col.expr);
+    case "CASE_COL":
+      return col.alias ?? "case";
+    case "STRFUNC_COL":
+      return col.alias ?? stringFuncDefaultKey(col.expr);
+    case "SCALAR_SUBQUERY_COL":
+      return col.alias ?? "(subquery)";
+    case "WILDCARD":
+    case "PARENT_WILDCARD":
+      throw new Error("internal: computeOutputKey received a wildcard column");
+  }
 }
 
 function buildDefaultFieldOutputKeys(columns: SelectColumn[]): Map<number, string> {
@@ -834,6 +866,8 @@ export interface FullScanInput {
   havingFieldTypeResolver?: FieldTypeResolver;
   /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
   appliedKlikes?: ReadonlySet<object>;
+  /** 単一の実体化ソースが保持する出力列。0 行の単独 SELECT * にのみ使う。 */
+  sourceColumns?: readonly string[];
 }
 
 /**
@@ -853,6 +887,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     fieldTypeResolver,
     havingFieldTypeResolver,
     appliedKlikes,
+    sourceColumns,
   } = input;
 
   // 1. flatten
@@ -895,5 +930,5 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   rows = applyLimit(rows, stmt.limit, stmt.offset);
 
   // 9. project
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns);
 }
