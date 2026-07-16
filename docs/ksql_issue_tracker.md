@@ -30,6 +30,16 @@
 
 進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。
 
+### 次期リリース計画: v2.13.0（B12 バンドル）
+
+2026-07-16 決定。**B12 をまとめて 1 バージョンでリリース**する。
+
+1. **B12-A `VALIDATE ONLY`** — ✅ 実装・実機確認完了（PR #47 マージ済み・main に未リリースで滞留・実機バグ3件修正込み）
+2. **B11.1 業務キー結合**（`target.field = source.field`） — 仕様済み（[B11 spec §12](internal/ksql_update_from_spec.md)）・未実装。B12-B の `#err` 書き戻しゲート
+3. **B12-B `ON ERROR SKIP INTO #err`** — 仕様 R4・未実装。**実装前ゲート＝隔離厳格度（false isolation の扱い）を親仕様で確定**
+
+3 件そろって v2.13.0（CHANGELOG は「v2.13.0（未リリース）」で積み上げ）。SemVer は機能追加の minor。
+
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
@@ -39,8 +49,8 @@
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
-| B11.1 | `UPDATE … FROM` 業務キー結合（`target.field = source.field`） | 改善 | 📋 B12-B の書き戻し前提として仕様追加・未実装（B12-A 後） | 機能 | 中 | [spec §12](internal/ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
-| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 🚧 B12-A v2.13.0実装済み・文字数実機確認待ち。次はB11.1 → B12-B | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [plan](internal/ksql_validate_only_implementation_plan.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
+| B11.1 | `UPDATE … FROM` 業務キー結合（`target.field = source.field`） | 改善 | 📋 **v2.13.0 予定②**（仕様済み §12・未実装・B12-B の書き戻しゲート） | 機能 | 中 | [spec §12](internal/ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
+| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 🚧 **v2.13.0 バンドル**（①B12-A 実装・実機確認完了=main 滞留／③B12-B は隔離厳格度ゲート決定後に実装） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [plan](internal/ksql_validate_only_implementation_plan.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
 
