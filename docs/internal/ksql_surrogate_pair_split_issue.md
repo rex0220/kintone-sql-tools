@@ -69,6 +69,18 @@ LENGTH('😀')    = 2       ← UTF-16 コードユニット
 
 **コードポイント計数なら `😀`×6 は 6 ≤ 10 で通るはずが、弾かれた。** kSQL の Tier-0 検証（B12-A）は **UTF-16 コードユニットで数えている**ことが確定。
 
+### 2.1 kintone 本体でも確認済み（B23 の検討で追加）
+
+上記は **kSQL の Tier-0 検証**であって kintone 本体ではない。Tier-0 は `validateOnly` / `onErrorSkip` のときだけ動く（`execute.ts:456` / `:462`）ため、**素の `INSERT` は検証を通さず kintone へ届く**。これで kintone へ直接問える:
+
+```
+INSERT INTO APP4221 (…, 文字列MAX) VALUES (…, '😀😀😀😀😀😀')   -- 素の INSERT
+→ kintone API 400 CB_VA01
+   {"records[0].文字列MAX.value":{"messages":["11文字より短くなければなりません。"]}}
+```
+
+**kintone 本体が UTF-16 コードユニットで数え、それを「文字」と呼ぶ**ことが確定した。**B12-A の Tier-0 は正しい**（kintone と一致）。
+
 これは **B12-A が kintone 本体を実測して確定した仕様**に合わせたもの（[VALIDATE ONLY 実装計画](ksql_validate_only_implementation_plan.md)。「計数は UTF-16 code units」「未設定制約は空文字」「`minLength` は空文字・未指定にも適用」を実機で確定）。
 
 **kintone がそう数える以上、`LENGTH` を変えることはできない** — `LENGTH` は「この値はフィールドに収まるか」を判定する唯一の手段だから。
