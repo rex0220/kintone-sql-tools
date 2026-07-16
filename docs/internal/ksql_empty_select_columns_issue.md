@@ -92,4 +92,4 @@ if (columns.length !== stmt.fields.length) {
 - **POST / PUT（kintone 書き込み API）が呼ばれないこと**も検証する（0 行 no-op が本当に無通信であること）。
 - **混在ワイルドカード（例: `SELECT *, a`）** が本修正の対象か明示する。→ **本課題では対象外**（`SELECT *` を含む時点でデータ依存の列決定が必要なため。空 `SELECT *`／空 CTE と同じ別課題スコープ）。明示列のみ（`WILDCARD`/`PARENT_WILDCARD` を含まない SELECT）を対象とする。
 - （補助）列数不一致メッセージが 0 列時に原因（0 行）を示す。
-- （スコープ外・別課題）`SELECT * FROM #empty_temp`／空 CTE がスキーマから列を返す（列メタデータのパイプライン伝播）。
+- （残スコープ・別仕様）`SELECT * FROM #empty_temp`／空 CTE がスキーマから列を返す（列メタデータのパイプライン伝播）。→ [ksql_empty_select_wildcard_pipeline_spec.md](ksql_empty_select_wildcard_pipeline_spec.md)（v2.11.0 予定②・R1）。
