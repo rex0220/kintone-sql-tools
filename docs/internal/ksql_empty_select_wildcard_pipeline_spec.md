@@ -3,7 +3,7 @@
 - 作成日: 2026-07-16
 - 対象課題: [ksql_empty_select_columns_issue.md](ksql_empty_select_columns_issue.md) の残スコープ（§95 「スコープ外・別課題」）
 - 先行修正: [ksql_empty_select_columns_fix_spec.md](ksql_empty_select_columns_fix_spec.md)（明示列＝v2.1.1 リリース済）
-- ステータス: **仕様案 R3（codex 再レビュー反映・実装着手可）。v2.11.0 予定②（B1 の後・B8 の前）**
+- ステータス: **仕様案 R3・codex 再レビュー承認（追加 Finding なし）・実装着手可。v2.11.0 予定②（B1 の後・B8 の前）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
   - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①非インライン CTE のテストを必須化（`canInlineSingleCte` で単純 CTE は MaterializedTable 経路を踏まない）②混在ワイルドカードの semantics を修正＝`sourceColumns` 展開は**単独 `SELECT *` 限定**・混在は明示列のみ返す（現行 1 行以上と一致）・「先勝ち」表現を撤回③`PARENT_WILDCARD` を1つでも含む列リストは `sourceColumns` 展開を使わない。未決事項3点を確定（実アプリ bare `SELECT *`＝案ア／`MaterializedTable`＝execute.ts ローカル private／ストア＝単一構造体マップ）
@@ -224,7 +224,9 @@ UNION の実装は 2 経路あり、**どちらも `leftResult.columns`（`leftC
 - 空 temp `SELECT *`: `CREATE TEMP TABLE #t AS SELECT a,b FROM APP WHERE (0件); UPSERT INTO x (a,b) SELECT * FROM #t ON DUPLICATE (a)` → `inserted=0/updated=0`・**POST/PUT 未呼び出し**。
 - **非インライン CTE の空 `SELECT *`（Finding 1・必須）**: 例 `WITH c AS (SELECT a, COUNT(*) cnt FROM APP WHERE (0件) GROUP BY a) SELECT * FROM c`（本体 GROUP BY＝FULL_SCAN＝非インライン）→ 0 行で `columns` が CTE スキーマ（`['a','cnt']`）。**併せて `canInlineSingleCte` が false になることをコメントで固定**（単純 CTE との差を明示）。
 - 参考（インライン CTE・別経路）: `WITH c AS (SELECT a,b FROM APP WHERE (0件)) SELECT * FROM c` は `canInlineSingleCte=true` で `SELECT a,b` に展開され、v2.1.1 の明示列経路で既に列が出る（MaterializedTable 経路ではない）ことを1本で確認。
-- 左辺空 UNION（`UNION ALL` と `UNION` 両方）: `SELECT * FROM #empty UNION ALL SELECT b FROM APP2` → 結果列＝#empty スキーマ、右辺値が載る。
+- 左辺空 UNION（両経路・両演算子）:
+  - **temp/CTE 経路（`executeQueryWithCte` の UNION 分岐 1666-1681）**: `SELECT * FROM #empty UNION ALL SELECT b FROM APP2` と `… UNION …` → 結果列＝#empty スキーマ、右辺値が `leftCols` へ載る。**本仕様で新規追加すべきはこちら**（左辺が temp/CTE の `SELECT *`）。
+  - 通常経路（`executeUnion` 1580）: 明示列の空左辺は v2.1.1 の `project` 修正で既に列が出る。既存テストがあれば流用、なければ回帰として1本追加し両経路を固定する。
 - **JOIN 非対象**: `SELECT * FROM #empty t JOIN APP a ON ...`（0 行）→ `sourceColumns` 非供給で現状どおり（空列）を固定。
 - 1 行以上の `SELECT * FROM #temp` 回帰。
 
