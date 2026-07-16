@@ -11,6 +11,7 @@ import type {
   StringFuncArg,
 } from "../types/ast";
 import type { ProcessRow } from "./evalWhere";
+import { selectScalarExtreme } from "../core/scalarCompare";
 
 // ============================================================
 // 算術式
@@ -40,7 +41,7 @@ export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
 // ============================================================
 
 export function applyRoundOp(
-  op: "round" | "floor" | "ceil",
+  op: "round" | "floor" | "ceil" | "trunc",
   num: number,
   digits: number
 ): string {
@@ -69,6 +70,36 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const len   = args[2] !== undefined ? Number(args[2]) : undefined;
       return len !== undefined ? str.slice(start, start + len) : str.slice(start);
     }
+    case "LEFT": {
+      assertArity("LEFT", args, 2, 2);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      return Number.isNaN(n) || n <= 0 ? "" : str.slice(0, n);
+    }
+    case "RIGHT": {
+      assertArity("RIGHT", args, 2, 2);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      return Number.isNaN(n) || n <= 0 ? "" : str.slice(Math.max(0, str.length - n));
+    }
+    case "INSTR":
+      assertArity("INSTR", args, 2, 2);
+      return String(args[0].indexOf(args[1]) + 1);
+    case "LPAD":
+    case "RPAD": {
+      assertArity(expr.func, args, 2, 3);
+      const str = args[0];
+      const n = Math.trunc(Number(args[1]));
+      if (Number.isNaN(n) || n <= 0) return "";
+      if (str.length >= n) return str.slice(0, n);
+      const pad = args[2] ?? " ";
+      if (pad === "") return str;
+      return expr.func === "LPAD" ? str.padStart(n, pad) : str.padEnd(n, pad);
+    }
+    case "GREATEST":
+    case "LEAST":
+      assertArity(expr.func, args, 2);
+      return selectScalarExtreme(args, expr.func === "GREATEST" ? "greatest" : "least");
     case "CONCAT":   return args.join("");
     case "REPLACE": {
       const str  = args[0] ?? "";
@@ -87,6 +118,9 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
     case "ROUND": return applyRoundOp("round", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "FLOOR": return applyRoundOp("floor", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "CEIL":  return applyRoundOp("ceil",  Number(args[0] ?? "0"), Number(args[1] ?? "0"));
+    case "TRUNCATE":
+      assertArity("TRUNCATE", args, 1, 2);
+      return applyRoundOp("trunc", Number(args[0]), Number(args[1] ?? "0"));
     case "CAST": {
       const val      = args[0] ?? "";
       const castType = args[1] ?? "TEXT";
@@ -121,6 +155,9 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       return applyDateDiff(args[0] ?? "", args[1] ?? "");
     case "DATE_ADD":
       return applyDateAdd(args[0] ?? "", Number(args[1] ?? "0"), (args[2] ?? "DAY").toUpperCase());
+    case "LAST_DAY":
+      assertArity("LAST_DAY", args, 1, 1);
+      return applyLastDay(args[0]);
     case "ABS":
       return String(Math.abs(Number(args[0] ?? "0")));
     case "MOD": {
@@ -142,6 +179,12 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
     case "CURRENT_TIMESTAMP":
       return new Date().toISOString();
   }
+}
+
+function assertArity(func: string, args: readonly string[], min: number, max = Number.POSITIVE_INFINITY): void {
+  if (args.length >= min && args.length <= max) return;
+  const expected = min === max ? String(min) : max === Number.POSITIVE_INFINITY ? `${min} or more` : `${min} to ${max}`;
+  throw new Error(`ArgumentError: ${func} expects ${expected} argument(s).`);
 }
 
 // ============================================================
@@ -213,17 +256,31 @@ function applyDateDiff(date1: string, date2: string): string {
  * サポートする単位: YEAR / MONTH / DAY（大文字・小文字不問）
  */
 function applyDateAdd(dateStr: string, n: number, unit: string): string {
+  if (unit !== "YEAR" && unit !== "MONTH" && unit !== "DAY") {
+    throw new Error("ArgumentError: DATE_ADD unit must be YEAR, MONTH, or DAY.");
+  }
   if (!dateStr || dateStr.length < 10) return dateStr;
   const { y, mo, d } = parseDateParts(dateStr);
   const dt = new Date(Date.UTC(+y, +mo - 1, +d));
   switch (unit) {
     case "YEAR":  dt.setUTCFullYear(dt.getUTCFullYear() + n); break;
     case "MONTH": dt.setUTCMonth(dt.getUTCMonth() + n);       break;
-    default:      dt.setUTCDate(dt.getUTCDate() + n);         break; // DAY
+    case "DAY":   dt.setUTCDate(dt.getUTCDate() + n);         break;
   }
   const ry  = String(dt.getUTCFullYear()).padStart(4, "0");
   const rmo = String(dt.getUTCMonth() + 1).padStart(2, "0");
   const rd  = String(dt.getUTCDate()).padStart(2, "0");
+  return `${ry}-${rmo}-${rd}`;
+}
+
+/** LAST_DAY — 指定日の月末日を YYYY-MM-DD 形式で返す */
+function applyLastDay(dateStr: string): string {
+  if (!dateStr || dateStr.length < 10) return dateStr;
+  const { y, mo } = parseDateParts(dateStr);
+  const dt = new Date(Date.UTC(+y, +mo, 0));
+  const ry = String(dt.getUTCFullYear()).padStart(4, "0");
+  const rmo = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const rd = String(dt.getUTCDate()).padStart(2, "0");
   return `${ry}-${rmo}-${rd}`;
 }
 

@@ -112,11 +112,14 @@ const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
   TokenKind.LENGTH, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
   TokenKind.REPLACE, TokenKind.COALESCE, TokenKind.NULLIF, TokenKind.ISNULL,
+  TokenKind.LEFT, TokenKind.RIGHT, TokenKind.INSTR,
+  TokenKind.GREATEST, TokenKind.LEAST, TokenKind.LPAD, TokenKind.RPAD,
   TokenKind.CAST, TokenKind.CONVERT, TokenKind.FORMAT,
   TokenKind.ROUND, TokenKind.FLOOR, TokenKind.CEIL, TokenKind.CEILING,
+  TokenKind.TRUNCATE, TokenKind.TRUNC,
   TokenKind.ABS, TokenKind.MOD, TokenKind.POWER, TokenKind.POW, TokenKind.SQRT,
   TokenKind.YEAR, TokenKind.MONTH, TokenKind.DAY,
-  TokenKind.DATE_FORMAT, TokenKind.DATEDIFF, TokenKind.DATE_ADD,
+  TokenKind.DATE_FORMAT, TokenKind.DATEDIFF, TokenKind.DATE_ADD, TokenKind.LAST_DAY,
   TokenKind.IF,
 ]);
 
@@ -1137,6 +1140,12 @@ export class Parser {
   // ──────────────────────────────────────────────────
 
   private tryStringFuncName(): StringFuncName | null {
+    // LEFT / RIGHT は JOIN 修飾子でもあるため、直後が "(" の場合だけ関数とする。
+    if (this.peekAt(1).kind === TokenKind.LPAREN) {
+      if (this.peek().kind === TokenKind.LEFT) return "LEFT";
+      if (this.peek().kind === TokenKind.RIGHT) return "RIGHT";
+    }
+
     const map: Partial<Record<TokenKind, StringFuncName>> = {
       [TokenKind.UPPER]:     "UPPER",
       [TokenKind.LOWER]:     "LOWER",
@@ -1151,6 +1160,11 @@ export class Parser {
       [TokenKind.COALESCE]:  "COALESCE",
       [TokenKind.NULLIF]:    "NULLIF",
       [TokenKind.ISNULL]:    "ISNULL",
+      [TokenKind.INSTR]:     "INSTR",
+      [TokenKind.GREATEST]:  "GREATEST",
+      [TokenKind.LEAST]:     "LEAST",
+      [TokenKind.LPAD]:      "LPAD",
+      [TokenKind.RPAD]:      "RPAD",
       [TokenKind.CAST]:      "CAST",
       [TokenKind.CONVERT]:   "CAST",   // CONVERT → CAST に正規化
       [TokenKind.FORMAT]:    "FORMAT",
@@ -1158,12 +1172,15 @@ export class Parser {
       [TokenKind.FLOOR]:     "FLOOR",
       [TokenKind.CEIL]:      "CEIL",
       [TokenKind.CEILING]:   "CEIL",   // CEILING → CEIL に正規化
+      [TokenKind.TRUNCATE]:  "TRUNCATE",
+      [TokenKind.TRUNC]:     "TRUNCATE", // TRUNC → TRUNCATE に正規化
       [TokenKind.YEAR]:        "YEAR",
       [TokenKind.MONTH]:       "MONTH",
       [TokenKind.DAY]:         "DAY",
       [TokenKind.DATE_FORMAT]: "DATE_FORMAT",
       [TokenKind.DATEDIFF]:    "DATEDIFF",
       [TokenKind.DATE_ADD]:    "DATE_ADD",
+      [TokenKind.LAST_DAY]:    "LAST_DAY",
       [TokenKind.ABS]:         "ABS",
       [TokenKind.MOD]:         "MOD",
       [TokenKind.POWER]:       "POWER",

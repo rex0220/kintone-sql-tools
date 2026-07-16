@@ -736,6 +736,35 @@ test("SELECT SUBSTR(...) — SUBSTRING の別名", () => {
   if (col.type === "STRFUNC_COL") expect(col.expr.func).toBe("SUBSTRING");
 });
 
+test("B19 の追加関数と別名を解析する", () => {
+  const ast = parseSelect(
+    "SELECT TRUNCATE(n, 1), TRUNC(n), LEFT(s, 2), RIGHT(s, 2), " +
+    "INSTR(s, '-'), GREATEST(a, b), LEAST(a, b), LPAD(s, 3, '0'), " +
+    "RPAD(s, 3), LAST_DAY(d) FROM APP100"
+  );
+  const funcs = ast.columns.map((column) =>
+    column.type === "STRFUNC_COL" ? column.expr.func : null
+  );
+  expect(funcs).toEqual([
+    "TRUNCATE", "TRUNCATE", "LEFT", "RIGHT", "INSTR",
+    "GREATEST", "LEAST", "LPAD", "RPAD", "LAST_DAY",
+  ]);
+});
+
+test("LEFT / RIGHT 関数と LEFT / RIGHT JOIN が同一クエリで共存する", () => {
+  const left = parseSelect(
+    "SELECT LEFT(a.name, 2) AS short FROM APP1 AS a LEFT JOIN APP2 AS b ON a.id = b.id"
+  );
+  expect(left.columns[0]).toMatchObject({ type: "STRFUNC_COL", expr: { func: "LEFT" } });
+  expect(left.joins[0].type).toBe("LEFT");
+
+  const right = parseSelect(
+    "SELECT RIGHT(b.name, 2) AS short FROM APP1 AS a RIGHT JOIN APP2 AS b ON a.id = b.id"
+  );
+  expect(right.columns[0]).toMatchObject({ type: "STRFUNC_COL", expr: { func: "RIGHT" } });
+  expect(right.joins[0].type).toBe("RIGHT");
+});
+
 test("SELECT CONCAT(姓, ' ', 名) FROM APP100 — 文字列リテラル引数", () => {
   const ast = parseSelect("SELECT CONCAT(姓, ' ', 名) AS 氏名 FROM APP100");
   const col = ast.columns[0];

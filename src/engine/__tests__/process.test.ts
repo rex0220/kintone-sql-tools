@@ -1373,6 +1373,128 @@ test("runFullScan: SUBSTRING (start のみ)", () => {
   expect(result[0]["sub"]).toBe("CDE");
 });
 
+test("runFullScan: B19 文字列・数値・日付関数", () => {
+  const records = [makeRecord({ s: "Database", n: "-123.456", d: "2024-02-10", d2: "2026-02-10" })];
+  const stmt = parseSelect(
+    "SELECT TRUNCATE(n, 1) AS trunc, TRUNC(n) AS trunc0, " +
+    "TRUNCATE(1234.5, -2) AS trunc_neg, FLOOR(-1.5) AS floor_neg, TRUNCATE(-1.5) AS trunc_zero, " +
+    "LEFT(s, 4) AS l, RIGHT(s, 4) AS r, INSTR(s, 'base') AS pos, " +
+    "LPAD('7', 5, '0') AS lp, RPAD('7', 3) AS rp, " +
+    "LAST_DAY(d) AS leap_last, LAST_DAY(d2) AS last FROM APP100"
+  );
+  const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
+  expect(rows[0]).toEqual({
+    trunc: "-123.4",
+    trunc0: "-123",
+    trunc_neg: "1200",
+    floor_neg: "-2",
+    trunc_zero: "-1",
+    l: "Data",
+    r: "base",
+    pos: "5",
+    lp: "00007",
+    rp: "7  ",
+    leap_last: "2024-02-29",
+    last: "2026-02-28",
+  });
+});
+
+test("runFullScan: B19 の文字数単位は LENGTH / SUBSTRING と一致する", () => {
+  const records = [makeRecord({ s: "😀X" })];
+  const stmt = parseSelect(
+    "SELECT LEFT(s, 2) AS l, SUBSTRING(s, 1, 2) AS sl, " +
+    "RIGHT(s, 2) AS r, SUBSTRING(s, 2, 2) AS sr, LPAD(s, 4, '0') AS p FROM APP100"
+  );
+  const row = runFullScan({ tables: new Map([[null, records]]), stmt }).rows[0];
+  expect(row.l).toBe(row.sl);
+  expect(row.r).toBe(row.sr);
+  expect(row.p).toBe("0😀X");
+});
+
+test("runFullScan: B19 の空文字・長さ境界", () => {
+  const records = [makeRecord({ empty: "", s: "ABCDE" })];
+  const stmt = parseSelect(
+    "SELECT LPAD(empty, 3, '0') AS lp, RPAD(empty, 3, '0') AS rp, " +
+    "LEFT(s, 0) AS l0, LEFT(s, -1) AS ln, LEFT(s, 2.7) AS ld, " +
+    "RIGHT(s, -1) AS rn, LPAD('7', 5, '') AS ep, " +
+    "INSTR(empty, '') AS ii, INSTR(empty, 'a') AS ia FROM APP100"
+  );
+  const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
+  expect(rows[0]).toEqual({
+    lp: "000", rp: "000", l0: "", ln: "", ld: "AB", rn: "",
+    ep: "7", ii: "1", ia: "0",
+  });
+});
+
+test("runFullScan: GREATEST / LEAST は集合モード・tie-break・空文字規則を使う", () => {
+  const records = [makeRecord({ empty: "" })];
+  const stmt = parseSelect(
+    "SELECT GREATEST('2','10','1a') AS mixed_g, LEAST('2','10','1a') AS mixed_l, " +
+    "GREATEST('1','01','1.0') AS tie_g, LEAST('1','01','1.0') AS tie_l, " +
+    "GREATEST(empty, '-1') AS empty_g, LEAST('-1', empty) AS empty_l FROM APP100"
+  );
+  const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
+  expect(rows[0]).toEqual({
+    mixed_g: "2", mixed_l: "10", tie_g: "1.0", tie_l: "01",
+    empty_g: "-1", empty_l: "",
+  });
+});
+
+test.each([
+  "LEFT('x')",
+  "LEFT('x', 1, 2)",
+  "INSTR('x')",
+  "GREATEST('a')",
+  "GREATEST()",
+  "LAST_DAY()",
+  "LPAD('x')",
+])("runFullScan: B19 の arity 違反は ArgumentError — %s", (expression) => {
+  const stmt = parseSelect(`SELECT ${expression} AS value FROM APP100`);
+  expect(() => runFullScan({
+    tables: new Map([[null, [makeRecord({})]]]),
+    stmt,
+  })).toThrow(/ArgumentError/);
+});
+
+test("runFullScan: DATE_ADD は単位を実行時検証し、小文字を許容する", () => {
+  const records = [makeRecord({ d: "2026-07-15", unit: "HOUR" })];
+  const valid = parseSelect(
+    "SELECT DATE_ADD(d, 1, 'day') AS lower, DATE_ADD(d, -1, 'MONTH') AS prev FROM APP100"
+  );
+  expect(runFullScan({ tables: new Map([[null, records]]), stmt: valid }).rows[0]).toEqual({
+    lower: "2026-07-16",
+    prev: "2026-06-15",
+  });
+
+  for (const unit of ["'HOUR'", "'WEEK'", "'xxx'", "unit"]) {
+    const invalid = parseSelect(`SELECT DATE_ADD(d, 1, ${unit}) AS value FROM APP100`);
+    expect(() => runFullScan({ tables: new Map([[null, records]]), stmt: invalid }))
+      .toThrow(/ArgumentError: DATE_ADD unit must be YEAR, MONTH, or DAY/);
+  }
+});
+
+test("runFullScan: LEFT 関数と LEFT JOIN が共存する", () => {
+  const stmt = parseSelect(
+    "SELECT LEFT(a.name, 2) AS short FROM APP1 AS a LEFT JOIN APP2 AS b ON a.id = b.id"
+  );
+  const tables = new Map<string | null, KintoneRecord[]>([
+    ["a", [makeRecord({ id: "1", name: "Alpha" })]],
+    ["b", [makeRecord({ id: "1" })]],
+  ]);
+  expect(runFullScan({ tables, stmt }).rows).toEqual([{ short: "Al" }]);
+});
+
+test("runFullScan: RIGHT 関数と RIGHT JOIN が共存する", () => {
+  const stmt = parseSelect(
+    "SELECT RIGHT(b.name, 2) AS short FROM APP1 AS a RIGHT JOIN APP2 AS b ON a.id = b.id"
+  );
+  const tables = new Map<string | null, KintoneRecord[]>([
+    ["a", [makeRecord({ id: "1" })]],
+    ["b", [makeRecord({ id: "1", name: "Bravo" })]],
+  ]);
+  expect(runFullScan({ tables, stmt }).rows).toEqual([{ short: "vo" }]);
+});
+
 test("runFullScan: CONCAT", () => {
   const records = [makeRecord({ 姓: "田中", 名: "太郎" })];
   const stmt = parseSelect("SELECT CONCAT(姓, ' ', 名) AS 氏名 FROM APP100");
