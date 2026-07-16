@@ -94,15 +94,21 @@ kSQL の実装済み関数（コード確認済み・`src/types/ast.ts:246`）:
 
 #### T1-1. ウィンドウ関数（`ROW_NUMBER` / `RANK` / `LAG` / `LEAD` / 集計 `OVER`）— **最大の欠落**
 
-- **効果: 大**。kintone 業務の定番「**顧客ごとの最新1件**」「ランキング」「累計」「前月比」が 1 文で書けない。現在の回避策は言語リファレンス §25 の例そのもので、**一時テーブル + `MAX()` + `JOIN` の 3 文**を要する:
+- **効果: 大**。kintone 業務の定番「**顧客ごとの最新1件**」「ランキング」「累計」「前月比」が書けない。
+  > **訂正（2026-07-16・実機確認）**: 当初ここに「ウィンドウ関数があれば **1 文**」として `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (…) rn FROM APP300) WHERE rn = 1` と書いたが**誤り**。**kSQL は派生テーブル `FROM (SELECT …)` に非対応**（実測: `ParseError`）。B17 を入れても**一時テーブル経由の 2 文**になる。
+  >
+  > 一方で**効果の評価はむしろ上方修正**される。`MAX()` 方式が「最新行の他列を取れない」のは**回避不能**だと確認できた: 派生テーブルが無く、かつ **JOIN が複合キー結合に非対応**（実測: `ON a.k = t.k AND a.d = t.max_d` は `ParseError`）なため、`(グループキー, 最大値)` で元行へ結合し直す手段が無い。つまり「**各グループの最新 1 件を全列付きで取得する**」は**現状の kSQL では表現できない**。B17 はこれを初めて可能にする（＝「3文→1文」ではなく「**不可能→可能**」）。詳細は [B17 仕様 §0](ksql_window_function_spec.md)。
+
   ```sql
-  -- 現在（3文）
+  -- 現状: グループキーと最大値しか取れない（その行の金額等は取得不能）
   CREATE TEMP TABLE #latest AS SELECT 顧客ID, MAX(受注日) AS 最新受注日 FROM APP300 GROUP BY 顧客ID;
   SELECT a.顧客名, t.最新受注日 FROM APP100 a INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
-  -- ウィンドウ関数があれば（1文）
-  SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn FROM APP300) WHERE rn = 1;
+
+  -- B17 後（2文）: 最新行の全列が取れる
+  CREATE TEMP TABLE #ranked AS
+  SELECT 顧客ID, 受注日, 金額, ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn FROM APP300;
+  SELECT 顧客ID, 受注日, 金額 FROM #ranked WHERE rn = 1;
   ```
-  しかも `MAX()` 方式は**最新行の他列を取れない**（受注日は取れるが、その行の金額は取れない）ため、真の代替になっていない。
 - **コスト: 中**。全て JS 側の計算で完結し、API 追加なし。既存 `applyGroupBy`（`src/engine/process.ts`）の隣に partition → sort → 採番の実装を足す形。パーサに `OVER (PARTITION BY … ORDER BY …)` を追加。
 - **適合性: 高**。FULL_SCAN 前提と完全に整合（既に全件 JS 保持）。ソート種別は **v2.14.0 の `AggregateSortKindResolver` を再利用可能**（`ORDER BY` の型判定と同じ問題）。
 - **推奨: 最優先**。ただし**サブセットから**（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`/`ORDER BY` のみ。フレーム句 `ROWS BETWEEN` は第2段）。「各グループ最新1件」が取れるだけで価値の大半を回収できる。
