@@ -160,7 +160,7 @@ if (meta.sortKind === "string") → 辞書順（localeCompare "ja"）
 ### 4.1 構文
 
 ```
-<ウィンドウ関数>() OVER ( [PARTITION BY <フィールド> [, …]] [ORDER BY <フィールド> [ASC|DESC] [, …]] ) [AS alias]
+<ウィンドウ関数>() OVER ( [PARTITION BY <フィールド> [, …]] [ORDER BY <フィールド> [ASC|DESC] [, …]] ) AS <alias>
 ```
 
 - 関数は `ROW_NUMBER` / `RANK` / `DENSE_RANK` の 3 つ。**引数なし**（`ROW_NUMBER(x)` は `ParseError`）。
@@ -234,22 +234,27 @@ FROM APP300
 
 - 理由: 標準では「集約後の行に対してウィンドウを適用」だが、`PARTITION BY` / `ORDER BY` が集約の出力列（alias・合成名）を参照する解決が必要になり、面が広がる。
 - **看板ユースケース（各グループ最新 1 件・ランキング・連番）はいずれも `GROUP BY` を必要としない**ため、v1 の価値は損なわれない。
-- 集約結果へ順位を付けたい場合は 2 文に分ける（`CREATE TEMP TABLE #agg AS SELECT … GROUP BY …;` → `SELECT *, RANK() OVER (ORDER BY 合計 DESC) FROM #agg;`）。**一時テーブル経由なら v1 でも書ける**。
+- 集約結果へ順位を付けたい場合は**スコープを分ける**。CTE なら 1 文で書ける:
+  ```sql
+  WITH agg AS (SELECT 部署, SUM(売上) AS 合計 FROM APP300 GROUP BY 部署)
+  SELECT 部署, 合計, RANK() OVER (ORDER BY 合計 DESC) AS 順位 FROM agg;
+  ```
+  一時テーブル経由（複文）でも同じ。**いずれも v1 で書ける**（ウィンドウ側の SELECT に `GROUP BY`／集計が無いため）。
 
 ## 5. 実装差分
 
 | 箇所 | 変更 |
 |---|---|
 | `src/lexer/tokens.ts` | `ROW_NUMBER` / `RANK` / `DENSE_RANK` を予約語に。`OVER` / `PARTITION` は**ソフトキーワード** |
-| `src/types/ast.ts` | `WindowColumn`（`type: "WINDOW_COL"`・`func`・`partitionBy: FieldRef[]`・`orderBy: OrderByItem[]`・`alias`）を `SelectColumn` へ追加 |
+| `src/types/ast.ts` | `WindowColumn`（`type: "WINDOW_COL"`・`func`・`partitionBy: FieldRef[]`・`orderBy: OrderByItem[]`・**`alias: string`**）を `SelectColumn` へ追加。他の列は `alias: string \| null` だが、ウィンドウ列は **alias 必須（§4.4）なので `string` にして不変条件を型で保証**する（`?? 合成名` のフォールバックを書けなくする） |
 | `src/parser/parser.ts` | SELECT 列で `ROW_NUMBER()` 等を検出し `OVER (…)` を解析。**`OVER` 必須**・引数なし・**`AS alias` 必須**（§4.4）・`PARTITION BY` はフィールド参照のみ。`GROUP BY`/集計との併用は `ParseError`（§4.8） |
 | **`resolveSelectMode`** | ウィンドウ列があれば **FULL_SCAN 強制**（`hasAggregateColumns` に相当する `hasWindowColumns` を追加）。**§0.3 のとおり CTE インライン化を止める役割も兼ね、看板 1 文形の正しさに直結する** |
 | **`collectRequiredFieldsByTable`（[selectToKintone.ts:577 付近](../../src/converter/selectToKintone.ts#L577)）** | **`WindowColumn` の `partitionBy` / `orderBy` のキーを走査対象に追加**（§2.4）。これが無いとキーが API から取得されず**静かに全行同順位**になる |
 | **DISTINCT のキー生成（[process.ts:430 付近](../../src/engine/process.ts#L430)）** | ウィンドウ列の出力値をキーへ含める。現状は列種別ごとの分岐でウィンドウ列を扱えず、`SELECT DISTINCT RANK() … AS r` が**全行同一キー**になり 1 行へ潰れる（§6） |
 | **`buildOrderByMetaForSelect`（[execute.ts:2684](../../src/execute.ts#L2684)）** | 早期 return の条件を **`stmt.orderBy.length === 0 && ウィンドウの ORDER BY も無い`** へ変更（§2.3）。**これが無いと数値が辞書順で並ぶ** |
-| `src/engine/process.ts` | `applyWindow(rows, columns, optionOrders, sortKinds)` を新設し、**HAVING と DISTINCT の間**で呼ぶ。パーティション分割 → **`applyOrderBy` でパーティション内を整列** → 採番。結果を各行へ `alias`（無ければ合成名）で書き込む |
-| `selectToKintone.ts` の出力列収集 | ウィンドウ列の alias / 合成名を出力列として認識（`collectSelectOutputNames`） |
-| `inferSelectColumnMeta`（B14） | ウィンドウ列 → `{ sortKind: "number" }`（§4.4） |
+| `src/engine/process.ts` | `applyWindow(rows, columns, optionOrders, sortKinds)` を新設し、**HAVING と DISTINCT の間**で呼ぶ。パーティション分割 → **`applyOrderBy` でパーティション内を整列** → 採番。結果を各行へ **`alias`** で書き込む（alias は必須なので合成名の分岐は無い・§4.4） |
+| `selectToKintone.ts` の出力列収集 | ウィンドウ列の **alias** を出力列として認識（`collectSelectOutputNames`）。合成名は無い（§4.4） |
+| `inferSelectColumnMeta`（B14） | ウィンドウ列 → `{ sortKind: "number" }`（§4.7） |
 | 言語リファレンス | 新節を追加。**同一スコープの `WHERE` ではウィンドウ結果を絞れない**（標準どおり）ことと、**絞り込みは CTE で 1 文**（または一時テーブル経由）で書くことを明記 |
 
 ### 5.1 採番アルゴリズム（パーティションごと）
@@ -302,6 +307,6 @@ RANK / DENSE_RANK:
 
 - **集計の `OVER`**（`SUM(x) OVER (PARTITION BY …)`）とフレーム句（`ROWS BETWEEN …`）: 累計・移動平均。v2。
 - **`LAG` / `LEAD`**（前月比）・`NTILE` / `FIRST_VALUE` / `LAST_VALUE`。
-- **派生テーブル `FROM (SELECT …)`**: これが入ると本機能が 1 文で書けるようになる（§0）。**独立した価値が大きい別課題**として起票候補。
+- **派生テーブル `FROM (SELECT …)`**: **本機能の 1 文化には不要**（CTE で既に 1 文・§0.1）。他 RDB からの移植時に**同等処理を別構文でも書ける**ようにする利便性が価値であり、**独立した別課題**として起票候補。
 - **`QUALIFY`**（ウィンドウ結果での絞り込み専用句）: Snowflake 等にはあるが MySQL/Oracle/SQL Server には無いため優先度低。
 - **`GROUP BY` との併用**（§4.8）。
