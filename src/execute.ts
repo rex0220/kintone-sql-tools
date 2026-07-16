@@ -66,6 +66,13 @@ import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere"
 import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
+import {
+  renderValidationValue,
+  validateDmlCandidates,
+  VALIDATION_META_COLUMNS,
+  type DmlValidationCandidate,
+  type ValidationOperation,
+} from "./core/dmlValidationCandidates";
 
 // ============================================================
 // kintone API クライアントインターフェース
@@ -122,6 +129,16 @@ export interface KintoneFieldInfo {
   optionOrder?: Record<string, number>;
   /** ソート種別（CALC設定などに基づく） */
   sortKind?: "number" | "string";
+  required?: boolean;
+  minValue?: string;
+  maxValue?: string;
+  minLength?: string;
+  maxLength?: string;
+  defaultValue?: unknown;
+  /** true の場合、サブテーブルの子フィールドとして create 検証の必須/既定値走査から除外する。 */
+  inSubtable?: boolean;
+  /** false は計算・システム・ルックアップコピー先等の書込不可フィールド。 */
+  writable?: boolean;
 }
 
 // ============================================================
@@ -135,7 +152,8 @@ export type ExecuteResult =
   | DeleteResult
   | UpsertResult
   | ReorderResult
-  | AssertResult;
+  | AssertResult
+  | DmlValidationResult;
 
 /** 1 回の execute() で発生した kintone API 呼び出しの計測値 */
 export interface ExecuteMetrics {
@@ -215,6 +233,19 @@ export interface AssertResult {
   type: "ASSERT";
   /** 評価した条件（パーサが再構成した正規化テキスト） */
   condition: string;
+  metrics?: ExecuteMetrics;
+}
+
+export interface DmlValidationResult {
+  type: "VALIDATION";
+  operation: "INSERT" | "UPDATE" | "UPSERT";
+  validatedRows: number;
+  validRows: number;
+  invalidRows: number;
+  errorCount: number;
+  columns: string[];
+  errors: ProcessRow[];
+  errTable?: string;
   metrics?: ExecuteMetrics;
 }
 
@@ -396,6 +427,12 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   validateKlikeStatement(stmt);
+  if ("validateOnly" in stmt && stmt.validateOnly === true) {
+    if (stmt.validationErrorTable) {
+      throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    }
+    return executeDmlValidation(stmt, client, { ...options, onLimitReached: "error" }, cacheContext, undefined, 1);
+  }
   switch (stmt.type) {
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
@@ -449,6 +486,25 @@ export interface BatchExecuteOptions extends ExecuteOptions {
 export interface BatchStatementError {
   code: string;
   message: string;
+}
+
+function appendValidationErrors(
+  tempTables: Map<string, MaterializedTable>,
+  name: string,
+  columns: string[],
+  rows: ProcessRow[],
+  maxRows: number
+): void {
+  const current = tempTables.get(name);
+  if (current && (current.columns.length !== columns.length || current.columns.some((c, i) => c !== columns[i]))) {
+    throw new Error(`ArgumentError: validation error table ${name} has a different schema.`);
+  }
+  const existingRows = current?.rows ?? [];
+  if (existingRows.length + rows.length > maxRows) {
+    throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
+  }
+  // schema・件数を先に検査し、既存値を変更せず単一setで反映する。
+  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows] });
 }
 
 export interface BatchStatementResult {
@@ -673,6 +729,27 @@ async function executeBatchStatement(
   const resolvedStmt = resolveVariableRefs(stmt, variables);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
+
+  if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
+    const result = await executeDmlValidation(
+      resolvedStmt,
+      client,
+      { ...options, onLimitReached: "error" },
+      cacheContext,
+      tempTables,
+      info.index + 1
+    );
+    if (resolvedStmt.validationErrorTable) {
+      appendValidationErrors(
+        tempTables,
+        resolvedStmt.validationErrorTable,
+        result.columns,
+        result.errors,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+      );
+    }
+    return { result };
+  }
 
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     // 実体化は onLimitReached を適用せず常に error
@@ -2360,6 +2437,197 @@ function convertProcessRowValue(
 // ============================================================
 // INSERT
 // ============================================================
+
+type ValidationStatement = InsertStatement | InsertSelectStatement | UpsertStatement | UpsertSelectStatement | UpdateStatement;
+const NON_WRITABLE_FIELD_TYPES = new Set([
+  "CALC", "RECORD_NUMBER", "CREATOR", "CREATED_TIME", "MODIFIER", "UPDATED_TIME", "STATUS", "STATUS_ASSIGNEE", "CATEGORY", "REFERENCE_TABLE",
+]);
+
+async function executeDmlValidation(
+  stmt: ValidationStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable> | undefined,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const operation: ValidationOperation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
+  const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
+  if (new Set(payloadFields).size !== payloadFields.length) {
+    throw new Error("ArgumentError: DML target fields contain duplicates.");
+  }
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const targetFields = stmt.type === "UPDATE" ? stmt.assignments.map((a) => a.field) : stmt.fields;
+  for (const code of targetFields) {
+    const info = infoByCode.get(code);
+    if (!info) throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
+    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
+      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
+    }
+  }
+
+  const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
+  const { errors, invalidRows } = validateDmlCandidates(
+    candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber
+  );
+  const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
+  return {
+    type: "VALIDATION",
+    operation,
+    validatedRows: candidates.length,
+    validRows: candidates.length - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+  };
+}
+
+async function materializeValidationCandidates(
+  stmt: ValidationStatement,
+  operation: ValidationOperation,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable> | undefined,
+  infoByCode: Map<string, KintoneFieldInfo>
+): Promise<DmlValidationCandidate[]> {
+  if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
+
+  let rows: unknown[][];
+  if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
+    rows = stmt.values.map((row) => row.map((value, i) =>
+      value.type === "CASE_VALUE"
+        ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType)
+        : value
+    ));
+  } else {
+    const selectResult = tempTables && tempTables.size > 0
+      ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext)
+      : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext);
+    if (selectResult.columns.length !== stmt.fields.length) {
+      throw new Error(`SELECT の列数（${selectResult.columns.length}）と DML のフィールド数（${stmt.fields.length}）が一致しません`);
+    }
+    rows = selectResult.rows.map((row) => selectResult.columns.map((column) => row[column] ?? ""));
+  }
+
+  const candidates = rows.map((values, index): DmlValidationCandidate => ({
+    rowNumber: index + 1,
+    operation,
+    mode: "create",
+    payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
+    preErrors: [],
+  }));
+  if (stmt.type !== "UPSERT" && stmt.type !== "UPSERT_SELECT") return candidates;
+
+  for (const key of stmt.keyFields) {
+    if (!stmt.fields.includes(key)) throw new Error(`ON DUPLICATE のキー「${key}」が UPSERT フィールドに含まれていません`);
+  }
+  const fieldTypes = new Map([...infoByCode].map(([code, info]) => [code, info.fieldType]));
+  const rowKeys = candidates.map((candidate) => stmt.keyFields.map((key) => renderValidationValue(candidate.payload.get(key))));
+  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
+  const numeric = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
+  const keyCounts = new Map<string, number>();
+  for (const parts of rowKeys) {
+    const key = upsertNormalizedKey(parts, numeric);
+    keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
+  }
+  candidates.forEach((candidate, index) => {
+    const parts = rowKeys[index];
+    candidate.mode = lookupUpsertTarget(targets, parts) === undefined ? "create" : "update";
+    stmt.keyFields.forEach((key, keyIndex) => {
+      if (parts[keyIndex] === "") candidate.preErrors.push({ field: key, code: "ERR_KEY_EMPTY", message: `UPSERT キー ${key} は空にできません` });
+    });
+    if ((keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
+      candidate.preErrors.push({ field: stmt.keyFields[0], code: "ERR_KEY_DUP_SOURCE", message: "UPSERT ソース内でキーが重複しています" });
+    }
+  });
+  return candidates;
+}
+
+async function materializeUpdateValidationCandidates(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<DmlValidationCandidate[]> {
+  if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
+  await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  let records: Array<{ id: number; record: KintoneRecord }>;
+  if (hasArithAssignment(stmt)) {
+    const getParams = updateToGetQueryForArith(stmt);
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
+      maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
+    });
+    records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
+  } else {
+    const getParams = updateToGetQuery(stmt);
+    const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
+      maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1,
+    });
+    records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+  }
+  return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
+    rowNumber: index + 1,
+    operation: "UPDATE",
+    mode: "update",
+    payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
+    preErrors: [],
+  }));
+}
+
+async function materializeUpdateFromValidationCandidates(
+  stmt: UpdateStatement,
+  from: NonNullable<UpdateStatement["from"]>,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<DmlValidationCandidate[]> {
+  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
+  let sourceRows: ProcessRow[];
+  if (from.cteName !== null) {
+    const table = tempTables?.get(from.cteName);
+    if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
+    for (const field of requiredSourceFields) if (!table.columns.includes(field)) throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
+    sourceRows = table.rows;
+  } else {
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, from.appId, "", requiredSourceFields, {
+      maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
+    });
+    sourceRows = resolved.records.map((record) => flatten(record, null));
+  }
+  const sourceById = new Map<number, ProcessRow>();
+  for (const row of sourceRows) {
+    const raw = row[from.joinKeyField]; const text = typeof raw === "string" ? raw.trim() : ""; const id = Number(text);
+    if (text === "" || !Number.isSafeInteger(id) || id <= 0) throw new Error(`ArgumentError: UPDATE ... FROM source key must be a positive safe integer: ${String(raw)}`);
+    if (sourceById.has(id)) throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for target $id ${id}.`);
+    sourceById.set(id, row);
+  }
+  const targetFields = collectUpdateFromTargetFields(stmt);
+  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetRecords: KintoneRecord[] = [];
+  for (const ids of splitChunks([...sourceById.keys()], UPDATE_FROM_ID_CHUNK_SIZE)) {
+    const idQuery = `$id in (${ids.map((id) => sqlQuote(String(id))).join(",")})`;
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, stmt.appId, filterQuery ? `(${idQuery}) and (${filterQuery})` : idQuery, targetFields, {
+      maxRecords: Math.max(ids.length, 1), parallel: options.fetchParallel ?? 1, onLimit: "error",
+    });
+    targetRecords.push(...resolved.records);
+  }
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const matched = targetRecords.map((target) => ({ target, source: sourceById.get(Number(target["$id"]?.value))! }));
+  const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
+    rowNumber: index + 1, operation: "UPDATE", mode: "update",
+    payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
+    preErrors: [],
+  }));
+}
 
 async function executeInsert(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,

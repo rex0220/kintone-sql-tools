@@ -1297,6 +1297,12 @@ export class Parser {
   private tryParseImplicitAlias(): string | null {
     const k = this.peek().kind;
     if (k === TokenKind.IDENT || k === TokenKind.BIDENT) {
+      if (
+        k === TokenKind.IDENT &&
+        this.peek().value.toUpperCase() === "VALIDATE" &&
+        this.peekAt(1).kind === TokenKind.IDENT &&
+        this.peekAt(1).value.toUpperCase() === "ONLY"
+      ) return null;
       return this.parseTableAliasName();
     }
     return null;
@@ -1844,7 +1850,8 @@ export class Parser {
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT はサブテーブル仮想テーブルでは未対応です", this.prev());
       }
-      return { type: "INSERT_SELECT", appId, fields, select } satisfies InsertSelectStatement;
+      const validation = this.parseValidateOnlySuffix();
+      return { type: "INSERT_SELECT", appId, fields, select, ...validation } satisfies InsertSelectStatement;
     }
 
     // INSERT INTO ... VALUES (...)
@@ -1858,9 +1865,13 @@ export class Parser {
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
 
+    const validation = this.parseValidateOnlySuffix();
+    if (subtableCode && validation.validateOnly) {
+      throw new ParseError("VALIDATE ONLY はサブテーブル INSERT に対応していません", this.prev());
+    }
     return subtableCode
-      ? { type: "INSERT", appId, subtableCode, fields, values }
-      : { type: "INSERT", appId, fields, values };
+      ? { type: "INSERT", appId, subtableCode, fields, values, ...validation }
+      : { type: "INSERT", appId, fields, values, ...validation };
   }
 
   private parseUpsert(): UpsertStatement | UpsertSelectStatement {
@@ -1882,7 +1893,8 @@ export class Parser {
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
       const keyFields = this.parseOnDuplicate();
-      return { type: "UPSERT_SELECT", appId, fields, select, keyFields };
+      const validation = this.parseValidateOnlySuffix();
+      return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...validation };
     }
 
     // UPSERT INTO ... VALUES (...)
@@ -1896,7 +1908,8 @@ export class Parser {
     } while (this.consume(TokenKind.COMMA));
 
     const keyFields = this.parseOnDuplicate();
-    return { type: "UPSERT", appId, fields, values, keyFields };
+    const validation = this.parseValidateOnlySuffix();
+    return { type: "UPSERT", appId, fields, values, keyFields, ...validation };
   }
 
   private parseOnDuplicate(): string[] {
@@ -2020,10 +2033,40 @@ export class Parser {
       );
     }
 
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from };
+    const validation = this.parseValidateOnlySuffix();
+    if (subtableCode && validation.validateOnly) {
+      throw new ParseError("VALIDATE ONLY はサブテーブル UPDATE に対応していません", this.prev());
+    }
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...validation };
     return subtableCode
-      ? { type: "UPDATE", appId, subtableCode, assignments, where }
-      : { type: "UPDATE", appId, assignments, where };
+      ? { type: "UPDATE", appId, subtableCode, assignments, where, ...validation }
+      : { type: "UPDATE", appId, assignments, where, ...validation };
+  }
+
+  /** DML末尾の VALIDATE ONLY [INTO #err]。VALIDATE / ONLY はsoft keyword。 */
+  private parseValidateOnlySuffix(): { validateOnly?: true; validationErrorTable?: string | null } {
+    if (!this.isSoftKeyword("VALIDATE")) return {};
+    const validateTok = this.advance();
+    if (!this.isSoftKeyword("ONLY")) {
+      throw new ParseError("VALIDATE の後には ONLY が必要です", this.peek());
+    }
+    this.advance();
+    let validationErrorTable: string | null = null;
+    if (this.consume(TokenKind.INTO)) {
+      const tok = this.peek();
+      if (tok.kind !== TokenKind.IDENT || !tok.value.startsWith("#")) {
+        throw new ParseError("VALIDATE ONLY INTO には # で始まる一時テーブル名が必要です", tok);
+      }
+      validationErrorTable = this.parseTableName();
+    }
+    if (this.isSoftKeyword("ON") || this.isSoftKeyword("REJECT")) {
+      throw new ParseError("VALIDATE ONLY と ON ERROR / REJECT LIMIT は併記できません", validateTok);
+    }
+    return { validateOnly: true, validationErrorTable };
+  }
+
+  private isSoftKeyword(value: string): boolean {
+    return this.peek().kind === TokenKind.IDENT && this.peek().value.toUpperCase() === value;
   }
 
   private validateUpdateFromAssignments(

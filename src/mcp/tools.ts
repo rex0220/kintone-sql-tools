@@ -10,6 +10,7 @@ import {
   type BatchExecuteResult,
   type ExecuteOptions,
   type AssertResult,
+  type DmlValidationResult,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
@@ -91,6 +92,8 @@ export interface StatementValidation {
   /** DML の書き込み対象アプリ ID（DML 以外は null。appIds は参照先も含む） */
   targetAppId: number | null;
   isUpdateFrom: boolean;
+  isValidationOnly: boolean;
+  requiresCompleteInput: boolean;
 }
 
 interface ValidationCommon {
@@ -100,6 +103,8 @@ interface ValidationCommon {
   statementCount: number;
   isReadOnlyBatch: boolean;
   containsDml: boolean;
+  containsValidationOnly: boolean;
+  requiresCompleteInput: boolean;
   tempTables: string[];
   canRunWithQueryTool: boolean;
   requiresMutationTool: boolean;
@@ -248,7 +253,22 @@ function toAssertPayload(result: AssertResult) {
   };
 }
 
-function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertResult>) {
+function toDmlValidationPayload(result: DmlValidationResult) {
+  return {
+    ok: true,
+    type: result.type,
+    operation: result.operation,
+    validatedRows: result.validatedRows,
+    validRows: result.validRows,
+    invalidRows: result.invalidRows,
+    errorCount: result.errorCount,
+    columns: result.columns,
+    errors: result.errors,
+    ...(result.errTable ? { errTable: result.errTable } : {}),
+  };
+}
+
+function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertResult | DmlValidationResult>) {
   if (result.type === "INSERT") {
     return {
       ok: true,
@@ -417,6 +437,8 @@ export function createKsqlMcpTools(
       tempOnlySource: s.tempOnlySource,
       targetAppId: s.targetAppId,
       isUpdateFrom: s.isUpdateFrom,
+      isValidationOnly: s.isValidationOnly,
+      requiresCompleteInput: s.requiresCompleteInput,
     }));
 
     const common = {
@@ -424,6 +446,8 @@ export function createKsqlMcpTools(
       statementCount: analysis.statementCount,
       isReadOnlyBatch: analysis.isReadOnlyBatch,
       containsDml: analysis.containsDml,
+      containsValidationOnly: analysis.containsValidationOnly,
+      requiresCompleteInput: analysis.requiresCompleteInput,
       tempTables: analysis.tempTables,
       canRunWithQueryTool: analysis.isReadOnlyBatch,
       requiresMutationTool: analysis.containsDml,
@@ -510,7 +534,7 @@ export function createKsqlMcpTools(
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: input.onLimit,
+        onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
       });
@@ -546,6 +570,7 @@ export function createKsqlMcpTools(
         cacheContext: validation.cacheContext,
       });
       if (result.type === "ASSERT") return toAssertPayload(result);
+      if (result.type === "VALIDATION") return toDmlValidationPayload(result);
       if (result.type !== "SELECT") {
         throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
       }
@@ -558,7 +583,7 @@ export function createKsqlMcpTools(
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: input.onLimit,
+      onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
       timeout: input.timeout,
     });
     const result = await executeSql(runtime.sql, runtime.client, {
@@ -568,6 +593,7 @@ export function createKsqlMcpTools(
       cacheContext: runtime.cacheContext,
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
+    if (result.type === "VALIDATION") return toDmlValidationPayload(result);
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
     }
@@ -726,7 +752,7 @@ export function createKsqlMcpTools(
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
     }
     // 単文 ASSERT は validate の isReadOnly ガードで ksql_query 誘導済みのため来ない
-    if (result.type === "SELECT" || result.type === "ASSERT") {
+    if (result.type === "SELECT" || result.type === "ASSERT" || result.type === "VALIDATION") {
       throw new Error(`ArgumentError: ksql_mutate returned unexpected result type ${result.type}.`);
     }
     return toMutationPayload(result);

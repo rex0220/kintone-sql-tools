@@ -456,7 +456,7 @@ export function deleteToDeleteBatches(
 // 複合フィールド変換ヘルパー
 // ============================================================
 
-type KintoneValue = string | string[] | Array<{ code: string }>;
+export type KintoneValue = string | string[] | Array<{ code: string }>;
 
 function isUserType(t: string | undefined): boolean  { return USER_TYPES.has(t  ?? ""); }
 function isArrayType(t: string | undefined): boolean { return ARRAY_TYPES.has(t ?? ""); }
@@ -564,6 +564,25 @@ export function evalCaseWhenValue(
  * fieldType が USER_SELECT 等の場合は配列形式に変換する。
  */
 export function toKintoneValue(value: SqlValue, fieldType?: string): KintoneValue {
+  const result = normalizeDmlSqlValue(value, fieldType);
+  if (!result.ok) throw new DmlConvertError(result.message);
+  return result.value;
+}
+
+export type DmlSqlValueNormalization =
+  | { ok: true; value: KintoneValue }
+  | { ok: false; message: string };
+
+/** throwしない正規化primitive。VALIDATE ONLYと従来converterが共有する。 */
+export function normalizeDmlSqlValue(value: SqlValue, fieldType?: string): DmlSqlValueNormalization {
+  try {
+    return { ok: true, value: convertDmlSqlValue(value, fieldType) };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function convertDmlSqlValue(value: SqlValue, fieldType?: string): KintoneValue {
   switch (value.type) {
     case "VARIABLE":
       throw new DmlConvertError(`未解決のバッチ変数 @${value.name} があります`);

@@ -533,6 +533,8 @@ export interface InsertStatement {
   subtableCode?: string | null;
   fields: string[];
   values: InsertRow[];
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
 }
 
 /** 1 行分の値リスト */
@@ -554,6 +556,8 @@ export interface UpsertStatement {
   values: InsertRow[];
   /** ON DUPLICATE (フィールド名) — 重複判定キー */
   keyFields: string[];
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
 }
 
 // ------------------------------------------------------------
@@ -566,6 +570,8 @@ export interface UpsertSelectStatement {
   fields: string[];
   select: SelectStatement;
   keyFields: string[];
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
 }
 
 // ------------------------------------------------------------
@@ -577,6 +583,8 @@ export interface InsertSelectStatement {
   appId: number;
   fields: string[];          // ターゲットフィールド（列順）
   select: SelectStatement;   // ソースクエリ
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
 }
 
 // ------------------------------------------------------------
@@ -591,6 +599,8 @@ export interface UpdateStatement {
   where: WhereExpr;   // WHERE 必須（UI で警告）
   /** UPDATE ... FROM source。未指定時は従来の UPDATE。 */
   from?: UpdateFromSource | null;
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
 }
 
 export interface Assignment {

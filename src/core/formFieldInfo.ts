@@ -8,11 +8,26 @@ export interface FormFieldProperty {
   format?: string;
   options?: Record<string, { index?: string | number }>;
   fields?: Record<string, FormFieldProperty>;
+  required?: boolean;
+  minValue?: string;
+  maxValue?: string;
+  minLength?: string;
+  maxLength?: string;
+  defaultValue?: unknown;
+  lookup?: { fieldMappings?: Array<{ field?: string }> };
 }
 
 /** TABLE.fields を含め、フォームフィールド定義を再帰的にフラット化する。 */
 export function flattenFormFieldProperties(
   properties: Record<string, FormFieldProperty>
+): KintoneFieldInfo[] {
+  return flattenFields(properties, collectLookupCopyFields(properties));
+}
+
+function flattenFields(
+  properties: Record<string, FormFieldProperty>,
+  lookupCopyFields: Set<string>,
+  inSubtable = false
 ): KintoneFieldInfo[] {
   const out: KintoneFieldInfo[] = [];
   for (const field of Object.values(properties)) {
@@ -22,10 +37,41 @@ export function flattenFormFieldProperties(
       fieldType: field.type,
       optionOrder: toOptionOrderMap(field.options),
       sortKind: detectSortKind(field.type, field.format),
+      required: field.required,
+      minValue: normalizeConstraintValue(field.minValue),
+      maxValue: normalizeConstraintValue(field.maxValue),
+      minLength: normalizeConstraintValue(field.minLength),
+      maxLength: normalizeConstraintValue(field.maxLength),
+      defaultValue: field.defaultValue,
+      inSubtable,
+      writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES.has(field.type),
     });
-    if (field.fields) out.push(...flattenFormFieldProperties(field.fields));
+    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
   }
   return out;
+}
+
+const NON_WRITABLE_FIELD_TYPES = new Set([
+  "CALC", "RECORD_NUMBER", "CREATOR", "CREATED_TIME", "MODIFIER", "UPDATED_TIME",
+  "STATUS", "STATUS_ASSIGNEE", "CATEGORY", "REFERENCE_TABLE", "SUBTABLE",
+]);
+
+function collectLookupCopyFields(properties: Record<string, FormFieldProperty>): Set<string> {
+  const result = new Set<string>();
+  const visit = (fields: Record<string, FormFieldProperty>): void => {
+    for (const field of Object.values(fields)) {
+      for (const mapping of field.lookup?.fieldMappings ?? []) {
+        if (mapping.field) result.add(mapping.field);
+      }
+      if (field.fields) visit(field.fields);
+    }
+  };
+  visit(properties);
+  return result;
+}
+
+function normalizeConstraintValue(value?: string): string | undefined {
+  return value == null || value === "" ? undefined : value;
 }
 
 function toOptionOrderMap(

@@ -209,6 +209,31 @@ describe("MCP tools", () => {
     expect(result).toEqual({ ok: true, type: "ASSERT", condition: "1 = 1" });
   });
 
+  test("query: VALIDATE ONLY はread-only分類されtruncateをerrorへ上書きする", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "validate-mcp",
+        maxRecords: input.maxRecords ?? 500, fetchParallel: input.fetchParallel ?? 3,
+        onLimit: input.onLimit ?? "truncate", timeout: input.timeout ?? 30000,
+      };
+    };
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 1,
+      invalidRows: 0, errorCount: 0, columns: ["code", "$err_code"], errors: [],
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const validation = await tools.validate({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY" });
+    expect(validation).toMatchObject({
+      isReadOnly: true, isDml: false, containsDml: false, containsValidationOnly: true,
+      requiresCompleteInput: true, canRunWithQueryTool: true, requiresMutationTool: false,
+    });
+    const result = await tools.query({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY", onLimit: "truncate" });
+    expect(runtimeInputs[0].onLimit).toBe("error");
+    expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
+  });
+
   test("query: 単文 ASSERT の不成立は AssertError で reject する", async () => {
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,

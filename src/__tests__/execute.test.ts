@@ -101,6 +101,78 @@ function makePagedClient(
   return client;
 }
 
+test("INSERT VALIDATE ONLY は全エラーを返しwrite APIを呼ばない", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true, minLength: "2" },
+    { code: "amount", label: "amount", fieldType: "NUMBER", minValue: "0", maxValue: "10" },
+  ];
+  const result = await execute(
+    "INSERT INTO APP100 (code, amount) VALUES ('', 11), ('OK', 5) VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-insert" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", operation: "INSERT", validatedRows: 2, validRows: 1, invalidRows: 1, errorCount: 2,
+  });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors.map((row) => row.$err_code)).toEqual(["ERR_REQUIRED", "ERR_RANGE_MAX"]);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+  expect(result.metrics).toMatchObject({ postCalls: 0, putCalls: 0, deleteCalls: 0 });
+});
+
+test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返す", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const result = await execute(
+    "UPSERT INTO APP100 (code, name) VALUES ('A', 'one'), ('A', 'two') ON DUPLICATE (code) VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-upsert" }
+  );
+  expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 2, invalidRows: 2, errorCount: 2 });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors.every((row) => row.$err_code === "ERR_KEY_DUP_SOURCE")).toBe(true);
+  expect(client.getCalls.length).toBeGreaterThan(0);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE VALIDATE ONLY は対象を読み取るがPUTせず$id順で検証する", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "2" }), makeRecord({ $id: "1" })] });
+  client.getFields = async () => [
+    { code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET amount = 11 WHERE $id in (1, 2) VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-update" }
+  );
+  expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 2, invalidRows: 2, errorCount: 2 });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors.map((row) => row.$id)).toEqual(["1", "2"]);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("INSERT SELECT VALIDATE ONLY はsourceを検証してPOSTしない", async () => {
+  const client = makeClient({ recordsByApp: { 200: [makeRecord({ amount: "bad" })] } });
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "amount", label: "amount", fieldType: "NUMBER" }]
+    : [{ code: "amount", label: "amount", fieldType: "SINGLE_LINE_TEXT" }];
+  const result = await execute(
+    "INSERT INTO APP100 (amount) SELECT amount FROM APP200 VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-insert-select" }
+  );
+  expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 1, invalidRows: 1, errorCount: 1 });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors[0].$err_code).toBe("ERR_TYPE_NUMBER");
+  expect(client.postCalls).toHaveLength(0);
+});
+
 // ----------------------------------------------------------------
 // SELECT
 // ----------------------------------------------------------------

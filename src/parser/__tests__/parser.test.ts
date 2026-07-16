@@ -12,6 +12,29 @@ function parseBatch(sql: string) {
 }
 function parseSelect(sql: string) { return parse(sql) as SelectStatement; }
 
+test("DML VALIDATE ONLY suffix をsoft keywordとして解析する", () => {
+  expect(parse("INSERT INTO APP100 (name) VALUES ('x') VALIDATE ONLY")).toMatchObject({
+    type: "INSERT", validateOnly: true, validationErrorTable: null,
+  });
+  expect(parse("UPSERT INTO APP100 (code) SELECT code FROM APP200 ON DUPLICATE (code) VALIDATE ONLY INTO #err")).toMatchObject({
+    type: "UPSERT_SELECT", validateOnly: true, validationErrorTable: "#err",
+  });
+  expect(parse("UPDATE APP100 SET name = 'x' WHERE $id = 1 VALIDATE ONLY")).toMatchObject({
+    type: "UPDATE", validateOnly: true,
+  });
+});
+
+test("validate / only は通常フィールド名として維持する", () => {
+  expect(parse("INSERT INTO APP100 (validate, only) VALUES ('a', 'b')")).toMatchObject({
+    type: "INSERT", fields: ["validate", "only"],
+  });
+});
+
+test("サブテーブル VALIDATE ONLY を拒否する", () => {
+  expect(() => parse("INSERT INTO APP100$rows (x) VALUES ('a') VALIDATE ONLY")).toThrow(ParseError);
+  expect(() => parse("UPDATE APP100$rows SET x = 'a' WHERE _pid = 1 VALIDATE ONLY")).toThrow(ParseError);
+});
+
 // ----------------------------------------------------------------
 // SELECT 基本
 // ----------------------------------------------------------------

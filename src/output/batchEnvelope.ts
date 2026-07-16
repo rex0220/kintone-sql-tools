@@ -12,14 +12,22 @@ import type {
   AssertResult,
   BatchExecuteResult,
   ExecuteResult,
+  DmlValidationResult,
   SelectResult,
 } from "../execute";
 
 export interface BatchEnvelopeResultSet {
+  type?: "SELECT" | "VALIDATION";
   columns: string[];
   rows: SelectResult["rows"];
   rowCount: number;
   warnings: string[];
+  operation?: DmlValidationResult["operation"];
+  validatedRows?: number;
+  validRows?: number;
+  invalidRows?: number;
+  errorCount?: number;
+  errTable?: string;
 }
 
 export interface BatchEnvelope {
@@ -39,7 +47,7 @@ export interface BuildBatchEnvelopeOptions {
 
 /** ミューテーション結果から影響件数フィールドを取り出す（文ごとエンベロープ用） */
 function toMutationSummary(
-  result: Exclude<ExecuteResult, SelectResult | AssertResult>
+  result: Exclude<ExecuteResult, SelectResult | AssertResult | DmlValidationResult>
 ): Record<string, unknown> {
   if (result.type === "INSERT") {
     return { insertedCount: result.insertedCount, createdIds: result.createdIds };
@@ -88,12 +96,32 @@ export function buildBatchEnvelope(
       }
       entry.resultIndex = results.length;
       results.push({
+        type: "SELECT",
         columns: s.result.columns,
         rows: s.result.rows,
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? [],
       });
-    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
+    } else if (s.status === "success" && s.result?.type === "VALIDATION") {
+      totalRows += s.result.errorCount;
+      if (maxTotalRecords !== undefined && totalRows > maxTotalRecords) {
+        throw new Error(`ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`);
+      }
+      entry.resultIndex = results.length;
+      results.push({
+        type: "VALIDATION",
+        columns: s.result.columns,
+        rows: s.result.errors,
+        rowCount: s.result.errorCount,
+        warnings: [],
+        operation: s.result.operation,
+        validatedRows: s.result.validatedRows,
+        validRows: s.result.validRows,
+        invalidRows: s.result.invalidRows,
+        errorCount: s.result.errorCount,
+        ...(s.result.errTable ? { errTable: s.result.errTable } : {}),
+      });
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT" && s.result.type !== "VALIDATION") {
       // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない
       //（ExecuteResult 型上は含まれるため型の除外も兼ねる）
       Object.assign(entry, toMutationSummary(s.result));

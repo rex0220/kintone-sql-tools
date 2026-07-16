@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v2.13.0（未リリース）
+
+### 機能追加
+
+- **B12-A `VALIDATE ONLY` を追加**。親レコードの `INSERT` / `UPSERT` / `UPDATE`（VALUES、SELECT、`UPDATE ... FROM`を含む）をkintoneへ書き込まず全候補行検証できる。必須、型、範囲、文字列長、選択肢、UPSERTキーを安定エラーコードで収集し、1行複数エラーを返す。複文では `INTO #err` に原子的に作成・追記して後続文から参照できる。
+- `VALIDATE ONLY` はread-onlyとしてMCP `ksql_query`、CLI、プラグインからDML承認なしで実行できる一方、完全入力を要求するためtruncate設定を常にerrorへ上書きする。通常DMLのAST・変換・確認・書き込み経路は維持する。
+
 ## v2.12.0（2026-07-16）
 
 ### 機能追加
