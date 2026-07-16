@@ -1,14 +1,14 @@
 # B12-A `VALIDATE ONLY` 実装計画
 
 - 作成日: 2026-07-16
-- ステータス: **R3・v2.13.0 実装済み（文字数計数のkintone実機確認のみリリースゲートとして残存）**
+- ステータス: **R4・v2.13.0 実装済み・実機確認済み（残存ゲートなし）**
 - 親仕様: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md) R4
 - 関連仕様: [ksql_update_from_spec.md](ksql_update_from_spec.md)（B11 v1 実装済み。B12-A は B11 v1.1 非依存）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B12
 - 対象: B12-A `VALIDATE ONLY` のみ。B12-B `ON ERROR SKIP` と B11 v1.1 は本計画の対象外
 - 2026-07-16 R1: 初版。構文、結果セット、制約メタデータ、collect 型検証器、read-only 配線、`#err`、実装順を確定
 - 2026-07-16 R2: Claude レビューを反映。通常書き込み経路との検証厳格度の非対称を明記し、B12-B の設計ゲートを追加。文字数境界の実機確認と truncate override の利用者向け明記を必須化
-- 2026-07-16 R3: S0〜S7を実装。AST・解析ベースread-only分類、制約メタデータ、非throw正規化primitive、全対応候補行、`DmlValidationResult`、原子的`#err` append、MCP/CLI/plugin表示とfail-closedを配線。自動テスト・全bundle検証済み。文字数境界の実機確認は未完了
+- 2026-07-16 R3: S0〜S7を実装。AST・解析ベースread-only分類、制約メタデータ、非throw正規化primitive、全対応候補行、`DmlValidationResult`、原子的`#err` append、MCP/CLI/plugin表示とfail-closedを配線。自動テスト・全bundle検証済み。文字数境界の実機確認は未完了→R4で消化
 
 ---
 
@@ -190,7 +190,7 @@ export function validateAndNormalizeDmlValue(
 - B12-A ではプレビューとしてこの厳密検証を採用する。B12-B は、APIなら受理し得る行まで隔離する false isolation を避けて書き込み経路へ厳格度を合わせるか、Tier 0 厳格検証をそのまま隔離条件にするかを、実装着手前に親仕様で確定する
 - NUMBER は空値をrequiredとは別に扱い、非空なら有限数であることを検証する
 - R3 の範囲検証で参照した「厳密数値比較」は一般比較器には未実装（B9保留）。B12-A はschema境界比較専用の10進文字列比較を局所実装し、WHERE/ASSERTの意味論は変更しない
-- length は正規化前の文字列に対し Unicode code point 数で判定する。ただし kintone 実機の文字数計数と一致するかは未確認であり、サロゲートペア・結合文字・異体字セレクタを含む min/max 境界を実機確認してから互換契約を確定する
+- length は **UTF-16 code units（JS `String#length`）** で判定する（**kintone 実測 2026-07-16・APP4221 で確定**: 𩸽×6=12units が maxLength=10 で CB_VA01 拒否・結合文字×5=10units は受理）。あわせて **minLength は空文字にも適用される**（明示・create 未指定とも CB_VA01）ことを実測し、ローカル判定を同一挙動へ修正済み（実測 fixture を回帰テストで固定）
 - choice は配列型では各要素を検証し、1フィールドにつき1つの `ERR_CHOICE_INVALID` を返す
 - 親仕様の既存コード体系を維持し、DATE / TIME / DATETIME の形式エラーは `ERR_TYPE_DATE` に集約する
 
@@ -357,7 +357,7 @@ appendValidationErrors(
 
 - 言語リファレンス、MCP/CLI/plugin仕様、CHANGELOG、課題台帳を更新
 - 言語リファレンスと MCP tool description / server仕様には、`VALIDATE ONLY` が完全入力を必要とするため、利用者の `onLimit=truncate` / `--on-limit truncate` / UI truncate 設定を無視して error 扱いにすることを明記する
-- kintone 実機で minLength / maxLength の境界を確認する。ASCII、BMP日本語、サロゲートペア、結合文字、異体字セレクタを対象に、API/form側の計数とローカル判定が一致しない場合は実装と仕様を同時に修正する
+- 【R4 消化済み】kintone 実機（APP4221）で境界確認済み: 計数=UTF-16 code units・空文字にも minLength 適用。ローカル判定を修正し実測値を fixture 固定（ASCII/数値境界・サロゲートペア・結合文字・空文字・create 未指定の全パターンでローカル==実機を確認）
 - package minor versionは実装PR時に決定
 - `npm test`
 - `npm run build`

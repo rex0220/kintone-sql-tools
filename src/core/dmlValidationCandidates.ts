@@ -37,13 +37,19 @@ export function validateDmlCandidates(
       for (const info of fieldInfos) {
         if (info.inSubtable) continue;
         if (candidate.payload.has(info.code)) continue;
-        if (!isEmptyDmlValue(info.defaultValue)) {
+        const emptyDefault = isEmptyDmlValue(info.defaultValue);
+        if (!emptyDefault) {
           const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);
           if (!defaultResult.ok) rowErrors.push({
             field: info.code, code: defaultResult.code, message: `既定値: ${defaultResult.message}`,
           });
-        } else if (info.required) {
-          rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} は必須です` });
+        } else {
+          const emptyResult = validateAndNormalizeDmlValue("", info);
+          if (!emptyResult.ok) {
+            rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
+          } else if (info.required) {
+            rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} は必須です` });
+          }
         }
       }
     }

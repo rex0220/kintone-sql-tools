@@ -25,6 +25,12 @@ test("10進文字列を浮動小数化せず比較する", () => {
   expect(compareDecimal("-1.20", "-1.2")).toBe(0);
 });
 
+test("UTF-16 code units を長さ制約に使い、空文字でも minLength を適用する", () => {
+  expect(validateAndNormalizeDmlValue("𩸽𩸽𩸽𩸽𩸽𩸽", field("SINGLE_LINE_TEXT", { maxLength: "10" }))).toMatchObject({ ok: false, code: "ERR_LENGTH_MAX" });
+  expect(validateAndNormalizeDmlValue("𩸽𩸽", field("SINGLE_LINE_TEXT", { minLength: "3" }))).toMatchObject({ ok: true });
+  expect(validateAndNormalizeDmlValue("", field("SINGLE_LINE_TEXT", { minLength: "3" }))).toMatchObject({ ok: false, code: "ERR_LENGTH_MIN" });
+});
+
 test("create バリデーションではサブテーブル子フィールドを必須/既定値走査から除外する", () => {
   const candidates = [{
     rowNumber: 1,
@@ -40,4 +46,21 @@ test("create バリデーションではサブテーブル子フィールドを�
   const result = validateDmlCandidates(candidates, "INSERT", ["title"], ["title"], fieldInfos, 1);
   expect(result.errors).toHaveLength(0);
   expect(result.invalidRows).toBe(0);
+});
+
+test("create バリデーションで未指定フィールドの空値にも minLength を適用する", () => {
+  const candidates = [{
+    rowNumber: 1,
+    operation: "INSERT" as const,
+    mode: "create" as const,
+    payload: new Map<string, unknown>([["title", "abc"]]),
+    preErrors: [],
+  }];
+  const fieldInfos = [
+    { code: "title", label: "タイトル", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "メモ", fieldType: "SINGLE_LINE_TEXT", minLength: "3" },
+  ];
+  const result = validateDmlCandidates(candidates, "INSERT", ["title"], ["title"], fieldInfos, 1);
+  expect(result.errors).toEqual([expect.objectContaining({ $err_field: "memo", $err_code: "ERR_LENGTH_MIN" })]);
+  expect(result.invalidRows).toBe(1);
 });

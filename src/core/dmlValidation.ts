@@ -60,7 +60,7 @@ export function validateAndNormalizeDmlValue(
     }
   }
   if (typeof value === "string") {
-    const length = [...value].length;
+    const length = value.length;
     const min = field.minLength == null ? null : Number(field.minLength);
     const max = field.maxLength == null ? null : Number(field.maxLength);
     if (Number.isFinite(min) && length < min!) {
