@@ -1,7 +1,7 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **未実装・採用（B12・Phase 3）。仕様レビュー R4。** **B12-A `VALIDATE ONLY` は B11 非依存で先行可能**。B12-B の看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **一部実装（B12-A `VALIDATE ONLY` は v2.13.0、文字数計数のkintone実機確認待ち）。仕様レビュー R4。** B12-B は未実装。看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
 - B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。
 - 2026-07-16 R2: Oracle / Snowflake / PostgreSQL / SQL Server / Db2 の公式仕様と比較し、採用点・非採用点・kSQL 固有の安全性判断を §8 に追記。

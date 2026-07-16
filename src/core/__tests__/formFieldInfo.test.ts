@@ -42,3 +42,27 @@ test("TABLE.fields を再帰展開し、子フィールドの型・選択肢を�
   expect(fields.find((field) => field.code === "子選択")?.fieldType).toBe("MULTI_SELECT");
   expect(fields.find((field) => field.code === "深い数値")?.sortKind).toBe("number");
 });
+
+test("VALIDATE ONLY用のフォーム制約メタデータを保持する", () => {
+  const [field] = flattenFormFieldProperties({
+    code: {
+      code: "code", label: "コード", type: "SINGLE_LINE_TEXT", required: true,
+      minLength: "2", maxLength: "10", defaultValue: "AA",
+    },
+  });
+  expect(field).toMatchObject({
+    required: true, minLength: "2", maxLength: "10", defaultValue: "AA",
+  });
+});
+
+test("ルックアップコピー先を書込不可として展開する", () => {
+  const fields = flattenFormFieldProperties({
+    customer: {
+      code: "customer", label: "customer", type: "SINGLE_LINE_TEXT",
+      lookup: { fieldMappings: [{ field: "customerName" }] },
+    },
+    customerName: { code: "customerName", label: "customerName", type: "SINGLE_LINE_TEXT" },
+  });
+  expect(fields.find((f) => f.code === "customer")?.writable).toBe(true);
+  expect(fields.find((f) => f.code === "customerName")?.writable).toBe(false);
+});

@@ -29,6 +29,35 @@ test("DML を含むバッチ: containsDml = true / isReadOnlyBatch = false", () 
   expect(a.statements[1].hasWhere).toBe(true);
 });
 
+test("VALIDATE ONLY はread-onlyだが完全入力を要求する", () => {
+  const a = analyze("INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY");
+  expect(a.isReadOnlyBatch).toBe(true);
+  expect(a.containsDml).toBe(false);
+  expect(a.containsValidationOnly).toBe(true);
+  expect(a.requiresCompleteInput).toBe(true);
+  expect(a.statements[0]).toMatchObject({ isDml: false, isReadOnly: true, isValidationOnly: true });
+});
+
+test("VALIDATE ONLY INTO は暗黙temp作成・同schema appendを解析する", () => {
+  const a = analyze(
+    "INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY INTO #err; " +
+    "INSERT INTO APP100 (x) VALUES ('b') VALIDATE ONLY INTO #err; SELECT * FROM #err"
+  );
+  expect(a.statements[0].tempTablesCreated).toEqual(["#err"]);
+  expect(a.statements[1].dependsOn).toEqual([0]);
+  expect(a.statements[2].dependsOn).toEqual([0]);
+});
+
+test("VALIDATE ONLY INTO の単文・異schema appendを拒否する", () => {
+  expect(() => analyze("INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY INTO #err")).toThrow(
+    "ArgumentError: VALIDATE ONLY INTO requires a batch."
+  );
+  expect(() => analyze(
+    "INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY INTO #err; " +
+    "INSERT INTO APP100 (y) VALUES ('b') VALIDATE ONLY INTO #err"
+  )).toThrow("different payload schema");
+});
+
 test("UPDATE FROM #temp は collectRefs により依存と参照が自動配線される", () => {
   const a = analyze(
     "CREATE TEMP TABLE #e AS SELECT $id AS k, name AS f FROM APP200; " +

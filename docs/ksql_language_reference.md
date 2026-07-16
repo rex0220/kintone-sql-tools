@@ -1591,6 +1591,43 @@ ON DUPLICATE (顧客名)
 
 ---
 
+## 17.1 VALIDATE ONLY（書き込み前検証）
+
+`INSERT` / `UPSERT` / `UPDATE` の末尾に `VALIDATE ONLY` を付けると、候補行を全件検証し、kintone の POST / PUT / DELETE APIを呼ばずにエラー一覧を返します。親レコードDMLのみ対応し、サブテーブルDML、`DELETE`、`REORDER`には指定できません。
+
+```sql
+INSERT INTO APP100 (顧客コード, 金額)
+VALUES ('C001', 100), ('', -1)
+VALIDATE ONLY;
+
+UPSERT INTO APP100 (顧客コード, 顧客名)
+SELECT 顧客コード, 顧客名 FROM APP200
+ON DUPLICATE (顧客コード)
+VALIDATE ONLY;
+
+UPDATE APP100 SET 金額 = 金額 * 1.1
+WHERE ステータス = '有効'
+VALIDATE ONLY;
+```
+
+検証対象は必須、数値・日付・時刻・日時、数値範囲、文字列長、選択肢、UPSERTキーの空値・ソース内重複です。1行に複数の問題があればエラーも複数行になります。結果には `validatedRows` / `validRows` / `invalidRows` / `errorCount` と、入力ペイロード列および `$err_*` 診断列が含まれます。
+
+複文バッチでは `VALIDATE ONLY INTO #err` とすると、同じエラー行を後続文から一時テーブルとして参照できます。同名 `#err` は入力列構成が同じ場合だけ追記でき、異なるschemaまたは `tempTableMaxRows` 超過は既存行を変更せずエラーになります。
+
+```sql
+INSERT INTO APP100 (顧客コード, 金額)
+SELECT 顧客コード, 金額 FROM #source
+VALIDATE ONLY INTO #err;
+SELECT * FROM #err;
+```
+
+- `VALIDATE ONLY` はread-only扱いで、MCPでは `ksql_query`、CLIでは `--allow-dml`なし、プラグインでは確認ダイアログなしで実行できます
+- 完全な候補集合が必要なため、`onLimit=truncate` / CLI `--on-limit truncate` / プラグインのtruncate設定は無視され、常にerrorとして扱われます
+- ローカル検証は通常の書き込み経路より厳密な場合があります。検証エラーはkSQLが検出したTier 0問題であり、同じ値をkintone APIが必ず拒否するという予測ではありません
+- 検証通過は書き込み成功を保証しません。権限、競合、ユーザー実在性、既存レコードとの一意制約衝突などAPI実行時の問題は対象外です
+
+---
+
 ## 18. DELETE
 
 ```sql

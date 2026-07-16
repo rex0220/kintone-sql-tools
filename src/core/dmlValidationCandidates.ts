@@ -1,0 +1,74 @@
+import type { KintoneFieldInfo } from "../execute";
+import type { ProcessRow } from "../engine/process";
+import { isEmptyDmlValue, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
+
+export type ValidationOperation = "INSERT" | "UPDATE" | "UPSERT";
+
+export interface DmlValidationCandidate {
+  rowNumber: number;
+  operation: ValidationOperation;
+  mode: "create" | "update";
+  payload: Map<string, unknown>;
+  preErrors: Array<{ field: string; code: DmlValidationErrorCode; message: string }>;
+}
+
+export const VALIDATION_META_COLUMNS = [
+  "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+] as const;
+
+export function validateDmlCandidates(
+  candidates: DmlValidationCandidate[],
+  operation: ValidationOperation,
+  payloadFields: string[],
+  targetFields: string[],
+  fieldInfos: KintoneFieldInfo[],
+  statementNumber: number
+): { errors: ProcessRow[]; invalidRows: number } {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const errors: ProcessRow[] = [];
+  const invalid = new Set<number>();
+  for (const candidate of candidates) {
+    const rowErrors = [...candidate.preErrors];
+    for (const code of targetFields) {
+      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!);
+      if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
+    }
+    if (candidate.mode === "create") {
+      for (const info of fieldInfos) {
+        if (candidate.payload.has(info.code)) continue;
+        if (!isEmptyDmlValue(info.defaultValue)) {
+          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);
+          if (!defaultResult.ok) rowErrors.push({
+            field: info.code, code: defaultResult.code, message: `既定値: ${defaultResult.message}`,
+          });
+        } else if (info.required) {
+          rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} は必須です` });
+        }
+      }
+    }
+    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
+    for (const error of rowErrors) {
+      const row: ProcessRow = {};
+      for (const field of payloadFields) row[field] = renderValidationValue(candidate.payload.get(field));
+      row["$err_statement"] = String(statementNumber);
+      row["$err_operation"] = operation;
+      row["$err_row"] = String(candidate.rowNumber);
+      row["$err_field"] = error.field;
+      row["$err_code"] = error.code;
+      row["$err_message"] = error.message;
+      errors.push(row);
+    }
+  }
+  return { errors, invalidRows: invalid.size };
+}
+
+export function renderValidationValue(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "object" && "type" in value) {
+    const sql = value as { type: string; value?: unknown; elements?: Array<{ value: string }> };
+    if (sql.type === "STRING" || sql.type === "NUMBER") return String(sql.value ?? "");
+    if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
+  }
+  if (Array.isArray(value)) return JSON.stringify(value);
+  return String(value);
+}

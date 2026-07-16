@@ -1,13 +1,14 @@
 # B12-A `VALIDATE ONLY` 実装計画
 
 - 作成日: 2026-07-16
-- ステータス: **R2・レビュー済み・実装着手可**
+- ステータス: **R3・v2.13.0 実装済み（文字数計数のkintone実機確認のみリリースゲートとして残存）**
 - 親仕様: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md) R4
 - 関連仕様: [ksql_update_from_spec.md](ksql_update_from_spec.md)（B11 v1 実装済み。B12-A は B11 v1.1 非依存）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B12
 - 対象: B12-A `VALIDATE ONLY` のみ。B12-B `ON ERROR SKIP` と B11 v1.1 は本計画の対象外
 - 2026-07-16 R1: 初版。構文、結果セット、制約メタデータ、collect 型検証器、read-only 配線、`#err`、実装順を確定
 - 2026-07-16 R2: Claude レビューを反映。通常書き込み経路との検証厳格度の非対称を明記し、B12-B の設計ゲートを追加。文字数境界の実機確認と truncate override の利用者向け明記を必須化
+- 2026-07-16 R3: S0〜S7を実装。AST・解析ベースread-only分類、制約メタデータ、非throw正規化primitive、全対応候補行、`DmlValidationResult`、原子的`#err` append、MCP/CLI/plugin表示とfail-closedを配線。自動テスト・全bundle検証済み。文字数境界の実機確認は未完了
 
 ---
 
@@ -425,17 +426,17 @@ appendValidationErrors(
 
 ## 12. 受入条件
 
-- [ ] 対応DMLへ `VALIDATE ONLY` を付けると候補全行を検証しwrite APIを1回も呼ばない
-- [ ] 1行複数エラーで `invalidRows=1`, `errorCount>1`
-- [ ] UPSERTは照合後のcreate/updateでrequired規則を切り替える
-- [ ] `VALIDATE ONLY` はksql_query/CLI/pluginでDML承認なしに動く
-- [ ] truncate設定でも完全性不足を成功扱いせずfail-closed
-- [ ] 言語リファレンスとMCP説明に、VALIDATE ONLYではtruncate設定を無視してerror扱いにすることが明記されている
+- [x] 対応DMLへ `VALIDATE ONLY` を付けると候補全行を検証しwrite APIを1回も呼ばない
+- [x] 1行複数エラーで `invalidRows=1`, `errorCount>1`
+- [x] UPSERTは照合後のcreate/updateでrequired規則を切り替える
+- [x] `VALIDATE ONLY` はksql_query/CLI/pluginでDML承認なしに動く
+- [x] truncate設定でも完全性不足を成功扱いせずfail-closed
+- [x] 言語リファレンスとMCP説明に、VALIDATE ONLYではtruncate設定を無視してerror扱いにすることが明記されている
 - [ ] minLength / maxLength の文字数計数をkintone実機で境界確認し、結果がテストへ固定されている
-- [ ] 同名`#err`へのappendが原子的でschema/上限を守る
-- [ ] MCP/CLI/UIで同じ件数・列順・error codeを観測できる
-- [ ] 句なしDMLのAST、API request、結果、確認、API回数に回帰がない
-- [ ] B12-B/B11 v1.1のコードを含めない
+- [x] 同名`#err`へのappendが原子的でschema/上限を守る
+- [x] MCP/CLI/UIで同じ件数・列順・error codeを観測できる
+- [x] 句なしDMLのAST、API request、結果、確認、API回数に回帰がない
+- [x] B12-B/B11 v1.1のコードを含めない
 
 ## 13. 主なリスクと対策
 

@@ -347,6 +347,7 @@ read-only SQL を実行する。
 5. `DESCRIBE`
 6. `EXPLAIN`
 7. `ASSERT`（v1.10.0。read-only 扱い。成功時は `{ ok: true, type: "ASSERT", condition: "<条件>" }`、不成立は `AssertError`。バッチ内では result を持たない no-result 文）
+8. `INSERT` / `UPSERT` / `UPDATE` の `VALIDATE ONLY`（書き込みAPI 0のread-only検証。`allowDml` / `confirmText`不要）
 
 拒否する文:
 
@@ -371,6 +372,7 @@ read-only SQL を実行する。
 MCP tool result は常に構造化 JSON として返す。
 
 `onLimit` は tool input 上の名前であり、`execute()` に渡すときは `ExecuteOptions.onLimitReached` に明示的にマッピングする。
+ただし `VALIDATE ONLY` は候補全件の完全性が必要なため、入力が `truncate` でも無視して `error` として実行する。バッチ内に `VALIDATE ONLY` が1文でもあればバッチ全体を同じ扱いにする。
 
 `maxRecords` は MCP 層で既定値 500 を明示し、`execute()` に必ず渡す。
 `execute()` 内部の既定値とは独立して、AI 利用時の安全側の既定値を MCP 層で固定する。
@@ -392,6 +394,8 @@ tool input として受ける場合も、`execute()` ではなく runtime/client
   "warnings": []
 }
 ```
+
+`VALIDATE ONLY` の単文出力は `type: "VALIDATION"` とし、`operation`、`validatedRows`、`validRows`、`invalidRows`、`errorCount`、`columns`、`errors`を返す。`VALIDATE ONLY INTO #err` は複文バッチ専用で、validation結果セットに加えて後続文から `#err` を参照できる。
 
 ### 7.2.1 バッチ（複文）入力（v1.4.0）
 

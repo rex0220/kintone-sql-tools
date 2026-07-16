@@ -45,6 +45,20 @@ export function isReadOnlyType(type: string): boolean {
     || type === "ASSERT";
 }
 
+/** 文が実際に kintone の mutation API を呼ぶか。 */
+export function writesKintone(stmt: Statement): boolean {
+  return isDmlType(stmt.type) && !("validateOnly" in stmt && stmt.validateOnly === true);
+}
+
+export function isReadOnlyStatement(stmt: Statement): boolean {
+  return !writesKintone(stmt) && (isReadOnlyType(stmt.type) || isDmlType(stmt.type));
+}
+
+/** truncate を許さず完全な入力集合を必要とする文か。 */
+export function requiresCompleteInput(stmt: Statement): boolean {
+  return isDmlType(stmt.type);
+}
+
 export function hasWhereClause(stmt: unknown): boolean {
   if (!stmt || typeof stmt !== "object") return false;
   const obj = stmt as { where?: unknown };

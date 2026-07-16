@@ -22,6 +22,7 @@ import {
   type BatchStatementResult,
   type DisplayOptions,
   type AssertResult,
+  type DmlValidationResult,
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
@@ -56,6 +57,8 @@ import {
   hasWhereClause,
   isDmlType,
   isNoFromSelectStatement,
+  writesKintone,
+  requiresCompleteInput,
 } from "../node/dmlGuard";
 
 export {
@@ -562,6 +565,18 @@ function buildAssertOutput(result: AssertResult, format: OutputFormat, pretty: b
   return `assertion ok: ${result.condition}`;
 }
 
+export function buildValidationOutput(
+  result: DmlValidationResult,
+  format: OutputFormat,
+  noHeader: boolean,
+  pretty: boolean,
+  displayOptions: DisplayOptions
+): string {
+  if (format === "json") return JSON.stringify({ ok: true, ...result, metrics: undefined }, null, pretty ? 2 : 0);
+  if (format === "jsonl") return result.errors.map((row) => JSON.stringify(row)).join("\n");
+  return buildOutput({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, format, noHeader, pretty, displayOptions);
+}
+
 function buildMutationOutput(
   result: Exclude<ExecuteResult, SelectResult | AssertResult>,
   format: OutputFormat,
@@ -720,6 +735,7 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     else if (r.type === "DELETE") parts.push(`deleted=${r.deletedCount}`);
     else if (r.type === "UPSERT") parts.push(`inserted=${r.insertedCount} updated=${r.updatedCount}`);
     else if (r.type === "REORDER") parts.push(`reordered=${r.reorderedParentCount}`);
+    else if (r.type === "VALIDATION") parts.push(`validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`);
   }
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
@@ -781,6 +797,8 @@ function buildBatchResultsOutput(
   for (const s of batch.statements) {
     if (s.status === "success" && s.result?.type === "SELECT") {
       outputs.push(buildOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
+    } else if (s.status === "success" && s.result?.type === "VALIDATION") {
+      outputs.push(buildValidationOutput(s.result, opts.format, opts.noHeader, opts.pretty, opts.displayOptions));
     }
   }
   return outputs.join("\n\n");
@@ -1529,6 +1547,7 @@ async function run(): Promise<number> {
   let isBatchSql = false;
   let batchContainsDml = false;
   let batchAnalysis: BatchAnalysis | null = null;
+  let needsCompleteInput = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1563,11 +1582,13 @@ async function run(): Promise<number> {
         batchAnalysis = analyzeBatch(statements);
         isBatchSql = true;
         batchContainsDml = batchAnalysis.containsDml;
+        needsCompleteInput = batchAnalysis.requiresCompleteInput;
       } else {
         const stmt = parseSqlStatement(sql);
         parsedStmt = stmt;
         stmtType = getStatementType(stmt);
-        isDmlStatement = isDmlType(stmtType);
+        isDmlStatement = writesKintone(stmt);
+        needsCompleteInput = requiresCompleteInput(stmt);
         hasWhere = hasWhereClause(stmt);
         insertValuesCount = getInsertValuesCount(stmt);
 
@@ -1578,7 +1599,7 @@ async function run(): Promise<number> {
           || stmtType === "SHOW_APPS"
           || stmtType === "DESCRIBE"
           || stmtType === "ASSERT"
-          || isDmlStatement;
+          || isDmlType(stmtType);
         if (!supported) {
           process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
           return 2;
@@ -1627,10 +1648,12 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
-  const dmlForcesOnLimitError = isDmlStatement || batchContainsDml;
+  const dmlForcesOnLimitError = needsCompleteInput;
   const effectiveOnLimit: OnLimitMode = dmlForcesOnLimitError ? "error" : onLimit;
   if (dmlForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
-    process.stderr.write("note: onLimit=truncate is ignored for DML (forced to error)\n");
+    process.stderr.write(isDmlStatement || batchContainsDml
+      ? "note: onLimit=truncate is ignored for DML (forced to error)\n"
+      : "note: onLimit=truncate is ignored for VALIDATE ONLY (forced to error)\n");
   }
   if (format === "markdown" && noHeader) {
     process.stderr.write("ArgumentError: --no-header cannot be used with --format markdown|md.\n");
@@ -2042,6 +2065,13 @@ async function run(): Promise<number> {
       const output = buildAssertOutput(result, format, pretty);
       if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
       else if (output) process.stdout.write(`${output}\n`);
+      return 0;
+    }
+    if (result.type === "VALIDATION") {
+      const output = buildValidationOutput(result, format, noHeader, pretty, displayOptions);
+      if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
+      else if (output) process.stdout.write(`${output}\n`);
+      if (!quiet) process.stderr.write(`validated=${result.validatedRows} valid=${result.validRows} invalid=${result.invalidRows} errors=${result.errorCount}\n`);
       return 0;
     }
     if (result.type !== "SELECT") {

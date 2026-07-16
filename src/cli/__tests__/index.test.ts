@@ -1,5 +1,6 @@
 import {
   buildReplExecArgv,
+  buildValidationOutput,
   extractAppIds,
   normalizeAppKey,
   normalizeSqlAppProfiles,
@@ -11,6 +12,18 @@ import {
 } from "../index";
 
 describe("cli helpers", () => {
+  test("VALIDATION resultをJSON契約とtableへ整形する", () => {
+    const result = {
+      type: "VALIDATION" as const,
+      operation: "INSERT" as const,
+      validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 1,
+      columns: ["code", "$err_code"], errors: [{ code: "", $err_code: "ERR_REQUIRED" }],
+    };
+    expect(JSON.parse(buildValidationOutput(result, "json", false, false, {}))).toMatchObject({
+      ok: true, type: "VALIDATION", errorCount: 1,
+    });
+    expect(buildValidationOutput(result, "table", false, false, {})).toContain("ERR_REQUIRED");
+  });
   test("parseTokenMap normalizes app keys", () => {
     const m = parseTokenMap("APP100=t1,101=t2");
     expect(m.APP100).toBe("t1");

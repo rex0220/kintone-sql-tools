@@ -76,6 +76,71 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("VALIDATE ONLY INTO #err は空schemaを保持し後続SELECTから参照できる", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "validate-batch" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errTable: "#err" });
+  expect(batch.statements[1].result).toMatchObject({ type: "SELECT", rowCount: 1 });
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("エラー0件のVALIDATE ONLY INTOも列schemaを保持する", async () => {
+  const client = makeClient();
+  client.getFields = async () => [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true }];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "validate-empty-err" }
+  );
+  const selected = batch.statements[1].result;
+  expect(selected).toMatchObject({ type: "SELECT", rowCount: 0 });
+  if (selected?.type !== "SELECT") throw new Error("unexpected result");
+  expect(selected.columns).toContain("$err_code");
+});
+
+test("#err append上限超過は既存行を壊さない", async () => {
+  const client = makeClient();
+  client.getFields = async () => [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true }];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err; " +
+    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "validate-atomic-err", tempTableMaxRows: 1, continueOnError: true }
+  );
+  expect(batch.statements[1].status).toBe("error");
+  expect(batch.statements[2].result).toMatchObject({ type: "SELECT", rowCount: 1 });
+});
+
+test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ k: "1", amount: "99" })],
+    100: [makeRecord({ $id: "1", amount: "1" })],
+  } });
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" }]
+    : [
+      { code: "k", label: "k", fieldType: "NUMBER" },
+      { code: "amount", label: "amount", fieldType: "NUMBER" },
+    ];
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #src AS SELECT k, amount FROM APP200; " +
+    "UPDATE APP100 SET amount = s.amount FROM #src s WHERE APP100.$id = s.k VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-update-from" }
+  );
+  expect(batch.statements[1].result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 1 });
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("UPDATE FROM #temp はバッチストアを参照して更新する", async () => {
   const client = makeClient({
     recordsByApp: {

@@ -12,12 +12,15 @@ import {
   getInsertValuesCount,
   getStatementType,
   isDmlType,
+  writesKintone,
+  requiresCompleteInput,
   OperationCancelledError,
 } from "../core";
 import type {
   BatchExecuteResult,
   DmlConfirmContext,
   ExecuteResult,
+  DmlValidationResult,
   KintoneAppInfo,
   SelectResult,
 } from "../core";
@@ -1862,7 +1865,7 @@ function batchPlansToSelectResult(sql: string): SelectResult {
 
 /** バッチ実行の表示用結果（result = 最終結果セット、note = 情報行、dmlSummary = success した DML の影響件数） */
 interface BatchRunOutcome {
-  result: SelectResult | null;
+  result: SelectResult | DmlValidationResult | null;
   note: string | null;
   dmlSummary: string[];
   /** 確認ダイアログでキャンセルされた（履歴保存をスキップし note を情報表示する） */
@@ -1908,6 +1911,7 @@ function buildDmlSummary(batch: BatchExecuteResult): string[] {
     else if (r.type === "DELETE") detail = `deleted=${r.deletedCount}`;
     else if (r.type === "UPSERT") detail = `inserted=${r.insertedCount} updated=${r.updatedCount}`;
     else if (r.type === "REORDER") detail = `reordered=${r.reorderedParentCount}`;
+    else if (r.type === "VALIDATION") detail = `validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`;
     if (detail) lines.push(`[${s.index + 1}] ${s.type}: ${detail}`);
   }
   return lines;
@@ -1938,6 +1942,7 @@ async function runBatchSql(
   // INSERT VALUES の実行前静的確認（仕様 §3.3。件数は静的に正確。
   // キャンセル時は1文も実行しない）
   for (const s of analysis.statements) {
+    if (!s.isDml) continue;
     if (s.insertValuesCount === null) continue;
     const ok = await showConfirmDialog(
       `[${s.index + 1}/${analysis.statementCount}] ${dmlDialogHead(s.statementType, s.targetAppId)}\n`
@@ -1959,7 +1964,7 @@ async function runBatchSql(
     // DML を含むバッチでは常に error（truncate だと SELECT-based DML のソース
     // 読み取りが黙って切り捨てられ、切り捨て後の件数で confirm → 部分書き込みに
     // なるため。MCP の ksql_mutate と同じ固定。仕様 §3.6）
-    onLimitReached: analysis.containsDml ? "error" : options.onLimitReached,
+    onLimitReached: analysis.requiresCompleteInput ? "error" : options.onLimitReached,
     // 一時テーブル実体化上限（未指定 = エンジン既定 10,000）。実体化は
     // onLimitReached 設定によらずエンジン層で常に error（batch spec §5.6）
     tempTableMaxRows: options.tempTableMaxRows,
@@ -1986,12 +1991,14 @@ async function runBatchSql(
     );
   }
 
-  // 最後に結果セットを返した文（通常は最終 SELECT）のみ表示する。
+  // 最後に結果セットを返した文（SELECT / VALIDATION）のみ表示する。
   // 途中の SELECT 結果は表示しない（最終結果のみ、が本 UI の契約）
-  const lastSelect = [...batch.statements].reverse().find((s) => s.result?.type === "SELECT");
-  if (lastSelect?.result?.type === "SELECT") {
+  const lastResultSet = [...batch.statements].reverse().find(
+    (s) => s.result?.type === "SELECT" || s.result?.type === "VALIDATION"
+  );
+  if (lastResultSet?.result?.type === "SELECT" || lastResultSet?.result?.type === "VALIDATION") {
     return {
-      result: lastSelect.result,
+      result: lastResultSet.result,
       note: dmlSummary.length > 0 ? `バッチ ${batch.statementCount} 文を実行しました。` : null,
       dmlSummary,
       cancelled: false,
@@ -2082,11 +2089,13 @@ async function runSql(
     //（v1.9.0 仕様 §3.3。パース不能な入力はそのまま execute のエラー表示に任せる）
     let insertValuesConfirm: { count: number; appId: number | null } | null = null;
     let isDmlSql = false;
+    let needsCompleteInput = false;
     try {
       const stmt = parseSqlStatement(sql);
-      isDmlSql = isDmlType(getStatementType(stmt));
+      isDmlSql = writesKintone(stmt);
+      needsCompleteInput = requiresCompleteInput(stmt);
       const count = getInsertValuesCount(stmt);
-      if (count !== null) {
+      if (isDmlSql && count !== null) {
         const appId = (stmt as { appId?: unknown }).appId;
         insertValuesConfirm = { count, appId: typeof appId === "number" ? appId : null };
       }
@@ -2108,7 +2117,7 @@ async function runSql(
       maxRecords: runtimeFetch.maxRecords,
       // DML では常に error（truncate だと SELECT-based DML のソース読み取りが
       // 黙って切り捨てられ部分書き込みになるため。バッチ側と同じ固定。仕様 §3.6）
-      onLimitReached: isDmlSql ? "error" : runtimeFetch.onLimitReached,
+      onLimitReached: needsCompleteInput ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
     });
 

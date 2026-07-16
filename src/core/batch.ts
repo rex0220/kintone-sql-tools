@@ -19,6 +19,9 @@ import {
   hasWhereClause,
   isDmlType,
   isReadOnlyType,
+  isReadOnlyStatement,
+  requiresCompleteInput,
+  writesKintone,
 } from "./dmlGuard";
 import { KlikeValidationError, validateKlikeStatement } from "./klikeValidation";
 
@@ -81,6 +84,8 @@ export interface StatementAnalysis {
   targetAppId: number | null;
   /** UPDATE ... FROM。ソース読み取り上限を影響行数から分離するために使う。 */
   isUpdateFrom: boolean;
+  isValidationOnly: boolean;
+  requiresCompleteInput: boolean;
 }
 
 export interface BatchVariableAnalysis {
@@ -94,6 +99,8 @@ export interface BatchAnalysis {
   /** DML を1文も含まないか（一時テーブルの CREATE / DROP は read-only 扱い） */
   isReadOnlyBatch: boolean;
   containsDml: boolean;
+  containsValidationOnly: boolean;
+  requiresCompleteInput: boolean;
   /** バッチ内で CREATE される一時テーブル名（出現順。DROP 後の再 CREATE も含む） */
   tempTables: string[];
   variables: BatchVariableAnalysis[];
@@ -195,12 +202,17 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
 
   /** live な一時テーブル名 → CREATE した文の index */
   const defined = new Map<string, number>();
+  const validationSchemas = new Map<string, string>();
   const createdOrder: string[] = [];
   const results: StatementAnalysis[] = [];
   const variableDefs = new Map<string, { index: number; referencedBy: number[] }>();
   const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
+    const validationTable = "validationErrorTable" in stmt ? stmt.validationErrorTable : null;
+    if (statements.length === 1 && validationTable) {
+      throw new BatchAnalysisError("ArgumentError: VALIDATE ONLY INTO requires a batch.", index);
+    }
     const statementType = getStatementType(stmt);
     const created: string[] = [];
     const dropped: string[] = [];
@@ -266,6 +278,31 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       dependsOn.add(at);
     }
 
+    if (validationTable) {
+      const payloadFields = stmt.type === "UPDATE"
+        ? ["$id", ...stmt.assignments.map((a) => a.field)]
+        : ("fields" in stmt ? stmt.fields : []);
+      const signature = JSON.stringify(payloadFields);
+      const at = defined.get(validationTable);
+      if (at === undefined) {
+        defined.set(validationTable, index);
+        validationSchemas.set(validationTable, signature);
+        createdOrder.push(validationTable);
+        created.push(validationTable);
+        if (defined.size > MAX_TEMP_TABLES) {
+          throw new BatchAnalysisError(`ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`, index);
+        }
+      } else {
+        if (validationSchemas.get(validationTable) !== signature) {
+          throw new BatchAnalysisError(
+            `ParseError: validation error table ${validationTable} has a different payload schema.`,
+            index
+          );
+        }
+        dependsOn.add(at);
+      }
+    }
+
     if (stmt.type === "CREATE_TEMP_TABLE") {
       if (defined.has(stmt.name)) {
         throw new BatchAnalysisError(
@@ -300,8 +337,8 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     results.push({
       index,
       statementType,
-      isDml: isDmlType(statementType),
-      isReadOnly: isReadOnlyType(statementType),
+      isDml: writesKintone(stmt),
+      isReadOnly: isReadOnlyStatement(stmt),
       hasWhere: hasWhereClause(stmt),
       insertValuesCount: getInsertValuesCount(stmt),
       appIds: [...stmtAppIds].sort((a, b) => a - b),
@@ -315,10 +352,14 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
           ? (stmt as { appId: number }).appId
           : null,
       isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null,
+      isValidationOnly: "validateOnly" in stmt && stmt.validateOnly === true,
+      requiresCompleteInput: requiresCompleteInput(stmt),
     });
   });
 
   const containsDml = results.some((r) => r.isDml);
+  const containsValidationOnly = results.some((r) => r.isValidationOnly);
+  const needsCompleteInput = results.some((r) => r.requiresCompleteInput);
   const variables = variableOrder.map((name) => ({
     name,
     referencedBy: [...variableDefs.get(name)!.referencedBy],
@@ -327,6 +368,8 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     statementCount: statements.length,
     isReadOnlyBatch: !containsDml && results.every((r) => r.isReadOnly),
     containsDml,
+    containsValidationOnly,
+    requiresCompleteInput: needsCompleteInput,
     tempTables: createdOrder,
     variables,
     warnings: variables
