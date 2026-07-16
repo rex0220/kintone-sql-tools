@@ -1,7 +1,7 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **未実装・採用（B12・Phase 3）。codex レビュー前。** 依存機能 **UPDATE … FROM（B11・Phase 2・§7）を先行**。実装は **VALIDATE ONLY を先行リリース**（書き込み非変更・低リスクで需要検証）→ 需要立証後に `ON ERROR SKIP INTO #err`。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **未実装・採用（B12・Phase 3）。codex レビュー前。** 依存機能 **UPDATE … FROM（B11・Phase 2）を先行**（実装仕様 R1＝[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7 は概要）。実装は **VALIDATE ONLY を先行リリース**（書き込み非変更・低リスクで需要検証）→ 需要立証後に `ON ERROR SKIP INTO #err`。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
 ## 1. 目的と定義
