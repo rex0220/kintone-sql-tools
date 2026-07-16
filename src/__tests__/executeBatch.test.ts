@@ -837,6 +837,53 @@ test("WITH（CTE）から一時テーブルを参照できる", async () => {
   expect(rows.map((row) => row["顧客名"])).toEqual(["B社", "C社"]);
 });
 
+test("MIN / MAX: 一時テーブルと CTE は型メタを持たず従来の数値経路を維持する", async () => {
+  const client = makeClient({
+    recordsByApp: { 100: [makeRecord({ name: "B" }), makeRecord({ name: "A" })] },
+  });
+  client.getFields = async () => [
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT name FROM APP100;" +
+    "SELECT MIN(name) AS tempMin FROM #t;" +
+    "WITH c AS (SELECT name FROM APP100) SELECT MIN(name) AS cteMin FROM c",
+    client,
+    { cacheContext: "aggregate-sort-materialized" }
+  );
+
+  expect((r.statements[1].result as SelectResult).rows[0].tempmin).toBe("NaN");
+  expect((r.statements[2].result as SelectResult).rows[0].ctemin).toBe("NaN");
+});
+
+test("MIN / MAX: CTE/temp 混在 JOIN の非修飾列では物理側の型メタも取得しない", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ key: "1", value: "B" })],
+      200: [makeRecord({ key: "1", value: "A" })],
+    },
+  });
+  let fieldCalls = 0;
+  client.getFields = async () => {
+    fieldCalls += 1;
+    return [
+      { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "value", label: "value", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  };
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #t AS SELECT key, value FROM APP100;" +
+    "SELECT MIN(value) AS collision FROM APP200 a JOIN #t b ON a.key = b.key",
+    client,
+    { cacheContext: "aggregate-sort-mixed-materialized" }
+  );
+
+  expect(r.statements[0].error).toBeUndefined();
+  expect(r.statements[1].error).toBeUndefined();
+  expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("NaN");
+  expect(fieldCalls).toBe(1);
+});
+
 test("CREATE の AS 句が先行の一時テーブルを参照できる", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const r = await executeBatch(

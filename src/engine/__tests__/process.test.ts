@@ -264,6 +264,51 @@ test("GROUP BY + MAX / MIN", () => {
   expect(B["mn"]).toBe("300");
 });
 
+test("MIN / MAX: 文字列型は全文を辞書順比較し、数値型は従来の数値比較を維持する", () => {
+  const rows: ProcessRow[] = [{ 値: "9" }, { 値: "10" }, { 値: "0100" }];
+  const stmt = parseSelect("SELECT MIN(値) AS mn, MAX(値) AS mx FROM APP100");
+
+  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "string")[0]).toMatchObject({
+    mn: "0100",
+    mx: "9",
+  });
+  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
+    mn: "9",
+    mx: "100",
+  });
+});
+
+test("MIN / MAX: 文字列型の DISTINCT・空文字・修飾フィールドを扱う", () => {
+  const rows: ProcessRow[] = [
+    { "a.値": "B" },
+    { "a.値": "", },
+    { "a.値": "A" },
+    { "a.値": "A" },
+  ];
+  const stmt = parseSelect("SELECT MIN(DISTINCT a.値) AS mn, MAX(a.値) AS mx FROM APP100 a");
+  const seen: string[] = [];
+  const result = applyGroupBy(rows, stmt.groupBy, stmt.columns, (field) => {
+    seen.push(`${field.tableAlias}.${field.field}`);
+    return "string";
+  });
+  expect(result[0]).toMatchObject({ mn: "A", mx: "B" });
+  expect(seen).toEqual(["a.値", "a.値"]);
+
+  const empty = applyGroupBy([{ "a.値": "" }], stmt.groupBy, stmt.columns, () => "string");
+  expect(empty[0]).toMatchObject({ mn: "", mx: "" });
+});
+
+test("文字列 MIN / MAX: 文字列関数へ STRING として渡し、算術では Number() 変換する", () => {
+  const tables = new Map([[null, [makeRecord({ 値: "beta" }), makeRecord({ 値: "Alpha" })]]]);
+  const stringStmt = parseSelect("SELECT UPPER(MIN(値)) AS first, LENGTH(MAX(値)) AS len FROM APP100");
+  const stringResult = runFullScan({ tables, stmt: stringStmt, aggregateSortKindResolver: () => "string" });
+  expect(stringResult.rows[0]).toMatchObject({ first: "ALPHA", len: "4" });
+
+  const arithmeticStmt = parseSelect("SELECT MIN(値) + 1 FROM APP100");
+  const arithmeticResult = runFullScan({ tables, stmt: arithmeticStmt, aggregateSortKindResolver: () => "string" });
+  expect(Object.values(arithmeticResult.rows[0])).toContain("NaN");
+});
+
 test("GROUP BY + FORMAT(SUM(...))", () => {
   const stmt = parseSelect("SELECT 種別, FORMAT(SUM(金額), '#,##0') AS 合計 FROM APP100 GROUP BY 種別");
   const result = runFullScan({ tables: new Map([[null, groupRows.map((r) => makeRecord(r as Record<string, string>))]]), stmt });
