@@ -21,7 +21,7 @@
 | Phase 0 | レシピ集（ドキュメント整備） | 中 | 即着手 | 本書末尾 |
 | Phase 1 | バッチ変数（SET → DECLARE） | 大 | 採用 | kSQL仕様案_バッチ変数.md |
 | Phase 2 | UPDATE ... FROM v1（`$id` 結合） | 大 | **v2.12.0 実装済み** | [B11 spec](ksql_update_from_spec.md) |
-| Phase 3-A | `VALIDATE ONLY` | **最大** | 採用・次候補（B11非依存） | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
+| Phase 3-A | `VALIDATE ONLY` | **最大** | 採用・次候補（B11非依存） | [B12 spec](ksql_on_error_skip_isolation_spec.md) / [plan](ksql_validate_only_implementation_plan.md) |
 | Phase 3-B | UPDATE ... FROM v1.1（業務キー結合） | 大 | 採用・B12-Bのリリースゲート | [B11 spec §12](ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
 | Phase 3-C | `ON ERROR SKIP INTO #err` | **最大** | 採用 | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
 | 機会的 | HTTP 層の透過リトライ（429 のみ） | 小（夜間バッチでは発動条件がほぼない） | HTTP クライアント改修時に同梱 | 本書内 |
