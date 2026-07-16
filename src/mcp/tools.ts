@@ -90,6 +90,7 @@ export interface StatementValidation {
   tempOnlySource: boolean;
   /** DML の書き込み対象アプリ ID（DML 以外は null。appIds は参照先も含む） */
   targetAppId: number | null;
+  isUpdateFrom: boolean;
 }
 
 interface ValidationCommon {
@@ -316,10 +317,10 @@ function requireDmlApproval(
   return Number(input.dmlMaxRows);
 }
 
-/** SELECT-based DML(INSERT_SELECT / UPSERT_SELECT)を含むか */
-function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: string }>): boolean {
+/** ソース読み取り件数が影響行数と一致しない DML を含むか。 */
+function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: string; isUpdateFrom?: boolean }>): boolean {
   return statements.some(
-    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT"
+    (s) => s.statementType === "INSERT_SELECT" || s.statementType === "UPSERT_SELECT" || s.isUpdateFrom === true
   );
 }
 
@@ -333,7 +334,7 @@ function containsSelectBasedDml(statements: ReadonlyArray<{ statementType: strin
  *   のため dmlMaxRows + 1(超過検出用に 1 件多く読む)
  */
 function resolveMutateRuntimeMaxRecords(
-  statements: ReadonlyArray<{ statementType: string }>,
+  statements: ReadonlyArray<{ statementType: string; isUpdateFrom?: boolean }>,
   dmlMaxRows: number
 ): number | undefined {
   return containsSelectBasedDml(statements) ? undefined : dmlMaxRows + 1;
@@ -343,7 +344,7 @@ function resolveMutateRuntimeMaxRecords(
 // SELECT-based DML では「dmlMaxRows を上げる」が正しい対処ではないことを案内する
 const READ_LIMIT_MESSAGE_FRAGMENT = "取得件数が上限";
 const SELECT_BASED_DML_READ_LIMIT_HINT =
-  "SELECT-based DML のソース読み取り上限は dmlMaxRows ではなく maxRecords 解決値" +
+  "SELECT-based DML（UPDATE … FROM を含む）のソース読み取り上限は dmlMaxRows ではなく maxRecords 解決値" +
   "(KSQL_MAX_RECORDS / profile の query.maxRecords、既定 500)で制御されます。" +
   "dmlMaxRows は影響行数ガードです。";
 
@@ -415,6 +416,7 @@ export function createKsqlMcpTools(
       tempTablesDropped: s.tempTablesDropped,
       tempOnlySource: s.tempOnlySource,
       targetAppId: s.targetAppId,
+      isUpdateFrom: s.isUpdateFrom,
     }));
 
     const common = {
@@ -657,7 +659,8 @@ export function createKsqlMcpTools(
     // にヒントを付与する
     if (selectBasedDml) {
       for (const entry of payload.statements) {
-        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT") continue;
+        const statement = validation.statements.find((s) => s.index === entry.index);
+        if (entry.type !== "INSERT_SELECT" && entry.type !== "UPSERT_SELECT" && statement?.isUpdateFrom !== true) continue;
         const error = entry.error as { code?: string; message?: string } | undefined;
         if (typeof error?.message !== "string") continue;
         if (!error.message.includes(READ_LIMIT_MESSAGE_FRAGMENT)) continue;

@@ -79,6 +79,8 @@ export interface StatementAnalysis {
    *  appIds は SELECT ソースやサブクエリの参照先も含むため、
    *  確認プロンプト等で「変更されるアプリ」を示す用途にはこちらを使う */
   targetAppId: number | null;
+  /** UPDATE ... FROM。ソース読み取り上限を影響行数から分離するために使う。 */
+  isUpdateFrom: boolean;
 }
 
 export interface BatchVariableAnalysis {
@@ -312,6 +314,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
         isDmlType(statementType) && typeof (stmt as { appId?: unknown }).appId === "number"
           ? (stmt as { appId: number }).appId
           : null,
+      isUpdateFrom: stmt.type === "UPDATE" && stmt.from != null,
     });
   });
 

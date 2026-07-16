@@ -710,6 +710,45 @@ describe("MCP tools", () => {
     expect(executeOptions?.onLimitReached).toBe("error");
   });
 
+  test("mutate: UPDATE FROM APP はソース読み取りを dmlMaxRows + 1 で制限しない", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql,
+        profileName: input.profile ?? "prod",
+        client: makeClient(),
+        cacheContext: "update-from-mcp",
+        maxRecords: input.maxRecords ?? 500,
+        fetchParallel: 3,
+        onLimit: "error",
+        timeout: 30000,
+      };
+    };
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      {
+        createRuntime,
+        executeSql: async (_sql, _client, options) => {
+          expect(options?.maxRecords).toBe(500);
+          await options?.confirm?.(1, "UPDATE");
+          return { type: "UPDATE", updatedCount: 1 };
+        },
+      }
+    );
+    const result = await tools.mutate({
+      sql: "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 10,
+    });
+    expect(result).toMatchObject({ ok: true, type: "UPDATE", updatedCount: 1 });
+    expect(runtimeInputs[0]?.maxRecords).toBeUndefined();
+  });
+
   test("mutate rejects confirm counts above dmlMaxRows", async () => {
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
@@ -1821,6 +1860,53 @@ describe("MCP tools", () => {
 
     expect(result.ok).toBe(true);
     expect(runtimeInputs[0]?.maxRecords).toBe(3); // dmlMaxRows + 1(超過検出用)
+  });
+
+  test("mutate: バッチ内 UPDATE FROM #temp も通常の maxRecords 解決を使う", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    const createRuntime = async (
+      _serverOptions: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql,
+        profileName: input.profile ?? "prod",
+        client: makeClient(),
+        cacheContext: "batch-update-from-mcp",
+        maxRecords: input.maxRecords ?? 500,
+        fetchParallel: 3,
+        onLimit: "error",
+        timeout: 30000,
+      };
+    };
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      {
+        createRuntime,
+        executeBatchSql: async (_sql, _client, options) => {
+          await options?.confirm?.(1, "UPDATE");
+          return {
+            ok: true,
+            statementCount: 2,
+            statements: [
+              { index: 0, type: "CREATE_TEMP_TABLE", status: "success", tempTable: "#e", rowCount: 1 },
+              { index: 1, type: "UPDATE", status: "success", result: { type: "UPDATE", updatedCount: 1 } },
+            ],
+            analysis: {} as never,
+            metrics: { apiCalls: 0, fetchedRows: 0, elapsedMs: 0 },
+          } as never;
+        },
+      }
+    );
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: "CREATE TEMP TABLE #e AS SELECT $id AS k, name AS src FROM APP200; " +
+        "UPDATE APP100 SET dest = e.src FROM #e e WHERE APP100.$id = e.k",
+      dmlMaxRows: 10,
+    }) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    expect(runtimeInputs[0]?.maxRecords).toBeUndefined();
   });
 
   test("mutate: dmlTotalMaxRows は INSERT VALUES(静的)と APP ソース INSERT_SELECT(confirm)を二重計上なしで合算する", async () => {

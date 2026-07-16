@@ -571,8 +571,9 @@ Phase 1.5 / Phase 2 で初期実装する。
 `DELETE FROM LAPP_ORDERS@prod ...` はMCPでは既存runtimeの挙動どおり許可される。CLIでは同じSQLを明示profile制約により拒否するため、surface差を前提にすること。
 
 拒否する文（**SELECT-based DML のソース制限としての拒否**）: なし — v1.7.0 で最終解消。
-なお、これとは別に **SELECT-based DML 以外の DML（UPDATE / DELETE / UPSERT）内の一時テーブル参照**は、
+なお、これとは別に **DELETE / UPSERT および通常 UPDATE 内の一時テーブル参照**は、
 エンジン未実装（`temp table references in X are not supported yet.`）として引き続き実行前拒否される。
+`UPDATE ... FROM #temp` は専用経路として対応し、通常 UPDATE のサブクエリ内 temp 参照とは区別する。
 
 `INSERT_SELECT` は初期実装（〜v1.4.1）では拒否していたが、v1.4.0（M4）で `executeInsertSelect()` に
 書き込み前 confirm hook が実装された（source SELECT 実行後・POST 前に `confirm(rows.length, "INSERT")`）
@@ -580,7 +581,7 @@ Phase 1.5 / Phase 2 で初期実装する。
 v1.7.0 で混在ソース（APP + 一時テーブルの JOIN・サブクエリ）も解禁 — 実行は read-only バッチで
 実戦投入済みの FULL_SCAN 注入経路（`executeQueryWithCte`）による。
 
-**読み取り上限（v1.8.0 で dmlMaxRows から分離）**: SELECT-based DML を含む `ksql_mutate` では、
+**読み取り上限（v1.8.0 で dmlMaxRows から分離）**: SELECT-based DML または `UPDATE ... FROM` を含む `ksql_mutate` では、
 APP テーブルの fetch は **runtime の通常 `maxRecords` 解決**（`KSQL_MAX_RECORDS` →
 profile `query.maxRecords` → 既定 500。`onLimit = "error"` 固定）に従い、
 `dmlMaxRows` はソース読み取りを**絞らない**（影響行数ガード専用）。
@@ -593,7 +594,7 @@ MCP クライアントが影響行数基準で小さい `dmlMaxRows` を選ぶ�
 実害が確認されたため分離した（CLI は当初から `--max-records` と `--dml-max-rows` を
 分離しており、同じモデルに揃えた形。経緯は
 `docs/internal/ksql_mcp_dml_source_read_limit_issue.md` を参照）。
-なお SELECT-based DML を**含まない** DML（UPDATE / DELETE / INSERT VALUES / UPSERT VALUES /
+なお SELECT-based DML・`UPDATE ... FROM` を**含まない** DML（通常 UPDATE / DELETE / INSERT VALUES / UPSERT VALUES /
 REORDER のみ）では、対象読み取り件数 ≒ 影響行数が成立するため、従来どおり
 `maxRecords = dmlMaxRows + 1`（超過検出用に 1 件多く読む）を維持する。
 経緯は `docs/internal/ksql_mcp_insert_select_app_source_spec.md`（v1.5.0）と

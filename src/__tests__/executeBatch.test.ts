@@ -76,6 +76,47 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("UPDATE FROM #temp はバッチストアを参照して更新する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      200: [makeRecord({ k: "1", src: "A" }), makeRecord({ k: "2", src: "B" })],
+      100: [makeRecord({ $id: "1" }), makeRecord({ $id: "2" })],
+    },
+  });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "k", label: "k", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #e AS SELECT k, src FROM APP200; " +
+    "UPDATE APP100 SET dest = e.src FROM #e e WHERE APP100.$id = e.k",
+    client,
+    { cacheContext: "batch-update-from-temp" }
+  );
+  expect(result.ok).toBe(true);
+  expect(result.analysis.statements[1].tempTablesReferenced).toEqual(["#e"]);
+  expect(result.analysis.statements[1].dependsOn).toEqual([0]);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toEqual([
+    { id: 1, record: { dest: { value: "A" } } },
+    { id: 2, record: { dest: { value: "B" } } },
+  ]);
+});
+
+test("UPDATE FROM #temp は0行でも列欠落を PUT 前に拒否する", async () => {
+  const client = makeClient({ recordsByApp: { 200: [] } });
+  client.getFields = async () => [{ code: "k", label: "k", fieldType: "NUMBER" }];
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #e AS SELECT k FROM APP200; " +
+    "UPDATE APP100 SET dest = e.src FROM #e e WHERE APP100.$id = e.k",
+    client,
+    { cacheContext: "batch-update-from-missing-column" }
+  );
+  expect(result.ok).toBe(false);
+  expect(result.statements[1]).toMatchObject({ status: "error" });
+  expect(result.statements[1].error?.message).toMatch(/source column src does not exist/);
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("FROM なし SELECT/UNION を一時テーブルに実体化できる", async () => {
   const result = await executeBatch(
     "CREATE TEMP TABLE #ids AS SELECT '4' AS id UNION ALL SELECT '7' AS id; "

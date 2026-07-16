@@ -4,7 +4,7 @@
 - 親ロードマップ: [ksql_batch_processing_roadmap.md](ksql_batch_processing_roadmap.md)（Phase 2）
 - 後続依存先: [ksql_on_error_skip_isolation_spec.md](ksql_on_error_skip_isolation_spec.md)（B12・`#err` の書き戻しに本機能が必要）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B11
-- ステータス: **仕様案 R4（codex 再レビュー反映・実装着手可）。採用・未実装。現行コードとのギャップ精査を反映**
+- ステータス: **R4 実装済み（codex）。自動テスト済み・コードレビュー／実機確認待ち。**
 - 更新履歴:
   - 2026-07-16 R1: 初版（ソース temp/CTE 限定）
   - 2026-07-16 R2: **ソースに実アプリを追加**（ユーザー判断・案X）。結合・複数マッチ・per-record PUT は共通で、ソース取得だけ分岐。app ソースは maxRecords 準拠・上限超過は fail-closed

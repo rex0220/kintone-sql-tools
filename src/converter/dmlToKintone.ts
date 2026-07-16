@@ -176,7 +176,7 @@ function buildUpdateRecord(
   const record: KintoneRecord = {};
   for (const { field, value } of assignments) {
     // ARITH / CASE_VALUE は updateToPutBatchesArith で処理するため、ここには到達しない
-    if (value.type === "ARITH" || value.type === "CASE_VALUE") continue;
+    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "SOURCE_FIELD") continue;
     record[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record;
@@ -307,6 +307,8 @@ export function updateToPutBatchesArith(
         record[field] = { value: String(evalArith(value, raw)) };
       } else if (value.type === "CASE_VALUE") {
         record[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
+      } else if (value.type === "SOURCE_FIELD") {
+        throw new DmlConvertError("SOURCE_FIELD は UPDATE ... FROM 専用です");
       } else {
         record[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
       }
@@ -317,6 +319,63 @@ export function updateToPutBatchesArith(
     app: stmt.appId,
     records: batch,
   }));
+}
+
+const UPDATE_FROM_UNSUPPORTED_TYPES = new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE",
+]);
+
+export interface UpdateFromMatchedRecord {
+  target: KintoneRecord;
+  source: ProcessRow;
+}
+
+/** UPDATE ... FROM 用の全 PUT データを構築する。呼び出し後はローカル変換エラーが残らない。 */
+export function updateFromToPutBatches(
+  stmt: UpdateStatement,
+  matched: UpdateFromMatchedRecord[],
+  fieldTypes: FieldTypeMap = new Map()
+): KintonePutParams[] {
+  const updateRecords: KintoneUpdateRecord[] = matched.map(({ target, source }) => {
+    const id = Number(target["$id"]?.value);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new DmlConvertError("UPDATE ... FROM の対象レコード番号が不正です");
+    }
+    const targetRow = kintoneRecordToProcessRow(target);
+    const record: KintoneRecord = {};
+    for (const { field, value } of stmt.assignments) {
+      const fieldType = fieldTypes.get(field);
+      if (value.type === "SOURCE_FIELD") {
+        if (UPDATE_FROM_UNSUPPORTED_TYPES.has(fieldType ?? "")) {
+          throw new DmlConvertError(`UPDATE ... FROM の SOURCE_FIELD は ${fieldType} フィールドに対応していません（フィールド: ${field}）`);
+        }
+        if (!Object.prototype.hasOwnProperty.call(source, value.field)) {
+          throw new DmlConvertError(`UPDATE ... FROM のソース列 ${value.field} が存在しません`);
+        }
+        const raw = source[value.field];
+        if (typeof raw !== "string") {
+          throw new DmlConvertError(`UPDATE ... FROM の SOURCE_FIELD はスカラー値のみ対応しています（列: ${value.field}）`);
+        }
+        if ((fieldType === "NUMBER" || fieldType === "CALC") && raw !== "" && !Number.isFinite(Number(raw))) {
+          throw new DmlConvertError(`数値フィールド ${field} に変換できない値です: ${raw}`);
+        }
+        record[field] = { value: toKintoneValue({ type: "STRING", value: raw }, fieldType) };
+      } else if (value.type === "ARITH") {
+        record[field] = { value: String(evalArith(value, target)) };
+      } else if (value.type === "CASE_VALUE") {
+        record[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
+      } else {
+        record[field] = { value: toKintoneValue(value, fieldType) };
+      }
+    }
+    return { id, record };
+  });
+  return chunk(updateRecords, 100).map((records) => ({ app: stmt.appId, records }));
 }
 
 function kintoneRecordToProcessRow(raw: KintoneRecord): ProcessRow {

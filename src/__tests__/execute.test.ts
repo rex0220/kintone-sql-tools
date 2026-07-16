@@ -1622,6 +1622,140 @@ test("UPDATE 算術式と通常代入の混在", async () => {
   });
 });
 
+test("UPDATE FROM APP: ソース値・リテラル・ターゲット算術を行ごとに PUT", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      200: [
+        makeRecord({ k: "1", src: "A" }),
+        makeRecord({ k: "2", src: "B" }),
+      ],
+      100: [
+        makeRecord({ $id: "1", amount: "10" }),
+        makeRecord({ $id: "2", amount: "20" }),
+      ],
+    },
+  });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "k", label: "k", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }, { code: "amount", label: "amount", fieldType: "NUMBER" }, { code: "status", label: "status", fieldType: "SINGLE_LINE_TEXT" }];
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src, status = 'done', amount = amount * 2 FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { cacheContext: "update-from-basic" }
+  ) as UpdateResult;
+
+  expect(result.updatedCount).toBe(2);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toEqual([
+    { id: 1, record: { dest: { value: "A" }, status: { value: "done" }, amount: { value: "20" } } },
+    { id: 2, record: { dest: { value: "B" }, status: { value: "done" }, amount: { value: "40" } } },
+  ]);
+});
+
+test("UPDATE FROM APP: 正規化後の重複キーは全 PUT 前に拒否", async () => {
+  const client = makeClient({ recordsByApp: { 200: [makeRecord({ k: "1", src: "A" }), makeRecord({ k: " 1 ", src: "B" })] } });
+  client.getFields = async () => [
+    { code: "k", label: "k", fieldType: "NUMBER" },
+    { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { cacheContext: "update-from-duplicate" }
+  )).rejects.toThrow(/multiple rows/);
+  expect(client.putCalls).toHaveLength(0);
+  expect(client.getCalls.filter((c) => c.app === 100)).toHaveLength(0);
+});
+
+test.each(["", "abc", "0", "-1", "1.5", "9007199254740992"])(
+  "UPDATE FROM APP: 不正なソースキー %p は PUT 前に拒否",
+  async (key) => {
+    const client = makeClient({ recordsByApp: { 200: [makeRecord({ k: key, src: "A" })] } });
+    client.getFields = async () => [
+      { code: "k", label: "k", fieldType: "NUMBER" },
+      { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+    await expect(execute(
+      "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+      client,
+      { cacheContext: `update-from-invalid-${key}` }
+    )).rejects.toThrow(/positive safe integer/);
+    expect(client.putCalls).toHaveLength(0);
+  }
+);
+
+test("UPDATE FROM APP: ソース0件は no-op", async () => {
+  const client = makeClient({ recordsByApp: { 200: [] } });
+  client.getFields = async () => [
+    { code: "k", label: "k", fieldType: "NUMBER" },
+    { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { cacheContext: "update-from-empty" }
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: 複合型ソース列を PUT 前に拒否", async () => {
+  const client = makeClient({ recordsByApp: { 200: [makeTypedRecord({ k: "1", src: ["A"] })] } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "k", label: "k", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "CHECK_BOX" }]
+    : [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { cacheContext: "update-from-complex" }
+  )).rejects.toThrow(/does not support source field type CHECK_BOX/);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: ソースが maxRecords を超えると truncate 指定でも fail-closed", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ k: "1", src: "A" }), makeRecord({ k: "2", src: "B" }), makeRecord({ k: "3", src: "C" })],
+  } });
+  client.getFields = async () => [
+    { code: "k", label: "k", fieldType: "NUMBER" },
+    { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await expect(execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { maxRecords: 2, onLimitReached: "truncate", cacheContext: "update-from-max-records" }
+  )).rejects.toThrow(/上限/);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("UPDATE FROM APP: 130 IDs は50件ずつ3クエリで対象取得する", async () => {
+  const source = Array.from({ length: 130 }, (_, i) => makeRecord({ k: String(i + 1), src: `v${i + 1}` }));
+  const target = Array.from({ length: 130 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "k", label: "k", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    if (params.app === 200) return { records: source };
+    const ids = [...(params.query ?? "").matchAll(/\"(\d+)\"/g)].map((m) => Number(m[1]));
+    return { records: target.filter((r) => ids.includes(Number(r.$id.value))) };
+  };
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE APP100.$id = s.k",
+    client,
+    { maxRecords: 500, cacheContext: "update-from-chunks" }
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(130);
+  expect(client.getCalls.filter((c) => c.app === 100)).toHaveLength(3);
+  expect(client.putCalls.flatMap((c) => c.records)).toHaveLength(130);
+});
+
 test("UPDATE サブテーブル行（_rid 条件）", async () => {
   const client = makeClient({
     recordsByApp: {

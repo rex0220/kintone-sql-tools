@@ -2,6 +2,12 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased
+
+### 機能追加
+
+- **`UPDATE ... FROM` によるアプリ間・一時テーブルからの転記に対応**。ソースは `APP<n>[@profile]` またはバッチ内 `#temp`、結合は更新先 `$id = source.key` の単一等値に限定する。複数マッチ・不正キー・列欠落・非対応複合型・読み取り上限超過は最初の PUT 前に fail-closed で停止する。対象取得は50件ずつに分割し、MCPではソース読み取りを `dmlMaxRows` ではなく通常の `maxRecords` で制御する。
+
 ## v2.11.0（2026-07-16）
 
 ### 修正（バグ）
