@@ -1,8 +1,9 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **一部実装（B12-A `VALIDATE ONLY` は v2.13.0、文字数計数のkintone実機確認待ち）。仕様レビュー R4。** B12-B は未実装。看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md)・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
-- B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)
+- ステータス: **仕様 R5。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)（R4・残存ゲートなし）
+- 2026-07-16 R5: **B12-B 実装前ゲート（隔離厳格度）を解消**（§7.3 新設）。`ON ERROR SKIP` の隔離集合は `VALIDATE ONLY` と同一基準（Tier 0 厳格）で確定。書き込み経路相当への緩和（案A）はプレビュー→本実行の 1:1 対応を壊し、lenient 通過値の API 拒否が全体 fail-fast を招くため不採用。B12-A の実機合わせ込み（UTF-16 計数・空文字 minLength・未設定制約）で主要な過剰厳格は解消済みという実測根拠を記録
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。
 - 2026-07-16 R2: Oracle / Snowflake / PostgreSQL / SQL Server / Db2 の公式仕様と比較し、採用点・非採用点・kSQL 固有の安全性判断を §8 に追記。
 - 2026-07-16 R3: Claude レビューをコードで再確認して反映。B12-B の前提を B11 v1.1（非 `$id` 業務キー結合）へ修正。B12-A の必須実装としてフィールド制約メタ拡張、collect 型検証器、`#err` 追記、文単位 read-only 判定を確定。例を実在構文 `APP<n>` へ修正。
@@ -107,7 +108,7 @@ toKintoneValue(value, fieldInfo): KintoneValue;                     // 上記を
 - required / length / range / choice も同じ `fieldInfo` と正規化済み値を入力にする。UPSERT のソース内キー重複など行間検証は別レイヤーで収集する
 - エラー文言は変更可能だが `DmlValidationErrorCode` は §5 の安定コードへ対応させる
 - `VALIDATE ONLY` は日付の実在性やフォーム制約まで厳密に確認するため、変換失敗値をrawのままAPIへ委ねる句なしDMLより厳しい場合がある。したがって検証エラーはローカル Tier 0 問題の検出であり、API拒否の保証ではない
-- **B12-B 実装前ゲート**: `ON ERROR SKIP` の隔離条件を (A) 通常書き込み経路と同じ厳格度へ合わせて false isolation を避ける、または (B) B12-A と同じTier 0厳格検証を採用する、のどちらにするかを実装前に確定する。B12-A R2では決めない
+- **B12-B 実装前ゲート**: ~~(A) 書き込み経路相当へ緩和／(B) Tier 0 厳格 のどちらかを実装前に確定する~~ → **R5 で解消（§7.3）＝(B) Tier 0 厳格を採用**。隔離集合は `VALIDATE ONLY` のエラー集合と同一
 
 ### 3.3 フィールド制約メタデータ（B12-A 必須）
 
@@ -219,6 +220,33 @@ B12-A の利用実績は B12-B の着手判断材料にはするが、B12-A の�
 - 同名 `#err` は同一schemaなら追記し、異なるschemaまたは `tempTableMaxRows` 超過なら既存行を壊さず静的エラーになる
 - node / UI のフォームフィールド取得で required・range・length・default metadata が保持される
 - §6 の業務キー書き戻しが B11 v1.1 で動作し、複数マッチ時は PUT 0 回になる
+
+### 7.3 隔離厳格度の確定（B12-B 実装前ゲート・R5 で解消）
+
+**決定: 案B ＝ Tier 0 厳格（`VALIDATE ONLY` と同一基準）で隔離する。**
+
+`ON ERROR SKIP` の隔離集合は、同一入力・同一フィールド定義スナップショットに対する `VALIDATE ONLY` のエラー集合と**完全に一致**させる。検証器・候補行 materialize・エラー行構築は B12-A の共通実装をそのまま使い、隔離専用の判定を持たない。
+
+#### 選択肢の比較
+
+| 案 | 隔離基準 | 評価 |
+|---|---|---|
+| A: 書き込み経路相当へ緩和 | 句なし DML の lenient 変換（変換失敗値を raw のまま API へ委ねる）が通す値は隔離しない | **不採用**。「`VALIDATE ONLY` はエラーと報告したのに `ON ERROR SKIP` は書き込む」行が生まれ、**プレビュー→本実行の対応が壊れる**。lenient 通過値が API で拒否されると文全体 fail-fast＝「隔離で継続するための機能が全体停止を招く」転倒が起きる |
+| **B: Tier 0 厳格（採用）** | `VALIDATE ONLY` と同一の collect 型検証器・同一エラー集合 | プレビューと本実行が 1:1 対応。実装は B12-A の共通化投資がそのまま効き二重実装なし |
+| C: kintone API 実挙動と完全一致 | — | **実現不能**（条件付き必須・カスタマイズ JS・権限・競合はローカル判定不可） |
+
+#### 案B を安全と判断する根拠（false isolation の残余評価）
+
+1. **主要な過剰厳格は B12-A の実機合わせ込みで解消済み**（2026-07-16・APP4221 実測）: 文字数計数=UTF-16 code units、minLength の空文字/未指定適用、未設定制約（空文字）の非制約化、サブテーブル子の除外。実測パターンではローカル判定==kintone 実挙動が完全一致。
+2. **残余の「ローカルが厳しい可能性」は限定的かつ安全側**: 日付の実在チェック（2/30 等）・数値の厳密10進表記（カンマ等の拒否）・選択肢の optionOrder 検証は、いずれも kintone も拒否する蓋然性が高い値。仮に API が受理し得る値を隔離しても、**隔離行は `#err` に元値ごと残り利用者が確認・手当てできる**（サイレントな欠落ではない）。
+3. **逆方向（検出漏れ）は Tier 0 の定義そのもの**: 権限・ルックアップ・ユーザー実在性・INSERT 一意制約衝突・カスタマイズ JS は隔離対象外で、書き込み時の API エラーは従来どおり fail-fast（§3・§9-1）。
+
+#### B12-B 仕様への帰結
+
+- 隔離判定に新しい規則を追加しない。`ON ERROR SKIP` = 「`VALIDATE ONLY` の検証 → エラー行を `#err` へ → **合格行だけ**を既存 DML 経路（100 件チャンク）へ」。
+- **受入条件（一致性）**: 同一入力に対し、`VALIDATE ONLY` の `invalidRows`／`errors` と `ON ERROR SKIP` の `skippedRows`／`#err` 内容（行・列・エラーコード・順序）が一致する。
+- 合格行の書き込みで発生した API エラーは隔離せず fail-fast（チャンク単位の部分書き込みは既存 DML と同じ挙動・変更しない）。
+- 利用者向け文書は「隔離＝kSQL がローカルで検出した Tier 0 問題であり、API 拒否の証明ではない」（§1 非保証・§9-1）の表現を維持する。
 
 ## 8. 他 RDB・DWH の同等機能との比較評価
 

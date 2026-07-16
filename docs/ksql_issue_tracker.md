@@ -50,7 +50,7 @@
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B11.1 | `UPDATE … FROM` 業務キー結合（`target.field = source.field`） | 改善 | 📋 **v2.13.0 予定②**（仕様済み §12・未実装・B12-B の書き戻しゲート） | 機能 | 中 | [spec §12](internal/ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
-| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 🚧 **v2.13.0 バンドル**（①B12-A 実装・実機確認完了=main 滞留／③B12-B は隔離厳格度ゲート決定後に実装） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [plan](internal/ksql_validate_only_implementation_plan.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
+| B12 | 行単位エラー隔離 `ON ERROR SKIP INTO #err` ＋ `VALIDATE ONLY`（Tier 0 事前検証） | 改善 | 🚧 **v2.13.0 バンドル**（①B12-A 実装・実機確認完了=main 滞留／③B12-B は**隔離厳格度ゲート解消済み（R5 §7.3＝Tier 0 厳格）**・B11.1 実装後に着手） | 機能 | 中 | [spec](internal/ksql_on_error_skip_isolation_spec.md) / [plan](internal/ksql_validate_only_implementation_plan.md) / [roadmap](internal/ksql_batch_processing_roadmap.md) |
 
 ---
 
