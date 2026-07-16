@@ -1,13 +1,14 @@
 # kSQL 仕様案：ON ERROR SKIP（事前検証エラー行の隔離・継続）
 
 - 出典: 設計メモ `ksql-batch/kSQL仕様案_Tier0エラー行隔離.md`（2026-07-16 に repo へ移設）
-- ステータス: **仕様 R6。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。R6 で kintone PUT 全レコード再検証（B11.1 実機発見）の Tier 0 境界を §9 へ追記。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
+- ステータス: **仕様 R7（B12-B 実装着手可）。B12-A `VALIDATE ONLY` は実装・実機確認完了（v2.13.0 未リリース・main 滞留・実機バグ3件修正込み）。B12-B は未実装だが、実装前ゲート（隔離厳格度）は §7.3 で解消済み＝Tier 0 厳格を採用。R6 で kintone PUT 全レコード再検証（B11.1 実機発見）の Tier 0 境界を §9 へ追記。**R7 で B12-B の codex レビュー P1×3 を反映（§7.4 実装契約）＝実装着手可。** 看板ユースケース（`#err` から差分アプリへの書き戻し）は **UPDATE … FROM の業務キー結合（B11 v1.1・R7 仕様確定）を前提**とする（[ksql_update_from_spec.md](ksql_update_from_spec.md) §12・本書 §7）。Tier 0＝API 送信前のローカル検証エラーのみ隔離（API 実行時エラーは従来どおり fail-fast）。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) §1 B12。
 - B12-A 実装計画: [ksql_validate_only_implementation_plan.md](ksql_validate_only_implementation_plan.md)（R4・残存ゲートなし）
 - 2026-07-16 R5: **B12-B 実装前ゲート（隔離厳格度）を解消**（§7.3 新設）。`ON ERROR SKIP` の隔離集合は `VALIDATE ONLY` と同一基準（Tier 0 厳格）で確定。書き込み経路相当への緩和（案A）はプレビュー→本実行の 1:1 対応を壊し、lenient 通過値の API 拒否が全体 fail-fast を招くため不採用。B12-A の実機合わせ込み（UTF-16 計数・空文字 minLength・未設定制約）で主要な過剰厳格は解消済みという実測根拠を記録
 - 2026-07-16 R1: `VALIDATE ONLY [INTO #err]` の構文・ツール境界・戻り値を確定。create/update/upsert の検証差、`#err` の保持列、複数エラー時の書き戻し例を明確化。
 - 2026-07-16 R2: Oracle / Snowflake / PostgreSQL / SQL Server / Db2 の公式仕様と比較し、採用点・非採用点・kSQL 固有の安全性判断を §8 に追記。
 - 2026-07-16 R3: Claude レビューをコードで再確認して反映。B12-B の前提を B11 v1.1（非 `$id` 業務キー結合）へ修正。B12-A の必須実装としてフィールド制約メタ拡張、collect 型検証器、`#err` 追記、文単位 read-only 判定を確定。例を実在構文 `APP<n>` へ修正。
 - 2026-07-16 R4: B12-A の厳密なローカル検証が通常書き込み経路より厳しい場合を明記。B12-B の隔離厳格度を実装前の設計ゲートとし、false isolation の扱いを確定事項から分離。
+- 2026-07-16 R7: B12-B codex レビュー反映（コードで裏取り）。**P1-1**=REJECT LIMIT 超過の返却契約（RejectLimitExceededError 新設・error 文でも診断を results[] へ載せる例外契約・#err 追記完了後にエラー化・「返す」=応答結果セットの意味・ON ERROR SKIP はバッチ専用）。**P1-2**=prepared write plan（合格候補に targetId/record 保持・UPSERT 照合1回・既存 executor を再実行しない）。**P1-3**=raw insertValuesCount 静的ガード除外・候補取得は maxRecords・合格 write plan 件数で confirm/dmlMaxRows 判定。M2=結果メタデータの operation 別 optional field・REJECT LIMIT 数値契約
 - 2026-07-16 R6: B11.1 実機確認で判明した kintone PUT の全レコード再検証を §9 に追記。UPDATE の SET 対象外に既存の制約違反値がある場合は `VALIDATE ONLY` で検出できず、API実行時に fail-fast となる Tier 0 境界を明文化。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
@@ -46,6 +47,9 @@ UPDATE <app> SET ... WHERE ...
   - 超過時も**全行の検証を完了**してから、**書き込みを一切行わず**停止する。部分書き込み後の停止は発生せず、結果は決定的
   - 超過による停止時も `#err` は結果セットとして返す（原因調査に使える）
   - `REJECT LIMIT` 省略時は `UNLIMITED`（隔離件数無制限で継続）。`ON ERROR SKIP` 句自体を書かなければ従来の fail-fast
+- **`REJECT LIMIT n` の数値契約（R7）**: `n` は **0 以上の安全な整数**のみ。負数・小数・指数表記・安全整数超過は ParseError。`REJECT LIMIT` 単独（`ON ERROR SKIP INTO` なし）・重複指定・`VALIDATE ONLY` との併記も ParseError
+- **AST（R7）**: `onErrorSkip: boolean`（既定 false）・`errorTable: string`（`INTO` 必須）・`rejectLimit: number | null`（null=UNLIMITED）。分類は `requiresCompleteInput=true`・**`writesKintone=true`**（書き込みあり＝`ksql_mutate`/DML 承認必須。`VALIDATE ONLY` との最大の違い）
+- **`ON ERROR SKIP` はバッチ専用（R7）**: `INTO #err` が必須で `#err` はバッチスコープのため、単文の `ON ERROR SKIP` は静的に `ArgumentError: ON ERROR SKIP requires a batch.`（B12-A の「単文 `VALIDATE ONLY INTO` はバッチ必須」と同じ規則）。単文で隔離相当を行う場合は 2 文バッチ（`… ON ERROR SKIP INTO #err; SELECT * FROM #err`）にする
 - 句を付けない既存 SQL の挙動は一切変わらない（後方互換）
 
 ### 2.1 VALIDATE ONLY の公開境界（先行リリース）
@@ -248,6 +252,60 @@ B12-A の利用実績は B12-B の着手判断材料にはするが、B12-A の�
 - **受入条件（一致性）**: 同一入力に対し、`VALIDATE ONLY` の `invalidRows`／`errors` と `ON ERROR SKIP` の `skippedRows`／`#err` 内容（行・列・エラーコード・順序）が一致する。
 - 合格行の書き込みで発生した API エラーは隔離せず fail-fast（チャンク単位の部分書き込みは既存 DML と同じ挙動・変更しない）。
 - 利用者向け文書は「隔離＝kSQL がローカルで検出した Tier 0 問題であり、API 拒否の証明ではない」（§1 非保証・§9-1）の表現を維持する。
+
+### 7.4 B12-B 実装契約（R7・codex レビュー P1×3 反映）
+
+#### 7.4.1 REJECT LIMIT 超過時の返却契約（P1-1）
+
+現行のバッチ実行は `BatchStatementResult.result` が success 文専用で、catch 時は `error` のみを格納し（[execute.ts:655](../../src/execute.ts#L655)）、エンベロープの `results[]` へ入るのも success の SELECT/VALIDATION のみ（[batchEnvelope.ts:90](../../src/output/batchEnvelope.ts#L90)）。また `AssertError` を流用すると後続文の skippedReason が `assertion` になり誤分類される（[execute.ts:660](../../src/execute.ts#L660)）。よって:
+
+- **`RejectLimitExceededError` を新設**する（`AssertError` を流用しない）。後続文の skippedReason は `fail-fast`。
+- **超過文は `status:"error"` としつつ、診断結果セットを `results[]` に載せ `resultIndex` を持てる**ようエンベロープ契約を拡張する（「error 文は result を持たない」現行構造への唯一の例外として明記）。
+- **`#err` への追記を完了してから超過エラー化**する（診断行の欠落を防ぐ）。
+- 超過時の「`#err` を返す」は**「応答結果セットとして返す」の意味**である。超過はバッチを fail-fast させるため、**後続 SQL から `#err` を参照することはできない**（後続文は skipped）。
+- エラー時の診断結果セットも `maxTotalRecords` の集計対象にする。
+
+#### 7.4.2 prepared write plan（P1-2）
+
+現行の `validateDmlCandidates()` は `errors` と `invalidRows` 件数しか返さず、合格行の集合・正規化済み値・UPSERT 照合済み target ID を失う（[dmlValidationCandidates.ts:19](../../src/core/dmlValidationCandidates.ts#L19)）。合格行を既存 `executeInsert`/`executeUpdate`/`executeUpsert` へ入れ直すと、ソース再取得・式再評価・**UPSERT 再照合**が起き、「ソース確定（スナップショット）」契約（§3-1）を破る。よって:
+
+- **候補 materialize の戻り値を「書き込み可能な prepared candidate（write plan）」へ拡張**する: 候補に `targetId`（UPDATE/UPSERT-update）または直接 POST/PUT 可能な record を保持する。
+- 検証結果は **`invalidRowNumbers`（または valid candidates 集合）** を返し、合格行を特定できるようにする。
+- **UPSERT の `targetIndex`（`resolveUpsertTargets`）は検証・書き込みを通じて 1 回だけ解決**し共有する（照合 GET は 1 回）。
+- **合格 prepared plan を `postRecords`/`putRecords` の 100 件チャンク処理へ直接渡す**。既存の executor 関数を丸ごと再実行しない。
+- これにより Tier 0 一致性（§7.3）・ソーススナップショット・UPSERT 照合 1 回を同時に満たす。
+
+#### 7.4.3 ガード連携（P1-3）
+
+現行は INSERT VALUES の**入力行数**を実行前に静的拒否し（MCP 単文 [tools.ts:721](../../src/mcp/tools.ts#L721)・バッチ合計 [tools.ts:618](../../src/mcp/tools.ts#L618)・CLI [cli/index.ts:1732](../../src/cli/index.ts#L1732)）、非 SELECT-based DML の読み取り上限を `dmlMaxRows + 1` に絞る（[tools.ts:356](../../src/mcp/tools.ts#L356)）。「入力 10 行・隔離 9 行・`dmlMaxRows=1`」は仕様上成功すべきだが、raw 件数の静的ガードでは拒否される。よって:
+
+- **`ON ERROR SKIP` 文は raw `insertValuesCount` の静的 `dmlMaxRows` ガードから除外**する（MCP 単文・バッチ・CLI とも）。`dmlTotalMaxRows` の静的 INSERT 合計にも raw 件数を加えない。
+- **候補取得は通常の `maxRecords`** を使用し `dmlMaxRows + 1` で絞らない（`containsSelectBasedDml` 系の判定へ `onErrorSkip` も加える＝`isUpdateFrom` と同じパターン）。
+- **全候補検証・隔離・REJECT LIMIT 判定の完了後、合格 write plan の件数**で `confirm`／`dmlMaxRows`／`dmlTotalMaxRows` を判定する。
+- INSERT VALUES は現行 `confirm` 非経由だが、**`ON ERROR SKIP` 付き INSERT VALUES は prepared writer の合格件数ガードを必須**とする（静的ガード除外の代替）。
+
+#### 7.4.4 結果メタデータ（M2）
+
+既存の operation 別 result 型へ**後方互換な optional field** として追加する:
+
+| フィールド | 意味 |
+|---|---|
+| `affectedRows` | INSERT=`insertedCount`／UPDATE=`updatedCount`／UPSERT=`insertedCount+updatedCount` |
+| `skippedRows` | invalid source row のユニーク数 |
+| `rejectLimit` | 数値または `null`（UNLIMITED） |
+| `errTable` | 指定された `#err` 名 |
+
+INSERT の `createdIds` は合格行分のみ。型追加に加え、**MCP 単文変換（[tools.ts:271](../../src/mcp/tools.ts#L271)）とバッチサマリー（[batchEnvelope.ts:49](../../src/output/batchEnvelope.ts#L49)）の明示的な更新**（＋スナップショット）が必要。
+
+#### 7.4.5 追加受入（R7）
+
+- raw 10 行・invalid 9 行・`dmlMaxRows=1` が 1 行書き込みで成功する。`dmlTotalMaxRows` も合格行だけを加算する。
+- `REJECT LIMIT n` は隔離 n 行で成功・n+1 行で超過。1 行複数エラーでも行数は 1。
+- 超過時は `status:"error"` と `results[resultIndex]` の診断の両方を返し、POST/PUT 0 回。後続文は fail-fast skipped。
+- UPSERT の照合 GET が検証・書き込みを通じて 1 回だけ。
+- `tempTableMaxRows` 超過・`#err` schema 不一致時は書き込み 0 回。
+- **一致性**: 同一入力の `VALIDATE ONLY` と `ON ERROR SKIP` でエラー行・列・コード・順序が完全一致する。
+- API 書き込み失敗時は既存チャンク単位の部分反映規則を維持する。
 
 ## 8. 他 RDB・DWH の同等機能との比較評価
 
