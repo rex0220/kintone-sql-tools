@@ -225,8 +225,8 @@ UNION の実装は 2 経路あり、**どちらも `leftResult.columns`（`leftC
 - **非インライン CTE の空 `SELECT *`（Finding 1・必須）**: 例 `WITH c AS (SELECT a, COUNT(*) cnt FROM APP WHERE (0件) GROUP BY a) SELECT * FROM c`（本体 GROUP BY＝FULL_SCAN＝非インライン）→ 0 行で `columns` が CTE スキーマ（`['a','cnt']`）。**併せて `canInlineSingleCte` が false になることをコメントで固定**（単純 CTE との差を明示）。
 - 参考（インライン CTE・別経路）: `WITH c AS (SELECT a,b FROM APP WHERE (0件)) SELECT * FROM c` は `canInlineSingleCte=true` で `SELECT a,b` に展開され、v2.1.1 の明示列経路で既に列が出る（MaterializedTable 経路ではない）ことを1本で確認。
 - 左辺空 UNION（両経路・両演算子）:
-  - **temp/CTE 経路（`executeQueryWithCte` の UNION 分岐 1666-1681）**: `SELECT * FROM #empty UNION ALL SELECT b FROM APP2` と `… UNION …` → 結果列＝#empty スキーマ、右辺値が `leftCols` へ載る。**本仕様で新規追加すべきはこちら**（左辺が temp/CTE の `SELECT *`）。
-  - 通常経路（`executeUnion` 1580）: 明示列の空左辺は v2.1.1 の `project` 修正で既に列が出る。既存テストがあれば流用、なければ回帰として1本追加し両経路を固定する。
+  - **通常経路（`executeUnion` 1580）は既存テストを流用**: [execute.test.ts:2158-2176](../../src/__tests__/execute.test.ts#L2158) の `test.each`（`UNION`/`UNION ALL`）が、空の明示列左辺 `SELECT a FROM APP100`（`recordsByApp: { 100: [] }`）で `columns===['a']`・右辺値の `a` へのリマップを検証済み。追加不要。
+  - **temp/CTE 経路（`executeQueryWithCte` の UNION 分岐 1666-1681）を新規追加**: `SELECT * FROM #empty UNION ALL SELECT b FROM APP2` と `… UNION …` → 結果列＝#empty スキーマ、右辺値が `leftCols` へ載る。**本仕様で追加すべきはこちら**（左辺が temp/CTE の `SELECT *`）。
 - **JOIN 非対象**: `SELECT * FROM #empty t JOIN APP a ON ...`（0 行）→ `sourceColumns` 非供給で現状どおり（空列）を固定。
 - 1 行以上の `SELECT * FROM #temp` 回帰。
 
