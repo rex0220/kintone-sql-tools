@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §4 で**最優先（効果大／コスト小）**と評価した機能。B12 の `#err` メッセージ集約の本命。
-- ステータス: **仕様 R2・codex 実装／テスト完了（コードレビュー・実機確認待ち）。**
+- ステータス: **v2.15.0 でリリース済み**（R2 実装・コードレビュー承認・実機 全12項目 pass）。実機＝`#err` の 4 エラーを `/` 連結／`UPPER(GROUP_CONCAT(郵便番号 SEPARATOR ' / '))`=`130-XXXX / 310-XXXX`（区切りが文字列関数経路まで伝播）／`GROUP_CONCAT(*)` は ParseError。実装時に **HAVING が集約を別経路でパースする**ことが判明し、そちらでもワイルドカードと `SEPARATOR` を対応（§5 は SELECT 側しか見ていなかった）。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

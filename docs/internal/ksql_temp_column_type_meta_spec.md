@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。B16 `GROUP_CONCAT` とは独立（[B16 仕様](ksql_group_concat_spec.md) §0）。
-- ステータス: **R2 実装済み（codex・コードレビュー待ち）。1,294 テスト green。v2.15.0 予定。**
+- ステータス: **v2.15.0 でリリース済み**（R2 実装・コードレビュー承認・実機 全13項目 pass）。決定的証拠＝同一 `#err` で `MIN(文字列T1)`=`x`（文字列）・`MIN(数値T1)`=`NaN`（数値）＝DML 対象アプリの型どおりに分離／`MAX($id)`=15（辞書順なら `"9"`）＝`RECORD_NUMBER` 宣言／`MAX(顧客No)`=214＝temp 越しの数値非回帰。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
