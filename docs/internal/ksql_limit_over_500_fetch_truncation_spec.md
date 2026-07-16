@@ -3,7 +3,7 @@
 - 作成日: 2026-07-16
 - 対象課題: [perf-sql-execution-improvements.md](../perf-sql-execution-improvements.md) §A-8 / [perf-sql-execution-implementation-plan.md](../perf-sql-execution-implementation-plan.md) フェーズ3 A-8
 - 前提修正: [ksql_simple_select_limit_over_500_issue.md](ksql_simple_select_limit_over_500_issue.md)（`LIMIT>500` を `fetchAll` へ送る機能バグ＝v2.10.1 で解消済み）
-- ステータス: **仕様案 R3（codex 再レビュー反映・実装着手可）。v2.11.0 予定③（B1・B2 の後）**
+- ステータス: **仕様案 R3・codex 再レビュー承認（追加 Finding なし）・実装着手可。v2.11.0 予定③（B1・B2 の後）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
   - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①「完全後方互換・API 呼び出し数のみ変更」を撤回＝`stopAfter` は `maxRecords/onLimit` の意味論を変える（総数>`maxRecords` でも `offset+limit<=maxRecords` なら従来のエラー/警告なしで成功）と明示（§1.1）②検索打ち切り警告の保証を「実際に取得したレスポンス」に限定③受入の「N 件取得」を「返却/保持 N 件・GET 数 ceil(N/pageSize)・最終ページで最大 pageSize−1 の余分受信は許容」へ厳密化。`stopAfter` の実行時検証（正の安全整数 && `<= maxRecords`）を追加
@@ -130,7 +130,7 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 - `stmt.orderBy.length === 0`: フェッチ順＝返却順（§3）。
 - `stmt.limit !== null`: `LIMIT` 明示時のみ（この経路は `LIMIT>500`。`LIMIT` なしは全件が目的なので `stopAfter` なし）。
 - `needed <= maxRecords`: 必要行数が取得上限内。超えるときは現状の `maxRecords` 打ち切り（警告/例外）に委ねる。
-- `!whereHasKlike(stmt.where)`: **KLIKE を含む WHERE は除外**（§1.2・検索打ち切り警告を見逃さないため）。`whereHasKlike` は [src/core/like.ts:41](../../src/core/like.ts#L41)。
+- `!whereHasKlike(stmt.where)`: **KLIKE を含む WHERE は除外**（§1.2・検索打ち切り警告を見逃さないため）。`whereHasKlike` は [src/core/like.ts:41](../../src/core/like.ts#L41)。**インライン CTE**（`buildInlinedQuery` で展開済み）でも、`executeSimpleSelect` が受け取るのは展開後の `stmt` なので、その `stmt.where`（CTE 本体 WHERE ＋ 最終 WHERE の合成）に対して同じ判定が効く。追加対応は不要。
 
 その後の `applyOrderBy`（no-op）→ `applyLimit(rows, stmt.limit, stmt.offset)` は現行のまま。フェッチした `needed` 行から `offset..offset+limit` を切り出す＝結果は現行と一致。
 
