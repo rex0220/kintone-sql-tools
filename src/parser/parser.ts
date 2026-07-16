@@ -1850,7 +1850,7 @@ export class Parser {
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT はサブテーブル仮想テーブルでは未対応です", this.prev());
       }
-      const validation = this.parseValidateOnlySuffix();
+      const validation = this.parseDmlControlSuffix();
       return { type: "INSERT_SELECT", appId, fields, select, ...validation } satisfies InsertSelectStatement;
     }
 
@@ -1865,9 +1865,9 @@ export class Parser {
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
 
-    const validation = this.parseValidateOnlySuffix();
-    if (subtableCode && validation.validateOnly) {
-      throw new ParseError("VALIDATE ONLY はサブテーブル INSERT に対応していません", this.prev());
+    const validation = this.parseDmlControlSuffix();
+    if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
+      throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル INSERT に対応していません", this.prev());
     }
     return subtableCode
       ? { type: "INSERT", appId, subtableCode, fields, values, ...validation }
@@ -1893,7 +1893,7 @@ export class Parser {
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
       const keyFields = this.parseOnDuplicate();
-      const validation = this.parseValidateOnlySuffix();
+      const validation = this.parseDmlControlSuffix();
       return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...validation };
     }
 
@@ -1908,7 +1908,7 @@ export class Parser {
     } while (this.consume(TokenKind.COMMA));
 
     const keyFields = this.parseOnDuplicate();
-    const validation = this.parseValidateOnlySuffix();
+    const validation = this.parseDmlControlSuffix();
     return { type: "UPSERT", appId, fields, values, keyFields, ...validation };
   }
 
@@ -2038,9 +2038,9 @@ export class Parser {
       );
     }
 
-    const validation = this.parseValidateOnlySuffix();
-    if (subtableCode && validation.validateOnly) {
-      throw new ParseError("VALIDATE ONLY はサブテーブル UPDATE に対応していません", this.prev());
+    const validation = this.parseDmlControlSuffix();
+    if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
+      throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル UPDATE に対応していません", this.prev());
     }
     if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...validation };
     return subtableCode
@@ -2048,8 +2048,18 @@ export class Parser {
       : { type: "UPDATE", appId, assignments, where, ...validation };
   }
 
-  /** DML末尾の VALIDATE ONLY [INTO #err]。VALIDATE / ONLY はsoft keyword。 */
-  private parseValidateOnlySuffix(): { validateOnly?: true; validationErrorTable?: string | null } {
+  /** DML末尾の VALIDATE ONLY または ON ERROR SKIP。各語はsoft keyword。 */
+  private parseDmlControlSuffix(): {
+    validateOnly?: true;
+    validationErrorTable?: string | null;
+    onErrorSkip?: true;
+    errorTable?: string;
+    rejectLimit?: number | null;
+  } {
+    if (this.peek().kind === TokenKind.ON) return this.parseOnErrorSkipSuffix();
+    if (this.isSoftKeyword("REJECT")) {
+      throw new ParseError("REJECT LIMIT には ON ERROR SKIP INTO が必要です", this.peek());
+    }
     if (!this.isSoftKeyword("VALIDATE")) return {};
     const validateTok = this.advance();
     if (!this.isSoftKeyword("ONLY")) {
@@ -2064,10 +2074,37 @@ export class Parser {
       }
       validationErrorTable = this.parseTableName();
     }
-    if (this.isSoftKeyword("ON") || this.isSoftKeyword("REJECT")) {
+    if (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT")) {
       throw new ParseError("VALIDATE ONLY と ON ERROR / REJECT LIMIT は併記できません", validateTok);
     }
     return { validateOnly: true, validationErrorTable };
+  }
+
+  private parseOnErrorSkipSuffix(): { onErrorSkip: true; errorTable: string; rejectLimit: number | null } {
+    const onTok = this.advance();
+    if (!this.isSoftKeyword("ERROR")) throw new ParseError("ON の後には ERROR が必要です", this.peek());
+    this.advance();
+    if (!this.isSoftKeyword("SKIP")) throw new ParseError("ON ERROR の後には SKIP が必要です", this.peek());
+    this.advance();
+    this.expect(TokenKind.INTO, "ON ERROR SKIP には INTO #一時テーブル が必要です");
+    const tableTok = this.peek();
+    if (tableTok.kind !== TokenKind.IDENT || !tableTok.value.startsWith("#")) {
+      throw new ParseError("ON ERROR SKIP INTO には # で始まる一時テーブル名が必要です", tableTok);
+    }
+    const errorTable = this.parseTableName();
+    let rejectLimit: number | null = null;
+    if (this.isSoftKeyword("REJECT")) {
+      this.advance();
+      this.expect(TokenKind.LIMIT, "REJECT の後には LIMIT が必要です");
+      const tok = this.expect(TokenKind.NUMBER, "REJECT LIMIT には 0 以上の整数が必要です");
+      if (!/^\d+$/.test(tok.value)) throw new ParseError("REJECT LIMIT は 0 以上の安全な整数で指定してください", tok);
+      rejectLimit = Number(tok.value);
+      if (!Number.isSafeInteger(rejectLimit)) throw new ParseError("REJECT LIMIT は 0 以上の安全な整数で指定してください", tok);
+    }
+    if (this.isSoftKeyword("REJECT") || this.isSoftKeyword("VALIDATE") || this.peek().kind === TokenKind.ON) {
+      throw new ParseError("ON ERROR SKIP の句が重複または競合しています", onTok);
+    }
+    return { onErrorSkip: true, errorTable, rejectLimit };
   }
 
   private isSoftKeyword(value: string): boolean {

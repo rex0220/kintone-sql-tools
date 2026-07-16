@@ -50,12 +50,30 @@ function toMutationSummary(
   result: Exclude<ExecuteResult, SelectResult | AssertResult | DmlValidationResult>
 ): Record<string, unknown> {
   if (result.type === "INSERT") {
-    return { insertedCount: result.insertedCount, createdIds: result.createdIds };
+    return {
+      insertedCount: result.insertedCount, createdIds: result.createdIds,
+      ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+      ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+      ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+      ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
+    };
   }
-  if (result.type === "UPDATE") return { updatedCount: result.updatedCount };
+  if (result.type === "UPDATE") return {
+    updatedCount: result.updatedCount,
+    ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+    ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+    ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+    ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
+  };
   if (result.type === "DELETE") return { deletedCount: result.deletedCount };
   if (result.type === "UPSERT") {
-    return { insertedCount: result.insertedCount, updatedCount: result.updatedCount };
+    return {
+      insertedCount: result.insertedCount, updatedCount: result.updatedCount,
+      ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
+      ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
+      ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
+      ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
+    };
   }
   return { reorderedParentCount: result.reorderedParentCount };
 }
@@ -102,7 +120,7 @@ export function buildBatchEnvelope(
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? [],
       });
-    } else if (s.status === "success" && s.result?.type === "VALIDATION") {
+    } else if (s.result?.type === "VALIDATION") {
       totalRows += s.result.errorCount;
       if (maxTotalRecords !== undefined && totalRows > maxTotalRecords) {
         throw new Error(`ArgumentError: batch total rows (${totalRows}) exceed maxTotalRecords (${maxTotalRecords}).`);
@@ -121,7 +139,7 @@ export function buildBatchEnvelope(
         errorCount: s.result.errorCount,
         ...(s.result.errTable ? { errTable: s.result.errTable } : {}),
       });
-    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT" && s.result.type !== "VALIDATION") {
+    } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない
       //（ExecuteResult 型上は含まれるため型の除外も兼ねる）
       Object.assign(entry, toMutationSummary(s.result));

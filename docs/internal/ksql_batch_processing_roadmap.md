@@ -1,7 +1,7 @@
 # kSQL 改善案：バッチ処理向け機能（改訂版）
 
 - 出典: 設計メモ `ksql-batch/kSQL改善案_バッチ処理機能.md`（2026-07-16 に repo へ移設）
-- ステータス: **バッチ強化の親ロードマップ**。Phase 0 レシピ集・Phase 1 バッチ変数・Phase 2 B11 v1（`$id` 結合）・Phase 3-A B12-A `VALIDATE ONLY` は実装済み（B11 v1はv2.12.0、B12-Aはv2.13.0・文字数実機確認待ち）。次は **B11 v1.1 業務キー結合 → B12-B ON ERROR SKIP**。ONLY CHANGED ほかは保留/取下げ。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) 参照。
+- ステータス: **バッチ強化の親ロードマップ**。Phase 0〜3-B（B12-A `VALIDATE ONLY`、B11.1 業務キー結合）は実装・実機確認完了。Phase 3-C B12-B `ON ERROR SKIP` はcodex実装完了・コードレビュー／実機確認待ち。3件をv2.13.0へ同梱する。ONLY CHANGED ほかは保留/取下げ。台帳 [ksql_issue_tracker.md](../ksql_issue_tracker.md) 参照。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
 ## この文書の目的
@@ -21,9 +21,9 @@
 | Phase 0 | レシピ集（ドキュメント整備） | 中 | 即着手 | 本書末尾 |
 | Phase 1 | バッチ変数（SET → DECLARE） | 大 | 採用 | kSQL仕様案_バッチ変数.md |
 | Phase 2 | UPDATE ... FROM v1（`$id` 結合） | 大 | **v2.12.0 実装済み** | [B11 spec](ksql_update_from_spec.md) |
-| Phase 3-A | `VALIDATE ONLY` | **最大** | **v2.13.0 実装済み**（文字数実機確認待ち） | [B12 spec](ksql_on_error_skip_isolation_spec.md) / [plan](ksql_validate_only_implementation_plan.md) |
-| Phase 3-B | UPDATE ... FROM v1.1（業務キー結合） | 大 | 採用・B12-Bのリリースゲート | [B11 spec §12](ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
-| Phase 3-C | `ON ERROR SKIP INTO #err` | **最大** | 採用 | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
+| Phase 3-A | `VALIDATE ONLY` | **最大** | **v2.13.0 実装・実機確認済み** | [B12 spec](ksql_on_error_skip_isolation_spec.md) / [plan](ksql_validate_only_implementation_plan.md) |
+| Phase 3-B | UPDATE ... FROM v1.1（業務キー結合） | 大 | **v2.13.0 実装・実機確認済み** | [B11 spec §12](ksql_update_from_spec.md#12-v11業務キー結合b12-b-リリースゲート) |
+| Phase 3-C | `ON ERROR SKIP INTO #err` | **最大** | **v2.13.0 codex実装済み・レビュー/実機待ち** | [B12 spec](ksql_on_error_skip_isolation_spec.md) |
 | 機会的 | HTTP 層の透過リトライ（429 のみ） | 小（夜間バッチでは発動条件がほぼない） | HTTP クライアント改修時に同梱 | 本書内 |
 | 保留 | 実行ログ自動記録 | 中 | バッチ変数の @batch_id 連携で再評価 | — |
 | 保留 | UPSERT 変更行スキップ（ONLY CHANGED） | 小（差分型では効果がリラン時限定） | 需要立証後に再評価 | kSQL仕様案_ONLY-CHANGED変更行スキップ.md |

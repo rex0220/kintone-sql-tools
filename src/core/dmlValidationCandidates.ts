@@ -1,6 +1,7 @@
 import type { KintoneFieldInfo } from "../execute";
 import type { ProcessRow } from "../engine/process";
 import { isEmptyDmlValue, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
+import type { KintoneRecord } from "../converter/dmlToKintone";
 
 export type ValidationOperation = "INSERT" | "UPDATE" | "UPSERT";
 
@@ -10,6 +11,10 @@ export interface DmlValidationCandidate {
   mode: "create" | "update";
   payload: Map<string, unknown>;
   preErrors: Array<{ field: string; code: DmlValidationErrorCode; message: string }>;
+  /** 検証成功値だけで構成した、そのまま POST/PUT 可能なペイロード。 */
+  record?: KintoneRecord;
+  /** UPDATE / UPSERT-update の書き込み先レコード ID。 */
+  targetId?: number;
 }
 
 export const VALIDATION_META_COLUMNS = [
@@ -23,15 +28,17 @@ export function validateDmlCandidates(
   targetFields: string[],
   fieldInfos: KintoneFieldInfo[],
   statementNumber: number
-): { errors: ProcessRow[]; invalidRows: number } {
+): { errors: ProcessRow[]; invalidRows: number; invalidRowNumbers: Set<number> } {
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors: ProcessRow[] = [];
   const invalid = new Set<number>();
   for (const candidate of candidates) {
+    candidate.record ??= {};
     const rowErrors = [...candidate.preErrors];
     for (const code of targetFields) {
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
+      else candidate.record[code] = { value: result.value };
     }
     if (candidate.mode === "create") {
       for (const info of fieldInfos) {
@@ -66,7 +73,7 @@ export function validateDmlCandidates(
       errors.push(row);
     }
   }
-  return { errors, invalidRows: invalid.size };
+  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
 }
 
 export function renderValidationValue(value: unknown): string {

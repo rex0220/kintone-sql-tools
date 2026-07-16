@@ -2,7 +2,7 @@
 // core index — UI/CLI から利用する公開API
 // ============================================================
 
-export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError, AssertError, SearchAbortedError } from "../execute";
+export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError, AssertError, RejectLimitExceededError, SearchAbortedError } from "../execute";
 export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { validateKlikeStatement, KlikeValidationError } from "./klikeValidation";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES, MAX_BATCH_VARIABLES } from "./batch";

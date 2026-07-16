@@ -1557,7 +1557,11 @@ describe("MCP tools", () => {
   // ksql_mutate の DML バッチ受理（フェーズ2 M1）
   // ----------------------------------------------------------------
 
-  function makeMutateRuntimeDeps(recordsByApp: Record<number, Array<Record<string, { value: string }>>>) {
+  function makeMutateRuntimeDeps(
+    recordsByApp: Record<number, Array<Record<string, { value: string }>>>,
+    fields: Array<{ code: string; label: string; fieldType: string; required?: boolean }> = [],
+    cacheContext = "mutate-batch-test"
+  ) {
     const calls = { post: 0, put: 0, del: 0, get: 0 };
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     const client: KintoneClient = {
@@ -1572,7 +1576,7 @@ describe("MCP tools", () => {
       async putRecords() { calls.put += 1; },
       async deleteRecords() { calls.del += 1; },
       async getApps() { return []; },
-      async getFields() { return []; },
+      async getFields() { return fields; },
       async getProcessStatuses() { return { enable: false, states: [] }; },
     };
     const createRuntime = async (
@@ -1584,7 +1588,7 @@ describe("MCP tools", () => {
         sql: input.sql,
         profileName: input.profile ?? "prod",
         client,
-        cacheContext: "mutate-batch-test",
+        cacheContext,
         // 実 runtime(createKsqlRuntime)と同じく、input 未指定なら既定 500 を解決する
         maxRecords: input.maxRecords ?? 500,
         fetchParallel: input.fetchParallel ?? 3,
@@ -1625,6 +1629,28 @@ describe("MCP tools", () => {
       status: "success",
       updatedCount: 1,
     });
+  });
+
+  test("mutate: ON ERROR SKIP は raw 行数で拒否せず隔離後件数を dmlMaxRows/total に適用", async () => {
+    const { deps, calls, runtimeInputs } = makeMutateRuntimeDeps({}, [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    ], "on-error-mcp");
+    const tools = createKsqlMcpTools({ profile: "prod" }, deps);
+    const values = ["'OK'", ...Array.from({ length: 9 }, () => "''")].map((v) => `(${v})`).join(", ");
+    const result = await tools.mutate({
+      ...MUTATE_BASE,
+      sql: `INSERT INTO APP100 (code) VALUES ${values} ON ERROR SKIP INTO #err; SELECT * FROM #err`,
+      dmlMaxRows: 1,
+      dmlTotalMaxRows: 1,
+    }) as { ok: boolean; statements: Array<Record<string, unknown>>; results: Array<Record<string, unknown>> };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[0]).toMatchObject({
+      status: "success", insertedCount: 1, affectedRows: 1, skippedRows: 9, errTable: "#err",
+    });
+    expect(result.results[0]).toMatchObject({ type: "SELECT", rowCount: 9 });
+    expect(calls.post).toBe(1);
+    expect(runtimeInputs[0].maxRecords).toBeUndefined();
   });
 
   test("mutate: DECLARE 変数を MCP variables から UPDATE SET へ渡す", async () => {

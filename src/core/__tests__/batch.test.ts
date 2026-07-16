@@ -58,6 +58,20 @@ test("VALIDATE ONLY INTO の単文・異schema appendを拒否する", () => {
   )).toThrow("different payload schema");
 });
 
+test("ON ERROR SKIP は書き込みDML・完全入力・暗黙tempとして解析し単文を拒否する", () => {
+  expect(() => analyze(
+    "INSERT INTO APP100 (x) VALUES ('a') ON ERROR SKIP INTO #err"
+  )).toThrow("ArgumentError: ON ERROR SKIP requires a batch.");
+  const a = analyze(
+    "INSERT INTO APP100 (x) VALUES ('a') ON ERROR SKIP INTO #err; SELECT * FROM #err"
+  );
+  expect(a).toMatchObject({ containsDml: true, isReadOnlyBatch: false, requiresCompleteInput: true });
+  expect(a.statements[0]).toMatchObject({
+    isDml: true, isReadOnly: false, isOnErrorSkip: true, tempTablesCreated: ["#err"],
+  });
+  expect(a.statements[1].dependsOn).toEqual([0]);
+});
+
 test("UPDATE FROM #temp は collectRefs により依存と参照が自動配線される", () => {
   const a = analyze(
     "CREATE TEMP TABLE #e AS SELECT $id AS k, name AS f FROM APP200; " +

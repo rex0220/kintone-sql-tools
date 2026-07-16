@@ -397,6 +397,8 @@ tool input として受ける場合も、`execute()` ではなく runtime/client
 
 `VALIDATE ONLY` の単文出力は `type: "VALIDATION"` とし、`operation`、`validatedRows`、`validRows`、`invalidRows`、`errorCount`、`columns`、`errors`を返す。`VALIDATE ONLY INTO #err` は複文バッチ専用で、validation結果セットに加えて後続文から `#err` を参照できる。
 
+`ON ERROR SKIP INTO #err [REJECT LIMIT n]` は書き込みを伴う複文バッチ専用構文で、`ksql_mutate` のDML承認を必須とする。正常終了したmutation文にはoperation別件数と `affectedRows`、`skippedRows`、`rejectLimit`、`errTable` を返す。REJECT LIMIT超過文は `status: "error"` と `RejectLimitExceededError` を返しつつ、同じ文の診断結果を `results[]` に格納して `resultIndex` から参照可能にする。`dmlMaxRows` / `dmlTotalMaxRows` は隔離後の実書き込み件数へ適用する。
+
 ### 7.2.1 バッチ（複文）入力（v1.4.0）
 
 `;` 区切りの複文を **read-only バッチ**として受理する（DML を1文でも含む場合は

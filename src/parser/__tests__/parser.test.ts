@@ -24,6 +24,21 @@ test("DML VALIDATE ONLY suffix をsoft keywordとして解析する", () => {
   });
 });
 
+test("DML ON ERROR SKIP suffix と REJECT LIMIT を解析する", () => {
+  expect(parse("INSERT INTO APP100 (name) VALUES ('x') ON ERROR SKIP INTO #err")).toMatchObject({
+    type: "INSERT", onErrorSkip: true, errorTable: "#err", rejectLimit: null,
+  });
+  expect(parse("UPDATE APP100 SET name = 'x' WHERE $id = 1 ON ERROR SKIP INTO #err REJECT LIMIT 0")).toMatchObject({
+    type: "UPDATE", onErrorSkip: true, errorTable: "#err", rejectLimit: 0,
+  });
+  for (const sql of [
+    "INSERT INTO APP100 (x) VALUES ('a') REJECT LIMIT 1",
+    "INSERT INTO APP100 (x) VALUES ('a') ON ERROR SKIP INTO #err REJECT LIMIT -1",
+    "INSERT INTO APP100 (x) VALUES ('a') ON ERROR SKIP INTO #err REJECT LIMIT 1.5",
+    "INSERT INTO APP100 (x) VALUES ('a') ON ERROR SKIP INTO #err REJECT LIMIT 9007199254740992",
+  ]) expect(() => parse(sql)).toThrow(ParseError);
+});
+
 test("validate / only は通常フィールド名として維持する", () => {
   expect(parse("INSERT INTO APP100 (validate, only) VALUES ('a', 'b')")).toMatchObject({
     type: "INSERT", fields: ["validate", "only"],

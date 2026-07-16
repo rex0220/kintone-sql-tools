@@ -13,6 +13,7 @@ import {
   SelectResult,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import { buildBatchEnvelope } from "../output/batchEnvelope";
 
 function makeRecord(fields: Record<string, string>): KintoneRecord {
   return Object.fromEntries(
@@ -105,6 +106,122 @@ test("エラー0件のVALIDATE ONLY INTOも列schemaを保持する", async () =
   expect(selected).toMatchObject({ type: "SELECT", rowCount: 0 });
   if (selected?.type !== "SELECT") throw new Error("unexpected result");
   expect(selected.columns).toContain("$err_code");
+});
+
+test("ON ERROR SKIP は不正行を隔離し合格 prepared plan だけを書き込む", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const confirmed: number[] = [];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES ('A'), (''), ('B') ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "on-error-insert", confirm: async (count) => { confirmed.push(count); return true; } }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "INSERT", insertedCount: 2, affectedRows: 2, skippedRows: 1,
+    rejectLimit: null, errTable: "#err",
+  });
+  expect(confirmed).toEqual([2]);
+  expect(client.postCalls).toHaveLength(1);
+  expect(client.postCalls[0].records).toEqual([
+    { code: { value: "A" } }, { code: { value: "B" } },
+  ]);
+  expect(batch.statements[1].result).toMatchObject({ type: "SELECT", rowCount: 1 });
+});
+
+test("REJECT LIMIT 超過は error と診断結果を両立し書き込みゼロで fail-fast", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES (''), ('OK') ON ERROR SKIP INTO #err REJECT LIMIT 0; SELECT * FROM #err",
+    client,
+    { cacheContext: "on-error-reject" }
+  );
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[0]).toMatchObject({
+    status: "error",
+    error: { code: "RejectLimitExceededError" },
+    result: { type: "VALIDATION", invalidRows: 1, errorCount: 1, errTable: "#err" },
+  });
+  expect(batch.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+  expect(client.postCalls).toHaveLength(0);
+  const envelope = buildBatchEnvelope(batch);
+  expect(envelope.statements[0]).toMatchObject({ status: "error", resultIndex: 0 });
+  expect(envelope.results[0]).toMatchObject({ type: "VALIDATION", rowCount: 1, invalidRows: 1 });
+  expect(() => buildBatchEnvelope(batch, { maxTotalRecords: 0 })).toThrow(/maxTotalRecords/);
+});
+
+test("ON ERROR SKIP の #err 上限超過は prepared plan を書き込まない", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES (''), ('OK') ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "on-error-temp-limit", tempTableMaxRows: 0 }
+  );
+  expect(batch.statements[0]).toMatchObject({ status: "error" });
+  expect(batch.statements[0].error?.message).toMatch(/temp table #err exceeds max rows/);
+  expect(client.postCalls).toHaveLength(0);
+});
+
+test("ON ERROR SKIP UPSERT は targetIndex を再取得せず合格行だけ更新する", async () => {
+  const client = makeClient({ recordsByApp: {
+    100: [makeRecord({ $id: "7", code: "A", name: "old" })],
+  } });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const batch = await executeBatch(
+    "UPSERT INTO APP100 (code, name) VALUES ('A', 'new'), ('B', '') " +
+    "ON DUPLICATE (code) ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "on-error-upsert" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "UPSERT", insertedCount: 0, updatedCount: 1, affectedRows: 1, skippedRows: 1,
+  });
+  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(1);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toEqual([
+    { id: 7, record: { code: { value: "A" }, name: { value: "new" } } },
+  ]);
+});
+
+test("VALIDATE ONLY と ON ERROR SKIP は同一入力でエラー内容・順序が一致する", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "amount", label: "amount", fieldType: "NUMBER", minValue: "1" },
+  ];
+  const values = "('', 0), ('OK', 2)";
+  const validation = await executeBatch(
+    `INSERT INTO APP100 (code, amount) VALUES ${values} VALIDATE ONLY INTO #err; SELECT * FROM #err`,
+    client,
+    { cacheContext: "isolation-consistency" }
+  );
+  const isolation = await executeBatch(
+    `INSERT INTO APP100 (code, amount) VALUES ${values} ON ERROR SKIP INTO #err; SELECT * FROM #err`,
+    client,
+    { cacheContext: "isolation-consistency" }
+  );
+  const validationResult = validation.statements[0].result;
+  const isolatedErrors = isolation.statements[1].result;
+  if (validationResult?.type !== "VALIDATION" || isolatedErrors?.type !== "SELECT") {
+    throw new Error("unexpected result types");
+  }
+  expect(isolatedErrors.columns).toEqual(validationResult.columns);
+  expect(isolatedErrors.rows).toEqual(validationResult.errors);
+  expect(isolation.statements[0].result).toMatchObject({ skippedRows: validationResult.invalidRows });
 });
 
 test("#err append上限超過は既存行を壊さない", async () => {
