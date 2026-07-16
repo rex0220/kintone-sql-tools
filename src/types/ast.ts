@@ -615,6 +615,8 @@ export interface UpdateFromSource {
   /** #temp 名。実アプリの場合は null。collectRefs が参照を検出する既存キー名を踏襲。 */
   cteName: string | null;
   alias: string;
+  /** 更新先の結合キー。v1 のレコード番号結合は "$id"。 */
+  targetJoinField: string;
   joinKeyField: string;
   targetFilter: WhereExpr | null;
 }

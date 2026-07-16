@@ -311,6 +311,14 @@ test("EXPLAIN UPDATE — 算術 SET + スカラーサブクエリ SET の混在"
   expect(plan.some((l) => l.includes("[subquery: 上限費用]"))).toBe(true);
 });
 
+test("EXPLAIN UPDATE FROM — 業務キー結合を表示", async () => {
+  const plan = await explain(
+    "EXPLAIN UPDATE APP88 SET 顧客名 = s.顧客名 FROM APP89 s WHERE APP88.顧客コード = s.顧客コード"
+  );
+  expect(plan.some((l) => l.includes("[UPDATE FROM]"))).toBe(true);
+  expect(plan.find((l) => l.includes("join:"))).toContain("APP88.顧客コード = s.顧客コード");
+});
+
 // ----------------------------------------------------------------
 // EXPLAIN DELETE
 // ----------------------------------------------------------------

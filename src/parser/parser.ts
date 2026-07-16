@@ -2000,10 +2000,14 @@ export class Parser {
       if (!table.alias) {
         throw new ParseError("UPDATE ... FROM のソースにはエイリアスが必要です", this.prev());
       }
+      if (table.alias.toLowerCase() === `app${appId}`.toLowerCase()) {
+        throw new ParseError(`UPDATE ... FROM のソース alias は更新先 APP${appId} と同名にできません`, this.prev());
+      }
       from = {
         appId: table.appId,
         cteName: table.cteName,
         alias: table.alias,
+        targetJoinField: "",
         joinKeyField: "",
         targetFilter: null,
       };
@@ -2024,6 +2028,7 @@ export class Parser {
       }
       this.validateUpdateFromAssignments(assignments, from.alias, whereTok);
       const decomposed = this.decomposeUpdateFromWhere(where, appId, from.alias, whereTok);
+      from.targetJoinField = decomposed.targetJoinField;
       from.joinKeyField = decomposed.joinKeyField;
       from.targetFilter = decomposed.targetFilter;
     } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
@@ -2098,15 +2103,15 @@ export class Parser {
     targetAppId: number,
     sourceAlias: string,
     tok: Token
-  ): { joinKeyField: string; targetFilter: WhereExpr | null } {
+  ): { targetJoinField: string; joinKeyField: string; targetFilter: WhereExpr | null } {
     const leaves = this.flattenTopLevelAnd(where);
-    const joins: Array<{ index: number; sourceField: string }> = [];
+    const joins: Array<{ index: number; targetField: string; sourceField: string }> = [];
     leaves.forEach((leaf, index) => {
-      const sourceField = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
-      if (sourceField !== null) joins.push({ index, sourceField });
+      const matched = this.matchUpdateFromJoin(leaf, targetAppId, sourceAlias);
+      if (matched !== null) joins.push({ index, ...matched });
     });
     if (joins.length !== 1) {
-      throw new ParseError("UPDATE ... FROM の WHERE には target.$id = source.key の結合等値がちょうど1つ必要です", tok);
+      throw new ParseError("UPDATE ... FROM の WHERE には target.key = source.key の結合等値がちょうど1つ必要です", tok);
     }
     const join = joins[0];
     for (let i = 0; i < leaves.length; i++) {
@@ -2122,7 +2127,7 @@ export class Parser {
       (acc, expr) => acc === null ? expr : { type: "LOGICAL", op: "AND", left: acc, right: expr },
       null
     );
-    return { joinKeyField: join.sourceField, targetFilter };
+    return { targetJoinField: join.targetField, joinKeyField: join.sourceField, targetFilter };
   }
 
   private flattenTopLevelAnd(expr: WhereExpr): WhereExpr[] {
@@ -2133,15 +2138,23 @@ export class Parser {
     return [expr];
   }
 
-  private matchUpdateFromJoin(expr: WhereExpr, targetAppId: number, sourceAlias: string): string | null {
+  private matchUpdateFromJoin(
+    expr: WhereExpr,
+    targetAppId: number,
+    sourceAlias: string
+  ): { targetField: string; sourceField: string } | null {
     if (expr.type !== "BINARY" || expr.op !== "=" || expr.left.type !== "FIELD") return null;
     const right = expr.right.type === "ARITH_VALUE" && expr.right.expr.type === "FIELD_REF"
       ? this.splitQualifiedField(expr.right.expr.field)
       : null;
     if (right === null) return null;
     const left = { alias: expr.left.tableAlias, field: expr.left.field };
-    if (this.isTargetIdRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) return right.field;
-    if (this.isSourceRef(left, sourceAlias) && this.isTargetIdRef(right, targetAppId)) return left.field;
+    if (this.isTargetRef(left, targetAppId) && this.isSourceRef(right, sourceAlias)) {
+      return { targetField: left.field, sourceField: right.field };
+    }
+    if (this.isSourceRef(left, sourceAlias) && this.isTargetRef(right, targetAppId)) {
+      return { targetField: right.field, sourceField: left.field };
+    }
     return null;
   }
 
@@ -2150,8 +2163,8 @@ export class Parser {
     return dot < 0 ? { alias: null, field } : { alias: field.slice(0, dot), field: field.slice(dot + 1) };
   }
 
-  private isTargetIdRef(ref: { alias: string | null; field: string }, appId: number): boolean {
-    return ref.field === "$id" && (ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase());
+  private isTargetRef(ref: { alias: string | null; field: string }, appId: number): boolean {
+    return ref.alias === null || ref.alias.toLowerCase() === `app${appId}`.toLowerCase();
   }
 
   private isSourceRef(ref: { alias: string | null; field: string }, alias: string): boolean {

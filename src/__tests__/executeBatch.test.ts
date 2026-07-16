@@ -167,6 +167,61 @@ test("UPDATE FROM #temp はバッチストアを参照して更新する", async
   ]);
 });
 
+test("UPDATE FROM #temp: B12の業務キー書き戻し例を実行する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ 顧客コード: "C001", エラー内容: "invalid" })],
+    100: [makeRecord({ $id: "7", 顧客コード: "C001" })],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [
+      { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "エラー内容", label: "エラー内容", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "処理ステータス", label: "処理ステータス", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "エラー内容", label: "エラー内容", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #err_summary AS SELECT 顧客コード, エラー内容 FROM APP200; " +
+    "UPDATE APP100 SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容 " +
+    "FROM #err_summary e WHERE APP100.顧客コード = e.顧客コード",
+    client,
+    { cacheContext: "batch-update-from-business-key" }
+  );
+  expect(result.ok).toBe(true);
+  expect(client.putCalls[0].records).toEqual([
+    { id: 7, record: { 処理ステータス: { value: "エラー" }, エラー内容: { value: "invalid" } } },
+  ]);
+});
+
+test("UPDATE FROM #temp VALIDATE ONLY INTO は業務キーmatchedだけを#errorへ書く", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ 顧客コード: "C001", amount: "11" })],
+    100: [makeRecord({ $id: "7", 顧客コード: "C001" })],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [
+      { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "amount", label: "amount", fieldType: "NUMBER" },
+    ]
+    : [
+      { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" },
+    ];
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #src AS SELECT 顧客コード, amount FROM APP200; " +
+    "UPDATE APP100 SET amount = s.amount FROM #src s WHERE 顧客コード = s.顧客コード " +
+    "VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "batch-validate-update-from-business" }
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[1].result).toMatchObject({ type: "VALIDATION", validatedRows: 1, invalidRows: 1 });
+  expect(result.statements[2].result).toMatchObject({ type: "SELECT", rowCount: 1 });
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("UPDATE FROM #temp は0行でも列欠落を PUT 前に拒否する", async () => {
   const client = makeClient({ recordsByApp: { 200: [] } });
   client.getFields = async () => [{ code: "k", label: "k", fieldType: "NUMBER" }];
