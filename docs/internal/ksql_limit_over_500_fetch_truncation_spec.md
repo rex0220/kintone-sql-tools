@@ -3,10 +3,11 @@
 - 作成日: 2026-07-16
 - 対象課題: [perf-sql-execution-improvements.md](../perf-sql-execution-improvements.md) §A-8 / [perf-sql-execution-implementation-plan.md](../perf-sql-execution-implementation-plan.md) フェーズ3 A-8
 - 前提修正: [ksql_simple_select_limit_over_500_issue.md](ksql_simple_select_limit_over_500_issue.md)（`LIMIT>500` を `fetchAll` へ送る機能バグ＝v2.10.1 で解消済み）
-- ステータス: **仕様案 R2（codex レビュー反映・実装着手可）。v2.11.0 予定③（B1・B2 の後）**
+- ステータス: **仕様案 R3（codex 再レビュー反映・実装着手可）。v2.11.0 予定③（B1・B2 の後）**
 - 更新履歴:
   - 2026-07-16 R1: 初版
-  - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①「完全後方互換・API 呼び出し数のみ変更」を撤回＝`stopAfter` は `maxRecords/onLimit` の意味論を変える（総数>`maxRecords` でも `offset+limit<=maxRecords` なら従来のエラー/警告なしで成功）と明示（§1.1）②検索打ち切り警告の保証を「実際に取得したレスポンス」に限定（早期停止で未取得のページの警告は検出不能・kintone が全ページに警告を返す契約は未確認）③受入の「N 件取得」を「返却/保持 N 件・GET 数 ceil(N/pageSize)・最終ページで最大 pageSize−1 の余分受信は許容」へ厳密化。`stopAfter` の実行時検証（正の安全整数 && `<= maxRecords`）を追加
+  - 2026-07-16 R2: codex レビュー反映（コードで裏取り）。①「完全後方互換・API 呼び出し数のみ変更」を撤回＝`stopAfter` は `maxRecords/onLimit` の意味論を変える（総数>`maxRecords` でも `offset+limit<=maxRecords` なら従来のエラー/警告なしで成功）と明示（§1.1）②検索打ち切り警告の保証を「実際に取得したレスポンス」に限定③受入の「N 件取得」を「返却/保持 N 件・GET 数 ceil(N/pageSize)・最終ページで最大 pageSize−1 の余分受信は許容」へ厳密化。`stopAfter` の実行時検証（正の安全整数 && `<= maxRecords`）を追加
+  - 2026-07-16 R3: codex 再レビュー反映（コードで裏取り）。①**ブロッカー＝KLIKE を安全サブセットから除外**（`whereHasKlike(stmt.where)` true なら `stopAfter` 非適用・§1.2）。検索打ち切りは kintone `like`＝KLIKE のみで起き、除外により `stopAfter` 経路では原理的に発生しない＝見逃し構造的に解消（§6.1）②§1 目的の「性能だけ改善」を「両方成功するケースの返却行は同一・ただし §1.1 の上限意味論変更を含む」へ訂正③`stopAfter` 検証は `ExecuteOptions` に項目がなく結合注入不可のため `fetchAll` 単体のみに置くと明記
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - SemVer: 性能改善だが **`maxRecords/onLimit` の意味論変更を含む**（§1.1・返却行は現行と一致するが従来エラーだったクエリが成功し得る）→ minor バンドル v2.11.0 の一部
 
@@ -16,15 +17,16 @@
 
 ### 目的
 
-SIMPLE SELECT の `LIMIT > 500` で、現状は WHERE 一致分を最大 `maxRecords` まで**全件取得**してから JS で `LIMIT` する（`LIMIT 1000` でも一致 10,000 件を全部取る）。**必要な行数に達した時点で取得を止め**、API 往復とメモリを削減する。返却行は現行と**完全一致**（正しさは不変・性能だけ改善）。
+SIMPLE SELECT の `LIMIT > 500` で、現状は WHERE 一致分を最大 `maxRecords` まで**全件取得**してから JS で `LIMIT` する（`LIMIT 1000` でも一致 10,000 件を全部取る）。**必要な行数に達した時点で取得を止め**、API 往復とメモリを削減する。**両方とも成功するケースの返却行は現行と同一**。ただし本仕様は **§1.1 の `maxRecords` 上限意味論の変更を含む**（従来エラー/警告だったクエリが成功し得る）。
 
 ### スコープ（安全サブセットのみ・v2.11.0）
 
-**`stmt.orderBy` が空**の SIMPLE SELECT `LIMIT > 500`（`fetchAll` 経路）に限り、`offset + limit` 件に達したら取得を打ち切る。§3 の「フェッチ順＝返却順」がこの条件でのみ成立する。
+**`stmt.orderBy` が空**、かつ **KLIKE を含まない**（`whereHasKlike(stmt.where) === false`）SIMPLE SELECT `LIMIT > 500`（`fetchAll` 経路）に限り、`offset + limit` 件に達したら取得を打ち切る。§3 の「フェッチ順＝返却順」と §1.2 の「検索打ち切りを見逃さない」がこの条件でのみ成立する。
 
 ### スコープ外（本仕様では最適化しない・現状維持）
 
 - **`ORDER BY` を伴う `LIMIT > 500`** — JS の `applyOrderBy` が全件を再ソートするため、`LIMIT` 窓が全件に依存する。早期打ち切り不可（§3・§5）。
+- **KLIKE（kintone キーワード検索）を含む `LIMIT > 500`** — 検索打ち切り（10 万件）警告が後続ページにのみ付く可能性があり、早期停止で見逃してサイレントな不完全結果になり得る（§1.2）。**v2.11.0 では `stopAfter` を適用せず現状の全取得を維持**。
 - **`LIMIT <= 500`** — 単発 GET で kintone が order+limit を処理（既に最適）。本仕様の対象外。
 - **FULL_SCAN 経路（JOIN / GROUP BY / DISTINCT / 集計 / 式 ORDER BY / サブテーブル）** — 集約・結合に全件が必要。対象外。
 - **`offset + limit > maxRecords`** — 必要行数が取得上限を超える。現状どおり `maxRecords` で打ち切り（`onLimit` に従い警告/例外）。
@@ -39,6 +41,12 @@ SIMPLE SELECT の `LIMIT > 500` で、現状は WHERE 一致分を最大 `maxRec
 - **返却行は現行と同一**だが、**従来は取得上限エラー/警告になっていたクエリが成功に変わる**場合がある（例: `LIMIT 1000`・`maxRecords=10000`・一致 20,000 件 → 現状はエラー/警告、本仕様では 1,000 行を返して正常終了）。
 
 これは合理的な改善だが、[v2.10.1 仕様](ksql_simple_select_limit_over_500_issue.md)の「`maxRecords`/`onLimitReached` の既存挙動を変更しない」という不変条件とは**衝突する**。厳密に従来の上限エラーを維持するには一致総数の確認＝全件取得が必要で、本最適化とは両立しない。よって v2.11.0 で上記の意味論変更を**受け入れる**。
+
+### 1.2 KLIKE を安全サブセットから除外する（codex レビュー・ブロッカー対応）
+
+検索打ち切り（10 万件）の検出は取得したレスポンスの `searchAborted` に依存する（§6.1）。**KLIKE 検索が打ち切られ、警告が先頭ページに付かず後続ページにのみ付く**場合、`stopAfter` が先に正常終了し、警告を検出できず、返却した先頭 `LIMIT` 行が**完全な検索集合に基づく保証もない**（サイレントな不完全結果）。
+
+「警告は必ず最初のレスポンスにも付く」という API 契約または実機根拠が確認できるまで、**KLIKE を含む WHERE（`whereHasKlike(stmt.where) === true`）では `stopAfter` を適用しない**（現状の全取得を維持）。`whereHasKlike`（[src/core/like.ts:41](../../src/core/like.ts#L41)）は既存で、判定追加は小さい。文書化（§6.1）だけではサイレントな不完全結果を防げないため、コードで除外する。
 
 ---
 
@@ -108,7 +116,10 @@ if (!useSingleGet) {
 ```ts
 const needed = (stmt.offset ?? 0) + (stmt.limit ?? 0);
 const stopAfter =
-  stmt.orderBy.length === 0 && stmt.limit !== null && needed <= maxRecords
+  stmt.orderBy.length === 0 &&
+  stmt.limit !== null &&
+  needed <= maxRecords &&
+  !whereHasKlike(stmt.where)          // KLIKE は検索打ち切り見逃しの恐れ（§1.2）
     ? needed
     : undefined;
 ...
@@ -119,6 +130,7 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 - `stmt.orderBy.length === 0`: フェッチ順＝返却順（§3）。
 - `stmt.limit !== null`: `LIMIT` 明示時のみ（この経路は `LIMIT>500`。`LIMIT` なしは全件が目的なので `stopAfter` なし）。
 - `needed <= maxRecords`: 必要行数が取得上限内。超えるときは現状の `maxRecords` 打ち切り（警告/例外）に委ねる。
+- `!whereHasKlike(stmt.where)`: **KLIKE を含む WHERE は除外**（§1.2・検索打ち切り警告を見逃さないため）。`whereHasKlike` は [src/core/like.ts:41](../../src/core/like.ts#L41)。
 
 その後の `applyOrderBy`（no-op）→ `applyLimit(rows, stmt.limit, stmt.offset)` は現行のまま。フェッチした `needed` 行から `offset..offset+limit` を切り出す＝結果は現行と一致。
 
@@ -133,7 +145,7 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 | ファイル | 変更 |
 |---|---|
 | `src/api/fetchAll.ts` | `FetchAllOptions.stopAfter?: number` を追加。`fetchCap = stopAfter ?? maxRecords` でバッチ並列数を算出。各 push 後に `stopAfter` 到達で `slice(0, stopAfter)` を通知なしで返す（`maxRecords` 超過チェックより前） |
-| `src/execute.ts` | `executeSimpleSelect` で安全サブセット条件（§4.2）を満たすとき `stopAfter=needed` を `fetchAll` へ渡す |
+| `src/execute.ts` | `executeSimpleSelect` で安全サブセット条件（§4.2＝`orderBy` 空・`LIMIT` 明示・`needed<=maxRecords`・`!whereHasKlike`）を満たすとき `stopAfter=needed` を `fetchAll` へ渡す。`whereHasKlike` を import（`src/core/like.ts`） |
 | `src/api/__tests__/fetchAll.test.ts` | `stopAfter` の単体テスト（§7） |
 | `src/__tests__/execute.test.ts` | `LIMIT>500`×`ORDER BY` 有無で GET 回数・結果一致を固定（§7） |
 | `docs/perf-sql-execution-improvements.md` §A-8 / 実装計画 | A-8 の実装完了・安全サブセット範囲を追記 |
@@ -148,18 +160,15 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 - `LIMIT` なし（全件が目的）。
 - `offset + limit > maxRecords`（`maxRecords` 打ち切りに委譲）。
 - FULL_SCAN（JOIN/GROUP BY/DISTINCT/集計/式 ORDER BY/サブテーブル）。
-- KLIKE 等の押し下げ WHERE は `baseQuery` に含まれるため `stopAfter` と両立（`fetchAll` は WHERE をそのままページングするだけ）。
+- **KLIKE を含む WHERE**（§1.2・検索打ち切り見逃し回避のため `stopAfter` 非適用＝全取得維持）。
 
-### 6.1 検索打ち切り警告の保証範囲（codex レビュー・限定）
+### 6.1 検索打ち切りと KLIKE 除外の関係（codex レビュー）
 
-検索打ち切り（10 万件）の検出は、単文 `execute()`（[execute.ts:284-285](../../src/execute.ts#L284)）・バッチ（[execute.ts:582-593](../../src/execute.ts#L582)）とも `wrapClientWithSearchAbort`（[execute.ts:354-370](../../src/execute.ts#L354)）が**実際に取得した各レスポンスの `searchAborted` を検査**する仕組み。`fetchAll.onSearchAborted` も同様に取得ページのみを見る。
+検索打ち切り（10 万件）の検出は、単文 `execute()`（[execute.ts:284-285](../../src/execute.ts#L284)）・バッチ（[execute.ts:582-593](../../src/execute.ts#L582)）とも `wrapClientWithSearchAbort`（[execute.ts:354-370](../../src/execute.ts#L354)）が**実際に取得した各レスポンスの `searchAborted` を検査**する（`fetchAll.onSearchAborted` も取得ページのみ）。早期停止で未取得のページに警告が付いても検出できない。
 
-**早期停止（`stopAfter`）で未取得になったページに警告が付いていても、それは検出できない。** よって保証は次に限定する:
+**検索打ち切りは kintone `like` 演算子でのみ起きる。v2.0.0 以降、kSQL が WHERE に kintone `like` を出すのは KLIKE のみ**（通常 `LIKE` は JS 評価・`whereToKintone` が拒否）。したがって **§1.2 で KLIKE を `stopAfter` から除外した結果、`stopAfter` を適用する経路（非 KLIKE WHERE）では検索打ち切りが原理的に発生しない**。早期停止による警告見逃しは構造的に起こらない。
 
-- **実際に取得したレスポンスに `searchAborted=true` があれば最終警告へ伝播する**（取得ページ内での検出は不変）。
-- **未取得ページを含めて警告が失われない、とは保証しない**。kintone が同一検索の全ページに警告を返すことを契約として確認できていないため、この限定を明記する。
-
-（実害の程度: 検索打ち切りは一致総数が 10 万件級のときに起きる。`LIMIT` 窓が小さく先頭数ページで停止する場合、先頭ページに警告が付けば伝播する。付かない実装なら見逃し得る＝上記限定のとおり。）
+KLIKE を含むクエリは `stopAfter` 非適用で全取得するため、検索打ち切り警告は現行どおり全ページ検査で検出される（挙動不変）。
 
 ## 7. 受入条件
 
@@ -170,9 +179,9 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 - [ ] `ORDER BY` なし `LIMIT 1000`・一致 300 件: 早期打ち切りに到達せず（最終ページで終了）300 行。現行と一致。
 - [ ] `offset + limit > maxRecords`（例 `LIMIT 100000`・`maxRecords=10000`）: `stopAfter` 不適用。現状どおり `maxRecords` 到達で `onLimit`（error/truncate）挙動。
 - [ ] `LIMIT <= 500`: 単発 GET のまま（`stopAfter` 経路に入らない）。
-- [ ] KLIKE + `ORDER BY` なし `LIMIT 1000`: WHERE に kintone `like` が保持されつつ `stopAfter` で早期打ち切り。**取得したレスポンス**に `searchAborted` があれば最終警告へ伝播（§6.1・未取得ページの警告は保証外）。
+- [ ] **KLIKE を含む `ORDER BY` なし `LIMIT 1000`: `stopAfter` を適用しない＝全取得（現状維持）**。GET 回数・結果・検索打ち切り警告が現行と一致（§1.2）。
 - [ ] `fetchAll` 単体: `stopAfter=N`（`N ≤ maxRecords`）で **返却 N 行・`onTruncate` 未通知・GET 数 = `ceil(N/pageSize)`**（最終ページの余分受信は許容・不要な追加ページは発行しない）。
-- [ ] `fetchAll` 単体（検証）: `stopAfter <= 0` / 非安全整数 / `stopAfter > maxRecords` は `RangeError`。
+- [ ] `fetchAll` 単体（検証）: `stopAfter <= 0` / 非安全整数 / `stopAfter > maxRecords` は `RangeError`。**注**: `ExecuteOptions` に `stopAfter` はないため、`executeSimpleSelect` 経由での不正注入は不可能。この検証は `fetchAll` 単体テストにのみ置く（結合テストには置かない）。
 
 ## 8. テスト計画（修正前=全取得 / 修正後=早期停止）
 
@@ -192,14 +201,14 @@ records = await fetchAll(client.getRecords, params.app, baseQuery, params.fields
 - `LIMIT 1000 OFFSET 200` → 結果一致（1,000 行）。
 - **意味論変更（§1.1）**: `ORDER BY` なし・一致 20,000・`maxRecords=10000`・`LIMIT 1000` を `onLimit=error` と `onLimit=truncate` の両方で実行 → **どちらも正常終了・1,000 行**（従来の例外／警告が出ないことを固定）。
 - `offset+limit > maxRecords` → `maxRecords` 打ち切り挙動（従来どおり）。
-- KLIKE + `LIMIT 1000`（`ORDER BY` なし）→ 早期停止・WHERE 保持。**先頭（stopAfter 到達前）のレスポンスに `searchAborted` を設定**したとき最終警告へ伝播する（§6.1・未取得ページ設定のケースは保証外＝テストしない）。
-- `stopAfter` 検証: 非正・非安全整数・`> maxRecords` で `RangeError`。
+- **KLIKE + `LIMIT 1000`（`ORDER BY` なし）→ `stopAfter` 不適用＝全取得**（GET 回数・結果・検索打ち切り警告が現行と一致・§1.2）。
+- `stopAfter` 検証（非正・非安全整数・`> maxRecords` で `RangeError`）は **`fetchAll` 単体のみ**（`ExecuteOptions` に `stopAfter` がなく結合経由で注入不可）。
 
 ## 9. リスク・非対象
 
 - **リスク（意味論変更・§1.1）**: 従来 `maxRecords` 超過でエラー/警告だったクエリが `offset+limit<=maxRecords` で成功に変わる。**v2.11.0 で明示採用**。CHANGELOG／`maxRecords` の説明に「`maxRecords` は取得行数の上限。`ORDER BY` なしで `LIMIT` を満たせば一致総数に関わらず正常終了」を追記する。
 - **リスク（順序前提）**: 早期打ち切りは「フェッチ順（`$id` 昇順）＝返却順」に依存する。`ORDER BY` なしに厳密限定することで担保（`ORDER BY $id ASC` 等の「実質同順」ケースも v2.11.0 では含めない＝安全側）。§3 の根拠を回帰テストで固定。
-- **リスク（検索打ち切り見逃し・§6.1）**: 早期停止で未取得のページにのみ警告が付く場合は検出できない。保証は取得レスポンスに限定と明記。
+- **検索打ち切り見逃し（§1.2・§6.1）＝KLIKE 除外で解消**: 検索打ち切りは kintone `like`（＝KLIKE のみ）で起き、KLIKE を `stopAfter` から除外したため `stopAfter` 適用経路では原理的に発生しない。KLIKE クエリは全取得維持で現行どおり検出。
 - **リスク（`onTruncate` 誤通知）**: `stopAfter` 到達を打ち切り（`maxRecords` 超過）と混同すると誤警告になる。`stopAfter` の返却は通知なし・`stopAfter <= maxRecords` 保証で分離。
 - **非対象**: `ORDER BY` 付き（押し下げはカーソルページングと非両立）・`LIMIT` なし・FULL_SCAN・`offset+limit > maxRecords`。
 

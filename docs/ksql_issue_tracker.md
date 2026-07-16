@@ -49,7 +49,7 @@
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
 | B6 | KLIKE 外部結合 非 nullable 側の押し下げ解禁 | 改善 | 📝 改善案 | 性能 | 低 | [v2 spec](internal/ksql_klike_pushdown_v2_spec.md) |
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
-| B8 | A-8：`LIMIT`>500 の取得打ち切り最適化（API エラーのバグ部分は v2.10.1 で修正済・残りは性能改善＋`maxRecords` 意味論変更） | 改善 | 📝 **v2.11.0 予定③**（仕様案 R2・codex 承認・実装着手可） | 性能 | 低 | [spec](internal/ksql_limit_over_500_fetch_truncation_spec.md) / [perf §A-8](perf-sql-execution-improvements.md) |
+| B8 | A-8：`LIMIT`>500 の取得打ち切り最適化（API エラーのバグ部分は v2.10.1 で修正済・残りは性能改善＋`maxRecords` 意味論変更・KLIKE 除外） | 改善 | 📝 **v2.11.0 予定③**（仕様案 R3・codex 承認・実装着手可） | 性能 | 低 | [spec](internal/ksql_limit_over_500_fetch_truncation_spec.md) / [perf §A-8](perf-sql-execution-improvements.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
 
