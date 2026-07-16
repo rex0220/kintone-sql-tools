@@ -256,6 +256,37 @@ test("WHERE IN / NOT IN は変数を単一要素・リテラル混在で受理�
   });
 });
 
+test("WHERE IN / NOT IN は符号付き数値を数値リテラルとして受理する", () => {
+  const inAst = parseSelect(
+    "SELECT * FROM APP100 WHERE 金額 IN (0, 1000, -1, +1, '-1', @v)"
+  );
+  expect((inAst.where as any).right.values).toEqual([
+    { type: "NUMBER", value: 0 },
+    { type: "NUMBER", value: 1000 },
+    { type: "NUMBER", value: -1 },
+    { type: "NUMBER", value: 1 },
+    { type: "STRING", value: "-1" },
+    { type: "VARIABLE", name: "v" },
+  ]);
+
+  const notInAst = parseSelect("SELECT * FROM APP100 WHERE 金額 NOT IN (-1)");
+  expect(notInAst.where).toMatchObject({
+    type: "BINARY",
+    op: "NOT_IN",
+    right: { type: "IN_LIST", values: [{ type: "NUMBER", value: -1 }] },
+  });
+});
+
+test.each([
+  "SELECT * FROM APP100 WHERE 金額 IN (-)",
+  "SELECT * FROM APP100 WHERE 金額 IN (-'a')",
+  "SELECT * FROM APP100 WHERE 金額 IN (+@v)",
+])("WHERE IN の符号直後が数値でない場合は従来の ParseError にする — %s", (sql) => {
+  expect(() => parseSelect(sql)).toThrow(
+    /IN リストには文字列、数値、またはバッチ変数が必要です/
+  );
+});
+
 test("WHERE IS NULL / IS NOT NULL", () => {
   const ast1 = parseSelect("SELECT * FROM APP100 WHERE 担当者 IS NULL");
   expect(ast1.where).toEqual({ type: "NULL_CHECK", field: { type: "FIELD", tableAlias: null, field: "担当者" }, not: false });

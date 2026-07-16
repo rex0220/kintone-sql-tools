@@ -13,6 +13,27 @@ function resolver(types: Record<string, string>): FieldTypeResolver {
   return (field) => types[field.field];
 }
 
+test("符号付き IN / NOT IN は = と同じ負数文字列表現を評価する", () => {
+  const inNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 IN (-1)");
+  const notInNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 NOT IN (-1)");
+  const equalNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 = -1");
+  const betweenNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 BETWEEN -10 AND 10");
+  const mixed = parseWhere("SELECT * FROM APP1 WHERE 金額 IN (0, 1000, -1, +1)");
+
+  for (const value of ["-1", "0", "1", "1000", "2"]) {
+    expect(evalWhere(inNegative, { 金額: value }))
+      .toBe(evalWhere(equalNegative, { 金額: value }));
+    expect(evalWhere(notInNegative, { 金額: value }))
+      .toBe(!evalWhere(equalNegative, { 金額: value }));
+  }
+  expect(["-1", "0", "1", "1000", "2"].filter((金額) =>
+    evalWhere(mixed, { 金額 })
+  )).toEqual(["-1", "0", "1", "1000"]);
+  expect(["-11", "-10", "0", "10", "11"].filter((金額) =>
+    evalWhere(betweenNegative, { 金額 })
+  )).toEqual(["-10", "0", "10"]);
+});
+
 test("CHECK_BOX / MULTI_SELECT の IN は文字列配列の要素を比較する", () => {
   const expr = parseWhere("SELECT * FROM APP1 WHERE 選択 IN ('A', 'C')");
   expect(evalWhere(expr, { 選択: '["A","B"]' }, resolver({ 選択: "CHECK_BOX" }))).toBe(true);
