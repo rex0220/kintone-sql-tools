@@ -374,6 +374,8 @@ WHERE 担当者 = 'user1'
 | `CONCAT` | `CONCAT(値1, 値2, ...)` | 文字列の連結（可変長引数） |
 | `REPLACE` | `REPLACE(フィールド, 検索, 置換)` | 文字列置換 |
 | `COALESCE` | `COALESCE(値1, 値2, ...)` | 最初の非空値を返す |
+| `ISNULL` | `ISNULL(値, 代替値)` | 値が空なら代替値、それ以外は値（`COALESCE` の 2 引数版） |
+| `NULLIF` | `NULLIF(値1, 値2)` | 値1 と 値2 が等しければ空文字、それ以外は 値1 |
 
 ```sql
 SELECT UPPER(ステータス) AS ステータス FROM APP100
@@ -381,7 +383,24 @@ SELECT CONCAT(姓, '　', 名) AS 氏名 FROM APP100
 SELECT SUBSTRING(郵便番号, 1, 3) AS 市外局番 FROM APP100
 SELECT REPLACE(電話番号, '-', '') AS 電話番号 FROM APP100
 SELECT COALESCE(メモ, '（なし）') AS メモ FROM APP100
+SELECT ISNULL(建物名, '（なし）') AS 建物名 FROM APP100
+SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空にする
 ```
+
+> **`ISNULL` は 2 引数（SQL Server 系）です。** MySQL の 1 引数 `ISNULL(式)`（真偽を返す）とは**別物**です。空判定には `IS NULL` / `IS NOT NULL`（→ [§6](#6-where-句)）を使ってください。
+
+> **`NULLIF` によるゼロ除算ガードは効きません。** kintone には NULL がなく kSQL では**空文字が NULL 相当**のため、`NULLIF(x, 0)` の結果（空文字）を除数にすると `Number('') = 0` となり、結局ゼロ除算で `NaN` になります。
+>
+> ```sql
+> -- ✗ RDB の定番だが kSQL では NaN（ガードにならない）
+> SELECT 1000 / NULLIF(金額, 0) AS 単価 FROM APP100   -- 金額=0 の行は NaN
+>
+> -- ○ NULL 置換としては正しく機能する
+> SELECT ISNULL(NULLIF(金額, 0), '未設定') AS 金額 FROM APP100   -- 金額=0 の行は「未設定」
+>
+> -- ○ ゼロ除算を避けたい場合は CASE WHEN を使う
+> SELECT CASE WHEN 金額 = 0 THEN '' ELSE 1000 / 金額 END AS 単価 FROM APP100
+> ```
 
 ### 数値関数
 

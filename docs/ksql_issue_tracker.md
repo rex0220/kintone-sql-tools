@@ -32,7 +32,10 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
+| B15 | `IN`/`NOT IN` が負数リテラルを拒否（`=`/`BETWEEN` とは非対称） | バグ | 🐞 実機で発見・原因特定済み（`parseInValues` が単項マイナス非受理）・修正方針あり | 正しさ | 中 | [issue](internal/ksql_in_list_negative_number_issue.md) |
 | B14 | 一時テーブル/CTE 列の型メタ伝播（B13 フェーズ2・temp のテキスト `MIN`/`MAX`） | 改善 | 📝 提案（B13 §7/§9 で分離。`MaterializedTable` に列型メタを付与） | 正しさ | 中 | [B13 spec §7](internal/ksql_string_min_max_aggregate_spec.md) |
+| B16 | 文字列集約 `GROUP_CONCAT`（1対多の連結・`#err` メッセージ集約） | 改善 | 📝 評価済み（比較評価 T1-2 で最優先。**B14 が前提**・v2.14.0 で下地あり） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
+| B17 | ウィンドウ関数サブセット（`ROW_NUMBER`/`RANK`/`DENSE_RANK` + `PARTITION BY`） | 改善 | 📝 評価済み（比較評価 T1-1・最大の欠落。「各グループ最新1件」を1文化） | 機能 | 中 | [eval §3](internal/ksql_sql_feature_comparison_evaluation.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
@@ -92,6 +95,7 @@
 ## 関連文書
 
 - リリース履歴の一次情報: [`CHANGELOG.md`](../CHANGELOG.md)
+- 主要 RDB（MySQL/Oracle/SQL Server）との機能比較・欠落機能の効果評価: [`ksql_sql_feature_comparison_evaluation.md`](internal/ksql_sql_feature_comparison_evaluation.md)
 - 言語仕様: [`ksql_language_reference.md`](ksql_language_reference.md)
 - バッチ実務レシピ: [`ksql_batch_recipes.md`](ksql_batch_recipes.md)
 - リリース手順: auto-memory `release-procedure.md`
