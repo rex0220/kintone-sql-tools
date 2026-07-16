@@ -1,6 +1,6 @@
 {
   "name": "@rex0220/kintone-sql-tools",
-  "version": "2.13.0",
+  "version": "2.14.0",
   "description": "kintone SQL plugin, CLI, and MCP tools (ksql)",
   "publishConfig": {
     "access": "public"
