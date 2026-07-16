@@ -622,6 +622,47 @@ test("SELECT COUNT(*) GROUP BY（FULL_SCAN モード）", async () => {
   ]);
 });
 
+test("GROUP_CONCAT: GROUP BY・HAVING/ORDER BY alias・DISTINCT・SEPARATOR", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ 種別: "A", 担当者: "田中" }),
+      makeRecord({ 種別: "A", 担当者: "鈴木" }),
+      makeRecord({ 種別: "A", 担当者: "田中" }),
+      makeRecord({ 種別: "B", 担当者: "佐藤" }),
+      makeRecord({ 種別: "C", 担当者: "" }),
+    ],
+  });
+  const result = await execute(
+    "SELECT 種別, GROUP_CONCAT(DISTINCT 担当者 SEPARATOR ' / ') AS members " +
+    "FROM APP100 GROUP BY 種別 " +
+    "HAVING GROUP_CONCAT(DISTINCT 担当者 SEPARATOR ' / ') != '' ORDER BY members DESC",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 種別: "A", members: "田中 / 鈴木" },
+    { 種別: "B", members: "佐藤" },
+  ]);
+  expect(client.getCalls[0].fields).not.toContain("members");
+});
+
+test("GROUP_CONCAT: UNION で alias 列を位置対応させる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ 名前: "A" }), makeRecord({ 名前: "B" })],
+      200: [makeRecord({ 名前: "C" }), makeRecord({ 名前: "D" })],
+    },
+  });
+  const result = await execute(
+    "SELECT GROUP_CONCAT(名前 SEPARATOR '/') AS members FROM APP100 " +
+    "UNION ALL SELECT GROUP_CONCAT(名前 SEPARATOR '/') AS members FROM APP200",
+    client
+  ) as SelectResult;
+
+  expect(result.columns).toEqual(["members"]);
+  expect(result.rows).toEqual([{ members: "A/B" }, { members: "C/D" }]);
+});
+
 test("集計算術式: 末尾が集計関数でも alias と値を保持する", async () => {
   const client = makeClient({
     records: [

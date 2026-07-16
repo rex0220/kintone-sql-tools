@@ -23,6 +23,7 @@ import type {
   CaseWhenExpr,
   CaseResult,
   TableRef,
+  AggregateFunc,
 } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
@@ -658,7 +659,7 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
 }
 
 function aggregateSyntheticName(
-  func: "COUNT" | "SUM" | "AVG" | "MAX" | "MIN",
+  func: AggregateFunc,
   distinct: boolean,
   arg: { type: "WILDCARD" } | ArithNode
 ): string {
@@ -685,5 +686,5 @@ function stringFuncLabel(expr: StringFuncExpr): string {
 }
 
 function isAggregateSyntheticName(name: string): boolean {
-  return /^(COUNT|SUM|AVG|MAX|MIN)\(/i.test(name);
+  return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT)\(/i.test(name);
 }

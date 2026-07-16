@@ -899,6 +899,55 @@ test("MIN / MAX: 一時テーブルと CTE に文字列型メタが伝播する"
   expect((r.statements[2].result as SelectResult).rows[0].ctemin).toBe("A");
 });
 
+test("GROUP_CONCAT: 一時テーブル・CTE・$err_message で型メタなしに連結する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ key: "1", message: "必須です" }),
+        makeRecord({ key: "1", message: "長すぎます" }),
+        makeRecord({ key: "2", message: "形式エラー" }),
+      ],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #err AS SELECT key, message AS $err_message FROM APP100;" +
+    "SELECT key, GROUP_CONCAT($err_message SEPARATOR ' / ') AS errors FROM #err GROUP BY key;" +
+    "WITH c AS (SELECT $err_message FROM #err) " +
+    "SELECT GROUP_CONCAT($err_message SEPARATOR '|') AS all_errors FROM c",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult).rows).toEqual([
+    { key: "1", errors: "必須です / 長すぎます" },
+    { key: "2", errors: "形式エラー" },
+  ]);
+  expect((r.statements[2].result as SelectResult).rows[0].all_errors)
+    .toBe("必須です|長すぎます|形式エラー");
+});
+
+test("GROUP_CONCAT: 実体化した集約列へ string 型メタを付け、後段 MIN を辞書順にする", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [
+        makeRecord({ category: "1", name: "Z" }),
+        makeRecord({ category: "1", name: "B" }),
+        makeRecord({ category: "2", name: "A" }),
+        makeRecord({ category: "2", name: "C" }),
+      ],
+    },
+  });
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #joined AS " +
+    "SELECT category, GROUP_CONCAT(name) AS names FROM APP100 GROUP BY category;" +
+    "SELECT MIN(names) AS first_names FROM #joined",
+    client
+  );
+
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult).rows[0].first_names).toBe("A,C");
+});
+
 test("MIN / MAX: CTE/temp 混在 JOIN の非修飾同名列は衝突として型不明にする", async () => {
   const client = makeClient({
     recordsByApp: {

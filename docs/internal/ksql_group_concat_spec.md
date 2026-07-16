@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §4 で**最優先（効果大／コスト小）**と評価した機能。B12 の `#err` メッセージ集約の本命。
-- ステータス: **仕様案 R2（codex レビュー反映済み・実装着手可）。未実装。**
+- ステータス: **仕様 R2・codex 実装／テスト完了（コードレビュー・実機確認待ち）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -146,8 +146,8 @@ AST に足すだけでは届かない。**2 箇所で明示的に運ぶ**必要�
    - [process.ts:869](../../src/engine/process.ts#L869) 文字列関数内（`resolveAggInStringFuncArg`）
 
 受入条件で **`UPPER(GROUP_CONCAT(f SEPARATOR ' / '))` が区切り文字を保つ**ことを固定し、伝播漏れを検出する。
-| 言語リファレンス §8 | 集計関数表に追加。順序・空値・長さ・区切り文字を明記 |
-| B12 レシピ（`ksql_on_error_skip_isolation_spec.md` §6・roadmap） | `DISTINCT`＋定数フラグの回避策を **`GROUP_CONCAT($err_message SEPARATOR ' / ')`** へ戻す |
+
+その他、言語リファレンス §8 の集計関数表と、B12 レシピ（`ksql_on_error_skip_isolation_spec.md` §6・roadmap）を `GROUP_CONCAT($err_message SEPARATOR ' / ')` へ更新する。
 
 ## 6. 受入条件
 

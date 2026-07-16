@@ -113,6 +113,71 @@ test("SUM / AVG / MAX / MIN", () => {
   expect(funcs).toEqual(["SUM", "AVG", "MAX", "MIN"]);
 });
 
+test("GROUP_CONCAT: DISTINCT と SEPARATOR を AST に保持する", () => {
+  const ast = parseSelect(
+    "SELECT GROUP_CONCAT(DISTINCT 担当者 SEPARATOR ' / ') AS members FROM APP100"
+  );
+  expect(ast.columns[0]).toEqual({
+    type: "AGGREGATE",
+    func: "GROUP_CONCAT",
+    distinct: true,
+    arg: { type: "FIELD_REF", field: "担当者" },
+    separator: " / ",
+    alias: "members",
+  });
+});
+
+test("GROUP_CONCAT: 文字列関数内でも SEPARATOR を AggregateRef に保持する", () => {
+  const ast = parseSelect(
+    "SELECT UPPER(GROUP_CONCAT(担当者 SEPARATOR ' / ')) AS members FROM APP100"
+  );
+  expect(ast.columns[0]).toMatchObject({
+    type: "STRFUNC_COL",
+    expr: {
+      func: "UPPER",
+      args: [{
+        type: "AGG_REF",
+        func: "GROUP_CONCAT",
+        separator: " / ",
+      }],
+    },
+  });
+});
+
+test.each([
+  "SELECT GROUP_CONCAT(*) FROM APP100",
+  "SELECT GROUP_CONCAT(DISTINCT *) FROM APP100",
+  "SELECT 種別, GROUP_CONCAT(担当者) FROM APP100 GROUP BY 種別 HAVING GROUP_CONCAT(*) != ''",
+])("GROUP_CONCAT はワイルドカード引数を拒否する: %s", (sql) => {
+  expect(() => parseSelect(sql)).toThrow(/GROUP_CONCAT\(\*\) は使用できません/);
+});
+
+test("SEPARATOR は GROUP_CONCAT 以外の集約では拒否し、通常のフィールド名としては使える", () => {
+  expect(() => parseSelect("SELECT SUM(金額 SEPARATOR ',') FROM APP100"))
+    .toThrow(/SEPARATOR は GROUP_CONCAT でのみ使用できます/);
+  expect(parseSelect("SELECT SEPARATOR FROM APP100").columns[0]).toEqual({
+    type: "FIELD", field: "SEPARATOR", alias: null,
+  });
+});
+
+test("GROUP_CONCAT は予約語で、同名フィールドはバッククォートで参照できる", () => {
+  expect(() => parseSelect("SELECT GROUP_CONCAT FROM APP100")).toThrow();
+  expect(parseSelect("SELECT `GROUP_CONCAT` FROM APP100").columns[0]).toEqual({
+    type: "FIELD", field: "GROUP_CONCAT", alias: null,
+  });
+});
+
+test("HAVING の GROUP_CONCAT 直接参照でも SEPARATOR を受理する", () => {
+  const ast = parseSelect(
+    "SELECT 種別, GROUP_CONCAT(担当者 SEPARATOR '/') FROM APP100 " +
+    "GROUP BY 種別 HAVING GROUP_CONCAT(担当者 SEPARATOR '/') != ''"
+  );
+  expect(ast.having).toMatchObject({
+    type: "BINARY",
+    left: { type: "FIELD", field: "GROUP_CONCAT(担当者)" },
+  });
+});
+
 test("FORMAT(SUM(...))", () => {
   const ast = parseSelect("SELECT FORMAT(SUM(金額), '#,##0') AS 合計 FROM APP100 GROUP BY 種別");
   const col = ast.columns[0];

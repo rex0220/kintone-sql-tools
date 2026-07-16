@@ -177,13 +177,11 @@ SELECT 顧客コード, 顧客名, 住所, 電話番号 FROM #tgt
 ON DUPLICATE (顧客コード)
 ON ERROR SKIP INTO #err REJECT LIMIT 100;
 
--- 1 入力行に複数エラーがあり得るため、B11 の複数マッチ禁止に触れないよう
--- 業務キー単位へ 1 行化してから差分アプリへ書き戻す（→ §7 の依存機能）
--- 注: MIN/MAX はテキスト列を数値強制するため $err_message では NaN 化する
--- （別課題 ksql_string_min_max_aggregate_spec.md）。当面は DISTINCT + 定数フラグで 1 行化する
+-- 1 入力行に複数エラーがあり得るため、業務キー単位へ 1 行化し、
+-- 全メッセージを連結してから差分アプリへ書き戻す（→ §7 の依存機能）
 CREATE TEMP TABLE #err_summary AS
-SELECT DISTINCT 顧客コード, '検証エラー' AS エラー内容
-FROM #err;
+SELECT 顧客コード, GROUP_CONCAT($err_message SEPARATOR ' / ') AS エラー内容
+FROM #err GROUP BY 顧客コード;
 
 -- B11 v1.1（業務キー結合）が必要。B11 v1 の target.$id = source.key では実行不可
 UPDATE APP4220 SET 処理ステータス = 'エラー', エラー内容 = e.エラー内容

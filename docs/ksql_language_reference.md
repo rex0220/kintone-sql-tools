@@ -840,6 +840,7 @@ GROUP BY 担当者, ステータス
 | `AVG(フィールド)` | 平均 | 空文字・NULL はスキップ |
 | `MAX(フィールド)` | 最大値 | 空文字・NULL はスキップ |
 | `MIN(フィールド)` | 最小値 | 空文字・NULL はスキップ |
+| `GROUP_CONCAT([DISTINCT] 引数 [SEPARATOR '区切り'])` | 文字列連結 | 空文字・NULL はスキップ |
 
 > **`MAX`/`MIN` の比較規則**: 実アプリの NUMBER と数値形式 CALC は数値順、テキスト・選択・日時フィールドと文字列形式 CALC は UTF-16 辞書順で比較します。日時の時系列順と一致するのは kintone が返す正規化形式（DATE=`YYYY-MM-DD`、TIME=`HH:mm`、DATETIME/作成日時/更新日時=`...Z`）が前提です。v2.15.0 以降は、確定できた型メタが一時テーブル/CTEにも伝播するため、素通し列・集約・算術・リテラルを経由した再集約でも同じ比較規則を使います。複数値・ユーザー等の対象外型、同名列が競合する JOIN、型を確定しない文字列関数・CASE・スカラーサブクエリ由来の列は、従来の数値経路を使うため非数値値が `NaN` になります。
 
@@ -848,6 +849,25 @@ SELECT COUNT(*) AS 総件数, SUM(金額) AS 合計金額, AVG(金額) AS 平均
 FROM APP100
 WHERE ステータス = '完了'
 ```
+
+### GROUP_CONCAT（v2.15.0）
+
+`GROUP_CONCAT` はグループ内の空でない値を収集順に連結します。既定の区切り文字は `,` です。
+
+```sql
+SELECT 顧客ID, GROUP_CONCAT(担当者) AS 担当者一覧
+FROM APP100 GROUP BY 顧客ID
+
+SELECT 顧客ID, GROUP_CONCAT(DISTINCT 業種 SEPARATOR ' / ') AS 業種一覧
+FROM APP100 GROUP BY 顧客ID
+```
+
+- `DISTINCT` は文字列として重複を除き、最初に現れた順序を保ちます
+- `SEPARATOR` には文字列リテラルだけを指定できます。`SEPARATOR ''` は区切りなしです
+- `GROUP_CONCAT(*)` と `GROUP_CONCAT(DISTINCT *)` は使用できません
+- 関数内の `ORDER BY` は未対応です。連結順は WHERE / JOIN 適用後の収集順であり、取得順が変われば結果も変わり得ます
+- 結果を長さで切り捨てません。書き込み先フィールドの最大文字数を超えた場合は書き込み時の検証エラーになります
+- `GROUP_CONCAT` は予約語です。同名フィールドは `` `GROUP_CONCAT` `` とバッククォートで囲みます。`SEPARATOR` は通常のフィールド名としても使えます
 
 ### DISTINCT 付き集計
 
@@ -869,6 +889,7 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 |------|-----------|
 | `COUNT(*)` / `COUNT(f)` / `COUNT(DISTINCT f)` | `0` |
 | `SUM` / `AVG` / `MAX` / `MIN` | `0`（**標準 SQL の NULL とは異なります**） |
+| `GROUP_CONCAT` | `""`（空文字） |
 
 - 「対象なし（COUNT = 0）」と「合計が 0」を区別したい場合は COUNT を併用してください
 - GROUP BY が**ある**場合は従来どおり 0 行を返します（グループが存在しないため）
