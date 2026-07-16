@@ -24,7 +24,9 @@ SELECT MIN(会社名) FROM #t;                            -- → 'NaN'
 これにより 2 つの機能が成立しない:
 
 1. **B13 フェーズ2**: temp/CTE 列のテキスト・日時 `MIN`/`MAX`（上記）。
-2. **B16 `GROUP_CONCAT` の看板ユースケース**: B12 の `#err` は**一時テーブル**なので、`GROUP_CONCAT` を実装しても `GROUP_CONCAT($err_message) FROM #err GROUP BY 顧客コード` は型不明のまま。**B14 なしでは B16 を入れても成果が出ない**（現在の回避策 `SELECT DISTINCT 業務キー, '検証エラー' AS flag` のまま＝具体的なエラーメッセージを書き戻せない）。
+2. **`#err` に対する `MIN`/`MAX`**: B12 の `#err` は**一時テーブル**なので、B13（実アプリ列）を入れても `MIN($err_message) FROM #err` は型不明＝`NaN` のまま。業務キー単位でエラーメッセージを 1 件取り出すことすらできず、回避策（`SELECT DISTINCT 業務キー, '検証エラー' AS flag`）で**具体的なメッセージを捨てている**。
+
+> **注（R2 で訂正）**: 当初ここに「**B14 なしでは B16（`GROUP_CONCAT`）を入れても成果が出ない**」と書いていたが**誤り**。`GROUP_CONCAT` は生文字列を `join` するだけで型メタを参照しないため、**B14 なしでも `#err` で動く**（→ [B16 仕様 §0](ksql_group_concat_spec.md)）。**B14 と B16 は独立**しており、本仕様の価値は「temp 列の `MIN`/`MAX` が正しくなること」である。
 
 同じ欠落は **v2.5.0 の型メタ付き `IN`/`NOT IN` 評価**にもある（言語リファレンス §11 に「一時テーブル/CTE 経由は文字列比較（別課題）」と既に明記）。本仕様はその基盤も用意するが、`IN` への配線は §8 のとおり**別課題**とする。
 
@@ -81,7 +83,7 @@ if (stmt.from.cteName !== null) return undefined;            // 非修飾・JOIN
 | 区分 | 内容 |
 |---|---|
 | **対象** | `MaterializedTable` への列型メタ付与（3 生成箇所すべて）＋ **集約ソート種別リゾルバ（B13）への配線** |
-| **対象（B16 の前提）** | `#err` の `$err_*` 列の型を明示宣言し、`GROUP_CONCAT($err_message)`／`MIN($err_message)` が temp でも効くようにする |
+| **対象** | `#err` の列型を明示宣言し、`MIN($err_message)`（文字列）／`MIN($err_row)`（数値）が temp でも効くようにする<br>※ B16 `GROUP_CONCAT` は**型メタを参照しない**ため本仕様に依存しない（[B16 仕様 §0](ksql_group_concat_spec.md)）|
 | **非対象（別課題）** | 型メタ付き `IN`/`NOT IN` 評価（v2.5.0）への配線＝**挙動変更**のため独立検証が要る（§8） |
 | **非対象** | `ORDER BY` の `sortKinds`（既存 `FieldSortKindMap` の意味論は変更しない） |
 
@@ -223,4 +225,4 @@ const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 - **`StringFuncColumn` の戻り型推論**: 関数ごとの戻り型表（`LENGTH`/`DATEDIFF`/`YEAR`→number・`CAST`→引数依存・`COALESCE`/`ISNULL`/`NULLIF`→引数依存）。面が広く誤りが静かに効くため別課題。
 - **`CaseColumn` の型推論**（全分岐が同型のときのみ確定、など）。
 - **`#t.x`（alias なしの temp 修飾参照）**: `parseTableRef` が temp/CTE には既定 alias を与えない（物理アプリだけ `?? name`）ため現状 `#t.x` は解決できない（§5）。**名前解決の変更**であり本仕様とは別課題。当面は `FROM #t AS t` の `t.x` を使う。
-- **B16 `GROUP_CONCAT`**: 本仕様の完了後に実装し、**同一リリース（v2.15.0）で束ねる**（片方だけでは `#err` 集約が成立せず成果が出ないため）。
+- **B16 `GROUP_CONCAT`**: **本仕様に依存しない**（`GROUP_CONCAT` は生文字列を `join` するだけで型メタを参照しない。→ [B16 仕様 §0](ksql_group_concat_spec.md)）。同一リリース（v2.15.0）で束ねるのは**同じ集約領域を 1 回の実機で検証できるという利便性の理由**であり、依存関係ではない。B14 単体でも temp の `MIN`/`MAX` という成果が出る（実機確認済み）。
