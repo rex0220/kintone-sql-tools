@@ -32,7 +32,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B13 | `MIN`/`MAX` の文字列・日時対応（テキスト列で `NaN` になる） | バグ/改善 | 📝 仕様案 R1（codex レビュー前）・実機で発見 | 正しさ | 中 | [spec](internal/ksql_string_min_max_aggregate_spec.md) |
+| B13 | `MIN`/`MAX` の文字列・日時対応（テキスト列で `NaN` になる） | バグ/改善 | 📋 仕様案 R2（codex レビュー反映・実装着手可）・実機で発見 | 正しさ | 中 | [spec](internal/ksql_string_min_max_aggregate_spec.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
