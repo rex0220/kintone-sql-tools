@@ -30999,6 +30999,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["AVG", "AVG" /* AVG */],
   ["MAX", "MAX" /* MAX */],
   ["MIN", "MIN" /* MIN */],
+  ["GROUP_CONCAT", "GROUP_CONCAT" /* GROUP_CONCAT */],
   ["ASSERT", "ASSERT" /* ASSERT */],
   ["AND", "AND" /* AND */],
   ["OR", "OR" /* OR */],
@@ -31991,6 +31992,7 @@ var Parser = class {
         func: ref.func,
         distinct: ref.distinct,
         arg: ref.arg,
+        ...ref.separator !== void 0 ? { separator: ref.separator } : {},
         alias: alias2
       };
     }
@@ -32362,7 +32364,8 @@ var Parser = class {
       ["SUM" /* SUM */]: "SUM",
       ["AVG" /* AVG */]: "AVG",
       ["MAX" /* MAX */]: "MAX",
-      ["MIN" /* MIN */]: "MIN"
+      ["MIN" /* MIN */]: "MIN",
+      ["GROUP_CONCAT" /* GROUP_CONCAT */]: "GROUP_CONCAT"
     };
     const kind = this.peek().kind;
     return map2[kind] ?? null;
@@ -32374,12 +32377,29 @@ var Parser = class {
     const distinct = this.consume("DISTINCT" /* DISTINCT */);
     let arg;
     if (this.consume("*" /* STAR */)) {
+      if (func === "GROUP_CONCAT") {
+        throw new ParseError("GROUP_CONCAT(*) \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002\u30D5\u30A3\u30FC\u30EB\u30C9\u307E\u305F\u306F\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.prev());
+      }
       arg = { type: "WILDCARD" };
     } else {
       arg = this.parseArithAddSub();
     }
+    let separator;
+    if (this.isSoftKeyword("SEPARATOR")) {
+      const separatorToken = this.advance();
+      if (func !== "GROUP_CONCAT") {
+        throw new ParseError("SEPARATOR \u306F GROUP_CONCAT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059", separatorToken);
+      }
+      separator = this.expect("STRING" /* STRING */, "SEPARATOR \u306E\u5F8C\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059").value;
+    }
     this.expect(")" /* RPAREN */);
-    return { type: "AGG_REF", func, distinct, arg };
+    return {
+      type: "AGG_REF",
+      func,
+      distinct,
+      arg,
+      ...separator !== void 0 ? { separator } : {}
+    };
   }
   // ----------------------------------------------------------
   // FROM / JOIN
@@ -32657,9 +32677,19 @@ var Parser = class {
       const distinct = this.consume("DISTINCT" /* DISTINCT */);
       let argStr;
       if (this.consume("*" /* STAR */)) {
+        if (aggFunc === "GROUP_CONCAT") {
+          throw new ParseError("GROUP_CONCAT(*) \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002\u30D5\u30A3\u30FC\u30EB\u30C9\u307E\u305F\u306F\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.prev());
+        }
         argStr = "*";
       } else {
         argStr = this.parseIdentifier();
+      }
+      if (this.isSoftKeyword("SEPARATOR")) {
+        const separatorToken = this.advance();
+        if (aggFunc !== "GROUP_CONCAT") {
+          throw new ParseError("SEPARATOR \u306F GROUP_CONCAT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059", separatorToken);
+        }
+        this.expect("STRING" /* STRING */, "SEPARATOR \u306E\u5F8C\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
       }
       this.expect(")" /* RPAREN */);
       const syntheticName = distinct ? `${aggFunc}(DISTINCT ${argStr})` : `${aggFunc}(${argStr})`;
@@ -34257,7 +34287,7 @@ function stringFuncLabel(expr) {
   return `${expr.func}(${args.join(",")})`;
 }
 function isAggregateSyntheticName(name) {
-  return /^(COUNT|SUM|AVG|MAX|MIN)\(/i.test(name);
+  return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT)\(/i.test(name);
 }
 
 // src/core/cteInlining.ts
@@ -36023,7 +36053,7 @@ function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind) {
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
         const syntheticKey = aggregateSyntheticName2(col.func, col.distinct, col.arg);
-        const value = String(evalAggregate(col.func, col.distinct, col.arg, groupRows, resolveAggSortKind));
+        const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
         outRow[col.alias ?? syntheticKey] = value;
         if (col.alias) outRow[syntheticKey] = value;
       } else if (col.type === "ARITH_AGG_COL") {
@@ -36044,7 +36074,7 @@ function evalGroupByKey(key, row) {
   if (key.type === "FUNC_KEY") return evalStringFunc(key.expr, row);
   return String(evalArithExpr(key.expr, row));
 }
-function evalAggregate(func, distinct, arg, rows, resolveAggSortKind) {
+function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind) {
   if (arg.type === "WILDCARD") {
     return func === "COUNT" ? rows.length : 0;
   }
@@ -36064,6 +36094,7 @@ function evalAggregate(func, distinct, arg, rows, resolveAggSortKind) {
   }
   const eff = distinct ? [...new Set(strValues)] : strValues;
   if (func === "COUNT") return eff.length;
+  if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
   const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" ? resolveAggSortKind?.(toAggregateFieldRef(arg.field)) : void 0;
   if (sortKind === "string") {
     if (eff.length === 0) return "";
@@ -36108,7 +36139,7 @@ function minOf(nums) {
 }
 function evalAggArithExpr(node, rows, resolveAggSortKind) {
   if (node.type === "NUMBER") return node.value;
-  if (node.type === "AGG_REF") return Number(evalAggregate(node.func, node.distinct, node.arg, rows, resolveAggSortKind));
+  if (node.type === "AGG_REF") return Number(evalAggregate(node.func, node.distinct, node.arg, node.separator, rows, resolveAggSortKind));
   const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
   const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
   switch (node.op) {
@@ -36457,7 +36488,7 @@ function hasAggregateInStringFuncExpr2(expr) {
 }
 function resolveAggInStringFuncArg(arg, rows, resolveAggSortKind) {
   if (arg.type === "AGG_REF") {
-    const value = evalAggregate(arg.func, arg.distinct, arg.arg, rows, resolveAggSortKind);
+    const value = evalAggregate(arg.func, arg.distinct, arg.arg, arg.separator, rows, resolveAggSortKind);
     return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {
@@ -36703,7 +36734,8 @@ function isValidTemporal(value, type) {
   const date5 = new Date(Date.UTC(year, month - 1, day));
   if (date5.getUTCFullYear() !== year || date5.getUTCMonth() !== month - 1 || date5.getUTCDate() !== day) return false;
   if (type === "DATE") return true;
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValidTemporal(value.slice(11, value.endsWith("Z") ? -1 : value.length - 6), "TIME");
+  const timePart = value.slice(11, value.endsWith("Z") ? -1 : value.length - 6).replace(/\.\d+$/, "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValidTemporal(timePart, "TIME");
 }
 
 // src/core/dmlValidationCandidates.ts
@@ -36783,6 +36815,8 @@ var SearchAbortedError = class extends Error {
     this.name = "SearchAbortedError";
   }
 };
+var materializedMetaBySelectResult = /* @__PURE__ */ new WeakMap();
+var materializedMetaByValidationResult = /* @__PURE__ */ new WeakMap();
 async function execute(sql, client, options = {}) {
   const startedAt = Date.now();
   const stmt = parseSql(sql);
@@ -36928,16 +36962,25 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
   }
 }
 var TEMP_TABLE_MAX_ROWS = 1e4;
-function appendValidationErrors(tempTables, name, columns, rows, maxRows) {
+function appendValidationErrors(tempTables, name, columns, rows, maxRows, columnMeta) {
   const current = tempTables.get(name);
-  if (current && (current.columns.length !== columns.length || current.columns.some((c, i) => c !== columns[i]))) {
+  if (current && (current.columns.length !== columns.length || current.columns.some((c, i) => c !== columns[i]) || !materializedColumnMetaEqual(current.columnMeta, columnMeta))) {
     throw new Error(`ArgumentError: validation error table ${name} has a different schema.`);
   }
   const existingRows = current?.rows ?? [];
   if (existingRows.length + rows.length > maxRows) {
     throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
   }
-  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows] });
+  tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows], columnMeta });
+}
+function materializedColumnMetaEqual(left, right) {
+  if (left === right) return true;
+  if (!left || !right || left.size !== right.size) return false;
+  for (const [column, meta3] of left) {
+    const candidate = right.get(column);
+    if (!candidate || candidate.sortKind !== meta3.sortKind || candidate.fieldType !== meta3.fieldType) return false;
+  }
+  return true;
 }
 var BatchTimeoutError = class extends Error {
   constructor() {
@@ -37099,7 +37142,8 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
         resolvedStmt.validationErrorTable,
         result.columns,
         result.errors,
-        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaByValidationResult.get(result) ?? /* @__PURE__ */ new Map()
       );
     }
     return { result };
@@ -37123,7 +37167,11 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
       onLimitReached: "error"
     };
     const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
-    tempTables.set(resolvedStmt.name, { rows: result.rows, columns: result.columns });
+    tempTables.set(resolvedStmt.name, {
+      rows: result.rows,
+      columns: result.columns,
+      columnMeta: materializedMetaBySelectResult.get(result)
+    });
     return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -37159,9 +37207,9 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
 }
 async function runSelectLike(query, client, options, cacheContext, tempTables) {
   if (query.type === "WITH") {
-    return executeWith(query, client, options, cacheContext, tempTables);
+    return executeWith(query, client, options, cacheContext, tempTables, true);
   }
-  return executeQueryWithCte(query, client, options, tempTables, cacheContext);
+  return executeQueryWithCte(query, client, options, tempTables, cacheContext, true);
 }
 async function runWithDeadline(work, remainingMs) {
   if (remainingMs === null) return work;
@@ -37374,18 +37422,27 @@ function evalAssertArith(node) {
   }
   throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
 }
-async function executeSelect(stmt, client, options, cacheContext, cteCache) {
+async function executeSelect(stmt, client, options, cacheContext, cteCache, captureColumnMeta = false) {
+  let result;
   if (isNoFromSelect(stmt)) {
-    return executeNoFromSelect(stmt);
+    result = executeNoFromSelect(stmt);
+    if (captureColumnMeta) {
+      materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+    }
+    return result;
   }
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const mode = resolveSelectMode(stmt);
   await validateSelectFieldCodes(stmt, mode, client, cacheContext);
   if (mode === "SIMPLE") {
-    return executeSimpleSelect(stmt, client, options, cacheContext);
+    result = await executeSimpleSelect(stmt, client, options, cacheContext);
   } else {
-    return executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
+    result = await executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
   }
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+  }
+  return result;
 }
 function isNoFromSelect(stmt) {
   return stmt.from.appId === 0 && stmt.from.cteName === NO_FROM_CTE_NAME;
@@ -37709,7 +37766,7 @@ function aggregateSortKind(info) {
   if (info.fieldType === "NUMBER" || info.fieldType === "RECORD_NUMBER") return "number";
   return AGGREGATE_STRING_FIELD_TYPES.has(info.fieldType) ? "string" : void 0;
 }
-async function loadAggregateSortKindResolver(stmt, client, cacheContext) {
+async function loadAggregateSortKindResolver(stmt, client, cacheContext, materializedTables) {
   const refs = collectSelectAggregateSortRefs(stmt.columns);
   if (refs.length === 0) return void 0;
   const appIds = /* @__PURE__ */ new Set();
@@ -37725,11 +37782,9 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext) {
     } else if (stmt.joins.length === 0) {
       if (stmt.from.cteName === null) appIds.add(stmt.from.appId);
     } else {
-      if ([stmt.from, ...stmt.joins.map((join) => join.table)].some((table) => table.cteName !== null)) continue;
       for (const table of physicalTables) appIds.add(table.appId);
     }
   }
-  if (appIds.size === 0) return void 0;
   const fieldInfosByApp = new Map(
     await Promise.all([...appIds].map(async (appId) => {
       const infos = await getFieldsCached(appId, client, cacheContext);
@@ -37744,17 +37799,28 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext) {
         info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
       } else {
         const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
-        if (!table || table.cteName !== null) return void 0;
+        if (!table) return void 0;
+        if (table.cteName !== null) {
+          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+        }
         info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       }
     } else if (stmt.joins.length === 0) {
-      if (stmt.from.cteName !== null) return void 0;
+      if (stmt.from.cteName !== null) {
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+      }
       info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
     } else {
-      if (tables.some((table) => table.cteName !== null)) return void 0;
-      const matches = physicalTables.map((table) => fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field))).filter((candidate) => candidate !== void 0);
+      const matches = tables.flatMap((table) => {
+        if (table.cteName !== null) {
+          const materialized = materializedTables?.get(table.cteName);
+          return materialized?.columns.includes(ref.field) ? [materialized.columnMeta?.get(ref.field)?.sortKind] : [];
+        }
+        const candidate = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+        return candidate ? [aggregateSortKind(candidate)] : [];
+      });
       if (matches.length !== 1) return void 0;
-      info = matches[0];
+      return matches[0];
     }
     return info ? aggregateSortKind(info) : void 0;
   };
@@ -37762,6 +37828,106 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext) {
 function fieldCodeForTypeLookup(table, field) {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
+}
+function materializedMetaFromFieldInfo(info) {
+  return { sortKind: aggregateSortKind(info), fieldType: info.fieldType };
+}
+function selectNeedsSourceColumnMeta(stmt) {
+  return stmt.columns.some(
+    (column) => column.type === "FIELD" || column.type === "WILDCARD" || column.type === "PARENT_WILDCARD" || column.type === "AGGREGATE" && (column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF"
+  );
+}
+async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, materializedTables) {
+  const physicalInfos = /* @__PURE__ */ new Map();
+  if (selectNeedsSourceColumnMeta(stmt)) {
+    await Promise.all(physicalSelectTables(stmt).map(async (table) => {
+      if (physicalInfos.has(table.appId)) return;
+      const infos = await getFieldsCached(table.appId, client, cacheContext);
+      physicalInfos.set(table.appId, new Map(infos.map((info) => [info.code, info])));
+    }));
+  }
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const resolveField2 = (ref) => {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        const info2 = physicalInfos.get(stmt.from.appId)?.get(ref.field);
+        return info2 ? materializedMetaFromFieldInfo(info2) : void 0;
+      }
+      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      if (!table) return void 0;
+      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? materializedMetaFromFieldInfo(info) : void 0;
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+      return info ? materializedMetaFromFieldInfo(info) : void 0;
+    }
+    const matches = tables.flatMap((table) => {
+      if (table.cteName !== null) {
+        const materialized = materializedTables?.get(table.cteName);
+        if (!materialized?.columns.includes(ref.field)) return [];
+        return [materialized.columnMeta?.get(ref.field)];
+      }
+      const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? [materializedMetaFromFieldInfo(info)] : [];
+    });
+    return matches.length === 1 ? matches[0] : void 0;
+  };
+  const inferred = /* @__PURE__ */ new Map();
+  const hasWildcard = stmt.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD");
+  if (stmt.columns.length === 1 && (stmt.columns[0].type === "WILDCARD" || stmt.columns[0].type === "PARENT_WILDCARD")) {
+    for (const output of outputColumns) {
+      const meta3 = resolveField2(aggregateFieldRef(output));
+      if (meta3) inferred.set(output, meta3);
+    }
+    return inferred;
+  }
+  if (hasWildcard) {
+    for (const output of outputColumns) {
+      const meta3 = resolveField2(aggregateFieldRef(output));
+      if (meta3) inferred.set(output, meta3);
+    }
+  }
+  const explicitColumns = stmt.columns.filter(
+    (column) => column.type !== "WILDCARD" && column.type !== "PARENT_WILDCARD"
+  );
+  explicitColumns.forEach((column, index) => {
+    const output = hasWildcard ? "alias" in column && column.alias ? column.alias : void 0 : outputColumns[index];
+    if (!output) return;
+    let meta3;
+    if (column.type === "FIELD") {
+      meta3 = resolveField2(aggregateFieldRef(column.field));
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "GROUP_CONCAT") {
+        meta3 = { sortKind: "string" };
+      } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+        meta3 = { sortKind: "number" };
+      } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
+        const source = resolveField2(aggregateFieldRef(column.arg.field));
+        if (source?.sortKind) meta3 = { sortKind: source.sortKind };
+      }
+    } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
+      meta3 = { sortKind: "number" };
+    } else if (column.type === "LITERAL_COL") {
+      meta3 = { sortKind: "string" };
+    }
+    if (meta3) inferred.set(output, meta3);
+  });
+  return inferred;
+}
+function mergeUnionColumnMeta(left, right) {
+  const leftMeta = materializedMetaBySelectResult.get(left);
+  const rightMeta = materializedMetaBySelectResult.get(right);
+  const merged = /* @__PURE__ */ new Map();
+  left.columns.forEach((column, index) => {
+    const a = leftMeta?.get(column);
+    const rightColumn = right.columns[index];
+    const b = rightColumn === void 0 ? void 0 : rightMeta?.get(rightColumn);
+    if (a && b && a.sortKind === b.sortKind && a.fieldType === b.fieldType) merged.set(column, a);
+  });
+  return merged;
 }
 function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
@@ -37807,7 +37973,7 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
-    loadAggregateSortKindResolver(stmt, client, cacheContext)
+    loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -37927,9 +38093,9 @@ function deduplicateRows(rows, columns) {
     return true;
   });
 }
-async function executeWith(stmt, client, options, cacheContext, seed) {
+async function executeWith(stmt, client, options, cacheContext, seed, captureColumnMeta = false) {
   if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
-    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext);
+    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext, void 0, captureColumnMeta);
   }
   const cteCache = new Map(seed ?? []);
   for (const cte of stmt.ctes) {
@@ -37939,17 +38105,21 @@ async function executeWith(stmt, client, options, cacheContext, seed) {
     } else if (cte.query.type === "DESCRIBE") {
       result = await executeDescribe(cte.query, client, cacheContext);
     } else {
-      result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext);
+      result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext, true);
     }
-    cteCache.set(cte.name, { rows: result.rows, columns: result.columns });
+    cteCache.set(cte.name, {
+      rows: result.rows,
+      columns: result.columns,
+      columnMeta: materializedMetaBySelectResult.get(result)
+    });
   }
-  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext);
+  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext, captureColumnMeta);
 }
-async function executeQueryWithCte(query, client, options, cteCache, cacheContext) {
+async function executeQueryWithCte(query, client, options, cteCache, cacheContext, captureColumnMeta = false) {
   if (query.type === "UNION") {
     const [leftResult, rightResult] = await Promise.all([
-      executeQueryWithCte(query.left, client, options, cteCache, cacheContext),
-      executeQueryWithCte(query.right, client, options, cteCache, cacheContext)
+      executeQueryWithCte(query.left, client, options, cteCache, cacheContext, captureColumnMeta),
+      executeQueryWithCte(query.right, client, options, cteCache, cacheContext, captureColumnMeta)
     ]);
     const leftCols = leftResult.columns;
     const rightCols = rightResult.columns;
@@ -37962,13 +38132,21 @@ async function executeQueryWithCte(query, client, options, cteCache, cacheContex
     });
     const combined = [...leftResult.rows, ...remapped];
     const rows = query.all ? combined : deduplicateRows(combined, leftCols);
-    return { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    const result2 = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    if (captureColumnMeta) {
+      materializedMetaBySelectResult.set(result2, mergeUnionColumnMeta(leftResult, rightResult));
+    }
+    return result2;
   }
   const hasCteRef = query.from.cteName != null && query.from.cteName !== NO_FROM_CTE_NAME || query.joins.some((j) => j.table.cteName != null);
   if (!hasCteRef) {
-    return executeSelect(query, client, options, cacheContext, cteCache);
+    return executeSelect(query, client, options, cacheContext, cteCache, captureColumnMeta);
   }
-  return executeFullScanWithCte(query, client, options, cteCache, cacheContext);
+  const result = await executeFullScanWithCte(query, client, options, cteCache, cacheContext);
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(query, result.columns, client, cacheContext, cteCache));
+  }
+  return result;
 }
 async function executeFullScanWithCte(stmt, client, options, cteCache, cacheContext) {
   const maxRecords2 = options.maxRecords ?? 1e4;
@@ -37982,7 +38160,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
-    loadAggregateSortKindResolver(stmt, client, cacheContext)
+    loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -38460,7 +38638,23 @@ async function prepareDmlValidation(stmt, client, options, cacheContext, tempTab
     errors,
     ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : stmt.onErrorSkip && stmt.errorTable ? { errTable: stmt.errorTable } : {}
   };
-  return { result, candidates, invalidRowNumbers };
+  const columnMeta = /* @__PURE__ */ new Map();
+  for (const column of payloadFields) {
+    if (column === "$id") {
+      columnMeta.set(column, { sortKind: "number", fieldType: "RECORD_NUMBER" });
+      continue;
+    }
+    const info = infoByCode.get(column);
+    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info));
+  }
+  columnMeta.set("$err_statement", { sortKind: "number" });
+  columnMeta.set("$err_operation", { sortKind: "string" });
+  columnMeta.set("$err_row", { sortKind: "number" });
+  columnMeta.set("$err_field", { sortKind: "string" });
+  columnMeta.set("$err_code", { sortKind: "string" });
+  columnMeta.set("$err_message", { sortKind: "string" });
+  materializedMetaByValidationResult.set(result, columnMeta);
+  return { result, candidates, invalidRowNumbers, columnMeta };
 }
 async function executeOnErrorSkip(stmt, client, options, cacheContext, tempTables, statementNumber) {
   const prepared = await prepareDmlValidation(
@@ -38478,7 +38672,8 @@ async function executeOnErrorSkip(stmt, client, options, cacheContext, tempTable
     errTable,
     prepared.result.columns,
     prepared.result.errors,
-    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS
+    options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+    prepared.columnMeta
   );
   const rejectLimit = stmt.rejectLimit ?? null;
   if (rejectLimit !== null && prepared.result.invalidRows > rejectLimit) {
@@ -42219,7 +42414,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.14.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.15.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
