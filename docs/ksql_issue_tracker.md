@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-16
-- 現在の最新リリース: **v2.10.1**
+- 現在の最新リリース: **v2.11.0**（npm publish はユーザー操作待ち）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -30,26 +30,13 @@
 
 進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。
 
-### 次期リリース計画: v2.11.0（B1 + B2 + B8）
-
-2026-07-16 決定。3 件を 1 バージョンに束ね、内部順序を固定して進める。
-
-1. **B1（先行）** — 実装済み（案A）。コア不変・呼び出し層のみ。CLI 経路テストと docs 反映まで完了。
-2. **B2** — 空 `SELECT *`／空 CTE／混在ワイルドカードの列メタ伝播を **R3 実装済み・codex 検証済み**（[wildcard-pipeline spec](internal/ksql_empty_select_wildcard_pipeline_spec.md)）。
-3. **B8（安全サブセットのみ）** — **R3 実装済み・codex 検証済み**（[fetch-truncation spec](internal/ksql_limit_over_500_fetch_truncation_spec.md)）。`ORDER BY` が空かつ KLIKE なしのときだけ「フェッチ順＝返却順（$id 昇順）」が成立するため `offset+limit` 件で早期打ち切り。`ORDER BY` 付き・KLIKE は従来どおり全取得（正しさと検索打ち切り検出を維持）。
-
-3 件そろって v2.11.0。SemVer は正しさ/安全性/性能改善のまとめ minor。
-
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B1 | CLI の DML × `truncate` で暗黙の部分書き込み | バグ | ✅ **v2.11.0 予定①**（案A・実装済み） | 安全性 | **高** | [issue](internal/ksql_cli_dml_on_limit_truncate_issue.md) |
-| B2 | 空 `SELECT *` / 空 CTE / 混在ワイルドカードの 0 行列欠落 | バグ | ✅ **v2.11.0 予定②**（R3 実装・codex 検証済み） | 正しさ | 中 | [issue](internal/ksql_empty_select_columns_issue.md) / [spec](internal/ksql_empty_select_wildcard_pipeline_spec.md) |
 | B3 | バッチ変数 Phase 1a R4：配列展開 `IN (@list)` | 改善 | 📋 仕様追記済・実装は codex レビュー後 | 機能 | 中 | [spec](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
 | B6 | KLIKE 外部結合 非 nullable 側の押し下げ解禁 | 改善 | 📝 改善案 | 性能 | 低 | [v2 spec](internal/ksql_klike_pushdown_v2_spec.md) |
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
-| B8 | A-8：`LIMIT`>500 の取得打ち切り最適化（API エラーのバグ部分は v2.10.1 で修正済・残りは性能改善＋`maxRecords` 意味論変更・KLIKE 除外） | 改善 | 🚧 **v2.11.0 予定③**（R3 実装・codex 検証済み） | 性能 | 低 | [spec](internal/ksql_limit_over_500_fetch_truncation_spec.md) / [perf §A-8](perf-sql-execution-improvements.md) |
 | B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | ⏸ 保留（16 桁クラスは当面対象外） | 正しさ | 低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
 
@@ -61,6 +48,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v2.11.0** | B1 CLI DML×`truncate` 暗黙部分書き込み防止（`error` 固定）／B2 空 `SELECT *` の列スキーマをパイプライン伝播（0 行 no-op 完走）／B8 `LIMIT>500` の安全な取得打ち切り（`ORDER BY` なし・KLIKE なし限定）＋`maxRecords` 意味論変更 | 安全性・正しさ・性能 | [B1](internal/ksql_cli_dml_on_limit_truncate_issue.md) / [B2](internal/ksql_empty_select_wildcard_pipeline_spec.md) / [B8](internal/ksql_limit_over_500_fetch_truncation_spec.md) |
 | **v2.10.1** | SIMPLE SELECT の `LIMIT` > 500 が API エラーになる不具合を修正（案A ＝ `fetchAll` でページング） | 正しさ | [issue](internal/ksql_simple_select_limit_over_500_issue.md) |
 | **v2.10.0** | 検索打ち切り（10 万件）検出＋`FROM` なし SELECT の実体化バグ修正。SELECT は警告 / DML・一時テーブル実体化は fail-closed | 正しさ・安全性 | [abort](internal/ksql_search_abort_warning_issue.md) / [fromless](internal/ksql_fromless_select_materialize_bug.md) |
 | **v2.9.0** | KLIKE プレフィルタ押し下げ（v2）。FULL_SCAN でも KLIKE を安全 AND リーフとして kintone 押下・INNER JOIN 限定 | 性能 | [spec](internal/ksql_klike_pushdown_v2_spec.md) |
