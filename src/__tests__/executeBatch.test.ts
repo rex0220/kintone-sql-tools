@@ -135,6 +135,39 @@ test("#err ペイロード型は元SELECTではなくDML対象フィールドか
   expect((batch.statements[1].result as SelectResult).rows[0].maxamount).toBe("9");
 });
 
+test.failing("B26/B14: #err NUMBER 宣言列の正当な非数値も固定バンドで点検できる", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "amount", label: "amount", fieldType: "NUMBER" },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code, amount) VALUES ('', 2), ('', 10), ('', 'x') VALIDATE ONLY INTO #err;" +
+    "SELECT amount FROM #err ORDER BY amount ASC;" +
+    "SELECT MIN(amount) AS min_amount, MAX(amount) AS max_amount FROM #err;" +
+    "SELECT amount FROM #err WHERE amount > 5 ORDER BY amount ASC",
+    client,
+    { cacheContext: "v3-number-band-err-table" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "VALIDATION",
+    invalidRows: 3,
+    errTable: "#err",
+  });
+  expect((batch.statements[1].result as SelectResult).rows.map((row) => row.amount)).toEqual([
+    "2", "10", "x", "x",
+  ]);
+  expect((batch.statements[2].result as SelectResult).rows[0]).toEqual({
+    min_amount: "2",
+    max_amount: "x",
+  });
+  expect((batch.statements[3].result as SelectResult).rows.map((row) => row.amount)).toEqual([
+    "10", "x", "x",
+  ]);
+});
+
 test("UPDATE の #err.$id は RECORD_NUMBER 相当の数値型で宣言する", async () => {
   const client = makeClient({ recordsByApp: {
     100: [makeRecord({ $id: "9", amount: "1" }), makeRecord({ $id: "10", amount: "2" })],

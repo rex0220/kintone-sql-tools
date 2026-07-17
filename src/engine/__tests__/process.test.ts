@@ -640,6 +640,7 @@ test("ORDER BY FIELD_NAME: sortKind=string は文字列比較を優先", () => {
   const rows: ProcessRow[] = [
     { 計算値: "2" },
     { 計算値: "10" },
+    { 計算値: "1a" },
   ];
   const sortKinds = new Map<string, "number" | "string">([
     ["計算値", "string"],
@@ -650,7 +651,7 @@ test("ORDER BY FIELD_NAME: sortKind=string は文字列比較を優先", () => {
     undefined,
     sortKinds
   );
-  expect(result.map((r) => r["計算値"])).toEqual(["10", "2"]);
+  expect(result.map((r) => r["計算値"])).toEqual(["10", "1a", "2"]);
 });
 
 test("ORDER BY FIELD_NAME: sortKind=number は数値比較を優先", () => {
@@ -669,6 +670,117 @@ test("ORDER BY FIELD_NAME: sortKind=number は数値比較を優先", () => {
   );
   expect(result.map((r) => r["計算値"])).toEqual(["2", "10"]);
 });
+
+// v3.0.0 Phase 0 baseline fixtures.
+// test.failing は現行実装で期待値に届かないことを固定し、実装時に通常 test へ反転する。
+test.failing("B26: typed string ORDER BY は locale/UTF-16 ではなくコードポイント順", () => {
+  const compatibilityIdeograph = String.fromCodePoint(0xfa00);
+  const rows: ProcessRow[] = [
+    { value: "😀" },
+    { value: "ｱ" },
+    { value: compatibilityIdeograph },
+    { value: "亜" },
+    { value: "𠮟" },
+  ];
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "ASC" }],
+    undefined,
+    new Map([["value", "string"]])
+  );
+  expect(result.map((row) => row.value)).toEqual([
+    "亜",
+    compatibilityIdeograph,
+    "ｱ",
+    "😀",
+    "𠮟",
+  ]);
+});
+
+test.failing("B26: typed string WHERE は数値らしい値もコードポイント順で比較", () => {
+  const stmt = parseSelect("SELECT value FROM APP1 WHERE value > '100'");
+  const rows: ProcessRow[] = [
+    { value: "20" },
+    { value: "30" },
+    { value: "99" },
+    { value: "9" },
+    { value: "10" },
+  ];
+  const result = applyFilter(rows, stmt.where, () => "SINGLE_LINE_TEXT");
+  expect(result.map((row) => row.value)).toEqual(["20", "30", "99", "9"]);
+});
+
+test.failing("B26: typed number ORDER BY は域外値を含む固定バンド順", () => {
+  const values = ["x", "NaN", "Infinity", "10", "2", "-Infinity", "", "1a"];
+  const rows = values.map((value) => ({ value }));
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "ASC" }],
+    undefined,
+    new Map([["value", "number"]])
+  );
+  expect(result.map((row) => row.value)).toEqual([
+    "",
+    "-Infinity",
+    "2",
+    "10",
+    "Infinity",
+    "NaN",
+    "1a",
+    "x",
+  ]);
+});
+
+test.failing("B26/B14: typed number MIN/MAX は #err 相当の非数値も固定バンドで集約", () => {
+  const records = [
+    makeRecord({ value: "10" }),
+    makeRecord({ value: "2" }),
+    makeRecord({ value: "NaN" }),
+    makeRecord({ value: "x" }),
+  ];
+  const stmt = parseSelect("SELECT MIN(value) AS min_value, MAX(value) AS max_value FROM APP1");
+  const { rows } = runFullScan({
+    tables: new Map([[null, records]]),
+    stmt,
+    aggregateSortKindResolver: () => "number",
+  });
+  expect(rows[0]).toEqual({ min_value: "2", max_value: "x" });
+});
+
+test.failing("B26/B14: typed number が域外値だけなら MIN/MAX は存在する端のバンド値", () => {
+  const records = [
+    makeRecord({ value: "x" }),
+    makeRecord({ value: "NaN" }),
+    makeRecord({ value: "1a" }),
+  ];
+  const stmt = parseSelect("SELECT MIN(value) AS min_value, MAX(value) AS max_value FROM APP1");
+  const { rows } = runFullScan({
+    tables: new Map([[null, records]]),
+    stmt,
+    aggregateSortKindResolver: () => "number",
+  });
+  expect(rows[0]).toEqual({ min_value: "NaN", max_value: "x" });
+});
+
+test("B26: typed number の同一域外値は RANK/DENSE_RANK で peer のまま", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (ORDER BY value) AS r, " +
+    "DENSE_RANK() OVER (ORDER BY value) AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { value: "x" }, { value: "x" }, { value: "NaN" }, { value: "2" },
+  ];
+  applyWindow(rows, stmt.columns, undefined, new Map([["value", "number"]]));
+  expect(rows.map((row) => [row.value, row.r, row.dr])).toEqual([
+    ["x", "3", "3"],
+    ["x", "3", "3"],
+    ["NaN", "2", "2"],
+    ["2", "1", "1"],
+  ]);
+});
+
+test.todo("B27: STATUS states.*.index を保持し、STATUS ORDER BY の rank map にだけ統合する");
+test.todo("B27: 同値群をまたぐ LIMIT/OFFSET は canonical $id ASC を結果 tie-break に使い、peer 比較には混ぜない");
 
 test("ORDER BY 選択肢: DROP_DOWN は option index 順で比較", () => {
   const rows: ProcessRow[] = [
@@ -1431,12 +1543,13 @@ test("runFullScan: GREATEST / LEAST は集合モード・tie-break・空文字�
   const stmt = parseSelect(
     "SELECT GREATEST('2','10','1a') AS mixed_g, LEAST('2','10','1a') AS mixed_l, " +
     "GREATEST('1','01','1.0') AS tie_g, LEAST('1','01','1.0') AS tie_l, " +
-    "GREATEST(empty, '-1') AS empty_g, LEAST('-1', empty) AS empty_l FROM APP100"
+    "GREATEST(empty, '-1') AS empty_g, LEAST('-1', empty) AS empty_l, " +
+    "GREATEST('20','100') AS v3_g FROM APP100"
   );
   const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
   expect(rows[0]).toEqual({
     mixed_g: "2", mixed_l: "10", tie_g: "1.0", tie_l: "01",
-    empty_g: "-1", empty_l: "",
+    empty_g: "-1", empty_l: "", v3_g: "100",
   });
 });
 

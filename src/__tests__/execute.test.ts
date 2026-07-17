@@ -295,6 +295,48 @@ test("SIMPLE OFFSET + LIMIT が maxRecords を超える truncate は従来どお
   expect(result.warnings).toEqual([expect.stringContaining("取得上限")]);
 });
 
+test.failing("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-closed", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: i === 100 ? "a" : `z${String(i).padStart(3, "0")}`,
+  }));
+  const client = makePagedClient(records);
+
+  await expect(execute(
+    "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名 ASC LIMIT 1",
+    client,
+    { maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow("取得件数が上限");
+});
+
+test.failing("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHERE で評価", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ $id: "1", 郵便番号: "20" }),
+      makeRecord({ $id: "2", 郵便番号: "99" }),
+      makeRecord({ $id: "3", 郵便番号: "10" }),
+    ],
+  });
+  client.getFields = async () => [
+    { code: "郵便番号", label: "郵便番号", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const originalGetRecords = client.getRecords;
+  client.getRecords = async (params) => {
+    if (params.query.includes('郵便番号 > "100"')) {
+      throw new Error("GAIA_IQ03: 郵便番号フィールドに演算子>を使用できません");
+    }
+    return originalGetRecords(params);
+  };
+
+  const result = await execute(
+    "SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100' LIMIT 5",
+    client,
+    { cacheContext: "b32-baseline" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.郵便番号)).toEqual(["20", "99"]);
+  expect(client.getCalls.every((call) => !call.query.includes('郵便番号 > "100"'))).toBe(true);
+});
+
 test("SIMPLE ORDER BY は LIMIT 500 / 501 境界で同じ先頭 500 行を返す", async () => {
   const records = Array.from({ length: 501 }, (_, i) => makeRecord({ $id: String(i + 1) }));
   const singleClient = makePagedClient(records);
