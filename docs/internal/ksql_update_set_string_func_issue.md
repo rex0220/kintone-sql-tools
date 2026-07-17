@@ -2,7 +2,8 @@
 
 - 作成日: 2026-07-17
 - 位置づけ: B20（正規表現関数）の仕様検討中に発見。**B20 とは独立した既存の欠陥**で、`UPPER` / `REPLACE` / `CONCAT` および B19（v2.17.0）で追加した `LPAD` / `LEFT` / `RIGHT` など**既存の全文字列関数に効く**ため、B20 を待たずに単独で価値が出る。
-- ステータス: **課題 R1（codex レビュー前）。未実装。**
+- ステータス: **課題 R4 同期。未実装。**
+- 横断契約: 文字列関数の単位・戻り型・空文字は [文字列の扱い](ksql_string_semantics.md) を正とする。本書は assignment の構文・行評価・DML 検証経路だけを扱う。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -21,7 +22,7 @@ UPDATE APP100 SET 建物名 = CASE WHEN 顧客No IN (1) THEN UPPER(建物名) EL
 WHERE 顧客No IN (1)
 ```
 
-**評価機構は既に完成しており**（`dmlToKintone.ts:539` が `evalStringFunc` を呼ぶ）、**parser の accept list から `STRING_FUNC` が漏れているだけ**に見える。
+当初は parser の accept list 漏れに見えたが、**この仮説はコード追跡で否定された**。`:539` は row を持つ CASE 専用経路であり、単純 UPDATE の `buildUpdateRecord` は row を持たない（§2）。
 
 **効果は「機能」ではなく「一貫性」**。回避策（`CASE WHEN` で包む）が存在するため利用者が詰むことはないが、**`CASE WHEN 1=1 THEN … ELSE … END` という無意味な呪文**を書かせている。
 
@@ -109,6 +110,7 @@ throw new ParseError("SET の値にはリテラル・算術式を指定してく
 - **`VALIDATE ONLY`（B12-A）/ `ON ERROR SKIP`（B12-B）が評価済みの値を検証すること**
 - **算術式内の `STRING_FUNC` は従来どおり `DmlConvertError` で拒否**（§3.2・差分最小）
 - `UPDATE … FROM`（B11）の `SET x = t.field`（`SOURCE_FIELD` 分岐）を壊さないこと。**`SET x = UPPER(t.field)` を許すかは codex の判断**（v1 で許さない方が安全に見えるが、ソース行の解決順序を知っているのは実装側）
+- 評価結果の意味型は各関数の契約から引き継ぐ。`UPPER` / `REPLACE` / `TRANSLATE` 等は typed string、`LENGTH_CHAR` 等は typed number とし、値の見た目で再判定しない（横断仕様 原則3）。assignment 先への変換・検証はその後に行う
 
 **codex に設計してほしいこと**（レビュー指摘より）:
 

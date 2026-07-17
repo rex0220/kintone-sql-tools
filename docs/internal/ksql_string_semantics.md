@@ -170,9 +170,9 @@ INSERT INTO APP4221 (…, 文字列MAX) VALUES (…, '😀😀😀😀😀😀')
 
 **`髙`（はしごだか）は BMP** なので問題にならない。**サロゲートかどうかは見た目で分からない。**
 
-### 3.2 切り出しは UTF-16 のまま、割る位置では短い方へ寄せる（[B22](ksql_surrogate_pair_split_issue.md)）
+### 3.2 切り出しはコードユニット予算内の最大安全部分列（[B22](ksql_surrogate_pair_split_issue.md)）
 
-**コードポイント単位の切り出しにしてはならない。** `LEFT(x, 64)` が 64 コードポイント = 最大 128 コードユニットを返し、**`maxLength` = 64 のフィールドに収まらなくなる**（§2.1）。「上限に収める切り詰め」が kintone における `LEFT`/`SUBSTRING` の第一の用途である。
+既存 `LEFT` / `RIGHT` / `SUBSTRING` の長さ引数をコードポイント数へ再解釈してはならない。`LEFT(x, 64)` が最大 128 コードユニットを返し、`maxLength = 64` の保存予算を越え得るためである。人向けのコードポイント切り出しは、必要なら別名の関数として設計する。
 
 > **規則: 結果は常に「n コードユニット以下」かつ「入力中で対になっていたペアを割らない」。**
 
@@ -428,6 +428,7 @@ ORDER BY 文字列 ASC             → a, B, ｱ, ア, あ, 亜    （JS の ICU
 | 真に型不明 | 規定値 | **文字列** | 安定した fail-safe。自動数値判定を廃止 |
 | DROP_DOWN / RADIO / STATUS | option/process metadata | 定義順 rank、同 rank はコードポイント順 | 不明値を含む tie-break を決定可能にする |
 | MULTI_SELECT / CHECK_BOX | option metadata | **kSQL 独自契約**（§4.6.2） | **release gate 解消**（実測）。**kintone はソート自体を拒否する**（`GAIA_IS02`）ため合わせる相手がない。決定性・strict weak order・4 面同一だけ満たせばよい |
+| USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / FILE / SUBTABLE / REFERENCE_TABLE | 複合値 | **未決。既定で ORDER BY を拒否** | 配列・オブジェクトの JSON 表現を暗黙の順序にしない。必要な型だけ別途 canonical key を定義する |
 
 通常テキストへ `sortKind="string"` を付与し、式の戻り型と temp/CTE のメタ伝播を拡張する。**データ集合が全て数値に見えるか**でモードを選ぶ案は却下する。行の追加、LIMIT、事前絞り込みで列全体の意味が変わるためである。
 
@@ -463,14 +464,14 @@ ORDER BY 文字列 ASC             → a, B, ｱ, ア, あ, 亜    （JS の ICU
 ```
 string: (type=string, codePointSequence)
 number: (type=number, numericValue)
-option: (type=option, optionOrderKey, originalCodePointSequence)
+option: (type=option, canonicalOptionVector)
 ```
 
 同一 ORDER BY 式の全行で `type` は固定する。文字列・option の各成分が全順序なら辞書式積も全順序になる。数値は数値的に同値なら 0 を返すため全順序ではなく total preorder だが、同値関係は推移的なので strict weak order を満たす。これにより `RANK` は `1` / `01` のような数値同値を同順位にできる。複数 ORDER BY キーも辞書式積で同じ性質を保ち、DESC は符号を反転するだけなので性質を保つ。
 
-数値の `a.n - b.n` は使わず、`<` / `>` で比較する。`Infinity - Infinity = NaN` となり、**比較器が `NaN` を返すのは ECMAScript 仕様上の未定義動作**だからである。
+数値の比較 primitive は `a.n - b.n` ではなく、`<` / `>` による三方比較で `-1 / 0 / 1` のいずれかを返す。`Infinity - Infinity` は `NaN` になるが、**現行 ECMA-262 の `CompareArrayElements` は comparefn の結果が `NaN` なら `+0` として扱う**。したがって「ECMAScript の未定義動作」「V8 が偶然 0 扱い」は誤りであり、6 組で差が出なかった結果とも整合する。
 
-**ただしこれは現に壊れている不具合ではない**（Claude 実測・R4 レビュー時に確認）。V8 は比較器の `NaN` を `0`（等価）として扱うため、`[Infinity, 1, Infinity, 5]` などは `a-b` でも `<`/`>` と同じ結果になる（6 組を試して食い違い 0）。**変更の理由は「仕様上の未定義動作に依存しない」ことであり、既存の誤結果の修正ではない。** 受入条件を「`a-b` の誤りを直す」と書くと反証不能になるため、**「比較器が `NaN` を返さないこと」を性質として検査する**。`NaN` は文字列比較へ落とさず `ArgumentError` とする。物理数値の空セルは既存契約どおり最小値クラスとして先に処理する。GREATEST/LEAST だけは一意の元文字列を返す必要があるため、§4.5.3 のコードポイント二次キーを使う。ただし kintone NUMBER との10進精度一致は B9 の課題である。
+それでも三方比較へ変える理由は、比較 primitive 自体の契約を有限の符号値に固定し、`Array.sort` 以外の消費先を Sort 固有の `NaN → +0` 正規化へ依存させないためである。**現に壊れている誤結果の修正ではなく衛生**であり、受入条件は「primitive が常に `-1 / 0 / 1` を返す」とする。入力値としての `NaN` は文字列比較へ落とさず `ArgumentError` とする。物理数値の空セルは既存契約どおり最小値クラスとして先に処理する。GREATEST/LEAST だけは一意の元文字列を返す必要があるため、§4.5.3 のコードポイント二次キーを使う。kintone NUMBER との10進精度一致は B9 の課題である。
 
 #### 4.5.6 証明と検証方法
 
@@ -478,7 +479,7 @@ option: (type=option, optionOrderKey, originalCodePointSequence)
 
 - 文字列値: 空、ASCII大小、BMP、補助平面、共通接頭辞、NFC/NFD、孤立サロゲート
 - 数値値: 負数、0/-0、整数、小数、同値異表記、±Infinity。NaN は必ずエラー
-- option: 単一値、同 rank、未知値、複数値（実機規則確定後）
+- option: 単一値、同 rank、未知値、複数値、保存配列順の入替え
 - 全組で反対称性、全3組で推移律、`cmp(a,a)=0`
 - 同値関係 `cmp(a,b)=0` の推移律
 - 複数キー、ASC/DESC、全入力順列で結果の同値クラスが不変
@@ -503,7 +504,7 @@ option: (type=option, optionOrderKey, originalCodePointSequence)
 
 数値順が要る列は **NUMBER 型にする**か、**式で数値化する**のが正しい対処であることを案内する。
 
-B26 は比較ディスパッチ、文字列順、型メタ伝播、複合比較器の性質を扱う。B9（厳密10進比較）は B26 の依存課題へ格上げする。B9 を同時に実装しない場合、「typed number は大精度で REST と不一致」という制限を残し、全比較が一致したとは表現しない。
+B26 は比較ディスパッチ、文字列順、型メタ伝播、複合比較器の性質を扱う。**B9（厳密10進比較）は同時実装せず、独立した follow-up とする。** B9 は数値の等価・範囲・集約まで試験面を広げ、B26 の文字列変更と同梱すると回帰範囲が過大になる。B26 の完了時点でも「typed number は大精度で REST と不一致」という制限6を残し、全比較が一致したとは表現しない。
 
 **影響箇所**: `process.ts:594-604` / `execute.ts:4117` / `process.ts:344,350` / `core/scalarCompare.ts`、および `compareScalarValues` の消費先である HAVING / CASE WHEN / サブテーブル DML / ASSERT（`execute.ts:1071`）。WINDOW は `compareSortKeys` を共有する。型メタ生成・伝播（`formFieldInfo.ts` / `execute.ts`）も変更対象である。
 
@@ -541,7 +542,14 @@ SELECT $id, チェックボックス FROM APP4221 ORDER BY チェックボック
 - **strict weak order であること**
 - **4 面で同一であること**（JS のみで完結するため自動的に満たす）
 
-**推奨**（codex の設計判断に委ねるが、Claude の見立て）: **rank（最小 option index）→ 同 rank は元の値表現のコードポイント順**。`["Y"]` と `["Y","Z"]` は前者が短く共通接頭辞なので前に来る（§4.1 で確認した kintone のテキスト順と同じ規則＝**利用者が学ぶ規則を 1 つに保てる**）。
+**採用する kSQL 独自契約:** 複数選択値を「生の JSON 文字列」ではなく**選択肢の集合**として正規化し、option 定義順のベクトルを辞書式比較する。
+
+1. 各選択値を、既知値なら `(0, option rank, label のコードポイント列)`、未知値なら `(1, 0, label のコードポイント列)` に写像する
+2. 重複を除き、この要素キーで昇順に並べて canonical vector を作る。空選択は空 vector
+3. vector を要素ごとに辞書式比較し、共通接頭辞なら短い vector を先にする
+4. DESC は最終結果の符号だけを反転する
+
+これにより `['Y','Z']` と `['Z','Y']` は同じ集合として等価になり、保存配列順や JSON serialization に意味を引きずられない。option rank とコードポイント順という既存の二つの規則だけで説明できる。各要素キーは全順序、有限 vector の辞書式比較も全順序なので、canonical な選択集合上で全順序（したがって strict weak order）になる。DROP_DOWN / RADIO は同じ要素キーを 1 個だけ使い、未知値は既知 option の後でコードポイント順とする。
 
 #### 4.6.3 **kSQL は押し下げ不能なソートを kintone へ押し下げている**（**新規欠陥**・実測）
 
@@ -556,9 +564,18 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
 
 **EXPLAIN が `ok` を返し、実行すると必ず失敗する。** B20 §11 論点 4 と同型（`EXPLAIN UPDATE … WHERE LEFT(…)` が計画を表示するが実行は必ず `KintoneQueryError`）。
 
-**正しい挙動は「ソート不能な型は FULL_SCAN へ落として JS で並べる」**であり、そうすれば §4.6.2 の kSQL 独自契約が SIMPLE / FULL_SCAN の両方で成立する（＝原則 2 を満たす）。
+**正しい挙動は、押し下げ同値性を証明できない ORDER BY を FULL_SCAN へ落として JS で並べること**である。「kintone API がエラーにしない」だけでは不十分で、サーバの順序が §4.5–4.6 の kSQL 契約と一致することまで必要になる。
 
-**B26 の対象に含める**（型メタに基づく押し下げ可否の判定）。**kintone がソートを拒否する型の一覧は未実測**（`USER_SELECT` / `ORGANIZATION_SELECT` / `GROUP_SELECT` / `STATUS_ASSIGNEE` / `CATEGORY` / `SUBTABLE` 等も要確認）。
+#### B27 の設計
+
+- 意味型（string / number / option / complex）、ローカル ORDER BY 契約の有無、サーバ ORDER BY 能力を分離する。サーバ能力は `equivalent / unsupported / unknown` の三値とし、**ローカル契約あり + `equivalent` だけを押し下げる**
+- `equivalent` は raw REST の ASC/DESC、空値、同値・境界値を実測して kSQL comparator と一致した型の allowlist とする。**ローカル契約がある型では** `unsupported` と `unknown` を FULL_SCAN にする。新しいフィールド型を楽観的に SIMPLE にしない
+- ローカル契約が未定義の複合型は FULL_SCAN にせず、planning 時に `ArgumentError`。配列・オブジェクトを `String(...)` / JSON にして暗黙に並べない
+- `resolveSelectMode` の構文判定を第一段階、schema 取得後の能力判定を第二段階とする。最終 plan は schema-aware にし、**EXPLAIN と実行が同じ planner 結果を使う**
+- FULL_SCAN では base query から ORDER BY を外し、全候補取得後にローカル sort、最後に LIMIT を適用する。取得上限・打切りは既存の明示的エラー/警告契約に従い、部分集合を top-N として黙って返さない
+- schema を取得できない場合は SIMPLE を仮定せず明示的に失敗する。system field、CALC の format、SUBTABLE 内フィールドも field code だけで判定しない
+
+**課題境界:** B26 と B27 は型メタ基盤を共有し、同じ major リリースで完了させるのが妥当だが、欠陥と受入条件が異なるため統合しない。B26 は比較意味論、B27 は計画・押し下げ同値性を所有する。
 
 ## 5. 文字列リテラルと識別子
 
@@ -589,7 +606,7 @@ kSQL は入力値に NFC / NFD 正規化を行わず、`UPPER` / `LOWER` を明�
 'e\u0301'     -- U+0065 U+0301
 ```
 
-この 2 値は見た目が同じでも、`=`・DISTINCT・GROUP BY・既定 ORDER BY では異なる値である。kintone が保存時または比較時に正規化するかは未実測であり、§9 の確認対象とする。正規化が必要なら将来 `NORMALIZE(value, form)` のような明示関数を検討する。
+この 2 値は見た目が同じでも、`=`・DISTINCT・GROUP BY・既定 ORDER BY では異なる値である。raw REST の ORDER BY 実測では NFC/NFD と IVS 有無を区別し、入力のコードポイント列を保持した（§4.1）。ただし、この結果だけから kintone の全検索演算子へ一般化しない。正規化が必要なら将来 `NORMALIZE(value, form)` のような明示関数を検討する。
 
 ### 5.4 ASCII 識別子は小文字化される
 
@@ -622,7 +639,8 @@ SELECT 顧客No AS ABC, 顧客No AS PLAIN FROM APP4148
 | `LENGTH` | — | `s.length` | 同左 | 同左 | 3 面で一貫 | 維持 |
 | `ORDER BY`（文字列） | 検証集合ではコードポイント順 | SIMPLE は REST、JS は ICU | 同左 | 同左だがブラウザ ICU | 不一致 | 全 JS 経路をコードポイント順 |
 | `ORDER BY`（数値らしいテキスト） | 文字列順（実測） | JS は値ベース数値判定 | 同左 | 同左 | 不一致・非推移 | typed string としてコードポイント順 |
-| `ORDER BY`（数値型） | 数値順 | JS Number + 型メタ | 同左 | 同左 | 通常値は一致、大精度は B9 | 厳密10進を B9 依存として統合 |
+| `ORDER BY`（数値型） | 数値順 | JS Number + 型メタ | 同左 | 同左 | 通常値は一致、大精度は B9 | B26 では現状維持。大精度差を制限6へ残し B9 で解消 |
+| `ORDER BY`（選択系） | 型により受理/拒否。MULTI_SELECT/CHECK_BOX は拒否 | 現状は field 名なら押し下げ | 同左 | 同左 | B27。実行時400または意味未確認 | `equivalent` 型だけ押し下げ、他は canonical option vector でローカル sort |
 | `MIN` / `MAX` | — | typed string は UTF-16順 | 同左 | 同左 | 3 面は一致、REST順とは不一致 | 型表に従う。文字列はコードポイント |
 | `GREATEST` / `LEAST` | — | 集合モード + UTF-16 tie | 同左 | 同左 | 3 面で一貫 | §4.5.3 |
 | `WHERE` の `<`/`>` | 押し下げ可能時はサーバ | FULL_SCAN は型なしペア判定 | 同左 | 同左 | モード不一致 | 左辺型で固定。文字列はコードポイント |
@@ -684,7 +702,7 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 ### 制限 5: Unicode 正規化等価を同一視しない
 
 - 影響する面: kintone / CLI / MCP / プラグイン
-- なぜ揃えられないか: 暗黙正規化は入力情報を変え、既存値の等価性を変更する。kintone の保存・比較時正規化は未検証
+- なぜ揃えられないか: 暗黙正規化は入力情報を変え、既存値の等価性を変更する。kintone ORDER BY は NFC/NFD・IVS 有無を区別することを実測済みだが、全検索演算子へは一般化していない
 - 利用者から見た現れ方: NFC `é` と NFD `e + ◌́` は別値として比較・集約される
 - 検知できるか: コードポイント列を表示すれば可能だが、通常表示だけでは困難
 - 回避策: 現状は入力側で正規化。将来、明示的 `NORMALIZE` を追加
@@ -695,7 +713,7 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 - なぜ揃えられないか: JS は IEEE-754 `Number`、kintone は10進値として比較する
 - 利用者から見た現れ方: 16桁級整数・高精度小数の ORDER BY / WHERE / MIN/MAX が SIMPLE と FULL_SCAN でずれ得る
 - 検知できるか: 型と桁数から警告は可能。現状は一般的な実行時検知なし
-- 回避策: B9 の厳密10進比較を B26 の依存課題として実装する。それまでは大精度値でローカル比較を避ける
+- 回避策: B9 を独立 follow-up として実装する。それまでは大精度値でローカル比較を避け、B26 のリリースノートで制限を明示する
 
 ### 制限 7: プラグイン固有の取得能力差
 
@@ -719,10 +737,10 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | [B13](ksql_string_min_max_aggregate_spec.md) | 文字列 `MIN`/`MAX` | §4（**「UTF-16 辞書順」と書いたが `ORDER BY` との差は未記載**） |
 | [B12-A](ksql_validate_only_implementation_plan.md) | `VALIDATE ONLY` | §2.1（UTF-16 計数・空文字 = 未設定） |
 | ~~B25~~ | `ORDER BY` と `MIN`/`MAX` の比較不整合 | **B26 へ統合**（同根） |
-| **B26** | 型付き比較・文字列順・型メタ・ソート比較器を4面で統一（旧 B25 を統合） | **§4.5 で R4 規則を決定。MULTI_SELECT 実測と B9 が依存** |
+| **B26** | 型付き比較・文字列順・型メタ・ソート比較器を4面で統一（旧 B25 を統合） | **§4.5 で R4 規則を決定。B9 は同時実装しない** |
+| **B27** | ORDER BY の押し下げ同値性 | §4.6.3。B26 と基盤・リリースを共有するが別課題 |
 | **未起票** | `LIKE '_'` の単位不整合 | §3.5 |
-| **B9** | 厳密10進比較 | B26 が typed number まで REST 一致を名乗るための依存課題（§4.5.7 / 制限6） |
-| **未起票** | kintone が複数選択値を同 rank のときどう並べるか（**未実測**） | §4.6 / §9 |
+| **B9** | 厳密10進比較 | 独立 follow-up。完了までは typed number の大精度差を制限6として残す |
 
 ---
 
@@ -739,12 +757,15 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 数値らしい text（`9`/`10`/`1a`） | **解消**（§4.2.1）。**kintone は数値と解釈しない** |
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
-| §9.1 補助平面どうしの組（`𠮟` vs `𩸽`） | **未** |
-| §9.1 結合文字の連続 | **未** |
-| §9.1 ASC と DESC が厳密に逆順 | **未** |
-| §9.2 DROP_DOWN / RADIO の rank | **未** |
-| §9.3 `LIKE` と `KLIKE` の差 | **未** |
-| §9.4 Chromium / Firefox の smoke | **未**（Claude は実行環境を持たない） |
+| **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **25 型を測定**（§9.2.1）。**受理 15 / 拒否 10**。非自明な境界: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理** |
+| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **未。`equivalent` と言える型は現時点でゼロ**。**受理は同値の証拠ではない** |
+| §9.2.1 `CREATOR`/`MODIFIER` の code/name | **未 — 測定不能**。検証データの code 順と name 順が同じ答えになるため切り分けられない。**逆順になるユーザーの追加が要る** |
+| §9.2.1 各受理型の ASC/DESC 逆順・空値位置 | **未**（`更新者` と `タイトル` で ASC/DESC が逆になることのみ確認） |
+| §9.2.1 `RICH_TEXT`/`FILE`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし） |
+| §9.1 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | **未**（非 Blocking） |
+| §9.2 DROP_DOWN / RADIO の rank | **一部**。空値が先頭であることは確認（§9.2.1）。定義順との突き合わせは未 |
+| §9.3 `LIKE` と `KLIKE` の差 | **未**（**出荷 blocker にしない**・R4 判断） |
+| §9.4 Chromium / Firefox の smoke | **未**（**Claude は実行環境を持たない**。B20 は出荷しないため正規表現の smoke は不要） |
 
 **§4.6.3 で新たな欠陥を発見**: kSQL は kintone がソートできない型でも SIMPLE のまま押し下げ、**EXPLAIN は `ok` を返して実行が必ず失敗する**。
 
@@ -769,16 +790,102 @@ ASC と DESC が厳密に逆順になること、LIMIT 500/501/なしで SIMPLE/
 
 ### 9.2 optionOrders
 
-DROP_DOWN / RADIO / CHECK_BOX / MULTI_SELECT を別々に測る。特に同じ最小 rank を持つ次の値を、挿入順の全順列で確認する。
+- DROP_DOWN / RADIO は raw REST の ASC/DESC で option 定義順、空値、未知値（作成可能なら）を測り、§4.6.2 の単一 option key と一致するか確認する
+- CHECK_BOX / MULTI_SELECT はソート拒否を確認済み。ローカル comparator について、空集合、単一値、共通 rank、未知値、`['Y','Z']` / `['Z','Y']` を全入力順列で property test し、canonical vector 契約を検証する
+
+### 9.2.1 B27 のサーバ ORDER BY 能力
+
+raw REST の `order by <field> asc/desc limit 500` を直接使い、EXPLAIN を実行の代わりにしない。
+
+#### 実測結果（Claude・2026-07-17・APP4221 / APP4148）
+
+**方法**: `SELECT $id FROM APPn ORDER BY <field> ASC LIMIT 1`（`LIMIT` ≤ 500 ＝ 単発 GET ＝ kintone が並べる。`execute.ts:1288`）を `continueOnError: true` のバッチで各型 1 本ずつ実行し、**kintone API の生の応答**で受理/拒否を判定した。
+
+| 型 | フィールド | 受理 | 備考 |
+|---|---|---|---|
+| RECORD_NUMBER | `レコード番号` | **✅ 受理** | |
+| SINGLE_LINE_TEXT | `タイトル` | **✅ 受理** | |
+| NUMBER | `金額` | **✅ 受理** | |
+| CALC | `計算` | **✅ 受理** | format 別は未測定 |
+| DATE | `日付` | **✅ 受理** | |
+| DATETIME | `日時` | **✅ 受理** | |
+| TIME | `時刻` | **✅ 受理** | |
+| CREATED_TIME | `作成日時` | **✅ 受理** | |
+| UPDATED_TIME | `更新日時` | **✅ 受理** | |
+| DROP_DOWN | `ドロップダウン` | **✅ 受理** | |
+| RADIO_BUTTON | `ラジオボタン` | **✅ 受理** | |
+| STATUS | `ステータス` | **✅ 受理** | |
+| **LINK** | `Webサイト` | **✅ 受理** | **MULTI_LINE_TEXT と分かれる** |
+| **CREATOR** | `作成者` | **✅ 受理** | **ソートキーが code か name か未確定**（下記） |
+| **MODIFIER** | `更新者` | **✅ 受理** | 同上 |
+| **MULTI_LINE_TEXT** | `顧客情報メモ欄` | **❌ `GAIA_IS02`** | **LINK と分かれる。テキスト系でも拒否される** |
+| MULTI_SELECT | `複数選択` | **❌ `GAIA_IS02`** | |
+| CHECK_BOX | `チェックボックス` | **❌ `GAIA_IS02`** | |
+| USER_SELECT | `ユーザー選択` | **❌ `GAIA_IS02`** | |
+| ORGANIZATION_SELECT | `組織選択` | **❌ `GAIA_IS02`** | |
+| GROUP_SELECT | `グループ選択` | **❌ `GAIA_IS02`** | |
+| STATUS_ASSIGNEE | `作業者` | **❌ `GAIA_IS02`** | |
+| CATEGORY | `カテゴリー` | **❌ `GAIA_IS02`** | |
+| REFERENCE_TABLE | `担当者一覧` | **❌ `GAIA_IS02`** | |
+| SUBTABLE | `テーブル` | **❌ `GAIA_IS02`** | |
+
+**拒否メッセージは全型で同一形式**: `GAIA_IS02:「<ラベル>」フィールドはソート条件に使用できません。`
+
+**未測定**: `RICH_TEXT`・`FILE`・`$revision`・SUBTABLE 内フィールド・CALC の format 別（検証アプリに該当フィールドが無い、または要追加）。
+
+#### 判明した非自明な境界
+
+1. **`MULTI_LINE_TEXT` は拒否、`LINK` は受理。** 「テキスト系は受理」という一般化はできない。**型ごとに測る必要がある**
+2. **`CREATOR` / `MODIFIER` は受理される。** ただし kSQL は複合値（`{"code":…,"name":…}`）として扱い、v2.5.0 以降 **code で比較**する。**kintone が code と name のどちらで並べるかは未確定**（下記）
+3. **`CATEGORY` / `STATUS_ASSIGNEE` は拒否。** `STATUS` は受理
+
+#### `CREATOR` / `MODIFIER` のソートキーが未確定（**gate 継続**）
+
+検証データが判定に不足していた:
 
 ```
-["Y"]
-["Y","Z"]
-["Z","Y"]       -- kintone が選択値順を保存するなら区別
-["Y","unknown"] -- 構成変更後の旧値を作れる場合
+更新者 ASC  → Alex2013 / レックス
+更新者 DESC → rex0220 / 開発太郎
 ```
 
-raw REST の結果と、FULL_SCAN / WINDOW の結果を分けて記録する。最小 rank、rank ベクトル、保存配列、入力順のどれで決まるかを判別する。
+- **code 順**: `Alex2013`(0x41…) < `rex0220`(0x72…) → `Alex2013` が先
+- **name 順**: `レックス`(U+30EC…) < `開発太郎`(U+958B…) → `レックス` が先
+
+**両方とも同じ答えになるため切り分けられない。** ASC / DESC が逆順であることは確認できた。
+
+**必要な追加データ**: code の順と name の順が**逆になる**ユーザーの組（例: code `a-user` / name `ヤマダ` と code `z-user` / name `アオキ`）。**検証環境にユーザーを追加できる場合のみ測定可能。**
+
+**それまで `CREATOR` / `MODIFIER` は `unknown` として押し下げない。**
+
+#### `DROP_DOWN` の空値位置（実測）
+
+```
+ドロップダウン ASC → '', '', '', '', 'd1', 'd1', 'd2', 'd2'
+```
+
+**空（未選択）が先頭。** 選択肢の定義順が `d1` → `d2` かは未確認（フォーム定義との突き合わせが要る）。
+
+#### 分類（§4.6.3 の三要素）
+
+| サーバ能力 | 型 |
+|---|---|
+| `unsupported`（`GAIA_IS02`） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE |
+| **`unknown`**（受理するが R4 comparator との同値が未確認） | SINGLE_LINE_TEXT / NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS / LINK / **CREATOR** / **MODIFIER** |
+| `equivalent` | **現時点でゼロ。** §4.1 でコードポイント順が一致したのは SINGLE_LINE_TEXT のみだが、**空値位置・DESC・全型の網羅は未完** |
+
+> **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、**サーバ順が R4 comparator と同値**と確認できた型だけである（§4.6.3）。**現時点で押し下げ可と言える型は無い。**
+
+#### 残る実測（Blocking）
+
+- 各受理型で **ASC / DESC が厳密に逆順**か
+- 各受理型で **空値の位置**（先頭 / 末尾）
+- 各受理型で **R4 comparator と同値**か（`$id` を second key にして tie を固定し、全順列で確認）
+- `CREATOR` / `MODIFIER` の **code / name** 切り分け（要ユーザー追加）
+- `RICH_TEXT` / `FILE` / `$revision` / SUBTABLE 内フィールド / CALC の format 別
+
+**残り（非 Blocking・取る価値あり）**: `𠮟` vs `𩸽`（補助平面どうし）・結合文字の連続・文字列 ASC/DESC の厳密な逆順。
+
+**出荷 blocker にしない**（R4 判断）: `LIKE`/`KLIKE` の差・ブラウザ smoke。B20 は出荷しないため正規表現のブラウザ smoke も不要。
 
 ### 9.3 WHERE / LIKE / KLIKE
 
