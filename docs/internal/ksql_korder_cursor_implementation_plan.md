@@ -5,7 +5,7 @@
 - 対象課題: **B33**
 - 分担: **Claude=仕様/観点、Codex=実装/テスト**
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
-- 正となる仕様: [B33 設計 R3](ksql_cursor_api_fetch_spec.md)
+- 正となる仕様: [B33 設計 R4](ksql_cursor_api_fetch_spec.md)（本書の「R3 §n」参照は R4 でも同一節番号）
 - 参照契約: [型付き順序・安全な ORDER BY R8 §4.3](ksql_local_order_by_draft.md)、[文字列の扱い R8.5 §0/原則6](ksql_string_semantics.md)
 
 本書はB33 R3 §15を実ファイル・実シンボル単位へ展開する実装計画である。R3の事実や契約本文は再掲せず、該当節を参照する。R3と本書が衝突する場合はR3を正とし、本書を修正する。
@@ -167,7 +167,9 @@ executorは`try/finally`でhandleを所有し、offset読み飛ばし、limit収
 - **新規ファイル**: `src/api/__tests__/kintoneCursor.test.ts`、`src/api/__tests__/kintoneCursor.property.test.ts`、`src/api/__tests__/cursorLeaseManager.test.ts`
 - **テストファイル**: 新規3ファイル
 
-#### Step 0-3: Delete実応答の実測blocker
+#### Step 0-3: Delete実応答の実測blocker — **実測済み（2026-07-18・blocker 解消）**
+
+> **結果**: 明示 Delete 済み・自動削除（next=false）済みの 2 経路とも **`HTTP 404` + `code: GAIA_CN01`** で完全同一（[実測記録](evidence/b33_cursor_delete_responses.md)・R4 §14.4 へ反映済み）。既解放 fixture はこのペア 1 種のみ。Phase 1 以降の既解放判定を実装可能。
 
 担当は**Claudeまたはユーザー実機**とし、raw RESTまたはブラウザの`kintone.api()`で次を行う。token、cookie、cursor IDは成果物へ残さない。
 
