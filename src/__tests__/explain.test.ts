@@ -61,6 +61,43 @@ test("EXPLAIN canonical REST top-N — $id exact window を表示する", async 
   expect(plan.some((line) => line.includes("complete input"))).toBe(false);
 });
 
+test("B31: EXPLAIN KORDER BY は native plan とそのままの REST query を表示する", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT 金額 FROM APP100 WHERE 金額 > 0 KORDER BY 金額 DESC, $id ASC LIMIT 5 OFFSET 2"
+  );
+  expect(plan.find((line) => line.includes("mode"))).toContain("SIMPLE");
+  expect(plan.find((line) => line.includes("order plan"))).toContain("KORDER_NATIVE");
+  expect(plan.find((line) => line.includes("kintone query")))
+    .toContain("order by 金額 desc, $id asc limit 5 offset 2");
+  expect(plan.some((line) => line.includes("complete input"))).toBe(false);
+  expect(plan.find((line) => line.includes("order semantics")))
+    .toContain("kintone native (not kSQL canonical)");
+  expect(plan.find((line) => line.includes("REST execution"))).toContain("single GET");
+});
+
+test.each([0, 1])("B31: EXPLAIN も native allowlist 外を LIMIT %i で同じく拒否する", async (limit) => {
+  await expect(explain(
+    `EXPLAIN SELECT $id FROM APP100 KORDER BY 利用者 LIMIT ${limit}`
+  )).rejects.toThrow(/KORDER_TYPE_UNSUPPORTED/);
+});
+
+test("B31: EXPLAIN も実行時 maxRecords を使って native window を検査する", async () => {
+  const client = makeClient();
+  await expect(execute(
+    "EXPLAIN SELECT $id FROM APP100 KORDER BY $id LIMIT 500",
+    client,
+    { maxRecords: 100 }
+  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+});
+
+test("B31: EXPLAIN STATUS KORDER BY は process status metadata に依存しない", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT ステータス FROM APP100 KORDER BY ステータス LIMIT 1"
+  );
+  expect(plan.find((line) => line.includes("order plan"))).toContain("KORDER_NATIVE");
+  expect(plan.some((line) => line.includes("metadata API: process status"))).toBe(false);
+});
+
 test("EXPLAIN は unsupported ORDER key を行数に依存せず拒否する", async () => {
   await expect(explain("EXPLAIN SELECT $id FROM APP100 ORDER BY 利用者 LIMIT 1"))
     .rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
@@ -488,6 +525,16 @@ test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数�
   // 実行時オプションを知らないため実効値ではなく「既定上限」と表示する
   expect(create.plan.join("\n")).toMatch(/既定上限 10000 行、tempTableMaxRows で変更可、超過はエラー/);
   expect(create.plan.join("\n")).toMatch(/mode:\s+SIMPLE/); // 内側 SELECT のプラン
+});
+
+test("B31: バッチ EXPLAIN も実行時 maxRecords で KORDER window を検査する", async () => {
+  await expect(buildBatchExplainPlansCore(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 500; SELECT $id FROM APP100 LIMIT 1",
+    makeClient(),
+    undefined,
+    "explain-test-korder-max",
+    100
+  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
 });
 
 test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不明を明示", async () => {

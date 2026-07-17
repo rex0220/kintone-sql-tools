@@ -183,6 +183,7 @@ export interface SelectStatement {
   where: WhereExpr | null;
   groupBy: GroupByKey[];
   having: WhereExpr | null;
+  orderMode: "CANONICAL" | "KINTONE_NATIVE";
   orderBy: OrderByItem[];
   limit: number | null;
   offset: number | null;

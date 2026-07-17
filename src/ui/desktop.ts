@@ -1854,9 +1854,10 @@ function isMultiStatementSql(sql: string): boolean {
 /** バッチ EXPLAIN のプランを既存のテーブル描画に載せるための SelectResult を組む */
 async function batchPlansToSelectResult(
   sql: string,
-  client: Parameters<typeof executeBatch>[1]
+  client: Parameters<typeof executeBatch>[1],
+  maxRecords: number
 ): Promise<SelectResult> {
-  const plans = await buildBatchExplainPlans(sql, client);
+  const plans = await buildBatchExplainPlans(sql, client, undefined, "batch-explain", maxRecords);
   const rows: Array<{ plan: string }> = [];
   plans.statements.forEach((p) => {
     if (p.index > 0) rows.push({ plan: "" });
@@ -1942,7 +1943,12 @@ async function runBatchSql(
   // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
   // → バッチ全体のプラン表示（metadata API のみ。2文目以降も実行しない）
   if (explainOnly || statements[0].type === "EXPLAIN") {
-    return { result: await batchPlansToSelectResult(sql, client), note: null, dmlSummary: [], cancelled: false };
+    return {
+      result: await batchPlansToSelectResult(sql, client, options.maxRecords),
+      note: null,
+      dmlSummary: [],
+      cancelled: false,
+    };
   }
 
   // INSERT VALUES の実行前静的確認（仕様 §3.3。件数は静的に正確。

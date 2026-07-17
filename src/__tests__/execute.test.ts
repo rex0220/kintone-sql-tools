@@ -407,6 +407,145 @@ test("B27: window ORDER BY の unsupported key も records GET 前に拒否す�
   expect(client.getCalls).toHaveLength(0);
 });
 
+test("B31: KORDER BY は kintone native 順を単発 GET のまま保持する", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ $id: "9", 金額: "10" }),
+      makeRecord({ $id: "2", 金額: "2" }),
+    ],
+    fieldTypes: { 金額: "NUMBER" },
+  });
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP100 WHERE 金額 > 0 KORDER BY 金額 DESC, $id ASC LIMIT 5 OFFSET 2",
+    client,
+    { maxRecords: 5, onLimitReached: "truncate" }
+  ) as SelectResult;
+
+  // mock の返却順をローカルで並べ直さず、そのまま kintone native 順として採用する。
+  expect(result.rows).toEqual([
+    { $id: "9", 金額: "10" },
+    { $id: "2", 金額: "2" },
+  ]);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain("金額 > 0");
+  expect(client.getCalls[0].query).toContain("order by 金額 desc, $id asc limit 5 offset 2");
+  expect(result.warnings).toEqual([]);
+});
+
+test("B31: canonical ORDER BY と KORDER BY は同値群の順序を意図的に共有しない", async () => {
+  const canonicalClient = makePagedClient([
+    makeRecord({ $id: "1", 名前: "same" }),
+    makeRecord({ $id: "2", 名前: "same" }),
+  ]);
+  canonicalClient.getFields = async () => [
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const canonical = await execute(
+    "SELECT $id FROM APP100 ORDER BY 名前 LIMIT 2",
+    canonicalClient
+  ) as SelectResult;
+
+  // native mock は kintone の暗黙 tie 順を表す。KORDER はこれを canonical $id ASC へ直さない。
+  const nativeClient = makeClient({
+    records: [
+      makeRecord({ $id: "2", 名前: "same" }),
+      makeRecord({ $id: "1", 名前: "same" }),
+    ],
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT" },
+  });
+  const native = await execute(
+    "SELECT $id FROM APP100 KORDER BY 名前 LIMIT 2",
+    nativeClient
+  ) as SelectResult;
+
+  expect(canonical.rows).toEqual([{ $id: "1" }, { $id: "2" }]);
+  expect(native.rows).toEqual([{ $id: "2" }, { $id: "1" }]);
+});
+
+test("B31: KORDER BY LIMIT 0 は全 planning 検査後に records GET なしで空結果を返す", async () => {
+  const client = makeClient({ fieldTypes: { 金額: "NUMBER" } });
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP100 KORDER BY 金額 LIMIT 0",
+    client
+  ) as SelectResult;
+
+  expect(result).toMatchObject({ rowCount: 0, rows: [], columns: ["$id", "金額"] });
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test.each([0, 1])("B31: native allowlist 外は LIMIT %i でも records GET 前に拒否する", async (limit) => {
+  const client = makeClient({ fieldTypes: { 利用者: "USER_SELECT" } });
+
+  await expect(execute(
+    `SELECT $id FROM APP100 KORDER BY 利用者 LIMIT ${limit}`,
+    client
+  )).rejects.toThrow(/KORDER_TYPE_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test.each([
+  ["SELECT $id FROM APP100 KORDER BY $id", "KORDER_LIMIT_INVALID"],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 501", "KORDER_LIMIT_INVALID"],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 5 OFFSET 10001", "KORDER_OFFSET_INVALID"],
+] as const)("B31: native REST window 条件を fail-closed にする: %s", async (sql, reason) => {
+  const client = makeClient();
+  await expect(execute(sql, client)).rejects.toThrow(reason);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: LIMIT が実行時 maxRecords を超える KORDER BY を拒否する", async () => {
+  const client = makeClient();
+  await expect(execute(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 5",
+    client,
+    { maxRecords: 4 }
+  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: residual WHERE と KLIKE を native order へ混在させない", async () => {
+  const residual = makeClient({ fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "SELECT $id FROM APP100 WHERE 名前 > 'a' KORDER BY $id LIMIT 5",
+    residual
+  )).rejects.toThrow(/KORDER_WHERE_NOT_EXACT/);
+  expect(residual.getCalls).toHaveLength(0);
+
+  const klike = makeClient({ fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "SELECT $id FROM APP100 WHERE 名前 KLIKE 'a' KORDER BY $id LIMIT 5",
+    klike
+  )).rejects.toThrow(/KORDER_KLIKE_UNSUPPORTED/);
+  expect(klike.getCalls).toHaveLength(0);
+});
+
+test("B31: SELECT alias は native order の物理フィールドとして扱わない", async () => {
+  const client = makeClient({ fieldTypes: { 金額: "NUMBER" } });
+  await expect(execute(
+    "SELECT 金額 AS 別名 FROM APP100 KORDER BY 別名 LIMIT 5",
+    client
+  )).rejects.toThrow(/KORDER_KEY_NOT_DIRECT_FIELD/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: STATUS native order は process status metadata を取得しない", async () => {
+  const client = makeClient({ fieldTypes: { ステータス: "STATUS" } });
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return { enable: true, states: [{ name: "完了", index: 0 }] };
+  };
+
+  await execute(
+    "SELECT ステータス FROM APP100 KORDER BY ステータス LIMIT 1",
+    client
+  );
+  expect(statusCalls).toBe(0);
+  expect(client.getCalls).toHaveLength(1);
+});
+
 test("B30: window ORDER BY も truncate を fail-closed にする", async () => {
   const records = Array.from({ length: 101 }, (_, i) => makeRecord({
     $id: String(i + 1),

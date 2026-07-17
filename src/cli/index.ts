@@ -1981,7 +1981,7 @@ async function run(): Promise<number> {
 
   if (isBatchSql && args.dryRun) {
     try {
-      const plans = await buildBatchExplainPlans(sql!, client, args.variables, cacheContext);
+      const plans = await buildBatchExplainPlans(sql!, client, args.variables, cacheContext, maxRecords);
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
         ? restoreSqlDiagnosticValue(plans.statements, sqlDiagnosticContext.appBindingByMappedApp) as typeof plans.statements

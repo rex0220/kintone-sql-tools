@@ -525,7 +525,13 @@ export function createKsqlMcpTools(
     const explainSourceSql = runtime?.sql ?? normalized.normalizedSql;
 
     if (statements.length > 1) {
-      const plans = await buildBatchExplainPlans(explainSourceSql, explainClient, undefined, explainCacheContext);
+      const plans = await buildBatchExplainPlans(
+        explainSourceSql,
+        explainClient,
+        undefined,
+        explainCacheContext,
+        runtime?.maxRecords
+      );
       return {
         ok: true,
         batch: true,
@@ -537,6 +543,7 @@ export function createKsqlMcpTools(
 
     const result = await executeSql(explainSql(explainSourceSql), explainClient, {
       cacheContext: explainCacheContext,
+      maxRecords: runtime?.maxRecords,
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);

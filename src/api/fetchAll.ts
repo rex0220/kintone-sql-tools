@@ -4,7 +4,7 @@
 // kintone API 制約:
 //   - 1リクエストで取得できる最大件数: 500件
 //   - ページングは query 末尾の "limit 500 offset N" で制御
-//   - offset の最大値: 9999（offset >= 10000 はエラー）
+//   - fetchAll は offset 10000 到達前後で保守的にカーソル方式へ切り替える
 //
 // 10000件超対応:
 //   - offset が KINTONE_MAX_OFFSET (10000) に達したら
@@ -242,7 +242,7 @@ export function extractIds(records: KintoneRecord[]): number[] {
 const PAGE_SIZE_DEFAULT   = 500;
 const PARALLEL_DEFAULT    = 1;
 const MAX_RECORDS_DEFAULT = 10_000;
-/** kintone の offset 上限（この値以上は API エラー） */
+/** offset 10000 到達前後で保守的にカーソル方式へ切り替える内部閾値。 */
 const KINTONE_MAX_OFFSET  = 10_000;
 
 async function fetchPage(

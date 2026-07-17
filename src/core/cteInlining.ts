@@ -36,6 +36,7 @@ export function buildInlinedQuery(stmt: WithStatement): SelectStatement {
     where,
     groupBy: [],
     having: null,
+    orderMode: "CANONICAL",
     orderBy: final.orderBy.length > 0 ? final.orderBy : cteBody.orderBy,
     limit: final.limit ?? cteBody.limit,
     offset: final.offset ?? cteBody.offset,

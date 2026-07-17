@@ -3,7 +3,7 @@ import type { SelectMode } from "../../converter/selectToKintone";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
 import type { PredicateCapability } from "./whereCapability";
 
-export type CanonicalOrderPlanKind = "CANONICAL_REST_TOP_N" | "CANONICAL_LOCAL";
+export type CanonicalOrderPlanKind = "CANONICAL_REST_TOP_N" | "CANONICAL_LOCAL" | "KORDER_NATIVE";
 
 export type CanonicalOrderReasonCode =
   | "ORDER_KEY_NOT_REST_EQUIVALENT"

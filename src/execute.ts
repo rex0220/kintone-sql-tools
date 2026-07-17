@@ -64,6 +64,7 @@ import {
   planCanonicalOrder,
   type CanonicalOrderPlan,
 } from "./core/optimization/canonicalOrderPlanner";
+import { planKorderNative } from "./core/optimization/korderPlanner";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -512,7 +513,7 @@ async function executeParsedStatement(
     case "REORDER":       return executeReorder(stmt, client, options, cacheContext);
     case "SHOW_APPS":     return executeShowApps(client);
     case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
-    case "EXPLAIN":       return executeExplain(stmt, client, cacheContext);
+    case "EXPLAIN":       return executeExplain(stmt, client, cacheContext, options.maxRecords ?? 10_000);
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
@@ -1448,7 +1449,7 @@ async function executeSelect(
     : "FULL_SCAN";
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   const orderPlan = hasCanonicalOrder(stmt)
-    ? planCanonicalOrder({
+    ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
         stmt,
         staticMode: mode,
         whereCapability: whereCapability.capability,
@@ -1465,7 +1466,7 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
     ? requiresCompleteInput({ ...stmt, orderBy: [] })
     : requiresCompleteInput(stmt);
   const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
@@ -1593,7 +1594,7 @@ async function executeSimpleSelect(
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
   const useRestWindow = stmt.orderBy.length > 0
-    ? orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
     : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter =
@@ -1607,7 +1608,9 @@ async function executeSimpleSelect(
   // ORDER BY ありは schema-aware plan だけが REST 窓を許可する。
   // ORDER BY なしは順序契約がないため、従来どおり小さい LIMIT を単発取得できる。
   let records: KintoneRecord[];
-  if (useRestWindow) {
+  if (orderPlan?.kind === "KORDER_NATIVE" && stmt.limit === 0) {
+    records = [];
+  } else if (useRestWindow) {
     const res: KintoneGetResponse = await client.getRecords({
       app: params.app,
       query: params.query,
@@ -2658,7 +2661,7 @@ async function executeFullScanWithCte(
   }
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   if (hasCanonicalOrder(stmt)) {
-    planCanonicalOrder({
+    (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
       stmt,
       staticMode: "FULL_SCAN",
       whereCapability: whereCapability.capability,
@@ -3282,7 +3285,7 @@ async function buildOrderSemanticsForSelect(
     const base = aliasSemantics.get(name) ?? resolveField(aggregateFieldRef(name))?.semantics;
     if (!base) continue;
     let semantics = base;
-    if (base.fieldType === "STATUS" && base.source) {
+    if (base.fieldType === "STATUS" && base.source && stmt.orderMode !== "KINTONE_NATIVE") {
       const process = await getProcessStatusesCached(base.source.appId, client, cacheContext);
       if (process.enable && process.states !== null) {
         semantics = {
@@ -5090,7 +5093,8 @@ interface ExplainWhereAnalysis {
 async function buildExplainWhereAnalysis(
   query: unknown,
   client: KintoneClient,
-  cacheContext: string
+  cacheContext: string,
+  maxRecords = 10_000
 ): Promise<ExplainWhereAnalysis> {
   const fieldApps = new Set<number>();
   const processStatusApps = new Set<number>();
@@ -5137,9 +5141,11 @@ async function buildExplainWhereAnalysis(
       if (select.orderBy.length > 0
         || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
         const meta = await buildOrderByMetaForSelect(select, tracedClient, cacheContext);
-        for (const semantics of meta.semantics.values()) {
-          if (semantics.fieldType === "STATUS" && semantics.source) {
-            processStatusApps.add(semantics.source.appId);
+        if (select.orderMode !== "KINTONE_NATIVE") {
+          for (const semantics of meta.semantics.values()) {
+            if (semantics.fieldType === "STATUS" && semantics.source) {
+              processStatusApps.add(semantics.source.appId);
+            }
           }
         }
         const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)]
@@ -5150,12 +5156,12 @@ async function buildExplainWhereAnalysis(
           const mode = capability.capability === "EXACT_PUSHDOWN"
             ? resolveSelectMode(select)
             : "FULL_SCAN";
-          orderPlans.set(select, planCanonicalOrder({
+          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
             stmt: select,
             staticMode: mode,
             whereCapability: capability.capability,
             orderSemantics: meta.semantics,
-            maxRecords: 10_000,
+            maxRecords,
             hasKlike: whereHasKlike(select.where),
           }));
         }
@@ -5182,12 +5188,12 @@ async function buildExplainWhereAnalysis(
     capabilities.set(inlined, capability);
     if (hasCanonicalOrder(inlined)) {
       const meta = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
-      orderPlans.set(inlined, planCanonicalOrder({
+      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
         stmt: inlined,
         staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
         whereCapability: capability.capability,
         orderSemantics: meta.semantics,
-        maxRecords: 10_000,
+        maxRecords,
         hasKlike: whereHasKlike(inlined.where),
       }));
     }
@@ -5227,7 +5233,8 @@ export async function buildBatchExplainPlans(
   sql: string,
   client: KintoneClient,
   injectedVariables?: Readonly<Record<string, string>>,
-  cacheContext = "batch-explain"
+  cacheContext = "batch-explain",
+  maxRecords = 10_000
 ): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
@@ -5242,7 +5249,7 @@ export async function buildBatchExplainPlans(
           : stmt)
         : resolveVariableRefs(stmt, variables);
       validateKlikeStatement(planStmt);
-      const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext);
+      const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords);
       const statementPlan = buildBatchStatementPlan(
         planStmt,
         analysis.statements[i],
@@ -5381,9 +5388,10 @@ function buildPlanForBatchQuery(
 async function executeExplain(
   stmt: ExplainStatement,
   client: KintoneClient,
-  cacheContext: string
+  cacheContext: string,
+  maxRecords: number
 ): Promise<SelectResult> {
-  const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext);
+  const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
   const lines = [
     ...explainMetadataLines(analysis),
     ...buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
@@ -5442,6 +5450,10 @@ function buildSelectPlan(
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
     if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
+    if (orderPlan.kind === "KORDER_NATIVE") {
+      lines.push("  order semantics: kintone native (not kSQL canonical)");
+      lines.push("  REST execution: single GET");
+    }
   }
   if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
     lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
