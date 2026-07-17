@@ -570,7 +570,7 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
 SELECT LENGTH('\d+')   → 3     -- バックスラッシュが生き残る
 ```
 
-**正規表現（B20（文書は `spec/b20-regexp-functions` ブランチ））と相性が良い** — MySQL のような二重エスケープ（`'\\d'`）が要らない。
+**正規表現（[B20](ksql_regexp_function_spec.md)）と相性が良い** — MySQL のような二重エスケープ（`'\\d'`）が要らない。
 
 ### 5.2 空文字が NULL 相当
 
@@ -715,7 +715,7 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | [B23](ksql_length_char_spec.md) | `LENGTH_CHAR` | §2.3 / §3.3 / §3.4 |
 | [B24](ksql_translate_spec.md) | `TRANSLATE` | §3.3 |
 | [B21](ksql_update_set_string_func_issue.md) | `UPDATE SET` が文字列関数を受け付けない | §5（文字列関数の書き戻し経路） |
-| **B20** | 正規表現関数 | §5.1（リテラル）／ §7 制限1。**文書は `spec/b20-regexp-functions` ブランチにあり本ブランチには無いためリンクしない** |
+| [B20](ksql_regexp_function_spec.md) | 正規表現関数 | §5.1（リテラルのバックスラッシュ素通し）／ §7 制限 1（**現方式では出荷しない**） |
 | [B13](ksql_string_min_max_aggregate_spec.md) | 文字列 `MIN`/`MAX` | §4（**「UTF-16 辞書順」と書いたが `ORDER BY` との差は未記載**） |
 | [B12-A](ksql_validate_only_implementation_plan.md) | `VALIDATE ONLY` | §2.1（UTF-16 計数・空文字 = 未設定） |
 | ~~B25~~ | `ORDER BY` と `MIN`/`MAX` の比較不整合 | **B26 へ統合**（同根） |
@@ -801,7 +801,7 @@ CLI と MCP は同じ Node 版で一致することを確認し、プラグイ�
 
 | 文書 | 誤り | 正 |
 |---|---|---|
-| **B20** §3.1 | 「正規表現が『同じ SQL は同じ結果』の原則に構造的に反する**最初の**機能になる」 | **既に `ORDER BY` で起きている**（§4.4）。正規表現は最初ではない。**訂正済み**（`spec/b20-regexp-functions`） |
+| [B20](ksql_regexp_function_spec.md) §3.1 | 「正規表現が『同じ SQL は同じ結果』の原則に構造的に反する**最初の**機能になる」 | **既に `ORDER BY` で起きている**（§4.4）。正規表現は最初ではない。**訂正済み** |
 | **B20** §4.3 | **安全部分集合 R-1/R-2 で指数時間を塞げる** | **誤り。** 量化グループも後方参照も無い `^a?×n a×n b$` が指数時間になる（§10.3）。**B20 は現方式では出荷しない**（§7 制限1） |
 | [B13](ksql_string_min_max_aggregate_spec.md) | `MIN`/`MAX` は「UTF-16 辞書順」 | 記述自体は正しいが、**`ORDER BY` との差も、kintone との差（サロゲート）も記載していない** |
 | [B21](ksql_update_set_string_func_issue.md) | 「評価機構は完成済み・parser 側が主」 | **誤り。** 単純 UPDATE は `buildUpdateRecord`（`dmlToKintone.ts:172`）が**行を持たずに** `toKintoneValue` へ渡す。CASE 版が動くのは `:539` が取得済み `row` を渡す**別経路**だから（§10.3） |
