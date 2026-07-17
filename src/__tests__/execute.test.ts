@@ -295,7 +295,7 @@ test("SIMPLE OFFSET + LIMIT が maxRecords を超える truncate は従来どお
   expect(result.warnings).toEqual([expect.stringContaining("取得上限")]);
 });
 
-test.failing("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-closed", async () => {
+test("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-closed", async () => {
   const records = Array.from({ length: 101 }, (_, i) => makeRecord({
     $id: String(i + 1),
     会社名: i === 100 ? "a" : `z${String(i).padStart(3, "0")}`,
@@ -306,7 +306,45 @@ test.failing("B30: truncated local ORDER BY は部分候補の top-1 を返さ�
     "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名 ASC LIMIT 1",
     client,
     { maxRecords: 100, onLimitReached: "truncate" }
-  )).rejects.toThrow("取得件数が上限");
+  )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
+});
+
+test("B30: window ORDER BY も truncate を fail-closed にする", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: String.fromCodePoint(0x7a + (i % 2)),
+  }));
+  const client = makePagedClient(records);
+
+  await expect(execute(
+    "SELECT 会社名, ROW_NUMBER() OVER (ORDER BY 会社名 ASC) AS rn FROM APP100",
+    client,
+    { maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
+});
+
+test.each([
+  [
+    "UNION",
+    "SELECT 会社名 FROM APP200 UNION ALL " +
+      "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名",
+  ],
+  [
+    "WITH",
+    "WITH x AS (SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名) " +
+      "SELECT 会社名 FROM x",
+  ],
+])("B30: %s 内の ORDER BY も完全入力を要求する", async (_label, sql) => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: i === 100 ? "a" : `z${String(i).padStart(3, "0")}`,
+  }));
+  const client = makeClient({ recordsByApp: { 100: records, 200: [] } });
+
+  await expect(execute(sql, client, {
+    maxRecords: 100,
+    onLimitReached: "truncate",
+  })).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
 });
 
 test.failing("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHERE で評価", async () => {

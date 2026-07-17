@@ -983,7 +983,7 @@ function buildFetchOptionsPanel(
 
   const modes: Array<{ value: "error" | "truncate"; label: string }> = [
     { value: "error", label: "エラー" },
-    { value: "truncate", label: "打ち切って続行" },
+    { value: "truncate", label: "打ち切って続行（ORDER BYではエラー）" },
   ];
   for (const m of modes) {
     const lbl = el("label", "ksql-opt-radio-label");

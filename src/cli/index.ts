@@ -86,7 +86,7 @@ Options:
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
-  --on-limit <mode>          On record limit: error | truncate
+  --on-limit <mode>          On record limit: error | truncate (ORDER BY forces error)
   --temp-table-max-rows <n>  Max rows per temp table (default: 10000, always errors on overflow)
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
@@ -1661,12 +1661,19 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
-  const dmlForcesOnLimitError = needsCompleteInput;
-  const effectiveOnLimit: OnLimitMode = dmlForcesOnLimitError ? "error" : onLimit;
-  if (dmlForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
-    process.stderr.write(isDmlStatement || batchContainsDml
-      ? "note: onLimit=truncate is ignored for DML (forced to error)\n"
-      : "note: onLimit=truncate is ignored for VALIDATE ONLY (forced to error)\n");
+  const completeInputForcesOnLimitError = needsCompleteInput;
+  const effectiveOnLimit: OnLimitMode = completeInputForcesOnLimitError ? "error" : onLimit;
+  if (completeInputForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
+    const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
+      parsedStmt !== null && typeof parsedStmt === "object" &&
+      "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
+    );
+    const reason = isDmlStatement || batchContainsDml
+      ? "DML"
+      : isValidationOnly
+        ? "VALIDATE ONLY"
+        : "ORDER BY";
+    process.stderr.write(`note: onLimit=truncate is ignored for ${reason} (forced to error)\n`);
   }
   if (format === "markdown" && noHeader) {
     process.stderr.write("ArgumentError: --no-header cannot be used with --format markdown|md.\n");

@@ -35,6 +35,12 @@ test("EXPLAIN SIMPLE — 基本 SELECT", async () => {
   expect(plan.find((l) => l.includes("kintone query"))).toContain('ステータス = "完了"');
   expect(plan.find((l) => l.includes("fields"))).toContain("顧客名");
   expect(plan.find((l) => l.includes("fields"))).toContain("金額");
+  expect(plan.find((l) => l.includes("complete input"))).toContain("onLimit=truncate disabled");
+});
+
+test("EXPLAIN ORDER BY なし — complete input 要件を表示しない", async () => {
+  const plan = await explain("EXPLAIN SELECT 顧客名 FROM APP100");
+  expect(plan.some((line) => line.includes("complete input"))).toBe(false);
 });
 
 test("EXPLAIN SIMPLE — WHERE なし", async () => {

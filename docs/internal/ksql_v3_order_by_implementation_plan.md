@@ -1,6 +1,6 @@
 # kSQL v3.0.0 比較・ORDER BY 実装計画
 
-- ステータス: **R3改訂案 / R2レビューのBlocking（B14 `#err`非数値）反映 / Claude再レビュー待ち / 未実装**
+- ステータス: **R3承認済み / Phase 0–1（baseline fixture・B30）実装済み / Phase 2以降未実装**
 - 対象リリース: **v3.0.0**
 - 対象課題: **B26 / B27 / B30 / B31 / B32**
 - follow-up: **B9（v3.1.0候補）**

@@ -17,6 +17,7 @@ import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { NO_FROM_CTE_NAME } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
+import { requiresCompleteInput } from "./core/dmlGuard";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
@@ -1194,14 +1195,30 @@ async function executeSelect(
     }
     return result;
   }
-  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
+  const completeInputRequired = requiresCompleteInput(stmt);
+  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
+  const effectiveOptions = truncateWasDisabled
+    ? { ...options, onLimitReached: "error" as const }
+    : options;
+  await resolveSelectCaseSubqueries(stmt, client, effectiveOptions, cacheContext, cteCache);
   const mode = resolveSelectMode(stmt);
   await validateSelectFieldCodes(stmt, mode, client, cacheContext);
 
-  if (mode === "SIMPLE") {
-    result = await executeSimpleSelect(stmt, client, options, cacheContext);
-  } else {
-    result = await executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
+  try {
+    if (mode === "SIMPLE") {
+      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext);
+    } else {
+      result = await executeFullScanSelect(stmt, client, effectiveOptions, cacheContext, cteCache);
+    }
+  } catch (error) {
+    if (completeInputRequired && error instanceof FetchAllLimitError) {
+      throw new FetchAllLimitError(
+        "ORDER BYの正しい結果には完全な候補集合が必要です。" +
+        (truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
+        error.message
+      );
+    }
+    throw error;
   }
   if (captureColumnMeta) {
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
@@ -4622,6 +4639,9 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  if (requiresCompleteInput(stmt)) {
+    lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
+  }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
     lines.push(`  reason:        ${reasons.join(", ")}`);
   }
