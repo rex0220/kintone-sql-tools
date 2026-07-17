@@ -1,7 +1,7 @@
 # 課題: B9 厳密10進比較
 
 - 作成日: 2026-07-15
-- 改訂日: 2026-07-17（R2）
+- 改訂日: 2026-07-17（R4: B26の`#err`非数値末尾バンド契約と境界を同期）
 - ステータス: **高優先度の独立 follow-up。B26 と同時実装しないが、旧「16桁級アプリは対象外なので実害は低」という保留理由は撤回する**
 - 関連: [文字列・比較の横断仕様](ksql_string_semantics.md) §4.5.5 / §7 制限6、[B29](ksql_number_precision_semantics_issue.md)
 - 分担: Claude=仕様/観点、Codex=実装/テスト
@@ -32,7 +32,7 @@ kintone の [`numberPrecision.digits`](https://cybozu.dev/ja/kintone/docs/rest-a
 - `< > <= >=` と、typed number の等価判定・ORDER BY・MIN/MAXで同じ10進 primitiveを共有する
 - 符号、`-0`、末尾ゼロ、指数表記を正規化する
 - 空セルは既存の「数値型では最小値クラス」契約を維持する
-- `NaN` / `Infinity` / `-Infinity` はkintone NUMBERではないため、暗黙に10進値へ混ぜず明示的に拒否する
+- B9の厳密10進primitiveは有限10進値だけを解析する。B26の外側のtyped-number domainは、空セル、算術由来の±Infinity、正規`"NaN"` sentinel、B14 `#err`由来のその他非数値バンドを有限10進値と分離して順序づける。物理kintone NUMBERへの入力・書込みでは引き続き拒否する
 - typed textや型不明値を値の見た目だけで数値へ昇格しない
 
 比較器は `numberPrecision` を読まなくても、任意精度の有限10進文字列を比較できるようにする。アプリ設定は受入値域の境界テストと診断には使えるが、比較結果そのものを設定ごとに変えない。
@@ -60,8 +60,8 @@ B9 に含めないもの:
 | 末尾ゼロ | `1.10` と `1.1` は同値 |
 | 指数表記 | 受理するなら正規化後の同じ10進値として比較。SQL字句としての受理範囲は別途固定する |
 | 空セル | typed numberでは全有限値より小さい既存契約を維持 |
-| 非有限値 | `ArgumentError`。比較器の戻り値へ `NaN` を出さない |
-| 非数値文字列 | typed numberならエラー、typed stringなら文字列比較。型不明を値ベースで数値化しない |
+| 非有限値・域外値 | B26の外側domainで`空セル < -Infinity < 有限10進 < +Infinity < NaN sentinel < その他非数値`。その他非数値バンド内はコードポイント順。厳密10進parserへ混ぜず、比較器の戻り値へ`NaN`を出さない |
+| 非数値文字列 | B14 `#err`等のtyped numberでは上記末尾バンド。typed stringでは通常のコードポイント比較。型不明を値ベースで数値化しない |
 | 戻り値 | 常に `-1 / 0 / 1` |
 
 ## 5. 影響範囲
@@ -81,7 +81,8 @@ B9 に含めないもの:
 - SIMPLE raw RESTとFULL_SCANを、`$id asc`を明示して同じ行列で比較する
 - WHERE / HAVING / CASE / ASSERT / BETWEEN / ORDER BY / MIN/MAXの代表経路を回帰テストする
 - JS算術由来値について、B9時点で保証する範囲と制限/エラーをテストで固定する
-- `NaN` / ±Infinity / typed number内の不正文字列はfail-closed
+- 正規`"NaN"` sentinel、±Infinity、その他非数値がB26の外側domain順を維持し、有限10進値だけが厳密primitiveへ入る
+- その他非数値バンド内のコードポイント順とpeer関係をB9後も維持する
 
 ## 7. 未実測
 

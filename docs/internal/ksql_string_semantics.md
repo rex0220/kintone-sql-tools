@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - **位置づけ: 本書が文字列の扱いの「正」（single source of truth）。** 個別の仕様・課題文書は**事実を書き写さず本書を参照する**。
-- ステータス: **R8.1（B27 の tie-break 契約を確定。SIMPLE は利用者キー末尾へ `$id asc` を明示して FULL_SCAN の安定順へ合わせ、peer 比較器とは分離する。B9 は最大30桁の厳密比較、精度依存の検証・丸めは B29 へ分離。R8.1 で `STATUS` を `equivalent 候補（実装前提あり）` へ訂正＝`states.*.index` を捨てているためローカルが定義順を再現できない。LINK(TEL)・CREATED_TIME/UPDATED_TIME を unknown へ差し戻し。R8.2 で `status.json` を実測＝`index` は**文字列**・`enable: false` でも `states` は返る）。**
+- ステータス: **R8.5（R8.1でB27のtie-breakとSTATUS訂正、R8.2で`status.json`の`index`型・無効時挙動を確定。R8.3でv3.0.0統合範囲とWHERE/GREATEST/B32を追加。R8.4のNaN sentinel案を、B14 `#err`契約との衝突によりR8.5で訂正。typed numberの正当な域外値を固定末尾バンドへ置き、ペア単位モード切替だけを禁止）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -444,7 +444,9 @@ ORDER BY 文字列 ASC             → a, B, ｱ, ア, あ, 亜    （JS の ICU
 4. 数値が同値なら、元文字列のコードポイント順を二次キーにする
 5. 文字列モードはコードポイント順
 
-これにより引数順に依存せず、異なる元文字列にも一意の勝者がある。kintone に対応する関数はないため、物理フィールドの型規則を無理に適用しない。
+これにより引数順に依存せず、異なる元文字列にも一意の勝者がある。kintone に対応する関数はないため、物理フィールドの型規則を無理に適用しない。したがって、全引数が数値化可能な `GREATEST('20','100')` は v2.17.0 と同じ **`'100'`** であり、typed string の一般則から `'20'` へ変更しない。B26 が変更するのは、文字列モードと数値同値時の二次キーをコードポイント比較へ統一する部分である。
+
+共有 leaf 比較器は caller が集合全体について一度確定した `number` / `string` mode を受け取る。leaf が値の組ごとにモードを再判定してはならない。これにより B19 で排除した `2 < 10 < 1a < 2` の循環を再導入しない。
 
 #### 4.5.4 `WHERE` / `HAVING` / `CASE WHEN` / `ASSERT`
 
@@ -473,21 +475,36 @@ option: (type=option, canonicalOptionVector)
 
 数値の比較 primitive は `a.n - b.n` ではなく、`<` / `>` による三方比較で `-1 / 0 / 1` のいずれかを返す。`Infinity - Infinity` は `NaN` になるが、**現行 ECMA-262 の `CompareArrayElements` は comparefn の結果が `NaN` なら `+0` として扱う**。したがって「ECMAScript の未定義動作」「V8 が偶然 0 扱い」は誤りであり、6 組で差が出なかった結果とも整合する。
 
-それでも三方比較へ変える理由は、比較 primitive 自体の契約を有限の符号値に固定し、`Array.sort` 以外の消費先を Sort 固有の `NaN → +0` 正規化へ依存させないためである。**現に壊れている誤結果の修正ではなく衛生**であり、受入条件は「primitive が常に `-1 / 0 / 1` を返す」とする。入力値としての `NaN` は文字列比較へ落とさず `ArgumentError` とする。物理数値の空セルは既存契約どおり最小値クラスとして先に処理する。GREATEST/LEAST だけは一意の元文字列を返す必要があるため、§4.5.3 のコードポイント二次キーを使う。kintone NUMBER との10進精度一致は B9 の課題である。
+それでも三方比較へ変える理由は、比較 primitive 自体の契約を有限の符号値に固定し、`Array.sort` 以外の消費先を Sort 固有の `NaN → +0` 正規化へ依存させないためである。**現に壊れている誤結果の修正ではなく衛生**であり、受入条件は「primitive が常に `-1 / 0 / 1` を返す」とする。
+
+typed number の値域は、次の固定バンドとする。
+
+```text
+空セル < -Infinity < 有限数 < +Infinity < "NaN" sentinel < その他の非数値
+```
+
+最後のバンド内は§4.5.1のコードポイント順とする。完全一致の文字列`"NaN"`は算術・集約算術が生成する独立sentinelで、その他の非数値バンドより前に置く。同じsentinel、同じ非数値文字列はpeerである。DESCはバンドを含む比較結果全体を反転する。
+
+この域外値は型破損とは限らない。B14の`#err`はDML対象アプリの型メタを保持しながら、検証に失敗した元入力を意図的に保存するため、NUMBER宣言列へ`"x"`等が正当に存在する。禁止するのは現行のように**比較するペアごとに数値／文字列モードを切り替えること**であり、あらかじめ決めた末尾バンドではない。固定バンドはoptionの未知値バンドと同じ構造で、strict weak orderを保つ。物理kintone NUMBERへの書込みで非有限値・非数値を受理する意味ではない。
+
+typed numberの等価比較では、有限値は数値同値、空セル・各Infinity・`"NaN"` sentinelは同じバンド値どうし、その他の非数値は完全一致文字列どうしを同値とする。範囲比較、ORDER BY、MIN/MAXは同じバンド順を使う。
+
+GREATEST/LEAST だけは一意の元文字列を返す必要があるため、§4.5.3 のコードポイント二次キーを使う。kintone NUMBER との10進精度一致は B9 の課題である。
 
 #### 4.5.6 証明と検証方法
 
 形式的確認に加え、比較 primitive と複合 ORDER BY の両方で性質テストを行う。
 
 - 文字列値: 空、ASCII大小、BMP、補助平面、共通接頭辞、NFC/NFD、孤立サロゲート
-- 数値値: 負数、0/-0、整数、小数、同値異表記、±Infinity。NaN は必ずエラー
+- 数値値: 空セル、負数、0/-0、整数、小数、同値異表記、±Infinity、正規`"NaN"` sentinel、複数のその他非数値文字列
+- 正規`"NaN"` sentinelは全数値より後、その他の非数値はさらに後でコードポイント順。同一域外値はpeer
 - option: 単一値、同 rank、未知値、複数値、保存配列順の入替え
 - 全組で反対称性、全3組で推移律、`cmp(a,a)=0`
 - 同値関係 `cmp(a,b)=0` の推移律
 - 複数キー、ASC/DESC、全入力順列で結果の同値クラスが不変
 - `GREATEST` / `LEAST` は引数の全順列で同じ元文字列を返す
 
-コードポイント比較と、非 NaN の数値比較についてはこの構造で性質を満たす。B26 の受入判定は固定サンプル数本ではなく、上記の直積を property test で通す。
+コードポイント比較と、sentinelを含む拡張数値順についてこの構造で性質を満たす。B26 の受入判定は固定サンプル数本ではなく、上記の直積を property test で通す。
 
 #### 4.5.7 SemVer と課題境界
 
@@ -506,7 +523,17 @@ option: (type=option, canonicalOptionVector)
 
 数値順が要る列は **NUMBER 型にする**か、**式で数値化する**のが正しい対処であることを案内する。
 
-B26 は比較ディスパッチ、文字列順、型メタ伝播、複合比較器の性質を扱う。**B9（厳密10進比較）は同時実装せず、独立した follow-up とする。** B9 は数値の等価・範囲・集約まで試験面を広げ、B26 の文字列変更と同梱すると回帰範囲が過大になる。B26 の完了時点でも「typed number は大精度で REST と不一致」という制限6を残し、全比較が一致したとは表現しない。
+ORDER BY だけでなく、typed string の範囲比較も結果集合が変わる。たとえば `WHERE x > '100'`（`x` は文字列型）では、FULL_SCAN 時の現行値ベース数値判定で除外される `20` / `30` / `99` / `9` が、B26 後はコードポイント順により含まれる。これは件数、集約値、サブクエリ結果、DML 対象候補へ波及するため、単なる表示順変更として告知してはならない。
+
+ただし現行 SIMPLE は文字列型の `>` を kintone REST へ不正に押し下げ、実行時に `GAIA_IQ03` で失敗する。旧数値判定で成功していたのは FULL_SCAN 経路である。v3.0.0 では B32 が型×演算子能力を判定して SELECT を FULL_SCAN 残余評価へ routing し、その後 B26 のコードポイント契約を適用する。「従来のすべての SELECT が数値比較で成功していた」と説明しない。
+
+`GREATEST` / `LEAST` は §4.5.3 の集合モードを維持するため、全引数が数値化可能な例の結果は変えない。この例外を typed string の範囲比較と混同しない。
+
+`#err`のNUMBER宣言列に非数値がある場合も互換性が変わる。v2.15.0のB14では、非数値が1件でも数値MIN/MAXを`NaN`へ汚染し得た。v3.0.0では共有比較規則を使うため、MINは最も前のバンド（数値があれば最小数値、数値がなく`"NaN"`があればsentinel、それもなければ最小の非数値文字列）、MAXは最も後のバンドを返す。`MIN(数値T1)=NaN`というB14のリリース時受入証拠は**型メタ伝播の証拠としては有効だが、v3の集約結果契約ではない**。ORDER BY・範囲比較・MIN/MAXが同じ大小関係を使うためのmajor変更として移行ガイドへ明記する。
+
+B26 は比較ディスパッチ、文字列順、型メタ伝播、複合比較器の性質を扱う。**B9（厳密10進比較）は同時実装せず、独立した follow-up とする。** B26 で分散した比較経路を caller の意味型判定＋共有 leaf へ先に集約すれば、B9 は共有数値 primitive の厳密10進化へ集中できる。逆順では複数経路を厳密化した後に B26 で再統合することになるため、**B26 → B9 は積極的な依存順序**である。B26 の完了時点でも「typed number は大精度で REST と不一致」という制限6を残し、全比較が一致したとは表現しない。
+
+公開リリースは **v3.0.0** とし、B26 / B27 / B30 / B31 / B32 を統合する。B30 だけの v2.18.0 は挟まない。B9 は v3.1.0 候補とする。実装は課題ごとに分割し、B30 を先に修正・回帰試験してよいが、利用者への移行説明は比較意味論、routing、完全性、`KORDER BY` を一つの major として行う。
 
 **影響箇所**: `process.ts:594-604` / `execute.ts:4117` / `process.ts:344,350` / `core/scalarCompare.ts`、および `compareScalarValues` の消費先である HAVING / CASE WHEN / サブテーブル DML / ASSERT（`execute.ts:1071`）。WINDOW は `compareSortKeys` を共有する。型メタ生成・伝播（`formFieldInfo.ts` / `execute.ts`）も変更対象である。
 
@@ -615,7 +642,7 @@ APP4148 (enable: false)  未処理 "0" / 処理中 "1" / 追加確認中 "2" / �
 
 必要なアクセス権は「アプリのレコード**閲覧**権限」または「レコード**追加**権限」。**レコードを読めるユーザーは常に `status.json` を読める**ため、条件付き取得を足しても新たな権限エラー経路は生まれない。
 
-**課題境界:** B26 と B27 は型メタ基盤を共有し、同じ major リリースで完了させるのが妥当だが、欠陥と受入条件が異なるため統合しない。B26 は比較意味論、B27 は計画・押し下げ同値性を所有する。
+**課題境界:** B26 と B27 は型メタ基盤を共有し、同じ major リリースで完了させるのが妥当だが、欠陥と受入条件が異なるため統合しない。B26 は比較意味論、B27 は ORDER BY の計画・押し下げ同値性を所有する。B32 は WHERE の型×演算子 REST 能力と SIMPLE / FULL_SCAN routing を所有し、B27 / B31 の「WHERE 全体を完全押し下げできるか」という判定へ同じ能力表を提供する。
 
 ## 5. 文字列リテラルと識別子
 
@@ -787,6 +814,9 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | ~~B25~~ | `ORDER BY` と `MIN`/`MAX` の比較不整合 | **B26 へ統合**（同根） |
 | **B26** | 型付き比較・文字列順・型メタ・ソート比較器を4面で統一（旧 B25 を統合） | **§4.5 で R4 規則を決定。B9 は同時実装しない** |
 | **B27** | ORDER BY の押し下げ同値性 | §4.6.3。B26 と基盤・リリースを共有するが別課題 |
+| [B30](ksql_order_by_truncate_completeness_issue.md) | `ORDER BY` と取得打ち切りが誤った top-N を返す | `ORDER BY` を含む SELECT は完全候補取得前の `truncate` を禁止。v3.0.0へ統合 |
+| **B31** | kintone 固有順を明示する `KORDER BY` | [local ORDER BY draft](ksql_local_order_by_draft.md)。B27 の schema-aware planner を共有するが、canonical 同値性とは別の native 能力 allowlist を使う |
+| [B32](ksql_where_operator_pushdown_capability_issue.md) | WHERE の型×演算子を見ず実行不能な REST query を計画する | SELECT はローカル契約があれば FULL_SCAN 残余評価、DML は事前エラー。B27/B31へ能力表を共有 |
 | **未起票** | `LIKE '_'` の単位不整合 | §3.5 |
 | [B9](ksql_exact_decimal_compare_issue.md) | 最大30桁の厳密10進比較 | 独立 follow-up。完了までは typed number の大精度差を制限6として残す |
 | [B29](ksql_number_precision_semantics_issue.md) | kintone数値精度・丸め設定との整合 | `decimalPlaces` / `roundingMode`による入力・算術結果の検証と量子化。B9の比較から分離 |
@@ -807,11 +837,11 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 数値らしい text（`9`/`10`/`1a`） | **解消**（§4.2.1）。**kintone は数値と解釈しない** |
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
-| **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **解消**。**29 型を測定し公式リストと 100% 一致**（§9.2.1）。受理 15 / 拒否 12 / LOOKUP は基底型。非自明: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理**・**`LOOKUP` は独立型でない** |
+| **§9.2.1 サーバ ORDER BY の受理/拒否（B27/B31）** | **native 能力の初期 allowlist は解消**。公式ヘルプの受理型一覧と実測が一致する。B31 は `$id`＋公式受理15型を allowlist とし、未知型を拒否する。B27 の canonical top-N allowlist は別物で、初期版は `$id` のみ |
 | **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消**。RECORD_NUMBERはアプリコードなしで実測一致したが`APPCODE-1`形式待ち。SINGLE_LINE_TEXTは値順が公式契約と一致するが空値/DESC待ち。DROP_DOWNは定義順・空値が実測一致するが未知/削除済みoption待ち。NUMBERは通常値が一致するが最大30桁を扱えないためB9完了までnon-equivalent。CREATOR/MODIFIERはcode順とnon-equivalent。**R8 追加**: LINK（URL）・DATE・DATETIME・TIME は実測一致（空値=最小・tie=`$id`昇順）で `equivalent` 候補／**LINK（TEL）は判別例が不十分で `unknown`**（`"03-"<"043-"` は数値解釈でも同じ結論）／**STATUS はサーバがプロセス定義順だがローカルが `states.*.index` を捨てており再現不能＝実装前提あり**／**RADIO は `A`/`B`/`C` で判別不能**／**CREATED_TIME・UPDATED_TIME は受理のみ確認で並び順は未測定** |
 | §9.2.1 `CREATOR`/`MODIFIER` の並び順 | **解消（公式）**。**ユーザーID 順**＝code でも name でもない。サーバは `supported` だが、現行のレコード取得と code 順ローカル契約では `non_equivalent` → §7 制限 8 |
 | §9.2.1 各受理型の方向・tie・空値位置 | **一部**。明示`$id asc`が第1キーの方向と独立に効くことを確認。残り型は非同値群反転・tie群不変・空値位置を測る |
-| §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし）。**`FILE` は測定済み＝拒否** |
+| §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | raw REST の一部は未測定。ただし B31 native 能力は公式 allowlist で fail-closed に確定済み。`RICH_TEXT` / `$revision` / SUBTABLE 内 / 未知型は拒否、`CALC` は format にかかわらず公式受理型。**`FILE` は実測済み＝拒否** |
 | §9.1 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | **未**（非 Blocking） |
 | §9.2 DROP_DOWN / RADIO の rank | **一部**。DROP_DOWNは語彙順と逆の既存設定で定義順・空値先頭を確認。RADIOは未 |
 | §9.3 `LIKE` と `KLIKE` の差 | **未**（**出荷 blocker にしない**・R4 判断） |
@@ -856,7 +886,7 @@ raw REST の `order by <field> asc/desc, $id asc limit 500` を直接使い、EX
 | RECORD_NUMBER | `レコード番号` | **✅ 受理** | |
 | SINGLE_LINE_TEXT | `タイトル` | **✅ 受理** | |
 | NUMBER | `金額` | **✅ 受理** | |
-| CALC | `計算` | **✅ 受理** | format 別は未測定 |
+| CALC | `計算` | **✅ 受理** | raw REST の format 別は未測定。ただし公式は format 条件なしで `計算` を受理型に列挙 |
 | DATE | `日付` | **✅ 受理** | |
 | DATETIME | `日時` | **✅ 受理** | |
 | TIME | `時刻` | **✅ 受理** | |
@@ -885,7 +915,7 @@ raw REST の `order by <field> asc/desc, $id asc limit 500` を直接使い、EX
 
 **拒否メッセージは全型で同一形式**: `GAIA_IS02:「<ラベル>」フィールドはソート条件に使用できません。`
 
-**未測定**: `RICH_TEXT`・`FILE`・`$revision`・SUBTABLE 内フィールド・CALC の format 別（検証アプリに該当フィールドが無い、または要追加）。
+**raw REST 未測定**: `RICH_TEXT`・`$revision`・SUBTABLE 内フィールド・CALC の format 別（検証アプリに該当フィールドが無い、または要追加）。`FILE` は実測済みで拒否された。raw 未測定は native 能力を unknown にする理由ではない。公式受理一覧にない `RICH_TEXT` / `$revision` / SUBTABLE 内フィールドは B31 で拒否し、公式が format 条件なしで列挙する `CALC` は受理する。将来追加型も拒否する。
 
 #### 公式ドキュメントとの突き合わせ（**実測 15/15 が一致**）
 
@@ -895,7 +925,7 @@ raw REST の `order by <field> asc/desc, $id asc limit 500` を直接使い、EX
 >
 > **非対応**: 関連レコード一覧フィールドおよびテーブルにしたフィールドはソートできません
 
-**§9.2.1 の実測（受理 15 / 拒否 10）は公式リストと完全に一致する。**
+**実測した型の受理/拒否は公式リストと一致する。** B31 の native 能力判定はこの公式列挙を明示 allowlist として使う。一方、B27 の canonical top-N 押し下げには「REST が受理する」だけでなく、値順・空値・tie を含む窓全体が kSQL comparator と同値である証明が要る。したがって B31 の広い native allowlist を B27 へ流用しない。
 
 - **`文字列（複数行）` が対応リストに無い**ことが、`MULTI_LINE_TEXT` 拒否の理由。**`リンク` は対応リストにある**＝「テキスト系は受理」ではなく**公式が型ごとに列挙している**
 - `MULTI_SELECT` / `CHECK_BOX` / `USER_SELECT` / `ORGANIZATION_SELECT` / `GROUP_SELECT` / `STATUS_ASSIGNEE` / `CATEGORY` はいずれも**対応リストに無い**＝拒否と整合
@@ -908,12 +938,13 @@ raw REST の `order by <field> asc/desc, $id asc limit 500` を直接使い、EX
 APP74 の DESCRIBE:
   顧客番号（ルックアップ）→ タイプ: NUMBER
   顧客名  （ルックアップ）→ タイプ: SINGLE_LINE_TEXT
+  URL等   （ルックアップ）→ タイプ: LINK
 
 ORDER BY 顧客番号 ASC LIMIT 1 → ✅ 受理
 ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 ```
 
-> **`LOOKUP` という型は kSQL から見えない。基底型の規則がそのまま適用される。B26/B27 で `LOOKUP` の特別扱いは不要。**
+> **`LOOKUP` という型は kSQL から見えない。NUMBER / SINGLE_LINE_TEXT / LINK など、解決済み基底型の規則がそのまま適用される。B26/B27/B31 で `LOOKUP` の特別扱いは不要。**
 
 （公式リストが `ルックアップ` を挙げているのは、フォーム設定上のフィールド種別として列挙しているため。）
 
