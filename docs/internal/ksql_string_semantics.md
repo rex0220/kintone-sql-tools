@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - **位置づけ: 本書が文字列の扱いの「正」（single source of truth）。** 個別の仕様・課題文書は**事実を書き写さず本書を参照する**。
-- ステータス: **R7（R5 の公式契約に加え、B27 の tie-break を確定＝SIMPLE 押し下げ時に `$id asc` を明示して FULL_SCAN の基準へ合わせる。実測で確認済み。B9 のスコープは縮小不可）。**
+- ステータス: **R8（B27 の tie-break 契約を確定。SIMPLE は利用者キー末尾へ `$id asc` を明示して FULL_SCAN の安定順へ合わせ、peer 比較器とは分離する。B9 は最大30桁の厳密比較、精度依存の検証・丸めは B29 へ分離）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -572,6 +572,9 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
 
 - 意味型（string / number / option / complex）、ローカル ORDER BY 契約の有無、サーバが ORDER BY を受理するか、サーバ順とローカル順が同値かを分離する。サーバ受理は `supported / rejected / unknown`、押し下げ同値性は `equivalent / non_equivalent / unknown` とする。**ローカル契約あり + supported + equivalent だけを押し下げる**
 - `equivalent` は公式契約、または raw REST の ASC/DESC、空値、同値・境界値を測って kSQL comparator と一致した型の allowlist とする。ローカル契約がある型でも `rejected / non_equivalent / unknown` は FULL_SCAN。新しいフィールド型を楽観的に SIMPLE にしない
+- SIMPLE に押し下げるトップレベル `ORDER BY` は、利用者指定キーの末尾へ **`$id asc`** を補う（利用者が既に `$id` をキーに含める場合は重複させない）。FULL_SCAN の `$id asc` 取得順と安定ソートに合わせ、同値を含む `LIMIT` / `OFFSET` でも同じ行を返す
+- 値比較器は利用者指定キーの同値関係だけを返す。**`$id` を比較器へ混ぜない。** 同じ比較器を使う `RANK` / `DENSE_RANK` の peer 判定と、トップレベル結果列の canonical tie-break を分離する
+- ASC / DESC の同値性は「結果列全体が逆順」では判定しない。**非同値グループの順は反転し、同値グループ内の `$id asc` は方向にかかわらず不変**であることを確認する
 - ローカル契約が未定義の複合型は FULL_SCAN にせず、planning 時に `ArgumentError`。配列・オブジェクトを `String(...)` / JSON にして暗黙に並べない
 - `resolveSelectMode` の構文判定を第一段階、schema 取得後の能力判定を第二段階とする。最終 plan は schema-aware にし、**EXPLAIN と実行が同じ planner 結果を使う**
 - FULL_SCAN では base query から ORDER BY を外し、全候補取得後にローカル sort、最後に LIMIT を適用する。取得上限・打切りは既存の明示的エラー/警告契約に従い、部分集合を top-N として黙って返さない
@@ -750,7 +753,9 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | **B26** | 型付き比較・文字列順・型メタ・ソート比較器を4面で統一（旧 B25 を統合） | **§4.5 で R4 規則を決定。B9 は同時実装しない** |
 | **B27** | ORDER BY の押し下げ同値性 | §4.6.3。B26 と基盤・リリースを共有するが別課題 |
 | **未起票** | `LIKE '_'` の単位不整合 | §3.5 |
-| **B9** | 厳密10進比較 | 独立 follow-up。完了までは typed number の大精度差を制限6として残す |
+| [B9](ksql_exact_decimal_compare_issue.md) | 最大30桁の厳密10進比較 | 独立 follow-up。完了までは typed number の大精度差を制限6として残す |
+| [B29](ksql_number_precision_semantics_issue.md) | kintone数値精度・丸め設定との整合 | `decimalPlaces` / `roundingMode`による入力・算術結果の検証と量子化。B9の比較から分離 |
+| [B28](ksql_dml_unary_sign_issue.md) | DML値の単項符号 | INSERT/UPSERT VALUESとUPDATE SETの受理非対称。一時テーブル対象DMLは非対応のまま |
 
 ---
 
@@ -768,12 +773,12 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
 | **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **解消**。**29 型を測定し公式リストと 100% 一致**（§9.2.1）。受理 15 / 拒否 12 / LOOKUP は基底型。非自明: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理**・**`LOOKUP` は独立型でない** |
-| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消（公式契約）**。`SINGLE_LINE_TEXT` は「UTF-8 文字コード順」＝同値と論証可。`CREATOR`/`MODIFIER` は現行 code 順と non-equivalent。**LINK・数値・日付・選択肢は一覧/RESTの順序契約を未確認** |
+| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消**。RECORD_NUMBERはアプリコードなしで実測一致したが`APPCODE-1`形式待ち。SINGLE_LINE_TEXTは値順が公式契約と一致するが空値/DESC待ち。DROP_DOWNは定義順・空値が実測一致するが未知/削除済みoption待ち。NUMBERは通常値が一致するが最大30桁を扱えないためB9完了までnon-equivalent。CREATOR/MODIFIERはcode順とnon-equivalent。**LINK・日付時刻・RADIO・STATUSは未確認** |
 | §9.2.1 `CREATOR`/`MODIFIER` の並び順 | **解消（公式）**。**ユーザーID 順**＝code でも name でもない。サーバは `supported` だが、現行のレコード取得と code 順ローカル契約では `non_equivalent` → §7 制限 8 |
-| §9.2.1 各受理型の ASC/DESC 逆順・空値位置 | **未**（`更新者` と `タイトル` で ASC/DESC が逆になることのみ確認） |
+| §9.2.1 各受理型の方向・tie・空値位置 | **一部**。明示`$id asc`が第1キーの方向と独立に効くことを確認。残り型は非同値群反転・tie群不変・空値位置を測る |
 | §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし）。**`FILE` は測定済み＝拒否** |
 | §9.1 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | **未**（非 Blocking） |
-| §9.2 DROP_DOWN / RADIO の rank | **一部**。空値が先頭であることは確認（§9.2.1）。定義順との突き合わせは未 |
+| §9.2 DROP_DOWN / RADIO の rank | **一部**。DROP_DOWNは語彙順と逆の既存設定で定義順・空値先頭を確認。RADIOは未 |
 | §9.3 `LIKE` と `KLIKE` の差 | **未**（**出荷 blocker にしない**・R4 判断） |
 | §9.4 Chromium / Firefox の smoke | **未**（**Claude は実行環境を持たない**。B20 は出荷しないため正規表現の smoke は不要） |
 
@@ -796,7 +801,7 @@ SINGLE_LINE_TEXT に次をバラバラの `$id` 順で保存し、raw REST の `
 | ASCII case | `A`, `B`, `a`, `b` | ICU/大小文字畳み込みとの区別 |
 | 数値らしいtext | `2`, `10`, `1a`, `9` | 数値自動判定の有無 |
 
-ASC と DESC が厳密に逆順になること、LIMIT 500/501/なしで SIMPLE/JS の主体が想定どおり分かれることも確認する。
+ASC / DESC では**非同値グループだけが反転し、同値グループ内の `$id asc` は不変**であることを確認する。LIMIT 500/501/なしで SIMPLE/JS の主体が想定どおり分かれることも確認する。
 
 ### 9.2 optionOrders
 
@@ -805,7 +810,7 @@ ASC と DESC が厳密に逆順になること、LIMIT 500/501/なしで SIMPLE/
 
 ### 9.2.1 B27 のサーバ ORDER BY 能力
 
-raw REST の `order by <field> asc/desc limit 500` を直接使い、EXPLAIN を実行の代わりにしない。
+raw REST の `order by <field> asc/desc, $id asc limit 500` を直接使い、EXPLAIN を実行の代わりにしない。暗黙tie-breakは型ごとに再測定せず、明示したcanonical tie-break込みの結果列をFULL_SCANと比較する。
 
 #### 実測結果（Claude・2026-07-17・APP4221 / APP4148）
 
@@ -951,11 +956,81 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 | サーバ受理 + 押し下げ同値性 | 型 |
 |---|---|
 | `rejected`（`GAIA_IS02`・**12 型**） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE / **FILE** / **GROUP** |
-| `supported` + **`equivalent` 候補**（値同士の順序は公式契約で一致） | **SINGLE_LINE_TEXT**（未確定軸: 空値位置・DESC） |
-| `supported` + **`non_equivalent`** | **CREATOR** / **MODIFIER** — サーバはユーザーID順、現行ローカル契約はcode順（§7 制限8） |
-| `supported` + **`unknown`**（一覧/RESTの順序契約を未確認） | **LINK** / NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS（**LOOKUP は基底型に含まれる**） |
+| `supported` + **`equivalent` 候補** | **RECORD_NUMBER**（アプリコード付き`APPCODE-1`待ち）/ **SINGLE_LINE_TEXT**（空値・DESC待ち）/ **DROP_DOWN**（未知・削除済みoption待ち） |
+| `supported` + **`non_equivalent`** | **CREATOR** / **MODIFIER** — サーバはユーザーID順、現行ローカル契約はcode順（§7 制限8）/ **NUMBER** — 通常値は一致するが最大30桁を現行`Number`比較で区別できない（B9） |
+| `supported` + **`unknown`**（一覧/RESTの順序契約を未確認） | **LINK** / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RADIO_BUTTON / STATUS（**LOOKUP は基底型に含まれる**） |
 
-> **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、**サーバ順が R4 comparator と同値**と確認できた型だけである（§4.6.3）。SINGLE_LINE_TEXT も空値位置と DESC を通すまでは候補であり、**確定した allowlist は現時点で空**である。
+> **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、値順・空値・方向・canonical tieを含めてローカル契約と一致した型だけである。現時点の確定allowlistは空。候補を残存軸の検証前に追加しない。
+
+#### R8 実測: 残り型 × 明示 `$id asc`（Claude・2026-07-17）
+
+**方法**: `ORDER BY <field> ASC, $id ASC LIMIT 500`（≤500 ＝ 単発 GET ＝ kintone が並べる）。R7 で確定した契約どおり末尾に `$id asc` を明示した。
+
+##### 結果
+
+| 型 | 並び | 空値 | 同値の tie | 判定 |
+|---|---|---|---|---|
+| **SINGLE_LINE_TEXT** | **コードポイント順** | （データなし） | （同値なし） | **`equivalent` 候補**（公式契約とも一致） |
+| **LINK（URL）** | **コードポイント順** | （データなし） | （同値なし） | **`equivalent` 候補** |
+| **LINK（TEL）** | **コードポイント順**（数値順ではない） | （データなし） | **`$id` 昇順** ✓ | **`equivalent` 候補** |
+| **DATE** | 日付順（＝正規化形のコードポイント順） | **最小**（ASC 先頭） | **`$id` 昇順** ✓ | **`equivalent` 候補** |
+| **DATETIME** | 時系列順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | **`equivalent` 候補** |
+| **TIME** | 時刻順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | **`equivalent` 候補** |
+| **STATUS** | **プロセス定義順**（コードポイント順ではない） | （データなし） | **`$id` 昇順** ✓ | **`equivalent` 候補**（プロセス定義順を再現できる限り） |
+| **RADIO_BUTTON** | **判別不能**（`A`/`B`/`C` は定義順とコードポイント順が一致） | （データなし） | **`$id` 昇順** ✓ | **`unknown`** |
+
+##### 根拠（コードポイント順であることの決定的な例）
+
+```
+SINGLE_LINE_TEXT ASC: A1, A2, A3, A4, "T -1", "T 0", "T 1", "T NULL"
+  'A'(0x41) < 'T'(0x54)
+  "T " の後: '-'(0x2D) < '0'(0x30) < '1'(0x31) < 'N'(0x4E)   ← 数値順でも辞書順でもない
+
+LINK(URL) ASC: http://… , https://kikkawa… , https://shinomura… , https://www.kin… ,
+               https://www.mukaigawa… , https://www.xxx.xxx , https://www.xxx.xxx.com ,
+               https://www.xxxx.com
+  "http://" < "https://"                    '/'(0x2F) < 's'(0x73)
+  "https://www.xxx.xxx" < "…xxx.xxx.com"    共通接頭辞は短い方が先
+  "…www.xxx.xxx.com" < "…www.xxxx.com"      '.'(0x2E) < 'x'(0x78)
+
+LINK(TEL) ASC: 03-…, 043-…, 045-…, 048-…, 077-…
+  "03-" < "043"    '3'(0x33) < '4'(0x34)   ← 数値順なら 3 < 43 で同じだが、
+                                              コードポイント順であることは '-'(0x2D) の位置で分かる
+```
+
+##### ★ `STATUS` はプロセス定義順（決定的）
+
+```
+STATUS ASC: 未処理, 処理中, 完了, 保留
+符号位置  : 保 U+4FDD < 処 U+51E6 < 完 U+5B8C < 未 U+672A
+
+→ コードポイント順なら 保留 が先頭。実際は 未処理（最大の符号位置）が先頭。
+→ プロセス管理の定義順（未処理 → 処理中 → 完了、保留は分岐）で並んでいる。
+```
+
+**`DROP_DOWN`（R6 の `業種`）と同じ構造。** 選択系・プロセス系は**定義順が第一キー**であり、`optionOrders` / プロセス設定の再現が `equivalent` の条件になる。
+
+##### ★ 明示 `$id asc` が全型で効く（R7 契約の裏付け）
+
+```
+DATE     ''(1,2,3,4) | 2026-07-08(6,7)
+DATETIME ''(1,2,3,4) | 2026-07-20T09:00:00Z(6,7)
+TIME     ''(1,2,3,4) | 16:00(6,7,8)
+LINK TEL 03-(1,4,7) | 045-(2,8)
+RADIO    A(1,2,3,4,5) | C(6,7)
+STATUS   未処理(1,5,6) | 処理中(4,7) | 完了(2,8)
+```
+
+**すべての同値グループが `$id` 昇順。** R7 の契約（SIMPLE 押し下げ時に `$id asc` を明示して FULL_SCAN の基準へ合わせる）は**全型で成立する**。
+
+##### 未測定
+
+| 項目 | 理由 |
+|---|---|
+| `SINGLE_LINE_TEXT` / `LINK` の**空値位置** | 検証アプリに空値のレコードが無い。**`$id asc` 明示時の tie は他型で確認済み**のため優先度は低い |
+| `RADIO_BUTTON` の定義順 | `A`/`B`/`C` では判別不能。**語彙順と逆の定義順**が要る（フォーム設定の変更＝kintone MCP または手動） |
+| **アプリコード付き `RECORD_NUMBER`**（`APPCODE-1` 形式） | 検証アプリにアプリコードが設定されていない（`レコード番号` は `1`〜`8` の素の数値）。**アプリコードがあると `RECORD_NUMBER` は文字列になる可能性があり、数値順か文字列順かで挙動が変わる。要検証** |
+| 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | 非 Blocking |
 
 #### R7 実測: 明示 `$id` 第2キー（Claude・2026-07-17・**B27 の方針確定**）
 
@@ -997,6 +1072,11 @@ order by 金額 desc, $id desc → 8, [7, 6], 5, 4, 2, 3, 1
 
 - **非同値グループの順は反転する**
 - **同値グループ内の canonical tie 順は ASC/DESC で変わらない**（明示第2キーを付けた場合はその第2キーの向きに従う）
+- SIMPLEの単一/複数キー、ASC/DESC、LIMIT/OFFSETで、生成query末尾が`$id asc`になる
+- 利用者キーに既に`$id`があれば重複追加しない。そのキー方向を尊重する
+- 同じデータをSIMPLEとFULL_SCANで実行し、同値群を含む結果行とLIMIT窓が一致する
+- `RANK` / `DENSE_RANK`のpeer比較には`$id`が入らず、同値行が同順位のまま。`ROW_NUMBER`だけがcanonical安定順で連番になる
+- EXPLAIN表示と実行が同じ補完済みORDER BY計画を使う
 
 ##### この確定により、残り型の実測が簡単になる
 
@@ -1025,20 +1105,7 @@ order by 金額 desc, $id desc → 8, [7, 6], 5, 4, 2, 3, 1
 → JS の Number では区別できない（両方 9007199254740992 になる）
 ```
 
-##### 桁数は**アプリ設定**（フィールド設定ではない）— 最大 30 桁・丸めかたも規定（R7 で追加）
-
-[アプリの一般設定を取得する](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/get-general-settings/):
-
-
-
-**したがって:**
-
-- **「 は 12 桁上限」は  の  が 12 だっただけ**であり、kintone の制限ではない
-- **アプリ単位で最大 30 桁まで設定できる。**  の安全整数は約 15.9 桁（2^53）なので、**30 桁は大きく超える**
-- ** まで規定されている。** （銀行丸め）は JS の  では再現できない
-- **設定の取得に特別な権限は不要**（レコード閲覧権限で足りる）→ **B9 は設定を読んで挙動を決められる**
-
-##### 桁数は**アプリ設定**（フィールド設定ではない）— 最大 30 桁・丸めかたも規定（R7 で追加）
+##### 桁数は**アプリ設定**（フィールド設定ではない）— 最大30桁・丸めかたも規定（R8で整理）
 
 [アプリの一般設定を取得する](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/get-general-settings/):
 
@@ -1056,9 +1123,9 @@ GET /k/v1/app/settings.json?app=<id>
 - **「`金額` は 12 桁上限」は `APP4221` の `numberPrecision.digits` が 12 だっただけ**であり、kintone の制限ではない。**またフィールド 1 つの観測を一般化していた**
 - **アプリ単位で最大 30 桁まで設定できる。** `Number` の安全整数は約 15.9 桁（2^53）なので **30 桁は大きく超える**
 - **`roundingMode` まで規定されている。** `HALF_EVEN`（銀行丸め）は `Math.round` では再現できない
-- **設定の取得に特別な権限は不要**（レコード閲覧権限で足りる）→ **B9 は設定を読んで挙動を決められる**
+- 運用環境の設定取得には**レコード閲覧権限または追加権限**が必要。通常のkSQL実行資格と重なるが、無権限ではない
 
-> **B9 は縮小できないどころか、想定より広い。** `ORDER BY` の同値性だけでなく、**`decimalPlaces` と `roundingMode` を含む 10 進の意味論全体**が対象になる。
+> **B9 は縮小できない。** 最大30桁の既存値を厳密比較する。一方、`decimalPlaces` と `roundingMode` は比較順ではなく入力・算術結果の量子化規則なので、**B29へ分離する**。B9へ10進算術全体を抱え込ませない。
 
 **未測定**: `9007199254740992` / `9007199254740993` の保存可否。**`numberPrecision.digits` を 16 以上に設定したアプリ**が要る（kSQL に app settings API は無いため Claude は設定変更できない）。**検証用アプリの設定変更をお願いしたい。**
 
@@ -1073,13 +1140,13 @@ INSERT … VALUES ('…','…','…','999999999999999'), (…,'9999999999999999'
 実 INSERT（17 桁） → CB_VA01「有効桁数を超えています」
 ```
 
-**Tier-0 は「API 拒否の予測」ではない**という B12-A の設計どおりではあるが、**`ON ERROR SKIP` が「合格」と判定した行が kintone で拒否される**ことを意味する。**B12-B の fail-fast 契約（API 書き込みエラーは従来どおり fail-fast）で救われるが、記録しておく。**
+**Tier-0 は「API 拒否の予測」ではない**という B12-A の設計どおりではあるが、**`ON ERROR SKIP` が「合格」と判定した行が kintone で拒否される**ことを意味する。B12-B のfail-fast契約により部分継続はしない。この差を埋める場合は比較のB9ではなく、設定依存検証を所有する **B29** で扱う。
 
 ##### 副次的な発見: `ksql_mutate` の `continueOnError` は効かない
 
 DML バッチは**常に fail-fast**（`ksql_mutate` の仕様どおり）。`continueOnError: true` を渡しても後続文は `skipped / fail-fast` になる。**読み取り（`ksql_query`）では効く。**
 
-#### R6 実測: 同値性の判定（Claude・2026-07-17）
+#### R6 実測: 同値性の判定（Claude・2026-07-17・**R7で設計訂正済みの履歴**）
 
 ##### ★ 発見 1: **同値の tie-break は `$id` 降順で、`DESC` でも反転しない**
 
@@ -1103,7 +1170,7 @@ DML バッチは**常に fail-fast**（`ksql_mutate` の仕様どおり）。`co
 
 kSQL の FULL_SCAN は `order by $id asc` を注入して取得し（`selectToKintone.ts:130`）安定ソートするため、**同値は `$id` 昇順**になる。**kintone は `$id` 降順**。→ **同値がある限り SIMPLE と FULL_SCAN は一致しない。**
 
-**B27 の設計に反映が要る**: ローカル comparator の最終 tie-break を **`$id` 降順**にするか、押し下げ時に `order by <field> <dir>, $id desc` を明示的に付ける。
+**当時の二案はいずれも採用しない。** comparatorへ`$id`を足すとRANK/DENSE_RANKのpeerを壊し、`$id desc`押し下げはFULL_SCANの既存基準と逆になる。R7で **SIMPLE末尾へ`$id asc`を明示する**契約に確定した（上記）。
 
 ##### ★ 発見 2: **`DROP_DOWN` は選択肢の定義順で並ぶ**（値のコードポイント順ではない）
 
@@ -1122,15 +1189,15 @@ kSQL の FULL_SCAN は `order by $id asc` を注入して取得し（`selectToKi
 
 | 型 | 受理 | 並び | 空値 | ASC/DESC | 同値性 |
 |---|---|---|---|---|---|
-| **RECORD_NUMBER** | supported | **数値順**（`8 < 59`。文字列順なら `"59" < "8"`） | — | 厳密に逆順（同値なし） | **`equivalent`**（tie-break を除く） |
-| **NUMBER** | supported | **数値順**（`2 < 10`・負数・小数とも） | **最小**（ASC 先頭 / DESC 末尾）＝ **v2.2.0 の −∞ 規則と一致** | 非同値部分は逆順・**同値は不変** | **`equivalent`**（tie-break を除く） |
-| **DROP_DOWN** | supported | **選択肢の定義順** | **最小**（ASC 先頭） | 群は逆順・**同値は不変** | **`equivalent`**（`optionOrders` が定義順を再現できる限り。tie-break を除く） |
+| **RECORD_NUMBER** | supported | **数値順**（`8 < 59`。文字列順なら `"59" < "8"`） | — | 測定範囲では反転 | **候補**。アプリコード付き`APPCODE-1`形式が未測定 |
+| **NUMBER** | supported | **数値順**（`2 < 10`・負数・小数とも） | **最小**（ASC 先頭 / DESC 末尾）＝ **v2.2.0 の −∞ 規則と一致** | 非同値部分は逆順・**同値は不変** | 通常値は一致。ただし最大30桁は現行`Number`で区別できず、**B9完了までnon-equivalent** |
+| **DROP_DOWN** | supported | **選択肢の定義順** | **最小**（ASC 先頭） | 群は逆順・**同値は不変** | **候補**。未知・削除済みoptionが未測定 |
 
 ##### 測定できなかったもの
 
 | 項目 | 理由 |
 |---|---|
-| **16 桁超の NUMBER** | **kintone が受け付けない**。`CB_VA01:「有効桁数を超えています」`（`12345678901234567` で発生）→ **B9 の「16 桁級」は kintone へ保存できない値であり、`ORDER BY` の同値性の論点にならない可能性がある。B9 のスコープを要再検討** |
+| **16桁境界のNUMBER** | R6の測定は12桁設定のフィールドへ17桁を入れただけで、一般化不能。公式上限はアプリ設定で30桁。B9は縮小しない |
 | `DROP_DOWN` / `RADIO_BUTTON` の「語彙順と逆になる設定順」 | フォーム定義の変更が要る（kSQL に form API は無い）。**`業種` が偶然それを満たしていた**ため定義順であることは確認できた |
 | `STATUS` の「表示文字列順と逆になるプロセス設定順」 | 同上（プロセス管理設定の変更が要る） |
 
@@ -1145,12 +1212,12 @@ INSERT INTO APP4221 (…, 金額) VALUES (…, -5)
 
 #### 残る実測（Blocking）
 
-- 各受理型で **ASC / DESC が厳密に逆順**か
+- 各受理型で **非同値グループがASC/DESCで反転し、同値グループ内の`$id asc`が不変**か
 - 各受理型で **空値の位置**（先頭 / 末尾）
 - 各受理型で **R4 comparator と同値**か（`$id` を second key にして tie を固定し、全順列で確認）
 - `RICH_TEXT` / `FILE` / `$revision` / SUBTABLE 内フィールド / CALC の format 別
 
-**残り（非 Blocking・取る価値あり）**: `𠮟` vs `𩸽`（補助平面どうし）・結合文字の連続・文字列 ASC/DESC の厳密な逆順。
+**残り（非 Blocking・取る価値あり）**: `𠮟` vs `𩸽`（補助平面どうし）・結合文字の連続・文字列ASC/DESCでの非同値群反転とtie群不変。
 
 **出荷 blocker にしない**（R4 判断）: `LIKE`/`KLIKE` の差・ブラウザ smoke。B20 は出荷しないため正規表現のブラウザ smoke も不要。
 

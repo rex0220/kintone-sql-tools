@@ -38,15 +38,16 @@
 | B23 | `LENGTH_CHAR`（コードポイント単位の文字数）を追加 | 改善 | 📝 **R4 同期**。コードポイント計数を別名で追加し、戻り意味型は numeric。`LENGTH - LENGTH_CHAR` は有効なサロゲートペア数。`LENGTH`・kintone計数の事実は横断仕様 §2を参照 | 機能 | 中 | [spec](internal/ksql_length_char_spec.md) |
 | B24 | `TRANSLATE(x, from, to)`（1 対 1 の文字写像）を追加 | 改善 | 📝 **R4 同期**。実需の40字表ではコードユニット実装が25字を誤変換するため、コードポイント列で1対1写像する。長さ不一致はエラー、重複は先頭優先、戻り意味型は string。一般則は横断仕様 原則3–4を参照 | 機能 | 中 | [spec](internal/ksql_translate_spec.md) |
 | B26 | **型付き比較・文字列順・型メタ・ソート比較器を4面で統一する**（旧 B25 を統合） | **バグ / 言語意味論** | 📝 **R4 設計決定**（横断仕様 §4.5）。既定文字列順はコードポイント、通常テキストは typed string、型不明は文字列、値ベースのペア判定を廃止。`GREATEST` は集合モードを維持してコードポイント tie-break。ORDER BY は型固定タプルの strict weak order とする。MULTI_SELECT/CHECK_BOX は kintone がソートを拒否するため、canonical option vector による kSQL 独自契約。**B9 は同時実装せず制限を残す**。SemVer=**major** | **正しさ** | **高** | [semantics §4](internal/ksql_string_semantics.md) |
-| B27 | **ORDER BY の押し下げ同値性を型メタで判定する** | **バグ** | 📝 R5設計（横断仕様 §4.6.3・実測/公式）。意味型、ローカル順、サーバ受理 `supported/rejected/unknown`、押し下げ同値性 `equivalent/non_equivalent/unknown` を分離する。**ローカル契約あり + supported + equivalent だけ allowlist で押し下げる**。CREATOR/MODIFIER は supported だがユーザーID順のため、現行code順とは non_equivalent。schema-aware planner を EXPLAIN/実行で共有する。B26 と基盤・major リリースを共有するが別課題 | **正しさ** | **高** | [semantics §4.6.3](internal/ksql_string_semantics.md) |
-| B28 | **DML の単項符号（負数リテラル）の受理範囲が経路ごとに違う** | **バグ**（一貫性） | 📝 課題 R1（未起票文書）。**`INSERT … VALUES (…, -5)` が `ParseError`**（`INSERT の値には文字列・数値・配列リテラル・CASE WHEN が必要です`）。`'-5'`（文字列）なら通る。**B15（`IN` の負数リテラル・v2.14.1 でリリース済み）と同型の未対応**だが、B15 へは戻さず別課題とする。**横断で確認すること**＝`INSERT VALUES` / `UPSERT` / `UPDATE SET` / 一時テーブル DML の単項 `-`/`+` の受理範囲。受理範囲の拡大のみなら patch 相当 | **正しさ** | 低 | （文書未作成） |
+| B27 | **ORDER BY の押し下げ同値性を型メタで判定する** | **バグ** | 📝 **R7契約確定**（横断仕様 §4.6.3 / §9.2.1）。サーバ受理と押し下げ同値性を分離し、`supported + equivalent` だけallowlistで押し下げる。トップレベルのSIMPLEは利用者キー末尾へ **`$id asc`** を補い、FULL_SCANの安定入力順と一致させる。値比較器へ`$id`を混ぜずRANK/DENSE_RANKのpeer判定を維持。非同値群はASC/DESCで反転、同値群内のcanonical tie順は不変。CREATOR/MODIFIERはsupported + non_equivalent | **正しさ** | **高** | [semantics §4.6.3](internal/ksql_string_semantics.md) |
+| B28 | **DML の単項符号（負数・正数リテラル）の受理範囲が経路ごとに違う** | **バグ**（一貫性） | 📝 課題R1。INSERT/UPSERT VALUESは`-5`/`+5`を拒否、UPDATE SETは`-5`のみ受理。親・サブテーブル・SELECT-based DMLを横断し、VALUESには符号付き数値だけを追加する。一時テーブル対象DMLは元から非対応なので解禁しない | **正しさ** | 低 | [issue](internal/ksql_dml_unary_sign_issue.md) |
+| B29 | **kintoneの数値精度・丸め設定とDML/Tier-0を整合させる** | **バグ / 言語意味論** | 📝 課題R1。`numberPrecision`（最大30桁・小数10桁・HALF_EVEN/UP/DOWN）はB9の比較順ではなく、入力・算術結果の検証/量子化を所有する。VALIDATE ONLYが設定超過を合格させ実書込みでCB_VA01になる差を扱う。B9とは別実装・別受入条件 | **正しさ** | **高** | [issue](internal/ksql_number_precision_semantics_issue.md) |
 | B20 | 正規表現関数（`REGEXP_LIKE`/`REGEXP_REPLACE`/`REGEXP_SUBSTR`） | 改善 | ⛔ **現方式では出荷しない**（横断仕様 §7 制限 1）。**安全部分集合 R-1/R-2 では ReDoS を塞げない**＝量化グループも後方参照も無い `^a?×n a×n b$`（入力 `a×2n`）が指数時間（実測 n=26 で 470ms）。**任意の曖昧 NFA を構文規則で検出することはできない**。加えて **native `RegExp` の解釈はホスト依存**で 4 面同一にできない。**再開条件**＝①Node/ブラウザ共通の**非バックトラックエンジン**（WASM 等）を版ごと固定 or ②**正規表現でない限定パターン言語**を別設計。**CLI/MCP 限定は 4 面一貫性を捨てるため既定案にしない** | 機能 | 低 | [spec](internal/ksql_regexp_function_spec.md) |
 | B3 | バッチ変数：配列展開 `IN (@list)`（1 変数＝複数値） | 改善 | 📝 提案（**仕様なし**＝1a 仕様 §2.2/§6 で対象外・配列型の導入が要る。R4 の `IN (@a, @b)` スカラー並べは **v2.1.0 で出荷済み**） | 機能 | 低 | [1a spec §6](internal/ksql_batch_variables_phase1a_spec.md) |
 | B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 評価確定・実装計画待ち | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
 | B6 | KLIKE 外部結合 非 nullable 側の押し下げ解禁 | 改善 | 📝 改善案 | 性能 | 低 | [v2 spec](internal/ksql_klike_pushdown_v2_spec.md) |
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
-| B9 | 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | 改善 | 🔗 **B26 とは分離した follow-up**。B26 と同時実装せず、完了までは typed number の大精度 SIMPLE/FULL_SCAN 差を制限事項として残す | 正しさ | 高 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
+| B9 | **最大30桁の厳密10進比較** | **バグ / 言語意味論** | 🔗 **B26とは分離した高優先度follow-up**。旧「16桁級は対象外」の保留理由を撤回。既存有限10進値のORDER BY / WHERE / HAVING / CASE / ASSERT / MIN/MAXを文字列ベースで厳密比較する。`decimalPlaces` / `roundingMode`による入力・算術結果の量子化はB29へ分離 | 正しさ | 高 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
 
 ---
@@ -93,7 +94,6 @@
 
 | 項目 | 状態 | 理由 | 文書 |
 |---|---|---|---|
-| 厳密 10 進比較（案B・`<=`/`>=` 押し下げ） | ⏸ 保留 | ユーザー判断で 16 桁クラス数値アプリは当面対象外。案A の `Number.isSafeInteger` ゲートで 16 桁超は押し下げないため実害は低 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | UPSERT 変更行スキップ `ONLY CHANGED` | ⏸ 保留 | 差分型では効果がリラン時の監査情報保護に限定・実装コスト重（既存値読み取り戦略/型別正規化/64 文字キー問題）。エラー行隔離（B12）の検証エンジンが先・需要立証後に再評価 | [spec](internal/ksql_only_changed_upsert_spec.md) |
 | 実行ログ自動記録 / 更新前スナップショット退避 / チャンク実行・レジューム | ⏸ 保留 | ログは `@batch_id`＋現行 INSERT で運用可・スナップショットは `#before` レシピで代替・チャンクは適用限界の外（数十万件級は連携方式見直しが先）。バッチ強化 [roadmap](internal/ksql_batch_processing_roadmap.md) | [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | 複数 SQL の並列実行 | ⏸ 対象外 | 順次バッチのみ採用。並列は評価時に対象外化 | [eval](multi-statement-temp-table-evaluation.md) |
