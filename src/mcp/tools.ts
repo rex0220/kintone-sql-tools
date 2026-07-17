@@ -6,6 +6,7 @@ import {
   buildBatchExplainPlans,
   parseSqlStatement,
   parseSqlStatements,
+  explainNeedsAppMetadata,
   analyzeBatch,
   type BatchExecuteResult,
   type ExecuteOptions,
@@ -510,8 +511,21 @@ export function createKsqlMcpTools(
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
+    const needsAppMetadata = normalized.appBindingByMappedApp.size > 0
+      && statements.some(explainNeedsAppMetadata);
+    const runtime = needsAppMetadata
+      ? await createRuntime(serverOptions, {
+          sql: input.sql,
+          sqlContext: normalized.sqlContext,
+          profile: input.profile,
+        })
+      : null;
+    const explainClient = runtime?.client ?? noOpClient();
+    const explainCacheContext = runtime?.cacheContext ?? normalized.cacheContext;
+    const explainSourceSql = runtime?.sql ?? normalized.normalizedSql;
+
     if (statements.length > 1) {
-      const plans = buildBatchExplainPlans(normalized.normalizedSql);
+      const plans = await buildBatchExplainPlans(explainSourceSql, explainClient, undefined, explainCacheContext);
       return {
         ok: true,
         batch: true,
@@ -521,8 +535,8 @@ export function createKsqlMcpTools(
       };
     }
 
-    const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
-      cacheContext: normalized.cacheContext,
+    const result = await executeSql(explainSql(explainSourceSql), explainClient, {
+      cacheContext: explainCacheContext,
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);

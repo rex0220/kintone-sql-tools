@@ -11,6 +11,7 @@ export { getInsertValuesCount, getStatementType, isDmlType, writesKintone, isRea
 export type { BatchAnalysis, StatementAnalysis, BatchVariableAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
 export { resolveFieldSemantics, syntheticSemantics, withFieldSemanticSource } from "./fieldSemantics";
+export { explainNeedsAppMetadata, whereNeedsFieldMetadata } from "./explainMetadata";
 export type { CompareMode, ResolvedFieldSemantics } from "./fieldSemantics";
 export type { ProcessStatusState } from "./processStatus";
 

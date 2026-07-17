@@ -82,7 +82,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the kSQL execution plan without calling kintone APIs.",
+    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records.",
     inputSchema: explainInputShape,
   }, tools.explainTool);
 

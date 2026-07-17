@@ -34,6 +34,7 @@ interface MockClientOptions {
   records?: KintoneRecord[];          // GET で返すレコード（全アプリ共通）
   recordsByApp?: Record<number, KintoneRecord[]>; // アプリ ID ごとにレコードを分ける
   postIds?: string[];                 // POST レスポンスの id リスト
+  fieldTypes?: Record<string, string>; // schema-aware planner 用の明示フィールド型
 }
 
 function makeClient(opts: MockClientOptions = {}): KintoneClient & {
@@ -73,8 +74,14 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
     async getApps() {
       return [];
     },
-    async getFields(_appId) {
-      return [];
+    async getFields(appId) {
+      const records = opts.recordsByApp?.[appId] ?? opts.records ?? [];
+      const codes = new Set(records.flatMap((record) => Object.keys(record)));
+      const types = opts.fieldTypes ?? {};
+      Object.keys(types).forEach((code) => codes.add(code));
+      return [...codes]
+        .filter((code) => !code.startsWith("$"))
+        .map((code) => ({ code, label: code, fieldType: types[code] ?? "SINGLE_LINE_TEXT" }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
@@ -85,7 +92,8 @@ function makePagedClient(
   records: KintoneRecord[],
   options: { searchAborted?: boolean } = {}
 ): ReturnType<typeof makeClient> {
-  const client = makeClient();
+  // Phase 3 の schema-aware planner も実レコードと同じフィールド定義を参照できるようにする。
+  const client = makeClient({ records });
   client.getRecords = async (params) => {
     client.getCalls.push({ app: params.app, query: params.query, fields: [...params.fields] });
     const limit = Number(params.query.match(/\blimit\s+(\d+)/i)?.[1] ?? "100");
@@ -373,6 +381,36 @@ test.failing("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHER
   ) as SelectResult;
   expect(result.rows.map((row) => row.郵便番号)).toEqual(["20", "99"]);
   expect(client.getCalls.every((call) => !call.query.includes('郵便番号 > "100"'))).toBe(true);
+});
+
+test("B32 Phase 3: SINGLE_LINE_TEXT の範囲比較は REST query へ押し下げない", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 郵便番号: "20" }),
+    makeRecord({ $id: "2", 郵便番号: "99" }),
+  ] });
+  client.getFields = async () => [
+    { code: "郵便番号", label: "郵便番号", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const result = await execute(
+    "SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100' LIMIT 5",
+    client,
+    { cacheContext: "b32-phase3-select" }
+  ) as SelectResult;
+
+  expect(result.type).toBe("SELECT");
+  expect(client.getCalls.length).toBeGreaterThan(0);
+  expect(client.getCalls.every((call) => !call.query.includes("郵便番号 >"))).toBe(true);
+});
+
+test("B32 Phase 3: DML の REST 非対応 WHERE は GET/PUT 前に拒否する", async () => {
+  const client = makeClient({ fieldTypes: { 郵便番号: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "UPDATE APP100 SET 郵便番号 = '200' WHERE 郵便番号 > '100'",
+    client,
+    { cacheContext: "b32-phase3-dml" }
+  )).rejects.toThrow(/DmlConvertError|cannot be represented by kintone REST/);
+  expect(client.getCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
 });
 
 test("SIMPLE ORDER BY は LIMIT 500 / 501 境界で同じ先頭 500 行を返す", async () => {
@@ -946,8 +984,8 @@ test("FULL_SCAN: JOIN + WHERE（join側フィールド）は API WHERE に押し
         makeRecord({ $id: "2", 顧客No: "C002", 会社名: "B社", 顧客ランク: "B" }),
       ],
       4149: [
-        makeRecord({ $id: "10", 顧客No_: "C001", 案件No_: "K-10", 商談フェーズ: "提案中", 売上: "1000" }),
-        makeRecord({ $id: "11", 顧客No_: "C002", 案件No_: "K-11", 商談フェーズ: "失注", 売上: "2000" }),
+        makeRecord({ $id: "10", 顧客No_: "C001", 案件No_: "K-10", 案件名: "案件A", 商談フェーズ: "提案中", 売上: "1000" }),
+        makeRecord({ $id: "11", 顧客No_: "C002", 案件No_: "K-11", 案件名: "案件B", 商談フェーズ: "失注", 売上: "2000" }),
       ],
     },
   });
@@ -1815,8 +1853,8 @@ test("INSERT サブテーブル行 → 親レコードに PUT", async () => {
 
 test("UPDATE → GET して PUT", async () => {
   const records = [
-    makeRecord({ $id: "1" }),
-    makeRecord({ $id: "2" }),
+    makeRecord({ $id: "1", ステータス: "未完了" }),
+    makeRecord({ $id: "2", ステータス: "未完了" }),
   ];
   const client = makeClient({ records });
   const result = await execute(
@@ -1834,7 +1872,7 @@ test("UPDATE → GET して PUT", async () => {
 });
 
 test("UPDATE → 確認コールバックで OK", async () => {
-  const records = [makeRecord({ $id: "1" })];
+  const records = [makeRecord({ $id: "1", f: "old" })];
   const client = makeClient({ records });
   let confirmed = false;
 
@@ -1856,7 +1894,7 @@ test("UPDATE → 確認コールバックで OK", async () => {
 });
 
 test("UPDATE → 確認コールバックでキャンセル", async () => {
-  const client = makeClient({ records: [makeRecord({ $id: "1" })] });
+  const client = makeClient({ records: [makeRecord({ $id: "1", f: "old" })] });
   await expect(
     execute("UPDATE APP100 SET f = 'v' WHERE f = 'old'", client, {
       confirm: async () => false,
@@ -1867,8 +1905,8 @@ test("UPDATE → 確認コールバックでキャンセル", async () => {
 
 test("UPDATE 算術式: 現在値を取得して計算結果で PUT", async () => {
   const records = [
-    makeRecord({ $id: "1", 金額: "1000" }),
-    makeRecord({ $id: "2", 金額: "2000" }),
+    makeRecord({ $id: "1", 金額: "1000", ステータス: "対象" }),
+    makeRecord({ $id: "2", 金額: "2000", ステータス: "対象" }),
   ];
   const client = makeClient({ records });
   const result = await execute(
@@ -1884,9 +1922,9 @@ test("UPDATE 算術式: 現在値を取得して計算結果で PUT", async () =
 
 test("UPDATE 算術式: 確認コールバックが件数を受け取る", async () => {
   const records = [
-    makeRecord({ $id: "10", 金額: "500" }),
-    makeRecord({ $id: "11", 金額: "800" }),
-    makeRecord({ $id: "12", 金額: "300" }),
+    makeRecord({ $id: "10", 金額: "500", ステータス: "対象" }),
+    makeRecord({ $id: "11", 金額: "800", ステータス: "対象" }),
+    makeRecord({ $id: "12", 金額: "300", ステータス: "対象" }),
   ];
   const client = makeClient({ records });
   let confirmedCount = 0;
@@ -1908,7 +1946,7 @@ test("UPDATE 算術式: 確認コールバックが件数を受け取る", async
 });
 
 test("UPDATE 算術式: 確認コールバックでキャンセル", async () => {
-  const records = [makeRecord({ $id: "1", 金額: "100" })];
+  const records = [makeRecord({ $id: "1", 金額: "100", f: "v" })];
   const client = makeClient({ records });
   await expect(
     execute("UPDATE APP100 SET 金額 = 金額 * 10 WHERE f = 'v'", client, {
@@ -2511,8 +2549,8 @@ test("UPDATE サブテーブルは _rid 条件必須", async () => {
 // ----------------------------------------------------------------
 
 test("DELETE → GET して DELETE", async () => {
-  const records = [makeRecord({ $id: "10" }), makeRecord({ $id: "20" })];
-  const client = makeClient({ records });
+  const records = [makeRecord({ $id: "10", 作成日: "2022-01-01" }), makeRecord({ $id: "20", 作成日: "2022-01-01" })];
+  const client = makeClient({ records, fieldTypes: { 作成日: "DATE" } });
   const result = await execute(
     "DELETE FROM APP100 WHERE 作成日 < '2023-01-01'",
     client
@@ -2524,7 +2562,7 @@ test("DELETE → GET して DELETE", async () => {
 });
 
 test("DELETE → 確認コールバックでキャンセル", async () => {
-  const client = makeClient({ records: [makeRecord({ $id: "1" })] });
+  const client = makeClient({ records: [makeRecord({ $id: "1", f: "v" })] });
   await expect(
     execute("DELETE FROM APP100 WHERE f = 'v'", client, {
       confirm: async () => false,
@@ -3204,6 +3242,7 @@ test("WITH インライン化 — 単純 CTE の WHERE が REST API クエリに
       makeRecord({ 種別: "A", 金額: "100" }),
       makeRecord({ 種別: "B", 金額: "200" }),
     ],
+    fieldTypes: { 金額: "NUMBER" },
   });
 
   // CTE が SIMPLE モード + 最終 WHERE が単純比較 → インライン化される
@@ -3275,7 +3314,8 @@ test("WITH インライン化 — LIMIT が最終クエリから REST API に渡
 
 test("WITH インライン化 — エイリアス付き FROM (FROM cte AS c WHERE c.field)", async () => {
   const client = makeClient({
-    records: [makeRecord({ 金額: "500" }), makeRecord({ 金額: "100" })],
+    records: [makeRecord({ 金額: "500", 種別: "A" }), makeRecord({ 金額: "100", 種別: "A" })],
+    fieldTypes: { 金額: "NUMBER" },
   });
 
   await execute(
@@ -3437,7 +3477,7 @@ test("UPDATE SET スカラーサブクエリ — サブクエリの値で全件 
   const subqueryRecords = [makeRecord({ 合計費用: "5000" })];
   const updateRecords   = [makeRecord({ $id: "1" }), makeRecord({ $id: "2" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: subqueryRecords }; // SELECT MAX(合計費用)
@@ -3459,7 +3499,7 @@ test("UPDATE SET スカラーサブクエリ — サブクエリの値で全件 
 test("UPDATE SET スカラーサブクエリ — 非集計で 0 行返す場合はエラー", async () => {
   // v1.12.0: 集計サブクエリ（MAX 等）は 0 件でも 1 行（0）を返すため、
   // 0 行エラーが残るのは非集計プローブの空振りのみ
-  const client = makeClient({ records: [] }); // サブクエリが 0 件
+  const client = makeClient({ records: [], fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } }); // サブクエリが 0 件
   await expect(
     execute(
       "UPDATE APP88 SET 上限費用 = (SELECT 合計費用 FROM APP88) WHERE 確度 in ('80%')",
@@ -3473,7 +3513,7 @@ test("UPDATE SET スカラーサブクエリ — 0 件集計は 0 に解決さ�
   // GET 2回目: UPDATE 対象の $id 取得
   const updateRecords = [makeRecord({ $id: "1" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: [] }; // SELECT MAX(合計費用) — 0 件
@@ -3493,7 +3533,7 @@ test("UPDATE SET スカラーサブクエリ — 通常 SET との混在", async
   const subqueryRecords = [makeRecord({ 合計費用: "9999" })];
   const updateRecords   = [makeRecord({ $id: "10" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN", ステータス: "SINGLE_LINE_TEXT" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: subqueryRecords };
@@ -4025,7 +4065,11 @@ function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): K
     async putRecords() { /* noop */ },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields(appId) {
+      const codes = new Set((recordsByApp[appId] ?? []).flatMap((record) => Object.keys(record)));
+      return [...codes].filter((code) => !code.startsWith("$"))
+        .map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" }));
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
     maxActive: () => max,
   };

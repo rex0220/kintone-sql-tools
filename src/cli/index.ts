@@ -15,6 +15,7 @@ import {
   OperationCancelledError,
   parseSqlStatement,
   parseSqlStatements,
+  explainNeedsAppMetadata,
   analyzeBatch,
   normalizeBatchVariableName,
   type BatchAnalysis,
@@ -1561,6 +1562,7 @@ async function run(): Promise<number> {
   let batchContainsDml = false;
   let batchAnalysis: BatchAnalysis | null = null;
   let needsCompleteInput = false;
+  let dryRunNeedsMetadata = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1588,6 +1590,7 @@ async function run(): Promise<number> {
 
     try {
       const statements = parseSqlStatements(sql);
+      dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
         // バッチのガード（--allow-dml / dry-run / 確認プロンプト）は
@@ -1707,33 +1710,6 @@ async function run(): Promise<number> {
       process.stderr.write("ArgumentError: DML is disabled. Use --allow-dml to enable UPDATE/DELETE/INSERT/UPSERT/REORDER.\n");
       return 2;
     }
-    if (args.dryRun) {
-      // バッチ dry-run: 全文のプランを表示して終了（kintone アクセスなし。DML 込みでも可）
-      let plans: ReturnType<typeof buildBatchExplainPlans>;
-      try {
-        plans = buildBatchExplainPlans(sql!, args.variables);
-      } catch (err) {
-        const restored = sourceSql && sqlDiagnosticContext
-          ? restoreSqlContextError(err, sourceSql, {
-              bindings: sqlDiagnosticContext.appBindingByMappedApp,
-              rewriteSegments: sqlDiagnosticContext.rewriteSegments,
-            })
-          : err;
-        process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
-        return toExitCodeFromError(restored);
-      }
-      const out: string[] = [];
-      const restoredStatements = sqlDiagnosticContext
-        ? restoreSqlDiagnosticValue(plans.statements, sqlDiagnosticContext.appBindingByMappedApp) as typeof plans.statements
-        : plans.statements;
-      restoredStatements.forEach((p) => {
-        if (p.index > 0) out.push("");
-        out.push(`[${p.index + 1}] ${p.type}`);
-        out.push(...p.plan);
-      });
-      process.stdout.write(`${out.join("\n")}\n`);
-      return 0;
-    }
   }
 
   if (isDmlStatement) {
@@ -1762,7 +1738,7 @@ async function run(): Promise<number> {
   }
   const cacheContext = buildCacheContext(profileName, appBindingByMappedApp);
 
-  if (args.dryRun) {
+  if (args.dryRun && !dryRunNeedsMetadata) {
     client = createDryRunClient();
   } else {
     for (const explicitProfile of appProfileByApp.values()) {
@@ -2001,6 +1977,32 @@ async function run(): Promise<number> {
       baseDelayMs: args.retryBaseDelay ?? profile.query?.retryBaseDelayMs,
       maxDelayMs: args.retryMaxDelay ?? profile.query?.retryMaxDelayMs,
     })));
+  }
+
+  if (isBatchSql && args.dryRun) {
+    try {
+      const plans = await buildBatchExplainPlans(sql!, client, args.variables, cacheContext);
+      const out: string[] = [];
+      const restoredStatements = sqlDiagnosticContext
+        ? restoreSqlDiagnosticValue(plans.statements, sqlDiagnosticContext.appBindingByMappedApp) as typeof plans.statements
+        : plans.statements;
+      restoredStatements.forEach((p) => {
+        if (p.index > 0) out.push("");
+        out.push(`[${p.index + 1}] ${p.type}`);
+        out.push(...p.plan);
+      });
+      process.stdout.write(`${out.join("\n")}\n`);
+      return 0;
+    } catch (err) {
+      const restored = sourceSql && sqlDiagnosticContext
+        ? restoreSqlContextError(err, sourceSql, {
+            bindings: sqlDiagnosticContext.appBindingByMappedApp,
+            rewriteSegments: sqlDiagnosticContext.rewriteSegments,
+          })
+        : err;
+      process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
+      return toExitCodeFromError(restored);
+    }
   }
 
   try {

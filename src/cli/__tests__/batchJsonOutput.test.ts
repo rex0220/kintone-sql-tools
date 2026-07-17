@@ -30,7 +30,11 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
     async putRecords() { },
     async deleteRecords() { },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields(appId) {
+      const codes = new Set((recordsByApp[appId] ?? []).flatMap((record) => Object.keys(record)));
+      return [...codes].filter((code) => !code.startsWith("$"))
+        .map((code) => ({ code, label: code, fieldType: code === "売上" ? "NUMBER" : "SINGLE_LINE_TEXT" }));
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }

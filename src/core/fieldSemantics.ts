@@ -4,6 +4,8 @@ export interface ResolvedFieldSemantics {
   readonly fieldType: string;
   readonly compareMode: CompareMode;
   readonly inSubtable: boolean;
+  /** SUBTABLE / REFERENCE_TABLE の参照先など、= / != ではなく IN 系を要求する構造。 */
+  readonly requiresCollectionOperators: boolean;
   readonly optionOrder?: ReadonlyMap<string, number>;
   /** temp/CTE 後段で STATUS 等の追加metadataを遅延解決するための物理列来歴。 */
   readonly source?: Readonly<{ appId: number; fieldCode: string }>;
@@ -13,6 +15,7 @@ export interface FieldSemanticsSource {
   readonly fieldType: string;
   readonly sortKind?: "number" | "string";
   readonly inSubtable?: boolean;
+  readonly requiresCollectionOperators?: boolean;
   readonly optionOrder?: Readonly<Record<string, number>>;
 }
 
@@ -49,6 +52,7 @@ export function resolveFieldSemantics(source: FieldSemanticsSource): ResolvedFie
     fieldType: source.fieldType,
     compareMode,
     inSubtable: source.inSubtable === true,
+    requiresCollectionOperators: source.inSubtable === true || source.requiresCollectionOperators === true,
     ...(optionOrder && optionOrder.size > 0 ? { optionOrder } : {}),
   };
 }
@@ -57,7 +61,7 @@ export function syntheticSemantics(
   compareMode: "string" | "number",
   fieldType = compareMode === "number" ? "KSQL_NUMBER" : "KSQL_STRING"
 ): ResolvedFieldSemantics {
-  return { fieldType, compareMode, inSubtable: false };
+  return { fieldType, compareMode, inSubtable: false, requiresCollectionOperators: false };
 }
 
 export function withFieldSemanticSource(
@@ -77,7 +81,8 @@ export function fieldSemanticsEqual(
   if (
     left.fieldType !== right.fieldType ||
     left.compareMode !== right.compareMode ||
-    left.inSubtable !== right.inSubtable
+    left.inSubtable !== right.inSubtable ||
+    left.requiresCollectionOperators !== right.requiresCollectionOperators
   ) return false;
   if (
     left.source?.appId !== right.source?.appId ||

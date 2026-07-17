@@ -66,7 +66,15 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields(appId) {
+      const codes = new Set((opts.recordsByApp?.[appId] ?? []).flatMap((record) => Object.keys(record)));
+      return [...codes].filter((code) => !code.startsWith("$"))
+        .map((code) => ({
+          code,
+          label: code,
+          fieldType: code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT",
+        }));
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }

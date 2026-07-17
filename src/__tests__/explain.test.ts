@@ -1,7 +1,7 @@
 import { execute, KintoneClient, SelectResult } from "../execute";
 
 // ----------------------------------------------------------------
-// EXPLAIN は API 呼び出しなし — 空クライアントで十分
+// EXPLAIN は schema-aware planner として form metadata のみ読む。
 // ----------------------------------------------------------------
 
 function makeClient(): KintoneClient {
@@ -11,7 +11,21 @@ function makeClient(): KintoneClient {
     async putRecords()  { },
     async deleteRecords() { },
     async getApps()     { return []; },
-    async getFields()   { return []; },
+    async getFields() {
+      const numberFields = ["金額", "売上", "数量", "合計費用", "上限費用"];
+      const dateFields = ["登録日", "作成日", "受注予定日"];
+      const optionFields = ["選択", "確度", "顧客ランク"];
+      const textFields = [
+        "顧客名", "顧客ID", "会社名", "担当者", "件名", "郵便番号", "値", "フラグ", "名前", "備考", "状態",
+      ];
+      return [
+        ...numberFields.map((code) => ({ code, label: code, fieldType: "NUMBER" })),
+        ...dateFields.map((code) => ({ code, label: code, fieldType: "DATE" })),
+        ...optionFields.map((code) => ({ code, label: code, fieldType: "DROP_DOWN" })),
+        ...textFields.map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" })),
+        { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+      ];
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
@@ -53,6 +67,25 @@ test("EXPLAIN SIMPLE — SELECT *", async () => {
   const plan = await explain("EXPLAIN SELECT * FROM APP100 WHERE 金額 > 1000");
   expect(plan.find((l) => l.includes("mode"))).toContain("SIMPLE");
   expect(plan.find((l) => l.includes("fields"))).toContain("(全フィールド)");
+});
+
+test("B32: EXPLAIN は SINGLE_LINE_TEXT 範囲比較を schema-aware FULL_SCAN と表示する", async () => {
+  const plan = await explain("EXPLAIN SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100' LIMIT 5");
+  expect(plan.find((line) => line.includes("mode"))).toContain("FULL_SCAN");
+  expect(plan.some((line) => line.includes("WHERE_RESIDUAL"))).toBe(true);
+  expect(plan.some((line) => line.includes("郵便番号 >"))).toBe(false);
+  expect(plan.some((line) => line.includes("metadata API: form definition APP100"))).toBe(true);
+});
+
+test("B32: DML EXPLAIN も実行と同じ capability error で拒否する", async () => {
+  await expect(explain(
+    "EXPLAIN UPDATE APP100 SET 郵便番号 = '200' WHERE 郵便番号 > '100'"
+  )).rejects.toThrow(/cannot be represented by kintone REST/);
+});
+
+test("EXPLAIN STATUS ORDER BY は status metadata API 依存を表示する", async () => {
+  const plan = await explain("EXPLAIN SELECT ステータス FROM APP100 ORDER BY ステータス");
+  expect(plan.some((line) => line.includes("metadata API: process status APP100"))).toBe(true);
 });
 
 // ----------------------------------------------------------------
@@ -124,7 +157,7 @@ test("EXPLAIN FULL_SCAN — 選択系 IN は実行時確認前の候補として
   expect(candidate).toContain("実行時の型・実在確認待ち");
 });
 
-test("EXPLAIN FULL_SCAN — STATUS IN もAPIなしで候補表示する", async () => {
+test("EXPLAIN FULL_SCAN — STATUS IN をmetadata解決後に候補表示する", async () => {
   const plan = await explain(
     "EXPLAIN SELECT $id FROM APP100 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'"
   );
@@ -414,10 +447,17 @@ test("EXPLAIN DML 以外のキーワード — エラー", async () => {
 // バッチ EXPLAIN（フェーズ2 M3）
 // ----------------------------------------------------------------
 
-import { buildBatchExplainPlans } from "../execute";
+import { buildBatchExplainPlans as buildBatchExplainPlansCore } from "../execute";
 
-test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数不明・内側の SELECT プラン）", () => {
-  const plans = buildBatchExplainPlans(
+async function buildBatchExplainPlans(
+  sql: string,
+  variables?: Readonly<Record<string, string>>
+) {
+  return buildBatchExplainPlansCore(sql, makeClient(), variables, "explain-test-batch");
+}
+
+test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数不明・内側の SELECT プラン）", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100 WHERE 売上 > 100;" +
     "SELECT 顧客名 FROM #t"
   );
@@ -434,8 +474,8 @@ test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数�
   expect(create.plan.join("\n")).toMatch(/mode:\s+SIMPLE/); // 内側 SELECT のプラン
 });
 
-test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不明を明示", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不明を明示", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
     "SELECT a.顧客名 FROM APP200 a INNER JOIN #t b ON a.顧客名 = b.顧客名"
   );
@@ -447,8 +487,8 @@ test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不�
   expect(text).toMatch(/WHERE プッシュダウンは行われない/);
 });
 
-test("バッチ EXPLAIN: 一時テーブルソースの UPSERT_SELECT はヘッダ行 + FULL_SCAN を明示（v1.7.0）", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: 一時テーブルソースの UPSERT_SELECT はヘッダ行 + FULL_SCAN を明示（v1.7.0）", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
     "UPSERT INTO APP400 (顧客名) SELECT 顧客名 FROM #t ON DUPLICATE (顧客名)"
   );
@@ -460,8 +500,8 @@ test("バッチ EXPLAIN: 一時テーブルソースの UPSERT_SELECT はヘッ�
   expect(text).not.toMatch(/app:\s+.*APP400/); // 書き込み先アプリはソース一覧から除外
 });
 
-test("バッチ EXPLAIN: 一時テーブル無関係の文は既存プラン、DROP は解放のみ", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: 一時テーブル無関係の文は既存プラン、DROP は解放のみ", async () => {
+  const plans = await buildBatchExplainPlans(
     "SELECT 顧客名 FROM APP100;" +
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
     "DROP TEMP TABLE #t"
@@ -471,8 +511,8 @@ test("バッチ EXPLAIN: 一時テーブル無関係の文は既存プラン、D
   expect(plans.statements[2].plan.join("\n")).toMatch(/kintone アクセスなし/);
 });
 
-test("バッチ EXPLAIN: temp ソースの INSERT_SELECT は件数確定と dmlMaxRows 適用を明示", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: temp ソースの INSERT_SELECT は件数確定と dmlMaxRows 適用を明示", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
     "INSERT INTO APP200 (名前) SELECT 顧客名 FROM #t"
   );
@@ -482,17 +522,17 @@ test("バッチ EXPLAIN: temp ソースの INSERT_SELECT は件数確定と dmlM
   expect(text).not.toMatch(/app:\s+.*APP200/); // 書き込み先は app 行に混ぜない
 });
 
-test("バッチ EXPLAIN: 静的検証違反（未定義参照）は拒否される", () => {
-  expect(() => buildBatchExplainPlans("SELECT 1 FROM APP100; SELECT * FROM #t"))
-    .toThrow(/temp table #t is not defined in this batch/);
+test("バッチ EXPLAIN: 静的検証違反（未定義参照）は拒否される", async () => {
+  await expect(buildBatchExplainPlans("SELECT 1 FROM APP100; SELECT * FROM #t"))
+    .rejects.toThrow(/temp table #t is not defined in this batch/);
 });
 
 // ----------------------------------------------------------------
 // バッチ EXPLAIN: ASSERT（バッチ強化第1弾 A4）
 // ----------------------------------------------------------------
 
-test("バッチ EXPLAIN: ASSERT はサブクエリのプラン + 実行時評価の注記を表示", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: ASSERT はサブクエリのプラン + 実行時評価の注記を表示", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
     "ASSERT (SELECT COUNT(*) FROM #t) BETWEEN 1 AND 500"
   );
@@ -506,8 +546,8 @@ test("バッチ EXPLAIN: ASSERT はサブクエリのプラン + 実行時評価
   expect(text).toMatch(/mode:\s+FULL_SCAN（一時テーブル参照）/);
 });
 
-test("バッチ EXPLAIN: ASSERT の APP 参照サブクエリは通常プラン（FULL_SCAN 表示にしない）", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: ASSERT の APP 参照サブクエリは通常プラン（FULL_SCAN 表示にしない）", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT $id FROM APP100;" +
     "ASSERT (SELECT COUNT(*) FROM APP200) = 0"
   );
@@ -517,16 +557,16 @@ test("バッチ EXPLAIN: ASSERT の APP 参照サブクエリは通常プラン�
   expect(text).toMatch(/APP200/);
 });
 
-test("バッチ EXPLAIN: リテラルのみの ASSERT はサブクエリ行を持たない", () => {
-  const plans = buildBatchExplainPlans("SELECT 顧客名 FROM APP100; ASSERT 1 = 1");
+test("バッチ EXPLAIN: リテラルのみの ASSERT はサブクエリ行を持たない", async () => {
+  const plans = await buildBatchExplainPlans("SELECT 顧客名 FROM APP100; ASSERT 1 = 1");
   const text = plans.statements[1].plan.join("\n");
   expect(plans.statements[1].type).toBe("ASSERT");
   expect(text).toMatch(/実行時に条件評価/);
   expect(text).not.toMatch(/subquery/);
 });
 
-test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化できる", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化できる", async () => {
+  const plans = await buildBatchExplainPlans(
     "SET @min = 10; SELECT 顧客名 FROM APP100 WHERE 売上 > @min"
   );
   expect(plans.statements[0]).toMatchObject({
@@ -536,8 +576,8 @@ test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化
   expect(plans.statements[1].plan.join("\n")).toContain("@min");
 });
 
-test("バッチ EXPLAIN: 選択系 IN の文字列変数を候補表示し、値は実行しない", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: 選択系 IN の文字列変数を候補表示し、値は実行しない", async () => {
+  const plans = await buildBatchExplainPlans(
     "DECLARE @choice = 'A'; " +
       "SELECT $id FROM APP100 WHERE 選択 IN (@choice) AND 件名 LIKE '%'",
     { choice: "secret-option" }
@@ -548,8 +588,8 @@ test("バッチ EXPLAIN: 選択系 IN の文字列変数を候補表示し、値
   expect(text).not.toContain("secret-option");
 });
 
-test("バッチ EXPLAIN: SET の APP スカラーサブクエリ計画と1回評価を表示する", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: SET の APP スカラーサブクエリ計画と1回評価を表示する", async () => {
+  const plans = await buildBatchExplainPlans(
     "SET @cnt = (SELECT COUNT(*) FROM APP8201); ASSERT @cnt >= 0"
   );
   const set = plans.statements[0];
@@ -561,8 +601,8 @@ test("バッチ EXPLAIN: SET の APP スカラーサブクエリ計画と1回評
   expect(text).toMatch(/APP8201/);
 });
 
-test("バッチ EXPLAIN: SET の一時テーブル参照を FULL_SCAN 計画で表示する", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: SET の一時テーブル参照を FULL_SCAN 計画で表示する", async () => {
+  const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT $id FROM APP8202;" +
     "SET @cnt = (SELECT COUNT(*) FROM #t); ASSERT @cnt >= 0"
   );
@@ -572,8 +612,8 @@ test("バッチ EXPLAIN: SET の一時テーブル参照を FULL_SCAN 計画で�
   expect(text).toMatch(/temp:\s+#t/);
 });
 
-test("バッチ EXPLAIN: SET サブクエリ内の先行変数をプレースホルダー解決する", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: SET サブクエリ内の先行変数をプレースホルダー解決する", async () => {
+  const plans = await buildBatchExplainPlans(
     "SET @target = 1;" +
     "SET @amount = (SELECT 売上 FROM APP8203 WHERE $id = @target LIMIT 1);" +
     "ASSERT @amount >= 0"
@@ -583,8 +623,8 @@ test("バッチ EXPLAIN: SET サブクエリ内の先行変数をプレースホ
   expect(text).not.toMatch(/variable @target is not defined/);
 });
 
-test("バッチ EXPLAIN: DECLARE は値を表示せず、注入名を事前照合する", () => {
-  const plans = buildBatchExplainPlans(
+test("バッチ EXPLAIN: DECLARE は値を表示せず、注入名を事前照合する", async () => {
+  const plans = await buildBatchExplainPlans(
     "DECLARE @since = '2026-01-01'; SELECT * FROM APP100 WHERE 登録日 >= @since",
     { Since: "secret-value" }
   );
@@ -592,8 +632,23 @@ test("バッチ EXPLAIN: DECLARE は値を表示せず、注入名を事前照�
   expect(plans.statements[0].type).toBe("DECLARE_VARIABLE");
   expect(text).toContain("DECLARE @since");
   expect(text).not.toContain("secret-value");
-  expect(() => buildBatchExplainPlans(
+  await expect(buildBatchExplainPlans(
     "DECLARE @since = '2026-01-01'; SELECT * FROM APP100 WHERE 登録日 >= @since",
     { typo: "x" }
-  )).toThrow(/@typo is not declared/);
+  )).rejects.toThrow(/@typo is not declared/);
+});
+
+test("バッチ EXPLAIN schema-aware形は実行と同じWHERE capabilityを使う", async () => {
+  const client = makeClient();
+  const plans = await buildBatchExplainPlansCore(
+    "SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100'; SELECT $id FROM APP100",
+    client,
+    undefined,
+    "batch-explain-b32"
+  );
+  const first = plans.statements[0].plan.join("\n");
+  expect(first).toMatch(/mode:\s+FULL_SCAN/);
+  expect(first).toContain("WHERE_RESIDUAL");
+  expect(first).toContain("metadata API: form definition APP100");
+  expect(first).not.toContain('kintone query: 郵便番号 > "100"');
 });
