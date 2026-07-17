@@ -12,6 +12,7 @@ import {
   flattenFormFieldProperties,
   type FormFieldProperty,
 } from "../core/formFieldInfo";
+import { normalizeProcessStatusStates, type RawProcessStatusState } from "../core/processStatus";
 
 export interface TokenResolver {
   guestSpaceId?: number | null;
@@ -262,11 +263,11 @@ export function createNodeKintoneClient(
       qs.set("lang", "user");
       const res = await requestJson<{
         enable: boolean;
-        states: Record<string, { name: string }> | null;
+        states: Record<string, RawProcessStatusState> | null;
       }>(`${apiBasePath}/app/status.json?${qs.toString()}`, { method: "GET" }, appId);
       return {
         enable: res.enable,
-        states: Object.values(res.states ?? {}).map((state) => state.name),
+        states: normalizeProcessStatusStates(res.states),
       };
     },
   };

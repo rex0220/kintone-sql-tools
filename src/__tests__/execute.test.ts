@@ -1269,7 +1269,7 @@ test.each(["IN", "NOT IN"])(
     let statusCalls = 0;
     client.getProcessStatuses = async () => {
       statusCalls += 1;
-      return { enable: true, states: ["処理中", "完了"] };
+      return { enable: true, states: [{ name: "処理中", index: 0 }, { name: "完了", index: 1 }] };
     };
 
     const result = await execute(
@@ -1299,7 +1299,10 @@ test.each([
       { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
       { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
     ];
-    client.getProcessStatuses = async () => ({ enable, states: [...states] });
+    client.getProcessStatuses = async () => ({
+      enable,
+      states: states.map((name, index) => ({ name, index })),
+    });
 
     const result = await execute(
       `SELECT $id FROM APP99302 WHERE $id >= 1 AND ステータス IN ('${value}') AND 件名 LIKE '%'`,
@@ -1326,7 +1329,7 @@ test("FULL_SCAN: NUMBER / DROP_DOWN候補だけなら status.json を呼ばな�
   let statusCalls = 0;
   client.getProcessStatuses = async () => {
     statusCalls += 1;
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
 
   await execute(
@@ -1342,6 +1345,80 @@ test("FULL_SCAN: NUMBER / DROP_DOWN候補だけなら status.json を呼ばな�
     { cacheContext: "status-empty-not-candidate" }
   );
   expect(statusCalls).toBe(0);
+});
+
+test("ORDER BY の実キーが STATUS のときだけ定義順 metadata を取得する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理", 件名: "one" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了", 件名: "two" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  await execute(
+    "SELECT ステータス AS s FROM APP99308 ORDER BY s ASC",
+    client,
+    { cacheContext: "status-order-meta" }
+  );
+  expect(statusCalls).toBe(1);
+
+  const statusOrdered = await execute(
+    "SELECT ステータス FROM APP99308 ORDER BY ステータス ASC",
+    client,
+    { cacheContext: "status-order-meta-result-boundary" }
+  ) as SelectResult;
+  expect(statusCalls).toBe(2);
+  // Phase 2 は metadata だけを準備し、まだ process index 順へ結果を切り替えない。
+  expect(statusOrdered.rows).toEqual([{ ステータス: "完了" }, { ステータス: "未処理" }]);
+
+  await execute(
+    "SELECT $id FROM APP99308 ORDER BY 件名 ASC",
+    client,
+    { cacheContext: "text-order-no-status-meta" }
+  );
+  await execute(
+    "SELECT $id FROM APP99308",
+    client,
+    { cacheContext: "no-order-no-status-meta" }
+  );
+  expect(statusCalls).toBe(2);
+});
+
+test("CTE を越えて STATUS の物理列来歴を ORDER BY metadata へ伝播する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  const result = await execute(
+    "WITH x AS (SELECT ステータス FROM APP99309) SELECT ステータス FROM x ORDER BY ステータス ASC",
+    client,
+    { cacheContext: "status-order-cte-lineage" }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(2);
+  expect(statusCalls).toBe(1);
 });
 
 test("FULL_SCAN: status.json の reject をレコード取得前に伝播する", async () => {
@@ -1374,7 +1451,7 @@ test("FULL_SCAN: status.json は同一APP/profileの同時実行でも1回だけ
   client.getProcessStatuses = async () => {
     statusCalls += 1;
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
   const sql = "SELECT $id FROM APP99305 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'";
 
@@ -1402,7 +1479,7 @@ test("FULL_SCAN JOIN: STATUS候補のある側だけ status.json を取得して
   const statusApps: number[] = [];
   client.getProcessStatuses = async (appId) => {
     statusApps.push(appId);
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
 
   const result = await execute(

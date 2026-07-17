@@ -39,8 +39,16 @@ test("TABLE.fields を再帰展開し、子フィールドの型・選択肢を�
     "深い数値",
   ]);
   expect(fields.find((field) => field.code === "親選択")?.optionOrder).toEqual({ A: 0, B: 1 });
+  expect(fields.find((field) => field.code === "親選択")?.semantics).toMatchObject({
+    fieldType: "CHECK_BOX", compareMode: "option", inSubtable: false,
+  });
+  expect([...(fields.find((field) => field.code === "親選択")?.semantics?.optionOrder ?? [])])
+    .toEqual([["A", 0], ["B", 1]]);
   expect(fields.find((field) => field.code === "子選択")?.fieldType).toBe("MULTI_SELECT");
   expect(fields.find((field) => field.code === "深い数値")?.sortKind).toBe("number");
+  expect(fields.find((field) => field.code === "深い数値")?.semantics).toMatchObject({
+    fieldType: "NUMBER", compareMode: "number", inSubtable: true,
+  });
 });
 
 test("VALIDATE ONLY用のフォーム制約メタデータを保持する", () => {

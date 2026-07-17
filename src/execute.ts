@@ -14,10 +14,18 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { NO_FROM_CTE_NAME } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
+import {
+  fieldSemanticsEqual,
+  resolveFieldSemantics,
+  syntheticSemantics,
+  withFieldSemanticSource,
+  type ResolvedFieldSemantics,
+} from "./core/fieldSemantics";
+import type { ProcessStatusState } from "./core/processStatus";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareScalarValues } from "./core/scalarCompare";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
@@ -100,8 +108,8 @@ export interface KintoneClient {
 
 export interface KintoneProcessStatuses {
   enable: boolean;
-  /** 実行ユーザーの表示言語に対応する状態名 */
-  states: string[];
+  /** 実行ユーザーの表示言語に対応する状態名と数値化済み定義順。未設定は null。 */
+  states: ProcessStatusState[] | null;
 }
 
 const SEARCH_ABORTED_WARNING =
@@ -132,6 +140,8 @@ export interface KintoneFieldInfo {
   optionOrder?: Record<string, number>;
   /** ソート種別（CALC設定などに基づく） */
   sortKind?: "number" | "string";
+  /** 比較・planner・実体化が共有する解決済み意味型。 */
+  semantics?: ResolvedFieldSemantics;
   required?: boolean;
   minValue?: string;
   maxValue?: string;
@@ -197,6 +207,7 @@ export interface SelectResult {
 export interface MaterializedColumnMeta {
   readonly sortKind?: "number" | "string";
   readonly fieldType?: string;
+  readonly semantics?: ResolvedFieldSemantics;
 }
 
 type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
@@ -550,7 +561,12 @@ function materializedColumnMetaEqual(
   if (!left || !right || left.size !== right.size) return false;
   for (const [column, meta] of left) {
     const candidate = right.get(column);
-    if (!candidate || candidate.sortKind !== meta.sortKind || candidate.fieldType !== meta.fieldType) return false;
+    if (
+      !candidate ||
+      candidate.sortKind !== meta.sortKind ||
+      candidate.fieldType !== meta.fieldType ||
+      !fieldSemanticsEqual(candidate.semantics, meta.semantics)
+    ) return false;
   }
   return true;
 }
@@ -1454,8 +1470,8 @@ async function loadTypedPushdownMeta(
       .filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
     if (statusFields.length > 0) {
       const process = await getProcessStatusesCached(appId, client, cacheContext);
-      if (process.enable && process.states.length > 0) {
-        const states = new Set(process.states);
+      if (process.enable && process.states && process.states.length > 0) {
+        const states = new Set(process.states.map((state) => state.name));
         for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
       }
     }
@@ -1712,8 +1728,100 @@ function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   return field;
 }
 
-function materializedMetaFromFieldInfo(info: KintoneFieldInfo): MaterializedColumnMeta {
-  return { sortKind: aggregateSortKind(info), fieldType: info.fieldType };
+function materializedMetaFromFieldInfo(
+  info: KintoneFieldInfo,
+  sourceAppId?: number
+): MaterializedColumnMeta {
+  const semantics = info.semantics ?? resolveFieldSemantics(info);
+  return {
+    sortKind: aggregateSortKind(info),
+    fieldType: info.fieldType,
+    semantics: sourceAppId === undefined
+      ? semantics
+      : withFieldSemanticSource(semantics, sourceAppId, info.code),
+  };
+}
+
+function syntheticColumnMeta(compareMode: "string" | "number"): MaterializedColumnMeta {
+  return { sortKind: compareMode, semantics: syntheticSemantics(compareMode) };
+}
+
+/** 型が安全に合流しない式は v3 の既定で文字列とするが、Phase 2 では既存 sortKind を変えない。 */
+function unknownStringColumnMeta(): MaterializedColumnMeta {
+  return { semantics: syntheticSemantics("string", "KSQL_UNKNOWN") };
+}
+
+function unsupportedColumnMeta(fieldType = "KSQL_ARRAY"): MaterializedColumnMeta {
+  return {
+    semantics: { fieldType, compareMode: "unsupported", inSubtable: false },
+  };
+}
+
+function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
+  if (field === "$id" || field === "_rid" || field === "_pid") {
+    return {
+      sortKind: "number",
+      fieldType: "__ID__",
+      semantics: resolveFieldSemantics({ fieldType: "__ID__" }),
+    };
+  }
+  if (field === "$revision") return syntheticColumnMeta("number");
+  return undefined;
+}
+
+const NUMBER_RETURNING_STRING_FUNCTIONS = new Set([
+  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
+]);
+
+function stringFunctionColumnMeta(expr: StringFuncExpr): MaterializedColumnMeta {
+  if (expr.func === "CAST") {
+    const target = expr.args[1];
+    return target?.type === "STRING" && target.value === "NUMBER"
+      ? syntheticColumnMeta("number")
+      : syntheticColumnMeta("string");
+  }
+  return NUMBER_RETURNING_STRING_FUNCTIONS.has(expr.func)
+    ? syntheticColumnMeta("number")
+    : syntheticColumnMeta("string");
+}
+
+function caseResultColumnMeta(
+  result: CaseResult,
+  resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
+): MaterializedColumnMeta {
+  if (result.type === "STRING") return syntheticColumnMeta("string");
+  if (result.type === "ARRAY") return unsupportedColumnMeta();
+  if (result.type === "NUMBER" || result.type === "ARITH") return syntheticColumnMeta("number");
+  if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
+  const source = resolveField(aggregateFieldRef(result.field));
+  return source ?? unknownStringColumnMeta();
+}
+
+function mergeExpressionColumnMeta(
+  candidates: readonly MaterializedColumnMeta[]
+): MaterializedColumnMeta {
+  if (candidates.length === 0) return unknownStringColumnMeta();
+  const first = candidates[0];
+  const withoutSource = (semantics: ResolvedFieldSemantics | undefined): ResolvedFieldSemantics | undefined => {
+    if (!semantics) return undefined;
+    const { source: _source, ...rest } = semantics;
+    return rest;
+  };
+  if (candidates.every((candidate) =>
+    candidate.sortKind === first.sortKind
+    && candidate.fieldType === first.fieldType
+    && fieldSemanticsEqual(withoutSource(candidate.semantics), withoutSource(first.semantics))
+  )) {
+    const sameSource = candidates.every((candidate) =>
+      fieldSemanticsEqual(candidate.semantics, first.semantics)
+    );
+    return sameSource ? first : { ...first, semantics: withoutSource(first.semantics) };
+  }
+  if (candidates.some((candidate) => candidate.semantics?.compareMode === "unsupported")) {
+    return unsupportedColumnMeta("KSQL_MIXED_UNSUPPORTED");
+  }
+  return unknownStringColumnMeta();
 }
 
 function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
@@ -1721,6 +1829,7 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     column.type === "FIELD"
     || column.type === "WILDCARD"
     || column.type === "PARENT_WILDCARD"
+    || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
       && (column.func === "MIN" || column.func === "MAX")
       && column.arg.type === "FIELD_REF")
@@ -1748,19 +1857,19 @@ async function inferSelectColumnMeta(
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         const info = physicalInfos.get(stmt.from.appId)?.get(ref.field);
-        return info ? materializedMetaFromFieldInfo(info) : undefined;
+        return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
       }
       const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : undefined;
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : undefined;
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
 
     const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
@@ -1770,7 +1879,8 @@ async function inferSelectColumnMeta(
         return [materialized.columnMeta?.get(ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? [materializedMetaFromFieldInfo(info)] : [];
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta ? [meta] : [];
     });
     return matches.length === 1 ? matches[0] : undefined;
   };
@@ -1808,19 +1918,28 @@ async function inferSelectColumnMeta(
         meta = resolveField(aggregateFieldRef(column.field));
       } else if (column.type === "AGGREGATE") {
         if (column.func === "GROUP_CONCAT") {
-          meta = { sortKind: "string" };
+          meta = syntheticColumnMeta("string");
         } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
-          meta = { sortKind: "number" };
+          meta = syntheticColumnMeta("number");
         } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
           const source = resolveField(aggregateFieldRef(column.arg.field));
-          if (source?.sortKind) meta = { sortKind: source.sortKind };
+          if (source) meta = source;
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
-        meta = { sortKind: "number" };
+        meta = syntheticColumnMeta("number");
       } else if (column.type === "LITERAL_COL") {
-        meta = { sortKind: "string" };
+        meta = syntheticColumnMeta("string");
+      } else if (column.type === "STRFUNC_COL") {
+        meta = stringFunctionColumnMeta(column.expr);
       } else if (column.type === "WINDOW_COL") {
-        meta = { sortKind: "number" };
+        meta = syntheticColumnMeta("number");
+      } else if (column.type === "CASE_COL") {
+        const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
+        if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
+        meta = mergeExpressionColumnMeta(results);
+      } else if (column.type === "SCALAR_SUBQUERY_COL") {
+        // サブクエリの実行値は後段で解決される。安全に型を証明できないため既定の文字列意味型を付ける。
+        meta = unknownStringColumnMeta();
       }
       if (meta) inferred.set(output, meta);
     });
@@ -1835,7 +1954,8 @@ function mergeUnionColumnMeta(left: SelectResult, right: SelectResult): Material
     const a = leftMeta?.get(column);
     const rightColumn = right.columns[index];
     const b = rightColumn === undefined ? undefined : rightMeta?.get(rightColumn);
-    if (a && b && a.sortKind === b.sortKind && a.fieldType === b.fieldType) merged.set(column, a);
+    if (a && b) merged.set(column, mergeExpressionColumnMeta([a, b]));
+    else if (a || b) merged.set(column, unknownStringColumnMeta());
   });
   return merged;
 }
@@ -1968,7 +2088,7 @@ async function executeFullScanSelect(
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   // （レコードに依存しないため、フェッチ完了を待つ必要がない）
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -2212,7 +2332,7 @@ async function executeFullScanWithCte(
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -2695,6 +2815,94 @@ async function getSortKindMapByApp(
 interface OrderByMeta {
   optionOrders: OptionOrderMap;
   sortKinds: FieldSortKindMap;
+  /** Phase 2 で収集する共有意味型。比較器への切替は Phase 4 で行う。 */
+  semantics: ReadonlyMap<string, ResolvedFieldSemantics>;
+}
+
+function orderByFieldNames(stmt: SelectStatement): string[] {
+  const items: OrderByItem[] = [
+    ...stmt.orderBy,
+    ...stmt.columns.flatMap((column) => column.type === "WINDOW_COL" ? column.orderBy : []),
+  ];
+  return [...new Set(items.flatMap((item) =>
+    item.key.type === "FIELD_NAME" ? [item.key.name] : []
+  ))];
+}
+
+async function buildOrderSemanticsForSelect(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<ReadonlyMap<string, ResolvedFieldSemantics>> {
+  const names = orderByFieldNames(stmt);
+  if (names.length === 0) return new Map();
+
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const infosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
+    await Promise.all([...new Set(
+      tables.filter((table) => table.cteName === null).map((table) => table.appId)
+    )].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
+    }))
+  );
+
+  const aliases = new Map<string, FieldRef>();
+  for (const column of stmt.columns) {
+    if (column.type === "FIELD" && column.alias) {
+      aliases.set(column.alias, aggregateFieldRef(column.field));
+    }
+  }
+
+  const resolveField = (ref: FieldRef): MaterializedColumnMeta | undefined => {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        const info = infosByApp.get(stmt.from.appId)?.get(ref.field);
+        return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
+      }
+      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      if (!table) return undefined;
+      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
+    }
+    const matches = tables.flatMap((table): MaterializedColumnMeta[] => {
+      if (table.cteName !== null) {
+        const materialized = materializedTables?.get(table.cteName);
+        const meta = materialized?.columns.includes(ref.field) ? materialized.columnMeta?.get(ref.field) : undefined;
+        return meta ? [meta] : [];
+      }
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta ? [meta] : [];
+    });
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
+  const result = new Map<string, ResolvedFieldSemantics>();
+  for (const name of names) {
+    const ref = aliases.get(name) ?? aggregateFieldRef(name);
+    const base = resolveField(ref)?.semantics;
+    if (!base) continue;
+    let semantics = base;
+    if (base.fieldType === "STATUS" && base.source) {
+      const process = await getProcessStatusesCached(base.source.appId, client, cacheContext);
+      if (process.enable && process.states !== null) {
+        semantics = {
+          ...base,
+          optionOrder: new Map(process.states.map((state) => [state.name, state.index])),
+        };
+      }
+    }
+    result.set(name, semantics);
+  }
+  return result;
 }
 
 /**
@@ -2705,19 +2913,21 @@ interface OrderByMeta {
 async function buildOrderByMetaForSelect(
   stmt: SelectStatement,
   client: KintoneClient,
-  cacheContext: string
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<OrderByMeta> {
   const hasWindowOrderBy = stmt.columns.some(
     (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
   );
   if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
-    return { optionOrders: new Map(), sortKinds: new Map() };
+    return { optionOrders: new Map(), sortKinds: new Map(), semantics: new Map() };
   }
-  const [optionOrders, sortKinds] = await Promise.all([
+  const [optionOrders, sortKinds, semantics] = await Promise.all([
     buildOptionOrdersForSelect(stmt, client, cacheContext),
     buildSortKindsForSelect(stmt, client, cacheContext),
+    buildOrderSemanticsForSelect(stmt, client, cacheContext, materializedTables),
   ]);
-  return { optionOrders, sortKinds };
+  return { optionOrders, sortKinds, semantics };
 }
 
 async function buildOptionOrdersForSelect(
@@ -2904,18 +3114,22 @@ async function prepareDmlValidation(
   const columnMeta = new Map<string, MaterializedColumnMeta>();
   for (const column of payloadFields) {
     if (column === "$id") {
-      columnMeta.set(column, { sortKind: "number", fieldType: "RECORD_NUMBER" });
+      columnMeta.set(column, {
+        sortKind: "number",
+        fieldType: "RECORD_NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "RECORD_NUMBER" }),
+      });
       continue;
     }
     const info = infoByCode.get(column);
-    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info));
+    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info, stmt.appId));
   }
-  columnMeta.set("$err_statement", { sortKind: "number" });
-  columnMeta.set("$err_operation", { sortKind: "string" });
-  columnMeta.set("$err_row", { sortKind: "number" });
-  columnMeta.set("$err_field", { sortKind: "string" });
-  columnMeta.set("$err_code", { sortKind: "string" });
-  columnMeta.set("$err_message", { sortKind: "string" });
+  columnMeta.set("$err_statement", syntheticColumnMeta("number"));
+  columnMeta.set("$err_operation", syntheticColumnMeta("string"));
+  columnMeta.set("$err_row", syntheticColumnMeta("number"));
+  columnMeta.set("$err_field", syntheticColumnMeta("string"));
+  columnMeta.set("$err_code", syntheticColumnMeta("string"));
+  columnMeta.set("$err_message", syntheticColumnMeta("string"));
   materializedMetaByValidationResult.set(result, columnMeta);
   return { result, candidates, invalidRowNumbers, columnMeta };
 }
