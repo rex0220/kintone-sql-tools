@@ -1,6 +1,6 @@
 # kSQL v3.0.0 比較・ORDER BY 実装計画
 
-- ステータス: **R3承認済み / Phase 0–1（baseline fixture・B30）実装済み / Phase 2以降未実装**
+- ステータス: **R3承認済み / Phase 0–7実装・Node検証済み / v3.0.0公開待ち**。CLI / MCP / plugin成果物は生成済み。Chromium / Firefoxの実kintone plugin smokeは未実施で、§6.4どおりrelease blockerとして残す
 - 対象リリース: **v3.0.0**
 - 対象課題: **B26 / B27 / B30 / B31 / B32**
 - follow-up: **B9（v3.1.0候補）**
@@ -209,7 +209,7 @@ type PredicateCapability =
 - lexerへ`KORDER`予約語を追加する
 - ASTへ通常ORDERとnative ORDERの区別を追加する。推奨は`SelectStatement.orderMode: "CANONICAL" | "KINTONE_NATIVE"`で、同じ文に両方を持たせない
 - parserで`KORDER BY`をトップレベルSELECTにだけ受理する
-- `$id`＋公式受理15型のnative allowlistを実装し、LOOKUPは解決済み基底型で判定する
+- `$id`＋公式受理15型のnative allowlistを実装し、LOOKUPは解決済み基底型で判定する。初期版のキーは非修飾フィールドコードに限定し、表修飾をkintone queryから安全に除去する契約は将来段階とする
 - 単一物理アプリ、直接フィールド、完全押し下げWHERE、LIKE/KLIKEなし、`LIMIT 0..500`かつ`LIMIT <= 実行時maxRecords`、`OFFSET 0..10000`を検査する
 - `OFFSET >= 10001`、LIMITなし、LIMIT 501以上、nested利用、未知型をplanning errorにする
 - `LIMIT 0`も完全検証後にRESTを呼ばず空結果を返す

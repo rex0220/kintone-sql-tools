@@ -10,6 +10,8 @@
 - 親仕様: [ksql_like_predicate_pushdown_spec.md](ksql_like_predicate_pushdown_spec.md)（R3）。本書は「第1段（数値）」の詳細。
 - 関連コード: `src/core/optimization/wherePredicatePushdown.ts`（`extractSafePushdownLeaves`）、`src/execute.ts`（`extractMainSafePushdown` / `executeFullScanSelect` / `getFieldTypeMap`）、`src/core/scalarCompare.ts`（②の比較器）
 
+> **v3.0.0で変更:** 本書中のEXPLAIN no-API契約はv2.2.0時点の履歴である。現行EXPLAINはschema-aware plannerのためmetadata APIを使うが、レコード取得・書込みは行わない。
+
 ## 0. スコープ（今回入れる / 入れない）
 
 - **入れる**: **NUMBER フィールド**の押し下げ。演算子は **`=` と strict `<` / `>`**（右辺が安全整数の整数リテラル）。型メタ（`FieldTypeMap`）で NUMBER を確定したリーフのみ。`$id`（第0段）は `= < > <= >=` をそのまま維持（安全整数ドメイン）。

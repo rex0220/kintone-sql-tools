@@ -149,7 +149,7 @@ stdio MCP サーバーでは stdout が JSON-RPC 専用のため、shim が通�
 | Tool | 用途 |
 | --- | --- |
 | `ksql_validate` | SQL を解析し、実行前に構文や DML 判定を確認 |
-| `ksql_explain` | kintone API を呼ばずに実行計画を確認 |
+| `ksql_explain` | フォーム定義と必要時のプロセス状態metadataを使って実行計画を確認（レコード取得・書込みなし） |
 | `ksql_query` | SELECT / EXPLAIN / SHOW / DESCRIBE など read-only SQL を実行 |
 | `ksql_mutate` | 明示承認付きで INSERT / UPDATE / UPSERT / DELETE を実行 |
 | `ksql_describe_app` | アプリのフィールド定義を取得 |

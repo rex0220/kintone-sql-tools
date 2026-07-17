@@ -394,6 +394,37 @@ test("B27: 未解決 ORDER key も空集合として成功させない", async (
   expect(client.getCalls).toHaveLength(0);
 });
 
+test("B27: JOIN の曖昧な非修飾 ORDER key は型未解決と区別して拒否する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", code: "A", name: "left" })],
+      200: [makeRecord({ $id: "2", code: "A", name: "right" })],
+    },
+  });
+
+  await expect(execute(
+    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.code = b.code ORDER BY name LIMIT 1",
+    client
+  )).rejects.toThrow(/ambiguous column reference.*ORDER_KEY_AMBIGUOUS/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: JOIN の曖昧な ORDER key は表修飾すれば実行できる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", code: "A", name: "left" })],
+      200: [makeRecord({ $id: "2", code: "A", name: "right" })],
+    },
+  });
+
+  const result = await execute(
+    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.code = b.code ORDER BY a.name LIMIT 1",
+    client
+  );
+  expect(result.type).toBe("SELECT");
+  if (result.type === "SELECT") expect(result.rows).toEqual([{ "$id": "1" }]);
+});
+
 test("B27: window ORDER BY の unsupported key も records GET 前に拒否する", async () => {
   const client = makeClient({ records: [] });
   client.getFields = async () => [

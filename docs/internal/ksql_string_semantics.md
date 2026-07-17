@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - **位置づけ: 本書が文字列の扱いの「正」（single source of truth）。** 個別の仕様・課題文書は**事実を書き写さず本書を参照する**。
-- ステータス: **R8.5（R8.1でB27のtie-breakとSTATUS訂正、R8.2で`status.json`の`index`型・無効時挙動を確定。R8.3でv3.0.0統合範囲とWHERE/GREATEST/B32を追加。R8.4のNaN sentinel案を、B14 `#err`契約との衝突によりR8.5で訂正。typed numberの正当な域外値を固定末尾バンドへ置き、ペア単位モード切替だけを禁止）。**
+- ステータス: **R8.5承認済み / v3.0.0実装済み・公開待ち**（R8.1でB27のtie-breakとSTATUS訂正、R8.2で`status.json`の`index`型・無効時挙動を確定。R8.3でv3.0.0統合範囲とWHERE/GREATEST/B32を追加。R8.4のNaN sentinel案を、B14 `#err`契約との衝突によりR8.5で訂正。typed numberの正当な域外値を固定末尾バンドへ置き、ペア単位モード切替だけを禁止）。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -814,7 +814,7 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | ~~B25~~ | `ORDER BY` と `MIN`/`MAX` の比較不整合 | **B26 へ統合**（同根） |
 | **B26** | 型付き比較・文字列順・型メタ・ソート比較器を4面で統一（旧 B25 を統合） | **§4.5 で R4 規則を決定。B9 は同時実装しない** |
 | **B27** | ORDER BY の押し下げ同値性 | §4.6.3。B26 と基盤・リリースを共有するが別課題 |
-| [B30](ksql_order_by_truncate_completeness_issue.md) | `ORDER BY` と取得打ち切りが誤った top-N を返す | `ORDER BY` を含む SELECT は完全候補取得前の `truncate` を禁止。v3.0.0へ統合 |
+| [B30](ksql_order_by_truncate_completeness_issue.md) | `ORDER BY` と取得打ち切りが誤った top-N を返す | local ORDER planは不完全候補の`truncate`を禁止。REST top-Nと`KORDER_NATIVE`は対象外。v3.0.0へ統合 |
 | **B31** | kintone 固有順を明示する `KORDER BY` | [local ORDER BY draft](ksql_local_order_by_draft.md)。B27 の schema-aware planner を共有するが、canonical 同値性とは別の native 能力 allowlist を使う |
 | [B32](ksql_where_operator_pushdown_capability_issue.md) | WHERE の型×演算子を見ず実行不能な REST query を計画する | SELECT はローカル契約があれば FULL_SCAN 残余評価、DML は事前エラー。B27/B31へ能力表を共有 |
 | **未起票** | `LIKE '_'` の単位不整合 | §3.5 |

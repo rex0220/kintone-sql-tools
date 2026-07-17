@@ -3215,6 +3215,7 @@ async function buildOrderSemanticsForSelect(
   if (names.length === 0) return new Map();
 
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const ambiguousFields = new Set<string>();
   const infosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
     await Promise.all([...new Set(
       tables.filter((table) => table.cteName === null).map((table) => table.appId)
@@ -3251,6 +3252,7 @@ async function buildOrderSemanticsForSelect(
       const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
       return meta ? [meta] : [];
     });
+    if (matches.length > 1) ambiguousFields.add(ref.field);
     return matches.length === 1 ? matches[0] : undefined;
   };
 
@@ -3283,7 +3285,13 @@ async function buildOrderSemanticsForSelect(
   const result = new Map<string, ResolvedFieldSemantics>();
   for (const name of names) {
     const base = aliasSemantics.get(name) ?? resolveField(aggregateFieldRef(name))?.semantics;
-    if (!base) continue;
+    if (!base) {
+      const ref = aggregateFieldRef(name);
+      if (ref.tableAlias === null && ambiguousFields.has(ref.field)) {
+        result.set(name, resolveFieldSemantics({ fieldType: "KSQL_AMBIGUOUS" }));
+      }
+      continue;
+    }
     let semantics = base;
     if (base.fieldType === "STATUS" && base.source && stmt.orderMode !== "KINTONE_NATIVE") {
       const process = await getProcessStatusesCached(base.source.appId, client, cacheContext);

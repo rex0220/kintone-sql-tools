@@ -95,7 +95,7 @@ FetchAllLimitError: ORDER BYの正しい結果には完全な候補集合が必�
 WHEREで候補を絞るか、maxRecordsを引き上げてください。
 ```
 
-CLI/MCPの入力説明にも「ORDER BYはtruncateをerrorへ上書きする」を明記する。単に「100件で打ち切って表示」と警告して成功させない。
+CLI/MCPの入力説明には「local ORDER BYは完全入力が必要」と明記する。サーフェスが文面だけで一律に上書きせず、plannerがREST top-N / `KORDER_NATIVE`とlocal sortを区別する。local sortで単に「100件で打ち切って表示」と警告して成功させない。
 
 ## 6. 実装面
 

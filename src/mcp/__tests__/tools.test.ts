@@ -331,7 +331,7 @@ describe("MCP tools", () => {
     })).rejects.toThrow(/not allowed by ksql_query/);
   });
 
-  test("query maps maxRecords/onLimit and forces ORDER BY truncate to error", async () => {
+  test("query maps maxRecords/onLimit and leaves ORDER BY plan choice to the engine", async () => {
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     let executeOptions: ExecuteOptions | undefined;
 
@@ -386,8 +386,8 @@ describe("MCP tools", () => {
       sql: "SELECT * FROM APP100 ORDER BY name",
       onLimit: "truncate",
     });
-    expect(runtimeInputs[1]?.onLimit).toBe("error");
-    expect(executeOptions?.onLimitReached).toBe("error");
+    expect(runtimeInputs[1]?.onLimit).toBe("truncate");
+    expect(executeOptions?.onLimitReached).toBe("truncate");
   });
 
   test("query schema does not expose CLI-only format or per-call configPath", () => {

@@ -85,3 +85,15 @@ test("未解決 ORDER key は planning 時に拒否する", () => {
     hasKlike: false,
   })).toThrow(/ORDER_KEY_UNRESOLVED/);
 });
+
+test("JOIN の曖昧な非修飾 ORDER key は専用 planning error にする", () => {
+  const stmt = statement("SELECT a.$id FROM APP100 a JOIN APP200 b ON a.code = b.code ORDER BY name LIMIT 5");
+  expect(() => planCanonicalOrder({
+    stmt,
+    staticMode: "FULL_SCAN",
+    whereCapability: "EXACT_PUSHDOWN",
+    orderSemantics: new Map([["name", resolveFieldSemantics({ fieldType: "KSQL_AMBIGUOUS" })]]),
+    maxRecords: 10_000,
+    hasKlike: false,
+  })).toThrow(/ambiguous column reference.*ORDER_KEY_AMBIGUOUS/);
+});

@@ -30990,6 +30990,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["BY", "BY" /* BY */],
   ["HAVING", "HAVING" /* HAVING */],
   ["ORDER", "ORDER" /* ORDER */],
+  ["KORDER", "KORDER" /* KORDER */],
   ["ASC", "ASC" /* ASC */],
   ["DESC", "DESC" /* DESC */],
   ["LIMIT", "LIMIT" /* LIMIT */],
@@ -31515,7 +31516,7 @@ var Parser = class {
       case "WITH" /* WITH */:
         return this.parseWith();
       case "SELECT" /* SELECT */:
-        return this.tryParseUnionChain(this.parseSelect());
+        return this.tryParseUnionChain(this.parseSelect(true));
       case "INSERT" /* INSERT */:
         return this.parseInsert();
       case "UPDATE" /* UPDATE */:
@@ -31705,7 +31706,7 @@ var Parser = class {
       }
       query = w;
     } else if (tok.kind === "SELECT" /* SELECT */) {
-      const sel = this.parseSelect();
+      const sel = this.parseSelect(true);
       const chained = this.tryParseUnionChain(sel);
       query = chained;
     } else if (tok.kind === "INSERT" /* INSERT */) {
@@ -31898,7 +31899,7 @@ var Parser = class {
   // ----------------------------------------------------------
   // SELECT
   // ----------------------------------------------------------
-  parseSelect() {
+  parseSelect(allowKorder = false) {
     this.expect("SELECT" /* SELECT */);
     const distinct = this.consume("DISTINCT" /* DISTINCT */);
     const columns = this.parseSelectColumns();
@@ -31915,7 +31916,19 @@ var Parser = class {
         having = this.parseWhereExpr();
       }
     }
-    const orderBy = this.consume("ORDER" /* ORDER */) ? (this.expect("BY" /* BY */), this.parseOrderBy()) : [];
+    let orderMode = "CANONICAL";
+    let orderBy = [];
+    if (this.consume("ORDER" /* ORDER */)) {
+      this.expect("BY" /* BY */);
+      orderBy = this.parseOrderBy();
+    } else if (this.consume("KORDER" /* KORDER */)) {
+      if (!allowKorder) {
+        throw new ParseError("KORDER BY \u306F\u5229\u7528\u8005\u3078\u7D50\u679C\u3092\u8FD4\u3059\u30C8\u30C3\u30D7\u30EC\u30D9\u30EB SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059", this.prev());
+      }
+      orderMode = "KINTONE_NATIVE";
+      this.expect("BY" /* BY */);
+      orderBy = this.parseOrderBy();
+    }
     const limit = this.consume("LIMIT" /* LIMIT */) ? this.parseUnsignedInt() : null;
     const offset = this.consume("OFFSET" /* OFFSET */) ? this.parseUnsignedInt() : null;
     const hasWindow = columns.some((column) => column.type === "WINDOW_COL");
@@ -31932,6 +31945,7 @@ var Parser = class {
       where,
       groupBy,
       having,
+      orderMode,
       orderBy,
       limit,
       offset
@@ -31969,6 +31983,9 @@ var Parser = class {
   // ----------------------------------------------------------
   tryParseUnionChain(left) {
     if (this.peek().kind !== "UNION" /* UNION */) return left;
+    if (left.type === "SELECT" && left.orderMode === "KINTONE_NATIVE") {
+      throw new ParseError("KORDER BY \u306F UNION \u5206\u5C90\u3067\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
     this.advance();
     const all = this.consume("ALL" /* ALL */);
     const right = this.parseSelect();
@@ -33622,7 +33639,50 @@ function isReadOnlyStatement(stmt) {
   return !writesKintone(stmt) && (isReadOnlyType(stmt.type) || isDmlType(stmt.type));
 }
 function requiresCompleteInput(stmt) {
-  return isDmlType(stmt.type);
+  if (isDmlType(stmt.type)) return true;
+  switch (stmt.type) {
+    case "SELECT":
+      return selectRequiresCompleteInput(stmt);
+    case "UNION":
+      return unionRequiresCompleteInput(stmt);
+    case "WITH":
+      return stmt.ctes.some(
+        (cte) => cte.query.type === "SELECT" && selectRequiresCompleteInput(cte.query) || cte.query.type === "UNION" && unionRequiresCompleteInput(cte.query)
+      ) || (stmt.query.type === "SELECT" ? selectRequiresCompleteInput(stmt.query) : unionRequiresCompleteInput(stmt.query));
+    case "CREATE_TEMP_TABLE":
+      return stmt.query.type === "SELECT" ? selectRequiresCompleteInput(stmt.query) : stmt.query.type === "UNION" ? unionRequiresCompleteInput(stmt.query) : requiresCompleteInput(stmt.query);
+    default:
+      return false;
+  }
+}
+function unionRequiresCompleteInput(stmt) {
+  const left = stmt.left.type === "SELECT" ? selectRequiresCompleteInput(stmt.left) : unionRequiresCompleteInput(stmt.left);
+  return left || selectRequiresCompleteInput(stmt.right);
+}
+function selectRequiresCompleteInput(stmt) {
+  if (stmt.orderBy.length > 0) return true;
+  if (stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0 || column.type === "SCALAR_SUBQUERY_COL" && selectRequiresCompleteInput(column.query) || column.type === "CASE_COL" && column.expr.branches.some(
+      (branch) => whereRequiresCompleteInput(branch.condition)
+    )
+  )) return true;
+  return whereRequiresCompleteInput(stmt.where) || whereRequiresCompleteInput(stmt.having);
+}
+function whereRequiresCompleteInput(where) {
+  if (where === null) return false;
+  switch (where.type) {
+    case "BINARY":
+      return (where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY") && selectRequiresCompleteInput(where.right.query);
+    case "LOGICAL":
+      return whereRequiresCompleteInput(where.left) || whereRequiresCompleteInput(where.right);
+    case "NOT":
+    case "GROUP":
+      return whereRequiresCompleteInput(where.expr);
+    case "EXISTS":
+      return selectRequiresCompleteInput(where.query);
+    case "NULL_CHECK":
+      return false;
+  }
 }
 function hasWhereClause(stmt) {
   if (!stmt || typeof stmt !== "object") return false;
@@ -34425,6 +34485,7 @@ function buildInlinedQuery(stmt) {
     where,
     groupBy: [],
     having: null,
+    orderMode: "CANONICAL",
     orderBy: final.orderBy.length > 0 ? final.orderBy : cteBody.orderBy,
     limit: final.limit ?? cteBody.limit,
     offset: final.offset ?? cteBody.offset,
@@ -35019,6 +35080,72 @@ function analyzeBatch(statements) {
   };
 }
 
+// src/core/fieldSemantics.ts
+var STRING_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "SINGLE_LINE_TEXT",
+  "MULTI_LINE_TEXT",
+  "RICH_TEXT",
+  "LINK",
+  "DATE",
+  "TIME",
+  "DATETIME",
+  "CREATED_TIME",
+  "UPDATED_TIME",
+  "CREATOR",
+  "MODIFIER"
+]);
+var OPTION_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "STATUS"
+]);
+function resolveFieldSemantics(source) {
+  let compareMode;
+  if (source.fieldType === "RECORD_NUMBER" || source.fieldType === "__ID__") {
+    compareMode = "recordNumber";
+  } else if (source.fieldType === "NUMBER") {
+    compareMode = "number";
+  } else if (source.fieldType === "CALC") {
+    compareMode = source.sortKind === "number" ? "number" : "string";
+  } else if (OPTION_FIELD_TYPES.has(source.fieldType)) {
+    compareMode = "option";
+  } else if (STRING_FIELD_TYPES.has(source.fieldType)) {
+    compareMode = "string";
+  } else {
+    compareMode = "unsupported";
+  }
+  const optionOrder = source.optionOrder ? new Map(Object.entries(source.optionOrder)) : void 0;
+  return {
+    fieldType: source.fieldType,
+    compareMode,
+    inSubtable: source.inSubtable === true,
+    requiresCollectionOperators: source.inSubtable === true || source.requiresCollectionOperators === true,
+    ...optionOrder && optionOrder.size > 0 ? { optionOrder } : {}
+  };
+}
+function syntheticSemantics(compareMode, fieldType = compareMode === "number" ? "KSQL_NUMBER" : "KSQL_STRING") {
+  return { fieldType, compareMode, inSubtable: false, requiresCollectionOperators: false };
+}
+function withFieldSemanticSource(semantics, appId, fieldCode) {
+  return { ...semantics, source: { appId, fieldCode } };
+}
+function fieldSemanticsEqual(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.fieldType !== right.fieldType || left.compareMode !== right.compareMode || left.inSubtable !== right.inSubtable || left.requiresCollectionOperators !== right.requiresCollectionOperators) return false;
+  if (left.source?.appId !== right.source?.appId || left.source?.fieldCode !== right.source?.fieldCode) return false;
+  const a = left.optionOrder;
+  const b = right.optionOrder;
+  if (a === b) return true;
+  if (!a || !b || a.size !== b.size) return false;
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) return false;
+  }
+  return true;
+}
+
 // src/core/batchVariables.ts
 var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 function normalizeBatchVariableName(name) {
@@ -35054,24 +35181,129 @@ function validateDeclaredBatchVariables(statements, input) {
 }
 
 // src/core/scalarCompare.ts
-function compareScalarValues(op, leftStr, rightStr) {
-  if (op === "=") return leftStr === rightStr;
-  if (op === "!=" || op === "<>") return leftStr !== rightStr;
-  const rightNum = Number(rightStr);
-  if (leftStr === "" && rightStr !== "" && Number.isFinite(rightNum)) {
-    return op === "<" || op === "<=";
+function compareCodePointStrings(left, right) {
+  const a = left[Symbol.iterator]();
+  const b = right[Symbol.iterator]();
+  while (true) {
+    const av = a.next();
+    const bv = b.next();
+    if (av.done || bv.done) {
+      if (av.done && bv.done) return 0;
+      return av.done ? -1 : 1;
+    }
+    const ac = av.value.codePointAt(0) ?? 0;
+    const bc = bv.value.codePointAt(0) ?? 0;
+    if (ac < bc) return -1;
+    if (ac > bc) return 1;
   }
-  const leftNum = Number(leftStr);
-  const numeric = !Number.isNaN(leftNum) && !Number.isNaN(rightNum);
+}
+function triCompare(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function numberKey(value) {
+  if (value === "") return { band: 0 };
+  const numeric = Number(value);
+  if (numeric === Number.NEGATIVE_INFINITY) return { band: 1 };
+  if (Number.isFinite(numeric)) return { band: 2, value: numeric };
+  if (numeric === Number.POSITIVE_INFINITY) return { band: 3 };
+  if (value === "NaN") return { band: 4 };
+  return { band: 5, value };
+}
+function compareNumbers(left, right) {
+  const a = numberKey(left);
+  const b = numberKey(right);
+  if (a.band !== b.band) return a.band < b.band ? -1 : 1;
+  if (a.band === 2 && b.band === 2) return triCompare(a.value, b.value);
+  if (a.band === 5 && b.band === 5) return compareCodePointStrings(a.value, b.value);
+  return 0;
+}
+function recordNumberKey(value, allowPrefix) {
+  if (value === "") return { empty: true, normalizedId: "", display: value };
+  const match = /^\d+$/.test(value) ? value : allowPrefix ? /-(\d+)$/.exec(value)?.[1] : void 0;
+  if (match === void 0) {
+    throw new Error(`ArgumentError: invalid ${allowPrefix ? "RECORD_NUMBER" : "$id"} value: ${value}`);
+  }
+  return {
+    empty: false,
+    normalizedId: match.replace(/^0+(?=\d)/, ""),
+    display: value
+  };
+}
+function compareRecordNumbers(left, right, allowPrefix) {
+  const a = recordNumberKey(left, allowPrefix);
+  const b = recordNumberKey(right, allowPrefix);
+  if (a.empty || b.empty) return a.empty === b.empty ? 0 : a.empty ? -1 : 1;
+  if (a.normalizedId.length !== b.normalizedId.length) {
+    return a.normalizedId.length < b.normalizedId.length ? -1 : 1;
+  }
+  const idCmp = compareCodePointStrings(a.normalizedId, b.normalizedId);
+  return idCmp !== 0 ? idCmp : compareCodePointStrings(a.display, b.display);
+}
+function parseOptionValues(value, fieldType) {
+  if (value === "") return [];
+  if (fieldType !== "CHECK_BOX" && fieldType !== "MULTI_SELECT") return [value];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item ?? "")) : [value];
+  } catch {
+    return [value];
+  }
+}
+function optionVector(value, semantics) {
+  const order = semantics.optionOrder ?? /* @__PURE__ */ new Map();
+  const unique = [...new Set(parseOptionValues(value, semantics.fieldType))];
+  const vector = unique.map((label) => {
+    const rank = order.get(label);
+    return rank === void 0 ? { knownBand: 1, rank: 0, label } : { knownBand: 0, rank, label };
+  });
+  vector.sort(compareOptionElement);
+  return vector;
+}
+function compareOptionElement(left, right) {
+  if (left.knownBand !== right.knownBand) return left.knownBand < right.knownBand ? -1 : 1;
+  if (left.rank !== right.rank) return left.rank < right.rank ? -1 : 1;
+  return compareCodePointStrings(left.label, right.label);
+}
+function compareOptions(left, right, semantics) {
+  const a = optionVector(left, semantics);
+  const b = optionVector(right, semantics);
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index++) {
+    const cmp = compareOptionElement(a[index], b[index]);
+    if (cmp !== 0) return cmp;
+  }
+  return a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+}
+function compareCanonicalValues(left, right, semantics) {
+  switch (semantics.compareMode) {
+    case "string":
+      return compareCodePointStrings(left, right);
+    case "number":
+      return compareNumbers(left, right);
+    case "recordNumber":
+      return compareRecordNumbers(left, right, semantics.fieldType === "RECORD_NUMBER");
+    case "option":
+      return compareOptions(left, right, semantics);
+    case "unsupported":
+      throw new Error(`ArgumentError: values of type ${semantics.fieldType} cannot be compared.`);
+  }
+}
+function compareScalarValues(op, left, right, semantics = syntheticSemantics("string")) {
+  const cmp = compareCanonicalValues(left, right, semantics);
   switch (op) {
+    case "=":
+      return cmp === 0;
+    case "!=":
+    case "<>":
+      return cmp !== 0;
     case ">":
-      return numeric ? leftNum > rightNum : leftStr > rightStr;
+      return cmp > 0;
     case "<":
-      return numeric ? leftNum < rightNum : leftStr < rightStr;
+      return cmp < 0;
     case ">=":
-      return numeric ? leftNum >= rightNum : leftStr >= rightStr;
+      return cmp >= 0;
     case "<=":
-      return numeric ? leftNum <= rightNum : leftStr <= rightStr;
+      return cmp <= 0;
   }
 }
 function selectScalarExtreme(values, extreme) {
@@ -35081,17 +35313,64 @@ function selectScalarExtreme(values, extreme) {
   const numeric = candidates.every((value) => !Number.isNaN(Number(value)));
   const compare = (left, right) => {
     if (numeric) {
-      const leftNum = Number(left);
-      const rightNum = Number(right);
-      if (leftNum < rightNum) return -1;
-      if (leftNum > rightNum) return 1;
+      const numericCmp = triCompare(Number(left), Number(right));
+      if (numericCmp !== 0) return numericCmp;
     }
-    return left < right ? -1 : left > right ? 1 : 0;
+    return compareCodePointStrings(left, right);
   };
   return candidates.reduce((best, candidate) => {
     const cmp = compare(candidate, best);
     return extreme === "greatest" ? cmp > 0 ? candidate : best : cmp < 0 ? candidate : best;
   });
+}
+
+// src/core/explainMetadata.ts
+function whereNeedsFieldMetadata(where) {
+  if (where === null) return false;
+  switch (where.type) {
+    case "BINARY":
+      return valueNeedsFieldMetadata(where.left);
+    case "NULL_CHECK":
+      return valueNeedsFieldMetadata(where.field);
+    case "LOGICAL":
+      return whereNeedsFieldMetadata(where.left) || whereNeedsFieldMetadata(where.right);
+    case "NOT":
+    case "GROUP":
+      return whereNeedsFieldMetadata(where.expr);
+    case "EXISTS":
+      return false;
+  }
+}
+function valueNeedsFieldMetadata(value) {
+  if (Array.isArray(value)) return value.some(valueNeedsFieldMetadata);
+  if (value === null || typeof value !== "object") return false;
+  const item = value;
+  if (item["type"] === "FIELD") return item["field"] !== "$id";
+  if (item["type"] === "SELECT") return false;
+  return Object.values(item).some(valueNeedsFieldMetadata);
+}
+function selectNeedsOwnMetadata(statement) {
+  return whereNeedsFieldMetadata(statement.where) || statement.orderBy.length > 0 || statement.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+}
+function explainNeedsAppMetadata(statement) {
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(visit);
+    const item = node;
+    if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node)) {
+      return true;
+    }
+    if ((item["type"] === "UPDATE" || item["type"] === "DELETE") && whereNeedsFieldMetadata(node.where)) {
+      return true;
+    }
+    return Object.values(item).some(visit);
+  };
+  return visit(statement);
 }
 
 // src/engine/evalFunc.ts
@@ -35358,34 +35637,35 @@ function resolveFieldRef(row, field) {
 }
 
 // src/engine/evalWhere.ts
-function evalWhere(expr, row, resolveFieldType, appliedKlikes) {
+function evalWhere(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   switch (expr.type) {
     case "BINARY":
-      return evalBinary(expr, row, resolveFieldType, appliedKlikes);
+      return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
     case "NULL_CHECK":
       return evalNullCheck(expr, row);
     case "LOGICAL":
-      return evalLogical(expr, row, resolveFieldType, appliedKlikes);
+      return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
     case "NOT":
-      return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
+      return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
     case "GROUP":
-      return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
+      return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
     case "EXISTS": {
       const exists = expr.resolved;
       return expr.not ? !exists : exists;
     }
   }
 }
-function evalBinary(expr, row, resolveFieldType, appliedKlikes) {
+function evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
     if (appliedKlikes?.has(expr)) return true;
     throw new Error("KLIKE / NOT KLIKE \u306F\u62BC\u3057\u4E0B\u3052\u6E08\u307F\u96C6\u5408\u306B\u542B\u307E\u308C\u306A\u3044\u305F\u3081 JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093");
   }
-  const left = resolveField(expr.left, row, resolveFieldType);
+  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics2);
   const fieldType = expr.left.type === "FIELD" ? resolveFieldType?.(expr.left) : void 0;
-  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType);
+  const semantics = semanticsForLeft(expr.left, fieldType, resolveFieldSemantics2);
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics2);
 }
-function evalOp(op, leftStr, right, row, fieldType, resolveFieldType) {
+function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics = syntheticSemantics("string"), resolveFieldSemantics2) {
   if (op === "IN" || op === "NOT_IN") {
     let values = null;
     if (right.type === "IN_LIST") {
@@ -35410,8 +35690,53 @@ function evalOp(op, leftStr, right, row, fieldType, resolveFieldType) {
   if (op === "KLIKE" || op === "NOT_KLIKE") {
     throw new Error("KLIKE / NOT KLIKE \u306F JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093\uFF08SIMPLE SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059\uFF09");
   }
-  const rightStr = resolveValue(right, row, resolveFieldType);
-  return compareScalarValues(op, leftStr, rightStr);
+  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics2);
+  return compareScalarValues(op, leftStr, rightStr, semantics);
+}
+var NUMERIC_STRING_FUNCTIONS = /* @__PURE__ */ new Set([
+  "LENGTH",
+  "INSTR",
+  "ROUND",
+  "FLOOR",
+  "CEIL",
+  "TRUNCATE",
+  "YEAR",
+  "MONTH",
+  "DAY",
+  "DATEDIFF",
+  "ABS",
+  "MOD",
+  "POWER",
+  "SQRT"
+]);
+function semanticsForLeft(left, fieldType, resolveSemantics) {
+  if (left.type === "FIELD") {
+    return resolveSemantics?.(left) ?? (fieldType ? resolveFieldSemantics({ fieldType }) : syntheticSemantics("string"));
+  }
+  if (left.type === "ARITH_FIELD") return syntheticSemantics("number");
+  if (left.type === "FUNC_FIELD") {
+    return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(left.expr.func) ? "number" : "string");
+  }
+  if (left.type === "CASE_FIELD") {
+    const results = [
+      ...left.expr.branches.map((branch) => branch.result),
+      ...left.expr.elseResult ? [left.expr.elseResult] : []
+    ];
+    const modes = results.map((result) => {
+      if (result.type === "NUMBER" || result.type === "ARITH") return syntheticSemantics("number");
+      if (result.type === "STRING_FUNC") {
+        return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(result.func) ? "number" : "string");
+      }
+      if (result.type === "FIELD_REF") {
+        const dot = result.field.indexOf(".");
+        const ref = dot > 0 ? { type: "FIELD", tableAlias: result.field.slice(0, dot), field: result.field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field: result.field };
+        return resolveSemantics?.(ref) ?? syntheticSemantics("string");
+      }
+      return syntheticSemantics("string");
+    });
+    if (modes.length > 0 && modes.every((mode) => mode.compareMode === modes[0].compareMode)) return modes[0];
+  }
+  return syntheticSemantics("string");
 }
 var STRING_ARRAY_FIELD_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
 var OBJECT_ARRAY_FIELD_TYPES = /* @__PURE__ */ new Set([
@@ -35462,20 +35787,20 @@ function evalNullCheck(expr, row) {
   const val = resolveField(expr.field, row);
   return expr.not ? val !== "" : val === "";
 }
-function evalLogical(expr, row, resolveFieldType, appliedKlikes) {
+function evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes) && evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
   }
-  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes) || evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
 }
-function resolveField(field, row, resolveFieldType) {
+function resolveField(field, row, resolveFieldType, resolveFieldSemantics2) {
   if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType);
+  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics2);
   const key = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
   return resolveFieldRef(row, key);
 }
-function resolveValue(value, row, resolveFieldType) {
+function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2) {
   switch (value.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
@@ -35498,14 +35823,14 @@ function resolveValue(value, row, resolveFieldType) {
       if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
       return String(evalArithExpr(value.expr, row));
     case "CASE_VALUE":
-      return evalCaseWhen(value.expr, row, resolveFieldType);
+      return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics2);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
 }
-function evalCaseWhen(expr, row, resolveFieldType) {
+function evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2) {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType)) {
+    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2)) {
       return evalCaseResult(branch.result, row);
     }
   }
@@ -36136,6 +36461,141 @@ async function resolveDmlTargetIds(getRecords, app, query, options) {
   };
 }
 
+// src/core/optimization/canonicalOrderPlanner.ts
+var REST_OFFSET_MAX = 1e4;
+var REST_LIMIT_MAX = 500;
+function fieldSemantics(item, semantics) {
+  return item.key.type === "FIELD_NAME" ? semantics.get(item.key.name) : void 0;
+}
+function planCanonicalOrder(input) {
+  const { stmt } = input;
+  const reasons = [];
+  const windowOrderBy = stmt.columns.flatMap(
+    (column) => column.type === "WINDOW_COL" ? column.orderBy : []
+  );
+  const allOrderBy = [...stmt.orderBy, ...windowOrderBy];
+  for (const item of allOrderBy) {
+    if (item.key.type !== "FIELD_NAME") continue;
+    const semantics = fieldSemantics(item, input.orderSemantics);
+    if (!semantics) {
+      reasons.push("ORDER_KEY_UNRESOLVED");
+      continue;
+    }
+    if (semantics.fieldType === "KSQL_AMBIGUOUS") reasons.push("ORDER_KEY_AMBIGUOUS");
+    else if (semantics.compareMode === "unsupported") reasons.push("ORDER_KEY_UNSUPPORTED");
+  }
+  if (reasons.includes("ORDER_KEY_AMBIGUOUS")) {
+    throw new Error(
+      "ArgumentError: ORDER BY key is an ambiguous column reference (reason=ORDER_KEY_AMBIGUOUS). Qualify the key with its table alias."
+    );
+  }
+  if (reasons.includes("ORDER_KEY_UNSUPPORTED") || reasons.includes("ORDER_KEY_UNRESOLVED")) {
+    const reason = reasons.includes("ORDER_KEY_UNSUPPORTED") ? "ORDER_KEY_UNSUPPORTED" : "ORDER_KEY_UNRESOLVED";
+    throw new Error(`ArgumentError: ORDER BY key has no canonical comparison contract (reason=${reason}).`);
+  }
+  const allRestEquivalent = stmt.orderBy.length > 0 && windowOrderBy.length === 0 && stmt.orderBy.every(
+    (item) => item.key.type === "FIELD_NAME" && item.key.name === "$id"
+  );
+  if (!allRestEquivalent) reasons.push("ORDER_KEY_NOT_REST_EQUIVALENT");
+  if (input.whereCapability !== "EXACT_PUSHDOWN") reasons.push("WHERE_NOT_EXACT");
+  if (input.staticMode !== "SIMPLE") reasons.push("QUERY_SHAPE_LOCAL");
+  if (stmt.limit === null || stmt.limit < 0 || stmt.limit > REST_LIMIT_MAX) {
+    reasons.push("LIMIT_NOT_REST_WINDOW");
+  }
+  if ((stmt.offset ?? 0) < 0 || (stmt.offset ?? 0) > REST_OFFSET_MAX) {
+    reasons.push("OFFSET_NOT_REST_WINDOW");
+  }
+  if (stmt.limit !== null && stmt.limit > input.maxRecords) reasons.push("MAX_RECORDS_WINDOW");
+  if (input.hasKlike) reasons.push("KLIKE_NOT_REST_WINDOW");
+  if (reasons.length === 0) {
+    return {
+      kind: "CANONICAL_REST_TOP_N",
+      requiresCompleteInput: false,
+      localOrderBy: false,
+      applyLocalOffsetLimit: false,
+      reasonCodes: []
+    };
+  }
+  return {
+    kind: "CANONICAL_LOCAL",
+    requiresCompleteInput: allOrderBy.length > 0,
+    localOrderBy: stmt.orderBy.length > 0,
+    applyLocalOffsetLimit: stmt.orderBy.length > 0,
+    reasonCodes: [...new Set(reasons)]
+  };
+}
+
+// src/core/optimization/korderPlanner.ts
+var KORDER_NATIVE_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "RECORD_NUMBER",
+  "SINGLE_LINE_TEXT",
+  "NUMBER",
+  "CALC",
+  "DATE",
+  "DATETIME",
+  "TIME",
+  "CREATED_TIME",
+  "UPDATED_TIME",
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "STATUS",
+  "LINK",
+  "CREATOR",
+  "MODIFIER"
+]);
+function planKorderNative(input) {
+  const { stmt } = input;
+  const reasons = [];
+  if (stmt.orderMode !== "KINTONE_NATIVE") reasons.push("KORDER_MODE_REQUIRED");
+  if (stmt.from.cteName !== null || stmt.from.subtableCode || input.staticMode !== "SIMPLE") {
+    reasons.push("KORDER_QUERY_SHAPE_UNSUPPORTED");
+  }
+  if (input.whereCapability !== "EXACT_PUSHDOWN") reasons.push("KORDER_WHERE_NOT_EXACT");
+  if (input.hasKlike) reasons.push("KORDER_KLIKE_UNSUPPORTED");
+  if (stmt.orderBy.length === 0) reasons.push("KORDER_KEY_REQUIRED");
+  for (const item of stmt.orderBy) {
+    if (item.key.type !== "FIELD_NAME") {
+      reasons.push(`KORDER_KEY_NOT_DIRECT_FIELD(key=${item.key.type})`);
+      continue;
+    }
+    const name = item.key.name;
+    const semantics = input.orderSemantics.get(name);
+    if (!semantics) {
+      reasons.push(`KORDER_KEY_UNRESOLVED(field=${name})`);
+      continue;
+    }
+    if (name === "$id") continue;
+    if (!semantics.source || semantics.source.fieldCode !== name) {
+      reasons.push(`KORDER_KEY_NOT_DIRECT_FIELD(field=${name})`);
+      continue;
+    }
+    if (!KORDER_NATIVE_FIELD_TYPES.has(semantics.fieldType)) {
+      reasons.push(`KORDER_TYPE_UNSUPPORTED(field=${name}, type=${semantics.fieldType})`);
+    }
+  }
+  if (stmt.limit === null || stmt.limit < 0 || stmt.limit > 500) {
+    reasons.push(`KORDER_LIMIT_INVALID(limit=${String(stmt.limit)})`);
+  }
+  if (stmt.limit !== null && stmt.limit > input.maxRecords) {
+    reasons.push(`KORDER_LIMIT_EXCEEDS_MAX_RECORDS(limit=${stmt.limit}, maxRecords=${input.maxRecords})`);
+  }
+  const offset = stmt.offset ?? 0;
+  if (offset < 0 || offset > 1e4) reasons.push(`KORDER_OFFSET_INVALID(offset=${offset})`);
+  const unique = [...new Set(reasons)];
+  if (unique.length > 0) {
+    throw new Error(
+      `ArgumentError: KORDER BY cannot be executed (mode=KINTONE_NATIVE; ${unique.join(", ")}). Use ORDER BY for canonical local ordering or simplify the query.`
+    );
+  }
+  return {
+    kind: "KORDER_NATIVE",
+    requiresCompleteInput: false,
+    localOrderBy: false,
+    applyLocalOffsetLimit: false,
+    reasonCodes: []
+  };
+}
+
 // src/engine/process.ts
 function flatten(record2, alias) {
   const row = {};
@@ -36200,9 +36660,9 @@ function applyJoin(leftRows, rightRows, join) {
   }
   return result;
 }
-function applyFilter(rows, where, resolveFieldType, appliedKlikes) {
+function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2));
 }
 function hasAggregateColumns(columns) {
   return columns.some(
@@ -36263,7 +36723,7 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
     let strVal;
     if (arg.type === "FIELD_REF") {
       const raw = row[arg.field];
-      if (raw === void 0 || raw === "") continue;
+      if (raw === void 0 || raw === "" && func !== "MIN" && func !== "MAX") continue;
       strVal = raw;
     } else {
       const n = evalArithExpr(arg, row);
@@ -36275,10 +36735,16 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
   const eff = distinct ? [...new Set(strValues)] : strValues;
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
-  const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" ? resolveAggSortKind?.(toAggregateFieldRef(arg.field)) : void 0;
-  if (sortKind === "string") {
-    if (eff.length === 0) return "";
-    return func === "MAX" ? maxStringOf(eff) : minStringOf(eff);
+  const comparison = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" ? resolveAggSortKind?.(toAggregateFieldRef(arg.field)) : void 0;
+  if (func === "MIN" || func === "MAX") {
+    if (eff.length === 0) return 0;
+    const semantics = typeof comparison === "string" ? syntheticSemantics(comparison) : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
+    let result = eff[0];
+    for (const candidate of eff.slice(1)) {
+      const cmp = compareCanonicalValues(candidate, result, semantics);
+      if (func === "MAX" && cmp > 0 || func === "MIN" && cmp < 0) result = candidate;
+    }
+    return result;
   }
   const nums = eff.map(Number);
   switch (func) {
@@ -36286,36 +36752,11 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
       return nums.reduce((a, b) => a + b, 0);
     case "AVG":
       return nums.length === 0 ? 0 : nums.reduce((a, b) => a + b, 0) / nums.length;
-    // Math.max(...nums) は要素数が多いと RangeError になるためループで求める
-    case "MAX":
-      return nums.length === 0 ? 0 : maxOf(nums);
-    case "MIN":
-      return nums.length === 0 ? 0 : minOf(nums);
   }
 }
 function toAggregateFieldRef(field) {
   const dot = field.indexOf(".");
   return dot > 0 ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field };
-}
-function maxStringOf(values) {
-  let value = values[0];
-  for (const candidate of values) if (candidate > value) value = candidate;
-  return value;
-}
-function minStringOf(values) {
-  let value = values[0];
-  for (const candidate of values) if (candidate < value) value = candidate;
-  return value;
-}
-function maxOf(nums) {
-  let m = nums[0];
-  for (const n of nums) if (n > m) m = n;
-  return m;
-}
-function minOf(nums) {
-  let m = nums[0];
-  for (const n of nums) if (n < m) m = n;
-  return m;
 }
 function evalAggArithExpr(node, rows, resolveAggSortKind) {
   if (node.type === "NUMBER") return node.value;
@@ -36348,9 +36789,9 @@ function aggregateSyntheticName2(func, distinct, arg) {
   const argStr = aggregateArgLabel(arg);
   return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
 }
-function applyHaving(rows, having, resolveFieldType) {
+function applyHaving(rows, having, resolveFieldType, resolveFieldSemantics2) {
   if (having === null) return rows;
-  return rows.filter((row) => evalWhere(having, row, resolveFieldType));
+  return rows.filter((row) => evalWhere(having, row, resolveFieldType, void 0, resolveFieldSemantics2));
 }
 function applyDistinct(rows, columns) {
   if (rows.length === 0) return rows;
@@ -36402,27 +36843,37 @@ function buildDistinctKeyBuilder(rows, columns) {
     return JSON.stringify(values);
   };
 }
-function applyOrderBy(rows, orderBy, optionOrders, sortKinds) {
+function applyOrderBy(rows, orderBy, optionOrders, sortKinds, fieldSemantics2) {
   if (orderBy.length === 0) return rows;
-  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds).rows.map((item) => item.row);
+  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics2).rows.map((item) => item.row);
 }
-function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds) {
-  const keyMeta = orderBy.map(({ key }) => ({
-    orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : void 0,
-    sortKind: key.type === "FIELD_NAME" ? sortKinds?.get(key.name) : void 0
-  }));
+function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics2) {
+  const keyMeta = orderBy.map(({ key }) => {
+    if (key.type === "ARITH_KEY") return { semantics: syntheticSemantics("number") };
+    if (key.type === "FUNC_KEY") {
+      return { semantics: syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(key.expr.func) ? "number" : "string") };
+    }
+    const semantics = fieldSemantics2?.get(key.name);
+    if (semantics) return { semantics };
+    const orderMap = optionOrders?.get(key.name);
+    if (orderMap) {
+      return {
+        semantics: {
+          fieldType: "MULTI_SELECT",
+          compareMode: "option",
+          inSubtable: false,
+          requiresCollectionOperators: false,
+          optionOrder: orderMap
+        }
+      };
+    }
+    return { semantics: syntheticSemantics(sortKinds?.get(key.name) ?? "string") };
+  });
   const decorated = rows.map((row) => ({
     row,
     keys: orderBy.map(({ key }, i) => {
       const s = evalOrderKey(key, row);
-      const n = Number(s);
-      const orderMap = keyMeta[i].orderMap;
-      return {
-        s,
-        n,
-        isNum: !Number.isNaN(n),
-        rank: orderMap ? minChoiceIndex(parseChoiceValues(s), orderMap) : 0
-      };
+      return { s };
     })
   }));
   const compare = (a, b) => compareDecoratedRows(a, b, orderBy, keyMeta);
@@ -36437,15 +36888,24 @@ function compareDecoratedRows(a, b, orderBy, keyMeta) {
   return 0;
 }
 function compareSortKeys(a, b, meta3) {
-  if (meta3.orderMap) {
-    if (a.rank !== b.rank) return a.rank - b.rank;
-    return a.s.localeCompare(b.s, "ja");
-  }
-  if (meta3.sortKind === "string") {
-    return a.s.localeCompare(b.s, "ja");
-  }
-  return a.isNum && b.isNum ? a.n - b.n : a.s.localeCompare(b.s, "ja");
+  return compareCanonicalValues(a.s, b.s, meta3.semantics);
 }
+var NUMERIC_ORDER_FUNCTIONS = /* @__PURE__ */ new Set([
+  "LENGTH",
+  "INSTR",
+  "ROUND",
+  "FLOOR",
+  "CEIL",
+  "TRUNCATE",
+  "YEAR",
+  "MONTH",
+  "DAY",
+  "DATEDIFF",
+  "ABS",
+  "MOD",
+  "POWER",
+  "SQRT"
+]);
 function evalOrderKey(key, row) {
   switch (key.type) {
     case "FIELD_NAME":
@@ -36456,30 +36916,7 @@ function evalOrderKey(key, row) {
       return evalStringFunc(key.expr, row);
   }
 }
-function parseChoiceValues(raw) {
-  const trimmed = raw.trim();
-  if (trimmed === "") return [""];
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    try {
-      const arr = JSON.parse(trimmed);
-      if (Array.isArray(arr)) {
-        return arr.map((v) => String(v ?? ""));
-      }
-    } catch {
-    }
-  }
-  return [trimmed];
-}
-function minChoiceIndex(values, orderMap) {
-  let min = Number.MAX_SAFE_INTEGER;
-  for (const value of values) {
-    const idx = orderMap.get(value);
-    const rank = idx ?? Number.MAX_SAFE_INTEGER;
-    if (rank < min) min = rank;
-  }
-  return min;
-}
-function applyWindow(rows, columns, optionOrders, sortKinds) {
+function applyWindow(rows, columns, optionOrders, sortKinds, fieldSemantics2) {
   const windows = columns.filter((column) => column.type === "WINDOW_COL");
   if (rows.length === 0 || windows.length === 0) return rows;
   for (const window of windows) {
@@ -36491,7 +36928,7 @@ function applyWindow(rows, columns, optionOrders, sortKinds) {
       else partitions.set(key, [row]);
     }
     for (const partition of partitions.values()) {
-      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds);
+      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics2);
       const sorted = sortedResult.rows;
       let rank = 1;
       let denseRank = 1;
@@ -36516,7 +36953,7 @@ function applyLimit(rows, limit, offset) {
   if (limit === null) return rows.slice(start);
   return rows.slice(start, start + limit);
 }
-function project(rows, columns, scalarCache, resolveFieldType, sourceColumns) {
+function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, resolveFieldSemantics2) {
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
     const projected2 = rows.map((row) => stripParentShortcutColumns(row));
     const cols = projected2.length > 0 ? Object.keys(projected2[0]) : [...sourceColumns ?? []];
@@ -36580,7 +37017,7 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns) {
         }
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
-          out[key] = evalCaseWhen(col.expr, row, resolveFieldType);
+          out[key] = evalCaseWhen(col.expr, row, resolveFieldType, resolveFieldSemantics2);
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -36735,6 +37172,26 @@ function resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind) {
     args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows, resolveAggSortKind))
   };
 }
+function deriveOutputOrderSemantics(columns) {
+  const result = /* @__PURE__ */ new Map();
+  for (const column of columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      result.set(column.alias, syntheticSemantics("number"));
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+        result.set(column.alias, syntheticSemantics("number"));
+      } else if (column.func === "GROUP_CONCAT") {
+        result.set(column.alias, syntheticSemantics("string"));
+      }
+    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL") {
+      result.set(column.alias, syntheticSemantics("string"));
+    } else if (column.type === "STRFUNC_COL") {
+      result.set(column.alias, syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(column.expr.func) ? "number" : "string"));
+    }
+  }
+  return result;
+}
 function runFullScan(input) {
   const {
     stmt,
@@ -36742,12 +37199,17 @@ function runFullScan(input) {
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics,
     fieldTypeResolver,
+    fieldSemanticsResolver,
     havingFieldTypeResolver,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes,
     sourceColumns
   } = input;
+  const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
+  for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
   let rows = [];
   const mainAlias = stmt.from.alias;
   const mainRecords = tables.get(mainAlias) ?? tables.get(null) ?? [];
@@ -36758,18 +37220,18 @@ function runFullScan(input) {
     const rightRows = rightRecords.map((r) => flatten(r, rightAlias));
     rows = applyJoin(rows, rightRows, join);
   }
-  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
   }
-  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
-  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, havingFieldSemanticsResolver);
+  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds, effectiveOrderSemantics);
   if (stmt.distinct) {
     rows = applyDistinct(rows, stmt.columns);
   }
-  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
+  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds, effectiveOrderSemantics);
   rows = applyLimit(rows, stmt.limit, stmt.offset);
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns, fieldSemanticsResolver);
 }
 
 // src/converter/subtableAdapter.ts
@@ -37037,6 +37499,192 @@ function renderValidationValue(value) {
   return String(value);
 }
 
+// src/core/optimization/whereCapability.ts
+var RANGE_AND_EQUALITY = ["=", "!=", ">", "<", ">=", "<="];
+var EQUALITY_IN = ["=", "!=", "in", "not in"];
+var NATIVE_OPERATORS = /* @__PURE__ */ new Map([
+  ["RECORD_NUMBER", /* @__PURE__ */ new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
+  ["__ID__", /* @__PURE__ */ new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
+  ["CREATOR", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["MODIFIER", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["CREATED_TIME", new Set(RANGE_AND_EQUALITY)],
+  ["UPDATED_TIME", new Set(RANGE_AND_EQUALITY)],
+  ["DATE", new Set(RANGE_AND_EQUALITY)],
+  ["TIME", new Set(RANGE_AND_EQUALITY)],
+  ["DATETIME", new Set(RANGE_AND_EQUALITY)],
+  ["SINGLE_LINE_TEXT", /* @__PURE__ */ new Set(["=", "!=", "in", "not in", "like", "not like"])],
+  ["LINK", /* @__PURE__ */ new Set(["=", "!=", "in", "not in", "like", "not like"])],
+  ["NUMBER", /* @__PURE__ */ new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
+  ["CALC", /* @__PURE__ */ new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
+  ["MULTI_LINE_TEXT", /* @__PURE__ */ new Set(["like", "not like"])],
+  ["RICH_TEXT", /* @__PURE__ */ new Set(["like", "not like"])],
+  ["CHECK_BOX", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["RADIO_BUTTON", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["DROP_DOWN", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["MULTI_SELECT", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["FILE", /* @__PURE__ */ new Set(["like", "not like"])],
+  ["USER_SELECT", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["ORGANIZATION_SELECT", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["GROUP_SELECT", /* @__PURE__ */ new Set(["in", "not in"])],
+  ["STATUS", new Set(EQUALITY_IN)]
+]);
+var LOCAL_SCALAR_TYPES = /* @__PURE__ */ new Set([
+  "RECORD_NUMBER",
+  "__ID__",
+  "CREATOR",
+  "MODIFIER",
+  "CREATED_TIME",
+  "UPDATED_TIME",
+  "DATE",
+  "TIME",
+  "DATETIME",
+  "SINGLE_LINE_TEXT",
+  "LINK",
+  "NUMBER",
+  "CALC",
+  "MULTI_LINE_TEXT",
+  "RICH_TEXT",
+  "RADIO_BUTTON",
+  "DROP_DOWN",
+  "STATUS",
+  // 一時表・CTE・式列は kintone REST へは送らず、共有ローカル評価器で扱う。
+  "KSQL_STRING",
+  "KSQL_NUMBER",
+  "KSQL_BOOLEAN"
+]);
+var LOCAL_COLLECTION_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "FILE",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "STATUS_ASSIGNEE",
+  "CATEGORY"
+]);
+function nativeWhereOperatorsForType(fieldType) {
+  return NATIVE_OPERATORS.get(fieldType) ?? /* @__PURE__ */ new Set();
+}
+function classifyWhereCapability(where, resolveField2) {
+  if (where === null) {
+    return { capability: "EXACT_PUSHDOWN", reasons: [{ code: "WHERE_EXACT" }] };
+  }
+  return classifyNode(where, resolveField2);
+}
+function classifyNode(where, resolveField2) {
+  switch (where.type) {
+    case "BINARY":
+      return classifyBinary(where.op, where.left, where.right.type, resolveField2);
+    case "NULL_CHECK":
+      if (where.field.type !== "FIELD") return localExpression();
+      return classifyLocalOnlyField(where.field, where.not ? "IS NOT NULL" : "IS NULL", resolveField2);
+    case "EXISTS":
+      return localExpression();
+    case "GROUP":
+      return classifyNode(where.expr, resolveField2);
+    case "NOT": {
+      const inner = classifyNode(where.expr, resolveField2);
+      return inner.capability === "SUPERSET_PREFILTER" ? { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] } : inner;
+    }
+    case "LOGICAL": {
+      const left = classifyNode(where.left, resolveField2);
+      const right = classifyNode(where.right, resolveField2);
+      return combineLogical(where.op, left, right);
+    }
+  }
+}
+function classifyBinary(op, left, rightType, resolveField2) {
+  if (left.type !== "FIELD") return localExpression();
+  const semantics = resolveField2(left);
+  if (!semantics) {
+    return unsupported("WHERE_FIELD_UNRESOLVED", left.field, void 0, normalizeOperator(op));
+  }
+  if (!hasLocalContract(semantics.fieldType, op)) {
+    return unsupported("WHERE_OPERATOR_UNSUPPORTED", left.field, semantics.fieldType, normalizeOperator(op));
+  }
+  const nativeOp = normalizeOperator(op);
+  const native = nativeWhereOperatorsForType(semantics.fieldType);
+  const rightCanPush = rightType === "STRING" || rightType === "NUMBER" || rightType === "IN_LIST" || rightType === "KINTONE_FUNC";
+  const structureAllows = !semantics.requiresCollectionOperators || nativeOp !== "=" && nativeOp !== "!=";
+  const sqlLikeIsResidual = op === "LIKE" || op === "NOT_LIKE";
+  if (rightCanPush && structureAllows && native.has(nativeOp) && !sqlLikeIsResidual) {
+    return {
+      capability: "EXACT_PUSHDOWN",
+      reasons: [{
+        code: "WHERE_EXACT",
+        field: left.field,
+        fieldType: semantics.fieldType,
+        operator: nativeOp
+      }]
+    };
+  }
+  return {
+    capability: "LOCAL_ONLY",
+    reasons: [{
+      code: "WHERE_RESIDUAL",
+      field: left.field,
+      fieldType: semantics.fieldType,
+      operator: nativeOp
+    }]
+  };
+}
+function classifyLocalOnlyField(field, operator, resolveField2) {
+  const semantics = resolveField2(field);
+  if (!semantics) return unsupported("WHERE_FIELD_UNRESOLVED", field.field, void 0, operator);
+  if (!LOCAL_SCALAR_TYPES.has(semantics.fieldType) && !LOCAL_COLLECTION_TYPES.has(semantics.fieldType)) {
+    return unsupported("WHERE_OPERATOR_UNSUPPORTED", field.field, semantics.fieldType, operator);
+  }
+  return {
+    capability: "LOCAL_ONLY",
+    reasons: [{ code: "WHERE_RESIDUAL", field: field.field, fieldType: semantics.fieldType, operator }]
+  };
+}
+function hasLocalContract(fieldType, op) {
+  if (LOCAL_SCALAR_TYPES.has(fieldType)) return true;
+  if (!LOCAL_COLLECTION_TYPES.has(fieldType)) return false;
+  return op === "=" || op === "!=" || op === "<>" || op === "IN" || op === "NOT_IN" || op === "LIKE" || op === "NOT_LIKE" || op === "KLIKE" || op === "NOT_KLIKE";
+}
+function normalizeOperator(op) {
+  switch (op) {
+    case "<>":
+      return "!=";
+    case "IN":
+      return "in";
+    case "NOT_IN":
+      return "not in";
+    case "LIKE":
+    case "KLIKE":
+      return "like";
+    case "NOT_LIKE":
+    case "NOT_KLIKE":
+      return "not like";
+    default:
+      return op;
+  }
+}
+function combineLogical(op, left, right) {
+  const reasons = [...left.reasons, ...right.reasons];
+  if (left.capability === "UNSUPPORTED" || right.capability === "UNSUPPORTED") {
+    return { capability: "UNSUPPORTED", reasons };
+  }
+  if (left.capability === "EXACT_PUSHDOWN" && right.capability === "EXACT_PUSHDOWN") {
+    return { capability: "EXACT_PUSHDOWN", reasons };
+  }
+  if (op === "AND" && (left.capability === "EXACT_PUSHDOWN" || right.capability === "EXACT_PUSHDOWN" || left.capability === "SUPERSET_PREFILTER" || right.capability === "SUPERSET_PREFILTER")) {
+    return {
+      capability: "SUPERSET_PREFILTER",
+      reasons: [{ code: "WHERE_SUPERSET_PREFILTER" }, ...reasons]
+    };
+  }
+  return { capability: "LOCAL_ONLY", reasons };
+}
+function localExpression() {
+  return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
+}
+function unsupported(code, field, fieldType, operator) {
+  return { capability: "UNSUPPORTED", reasons: [{ code, field, fieldType, operator }] };
+}
+
 // src/execute.ts
 var SEARCH_ABORTED_WARNING = "\u691C\u7D22\u304C 10 \u4E07\u4EF6\u3067\u6253\u3061\u5207\u3089\u308C\u3001\u7D50\u679C\u304C\u6B20\u843D\u3057\u305F\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002";
 var SearchAbortedError = class extends Error {
@@ -37047,8 +37695,20 @@ var SearchAbortedError = class extends Error {
 };
 var materializedMetaBySelectResult = /* @__PURE__ */ new WeakMap();
 var materializedMetaByValidationResult = /* @__PURE__ */ new WeakMap();
+var defaultCacheContextByClient = /* @__PURE__ */ new WeakMap();
+var nextDefaultCacheContextId = 1;
+function resolveCacheContext(client, explicit) {
+  if (explicit) return explicit;
+  let context = defaultCacheContextByClient.get(client);
+  if (!context) {
+    context = `client:${nextDefaultCacheContextId++}`;
+    defaultCacheContextByClient.set(client, context);
+  }
+  return context;
+}
 async function execute(sql, client, options = {}) {
   const startedAt = Date.now();
+  const cacheContext = resolveCacheContext(client, options.cacheContext);
   const stmt = parseSql(sql);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
@@ -37062,7 +37722,7 @@ async function execute(sql, client, options = {}) {
     stmt,
     guardedClient,
     options,
-    options.cacheContext ?? "default"
+    cacheContext
   );
   metrics.elapsedMs = Date.now() - startedAt;
   return { ...attachSearchAbortWarning(result, collector), metrics };
@@ -37177,7 +37837,7 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     case "DESCRIBE":
       return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":
-      return executeExplain(stmt);
+      return executeExplain(stmt, client, cacheContext, options.maxRecords ?? 1e4);
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
@@ -37208,7 +37868,7 @@ function materializedColumnMetaEqual(left, right) {
   if (!left || !right || left.size !== right.size) return false;
   for (const [column, meta3] of left) {
     const candidate = right.get(column);
-    if (!candidate || candidate.sortKind !== meta3.sortKind || candidate.fieldType !== meta3.fieldType) return false;
+    if (!candidate || candidate.sortKind !== meta3.sortKind || candidate.fieldType !== meta3.fieldType || !fieldSemanticsEqual(candidate.semantics, meta3.semantics)) return false;
   }
   return true;
 }
@@ -37239,7 +37899,7 @@ async function executeBatch(sql, client, options = {}) {
   const countedClient = wrapClientWithMetrics(client, metrics);
   const startedAt = Date.now();
   const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
-  const cacheContext = options.cacheContext ?? "default";
+  const cacheContext = resolveCacheContext(client, options.cacheContext);
   const tempTables = /* @__PURE__ */ new Map();
   const variables = /* @__PURE__ */ new Map();
   const results = [];
@@ -37333,7 +37993,10 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
           cacheContext,
           tempTables
         );
-        variables.set(stmt.name, { type: "string", value });
+        const first = resolvedStmt2.expr.query.columns[0];
+        const numeric = first?.type === "ARITH_COL" || first?.type === "ARITH_AGG_COL" || first?.type === "WINDOW_COL" || first?.type === "AGGREGATE" && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG");
+        const numberValue = numeric ? Number(value) : Number.NaN;
+        variables.set(stmt.name, numeric && Number.isFinite(numberValue) ? { type: "number", value: numberValue } : { type: "string", value });
       } catch (e) {
         if (e instanceof ScalarSubqueryError) {
           throw new Error(`ArgumentError: ${e.message}`);
@@ -37564,13 +38227,14 @@ var ScalarSubqueryError = class extends Error {
 };
 async function executeAssert(stmt, client, options, cacheContext, tempTables) {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
+  const semantics = stmt.left.type === "NUMBER" || stmt.left.type === "ARITH" ? syntheticSemantics("number") : syntheticSemantics("string");
   if (stmt.op === "BETWEEN") {
     if (stmt.low === null || stmt.high === null) {
       throw new Error("ArgumentError: malformed ASSERT statement.");
     }
     const low = await evalAssertOperand(stmt.low, client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
-    if (!compareScalarValues(">=", left, low) || !compareScalarValues("<=", left, high)) {
+    if (!compareScalarValues(">=", left, low, semantics) || !compareScalarValues("<=", left, high, semantics)) {
       throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
     }
     return { type: "ASSERT", condition: stmt.text };
@@ -37579,7 +38243,7 @@ async function executeAssert(stmt, client, options, cacheContext, tempTables) {
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareScalarValues(stmt.op, left, right)) {
+  if (!compareScalarValues(stmt.op, left, right, semantics)) {
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
   }
   return { type: "ASSERT", condition: stmt.text };
@@ -37652,6 +38316,149 @@ function evalAssertArith(node) {
   }
   throw new Error(`ArgumentError: unsupported operand in ASSERT expression: ${node.type}`);
 }
+async function buildWhereFieldSemanticsResolver(stmt, client, cacheContext, materializedTables, forcePhysicalMetadata = false) {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const physicalAppIds = forcePhysicalMetadata || whereNeedsFieldMetadata(stmt.where) ? [...new Set(tables.filter((table) => table.cteName === null).map((table) => table.appId))] : [];
+  const infosByApp = new Map(
+    await Promise.all(physicalAppIds.map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))];
+    }))
+  );
+  const orderedFields = /* @__PURE__ */ new Set();
+  const collectOrderedFields = (node) => {
+    if (Array.isArray(node)) {
+      node.forEach(collectOrderedFields);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node;
+    if (value["type"] === "SELECT") return;
+    if (value["type"] === "BINARY" && [">", "<", ">=", "<="].includes(String(value["op"]))) {
+      const left = value["left"];
+      if (left?.["type"] === "FIELD" && typeof left["field"] === "string") {
+        orderedFields.add(left["field"]);
+      }
+    }
+    Object.values(value).forEach(collectOrderedFields);
+  };
+  collectOrderedFields(stmt.where);
+  collectOrderedFields(stmt.having);
+  for (const column of stmt.columns) {
+    if (column.type === "CASE_COL") collectOrderedFields(column.expr);
+  }
+  const statusOrdersByApp = /* @__PURE__ */ new Map();
+  await Promise.all([...infosByApp].map(async ([appId, infos]) => {
+    const needsStatus = [...orderedFields].some((field) => infos.get(field)?.fieldType === "STATUS");
+    if (!needsStatus) return;
+    const order = await loadProcessStatusOrder(appId, client, cacheContext);
+    if (order) statusOrdersByApp.set(appId, order);
+  }));
+  const fromPhysical = (table, field) => {
+    if (field === "$id") return withFieldSemanticSource(
+      resolveFieldSemantics({ fieldType: "__ID__" }),
+      table.appId,
+      "$id"
+    );
+    const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
+    if (!info) return void 0;
+    const base = info.semantics ?? resolveFieldSemantics(info);
+    const semantics = info.fieldType === "STATUS" && statusOrdersByApp.has(table.appId) ? { ...base, optionOrder: statusOrdersByApp.get(table.appId) } : base;
+    return withFieldSemanticSource(
+      semantics,
+      table.appId,
+      info.code
+    );
+  };
+  return (field) => {
+    if (field.tableAlias !== null) {
+      if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        return fromPhysical(stmt.from, field.field);
+      }
+      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      if (!table) return void 0;
+      if (table.cteName !== null) {
+        return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics ?? syntheticSemantics("string");
+      }
+      return fromPhysical(table, field.field);
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) {
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics ?? syntheticSemantics("string");
+      }
+      return fromPhysical(stmt.from, field.field);
+    }
+    const matches = tables.flatMap((table) => {
+      const semantics = table.cteName !== null ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics : fromPhysical(table, field.field);
+      return semantics ? [semantics] : [];
+    });
+    if (matches.length === 1) return matches[0];
+    return matches.length > 1 ? syntheticSemantics("string") : void 0;
+  };
+}
+function selectCaseConditionsNeedFieldMetadata(stmt) {
+  return stmt.columns.some((column) => column.type === "CASE_COL" && column.expr.branches.some((branch) => whereNeedsFieldMetadata(branch.condition)));
+}
+function buildHavingFieldSemanticsResolver(stmt, rowResolver) {
+  const aliases = /* @__PURE__ */ new Map();
+  for (const column of stmt.columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    let semantics;
+    if (column.type === "FIELD") semantics = rowResolver(aggregateFieldRef(column.field));
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      semantics = syntheticSemantics("number");
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "MIN" || column.func === "MAX") {
+        semantics = column.arg.type === "FIELD_REF" ? rowResolver(aggregateFieldRef(column.arg.field)) : syntheticSemantics("number");
+      } else {
+        semantics = column.func === "GROUP_CONCAT" ? syntheticSemantics("string") : syntheticSemantics("number");
+      }
+    } else if (column.type === "STRFUNC_COL") {
+      semantics = stringFunctionColumnMeta(column.expr).semantics;
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL") {
+      semantics = syntheticSemantics("string");
+    }
+    if (semantics) aliases.set(column.alias, semantics);
+  }
+  return (field) => field.tableAlias === null && aliases.has(field.field) ? aliases.get(field.field) : rowResolver(field);
+}
+async function resolveSelectWhereCapability(stmt, client, cacheContext, materializedTables) {
+  if (stmt.where === null) return classifyWhereCapability(null, () => void 0);
+  const resolver = await buildWhereFieldSemanticsResolver(stmt, client, cacheContext, materializedTables);
+  return classifyWhereCapability(stmt.where, resolver);
+}
+function formatWhereCapabilityFailure(result) {
+  const reason = result.reasons.find(
+    (candidate) => candidate.code === "WHERE_FIELD_UNRESOLVED" || candidate.code === "WHERE_OPERATOR_UNSUPPORTED"
+  ) ?? result.reasons[0];
+  const details = [
+    reason?.field ? `field=${reason.field}` : null,
+    reason?.fieldType ? `type=${reason.fieldType}` : null,
+    reason?.operator ? `operator=${reason.operator}` : null,
+    reason?.code ? `reason=${reason.code}` : null
+  ].filter((value) => value !== null).join(", ");
+  return details || "reason=WHERE_UNSUPPORTED";
+}
+function hasCanonicalOrder(stmt) {
+  return stmt.orderBy.length > 0 || stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+}
+async function assertDmlWhereCapability(stmt, client, cacheContext) {
+  if (stmt.subtableCode || stmt.type === "UPDATE" && stmt.from != null) return;
+  const fields = whereNeedsFieldMetadata(stmt.where) ? await getFieldsCached(stmt.appId, client, cacheContext) : [];
+  const byCode = new Map(fields.map((field) => [field.code, field]));
+  const result = classifyWhereCapability(stmt.where, (field) => {
+    if (field.field === "$id") return resolveFieldSemantics({ fieldType: "__ID__" });
+    const info = byCode.get(field.field);
+    return info?.semantics ?? (info ? resolveFieldSemantics(info) : void 0);
+  });
+  if (result.capability !== "EXACT_PUSHDOWN") {
+    throw new DmlConvertError(
+      `WHERE predicate cannot be represented by kintone REST (${formatWhereCapabilityFailure(result)})`
+    );
+  }
+}
 async function executeSelect(stmt, client, options, cacheContext, cteCache, captureColumnMeta = false) {
   let result;
   if (isNoFromSelect(stmt)) {
@@ -37662,12 +38469,51 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
     return result;
   }
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
-  const mode = resolveSelectMode(stmt);
-  await validateSelectFieldCodes(stmt, mode, client, cacheContext);
-  if (mode === "SIMPLE") {
-    result = await executeSimpleSelect(stmt, client, options, cacheContext);
-  } else {
-    result = await executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
+  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  if (whereCapability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
+  }
+  const staticMode = resolveSelectMode(stmt);
+  const mode = whereCapability.capability === "EXACT_PUSHDOWN" ? staticMode : "FULL_SCAN";
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  const orderPlan = hasCanonicalOrder(stmt) ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+    stmt,
+    staticMode: mode,
+    whereCapability: whereCapability.capability,
+    orderSemantics: orderMeta.semantics,
+    maxRecords: options.maxRecords ?? 1e4,
+    hasKlike: whereHasKlike(stmt.where)
+  }) : null;
+  await validateSelectFieldCodes(
+    stmt,
+    orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : mode,
+    client,
+    cacheContext
+  );
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" ? requiresCompleteInput({ ...stmt, orderBy: [] }) : requiresCompleteInput(stmt);
+  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
+  const effectiveOptions = truncateWasDisabled ? { ...options, onLimitReached: "error" } : options;
+  try {
+    if (mode === "SIMPLE") {
+      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext, orderPlan, orderMeta);
+    } else {
+      result = await executeFullScanSelect(
+        stmt,
+        client,
+        effectiveOptions,
+        cacheContext,
+        cteCache,
+        whereCapability.capability === "EXACT_PUSHDOWN",
+        orderMeta
+      );
+    }
+  } catch (error51) {
+    if (completeInputRequired && error51 instanceof FetchAllLimitError) {
+      throw new FetchAllLimitError(
+        "ORDER BY\u306E\u6B63\u3057\u3044\u7D50\u679C\u306B\u306F\u5B8C\u5168\u306A\u5019\u88DC\u96C6\u5408\u304C\u5FC5\u8981\u3067\u3059\u3002" + (truncateWasDisabled ? "onLimit=truncate\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002" : "") + error51.message
+      );
+    }
+    throw error51;
   }
   if (captureColumnMeta) {
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
@@ -37728,19 +38574,30 @@ function executeNoFromSelect(stmt) {
   const rows = applyLimit(projected, stmt.limit, stmt.offset);
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
-async function executeSimpleSelect(stmt, client, options, cacheContext) {
-  const params = selectToKintoneParams(stmt);
+async function executeSimpleSelect(stmt, client, options, cacheContext, orderPlan, orderMeta) {
+  const restStmt = orderPlan?.kind === "CANONICAL_REST_TOP_N" ? withCanonicalRestTie(stmt) : stmt;
+  const params = selectToKintoneParams(restStmt);
+  const fetchFields = orderPlan?.kind === "CANONICAL_LOCAL" ? selectToFetchAllFields(stmt, stmt.from) : params.fields;
   const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const projectionSemanticsResolver = stmt.columns.some((column) => column.type === "CASE_COL") ? await buildWhereFieldSemanticsResolver(
+    stmt,
+    client,
+    cacheContext,
+    void 0,
+    selectCaseConditionsNeedFieldMetadata(stmt)
+  ) : void 0;
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const onLimit2 = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const useRestWindow = stmt.orderBy.length > 0 ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter = stmt.orderBy.length === 0 && needed !== null && needed <= maxRecords2 && !whereHasKlike(stmt.where) ? needed : void 0;
   let records;
-  if (useSingleGet) {
+  if (orderPlan?.kind === "KORDER_NATIVE" && stmt.limit === 0) {
+    records = [];
+  } else if (useRestWindow) {
     const res = await client.getRecords({
       app: params.app,
       query: params.query,
@@ -37753,7 +38610,7 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
       client.getRecords,
       params.app,
       baseQuery,
-      params.fields,
+      fetchFields,
       {
         parallel,
         maxRecords: maxRecords2,
@@ -37766,16 +38623,23 @@ async function executeSimpleSelect(stmt, client, options, cacheContext) {
     );
   }
   let rows = records.map((r) => flatten(r, null));
-  if (!useSingleGet) {
-    const { optionOrders, sortKinds } = await buildOrderByMetaForSelect(stmt, client, cacheContext);
-    rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
+  if (!useRestWindow) {
+    rows = applyOrderBy(
+      rows,
+      stmt.orderBy,
+      orderMeta.optionOrders,
+      orderMeta.sortKinds,
+      orderMeta.semantics
+    );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
   const { rows: projected, columns } = project(
     rows,
     stmt.columns,
     void 0,
-    fieldTypeResolvers.row
+    fieldTypeResolvers.row,
+    void 0,
+    projectionSemanticsResolver
   );
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
 }
@@ -37848,8 +38712,8 @@ async function loadTypedPushdownMeta(stmt, client, cacheContext) {
     const statusFields = collectCandidateFieldCodes(candidates).filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
     if (statusFields.length > 0) {
       const process4 = await getProcessStatusesCached(appId, client, cacheContext);
-      if (process4.enable && process4.states.length > 0) {
-        const states = new Set(process4.states);
+      if (process4.enable && process4.states && process4.states.length > 0) {
+        const states = new Set(process4.states.map((state) => state.name));
         for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
       }
     }
@@ -38027,7 +38891,18 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
       return [appId, new Map(infos.map((info) => [info.code, info]))];
     }))
   );
+  const statusOrdersByApp = /* @__PURE__ */ new Map();
+  const aggregateFieldNames = new Set(refs.map((ref) => ref.field));
+  await Promise.all([...fieldInfosByApp].map(async ([appId, infos]) => {
+    if (![...aggregateFieldNames].some((field) => infos.get(field)?.fieldType === "STATUS")) return;
+    const order = await loadProcessStatusOrder(appId, client, cacheContext);
+    if (order) statusOrdersByApp.set(appId, order);
+  }));
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const semanticsForInfo = (info, appId) => {
+    const base = info.semantics ?? resolveFieldSemantics(info);
+    return info.fieldType === "STATUS" && statusOrdersByApp.has(appId) ? { ...base, optionOrder: statusOrdersByApp.get(appId) } : base;
+  };
   return (ref) => {
     let info;
     if (ref.tableAlias !== null) {
@@ -38037,40 +38912,130 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
         const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
         if (!table) return void 0;
         if (table.cteName !== null) {
-          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string");
         }
         info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       }
     } else if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
-        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string");
       }
       info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
     } else {
       const matches = tables.flatMap((table) => {
         if (table.cteName !== null) {
           const materialized = materializedTables?.get(table.cteName);
-          return materialized?.columns.includes(ref.field) ? [materialized.columnMeta?.get(ref.field)?.sortKind] : [];
+          return materialized?.columns.includes(ref.field) ? [materialized.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string")] : [];
         }
         const candidate = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-        return candidate ? [aggregateSortKind(candidate)] : [];
+        return candidate ? [semanticsForInfo(candidate, table.appId)] : [];
       });
       if (matches.length !== 1) return void 0;
       return matches[0];
     }
-    return info ? aggregateSortKind(info) : void 0;
+    if (!info) return void 0;
+    const sourceTable = ref.tableAlias !== null ? tables.find((table) => table.alias === ref.tableAlias) : stmt.joins.length === 0 ? stmt.from : void 0;
+    return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
 }
 function fieldCodeForTypeLookup(table, field) {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
 }
-function materializedMetaFromFieldInfo(info) {
-  return { sortKind: aggregateSortKind(info), fieldType: info.fieldType };
+function materializedMetaFromFieldInfo(info, sourceAppId) {
+  const semantics = info.semantics ?? resolveFieldSemantics(info);
+  return {
+    sortKind: aggregateSortKind(info),
+    fieldType: info.fieldType,
+    semantics: sourceAppId === void 0 ? semantics : withFieldSemanticSource(semantics, sourceAppId, info.code)
+  };
+}
+function withCanonicalRestTie(stmt) {
+  const hasId = stmt.orderBy.some(
+    (item) => item.key.type === "FIELD_NAME" && item.key.name === "$id"
+  );
+  return hasId ? stmt : {
+    ...stmt,
+    orderBy: [...stmt.orderBy, { key: { type: "FIELD_NAME", name: "$id" }, direction: "ASC" }]
+  };
+}
+function syntheticColumnMeta(compareMode) {
+  return { sortKind: compareMode, semantics: syntheticSemantics(compareMode) };
+}
+function unknownStringColumnMeta() {
+  return { semantics: syntheticSemantics("string", "KSQL_UNKNOWN") };
+}
+function unsupportedColumnMeta(fieldType = "KSQL_ARRAY") {
+  return {
+    semantics: { fieldType, compareMode: "unsupported", inSubtable: false, requiresCollectionOperators: false }
+  };
+}
+function systemColumnMeta(field) {
+  if (field === "$id" || field === "_rid" || field === "_pid") {
+    return {
+      sortKind: "number",
+      fieldType: "__ID__",
+      semantics: resolveFieldSemantics({ fieldType: "__ID__" })
+    };
+  }
+  if (field === "$revision") return syntheticColumnMeta("number");
+  return void 0;
+}
+var NUMBER_RETURNING_STRING_FUNCTIONS = /* @__PURE__ */ new Set([
+  "LENGTH",
+  "INSTR",
+  "ROUND",
+  "FLOOR",
+  "CEIL",
+  "TRUNCATE",
+  "YEAR",
+  "MONTH",
+  "DAY",
+  "DATEDIFF",
+  "ABS",
+  "MOD",
+  "POWER",
+  "SQRT"
+]);
+function stringFunctionColumnMeta(expr) {
+  if (expr.func === "CAST") {
+    const target = expr.args[1];
+    return target?.type === "STRING" && target.value === "NUMBER" ? syntheticColumnMeta("number") : syntheticColumnMeta("string");
+  }
+  return NUMBER_RETURNING_STRING_FUNCTIONS.has(expr.func) ? syntheticColumnMeta("number") : syntheticColumnMeta("string");
+}
+function caseResultColumnMeta(result, resolveField2) {
+  if (result.type === "STRING") return syntheticColumnMeta("string");
+  if (result.type === "ARRAY") return unsupportedColumnMeta();
+  if (result.type === "NUMBER" || result.type === "ARITH") return syntheticColumnMeta("number");
+  if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
+  const source = resolveField2(aggregateFieldRef(result.field));
+  return source ?? unknownStringColumnMeta();
+}
+function mergeExpressionColumnMeta(candidates) {
+  if (candidates.length === 0) return unknownStringColumnMeta();
+  const first = candidates[0];
+  const withoutSource = (semantics) => {
+    if (!semantics) return void 0;
+    const { source: _source, ...rest } = semantics;
+    return rest;
+  };
+  if (candidates.every(
+    (candidate) => candidate.sortKind === first.sortKind && candidate.fieldType === first.fieldType && fieldSemanticsEqual(withoutSource(candidate.semantics), withoutSource(first.semantics))
+  )) {
+    const sameSource = candidates.every(
+      (candidate) => fieldSemanticsEqual(candidate.semantics, first.semantics)
+    );
+    return sameSource ? first : { ...first, semantics: withoutSource(first.semantics) };
+  }
+  if (candidates.some((candidate) => candidate.semantics?.compareMode === "unsupported")) {
+    return unsupportedColumnMeta("KSQL_MIXED_UNSUPPORTED");
+  }
+  return unknownStringColumnMeta();
 }
 function selectNeedsSourceColumnMeta(stmt) {
   return stmt.columns.some(
-    (column) => column.type === "FIELD" || column.type === "WILDCARD" || column.type === "PARENT_WILDCARD" || column.type === "AGGREGATE" && (column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF"
+    (column) => column.type === "FIELD" || column.type === "WILDCARD" || column.type === "PARENT_WILDCARD" || column.type === "CASE_COL" || column.type === "AGGREGATE" && (column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF"
   );
 }
 async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, materializedTables) {
@@ -38087,18 +39052,18 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         const info2 = physicalInfos.get(stmt.from.appId)?.get(ref.field);
-        return info2 ? materializedMetaFromFieldInfo(info2) : void 0;
+        return info2 ? materializedMetaFromFieldInfo(info2, stmt.from.appId) : void 0;
       }
       const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
       if (!table) return void 0;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : void 0;
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : void 0;
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
     const matches = tables.flatMap((table) => {
       if (table.cteName !== null) {
@@ -38107,7 +39072,8 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
         return [materialized.columnMeta?.get(ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? [materializedMetaFromFieldInfo(info)] : [];
+      const meta3 = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta3 ? [meta3] : [];
     });
     return matches.length === 1 ? matches[0] : void 0;
   };
@@ -38137,19 +39103,27 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
       meta3 = resolveField2(aggregateFieldRef(column.field));
     } else if (column.type === "AGGREGATE") {
       if (column.func === "GROUP_CONCAT") {
-        meta3 = { sortKind: "string" };
+        meta3 = syntheticColumnMeta("string");
       } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
-        meta3 = { sortKind: "number" };
+        meta3 = syntheticColumnMeta("number");
       } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
         const source = resolveField2(aggregateFieldRef(column.arg.field));
-        if (source?.sortKind) meta3 = { sortKind: source.sortKind };
+        if (source) meta3 = source;
       }
     } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
-      meta3 = { sortKind: "number" };
+      meta3 = syntheticColumnMeta("number");
     } else if (column.type === "LITERAL_COL") {
-      meta3 = { sortKind: "string" };
+      meta3 = syntheticColumnMeta("string");
+    } else if (column.type === "STRFUNC_COL") {
+      meta3 = stringFunctionColumnMeta(column.expr);
     } else if (column.type === "WINDOW_COL") {
-      meta3 = { sortKind: "number" };
+      meta3 = syntheticColumnMeta("number");
+    } else if (column.type === "CASE_COL") {
+      const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField2));
+      if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveField2));
+      meta3 = mergeExpressionColumnMeta(results);
+    } else if (column.type === "SCALAR_SUBQUERY_COL") {
+      meta3 = unknownStringColumnMeta();
     }
     if (meta3) inferred.set(output, meta3);
   });
@@ -38163,7 +39137,8 @@ function mergeUnionColumnMeta(left, right) {
     const a = leftMeta?.get(column);
     const rightColumn = right.columns[index];
     const b = rightColumn === void 0 ? void 0 : rightMeta?.get(rightColumn);
-    if (a && b && a.sortKind === b.sortKind && a.fieldType === b.fieldType) merged.set(column, a);
+    if (a && b) merged.set(column, mergeExpressionColumnMeta([a, b]));
+    else if (a || b) merged.set(column, unknownStringColumnMeta());
   });
   return merged;
 }
@@ -38200,7 +39175,7 @@ function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
   };
   return { row, having };
 }
-async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache) {
+async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache, allowOriginalWherePushdown = true, preloadedOrderMeta) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
@@ -38214,6 +39189,14 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const fieldSemanticsResolver = await buildWhereFieldSemanticsResolver(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
+  );
+  const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
   const mainPushDown = pushdownPlan.mainCondition;
@@ -38227,7 +39210,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     true,
     options.onLimitReached ?? "error",
     warnings,
-    mainPushDown
+    mainPushDown,
+    allowOriginalWherePushdown
   );
   const parallelJoins = [];
   const onOptJoins = [];
@@ -38253,7 +39237,7 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     }
   }
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = preloadedOrderMeta ? Promise.resolve(preloadedOrderMeta) : buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   scalarCachePromise.catch(() => {
   });
   orderByMetaPromise.catch(() => {
@@ -38290,15 +39274,18 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     tables.set(join.table.alias, joinRecords);
   }));
   const scalarCache = await scalarCachePromise;
-  const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
   const { rows, columns } = runFullScan({
     tables,
     stmt,
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics: semantics,
     fieldTypeResolver: fieldTypeResolvers.row,
+    fieldSemanticsResolver,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes
   });
@@ -38395,16 +39382,39 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache)
   ]);
+  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  if (whereCapability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
+  }
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  if (hasCanonicalOrder(stmt)) {
+    (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+      stmt,
+      staticMode: "FULL_SCAN",
+      whereCapability: whereCapability.capability,
+      orderSemantics: orderMeta.semantics,
+      maxRecords: maxRecords2,
+      hasKlike: whereHasKlike(stmt.where)
+    });
+  }
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
     loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache)
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const fieldSemanticsResolver = await buildWhereFieldSemanticsResolver(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
+  );
+  const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = Promise.resolve(orderMeta);
   scalarCachePromise.catch(() => {
   });
   orderByMetaPromise.catch(() => {
@@ -38423,7 +39433,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
       true,
       options.onLimitReached ?? "error",
       warnings,
-      pushdownPlan.mainCondition
+      pushdownPlan.mainCondition,
+      whereCapability.capability === "EXACT_PUSHDOWN"
     );
     tables.set(stmt.from.alias, mainRecords);
   }
@@ -38460,7 +39471,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   });
   await Promise.all(joinFetches);
   const scalarCache = await scalarCachePromise;
-  const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null ? cteCache.get(stmt.from.cteName)?.columns : void 0;
   const { rows, columns } = runFullScan({
     tables,
@@ -38468,8 +39479,11 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics: semantics,
     fieldTypeResolver: fieldTypeResolvers.row,
+    fieldSemanticsResolver,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
     sourceColumns
@@ -38481,13 +39495,13 @@ function processRowToKintoneRecord(row) {
     Object.entries(row).map(([k, v]) => [k, { value: v ?? "" }])
   );
 }
-async function fetchTableRecordsForFullScan(stmt, table, client, maxRecords2, parallel, isMainTable, onLimit2, warnings, pushDownCond = null) {
+async function fetchTableRecordsForFullScan(stmt, table, client, maxRecords2, parallel, isMainTable, onLimit2, warnings, pushDownCond = null, allowOriginalWherePushdown = true) {
   const fields = selectToFetchAllFields(stmt, table);
   const onTruncate = (max) => {
     warnings.add(`\u53D6\u5F97\u4E0A\u9650\uFF08${max} \u4EF6\uFF09\u306B\u9054\u3057\u305F\u305F\u3081\u3001${max} \u4EF6\u3067\u6253\u3061\u5207\u3063\u3066\u8868\u793A\u3057\u3066\u3044\u307E\u3059\u3002`);
   };
   if (!table.subtableCode) {
-    const baseQuery = isMainTable ? selectToFetchAllParams(stmt, table.appId).query : "";
+    const baseQuery = isMainTable && allowOriginalWherePushdown ? selectToFetchAllParams(stmt, table.appId).query : "";
     const pushQuery = pushDownCond !== null ? whereToKintone(pushDownCond) : "";
     const query = baseQuery && pushQuery ? `(${baseQuery}) and (${pushQuery})` : baseQuery || pushQuery;
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, table.appId, query, fields, {
@@ -38691,6 +39705,10 @@ async function getProcessStatusesCached(appId, client, cacheContext) {
   setScopedCacheValue(processStatusCache, cacheContext, appId, loading);
   return loading;
 }
+async function loadProcessStatusOrder(appId, client, cacheContext) {
+  const process4 = await getProcessStatusesCached(appId, client, cacheContext);
+  return process4.enable && process4.states !== null ? new Map(process4.states.map((state) => [state.name, state.index])) : void 0;
+}
 async function getFieldTypeMap(appId, client, cacheContext) {
   const cached2 = getScopedCacheValue(fieldTypeCache, cacheContext, appId);
   if (cached2) return cached2;
@@ -38734,18 +39752,118 @@ async function getSortKindMapByApp(appId, client, cacheContext) {
   setScopedCacheValue(sortKindCache, cacheContext, appId, map2);
   return map2;
 }
-async function buildOrderByMetaForSelect(stmt, client, cacheContext) {
+function orderByFieldNames(stmt) {
+  const items = [
+    ...stmt.orderBy,
+    ...stmt.columns.flatMap((column) => column.type === "WINDOW_COL" ? column.orderBy : [])
+  ];
+  return [...new Set(items.flatMap(
+    (item) => item.key.type === "FIELD_NAME" ? [item.key.name] : []
+  ))];
+}
+async function buildOrderSemanticsForSelect(stmt, client, cacheContext, materializedTables) {
+  const names = orderByFieldNames(stmt);
+  if (names.length === 0) return /* @__PURE__ */ new Map();
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const ambiguousFields = /* @__PURE__ */ new Set();
+  const infosByApp = new Map(
+    await Promise.all([...new Set(
+      tables.filter((table) => table.cteName === null).map((table) => table.appId)
+    )].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))];
+    }))
+  );
+  const resolveField2 = (ref) => {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        const info2 = infosByApp.get(stmt.from.appId)?.get(ref.field);
+        return info2 ? materializedMetaFromFieldInfo(info2, stmt.from.appId) : void 0;
+      }
+      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      if (!table) return void 0;
+      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
+    }
+    const matches = tables.flatMap((table) => {
+      if (table.cteName !== null) {
+        const materialized = materializedTables?.get(table.cteName);
+        const meta4 = materialized?.columns.includes(ref.field) ? materialized.columnMeta?.get(ref.field) : void 0;
+        return meta4 ? [meta4] : [];
+      }
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      const meta3 = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta3 ? [meta3] : [];
+    });
+    if (matches.length > 1) ambiguousFields.add(ref.field);
+    return matches.length === 1 ? matches[0] : void 0;
+  };
+  const aliasSemantics = /* @__PURE__ */ new Map();
+  for (const column of stmt.columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    let meta3;
+    if (column.type === "FIELD") meta3 = resolveField2(aggregateFieldRef(column.field));
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      meta3 = syntheticColumnMeta("number");
+    } else if (column.type === "LITERAL_COL") meta3 = syntheticColumnMeta("string");
+    else if (column.type === "STRFUNC_COL") meta3 = stringFunctionColumnMeta(column.expr);
+    else if (column.type === "SCALAR_SUBQUERY_COL") meta3 = unknownStringColumnMeta();
+    else if (column.type === "CASE_COL") {
+      const candidates = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField2));
+      if (column.expr.elseResult) candidates.push(caseResultColumnMeta(column.expr.elseResult, resolveField2));
+      meta3 = mergeExpressionColumnMeta(candidates);
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "MIN" || column.func === "MAX") {
+        meta3 = column.arg.type === "FIELD_REF" ? resolveField2(aggregateFieldRef(column.arg.field)) : syntheticColumnMeta("number");
+      } else {
+        meta3 = column.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
+      }
+    }
+    if (meta3?.semantics) aliasSemantics.set(column.alias, meta3.semantics);
+  }
+  const result = /* @__PURE__ */ new Map();
+  for (const name of names) {
+    const base = aliasSemantics.get(name) ?? resolveField2(aggregateFieldRef(name))?.semantics;
+    if (!base) {
+      const ref = aggregateFieldRef(name);
+      if (ref.tableAlias === null && ambiguousFields.has(ref.field)) {
+        result.set(name, resolveFieldSemantics({ fieldType: "KSQL_AMBIGUOUS" }));
+      }
+      continue;
+    }
+    let semantics = base;
+    if (base.fieldType === "STATUS" && base.source && stmt.orderMode !== "KINTONE_NATIVE") {
+      const process4 = await getProcessStatusesCached(base.source.appId, client, cacheContext);
+      if (process4.enable && process4.states !== null) {
+        semantics = {
+          ...base,
+          optionOrder: new Map(process4.states.map((state) => [state.name, state.index]))
+        };
+      }
+    }
+    result.set(name, semantics);
+  }
+  return result;
+}
+async function buildOrderByMetaForSelect(stmt, client, cacheContext, materializedTables) {
   const hasWindowOrderBy = stmt.columns.some(
     (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
   );
   if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
-    return { optionOrders: /* @__PURE__ */ new Map(), sortKinds: /* @__PURE__ */ new Map() };
+    return { optionOrders: /* @__PURE__ */ new Map(), sortKinds: /* @__PURE__ */ new Map(), semantics: /* @__PURE__ */ new Map() };
   }
-  const [optionOrders, sortKinds] = await Promise.all([
+  const [optionOrders, sortKinds, semantics] = await Promise.all([
     buildOptionOrdersForSelect(stmt, client, cacheContext),
-    buildSortKindsForSelect(stmt, client, cacheContext)
+    buildSortKindsForSelect(stmt, client, cacheContext),
+    buildOrderSemanticsForSelect(stmt, client, cacheContext, materializedTables)
   ]);
-  return { optionOrders, sortKinds };
+  return { optionOrders, sortKinds, semantics };
 }
 async function buildOptionOrdersForSelect(stmt, client, cacheContext) {
   const optionOrders = /* @__PURE__ */ new Map();
@@ -38843,6 +39961,9 @@ var RejectLimitExceededError = class extends Error {
   }
 };
 async function prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
+  if (stmt.type === "UPDATE") {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
+  }
   const operation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
@@ -38882,18 +40003,22 @@ async function prepareDmlValidation(stmt, client, options, cacheContext, tempTab
   const columnMeta = /* @__PURE__ */ new Map();
   for (const column of payloadFields) {
     if (column === "$id") {
-      columnMeta.set(column, { sortKind: "number", fieldType: "RECORD_NUMBER" });
+      columnMeta.set(column, {
+        sortKind: "number",
+        fieldType: "RECORD_NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "RECORD_NUMBER" })
+      });
       continue;
     }
     const info = infoByCode.get(column);
-    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info));
+    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info, stmt.appId));
   }
-  columnMeta.set("$err_statement", { sortKind: "number" });
-  columnMeta.set("$err_operation", { sortKind: "string" });
-  columnMeta.set("$err_row", { sortKind: "number" });
-  columnMeta.set("$err_field", { sortKind: "string" });
-  columnMeta.set("$err_code", { sortKind: "string" });
-  columnMeta.set("$err_message", { sortKind: "string" });
+  columnMeta.set("$err_statement", syntheticColumnMeta("number"));
+  columnMeta.set("$err_operation", syntheticColumnMeta("string"));
+  columnMeta.set("$err_row", syntheticColumnMeta("number"));
+  columnMeta.set("$err_field", syntheticColumnMeta("string"));
+  columnMeta.set("$err_code", syntheticColumnMeta("string"));
+  columnMeta.set("$err_message", syntheticColumnMeta("string"));
   materializedMetaByValidationResult.set(result, columnMeta);
   return { result, candidates, invalidRowNumbers, columnMeta };
 }
@@ -39279,6 +40404,7 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
   };
 }
 async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
@@ -39356,6 +40482,7 @@ function collectUpdateFromTargetFields(stmt) {
   return [...fields];
 }
 async function executeDelete(stmt, client, options, cacheContext) {
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
     return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
@@ -39728,6 +40855,18 @@ async function executeReorder(stmt, client, options, cacheContext) {
     client,
     cacheContext
   );
+  const reorderFields = await getFieldsCached(stmt.appId, client, cacheContext);
+  const reorderSemanticsByCode = new Map(reorderFields.map((field) => [
+    field.code,
+    field.semantics ?? resolveFieldSemantics(field)
+  ]));
+  const resolveReorderSemantics = (field) => {
+    if (field.field === "_idx" || field.field === "_pid" || field.field === "_rid") {
+      return syntheticSemantics("number");
+    }
+    const code = field.field.startsWith("_p.") ? field.field.slice(3) : field.field;
+    return reorderSemanticsByCode.get(code) ?? syntheticSemantics("string");
+  };
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -39736,7 +40875,13 @@ async function executeReorder(stmt, client, options, cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, stmt.subtableCode);
-  const targetParentIds = stmt.all ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== "")) : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat, resolveFieldType)).map((r) => r.parentId));
+  const targetParentIds = stmt.all ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== "")) : new Set(expanded.filter((r) => stmt.where && evalWhere(
+    stmt.where,
+    r.flat,
+    resolveFieldType,
+    void 0,
+    resolveReorderSemantics
+  )).map((r) => r.parentId));
   if (options.confirm) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", targetParentIds.size);
@@ -39747,7 +40892,7 @@ async function executeReorder(stmt, client, options, cacheContext) {
     if (!parent) continue;
     const rows = getMutableTableRows(parent, stmt.subtableCode);
     const sortable = rows.map((row, i) => ({ row, i, flat: buildFlatRowForSort(parent, stmt.subtableCode, row, i) }));
-    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by));
+    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by, resolveReorderSemantics));
     const orderedRowIds = sortable.map((x) => x.row.id ?? "");
     await client.putRecords(buildSubtableReorderPutParams(stmt.appId, pid, getRevision(parent), stmt.subtableCode, orderedRowIds));
   }
@@ -39768,14 +40913,12 @@ function buildFlatRowForSort(parent, subtableCode, row, idx) {
   }
   return flat;
 }
-function compareByOrder(a, b, orderBy) {
+function compareByOrder(a, b, orderBy, resolveSemantics) {
   for (const item of orderBy) {
     const av = evalOrderKeyForRow(item.key, a);
     const bv = evalOrderKeyForRow(item.key, b);
-    const an = Number(av);
-    const bn = Number(bv);
-    const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-    const cmp = numeric ? an - bn : av.localeCompare(bv, "ja");
+    const semantics = item.key.type === "FIELD_NAME" ? resolveSemantics(aggregateFieldRef(item.key.name)) : item.key.type === "ARITH_KEY" ? syntheticSemantics("number") : stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string");
+    const cmp = compareCanonicalValues(av, bv, semantics ?? syntheticSemantics("string"));
     if (cmp !== 0) return item.direction === "ASC" ? cmp : -cmp;
   }
   return 0;
@@ -39972,35 +41115,140 @@ async function resolveScalarColumns(columns, client, options, cacheContext, cteC
   pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
 }
-function buildBatchExplainPlans(sql, injectedVariables) {
+async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords2 = 1e4) {
+  const fieldApps = /* @__PURE__ */ new Set();
+  const processStatusApps = /* @__PURE__ */ new Set();
+  const tracedClient = {
+    ...client,
+    getFields: async (appId) => {
+      fieldApps.add(appId);
+      return client.getFields(appId);
+    },
+    getProcessStatuses: async (appId) => {
+      processStatusApps.add(appId);
+      return client.getProcessStatuses(appId);
+    }
+  };
+  const capabilities = /* @__PURE__ */ new Map();
+  const orderPlans = /* @__PURE__ */ new Map();
+  const seen = /* @__PURE__ */ new Set();
+  const visit = async (node) => {
+    if (node === null || typeof node !== "object") return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      await Promise.all(node.map(visit));
+      return;
+    }
+    const typed = node;
+    if (typed["type"] === "SELECT") {
+      const select = node;
+      const physicalApps = [select.from, ...select.joins.map((join) => join.table)].filter((table) => table.cteName === null).map((table) => table.appId);
+      const needsWhereSchema = whereNeedsFieldMetadata(select.where);
+      if (needsWhereSchema || select.orderBy.length > 0 || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        physicalApps.forEach((appId) => fieldApps.add(appId));
+      }
+      const capability = await resolveSelectWhereCapability(select, tracedClient, cacheContext);
+      if (capability.capability === "UNSUPPORTED") {
+        throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+      }
+      capabilities.set(select, capability);
+      if (select.orderBy.length > 0 || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        const meta3 = await buildOrderByMetaForSelect(select, tracedClient, cacheContext);
+        if (select.orderMode !== "KINTONE_NATIVE") {
+          for (const semantics of meta3.semantics.values()) {
+            if (semantics.fieldType === "STATUS" && semantics.source) {
+              processStatusApps.add(semantics.source.appId);
+            }
+          }
+        }
+        const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)].some((table) => table.cteName !== null);
+        if (hasCanonicalOrder(select) && !hasUnmaterializedSource) {
+          const mode = capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(select) : "FULL_SCAN";
+          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+            stmt: select,
+            staticMode: mode,
+            whereCapability: capability.capability,
+            orderSemantics: meta3.semantics,
+            maxRecords: maxRecords2,
+            hasKlike: whereHasKlike(select.where)
+          }));
+        }
+      }
+    } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
+      fieldApps.add(node.appId);
+      await assertDmlWhereCapability(
+        node,
+        tracedClient,
+        cacheContext
+      );
+    }
+    await Promise.all(Object.values(typed).map(visit));
+  };
+  await visit(query);
+  if (typeof query === "object" && query !== null && query.type === "WITH" && canInlineSingleCte(query)) {
+    const inlined = buildInlinedQuery(query);
+    const capability = await resolveSelectWhereCapability(inlined, tracedClient, cacheContext);
+    if (capability.capability === "UNSUPPORTED") {
+      throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+    }
+    capabilities.set(inlined, capability);
+    if (hasCanonicalOrder(inlined)) {
+      const meta3 = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
+      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+        stmt: inlined,
+        staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
+        whereCapability: capability.capability,
+        orderSemantics: meta3.semantics,
+        maxRecords: maxRecords2,
+        hasKlike: whereHasKlike(inlined.where)
+      }));
+    }
+  }
+  return { capabilities, orderPlans, fieldApps, processStatusApps };
+}
+function explainMetadataLines(analysis) {
+  return [
+    ...[...analysis.fieldApps].sort((a, b) => a - b).map((appId) => `  metadata API: form definition APP${appId}`),
+    ...[...analysis.processStatusApps].sort((a, b) => a - b).map((appId) => `  metadata API: process status APP${appId}`)
+  ];
+}
+async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4) {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
   validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = /* @__PURE__ */ new Map();
-  return {
-    statementCount: statements.length,
-    statements: statements.map((stmt, i) => {
-      const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
-      validateKlikeStatement(planStmt);
-      const result = {
-        index: i,
-        type: analysis.statements[i].statementType,
-        plan: buildBatchStatementPlan(planStmt, analysis.statements[i])
-      };
-      if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
-        variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
-      }
-      return result;
-    })
-  };
+  const plans = [];
+  for (let i = 0; i < statements.length; i++) {
+    const stmt = statements[i];
+    const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
+    validateKlikeStatement(planStmt);
+    const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords2);
+    const statementPlan = buildBatchStatementPlan(
+      planStmt,
+      analysis.statements[i],
+      whereAnalysis.capabilities,
+      whereAnalysis.orderPlans
+    );
+    const metadataPlan = explainMetadataLines(whereAnalysis);
+    plans.push({
+      index: i,
+      type: analysis.statements[i].statementType,
+      plan: statementPlan.length === 0 ? metadataPlan : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)]
+    });
+    if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
+      variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
+    }
+  }
+  return { statementCount: statements.length, statements: plans };
 }
-function buildBatchStatementPlan(stmt, info) {
+function buildBatchStatementPlan(stmt, info, capabilities, orderPlans) {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch\uFF08\u30D0\u30C3\u30C1\u7D42\u4E86\u6642\u306B\u81EA\u52D5\u7834\u68C4\uFF09`,
       `  rows:          \u5B9F\u4F53\u5316\u524D\u306E\u305F\u3081\u4E0D\u660E\uFF08\u65E2\u5B9A\u4E0A\u9650 ${TEMP_TABLE_MAX_ROWS} \u884C\u3001tempTableMaxRows \u3067\u5909\u66F4\u53EF\u3001\u8D85\u904E\u306F\u30A8\u30E9\u30FC\uFF09`,
-      ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`)
+      ...buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans).map((l) => `  ${l}`)
     ];
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -40016,7 +41264,7 @@ function buildBatchStatementPlan(stmt, info) {
         `SET @${stmt.name} = (SELECT ...)`,
         "  value:         \u30B5\u30D6\u30AF\u30A8\u30EA\u3092\u5B9F\u884C\u6642\u306B1\u56DE\u8A55\u4FA1\uFF081\u884C1\u5217\u30FB\u30D0\u30C3\u30C1\u5185\u5B9A\u6570\u30FB\u7D50\u679C\u30E1\u30BF\u30C7\u30FC\u30BF\u306B\u306F\u975E\u516C\u958B\uFF09",
         "  subquery:",
-        ...buildPlanForBatchQuery(stmt.expr.query, subInfo).map((l) => `  ${l}`)
+        ...buildPlanForBatchQuery(stmt.expr.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`)
       ];
     }
     return [
@@ -40032,7 +41280,7 @@ function buildBatchStatementPlan(stmt, info) {
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS\uFF08\u30A2\u30D7\u30EA\u4E00\u89A7\u306E\u53D6\u5F97\uFF09"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u5B9A\u7FA9\u306E\u53D6\u5F97\uFF09`];
-  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans);
   if (stmt.type === "ASSERT") {
     const lines = [
       `ASSERT ${stmt.text}`,
@@ -40044,11 +41292,11 @@ function buildBatchStatementPlan(stmt, info) {
     subqueries.forEach((sq, i) => {
       lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
-      lines.push(...buildPlanForBatchQuery(sq.query, subInfo).map((l) => `  ${l}`));
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`));
     });
     return lines;
   }
-  return buildPlanForBatchQuery(stmt, info);
+  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }
 function hasTempTableRef(node) {
   if (Array.isArray(node)) return node.some(hasTempTableRef);
@@ -40060,9 +41308,9 @@ function hasTempTableRef(node) {
   }
   return false;
 }
-function buildPlanForBatchQuery(query, info) {
+function buildPlanForBatchQuery(query, info, capabilities, orderPlans) {
   if (info.tempTablesReferenced.length === 0) {
-    return buildExplainPlan(query);
+    return buildExplainPlan(query, void 0, capabilities, orderPlans);
   }
   const lines = [];
   if (query.type === "INSERT_SELECT") {
@@ -40087,8 +41335,12 @@ function buildPlanForBatchQuery(query, info) {
   lines.push("  note:          \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3078\u306E WHERE \u30D7\u30C3\u30B7\u30E5\u30C0\u30A6\u30F3\u306F\u884C\u308F\u308C\u306A\u3044");
   return lines;
 }
-function executeExplain(stmt) {
-  const lines = buildExplainPlan(stmt.query);
+async function executeExplain(stmt, client, cacheContext, maxRecords2) {
+  const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords2);
+  const lines = [
+    ...explainMetadataLines(analysis),
+    ...buildExplainPlan(stmt.query, void 0, analysis.capabilities, analysis.orderPlans)
+  ];
   return {
     type: "SELECT",
     columns: ["plan"],
@@ -40096,29 +41348,45 @@ function executeExplain(stmt) {
     rowCount: lines.length
   };
 }
-function buildExplainPlan(query, label) {
-  if (query.type === "UNION") return buildUnionPlan(query);
-  if (query.type === "WITH") return buildWithPlan(query);
+function buildExplainPlan(query, label, capabilities, orderPlans) {
+  if (query.type === "UNION") return buildUnionPlan(query, capabilities, orderPlans);
+  if (query.type === "WITH") return buildWithPlan(query, capabilities, orderPlans);
   if (query.type === "INSERT") return buildInsertPlan(query, label);
-  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label);
+  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPSERT") return buildUpsertPlan(query, label);
-  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label);
-  if (query.type === "UPDATE") return buildUpdatePlan(query, label);
+  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPDATE") return buildUpdatePlan(query, label, capabilities, orderPlans);
   if (query.type === "DELETE") return buildDeletePlan(query, label);
   if (query.type === "REORDER") return buildReorderPlan(query, label);
-  return buildSelectPlan(query, label);
+  return buildSelectPlan(query, label, capabilities, orderPlans);
 }
-function buildSelectPlan(stmt, label) {
-  const mode = resolveSelectMode(stmt);
+function buildSelectPlan(stmt, label, capabilities, orderPlans) {
+  const whereCapability = capabilities?.get(stmt) ?? (capabilities ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
+  const orderPlan = orderPlans?.get(stmt) ?? (orderPlans ? [...orderPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
+  const mode = orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN" ? "FULL_SCAN" : resolveSelectMode(stmt);
   const reasons = collectFullScanReasons(stmt);
+  if (whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN") {
+    reasons.push(...whereCapability.reasons.map((reason) => reason.code));
+  }
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  if (orderPlan) {
+    lines.push(`  order plan:    ${orderPlan.kind}`);
+    if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
+    if (orderPlan.kind === "KORDER_NATIVE") {
+      lines.push("  order semantics: kintone native (not kSQL canonical)");
+      lines.push("  REST execution: single GET");
+    }
+  }
+  if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
+    lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
+  }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
     lines.push(`  reason:        ${reasons.join(", ")}`);
   }
   if (mode === "SIMPLE") {
-    const params = selectToKintoneParams(stmt);
+    const params = selectToKintoneParams(orderPlan?.kind === "CANONICAL_REST_TOP_N" ? withCanonicalRestTie(stmt) : stmt);
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${params.query || "(\u306A\u3057)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : params.fields.join(", ")}`);
@@ -40128,7 +41396,8 @@ function buildSelectPlan(stmt, label) {
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
-    const mainQ = mainPushDown !== null ? whereToKintone(mainPushDown) : "(\u5168\u4EF6\u53D6\u5F97)";
+    const exactOriginalWhere = stmt.joins.length === 0 && whereCapability?.capability === "EXACT_PUSHDOWN" && stmt.where !== null && !whereRequiresJsEval(stmt.where) ? whereToKintone(stmt.where) : "";
+    const mainQ = mainPushDown !== null ? whereToKintone(mainPushDown) : exactOriginalWhere || "(\u5168\u4EF6\u53D6\u5F97)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     if (mainCandidate !== null) {
@@ -40150,10 +41419,10 @@ function buildSelectPlan(stmt, label) {
       lines.push(`  fields:        ${joinFields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : joinFields.join(", ")}`);
     }
   }
-  lines.push(...collectSubqueryPlans(stmt));
+  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans));
   return lines;
 }
-function buildUnionPlan(stmt) {
+function buildUnionPlan(stmt, capabilities, orderPlans) {
   const selects = [];
   const collect = (u) => {
     if (u.type === "SELECT") {
@@ -40167,24 +41436,25 @@ function buildUnionPlan(stmt) {
   const lines = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans));
   });
   return lines;
 }
-function buildWithPlan(stmt) {
+function buildWithPlan(stmt, capabilities, orderPlans) {
   const lines = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans));
       lines.push("");
     }
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
-    lines.push(...buildExplainPlan(stmt.query, "[main]"));
+    lines.push(...buildExplainPlan(stmt.query, "[main]", capabilities, orderPlans));
   }
   if (canInlineSingleCte(stmt)) {
     lines.push("");
-    lines.push(...buildSelectPlan(buildInlinedQuery(stmt), "[effective: inlined CTE]"));
+    const inlined = buildInlinedQuery(stmt);
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans));
   }
   return lines;
 }
@@ -40212,7 +41482,7 @@ function collectFullScanReasons(stmt) {
     r.push("ORDER BY \u306B\u5F0F");
   return r;
 }
-function collectSubqueryPlans(stmt) {
+function collectSubqueryPlans(stmt, capabilities, orderPlans) {
   const lines = [];
   let idx = 1;
   const visitWhere = (w) => {
@@ -40221,16 +41491,16 @@ function collectSubqueryPlans(stmt) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
           lines.push("");
-          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`));
+          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
           lines.push("");
-          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`));
+          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         break;
       case "EXISTS":
         lines.push("");
-        lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`));
+        lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         break;
       case "LOGICAL":
         visitWhere(w.left);
@@ -40248,7 +41518,7 @@ function collectSubqueryPlans(stmt) {
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
       lines.push("");
-      lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`));
+      lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans));
     }
   }
   if (stmt.having) visitWhere(stmt.having);
@@ -40266,7 +41536,7 @@ function buildInsertPlan(stmt, label) {
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   return lines;
 }
-function buildInsertSelectPlan(stmt, label) {
+function buildInsertSelectPlan(stmt, label, capabilities, orderPlans) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT SELECT]`);
@@ -40274,10 +41544,10 @@ function buildInsertSelectPlan(stmt, label) {
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json\uFF08\u4EF6\u6570\u306F SELECT \u7D50\u679C\u306B\u4F9D\u5B58\u3001100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]"));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
-function buildUpdatePlan(stmt, label) {
+function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
   const isArith = hasArithAssignment(stmt);
   const isSubq = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines = [];
@@ -40311,7 +41581,7 @@ function buildUpdatePlan(stmt, label) {
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`));
+      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans));
     }
   }
   return lines;
@@ -40338,7 +41608,7 @@ function buildUpsertPlan(stmt, label) {
     `  api:        GET /k/v1/records.json\uFF08\u91CD\u8907\u5224\u5B9A\uFF09\u2192 POST \u307E\u305F\u306F PUT /k/v1/records.json \xD7 ${batchCount}`
   ];
 }
-function buildUpsertSelectPlan(stmt, label) {
+function buildUpsertSelectPlan(stmt, label, capabilities, orderPlans) {
   const lines = [
     ...label ? [label] : [],
     `  [UPSERT SELECT]`,
@@ -40348,7 +41618,7 @@ function buildUpsertSelectPlan(stmt, label) {
     `  api:        GET /k/v1/records.json\uFF08\u91CD\u8907\u5224\u5B9A\uFF09\u2192 POST \u307E\u305F\u306F PUT /k/v1/records.json\uFF08100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`,
     ``
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]"));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
 function buildReorderPlan(stmt, label) {
@@ -40883,12 +42153,14 @@ function flattenFormFieldProperties(properties) {
 function flattenFields(properties, lookupCopyFields, inSubtable = false) {
   const out = [];
   for (const field of Object.values(properties)) {
-    out.push({
+    const optionOrder = toOptionOrderMap(field.options);
+    const sortKind = detectSortKind(field.type, field.format);
+    const info = {
       code: field.code,
       label: field.label,
       fieldType: field.type,
-      optionOrder: toOptionOrderMap(field.options),
-      sortKind: detectSortKind(field.type, field.format),
+      optionOrder,
+      sortKind,
       required: field.required,
       minValue: normalizeConstraintValue(field.minValue),
       maxValue: normalizeConstraintValue(field.maxValue),
@@ -40897,7 +42169,9 @@ function flattenFields(properties, lookupCopyFields, inSubtable = false) {
       defaultValue: field.defaultValue,
       inSubtable,
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES2.has(field.type)
-    });
+    };
+    info.semantics = resolveFieldSemantics(info);
+    out.push(info);
     if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
   }
   return out;
@@ -40950,6 +42224,18 @@ function detectSortKind(fieldType, calcFormat) {
     return "string";
   }
   return void 0;
+}
+
+// src/core/processStatus.ts
+function normalizeProcessStatusStates(states) {
+  if (states === null) return null;
+  return Object.values(states).map((state) => {
+    const index = Number(state.index);
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new Error(`ArgumentError: invalid process status index: ${String(state.index)}`);
+    }
+    return { name: state.name, index };
+  });
 }
 
 // src/cli/nodeKintoneClient.ts
@@ -41149,7 +42435,7 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
       const res = await requestJson(`${apiBasePath}/app/status.json?${qs.toString()}`, { method: "GET" }, appId);
       return {
         enable: res.enable,
-        states: Object.values(res.states ?? {}).map((state) => state.name)
+        states: normalizeProcessStatusStates(res.states)
       };
     }
   };
@@ -42156,8 +43442,23 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
+    const needsAppMetadata = normalized.appBindingByMappedApp.size > 0 && statements.some(explainNeedsAppMetadata);
+    const runtime = needsAppMetadata ? await createRuntime(serverOptions, {
+      sql: input.sql,
+      sqlContext: normalized.sqlContext,
+      profile: input.profile
+    }) : null;
+    const explainClient = runtime?.client ?? noOpClient();
+    const explainCacheContext = runtime?.cacheContext ?? normalized.cacheContext;
+    const explainSourceSql = runtime?.sql ?? normalized.normalizedSql;
     if (statements.length > 1) {
-      const plans = buildBatchExplainPlans(normalized.normalizedSql);
+      const plans = await buildBatchExplainPlans(
+        explainSourceSql,
+        explainClient,
+        void 0,
+        explainCacheContext,
+        runtime?.maxRecords
+      );
       return {
         ok: true,
         batch: true,
@@ -42166,8 +43467,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         appBindings
       };
     }
-    const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
-      cacheContext: normalized.cacheContext
+    const result = await executeSql(explainSql(explainSourceSql), explainClient, {
+      cacheContext: explainCacheContext,
+      maxRecords: runtime?.maxRecords
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -42192,7 +43494,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+        onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows
       });
@@ -42237,7 +43539,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+      onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
       timeout: input.timeout
     });
     const result = await executeSql(runtime.sql, runtime.client, {
@@ -42533,7 +43835,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
 var profile = external_exports.string().min(1).describe("kintone connection profile name from ksql.config.json (default: the server's default profile).").optional();
 var maxRecords = external_exports.number().int().positive().describe("Maximum records fetched per SELECT (default 500).").optional();
 var fetchParallel = external_exports.number().int().min(1).max(10).describe("Number of parallel kintone record-fetch requests (1-10).").optional();
-var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). VALIDATE ONLY always requires complete input and therefore overrides 'truncate' to 'error'.").optional();
+var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always overrides 'truncate' to 'error'.").optional();
 var tempTableMaxRows = external_exports.number().int().positive().describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors \u2014 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.").optional();
 var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
 var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
@@ -42657,7 +43959,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "2.17.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.0.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -42674,12 +43976,12 @@ function createServer(args) {
   }, tools.validateTool);
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the kSQL execution plan without calling kintone APIs.",
+    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records.",
     inputSchema: explainInputShape
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. VALIDATE ONLY performs local Tier-0 validation with zero write API calls; it always requires complete input, so onLimit=truncate is ignored and treated as error. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always treats onLimit=truncate as error. VALIDATE ONLY performs local Tier-0 validation with zero write API calls. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {

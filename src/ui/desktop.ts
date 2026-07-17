@@ -13,7 +13,6 @@ import {
   getStatementType,
   isDmlType,
   writesKintone,
-  requiresCompleteInput,
   OperationCancelledError,
 } from "../core";
 import type {
@@ -983,7 +982,7 @@ function buildFetchOptionsPanel(
 
   const modes: Array<{ value: "error" | "truncate"; label: string }> = [
     { value: "error", label: "エラー" },
-    { value: "truncate", label: "打ち切って続行（ORDER BYではエラー）" },
+    { value: "truncate", label: "打ち切って続行（local ORDER BYでは完全入力が必要）" },
   ];
   for (const m of modes) {
     const lbl = el("label", "ksql-opt-radio-label");
@@ -1976,7 +1975,9 @@ async function runBatchSql(
     // DML を含むバッチでは常に error（truncate だと SELECT-based DML のソース
     // 読み取りが黙って切り捨てられ、切り捨て後の件数で confirm → 部分書き込みに
     // なるため。MCP の ksql_mutate と同じ固定。仕様 §3.6）
-    onLimitReached: analysis.requiresCompleteInput ? "error" : options.onLimitReached,
+    onLimitReached: analysis.containsDml || analysis.containsValidationOnly
+      ? "error"
+      : options.onLimitReached,
     // 一時テーブル実体化上限（未指定 = エンジン既定 10,000）。実体化は
     // onLimitReached 設定によらずエンジン層で常に error（batch spec §5.6）
     tempTableMaxRows: options.tempTableMaxRows,
@@ -2101,11 +2102,13 @@ async function runSql(
     //（v1.9.0 仕様 §3.3。パース不能な入力はそのまま execute のエラー表示に任せる）
     let insertValuesConfirm: { count: number; appId: number | null } | null = null;
     let isDmlSql = false;
-    let needsCompleteInput = false;
+    let surfaceForcesOnLimitError = false;
     try {
       const stmt = parseSqlStatement(sql);
       isDmlSql = writesKintone(stmt);
-      needsCompleteInput = requiresCompleteInput(stmt);
+      surfaceForcesOnLimitError = isDmlSql || (
+        "validateOnly" in stmt && stmt.validateOnly === true
+      );
       const count = getInsertValuesCount(stmt);
       if (isDmlSql && count !== null) {
         const appId = (stmt as { appId?: unknown }).appId;
@@ -2129,7 +2132,7 @@ async function runSql(
       maxRecords: runtimeFetch.maxRecords,
       // DML では常に error（truncate だと SELECT-based DML のソース読み取りが
       // 黙って切り捨てられ部分書き込みになるため。バッチ側と同じ固定。仕様 §3.6）
-      onLimitReached: needsCompleteInput ? "error" : runtimeFetch.onLimitReached,
+      onLimitReached: surfaceForcesOnLimitError ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
     });
 

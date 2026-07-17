@@ -1,13 +1,12 @@
 # kSQL 型付き順序・安全な `ORDER BY` / `KORDER BY` 実行仕様（R8案）
 
-- ステータス: **R8改訂案 / Claudeレビュー待ち / 未実装**（R7のv3.0.0統合範囲・B32・WHERE/GREATEST移行影響に加え、R8でB14 `#err`の非数値末尾バンドを追加）
+- ステータス: **R8承認済み / v3.0.0実装済み・公開待ち**（R7のv3.0.0統合範囲・B32・WHERE/GREATEST移行影響に加え、R8でB14 `#err`の非数値末尾バンドを追加）
 - 想定する改訂: 文字列横断仕様 R9 候補
 - 関連課題: B26（型付き比較器）、B27（`ORDER BY` 実行計画）、B30（不完全top-N）、B31（`KORDER BY`）、B32（WHERE押し下げ能力）、B9（厳密10進比較）
 - 実装計画: [v3.0.0 比較・ORDER BY 実装計画](ksql_v3_order_by_implementation_plan.md)
 - 正となる既存文書: [文字列の扱い](ksql_string_semantics.md)
 
-> 本書は Claude のレビューを受けるための差分仕様案である。本書だけを根拠に実装へ進まない。
-> 既存仕様と矛盾する場合、レビュー完了までは既存仕様を正とする。
+> 本書はレビュー済みのv3.0.0差分仕様である。文字列一般則は[文字列の扱い](ksql_string_semantics.md)を正とし、本書は`ORDER BY` / `KORDER BY`の実行契約を定める。
 
 ### R2で反映した初回レビュー
 
@@ -132,9 +131,9 @@ kSQL は型付きの canonical 順を定義する。生 REST／kintone 一覧画
 
 完全同値を証明済みのREST top-N計画は例外である。この計画では、サーバが返した窓自体がcanonical順の正しい窓であることをallowlistの根拠と受入試験で保証する。
 
-### 決定案 5: `ORDER BY` と `onLimit: "truncate"` を併用しない
+### 決定案 5: local `ORDER BY` は不完全な入力と併用しない
 
-`ORDER BY` を含む SELECT が取得上限へ到達した場合、`onLimit: "truncate"` を `error` へ格上げする。警告付きで部分集合をsortして返すことを禁止する。
+local sort計画が取得上限へ到達した場合、`onLimit: "truncate"`を指定していてもfail-closedとする。警告付きで部分集合をsortして返すことを禁止する。証明済みREST top-Nと`KORDER_NATIVE`は、部分候補をlocal sortしないため対象外である。
 
 これは本仕様の将来設計だけでなく、現行FULL_SCANでも誤った最小値・最大値を返せる既存欠陥であるため、**B30** として独立管理する（[課題文書](ksql_order_by_truncate_completeness_issue.md)）。
 
@@ -235,7 +234,7 @@ LIMIT 20
 
 1. 単一の物理アプリを直接読む、利用者へ結果を返すトップレベルSELECTである
 2. JOIN、サブテーブル展開、temp / CTE、UNION、DISTINCT、GROUP BY、HAVING、集約、WINDOWがない
-3. すべてのキーが対象物理アプリのフィールドまたは`$id`を直接参照し、alias、算術式、関数を含まない
+3. すべてのキーが対象物理アプリの**非修飾フィールドコード**または`$id`を直接参照し、SELECT alias、`t.金額`のような表修飾、算術式、関数を含まない。初期版で表修飾を拒否するのは、kintone queryへ修飾子をそのまま送れず、安全な除去変換を別途設計する必要があるためである
 4. すべてのキーの解決済み型が、次の**明示allowlist**に含まれる。未知・未測定・将来追加型を、既知の拒否型ではないという理由で許可してはならない
 5. WHERE全体をkintoneへ同値に変換でき、REST取得後の再評価や上位集合プレフィルターが残らない
 6. `LIMIT`を明示し、値が0以上500以下かつ実行時`maxRecords`以下である
@@ -263,7 +262,7 @@ LOOKUPはkSQLの型メタデータ上では独立型にせず、コピー元の�
 - JOIN、集約、DISTINCT、WINDOWを含むSELECT
 - temp / CTEを参照するSELECT、またはtemp / CTE / DML / subquery / UNION内のnested SELECT
 - `LIMIT`を省略したSELECT、`LIMIT 501`以上のSELECT
-- alias、関数、算術式を`KORDER BY`キーにしたSELECT
+- SELECT alias、表修飾付きキー、関数、算術式を`KORDER BY`キーにしたSELECT
 
 `KORDER BY`ではORDER BY / LIMIT / OFFSETを含むqueryを単発GETへそのまま送るため、完全な候補集合をローカルへ取得する必要はない。`LIMIT 0`だけは検証後に空結果へ短絡する。指定窓が`maxRecords`を超える場合に`onLimit: "truncate"`で縮めず、planning errorとする。
 
@@ -466,7 +465,7 @@ kintone固有順でよく、§4.3の単発GET条件を満たす場合は、`KORD
 
 ### 9.2 `onLimit: "truncate"` の挙動変更
 
-`ORDER BY`を含むSELECTでは、取得上限到達時の`truncate`を`error`へ格上げする。部分集合をsortして得た誤った最小／最大候補を、単なる件数省略の警告付きで返さない。詳細はB30で扱う。
+local sort計画では、取得上限到達時に`truncate`を指定していてもfail-closedとする。部分集合をsortして得た誤った最小／最大候補を、単なる件数省略の警告付きで返さない。証明済みREST top-Nと`KORDER_NATIVE`は対象外とする。詳細はB30で扱う。
 
 ### 9.3 型メタデータ欠落による移行リスク
 
@@ -523,7 +522,7 @@ v2.17.0の集合モードは維持するため、全引数が数値化可能な`
 | B26 | ホスト非依存の型付き比較器、コードポイント比較、`RECORD_NUMBER`の末尾ID比較、型メタ伝播、option / STATUS rank、peer比較。ORDER BYだけでなくMIN/MAX、範囲比較、GREATEST/LEAST、REORDERへ共有leafを適用 |
 | B27 | schema-awareなREST top-N allowlist、allowlist外の完全候補取得、ローカル sort 後の OFFSET / LIMIT、canonical tie |
 | B9 | 最大30桁を含む typed number の厳密10進比較 |
-| B30 | `ORDER BY`を含むSELECTで`onLimit: "truncate"`を`error`へ格上げし、部分top-Nを禁止 |
+| B30 | local `ORDER BY`で不完全な候補集合の部分top-Nを禁止。証明済みREST top-Nと`KORDER_NATIVE`は対象外 |
 | B31 | `KORDER BY`構文、schema-awareなnative実行可否判定、`LIMIT 1..500`の単発GET／`LIMIT 0`短絡、nested SELECT初期拒否、planning error、EXPLAIN / 公開リファレンス |
 | B32 | WHEREの型×演算子REST能力allowlist、通常SELECTのSIMPLE/FULL_SCAN routing、B27/B31のWHERE完全押し下げ判定。DMLは暗黙local化せず事前エラー |
 
@@ -590,7 +589,7 @@ R8.2で残っている型別REST実測は、B27の正しさを成立させるrel
 - KLIKEプレフィルター、`extractSafePushdownLeaves`の安全ANDリーフ、`$id`プレフィルターなど、上位集合だけをRESTへ送るqueryではORDER BY / OFFSET / LIMITを押し下げない
 - local sort前に完全な候補集合を取得する
 - 取得上限超過、検索打ち切り、タイムアウトで部分 top-N を返さない
-- `ORDER BY`を含むSELECTでは`onLimit: "truncate"`が`error`へ格上げされる
+- local sort計画では`onLimit: "truncate"`でも取得上限到達時にfail-closedとなる。REST top-Nと`KORDER_NATIVE`では不要な上書きを行わない
 - sort 後に OFFSET、最後に LIMIT を適用する
 
 ### 11.4 回帰例
@@ -644,7 +643,7 @@ LIMIT 5
 - `LIMIT 1..500`では、指定したORDER BY / LIMIT / OFFSETが1回のREST queryへそのまま載る
 - `$id`と受理済み15型だけを許可し、`RICH_TEXT`、`$revision`、未知・未測定・将来追加型をplanning時に拒否する。LOOKUPは解決済み基底型で判定する
 - REST順と§5のcanonical順が異なるfixtureで、`ORDER BY`と`KORDER BY`が意図的に異なる結果を返す
-- JOIN / temp / CTE / UNION / DISTINCT / GROUP / WINDOW / alias / 式キー / 残余WHERE / LIKE / KLIKE / LIMITなし / LIMIT 501以上をplanning時に拒否する
+- JOIN / temp / CTE / UNION / DISTINCT / GROUP / WINDOW / SELECT alias / 表修飾付きキー / 式キー / 残余WHERE / LIKE / KLIKE / LIMITなし / LIMIT 501以上をplanning時に拒否する
 - `CREATE TEMP TABLE ... AS SELECT`、CTE、SELECT-based DML、IN/scalar subquery、UNION分岐内のnested `KORDER BY`を初期版では拒否する
 - `KORDER BY`を実行不能なとき、`ORDER BY`へ黙ってフォールバックしない
 - 同値群の決定性が必要な例では、利用者が`$id`を最後のキーに明示し、その方向が独立に効く

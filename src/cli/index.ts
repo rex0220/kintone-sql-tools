@@ -59,7 +59,6 @@ import {
   isDmlType,
   isNoFromSelectStatement,
   writesKintone,
-  requiresCompleteInput,
 } from "../node/dmlGuard";
 
 export {
@@ -87,7 +86,7 @@ Options:
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
-  --on-limit <mode>          On record limit: error | truncate (ORDER BY forces error)
+  --on-limit <mode>          On record limit: error | truncate (local ORDER BY needs complete input)
   --temp-table-max-rows <n>  Max rows per temp table (default: 10000, always errors on overflow)
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
@@ -1561,7 +1560,6 @@ async function run(): Promise<number> {
   let isBatchSql = false;
   let batchContainsDml = false;
   let batchAnalysis: BatchAnalysis | null = null;
-  let needsCompleteInput = false;
   let dryRunNeedsMetadata = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
@@ -1598,13 +1596,11 @@ async function run(): Promise<number> {
         batchAnalysis = analyzeBatch(statements);
         isBatchSql = true;
         batchContainsDml = batchAnalysis.containsDml;
-        needsCompleteInput = batchAnalysis.requiresCompleteInput;
       } else {
         const stmt = parseSqlStatement(sql);
         parsedStmt = stmt;
         stmtType = getStatementType(stmt);
         isDmlStatement = writesKintone(stmt);
-        needsCompleteInput = requiresCompleteInput(stmt);
         hasWhere = hasWhereClause(stmt);
         insertValuesCount = getInsertValuesCount(stmt);
 
@@ -1664,18 +1660,19 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
-  const completeInputForcesOnLimitError = needsCompleteInput;
-  const effectiveOnLimit: OnLimitMode = completeInputForcesOnLimitError ? "error" : onLimit;
-  if (completeInputForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
-    const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
-      parsedStmt !== null && typeof parsedStmt === "object" &&
-      "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
-    );
+  const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
+    parsedStmt !== null && typeof parsedStmt === "object" &&
+    "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
+  );
+  // 通常 ORDER BY は schema-aware planner が local 完全入力か REST top-N かを決める。
+  // surface で一律 error にすると、安全な REST top-N / KORDER_NATIVE まで truncate を
+  // 「無視した」と誤表示するため、事前強制は書込み安全性と検証完全性にだけ限定する。
+  const surfaceForcesOnLimitError = isDmlStatement || batchContainsDml || isValidationOnly;
+  const effectiveOnLimit: OnLimitMode = surfaceForcesOnLimitError ? "error" : onLimit;
+  if (surfaceForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
     const reason = isDmlStatement || batchContainsDml
       ? "DML"
-      : isValidationOnly
-        ? "VALIDATE ONLY"
-        : "ORDER BY";
+      : "VALIDATE ONLY";
     process.stderr.write(`note: onLimit=truncate is ignored for ${reason} (forced to error)\n`);
   }
   if (format === "markdown" && noHeader) {

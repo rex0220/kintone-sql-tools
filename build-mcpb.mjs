@@ -57,7 +57,7 @@ const manifest = {
   },
   tools: [
     { name: "ksql_validate", description: "Validate kSQL without calling kintone APIs." },
-    { name: "ksql_explain", description: "Return a kSQL execution plan without calling kintone APIs." },
+    { name: "ksql_explain", description: "Return a schema-aware plan using form/status metadata only; never read or write records." },
     { name: "ksql_query", description: "Execute read-only kSQL." },
     { name: "ksql_mutate", description: "Execute DML kSQL with explicit safety approvals." },
     { name: "ksql_describe_app", description: "Describe a kintone app." },

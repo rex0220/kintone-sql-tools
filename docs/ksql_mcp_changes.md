@@ -78,7 +78,7 @@ MCP 層は `execute(sql, client, options)` を直接再利用し、SQL 実行エ
 | Tool | 用途 |
 | --- | --- |
 | `ksql_validate` | SQL を解析し、DML 判定・APP@profile 正規化結果を返す |
-| `ksql_explain` | kintone API なしで実行計画を返す |
+| `ksql_explain` | フォーム定義と必要時のプロセス状態metadataを使うschema-aware計画を返す。レコード取得・書込みは行わない |
 | `ksql_query` | read-only SQL を実行する |
 | `ksql_mutate` | 明示承認付きで DML を実行する |
 | `ksql_describe_app` | `DESCRIBE APPxxx` を実行する |

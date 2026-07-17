@@ -574,7 +574,7 @@ export function createKsqlMcpTools(
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+        onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
       });
@@ -623,7 +623,7 @@ export function createKsqlMcpTools(
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+      onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
       timeout: input.timeout,
     });
     const result = await executeSql(runtime.sql, runtime.client, {

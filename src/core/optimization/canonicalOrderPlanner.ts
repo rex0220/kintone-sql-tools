@@ -7,6 +7,7 @@ export type CanonicalOrderPlanKind = "CANONICAL_REST_TOP_N" | "CANONICAL_LOCAL" 
 
 export type CanonicalOrderReasonCode =
   | "ORDER_KEY_NOT_REST_EQUIVALENT"
+  | "ORDER_KEY_AMBIGUOUS"
   | "ORDER_KEY_UNRESOLVED"
   | "ORDER_KEY_UNSUPPORTED"
   | "WHERE_NOT_EXACT"
@@ -62,9 +63,16 @@ export function planCanonicalOrder(input: CanonicalOrderPlanInput): CanonicalOrd
       reasons.push("ORDER_KEY_UNRESOLVED");
       continue;
     }
-    if (semantics.compareMode === "unsupported") reasons.push("ORDER_KEY_UNSUPPORTED");
+    if (semantics.fieldType === "KSQL_AMBIGUOUS") reasons.push("ORDER_KEY_AMBIGUOUS");
+    else if (semantics.compareMode === "unsupported") reasons.push("ORDER_KEY_UNSUPPORTED");
   }
 
+  if (reasons.includes("ORDER_KEY_AMBIGUOUS")) {
+    throw new Error(
+      "ArgumentError: ORDER BY key is an ambiguous column reference " +
+      "(reason=ORDER_KEY_AMBIGUOUS). Qualify the key with its table alias."
+    );
+  }
   if (reasons.includes("ORDER_KEY_UNSUPPORTED") || reasons.includes("ORDER_KEY_UNRESOLVED")) {
     const reason = reasons.includes("ORDER_KEY_UNSUPPORTED")
       ? "ORDER_KEY_UNSUPPORTED"

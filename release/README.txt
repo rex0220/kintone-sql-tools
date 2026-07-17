@@ -1,9 +1,28 @@
-ksql 配布パッケージ (v2.17.0)
+ksql 配布パッケージ (v3.0.0)
 
-1. ksql-plugin-v2.17.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.0.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.0.0: 比較・ORDER BY・WHERE押し下げ・top-N安全性を統合するmajor release
+          (B26 / B27 / B30 / B31 / B32)。
+- 通常ORDER BY、ウィンドウORDER、MIN/MAX、WHERE範囲比較、REORDERを
+  型付きcanonical比較へ統一。文字列と型不明列はUnicodeコードポイント順。
+  数字らしい文字列をペアごとに数値比較する旧挙動は廃止。
+- typed numberは 空セル < -Infinity < 有限数 < +Infinity < "NaN" < その他非数値
+  の固定バンド。#err NUMBER列の検証失敗値はエラーにせず同じ順序で扱う。
+- local ORDER BYがmaxRecordsへ達した場合、onLimit=truncateでも部分候補の誤った
+  top-Nを返さずエラー。schema-aware REST top-Nの初期allowlistは$idのみ。
+- kintone REST固有順を明示するKORDER BYを追加。トップレベル単一物理アプリ、
+  非修飾直接フィールド、完全押し下げWHERE、LIMIT 0..500等の条件外はplanning error。
+  KORDERは新しい予約語。同名フィールドはバッククォートで参照する。
+- WHEREの型×演算子能力をフォーム定義で判定。文字列型の範囲比較はSELECTでは
+  FULL_SCANへ切り替え、DMLでは実行前に拒否する。
+- EXPLAINはschema-aware化し、フォーム定義と必要時のプロセス状態metadataを読む。
+  レコード取得・書き込みは行わない。
+- JOINの曖昧な非修飾ORDERキーはambiguous columnとしてplanning時に拒否。
+- 互換性の詳細は docs/ksql_v3_migration_guide.md を参照。
 
 v2.17.0: スカラー関数の拡充(B19・機能追加)と DATE_ADD の不具合修正(B19・バグ修正)。
 - TRUNCATE(TRUNC) / LEFT / RIGHT / INSTR / GREATEST / LEAST / LPAD / RPAD /
