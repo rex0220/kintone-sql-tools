@@ -757,11 +757,11 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 数値らしい text（`9`/`10`/`1a`） | **解消**（§4.2.1）。**kintone は数値と解釈しない** |
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
-| **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **25 型を測定**（§9.2.1）。**受理 15 / 拒否 10**。非自明な境界: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理** |
+| **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **解消**。**29 型を測定し公式リストと 100% 一致**（§9.2.1）。受理 15 / 拒否 12 / LOOKUP は基底型。非自明: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理**・**`LOOKUP` は独立型でない** |
 | **§9.2.1 R4 comparator との同値（B27・Blocking）** | **未。`equivalent` と言える型は現時点でゼロ**。**受理は同値の証拠ではない** |
 | §9.2.1 `CREATOR`/`MODIFIER` の code/name | **未 — 測定不能**。検証データの code 順と name 順が同じ答えになるため切り分けられない。**逆順になるユーザーの追加が要る** |
 | §9.2.1 各受理型の ASC/DESC 逆順・空値位置 | **未**（`更新者` と `タイトル` で ASC/DESC が逆になることのみ確認） |
-| §9.2.1 `RICH_TEXT`/`FILE`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし） |
+| §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし）。**`FILE` は測定済み＝拒否** |
 | §9.1 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | **未**（非 Blocking） |
 | §9.2 DROP_DOWN / RADIO の rank | **一部**。空値が先頭であることは確認（§9.2.1）。定義順との突き合わせは未 |
 | §9.3 `LIKE` と `KLIKE` の差 | **未**（**出荷 blocker にしない**・R4 判断） |
@@ -828,10 +828,53 @@ raw REST の `order by <field> asc/desc limit 500` を直接使い、EXPLAIN を
 | CATEGORY | `カテゴリー` | **❌ `GAIA_IS02`** | |
 | REFERENCE_TABLE | `担当者一覧` | **❌ `GAIA_IS02`** | |
 | SUBTABLE | `テーブル` | **❌ `GAIA_IS02`** | |
+| **FILE** | `添付ファイル`（APP74） | **❌ `GAIA_IS02`** | |
+| **GROUP** | `グループ`（APP74） | **❌ `GAIA_IS02`** | フォームの「グループ」（区切り） |
+| **LOOKUP（NUMBER 基底）** | `顧客番号`（APP74） | **✅ 受理** | **下記** |
+| **LOOKUP（TEXT 基底）** | `顧客名`（APP74） | **✅ 受理** | **下記** |
 
 **拒否メッセージは全型で同一形式**: `GAIA_IS02:「<ラベル>」フィールドはソート条件に使用できません。`
 
 **未測定**: `RICH_TEXT`・`FILE`・`$revision`・SUBTABLE 内フィールド・CALC の format 別（検証アプリに該当フィールドが無い、または要追加）。
+
+#### 公式ドキュメントとの突き合わせ（**実測 15/15 が一致**）
+
+[ソートで選択できるフィールド・項目を知りたい](https://jp.kintone.help/k/ja/trouble_shooting/app_qa/sort)（kintone ヘルプ）
+
+> **対応**: 「レコード番号」「更新者」「作成者」「更新日時」「作成日時」「文字列（1行）」「数値」「計算」「ラジオボタン」「ドロップダウン」「日付」「時刻」「日時」「リンク」「ルックアップ」、プロセス管理の「ステータス」
+>
+> **非対応**: 関連レコード一覧フィールドおよびテーブルにしたフィールドはソートできません
+
+**§9.2.1 の実測（受理 15 / 拒否 10）は公式リストと完全に一致する。**
+
+- **`文字列（複数行）` が対応リストに無い**ことが、`MULTI_LINE_TEXT` 拒否の理由。**`リンク` は対応リストにある**＝「テキスト系は受理」ではなく**公式が型ごとに列挙している**
+- `MULTI_SELECT` / `CHECK_BOX` / `USER_SELECT` / `ORGANIZATION_SELECT` / `GROUP_SELECT` / `STATUS_ASSIGNEE` / `CATEGORY` はいずれも**対応リストに無い**＝拒否と整合
+
+#### `ルックアップ` は独立した型ではない（実測・R5 で追加）
+
+公式リストの `ルックアップ` は、**REST 層では基底型（コピー元フィールドの型）として現れる**。
+
+```
+APP74 の DESCRIBE:
+  顧客番号（ルックアップ）→ タイプ: NUMBER
+  顧客名  （ルックアップ）→ タイプ: SINGLE_LINE_TEXT
+
+ORDER BY 顧客番号 ASC LIMIT 1 → ✅ 受理
+ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
+```
+
+> **`LOOKUP` という型は kSQL から見えない。基底型の規則がそのまま適用される。B26/B27 で `LOOKUP` の特別扱いは不要。**
+
+（公式リストが `ルックアップ` を挙げているのは、フォーム設定上のフィールド種別として列挙しているため。）
+
+#### 公式は「順序の意味論」を規定していない（**重要**）
+
+**公式ドキュメントが規定するのは「どのフィールドを並べられるか」だけであり、「どの順序で並ぶか」は書かれていない。** 文字コード順か・大文字小文字を区別するか・`CREATOR`/`MODIFIER` が code と name のどちらで並ぶかは、いずれも**公式に記載がない**。
+
+**したがって:**
+
+- §4.1 の「kintone はコードポイント順」は**観測であって契約ではない**。R4 §4.5.1 が「検証済みの kintone 結果と一致する」を**採用理由の 3 番目**に置き、1 番目を「SIMPLE と FULL_SCAN を一致させる必要がある」としたのは正しい。**kintone 側の順序が将来変わっても、kSQL の既定順が壊れない構造になっている**
+- **`equivalent` の判定は本質的に脆い。** 公式契約が無い以上、押し下げてよいと判断した型も**回帰テストで観測を固定し続ける**必要がある。**これを §7 の制限事項に加えるか、codex の判断を仰ぐ**
 
 #### 判明した非自明な境界
 
@@ -869,8 +912,8 @@ raw REST の `order by <field> asc/desc limit 500` を直接使い、EXPLAIN を
 
 | サーバ能力 | 型 |
 |---|---|
-| `unsupported`（`GAIA_IS02`） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE |
-| **`unknown`**（受理するが R4 comparator との同値が未確認） | SINGLE_LINE_TEXT / NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS / LINK / **CREATOR** / **MODIFIER** |
+| `unsupported`（`GAIA_IS02`・**12 型**） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE / **FILE** / **GROUP** |
+| **`unknown`**（受理するが R4 comparator との同値が未確認・**15 型**） | SINGLE_LINE_TEXT / NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS / LINK / **CREATOR** / **MODIFIER**（**LOOKUP は基底型に含まれる**） |
 | `equivalent` | **現時点でゼロ。** §4.1 でコードポイント順が一致したのは SINGLE_LINE_TEXT のみだが、**空値位置・DESC・全型の網羅は未完** |
 
 > **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、**サーバ順が R4 comparator と同値**と確認できた型だけである（§4.6.3）。**現時点で押し下げ可と言える型は無い。**
