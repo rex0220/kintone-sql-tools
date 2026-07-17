@@ -1109,9 +1109,29 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 - `LIMIT n` — 最大 n 件を返す
 - `OFFSET m` — 先頭 m 件をスキップしてから返す（ページング用）
 
-> **デフォルト上限:** LIMIT 未指定時のエンジン上限は最大 **10,000 件** です。  
-> CLI 既定値は `--max-records=500` のため、CLI 実行時は 500 件で制御されます。  
-> 超過した場合はエラーになります。
+### v3.0.0 制限値一覧
+
+| 対象 | 制限値 | 超過・条件不成立時の動作 |
+|---|---:|---|
+| 通常`ORDER BY`の`LIMIT` | SQL構文上の固定上限なし | REST top-Nの条件を満たさない値（初期版では`LIMIT > 500`等）は禁止せず、完全候補取得後のlocal sortへ切り替える |
+| 通常`ORDER BY`の`OFFSET` | SQL構文上の固定上限なし | REST top-Nの条件を満たさない値（初期版では`OFFSET > 10000`等）は禁止せず、local評価へ切り替える |
+| local `ORDER BY`の候補取得 | 実行時`maxRecords`未満で完了すること | 上限へ到達すると、`LIMIT 1`や`onLimit=truncate`でも`FetchAllLimitError`。部分候補のtop-Nは返さない |
+| `CANONICAL_REST_TOP_N`の窓 | `LIMIT 0..500`かつ`LIMIT <= maxRecords`、`OFFSET 0..10000` | 利用者エラーにはせず`CANONICAL_LOCAL`へ切り替える。初期キーallowlistは`$id`のみ |
+| `KORDER BY`の`LIMIT` | **必須**。`0..500`かつ`LIMIT <= maxRecords` | planning error。通常`ORDER BY`へフォールバックしない |
+| `KORDER BY`の`OFFSET` | 省略または`0..10000` | `10001`以上はplanning error。APIが受理する場合でも許可しない |
+
+`maxRecords`はSQLの返却行数ではなく、RESTから取得して保持する候補行数の上限です。入口ごとの既定値は次のとおりです。
+
+| 実行面 | `maxRecords`既定値 | 変更方法 |
+|---|---:|---|
+| エンジンAPIを直接利用 | 10,000件 | `ExecuteOptions.maxRecords` |
+| CLI | 500件 | `--max-records`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
+| MCP | 500件 | tool入力`maxRecords`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
+| プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
+
+値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。
+
+> **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
 
 > **`LIMIT > 500` の早期停止（v2.11.0）:** `ORDER BY`がなくKLIKEを含まない安全な経路では、`OFFSET + LIMIT`件を取得した時点で正常終了します。`maxRecords`は実際に取得する行数の上限です。
 

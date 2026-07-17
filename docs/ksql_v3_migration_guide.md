@@ -57,6 +57,8 @@ v3が変更するのは文字列モードと数値tieの二次比較をコード
 
 `CANONICAL_REST_TOP_N`と`KORDER_NATIVE`は単発REST窓であり、部分候補のローカルsortを行わないため、このエラーの対象外です。
 
+入口ごとの`maxRecords`既定値（エンジン10,000件／CLI・MCP 500件／プラグイン3,000件）と、通常`ORDER BY`・REST top-N・`KORDER BY`のLIMIT/OFFSET境界は、[言語リファレンス「v3.0.0 制限値一覧」](ksql_language_reference.md#v300-制限値一覧)を参照してください。
+
 ## 6. KORDER BYを追加しました
 
 `KORDER BY`はkintone RESTの型別順序を明示的に選ぶ別構文です。通常`ORDER BY`の高速化ヒントではありません。
@@ -98,4 +100,3 @@ schema-aware plannerと実行で同じ型・WHERE能力判定を行うため、`
 ## 9. B9はv3.1.0候補です
 
 v3.0.0は比較経路を共有leafへ統合しましたが、kintoneの最大30桁・小数桁・HALF_EVEN等を完全再現する厳密10進演算はB9として分離しています。binary64を超えるNUMBERの算術・丸めは、v3.0.0でもkintoneと差が残る可能性があります。
-
