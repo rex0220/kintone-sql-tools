@@ -34,6 +34,7 @@ interface MockClientOptions {
   records?: KintoneRecord[];          // GET で返すレコード（全アプリ共通）
   recordsByApp?: Record<number, KintoneRecord[]>; // アプリ ID ごとにレコードを分ける
   postIds?: string[];                 // POST レスポンスの id リスト
+  fieldTypes?: Record<string, string>; // schema-aware planner 用の明示フィールド型
 }
 
 function makeClient(opts: MockClientOptions = {}): KintoneClient & {
@@ -73,8 +74,14 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
     async getApps() {
       return [];
     },
-    async getFields(_appId) {
-      return [];
+    async getFields(appId) {
+      const records = opts.recordsByApp?.[appId] ?? opts.records ?? [];
+      const codes = new Set(records.flatMap((record) => Object.keys(record)));
+      const types = opts.fieldTypes ?? {};
+      Object.keys(types).forEach((code) => codes.add(code));
+      return [...codes]
+        .filter((code) => !code.startsWith("$"))
+        .map((code) => ({ code, label: code, fieldType: types[code] ?? "SINGLE_LINE_TEXT" }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
@@ -85,7 +92,8 @@ function makePagedClient(
   records: KintoneRecord[],
   options: { searchAborted?: boolean } = {}
 ): ReturnType<typeof makeClient> {
-  const client = makeClient();
+  // Phase 3 の schema-aware planner も実レコードと同じフィールド定義を参照できるようにする。
+  const client = makeClient({ records });
   client.getRecords = async (params) => {
     client.getCalls.push({ app: params.app, query: params.query, fields: [...params.fields] });
     const limit = Number(params.query.match(/\blimit\s+(\d+)/i)?.[1] ?? "100");
@@ -293,6 +301,376 @@ test("SIMPLE OFFSET + LIMIT が maxRecords を超える truncate は従来どお
 
   expect(result.rowCount).toBe(800);
   expect(result.warnings).toEqual([expect.stringContaining("取得上限")]);
+});
+
+test("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-closed", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: i === 100 ? "a" : `z${String(i).padStart(3, "0")}`,
+  }));
+  const client = makePagedClient(records);
+
+  await expect(execute(
+    "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名 ASC LIMIT 1",
+    client,
+    { maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
+});
+
+test("B27: $id canonical REST top-N は B30 の完全入力要求を免除する", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 ORDER BY $id DESC LIMIT 1",
+    client,
+    { maxRecords: 1, onLimitReached: "truncate" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "101" }]);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain("order by $id desc limit 1");
+  expect(client.getCalls[0].query.match(/\$id/g)).toHaveLength(1);
+});
+
+test("B27: local ORDER key は SELECT 出力列でなくても取得して並べ替える", async () => {
+  const client = makePagedClient([
+    makeRecord({ $id: "1", 会社名: "z" }),
+    makeRecord({ $id: "2", 会社名: "a" }),
+  ]);
+  client.getFields = async () => [
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id FROM APP100 ORDER BY 会社名 ASC LIMIT 1",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "2" }]);
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["$id", "会社名"]));
+  expect(client.getCalls[0].query).not.toContain("order by 会社名");
+});
+
+test("B27: local同値群は stable $id ASC の後に OFFSET/LIMIT を適用する", async () => {
+  const client = makePagedClient([
+    makeRecord({ $id: "1", 会社名: "same" }),
+    makeRecord({ $id: "2", 会社名: "same" }),
+    makeRecord({ $id: "3", 会社名: "same" }),
+  ]);
+  client.getFields = async () => [
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id, 会社名 FROM APP100 ORDER BY 会社名 ASC LIMIT 1 OFFSET 1",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "2", 会社名: "same" }]);
+});
+
+test("B27: compareMode unsupported は行数に依存せず records GET 前に拒否する", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "利用者", label: "利用者", fieldType: "USER_SELECT" },
+  ];
+
+  await expect(execute(
+    "SELECT $id FROM APP100 ORDER BY 利用者 ASC LIMIT 1",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: 未解決 ORDER key も空集合として成功させない", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [];
+
+  await expect(execute(
+    "SELECT $id FROM APP100 ORDER BY typo ASC LIMIT 1",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNRESOLVED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: JOIN の曖昧な非修飾 ORDER key は型未解決と区別して拒否する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", code: "A", name: "left" })],
+      200: [makeRecord({ $id: "2", code: "A", name: "right" })],
+    },
+  });
+
+  await expect(execute(
+    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.code = b.code ORDER BY name LIMIT 1",
+    client
+  )).rejects.toThrow(/ambiguous column reference.*ORDER_KEY_AMBIGUOUS/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: JOIN の曖昧な ORDER key は表修飾すれば実行できる", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeRecord({ $id: "1", code: "A", name: "left" })],
+      200: [makeRecord({ $id: "2", code: "A", name: "right" })],
+    },
+  });
+
+  const result = await execute(
+    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.code = b.code ORDER BY a.name LIMIT 1",
+    client
+  );
+  expect(result.type).toBe("SELECT");
+  if (result.type === "SELECT") expect(result.rows).toEqual([{ "$id": "1" }]);
+});
+
+test("B27: window ORDER BY の unsupported key も records GET 前に拒否する", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "利用者", label: "利用者", fieldType: "USER_SELECT" },
+  ];
+
+  await expect(execute(
+    "SELECT RANK() OVER (ORDER BY 利用者 ASC) AS r FROM APP100",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: KORDER BY は kintone native 順を単発 GET のまま保持する", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ $id: "9", 金額: "10" }),
+      makeRecord({ $id: "2", 金額: "2" }),
+    ],
+    fieldTypes: { 金額: "NUMBER" },
+  });
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP100 WHERE 金額 > 0 KORDER BY 金額 DESC, $id ASC LIMIT 5 OFFSET 2",
+    client,
+    { maxRecords: 5, onLimitReached: "truncate" }
+  ) as SelectResult;
+
+  // mock の返却順をローカルで並べ直さず、そのまま kintone native 順として採用する。
+  expect(result.rows).toEqual([
+    { $id: "9", 金額: "10" },
+    { $id: "2", 金額: "2" },
+  ]);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain("金額 > 0");
+  expect(client.getCalls[0].query).toContain("order by 金額 desc, $id asc limit 5 offset 2");
+  expect(result.warnings).toEqual([]);
+});
+
+test("B31: canonical ORDER BY と KORDER BY は同値群の順序を意図的に共有しない", async () => {
+  const canonicalClient = makePagedClient([
+    makeRecord({ $id: "1", 名前: "same" }),
+    makeRecord({ $id: "2", 名前: "same" }),
+  ]);
+  canonicalClient.getFields = async () => [
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const canonical = await execute(
+    "SELECT $id FROM APP100 ORDER BY 名前 LIMIT 2",
+    canonicalClient
+  ) as SelectResult;
+
+  // native mock は kintone の暗黙 tie 順を表す。KORDER はこれを canonical $id ASC へ直さない。
+  const nativeClient = makeClient({
+    records: [
+      makeRecord({ $id: "2", 名前: "same" }),
+      makeRecord({ $id: "1", 名前: "same" }),
+    ],
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT" },
+  });
+  const native = await execute(
+    "SELECT $id FROM APP100 KORDER BY 名前 LIMIT 2",
+    nativeClient
+  ) as SelectResult;
+
+  expect(canonical.rows).toEqual([{ $id: "1" }, { $id: "2" }]);
+  expect(native.rows).toEqual([{ $id: "2" }, { $id: "1" }]);
+});
+
+test("B31: KORDER BY LIMIT 0 は全 planning 検査後に records GET なしで空結果を返す", async () => {
+  const client = makeClient({ fieldTypes: { 金額: "NUMBER" } });
+
+  const result = await execute(
+    "SELECT $id, 金額 FROM APP100 KORDER BY 金額 LIMIT 0",
+    client
+  ) as SelectResult;
+
+  expect(result).toMatchObject({ rowCount: 0, rows: [], columns: ["$id", "金額"] });
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test.each([0, 1])("B31: native allowlist 外は LIMIT %i でも records GET 前に拒否する", async (limit) => {
+  const client = makeClient({ fieldTypes: { 利用者: "USER_SELECT" } });
+
+  await expect(execute(
+    `SELECT $id FROM APP100 KORDER BY 利用者 LIMIT ${limit}`,
+    client
+  )).rejects.toThrow(/KORDER_TYPE_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test.each([
+  ["SELECT $id FROM APP100 KORDER BY $id", "KORDER_LIMIT_INVALID"],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 501", "KORDER_LIMIT_INVALID"],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 5 OFFSET 10001", "KORDER_OFFSET_INVALID"],
+] as const)("B31: native REST window 条件を fail-closed にする: %s", async (sql, reason) => {
+  const client = makeClient();
+  await expect(execute(sql, client)).rejects.toThrow(reason);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: LIMIT が実行時 maxRecords を超える KORDER BY を拒否する", async () => {
+  const client = makeClient();
+  await expect(execute(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 5",
+    client,
+    { maxRecords: 4 }
+  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: residual WHERE と KLIKE を native order へ混在させない", async () => {
+  const residual = makeClient({ fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "SELECT $id FROM APP100 WHERE 名前 > 'a' KORDER BY $id LIMIT 5",
+    residual
+  )).rejects.toThrow(/KORDER_WHERE_NOT_EXACT/);
+  expect(residual.getCalls).toHaveLength(0);
+
+  const klike = makeClient({ fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "SELECT $id FROM APP100 WHERE 名前 KLIKE 'a' KORDER BY $id LIMIT 5",
+    klike
+  )).rejects.toThrow(/KORDER_KLIKE_UNSUPPORTED/);
+  expect(klike.getCalls).toHaveLength(0);
+});
+
+test("B31: SELECT alias は native order の物理フィールドとして扱わない", async () => {
+  const client = makeClient({ fieldTypes: { 金額: "NUMBER" } });
+  await expect(execute(
+    "SELECT 金額 AS 別名 FROM APP100 KORDER BY 別名 LIMIT 5",
+    client
+  )).rejects.toThrow(/KORDER_KEY_NOT_DIRECT_FIELD/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B31: STATUS native order は process status metadata を取得しない", async () => {
+  const client = makeClient({ fieldTypes: { ステータス: "STATUS" } });
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return { enable: true, states: [{ name: "完了", index: 0 }] };
+  };
+
+  await execute(
+    "SELECT ステータス FROM APP100 KORDER BY ステータス LIMIT 1",
+    client
+  );
+  expect(statusCalls).toBe(0);
+  expect(client.getCalls).toHaveLength(1);
+});
+
+test("B30: window ORDER BY も truncate を fail-closed にする", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: String.fromCodePoint(0x7a + (i % 2)),
+  }));
+  const client = makePagedClient(records);
+
+  await expect(execute(
+    "SELECT 会社名, ROW_NUMBER() OVER (ORDER BY 会社名 ASC) AS rn FROM APP100",
+    client,
+    { maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
+});
+
+test.each([
+  [
+    "UNION",
+    "SELECT 会社名 FROM APP200 UNION ALL " +
+      "SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名",
+  ],
+  [
+    "WITH",
+    "WITH x AS (SELECT 会社名 FROM APP100 WHERE 会社名 LIKE '%' ORDER BY 会社名) " +
+      "SELECT 会社名 FROM x",
+  ],
+])("B30: %s 内の ORDER BY も完全入力を要求する", async (_label, sql) => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    会社名: i === 100 ? "a" : `z${String(i).padStart(3, "0")}`,
+  }));
+  const client = makeClient({ recordsByApp: { 100: records, 200: [] } });
+
+  await expect(execute(sql, client, {
+    maxRecords: 100,
+    onLimitReached: "truncate",
+  })).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
+});
+
+test("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHERE で評価", async () => {
+  const client = makeClient({
+    records: [
+      makeRecord({ $id: "1", 郵便番号: "20" }),
+      makeRecord({ $id: "2", 郵便番号: "99" }),
+      makeRecord({ $id: "3", 郵便番号: "10" }),
+    ],
+  });
+  client.getFields = async () => [
+    { code: "郵便番号", label: "郵便番号", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const originalGetRecords = client.getRecords;
+  client.getRecords = async (params) => {
+    if (params.query.includes('郵便番号 > "100"')) {
+      throw new Error("GAIA_IQ03: 郵便番号フィールドに演算子>を使用できません");
+    }
+    return originalGetRecords(params);
+  };
+
+  const result = await execute(
+    "SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100' LIMIT 5",
+    client,
+    { cacheContext: "b32-baseline" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.郵便番号)).toEqual(["20", "99"]);
+  expect(client.getCalls.every((call) => !call.query.includes('郵便番号 > "100"'))).toBe(true);
+});
+
+test("B32 Phase 3: SINGLE_LINE_TEXT の範囲比較は REST query へ押し下げない", async () => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", 郵便番号: "20" }),
+    makeRecord({ $id: "2", 郵便番号: "99" }),
+  ] });
+  client.getFields = async () => [
+    { code: "郵便番号", label: "郵便番号", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const result = await execute(
+    "SELECT 郵便番号 FROM APP100 WHERE 郵便番号 > '100' LIMIT 5",
+    client,
+    { cacheContext: "b32-phase3-select" }
+  ) as SelectResult;
+
+  expect(result.type).toBe("SELECT");
+  expect(client.getCalls.length).toBeGreaterThan(0);
+  expect(client.getCalls.every((call) => !call.query.includes("郵便番号 >"))).toBe(true);
+});
+
+test("B32 Phase 3: DML の REST 非対応 WHERE は GET/PUT 前に拒否する", async () => {
+  const client = makeClient({ fieldTypes: { 郵便番号: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "UPDATE APP100 SET 郵便番号 = '200' WHERE 郵便番号 > '100'",
+    client,
+    { cacheContext: "b32-phase3-dml" }
+  )).rejects.toThrow(/DmlConvertError|cannot be represented by kintone REST/);
+  expect(client.getCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
 });
 
 test("SIMPLE ORDER BY は LIMIT 500 / 501 境界で同じ先頭 500 行を返す", async () => {
@@ -866,8 +1244,8 @@ test("FULL_SCAN: JOIN + WHERE（join側フィールド）は API WHERE に押し
         makeRecord({ $id: "2", 顧客No: "C002", 会社名: "B社", 顧客ランク: "B" }),
       ],
       4149: [
-        makeRecord({ $id: "10", 顧客No_: "C001", 案件No_: "K-10", 商談フェーズ: "提案中", 売上: "1000" }),
-        makeRecord({ $id: "11", 顧客No_: "C002", 案件No_: "K-11", 商談フェーズ: "失注", 売上: "2000" }),
+        makeRecord({ $id: "10", 顧客No_: "C001", 案件No_: "K-10", 案件名: "案件A", 商談フェーズ: "提案中", 売上: "1000" }),
+        makeRecord({ $id: "11", 顧客No_: "C002", 案件No_: "K-11", 案件名: "案件B", 商談フェーズ: "失注", 売上: "2000" }),
       ],
     },
   });
@@ -1018,7 +1396,10 @@ test("FULL_SCAN: NUMBER 等値は押し下げても JS の文字列表現で再�
   ) as SelectResult;
 
   expect(client.getCalls[0].query).toContain("金額 = 100");
-  expect(result.rows).toEqual([{ $id: "2", 金額: "100" }]);
+  expect(result.rows).toEqual([
+    { $id: "1", 金額: "100.0" },
+    { $id: "2", 金額: "100" },
+  ]);
 });
 
 test.each([
@@ -1189,7 +1570,7 @@ test.each(["IN", "NOT IN"])(
     let statusCalls = 0;
     client.getProcessStatuses = async () => {
       statusCalls += 1;
-      return { enable: true, states: ["処理中", "完了"] };
+      return { enable: true, states: [{ name: "処理中", index: 0 }, { name: "完了", index: 1 }] };
     };
 
     const result = await execute(
@@ -1219,7 +1600,10 @@ test.each([
       { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
       { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
     ];
-    client.getProcessStatuses = async () => ({ enable, states: [...states] });
+    client.getProcessStatuses = async () => ({
+      enable,
+      states: states.map((name, index) => ({ name, index })),
+    });
 
     const result = await execute(
       `SELECT $id FROM APP99302 WHERE $id >= 1 AND ステータス IN ('${value}') AND 件名 LIKE '%'`,
@@ -1246,7 +1630,7 @@ test("FULL_SCAN: NUMBER / DROP_DOWN候補だけなら status.json を呼ばな�
   let statusCalls = 0;
   client.getProcessStatuses = async () => {
     statusCalls += 1;
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
 
   await execute(
@@ -1262,6 +1646,106 @@ test("FULL_SCAN: NUMBER / DROP_DOWN候補だけなら status.json を呼ばな�
     { cacheContext: "status-empty-not-candidate" }
   );
   expect(statusCalls).toBe(0);
+});
+
+test("ORDER BY の実キーが STATUS のときだけ定義順 metadata を取得する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理", 件名: "one" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了", 件名: "two" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  await execute(
+    "SELECT ステータス AS s FROM APP99308 ORDER BY s ASC",
+    client,
+    { cacheContext: "status-order-meta" }
+  );
+  expect(statusCalls).toBe(1);
+
+  const statusOrdered = await execute(
+    "SELECT ステータス FROM APP99308 ORDER BY ステータス ASC",
+    client,
+    { cacheContext: "status-order-meta-result-boundary" }
+  ) as SelectResult;
+  expect(statusCalls).toBe(2);
+  expect(statusOrdered.rows).toEqual([{ ステータス: "未処理" }, { ステータス: "完了" }]);
+
+  await execute(
+    "SELECT $id FROM APP99308 ORDER BY 件名 ASC",
+    client,
+    { cacheContext: "text-order-no-status-meta" }
+  );
+  await execute(
+    "SELECT $id FROM APP99308",
+    client,
+    { cacheContext: "no-order-no-status-meta" }
+  );
+  expect(statusCalls).toBe(2);
+});
+
+test("STATUS の範囲比較は定義順 metadata を使う", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理", 件名: "one" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了", 件名: "two" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  const ranged = await execute(
+    "SELECT $id FROM APP99308 WHERE ステータス > '未処理' AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "status-range-meta" }
+  ) as SelectResult;
+  expect(ranged.rows).toEqual([{ $id: "2" }]);
+  expect(statusCalls).toBe(1);
+});
+
+test("CTE を越えて STATUS の物理列来歴を ORDER BY metadata へ伝播する", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  const result = await execute(
+    "WITH x AS (SELECT ステータス FROM APP99309) SELECT ステータス FROM x ORDER BY ステータス ASC",
+    client,
+    { cacheContext: "status-order-cte-lineage" }
+  ) as SelectResult;
+
+  expect(result.rowCount).toBe(2);
+  expect(statusCalls).toBe(1);
 });
 
 test("FULL_SCAN: status.json の reject をレコード取得前に伝播する", async () => {
@@ -1294,7 +1778,7 @@ test("FULL_SCAN: status.json は同一APP/profileの同時実行でも1回だけ
   client.getProcessStatuses = async () => {
     statusCalls += 1;
     await new Promise((resolve) => setTimeout(resolve, 5));
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
   const sql = "SELECT $id FROM APP99305 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'";
 
@@ -1322,7 +1806,7 @@ test("FULL_SCAN JOIN: STATUS候補のある側だけ status.json を取得して
   const statusApps: number[] = [];
   client.getProcessStatuses = async (appId) => {
     statusApps.push(appId);
-    return { enable: true, states: ["処理中"] };
+    return { enable: true, states: [{ name: "処理中", index: 0 }] };
   };
 
   const result = await execute(
@@ -1526,6 +2010,7 @@ test("SELECT サブテーブル仮想テーブル + _p.項目", async () => {
         } as unknown as KintoneRecord,
       ],
     },
+    fieldTypes: { 案件名: "SINGLE_LINE_TEXT", 商品コード: "SINGLE_LINE_TEXT", 数量: "NUMBER" },
   });
 
   const result = await execute(
@@ -1658,8 +2143,8 @@ test("INSERT サブテーブル行 → 親レコードに PUT", async () => {
 
 test("UPDATE → GET して PUT", async () => {
   const records = [
-    makeRecord({ $id: "1" }),
-    makeRecord({ $id: "2" }),
+    makeRecord({ $id: "1", ステータス: "未完了" }),
+    makeRecord({ $id: "2", ステータス: "未完了" }),
   ];
   const client = makeClient({ records });
   const result = await execute(
@@ -1677,7 +2162,7 @@ test("UPDATE → GET して PUT", async () => {
 });
 
 test("UPDATE → 確認コールバックで OK", async () => {
-  const records = [makeRecord({ $id: "1" })];
+  const records = [makeRecord({ $id: "1", f: "old" })];
   const client = makeClient({ records });
   let confirmed = false;
 
@@ -1699,7 +2184,7 @@ test("UPDATE → 確認コールバックで OK", async () => {
 });
 
 test("UPDATE → 確認コールバックでキャンセル", async () => {
-  const client = makeClient({ records: [makeRecord({ $id: "1" })] });
+  const client = makeClient({ records: [makeRecord({ $id: "1", f: "old" })] });
   await expect(
     execute("UPDATE APP100 SET f = 'v' WHERE f = 'old'", client, {
       confirm: async () => false,
@@ -1710,8 +2195,8 @@ test("UPDATE → 確認コールバックでキャンセル", async () => {
 
 test("UPDATE 算術式: 現在値を取得して計算結果で PUT", async () => {
   const records = [
-    makeRecord({ $id: "1", 金額: "1000" }),
-    makeRecord({ $id: "2", 金額: "2000" }),
+    makeRecord({ $id: "1", 金額: "1000", ステータス: "対象" }),
+    makeRecord({ $id: "2", 金額: "2000", ステータス: "対象" }),
   ];
   const client = makeClient({ records });
   const result = await execute(
@@ -1727,9 +2212,9 @@ test("UPDATE 算術式: 現在値を取得して計算結果で PUT", async () =
 
 test("UPDATE 算術式: 確認コールバックが件数を受け取る", async () => {
   const records = [
-    makeRecord({ $id: "10", 金額: "500" }),
-    makeRecord({ $id: "11", 金額: "800" }),
-    makeRecord({ $id: "12", 金額: "300" }),
+    makeRecord({ $id: "10", 金額: "500", ステータス: "対象" }),
+    makeRecord({ $id: "11", 金額: "800", ステータス: "対象" }),
+    makeRecord({ $id: "12", 金額: "300", ステータス: "対象" }),
   ];
   const client = makeClient({ records });
   let confirmedCount = 0;
@@ -1751,7 +2236,7 @@ test("UPDATE 算術式: 確認コールバックが件数を受け取る", async
 });
 
 test("UPDATE 算術式: 確認コールバックでキャンセル", async () => {
-  const records = [makeRecord({ $id: "1", 金額: "100" })];
+  const records = [makeRecord({ $id: "1", 金額: "100", f: "v" })];
   const client = makeClient({ records });
   await expect(
     execute("UPDATE APP100 SET 金額 = 金額 * 10 WHERE f = 'v'", client, {
@@ -2354,8 +2839,8 @@ test("UPDATE サブテーブルは _rid 条件必須", async () => {
 // ----------------------------------------------------------------
 
 test("DELETE → GET して DELETE", async () => {
-  const records = [makeRecord({ $id: "10" }), makeRecord({ $id: "20" })];
-  const client = makeClient({ records });
+  const records = [makeRecord({ $id: "10", 作成日: "2022-01-01" }), makeRecord({ $id: "20", 作成日: "2022-01-01" })];
+  const client = makeClient({ records, fieldTypes: { 作成日: "DATE" } });
   const result = await execute(
     "DELETE FROM APP100 WHERE 作成日 < '2023-01-01'",
     client
@@ -2367,7 +2852,7 @@ test("DELETE → GET して DELETE", async () => {
 });
 
 test("DELETE → 確認コールバックでキャンセル", async () => {
-  const client = makeClient({ records: [makeRecord({ $id: "1" })] });
+  const client = makeClient({ records: [makeRecord({ $id: "1", f: "v" })] });
   await expect(
     execute("DELETE FROM APP100 WHERE f = 'v'", client, {
       confirm: async () => false,
@@ -2481,6 +2966,30 @@ test("REORDER サブテーブル行（親単位）", async () => {
   expect(table[0].id).toBe("r2");
   expect(table[1].id).toBe("r1");
   expect(table.every((r) => r.value === undefined)).toBe(true);
+});
+
+test("B26: REORDER はtyped stringをコードポイント順、typed numberを数値順にする", async () => {
+  const parent = {
+    $id: { value: "1" },
+    $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { コード: { value: "2" }, 数量: { value: "10" } } },
+      { id: "r2", value: { コード: { value: "10" }, 数量: { value: "2" } } },
+    ] },
+  } as unknown as KintoneRecord;
+  const client = makeClient({ recordsByApp: { 100: [parent] } });
+  client.getFields = async () => [
+    { code: "コード", label: "コード", fieldType: "SINGLE_LINE_TEXT", inSubtable: true },
+    { code: "数量", label: "数量", fieldType: "NUMBER", inSubtable: true },
+  ];
+
+  await execute("REORDER ALL APP100$明細 BY コード ASC", client, { cacheContext: "reorder-string" });
+  await execute("REORDER ALL APP100$明細 BY 数量 ASC", client, { cacheContext: "reorder-number" });
+
+  const stringOrder = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  const numberOrder = client.putCalls[1].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  expect(stringOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
+  expect(numberOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
 });
 
 test("REORDER: 空数値セルだけの親を >= の対象から外し、確認件数と親件数を揃える", async () => {
@@ -3047,6 +3556,7 @@ test("WITH インライン化 — 単純 CTE の WHERE が REST API クエリに
       makeRecord({ 種別: "A", 金額: "100" }),
       makeRecord({ 種別: "B", 金額: "200" }),
     ],
+    fieldTypes: { 金額: "NUMBER" },
   });
 
   // CTE が SIMPLE モード + 最終 WHERE が単純比較 → インライン化される
@@ -3097,30 +3607,31 @@ test("WITH インライン化 — GROUP BY CTE は非インライン（FULL_SCAN
   expect(client.getCalls.length).toBeGreaterThan(0);
 });
 
-test("WITH インライン化 — LIMIT が最終クエリから REST API に渡る", async () => {
+test("WITH インライン化 — allowlist外 ORDER BY は LIMIT を REST API に渡さない", async () => {
   const client = makeClient({
     records: [
       makeRecord({ 金額: "300" }),
       makeRecord({ 金額: "100" }),
       makeRecord({ 金額: "200" }),
     ],
+    fieldTypes: { 金額: "NUMBER" },
   });
 
-  await execute(
+  const result = await execute(
     `WITH 全件 AS (SELECT * FROM APP100)
      SELECT * FROM 全件 ORDER BY 金額 ASC LIMIT 2`,
     client
   ) as SelectResult;
 
-  // LIMIT が REST API クエリに含まれる（SIMPLE モードとしてインライン化）
-  expect(client.getCalls[0].query).toContain("limit 2");
+  expect(client.getCalls[0].query).not.toContain("limit 2");
+  expect(result.rows.map((row) => row.金額)).toEqual(["100", "200"]);
 });
 
 test("WITH インライン化 — エイリアス付き FROM (FROM cte AS c WHERE c.field)", async () => {
   const client = makeClient({
-    records: [makeRecord({ 金額: "500" }), makeRecord({ 金額: "100" })],
+    records: [makeRecord({ 金額: "500", 種別: "A" }), makeRecord({ 金額: "100", 種別: "A" })],
+    fieldTypes: { 金額: "NUMBER" },
   });
-
   await execute(
     `WITH 全件 AS (SELECT * FROM APP100 WHERE 種別 = 'A')
      SELECT * FROM 全件 AS c WHERE c.金額 > 200`,
@@ -3180,6 +3691,11 @@ test("CASE WHEN WHERE フィルタ — 左辺 CASE: 区分で金額を切り替�
       makeRecord({ 区分: "特別", 金額: "1200", 名前: "佐藤" }),
     ],
   });
+  client.getFields = async () => [
+    { code: "区分", label: "区分", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ];
 
   // CASE WHEN 区分 = '特別' THEN 金額 ELSE 0 END > 1000
   // → 特別かつ金額>1000 の行だけ通過: 佐藤(1200)
@@ -3280,7 +3796,7 @@ test("UPDATE SET スカラーサブクエリ — サブクエリの値で全件 
   const subqueryRecords = [makeRecord({ 合計費用: "5000" })];
   const updateRecords   = [makeRecord({ $id: "1" }), makeRecord({ $id: "2" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: subqueryRecords }; // SELECT MAX(合計費用)
@@ -3302,7 +3818,7 @@ test("UPDATE SET スカラーサブクエリ — サブクエリの値で全件 
 test("UPDATE SET スカラーサブクエリ — 非集計で 0 行返す場合はエラー", async () => {
   // v1.12.0: 集計サブクエリ（MAX 等）は 0 件でも 1 行（0）を返すため、
   // 0 行エラーが残るのは非集計プローブの空振りのみ
-  const client = makeClient({ records: [] }); // サブクエリが 0 件
+  const client = makeClient({ records: [], fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } }); // サブクエリが 0 件
   await expect(
     execute(
       "UPDATE APP88 SET 上限費用 = (SELECT 合計費用 FROM APP88) WHERE 確度 in ('80%')",
@@ -3316,7 +3832,7 @@ test("UPDATE SET スカラーサブクエリ — 0 件集計は 0 に解決さ�
   // GET 2回目: UPDATE 対象の $id 取得
   const updateRecords = [makeRecord({ $id: "1" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: [] }; // SELECT MAX(合計費用) — 0 件
@@ -3336,7 +3852,7 @@ test("UPDATE SET スカラーサブクエリ — 通常 SET との混在", async
   const subqueryRecords = [makeRecord({ 合計費用: "9999" })];
   const updateRecords   = [makeRecord({ $id: "10" })];
   let getCallCount = 0;
-  const client = makeClient();
+  const client = makeClient({ fieldTypes: { 合計費用: "NUMBER", 上限費用: "NUMBER", 確度: "DROP_DOWN", ステータス: "SINGLE_LINE_TEXT" } });
   (client as KintoneClient & { getRecords: KintoneClient["getRecords"] }).getRecords = async () => {
     getCallCount++;
     if (getCallCount === 1) return { records: subqueryRecords };
@@ -3578,7 +4094,7 @@ test("MIN / MAX: 日時・RICH_TEXT は文字列、CREATOR は型不明の従来
     oldest: "2025-12-31",
     latest: "2026-07-16T02:00:00Z",
     richmin: "A",
-    unsupported: "NaN",
+    unsupported: "A",
   });
 });
 
@@ -3631,7 +4147,7 @@ test("MIN / MAX: JOIN 非修飾名は一意なら型解決し、同名競合な�
     { cacheContext: "aggregate-sort-unqualified-join" }
   ) as SelectResult;
 
-  expect(result.rows[0]).toMatchObject({ uniquemin: "10", collision: "NaN" });
+  expect(result.rows[0]).toMatchObject({ uniquemin: "10", collision: "A" });
 });
 
 test("metrics: INSERT は postCalls を数える", async () => {
@@ -3868,7 +4384,11 @@ function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): K
     async putRecords() { /* noop */ },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields(appId) {
+      const codes = new Set((recordsByApp[appId] ?? []).flatMap((record) => Object.keys(record)));
+      return [...codes].filter((code) => !code.startsWith("$"))
+        .map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" }));
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
     maxActive: () => max,
   };

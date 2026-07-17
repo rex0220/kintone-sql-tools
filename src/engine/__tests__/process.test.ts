@@ -16,6 +16,7 @@ import type { KintoneRecord } from "../../converter/dmlToKintone";
 import type { SelectStatement, JoinClause, WhereExpr } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
+import { resolveFieldSemantics } from "../../core/fieldSemantics";
 
 // ヘルパー
 function makeRecord(fields: Record<string, string>): KintoneRecord {
@@ -220,9 +221,10 @@ test("applyFilter: 空セルを有限数との範囲比較で −∞ として�
   const gte = parseSelect("SELECT * FROM APP100 WHERE 金額 >= -1000000");
   const lte = parseSelect("SELECT * FROM APP100 WHERE 金額 <= -1000000");
 
-  expect(applyFilter(rows, gte.where).map((row) => row["金額"]))
+  const resolveType = () => "NUMBER";
+  expect(applyFilter(rows, gte.where, resolveType).map((row) => row["金額"]))
     .toEqual(["0", "-1", "1"]);
-  expect(applyFilter(rows, lte.where).map((row) => row["金額"]))
+  expect(applyFilter(rows, lte.where, resolveType).map((row) => row["金額"]))
     .toEqual([""]);
 });
 
@@ -330,7 +332,7 @@ test("MIN / MAX: 文字列型は全文を辞書順比較し、数値型は従来
   });
   expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
     mn: "9",
-    mx: "100",
+    mx: "0100",
   });
 });
 
@@ -347,7 +349,7 @@ test("MIN / MAX: 文字列型の DISTINCT・空文字・修飾フィールドを
     seen.push(`${field.tableAlias}.${field.field}`);
     return "string";
   });
-  expect(result[0]).toMatchObject({ mn: "A", mx: "B" });
+  expect(result[0]).toMatchObject({ mn: "", mx: "B" });
   expect(seen).toEqual(["a.値", "a.値"]);
 
   const empty = applyGroupBy([{ "a.値": "" }], stmt.groupBy, stmt.columns, () => "string");
@@ -640,6 +642,7 @@ test("ORDER BY FIELD_NAME: sortKind=string は文字列比較を優先", () => {
   const rows: ProcessRow[] = [
     { 計算値: "2" },
     { 計算値: "10" },
+    { 計算値: "1a" },
   ];
   const sortKinds = new Map<string, "number" | "string">([
     ["計算値", "string"],
@@ -650,7 +653,7 @@ test("ORDER BY FIELD_NAME: sortKind=string は文字列比較を優先", () => {
     undefined,
     sortKinds
   );
-  expect(result.map((r) => r["計算値"])).toEqual(["10", "2"]);
+  expect(result.map((r) => r["計算値"])).toEqual(["10", "1a", "2"]);
 });
 
 test("ORDER BY FIELD_NAME: sortKind=number は数値比較を優先", () => {
@@ -668,6 +671,140 @@ test("ORDER BY FIELD_NAME: sortKind=number は数値比較を優先", () => {
     sortKinds
   );
   expect(result.map((r) => r["計算値"])).toEqual(["2", "10"]);
+});
+
+// v3.0.0 Phase 0 baseline fixtures（Phase 4 で通常テストへ反転）。
+test("B26: typed string ORDER BY は locale/UTF-16 ではなくコードポイント順", () => {
+  const compatibilityIdeograph = String.fromCodePoint(0xfa00);
+  const rows: ProcessRow[] = [
+    { value: "😀" },
+    { value: "ｱ" },
+    { value: compatibilityIdeograph },
+    { value: "亜" },
+    { value: "𠮟" },
+  ];
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "ASC" }],
+    undefined,
+    new Map([["value", "string"]])
+  );
+  expect(result.map((row) => row.value)).toEqual([
+    "亜",
+    compatibilityIdeograph,
+    "ｱ",
+    "😀",
+    "𠮟",
+  ]);
+});
+
+test("B26: typed string WHERE は数値らしい値もコードポイント順で比較", () => {
+  const stmt = parseSelect("SELECT value FROM APP1 WHERE value > '100'");
+  const rows: ProcessRow[] = [
+    { value: "20" },
+    { value: "30" },
+    { value: "99" },
+    { value: "9" },
+    { value: "10" },
+  ];
+  const result = applyFilter(rows, stmt.where, () => "SINGLE_LINE_TEXT");
+  expect(result.map((row) => row.value)).toEqual(["20", "30", "99", "9"]);
+});
+
+test("B26: typed number ORDER BY は域外値を含む固定バンド順", () => {
+  const values = ["x", "NaN", "Infinity", "10", "2", "-Infinity", "", "1a"];
+  const rows = values.map((value) => ({ value }));
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "ASC" }],
+    undefined,
+    new Map([["value", "number"]])
+  );
+  expect(result.map((row) => row.value)).toEqual([
+    "",
+    "-Infinity",
+    "2",
+    "10",
+    "Infinity",
+    "NaN",
+    "1a",
+    "x",
+  ]);
+});
+
+test("B26: typed number DESC は固定バンド全体を反転する", () => {
+  const values = ["x", "NaN", "Infinity", "10", "2", "-Infinity", ""];
+  const result = applyOrderBy(
+    values.map((value) => ({ value })),
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "DESC" }],
+    undefined,
+    new Map([["value", "number"]])
+  );
+  expect(result.map((row) => row.value)).toEqual(["x", "NaN", "Infinity", "10", "2", "-Infinity", ""]);
+});
+
+test("B26/B14: typed number MIN/MAX は #err 相当の非数値も固定バンドで集約", () => {
+  const records = [
+    makeRecord({ value: "10" }),
+    makeRecord({ value: "2" }),
+    makeRecord({ value: "NaN" }),
+    makeRecord({ value: "x" }),
+  ];
+  const stmt = parseSelect("SELECT MIN(value) AS min_value, MAX(value) AS max_value FROM APP1");
+  const { rows } = runFullScan({
+    tables: new Map([[null, records]]),
+    stmt,
+    aggregateSortKindResolver: () => "number",
+  });
+  expect(rows[0]).toEqual({ min_value: "2", max_value: "x" });
+});
+
+test("B26/B14: typed number が域外値だけなら MIN/MAX は存在する端のバンド値", () => {
+  const records = [
+    makeRecord({ value: "x" }),
+    makeRecord({ value: "NaN" }),
+    makeRecord({ value: "1a" }),
+  ];
+  const stmt = parseSelect("SELECT MIN(value) AS min_value, MAX(value) AS max_value FROM APP1");
+  const { rows } = runFullScan({
+    tables: new Map([[null, records]]),
+    stmt,
+    aggregateSortKindResolver: () => "number",
+  });
+  expect(rows[0]).toEqual({ min_value: "NaN", max_value: "x" });
+});
+
+test("B26: typed number の同一域外値は RANK/DENSE_RANK で peer のまま", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (ORDER BY value) AS r, " +
+    "DENSE_RANK() OVER (ORDER BY value) AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { value: "x" }, { value: "x" }, { value: "NaN" }, { value: "2" },
+  ];
+  applyWindow(rows, stmt.columns, undefined, new Map([["value", "number"]]));
+  expect(rows.map((row) => [row.value, row.r, row.dr])).toEqual([
+    ["x", "3", "3"],
+    ["x", "3", "3"],
+    ["NaN", "2", "2"],
+    ["2", "1", "1"],
+  ]);
+});
+
+test("B27: STATUS ORDER BY は states.*.index の rank map を使う", () => {
+  const rows: ProcessRow[] = [{ ステータス: "完了" }, { ステータス: "未処理" }];
+  const semantics = resolveFieldSemantics({
+    fieldType: "STATUS",
+    optionOrder: { 未処理: 0, 完了: 1 },
+  });
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "ステータス" }, direction: "ASC" }],
+    undefined,
+    undefined,
+    new Map([["ステータス", semantics]])
+  );
+  expect(result.map((row) => row.ステータス)).toEqual(["未処理", "完了"]);
 });
 
 test("ORDER BY 選択肢: DROP_DOWN は option index 順で比較", () => {
@@ -702,6 +839,27 @@ test("ORDER BY 選択肢: MULTI_SELECT は最小 index で比較", () => {
     optionOrders
   );
   expect(result.map((r) => r["オプション"])).toEqual(["[\"X\"]", "[\"Y\"]", "[\"Z\",\"Y\"]"]);
+});
+
+test("B26: MULTI_SELECT の保存配列順違いはRANK/DENSE_RANKでpeerになる", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (ORDER BY オプション) AS r, " +
+    "DENSE_RANK() OVER (ORDER BY オプション) AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { オプション: '["Y","Z"]' },
+    { オプション: '["Z","Y"]' },
+    { オプション: '["Z"]' },
+  ];
+  const optionOrders = new Map<string, Map<string, number>>([
+    ["オプション", new Map([["X", 0], ["Y", 1], ["Z", 2]])],
+  ]);
+  applyWindow(rows, stmt.columns, optionOrders);
+  expect(rows.map((row) => [row.オプション, row.r, row.dr])).toEqual([
+    ['["Y","Z"]', "1", "1"],
+    ['["Z","Y"]', "1", "1"],
+    ['["Z"]', "3", "2"],
+  ]);
 });
 
 // ----------------------------------------------------------------
@@ -1431,12 +1589,13 @@ test("runFullScan: GREATEST / LEAST は集合モード・tie-break・空文字�
   const stmt = parseSelect(
     "SELECT GREATEST('2','10','1a') AS mixed_g, LEAST('2','10','1a') AS mixed_l, " +
     "GREATEST('1','01','1.0') AS tie_g, LEAST('1','01','1.0') AS tie_l, " +
-    "GREATEST(empty, '-1') AS empty_g, LEAST('-1', empty) AS empty_l FROM APP100"
+    "GREATEST(empty, '-1') AS empty_g, LEAST('-1', empty) AS empty_l, " +
+    "GREATEST('20','100') AS v3_g FROM APP100"
   );
   const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
   expect(rows[0]).toEqual({
     mixed_g: "2", mixed_l: "10", tie_g: "1.0", tie_l: "01",
-    empty_g: "-1", empty_l: "",
+    empty_g: "-1", empty_l: "", v3_g: "100",
   });
 });
 
@@ -1713,7 +1872,7 @@ test("MAX / MIN: 150,000 行でも RangeError にならない", () => {
     金額: String(i + 1),
   }));
   const stmt = parseSelect("SELECT MAX(金額) AS mx, MIN(金額) AS mn FROM APP100");
-  const result = applyGroupBy(bigRows, stmt.groupBy, stmt.columns);
+  const result = applyGroupBy(bigRows, stmt.groupBy, stmt.columns, () => "number");
   expect(result[0]["mx"]).toBe("150000");
   expect(result[0]["mn"]).toBe("1");
 });

@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-16
 - 位置づけ: [主要 RDB 機能比較評価](ksql_sql_feature_comparison_evaluation.md) §3 T2-1 / T2-4（「効果:中／コスト:小」でまとめて 1 リリースが効率的と評価）。
-- ステータス: **仕様 R4・実装済み・コードレビュー承認・実機 全 17 項目 pass（v2.17.0 リリース待ち）。**
+- ステータス: **v2.17.0 でリリース済み（npm publish 済み・latest 2.17.0）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

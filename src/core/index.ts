@@ -10,6 +10,10 @@ export { normalizeBatchVariableName, normalizeBatchVariables, validateDeclaredBa
 export { getInsertValuesCount, getStatementType, isDmlType, writesKintone, isReadOnlyStatement, requiresCompleteInput } from "./dmlGuard";
 export type { BatchAnalysis, StatementAnalysis, BatchVariableAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
+export { resolveFieldSemantics, syntheticSemantics, withFieldSemanticSource } from "./fieldSemantics";
+export { explainNeedsAppMetadata, whereNeedsFieldMetadata } from "./explainMetadata";
+export type { CompareMode, ResolvedFieldSemantics } from "./fieldSemantics";
+export type { ProcessStatusState } from "./processStatus";
 
 export type {
   DmlConfirmContext,

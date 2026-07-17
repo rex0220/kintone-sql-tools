@@ -3,6 +3,8 @@
 - 作成日: 2026-07-16
 - 位置づけ: [B13 文字列・日時 MIN/MAX](ksql_string_min_max_aggregate_spec.md) §7/§9 で**フェーズ2として分離**した積み残し。B16 `GROUP_CONCAT` とは独立（[B16 仕様](ksql_group_concat_spec.md) §0）。
 - ステータス: **v2.15.0 でリリース済み**（R2 実装・コードレビュー承認・実機 全13項目 pass）。決定的証拠＝同一 `#err` で `MIN(文字列T1)`=`x`（文字列）・`MIN(数値T1)`=`NaN`（数値）＝DML 対象アプリの型どおりに分離／`MAX($id)`=15（辞書順なら `"9"`）＝`RECORD_NUMBER` 宣言／`MAX(顧客No)`=214＝temp 越しの数値非回帰。
+
+> **v3.0.0移行注記（B26）:** 上記`MIN(数値T1)=NaN`はv2.15.0時点で「NUMBERメタが伝播した」ことを示す履歴上の受入証拠であり、v3のMIN結果契約ではない。`#err`のNUMBER宣言列には検証失敗入力の非数値が設計どおり存在するため、v3では`空セル < -Infinity < 有限数 < +Infinity < "NaN" < その他非数値`の固定バンドでORDER BY・範囲比較・MIN/MAXを統一する。非数値1件によるNaN汚染から結果が変わることはmajor移行事項として扱う。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

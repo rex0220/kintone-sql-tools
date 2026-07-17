@@ -516,6 +516,27 @@ test("ORDER BY 複数 / LIMIT", () => {
     { key: { type: "FIELD_NAME", name: "金額"   }, direction: "ASC"  },
   ]);
   expect(ast.limit).toBe(20);
+  expect(ast.orderMode).toBe("CANONICAL");
+});
+
+test("KORDER BY は native order mode としてトップレベル SELECT にだけ受理する", () => {
+  const ast = parseSelect("SELECT * FROM APP100 KORDER BY 金額 DESC, $id ASC LIMIT 20");
+  expect(ast.orderMode).toBe("KINTONE_NATIVE");
+  expect(ast.orderBy).toHaveLength(2);
+  expect(() => parse("SELECT KORDER FROM APP100")).toThrow(ParseError);
+  expect(parseSelect("SELECT `KORDER` FROM APP100").columns[0]).toMatchObject({ field: "KORDER" });
+});
+
+test.each([
+  "WITH x AS (SELECT * FROM APP100 KORDER BY $id LIMIT 1) SELECT * FROM x",
+  "SELECT * FROM APP100 WHERE $id IN (SELECT $id FROM APP200 KORDER BY $id LIMIT 1)",
+  "SELECT * FROM APP100 KORDER BY $id LIMIT 1 UNION ALL SELECT * FROM APP200",
+  "INSERT INTO APP200 ($id) SELECT $id FROM APP100 KORDER BY $id LIMIT 1",
+  "UPSERT INTO APP200 ($id) SELECT $id FROM APP100 KORDER BY $id LIMIT 1 ON DUPLICATE ($id)",
+  "CREATE TEMP TABLE #x AS SELECT $id FROM APP100 KORDER BY $id LIMIT 1",
+  "UPDATE APP100 SET value = (SELECT value FROM APP200 KORDER BY $id LIMIT 1) WHERE $id = 1",
+])("nested KORDER BY を拒否する: %s", (sql) => {
+  expect(() => parse(sql)).toThrow(/KORDER BY/);
 });
 
 // ----------------------------------------------------------------

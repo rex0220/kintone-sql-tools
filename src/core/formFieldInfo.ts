@@ -1,4 +1,5 @@
 import type { KintoneFieldInfo } from "../execute";
+import { resolveFieldSemantics } from "./fieldSemantics";
 
 /** GET form fields API のうち、ksql が使用する共通部分。 */
 export interface FormFieldProperty {
@@ -31,12 +32,14 @@ function flattenFields(
 ): KintoneFieldInfo[] {
   const out: KintoneFieldInfo[] = [];
   for (const field of Object.values(properties)) {
-    out.push({
+    const optionOrder = toOptionOrderMap(field.options);
+    const sortKind = detectSortKind(field.type, field.format);
+    const info: KintoneFieldInfo = {
       code: field.code,
       label: field.label,
       fieldType: field.type,
-      optionOrder: toOptionOrderMap(field.options),
-      sortKind: detectSortKind(field.type, field.format),
+      optionOrder,
+      sortKind,
       required: field.required,
       minValue: normalizeConstraintValue(field.minValue),
       maxValue: normalizeConstraintValue(field.maxValue),
@@ -45,7 +48,9 @@ function flattenFields(
       defaultValue: field.defaultValue,
       inSubtable,
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES.has(field.type),
-    });
+    };
+    info.semantics = resolveFieldSemantics(info);
+    out.push(info);
     if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
   }
   return out;

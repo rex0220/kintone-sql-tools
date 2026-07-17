@@ -12,7 +12,7 @@ const fetchParallel = z.number().int().min(1).max(10)
   .describe("Number of parallel kintone record-fetch requests (1-10).")
   .optional();
 const onLimit = z.enum(["error", "truncate"])
-  .describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). VALIDATE ONLY always requires complete input and therefore overrides 'truncate' to 'error'.")
+  .describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always overrides 'truncate' to 'error'.")
   .optional();
 const tempTableMaxRows = z.number().int().positive()
   .describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors — 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.")

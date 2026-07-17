@@ -19,7 +19,13 @@ function makeClient(): KintoneClient & { getCalls: PageFetchParams[]; writeCalls
     async putRecords() { client.writeCalls++; },
     async deleteRecords() { client.writeCalls++; },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields() {
+      return [
+        { code: "ID", label: "ID", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "備考", label: "備考", fieldType: "SINGLE_LINE_TEXT" },
+      ];
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
   return client;
@@ -42,7 +48,7 @@ test("EXPLAIN は KLIKE の SIMPLE kintone query を表示する", async () => {
     client
   ) as SelectResult;
   expect(result.rows.some((row) => String(row.plan).includes('件名 not like "保留"'))).toBe(true);
-  expect(client.getCalls).toHaveLength(0);
+  expect(client.getCalls).toHaveLength(0); // metadata API は getRecords には数えない
 });
 
 test("FULL_SCAN KLIKE を押し下げ、DISTINCT は JS 側で処理する", async () => {

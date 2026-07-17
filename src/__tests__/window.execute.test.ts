@@ -53,7 +53,10 @@ test("CTE 1文形で各グループの最新行を全列付きで取得し、外
 });
 
 test("SELECT しないウィンドウ ORDER BY キーを API 取得フィールドへ含める", async () => {
-  const client = makeClient(sales);
+  const client = makeClient(sales, [
+    { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "受注日", label: "受注日", fieldType: "DATE" },
+  ]);
   await execute(
     "SELECT 顧客ID, ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn FROM APP300",
     client,
@@ -113,7 +116,10 @@ test("EXPLAIN はウィンドウ CTE を FULL_SCAN としインライン化し�
     "EXPLAIN WITH ranked AS (" +
       "SELECT k, ROW_NUMBER() OVER (ORDER BY d DESC) AS rn FROM APP300" +
     ") SELECT k FROM ranked WHERE rn = 1",
-    makeClient([]),
+    makeClient([], [
+      { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "d", label: "d", fieldType: "DATE" },
+    ]),
     { cacheContext: "window-explain" }
   ) as SelectResult;
   const plan = result.rows.map((row) => row.plan);
@@ -124,7 +130,10 @@ test("EXPLAIN はウィンドウ CTE を FULL_SCAN としインライン化し�
 });
 
 test("一時テーブルへ実体化したウィンドウ列は数値メタを保持する", async () => {
-  const client = makeClient(sales);
+  const client = makeClient(sales, [
+    { code: "顧客ID", label: "顧客ID", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "受注日", label: "受注日", fieldType: "DATE" },
+  ]);
   const result = await executeBatch(
     "CREATE TEMP TABLE #ranked AS " +
       "SELECT 顧客ID, ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日) AS rn FROM APP300;" +

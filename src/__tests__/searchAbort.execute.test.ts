@@ -34,7 +34,13 @@ function makeAbortedClient(): KintoneClient & {
     async putRecords() { client.putCalls++; },
     async deleteRecords() { client.deleteCalls++; },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields() {
+      return [
+        { code: "f", label: "f", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "金額", label: "金額", fieldType: "NUMBER" },
+        { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+      ];
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
   return client;

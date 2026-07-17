@@ -9,6 +9,7 @@
 ## 主要仕様
 
 - `ksql_language_reference.md`
+- `ksql_v3_migration_guide.md` — v3.0.0の比較・ORDER BY・WHERE・取得上限・KORDER予約語の移行ガイド
 - `ksql_batch_recipes.md` — バッチ設計レシピ集（リラン可能な差分更新・件数ゲート・スナップショット・バッチ変数）
 - `ksql_cli_console_spec.md`
 - `kintone_sql_plugin_spec.md`

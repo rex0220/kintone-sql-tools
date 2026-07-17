@@ -153,7 +153,7 @@ FROM #err GROUP BY 顧客コード;
 - ただし**完全な入力を要求**するため、`truncate` 設定は常に `error` へ上書きされます。
 - **通過は kintone の書き込み成功を保証しません**（権限・競合・カスタマイズ JS など、ローカルで判定できない要因があるため）。
 
-> **確認手段の役割分担**: 構文・静的検査 → `ksql_validate`／実行計画のみ（**kintone 非アクセス・実件数なし**）→ `ksql_explain` / `--dry-run`／実データの件数 → 上の R2 を `ksql_query` / CLI で**実行**（read-only）／**値の妥当性** → `VALIDATE ONLY`。
+> **確認手段の役割分担**: 構文・静的検査 → `ksql_validate`（kintone非アクセス）／実行計画（**フォーム定義と必要時のプロセス状態metadataだけを取得し、レコード取得・書込みなし**）→ `ksql_explain` / `--dry-run`／実データの件数 → 上の R2 を `ksql_query` / CLI で**実行**（read-only）／**値の妥当性** → `VALIDATE ONLY`。
 >
 > **`ksql_validate` は「実行できること」を保証しません**（構文・静的解析のみ）。たとえば `UPDATE … WHERE $id IN (SELECT … FROM #tmp)` は `ksql_validate` が `ok` を返しますが、実行時に `IN (SELECT ...) は kintone クエリに変換できません` で失敗します（下記の注記）。実行可否は read-only（`VALIDATE ONLY`・`SELECT`）で確かめてください。
 

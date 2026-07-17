@@ -66,7 +66,15 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields(appId) {
+      const codes = new Set((opts.recordsByApp?.[appId] ?? []).flatMap((record) => Object.keys(record)));
+      return [...codes].filter((code) => !code.startsWith("$"))
+        .map((code) => ({
+          code,
+          label: code,
+          fieldType: code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT",
+        }));
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
@@ -133,6 +141,39 @@ test("#err ペイロード型は元SELECTではなくDML対象フィールドか
   expect(batch.statements[0].result).toMatchObject({ type: "VALIDATION", invalidRows: 2 });
   // 対象 amount は文字列なので辞書順。元SELECTの NUMBER を誤継承すると 10 になる。
   expect((batch.statements[1].result as SelectResult).rows[0].maxamount).toBe("9");
+});
+
+test("B26/B14: #err NUMBER 宣言列の正当な非数値も固定バンドで点検できる", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "amount", label: "amount", fieldType: "NUMBER" },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code, amount) VALUES ('', 2), ('', 10), ('', 'x') VALIDATE ONLY INTO #err;" +
+    "SELECT amount FROM #err ORDER BY amount ASC;" +
+    "SELECT MIN(amount) AS min_amount, MAX(amount) AS max_amount FROM #err;" +
+    "SELECT amount FROM #err WHERE amount > 5 ORDER BY amount ASC",
+    client,
+    { cacheContext: "v3-number-band-err-table" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "VALIDATION",
+    invalidRows: 3,
+    errTable: "#err",
+  });
+  expect((batch.statements[1].result as SelectResult).rows.map((row) => row.amount)).toEqual([
+    "2", "10", "x", "x",
+  ]);
+  expect((batch.statements[2].result as SelectResult).rows[0]).toEqual({
+    min_amount: "2",
+    max_amount: "x",
+  });
+  expect((batch.statements[3].result as SelectResult).rows.map((row) => row.amount)).toEqual([
+    "10", "x", "x",
+  ]);
 });
 
 test("UPDATE の #err.$id は RECORD_NUMBER 相当の数値型で宣言する", async () => {
@@ -1005,7 +1046,7 @@ test("MIN / MAX: CTE/temp 混在 JOIN の非修飾同名列は衝突として型
 
   expect(r.statements[0].error).toBeUndefined();
   expect(r.statements[1].error).toBeUndefined();
-  expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("NaN");
+  expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("B");
   expect(fieldCalls).toBe(2);
 });
 
@@ -1063,7 +1104,7 @@ test("MIN / MAX: UNION は左右の型一致時だけメタを伝播する", asy
   );
 
   expect((r.statements[1].result as SelectResult).rows[0].samemin).toBe("A");
-  expect((r.statements[3].result as SelectResult).rows[0].mixedmin).toBe("NaN");
+  expect((r.statements[3].result as SelectResult).rows[0].mixedmin).toBe("10");
 });
 
 test("MIN / MAX: SELECT * 実体化でも型を付けフォーム定義は1回だけ取得する", async () => {

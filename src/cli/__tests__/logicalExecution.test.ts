@@ -82,7 +82,7 @@ describe("CLI logical app execution", () => {
           件名: { code: "件名", label: "件名", type: "SINGLE_LINE_TEXT" },
         } };
       } else if (url.includes("/app/status.json")) {
-        body = { enable: true, states: { internal: { name: "処理中" } } };
+        body = { enable: true, states: { internal: { name: "処理中", index: "0" } } };
       } else {
         body = { records: [{ $id: { value: "1" }, ステータス: { value: "処理中" }, 件名: { value: "one" } }] };
       }

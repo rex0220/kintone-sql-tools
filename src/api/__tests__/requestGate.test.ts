@@ -203,7 +203,7 @@ function makeFailThenOkClient(failures: { getRecords: number }) {
     async getProcessStatuses() {
       processStatusCalls += 1;
       if (processStatusCalls === 1) throw httpError(429);
-      return { enable: true, states: ["In Progress"] };
+      return { enable: true, states: [{ name: "In Progress", index: 0 }] };
     },
   };
   return { client, calls: () => ({ getRecordsCalls, postCalls, processStatusCalls }) };
@@ -221,7 +221,7 @@ test("withRequestGate: GET 系はリトライ付き、書き込み系はリト�
 
   await expect(gated.getProcessStatuses(1)).resolves.toEqual({
     enable: true,
-    states: ["In Progress"],
+    states: [{ name: "In Progress", index: 0 }],
   });
   expect(calls().processStatusCalls).toBe(2);
 

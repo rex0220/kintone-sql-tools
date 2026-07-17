@@ -54,10 +54,10 @@ npm run mcp:smoke
 npm run build
 ```
 
-## 3. API なし疎通確認
+## 3. レコードAPIなし疎通確認
 
-`ksql_validate` と `ksql_explain` は kintone API を呼ばずに確認できる。
-MCP クライアント設定前の切り分けとして、Node.js の MCP SDK クライアントから直接呼び出す。
+`ksql_validate`と、no-FROM SQLに対する`ksql_explain`はkintone APIを呼ばずに確認できる。物理アプリを参照する`ksql_explain`はv3.0.0以降、フォーム定義と必要時のプロセス状態metadataを取得するが、レコード取得・書込みは行わない。
+MCPクライアント設定前の切り分けとして、Node.jsのMCP SDKクライアントからno-FROM SQLを直接呼び出す。
 
 PowerShell:
 
@@ -362,7 +362,7 @@ Inspector の画面で確認すること:
 
 1. tools 一覧に `ksql_validate` / `ksql_explain` / `ksql_query` / `ksql_describe_app` / `ksql_show_apps` が表示される
 2. `ksql_validate` が API なしで成功する
-3. `ksql_explain` が API なしで成功する
+3. `ksql_explain`がno-FROM SQLではAPIなしで成功し、物理アプリ参照時はmetadataだけを取得して成功する
 4. `ksql_query` が実 kintone 環境に対して成功する
 5. 手動接続確認では `npm run mcp:kintone-smoke -- --config ... --profile ... --app ...` を使う
 
@@ -490,7 +490,7 @@ Remove-Item Env:\KSQL_STG_TOKEN_APP100 -ErrorAction SilentlyContinue
 1. `node dist-mcp/ksql-mcp.js --help` が成功する
 2. MCP クライアントに 11 個の tool が表示される
 3. `ksql_validate` が API なしで成功する
-4. `ksql_explain` が API なしで成功する
+4. `ksql_explain`がno-FROM SQLではAPIなしで成功し、物理アプリ参照時はmetadataだけを取得して成功する
 5. `mcp:kintone-smoke` で `ksql_describe_app` と `ksql_query` が実 kintone 環境で成功する
 6. `APP100@prod` / `APP100@stg` のような複数 profile 指定が期待どおり動く
 7. token や password をリポジトリに保存していない

@@ -6,6 +6,7 @@ import {
   buildBatchExplainPlans,
   parseSqlStatement,
   parseSqlStatements,
+  explainNeedsAppMetadata,
   analyzeBatch,
   type BatchExecuteResult,
   type ExecuteOptions,
@@ -510,8 +511,27 @@ export function createKsqlMcpTools(
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
+    const needsAppMetadata = normalized.appBindingByMappedApp.size > 0
+      && statements.some(explainNeedsAppMetadata);
+    const runtime = needsAppMetadata
+      ? await createRuntime(serverOptions, {
+          sql: input.sql,
+          sqlContext: normalized.sqlContext,
+          profile: input.profile,
+        })
+      : null;
+    const explainClient = runtime?.client ?? noOpClient();
+    const explainCacheContext = runtime?.cacheContext ?? normalized.cacheContext;
+    const explainSourceSql = runtime?.sql ?? normalized.normalizedSql;
+
     if (statements.length > 1) {
-      const plans = buildBatchExplainPlans(normalized.normalizedSql);
+      const plans = await buildBatchExplainPlans(
+        explainSourceSql,
+        explainClient,
+        undefined,
+        explainCacheContext,
+        runtime?.maxRecords
+      );
       return {
         ok: true,
         batch: true,
@@ -521,8 +541,9 @@ export function createKsqlMcpTools(
       };
     }
 
-    const result = await executeSql(explainSql(normalized.normalizedSql), noOpClient(), {
-      cacheContext: normalized.cacheContext,
+    const result = await executeSql(explainSql(explainSourceSql), explainClient, {
+      cacheContext: explainCacheContext,
+      maxRecords: runtime?.maxRecords,
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -553,7 +574,7 @@ export function createKsqlMcpTools(
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+        onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
       });
@@ -602,7 +623,7 @@ export function createKsqlMcpTools(
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: validation.requiresCompleteInput ? "error" : input.onLimit,
+      onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
       timeout: input.timeout,
     });
     const result = await executeSql(runtime.sql, runtime.client, {

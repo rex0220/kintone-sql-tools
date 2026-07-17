@@ -38,6 +38,27 @@ test("VALIDATE ONLY はread-onlyだが完全入力を要求する", () => {
   expect(a.statements[0]).toMatchObject({ isDml: false, isReadOnly: true, isValidationOnly: true });
 });
 
+test("B30: ORDER BY は SELECT / WINDOW / UNION / WITH / temp を横断して完全入力を要求する", () => {
+  expect(analyze("SELECT * FROM APP100 ORDER BY name").requiresCompleteInput).toBe(true);
+  expect(analyze(
+    "SELECT ROW_NUMBER() OVER (ORDER BY name) AS rn FROM APP100"
+  ).requiresCompleteInput).toBe(true);
+  expect(analyze(
+    "SELECT name FROM APP100 UNION ALL SELECT name FROM APP200 ORDER BY name"
+  ).requiresCompleteInput).toBe(true);
+  expect(analyze(
+    "WITH x AS (SELECT name FROM APP100 ORDER BY name) SELECT name FROM x"
+  ).requiresCompleteInput).toBe(true);
+  expect(analyze(
+    "CREATE TEMP TABLE #x AS SELECT name FROM APP100 ORDER BY name; SELECT * FROM #x"
+  ).requiresCompleteInput).toBe(true);
+});
+
+test("B30: ORDER BY のないread-only SELECTとEXPLAIN自体はtruncateを禁止しない", () => {
+  expect(analyze("SELECT * FROM APP100").requiresCompleteInput).toBe(false);
+  expect(analyze("EXPLAIN SELECT * FROM APP100 ORDER BY name").requiresCompleteInput).toBe(false);
+});
+
 test("VALIDATE ONLY INTO は暗黙temp作成・同schema appendを解析する", () => {
   const a = analyze(
     "INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY INTO #err; " +

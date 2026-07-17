@@ -23,6 +23,11 @@ import type {
 import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
+import {
+  resolveFieldSemantics as resolveDeclaredFieldSemantics,
+  syntheticSemantics,
+  type ResolvedFieldSemantics,
+} from "../core/fieldSemantics";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -59,6 +64,7 @@ export type ProcessRow = Record<string, string>;
 
 /** 物理フィールド参照から kintone フィールド型を解決する。 */
 export type FieldTypeResolver = (field: FieldRef) => string | undefined;
+export type FieldSemanticsResolver = (field: FieldRef) => ResolvedFieldSemantics | undefined;
 
 // ------------------------------------------------------------
 // エントリポイント
@@ -68,14 +74,15 @@ export function evalWhere(
   expr: WhereExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  appliedKlikes?: ReadonlySet<object>
+  appliedKlikes?: ReadonlySet<object>,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): boolean {
   switch (expr.type) {
-    case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes);
+    case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
     case "NULL_CHECK": return evalNullCheck(expr, row);
-    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes);
-    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
-    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes);
+    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
     case "EXISTS": {
       const exists = (expr as ResolvedExistsExpr).resolved;
       return expr.not ? !exists : exists;
@@ -91,17 +98,19 @@ function evalBinary(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  appliedKlikes?: ReadonlySet<object>
+  appliedKlikes?: ReadonlySet<object>,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): boolean {
   if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
     if (appliedKlikes?.has(expr)) return true;
     throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
   }
-  const left = resolveField(expr.left, row, resolveFieldType);
+  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics);
   const fieldType = expr.left.type === "FIELD"
     ? resolveFieldType?.(expr.left)
     : undefined;
-  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType);
+  const semantics = semanticsForLeft(expr.left, fieldType, resolveFieldSemantics);
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics);
 }
 
 function evalOp(
@@ -110,7 +119,9 @@ function evalOp(
   right: SqlValue,
   row: ProcessRow,
   fieldType?: string,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  semantics: ResolvedFieldSemantics = syntheticSemantics("string"),
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): boolean {
   if (op === "IN" || op === "NOT_IN") {
     let values: Set<string> | null = null;
@@ -141,9 +152,51 @@ function evalOp(
     throw new Error("KLIKE / NOT KLIKE は JavaScript 側では評価できません（SIMPLE SELECT でのみ使用できます）");
   }
 
-  const rightStr = resolveValue(right, row, resolveFieldType);
+  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics);
 
-  return compareScalarValues(op, leftStr, rightStr);
+  return compareScalarValues(op, leftStr, rightStr, semantics);
+}
+
+const NUMERIC_STRING_FUNCTIONS = new Set([
+  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
+]);
+
+function semanticsForLeft(
+  left: FieldValue,
+  fieldType?: string,
+  resolveSemantics?: FieldSemanticsResolver
+): ResolvedFieldSemantics {
+  if (left.type === "FIELD") {
+    return resolveSemantics?.(left)
+      ?? (fieldType ? resolveDeclaredFieldSemantics({ fieldType }) : syntheticSemantics("string"));
+  }
+  if (left.type === "ARITH_FIELD") return syntheticSemantics("number");
+  if (left.type === "FUNC_FIELD") {
+    return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(left.expr.func) ? "number" : "string");
+  }
+  if (left.type === "CASE_FIELD") {
+    const results = [
+      ...left.expr.branches.map((branch) => branch.result),
+      ...(left.expr.elseResult ? [left.expr.elseResult] : []),
+    ];
+    const modes = results.map((result): ResolvedFieldSemantics => {
+      if (result.type === "NUMBER" || result.type === "ARITH") return syntheticSemantics("number");
+      if (result.type === "STRING_FUNC") {
+        return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(result.func) ? "number" : "string");
+      }
+      if (result.type === "FIELD_REF") {
+        const dot = result.field.indexOf(".");
+        const ref: FieldRef = dot > 0
+          ? { type: "FIELD", tableAlias: result.field.slice(0, dot), field: result.field.slice(dot + 1) }
+          : { type: "FIELD", tableAlias: null, field: result.field };
+        return resolveSemantics?.(ref) ?? syntheticSemantics("string");
+      }
+      return syntheticSemantics("string");
+    });
+    if (modes.length > 0 && modes.every((mode) => mode.compareMode === modes[0].compareMode)) return modes[0];
+  }
+  return syntheticSemantics("string");
 }
 
 const STRING_ARRAY_FIELD_TYPES = new Set(["CHECK_BOX", "MULTI_SELECT"]);
@@ -236,14 +289,15 @@ function evalLogical(
   expr: Extract<WhereExpr, { type: "LOGICAL" }>,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  appliedKlikes?: ReadonlySet<object>
+  appliedKlikes?: ReadonlySet<object>,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): boolean {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes)
-      && evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics)
+      && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
   }
-  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes)
-    || evalWhere(expr.right, row, resolveFieldType, appliedKlikes);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics)
+    || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
 }
 
 // ------------------------------------------------------------
@@ -253,11 +307,12 @@ function evalLogical(
 function resolveField(
   field: FieldValue,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType);
+  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
   // エイリアス付き: "a.フィールド"
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`
@@ -268,7 +323,8 @@ function resolveField(
 function resolveValue(
   value: SqlValue,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   switch (value.type) {
     case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
@@ -282,7 +338,7 @@ function resolveValue(
       if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
       if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
       return String(evalArithExpr(value.expr, row));
-    case "CASE_VALUE":        return evalCaseWhen(value.expr, row, resolveFieldType);
+    case "CASE_VALUE":        return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
@@ -295,10 +351,11 @@ function resolveValue(
 export function evalCaseWhen(
   expr: CaseWhenExpr,
   row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType)) {
+    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics)) {
       return evalCaseResult(branch.result, row);
     }
   }

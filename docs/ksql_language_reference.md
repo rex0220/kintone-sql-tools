@@ -569,6 +569,18 @@ WHERE 担当者 != '山田'
 
 > 右辺の値にはバッチ変数 `@名前` も指定できます（→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)）。
 
+### 型付き比較（v3.0.0）
+
+比較方法は値の見た目ではなく、フォーム定義または一時テーブルへ伝播した列型で決まります。
+
+- 文字列型と型不明列は Unicode コードポイント順で比較します。`'20' > '100'` は真です
+- NUMBER と数値形式 CALC は数値比較です。空セル、無限大、検証失敗値を含む一時テーブル列にも決定的な固定順があります
+- DATE / TIME / DATETIME はkintoneの正規化済み表現を文字列として比較します
+- DROP_DOWN / RADIO_BUTTON / STATUS等は、取得できた定義順を使用します
+- 文字列（1行）等でkintone RESTが受理しない`<` / `>`は、SELECTでは自動的にローカル評価へ切り替えます。DMLは対象集合を暗黙に広げず、実行前にエラーにします
+
+v2までは数字だけの文字列を値ベースで数値比較する経路がありました。v3ではこのペア単位の自動切替を廃止したため、WHEREの結果行、集計値、DML候補が変わる場合があります。詳細は[v3.0.0 移行ガイド](ksql_v3_migration_guide.md)を参照してください。
+
 ### KLIKE / NOT KLIKE（kintoneキーワード検索）
 
 `KLIKE` はSQL `LIKE`とは別の演算子です。条件をkintoneの `like` / `not like` へ変換し、kintone側でキーワード検索します。
@@ -976,7 +988,19 @@ ORDER BY 部署 ASC, 金額 DESC
 - `ASC` — 昇順（省略可、デフォルト）
 - `DESC` — 降順
 
-数値として解釈できるフィールドは数値比較、それ以外は文字列（日本語対応）で比較します。
+### canonical順（v3.0.0）
+
+通常の`ORDER BY`は、REST取得・FULL_SCAN・一時テーブル・CLI・MCP・プラグインのどの経路でも、同じkSQL canonical比較規則を使います。
+
+- typed string／型不明: Unicodeコードポイント順。NFC/NFD等のUnicode正規化やロケール照合は行いません
+- typed number: `空セル < -Infinity < 有限数 < +Infinity < "NaN" < その他非数値`。その他非数値のバンド内はコードポイント順です
+- 選択系: フォームまたはプロセス設定の定義順。未知・削除済み選択肢は既知値の後ろです
+- RECORD_NUMBER: アプリコードを含む表示値から末尾の数値IDを任意精度で比較します
+- DESCはバンドを含む順序全体を反転します
+
+文字列`"10"`を数値10として扱う値ベース自動判定は行いません。型を確定できない式・一時列も既定は文字列です。ローカル比較契約のない複合型は、行数に依存せずplanning時にエラーになります。
+
+同値行の最終表示順はcanonical tieとして安定化しますが、`RANK` / `DENSE_RANK`のpeer判定にはそのtieを混ぜません。JOINで複数テーブルに同名列がある場合、非修飾キーは`ambiguous column`として拒否するため、`a.列名`のように修飾してください。
 
 ### 算術式・関数によるソート
 
@@ -993,6 +1017,31 @@ ORDER BY UPPER(顧客名) ASC
 ORDER BY LENGTH(氏名) ASC
 ORDER BY ROUND(金額, -3) DESC
 ```
+
+### KORDER BY（kintone固有順、v3.0.0）
+
+`KORDER BY`は高速化ヒントではなく、比較意味をkintone REST APIの型別順序へ切り替える別構文です。条件外で通常`ORDER BY`へ黙ってフォールバックしません。
+
+```sql
+SELECT 会社名, 金額
+FROM APP100
+WHERE 顧客ランク = 'A'
+KORDER BY 会社名 ASC, $id ASC
+LIMIT 20
+```
+
+初期版は次をすべて満たす場合だけ使用できます。
+
+- 利用者へ結果を返すトップレベルSELECT、単一の物理アプリ、JOIN／CTE／temp／UNION／集約／WINDOWなし
+- **非修飾の**直接物理フィールドまたは`$id`だけをキーにする。SELECT alias、`t.金額`のような表修飾、関数、算術式は未対応
+- WHERE全体をkintoneへ同値に押し下げられ、SQL `LIKE`／`KLIKE`を含まない
+- `LIMIT 0..500`を明示し、実行時`maxRecords`以下にする
+- `OFFSET`は省略または`0..10000`
+- 型は`$id`、RECORD_NUMBER、SINGLE_LINE_TEXT、NUMBER、CALC、DATE、DATETIME、TIME、CREATED_TIME、UPDATED_TIME、DROP_DOWN、RADIO_BUTTON、STATUS、LINK、CREATOR、MODIFIERの明示allowlist内
+
+`LIMIT 1..500`は指定したORDER/LIMIT/OFFSETを単発GETへそのまま送ります。`LIMIT 0`も型・WHERE・query形状を完全検査した後、records APIを呼ばず空結果を返します。同値群の決定性が必要なら、最後のキーとして`$id ASC`等を明示してください。
+
+`KORDER`は予約語です。同名フィールドは`` `KORDER` ``と記述します。
 
 ---
 
@@ -1033,7 +1082,7 @@ FROM ranked
 WHERE rn = 1
 ```
 
-ウィンドウ内の `ORDER BY` はトップレベルの `ORDER BY` と同じ比較規則を使用します。物理アプリでは数値型と選択肢定義順を反映します。CTE／一時テーブル由来の列は既存のトップレベル `ORDER BY` と同じ制限があり、選択肢定義順を引き継がず、値ベースの数値／文字列自動判定になります。
+ウィンドウ内の `ORDER BY` はトップレベルの通常`ORDER BY`と同じcanonical比較規則を使用します。CTE／一時テーブル由来でも伝播した型メタデータを使い、型を確定できない列は文字列として扱います。値の見た目による数値／文字列のペア単位切替は行いません。`KORDER BY`はウィンドウ内では使用できません。
 
 同じSELECT内での `GROUP BY`／集計関数との併用は未対応です。集約結果へ順位を付ける場合はCTEでスコープを分けます。
 
@@ -1060,13 +1109,35 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 - `LIMIT n` — 最大 n 件を返す
 - `OFFSET m` — 先頭 m 件をスキップしてから返す（ページング用）
 
-> **デフォルト上限:** LIMIT 未指定時のエンジン上限は最大 **10,000 件** です。  
-> CLI 既定値は `--max-records=500` のため、CLI 実行時は 500 件で制御されます。  
-> 超過した場合はエラーになります。
+### v3.0.0 制限値一覧
 
-> **`LIMIT > 500` の早期停止（v2.11.0）:** SIMPLE モードで `ORDER BY` がなく KLIKE を含まない場合、`OFFSET + LIMIT` 件を取得した時点で正常終了します。`maxRecords` は実際に取得する行数の上限であるため、`OFFSET + LIMIT <= maxRecords` なら一致総数が上限を超えていても上限エラー／truncate 警告は出ません。`ORDER BY` 付き・KLIKE・`OFFSET + LIMIT > maxRecords` は従来どおりです。
+| 対象 | 制限値 | 超過・条件不成立時の動作 |
+|---|---:|---|
+| 通常`ORDER BY`の`LIMIT` | SQL構文上の固定上限なし | REST top-Nの条件を満たさない値（初期版では`LIMIT > 500`等）は禁止せず、完全候補取得後のlocal sortへ切り替える |
+| 通常`ORDER BY`の`OFFSET` | SQL構文上の固定上限なし | REST top-Nの条件を満たさない値（初期版では`OFFSET > 10000`等）は禁止せず、local評価へ切り替える |
+| local `ORDER BY`の候補取得 | 実行時`maxRecords`未満で完了すること | 上限へ到達すると、`LIMIT 1`や`onLimit=truncate`でも`FetchAllLimitError`。部分候補のtop-Nは返さない |
+| `CANONICAL_REST_TOP_N`の窓 | `LIMIT 0..500`かつ`LIMIT <= maxRecords`、`OFFSET 0..10000` | 利用者エラーにはせず`CANONICAL_LOCAL`へ切り替える。初期キーallowlistは`$id`のみ |
+| `KORDER BY`の`LIMIT` | **必須**。`0..500`かつ`LIMIT <= maxRecords` | planning error。通常`ORDER BY`へフォールバックしない |
+| `KORDER BY`の`OFFSET` | 省略または`0..10000` | `10001`以上はplanning error。APIが受理する場合でも許可しない |
 
-> **SIMPLE モード（JOIN なし）:** `LIMIT <= 500` の OFFSET は kintone API に直接渡されます。`LIMIT > 500` はページング取得後に適用されます。
+`maxRecords`はSQLの返却行数ではなく、RESTから取得して保持する候補行数の上限です。入口ごとの既定値は次のとおりです。
+
+| 実行面 | `maxRecords`既定値 | 変更方法 |
+|---|---:|---|
+| エンジンAPIを直接利用 | 10,000件 | `ExecuteOptions.maxRecords` |
+| CLI | 500件 | `--max-records`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
+| MCP | 500件 | tool入力`maxRecords`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
+| プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
+
+値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。
+
+> **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
+
+> **`LIMIT > 500` の早期停止（v2.11.0）:** `ORDER BY`がなくKLIKEを含まない安全な経路では、`OFFSET + LIMIT`件を取得した時点で正常終了します。`maxRecords`は実際に取得する行数の上限です。
+
+> **ORDER BYと取得上限（v3.0.0）:** ローカル`ORDER BY`は正しいtop-Nのため完全な候補集合を必要とします。上限到達時に`onLimit=truncate`で部分候補を並べ替えて返さず、エラーにします。`CANONICAL_REST_TOP_N`（初期allowlistは`$id`のみ）と`KORDER_NATIVE`は単発REST窓なので、この完全入力エラーの対象外です。
+
+> **SIMPLE モード（JOIN なし）:** `ORDER BY`のREST押し下げはLIMIT値だけで決めず、schema-aware plannerがWHERE・型・query形状・窓全体を検査します。それ以外は全候補取得後にcanonical順を適用します。
 > **FULL_SCAN モード（JOIN あり等）:** JS 側でスライス処理します。
 
 ---
@@ -1947,7 +2018,7 @@ kSQL は以下の条件に応じて自動的に実行モードを切り替えま
 
 | 条件 | モード |
 |------|--------|
-| JOIN なし、GROUP BY なし、DISTINCT なし、WHERE/ORDER BY に関数・算術式なし | **SIMPLE**（kintone クエリに変換） |
+| JOIN なし、GROUP BY なし、DISTINCT なし、WHERE/ORDER BY に関数・算術式なし | **SIMPLE候補**（型×演算子能力とORDER plannerで最終決定） |
 | JOIN あり / GROUP BY あり / DISTINCT / WHERE に関数・算術式・CASE WHEN / ORDER BY に算術式 | **FULL_SCAN**（全件取得して JS 処理） |
 | WHERE に IN (SELECT) / EXISTS / NOT EXISTS / スカラーサブクエリ | **FULL_SCAN** |
 | SELECT 列にスカラーサブクエリ | **FULL_SCAN** |
@@ -1963,6 +2034,7 @@ FULL_SCAN モードは大量レコードの場合、時間がかかります。
 - エンジン既定値: **10,000 件**
 - CLI 既定値: **500 件**（`--max-records` で変更可能）
 - JOIN / GROUP BY / DISTINCT を使う場合、全テーブルを一括取得するため大量データでは時間がかかります
+- ローカル`ORDER BY`で上限に達した場合、`truncate`設定でも誤ったtop-Nを返さずエラーになります
 
 ### JOIN の等値結合のみ対応
 
@@ -2017,7 +2089,7 @@ kintone API のエラーはわかりやすく表示されます。フィール�
 
 ## 24. EXPLAIN
 
-`EXPLAIN` を先頭に付けると、実APIを実行せずに実行計画を表示します。
+`EXPLAIN` を先頭に付けると、schema-awareな実行計画を表示します。フォーム定義と、canonical STATUS順に必要な場合だけプロセス状態定義を読みます。レコード取得・書き込みAPIは呼びません。
 
 ```sql
 EXPLAIN SELECT * FROM APP100 WHERE ステータス = '完了'
@@ -2035,7 +2107,9 @@ EXPLAIN REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1
 ### 制約
 
 - `EXPLAIN SHOW APPS` など、上記以外の文は非対応です
-- 実データ更新は行いません（計画表示のみ）
+- 実データの取得・更新は行いません（metadata APIのみ）
+- 対象アプリのフォーム定義を読める権限が必要です。schema取得に失敗した場合、推定SIMPLEとして成功させず元の認証・通信エラーを返します
+- `order plan`は`CANONICAL_LOCAL`／`CANONICAL_REST_TOP_N`／`KORDER_NATIVE`を表示します
 
 ---
 

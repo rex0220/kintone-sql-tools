@@ -224,7 +224,7 @@ export class Parser {
     const tok = this.peek();
     switch (tok.kind) {
       case TokenKind.WITH:     return this.parseWith();
-      case TokenKind.SELECT:   return this.tryParseUnionChain(this.parseSelect());
+      case TokenKind.SELECT:   return this.tryParseUnionChain(this.parseSelect(true));
       case TokenKind.INSERT:   return this.parseInsert();
       case TokenKind.UPDATE:   return this.parseUpdate();
       case TokenKind.DELETE:   return this.parseDelete();
@@ -422,7 +422,7 @@ export class Parser {
       }
       query = w;
     } else if (tok.kind === TokenKind.SELECT) {
-      const sel = this.parseSelect();
+      const sel = this.parseSelect(true);
       const chained = this.tryParseUnionChain(sel);
       query = chained as SelectStatement | UnionStatement;
     } else if (tok.kind === TokenKind.INSERT) {
@@ -617,7 +617,7 @@ export class Parser {
   // SELECT
   // ----------------------------------------------------------
 
-  private parseSelect(): SelectStatement {
+  private parseSelect(allowKorder = false): SelectStatement {
     this.expect(TokenKind.SELECT);
 
     const distinct = this.consume(TokenKind.DISTINCT);
@@ -642,9 +642,19 @@ export class Parser {
       }
     }
 
-    const orderBy = this.consume(TokenKind.ORDER)
-      ? (this.expect(TokenKind.BY), this.parseOrderBy())
-      : [];
+    let orderMode: SelectStatement["orderMode"] = "CANONICAL";
+    let orderBy: OrderByItem[] = [];
+    if (this.consume(TokenKind.ORDER)) {
+      this.expect(TokenKind.BY);
+      orderBy = this.parseOrderBy();
+    } else if (this.consume(TokenKind.KORDER)) {
+      if (!allowKorder) {
+        throw new ParseError("KORDER BY は利用者へ結果を返すトップレベル SELECT でのみ使用できます", this.prev());
+      }
+      orderMode = "KINTONE_NATIVE";
+      this.expect(TokenKind.BY);
+      orderBy = this.parseOrderBy();
+    }
 
     const limit = this.consume(TokenKind.LIMIT)
       ? this.parseUnsignedInt()
@@ -669,6 +679,7 @@ export class Parser {
       where,
       groupBy,
       having,
+      orderMode,
       orderBy,
       limit,
       offset,
@@ -715,6 +726,9 @@ export class Parser {
     left: SelectStatement | UnionStatement
   ): SelectStatement | UnionStatement {
     if (this.peek().kind !== TokenKind.UNION) return left;
+    if (left.type === "SELECT" && left.orderMode === "KINTONE_NATIVE") {
+      throw new ParseError("KORDER BY は UNION 分岐では使用できません", this.peek());
+    }
     this.advance(); // UNION を消費
     const all = this.consume(TokenKind.ALL);
     const right = this.parseSelect();

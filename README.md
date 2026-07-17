@@ -11,6 +11,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - `SELECT`（JOIN/GROUP BY/HAVING/CTE/UNION）
 - `INSERT` / `UPDATE` / `UPDATE ... FROM` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
 - `EXPLAIN`
+- **型付きcanonical `ORDER BY`とkintone固有順を選ぶ`KORDER BY`**（v3.0.0）
 - **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
   - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）
   - プラグイン: read-only バッチのみ（最終結果を表示）
@@ -24,6 +25,8 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
   - `APP100` は常に物理 ID 100 のまま（暗黙変換なし）
   - `allowPhysicalAppRefs: false` で、その profile の物理 `APPxxx` 直接参照を禁止可能
 - `FROM` 省略 SELECT（例: `SELECT 'xxx' AS a`）
+
+> **v3.0.0は比較・ORDER BY意味論を変更するmajor releaseです。** 数字だけの文字列、`#err`数値列の非数値、取得上限時のlocal top-N、`KORDER`予約語、EXPLAINのmetadata API利用について、[v3.0.0 移行ガイド](docs/ksql_v3_migration_guide.md)を確認してください。
 
 ## インストール
 
@@ -159,7 +162,7 @@ Options:
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
   --fetch-parallel <n>       Parallel page fetches per query: 1-10 (default: 3)
-  --on-limit <mode>          On record limit: error | truncate
+  --on-limit <mode>          On record limit: error | truncate (local ORDER BY needs complete input)
   --temp-table-max-rows <n>  Max rows per temp table (default: 10000, always errors on overflow)
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)

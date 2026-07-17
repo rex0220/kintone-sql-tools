@@ -147,4 +147,22 @@ describe("CLI DML on-limit handling", () => {
     expect(res.stdout).toContain("B社");
     expect(res.stdout).not.toContain("C社");
   });
+
+  test("local ORDER BY is rejected by the engine without a misleading surface note", async () => {
+    installFetchMock();
+    const res = await runCaptured([
+      "--base-url", "https://example.cybozu.com",
+      "--auth", "token",
+      "--token", "dummy",
+      "--max-records", "2",
+      "--on-limit", "truncate",
+      "-e", "SELECT 顧客名 FROM APP100 ORDER BY 顧客名",
+    ]);
+
+    expect(res.code).toBe(1);
+    expect(res.stderr).not.toContain("note: onLimit=truncate is ignored for ORDER BY");
+    expect(res.stderr).toContain("ORDER BYの正しい結果には完全な候補集合が必要です");
+    expect(res.stderr).toContain("取得件数が上限（2 件）を超えました。");
+    expect(res.stdout).not.toContain("A社");
+  });
 });

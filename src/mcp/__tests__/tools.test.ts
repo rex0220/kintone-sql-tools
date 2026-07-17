@@ -12,7 +12,12 @@ function makeClient(): KintoneClient {
     async putRecords() { },
     async deleteRecords() { },
     async getApps() { return []; },
-    async getFields() { return []; },
+    async getFields() {
+      return [
+        { code: "顧客名", label: "顧客名", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+      ];
+    },
     async getProcessStatuses() { return { enable: false, states: [] }; },
   };
 }
@@ -165,8 +170,23 @@ describe("MCP tools", () => {
     ]);
   });
 
-  test("explain returns a plan without a real kintone client", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
+  test("explain resolves form metadata through the runtime client", async () => {
+    let runtimeCalls = 0;
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => {
+        runtimeCalls += 1;
+        return {
+          sql: input.sql,
+          client: makeClient(),
+          maxRecords: 10_000,
+          fetchParallel: 1,
+          onLimit: "error",
+          timeout: 30_000,
+          cacheContext: "mcp-explain-schema",
+          profileName: "prod",
+        };
+      },
+    });
     const result = await tools.explain({
       sql: "SELECT 顧客名 FROM APP100 WHERE ステータス = '完了'",
     });
@@ -175,6 +195,8 @@ describe("MCP tools", () => {
     expect(result.type).toBe("SELECT");
     expect(result.columns).toEqual(["plan"]);
     expect(JSON.stringify(result.rows)).toContain("mode:");
+    expect(JSON.stringify(result.rows)).toContain("metadata API: form definition APP100");
+    expect(runtimeCalls).toBe(1);
   });
 
   test("query executes no-FROM SELECT without runtime auth", async () => {
@@ -309,7 +331,7 @@ describe("MCP tools", () => {
     })).rejects.toThrow(/not allowed by ksql_query/);
   });
 
-  test("query maps maxRecords/onLimit to execute options and timeout to runtime", async () => {
+  test("query maps maxRecords/onLimit and leaves ORDER BY plan choice to the engine", async () => {
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     let executeOptions: ExecuteOptions | undefined;
 
@@ -358,6 +380,13 @@ describe("MCP tools", () => {
     expect(result.ok).toBe(true);
     expect(runtimeInputs[0]?.timeout).toBe(45000);
     expect(executeOptions?.maxRecords).toBe(123);
+    expect(executeOptions?.onLimitReached).toBe("truncate");
+
+    await tools.query({
+      sql: "SELECT * FROM APP100 ORDER BY name",
+      onLimit: "truncate",
+    });
+    expect(runtimeInputs[1]?.onLimit).toBe("truncate");
     expect(executeOptions?.onLimitReached).toBe("truncate");
   });
 

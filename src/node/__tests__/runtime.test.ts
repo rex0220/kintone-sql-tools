@@ -307,7 +307,7 @@ describe("logical app runtime context and token routing", () => {
     const fetchMock = jest.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response(JSON.stringify({
         enable: true,
-        states: { internal: { name: "In Progress" } },
+        states: { internal: { name: "In Progress", index: "10" } },
       }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -322,14 +322,14 @@ describe("logical app runtime context and token routing", () => {
 
     await expect(runtime.client.getProcessStatuses(binding.mappedAppId)).resolves.toEqual({
       enable: true,
-      states: ["In Progress"],
+      states: [{ name: "In Progress", index: 10 }],
     });
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("app/status.json?app=1234&lang=user");
     expect(new Headers(init?.headers).get("X-Cybozu-API-Token")).toBe("snapshot-token");
   });
 
-  test("status.json の states=null はクライアント境界で空配列へ正規化する", async () => {
+  test("status.json の states=null は enable=false の残存statesと区別して保持する", async () => {
     writeLogicalConfig();
     jest.spyOn(globalThis, "fetch").mockImplementation(async () =>
       new Response(JSON.stringify({ enable: false, states: null }), {
@@ -345,7 +345,7 @@ describe("logical app runtime context and token routing", () => {
     );
     await expect(runtime.client.getProcessStatuses(binding.mappedAppId)).resolves.toEqual({
       enable: false,
-      states: [],
+      states: null,
     });
   });
 

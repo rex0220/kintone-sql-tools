@@ -2,6 +2,31 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.0.0（2026-07-17）
+
+### Breaking changes
+
+- **B26 型付きcanonical比較へ統一**。通常`ORDER BY`、ウィンドウORDER、MIN/MAX、WHERE範囲比較、REORDERが共有leafを使う。文字列と型不明列はUnicodeコードポイント順で、`localeCompare`・Unicode正規化・数字らしい文字列のペア単位自動数値化を行わない。typed numberは`空セル < -Infinity < 有限数 < +Infinity < "NaN" < その他非数値`の固定バンドを使う。
+- 数字だけのtyped stringのWHERE範囲比較は返る行が変わり得る。たとえば文字列列では`'20' > '100'`が真になる。SELECTでkintone RESTが受理しない文字列`<` / `>`はB32の型×演算子能力判定によりFULL_SCANへ切り替え、DMLは実行前に拒否する。
+- B14 `#err`のNUMBER宣言列にある検証失敗値を型破損エラーにせず固定末尾バンドで扱う。これに伴い、v2.15.0の履歴上の受入証拠`MIN(数値T1)=NaN`はv3の結果契約ではなくなる。
+- JOIN両側に同名列がある非修飾ORDERキーは、行数や入力順に依存して処理せず`ambiguous column`としてplanning時に拒否する。
+- `KORDER`を予約語に追加。同名フィールドはバッククォートで参照する。
+- schema-aware plannerとの一致のため、`EXPLAIN`はフォーム定義と必要時のプロセス状態metadataを読む。レコード取得・書き込みは行わないが、対象アプリのmetadataを読めない認証では失敗する。
+
+### 機能追加
+
+- **B31 `KORDER BY`を追加**。kSQL canonical順ではなくkintone REST固有順を明示的に選ぶ別構文。初期版はトップレベル単一物理アプリ、非修飾直接フィールド、完全押し下げWHERE、明示15型＋`$id`、`LIMIT 0..500`かつ実行時`maxRecords`以下、`OFFSET 0..10000`に限定する。条件外は通常ORDERへfallbackせずplanning error。
+- **B27 schema-aware ORDER plannerを追加**。通常ORDERのREST top-N初期allowlistは`$id`だけ。WHERE・型・query形状・LIMIT/OFFSET窓全体がcanonical結果と同値な場合だけ単発GETへ押し下げ、それ以外は完全候補取得後にlocal canonical sortする。
+- EXPLAINに`CANONICAL_LOCAL` / `CANONICAL_REST_TOP_N` / `KORDER_NATIVE`、metadata API依存、完全入力要否を表示する。
+
+### 修正（正しさ・安全性）
+
+- **B30 部分候補の誤ったtop-Nを禁止**。local ORDER BYで`maxRecords`へ到達した場合、`onLimit=truncate`でも部分候補を並べ替えて成功せずfail-closedで停止する。REST top-NとKORDER_NATIVEは単発窓のため対象外。
+- STATUSのローカル順で`states.*.index`を保持・条件付き取得し、プロセス定義順を再現する。RANK/DENSE_RANKのpeer比較へ結果表示用tieを混ぜない。
+- `Infinity - Infinity`等で比較器がNaNを返す仕様外依存を避け、strict weak orderを性質テストで固定した。
+
+詳細と移行手順は[v3.0.0 移行ガイド](docs/ksql_v3_migration_guide.md)を参照。
+
 ## v2.17.0（2026-07-16）
 
 ### 機能追加

@@ -14,13 +14,23 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
 import { NO_FROM_CTE_NAME } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
+import { requiresCompleteInput } from "./core/dmlGuard";
+import {
+  fieldSemanticsEqual,
+  resolveFieldSemantics,
+  syntheticSemantics,
+  withFieldSemanticSource,
+  type ResolvedFieldSemantics,
+} from "./core/fieldSemantics";
+import type { ProcessStatusState } from "./core/processStatus";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
-import { compareScalarValues } from "./core/scalarCompare";
+import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
+import { whereNeedsFieldMetadata } from "./core/explainMetadata";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -39,6 +49,7 @@ import {
   KintonePutParams,
   KintoneDeleteParams,
   FieldTypeMap,
+  DmlConvertError,
 } from "./converter/dmlToKintone";
 import { fetchAll, FetchAllLimitError, PageFetcher } from "./api/fetchAll";
 import {
@@ -49,6 +60,11 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
+import {
+  planCanonicalOrder,
+  type CanonicalOrderPlan,
+} from "./core/optimization/canonicalOrderPlanner";
+import { planKorderNative } from "./core/optimization/korderPlanner";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -63,7 +79,7 @@ import {
   type AggregateSortKindResolver,
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
-import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver } from "./engine/evalWhere";
+import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
@@ -75,6 +91,11 @@ import {
   type DmlValidationCandidate,
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
+import {
+  classifyWhereCapability,
+  type PredicateCapabilityResult,
+  type WhereFieldSemanticsResolver,
+} from "./core/optimization/whereCapability";
 
 // ============================================================
 // kintone API クライアントインターフェース
@@ -99,8 +120,8 @@ export interface KintoneClient {
 
 export interface KintoneProcessStatuses {
   enable: boolean;
-  /** 実行ユーザーの表示言語に対応する状態名 */
-  states: string[];
+  /** 実行ユーザーの表示言語に対応する状態名と数値化済み定義順。未設定は null。 */
+  states: ProcessStatusState[] | null;
 }
 
 const SEARCH_ABORTED_WARNING =
@@ -131,6 +152,8 @@ export interface KintoneFieldInfo {
   optionOrder?: Record<string, number>;
   /** ソート種別（CALC設定などに基づく） */
   sortKind?: "number" | "string";
+  /** 比較・planner・実体化が共有する解決済み意味型。 */
+  semantics?: ResolvedFieldSemantics;
   required?: boolean;
   minValue?: string;
   maxValue?: string;
@@ -196,6 +219,7 @@ export interface SelectResult {
 export interface MaterializedColumnMeta {
   readonly sortKind?: "number" | "string";
   readonly fieldType?: string;
+  readonly semantics?: ResolvedFieldSemantics;
 }
 
 type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
@@ -322,6 +346,19 @@ export interface ExecuteOptions {
 // メイン: execute
 // ============================================================
 
+const defaultCacheContextByClient = new WeakMap<KintoneClient, string>();
+let nextDefaultCacheContextId = 1;
+
+function resolveCacheContext(client: KintoneClient, explicit?: string): string {
+  if (explicit) return explicit;
+  let context = defaultCacheContextByClient.get(client);
+  if (!context) {
+    context = `client:${nextDefaultCacheContextId++}`;
+    defaultCacheContextByClient.set(client, context);
+  }
+  return context;
+}
+
 /**
  * SQL 文字列を受け取り、kintone API を呼び出して結果を返す。
  * API 呼び出し回数・取得行数・所要時間を計測し、結果の metrics に付与する。
@@ -336,6 +373,7 @@ export async function execute(
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
   const startedAt = Date.now();
+  const cacheContext = resolveCacheContext(client, options.cacheContext);
   const stmt = parseSql(sql);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
@@ -349,7 +387,7 @@ export async function execute(
     stmt,
     guardedClient,
     options,
-    options.cacheContext ?? "default"
+    cacheContext
   );
   metrics.elapsedMs = Date.now() - startedAt;
   return { ...attachSearchAbortWarning(result, collector), metrics };
@@ -475,7 +513,7 @@ async function executeParsedStatement(
     case "REORDER":       return executeReorder(stmt, client, options, cacheContext);
     case "SHOW_APPS":     return executeShowApps(client);
     case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
-    case "EXPLAIN":       return executeExplain(stmt);
+    case "EXPLAIN":       return executeExplain(stmt, client, cacheContext, options.maxRecords ?? 10_000);
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
@@ -549,7 +587,12 @@ function materializedColumnMetaEqual(
   if (!left || !right || left.size !== right.size) return false;
   for (const [column, meta] of left) {
     const candidate = right.get(column);
-    if (!candidate || candidate.sortKind !== meta.sortKind || candidate.fieldType !== meta.fieldType) return false;
+    if (
+      !candidate ||
+      candidate.sortKind !== meta.sortKind ||
+      candidate.fieldType !== meta.fieldType ||
+      !fieldSemanticsEqual(candidate.semantics, meta.semantics)
+    ) return false;
   }
   return true;
 }
@@ -632,7 +675,7 @@ export async function executeBatch(
   const countedClient = wrapClientWithMetrics(client, metrics);
   const startedAt = Date.now();
   const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
-  const cacheContext = options.cacheContext ?? "default";
+  const cacheContext = resolveCacheContext(client, options.cacheContext);
 
   const tempTables = new Map<string, MaterializedTable>();
   const variables = new Map<string, VarValue>();
@@ -754,7 +797,16 @@ async function executeBatchStatement(
           cacheContext,
           tempTables
         );
-        variables.set(stmt.name, { type: "string", value });
+        const first = resolvedStmt.expr.query.columns[0];
+        const numeric = first?.type === "ARITH_COL"
+          || first?.type === "ARITH_AGG_COL"
+          || first?.type === "WINDOW_COL"
+          || (first?.type === "AGGREGATE"
+            && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"));
+        const numberValue = numeric ? Number(value) : Number.NaN;
+        variables.set(stmt.name, numeric && Number.isFinite(numberValue)
+          ? { type: "number", value: numberValue }
+          : { type: "string", value });
       } catch (e) {
         if (e instanceof ScalarSubqueryError) {
           throw new Error(`ArgumentError: ${e.message}`);
@@ -1060,6 +1112,9 @@ async function executeAssert(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<AssertResult> {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
+  const semantics = stmt.left.type === "NUMBER" || stmt.left.type === "ARITH"
+    ? syntheticSemantics("number")
+    : syntheticSemantics("string");
 
   if (stmt.op === "BETWEEN") {
     if (stmt.low === null || stmt.high === null) {
@@ -1068,7 +1123,7 @@ async function executeAssert(
     const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
-    if (!compareScalarValues(">=", left, low) || !compareScalarValues("<=", left, high)) {
+    if (!compareScalarValues(">=", left, low, semantics) || !compareScalarValues("<=", left, high, semantics)) {
       throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
     }
     return { type: "ASSERT", condition: stmt.text };
@@ -1078,7 +1133,7 @@ async function executeAssert(
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareScalarValues(stmt.op, left, right)) {
+  if (!compareScalarValues(stmt.op, left, right, semantics)) {
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
   }
   return { type: "ASSERT", condition: stmt.text };
@@ -1176,6 +1231,195 @@ function evalAssertArith(node: ArithNode): number {
 // SELECT
 // ============================================================
 
+async function buildWhereFieldSemanticsResolver(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>,
+  forcePhysicalMetadata = false
+): Promise<WhereFieldSemanticsResolver> {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  // $id はスキーマ不要の組み込み列。これだけの predicate で form API を増やさない。
+  const physicalAppIds = forcePhysicalMetadata || whereNeedsFieldMetadata(stmt.where)
+    ? [...new Set(tables.filter((table) => table.cteName === null).map((table) => table.appId))]
+    : [];
+  const infosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
+    await Promise.all(physicalAppIds.map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
+    }))
+  );
+  const orderedFields = new Set<string>();
+  const collectOrderedFields = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(collectOrderedFields);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "SELECT") return;
+    if (value["type"] === "BINARY"
+      && [">", "<", ">=", "<="].includes(String(value["op"]))) {
+      const left = value["left"] as Record<string, unknown> | undefined;
+      if (left?.["type"] === "FIELD" && typeof left["field"] === "string") {
+        orderedFields.add(left["field"] as string);
+      }
+    }
+    Object.values(value).forEach(collectOrderedFields);
+  };
+  collectOrderedFields(stmt.where);
+  collectOrderedFields(stmt.having);
+  for (const column of stmt.columns) {
+    if (column.type === "CASE_COL") collectOrderedFields(column.expr);
+  }
+  const statusOrdersByApp = new Map<number, ReadonlyMap<string, number>>();
+  await Promise.all([...infosByApp].map(async ([appId, infos]) => {
+    const needsStatus = [...orderedFields].some((field) => infos.get(field)?.fieldType === "STATUS");
+    if (!needsStatus) return;
+    const order = await loadProcessStatusOrder(appId, client, cacheContext);
+    if (order) statusOrdersByApp.set(appId, order);
+  }));
+
+  const fromPhysical = (table: TableRef, field: string): ResolvedFieldSemantics | undefined => {
+    if (field === "$id") return withFieldSemanticSource(
+      resolveFieldSemantics({ fieldType: "__ID__" }), table.appId, "$id"
+    );
+    const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
+    if (!info) return undefined;
+    const base = info.semantics ?? resolveFieldSemantics(info);
+    const semantics = info.fieldType === "STATUS" && statusOrdersByApp.has(table.appId)
+      ? { ...base, optionOrder: statusOrdersByApp.get(table.appId) }
+      : base;
+    return withFieldSemanticSource(
+      semantics,
+      table.appId,
+      info.code
+    );
+  };
+
+  return (field) => {
+    if (field.tableAlias !== null) {
+      if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        return fromPhysical(stmt.from, field.field);
+      }
+      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      if (!table) return undefined;
+      if (table.cteName !== null) {
+        return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
+          ?? syntheticSemantics("string");
+      }
+      return fromPhysical(table, field.field);
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) {
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics
+          ?? syntheticSemantics("string");
+      }
+      return fromPhysical(stmt.from, field.field);
+    }
+    const matches = tables.flatMap((table): ResolvedFieldSemantics[] => {
+      const semantics = table.cteName !== null
+        ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
+        : fromPhysical(table, field.field);
+      return semantics ? [semantics] : [];
+    });
+    if (matches.length === 1) return matches[0];
+    // JOIN の非修飾同名列は既存契約どおりローカル値として評価する。
+    return matches.length > 1 ? syntheticSemantics("string") : undefined;
+  };
+}
+
+function selectCaseConditionsNeedFieldMetadata(stmt: SelectStatement): boolean {
+  return stmt.columns.some((column) => column.type === "CASE_COL"
+    && column.expr.branches.some((branch) => whereNeedsFieldMetadata(branch.condition)));
+}
+
+function buildHavingFieldSemanticsResolver(
+  stmt: SelectStatement,
+  rowResolver: FieldSemanticsResolver
+): FieldSemanticsResolver {
+  const aliases = new Map<string, ResolvedFieldSemantics>();
+  for (const column of stmt.columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    let semantics: ResolvedFieldSemantics | undefined;
+    if (column.type === "FIELD") semantics = rowResolver(aggregateFieldRef(column.field));
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      semantics = syntheticSemantics("number");
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "MIN" || column.func === "MAX") {
+        semantics = column.arg.type === "FIELD_REF"
+          ? rowResolver(aggregateFieldRef(column.arg.field))
+          : syntheticSemantics("number");
+      } else {
+        semantics = column.func === "GROUP_CONCAT" ? syntheticSemantics("string") : syntheticSemantics("number");
+      }
+    } else if (column.type === "STRFUNC_COL") {
+      semantics = stringFunctionColumnMeta(column.expr).semantics;
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL") {
+      semantics = syntheticSemantics("string");
+    }
+    if (semantics) aliases.set(column.alias, semantics);
+  }
+  return (field) => field.tableAlias === null && aliases.has(field.field)
+    ? aliases.get(field.field)
+    : rowResolver(field);
+}
+
+async function resolveSelectWhereCapability(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<PredicateCapabilityResult> {
+  if (stmt.where === null) return classifyWhereCapability(null, () => undefined);
+  const resolver = await buildWhereFieldSemanticsResolver(stmt, client, cacheContext, materializedTables);
+  return classifyWhereCapability(stmt.where, resolver);
+}
+
+function formatWhereCapabilityFailure(result: PredicateCapabilityResult): string {
+  const reason = result.reasons.find((candidate) =>
+    candidate.code === "WHERE_FIELD_UNRESOLVED" || candidate.code === "WHERE_OPERATOR_UNSUPPORTED"
+  ) ?? result.reasons[0];
+  const details = [
+    reason?.field ? `field=${reason.field}` : null,
+    reason?.fieldType ? `type=${reason.fieldType}` : null,
+    reason?.operator ? `operator=${reason.operator}` : null,
+    reason?.code ? `reason=${reason.code}` : null,
+  ].filter((value): value is string => value !== null).join(", ");
+  return details || "reason=WHERE_UNSUPPORTED";
+}
+
+function hasCanonicalOrder(stmt: SelectStatement): boolean {
+  return stmt.orderBy.length > 0 || stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+}
+
+async function assertDmlWhereCapability(
+  stmt: UpdateStatement | DeleteStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  // サブテーブルDMLは既存どおり親を取得してローカル評価する。B32はREST対象選択経路を扱う。
+  // UPDATE ... FROM の WHERE はソースとの結合条件で、専用の照合器が対象を決める。
+  if (stmt.subtableCode || (stmt.type === "UPDATE" && stmt.from != null)) return;
+  const fields = whereNeedsFieldMetadata(stmt.where)
+    ? await getFieldsCached(stmt.appId, client, cacheContext)
+    : [];
+  const byCode = new Map(fields.map((field) => [field.code, field]));
+  const result = classifyWhereCapability(stmt.where, (field) => {
+    // UPDATE/DELETE の対象は単一アプリ。パーサが保持する APP100. 修飾も同じ対象列を指す。
+    if (field.field === "$id") return resolveFieldSemantics({ fieldType: "__ID__" });
+    const info = byCode.get(field.field);
+    return info?.semantics ?? (info ? resolveFieldSemantics(info) : undefined);
+  });
+  if (result.capability !== "EXACT_PUSHDOWN") {
+    throw new DmlConvertError(
+      `WHERE predicate cannot be represented by kintone REST (${formatWhereCapabilityFailure(result)})`
+    );
+  }
+}
+
 async function executeSelect(
   stmt: SelectStatement,
   client: KintoneClient,
@@ -1195,13 +1439,64 @@ async function executeSelect(
     return result;
   }
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
-  const mode = resolveSelectMode(stmt);
-  await validateSelectFieldCodes(stmt, mode, client, cacheContext);
+  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  if (whereCapability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
+  }
+  const staticMode = resolveSelectMode(stmt);
+  const mode: SelectMode = whereCapability.capability === "EXACT_PUSHDOWN"
+    ? staticMode
+    : "FULL_SCAN";
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  const orderPlan = hasCanonicalOrder(stmt)
+    ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+        stmt,
+        staticMode: mode,
+        whereCapability: whereCapability.capability,
+        orderSemantics: orderMeta.semantics,
+        maxRecords: options.maxRecords ?? 10_000,
+        hasKlike: whereHasKlike(stmt.where),
+      })
+    : null;
+  await validateSelectFieldCodes(
+    stmt,
+    orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : mode,
+    client,
+    cacheContext
+  );
+  // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
+  // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
+    ? requiresCompleteInput({ ...stmt, orderBy: [] })
+    : requiresCompleteInput(stmt);
+  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
+  const effectiveOptions = truncateWasDisabled
+    ? { ...options, onLimitReached: "error" as const }
+    : options;
 
-  if (mode === "SIMPLE") {
-    result = await executeSimpleSelect(stmt, client, options, cacheContext);
-  } else {
-    result = await executeFullScanSelect(stmt, client, options, cacheContext, cteCache);
+  try {
+    if (mode === "SIMPLE") {
+      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext, orderPlan, orderMeta);
+    } else {
+      result = await executeFullScanSelect(
+        stmt,
+        client,
+        effectiveOptions,
+        cacheContext,
+        cteCache,
+        whereCapability.capability === "EXACT_PUSHDOWN",
+        orderMeta
+      );
+    }
+  } catch (error) {
+    if (completeInputRequired && error instanceof FetchAllLimitError) {
+      throw new FetchAllLimitError(
+        "ORDER BYの正しい結果には完全な候補集合が必要です。" +
+        (truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
+        error.message
+      );
+    }
+    throw error;
   }
   if (captureColumnMeta) {
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
@@ -1274,18 +1569,33 @@ async function executeSimpleSelect(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  orderPlan: CanonicalOrderPlan | null,
+  orderMeta: OrderByMeta
 ): Promise<SelectResult> {
-  const params = selectToKintoneParams(stmt);
+  const restStmt = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    ? withCanonicalRestTie(stmt)
+    : stmt;
+  const params = selectToKintoneParams(restStmt);
+  const fetchFields = orderPlan?.kind === "CANONICAL_LOCAL"
+    ? selectToFetchAllFields(stmt, stmt.from)
+    : params.fields;
   // SELECT CASE は SIMPLE モードでも JS 側で射影されるため、CASE 条件内の
   // IN / NOT IN に限って型 resolver を用意する（フィールド定義キャッシュを再利用）。
   const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const projectionSemanticsResolver = stmt.columns.some((column) => column.type === "CASE_COL")
+    ? await buildWhereFieldSemanticsResolver(
+        stmt, client, cacheContext, undefined, selectCaseConditionsNeedFieldMetadata(stmt)
+      )
+    : undefined;
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const useRestWindow = stmt.orderBy.length > 0
+    ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
+    : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter =
     stmt.orderBy.length === 0 &&
@@ -1295,10 +1605,12 @@ async function executeSimpleSelect(
       ? needed
       : undefined;
 
-  // kintone は最大 500 件なので LIMIT が 500 以下ならページングは不要
-  // LIMIT 指定なし or 500 超の場合は fetchAll を使う
+  // ORDER BY ありは schema-aware plan だけが REST 窓を許可する。
+  // ORDER BY なしは順序契約がないため、従来どおり小さい LIMIT を単発取得できる。
   let records: KintoneRecord[];
-  if (useSingleGet) {
+  if (orderPlan?.kind === "KORDER_NATIVE" && stmt.limit === 0) {
+    records = [];
+  } else if (useRestWindow) {
     const res: KintoneGetResponse = await client.getRecords({
       app: params.app,
       query: params.query,
@@ -1311,7 +1623,7 @@ async function executeSimpleSelect(
       client.getRecords,
       params.app,
       baseQuery,
-      params.fields,
+      fetchFields,
       {
         parallel,
         maxRecords,
@@ -1325,16 +1637,23 @@ async function executeSimpleSelect(
   }
 
   let rows = records.map((r) => flatten(r, null));
-  if (!useSingleGet) {
-    const { optionOrders, sortKinds } = await buildOrderByMetaForSelect(stmt, client, cacheContext);
-    rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
+  if (!useRestWindow) {
+    rows = applyOrderBy(
+      rows,
+      stmt.orderBy,
+      orderMeta.optionOrders,
+      orderMeta.sortKinds,
+      orderMeta.semantics
+    );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
   const { rows: projected, columns } = project(
     rows,
     stmt.columns,
     undefined,
-    fieldTypeResolvers.row
+    fieldTypeResolvers.row,
+    undefined,
+    projectionSemanticsResolver
   );
 
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
@@ -1437,8 +1756,8 @@ async function loadTypedPushdownMeta(
       .filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
     if (statusFields.length > 0) {
       const process = await getProcessStatusesCached(appId, client, cacheContext);
-      if (process.enable && process.states.length > 0) {
-        const states = new Set(process.states);
+      if (process.enable && process.states && process.states.length > 0) {
+        const states = new Set(process.states.map((state) => state.name));
         for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
       }
     }
@@ -1652,7 +1971,21 @@ async function loadAggregateSortKindResolver(
       return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
     }))
   );
+  const statusOrdersByApp = new Map<number, ReadonlyMap<string, number>>();
+  const aggregateFieldNames = new Set(refs.map((ref) => ref.field));
+  await Promise.all([...fieldInfosByApp].map(async ([appId, infos]) => {
+    if (![...aggregateFieldNames].some((field) => infos.get(field)?.fieldType === "STATUS")) return;
+    const order = await loadProcessStatusOrder(appId, client, cacheContext);
+    if (order) statusOrdersByApp.set(appId, order);
+  }));
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+
+  const semanticsForInfo = (info: KintoneFieldInfo, appId: number): ResolvedFieldSemantics => {
+    const base = info.semantics ?? resolveFieldSemantics(info);
+    return info.fieldType === "STATUS" && statusOrdersByApp.has(appId)
+      ? { ...base, optionOrder: statusOrdersByApp.get(appId) }
+      : base;
+  };
 
   return (ref) => {
     let info: KintoneFieldInfo | undefined;
@@ -1663,30 +1996,36 @@ async function loadAggregateSortKindResolver(
         const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
         if (!table) return undefined;
         if (table.cteName !== null) {
-          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.semantics
+            ?? syntheticSemantics("string");
         }
         info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       }
     } else if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
-        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.sortKind;
+        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.semantics
+          ?? syntheticSemantics("string");
       }
       info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
     } else {
-      const matches = tables.flatMap((table): Array<"number" | "string" | undefined> => {
+      const matches = tables.flatMap((table): Array<ResolvedFieldSemantics | undefined> => {
         if (table.cteName !== null) {
           const materialized = materializedTables?.get(table.cteName);
           return materialized?.columns.includes(ref.field)
-            ? [materialized.columnMeta?.get(ref.field)?.sortKind]
+            ? [materialized.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string")]
             : [];
         }
         const candidate = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-        return candidate ? [aggregateSortKind(candidate)] : [];
+        return candidate ? [semanticsForInfo(candidate, table.appId)] : [];
       });
       if (matches.length !== 1) return undefined;
       return matches[0];
     }
-    return info ? aggregateSortKind(info) : undefined;
+    if (!info) return undefined;
+    const sourceTable = ref.tableAlias !== null
+      ? tables.find((table) => table.alias === ref.tableAlias)
+      : stmt.joins.length === 0 ? stmt.from : undefined;
+    return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
 }
 
@@ -1695,8 +2034,113 @@ function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   return field;
 }
 
-function materializedMetaFromFieldInfo(info: KintoneFieldInfo): MaterializedColumnMeta {
-  return { sortKind: aggregateSortKind(info), fieldType: info.fieldType };
+function materializedMetaFromFieldInfo(
+  info: KintoneFieldInfo,
+  sourceAppId?: number
+): MaterializedColumnMeta {
+  const semantics = info.semantics ?? resolveFieldSemantics(info);
+  return {
+    sortKind: aggregateSortKind(info),
+    fieldType: info.fieldType,
+    semantics: sourceAppId === undefined
+      ? semantics
+      : withFieldSemanticSource(semantics, sourceAppId, info.code),
+  };
+}
+
+/** REST top-N の同値群を FULL_SCAN の stable input ($id asc) と同じ順へ固定する。 */
+function withCanonicalRestTie(stmt: SelectStatement): SelectStatement {
+  const hasId = stmt.orderBy.some((item) =>
+    item.key.type === "FIELD_NAME" && item.key.name === "$id"
+  );
+  return hasId
+    ? stmt
+    : {
+        ...stmt,
+        orderBy: [...stmt.orderBy, { key: { type: "FIELD_NAME", name: "$id" }, direction: "ASC" }],
+      };
+}
+
+function syntheticColumnMeta(compareMode: "string" | "number"): MaterializedColumnMeta {
+  return { sortKind: compareMode, semantics: syntheticSemantics(compareMode) };
+}
+
+/** 型が安全に合流しない式は v3 の既定で文字列とするが、Phase 2 では既存 sortKind を変えない。 */
+function unknownStringColumnMeta(): MaterializedColumnMeta {
+  return { semantics: syntheticSemantics("string", "KSQL_UNKNOWN") };
+}
+
+function unsupportedColumnMeta(fieldType = "KSQL_ARRAY"): MaterializedColumnMeta {
+  return {
+    semantics: { fieldType, compareMode: "unsupported", inSubtable: false, requiresCollectionOperators: false },
+  };
+}
+
+function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
+  if (field === "$id" || field === "_rid" || field === "_pid") {
+    return {
+      sortKind: "number",
+      fieldType: "__ID__",
+      semantics: resolveFieldSemantics({ fieldType: "__ID__" }),
+    };
+  }
+  if (field === "$revision") return syntheticColumnMeta("number");
+  return undefined;
+}
+
+const NUMBER_RETURNING_STRING_FUNCTIONS = new Set([
+  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
+]);
+
+function stringFunctionColumnMeta(expr: StringFuncExpr): MaterializedColumnMeta {
+  if (expr.func === "CAST") {
+    const target = expr.args[1];
+    return target?.type === "STRING" && target.value === "NUMBER"
+      ? syntheticColumnMeta("number")
+      : syntheticColumnMeta("string");
+  }
+  return NUMBER_RETURNING_STRING_FUNCTIONS.has(expr.func)
+    ? syntheticColumnMeta("number")
+    : syntheticColumnMeta("string");
+}
+
+function caseResultColumnMeta(
+  result: CaseResult,
+  resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
+): MaterializedColumnMeta {
+  if (result.type === "STRING") return syntheticColumnMeta("string");
+  if (result.type === "ARRAY") return unsupportedColumnMeta();
+  if (result.type === "NUMBER" || result.type === "ARITH") return syntheticColumnMeta("number");
+  if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
+  const source = resolveField(aggregateFieldRef(result.field));
+  return source ?? unknownStringColumnMeta();
+}
+
+function mergeExpressionColumnMeta(
+  candidates: readonly MaterializedColumnMeta[]
+): MaterializedColumnMeta {
+  if (candidates.length === 0) return unknownStringColumnMeta();
+  const first = candidates[0];
+  const withoutSource = (semantics: ResolvedFieldSemantics | undefined): ResolvedFieldSemantics | undefined => {
+    if (!semantics) return undefined;
+    const { source: _source, ...rest } = semantics;
+    return rest;
+  };
+  if (candidates.every((candidate) =>
+    candidate.sortKind === first.sortKind
+    && candidate.fieldType === first.fieldType
+    && fieldSemanticsEqual(withoutSource(candidate.semantics), withoutSource(first.semantics))
+  )) {
+    const sameSource = candidates.every((candidate) =>
+      fieldSemanticsEqual(candidate.semantics, first.semantics)
+    );
+    return sameSource ? first : { ...first, semantics: withoutSource(first.semantics) };
+  }
+  if (candidates.some((candidate) => candidate.semantics?.compareMode === "unsupported")) {
+    return unsupportedColumnMeta("KSQL_MIXED_UNSUPPORTED");
+  }
+  return unknownStringColumnMeta();
 }
 
 function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
@@ -1704,6 +2148,7 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     column.type === "FIELD"
     || column.type === "WILDCARD"
     || column.type === "PARENT_WILDCARD"
+    || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
       && (column.func === "MIN" || column.func === "MAX")
       && column.arg.type === "FIELD_REF")
@@ -1731,19 +2176,19 @@ async function inferSelectColumnMeta(
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         const info = physicalInfos.get(stmt.from.appId)?.get(ref.field);
-        return info ? materializedMetaFromFieldInfo(info) : undefined;
+        return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
       }
       const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : undefined;
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
-      return info ? materializedMetaFromFieldInfo(info) : undefined;
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
 
     const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
@@ -1753,7 +2198,8 @@ async function inferSelectColumnMeta(
         return [materialized.columnMeta?.get(ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? [materializedMetaFromFieldInfo(info)] : [];
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta ? [meta] : [];
     });
     return matches.length === 1 ? matches[0] : undefined;
   };
@@ -1791,19 +2237,28 @@ async function inferSelectColumnMeta(
         meta = resolveField(aggregateFieldRef(column.field));
       } else if (column.type === "AGGREGATE") {
         if (column.func === "GROUP_CONCAT") {
-          meta = { sortKind: "string" };
+          meta = syntheticColumnMeta("string");
         } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
-          meta = { sortKind: "number" };
+          meta = syntheticColumnMeta("number");
         } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
           const source = resolveField(aggregateFieldRef(column.arg.field));
-          if (source?.sortKind) meta = { sortKind: source.sortKind };
+          if (source) meta = source;
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
-        meta = { sortKind: "number" };
+        meta = syntheticColumnMeta("number");
       } else if (column.type === "LITERAL_COL") {
-        meta = { sortKind: "string" };
+        meta = syntheticColumnMeta("string");
+      } else if (column.type === "STRFUNC_COL") {
+        meta = stringFunctionColumnMeta(column.expr);
       } else if (column.type === "WINDOW_COL") {
-        meta = { sortKind: "number" };
+        meta = syntheticColumnMeta("number");
+      } else if (column.type === "CASE_COL") {
+        const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
+        if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
+        meta = mergeExpressionColumnMeta(results);
+      } else if (column.type === "SCALAR_SUBQUERY_COL") {
+        // サブクエリの実行値は後段で解決される。安全に型を証明できないため既定の文字列意味型を付ける。
+        meta = unknownStringColumnMeta();
       }
       if (meta) inferred.set(output, meta);
     });
@@ -1818,7 +2273,8 @@ function mergeUnionColumnMeta(left: SelectResult, right: SelectResult): Material
     const a = leftMeta?.get(column);
     const rightColumn = right.columns[index];
     const b = rightColumn === undefined ? undefined : rightMeta?.get(rightColumn);
-    if (a && b && a.sortKind === b.sortKind && a.fieldType === b.fieldType) merged.set(column, a);
+    if (a && b) merged.set(column, mergeExpressionColumnMeta([a, b]));
+    else if (a || b) merged.set(column, unknownStringColumnMeta());
   });
   return merged;
 }
@@ -1879,7 +2335,9 @@ async function executeFullScanSelect(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  cteCache?: Map<string, MaterializedTable>
+  cteCache?: Map<string, MaterializedTable>,
+  allowOriginalWherePushdown = true,
+  preloadedOrderMeta?: OrderByMeta
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -1899,6 +2357,14 @@ async function executeFullScanSelect(
     loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const fieldSemanticsResolver = await buildWhereFieldSemanticsResolver(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
+  );
+  const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
 
   // 同じ計画を検証・fetch・JS 評価で共有する。
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
@@ -1916,7 +2382,8 @@ async function executeFullScanSelect(
     true,
     options.onLimitReached ?? "error",
     warnings,
-    mainPushDown
+    mainPushDown,
+    allowOriginalWherePushdown
   );
 
   // JOIN テーブルを push-down の有無で振り分け
@@ -1951,7 +2418,9 @@ async function executeFullScanSelect(
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   // （レコードに依存しないため、フェッチ完了を待つ必要がない）
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = preloadedOrderMeta
+    ? Promise.resolve(preloadedOrderMeta)
+    : buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -1994,7 +2463,7 @@ async function executeFullScanSelect(
 
   // 並行解決していたスカラーサブクエリ・ORDER BY メタ情報を回収
   const scalarCache = await scalarCachePromise;
-  const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
 
   // JS 集計パイプライン
   const { rows, columns } = runFullScan({
@@ -2003,8 +2472,11 @@ async function executeFullScanSelect(
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics: semantics,
     fieldTypeResolver: fieldTypeResolvers.row,
+    fieldSemanticsResolver,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
   });
@@ -2183,6 +2655,21 @@ async function executeFullScanWithCte(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
   ]);
+  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  if (whereCapability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
+  }
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  if (hasCanonicalOrder(stmt)) {
+    (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+      stmt,
+      staticMode: "FULL_SCAN",
+      whereCapability: whereCapability.capability,
+      orderSemantics: orderMeta.semantics,
+      maxRecords,
+      hasKlike: whereHasKlike(stmt.where),
+    });
+  }
 
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
@@ -2190,12 +2677,20 @@ async function executeFullScanWithCte(
     loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
+  const fieldSemanticsResolver = await buildWhereFieldSemanticsResolver(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
+  );
+  const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext);
+  const orderByMetaPromise = Promise.resolve(orderMeta);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -2215,7 +2710,8 @@ async function executeFullScanWithCte(
       true,
       options.onLimitReached ?? "error",
       warnings,
-      pushdownPlan.mainCondition
+      pushdownPlan.mainCondition,
+      whereCapability.capability === "EXACT_PUSHDOWN"
     );
     tables.set(stmt.from.alias, mainRecords);
   }
@@ -2257,7 +2753,7 @@ async function executeFullScanWithCte(
   await Promise.all(joinFetches);
 
   const scalarCache = await scalarCachePromise;
-  const { optionOrders, sortKinds } = await orderByMetaPromise;
+  const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
     ? cteCache.get(stmt.from.cteName)?.columns
     : undefined;
@@ -2267,8 +2763,11 @@ async function executeFullScanWithCte(
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics: semantics,
     fieldTypeResolver: fieldTypeResolvers.row,
+    fieldSemanticsResolver,
     havingFieldTypeResolver: fieldTypeResolvers.having,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
     sourceColumns,
@@ -2292,14 +2791,17 @@ async function fetchTableRecordsForFullScan(
   isMainTable: boolean,
   onLimit: "error" | "truncate",
   warnings: Set<string>,
-  pushDownCond: WhereExpr | null = null
+  pushDownCond: WhereExpr | null = null,
+  allowOriginalWherePushdown = true
 ): Promise<KintoneRecord[]> {
   const fields = selectToFetchAllFields(stmt, table);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
   };
   if (!table.subtableCode) {
-    const baseQuery = isMainTable ? selectToFetchAllParams(stmt, table.appId).query : "";
+    const baseQuery = isMainTable && allowOriginalWherePushdown
+      ? selectToFetchAllParams(stmt, table.appId).query
+      : "";
     const pushQuery = pushDownCond !== null ? whereToKintone(pushDownCond) : "";
     const query = baseQuery && pushQuery
       ? `(${baseQuery}) and (${pushQuery})`
@@ -2615,6 +3117,17 @@ async function getProcessStatusesCached(
   return loading;
 }
 
+async function loadProcessStatusOrder(
+  appId: number,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<ReadonlyMap<string, number> | undefined> {
+  const process = await getProcessStatusesCached(appId, client, cacheContext);
+  return process.enable && process.states !== null
+    ? new Map(process.states.map((state) => [state.name, state.index]))
+    : undefined;
+}
+
 async function getFieldTypeMap(appId: number, client: KintoneClient, cacheContext: string): Promise<FieldTypeMap> {
   const cached = getScopedCacheValue(fieldTypeCache, cacheContext, appId);
   if (cached) return cached;
@@ -2678,6 +3191,120 @@ async function getSortKindMapByApp(
 interface OrderByMeta {
   optionOrders: OptionOrderMap;
   sortKinds: FieldSortKindMap;
+  /** Phase 2 で収集する共有意味型。比較器への切替は Phase 4 で行う。 */
+  semantics: ReadonlyMap<string, ResolvedFieldSemantics>;
+}
+
+function orderByFieldNames(stmt: SelectStatement): string[] {
+  const items: OrderByItem[] = [
+    ...stmt.orderBy,
+    ...stmt.columns.flatMap((column) => column.type === "WINDOW_COL" ? column.orderBy : []),
+  ];
+  return [...new Set(items.flatMap((item) =>
+    item.key.type === "FIELD_NAME" ? [item.key.name] : []
+  ))];
+}
+
+async function buildOrderSemanticsForSelect(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<ReadonlyMap<string, ResolvedFieldSemantics>> {
+  const names = orderByFieldNames(stmt);
+  if (names.length === 0) return new Map();
+
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const ambiguousFields = new Set<string>();
+  const infosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
+    await Promise.all([...new Set(
+      tables.filter((table) => table.cteName === null).map((table) => table.appId)
+    )].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
+    }))
+  );
+
+  const resolveField = (ref: FieldRef): MaterializedColumnMeta | undefined => {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
+        const info = infosByApp.get(stmt.from.appId)?.get(ref.field);
+        return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
+      }
+      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      if (!table) return undefined;
+      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+    }
+    if (stmt.joins.length === 0) {
+      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      const info = infosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
+    }
+    const matches = tables.flatMap((table): MaterializedColumnMeta[] => {
+      if (table.cteName !== null) {
+        const materialized = materializedTables?.get(table.cteName);
+        const meta = materialized?.columns.includes(ref.field) ? materialized.columnMeta?.get(ref.field) : undefined;
+        return meta ? [meta] : [];
+      }
+      const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return meta ? [meta] : [];
+    });
+    if (matches.length > 1) ambiguousFields.add(ref.field);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+
+  const aliasSemantics = new Map<string, ResolvedFieldSemantics>();
+  for (const column of stmt.columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    let meta: MaterializedColumnMeta | undefined;
+    if (column.type === "FIELD") meta = resolveField(aggregateFieldRef(column.field));
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      meta = syntheticColumnMeta("number");
+    } else if (column.type === "LITERAL_COL") meta = syntheticColumnMeta("string");
+    else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr);
+    else if (column.type === "SCALAR_SUBQUERY_COL") meta = unknownStringColumnMeta();
+    else if (column.type === "CASE_COL") {
+      const candidates = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
+      if (column.expr.elseResult) candidates.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
+      meta = mergeExpressionColumnMeta(candidates);
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "MIN" || column.func === "MAX") {
+        meta = column.arg.type === "FIELD_REF"
+          ? resolveField(aggregateFieldRef(column.arg.field))
+          : syntheticColumnMeta("number");
+      } else {
+        meta = column.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
+      }
+    }
+    if (meta?.semantics) aliasSemantics.set(column.alias, meta.semantics);
+  }
+
+  const result = new Map<string, ResolvedFieldSemantics>();
+  for (const name of names) {
+    const base = aliasSemantics.get(name) ?? resolveField(aggregateFieldRef(name))?.semantics;
+    if (!base) {
+      const ref = aggregateFieldRef(name);
+      if (ref.tableAlias === null && ambiguousFields.has(ref.field)) {
+        result.set(name, resolveFieldSemantics({ fieldType: "KSQL_AMBIGUOUS" }));
+      }
+      continue;
+    }
+    let semantics = base;
+    if (base.fieldType === "STATUS" && base.source && stmt.orderMode !== "KINTONE_NATIVE") {
+      const process = await getProcessStatusesCached(base.source.appId, client, cacheContext);
+      if (process.enable && process.states !== null) {
+        semantics = {
+          ...base,
+          optionOrder: new Map(process.states.map((state) => [state.name, state.index])),
+        };
+      }
+    }
+    result.set(name, semantics);
+  }
+  return result;
 }
 
 /**
@@ -2688,19 +3315,21 @@ interface OrderByMeta {
 async function buildOrderByMetaForSelect(
   stmt: SelectStatement,
   client: KintoneClient,
-  cacheContext: string
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<OrderByMeta> {
   const hasWindowOrderBy = stmt.columns.some(
     (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
   );
   if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
-    return { optionOrders: new Map(), sortKinds: new Map() };
+    return { optionOrders: new Map(), sortKinds: new Map(), semantics: new Map() };
   }
-  const [optionOrders, sortKinds] = await Promise.all([
+  const [optionOrders, sortKinds, semantics] = await Promise.all([
     buildOptionOrdersForSelect(stmt, client, cacheContext),
     buildSortKindsForSelect(stmt, client, cacheContext),
+    buildOrderSemanticsForSelect(stmt, client, cacheContext, materializedTables),
   ]);
-  return { optionOrders, sortKinds };
+  return { optionOrders, sortKinds, semantics };
 }
 
 async function buildOptionOrdersForSelect(
@@ -2850,6 +3479,9 @@ async function prepareDmlValidation(
   tempTables: Map<string, MaterializedTable> | undefined,
   statementNumber: number
 ): Promise<PreparedDmlValidation> {
+  if (stmt.type === "UPDATE") {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
+  }
   const operation: ValidationOperation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
@@ -2887,18 +3519,22 @@ async function prepareDmlValidation(
   const columnMeta = new Map<string, MaterializedColumnMeta>();
   for (const column of payloadFields) {
     if (column === "$id") {
-      columnMeta.set(column, { sortKind: "number", fieldType: "RECORD_NUMBER" });
+      columnMeta.set(column, {
+        sortKind: "number",
+        fieldType: "RECORD_NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "RECORD_NUMBER" }),
+      });
       continue;
     }
     const info = infoByCode.get(column);
-    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info));
+    if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info, stmt.appId));
   }
-  columnMeta.set("$err_statement", { sortKind: "number" });
-  columnMeta.set("$err_operation", { sortKind: "string" });
-  columnMeta.set("$err_row", { sortKind: "number" });
-  columnMeta.set("$err_field", { sortKind: "string" });
-  columnMeta.set("$err_code", { sortKind: "string" });
-  columnMeta.set("$err_message", { sortKind: "string" });
+  columnMeta.set("$err_statement", syntheticColumnMeta("number"));
+  columnMeta.set("$err_operation", syntheticColumnMeta("string"));
+  columnMeta.set("$err_row", syntheticColumnMeta("number"));
+  columnMeta.set("$err_field", syntheticColumnMeta("string"));
+  columnMeta.set("$err_code", syntheticColumnMeta("string"));
+  columnMeta.set("$err_message", syntheticColumnMeta("string"));
   materializedMetaByValidationResult.set(result, columnMeta);
   return { result, candidates, invalidRowNumbers, columnMeta };
 }
@@ -3421,6 +4057,7 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
@@ -3536,6 +4173,7 @@ async function executeDelete(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<DeleteResult> {
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
     return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
@@ -4052,6 +4690,18 @@ async function executeReorder(
     client,
     cacheContext
   );
+  const reorderFields = await getFieldsCached(stmt.appId, client, cacheContext);
+  const reorderSemanticsByCode = new Map(reorderFields.map((field) => [
+    field.code,
+    field.semantics ?? resolveFieldSemantics(field),
+  ]));
+  const resolveReorderSemantics: FieldSemanticsResolver = (field) => {
+    if (field.field === "_idx" || field.field === "_pid" || field.field === "_rid") {
+      return syntheticSemantics("number");
+    }
+    const code = field.field.startsWith("_p.") ? field.field.slice(3) : field.field;
+    return reorderSemanticsByCode.get(code) ?? syntheticSemantics("string");
+  };
   const parents = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -4064,7 +4714,9 @@ async function executeReorder(
   // WHERE に一致する行を1件でも持つ親を対象とする
   const targetParentIds = stmt.all
     ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== ""))
-    : new Set(expanded.filter((r) => stmt.where && evalWhere(stmt.where, r.flat, resolveFieldType)).map((r) => r.parentId));
+    : new Set(expanded.filter((r) => stmt.where && evalWhere(
+        stmt.where, r.flat, resolveFieldType, undefined, resolveReorderSemantics
+      )).map((r) => r.parentId));
 
   if (options.confirm) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
@@ -4078,7 +4730,7 @@ async function executeReorder(
 
     const rows = getMutableTableRows(parent, stmt.subtableCode);
     const sortable = rows.map((row, i) => ({ row, i, flat: buildFlatRowForSort(parent, stmt.subtableCode, row, i) }));
-    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by));
+    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by, resolveReorderSemantics));
     const orderedRowIds = sortable.map((x) => x.row.id ?? "");
     await client.putRecords(buildSubtableReorderPutParams(stmt.appId, pid, getRevision(parent), stmt.subtableCode, orderedRowIds));
   }
@@ -4107,14 +4759,21 @@ function buildFlatRowForSort(
   return flat;
 }
 
-function compareByOrder(a: ProcessRow, b: ProcessRow, orderBy: ReorderStatement["by"]): number {
+function compareByOrder(
+  a: ProcessRow,
+  b: ProcessRow,
+  orderBy: ReorderStatement["by"],
+  resolveSemantics: FieldSemanticsResolver
+): number {
   for (const item of orderBy) {
     const av = evalOrderKeyForRow(item.key, a);
     const bv = evalOrderKeyForRow(item.key, b);
-    const an = Number(av);
-    const bn = Number(bv);
-    const numeric = !Number.isNaN(an) && !Number.isNaN(bn);
-    const cmp = numeric ? an - bn : av.localeCompare(bv, "ja");
+    const semantics = item.key.type === "FIELD_NAME"
+      ? resolveSemantics(aggregateFieldRef(item.key.name))
+      : item.key.type === "ARITH_KEY"
+        ? syntheticSemantics("number")
+        : stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string");
+    const cmp = compareCanonicalValues(av, bv, semantics ?? syntheticSemantics("string"));
     if (cmp !== 0) return item.direction === "ASC" ? cmp : -cmp;
   }
   return 0;
@@ -4432,9 +5091,136 @@ async function resolveScalarColumns(
 // EXPLAIN
 // ============================================================
 
+interface ExplainWhereAnalysis {
+  capabilities: Map<SelectStatement, PredicateCapabilityResult>;
+  orderPlans: Map<SelectStatement, CanonicalOrderPlan>;
+  fieldApps: Set<number>;
+  processStatusApps: Set<number>;
+}
+
+async function buildExplainWhereAnalysis(
+  query: unknown,
+  client: KintoneClient,
+  cacheContext: string,
+  maxRecords = 10_000
+): Promise<ExplainWhereAnalysis> {
+  const fieldApps = new Set<number>();
+  const processStatusApps = new Set<number>();
+  const tracedClient: KintoneClient = {
+    ...client,
+    getFields: async (appId) => {
+      fieldApps.add(appId);
+      return client.getFields(appId);
+    },
+    getProcessStatuses: async (appId) => {
+      processStatusApps.add(appId);
+      return client.getProcessStatuses(appId);
+    },
+  };
+  const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
+  const orderPlans = new Map<SelectStatement, CanonicalOrderPlan>();
+  const seen = new Set<object>();
+
+  const visit = async (node: unknown): Promise<void> => {
+    if (node === null || typeof node !== "object") return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      await Promise.all(node.map(visit));
+      return;
+    }
+    const typed = node as Record<string, unknown>;
+    if (typed["type"] === "SELECT") {
+      const select = node as SelectStatement;
+      const physicalApps = [select.from, ...select.joins.map((join) => join.table)]
+        .filter((table) => table.cteName === null)
+        .map((table) => table.appId);
+      const needsWhereSchema = whereNeedsFieldMetadata(select.where);
+      if (needsWhereSchema || select.orderBy.length > 0
+        || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        physicalApps.forEach((appId) => fieldApps.add(appId));
+      }
+      const capability = await resolveSelectWhereCapability(select, tracedClient, cacheContext);
+      if (capability.capability === "UNSUPPORTED") {
+        throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+      }
+      capabilities.set(select, capability);
+      // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
+      if (select.orderBy.length > 0
+        || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        const meta = await buildOrderByMetaForSelect(select, tracedClient, cacheContext);
+        if (select.orderMode !== "KINTONE_NATIVE") {
+          for (const semantics of meta.semantics.values()) {
+            if (semantics.fieldType === "STATUS" && semantics.source) {
+              processStatusApps.add(semantics.source.appId);
+            }
+          }
+        }
+        const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)]
+          .some((table) => table.cteName !== null);
+        // batch EXPLAIN は temp/CTE の実体化前には列意味型を確定できない。
+        // 実行時 planner は materialized metadata を受けて同じ検査を行う。
+        if (hasCanonicalOrder(select) && !hasUnmaterializedSource) {
+          const mode = capability.capability === "EXACT_PUSHDOWN"
+            ? resolveSelectMode(select)
+            : "FULL_SCAN";
+          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+            stmt: select,
+            staticMode: mode,
+            whereCapability: capability.capability,
+            orderSemantics: meta.semantics,
+            maxRecords,
+            hasKlike: whereHasKlike(select.where),
+          }));
+        }
+      }
+    } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
+      fieldApps.add((node as UpdateStatement | DeleteStatement).appId);
+      await assertDmlWhereCapability(
+        node as UpdateStatement | DeleteStatement,
+        tracedClient,
+        cacheContext
+      );
+    }
+    await Promise.all(Object.values(typed).map(visit));
+  };
+
+  await visit(query);
+  if (typeof query === "object" && query !== null && (query as { type?: string }).type === "WITH"
+    && canInlineSingleCte(query as WithStatement)) {
+    const inlined = buildInlinedQuery(query as WithStatement);
+    const capability = await resolveSelectWhereCapability(inlined, tracedClient, cacheContext);
+    if (capability.capability === "UNSUPPORTED") {
+      throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+    }
+    capabilities.set(inlined, capability);
+    if (hasCanonicalOrder(inlined)) {
+      const meta = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
+      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+        stmt: inlined,
+        staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
+        whereCapability: capability.capability,
+        orderSemantics: meta.semantics,
+        maxRecords,
+        hasKlike: whereHasKlike(inlined.where),
+      }));
+    }
+  }
+  return { capabilities, orderPlans, fieldApps, processStatusApps };
+}
+
+function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
+  return [
+    ...[...analysis.fieldApps].sort((a, b) => a - b)
+      .map((appId) => `  metadata API: form definition APP${appId}`),
+    ...[...analysis.processStatusApps].sort((a, b) => a - b)
+      .map((appId) => `  metadata API: process status APP${appId}`),
+  ];
+}
+
 // ------------------------------------------------------------
 // バッチ EXPLAIN（フェーズ2 M3）
-// 全文のプランを配列で返す（dry-run 用途。kintone アクセスなし）。
+// 全文のプランを配列で返す（dry-run 用途。schema-aware 形は metadata API のみ使用）。
 // 一時テーブル参照文は既存の buildSelectPlan に通さず temp-aware に組む
 // （resolveSelectMode が cteName 参照を SIMPLE と誤判定し APP0 表示になるため）。
 // ------------------------------------------------------------
@@ -4445,51 +5231,67 @@ export interface BatchStatementPlan {
   plan: string[];
 }
 
-/** `;` 区切りバッチの全文プランを生成する（静的検証込み。実行はしない） */
-export function buildBatchExplainPlans(
-  sql: string,
-  injectedVariables?: Readonly<Record<string, string>>
-): {
+type BatchExplainResult = {
   statementCount: number;
   statements: BatchStatementPlan[];
-} {
+};
+
+/** schema-aware planner 形。metadata API 以外の実行 API は呼ばない。 */
+export async function buildBatchExplainPlans(
+  sql: string,
+  client: KintoneClient,
+  injectedVariables?: Readonly<Record<string, string>>,
+  cacheContext = "batch-explain",
+  maxRecords = 10_000
+): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
   validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = new Map<string, VarValue>();
-  return {
-    statementCount: statements.length,
-    statements: statements.map((stmt, i) => {
+  const plans: BatchStatementPlan[] = [];
+  for (let i = 0; i < statements.length; i++) {
+      const stmt = statements[i];
       const planStmt = stmt.type === "SET_VARIABLE"
         ? (stmt.expr.type === "SCALAR_SUBQUERY"
           ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) }
           : stmt)
         : resolveVariableRefs(stmt, variables);
       validateKlikeStatement(planStmt);
-      const result = {
+      const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords);
+      const statementPlan = buildBatchStatementPlan(
+        planStmt,
+        analysis.statements[i],
+        whereAnalysis.capabilities,
+        whereAnalysis.orderPlans
+      );
+      const metadataPlan = explainMetadataLines(whereAnalysis);
+      plans.push({
         index: i,
         type: analysis.statements[i].statementType,
-        plan: buildBatchStatementPlan(planStmt, analysis.statements[i]),
-      };
+        plan: statementPlan.length === 0
+          ? metadataPlan
+          : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)],
+      });
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
         variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
       }
-      return result;
-    }),
-  };
+  }
+  return { statementCount: statements.length, statements: plans };
 }
 
 function buildBatchStatementPlan(
   stmt: Statement,
-  info: BatchAnalysis["statements"][number]
+  info: BatchAnalysis["statements"][number],
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch（バッチ終了時に自動破棄）`,
       `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
-      ...buildPlanForBatchQuery(stmt.query, info).map((l) => `  ${l}`),
+      ...buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans).map((l) => `  ${l}`),
     ];
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -4507,7 +5309,7 @@ function buildBatchStatementPlan(
         `SET @${stmt.name} = (SELECT ...)`,
         "  value:         サブクエリを実行時に1回評価（1行1列・バッチ内定数・結果メタデータには非公開）",
         "  subquery:",
-        ...buildPlanForBatchQuery(stmt.expr.query, subInfo).map((l) => `  ${l}`),
+        ...buildPlanForBatchQuery(stmt.expr.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`),
       ];
     }
     return [
@@ -4523,7 +5325,7 @@ function buildBatchStatementPlan(
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
-  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info);
+  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans);
   if (stmt.type === "ASSERT") {
     const lines: string[] = [
       `ASSERT ${stmt.text}`,
@@ -4537,11 +5339,11 @@ function buildBatchStatementPlan(
       // 参照先で経路が変わるため per-subquery に判定する
       //（temp 参照なしの側を FULL_SCAN 表示にしない）
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
-      lines.push(...buildPlanForBatchQuery(sq.query, subInfo).map((l) => `  ${l}`));
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`));
     });
     return lines;
   }
-  return buildPlanForBatchQuery(stmt, info);
+  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }
 
 /** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
@@ -4558,11 +5360,13 @@ function hasTempTableRef(node: unknown): boolean {
 
 function buildPlanForBatchQuery(
   query: Statement | ExplainStatement["query"],
-  info: BatchAnalysis["statements"][number]
+  info: BatchAnalysis["statements"][number],
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
   if (info.tempTablesReferenced.length === 0) {
-    return buildExplainPlan(query as ExplainStatement["query"]);
+    return buildExplainPlan(query as ExplainStatement["query"], undefined, capabilities, orderPlans);
   }
   // 一時テーブル参照あり → FULL_SCAN（インメモリ）であることを明示する
   const lines: string[] = [];
@@ -4589,8 +5393,17 @@ function buildPlanForBatchQuery(
   return lines;
 }
 
-function executeExplain(stmt: ExplainStatement): SelectResult {
-  const lines = buildExplainPlan(stmt.query);
+async function executeExplain(
+  stmt: ExplainStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  maxRecords: number
+): Promise<SelectResult> {
+  const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
+  const lines = [
+    ...explainMetadataLines(analysis),
+    ...buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
+  ];
   return {
     type: "SELECT",
     columns: ["plan"],
@@ -4601,33 +5414,66 @@ function executeExplain(stmt: ExplainStatement): SelectResult {
 
 function buildExplainPlan(
   query: ExplainStatement["query"],
-  label?: string
+  label?: string,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
-  if (query.type === "UNION")         return buildUnionPlan(query);
-  if (query.type === "WITH")          return buildWithPlan(query);
+  if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
+  if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
   if (query.type === "INSERT")        return buildInsertPlan(query, label);
-  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label);
+  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label);
-  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label);
-  if (query.type === "UPDATE")        return buildUpdatePlan(query, label);
+  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPDATE")        return buildUpdatePlan(query, label, capabilities, orderPlans);
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
-  return buildSelectPlan(query, label);
+  return buildSelectPlan(query, label, capabilities, orderPlans);
 }
 
-function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
-  const mode = resolveSelectMode(stmt);
+function buildSelectPlan(
+  stmt: SelectStatement,
+  label?: string,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
+  const whereCapability = capabilities?.get(stmt) ?? (capabilities
+    ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
+    : undefined);
+  const orderPlan = orderPlans?.get(stmt) ?? (orderPlans
+    ? [...orderPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
+    : undefined);
+  const mode = orderPlan?.kind === "CANONICAL_LOCAL"
+    ? "FULL_SCAN"
+    : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN"
+      ? "FULL_SCAN"
+      : resolveSelectMode(stmt);
   const reasons = collectFullScanReasons(stmt);
+  if (whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN") {
+    reasons.push(...whereCapability.reasons.map((reason) => reason.code));
+  }
   const lines: string[] = [];
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  if (orderPlan) {
+    lines.push(`  order plan:    ${orderPlan.kind}`);
+    if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
+    if (orderPlan.kind === "KORDER_NATIVE") {
+      lines.push("  order semantics: kintone native (not kSQL canonical)");
+      lines.push("  REST execution: single GET");
+    }
+  }
+  if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
+    lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
+  }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
     lines.push(`  reason:        ${reasons.join(", ")}`);
   }
 
   if (mode === "SIMPLE") {
-    const params = selectToKintoneParams(stmt);
+    const params = selectToKintoneParams(orderPlan?.kind === "CANONICAL_REST_TOP_N"
+      ? withCanonicalRestTie(stmt)
+      : stmt);
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${params.query || "(なし)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
@@ -4638,9 +5484,15 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
+    const exactOriginalWhere = stmt.joins.length === 0
+      && whereCapability?.capability === "EXACT_PUSHDOWN"
+      && stmt.where !== null
+      && !whereRequiresJsEval(stmt.where)
+      ? whereToKintone(stmt.where)
+      : "";
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
-      : "(全件取得)";
+      : exactOriginalWhere || "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     if (mainCandidate !== null) {
@@ -4669,11 +5521,15 @@ function buildSelectPlan(stmt: SelectStatement, label?: string): string[] {
     }
   }
 
-  lines.push(...collectSubqueryPlans(stmt));
+  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans));
   return lines;
 }
 
-function buildUnionPlan(stmt: UnionStatement): string[] {
+function buildUnionPlan(
+  stmt: UnionStatement,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   // UnionStatement は left / right の二分木 — 左辺を再帰的に展開して全 SELECT を収集
   const selects: SelectStatement[] = [];
   const collect = (u: SelectStatement | UnionStatement): void => {
@@ -4686,25 +5542,30 @@ function buildUnionPlan(stmt: UnionStatement): string[] {
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans));
   });
   return lines;
 }
 
-function buildWithPlan(stmt: WithStatement): string[] {
+function buildWithPlan(
+  stmt: WithStatement,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans));
       lines.push("");
     }
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
-    lines.push(...buildExplainPlan(stmt.query, "[main]"));
+    lines.push(...buildExplainPlan(stmt.query, "[main]", capabilities, orderPlans));
   }
   if (canInlineSingleCte(stmt)) {
     lines.push("");
-    lines.push(...buildSelectPlan(buildInlinedQuery(stmt), "[effective: inlined CTE]"));
+    const inlined = buildInlinedQuery(stmt);
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans));
   }
   return lines;
 }
@@ -4734,7 +5595,11 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
   return r;
 }
 
-function collectSubqueryPlans(stmt: SelectStatement): string[] {
+function collectSubqueryPlans(
+  stmt: SelectStatement,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   const lines: string[] = [];
   let idx = 1;
 
@@ -4743,14 +5608,14 @@ function collectSubqueryPlans(stmt: SelectStatement): string[] {
     switch (w.type) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         break;
       case "EXISTS":
-        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`));
+        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         break;
       case "LOGICAL":  visitWhere(w.left); visitWhere(w.right); break;
       case "NOT":
@@ -4763,7 +5628,7 @@ function collectSubqueryPlans(stmt: SelectStatement): string[] {
 
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
-      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`));
+      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans));
     }
   }
 
@@ -4789,7 +5654,12 @@ function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
   return lines;
 }
 
-function buildInsertSelectPlan(stmt: InsertSelectStatement, label?: string): string[] {
+function buildInsertSelectPlan(
+  stmt: InsertSelectStatement,
+  label?: string,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
   lines.push(`  [INSERT SELECT]`);
@@ -4797,11 +5667,16 @@ function buildInsertSelectPlan(stmt: InsertSelectStatement, label?: string): str
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]"));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
 
-function buildUpdatePlan(stmt: UpdateStatement, label?: string): string[] {
+function buildUpdatePlan(
+  stmt: UpdateStatement,
+  label?: string,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   const isArith  = hasArithAssignment(stmt);
   const isSubq   = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines: string[] = [];
@@ -4839,7 +5714,7 @@ function buildUpdatePlan(stmt: UpdateStatement, label?: string): string[] {
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`));
+      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans));
     }
   }
 
@@ -4870,7 +5745,12 @@ function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
   ];
 }
 
-function buildUpsertSelectPlan(stmt: UpsertSelectStatement, label?: string): string[] {
+function buildUpsertSelectPlan(
+  stmt: UpsertSelectStatement,
+  label?: string,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+): string[] {
   const lines: string[] = [
     ...(label ? [label] : []),
     `  [UPSERT SELECT]`,
@@ -4880,7 +5760,7 @@ function buildUpsertSelectPlan(stmt: UpsertSelectStatement, label?: string): str
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
     ``,
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]"));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
 

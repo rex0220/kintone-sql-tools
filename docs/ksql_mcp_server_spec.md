@@ -180,7 +180,7 @@ AI クライアント
   -> kintone REST API
 ```
 
-`EXPLAIN` や `dryRun` の場合は、kintone API を呼び出さない。
+`EXPLAIN`や`dryRun`はレコード取得・書込みAPIを呼ばない。v3.0.0以降はschema-aware plannerのため、フォーム定義と、必要な場合だけプロセス状態metadataを取得する。
 
 ## 6. 設定
 
@@ -287,7 +287,7 @@ MCP サーバーでは、config path は原則としてサーバー起動時に�
 ## 7.1 `ksql_explain`
 
 SQL の実行計画を返す。
-kintone API は呼ばない。
+フォーム定義と、必要な場合だけプロセス状態metadataを取得する。レコード取得・書込みAPIは呼ばない。
 
 入力:
 
@@ -1180,7 +1180,7 @@ format: cjs
 
 追加するテスト:
 
-1. `ksql_explain` が API を呼ばない
+1. `ksql_explain` が必要なmetadata APIだけを呼び、レコード取得・書込みAPIを呼ばない
 2. `ksql_query` が SELECT を実行する
 3. `ksql_query` が UPDATE を拒否する
 4. `ksql_validate` が DML / WHERE 有無を判定する

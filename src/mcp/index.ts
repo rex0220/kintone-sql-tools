@@ -82,13 +82,13 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the kSQL execution plan without calling kintone APIs.",
+    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records.",
     inputSchema: explainInputShape,
   }, tools.explainTool);
 
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. VALIDATE ONLY performs local Tier-0 validation with zero write API calls; it always requires complete input, so onLimit=truncate is ignored and treated as error. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always treats onLimit=truncate as error. VALIDATE ONLY performs local Tier-0 validation with zero write API calls. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
     inputSchema: queryInputShape,
   }, tools.queryTool);
 

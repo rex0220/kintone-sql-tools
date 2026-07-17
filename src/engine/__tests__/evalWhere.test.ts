@@ -19,6 +19,7 @@ test("符号付き IN / NOT IN は = と同じ負数文字列表現を評価す�
   const equalNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 = -1");
   const betweenNegative = parseWhere("SELECT * FROM APP1 WHERE 金額 BETWEEN -10 AND 10");
   const mixed = parseWhere("SELECT * FROM APP1 WHERE 金額 IN (0, 1000, -1, +1)");
+  const numberResolver = resolver({ 金額: "NUMBER" });
 
   for (const value of ["-1", "0", "1", "1000", "2"]) {
     expect(evalWhere(inNegative, { 金額: value }))
@@ -30,7 +31,7 @@ test("符号付き IN / NOT IN は = と同じ負数文字列表現を評価す�
     evalWhere(mixed, { 金額 })
   )).toEqual(["-1", "0", "1", "1000"]);
   expect(["-11", "-10", "0", "10", "11"].filter((金額) =>
-    evalWhere(betweenNegative, { 金額 })
+    evalWhere(betweenNegative, { 金額 }, numberResolver)
   )).toEqual(["-10", "0", "10"]);
 });
 

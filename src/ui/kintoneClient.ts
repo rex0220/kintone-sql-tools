@@ -16,6 +16,7 @@ import {
   flattenFormFieldProperties,
   type FormFieldProperty,
 } from "../core/formFieldInfo";
+import { normalizeProcessStatusStates, type RawProcessStatusState } from "../core/processStatus";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -130,11 +131,11 @@ export function createKintoneClient(): KintoneClient {
     async getProcessStatuses(appId: number): Promise<KintoneProcessStatuses> {
       const res = await api<{
         enable: boolean;
-        states: Record<string, { name: string }> | null;
+        states: Record<string, RawProcessStatusState> | null;
       }>("/k/v1/app/status.json", "GET", { app: appId, lang: "user" });
       return {
         enable: res.enable,
-        states: Object.values(res.states ?? {}).map((state) => state.name),
+        states: normalizeProcessStatusStates(res.states),
       };
     },
   };
