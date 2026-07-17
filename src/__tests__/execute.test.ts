@@ -317,6 +317,96 @@ test("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-c
   )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
 });
 
+test("B27: $id canonical REST top-N は B30 の完全入力要求を免除する", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({ $id: String(i + 1) }));
+  const client = makePagedClient(records);
+
+  const result = await execute(
+    "SELECT $id FROM APP100 ORDER BY $id DESC LIMIT 1",
+    client,
+    { maxRecords: 1, onLimitReached: "truncate" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "101" }]);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].query).toContain("order by $id desc limit 1");
+  expect(client.getCalls[0].query.match(/\$id/g)).toHaveLength(1);
+});
+
+test("B27: local ORDER key は SELECT 出力列でなくても取得して並べ替える", async () => {
+  const client = makePagedClient([
+    makeRecord({ $id: "1", 会社名: "z" }),
+    makeRecord({ $id: "2", 会社名: "a" }),
+  ]);
+  client.getFields = async () => [
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id FROM APP100 ORDER BY 会社名 ASC LIMIT 1",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "2" }]);
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["$id", "会社名"]));
+  expect(client.getCalls[0].query).not.toContain("order by 会社名");
+});
+
+test("B27: local同値群は stable $id ASC の後に OFFSET/LIMIT を適用する", async () => {
+  const client = makePagedClient([
+    makeRecord({ $id: "1", 会社名: "same" }),
+    makeRecord({ $id: "2", 会社名: "same" }),
+    makeRecord({ $id: "3", 会社名: "same" }),
+  ]);
+  client.getFields = async () => [
+    { code: "会社名", label: "会社名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+
+  const result = await execute(
+    "SELECT $id, 会社名 FROM APP100 ORDER BY 会社名 ASC LIMIT 1 OFFSET 1",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "2", 会社名: "same" }]);
+});
+
+test("B27: compareMode unsupported は行数に依存せず records GET 前に拒否する", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "利用者", label: "利用者", fieldType: "USER_SELECT" },
+  ];
+
+  await expect(execute(
+    "SELECT $id FROM APP100 ORDER BY 利用者 ASC LIMIT 1",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: 未解決 ORDER key も空集合として成功させない", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [];
+
+  await expect(execute(
+    "SELECT $id FROM APP100 ORDER BY typo ASC LIMIT 1",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNRESOLVED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B27: window ORDER BY の unsupported key も records GET 前に拒否する", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "利用者", label: "利用者", fieldType: "USER_SELECT" },
+  ];
+
+  await expect(execute(
+    "SELECT RANK() OVER (ORDER BY 利用者 ASC) AS r FROM APP100",
+    client
+  )).rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
 test("B30: window ORDER BY も truncate を fail-closed にする", async () => {
   const records = Array.from({ length: 101 }, (_, i) => makeRecord({
     $id: String(i + 1),
@@ -1750,6 +1840,7 @@ test("SELECT サブテーブル仮想テーブル + _p.項目", async () => {
         } as unknown as KintoneRecord,
       ],
     },
+    fieldTypes: { 案件名: "SINGLE_LINE_TEXT", 商品コード: "SINGLE_LINE_TEXT", 数量: "NUMBER" },
   });
 
   const result = await execute(
@@ -3346,23 +3437,24 @@ test("WITH インライン化 — GROUP BY CTE は非インライン（FULL_SCAN
   expect(client.getCalls.length).toBeGreaterThan(0);
 });
 
-test("WITH インライン化 — LIMIT が最終クエリから REST API に渡る", async () => {
+test("WITH インライン化 — allowlist外 ORDER BY は LIMIT を REST API に渡さない", async () => {
   const client = makeClient({
     records: [
       makeRecord({ 金額: "300" }),
       makeRecord({ 金額: "100" }),
       makeRecord({ 金額: "200" }),
     ],
+    fieldTypes: { 金額: "NUMBER" },
   });
 
-  await execute(
+  const result = await execute(
     `WITH 全件 AS (SELECT * FROM APP100)
      SELECT * FROM 全件 ORDER BY 金額 ASC LIMIT 2`,
     client
   ) as SelectResult;
 
-  // LIMIT が REST API クエリに含まれる（SIMPLE モードとしてインライン化）
-  expect(client.getCalls[0].query).toContain("limit 2");
+  expect(client.getCalls[0].query).not.toContain("limit 2");
+  expect(result.rows.map((row) => row.金額)).toEqual(["100", "200"]);
 });
 
 test("WITH インライン化 — エイリアス付き FROM (FROM cte AS c WHERE c.field)", async () => {

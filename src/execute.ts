@@ -60,6 +60,10 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
+import {
+  planCanonicalOrder,
+  type CanonicalOrderPlan,
+} from "./core/optimization/canonicalOrderPlanner";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -1384,6 +1388,12 @@ function formatWhereCapabilityFailure(result: PredicateCapabilityResult): string
   return details || "reason=WHERE_UNSUPPORTED";
 }
 
+function hasCanonicalOrder(stmt: SelectStatement): boolean {
+  return stmt.orderBy.length > 0 || stmt.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+}
+
 async function assertDmlWhereCapability(
   stmt: UpdateStatement | DeleteStatement,
   client: KintoneClient,
@@ -1427,12 +1437,7 @@ async function executeSelect(
     }
     return result;
   }
-  const completeInputRequired = requiresCompleteInput(stmt);
-  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
-  const effectiveOptions = truncateWasDisabled
-    ? { ...options, onLimitReached: "error" as const }
-    : options;
-  await resolveSelectCaseSubqueries(stmt, client, effectiveOptions, cacheContext, cteCache);
+  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
@@ -1441,11 +1446,36 @@ async function executeSelect(
   const mode: SelectMode = whereCapability.capability === "EXACT_PUSHDOWN"
     ? staticMode
     : "FULL_SCAN";
-  await validateSelectFieldCodes(stmt, mode, client, cacheContext);
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  const orderPlan = hasCanonicalOrder(stmt)
+    ? planCanonicalOrder({
+        stmt,
+        staticMode: mode,
+        whereCapability: whereCapability.capability,
+        orderSemantics: orderMeta.semantics,
+        maxRecords: options.maxRecords ?? 10_000,
+        hasKlike: whereHasKlike(stmt.where),
+      })
+    : null;
+  await validateSelectFieldCodes(
+    stmt,
+    orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : mode,
+    client,
+    cacheContext
+  );
+  // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
+  // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    ? requiresCompleteInput({ ...stmt, orderBy: [] })
+    : requiresCompleteInput(stmt);
+  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
+  const effectiveOptions = truncateWasDisabled
+    ? { ...options, onLimitReached: "error" as const }
+    : options;
 
   try {
     if (mode === "SIMPLE") {
-      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext);
+      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext, orderPlan, orderMeta);
     } else {
       result = await executeFullScanSelect(
         stmt,
@@ -1453,7 +1483,8 @@ async function executeSelect(
         effectiveOptions,
         cacheContext,
         cteCache,
-        whereCapability.capability === "EXACT_PUSHDOWN"
+        whereCapability.capability === "EXACT_PUSHDOWN",
+        orderMeta
       );
     }
   } catch (error) {
@@ -1537,9 +1568,17 @@ async function executeSimpleSelect(
   stmt: SelectStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  orderPlan: CanonicalOrderPlan | null,
+  orderMeta: OrderByMeta
 ): Promise<SelectResult> {
-  const params = selectToKintoneParams(stmt);
+  const restStmt = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    ? withCanonicalRestTie(stmt)
+    : stmt;
+  const params = selectToKintoneParams(restStmt);
+  const fetchFields = orderPlan?.kind === "CANONICAL_LOCAL"
+    ? selectToFetchAllFields(stmt, stmt.from)
+    : params.fields;
   // SELECT CASE は SIMPLE モードでも JS 側で射影されるため、CASE 条件内の
   // IN / NOT IN に限って型 resolver を用意する（フィールド定義キャッシュを再利用）。
   const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
@@ -1553,7 +1592,9 @@ async function executeSimpleSelect(
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useSingleGet = stmt.limit !== null && stmt.limit <= 500;
+  const useRestWindow = stmt.orderBy.length > 0
+    ? orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter =
     stmt.orderBy.length === 0 &&
@@ -1563,10 +1604,10 @@ async function executeSimpleSelect(
       ? needed
       : undefined;
 
-  // kintone は最大 500 件なので LIMIT が 500 以下ならページングは不要
-  // LIMIT 指定なし or 500 超の場合は fetchAll を使う
+  // ORDER BY ありは schema-aware plan だけが REST 窓を許可する。
+  // ORDER BY なしは順序契約がないため、従来どおり小さい LIMIT を単発取得できる。
   let records: KintoneRecord[];
-  if (useSingleGet) {
+  if (useRestWindow) {
     const res: KintoneGetResponse = await client.getRecords({
       app: params.app,
       query: params.query,
@@ -1579,7 +1620,7 @@ async function executeSimpleSelect(
       client.getRecords,
       params.app,
       baseQuery,
-      params.fields,
+      fetchFields,
       {
         parallel,
         maxRecords,
@@ -1593,9 +1634,14 @@ async function executeSimpleSelect(
   }
 
   let rows = records.map((r) => flatten(r, null));
-  if (!useSingleGet) {
-    const { optionOrders, sortKinds, semantics } = await buildOrderByMetaForSelect(stmt, client, cacheContext);
-    rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds, semantics);
+  if (!useRestWindow) {
+    rows = applyOrderBy(
+      rows,
+      stmt.orderBy,
+      orderMeta.optionOrders,
+      orderMeta.sortKinds,
+      orderMeta.semantics
+    );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
   const { rows: projected, columns } = project(
@@ -1999,6 +2045,19 @@ function materializedMetaFromFieldInfo(
   };
 }
 
+/** REST top-N の同値群を FULL_SCAN の stable input ($id asc) と同じ順へ固定する。 */
+function withCanonicalRestTie(stmt: SelectStatement): SelectStatement {
+  const hasId = stmt.orderBy.some((item) =>
+    item.key.type === "FIELD_NAME" && item.key.name === "$id"
+  );
+  return hasId
+    ? stmt
+    : {
+        ...stmt,
+        orderBy: [...stmt.orderBy, { key: { type: "FIELD_NAME", name: "$id" }, direction: "ASC" }],
+      };
+}
+
 function syntheticColumnMeta(compareMode: "string" | "number"): MaterializedColumnMeta {
   return { sortKind: compareMode, semantics: syntheticSemantics(compareMode) };
 }
@@ -2274,7 +2333,8 @@ async function executeFullScanSelect(
   options: ExecuteOptions,
   cacheContext: string,
   cteCache?: Map<string, MaterializedTable>,
-  allowOriginalWherePushdown = true
+  allowOriginalWherePushdown = true,
+  preloadedOrderMeta?: OrderByMeta
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -2355,7 +2415,9 @@ async function executeFullScanSelect(
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   // （レコードに依存しないため、フェッチ完了を待つ必要がない）
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  const orderByMetaPromise = preloadedOrderMeta
+    ? Promise.resolve(preloadedOrderMeta)
+    : buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -2594,6 +2656,17 @@ async function executeFullScanWithCte(
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
+  const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  if (hasCanonicalOrder(stmt)) {
+    planCanonicalOrder({
+      stmt,
+      staticMode: "FULL_SCAN",
+      whereCapability: whereCapability.capability,
+      orderSemantics: orderMeta.semantics,
+      maxRecords,
+      hasKlike: whereHasKlike(stmt.where),
+    });
+  }
 
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
@@ -2614,7 +2687,7 @@ async function executeFullScanWithCte(
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
   const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
-  const orderByMetaPromise = buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
+  const orderByMetaPromise = Promise.resolve(orderMeta);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
@@ -5009,6 +5082,7 @@ async function resolveScalarColumns(
 
 interface ExplainWhereAnalysis {
   capabilities: Map<SelectStatement, PredicateCapabilityResult>;
+  orderPlans: Map<SelectStatement, CanonicalOrderPlan>;
   fieldApps: Set<number>;
   processStatusApps: Set<number>;
 }
@@ -5032,6 +5106,7 @@ async function buildExplainWhereAnalysis(
     },
   };
   const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
+  const orderPlans = new Map<SelectStatement, CanonicalOrderPlan>();
   const seen = new Set<object>();
 
   const visit = async (node: unknown): Promise<void> => {
@@ -5067,6 +5142,23 @@ async function buildExplainWhereAnalysis(
             processStatusApps.add(semantics.source.appId);
           }
         }
+        const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)]
+          .some((table) => table.cteName !== null);
+        // batch EXPLAIN は temp/CTE の実体化前には列意味型を確定できない。
+        // 実行時 planner は materialized metadata を受けて同じ検査を行う。
+        if (hasCanonicalOrder(select) && !hasUnmaterializedSource) {
+          const mode = capability.capability === "EXACT_PUSHDOWN"
+            ? resolveSelectMode(select)
+            : "FULL_SCAN";
+          orderPlans.set(select, planCanonicalOrder({
+            stmt: select,
+            staticMode: mode,
+            whereCapability: capability.capability,
+            orderSemantics: meta.semantics,
+            maxRecords: 10_000,
+            hasKlike: whereHasKlike(select.where),
+          }));
+        }
       }
     } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
       fieldApps.add((node as UpdateStatement | DeleteStatement).appId);
@@ -5088,8 +5180,19 @@ async function buildExplainWhereAnalysis(
       throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
     }
     capabilities.set(inlined, capability);
+    if (hasCanonicalOrder(inlined)) {
+      const meta = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
+      orderPlans.set(inlined, planCanonicalOrder({
+        stmt: inlined,
+        staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
+        whereCapability: capability.capability,
+        orderSemantics: meta.semantics,
+        maxRecords: 10_000,
+        hasKlike: whereHasKlike(inlined.where),
+      }));
+    }
   }
-  return { capabilities, fieldApps, processStatusApps };
+  return { capabilities, orderPlans, fieldApps, processStatusApps };
 }
 
 function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
@@ -5143,7 +5246,8 @@ export async function buildBatchExplainPlans(
       const statementPlan = buildBatchStatementPlan(
         planStmt,
         analysis.statements[i],
-        whereAnalysis.capabilities
+        whereAnalysis.capabilities,
+        whereAnalysis.orderPlans
       );
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
@@ -5164,14 +5268,15 @@ export async function buildBatchExplainPlans(
 function buildBatchStatementPlan(
   stmt: Statement,
   info: BatchAnalysis["statements"][number],
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch（バッチ終了時に自動破棄）`,
       `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
-      ...buildPlanForBatchQuery(stmt.query, info, capabilities).map((l) => `  ${l}`),
+      ...buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans).map((l) => `  ${l}`),
     ];
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -5189,7 +5294,7 @@ function buildBatchStatementPlan(
         `SET @${stmt.name} = (SELECT ...)`,
         "  value:         サブクエリを実行時に1回評価（1行1列・バッチ内定数・結果メタデータには非公開）",
         "  subquery:",
-        ...buildPlanForBatchQuery(stmt.expr.query, subInfo, capabilities).map((l) => `  ${l}`),
+        ...buildPlanForBatchQuery(stmt.expr.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`),
       ];
     }
     return [
@@ -5205,7 +5310,7 @@ function buildBatchStatementPlan(
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
-  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info, capabilities);
+  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans);
   if (stmt.type === "ASSERT") {
     const lines: string[] = [
       `ASSERT ${stmt.text}`,
@@ -5219,11 +5324,11 @@ function buildBatchStatementPlan(
       // 参照先で経路が変わるため per-subquery に判定する
       //（temp 参照なしの側を FULL_SCAN 表示にしない）
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
-      lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities).map((l) => `  ${l}`));
+      lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`));
     });
     return lines;
   }
-  return buildPlanForBatchQuery(stmt, info, capabilities);
+  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }
 
 /** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
@@ -5241,11 +5346,12 @@ function hasTempTableRef(node: unknown): boolean {
 function buildPlanForBatchQuery(
   query: Statement | ExplainStatement["query"],
   info: BatchAnalysis["statements"][number],
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
   if (info.tempTablesReferenced.length === 0) {
-    return buildExplainPlan(query as ExplainStatement["query"], undefined, capabilities);
+    return buildExplainPlan(query as ExplainStatement["query"], undefined, capabilities, orderPlans);
   }
   // 一時テーブル参照あり → FULL_SCAN（インメモリ）であることを明示する
   const lines: string[] = [];
@@ -5280,7 +5386,7 @@ async function executeExplain(
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext);
   const lines = [
     ...explainMetadataLines(analysis),
-    ...buildExplainPlan(stmt.query, undefined, analysis.capabilities),
+    ...buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
   ];
   return {
     type: "SELECT",
@@ -5293,31 +5399,38 @@ async function executeExplain(
 function buildExplainPlan(
   query: ExplainStatement["query"],
   label?: string,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
-  if (query.type === "UNION")         return buildUnionPlan(query, capabilities);
-  if (query.type === "WITH")          return buildWithPlan(query, capabilities);
+  if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
+  if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
   if (query.type === "INSERT")        return buildInsertPlan(query, label);
-  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities);
+  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label);
-  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities);
-  if (query.type === "UPDATE")        return buildUpdatePlan(query, label, capabilities);
+  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPDATE")        return buildUpdatePlan(query, label, capabilities, orderPlans);
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
-  return buildSelectPlan(query, label, capabilities);
+  return buildSelectPlan(query, label, capabilities, orderPlans);
 }
 
 function buildSelectPlan(
   stmt: SelectStatement,
   label?: string,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities
     ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
     : undefined);
-  const mode = whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN"
+  const orderPlan = orderPlans?.get(stmt) ?? (orderPlans
+    ? [...orderPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
+    : undefined);
+  const mode = orderPlan?.kind === "CANONICAL_LOCAL"
     ? "FULL_SCAN"
-    : resolveSelectMode(stmt);
+    : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN"
+      ? "FULL_SCAN"
+      : resolveSelectMode(stmt);
   const reasons = collectFullScanReasons(stmt);
   if (whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN") {
     reasons.push(...whereCapability.reasons.map((reason) => reason.code));
@@ -5326,7 +5439,11 @@ function buildSelectPlan(
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
-  if (requiresCompleteInput(stmt)) {
+  if (orderPlan) {
+    lines.push(`  order plan:    ${orderPlan.kind}`);
+    if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
+  }
+  if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
     lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
   }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
@@ -5334,7 +5451,9 @@ function buildSelectPlan(
   }
 
   if (mode === "SIMPLE") {
-    const params = selectToKintoneParams(stmt);
+    const params = selectToKintoneParams(orderPlan?.kind === "CANONICAL_REST_TOP_N"
+      ? withCanonicalRestTie(stmt)
+      : stmt);
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${params.query || "(なし)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
@@ -5345,9 +5464,15 @@ function buildSelectPlan(
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
+    const exactOriginalWhere = stmt.joins.length === 0
+      && whereCapability?.capability === "EXACT_PUSHDOWN"
+      && stmt.where !== null
+      && !whereRequiresJsEval(stmt.where)
+      ? whereToKintone(stmt.where)
+      : "";
     const mainQ = mainPushDown !== null
       ? whereToKintone(mainPushDown)
-      : "(全件取得)";
+      : exactOriginalWhere || "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     if (mainCandidate !== null) {
@@ -5376,13 +5501,14 @@ function buildSelectPlan(
     }
   }
 
-  lines.push(...collectSubqueryPlans(stmt, capabilities));
+  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans));
   return lines;
 }
 
 function buildUnionPlan(
   stmt: UnionStatement,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   // UnionStatement は left / right の二分木 — 左辺を再帰的に展開して全 SELECT を収集
   const selects: SelectStatement[] = [];
@@ -5396,29 +5522,30 @@ function buildUnionPlan(
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans));
   });
   return lines;
 }
 
 function buildWithPlan(
   stmt: WithStatement,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans));
       lines.push("");
     }
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
-    lines.push(...buildExplainPlan(stmt.query, "[main]", capabilities));
+    lines.push(...buildExplainPlan(stmt.query, "[main]", capabilities, orderPlans));
   }
   if (canInlineSingleCte(stmt)) {
     lines.push("");
     const inlined = buildInlinedQuery(stmt);
-    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities));
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans));
   }
   return lines;
 }
@@ -5450,7 +5577,8 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
 
 function collectSubqueryPlans(
   stmt: SelectStatement,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const lines: string[] = [];
   let idx = 1;
@@ -5460,14 +5588,14 @@ function collectSubqueryPlans(
     switch (w.type) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         }
         break;
       case "EXISTS":
-        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities));
+        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans));
         break;
       case "LOGICAL":  visitWhere(w.left); visitWhere(w.right); break;
       case "NOT":
@@ -5480,7 +5608,7 @@ function collectSubqueryPlans(
 
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
-      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities));
+      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans));
     }
   }
 
@@ -5509,7 +5637,8 @@ function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
 function buildInsertSelectPlan(
   stmt: InsertSelectStatement,
   label?: string,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
@@ -5518,14 +5647,15 @@ function buildInsertSelectPlan(
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
 
 function buildUpdatePlan(
   stmt: UpdateStatement,
   label?: string,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const isArith  = hasArithAssignment(stmt);
   const isSubq   = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
@@ -5564,7 +5694,7 @@ function buildUpdatePlan(
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities));
+      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans));
     }
   }
 
@@ -5598,7 +5728,8 @@ function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
 function buildUpsertSelectPlan(
   stmt: UpsertSelectStatement,
   label?: string,
-  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const lines: string[] = [
     ...(label ? [label] : []),
@@ -5609,7 +5740,7 @@ function buildUpsertSelectPlan(
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
     ``,
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
 

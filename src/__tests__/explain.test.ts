@@ -24,6 +24,7 @@ function makeClient(): KintoneClient {
         ...optionFields.map((code) => ({ code, label: code, fieldType: "DROP_DOWN" })),
         ...textFields.map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" })),
         { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+        { code: "利用者", label: "利用者", fieldType: "USER_SELECT" },
       ];
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
@@ -43,13 +44,28 @@ async function explain(sql: string): Promise<string[]> {
 // SIMPLE モード
 // ----------------------------------------------------------------
 
-test("EXPLAIN SIMPLE — 基本 SELECT", async () => {
+test("EXPLAIN canonical local — allowlist外 ORDER BY は REST 窓を表示しない", async () => {
   const plan = await explain("EXPLAIN SELECT 顧客名, 金額 FROM APP100 WHERE ステータス = '完了' ORDER BY 金額 desc LIMIT 10");
-  expect(plan.find((l) => l.includes("mode"))).toContain("SIMPLE");
+  expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
+  expect(plan.find((l) => l.includes("order plan"))).toContain("CANONICAL_LOCAL");
   expect(plan.find((l) => l.includes("kintone query"))).toContain('ステータス = "完了"');
   expect(plan.find((l) => l.includes("fields"))).toContain("顧客名");
   expect(plan.find((l) => l.includes("fields"))).toContain("金額");
   expect(plan.find((l) => l.includes("complete input"))).toContain("onLimit=truncate disabled");
+});
+
+test("EXPLAIN canonical REST top-N — $id exact window を表示する", async () => {
+  const plan = await explain("EXPLAIN SELECT $id FROM APP100 WHERE $id > 0 ORDER BY $id DESC LIMIT 5");
+  expect(plan.find((l) => l.includes("order plan"))).toContain("CANONICAL_REST_TOP_N");
+  expect(plan.find((l) => l.includes("kintone query"))).toContain("order by $id desc limit 5");
+  expect(plan.some((line) => line.includes("complete input"))).toBe(false);
+});
+
+test("EXPLAIN は unsupported ORDER key を行数に依存せず拒否する", async () => {
+  await expect(explain("EXPLAIN SELECT $id FROM APP100 ORDER BY 利用者 LIMIT 1"))
+    .rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
+  await expect(explain("EXPLAIN SELECT RANK() OVER (ORDER BY 利用者) AS r FROM APP100"))
+    .rejects.toThrow(/ORDER_KEY_UNSUPPORTED/);
 });
 
 test("EXPLAIN ORDER BY なし — complete input 要件を表示しない", async () => {

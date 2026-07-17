@@ -60,6 +60,12 @@ test("typed number は固定バンド順にする", () => {
   ]);
 });
 
+test("typed number の空白のみは Number 規則により有限数 0 の peer とする", () => {
+  expect(compareCanonicalValues(" ", "0", numberSemantics)).toBe(0);
+  expect(compareCanonicalValues(" ", "-Infinity", numberSemantics)).toBe(1);
+  expect(compareCanonicalValues(" ", "Infinity", numberSemantics)).toBe(-1);
+});
+
 test("RECORD_NUMBER は末尾IDをbinary64へ変換せず比較する", () => {
   const semantics = resolveFieldSemantics({ fieldType: "RECORD_NUMBER" });
   expect(compareCanonicalValues("APPCODE-2", "APPCODE-10", semantics)).toBe(-1);
@@ -79,7 +85,7 @@ test("複数選択は保存配列順を捨てたcanonical vectorで比較する"
 });
 
 test("共有leafは -1/0/1・反対称性・推移律を満たす", () => {
-  const samples = ["", "-Infinity", "-1", "0", "-0", "2", "10", "Infinity", "NaN", "1a", "x"];
+  const samples = ["", "-Infinity", "-1", "0", "-0", " ", "2", "10", "Infinity", "NaN", "1a", "x"];
   for (const a of samples) {
     expect(compareCanonicalValues(a, a, numberSemantics)).toBe(0);
     for (const b of samples) {

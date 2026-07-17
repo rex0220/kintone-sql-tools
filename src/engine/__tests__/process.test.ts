@@ -16,6 +16,7 @@ import type { KintoneRecord } from "../../converter/dmlToKintone";
 import type { SelectStatement, JoinClause, WhereExpr } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
+import { resolveFieldSemantics } from "../../core/fieldSemantics";
 
 // ヘルパー
 function makeRecord(fields: Record<string, string>): KintoneRecord {
@@ -790,8 +791,21 @@ test("B26: typed number の同一域外値は RANK/DENSE_RANK で peer のまま
   ]);
 });
 
-test.todo("B27: STATUS states.*.index を保持し、STATUS ORDER BY の rank map にだけ統合する");
-test.todo("B27: 同値群をまたぐ LIMIT/OFFSET は canonical $id ASC を結果 tie-break に使い、peer 比較には混ぜない");
+test("B27: STATUS ORDER BY は states.*.index の rank map を使う", () => {
+  const rows: ProcessRow[] = [{ ステータス: "完了" }, { ステータス: "未処理" }];
+  const semantics = resolveFieldSemantics({
+    fieldType: "STATUS",
+    optionOrder: { 未処理: 0, 完了: 1 },
+  });
+  const result = applyOrderBy(
+    rows,
+    [{ key: { type: "FIELD_NAME", name: "ステータス" }, direction: "ASC" }],
+    undefined,
+    undefined,
+    new Map([["ステータス", semantics]])
+  );
+  expect(result.map((row) => row.ステータス)).toEqual(["未処理", "完了"]);
+});
 
 test("ORDER BY 選択肢: DROP_DOWN は option index 順で比較", () => {
   const rows: ProcessRow[] = [
