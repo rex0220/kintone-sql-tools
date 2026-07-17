@@ -143,7 +143,7 @@ test("#err ペイロード型は元SELECTではなくDML対象フィールドか
   expect((batch.statements[1].result as SelectResult).rows[0].maxamount).toBe("9");
 });
 
-test.failing("B26/B14: #err NUMBER 宣言列の正当な非数値も固定バンドで点検できる", async () => {
+test("B26/B14: #err NUMBER 宣言列の正当な非数値も固定バンドで点検できる", async () => {
   const client = makeClient();
   client.getFields = async () => [
     { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
@@ -1046,7 +1046,7 @@ test("MIN / MAX: CTE/temp 混在 JOIN の非修飾同名列は衝突として型
 
   expect(r.statements[0].error).toBeUndefined();
   expect(r.statements[1].error).toBeUndefined();
-  expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("NaN");
+  expect((r.statements[1].result as SelectResult).rows[0].collision).toBe("B");
   expect(fieldCalls).toBe(2);
 });
 
@@ -1104,7 +1104,7 @@ test("MIN / MAX: UNION は左右の型一致時だけメタを伝播する", asy
   );
 
   expect((r.statements[1].result as SelectResult).rows[0].samemin).toBe("A");
-  expect((r.statements[3].result as SelectResult).rows[0].mixedmin).toBe("NaN");
+  expect((r.statements[3].result as SelectResult).rows[0].mixedmin).toBe("10");
 });
 
 test("MIN / MAX: SELECT * 実体化でも型を付けフォーム定義は1回だけ取得する", async () => {

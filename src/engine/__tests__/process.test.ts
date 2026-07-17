@@ -220,9 +220,10 @@ test("applyFilter: 空セルを有限数との範囲比較で −∞ として�
   const gte = parseSelect("SELECT * FROM APP100 WHERE 金額 >= -1000000");
   const lte = parseSelect("SELECT * FROM APP100 WHERE 金額 <= -1000000");
 
-  expect(applyFilter(rows, gte.where).map((row) => row["金額"]))
+  const resolveType = () => "NUMBER";
+  expect(applyFilter(rows, gte.where, resolveType).map((row) => row["金額"]))
     .toEqual(["0", "-1", "1"]);
-  expect(applyFilter(rows, lte.where).map((row) => row["金額"]))
+  expect(applyFilter(rows, lte.where, resolveType).map((row) => row["金額"]))
     .toEqual([""]);
 });
 
@@ -330,7 +331,7 @@ test("MIN / MAX: 文字列型は全文を辞書順比較し、数値型は従来
   });
   expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
     mn: "9",
-    mx: "100",
+    mx: "0100",
   });
 });
 
@@ -347,7 +348,7 @@ test("MIN / MAX: 文字列型の DISTINCT・空文字・修飾フィールドを
     seen.push(`${field.tableAlias}.${field.field}`);
     return "string";
   });
-  expect(result[0]).toMatchObject({ mn: "A", mx: "B" });
+  expect(result[0]).toMatchObject({ mn: "", mx: "B" });
   expect(seen).toEqual(["a.値", "a.値"]);
 
   const empty = applyGroupBy([{ "a.値": "" }], stmt.groupBy, stmt.columns, () => "string");
@@ -671,9 +672,8 @@ test("ORDER BY FIELD_NAME: sortKind=number は数値比較を優先", () => {
   expect(result.map((r) => r["計算値"])).toEqual(["2", "10"]);
 });
 
-// v3.0.0 Phase 0 baseline fixtures.
-// test.failing は現行実装で期待値に届かないことを固定し、実装時に通常 test へ反転する。
-test.failing("B26: typed string ORDER BY は locale/UTF-16 ではなくコードポイント順", () => {
+// v3.0.0 Phase 0 baseline fixtures（Phase 4 で通常テストへ反転）。
+test("B26: typed string ORDER BY は locale/UTF-16 ではなくコードポイント順", () => {
   const compatibilityIdeograph = String.fromCodePoint(0xfa00);
   const rows: ProcessRow[] = [
     { value: "😀" },
@@ -697,7 +697,7 @@ test.failing("B26: typed string ORDER BY は locale/UTF-16 ではなくコード
   ]);
 });
 
-test.failing("B26: typed string WHERE は数値らしい値もコードポイント順で比較", () => {
+test("B26: typed string WHERE は数値らしい値もコードポイント順で比較", () => {
   const stmt = parseSelect("SELECT value FROM APP1 WHERE value > '100'");
   const rows: ProcessRow[] = [
     { value: "20" },
@@ -710,7 +710,7 @@ test.failing("B26: typed string WHERE は数値らしい値もコードポイン
   expect(result.map((row) => row.value)).toEqual(["20", "30", "99", "9"]);
 });
 
-test.failing("B26: typed number ORDER BY は域外値を含む固定バンド順", () => {
+test("B26: typed number ORDER BY は域外値を含む固定バンド順", () => {
   const values = ["x", "NaN", "Infinity", "10", "2", "-Infinity", "", "1a"];
   const rows = values.map((value) => ({ value }));
   const result = applyOrderBy(
@@ -731,7 +731,18 @@ test.failing("B26: typed number ORDER BY は域外値を含む固定バンド順
   ]);
 });
 
-test.failing("B26/B14: typed number MIN/MAX は #err 相当の非数値も固定バンドで集約", () => {
+test("B26: typed number DESC は固定バンド全体を反転する", () => {
+  const values = ["x", "NaN", "Infinity", "10", "2", "-Infinity", ""];
+  const result = applyOrderBy(
+    values.map((value) => ({ value })),
+    [{ key: { type: "FIELD_NAME", name: "value" }, direction: "DESC" }],
+    undefined,
+    new Map([["value", "number"]])
+  );
+  expect(result.map((row) => row.value)).toEqual(["x", "NaN", "Infinity", "10", "2", "-Infinity", ""]);
+});
+
+test("B26/B14: typed number MIN/MAX は #err 相当の非数値も固定バンドで集約", () => {
   const records = [
     makeRecord({ value: "10" }),
     makeRecord({ value: "2" }),
@@ -747,7 +758,7 @@ test.failing("B26/B14: typed number MIN/MAX は #err 相当の非数値も固定
   expect(rows[0]).toEqual({ min_value: "2", max_value: "x" });
 });
 
-test.failing("B26/B14: typed number が域外値だけなら MIN/MAX は存在する端のバンド値", () => {
+test("B26/B14: typed number が域外値だけなら MIN/MAX は存在する端のバンド値", () => {
   const records = [
     makeRecord({ value: "x" }),
     makeRecord({ value: "NaN" }),
@@ -814,6 +825,27 @@ test("ORDER BY 選択肢: MULTI_SELECT は最小 index で比較", () => {
     optionOrders
   );
   expect(result.map((r) => r["オプション"])).toEqual(["[\"X\"]", "[\"Y\"]", "[\"Z\",\"Y\"]"]);
+});
+
+test("B26: MULTI_SELECT の保存配列順違いはRANK/DENSE_RANKでpeerになる", () => {
+  const stmt = parseSelect(
+    "SELECT RANK() OVER (ORDER BY オプション) AS r, " +
+    "DENSE_RANK() OVER (ORDER BY オプション) AS dr FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { オプション: '["Y","Z"]' },
+    { オプション: '["Z","Y"]' },
+    { オプション: '["Z"]' },
+  ];
+  const optionOrders = new Map<string, Map<string, number>>([
+    ["オプション", new Map([["X", 0], ["Y", 1], ["Z", 2]])],
+  ]);
+  applyWindow(rows, stmt.columns, optionOrders);
+  expect(rows.map((row) => [row.オプション, row.r, row.dr])).toEqual([
+    ['["Y","Z"]', "1", "1"],
+    ['["Z","Y"]', "1", "1"],
+    ['["Z"]', "3", "2"],
+  ]);
 });
 
 // ----------------------------------------------------------------
@@ -1826,7 +1858,7 @@ test("MAX / MIN: 150,000 行でも RangeError にならない", () => {
     金額: String(i + 1),
   }));
   const stmt = parseSelect("SELECT MAX(金額) AS mx, MIN(金額) AS mn FROM APP100");
-  const result = applyGroupBy(bigRows, stmt.groupBy, stmt.columns);
+  const result = applyGroupBy(bigRows, stmt.groupBy, stmt.columns, () => "number");
   expect(result[0]["mx"]).toBe("150000");
   expect(result[0]["mn"]).toBe("1");
 });

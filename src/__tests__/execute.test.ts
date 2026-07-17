@@ -355,7 +355,7 @@ test.each([
   })).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
 });
 
-test.failing("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHERE で評価", async () => {
+test("B32: SINGLE_LINE_TEXT の範囲比較は押し下げず local WHERE で評価", async () => {
   const client = makeClient({
     records: [
       makeRecord({ $id: "1", 郵便番号: "20" }),
@@ -1136,7 +1136,10 @@ test("FULL_SCAN: NUMBER 等値は押し下げても JS の文字列表現で再�
   ) as SelectResult;
 
   expect(client.getCalls[0].query).toContain("金額 = 100");
-  expect(result.rows).toEqual([{ $id: "2", 金額: "100" }]);
+  expect(result.rows).toEqual([
+    { $id: "1", 金額: "100.0" },
+    { $id: "2", 金額: "100" },
+  ]);
 });
 
 test.each([
@@ -1416,8 +1419,7 @@ test("ORDER BY の実キーが STATUS のときだけ定義順 metadata を取�
     { cacheContext: "status-order-meta-result-boundary" }
   ) as SelectResult;
   expect(statusCalls).toBe(2);
-  // Phase 2 は metadata だけを準備し、まだ process index 順へ結果を切り替えない。
-  expect(statusOrdered.rows).toEqual([{ ステータス: "完了" }, { ステータス: "未処理" }]);
+  expect(statusOrdered.rows).toEqual([{ ステータス: "未処理" }, { ステータス: "完了" }]);
 
   await execute(
     "SELECT $id FROM APP99308 ORDER BY 件名 ASC",
@@ -1430,6 +1432,33 @@ test("ORDER BY の実キーが STATUS のときだけ定義順 metadata を取�
     { cacheContext: "no-order-no-status-meta" }
   );
   expect(statusCalls).toBe(2);
+});
+
+test("STATUS の範囲比較は定義順 metadata を使う", async () => {
+  const client = makeClient({ records: [
+    makeTypedRecord({ $id: "1", ステータス: "未処理", 件名: "one" }),
+    makeTypedRecord({ $id: "2", ステータス: "完了", 件名: "two" }),
+  ] });
+  client.getFields = async () => [
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
+    { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  let statusCalls = 0;
+  client.getProcessStatuses = async () => {
+    statusCalls += 1;
+    return {
+      enable: true,
+      states: [{ name: "未処理", index: 0 }, { name: "完了", index: 1 }],
+    };
+  };
+
+  const ranged = await execute(
+    "SELECT $id FROM APP99308 WHERE ステータス > '未処理' AND 件名 LIKE '%'",
+    client,
+    { cacheContext: "status-range-meta" }
+  ) as SelectResult;
+  expect(ranged.rows).toEqual([{ $id: "2" }]);
+  expect(statusCalls).toBe(1);
 });
 
 test("CTE を越えて STATUS の物理列来歴を ORDER BY metadata へ伝播する", async () => {
@@ -2678,6 +2707,30 @@ test("REORDER サブテーブル行（親単位）", async () => {
   expect(table.every((r) => r.value === undefined)).toBe(true);
 });
 
+test("B26: REORDER はtyped stringをコードポイント順、typed numberを数値順にする", async () => {
+  const parent = {
+    $id: { value: "1" },
+    $revision: { value: "1" },
+    明細: { value: [
+      { id: "r1", value: { コード: { value: "2" }, 数量: { value: "10" } } },
+      { id: "r2", value: { コード: { value: "10" }, 数量: { value: "2" } } },
+    ] },
+  } as unknown as KintoneRecord;
+  const client = makeClient({ recordsByApp: { 100: [parent] } });
+  client.getFields = async () => [
+    { code: "コード", label: "コード", fieldType: "SINGLE_LINE_TEXT", inSubtable: true },
+    { code: "数量", label: "数量", fieldType: "NUMBER", inSubtable: true },
+  ];
+
+  await execute("REORDER ALL APP100$明細 BY コード ASC", client, { cacheContext: "reorder-string" });
+  await execute("REORDER ALL APP100$明細 BY 数量 ASC", client, { cacheContext: "reorder-number" });
+
+  const stringOrder = client.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  const numberOrder = client.putCalls[1].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  expect(stringOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
+  expect(numberOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
+});
+
 test("REORDER: 空数値セルだけの親を >= の対象から外し、確認件数と親件数を揃える", async () => {
   const parent = (id: string, quantity: string, rowId: string) => ({
     $id: { value: id }, $revision: { value: "1" },
@@ -3317,7 +3370,6 @@ test("WITH インライン化 — エイリアス付き FROM (FROM cte AS c WHER
     records: [makeRecord({ 金額: "500", 種別: "A" }), makeRecord({ 金額: "100", 種別: "A" })],
     fieldTypes: { 金額: "NUMBER" },
   });
-
   await execute(
     `WITH 全件 AS (SELECT * FROM APP100 WHERE 種別 = 'A')
      SELECT * FROM 全件 AS c WHERE c.金額 > 200`,
@@ -3377,6 +3429,11 @@ test("CASE WHEN WHERE フィルタ — 左辺 CASE: 区分で金額を切り替�
       makeRecord({ 区分: "特別", 金額: "1200", 名前: "佐藤" }),
     ],
   });
+  client.getFields = async () => [
+    { code: "区分", label: "区分", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ];
 
   // CASE WHEN 区分 = '特別' THEN 金額 ELSE 0 END > 1000
   // → 特別かつ金額>1000 の行だけ通過: 佐藤(1200)
@@ -3775,7 +3832,7 @@ test("MIN / MAX: 日時・RICH_TEXT は文字列、CREATOR は型不明の従来
     oldest: "2025-12-31",
     latest: "2026-07-16T02:00:00Z",
     richmin: "A",
-    unsupported: "NaN",
+    unsupported: "A",
   });
 });
 
@@ -3828,7 +3885,7 @@ test("MIN / MAX: JOIN 非修飾名は一意なら型解決し、同名競合な�
     { cacheContext: "aggregate-sort-unqualified-join" }
   ) as SelectResult;
 
-  expect(result.rows[0]).toMatchObject({ uniquemin: "10", collision: "NaN" });
+  expect(result.rows[0]).toMatchObject({ uniquemin: "10", collision: "A" });
 });
 
 test("metrics: INSERT は postCalls を数える", async () => {

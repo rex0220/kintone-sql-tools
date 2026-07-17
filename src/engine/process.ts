@@ -43,6 +43,7 @@ import {
   evalCaseWhen,
   ProcessRow,
   type FieldTypeResolver,
+  type FieldSemanticsResolver,
 } from "./evalWhere";
 import {
   evalArithExpr,
@@ -50,12 +51,14 @@ import {
   applyRoundOp,
   resolveFieldRef,
 } from "./evalFunc";
+import { compareCanonicalValues } from "../core/scalarCompare";
+import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
 
 export { ProcessRow };
 
 /** MIN/MAX の直接フィールド参照を数値順・文字列順へ分類する。 */
 export type AggregateSortKindResolver =
-  (field: FieldRef) => "number" | "string" | undefined;
+  (field: FieldRef) => "number" | "string" | ResolvedFieldSemantics | undefined;
 
 // ============================================================
 // 1. flatten — KintoneRecord → ProcessRow
@@ -179,10 +182,11 @@ export function applyFilter(
   rows: ProcessRow[],
   where: WhereExpr | null,
   resolveFieldType?: FieldTypeResolver,
-  appliedKlikes?: ReadonlySet<object>
+  appliedKlikes?: ReadonlySet<object>,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): ProcessRow[] {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes));
+  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes, resolveFieldSemantics));
 }
 
 // ============================================================
@@ -292,14 +296,14 @@ function evalAggregate(
     return func === "COUNT" ? rows.length : 0;
   }
 
-  // 各行で arg を評価し、非空・非 NaN の文字列値を収集
+  // 各行で arg を評価する。MIN/MAX は空セルも canonical band の値として保持する。
   const strValues: string[] = [];
   for (const row of rows) {
     let strVal: string;
     if (arg.type === "FIELD_REF") {
       // 単純フィールド参照: 空文字はスキップ（COUNT(field) の既存動作を維持）
       const raw = row[arg.field];
-      if (raw === undefined || raw === "") continue;
+      if (raw === undefined || (raw === "" && func !== "MIN" && func !== "MAX")) continue;
       strVal = raw;
     } else {
       // 算術式 / 関数: 数値として評価し NaN はスキップ
@@ -316,21 +320,26 @@ function evalAggregate(
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
 
-  const sortKind = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF"
+  const comparison = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF"
     ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
     : undefined;
-  if (sortKind === "string") {
-    if (eff.length === 0) return "";
-    return func === "MAX" ? maxStringOf(eff) : minStringOf(eff);
+  if (func === "MIN" || func === "MAX") {
+    if (eff.length === 0) return 0;
+    const semantics = typeof comparison === "string"
+      ? syntheticSemantics(comparison)
+      : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
+    let result = eff[0];
+    for (const candidate of eff.slice(1)) {
+      const cmp = compareCanonicalValues(candidate, result, semantics);
+      if ((func === "MAX" && cmp > 0) || (func === "MIN" && cmp < 0)) result = candidate;
+    }
+    return result;
   }
 
   const nums = eff.map(Number);
   switch (func) {
     case "SUM": return nums.reduce((a, b) => a + b, 0);
     case "AVG": return nums.length === 0 ? 0 : nums.reduce((a, b) => a + b, 0) / nums.length;
-    // Math.max(...nums) は要素数が多いと RangeError になるためループで求める
-    case "MAX": return nums.length === 0 ? 0 : maxOf(nums);
-    case "MIN": return nums.length === 0 ? 0 : minOf(nums);
   }
 }
 
@@ -339,30 +348,6 @@ function toAggregateFieldRef(field: string): FieldRef {
   return dot > 0
     ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) }
     : { type: "FIELD", tableAlias: null, field };
-}
-
-function maxStringOf(values: string[]): string {
-  let value = values[0];
-  for (const candidate of values) if (candidate > value) value = candidate;
-  return value;
-}
-
-function minStringOf(values: string[]): string {
-  let value = values[0];
-  for (const candidate of values) if (candidate < value) value = candidate;
-  return value;
-}
-
-function maxOf(nums: number[]): number {
-  let m = nums[0];
-  for (const n of nums) if (n > m) m = n;
-  return m;
-}
-
-function minOf(nums: number[]): number {
-  let m = nums[0];
-  for (const n of nums) if (n < m) m = n;
-  return m;
 }
 
 /** 集計算術式を評価する（グループ行全体を受け取る） */
@@ -415,10 +400,11 @@ function aggregateSyntheticName(
 export function applyHaving(
   rows: ProcessRow[],
   having: WhereExpr | null,
-  resolveFieldType?: FieldTypeResolver
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): ProcessRow[] {
   if (having === null) return rows;
-  return rows.filter((row) => evalWhere(having, row, resolveFieldType));
+  return rows.filter((row) => evalWhere(having, row, resolveFieldType, undefined, resolveFieldSemantics));
 }
 
 // ============================================================
@@ -505,16 +491,18 @@ function buildDistinctKeyBuilder(
 
 export type OptionOrderMap = Map<string, Map<string, number>>;
 export type FieldSortKindMap = Map<string, "number" | "string">;
+export type FieldSemanticsMap = ReadonlyMap<string, ResolvedFieldSemantics>;
 
 export function applyOrderBy(
   rows: ProcessRow[],
   orderBy: OrderByItem[],
   optionOrders?: OptionOrderMap,
-  sortKinds?: FieldSortKindMap
+  sortKinds?: FieldSortKindMap,
+  fieldSemantics?: FieldSemanticsMap
 ): ProcessRow[] {
   if (orderBy.length === 0) return rows;
 
-  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds).rows.map((item) => item.row);
+  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics).rows.map((item) => item.row);
 }
 
 interface DecoratedSortRow {
@@ -531,28 +519,39 @@ function sortDecoratedRows(
   rows: ProcessRow[],
   orderBy: OrderByItem[],
   optionOrders?: OptionOrderMap,
-  sortKinds?: FieldSortKindMap
+  sortKinds?: FieldSortKindMap,
+  fieldSemantics?: FieldSemanticsMap
 ): DecoratedSortResult {
 
   // キーごとの比較設定（選択肢順マップ / ソート種別）を 1 回だけ解決
-  const keyMeta: SortKeyMeta[] = orderBy.map(({ key }) => ({
-    orderMap: key.type === "FIELD_NAME" ? optionOrders?.get(key.name) : undefined,
-    sortKind: key.type === "FIELD_NAME" ? sortKinds?.get(key.name) : undefined,
-  }));
+  const keyMeta: SortKeyMeta[] = orderBy.map(({ key }) => {
+    if (key.type === "ARITH_KEY") return { semantics: syntheticSemantics("number") };
+    if (key.type === "FUNC_KEY") {
+      return { semantics: syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(key.expr.func) ? "number" : "string") };
+    }
+    const semantics = fieldSemantics?.get(key.name);
+    if (semantics) return { semantics };
+    const orderMap = optionOrders?.get(key.name);
+    if (orderMap) {
+      return {
+        semantics: {
+          fieldType: "MULTI_SELECT",
+          compareMode: "option",
+          inSubtable: false,
+          requiresCollectionOperators: false,
+          optionOrder: orderMap,
+        },
+      };
+    }
+    return { semantics: syntheticSemantics(sortKinds?.get(key.name) ?? "string") };
+  });
 
   // ソートキーを行ごとに前計算する（比較のたびの式評価・数値変換を避ける）
   const decorated: DecoratedSortRow[] = rows.map((row) => ({
     row,
     keys: orderBy.map(({ key }, i): SortKey => {
       const s = evalOrderKey(key, row);
-      const n = Number(s);
-      const orderMap = keyMeta[i].orderMap;
-      return {
-        s,
-        n,
-        isNum: !Number.isNaN(n),
-        rank: orderMap ? minChoiceIndex(parseChoiceValues(s), orderMap) : 0,
-      };
+      return { s };
     }),
   }));
 
@@ -577,31 +576,21 @@ function compareDecoratedRows(
 }
 
 interface SortKey {
-  /** 文字列値 */
   s: string;
-  /** 数値解釈（NaN の場合は isNum=false） */
-  n: number;
-  isNum: boolean;
-  /** 選択肢順ランク（orderMap がある場合のみ有効） */
-  rank: number;
 }
 
 interface SortKeyMeta {
-  orderMap?: Map<string, number>;
-  sortKind?: "number" | "string";
+  semantics: ResolvedFieldSemantics;
 }
 
 function compareSortKeys(a: SortKey, b: SortKey, meta: SortKeyMeta): number {
-  if (meta.orderMap) {
-    if (a.rank !== b.rank) return a.rank - b.rank;
-    return a.s.localeCompare(b.s, "ja");
-  }
-  if (meta.sortKind === "string") {
-    return a.s.localeCompare(b.s, "ja");
-  }
-  // sortKind="number" / 自動判定: 両辺とも数値のときだけ数値比較（従来と同じ規則）
-  return a.isNum && b.isNum ? a.n - b.n : a.s.localeCompare(b.s, "ja");
+  return compareCanonicalValues(a.s, b.s, meta.semantics);
 }
+
+const NUMERIC_ORDER_FUNCTIONS = new Set([
+  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
+]);
 
 function evalOrderKey(key: OrderByKey, row: ProcessRow): string {
   switch (key.type) {
@@ -609,32 +598,6 @@ function evalOrderKey(key: OrderByKey, row: ProcessRow): string {
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
   }
-}
-
-function parseChoiceValues(raw: string): string[] {
-  const trimmed = raw.trim();
-  if (trimmed === "") return [""];
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    try {
-      const arr = JSON.parse(trimmed);
-      if (Array.isArray(arr)) {
-        return arr.map((v) => String(v ?? ""));
-      }
-    } catch {
-      // fall through
-    }
-  }
-  return [trimmed];
-}
-
-function minChoiceIndex(values: string[], orderMap: Map<string, number>): number {
-  let min = Number.MAX_SAFE_INTEGER;
-  for (const value of values) {
-    const idx = orderMap.get(value);
-    const rank = idx ?? Number.MAX_SAFE_INTEGER;
-    if (rank < min) min = rank;
-  }
-  return min;
 }
 
 // ============================================================
@@ -646,7 +609,8 @@ export function applyWindow(
   rows: ProcessRow[],
   columns: SelectColumn[],
   optionOrders?: OptionOrderMap,
-  sortKinds?: FieldSortKindMap
+  sortKinds?: FieldSortKindMap,
+  fieldSemantics?: FieldSemanticsMap
 ): ProcessRow[] {
   const windows = columns.filter((column): column is WindowColumn => column.type === "WINDOW_COL");
   if (rows.length === 0 || windows.length === 0) return rows;
@@ -661,7 +625,7 @@ export function applyWindow(
     }
 
     for (const partition of partitions.values()) {
-      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds);
+      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics);
       const sorted = sortedResult.rows;
       let rank = 1;
       let denseRank = 1;
@@ -717,7 +681,8 @@ export function project(
   columns: SelectColumn[],
   scalarCache?: Map<number, string>,
   resolveFieldType?: FieldTypeResolver,
-  sourceColumns?: readonly string[]
+  sourceColumns?: readonly string[],
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): { rows: ProcessRow[]; columns: string[] } {
   // SELECT * → そのまま全フィールド
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
@@ -789,7 +754,7 @@ export function project(
         }
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
-          out[key] = evalCaseWhen(col.expr, row, resolveFieldType);
+          out[key] = evalCaseWhen(col.expr, row, resolveFieldType, resolveFieldSemantics);
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -999,16 +964,41 @@ export interface FullScanInput {
   optionOrders?: OptionOrderMap;
   /** フィールドごとの強制ソート種別 */
   sortKinds?: FieldSortKindMap;
+  /** ORDER BY / WINDOW キーごとの共有意味型 */
+  orderSemantics?: FieldSemanticsMap;
   /** WHERE / SELECT CASE 等、物理行を評価する際のフィールド型解決器 */
   fieldTypeResolver?: FieldTypeResolver;
+  fieldSemanticsResolver?: FieldSemanticsResolver;
   /** HAVING 用。集計列 alias を物理フィールドと誤認しない解決器 */
   havingFieldTypeResolver?: FieldTypeResolver;
+  havingFieldSemanticsResolver?: FieldSemanticsResolver;
   /** MIN/MAX の直接フィールド参照用ソート種別解決器。 */
   aggregateSortKindResolver?: AggregateSortKindResolver;
   /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
   appliedKlikes?: ReadonlySet<object>;
   /** 単一の実体化ソースが保持する出力列。0 行の単独 SELECT * にのみ使う。 */
   sourceColumns?: readonly string[];
+}
+
+function deriveOutputOrderSemantics(columns: SelectColumn[]): Map<string, ResolvedFieldSemantics> {
+  const result = new Map<string, ResolvedFieldSemantics>();
+  for (const column of columns) {
+    if (!("alias" in column) || !column.alias) continue;
+    if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      result.set(column.alias, syntheticSemantics("number"));
+    } else if (column.type === "AGGREGATE") {
+      if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+        result.set(column.alias, syntheticSemantics("number"));
+      } else if (column.func === "GROUP_CONCAT") {
+        result.set(column.alias, syntheticSemantics("string"));
+      }
+    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL") {
+      result.set(column.alias, syntheticSemantics("string"));
+    } else if (column.type === "STRFUNC_COL") {
+      result.set(column.alias, syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(column.expr.func) ? "number" : "string"));
+    }
+  }
+  return result;
 }
 
 /**
@@ -1025,12 +1015,17 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     scalarCache,
     optionOrders,
     sortKinds,
+    orderSemantics,
     fieldTypeResolver,
+    fieldSemanticsResolver,
     havingFieldTypeResolver,
+    havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes,
     sourceColumns,
   } = input;
+  const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
+  for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
 
   // 1. flatten
   let rows: ProcessRow[] = [];
@@ -1049,7 +1044,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 3. filter — JS 側 WHERE 評価
   // JOIN があれば常に適用（kintone クエリでは複数テーブルの結合条件を表現不可）
   // JOIN がなくても WHERE に関数が含まれる場合は kintone 側でフィルタできないため JS で評価
-  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes);
+  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
@@ -1058,10 +1053,10 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 5. HAVING
-  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, havingFieldSemanticsResolver);
 
   // 6. ウィンドウ関数
-  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds);
+  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds, effectiveOrderSemantics);
 
   // 7. DISTINCT
   if (stmt.distinct) {
@@ -1069,11 +1064,11 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 8. ORDER BY
-  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds);
+  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds, effectiveOrderSemantics);
 
   // 9. LIMIT / OFFSET
   rows = applyLimit(rows, stmt.limit, stmt.offset);
 
   // 10. project
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns);
+  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns, fieldSemanticsResolver);
 }
