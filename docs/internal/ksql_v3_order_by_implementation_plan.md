@@ -1,6 +1,6 @@
 # kSQL v3.0.0 比較・ORDER BY 実装計画
 
-- ステータス: **R3承認済み / Phase 0–7実装・Node検証済み / v3.0.0公開待ち**。CLI / MCP / plugin成果物は生成済み。Chromium / Firefoxの実kintone plugin smokeは未実施で、§6.4どおりrelease blockerとして残す
+- ステータス: **R3承認済み / Phase 0–7実装・Node検証・全実機smoke完了 / v3.0.0公開待ち**。CLI / MCP / Firefox / Chromiumのrelease gateはすべて通過し、**release blockerなし**
 - 対象リリース: **v3.0.0**
 - 対象課題: **B26 / B27 / B30 / B31 / B32**
 - follow-up: **B9（v3.1.0候補）**
@@ -277,6 +277,12 @@ plan kindとreason codeを表形式で固定する。
 - `SINGLE_LINE_TEXT > '100'`がGAIA_IQ03ではなくlocal契約で動く
 - kintoneが拒否する型を`KORDER BY`がAPI呼出し前に拒否する
 - CLI / MCP / Chromium / Firefoxの最低1本ずつ。ブラウザ実行環境が用意できない場合は未実施をrelease blockerとして明示し、Nodeテスト成功で代用したと書かない
+
+実施記録（2026-07-17）:
+
+- CLI / MCP: 全9項目PASS。常駐ksql MCPがPhase 7専用のJOIN曖昧列エラーを返すことも確認
+- Firefox plugin: APP4148で `EXPLAIN SELECT $id FROM APP4148 KORDER BY 会社名 ASC, $id ASC LIMIT 5` を実行し、`KORDER_NATIVE`、kintone native、single GET、`order by 会社名 asc, $id asc limit 5` を確認。実行結果の `$id` は `211, 109, 110, 111, 112`
+- Chromium（Google Chrome）plugin: APP4148でFirefoxと同じEXPLAIN・実行queryを確認。`KORDER_NATIVE`、kintone native、single GET、`order by 会社名 asc, $id asc limit 5`、実行結果 `$id = 211, 109, 110, 111, 112` がFirefoxと一致
 
 ## 7. EXPLAIN移行の注意
 
