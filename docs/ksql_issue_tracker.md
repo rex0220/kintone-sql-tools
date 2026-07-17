@@ -53,7 +53,7 @@
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 改善案（検索打ち切り検出が前提・v2.10.0 で整備済） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
 | B6 | KLIKE 外部結合 非 nullable 側の押し下げ解禁 | 改善 | 📝 改善案 | 性能 | 低 | [v2 spec](internal/ksql_klike_pushdown_v2_spec.md) |
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 改善案（プラグインは header 不可） | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
-| B9 | **最大30桁の厳密10進比較** | **バグ / 言語意味論** | 🔗 **B26とは分離した高優先度follow-up**。旧「16桁級は対象外」の保留理由を撤回。既存有限10進値のORDER BY / WHERE / HAVING / CASE / ASSERT / MIN/MAXを文字列ベースで厳密比較する。`decimalPlaces` / `roundingMode`による入力・算術結果の量子化はB29へ分離 | 正しさ | 高 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
+| B9 | **最大30桁の厳密10進比較** | **バグ / 言語意味論** | 🔗 **R5: 優先度を頻度根拠で中へ降格**（能力の事実=digits最大30桁は不変・R4の撤回ではない）。衝突は2^53=9.0e15（16桁）超のみで現実の金額・数量は届かず、`Number()`丸めは単調のため**順序逆転はなく偽の同値だけ**（衝突域の`WHERE =`誤マッチ・MIN/MAX代表値）。`$id`/`RECORD_NUMBER`はv3.0.0で厳密化済み。追加スコープ=算術由来`"1e+21"`の科学記法正規化。**再昇格トリガー=①16桁超実データでの誤動作報告②B29実装着手**（同領域・同時が安価）。制限はv3移行ガイド・横断仕様§7に明記済み。`decimalPlaces`/`roundingMode`の量子化はB29へ分離 | 正しさ | 中 | [issue](internal/ksql_exact_decimal_compare_issue.md) |
 | B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 提案（後続フェーズ） | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
 
 ---
