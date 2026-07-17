@@ -186,7 +186,9 @@ executorは`try/finally`でhandleを所有し、offset読み飛ばし、limit収
 - **新規ファイル**: 実装時に`docs/internal/evidence/b33_cursor_delete_responses.md`を作るかはreviewで決める。作る場合もID/tokenを残さない
 - **テストファイル**: `src/api/__tests__/fixtures/korderCursorPages.ts`、`src/api/__tests__/kintoneCursor.test.ts`
 
-#### Step 0-4: 公式5分timeout後の残存調査gate
+#### Step 0-4: 公式5分timeout後の残存調査gate — **実施済み（2026-07-18・再現不能・未検証のまま維持）**
+
+> **結果**（[実測記録](evidence/b33_cursor_timeout_capacity_probe.md)）: APP730（618,525 件）へ WHERE なし・複合 4 キー order by の Create でも**約 9 秒で成功**し、この環境では 5 分 timeout を再現できない。残存有無は未検証のまま quarantine 契約を維持する。**副産物として容量上限を実測確定**: 10 個目まで成功・**11 個目は `HTTP 429` + `GAIA_TM12`**（R4 制限 3 の検知に使用可・`429` でも Create 自動再試行禁止の裏付け）。
 
 これはDelete blockerと分離し、**未検証**のまま扱う。安全に隔離したtest domainで、他製品がcursorを使っていないことを確認したうえで、Claudeまたはユーザー実機が次を行う。
 
