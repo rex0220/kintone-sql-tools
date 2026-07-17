@@ -52,6 +52,13 @@ test("AND は exact leaf を上位集合prefilterとして残し、OR は全体�
     .toBe("LOCAL_ONLY");
 });
 
+test("NOT は内側の上位集合prefilterをLOCAL_ONLYへ落とす", () => {
+  const fields = { n: { fieldType: "NUMBER" }, s: { fieldType: "SINGLE_LINE_TEXT" } };
+  const result = classify("SELECT n FROM APP1 WHERE NOT (n > 1 AND s > '1')", fields);
+  expect(result.capability).toBe("LOCAL_ONLY");
+  expect(result.reasons).toEqual([{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }]);
+});
+
 test("サブテーブル内の = はnative不可、INは基底型能力を使う", () => {
   const fields = { x: { fieldType: "SINGLE_LINE_TEXT", inSubtable: true } };
   expect(classify("SELECT x FROM APP1 WHERE x = 'A'", fields).capability).toBe("LOCAL_ONLY");

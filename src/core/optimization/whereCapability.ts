@@ -102,8 +102,13 @@ function classifyNode(
       return localExpression();
     case "GROUP":
       return classifyNode(where.expr, resolveField);
-    case "NOT":
-      return classifyNode(where.expr, resolveField);
+    case "NOT": {
+      const inner = classifyNode(where.expr, resolveField);
+      // 上位集合の補集合は上位集合ではないため、NOT の外へ prefilter 能力を漏らさない。
+      return inner.capability === "SUPERSET_PREFILTER"
+        ? { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] }
+        : inner;
+    }
     case "LOGICAL": {
       const left = classifyNode(where.left, resolveField);
       const right = classifyNode(where.right, resolveField);

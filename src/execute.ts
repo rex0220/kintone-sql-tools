@@ -1254,14 +1254,14 @@ async function buildWhereFieldSemanticsResolver(
       if (!table) return undefined;
       if (table.cteName !== null) {
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
-          ?? resolveFieldSemantics({ fieldType: "KSQL_STRING" });
+          ?? syntheticSemantics("string");
       }
       return fromPhysical(table, field.field);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
         return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics
-          ?? resolveFieldSemantics({ fieldType: "KSQL_STRING" });
+          ?? syntheticSemantics("string");
       }
       return fromPhysical(stmt.from, field.field);
     }
@@ -1273,7 +1273,7 @@ async function buildWhereFieldSemanticsResolver(
     });
     if (matches.length === 1) return matches[0];
     // JOIN の非修飾同名列は既存契約どおりローカル値として評価する。
-    return matches.length > 1 ? resolveFieldSemantics({ fieldType: "KSQL_STRING" }) : undefined;
+    return matches.length > 1 ? syntheticSemantics("string") : undefined;
   };
 }
 
