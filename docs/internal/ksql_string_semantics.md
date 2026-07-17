@@ -579,6 +579,12 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
 - `resolveSelectMode` の構文判定を第一段階、schema 取得後の能力判定を第二段階とする。最終 plan は schema-aware にし、**EXPLAIN と実行が同じ planner 結果を使う**
 - FULL_SCAN では base query から ORDER BY を外し、全候補取得後にローカル sort、最後に LIMIT を適用する。取得上限・打切りは既存の明示的エラー/警告契約に従い、部分集合を top-N として黙って返さない
 - schema を取得できない場合は SIMPLE を仮定せず明示的に失敗する。system field、CALC の format、SUBTABLE 内フィールドも field code だけで判定しない
+- **`STATUS` の rank を実装する（R8.1 で追加・Blocking）。** kintone は `STATUS` を**プロセス定義順**で並べる（R8 で決定的に実測）。公式 API も各状態の **`index`** を返し **`index` 昇順が状態順**と規定している（[プロセス管理設定を取得する](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/get-process-management-settings/)）。**しかし現行コードは `index` を捨てている**:
+  - `nodeKintoneClient.ts:259` — 型に `index` を含めず `states: … map((state) => state.name)` で名前配列にする
+  - `getOptionOrderMapByApp`（`execute.ts:2627`）— フォームの `optionOrder` しか見ない
+  - `buildOptionOrdersForSelect`（`execute.ts:2707`）— `STATUS` rank が入らない
+
+  → **FULL_SCAN の `STATUS` はプロセス定義順にならない**＝原則 2 違反。**`states.*.index` を保持し、`STATUS` の `ORDER BY` が実在する場合だけ rank map へ統合する**（`optionOrders` と同じ経路）。取得は `STATUS` を並べ替えるクエリのときだけ（**v2.7.0 の STATUS 押し下げが `status.json` を条件付きで取る前例に倣う**）。**実装しない限り `STATUS` は `non_equivalent`。**
 
 **課題境界:** B26 と B27 は型メタ基盤を共有し、同じ major リリースで完了させるのが妥当だが、欠陥と受入条件が異なるため統合しない。B26 は比較意味論、B27 は計画・押し下げ同値性を所有する。
 
@@ -773,7 +779,7 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
 | **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **解消**。**29 型を測定し公式リストと 100% 一致**（§9.2.1）。受理 15 / 拒否 12 / LOOKUP は基底型。非自明: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理**・**`LOOKUP` は独立型でない** |
-| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消**。RECORD_NUMBERはアプリコードなしで実測一致したが`APPCODE-1`形式待ち。SINGLE_LINE_TEXTは値順が公式契約と一致するが空値/DESC待ち。DROP_DOWNは定義順・空値が実測一致するが未知/削除済みoption待ち。NUMBERは通常値が一致するが最大30桁を扱えないためB9完了までnon-equivalent。CREATOR/MODIFIERはcode順とnon-equivalent。**LINK・日付時刻・RADIO・STATUSは未確認** |
+| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消**。RECORD_NUMBERはアプリコードなしで実測一致したが`APPCODE-1`形式待ち。SINGLE_LINE_TEXTは値順が公式契約と一致するが空値/DESC待ち。DROP_DOWNは定義順・空値が実測一致するが未知/削除済みoption待ち。NUMBERは通常値が一致するが最大30桁を扱えないためB9完了までnon-equivalent。CREATOR/MODIFIERはcode順とnon-equivalent。**R8 追加**: LINK（URL）・DATE・DATETIME・TIME は実測一致（空値=最小・tie=`$id`昇順）で `equivalent` 候補／**LINK（TEL）は判別例が不十分で `unknown`**（`"03-"<"043-"` は数値解釈でも同じ結論）／**STATUS はサーバがプロセス定義順だがローカルが `states.*.index` を捨てており再現不能＝実装前提あり**／**RADIO は `A`/`B`/`C` で判別不能**／**CREATED_TIME・UPDATED_TIME は受理のみ確認で並び順は未測定** |
 | §9.2.1 `CREATOR`/`MODIFIER` の並び順 | **解消（公式）**。**ユーザーID 順**＝code でも name でもない。サーバは `supported` だが、現行のレコード取得と code 順ローカル契約では `non_equivalent` → §7 制限 8 |
 | §9.2.1 各受理型の方向・tie・空値位置 | **一部**。明示`$id asc`が第1キーの方向と独立に効くことを確認。残り型は非同値群反転・tie群不変・空値位置を測る |
 | §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし）。**`FILE` は測定済み＝拒否** |
@@ -956,9 +962,10 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 | サーバ受理 + 押し下げ同値性 | 型 |
 |---|---|
 | `rejected`（`GAIA_IS02`・**12 型**） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE / **FILE** / **GROUP** |
-| `supported` + **`equivalent` 候補** | **RECORD_NUMBER**（アプリコード付き`APPCODE-1`待ち）/ **SINGLE_LINE_TEXT**（空値・DESC待ち）/ **DROP_DOWN**（未知・削除済みoption待ち） |
+| `supported` + **`equivalent` 候補** | **RECORD_NUMBER**（アプリコード付き`APPCODE-1`待ち）/ **SINGLE_LINE_TEXT**（空値・DESC待ち）/ **DROP_DOWN**（未知・削除済みoption待ち）/ **LINK（URL）**（R8・空値待ち）/ **DATE** / **DATETIME** / **TIME**（R8・正規化形の順＝時系列順を実測。空値=最小・tie=`$id`昇順も確認） |
+| `supported` + **`equivalent` 候補（実装前提あり）** | **STATUS** — サーバはプロセス定義順（R8 で決定的に実測）だが、**現行コードは `states.*.index` を捨てており**（`nodeKintoneClient.ts:259`）**ローカルで再現できない**。**B27 で index の保持・rank map 統合を実装しない限り `non_equivalent`**（§R8.1） |
 | `supported` + **`non_equivalent`** | **CREATOR** / **MODIFIER** — サーバはユーザーID順、現行ローカル契約はcode順（§7 制限8）/ **NUMBER** — 通常値は一致するが最大30桁を現行`Number`比較で区別できない（B9） |
-| `supported` + **`unknown`**（一覧/RESTの順序契約を未確認） | **LINK** / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RADIO_BUTTON / STATUS（**LOOKUP は基底型に含まれる**） |
+| `supported` + **`unknown`**（一覧/RESTの順序契約を未確認） | **LINK（TEL）**（R8.1・判別例が不十分＝`"03-"<"043-"` は数値解釈でも同じ結論）/ CALC / **CREATED_TIME** / **UPDATED_TIME**（**受理のみ確認・並び順は未測定**）/ **RADIO_BUTTON**（`A`/`B`/`C` では定義順とコードポイント順が一致し判別不能）（**LOOKUP は基底型に含まれる**） |
 
 > **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、値順・空値・方向・canonical tieを含めてローカル契約と一致した型だけである。現時点の確定allowlistは空。候補を残存軸の検証前に追加しない。
 
@@ -966,18 +973,67 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 
 **方法**: `ORDER BY <field> ASC, $id ASC LIMIT 500`（≤500 ＝ 単発 GET ＝ kintone が並べる）。R7 で確定した契約どおり末尾に `$id asc` を明示した。
 
-##### 結果
+##### 結果（R8.1 で訂正）
 
-| 型 | 並び | 空値 | 同値の tie | 判定 |
-|---|---|---|---|---|
-| **SINGLE_LINE_TEXT** | **コードポイント順** | （データなし） | （同値なし） | **`equivalent` 候補**（公式契約とも一致） |
-| **LINK（URL）** | **コードポイント順** | （データなし） | （同値なし） | **`equivalent` 候補** |
-| **LINK（TEL）** | **コードポイント順**（数値順ではない） | （データなし） | **`$id` 昇順** ✓ | **`equivalent` 候補** |
-| **DATE** | 日付順（＝正規化形のコードポイント順） | **最小**（ASC 先頭） | **`$id` 昇順** ✓ | **`equivalent` 候補** |
-| **DATETIME** | 時系列順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | **`equivalent` 候補** |
-| **TIME** | 時刻順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | **`equivalent` 候補** |
-| **STATUS** | **プロセス定義順**（コードポイント順ではない） | （データなし） | **`$id` 昇順** ✓ | **`equivalent` 候補**（プロセス定義順を再現できる限り） |
-| **RADIO_BUTTON** | **判別不能**（`A`/`B`/`C` は定義順とコードポイント順が一致） | （データなし） | **`$id` 昇順** ✓ | **`unknown`** |
+> **`equivalent` は「kintone とローカルが一致する」ことである。** kintone 側の並びが分かっただけでは `equivalent` にならない。**ローカルが再現できるか**を別に確かめる必要がある。R8 初稿はこれを混同していた（§10.1.2）。
+
+| 型 | kintone 側の並び（実測） | 空値 | 同値の tie | ローカル再現 | 分類 |
+|---|---|---|---|---|---|
+| **SINGLE_LINE_TEXT** | **コードポイント順** | 未測定 | （同値なし） | 可（B26 の既定文字列順） | **`equivalent` 候補** |
+| **LINK（URL）** | **コードポイント順** | 未測定 | （同値なし） | 可（同上） | **`equivalent` 候補** |
+| **LINK（TEL）** | コードポイント順**と矛盾しない** | 未測定 | **`$id` 昇順** ✓ | 可（同上） | **`unknown`**（§下記・判別例が不十分） |
+| **DATE** | 日付順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | 可 | **`equivalent` 候補** |
+| **DATETIME** | 時系列順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | 可 | **`equivalent` 候補** |
+| **TIME** | 時刻順（＝正規化形のコードポイント順） | **最小** | **`$id` 昇順** ✓ | 可 | **`equivalent` 候補** |
+| **CREATED_TIME / UPDATED_TIME** | **未測定** | — | — | — | **`unknown`** |
+| **STATUS** | **プロセス定義順**（決定的・下記） | 未測定 | **`$id` 昇順** ✓ | **不可（現行コード）** | **`equivalent` 候補（実装前提あり）** |
+| **RADIO_BUTTON** | **判別不能**（`A`/`B`/`C` は定義順とコードポイント順が一致） | 未測定 | **`$id` 昇順** ✓ | — | **`unknown`** |
+
+**測定した日付時刻型は `DATE` / `DATETIME` / `TIME` の 3 型のみ。** R8 初稿は「日付時刻 6 型」と書いたが誤りで、`CREATED_TIME` / `UPDATED_TIME` は**受理の確認のみ**（§9.2.1）で並び順は未測定。
+
+##### ★ `STATUS` はローカルで再現できない（R8.1 で追加・**コード確定**）
+
+**kintone がプロセス定義順であることは決定的**（下記）。**公式 API も各状態の `index` を返し、`index` 昇順が状態順と規定している**（[プロセス管理設定を取得する](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/get-process-management-settings/)）。
+
+**しかし現行コードは `index` を捨てている:**
+
+```ts
+// nodeKintoneClient.ts:259 — 型に index が無く、name だけ取り出す
+const res = await requestJson<{
+  enable: boolean;
+  states: Record<string, { name: string }> | null;      // ← index を型に含めていない
+}>(`${apiBasePath}/app/status.json?${qs.toString()}`, …);
+return {
+  enable: res.enable,
+  states: Object.values(res.states ?? {}).map((state) => state.name),   // ← index を捨てる
+};
+
+// execute.ts:2627 — getOptionOrderMapByApp はフォームの optionOrder しか見ない
+for (const field of fields) { if (!field.optionOrder) continue; … }
+
+// execute.ts:2707 — buildOptionOrdersForSelect へ STATUS rank が入らない
+```
+
+> **したがって FULL_SCAN の `STATUS` はプロセス定義順にならない。** SIMPLE（kintone）とローカルで**別の順序**になる＝原則 2 違反。
+
+**B27 に追加が要る**: **`states.*.index` を保持し、`STATUS` の `ORDER BY` が実在する場合だけ rank map へ統合する**（`optionOrders` と同じ経路）。取得は `STATUS` を並べ替えるクエリのときだけ（v2.7.0 の STATUS 押し下げが `status.json` を条件付きで取る前例に倣う）。
+
+**分類は `equivalent` 候補（実装前提あり）。** 実装しない限り `non_equivalent`。
+
+##### `LINK（TEL）` の判別例は不十分（R8.1 で訂正）
+
+R8 初稿は次を「数値順ではない」の根拠とした:
+
+```
+LINK(TEL) ASC: 03-…, 043-…, 045-…, 048-…, 077-…
+```
+
+**これは反証になっていない。** `"03-"` < `"043-"` は**コードポイント順（`'3'`(0x33) < `'4'`(0x34)）でも、数値解釈（3 < 43）でも同じ結論**になる。
+
+**必要なのは順序が逆転する組**（例: `"10"` と `"2"` — コードポイント順なら `"10"` < `"2"`、数値順なら `2` < `10`）。TEL の書式制約が許すかを含めて**要実測**。
+
+**`LINK（TEL）` の分類は `unknown`。** `LINK（URL）` は §下記の `"…www.xxx.xxx.com"` < `"…www.xxxx.com"`（`'.'`(0x2E) < `'x'`(0x78)）が**数値解釈では説明できない**ため `equivalent` 候補のまま。
+
 
 ##### 根拠（コードポイント順であることの決定的な例）
 
@@ -1258,6 +1314,18 @@ CLI と MCP は同じ Node 版で一致することを確認し、プラグイ�
 **原因**: 「ソートで選択できるフィールド」のページだけを見て「公式は順序を規定していない」と一般化した。**1 ページの不在を、ドキュメント全体の不在と読み替えた。** ユーザーが別の 2 ページを提示して判明した。
 
 **教訓**: **「公式に記載が無い」と書く前に、その主題で検索したか確認する。** 1 ページに無いことは「規定が無い」ことを意味しない。**「無いことの証明」は「あることの証明」より慎重に扱う。**
+
+### 10.1.2 R8 実測時の Claude の誤り（R8.1 で判明）
+
+| Claude の記述 | 実際 |
+|---|---|
+| 「**`STATUS` は `equivalent` 候補**」 | **誤り。** kintone がプロセス定義順であることは実測したが、**ローカルが再現できるかを確かめていない**。`nodeKintoneClient.ts:259` は `states.*.index` を型にすら含めず捨てており、`getOptionOrderMapByApp`（`execute.ts:2627`）はフォームの `optionOrder` しか見ない。**FULL_SCAN の `STATUS` はプロセス定義順にならない**＝`equivalent` ではなく `non_equivalent`（実装すれば候補） |
+| 「**日付時刻 6 型**が `equivalent` 候補」 | **誤り。測定したのは `DATE` / `DATETIME` / `TIME` の 3 型のみ。** `CREATED_TIME` / `UPDATED_TIME` は §9.2.1 で**受理を確認しただけ**で並び順は未測定。**受理の確認を並び順の確認と混同した** |
+| 「`LINK（TEL）` の `"03-" < "043-"` は**数値順ではない**ことの根拠」 | **反証になっていない。** コードポイント順（`'3'`(0x33) < `'4'`(0x34)）でも数値解釈（3 < 43）でも**同じ結論**になる。順序が逆転する組（`"10"` vs `"2"` 等）が要る |
+
+**原因**: **`equivalent` の定義を取り違えた。** `equivalent` は「**kintone とローカルが一致する**」ことであり、**kintone 側の並びが分かっただけでは半分**でしかない。R4 §4.6.3 が「意味型 / ローカル契約の有無 / サーバ能力」を**3 要素に分離**したのは、まさにこの混同を防ぐためだったのに、実測では kintone 側しか見ていなかった。
+
+**教訓**: **「両者が一致するか」を確かめるときは、両者を別々に確認する。** 片側だけ測って一致を主張しない。これは R1 で犯した「比較しているつもりの 2 つが同じ経路だった」（§10.2）と同じ形である。
 
 ### 10.2 本書 R1 → R2 → R3 の誤りの記録
 
