@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - **位置づけ: 本書が文字列の扱いの「正」（single source of truth）。** 個別の仕様・課題文書は**事実を書き写さず本書を参照する**。
-- ステータス: **R5（公式ドキュメントで順序の意味論が確定。テキスト=UTF-8 文字コード順・CREATOR/MODIFIER=ユーザーID 順で再現不能）。**
+- ステータス: **R5（公式ドキュメントで順序の意味論を追加確認。SINGLE_LINE_TEXT=UTF-8文字コード順・CREATOR/MODIFIER=ユーザーID順。後者は現行レコード取得だけでは再現しない）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -237,9 +237,9 @@ kintone が返す順: '', 亜, ｱ, 😀, 𠮟
 kintone が返す順: 10, 1a, 9      ← 文字列順（'1'(0x31) < '9'(0x39)）
 ```
 
-> **kintone REST API は Unicode コードポイントの昇順で並べる。**
+> **kintone の `SINGLE_LINE_TEXT` は、有効な Unicode 文字列を Unicode コードポイントの昇順で並べる。**
 >
-> **公式契約**（[数値が意図した順番に並ばない](https://jp.kintone.help/k/ja/trouble_shooting/app_trouble/order_numbers_text_field)）: 「文字列（1行）」の値は **UTF-8 の文字コード順**。**UTF-8 バイト順 = コードポイント順**（実測 625 組で不一致 0）。
+> **公式契約**（[数値が意図した順番に並ばない](https://jp.kintone.help/k/ja/trouble_shooting/app_trouble/order_numbers_text_field)）: 「文字列（1行）」の値は **UTF-8 の文字コード順**。[Unicode Standard の Binary Sorting](https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-2/) により、**有効な UTF-8 文字列のバイト順 = コードポイント順**。実測 625 組でも不一致 0。
 > **日本語の「辞書順」ではない**（`'B'` < `'a'`。ひらがな・カタカナ・半角カナは等価にならない）。
 > **検証したテキスト値を数値とは解釈しなかった。**
 
@@ -570,8 +570,8 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
 
 #### B27 の設計
 
-- 意味型（string / number / option / complex）、ローカル ORDER BY 契約の有無、サーバ ORDER BY 能力を分離する。サーバ能力は `equivalent / unsupported / unknown` の三値とし、**ローカル契約あり + `equivalent` だけを押し下げる**
-- `equivalent` は raw REST の ASC/DESC、空値、同値・境界値を実測して kSQL comparator と一致した型の allowlist とする。**ローカル契約がある型では** `unsupported` と `unknown` を FULL_SCAN にする。新しいフィールド型を楽観的に SIMPLE にしない
+- 意味型（string / number / option / complex）、ローカル ORDER BY 契約の有無、サーバが ORDER BY を受理するか、サーバ順とローカル順が同値かを分離する。サーバ受理は `supported / rejected / unknown`、押し下げ同値性は `equivalent / non_equivalent / unknown` とする。**ローカル契約あり + supported + equivalent だけを押し下げる**
+- `equivalent` は公式契約、または raw REST の ASC/DESC、空値、同値・境界値を測って kSQL comparator と一致した型の allowlist とする。ローカル契約がある型でも `rejected / non_equivalent / unknown` は FULL_SCAN。新しいフィールド型を楽観的に SIMPLE にしない
 - ローカル契約が未定義の複合型は FULL_SCAN にせず、planning 時に `ArgumentError`。配列・オブジェクトを `String(...)` / JSON にして暗黙に並べない
 - `resolveSelectMode` の構文判定を第一段階、schema 取得後の能力判定を第二段階とする。最終 plan は schema-aware にし、**EXPLAIN と実行が同じ planner 結果を使う**
 - FULL_SCAN では base query から ORDER BY を外し、全候補取得後にローカル sort、最後に LIMIT を適用する。取得上限・打切りは既存の明示的エラー/警告契約に従い、部分集合を top-N として黙って返さない
@@ -725,13 +725,13 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 - 検知できるか: 一部不可
 - 回避策: B7 と論理アプリ対応を別課題として維持し、本書の文字列一致達成条件へ混ぜない
 
-### 制限 8: `CREATOR` / `MODIFIER` の並び順は kintone と一致させられない（R5 で追加・**公式契約に基づく**）
+### 制限 8: `CREATOR` / `MODIFIER` は現行 kSQL のローカル順を kintone と一致させない（R5 で追加・**公式契約に基づく**）
 
 - 影響する面: kintone / CLI / MCP / プラグイン
-- なぜ揃えられないか: **公式は「ユーザーID（ユーザー追加時に自動採番される数値）の昇順・降順」と規定している**（[一覧やグラフのソートで作成者・更新者を指定したときの並び順](https://jp.kintone.help/k/ja/trouble_shooting/app_qa/list_graph_sort)）。**レコードの値は `{"code":…,"name":…}` でユーザーID を含まない**ため、kSQL は再現できない。再現するには別 API（ユーザー一覧）で code → ID を解決する必要があり、追加の権限と API 消費が要る
+- なぜ揃えないか: **公式は「ユーザーID（ユーザー追加時に自動採番される数値）の昇順・降順」と規定している**（[一覧やグラフのソートで作成者・更新者を指定したときの並び順](https://jp.kintone.help/k/ja/trouble_shooting/app_qa/list_graph_sort)）。レコード値は `{"code":…,"name":…}` で ID を含まない。別の [User API](https://cybozu.dev/ja/common/docs/user-api/users/get-users/) は `id` を返すため**原理的には再現可能**だが、現行のレコード取得だけでは完結せず、別 API 呼出し・ページング・キャッシュ・退職/削除ユーザーの扱いが必要になる。User API 自体の必要アクセス権は「なし」であり、「追加権限が必要」は誤り
 - 利用者から見た現れ方: **kSQL の `ORDER BY 作成者` は kintone の一覧画面と違う順序になる**（kSQL は code 順、kintone はユーザーID 順＝アカウント作成順）
 - 検知できるか: 不可（両者とも「正しく」並んでいるため）
-- 回避策: **`CREATOR`/`MODIFIER` は押し下げず常にローカル評価**（code 順・v2.5.0 の既存契約）。**原則 2 には反しない** — 常に FULL_SCAN ならモード差は生じない。**kintone の一覧画面と並びが違うことをリファレンスに明記する**。ユーザーID 順が要る場合は、ユーザー一覧 API で ID を取得して結合する運用を案内する
+- 回避策: **`CREATOR`/`MODIFIER` は押し下げず常にローカル評価**（code 順・v2.5.0 の既存契約）。**原則 2 には反しない** — 常に FULL_SCAN ならモード差は生じない。kintone の一覧画面と並びが違うことをリファレンスに明記する。将来、User API enrichment を明示オプションとして設計できる
 
 ---
 
@@ -768,8 +768,8 @@ Node の単体テストだけではブラウザホスト差を捕捉できない
 | §9.1 LIMIT 500/501/なしで主体が分かれる | **解消**（§4.4） |
 | **§9.2 optionOrders（MULTI_SELECT / CHECK_BOX）** | **解消 — ただし想定と違う形で。** **kintone はソート自体を拒否する**（`GAIA_IS02`・§4.6.2）。合わせる相手が存在しない |
 | **§9.2.1 サーバ ORDER BY の受理/拒否（B27・Blocking）** | **解消**。**29 型を測定し公式リストと 100% 一致**（§9.2.1）。受理 15 / 拒否 12 / LOOKUP は基底型。非自明: **`MULTI_LINE_TEXT` は拒否だが `LINK` は受理**・**`CREATOR`/`MODIFIER` は受理**・**`LOOKUP` は独立型でない** |
-| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消（公式契約）**。テキスト系は「UTF-8 文字コード順」＝同値と論証可。`CREATOR`/`MODIFIER` は同値化不能と確定。**数値・日付・選択肢は公式の記載を未確認** |
-| §9.2.1 `CREATOR`/`MODIFIER` の並び順 | **解消（公式）**。**ユーザーID 順**＝code でも name でもない。**レコード値に ID が無く kSQL は再現不能** → `unsupported`・§7 制限 8 |
+| **§9.2.1 R4 comparator との同値（B27・Blocking）** | **一部解消（公式契約）**。`SINGLE_LINE_TEXT` は「UTF-8 文字コード順」＝同値と論証可。`CREATOR`/`MODIFIER` は現行 code 順と non-equivalent。**LINK・数値・日付・選択肢は一覧/RESTの順序契約を未確認** |
+| §9.2.1 `CREATOR`/`MODIFIER` の並び順 | **解消（公式）**。**ユーザーID 順**＝code でも name でもない。サーバは `supported` だが、現行のレコード取得と code 順ローカル契約では `non_equivalent` → §7 制限 8 |
 | §9.2.1 各受理型の ASC/DESC 逆順・空値位置 | **未**（`更新者` と `タイトル` で ASC/DESC が逆になることのみ確認） |
 | §9.2.1 `RICH_TEXT`/`$revision`/SUBTABLE 内/CALC format 別 | **未**（検証アプリに該当なし）。**`FILE` は測定済み＝拒否** |
 | §9.1 補助平面どうしの組（`𠮟` vs `𩸽`）・結合文字の連続 | **未**（非 Blocking） |
@@ -881,7 +881,7 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 
 **R4 レビュー時に Claude は「公式は順序の意味論を規定していない」と書いたが、誤りだった。** 別ページに記載がある。
 
-##### テキストは **UTF-8 の文字コード順**（公式）
+##### `SINGLE_LINE_TEXT` は **UTF-8 の文字コード順**（公式）
 
 [文字列（1行）フィールドの数値が意図した順番に並ばない](https://jp.kintone.help/k/ja/trouble_shooting/app_trouble/order_numbers_text_field)
 
@@ -910,11 +910,11 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 
 **これは §9.2.1 で「測定不能」としていた問いの答えである。**
 
-> **kSQL は kintone の `CREATOR`/`MODIFIER` の順序を再現できない。**
+> **現行 kSQL のレコード取得だけでは、kintone の `CREATOR`/`MODIFIER` の順序を再現できない。**
 >
-> レコードの値は `{"code":"rex0220","name":"開発太郎"}` であり、**ユーザーID を含まない**。再現するには別 API（ユーザー一覧）を叩いて code → ID を解決する必要があり、権限も増える。
+> レコードの値は `{"code":"rex0220","name":"開発太郎"}` であり、**ユーザーID を含まない**。一方、User API は `id` と `code` を返し、必要アクセス権も「なし」と公式に規定される。したがって原理的に再現可能だが、別 API・ページング・キャッシュ・削除済みユーザーの契約が必要になる。
 
-**結論**: `CREATOR` / `MODIFIER` は **`unsupported`（同値化不能）として押し下げない**。kSQL はローカルで **code 順**（v2.5.0 の既存契約）に並べる。
+**結論**: `CREATOR` / `MODIFIER` は **`supported + non_equivalent` として押し下げない**。kSQL はローカルで **code 順**（v2.5.0 の既存契約）に並べる。User API enrichment は本課題へ暗黙に追加せず、必要なら別設計とする。
 
 **原則 2 に照らして問題ない**: 常に FULL_SCAN なら**モード差は生じない**。kintone の一覧画面と並びが違うことは**制限事項として明記する**（§7・新規）。
 
@@ -922,33 +922,19 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 
 **公式契約があるため、`equivalent` の判定は観測頼みではない。**
 
-- **テキスト系**: 公式が「UTF-8 文字コード順」と規定 → R4 comparator と**同値**と論証できる
-- **`CREATOR`/`MODIFIER`**: 公式が「ユーザーID 順」と規定 → **同値化不能**と論証できる
-- **その他（数値・日付・選択肢）**: 公式の記載を未確認。**引き続き実測ゲート**
+- **`SINGLE_LINE_TEXT`**: 公式が「UTF-8 文字コード順」と規定 → R4 comparator と**同値**と論証できる。有効な Unicode scalar value の列が対象
+- **`CREATOR`/`MODIFIER`**: 公式が「ユーザーID 順」と規定 → **現行の code 順ローカル契約とは non-equivalent** と論証できる
+- **`LINK` とその他（数値・日付・選択肢）**: 一覧/RESTの順序を直接規定する公式記載を未確認。**引き続き実測ゲート**
 
 #### 判明した非自明な境界
 
 1. **`MULTI_LINE_TEXT` は拒否、`LINK` は受理。** 「テキスト系は受理」という一般化はできない。**型ごとに測る必要がある**
-2. **`CREATOR` / `MODIFIER` は受理される。** ただし kSQL は複合値（`{"code":…,"name":…}`）として扱い、v2.5.0 以降 **code で比較**する。**kintone が code と name のどちらで並べるかは未確定**（下記）
+2. **`CREATOR` / `MODIFIER` は受理され、kintone はユーザーID順。** kSQL の既存 code 順とは non-equivalent なので押し下げない（§7 制限8）
 3. **`CATEGORY` / `STATUS_ASSIGNEE` は拒否。** `STATUS` は受理
 
-#### `CREATOR` / `MODIFIER` のソートキーが未確定（**gate 継続**）
+#### `CREATOR` / `MODIFIER` の旧 code/name 実測
 
-検証データが判定に不足していた:
-
-```
-更新者 ASC  → Alex2013 / レックス
-更新者 DESC → rex0220 / 開発太郎
-```
-
-- **code 順**: `Alex2013`(0x41…) < `rex0220`(0x72…) → `Alex2013` が先
-- **name 順**: `レックス`(U+30EC…) < `開発太郎`(U+958B…) → `レックス` が先
-
-**両方とも同じ答えになるため切り分けられない。** ASC / DESC が逆順であることは確認できた。
-
-**必要な追加データ**: code の順と name の順が**逆になる**ユーザーの組（例: code `a-user` / name `ヤマダ` と code `z-user` / name `アオキ`）。**検証環境にユーザーを追加できる場合のみ測定可能。**
-
-**それまで `CREATOR` / `MODIFIER` は `unknown` として押し下げない。**
+既存2ユーザーでは code順とname順が同じ答えになり、観測だけでは切り分けられなかった。しかし公式契約がユーザーID順と確定したため、ユーザー追加による code/name 切り分けは不要になった。
 
 #### `DROP_DOWN` の空値位置（実測）
 
@@ -958,24 +944,88 @@ ORDER BY 顧客名   ASC LIMIT 1 → ✅ 受理
 
 **空（未選択）が先頭。** 選択肢の定義順が `d1` → `d2` かは未確認（フォーム定義との突き合わせが要る）。
 
+公式の[グラフにおける選択式フィールドの並び順](https://jp.kintone.help/k/ja/trouble_shooting/app_qa/graph_sort_selection_fields.html)は、グラフの分類値を option 設定順に並べると規定する。ただし**一覧/RESTの ORDER BY を規定するページではない**ため、DROP_DOWN / RADIO_BUTTON の強い仮説にはなるが、B27 の `equivalent` 根拠には単独で使わない。
+
 #### 分類（§4.6.3 の三要素）
 
-| サーバ能力 | 型 |
+| サーバ受理 + 押し下げ同値性 | 型 |
 |---|---|
-| `unsupported`（`GAIA_IS02`・**12 型**） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE / **FILE** / **GROUP** |
-| **`equivalent` 候補**（公式が「UTF-8 文字コード順」と規定＝R4 comparator と同値と論証できる） | **SINGLE_LINE_TEXT** / **LINK**（要: 空値位置・DESC の確認） |
-| **`unsupported`（同値化不能）** | **CREATOR** / **MODIFIER** — 公式は**ユーザーID 順**。レコード値に ID が無く再現不能（§7 制限 8） |
-| **`unknown`**（公式の記載を未確認） | NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS（**LOOKUP は基底型に含まれる**） |
-| `equivalent` | **現時点でゼロ。** §4.1 でコードポイント順が一致したのは SINGLE_LINE_TEXT のみだが、**空値位置・DESC・全型の網羅は未完** |
+| `rejected`（`GAIA_IS02`・**12 型**） | MULTI_LINE_TEXT / MULTI_SELECT / CHECK_BOX / USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE / CATEGORY / REFERENCE_TABLE / SUBTABLE / **FILE** / **GROUP** |
+| `supported` + **`equivalent` 候補**（値同士の順序は公式契約で一致） | **SINGLE_LINE_TEXT**（未確定軸: 空値位置・DESC） |
+| `supported` + **`non_equivalent`** | **CREATOR** / **MODIFIER** — サーバはユーザーID順、現行ローカル契約はcode順（§7 制限8） |
+| `supported` + **`unknown`**（一覧/RESTの順序契約を未確認） | **LINK** / NUMBER / CALC / DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME / RECORD_NUMBER / DROP_DOWN / RADIO_BUTTON / STATUS（**LOOKUP は基底型に含まれる**） |
 
-> **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、**サーバ順が R4 comparator と同値**と確認できた型だけである（§4.6.3）。**現時点で押し下げ可と言える型は無い。**
+> **受理されることは `equivalent` の証拠ではない。** 押し下げてよいのは、**サーバ順が R4 comparator と同値**と確認できた型だけである（§4.6.3）。SINGLE_LINE_TEXT も空値位置と DESC を通すまでは候補であり、**確定した allowlist は現時点で空**である。
+
+#### R6 実測: 同値性の判定（Claude・2026-07-17）
+
+##### ★ 発見 1: **同値の tie-break は `$id` 降順で、`DESC` でも反転しない**
+
+**全型に効く。R4/R5 のどの節にも書かれていなかった。**
+
+```
+金額(NUMBER) ASC : '',''  ,'','' | -5 | -1 | -0.001 | 0, 0 | 0.5 | 1 | 2 | 10 | 1000 | 3000, 3000 | 5000
+                   $id: 61,60,59,1        63,2            7,6
+金額(NUMBER) DESC: 5000 | 3000, 3000 | 1000 | 10 | 2 | 1 | 0.5 | 0, 0 | -0.001 | -1 | -5 | '','','',''
+                         7,6                              63,2                        61,60,59,1
+
+業種(DROP_DOWN) ASC : 製造業(8,5) | 不動産業(3) | 運輸・通信業(6,4,2,1) | 金融業(7)
+業種(DROP_DOWN) DESC: 金融業(7) | 運輸・通信業(6,4,2,1) | 不動産業(3) | 製造業(8,5)
+```
+
+**同値グループ内は ASC でも DESC でも `$id` の降順で固定**（`61,60,59,1` / `63,2` / `7,6` / `8,5` / `6,4,2,1` がすべて ASC・DESC で同一）。
+
+**公式仕様と整合する**: [クエリの記述方法](https://cybozu.dev/ja/kintone/docs/overview/query/) の `order by` 説明に「**省略すると、レコードIDの降順で並び替えされます**」とあり、これが **`order by` 指定時の同値の tie-break としても効いている**と見える（公式に明記はない＝**推論**）。
+
+> **`equivalent` の判定には tie-break も含めなければならない。**
+
+kSQL の FULL_SCAN は `order by $id asc` を注入して取得し（`selectToKintone.ts:130`）安定ソートするため、**同値は `$id` 昇順**になる。**kintone は `$id` 降順**。→ **同値がある限り SIMPLE と FULL_SCAN は一致しない。**
+
+**B27 の設計に反映が要る**: ローカル comparator の最終 tie-break を **`$id` 降順**にするか、押し下げ時に `order by <field> <dir>, $id desc` を明示的に付ける。
+
+##### ★ 発見 2: **`DROP_DOWN` は選択肢の定義順で並ぶ**（値のコードポイント順ではない）
+
+```
+業種 ASC: 製造業, 不動産業, 運輸・通信業, 金融業
+符号位置: 製 U+88FD / 不 U+4E0D / 運 U+904B / 金 U+91D1
+コードポイント順なら: 不動産業(0x4E0D), 製造業(0x88FD), 運輸・通信業(0x904B), 金融業(0x91D1)
+→ 一致しない。定義順で並んでいる。
+```
+
+**kSQL の `optionOrders`（v2.6.0）が正しいことの裏付け。** `DROP_DOWN` の `equivalent` 判定は「定義順 rank が一致するか」で行う。
+
+**グラフについては公式ページがある**（[グラフの分類項目に選択肢のフィールドを指定したときの並び順](https://jp.kintone.help/k/ja/trouble_shooting/app_qa/graph_sort_selection_fields.html)）が、**REST の `order by` については規定が無い**。本実測は**観測**であり契約ではない。
+
+##### 型ごとの結果
+
+| 型 | 受理 | 並び | 空値 | ASC/DESC | 同値性 |
+|---|---|---|---|---|---|
+| **RECORD_NUMBER** | supported | **数値順**（`8 < 59`。文字列順なら `"59" < "8"`） | — | 厳密に逆順（同値なし） | **`equivalent`**（tie-break を除く） |
+| **NUMBER** | supported | **数値順**（`2 < 10`・負数・小数とも） | **最小**（ASC 先頭 / DESC 末尾）＝ **v2.2.0 の −∞ 規則と一致** | 非同値部分は逆順・**同値は不変** | **`equivalent`**（tie-break を除く） |
+| **DROP_DOWN** | supported | **選択肢の定義順** | **最小**（ASC 先頭） | 群は逆順・**同値は不変** | **`equivalent`**（`optionOrders` が定義順を再現できる限り。tie-break を除く） |
+
+##### 測定できなかったもの
+
+| 項目 | 理由 |
+|---|---|
+| **16 桁超の NUMBER** | **kintone が受け付けない**。`CB_VA01:「有効桁数を超えています」`（`12345678901234567` で発生）→ **B9 の「16 桁級」は kintone へ保存できない値であり、`ORDER BY` の同値性の論点にならない可能性がある。B9 のスコープを要再検討** |
+| `DROP_DOWN` / `RADIO_BUTTON` の「語彙順と逆になる設定順」 | フォーム定義の変更が要る（kSQL に form API は無い）。**`業種` が偶然それを満たしていた**ため定義順であることは確認できた |
+| `STATUS` の「表示文字列順と逆になるプロセス設定順」 | 同上（プロセス管理設定の変更が要る） |
+
+##### 副次的な発見: `INSERT` の `VALUES` が負数リテラルを受け付けない
+
+```
+INSERT INTO APP4221 (…, 金額) VALUES (…, -5)
+→ ParseError: INSERT の値には文字列・数値・配列リテラル・CASE WHEN が必要です（位置 340、トークン: 「-」）
+```
+
+**B15（`IN` の負数リテラル・v2.14.1）と同型の未対応。** `'-5'`（文字列）なら通る。**本仕様の対象外だが起票の価値がある。**
 
 #### 残る実測（Blocking）
 
 - 各受理型で **ASC / DESC が厳密に逆順**か
 - 各受理型で **空値の位置**（先頭 / 末尾）
 - 各受理型で **R4 comparator と同値**か（`$id` を second key にして tie を固定し、全順列で確認）
-- `CREATOR` / `MODIFIER` の **code / name** 切り分け（要ユーザー追加）
 - `RICH_TEXT` / `FILE` / `$revision` / SUBTABLE 内フィールド / CALC の format 別
 
 **残り（非 Blocking・取る価値あり）**: `𠮟` vs `𩸽`（補助平面どうし）・結合文字の連続・文字列 ASC/DESC の厳密な逆順。
@@ -1012,9 +1062,9 @@ CLI と MCP は同じ Node 版で一致することを確認し、プラグイ�
 
 | Claude の記述 | 実際 |
 |---|---|
-| 「**公式は順序の意味論を規定していない**。§4.1 のコードポイント順は観測であって契約ではない」 | **誤り。** 別ページに規定がある。テキストは **UTF-8 の文字コード順**（公式の例: `1, 10, 11, 2, 3`）。**UTF-8 バイト順 = コードポイント順**（実測 625 組で不一致 0）→ **R4 の設計は公式契約に裏付けられる** |
-| 「`CREATOR`/`MODIFIER` の code/name は測定不能」 | **測定不能ではなく、公式に書いてあった。** しかも答えは**どちらでもなく「ユーザーID 順」**。**レコード値に ID が無いため再現不能**（§7 制限 8） |
-| 「`equivalent` の判定は本質的に脆い（公式契約が無いため観測を固定し続ける必要がある）」 | **前提が誤り。** 公式契約があるため論証できる |
+| 「**公式は順序の意味論を規定していない**。§4.1 のコードポイント順は観測であって契約ではない」 | **SINGLE_LINE_TEXT について誤り。** 別ページに **UTF-8 の文字コード順**との規定がある（公式の例: `1, 10, 11, 2, 3`）。有効な Unicode 文字列では **UTF-8 バイト順 = コードポイント順**（実測 625 組で不一致 0）→ この型の R4 設計は公式契約に裏付けられる。**LINK や他型へは一般化しない** |
+| 「`CREATOR`/`MODIFIER` の code/name は測定不能」 | **code/name の二択自体が誤り。** 公式契約は**ユーザーID 順**。現行のレコード値だけでは ID を得られないが、User API による再現は原理的に可能。現行 code 順とは `non_equivalent`（§7 制限 8） |
+| 「`equivalent` の判定は本質的に脆い（公式契約が無いため観測を固定し続ける必要がある）」 | **SINGLE_LINE_TEXT と CREATOR/MODIFIER について前提が誤り。** 公式契約から equivalent / non_equivalent を論証できる。他型は未確認のまま |
 
 **原因**: 「ソートで選択できるフィールド」のページだけを見て「公式は順序を規定していない」と一般化した。**1 ページの不在を、ドキュメント全体の不在と読み替えた。** ユーザーが別の 2 ページを提示して判明した。
 
