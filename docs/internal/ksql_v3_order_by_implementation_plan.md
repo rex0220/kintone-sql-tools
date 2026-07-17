@@ -1,6 +1,6 @@
 # kSQL v3.0.0 比較・ORDER BY 実装計画
 
-- ステータス: **R3承認済み / Phase 0–7実装・Node検証・全実機smoke完了 / v3.0.0公開待ち**。CLI / MCP / Firefox / Chromiumのrelease gateはすべて通過し、**release blockerなし**
+- ステータス: **R3承認済み / Phase 0–7実装・Node検証・全実機smoke完了 / v3.0.0 公開済み（2026-07-17）**。CLI / MCP / Firefox / Chromiumのrelease gateはすべて通過し、**release blockerなし**
 - 対象リリース: **v3.0.0**
 - 対象課題: **B26 / B27 / B30 / B31 / B32**
 - follow-up: **B9（v3.1.0候補）**
