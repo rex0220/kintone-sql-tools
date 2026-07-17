@@ -1,9 +1,9 @@
-# B33: `KORDER BY` 大規模窓の Cursor API 対応（設計案 R3）
+# B33: `KORDER BY` 大規模窓の Cursor API 対応（設計案 R4）
 
 ## 0. ステータス
 
-- 種別: 設計案（未実装）
-- 対象バージョン: v3.1.0以降のminor候補（B9のリリース計画と調整する）
+- 種別: 設計案（未実装）。**R4（2026-07-18）: 実装前 blocker だった Delete 実応答を実機実測し §14.4 / §17 へ反映**（明示 Delete 済み・自動削除済みの 2 経路とも `HTTP 404` + `GAIA_CN01` で完全同一・[実測記録](evidence/b33_cursor_delete_responses.md)）
+- 対象バージョン: v3.1.0のminor候補（B9のリリース計画と調整する）
 - 対象: 単発Records APIで完結しない `KORDER BY` の結果窓
 - 非対象: 通常の `ORDER BY`、FULL_SCAN、JOIN、DML、一時テーブルの取得方式変更
 
@@ -228,7 +228,7 @@ Cursor APIが返す順序をそのまま結果順とする。ローカル再ソ�
 | 項目 | kintone公式契約 | kSQL R3 |
 |---|---|---|
 | 1回の取得件数 | `size` 最大500、既定100 | 500固定 |
-| 有効カーソル | 1ドメイン最大10個 | kSQLは既定2、設定しても最大5 |
+| 有効カーソル | 1ドメイン最大10個（**実測確認済み・R4**: 10個目まで成功・11個目は `HTTP 429`+`GAIA_TM12`・[実測記録](evidence/b33_cursor_timeout_capacity_probe.md)） | kSQLは既定2、設定しても最大5 |
 | Add Cursorの並行性 | 同一ドメインで並行作成要求があると、後続要求はサーバー側で待機 | host単位mutexでクライアント側から直列化 |
 | 有効期限 | 作成から10分。残件取得時に10分延長 | 停止せず逐次取得。期限切れは明示エラー |
 | 解放 | 全件取得、削除、期限切れ | 全件取得以外は必ず明示削除 |
@@ -383,7 +383,7 @@ LIMIT 10001;
 
 - 影響する面: 同一ドメインの全利用者
 - 現れ方: kSQL内部上限以下でもCreate Cursorが失敗し得る
-- 検知: Create Cursor APIエラーとして検知
+- 検知: Create Cursor APIエラーとして検知（**実測・R4**: `HTTP 429` + `code: GAIA_TM12`「作成できるカーソルの上限に達しているため…」）。kSQL内部のpermit不足（API前の`CursorCapacityError`）とは診断を区別できる。`429`だが自動再試行は§10のとおり禁止
 - 回避策: 並列ジョブを減らし、時間を置いて再実行する
 
 ### 制限4: Create応答喪失時は即時削除できない
@@ -477,7 +477,17 @@ ordering: kintone native
 
 Nodeテストだけでブラウザのcleanup保証を代用してはならない。
 
-Deleteの二重実行と自動削除後Deleteの応答は、実装前のblockerである。その結果を得るまで、特定のHTTP statusやkintone error codeを「既に解放済み」の契約へ書かない。複数ページの順序・同値安定性はB33のrelease blockerとする。
+**Deleteの二重実行と自動削除後Deleteの応答は実測済み（R4・2026-07-18・[実測記録](evidence/b33_cursor_delete_responses.md)）。** 2 経路とも完全に同一の応答であり、別 fixture に分ける必要はない:
+
+```text
+明示 Delete 済みへの再 Delete      → HTTP 404  {"code":"GAIA_CN01","id":"…","message":"指定したカーソルは存在しないか、既に有効期限が切れています。"}
+自動削除（next=false）後の Delete → HTTP 404  同一 code・同一 message・同一 body 形状 {code,id,message}
+Delete 成功（1回目）              → HTTP 200  {}
+```
+
+**「既解放」契約: `HTTP 404` かつ `code === "GAIA_CN01"` のペアに限り解放済みとして成功扱いにできる。** このペア以外（404 の別 code・GAIA_CN01 の別 status・5xx・ネットワークエラー）は既解放と推定せず quarantine へ送る。なお `GAIA_CN01` は「存在しない」と「期限切れ」を区別しないが、cleanup の目的はサーバー上に資源が無いことの確認であり、不存在の理由の特定ではないため、どちらも解放済み扱いで安全である。実測は password 認証・guest space なしの 1 経路で行った。guest space・API トークン経路で差が疑われる場合は実装時に追測する。
+
+複数ページの順序・同値安定性はB33のrelease blockerとする。
 
 ## 15. 実装フェーズ
 
@@ -541,8 +551,8 @@ Deleteの二重実行と自動削除後Deleteの応答は、実装前のblocker�
 
 次は未確定であり、実装前に決める。
 
-- Delete済み／自動削除済みIDへDeleteしたときの実応答
-- 公式5分timeout後に有効カーソルが残る可能性の有無
+- ~~Delete済み／自動削除済みIDへDeleteしたときの実応答~~ → **R4 で実測済み**（`404` + `GAIA_CN01`・2 経路同一・§14.4）
+- 公式5分timeout後に有効カーソルが残る可能性の有無 — **未検証のまま（R4 で再現試行済み・再現不能）**: 618,525 件＋複合 4 キー order by の Create でも約 9 秒で成功（[実測記録](evidence/b33_cursor_timeout_capacity_probe.md)）。quarantine 契約を維持し、再開条件＝より大規模な環境での再試行または公式回答
 - `KORDER_CURSOR` をB9と同じv3.1.0へ含めるか、別minorへ分けるか
 - cursor permit待機時間
 - cleanup timeout、DELETE再確認回数、quarantineの安全余裕
