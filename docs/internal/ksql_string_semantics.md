@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - **位置づけ: 本書が文字列の扱いの「正」（single source of truth）。** 個別の仕様・課題文書は**事実を書き写さず本書を参照する**。
-- ステータス: **R8.1（B27 の tie-break 契約を確定。SIMPLE は利用者キー末尾へ `$id asc` を明示して FULL_SCAN の安定順へ合わせ、peer 比較器とは分離する。B9 は最大30桁の厳密比較、精度依存の検証・丸めは B29 へ分離。R8.1 で `STATUS` を `equivalent 候補（実装前提あり）` へ訂正＝`states.*.index` を捨てているためローカルが定義順を再現できない。LINK(TEL)・CREATED_TIME/UPDATED_TIME を unknown へ差し戻し）。**
+- ステータス: **R8.1（B27 の tie-break 契約を確定。SIMPLE は利用者キー末尾へ `$id asc` を明示して FULL_SCAN の安定順へ合わせ、peer 比較器とは分離する。B9 は最大30桁の厳密比較、精度依存の検証・丸めは B29 へ分離。R8.1 で `STATUS` を `equivalent 候補（実装前提あり）` へ訂正＝`states.*.index` を捨てているためローカルが定義順を再現できない。LINK(TEL)・CREATED_TIME/UPDATED_TIME を unknown へ差し戻し。R8.2 で `status.json` を実測＝`index` は**文字列**・`enable: false` でも `states` は返る）。**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
@@ -585,6 +585,35 @@ EXPLAIN SELECT $id FROM APP4221 ORDER BY チェックボックス ASC LIMIT 5
   - `buildOptionOrdersForSelect`（`execute.ts:2707`）— `STATUS` rank が入らない
 
   → **FULL_SCAN の `STATUS` はプロセス定義順にならない**＝原則 2 違反。**`states.*.index` を保持し、`STATUS` の `ORDER BY` が実在する場合だけ rank map へ統合する**（`optionOrders` と同じ経路）。取得は `STATUS` を並べ替えるクエリのときだけ（**v2.7.0 の STATUS 押し下げが `status.json` を条件付きで取る前例に倣う**）。**実装しない限り `STATUS` は `non_equivalent`。**
+
+##### R8.2 実測: `status.json` の実レスポンス（Claude・2026-07-17・kintone MCP + 公式ドキュメント）
+
+**dev 環境の実 API と公式ドキュメントの両方で確認した。実装を確定できる。**
+
+**★ `index` は文字列である。数値としてパースすること。**
+
+```
+APP4221 (enable: true)   未処理 index:"0" / 処理中 "1" / 完了 "2" / 保留 "3"
+公式: states.<ステータス名>.index | 文字列 | ステータスの順番。値は 0 から始まり、昇順で並べ替えられます。
+```
+
+型が**文字列**（`"0"` であって `0` ではない）と公式に明記されている。**辞書順のまま rank に使わない** — 状態数が 2 桁に届けば `"10" < "2"` で順序が壊れる。状態数の上限は未確認だが、文字列を辞書順で使う理由はどのみち無い。`Number(index)` で整数化し、`optionOrder`（フォーム側）と同じ数値 rank へ正規化する。
+
+**★ R8 の実測順は `index` 昇順と完全に一致した。**
+
+R8 で観測した `STATUS ASC: 未処理, 処理中, 完了, 保留` は、APP4221 の `index` 0 / 1 / 2 / 3 とそのまま一致する。**kintone 側の「プロセス定義順」＝ `index` 昇順**が、観測と API 定義という独立した 2 つの根拠で確定した（R8.1 で欠けていたのはローカル側であり、kintone 側ではない）。
+
+**★ `enable: false` でも `states` は返る。`enable` を見ないと誤った rank を作る。**
+
+```
+APP4148 (enable: false)  未処理 "0" / 処理中 "1" / 追加確認中 "2" / 完了 "3"   ← states は非 null
+```
+
+プロセス管理が**無効**なアプリでも、過去の設定が `states` に残る。**`states` の非 null を有効性の判定に使わない。** 公式は「プロセス管理を**一度も設定していない**アプリの場合は `null`」と規定しており、**`null` と `enable: false` は別の状態**。両方を扱う。
+
+**★ 追加の権限は要らない（v2.7.0 の前例が成立する裏付け）。**
+
+必要なアクセス権は「アプリのレコード**閲覧**権限」または「レコード**追加**権限」。**レコードを読めるユーザーは常に `status.json` を読める**ため、条件付き取得を足しても新たな権限エラー経路は生まれない。
 
 **課題境界:** B26 と B27 は型メタ基盤を共有し、同じ major リリースで完了させるのが妥当だが、欠陥と受入条件が異なるため統合しない。B26 は比較意味論、B27 は計画・押し下げ同値性を所有する。
 
