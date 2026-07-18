@@ -2,7 +2,7 @@
 
 ## 0. ステータス
 
-- 種別: 設計案（未実装）。**R4（2026-07-18）: 実装前 blocker だった Delete 実応答を実機実測し §14.4 / §17 へ反映**（明示 Delete 済み・自動削除済みの 2 経路とも `HTTP 404` + `GAIA_CN01` で完全同一・[実測記録](evidence/b33_cursor_delete_responses.md)）
+- 種別: 設計確定・実装中。**R4（2026-07-18）: 実装前 blocker だった Delete 実応答を実機実測し §14.4 / §17 へ反映**（明示 Delete 済み・自動削除済みの 2 経路とも `HTTP 404` + `GAIA_CN01` で完全同一・[実測記録](evidence/b33_cursor_delete_responses.md)）。同日、planner/executor・client lifecycle・lease/cleanup・各surface設定まで実装し、ローカルtest/build/MCP検証を通過。**複数ページ順序release blockerはAPP730のCLI/MCP実機smoke 7/7完全一致で解消**（[実測記録](evidence/b33_cli_mcp_smoke.md)）。残るrelease blockerはplugin実機確認
 - 対象バージョン: v3.1.0のminor候補（B9のリリース計画と調整する）
 - 対象: 単発Records APIで完結しない `KORDER BY` の結果窓
 - 非対象: 通常の `ORDER BY`、FULL_SCAN、JOIN、DML、一時テーブルの取得方式変更
@@ -393,12 +393,13 @@ LIMIT 10001;
 - 検知: 結果不明エラーとして検知できるが、作成成否は確定不能
 - 回避策: Createを自動再試行しない
 
-### 制限5: Cursorの複数ページ順序は公式明文だけでは確定していない
+### 制限5: Cursorの複数ページ順序は公式明文だけでは確定していない（APP730実機gateは通過）
 
 - 影響する面: CLI / MCP / プラグイン
 - 現れ方: `order by` を指定したCursorのページ連結順が、仕様上のKORDER結果順を維持するかは実測前には保証しない
 - 理由: 公式は同じCursorで「続き」を取得すると説明し、Create例に `order by` があるが、同値群を含む複数ページの順序保証を明記していないため
-- 回避策: 500件境界に同値群を置く実機gateを通過するまでB33を出荷しない。決定的順序が必要な利用者には `$id` の明示的な最終キーを案内する
+- 実測: APP730（618,525件）で10,001件・21ページ、500件境界をまたぐ同値群のASC/DESC・`$id`有無、LIMIT 501、OFFSET 700をraw Cursor APIと照合し7/7完全一致（[証跡](evidence/b33_cli_mcp_smoke.md)）
+- 回避策: 公式保証ではないため、決定的順序が必要な利用者には引き続き`$id`の明示的な最終キーを案内する
 
 ## 13. EXPLAIN・診断
 
@@ -485,9 +486,9 @@ Nodeテストだけでブラウザのcleanup保証を代用してはならない
 Delete 成功（1回目）              → HTTP 200  {}
 ```
 
-**「既解放」契約: `HTTP 404` かつ `code === "GAIA_CN01"` のペアに限り解放済みとして成功扱いにできる。** このペア以外（404 の別 code・GAIA_CN01 の別 status・5xx・ネットワークエラー）は既解放と推定せず quarantine へ送る。なお `GAIA_CN01` は「存在しない」と「期限切れ」を区別しないが、cleanup の目的はサーバー上に資源が無いことの確認であり、不存在の理由の特定ではないため、どちらも解放済み扱いで安全である。実測は password 認証・guest space なしの 1 経路で行った。guest space・API トークン経路で差が疑われる場合は実装時に追測する。
+**「既解放」契約: HTTP statusを観測できるNode面では、`HTTP 404` かつ `code === "GAIA_CN01"` のペアに限り解放済みとして成功扱いにできる。** このペア以外（404 の別 code・GAIA_CN01 の別 status・5xx・ネットワークエラー）は既解放と推定せず quarantine へ送る。pluginの`kintone.api()` rejectはHTTP statusを公開しないため、plugin面に限り`code === "GAIA_CN01"`かつstatus不在も既解放扱いにする。statusが存在する場合はNode面と同じ404とのペアを要求する。なお `GAIA_CN01` は「存在しない」と「期限切れ」を区別しないが、cleanup の目的はサーバー上に資源が無いことの確認であり、不存在の理由の特定ではないため、どちらも解放済み扱いで安全である。HTTP実測はpassword認証・guest spaceなしの1経路で行った。pluginの実reject形状はChromium/Firefox smokeで二重DELETEを行い確認する。
 
-複数ページの順序・同値安定性はB33のrelease blockerとする。
+複数ページの順序・同値安定性は、APP730のCLI/MCP実機smoke 7/7完全一致によりB33のrelease blockerを解消した（[証跡](evidence/b33_cli_mcp_smoke.md)）。
 
 ## 15. 実装フェーズ
 

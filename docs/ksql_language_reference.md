@@ -1072,11 +1072,10 @@ LIMIT 20
 - 利用者へ結果を返すトップレベルSELECT、単一の物理アプリ、JOIN／CTE／temp／UNION／集約／WINDOWなし
 - **非修飾の**直接物理フィールドまたは`$id`だけをキーにする。SELECT alias、`t.金額`のような表修飾、関数、算術式は未対応
 - WHERE全体をkintoneへ同値に押し下げられ、SQL `LIKE`／`KLIKE`を含まない
-- `LIMIT 0..500`を明示し、実行時`maxRecords`以下にする
-- `OFFSET`は省略または`0..10000`
+- `LIMIT`を明示し、`LIMIT`・`OFFSET`・`OFFSET + LIMIT`がすべて0以上の安全な整数である
 - 型は`$id`、RECORD_NUMBER、SINGLE_LINE_TEXT、NUMBER、CALC、DATE、DATETIME、TIME、CREATED_TIME、UPDATED_TIME、DROP_DOWN、RADIO_BUTTON、STATUS、LINK、CREATOR、MODIFIERの明示allowlist内
 
-`LIMIT 1..500`は指定したORDER/LIMIT/OFFSETを単発GETへそのまま送ります。`LIMIT 0`も型・WHERE・query形状を完全検査した後、records APIを呼ばず空結果を返します。同値群の決定性が必要なら、最後のキーとして`$id ASC`等を明示してください。
+`LIMIT ≤ 500`・`OFFSET ≤ 10000`・`LIMIT ≤ maxRecords`なら、指定したORDER/LIMIT/OFFSETを単発GETへそのまま送ります。`LIMIT 0`も型・WHERE・query形状を完全検査した後、records APIを呼ばず空結果を返します。同値群の決定性が必要なら、最後のキーとして`$id ASC`等を明示してください。
 
 #### 大きい窓と Cursor API（v3.1.0）
 
@@ -1106,6 +1105,8 @@ LIMIT 10001
 > - **有効期限は作成から 10 分**（残件取得で延長）。全件取得または明示削除で解放されます。kSQL は必要な窓へ到達した時点でカーソルを即時削除しますが、異常終了時は最大 10 分程度、ドメインの枠を 1 つ占有する可能性があります
 > - **取得は 500 件ずつ**の逐次ページで、kintone が返した順序をそのまま結果にします（ローカル再ソート・`$id` の自動追補なし）。同値群の決定性が必要なら単発GETと同様に `$id` を最後のキーへ明示してください
 > - **カーソルの作成・取得は自動再試行しません**。応答喪失時に再試行すると、孤児カーソル（作成）やページ欠落（取得）が起き得るためです。作成タイムアウト時はクエリの絞り込み・単純化を案内するエラーになります
+
+同時カーソル上限はCLIの`--cursor-max-active`、環境変数`KSQL_CURSOR_MAX_ACTIVE`、profileの`query.cursorMaxActive`、MCP入力`cursorMaxActive`、pluginの取得オプションで1..5へ設定できます。既定は2です。同一process・同一hostで後から変更した場合も次の取得から反映されます。上限を下げても既存Cursorは強制終了せず、active数が新上限を下回るまで新規作成を待機させます。
 
 `KORDER`は予約語です。同名フィールドは`` `KORDER` ``と記述します。
 
@@ -1196,7 +1197,7 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 |---|---:|---|
 | エンジンAPIを直接利用 | 10,000件 | `ExecuteOptions.maxRecords` |
 | CLI | 500件 | `--max-records`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
-| MCP | 500件 | tool入力`maxRecords`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
+| MCP | 500件 | `ksql_query`・`ksql_explain`等のtool入力`maxRecords`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
 | プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
 
 値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。

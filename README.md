@@ -167,6 +167,7 @@ Options:
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
                              (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --cursor-max-active <n>    Max active cursors per host: 1-5 (default: 2; KSQL_CURSOR_MAX_ACTIVE wins)
   --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
   --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
   --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)

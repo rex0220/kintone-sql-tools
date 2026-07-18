@@ -31,7 +31,7 @@ v3.1.0では、単発Records APIで完結しないトップレベル`KORDER BY`�
 |---|---|
 | **コード確定** | 現在の実装、型、呼出し経路をgrepとコード読解で確認した事項。§3に限定して記す |
 | **設計決定案** | kSQL v3.1.0が採る実装値・公開設定・cleanup方針。§4でレビュー対象として明示する |
-| **未検証** | Delete済みID、自動削除済みID、公式5分timeout後の残存、複数ページ順序、ブラウザ離脱cleanup。観測前に成功statusやerror codeを仮定しない |
+| **未検証** | 公式5分timeout後の残存、ブラウザ離脱cleanup。Delete済みID・自動削除済みID・複数ページ順序は2026-07-18実測済み。観測前に成功statusやerror codeを仮定しない |
 
 実測によりR3の横断事実が変わる場合は、先にR3へ反映する。本計画だけに新しい一般契約を閉じ込めない。
 
@@ -352,6 +352,7 @@ executorは`try/finally`でhandleを所有し、offset読み飛ばし、limit収
 - Claudeまたはユーザー実機がCLI / MCP / Chromium / Firefoxを実施する
 - 10,001件以上の順序、1,501件以上で500件境界へ同値群を置くfixture、`$id`二次キー有無×ASC/DESC、早期DELETE直後の再Createを確認する
 - pluginでは通常完了、実行中cancel、ページ離脱、cleanup warning表示をChromium/Firefox別々に確認する
+- pluginコンソールから二重DELETEを行い、`kintone.api()` rejectのcodeとHTTP status可視性を確認する
 - **変更ファイル**: 実測で契約差が判明した場合は先にR3へ指摘し、黙って実装だけを合わせない
 - **新規ファイル**: redact済みsmoke記録（release手順に従う）
 - **テストファイル**: Node代用なし。実機release gate
@@ -408,6 +409,8 @@ R3 §14.3を`cursorLeaseManager.test.ts`、`runtime.test.ts`、`executeBatch.tes
 | 500件境界の同値群 | Claude/ユーザー、4 surface | mockはkintone固有tieを再現した前提に過ぎない |
 | pagehide/beforeunload cleanup | Claude/ユーザー、Chromium/Firefox | Node/JSDOMは実ブラウザのunload/network打切りを再現しない |
 | plugin warning/error表示 | Claude/ユーザー、Chromium/Firefox | 実`kintone.api()` rejectとDOM lifecycleが必要である |
+
+> 2026-07-18: APP730のCLI/MCP smokeで10,001件・同値群境界・ASC/DESC・LIMIT/OFFSETをraw Cursor APIと照合し7/7完全一致。順序release blockerは解消（[証跡](evidence/b33_cli_mcp_smoke.md)）。plugin行は未完了。
 
 CLI / MCPも同じcore contractを使うことはunit testできるが、認証route、実API error、実件数・順序のrelease gateは各surfaceで実施する。
 
