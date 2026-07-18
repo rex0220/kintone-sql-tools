@@ -10,7 +10,7 @@ import type {
   SelectStatement,
   SelectColumn,
   OrderByItem,
-  ArithExpr,
+  LegacyArithExpr,
   ArithNode,
   StringFuncExpr,
   StringFuncArg,
@@ -24,6 +24,7 @@ import type {
   CaseResult,
   TableRef,
   AggregateFunc,
+  ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
@@ -74,7 +75,8 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
     c.type === "SCALAR_SUBQUERY_COL" ||
-    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr))
+    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
+    (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
   )) return "FULL_SCAN";
   if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME")) return "FULL_SCAN";
@@ -235,12 +237,14 @@ function extractFields(columns: SelectColumn[]): string[] {
       collectArithNode(col.expr, fields);
     } else if (col.type === "STRFUNC_COL") {
       collectStringFuncFields(col.expr, fields);
+    } else if (col.type === "SCALAR_VALUE_COL") {
+      collectScalarValueFields(col.expr, fields);
     }
   }
   return [...new Set(fields)];
 }
 
-function collectArithFields(expr: ArithExpr, out: string[]): void {
+function collectArithFields(expr: LegacyArithExpr, out: string[]): void {
   collectArithNode(expr.left, out);
   collectArithNode(expr.right, out);
 }
@@ -269,10 +273,28 @@ function collectStringFuncFields(expr: StringFuncExpr, out: string[]): void {
 }
 
 function collectStringFuncArgFields(arg: StringFuncArg, out: string[]): void {
-  if (arg.type === "STRING")      return; // 文字列リテラル: フィールド参照なし
-  if (arg.type === "STRING_FUNC") { collectStringFuncFields(arg, out); return; }
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") { collectAggOperandFields(arg, out); return; }
-  collectArithNode(arg, out);             // ArithNode: FIELD_REF / NUMBER / ARITH
+  collectScalarValueFields(arg, out);
+}
+
+function collectScalarValueFields(expr: ScalarValueExpr, out: string[]): void {
+  if (expr.type === "FIELD") { out.push(normalizeSimpleFieldRef(expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field)); return; }
+  if (expr.type === "STRING_FUNC") { collectStringFuncFields(expr, out); return; }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarValueFields(expr.left, out);
+    collectScalarValueFields(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") {
+    for (const branch of expr.branches) collectCaseResultScalarFields(branch.result, out);
+    if (expr.elseResult) collectCaseResultScalarFields(expr.elseResult, out);
+  }
+}
+
+function collectCaseResultScalarFields(result: CaseResult, out: string[]): void {
+  if (result.type === "ARRAY") return;
+  if (result.type === "FIELD_REF" || result.type === "ARITH") { collectArithNode(result, out); return; }
+  collectScalarValueFields(result, out);
 }
 
 function collectAggOperandFields(node: AggOperand, out: string[]): void {
@@ -289,9 +311,25 @@ function collectAggOperandFields(node: AggOperand, out: string[]): void {
 function hasAggregateInStringFuncExpr(expr: StringFuncExpr): boolean {
   return expr.args.some((arg) => {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-    if (arg.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(arg);
-    return false;
+    return scalarValueHasAggregate(arg);
   });
+}
+
+function scalarValueHasAggregate(expr: ScalarValueExpr): boolean {
+  if (expr.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasAggregate(expr.left) || scalarValueHasAggregate(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    return expr.branches.some((b) => caseResultHasAggregate(b.result))
+      || (expr.elseResult !== null && caseResultHasAggregate(expr.elseResult));
+  }
+  return false;
+}
+
+function caseResultHasAggregate(result: CaseResult): boolean {
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+  return scalarValueHasAggregate(result);
 }
 
 interface RequiredFieldState {
@@ -462,30 +500,35 @@ function collectRequiredFieldsByTable(
   };
 
   const walkStringArg = (arg: StringFuncArg, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
-    if (arg.type === "STRING") return;
-    if (arg.type === "STRING_FUNC") {
-      walkStringFunc(arg, phase);
-      return;
-    }
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
       walkAgg(arg, phase);
       return;
     }
-    walkArith(arg, phase);
+    walkScalar(arg, phase);
   };
 
   const walkStringFunc = (expr: StringFuncExpr, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
     for (const arg of expr.args) walkStringArg(arg, phase);
   };
 
-  const walkCaseResult = (result: CaseResult, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
-    if (result.type === "STRING") return;
-    if (result.type === "ARRAY") return;
-    if (result.type === "STRING_FUNC") {
-      walkStringFunc(result, phase);
+  const walkScalar = (expr: ScalarValueExpr, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
+    if (expr.type === "FIELD") {
+      addFieldRef(expr.field, expr.tableAlias, phase);
       return;
     }
-    walkArith(result, phase);
+    if (expr.type === "STRING_FUNC") { walkStringFunc(expr, phase); return; }
+    if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+      walkScalar(expr.left, phase);
+      walkScalar(expr.right, phase);
+      return;
+    }
+    if (expr.type === "CASE_WHEN") walkCase(expr, phase);
+  };
+
+  const walkCaseResult = (result: CaseResult, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
+    if (result.type === "ARRAY") return;
+    if (result.type === "FIELD_REF" || result.type === "ARITH") { walkArith(result, phase); return; }
+    walkScalar(result, phase);
   };
 
   const walkCase = (expr: CaseWhenExpr, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
@@ -608,6 +651,9 @@ function collectRequiredFieldsByTable(
       case "STRFUNC_COL":
         walkStringFunc(col.expr, "select");
         break;
+      case "SCALAR_VALUE_COL":
+        walkScalar(col.expr, "select");
+        break;
       case "SCALAR_SUBQUERY_COL":
         break;
       case "WINDOW_COL":
@@ -661,6 +707,10 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
       if (col.alias) names.add(col.alias);
       continue;
     }
+    if (col.type === "SCALAR_VALUE_COL") {
+      if (col.alias) names.add(col.alias);
+      continue;
+    }
     if (col.type === "SCALAR_SUBQUERY_COL") {
       names.add(col.alias ?? "(subquery)");
       continue;
@@ -690,13 +740,24 @@ function arithNodeLabel(node: ArithNode): string {
 
 function stringFuncLabel(expr: StringFuncExpr): string {
   const args = expr.args.map((a) => {
-    if (a.type === "STRING") return `'${a.value}'`;
-    if (a.type === "STRING_FUNC") return stringFuncLabel(a);
     if (a.type === "AGG_REF") return aggregateSyntheticName(a.func, a.distinct, a.arg);
     if (a.type === "AGG_ARITH") return "agg_arith";
-    return arithNodeLabel(a);
+    return scalarValueLabel(a);
   });
   return `${expr.func}(${args.join(",")})`;
+}
+
+function scalarValueLabel(expr: ScalarValueExpr): string {
+  switch (expr.type) {
+    case "STRING": return `'${expr.value}'`;
+    case "NUMBER": return numberLiteralText(expr);
+    case "VARIABLE": return `@${expr.name}`;
+    case "FIELD": return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
+    case "STRING_FUNC": return stringFuncLabel(expr);
+    case "CASE_WHEN": return "case";
+    case "SCALAR_ARITH": return `(${scalarValueLabel(expr.left)}${expr.op}${scalarValueLabel(expr.right)})`;
+    case "CONCAT_OP": return `(${scalarValueLabel(expr.left)}||${scalarValueLabel(expr.right)})`;
+  }
 }
 
 function isAggregateSyntheticName(name: string): boolean {

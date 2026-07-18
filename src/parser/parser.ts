@@ -65,7 +65,7 @@ import type {
   ShowAppsStatement,
   DescribeStatement,
   ExplainStatement,
-  ArithExpr,
+  LegacyArithExpr,
   ArithOp,
   ArithNode,
   ArithColumn,
@@ -91,6 +91,9 @@ import type {
   VariableRef,
   WindowColumn,
   WindowFunc,
+  ScalarValueExpr,
+  ConcatExpr,
+  ScalarValueColumn,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -156,6 +159,8 @@ export class ParseError extends Error {
 
 export class Parser {
   private allowUnaryPlusNumber = false;
+  private scalarAllowsAggregateArgs = true;
+  private scalarAllowsCase = true;
   private pos = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
@@ -331,19 +336,21 @@ export class Parser {
     throw new ParseError(`${context} の右辺にはフィールド参照を含まないスカラー式を指定してください`, tok);
   }
 
-  private rejectNonScalarExpr(node: StringFuncArg, tok: Token, context: "SET" | "DECLARE"): void {
+  private rejectNonScalarExpr(node: StringFuncArg | ArithNode, tok: Token, context: "SET" | "DECLARE"): void {
     if (node.type === "STRING" || node.type === "NUMBER") return;
-    if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
+    if (node.type === "FIELD_REF" || node.type === "FIELD" || node.type === "VARIABLE" || node.type === "AGG_REF") {
       throw new ParseError(`${context} の右辺ではフィールド参照・集計関数を使用できません`, tok);
     }
-    if (node.type === "ARITH" || node.type === "AGG_ARITH") {
+    if (node.type === "ARITH" || node.type === "SCALAR_ARITH" || node.type === "CONCAT_OP" || node.type === "AGG_ARITH") {
       this.rejectNonScalarExpr(node.left, tok, context);
       this.rejectNonScalarExpr(node.right, tok, context);
       return;
     }
     if (node.type === "STRING_FUNC") {
       for (const arg of node.args) this.rejectNonScalarExpr(arg, tok, context);
+      return;
     }
+    throw new ParseError(`${context} の右辺では CASE を使用できません`, tok);
   }
 
   // ----------------------------------------------------------
@@ -536,7 +543,7 @@ export class Parser {
       const expr = this.parseArithAddSub();
       this.rejectNonLiteralArith(expr, tok);
       if (expr.type === "NUMBER") return expr;
-      return expr as ArithExpr;
+      return expr as LegacyArithExpr;
     }
 
     // 関数呼び出し（ROUND / LENGTH / TODAY 等）は初期版では非対応
@@ -754,6 +761,13 @@ export class Parser {
       return { type: "WILDCARD" };
     }
 
+    // `||` のない既存列は従来 AST を維持する。
+    if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
+      const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
+      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return { type: "SCALAR_VALUE_COL", expr, alias } satisfies ScalarValueColumn;
+    }
+
     const windowFunc = this.tryWindowFunc();
     if (windowFunc !== null) {
       return this.parseWindowColumn(windowFunc);
@@ -898,14 +912,27 @@ export class Parser {
 
   private selectColumnHasAggregate(column: SelectColumn): boolean {
     if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
-    if (column.type !== "STRFUNC_COL") return false;
-    return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (column.type === "STRFUNC_COL") return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (column.type === "SCALAR_VALUE_COL") return this.scalarValueHasAggregate(column.expr);
+    return false;
   }
 
   private stringFuncArgHasAggregate(arg: StringFuncArg): boolean {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-    if (arg.type === "STRING_FUNC") {
-      return arg.args.some((nested) => this.stringFuncArgHasAggregate(nested));
+    return this.scalarValueHasAggregate(arg);
+  }
+
+  private scalarValueHasAggregate(expr: ScalarValueExpr): boolean {
+    if (expr.type === "STRING_FUNC") return expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+      return this.scalarValueHasAggregate(expr.left) || this.scalarValueHasAggregate(expr.right);
+    }
+    if (expr.type === "CASE_WHEN") {
+      const results = [...expr.branches.map((b) => b.result), ...(expr.elseResult ? [expr.elseResult] : [])];
+      return results.some((result) => {
+        if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+        return this.scalarValueHasAggregate(result);
+      });
     }
     return false;
   }
@@ -982,6 +1009,113 @@ export class Parser {
       return this.parseAggregateRef(aggFunc);
     }
     throw new ParseError("集計算術式には集計関数または数値が必要です", this.peek());
+  }
+
+  // ──────────────────────────────────────────────────
+  // 汎用スカラー値式パーサー（B38）
+  // ──────────────────────────────────────────────────
+
+  /** 比較・述語・集約・サブクエリを含まない値式の公開入口。 */
+  public parseScalarValueExpr(options: { allowCase?: boolean; allowAggregateArgs?: boolean } = {}): ScalarValueExpr {
+    const previousAggregateArgs = this.scalarAllowsAggregateArgs;
+    const previousCase = this.scalarAllowsCase;
+    this.scalarAllowsAggregateArgs = options.allowAggregateArgs === true;
+    this.scalarAllowsCase = options.allowCase !== false;
+    let expr: ScalarValueExpr;
+    try {
+      expr = this.parseScalarAddSubConcat(this.scalarAllowsCase);
+    } finally {
+      this.scalarAllowsAggregateArgs = previousAggregateArgs;
+      this.scalarAllowsCase = previousCase;
+    }
+    const next = this.peek();
+    if (
+      next.kind === TokenKind.IS ||
+      next.kind === TokenKind.EQ || next.kind === TokenKind.NEQ || next.kind === TokenKind.LT_GT ||
+      next.kind === TokenKind.GT || next.kind === TokenKind.LT || next.kind === TokenKind.GTE || next.kind === TokenKind.LTE ||
+      next.kind === TokenKind.LIKE || next.kind === TokenKind.KLIKE || next.kind === TokenKind.IN || next.kind === TokenKind.BETWEEN
+    ) throw new ParseError("スカラー値式に比較・述語は使用できません", next);
+    return expr;
+  }
+
+  private parseScalarAddSubConcat(allowCase: boolean): ScalarValueExpr {
+    let left = this.parseScalarMulDiv(allowCase);
+    while (this.peek().kind === TokenKind.PLUS || this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.CONCAT_OP) {
+      const token = this.advance();
+      const right = this.parseScalarMulDiv(allowCase);
+      left = token.kind === TokenKind.CONCAT_OP
+        ? { type: "CONCAT_OP", left, right } satisfies ConcatExpr
+        : { type: "SCALAR_ARITH", left, op: token.kind === TokenKind.PLUS ? "+" : "-", right };
+    }
+    return left;
+  }
+
+  private parseScalarMulDiv(allowCase: boolean): ScalarValueExpr {
+    let left = this.parseScalarPrimary(allowCase);
+    while (this.peek().kind === TokenKind.STAR || this.peek().kind === TokenKind.SLASH || this.peek().kind === TokenKind.PERCENT) {
+      const token = this.advance();
+      const op: ArithOp = token.kind === TokenKind.STAR ? "*" : token.kind === TokenKind.SLASH ? "/" : "%";
+      left = { type: "SCALAR_ARITH", left, op, right: this.parseScalarPrimary(allowCase) };
+    }
+    return left;
+  }
+
+  private parseScalarPrimary(allowCase: boolean): ScalarValueExpr {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.LPAREN) {
+      if (this.peekAt(1).kind === TokenKind.SELECT) throw new ParseError("スカラー値式にサブクエリは使用できません", tok);
+      this.advance();
+      const expr = this.parseScalarAddSubConcat(allowCase);
+      this.expect(TokenKind.RPAREN);
+      return expr;
+    }
+    if (tok.kind === TokenKind.PLUS || tok.kind === TokenKind.MINUS) {
+      this.advance();
+      if (this.peek().kind === TokenKind.PLUS || this.peek().kind === TokenKind.MINUS) {
+        throw new ParseError("単項符号を重ねて指定することはできません", this.peek());
+      }
+      const operand = this.parseScalarPrimary(allowCase);
+      if (operand.type === "NUMBER") {
+        return makeNumberLiteral(`${tok.kind === TokenKind.MINUS ? "-" : "+"}${numberLiteralText(operand)}`);
+      }
+      if (tok.kind === TokenKind.PLUS) throw new ParseError("単項 + の直後には数値リテラルが必要です", tok);
+      return { type: "SCALAR_ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
+    }
+    if (tok.kind === TokenKind.STRING) { this.advance(); return { type: "STRING", value: tok.value }; }
+    if (tok.kind === TokenKind.NUMBER) { this.advance(); return makeNumberLiteral(tok.value); }
+    if (tok.kind === TokenKind.VARIABLE) { this.advance(); return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() }; }
+    if (tok.kind === TokenKind.CASE) {
+      if (!allowCase) throw new ParseError("このスカラー値式では CASE を使用できません", tok);
+      return this.parseCaseWhenExpr();
+    }
+    if (this.tryAggregateFunc() !== null) throw new ParseError("スカラー値式に集約関数は使用できません", tok);
+    if (this.tryStringFuncName() !== null) return this.parseStringFuncExpr();
+    if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
+      this.advance();
+      if (this.consume(TokenKind.DOT)) return { type: "FIELD", tableAlias: tok.value, field: this.parseIdentifier() };
+      return { type: "FIELD", tableAlias: null, field: tok.value };
+    }
+    throw new ParseError("スカラー値式のオペランドが必要です", tok);
+  }
+
+  /** 現在の値の終端までに指定トークンがあるか（括弧内も対象）。 */
+  private hasTopLevelTokenBeforeValueEnd(target: TokenKind): boolean {
+    let depth = 0;
+    for (let i = this.pos; i < this.tokens.length; i++) {
+      const kind = this.tokens[i].kind;
+      if (kind === TokenKind.LPAREN || kind === TokenKind.LBRACKET) depth++;
+      else if (kind === TokenKind.RPAREN || kind === TokenKind.RBRACKET) {
+        if (depth === 0) break;
+        depth--;
+      }
+      if (kind === target) return true;
+      if (depth === 0 && (
+        kind === TokenKind.COMMA || kind === TokenKind.AS || kind === TokenKind.FROM || kind === TokenKind.WHERE ||
+        kind === TokenKind.WHEN || kind === TokenKind.THEN || kind === TokenKind.ELSE || kind === TokenKind.END ||
+        kind === TokenKind.SEMICOLON || kind === TokenKind.EOF
+      )) break;
+    }
+    return false;
   }
 
   // ──────────────────────────────────────────────────
@@ -1135,12 +1269,15 @@ export class Parser {
     return { type: "CASE_WHEN", branches, elseResult };
   }
 
-  /** THEN / ELSE の結果値: 文字列リテラル / 配列リテラル / 文字列関数 / 算術式 */
+  /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
   private parseCaseResult(): CaseResult {
     const tok = this.peek();
     // 配列リテラル: ['val1', 'val2'] → ArrayLiteral
     if (tok.kind === TokenKind.LBRACKET) {
       return this.parseArrayLiteral();
+    }
+    if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
+      return this.parseScalarValueExpr({ allowAggregateArgs: true });
     }
     if (tok.kind === TokenKind.STRING) {
       this.advance();
@@ -1307,29 +1444,22 @@ export class Parser {
     return { type: "STRING", value: normalized };
   }
 
-  /** 文字列関数の引数: 文字列リテラル / ネスト文字列関数 / 算術式 / 集計算術式 */
+  /** 文字列関数の引数: ScalarValueExpr / 集計算術式 */
   private parseStringFuncArg(): StringFuncArg {
-    const tok = this.peek();
-    if (tok.kind === TokenKind.STRING) {
-      this.advance();
-      return { type: "STRING", value: tok.value };
-    }
-    if (this.tryStringFuncName() !== null) {
-      return this.parseStringFuncExpr();
-    }
     // 関数引数内では、集計式（例: SUM(金額), 100+SUM(金額)）を優先的に試す。
     // ただし集計関数を含まない式は従来どおり算術式として扱う。
-    const startPos = this.pos;
-    try {
-      const left = this.parseAggPrimary();
-      const expr = this.continueAggArith(left);
-      if (this.hasAggregateOperand(expr)) return expr;
-    } catch {
-      // fallback: 通常の算術式として解釈
+    if (this.scalarAllowsAggregateArgs) {
+      const startPos = this.pos;
+      try {
+        const left = this.parseAggPrimary();
+        const expr = this.continueAggArith(left);
+        if (this.hasAggregateOperand(expr)) return expr;
+      } catch {
+        // fallback: 通常のスカラー値式として解釈
+      }
+      this.pos = startPos;
     }
-    this.pos = startPos;
-    // 数値・フィールド参照・算術式 → ArithNode
-    return this.parseArithAddSub();
+    return this.parseScalarAddSubConcat(this.scalarAllowsCase);
   }
 
   private hasAggregateOperand(node: AggOperand): boolean {
@@ -2445,6 +2575,12 @@ export class Parser {
    */
   private parseAssignmentValue(): Assignment["value"] {
     const tok = this.peek();
+    if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
+      const expr = this.parseScalarValueExpr();
+      if (expr.type === "CONCAT_OP" || expr.type === "SCALAR_ARITH" || expr.type === "STRING_FUNC") return expr;
+      if (expr.type === "CASE_WHEN") return { type: "CASE_VALUE", expr };
+      throw new ParseError("SET の値には連結を含むスカラー値式が必要です", tok);
+    }
     if (tok.kind === TokenKind.VARIABLE) return this.parseSqlValue();
     // 文字列リテラルは算術不可
     if (tok.kind === TokenKind.STRING) return this.parseSqlValue();

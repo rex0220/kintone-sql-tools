@@ -176,6 +176,7 @@ export const enum TokenKind {
   MINUS   = "-",
   SLASH   = "/",
   PERCENT = "%",
+  CONCAT_OP = "||",
 
   // 記号
   STAR      = "*",

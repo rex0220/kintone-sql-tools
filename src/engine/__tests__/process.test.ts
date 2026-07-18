@@ -656,7 +656,7 @@ test("ORDER BY 関数: LENGTH(名前) ASC", () => {
   const result = applyOrderBy(rows, [{
     key: { type: "FUNC_KEY", expr: {
       type: "STRING_FUNC", func: "LENGTH",
-      args: [{ type: "FIELD_REF", field: "名前" }],
+      args: [{ type: "FIELD", tableAlias: null, field: "名前" }],
     }},
     direction: "ASC",
   }]);

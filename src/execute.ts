@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
@@ -1511,7 +1511,7 @@ function buildHavingFieldSemanticsResolver(
       }
     } else if (column.type === "STRFUNC_COL") {
       semantics = stringFunctionColumnMeta(column.expr).semantics;
-    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL" || column.type === "SCALAR_VALUE_COL") {
       semantics = syntheticSemantics("string");
     }
     if (semantics) aliases.set(column.alias, semantics);
@@ -1672,10 +1672,24 @@ function arithHasFieldRef(node: ArithNode): boolean {
 }
 
 function stringFuncArgHasFieldRef(arg: StringFuncArg): boolean {
-  if (arg.type === "FIELD_REF") return true;
-  if (arg.type === "ARITH") return arithHasFieldRef(arg);
-  if (arg.type === "STRING_FUNC") return stringFuncHasFieldRef(arg);
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+  return scalarValueHasFieldRef(arg);
+}
+
+function scalarValueHasFieldRef(expr: ScalarValueExpr): boolean {
+  if (expr.type === "FIELD") return true;
+  if (expr.type === "STRING_FUNC") return stringFuncHasFieldRef(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasFieldRef(expr.left) || scalarValueHasFieldRef(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    const results = [...expr.branches.map((branch) => branch.result), ...(expr.elseResult ? [expr.elseResult] : [])];
+    return results.some((result) => result.type !== "ARRAY" && (
+      result.type === "FIELD_REF" || result.type === "ARITH"
+        ? arithHasFieldRef(result)
+        : scalarValueHasFieldRef(result)
+    ));
+  }
   return false;
 }
 
@@ -1695,6 +1709,11 @@ function validateNoFromColumns(stmt: SelectStatement): void {
         break;
       case "STRFUNC_COL":
         if (stringFuncHasFieldRef(col.expr)) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
+      case "SCALAR_VALUE_COL":
+        if (scalarValueHasFieldRef(col.expr)) {
           throw new Error("ArgumentError: field reference is not allowed without FROM.");
         }
         break;
@@ -2073,8 +2092,24 @@ function collectStringFuncAggregateRefs(expr: StringFuncExpr, out: FieldRef[]): 
   for (const arg of expr.args) {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
       collectAggregateOperandRefs(arg, out);
-    } else if (arg.type === "STRING_FUNC") {
-      collectStringFuncAggregateRefs(arg, out);
+    } else {
+      collectScalarAggregateRefs(arg, out);
+    }
+  }
+}
+
+function collectScalarAggregateRefs(expr: ScalarValueExpr, out: FieldRef[]): void {
+  if (expr.type === "STRING_FUNC") { collectStringFuncAggregateRefs(expr, out); return; }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarAggregateRefs(expr.left, out);
+    collectScalarAggregateRefs(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") {
+    const results = [...expr.branches.map((branch) => branch.result), ...(expr.elseResult ? [expr.elseResult] : [])];
+    for (const result of results) {
+      if (result.type === "STRING_FUNC") collectStringFuncAggregateRefs(result, out);
+      else if (result.type !== "ARRAY" && result.type !== "FIELD_REF" && result.type !== "ARITH") collectScalarAggregateRefs(result, out);
     }
   }
 }
@@ -2088,6 +2123,8 @@ function collectSelectAggregateSortRefs(columns: SelectColumn[]): FieldRef[] {
       collectAggregateOperandRefs(column.expr, refs);
     } else if (column.type === "STRFUNC_COL") {
       collectStringFuncAggregateRefs(column.expr, refs);
+    } else if (column.type === "SCALAR_VALUE_COL") {
+      collectScalarAggregateRefs(column.expr, refs);
     }
   }
   return refs;
@@ -2278,10 +2315,11 @@ function caseResultColumnMeta(
 ): MaterializedColumnMeta {
   if (result.type === "STRING") return syntheticColumnMeta("string");
   if (result.type === "ARRAY") return unsupportedColumnMeta();
-  if (result.type === "NUMBER" || result.type === "ARITH") return syntheticColumnMeta("number");
+  if (result.type === "NUMBER" || result.type === "ARITH" || result.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
-  const source = resolveField(aggregateFieldRef(result.field));
-  return source ?? unknownStringColumnMeta();
+  if (result.type === "FIELD_REF") return resolveField(aggregateFieldRef(result.field)) ?? unknownStringColumnMeta();
+  if (result.type === "FIELD") return resolveField(result) ?? unknownStringColumnMeta();
+  return unknownStringColumnMeta();
 }
 
 function mergeExpressionColumnMeta(
@@ -2413,7 +2451,7 @@ async function inferSelectColumnMeta(
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
         meta = syntheticColumnMeta("number");
-      } else if (column.type === "LITERAL_COL") {
+      } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") {
         meta = syntheticColumnMeta("string");
       } else if (column.type === "STRFUNC_COL") {
         meta = stringFunctionColumnMeta(column.expr);
@@ -3443,7 +3481,7 @@ async function buildOrderSemanticsForSelect(
     if (column.type === "FIELD") meta = resolveField(aggregateFieldRef(column.field));
     else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
       meta = syntheticColumnMeta("number");
-    } else if (column.type === "LITERAL_COL") meta = syntheticColumnMeta("string");
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta = syntheticColumnMeta("string");
     else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr);
     else if (column.type === "SCALAR_SUBQUERY_COL") meta = unknownStringColumnMeta();
     else if (column.type === "CASE_COL") {
@@ -6101,11 +6139,12 @@ function collectArithRefFields(stmt: UpdateStatement): string[] {
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") collectArithNodeRefs(value, refs);
     if (value.type === "STRING_FUNC") collectArithNodeRefs(value, refs);
+    if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") collectScalarNodeRefs(value, refs);
   }
   return [...refs];
 }
 
-function collectArithNodeRefs(node: ArithExpr | ArithNode, out: Set<string>): void {
+function collectArithNodeRefs(node: LegacyArithExpr | ArithNode, out: Set<string>): void {
   if (node.type === "FIELD_REF") { out.add(node.field); return; }
   if (node.type === "ARITH") {
     collectArithNodeRefs(node.left, out);
@@ -6113,10 +6152,20 @@ function collectArithNodeRefs(node: ArithExpr | ArithNode, out: Set<string>): vo
   }
   if (node.type === "STRING_FUNC") {
     for (const arg of node.args) {
-      if (arg.type !== "STRING" && arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") {
-        collectArithNodeRefs(arg, out);
-      }
+      if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
     }
+  }
+}
+
+function collectScalarNodeRefs(node: ScalarValueExpr, out: Set<string>): void {
+  if (node.type === "FIELD") { out.add(node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field); return; }
+  if (node.type === "STRING_FUNC") {
+    for (const arg of node.args) if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
+    return;
+  }
+  if (node.type === "SCALAR_ARITH" || node.type === "CONCAT_OP") {
+    collectScalarNodeRefs(node.left, out);
+    collectScalarNodeRefs(node.right, out);
   }
 }
 
@@ -6133,7 +6182,7 @@ function formatAssignment(a: Assignment): string {
   return `${a.field} = (${v.type})`;
 }
 
-function formatArithExprStr(expr: ArithExpr): string {
+function formatArithExprStr(expr: LegacyArithExpr): string {
   return `${formatArithNodeStr(expr.left)} ${expr.op} ${formatArithNodeStr(expr.right)}`;
 }
 

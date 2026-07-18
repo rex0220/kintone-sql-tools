@@ -19,9 +19,11 @@ import type {
   SubqueryInList,
   ExistsExpr,
   ScalarSubquery,
+  ArithNode,
+  ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
-import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
+import { evalStringFunc, evalArithExpr, evalScalarValueExpr, resolveFieldRef } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
 import {
@@ -374,11 +376,14 @@ export function evalCaseWhen(
 
 function evalCaseResult(result: CaseResult, row: ProcessRow): string {
   if (result.type === "ARRAY")       return result.elements.map((e) => e.value).join(",");
-  if (result.type === "STRING")      return result.value;
-  if (result.type === "STRING_FUNC") return evalStringFunc(result, row);
-  if (result.type === "FIELD_REF")   return row[result.field] ?? "";
-  // NUMBER or ARITH
-  return String(evalArithExpr(result, row));
+  // 旧 CASE 経路が生成済み AST を受ける互換分岐。
+  if ((result as { type: string }).type === "FIELD_REF") {
+    return row[(result as unknown as { field: string }).field] ?? "";
+  }
+  if ((result as { type: string }).type === "ARITH") {
+    return String(evalArithExpr(result as unknown as ArithNode, row));
+  }
+  return String(evalScalarValueExpr(result as ScalarValueExpr, row));
 }
 
 export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {

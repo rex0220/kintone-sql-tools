@@ -9,10 +9,12 @@ import type {
   ArithNode,
   StringFuncExpr,
   StringFuncArg,
+  ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import type { ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
+import { evalCaseWhen } from "./evalWhere";
 
 // ============================================================
 // 算術式
@@ -30,6 +32,38 @@ export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
     case "*": return l * r;
     case "/": return r !== 0 ? l / r : NaN;
     case "%": return r !== 0 ? l % r : NaN;
+  }
+}
+
+/** 新 ScalarValueExpr 専用評価器。旧 ArithNode 評価器とは入口を分離する。 */
+export function evalScalarValueExpr(expr: ScalarValueExpr, row: ProcessRow): string | number {
+  switch (expr.type) {
+    case "STRING": return expr.value;
+    case "NUMBER": return expr.value;
+    case "FIELD": return resolveFieldRef(row, expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field);
+    case "VARIABLE":
+      throw new Error(`ArgumentError: unresolved variable @${expr.name} reached scalar evaluator.`);
+    case "STRING_FUNC": return evalStringFunc(expr, row);
+    case "CASE_WHEN": return evalCaseWhen(expr, row);
+    case "CONCAT_OP": {
+      // CONCAT の空値・文字列化規則を唯一の実装として再利用する。
+      return evalStringFunc({
+        type: "STRING_FUNC",
+        func: "CONCAT",
+        args: [expr.left, expr.right],
+      }, row);
+    }
+    case "SCALAR_ARITH": {
+      const left = Number(evalScalarValueExpr(expr.left, row));
+      const right = Number(evalScalarValueExpr(expr.right, row));
+      switch (expr.op) {
+        case "+": return left + right;
+        case "-": return left - right;
+        case "*": return left * right;
+        case "/": return right !== 0 ? left / right : NaN;
+        case "%": return right !== 0 ? left % right : NaN;
+      }
+    }
   }
 }
 
@@ -555,14 +589,11 @@ function formatWithComma(num: number, digits: number): string {
 }
 
 export function evalStringFuncArg(arg: StringFuncArg, row: ProcessRow): string {
-  if (arg.type === "STRING")      return arg.value;
-  if (arg.type === "STRING_FUNC") return evalStringFunc(arg, row);
-  if (arg.type === "FIELD_REF")   return resolveFieldRef(row, arg.field);
-  if (arg.type === "NUMBER")      return numberLiteralText(arg);
   // 集計引数は GROUP BY 評価側で事前解決される想定。
   // ここに到達した場合は行コンテキストのみのため空文字を返して安全側に倒す。
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
-  return String(evalArithExpr(arg, row)); // ARITH
+  if (arg.type === "NUMBER") return numberLiteralText(arg);
+  return String(evalScalarValueExpr(arg, row));
 }
 
 export function resolveFieldRef(row: ProcessRow, field: string): string {

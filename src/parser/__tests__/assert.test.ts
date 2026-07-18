@@ -4,7 +4,7 @@
 
 import { Lexer } from "../../lexer/lexer";
 import { Parser, ParseError } from "../parser";
-import type { AssertStatement, ArithExpr, ScalarSubquery } from "../../types/ast";
+import type { AssertStatement, LegacyArithExpr, ScalarSubquery } from "../../types/ast";
 
 function parse(sql: string) {
   const tokens = new Lexer(sql).tokenize();
@@ -78,7 +78,7 @@ test("BETWEEN の AND 欠落はエラー", () => {
 
 test("算術式（優先順位: * が先）", () => {
   const ast = parseAssert("ASSERT 2 + 3 * 4 = 14");
-  const left = ast.left as ArithExpr;
+  const left = ast.left as LegacyArithExpr;
   expect(left.type).toBe("ARITH");
   expect(left.op).toBe("+");
   expect(left.left).toEqual({ type: "NUMBER", value: 2, raw: "2" });
@@ -92,7 +92,7 @@ test("算術式（優先順位: * が先）", () => {
 
 test("括弧付き算術式", () => {
   const ast = parseAssert("ASSERT (2 + 3) * 4 = 20");
-  const left = ast.left as ArithExpr;
+  const left = ast.left as LegacyArithExpr;
   expect(left.op).toBe("*");
 });
 
