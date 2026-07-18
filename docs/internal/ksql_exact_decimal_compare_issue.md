@@ -3,6 +3,7 @@
 - 作成日: 2026-07-15
 - 改訂日: 2026-07-17（R5: 優先度を頻度根拠で中へ降格。R4: B26の`#err`非数値末尾バンド契約と境界を同期）
 - ステータス: **独立 follow-up・優先度 中（R5 で高から降格）**。降格は**頻度**の判断であり、R4 の事実（`numberPrecision.digits` は最大30桁＝16桁級は仕様上の対象）の撤回ではない。詳細は §8
+- **実装計画: [ksql_exact_decimal_compare_implementation_plan.md](ksql_exact_decimal_compare_implementation_plan.md)（R1・Claude レビュー承認・2026-07-18）**
 - 関連: [文字列・比較の横断仕様](ksql_string_semantics.md) §4.5.5 / §7 制限6、[B29](ksql_number_precision_semantics_issue.md)
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 
