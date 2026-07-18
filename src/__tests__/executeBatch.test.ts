@@ -667,6 +667,18 @@ test("SET の文字列関数を UPDATE SET と WHERE に置換する", async () 
   expect(client.putCalls[0].records[0]).toMatchObject({ record: { 顧客名: { value: "AB" } } });
 });
 
+test("関数引数と || の @var を既存バッチ変数解決で置換する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ x: "X" })] } });
+  const r = await executeBatch(
+    "SET @v = 'ab'; SELECT CONCAT('x=', @v)||'!' AS joined, CONCAT(UPPER(@v), x) AS nested FROM APP100",
+    client
+  );
+  expect(r.ok).toBe(true);
+  expect((r.statements[1].result as SelectResult).rows).toEqual([
+    { joined: "x=ab!", nested: "ABX" },
+  ]);
+});
+
 test("IN リストのスカラー変数を SIMPLE 経路でリテラルへ置換する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const r = await executeBatch(

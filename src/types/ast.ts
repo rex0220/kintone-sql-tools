@@ -108,7 +108,7 @@ export type ScalarExpr =
   | ScalarArithExpr
   | ScalarSubquery;
 
-export type ScalarArithExpr = ArithExpr;
+export type ScalarArithExpr = LegacyArithExpr;
 
 // ------------------------------------------------------------
 // ASSERT（アサーション — 実行時ゲート）
@@ -127,7 +127,7 @@ export type AssertOperand =
   | StringLiteral
   | VariableRef
   | ScalarSubquery
-  | ArithExpr;
+  | LegacyArithExpr;
 
 /**
  * ASSERT <式> <比較演算子> <式> / ASSERT <式> BETWEEN <式> AND <式>
@@ -202,6 +202,7 @@ export type SelectColumn =
   | ArithColumn             // field * 1.1 [AS alias]
   | CaseColumn              // CASE WHEN ... END [AS alias]
   | StringFuncColumn        // UPPER(f) / CONCAT(a,b) / ... [AS alias]
+  | ScalarValueColumn       // a || b / scalar-value arithmetic [AS alias]
   | WindowColumn            // ROW_NUMBER() OVER (...) AS alias
   | ScalarSubqueryColumn;   // (SELECT ...) [AS alias]
 
@@ -272,8 +273,8 @@ export type StringFuncName =
   | "ABS" | "MOD" | "POWER" | "SQRT"
   | "CURRENT_DATE" | "CURRENT_TIMESTAMP";
 
-/** 文字列関数の引数: 文字列リテラル / 算術ノード / ネストした文字列関数 / 集計算術 */
-export type StringFuncArg = StringLiteral | ArithNode | StringFuncExpr | AggOperand;
+/** 文字列関数の引数。集約入り関数の既存構文は AggOperand で保持する。 */
+export type StringFuncArg = ScalarValueExpr | AggOperand;
 
 export interface StringFuncExpr {
   type: "STRING_FUNC";
@@ -285,6 +286,13 @@ export interface StringFuncExpr {
 export interface StringFuncColumn {
   type: "STRFUNC_COL";
   expr: StringFuncExpr;
+  alias: string | null;
+}
+
+/** SELECT 句の汎用スカラー値式カラム。 */
+export interface ScalarValueColumn {
+  type: "SCALAR_VALUE_COL";
+  expr: ScalarValueExpr;
   alias: string | null;
 }
 
@@ -306,7 +314,7 @@ export interface ScalarSubqueryColumn {
 // ------------------------------------------------------------
 
 /** CASE WHEN の THEN / ELSE 結果値 */
-export type CaseResult = StringLiteral | ArrayLiteral | ArithNode | StringFuncExpr;
+export type CaseResult = ArrayLiteral | ScalarValueExpr | ArithNode;
 
 export interface CaseWhenClause {
   condition: WhereExpr;
@@ -570,6 +578,7 @@ export interface InsertStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 /** 1 行分の値リスト */
@@ -596,6 +605,7 @@ export interface UpsertStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -613,6 +623,7 @@ export interface UpsertSelectStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -629,6 +640,7 @@ export interface InsertSelectStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -648,6 +660,16 @@ export interface UpdateStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
+}
+
+export interface CheckGroup {
+  rules: CheckRule[];
+}
+
+export interface CheckRule {
+  condition: WhereExpr;
+  message: ScalarValueExpr;
 }
 
 export interface Assignment {
@@ -676,7 +698,7 @@ export interface SourceFieldValue {
 }
 
 /** UPDATE SET 専用。文字列関数は行ごとに現在値を参照して評価する。 */
-export type AssignmentValue = SqlValue | ArithExpr | StringFuncExpr | SourceFieldValue;
+export type AssignmentValue = SqlValue | LegacyArithExpr | StringFuncExpr | ConcatExpr | ArithExpr | SourceFieldValue;
 
 // ------------------------------------------------------------
 // 算術式（UPDATE SET のみ）
@@ -695,18 +717,50 @@ export type ArithOp = "+" | "-" | "*" | "/" | "%";
 export type ArithNode =
   | { type: "FIELD_REF"; field: string }
   | NumberLiteral
-  | ArithExpr
+  | LegacyArithExpr
   | StringFuncExpr;
 
 /** 後方互換エイリアス */
 export type ArithOperand = ArithNode;
 
-export interface ArithExpr {
+export interface LegacyArithExpr {
   type: "ARITH";
   left: ArithNode;
   op: ArithOp;
   right: ArithNode;
 }
+
+// ------------------------------------------------------------
+// 汎用スカラー値式（B38）
+// ------------------------------------------------------------
+
+/** 値レベルのスカラー式。比較・述語・集約・サブクエリは含めない。 */
+export type ScalarValueExpr =
+  | StringLiteral
+  | NumberLiteral
+  | FieldRef
+  | VariableRef
+  | StringFuncExpr
+  | ArithExpr
+  | ConcatExpr
+  | CaseWhenExpr;
+
+/** ScalarValueExpr 専用の算術式。旧 ArithNode/LegacyArithExpr とは分離する。 */
+export interface ArithExpr {
+  type: "SCALAR_ARITH";
+  left: ScalarValueExpr;
+  op: ArithOp;
+  right: ScalarValueExpr;
+}
+
+export interface ConcatExpr {
+  type: "CONCAT_OP";
+  left: ScalarValueExpr;
+  right: ScalarValueExpr;
+}
+
+/** 仕様上の CaseExpr 名。既存 CASE AST をそのまま再利用する。 */
+export type CaseExpr = CaseWhenExpr;
 
 // ------------------------------------------------------------
 // DELETE

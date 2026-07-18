@@ -738,7 +738,7 @@ test("SELECT UPPER(名前) AS n FROM APP100", () => {
   if (col.type === "STRFUNC_COL") {
     expect(col.expr.func).toBe("UPPER");
     expect(col.expr.args).toHaveLength(1);
-    expect(col.expr.args[0]).toEqual({ type: "FIELD_REF", field: "名前" });
+    expect(col.expr.args[0]).toEqual({ type: "FIELD", tableAlias: null, field: "名前" });
     expect(col.alias).toBe("n");
   }
 });
@@ -875,7 +875,7 @@ test("B23/B24 LENGTH_CHAR と TRANSLATE を予約語関数として解析する"
   expect(ast.columns).toMatchObject([
     { type: "STRFUNC_COL", expr: { func: "LENGTH_CHAR" } },
     { type: "STRFUNC_COL", expr: { func: "TRANSLATE", args: [
-      { type: "FIELD_REF", field: "名前" },
+      { type: "FIELD", field: "名前" },
       { type: "STRING_FUNC", func: "CONCAT" },
       { type: "STRING", value: "AB" },
     ] } },
@@ -898,10 +898,10 @@ test("B20 正規表現3関数を式引数付きで解析する", () => {
   expect(ast.columns).toMatchObject([
     { type: "STRFUNC_COL", expr: { func: "REGEXP_LIKE" } },
     { type: "STRFUNC_COL", expr: { func: "REGEXP_REPLACE", args: [
-      { type: "FIELD_REF", field: "value" },
+      { type: "FIELD", field: "value" },
       { type: "STRING_FUNC", func: "CONCAT" },
-      { type: "FIELD_REF", field: "replacement" },
-      { type: "FIELD_REF", field: "flags" },
+      { type: "FIELD", field: "replacement" },
+      { type: "FIELD", field: "flags" },
     ] } },
     { type: "STRFUNC_COL", expr: { func: "REGEXP_SUBSTR" } },
   ]);
@@ -932,7 +932,7 @@ test("select LOWER(顧客名) from app89 — ユーザー実例", () => {
   expect(ast.columns[0].type).toBe("STRFUNC_COL");
   if (ast.columns[0].type === "STRFUNC_COL") {
     expect(ast.columns[0].expr.func).toBe("LOWER");
-    expect(ast.columns[0].expr.args[0]).toEqual({ type: "FIELD_REF", field: "顧客名" });
+    expect(ast.columns[0].expr.args[0]).toEqual({ type: "FIELD", tableAlias: null, field: "顧客名" });
   }
 });
 

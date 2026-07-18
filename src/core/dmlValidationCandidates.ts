@@ -3,6 +3,8 @@ import type { ProcessRow } from "../engine/process";
 import { isEmptyDmlValue, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { NumberPrecision } from "./numberPrecision";
+import type { CheckGroup, FieldRef } from "../types/ast";
+import { evaluateCustomChecks } from "./dmlCustomCheck";
 
 export type ValidationOperation = "INSERT" | "UPDATE" | "UPSERT";
 
@@ -16,6 +18,9 @@ export interface DmlValidationCandidate {
   record?: KintoneRecord;
   /** UPDATE / UPSERT-update の書き込み先レコード ID。 */
   targetId?: number;
+  /** CHECK 専用の読み取り行。書込み payload とは分離する。 */
+  evaluationRow?: ProcessRow;
+  evaluationFieldTypes?: ReadonlyMap<string, string>;
 }
 
 export const VALIDATION_META_COLUMNS = [
@@ -29,20 +34,24 @@ export function validateDmlCandidates(
   targetFields: string[],
   fieldInfos: KintoneFieldInfo[],
   statementNumber: number,
-  numberPrecision?: NumberPrecision
+  numberPrecision?: NumberPrecision,
+  checkGroups: readonly CheckGroup[] = [],
+  validateMissingCreateFields = true,
+  includePreErrors = true
 ): { errors: ProcessRow[]; invalidRows: number; invalidRowNumbers: Set<number> } {
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors: ProcessRow[] = [];
   const invalid = new Set<number>();
+  let firstEvaluationError: unknown;
   for (const candidate of candidates) {
     candidate.record ??= {};
-    const rowErrors = [...candidate.preErrors];
+    const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
     for (const code of targetFields) {
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!, numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
       else candidate.record[code] = { value: result.value };
     }
-    if (candidate.mode === "create") {
+    if (validateMissingCreateFields && candidate.mode === "create") {
       for (const info of fieldInfos) {
         if (info.inSubtable) continue;
         if (candidate.payload.has(info.code)) continue;
@@ -62,6 +71,23 @@ export function validateDmlCandidates(
         }
       }
     }
+    if (checkGroups.length > 0) {
+      const row = candidate.evaluationRow ?? Object.fromEntries(
+        [...candidate.payload].map(([field, value]) => [field, renderValidationValue(value)])
+      );
+      const types = candidate.evaluationFieldTypes;
+      const resolveType = (field: FieldRef): string | undefined => {
+        const qualified = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
+        return types?.get(qualified) ?? types?.get(field.field);
+      };
+      try {
+        for (const custom of evaluateCustomChecks(checkGroups, row, resolveType)) {
+          rowErrors.push({ field: "", code: "ERR_CHECK", message: custom.message });
+        }
+      } catch (error) {
+        firstEvaluationError ??= error;
+      }
+    }
     if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
     for (const error of rowErrors) {
       const row: ProcessRow = {};
@@ -75,6 +101,7 @@ export function validateDmlCandidates(
       errors.push(row);
     }
   }
+  if (firstEvaluationError !== undefined) throw firstEvaluationError;
   return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
 }
 

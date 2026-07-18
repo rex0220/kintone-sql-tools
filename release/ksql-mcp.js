@@ -31219,6 +31219,10 @@ var Lexer = class {
       this.pos += 2;
       return this.makeToken("<=" /* LTE */, "<=", start);
     }
+    if (ch === "|" && ch2 === "|") {
+      this.pos += 2;
+      return this.makeToken("||" /* CONCAT_OP */, "||", start);
+    }
     switch (ch) {
       case "=":
         this.pos++;
@@ -31562,6 +31566,8 @@ var Parser = class {
   constructor(tokens) {
     this.tokens = tokens;
     this.allowUnaryPlusNumber = false;
+    this.scalarAllowsAggregateArgs = true;
+    this.scalarAllowsCase = true;
     this.pos = 0;
     /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
     this.cteNames = /* @__PURE__ */ new Set();
@@ -31730,17 +31736,19 @@ var Parser = class {
   }
   rejectNonScalarExpr(node, tok, context) {
     if (node.type === "STRING" || node.type === "NUMBER") return;
-    if (node.type === "FIELD_REF" || node.type === "AGG_REF") {
+    if (node.type === "FIELD_REF" || node.type === "FIELD" || node.type === "VARIABLE" || node.type === "AGG_REF") {
       throw new ParseError(`${context} \u306E\u53F3\u8FBA\u3067\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u30FB\u96C6\u8A08\u95A2\u6570\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`, tok);
     }
-    if (node.type === "ARITH" || node.type === "AGG_ARITH") {
+    if (node.type === "ARITH" || node.type === "SCALAR_ARITH" || node.type === "CONCAT_OP" || node.type === "AGG_ARITH") {
       this.rejectNonScalarExpr(node.left, tok, context);
       this.rejectNonScalarExpr(node.right, tok, context);
       return;
     }
     if (node.type === "STRING_FUNC") {
       for (const arg of node.args) this.rejectNonScalarExpr(arg, tok, context);
+      return;
     }
+    throw new ParseError(`${context} \u306E\u53F3\u8FBA\u3067\u306F CASE \u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`, tok);
   }
   // ----------------------------------------------------------
   // CREATE TEMP TABLE / DROP TEMP TABLE（バッチ内一時テーブル）
@@ -32111,6 +32119,11 @@ var Parser = class {
     if (this.consume("*" /* STAR */)) {
       return { type: "WILDCARD" };
     }
+    if (this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
+      const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
+      const alias2 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
+      return { type: "SCALAR_VALUE_COL", expr, alias: alias2 };
+    }
     const windowFunc = this.tryWindowFunc();
     if (windowFunc !== null) {
       return this.parseWindowColumn(windowFunc);
@@ -32226,13 +32239,25 @@ var Parser = class {
   }
   selectColumnHasAggregate(column) {
     if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
-    if (column.type !== "STRFUNC_COL") return false;
-    return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (column.type === "STRFUNC_COL") return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (column.type === "SCALAR_VALUE_COL") return this.scalarValueHasAggregate(column.expr);
+    return false;
   }
   stringFuncArgHasAggregate(arg) {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-    if (arg.type === "STRING_FUNC") {
-      return arg.args.some((nested) => this.stringFuncArgHasAggregate(nested));
+    return this.scalarValueHasAggregate(arg);
+  }
+  scalarValueHasAggregate(expr) {
+    if (expr.type === "STRING_FUNC") return expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
+    if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+      return this.scalarValueHasAggregate(expr.left) || this.scalarValueHasAggregate(expr.right);
+    }
+    if (expr.type === "CASE_WHEN") {
+      const results = [...expr.branches.map((b) => b.result), ...expr.elseResult ? [expr.elseResult] : []];
+      return results.some((result) => {
+        if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+        return this.scalarValueHasAggregate(result);
+      });
     }
     return false;
   }
@@ -32288,6 +32313,105 @@ var Parser = class {
       return this.parseAggregateRef(aggFunc);
     }
     throw new ParseError("\u96C6\u8A08\u7B97\u8853\u5F0F\u306B\u306F\u96C6\u8A08\u95A2\u6570\u307E\u305F\u306F\u6570\u5024\u304C\u5FC5\u8981\u3067\u3059", this.peek());
+  }
+  // ──────────────────────────────────────────────────
+  // 汎用スカラー値式パーサー（B38）
+  // ──────────────────────────────────────────────────
+  /** 比較・述語・集約・サブクエリを含まない値式の公開入口。 */
+  parseScalarValueExpr(options = {}) {
+    const previousAggregateArgs = this.scalarAllowsAggregateArgs;
+    const previousCase = this.scalarAllowsCase;
+    this.scalarAllowsAggregateArgs = options.allowAggregateArgs === true;
+    this.scalarAllowsCase = options.allowCase !== false;
+    let expr;
+    try {
+      expr = this.parseScalarAddSubConcat(this.scalarAllowsCase);
+    } finally {
+      this.scalarAllowsAggregateArgs = previousAggregateArgs;
+      this.scalarAllowsCase = previousCase;
+    }
+    const next = this.peek();
+    if (next.kind === "IS" /* IS */ || next.kind === "=" /* EQ */ || next.kind === "!=" /* NEQ */ || next.kind === "<>" /* LT_GT */ || next.kind === ">" /* GT */ || next.kind === "<" /* LT */ || next.kind === ">=" /* GTE */ || next.kind === "<=" /* LTE */ || next.kind === "LIKE" /* LIKE */ || next.kind === "KLIKE" /* KLIKE */ || next.kind === "IN" /* IN */ || next.kind === "BETWEEN" /* BETWEEN */) throw new ParseError("\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306B\u6BD4\u8F03\u30FB\u8FF0\u8A9E\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", next);
+    return expr;
+  }
+  parseScalarAddSubConcat(allowCase) {
+    let left = this.parseScalarMulDiv(allowCase);
+    while (this.peek().kind === "+" /* PLUS */ || this.peek().kind === "-" /* MINUS */ || this.peek().kind === "||" /* CONCAT_OP */) {
+      const token = this.advance();
+      const right = this.parseScalarMulDiv(allowCase);
+      left = token.kind === "||" /* CONCAT_OP */ ? { type: "CONCAT_OP", left, right } : { type: "SCALAR_ARITH", left, op: token.kind === "+" /* PLUS */ ? "+" : "-", right };
+    }
+    return left;
+  }
+  parseScalarMulDiv(allowCase) {
+    let left = this.parseScalarPrimary(allowCase);
+    while (this.peek().kind === "*" /* STAR */ || this.peek().kind === "/" /* SLASH */ || this.peek().kind === "%" /* PERCENT */) {
+      const token = this.advance();
+      const op = token.kind === "*" /* STAR */ ? "*" : token.kind === "/" /* SLASH */ ? "/" : "%";
+      left = { type: "SCALAR_ARITH", left, op, right: this.parseScalarPrimary(allowCase) };
+    }
+    return left;
+  }
+  parseScalarPrimary(allowCase) {
+    const tok = this.peek();
+    if (tok.kind === "(" /* LPAREN */) {
+      if (this.peekAt(1).kind === "SELECT" /* SELECT */) throw new ParseError("\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306B\u30B5\u30D6\u30AF\u30A8\u30EA\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      this.advance();
+      const expr = this.parseScalarAddSubConcat(allowCase);
+      this.expect(")" /* RPAREN */);
+      return expr;
+    }
+    if (tok.kind === "+" /* PLUS */ || tok.kind === "-" /* MINUS */) {
+      this.advance();
+      if (this.peek().kind === "+" /* PLUS */ || this.peek().kind === "-" /* MINUS */) {
+        throw new ParseError("\u5358\u9805\u7B26\u53F7\u3092\u91CD\u306D\u3066\u6307\u5B9A\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093", this.peek());
+      }
+      const operand = this.parseScalarPrimary(allowCase);
+      if (operand.type === "NUMBER") {
+        return makeNumberLiteral(`${tok.kind === "-" /* MINUS */ ? "-" : "+"}${numberLiteralText(operand)}`);
+      }
+      if (tok.kind === "+" /* PLUS */) throw new ParseError("\u5358\u9805 + \u306E\u76F4\u5F8C\u306B\u306F\u6570\u5024\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059", tok);
+      return { type: "SCALAR_ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
+    }
+    if (tok.kind === "STRING" /* STRING */) {
+      this.advance();
+      return { type: "STRING", value: tok.value };
+    }
+    if (tok.kind === "NUMBER" /* NUMBER */) {
+      this.advance();
+      return makeNumberLiteral(tok.value);
+    }
+    if (tok.kind === "VARIABLE" /* VARIABLE */) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
+    }
+    if (tok.kind === "CASE" /* CASE */) {
+      if (!allowCase) throw new ParseError("\u3053\u306E\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u3067\u306F CASE \u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      return this.parseCaseWhenExpr();
+    }
+    if (this.tryAggregateFunc() !== null) throw new ParseError("\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306B\u96C6\u7D04\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    if (this.tryStringFuncName() !== null) return this.parseStringFuncExpr();
+    if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) {
+      this.advance();
+      if (this.consume("." /* DOT */)) return { type: "FIELD", tableAlias: tok.value, field: this.parseIdentifier() };
+      return { type: "FIELD", tableAlias: null, field: tok.value };
+    }
+    throw new ParseError("\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306E\u30AA\u30DA\u30E9\u30F3\u30C9\u304C\u5FC5\u8981\u3067\u3059", tok);
+  }
+  /** 現在の値の終端までに指定トークンがあるか（括弧内も対象）。 */
+  hasTopLevelTokenBeforeValueEnd(target) {
+    let depth = 0;
+    for (let i = this.pos; i < this.tokens.length; i++) {
+      const kind = this.tokens[i].kind;
+      if (kind === "(" /* LPAREN */ || kind === "[" /* LBRACKET */) depth++;
+      else if (kind === ")" /* RPAREN */ || kind === "]" /* RBRACKET */) {
+        if (depth === 0) break;
+        depth--;
+      }
+      if (kind === target) return true;
+      if (depth === 0 && (kind === "," /* COMMA */ || kind === "AS" /* AS */ || kind === "FROM" /* FROM */ || kind === "WHERE" /* WHERE */ || kind === "WHEN" /* WHEN */ || kind === "THEN" /* THEN */ || kind === "ELSE" /* ELSE */ || kind === "END" /* END */ || kind === ";" /* SEMICOLON */ || kind === "EOF" /* EOF */)) break;
+    }
+    return false;
   }
   // ──────────────────────────────────────────────────
   // 算術式パーサー（演算子優先順位: * / > + -）
@@ -32411,11 +32535,14 @@ var Parser = class {
     this.expect("END" /* END */);
     return { type: "CASE_WHEN", branches, elseResult };
   }
-  /** THEN / ELSE の結果値: 文字列リテラル / 配列リテラル / 文字列関数 / 算術式 */
+  /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
   parseCaseResult() {
     const tok = this.peek();
     if (tok.kind === "[" /* LBRACKET */) {
       return this.parseArrayLiteral();
+    }
+    if (this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
+      return this.parseScalarValueExpr({ allowAggregateArgs: true });
     }
     if (tok.kind === "STRING" /* STRING */) {
       this.advance();
@@ -32564,25 +32691,19 @@ var Parser = class {
     }
     return { type: "STRING", value: normalized };
   }
-  /** 文字列関数の引数: 文字列リテラル / ネスト文字列関数 / 算術式 / 集計算術式 */
+  /** 文字列関数の引数: ScalarValueExpr / 集計算術式 */
   parseStringFuncArg() {
-    const tok = this.peek();
-    if (tok.kind === "STRING" /* STRING */) {
-      this.advance();
-      return { type: "STRING", value: tok.value };
+    if (this.scalarAllowsAggregateArgs) {
+      const startPos = this.pos;
+      try {
+        const left = this.parseAggPrimary();
+        const expr = this.continueAggArith(left);
+        if (this.hasAggregateOperand(expr)) return expr;
+      } catch {
+      }
+      this.pos = startPos;
     }
-    if (this.tryStringFuncName() !== null) {
-      return this.parseStringFuncExpr();
-    }
-    const startPos = this.pos;
-    try {
-      const left = this.parseAggPrimary();
-      const expr = this.continueAggArith(left);
-      if (this.hasAggregateOperand(expr)) return expr;
-    } catch {
-    }
-    this.pos = startPos;
-    return this.parseArithAddSub();
+    return this.parseScalarAddSubConcat(this.scalarAllowsCase);
   }
   hasAggregateOperand(node) {
     if (node.type === "AGG_REF") return true;
@@ -32670,6 +32791,7 @@ var Parser = class {
     const k = this.peek().kind;
     if (k === "IDENT" /* IDENT */ || k === "BIDENT" /* BIDENT */) {
       if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "VALIDATE" && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "ONLY") return null;
+      if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "CHECK" && this.peekAt(1).kind === "WHEN" /* WHEN */) return null;
       return this.parseTableAliasName();
     }
     return null;
@@ -33135,8 +33257,9 @@ var Parser = class {
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u4EEE\u60F3\u30C6\u30FC\u30D6\u30EB\u3067\u306F\u672A\u5BFE\u5FDC\u3067\u3059", this.prev());
       }
+      const checkGroups2 = this.parseCheckGroups();
       const validation2 = this.parseDmlControlSuffix();
-      return { type: "INSERT_SELECT", appId, fields, select, ...validation2 };
+      return { type: "INSERT_SELECT", appId, fields, select, ...checkGroups2, ...validation2 };
     }
     this.expect("VALUES" /* VALUES */);
     const values = [];
@@ -33146,11 +33269,15 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
       values.push(row);
     } while (this.consume("," /* COMMA */));
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (subtableCode && checkGroups.checkGroups) {
+      throw new ParseError("CHECK \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+    }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
-    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values, ...validation } : { type: "INSERT", appId, fields, values, ...validation };
+    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values, ...checkGroups, ...validation } : { type: "INSERT", appId, fields, values, ...checkGroups, ...validation };
   }
   parseUpsert() {
     this.expect("UPSERT" /* UPSERT */);
@@ -33167,8 +33294,9 @@ var Parser = class {
     if (this.peek().kind === "SELECT" /* SELECT */) {
       const select = this.parseSelect();
       const keyFields2 = this.parseOnDuplicate();
+      const checkGroups2 = this.parseCheckGroups();
       const validation2 = this.parseDmlControlSuffix();
-      return { type: "UPSERT_SELECT", appId, fields, select, keyFields: keyFields2, ...validation2 };
+      return { type: "UPSERT_SELECT", appId, fields, select, keyFields: keyFields2, ...checkGroups2, ...validation2 };
     }
     this.expect("VALUES" /* VALUES */);
     const values = [];
@@ -33178,8 +33306,9 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
     } while (this.consume("," /* COMMA */));
     const keyFields = this.parseOnDuplicate();
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
-    return { type: "UPSERT", appId, fields, values, keyFields, ...validation };
+    return { type: "UPSERT", appId, fields, values, keyFields, ...checkGroups, ...validation };
   }
   parseOnDuplicate() {
     this.expectKeyword("ON" /* ON */, "UPSERT \u306B\u306F ON DUPLICATE (\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9) \u304C\u5FC5\u8981\u3067\u3059");
@@ -33311,12 +33440,33 @@ var Parser = class {
         whereTok
       );
     }
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (subtableCode && checkGroups.checkGroups) {
+      throw new ParseError("CHECK \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+    }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...validation };
-    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where, ...validation } : { type: "UPDATE", appId, assignments, where, ...validation };
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...checkGroups, ...validation };
+    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where, ...checkGroups, ...validation } : { type: "UPDATE", appId, assignments, where, ...checkGroups, ...validation };
+  }
+  /** CHECK WHEN ... THEN ... blocks. CHECK is a soft keyword. */
+  parseCheckGroups() {
+    const groups = [];
+    while (this.isSoftKeyword("CHECK") && this.peekAt(1).kind === "WHEN" /* WHEN */) {
+      const check2 = this.advance();
+      const rules = [];
+      while (this.consume("WHEN" /* WHEN */)) {
+        const condition = this.parseWhereExpr();
+        this.expect("THEN" /* THEN */, "CHECK WHEN \u306E\u6761\u4EF6\u306E\u5F8C\u306B\u306F THEN \u304C\u5FC5\u8981\u3067\u3059");
+        const message = this.parseScalarValueExpr({ allowCase: false });
+        rules.push({ condition, message });
+      }
+      if (rules.length === 0) throw new ParseError("CHECK \u306E\u5F8C\u306B\u306F WHEN \u304C\u6700\u4F4E 1 \u3064\u5FC5\u8981\u3067\u3059", check2);
+      groups.push({ rules });
+    }
+    return groups.length > 0 ? { checkGroups: groups } : {};
   }
   /** DML末尾の VALIDATE ONLY または ON ERROR SKIP。各語はsoft keyword。 */
   parseDmlControlSuffix() {
@@ -33505,6 +33655,12 @@ var Parser = class {
    */
   parseAssignmentValue() {
     const tok = this.peek();
+    if (this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
+      const expr = this.parseScalarValueExpr();
+      if (expr.type === "CONCAT_OP" || expr.type === "SCALAR_ARITH" || expr.type === "STRING_FUNC") return expr;
+      if (expr.type === "CASE_WHEN") return { type: "CASE_VALUE", expr };
+      throw new ParseError("SET \u306E\u5024\u306B\u306F\u9023\u7D50\u3092\u542B\u3080\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u304C\u5FC5\u8981\u3067\u3059", tok);
+    }
     if (tok.kind === "VARIABLE" /* VARIABLE */) return this.parseSqlValue();
     if (tok.kind === "STRING" /* STRING */) return this.parseSqlValue();
     if (tok.kind === "TODAY" /* TODAY */ || tok.kind === "NOW" /* NOW */ || tok.kind === "LOGINUSER" /* LOGINUSER */) return this.parseSqlValue();
@@ -34116,7 +34272,7 @@ function resolveSelectMode(stmt) {
   if (stmt.distinct) return "FULL_SCAN";
   if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)
+    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr)
   )) return "FULL_SCAN";
   if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME")) return "FULL_SCAN";
@@ -34211,6 +34367,8 @@ function extractFields(columns) {
       collectArithNode(col.expr, fields);
     } else if (col.type === "STRFUNC_COL") {
       collectStringFuncFields(col.expr, fields);
+    } else if (col.type === "SCALAR_VALUE_COL") {
+      collectScalarValueFields(col.expr, fields);
     }
   }
   return [...new Set(fields)];
@@ -34236,16 +34394,38 @@ function collectStringFuncFields(expr, out) {
   }
 }
 function collectStringFuncArgFields(arg, out) {
-  if (arg.type === "STRING") return;
-  if (arg.type === "STRING_FUNC") {
-    collectStringFuncFields(arg, out);
-    return;
-  }
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
     collectAggOperandFields(arg, out);
     return;
   }
-  collectArithNode(arg, out);
+  collectScalarValueFields(arg, out);
+}
+function collectScalarValueFields(expr, out) {
+  if (expr.type === "FIELD") {
+    out.push(normalizeSimpleFieldRef(expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field));
+    return;
+  }
+  if (expr.type === "STRING_FUNC") {
+    collectStringFuncFields(expr, out);
+    return;
+  }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarValueFields(expr.left, out);
+    collectScalarValueFields(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") {
+    for (const branch of expr.branches) collectCaseResultScalarFields(branch.result, out);
+    if (expr.elseResult) collectCaseResultScalarFields(expr.elseResult, out);
+  }
+}
+function collectCaseResultScalarFields(result, out) {
+  if (result.type === "ARRAY") return;
+  if (result.type === "FIELD_REF" || result.type === "ARITH") {
+    collectArithNode(result, out);
+    return;
+  }
+  collectScalarValueFields(result, out);
 }
 function collectAggOperandFields(node, out) {
   if (node.type === "AGG_REF") {
@@ -34260,9 +34440,22 @@ function collectAggOperandFields(node, out) {
 function hasAggregateInStringFuncExpr(expr) {
   return expr.args.some((arg) => {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-    if (arg.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(arg);
-    return false;
+    return scalarValueHasAggregate(arg);
   });
+}
+function scalarValueHasAggregate(expr) {
+  if (expr.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasAggregate(expr.left) || scalarValueHasAggregate(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    return expr.branches.some((b) => caseResultHasAggregate(b.result)) || expr.elseResult !== null && caseResultHasAggregate(expr.elseResult);
+  }
+  return false;
+}
+function caseResultHasAggregate(result) {
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+  return scalarValueHasAggregate(result);
 }
 function collectRequiredFieldsByTable(stmt) {
   const physicalTables = [stmt.from, ...stmt.joins.map((j) => j.table)].filter((t) => t.cteName === null);
@@ -34398,28 +34591,38 @@ function collectRequiredFieldsByTable(stmt) {
     }
   };
   const walkStringArg = (arg, phase = "select") => {
-    if (arg.type === "STRING") return;
-    if (arg.type === "STRING_FUNC") {
-      walkStringFunc(arg, phase);
-      return;
-    }
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
       walkAgg(arg, phase);
       return;
     }
-    walkArith(arg, phase);
+    walkScalar(arg, phase);
   };
   const walkStringFunc = (expr, phase = "select") => {
     for (const arg of expr.args) walkStringArg(arg, phase);
   };
-  const walkCaseResult = (result, phase = "select") => {
-    if (result.type === "STRING") return;
-    if (result.type === "ARRAY") return;
-    if (result.type === "STRING_FUNC") {
-      walkStringFunc(result, phase);
+  const walkScalar = (expr, phase = "select") => {
+    if (expr.type === "FIELD") {
+      addFieldRef(expr.field, expr.tableAlias, phase);
       return;
     }
-    walkArith(result, phase);
+    if (expr.type === "STRING_FUNC") {
+      walkStringFunc(expr, phase);
+      return;
+    }
+    if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+      walkScalar(expr.left, phase);
+      walkScalar(expr.right, phase);
+      return;
+    }
+    if (expr.type === "CASE_WHEN") walkCase(expr, phase);
+  };
+  const walkCaseResult = (result, phase = "select") => {
+    if (result.type === "ARRAY") return;
+    if (result.type === "FIELD_REF" || result.type === "ARITH") {
+      walkArith(result, phase);
+      return;
+    }
+    walkScalar(result, phase);
   };
   const walkCase = (expr, phase = "select") => {
     for (const b of expr.branches) {
@@ -34525,6 +34728,9 @@ function collectRequiredFieldsByTable(stmt) {
       case "STRFUNC_COL":
         walkStringFunc(col.expr, "select");
         break;
+      case "SCALAR_VALUE_COL":
+        walkScalar(col.expr, "select");
+        break;
       case "SCALAR_SUBQUERY_COL":
         break;
       case "WINDOW_COL":
@@ -34575,6 +34781,10 @@ function collectSelectOutputNames(columns) {
       if (col.alias) names.add(col.alias);
       continue;
     }
+    if (col.type === "SCALAR_VALUE_COL") {
+      if (col.alias) names.add(col.alias);
+      continue;
+    }
     if (col.type === "SCALAR_SUBQUERY_COL") {
       names.add(col.alias ?? "(subquery)");
       continue;
@@ -34597,13 +34807,31 @@ function arithNodeLabel(node) {
 }
 function stringFuncLabel(expr) {
   const args = expr.args.map((a) => {
-    if (a.type === "STRING") return `'${a.value}'`;
-    if (a.type === "STRING_FUNC") return stringFuncLabel(a);
     if (a.type === "AGG_REF") return aggregateSyntheticName(a.func, a.distinct, a.arg);
     if (a.type === "AGG_ARITH") return "agg_arith";
-    return arithNodeLabel(a);
+    return scalarValueLabel(a);
   });
   return `${expr.func}(${args.join(",")})`;
+}
+function scalarValueLabel(expr) {
+  switch (expr.type) {
+    case "STRING":
+      return `'${expr.value}'`;
+    case "NUMBER":
+      return numberLiteralText(expr);
+    case "VARIABLE":
+      return `@${expr.name}`;
+    case "FIELD":
+      return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
+    case "STRING_FUNC":
+      return stringFuncLabel(expr);
+    case "CASE_WHEN":
+      return "case";
+    case "SCALAR_ARITH":
+      return `(${scalarValueLabel(expr.left)}${expr.op}${scalarValueLabel(expr.right)})`;
+    case "CONCAT_OP":
+      return `(${scalarValueLabel(expr.left)}||${scalarValueLabel(expr.right)})`;
+  }
 }
 function isAggregateSyntheticName(name) {
   return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT)\(/i.test(name);
@@ -35547,6 +35775,45 @@ function evalArithExpr(expr, row) {
       return r !== 0 ? l % r : NaN;
   }
 }
+function evalScalarValueExpr(expr, row) {
+  switch (expr.type) {
+    case "STRING":
+      return expr.value;
+    case "NUMBER":
+      return expr.value;
+    case "FIELD":
+      return resolveFieldRef(row, expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field);
+    case "VARIABLE":
+      throw new Error(`ArgumentError: unresolved variable @${expr.name} reached scalar evaluator.`);
+    case "STRING_FUNC":
+      return evalStringFunc(expr, row);
+    case "CASE_WHEN":
+      return evalCaseWhen(expr, row);
+    case "CONCAT_OP": {
+      return evalStringFunc({
+        type: "STRING_FUNC",
+        func: "CONCAT",
+        args: [expr.left, expr.right]
+      }, row);
+    }
+    case "SCALAR_ARITH": {
+      const left = Number(evalScalarValueExpr(expr.left, row));
+      const right = Number(evalScalarValueExpr(expr.right, row));
+      switch (expr.op) {
+        case "+":
+          return left + right;
+        case "-":
+          return left - right;
+        case "*":
+          return left * right;
+        case "/":
+          return right !== 0 ? left / right : NaN;
+        case "%":
+          return right !== 0 ? left % right : NaN;
+      }
+    }
+  }
+}
 function applyRoundOp(op, num, digits) {
   const factor = Math.pow(10, digits);
   const raw = Math[op](num * factor) / factor;
@@ -35949,12 +36216,9 @@ function formatWithComma(num, digits) {
   return decStr ? `${intFmt}.${decStr}` : intFmt;
 }
 function evalStringFuncArg(arg, row) {
-  if (arg.type === "STRING") return arg.value;
-  if (arg.type === "STRING_FUNC") return evalStringFunc(arg, row);
-  if (arg.type === "FIELD_REF") return resolveFieldRef(row, arg.field);
-  if (arg.type === "NUMBER") return numberLiteralText(arg);
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
-  return String(evalArithExpr(arg, row));
+  if (arg.type === "NUMBER") return numberLiteralText(arg);
+  return String(evalScalarValueExpr(arg, row));
 }
 function resolveFieldRef(row, field) {
   const direct = row[field];
@@ -36177,10 +36441,13 @@ function evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2) {
 }
 function evalCaseResult(result, row) {
   if (result.type === "ARRAY") return result.elements.map((e) => e.value).join(",");
-  if (result.type === "STRING") return result.value;
-  if (result.type === "STRING_FUNC") return evalStringFunc(result, row);
-  if (result.type === "FIELD_REF") return row[result.field] ?? "";
-  return String(evalArithExpr(result, row));
+  if (result.type === "FIELD_REF") {
+    return row[result.field] ?? "";
+  }
+  if (result.type === "ARITH") {
+    return String(evalArithExpr(result, row));
+  }
+  return String(evalScalarValueExpr(result, row));
 }
 function resolveKintoneFunc(name) {
   const now = /* @__PURE__ */ new Date();
@@ -36224,6 +36491,63 @@ function matchLike(value, pattern) {
   return regex.test(value);
 }
 
+// src/core/dmlCustomCheck.ts
+function collectCheckFieldRefs(groups) {
+  return collectRefs2(groups);
+}
+function collectCheckComparisonFieldRefs(groups) {
+  return collectRefs2(groups.flatMap((group) => group.rules.map((rule) => rule.condition)));
+}
+function collectRefs2(root) {
+  const refs = [];
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (node) => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const obj = node;
+    if (obj.type === "EXISTS" || obj.type === "SUBQUERY_IN_LIST" || obj.type === "SCALAR_SUBQUERY") {
+      throw customCheckParseError("CHECK \u306B\u30B5\u30D6\u30AF\u30A8\u30EA\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093");
+    }
+    if (obj.type === "FIELD" && typeof obj.field === "string") {
+      add(typeof obj.tableAlias === "string" ? obj.tableAlias : null, obj.field);
+    } else if (obj.type === "FIELD_REF" && typeof obj.field === "string") {
+      const dot = obj.field.indexOf(".");
+      add(dot > 0 ? obj.field.slice(0, dot) : null, dot > 0 ? obj.field.slice(dot + 1) : obj.field);
+    }
+    for (const value of Object.values(obj)) visit(value);
+  };
+  const add = (tableAlias, field) => {
+    if (/^(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\(/i.test(field)) {
+      throw customCheckParseError("CHECK \u306B\u96C6\u7D04\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093");
+    }
+    const key = `${tableAlias ?? ""}\0${field}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      refs.push({ tableAlias, field });
+    }
+  };
+  visit(root);
+  return refs;
+}
+function customCheckParseError(message) {
+  return new ParseError(message, { kind: "EOF" /* EOF */, value: "CHECK", pos: 0 });
+}
+function evaluateCustomChecks(groups, row, resolveFieldType) {
+  const errors = [];
+  groups.forEach((group, groupIndex) => {
+    for (const rule of group.rules) {
+      if (!evalWhere(rule.condition, row, resolveFieldType)) continue;
+      const value = evalScalarValueExpr(rule.message, row);
+      errors.push({ groupIndex, message: value == null ? "" : String(value) });
+      break;
+    }
+  });
+  return errors;
+}
+
 // src/converter/dmlToKintone.ts
 function assertDmlWhereIsSafe(where) {
   if (whereHasKlike(where)) {
@@ -36261,10 +36585,11 @@ function buildInsertRecord(fields, row, fieldTypes) {
 }
 function updateToGetQuery(stmt) {
   assertDmlWhereIsSafe(stmt.where);
+  const checkFields = collectUpdateCheckTargetFields(stmt);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
-    fields: ["$id"],
+    fields: ["$id", ...checkFields],
     totalCount: false
   };
 }
@@ -36278,19 +36603,19 @@ function updateToPutBatches(stmt, ids, fieldTypes = /* @__PURE__ */ new Map()) {
 function buildUpdateRecord(assignments, fieldTypes) {
   const record2 = {};
   for (const { field, value } of assignments) {
-    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
+    if (value.type === "ARITH" || value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
     record2[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record2;
 }
 function hasArithAssignment(stmt) {
   return stmt.assignments.some(
-    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE"
+    (a) => a.value.type === "ARITH" || a.value.type === "SCALAR_ARITH" || a.value.type === "CONCAT_OP" || a.value.type === "CASE_VALUE"
   );
 }
 function hasRowDependentAssignment(stmt) {
   return stmt.assignments.some(
-    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
+    (a) => a.value.type === "ARITH" || a.value.type === "SCALAR_ARITH" || a.value.type === "CONCAT_OP" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
   );
 }
 function updateToGetQueryForArith(stmt) {
@@ -36299,12 +36624,15 @@ function updateToGetQueryForArith(stmt) {
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
       collectArithFields2(value, refFields);
+    } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+      collectScalarValueFields2(value, refFields);
     } else if (value.type === "STRING_FUNC") {
       collectStringFuncFields2(value, refFields);
     } else if (value.type === "CASE_VALUE") {
       collectCaseFields(value.expr, refFields);
     }
   }
+  collectUpdateCheckTargetFields(stmt).forEach((field) => refFields.add(field));
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -36325,16 +36653,27 @@ function collectStringFuncFields2(expr, out) {
   for (const arg of expr.args) collectStringFuncArgFields2(arg, out);
 }
 function collectStringFuncArgFields2(arg, out) {
-  if (arg.type === "STRING") return;
-  if (arg.type === "STRING_FUNC") {
-    collectStringFuncFields2(arg, out);
-    return;
-  }
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
     collectAggOperandFields2(arg, out);
     return;
   }
-  collectArithNode2(arg, out);
+  collectScalarValueFields2(arg, out);
+}
+function collectScalarValueFields2(expr, out) {
+  if (expr.type === "FIELD") {
+    out.add(expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field);
+    return;
+  }
+  if (expr.type === "STRING_FUNC") {
+    collectStringFuncFields2(expr, out);
+    return;
+  }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarValueFields2(expr.left, out);
+    collectScalarValueFields2(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") collectCaseFields(expr, out);
 }
 function collectAggOperandFields2(node, out) {
   if (node.type === "AGG_REF") {
@@ -36347,9 +36686,12 @@ function collectAggOperandFields2(node, out) {
   }
 }
 function collectCaseResultFields(result, out) {
-  if (result.type === "STRING") return;
   if (result.type === "ARRAY") return;
-  collectArithNode2(result, out);
+  if (result.type === "FIELD_REF" || result.type === "ARITH") {
+    collectArithNode2(result, out);
+    return;
+  }
+  collectScalarValueFields2(result, out);
 }
 function collectCaseFields(expr, out) {
   for (const branch of expr.branches) {
@@ -36387,6 +36729,8 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     for (const { field, value } of stmt.assignments) {
       if (value.type === "ARITH") {
         record2[field] = { value: String(evalArith(value, raw)) };
+      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+        record2[field] = { value: String(evalScalarValueExpr(value, row)) };
       } else if (value.type === "STRING_FUNC") {
         record2[field] = { value: evalStringFunc(value, row) };
       } else if (value.type === "CASE_VALUE") {
@@ -36441,6 +36785,8 @@ function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new 
         throw new DmlConvertError("UPDATE ... FROM \u306E SET \u3067\u306F\u6587\u5B57\u5217\u95A2\u6570\u3092\u76F4\u63A5\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093");
       } else if (value.type === "ARITH") {
         record2[field] = { value: String(evalArith(value, target)) };
+      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+        record2[field] = { value: String(evalScalarValueExpr(value, targetRow)) };
       } else if (value.type === "CASE_VALUE") {
         record2[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
       } else {
@@ -36551,7 +36897,15 @@ function evalCaseResultValue(result, row, fieldType) {
   if (result.type === "STRING_FUNC") {
     return evalStringFunc(result, row);
   }
-  return String(evalArithExpr(result, row));
+  if (result.type === "FIELD_REF" || result.type === "ARITH") {
+    return String(evalArithExpr(result, row));
+  }
+  return String(evalScalarValueExpr(result, row));
+}
+function collectUpdateCheckTargetFields(stmt) {
+  if (!stmt.checkGroups) return [];
+  const targetAlias = `app${stmt.appId}`.toLowerCase();
+  return [...new Set(collectCheckFieldRefs(stmt.checkGroups).filter((ref) => ref.tableAlias === null || ref.tableAlias.toLowerCase() === targetAlias).map((ref) => ref.field).filter((field) => field !== "$id"))];
 }
 function evalCaseWhenValue(expr, row, fieldType) {
   for (const branch of expr.branches) {
@@ -37104,7 +37458,7 @@ function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldS
 }
 function hasAggregateColumns(columns) {
   return columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr)
+    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(c.expr)
   );
 }
 function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind) {
@@ -37141,6 +37495,10 @@ function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind) {
         const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
         const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
         outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
+      } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(col.expr)) {
+        const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
+        const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
+        outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
       }
     }
     result.push(outRow);
@@ -37471,6 +37829,13 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, re
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
+        case "SCALAR_VALUE_COL": {
+          const key = outputKeys?.[colIdx] ?? col.alias ?? scalarValueDefaultKey(col.expr);
+          const srcKey = scalarValueDefaultKey(col.expr);
+          out[key] = scalarValueHasAggregate2(col.expr) ? row[col.alias ?? srcKey] ?? row[srcKey] ?? "" : String(evalScalarValueExpr(col.expr, row));
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
         case "SCALAR_SUBQUERY_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "(subquery)";
           out[key] = scalarCache?.get(colIdx) ?? "";
@@ -37521,6 +37886,8 @@ function computeOutputKey(col, colIdx, defaultFieldKeys) {
       return col.alias ?? "case";
     case "STRFUNC_COL":
       return col.alias ?? stringFuncDefaultKey(col.expr);
+    case "SCALAR_VALUE_COL":
+      return col.alias ?? scalarValueDefaultKey(col.expr);
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
     case "WINDOW_COL":
@@ -37576,17 +37943,48 @@ function arithColDefaultKey(expr) {
 }
 function stringFuncDefaultKey(expr) {
   const argStrs = expr.args.map((a) => {
-    if (a.type === "STRING") return `'${a.value}'`;
-    if (a.type === "STRING_FUNC") return stringFuncDefaultKey(a);
     if (a.type === "AGG_REF" || a.type === "AGG_ARITH") return aggArithDefaultKey(a);
-    return arithColDefaultKey(a);
+    return scalarValueDefaultKey(a);
   });
   return `${expr.func}(${argStrs.join(",")})`;
 }
+function scalarValueDefaultKey(expr) {
+  switch (expr.type) {
+    case "STRING":
+      return `'${expr.value}'`;
+    case "NUMBER":
+      return numberLiteralText(expr);
+    case "VARIABLE":
+      return `@${expr.name}`;
+    case "FIELD":
+      return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
+    case "STRING_FUNC":
+      return stringFuncDefaultKey(expr);
+    case "CASE_WHEN":
+      return "case";
+    case "SCALAR_ARITH":
+      return `${scalarValueDefaultKey(expr.left)}${expr.op}${scalarValueDefaultKey(expr.right)}`;
+    case "CONCAT_OP":
+      return `${scalarValueDefaultKey(expr.left)}||${scalarValueDefaultKey(expr.right)}`;
+  }
+}
 function hasAggregateInStringFuncArg(arg) {
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-  if (arg.type === "STRING_FUNC") return hasAggregateInStringFuncExpr2(arg);
+  return scalarValueHasAggregate2(arg);
+}
+function scalarValueHasAggregate2(expr) {
+  if (expr.type === "STRING_FUNC") return hasAggregateInStringFuncExpr2(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasAggregate2(expr.left) || scalarValueHasAggregate2(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    return expr.branches.some((branch) => caseResultHasAggregate2(branch.result)) || expr.elseResult !== null && caseResultHasAggregate2(expr.elseResult);
+  }
   return false;
+}
+function caseResultHasAggregate2(result) {
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+  return scalarValueHasAggregate2(result);
 }
 function hasAggregateInStringFuncExpr2(expr) {
   return expr.args.some((arg) => hasAggregateInStringFuncArg(arg));
@@ -37603,7 +38001,18 @@ function resolveAggInStringFuncArg(arg, rows, resolveAggSortKind) {
   if (arg.type === "STRING_FUNC") {
     return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);
   }
-  return arg;
+  return resolveAggInScalarValue(arg, rows, resolveAggSortKind);
+}
+function resolveAggInScalarValue(expr, rows, resolveAggSortKind) {
+  if (expr.type === "STRING_FUNC") return resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return {
+      ...expr,
+      left: resolveAggInScalarValue(expr.left, rows, resolveAggSortKind),
+      right: resolveAggInScalarValue(expr.right, rows, resolveAggSortKind)
+    };
+  }
+  return expr;
 }
 function resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind) {
   return {
@@ -37624,7 +38033,7 @@ function deriveOutputOrderSemantics(columns) {
       } else if (column.func === "GROUP_CONCAT") {
         result.set(column.alias, syntheticSemantics("string"));
       }
-    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "SCALAR_VALUE_COL") {
       result.set(column.alias, syntheticSemantics("string"));
     } else if (column.type === "STRFUNC_COL") {
       result.set(column.alias, syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(column.expr.func) ? "number" : "string"));
@@ -37897,19 +38306,20 @@ var VALIDATION_META_COLUMNS = [
   "$err_code",
   "$err_message"
 ];
-function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision) {
+function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision, checkGroups = [], validateMissingCreateFields = true, includePreErrors = true) {
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors = [];
   const invalid = /* @__PURE__ */ new Set();
+  let firstEvaluationError;
   for (const candidate of candidates) {
     candidate.record ??= {};
-    const rowErrors = [...candidate.preErrors];
+    const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
     for (const code of targetFields) {
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code), numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
       else candidate.record[code] = { value: result.value };
     }
-    if (candidate.mode === "create") {
+    if (validateMissingCreateFields && candidate.mode === "create") {
       for (const info of fieldInfos) {
         if (info.inSubtable) continue;
         if (candidate.payload.has(info.code)) continue;
@@ -37931,6 +38341,23 @@ function validateDmlCandidates(candidates, operation, payloadFields, targetField
         }
       }
     }
+    if (checkGroups.length > 0) {
+      const row = candidate.evaluationRow ?? Object.fromEntries(
+        [...candidate.payload].map(([field, value]) => [field, renderValidationValue(value)])
+      );
+      const types = candidate.evaluationFieldTypes;
+      const resolveType = (field) => {
+        const qualified = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
+        return types?.get(qualified) ?? types?.get(field.field);
+      };
+      try {
+        for (const custom2 of evaluateCustomChecks(checkGroups, row, resolveType)) {
+          rowErrors.push({ field: "", code: "ERR_CHECK", message: custom2.message });
+        }
+      } catch (error51) {
+        firstEvaluationError ??= error51;
+      }
+    }
     if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
     for (const error51 of rowErrors) {
       const row = {};
@@ -37944,6 +38371,7 @@ function validateDmlCandidates(candidates, operation, payloadFields, targetField
       errors.push(row);
     }
   }
+  if (firstEvaluationError !== void 0) throw firstEvaluationError;
   return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
 }
 function renderValidationValue(value) {
@@ -39000,7 +39428,7 @@ function buildHavingFieldSemanticsResolver(stmt, rowResolver) {
       }
     } else if (column.type === "STRFUNC_COL") {
       semantics = stringFunctionColumnMeta(column.expr).semantics;
-    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL" || column.type === "SCALAR_VALUE_COL") {
       semantics = syntheticSemantics("string");
     }
     if (semantics) aliases.set(column.alias, semantics);
@@ -39115,10 +39543,19 @@ function arithHasFieldRef(node) {
   return false;
 }
 function stringFuncArgHasFieldRef(arg) {
-  if (arg.type === "FIELD_REF") return true;
-  if (arg.type === "ARITH") return arithHasFieldRef(arg);
-  if (arg.type === "STRING_FUNC") return stringFuncHasFieldRef(arg);
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+  return scalarValueHasFieldRef(arg);
+}
+function scalarValueHasFieldRef(expr) {
+  if (expr.type === "FIELD") return true;
+  if (expr.type === "STRING_FUNC") return stringFuncHasFieldRef(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasFieldRef(expr.left) || scalarValueHasFieldRef(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    const results = [...expr.branches.map((branch) => branch.result), ...expr.elseResult ? [expr.elseResult] : []];
+    return results.some((result) => result.type !== "ARRAY" && (result.type === "FIELD_REF" || result.type === "ARITH" ? arithHasFieldRef(result) : scalarValueHasFieldRef(result)));
+  }
   return false;
 }
 function stringFuncHasFieldRef(expr) {
@@ -39136,6 +39573,11 @@ function validateNoFromColumns(stmt) {
         break;
       case "STRFUNC_COL":
         if (stringFuncHasFieldRef(col.expr)) {
+          throw new Error("ArgumentError: field reference is not allowed without FROM.");
+        }
+        break;
+      case "SCALAR_VALUE_COL":
+        if (scalarValueHasFieldRef(col.expr)) {
           throw new Error("ArgumentError: field reference is not allowed without FROM.");
         }
         break;
@@ -39425,8 +39867,26 @@ function collectStringFuncAggregateRefs(expr, out) {
   for (const arg of expr.args) {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
       collectAggregateOperandRefs(arg, out);
-    } else if (arg.type === "STRING_FUNC") {
-      collectStringFuncAggregateRefs(arg, out);
+    } else {
+      collectScalarAggregateRefs(arg, out);
+    }
+  }
+}
+function collectScalarAggregateRefs(expr, out) {
+  if (expr.type === "STRING_FUNC") {
+    collectStringFuncAggregateRefs(expr, out);
+    return;
+  }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarAggregateRefs(expr.left, out);
+    collectScalarAggregateRefs(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") {
+    const results = [...expr.branches.map((branch) => branch.result), ...expr.elseResult ? [expr.elseResult] : []];
+    for (const result of results) {
+      if (result.type === "STRING_FUNC") collectStringFuncAggregateRefs(result, out);
+      else if (result.type !== "ARRAY" && result.type !== "FIELD_REF" && result.type !== "ARITH") collectScalarAggregateRefs(result, out);
     }
   }
 }
@@ -39439,6 +39899,8 @@ function collectSelectAggregateSortRefs(columns) {
       collectAggregateOperandRefs(column.expr, refs);
     } else if (column.type === "STRFUNC_COL") {
       collectStringFuncAggregateRefs(column.expr, refs);
+    } else if (column.type === "SCALAR_VALUE_COL") {
+      collectScalarAggregateRefs(column.expr, refs);
     }
   }
   return refs;
@@ -39604,10 +40066,11 @@ function stringFunctionColumnMeta(expr) {
 function caseResultColumnMeta(result, resolveField2) {
   if (result.type === "STRING") return syntheticColumnMeta("string");
   if (result.type === "ARRAY") return unsupportedColumnMeta();
-  if (result.type === "NUMBER" || result.type === "ARITH") return syntheticColumnMeta("number");
+  if (result.type === "NUMBER" || result.type === "ARITH" || result.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
-  const source = resolveField2(aggregateFieldRef(result.field));
-  return source ?? unknownStringColumnMeta();
+  if (result.type === "FIELD_REF") return resolveField2(aggregateFieldRef(result.field)) ?? unknownStringColumnMeta();
+  if (result.type === "FIELD") return resolveField2(result) ?? unknownStringColumnMeta();
+  return unknownStringColumnMeta();
 }
 function mergeExpressionColumnMeta(candidates) {
   if (candidates.length === 0) return unknownStringColumnMeta();
@@ -39709,7 +40172,7 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
       }
     } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
       meta3 = syntheticColumnMeta("number");
-    } else if (column.type === "LITERAL_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") {
       meta3 = syntheticColumnMeta("string");
     } else if (column.type === "STRFUNC_COL") {
       meta3 = stringFunctionColumnMeta(column.expr);
@@ -40416,7 +40879,7 @@ async function buildOrderSemanticsForSelect(stmt, client, cacheContext, material
     if (column.type === "FIELD") meta3 = resolveField2(aggregateFieldRef(column.field));
     else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
       meta3 = syntheticColumnMeta("number");
-    } else if (column.type === "LITERAL_COL") meta3 = syntheticColumnMeta("string");
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta3 = syntheticColumnMeta("string");
     else if (column.type === "STRFUNC_COL") meta3 = stringFunctionColumnMeta(column.expr);
     else if (column.type === "SCALAR_SUBQUERY_COL") meta3 = unknownStringColumnMeta();
     else if (column.type === "CASE_COL") {
@@ -40604,7 +41067,7 @@ var RejectLimitExceededError = class extends Error {
     this.name = "RejectLimitExceededError";
   }
 };
-async function prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
+async function prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber, validateMissingCreateFields = true, includePreErrors = true) {
   const operation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
@@ -40636,7 +41099,10 @@ async function prepareDmlValidation(stmt, client, options, cacheContext, tempTab
     targetFields,
     fieldInfos,
     statementNumber,
-    numberPrecision
+    numberPrecision,
+    stmt.checkGroups ?? [],
+    validateMissingCreateFields,
+    includePreErrors
   );
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result = {
@@ -40746,15 +41212,33 @@ async function executeOnErrorSkip(stmt, client, options, cacheContext, tempTable
 async function materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode) {
   if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
   let rows;
+  let sourceRows;
+  let evaluationTypes;
   if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
+    assertInsertCheckRefs(stmt, stmt.fields);
+    evaluationTypes = new Map(stmt.fields.map((field) => [field, infoByCode.get(field)?.fieldType ?? ""]));
+    assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = stmt.values.map((row) => row.map(
       (value, i) => value.type === "CASE_VALUE" ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType) : value
     ));
   } else {
-    const selectResult = tempTables && tempTables.size > 0 ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext) : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext);
-    if (selectResult.columns.length !== stmt.fields.length) {
+    const selectResult = tempTables && tempTables.size > 0 ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext) : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext, void 0, true);
+    const hasChecks = (stmt.checkGroups?.length ?? 0) > 0;
+    if (selectResult.columns.length < stmt.fields.length || !hasChecks && selectResult.columns.length !== stmt.fields.length) {
       throw new Error(`SELECT \u306E\u5217\u6570\uFF08${selectResult.columns.length}\uFF09\u3068 DML \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u6570\uFF08${stmt.fields.length}\uFF09\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093`);
     }
+    if (hasChecks && new Set(selectResult.columns).size !== selectResult.columns.length) {
+      throw customCheckParseError("CHECK \u4ED8\u304D DML \u30BD\u30FC\u30B9 SELECT \u306E\u51FA\u529B\u540D\u306F\u4E00\u610F\u3067\u3042\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059");
+    }
+    assertInsertCheckRefs(stmt, selectResult.columns);
+    sourceRows = selectResult.rows;
+    const meta3 = materializedMetaBySelectResult.get(selectResult);
+    evaluationTypes = new Map(selectResult.columns.map((column) => {
+      const columnMeta = meta3?.get(column);
+      const type = columnMeta?.fieldType ?? (columnMeta?.semantics?.compareMode === "number" || columnMeta?.sortKind === "number" ? "NUMBER" : "SINGLE_LINE_TEXT");
+      return [column, type];
+    }));
+    assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = selectResult.rows.map((row) => selectResult.columns.map((column) => row[column] ?? ""));
   }
   const candidates = rows.map((values, index) => ({
@@ -40763,7 +41247,11 @@ async function materializeValidationCandidates(stmt, operation, client, options,
     mode: "create",
     payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
     preErrors: [],
-    record: {}
+    record: {},
+    evaluationRow: sourceRows?.[index] ?? Object.fromEntries(
+      stmt.fields.map((field, i) => [field, renderValidationValue(values[i])])
+    ),
+    evaluationFieldTypes: evaluationTypes
   }));
   if (stmt.type !== "UPSERT" && stmt.type !== "UPSERT_SELECT") return candidates;
   for (const key of stmt.keyFields) {
@@ -40792,26 +41280,74 @@ async function materializeValidationCandidates(stmt, operation, client, options,
   });
   return candidates;
 }
+function checkRefs(stmt) {
+  return stmt.checkGroups ? collectCheckFieldRefs(stmt.checkGroups) : [];
+}
+function assertInsertCheckRefs(stmt, available) {
+  const names = new Set(available);
+  for (const ref of checkRefs(stmt)) {
+    if (ref.tableAlias !== null) {
+      throw customCheckParseError(`CHECK \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.tableAlias}.${ref.field} \u306F\u3053\u306E\u8A55\u4FA1\u884C\u3067\u306F\u4FEE\u98FE\u3067\u304D\u307E\u305B\u3093`);
+    }
+    if (!names.has(ref.field)) {
+      throw customCheckParseError(`CHECK \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F\u8A55\u4FA1\u884C\u306B\u5B58\u5728\u3057\u307E\u305B\u3093`);
+    }
+  }
+}
+var CHECK_UNSUPPORTED_COMPARISON_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "FILE",
+  "KSQL_ARRAY"
+]);
+function assertCheckComparisonTypes(stmt, types) {
+  if (!stmt.checkGroups) return;
+  for (const ref of collectCheckComparisonFieldRefs(stmt.checkGroups)) {
+    const key = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
+    const type = types.get(key) ?? types.get(ref.field);
+    if (CHECK_UNSUPPORTED_COMPARISON_TYPES.has(type ?? "")) {
+      throw customCheckParseError(`CHECK \u306E\u6BD4\u8F03\u3067\u306F ${type} \u30D5\u30A3\u30FC\u30EB\u30C9 ${key} \u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
+    }
+  }
+}
 async function materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables) {
   if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
+  assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
   let records;
+  let evaluationById = /* @__PURE__ */ new Map();
   if (hasRowDependentAssignment(stmt)) {
     const getParams = updateToGetQueryForArith(stmt);
-    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
+    const fields = [.../* @__PURE__ */ new Set([...getParams.fields, ...checkTargetFields])];
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
       maxRecords: options.maxRecords ?? 1e4,
       parallel: options.fetchParallel ?? 1,
       onLimit: "error"
     });
+    evaluationById = new Map(resolved.records.map((record2) => [Number(record2["$id"]?.value), record2]));
     records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt);
-    const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
-      maxRecords: options.maxRecords ?? 1e4,
-      parallel: options.fetchParallel ?? 1
-    });
-    records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+    if (checkTargetFields.length > 0) {
+      const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [.../* @__PURE__ */ new Set(["$id", ...checkTargetFields])], {
+        maxRecords: options.maxRecords ?? 1e4,
+        parallel: options.fetchParallel ?? 1,
+        onLimit: "error"
+      });
+      evaluationById = new Map(resolved.records.map((record2) => [Number(record2["$id"]?.value), record2]));
+      records = updateToPutBatches(stmt, [...evaluationById.keys()], fieldTypes).flatMap((batch) => batch.records);
+    } else {
+      const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
+        maxRecords: options.maxRecords ?? 1e4,
+        parallel: options.fetchParallel ?? 1
+      });
+      records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+    }
   }
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1,
@@ -40820,13 +41356,48 @@ async function materializeUpdateValidationCandidates(stmt, client, options, cach
     payload: new Map([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""])]),
     preErrors: [],
     record: entry.record,
-    targetId: entry.id
+    targetId: entry.id,
+    evaluationRow: updateEvaluationRow(evaluationById.get(entry.id), stmt.appId),
+    evaluationFieldTypes: updateEvaluationTypes(fieldTypes, stmt.appId)
   }));
 }
+function assertUpdateCheckRefs(stmt, targetTypes) {
+  if (stmt.from) return [];
+  const fields = /* @__PURE__ */ new Set();
+  for (const ref of checkRefs(stmt)) {
+    if (ref.tableAlias !== null && ref.tableAlias.toLowerCase() !== `app${stmt.appId}`.toLowerCase()) {
+      throw customCheckParseError(`CHECK \u306E\u4FEE\u98FE\u5B50 ${ref.tableAlias} \u306F\u66F4\u65B0\u5148 APP${stmt.appId} \u3067\u306F\u3042\u308A\u307E\u305B\u3093`);
+    }
+    if (ref.field !== "$id" && !targetTypes.has(ref.field)) {
+      throw customCheckParseError(`CHECK \u306E\u30BF\u30FC\u30B2\u30C3\u30C8\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093`);
+    }
+    fields.add(ref.field);
+  }
+  return [...fields];
+}
+function updateEvaluationRow(record2, appId) {
+  if (!record2) return {};
+  const plain = flatten(record2, null);
+  return Object.fromEntries([
+    ...Object.entries(plain),
+    ...Object.entries(plain).map(([field, value]) => [`APP${appId}.${field}`, value])
+  ]);
+}
+function updateEvaluationTypes(types, appId) {
+  return new Map([
+    ...types,
+    ...[...types].map(([field, type]) => [`APP${appId}.${field}`, type]),
+    ["$id", "RECORD_NUMBER"],
+    [`APP${appId}.$id`, "RECORD_NUMBER"]
+  ]);
+}
 async function materializeUpdateFromValidationCandidates(stmt, from, client, options, cacheContext, tempTables) {
+  const scope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
+  assertCheckComparisonTypes(stmt, scope.evaluationTypes);
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1,
     operation: "UPDATE",
@@ -40834,7 +41405,9 @@ async function materializeUpdateFromValidationCandidates(stmt, from, client, opt
     payload: new Map([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""])]),
     preErrors: [],
     record: entry.record,
-    targetId: entry.id
+    targetId: entry.id,
+    evaluationRow: updateFromEvaluationRow(matchedById.get(entry.id), stmt.appId, from.alias),
+    evaluationFieldTypes: scope.evaluationTypes
   }));
 }
 var UPDATE_FROM_KEY_CHUNK_SIZE = UPSERT_IN_CHUNK_SIZE;
@@ -40848,7 +41421,8 @@ var UPDATE_FROM_UNSUPPORTED_SOURCE_TYPES = /* @__PURE__ */ new Set([
 ]);
 async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables) {
   const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
-  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+  const checkScope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
+  const sourceFields = [...new Set(stmt.assignments.filter((a) => a.value.type === "SOURCE_FIELD").map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : "").concat(checkScope.sourceFields))];
   const requiredSourceFields = [.../* @__PURE__ */ new Set([from.joinKeyField, ...sourceFields])];
   const sourceRows = await loadUpdateFromSourceRows(
     from,
@@ -40874,8 +41448,8 @@ async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cach
   }
   if (sourceByKey.size === 0) return [];
   const maxRecords2 = options.maxRecords ?? 1e4;
-  const targetFields = collectUpdateFromTargetFields(stmt);
-  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+  const targetFields = [.../* @__PURE__ */ new Set([...collectUpdateFromTargetFields(stmt), ...checkScope.targetFields])];
+  const filterQuery = from.targetFilter === null ? "" : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: void 0 }).query;
   const targetRecords = [];
   const seenTargetIds = /* @__PURE__ */ new Set();
   let fetchedTargetCount = 0;
@@ -40993,7 +41567,54 @@ function normalizeUpdateFromJoinKey(raw, kind, side) {
   }
   return JSON.stringify(decimal);
 }
+async function executeCheckedPlainDml(stmt, client, options, cacheContext, tempTables) {
+  const prepared = await prepareDmlValidation(
+    stmt,
+    client,
+    options,
+    cacheContext,
+    tempTables,
+    1,
+    false,
+    false
+  );
+  if (prepared.result.errors.length > 0) {
+    const first = prepared.result.errors[0];
+    throw new Error(
+      `DmlValidationError: ${first["$err_code"]} ${first["$err_message"]} (row=${first["$err_row"]}, field=${first["$err_field"]})`
+    );
+  }
+  const candidates = prepared.candidates;
+  const confirmOperation = stmt.type.startsWith("INSERT") ? "INSERT" : "UPDATE";
+  if (options.confirm && candidates.length > 0) {
+    const ok = await options.confirm(candidates.length, confirmOperation);
+    if (!ok) throw new OperationCancelledError(confirmOperation, candidates.length);
+  }
+  if (stmt.type === "INSERT" || stmt.type === "INSERT_SELECT") {
+    const createdIds = [];
+    for (let i = 0; i < candidates.length; i += 100) {
+      const response = await client.postRecords({ app: stmt.appId, records: candidates.slice(i, i + 100).map((c) => c.record) });
+      createdIds.push(response.ids);
+    }
+    return { type: "INSERT", createdIds, insertedCount: createdIds.flat().length };
+  }
+  if (stmt.type === "UPDATE") {
+    const updates2 = candidates.map((candidate) => ({ id: candidate.targetId, record: candidate.record }));
+    for (let i = 0; i < updates2.length; i += 100) await client.putRecords({ app: stmt.appId, records: updates2.slice(i, i + 100) });
+    return { type: "UPDATE", updatedCount: updates2.length };
+  }
+  const inserts = candidates.filter((candidate) => candidate.mode === "create");
+  const updates = candidates.filter((candidate) => candidate.mode === "update").map((candidate) => ({ id: candidate.targetId, record: candidate.record }));
+  let insertedCount = 0;
+  for (let i = 0; i < inserts.length; i += 100) {
+    const response = await client.postRecords({ app: stmt.appId, records: inserts.slice(i, i + 100).map((c) => c.record) });
+    insertedCount += response.ids.length;
+  }
+  for (let i = 0; i < updates.length; i += 100) await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  return { type: "UPSERT", insertedCount, updatedCount: updates.length };
+}
 async function executeInsert(stmt, client, options, cacheContext) {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
@@ -41014,6 +41635,7 @@ async function executeInsert(stmt, client, options, cacheContext) {
   };
 }
 async function executeInsertSelect(stmt, client, options, cacheContext, cteCache) {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
@@ -41051,6 +41673,7 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
   };
 }
 async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, tempTables);
   if (stmt.subtableCode) {
     await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
@@ -41176,6 +41799,7 @@ async function executeDelete(stmt, client, options, cacheContext) {
   return { type: "DELETE", deletedCount: ids.length };
 }
 async function executeUpsert(stmt, client, options, cacheContext) {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const toInsert = [];
@@ -41610,6 +42234,7 @@ function evalOrderKeyForRow(key, row) {
   }
 }
 async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache) {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
@@ -42357,6 +42982,7 @@ function collectArithRefFields(stmt) {
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") collectArithNodeRefs(value, refs);
     if (value.type === "STRING_FUNC") collectArithNodeRefs(value, refs);
+    if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") collectScalarNodeRefs(value, refs);
   }
   return [...refs];
 }
@@ -42371,10 +42997,74 @@ function collectArithNodeRefs(node, out) {
   }
   if (node.type === "STRING_FUNC") {
     for (const arg of node.args) {
-      if (arg.type !== "STRING" && arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") {
-        collectArithNodeRefs(arg, out);
-      }
+      if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
     }
+  }
+}
+async function resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables) {
+  const refs = checkRefs(stmt);
+  const targetTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const sourceTableName = from.cteName;
+  const sourceTypes = sourceTableName !== null ? new Map((tempTables?.get(sourceTableName)?.columns ?? []).map((column) => [
+    column,
+    tempTables?.get(sourceTableName)?.columnMeta?.get(column)?.fieldType ?? (tempTables?.get(sourceTableName)?.columnMeta?.get(column)?.semantics?.compareMode === "number" ? "NUMBER" : "SINGLE_LINE_TEXT")
+  ])) : await getFieldTypeMap(from.appId, client, cacheContext);
+  const targetFields = /* @__PURE__ */ new Set();
+  const sourceFields = /* @__PURE__ */ new Set();
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias.toLowerCase() === `app${stmt.appId}`.toLowerCase()) {
+        if (ref.field !== "$id" && !targetTypes.has(ref.field)) throw customCheckParseError(`CHECK \u306E\u30BF\u30FC\u30B2\u30C3\u30C8\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093`);
+        targetFields.add(ref.field);
+      } else if (ref.tableAlias.toLowerCase() === from.alias.toLowerCase()) {
+        if (ref.field !== "$id" && !sourceTypes.has(ref.field)) throw customCheckParseError(`CHECK \u306E\u30BD\u30FC\u30B9\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093`);
+        sourceFields.add(ref.field);
+      } else {
+        throw customCheckParseError(`CHECK \u306E\u4FEE\u98FE\u5B50 ${ref.tableAlias} \u306F\u66F4\u65B0\u5148\u307E\u305F\u306F FROM alias \u3067\u306F\u3042\u308A\u307E\u305B\u3093`);
+      }
+      continue;
+    }
+    const inTarget = ref.field === "$id" || targetTypes.has(ref.field);
+    const inSource = ref.field === "$id" || sourceTypes.has(ref.field);
+    if (!inTarget) {
+      throw customCheckParseError(`UPDATE FROM \u306E CHECK \u3067\u306F\u30BD\u30FC\u30B9\u5217 ${ref.field} \u3092\u4FEE\u98FE\u3057\u3066\u304F\u3060\u3055\u3044`);
+    }
+    if (inSource) {
+      throw customCheckParseError(`UPDATE FROM \u306E CHECK \u306E\u975E\u4FEE\u98FE\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F\u66D6\u6627\u3067\u3059`);
+    }
+    targetFields.add(ref.field);
+  }
+  const evaluationTypes = /* @__PURE__ */ new Map();
+  for (const [field, type] of targetTypes) {
+    evaluationTypes.set(field, type);
+    evaluationTypes.set(`APP${stmt.appId}.${field}`, type);
+  }
+  evaluationTypes.set("$id", "RECORD_NUMBER");
+  evaluationTypes.set(`APP${stmt.appId}.$id`, "RECORD_NUMBER");
+  for (const [field, type] of sourceTypes) evaluationTypes.set(`${from.alias}.${field}`, type);
+  return { targetFields: [...targetFields], sourceFields: [...sourceFields], evaluationTypes };
+}
+function updateFromEvaluationRow(pair, appId, sourceAlias) {
+  if (!pair) return {};
+  const target = flatten(pair.target, null);
+  return Object.fromEntries([
+    ...Object.entries(target),
+    ...Object.entries(target).map(([field, value]) => [`APP${appId}.${field}`, value]),
+    ...Object.entries(pair.source).map(([field, value]) => [`${sourceAlias}.${field}`, value])
+  ]);
+}
+function collectScalarNodeRefs(node, out) {
+  if (node.type === "FIELD") {
+    out.add(node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field);
+    return;
+  }
+  if (node.type === "STRING_FUNC") {
+    for (const arg of node.args) if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
+    return;
+  }
+  if (node.type === "SCALAR_ARITH" || node.type === "CONCAT_OP") {
+    collectScalarNodeRefs(node.left, out);
+    collectScalarNodeRefs(node.right, out);
   }
 }
 function formatAssignment(a) {
@@ -44998,7 +45688,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "3.3.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.4.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

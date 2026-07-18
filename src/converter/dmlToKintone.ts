@@ -14,7 +14,7 @@ import type {
   UpdateStatement,
   DeleteStatement,
   SqlValue,
-  ArithExpr,
+  LegacyArithExpr,
   ArithNode,
   StringFuncExpr,
   StringFuncArg,
@@ -22,11 +22,13 @@ import type {
   CaseWhenExpr,
   CaseResult,
   WhereExpr,
+  ScalarValueExpr,
 } from "../types/ast";
+import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
-import { evalStringFunc, evalArithExpr } from "../engine/evalFunc";
+import { evalStringFunc, evalArithExpr, evalScalarValueExpr } from "../engine/evalFunc";
 import { whereHasKlike, whereHasLike } from "../core/like";
 
 function assertDmlWhereIsSafe(where: WhereExpr): void {
@@ -146,10 +148,11 @@ function buildInsertRecord(
  */
 export function updateToGetQuery(stmt: UpdateStatement): KintoneGetForDmlParams {
   assertDmlWhereIsSafe(stmt.where);
+  const checkFields = collectUpdateCheckTargetFields(stmt);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
-    fields: ["$id"],
+    fields: ["$id", ...checkFields],
     totalCount: false,
   };
 }
@@ -177,7 +180,7 @@ function buildUpdateRecord(
   const record: KintoneRecord = {};
   for (const { field, value } of assignments) {
     // 行評価が必要な値は updateToPutBatchesArith で処理するため、ここには到達しない
-    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
+    if (value.type === "ARITH" || value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
     record[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record;
@@ -193,14 +196,14 @@ function buildUpdateRecord(
  */
 export function hasArithAssignment(stmt: UpdateStatement): boolean {
   return stmt.assignments.some(
-    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE"
+    (a) => a.value.type === "ARITH" || a.value.type === "SCALAR_ARITH" || a.value.type === "CONCAT_OP" || a.value.type === "CASE_VALUE"
   );
 }
 
 /** 現在のレコードを取得して行ごとに評価する assignment を含むか。 */
 export function hasRowDependentAssignment(stmt: UpdateStatement): boolean {
   return stmt.assignments.some(
-    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
+    (a) => a.value.type === "ARITH" || a.value.type === "SCALAR_ARITH" || a.value.type === "CONCAT_OP" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
   );
 }
 
@@ -214,12 +217,15 @@ export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDm
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
       collectArithFields(value, refFields);
+    } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+      collectScalarValueFields(value, refFields);
     } else if (value.type === "STRING_FUNC") {
       collectStringFuncFields(value, refFields);
     } else if (value.type === "CASE_VALUE") {
       collectCaseFields(value.expr, refFields);
     }
   }
+  collectUpdateCheckTargetFields(stmt).forEach((field) => refFields.add(field));
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -228,7 +234,7 @@ export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDm
   };
 }
 
-function collectArithFields(expr: ArithExpr, out: Set<string>): void {
+function collectArithFields(expr: LegacyArithExpr, out: Set<string>): void {
   collectArithNode(expr.left, out);
   collectArithNode(expr.right, out);
 }
@@ -244,10 +250,19 @@ function collectStringFuncFields(expr: StringFuncExpr, out: Set<string>): void {
 }
 
 function collectStringFuncArgFields(arg: StringFuncArg, out: Set<string>): void {
-  if (arg.type === "STRING")      return;
-  if (arg.type === "STRING_FUNC") { collectStringFuncFields(arg, out); return; }
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") { collectAggOperandFields(arg, out); return; }
-  collectArithNode(arg, out);
+  collectScalarValueFields(arg, out);
+}
+
+function collectScalarValueFields(expr: ScalarValueExpr, out: Set<string>): void {
+  if (expr.type === "FIELD") { out.add(expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field); return; }
+  if (expr.type === "STRING_FUNC") { collectStringFuncFields(expr, out); return; }
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    collectScalarValueFields(expr.left, out);
+    collectScalarValueFields(expr.right, out);
+    return;
+  }
+  if (expr.type === "CASE_WHEN") collectCaseFields(expr, out);
 }
 
 function collectAggOperandFields(node: AggOperand, out: Set<string>): void {
@@ -262,10 +277,9 @@ function collectAggOperandFields(node: AggOperand, out: Set<string>): void {
 }
 
 function collectCaseResultFields(result: CaseResult, out: Set<string>): void {
-  if (result.type === "STRING") return;
   if (result.type === "ARRAY") return; // 配列リテラルはフィールド参照なし
-  // ArithNode (FIELD_REF / NUMBER / ARITH / STRING_FUNC) or StringFuncExpr
-  collectArithNode(result as ArithNode, out);
+  if (result.type === "FIELD_REF" || result.type === "ARITH") { collectArithNode(result, out); return; }
+  collectScalarValueFields(result, out);
 }
 
 function collectCaseFields(expr: CaseWhenExpr, out: Set<string>): void {
@@ -315,6 +329,8 @@ export function updateToPutBatchesArith(
     for (const { field, value } of stmt.assignments) {
       if (value.type === "ARITH") {
         record[field] = { value: String(evalArith(value, raw)) };
+      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+        record[field] = { value: String(evalScalarValueExpr(value, row)) };
       } else if (value.type === "STRING_FUNC") {
         record[field] = { value: evalStringFunc(value, row) };
       } else if (value.type === "CASE_VALUE") {
@@ -381,6 +397,8 @@ export function updateFromToPutBatches(
         throw new DmlConvertError("UPDATE ... FROM の SET では文字列関数を直接使用できません");
       } else if (value.type === "ARITH") {
         record[field] = { value: String(evalArith(value, target)) };
+      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+        record[field] = { value: String(evalScalarValueExpr(value, targetRow)) };
       } else if (value.type === "CASE_VALUE") {
         record[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
       } else {
@@ -401,7 +419,7 @@ function kintoneRecordToProcessRow(raw: KintoneRecord): ProcessRow {
   );
 }
 
-function evalArith(expr: ArithExpr, raw: KintoneRecord): number {
+function evalArith(expr: LegacyArithExpr, raw: KintoneRecord): number {
   const l = resolveArithOperand(expr.left, raw);
   const r = resolveArithOperand(expr.right, raw);
   switch (expr.op) {
@@ -553,8 +571,19 @@ function evalCaseResultValue(
   if (result.type === "STRING_FUNC") {
     return evalStringFunc(result, row);
   }
-  // NUMBER / ARITH / FIELD_REF
-  return String(evalArithExpr(result as ArithNode, row));
+  if (result.type === "FIELD_REF" || result.type === "ARITH") {
+    return String(evalArithExpr(result, row));
+  }
+  return String(evalScalarValueExpr(result, row));
+}
+
+function collectUpdateCheckTargetFields(stmt: UpdateStatement): string[] {
+  if (!stmt.checkGroups) return [];
+  const targetAlias = `app${stmt.appId}`.toLowerCase();
+  return [...new Set(collectCheckFieldRefs(stmt.checkGroups)
+    .filter((ref) => ref.tableAlias === null || ref.tableAlias.toLowerCase() === targetAlias)
+    .map((ref) => ref.field)
+    .filter((field) => field !== "$id"))];
 }
 
 export function evalCaseWhenValue(

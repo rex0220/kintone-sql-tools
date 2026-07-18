@@ -198,6 +198,7 @@ export class Lexer {
     if (ch === "<" && ch2 === ">") { this.pos += 2; return this.makeToken(TokenKind.LT_GT, "<>", start); }
     if (ch === ">" && ch2 === "=") { this.pos += 2; return this.makeToken(TokenKind.GTE,   ">=", start); }
     if (ch === "<" && ch2 === "=") { this.pos += 2; return this.makeToken(TokenKind.LTE,   "<=", start); }
+    if (ch === "|" && ch2 === "|") { this.pos += 2; return this.makeToken(TokenKind.CONCAT_OP, "||", start); }
 
     // 1文字
     switch (ch) {

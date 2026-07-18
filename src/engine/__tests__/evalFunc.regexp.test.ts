@@ -98,13 +98,13 @@ test("B36 occurrence はフィールドと式を行ごとに実行時評価す�
   expect(evalStringFunc({
     type: "STRING_FUNC",
     func: "REGEXP_REPLACE",
-    args: [...baseArgs, { type: "FIELD_REF", field: "occurrence" }],
+    args: [...baseArgs, { type: "FIELD", tableAlias: null, field: "occurrence" }],
   }, { occurrence: "2" })).toBe("a-x-a");
   expect(evalStringFunc({
     type: "STRING_FUNC",
     func: "REGEXP_REPLACE",
     args: [...baseArgs, {
-      type: "ARITH",
+      type: "SCALAR_ARITH",
       op: "+",
       left: { type: "NUMBER", value: 1, raw: "1" },
       right: { type: "NUMBER", value: 1, raw: "1" },

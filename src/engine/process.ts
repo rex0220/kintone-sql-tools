@@ -36,6 +36,8 @@ import type {
   StringFuncExpr,
   FieldRef,
   WindowColumn,
+  ScalarValueExpr,
+  CaseResult,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
@@ -51,6 +53,7 @@ import {
   evalStringFunc,
   applyRoundOp,
   resolveFieldRef,
+  evalScalarValueExpr,
 } from "./evalFunc";
 import { compareCanonicalValues } from "../core/scalarCompare";
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
@@ -199,7 +202,8 @@ export function hasAggregateColumns(columns: SelectColumn[]): boolean {
   return columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
-    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr))
+    (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
+    (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
   );
 }
 
@@ -265,6 +269,10 @@ export function applyGroupBy(
         const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
         const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
         outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
+      } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr)) {
+        const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
+        const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
+        outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
       }
     }
 
@@ -770,6 +778,15 @@ export function project(
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
+        case "SCALAR_VALUE_COL": {
+          const key = outputKeys?.[colIdx] ?? col.alias ?? scalarValueDefaultKey(col.expr);
+          const srcKey = scalarValueDefaultKey(col.expr);
+          out[key] = scalarValueHasAggregate(col.expr)
+            ? row[col.alias ?? srcKey] ?? row[srcKey] ?? ""
+            : String(evalScalarValueExpr(col.expr, row));
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
         case "SCALAR_SUBQUERY_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "(subquery)";
           out[key] = scalarCache?.get(colIdx) ?? "";
@@ -836,6 +853,8 @@ function computeOutputKey(
       return col.alias ?? "case";
     case "STRFUNC_COL":
       return col.alias ?? stringFuncDefaultKey(col.expr);
+    case "SCALAR_VALUE_COL":
+      return col.alias ?? scalarValueDefaultKey(col.expr);
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
     case "WINDOW_COL":
@@ -903,18 +922,45 @@ function arithColDefaultKey(expr: ArithNode): string {
 /** alias なし時のデフォルトキー名: "UPPER(名前)" 形式 */
 function stringFuncDefaultKey(expr: StringFuncExpr): string {
   const argStrs = expr.args.map((a) => {
-    if (a.type === "STRING")      return `'${a.value}'`;
-    if (a.type === "STRING_FUNC") return stringFuncDefaultKey(a);
     if (a.type === "AGG_REF" || a.type === "AGG_ARITH") return aggArithDefaultKey(a);
-    return arithColDefaultKey(a); // ArithNode
+    return scalarValueDefaultKey(a);
   });
   return `${expr.func}(${argStrs.join(",")})`;
 }
 
+function scalarValueDefaultKey(expr: ScalarValueExpr): string {
+  switch (expr.type) {
+    case "STRING": return `'${expr.value}'`;
+    case "NUMBER": return numberLiteralText(expr);
+    case "VARIABLE": return `@${expr.name}`;
+    case "FIELD": return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
+    case "STRING_FUNC": return stringFuncDefaultKey(expr);
+    case "CASE_WHEN": return "case";
+    case "SCALAR_ARITH": return `${scalarValueDefaultKey(expr.left)}${expr.op}${scalarValueDefaultKey(expr.right)}`;
+    case "CONCAT_OP": return `${scalarValueDefaultKey(expr.left)}||${scalarValueDefaultKey(expr.right)}`;
+  }
+}
+
 function hasAggregateInStringFuncArg(arg: StringFuncArg): boolean {
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
-  if (arg.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(arg);
+  return scalarValueHasAggregate(arg);
+}
+
+function scalarValueHasAggregate(expr: ScalarValueExpr): boolean {
+  if (expr.type === "STRING_FUNC") return hasAggregateInStringFuncExpr(expr);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return scalarValueHasAggregate(expr.left) || scalarValueHasAggregate(expr.right);
+  }
+  if (expr.type === "CASE_WHEN") {
+    return expr.branches.some((branch) => caseResultHasAggregate(branch.result))
+      || (expr.elseResult !== null && caseResultHasAggregate(expr.elseResult));
+  }
   return false;
+}
+
+function caseResultHasAggregate(result: CaseResult): boolean {
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
+  return scalarValueHasAggregate(result);
 }
 
 function hasAggregateInStringFuncExpr(expr: StringFuncExpr): boolean {
@@ -939,7 +985,23 @@ function resolveAggInStringFuncArg(
   if (arg.type === "STRING_FUNC") {
     return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);
   }
-  return arg;
+  return resolveAggInScalarValue(arg, rows, resolveAggSortKind);
+}
+
+function resolveAggInScalarValue(
+  expr: ScalarValueExpr,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): ScalarValueExpr {
+  if (expr.type === "STRING_FUNC") return resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind);
+  if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
+    return {
+      ...expr,
+      left: resolveAggInScalarValue(expr.left, rows, resolveAggSortKind),
+      right: resolveAggInScalarValue(expr.right, rows, resolveAggSortKind),
+    };
+  }
+  return expr;
 }
 
 function resolveAggInStringFuncExpr(
@@ -996,7 +1058,7 @@ function deriveOutputOrderSemantics(columns: SelectColumn[]): Map<string, Resolv
       } else if (column.func === "GROUP_CONCAT") {
         result.set(column.alias, syntheticSemantics("string"));
       }
-    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "SCALAR_VALUE_COL") {
       result.set(column.alias, syntheticSemantics("string"));
     } else if (column.type === "STRFUNC_COL") {
       result.set(column.alias, syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(column.expr.func) ? "number" : "string"));
