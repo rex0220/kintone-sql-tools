@@ -1,9 +1,21 @@
-ksql 配布パッケージ (v3.3.0)
+ksql 配布パッケージ (v3.4.0)
 
-1. ksql-plugin-v3.3.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.4.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.4.0: DML カスタムチェックと文字列連結演算子 (B37/B38)。
+- B38: 文字列連結演算子 || を追加 (CONCAT と同義・NULL/空は空文字・加減算と
+  同じ優先順位で左結合)。CONCAT 等の関数引数に @var を渡せるように。SELECT 列・
+  UPDATE SET・CASE・CHECK メッセージで利用可 (WHERE の比較オペランドは未対応)。
+- B37: DML カスタムチェック CHECK WHEN <条件> THEN <メッセージ> を追加。
+  INSERT/UPSERT/UPDATE に行レベル業務ルールを付与し、該当行をカスタムメッセージ
+  付きで #err (ERR_CHECK) へ隔離。CHECK ブロック=グループ (ブロック内先勝ち・
+  ブロック間独立)。参照は読み取り行 (SELECT 出力行/挿入値/UPDATE 更新前値/
+  UPDATE FROM は APP<n>.列=旧値・ソース別名.列=新値)。ON ERROR SKIP で隔離、
+  VALIDATE ONLY で報告。新ソフトキーワード CHECK (予約語増なし)。
+- 既存の正しいクエリの挙動変更なし (minor)。
 
 v3.3.0: 厳密10進比較・数値精度整合・正規表現の 4 件バンドル (B9/B29/B20/B36)。
 - B9: 最大30桁の有限10進比較を厳密化。16 有効桁を超える NUMBER/CALC 値を
