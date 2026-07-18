@@ -73,7 +73,7 @@ type ScalarExpr =
 | 評価タイミング | `SET` 文の**実行時に一度だけ**評価し、以後は定数。`SET @now = NOW()` はその文の実行時刻で固定 |
 | 型 | 代入値から決定: **number**（数値リテラル・算術結果）/ **string**（文字列・文字列関数・日付系関数の結果）。**1a では `null` を扱わない**（下記） |
 | 比較 | 参照時は型付き値として既存の比較規則に従う（v2.0.0 準拠: `=`/`!=` は文字列一致、`>`/`<` は両辺数値化可能なら数値）。日付は ISO 文字列比較（kintone 日付と整合） |
-| NULL | **1a では対象外**。現行言語に `NullLiteral` はなく（[ast.ts:398](../../src/types/ast.ts#L398) の `SqlValue` に無し）、`parseSqlValue` も `NULL` を受理しない。`@x IS NULL` / `f IS @x` 構文も無い。kintone の null 相当は空文字で処理（[evalWhere.ts:131](../../src/engine/evalWhere.ts#L131)）。NULL は独立機能として後続へ（§6・codex #2） |
+| NULL | **1a では対象外**。~~現行言語に `NullLiteral` はなく、`@x IS NULL` 構文も無い~~ → **【2026-07-18 訂正・B10】この根拠は陳腐化**。v3.2.0 では `NULL` トークン（`tokens.ts:90`）と `IS NULL`/`IS NOT NULL` 述語（`NullCheckExpr`・`parser.ts:1590` 付近）が**フィールドに対しては実装済み**。ただし**変数への NULL 代入は今も拒否**（`parseScalarExpr` が SET/DECLARE RHS で NULL を拒否・`parser.ts:288` 付近）で、`VarValue` に null バリアントも無い。kintone の null 相当は空文字で処理（`SET @empty = ''` で概ね代替可）。**B10 の NULL 部分を再評価する際は「フィールドの IS NULL は既にある／不足しているのは変数への NULL 代入＋変数 null の意味論」に論点を絞り、仕様の前提文を書き直すこと**。SELECT 列での `@var` 参照（`SELECT @x AS c`）は前提不変（変数列型が未実装）で純粋な後続拡張 |
 | 再代入 | **不可（validate 静的エラー）**。上限（§下）とは別エラー。バッチ定数として小さく保つ |
 | 未定義参照 | **validate 静的エラー**（タイプミスを実行前に検出）。バッチ内で先行する `SET` が無い `@name` 参照はエラー |
 | スコープ | 1 バッチ実行内（temp table と同一ライフサイクル）。バッチをまたがない。**単文 `SET`・単文での `@ref` はエラー**（§2.4） |
