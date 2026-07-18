@@ -5,8 +5,8 @@
 - 種別: 機能バグ（KLIKE 固有ではなく SIMPLE SELECT 全般）
 - 優先度: **P1**
 - 関連課題:
-  - [`../perf-sql-execution-improvements.md`](../perf-sql-execution-improvements.md) A-8（`LIMIT > 500` の取得打ち切り。性能改善）
-  - [`../perf-sql-execution-implementation-plan.md`](../perf-sql-execution-implementation-plan.md) フェーズ3 A-8
+  - [`../perf-sql-execution-improvements.md`](perf-sql-execution-improvements.md) A-8（`LIMIT > 500` の取得打ち切り。性能改善）
+  - [`../perf-sql-execution-implementation-plan.md`](perf-sql-execution-implementation-plan.md) フェーズ3 A-8
 - 更新履歴:
   - R2（2026-07-16）: レビュー承認を反映。実機で `LIMIT 501` が `GAIA_QU01`、`LIMIT 500` が正常であることを確認。`LIMIT 500 / 501` の ORDER BY 境界テストと、検索打ち切りを `wrapClientWithSearchAbort` がクライアント層で捕捉することの回帰コメントを追加。案Aを実装。
 

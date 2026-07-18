@@ -10,7 +10,7 @@
 - ステータス: **実装・実機検証完了（v1.9.0）**
 - 対象バージョン: v1.9.0
 - 関連資料:
-  - [ksql_batch_temp_table_spec.md](../ksql_batch_temp_table_spec.md) §8.4（現行のプラグイン read-only 制限）・§8.3（CLI の DML バッチ確認）・§10（制限事項）
+  - [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md) §8.4（現行のプラグイン read-only 制限）・§8.3（CLI の DML バッチ確認）・§10（制限事項）
   - [ksql_batch_temp_table_implementation_plan.md](ksql_batch_temp_table_implementation_plan.md)（フェーズ1・2 の実装経緯）
 
 ---

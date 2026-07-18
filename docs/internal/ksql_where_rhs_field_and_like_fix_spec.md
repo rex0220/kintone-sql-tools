@@ -10,7 +10,7 @@
 - ステータス: **実装完了(v1.14.0)**
 - 対象バージョン: 現行 v1.13.2 → **v1.14.0 確定**(挙動変更を含むため minor バンプ + CHANGELOG に Safety/移行案内)
 - 課題文書: [ksql_where_rhs_field_and_like_mode_divergence_issue.md](ksql_where_rhs_field_and_like_mode_divergence_issue.md)
-- 関連ドキュメント: [docs/ksql_language_reference.md §6](../ksql_language_reference.md#L595)(LIKE / 比較)、[docs/perf-where-pushdown-join.md](../perf-where-pushdown-join.md)(JOIN WHERE 押し下げ)
+- 関連ドキュメント: [docs/ksql_language_reference.md §6](../ksql_language_reference.md#L595)(LIKE / 比較)、[docs/perf-where-pushdown-join.md](perf-where-pushdown-join.md)(JOIN WHERE 押し下げ)
 
 ---
 

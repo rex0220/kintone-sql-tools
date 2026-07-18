@@ -4,7 +4,7 @@
 - 更新日: 2026-07-09(並列実行を対象外化。仕様化が必要な追加論点・先行すべき基盤仕様を追記。レビュー指摘反映: `#` はレキサ変更が必要、一時テーブル参照は常に FULL_SCAN、`fetchParallel` 既定値の層別表記、テスト数 404)
 - 対象バージョン: `@rex0220/kintone-sql-tools` v1.3.0
 - ステータス: 採用・実装済み(順次バッチ＋一時テーブルは v1.11.0/v1.12.x でリリース済。並列実行は対象外のまま)。本書は起点の評価資料
-- 後続資料: [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md)(仕様書)/ [internal/ksql_batch_temp_table_implementation_plan.md](internal/ksql_batch_temp_table_implementation_plan.md)(実装計画)
+- 後続資料: [ksql_batch_temp_table_spec.md](ksql_batch_temp_table_spec.md)(仕様書)/ [internal/ksql_batch_temp_table_implementation_plan.md](ksql_batch_temp_table_implementation_plan.md)(実装計画)
 
 kSQL に「複数SQLの順次実行・並列実行」と「一時テーブル」を追加する案について、現行実装のコード調査に基づいて評価する。並列実行は本改訂で**対象外**とした(§3)。
 

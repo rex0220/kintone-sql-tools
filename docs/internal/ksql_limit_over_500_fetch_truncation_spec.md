@@ -1,7 +1,7 @@
 # 仕様案: `LIMIT > 500` の取得打ち切り最適化（A-8・安全サブセット）
 
 - 作成日: 2026-07-16
-- 対象課題: [perf-sql-execution-improvements.md](../perf-sql-execution-improvements.md) §A-8 / [perf-sql-execution-implementation-plan.md](../perf-sql-execution-implementation-plan.md) フェーズ3 A-8
+- 対象課題: [perf-sql-execution-improvements.md](perf-sql-execution-improvements.md) §A-8 / [perf-sql-execution-implementation-plan.md](perf-sql-execution-implementation-plan.md) フェーズ3 A-8
 - 前提修正: [ksql_simple_select_limit_over_500_issue.md](ksql_simple_select_limit_over_500_issue.md)（`LIMIT>500` を `fetchAll` へ送る機能バグ＝v2.10.1 で解消済み）
 - ステータス: **R3 実装済み・codex 検証済み。v2.11.0 予定③（リリース待ち）**
 - 更新履歴:

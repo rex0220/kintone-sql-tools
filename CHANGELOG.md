@@ -412,8 +412,8 @@
     解決する。値パラメータ化とは独立。
   - 既存の `APPxxx` SQL の意味・挙動に回帰はなく、`logicalApps` を追加しただけでは既存 SQL が
     別アプリへ向くことはない（opt-in）。
-  - 詳細は `docs/ksql_language_reference.md`・`docs/cli_app_profile_spec.md`・
-    `docs/ksql_mcp_server_spec.md` を参照。
+  - 詳細は `docs/ksql_language_reference.md`・`docs/internal/cli_app_profile_spec.md`・
+    `docs/internal/ksql_mcp_server_spec.md` を参照。
 
 ### 内部
 
