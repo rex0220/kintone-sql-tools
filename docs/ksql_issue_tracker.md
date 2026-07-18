@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-07-18
-- 現在の最新リリース: **v3.1.0**（B33 KORDER BY 大規模窓の Cursor API 対応・tag/GitHub Release 公開済み・**npm publish はユーザー操作待ち**）
+- 現在の最新リリース: **v3.1.0**（B33 KORDER BY 大規模窓の Cursor API 対応・tag/GitHub Release 公開・npm publish 済み・latest 3.1.0）
 - 次回リリース計画: **v3.2.0 = B34＋B22**（受入確定済みの正しさバグ・実装着手可）。以降の目安: **v3.3.0 = B9＋B29**（numberPrecision 領域ペア・仕様作成から）
 - 実装計画: [B33 KORDER Cursor 実装計画](internal/ksql_korder_cursor_implementation_plan.md)（v3.0.0 の計画は [こちら](internal/ksql_v3_order_by_implementation_plan.md)）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
