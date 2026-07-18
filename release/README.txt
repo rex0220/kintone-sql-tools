@@ -1,9 +1,19 @@
-ksql 配布パッケージ (v3.0.0)
+ksql 配布パッケージ (v3.1.0)
 
-1. ksql-plugin-v3.0.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.1.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.1.0: KORDER BY 大規模窓の Cursor API 対応 (B33)。
+- 単発GETに収まらない KORDER BY 窓 (LIMIT>500 / OFFSET>10000) を、
+  kintone Cursor API で kintone 固有順のまま実行 (KORDER_CURSOR)。
+  条件は走査件数 OFFSET+LIMIT <= maxRecords。超過は planning error。
+- カーソルは 500 件ずつ取得し必要窓到達で即時削除。同時カーソルは
+  host 単位で既定 2・最大 5 (新設定 cursorMaxActive・プラグインは
+  「⚙ オプション」の Cursor 上限)。
+- 既存クエリの挙動変更なし (純加法的 minor)。
+  詳細: docs/ksql_v3_1_migration_guide.md
 
 v3.0.0: 比較・ORDER BY・WHERE押し下げ・top-N安全性を統合するmajor release
           (B26 / B27 / B30 / B31 / B32)。
