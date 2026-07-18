@@ -1,12 +1,21 @@
 # 保存クエリのパラメータ化 — 仕様案サマリと効果評価
 
 - 作成日: 2026-07-12
-- ステータス: **評価確定（実装計画待ち）**
+- ステータス: **価値評価の再検討が必要（棚上げ寄り・2026-07-18 更新）**。当初「評価確定（実装計画待ち）」だったが、**本評価の作成 2 日後（2026-07-14〜15）に `SET @var` / `DECLARE @param`（外部注入）が実装され**（v2.x）、B4 の中核価値の大半を既に提供している。着手前に「@var との差分」に絞った再評価が要る。
 - 対象機能: MCP 保存クエリのパラメータ化（名前付きバインド変数）
 - 仕様本体: [ksql_saved_query_params_spec.md](./ksql_saved_query_params_spec.md)
 - 関連実装: `src/mcp/savedQueries.ts`、`src/mcp/tools.ts`、`src/mcp/schemas.ts`、`src/mcp/index.ts`、`src/lexer/`、`src/parser/`、`src/types/ast.ts`
 
 このファイルは、仕様案（R2）と、複数回の codex レビューを反映した効果評価を1枚にまとめたもの。設計評価 → codex R1〜R2（仕様）→ 効果評価 → codex 効果レビュー訂正、の結論を確定版として記録する。
+
+## 【2026-07-18 追記】DECLARE @var 実装後の価値再評価
+
+本評価は `@var`（バッチ変数）実装**前**に書かれ、両者の重複を検討していなかった。現状（v3.2.0）を踏まえた訂正:
+
+- **B4 の中核目的「生 SQL 生成・文字列置換を避けて外部から動的値を安全に渡す」は、既に `@var` が実行時に提供している**。`DECLARE @x`＋CLI `--var` / MCP `variables` で宣言済み変数へ値だけを注入でき（`src/core/batchVariables.ts` の `validateDeclaredBatchVariables`）、未宣言・タイポは実行前拒否。`@var` は WHERE 右辺・UPDATE SET・ASSERT・IN 要素・KLIKE パターンで使える。
+- **B4 に残る固有価値は「カタログへ永続化された宣言メタデータ＋保存クエリでの利用」だけ**。ただし保存クエリは save/run とも単文限定のため、`DECLARE @since; SELECT … WHERE 日付 >= @since` のバッチを保存クエリ化できないのが現状の穴。
+- **費用対効果の逆転**: 「保存クエリでも動的値を使いたい」なら、B4 のフルスタック（lexer PARAM／parser allowParams／新 AST ノード `ParamRef`／binder／カタログ v2 移行）を作るより、**保存クエリの単文制約を緩めて「DECLARE + SELECT のバッチ保存」＋既存 `@var` 外部注入を許す**ほうが遥かに小さい実装で同じ価値に届く。
+- **結論**: 判定表（§4.2）の「実需があれば実装推奨」は `@var` との差分に絞って再評価しない限り着手すべきでない。**当面は棚上げ**。動かす場合の第一候補は「フル `:name` 実装」ではなく「保存クエリの複文許可＋@var」という軽量路線。
 
 ---
 

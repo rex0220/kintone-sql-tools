@@ -86,6 +86,8 @@ kintone ネイティブゆえ **`KLIKE` は JS で再評価できない**。FULL
   - 「事前 SELECT 推奨」は意味論確認には役立つが、SELECT 後の更新との競合や 10 万件打ち切りは解消しないため、DML 解禁の根拠にはしない。
 - DML result 型に `warnings` が無い（[execute.ts:165](../../src/execute.ts#L165)）ため「警告付き DML 許可」は現状実装不可。解禁時は result 型拡張が前提。
 
+> **【2026-07-18 追記・B5 の面依存性】** 台帳 B5「KLIKE 親レコード DML 解禁」の前提「検索打ち切り検出は v2.10.0 で整備済み」は **Node/CLI/MCP でのみ成立**する（`nodeKintoneClient.ts` が `X-Cybozu-Warning` を判定・`execute.ts` の `SearchAbortedError` で fail-closed）。**プラグインは `kintone.api()` がヘッダーを露出せず打ち切りを検出できない**（`ui/kintoneClient.ts` は `{ records }` のみ返す＝台帳 B7）。したがって **B5 を実装する際は「①DML result 型への `warnings` 追加②プラグイン面は B7 未解決のため対象外にするか（Node 系限定で解禁するか）③サブテーブル DML は恒久非対応」を確定する専用仕様が要る**。現状は改善案止まりで専用仕様が無いため、B5 は「仕様が要る」状態。
+
 ### 3.6 EXPLAIN
 - SIMPLE: `kintone query` に `件名 like "至急"` が現れる。
 - v2 の FULL_SCAN 押し下げ時: `pushdown` として現れる（型不要・kintone ネイティブ）。

@@ -66,11 +66,13 @@ B9 に含めないもの:
 
 ## 5. 影響範囲
 
-- lexer/parser/AST: `NumberLiteral.value: number`だけでは元字句を失う。decimal表現またはraw lexemeを追加し、INSERT等の既存消費先との互換を設計する
-- `scalarCompare` の消費先: WHERE / HAVING / CASE WHEN / サブテーブル UPDATE・DELETE・REORDER / ASSERT / BETWEEN
+- lexer/parser/AST: `NumberLiteral.value: number`だけでは元字句を失う。decimal表現またはraw lexemeを追加し、INSERT等の既存消費先との互換を設計する（現行 `ast.ts` の `NumberLiteral.value: number`・parser の `Number(tok.value)` は v3.2.0 でも不変＝この記述は現状と一致）
+- `scalarCompare` の消費先: WHERE / HAVING / CASE WHEN / サブテーブル UPDATE・DELETE・REORDER / ASSERT / BETWEEN。**加えて `GREATEST`/`LEAST`（`scalarCompare.ts:180` 付近 `selectScalarExtreme` が `Number()` 直呼び）も binary64 経路のため対象に含める**（2026-07-18 追記・当初リストから漏れていた）
 - B26のtyped number ORDER BY、MIN/MAX、比較器共通化
 - 数値プレフィルタ: 厳密比較完成後に `<=` / `>=` の超集合性を再証明する。押し下げ解禁は別変更とする
 - CLI / MCP / プラグインの4面。同じ文字列ベースprimitiveを共有し、ホストの浮動小数点差へ依存しない
+
+> **【2026-07-18 追記】既存 `compareDecimal` の再利用を検討すること**: `src/core/dmlValidation.ts` の `compareDecimal` が既に**符号・先頭ゼロ・末尾ゼロ・小数桁パディングを厳密に文字列比較**しており、DML の範囲検証（min/maxValue）で使われている（指数表記のみ非対応）。B9 は「新規に厳密 primitive を作る」前提だが、この既存関数を拡張・共通化して `scalarCompare` へ流用できる可能性が高い（新規実装との二重化を避ける）。実装計画で「既存 `compareDecimal` の拡張 vs 新規」「指数表記 `"1e+21"` の正規化」を先に決める。**B29 も同じ `compareDecimal` を桁数・小数桁・丸め検証の基盤に使えるため、B9→B29 で単一 primitive を共有できる**。
 
 ## 6. 受入条件
 
