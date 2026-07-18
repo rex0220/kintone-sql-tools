@@ -492,6 +492,16 @@ export interface StringLiteral {
 export interface NumberLiteral {
   type: "NUMBER";
   value: number;
+  /** Original SQL lexeme. Parser-produced nodes always provide this. */
+  raw?: string;
+}
+
+export function makeNumberLiteral(raw: string): NumberLiteral {
+  return { type: "NUMBER", value: Number(raw), raw };
+}
+
+export function numberLiteralText(node: NumberLiteral): string {
+  return node.raw ?? String(node.value);
 }
 
 /** kintone 専用関数: TODAY() / NOW() / LOGINUSER() */

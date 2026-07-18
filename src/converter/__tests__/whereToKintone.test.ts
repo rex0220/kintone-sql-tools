@@ -32,7 +32,14 @@ test("IN リストへ未解決 VARIABLE が到達したら変換前に拒否す�
 
 test("IN の負数は引用符なし、文字列の負数は引用符付きで変換する", () => {
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 IN (-1, +1, '-1')")))
-    .toBe('金額 in (-1,1,"-1")');
+    .toBe('金額 in (-1,+1,"-1")');
+});
+
+test("SIMPLE REST query は16桁超・指数のraw lexemeを保持する", () => {
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 = 9007199254740993")))
+    .toBe("金額 = 9007199254740993");
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 IN (1.20e+21, 9007199254740993)")))
+    .toBe("金額 in (1.20e+21,9007199254740993)");
 });
 
 test("KLIKE / NOT KLIKE を kintone like / not like へ変換する", () => {

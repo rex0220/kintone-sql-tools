@@ -1,6 +1,10 @@
 import type { KintoneFieldInfo } from "../execute";
 import type { SqlValue } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import { normalizeDmlSqlValue, type KintoneValue } from "../converter/dmlToKintone";
+import { compareDecimal, isFiniteDecimal } from "./exactDecimal";
+
+export { compareDecimal, isFiniteDecimal } from "./exactDecimal";
 
 export type DmlValidationErrorCode =
   | "ERR_REQUIRED"
@@ -81,7 +85,8 @@ export function validateAndNormalizeDmlValue(
 
 function rawScalarText(raw: unknown): string {
   if (raw == null) return "";
-  if (isSqlValue(raw) && (raw.type === "STRING" || raw.type === "NUMBER")) return String(raw.value);
+  if (isSqlValue(raw) && raw.type === "NUMBER") return numberLiteralText(raw);
+  if (isSqlValue(raw) && raw.type === "STRING") return raw.value;
   return typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
 }
 
@@ -135,35 +140,6 @@ function isEmpty(value: KintoneValue): boolean {
 
 function typeCode(type: string): DmlValidationErrorCode {
   return type === "NUMBER" ? "ERR_TYPE_NUMBER" : "ERR_TYPE_DATE";
-}
-
-function isFiniteDecimal(value: string): boolean {
-  return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim());
-}
-
-/** 指数表記を使わないフォーム制約値向けの正確な10進比較。 */
-export function compareDecimal(left: string, right: string): number {
-  const normalize = (input: string) => {
-    let s = input.trim();
-    let sign = 1;
-    if (s.startsWith("-")) { sign = -1; s = s.slice(1); }
-    else if (s.startsWith("+")) s = s.slice(1);
-    let [whole, fraction = ""] = s.split(".");
-    whole = (whole || "0").replace(/^0+(?=\d)/, "");
-    fraction = fraction.replace(/0+$/, "");
-    if (/^0*$/.test(whole) && fraction === "") sign = 1;
-    return { sign, whole, fraction };
-  };
-  const a = normalize(left);
-  const b = normalize(right);
-  if (a.sign !== b.sign) return a.sign < b.sign ? -1 : 1;
-  const direction = a.sign;
-  if (a.whole.length !== b.whole.length) return a.whole.length < b.whole.length ? -direction : direction;
-  if (a.whole !== b.whole) return a.whole < b.whole ? -direction : direction;
-  const width = Math.max(a.fraction.length, b.fraction.length);
-  const af = a.fraction.padEnd(width, "0");
-  const bf = b.fraction.padEnd(width, "0");
-  return af === bf ? 0 : af < bf ? -direction : direction;
 }
 
 function isValidTemporal(value: string, type: string): boolean {

@@ -31,6 +31,7 @@ import type {
   InList,
   CompareOp,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 
 // ------------------------------------------------------------
 // エントリポイント
@@ -184,7 +185,7 @@ function convertValue(value: SqlValue, op: CompareOp): string {
     case "VARIABLE":
       throw new KintoneQueryError(`未解決のバッチ変数 @${value.name} があります`);
     case "STRING":        return convertString(value);
-    case "NUMBER":        return String(value.value);
+    case "NUMBER":        return numberLiteralText(value);
     case "KINTONE_FUNC":  return convertKintoneFunc(value);
     case "IN_LIST":       return convertInList(value, op);
     case "ARITH_VALUE":
@@ -220,7 +221,7 @@ function convertInList(v: InList, op: CompareOp): string {
     .map((item) =>
       item.type === "STRING"
         ? convertString(item)
-        : String(item.value)
+        : numberLiteralText(item)
     )
     .join(",");
   return `(${values})`;

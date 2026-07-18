@@ -10,6 +10,7 @@ import type {
   StringFuncExpr,
   StringFuncArg,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import type { ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
 
@@ -473,7 +474,7 @@ export function evalStringFuncArg(arg: StringFuncArg, row: ProcessRow): string {
   if (arg.type === "STRING")      return arg.value;
   if (arg.type === "STRING_FUNC") return evalStringFunc(arg, row);
   if (arg.type === "FIELD_REF")   return resolveFieldRef(row, arg.field);
-  if (arg.type === "NUMBER")      return String(arg.value);
+  if (arg.type === "NUMBER")      return numberLiteralText(arg);
   // 集計引数は GROUP BY 評価側で事前解決される想定。
   // ここに到達した場合は行コンテキストのみのため空文字を返して安全側に倒す。
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";

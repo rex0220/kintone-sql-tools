@@ -110,6 +110,62 @@ function makePagedClient(
   return client;
 }
 
+test("FULL_SCAN WHERE/CASE/HAVINGは16桁超NUMBERを同じ厳密比較器で評価する", async () => {
+  const records = [
+    makeRecord({ $id: "1", kind: "low", n: "9007199254740992" }),
+    makeRecord({ $id: "2", kind: "high", n: "9007199254740993" }),
+  ];
+  const client = makeClient({ records, fieldTypes: { kind: "SINGLE_LINE_TEXT", n: "NUMBER" } });
+  const selected = await execute(
+    "SELECT $id AS id, CASE WHEN n = 9007199254740993 THEN 'H' ELSE 'L' END AS band " +
+      "FROM APP100 ORDER BY $id ASC",
+    client,
+    { cacheContext: "exact-where-case" }
+  ) as SelectResult;
+  expect(selected.rows).toEqual([{ id: "1", band: "L" }, { id: "2", band: "H" }]);
+
+  const having = await execute(
+    "SELECT kind, MAX(n) AS mx FROM APP100 GROUP BY kind HAVING mx = 9007199254740993",
+    client,
+    { cacheContext: "exact-having" }
+  ) as SelectResult;
+  expect(having.rows).toEqual([expect.objectContaining({ kind: "high", mx: "9007199254740993" })]);
+});
+
+test("通常UPDATE/DELETEは16桁超NUMBERのraw REST条件で対象選定する", async () => {
+  const records = [
+    makeRecord({ $id: "1", n: "9007199254740992", mark: "" }),
+    makeRecord({ $id: "2", n: "9007199254740993", mark: "" }),
+  ];
+  const updateClient = makeClient({ records, fieldTypes: { n: "NUMBER", mark: "SINGLE_LINE_TEXT" } });
+  updateClient.getRecords = async (params) => {
+    updateClient.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    return { records: params.query.includes("n < 9007199254740993") ? [records[0]] : records };
+  };
+  const updated = await execute(
+    "UPDATE APP100 SET mark = 'low' WHERE n < 9007199254740993",
+    updateClient,
+    { cacheContext: "exact-normal-update" }
+  ) as UpdateResult;
+  expect(updated.updatedCount).toBe(1);
+  expect(updateClient.getCalls[0].query).toContain("n < 9007199254740993");
+  expect(updateClient.putCalls.flatMap((call) => call.records).map((record) => record.id)).toEqual([1]);
+
+  const deleteClient = makeClient({ records, fieldTypes: { n: "NUMBER" } });
+  deleteClient.getRecords = async (params) => {
+    deleteClient.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    return { records: params.query.includes("n > 9007199254740992") ? [records[1]] : records };
+  };
+  const deleted = await execute(
+    "DELETE FROM APP100 WHERE n > 9007199254740992",
+    deleteClient,
+    { cacheContext: "exact-normal-delete" }
+  ) as DeleteResult;
+  expect(deleted.deletedCount).toBe(1);
+  expect(deleteClient.getCalls[0].query).toContain("n > 9007199254740992");
+  expect(deleteClient.deleteCalls[0].ids).toEqual([2]);
+});
+
 test("INSERT VALIDATE ONLY は全エラーを返しwrite APIを呼ばない", async () => {
   const client = makeClient();
   client.getFields = async () => [
@@ -2605,7 +2661,7 @@ test("UPDATE FROM APP: NUMBER業務キーの正規化後source重複をtarget取
   expect(client.putCalls).toHaveLength(0);
 });
 
-test.each(["", "1e3", "NaN", "Infinity"])(
+test.each(["", "NaN", "Infinity"])(
   "UPDATE FROM APP: NUMBER source業務キー %p を有限10進表記として拒否する",
   async (key) => {
     const client = makeClient({ recordsByApp: { 200: [makeRecord({ code: key, src: "A" })] } });
@@ -2621,6 +2677,23 @@ test.each(["", "1e3", "NaN", "Infinity"])(
     expect(client.putCalls).toHaveLength(0);
   }
 );
+
+test("UPDATE FROM APP: NUMBER業務キーは指数同値を単一primitiveで照合する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "1e3", src: "A" })],
+    100: [makeRecord({ $id: "1", 顧客番号: "1000" })],
+  } });
+  client.getFields = async (appId) => appId === 200
+    ? [{ code: "code", label: "code", fieldType: "NUMBER" }, { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" }]
+    : [{ code: "顧客番号", label: "顧客番号", fieldType: "NUMBER" }, { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" }];
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE 顧客番号 = s.code",
+    client,
+    { cacheContext: "update-from-exact-exponent" }
+  ) as UpdateResult;
+  expect(result.updatedCount).toBe(1);
+  expect(client.getCalls.find((call) => call.app === 100)?.query).toContain('"1e3"');
+});
 
 test("UPDATE FROM APP: target/sourceの非対応業務キー型をtarget取得前に拒否する", async () => {
   const targetClient = makeClient();
@@ -3070,6 +3143,52 @@ test("B26: REORDER はtyped stringをコードポイント順、typed numberを�
   const numberOrder = client.putCalls[1].records[0].record["明細"].value as unknown as Array<{ id: string }>;
   expect(stringOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
   expect(numberOrder.map((row) => row.id)).toEqual(["r2", "r1"]);
+});
+
+test("サブテーブルUPDATE/DELETE/REORDERは16桁超NUMBERを厳密評価する", async () => {
+  const makeExactClient = () => {
+    const parent = {
+      $id: { value: "1" }, $revision: { value: "1" },
+      明細: { value: [
+        { id: "high", value: { 数量: { value: "9007199254740993" }, 印: { value: "" } } },
+        { id: "low", value: { 数量: { value: "9007199254740992" }, 印: { value: "" } } },
+      ] },
+    } as unknown as KintoneRecord;
+    const client = makeClient({ recordsByApp: { 100: [parent] } });
+    client.getFields = async () => [
+      { code: "数量", label: "数量", fieldType: "NUMBER", inSubtable: true },
+      { code: "印", label: "印", fieldType: "SINGLE_LINE_TEXT", inSubtable: true },
+    ];
+    return client;
+  };
+
+  const updateClient = makeExactClient();
+  const updated = await execute(
+    "UPDATE APP100$明細 SET 印 = 'L' WHERE _rid LIKE '%' AND 数量 < 9007199254740993",
+    updateClient,
+    { cacheContext: "exact-subtable-update" }
+  ) as UpdateResult;
+  expect(updated.updatedCount).toBe(1);
+  const updatedTable = updateClient.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id: string; value?: Record<string, { value: string }> }>;
+  expect(updatedTable.find((row) => row.id === "low")?.value?.["印"].value).toBe("L");
+  expect(updatedTable.find((row) => row.id === "high")?.value).toBeUndefined();
+
+  const deleteClient = makeExactClient();
+  const deleted = await execute(
+    "DELETE FROM APP100$明細 WHERE _rid LIKE '%' AND 数量 > 9007199254740992",
+    deleteClient,
+    { cacheContext: "exact-subtable-delete" }
+  ) as DeleteResult;
+  expect(deleted.deletedCount).toBe(1);
+  const remaining = deleteClient.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  expect(remaining.map((row) => row.id)).toEqual(["low"]);
+
+  const reorderClient = makeExactClient();
+  await execute("REORDER ALL APP100$明細 BY 数量 ASC", reorderClient, {
+    cacheContext: "exact-subtable-reorder",
+  });
+  const reordered = reorderClient.putCalls[0].records[0].record["明細"].value as unknown as Array<{ id: string }>;
+  expect(reordered.map((row) => row.id)).toEqual(["low", "high"]);
 });
 
 test("REORDER: 空数値セルだけの親を >= の対象から外し、確認件数と親件数を揃える", async () => {
@@ -4430,6 +4549,24 @@ test("UPSERT: NUMBER キーは表記ゆれ（'5.0' と '5'）を同一視する"
   expect(client.putCalls).toHaveLength(1);
   expect(client.putCalls[0].records[0].id).toBe(7);
   expect(client.postCalls).toHaveLength(0);
+});
+
+test("UPSERT VALUESは2^53境界キーを区別しraw payloadを保持する", async () => {
+  const client = makeClient({
+    records: [makeRecord({ $id: "7", 商品番号: "9007199254740992" })],
+    postIds: ["9"],
+  });
+  client.getFields = async () => ([
+    { code: "商品番号", label: "商品番号", fieldType: "NUMBER" },
+    { code: "ランク", label: "ランク", fieldType: "SINGLE_LINE_TEXT" },
+  ]);
+  await execute(
+    "UPSERT INTO APP77016 (商品番号, ランク) VALUES (9007199254740993, 'A') ON DUPLICATE (商品番号)",
+    client,
+    { cacheContext: "upsert-exact-number-key" }
+  );
+  expect(client.putCalls).toHaveLength(0);
+  expect(client.postCalls[0].records[0]["商品番号"].value).toBe("9007199254740993");
 });
 
 test("UPSERT SELECT: 複合キーの値に区切り文字（\\u0000）を含んでも誤同一視しない", async () => {

@@ -1,8 +1,10 @@
 import { syntheticSemantics, type ResolvedFieldSemantics } from "./fieldSemantics";
+import { compareExactDecimal, parseExactDecimal, type ExactDecimal } from "./exactDecimal";
 
 export type ScalarCompareOp = "=" | "!=" | "<>" | ">" | "<" | ">=" | "<=";
 export type ScalarExtreme = "greatest" | "least";
-export type CompareResult = -1 | 0 | 1;
+export type { CompareResult } from "./exactDecimal";
+import type { CompareResult } from "./exactDecimal";
 
 export function compareCodePointStrings(left: string, right: string): CompareResult {
   const a = left[Symbol.iterator]();
@@ -27,14 +29,15 @@ function triCompare(left: number, right: number): CompareResult {
 
 type NumberKey =
   | { band: 0 | 1 | 3 | 4 }
-  | { band: 2; value: number }
+  | { band: 2; value: ExactDecimal }
   | { band: 5; value: string };
 
 function numberKey(value: string): NumberKey {
   if (value === "") return { band: 0 };
+  const decimal = parseExactDecimal(value);
+  if (decimal !== null) return { band: 2, value: decimal };
   const numeric = Number(value);
   if (numeric === Number.NEGATIVE_INFINITY) return { band: 1 };
-  if (Number.isFinite(numeric)) return { band: 2, value: numeric };
   if (numeric === Number.POSITIVE_INFINITY) return { band: 3 };
   if (value === "NaN") return { band: 4 };
   return { band: 5, value };
@@ -44,7 +47,7 @@ function compareNumbers(left: string, right: string): CompareResult {
   const a = numberKey(left);
   const b = numberKey(right);
   if (a.band !== b.band) return a.band < b.band ? -1 : 1;
-  if (a.band === 2 && b.band === 2) return triCompare(a.value, b.value);
+  if (a.band === 2 && b.band === 2) return compareExactDecimal(a.value, b.value);
   if (a.band === 5 && b.band === 5) return compareCodePointStrings(a.value, b.value);
   return 0;
 }
@@ -180,7 +183,11 @@ export function selectScalarExtreme(values: readonly string[], extreme: ScalarEx
   const numeric = candidates.every((value) => !Number.isNaN(Number(value)));
   const compare = (left: string, right: string): CompareResult => {
     if (numeric) {
-      const numericCmp = triCompare(Number(left), Number(right));
+      const leftDecimal = parseExactDecimal(left);
+      const rightDecimal = parseExactDecimal(right);
+      const numericCmp = leftDecimal !== null && rightDecimal !== null
+        ? compareExactDecimal(leftDecimal, rightDecimal)
+        : triCompare(Number(left), Number(right));
       if (numericCmp !== 0) return numericCmp;
     }
     return compareCodePointStrings(left, right);

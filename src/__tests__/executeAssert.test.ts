@@ -97,6 +97,18 @@ test("単文: 大小比較は数値として評価される（'9' < '10'）", as
   expect(result.type).toBe("ASSERT");
 });
 
+test("ASSERT はraw 16桁超を区別し、指数同値を認識する", async () => {
+  expect((await execute("ASSERT 9007199254740992 < 9007199254740993", makeClient())).type).toBe("ASSERT");
+  expect((await execute("ASSERT 1e21 = 1000000000000000000000", makeClient())).type).toBe("ASSERT");
+  await expect(execute("ASSERT 9007199254740992 = 9007199254740993", makeClient()))
+    .rejects.toThrow(/assertion failed/);
+});
+
+test("ASSERT のJS算術値はbinary64制限を維持し、指数Stringは比較できる", async () => {
+  expect((await execute("ASSERT 9007199254740992 + 1 = 9007199254740992", makeClient())).type).toBe("ASSERT");
+  expect((await execute("ASSERT 1000000000000000000000 + 0 = 1e21", makeClient())).type).toBe("ASSERT");
+});
+
 test("単文: 空左辺と有限数の範囲比較は WHERE と同じ −∞ 規則を使う", async () => {
   expect((await execute("ASSERT '' < -1000000", makeClient())).type).toBe("ASSERT");
   await expect(execute("ASSERT '' >= -1000000", makeClient()))

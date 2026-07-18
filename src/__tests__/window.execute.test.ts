@@ -81,6 +81,22 @@ test("トップレベル ORDER BY なしでも物理 NUMBER メタで数値順�
   ]);
 });
 
+test("ウィンドウNUMBER ORDER BYは16桁超を非peerとして順位付けする", async () => {
+  const client = makeClient(
+    [record({ n: "9007199254740993" }), record({ n: "9007199254740992" })],
+    [{ code: "n", label: "n", fieldType: "NUMBER", sortKind: "number" }]
+  );
+  const result = await execute(
+    "SELECT n, RANK() OVER (ORDER BY n) AS r FROM APP300",
+    client,
+    { cacheContext: "window-exact-decimal" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([
+    { n: "9007199254740993", r: "2" },
+    { n: "9007199254740992", r: "1" },
+  ]);
+});
+
 test("トップレベル ORDER BY なしでも選択肢定義順で順位付けする", async () => {
   const client = makeClient(
     [record({ 優先度: "中" }), record({ 優先度: "高" }), record({ 優先度: "低" })],

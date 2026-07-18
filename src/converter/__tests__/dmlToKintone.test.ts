@@ -35,6 +35,16 @@ test("INSERT 単一行 → POST パラメータ", () => {
   });
 });
 
+test("INSERT VALUES は16桁超・指数のraw literalをpayloadへ保持する", () => {
+  const stmt = parse(
+    "INSERT INTO APP100 (a, b) VALUES (9007199254740993, 1.20e+21)"
+  ) as InsertStatement;
+  expect(insertToPostBatches(stmt)[0].records[0]).toEqual({
+    a: { value: "9007199254740993" },
+    b: { value: "1.20e+21" },
+  });
+});
+
 test("INSERT 複数行 → POST パラメータ", () => {
   const stmt = parse(
     "INSERT INTO APP100 (名前) VALUES ('田中'), ('鈴木'), ('佐藤')"

@@ -10,6 +10,7 @@
 // ============================================================
 
 import { Token, TokenKind, KEYWORDS } from "../lexer/tokens";
+import { makeNumberLiteral, numberLiteralText } from "../types/ast";
 import type {
   Statement,
   SelectStatement,
@@ -967,13 +968,13 @@ export class Parser {
     if (this.peek().kind === TokenKind.MINUS) {
       this.advance();
       const operand = this.parseAggPrimary();
-      if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
-      return { type: "AGG_ARITH", left: { type: "NUMBER", value: 0 }, op: "-", right: operand };
+      if (operand.type === "NUMBER") return makeNumberLiteral(`-${numberLiteralText(operand)}`);
+      return { type: "AGG_ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
     }
     // 数値リテラル
     if (this.peek().kind === TokenKind.NUMBER) {
       const tok = this.advance();
-      return { type: "NUMBER", value: Number(tok.value) };
+      return makeNumberLiteral(tok.value);
     }
     // 集計関数
     const aggFunc = this.tryAggregateFunc();
@@ -1043,7 +1044,7 @@ export class Parser {
     if (this.allowUnaryPlusNumber && this.peek().kind === TokenKind.PLUS) {
       this.advance();
       const number = this.expect(TokenKind.NUMBER, "単項 + の直後には数値リテラルが必要です");
-      return { type: "NUMBER", value: Number(number.value) };
+      return makeNumberLiteral(`+${number.value}`);
     }
     // 単項マイナス: -expr（符号のネストは受理しない）
     if (this.peek().kind === TokenKind.MINUS) {
@@ -1053,9 +1054,9 @@ export class Parser {
       }
       const operand = this.parseArithPrimary();
       // 数値リテラルは即座に符号反転
-      if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
+      if (operand.type === "NUMBER") return makeNumberLiteral(`-${numberLiteralText(operand)}`);
       // それ以外は 0 - operand に展開
-      return { type: "ARITH", left: { type: "NUMBER", value: 0 }, op: "-", right: operand };
+      return { type: "ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
     }
     // 文字列・数値関数 (ROUND / LENGTH / UPPER / ...) → StringFuncExpr as ArithNode
     if (this.tryStringFuncName() !== null) {
@@ -1064,7 +1065,7 @@ export class Parser {
     const tok = this.peek();
     if (tok.kind === TokenKind.NUMBER) {
       this.advance();
-      return { type: "NUMBER", value: Number(tok.value) };
+      return makeNumberLiteral(tok.value);
     }
     if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
       this.advance();
@@ -1838,7 +1839,7 @@ export class Parser {
     ) {
       const expr = this.parseArithAddSub();
       // 単純な数値リテラルはそのまま NumberLiteral に
-      if (expr.type === "NUMBER") return { type: "NUMBER", value: expr.value } satisfies NumberLiteral;
+      if (expr.type === "NUMBER") return expr satisfies NumberLiteral;
       return { type: "ARITH_VALUE", expr } satisfies ArithSqlValue;
     }
 
@@ -1873,15 +1874,15 @@ export class Parser {
       if (tok.kind === TokenKind.STRING) {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === TokenKind.NUMBER) {
-        values.push({ type: "NUMBER", value: Number(tok.value) });
+        values.push(makeNumberLiteral(tok.value));
       } else if (tok.kind === TokenKind.MINUS || tok.kind === TokenKind.PLUS) {
         const number = this.peek();
         if (number.kind !== TokenKind.NUMBER) {
           throw new ParseError(invalidValueMessage, tok);
         }
         this.advance();
-        const sign = tok.kind === TokenKind.MINUS ? -1 : 1;
-        values.push({ type: "NUMBER", value: sign * Number(number.value) });
+        const sign = tok.kind === TokenKind.MINUS ? "-" : "+";
+        values.push(makeNumberLiteral(`${sign}${number.value}`));
       } else if (tok.kind === TokenKind.VARIABLE) {
         values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
@@ -2112,14 +2113,13 @@ export class Parser {
       } else if (this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.PLUS) {
         const sign = this.advance();
         const number = this.expect(TokenKind.NUMBER, "INSERT の単項符号の直後には数値リテラルが必要です");
-        const value = Number(number.value);
-        row.push({ type: "NUMBER", value: sign.kind === TokenKind.MINUS ? -value : value });
+        row.push(makeNumberLiteral(`${sign.kind === TokenKind.MINUS ? "-" : "+"}${number.value}`));
       } else {
         const tok = this.advance();
         if (tok.kind === TokenKind.STRING) {
           row.push({ type: "STRING", value: tok.value });
         } else if (tok.kind === TokenKind.NUMBER) {
-          row.push({ type: "NUMBER", value: Number(tok.value) });
+          row.push(makeNumberLiteral(tok.value));
         } else {
           throw new ParseError("INSERT の値には文字列・数値・配列リテラル・CASE WHEN が必要です", tok);
         }

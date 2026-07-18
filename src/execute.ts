@@ -15,7 +15,7 @@
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, ArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr } from "./types/ast";
-import { NO_FROM_CTE_NAME } from "./types/ast";
+import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
 import {
@@ -28,6 +28,7 @@ import {
 import type { ProcessStatusState } from "./core/processStatus";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
+import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import { whereNeedsFieldMetadata } from "./core/explainMetadata";
@@ -731,7 +732,7 @@ export interface BatchExecuteResult {
 
 type VarValue =
   | { type: "string"; value: string }
-  | { type: "number"; value: number };
+  | { type: "number"; value: number; raw?: string };
 
 /** バッチタイムアウト。message 接頭辞で code = TimeoutError として報告される */
 class BatchTimeoutError extends Error {
@@ -914,7 +915,7 @@ async function executeBatchStatement(
             && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"));
         const numberValue = numeric ? Number(value) : Number.NaN;
         variables.set(stmt.name, numeric && Number.isFinite(numberValue)
-          ? { type: "number", value: numberValue }
+          ? { type: "number", value: numberValue, raw: value }
           : { type: "string", value });
       } catch (e) {
         if (e instanceof ScalarSubqueryError) {
@@ -934,7 +935,10 @@ async function executeBatchStatement(
       variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
     } else {
       const value = evaluateScalarExpr(stmt.default);
-      variables.set(stmt.name, { type: "string", value: String(value.value) });
+      variables.set(stmt.name, {
+        type: "string",
+        value: value.type === "number" ? (value.raw ?? String(value.value)) : value.value,
+      });
     }
     return {};
   }
@@ -1164,7 +1168,7 @@ function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): VarValue
     case "STRING":
       return { type: "string", value: expr.value };
     case "NUMBER":
-      return { type: "number", value: expr.value };
+      return { type: "number", value: expr.value, raw: numberLiteralText(expr) };
     case "KINTONE_FUNC":
       return { type: "string", value: resolveKintoneFunc(expr.name) };
     case "STRING_FUNC":
@@ -1174,7 +1178,7 @@ function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): VarValue
       if (!Number.isFinite(value)) {
         throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
       }
-      return { type: "number", value };
+      return { type: "number", value, raw: String(value) };
     }
   }
 }
@@ -1192,7 +1196,7 @@ function resolveVariableRefs<T>(node: T, variables: Map<string, VarValue>): T {
         throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       }
       return (value.type === "number"
-        ? { type: "NUMBER", value: value.value }
+        ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }
         : { type: "STRING", value: value.value }) as T;
     }
     return Object.fromEntries(
@@ -1291,7 +1295,7 @@ async function evalAssertOperand(
   switch (operand.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
-    case "NUMBER": return String(operand.value);
+    case "NUMBER": return numberLiteralText(operand);
     case "STRING": return operand.value;
     case "ARITH":  return String(evalAssertArith(operand));
     case "SCALAR_SUBQUERY": {
@@ -2999,8 +3003,8 @@ interface UpsertTargetIndex {
 
 /** 数値として解釈できるキー成分は正規形に揃える（数値フィールドの表記ゆれ対策） */
 function normalizeKeyPart(v: string): string {
-  const t = v.trim();
-  if (t !== "" && !Number.isNaN(Number(t))) return String(Number(t));
+  const decimal = parseExactDecimal(v);
+  if (decimal !== null) return JSON.stringify(decimal);
   return v;
 }
 
@@ -3957,6 +3961,7 @@ async function resolveUpdateFromMatchedRecords(
   );
 
   const sourceByKey = new Map<string, ProcessRow>();
+  const sourceQueryByKey = new Map<string, string>();
   for (const row of sourceRows) {
     if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
       throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
@@ -3966,6 +3971,7 @@ async function resolveUpdateFromMatchedRecords(
       throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for normalized key ${key}.`);
     }
     sourceByKey.set(key, row);
+    sourceQueryByKey.set(key, String(row[from.joinKeyField]).trim());
   }
 
   if (sourceByKey.size === 0) return [];
@@ -3978,7 +3984,7 @@ async function resolveUpdateFromMatchedRecords(
   const targetRecords: KintoneRecord[] = [];
   const seenTargetIds = new Set<string>();
   let fetchedTargetCount = 0;
-  for (const keys of splitChunks([...sourceByKey.keys()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
+  for (const keys of splitChunks([...sourceQueryByKey.values()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
     const keyQuery = `${from.targetJoinField} in (${keys.map(sqlQuote).join(",")})`;
     const query = filterQuery ? `(${keyQuery}) and (${filterQuery})` : keyQuery;
     const resolved = await fetchRecordsForSharedPlan(
@@ -4122,22 +4128,11 @@ function normalizeUpdateFromJoinKey(
     }
     return String(id);
   }
-  const text = raw.trim();
-  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+  const decimal = parseExactDecimal(raw);
+  if (decimal === null) {
     throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a finite decimal: ${raw}`);
   }
-  let unsigned = text;
-  let negative = false;
-  if (unsigned.startsWith("-") || unsigned.startsWith("+")) {
-    negative = unsigned[0] === "-";
-    unsigned = unsigned.slice(1);
-  }
-  let [whole, fraction = ""] = unsigned.split(".");
-  whole = (whole || "0").replace(/^0+(?=\d)/, "");
-  fraction = fraction.replace(/0+$/, "");
-  const zero = /^0*$/.test(whole) && fraction === "";
-  const canonical = fraction === "" ? whole : `${whole}.${fraction}`;
-  return negative && !zero ? `-${canonical}` : canonical;
+  return JSON.stringify(decimal);
 }
 
 async function executeInsert(
@@ -4428,7 +4423,7 @@ async function executeUpsert(
       if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
       const val = row[idx];
       return val.type === "STRING" ? val.value
-        : val.type === "NUMBER" ? String(val.value)
+        : val.type === "NUMBER" ? numberLiteralText(val)
         : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
         : val.elements.map((e) => e.value).join(",");
     })
@@ -4829,15 +4824,15 @@ function evalAssignmentValueForSubtable(
   resolveFieldType?: FieldTypeResolver
 ): string {
   if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return String(value.value);
+  if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "ARITH") return String(evalArithExpr(value, row));
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
   throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
-function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr }): string {
+function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number; raw?: string } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr }): string {
   if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return String(value.value);
+  if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, {});
   return value.elements.map((e) => e.value).join(",");
 }
@@ -6063,7 +6058,7 @@ function formatArithExprStr(expr: ArithExpr): string {
 
 function formatArithNodeStr(node: ArithNode): string {
   if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER")    return String(node.value);
+  if (node.type === "NUMBER")    return numberLiteralText(node);
   if (node.type === "ARITH")     return `(${formatArithExprStr(node)})`;
   return "...";
 }

@@ -25,6 +25,7 @@ import type {
   TableRef,
   AggregateFunc,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
 
@@ -682,7 +683,7 @@ function aggregateSyntheticName(
 
 function arithNodeLabel(node: ArithNode): string {
   if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER") return String(node.value);
+  if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "STRING_FUNC") return stringFuncLabel(node);
   return `(${arithNodeLabel(node.left)}${node.op}${arithNodeLabel(node.right)})`;
 }

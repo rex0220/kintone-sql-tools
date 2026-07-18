@@ -20,6 +20,7 @@ import type {
   ExistsExpr,
   ScalarSubquery,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import { evalStringFunc, evalArithExpr, resolveFieldRef } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
@@ -128,7 +129,9 @@ function evalOp(
     if (right.type === "IN_LIST") {
       // 比較前に全要素を検査し、some/every の短絡で未解決変数を見逃さない。
       assertResolvedInListValues(right.values);
-      values = new Set(right.values.map((v) => String(v.value)));
+      values = new Set(right.values.map((v) => v.type === "NUMBER"
+        ? (fieldType === "NUMBER" ? numberLiteralText(v) : String(v.value))
+        : v.value));
     }
     if (right.type === "SUBQUERY_IN_LIST") {
       values = (right as ResolvedSubqueryInList).resolved;
@@ -219,6 +222,10 @@ function typedInContains(
 ): boolean {
   const fallback = () => values.has(leftStr);
   if (fieldType === undefined) return fallback();
+  if (fieldType === "NUMBER") {
+    const semantics = syntheticSemantics("number");
+    return [...values].some((value) => compareScalarValues("=", leftStr, value, semantics));
+  }
 
   let parsed: unknown;
   if (
@@ -329,7 +336,7 @@ function resolveValue(
   switch (value.type) {
     case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
     case "STRING":       return value.value;
-    case "NUMBER":       return String(value.value);
+    case "NUMBER":       return numberLiteralText(value);
     case "KINTONE_FUNC": return resolveKintoneFunc(value.name);
     case "IN_LIST":           return ""; // IN は evalOp で別処理
     case "SUBQUERY_IN_LIST":  return ""; // IN (SELECT) は evalOp で別処理

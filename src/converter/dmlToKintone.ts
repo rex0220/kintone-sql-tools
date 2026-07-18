@@ -23,6 +23,7 @@ import type {
   CaseResult,
   WhereExpr,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr } from "../engine/evalFunc";
@@ -602,7 +603,7 @@ function convertDmlSqlValue(value: SqlValue, fieldType?: string): KintoneValue {
     case "STRING":
       return convertString(value.value, fieldType);
     case "NUMBER":
-      return String(value.value);
+      return numberLiteralText(value);
     case "ARRAY":
       return convertArray(value.elements.map((e) => e.value), fieldType);
     case "KINTONE_FUNC":

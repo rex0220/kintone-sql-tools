@@ -1,4 +1,5 @@
 import type { WhereExpr, FieldValue } from "../../types/ast";
+import { numberLiteralText } from "../../types/ast";
 
 export interface SafePushdownOptions {
   /** JOIN 時に抽出対象とするテーブルエイリアス。 */
@@ -165,6 +166,7 @@ function isNumericCandidate(
   if (expr.right.type !== "NUMBER") return false;
   if (expr.op === "=") return true;
   return (expr.op === "<" || expr.op === ">")
+    && /^[+-]?\d+$/.test(numberLiteralText(expr.right))
     && Number.isSafeInteger(expr.right.value);
 }
 

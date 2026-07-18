@@ -37,6 +37,7 @@ import type {
   FieldRef,
   WindowColumn,
 } from "../types/ast";
+import { numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import {
   evalWhere,
@@ -372,7 +373,7 @@ function evalAggArithExpr(
 
 /** alias なし時のデフォルトキー名: "SUM(金額)*1.1" 形式 */
 function aggArithDefaultKey(node: AggOperand): string {
-  if (node.type === "NUMBER")    return String(node.value);
+  if (node.type === "NUMBER")    return numberLiteralText(node);
   if (node.type === "AGG_REF")   return aggregateSyntheticName(node.func, node.distinct, node.arg);
   return `${aggArithDefaultKey(node.left)}${node.op}${aggArithDefaultKey(node.right)}`;
 }
@@ -886,7 +887,7 @@ function stripParentShortcutColumns(row: ProcessRow): ProcessRow {
 function arithColDefaultKey(expr: ArithNode): string {
   const nodeLabel = (n: ArithNode): string => {
     if (n.type === "FIELD_REF")   return n.field;
-    if (n.type === "NUMBER")      return String(n.value);
+    if (n.type === "NUMBER")      return numberLiteralText(n);
     if (n.type === "STRING_FUNC") return stringFuncDefaultKey(n);
     return `(${nodeLabel(n.left)}${n.op}${nodeLabel(n.right)})`;
   };
@@ -927,10 +928,13 @@ function resolveAggInStringFuncArg(
 ): StringFuncArg {
   if (arg.type === "AGG_REF") {
     const value = evalAggregate(arg.func, arg.distinct, arg.arg, arg.separator, rows, resolveAggSortKind);
-    return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
+    return typeof value === "number"
+      ? { type: "NUMBER", value, raw: String(value) }
+      : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {
-    return { type: "NUMBER", value: evalAggArithExpr(arg, rows, resolveAggSortKind) };
+    const value = evalAggArithExpr(arg, rows, resolveAggSortKind);
+    return { type: "NUMBER", value, raw: String(value) };
   }
   if (arg.type === "STRING_FUNC") {
     return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);

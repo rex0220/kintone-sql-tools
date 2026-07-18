@@ -35,6 +35,15 @@ test("符号付き IN / NOT IN は = と同じ負数文字列表現を評価す�
   )).toEqual(["-10", "0", "10"]);
 });
 
+test("typed NUMBER の WHERE/BETWEEN/IN はraw literalを厳密比較する", () => {
+  const types = resolver({ n: "NUMBER" });
+  expect(evalWhere(parseWhere("SELECT * FROM APP1 WHERE n = 9007199254740993"), { n: "9007199254740992" }, types)).toBe(false);
+  expect(evalWhere(parseWhere("SELECT * FROM APP1 WHERE n < 9007199254740993"), { n: "9007199254740992" }, types)).toBe(true);
+  expect(evalWhere(parseWhere("SELECT * FROM APP1 WHERE n BETWEEN 9007199254740992 AND 9007199254740993"), { n: "9007199254740993" }, types)).toBe(true);
+  expect(evalWhere(parseWhere("SELECT * FROM APP1 WHERE n IN (1.0, 1e0, 9007199254740993)"), { n: "1.00" }, types)).toBe(true);
+  expect(evalWhere(parseWhere("SELECT * FROM APP1 WHERE n IN (9007199254740993)"), { n: "9007199254740992" }, types)).toBe(false);
+});
+
 test("CHECK_BOX / MULTI_SELECT の IN は文字列配列の要素を比較する", () => {
   const expr = parseWhere("SELECT * FROM APP1 WHERE 選択 IN ('A', 'C')");
   expect(evalWhere(expr, { 選択: '["A","B"]' }, resolver({ 選択: "CHECK_BOX" }))).toBe(true);

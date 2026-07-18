@@ -322,6 +322,14 @@ test("GROUP BY + MAX / MIN", () => {
   expect(B["mn"]).toBe("300");
 });
 
+test("typed NUMBER MIN/MAX は16桁超を厳密比較する", () => {
+  const rows: ProcessRow[] = [{ 値: "9007199254740993" }, { 値: "9007199254740992" }];
+  const stmt = parseSelect("SELECT MIN(値) AS mn, MAX(値) AS mx FROM APP100");
+  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
+    mn: "9007199254740992", mx: "9007199254740993",
+  });
+});
+
 test("MIN / MAX: 文字列型は全文を辞書順比較し、数値型は従来の数値比較を維持する", () => {
   const rows: ProcessRow[] = [{ 値: "9" }, { 値: "10" }, { 値: "0100" }];
   const stmt = parseSelect("SELECT MIN(値) AS mn, MAX(値) AS mx FROM APP100");
@@ -588,6 +596,24 @@ test("ORDER BY 数値 DESC", () => {
   ];
   const result = applyOrderBy(rows, [{ key: { type: "FIELD_NAME", name: "金額" }, direction: "DESC" }]);
   expect(result.map((r) => r["金額"])).toEqual(["300", "200", "100"]);
+});
+
+test("typed NUMBER ORDER BY は16桁超を非peerとして厳密順序にする", () => {
+  const rows: ProcessRow[] = [
+    { n: "9007199254740993", id: "2" },
+    { n: "9007199254740992", id: "1" },
+    { n: "9.007199254740993e15", id: "3" },
+  ];
+  const result = applyOrderBy(
+    rows,
+    [
+      { key: { type: "FIELD_NAME", name: "n" }, direction: "ASC" },
+      { key: { type: "FIELD_NAME", name: "id" }, direction: "ASC" },
+    ],
+    undefined,
+    new Map([["n", "number"], ["id", "number"]])
+  );
+  expect(result.map((row) => row.id)).toEqual(["1", "2", "3"]);
 });
 
 test("ORDER BY 複数フィールド", () => {

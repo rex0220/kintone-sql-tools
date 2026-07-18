@@ -149,7 +149,7 @@ export class Lexer {
   }
 
   // ----------------------------------------------------------
-  // 数値: 整数 or 小数（123 / 3.14）
+  // 数値: digits[.digits][e[+-]digits]（先頭/末尾 dot は受理しない）
   // ----------------------------------------------------------
 
   private readNumber(start: number): Token {
@@ -167,6 +167,16 @@ export class Lexer {
       while (this.pos < this.input.length && isDigit(this.input[this.pos])) {
         this.pos++;
       }
+    }
+    if (this.pos < this.input.length && (this.input[this.pos] === "e" || this.input[this.pos] === "E")) {
+      this.pos++;
+      if (this.pos < this.input.length && (this.input[this.pos] === "+" || this.input[this.pos] === "-")) {
+        this.pos++;
+      }
+      if (this.pos >= this.input.length || !isDigit(this.input[this.pos])) {
+        throw new LexError("指数部には数字が必要です", start, this.input, this.pos >= this.input.length);
+      }
+      while (this.pos < this.input.length && isDigit(this.input[this.pos])) this.pos++;
     }
     return this.makeToken(
       TokenKind.NUMBER,
