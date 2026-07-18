@@ -429,6 +429,7 @@ WHERE 担当者 = 'user1'
 ```sql
 SELECT UPPER(ステータス) AS ステータス FROM APP100
 SELECT CONCAT(姓, '　', 名) AS 氏名 FROM APP100
+SELECT '氏名: ' || 姓 || '　' || 名 AS 表示 FROM APP100   -- || は CONCAT と同義（v3.4.0）
 SELECT SUBSTRING(郵便番号, 1, 3) AS 市外局番 FROM APP100
 SELECT LEFT(顧客コード, 2) AS 分類, RIGHT(顧客コード, 4) AS 連番 FROM APP100
 SELECT LPAD(顧客No, 5, '0') AS 顧客コード FROM APP100
@@ -1997,6 +1998,30 @@ SELECT * FROM #err;
 - kintone APIが書き込み時に返す権限・競合・一意制約・既存レコード全体の再検証エラーなどは隔離せず、従来どおりfail-fastです
 
 ---
+
+## 17.3 CHECK（カスタムチェック・v3.4.0）
+
+`INSERT` / `UPSERT` / `UPDATE` のソースの後、処分節（`VALIDATE ONLY` / `ON ERROR SKIP`）の前に `CHECK` ブロックを置くと、ユーザー定義の行レベル業務ルールで不正行を `#err`（`$err_code = ERR_CHECK`）へ隔離できます。
+
+```sql
+INSERT INTO APP123 (数値1, 数値2, 数値3)
+SELECT 数値1, 数値2, 数値3 FROM APP999
+CHECK
+  WHEN 数値1 IS NULL THEN '数値1 未入力エラー'
+  WHEN 数値1 > 数値2  THEN '数値1=' || 数値1 || ' が 数値2=' || 数値2 || ' を超過'
+CHECK
+  WHEN 数値3 > 100 THEN CONCAT('数値3 が上限超過: ', 数値3)
+ON ERROR SKIP INTO #err;
+```
+
+- **グループ＝先勝ち**：1 つの `CHECK` ブロック内は上から評価し、最初に該当した `WHEN` のメッセージだけを 1 件出します。`CHECK` ブロックを複数並べると互いに独立に評価します（関連チェックは同じブロック＝最初のエラーのみ、無関係チェックは別ブロック＝それぞれ）。
+- **参照は読み取り行**：
+  - `INSERT` / `UPSERT … SELECT` は元 SELECT の出力列（別名可）。**先頭 N 列が書き込み対象、残りの末尾列は CHECK 専用**（`CHECK` を付けるとき SELECT 出力名は一意にする）。
+  - `… VALUES` は挿入列。
+  - `UPDATE` は**更新前の既存値**（書き込む新値を検査したいときは SET 式を書く：`SET 数量 = 数量 - 出庫数` に対し `WHEN 数量 - 出庫数 < 0`）。
+  - `UPDATE … FROM` は `APP<n>.列`＝更新前ターゲット・`<ソース別名>.列`＝ソース新値で識別（`WHEN s.金額 < APP100.金額 THEN '減額不可'`）。ソース列を修飾なしで参照するとエラー。
+- メッセージは `||` / `CONCAT` でフィールドや `@var` を補間できます。**条件（`WHEN`）では `||` は使えません**（`CONCAT` を使う）。
+- 処分：`ON ERROR SKIP INTO #err` は該当行を隔離して残りを書き込み、`VALIDATE ONLY` は書かずに報告、処分節なしの素 DML は書き込み前に停止します。組み込み検証（必須・型・範囲・桁）とは独立に評価し、`#err` は組み込みエラー → カスタムエラーの順です。比較非対応の複合型を条件に使う等の評価不能は文全体エラー（行隔離しません）。サブテーブル DML には指定できません。`CHECK` は `CHECK WHEN` の並びのときだけキーワードになります（同名フィールドはバッククォート）。
 
 ## 18. DELETE
 
