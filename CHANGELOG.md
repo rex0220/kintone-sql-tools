@@ -8,6 +8,7 @@
 
 - **B20 正規表現関数 `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` を追加**。ECMAScript 方言、`i` / `m` / `s` のみ受理、Unicode モード `u` を常時有効化する。パターンとフラグは式・フィールドを含めて実行時評価し、SELECT / WHERE / HAVING / ORDER BY / 一時テーブル / CTE / 通常の `UPDATE SET` で使用できる。3語は新しい予約語で、同名フィールドはバッククォートで参照する。
 - 正規表現は opt-in ゲートを設けないユーザー責任の機能として提供する。ReDoS の中断不能、プラグイン・CLI・MCP ごとの復旧手段、ホストと Unicode 版による結果差、DML 書き戻しで保存データ差になり得る点を言語リファレンスへ明記した。
+- **B36 `REGEXP_REPLACE` に第 5 引数 `occurrence` を追加**。`REGEXP_REPLACE(x, pattern, replacement [, flags [, occurrence]])`。`occurrence` を省略または `0` にすると従来どおり全置換、`1` で先頭の一致だけ、`N` で N 番目の一致だけを置換する（一致数を超える `N` は無変化）。`occurrence` は実行時評価で、非負整数以外は `ArgumentError`。N 番目置換でも後方参照（`$1` 等）は当該一致に展開する。kSQL の第 4 引数は `flags` のため、MySQL/Oracle と引数位置が異なる（`occurrence` 指定時は `flags` を明示、不要なら空文字）。
 
 ### 修正（正しさ）
 

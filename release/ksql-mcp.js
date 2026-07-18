@@ -35628,6 +35628,74 @@ function assertRegexpReplacement(replacement) {
     throw new Error("ArgumentError: REGEXP_REPLACE replacement must not contain $` or $'.");
   }
 }
+function parseRegexpOccurrence(arg) {
+  if (arg === void 0) return 0;
+  if (!/^\d+$/.test(arg)) {
+    throw new Error("ArgumentError: REGEXP_REPLACE occurrence must be a non-negative integer.");
+  }
+  return Number(arg);
+}
+function expandRegexpReplacement(replacement, match, captures, namedGroups) {
+  let result = "";
+  for (let i = 0; i < replacement.length; i += 1) {
+    const char = replacement[i];
+    if (char !== "$" || i + 1 >= replacement.length) {
+      result += char;
+      continue;
+    }
+    const next = replacement[i + 1];
+    if (next === "$") {
+      result += "$";
+      i += 1;
+      continue;
+    }
+    if (next === "&") {
+      result += match;
+      i += 1;
+      continue;
+    }
+    if (next === "<" && namedGroups !== void 0) {
+      const end = replacement.indexOf(">", i + 2);
+      if (end >= 0) {
+        result += namedGroups[replacement.slice(i + 2, end)] ?? "";
+        i = end;
+        continue;
+      }
+    }
+    if (/\d/.test(next)) {
+      const secondDigit = replacement[i + 2];
+      if (secondDigit !== void 0 && /\d/.test(secondDigit)) {
+        const twoDigitIndex = Number(next + secondDigit);
+        if (twoDigitIndex >= 1 && twoDigitIndex <= captures.length) {
+          result += captures[twoDigitIndex - 1] ?? "";
+          i += 2;
+          continue;
+        }
+      }
+      const oneDigitIndex = Number(next);
+      if (oneDigitIndex >= 1 && oneDigitIndex <= captures.length) {
+        result += captures[oneDigitIndex - 1] ?? "";
+        i += 1;
+        continue;
+      }
+    }
+    result += "$";
+  }
+  return result;
+}
+function replaceNthMatch(input, globalRe, replacement, n) {
+  let matchCount = 0;
+  return input.replace(globalRe, (match, ...callbackArgs) => {
+    matchCount += 1;
+    if (matchCount !== n) return match;
+    const lastArg = callbackArgs[callbackArgs.length - 1];
+    const hasNamedGroups = typeof lastArg === "object" && lastArg !== null;
+    const capturesEnd = callbackArgs.length - (hasNamedGroups ? 3 : 2);
+    const captures = callbackArgs.slice(0, capturesEnd);
+    const namedGroups = hasNamedGroups ? lastArg : void 0;
+    return expandRegexpReplacement(replacement, match, captures, namedGroups);
+  });
+}
 function evalStringFunc(expr, row) {
   const args = expr.args.map((a) => evalStringFuncArg(a, row));
   switch (expr.func) {
@@ -35696,9 +35764,11 @@ function evalStringFunc(expr, row) {
       return compileRegexp(args[1], args[2] ?? "").test(args[0]) ? "1" : "0";
     }
     case "REGEXP_REPLACE": {
-      assertArity("REGEXP_REPLACE", args, 3, 4);
+      assertArity("REGEXP_REPLACE", args, 3, 5);
       assertRegexpReplacement(args[2]);
-      return args[0].replace(compileRegexp(args[1], args[3] ?? "", true), args[2]);
+      const occurrence = parseRegexpOccurrence(args[4]);
+      const regexp = compileRegexp(args[1], args[3] ?? "", true);
+      return occurrence === 0 ? args[0].replace(regexp, args[2]) : replaceNthMatch(args[0], regexp, args[2], occurrence);
     }
     case "REGEXP_SUBSTR": {
       assertArity("REGEXP_SUBSTR", args, 2, 3);
