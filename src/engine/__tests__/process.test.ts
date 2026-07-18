@@ -1585,6 +1585,25 @@ test("B23/B24 は SELECT・WHERE・HAVING で評価される", () => {
   expect(rows).toEqual([{ category: "keep", points: "1", pairs: "1", mapped: "叱" }]);
 });
 
+test("B20 は SELECT・WHERE・HAVING・ORDER BY で実行時評価される", () => {
+  const records = [
+    makeRecord({ value: "A-10", pattern: "^[A-Z]-[0-9]+$", flags: "", category: "keep" }),
+    makeRecord({ value: "A-2", pattern: "^[A-Z]-[0-9]+$", flags: "", category: "keep" }),
+    makeRecord({ value: "bad", pattern: "^[A-Z]-[0-9]+$", flags: "", category: "drop" }),
+  ];
+  const stmt = parseSelect(
+    "SELECT category, REGEXP_REPLACE(value, '[^0-9]', '') AS digits " +
+    "FROM APP100 WHERE REGEXP_LIKE(value, pattern, flags) = '1' " +
+    "GROUP BY category, value, pattern, flags " +
+    "HAVING REGEXP_SUBSTR(value, '[0-9]+') != '' " +
+    "ORDER BY REGEXP_SUBSTR(value, '[0-9]+') ASC"
+  );
+  expect(runFullScan({ tables: new Map([[null, records]]), stmt }).rows).toEqual([
+    { category: "keep", digits: "10" },
+    { category: "keep", digits: "2" },
+  ]);
+});
+
 test("runFullScan: B22 は BMP の B19 契約と LENGTH / LIKE / INSTR の単位を変えない", () => {
   const records = [makeRecord({ s: "😀", bmp: "東京都千代田区" })];
   const stmt = parseSelect(

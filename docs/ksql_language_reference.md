@@ -415,6 +415,9 @@ WHERE 担当者 = 'user1'
 | `INSTR` | `INSTR(値, 検索文字列)` | 検索位置を 1-indexed で返す（見つからなければ `0`） |
 | `CONCAT` | `CONCAT(値1, 値2, ...)` | 文字列の連結（可変長引数） |
 | `REPLACE` | `REPLACE(フィールド, 検索, 置換)` | 文字列置換 |
+| `REGEXP_LIKE` | `REGEXP_LIKE(値, パターン [, フラグ])` | 一致すれば文字列 `'1'`、非一致なら文字列 `'0'` |
+| `REGEXP_REPLACE` | `REGEXP_REPLACE(値, パターン, 置換 [, フラグ])` | 正規表現に一致する箇所をすべて置換 |
+| `REGEXP_SUBSTR` | `REGEXP_SUBSTR(値, パターン [, フラグ])` | 最初の一致文字列（非一致は空文字） |
 | `TRANSLATE` | `TRANSLATE(値, 変換元, 変換先)` | コードポイント単位の 1 文字対 1 文字写像 |
 | `COALESCE` | `COALESCE(値1, 値2, ...)` | 最初の非空値を返す |
 | `ISNULL` | `ISNULL(値, 代替値)` | 値が空なら代替値、それ以外は値（`COALESCE` の 2 引数版） |
@@ -432,6 +435,9 @@ SELECT LEFT(顧客コード, 2) AS 分類, RIGHT(顧客コード, 4) AS 連番 F
 SELECT LPAD(顧客No, 5, '0') AS 顧客コード FROM APP100
 SELECT GREATEST(見積額, 受注額, 請求額) AS 最大額 FROM APP100
 SELECT REPLACE(電話番号, '-', '') AS 電話番号 FROM APP100
+SELECT REGEXP_LIKE(郵便番号, '^[0-9]{3}-[0-9]{4}$') AS 書式OK FROM APP100
+SELECT REGEXP_REPLACE(電話番号, '[^0-9]', '') AS 数字のみ FROM APP100
+SELECT REGEXP_SUBSTR(メモ, '[A-Z]{2}-[0-9]{6}') AS 受付番号 FROM APP100
 SELECT LENGTH(会社名) AS kintone文字数, LENGTH_CHAR(会社名) AS コードポイント数 FROM APP100
 SELECT TRANSLATE(会社名, '啞焰鷗', '唖焔鴎') AS 会社名 FROM APP100
 SELECT COALESCE(メモ, '（なし）') AS メモ FROM APP100
@@ -447,11 +453,17 @@ SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空
 
 `TRANSLATE` は `変換元` と `変換先` をコードポイント単位で位置対応させる、1 文字から 1 文字への写像専用関数です。両者の文字数が異なる場合は `ArgumentError` になり、`変換元` に同じ文字が複数ある場合は最初の対応が優先されます。対応しない入力文字はそのまま返します。`ﾎﾞ`（2 文字）から `ボ`（1 文字）のような半角カナから全角カナへの変換は 2 対 1 を含むため、`TRANSLATE` だけではできません。
 
+正規表現3関数は ECMAScript（JavaScript）方言を使い、POSIX ERE ではありません。フラグは `i` / `m` / `s` のみ指定でき、Unicode モード `u` は常に有効です。`g` / `y` / `d` / `u` / `v` その他のフラグは `ArgumentError` になります。`REGEXP_REPLACE` は常に全件置換し、置換文字列の `$1`〜`$9`・`$&`・`$$` を解釈します。前後文字列を挿入する `` $` `` と `$'` は使用できません。`REGEXP_SUBSTR` は非一致と空文字一致のどちらも空文字を返すため、区別が必要な場合は `REGEXP_LIKE` を併用してください。パターンとフラグにはリテラルだけでなく式やフィールドを指定でき、行ごとに実行時評価されます。
+
+> **正規表現の利用はユーザー責任です。** パターンによっては ReDoS（破滅的バックトラック）で実行が暴走し、kSQL からは中断できません。プラグインではタブを強制終了（同じタブの未保存レコード編集と未保存 SQL も失われます）、CLI では Ctrl+C、MCP ではプロセスを再起動してください。MCP では同一プロセスの他のリクエストも停止します。
+>
+> 結果や構文の受理可否は実行環境（ブラウザ／Node）とその版に依存し得ます。特に `\p{}`、`u+i` の case folding は Unicode 版差、新しい正規表現構文は Node 版差の影響を受け、同じ SQL でもプラグイン・CLI・MCP で結果が変わる場合があります。
+
 `GREATEST` / `LEAST` は、列方向の集約関数 `MAX` / `MIN` とは異なり、同じ行の引数同士を比較します。空文字は常に最小です。空文字を除いた集合がすべて数値なら数値比較し、1 つでも非数値なら集合全体を文字列比較します。数値が同値なら元の文字列表記を二次キーにするため、引数順によって結果は変わりません。
 
 `LEFT` / `RIGHT` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は引数の個数を検証し、不正な場合は `ArgumentError` になります。`LPAD` / `RPAD` で埋め文字列が空の場合は、入力値をそのまま返します。
 
-- `LENGTH_CHAR` / `TRANSLATE` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は予約語です。同名フィールドは `` `TRANSLATE` `` のようにバッククォートで囲みます。`LEFT` / `RIGHT` は `LEFT JOIN` / `RIGHT JOIN` の予約語を兼ねており、直後に `(` がある場合のみ関数として扱います。
+- `LENGTH_CHAR` / `TRANSLATE` / `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は予約語です。同名フィールドは `` `REGEXP_LIKE` `` のようにバッククォートで囲みます。`LEFT` / `RIGHT` は `LEFT JOIN` / `RIGHT JOIN` の予約語を兼ねており、直後に `(` がある場合のみ関数として扱います。
 
 > **`ISNULL` は 2 引数（SQL Server 系）です。** MySQL の 1 引数 `ISNULL(式)`（真偽を返す）とは**別物**です。空判定には `IS NULL` / `IS NOT NULL`（→ [§6](#6-where-句)）を使ってください。
 
@@ -1640,6 +1652,8 @@ FROM #src AS e
 WHERE APP100.$id = e.転記先ID;
 ```
 
+> `REGEXP_REPLACE` / `REGEXP_SUBSTR` などの正規表現結果を一時テーブル経由の `UPDATE ... FROM` で書き戻す場合、ブラウザ／Node とその版による結果差が保存データの差になります。書き戻しに使う実行面と版を固定し、事前に SELECT で結果を確認してください。
+
 - ソースは `#temp` または `APP<n>[@profile]`。CTE・サブクエリは非対応です。
 - 結合条件は更新先とソース列の単一等値を1つだけ指定します。更新先キーは `$id`、文字列（1行）、数値に対応します。
 - `$id` のソースキーは正の安全整数です。業務キーのソース値は空にできず、正規化後に重複する場合は書き込み前にエラーになります。
@@ -1664,7 +1678,7 @@ SET 正規化名 = UPPER(名称),
 WHERE $id IN (1, 2, 3)
 ```
 
-`UPPER` / `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` / `TRANSLATE` など、既存の文字列関数を使用できます。`LPAD('7', 5, '0')` の結果は文字列 `'00007'` のまま書き込まれます。`VALIDATE ONLY` と `ON ERROR SKIP` は、関数を評価した後の値を検証します。
+`UPPER` / `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` / `TRANSLATE` / `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` などの文字列関数を使用できます。`LPAD('7', 5, '0')` と `REGEXP_LIKE(...)` の結果は、見た目が数値でも文字列のまま書き込まれます。`VALIDATE ONLY` と `ON ERROR SKIP` は、関数を評価した後の値を検証します。正規表現のホスト差は保存データの差になり得るため、書き込みに使う実行面と版を固定してください。
 
 次の範囲は非対応です。
 
@@ -2118,6 +2132,12 @@ HAVING SUM(金額) > (SELECT AVG(金額) FROM APP100) * 2
 ---
 
 ## 22. 制限事項
+
+### 正規表現の適用限界
+
+`REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` に安全性ゲートや実行時間制限はありません。ReDoS で同期処理が暴走すると kSQL 自身からは中断できません。プラグインはタブ強制終了、CLI は Ctrl+C、MCP はプロセス再起動で復旧します。プラグインでは同じタブの未保存編集と SQL、MCP では同一プロセスの全リクエストを巻き込みます。
+
+ECMAScript 正規表現はホストのブラウザ／Node とその版に依存します。`\p{}`、Unicode モードと `i` の case folding、新構文の受理可否などは同じ SQL でも面ごとに異なる場合があります。結果を `UPDATE SET` または一時テーブル経由の `UPDATE ... FROM` で保存すると、その差が保存データへ残るため、書き戻し環境を固定して事前確認してください。
 
 ### サポートしていない構文
 

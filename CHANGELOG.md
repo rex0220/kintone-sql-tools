@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.3.0（未リリース）
+
+### 機能追加
+
+- **B20 正規表現関数 `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` を追加**。ECMAScript 方言、`i` / `m` / `s` のみ受理、Unicode モード `u` を常時有効化する。パターンとフラグは式・フィールドを含めて実行時評価し、SELECT / WHERE / HAVING / ORDER BY / 一時テーブル / CTE / 通常の `UPDATE SET` で使用できる。3語は新しい予約語で、同名フィールドはバッククォートで参照する。
+- 正規表現は opt-in ゲートを設けないユーザー責任の機能として提供する。ReDoS の中断不能、プラグイン・CLI・MCP ごとの復旧手段、ホストと Unicode 版による結果差、DML 書き戻しで保存データ差になり得る点を言語リファレンスへ明記した。
+
 ## v3.2.0（2026-07-18）
 
 ### 機能追加
