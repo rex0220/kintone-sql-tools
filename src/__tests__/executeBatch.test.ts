@@ -29,6 +29,7 @@ function makeTypedRecord(fields: Record<string, unknown>): KintoneRecord {
 
 interface MockOptions {
   recordsByApp?: Record<number, KintoneRecord[]>;
+  fieldTypes?: Record<string, string>;
   /** このアプリへの getRecords を失敗させる */
   failApps?: number[];
   /** getRecords を遅延させる（ミリ秒） */
@@ -69,11 +70,13 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     async getApps() { return []; },
     async getFields(appId) {
       const codes = new Set((opts.recordsByApp?.[appId] ?? []).flatMap((record) => Object.keys(record)));
+      const types = opts.fieldTypes ?? {};
+      Object.keys(types).forEach((code) => codes.add(code));
       return [...codes].filter((code) => !code.startsWith("$"))
         .map((code) => ({
           code,
           label: code,
-          fieldType: code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT",
+          fieldType: types[code] ?? (code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT"),
         }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
@@ -459,7 +462,10 @@ test("UPDATE FROM #temp VALIDATE ONLY INTO は業務キーmatchedだけを#error
 
 test("UPDATE FROM #temp は0行でも列欠落を PUT 前に拒否する", async () => {
   const client = makeClient({ recordsByApp: { 200: [] } });
-  client.getFields = async () => [{ code: "k", label: "k", fieldType: "NUMBER" }];
+  client.getFields = async () => [
+    { code: "k", label: "k", fieldType: "NUMBER" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+  ];
   const result = await executeBatch(
     "CREATE TEMP TABLE #e AS SELECT k FROM APP200; " +
     "UPDATE APP100 SET dest = e.src FROM #e e WHERE APP100.$id = e.k",
@@ -848,7 +854,10 @@ test("空の一時テーブルの混在 SELECT *, extra は明示列だけ返す
 });
 
 test("空の一時テーブルの SELECT * は INSERT/UPSERT を no-op で完了する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({
+    recordsByApp: { 100: [], 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 売上: "NUMBER" },
+  });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "INSERT INTO APP200 (顧客名, 売上) SELECT * FROM #t;" +
@@ -1276,7 +1285,7 @@ test("DML 文内の一時テーブル参照（UPDATE のサブクエリ等）は
 // ----------------------------------------------------------------
 
 test("INSERT_SELECT: ソースが一時テーブルのみなら実行できる", async () => {
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT", 金額: "NUMBER" } });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "INSERT INTO APP200 (名前, 金額) SELECT 顧客名, 売上 FROM #t",
@@ -1292,7 +1301,7 @@ test("INSERT_SELECT: ソースが一時テーブルのみなら実行できる",
 });
 
 test("INSERT_SELECT: 実体化済み行数に confirm(dmlMaxRows 相当)が適用される", async () => {
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const confirmCalls: Array<{ count: number; operation: string }> = [];
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1323,6 +1332,7 @@ test("INSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0
         makeRecord({ $id: "2", 顧客名: "C社", 地域: "大阪" }),
       ],
     },
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT", 地域: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1352,6 +1362,7 @@ test("INSERT_SELECT: サブクエリ内の一時テーブル参照（WHERE ... I
         makeRecord({ $id: "2", 顧客名: "C社" }),
       ],
     },
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #all AS SELECT 顧客名 FROM APP100;" +
@@ -1403,7 +1414,10 @@ test("UPSERT_SELECT: 一時テーブルソースを実行でき insert / update 
 });
 
 test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで成功する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({
+    recordsByApp: { 100: [], 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 売上: "NUMBER" },
+  });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "UPSERT INTO APP400 (顧客名, 売上) SELECT 顧客名, 売上 FROM #t ON DUPLICATE (顧客名)",
@@ -1424,7 +1438,7 @@ test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで�
 });
 
 test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({ recordsByApp: { 100: [], 400: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
   const r = await executeBatch(
     "UPSERT INTO APP400 (顧客名) SELECT * FROM APP100 ON DUPLICATE (顧客名)",
     client,
@@ -1442,6 +1456,7 @@ test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する"
 test("UPSERT_SELECT: 一時テーブルソースでも confirm 拒否で当該文ゼロ書き込み", async () => {
   const client = makeClient({
     recordsByApp: { 100: APP1, 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1468,6 +1483,7 @@ test("UPSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0
       300: [makeRecord({ $id: "1", 顧客名: "A社", 地域: "東京" })],
       400: [makeRecord({ $id: "9", 顧客名: "A社" })],
     },
+    fieldTypes: { 地域: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1734,7 +1750,7 @@ test("INSERT VALUES（confirm 非経由）が混在しても文コンテキス�
   // 文1: INSERT VALUES（confirm 非経由で書き込まれる — コア実態の回帰固定）
   // 文2: DELETE（confirm 呼び出し）→ statementIndex = 2 が正しく渡ること
   //（confirm 呼び出し回数から文番号を推測すると1回目 = 文1 と誤る）
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const contexts: unknown[] = [];
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1799,7 +1815,7 @@ test("SELECT-based DML のソース読み取りは onLimitReached=truncate に�
   // 切り捨て後の件数で confirm → 部分書き込みになる。
   // プラグインは DML を含む実行で onLimitReached を "error" に固定してこれを防ぐ
   //（v1.9.0 仕様 §3.6。MCP ksql_mutate は DEFAULT_ON_LIMIT="error" 固定で従来から安全）
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const confirmCounts: number[] = [];
   const r = await executeBatch(
     "SELECT 顧客名 FROM APP100;" +

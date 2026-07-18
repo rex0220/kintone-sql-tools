@@ -3593,6 +3593,40 @@ const NON_WRITABLE_FIELD_TYPES = new Set([
   "CALC", "RECORD_NUMBER", "CREATOR", "CREATED_TIME", "MODIFIER", "UPDATED_TIME", "STATUS", "STATUS_ASSIGNEE", "CATEGORY", "REFERENCE_TABLE",
 ]);
 
+function assertWritableTopLevelDmlFields(
+  appId: number,
+  targetFields: readonly string[],
+  fieldInfos: readonly KintoneFieldInfo[]
+): void {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  for (const code of targetFields) {
+    const info = infoByCode.get(code);
+    if (!info) {
+      throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
+    }
+    if (info.inSubtable) {
+      throw new Error(
+        `ArgumentError: DML target field ${code} is inside a subtable. ` +
+        `Use subtable DML syntax (for example, APP${appId}$テーブル).`
+      );
+    }
+    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
+      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
+    }
+  }
+}
+
+async function loadWritableTopLevelDmlFields(
+  appId: number,
+  targetFields: readonly string[],
+  client: KintoneClient,
+  cacheContext: string
+): Promise<KintoneFieldInfo[]> {
+  const fieldInfos = await getFieldsCached(appId, client, cacheContext);
+  assertWritableTopLevelDmlFields(appId, targetFields, fieldInfos);
+  return fieldInfos;
+}
+
 async function executeDmlValidation(
   stmt: ValidationStatement,
   client: KintoneClient,
@@ -3630,24 +3664,19 @@ async function prepareDmlValidation(
   tempTables: Map<string, MaterializedTable> | undefined,
   statementNumber: number
 ): Promise<PreparedDmlValidation> {
-  if (stmt.type === "UPDATE") {
-    await assertDmlWhereCapability(stmt, client, cacheContext);
-  }
   const operation: ValidationOperation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
     throw new Error("ArgumentError: DML target fields contain duplicates.");
   }
-  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
-  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const targetFields = stmt.type === "UPDATE" ? stmt.assignments.map((a) => a.field) : stmt.fields;
-  for (const code of targetFields) {
-    const info = infoByCode.get(code);
-    if (!info) throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
-    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
-      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
-    }
+  const fieldInfos = await loadWritableTopLevelDmlFields(
+    stmt.appId, targetFields, client, cacheContext
+  );
+  if (stmt.type === "UPDATE") {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
   }
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
 
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
   const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
@@ -4119,6 +4148,7 @@ async function executeInsert(
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
   const createdIds: string[][] = [];
@@ -4147,13 +4177,16 @@ async function executeInsertSelect(
   /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
   cteCache?: Map<string, MaterializedTable>
 ): Promise<InsertResult> {
-  // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
+  // 1. 転送先フィールドを、ソース SELECT や confirm より前に検査する。
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+
+  // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
     ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
     : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
 
-  // 2. 列数チェック
+  // 3. 列数チェック
   if (columns.length !== stmt.fields.length) {
     const emptySourceHint = columns.length === 0 && rows.length === 0
       ? "。結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
@@ -4163,16 +4196,16 @@ async function executeInsertSelect(
     );
   }
 
-  // 2.5 書き込み前に件数が確定するため、確認コールバック（dmlMaxRows ガード等）を通す
+  // 4. 書き込み前に件数が確定するため、確認コールバック（dmlMaxRows ガード等）を通す
   if (options.confirm) {
     const ok = await options.confirm(rows.length, "INSERT");
     if (!ok) throw new OperationCancelledError("INSERT", rows.length);
   }
 
-  // 3. 転送先フィールド型を取得（同型自動変換）
+  // 5. 転送先フィールド型を取得（同型自動変換）
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
-  // 4. ProcessRow[] → KintoneRecord[]（列の位置で対応付け）
+  // 6. ProcessRow[] → KintoneRecord[]（列の位置で対応付け）
   const allRecords = rows.map((row) => {
     const record: KintoneRecord = {};
     stmt.fields.forEach((field, i) => {
@@ -4182,7 +4215,7 @@ async function executeInsertSelect(
     return record;
   });
 
-  // 5. 100 件ごとに POST
+  // 7. 100 件ごとに POST
   const createdIds: string[][] = [];
   for (let i = 0; i < allRecords.length; i += 100) {
     const batch = allRecords.slice(i, i + 100);
@@ -4208,10 +4241,14 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
-  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
+  await loadWritableTopLevelDmlFields(
+    stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
+  );
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.from != null) {
     return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
@@ -4376,6 +4413,8 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+
   // 1. 各行のキー値を評価し、既存レコードを一括検索（in (...) チャンク）
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
@@ -4953,7 +4992,10 @@ async function executeUpsertSelect(
   /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
   cteCache?: Map<string, MaterializedTable>
 ): Promise<UpsertResult> {
-  // 1. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
+  // 1. 転送先フィールドを、ソース SELECT や照合 read、confirm より前に検査する。
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+
+  // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
     ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
     : await executeSelect(stmt.select, client, options, cacheContext);
