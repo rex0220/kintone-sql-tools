@@ -20,6 +20,7 @@ function makeClient(): KintoneClient {
       ];
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 
@@ -1356,6 +1357,7 @@ describe("MCP tools", () => {
       async getApps() { return []; },
       async getFields() { return []; },
       async getProcessStatuses() { return { enable: false, states: [] }; },
+      async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
@@ -1487,6 +1489,7 @@ describe("MCP tools", () => {
         async getApps() { return []; },
         async getFields() { return []; },
         async getProcessStatuses() { return { enable: false, states: [] }; },
+        async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
       };
       const createRuntime = async (
         _serverOptions: KsqlRuntimeServerOptions,
@@ -1580,6 +1583,7 @@ describe("MCP tools", () => {
       async getApps() { return []; },
       async getFields() { return []; },
       async getProcessStatuses() { return { enable: false, states: [] }; },
+      async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,
@@ -1654,6 +1658,7 @@ describe("MCP tools", () => {
       async getApps() { return []; },
       async getFields() { return fields; },
       async getProcessStatuses() { return { enable: false, states: [] }; },
+      async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
     };
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,

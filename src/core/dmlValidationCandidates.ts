@@ -2,6 +2,7 @@ import type { KintoneFieldInfo } from "../execute";
 import type { ProcessRow } from "../engine/process";
 import { isEmptyDmlValue, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import type { NumberPrecision } from "./numberPrecision";
 
 export type ValidationOperation = "INSERT" | "UPDATE" | "UPSERT";
 
@@ -27,7 +28,8 @@ export function validateDmlCandidates(
   payloadFields: string[],
   targetFields: string[],
   fieldInfos: KintoneFieldInfo[],
-  statementNumber: number
+  statementNumber: number,
+  numberPrecision?: NumberPrecision
 ): { errors: ProcessRow[]; invalidRows: number; invalidRowNumbers: Set<number> } {
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors: ProcessRow[] = [];
@@ -36,7 +38,7 @@ export function validateDmlCandidates(
     candidate.record ??= {};
     const rowErrors = [...candidate.preErrors];
     for (const code of targetFields) {
-      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!);
+      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!, numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
       else candidate.record[code] = { value: result.value };
     }
@@ -46,12 +48,12 @@ export function validateDmlCandidates(
         if (candidate.payload.has(info.code)) continue;
         const emptyDefault = isEmptyDmlValue(info.defaultValue);
         if (!emptyDefault) {
-          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);
+          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info, numberPrecision);
           if (!defaultResult.ok) rowErrors.push({
             field: info.code, code: defaultResult.code, message: `既定値: ${defaultResult.message}`,
           });
         } else {
-          const emptyResult = validateAndNormalizeDmlValue("", info);
+          const emptyResult = validateAndNormalizeDmlValue("", info, numberPrecision);
           if (!emptyResult.ok) {
             rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
           } else if (info.required) {

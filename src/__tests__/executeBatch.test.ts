@@ -80,6 +80,7 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
         }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 

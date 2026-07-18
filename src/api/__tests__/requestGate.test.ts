@@ -185,6 +185,7 @@ test("書き込み系は 429 でもリトライしない", async () => {
 function makeFailThenOkClient(failures: { getRecords: number }) {
   let getRecordsCalls = 0;
   let processStatusCalls = 0;
+  let numberPrecisionCalls = 0;
   let postCalls = 0;
   const client: KintoneClient = {
     async getRecords() {
@@ -206,8 +207,13 @@ function makeFailThenOkClient(failures: { getRecords: number }) {
       if (processStatusCalls === 1) throw httpError(429);
       return { enable: true, states: [{ name: "In Progress", index: 0 }] };
     },
+    async getNumberPrecision() {
+      numberPrecisionCalls += 1;
+      if (numberPrecisionCalls === 1) throw httpError(429);
+      return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const };
+    },
   };
-  return { client, calls: () => ({ getRecordsCalls, postCalls, processStatusCalls }) };
+  return { client, calls: () => ({ getRecordsCalls, postCalls, processStatusCalls, numberPrecisionCalls }) };
 }
 
 test("withRequestGate: GET 系はリトライ付き、書き込み系はリトライなし", async () => {
@@ -225,6 +231,11 @@ test("withRequestGate: GET 系はリトライ付き、書き込み系はリト�
     states: [{ name: "In Progress", index: 0 }],
   });
   expect(calls().processStatusCalls).toBe(2);
+
+  await expect(gated.getNumberPrecision(1)).resolves.toEqual({
+    digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN",
+  });
+  expect(calls().numberPrecisionCalls).toBe(2);
 
   await expect(gated.postRecords({ app: 1, records: [] })).rejects.toThrow(/429/);
   expect(calls().postCalls).toBe(1); // リトライしない

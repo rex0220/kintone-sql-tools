@@ -45,6 +45,7 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
     async getApps() { return []; },
     async getFields() { return []; },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 

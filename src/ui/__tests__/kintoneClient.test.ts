@@ -101,3 +101,22 @@ test("plugin クライアントは STATUS の name と index を保持し states
     else delete root.kintone;
   }
 });
+
+test("plugin クライアントは運用app/settings.jsonを読みnumberPrecisionを検証する", async () => {
+  const api = jest.fn(async () => ({
+    numberPrecision: { digits: "16", decimalPlaces: "4", roundingMode: "DOWN" },
+  })) as jest.Mock & { url: (path: string, guest: boolean) => string };
+  api.url = (path) => path;
+  const root = globalThis as unknown as { kintone?: { api: typeof api } };
+  const previous = root.kintone;
+  root.kintone = { api };
+  try {
+    await expect(createKintoneClient().getNumberPrecision(123)).resolves.toEqual({
+      digits: 16, decimalPlaces: 4, roundingMode: "DOWN",
+    });
+    expect(api).toHaveBeenCalledWith("/k/v1/app/settings.json", "GET", { app: 123 });
+  } finally {
+    if (previous) root.kintone = previous;
+    else delete root.kintone;
+  }
+});

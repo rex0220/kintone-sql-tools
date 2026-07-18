@@ -2,7 +2,8 @@ import type { KintoneFieldInfo } from "../execute";
 import type { SqlValue } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import { normalizeDmlSqlValue, type KintoneValue } from "../converter/dmlToKintone";
-import { compareDecimal, isFiniteDecimal } from "./exactDecimal";
+import { compareDecimal, parseExactDecimal } from "./exactDecimal";
+import { exactDecimalDigitCounts, type NumberPrecision } from "./numberPrecision";
 
 export { compareDecimal, isFiniteDecimal } from "./exactDecimal";
 
@@ -12,6 +13,8 @@ export type DmlValidationErrorCode =
   | "ERR_TYPE_DATE"
   | "ERR_RANGE_MAX"
   | "ERR_RANGE_MIN"
+  | "ERR_NUMBER_INTEGER_DIGITS"
+  | "ERR_NUMBER_DECIMAL_PLACES"
   | "ERR_LENGTH_MAX"
   | "ERR_LENGTH_MIN"
   | "ERR_CHOICE_INVALID"
@@ -27,7 +30,8 @@ const CHOICE_TYPES = new Set(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_S
 
 export function validateAndNormalizeDmlValue(
   raw: unknown,
-  field: KintoneFieldInfo
+  field: KintoneFieldInfo,
+  numberPrecision?: NumberPrecision
 ): DmlValueValidation {
   if (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME") {
     const original = rawScalarText(raw);
@@ -48,7 +52,8 @@ export function validateAndNormalizeDmlValue(
   }
   if (!isEmpty(value) && field.fieldType === "NUMBER") {
     const text = String(value);
-    if (!isFiniteDecimal(text)) {
+    const decimal = parseExactDecimal(text);
+    if (decimal === null) {
       return { ok: false, code: "ERR_TYPE_NUMBER", message: `${field.code} は数値で指定してください` };
     }
     if (field.minValue != null && compareDecimal(text, field.minValue) < 0) {
@@ -56,6 +61,25 @@ export function validateAndNormalizeDmlValue(
     }
     if (field.maxValue != null && compareDecimal(text, field.maxValue) > 0) {
       return { ok: false, code: "ERR_RANGE_MAX", message: `${field.code} は ${field.maxValue} 以下で指定してください` };
+    }
+    if (numberPrecision !== undefined) {
+      const { integerDigits, fractionDigits } = exactDecimalDigitCounts(decimal);
+      // R1 §5.2: I = digits - decimalPlaces. §11-4 実機確定済み（D=16,P=4 で 12桁受理・13桁は CB_VA01 拒否）。
+      const integerBudget = numberPrecision.digits - numberPrecision.decimalPlaces;
+      if (integerDigits > integerBudget) {
+        return {
+          ok: false,
+          code: "ERR_NUMBER_INTEGER_DIGITS",
+          message: `${field.code} の整数部は ${integerDigits} 桁です。許容は ${integerBudget} 桁までです (digits=${numberPrecision.digits}, decimalPlaces=${numberPrecision.decimalPlaces})`,
+        };
+      }
+      if (fractionDigits > numberPrecision.decimalPlaces) {
+        return {
+          ok: false,
+          code: "ERR_NUMBER_DECIMAL_PLACES",
+          message: `${field.code} の小数部は ${fractionDigits} 桁です。許容は ${numberPrecision.decimalPlaces} 桁までです (digits=${numberPrecision.digits}, decimalPlaces=${numberPrecision.decimalPlaces})`,
+        };
+      }
     }
   }
   if (!isEmpty(value) && (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME")) {

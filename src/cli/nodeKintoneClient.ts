@@ -16,6 +16,7 @@ import { normalizeProcessStatusStates, type RawProcessStatusState } from "../cor
 import { createKintoneCursorHandle } from "../api/kintoneCursor";
 import { getCursorLeaseManager } from "../api/cursorLeaseManager";
 import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
+import { parseNumberPrecisionSettings } from "../core/numberPrecision";
 
 export class KintoneApiError extends Error {
   constructor(readonly status: number, readonly code: string | undefined, bodyText: string) {
@@ -314,6 +315,17 @@ export function createNodeKintoneClient(
       );
 
       return flattenFormFieldProperties(res.properties);
+    },
+
+    async getNumberPrecision(appId: number) {
+      const qs = new URLSearchParams();
+      qs.set("app", String(appId));
+      const res = await requestJson<Parameters<typeof parseNumberPrecisionSettings>[0]>(
+        `${apiBasePath}/app/settings.json?${qs.toString()}`,
+        { method: "GET" },
+        appId
+      );
+      return parseNumberPrecisionSettings(res);
     },
 
     async getProcessStatuses(appId: number): Promise<KintoneProcessStatuses> {

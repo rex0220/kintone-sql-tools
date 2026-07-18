@@ -329,6 +329,31 @@ describe("logical app runtime context and token routing", () => {
     expect(new Headers(init?.headers).get("X-Cybozu-API-Token")).toBe("snapshot-token");
   });
 
+  test("logical numberPrecision routing は physical app ID とそのtokenを使う", async () => {
+    writeLogicalConfig();
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({
+        numberPrecision: { digits: "16", decimalPlaces: "4", roundingMode: "HALF_EVEN" },
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+    const context = resolveSqlContext({ configPath }, "SELECT * FROM LAPP_ORDERS", "prod");
+    const [binding] = [...context.bindings.values()];
+    const runtime = await createKsqlRuntime(
+      { configPath },
+      { sql: "SELECT * FROM LAPP_ORDERS", profile: "prod", sqlContext: context }
+    );
+
+    await expect(runtime.client.getNumberPrecision(binding.mappedAppId)).resolves.toEqual({
+      digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN",
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("app/settings.json?app=1234");
+    expect(new Headers(init?.headers).get("X-Cybozu-API-Token")).toBe("snapshot-token");
+  });
+
   test("status.json の states=null は enable=false の残存statesと区別して保持する", async () => {
     writeLogicalConfig();
     jest.spyOn(globalThis, "fetch").mockImplementation(async () =>

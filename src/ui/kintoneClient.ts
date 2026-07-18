@@ -21,6 +21,7 @@ import { createKintoneCursorHandle } from "../api/kintoneCursor";
 import { getCursorLeaseManager } from "../api/cursorLeaseManager";
 import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
 import { installCursorPageLifecycle, registerCursorHandle } from "./cursorPageLifecycle";
+import { parseNumberPrecisionSettings } from "../core/numberPrecision";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -180,6 +181,13 @@ export function createKintoneClient(options: { cursorMaxActive?: number } = {}):
         app: appId,
       });
       return flattenFormFieldProperties(res.properties);
+    },
+
+    async getNumberPrecision(appId: number) {
+      const res = await api<Parameters<typeof parseNumberPrecisionSettings>[0]>(
+        "/k/v1/app/settings.json", "GET", { app: appId }
+      );
+      return parseNumberPrecisionSettings(res);
     },
 
     async getProcessStatuses(appId: number): Promise<KintoneProcessStatuses> {

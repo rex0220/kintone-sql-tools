@@ -157,7 +157,7 @@ interface ExactDecimal {
 
 ### 5.2 許容範囲
 
-設定を `D = digits`、`P = decimalPlaces`、整数部予算を `I = D - P` とする。**この予算式（整数部 = digits − decimalPlaces）は kintone の実挙動を前提としており、実装前に §11-4 の実機で確定する**（`D=16, P=4` で整数 13 桁が `ERR_NUMBER_INTEGER_DIGITS` 相当で拒否されるか、合計 digits 制限として別挙動になるかを境界で確認）。実機と食い違えば予算式を実挙動へ合わせる。
+設定を `D = digits`、`P = decimalPlaces`、整数部予算を `I = D - P` とする。**この予算式（整数部 = digits − decimalPlaces）は §11-4 の実機で確定済み**（`D=16, P=4` で整数 12 桁は kintone に受理され、13 桁は `CB_VA01`「有効桁数を超えています。」で拒否される。合計 digits 制限ではなく整数部予算で拒否＝`I=12` がハード境界。証跡: `docs/internal/evidence/b29_number_precision_smoke.md` §2）。
 
 有限10進値は次を両方満たす場合だけ表現可能である。
 
@@ -418,6 +418,11 @@ HALF_EVEN の必須例は `0.5→0`、`1.5→2`、`2.5→2`、`3.5→4` とそ�
 Tier-0 外エラーの存在により一般的な「valid なら必ず API 成功」までは主張しない。比較対象は numberPrecision による桁判定に限定する。
 
 ## 11. Claude が実機で確認する項目（実装後）
+
+**実施済み（2026-07-18・証跡 `docs/internal/evidence/b29_number_precision_smoke.md`）。** 要点:
+- §11-4 整数部予算 `I = D − P = 12` は kintone の実ハード境界と一致（12桁受理・13桁 `CB_VA01` 拒否）。
+- 小数超過は kintone が**ハード拒否せず暗黙丸め**（`12.34567`→保存 `12.3457`・`0.00005`→`0`）。B29 の `ERR_NUMBER_DECIMAL_PLACES` はこの silent rounding を防ぐ保護であり偽拒否ではない。
+- VALIDATE ONLY 桁検証・fail-closed・per-field 診断・cleanup を確認。
 
 実機操作と証跡作成は Claude 担当とし、本仕様作成時には実行しない。
 
