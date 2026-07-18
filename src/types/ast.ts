@@ -260,6 +260,7 @@ export interface ArithColumn {
 export type StringFuncName =
   | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM"
   | "LENGTH" | "LENGTH_CHAR" | "SUBSTRING" | "CONCAT" | "REPLACE" | "TRANSLATE" | "COALESCE"
+  | "REGEXP_LIKE" | "REGEXP_REPLACE" | "REGEXP_SUBSTR"
   | "NULLIF" | "ISNULL" | "LEFT" | "RIGHT" | "INSTR" | "LPAD" | "RPAD"
   | "GREATEST" | "LEAST"
   | "ROUND" | "FLOOR" | "CEIL" | "TRUNCATE"

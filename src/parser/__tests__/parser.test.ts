@@ -877,6 +877,34 @@ test.each(["LENGTH_CHAR", "TRANSLATE"])("%s は予約語で、同名フィール
   });
 });
 
+test("B20 正規表現3関数を式引数付きで解析する", () => {
+  const ast = parseSelect(
+    "SELECT REGEXP_LIKE(value, pattern, flags), " +
+    "REGEXP_REPLACE(value, CONCAT('[', pattern, ']'), replacement, flags), " +
+    "REGEXP_SUBSTR(value, pattern) FROM APP100"
+  );
+  expect(ast.columns).toMatchObject([
+    { type: "STRFUNC_COL", expr: { func: "REGEXP_LIKE" } },
+    { type: "STRFUNC_COL", expr: { func: "REGEXP_REPLACE", args: [
+      { type: "FIELD_REF", field: "value" },
+      { type: "STRING_FUNC", func: "CONCAT" },
+      { type: "FIELD_REF", field: "replacement" },
+      { type: "FIELD_REF", field: "flags" },
+    ] } },
+    { type: "STRFUNC_COL", expr: { func: "REGEXP_SUBSTR" } },
+  ]);
+});
+
+test.each(["REGEXP_LIKE", "REGEXP_REPLACE", "REGEXP_SUBSTR"])(
+  "%s は予約語で、同名フィールドはバッククォートで参照できる",
+  (name) => {
+    expect(() => parseSelect(`SELECT ${name} FROM APP100`)).toThrow(ParseError);
+    expect(parseSelect(`SELECT \`${name}\` FROM APP100`).columns[0]).toEqual({
+      type: "FIELD", field: name, alias: null,
+    });
+  }
+);
+
 test("B24 バッチレシピ R8 の40字変換 SQL を構文検証できる", () => {
   expect(() => parseSelect(
     "SELECT TRANSLATE(会社名, " +

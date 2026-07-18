@@ -107,6 +107,48 @@ function makeSafePadding(pad: string, gap: number): string {
   return sliceSafePrefix(repeated, gap);
 }
 
+const REGEXP_CACHE_MAX = 200;
+const regexpCache = new Map<string, RegExp>();
+
+function normalizeRegexpFlags(flags: string): string {
+  if (/[^ims]/.test(flags)) {
+    throw new Error("ArgumentError: regular expression flags may contain only i, m, or s.");
+  }
+  if (new Set(flags).size !== flags.length) {
+    throw new Error("ArgumentError: regular expression flags must not contain duplicates.");
+  }
+  return `${flags}u`;
+}
+
+function compileRegexp(pattern: string, flags: string, global = false): RegExp {
+  const normalizedFlags = normalizeRegexpFlags(flags) + (global ? "g" : "");
+  const key = `${pattern}\0${normalizedFlags}`;
+  const cached = regexpCache.get(key);
+  if (cached !== undefined) {
+    cached.lastIndex = 0;
+    return cached;
+  }
+  let regexp: RegExp;
+  try {
+    regexp = new RegExp(pattern, normalizedFlags);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`ArgumentError: invalid regular expression: ${detail}`);
+  }
+  if (regexpCache.size >= REGEXP_CACHE_MAX) {
+    const oldest = regexpCache.keys().next().value as string | undefined;
+    if (oldest !== undefined) regexpCache.delete(oldest);
+  }
+  regexpCache.set(key, regexp);
+  return regexp;
+}
+
+function assertRegexpReplacement(replacement: string): void {
+  if (replacement.includes("$`") || replacement.includes("$'")) {
+    throw new Error("ArgumentError: REGEXP_REPLACE replacement must not contain $` or $'.");
+  }
+}
+
 // ============================================================
 // 文字列・数値関数
 // ============================================================
@@ -166,6 +208,19 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const from = args[1] ?? "";
       const to   = args[2] ?? "";
       return from === "" ? str : str.split(from).join(to);
+    }
+    case "REGEXP_LIKE": {
+      assertArity("REGEXP_LIKE", args, 2, 3);
+      return compileRegexp(args[1], args[2] ?? "").test(args[0]) ? "1" : "0";
+    }
+    case "REGEXP_REPLACE": {
+      assertArity("REGEXP_REPLACE", args, 3, 4);
+      assertRegexpReplacement(args[2]);
+      return args[0].replace(compileRegexp(args[1], args[3] ?? "", true), args[2]);
+    }
+    case "REGEXP_SUBSTR": {
+      assertArity("REGEXP_SUBSTR", args, 2, 3);
+      return compileRegexp(args[1], args[2] ?? "").exec(args[0])?.[0] ?? "";
     }
     case "TRANSLATE": {
       assertArity("TRANSLATE", args, 3, 3);

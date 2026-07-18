@@ -110,6 +110,27 @@ test("B23/B24 は temp・CTE を通り、LENGTH_CHAR=numeric／TRANSLATE=string 
   ]);
 });
 
+test("B20 は temp・CTE を通り、REGEXP_LIKE も string 意味型を保つ", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ value: "aa", pattern: "^a+$" }),
+    makeRecord({ value: "b", pattern: "^a+$" }),
+  ] } });
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #matched AS " +
+      "SELECT REGEXP_LIKE(value, pattern) AS matched, REGEXP_SUBSTR(value, 'a+') AS part FROM APP100;" +
+    "WITH c AS (SELECT matched, part FROM #matched) " +
+      "SELECT matched, part FROM c WHERE matched != '00' ORDER BY matched ASC, part ASC",
+    client,
+    { cacheContext: "b20-temp-cte-meta" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([
+    { matched: "0", part: "" },
+    { matched: "1", part: "aa" },
+  ]);
+});
+
 test("B24 from/to 式の長さ検証は行評価時に行う", async () => {
   const client = makeClient({ recordsByApp: { 100: [makeRecord({ value: "x" })] } });
   await expect(execute(

@@ -234,6 +234,26 @@ test("B21 文字列関数 UPDATE は参照フィールドを GET し、行ごと
   });
 });
 
+test("B20 UPDATE SET は正規表現引数フィールドを取得して行ごとに評価する", () => {
+  const stmt = parse(
+    "UPDATE APP100 SET matched = REGEXP_LIKE(source, pattern, flags), " +
+    "normalized = REGEXP_REPLACE(source, pattern, replacement, flags), " +
+    "part = REGEXP_SUBSTR(source, pattern, flags) WHERE $id = 1"
+  ) as UpdateStatement;
+  const getParams = updateToGetQueryForArith(stmt);
+  expect(getParams.fields).toEqual(["$id", "source", "pattern", "flags", "replacement"]);
+
+  const batches = updateToPutBatchesArith(stmt, [{
+    "$id": { value: "1" }, source: { value: "AaA" }, pattern: { value: "a+" },
+    flags: { value: "i" }, replacement: { value: "x" },
+  }]);
+  expect(batches[0].records[0].record).toEqual({
+    matched: { value: "1" },
+    normalized: { value: "x" },
+    part: { value: "AaA" },
+  });
+});
+
 test("B21 算術式内 STRING_FUNC は従来どおり DmlConvertError", () => {
   const stmt = parse(
     "UPDATE APP100 SET n = LENGTH(source) * 1 WHERE $id = 1"
