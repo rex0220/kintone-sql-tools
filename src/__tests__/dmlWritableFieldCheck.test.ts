@@ -15,6 +15,7 @@ const DML_FORMS: DmlForm[] = [
   { name: "UPDATE normal", sql: (target) => `UPDATE APP100 SET ${target} = 1 WHERE $id = 1` },
   { name: "UPDATE arithmetic", sql: (target) => `UPDATE APP100 SET ${target} = ${target} + 1 WHERE $id = 1` },
   { name: "UPDATE CASE", sql: (target) => `UPDATE APP100 SET ${target} = CASE WHEN $id = 1 THEN 1 ELSE 2 END WHERE $id = 1` },
+  { name: "UPDATE string function", sql: (target) => `UPDATE APP100 SET ${target} = UPPER(key) WHERE $id = 1` },
   {
     name: "UPDATE FROM",
     sql: (target) => `UPDATE APP100 SET ${target} = s.source FROM APP200 s WHERE APP100.$id = s.key`,

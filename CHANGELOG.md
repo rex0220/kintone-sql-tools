@@ -12,6 +12,7 @@
 
 ### 修正（正しさ・安全性）
 
+- **B21 `UPDATE SET` が文字列関数を直接受け付けない不整合を修正**。親レコードの通常 `UPDATE` で `SET t = UPPER(t)`、`SET code = LPAD(code, 5, '0')` などを受理し、参照フィールドを取得してレコードごとに評価する。関数の戻り型契約を維持したまま `VALIDATE ONLY` / `ON ERROR SKIP` の検証経路へ渡し、B34 の書き込み先検査は対象取得より前に行う。算術式内の文字列関数、フィールド参照単独、`UPDATE ... FROM` / サブテーブル UPDATE での直接関数は引き続き明示エラーとする。
 - **B28 DML 値の単項符号の受理不整合を修正**。親・サブテーブルの `INSERT ... VALUES` と `UPSERT ... VALUES` で `-5` / `+5` / `-0.5` / `+0.5` などを数値リテラルとして受理する。`UPDATE SET` の単項 `+` は数値リテラル直前だけに限定し、既存の単項 `-` が式・フィールドへ掛かる範囲は維持する。符号のネスト、VALUES 内の算術式・フィールド参照・関数は引き続き拒否する。
 - **B35 プラグインの message なしネットワークエラー表示を修正**。kintone API が message なし・空文字列・undefined で reject した場合、元の値を `cause` に保持した Error と判別可能なネットワーク fallback 文言へ正規化する。表示層にも汎用文言の最終防衛を置き、「⚠」だけ、または `[object Object]` だけが表示される状態を防ぐ。kintone 正規エラーの code/message/errors 詳細と Cursor 系 Error の表示は変更しない。
 - **B34 DML の書き込み先フィールド検査を追加**。親レコードの INSERT VALUES/SELECT、UPDATE（通常・算術・CASE・UPDATE FROM）、UPSERT VALUES/SELECT で、不存在フィールド、サブテーブル子フィールド、書き込み不可フィールドを文単位の `ArgumentError` とする。`VALIDATE ONLY` / `ON ERROR SKIP` にも同じ検査を適用し、サブテーブル子のエラーは `APPxxxx$テーブル` 構文を案内する。

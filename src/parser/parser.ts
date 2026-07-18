@@ -2145,6 +2145,13 @@ export class Parser {
     this.expect(TokenKind.SET);
     const assignments = this.parseAssignments();
 
+    if (subtableCode && assignments.some((a) => a.value.type === "STRING_FUNC")) {
+      throw new ParseError(
+        "サブテーブル UPDATE SET では文字列関数を直接使用できません",
+        this.prev()
+      );
+    }
+
     let from: UpdateStatement["from"] = null;
     if (this.consume(TokenKind.FROM)) {
       const table = this.parseTableRef();
@@ -2190,7 +2197,14 @@ export class Parser {
       from.targetFilter = decomposed.targetFilter;
     } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
       throw new ParseError(
-        "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",
+        "SET の値にフィールド参照を単独で指定することはできません",
+        whereTok
+      );
+    } else if (assignments.some(
+      (a) => a.value.type === "STRING_FUNC" && this.nodeContainsAnyQualifier(a.value)
+    )) {
+      throw new ParseError(
+        "UPDATE SET の文字列関数では更新先フィールドを修飾しないでください",
         whereTok
       );
     }
@@ -2274,6 +2288,12 @@ export class Parser {
     tok: Token
   ): void {
     for (const assignment of assignments) {
+      if (assignment.value.type === "STRING_FUNC") {
+        throw new ParseError(
+          "UPDATE ... FROM の SET では文字列関数を直接使用できません",
+          tok
+        );
+      }
       if (assignment.value.type === "SOURCE_FIELD") {
         if (assignment.value.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
           throw new ParseError(`UPDATE ... FROM の SET 参照はソース alias ${sourceAlias} で修飾してください`, tok);
@@ -2457,6 +2477,7 @@ export class Parser {
     }
     if (node.type === "NUMBER") return node;   // 数値単独 → SqlValue
     if (node.type === "ARITH")  return node;   // 算術式
+    if (node.type === "STRING_FUNC") return node; // UPDATE SET 専用の行評価
     if (node.type === "FIELD_REF") {
       const dot = node.field.indexOf(".");
       if (dot > 0 && dot < node.field.length - 1) {
@@ -2465,7 +2486,7 @@ export class Parser {
     }
     // FIELD_REF 単独（SET f = other_field）は未サポート
     throw new ParseError(
-      "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",
+      "SET の値にフィールド参照を単独で指定することはできません",
       tok
     );
   }

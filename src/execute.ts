@@ -38,6 +38,7 @@ import {
   updateToGetQuery,
   updateToPutBatches,
   hasArithAssignment,
+  hasRowDependentAssignment,
   updateToGetQueryForArith,
   updateToPutBatchesArith,
   updateFromToPutBatches,
@@ -3876,7 +3877,7 @@ async function materializeUpdateValidationCandidates(
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   let records: Array<{ id: number; record: KintoneRecord }>;
-  if (hasArithAssignment(stmt)) {
+  if (hasRowDependentAssignment(stmt)) {
     const getParams = updateToGetQueryForArith(stmt);
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
       maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
@@ -4259,7 +4260,7 @@ async function executeUpdate(
 
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
-  if (hasArithAssignment(stmt)) {
+  if (hasRowDependentAssignment(stmt)) {
     // ── 算術式あり: 現在値を取得してから計算 → PUT ──
     // 1. $id + 参照フィールドを取得
     const getParams = updateToGetQueryForArith(stmt);
@@ -5896,6 +5897,8 @@ function buildUpdatePlan(
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const isArith  = hasArithAssignment(stmt);
+  const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
+  const isRowDependent = hasRowDependentAssignment(stmt);
   const isSubq   = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines: string[] = [];
   if (label) lines.push(label);
@@ -5913,11 +5916,12 @@ function buildUpdatePlan(
 
   const setTypes: string[] = [];
   if (isArith)  setTypes.push("算術 SET（現在値を取得して計算）");
+  if (isStringFunc) setTypes.push("文字列関数 SET（現在値を取得して評価）");
   if (isSubq)   setTypes.push("スカラーサブクエリ SET");
-  if (!isArith && !isSubq) setTypes.push("単純 SET");
+  if (!isRowDependent && !isSubq) setTypes.push("単純 SET");
   lines.push(`  set type:      ${setTypes.join(", ")}`);
 
-  if (isArith) {
+  if (isRowDependent) {
     const refFields = collectArithRefFields(stmt);
     if (refFields.length > 0) {
       lines.push(`  ref fields:    ${refFields.join(", ")}（GET に含める）`);
@@ -6015,11 +6019,12 @@ function safeWhereToKintone(where: WhereExpr): string {
   }
 }
 
-/** UPDATE の算術 SET で参照されるフィールド名を収集する */
+/** UPDATE の行評価 SET で参照されるフィールド名を収集する */
 function collectArithRefFields(stmt: UpdateStatement): string[] {
   const refs = new Set<string>();
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") collectArithNodeRefs(value, refs);
+    if (value.type === "STRING_FUNC") collectArithNodeRefs(value, refs);
   }
   return [...refs];
 }
@@ -6030,6 +6035,13 @@ function collectArithNodeRefs(node: ArithExpr | ArithNode, out: Set<string>): vo
     collectArithNodeRefs(node.left, out);
     collectArithNodeRefs(node.right, out);
   }
+  if (node.type === "STRING_FUNC") {
+    for (const arg of node.args) {
+      if (arg.type !== "STRING" && arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") {
+        collectArithNodeRefs(arg, out);
+      }
+    }
+  }
 }
 
 /** Assignment を人が読める形式にフォーマットする */
@@ -6039,6 +6051,7 @@ function formatAssignment(a: Assignment): string {
   if (v.type === "NUMBER")          return `${a.field} = ${v.value}`;
   if (v.type === "ARITH")           return `${a.field} = ${formatArithExprStr(v)}`;
   if (v.type === "CASE_VALUE")      return `${a.field} = CASE WHEN ...`;
+  if (v.type === "STRING_FUNC")     return `${a.field} = ${v.func}(...)`;
   if (v.type === "SCALAR_SUBQUERY") return `${a.field} = (SELECT ...)`;
   if (v.type === "SOURCE_FIELD")    return `${a.field} = ${v.alias}.${v.field}`;
   return `${a.field} = (${v.type})`;

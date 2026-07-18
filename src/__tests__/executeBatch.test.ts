@@ -411,6 +411,31 @@ test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () 
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B21 ON ERROR SKIP は文字列関数の評価結果が不正な行だけを隔離する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ $id: "1", source: "A" }),
+    makeRecord({ $id: "2", source: "LONG" }),
+  ] } });
+  client.getFields = async () => [
+    { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "3" },
+  ];
+  const batch = await executeBatch(
+    "UPDATE APP100 SET dest = CONCAT(source, 'x') WHERE $id >= 1 " +
+    "ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b21-on-error-string-func" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "UPDATE", updatedCount: 1, skippedRows: 1,
+  });
+  expect(client.putCalls[0].records).toEqual([
+    { id: 1, record: { dest: { value: "Ax" } } },
+  ]);
+  expect((batch.statements[1].result as SelectResult).rows[0].$err_code).toBe("ERR_LENGTH_MAX");
+});
+
 test("B22 LEFT の64コードユニット結果は同じ maxLength の UPDATE FROM VALIDATE ONLY を通る", async () => {
   const client = makeClient({ recordsByApp: {
     200: [makeRecord({ k: "1", source: "😀".repeat(40) })],

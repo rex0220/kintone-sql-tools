@@ -1653,6 +1653,40 @@ WHERE APP100.$id = e.転記先ID;
 - 結合等値はトップレベルの `AND` 連鎖に置きます。`OR` / `NOT` の配下に結合等値を書くとエラーになります（ターゲットのみを条件にした括弧内 `OR` は使えます）。
 - **親レコードの `UPDATE` 限定**です。サブテーブルに対する `UPDATE ... FROM` は非対応です。
 
+### SET での文字列関数
+
+親レコードの通常の `UPDATE` では、SET の右辺に文字列関数を直接指定できます。関数は更新対象レコードごとに評価され、SET 対象とは別のフィールドも参照できます。戻り値は関数の意味型を引き継ぎ、値の見た目から数値／文字列を再判定しません。
+
+```sql
+UPDATE APP100
+SET 正規化名 = UPPER(名称),
+    コード = LPAD(コード, 5, '0')
+WHERE $id IN (1, 2, 3)
+```
+
+`UPPER` / `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` / `TRANSLATE` など、既存の文字列関数を使用できます。`LPAD('7', 5, '0')` の結果は文字列 `'00007'` のまま書き込まれます。`VALIDATE ONLY` と `ON ERROR SKIP` は、関数を評価した後の値を検証します。
+
+次の範囲は非対応です。
+
+- `SET n = LENGTH(s) * 1` のように算術式の中へ文字列関数を入れること
+- `SET a = b` のようにフィールド参照だけを右辺へ指定すること
+- `UPDATE ... FROM` またはサブテーブル UPDATE の SET 右辺へ文字列関数を直接指定すること（`UPDATE ... FROM` の `SET a = src.b` は従来どおり使用できます）
+
+また、親レコード DML の WHERE 句では文字列関数を使用できません。SET で関数を使えるようになっても、`WHERE LEFT(郵便番号, 3) = '100'` のような絞り込みは拒否されます。不正な行だけを正規化する場合は、一時テーブルで対象と変換値を作り、`UPDATE ... FROM` で書き戻します。
+
+```sql
+CREATE TEMP TABLE #norm AS
+SELECT $id AS 対象id,
+       REPLACE(REPLACE(電話番号, '-', ''), ' ', '') AS 正規化
+FROM APP100
+WHERE 条件;
+
+UPDATE APP100
+SET 電話番号 = n.正規化
+FROM #norm AS n
+WHERE APP100.$id = n.対象id;
+```
+
 ### SET での算術式
 
 ```sql

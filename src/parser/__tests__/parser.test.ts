@@ -821,6 +821,41 @@ test("SELECT LENGTH(名前) FROM APP100", () => {
   if (col.type === "STRFUNC_COL") expect(col.expr.func).toBe("LENGTH");
 });
 
+test("B21 UPDATE SET は文字列関数を直接 AssignmentValue として受理する", () => {
+  const ast = parse(
+    "UPDATE APP100 SET a = UPPER(b), code = LPAD(code, 5, '0'), mapped = TRANSLATE(b, 'ab', 'AB') WHERE $id = 1"
+  ) as UpdateStatement;
+  expect(ast.assignments.map((assignment) => assignment.value.type)).toEqual([
+    "STRING_FUNC", "STRING_FUNC", "STRING_FUNC",
+  ]);
+});
+
+test("B21 FIELD_REF 単独は実態に合う ParseError のまま拒否する", () => {
+  expect(() => parse("UPDATE APP100 SET a = b WHERE $id = 1")).toThrow(
+    "SET の値にフィールド参照を単独で指定することはできません"
+  );
+});
+
+test("B21 UPDATE FROM とサブテーブル UPDATE へ文字列関数の受理を波及させない", () => {
+  expect(() => parse(
+    "UPDATE APP100 SET a = UPPER(s.b) FROM APP200 s WHERE APP100.$id = s.id"
+  )).toThrow("UPDATE ... FROM の SET では文字列関数を直接使用できません");
+  expect(() => parse(
+    "UPDATE APP100$明細 SET a = UPPER(b) WHERE _rid = '1'"
+  )).toThrow("サブテーブル UPDATE SET では文字列関数を直接使用できません");
+  expect(() => parse(
+    "UPDATE APP100 SET a = UPPER(APP100.b) WHERE $id = 1"
+  )).toThrow("UPDATE SET の文字列関数では更新先フィールドを修飾しないでください");
+});
+
+test("B21 AssignmentValue の拡張は INSERT VALUES / UPSERT VALUES に波及しない", () => {
+  expect(() => parse("INSERT INTO APP100 (a) VALUES (UPPER('x'))")).toThrow(ParseError);
+  expect(() => parse("UPSERT INTO APP100 (a) VALUES (UPPER('x')) ON DUPLICATE (a)")).toThrow(ParseError);
+  expect(() => parse("ASSERT UPPER('x') = 'X'")).toThrow(
+    "ASSERT の式では関数は使用できません"
+  );
+});
+
 test("B23/B24 LENGTH_CHAR と TRANSLATE を予約語関数として解析する", () => {
   const ast = parseSelect(
     "SELECT LENGTH_CHAR(名前), TRANSLATE(名前, CONCAT('a', 'b'), 'AB') FROM APP100"

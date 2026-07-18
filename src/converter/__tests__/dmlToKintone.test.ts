@@ -208,6 +208,41 @@ test("通常 UPDATE は hasArithAssignment が false を返す", () => {
   expect(hasArithAssignment(stmt)).toBe(false);
 });
 
+test("B21 文字列関数 UPDATE は参照フィールドを GET し、行ごとに文字列として評価する", () => {
+  const stmt = parse(
+    "UPDATE APP100 SET upper_value = UPPER(source), padded = LPAD(code, 5, '0'), " +
+    "joined = CONCAT(source, code), replaced = REPLACE(source, 'b', 'B'), " +
+    "sub_value = SUBSTRING(source, 2, 2), left_value = LEFT(source, 2), right_value = RIGHT(source, 2), " +
+    "mapped = TRANSLATE(source, 'abc', 'ABC') WHERE $id = 1"
+  ) as UpdateStatement;
+  expect(hasArithAssignment(stmt)).toBe(false);
+  const getParams = updateToGetQueryForArith(stmt);
+  expect(getParams.fields).toEqual(["$id", "source", "code"]);
+
+  const batches = updateToPutBatchesArith(stmt, [
+    { "$id": { value: "1" }, source: { value: "abc" }, code: { value: "7" } },
+  ]);
+  expect(batches[0].records[0].record).toEqual({
+    upper_value: { value: "ABC" },
+    padded: { value: "00007" },
+    joined: { value: "abc7" },
+    replaced: { value: "aBc" },
+    sub_value: { value: "bc" },
+    left_value: { value: "ab" },
+    right_value: { value: "bc" },
+    mapped: { value: "ABC" },
+  });
+});
+
+test("B21 算術式内 STRING_FUNC は従来どおり DmlConvertError", () => {
+  const stmt = parse(
+    "UPDATE APP100 SET n = LENGTH(source) * 1 WHERE $id = 1"
+  ) as UpdateStatement;
+  expect(() => updateToPutBatchesArith(stmt, [
+    { "$id": { value: "1" }, source: { value: "abc" } },
+  ])).toThrow("UPDATE SET の算術式では文字列関数はサポートされていません");
+});
+
 test("算術式 UPDATE → GET クエリに参照フィールドを含む", () => {
   const stmt = parse(
     "UPDATE APP100 SET 金額 = 金額 * 1.1 WHERE ステータス = '対象'"

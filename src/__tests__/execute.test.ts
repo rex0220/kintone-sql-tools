@@ -166,6 +166,45 @@ test("UPDATE VALIDATE ONLY は対象を読み取るがPUTせず$id順で検証�
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B21 UPDATE SET 文字列関数は別フィールドを取得してレコードごとに評価する", async () => {
+  const client = makeClient({
+    records: [makeRecord({ $id: "1", source: "abc", code: "7" })],
+    fieldTypes: {
+      source: "SINGLE_LINE_TEXT", code: "SINGLE_LINE_TEXT",
+      upper_value: "SINGLE_LINE_TEXT", padded: "SINGLE_LINE_TEXT",
+    },
+  });
+  await execute(
+    "UPDATE APP100 SET upper_value = UPPER(source), padded = LPAD(code, 5, '0') WHERE $id = 1",
+    client,
+    { cacheContext: "b21-update-string-func" }
+  );
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["$id", "source", "code"]));
+  expect(client.putCalls[0].records[0]).toEqual({
+    id: 1,
+    record: { upper_value: { value: "ABC" }, padded: { value: "00007" } },
+  });
+});
+
+test("B21 VALIDATE ONLY は文字列関数の評価結果で ERR_LENGTH_MAX を検出する", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1", source: "abcd" })] });
+  client.getFields = async () => [
+    { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "4" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET dest = CONCAT(source, 'x') WHERE $id = 1 VALIDATE ONLY",
+    client,
+    { cacheContext: "b21-validate-string-func" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, invalidRows: 1, errorCount: 1,
+  });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors[0].$err_code).toBe("ERR_LENGTH_MAX");
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("INSERT SELECT VALIDATE ONLY はsourceを検証してPOSTしない", async () => {
   const client = makeClient({ recordsByApp: { 200: [makeRecord({ amount: "bad" })] } });
   client.getFields = async (appId) => appId === 100

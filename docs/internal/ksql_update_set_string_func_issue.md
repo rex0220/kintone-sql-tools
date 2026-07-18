@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - 位置づけ: B20（正規表現関数）の仕様検討中に発見。**B20 とは独立した既存の欠陥**で、`UPPER` / `REPLACE` / `CONCAT` および B19（v2.17.0）で追加した `LPAD` / `LEFT` / `RIGHT` など**既存の全文字列関数に効く**ため、B20 を待たずに単独で価値が出る。
-- ステータス: **課題 R4 同期。未実装。**
+- ステータス: **課題 R4 実装済み・実機確認済み（2026-07-18・[実機記録](evidence/b21_update_set_string_func_smoke.md)）・v3.2.0 リリース待ち。**
 - 横断契約: 文字列関数の単位・戻り型・空文字は [文字列の扱い](ksql_string_semantics.md) を正とする。本書は assignment の構文・行評価・DML 検証経路だけを扱う。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
@@ -175,14 +175,14 @@ UPDATE APP100 SET 電話番号 = n.正規化 FROM #norm AS n WHERE APP100.$id = 
 
 ## 6. 受入条件
 
-- [ ] `UPDATE APP SET t = UPPER(t) WHERE …` が書き込める。値が**文字列として**正しい（数値化されない）
-- [ ] B19 の関数も効く: `SET code = LPAD(code, 5, '0')` が `'7'` → `'00007'`（**先頭ゼロが保持される**＝数値化されていないことの決定的証拠）
-- [ ] `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` が `SET` で動く
-- [ ] **`CASE WHEN … THEN UPPER(x) ELSE x END` が引き続き動く**（非回帰・§1.2）
-- [ ] **`VALIDATE ONLY`（B12-A）が新経路の値を検証する**（長さ超過が `ERR_LENGTH_MAX` で捕捉される）
-- [ ] **`ON ERROR SKIP`（B12-B）が新経路で効く**
-- [ ] `SET x = LENGTH(y) * 1`（算術式内）は**従来どおり `DmlConvertError`**（§3.2・非回帰）
-- [ ] `SET x = other_field`（`FIELD_REF` 単独）は**従来どおり `ParseError`**（非回帰）
-- [ ] `UPDATE … FROM` の `SET x = t.field` が**従来どおり動く**（`SOURCE_FIELD` 分岐の非回帰）
-- [ ] **`SqlValue` の他の消費側が壊れない**: `INSERT VALUES` / `UPSERT` / サブテーブル DML / `ASSERT`（§3.1 の申し送り）
-- [ ] エラーメッセージが実態と一致する（§3.3）
+- [x] `UPDATE APP SET t = UPPER(t) WHERE …` が書き込める。値が**文字列として**正しい（数値化されない）
+- [x] B19 の関数も効く: `SET code = LPAD(code, 5, '0')` が `'7'` → `'00007'`（**先頭ゼロが保持される**＝数値化されていないことの決定的証拠）
+- [x] `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` が `SET` で動く
+- [x] **`CASE WHEN … THEN UPPER(x) ELSE x END` が引き続き動く**（非回帰・§1.2）
+- [x] **`VALIDATE ONLY`（B12-A）が新経路の値を検証する**（長さ超過が `ERR_LENGTH_MAX` で捕捉される）
+- [x] **`ON ERROR SKIP`（B12-B）が新経路で効く**
+- [x] `SET x = LENGTH(y) * 1`（算術式内）は**従来どおり `DmlConvertError`**（§3.2・非回帰）
+- [x] `SET x = other_field`（`FIELD_REF` 単独）は**従来どおり `ParseError`**（非回帰）
+- [x] `UPDATE … FROM` の `SET x = t.field` が**従来どおり動く**（`SOURCE_FIELD` 分岐の非回帰）
+- [x] **`SqlValue` の他の消費側が壊れない**: `INSERT VALUES` / `UPSERT` / サブテーブル DML / `ASSERT`（§3.1 の申し送り）
+- [x] エラーメッセージが実態と一致する（§3.3）
