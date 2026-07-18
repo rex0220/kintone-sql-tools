@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-18
 - 現在の最新リリース: **v3.2.0**（正しさ・関数の 7 件バンドル B21/B22/B23/B24/B28/B34/B35・npm publish 済み・latest 3.2.0）
-- 次回リリース計画: **v3.3.0 = B9＋B29**（numberPrecision 領域ペア・仕様作成から。B9 再昇格トリガー②＝B29 着手を同時に回収）
+- 次回リリース計画: **v3.3.0 = B9＋B29＋B20**（2026-07-18 決定）。依存順=**B9（厳密10進 primitive の土台）→ B29（B9 の primitive を桁検証・量子化へ再利用）**、**B20（正規表現・案 A）は独立で並行可**。B9 は SemVer major 級の可能性（16桁超の比較結果が変わる）→実測で判定。
 - 実装計画: [B33 KORDER Cursor 実装計画](internal/ksql_korder_cursor_implementation_plan.md)（v3.0.0 の計画は [こちら](internal/ksql_v3_order_by_implementation_plan.md)）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
