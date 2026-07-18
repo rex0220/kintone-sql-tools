@@ -110,8 +110,8 @@ const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.ROW_NUMBER, TokenKind.RANK, TokenKind.DENSE_RANK,
   TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
-  TokenKind.LENGTH, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
-  TokenKind.REPLACE, TokenKind.COALESCE, TokenKind.NULLIF, TokenKind.ISNULL,
+  TokenKind.LENGTH, TokenKind.LENGTH_CHAR, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
+  TokenKind.REPLACE, TokenKind.TRANSLATE, TokenKind.COALESCE, TokenKind.NULLIF, TokenKind.ISNULL,
   TokenKind.LEFT, TokenKind.RIGHT, TokenKind.INSTR,
   TokenKind.GREATEST, TokenKind.LEAST, TokenKind.LPAD, TokenKind.RPAD,
   TokenKind.CAST, TokenKind.CONVERT, TokenKind.FORMAT,
@@ -153,6 +153,7 @@ export class ParseError extends Error {
 // ------------------------------------------------------------
 
 export class Parser {
+  private allowUnaryPlusNumber = false;
   private pos = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
@@ -1037,9 +1038,18 @@ export class Parser {
       this.expect(TokenKind.RPAREN);
       return expr;
     }
-    // 単項マイナス: -expr
+    // 単項プラス: 数値リテラルの直前だけを受理する
+    if (this.allowUnaryPlusNumber && this.peek().kind === TokenKind.PLUS) {
+      this.advance();
+      const number = this.expect(TokenKind.NUMBER, "単項 + の直後には数値リテラルが必要です");
+      return { type: "NUMBER", value: Number(number.value) };
+    }
+    // 単項マイナス: -expr（符号のネストは受理しない）
     if (this.peek().kind === TokenKind.MINUS) {
       this.advance();
+      if (this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.PLUS) {
+        throw new ParseError("単項符号を重ねて指定することはできません", this.peek());
+      }
       const operand = this.parseArithPrimary();
       // 数値リテラルは即座に符号反転
       if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
@@ -1167,10 +1177,12 @@ export class Parser {
       [TokenKind.LTRIM]:     "LTRIM",
       [TokenKind.RTRIM]:     "RTRIM",
       [TokenKind.LENGTH]:    "LENGTH",
+      [TokenKind.LENGTH_CHAR]: "LENGTH_CHAR",
       [TokenKind.SUBSTRING]: "SUBSTRING",
       [TokenKind.SUBSTR]:    "SUBSTRING",
       [TokenKind.CONCAT]:    "CONCAT",
       [TokenKind.REPLACE]:   "REPLACE",
+      [TokenKind.TRANSLATE]: "TRANSLATE",
       [TokenKind.COALESCE]:  "COALESCE",
       [TokenKind.NULLIF]:    "NULLIF",
       [TokenKind.ISNULL]:    "ISNULL",
@@ -2093,6 +2105,11 @@ export class Parser {
         // IF(cond, then, else) → CaseSqlValue
         const expr = this.parseIfExpr();
         row.push({ type: "CASE_VALUE", expr });
+      } else if (this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.PLUS) {
+        const sign = this.advance();
+        const number = this.expect(TokenKind.NUMBER, "INSERT の単項符号の直後には数値リテラルが必要です");
+        const value = Number(number.value);
+        row.push({ type: "NUMBER", value: sign.kind === TokenKind.MINUS ? -value : value });
       } else {
         const tok = this.advance();
         if (tok.kind === TokenKind.STRING) {
@@ -2127,6 +2144,13 @@ export class Parser {
 
     this.expect(TokenKind.SET);
     const assignments = this.parseAssignments();
+
+    if (subtableCode && assignments.some((a) => a.value.type === "STRING_FUNC")) {
+      throw new ParseError(
+        "サブテーブル UPDATE SET では文字列関数を直接使用できません",
+        this.prev()
+      );
+    }
 
     let from: UpdateStatement["from"] = null;
     if (this.consume(TokenKind.FROM)) {
@@ -2173,7 +2197,14 @@ export class Parser {
       from.targetFilter = decomposed.targetFilter;
     } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
       throw new ParseError(
-        "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",
+        "SET の値にフィールド参照を単独で指定することはできません",
+        whereTok
+      );
+    } else if (assignments.some(
+      (a) => a.value.type === "STRING_FUNC" && this.nodeContainsAnyQualifier(a.value)
+    )) {
+      throw new ParseError(
+        "UPDATE SET の文字列関数では更新先フィールドを修飾しないでください",
         whereTok
       );
     }
@@ -2257,6 +2288,12 @@ export class Parser {
     tok: Token
   ): void {
     for (const assignment of assignments) {
+      if (assignment.value.type === "STRING_FUNC") {
+        throw new ParseError(
+          "UPDATE ... FROM の SET では文字列関数を直接使用できません",
+          tok
+        );
+      }
       if (assignment.value.type === "SOURCE_FIELD") {
         if (assignment.value.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
           throw new ParseError(`UPDATE ... FROM の SET 参照はソース alias ${sourceAlias} で修飾してください`, tok);
@@ -2430,9 +2467,17 @@ export class Parser {
     }
 
     // 数値・識別子・括弧 → 算術式として解析
-    const node = this.parseArithAddSub();
+    const previousAllowUnaryPlusNumber = this.allowUnaryPlusNumber;
+    this.allowUnaryPlusNumber = true;
+    let node: ArithNode;
+    try {
+      node = this.parseArithAddSub();
+    } finally {
+      this.allowUnaryPlusNumber = previousAllowUnaryPlusNumber;
+    }
     if (node.type === "NUMBER") return node;   // 数値単独 → SqlValue
     if (node.type === "ARITH")  return node;   // 算術式
+    if (node.type === "STRING_FUNC") return node; // UPDATE SET 専用の行評価
     if (node.type === "FIELD_REF") {
       const dot = node.field.indexOf(".");
       if (dot > 0 && dot < node.field.length - 1) {
@@ -2441,7 +2486,7 @@ export class Parser {
     }
     // FIELD_REF 単独（SET f = other_field）は未サポート
     throw new ParseError(
-      "SET の値にはリテラル・算術式を指定してください（フィールド参照のみは不可）",
+      "SET の値にフィールド参照を単独で指定することはできません",
       tok
     );
   }

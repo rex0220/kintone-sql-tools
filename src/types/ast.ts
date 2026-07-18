@@ -259,7 +259,7 @@ export interface ArithColumn {
 
 export type StringFuncName =
   | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM"
-  | "LENGTH" | "SUBSTRING" | "CONCAT" | "REPLACE" | "COALESCE"
+  | "LENGTH" | "LENGTH_CHAR" | "SUBSTRING" | "CONCAT" | "REPLACE" | "TRANSLATE" | "COALESCE"
   | "NULLIF" | "ISNULL" | "LEFT" | "RIGHT" | "INSTR" | "LPAD" | "RPAD"
   | "GREATEST" | "LEAST"
   | "ROUND" | "FLOOR" | "CEIL" | "TRUNCATE"
@@ -658,7 +658,8 @@ export interface SourceFieldValue {
   field: string;
 }
 
-export type AssignmentValue = SqlValue | ArithExpr | SourceFieldValue;
+/** UPDATE SET 専用。文字列関数は行ごとに現在値を参照して評価する。 */
+export type AssignmentValue = SqlValue | ArithExpr | StringFuncExpr | SourceFieldValue;
 
 // ------------------------------------------------------------
 // 算術式（UPDATE SET のみ）

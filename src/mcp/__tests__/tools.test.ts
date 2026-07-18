@@ -1628,9 +1628,13 @@ describe("MCP tools", () => {
   // ksql_mutate の DML バッチ受理（フェーズ2 M1）
   // ----------------------------------------------------------------
 
+  const MUTATE_FORM_FIELDS = [
+    "name", "名前", "顧客コード", "ステータス", "dest", "x", "顧客名", "code", "地域",
+  ].map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" }));
+
   function makeMutateRuntimeDeps(
     recordsByApp: Record<number, Array<Record<string, { value: string }>>>,
-    fields: Array<{ code: string; label: string; fieldType: string; required?: boolean }> = [],
+    fields: Array<{ code: string; label: string; fieldType: string; required?: boolean }> = MUTATE_FORM_FIELDS,
     cacheContext = "mutate-batch-test"
   ) {
     const calls = { post: 0, put: 0, del: 0, get: 0 };

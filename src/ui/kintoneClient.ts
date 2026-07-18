@@ -42,9 +42,15 @@ export function isPluginAlreadyReleasedCursorError(error: unknown): boolean {
  * CLI の nodeKintoneClient が response body 全文を message に入れるのと同方針。
  */
 export function toDetailedApiError(e: unknown): unknown {
-  if (e instanceof Error || e === null || typeof e !== "object") return e;
-  const obj = e as { code?: unknown; message?: unknown; errors?: unknown; status?: unknown };
-  if (typeof obj.message !== "string" || obj.message === "") return e;
+  const shaped = e as { message?: unknown } | null;
+  if (e instanceof Error && e.message.trim() !== "") return e;
+  if (shaped === null || typeof shaped !== "object"
+    || typeof shaped.message !== "string" || shaped.message.trim() === "") {
+    const err = new Error("ネットワークエラー: kintone からの応答がありません（オフライン・通信遮断の可能性）");
+    Object.assign(err, { cause: e });
+    return err;
+  }
+  const obj = shaped as { code?: unknown; message: string; errors?: unknown; status?: unknown };
 
   const lines: string[] = [];
   lines.push(
@@ -66,6 +72,7 @@ export function toDetailedApiError(e: unknown): unknown {
   if (typeof obj.code === "string" && obj.code !== "") err.name = obj.code;
   if (typeof obj.code === "string") Object.assign(err, { code: obj.code });
   if (typeof obj.status === "number") Object.assign(err, { status: obj.status });
+  Object.assign(err, { cause: e });
   return err;
 }
 

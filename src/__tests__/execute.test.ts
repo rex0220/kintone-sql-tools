@@ -166,6 +166,45 @@ test("UPDATE VALIDATE ONLY は対象を読み取るがPUTせず$id順で検証�
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B21 UPDATE SET 文字列関数は別フィールドを取得してレコードごとに評価する", async () => {
+  const client = makeClient({
+    records: [makeRecord({ $id: "1", source: "abc", code: "7" })],
+    fieldTypes: {
+      source: "SINGLE_LINE_TEXT", code: "SINGLE_LINE_TEXT",
+      upper_value: "SINGLE_LINE_TEXT", padded: "SINGLE_LINE_TEXT",
+    },
+  });
+  await execute(
+    "UPDATE APP100 SET upper_value = UPPER(source), padded = LPAD(code, 5, '0') WHERE $id = 1",
+    client,
+    { cacheContext: "b21-update-string-func" }
+  );
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["$id", "source", "code"]));
+  expect(client.putCalls[0].records[0]).toEqual({
+    id: 1,
+    record: { upper_value: { value: "ABC" }, padded: { value: "00007" } },
+  });
+});
+
+test("B21 VALIDATE ONLY は文字列関数の評価結果で ERR_LENGTH_MAX を検出する", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "1", source: "abcd" })] });
+  client.getFields = async () => [
+    { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "4" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET dest = CONCAT(source, 'x') WHERE $id = 1 VALIDATE ONLY",
+    client,
+    { cacheContext: "b21-validate-string-func" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, invalidRows: 1, errorCount: 1,
+  });
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors[0].$err_code).toBe("ERR_LENGTH_MAX");
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("INSERT SELECT VALIDATE ONLY はsourceを検証してPOSTしない", async () => {
   const client = makeClient({ recordsByApp: { 200: [makeRecord({ amount: "bad" })] } });
   client.getFields = async (appId) => appId === 100
@@ -2126,7 +2165,7 @@ test("SELECT * は _p.* を暗黙表示しない", async () => {
 // ----------------------------------------------------------------
 
 test("INSERT 単一行 → POST 1回", async () => {
-  const client = makeClient({ postIds: ["101"] });
+  const client = makeClient({ postIds: ["101"], fieldTypes: { 名前: "SINGLE_LINE_TEXT", 金額: "NUMBER" } });
   const result = await execute(
     "INSERT INTO APP100 (名前, 金額) VALUES ('田中', 1000)",
     client
@@ -2143,7 +2182,7 @@ test("INSERT 単一行 → POST 1回", async () => {
 
 test("INSERT 101行 → POST 2回（バッチ分割）", async () => {
   const rows = Array.from({ length: 101 }, (_, i) => `('名前${i}')`).join(", ");
-  const client = makeClient({ postIds: [] });
+  const client = makeClient({ postIds: [], fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   await execute(`INSERT INTO APP100 (名前) VALUES ${rows}`, client);
 
   expect(client.postCalls).toHaveLength(2);
@@ -2289,7 +2328,7 @@ test("UPDATE 算術式: 確認コールバックでキャンセル", async () =>
 
 test("UPDATE 算術式と通常代入の混在", async () => {
   const records = [makeRecord({ $id: "5", 金額: "1000" })];
-  const client = makeClient({ records });
+  const client = makeClient({ records, fieldTypes: { 備考: "SINGLE_LINE_TEXT" } });
   await execute(
     "UPDATE APP100 SET 金額 = 金額 * 1.1, 備考 = '値上げ後' WHERE $id = 5",
     client
@@ -3156,6 +3195,7 @@ test("INSERT INTO APP200 ... SELECT FROM APP100 — 基本", async () => {
       ],
     },
     postIds: ["201", "202"],
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 単価: "NUMBER" },
   });
 
   const result = await execute(
@@ -3184,6 +3224,7 @@ test("INSERT INTO ... SELECT — 101行 → POST 2回", async () => {
   const client = makeClient({
     recordsByApp: { 100: sourceRecords },
     postIds: [],
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" },
   });
 
   await execute(
@@ -3197,7 +3238,7 @@ test("INSERT INTO ... SELECT — 101行 → POST 2回", async () => {
 });
 
 test("INSERT INTO ... SELECT — 明示列の空ソースは insertedCount=0 の no-op", async () => {
-  const client = makeClient({ recordsByApp: { 100: [] } });
+  const client = makeClient({ recordsByApp: { 100: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 単価: "NUMBER", 名前: "SINGLE_LINE_TEXT", 金額: "NUMBER" } });
 
   const result = await execute(
     "INSERT INTO APP200 (顧客名, 単価) SELECT 名前, 金額 FROM APP100",
@@ -3211,7 +3252,7 @@ test("INSERT INTO ... SELECT — 明示列の空ソースは insertedCount=0 の
 });
 
 test("INSERT INTO ... SELECT * — 空ソースの列数エラーは明示列を案内する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [] } });
+  const client = makeClient({ recordsByApp: { 100: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
 
   await expect(
     execute(
@@ -3227,7 +3268,7 @@ test("INSERT INTO ... SELECT * — 空ソースの列数エラーは明示列を
 });
 
 test("INSERT INTO ... SELECT * — 非空結果の 0 列エラーでは 0 行と誤案内しない", async () => {
-  const client = makeClient({ recordsByApp: { 100: [makeRecord({ "_p.hidden": "x" })] } });
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ "_p.hidden": "x" })] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
   const execution = execute(
     "INSERT INTO APP200 (顧客名) SELECT * FROM APP100",
     client,
@@ -3245,6 +3286,7 @@ test("INSERT INTO ... SELECT * — 非空結果の 0 列エラーでは 0 行と
 test("INSERT INTO ... SELECT — 列数不一致はエラー", async () => {
   const client = makeClient({
     recordsByApp: { 100: [makeRecord({ 名前: "田中" })] },
+    fieldTypes: { f1: "SINGLE_LINE_TEXT", f2: "SINGLE_LINE_TEXT" },
   });
 
   await expect(
@@ -3265,6 +3307,7 @@ test("INSERT INTO ... SELECT — 集計結果を別アプリに登録", async ()
       ],
     },
     postIds: [],
+    fieldTypes: { 種別: "SINGLE_LINE_TEXT", 合計: "NUMBER" },
   });
 
   await execute(
@@ -3813,7 +3856,7 @@ test("UPDATE SET CASE WHEN — 複数フィールドを混在更新（ARITH と 
   const records = [
     makeRecord({ $id: "1", 区分: "A", 単価: "100", 数量: "3" }),
   ];
-  const client = makeClient({ records });
+  const client = makeClient({ records, fieldTypes: { 合計: "NUMBER", ランク: "SINGLE_LINE_TEXT" } });
 
   // SET 合計 = 単価 * 数量, ランク = CASE WHEN 区分 = 'A' THEN '上位' ELSE '下位' END
   await execute(
@@ -3985,6 +4028,7 @@ test("INSERT INTO ... SELECT COUNT(*) — 0 件でも 1 行書き込まれる（
   const client = makeClient({
     recordsByApp: { 300: [] },
     postIds: ["1"],
+    fieldTypes: { 件数: "NUMBER" },
   });
   // confirm / dmlMaxRows の件数判定に 1 行として乗ることも固定する
   // （dmlMaxRows は上位層が confirm を構成する仕組みのため、件数伝播の検証で足りる）
@@ -4192,7 +4236,7 @@ test("MIN / MAX: JOIN 非修飾名は一意なら型解決し、同名競合な�
 });
 
 test("metrics: INSERT は postCalls を数える", async () => {
-  const client = makeClient({ postIds: ["1"] });
+  const client = makeClient({ postIds: ["1"], fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const result = await execute(
     "INSERT INTO APP77003 (名前) VALUES ('田中')",
     client
@@ -4204,7 +4248,7 @@ test("metrics: INSERT は postCalls を数える", async () => {
 
 test("metrics: UPDATE は getCalls（$id 取得）と putCalls を数える", async () => {
   const records = [makeRecord({ $id: "10" })];
-  const client = makeClient({ records });
+  const client = makeClient({ records, fieldTypes: { ステータス: "SINGLE_LINE_TEXT" } });
   const result = await execute(
     "UPDATE APP77004 SET ステータス = '完了' WHERE $id = 10",
     client
@@ -4232,7 +4276,7 @@ test("UPSERT: キーが複数レコードにヒットした場合は最大 $id�
     makeRecord({ $id: "9", 顧客名: "X" }),
     makeRecord({ $id: "7", 顧客名: "X" }),
   ];
-  const client = makeClient({ records });
+  const client = makeClient({ records, fieldTypes: { ランク: "SINGLE_LINE_TEXT" } });
   await execute(
     "UPSERT INTO APP77010 (顧客名, ランク) VALUES ('X', 'A') ON DUPLICATE (顧客名)",
     client
@@ -4244,7 +4288,7 @@ test("UPSERT: キーが複数レコードにヒットした場合は最大 $id�
 });
 
 test("UPSERT: キーがヒットしない場合は INSERT する", async () => {
-  const client = makeClient({ records: [], postIds: ["1"] });
+  const client = makeClient({ records: [], postIds: ["1"], fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", ランク: "SINGLE_LINE_TEXT" } });
   await execute(
     "UPSERT INTO APP77011 (顧客名, ランク) VALUES ('Y', 'B') ON DUPLICATE (顧客名)",
     client
@@ -4277,7 +4321,7 @@ test("SELECT 列の同一スカラーサブクエリは 1 回だけ実行され�
 });
 
 test("UPSERT: 既存判定はキーを 50 件ずつの in (...) チャンクでまとめて検索する", async () => {
-  const client = makeClient({ records: [], postIds: ["1"] });
+  const client = makeClient({ records: [], postIds: ["1"], fieldTypes: { 顧客コード: "SINGLE_LINE_TEXT", ランク: "SINGLE_LINE_TEXT" } });
   const values = Array.from({ length: 120 }, (_, i) => `('K${i}', 'v')`).join(", ");
   await execute(
     `UPSERT INTO APP77012 (顧客コード, ランク) VALUES ${values} ON DUPLICATE (顧客コード)`,
@@ -4297,7 +4341,7 @@ test("UPSERT: 複合キーは第 1 キーで検索し残りキーをクライア
     makeRecord({ $id: "1", k1: "A", k2: "1" }),
     makeRecord({ $id: "2", k1: "A", k2: "2" }),
   ];
-  const client = makeClient({ records, postIds: ["9"] });
+  const client = makeClient({ records, postIds: ["9"], fieldTypes: { v: "SINGLE_LINE_TEXT" } });
   await execute(
     "UPSERT INTO APP77013 (k1, k2, v) VALUES ('A', '2', 'x'), ('A', '3', 'y') ON DUPLICATE (k1, k2)",
     client
@@ -4310,7 +4354,7 @@ test("UPSERT: 複合キーは第 1 キーで検索し残りキーをクライア
 });
 
 test("UPSERT: 空文字キーは in にまとめず行ごとに検索する（従来挙動）", async () => {
-  const client = makeClient({ records: [], postIds: ["1"] });
+  const client = makeClient({ records: [], postIds: ["1"], fieldTypes: { 顧客コード: "SINGLE_LINE_TEXT", ランク: "SINGLE_LINE_TEXT" } });
   await execute(
     "UPSERT INTO APP77014 (顧客コード, ランク) VALUES ('', 'v') ON DUPLICATE (顧客コード)",
     client

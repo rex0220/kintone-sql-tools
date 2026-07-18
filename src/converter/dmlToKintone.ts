@@ -175,8 +175,8 @@ function buildUpdateRecord(
 ): KintoneRecord {
   const record: KintoneRecord = {};
   for (const { field, value } of assignments) {
-    // ARITH / CASE_VALUE は updateToPutBatchesArith で処理するため、ここには到達しない
-    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "SOURCE_FIELD") continue;
+    // 行評価が必要な値は updateToPutBatchesArith で処理するため、ここには到達しない
+    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
     record[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record;
@@ -196,6 +196,13 @@ export function hasArithAssignment(stmt: UpdateStatement): boolean {
   );
 }
 
+/** 現在のレコードを取得して行ごとに評価する assignment を含むか。 */
+export function hasRowDependentAssignment(stmt: UpdateStatement): boolean {
+  return stmt.assignments.some(
+    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
+  );
+}
+
 /**
  * 算術式 UPDATE 用の GET クエリを生成する。
  * $id に加えて、算術式で参照されるフィールド名も取得対象に含める。
@@ -206,6 +213,8 @@ export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDm
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
       collectArithFields(value, refFields);
+    } else if (value.type === "STRING_FUNC") {
+      collectStringFuncFields(value, refFields);
     } else if (value.type === "CASE_VALUE") {
       collectCaseFields(value.expr, refFields);
     }
@@ -305,6 +314,8 @@ export function updateToPutBatchesArith(
     for (const { field, value } of stmt.assignments) {
       if (value.type === "ARITH") {
         record[field] = { value: String(evalArith(value, raw)) };
+      } else if (value.type === "STRING_FUNC") {
+        record[field] = { value: evalStringFunc(value, row) };
       } else if (value.type === "CASE_VALUE") {
         record[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
       } else if (value.type === "SOURCE_FIELD") {
@@ -365,6 +376,8 @@ export function updateFromToPutBatches(
           throw new DmlConvertError(`数値フィールド ${field} に変換できない値です: ${raw}`);
         }
         record[field] = { value: toKintoneValue({ type: "STRING", value: raw }, fieldType) };
+      } else if (value.type === "STRING_FUNC") {
+        throw new DmlConvertError("UPDATE ... FROM の SET では文字列関数を直接使用できません");
       } else if (value.type === "ARITH") {
         record[field] = { value: String(evalArith(value, target)) };
       } else if (value.type === "CASE_VALUE") {

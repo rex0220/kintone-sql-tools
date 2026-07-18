@@ -50,6 +50,7 @@ function isolationSuffix(result: { skippedRows?: number; errTable?: string }): s
 
 export function renderError(err: unknown): string {
   const lines: string[] = [];
+  const fallback = "エラーが発生しましたが、詳細を取得できませんでした。";
 
   if (err instanceof Error) {
     // kintoneClient.toDetailedApiError はフィールド単位の詳細を改行区切りで
@@ -63,10 +64,14 @@ export function renderError(err: unknown): string {
       }
     }
   } else {
-    lines.push(String(err));
+    const text = err === null || err === undefined || typeof err === "object"
+      ? fallback
+      : String(err);
+    lines.push(text);
   }
 
-  const html = lines.map((l) => escHtml(l)).join("<br>");
+  const displayLines = lines.filter((line) => line.trim() !== "");
+  const html = (displayLines.length > 0 ? displayLines : [fallback]).map((l) => escHtml(l)).join("<br>");
   return `<div class="ksql-error"><span class="ksql-error-icon">⚠</span>${html}</div>`;
 }
 

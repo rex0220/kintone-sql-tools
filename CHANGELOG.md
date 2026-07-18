@@ -2,6 +2,23 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.2.0（2026-07-18）
+
+### 機能追加
+
+- **B23 `LENGTH_CHAR(x)` を追加**。既存の `LENGTH`（UTF-16 コードユニット数）を変更せず、Unicode コードポイント数を返す別関数を追加する。`LENGTH(x) - LENGTH_CHAR(x)` でサロゲートペア数を求められ、戻り値は B26 の型メタで numeric として temp/CTE/ORDER BY/比較へ伝播する。
+- **B24 `TRANSLATE(x, from, to)` を追加**。入力と変換表をコードポイント単位で整列し、1 文字から 1 文字へ写像する。変換表の長さ不一致はコードポイント数を示す `ArgumentError`、重複文字は最初の対応を優先し、非対象文字と既存の孤立サロゲートは保持する。Shift_JIS CSV 出力向けの 40 字変換表をバッチレシピ R8 に追加した。
+- `LENGTH_CHAR` と `TRANSLATE` は新しい予約語。同名フィールドはバッククォートで参照できる。純加法的な機能追加として B34/B22 と同じ v3.2.0 minor リリースに含める。
+
+### 修正（正しさ・安全性）
+
+- **B21 `UPDATE SET` が文字列関数を直接受け付けない不整合を修正**。親レコードの通常 `UPDATE` で `SET t = UPPER(t)`、`SET code = LPAD(code, 5, '0')` などを受理し、参照フィールドを取得してレコードごとに評価する。関数の戻り型契約を維持したまま `VALIDATE ONLY` / `ON ERROR SKIP` の検証経路へ渡し、B34 の書き込み先検査は対象取得より前に行う。算術式内の文字列関数、フィールド参照単独、`UPDATE ... FROM` / サブテーブル UPDATE での直接関数は引き続き明示エラーとする。
+- **B28 DML 値の単項符号の受理不整合を修正**。親・サブテーブルの `INSERT ... VALUES` と `UPSERT ... VALUES` で `-5` / `+5` / `-0.5` / `+0.5` などを数値リテラルとして受理する。`UPDATE SET` の単項 `+` は数値リテラル直前だけに限定し、既存の単項 `-` が式・フィールドへ掛かる範囲は維持する。符号のネスト、VALUES 内の算術式・フィールド参照・関数は引き続き拒否する。
+- **B35 プラグインの message なしネットワークエラー表示を修正**。kintone API が message なし・空文字列・undefined で reject した場合、元の値を `cause` に保持した Error と判別可能なネットワーク fallback 文言へ正規化する。表示層にも汎用文言の最終防衛を置き、「⚠」だけ、または `[object Object]` だけが表示される状態を防ぐ。kintone 正規エラーの code/message/errors 詳細と Cursor 系 Error の表示は変更しない。
+- **B34 DML の書き込み先フィールド検査を追加**。親レコードの INSERT VALUES/SELECT、UPDATE（通常・算術・CASE・UPDATE FROM）、UPSERT VALUES/SELECT で、不存在フィールド、サブテーブル子フィールド、書き込み不可フィールドを文単位の `ArgumentError` とする。`VALIDATE ONLY` / `ON ERROR SKIP` にも同じ検査を適用し、サブテーブル子のエラーは `APPxxxx$テーブル` 構文を案内する。
+- 検査をソース SELECT、更新・UPSERT対象取得、確認、POST / PUT より前へ固定。不正な書き込み先ではフォーム定義以外のレコード取得・確認・書き込みを行わない。正規のサブテーブル DML（INSERT VALUES / UPDATE / DELETE / REORDER）は従来どおり動作する。
+- **B22 `LEFT` / `RIGHT` / `SUBSTRING` / `LPAD` / `RPAD` がサロゲートペアを分割する不具合を修正**。長さ引数を UTF-16 コードユニット予算として維持しつつ、入力中で対になっていたペアを割る境界では安全な側へ縮め、結果を必ず指定予算以下にする。`LPAD` / `RPAD` は入力の切り詰めと埋め文字列の切り詰めの両方に適用する。`LENGTH` / `LIKE '_'` / `INSTR` の単位は変更しない。
+
 ## v3.1.0（2026-07-18）
 
 ### 機能追加

@@ -1,9 +1,22 @@
-ksql 配布パッケージ (v3.1.0)
+ksql 配布パッケージ (v3.2.0)
 
-1. ksql-plugin-v3.1.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.2.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.2.0: 正しさ・関数の 7 件バンドル (B21/B22/B23/B24/B28/B34/B35)。
+- B34: DML の書き込み先フィールド検査。不存在・サブテーブル子・書込不可
+  フィールドへの INSERT/UPDATE/UPSERT が黙って成功せず文単位エラーに。
+  検査はソース SELECT・確認・書き込みより前。
+- B22: LEFT/RIGHT/SUBSTRING/LPAD/RPAD がサロゲートペアを分割しない
+  (コードユニット予算内の最大安全部分列)。
+- B21: UPDATE SET で文字列関数を直接受理 (SET code = LPAD(code,5,'0') 等)。
+- B23/B24: LENGTH_CHAR (コードポイント計数)・TRANSLATE (1対1文字写像) を追加。
+  予約語 2 語。Shift_JIS 変換レシピ R8 を同梱。
+- B28: INSERT/UPSERT VALUES で符号付き数値リテラル (-5/+0.5) を受理。
+- B35: ネットワーク断時にプラグインが「⚠」のみ表示になる問題を修正。
+- 既存の正しいクエリの挙動変更なし (minor)。
 
 v3.1.0: KORDER BY 大規模窓の Cursor API 対応 (B33)。
 - 単発GETに収まらない KORDER BY 窓 (LIMIT>500 / OFFSET>10000) を、

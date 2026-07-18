@@ -588,7 +588,7 @@ function compareSortKeys(a: SortKey, b: SortKey, meta: SortKeyMeta): number {
 }
 
 const NUMERIC_ORDER_FUNCTIONS = new Set([
-  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
   "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
 ]);
 

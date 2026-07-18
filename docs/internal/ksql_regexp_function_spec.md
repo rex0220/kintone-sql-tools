@@ -429,12 +429,12 @@ REGEXP_LIKE(x, '^[ab]+$')
 
 | 用途 | なぜ無理か |
 |---|---|
-| **全角英数 → 半角**（`ＡＢＣ` → `ABC`） | 正規表現は**文字の写像ができない**。1 対 1 変換には `TRANSLATE` が要る（**Oracle / PostgreSQL / SQL Server 2017 にあり、MySQL のみ無し**。kSQL にも無いが [B24](ksql_translate_spec.md) で起票済み。`CONVERT` は文字コード変換で別物） |
+| **全角英数 → 半角**（`ＡＢＣ` → `ABC`） | 正規表現は**文字の写像ができない**。1 対 1 変換には `TRANSLATE` が要る（**主要 4 RDB のうち 3 つ、Oracle / PostgreSQL / SQL Server 2017+ にあり、MySQL のみ無し**。kSQL は [B24](ksql_translate_spec.md) で v3.2.0 実装済み・実機確認待ち。`CONVERT` は文字コード変換で別物） |
 | **半角カナ → 全角カナ**（`ｻｲﾎﾞｳｽﾞ` → `サイボウズ`） | 同上。加えて濁点の合成（`ﾎﾞ` = 2 文字 → `ボ` = 1 文字）が要り、写像ですら足りない |
 
 **`REGEXP_LIKE` で「検出」はできるが「変換」はできない**、という非対称をリファレンスに明記する。検出して `#err` へ隔離する（B12）か、`GROUP_CONCAT` で一覧化する（B16）のが kSQL での現実的な運用。
 
-**`TRANSLATE` は [B24](ksql_translate_spec.md) として起票済み**（R2 の検討後に起票）。`REGEXP_REPLACE` とは**守備範囲が重ならず補完的**（`TRANSLATE` は 1 文字→1 文字、`REGEXP_REPLACE` は 1 パターン→1 文字列）。
+**`TRANSLATE` は [B24](ksql_translate_spec.md) として v3.2.0 実装済み・実機確認待ち**。`REGEXP_REPLACE` とは**守備範囲が重ならず補完的**（`TRANSLATE` は 1 文字→1 文字、`REGEXP_REPLACE` は 1 パターン→1 文字列）。
 
 ### 4.5.4 判定器プロトタイプで見つかった実装の落とし穴（R2 で追加）
 

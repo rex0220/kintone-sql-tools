@@ -29,6 +29,7 @@ function makeTypedRecord(fields: Record<string, unknown>): KintoneRecord {
 
 interface MockOptions {
   recordsByApp?: Record<number, KintoneRecord[]>;
+  fieldTypes?: Record<string, string>;
   /** このアプリへの getRecords を失敗させる */
   failApps?: number[];
   /** getRecords を遅延させる（ミリ秒） */
@@ -69,11 +70,13 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     async getApps() { return []; },
     async getFields(appId) {
       const codes = new Set((opts.recordsByApp?.[appId] ?? []).flatMap((record) => Object.keys(record)));
+      const types = opts.fieldTypes ?? {};
+      Object.keys(types).forEach((code) => codes.add(code));
       return [...codes].filter((code) => !code.startsWith("$"))
         .map((code) => ({
           code,
           label: code,
-          fieldType: code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT",
+          fieldType: types[code] ?? (code === "売上" || code === "金額" ? "NUMBER" : "SINGLE_LINE_TEXT"),
         }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
@@ -85,6 +88,38 @@ const APP1 = [
   makeRecord({ $id: "2", 顧客名: "B社", 売上: "300" }),
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
+
+test("B23/B24 は temp・CTE を通り、LENGTH_CHAR=numeric／TRANSLATE=string の意味型を保つ", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ s: "aa", text: "2" }),
+    makeRecord({ s: "aaaaaaaaaa", text: "10" }),
+  ] } });
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #mapped AS " +
+      "SELECT LENGTH_CHAR(s) AS n, TRANSLATE(text, CONCAT('a', 'b'), 'AB') AS text_value FROM APP100;" +
+    "WITH c AS (SELECT n, text_value FROM #mapped) " +
+      "SELECT n, text_value FROM c ORDER BY n ASC, text_value ASC",
+    client,
+    { cacheContext: "b23-b24-temp-cte-meta" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([
+    { n: "2", text_value: "2" },
+    { n: "10", text_value: "10" },
+  ]);
+});
+
+test("B24 from/to 式の長さ検証は行評価時に行う", async () => {
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ value: "x" })] } });
+  await expect(execute(
+    "SELECT TRANSLATE(value, CONCAT('a', 'b'), 'A') AS mapped FROM APP100",
+    client,
+    { cacheContext: "b24-runtime-expression-length" }
+  )).rejects.toThrow(
+    "ArgumentError: TRANSLATE の from と to は同じ文字数である必要があります（from=2, to=1）"
+  );
+});
 
 test("VALIDATE ONLY INTO #err は空schemaを保持し後続SELECTから参照できる", async () => {
   const client = makeClient();
@@ -376,6 +411,55 @@ test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () 
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B21 ON ERROR SKIP は文字列関数の評価結果が不正な行だけを隔離する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ $id: "1", source: "A" }),
+    makeRecord({ $id: "2", source: "LONG" }),
+  ] } });
+  client.getFields = async () => [
+    { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "3" },
+  ];
+  const batch = await executeBatch(
+    "UPDATE APP100 SET dest = CONCAT(source, 'x') WHERE $id >= 1 " +
+    "ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b21-on-error-string-func" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[0].result).toMatchObject({
+    type: "UPDATE", updatedCount: 1, skippedRows: 1,
+  });
+  expect(client.putCalls[0].records).toEqual([
+    { id: 1, record: { dest: { value: "Ax" } } },
+  ]);
+  expect((batch.statements[1].result as SelectResult).rows[0].$err_code).toBe("ERR_LENGTH_MAX");
+});
+
+test("B22 LEFT の64コードユニット結果は同じ maxLength の UPDATE FROM VALIDATE ONLY を通る", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ k: "1", source: "😀".repeat(40) })],
+    100: [makeRecord({ $id: "1", dest: "before" })],
+  } });
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "64" }]
+    : [
+      { code: "k", label: "k", fieldType: "NUMBER" },
+      { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #trimmed AS SELECT k, LEFT(source, 64) AS safe_value FROM APP200; " +
+    "UPDATE APP100 SET dest = t.safe_value FROM #trimmed t WHERE APP100.$id = t.k VALIDATE ONLY",
+    client,
+    { cacheContext: "b22-left-validate-only" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[1].result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 1, invalidRows: 0, errorCount: 0,
+  });
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("UPDATE FROM #temp はバッチストアを参照して更新する", async () => {
   const client = makeClient({
     recordsByApp: {
@@ -459,7 +543,10 @@ test("UPDATE FROM #temp VALIDATE ONLY INTO は業務キーmatchedだけを#error
 
 test("UPDATE FROM #temp は0行でも列欠落を PUT 前に拒否する", async () => {
   const client = makeClient({ recordsByApp: { 200: [] } });
-  client.getFields = async () => [{ code: "k", label: "k", fieldType: "NUMBER" }];
+  client.getFields = async () => [
+    { code: "k", label: "k", fieldType: "NUMBER" },
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+  ];
   const result = await executeBatch(
     "CREATE TEMP TABLE #e AS SELECT k FROM APP200; " +
     "UPDATE APP100 SET dest = e.src FROM #e e WHERE APP100.$id = e.k",
@@ -848,7 +935,10 @@ test("空の一時テーブルの混在 SELECT *, extra は明示列だけ返す
 });
 
 test("空の一時テーブルの SELECT * は INSERT/UPSERT を no-op で完了する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({
+    recordsByApp: { 100: [], 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 売上: "NUMBER" },
+  });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "INSERT INTO APP200 (顧客名, 売上) SELECT * FROM #t;" +
@@ -1276,7 +1366,7 @@ test("DML 文内の一時テーブル参照（UPDATE のサブクエリ等）は
 // ----------------------------------------------------------------
 
 test("INSERT_SELECT: ソースが一時テーブルのみなら実行できる", async () => {
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT", 金額: "NUMBER" } });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "INSERT INTO APP200 (名前, 金額) SELECT 顧客名, 売上 FROM #t",
@@ -1292,7 +1382,7 @@ test("INSERT_SELECT: ソースが一時テーブルのみなら実行できる",
 });
 
 test("INSERT_SELECT: 実体化済み行数に confirm(dmlMaxRows 相当)が適用される", async () => {
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const confirmCalls: Array<{ count: number; operation: string }> = [];
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1323,6 +1413,7 @@ test("INSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0
         makeRecord({ $id: "2", 顧客名: "C社", 地域: "大阪" }),
       ],
     },
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT", 地域: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1352,6 +1443,7 @@ test("INSERT_SELECT: サブクエリ内の一時テーブル参照（WHERE ... I
         makeRecord({ $id: "2", 顧客名: "C社" }),
       ],
     },
+    fieldTypes: { 名前: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #all AS SELECT 顧客名 FROM APP100;" +
@@ -1403,7 +1495,10 @@ test("UPSERT_SELECT: 一時テーブルソースを実行でき insert / update 
 });
 
 test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで成功する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({
+    recordsByApp: { 100: [], 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT", 売上: "NUMBER" },
+  });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100;" +
     "UPSERT INTO APP400 (顧客名, 売上) SELECT 顧客名, 売上 FROM #t ON DUPLICATE (顧客名)",
@@ -1424,7 +1519,7 @@ test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで�
 });
 
 test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する", async () => {
-  const client = makeClient({ recordsByApp: { 100: [], 400: [] } });
+  const client = makeClient({ recordsByApp: { 100: [], 400: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
   const r = await executeBatch(
     "UPSERT INTO APP400 (顧客名) SELECT * FROM APP100 ON DUPLICATE (顧客名)",
     client,
@@ -1442,6 +1537,7 @@ test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する"
 test("UPSERT_SELECT: 一時テーブルソースでも confirm 拒否で当該文ゼロ書き込み", async () => {
   const client = makeClient({
     recordsByApp: { 100: APP1, 400: [] },
+    fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1468,6 +1564,7 @@ test("UPSERT_SELECT: 混在ソース（#t JOIN APP）を実行できる（v1.7.0
       300: [makeRecord({ $id: "1", 顧客名: "A社", 地域: "東京" })],
       400: [makeRecord({ $id: "9", 顧客名: "A社" })],
     },
+    fieldTypes: { 地域: "SINGLE_LINE_TEXT" },
   });
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1734,7 +1831,7 @@ test("INSERT VALUES（confirm 非経由）が混在しても文コンテキス�
   // 文1: INSERT VALUES（confirm 非経由で書き込まれる — コア実態の回帰固定）
   // 文2: DELETE（confirm 呼び出し）→ statementIndex = 2 が正しく渡ること
   //（confirm 呼び出し回数から文番号を推測すると1回目 = 文1 と誤る）
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const contexts: unknown[] = [];
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100;" +
@@ -1799,7 +1896,7 @@ test("SELECT-based DML のソース読み取りは onLimitReached=truncate に�
   // 切り捨て後の件数で confirm → 部分書き込みになる。
   // プラグインは DML を含む実行で onLimitReached を "error" に固定してこれを防ぐ
   //（v1.9.0 仕様 §3.6。MCP ksql_mutate は DEFAULT_ON_LIMIT="error" 固定で従来から安全）
-  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const client = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 名前: "SINGLE_LINE_TEXT" } });
   const confirmCounts: number[] = [];
   const r = await executeBatch(
     "SELECT 顧客名 FROM APP100;" +

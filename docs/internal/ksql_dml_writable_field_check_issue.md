@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-17
 - 位置づけ: kintone の文字列ソート実機検証（Qiita 記事作成）中に発見。テスト対象に選んだ `文字列T1` がサブテーブル子フィールドだったことが端緒。レビューで「サブテーブル子に限定せず、不存在フィールドも同じ欠陥ではないか」と指摘され、実機で確認して確定した。
-- ステータス: **課題 R2。実機確認済み・仕様案前。**（R1 レビュー指摘を反映: ①検査タイミングを「ソース取得・confirm より前」に固定②VALIDATE ONLY / ON ERROR SKIP は独立経路でなく DML 形式への修飾としてマトリクス化③サブテーブル DML の非回帰範囲を現行対応の INSERT VALUES / UPDATE / DELETE / REORDER に限定）
+- ステータス: **課題 R2 実装済み・実機確認済み（2026-07-18・[実機記録](evidence/b34_dml_writable_field_check_smoke.md)）・v3.2.0 リリース待ち。**（共有の書き込み可能トップレベルフィールド検査を全親レコード DML 経路へ適用し、DML 形式×修飾×対象の直積テスト、早期失敗、正規サブテーブル DML の非回帰を自動テスト化済み）
 - 横断契約: [文字列の扱い](ksql_string_semantics.md) 原則 1「**不可逆または説明不能な成功を作らない**」に違反する。
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
@@ -70,9 +70,9 @@ DML 準備段階に共通検査を置き、**全 DML 経路へ横断適用**す�
 
 ## 5. 受入条件
 
-- [ ] **DML 形式×修飾×対象の直積**をテストする: DML 形式 = {INSERT VALUES, INSERT…SELECT, UPDATE 通常, UPDATE 算術, UPDATE CASE, UPDATE…FROM, UPSERT VALUES, UPSERT…SELECT} × 修飾 = {なし, VALIDATE ONLY, ON ERROR SKIP}（適用可能な組み合わせ全部） × 対象 = {不存在, サブテーブル子, 正常トップレベル（非回帰）}
-- [ ] **検査タイミング**: 対象フィールド検査は、**ソース SELECT・更新対象取得・confirm・POST/PUT より前**に完了する。フォーム定義取得のみ許可し、不正時はレコード取得・confirm・書き込み API を呼ばない（`INSERT … SELECT` で不正な書き込み先を指定したとき、ソース SELECT が実行されないことをテストで確認する）
-- [ ] 正規のサブテーブル DML（`APPxxxx$テーブル`）のうち現行対応の **INSERT VALUES / UPDATE / DELETE / REORDER** が非回帰
-- [ ] エラー文言: 不存在と サブテーブル子 を区別し、後者は正規構文を案内する
-- [ ] `ON ERROR SKIP` では行単位の隔離ではなく**文単位の ArgumentError** とする（対象フィールドの誤りは全行に共通で、`#err` へ流す性質のものではない）
-- [ ] 実機: 上記 §1 の 6 パターン（すべて不正対象）が、修正後は**すべて文単位の `ArgumentError`** になり、**confirm・レコード取得・書き込み API の呼び出しが 0 件**であること
+- [x] **DML 形式×修飾×対象の直積**をテストする: DML 形式 = {INSERT VALUES, INSERT…SELECT, UPDATE 通常, UPDATE 算術, UPDATE CASE, UPDATE…FROM, UPSERT VALUES, UPSERT…SELECT} × 修飾 = {なし, VALIDATE ONLY, ON ERROR SKIP}（適用可能な組み合わせ全部） × 対象 = {不存在, サブテーブル子, 正常トップレベル（非回帰）}
+- [x] **検査タイミング**: 対象フィールド検査は、**ソース SELECT・更新対象取得・confirm・POST/PUT より前**に完了する。フォーム定義取得のみ許可し、不正時はレコード取得・confirm・書き込み API を呼ばない（`INSERT … SELECT` で不正な書き込み先を指定したとき、ソース SELECT が実行されないことをテストで確認する）
+- [x] 正規のサブテーブル DML（`APPxxxx$テーブル`）のうち現行対応の **INSERT VALUES / UPDATE / DELETE / REORDER** が非回帰
+- [x] エラー文言: 不存在と サブテーブル子 を区別し、後者は正規構文を案内する
+- [x] `ON ERROR SKIP` では行単位の隔離ではなく**文単位の ArgumentError** とする（対象フィールドの誤りは全行に共通で、`#err` へ流す性質のものではない）
+- [x] 実機: 上記 §1 の 6 パターン（すべて不正対象）が、修正後は**すべて文単位の `ArgumentError`** になり、**confirm・レコード取得・書き込み API の呼び出しが 0 件**であること（2026-07-18・CLI/MCP・[実機記録](evidence/b34_dml_writable_field_check_smoke.md)。非回帰の実書き込み INSERT+DELETE も確認）
