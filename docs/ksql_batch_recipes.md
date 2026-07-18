@@ -28,7 +28,7 @@ kSQL の現行機能（バッチ実行・一時テーブル・ASSERT・UPSERT・
 
 > **突合キー（`顧客コード`）はルックアップにしない**: UPSERT のキー `顧客コード` を**ルックアップ**フィールドにすると、マスタ（ルックアップ元）に存在しない値の書き込みで `値「…」が…（GAIA_LO04）` エラーになります。`顧客コード` は差分・マスタとも**文字列（1行）**にして、UPSERT のキー照合（`ON DUPLICATE (顧客コード)`）に使います。
 
-> **前提バージョン**: 本レシピはバッチ変数を使うため **v2.1.0 以降**。さらに**差分 0 件の日**（空ソースからの `UPSERT … SELECT`）を no-op でそのまま完走させるには、明示列なら **v2.1.1 以降**、実体化済み一時テーブル/CTE の `SELECT *` なら **v2.11.0 以降**が必要です。主な機能の追加版 — バッチ実行・一時テーブル `v1.4.0`／ASSERT `v1.10.0`／プラグインの DML バッチ `v1.9.0`／`tempTableMaxRows` `v1.11.0`／バッチ変数・IN リストの変数 `v2.1.0`／0 行明示列 SELECT の no-op 化 `v2.1.1`／0 行実体化 `SELECT *` の列伝播 `v2.11.0`／**`UPDATE … FROM`（アプリ間・一時テーブル転記）`v2.12.0`**／**`VALIDATE ONLY`・`ON ERROR SKIP INTO #err`・`UPDATE … FROM` の業務キー結合 `v2.13.0`**（R2・R6）／**文字列・日時の `MIN`/`MAX` `v2.14.0`**／**`GROUP_CONCAT`・一時テーブル列の型伝播 `v2.15.0`**（R6）。
+> **前提バージョン**: 本レシピはバッチ変数を使うため **v2.1.0 以降**。さらに**差分 0 件の日**（空ソースからの `UPSERT … SELECT`）を no-op でそのまま完走させるには、明示列なら **v2.1.1 以降**、実体化済み一時テーブル/CTE の `SELECT *` なら **v2.11.0 以降**が必要です。主な機能の追加版 — バッチ実行・一時テーブル `v1.4.0`／ASSERT `v1.10.0`／プラグインの DML バッチ `v1.9.0`／`tempTableMaxRows` `v1.11.0`／バッチ変数・IN リストの変数 `v2.1.0`／0 行明示列 SELECT の no-op 化 `v2.1.1`／0 行実体化 `SELECT *` の列伝播 `v2.11.0`／**`UPDATE … FROM`（アプリ間・一時テーブル転記）`v2.12.0`**／**`VALIDATE ONLY`・`ON ERROR SKIP INTO #err`・`UPDATE … FROM` の業務キー結合 `v2.13.0`**（R2・R6）／**文字列・日時の `MIN`/`MAX` `v2.14.0`**／**`GROUP_CONCAT`・一時テーブル列の型伝播 `v2.15.0`**（R6）／**通常 `ORDER BY` の canonical 化・`KORDER BY` `v3.0.0`**／**`KORDER BY` 大規模窓（Cursor API）`v3.1.0`**（R7）／**`UPDATE SET` の文字列関数・`LENGTH_CHAR`・`TRANSLATE`・符号付き数値リテラル・DML 書き込み先フィールド検査 `v3.2.0`**（R8〜R10）。
 
 ---
 
@@ -314,6 +314,26 @@ WHERE APP100.顧客コード = o.顧客コード AND APP100.バッチID = @now;
 
 ---
 
+## R7. kintone の画面と同じ並びで大量取得する（`KORDER BY`・v3.0.0 / v3.1.0）
+
+CSV 連携や目視突合で「**kintone の一覧とまったく同じ並び**」が要ることがあります。v3.0.0 の通常 `ORDER BY` は kSQL の canonical 順（文字列はコードポイント順）なので、kintone 固有順（選択肢の定義順・ステータスのプロセス定義順・kintone 側の同値群順）が必要な場合は **`KORDER BY`** を使います。
+
+```sql
+-- kintone 固有順のまま先頭 10,001 件（v3.1.0 から LIMIT > 500 も可）
+SELECT $id, 郵便番号, 住所1
+FROM APP730
+KORDER BY 郵便番号 ASC, $id ASC
+LIMIT 10001
+```
+
+- **`LIMIT` は必須**。500 以下は単発 API、**501 以上は Cursor API**（v3.1.0）で 500 件ずつ連結します（結果順は raw API と完全一致することを実測済み）
+- **走査件数 `OFFSET + LIMIT` ≤ 実行時 `maxRecords`** が条件。CLI/MCP の既定は 500 なので、上の例は `--max-records 10001`（MCP は `maxRecords: 10001`）へ引き上げます。超過は実行前の planning error（黙ってフォールバックしません）
+- 同値の並びを安定させるには**最後のキーへ `$id ASC` を明示**します（kSQL は暗黙追加しません）
+- カーソルの対象集合は作成時点で固定ですが**値は取得時点**です。更新が走る時間帯の実行は避けてください
+- 条件: トップレベル SELECT・単一アプリ・WHERE 完全押し下げ・型 allowlist 等（詳細は[言語リファレンス §10](ksql_language_reference.md#10-order-by)）
+
+---
+
 ## R8. Shift_JIS で出力できない漢字を変換する（v3.2.0）
 
 cli-kintone の CSV を Shift_JIS で出力すると、CP932 に無い漢字を含むレコードで出力エラーになることがあります。`TRANSLATE` を使い、該当する 40 字を Shift_JIS で扱える字体へ 1 対 1 で変換します。変換表は [計算式プラグインでの実例](https://qiita.com/rex0220/items/9db98b2cf027b686e0b5) と同じものです。
@@ -334,6 +354,64 @@ FROM APP100;
 ```
 
 `𠮟` は UTF-16 では 2 コードユニットですが、`TRANSLATE` はコードポイント単位で変換表をそろえるため、後続の対応もずれません。変換元と変換先の文字数が異なる場合は、欠落文字を黙って削除せず `ArgumentError` で停止します。変換後の SELECT 結果を cli-kintone の CSV 出力対象に使用してください。
+
+> **kintone 側のデータ自体を変換したい場合**は、v3.2.0 から `UPDATE APP100 SET 会社名 = TRANSLATE(会社名, FROM表, TO表) WHERE …` と直接書き戻せます（対象の絞り込み方は R10 を参照）。
+
+---
+
+## R9. データ品質チェック — サロゲートペア・文字数予算（v3.2.0）
+
+`LENGTH`（UTF-16 コードユニット＝kintone の「文字数」）と `LENGTH_CHAR`（コードポイント）の**差はサロゲートペアの個数**です。絵文字や `𠮟`・`𠮷`（常用漢字・人名で普通に現れる）を含む行を、外部連携の前に洗い出せます。
+
+```sql
+-- サロゲートペアを含む行を検出（差 = ペア数）
+SELECT $id, 会社名,
+       LENGTH(会社名) AS 文字数,
+       LENGTH(会社名) - LENGTH_CHAR(会社名) AS ペア数
+FROM APP100
+WHERE LENGTH(会社名) - LENGTH_CHAR(会社名) > 0
+```
+
+- SELECT の `WHERE` は関数・算術式を書けます（FULL_SCAN で JS 評価）。**親 DML の `WHERE` には書けない**点が対照的です（R10）
+- `éé` のような「UTF-8 だと 2 バイト／1 ユニット」の文字は差 0 になり誤検知しません（バイト数比較では原理的に判定できなかったケース）
+- kintone の `maxLength` は UTF-16 で数えるため、**上限チェックは従来どおり `LENGTH`** を使います。「人が数える文字数」に近いのは `LENGTH_CHAR` です（IVS・結合文字・ZWJ 絵文字は対象外）
+
+---
+
+## R10. 表記の正規化を書き戻す（`UPDATE SET` の文字列関数・v3.2.0）
+
+v3.2.0 から文字列関数を `UPDATE SET` に直接書けます（従来は `CASE WHEN 1=1 THEN … ELSE … END` で包むか一時テーブル経由が必要でした）。
+
+**形 A: 対象全行をそのまま正規化する（1 文）**
+
+```sql
+-- 電話番号のハイフン・空白を除去して書き戻す
+UPDATE APP100
+SET 電話番号 = REPLACE(REPLACE(電話番号, '-', ''), ' ', '')
+WHERE 処理ステータス IN ('未処理');
+```
+
+```sql
+-- 顧客コードを 8 桁ゼロ埋めへ（先頭ゼロは文字列のまま保持される）
+UPDATE APP100 SET 顧客コード = LPAD(顧客コード, 8, '0') WHERE 処理ステータス IN ('未処理');
+```
+
+- **親 DML の `WHERE` に関数は書けない**ため、形 A は「変換が不要な行」も含めて WHERE 条件の全行へ PUT します（値が同じでも更新扱いになり**更新日時が変わる**）。`VALIDATE ONLY` を付ければ書き込み前に結果を確認できます
+- `UPDATE … FROM` とサブテーブル UPDATE の `SET` には関数を直接書けません（明示エラー）
+
+**形 B: 変換が必要な行だけへ絞る（一時テーブル経由・従来の定石）**
+
+```sql
+CREATE TEMP TABLE #norm AS
+  SELECT $id AS 対象id,
+         REPLACE(REPLACE(電話番号, '-', ''), ' ', '') AS 正規化
+  FROM APP100
+  WHERE 処理ステータス IN ('未処理')
+    AND LENGTH(電話番号) > LENGTH(REPLACE(REPLACE(電話番号, '-', ''), ' ', ''));
+UPDATE APP100 SET 電話番号 = n.正規化 FROM #norm AS n WHERE APP100.$id = n.対象id;
+```
+
+SELECT 側の `WHERE` なら関数で「変換すると変わる行」だけを選べます。対象 0 件でも `UPDATE … FROM` は no-op で完走します（リラン安全）。
 
 ---
 
