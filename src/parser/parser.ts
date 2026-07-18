@@ -153,6 +153,7 @@ export class ParseError extends Error {
 // ------------------------------------------------------------
 
 export class Parser {
+  private allowUnaryPlusNumber = false;
   private pos = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
@@ -1037,9 +1038,18 @@ export class Parser {
       this.expect(TokenKind.RPAREN);
       return expr;
     }
-    // 単項マイナス: -expr
+    // 単項プラス: 数値リテラルの直前だけを受理する
+    if (this.allowUnaryPlusNumber && this.peek().kind === TokenKind.PLUS) {
+      this.advance();
+      const number = this.expect(TokenKind.NUMBER, "単項 + の直後には数値リテラルが必要です");
+      return { type: "NUMBER", value: Number(number.value) };
+    }
+    // 単項マイナス: -expr（符号のネストは受理しない）
     if (this.peek().kind === TokenKind.MINUS) {
       this.advance();
+      if (this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.PLUS) {
+        throw new ParseError("単項符号を重ねて指定することはできません", this.peek());
+      }
       const operand = this.parseArithPrimary();
       // 数値リテラルは即座に符号反転
       if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
@@ -2095,6 +2105,11 @@ export class Parser {
         // IF(cond, then, else) → CaseSqlValue
         const expr = this.parseIfExpr();
         row.push({ type: "CASE_VALUE", expr });
+      } else if (this.peek().kind === TokenKind.MINUS || this.peek().kind === TokenKind.PLUS) {
+        const sign = this.advance();
+        const number = this.expect(TokenKind.NUMBER, "INSERT の単項符号の直後には数値リテラルが必要です");
+        const value = Number(number.value);
+        row.push({ type: "NUMBER", value: sign.kind === TokenKind.MINUS ? -value : value });
       } else {
         const tok = this.advance();
         if (tok.kind === TokenKind.STRING) {
@@ -2432,7 +2447,14 @@ export class Parser {
     }
 
     // 数値・識別子・括弧 → 算術式として解析
-    const node = this.parseArithAddSub();
+    const previousAllowUnaryPlusNumber = this.allowUnaryPlusNumber;
+    this.allowUnaryPlusNumber = true;
+    let node: ArithNode;
+    try {
+      node = this.parseArithAddSub();
+    } finally {
+      this.allowUnaryPlusNumber = previousAllowUnaryPlusNumber;
+    }
     if (node.type === "NUMBER") return node;   // 数値単独 → SqlValue
     if (node.type === "ARITH")  return node;   // 算術式
     if (node.type === "FIELD_REF") {

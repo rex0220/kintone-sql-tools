@@ -2,7 +2,7 @@
 
 - 作成日: 2026-07-18
 - 位置づけ: B33 plugin smoke（DevTools request blocking で GET を遮断）中に発見。**B33 固有ではなく既存の表示品質問題**（`records.json` の遮断・オフライン・VPN 断でも同経路）。B33 の release blocker にはしない。
-- ステータス: **課題 R1。実機確認済み・仕様案前。**
+- ステータス: **実装済み・実機確認待ち（v3.2.0）**
 - 分担: Claude=仕様/観点、Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 

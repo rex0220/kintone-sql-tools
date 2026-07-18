@@ -12,6 +12,8 @@
 
 ### 修正（正しさ・安全性）
 
+- **B28 DML 値の単項符号の受理不整合を修正**。親・サブテーブルの `INSERT ... VALUES` と `UPSERT ... VALUES` で `-5` / `+5` / `-0.5` / `+0.5` などを数値リテラルとして受理する。`UPDATE SET` の単項 `+` は数値リテラル直前だけに限定し、既存の単項 `-` が式・フィールドへ掛かる範囲は維持する。符号のネスト、VALUES 内の算術式・フィールド参照・関数は引き続き拒否する。
+- **B35 プラグインの message なしネットワークエラー表示を修正**。kintone API が message なし・空文字列・undefined で reject した場合、元の値を `cause` に保持した Error と判別可能なネットワーク fallback 文言へ正規化する。表示層にも汎用文言の最終防衛を置き、「⚠」だけ、または `[object Object]` だけが表示される状態を防ぐ。kintone 正規エラーの code/message/errors 詳細と Cursor 系 Error の表示は変更しない。
 - **B34 DML の書き込み先フィールド検査を追加**。親レコードの INSERT VALUES/SELECT、UPDATE（通常・算術・CASE・UPDATE FROM）、UPSERT VALUES/SELECT で、不存在フィールド、サブテーブル子フィールド、書き込み不可フィールドを文単位の `ArgumentError` とする。`VALIDATE ONLY` / `ON ERROR SKIP` にも同じ検査を適用し、サブテーブル子のエラーは `APPxxxx$テーブル` 構文を案内する。
 - 検査をソース SELECT、更新・UPSERT対象取得、確認、POST / PUT より前へ固定。不正な書き込み先ではフォーム定義以外のレコード取得・確認・書き込みを行わない。正規のサブテーブル DML（INSERT VALUES / UPDATE / DELETE / REORDER）は従来どおり動作する。
 - **B22 `LEFT` / `RIGHT` / `SUBSTRING` / `LPAD` / `RPAD` がサロゲートペアを分割する不具合を修正**。長さ引数を UTF-16 コードユニット予算として維持しつつ、入力中で対になっていたペアを割る境界では安全な側へ縮め、結果を必ず指定予算以下にする。`LPAD` / `RPAD` は入力の切り詰めと埋め文字列の切り詰めの両方に適用する。`LENGTH` / `LIKE '_'` / `INSTR` の単位は変更しない。
