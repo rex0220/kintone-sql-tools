@@ -13,7 +13,7 @@
 
 - **B9 最大30桁の有限10進比較を厳密化**。NUMBER/CALC の WHERE・HAVING・CASE・BETWEEN・ASSERT・IN、通常/サブテーブル DML、REORDER、ORDER BY/ウィンドウ、MIN/MAX、GREATEST/LEASTを単一の文字列ベース比較primitiveへ統一し、`9007199254740992` と `9007199254740993` を区別する。SQL数値リテラルは元字句を保持し、`digits[.digits][e±digits]` の指数表記も受理する。SIMPLE RESTと単純INSERT/UPSERT VALUESにも丸め前の字句を渡す。
 - typed number の固定バンドは維持するが、空白のみの値は `Number(' ')=0` とせず「その他非数値」の末尾バンドへ移す。JS算術・SUM/AVG・数値関数は引き続きbinary64であり、演算前の10進値は復元しない。
-- **SemVer=major 確定（2026-07-18 実機）**。APP4221（16有効桁）で binary64 衝突ペア 999999999999.9991/.9992 を保存し、公開 v3.2.0 と B9 を比較したところ **MIN/MAX 値と ORDER BY 順が変わる**ことを実測（v3.2.0 は 2 値を同値扱い・MIN が誤り・ORDER BY 逆順）。→ **B9 は v3.3.0 minor では出せず v4.0.0 相当が必要**。版構成の再計画は別途。証跡: docs/internal/evidence/b9_exact_decimal_semver_probe.md
+- **互換性注意（重要）**: 16 有効桁を超える NUMBER の比較結果が変わる。実機で公開 v3.2.0 と比較したところ、binary64 で同値扱いされていた値（例 999999999999.9991 と .9992）が B9 では区別され、**MIN/MAX・ORDER BY・WHERE = の結果が正しくなる**（v3.2.0 は MIN が誤り・ORDER BY が逆順だった）。厳密には後方非互換だが、変わるのは 16 桁超という稀な領域で、かつ従来が誤りだった値のみのため、**ユーザー判断で v3.3.0（minor）に含める**。移行ガイドに明記。証跡: docs/internal/evidence/b9_exact_decimal_semver_probe.md
 
 ## v3.2.0（2026-07-18）
 

@@ -1,6 +1,6 @@
 # B9: 最大30桁の厳密10進比較 実装計画
 
-- ステータス: **実装完了・Claude レビュー承認・SemVer=major 確定（2026-07-18・[実機証跡](evidence/b9_exact_decimal_semver_probe.md)）**。primitive 検算 15/15・全 1,835 テスト green・実機で公開 v3.2.0 と MIN/MAX・ORDER BY が変わることを確認＝§8.3 の major 条件。**v3.3.0 minor では出せず版構成の再計画が必要**。
+- ステータス: **実装完了・Claude レビュー承認・SemVer=major 確定（2026-07-18・[実機証跡](evidence/b9_exact_decimal_semver_probe.md)）**。primitive 検算 15/15・全 1,835 テスト green・実機で公開 v3.2.0 と MIN/MAX・ORDER BY が変わることを確認＝§8.3 の major 条件。**16桁超の比較結果が変わる互換性注意あり（従来は誤り）。ユーザー判断で v3.3.0 に含める・移行ガイドに明記**。
 - 作成日: 2026-07-18
 - 対象リリース: **v3.3.0 の土台（SemVer は §8 の実測 gate で確定。major 判定時は版番号を再計画）**
 - 分担: **Claude=仕様レビュー・実機 SemVer 判定、Codex=実装・自動テスト**
