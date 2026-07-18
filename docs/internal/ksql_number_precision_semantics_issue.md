@@ -1,7 +1,7 @@
 # 課題: B29 kintone数値精度・丸め設定との整合
 
 - 作成日: 2026-07-17
-- ステータス: **課題R2・仕様の新規作成が必要（2026-07-18 棚卸し）**。問題認識は現行コードと一致し正確（`numberPrecision`/`general-settings`/`app/settings.json` は src 内に参照ゼロ＝完全未実装・`dmlValidation.ts` の NUMBER 検証は `minValue`/`maxValue` の範囲のみで桁数・小数桁・丸めを見ない）。ただし §3 は疑問形の論点列挙・§4 は「案」止まりで、**実装計画に落とせる確定方針がない** → B9 のように直接実装へは進めず、まず仕様化が要る（§6 に骨子を追加）。
+- ステータス: **課題R2→仕様 R1 作成・Claude レビュー承認（2026-07-18・[仕様書](ksql_number_precision_semantics_spec.md)）・実装待ち（B9 先行）**。問題認識は現行コードと一致し正確（`numberPrecision`/`general-settings`/`app/settings.json` は src 内に参照ゼロ＝完全未実装・`dmlValidation.ts` の NUMBER 検証は `minValue`/`maxValue` の範囲のみで桁数・小数桁・丸めを見ない）。ただし §3 は疑問形の論点列挙・§4 は「案」止まりで、**実装計画に落とせる確定方針がない** → B9 のように直接実装へは進めず、まず仕様化が要る（§6 に骨子を追加）。
 - 関連: [B9 厳密10進比較](ksql_exact_decimal_compare_issue.md)
 
 ## 1. 問題
