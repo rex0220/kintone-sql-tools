@@ -3,7 +3,6 @@
 - 最終更新: 2026-07-19
 - 現在の最新リリース: **v3.4.0**（DML カスタムチェック B37＋文字列連結 `||` B38・tag/GitHub Release 公開・npm publish 済み・latest 3.4.0）
 - 次回リリース計画: 未定。**実装候補（設計探索済み・要 R2/R3）**＝①**B41** 既存レコード監査（≈0.7〜0.9× B37・実需明確・**最も実装向き**）②**B39** CSV 取込（IMPORT 文案・要 R2・面 loader）③**B40** プロパティグラフ（≈2〜3× B37・大規模・探索的）。**棚上げ・低優先**＝B3/B4/B5/B6/B7/B10。
-- 実装計画（履歴・実装済み）: [B33 KORDER Cursor（v3.1.0）](internal/ksql_korder_cursor_implementation_plan.md)・[v3.0.0 ORDER BY](internal/ksql_v3_order_by_implementation_plan.md)（いずれもリリース済み・参考用）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
