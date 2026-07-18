@@ -1,9 +1,22 @@
-ksql 配布パッケージ (v3.2.0)
+ksql 配布パッケージ (v3.3.0)
 
-1. ksql-plugin-v3.2.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.3.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.3.0: 厳密10進比較・数値精度整合・正規表現の 3 件バンドル (B9/B29/B20)。
+- B9: 最大30桁の有限10進比較を厳密化。16 有効桁を超える NUMBER/CALC 値を
+  binary64 で丸めず区別 (WHERE=・MIN/MAX・ORDER BY 等が正しくなる)。数値
+  リテラルは元字句を保持し指数表記 digits[.digits][e±digits] も受理。
+- B29: 書き込み先アプリの numberPrecision 設定から整数部の桁超過を書き込み
+  前に検出 (ERR_NUMBER_INTEGER_DIGITS・ON ERROR SKIP で行隔離)。小数は
+  kSQL で検証せず kintone の自動丸めに委ねる (REST/CSV/編集画面と一貫)。
+- B20: 正規表現関数 REGEXP_LIKE/REGEXP_REPLACE/REGEXP_SUBSTR を追加
+  (ECMAScript・フラグ i/m/s・u 常時有効)。ユーザー責任 (ReDoS 中断不能・
+  ホストや Unicode 版で結果差)。予約語 3 語。
+- 大半の既存クエリは無影響 (minor)。16 桁超の比較のみ結果が正しく変わる。
+  詳細: docs/ksql_v3_3_migration_guide.md
 
 v3.2.0: 正しさ・関数の 7 件バンドル (B21/B22/B23/B24/B28/B34/B35)。
 - B34: DML の書き込み先フィールド検査。不存在・サブテーブル子・書込不可

@@ -31034,6 +31034,9 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["SUBSTR", "SUBSTR" /* SUBSTR */],
   ["CONCAT", "CONCAT" /* CONCAT */],
   ["REPLACE", "REPLACE" /* REPLACE */],
+  ["REGEXP_LIKE", "REGEXP_LIKE" /* REGEXP_LIKE */],
+  ["REGEXP_REPLACE", "REGEXP_REPLACE" /* REGEXP_REPLACE */],
+  ["REGEXP_SUBSTR", "REGEXP_SUBSTR" /* REGEXP_SUBSTR */],
   ["COALESCE", "COALESCE" /* COALESCE */],
   ["NULLIF", "NULLIF" /* NULLIF */],
   ["ISNULL", "ISNULL" /* ISNULL */],
@@ -31166,7 +31169,7 @@ var Lexer = class {
     );
   }
   // ----------------------------------------------------------
-  // 数値: 整数 or 小数（123 / 3.14）
+  // 数値: digits[.digits][e[+-]digits]（先頭/末尾 dot は受理しない）
   // ----------------------------------------------------------
   readNumber(start) {
     while (this.pos < this.input.length && isDigit(this.input[this.pos])) {
@@ -31177,6 +31180,16 @@ var Lexer = class {
       while (this.pos < this.input.length && isDigit(this.input[this.pos])) {
         this.pos++;
       }
+    }
+    if (this.pos < this.input.length && (this.input[this.pos] === "e" || this.input[this.pos] === "E")) {
+      this.pos++;
+      if (this.pos < this.input.length && (this.input[this.pos] === "+" || this.input[this.pos] === "-")) {
+        this.pos++;
+      }
+      if (this.pos >= this.input.length || !isDigit(this.input[this.pos])) {
+        throw new LexError("\u6307\u6570\u90E8\u306B\u306F\u6570\u5B57\u304C\u5FC5\u8981\u3067\u3059", start, this.input, this.pos >= this.input.length);
+      }
+      while (this.pos < this.input.length && isDigit(this.input[this.pos])) this.pos++;
     }
     return this.makeToken(
       "NUMBER" /* NUMBER */,
@@ -31379,6 +31392,12 @@ function isJapanese(cp) {
 
 // src/types/ast.ts
 var NO_FROM_CTE_NAME = "__NO_FROM__";
+function makeNumberLiteral(raw) {
+  return { type: "NUMBER", value: Number(raw), raw };
+}
+function numberLiteralText(node) {
+  return node.raw ?? String(node.value);
+}
 
 // src/parser/parser.ts
 var MAX_BATCH_STATEMENTS = 20;
@@ -31411,6 +31430,9 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "COALESCE" /* COALESCE */,
   "NULLIF" /* NULLIF */,
   "ISNULL" /* ISNULL */,
+  "REGEXP_LIKE" /* REGEXP_LIKE */,
+  "REGEXP_REPLACE" /* REGEXP_REPLACE */,
+  "REGEXP_SUBSTR" /* REGEXP_SUBSTR */,
   "LEFT" /* LEFT */,
   "RIGHT" /* RIGHT */,
   "INSTR" /* INSTR */,
@@ -32174,12 +32196,12 @@ var Parser = class {
     if (this.peek().kind === "-" /* MINUS */) {
       this.advance();
       const operand = this.parseAggPrimary();
-      if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
-      return { type: "AGG_ARITH", left: { type: "NUMBER", value: 0 }, op: "-", right: operand };
+      if (operand.type === "NUMBER") return makeNumberLiteral(`-${numberLiteralText(operand)}`);
+      return { type: "AGG_ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
     }
     if (this.peek().kind === "NUMBER" /* NUMBER */) {
       const tok = this.advance();
-      return { type: "NUMBER", value: Number(tok.value) };
+      return makeNumberLiteral(tok.value);
     }
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
@@ -32231,7 +32253,7 @@ var Parser = class {
     if (this.allowUnaryPlusNumber && this.peek().kind === "+" /* PLUS */) {
       this.advance();
       const number4 = this.expect("NUMBER" /* NUMBER */, "\u5358\u9805 + \u306E\u76F4\u5F8C\u306B\u306F\u6570\u5024\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
-      return { type: "NUMBER", value: Number(number4.value) };
+      return makeNumberLiteral(`+${number4.value}`);
     }
     if (this.peek().kind === "-" /* MINUS */) {
       this.advance();
@@ -32239,8 +32261,8 @@ var Parser = class {
         throw new ParseError("\u5358\u9805\u7B26\u53F7\u3092\u91CD\u306D\u3066\u6307\u5B9A\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093", this.peek());
       }
       const operand = this.parseArithPrimary();
-      if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
-      return { type: "ARITH", left: { type: "NUMBER", value: 0 }, op: "-", right: operand };
+      if (operand.type === "NUMBER") return makeNumberLiteral(`-${numberLiteralText(operand)}`);
+      return { type: "ARITH", left: makeNumberLiteral("0"), op: "-", right: operand };
     }
     if (this.tryStringFuncName() !== null) {
       return this.parseStringFuncExpr();
@@ -32248,7 +32270,7 @@ var Parser = class {
     const tok = this.peek();
     if (tok.kind === "NUMBER" /* NUMBER */) {
       this.advance();
-      return { type: "NUMBER", value: Number(tok.value) };
+      return makeNumberLiteral(tok.value);
     }
     if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) {
       this.advance();
@@ -32352,6 +32374,9 @@ var Parser = class {
       ["SUBSTR" /* SUBSTR */]: "SUBSTRING",
       ["CONCAT" /* CONCAT */]: "CONCAT",
       ["REPLACE" /* REPLACE */]: "REPLACE",
+      ["REGEXP_LIKE" /* REGEXP_LIKE */]: "REGEXP_LIKE",
+      ["REGEXP_REPLACE" /* REGEXP_REPLACE */]: "REGEXP_REPLACE",
+      ["REGEXP_SUBSTR" /* REGEXP_SUBSTR */]: "REGEXP_SUBSTR",
       ["TRANSLATE" /* TRANSLATE */]: "TRANSLATE",
       ["COALESCE" /* COALESCE */]: "COALESCE",
       ["NULLIF" /* NULLIF */]: "NULLIF",
@@ -32891,7 +32916,7 @@ var Parser = class {
     }
     if (tok.kind === "NUMBER" /* NUMBER */ || tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */ || tok.kind === "(" /* LPAREN */ || tok.kind === "-" /* MINUS */ || this.tryStringFuncName() !== null) {
       const expr = this.parseArithAddSub();
-      if (expr.type === "NUMBER") return { type: "NUMBER", value: expr.value };
+      if (expr.type === "NUMBER") return expr;
       return { type: "ARITH_VALUE", expr };
     }
     throw new ParseError(
@@ -32918,15 +32943,15 @@ var Parser = class {
       if (tok.kind === "STRING" /* STRING */) {
         values.push({ type: "STRING", value: tok.value });
       } else if (tok.kind === "NUMBER" /* NUMBER */) {
-        values.push({ type: "NUMBER", value: Number(tok.value) });
+        values.push(makeNumberLiteral(tok.value));
       } else if (tok.kind === "-" /* MINUS */ || tok.kind === "+" /* PLUS */) {
         const number4 = this.peek();
         if (number4.kind !== "NUMBER" /* NUMBER */) {
           throw new ParseError(invalidValueMessage, tok);
         }
         this.advance();
-        const sign = tok.kind === "-" /* MINUS */ ? -1 : 1;
-        values.push({ type: "NUMBER", value: sign * Number(number4.value) });
+        const sign = tok.kind === "-" /* MINUS */ ? "-" : "+";
+        values.push(makeNumberLiteral(`${sign}${number4.value}`));
       } else if (tok.kind === "VARIABLE" /* VARIABLE */) {
         values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
       } else {
@@ -33116,14 +33141,13 @@ var Parser = class {
       } else if (this.peek().kind === "-" /* MINUS */ || this.peek().kind === "+" /* PLUS */) {
         const sign = this.advance();
         const number4 = this.expect("NUMBER" /* NUMBER */, "INSERT \u306E\u5358\u9805\u7B26\u53F7\u306E\u76F4\u5F8C\u306B\u306F\u6570\u5024\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
-        const value = Number(number4.value);
-        row.push({ type: "NUMBER", value: sign.kind === "-" /* MINUS */ ? -value : value });
+        row.push(makeNumberLiteral(`${sign.kind === "-" /* MINUS */ ? "-" : "+"}${number4.value}`));
       } else {
         const tok = this.advance();
         if (tok.kind === "STRING" /* STRING */) {
           row.push({ type: "STRING", value: tok.value });
         } else if (tok.kind === "NUMBER" /* NUMBER */) {
-          row.push({ type: "NUMBER", value: Number(tok.value) });
+          row.push(makeNumberLiteral(tok.value));
         } else {
           throw new ParseError("INSERT \u306E\u5024\u306B\u306F\u6587\u5B57\u5217\u30FB\u6570\u5024\u30FB\u914D\u5217\u30EA\u30C6\u30E9\u30EB\u30FBCASE WHEN \u304C\u5FC5\u8981\u3067\u3059", tok);
         }
@@ -33945,7 +33969,7 @@ function convertValue(value, op) {
     case "STRING":
       return convertString(value);
     case "NUMBER":
-      return String(value.value);
+      return numberLiteralText(value);
     case "KINTONE_FUNC":
       return convertKintoneFunc(value);
     case "IN_LIST":
@@ -33974,7 +33998,7 @@ function convertInList(v, op) {
   }
   assertResolvedInListValues(v.values);
   const values = v.values.map(
-    (item) => item.type === "STRING" ? convertString(item) : String(item.value)
+    (item) => item.type === "STRING" ? convertString(item) : numberLiteralText(item)
   ).join(",");
   return `(${values})`;
 }
@@ -34487,7 +34511,7 @@ function aggregateSyntheticName(func, distinct, arg) {
 }
 function arithNodeLabel(node) {
   if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER") return String(node.value);
+  if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "STRING_FUNC") return stringFuncLabel(node);
   return `(${arithNodeLabel(node.left)}${node.op}${arithNodeLabel(node.right)})`;
 }
@@ -34644,7 +34668,7 @@ function isNumericCandidate(expr, options) {
   if (!isTargetField(expr.left, options)) return false;
   if (expr.right.type !== "NUMBER") return false;
   if (expr.op === "=") return true;
-  return (expr.op === "<" || expr.op === ">") && Number.isSafeInteger(expr.right.value);
+  return (expr.op === "<" || expr.op === ">") && /^[+-]?\d+$/.test(numberLiteralText(expr.right)) && Number.isSafeInteger(expr.right.value);
 }
 function isSelectionInCandidate(expr, options) {
   if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
@@ -35227,6 +35251,67 @@ function validateDeclaredBatchVariables(statements, input) {
   return normalized;
 }
 
+// src/core/exactDecimal.ts
+var DECIMAL_PATTERN = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?)(\d+))?$/;
+function parseSafeExponent(sign, digits) {
+  if (digits === void 0) return 0;
+  let value = 0;
+  for (const digit of digits) {
+    value = value * 10 + (digit.charCodeAt(0) - 48);
+    if (!Number.isSafeInteger(value)) return null;
+  }
+  return sign === "-" ? -value : value;
+}
+function parseExactDecimal(input) {
+  const match = DECIMAL_PATTERN.exec(input.trim());
+  if (match === null) return null;
+  const exponent = parseSafeExponent(match[5], match[6]);
+  if (exponent === null) return null;
+  const fraction = match[3] ?? match[4] ?? "";
+  let coefficient = `${match[2] ?? ""}${fraction}`.replace(/^0+/, "");
+  if (coefficient === "") return { sign: 0, coefficient: "0", scale: 0 };
+  let scale = fraction.length - exponent;
+  if (!Number.isSafeInteger(scale)) return null;
+  const trailingZeros = /0+$/.exec(coefficient)?.[0].length ?? 0;
+  if (trailingZeros > 0) {
+    coefficient = coefficient.slice(0, -trailingZeros);
+    scale -= trailingZeros;
+    if (!Number.isSafeInteger(scale)) return null;
+  }
+  if (!Number.isSafeInteger(coefficient.length - scale)) return null;
+  const sign = match[1] === "-" ? -1 : 1;
+  return { sign, coefficient, scale };
+}
+function compareMagnitudes(left, right) {
+  const leftPoint = left.coefficient.length - left.scale;
+  const rightPoint = right.coefficient.length - right.scale;
+  if (!Number.isSafeInteger(leftPoint) || !Number.isSafeInteger(rightPoint)) {
+    throw new Error("ArgumentError: exact decimal scale is outside the supported range.");
+  }
+  if (leftPoint !== rightPoint) return leftPoint < rightPoint ? -1 : 1;
+  const width = Math.max(left.coefficient.length, right.coefficient.length);
+  for (let index = 0; index < width; index++) {
+    const a = index < left.coefficient.length ? left.coefficient.charCodeAt(index) : 48;
+    const b = index < right.coefficient.length ? right.coefficient.charCodeAt(index) : 48;
+    if (a !== b) return a < b ? -1 : 1;
+  }
+  return 0;
+}
+function compareExactDecimal(left, right) {
+  if (left.sign !== right.sign) return left.sign < right.sign ? -1 : 1;
+  if (left.sign === 0) return 0;
+  const magnitude = compareMagnitudes(left, right);
+  return left.sign === -1 ? magnitude === 0 ? 0 : magnitude === -1 ? 1 : -1 : magnitude;
+}
+function compareDecimal(left, right) {
+  const a = parseExactDecimal(left);
+  const b = parseExactDecimal(right);
+  if (a === null || b === null) {
+    throw new Error("ArgumentError: compareDecimal requires finite decimal inputs.");
+  }
+  return compareExactDecimal(a, b);
+}
+
 // src/core/scalarCompare.ts
 function compareCodePointStrings(left, right) {
   const a = left[Symbol.iterator]();
@@ -35249,9 +35334,10 @@ function triCompare(left, right) {
 }
 function numberKey(value) {
   if (value === "") return { band: 0 };
+  const decimal = parseExactDecimal(value);
+  if (decimal !== null) return { band: 2, value: decimal };
   const numeric = Number(value);
   if (numeric === Number.NEGATIVE_INFINITY) return { band: 1 };
-  if (Number.isFinite(numeric)) return { band: 2, value: numeric };
   if (numeric === Number.POSITIVE_INFINITY) return { band: 3 };
   if (value === "NaN") return { band: 4 };
   return { band: 5, value };
@@ -35260,7 +35346,7 @@ function compareNumbers(left, right) {
   const a = numberKey(left);
   const b = numberKey(right);
   if (a.band !== b.band) return a.band < b.band ? -1 : 1;
-  if (a.band === 2 && b.band === 2) return triCompare(a.value, b.value);
+  if (a.band === 2 && b.band === 2) return compareExactDecimal(a.value, b.value);
   if (a.band === 5 && b.band === 5) return compareCodePointStrings(a.value, b.value);
   return 0;
 }
@@ -35360,7 +35446,9 @@ function selectScalarExtreme(values, extreme) {
   const numeric = candidates.every((value) => !Number.isNaN(Number(value)));
   const compare = (left, right) => {
     if (numeric) {
-      const numericCmp = triCompare(Number(left), Number(right));
+      const leftDecimal = parseExactDecimal(left);
+      const rightDecimal = parseExactDecimal(right);
+      const numericCmp = leftDecimal !== null && rightDecimal !== null ? compareExactDecimal(leftDecimal, rightDecimal) : triCompare(Number(left), Number(right));
       if (numericCmp !== 0) return numericCmp;
     }
     return compareCodePointStrings(left, right);
@@ -35483,6 +35571,44 @@ function makeSafePadding(pad, gap) {
   const repeated = pad.repeat(Math.ceil(gap / pad.length));
   return sliceSafePrefix(repeated, gap);
 }
+var REGEXP_CACHE_MAX = 200;
+var regexpCache = /* @__PURE__ */ new Map();
+function normalizeRegexpFlags(flags) {
+  if (/[^ims]/.test(flags)) {
+    throw new Error("ArgumentError: regular expression flags may contain only i, m, or s.");
+  }
+  if (new Set(flags).size !== flags.length) {
+    throw new Error("ArgumentError: regular expression flags must not contain duplicates.");
+  }
+  return `${flags}u`;
+}
+function compileRegexp(pattern, flags, global = false) {
+  const normalizedFlags = normalizeRegexpFlags(flags) + (global ? "g" : "");
+  const key = `${pattern}\0${normalizedFlags}`;
+  const cached2 = regexpCache.get(key);
+  if (cached2 !== void 0) {
+    cached2.lastIndex = 0;
+    return cached2;
+  }
+  let regexp;
+  try {
+    regexp = new RegExp(pattern, normalizedFlags);
+  } catch (error51) {
+    const detail = error51 instanceof Error ? error51.message : String(error51);
+    throw new Error(`ArgumentError: invalid regular expression: ${detail}`);
+  }
+  if (regexpCache.size >= REGEXP_CACHE_MAX) {
+    const oldest = regexpCache.keys().next().value;
+    if (oldest !== void 0) regexpCache.delete(oldest);
+  }
+  regexpCache.set(key, regexp);
+  return regexp;
+}
+function assertRegexpReplacement(replacement) {
+  if (replacement.includes("$`") || replacement.includes("$'")) {
+    throw new Error("ArgumentError: REGEXP_REPLACE replacement must not contain $` or $'.");
+  }
+}
 function evalStringFunc(expr, row) {
   const args = expr.args.map((a) => evalStringFuncArg(a, row));
   switch (expr.func) {
@@ -35545,6 +35671,19 @@ function evalStringFunc(expr, row) {
       const from = args[1] ?? "";
       const to = args[2] ?? "";
       return from === "" ? str : str.split(from).join(to);
+    }
+    case "REGEXP_LIKE": {
+      assertArity("REGEXP_LIKE", args, 2, 3);
+      return compileRegexp(args[1], args[2] ?? "").test(args[0]) ? "1" : "0";
+    }
+    case "REGEXP_REPLACE": {
+      assertArity("REGEXP_REPLACE", args, 3, 4);
+      assertRegexpReplacement(args[2]);
+      return args[0].replace(compileRegexp(args[1], args[3] ?? "", true), args[2]);
+    }
+    case "REGEXP_SUBSTR": {
+      assertArity("REGEXP_SUBSTR", args, 2, 3);
+      return compileRegexp(args[1], args[2] ?? "").exec(args[0])?.[0] ?? "";
     }
     case "TRANSLATE": {
       assertArity("TRANSLATE", args, 3, 3);
@@ -35724,7 +35863,7 @@ function evalStringFuncArg(arg, row) {
   if (arg.type === "STRING") return arg.value;
   if (arg.type === "STRING_FUNC") return evalStringFunc(arg, row);
   if (arg.type === "FIELD_REF") return resolveFieldRef(row, arg.field);
-  if (arg.type === "NUMBER") return String(arg.value);
+  if (arg.type === "NUMBER") return numberLiteralText(arg);
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
   return String(evalArithExpr(arg, row));
 }
@@ -35773,7 +35912,7 @@ function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics 
     let values = null;
     if (right.type === "IN_LIST") {
       assertResolvedInListValues2(right.values);
-      values = new Set(right.values.map((v) => String(v.value)));
+      values = new Set(right.values.map((v) => v.type === "NUMBER" ? fieldType === "NUMBER" ? numberLiteralText(v) : String(v.value) : v.value));
     }
     if (right.type === "SUBQUERY_IN_LIST") {
       values = right.resolved;
@@ -35853,6 +35992,10 @@ var SINGLE_OBJECT_FIELD_TYPES = /* @__PURE__ */ new Set(["CREATOR", "MODIFIER"])
 function typedInContains(leftStr, values, fieldType) {
   const fallback = () => values.has(leftStr);
   if (fieldType === void 0) return fallback();
+  if (fieldType === "NUMBER") {
+    const semantics = syntheticSemantics("number");
+    return [...values].some((value) => compareScalarValues("=", leftStr, value, semantics));
+  }
   let parsed;
   if (STRING_ARRAY_FIELD_TYPES.has(fieldType) || OBJECT_ARRAY_FIELD_TYPES.has(fieldType) || SINGLE_OBJECT_FIELD_TYPES.has(fieldType)) {
     try {
@@ -35911,7 +36054,7 @@ function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2) {
     case "STRING":
       return value.value;
     case "NUMBER":
-      return String(value.value);
+      return numberLiteralText(value);
     case "KINTONE_FUNC":
       return resolveKintoneFunc(value.name);
     case "IN_LIST":
@@ -36351,7 +36494,7 @@ function convertDmlSqlValue(value, fieldType) {
     case "STRING":
       return convertString2(value.value, fieldType);
     case "NUMBER":
-      return String(value.value);
+      return numberLiteralText(value);
     case "ARRAY":
       return convertArray(value.elements.map((e) => e.value), fieldType);
     case "KINTONE_FUNC":
@@ -36983,7 +37126,7 @@ function evalAggArithExpr(node, rows, resolveAggSortKind) {
   }
 }
 function aggArithDefaultKey(node) {
-  if (node.type === "NUMBER") return String(node.value);
+  if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "AGG_REF") return aggregateSyntheticName2(node.func, node.distinct, node.arg);
   return `${aggArithDefaultKey(node.left)}${node.op}${aggArithDefaultKey(node.right)}`;
 }
@@ -37333,7 +37476,7 @@ function stripParentShortcutColumns(row) {
 function arithColDefaultKey(expr) {
   const nodeLabel = (n) => {
     if (n.type === "FIELD_REF") return n.field;
-    if (n.type === "NUMBER") return String(n.value);
+    if (n.type === "NUMBER") return numberLiteralText(n);
     if (n.type === "STRING_FUNC") return stringFuncDefaultKey(n);
     return `(${nodeLabel(n.left)}${n.op}${nodeLabel(n.right)})`;
   };
@@ -37362,10 +37505,11 @@ function hasAggregateInStringFuncExpr2(expr) {
 function resolveAggInStringFuncArg(arg, rows, resolveAggSortKind) {
   if (arg.type === "AGG_REF") {
     const value = evalAggregate(arg.func, arg.distinct, arg.arg, arg.separator, rows, resolveAggSortKind);
-    return typeof value === "number" ? { type: "NUMBER", value } : { type: "STRING", value };
+    return typeof value === "number" ? { type: "NUMBER", value, raw: String(value) } : { type: "STRING", value };
   }
   if (arg.type === "AGG_ARITH") {
-    return { type: "NUMBER", value: evalAggArithExpr(arg, rows, resolveAggSortKind) };
+    const value = evalAggArithExpr(arg, rows, resolveAggSortKind);
+    return { type: "NUMBER", value, raw: String(value) };
   }
   if (arg.type === "STRING_FUNC") {
     return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);
@@ -37483,10 +37627,43 @@ function toFlatString(value) {
   }
 }
 
+// src/core/numberPrecision.ts
+function parseIntegerSetting(value, name, min, max) {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new Error(`SettingsError: numberPrecision.${name} must be an integer string.`);
+  }
+  let parsed = 0;
+  for (const digit of value) parsed = parsed * 10 + digit.charCodeAt(0) - 48;
+  if (parsed < min || parsed > max) {
+    throw new Error(`SettingsError: numberPrecision.${name} must be between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+function parseNumberPrecisionSettings(response) {
+  const raw = response.numberPrecision;
+  if (raw === void 0 || raw === null || typeof raw !== "object") {
+    throw new Error("SettingsError: numberPrecision is missing from app settings.");
+  }
+  const digits = parseIntegerSetting(raw.digits, "digits", 1, 30);
+  const decimalPlaces = parseIntegerSetting(raw.decimalPlaces, "decimalPlaces", 0, 10);
+  const roundingMode = raw.roundingMode;
+  if (roundingMode !== "HALF_EVEN" && roundingMode !== "UP" && roundingMode !== "DOWN") {
+    throw new Error("SettingsError: numberPrecision.roundingMode is unsupported.");
+  }
+  return { digits, decimalPlaces, roundingMode };
+}
+function exactDecimalDigitCounts(value) {
+  if (value.sign === 0) return { integerDigits: 0, fractionDigits: 0 };
+  return {
+    integerDigits: Math.max(value.coefficient.length - value.scale, 0),
+    fractionDigits: Math.max(value.scale, 0)
+  };
+}
+
 // src/core/dmlValidation.ts
 var ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
 var CHOICE_TYPES = /* @__PURE__ */ new Set(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"]);
-function validateAndNormalizeDmlValue(raw, field) {
+function validateAndNormalizeDmlValue(raw, field, numberPrecision) {
   if (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME") {
     const original = rawScalarText(raw);
     if (original !== "" && !isValidTemporalInput(original, field.fieldType)) {
@@ -37505,7 +37682,8 @@ function validateAndNormalizeDmlValue(raw, field) {
   }
   if (!isEmpty(value) && field.fieldType === "NUMBER") {
     const text = String(value);
-    if (!isFiniteDecimal(text)) {
+    const decimal = parseExactDecimal(text);
+    if (decimal === null) {
       return { ok: false, code: "ERR_TYPE_NUMBER", message: `${field.code} \u306F\u6570\u5024\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
     }
     if (field.minValue != null && compareDecimal(text, field.minValue) < 0) {
@@ -37513,6 +37691,17 @@ function validateAndNormalizeDmlValue(raw, field) {
     }
     if (field.maxValue != null && compareDecimal(text, field.maxValue) > 0) {
       return { ok: false, code: "ERR_RANGE_MAX", message: `${field.code} \u306F ${field.maxValue} \u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (numberPrecision !== void 0) {
+      const { integerDigits } = exactDecimalDigitCounts(decimal);
+      const integerBudget = numberPrecision.digits - numberPrecision.decimalPlaces;
+      if (integerDigits > integerBudget) {
+        return {
+          ok: false,
+          code: "ERR_NUMBER_INTEGER_DIGITS",
+          message: `${field.code} \u306E\u6574\u6570\u90E8\u306F ${integerDigits} \u6841\u3067\u3059\u3002\u8A31\u5BB9\u306F ${integerBudget} \u6841\u307E\u3067\u3067\u3059 (digits=${numberPrecision.digits}, decimalPlaces=${numberPrecision.decimalPlaces})`
+        };
+      }
     }
   }
   if (!isEmpty(value) && (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME")) {
@@ -37541,7 +37730,8 @@ function validateAndNormalizeDmlValue(raw, field) {
 }
 function rawScalarText(raw) {
   if (raw == null) return "";
-  if (isSqlValue(raw) && (raw.type === "STRING" || raw.type === "NUMBER")) return String(raw.value);
+  if (isSqlValue(raw) && raw.type === "NUMBER") return numberLiteralText(raw);
+  if (isSqlValue(raw) && raw.type === "STRING") return raw.value;
   return typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
 }
 function isValidTemporalInput(value, type) {
@@ -37591,34 +37781,6 @@ function isEmpty(value) {
 function typeCode(type) {
   return type === "NUMBER" ? "ERR_TYPE_NUMBER" : "ERR_TYPE_DATE";
 }
-function isFiniteDecimal(value) {
-  return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value.trim());
-}
-function compareDecimal(left, right) {
-  const normalize = (input) => {
-    let s = input.trim();
-    let sign = 1;
-    if (s.startsWith("-")) {
-      sign = -1;
-      s = s.slice(1);
-    } else if (s.startsWith("+")) s = s.slice(1);
-    let [whole, fraction = ""] = s.split(".");
-    whole = (whole || "0").replace(/^0+(?=\d)/, "");
-    fraction = fraction.replace(/0+$/, "");
-    if (/^0*$/.test(whole) && fraction === "") sign = 1;
-    return { sign, whole, fraction };
-  };
-  const a = normalize(left);
-  const b = normalize(right);
-  if (a.sign !== b.sign) return a.sign < b.sign ? -1 : 1;
-  const direction = a.sign;
-  if (a.whole.length !== b.whole.length) return a.whole.length < b.whole.length ? -direction : direction;
-  if (a.whole !== b.whole) return a.whole < b.whole ? -direction : direction;
-  const width = Math.max(a.fraction.length, b.fraction.length);
-  const af = a.fraction.padEnd(width, "0");
-  const bf = b.fraction.padEnd(width, "0");
-  return af === bf ? 0 : af < bf ? -direction : direction;
-}
 function isValidTemporal(value, type) {
   if (type === "TIME") {
     const m2 = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
@@ -37646,7 +37808,7 @@ var VALIDATION_META_COLUMNS = [
   "$err_code",
   "$err_message"
 ];
-function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber) {
+function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision) {
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors = [];
   const invalid = /* @__PURE__ */ new Set();
@@ -37654,7 +37816,7 @@ function validateDmlCandidates(candidates, operation, payloadFields, targetField
     candidate.record ??= {};
     const rowErrors = [...candidate.preErrors];
     for (const code of targetFields) {
-      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code));
+      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code), numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
       else candidate.record[code] = { value: result.value };
     }
@@ -37664,14 +37826,14 @@ function validateDmlCandidates(candidates, operation, payloadFields, targetField
         if (candidate.payload.has(info.code)) continue;
         const emptyDefault = isEmptyDmlValue(info.defaultValue);
         if (!emptyDefault) {
-          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info);
+          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info, numberPrecision);
           if (!defaultResult.ok) rowErrors.push({
             field: info.code,
             code: defaultResult.code,
             message: `\u65E2\u5B9A\u5024: ${defaultResult.message}`
           });
         } else {
-          const emptyResult = validateAndNormalizeDmlValue("", info);
+          const emptyResult = validateAndNormalizeDmlValue("", info, numberPrecision);
           if (!emptyResult.ok) {
             rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
           } else if (info.required) {
@@ -37699,7 +37861,8 @@ function renderValidationValue(value) {
   if (value == null) return "";
   if (typeof value === "object" && "type" in value) {
     const sql = value;
-    if (sql.type === "STRING" || sql.type === "NUMBER") return String(sql.value ?? "");
+    if (sql.type === "NUMBER") return sql.raw ?? String(sql.value ?? "");
+    if (sql.type === "STRING") return String(sql.value ?? "");
     if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
   }
   if (Array.isArray(value)) return JSON.stringify(value);
@@ -37941,6 +38104,7 @@ function createEmptyMetrics() {
     putCalls: 0,
     deleteCalls: 0,
     fieldCalls: 0,
+    numberPrecisionCalls: 0,
     appsCalls: 0,
     processStatusCalls: 0,
     cursorCreateCalls: 0,
@@ -38025,6 +38189,10 @@ function wrapClientWithMetrics(client, metrics) {
     getFields: (appId) => {
       metrics.fieldCalls += 1;
       return client.getFields(appId);
+    },
+    getNumberPrecision: (appId) => {
+      metrics.numberPrecisionCalls += 1;
+      return client.getNumberPrecision(appId);
     },
     getProcessStatuses: (appId) => {
       metrics.processStatusCalls += 1;
@@ -38293,7 +38461,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
         const first = resolvedStmt2.expr.query.columns[0];
         const numeric = first?.type === "ARITH_COL" || first?.type === "ARITH_AGG_COL" || first?.type === "WINDOW_COL" || first?.type === "AGGREGATE" && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG");
         const numberValue = numeric ? Number(value) : Number.NaN;
-        variables.set(stmt.name, numeric && Number.isFinite(numberValue) ? { type: "number", value: numberValue } : { type: "string", value });
+        variables.set(stmt.name, numeric && Number.isFinite(numberValue) ? { type: "number", value: numberValue, raw: value } : { type: "string", value });
       } catch (e) {
         if (e instanceof ScalarSubqueryError) {
           throw new Error(`ArgumentError: ${e.message}`);
@@ -38311,7 +38479,10 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
       variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
     } else {
       const value = evaluateScalarExpr(stmt.default);
-      variables.set(stmt.name, { type: "string", value: String(value.value) });
+      variables.set(stmt.name, {
+        type: "string",
+        value: value.type === "number" ? value.raw ?? String(value.value) : value.value
+      });
     }
     return {};
   }
@@ -38487,7 +38658,7 @@ function evaluateScalarExpr(expr) {
     case "STRING":
       return { type: "string", value: expr.value };
     case "NUMBER":
-      return { type: "number", value: expr.value };
+      return { type: "number", value: expr.value, raw: numberLiteralText(expr) };
     case "KINTONE_FUNC":
       return { type: "string", value: resolveKintoneFunc(expr.name) };
     case "STRING_FUNC":
@@ -38497,7 +38668,7 @@ function evaluateScalarExpr(expr) {
       if (!Number.isFinite(value)) {
         throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
       }
-      return { type: "number", value };
+      return { type: "number", value, raw: String(value) };
     }
   }
 }
@@ -38512,7 +38683,7 @@ function resolveVariableRefs(node, variables) {
       if (value === void 0) {
         throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       }
-      return value.type === "number" ? { type: "NUMBER", value: value.value } : { type: "STRING", value: value.value };
+      return value.type === "number" ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) } : { type: "STRING", value: value.value };
     }
     return Object.fromEntries(
       Object.entries(obj).map(([key, value]) => [key, resolveVariableRefs(value, variables)])
@@ -38578,7 +38749,7 @@ async function evalAssertOperand(operand, client, options, cacheContext, tempTab
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
     case "NUMBER":
-      return String(operand.value);
+      return numberLiteralText(operand);
     case "STRING":
       return operand.value;
     case "ARITH":
@@ -39861,8 +40032,8 @@ async function fetchTableRecordsForFullScan(stmt, table, client, maxRecords2, pa
 }
 var UPSERT_IN_CHUNK_SIZE = 50;
 function normalizeKeyPart(v) {
-  const t = v.trim();
-  if (t !== "" && !Number.isNaN(Number(t))) return String(Number(t));
+  const decimal = parseExactDecimal(v);
+  if (decimal !== null) return JSON.stringify(decimal);
   return v;
 }
 function upsertCompositeKey(parts) {
@@ -40014,6 +40185,7 @@ var optionOrderCache = /* @__PURE__ */ new Map();
 var sortKindCache = /* @__PURE__ */ new Map();
 var fieldInfoCache = /* @__PURE__ */ new Map();
 var processStatusCache = /* @__PURE__ */ new Map();
+var numberPrecisionCache = /* @__PURE__ */ new Map();
 function getScopedCacheValue(root, cacheContext, appId) {
   return root.get(cacheContext)?.get(appId);
 }
@@ -40033,6 +40205,13 @@ async function getFieldsCached(appId, client, cacheContext) {
   if (cached2) return cached2;
   const loading = client.getFields(appId);
   setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
+  return loading;
+}
+async function getNumberPrecisionCached(appId, client, cacheContext) {
+  const cached2 = getScopedCacheValue(numberPrecisionCache, cacheContext, appId);
+  if (cached2) return cached2;
+  const loading = client.getNumberPrecision(appId);
+  setScopedCacheValue(numberPrecisionCache, cacheContext, appId, loading);
   return loading;
 }
 async function getProcessStatusesCached(appId, client, cacheContext) {
@@ -40309,6 +40488,23 @@ async function loadWritableTopLevelDmlFields(appId, targetFields, client, cacheC
   assertWritableTopLevelDmlFields(appId, targetFields, fieldInfos);
   return fieldInfos;
 }
+async function loadNumberPrecisionForTargets(appId, targetFields, fieldInfos, client, cacheContext) {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  return targetFields.some((code) => infoByCode.get(code)?.fieldType === "NUMBER") ? getNumberPrecisionCached(appId, client, cacheContext) : void 0;
+}
+function assertValidDmlRecords(records, targetFields, fieldInfos, numberPrecision) {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  records.forEach((record2, rowIndex) => {
+    for (const code of targetFields) {
+      const info = infoByCode.get(code);
+      const result = validateAndNormalizeDmlValue(record2[code]?.value ?? "", info, numberPrecision);
+      if (!result.ok) {
+        throw new Error(`DmlValidationError: ${result.code} ${result.message} (row=${rowIndex + 1}, field=${code})`);
+      }
+      record2[code] = { value: result.value };
+    }
+  });
+}
 async function executeDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
   return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
 }
@@ -40336,6 +40532,13 @@ async function prepareDmlValidation(stmt, client, options, cacheContext, tempTab
     await assertDmlWhereCapability(stmt, client, cacheContext);
   }
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const numberPrecision = await loadNumberPrecisionForTargets(
+    stmt.appId,
+    targetFields,
+    fieldInfos,
+    client,
+    cacheContext
+  );
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
   const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
     candidates,
@@ -40343,7 +40546,8 @@ async function prepareDmlValidation(stmt, client, options, cacheContext, tempTab
     payloadFields,
     targetFields,
     fieldInfos,
-    statementNumber
+    statementNumber,
+    numberPrecision
   );
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result = {
@@ -40567,6 +40771,7 @@ async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cach
     tempTables
   );
   const sourceByKey = /* @__PURE__ */ new Map();
+  const sourceQueryByKey = /* @__PURE__ */ new Map();
   for (const row of sourceRows) {
     if (!Object.prototype.hasOwnProperty.call(row, from.joinKeyField)) {
       throw new Error(`ArgumentError: UPDATE ... FROM source column ${from.joinKeyField} does not exist.`);
@@ -40576,6 +40781,7 @@ async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cach
       throw new Error(`ArgumentError: UPDATE ... FROM source has multiple rows for normalized key ${key}.`);
     }
     sourceByKey.set(key, row);
+    sourceQueryByKey.set(key, String(row[from.joinKeyField]).trim());
   }
   if (sourceByKey.size === 0) return [];
   const maxRecords2 = options.maxRecords ?? 1e4;
@@ -40584,7 +40790,7 @@ async function resolveUpdateFromMatchedRecords(stmt, from, client, options, cach
   const targetRecords = [];
   const seenTargetIds = /* @__PURE__ */ new Set();
   let fetchedTargetCount = 0;
-  for (const keys of splitChunks([...sourceByKey.keys()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
+  for (const keys of splitChunks([...sourceQueryByKey.values()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
     const keyQuery = `${from.targetJoinField} in (${keys.map(sqlQuote).join(",")})`;
     const query = filterQuery ? `(${keyQuery}) and (${filterQuery})` : keyQuery;
     const resolved = await fetchRecordsForSharedPlan(
@@ -40685,37 +40891,28 @@ function normalizeUpdateFromJoinKey(raw, kind, side) {
   }
   if (kind === "number" && side === "target" && raw === "") return null;
   if (kind === "id") {
-    const text2 = raw.trim();
-    const id = Number(text2);
-    if (text2 === "" || !Number.isSafeInteger(id) || id <= 0) {
+    const text = raw.trim();
+    const id = Number(text);
+    if (text === "" || !Number.isSafeInteger(id) || id <= 0) {
       throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a positive safe integer: ${raw}`);
     }
     return String(id);
   }
-  const text = raw.trim();
-  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+  const decimal = parseExactDecimal(raw);
+  if (decimal === null) {
     throw new Error(`ArgumentError: UPDATE ... FROM ${side} key must be a finite decimal: ${raw}`);
   }
-  let unsigned = text;
-  let negative = false;
-  if (unsigned.startsWith("-") || unsigned.startsWith("+")) {
-    negative = unsigned[0] === "-";
-    unsigned = unsigned.slice(1);
-  }
-  let [whole, fraction = ""] = unsigned.split(".");
-  whole = (whole || "0").replace(/^0+(?=\d)/, "");
-  fraction = fraction.replace(/0+$/, "");
-  const zero = /^0*$/.test(whole) && fraction === "";
-  const canonical = fraction === "" ? whole : `${whole}.${fraction}`;
-  return negative && !zero ? `-${canonical}` : canonical;
+  return JSON.stringify(decimal);
 }
 async function executeInsert(stmt, client, options, cacheContext) {
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records), stmt.fields, fieldInfos, numberPrecision);
   const createdIds = [];
   for (const batch of batches) {
     const res = await client.postRecords(batch);
@@ -40728,7 +40925,8 @@ async function executeInsert(stmt, client, options, cacheContext) {
   };
 }
 async function executeInsertSelect(stmt, client, options, cacheContext, cteCache) {
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
@@ -40750,6 +40948,7 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
     });
     return record2;
   });
+  assertValidDmlRecords(allRecords, stmt.fields, fieldInfos, numberPrecision);
   const createdIds = [];
   for (let i = 0; i < allRecords.length; i += 100) {
     const batch = allRecords.slice(i, i + 100);
@@ -40767,9 +40966,17 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
     await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
-  await loadWritableTopLevelDmlFields(
+  const fieldInfos = await loadWritableTopLevelDmlFields(
     stmt.appId,
     stmt.assignments.map((assignment) => assignment.field),
+    client,
+    cacheContext
+  );
+  const targetFields = stmt.assignments.map((assignment) => assignment.field);
+  const numberPrecision = await loadNumberPrecisionForTargets(
+    stmt.appId,
+    targetFields,
+    fieldInfos,
     client,
     cacheContext
   );
@@ -40790,11 +40997,12 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
       { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1 }
     );
     const records = resolved2.records;
+    const batches2 = updateToPutBatchesArith(stmt, records, fieldTypes);
+    assertValidDmlRecords(batches2.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
     if (options.confirm) {
       const ok = await options.confirm(records.length, "UPDATE");
       if (!ok) throw new OperationCancelledError("UPDATE", records.length);
     }
-    const batches2 = updateToPutBatchesArith(stmt, records, fieldTypes);
     for (const batch of batches2) {
       await client.putRecords(batch);
     }
@@ -40808,11 +41016,12 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
     { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1 }
   );
   const ids = resolved.ids;
+  const batches = updateToPutBatches(stmt, ids, fieldTypes);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
   if (options.confirm) {
     const ok = await options.confirm(ids.length, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", ids.length);
   }
-  const batches = updateToPutBatches(stmt, ids, fieldTypes);
   for (const batch of batches) {
     await client.putRecords(batch);
   }
@@ -40820,12 +41029,16 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
 }
 async function executeUpdateFrom(stmt, from, client, options, cacheContext, tempTables) {
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  const targetFields = stmt.assignments.map((assignment) => assignment.field);
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, targetFields, fieldInfos, client, cacheContext);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
   if (options.confirm) {
     const ok = await options.confirm(matched.length, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", matched.length);
   }
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
   for (const batch of batches) await client.putRecords(batch);
   return { type: "UPDATE", updatedCount: matched.length };
 }
@@ -40874,7 +41087,8 @@ async function executeDelete(stmt, client, options, cacheContext) {
   return { type: "DELETE", deletedCount: ids.length };
 }
 async function executeUpsert(stmt, client, options, cacheContext) {
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const toInsert = [];
   const toUpdate = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
@@ -40883,7 +41097,7 @@ async function executeUpsert(stmt, client, options, cacheContext) {
       const idx = stmt.fields.indexOf(key);
       if (idx === -1) throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C INSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
       const val = row[idx];
-      return val.type === "STRING" ? val.value : val.type === "NUMBER" ? String(val.value) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((e) => e.value).join(",");
+      return val.type === "STRING" ? val.value : val.type === "NUMBER" ? numberLiteralText(val) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((e) => e.value).join(",");
     })
   );
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
@@ -40904,6 +41118,12 @@ async function executeUpsert(stmt, client, options, cacheContext) {
       toInsert.push(record2);
     }
   });
+  assertValidDmlRecords(
+    [...toInsert, ...toUpdate.map((entry) => entry.record)],
+    stmt.fields,
+    fieldInfos,
+    numberPrecision
+  );
   if (options.confirm && toInsert.length + toUpdate.length > 0) {
     const total = toInsert.length + toUpdate.length;
     const ok = await options.confirm(total, "UPDATE");
@@ -41179,14 +41399,14 @@ function buildSubtableReorderPutParams(appId, parentId, revision, subtableCode, 
 }
 function evalAssignmentValueForSubtable(value, row, resolveFieldType) {
   if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return String(value.value);
+  if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "ARITH") return String(evalArithExpr(value, row));
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
   throw new Error(`${value.type} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306E\u5024\u3068\u3057\u3066\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
 }
 function valueToString(value) {
   if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return String(value.value);
+  if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, {});
   return value.elements.map((e) => e.value).join(",");
 }
@@ -41301,7 +41521,8 @@ function evalOrderKeyForRow(key, row) {
   }
 }
 async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache) {
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
@@ -41324,6 +41545,7 @@ async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache
     });
     return record2;
   });
+  assertValidDmlRecords(records, stmt.fields, fieldInfos, numberPrecision);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const rowKeyValues = records.map(
     (record2) => stmt.keyFields.map((key) => String(record2[key]?.value ?? ""))
@@ -42082,7 +42304,7 @@ function formatArithExprStr(expr) {
 }
 function formatArithNodeStr(node) {
   if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER") return String(node.value);
+  if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "ARITH") return `(${formatArithExprStr(node)})`;
   return "...";
 }
@@ -42544,6 +42766,7 @@ function withRequestGate(client, gate) {
     },
     getApps: () => gate.runReadOnly(() => client.getApps()),
     getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
+    getNumberPrecision: (appId) => gate.runReadOnly(() => client.getNumberPrecision(appId)),
     getProcessStatuses: (appId) => gate.runReadOnly(() => client.getProcessStatuses(appId)),
     postRecords: (params) => gate.runMutation(() => client.postRecords(params)),
     putRecords: (params) => gate.runMutation(() => client.putRecords(params)),
@@ -43105,6 +43328,16 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
       );
       return flattenFormFieldProperties(res.properties);
     },
+    async getNumberPrecision(appId) {
+      const qs = new URLSearchParams();
+      qs.set("app", String(appId));
+      const res = await requestJson(
+        `${apiBasePath}/app/settings.json?${qs.toString()}`,
+        { method: "GET" },
+        appId
+      );
+      return parseNumberPrecisionSettings(res);
+    },
     async getProcessStatuses(appId) {
       const qs = new URLSearchParams();
       qs.set("app", String(appId));
@@ -43633,6 +43866,12 @@ async function createKsqlRuntime(serverOptions, input) {
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
       return routed.getFields(binding.appId);
     },
+    getNumberPrecision: (appId) => {
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, appId);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
+      if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
+      return routed.getNumberPrecision(binding.appId);
+    },
     getProcessStatuses: (appId) => {
       const binding = resolveRuntimeBinding(runtimeContext.sqlContext, appId);
       const routed = runtimeContext.clientsByProfile.get(binding.profile);
@@ -43868,6 +44107,9 @@ function noOpClient() {
     getFields: fail,
     async getProcessStatuses() {
       return { enable: false, states: [] };
+    },
+    async getNumberPrecision() {
+      return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" };
     }
   };
 }
@@ -44667,7 +44909,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "3.2.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.3.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -44689,12 +44931,12 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always treats onLimit=truncate as error. VALIDATE ONLY performs local Tier-0 validation with zero write API calls. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always treats onLimit=truncate as error. VALIDATE ONLY performs local Tier-0 validation with zero write API calls; NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {
