@@ -12,6 +12,8 @@
   - **参照は読み取り行**：INSERT/UPSERT … SELECT は元 SELECT 出力行（先頭 N 列＝書込み・残りの末尾列は CHECK 専用・出力名は一意）、VALUES は挿入列、UPDATE は更新前の既存値（書込む新値は SET 式を書く）、UPDATE … FROM は `APP<n>.列`＝更新前ターゲット・`<source_alias>.列`＝ソース新値で識別する（減額チェック等）。
   - メッセージは `||` / `CONCAT` でフィールド・`@var` を補間できる。条件では `||` 不可（`CONCAT` を使う）。組み込み検証（必須・型・範囲・桁）とは独立に評価し、`#err` は組み込みエラー → カスタムエラー（グループ順）の順。評価器例外（比較非対応型など）は行隔離せず文全体を fail-closed。`CHECK` は新しいソフトキーワード（`CHECK WHEN` の並びのときだけ）で新規予約語なし。サブテーブル DML には非対応。
 
+## v3.3.0（2026-07-18）
+
 ### 機能追加
 
 - **B20 正規表現関数 `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` を追加**。ECMAScript 方言、`i` / `m` / `s` のみ受理、Unicode モード `u` を常時有効化する。パターンとフラグは式・フィールドを含めて実行時評価し、SELECT / WHERE / HAVING / ORDER BY / 一時テーブル / CTE / 通常の `UPDATE SET` で使用できる。3語は新しい予約語で、同名フィールドはバッククォートで参照する。
