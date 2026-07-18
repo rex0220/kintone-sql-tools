@@ -14,7 +14,7 @@ export { resolveFieldSemantics, syntheticSemantics, withFieldSemanticSource } fr
 export { explainNeedsAppMetadata, whereNeedsFieldMetadata } from "./explainMetadata";
 export type { CompareMode, ResolvedFieldSemantics } from "./fieldSemantics";
 export type { ProcessStatusState } from "./processStatus";
-export { parseNumberPrecisionSettings, exactDecimalDigitCounts, quantizeDecimal } from "./numberPrecision";
+export { parseNumberPrecisionSettings, exactDecimalDigitCounts } from "./numberPrecision";
 export type { NumberPrecision, NumberRoundingMode, RawNumberPrecisionSettings } from "./numberPrecision";
 
 export type {

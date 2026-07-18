@@ -55,17 +55,14 @@ test("通常INSERTは同じprecision primitiveでAPI前に停止し、valid payl
   expect(valid.calls).toMatchObject({ settings: 1, post: 1 });
 });
 
-test("VALIDATE ONLYとON ERROR SKIPは同じcodeで超過を隔離し元値を保持する", async () => {
+test("VALIDATE ONLYとON ERROR SKIPは小数超過を隔離せず元値を通す", async () => {
   const validate = makeClient();
   const result = await execute(
     "INSERT INTO APP92005 (n) VALUES (1.234) VALIDATE ONLY",
     validate.client,
     { cacheContext: "b29-validate" }
   );
-  expect(result).toMatchObject({ type: "VALIDATION", validRows: 0, invalidRows: 1 });
-  if (result.type === "VALIDATION") {
-    expect(result.errors[0]).toMatchObject({ n: "1.234", $err_code: "ERR_NUMBER_DECIMAL_PLACES" });
-  }
+  expect(result).toMatchObject({ type: "VALIDATION", validRows: 1, invalidRows: 0, errors: [] });
   expect(validate.calls.post).toBe(0);
 
   const skip = makeClient();
@@ -77,7 +74,7 @@ test("VALIDATE ONLYとON ERROR SKIPは同じcodeで超過を隔離し元値を�
   expect(skip.calls).toMatchObject({ settings: 1, post: 1 });
   expect(batch.statements[1].result).toMatchObject({
     type: "SELECT",
-    rows: [expect.objectContaining({ n: "1.234", $err_code: "ERR_NUMBER_DECIMAL_PLACES" })],
+    rows: [],
   });
 });
 

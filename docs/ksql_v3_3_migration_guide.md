@@ -7,10 +7,10 @@ v3.3.0 は 3 機能の minor リリースです。**大半のクエリは無変�
 | 変更 | 影響を受けるのは | 従来 | v3.3.0 |
 |---|---|---|---|
 | **B9 厳密10進比較** | **16 有効桁を超える** NUMBER/CALC 値の比較（WHERE=・MIN/MAX・ORDER BY 等） | binary64 で丸まり偽同値・順序誤り | 厳密に区別（正しい結果） |
-| **B29 小数桁の検証** | `decimalPlaces` を超える小数を **書き込む** DML | kintone が受理し暗黙丸め | 書き込み前に拒否 |
+| **B29 整数桁の事前検出** | 整数部が `digits − decimalPlaces` を超える値を **書き込む** DML | kintone が `CB_VA01` で拒否 | 書き込み前にローカル検出（`ON ERROR SKIP` で行隔離可能） |
 | **B20 正規表現関数** | 新関数を使うクエリのみ | （関数なし） | 純加法（既存クエリ無影響） |
 
-16 桁超の数値も、`decimalPlaces` 超の小数書き込みも使っていなければ、**移行作業は不要**です。
+16 桁超の数値も、整数桁があふれる書き込みも使っていなければ、**移行作業は不要**です。**小数の扱いは v3.2.0 から変わりません**（下記 §3）。
 
 ## 2. B9 — 最大30桁の厳密10進比較（互換性注意・重要）
 
@@ -34,27 +34,33 @@ kSQL はこれまで数値比較を JavaScript の `Number`（binary64・有効�
 - 16 桁超の数値に依存する保存クエリ・レポートがある場合、v3.3.0 で結果が「正しく」変わり得ます。以前の（誤った）値を前提にした下流処理があれば見直してください。
 - JS 算術由来の値（`+ - * / %`・`SUM`/`AVG`・数値関数・CALC 由来）は**引き続き binary64** です。B9 が厳密化するのは検証器へ到達した**最終10進文字列（リテラル・フィールド値）**の比較で、演算の途中精度は復元しません。
 
-## 3. B29 — kintone の数値精度設定と DML の整合（互換性注意）
+## 3. B29 — 整数桁超過の事前検出（小数は従来どおり）
 
 ### 何が変わるか
 
-書き込み先に NUMBER 列がある `INSERT` / `UPSERT` / `UPDATE` で、運用環境の `app/settings.json` から `numberPrecision`（`digits` / `decimalPlaces` / `roundingMode`）を取得し、**整数部・小数部の桁を書き込み前に検証**します。通常書き込み・`VALIDATE ONLY`・`ON ERROR SKIP` の全経路で同じ厳密10進検証を使います。
+書き込み先に NUMBER 列がある `INSERT` / `UPSERT` / `UPDATE` で、運用環境の `app/settings.json` から `numberPrecision`（`digits` / `decimalPlaces`）を取得し、**整数部の桁超過だけ**を書き込み前に検出します。
 
 - 整数部が予算 `I = digits − decimalPlaces` を超える → `ERR_NUMBER_INTEGER_DIGITS`
-- 小数部が `decimalPlaces` を超える → `ERR_NUMBER_DECIMAL_PLACES`
 
-超過値を**自動丸めしません**（検証のみ・v1）。既存 `ROUND` の意味は変わりません。
+通常書き込み・`VALIDATE ONLY`・`ON ERROR SKIP` の全経路で同じ検証を使います。
+
+### 小数は kSQL では検証しません（重要）
+
+`decimalPlaces` を超える小数は、**そのまま kintone へ渡し、kintone が自動丸め**します。これは REST API・CSV 読み込み・編集画面・計算フィールドと**同じ挙動**で、kintone のプラットフォーム全体で一貫します。
+
+- `1/3` などの算術結果や小数の多い入力に **`ROUND` を強制しません**（v3.2.0 と同じ）。
+- 丸めは kintone が行います（例: `digits=16, decimalPlaces=4` のアプリで `12.34567` を書き込むと kintone が `12.3457` に丸めて保存）。この挙動は従来から変わりません。
 
 ### 実機で確認した根拠
 
 `digits=16, decimalPlaces=4`（整数部予算 12）のアプリで測定:
 
-- 整数 13 桁 → **kintone が従来から `CB_VA01`「有効桁数を超えています。」で拒否**していた。v3.3.0 はこれを書き込み前のローカル診断へ前倒しするだけ（挙動の実質変更なし）。
-- 小数超過 `12.34567` → **kintone は受理し、保存時に `12.3457` へ暗黙丸め**していた（`0.00005` → `0`）。v3.3.0 はこれを拒否し、**静かな丸めによるデータ改変を防ぐ**。ここが実質的な挙動変更です。
+- 整数 13 桁 → **kintone が `CB_VA01`「有効桁数を超えています。」で拒否**（REST/CSV/編集画面いずれも）。v3.3.0 はこれを書き込み前のローカル検出へ前倒しし、`ON ERROR SKIP` では該当行だけを `#err` へ隔離して残りを書き込めます。
+- 小数超過 `12.34567` → kintone は受理し `12.3457` へ自動丸め。kSQL も従来どおり素通しし、kintone の丸めに委ねます。
 
 ### 対処
 
-- `decimalPlaces` を超える小数を書き込んでいたクエリは、v3.3.0 で `ERR_NUMBER_DECIMAL_PLACES` になります。これまで kintone が黙って丸めていた値です。**意図した丸めなら、SQL 側で `ROUND(x, <decimalPlaces>)` を明示**してから書き込んでください。
+- 整数桁があふれる書き込みは `ERR_NUMBER_INTEGER_DIGITS` になります（従来は kintone の `CB_VA01` で失敗していたのが、より早く・行単位で分かるようになるだけ）。バッチで一部行だけ整数超過する場合は `ON ERROR SKIP INTO #err` で隔離できます。
 - NUMBER を書き込む credential には、一般設定取得 API（`app/settings.json`）を利用できる**レコード閲覧権限または管理権限**が必要です。設定を取得できない場合、既定値を仮定せず**文全体が失敗**します（fail-closed）。
 - `CALC` 列の直接指定は従来どおり書き込み不可。ソース側が CALC でも、書き込み先に NUMBER 列が無ければ設定は取得しません。
 
@@ -86,14 +92,15 @@ kSQL はこれまで数値比較を JavaScript の `Number`（binary64・有効�
 
 | code | 意味 | 対処 |
 |---|---|---|
-| `ERR_NUMBER_INTEGER_DIGITS` | 整数部が `digits − decimalPlaces` を超過 | 桁を減らす／アプリの精度設定を見直す |
-| `ERR_NUMBER_DECIMAL_PLACES` | 小数部が `decimalPlaces` を超過 | `ROUND(x, <decimalPlaces>)` を明示して書き込む |
+| `ERR_NUMBER_INTEGER_DIGITS` | 整数部が `digits − decimalPlaces` を超過 | 桁を減らす／アプリの精度設定を見直す（`ON ERROR SKIP` で行隔離も可） |
 | `SettingsError`（fail-closed） | `numberPrecision` を取得・解釈できない | credential の権限・設定値を確認（既定値では続行しない） |
+
+小数超過に対する専用エラーはありません（kSQL は素通しし kintone が丸めます）。
 
 ## 6. 移行が不要なケース
 
 - 16 有効桁を超える数値を扱っていない
-- `decimalPlaces` を超える小数を書き込んでいない
+- 整数桁が `digits − decimalPlaces` を超える値を書き込んでいない
 - 正規表現関数を使わない
 
 いずれにも当てはまらなければ、v3.2.0 からそのまま更新できます。

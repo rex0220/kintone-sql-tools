@@ -1968,9 +1968,10 @@ SELECT * FROM #err;
 ```
 
 - `VALIDATE ONLY` はread-only扱いで、MCPでは `ksql_query`、CLIでは `--allow-dml`なし、プラグインでは確認ダイアログなしで実行できます
-- 書き込み先に NUMBER 列がある場合、通常 DML と同じく運用環境の `app/settings.json` から `numberPrecision` を取得し、整数部は `digits - decimalPlaces` 桁、小数部は `decimalPlaces` 桁までを厳密10進文字列で検証します。超過は `ERR_NUMBER_INTEGER_DIGITS` / `ERR_NUMBER_DECIMAL_PLACES` です
+- 書き込み先に NUMBER 列がある場合、通常 DML と同じく運用環境の `app/settings.json` から `numberPrecision` を取得し、**整数部**が `digits - decimalPlaces` 桁を超える値を書き込み前に検出します（`ERR_NUMBER_INTEGER_DIGITS`）。kintone も整数超過は全面で `CB_VA01` 拒否するため、これはその判断の前倒しです
+- **小数部は kSQL では検証しません**。`decimalPlaces` を超える小数はそのまま kintone へ渡し、kintone が `roundingMode` で自動丸めします（REST API・CSV 読み込み・編集画面・計算フィールドと同じ挙動）。`1/3` などの算術結果に `ROUND` を強制しません
 - 一般設定は同じ実行コンテキスト・アプリごとに最大1回取得します。取得失敗、不正レスポンス、未知の丸めモードでは既定値を仮定せず文全体をfail-closedし、`ON ERROR SKIP` の行エラーには変換しません
-- 桁超過値は `HALF_EVEN` / `UP` / `DOWN` のどの設定でも暗黙に丸めません。既存 `ROUND` の意味も変わりません。算術、集計、数値関数、CASE、CALC由来値の計算は引き続きbinary64で、最終的な書き込み文字列だけがアプリ精度の検証対象です
+- 既存 `ROUND` の意味は変わりません。算術、集計、数値関数、CASE、CALC由来値の計算は引き続きbinary64です
 - 完全な候補集合が必要なため、`onLimit=truncate` / CLI `--on-limit truncate` / プラグインのtruncate設定は無視され、常にerrorとして扱われます
 - ローカル検証は通常の書き込み経路より厳密な場合があります。検証エラーはkSQLが検出したTier 0問題であり、同じ値をkintone APIが必ず拒否するという予測ではありません
 - 検証通過は書き込み成功を保証しません。権限、競合、ユーザー実在性、既存レコードとの一意制約衝突などAPI実行時の問題は対象外です
