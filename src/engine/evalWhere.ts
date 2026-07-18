@@ -158,7 +158,7 @@ function evalOp(
 }
 
 const NUMERIC_STRING_FUNCTIONS = new Set([
-  "LENGTH", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
+  "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
   "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
 ]);
 

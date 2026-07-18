@@ -120,6 +120,9 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
     case "LTRIM":  return (args[0] ?? "").trimStart();
     case "RTRIM":  return (args[0] ?? "").trimEnd();
     case "LENGTH": return String((args[0] ?? "").length);
+    case "LENGTH_CHAR":
+      assertArity("LENGTH_CHAR", args, 1, 1);
+      return String([...(args[0] ?? "")].length);
     case "SUBSTRING": {
       const str   = args[0] ?? "";
       const start = Math.max(0, Number(args[1] ?? "1") - 1); // SQL は 1-indexed
@@ -163,6 +166,21 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const from = args[1] ?? "";
       const to   = args[2] ?? "";
       return from === "" ? str : str.split(from).join(to);
+    }
+    case "TRANSLATE": {
+      assertArity("TRANSLATE", args, 3, 3);
+      const from = [...args[1]];
+      const to = [...args[2]];
+      if (from.length !== to.length) {
+        throw new Error(
+          `ArgumentError: TRANSLATE の from と to は同じ文字数である必要があります（from=${from.length}, to=${to.length}）`
+        );
+      }
+      const map = new Map<string, string>();
+      from.forEach((ch, i) => {
+        if (!map.has(ch)) map.set(ch, to[i]);
+      });
+      return [...args[0]].map((ch) => map.get(ch) ?? ch).join("");
     }
     case "COALESCE":
       return args.find((a) => a !== "") ?? "";

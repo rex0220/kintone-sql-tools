@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-18
 - 現在の最新リリース: **v3.1.0**（B33 KORDER BY 大規模窓の Cursor API 対応・tag/GitHub Release 公開・npm publish 済み・latest 3.1.0）
-- 次回リリース計画: **v3.2.0 = B34＋B22**（受入確定済みの正しさバグ・実装着手可）。以降の目安: **v3.3.0 = B9＋B29**（numberPrecision 領域ペア・仕様作成から）
+- 次回リリース計画: **v3.2.0 = B34＋B22＋B23＋B24**（B23/B24 は純加法的な minor 機能）。以降の目安: **v3.3.0 = B9＋B29**（numberPrecision 領域ペア・仕様作成から）
 - 実装計画: [B33 KORDER Cursor 実装計画](internal/ksql_korder_cursor_implementation_plan.md)（v3.0.0 の計画は [こちら](internal/ksql_v3_order_by_implementation_plan.md)）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
@@ -37,8 +37,8 @@
 |---|---|---|---|---|---|---|
 | B21 | **`UPDATE SET` が文字列関数を直接受け付けない** | **バグ**（一貫性） | 📝 **R4 同期**。**同じ式が `CASE WHEN` の中では書けるのに直接書くと `ParseError`**。単純 UPDATE は `buildUpdateRecord` が row を持たないため、parser 追加だけでは直らない。assignment に限定して参照フィールド収集・row 評価・VALIDATE/ON ERROR SKIP を通し、関数の意味型（string/numeric）を値の見た目で再判定しない。親 DML WHERE は対象外 | **正しさ** | 中 | [issue](internal/ksql_update_set_string_func_issue.md) |
 | B22 | **切り出し・桁揃え関数がサロゲートペアを分割する** | **バグ** | 🚧 **実装・実機完了（2026-07-18・[実機記録](internal/evidence/b22_surrogate_slice_smoke.md)）・v3.2.0 リリース待ち**。案C=コードユニット予算内の最大安全部分列（両側判定 splitsPair）。LEFT/RIGHT/SUBSTRING/LPAD/RPAD の切り詰め・埋め両経路を安全化。性質テスト=18入力×全境界×埋め4種で予算/包含/ペア保存/最大性を固定。実機=孤立サロゲート解消・LEFT(x,10)→maxLength=10 の VALIDATE ONLY 通過。LENGTH/LIKE _/INSTR は不変（非回帰固定）。SemVer=minor | **正しさ** | 中 | [issue](internal/ksql_surrogate_pair_split_issue.md) |
-| B23 | `LENGTH_CHAR`（コードポイント単位の文字数）を追加 | 改善 | 📝 **R4 同期**。コードポイント計数を別名で追加し、戻り意味型は numeric。`LENGTH - LENGTH_CHAR` は有効なサロゲートペア数。`LENGTH`・kintone計数の事実は横断仕様 §2を参照 | 機能 | 中 | [spec](internal/ksql_length_char_spec.md) |
-| B24 | `TRANSLATE(x, from, to)`（1 対 1 の文字写像）を追加 | 改善 | 📝 **R4 同期**。実需の40字表ではコードユニット実装が25字を誤変換するため、コードポイント列で1対1写像する。長さ不一致はエラー、重複は先頭優先、戻り意味型は string。一般則は横断仕様 原則3–4を参照 | 機能 | 中 | [spec](internal/ksql_translate_spec.md) |
+| B23 | `LENGTH_CHAR`（コードポイント単位の文字数）を追加 | 改善 | 🚧 **実装・実機完了（2026-07-18・[実機記録](internal/evidence/b23_b24_codepoint_functions_smoke.md)）・v3.2.0 リリース待ち**。コードポイント計数・LENGTH−LENGTH_CHAR=ペア数（紛らわしい éé/ΑΒ/йц で差0 実測）・意味型 numeric を 3 系統へ配線・予約語 | 機能 | 中 | [spec](internal/ksql_length_char_spec.md) |
+| B24 | `TRANSLATE(x, from, to)`（1 対 1 の文字写像）を追加 | 改善 | 🚧 **実装・実機完了（2026-07-18・[実機記録](internal/evidence/b23_b24_codepoint_functions_smoke.md)）・v3.2.0 リリース待ち**。コードポイント整列（屢々沪過して蠟燭→屡々濾過して蝋燭 実測）・長さ不一致は実行時 ArgumentError（コードポイント数表現）・重複最初優先・レシピ R8 新設（公開 SQL は実機 read-only 実行済み）・B20 仕様の RDB 前例記述を訂正・予約語 | 機能 | 中 | [spec](internal/ksql_translate_spec.md) |
 | B28 | **DML の単項符号（負数・正数リテラル）の受理範囲が経路ごとに違う** | **バグ**（一貫性） | 📝 課題R1。INSERT/UPSERT VALUESは`-5`/`+5`を拒否、UPDATE SETは`-5`のみ受理。親・サブテーブル・SELECT-based DMLを横断し、VALUESには符号付き数値だけを追加する。一時テーブル対象DMLは元から非対応なので解禁しない | **正しさ** | 低 | [issue](internal/ksql_dml_unary_sign_issue.md) |
 | B29 | **kintoneの数値精度・丸め設定とDML/Tier-0を整合させる** | **バグ / 言語意味論** | 📝 **課題R2: 優先度を中へ降格（2026-07-17）**。根拠=実書込みは kintone の fail-fast（CB_VA01）が部分成功・データ破壊を防いでおり、**偽合格が起きるのは VALIDATE ONLY / ON ERROR SKIP の事前検証経路に限られる**＋既定 `digits` を超える運用は B9 降格と同じ頻度根拠で稀。`numberPrecision`（最大30桁・小数10桁・HALF_EVEN/UP/DOWN）はB9の比較順ではなく、入力・算術結果の検証/量子化を所有する。B9とは別実装・別受入条件（**B9 再昇格トリガー②＝B29 実装着手の関係は不変**） | **正しさ** | 中 | [issue](internal/ksql_number_precision_semantics_issue.md) |
 | B34 | **DML が存在しない／サブテーブル内のフィールドを対象にしても黙って成功する** | **バグ**（説明不能な成功） | 🚧 **実装・実機完了（2026-07-18・[実機記録](internal/evidence/b34_dml_writable_field_check_smoke.md)）・v3.2.0 リリース待ち**。実機=発見時の 6 パターンがすべて ArgumentError 化（VALIDATE ONLY のサブ子素通し解消を含む）・非回帰の実書き込み確認済み。共有「書き込み可能トップレベルフィールド検査」を INSERT VALUES/SELECT・UPDATE 通常/算術/CASE/FROM・UPSERT VALUES/SELECT × なし/VALIDATE ONLY/ON ERROR SKIP へ横断適用。不存在、サブテーブル子、書込不可型を文単位 `ArgumentError` とし、**ソース SELECT・更新対象取得・confirm・POST/PUT より前**に検査する。8形式×3修飾×3対象の直積、API 0 件の早期失敗、正規サブテーブル INSERT VALUES/UPDATE/DELETE/REORDER の非回帰を自動テスト済み。SemVer=minor | **正しさ** | 中 | [issue](internal/ksql_dml_writable_field_check_issue.md) |

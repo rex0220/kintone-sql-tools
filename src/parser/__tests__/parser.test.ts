@@ -821,6 +821,36 @@ test("SELECT LENGTH(名前) FROM APP100", () => {
   if (col.type === "STRFUNC_COL") expect(col.expr.func).toBe("LENGTH");
 });
 
+test("B23/B24 LENGTH_CHAR と TRANSLATE を予約語関数として解析する", () => {
+  const ast = parseSelect(
+    "SELECT LENGTH_CHAR(名前), TRANSLATE(名前, CONCAT('a', 'b'), 'AB') FROM APP100"
+  );
+  expect(ast.columns).toMatchObject([
+    { type: "STRFUNC_COL", expr: { func: "LENGTH_CHAR" } },
+    { type: "STRFUNC_COL", expr: { func: "TRANSLATE", args: [
+      { type: "FIELD_REF", field: "名前" },
+      { type: "STRING_FUNC", func: "CONCAT" },
+      { type: "STRING", value: "AB" },
+    ] } },
+  ]);
+});
+
+test.each(["LENGTH_CHAR", "TRANSLATE"])("%s は予約語で、同名フィールドはバッククォートで参照できる", (name) => {
+  expect(() => parseSelect(`SELECT ${name} FROM APP100`)).toThrow(ParseError);
+  expect(parseSelect(`SELECT \`${name}\` FROM APP100`).columns[0]).toEqual({
+    type: "FIELD", field: name, alias: null,
+  });
+});
+
+test("B24 バッチレシピ R8 の40字変換 SQL を構文検証できる", () => {
+  expect(() => parseSelect(
+    "SELECT TRANSLATE(会社名, " +
+      "'啞焰鷗摑麴噓俠頰軀俱繫姸鹼嚙攢𠮟繡蔣醬蟬搔瘦驒簞塡顚禱瀆吞囊剝潑醱屛幷麵萊屢沪蠟', " +
+      "'唖焔鴎掴麹嘘侠頬躯倶繋妍鹸噛攅叱繍蒋醤蝉掻痩騨箪填顛祷涜呑嚢剥溌醗屏并麺莱屡濾蝋'" +
+    ") AS 会社名, 住所 FROM APP100"
+  )).not.toThrow();
+});
+
 test("select LOWER(顧客名) from app89 — ユーザー実例", () => {
   const ast = parseSelect("select LOWER(顧客名) from app89");
   expect(ast.from.appId).toBe(89);

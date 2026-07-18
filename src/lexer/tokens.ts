@@ -112,6 +112,7 @@ export const enum TokenKind {
   LTRIM     = "LTRIM",
   RTRIM     = "RTRIM",
   LENGTH    = "LENGTH",
+  LENGTH_CHAR = "LENGTH_CHAR",
   SUBSTRING = "SUBSTRING",
   SUBSTR    = "SUBSTR",
   CONCAT    = "CONCAT",
@@ -124,6 +125,7 @@ export const enum TokenKind {
   LEAST     = "LEAST",
   LPAD      = "LPAD",
   RPAD      = "RPAD",
+  TRANSLATE = "TRANSLATE",
 
   // 数値関数
   ROUND   = "ROUND",
@@ -260,6 +262,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["LTRIM",     TokenKind.LTRIM],
   ["RTRIM",     TokenKind.RTRIM],
   ["LENGTH",    TokenKind.LENGTH],
+  ["LENGTH_CHAR", TokenKind.LENGTH_CHAR],
   ["SUBSTRING", TokenKind.SUBSTRING],
   ["SUBSTR",    TokenKind.SUBSTR],
   ["CONCAT",    TokenKind.CONCAT],
@@ -272,6 +275,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["LEAST",     TokenKind.LEAST],
   ["LPAD",      TokenKind.LPAD],
   ["RPAD",      TokenKind.RPAD],
+  ["TRANSLATE", TokenKind.TRANSLATE],
   ["CAST",      TokenKind.CAST],
   ["CONVERT",   TokenKind.CONVERT],
   ["FORMAT",    TokenKind.FORMAT],

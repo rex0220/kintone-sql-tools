@@ -89,6 +89,38 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("B23/B24 は temp・CTE を通り、LENGTH_CHAR=numeric／TRANSLATE=string の意味型を保つ", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ s: "aa", text: "2" }),
+    makeRecord({ s: "aaaaaaaaaa", text: "10" }),
+  ] } });
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #mapped AS " +
+      "SELECT LENGTH_CHAR(s) AS n, TRANSLATE(text, CONCAT('a', 'b'), 'AB') AS text_value FROM APP100;" +
+    "WITH c AS (SELECT n, text_value FROM #mapped) " +
+      "SELECT n, text_value FROM c ORDER BY n ASC, text_value ASC",
+    client,
+    { cacheContext: "b23-b24-temp-cte-meta" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([
+    { n: "2", text_value: "2" },
+    { n: "10", text_value: "10" },
+  ]);
+});
+
+test("B24 from/to 式の長さ検証は行評価時に行う", async () => {
+  const client = makeClient({ recordsByApp: { 100: [makeRecord({ value: "x" })] } });
+  await expect(execute(
+    "SELECT TRANSLATE(value, CONCAT('a', 'b'), 'A') AS mapped FROM APP100",
+    client,
+    { cacheContext: "b24-runtime-expression-length" }
+  )).rejects.toThrow(
+    "ArgumentError: TRANSLATE の from と to は同じ文字数である必要があります（from=2, to=1）"
+  );
+});
+
 test("VALIDATE ONLY INTO #err は空schemaを保持し後続SELECTから参照できる", async () => {
   const client = makeClient();
   client.getFields = async () => [

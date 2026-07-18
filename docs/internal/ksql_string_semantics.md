@@ -126,10 +126,10 @@ INSERT INTO APP4221 (…, 文字列MAX) VALUES (…, '😀😀😀😀😀😀')
 | 関数 | 単位 | 状態 |
 |---|---|---|
 | **`LENGTH`** | **コードユニット**（= kintone の「文字数」） | 出荷済み・**変更しない** |
-| **`LENGTH_CHAR`** | コードポイント | [B23](ksql_length_char_spec.md)・未実装 |
+| **`LENGTH_CHAR`** | コードポイント | [B23](ksql_length_char_spec.md)・v3.2.0 実装済み・実機確認待ち |
 | `LENGTH_GRAPHEME` | 書記素 | 将来候補（ホスト依存・§7 制限2） |
 | **`LEFT` / `RIGHT` / `SUBSTRING` / `LPAD` / `RPAD`** | **コードユニット** | 出荷済み・**ペアを割る欠陥あり**（[B22](ksql_surrogate_pair_split_issue.md)） |
-| **`TRANSLATE`** | コードポイント（写像） | [B24](ksql_translate_spec.md)・未実装 |
+| **`TRANSLATE`** | コードポイント（写像） | [B24](ksql_translate_spec.md)・v3.2.0 実装済み・実機確認待ち |
 | **`LIKE '_'`** | **コードポイント**（`u` フラグ） | 出荷済み・**§3.5 の不整合** |
 
 ### 2.4 「正しい文字数」は用途で変わる（実測）
@@ -725,7 +725,7 @@ SELECT 顧客No AS ABC, 顧客No AS PLAIN FROM APP4148
 | `LIKE` | —（kSQL `LIKE` は押し下げない） | JS の contains / 生成 RegExp | 同左 | 同左 | 3面で共通コード | 維持。`KLIKE` との同値を要求しない |
 | `KLIKE` | 常に kintone `like` | サーバ結果のみ | 同左 | 同左 | 同一サーバ。ただし機能制限差あり | `LIKE` と別契約を維持 |
 | `LEFT` 等 | — | 現状はペア分割 | 同左 | 同左 | 3 面で同じ欠陥 | B22 の予算付き安全切り出し |
-| `LENGTH_CHAR` / `TRANSLATE` | — | ES コードポイント列 | 同左 | 同左 | 未実装。仕様上はホスト非依存 | B23/B24 |
+| `LENGTH_CHAR` / `TRANSLATE` | — | ES コードポイント列 | 同左 | 同左 | v3.2.0 実装済み・実機確認待ち。仕様上はホスト非依存 | B23/B24 |
 | 正規表現（B20） | — | Node RegExp | Node RegExp | Browser RegExp | 未実装・設計破綻 | §7 制限1。現案では出荷しない |
 
 ### 6.3 「同じコア」だけでは一貫性の証明にならない

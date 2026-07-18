@@ -4,6 +4,12 @@
 
 ## v3.2.0（未リリース）
 
+### 機能追加
+
+- **B23 `LENGTH_CHAR(x)` を追加**。既存の `LENGTH`（UTF-16 コードユニット数）を変更せず、Unicode コードポイント数を返す別関数を追加する。`LENGTH(x) - LENGTH_CHAR(x)` でサロゲートペア数を求められ、戻り値は B26 の型メタで numeric として temp/CTE/ORDER BY/比較へ伝播する。
+- **B24 `TRANSLATE(x, from, to)` を追加**。入力と変換表をコードポイント単位で整列し、1 文字から 1 文字へ写像する。変換表の長さ不一致はコードポイント数を示す `ArgumentError`、重複文字は最初の対応を優先し、非対象文字と既存の孤立サロゲートは保持する。Shift_JIS CSV 出力向けの 40 字変換表をバッチレシピ R8 に追加した。
+- `LENGTH_CHAR` と `TRANSLATE` は新しい予約語。同名フィールドはバッククォートで参照できる。純加法的な機能追加として B34/B22 と同じ v3.2.0 minor リリースに含める。
+
 ### 修正（正しさ・安全性）
 
 - **B34 DML の書き込み先フィールド検査を追加**。親レコードの INSERT VALUES/SELECT、UPDATE（通常・算術・CASE・UPDATE FROM）、UPSERT VALUES/SELECT で、不存在フィールド、サブテーブル子フィールド、書き込み不可フィールドを文単位の `ArgumentError` とする。`VALIDATE ONLY` / `ON ERROR SKIP` にも同じ検査を適用し、サブテーブル子のエラーは `APPxxxx$テーブル` 構文を案内する。

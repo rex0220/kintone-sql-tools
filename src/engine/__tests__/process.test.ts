@@ -1569,6 +1569,22 @@ test("runFullScan: B19 の文字数単位は LENGTH / SUBSTRING と一致する"
   expect(row.p).toBe("0😀X");
 });
 
+test("B23/B24 は SELECT・WHERE・HAVING で評価される", () => {
+  const records = [
+    makeRecord({ s: "𠮟", category: "keep" }),
+    makeRecord({ s: "ab", category: "drop" }),
+  ];
+  const stmt = parseSelect(
+    "SELECT category, LENGTH_CHAR(s) AS points, LENGTH(s) - LENGTH_CHAR(s) AS pairs, " +
+    "TRANSLATE(s, CONCAT('𠮟', ''), '叱') AS mapped " +
+    "FROM APP100 WHERE LENGTH_CHAR(s) = 1 AND TRANSLATE(category, 'd', 'D') != 'Drop' " +
+    "GROUP BY category, s " +
+    "HAVING LENGTH_CHAR(s) = 1 AND TRANSLATE(category, 'k', 'K') = 'Keep'"
+  );
+  const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
+  expect(rows).toEqual([{ category: "keep", points: "1", pairs: "1", mapped: "叱" }]);
+});
+
 test("runFullScan: B22 は BMP の B19 契約と LENGTH / LIKE / INSTR の単位を変えない", () => {
   const records = [makeRecord({ s: "😀", bmp: "東京都千代田区" })];
   const stmt = parseSelect(

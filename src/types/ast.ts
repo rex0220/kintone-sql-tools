@@ -259,7 +259,7 @@ export interface ArithColumn {
 
 export type StringFuncName =
   | "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM"
-  | "LENGTH" | "SUBSTRING" | "CONCAT" | "REPLACE" | "COALESCE"
+  | "LENGTH" | "LENGTH_CHAR" | "SUBSTRING" | "CONCAT" | "REPLACE" | "TRANSLATE" | "COALESCE"
   | "NULLIF" | "ISNULL" | "LEFT" | "RIGHT" | "INSTR" | "LPAD" | "RPAD"
   | "GREATEST" | "LEAST"
   | "ROUND" | "FLOOR" | "CEIL" | "TRUNCATE"

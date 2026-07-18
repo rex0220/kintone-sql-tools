@@ -407,13 +407,15 @@ WHERE 担当者 = 'user1'
 | `TRIM` | `TRIM(フィールド)` | 前後の空白を除去 |
 | `LTRIM` | `LTRIM(フィールド)` | 左側の空白を除去 |
 | `RTRIM` | `RTRIM(フィールド)` | 右側の空白を除去 |
-| `LENGTH` | `LENGTH(フィールド)` | 文字数を返す |
+| `LENGTH` | `LENGTH(フィールド)` | UTF-16 コードユニット数（kintone の文字数）を返す |
+| `LENGTH_CHAR` | `LENGTH_CHAR(フィールド)` | Unicode コードポイント数を返す |
 | `SUBSTRING` | `SUBSTRING(フィールド, 開始 [, 長さ])` | 部分文字列（1-indexed） |
 | `LEFT` | `LEFT(値, 文字数)` | 先頭から指定文字数を返す |
 | `RIGHT` | `RIGHT(値, 文字数)` | 末尾から指定文字数を返す |
 | `INSTR` | `INSTR(値, 検索文字列)` | 検索位置を 1-indexed で返す（見つからなければ `0`） |
 | `CONCAT` | `CONCAT(値1, 値2, ...)` | 文字列の連結（可変長引数） |
 | `REPLACE` | `REPLACE(フィールド, 検索, 置換)` | 文字列置換 |
+| `TRANSLATE` | `TRANSLATE(値, 変換元, 変換先)` | コードポイント単位の 1 文字対 1 文字写像 |
 | `COALESCE` | `COALESCE(値1, 値2, ...)` | 最初の非空値を返す |
 | `ISNULL` | `ISNULL(値, 代替値)` | 値が空なら代替値、それ以外は値（`COALESCE` の 2 引数版） |
 | `NULLIF` | `NULLIF(値1, 値2)` | 値1 と 値2 が等しければ空文字、それ以外は 値1 |
@@ -430,6 +432,8 @@ SELECT LEFT(顧客コード, 2) AS 分類, RIGHT(顧客コード, 4) AS 連番 F
 SELECT LPAD(顧客No, 5, '0') AS 顧客コード FROM APP100
 SELECT GREATEST(見積額, 受注額, 請求額) AS 最大額 FROM APP100
 SELECT REPLACE(電話番号, '-', '') AS 電話番号 FROM APP100
+SELECT LENGTH(会社名) AS kintone文字数, LENGTH_CHAR(会社名) AS コードポイント数 FROM APP100
+SELECT TRANSLATE(会社名, '啞焰鷗', '唖焔鴎') AS 会社名 FROM APP100
 SELECT COALESCE(メモ, '（なし）') AS メモ FROM APP100
 SELECT ISNULL(建物名, '（なし）') AS 建物名 FROM APP100
 SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空にする
@@ -439,11 +443,15 @@ SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空
 
 `SUBSTRING` / `LEFT` / `RIGHT` / `LPAD` / `RPAD` の長さ引数はコードユニット予算です。サロゲートペアを割る境界では安全な側へ縮めます。結果は必ず指定予算以下になります。`LPAD` / `RPAD` では、指定予算の残りに埋め文字列を安全に収められない場合、結果が指定長より短くなることがあります。
 
+`LENGTH` は kintone と同じ UTF-16 コードユニット数、`LENGTH_CHAR` は Unicode コードポイント数を返します。たとえば `LENGTH('𠮟') = 2`、`LENGTH_CHAR('𠮟') = 1` です。`LENGTH(x) - LENGTH_CHAR(x)` は、入力に含まれるサロゲートペア数になります。`LENGTH_CHAR` は書記素数ではないため、IVS・結合文字・ZWJ 絵文字を人が見る 1 文字としてまとめません。
+
+`TRANSLATE` は `変換元` と `変換先` をコードポイント単位で位置対応させる、1 文字から 1 文字への写像専用関数です。両者の文字数が異なる場合は `ArgumentError` になり、`変換元` に同じ文字が複数ある場合は最初の対応が優先されます。対応しない入力文字はそのまま返します。`ﾎﾞ`（2 文字）から `ボ`（1 文字）のような半角カナから全角カナへの変換は 2 対 1 を含むため、`TRANSLATE` だけではできません。
+
 `GREATEST` / `LEAST` は、列方向の集約関数 `MAX` / `MIN` とは異なり、同じ行の引数同士を比較します。空文字は常に最小です。空文字を除いた集合がすべて数値なら数値比較し、1 つでも非数値なら集合全体を文字列比較します。数値が同値なら元の文字列表記を二次キーにするため、引数順によって結果は変わりません。
 
 `LEFT` / `RIGHT` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は引数の個数を検証し、不正な場合は `ArgumentError` になります。`LPAD` / `RPAD` で埋め文字列が空の場合は、入力値をそのまま返します。
 
-- `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は予約語です。同名フィールドは `` `LEAST` `` のようにバッククォートで囲みます。`LEFT` / `RIGHT` は `LEFT JOIN` / `RIGHT JOIN` の予約語を兼ねており、直後に `(` がある場合のみ関数として扱います。
+- `LENGTH_CHAR` / `TRANSLATE` / `INSTR` / `GREATEST` / `LEAST` / `LPAD` / `RPAD` は予約語です。同名フィールドは `` `TRANSLATE` `` のようにバッククォートで囲みます。`LEFT` / `RIGHT` は `LEFT JOIN` / `RIGHT JOIN` の予約語を兼ねており、直後に `(` がある場合のみ関数として扱います。
 
 > **`ISNULL` は 2 引数（SQL Server 系）です。** MySQL の 1 引数 `ISNULL(式)`（真偽を返す）とは**別物**です。空判定には `IS NULL` / `IS NOT NULL`（→ [§6](#6-where-句)）を使ってください。
 
