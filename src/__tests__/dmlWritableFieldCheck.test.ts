@@ -55,7 +55,7 @@ function makeB34Client(): KintoneClient & {
   const sourceRecords = [record({ $id: "10", key: "1", source: "2" })];
   const targetFields: KintoneFieldInfo[] = [
     { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
-    { code: "topField", label: "topField", fieldType: "NUMBER" },
+    { code: "topField", label: "topField", fieldType: "SINGLE_LINE_TEXT" },
     { code: "childField", label: "childField", fieldType: "NUMBER", inSubtable: true },
     { code: "readOnlyField", label: "readOnlyField", fieldType: "CALC", writable: false },
   ];
@@ -89,6 +89,7 @@ function makeB34Client(): KintoneClient & {
       return appId === 100 ? targetFields : sourceFields;
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 

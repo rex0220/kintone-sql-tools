@@ -26,6 +26,7 @@ import {
   type ResolvedFieldSemantics,
 } from "./core/fieldSemantics";
 import type { ProcessStatusState } from "./core/processStatus";
+import type { NumberPrecision } from "./core/numberPrecision";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
@@ -97,6 +98,7 @@ import {
   type DmlValidationCandidate,
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
+import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
 import {
   classifyWhereCapability,
   type PredicateCapabilityResult,
@@ -122,6 +124,8 @@ export interface KintoneClient {
   getApps: () => Promise<KintoneAppInfo[]>;
   /** GET /k/v1/app/form/fields.json（DESCRIBE） */
   getFields: (appId: number) => Promise<KintoneFieldInfo[]>;
+  /** GET /k/v1/app/settings.json（数値の有効桁数と丸め設定） */
+  getNumberPrecision: (appId: number) => Promise<NumberPrecision>;
   /** GET /k/v1/app/status.json（プロセス管理設定） */
   getProcessStatuses: (appId: number) => Promise<KintoneProcessStatuses>;
 }
@@ -200,6 +204,8 @@ export interface ExecuteMetrics {
   deleteCalls: number;
   /** GET /k/v1/app/form/fields.json の呼び出し回数（キャッシュヒット時は増えない） */
   fieldCalls: number;
+  /** GET /k/v1/app/settings.json の呼び出し回数（キャッシュヒット時は増えない） */
+  numberPrecisionCalls: number;
   /** GET /k/v1/apps.json の呼び出し回数 */
   appsCalls: number;
   /** GET /k/v1/app/status.json の呼び出し回数（キャッシュヒット時は増えない） */
@@ -419,6 +425,7 @@ function createEmptyMetrics(): ExecuteMetrics {
     putCalls: 0,
     deleteCalls: 0,
     fieldCalls: 0,
+    numberPrecisionCalls: 0,
     appsCalls: 0,
     processStatusCalls: 0,
     cursorCreateCalls: 0,
@@ -509,6 +516,10 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
     getFields: (appId) => {
       metrics.fieldCalls += 1;
       return client.getFields(appId);
+    },
+    getNumberPrecision: (appId) => {
+      metrics.numberPrecisionCalls += 1;
+      return client.getNumberPrecision(appId);
     },
     getProcessStatuses: (appId) => {
       metrics.processStatusCalls += 1;
@@ -3226,6 +3237,7 @@ const optionOrderCache = new Map<string, Map<number, Map<string, Map<string, num
 const sortKindCache = new Map<string, Map<number, Map<string, "number" | "string">>>();
 const fieldInfoCache = new Map<string, Map<number, Promise<KintoneFieldInfo[]>>>();
 const processStatusCache = new Map<string, Map<number, Promise<KintoneProcessStatuses>>>();
+const numberPrecisionCache = new Map<string, Map<number, Promise<NumberPrecision>>>();
 
 function getScopedCacheValue<T>(
   root: Map<string, Map<number, T>>,
@@ -3258,6 +3270,18 @@ async function getFieldsCached(appId: number, client: KintoneClient, cacheContex
   if (cached) return cached;
   const loading = client.getFields(appId);
   setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
+  return loading;
+}
+
+async function getNumberPrecisionCached(
+  appId: number,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<NumberPrecision> {
+  const cached = getScopedCacheValue(numberPrecisionCache, cacheContext, appId);
+  if (cached) return cached;
+  const loading = client.getNumberPrecision(appId);
+  setScopedCacheValue(numberPrecisionCache, cacheContext, appId, loading);
   return loading;
 }
 
@@ -3632,6 +3656,38 @@ async function loadWritableTopLevelDmlFields(
   return fieldInfos;
 }
 
+async function loadNumberPrecisionForTargets(
+  appId: number,
+  targetFields: readonly string[],
+  fieldInfos: readonly KintoneFieldInfo[],
+  client: KintoneClient,
+  cacheContext: string
+): Promise<NumberPrecision | undefined> {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  return targetFields.some((code) => infoByCode.get(code)?.fieldType === "NUMBER")
+    ? getNumberPrecisionCached(appId, client, cacheContext)
+    : undefined;
+}
+
+function assertValidDmlRecords(
+  records: readonly KintoneRecord[],
+  targetFields: readonly string[],
+  fieldInfos: readonly KintoneFieldInfo[],
+  numberPrecision: NumberPrecision | undefined
+): void {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  records.forEach((record, rowIndex) => {
+    for (const code of targetFields) {
+      const info = infoByCode.get(code)!;
+      const result = validateAndNormalizeDmlValue(record[code]?.value ?? "", info, numberPrecision);
+      if (!result.ok) {
+        throw new Error(`DmlValidationError: ${result.code} ${result.message} (row=${rowIndex + 1}, field=${code})`);
+      }
+      record[code] = { value: result.value };
+    }
+  });
+}
+
 async function executeDmlValidation(
   stmt: ValidationStatement,
   client: KintoneClient,
@@ -3682,10 +3738,13 @@ async function prepareDmlValidation(
     await assertDmlWhereCapability(stmt, client, cacheContext);
   }
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const numberPrecision = await loadNumberPrecisionForTargets(
+    stmt.appId, targetFields, fieldInfos, client, cacheContext
+  );
 
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
   const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
-    candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber
+    candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision
   );
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result: DmlValidationResult = {
@@ -4144,9 +4203,11 @@ async function executeInsert(
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records), stmt.fields, fieldInfos, numberPrecision);
   const createdIds: string[][] = [];
 
   for (const batch of batches) {
@@ -4174,7 +4235,8 @@ async function executeInsertSelect(
   cteCache?: Map<string, MaterializedTable>
 ): Promise<InsertResult> {
   // 1. 転送先フィールドを、ソース SELECT や confirm より前に検査する。
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
@@ -4210,6 +4272,7 @@ async function executeInsertSelect(
     });
     return record;
   });
+  assertValidDmlRecords(allRecords, stmt.fields, fieldInfos, numberPrecision);
 
   // 7. 100 件ごとに POST
   const createdIds: string[][] = [];
@@ -4241,8 +4304,12 @@ async function executeUpdate(
     await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
-  await loadWritableTopLevelDmlFields(
+  const fieldInfos = await loadWritableTopLevelDmlFields(
     stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
+  );
+  const targetFields = stmt.assignments.map((assignment) => assignment.field);
+  const numberPrecision = await loadNumberPrecisionForTargets(
+    stmt.appId, targetFields, fieldInfos, client, cacheContext
   );
   await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.from != null) {
@@ -4268,6 +4335,9 @@ async function executeUpdate(
     );
     const records = resolved.records;
 
+    const batches = updateToPutBatchesArith(stmt, records, fieldTypes);
+    assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
+
     // 2. 実行前確認
     if (options.confirm) {
       const ok = await options.confirm(records.length, "UPDATE");
@@ -4275,7 +4345,6 @@ async function executeUpdate(
     }
 
     // 3. レコードごとに算術計算して PUT
-    const batches = updateToPutBatchesArith(stmt, records, fieldTypes);
     for (const batch of batches) {
       await client.putRecords(batch);
     }
@@ -4294,6 +4363,9 @@ async function executeUpdate(
   );
   const ids = resolved.ids;
 
+  const batches = updateToPutBatches(stmt, ids, fieldTypes);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
+
   // 2. 実行前確認
   if (options.confirm) {
     const ok = await options.confirm(ids.length, "UPDATE");
@@ -4301,7 +4373,6 @@ async function executeUpdate(
   }
 
   // 3. PUT バッチ実行
-  const batches = updateToPutBatches(stmt, ids, fieldTypes);
   for (const batch of batches) {
     await client.putRecords(batch);
   }
@@ -4318,15 +4389,19 @@ async function executeUpdateFrom(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
+  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  const targetFields = stmt.assignments.map((assignment) => assignment.field);
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, targetFields, fieldInfos, client, cacheContext);
+  assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
 
   if (options.confirm) {
     const ok = await options.confirm(matched.length, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", matched.length);
   }
 
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
-  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
   for (const batch of batches) await client.putRecords(batch);
   return { type: "UPDATE", updatedCount: matched.length };
 }
@@ -4409,7 +4484,8 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 1. 各行のキー値を評価し、既存レコードを一括検索（in (...) チャンク）
   const toInsert: KintoneRecord[] = [];
@@ -4449,6 +4525,9 @@ async function executeUpsert(
       toInsert.push(record);
     }
   });
+  assertValidDmlRecords(
+    [...toInsert, ...toUpdate.map((entry) => entry.record)], stmt.fields, fieldInfos, numberPrecision
+  );
 
   // 2. 確認ダイアログ（INSERT + UPDATE の合計）
   if (options.confirm && (toInsert.length + toUpdate.length) > 0) {
@@ -4989,7 +5068,8 @@ async function executeUpsertSelect(
   cteCache?: Map<string, MaterializedTable>
 ): Promise<UpsertResult> {
   // 1. 転送先フィールドを、ソース SELECT や照合 read、confirm より前に検査する。
-  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const selectResult = cteCache !== undefined && cteCache.size > 0
@@ -5024,6 +5104,7 @@ async function executeUpsertSelect(
     });
     return record;
   });
+  assertValidDmlRecords(records, stmt.fields, fieldInfos, numberPrecision);
 
   // キー値で既存レコードを一括検索（in (...) チャンク）
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);

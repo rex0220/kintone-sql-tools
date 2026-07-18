@@ -81,3 +81,13 @@ test("無関係な警告ヘッダーは searchAborted にしない", async () =>
   const response = await makeClient().getRecords({ app: 1, query: "", fields: [] });
   expect(response).toEqual({ records: [] });
 });
+
+test("Node clientは運用app/settings.jsonを既存app routeで読みnumberPrecisionを検証する", async () => {
+  globalThis.fetch = jest.fn(async () => jsonResponse({
+    numberPrecision: { digits: "30", decimalPlaces: "10", roundingMode: "UP" },
+  }));
+  await expect(makeClient().getNumberPrecision(321)).resolves.toEqual({
+    digits: 30, decimalPlaces: 10, roundingMode: "UP",
+  });
+  expect(String((globalThis.fetch as jest.Mock).mock.calls[0][0])).toContain("/k/v1/app/settings.json?app=321");
+});

@@ -85,6 +85,7 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
         .map((code) => ({ code, label: code, fieldType: types[code] ?? "SINGLE_LINE_TEXT" }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 
@@ -4613,6 +4614,7 @@ function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): K
         .map((code) => ({ code, label: code, fieldType: "SINGLE_LINE_TEXT" }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
     maxActive: () => max,
   };
 }

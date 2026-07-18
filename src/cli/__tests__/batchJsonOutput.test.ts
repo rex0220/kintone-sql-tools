@@ -37,6 +37,7 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
         .map((code) => ({ code, label: code, fieldType: code === "売上" ? "NUMBER" : "SINGLE_LINE_TEXT" }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 

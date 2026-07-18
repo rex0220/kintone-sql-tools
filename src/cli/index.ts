@@ -850,6 +850,7 @@ function createDryRunClient(): KintoneClient {
     getApps: notUsed,
     getFields: notUsed,
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 
@@ -1981,6 +1982,12 @@ async function run(): Promise<number> {
         const routed = profileClientMap.get(pName);
         if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${appId}.`);
         return routed.getFields(binding.appId);
+      },
+      getNumberPrecision: (appId) => {
+        const binding = appBindingByMappedApp.get(appId) ?? { appId, profile: profileName.toLowerCase() };
+        const routed = profileClientMap.get(binding.profile);
+        if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${appId}.`);
+        return routed.getNumberPrecision(binding.appId);
       },
       getProcessStatuses: (appId) => {
         const binding = appBindingByMappedApp.get(appId) ?? { appId, profile: profileName.toLowerCase() };

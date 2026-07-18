@@ -22,6 +22,7 @@ function makeClient(records: KintoneRecord[], fields: KintoneFieldInfo[] = []): 
     async getApps() { return []; },
     async getFields() { return fields; },
     async getProcessStatuses() { return { enable: false, states: [] }; },
+    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
 }
 
