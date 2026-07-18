@@ -31,15 +31,20 @@ test("IN リストへ未解決 VARIABLE が到達したら変換前に拒否す�
 });
 
 test("IN の負数は引用符なし、文字列の負数は引用符付きで変換する", () => {
+  // +1 は kintone が受理しない先頭符号のため平文 1 へ正規化する（-1 は保持）。
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 IN (-1, +1, '-1')")))
-    .toBe('金額 in (-1,+1,"-1")');
+    .toBe('金額 in (-1,1,"-1")');
 });
 
-test("SIMPLE REST query は16桁超・指数のraw lexemeを保持する", () => {
+test("SIMPLE REST query は16桁超の精度を保ちつつ平文10進で押し下げる", () => {
+  // 16桁超はbinary64で丸めずそのまま保持する。
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 = 9007199254740993")))
     .toBe("金額 = 9007199254740993");
+  // 指数表記は kintone が受理しないため平文10進へ展開する（値は不変・全桁保持）。
+  expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 = 1e3")))
+    .toBe("金額 = 1000");
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 IN (1.20e+21, 9007199254740993)")))
-    .toBe("金額 in (1.20e+21,9007199254740993)");
+    .toBe("金額 in (1200000000000000000000,9007199254740993)");
 });
 
 test("KLIKE / NOT KLIKE を kintone like / not like へ変換する", () => {
