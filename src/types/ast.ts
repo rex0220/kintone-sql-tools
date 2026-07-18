@@ -578,6 +578,7 @@ export interface InsertStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 /** 1 行分の値リスト */
@@ -604,6 +605,7 @@ export interface UpsertStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -621,6 +623,7 @@ export interface UpsertSelectStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -637,6 +640,7 @@ export interface InsertSelectStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
 }
 
 // ------------------------------------------------------------
@@ -656,6 +660,16 @@ export interface UpdateStatement {
   onErrorSkip?: boolean;
   errorTable?: string;
   rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
+}
+
+export interface CheckGroup {
+  rules: CheckRule[];
+}
+
+export interface CheckRule {
+  condition: WhereExpr;
+  message: ScalarValueExpr;
 }
 
 export interface Assignment {

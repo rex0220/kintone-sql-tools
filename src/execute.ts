@@ -99,6 +99,7 @@ import {
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
+import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, type CheckFieldRef } from "./core/dmlCustomCheck";
 import {
   classifyWhereCapability,
   type PredicateCapabilityResult,
@@ -3761,7 +3762,9 @@ async function prepareDmlValidation(
   options: ExecuteOptions,
   cacheContext: string,
   tempTables: Map<string, MaterializedTable> | undefined,
-  statementNumber: number
+  statementNumber: number,
+  validateMissingCreateFields = true,
+  includePreErrors = true
 ): Promise<PreparedDmlValidation> {
   const operation: ValidationOperation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
@@ -3782,7 +3785,8 @@ async function prepareDmlValidation(
 
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
   const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
-    candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision
+    candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision,
+    stmt.checkGroups ?? [], validateMissingCreateFields, includePreErrors
   );
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result: DmlValidationResult = {
@@ -3914,7 +3918,12 @@ async function materializeValidationCandidates(
   if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
 
   let rows: unknown[][];
+  let sourceRows: ProcessRow[] | undefined;
+  let evaluationTypes: ReadonlyMap<string, string> | undefined;
   if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
+    assertInsertCheckRefs(stmt, stmt.fields);
+    evaluationTypes = new Map(stmt.fields.map((field) => [field, infoByCode.get(field)?.fieldType ?? ""]));
+    assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = stmt.values.map((row) => row.map((value, i) =>
       value.type === "CASE_VALUE"
         ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType)
@@ -3923,10 +3932,24 @@ async function materializeValidationCandidates(
   } else {
     const selectResult = tempTables && tempTables.size > 0
       ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext)
-      : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext);
-    if (selectResult.columns.length !== stmt.fields.length) {
+      : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext, undefined, true);
+    const hasChecks = (stmt.checkGroups?.length ?? 0) > 0;
+    if (selectResult.columns.length < stmt.fields.length || (!hasChecks && selectResult.columns.length !== stmt.fields.length)) {
       throw new Error(`SELECT の列数（${selectResult.columns.length}）と DML のフィールド数（${stmt.fields.length}）が一致しません`);
     }
+    if (hasChecks && new Set(selectResult.columns).size !== selectResult.columns.length) {
+      throw customCheckParseError("CHECK 付き DML ソース SELECT の出力名は一意である必要があります");
+    }
+    assertInsertCheckRefs(stmt, selectResult.columns);
+    sourceRows = selectResult.rows;
+    const meta = materializedMetaBySelectResult.get(selectResult);
+    evaluationTypes = new Map(selectResult.columns.map((column) => {
+      const columnMeta = meta?.get(column);
+      const type = columnMeta?.fieldType
+        ?? (columnMeta?.semantics?.compareMode === "number" || columnMeta?.sortKind === "number" ? "NUMBER" : "SINGLE_LINE_TEXT");
+      return [column, type];
+    }));
+    assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = selectResult.rows.map((row) => selectResult.columns.map((column) => row[column] ?? ""));
   }
 
@@ -3937,6 +3960,10 @@ async function materializeValidationCandidates(
     payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
     preErrors: [],
     record: {},
+    evaluationRow: sourceRows?.[index] ?? Object.fromEntries(
+      stmt.fields.map((field, i) => [field, renderValidationValue(values[i])])
+    ),
+    evaluationFieldTypes: evaluationTypes,
   }));
   if (stmt.type !== "UPSERT" && stmt.type !== "UPSERT_SELECT") return candidates;
 
@@ -3967,6 +3994,41 @@ async function materializeValidationCandidates(
   return candidates;
 }
 
+function checkRefs(stmt: ValidationStatement): CheckFieldRef[] {
+  return stmt.checkGroups ? collectCheckFieldRefs(stmt.checkGroups) : [];
+}
+
+function assertInsertCheckRefs(
+  stmt: InsertStatement | InsertSelectStatement | UpsertStatement | UpsertSelectStatement,
+  available: readonly string[]
+): void {
+  const names = new Set(available);
+  for (const ref of checkRefs(stmt)) {
+    if (ref.tableAlias !== null) {
+      throw customCheckParseError(`CHECK のフィールド ${ref.tableAlias}.${ref.field} はこの評価行では修飾できません`);
+    }
+    if (!names.has(ref.field)) {
+      throw customCheckParseError(`CHECK のフィールド ${ref.field} は評価行に存在しません`);
+    }
+  }
+}
+
+const CHECK_UNSUPPORTED_COMPARISON_TYPES = new Set([
+  "CHECK_BOX", "MULTI_SELECT", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT", "FILE",
+  "KSQL_ARRAY",
+]);
+
+function assertCheckComparisonTypes(stmt: ValidationStatement, types: ReadonlyMap<string, string>): void {
+  if (!stmt.checkGroups) return;
+  for (const ref of collectCheckComparisonFieldRefs(stmt.checkGroups)) {
+    const key = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
+    const type = types.get(key) ?? types.get(ref.field);
+    if (CHECK_UNSUPPORTED_COMPARISON_TYPES.has(type ?? "")) {
+      throw customCheckParseError(`CHECK の比較では ${type} フィールド ${key} を使用できません`);
+    }
+  }
+}
+
 async function materializeUpdateValidationCandidates(
   stmt: UpdateStatement,
   client: KintoneClient,
@@ -3977,19 +4039,32 @@ async function materializeUpdateValidationCandidates(
   if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
+  assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
   let records: Array<{ id: number; record: KintoneRecord }>;
+  let evaluationById = new Map<number, KintoneRecord>();
   if (hasRowDependentAssignment(stmt)) {
     const getParams = updateToGetQueryForArith(stmt);
-    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
+    const fields = [...new Set([...getParams.fields, ...checkTargetFields])];
+    const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
       maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
     });
+    evaluationById = new Map(resolved.records.map((record) => [Number(record["$id"]?.value), record]));
     records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt);
-    const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
-      maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1,
-    });
-    records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+    if (checkTargetFields.length > 0) {
+      const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...new Set(["$id", ...checkTargetFields])], {
+        maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
+      });
+      evaluationById = new Map(resolved.records.map((record) => [Number(record["$id"]?.value), record]));
+      records = updateToPutBatches(stmt, [...evaluationById.keys()], fieldTypes).flatMap((batch) => batch.records);
+    } else {
+      const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
+        maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1,
+      });
+      records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+    }
   }
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1,
@@ -3999,7 +4074,42 @@ async function materializeUpdateValidationCandidates(
     preErrors: [],
     record: entry.record,
     targetId: entry.id,
+    evaluationRow: updateEvaluationRow(evaluationById.get(entry.id), stmt.appId),
+    evaluationFieldTypes: updateEvaluationTypes(fieldTypes, stmt.appId),
   }));
+}
+
+function assertUpdateCheckRefs(stmt: UpdateStatement, targetTypes: ReadonlyMap<string, string>): string[] {
+  if (stmt.from) return [];
+  const fields = new Set<string>();
+  for (const ref of checkRefs(stmt)) {
+    if (ref.tableAlias !== null && ref.tableAlias.toLowerCase() !== `app${stmt.appId}`.toLowerCase()) {
+      throw customCheckParseError(`CHECK の修飾子 ${ref.tableAlias} は更新先 APP${stmt.appId} ではありません`);
+    }
+    if (ref.field !== "$id" && !targetTypes.has(ref.field)) {
+      throw customCheckParseError(`CHECK のターゲットフィールド ${ref.field} は存在しません`);
+    }
+    fields.add(ref.field);
+  }
+  return [...fields];
+}
+
+function updateEvaluationRow(record: KintoneRecord | undefined, appId: number): ProcessRow {
+  if (!record) return {};
+  const plain = flatten(record, null);
+  return Object.fromEntries([
+    ...Object.entries(plain),
+    ...Object.entries(plain).map(([field, value]) => [`APP${appId}.${field}`, value] as const),
+  ]);
+}
+
+function updateEvaluationTypes(types: ReadonlyMap<string, string>, appId: number): ReadonlyMap<string, string> {
+  return new Map([
+    ...types,
+    ...[...types].map(([field, type]) => [`APP${appId}.${field}`, type] as const),
+    ["$id", "RECORD_NUMBER"],
+    [`APP${appId}.$id`, "RECORD_NUMBER"],
+  ]);
 }
 
 async function materializeUpdateFromValidationCandidates(
@@ -4010,15 +4120,20 @@ async function materializeUpdateFromValidationCandidates(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<DmlValidationCandidate[]> {
+  const scope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
+  assertCheckComparisonTypes(stmt, scope.evaluationTypes);
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1, operation: "UPDATE", mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
     record: entry.record,
     targetId: entry.id,
+    evaluationRow: updateFromEvaluationRow(matchedById.get(entry.id), stmt.appId, from.alias),
+    evaluationFieldTypes: scope.evaluationTypes,
   }));
 }
 
@@ -4043,9 +4158,10 @@ async function resolveUpdateFromMatchedRecords(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<Array<{ target: KintoneRecord; source: ProcessRow }>> {
   const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
+  const checkScope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
   const sourceFields = [...new Set(stmt.assignments
     .filter((a) => a.value.type === "SOURCE_FIELD")
-    .map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : ""))];
+    .map((a) => a.value.type === "SOURCE_FIELD" ? a.value.field : "").concat(checkScope.sourceFields))];
   const requiredSourceFields = [...new Set([from.joinKeyField, ...sourceFields])];
   const sourceRows = await loadUpdateFromSourceRows(
     from,
@@ -4074,10 +4190,10 @@ async function resolveUpdateFromMatchedRecords(
   if (sourceByKey.size === 0) return [];
 
   const maxRecords = options.maxRecords ?? 10_000;
-  const targetFields = collectUpdateFromTargetFields(stmt);
+  const targetFields = [...new Set([...collectUpdateFromTargetFields(stmt), ...checkScope.targetFields])];
   const filterQuery = from.targetFilter === null
     ? ""
-    : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter }).query;
+    : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: undefined }).query;
   const targetRecords: KintoneRecord[] = [];
   const seenTargetIds = new Set<string>();
   let fetchedTargetCount = 0;
@@ -4232,12 +4348,75 @@ function normalizeUpdateFromJoinKey(
   return JSON.stringify(decimal);
 }
 
+async function executeCheckedPlainDml(
+  stmt: InsertStatement | InsertSelectStatement,
+  client: KintoneClient, options: ExecuteOptions, cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<InsertResult>;
+async function executeCheckedPlainDml(
+  stmt: UpdateStatement,
+  client: KintoneClient, options: ExecuteOptions, cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpdateResult>;
+async function executeCheckedPlainDml(
+  stmt: UpsertStatement | UpsertSelectStatement,
+  client: KintoneClient, options: ExecuteOptions, cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpsertResult>;
+async function executeCheckedPlainDml(
+  stmt: ValidationStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<InsertResult | UpdateResult | UpsertResult> {
+  const prepared = await prepareDmlValidation(
+    stmt, client, options, cacheContext, tempTables, 1, false, false
+  );
+  if (prepared.result.errors.length > 0) {
+    const first = prepared.result.errors[0];
+    throw new Error(
+      `DmlValidationError: ${first["$err_code"]} ${first["$err_message"]} ` +
+      `(row=${first["$err_row"]}, field=${first["$err_field"]})`
+    );
+  }
+  const candidates = prepared.candidates;
+  const confirmOperation = stmt.type.startsWith("INSERT") ? "INSERT" : "UPDATE";
+  if (options.confirm && candidates.length > 0) {
+    const ok = await options.confirm(candidates.length, confirmOperation);
+    if (!ok) throw new OperationCancelledError(confirmOperation, candidates.length);
+  }
+  if (stmt.type === "INSERT" || stmt.type === "INSERT_SELECT") {
+    const createdIds: string[][] = [];
+    for (let i = 0; i < candidates.length; i += 100) {
+      const response = await client.postRecords({ app: stmt.appId, records: candidates.slice(i, i + 100).map((c) => c.record!) });
+      createdIds.push(response.ids);
+    }
+    return { type: "INSERT", createdIds, insertedCount: createdIds.flat().length };
+  }
+  if (stmt.type === "UPDATE") {
+    const updates = candidates.map((candidate) => ({ id: candidate.targetId!, record: candidate.record! }));
+    for (let i = 0; i < updates.length; i += 100) await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+    return { type: "UPDATE", updatedCount: updates.length };
+  }
+  const inserts = candidates.filter((candidate) => candidate.mode === "create");
+  const updates = candidates.filter((candidate) => candidate.mode === "update").map((candidate) => ({ id: candidate.targetId!, record: candidate.record! }));
+  let insertedCount = 0;
+  for (let i = 0; i < inserts.length; i += 100) {
+    const response = await client.postRecords({ app: stmt.appId, records: inserts.slice(i, i + 100).map((c) => c.record!) });
+    insertedCount += response.ids.length;
+  }
+  for (let i = 0; i < updates.length; i += 100) await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  return { type: "UPSERT", insertedCount, updatedCount: updates.length };
+}
+
 async function executeInsert(
   stmt: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "INSERT" }>,
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<InsertResult> {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
@@ -4272,6 +4451,7 @@ async function executeInsertSelect(
   /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
   cteCache?: Map<string, MaterializedTable>
 ): Promise<InsertResult> {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   // 1. 転送先フィールドを、ソース SELECT や confirm より前に検査する。
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
@@ -4338,6 +4518,7 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, tempTables);
   if (stmt.subtableCode) {
     await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
@@ -4522,6 +4703,7 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
@@ -5105,6 +5287,7 @@ async function executeUpsertSelect(
   /** バッチ実行時の一時テーブルストア（#name → 行＋列）。SELECT ソースの解決に使う */
   cteCache?: Map<string, MaterializedTable>
 ): Promise<UpsertResult> {
+  if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   // 1. 転送先フィールドを、ソース SELECT や照合 read、confirm より前に検査する。
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
@@ -6155,6 +6338,79 @@ function collectArithNodeRefs(node: LegacyArithExpr | ArithNode, out: Set<string
       if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
     }
   }
+}
+
+interface UpdateFromCheckScope {
+  targetFields: string[];
+  sourceFields: string[];
+  evaluationTypes: ReadonlyMap<string, string>;
+}
+
+async function resolveUpdateFromCheckScope(
+  stmt: UpdateStatement,
+  from: NonNullable<UpdateStatement["from"]>,
+  client: KintoneClient,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpdateFromCheckScope> {
+  const refs = checkRefs(stmt);
+  const targetTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const sourceTableName = from.cteName;
+  const sourceTypes: ReadonlyMap<string, string> = sourceTableName !== null
+    ? new Map((tempTables?.get(sourceTableName)?.columns ?? []).map((column) => [
+        column,
+        tempTables?.get(sourceTableName)?.columnMeta?.get(column)?.fieldType
+          ?? (tempTables?.get(sourceTableName)?.columnMeta?.get(column)?.semantics?.compareMode === "number" ? "NUMBER" : "SINGLE_LINE_TEXT"),
+      ]))
+    : await getFieldTypeMap(from.appId, client, cacheContext);
+  const targetFields = new Set<string>();
+  const sourceFields = new Set<string>();
+  for (const ref of refs) {
+    if (ref.tableAlias !== null) {
+      if (ref.tableAlias.toLowerCase() === `app${stmt.appId}`.toLowerCase()) {
+        if (ref.field !== "$id" && !targetTypes.has(ref.field)) throw customCheckParseError(`CHECK のターゲットフィールド ${ref.field} は存在しません`);
+        targetFields.add(ref.field);
+      } else if (ref.tableAlias.toLowerCase() === from.alias.toLowerCase()) {
+        if (ref.field !== "$id" && !sourceTypes.has(ref.field)) throw customCheckParseError(`CHECK のソースフィールド ${ref.field} は存在しません`);
+        sourceFields.add(ref.field);
+      } else {
+        throw customCheckParseError(`CHECK の修飾子 ${ref.tableAlias} は更新先または FROM alias ではありません`);
+      }
+      continue;
+    }
+    const inTarget = ref.field === "$id" || targetTypes.has(ref.field);
+    const inSource = ref.field === "$id" || sourceTypes.has(ref.field);
+    if (!inTarget) {
+      throw customCheckParseError(`UPDATE FROM の CHECK ではソース列 ${ref.field} を修飾してください`);
+    }
+    if (inSource) {
+      throw customCheckParseError(`UPDATE FROM の CHECK の非修飾フィールド ${ref.field} は曖昧です`);
+    }
+    targetFields.add(ref.field);
+  }
+  const evaluationTypes = new Map<string, string>();
+  for (const [field, type] of targetTypes) {
+    evaluationTypes.set(field, type);
+    evaluationTypes.set(`APP${stmt.appId}.${field}`, type);
+  }
+  evaluationTypes.set("$id", "RECORD_NUMBER");
+  evaluationTypes.set(`APP${stmt.appId}.$id`, "RECORD_NUMBER");
+  for (const [field, type] of sourceTypes) evaluationTypes.set(`${from.alias}.${field}`, type);
+  return { targetFields: [...targetFields], sourceFields: [...sourceFields], evaluationTypes };
+}
+
+function updateFromEvaluationRow(
+  pair: { target: KintoneRecord; source: ProcessRow } | undefined,
+  appId: number,
+  sourceAlias: string
+): ProcessRow {
+  if (!pair) return {};
+  const target = flatten(pair.target, null);
+  return Object.fromEntries([
+    ...Object.entries(target),
+    ...Object.entries(target).map(([field, value]) => [`APP${appId}.${field}`, value] as const),
+    ...Object.entries(pair.source).map(([field, value]) => [`${sourceAlias}.${field}`, value] as const),
+  ]);
 }
 
 function collectScalarNodeRefs(node: ScalarValueExpr, out: Set<string>): void {

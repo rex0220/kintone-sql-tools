@@ -94,6 +94,7 @@ import type {
   ScalarValueExpr,
   ConcatExpr,
   ScalarValueColumn,
+  CheckGroup,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -1571,6 +1572,11 @@ export class Parser {
         this.peekAt(1).kind === TokenKind.IDENT &&
         this.peekAt(1).value.toUpperCase() === "ONLY"
       ) return null;
+      if (
+        k === TokenKind.IDENT &&
+        this.peek().value.toUpperCase() === "CHECK" &&
+        this.peekAt(1).kind === TokenKind.WHEN
+      ) return null;
       return this.parseTableAliasName();
     }
     return null;
@@ -2137,8 +2143,9 @@ export class Parser {
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT はサブテーブル仮想テーブルでは未対応です", this.prev());
       }
+      const checkGroups = this.parseCheckGroups();
       const validation = this.parseDmlControlSuffix();
-      return { type: "INSERT_SELECT", appId, fields, select, ...validation } satisfies InsertSelectStatement;
+      return { type: "INSERT_SELECT", appId, fields, select, ...checkGroups, ...validation } satisfies InsertSelectStatement;
     }
 
     // INSERT INTO ... VALUES (...)
@@ -2152,13 +2159,17 @@ export class Parser {
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
 
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (subtableCode && checkGroups.checkGroups) {
+      throw new ParseError("CHECK はサブテーブル INSERT に対応していません", this.prev());
+    }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル INSERT に対応していません", this.prev());
     }
     return subtableCode
-      ? { type: "INSERT", appId, subtableCode, fields, values, ...validation }
-      : { type: "INSERT", appId, fields, values, ...validation };
+      ? { type: "INSERT", appId, subtableCode, fields, values, ...checkGroups, ...validation }
+      : { type: "INSERT", appId, fields, values, ...checkGroups, ...validation };
   }
 
   private parseUpsert(): UpsertStatement | UpsertSelectStatement {
@@ -2180,8 +2191,9 @@ export class Parser {
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
       const keyFields = this.parseOnDuplicate();
+      const checkGroups = this.parseCheckGroups();
       const validation = this.parseDmlControlSuffix();
-      return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...validation };
+      return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...checkGroups, ...validation };
     }
 
     // UPSERT INTO ... VALUES (...)
@@ -2195,8 +2207,9 @@ export class Parser {
     } while (this.consume(TokenKind.COMMA));
 
     const keyFields = this.parseOnDuplicate();
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
-    return { type: "UPSERT", appId, fields, values, keyFields, ...validation };
+    return { type: "UPSERT", appId, fields, values, keyFields, ...checkGroups, ...validation };
   }
 
   private parseOnDuplicate(): string[] {
@@ -2343,14 +2356,36 @@ export class Parser {
       );
     }
 
+    const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (subtableCode && checkGroups.checkGroups) {
+      throw new ParseError("CHECK はサブテーブル UPDATE に対応していません", this.prev());
+    }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル UPDATE に対応していません", this.prev());
     }
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...validation };
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...checkGroups, ...validation };
     return subtableCode
-      ? { type: "UPDATE", appId, subtableCode, assignments, where, ...validation }
-      : { type: "UPDATE", appId, assignments, where, ...validation };
+      ? { type: "UPDATE", appId, subtableCode, assignments, where, ...checkGroups, ...validation }
+      : { type: "UPDATE", appId, assignments, where, ...checkGroups, ...validation };
+  }
+
+  /** CHECK WHEN ... THEN ... blocks. CHECK is a soft keyword. */
+  private parseCheckGroups(): { checkGroups?: CheckGroup[] } {
+    const groups: CheckGroup[] = [];
+    while (this.isSoftKeyword("CHECK") && this.peekAt(1).kind === TokenKind.WHEN) {
+      const check = this.advance();
+      const rules: CheckGroup["rules"] = [];
+      while (this.consume(TokenKind.WHEN)) {
+        const condition = this.parseWhereExpr();
+        this.expect(TokenKind.THEN, "CHECK WHEN の条件の後には THEN が必要です");
+        const message = this.parseScalarValueExpr({ allowCase: false });
+        rules.push({ condition, message });
+      }
+      if (rules.length === 0) throw new ParseError("CHECK の後には WHEN が最低 1 つ必要です", check);
+      groups.push({ rules });
+    }
+    return groups.length > 0 ? { checkGroups: groups } : {};
   }
 
   /** DML末尾の VALIDATE ONLY または ON ERROR SKIP。各語はsoft keyword。 */

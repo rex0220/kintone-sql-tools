@@ -18,7 +18,8 @@ export type DmlValidationErrorCode =
   | "ERR_LENGTH_MIN"
   | "ERR_CHOICE_INVALID"
   | "ERR_KEY_EMPTY"
-  | "ERR_KEY_DUP_SOURCE";
+  | "ERR_KEY_DUP_SOURCE"
+  | "ERR_CHECK";
 
 export type DmlValueValidation =
   | { ok: true; value: KintoneValue }

@@ -24,6 +24,7 @@ import type {
   WhereExpr,
   ScalarValueExpr,
 } from "../types/ast";
+import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
@@ -147,10 +148,11 @@ function buildInsertRecord(
  */
 export function updateToGetQuery(stmt: UpdateStatement): KintoneGetForDmlParams {
   assertDmlWhereIsSafe(stmt.where);
+  const checkFields = collectUpdateCheckTargetFields(stmt);
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
-    fields: ["$id"],
+    fields: ["$id", ...checkFields],
     totalCount: false,
   };
 }
@@ -223,6 +225,7 @@ export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDm
       collectCaseFields(value.expr, refFields);
     }
   }
+  collectUpdateCheckTargetFields(stmt).forEach((field) => refFields.add(field));
   return {
     app: stmt.appId,
     query: whereToKintone(stmt.where),
@@ -572,6 +575,15 @@ function evalCaseResultValue(
     return String(evalArithExpr(result, row));
   }
   return String(evalScalarValueExpr(result, row));
+}
+
+function collectUpdateCheckTargetFields(stmt: UpdateStatement): string[] {
+  if (!stmt.checkGroups) return [];
+  const targetAlias = `app${stmt.appId}`.toLowerCase();
+  return [...new Set(collectCheckFieldRefs(stmt.checkGroups)
+    .filter((ref) => ref.tableAlias === null || ref.tableAlias.toLowerCase() === targetAlias)
+    .map((ref) => ref.field)
+    .filter((field) => field !== "$id"))];
 }
 
 export function evalCaseWhenValue(
