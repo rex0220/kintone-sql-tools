@@ -3,7 +3,7 @@
 ## 0. ステータス
 
 - 種別: 設計確定・実装中。**R4（2026-07-18）: 実装前 blocker だった Delete 実応答を実機実測し §14.4 / §17 へ反映**（明示 Delete 済み・自動削除済みの 2 経路とも `HTTP 404` + `GAIA_CN01` で完全同一・[実測記録](evidence/b33_cursor_delete_responses.md)）。同日、planner/executor・client lifecycle・lease/cleanup・各surface設定まで実装し、ローカルtest/build/MCP検証を通過。**複数ページ順序release blockerはAPP730のCLI/MCP実機smoke 7/7完全一致で解消**（[実測記録](evidence/b33_cli_mcp_smoke.md)）。残るrelease blockerはplugin実機確認
-- 対象バージョン: v3.1.0のminor候補（B9のリリース計画と調整する）
+- 対象バージョン: **v3.1.0（B33 単独リリースと決定・2026-07-18）**。B9/B29 は同居させず後続 minor（v3.3.0 目安）へ分離する。B9↔B29 の「同時着手が安価」（B9 再昇格トリガー②）の関係は両者の同時リリース時に回収する
 - 対象: 単発Records APIで完結しない `KORDER BY` の結果窓
 - 非対象: 通常の `ORDER BY`、FULL_SCAN、JOIN、DML、一時テーブルの取得方式変更
 

@@ -1,7 +1,7 @@
 # B33: `KORDER BY` 大規模窓 Cursor API 実装計画
 
-- ステータス: **R1・レビュー前**
-- 対象リリース: **v3.1.0**
+- ステータス: **R1.1・実装完了**（R1 レビュー承認→実装→コードレビュー指摘 3 件＋実機指摘 2 件を修正・確認済み。**R1.1（2026-07-18）: §4.4 の B9/B29 同居決定を「v3.1.0 は B33 単独」へ変更**。残 = Chromium/Firefox plugin smoke）
+- 対象リリース: **v3.1.0（B33 単独）**
 - 対象課題: **B33**
 - 分担: **Claude=仕様/観点、Codex=実装/テスト**
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
@@ -138,7 +138,7 @@ executorは`try/finally`でhandleを所有し、offset読み飛ばし、limit収
 | quarantine安全余裕 | **10分TTLに30秒を加える**。基準は最後に成功したCreate/Get時刻 | timer・通信遅延を吸収し、即時permit返却による孤児増加を防ぐ。公式5分timeout後の残存を否定する根拠には使わない |
 | active cursor数の公開設定 | **公開する**。既定2、入力範囲1..5、範囲外は明示エラー | R3 §6/§9の「設定しても最大5」を利用者契約にする。CLI=`--cursor-max-active`、env=`KSQL_CURSOR_MAX_ACTIVE`、profile=`query.cursorMaxActive`、MCP=server/profile設定、plugin=保存optionとする。permit wait等の内部値はv3.1.0では公開しない |
 | pluginページ離脱cleanup | **実施する**。active handle registryへ対して`pagehide`と`beforeunload`から冪等`close()`をfire-and-forgetする | 通常の`finally`を主保証としつつ、ページ離脱時に可能な範囲でDELETEを始める。ブラウザは完了を保証しないため「解放済み」とは扱わず、実機smokeを必須にする |
-| B9/B29との同居 | **B33+B9+B29をv3.1.0へ同居させる** | B33はAPI adapter・cursor lease・KORDER planner/executor、B9は共有数値比較primitive、B29はschemaの`numberPrecision`とDML/Tier-0検証・量子化が中心で、所有layerが異なる。`src/execute.ts`と設定型の統合競合はあり得るため課題別commitを保ち、最後に統合testする |
+| B9/B29との同居 | **R1.1（2026-07-18）で変更: v3.1.0 は B33 単独** | B33 完成時点で B9/B29 は仕様未作成。同居案の根拠は「所有 layer が異なり衝突しない」＝分離しても成立する。完成済みの純加法 minor を未着手仕様のために待たせない。B9↔B29 の「同時着手が安価」（B9 再昇格トリガー②）は v3.3.0 目安の同時リリースで回収する |
 
 次の2項目は**未検証のまま残し、本表で決定しない**。
 
@@ -338,9 +338,9 @@ executorは`try/finally`でhandleを所有し、offset読み飛ばし、limit収
 #### Step 4-3: 公開文書とv3.1.0成果物
 
 - SemVerは、既存queryを変更せず新しい成功可能範囲と設定を加えるため**minor**とし、v3.0.0からv3.1.0へ上げる
-- `CHANGELOG.md`へB33+B9+B29、Cursorの制限、cleanup warning、process-local上限を記載する
+- `CHANGELOG.md`へB33、Cursorの制限、cleanup warning、process-local上限を記載する（**R1.1: B9/B29 は含めない**）
 - `docs/ksql_language_reference.md`のKORDER上限表を、単発GET窓=`KORDER_NATIVE`、それ以外かつ`scanRows <= maxRecords`=`KORDER_CURSOR`へ更新する
-- 新規`docs/ksql_v3_1_migration_guide.md`へ設定、エラー、完全snapshotでない制限、B9/B29の意味論変更をまとめる。v3.0.0用`docs/ksql_v3_migration_guide.md`は履歴として書換えない
+- 新規`docs/ksql_v3_1_migration_guide.md`へ設定、エラー、完全snapshotでない制限をまとめる（R1.1: B9/B29 の意味論変更は含めない）。v3.0.0用`docs/ksql_v3_migration_guide.md`は履歴として書換えない
 - README、MCP tool description/schema `.describe()`、設定sample、台帳はreview承認後のrelease作業で同期する
 - package/lock、`prod/manifest.json`、CLI/MCP/MCPB/plugin bundle等をv3.1.0へ同期し、生成bundleに`KORDER_CURSOR`と新error codeが含まれることを確認する
 - **変更ファイル**: `CHANGELOG.md`、`docs/ksql_language_reference.md`、README、設定sample、`package.json`、`package-lock.json`、`prod/manifest.json`、build成果物、承認後の`docs/ksql_issue_tracker.md`
@@ -477,7 +477,7 @@ EXPLAINはR3 §13を参照し、事実を重複定義しない。表示を次の
 - [ ] EXPLAINがCursor APIを実行していない
 - [ ] cursor IDを通常ログ、error、EXPLAINへ出していない
 - [ ] plugin離脱cleanupをNode testだけで完了扱いにしていない
-- [ ] B9/B29との共有ファイル競合を課題別commitと統合testで解消した
+- [ ] ~~B9/B29との共有ファイル競合を課題別commitと統合testで解消した~~（R1.1: v3.1.0 は B33 単独のため対象外）
 - [ ] `.claude/settings.local.json`等の個人設定をcommitへ含めていない
 
 ## 10. 検証コマンド
@@ -504,10 +504,8 @@ git diff --check
 4. `feat: plan and execute KORDER_CURSOR windows`
 5. `feat: expose cursor diagnostics and surface settings`
 6. `docs: prepare B33 for v3.1.0 release`
-7. B9/B29の独立commit列
-8. `chore: integrate B33 B9 B29 release artifacts for v3.1.0`
 
-途中commitは公開releaseとせず、B33+B9+B29の全gate通過後にv3.1.0を一度公開する。B33は加法的機能なのでSemVer minorである。B9/B29に利用者可視の意味論変更が含まれる場合も、v3.1.0移行文書で個別に明示し、B33のAPI lifecycle変更と混同しない。
+途中commitは公開releaseとせず、B33の全gate通過後にv3.1.0を公開する（**R1.1: B9/B29 は同居させず後続 minor へ分離**）。B33は加法的機能なのでSemVer minorである。
 
 ## 12. R3への指摘
 
