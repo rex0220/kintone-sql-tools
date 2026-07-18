@@ -44,10 +44,10 @@ test.each(signedNumbers)("UPDATE SET が %s を NumberLiteral として受理す
 test("複数行 VALUES の正負混在を各行に保持する", () => {
   const ast = parse("INSERT INTO APP100 (n) VALUES (-5), (+5), (-0.5), (+0.5)") as InsertStatement;
   expect(ast.values.map((row) => row[0])).toEqual([
-    { type: "NUMBER", value: -5 },
-    { type: "NUMBER", value: 5 },
-    { type: "NUMBER", value: -0.5 },
-    { type: "NUMBER", value: 0.5 },
+    { type: "NUMBER", value: -5, raw: "-5" },
+    { type: "NUMBER", value: 5, raw: "+5" },
+    { type: "NUMBER", value: -0.5, raw: "-0.5" },
+    { type: "NUMBER", value: 0.5, raw: "+0.5" },
   ]);
 });
 

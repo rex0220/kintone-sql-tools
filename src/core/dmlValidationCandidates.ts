@@ -79,8 +79,9 @@ export function validateDmlCandidates(
 export function renderValidationValue(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "object" && "type" in value) {
-    const sql = value as { type: string; value?: unknown; elements?: Array<{ value: string }> };
-    if (sql.type === "STRING" || sql.type === "NUMBER") return String(sql.value ?? "");
+    const sql = value as { type: string; value?: unknown; raw?: string; elements?: Array<{ value: string }> };
+    if (sql.type === "NUMBER") return sql.raw ?? String(sql.value ?? "");
+    if (sql.type === "STRING") return String(sql.value ?? "");
     if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
   }
   if (Array.isArray(value)) return JSON.stringify(value);

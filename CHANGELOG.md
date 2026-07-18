@@ -9,6 +9,12 @@
 - **B20 正規表現関数 `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` を追加**。ECMAScript 方言、`i` / `m` / `s` のみ受理、Unicode モード `u` を常時有効化する。パターンとフラグは式・フィールドを含めて実行時評価し、SELECT / WHERE / HAVING / ORDER BY / 一時テーブル / CTE / 通常の `UPDATE SET` で使用できる。3語は新しい予約語で、同名フィールドはバッククォートで参照する。
 - 正規表現は opt-in ゲートを設けないユーザー責任の機能として提供する。ReDoS の中断不能、プラグイン・CLI・MCP ごとの復旧手段、ホストと Unicode 版による結果差、DML 書き戻しで保存データ差になり得る点を言語リファレンスへ明記した。
 
+### 修正（正しさ）
+
+- **B9 最大30桁の有限10進比較を厳密化**。NUMBER/CALC の WHERE・HAVING・CASE・BETWEEN・ASSERT・IN、通常/サブテーブル DML、REORDER、ORDER BY/ウィンドウ、MIN/MAX、GREATEST/LEASTを単一の文字列ベース比較primitiveへ統一し、`9007199254740992` と `9007199254740993` を区別する。SQL数値リテラルは元字句を保持し、`digits[.digits][e±digits]` の指数表記も受理する。SIMPLE RESTと単純INSERT/UPSERT VALUESにも丸め前の字句を渡す。
+- typed number の固定バンドは維持するが、空白のみの値は `Number(' ')=0` とせず「その他非数値」の末尾バンドへ移す。JS算術・SUM/AVG・数値関数は引き続きbinary64であり、演算前の10進値は復元しない。
+- **SemVer=major 確定（2026-07-18 実機）**。APP4221（16有効桁）で binary64 衝突ペア 999999999999.9991/.9992 を保存し、公開 v3.2.0 と B9 を比較したところ **MIN/MAX 値と ORDER BY 順が変わる**ことを実測（v3.2.0 は 2 値を同値扱い・MIN が誤り・ORDER BY 逆順）。→ **B9 は v3.3.0 minor では出せず v4.0.0 相当が必要**。版構成の再計画は別途。証跡: docs/internal/evidence/b9_exact_decimal_semver_probe.md
+
 ## v3.2.0（2026-07-18）
 
 ### 機能追加

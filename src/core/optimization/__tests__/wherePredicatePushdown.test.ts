@@ -85,6 +85,8 @@ test.each([
   "SELECT * FROM APP100 WHERE 金額 <= 1000",
   "SELECT * FROM APP100 WHERE 金額 != 1000",
   "SELECT * FROM APP100 WHERE 金額 > 1.5",
+  "SELECT * FROM APP100 WHERE 金額 > 1e3",
+  "SELECT * FROM APP100 WHERE 金額 > 1.0e3",
   "SELECT * FROM APP100 WHERE 金額 > 9007199254740992",
 ])("NUMBER 型でも対象外の一般数値比較を押し下げない: %s", (sql) => {
   const expr = where(sql);
@@ -99,6 +101,15 @@ test("一般フィールドは NUMBER 型が確定した場合だけ押し下げ
   expect(extractSafePushdownLeaves(expr, {
     fieldTypes: new Map([["金額", "SINGLE_LINE_TEXT"]]),
   })).toBeNull();
+});
+
+test("NUMBER equalityだけは高精度raw literalを安全leafとして保持する", () => {
+  const expr = where("SELECT * FROM APP100 WHERE 金額 = 9007199254740993");
+  expect(extractSafePushdownLeaves(expr, {
+    fieldTypes: new Map([["金額", "NUMBER"]]),
+  })).toEqual(expr);
+  if (expr.type !== "BINARY" || expr.right.type !== "NUMBER") throw new Error("unexpected AST");
+  expect(expr.right.raw).toBe("9007199254740993");
 });
 
 test("一般数値候補は型メタなしで抽出し、$id と対象外演算子を除外する", () => {

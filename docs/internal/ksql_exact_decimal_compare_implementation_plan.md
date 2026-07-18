@@ -1,6 +1,6 @@
 # B9: 最大30桁の厳密10進比較 実装計画
 
-- ステータス: **実装計画 R1・Claude レビュー承認（2026-07-18）・実装着手可（B29 の前提）**。§12 の 3 論点は Claude 判断で確定: ①版番号=v3.3.0 は暫定・§8 実測で major なら再計画②空白バンド=末尾バンドへ移す（正資料優先・既存テスト変更は仕様整合）③指数字句=SQL 受理は純加法（現状 1e3 は ParseError）で採用・範囲は digits[.digits][e±digits] 限定。3 経路の行番号・compareDecimal 分離・空白 Number 挙動をコード裏取り済み。
+- ステータス: **実装完了・Claude レビュー承認・SemVer=major 確定（2026-07-18・[実機証跡](evidence/b9_exact_decimal_semver_probe.md)）**。primitive 検算 15/15・全 1,835 テスト green・実機で公開 v3.2.0 と MIN/MAX・ORDER BY が変わることを確認＝§8.3 の major 条件。**v3.3.0 minor では出せず版構成の再計画が必要**。
 - 作成日: 2026-07-18
 - 対象リリース: **v3.3.0 の土台（SemVer は §8 の実測 gate で確定。major 判定時は版番号を再計画）**
 - 分担: **Claude=仕様レビュー・実機 SemVer 判定、Codex=実装・自動テスト**

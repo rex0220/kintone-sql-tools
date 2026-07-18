@@ -104,6 +104,7 @@ exports[`単文互換: INSERT VALUES 1`] = `
         "value": "A",
       },
       {
+        "raw": "100",
         "type": "NUMBER",
         "value": 100,
       },
@@ -114,6 +115,7 @@ exports[`単文互換: INSERT VALUES 1`] = `
         "value": "B",
       },
       {
+        "raw": "200",
         "type": "NUMBER",
         "value": 200,
       },
@@ -196,6 +198,7 @@ exports[`単文互換: REORDER 1`] = `
     },
     "op": "=",
     "right": {
+      "raw": "1",
       "type": "NUMBER",
       "value": 1,
     },
@@ -243,6 +246,7 @@ exports[`単文互換: SELECT フル句 1`] = `
     },
     "op": ">",
     "right": {
+      "raw": "100",
       "type": "NUMBER",
       "value": 100,
     },
@@ -385,6 +389,7 @@ exports[`単文互換: UPDATE 1`] = `
     },
     "op": "=",
     "right": {
+      "raw": "1",
       "type": "NUMBER",
       "value": 1,
     },

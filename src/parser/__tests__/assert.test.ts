@@ -41,8 +41,8 @@ test.each([
 
 test("数値リテラルの比較", () => {
   const ast = parseAssert("ASSERT 1 = 1");
-  expect(ast.left).toEqual({ type: "NUMBER", value: 1 });
-  expect(ast.right).toEqual({ type: "NUMBER", value: 1 });
+  expect(ast.left).toEqual({ type: "NUMBER", value: 1, raw: "1" });
+  expect(ast.right).toEqual({ type: "NUMBER", value: 1, raw: "1" });
 });
 
 test("文字列リテラルの比較", () => {
@@ -53,7 +53,7 @@ test("文字列リテラルの比較", () => {
 
 test("単項マイナス", () => {
   const ast = parseAssert("ASSERT -5 < 0");
-  expect(ast.left).toEqual({ type: "NUMBER", value: -5 });
+  expect(ast.left).toEqual({ type: "NUMBER", value: -5, raw: "-5" });
 });
 
 // ----------------------------------------------------------------
@@ -64,8 +64,8 @@ test("BETWEEN low AND high", () => {
   const ast = parseAssert("ASSERT 5 BETWEEN 1 AND 10");
   expect(ast.op).toBe("BETWEEN");
   expect(ast.right).toBeNull();
-  expect(ast.low).toEqual({ type: "NUMBER", value: 1 });
-  expect(ast.high).toEqual({ type: "NUMBER", value: 10 });
+  expect(ast.low).toEqual({ type: "NUMBER", value: 1, raw: "1" });
+  expect(ast.high).toEqual({ type: "NUMBER", value: 10, raw: "10" });
 });
 
 test("BETWEEN の AND 欠落はエラー", () => {
@@ -81,12 +81,12 @@ test("算術式（優先順位: * が先）", () => {
   const left = ast.left as ArithExpr;
   expect(left.type).toBe("ARITH");
   expect(left.op).toBe("+");
-  expect(left.left).toEqual({ type: "NUMBER", value: 2 });
+  expect(left.left).toEqual({ type: "NUMBER", value: 2, raw: "2" });
   expect(left.right).toEqual({
     type: "ARITH",
-    left: { type: "NUMBER", value: 3 },
+    left: { type: "NUMBER", value: 3, raw: "3" },
     op: "*",
-    right: { type: "NUMBER", value: 4 },
+    right: { type: "NUMBER", value: 4, raw: "4" },
   });
 });
 

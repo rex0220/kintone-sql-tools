@@ -262,7 +262,7 @@ test("WHERE = 文字列", () => {
 
 test("WHERE = 数値", () => {
   const ast = parseSelect("SELECT * FROM APP100 WHERE $id = 1");
-  expect((ast.where as any).right).toEqual({ type: "NUMBER", value: 1 });
+  expect((ast.where as any).right).toEqual({ type: "NUMBER", value: 1, raw: "1" });
 });
 
 test("WHERE LIKE", () => {
@@ -326,10 +326,10 @@ test("WHERE IN / NOT IN は符号付き数値を数値リテラルとして受�
     "SELECT * FROM APP100 WHERE 金額 IN (0, 1000, -1, +1, '-1', @v)"
   );
   expect((inAst.where as any).right.values).toEqual([
-    { type: "NUMBER", value: 0 },
-    { type: "NUMBER", value: 1000 },
-    { type: "NUMBER", value: -1 },
-    { type: "NUMBER", value: 1 },
+    { type: "NUMBER", value: 0, raw: "0" },
+    { type: "NUMBER", value: 1000, raw: "1000" },
+    { type: "NUMBER", value: -1, raw: "-1" },
+    { type: "NUMBER", value: 1, raw: "+1" },
     { type: "STRING", value: "-1" },
     { type: "VARIABLE", name: "v" },
   ]);
@@ -397,9 +397,21 @@ test("WHERE 左辺算術式: 金額 * 1.1 > 10000", () => {
     type: "ARITH",
     left: { type: "FIELD_REF", field: "金額" },
     op: "*",
-    right: { type: "NUMBER", value: 1.1 },
+    right: { type: "NUMBER", value: 1.1, raw: "1.1" },
   });
-  expect(w.right).toEqual({ type: "NUMBER", value: 10000 });
+  expect(w.right).toEqual({ type: "NUMBER", value: 10000, raw: "10000" });
+});
+
+test("指数数値と2^53境界の raw lexeme をASTへ保持する", () => {
+  const exponent = parseSelect("SELECT * FROM APP100 WHERE amount = 1.20e+21");
+  expect((exponent.where as any).right).toEqual({
+    type: "NUMBER", value: 1.2e21, raw: "1.20e+21",
+  });
+  const boundary = parseSelect("SELECT * FROM APP100 WHERE amount BETWEEN 9007199254740992 AND 9007199254740993");
+  const group = boundary.where as any;
+  expect([group.left, group.right].map((expr: any) => expr.right.raw)).toEqual([
+    "9007199254740992", "9007199254740993",
+  ]);
 });
 
 test("WHERE 左辺算術式: (単価 + 送料) * 数量 <= 50000", () => {
@@ -416,7 +428,7 @@ test("WHERE 左辺算術式: LENGTH(備考) > 10", () => {
   const w = ast.where as any;
   expect(w.left.type).toBe("FUNC_FIELD"); // 算術演算子なし → FUNC_FIELD のまま
   expect(w.left.expr.func).toBe("LENGTH");
-  expect(w.right).toEqual({ type: "NUMBER", value: 10 });
+  expect(w.right).toEqual({ type: "NUMBER", value: 10, raw: "10" });
 });
 
 test("WHERE 左辺算術式: LENGTH(備考) * 2 > 10", () => {
@@ -436,7 +448,7 @@ test("WHERE 右辺算術式: WHERE 税込 = 金額 * 1.1", () => {
     type: "ARITH",
     left: { type: "FIELD_REF", field: "金額" },
     op: "*",
-    right: { type: "NUMBER", value: 1.1 },
+    right: { type: "NUMBER", value: 1.1, raw: "1.1" },
   });
 });
 
@@ -552,7 +564,7 @@ test("INSERT 単一行", () => {
   expect(ast.fields).toEqual(["名前", "金額"]);
   expect(ast.values).toEqual([[
     { type: "STRING", value: "田中" },
-    { type: "NUMBER", value: 1000 },
+    { type: "NUMBER", value: 1000, raw: "1000" },
   ]]);
 });
 
@@ -582,7 +594,7 @@ test("UPDATE", () => {
   expect(ast.appId).toBe(100);
   expect(ast.assignments).toEqual([
     { field: "ステータス", value: { type: "STRING", value: "完了" } },
-    { field: "金額",       value: { type: "NUMBER", value: 999 } },
+    { field: "金額",       value: { type: "NUMBER", value: 999, raw: "999" } },
   ]);
 });
 

@@ -615,6 +615,15 @@ test("SET の数値式を ASSERT と WHERE へ型付きリテラルとして置�
   expect(client.getCalls[0].query).toContain("売上 > 14");
 });
 
+test("SET数値変数は2^53境界のraw lexemeを比較完了まで保持する", async () => {
+  const result = await executeBatch(
+    "SET @high = 9007199254740993; ASSERT @high > 9007199254740992; ASSERT @high = 9.007199254740993e15",
+    makeClient()
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements.map((statement) => statement.status)).toEqual(["success", "success", "success"]);
+});
+
 test("DECLARE は既定値を使い、外部注入を大小無視で上書きする", async () => {
   const sql = "DECLARE @min = '100'; SELECT 顧客名 FROM APP100 WHERE 売上 > @min";
   const defaultClient = makeClient({ recordsByApp: { 100: APP1 } });

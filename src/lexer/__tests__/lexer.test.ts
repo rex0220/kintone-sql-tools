@@ -10,6 +10,19 @@ function tokens(sql: string) {
   return new Lexer(sql).tokenize().map((t) => ({ k: t.kind, v: t.value }));
 }
 
+test("指数表記を単一NUMBER tokenとしてraw保持する", () => {
+  expect(tokens("1e3 1.20E-4 9e+21")).toEqual([
+    { k: TokenKind.NUMBER, v: "1e3" },
+    { k: TokenKind.NUMBER, v: "1.20E-4" },
+    { k: TokenKind.NUMBER, v: "9e+21" },
+    { k: TokenKind.EOF, v: "" },
+  ]);
+});
+
+test.each(["1e", "1e+", "1E-"])("不完全な指数をLexErrorにする: %s", (sql) => {
+  expect(() => new Lexer(sql).tokenize()).toThrow(LexError);
+});
+
 // ----------------------------------------------------------------
 // キーワード・識別子
 // ----------------------------------------------------------------

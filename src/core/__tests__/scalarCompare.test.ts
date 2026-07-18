@@ -37,9 +37,9 @@ test("等値・非等値は空セルの範囲規則に影響されない", () =>
   expect(compareScalarValues("=", "", "", numberSemantics)).toBe(true);
 });
 
-test("包含境界は高精度小数が安全整数へ丸まるため数値プレフィルタに使えない", () => {
-  expect(compareScalarValues(">=", "0.99999999999999999", "1", numberSemantics)).toBe(true);
-  expect(compareScalarValues("<=", "1.00000000000000001", "1", numberSemantics)).toBe(true);
+test("包含境界もローカルでは厳密10進比較する", () => {
+  expect(compareScalarValues(">=", "0.99999999999999999", "1", numberSemantics)).toBe(false);
+  expect(compareScalarValues("<=", "1.00000000000000001", "1", numberSemantics)).toBe(false);
 });
 
 test("コードポイント順はBMP・補助平面・孤立サロゲートをホスト非依存で比較する", () => {
@@ -60,10 +60,10 @@ test("typed number は固定バンド順にする", () => {
   ]);
 });
 
-test("typed number の空白のみは Number 規則により有限数 0 の peer とする", () => {
-  expect(compareCanonicalValues(" ", "0", numberSemantics)).toBe(0);
+test("typed number の空白のみはその他非数値の末尾バンドへ置く", () => {
+  expect(compareCanonicalValues(" ", "0", numberSemantics)).toBe(1);
   expect(compareCanonicalValues(" ", "-Infinity", numberSemantics)).toBe(1);
-  expect(compareCanonicalValues(" ", "Infinity", numberSemantics)).toBe(-1);
+  expect(compareCanonicalValues(" ", "Infinity", numberSemantics)).toBe(1);
 });
 
 test("RECORD_NUMBER は末尾IDをbinary64へ変換せず比較する", () => {
@@ -132,6 +132,14 @@ test("GREATEST/LEAST の文字列モードと数値tieはコードポイント�
   expect(selectScalarExtreme(["ｱ", "😀", "x"], "greatest")).toBe("😀");
   expect(selectScalarExtreme(["ｱ", "😀", "x"], "least")).toBe("x");
   expect(selectScalarExtreme(["0", "-0"], "greatest")).toBe("0");
+});
+
+test("GREATEST/LEAST は16桁超・指数同値を全順列で厳密比較する", () => {
+  const values = ["9007199254740992", "9007199254740993", "9.007199254740993e15"];
+  for (const args of permutations(values)) {
+    expect(selectScalarExtreme(args, "greatest")).toBe("9007199254740993");
+    expect(selectScalarExtreme(args, "least")).toBe("9007199254740992");
+  }
 });
 
 test("空文字は常に最小として比較前に確定する", () => {
