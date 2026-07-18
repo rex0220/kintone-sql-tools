@@ -8,6 +8,7 @@ import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../sche
 function makeClient(): KintoneClient {
   return {
     async getRecords() { return { records: [] }; },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { return { ids: [] }; },
     async putRecords() { },
     async deleteRecords() { },
@@ -399,6 +400,7 @@ describe("MCP tools", () => {
     expect(Object.keys(mutateInputSchema.shape).sort()).toEqual([
       "allowDml",
       "confirmText",
+      "cursorMaxActive",
       "dmlMaxRows",
       "dmlTotalMaxRows",
       "fetchParallel",
@@ -425,8 +427,45 @@ describe("MCP tools", () => {
     }
   });
 
-  test("explain schema exposes only sql and profile", () => {
-    expect(Object.keys(explainInputSchema.shape).sort()).toEqual(["profile", "sql"]);
+  test("explain schema exposes planning inputs", () => {
+    expect(Object.keys(explainInputSchema.shape).sort()).toEqual(["cursorMaxActive", "maxRecords", "profile", "sql"]);
+  });
+
+  test("explainはmaxRecordsとcursorMaxActiveをruntimeと表示へ反映する", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => {
+        runtimeInputs.push(input);
+        return {
+          sql: input.sql,
+          profileName: "prod",
+          client: makeClient(),
+          cacheContext: "mcp-explain-cursor",
+          maxRecords: input.maxRecords ?? 500,
+          fetchParallel: 1,
+          onLimit: "error",
+          timeout: 30_000,
+          cursorMaxActive: input.cursorMaxActive ?? 2,
+        };
+      },
+    });
+    const result = await tools.explain({
+      sql: "SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
+      maxRecords: 501,
+      cursorMaxActive: 4,
+    });
+    expect(runtimeInputs[0]).toMatchObject({ maxRecords: 501, cursorMaxActive: 4 });
+    expect(JSON.stringify(result.rows)).toContain("KORDER_CURSOR");
+    expect(JSON.stringify(result.rows)).toContain("cursor concurrency: 4 per domain (process-local)");
+  });
+
+  test("cursorMaxActive schema accepts 1..5 only", () => {
+    for (const value of [1, 2, 5]) {
+      expect(queryInputSchema.safeParse({ sql: "SELECT 1", cursorMaxActive: value }).success).toBe(true);
+    }
+    for (const value of [0, 6, 1.5]) {
+      expect(queryInputSchema.safeParse({ sql: "SELECT 1", cursorMaxActive: value }).success).toBe(false);
+    }
   });
 
   test("mutate rejects missing explicit DML approval", async () => {
@@ -1310,6 +1349,7 @@ describe("MCP tools", () => {
         }
         return { records: records as never };
       },
+      async openCursor() { throw new Error("unexpected cursor call"); },
       async postRecords() { return { ids: [] }; },
       async putRecords() { },
       async deleteRecords() { },
@@ -1440,6 +1480,7 @@ describe("MCP tools", () => {
           const filtered = manyRows.filter((r) => Number(r.$id.value) > cursor);
           return { records: filtered.slice(offset, offset + limit) as never };
         },
+        async openCursor() { throw new Error("unexpected cursor call"); },
         async postRecords() { return { ids: [] }; },
         async putRecords() { },
         async deleteRecords() { },
@@ -1532,6 +1573,7 @@ describe("MCP tools", () => {
         await new Promise((r) => setTimeout(r, 200));
         return { records: [] };
       },
+      async openCursor() { throw new Error("unexpected cursor call"); },
       async postRecords() { return { ids: [] }; },
       async putRecords() { },
       async deleteRecords() { },
@@ -1598,6 +1640,7 @@ describe("MCP tools", () => {
         calls.get += 1;
         return { records: (recordsByApp[params.app] ?? []) as never };
       },
+      async openCursor() { throw new Error("unexpected cursor call"); },
       async postRecords(params) {
         calls.post += 1;
         return { ids: params.records.map((_r, i) => String(100 + i)) };

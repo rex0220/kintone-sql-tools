@@ -20,6 +20,9 @@ const tempTableMaxRows = z.number().int().positive()
 const timeout = z.number().int().positive()
   .describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.")
   .optional();
+const cursorMaxActive = z.number().int().min(1).max(5)
+  .describe("Maximum active Cursor API handles per kintone host in this process (1-5, default 2). Later calls update the host limit; lowering it keeps existing cursors and delays new ones until active usage falls below the new limit. Create/Get are never automatically retried; capacity waits up to 30 seconds.")
+  .optional();
 const savedQueryName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)
   .describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
 const savedQueryTags = z.array(z.string().min(1))
@@ -36,6 +39,8 @@ export const explainInputSchema = z.object({
   sql: z.string().min(1)
     .describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
   profile,
+  maxRecords,
+  cursorMaxActive,
 });
 
 export const queryInputSchema = z.object({
@@ -47,6 +52,7 @@ export const queryInputSchema = z.object({
   onLimit,
   tempTableMaxRows,
   timeout,
+  cursorMaxActive,
   continueOnError: z.boolean()
     .describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).")
     .optional(),
@@ -71,6 +77,7 @@ export const mutateInputSchema = z.object({
   fetchParallel,
   tempTableMaxRows,
   timeout,
+  cursorMaxActive,
   dmlTotalMaxRows: z.number().int().positive()
     .describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.")
     .optional(),

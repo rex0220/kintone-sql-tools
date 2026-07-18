@@ -34,6 +34,7 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
       getCalls.push({ app: params.app, query: params.query ?? "" });
       return { records: recordsByApp[params.app] ?? [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords(params) {
       return { ids: params.records.map((_r, i) => String(i + 1)) };
     },

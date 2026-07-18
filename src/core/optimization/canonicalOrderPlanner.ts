@@ -3,7 +3,11 @@ import type { SelectMode } from "../../converter/selectToKintone";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
 import type { PredicateCapability } from "./whereCapability";
 
-export type CanonicalOrderPlanKind = "CANONICAL_REST_TOP_N" | "CANONICAL_LOCAL" | "KORDER_NATIVE";
+export type CanonicalOrderPlanKind =
+  | "CANONICAL_REST_TOP_N"
+  | "CANONICAL_LOCAL"
+  | "KORDER_NATIVE"
+  | "KORDER_CURSOR";
 
 export type CanonicalOrderReasonCode =
   | "ORDER_KEY_NOT_REST_EQUIVALENT"
@@ -23,6 +27,8 @@ export interface CanonicalOrderPlan {
   readonly localOrderBy: boolean;
   readonly applyLocalOffsetLimit: boolean;
   readonly reasonCodes: readonly CanonicalOrderReasonCode[];
+  /** KORDER_CURSOR が先頭から走査する行数。KORDER plan だけが設定する。 */
+  readonly scanRows?: number;
 }
 
 export interface CanonicalOrderPlanInput {

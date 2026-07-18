@@ -192,6 +192,7 @@ function makeFailThenOkClient(failures: { getRecords: number }) {
       if (getRecordsCalls <= failures.getRecords) throw httpError(429);
       return { records: [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() {
       postCalls += 1;
       throw httpError(429);
@@ -227,6 +228,16 @@ test("withRequestGate: GET 系はリトライ付き、書き込み系はリト�
 
   await expect(gated.postRecords({ app: 1, records: [] })).rejects.toThrow(/429/);
   expect(calls().postCalls).toBe(1); // リトライしない
+});
+
+test("runCursorStepはretryable errorでも再試行しない", async () => {
+  let calls = 0;
+  const gate = new RequestGate({ maxRetries: 3, sleep: async () => undefined });
+  await expect(gate.runCursorStep(async () => {
+    calls += 1;
+    throw httpError(429);
+  })).rejects.toThrow(/429/);
+  expect(calls).toBe(1);
 });
 
 // ----------------------------------------------------------------

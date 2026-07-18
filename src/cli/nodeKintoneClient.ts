@@ -13,10 +13,21 @@ import {
   type FormFieldProperty,
 } from "../core/formFieldInfo";
 import { normalizeProcessStatusStates, type RawProcessStatusState } from "../core/processStatus";
+import { createKintoneCursorHandle } from "../api/kintoneCursor";
+import { getCursorLeaseManager } from "../api/cursorLeaseManager";
+import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
+
+export class KintoneApiError extends Error {
+  constructor(readonly status: number, readonly code: string | undefined, bodyText: string) {
+    super(`kintone API error ${status}: ${bodyText}`);
+    this.name = "KintoneApiError";
+  }
+}
 
 export interface TokenResolver {
   guestSpaceId?: number | null;
   timeoutMs?: number;
+  cursorMaxActive?: number;
   debug?: boolean;
   debugHeaders?: boolean;
   log?: (line: string) => void;
@@ -96,7 +107,12 @@ export function createNodeKintoneClient(
       if (tokenResolver.debug) {
         tokenResolver.log?.(`[debug] response status=${res.status} body=${bodyText}`);
       }
-      throw new Error(`kintone API error ${res.status}: ${bodyText}`);
+      let code: string | undefined;
+      try {
+        const body = JSON.parse(bodyText) as { code?: unknown };
+        if (typeof body.code === "string") code = body.code;
+      } catch { /* non-JSON error body */ }
+      throw new KintoneApiError(res.status, code, bodyText);
     }
     if (tokenResolver.debug) {
       tokenResolver.log?.(`[debug] response status=${res.status}`);
@@ -174,6 +190,49 @@ export function createNodeKintoneClient(
           ? { ...response.body, searchAborted: true }
           : response.body;
       }
+    },
+
+    async openCursor(params) {
+      const manager = getCursorLeaseManager(new URL(normalizedBaseUrl).host, tokenResolver.cursorMaxActive);
+      const lease = await manager.acquire();
+      let created: { id: string; totalCount: string };
+      try {
+        created = await manager.runCreate(() => requestJson<{ id: string; totalCount: string }>(
+          `${apiBasePath}/records/cursor.json`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              app: params.app,
+              query: params.query,
+              size: params.size,
+              fields: params.fields && params.fields.length > 0 ? params.fields : undefined,
+            }),
+          },
+          params.app
+        ));
+      } catch (error) {
+        if (error instanceof KintoneApiError) {
+          lease.release();
+          throw error;
+        }
+        lease.quarantine();
+        throw new CursorCreateOutcomeUnknownError(error);
+      }
+      const cursorId = created.id;
+      return createKintoneCursorHandle(Number(created.totalCount), {
+        get: () => requestJson(
+          `${apiBasePath}/records/cursor.json?id=${encodeURIComponent(cursorId)}`,
+          { method: "GET" },
+          params.app
+        ),
+        delete: () => requestJson(
+          `${apiBasePath}/records/cursor.json`,
+          { method: "DELETE", body: JSON.stringify({ id: cursorId }) },
+          params.app
+        ),
+        onReleased: () => lease.release(),
+        onReleaseUnknown: () => lease.quarantine(),
+      });
     },
 
     async postRecords(_params: KintonePostParams) {

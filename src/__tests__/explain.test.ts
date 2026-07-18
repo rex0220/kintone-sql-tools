@@ -7,6 +7,7 @@ import { execute, KintoneClient, SelectResult } from "../execute";
 function makeClient(): KintoneClient {
   return {
     async getRecords()  { return { records: [] }; },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { return { ids: [] }; },
     async putRecords()  { },
     async deleteRecords() { },
@@ -81,13 +82,35 @@ test.each([0, 1])("B31: EXPLAIN も native allowlist 外を LIMIT %i で同じ�
   )).rejects.toThrow(/KORDER_TYPE_UNSUPPORTED/);
 });
 
-test("B31: EXPLAIN も実行時 maxRecords を使って native window を検査する", async () => {
+test("B33: EXPLAIN も実行時 maxRecords を使って cursor scanRows を検査する", async () => {
   const client = makeClient();
   await expect(execute(
     "EXPLAIN SELECT $id FROM APP100 KORDER BY $id LIMIT 500",
     client,
     { maxRecords: 100 }
-  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  )).rejects.toThrow(/KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS/);
+});
+
+test("B33: EXPLAIN KORDER_CURSOR はcursor APIとscanRowsを表示しLIMIT/OFFSETをqueryへ入れない", async () => {
+  const plan = await explain(
+    "EXPLAIN SELECT $id FROM APP100 KORDER BY $id LIMIT 501 OFFSET 2"
+  );
+  expect(plan.find((line) => line.includes("order plan"))).toContain("KORDER_CURSOR");
+  expect(plan.find((line) => line.includes("fetch API"))).toContain("records/cursor.json");
+  expect(plan.find((line) => line.includes("scan rows"))).toContain("503");
+  expect(plan.find((line) => line.includes("cursor concurrency"))).toContain("2 per domain (process-local)");
+  expect(plan.find((line) => line.includes("kintone query"))).toContain("order by $id asc");
+  expect(plan.find((line) => line.includes("kintone query"))).not.toMatch(/limit|offset/i);
+});
+
+test("B33: EXPLAINは実行surfaceで解決したcursorMaxActiveを表示する", async () => {
+  const result = await execute(
+    "EXPLAIN SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
+    makeClient(),
+    { maxRecords: 501, cursorMaxActive: 5 }
+  ) as SelectResult;
+  expect(result.rows.map((row) => String(row.plan)).find((line) => line.includes("cursor concurrency")))
+    .toContain("5 per domain (process-local)");
 });
 
 test("B31: EXPLAIN STATUS KORDER BY は process status metadata に依存しない", async () => {
@@ -534,7 +557,7 @@ test("B31: バッチ EXPLAIN も実行時 maxRecords で KORDER window を検査
     undefined,
     "explain-test-korder-max",
     100
-  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  )).rejects.toThrow(/KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS/);
 });
 
 test("バッチ EXPLAIN: 一時テーブル参照文は FULL_SCAN と行数不明を明示", async () => {

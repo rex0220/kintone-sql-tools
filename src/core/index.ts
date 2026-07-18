@@ -44,5 +44,6 @@ export type {
 } from "../converter/dmlToKintone";
 
 export type { PageFetchParams } from "../api/fetchAll";
+export type { KintoneCursorHandle, KintoneCursorOpenParams } from "../api/kintoneCursor";
 export type { Statement } from "../types/ast";
 export type { DisplayOptions } from "./displayFormat";

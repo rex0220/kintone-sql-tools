@@ -9,6 +9,14 @@ import {
 } from "../config";
 
 describe("logical app config", () => {
+  test("query.cursorMaxActive は1..5だけを受理する", () => {
+    expect(validateKsqlConfig({ profiles: { prod: { query: { cursorMaxActive: 5 } } } })
+      .profiles?.prod.query?.cursorMaxActive).toBe(5);
+    for (const cursorMaxActive of [0, 6, 1.5]) {
+      expect(() => validateKsqlConfig({ profiles: { prod: { query: { cursorMaxActive } } } }))
+        .toThrow(/cursorMaxActive.*1 to 5/);
+    }
+  });
   test("logicalApps を受理し、ASCII 大文字キーへ正規化する", () => {
     const config: KsqlConfig = {
       profiles: {

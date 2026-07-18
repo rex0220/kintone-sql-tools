@@ -3,7 +3,7 @@ import { Lexer } from "../../../lexer/lexer";
 import { Parser } from "../../../parser/parser";
 import type { SelectStatement } from "../../../types/ast";
 import { resolveFieldSemantics, withFieldSemanticSource } from "../../fieldSemantics";
-import { planKorderNative } from "../korderPlanner";
+import { planKorder } from "../korderPlanner";
 
 function statement(sql: string): SelectStatement {
   return new Parser(new Lexer(sql).tokenize()).parse() as SelectStatement;
@@ -23,7 +23,7 @@ function plan(
   } = {}
 ) {
   const stmt = statement(sql);
-  return planKorderNative({
+  return planKorder({
     stmt,
     staticMode: resolveSelectMode(stmt),
     whereCapability: options.capability ?? "EXACT_PUSHDOWN",
@@ -46,6 +46,7 @@ test("native allowlist の直接物理列を KORDER_NATIVE にする", () => {
       localOrderBy: false,
       applyLocalOffsetLimit: false,
       reasonCodes: [],
+      scanRows: 7,
   });
 });
 
@@ -76,9 +77,22 @@ test.each([9999, 10000])("OFFSET %i は公式契約内として受理する", (o
 });
 
 test.each([
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 501", 501],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 10001", 10001],
+  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 1 OFFSET 10001", 10002],
+] as const)("単発 GET 窓を超える %s は KORDER_CURSOR にする", (sql, scanRows) => {
+  expect(plan(sql, { maxRecords: 20_000 })).toMatchObject({ kind: "KORDER_CURSOR", scanRows });
+});
+
+test("単発 GET で完結する窓は scanRows が maxRecords を超えても native を優先する", () => {
+  expect(plan(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 500 OFFSET 10000",
+    { maxRecords: 500 }
+  )).toMatchObject({ kind: "KORDER_NATIVE", scanRows: 10_500 });
+});
+
+test.each([
   ["SELECT $id FROM APP100 KORDER BY 金額", "KORDER_LIMIT_INVALID"],
-  ["SELECT $id FROM APP100 KORDER BY 金額 LIMIT 501", "KORDER_LIMIT_INVALID"],
-  ["SELECT $id FROM APP100 KORDER BY 金額 LIMIT 5 OFFSET 10001", "KORDER_OFFSET_INVALID"],
   ["SELECT $id FROM APP100 KORDER BY 利用者 LIMIT 5", "KORDER_TYPE_UNSUPPORTED"],
   ["SELECT $id FROM APP100 KORDER BY typo LIMIT 5", "KORDER_KEY_UNRESOLVED"],
   ["SELECT $id FROM APP100 KORDER BY LENGTH(名前) LIMIT 5", "KORDER_KEY_NOT_DIRECT_FIELD"],
@@ -87,11 +101,11 @@ test.each([
   expect(() => plan(sql)).toThrow(reason);
 });
 
-test("LIMIT は実行時 maxRecords 以下でなければならない", () => {
+test("cursor の scanRows は実行時 maxRecords 以下でなければならない", () => {
   expect(() => plan(
-    "SELECT $id FROM APP100 KORDER BY $id LIMIT 500",
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
     { maxRecords: 100 }
-  )).toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  )).toThrow(/KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS/);
 });
 
 test("残余 WHERE と KLIKE は native plan にしない", () => {

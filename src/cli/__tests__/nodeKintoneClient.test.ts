@@ -1,10 +1,29 @@
 import { createNodeKintoneClient } from "../nodeKintoneClient";
+import { resetCursorLeaseManagers } from "../../api/cursorLeaseManager";
 
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   jest.restoreAllMocks();
+  resetCursorLeaseManagers();
+});
+
+test("Cursor Create/Get/Deleteを同じNode clientへ束縛する", async () => {
+  globalThis.fetch = jest.fn()
+    .mockResolvedValueOnce(jsonResponse({ id: "secret-cursor", totalCount: "600" }))
+    .mockResolvedValueOnce(jsonResponse({ records: [{ $id: { value: "1" } }], next: true }))
+    .mockResolvedValueOnce(jsonResponse({}));
+  const handle = await makeClient().openCursor({ app: 1, query: "order by $id asc", size: 500 });
+  expect(handle.totalCount).toBe(600);
+  await expect(handle.nextPage()).resolves.toMatchObject({ next: true });
+  await handle.close();
+  expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+  const createInit = (globalThis.fetch as jest.Mock).mock.calls[0][1] as RequestInit;
+  expect(JSON.parse(String(createInit.body))).toEqual({ app: 1, query: "order by $id asc", size: 500 });
+  expect(((globalThis.fetch as jest.Mock).mock.calls[1][0] as string)).toContain("records/cursor.json?id=secret-cursor");
+  const deleteInit = (globalThis.fetch as jest.Mock).mock.calls[2][1] as RequestInit;
+  expect(deleteInit.method).toBe("DELETE");
 });
 
 function jsonResponse(

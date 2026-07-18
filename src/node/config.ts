@@ -34,6 +34,8 @@ export interface KsqlProfileConfig {
     timeout?: number;
     /** 一時テーブル1個の実体化行数上限（既定 10,000。超過は onLimit 設定によらず常に error） */
     tempTableMaxRows?: number;
+    /** host単位の有効Cursor上限（1..5、既定2。env KSQL_CURSOR_MAX_ACTIVEが優先） */
+    cursorMaxActive?: number;
     /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
     maxConcurrent?: number;
     /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
@@ -150,6 +152,12 @@ export function validateKsqlConfig(config: KsqlConfig): KsqlConfig {
     }
     const logicalApps = normalizeLogicalApps(profileName, profile.logicalApps);
     if (logicalApps !== undefined) profile.logicalApps = logicalApps;
+    if (profile.query?.cursorMaxActive !== undefined) {
+      const value = profile.query.cursorMaxActive;
+      if (!Number.isSafeInteger(value) || value < 1 || value > 5) {
+        throw argumentError(`query.cursorMaxActive for profile "${profileName}" must be an integer from 1 to 5.`);
+      }
+    }
   }
   return config;
 }

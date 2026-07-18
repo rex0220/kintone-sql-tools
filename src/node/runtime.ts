@@ -36,6 +36,7 @@ export interface CreateKsqlRuntimeInput {
   onLimit?: OnLimitMode;
   timeout?: number;
   tempTableMaxRows?: number;
+  cursorMaxActive?: number;
   debug?: boolean;
   debugHeaders?: boolean;
   log?: (line: string) => void;
@@ -193,6 +194,8 @@ export interface KsqlRuntime {
   fetchParallel: number;
   onLimit: OnLimitMode;
   timeout: number;
+  /** 実runtimeでは解決済み。外部から差し替えるlegacy runtime mockでは省略可。 */
+  cursorMaxActive?: number;
   /** 一時テーブル実体化上限。undefined = エンジン既定（TEMP_TABLE_MAX_ROWS = 10,000）に委ねる */
   tempTableMaxRows?: number;
 }
@@ -246,6 +249,13 @@ export async function createKsqlRuntime(
   const tempTableMaxRows = input.tempTableMaxRows
     ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS")
     ?? profile.query?.tempTableMaxRows;
+  const cursorMaxActive = input.cursorMaxActive
+    ?? envInt("KSQL_CURSOR_MAX_ACTIVE")
+    ?? profile.query?.cursorMaxActive
+    ?? 2;
+  if (!Number.isSafeInteger(cursorMaxActive) || cursorMaxActive < 1 || cursorMaxActive > 5) {
+    throw new Error("ArgumentError: cursorMaxActive must be an integer from 1 to 5.");
+  }
 
   const appIds = extractAppIds(sql);
   const defaultApp = envInt("KSQL_APP") ?? profile.app ?? null;
@@ -290,6 +300,7 @@ export async function createKsqlRuntime(
       }
       profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
+        cursorMaxActive,
         timeoutMs: timeout,
         debug: input.debug,
         debugHeaders: input.debugHeaders,
@@ -324,6 +335,7 @@ export async function createKsqlRuntime(
 
     profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
       guestSpaceId,
+      cursorMaxActive,
       timeoutMs: timeout,
       debug: input.debug,
       debugHeaders: input.debugHeaders,
@@ -360,6 +372,12 @@ export async function createKsqlRuntime(
       const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.getRecords({ ...params, app: binding.appId });
+    },
+    openCursor: (params) => {
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
+      if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
+      return routed.openCursor({ ...params, app: binding.appId });
     },
     postRecords: (params) => {
       const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
@@ -417,6 +435,7 @@ export async function createKsqlRuntime(
     fetchParallel,
     onLimit,
     timeout,
+    cursorMaxActive,
     tempTableMaxRows,
   };
 }

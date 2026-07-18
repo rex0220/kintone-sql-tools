@@ -167,6 +167,7 @@ let latestPanelDisplayOptions: DisplayOptions = {
 let latestPanelMaxRecords = 3000;
 let latestPanelOnLimit: "error" | "truncate" = "error";
 let latestPanelTempTableMaxRows: number | undefined = undefined;
+let latestPanelCursorMaxActive = 2;
 
 // ============================================================
 // SQL 履歴（localStorage）
@@ -477,6 +478,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   // レコードページはフィールド復元値（initialTempTableMaxRows）、一覧ページは localStorage
   let panelTempTableMaxRowsState: number | undefined =
     options.initialTempTableMaxRows ?? storedFetch?.tempTableMaxRows;
+  let panelCursorMaxActiveState = storedFetch?.cursorMaxActive ?? 2;
   // 実行時は常にパネルの現在UI状態を優先する。
   // （レコード保存前に options.resolve* 側の値が古い場合でも、直近入力値で実行できるようにする）
   const resolveMaxRecords = (): number => panelMaxRecordsState;
@@ -486,6 +488,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   latestPanelMaxRecords = panelMaxRecordsState;
   latestPanelOnLimit = panelOnLimitState;
   latestPanelTempTableMaxRows = panelTempTableMaxRowsState;
+  latestPanelCursorMaxActive = panelCursorMaxActiveState;
 
   let panelLastResult: ExecuteResult | null = null;
   const panel = el("div", "ksql-panel", { id: "ksql-panel" });
@@ -584,7 +587,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     const tempRows = resolveTempTableMaxRows();
     // 一時テーブル上限は指定時のみ表示（未指定 = エンジン既定 10,000）
     const tempPart = tempRows !== undefined ? ` / 一時 ${tempRows}` : "";
-    optSummary.textContent = `取得: ${resolveMaxRecords()} / ${mode}${tempPart}`;
+    optSummary.textContent = `取得: ${resolveMaxRecords()} / ${mode}${tempPart} / Cursor ${panelCursorMaxActiveState}`;
   };
   refreshOptSummary();
 
@@ -607,16 +610,19 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     panelMaxRecordsState,
     panelOnLimitState,
     panelTempTableMaxRowsState,
-    (maxRecords, mode, tempTableMaxRows) => {
+    panelCursorMaxActiveState,
+    (maxRecords, mode, tempTableMaxRows, cursorMaxActive) => {
       panelMaxRecordsState = maxRecords;
       panelOnLimitState = mode;
       panelTempTableMaxRowsState = tempTableMaxRows;
       latestPanelMaxRecords = maxRecords;
       latestPanelOnLimit = mode;
       latestPanelTempTableMaxRows = tempTableMaxRows;
+      panelCursorMaxActiveState = cursorMaxActive;
+      latestPanelCursorMaxActive = cursorMaxActive;
       // 一覧ページ（initialMaxRecords 未指定）は設定を localStorage に永続化する
       if (options.initialMaxRecords === undefined) {
-        saveFetchOptions(FETCH_OPTIONS_KEY, maxRecords, mode, tempTableMaxRows);
+        saveFetchOptions(FETCH_OPTIONS_KEY, maxRecords, mode, tempTableMaxRows, cursorMaxActive);
       }
       refreshOptSummary();
     }
@@ -887,6 +893,12 @@ interface StoredFetchOptions {
   onLimitReached: "error" | "truncate";
   /** 一時テーブル上限。undefined = エンジン既定（旧形式の保存データも undefined 扱いで後方互換） */
   tempTableMaxRows?: number;
+  cursorMaxActive?: number;
+}
+
+function sanitizeCursorMaxActive(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 5 ? parsed : 2;
 }
 
 function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
@@ -895,10 +907,15 @@ function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
     if (!raw) return null;
     const obj = JSON.parse(raw) as unknown;
     if (typeof obj !== "object" || obj === null) return null;
-    const { maxRecords, onLimitReached, tempTableMaxRows } = obj as Record<string, unknown>;
+    const { maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive } = obj as Record<string, unknown>;
     if (typeof maxRecords !== "number" || maxRecords <= 0) return null;
     if (onLimitReached !== "error" && onLimitReached !== "truncate") return null;
-    return { maxRecords, onLimitReached, tempTableMaxRows: sanitizeTempTableMaxRows(tempTableMaxRows) };
+    return {
+      maxRecords,
+      onLimitReached,
+      tempTableMaxRows: sanitizeTempTableMaxRows(tempTableMaxRows),
+      cursorMaxActive: sanitizeCursorMaxActive(cursorMaxActive),
+    };
   } catch {
     return null;
   }
@@ -908,11 +925,12 @@ function saveFetchOptions(
   storageKey: string,
   maxRecords: number,
   onLimitReached: "error" | "truncate",
-  tempTableMaxRows?: number
+  tempTableMaxRows?: number,
+  cursorMaxActive = 2
 ): void {
   try {
     // tempTableMaxRows が undefined のときは JSON.stringify がキーごと省略する（旧形式と同形）
-    localStorage.setItem(storageKey, JSON.stringify({ maxRecords, onLimitReached, tempTableMaxRows }));
+    localStorage.setItem(storageKey, JSON.stringify({ maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive }));
   } catch {
     // noop
   }
@@ -940,7 +958,8 @@ function buildFetchOptionsPanel(
   initialMaxRecords: number,
   initialMode: "error" | "truncate",
   initialTempTableMaxRows: number | undefined,
-  onChange: (maxRecords: number, mode: "error" | "truncate", tempTableMaxRows: number | undefined) => void
+  initialCursorMaxActive: number,
+  onChange: (maxRecords: number, mode: "error" | "truncate", tempTableMaxRows: number | undefined, cursorMaxActive: number) => void
 ): HTMLElement {
   const panel = el("div", "ksql-fetch-panel");
 
@@ -975,6 +994,16 @@ function buildFetchOptionsPanel(
   const tempNote = el("div", "ksql-fetch-note");
   tempNote.textContent = "空欄 = 既定 10,000。超過は常にエラー（「打ち切って続行」は適用されません）";
 
+  const cursorRow = el("div", "ksql-fetch-row");
+  const cursorLabel = el("label", "ksql-fetch-label");
+  cursorLabel.textContent = "同時Cursor上限:";
+  const cursorInput = el("input", "ksql-fetch-input", {
+    type: "number", min: "1", max: "5", step: "1",
+    value: String(sanitizeCursorMaxActive(initialCursorMaxActive)),
+    id: "ksql-cursor-max-active-input",
+  }) as HTMLInputElement;
+  cursorRow.append(cursorLabel, cursorInput);
+
   const modeRow = el("div", "ksql-fetch-row");
   const modeLabel = el("span", "ksql-fetch-label");
   modeLabel.textContent = "上限到達時:";
@@ -1005,7 +1034,9 @@ function buildFetchOptionsPanel(
     const mode = readCheckedRadio(panel, "ksql-limit-mode") === "truncate" ? "truncate" : "error";
     // 空欄 = undefined（エンジン既定 10,000）。入力値は書き戻さない（空欄を維持できるように）
     const tempRows = sanitizeTempTableMaxRows(tempInput.value);
-    onChange(max, mode, tempRows);
+    const cursorMaxActive = sanitizeCursorMaxActive(cursorInput.value);
+    cursorInput.value = String(cursorMaxActive);
+    onChange(max, mode, tempRows, cursorMaxActive);
   };
 
   // 一部ブラウザで number スピナーが 1 刻みになるため、100 刻みに補正する
@@ -1035,8 +1066,10 @@ function buildFetchOptionsPanel(
   maxInput.addEventListener("blur", sync);
   tempInput.addEventListener("input", sync);
   tempInput.addEventListener("blur", sync);
+  cursorInput.addEventListener("input", sync);
+  cursorInput.addEventListener("blur", sync);
 
-  panel.append(maxRow, modeRow, tempRow, tempNote);
+  panel.append(maxRow, modeRow, tempRow, tempNote, cursorRow);
   panel.addEventListener("change", sync);
   sync();
 
@@ -1856,7 +1889,9 @@ async function batchPlansToSelectResult(
   client: Parameters<typeof executeBatch>[1],
   maxRecords: number
 ): Promise<SelectResult> {
-  const plans = await buildBatchExplainPlans(sql, client, undefined, "batch-explain", maxRecords);
+  const plans = await buildBatchExplainPlans(
+    sql, client, undefined, "batch-explain", maxRecords, latestPanelCursorMaxActive
+  );
   const rows: Array<{ plan: string }> = [];
   plans.statements.forEach((p) => {
     if (p.index > 0) rows.push({ plan: "" });
@@ -2071,7 +2106,7 @@ async function runSql(
     if (editor) editor.readOnly = true;
     resultArea.innerHTML = renderLoading();
 
-    const client = createKintoneClient();
+    const client = createKintoneClient({ cursorMaxActive: latestPanelCursorMaxActive });
     const resolvedOptions = resultOptions ?? displayOptions;
 
     // 複文バッチ: 最終結果のみ表示（仕様 §8.4）。DML を含むバッチは
@@ -2134,6 +2169,7 @@ async function runSql(
       // 黙って切り捨てられ部分書き込みになるため。バッチ側と同じ固定。仕様 §3.6）
       onLimitReached: surfaceForcesOnLimitError ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
+      cursorMaxActive: latestPanelCursorMaxActive,
     });
 
     lastResult = result;
