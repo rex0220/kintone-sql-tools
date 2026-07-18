@@ -245,7 +245,13 @@ type VarValue =
 - **Phase 1b**: `SET @x = (SELECT ...)` スカラーサブクエリ代入（0 行=NULL、2 行以上=実行時エラー）。実行エンジン連携。
 - **Phase 1c**: `DECLARE @param [DEFAULT ...]` + 外部注入（保存クエリのパラメータ化、MCP/CLI インターフェース変更、機密マスク）。
 - LIMIT/OFFSET・SELECT 定数列での `@var` 参照。（IN リスト要素は §2.6・R4 で対応済み）
-- **`IN (@list)` の配列展開**（1 変数が複数値を持つ）。配列型 `VarValue`・`SET @l=(...)` 代入構文・展開ロジックが必要（全体提案 §10）。
+- **`IN (@list)` の配列展開**（1 変数が複数値を持つ・台帳 B3）。配列型 `VarValue`・配列値の代入構文・展開ロジックが必要（全体提案 §10）。**推奨構文案（2026-07-19・利用例検討で確定）は下記**。
+
+  - **定義（代入）＝既存の配列リテラル `[...]` を再利用**：`SET @l = ['1', '2']`。kSQL は既に `ArrayLiteral`（`type:"ARRAY"`・角括弧）を持ち、複数値フィールド（CHECK_BOX / MULTI_SELECT / USER_SELECT）の書込み値に使用中（例: `SET タグ = ['重要','VIP']`・`THEN ['user1','user2']`・INSERT の `VALUES (['user1','user2'])`）。**新しいリテラル文法を足さずに済む**のが最大の利点。現状の `parseArrayLiteral` は**要素 STRING 限定**なので `['1','2']`（数値も文字列表記）。裸の `[1,2]` を許すなら要素の NUMBER 受理を拡張。
+  - **参照（展開）＝カッコ無しの `IN @l`**：`WHERE $id IN @l`。既存の `IN (…)` は「要素の並び」で意味確定済み（`IN (@a,@b)`＝R4 出荷済み・`IN (@l)`＝スカラー1要素）。**カッコの有無で「要素列（`IN (…)`）／リスト変数（`IN @l`）」を無曖昧に切り分け**られる（§2.6・codex #1 が留保した「別構文」の具体案）。パーサは IN の次トークンが `(` か `@var` かで分岐でき既存構文を壊さない。
+  - **却下案**：`SET @l = (1,2)` は `(...)` がスカラー括弧式／IN 要素列と衝突（実機で ParseError）。`ARRAY(1,2)` は `[...]` があるため冗長（PostgreSQL の配列リテラルも `ARRAY[...]`＝角括弧で、`ARRAY(...)`＝括弧はサブクエリ由来）。
+  - **他RDB対照**：「リスト変数を述語で直接使う」主流は PostgreSQL `= ANY(@arr)`（配列型＋専用演算子）か、Oracle/SQL Server の unnest（`TABLE()`/`STRING_SPLIT` で行に開いて `IN (SELECT …)`）。裸 `IN @var` はどのRDBにも前例が無い kSQL 独自形だが、`[...]` 既存＋曖昧さ回避の観点でこの案を推奨。unnest 派は kSQL の一時テーブル＋`IN (SELECT …)` で**既に代替可能**（B3 が優先低のまま棚上げでも困らない理由）。
+  - **残る実装差分**：①配列値を保持する `VarValue`②`SET @var = [配列リテラル]` の代入経路③`IN @var` の展開ロジック。**リテラル文法は新規不要**（①②③のみ）。
 - **NULL**（`NullLiteral` AST・`@x IS NULL` 構文・kintone 空値との対応・WHERE/UPDATE/ASSERT での null 意味論）を独立機能として（codex #2）。
 - 整形/接頭辞付きバッチ ID（`CONCAT` + `StringFuncArg` への `KINTONE_FUNC` 追加）。
 - 再代入（可変変数）、識別子のパラメータ化。
