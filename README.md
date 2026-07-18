@@ -238,10 +238,10 @@ Options:
 
 - [Docs Index](docs/README.md)
 - [言語リファレンス](docs/ksql_language_reference.md)
-- [CLI / Console 仕様](docs/ksql_cli_console_spec.md)
-- [バッチ実行・一時テーブル仕様](docs/ksql_batch_temp_table_spec.md)
-- [MCP サーバー仕様](docs/ksql_mcp_server_spec.md) / [Claude Desktop への導入（MCPB）](docs/ksql_mcpb_claude_desktop_install.md)
-- [APP@profile 仕様](docs/cli_app_profile_spec.md)
+- [CLI / Console 仕様](docs/internal/ksql_cli_console_spec.md)
+- [バッチ実行・一時テーブル仕様](docs/internal/ksql_batch_temp_table_spec.md)
+- [MCP サーバー仕様](docs/internal/ksql_mcp_server_spec.md) / [Claude Desktop への導入（MCPB）](docs/ksql_mcpb_claude_desktop_install.md)
+- [APP@profile 仕様](docs/internal/cli_app_profile_spec.md)
 - [公開前チェックリスト](docs/internal/public_release_checklist.md)
 
 ## ライセンス

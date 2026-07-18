@@ -1,48 +1,31 @@
 # Docs Index
 
-公開向けの主要ドキュメント一覧です。
+`docs/` 直下は**利用者向けドキュメント**、`docs/internal/` は**開発側の作業文書**（仕様書・実装計画・課題文書・評価・実測証跡）です。新しい文書は、利用者が読むものだけを直下へ置きます。
 
 ## 課題・改善案・Issue の管理
 
-- **[`ksql_issue_tracker.md`](ksql_issue_tracker.md)** — 課題・改善案・Issue の一括管理台帳（進捗 / 効果 / リリースバージョン）。個別文書のステータスをここに集約する。
+- **[`ksql_issue_tracker.md`](ksql_issue_tracker.md)** — 課題・改善案・Issue の一括管理台帳（進捗 / 効果 / リリースバージョン）。個別文書のステータスをここに集約する。**internal 配下の仕様・課題文書はこの台帳から辿る。**
 
-## 主要仕様
+## 利用者向けドキュメント
 
-- `ksql_language_reference.md`
-- `ksql_v3_migration_guide.md` — v3.0.0の比較・ORDER BY・WHERE・取得上限・KORDER予約語の移行ガイド
-- `ksql_batch_recipes.md` — バッチ設計レシピ集（リラン可能な差分更新・件数ゲート・スナップショット・バッチ変数）
-- `ksql_cli_console_spec.md`
-- `kintone_sql_plugin_spec.md`
-- `ksql_mcp_server_spec.md`
-- `ksql_mcp_changes.md`
-- `ksql_mcpb_config_path_spec.md`
-- `ksql_mcpb_claude_desktop_install.md`
-- `ksql_mcp_verification_setup.md`
+- [`ksql_language_reference.md`](ksql_language_reference.md) — kSQL 言語リファレンス（構文・関数・制限）
+- [`ksql_cli_tutorial.md`](ksql_cli_tutorial.md) — CLI チュートリアル
+- [`ksql_batch_recipes.md`](ksql_batch_recipes.md) — バッチ設計レシピ集（リラン可能な差分更新・ON ERROR SKIP・KORDER 大量取得・正規化書き戻し 等）
+- [`ksql_v3_migration_guide.md`](ksql_v3_migration_guide.md) — v3.0.0 移行ガイド（比較・ORDER BY・WHERE・取得上限・KORDER 予約語）
+- [`ksql_v3_1_migration_guide.md`](ksql_v3_1_migration_guide.md) — v3.1.0 移行ガイド（KORDER BY 大規模窓の Cursor API）
+- [`ksql_mcpb_claude_desktop_install.md`](ksql_mcpb_claude_desktop_install.md) — Claude Desktop への MCPB インストール手順
 
-## CLI profile 拡張
+## 設定サンプル
 
-- `cli_app_profile_spec.md`
+- `examples/ksql.config.sample.json` — CLI 設定
+- `examples/ksql.mcp.config.sample.json` — MCP 設定
+- `examples/mcp-client.sample.json` / `examples/mcp-verification.env.sample`
 
-## 公開・運用
+## 公開記事ドラフト
 
-- `examples/ksql.config.sample.json`
-- `examples/ksql.mcp.config.sample.json`
-- `examples/mcp-client.sample.json`
-- `examples/mcp-verification.env.sample`
+- `qiita_kintone_sql_tools_intro.md` / `qiita_cli_ksql_intro.md` / `qiita_cli_ksql_mechanism.md` — 紹介・仕組み解説
+- `qiita_kintone_string_sort.md` — kintone の文字列とソートの仕様まとめ（公式仕様＋実機検証）
 
-## 検討・評価
+## internal/（開発側の作業文書）
 
-- `multi-statement-temp-table-evaluation.md`
-
-## 主要仕様(v1.4.0 追加分)
-
-- `ksql_batch_temp_table_spec.md`(バッチ実行・一時テーブル 仕様書 — フェーズ1・2 実装済み、実機検証中)
-
-## 内部向け
-
-- `internal/ksql_batch_temp_table_implementation_plan.md`
-- `internal/ksql_v1.4.0_plugin_verification_sql.md`(v1.4.0 プラグイン実機テスト SQL)
-- `internal/cli_app_profile_implementation_guide.md`
-- `internal/cli_app_profile_implementation_guide_scoped_cache.md`
-- `internal/ksql_mcp_server_implementation_steps.md`
-- `internal/public_release_checklist.md`
+仕様書・実装計画・課題文書・評価・実測証跡（`internal/evidence/`）はすべて [`internal/`](internal/) 配下にあります。個別文書の位置づけと最新ステータスは[台帳](ksql_issue_tracker.md)を正とします。横断的な意味論は [`internal/ksql_string_semantics.md`](internal/ksql_string_semantics.md)（文字列の扱いの正）を参照してください。

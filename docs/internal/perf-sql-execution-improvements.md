@@ -95,7 +95,7 @@ INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` して�
 
 [execute.ts](../src/execute.ts) の `useSingleGet` でない場合、従来は WHERE 一致分を（最大 `maxRecords` まで）**全件**取得してから JS で ORDER BY / LIMIT していた。`LIMIT 1000` でも 10,000 件取得し得る。
 
-**v2.11.0 実装済み**: `ORDER BY` が空、`LIMIT` 明示、`offset + limit <= maxRecords`、KLIKE なしの SIMPLE SELECT に限定し、`fetchAll.stopAfter` へ `offset + limit` を渡す。フェッチ順の `$id` 昇順がそのまま返却順になる安全サブセットだけを必要件数で正常終了する。`ORDER BY` 付きは JS 再ソートが全件に依存し、KLIKE は後続ページの検索打ち切り警告を検査する必要があるため対象外。詳細は [B8 仕様](internal/ksql_limit_over_500_fetch_truncation_spec.md)。
+**v2.11.0 実装済み**: `ORDER BY` が空、`LIMIT` 明示、`offset + limit <= maxRecords`、KLIKE なしの SIMPLE SELECT に限定し、`fetchAll.stopAfter` へ `offset + limit` を渡す。フェッチ順の `$id` 昇順がそのまま返却順になる安全サブセットだけを必要件数で正常終了する。`ORDER BY` 付きは JS 再ソートが全件に依存し、KLIKE は後続ページの検索打ち切り警告を検査する必要があるため対象外。詳細は [B8 仕様](ksql_limit_over_500_fetch_truncation_spec.md)。
 
 この最適化では `maxRecords` を「実際に取得した行数」の上限として扱うため、`offset + limit <= maxRecords` なら一致総数が上限を超えていてもエラー／truncate 警告なしで成功する。返却行は従来成功時と同一だが、従来は上限エラーだったクエリが成功し得る。
 
