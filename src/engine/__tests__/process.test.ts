@@ -1630,6 +1630,20 @@ test("B20 は SELECT・WHERE・HAVING・ORDER BY で実行時評価される", (
   ]);
 });
 
+test("B36 occurrence は SELECT と WHERE でフィールドから実行時評価される", () => {
+  const records = [
+    makeRecord({ value: "a-a-a", occurrence: "2" }),
+    makeRecord({ value: "a-a-a", occurrence: "1" }),
+  ];
+  const stmt = parseSelect(
+    "SELECT REGEXP_REPLACE(value, 'a', 'x', '', occurrence) AS replaced " +
+    "FROM APP100 WHERE REGEXP_REPLACE(value, 'a', 'x', '', occurrence) = 'a-x-a'"
+  );
+  expect(runFullScan({ tables: new Map([[null, records]]), stmt }).rows).toEqual([
+    { replaced: "a-x-a" },
+  ]);
+});
+
 test("runFullScan: B22 は BMP の B19 契約と LENGTH / LIKE / INSTR の単位を変えない", () => {
   const records = [makeRecord({ s: "😀", bmp: "東京都千代田区" })];
   const stmt = parseSelect(

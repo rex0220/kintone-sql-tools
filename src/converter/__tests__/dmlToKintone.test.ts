@@ -265,6 +265,23 @@ test("B20 UPDATE SET は正規表現引数フィールドを取得して行ご�
   });
 });
 
+test("B36 UPDATE SET は occurrence フィールドを取得して N 番目だけ置換する", () => {
+  const stmt = parse(
+    "UPDATE APP100 SET normalized = REGEXP_REPLACE(source, pattern, replacement, flags, occurrence) " +
+    "WHERE $id = 1"
+  ) as UpdateStatement;
+  const getParams = updateToGetQueryForArith(stmt);
+  expect(getParams.fields).toEqual(["$id", "source", "pattern", "replacement", "flags", "occurrence"]);
+
+  const batches = updateToPutBatchesArith(stmt, [{
+    "$id": { value: "1" }, source: { value: "a-a-a" }, pattern: { value: "a" },
+    replacement: { value: "x" }, flags: { value: "" }, occurrence: { value: "2" },
+  }]);
+  expect(batches[0].records[0].record).toEqual({
+    normalized: { value: "a-x-a" },
+  });
+});
+
 test("B21 算術式内 STRING_FUNC は従来どおり DmlConvertError", () => {
   const stmt = parse(
     "UPDATE APP100 SET n = LENGTH(source) * 1 WHERE $id = 1"
