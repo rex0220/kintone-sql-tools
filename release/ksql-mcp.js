@@ -31029,6 +31029,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["LTRIM", "LTRIM" /* LTRIM */],
   ["RTRIM", "RTRIM" /* RTRIM */],
   ["LENGTH", "LENGTH" /* LENGTH */],
+  ["LENGTH_CHAR", "LENGTH_CHAR" /* LENGTH_CHAR */],
   ["SUBSTRING", "SUBSTRING" /* SUBSTRING */],
   ["SUBSTR", "SUBSTR" /* SUBSTR */],
   ["CONCAT", "CONCAT" /* CONCAT */],
@@ -31041,6 +31042,7 @@ var KEYWORDS = /* @__PURE__ */ new Map([
   ["LEAST", "LEAST" /* LEAST */],
   ["LPAD", "LPAD" /* LPAD */],
   ["RPAD", "RPAD" /* RPAD */],
+  ["TRANSLATE", "TRANSLATE" /* TRANSLATE */],
   ["CAST", "CAST" /* CAST */],
   ["CONVERT", "CONVERT" /* CONVERT */],
   ["FORMAT", "FORMAT" /* FORMAT */],
@@ -31400,10 +31402,12 @@ var FUNC_CALL_PREFIX_KINDS = /* @__PURE__ */ new Set([
   "LTRIM" /* LTRIM */,
   "RTRIM" /* RTRIM */,
   "LENGTH" /* LENGTH */,
+  "LENGTH_CHAR" /* LENGTH_CHAR */,
   "SUBSTRING" /* SUBSTRING */,
   "SUBSTR" /* SUBSTR */,
   "CONCAT" /* CONCAT */,
   "REPLACE" /* REPLACE */,
+  "TRANSLATE" /* TRANSLATE */,
   "COALESCE" /* COALESCE */,
   "NULLIF" /* NULLIF */,
   "ISNULL" /* ISNULL */,
@@ -31455,6 +31459,7 @@ var ParseError = class extends Error {
 var Parser = class {
   constructor(tokens) {
     this.tokens = tokens;
+    this.allowUnaryPlusNumber = false;
     this.pos = 0;
     /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
     this.cteNames = /* @__PURE__ */ new Set();
@@ -32223,8 +32228,16 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
       return expr;
     }
+    if (this.allowUnaryPlusNumber && this.peek().kind === "+" /* PLUS */) {
+      this.advance();
+      const number4 = this.expect("NUMBER" /* NUMBER */, "\u5358\u9805 + \u306E\u76F4\u5F8C\u306B\u306F\u6570\u5024\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
+      return { type: "NUMBER", value: Number(number4.value) };
+    }
     if (this.peek().kind === "-" /* MINUS */) {
       this.advance();
+      if (this.peek().kind === "-" /* MINUS */ || this.peek().kind === "+" /* PLUS */) {
+        throw new ParseError("\u5358\u9805\u7B26\u53F7\u3092\u91CD\u306D\u3066\u6307\u5B9A\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093", this.peek());
+      }
       const operand = this.parseArithPrimary();
       if (operand.type === "NUMBER") return { type: "NUMBER", value: -operand.value };
       return { type: "ARITH", left: { type: "NUMBER", value: 0 }, op: "-", right: operand };
@@ -32334,10 +32347,12 @@ var Parser = class {
       ["LTRIM" /* LTRIM */]: "LTRIM",
       ["RTRIM" /* RTRIM */]: "RTRIM",
       ["LENGTH" /* LENGTH */]: "LENGTH",
+      ["LENGTH_CHAR" /* LENGTH_CHAR */]: "LENGTH_CHAR",
       ["SUBSTRING" /* SUBSTRING */]: "SUBSTRING",
       ["SUBSTR" /* SUBSTR */]: "SUBSTRING",
       ["CONCAT" /* CONCAT */]: "CONCAT",
       ["REPLACE" /* REPLACE */]: "REPLACE",
+      ["TRANSLATE" /* TRANSLATE */]: "TRANSLATE",
       ["COALESCE" /* COALESCE */]: "COALESCE",
       ["NULLIF" /* NULLIF */]: "NULLIF",
       ["ISNULL" /* ISNULL */]: "ISNULL",
@@ -33098,6 +33113,11 @@ var Parser = class {
       } else if (this.peek().kind === "IF" /* IF */) {
         const expr = this.parseIfExpr();
         row.push({ type: "CASE_VALUE", expr });
+      } else if (this.peek().kind === "-" /* MINUS */ || this.peek().kind === "+" /* PLUS */) {
+        const sign = this.advance();
+        const number4 = this.expect("NUMBER" /* NUMBER */, "INSERT \u306E\u5358\u9805\u7B26\u53F7\u306E\u76F4\u5F8C\u306B\u306F\u6570\u5024\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
+        const value = Number(number4.value);
+        row.push({ type: "NUMBER", value: sign.kind === "-" /* MINUS */ ? -value : value });
       } else {
         const tok = this.advance();
         if (tok.kind === "STRING" /* STRING */) {
@@ -33127,6 +33147,12 @@ var Parser = class {
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     this.expect("SET" /* SET */);
     const assignments = this.parseAssignments();
+    if (subtableCode && assignments.some((a) => a.value.type === "STRING_FUNC")) {
+      throw new ParseError(
+        "\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE SET \u3067\u306F\u6587\u5B57\u5217\u95A2\u6570\u3092\u76F4\u63A5\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093",
+        this.prev()
+      );
+    }
     let from = null;
     if (this.consume("FROM" /* FROM */)) {
       const table = this.parseTableRef();
@@ -33170,7 +33196,14 @@ var Parser = class {
       from.targetFilter = decomposed.targetFilter;
     } else if (assignments.some((a) => a.value.type === "SOURCE_FIELD")) {
       throw new ParseError(
-        "SET \u306E\u5024\u306B\u306F\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306E\u307F\u306F\u4E0D\u53EF\uFF09",
+        "SET \u306E\u5024\u306B\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u5358\u72EC\u3067\u6307\u5B9A\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093",
+        whereTok
+      );
+    } else if (assignments.some(
+      (a) => a.value.type === "STRING_FUNC" && this.nodeContainsAnyQualifier(a.value)
+    )) {
+      throw new ParseError(
+        "UPDATE SET \u306E\u6587\u5B57\u5217\u95A2\u6570\u3067\u306F\u66F4\u65B0\u5148\u30D5\u30A3\u30FC\u30EB\u30C9\u3092\u4FEE\u98FE\u3057\u306A\u3044\u3067\u304F\u3060\u3055\u3044",
         whereTok
       );
     }
@@ -33237,6 +33270,12 @@ var Parser = class {
   }
   validateUpdateFromAssignments(assignments, sourceAlias, tok) {
     for (const assignment of assignments) {
+      if (assignment.value.type === "STRING_FUNC") {
+        throw new ParseError(
+          "UPDATE ... FROM \u306E SET \u3067\u306F\u6587\u5B57\u5217\u95A2\u6570\u3092\u76F4\u63A5\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093",
+          tok
+        );
+      }
       if (assignment.value.type === "SOURCE_FIELD") {
         if (assignment.value.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
           throw new ParseError(`UPDATE ... FROM \u306E SET \u53C2\u7167\u306F\u30BD\u30FC\u30B9 alias ${sourceAlias} \u3067\u4FEE\u98FE\u3057\u3066\u304F\u3060\u3055\u3044`, tok);
@@ -33376,9 +33415,17 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
       return { type: "SCALAR_SUBQUERY", query };
     }
-    const node = this.parseArithAddSub();
+    const previousAllowUnaryPlusNumber = this.allowUnaryPlusNumber;
+    this.allowUnaryPlusNumber = true;
+    let node;
+    try {
+      node = this.parseArithAddSub();
+    } finally {
+      this.allowUnaryPlusNumber = previousAllowUnaryPlusNumber;
+    }
     if (node.type === "NUMBER") return node;
     if (node.type === "ARITH") return node;
+    if (node.type === "STRING_FUNC") return node;
     if (node.type === "FIELD_REF") {
       const dot = node.field.indexOf(".");
       if (dot > 0 && dot < node.field.length - 1) {
@@ -33386,7 +33433,7 @@ var Parser = class {
       }
     }
     throw new ParseError(
-      "SET \u306E\u5024\u306B\u306F\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF08\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u306E\u307F\u306F\u4E0D\u53EF\uFF09",
+      "SET \u306E\u5024\u306B\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u5358\u72EC\u3067\u6307\u5B9A\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093",
       tok
     );
   }
@@ -35399,6 +35446,43 @@ function applyRoundOp(op, num, digits) {
   if (digits > 0) return String(parseFloat(raw.toFixed(digits)));
   return String(raw);
 }
+function isHighSurrogate(codeUnit) {
+  return codeUnit >= 55296 && codeUnit <= 56319;
+}
+function isLowSurrogate(codeUnit) {
+  return codeUnit >= 56320 && codeUnit <= 57343;
+}
+function splitsSurrogatePair(value, index) {
+  return index > 0 && index < value.length && isHighSurrogate(value.charCodeAt(index - 1)) && isLowSurrogate(value.charCodeAt(index));
+}
+function normalizeSliceIndex(index, length) {
+  if (Number.isNaN(index) || index === Number.NEGATIVE_INFINITY) return 0;
+  if (index === Number.POSITIVE_INFINITY) return length;
+  const integer2 = Math.trunc(index);
+  return integer2 < 0 ? Math.max(length + integer2, 0) : Math.min(integer2, length);
+}
+function sliceSafePrefix(value, budget) {
+  let end = Math.min(Math.max(0, budget), value.length);
+  if (splitsSurrogatePair(value, end)) end -= 1;
+  return value.slice(0, end);
+}
+function sliceSafeSuffix(value, budget) {
+  let start = Math.max(0, value.length - budget);
+  if (splitsSurrogatePair(value, start)) start += 1;
+  return value.slice(start);
+}
+function sliceSafeRange(value, rawStart, rawEnd) {
+  let start = normalizeSliceIndex(rawStart, value.length);
+  let end = normalizeSliceIndex(rawEnd, value.length);
+  if (end <= start) return "";
+  if (splitsSurrogatePair(value, start)) start += 1;
+  if (splitsSurrogatePair(value, end)) end -= 1;
+  return value.slice(start, Math.max(start, end));
+}
+function makeSafePadding(pad, gap) {
+  const repeated = pad.repeat(Math.ceil(gap / pad.length));
+  return sliceSafePrefix(repeated, gap);
+}
 function evalStringFunc(expr, row) {
   const args = expr.args.map((a) => evalStringFuncArg(a, row));
   switch (expr.func) {
@@ -35414,23 +35498,26 @@ function evalStringFunc(expr, row) {
       return (args[0] ?? "").trimEnd();
     case "LENGTH":
       return String((args[0] ?? "").length);
+    case "LENGTH_CHAR":
+      assertArity("LENGTH_CHAR", args, 1, 1);
+      return String([...args[0] ?? ""].length);
     case "SUBSTRING": {
       const str = args[0] ?? "";
       const start = Math.max(0, Number(args[1] ?? "1") - 1);
       const len = args[2] !== void 0 ? Number(args[2]) : void 0;
-      return len !== void 0 ? str.slice(start, start + len) : str.slice(start);
+      return sliceSafeRange(str, start, len !== void 0 ? start + len : str.length);
     }
     case "LEFT": {
       assertArity("LEFT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
-      return Number.isNaN(n) || n <= 0 ? "" : str.slice(0, n);
+      return Number.isNaN(n) || n <= 0 ? "" : sliceSafePrefix(str, n);
     }
     case "RIGHT": {
       assertArity("RIGHT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
-      return Number.isNaN(n) || n <= 0 ? "" : str.slice(Math.max(0, str.length - n));
+      return Number.isNaN(n) || n <= 0 ? "" : sliceSafeSuffix(str, n);
     }
     case "INSTR":
       assertArity("INSTR", args, 2, 2);
@@ -35441,10 +35528,11 @@ function evalStringFunc(expr, row) {
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       if (Number.isNaN(n) || n <= 0) return "";
-      if (str.length >= n) return str.slice(0, n);
+      if (str.length >= n) return sliceSafePrefix(str, n);
       const pad = args[2] ?? " ";
       if (pad === "") return str;
-      return expr.func === "LPAD" ? str.padStart(n, pad) : str.padEnd(n, pad);
+      const padding = makeSafePadding(pad, n - str.length);
+      return expr.func === "LPAD" ? padding + str : str + padding;
     }
     case "GREATEST":
     case "LEAST":
@@ -35457,6 +35545,21 @@ function evalStringFunc(expr, row) {
       const from = args[1] ?? "";
       const to = args[2] ?? "";
       return from === "" ? str : str.split(from).join(to);
+    }
+    case "TRANSLATE": {
+      assertArity("TRANSLATE", args, 3, 3);
+      const from = [...args[1]];
+      const to = [...args[2]];
+      if (from.length !== to.length) {
+        throw new Error(
+          `ArgumentError: TRANSLATE \u306E from \u3068 to \u306F\u540C\u3058\u6587\u5B57\u6570\u3067\u3042\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\uFF08from=${from.length}, to=${to.length}\uFF09`
+        );
+      }
+      const map2 = /* @__PURE__ */ new Map();
+      from.forEach((ch, i) => {
+        if (!map2.has(ch)) map2.set(ch, to[i]);
+      });
+      return [...args[0]].map((ch) => map2.get(ch) ?? ch).join("");
     }
     case "COALESCE":
       return args.find((a) => a !== "") ?? "";
@@ -35695,6 +35798,7 @@ function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics 
 }
 var NUMERIC_STRING_FUNCTIONS = /* @__PURE__ */ new Set([
   "LENGTH",
+  "LENGTH_CHAR",
   "INSTR",
   "ROUND",
   "FLOOR",
@@ -35942,7 +36046,7 @@ function updateToPutBatches(stmt, ids, fieldTypes = /* @__PURE__ */ new Map()) {
 function buildUpdateRecord(assignments, fieldTypes) {
   const record2 = {};
   for (const { field, value } of assignments) {
-    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "SOURCE_FIELD") continue;
+    if (value.type === "ARITH" || value.type === "CASE_VALUE" || value.type === "STRING_FUNC" || value.type === "SOURCE_FIELD") continue;
     record2[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
   }
   return record2;
@@ -35952,12 +36056,19 @@ function hasArithAssignment(stmt) {
     (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE"
   );
 }
+function hasRowDependentAssignment(stmt) {
+  return stmt.assignments.some(
+    (a) => a.value.type === "ARITH" || a.value.type === "CASE_VALUE" || a.value.type === "STRING_FUNC"
+  );
+}
 function updateToGetQueryForArith(stmt) {
   assertDmlWhereIsSafe(stmt.where);
   const refFields = /* @__PURE__ */ new Set();
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") {
       collectArithFields2(value, refFields);
+    } else if (value.type === "STRING_FUNC") {
+      collectStringFuncFields2(value, refFields);
     } else if (value.type === "CASE_VALUE") {
       collectCaseFields(value.expr, refFields);
     }
@@ -36044,6 +36155,8 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     for (const { field, value } of stmt.assignments) {
       if (value.type === "ARITH") {
         record2[field] = { value: String(evalArith(value, raw)) };
+      } else if (value.type === "STRING_FUNC") {
+        record2[field] = { value: evalStringFunc(value, row) };
       } else if (value.type === "CASE_VALUE") {
         record2[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
       } else if (value.type === "SOURCE_FIELD") {
@@ -36092,6 +36205,8 @@ function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new 
           throw new DmlConvertError(`\u6570\u5024\u30D5\u30A3\u30FC\u30EB\u30C9 ${field} \u306B\u5909\u63DB\u3067\u304D\u306A\u3044\u5024\u3067\u3059: ${raw}`);
         }
         record2[field] = { value: toKintoneValue({ type: "STRING", value: raw }, fieldType) };
+      } else if (value.type === "STRING_FUNC") {
+        throw new DmlConvertError("UPDATE ... FROM \u306E SET \u3067\u306F\u6587\u5B57\u5217\u95A2\u6570\u3092\u76F4\u63A5\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093");
       } else if (value.type === "ARITH") {
         record2[field] = { value: String(evalArith(value, target)) };
       } else if (value.type === "CASE_VALUE") {
@@ -36983,6 +37098,7 @@ function compareSortKeys(a, b, meta3) {
 }
 var NUMERIC_ORDER_FUNCTIONS = /* @__PURE__ */ new Set([
   "LENGTH",
+  "LENGTH_CHAR",
   "INSTR",
   "ROUND",
   "FLOOR",
@@ -39203,6 +39319,7 @@ function systemColumnMeta(field) {
 }
 var NUMBER_RETURNING_STRING_FUNCTIONS = /* @__PURE__ */ new Set([
   "LENGTH",
+  "LENGTH_CHAR",
   "INSTR",
   "ROUND",
   "FLOOR",
@@ -40170,6 +40287,28 @@ var NON_WRITABLE_FIELD_TYPES = /* @__PURE__ */ new Set([
   "CATEGORY",
   "REFERENCE_TABLE"
 ]);
+function assertWritableTopLevelDmlFields(appId, targetFields, fieldInfos) {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  for (const code of targetFields) {
+    const info = infoByCode.get(code);
+    if (!info) {
+      throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
+    }
+    if (info.inSubtable) {
+      throw new Error(
+        `ArgumentError: DML target field ${code} is inside a subtable. Use subtable DML syntax (for example, APP${appId}$\u30C6\u30FC\u30D6\u30EB).`
+      );
+    }
+    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
+      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
+    }
+  }
+}
+async function loadWritableTopLevelDmlFields(appId, targetFields, client, cacheContext) {
+  const fieldInfos = await getFieldsCached(appId, client, cacheContext);
+  assertWritableTopLevelDmlFields(appId, targetFields, fieldInfos);
+  return fieldInfos;
+}
 async function executeDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
   return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
 }
@@ -40181,24 +40320,22 @@ var RejectLimitExceededError = class extends Error {
   }
 };
 async function prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
-  if (stmt.type === "UPDATE") {
-    await assertDmlWhereCapability(stmt, client, cacheContext);
-  }
   const operation = stmt.type === "UPDATE" ? "UPDATE" : stmt.type.startsWith("UPSERT") ? "UPSERT" : "INSERT";
   const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : [...stmt.fields];
   if (new Set(payloadFields).size !== payloadFields.length) {
     throw new Error("ArgumentError: DML target fields contain duplicates.");
   }
-  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
-  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const targetFields = stmt.type === "UPDATE" ? stmt.assignments.map((a) => a.field) : stmt.fields;
-  for (const code of targetFields) {
-    const info = infoByCode.get(code);
-    if (!info) throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
-    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
-      throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
-    }
+  const fieldInfos = await loadWritableTopLevelDmlFields(
+    stmt.appId,
+    targetFields,
+    client,
+    cacheContext
+  );
+  if (stmt.type === "UPDATE") {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
   }
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
   const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
     candidates,
@@ -40367,7 +40504,7 @@ async function materializeUpdateValidationCandidates(stmt, client, options, cach
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   let records;
-  if (hasArithAssignment(stmt)) {
+  if (hasRowDependentAssignment(stmt)) {
     const getParams = updateToGetQueryForArith(stmt);
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...getParams.fields], {
       maxRecords: options.maxRecords ?? 1e4,
@@ -40576,6 +40713,7 @@ async function executeInsert(stmt, client, options, cacheContext) {
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
   }
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const batches = insertToPostBatches(stmt, fieldTypes);
   const createdIds = [];
@@ -40590,6 +40728,7 @@ async function executeInsert(stmt, client, options, cacheContext) {
   };
 }
 async function executeInsertSelect(stmt, client, options, cacheContext, cteCache) {
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
@@ -40624,17 +40763,24 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
   };
 }
 async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
-  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.subtableCode) {
+    await assertDmlWhereCapability(stmt, client, cacheContext);
     return executeUpdateSubtable(stmt, client, options, cacheContext);
   }
+  await loadWritableTopLevelDmlFields(
+    stmt.appId,
+    stmt.assignments.map((assignment) => assignment.field),
+    client,
+    cacheContext
+  );
+  await assertDmlWhereCapability(stmt, client, cacheContext);
   if (stmt.from != null) {
     return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
   const maxRecords2 = options.maxRecords ?? 1e4;
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  if (hasArithAssignment(stmt)) {
+  if (hasRowDependentAssignment(stmt)) {
     const getParams2 = updateToGetQueryForArith(stmt);
     const resolved2 = await fetchRecordsForSharedPlan(
       client.getRecords,
@@ -40728,6 +40874,7 @@ async function executeDelete(stmt, client, options, cacheContext) {
   return { type: "DELETE", deletedCount: ids.length };
 }
 async function executeUpsert(stmt, client, options, cacheContext) {
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const toInsert = [];
   const toUpdate = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
@@ -41154,6 +41301,7 @@ function evalOrderKeyForRow(key, row) {
   }
 }
 async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache) {
+  await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
   const { rows, columns } = selectResult;
   if (columns.length !== stmt.fields.length) {
@@ -41789,6 +41937,8 @@ function buildInsertSelectPlan(stmt, label, capabilities, orderPlans) {
 }
 function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
   const isArith = hasArithAssignment(stmt);
+  const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
+  const isRowDependent = hasRowDependentAssignment(stmt);
   const isSubq = stmt.assignments.some((a) => a.value.type === "SCALAR_SUBQUERY");
   const lines = [];
   if (label) lines.push(label);
@@ -41805,10 +41955,11 @@ function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
   lines.push(`  api:           GET /k/v1/records.json \u2192 PUT /k/v1/records.json`);
   const setTypes = [];
   if (isArith) setTypes.push("\u7B97\u8853 SET\uFF08\u73FE\u5728\u5024\u3092\u53D6\u5F97\u3057\u3066\u8A08\u7B97\uFF09");
+  if (isStringFunc) setTypes.push("\u6587\u5B57\u5217\u95A2\u6570 SET\uFF08\u73FE\u5728\u5024\u3092\u53D6\u5F97\u3057\u3066\u8A55\u4FA1\uFF09");
   if (isSubq) setTypes.push("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA SET");
-  if (!isArith && !isSubq) setTypes.push("\u5358\u7D14 SET");
+  if (!isRowDependent && !isSubq) setTypes.push("\u5358\u7D14 SET");
   lines.push(`  set type:      ${setTypes.join(", ")}`);
-  if (isArith) {
+  if (isRowDependent) {
     const refFields = collectArithRefFields(stmt);
     if (refFields.length > 0) {
       lines.push(`  ref fields:    ${refFields.join(", ")}\uFF08GET \u306B\u542B\u3081\u308B\uFF09`);
@@ -41894,6 +42045,7 @@ function collectArithRefFields(stmt) {
   const refs = /* @__PURE__ */ new Set();
   for (const { value } of stmt.assignments) {
     if (value.type === "ARITH") collectArithNodeRefs(value, refs);
+    if (value.type === "STRING_FUNC") collectArithNodeRefs(value, refs);
   }
   return [...refs];
 }
@@ -41906,6 +42058,13 @@ function collectArithNodeRefs(node, out) {
     collectArithNodeRefs(node.left, out);
     collectArithNodeRefs(node.right, out);
   }
+  if (node.type === "STRING_FUNC") {
+    for (const arg of node.args) {
+      if (arg.type !== "STRING" && arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") {
+        collectArithNodeRefs(arg, out);
+      }
+    }
+  }
 }
 function formatAssignment(a) {
   const v = a.value;
@@ -41913,6 +42072,7 @@ function formatAssignment(a) {
   if (v.type === "NUMBER") return `${a.field} = ${v.value}`;
   if (v.type === "ARITH") return `${a.field} = ${formatArithExprStr(v)}`;
   if (v.type === "CASE_VALUE") return `${a.field} = CASE WHEN ...`;
+  if (v.type === "STRING_FUNC") return `${a.field} = ${v.func}(...)`;
   if (v.type === "SCALAR_SUBQUERY") return `${a.field} = (SELECT ...)`;
   if (v.type === "SOURCE_FIELD") return `${a.field} = ${v.alias}.${v.field}`;
   return `${a.field} = (${v.type})`;
@@ -44507,7 +44667,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "3.1.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.2.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
