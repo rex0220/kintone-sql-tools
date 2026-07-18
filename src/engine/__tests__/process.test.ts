@@ -1569,6 +1569,21 @@ test("runFullScan: B19 の文字数単位は LENGTH / SUBSTRING と一致する"
   expect(row.p).toBe("0😀X");
 });
 
+test("runFullScan: B22 は BMP の B19 契約と LENGTH / LIKE / INSTR の単位を変えない", () => {
+  const records = [makeRecord({ s: "😀", bmp: "東京都千代田区" })];
+  const stmt = parseSelect(
+    "SELECT LEFT(bmp, 2) AS l, SUBSTRING(bmp, 1, 2) AS sub, " +
+    "LENGTH(s) AS len, INSTR('A😀B', 'B') AS pos FROM APP100 WHERE s LIKE '_'"
+  );
+  const { rows } = runFullScan({ tables: new Map([[null, records]]), stmt });
+  expect(rows).toEqual([{
+    l: "東京",
+    sub: "東京",
+    len: "2",
+    pos: "4",
+  }]);
+});
+
 test("runFullScan: B19 の空文字・長さ境界", () => {
   const records = [makeRecord({ empty: "", s: "ABCDE" })];
   const stmt = parseSelect(

@@ -8,6 +8,7 @@
 
 - **B34 DML の書き込み先フィールド検査を追加**。親レコードの INSERT VALUES/SELECT、UPDATE（通常・算術・CASE・UPDATE FROM）、UPSERT VALUES/SELECT で、不存在フィールド、サブテーブル子フィールド、書き込み不可フィールドを文単位の `ArgumentError` とする。`VALIDATE ONLY` / `ON ERROR SKIP` にも同じ検査を適用し、サブテーブル子のエラーは `APPxxxx$テーブル` 構文を案内する。
 - 検査をソース SELECT、更新・UPSERT対象取得、確認、POST / PUT より前へ固定。不正な書き込み先ではフォーム定義以外のレコード取得・確認・書き込みを行わない。正規のサブテーブル DML（INSERT VALUES / UPDATE / DELETE / REORDER）は従来どおり動作する。
+- **B22 `LEFT` / `RIGHT` / `SUBSTRING` / `LPAD` / `RPAD` がサロゲートペアを分割する不具合を修正**。長さ引数を UTF-16 コードユニット予算として維持しつつ、入力中で対になっていたペアを割る境界では安全な側へ縮め、結果を必ず指定予算以下にする。`LPAD` / `RPAD` は入力の切り詰めと埋め文字列の切り詰めの両方に適用する。`LENGTH` / `LIKE '_'` / `INSTR` の単位は変更しない。
 
 ## v3.1.0（2026-07-18）
 

@@ -52,6 +52,62 @@ export function applyRoundOp(
 }
 
 // ============================================================
+// UTF-16 コードユニット予算内の安全な切り出し
+// ============================================================
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+/** 位置 index で切ると、入力中で対になっているサロゲートペアを割るか。 */
+function splitsSurrogatePair(value: string, index: number): boolean {
+  return index > 0
+    && index < value.length
+    && isHighSurrogate(value.charCodeAt(index - 1))
+    && isLowSurrogate(value.charCodeAt(index));
+}
+
+/** String.prototype.slice と同じ規則で境界を 0..length に正規化する。 */
+function normalizeSliceIndex(index: number, length: number): number {
+  if (Number.isNaN(index) || index === Number.NEGATIVE_INFINITY) return 0;
+  if (index === Number.POSITIVE_INFINITY) return length;
+  const integer = Math.trunc(index);
+  return integer < 0
+    ? Math.max(length + integer, 0)
+    : Math.min(integer, length);
+}
+
+function sliceSafePrefix(value: string, budget: number): string {
+  let end = Math.min(Math.max(0, budget), value.length);
+  if (splitsSurrogatePair(value, end)) end -= 1;
+  return value.slice(0, end);
+}
+
+function sliceSafeSuffix(value: string, budget: number): string {
+  let start = Math.max(0, value.length - budget);
+  if (splitsSurrogatePair(value, start)) start += 1;
+  return value.slice(start);
+}
+
+function sliceSafeRange(value: string, rawStart: number, rawEnd: number): string {
+  let start = normalizeSliceIndex(rawStart, value.length);
+  let end = normalizeSliceIndex(rawEnd, value.length);
+  if (end <= start) return "";
+  if (splitsSurrogatePair(value, start)) start += 1;
+  if (splitsSurrogatePair(value, end)) end -= 1;
+  return value.slice(start, Math.max(start, end));
+}
+
+function makeSafePadding(pad: string, gap: number): string {
+  const repeated = pad.repeat(Math.ceil(gap / pad.length));
+  return sliceSafePrefix(repeated, gap);
+}
+
+// ============================================================
 // 文字列・数値関数
 // ============================================================
 
@@ -68,19 +124,19 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const str   = args[0] ?? "";
       const start = Math.max(0, Number(args[1] ?? "1") - 1); // SQL は 1-indexed
       const len   = args[2] !== undefined ? Number(args[2]) : undefined;
-      return len !== undefined ? str.slice(start, start + len) : str.slice(start);
+      return sliceSafeRange(str, start, len !== undefined ? start + len : str.length);
     }
     case "LEFT": {
       assertArity("LEFT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
-      return Number.isNaN(n) || n <= 0 ? "" : str.slice(0, n);
+      return Number.isNaN(n) || n <= 0 ? "" : sliceSafePrefix(str, n);
     }
     case "RIGHT": {
       assertArity("RIGHT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
-      return Number.isNaN(n) || n <= 0 ? "" : str.slice(Math.max(0, str.length - n));
+      return Number.isNaN(n) || n <= 0 ? "" : sliceSafeSuffix(str, n);
     }
     case "INSTR":
       assertArity("INSTR", args, 2, 2);
@@ -91,10 +147,11 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       if (Number.isNaN(n) || n <= 0) return "";
-      if (str.length >= n) return str.slice(0, n);
+      if (str.length >= n) return sliceSafePrefix(str, n);
       const pad = args[2] ?? " ";
       if (pad === "") return str;
-      return expr.func === "LPAD" ? str.padStart(n, pad) : str.padEnd(n, pad);
+      const padding = makeSafePadding(pad, n - str.length);
+      return expr.func === "LPAD" ? padding + str : str + padding;
     }
     case "GREATEST":
     case "LEAST":

@@ -379,6 +379,30 @@ test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () 
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B22 LEFT の64コードユニット結果は同じ maxLength の UPDATE FROM VALIDATE ONLY を通る", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ k: "1", source: "😀".repeat(40) })],
+    100: [makeRecord({ $id: "1", dest: "before" })],
+  } });
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT", maxLength: "64" }]
+    : [
+      { code: "k", label: "k", fieldType: "NUMBER" },
+      { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #trimmed AS SELECT k, LEFT(source, 64) AS safe_value FROM APP200; " +
+    "UPDATE APP100 SET dest = t.safe_value FROM #trimmed t WHERE APP100.$id = t.k VALIDATE ONLY",
+    client,
+    { cacheContext: "b22-left-validate-only" }
+  );
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[1].result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 1, invalidRows: 0, errorCount: 0,
+  });
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("UPDATE FROM #temp はバッチストアを参照して更新する", async () => {
   const client = makeClient({
     recordsByApp: {
