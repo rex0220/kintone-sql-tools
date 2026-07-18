@@ -35,13 +35,14 @@ test("INSERT 単一行 → POST パラメータ", () => {
   });
 });
 
-test("INSERT VALUES は16桁超・指数のraw literalをpayloadへ保持する", () => {
+test("INSERT VALUES は16桁超の精度を保ちつつ平文10進でpayloadへ入れる", () => {
   const stmt = parse(
     "INSERT INTO APP100 (a, b) VALUES (9007199254740993, 1.20e+21)"
   ) as InsertStatement;
+  // 16桁超は丸めず保持し、指数表記は kintone 用に平文10進へ展開する（値は不変）。
   expect(insertToPostBatches(stmt)[0].records[0]).toEqual({
     a: { value: "9007199254740993" },
-    b: { value: "1.20e+21" },
+    b: { value: "1200000000000000000000" },
   });
 });
 

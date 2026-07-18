@@ -48,6 +48,33 @@ export function isFiniteDecimal(input: string): boolean {
   return parseExactDecimal(input) !== null;
 }
 
+/**
+ * Formats an ExactDecimal as a plain decimal string with no exponent and no
+ * leading `+` (e.g. `1e3` -> `1000`, `1e-5` -> `0.00005`). Lossless: all digits
+ * are preserved without `Number()`. This is the canonical form for values sent
+ * to kintone query/DML, which reject exponent notation.
+ */
+export function formatPlainDecimal(dec: ExactDecimal): string {
+  if (dec.sign === 0) return "0";
+  const digits = dec.coefficient;
+  let magnitude: string;
+  if (dec.scale <= 0) {
+    magnitude = `${digits}${"0".repeat(-dec.scale)}`;
+  } else if (digits.length > dec.scale) {
+    const point = digits.length - dec.scale;
+    magnitude = `${digits.slice(0, point)}.${digits.slice(point)}`;
+  } else {
+    magnitude = `0.${"0".repeat(dec.scale - digits.length)}${digits}`;
+  }
+  return dec.sign === -1 ? `-${magnitude}` : magnitude;
+}
+
+/** Canonical plain-decimal string for a finite decimal input, or null if not finite. */
+export function toPlainDecimal(input: string): string | null {
+  const dec = parseExactDecimal(input);
+  return dec === null ? null : formatPlainDecimal(dec);
+}
+
 function compareMagnitudes(left: ExactDecimal, right: ExactDecimal): CompareResult {
   const leftPoint = left.coefficient.length - left.scale;
   const rightPoint = right.coefficient.length - right.scale;

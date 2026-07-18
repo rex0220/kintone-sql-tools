@@ -85,13 +85,21 @@ test.each([
   "SELECT * FROM APP100 WHERE 金額 <= 1000",
   "SELECT * FROM APP100 WHERE 金額 != 1000",
   "SELECT * FROM APP100 WHERE 金額 > 1.5",
-  "SELECT * FROM APP100 WHERE 金額 > 1e3",
-  "SELECT * FROM APP100 WHERE 金額 > 1.0e3",
   "SELECT * FROM APP100 WHERE 金額 > 9007199254740992",
 ])("NUMBER 型でも対象外の一般数値比較を押し下げない: %s", (sql) => {
   const expr = where(sql);
   const fieldTypes = new Map([["金額", "NUMBER"]]);
   expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();
+});
+
+test.each([
+  "SELECT * FROM APP100 WHERE 金額 > 1e3",
+  "SELECT * FROM APP100 WHERE 金額 > 1.0e3",
+])("整数値の指数リテラルは平文整数（safe integer）として直書き整数と同様に押し下げる: %s", (sql) => {
+  const expr = where(sql);
+  const fieldTypes = new Map([["金額", "NUMBER"]]);
+  // 1e3 = 1000 は safe integer。直書き `> 1000` と同じ安全leafとして押し下げる。
+  expect(extractSafePushdownLeaves(expr, { fieldTypes })).toEqual(expr);
 });
 
 test("一般フィールドは NUMBER 型が確定した場合だけ押し下げる", () => {
