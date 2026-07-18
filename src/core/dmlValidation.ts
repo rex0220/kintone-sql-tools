@@ -64,7 +64,7 @@ export function validateAndNormalizeDmlValue(
     }
     if (numberPrecision !== undefined) {
       const { integerDigits, fractionDigits } = exactDecimalDigitCounts(decimal);
-      // R1 §5.2: I = digits - decimalPlaces. kintone 実機境界は §11-4 で確定する。
+      // R1 §5.2: I = digits - decimalPlaces. §11-4 実機確定済み（D=16,P=4 で 12桁受理・13桁は CB_VA01 拒否）。
       const integerBudget = numberPrecision.digits - numberPrecision.decimalPlaces;
       if (integerDigits > integerBudget) {
         return {
