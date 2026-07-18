@@ -1,13 +1,36 @@
 # B29 kintone 数値精度・丸め設定と DML/Tier-0 の整合仕様
 
 - 作成日: 2026-07-18
-- ステータス: **仕様 R1・Claude レビュー承認（2026-07-18）・実装待ち（B9 先行）**。HALF_EVEN 丸めは検算 9/9 一致・既存コードアンカー実在・B34 CALC 衝突/ROUND 意味/B9 primitive 再利用の各契約を確認。実装は B9 完了後（S0→S5）。
+- ステータス: **仕様 R2・案B（小数素通し）採用（2026-07-18）**。R1（整数部＋小数部の両方を Tier-0 で拒否）を実装・実機検証後、**小数部の桁拒否は撤回**した。理由は §R2 決定。**整数部超過の事前検出のみ維持**。R1 実装は main マージ済み（PR #106）で、R2 はそこから小数検証・量子化 primitive を除去する差分。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B29
 - 課題文書: [ksql_number_precision_semantics_issue.md](ksql_number_precision_semantics_issue.md) R2（本仕様の正）
 - B9 仕様: [ksql_exact_decimal_compare_issue.md](ksql_exact_decimal_compare_issue.md) R5（現時点の B9 契約。B29 は B9 の厳密10進 primitive を再利用する）
 - 参考: [B12-A `VALIDATE ONLY` 実装計画](ksql_validate_only_implementation_plan.md)、[kintone「アプリの一般設定を取得する」](https://cybozu.dev/ja/kintone/docs/rest-api/apps/settings/get-general-settings/)、[kintone「数値の有効桁数と丸めかたを設定する」](https://jp.kintone.help/k/ja/app/form/othersettings/significant_figures)
-- リリース想定: **minor**。安全側の検証強化だが、従来 `valid` だった行が `invalid` へ変わることを移行時に明示する
+- リリース想定: **minor**。整数部超過を実書込み前に検出する安全側の追加。R2 では小数部の挙動を従来（kintone 任せ）から変えないため、小数に関する移行注意は不要。
+
+---
+
+## R2 決定（本文に優先する・案B 小数素通し）
+
+R1（整数部・小数部の両方を桁超過として拒否）を実装・実機検証した結果、**小数部の桁拒否を撤回**する。以下が確定仕様であり、本文中の小数拒否・量子化に関する記述（§1 の該当項・§5.2 の小数条件・§5.3 の `ERR_NUMBER_DECIMAL_PLACES`・§7 全体・§2.2 の量子化行）に**優先する**。
+
+### 決定
+
+1. **小数部は検証しない・素通しする**。`decimalPlaces` を超える小数を書込んでも kSQL はエラーにせず、値をそのまま kintone へ送る。`ERR_NUMBER_DECIMAL_PLACES` は**廃止**する。
+2. **整数部超過のみ検証する**。整数部が予算 `I = digits − decimalPlaces` を超えたら `ERR_NUMBER_INTEGER_DIGITS`。これは維持。
+3. **量子化 primitive `quantizeDecimal` は削除**する（自動丸めをしないため不要）。`roundingMode` は settings 形状検証のため parse のみ残し、判定には使わない。
+
+### 理由（プラットフォーム一貫性）
+
+- kintone は小数超過を **REST API・CSV 読み込み・編集画面・計算フィールド**、あらゆる面で受理して `decimalPlaces` へ自動丸めする（実機確認: `12.34567`→保存 `12.3457`・`0.00005`→`0`。証跡 `evidence/b29_number_precision_smoke.md` §3）。
+- したがって kSQL だけが小数超過をエラー（または警告付き自動丸め）にすると、**kSQL だけが特別な挙動**になり利用者に分かりにくい。透過的な導管として kintone に丸めを委ねるのが正しい。
+- 実務上、`1/3`・平均（`SUM/COUNT`）・単価（`合計/数量`）・税按分など**算術結果は日常的に小数超過**する（B29 は算術を binary64 のまま＝§8）。小数拒否はこれら全てに `ROUND` を強制し、摩擦ばかりで得るものが少ない。
+- **整数部超過は別**: kintone はこれをどの面でも**ハード拒否**（`CB_VA01`）するため、kSQL の事前検出は「kintone と同じ判断の前倒し」であり独自挙動ではない。かつ `ON ERROR SKIP` で不良行を隔離でき、バッチ全体の API 失敗を防ぐ実利がある（維持理由）。
+
+### 既知の境界（kintone に委ねる）
+
+- `999999999999.99999`（整数12桁・丸めで桁上がり）は、kintone が丸め後 13 桁で `CB_VA01` 拒否する。kSQL は生値の整数 12 桁を見て素通しするため、この行は kintone の API エラーとして返る。**丸めは kintone が権威**という本決定の立場どおりで、kSQL は生値の整数桁のみを検証する（丸め後桁上がりの予測はしない）。
 
 ---
 
@@ -159,43 +182,43 @@ interface ExactDecimal {
 
 設定を `D = digits`、`P = decimalPlaces`、整数部予算を `I = D - P` とする。**この予算式（整数部 = digits − decimalPlaces）は §11-4 の実機で確定済み**（`D=16, P=4` で整数 12 桁は kintone に受理され、13 桁は `CB_VA01`「有効桁数を超えています。」で拒否される。合計 digits 制限ではなく整数部予算で拒否＝`I=12` がハード境界。証跡: `docs/internal/evidence/b29_number_precision_smoke.md` §2）。
 
-有限10進値は次を両方満たす場合だけ表現可能である。
+**（R2 で更新）** kSQL がローカルで拒否するのは整数部超過のみである。有限10進値は次を満たす場合に整数部が表現可能である。
 
-1. 正規化後の小数部桁数 `scale <= P`
-2. 整数部の桁数が `I` 以下
+1. 整数部の桁数が `I` 以下
 
-整数部の桁数は先頭ゼロを除いて数える。絶対値が1未満の値とゼロの整数部桁数は 0 とする。符号と小数点は桁数に含めない。桁上がり後の再検証が必要な量子化結果では、量子化後の正規形に同じ規則を適用する。
+小数部桁数 `scale` は kSQL では検証しない（`scale > P` でも valid 扱いで素通しし、kintone が `roundingMode` で自動丸めする）。整数部の桁数は先頭ゼロを除いて数える。絶対値が1未満の値とゼロの整数部桁数は 0 とする。符号と小数点は桁数に含めない。
 
 例: `D=16, P=4` では整数部12桁、小数部4桁までである。
 
+**（R2 更新後の判定）**
+
 | 値 | 判定 | 理由 |
 |---|---|---|
-| `999999999999.9999` | valid | 整数12桁・小数4桁 |
+| `999999999999.9999` | valid | 整数12桁 |
 | `1000000000000` | invalid | 整数13桁 |
-| `1.2345` | valid | 小数4桁 |
-| `1.23450` | valid | 末尾ゼロ除去後は小数4桁 |
-| `1.23451` | invalid | 小数5桁、非ゼロ情報を失わず表現できない |
+| `1.2345` | valid | 整数1桁 |
+| `1.23451` | valid | 小数5桁でも素通し（kintone が丸める） |
+| `12.34567` | valid | 小数超過は検証しない |
 | `-0.0000` | valid | 正規化後はゼロ |
+| `9999999999999` | invalid | 整数13桁 |
 
 ### 5.3 エラー契約
 
-NUMBER の既存検証順を次で固定する。
+**（R2 で更新）** NUMBER の検証順を次で固定する。小数部桁数の検証は削除する。
 
 1. required / empty
 2. 有限10進形式
 3. `minValue`
 4. `maxValue`
 5. 整数部桁数 (`digits - decimalPlaces`)
-6. 小数部桁数 (`decimalPlaces`)
 
 安定した行エラーコードを追加する。
 
 ```text
 ERR_NUMBER_INTEGER_DIGITS  整数部の許容桁数を超える
-ERR_NUMBER_DECIMAL_PLACES  小数部の許容桁数を超える
 ```
 
-1値が両方を超える場合は、規則順に最初の `ERR_NUMBER_INTEGER_DIGITS` だけを返す。既存 `validateAndNormalizeDmlValue()` が1フィールド1エラーを返す契約を維持するためである。診断にはフィールドコード、実際の桁数、許容桁数、`digits` / `decimalPlaces` を含める。
+`ERR_NUMBER_DECIMAL_PLACES` は R2 で廃止（小数は素通し）。診断にはフィールドコード、実際の整数桁数、許容桁数、`digits` / `decimalPlaces` を含める。既存 `validateAndNormalizeDmlValue()` が1フィールド1エラーを返す契約は維持する。
 
 通常書込みでこのエラーが出た場合は API を呼ばない。`VALIDATE ONLY` / `ON ERROR SKIP` では既存の `$err_field`、`$err_code`、`$err_message` へ同じ内容を出す。
 
@@ -230,9 +253,20 @@ UPSERT は照合後の create/update どちらでも同じ NUMBER 桁規則を�
 
 CLI、MCP、plugin は engine の結果を表示するだけで、precision 判定を再実装しない。同じ SQL、設定、入力に対し、全 surface で error code と valid/invalid 件数が一致しなければならない。
 
-## 7. v1 の量子化方針
+## 7. v1 の丸め方針（R2: 量子化 primitive なし）
 
-### 7.1 通常 DML は検証のみ
+**（R2 で全面改訂）** R1 の量子化 primitive（`quantizeDecimal` と HALF_EVEN/UP/DOWN の桁ベース丸め）は**削除する**。理由:
+
+- 小数超過を素通しする（案B）ため、kSQL 側で丸める必要がない。丸めは kintone が全面で行う権威である。
+- 通常 DML も VALIDATE ONLY も、小数を書き換えず kintone へ渡す。整数部超過だけをローカルで拒否する。
+- 既存 `ROUND` / `FLOOR` / `CEIL` / `TRUNCATE` の公開意味は不変（`roundingMode` で差し替えない）。
+- `roundingMode` は settings 形状の妥当性検証（unknown mode で fail-closed）のためだけに parse し、判定に使わない。
+
+以下 §7.1〜§7.3 は R1 の旧方針（自動丸めをしない検証のみ・量子化 primitive を持つ）の記録であり、**R2 では量子化 primitive ごと削除するため無効**。参考として残す。
+
+---
+
+### 7.1 通常 DML は検証のみ（R1・無効）
 
 v1 の既定かつ唯一の通常 DML 動作は **検証のみ** である。`decimalPlaces` または整数部予算を超えた値を、app settings の `roundingMode` で自動丸めして受理しない。
 
