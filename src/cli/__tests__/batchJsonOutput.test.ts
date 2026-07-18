@@ -26,6 +26,7 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
     async getRecords(params) {
       return { records: recordsByApp[params.app] ?? [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords(params) { return { ids: params.records.map((_r, i) => String(i + 1)) }; },
     async putRecords() { },
     async deleteRecords() { },

@@ -90,6 +90,9 @@ kintone-sql-tools/
    エンジン `TEMP_TABLE_MAX_ROWS`。解決順はフラグ → env `KSQL_TEMP_TABLE_MAX_ROWS` →
    profile `query.tempTableMaxRows` → 既定。超過は `--on-limit` 設定によらず常にエラー。
    console の `:run` 子実行にも自動伝搬する）
+9. `--cursor-max-active <n>`（v3.1.0。host単位の有効Cursor上限、1〜5、既定2。
+   解決順はフラグ → env `KSQL_CURSOR_MAX_ACTIVE` → profile `query.cursorMaxActive` → 既定。
+   同一process・同一hostの後続実行にも反映される。縮小時は既存Cursorを維持し、active数が新上限を下回るまで新規作成を待機する。consoleの`:run`にも伝搬する）
 
 出力系:
 
@@ -187,11 +190,13 @@ kintone API 呼び出しには、プロセス内グローバルのレートゲ�
 | GET リトライ回数 | `--retry <n>`（0〜10。0 で無効） | `retry` | `KSQL_RETRY` | 3 |
 | バックオフ初期値（ミリ秒） | `--retry-base-delay <ms>` | `retryBaseDelayMs` | — | 500 |
 | バックオフ上限（ミリ秒） | `--retry-max-delay <ms>` | `retryMaxDelayMs` | — | 8000 |
+| 有効Cursor上限（host単位） | `--cursor-max-active <n>`（1〜5） | `cursorMaxActive` | `KSQL_CURSOR_MAX_ACTIVE` | 2 |
 
 1. 解決優先順は **env > CLI フラグ > config > 既定**
 2. ゲートはプロセス内グローバル1個で、**初回に解決された値で固定**される（複数 profile 同時利用では最初に解決された値が使われる）。config 経由の不正値・範囲外値はゲート側で安全側に clamp される（同時上限 1〜50 / リトライ 0〜10 / バックオフ初期値 1〜60,000ms / 上限 1〜600,000ms かつ初期値以上）
 3. リトライは **GET 系（レコード・アプリ一覧・フィールド情報の取得）限定**。対象は HTTP **408 / 429 / 502 / 503 / 504** とネットワーク層の一時エラー（fetch failed / タイムアウト中断）で、指数バックオフ + ジッタで再試行する
 4. **書き込み系（POST / PUT / DELETE）はリトライしない**（応答喪失時の二重実行を避けるため。セマフォのみ適用）。再実行が必要な場合は呼び出し側で冪等な再実行（UPSERT 等）を設計する
+5. Cursor APIのCreate / Get / Deleteは同時リクエストゲートだけを通り、自動リトライしない。Cursor上限は通常のHTTP同時数とは別に、同一process・同一hostで管理する
 
 ## 4.4 認証仕様（token）
 

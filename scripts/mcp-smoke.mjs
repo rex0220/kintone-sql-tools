@@ -54,7 +54,11 @@ function assertSchemas(tools) {
   const explainProps = explain.inputSchema?.properties ?? {};
   assert("sql" in explainProps, "ksql_explain.sql input is missing.");
   assert("profile" in explainProps, "ksql_explain.profile input is missing.");
-  assert(!("maxRecords" in explainProps), "ksql_explain must not expose maxRecords.");
+  assert("maxRecords" in explainProps, "ksql_explain.maxRecords input is missing.");
+  assert(
+    explainProps.maxRecords?.type === "integer" && explainProps.maxRecords?.exclusiveMinimum === 0,
+    "ksql_explain.maxRecords must be a positive integer."
+  );
   assert(!("onLimit" in explainProps), "ksql_explain must not expose onLimit.");
 
   const query = getTool(tools, "ksql_query");

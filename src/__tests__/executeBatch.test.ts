@@ -57,6 +57,7 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
       }
       return { records: opts.recordsByApp?.[params.app] ?? [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords(params) {
       postCalls.push({ app: params.app, records: [...params.records] });
       return { ids: params.records.map((_r, i) => String(i + 1)) };
@@ -1578,6 +1579,63 @@ test("timeout 未指定なら遅延があっても完走する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 }, delayMs: 20 });
   const r = await executeBatch("SELECT 顧客名 FROM APP100", client);
   expect(r.ok).toBe(true);
+});
+
+test("KORDER_CURSORのbatch timeoutはactive cursorのclose完了を待って返る", async () => {
+  const client = makeClient();
+  let pages = 0;
+  let closes = 0;
+  client.openCursor = async () => ({
+    totalCount: 600,
+    async nextPage() {
+      pages += 1;
+      if (pages === 1) await new Promise((resolve) => setTimeout(resolve, 20));
+      const count = pages === 1 ? 500 : 1;
+      return {
+        records: Array.from({ length: count }, (_v, i) => makeRecord({ $id: String((pages - 1) * 500 + i + 1) })),
+        next: true,
+      };
+    },
+    async close() { closes += 1; },
+  });
+  const result = await executeBatch(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
+    client,
+    { timeoutMs: 5 }
+  );
+  expect(result.statements[0].error?.code).toBe("TimeoutError");
+  expect(closes).toBe(1);
+});
+
+test("複文KORDER_CURSORは前文close完了後に次文cursorを作る", async () => {
+  const client = makeClient();
+  const events: string[] = [];
+  let cursorNo = 0;
+  client.openCursor = async () => {
+    const current = ++cursorNo;
+    events.push(`create${current}`);
+    return {
+      totalCount: 501,
+      async nextPage() {
+        events.push(`get${current}`);
+        return {
+          records: Array.from({ length: 501 }, (_v, i) => makeRecord({ $id: String(i + 1) })),
+          next: true,
+        };
+      },
+      async close() {
+        await Promise.resolve();
+        events.push(`close${current}`);
+      },
+    };
+  };
+  const result = await executeBatch(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 501; SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
+    client,
+    { maxRecords: 501 }
+  );
+  expect(result.ok).toBe(true);
+  expect(events).toEqual(["create1", "get1", "close1", "create2", "get2", "close2"]);
 });
 
 // ----------------------------------------------------------------

@@ -36543,7 +36543,7 @@ var KORDER_NATIVE_FIELD_TYPES = /* @__PURE__ */ new Set([
   "CREATOR",
   "MODIFIER"
 ]);
-function planKorderNative(input) {
+function planKorder(input) {
   const { stmt } = input;
   const reasons = [];
   if (stmt.orderMode !== "KINTONE_NATIVE") reasons.push("KORDER_MODE_REQUIRED");
@@ -36573,27 +36573,118 @@ function planKorderNative(input) {
       reasons.push(`KORDER_TYPE_UNSUPPORTED(field=${name}, type=${semantics.fieldType})`);
     }
   }
-  if (stmt.limit === null || stmt.limit < 0 || stmt.limit > 500) {
+  if (stmt.limit === null || !Number.isSafeInteger(stmt.limit) || stmt.limit < 0) {
     reasons.push(`KORDER_LIMIT_INVALID(limit=${String(stmt.limit)})`);
   }
-  if (stmt.limit !== null && stmt.limit > input.maxRecords) {
-    reasons.push(`KORDER_LIMIT_EXCEEDS_MAX_RECORDS(limit=${stmt.limit}, maxRecords=${input.maxRecords})`);
-  }
   const offset = stmt.offset ?? 0;
-  if (offset < 0 || offset > 1e4) reasons.push(`KORDER_OFFSET_INVALID(offset=${offset})`);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    reasons.push(`KORDER_OFFSET_INVALID(offset=${offset})`);
+  }
+  const scanRows = stmt.limit === null ? Number.NaN : offset + stmt.limit;
+  if (stmt.limit !== null && !Number.isSafeInteger(scanRows)) {
+    reasons.push(`KORDER_SCAN_ROWS_INVALID(offset=${offset}, limit=${stmt.limit})`);
+  }
   const unique = [...new Set(reasons)];
   if (unique.length > 0) {
     throw new Error(
       `ArgumentError: KORDER BY cannot be executed (mode=KINTONE_NATIVE; ${unique.join(", ")}). Use ORDER BY for canonical local ordering or simplify the query.`
     );
   }
+  const native = stmt.limit <= 500 && offset <= 1e4 && stmt.limit <= input.maxRecords;
+  if (!native && scanRows > input.maxRecords) {
+    throw new Error(
+      `ArgumentError: KORDER BY cannot be executed (mode=KINTONE_NATIVE; KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS(scanRows=${scanRows}, maxRecords=${input.maxRecords})). Use ORDER BY for canonical local ordering, raise maxRecords, or reduce LIMIT/OFFSET.`
+    );
+  }
   return {
-    kind: "KORDER_NATIVE",
+    kind: native ? "KORDER_NATIVE" : "KORDER_CURSOR",
     requiresCompleteInput: false,
     localOrderBy: false,
     applyLocalOffsetLimit: false,
-    reasonCodes: []
+    reasonCodes: [],
+    scanRows
   };
+}
+
+// src/core/errors/cursorErrors.ts
+var CursorCapacityError = class extends Error {
+  constructor(host, limit, waitMs) {
+    super(`CursorCapacityError: host=${host} \u306E active cursor \u4E0A\u9650 ${limit} \u306B ${waitMs}ms \u4EE5\u5185\u3067\u7A7A\u304D\u304C\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002`);
+    this.name = "CursorCapacityError";
+  }
+};
+var CursorCreateOutcomeUnknownError = class extends Error {
+  constructor(cause) {
+    super("CursorCreateOutcomeUnknownError: Create Cursor \u306E\u6210\u5426\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002\u81EA\u52D5\u518D\u8A66\u884C\u305B\u305A\u3001\u6700\u592710\u5206+\u5B89\u5168\u4F59\u88D5\u306E\u9593\u306F\u67A0\u3092\u9694\u96E2\u3057\u307E\u3059\u3002");
+    this.name = "CursorCreateOutcomeUnknownError";
+    this.cause = cause;
+  }
+};
+var CursorCleanupWarning = class extends Error {
+  constructor(cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`CursorCleanupWarning: Cursor \u306E\u89E3\u653E\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002\u7D50\u679C\u306F\u6709\u52B9\u3067\u3059\u304C\u3001\u6700\u592710\u5206+\u5B89\u5168\u4F59\u88D5\u306E\u9593\u306F\u67A0\u3092\u9694\u96E2\u3057\u307E\u3059\u3002\u8A73\u7D30: ${detail}`);
+    this.name = "CursorCleanupWarning";
+    this.cause = cause;
+  }
+};
+
+// src/core/optimization/korderCursorExecutor.ts
+async function executeKorderCursor(input) {
+  const handle = await input.client.openCursor({
+    app: input.app,
+    fields: input.fields.length > 0 ? input.fields : void 0,
+    query: input.query,
+    size: 500
+  });
+  const records = [];
+  let seen = 0;
+  let primaryError;
+  let cleanupWarning;
+  try {
+    if (handle.totalCount > input.offset) {
+      while (records.length < input.limit) {
+        const page = await handle.nextPage();
+        for (const record2 of page.records) {
+          if (seen < input.offset) seen += 1;
+          else if (records.length < input.limit) records.push(record2);
+          else break;
+        }
+        if (!page.next) break;
+      }
+    }
+  } catch (error51) {
+    primaryError = error51;
+    throw error51;
+  } finally {
+    try {
+      await handle.close();
+    } catch (cleanupError) {
+      if (primaryError && primaryError instanceof Error) {
+        Object.defineProperty(primaryError, "cursorCleanupError", {
+          value: cleanupError,
+          configurable: true
+        });
+      } else {
+        cleanupWarning = new CursorCleanupWarning(cleanupError).message;
+      }
+    }
+  }
+  return { records, cleanupWarning };
+}
+
+// src/converter/korderCursorQuery.ts
+function buildKorderCursorQuery(stmt) {
+  const parts = [];
+  if (stmt.where) parts.push(whereToKintone(stmt.where));
+  const order = stmt.orderBy.map((item) => {
+    if (item.key.type !== "FIELD_NAME") {
+      throw new Error("ArgumentError: KORDER cursor key must be a direct field.");
+    }
+    return `${item.key.name} ${item.direction === "ASC" ? "asc" : "desc"}`;
+  });
+  parts.push(`order by ${order.join(", ")}`);
+  return parts.join(" ");
 }
 
 // src/engine/process.ts
@@ -37736,6 +37827,15 @@ function createEmptyMetrics() {
     fieldCalls: 0,
     appsCalls: 0,
     processStatusCalls: 0,
+    cursorCreateCalls: 0,
+    cursorGetCalls: 0,
+    cursorDeleteCalls: 0,
+    cursorRecordsScanned: 0,
+    cursorActiveCurrent: 0,
+    cursorActivePeak: 0,
+    cursorCleanupFailures: 0,
+    cursorCreateOutcomeUnknown: 0,
+    cursorQuarantinedCurrent: 0,
     fetchedRows: 0,
     elapsedMs: 0
   };
@@ -37747,6 +37847,48 @@ function wrapClientWithMetrics(client, metrics) {
       const res = await client.getRecords(params);
       metrics.fetchedRows += res.records.length;
       return res;
+    },
+    openCursor: async (params) => {
+      metrics.cursorCreateCalls += 1;
+      let handle;
+      try {
+        handle = await client.openCursor(params);
+      } catch (error51) {
+        if (error51 instanceof Error && error51.name === "CursorCreateOutcomeUnknownError") {
+          metrics.cursorCreateOutcomeUnknown += 1;
+          metrics.cursorQuarantinedCurrent += 1;
+        }
+        throw error51;
+      }
+      metrics.cursorActiveCurrent += 1;
+      metrics.cursorActivePeak = Math.max(metrics.cursorActivePeak, metrics.cursorActiveCurrent);
+      let released = false;
+      const markReleased = () => {
+        if (released) return;
+        released = true;
+        metrics.cursorActiveCurrent -= 1;
+      };
+      return {
+        totalCount: handle.totalCount,
+        nextPage: async () => {
+          metrics.cursorGetCalls += 1;
+          const page = await handle.nextPage();
+          metrics.cursorRecordsScanned += page.records.length;
+          if (!page.next) markReleased();
+          return page;
+        },
+        close: async () => {
+          if (!released) metrics.cursorDeleteCalls += 1;
+          try {
+            await handle.close();
+            markReleased();
+          } catch (error51) {
+            metrics.cursorCleanupFailures += 1;
+            metrics.cursorQuarantinedCurrent += 1;
+            throw error51;
+          }
+        }
+      };
     },
     postRecords: (params) => {
       metrics.postCalls += 1;
@@ -37784,6 +37926,37 @@ function wrapClientWithSearchAbort(client, collector, failClosed) {
         if (failClosed) throw new SearchAbortedError();
       }
       return response;
+    }
+  };
+}
+function wrapClientWithCursorScope(client) {
+  const active = /* @__PURE__ */ new Set();
+  return {
+    client: {
+      ...client,
+      openCursor: async (params) => {
+        const handle = await client.openCursor(params);
+        active.add(handle);
+        const remove = () => active.delete(handle);
+        return {
+          totalCount: handle.totalCount,
+          async nextPage() {
+            const page = await handle.nextPage();
+            if (!page.next) remove();
+            return page;
+          },
+          async close() {
+            try {
+              await handle.close();
+            } finally {
+              remove();
+            }
+          }
+        };
+      }
+    },
+    closeActive: async () => {
+      await Promise.all([...active].map((handle) => handle.close().catch(() => void 0)));
     }
   };
 }
@@ -37837,7 +38010,13 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     case "DESCRIBE":
       return executeDescribe(stmt, client, cacheContext);
     case "EXPLAIN":
-      return executeExplain(stmt, client, cacheContext, options.maxRecords ?? 1e4);
+      return executeExplain(
+        stmt,
+        client,
+        cacheContext,
+        options.maxRecords ?? 1e4,
+        options.cursorMaxActive ?? 2
+      );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
@@ -37944,9 +38123,11 @@ async function executeBatch(sql, client, options = {}) {
         searchAbortCollector,
         info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
       );
+      const cursorScope = wrapClientWithCursorScope(statementClient);
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, statementClient, stmtOptions, cacheContext, tempTables, variables),
-        remaining
+        executeBatchStatement(statements[i], info, cursorScope.client, stmtOptions, cacheContext, tempTables, variables),
+        remaining,
+        cursorScope.closeActive
       );
       if (outcome.result) {
         outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
@@ -38104,19 +38285,47 @@ async function runSelectLike(query, client, options, cacheContext, tempTables) {
   }
   return executeQueryWithCte(query, client, options, tempTables, cacheContext, true);
 }
-async function runWithDeadline(work, remainingMs) {
+async function runWithDeadline(work, remainingMs, onTimeout) {
   if (remainingMs === null) return work;
   if (remainingMs <= 0) {
+    if (onTimeout) await onTimeout();
     void work.catch(() => {
     });
     throw new BatchTimeoutError();
   }
   let timer;
+  let timedOut = false;
+  const guardedWork = work.then(
+    (value) => timedOut ? new Promise(() => void 0) : value,
+    (error51) => {
+      if (timedOut) return new Promise(() => void 0);
+      throw error51;
+    }
+  );
   try {
     return await Promise.race([
-      work,
+      guardedWork,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new BatchTimeoutError()), remainingMs);
+        timer = setTimeout(() => {
+          timedOut = true;
+          void (async () => {
+            if (onTimeout) {
+              let cleanupTimer;
+              try {
+                await Promise.race([
+                  onTimeout(),
+                  new Promise((resolve2) => {
+                    cleanupTimer = setTimeout(resolve2, 5e3);
+                    cleanupTimer.unref?.();
+                  })
+                ]);
+              } finally {
+                if (cleanupTimer) clearTimeout(cleanupTimer);
+              }
+            }
+            reject(new BatchTimeoutError());
+          })();
+        }, remainingMs);
       })
     ]);
   } catch (e) {
@@ -38476,7 +38685,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
   const staticMode = resolveSelectMode(stmt);
   const mode = whereCapability.capability === "EXACT_PUSHDOWN" ? staticMode : "FULL_SCAN";
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
-  const orderPlan = hasCanonicalOrder(stmt) ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+  const orderPlan = hasCanonicalOrder(stmt) ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
     stmt,
     staticMode: mode,
     whereCapability: whereCapability.capability,
@@ -38490,7 +38699,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
     client,
     cacheContext
   );
-  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" ? requiresCompleteInput({ ...stmt, orderBy: [] }) : requiresCompleteInput(stmt);
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR" ? requiresCompleteInput({ ...stmt, orderBy: [] }) : requiresCompleteInput(stmt);
   const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
   const effectiveOptions = truncateWasDisabled ? { ...options, onLimitReached: "error" } : options;
   try {
@@ -38591,12 +38800,23 @@ async function executeSimpleSelect(stmt, client, options, cacheContext, orderPla
   const warnings = /* @__PURE__ */ new Set();
   const onLimit2 = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
-  const useRestWindow = stmt.orderBy.length > 0 ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" : stmt.limit !== null && stmt.limit <= 500;
+  const useRestWindow = stmt.orderBy.length > 0 ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR" : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter = stmt.orderBy.length === 0 && needed !== null && needed <= maxRecords2 && !whereHasKlike(stmt.where) ? needed : void 0;
   let records;
-  if (orderPlan?.kind === "KORDER_NATIVE" && stmt.limit === 0) {
+  if ((orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR") && stmt.limit === 0) {
     records = [];
+  } else if (orderPlan?.kind === "KORDER_CURSOR") {
+    const cursorResult = await executeKorderCursor({
+      client,
+      app: params.app,
+      fields: params.fields,
+      query: buildKorderCursorQuery(stmt),
+      offset: stmt.offset ?? 0,
+      limit: stmt.limit
+    });
+    records = cursorResult.records;
+    if (cursorResult.cleanupWarning) warnings.add(cursorResult.cleanupWarning);
   } else if (useRestWindow) {
     const res = await client.getRecords({
       app: params.app,
@@ -39388,7 +39608,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   }
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   if (hasCanonicalOrder(stmt)) {
-    (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+    (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
       stmt,
       staticMode: "FULL_SCAN",
       whereCapability: whereCapability.capability,
@@ -41165,7 +41385,7 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
         const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)].some((table) => table.cteName !== null);
         if (hasCanonicalOrder(select) && !hasUnmaterializedSource) {
           const mode = capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(select) : "FULL_SCAN";
-          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
             stmt: select,
             staticMode: mode,
             whereCapability: capability.capability,
@@ -41195,7 +41415,7 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
     capabilities.set(inlined, capability);
     if (hasCanonicalOrder(inlined)) {
       const meta3 = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
-      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
         stmt: inlined,
         staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
         whereCapability: capability.capability,
@@ -41213,7 +41433,7 @@ function explainMetadataLines(analysis) {
     ...[...analysis.processStatusApps].sort((a, b) => a - b).map((appId) => `  metadata API: process status APP${appId}`)
   ];
 }
-async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4) {
+async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2) {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements);
   validateDeclaredBatchVariables(statements, injectedVariables);
@@ -41224,12 +41444,12 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
     const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
     validateKlikeStatement(planStmt);
     const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords2);
-    const statementPlan = buildBatchStatementPlan(
+    const statementPlan = addCursorConcurrency(buildBatchStatementPlan(
       planStmt,
       analysis.statements[i],
       whereAnalysis.capabilities,
       whereAnalysis.orderPlans
-    );
+    ), cursorMaxActive2);
     const metadataPlan = explainMetadataLines(whereAnalysis);
     plans.push({
       index: i,
@@ -41335,11 +41555,14 @@ function buildPlanForBatchQuery(query, info, capabilities, orderPlans) {
   lines.push("  note:          \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3078\u306E WHERE \u30D7\u30C3\u30B7\u30E5\u30C0\u30A6\u30F3\u306F\u884C\u308F\u308C\u306A\u3044");
   return lines;
 }
-async function executeExplain(stmt, client, cacheContext, maxRecords2) {
+async function executeExplain(stmt, client, cacheContext, maxRecords2, cursorMaxActive2) {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords2);
   const lines = [
     ...explainMetadataLines(analysis),
-    ...buildExplainPlan(stmt.query, void 0, analysis.capabilities, analysis.orderPlans)
+    ...addCursorConcurrency(
+      buildExplainPlan(stmt.query, void 0, analysis.capabilities, analysis.orderPlans),
+      cursorMaxActive2
+    )
   ];
   return {
     type: "SELECT",
@@ -41347,6 +41570,17 @@ async function executeExplain(stmt, client, cacheContext, maxRecords2) {
     rows: lines.map((line) => ({ plan: line })),
     rowCount: lines.length
   };
+}
+function addCursorConcurrency(lines, cursorMaxActive2) {
+  const result = [];
+  for (const line of lines) {
+    result.push(line);
+    if (line.trim() === "cursor page size: 500") {
+      const indent = line.match(/^\s*/)?.[0] ?? "";
+      result.push(`${indent}cursor concurrency: ${cursorMaxActive2} per domain (process-local)`);
+    }
+  }
+  return result;
 }
 function buildExplainPlan(query, label, capabilities, orderPlans) {
   if (query.type === "UNION") return buildUnionPlan(query, capabilities, orderPlans);
@@ -41377,6 +41611,11 @@ function buildSelectPlan(stmt, label, capabilities, orderPlans) {
     if (orderPlan.kind === "KORDER_NATIVE") {
       lines.push("  order semantics: kintone native (not kSQL canonical)");
       lines.push("  REST execution: single GET");
+    } else if (orderPlan.kind === "KORDER_CURSOR") {
+      lines.push("  order semantics: kintone native (not kSQL canonical)");
+      lines.push("  fetch API: POST/GET/DELETE records/cursor.json");
+      lines.push("  cursor page size: 500");
+      lines.push(`  scan rows:     ${orderPlan.scanRows}`);
     }
   }
   if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
@@ -41388,7 +41627,8 @@ function buildSelectPlan(stmt, label, capabilities, orderPlans) {
   if (mode === "SIMPLE") {
     const params = selectToKintoneParams(orderPlan?.kind === "CANONICAL_REST_TOP_N" ? withCanonicalRestTie(stmt) : stmt);
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
-    lines.push(`  kintone query: ${params.query || "(\u306A\u3057)"}`);
+    const displayedQuery = orderPlan?.kind === "KORDER_CURSOR" ? buildKorderCursorQuery(stmt) : params.query;
+    lines.push(`  kintone query: ${displayedQuery || "(\u306A\u3057)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(\u5168\u30D5\u30A3\u30FC\u30EB\u30C9)" : params.fields.join(", ")}`);
   } else {
     const pushdownPlan = buildKlikePushdownPlan(stmt);
@@ -41931,6 +42171,12 @@ function validateKsqlConfig(config2) {
     }
     const logicalApps = normalizeLogicalApps(profileName, profile2.logicalApps);
     if (logicalApps !== void 0) profile2.logicalApps = logicalApps;
+    if (profile2.query?.cursorMaxActive !== void 0) {
+      const value = profile2.query.cursorMaxActive;
+      if (!Number.isSafeInteger(value) || value < 1 || value > 5) {
+        throw argumentError(`query.cursorMaxActive for profile "${profileName}" must be an integer from 1 to 5.`);
+      }
+    }
   }
   return config2;
 }
@@ -42093,6 +42339,10 @@ var RequestGate = class {
   async runMutation(fn) {
     return this.withSlot(fn);
   }
+  /** Cursor Create/Get/Delete: セマフォのみ。GETでも位置を進めるため再試行しない。 */
+  async runCursorStep(fn) {
+    return this.withSlot(fn);
+  }
   async withSlot(fn) {
     await this.acquire();
     try {
@@ -42124,6 +42374,14 @@ var RequestGate = class {
 function withRequestGate(client, gate) {
   return {
     getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
+    openCursor: async (params) => {
+      const handle = await gate.runCursorStep(() => client.openCursor(params));
+      return {
+        totalCount: handle.totalCount,
+        nextPage: () => gate.runCursorStep(() => handle.nextPage()),
+        close: () => gate.runCursorStep(() => handle.close())
+      };
+    },
     getApps: () => gate.runReadOnly(() => client.getApps()),
     getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
     getProcessStatuses: (appId) => gate.runReadOnly(() => client.getProcessStatuses(appId)),
@@ -42238,7 +42496,218 @@ function normalizeProcessStatusStates(states) {
   });
 }
 
+// src/api/kintoneCursor.ts
+function isAlreadyReleasedCursorError(error51) {
+  const shaped = error51;
+  return shaped?.status === 404 && shaped.code === "GAIA_CN01";
+}
+async function deleteCursorWithConfirmation(deleteCursor, sleep = (ms) => new Promise((resolve2) => setTimeout(resolve2, ms)), isAlreadyReleased = isAlreadyReleasedCursorError) {
+  try {
+    await deleteCursor();
+    return;
+  } catch (firstError) {
+    if (isAlreadyReleased(firstError)) return;
+  }
+  await sleep(250);
+  try {
+    await deleteCursor();
+  } catch (confirmationError) {
+    if (isAlreadyReleased(confirmationError)) return;
+    throw confirmationError;
+  }
+}
+async function withTimeout(promise2, timeoutMs) {
+  let timer;
+  const timeout2 = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`CursorCleanupTimeoutError: cleanup exceeded ${timeoutMs}ms.`)), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([promise2, timeout2]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+function createKintoneCursorHandle(totalCount, operations) {
+  let released = false;
+  let closing = false;
+  let pageTail = Promise.resolve();
+  let closePromise = null;
+  const nextPage = () => {
+    if (closing || released) return Promise.resolve({ records: [], next: false });
+    const result = pageTail.then(async () => {
+      if (closing || released) return { records: [], next: false };
+      const page = await operations.get();
+      if (!page.next) {
+        released = true;
+        operations.onReleased?.();
+      }
+      return page;
+    });
+    pageTail = result.then(() => void 0, () => void 0);
+    return result;
+  };
+  const close = () => {
+    if (released) return Promise.resolve();
+    if (closePromise) return closePromise;
+    closing = true;
+    closePromise = pageTail.then(async () => {
+      if (released) return;
+      try {
+        await withTimeout(
+          deleteCursorWithConfirmation(
+            operations.delete,
+            operations.sleep,
+            operations.isAlreadyReleasedError
+          ),
+          operations.cleanupTimeoutMs ?? 5e3
+        );
+        released = true;
+        operations.onReleased?.();
+      } catch (error51) {
+        operations.onReleaseUnknown?.();
+        throw error51;
+      }
+    });
+    return closePromise;
+  };
+  return { totalCount, nextPage, close };
+}
+
+// src/api/cursorLeaseManager.ts
+var DEFAULT_MAX_ACTIVE = 2;
+var MAX_ACTIVE = 5;
+var DEFAULT_WAIT_MS = 3e4;
+var DEFAULT_QUARANTINE_MS = 10 * 6e4 + 3e4;
+var CursorLeaseManager = class {
+  constructor(host, options = {}) {
+    this.host = host;
+    this.active = 0;
+    this.peak = 0;
+    this.quarantined = 0;
+    this.waiters = [];
+    this.createTail = Promise.resolve();
+    const maxActive = options.maxActive ?? DEFAULT_MAX_ACTIVE;
+    if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > MAX_ACTIVE) {
+      throw new Error(`ArgumentError: cursorMaxActive must be an integer from 1 to ${MAX_ACTIVE}.`);
+    }
+    this.maxActive = maxActive;
+    this.waitTimeoutMs = options.waitTimeoutMs ?? DEFAULT_WAIT_MS;
+    this.quarantineMs = options.quarantineMs ?? DEFAULT_QUARANTINE_MS;
+  }
+  acquire() {
+    if (this.active < this.maxActive) {
+      this.active += 1;
+      this.peak = Math.max(this.peak, this.active);
+      return Promise.resolve(this.makeLease());
+    }
+    return new Promise((resolve2, reject) => {
+      const waiter = {};
+      waiter.resolve = resolve2;
+      waiter.reject = reject;
+      waiter.timer = setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new CursorCapacityError(this.host, this.maxActive, this.waitTimeoutMs));
+      }, this.waitTimeoutMs);
+      waiter.timer.unref?.();
+      this.waiters.push(waiter);
+    });
+  }
+  /**
+   * 同一hostを共有する後続surfaceの設定を反映する。
+   * 縮小時は既存leaseを強制終了せず、activeが新上限を下回るまで新規取得だけを止める。
+   */
+  setMaxActive(maxActive) {
+    this.validateMaxActive(maxActive);
+    if (this.maxActive === maxActive) return;
+    this.maxActive = maxActive;
+    this.dispatchWaiters();
+  }
+  async runCreate(fn) {
+    const previous = this.createTail;
+    let unlock;
+    this.createTail = new Promise((resolve2) => {
+      unlock = resolve2;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      unlock();
+    }
+  }
+  snapshot() {
+    return {
+      active: this.active,
+      peak: this.peak,
+      quarantined: this.quarantined,
+      waiting: this.waiters.length,
+      limit: this.maxActive
+    };
+  }
+  makeLease() {
+    let done = false;
+    return {
+      release: () => {
+        if (done) return;
+        done = true;
+        this.returnPermit();
+      },
+      quarantine: (durationMs = this.quarantineMs) => {
+        if (done) return;
+        done = true;
+        this.quarantined += 1;
+        const timer = setTimeout(() => {
+          this.quarantined -= 1;
+          this.returnPermit();
+        }, durationMs);
+        timer.unref?.();
+      }
+    };
+  }
+  returnPermit() {
+    this.active -= 1;
+    this.dispatchWaiters();
+  }
+  dispatchWaiters() {
+    while (this.active < this.maxActive) {
+      const waiter = this.waiters.shift();
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      this.active += 1;
+      this.peak = Math.max(this.peak, this.active);
+      waiter.resolve(this.makeLease());
+    }
+  }
+  validateMaxActive(maxActive) {
+    if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > MAX_ACTIVE) {
+      throw new Error(`ArgumentError: cursorMaxActive must be an integer from 1 to ${MAX_ACTIVE}.`);
+    }
+  }
+};
+var managers = /* @__PURE__ */ new Map();
+function getCursorLeaseManager(host, maxActive = DEFAULT_MAX_ACTIVE) {
+  const key = host.toLowerCase();
+  let manager = managers.get(key);
+  if (!manager) {
+    manager = new CursorLeaseManager(key, { maxActive });
+    managers.set(key, manager);
+  } else {
+    manager.setMaxActive(maxActive);
+  }
+  return manager;
+}
+
 // src/cli/nodeKintoneClient.ts
+var KintoneApiError = class extends Error {
+  constructor(status, code, bodyText) {
+    super(`kintone API error ${status}: ${bodyText}`);
+    this.status = status;
+    this.code = code;
+    this.name = "KintoneApiError";
+  }
+};
 var SEARCH_ABORTED_HEADER_VALUE = "Filter aborted because of too many search results";
 function createNodeKintoneClient(baseUrl, tokenResolver) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
@@ -42286,7 +42755,13 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
       if (tokenResolver.debug) {
         tokenResolver.log?.(`[debug] response status=${res.status} body=${bodyText}`);
       }
-      throw new Error(`kintone API error ${res.status}: ${bodyText}`);
+      let code;
+      try {
+        const body = JSON.parse(bodyText);
+        if (typeof body.code === "string") code = body.code;
+      } catch {
+      }
+      throw new KintoneApiError(res.status, code, bodyText);
     }
     if (tokenResolver.debug) {
       tokenResolver.log?.(`[debug] response status=${res.status}`);
@@ -42352,6 +42827,48 @@ function createNodeKintoneClient(baseUrl, tokenResolver) {
         );
         return response.searchAborted ? { ...response.body, searchAborted: true } : response.body;
       }
+    },
+    async openCursor(params) {
+      const manager = getCursorLeaseManager(new URL(normalizedBaseUrl).host, tokenResolver.cursorMaxActive);
+      const lease = await manager.acquire();
+      let created;
+      try {
+        created = await manager.runCreate(() => requestJson(
+          `${apiBasePath}/records/cursor.json`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              app: params.app,
+              query: params.query,
+              size: params.size,
+              fields: params.fields && params.fields.length > 0 ? params.fields : void 0
+            })
+          },
+          params.app
+        ));
+      } catch (error51) {
+        if (error51 instanceof KintoneApiError) {
+          lease.release();
+          throw error51;
+        }
+        lease.quarantine();
+        throw new CursorCreateOutcomeUnknownError(error51);
+      }
+      const cursorId = created.id;
+      return createKintoneCursorHandle(Number(created.totalCount), {
+        get: () => requestJson(
+          `${apiBasePath}/records/cursor.json?id=${encodeURIComponent(cursorId)}`,
+          { method: "GET" },
+          params.app
+        ),
+        delete: () => requestJson(
+          `${apiBasePath}/records/cursor.json`,
+          { method: "DELETE", body: JSON.stringify({ id: cursorId }) },
+          params.app
+        ),
+        onReleased: () => lease.release(),
+        onReleaseUnknown: () => lease.quarantine()
+      });
     },
     async postRecords(_params) {
       const res = await requestJson(
@@ -42819,6 +43336,10 @@ async function createKsqlRuntime(serverOptions, input) {
   const onLimit2 = input.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile2.query?.onLimit ?? "error";
   const timeout2 = input.timeout ?? envInt("KSQL_TIMEOUT") ?? profile2.query?.timeout ?? 3e4;
   const tempTableMaxRows2 = input.tempTableMaxRows ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS") ?? profile2.query?.tempTableMaxRows;
+  const cursorMaxActive2 = input.cursorMaxActive ?? envInt("KSQL_CURSOR_MAX_ACTIVE") ?? profile2.query?.cursorMaxActive ?? 2;
+  if (!Number.isSafeInteger(cursorMaxActive2) || cursorMaxActive2 < 1 || cursorMaxActive2 > 5) {
+    throw new Error("ArgumentError: cursorMaxActive must be an integer from 1 to 5.");
+  }
   const appIds = extractAppIds(sql);
   const defaultApp = envInt("KSQL_APP") ?? profile2.app ?? null;
   if (appIds.length === 0 && defaultApp !== null) appIds.push(defaultApp);
@@ -42856,6 +43377,7 @@ async function createKsqlRuntime(serverOptions, input) {
       }
       profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
+        cursorMaxActive: cursorMaxActive2,
         timeoutMs: timeout2,
         debug: input.debug,
         debugHeaders: input.debugHeaders,
@@ -42887,6 +43409,7 @@ async function createKsqlRuntime(serverOptions, input) {
     }
     profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
       guestSpaceId,
+      cursorMaxActive: cursorMaxActive2,
       timeoutMs: timeout2,
       debug: input.debug,
       debugHeaders: input.debugHeaders,
@@ -42919,6 +43442,12 @@ async function createKsqlRuntime(serverOptions, input) {
       const routed = runtimeContext.clientsByProfile.get(binding.profile);
       if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
       return routed.getRecords({ ...params, app: binding.appId });
+    },
+    openCursor: (params) => {
+      const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
+      const routed = runtimeContext.clientsByProfile.get(binding.profile);
+      if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
+      return routed.openCursor({ ...params, app: binding.appId });
     },
     postRecords: (params) => {
       const binding = resolveRuntimeBinding(runtimeContext.sqlContext, params.app);
@@ -42970,6 +43499,7 @@ async function createKsqlRuntime(serverOptions, input) {
     fetchParallel: fetchParallel2,
     onLimit: onLimit2,
     timeout: timeout2,
+    cursorMaxActive: cursorMaxActive2,
     tempTableMaxRows: tempTableMaxRows2
   };
 }
@@ -43170,6 +43700,7 @@ function noOpClient() {
   };
   return {
     getRecords: fail,
+    openCursor: fail,
     postRecords: fail,
     putRecords: fail,
     deleteRecords: fail,
@@ -43446,7 +43977,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const runtime = needsAppMetadata ? await createRuntime(serverOptions, {
       sql: input.sql,
       sqlContext: normalized.sqlContext,
-      profile: input.profile
+      profile: input.profile,
+      maxRecords: input.maxRecords,
+      cursorMaxActive: input.cursorMaxActive
     }) : null;
     const explainClient = runtime?.client ?? noOpClient();
     const explainCacheContext = runtime?.cacheContext ?? normalized.cacheContext;
@@ -43457,7 +43990,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         explainClient,
         void 0,
         explainCacheContext,
-        runtime?.maxRecords
+        runtime?.maxRecords ?? input.maxRecords,
+        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
       );
       return {
         ok: true,
@@ -43469,7 +44003,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     }
     const result = await executeSql(explainSql(explainSourceSql), explainClient, {
       cacheContext: explainCacheContext,
-      maxRecords: runtime?.maxRecords
+      maxRecords: runtime?.maxRecords ?? input.maxRecords,
+      cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -43496,7 +44031,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         fetchParallel: input.fetchParallel,
         onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
         timeout: input.timeout,
-        tempTableMaxRows: input.tempTableMaxRows
+        tempTableMaxRows: input.tempTableMaxRows,
+        cursorMaxActive: input.cursorMaxActive
       });
       const batchResult = await executeBatchSql(runtime2.sql, runtime2.client, {
         maxRecords: runtime2.maxRecords,
@@ -43511,6 +44047,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime2.timeout,
+        cursorMaxActive: runtime2.cursorMaxActive ?? input.cursorMaxActive ?? 2,
         variables: input.variables
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
@@ -43540,13 +44077,15 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
       onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
-      timeout: input.timeout
+      timeout: input.timeout,
+      cursorMaxActive: input.cursorMaxActive
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
-      cacheContext: runtime.cacheContext
+      cacheContext: runtime.cacheContext,
+      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type === "VALIDATION") return toDmlValidationPayload(result);
@@ -43590,7 +44129,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
-      tempTableMaxRows: input.tempTableMaxRows
+      tempTableMaxRows: input.tempTableMaxRows,
+      cursorMaxActive: input.cursorMaxActive
     });
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
@@ -43602,6 +44142,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
+      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
       variables: input.variables,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
@@ -43657,7 +44198,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       maxRecords: resolveMutateRuntimeMaxRecords(validation.statements, dmlMaxRows),
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
-      timeout: input.timeout
+      timeout: input.timeout,
+      cursorMaxActive: input.cursorMaxActive
     });
     let result;
     try {
@@ -43666,6 +44208,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         fetchParallel: runtime.fetchParallel,
         onLimitReached: runtime.onLimit,
         cacheContext: runtime.cacheContext,
+        cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
         confirm: async (count, operation) => {
           if (count > dmlMaxRows) {
             throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
@@ -43838,6 +44381,7 @@ var fetchParallel = external_exports.number().int().min(1).max(10).describe("Num
 var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always overrides 'truncate' to 'error'.").optional();
 var tempTableMaxRows = external_exports.number().int().positive().describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors \u2014 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.").optional();
 var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
+var cursorMaxActive = external_exports.number().int().min(1).max(5).describe("Maximum active Cursor API handles per kintone host in this process (1-5, default 2). Later calls update the host limit; lowering it keeps existing cursors and delays new ones until active usage falls below the new limit. Create/Get are never automatically retried; capacity waits up to 30 seconds.").optional();
 var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
 var savedQueryTags = external_exports.array(external_exports.string().min(1)).describe("Tags for organizing saved queries.").optional();
 var validateInputSchema = external_exports.object({
@@ -43846,7 +44390,9 @@ var validateInputSchema = external_exports.object({
 });
 var explainInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
-  profile
+  profile,
+  maxRecords,
+  cursorMaxActive
 });
 var queryInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;"),
@@ -43856,6 +44402,7 @@ var queryInputSchema = external_exports.object({
   onLimit,
   tempTableMaxRows,
   timeout,
+  cursorMaxActive,
   continueOnError: external_exports.boolean().describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).").optional(),
   maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional(),
   variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
@@ -43869,6 +44416,7 @@ var mutateInputSchema = external_exports.object({
   fetchParallel,
   tempTableMaxRows,
   timeout,
+  cursorMaxActive,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional(),
   variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
@@ -43959,7 +44507,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "3.0.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.1.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

@@ -123,6 +123,11 @@ export class RequestGate {
     return this.withSlot(fn);
   }
 
+  /** Cursor Create/Get/Delete: セマフォのみ。GETでも位置を進めるため再試行しない。 */
+  async runCursorStep<T>(fn: () => Promise<T>): Promise<T> {
+    return this.withSlot(fn);
+  }
+
   private async withSlot<T>(fn: () => Promise<T>): Promise<T> {
     await this.acquire();
     try {
@@ -164,6 +169,14 @@ export class RequestGate {
 export function withRequestGate(client: KintoneClient, gate: RequestGate): KintoneClient {
   return {
     getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
+    openCursor: async (params) => {
+      const handle = await gate.runCursorStep(() => client.openCursor(params));
+      return {
+        totalCount: handle.totalCount,
+        nextPage: () => gate.runCursorStep(() => handle.nextPage()),
+        close: () => gate.runCursorStep(() => handle.close()),
+      };
+    },
     getApps: () => gate.runReadOnly(() => client.getApps()),
     getFields: (appId) => gate.runReadOnly(() => client.getFields(appId)),
     getProcessStatuses: (appId) => gate.runReadOnly(() => client.getProcessStatuses(appId)),

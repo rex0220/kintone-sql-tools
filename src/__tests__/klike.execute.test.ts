@@ -15,6 +15,7 @@ function makeClient(): KintoneClient & { getCalls: PageFetchParams[]; writeCalls
         備考: { value: "緊急対応" },
       }] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { client.writeCalls++; return { ids: [] }; },
     async putRecords() { client.writeCalls++; },
     async deleteRecords() { client.writeCalls++; },

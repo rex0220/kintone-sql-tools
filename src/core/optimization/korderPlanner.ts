@@ -19,7 +19,7 @@ export interface KorderPlanInput {
   readonly hasKlike: boolean;
 }
 
-export function planKorderNative(input: KorderPlanInput): CanonicalOrderPlan {
+export function planKorder(input: KorderPlanInput): CanonicalOrderPlan {
   const { stmt } = input;
   const reasons: string[] = [];
   if (stmt.orderMode !== "KINTONE_NATIVE") reasons.push("KORDER_MODE_REQUIRED");
@@ -51,14 +51,17 @@ export function planKorderNative(input: KorderPlanInput): CanonicalOrderPlan {
     }
   }
 
-  if (stmt.limit === null || stmt.limit < 0 || stmt.limit > 500) {
+  if (stmt.limit === null || !Number.isSafeInteger(stmt.limit) || stmt.limit < 0) {
     reasons.push(`KORDER_LIMIT_INVALID(limit=${String(stmt.limit)})`);
   }
-  if (stmt.limit !== null && stmt.limit > input.maxRecords) {
-    reasons.push(`KORDER_LIMIT_EXCEEDS_MAX_RECORDS(limit=${stmt.limit}, maxRecords=${input.maxRecords})`);
-  }
   const offset = stmt.offset ?? 0;
-  if (offset < 0 || offset > 10_000) reasons.push(`KORDER_OFFSET_INVALID(offset=${offset})`);
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    reasons.push(`KORDER_OFFSET_INVALID(offset=${offset})`);
+  }
+  const scanRows = stmt.limit === null ? Number.NaN : offset + stmt.limit;
+  if (stmt.limit !== null && !Number.isSafeInteger(scanRows)) {
+    reasons.push(`KORDER_SCAN_ROWS_INVALID(offset=${offset}, limit=${stmt.limit})`);
+  }
 
   const unique = [...new Set(reasons)];
   if (unique.length > 0) {
@@ -67,11 +70,24 @@ export function planKorderNative(input: KorderPlanInput): CanonicalOrderPlan {
       "Use ORDER BY for canonical local ordering or simplify the query."
     );
   }
+  const native = stmt.limit! <= 500 && offset <= 10_000 && stmt.limit! <= input.maxRecords;
+  if (!native && scanRows > input.maxRecords) {
+    throw new Error(
+      `ArgumentError: KORDER BY cannot be executed (mode=KINTONE_NATIVE; ` +
+      `KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS(scanRows=${scanRows}, maxRecords=${input.maxRecords})). ` +
+      "Use ORDER BY for canonical local ordering, raise maxRecords, or reduce LIMIT/OFFSET."
+    );
+  }
+
   return {
-    kind: "KORDER_NATIVE",
+    kind: native ? "KORDER_NATIVE" : "KORDER_CURSOR",
     requiresCompleteInput: false,
     localOrderBy: false,
     applyLocalOffsetLimit: false,
     reasonCodes: [],
+    scanRows,
   };
 }
+
+/** @deprecated B33 以前の呼出し名。新規コードは planKorder() を使う。 */
+export const planKorderNative = planKorder;

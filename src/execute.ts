@@ -64,7 +64,9 @@ import {
   planCanonicalOrder,
   type CanonicalOrderPlan,
 } from "./core/optimization/canonicalOrderPlanner";
-import { planKorderNative } from "./core/optimization/korderPlanner";
+import { planKorder } from "./core/optimization/korderPlanner";
+import { executeKorderCursor } from "./core/optimization/korderCursorExecutor";
+import { buildKorderCursorQuery } from "./converter/korderCursorQuery";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -84,6 +86,8 @@ import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere"
 import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
+import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
+export type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
 import {
   renderValidationValue,
   validateDmlCandidates,
@@ -104,6 +108,8 @@ import {
 export interface KintoneClient {
   /** GET /k/v1/records.json（1ページ分） */
   getRecords: PageFetcher;
+  /** POST/GET/DELETE records/cursor.json を作成時のrouteへ束縛する。 */
+  openCursor: (params: KintoneCursorOpenParams) => Promise<KintoneCursorHandle>;
   /** POST /k/v1/records.json（INSERT） */
   postRecords: (params: KintonePostParams) => Promise<{ ids: string[] }>;
   /** PUT /k/v1/records.json（UPDATE） */
@@ -196,6 +202,15 @@ export interface ExecuteMetrics {
   appsCalls: number;
   /** GET /k/v1/app/status.json の呼び出し回数（キャッシュヒット時は増えない） */
   processStatusCalls: number;
+  cursorCreateCalls: number;
+  cursorGetCalls: number;
+  cursorDeleteCalls: number;
+  cursorRecordsScanned: number;
+  cursorActiveCurrent: number;
+  cursorActivePeak: number;
+  cursorCleanupFailures: number;
+  cursorCreateOutcomeUnknown: number;
+  cursorQuarantinedCurrent: number;
   /** GET で取得したレコード総数（全ページ・サブクエリ含む） */
   fetchedRows: number;
   /** execute() 全体の所要時間（ミリ秒） */
@@ -340,6 +355,8 @@ export interface ExecuteOptions {
   fetchParallel?: number;
   /** フィールド関連キャッシュの文脈キー（例: CLI profile 名） */
   cacheContext?: string;
+  /** EXPLAINへ表示するhost単位のprocess-local Cursor上限（1..5、既定2） */
+  cursorMaxActive?: number;
 }
 
 // ============================================================
@@ -402,6 +419,15 @@ function createEmptyMetrics(): ExecuteMetrics {
     fieldCalls: 0,
     appsCalls: 0,
     processStatusCalls: 0,
+    cursorCreateCalls: 0,
+    cursorGetCalls: 0,
+    cursorDeleteCalls: 0,
+    cursorRecordsScanned: 0,
+    cursorActiveCurrent: 0,
+    cursorActivePeak: 0,
+    cursorCleanupFailures: 0,
+    cursorCreateOutcomeUnknown: 0,
+    cursorQuarantinedCurrent: 0,
     fetchedRows: 0,
     elapsedMs: 0,
   };
@@ -419,6 +445,48 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
       const res = await client.getRecords(params);
       metrics.fetchedRows += res.records.length;
       return res;
+    },
+    openCursor: async (params) => {
+      metrics.cursorCreateCalls += 1;
+      let handle: KintoneCursorHandle;
+      try {
+        handle = await client.openCursor(params);
+      } catch (error) {
+        if (error instanceof Error && error.name === "CursorCreateOutcomeUnknownError") {
+          metrics.cursorCreateOutcomeUnknown += 1;
+          metrics.cursorQuarantinedCurrent += 1;
+        }
+        throw error;
+      }
+      metrics.cursorActiveCurrent += 1;
+      metrics.cursorActivePeak = Math.max(metrics.cursorActivePeak, metrics.cursorActiveCurrent);
+      let released = false;
+      const markReleased = () => {
+        if (released) return;
+        released = true;
+        metrics.cursorActiveCurrent -= 1;
+      };
+      return {
+        totalCount: handle.totalCount,
+        nextPage: async () => {
+          metrics.cursorGetCalls += 1;
+          const page = await handle.nextPage();
+          metrics.cursorRecordsScanned += page.records.length;
+          if (!page.next) markReleased();
+          return page;
+        },
+        close: async () => {
+          if (!released) metrics.cursorDeleteCalls += 1;
+          try {
+            await handle.close();
+            markReleased();
+          } catch (error) {
+            metrics.cursorCleanupFailures += 1;
+            metrics.cursorQuarantinedCurrent += 1;
+            throw error;
+          }
+        },
+      };
     },
     postRecords: (params) => {
       metrics.postCalls += 1;
@@ -461,6 +529,38 @@ function wrapClientWithSearchAbort(
         if (failClosed) throw new SearchAbortedError();
       }
       return response;
+    },
+  };
+}
+
+function wrapClientWithCursorScope(client: KintoneClient): {
+  client: KintoneClient;
+  closeActive: () => Promise<void>;
+} {
+  const active = new Set<KintoneCursorHandle>();
+  return {
+    client: {
+      ...client,
+      openCursor: async (params) => {
+        const handle = await client.openCursor(params);
+        active.add(handle);
+        const remove = () => active.delete(handle);
+        return {
+          totalCount: handle.totalCount,
+          async nextPage() {
+            const page = await handle.nextPage();
+            if (!page.next) remove();
+            return page;
+          },
+          async close() {
+            try { await handle.close(); }
+            finally { remove(); }
+          },
+        };
+      },
+    },
+    closeActive: async () => {
+      await Promise.all([...active].map((handle) => handle.close().catch(() => undefined)));
     },
   };
 }
@@ -513,7 +613,13 @@ async function executeParsedStatement(
     case "REORDER":       return executeReorder(stmt, client, options, cacheContext);
     case "SHOW_APPS":     return executeShowApps(client);
     case "DESCRIBE":      return executeDescribe(stmt, client, cacheContext);
-    case "EXPLAIN":       return executeExplain(stmt, client, cacheContext, options.maxRecords ?? 10_000);
+    case "EXPLAIN":       return executeExplain(
+      stmt,
+      client,
+      cacheContext,
+      options.maxRecords ?? 10_000,
+      options.cursorMaxActive ?? 2
+    );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
       throw new Error("ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).");
@@ -734,9 +840,11 @@ export async function executeBatch(
         searchAbortCollector,
         info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
       );
+      const cursorScope = wrapClientWithCursorScope(statementClient);
       const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, statementClient, stmtOptions, cacheContext, tempTables, variables),
-        remaining
+        executeBatchStatement(statements[i], info, cursorScope.client, stmtOptions, cacheContext, tempTables, variables),
+        remaining,
+        cursorScope.closeActive
       );
       if (outcome.result) {
         outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
@@ -948,18 +1056,50 @@ async function runSelectLike(
  * 注意: 進行中の kintone リクエスト自体は中断されない（AbortSignal の
  * 伝播はレート制御基盤 P0-1 とあわせて対応する）。
  */
-async function runWithDeadline<T>(work: Promise<T>, remainingMs: number | null): Promise<T> {
+async function runWithDeadline<T>(
+  work: Promise<T>,
+  remainingMs: number | null,
+  onTimeout?: () => Promise<void>
+): Promise<T> {
   if (remainingMs === null) return work;
   if (remainingMs <= 0) {
+    if (onTimeout) await onTimeout();
     void work.catch(() => { /* 破棄する実行の未処理拒否を抑止 */ });
     throw new BatchTimeoutError();
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const guardedWork = work.then(
+    (value) => timedOut ? new Promise<T>(() => undefined) : value,
+    (error) => {
+      if (timedOut) return new Promise<T>(() => undefined);
+      throw error;
+    }
+  );
   try {
     return await Promise.race([
-      work,
+      guardedWork,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new BatchTimeoutError()), remainingMs);
+        timer = setTimeout(() => {
+          timedOut = true;
+          void (async () => {
+            if (onTimeout) {
+              let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                await Promise.race([
+                  onTimeout(),
+                  new Promise<void>((resolve) => {
+                    cleanupTimer = setTimeout(resolve, 5_000);
+                    cleanupTimer.unref?.();
+                  }),
+                ]);
+              } finally {
+                if (cleanupTimer) clearTimeout(cleanupTimer);
+              }
+            }
+            reject(new BatchTimeoutError());
+          })();
+        }, remainingMs);
       }),
     ]);
   } catch (e) {
@@ -1449,7 +1589,7 @@ async function executeSelect(
     : "FULL_SCAN";
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   const orderPlan = hasCanonicalOrder(stmt)
-    ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+    ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
         stmt,
         staticMode: mode,
         whereCapability: whereCapability.capability,
@@ -1466,7 +1606,7 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
+  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR"
     ? requiresCompleteInput({ ...stmt, orderBy: [] })
     : requiresCompleteInput(stmt);
   const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
@@ -1594,7 +1734,7 @@ async function executeSimpleSelect(
   const onLimit = options.onLimitReached ?? "error";
   const parallel = options.fetchParallel ?? 1;
   const useRestWindow = stmt.orderBy.length > 0
-    ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE"
+    ? orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR"
     : stmt.limit !== null && stmt.limit <= 500;
   const needed = stmt.limit === null ? null : (stmt.offset ?? 0) + stmt.limit;
   const stopAfter =
@@ -1608,8 +1748,19 @@ async function executeSimpleSelect(
   // ORDER BY ありは schema-aware plan だけが REST 窓を許可する。
   // ORDER BY なしは順序契約がないため、従来どおり小さい LIMIT を単発取得できる。
   let records: KintoneRecord[];
-  if (orderPlan?.kind === "KORDER_NATIVE" && stmt.limit === 0) {
+  if ((orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR") && stmt.limit === 0) {
     records = [];
+  } else if (orderPlan?.kind === "KORDER_CURSOR") {
+    const cursorResult = await executeKorderCursor({
+      client,
+      app: params.app,
+      fields: params.fields,
+      query: buildKorderCursorQuery(stmt),
+      offset: stmt.offset ?? 0,
+      limit: stmt.limit!,
+    });
+    records = cursorResult.records;
+    if (cursorResult.cleanupWarning) warnings.add(cursorResult.cleanupWarning);
   } else if (useRestWindow) {
     const res: KintoneGetResponse = await client.getRecords({
       app: params.app,
@@ -2661,7 +2812,7 @@ async function executeFullScanWithCte(
   }
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
   if (hasCanonicalOrder(stmt)) {
-    (stmt.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+    (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
       stmt,
       staticMode: "FULL_SCAN",
       whereCapability: whereCapability.capability,
@@ -5164,7 +5315,7 @@ async function buildExplainWhereAnalysis(
           const mode = capability.capability === "EXACT_PUSHDOWN"
             ? resolveSelectMode(select)
             : "FULL_SCAN";
-          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+          orderPlans.set(select, (select.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
             stmt: select,
             staticMode: mode,
             whereCapability: capability.capability,
@@ -5196,7 +5347,7 @@ async function buildExplainWhereAnalysis(
     capabilities.set(inlined, capability);
     if (hasCanonicalOrder(inlined)) {
       const meta = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
-      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorderNative : planCanonicalOrder)({
+      orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
         stmt: inlined,
         staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
         whereCapability: capability.capability,
@@ -5242,7 +5393,8 @@ export async function buildBatchExplainPlans(
   client: KintoneClient,
   injectedVariables?: Readonly<Record<string, string>>,
   cacheContext = "batch-explain",
-  maxRecords = 10_000
+  maxRecords = 10_000,
+  cursorMaxActive = 2
 ): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
@@ -5258,12 +5410,12 @@ export async function buildBatchExplainPlans(
         : resolveVariableRefs(stmt, variables);
       validateKlikeStatement(planStmt);
       const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords);
-      const statementPlan = buildBatchStatementPlan(
+      const statementPlan = addCursorConcurrency(buildBatchStatementPlan(
         planStmt,
         analysis.statements[i],
         whereAnalysis.capabilities,
         whereAnalysis.orderPlans
-      );
+      ), cursorMaxActive);
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
         index: i,
@@ -5397,12 +5549,16 @@ async function executeExplain(
   stmt: ExplainStatement,
   client: KintoneClient,
   cacheContext: string,
-  maxRecords: number
+  maxRecords: number,
+  cursorMaxActive: number
 ): Promise<SelectResult> {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
   const lines = [
     ...explainMetadataLines(analysis),
-    ...buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
+    ...addCursorConcurrency(
+      buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
+      cursorMaxActive
+    ),
   ];
   return {
     type: "SELECT",
@@ -5410,6 +5566,18 @@ async function executeExplain(
     rows: lines.map((line) => ({ plan: line })),
     rowCount: lines.length,
   };
+}
+
+function addCursorConcurrency(lines: string[], cursorMaxActive: number): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    result.push(line);
+    if (line.trim() === "cursor page size: 500") {
+      const indent = line.match(/^\s*/)?.[0] ?? "";
+      result.push(`${indent}cursor concurrency: ${cursorMaxActive} per domain (process-local)`);
+    }
+  }
+  return result;
 }
 
 function buildExplainPlan(
@@ -5461,6 +5629,11 @@ function buildSelectPlan(
     if (orderPlan.kind === "KORDER_NATIVE") {
       lines.push("  order semantics: kintone native (not kSQL canonical)");
       lines.push("  REST execution: single GET");
+    } else if (orderPlan.kind === "KORDER_CURSOR") {
+      lines.push("  order semantics: kintone native (not kSQL canonical)");
+      lines.push("  fetch API: POST/GET/DELETE records/cursor.json");
+      lines.push("  cursor page size: 500");
+      lines.push(`  scan rows:     ${orderPlan.scanRows}`);
     }
   }
   if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
@@ -5475,7 +5648,10 @@ function buildSelectPlan(
       ? withCanonicalRestTie(stmt)
       : stmt);
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
-    lines.push(`  kintone query: ${params.query || "(なし)"}`);
+    const displayedQuery = orderPlan?.kind === "KORDER_CURSOR"
+      ? buildKorderCursorQuery(stmt)
+      : params.query;
+    lines.push(`  kintone query: ${displayedQuery || "(なし)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
     const pushdownPlan = buildKlikePushdownPlan(stmt);

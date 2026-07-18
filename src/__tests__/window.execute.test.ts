@@ -15,6 +15,7 @@ function makeClient(records: KintoneRecord[], fields: KintoneFieldInfo[] = []): 
       getCalls.push({ query: params.query ?? "", fields: [...(params.fields ?? [])] });
       return { records };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { return { ids: [] }; },
     async putRecords() {},
     async deleteRecords() {},

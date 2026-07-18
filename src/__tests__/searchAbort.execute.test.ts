@@ -30,6 +30,7 @@ function makeAbortedClient(): KintoneClient & {
         searchAborted: true,
       };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { client.postCalls++; return { ids: ["1"] }; },
     async putRecords() { client.putCalls++; },
     async deleteRecords() { client.deleteCalls++; },

@@ -92,12 +92,14 @@ describe("cli helpers", () => {
   test("parseArgs parses requestGate flags（バッチ強化第1弾 C2）", () => {
     const args = parseArgs([
       "--max-concurrent", "5",
+      "--cursor-max-active", "4",
       "--retry", "0",
       "--retry-base-delay", "100",
       "--retry-max-delay", "2000",
       "-e", "SELECT * FROM APP100",
     ]);
     expect(args.maxConcurrent).toBe(5);
+    expect(args.cursorMaxActive).toBe(4);
     expect(args.retry).toBe(0); // 0 = リトライ無効は有効値
     expect(args.retryBaseDelay).toBe(100);
     expect(args.retryMaxDelay).toBe(2000);
@@ -118,6 +120,7 @@ describe("cli helpers", () => {
   test("parseArgs requestGate flags のデフォルトは null（未指定 = profile / 既定に委ねる）", () => {
     const args = parseArgs(["-e", "SELECT 1"]);
     expect(args.maxConcurrent).toBeNull();
+    expect(args.cursorMaxActive).toBeNull();
     expect(args.retry).toBeNull();
     expect(args.retryBaseDelay).toBeNull();
     expect(args.retryMaxDelay).toBeNull();
@@ -126,6 +129,8 @@ describe("cli helpers", () => {
   test("parseArgs requestGate flags の範囲検証", () => {
     expect(() => parseArgs(["--max-concurrent", "0"])).toThrow(/--max-concurrent must be an integer between 1 and 50/);
     expect(() => parseArgs(["--max-concurrent", "51"])).toThrow(/between 1 and 50/);
+    expect(() => parseArgs(["--cursor-max-active", "0"])).toThrow(/between 1 and 5/);
+    expect(() => parseArgs(["--cursor-max-active", "6"])).toThrow(/between 1 and 5/);
     expect(() => parseArgs(["--retry", "-1"])).toThrow(/--retry must be an integer between 0 and 10/);
     expect(() => parseArgs(["--retry", "11"])).toThrow(/between 0 and 10/);
     expect(() => parseArgs(["--retry-base-delay", "0"])).toThrow(/--retry-base-delay must be a positive integer/);

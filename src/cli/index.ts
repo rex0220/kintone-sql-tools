@@ -91,6 +91,7 @@ Options:
   --timeout <ms>             Request timeout in milliseconds (default: 30000)
   --max-concurrent <n>       Max concurrent kintone requests: 1-50 (default: 10)
                              (process-wide; fixed at first resolution; KSQL_MAX_CONCURRENT wins)
+  --cursor-max-active <n>    Max active cursors per host: 1-5 (default: 2; KSQL_CURSOR_MAX_ACTIVE wins)
   --retry <n>                GET retry count: 0-10, 0 disables (default: 3; KSQL_RETRY wins)
   --retry-base-delay <ms>    GET retry backoff base delay (default: 500)
   --retry-max-delay <ms>     GET retry backoff max delay (default: 8000)
@@ -153,6 +154,7 @@ interface CliConfig {
       timeout?: number;
       /** 一時テーブル1個の実体化行数上限（既定 10,000。超過は onLimit 設定によらず常に error） */
       tempTableMaxRows?: number;
+      cursorMaxActive?: number;
       /** kintone API の同時リクエスト数上限（プロセス内グローバル。env KSQL_MAX_CONCURRENT が優先） */
       maxConcurrent?: number;
       /** GET 系リトライ回数（0〜10。0 で無効。env KSQL_RETRY が優先） */
@@ -226,6 +228,7 @@ interface ParsedArgs {
   continueOnError: boolean;
   dmlMaxRows: number | null;
   maxConcurrent: number | null;
+  cursorMaxActive: number | null;
   retry: number | null;
   retryBaseDelay: number | null;
   retryMaxDelay: number | null;
@@ -279,6 +282,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     continueOnError: false,
     dmlMaxRows: null,
     maxConcurrent: null,
+    cursorMaxActive: null,
     retry: null,
     retryBaseDelay: null,
     retryMaxDelay: null,
@@ -442,6 +446,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(v);
       if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("ArgumentError: --max-concurrent must be an integer between 1 and 50.");
       out.maxConcurrent = n;
+      i++;
+      continue;
+    }
+    if (a === "--cursor-max-active") {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 5) throw new Error("ArgumentError: --cursor-max-active must be an integer between 1 and 5.");
+      out.cursorMaxActive = n;
       i++;
       continue;
     }
@@ -832,6 +843,7 @@ function createDryRunClient(): KintoneClient {
   };
   return {
     getRecords: notUsed,
+    openCursor: notUsed,
     postRecords: notUsed,
     putRecords: notUsed,
     deleteRecords: notUsed,
@@ -1008,6 +1020,7 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   pushOpt(argv, "--attachment-format", base.attachmentFormat);
   pushOpt(argv, "--dml-max-rows", base.dmlMaxRows);
   pushOpt(argv, "--max-concurrent", base.maxConcurrent);
+  pushOpt(argv, "--cursor-max-active", base.cursorMaxActive);
   pushOpt(argv, "--retry", base.retry);
   pushOpt(argv, "--retry-base-delay", base.retryBaseDelay);
   pushOpt(argv, "--retry-max-delay", base.retryMaxDelay);
@@ -1638,6 +1651,14 @@ async function run(): Promise<number> {
     ?? envInt("KSQL_TEMP_TABLE_MAX_ROWS")
     ?? profile.query?.tempTableMaxRows
     ?? undefined;
+  const cursorMaxActive = args.cursorMaxActive
+    ?? envInt("KSQL_CURSOR_MAX_ACTIVE")
+    ?? profile.query?.cursorMaxActive
+    ?? 2;
+  if (!Number.isSafeInteger(cursorMaxActive) || cursorMaxActive < 1 || cursorMaxActive > 5) {
+    process.stderr.write("ArgumentError: cursorMaxActive must be an integer from 1 to 5.\n");
+    return 2;
+  }
   if (!Number.isInteger(fetchParallel) || fetchParallel < 1 || fetchParallel > 10) {
     process.stderr.write("ArgumentError: fetch-parallel must be an integer between 1 and 10.\n");
     return 2;
@@ -1782,6 +1803,7 @@ async function run(): Promise<number> {
         }
         profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
           guestSpaceId,
+          cursorMaxActive,
           timeoutMs: timeout,
           debug,
           debugHeaders,
@@ -1818,6 +1840,7 @@ async function run(): Promise<number> {
 
       profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
         guestSpaceId,
+        cursorMaxActive,
         timeoutMs: timeout,
         debug,
         debugHeaders,
@@ -1925,6 +1948,12 @@ async function run(): Promise<number> {
         if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
         return routed.getRecords({ ...params, app: binding.appId });
       },
+      openCursor: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const routed = profileClientMap.get(binding.profile);
+        if (!routed) throw new Error(`AuthError: profile "${binding.profile}" is not resolved for APP${params.app}.`);
+        return routed.openCursor({ ...params, app: binding.appId });
+      },
       postRecords: (params) => {
         const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
         const pName = binding.profile;
@@ -1978,7 +2007,9 @@ async function run(): Promise<number> {
 
   if (isBatchSql && args.dryRun) {
     try {
-      const plans = await buildBatchExplainPlans(sql!, client, args.variables, cacheContext, maxRecords);
+      const plans = await buildBatchExplainPlans(
+        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive
+      );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
         ? restoreSqlDiagnosticValue(plans.statements, sqlDiagnosticContext.appBindingByMappedApp) as typeof plans.statements
@@ -2052,6 +2083,7 @@ async function run(): Promise<number> {
         continueOnError: args.continueOnError,
         tempTableMaxRows,
         timeoutMs: timeout,
+        cursorMaxActive,
         variables: args.variables,
         confirm: batchContainsDml
           ? async (count, operation) => {
@@ -2066,13 +2098,16 @@ async function run(): Promise<number> {
     }
 
     let result = args.dryRun
-      ? await execute(`EXPLAIN ${sql}`, client, { maxRecords, onLimitReached: onLimit, cacheContext })
+      ? await execute(`EXPLAIN ${sql}`, client, {
+          maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive,
+        })
       : await execute(sql!, client, {
         maxRecords,
         fetchParallel,
         onLimitReached: effectiveOnLimit,
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
+        cursorMaxActive,
       });
     // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）

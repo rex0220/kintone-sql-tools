@@ -2,6 +2,19 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.1.0（2026-07-18）
+
+### 機能追加
+
+- **B33 `KORDER BY` 大規模窓の Cursor API 対応**。単発 Records API で完結しない窓（`LIMIT > 500` / `OFFSET > 10000`）を、kintone Cursor API（作成・取得・削除）で kintone 固有順のまま実行する計画 `KORDER_CURSOR` を追加。走査件数 `OFFSET + LIMIT <= maxRecords` を満たす場合だけ実行し、超過は理由コード付き planning error（通常 `ORDER BY` へフォールバックしない）。単発 GET で完結する窓は従来どおり `KORDER_NATIVE` を優先する。
+- カーソルは 500 件ずつ逐次取得し、必要窓へ到達した時点で即時削除する。結果順は kintone が返した順のまま（ローカル再ソート・暗黙 `$id` 追補なし）。対象集合は作成時点で固定だが、値は各取得時点（完全スナップショットではない）。
+- 新設定 **`cursorMaxActive`**（host 単位の同時カーソル上限。既定 2・最大 5）: CLI `--cursor-max-active` / env `KSQL_CURSOR_MAX_ACTIVE` / profile `query.cursorMaxActive` / MCP ツール入力 / プラグイン「⚙ オプション」。同一 host では最後に実行した面の設定を反映し、縮小時は既存カーソルの自然減を待つ。
+- Create / Get Cursor は自動再試行しない（応答喪失時の孤児カーソル・ページ欠落を防ぐ）。既解放判定は実測に基づき `HTTP 404` + `GAIA_CN01` のみ。解放を確認できない場合は最大 10 分+30 秒の間カーソル枠を隔離し、成功結果には `CursorCleanupWarning` を付けて返す。プラグインはページ離脱時に best-effort で削除を試みる。
+- EXPLAIN に `KORDER_CURSOR` 計画（fetch API / cursor page size / cursor concurrency / scan rows）と cursor 系メトリクス 9 種を追加。
+- MCP `ksql_explain` に `maxRecords` 入力を追加（`ksql_query` で実行できる `KORDER_CURSOR` クエリの計画を確認できない非対称を解消）。
+
+既存クエリの挙動変更はない（従来 planning error だった窓が成功可能になる純加法的変更）。詳細は [v3.1.0 移行ガイド](docs/ksql_v3_1_migration_guide.md) を参照。
+
 ## v3.0.0（2026-07-17）
 
 ### Breaking changes

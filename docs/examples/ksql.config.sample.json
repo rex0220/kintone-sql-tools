@@ -18,6 +18,7 @@
       "query": {
         "maxRecords": 500,
         "maxConcurrent": 10,
+        "cursorMaxActive": 2,
         "onLimit": "error",
         "timeout": 30000
       },
@@ -52,6 +53,7 @@
       "query": {
         "maxRecords": 500,
         "maxConcurrent": 10,
+        "cursorMaxActive": 2,
         "onLimit": "error",
         "timeout": 30000
       },

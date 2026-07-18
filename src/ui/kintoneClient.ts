@@ -17,9 +17,20 @@ import {
   type FormFieldProperty,
 } from "../core/formFieldInfo";
 import { normalizeProcessStatusStates, type RawProcessStatusState } from "../core/processStatus";
+import { createKintoneCursorHandle } from "../api/kintoneCursor";
+import { getCursorLeaseManager } from "../api/cursorLeaseManager";
+import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
+import { installCursorPageLifecycle, registerCursorHandle } from "./cursorPageLifecycle";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
+
+/** pluginのkintone.api rejectはHTTP statusを公開しないため、このsurfaceだけcode単独を許可する。 */
+export function isPluginAlreadyReleasedCursorError(error: unknown): boolean {
+  const shaped = error as { status?: unknown; code?: unknown } | null;
+  return shaped?.code === "GAIA_CN01"
+    && (shaped.status === 404 || shaped.status === undefined);
+}
 
 /**
  * kintone.api() の reject（{code, id, message, errors} 形式のプレーンオブジェクト）を、
@@ -32,7 +43,7 @@ const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, tr
  */
 export function toDetailedApiError(e: unknown): unknown {
   if (e instanceof Error || e === null || typeof e !== "object") return e;
-  const obj = e as { code?: unknown; message?: unknown; errors?: unknown };
+  const obj = e as { code?: unknown; message?: unknown; errors?: unknown; status?: unknown };
   if (typeof obj.message !== "string" || obj.message === "") return e;
 
   const lines: string[] = [];
@@ -53,6 +64,8 @@ export function toDetailedApiError(e: unknown): unknown {
   const err = new Error(lines.join("\n"));
   // BatchStatementError.code に kintone のエラーコード（CB_VA01 等）を通す
   if (typeof obj.code === "string" && obj.code !== "") err.name = obj.code;
+  if (typeof obj.code === "string") Object.assign(err, { code: obj.code });
+  if (typeof obj.status === "number") Object.assign(err, { status: obj.status });
   return err;
 }
 
@@ -69,7 +82,8 @@ async function api<T>(
   }
 }
 
-export function createKintoneClient(): KintoneClient {
+export function createKintoneClient(options: { cursorMaxActive?: number } = {}): KintoneClient {
+  if (typeof window !== "undefined") installCursorPageLifecycle(window);
   return {
     async getRecords(params: PageFetchParams) {
       const res = await api<{ records: Record<string, { value: string }>[] }>(
@@ -80,6 +94,39 @@ export function createKintoneClient(): KintoneClient {
         }
       );
       return { records: res.records };
+    },
+
+    async openCursor(params) {
+      const cursorUrl = apiUrl("/k/v1/records/cursor.json");
+      const host = new URL(cursorUrl, globalThis.location?.href).host;
+      const manager = getCursorLeaseManager(host, options.cursorMaxActive);
+      const lease = await manager.acquire();
+      let created: { id: string; totalCount: string };
+      try {
+        created = await manager.runCreate(() => api<{ id: string; totalCount: string }>(
+          "/k/v1/records/cursor.json", "POST", {
+            app: params.app,
+            query: params.query,
+            size: params.size,
+            fields: params.fields && params.fields.length > 0 ? params.fields : undefined,
+          }
+        ));
+      } catch (error) {
+        if (typeof (error as { code?: unknown } | null)?.code === "string") {
+          lease.release();
+          throw error;
+        }
+        lease.quarantine();
+        throw new CursorCreateOutcomeUnknownError(error);
+      }
+      const cursorId = created.id;
+      return registerCursorHandle(createKintoneCursorHandle(Number(created.totalCount), {
+        get: () => api("/k/v1/records/cursor.json", "GET", { id: cursorId }),
+        delete: () => api("/k/v1/records/cursor.json", "DELETE", { id: cursorId }),
+        isAlreadyReleasedError: isPluginAlreadyReleasedCursorError,
+        onReleased: () => lease.release(),
+        onReleaseUnknown: () => lease.quarantine(),
+      }));
     },
 
     async postRecords(params: KintonePostParams) {

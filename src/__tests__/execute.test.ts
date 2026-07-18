@@ -61,6 +61,7 @@ function makeClient(opts: MockClientOptions = {}): KintoneClient & {
       }
       return { records: opts.records ?? [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords(params) {
       postCalls.push(params);
       return { ids: opts.postIds ?? [] };
@@ -506,6 +507,48 @@ test("B31: KORDER BY LIMIT 0 は全 planning 検査後に records GET なしで�
   expect(client.getCalls).toHaveLength(0);
 });
 
+test("B33: KORDER_CURSOR は複数pageを連結し、LIMIT到達後に明示closeする", async () => {
+  const client = makeClient();
+  let page = 0;
+  let closes = 0;
+  client.openCursor = async (params) => {
+    expect(params.query).toBe("order by $id asc");
+    expect(params.size).toBe(500);
+    return {
+      totalCount: 600,
+      async nextPage() {
+        page += 1;
+        const start = (page - 1) * 500 + 1;
+        const count = page === 1 ? 500 : 1;
+        return {
+          records: Array.from({ length: count }, (_v, i) => makeRecord({ $id: String(start + i) })),
+          next: true,
+        };
+      },
+      async close() { closes += 1; },
+    };
+  };
+  const result = await execute(
+    "SELECT $id FROM APP100 KORDER BY $id LIMIT 501",
+    client,
+    { maxRecords: 501 }
+  ) as SelectResult;
+  expect(result.rowCount).toBe(501);
+  expect(result.rows[500]).toEqual({ $id: "501" });
+  expect(page).toBe(2);
+  expect(closes).toBe(1);
+  expect(client.getCalls).toHaveLength(0);
+  expect(result.metrics).toMatchObject({
+    cursorCreateCalls: 1,
+    cursorGetCalls: 2,
+    cursorDeleteCalls: 1,
+    cursorRecordsScanned: 501,
+    cursorActiveCurrent: 0,
+    cursorActivePeak: 1,
+    cursorCleanupFailures: 0,
+  });
+});
+
 test.each([0, 1])("B31: native allowlist 外は LIMIT %i でも records GET 前に拒否する", async (limit) => {
   const client = makeClient({ fieldTypes: { 利用者: "USER_SELECT" } });
 
@@ -518,8 +561,6 @@ test.each([0, 1])("B31: native allowlist 外は LIMIT %i でも records GET 前�
 
 test.each([
   ["SELECT $id FROM APP100 KORDER BY $id", "KORDER_LIMIT_INVALID"],
-  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 501", "KORDER_LIMIT_INVALID"],
-  ["SELECT $id FROM APP100 KORDER BY $id LIMIT 5 OFFSET 10001", "KORDER_OFFSET_INVALID"],
 ] as const)("B31: native REST window 条件を fail-closed にする: %s", async (sql, reason) => {
   const client = makeClient();
   await expect(execute(sql, client)).rejects.toThrow(reason);
@@ -532,7 +573,7 @@ test("B31: LIMIT が実行時 maxRecords を超える KORDER BY を拒否する"
     "SELECT $id FROM APP100 KORDER BY $id LIMIT 5",
     client,
     { maxRecords: 4 }
-  )).rejects.toThrow(/KORDER_LIMIT_EXCEEDS_MAX_RECORDS/);
+  )).rejects.toThrow(/KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS/);
   expect(client.getCalls).toHaveLength(0);
 });
 
@@ -4380,6 +4421,7 @@ function makeConcurrencyClient(recordsByApp: Record<number, KintoneRecord[]>): K
       active -= 1;
       return { records: recordsByApp[params.app] ?? [] };
     },
+    async openCursor() { throw new Error("unexpected cursor call"); },
     async postRecords() { return { ids: [] }; },
     async putRecords() { /* noop */ },
     async deleteRecords() { /* noop */ },

@@ -169,6 +169,7 @@ function noOpClient(): KintoneClient {
   };
   return {
     getRecords: fail,
+    openCursor: fail,
     postRecords: fail,
     putRecords: fail,
     deleteRecords: fail,
@@ -518,6 +519,8 @@ export function createKsqlMcpTools(
           sql: input.sql,
           sqlContext: normalized.sqlContext,
           profile: input.profile,
+          maxRecords: input.maxRecords,
+          cursorMaxActive: input.cursorMaxActive,
         })
       : null;
     const explainClient = runtime?.client ?? noOpClient();
@@ -530,7 +533,8 @@ export function createKsqlMcpTools(
         explainClient,
         undefined,
         explainCacheContext,
-        runtime?.maxRecords
+        runtime?.maxRecords ?? input.maxRecords,
+        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
       );
       return {
         ok: true,
@@ -543,7 +547,8 @@ export function createKsqlMcpTools(
 
     const result = await executeSql(explainSql(explainSourceSql), explainClient, {
       cacheContext: explainCacheContext,
-      maxRecords: runtime?.maxRecords,
+      maxRecords: runtime?.maxRecords ?? input.maxRecords,
+      cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -577,6 +582,7 @@ export function createKsqlMcpTools(
         onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
+        cursorMaxActive: input.cursorMaxActive,
       });
       const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
         maxRecords: runtime.maxRecords,
@@ -591,6 +597,7 @@ export function createKsqlMcpTools(
         // runtime.timeout は env / profile / 既定 30000ms を解決済みの値で、
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime.timeout,
+        cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
         variables: input.variables,
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
@@ -625,12 +632,14 @@ export function createKsqlMcpTools(
       fetchParallel: input.fetchParallel,
       onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
       timeout: input.timeout,
+      cursorMaxActive: input.cursorMaxActive,
     });
     const result = await executeSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
+      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type === "VALIDATION") return toDmlValidationPayload(result);
@@ -692,6 +701,7 @@ export function createKsqlMcpTools(
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
       tempTableMaxRows: input.tempTableMaxRows,
+      cursorMaxActive: input.cursorMaxActive,
     });
 
     // バッチ合計の影響行数（INSERT(VALUES) は静的、confirm を呼ぶ文種
@@ -706,6 +716,7 @@ export function createKsqlMcpTools(
       tempTableMaxRows: runtime.tempTableMaxRows,
       // 合計タイムアウト（解決済みの runtime.timeout。per-request と同値）
       timeoutMs: runtime.timeout,
+      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
       variables: input.variables,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
@@ -773,6 +784,7 @@ export function createKsqlMcpTools(
       fetchParallel: input.fetchParallel,
       onLimit: DEFAULT_ON_LIMIT,
       timeout: input.timeout,
+      cursorMaxActive: input.cursorMaxActive,
     });
     let result: ExecuteResult;
     try {
@@ -781,6 +793,7 @@ export function createKsqlMcpTools(
         fetchParallel: runtime.fetchParallel,
         onLimitReached: runtime.onLimit,
         cacheContext: runtime.cacheContext,
+        cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
         confirm: async (count, operation) => {
           if (count > dmlMaxRows) {
             throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
