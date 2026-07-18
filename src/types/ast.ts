@@ -3,6 +3,8 @@
 // Phase 1 スコープ対応
 // ============================================================
 
+import { toPlainDecimal } from "../core/exactDecimal";
+
 // ------------------------------------------------------------
 // トップレベル
 // ------------------------------------------------------------
@@ -501,7 +503,11 @@ export function makeNumberLiteral(raw: string): NumberLiteral {
 }
 
 export function numberLiteralText(node: NumberLiteral): string {
-  return node.raw ?? String(node.value);
+  // Canonicalize to a plain decimal (no exponent, no leading `+`) so the lexeme
+  // never leaks to kintone query/DML, which reject `1e3`/`+5`. Lossless: keeps
+  // all digits without Number(). Falls back to the raw text if not finite.
+  const source = node.raw ?? String(node.value);
+  return toPlainDecimal(source) ?? source;
 }
 
 /** kintone 専用関数: TODAY() / NOW() / LOGINUSER() */

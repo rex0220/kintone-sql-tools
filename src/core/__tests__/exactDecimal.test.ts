@@ -1,8 +1,10 @@
 import {
   compareDecimal,
   compareExactDecimal,
+  formatPlainDecimal,
   isFiniteDecimal,
   parseExactDecimal,
+  toPlainDecimal,
 } from "../exactDecimal";
 
 describe("exact decimal primitive", () => {
@@ -41,5 +43,32 @@ describe("exact decimal primitive", () => {
 
   test("compareDecimal は不正domainをfail-closedする", () => {
     expect(() => compareDecimal("NaN", "0")).toThrow("ArgumentError");
+  });
+
+  test.each([
+    ["1e3", "1000"],
+    ["1E3", "1000"],
+    ["1.5e2", "150"],
+    ["1e21", "1000000000000000000000"],
+    ["1e-5", "0.00001"],
+    ["5e-5", "0.00005"],
+    ["+5", "5"],
+    ["-0", "0"],
+    ["007", "7"],
+    ["1.50", "1.5"],
+    ["9007199254740993", "9007199254740993"],
+    ["1.23456789012345678901234567890", "1.2345678901234567890123456789"],
+  ])("toPlainDecimal は指数・符号・冗長ゼロを平文10進へ正規化する %p -> %p", (input, expected) => {
+    expect(toPlainDecimal(input)).toBe(expected);
+  });
+
+  test("toPlainDecimal は非有限を null にする", () => {
+    expect(toPlainDecimal("NaN")).toBeNull();
+    expect(toPlainDecimal("1e")).toBeNull();
+  });
+
+  test("formatPlainDecimal は指数表記を出さない", () => {
+    expect(formatPlainDecimal(parseExactDecimal("1e30")!)).toBe(`1${"0".repeat(30)}`);
+    expect(formatPlainDecimal(parseExactDecimal("-1e-10")!)).toBe("-0.0000000001");
   });
 });
