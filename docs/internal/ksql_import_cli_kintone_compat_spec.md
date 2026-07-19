@@ -234,7 +234,7 @@ EXPLAIN は `writeMode=UPDATE_RECORD_NUMBER`、source key header、source親行�
 ### 7.1 CSV grouping
 
 - 先頭 `*` headerをmarker列として必須化する。marker非空行が親record開始、後続のmarker空行が同じ親の継続行である。先頭が空、marker値が不正、親開始が判定不能ならsource error。
-- 親fieldは開始行だけから採用する。継続行の親セルが非空なら `ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION` とし、無視しない。
+- 親fieldは開始行だけから採用する。cli-kintone の実 `*` export は継続行にもtable外field（レコード番号を含む）の値を繰り返し出力し、それらを読込時には無視する。この実挙動との互換性のため、継続行の親セルが空または開始行と完全一致なら受理して無視する。非空かつ開始行と異なる場合だけ、壊れたgroupを検出するため `ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION` とする。従来案の「非空なら無条件error」は実exportをround-tripできないため訂正する。
 - 各宣言subtableはそのchild header群と `ROW ID SOURCE` headerを所有する。同じCSV行で複数tableのchild群が非空なら、それぞれのtableへ1 child rowずつ追加できる。
 - あるtableのchild全列と行IDがすべて空の行は、そのtableについて**行なし**として無視する。ただし他tableの行は有効。非空childがあるのに行IDだけ空なら新規child、行IDだけ非空でもchild全列空なら既存空行の保持/更新候補として有効とする。
 - 複数tableを同時に扱う。`REPLACE SUBTABLES (T...)` に列挙したtableだけが全置換対象で、CSVに存在しても未列挙tableはpayloadから省略して維持する。未列挙tableのchild列を `INTO` に宣言することはanalyze error。

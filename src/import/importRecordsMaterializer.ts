@@ -64,13 +64,15 @@ export function materializeCliKintoneCsvImportRecords(
   payload: ImportSourcePayload,
   targets: readonly ImportTarget[],
   replacementTables: readonly string[],
-  maxParents: number
+  maxParents: number,
+  recordNumberSourceHeader?: string
 ): MaterializedImportRecords {
   const decoded = decodeCsv(payload.bytes, {
     encoding: source.encoding ?? payload.encoding ?? "utf8", hasHeader: source.hasHeader, columns: source.columns,
   });
   if (!source.hasHeader || decoded.columns[0] !== "*") throw new ImportSourceError('ERR_IMPORT_MARKER: first CSV header must be "*".');
   const indexes = new Map(decoded.columns.map((code, index) => [code, index]));
+  if (recordNumberSourceHeader && !indexes.has(recordNumberSourceHeader)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${recordNumberSourceHeader}" is missing.`);
   const fields = targets.filter((target): target is Extract<ImportTarget, { kind: "FIELD" }> => target.kind === "FIELD");
   const tables = targets.filter((target): target is Extract<ImportTarget, { kind: "SUBTABLE" }> => target.kind === "SUBTABLE");
   for (const field of fields) if (!indexes.has(field.field)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${field.field}" is missing.`);
@@ -78,7 +80,7 @@ export function materializeCliKintoneCsvImportRecords(
     if (!table.rowIdSourceHeader || !indexes.has(table.rowIdSourceHeader)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: row-ID header for ${table.subtableCode} is missing.`);
     for (const child of table.children) if (!indexes.has(child)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required child header "${child}" is missing.`);
   }
-  const records: Array<{ rowNumber: number; markerRowNumber: number; top: Map<string, string>; subtables: Map<string, Array<{ childRowNumber: number; sourceRowNumber: number; rowId?: string; values: Map<string, string> }>>; replacementTables: Set<string> }> = [];
+  const records: Array<{ rowNumber: number; markerRowNumber: number; top: Map<string, string>; subtables: Map<string, Array<{ childRowNumber: number; sourceRowNumber: number; rowId?: string; values: Map<string, string> }>>; replacementTables: Set<string>; recordNumberSourceValue?: string }> = [];
   let current: typeof records[number] | undefined;
   decoded.rows.forEach((cells, physicalIndex) => {
     const sourceRowNumber = physicalIndex + 2;
@@ -90,13 +92,23 @@ export function materializeCliKintoneCsvImportRecords(
         rowNumber: records.length + 1, markerRowNumber: sourceRowNumber,
         top: new Map(fields.map((field) => [field.field, cells[indexes.get(field.field)!]])),
         subtables: new Map(tables.map((table) => [table.subtableCode, []])), replacementTables: new Set(replacementTables),
+        ...(recordNumberSourceHeader ? { recordNumberSourceValue: cells[indexes.get(recordNumberSourceHeader)!] } : {}),
       };
       records.push(current);
     } else if (!current) {
       throw new ImportSourceError(`ERR_IMPORT_MARKER: first data row must start a parent (source row ${sourceRowNumber}).`);
     } else {
       for (const field of fields) {
-        if (cells[indexes.get(field.field)!] !== "") throw new ImportSourceError(`ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION: ${field.field} at source row ${sourceRowNumber}.`);
+        const continuationValue = cells[indexes.get(field.field)!];
+        if (continuationValue !== "" && continuationValue !== current.top.get(field.field)) {
+          throw new ImportSourceError(`ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION: ${field.field} at source row ${sourceRowNumber}.`);
+        }
+      }
+      if (recordNumberSourceHeader) {
+        const continuationValue = cells[indexes.get(recordNumberSourceHeader)!];
+        if (continuationValue !== "" && continuationValue !== current.recordNumberSourceValue) {
+          throw new ImportSourceError(`ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION: ${recordNumberSourceHeader} at source row ${sourceRowNumber}.`);
+        }
       }
     }
     for (const table of tables) {

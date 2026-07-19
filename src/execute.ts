@@ -107,14 +107,15 @@ import {
   type PredicateCapabilityResult,
   type WhereFieldSemanticsResolver,
 } from "./core/optimization/whereCapability";
-import type { ImportSourceHandle, ImportSourceResolver } from "./import/types";
+import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
 import { materializeCliKintoneCsvImportRecords, materializeJsonImportRecords } from "./import/importRecordsMaterializer";
-import { assertImportRejectLimit, prepareImportRecords } from "./import/importRecordValidation";
+import { assertImportRejectLimit, prepareImportRecords, type PreparedImportRecords, type ImportValidationError } from "./import/importRecordValidation";
 import { IMPORT_VALIDATION_META_COLUMNS, materializeImportValidationErrors } from "./import/importErrors";
-import { buildJsonImportRecordPayload, type ImportScalarPayloadValue } from "./import/subtablePayload";
+import { buildImportRecordPayload, buildJsonImportRecordPayload, type ImportScalarPayloadValue } from "./import/subtablePayload";
 import { assertJsonImportHasNoRowIds, buildJsonSubtableWritePlan, type JsonImportTableWriteDetail } from "./import/jsonSubtableWritePlan";
+import { assertNoDuplicateCsvSubtableRowIds, buildCsvSubtableReplacementPlan, type CsvImportTableWriteDetail } from "./import/subtableReplacementPlan";
 import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
 import { preflightImportRecordNumbers } from "./import/recordNumberUpdate";
 
@@ -305,6 +306,7 @@ export interface UpdateResult {
   rejectLimit?: number | null;
   errTable?: string;
   metrics?: ExecuteMetrics;
+  importDetail?: ImportConfirmDetail;
 }
 
 export interface DeleteResult {
@@ -356,11 +358,13 @@ export interface DmlValidationResult {
 export interface ImportValidationDetail {
   preflight: "ACTUAL_DATA";
   parents: { total: number; valid: number; invalid: number; mutationCandidates: number };
-  tables: Record<string, { parentsPresent: number; childRows: number; validChildRows: number; invalidChildRows: number }>;
+  tables: Record<string, { parentsPresent?: number; childRows?: number; validChildRows?: number; invalidChildRows?: number; existingRows?: number; inputRows?: number; updateRows?: number; addRows?: number; deleteRows?: number; rowIdNotFound?: number }>;
+  rowIdPolicy?: "PRESERVE_EXISTING";
+  rowIdNotFound?: number;
   writesKintone: false;
 }
 
-export interface ImportConfirmDetail {
+export interface JsonImportConfirmDetail {
   readonly kind: "IMPORT_JSON_SUBTABLE";
   readonly rowIdPolicy: "DROP_AND_RENUMBER_ALL";
   readonly parentsToWrite: number;
@@ -374,6 +378,19 @@ export interface ImportConfirmDetail {
     tables: readonly JsonImportTableWriteDetail[];
   }[];
 }
+export interface CsvImportConfirmDetail {
+  readonly kind: "IMPORT_CSV_SUBTABLE_REPLACE";
+  readonly rowIdPolicy: "PRESERVE_EXISTING";
+  readonly parentsToWrite: number;
+  readonly insertedParents: 0;
+  readonly updatedParents: number;
+  readonly hasDeletes: boolean;
+  readonly totalDeleteRows: number;
+  readonly rowIdNotFound: number;
+  readonly invalidParents: number;
+  readonly parents: readonly { parentRow: number; mode: "UPDATE"; targetId: number; tables: readonly CsvImportTableWriteDetail[] }[];
+}
+export type ImportConfirmDetail = JsonImportConfirmDetail | CsvImportConfirmDetail;
 
 // ============================================================
 // オプション
@@ -4824,11 +4841,17 @@ async function executeImport(
   if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
   const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
   if (stmt.targets?.some((target) => target.kind === "SUBTABLE")) {
-    if (!stmt.validateOnly && stmt.source.kind !== "JSON") {
-      throw new Error("UnsupportedError: CSV IMPORT subtable mutation is not available until Phase 5D; use VALIDATE ONLY.");
-    }
     if (!stmt.validateOnly && !options.supportsImportConfirmDetail) {
-      throw new Error("UnsupportedError: JSON IMPORT subtable mutation requires a surface that displays parent/table replacement and deletion detail; use VALIDATE ONLY/EXPLAIN.");
+      throw new Error("UnsupportedError: IMPORT subtable mutation requires a surface that displays parent/table replacement and deletion detail; use VALIDATE ONLY/EXPLAIN.");
+    }
+    if (stmt.source.kind === "CSV") {
+      if (stmt.writeMode !== "UPDATE_RECORD_NUMBER" || !stmt.recordNumberSourceHeader) throw new Error("ArgumentError: CSV subtable replacement requires IMPORT UPDATE and MATCH RECORD NUMBER SOURCE.");
+      if (!stmt.replaceSubtables?.length) throw new Error("ArgumentError: CSV subtable replacement requires REPLACE SUBTABLES (...).");
+      const declared = new Set(stmt.targets.filter((target) => target.kind === "SUBTABLE").map((target) => target.subtableCode));
+      if (stmt.replaceSubtables.some((table) => !declared.has(table))) throw new Error("ArgumentError: REPLACE SUBTABLES contains a table not declared in INTO.");
+      for (const target of stmt.targets.filter((target) => target.kind === "SUBTABLE")) {
+        if (!target.rowIdSourceHeader || !stmt.replaceSubtables.includes(target.subtableCode)) throw new Error(`ArgumentError: CSV subtable ${target.subtableCode} requires ROW ID SOURCE and REPLACE SUBTABLES declaration.`);
+      }
     }
     if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
     const targets = stmt.targets;
@@ -4840,9 +4863,10 @@ async function executeImport(
     const payload = await loadImportSource(handle, new Map());
     const materialized = stmt.source.kind === "JSON"
       ? materializeJsonImportRecords(stmt.source, payload, targets, options.maxRecords ?? 10_000)
-      : materializeCliKintoneCsvImportRecords(stmt.source, payload, targets, stmt.replaceSubtables ?? [], options.maxRecords ?? 10_000);
-    const operation = stmt.keyFields ? "UPSERT" : "INSERT";
+      : materializeCliKintoneCsvImportRecords(stmt.source, payload, targets, stmt.replaceSubtables ?? [], options.maxRecords ?? 10_000, stmt.recordNumberSourceHeader);
+    const operation = stmt.source.kind === "CSV" ? "UPDATE" : stmt.keyFields ? "UPSERT" : "INSERT";
     const prepared = prepareImportRecords(materialized, targets, fieldInfos, numberPrecision, operation);
+    if (stmt.source.kind === "CSV") return executeCsvSubtableReplacement(stmt, materialized, prepared, fieldInfos, client, options, tempTables);
     assertImportRejectLimit(prepared, stmt.rejectLimit);
     const payloadFields = [...new Set(targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children))];
     const errors = materializeImportValidationErrors(prepared.errors, payloadFields);
@@ -4986,6 +5010,110 @@ async function executeImport(
     ? executeUpsertSelect(generated, client, options, cacheContext, tempTables)
     : executeInsertSelect(generated, client, options, cacheContext, tempTables));
   return withAudit(result);
+}
+
+
+async function executeCsvSubtableReplacement(
+  stmt: ImportStatement,
+  materialized: MaterializedImportRecords,
+  preparedBase: PreparedImportRecords,
+  fieldInfos: readonly KintoneFieldInfo[],
+  client: KintoneClient,
+  options: ExecuteOptions,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpdateResult | DmlValidationResult> {
+  if (!stmt.recordNumberSourceHeader || !stmt.replaceSubtables?.length) throw new Error("InternalError: incomplete CSV subtable replacement AST.");
+  assertNoDuplicateCsvSubtableRowIds(materialized.records);
+  const rawKeys = materialized.records.map((record) => record.recordNumberSourceValue ?? "");
+  const keyPlan = preflightImportRecordNumbers(rawKeys, stmt.recordNumberSourceHeader);
+  const tableCodes = [...stmt.replaceSubtables];
+  const ownershipTableCodes = [...new Set(fieldInfos.filter((info) => !info.inSubtable && info.fieldType === "SUBTABLE").map((info) => info.code))];
+  const allRecords = await fetchAll(client.getRecords, stmt.appId, "", ["$id", "$revision", ...ownershipTableCodes], {
+    maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
+  });
+  const existingById = new Map<number, { id: number; revision?: number; record: KintoneRecord }>();
+  const ownership = new Map<string, Array<{ parentId: number; table: string }>>();
+  for (const record of allRecords) {
+    const id = Number(record["$id"]?.value);
+    const revision = Number(record["$revision"]?.value);
+    if (!Number.isFinite(id)) continue;
+    existingById.set(id, { id, ...(Number.isFinite(revision) ? { revision } : {}), record });
+    for (const table of ownershipTableCodes) {
+      const rows = record[table]?.value;
+      if (!Array.isArray(rows)) continue;
+      for (const row of rows as Array<{ id?: string }>) if (row.id) {
+        const owners = ownership.get(row.id) ?? [];
+        owners.push({ parentId: id, table }); ownership.set(row.id, owners);
+      }
+    }
+  }
+  const targetIds = keyPlan.normalized.map((key) => key === null ? undefined : Number(key));
+  const parents = preparedBase.parents.map((parent, index) => {
+    const errors: ImportValidationError[] = [...parent.errors];
+    for (const error of keyPlan.errors[index]) errors.push({
+      operation: "UPDATE", parentRow: parent.parentRow, field: error.field, code: error.code,
+      message: error.message, sourceValues: materialized.records[index].top,
+    });
+    const targetId = targetIds[index];
+    if (targetId !== undefined && !existingById.has(targetId)) errors.push({
+      operation: "UPDATE", parentRow: parent.parentRow, field: stmt.recordNumberSourceHeader!,
+      code: "ERR_RECORD_NUMBER_NOT_FOUND", message: `record number ${targetId} does not exist in APP${stmt.appId}`,
+      sourceValues: materialized.records[index].top,
+    });
+    return { ...parent, valid: errors.length === 0, errors };
+  });
+  const initialPlan = buildCsvSubtableReplacementPlan(materialized.records, parents, targetIds, existingById, ownership);
+  const planErrors = initialPlan.flatMap((parent) => [...parent.errors]);
+  const invalidParentRows = new Set(initialPlan.filter((parent) => !parent.valid).map((parent) => parent.parentRow));
+  const prepared: PreparedImportRecords = { ...preparedBase, parents, errors: planErrors, invalidParentRows };
+  assertImportRejectLimit(prepared, stmt.rejectLimit);
+  const validPlan = initialPlan.filter((parent) => parent.valid);
+  const allTables = initialPlan.flatMap((parent) => parent.tables);
+  const sum = (table: string, key: keyof CsvImportTableWriteDetail) => allTables.filter((item) => item.table === table).reduce((n, item) => n + Number(item[key]), 0);
+  const tableDetail = Object.fromEntries(tableCodes.map((table) => [table, {
+    existingRows: sum(table, "existingRows"), inputRows: sum(table, "inputRows"), updateRows: sum(table, "updateRows"),
+    addRows: sum(table, "addRows"), deleteRows: sum(table, "deleteRows"), rowIdNotFound: sum(table, "rowIdNotFound"),
+  }]));
+  const importDetail: CsvImportConfirmDetail = {
+    kind: "IMPORT_CSV_SUBTABLE_REPLACE", rowIdPolicy: "PRESERVE_EXISTING", parentsToWrite: validPlan.length,
+    insertedParents: 0, updatedParents: validPlan.length,
+    hasDeletes: validPlan.some((parent) => parent.tables.some((table) => table.deleteRows > 0)),
+    totalDeleteRows: validPlan.flatMap((parent) => parent.tables).reduce((n, table) => n + table.deleteRows, 0),
+    rowIdNotFound: validPlan.flatMap((parent) => parent.tables).reduce((n, table) => n + table.rowIdNotFound, 0),
+    invalidParents: invalidParentRows.size,
+    parents: validPlan.map((parent) => ({ parentRow: parent.parentRow, mode: "UPDATE", targetId: parent.targetId, tables: parent.tables })),
+  };
+  const payloadFields = [...new Set(stmt.targets!.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children))];
+  const errors = materializeImportValidationErrors(planErrors, payloadFields);
+  const columns = [...payloadFields, ...IMPORT_VALIDATION_META_COLUMNS];
+  if (stmt.validateOnly) {
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(tempTables, stmt.validationErrorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map());
+    return {
+    type: "VALIDATION", operation: "UPDATE", validatedRows: parents.length, validRows: parents.length - invalidParentRows.size,
+    invalidRows: invalidParentRows.size, errorCount: errors.length, columns, errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    importDetail: { preflight: "ACTUAL_DATA", parents: { total: parents.length, valid: validPlan.length, invalid: invalidParentRows.size, mutationCandidates: validPlan.length }, tables: tableDetail, rowIdPolicy: "PRESERVE_EXISTING", rowIdNotFound: importDetail.rowIdNotFound, writesKintone: false },
+    };
+  }
+  if (planErrors.length && !stmt.onErrorSkip) {
+    const first = planErrors[0]; throw new Error(`DmlValidationError: ${first.code} ${first.message} (row=${first.parentRow}, field=${first.field})`);
+  }
+  if (stmt.onErrorSkip) {
+    if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch and INTO error table.");
+    appendValidationErrors(tempTables, stmt.errorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map());
+  }
+  if (validPlan.length) {
+    if (!options.supportsImportConfirmDetail || !options.confirm) throw new Error("UnsupportedError: CSV subtable replacement requires explicit rendered detail approval.");
+    const ok = await options.confirm(validPlan.length, "UPDATE", { statementIndex: 0, statementCount: 1, statementType: "IMPORT", targetAppId: stmt.appId, importDetail });
+    if (!ok) throw new OperationCancelledError("UPDATE", validPlan.length);
+  }
+  const scalarMap = (record: KintoneRecord): Map<string, ImportScalarPayloadValue> => new Map(Object.entries(record).map(([code, field]) => [code, field.value as ImportScalarPayloadValue]));
+  for (const parent of validPlan) {
+    const record = buildImportRecordPayload(scalarMap(parent.top), new Map([...parent.subtables].map(([table, rows]) => [table, rows.map((row) => ({ ...(row.rowId ? { rowId: row.rowId } : {}), values: scalarMap(row.record) }))])), "PRESERVE") as unknown as KintoneRecord;
+    await client.putRecords({ app: stmt.appId, records: [{ id: parent.targetId, ...(parent.revision === undefined ? {} : { revision: parent.revision }), record }] });
+  }
+  return { type: "UPDATE", updatedCount: validPlan.length, affectedRows: validPlan.length, skippedRows: invalidParentRows.size, rejectLimit: stmt.rejectLimit, ...(stmt.errorTable ? { errTable: stmt.errorTable } : {}), importDetail };
 }
 
 async function executeImportRecordNumberUpdate(
@@ -6755,6 +6883,7 @@ function buildExplainPlan(
   if (query.type === "VALIDATE")      return buildValidatePlan(query, label);
   if (query.type === "IMPORT") {
     if (query.writeMode === "UPDATE_RECORD_NUMBER") {
+      const csvTables = query.targets?.filter((target) => target.kind === "SUBTABLE") ?? [];
       return [
         ...(label ? [label] : []),
         `IMPORT UPDATE INTO APP${query.appId}`,
@@ -6770,6 +6899,13 @@ function buildExplainPlan(
         `  requiresLookup:true`,
         `  inserted:      0`,
         `  keyInPayload:  false`,
+        ...(csvTables.length ? [
+          `  replaceSubtables: ${query.replaceSubtables?.join(", ") ?? "ERROR: required"}`,
+          `  subtableRowIdPolicy: PRESERVE existing; empty/unknown add without id`,
+          `  rowIdOwnership: owned elsewhere invalidates the parent`,
+          `  replacementDiff: existing/input/update/add/delete/rowIdNotFound requires actual-data preflight`,
+          `  confirmPolicy: highest warning "サブテーブル全置換・N行削除" plus per-table detail (including delete=0)`,
+        ] : []),
         `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
         `  gate:          enabled for this parse`,
         `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
@@ -6815,8 +6951,8 @@ function buildExplainPlan(
       `  preflight:     ${query.validateOnly && hasSubtables ? "requires actual source load at execution; this EXPLAIN is static" : "requires load"}`,
       ...(hasSubtables ? [query.source.kind === "JSON"
         ? `  Phase5C:       JSON mutation requires detail-capable confirmation surface`
-        : `  Phase5D:       CSV subtable mutation unsupported; VALIDATE ONLY/EXPLAIN only`] : []),
-      `  writesKintone: ${query.validateOnly || (hasSubtables && query.source.kind === "CSV") ? "false" : "true"}`,
+        : `  Phase5D:       CSV mutation requires detail-capable confirmation surface`] : []),
+      `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
       `  duplicateKey:  preflight before lookup/write (requires load)`,
     ];
   }

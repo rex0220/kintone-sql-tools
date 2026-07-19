@@ -613,6 +613,7 @@ export class Parser {
         if (subtableTargets.some((item) => item.rowIdSourceHeader)) throw new ParseError("JSON subtable IMPORT does not accept ROW ID SOURCE.", this.prev());
         if (replaceSubtables) throw new ParseError("REPLACE SUBTABLES is CSV-only; JSON uses nested-array replacement semantics.", this.prev());
       } else {
+        if (writeMode !== "UPDATE_RECORD_NUMBER" || !recordNumberSourceHeader) throw new ParseError("CSV subtable IMPORT requires IMPORT UPDATE and MATCH RECORD NUMBER SOURCE.", this.prev());
         if (mappingMode !== "BY_NAME") throw new ParseError("CSV subtable IMPORT requires BY NAME.", this.prev());
         if (!replaceSubtables) throw new ParseError("CSV subtable IMPORT requires REPLACE SUBTABLES (...).", this.prev());
         const replacement = new Set(replaceSubtables);

@@ -10,7 +10,7 @@ const USER_TYPES = new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"
 const UNSUPPORTED_CHILD_TYPES = new Set(["SUBTABLE", "FILE", "CALC", "RECORD_NUMBER", "CREATOR", "CREATED_TIME", "MODIFIER", "UPDATED_TIME", "STATUS", "STATUS_ASSIGNEE", "CATEGORY", "REFERENCE_TABLE"]);
 
 export interface ImportValidationError {
-  operation: "INSERT" | "UPSERT";
+  operation: "INSERT" | "UPDATE" | "UPSERT";
   parentRow: number;
   field: string;
   subtable?: string;
@@ -49,7 +49,7 @@ export function prepareImportRecords(
   targets: readonly ImportTarget[],
   fieldInfos: readonly KintoneFieldInfo[],
   numberPrecision: NumberPrecision | undefined,
-  operation: "INSERT" | "UPSERT"
+  operation: "INSERT" | "UPDATE" | "UPSERT"
 ): PreparedImportRecords {
   const topInfos = new Map(fieldInfos.filter((f) => !f.inSubtable).map((f) => [f.code, f]));
   const scoped = new Map<string, Map<string, KintoneFieldInfo>>();
@@ -81,7 +81,7 @@ function validateParent(
   topInfos: ReadonlyMap<string, KintoneFieldInfo>,
   scoped: ReadonlyMap<string, ReadonlyMap<string, KintoneFieldInfo>>,
   precision: NumberPrecision | undefined,
-  operation: "INSERT" | "UPSERT",
+  operation: "INSERT" | "UPDATE" | "UPSERT",
   tableCounts: Map<string, { parentsPresent: number; childRows: number; validChildRows: number; invalidChildRows: number }>
 ): PreparedImportParent {
   const errors: ImportValidationError[] = [];
@@ -151,7 +151,7 @@ function decodeRaw(raw: unknown): unknown {
 }
 function isJsonNumber(raw: unknown): raw is JsonNumberValue { return typeof raw === "object" && raw !== null && (raw as { kind?: string }).kind === "number"; }
 function preserveUserCodes(raw: unknown, info: KintoneFieldInfo): boolean { return USER_TYPES.has(info.fieldType) && Array.isArray(raw) && raw.every((v) => typeof v === "object" && v !== null && "code" in v); }
-function location(source: MaterializedImportRecord, operation: "INSERT" | "UPSERT", field: string, subtable?: string, subrow?: number, sourceRow?: number): Omit<ImportValidationError, "code" | "message"> {
+function location(source: MaterializedImportRecord, operation: "INSERT" | "UPDATE" | "UPSERT", field: string, subtable?: string, subrow?: number, sourceRow?: number): Omit<ImportValidationError, "code" | "message"> {
   const physicalRow = sourceRow ?? source.markerRowNumber;
   return { operation, parentRow: source.rowNumber, field, ...(subtable ? { subtable } : {}), ...(subrow == null ? {} : { subrow }), ...(physicalRow == null ? {} : { sourceRow: physicalRow }), sourceValues: subtable ? source.subtables.get(subtable)?.[subrow! - 1]?.values ?? new Map() : source.top };
 }

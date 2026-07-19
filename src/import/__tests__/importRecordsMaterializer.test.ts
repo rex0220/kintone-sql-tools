@@ -36,11 +36,15 @@ test("groups cli-kintone continuation rows and multiple tables on one physical r
   expect(result.records[1].subtables.get("Lines")).toEqual([]);
 });
 
-test("cli-kintone grouping rejects leading continuation and parent cells on continuation", () => {
+test("cli-kintone grouping accepts repeated parent values but rejects mismatches on continuation", () => {
   const csvTargets = [{ kind: "FIELD" as const, field: "code" }, { kind: "SUBTABLE" as const, subtableCode: "T", children: ["v"], rowIdSourceHeader: "rid" }];
   const source = { kind: "CSV" as const, sourceName: "src", hasHeader: true, mappingMode: "BY_NAME" as const, ignoreUnknownColumns: false };
   expect(() => materializeCliKintoneCsvImportRecords(source, { bytes: bytes("*,code,rid,v\n,,1,x\n") }, csvTargets, ["T"], 10)).toThrow("first data row");
+  const repeated = materializeCliKintoneCsvImportRecords(source, { bytes: bytes("*,recno,code,rid,v\n*,1,A,1,x\n,1,A,2,y\n,1,,3,z\n") }, csvTargets, ["T"], 10, "recno");
+  expect(repeated.records[0].top.get("code")).toBe("A");
+  expect(repeated.records[0].subtables.get("T")?.map((row) => row.rowId)).toEqual(["1", "2", "3"]);
   expect(() => materializeCliKintoneCsvImportRecords(source, { bytes: bytes("*,code,rid,v\n*,A,1,x\n,B,2,y\n") }, csvTargets, ["T"], 10)).toThrow("PARENT_VALUE_ON_CONTINUATION");
+  expect(() => materializeCliKintoneCsvImportRecords(source, { bytes: bytes("*,recno,code,rid,v\n*,1,A,1,x\n,2,A,2,y\n") }, csvTargets, ["T"], 10, "recno")).toThrow("PARENT_VALUE_ON_CONTINUATION");
 });
 
 test("distinguishes missing subtable from explicit empty replacement", () => {

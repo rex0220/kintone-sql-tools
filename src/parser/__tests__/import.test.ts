@@ -75,5 +75,7 @@ describe("B39 IMPORT parser gate", () => {
       .toThrow("requires REPLACE SUBTABLES");
     expect(() => parse("IMPORT UPDATE INTO APP1 (Lines(name) ROW ID SOURCE rid) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Other)"))
       .toThrow(/non-replaced|not declared/);
+    expect(() => parse("IMPORT INTO APP1 (Lines(name) ROW ID SOURCE rid) FROM CSV src BY NAME REPLACE SUBTABLES (Lines)"))
+      .toThrow("requires IMPORT UPDATE");
   });
 });

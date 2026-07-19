@@ -59,7 +59,7 @@ Options:
 
 Experimental IMPORT CSV/JSON is call-scoped and disabled by default. Supply named
 inline importSources (text or base64 bytes) to enable it; filesystem paths are not accepted.
-Nested JSON subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLAIN.
+Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLAIN.
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
