@@ -12,7 +12,7 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - `INSERT` / `UPDATE` / `UPDATE ... FROM` / `UPSERT` / `DELETE` / `REORDER`（`--allow-dml` 必須）
 - `EXPLAIN`
 - **型付きcanonical `ORDER BY`とkintone固有順を選ぶ`KORDER BY`**（v3.0.0）
-- **最大30桁のNUMBERをraw字句のまま比較する厳密10進primitive**（v3.3.0候補。SemVer実機判定待ち）
+- **最大30桁のNUMBERをraw字句のまま比較する厳密10進primitive**（v3.3.0）
 - **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
   - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）
   - プラグイン: read-only バッチのみ（最終結果を表示）
