@@ -718,6 +718,8 @@ export function project(
     const out: ProcessRow = {};
     for (const [colIdx, col] of columns.entries()) {
       switch (col.type) {
+        case "VARIABLE_COL":
+          throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
         case "WILDCARD":
           Object.assign(out, stripParentShortcutColumns(row));
           break;
@@ -839,6 +841,8 @@ function computeOutputKey(
   defaultFieldKeys: Map<number, string>
 ): string {
   switch (col.type) {
+    case "VARIABLE_COL":
+      throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
     case "FIELD":
       return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
     case "LITERAL_COL":

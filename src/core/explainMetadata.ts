@@ -18,6 +18,7 @@ export function whereNeedsFieldMetadata(where: WhereExpr | null): boolean {
     case "GROUP":
       return whereNeedsFieldMetadata(where.expr);
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }

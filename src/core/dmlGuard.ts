@@ -117,6 +117,7 @@ function whereRequiresCompleteInput(where: WhereExpr | null): boolean {
     case "EXISTS":
       return selectRequiresCompleteInput(where.query);
     case "NULL_CHECK":
+    case "BOOLEAN":
       return false;
   }
 }

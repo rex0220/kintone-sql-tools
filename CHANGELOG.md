@@ -2,6 +2,12 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 次期リリース
+
+### 機能追加
+
+- **B3＋B10-B バッチ変数の参照拡張**。スカラー変数を `SELECT @x AS alias` の定数列として使用でき、文字列配列 `SET @list=['A','B']` をカッコ無し `IN @list` / `NOT IN @list` で通常の literal IN へ展開できる。空配列は親条件を含めて真偽簡約し、恒偽 SELECT はレコード API を省略、更新系の恒真 WHERE は実行前拒否、恒偽 WHERE は 0 件 no-op とする。scalar/array の誤用は validate-all-first で全件静的拒否し、EXPLAIN も実行時と同じ展開・簡約を表示する。`IN (@a,@b)` と `@x || field` の既存動作は維持。
+
 ## v3.4.0（2026-07-18）
 
 ### 機能追加

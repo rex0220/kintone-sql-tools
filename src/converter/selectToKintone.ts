@@ -90,6 +90,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
 export function whereRequiresJsEval(where: WhereExpr | null): boolean {
   if (where === null) return false;
   switch (where.type) {
+    case "BOOLEAN":   return true;
     case "BINARY":
       return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY" || isLike(where);
     case "NULL_CHECK": return isFunc(where.field);
@@ -595,6 +596,7 @@ function collectRequiredFieldsByTable(
         walkWhere(where.expr, phase);
         return;
       case "EXISTS":
+      case "BOOLEAN":
         return;
     }
   };
@@ -636,6 +638,8 @@ function collectRequiredFieldsByTable(
         break;
       case "LITERAL_COL":
         break;
+      case "VARIABLE_COL":
+        throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "AGGREGATE":
         if (col.arg.type !== "WILDCARD") walkArith(col.arg, "select");
         break;

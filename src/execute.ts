@@ -744,7 +744,8 @@ export interface BatchExecuteResult {
 
 type VarValue =
   | { type: "string"; value: string }
-  | { type: "number"; value: number; raw?: string };
+  | { type: "number"; value: number; raw?: string }
+  | { type: "array"; elements: Array<{ type: "string"; value: string }> };
 
 /** バッチタイムアウト。message 接頭辞で code = TimeoutError として報告される */
 class BatchTimeoutError extends Error {
@@ -908,9 +909,14 @@ async function executeBatchStatement(
   variables: Map<string, VarValue>
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
-    const resolvedStmt = resolveVariableRefs(stmt, variables);
+    const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
     validateKlikeStatement(resolvedStmt);
-    if (resolvedStmt.expr.type === "SCALAR_SUBQUERY") {
+    if (resolvedStmt.expr.type === "ARRAY") {
+      variables.set(stmt.name, {
+        type: "array",
+        elements: resolvedStmt.expr.elements.map((element) => ({ type: "string", value: element.value })),
+      });
+    } else if (resolvedStmt.expr.type === "SCALAR_SUBQUERY") {
       try {
         const value = await evaluateScalarSubquery(
           resolvedStmt.expr.query,
@@ -955,7 +961,7 @@ async function executeBatchStatement(
     return {};
   }
 
-  const resolvedStmt = resolveVariableRefs(stmt, variables);
+  const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -1175,7 +1181,7 @@ function parseSqlBatch(sql: string): Statement[] {
   return new Parser(tokens).parseStatements();
 }
 
-function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): VarValue {
+function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): Exclude<VarValue, { type: "array" }> {
   switch (expr.type) {
     case "STRING":
       return { type: "string", value: expr.value };
@@ -1195,10 +1201,10 @@ function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): VarValue
   }
 }
 
-/** 文実行前に VariableRef を型付きリテラルへ置換し、既存実行経路へ渡す。 */
-function resolveVariableRefs<T>(node: T, variables: Map<string, VarValue>): T {
+/** Resolve batch references, expand array IN values, and simplify predicates. */
+export function resolveBatchVariableReferences<T>(node: T, variables: Map<string, VarValue>): T {
   if (Array.isArray(node)) {
-    return node.map((v) => resolveVariableRefs(v, variables)) as T;
+    return node.map((v) => resolveBatchVariableReferences(v, variables)) as T;
   }
   if (node !== null && typeof node === "object") {
     const obj = node as Record<string, unknown>;
@@ -1207,15 +1213,80 @@ function resolveVariableRefs<T>(node: T, variables: Map<string, VarValue>): T {
       if (value === undefined) {
         throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       }
+      if (value.type === "array") {
+        throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
+      }
       return (value.type === "number"
         ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }
         : { type: "STRING", value: value.value }) as T;
     }
-    return Object.fromEntries(
-      Object.entries(obj).map(([key, value]) => [key, resolveVariableRefs(value, variables)])
-    ) as T;
+    if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
+      const value = variables.get(obj["name"]);
+      if (value === undefined) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+      if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);
+      return (value.type === "number"
+        ? { type: "ARITH_COL", expr: { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }, alias: obj["alias"] }
+        : { type: "LITERAL_COL", value: value.value, alias: obj["alias"] }) as T;
+    }
+    if (obj["type"] === "VARIABLE_IN_LIST") return obj as T;
+    const resolved = Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, resolveBatchVariableReferences(value, variables)])
+    ) as Record<string, unknown>;
+    if (resolved["type"] === "BINARY") {
+      const right = resolved["right"] as Record<string, unknown> | undefined;
+      if (right?.["type"] === "VARIABLE_IN_LIST" && typeof right["name"] === "string") {
+        const value = variables.get(right["name"]);
+        if (value === undefined) throw new Error(`ParseError: variable @${right["name"]} is not defined in this batch.`);
+        if (value.type !== "array") {
+          throw new Error(`ParseError: scalar variable @${right["name"]} cannot be used as IN @${right["name"]}; use IN (@${right["name"]}) instead.`);
+        }
+        if (value.elements.length === 0) {
+          return { type: "BOOLEAN", value: resolved["op"] === "NOT_IN" } as T;
+        }
+        resolved["right"] = {
+          type: "IN_LIST",
+          values: value.elements.map((element) => ({ type: "STRING", value: element.value })),
+        };
+      }
+    }
+    const simplified = simplifyBooleanWhere(resolved);
+    if (simplified["type"] === "SELECT" && isBooleanNode(simplified["where"], true)) {
+      simplified["where"] = null;
+    }
+    if ((simplified["type"] === "UPDATE" || simplified["type"] === "DELETE" || simplified["type"] === "REORDER")
+        && isBooleanNode(simplified["where"], true)) {
+      throw new Error("ArgumentError: empty-array simplification makes the target WHERE always true; use an explicit safe target condition.");
+    }
+    return simplified as T;
   }
   return node;
+}
+
+function isBooleanNode(value: unknown, expected?: boolean): value is { type: "BOOLEAN"; value: boolean } {
+  return value !== null && typeof value === "object"
+    && (value as { type?: unknown }).type === "BOOLEAN"
+    && (expected === undefined || (value as { value?: unknown }).value === expected);
+}
+
+function simplifyBooleanWhere(obj: Record<string, unknown>): Record<string, unknown> {
+  if (obj["type"] === "NOT" && isBooleanNode(obj["expr"])) {
+    return { type: "BOOLEAN", value: !obj["expr"].value };
+  }
+  if (obj["type"] === "GROUP" && isBooleanNode(obj["expr"])) return obj["expr"];
+  if (obj["type"] === "LOGICAL") {
+    const left = obj["left"];
+    const right = obj["right"];
+    if (obj["op"] === "AND") {
+      if (isBooleanNode(left, false) || isBooleanNode(right, false)) return { type: "BOOLEAN", value: false };
+      if (isBooleanNode(left, true)) return right as Record<string, unknown>;
+      if (isBooleanNode(right, true)) return left as Record<string, unknown>;
+    } else if (obj["op"] === "OR") {
+      if (isBooleanNode(left, true) || isBooleanNode(right, true)) return { type: "BOOLEAN", value: true };
+      if (isBooleanNode(left, false)) return right as Record<string, unknown>;
+      if (isBooleanNode(right, false)) return left as Record<string, unknown>;
+    }
+  }
+  return obj;
 }
 
 function findVariableRef(node: unknown): string | null {
@@ -1228,7 +1299,8 @@ function findVariableRef(node: unknown): string | null {
   }
   if (node !== null && typeof node === "object") {
     const obj = node as Record<string, unknown>;
-    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") return obj["name"];
+    if ((obj["type"] === "VARIABLE" || obj["type"] === "VARIABLE_COL" || obj["type"] === "VARIABLE_IN_LIST")
+        && typeof obj["name"] === "string") return obj["name"];
     for (const value of Object.values(obj)) {
       const found = findVariableRef(value);
       if (found !== null) return found;
@@ -1564,6 +1636,7 @@ async function assertDmlWhereCapability(
     ? await getFieldsCached(stmt.appId, client, cacheContext)
     : [];
   const byCode = new Map(fields.map((field) => [field.code, field]));
+  if (stmt.where.type === "BOOLEAN" && stmt.where.value === false) return;
   const result = classifyWhereCapability(stmt.where, (field) => {
     // UPDATE/DELETE の対象は単一アプリ。パーサが保持する APP100. 修飾も同じ対象列を指す。
     if (field.field === "$id") return resolveFieldSemantics({ fieldType: "__ID__" });
@@ -1661,6 +1734,10 @@ async function executeSelect(
   return result;
 }
 
+function isConstantFalseWhere(where: WhereExpr | null): boolean {
+  return where?.type === "BOOLEAN" && where.value === false;
+}
+
 function isNoFromSelect(stmt: SelectStatement): boolean {
   return stmt.from.appId === 0 && stmt.from.cteName === NO_FROM_CTE_NAME;
 }
@@ -1701,6 +1778,8 @@ function stringFuncHasFieldRef(expr: StringFuncExpr): boolean {
 function validateNoFromColumns(stmt: SelectStatement): void {
   for (const col of stmt.columns) {
     switch (col.type) {
+      case "VARIABLE_COL":
+        throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "LITERAL_COL":
         break;
       case "ARITH_COL":
@@ -1998,6 +2077,7 @@ function collectTypedInFieldRefs(
       return;
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return;
   }
 }
@@ -2579,7 +2659,8 @@ async function executeFullScanSelect(
   const tableConditions = pushdownPlan.joinConditions;
 
   // メインテーブルのフェッチを開始（await しない）
-  const mainFetch = fetchTableRecordsForFullScan(
+  const constantFalse = isConstantFalseWhere(stmt.where);
+  const mainFetch = constantFalse ? Promise.resolve([]) : fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
     client,
@@ -2600,6 +2681,10 @@ async function executeFullScanSelect(
   const onOptJoins: (typeof stmt.joins) = [];
 
   for (const join of stmt.joins) {
+    if (constantFalse) {
+      parallelJoins.push({ join, promise: Promise.resolve([]) });
+      continue;
+    }
     const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
     if (jCond !== null) {
       parallelJoins.push({
@@ -4518,6 +4603,19 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
+  if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
+    const fieldInfos = await loadWritableTopLevelDmlFields(
+      stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
+    );
+    await loadNumberPrecisionForTargets(
+      stmt.appId, stmt.assignments.map((assignment) => assignment.field), fieldInfos, client, cacheContext
+    );
+    const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+    assertUpdateCheckRefs(stmt, fieldTypes);
+    assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
+    await assertDmlWhereCapability(stmt, client, cacheContext);
+    return { type: "UPDATE", updatedCount: 0 };
+  }
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, tempTables);
   if (stmt.subtableCode) {
     await assertDmlWhereCapability(stmt, client, cacheContext);
@@ -4531,6 +4629,7 @@ async function executeUpdate(
     stmt.appId, targetFields, fieldInfos, client, cacheContext
   );
   await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "UPDATE", updatedCount: 0 };
   if (stmt.from != null) {
     return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
@@ -4652,6 +4751,7 @@ async function executeDelete(
   cacheContext: string
 ): Promise<DeleteResult> {
   await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "DELETE", deletedCount: 0 };
   if (stmt.subtableCode) {
     return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
@@ -5176,6 +5276,7 @@ async function executeReorder(
     cacheContext
   );
   const reorderFields = await getFieldsCached(stmt.appId, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "REORDER", reorderedParentCount: 0 };
   const reorderSemanticsByCode = new Map(reorderFields.map((field) => [
     field.code,
     field.semantics ?? resolveFieldSemantics(field),
@@ -5516,6 +5617,8 @@ function collectSubqueryTasks(
       }));
       break;
     }
+    case "BOOLEAN":
+      break;
   }
 }
 
@@ -5745,9 +5848,9 @@ export async function buildBatchExplainPlans(
       const stmt = statements[i];
       const planStmt = stmt.type === "SET_VARIABLE"
         ? (stmt.expr.type === "SCALAR_SUBQUERY"
-          ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) }
+          ? { ...stmt, expr: resolveBatchVariableReferences(stmt.expr, variables) }
           : stmt)
-        : resolveVariableRefs(stmt, variables);
+        : resolveBatchVariableReferences(stmt, variables);
       validateKlikeStatement(planStmt);
       const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords);
       const statementPlan = addCursorConcurrency(buildBatchStatementPlan(
@@ -5766,7 +5869,9 @@ export async function buildBatchExplainPlans(
       });
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
-        variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
+        variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
+          ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
+          : { type: "string", value: `@${stmt.name}` });
       }
   }
   return { statementCount: statements.length, statements: plans };
@@ -5963,6 +6068,12 @@ function buildSelectPlan(
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  if (isConstantFalseWhere(stmt.where)) {
+    lines.push("  predicate:     constant false");
+    lines.push("  records API access: none");
+    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
+    return lines;
+  }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
     if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
@@ -6137,6 +6248,7 @@ function collectSubqueryPlans(
       case "NOT":
       case "GROUP":    visitWhere(w.expr); break;
       case "NULL_CHECK": break;
+      case "BOOLEAN": break;
     }
   };
 
@@ -6209,7 +6321,9 @@ function buildUpdatePlan(
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   }
-  lines.push(`  api:           GET /k/v1/records.json → PUT /k/v1/records.json`);
+  lines.push(isConstantFalseWhere(stmt.where)
+    ? "  api:           metadata validation only (records API access: none)"
+    : `  api:           GET /k/v1/records.json → PUT /k/v1/records.json`);
 
   const setTypes: string[] = [];
   if (isArith)  setTypes.push("算術 SET（現在値を取得して計算）");
@@ -6246,7 +6360,9 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
-  lines.push(`  api:           GET /k/v1/records.json → DELETE /k/v1/records.json`);
+  lines.push(isConstantFalseWhere(stmt.where)
+    ? "  api:           metadata validation only (records API access: none)"
+    : `  api:           GET /k/v1/records.json → DELETE /k/v1/records.json`);
   return lines;
 }
 
@@ -6294,7 +6410,9 @@ function buildReorderPlan(stmt: ReorderStatement, label?: string): string[] {
     `  table:  ${target}`,
     `  scope:  ${scope}`,
     `  by:     ${byStr}`,
-    `  api:    GET /k/v1/records.json（行 ID 取得）→ PUT /k/v1/records.json（id 配列のみ送信）`,
+    isConstantFalseWhere(stmt.where)
+      ? `  api:    metadata validation only (records API access: none)`
+      : `  api:    GET /k/v1/records.json（行 ID 取得）→ PUT /k/v1/records.json（id 配列のみ送信）`,
   ];
   if (!stmt.all && stmt.where) {
     lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where)}`);
@@ -6309,6 +6427,7 @@ function formatOrderByItem(item: OrderByItem): string {
 
 /** whereToKintone が例外を投げる場合（JS 関数含む等）は "(JS 評価)" を返す */
 function safeWhereToKintone(where: WhereExpr): string {
+  if (where.type === "BOOLEAN") return where.value ? "TRUE" : "FALSE (constant)";
   try {
     return whereToKintone(where);
   } catch {

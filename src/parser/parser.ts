@@ -22,6 +22,7 @@ import type {
   CaseFieldValue,
   CaseSqlValue,
   SelectColumn,
+  VariableColumn,
   WildcardColumn,
   FieldColumn,
   AggregateColumn,
@@ -45,6 +46,7 @@ import type {
   NumberLiteral,
   KintoneFunction,
   InList,
+  VariableInList,
   SubqueryInList,
   CompareOp,
   OrderByItem,
@@ -271,7 +273,9 @@ export class Parser {
     this.expect(TokenKind.SET);
     const variable = this.expect(TokenKind.VARIABLE, "SET の後には変数名（例: @name）が必要です");
     this.expect(TokenKind.EQ);
-    const expr = this.parseScalarExpr("SET", true);
+    const expr = this.peek().kind === TokenKind.LBRACKET
+      ? this.parseArrayLiteral()
+      : this.parseScalarExpr("SET", true);
     return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
   }
 
@@ -767,6 +771,19 @@ export class Parser {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "SCALAR_VALUE_COL", expr, alias } satisfies ScalarValueColumn;
+    }
+
+    // Must remain after CONCAT_OP detection: @x || field keeps its legacy path.
+    if (this.peek().kind === TokenKind.VARIABLE) {
+      const variable = this.advance();
+      if (!this.consume(TokenKind.AS)) {
+        throw new ParseError("SELECT 列のバッチ変数には AS alias が必要です", this.peek());
+      }
+      return {
+        type: "VARIABLE_COL",
+        name: variable.value.slice(1).toLowerCase(),
+        alias: this.parseAliasName(),
+      } satisfies VariableColumn;
     }
 
     const windowFunc = this.tryWindowFunc();
@@ -1751,9 +1768,7 @@ export class Parser {
     // NOT IN / NOT LIKE / NOT KLIKE
     if (this.consume(TokenKind.NOT)) {
       if (this.consume(TokenKind.IN)) {
-        this.expect(TokenKind.LPAREN);
-        const right = this.parseInListOrSubquery();
-        this.expect(TokenKind.RPAREN);
+        const right = this.parseInRight();
         return { type: "BINARY", op: "NOT_IN", left: field, right } satisfies BinaryExpr;
       }
       if (this.consume(TokenKind.LIKE)) {
@@ -1772,9 +1787,7 @@ export class Parser {
 
     // IN (...)
     if (this.consume(TokenKind.IN)) {
-      this.expect(TokenKind.LPAREN);
-      const right = this.parseInListOrSubquery();
-      this.expect(TokenKind.RPAREN);
+      const right = this.parseInRight();
       return { type: "BINARY", op: "IN", left: field, right } satisfies BinaryExpr;
     }
 
@@ -1986,6 +1999,19 @@ export class Parser {
   }
 
   // IN (...) — 値リストまたはサブクエリ
+  private parseInRight(): InList | SubqueryInList | VariableInList {
+    if (this.consume(TokenKind.LPAREN)) {
+      const right = this.parseInListOrSubquery();
+      this.expect(TokenKind.RPAREN);
+      return right;
+    }
+    const variable = this.expect(
+      TokenKind.VARIABLE,
+      "IN / NOT IN の後には (値リストまたは SELECT) か配列変数が必要です"
+    );
+    return { type: "VARIABLE_IN_LIST", name: variable.value.slice(1).toLowerCase() };
+  }
+
   private parseInListOrSubquery(): InList | SubqueryInList {
     // IN (SELECT ...) → サブクエリ
     if (this.peek().kind === TokenKind.SELECT) {

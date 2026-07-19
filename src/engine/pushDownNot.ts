@@ -8,6 +8,8 @@ import { KintoneQueryError } from "../converter/whereToKintone";
 
 export function pushDownNot(expr: WhereExpr): WhereExpr {
   switch (expr.type) {
+    case "BOOLEAN":
+      return { type: "BOOLEAN", value: !expr.value };
     case "BINARY": {
       const negated = negateOp(expr.op);
       if (negated === null) {

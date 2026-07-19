@@ -70,6 +70,23 @@ test("SET @name は専用 ScalarExpr としてパースし、名前を小文字�
   expect(stmts[2]).toEqual({ type: "SET_VARIABLE", name: "now", expr: { type: "KINTONE_FUNC", name: "NOW" } });
 });
 
+test("配列 SET とカッコ無し IN 変数を専用 AST として区別する", () => {
+  const stmts = parseAll("SET @l=['A','B']; SET @e=[]; SELECT @x AS c FROM APP100 WHERE code IN @l; SELECT * FROM APP100 WHERE code NOT IN @e; SELECT * FROM APP100 WHERE code IN (@x)");
+  expect(stmts[0]).toMatchObject({ type: "SET_VARIABLE", expr: { type: "ARRAY", elements: [{ value: "A" }, { value: "B" }] } });
+  expect(stmts[1]).toMatchObject({ type: "SET_VARIABLE", expr: { type: "ARRAY", elements: [] } });
+  expect((stmts[2] as SelectStatement).columns[0]).toEqual({ type: "VARIABLE_COL", name: "x", alias: "c" });
+  expect((stmts[2] as SelectStatement).where).toMatchObject({ right: { type: "VARIABLE_IN_LIST", name: "l" } });
+  expect((stmts[3] as SelectStatement).where).toMatchObject({ op: "NOT_IN", right: { type: "VARIABLE_IN_LIST", name: "e" } });
+  expect((stmts[4] as SelectStatement).where).toMatchObject({ right: { type: "IN_LIST", values: [{ type: "VARIABLE", name: "x" }] } });
+  expect(() => parseOne("SET @bad=[1]" as string)).toThrow();
+});
+
+test("SELECT 変数列は AS 必須で CONCAT_OP の既存分岐を退行させない", () => {
+  expect((parseOne("SELECT @x AS c") as SelectStatement).columns[0]).toEqual({ type: "VARIABLE_COL", name: "x", alias: "c" });
+  expect(() => parseOne("SELECT @x FROM APP100")).toThrow(/AS alias/);
+  expect((parseOne("SELECT @x || 'Y' AS c") as SelectStatement).columns[0]).toMatchObject({ type: "SCALAR_VALUE_COL" });
+});
+
 test("変数参照を WHERE / UPDATE SET / ASSERT の直接値で受理する", () => {
   const stmts = parseAll("SET @x = 10; UPDATE APP100 SET 金額 = @x WHERE $id = @x; ASSERT @x BETWEEN 1 AND 20");
   const update = stmts[1] as UpdateStatement;
