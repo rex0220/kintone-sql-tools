@@ -1,7 +1,7 @@
 # B41 v1 — 既存レコードの制約チェック（VALIDATE 文）仕様
 
 - 作成日: 2026-07-19
-- ステータス: **仕様 R2・codex レビュー待ち**（2026-07-19）。R1 の 3 重大＋中を **§10 で確定**（Claude がコード裏取り済み）＝①**値は二系統**（組み込み＝生値 `record[code].value`／WHERE・CHECK＝flat `ProcessRow`／`$err_value`＝生値化。`isEmpty`（dmlValidation.ts:154）は空配列を空と判定するが flatten 済み `"[]"`（process.ts:85）は非空扱い→ProcessRow 直渡しは USER/ORG/GROUP/複数選択の必須違反を取り逃がす）②**内部行契約 `{id, record, flat}`** を fetch 直後保持（取得＝$id∪制約∪WHERE∪CHECK・executeSelect の projected 戻り値は流用しない）③**read-only 配管**（新文 `VALIDATE` を `isReadOnlyType`（dmlGuard.ts:64）へ・`isDmlType` に入れず `writesKintone=false`・`requiresCompleteInput=true`＝onLimit=truncate→error・StatementAnalysis/dispatch/MCP `ksql_query`・書込み API 0 回）。中＝CHECK は `evaluateCustomChecks(groups, flat, resolveFieldType)`（dmlCustomCheck.ts:61）で B37 再利用・`INTO #err` は温度テーブル実体化（append だけでは不足）・`$err_value` の CHECK 時は空・Cursor は v1 で $id ページング限定・EXPLAIN。**判定＝再利用成立・B37 より軽い（工数 4.5〜8.5 人日 ≈ B37 の 0.7〜0.9 倍・据え置き）**。詳細 §10。
+- ステータス: **仕様 R2・codex レビュー済（要 R3・実装着手不可）**（2026-07-19）。核心（二系統・`{id,record,flat}`・read-only 方針）は妥当だが R2 に事実誤認/未確定が多数（§11）。R3 の8確定＝①R1本文の raw/flat 統一（反映済み）②`$err_value` 直列化契約③B29=全 NUMBER を対象④WHERE 範囲（KLIKE/subquery）⑤result type（SelectResult 推奨）⑥単文 INTO 方針＋#err schema⑦surface/runtime の onLimit 強制⑧fetchAll は Cursor 非使用（反映済み）。R1 の 3 重大＋中を **§10 で確定**（Claude がコード裏取り済み）＝①**値は二系統**（組み込み＝生値 `record[code].value`／WHERE・CHECK＝flat `ProcessRow`／`$err_value`＝生値化。`isEmpty`（dmlValidation.ts:154）は空配列を空と判定するが flatten 済み `"[]"`（process.ts:85）は非空扱い→ProcessRow 直渡しは USER/ORG/GROUP/複数選択の必須違反を取り逃がす）②**内部行契約 `{id, record, flat}`** を fetch 直後保持（取得＝$id∪制約∪WHERE∪CHECK・executeSelect の projected 戻り値は流用しない）③**read-only 配管**（新文 `VALIDATE` を `isReadOnlyType`（dmlGuard.ts:64）へ・`isDmlType` に入れず `writesKintone=false`・`requiresCompleteInput=true`＝onLimit=truncate→error・StatementAnalysis/dispatch/MCP `ksql_query`・書込み API 0 回）。中＝CHECK は `evaluateCustomChecks(groups, flat, resolveFieldType)`（dmlCustomCheck.ts:61）で B37 再利用・`INTO #err` は温度テーブル実体化（append だけでは不足）・`$err_value` の CHECK 時は空・Cursor は v1 で $id ページング限定・EXPLAIN。**判定＝再利用成立・B37 より軽い（工数 4.5〜8.5 人日 ≈ B37 の 0.7〜0.9 倍・据え置き）**。詳細 §10。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B41
 - 評価: [ksql_existing_record_validation_evaluation.md](ksql_existing_record_validation_evaluation.md)
@@ -43,7 +43,7 @@ SELECT $id, $err_field, $err_message, $err_value FROM #err;
 ### 3.1 組み込み制約（既存検証の読み取り再利用）
 
 - フォーム定義（`getFieldsCached`・[execute.ts:160](../../src/execute.ts) の `KintoneFieldInfo`）の `required/minValue/maxValue/minLength/maxLength/選択肢/数値桁(B29)` を、**既存レコードの現在値**に適用する。
-- 実装は既存 **`validateAndNormalizeDmlValue(現在値, fieldInfo, numberPrecision)`**（[dmlValidation.ts:50-97](../../src/core/dmlValidation.ts)）を流用。書込み経路（[execute.ts:3721](../../src/execute.ts)）と同じ呼び方で、値の出所が「書込み値」→「fetch 済みレコード値（`ProcessRow[code]`）」に変わるだけ。
+- 実装は既存 **`validateAndNormalizeDmlValue(生値, fieldInfo, numberPrecision)`**（[dmlValidation.ts:31](../../src/core/dmlValidation.ts)）を流用。書込み経路と同じ呼び方で、値の出所が「書込み値」→**「fetch 済みレコードの生値 `record[code].value`」**に変わる（**`ProcessRow`（flat）ではない**＝§10.2。flat 直渡しは空配列を取り逃がす）。
 - 検出コード＝既存の `ERR_REQUIRED/ERR_RANGE_MIN/MAX/ERR_LENGTH_MIN/MAX/ERR_CHOICE_INVALID/ERR_NUMBER_INTEGER_DIGITS`。記事の「必須・数値上下限・文字数・選択肢」を包含。
 
 ### 3.2 カスタムチェック（B37 構文）
@@ -67,13 +67,13 @@ SELECT $id, $err_field, $err_message, $err_value FROM #err;
 
 ## 5. 取得・境界・面
 
-- `WHERE` で監査対象を絞り、既存 fetch（`fetchAll`・大規模は Cursor）で取得。取得上限は既存 `maxRecords`／`onLimit`＝fail-closed（無音打ち切りしない）。
+- `WHERE` で監査対象を絞り、既存 `fetchAll`（**offset＋`$id` keyset ページング。Cursor API は使わない**＝§10.5）で取得。取得上限は既存 `maxRecords`／`onLimit`＝fail-closed（無音打ち切りしない・強制箇所は §10.3/R3）。
 - 全面（CLI/MCP/プラグイン）で同一＝engine 側の純検証。面ごとの配管不要。
 
 ## 6. パーサ・AST・再利用
 
 - 新文 `ValidateStatement { appId, fields?, where?, checkGroups?, errorTable? }`。`Statement` union（[ast.ts:15](../../src/types/ast.ts)）へ追加。`VALIDATE <app>` の解析を先頭文キーワードとして追加（`VALIDATE ONLY` サフィックスと分離）。
-- 実行：`WHERE`＋対象フィールドで records を fetch（既存 SELECT/FULL_SCAN 経路流用）→ 各 `ProcessRow` に §3.1 組み込み検証＋§3.2 CHECK →違反行を生成 → 結果集合 or `INTO #err`。
+- 実行：`WHERE`＋対象フィールドで records を fetch → 各 `ValidationRow`（§10.1）の**生値**に §3.1 組み込み検証、**flat** に §3.2 CHECK → 違反行を生成 → 結果集合 or `INTO #err`。
 - 再利用：`validateAndNormalizeDmlValue`（組み込み）・`evaluateCustomChecks`（B37）・`getFieldsCached`（制約）・`fetchAll`/`runFullScan`（取得）。**新規は「文法＋既存レコードへ検証を回す実行経路＋出力生成」のみ**。
 
 ## 7. 受入条件（テスト化）
@@ -81,7 +81,7 @@ SELECT $id, $err_field, $err_message, $err_value FROM #err;
 - 組み込み：必須空・数値上下限違反・文字数違反・**選択肢の定義外値（記事の看板ケース）**・数値桁超過を既存レコードで検出。対象フィールド省略＝全制約フィールド・`(fields)` 指定で限定。
 - カスタム：B37 `CHECK` が既存レコードで発火（グループ先勝ち・`||`/`CONCAT`/`@var`・`ERR_CHECK`）。
 - 出力：`$id`/`$err_field`/`$err_code`/`$err_message`/`$err_value`・1 レコード複数違反＝複数行・違反 0 件で列保持・CLI CSV。
-- 絞り込み：`WHERE` で対象限定・大規模は Cursor・`maxRecords` 超過 fail-closed。
+- 絞り込み：`WHERE` で対象限定・大規模は `fetchAll`（offset＋`$id` keyset・Cursor 非使用）・`maxRecords` 到達で fail-closed。
 - read-only：書込み API を呼ばない（MCP `ksql_query`・CLI `--allow-dml` 不要）。全面一致。
 - 非回帰：`VALIDATE ONLY` サフィックス（書込み候補検証）と混同しない・既存クエリ不変。
 
@@ -160,3 +160,31 @@ interface ValidationRow {
 - **read-only**: VALIDATE 実行で mutation API・confirm を 0 回（`writesKintone=false`・全面）。`onLimit=truncate` 指定でも error（`requiresCompleteInput=true`）。
 - **#err 実体化**: `VALIDATE … INTO #err; SELECT … FROM #err` が動く・違反 0 件で列保持・1 レコード複数違反＝複数行・CHECK 違反の `$err_field` 空/`$err_value` 空。
 - **EXPLAIN**: 取得フィールドの和集合表示・書込み API なし表示。
+
+---
+
+## 11. codex レビュー結果（R2・2026-07-19・要 R3）
+
+Claude が P1-1/6/9/10 を実ファイルで裏取り済み。**判定＝R3 必須・R2 のままでは実装着手不可**。核心（二系統・`{id,record,flat}`・`executeSelect` projected 非流用・`validateAndNormalizeDmlValue(生値)`・`evaluateCustomChecks(flat)` 再利用・`VALIDATE` を isReadOnlyType/非 isDmlType・多重違反行・EXPLAIN で件数非表示・minor）は妥当と確認された。
+
+### P1（誤り・要修正）
+1. **R1 §3.1/§6 が §10.2 と矛盾**（本文が「組み込み検証に `ProcessRow`」のまま）→ **本文を生値へ統一済み**（本コミット）。
+2. **`$err_value` の直列化は既存流用でなく新規**。`rawScalarText`（[dmlValidation.ts:103](../../src/core/dmlValidation.ts#L103)）は private＋配列/オブジェクトを空文字化・`renderValidationValue`（[dmlValidationCandidates.ts:108](../../src/core/dmlValidationCandidates.ts#L108)）は配列を JSON 化。→ R3 で「USER/ORG/GROUP の複数 code＝JSON 配列か区切りか・CHECK_BOX/MULTI・単一/空/`null`・code か name か」を確定。
+3. **B29 は全 NUMBER が対象**。数値桁は `getNumberPrecision()`（アプリ設定・[execute.ts:3315](../../src/execute.ts#L3315)）由来で、フォームの min/max が無い NUMBER も監査対象に含める必要がある。「制約フィールドをフォーム定義から導出」だけでは B29 対象を落とす。
+4. **取得列 collector をそのまま流用できない**。`collectRequiredFieldsByTable`（[selectToKintone.ts:341](../../src/converter/selectToKintone.ts#L341)）は private・`SelectStatement` 引数。CHECK 参照は別 collector `collectCheckFieldRefs`（[dmlCustomCheck.ts:13](../../src/core/dmlCustomCheck.ts#L13)）。→ R3 で「WHERE 収集を汎用 helper に抽出し CHECK と和集合」or「VALIDATE 専用 collector」を確定（架空 SELECT 経由は不適）。
+5. **WHERE 範囲が未確定**。KLIKE は local `evalWhere` で必ず例外（[evalWhere.ts:107](../../src/engine/evalWhere.ts#L107)）・SELECT は `klikeValidation`（[klikeValidation.ts:110](../../src/core/klikeValidation.ts#L110)）で安全押し下げ形のみ許可。→ R3 で「v1 は KLIKE/EXISTS/IN-subquery を禁止するか押し下げ実装するか・UNSUPPORTED capability のエラー・残余のローカル再評価」を確定。
+6. **`requiresCompleteInput=true` は onLimit を強制しない**（分類関数）。強制は surface 側（MCP `containsValidationOnly ? "error" : onLimit`・[tools.ts:583](../../src/mcp/tools.ts#L583)／CLI/plugin 同様）。→ R3 で **VALIDATE executor 内で常に error 強制**＋各 surface の強制条件へ VALIDATE を追加。
+7. **dispatch/surface の見落とし**。少なくとも単文 dispatch（[execute.ts:617](../../src/execute.ts#L617)）・CLI supported type（[cli/index.ts:1621](../../src/cli/index.ts#L1621)）・batch `INTO #err` 分岐（[execute.ts:1031](../../src/execute.ts#L1031)）・`analyzeBatch` 暗黙 temp/schema/依存辺（[batch.ts:287](../../src/core/batch.ts#L287)）・KLIKE static switch（[klikeValidation.ts:43](../../src/core/klikeValidation.ts#L43)）・`EXPLAIN VALIDATE`（ExplainStatement.query union＋parser＋plan dispatch＋metadata 必要性）を配線。
+8. **公開結果型が未確定**。`ExecuteResult` は union で、新 result 型を作ると renderResult/CLI formatter/MCP payload/batch envelope の exhaustiveness 更新が要る。既存 `VALIDATION`（INSERT/UPDATE/UPSERT 固定・[execute.ts:313](../../src/execute.ts#L313)）は流用不可。→ **最小は通常出力を `SelectResult` にする**（R3 確定）。
+9. **§10.4 の B12/B37 スキーマ説明が不正確**。実際は 元ペイロード列＋6列（`$err_statement/$err_operation/$err_row/$err_field/$err_code/$err_message`・[dmlValidationCandidates.ts:26](../../src/core/dmlValidationCandidates.ts#L26)）で **`$err_value` を持たない**。B41 の5列は別スキーマ・`$err_value` は B41 新規（「B37 と一致」でない）。`appendValidationErrors` は runtime 実体化する（[execute.ts:678](../../src/execute.ts#L678)）ので「append だけでは不足」は analyzeBatch 暗黙作成の意味に限る。単文 `VALIDATE … INTO #err` の拒否可否（B12 は拒否・[batch.ts:212](../../src/core/batch.ts#L212)）も明記。
+10. **「大規模は Cursor」は誤り**（反映済み）。`fetchAll` は offset＋`$id` keyset（[fetchAll.ts:199](../../src/api/fetchAll.ts#L199)）で Cursor API 非使用（Cursor は KORDER_CURSOR 専用）。
+
+### P2（改善）
+1. `maxRecords` は境界到達でも fail-closed（[fetchAll.ts:143](../../src/api/fetchAll.ts#L143)）→「上限到達時は完全性を証明できねば error」と表現・ちょうど上限＋満杯ページを受入に。
+2. EXPLAIN は metadata（フォーム定義/数値精度）は読む。「レコード/mutation API は呼ばない・違反件数は出さない」と正確化。
+3. `(fields)` の静的エラー（未知/重複/サブテーブル子/制約なし/`$id`・システム）を R3 で追加（`inSubtable`・型は `formFieldInfo` にある）。
+4. 工数 4.5〜8.5 人日は、WHERE 全機能＋専用 result 型まで含めると上限が厳しい。**v1 で KLIKE/subquery 禁止＋`SelectResult`** なら成立し得る。R3 スコープ確定後に再見積り。
+5. SemVer minor 妥当（3.5.0 相当）。既存 `VALIDATION` payload 兼用は避ける。
+
+### R3 の確定8点（提案する保守的 v1 の既定）
+①R1 raw/flat 統一（済）②`$err_value`＝`renderValidationValue` 相当の JSON（配列は code 配列）③B29＝全トップレベル NUMBER を対象に含める④**WHERE v1 は KLIKE/EXISTS/IN-subquery を禁止**（`klikeValidation` へ VALIDATE 追加・plain 比較＋AND/OR/BETWEEN/IN リテラル＋選択系 IN を local 評価）⑤result type＝`SelectResult`⑥単文 `INTO #err` は拒否（B12 同様）・#err は 5 列 B41 スキーマ⑦onLimit＝VALIDATE executor で常時 error＋各 surface に VALIDATE 追加⑧fetchAll は Cursor 非使用（済）。この保守スコープなら工数 4.5〜8.5 人日を維持。
