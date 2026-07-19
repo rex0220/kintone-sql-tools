@@ -568,7 +568,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     editor.focus();
   });
 
-  const importPicker = el("input", "ksql-import-file", { type: "file", accept: ".csv,text/csv" }) as HTMLInputElement;
+  const importPicker = el("input", "ksql-import-file", { type: "file", accept: ".csv,.json,text/csv,application/json" }) as HTMLInputElement;
   const importEncoding = el("select", "ksql-import-encoding") as HTMLSelectElement;
   importEncoding.append(new Option("UTF8", "utf8"), new Option("SJIS", "sjis"));
   const importStatus = el("span", "ksql-import-status");
