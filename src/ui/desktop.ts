@@ -2011,6 +2011,7 @@ async function runBatchSql(
     // 読み取りが黙って切り捨てられ、切り捨て後の件数で confirm → 部分書き込みに
     // なるため。MCP の ksql_mutate と同じ固定。仕様 §3.6）
     onLimitReached: analysis.containsDml || analysis.containsValidationOnly
+      || analysis.statements.some((s) => s.statementType === "VALIDATE")
       ? "error"
       : options.onLimitReached,
     // 一時テーブル実体化上限（未指定 = エンジン既定 10,000）。実体化は
@@ -2143,7 +2144,7 @@ async function runSql(
       isDmlSql = writesKintone(stmt);
       surfaceForcesOnLimitError = isDmlSql || (
         "validateOnly" in stmt && stmt.validateOnly === true
-      );
+      ) || stmt.type === "VALIDATE";
       const count = getInsertValuesCount(stmt);
       if (isDmlSql && count !== null) {
         const appId = (stmt as { appId?: unknown }).appId;

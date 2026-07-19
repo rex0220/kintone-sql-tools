@@ -23,6 +23,7 @@ export type Statement =
   | UpdateStatement
   | DeleteStatement
   | ReorderStatement
+  | ValidateStatement
   | ShowAppsStatement
   | DescribeStatement
   | ExplainStatement
@@ -60,7 +61,24 @@ export interface ExplainStatement {
     | UpsertSelectStatement
     | UpdateStatement
     | DeleteStatement
-    | ReorderStatement;
+    | ReorderStatement
+    | ValidateStatement;
+}
+
+// ------------------------------------------------------------
+// VALIDATE existing records
+// ------------------------------------------------------------
+
+/** Existing-record constraint audit. This statement never writes to kintone. */
+export interface ValidateStatement {
+  type: "VALIDATE";
+  appId: number;
+  /** Explicit audit targets. Omitted means constraints plus every top-level NUMBER. */
+  fields?: string[];
+  where: WhereExpr | null;
+  checkGroups?: CheckGroup[];
+  /** Batch-scoped materialization destination. */
+  errorTable?: string;
 }
 
 // ------------------------------------------------------------

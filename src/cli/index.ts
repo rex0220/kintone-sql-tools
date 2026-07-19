@@ -1625,6 +1625,7 @@ async function run(): Promise<number> {
           || stmtType === "SHOW_APPS"
           || stmtType === "DESCRIBE"
           || stmtType === "ASSERT"
+          || stmtType === "VALIDATE"
           || isDmlType(stmtType);
         if (!supported) {
           process.stderr.write(`ArgumentError: unsupported statement type in CLI: ${stmtType}\n`);
@@ -1686,15 +1687,17 @@ async function run(): Promise<number> {
     parsedStmt !== null && typeof parsedStmt === "object" &&
     "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
   );
+  const isExistingRecordValidation = batchAnalysis?.statements.some((s) => s.statementType === "VALIDATE") === true
+    || getStatementType(parsedStmt) === "VALIDATE";
   // 通常 ORDER BY は schema-aware planner が local 完全入力か REST top-N かを決める。
   // surface で一律 error にすると、安全な REST top-N / KORDER_NATIVE まで truncate を
   // 「無視した」と誤表示するため、事前強制は書込み安全性と検証完全性にだけ限定する。
-  const surfaceForcesOnLimitError = isDmlStatement || batchContainsDml || isValidationOnly;
+  const surfaceForcesOnLimitError = isDmlStatement || batchContainsDml || isValidationOnly || isExistingRecordValidation;
   const effectiveOnLimit: OnLimitMode = surfaceForcesOnLimitError ? "error" : onLimit;
   if (surfaceForcesOnLimitError && onLimit === "truncate" && !quiet && !args.dryRun) {
     const reason = isDmlStatement || batchContainsDml
       ? "DML"
-      : "VALIDATE ONLY";
+      : isExistingRecordValidation ? "VALIDATE" : "VALIDATE ONLY";
     process.stderr.write(`note: onLimit=truncate is ignored for ${reason} (forced to error)\n`);
   }
   if (format === "markdown" && noHeader) {

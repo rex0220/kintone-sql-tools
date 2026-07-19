@@ -6,6 +6,7 @@
 
 ### 機能追加
 
+- **B41 既存レコードの制約チェック（`VALIDATE` 文）**。`VALIDATE <app> [(fields)] [WHERE …] [CHECK WHEN … THEN …] [INTO #err]` の read-only 監査文を追加。既存レコードを組み込み制約（必須・数値上下限・文字数・選択肢・B29 桁）とカスタムチェック（B37 構文）で検査し、違反を `$id / $err_field / $err_code / $err_message / $err_value` の 5 列で返す（`INTO #err` で複文再利用）。組み込み検証は生値（USER/ORG/GROUP 等の空配列を必須違反として検出）、WHERE・CHECK は flatten 値で評価する。read-only（書込み API 0 回・`--allow-dml` 不要・全 surface で `onLimit=truncate` を無効化）。WHERE は KLIKE・サブクエリ・修飾参照を静的拒否し、取得は `fetchAll`（offset＋`$id` keyset）＋安全 prefilter＋取得後ローカル再評価。`EXPLAIN VALIDATE` は取得フィールド・完全入力要否・metadata 利用を表示し、レコード/mutation API は呼ばず違反件数も出さない。単文 `VALIDATE … INTO #err` は temp スコープが無いため拒否。
 - **B3＋B10-B バッチ変数の参照拡張**。スカラー変数を `SELECT @x AS alias` の定数列として使用でき、文字列配列 `SET @list=['A','B']` をカッコ無し `IN @list` / `NOT IN @list` で通常の literal IN へ展開できる。空配列は親条件を含めて真偽簡約し、恒偽 SELECT はレコード API を省略、更新系の恒真 WHERE は実行前拒否、恒偽 WHERE は 0 件 no-op とする。scalar/array の誤用は validate-all-first で全件静的拒否し、EXPLAIN も実行時と同じ展開・簡約を表示する。`IN (@a,@b)` と `@x || field` の既存動作は維持。
 
 ## v3.4.0（2026-07-18）

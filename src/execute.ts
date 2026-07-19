@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
@@ -60,6 +60,7 @@ import {
   resolveDmlTargetIds,
 } from "./core/optimization/sharedPlanner";
 import {
+  extractSafePushdownLeaves,
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
@@ -99,7 +100,8 @@ import {
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
-import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, type CheckFieldRef } from "./core/dmlCustomCheck";
+import { renderExistingValidationValue } from "./core/existingRecordValidation";
+import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, evaluateCustomChecks, type CheckFieldRef } from "./core/dmlCustomCheck";
 import {
   classifyWhereCapability,
   type PredicateCapabilityResult,
@@ -615,6 +617,7 @@ async function executeParsedStatement(
     throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
   }
   switch (stmt.type) {
+    case "VALIDATE":      return executeExistingRecordValidation(stmt, client, options, cacheContext);
     case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
     case "UNION":         return executeUnion(stmt, client, options, cacheContext);
     case "WITH":          return executeWith(stmt, client, options, cacheContext);
@@ -645,6 +648,178 @@ async function executeParsedStatement(
       throw new Error("ArgumentError: DECLARE variable requires a batch.");
     case "ASSERT":        return executeAssert(stmt, client, options, cacheContext);
   }
+}
+
+const EXISTING_VALIDATION_COLUMNS = ["$id", "$err_field", "$err_code", "$err_message", "$err_value"];
+
+function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
+  return field.required === true
+    || field.minValue !== undefined
+    || field.maxValue !== undefined
+    || field.minLength !== undefined
+    || field.maxLength !== undefined
+    || field.optionOrder !== undefined;
+}
+
+function resolveExistingValidationTargets(
+  stmt: ValidateStatement,
+  fieldInfos: readonly KintoneFieldInfo[]
+): KintoneFieldInfo[] {
+  const byCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const auditable = (field: KintoneFieldInfo) => !field.inSubtable
+    && (field.fieldType === "NUMBER" || hasAuditableConstraint(field));
+  if (stmt.fields === undefined) return fieldInfos.filter(auditable);
+
+  const seen = new Set<string>();
+  return stmt.fields.map((code) => {
+    if (seen.has(code)) throw new Error(`ArgumentError: VALIDATE field ${code} is duplicated.`);
+    seen.add(code);
+    if (code === "$id") throw new Error("ArgumentError: VALIDATE cannot audit system field $id.");
+    const info = byCode.get(code);
+    if (!info) throw new Error(`ArgumentError: VALIDATE field ${code} does not exist.`);
+    if (info.inSubtable) throw new Error(`ArgumentError: VALIDATE field ${code} is a subtable child field.`);
+    if (!auditable(info)) throw new Error(`ArgumentError: VALIDATE field ${code} has no auditable constraint.`);
+    return info;
+  });
+}
+
+function collectValidateWhereFields(where: WhereExpr | null): string[] {
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  const add = (field: string) => { if (!seen.has(field)) { seen.add(field); fields.push(field); } };
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    if (node === null || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+    if (obj.type === "FIELD" && typeof obj.field === "string") add(obj.field);
+    if (obj.type === "FIELD_REF" && typeof obj.field === "string") add(obj.field);
+    Object.values(obj).forEach(visit);
+  };
+  visit(where);
+  return fields;
+}
+
+function existingValidationColumnMeta(): MaterializedColumnMetaMap {
+  return new Map(EXISTING_VALIDATION_COLUMNS.map((column) => [column, {
+    fieldType: column === "$id" ? "KSQL_NUMBER" : "KSQL_STRING",
+    sortKind: column === "$id" ? "number" as const : "string" as const,
+    semantics: syntheticSemantics(column === "$id" ? "number" : "string"),
+  }]));
+}
+
+async function executeExistingRecordValidation(
+  stmt: ValidateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<SelectResult> {
+  if (stmt.errorTable) throw new Error("ArgumentError: VALIDATE INTO requires a batch.");
+  return executeExistingRecordValidationCore(stmt, client, options, cacheContext);
+}
+
+async function executeExistingRecordValidationCore(
+  stmt: ValidateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<SelectResult> {
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const targets = resolveExistingValidationTargets(stmt, fieldInfos);
+  const checkGroups = stmt.checkGroups ?? [];
+  const checkRefs = collectCheckFieldRefs(checkGroups);
+  for (const ref of checkRefs) {
+    if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+      throw customCheckParseError(`CHECK のフィールド ${ref.field} は APP${stmt.appId} に存在しません`);
+    }
+  }
+  const evaluationTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  evaluationTypes.set("$id", "RECORD_NUMBER");
+  assertCheckComparisonTypes(stmt, evaluationTypes);
+
+  const whereFields = collectValidateWhereFields(stmt.where);
+  const requiredFields = [...new Set([
+    "$id",
+    ...targets.map((field) => field.code),
+    ...whereFields,
+    ...checkRefs.map((ref) => ref.field),
+  ])];
+  for (const field of whereFields) {
+    if (field !== "$id" && !infoByCode.has(field)) {
+      throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${stmt.appId}.`);
+    }
+  }
+
+  const numberPrecision = targets.some((field) => field.fieldType === "NUMBER")
+    ? await getNumberPrecisionCached(stmt.appId, client, cacheContext)
+    : undefined;
+  const semantics = (field: FieldRef) => field.field === "$id"
+    ? resolveFieldSemantics({ fieldType: "__ID__" })
+    : infoByCode.get(field.field)?.semantics ?? (infoByCode.has(field.field)
+      ? resolveFieldSemantics(infoByCode.get(field.field)!)
+      : undefined);
+  const capability = classifyWhereCapability(stmt.where, semantics);
+  if (capability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+  }
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const fieldOptions = new Map(fieldInfos.flatMap((field) => field.optionOrder
+    ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
+    : []));
+  const prefilter = stmt.where === null
+    ? null
+    : capability.capability === "EXACT_PUSHDOWN"
+      ? stmt.where
+      : extractSafePushdownLeaves(stmt.where, {
+          allowUnqualifiedFields: true,
+          fieldTypes,
+          fieldOptions,
+          allowKlike: false,
+        });
+  const query = prefilter === null ? "" : whereToKintone(prefilter);
+  const records = await fetchAll(client.getRecords, stmt.appId, query, requiredFields, {
+    maxRecords: options.maxRecords ?? 10_000,
+    parallel: options.fetchParallel ?? 1,
+    onLimit: "error",
+  });
+  const validationRows = records.map((record) => ({
+    id: String(record["$id"]?.value ?? ""),
+    record,
+    flat: flatten(record, null),
+  })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
+
+  const rows: ProcessRow[] = [];
+  for (const row of validationRows) {
+    for (const field of targets) {
+      const raw = row.record[field.code]?.value;
+      const validation = validateAndNormalizeDmlValue(raw, field, numberPrecision);
+      if (validation.ok) continue;
+      rows.push({
+        "$id": row.id,
+        "$err_field": field.code,
+        "$err_code": validation.code,
+        "$err_message": validation.message,
+        "$err_value": renderExistingValidationValue(raw, field.fieldType),
+      });
+    }
+    for (const check of evaluateCustomChecks(checkGroups, row.flat, (field) => evaluationTypes.get(field.field))) {
+      rows.push({
+        "$id": row.id,
+        "$err_field": "",
+        "$err_code": "ERR_CHECK",
+        "$err_message": check.message,
+        "$err_value": "",
+      });
+    }
+  }
+  const result: SelectResult = {
+    type: "SELECT",
+    columns: [...EXISTING_VALIDATION_COLUMNS],
+    rows,
+    rowCount: rows.length,
+  };
+  materializedMetaBySelectResult.set(result, existingValidationColumnMeta());
+  return result;
 }
 
 // ============================================================
@@ -964,6 +1139,26 @@ async function executeBatchStatement(
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
+
+  if (resolvedStmt.type === "VALIDATE") {
+    const result = await executeExistingRecordValidationCore(
+      resolvedStmt,
+      client,
+      { ...options, onLimitReached: "error" },
+      cacheContext
+    );
+    if (resolvedStmt.errorTable) {
+      appendValidationErrors(
+        tempTables,
+        resolvedStmt.errorTable,
+        result.columns,
+        result.rows,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta()
+      );
+    }
+    return { result };
+  }
 
   if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
     const result = await executeDmlValidation(
@@ -4079,7 +4274,7 @@ async function materializeValidationCandidates(
   return candidates;
 }
 
-function checkRefs(stmt: ValidationStatement): CheckFieldRef[] {
+function checkRefs(stmt: { checkGroups?: CheckGroup[] }): CheckFieldRef[] {
   return stmt.checkGroups ? collectCheckFieldRefs(stmt.checkGroups) : [];
 }
 
@@ -4103,7 +4298,7 @@ const CHECK_UNSUPPORTED_COMPARISON_TYPES = new Set([
   "KSQL_ARRAY",
 ]);
 
-function assertCheckComparisonTypes(stmt: ValidationStatement, types: ReadonlyMap<string, string>): void {
+function assertCheckComparisonTypes(stmt: { checkGroups?: CheckGroup[] }, types: ReadonlyMap<string, string>): void {
   if (!stmt.checkGroups) return;
   for (const ref of collectCheckComparisonFieldRefs(stmt.checkGroups)) {
     const key = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
@@ -5690,7 +5885,18 @@ interface ExplainWhereAnalysis {
   orderPlans: Map<SelectStatement, CanonicalOrderPlan>;
   fieldApps: Set<number>;
   processStatusApps: Set<number>;
+  numberPrecisionApps: Set<number>;
 }
+
+interface ValidateExplainInfo {
+  targetFields: string[];
+  fetchFields: string[];
+  capability: PredicateCapabilityResult;
+  prefilter: WhereExpr | null;
+  numberPrecision: boolean;
+}
+
+const validateExplainInfo = new WeakMap<ValidateStatement, ValidateExplainInfo>();
 
 async function buildExplainWhereAnalysis(
   query: unknown,
@@ -5700,6 +5906,7 @@ async function buildExplainWhereAnalysis(
 ): Promise<ExplainWhereAnalysis> {
   const fieldApps = new Set<number>();
   const processStatusApps = new Set<number>();
+  const numberPrecisionApps = new Set<number>();
   const tracedClient: KintoneClient = {
     ...client,
     getFields: async (appId) => {
@@ -5709,6 +5916,10 @@ async function buildExplainWhereAnalysis(
     getProcessStatuses: async (appId) => {
       processStatusApps.add(appId);
       return client.getProcessStatuses(appId);
+    },
+    getNumberPrecision: async (appId) => {
+      numberPrecisionApps.add(appId);
+      return client.getNumberPrecision(appId);
     },
   };
   const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
@@ -5768,6 +5979,61 @@ async function buildExplainWhereAnalysis(
           }));
         }
       }
+    } else if (typed["type"] === "VALIDATE") {
+      const validate = node as ValidateStatement;
+      fieldApps.add(validate.appId);
+      const fields = await getFieldsCached(validate.appId, tracedClient, cacheContext);
+      const infoByCode = new Map(fields.map((field) => [field.code, field]));
+      const targets = resolveExistingValidationTargets(validate, fields);
+      const checks = collectCheckFieldRefs(validate.checkGroups ?? []);
+      const whereFields = collectValidateWhereFields(validate.where);
+      for (const ref of checks) {
+        if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+          throw customCheckParseError(`CHECK のフィールド ${ref.field} は APP${validate.appId} に存在しません`);
+        }
+      }
+      for (const field of whereFields) {
+        if (field !== "$id" && !infoByCode.has(field)) {
+          throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${validate.appId}.`);
+        }
+      }
+      const types = new Map(fields.map((field) => [field.code, field.fieldType]));
+      types.set("$id", "RECORD_NUMBER");
+      assertCheckComparisonTypes(validate, types);
+      const capability = classifyWhereCapability(validate.where, (field) => field.field === "$id"
+        ? resolveFieldSemantics({ fieldType: "__ID__" })
+        : infoByCode.get(field.field)?.semantics ?? (infoByCode.has(field.field)
+          ? resolveFieldSemantics(infoByCode.get(field.field)!)
+          : undefined));
+      if (capability.capability === "UNSUPPORTED") {
+        throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+      }
+      const fieldTypes = new Map(fields.map((field) => [field.code, field.fieldType]));
+      const fieldOptions = new Map(fields.flatMap((field) => field.optionOrder
+        ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
+        : []));
+      const prefilter = validate.where === null
+        ? null
+        : capability.capability === "EXACT_PUSHDOWN"
+          ? validate.where
+          : extractSafePushdownLeaves(validate.where, {
+              allowUnqualifiedFields: true,
+              fieldTypes,
+              fieldOptions,
+              allowKlike: false,
+            });
+      const needsPrecision = targets.some((field) => field.fieldType === "NUMBER");
+      if (needsPrecision) {
+        numberPrecisionApps.add(validate.appId);
+        await getNumberPrecisionCached(validate.appId, tracedClient, cacheContext);
+      }
+      validateExplainInfo.set(validate, {
+        targetFields: targets.map((field) => field.code),
+        fetchFields: [...new Set(["$id", ...targets.map((field) => field.code), ...whereFields, ...checks.map((ref) => ref.field)])],
+        capability,
+        prefilter,
+        numberPrecision: needsPrecision,
+      });
     } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
       fieldApps.add((node as UpdateStatement | DeleteStatement).appId);
       await assertDmlWhereCapability(
@@ -5800,7 +6066,7 @@ async function buildExplainWhereAnalysis(
       }));
     }
   }
-  return { capabilities, orderPlans, fieldApps, processStatusApps };
+  return { capabilities, orderPlans, fieldApps, processStatusApps, numberPrecisionApps };
 }
 
 function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
@@ -5809,6 +6075,8 @@ function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
       .map((appId) => `  metadata API: form definition APP${appId}`),
     ...[...analysis.processStatusApps].sort((a, b) => a - b)
       .map((appId) => `  metadata API: process status APP${appId}`),
+    ...[...analysis.numberPrecisionApps].sort((a, b) => a - b)
+      .map((appId) => `  metadata API: number precision APP${appId}`),
   ];
 }
 
@@ -6040,7 +6308,30 @@ function buildExplainPlan(
   if (query.type === "UPDATE")        return buildUpdatePlan(query, label, capabilities, orderPlans);
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
+  if (query.type === "VALIDATE")      return buildValidatePlan(query, label);
   return buildSelectPlan(query, label, capabilities, orderPlans);
+}
+
+function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
+  const info = validateExplainInfo.get(stmt);
+  const lines: string[] = [];
+  if (label) lines.push(label);
+  lines.push(`VALIDATE APP${stmt.appId}`);
+  lines.push("  operation:     read-only existing-record constraint audit (writesKintone=false)");
+  lines.push("  fetch API:     GET records via offset + $id keyset paging (Cursor API unused)");
+  lines.push("  complete input: required (onLimit=truncate disabled)");
+  if (!info) {
+    lines.push("  metadata:      form definition required; number precision required for NUMBER targets");
+    return lines;
+  }
+  lines.push(`  WHERE capability: ${info.capability.capability}`);
+  lines.push(`  kintone query: ${info.prefilter === null ? "(全件取得)" : whereToKintone(info.prefilter)}`);
+  lines.push(`  audit fields:  ${info.targetFields.length === 0 ? "(なし)" : info.targetFields.join(", ")}`);
+  lines.push(`  fetch fields:  ${info.fetchFields.join(", ")}`);
+  lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
+  lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
+  lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");
+  return lines;
 }
 
 function buildSelectPlan(
