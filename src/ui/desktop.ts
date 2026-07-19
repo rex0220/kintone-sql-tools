@@ -572,6 +572,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   importEncoding.append(new Option("UTF8", "utf8"), new Option("SJIS", "sjis"));
   const importStatus = el("span", "ksql-import-status");
   importStatus.textContent = "IMPORT CSV: 未選択（gate OFF）";
+  importStatus.title = importStatus.textContent ?? "";
   const refreshImportSource = (): void => {
     const file = importPicker.files?.[0];
     selectedImportSource = file
@@ -580,6 +581,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     importStatus.textContent = selectedImportSource
       ? `IMPORT CSV: ${selectedImportSource.name} (${selectedImportSource.encoding.toUpperCase()})`
       : "IMPORT CSV: 未選択（gate OFF）";
+    importStatus.title = importStatus.textContent ?? "";
   };
   importPicker.addEventListener("change", refreshImportSource);
   importEncoding.addEventListener("change", refreshImportSource);
@@ -612,7 +614,12 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   };
   refreshOptSummary();
 
-  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary, importPicker, importEncoding, importStatus);
+  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary);
+
+  // IMPORT のファイル選択・エンコーディング・状態はヘッダー上部（折りたたむの左）へ配置する
+  const importControls = el("div", "ksql-import-controls");
+  importControls.append(importPicker, importEncoding, importStatus);
+  header.insertBefore(importControls, toggle);
 
   // 履歴ドロップダウン（初期非表示）
   const histDropdown = el("div", "ksql-hist-dropdown", { id: "ksql-hist-dropdown" });
