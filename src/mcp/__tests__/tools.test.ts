@@ -262,6 +262,27 @@ describe("MCP tools", () => {
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
   });
 
+  test("query: IMPORT ... VALIDATE ONLY は importSources 供給で capability gate を通す（回帰）", async () => {
+    // 修正前は query の再パースに import フラグを渡しておらず「capability is disabled」で落ちていた。
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 1,
+      invalidRows: 0, errorCount: 0, columns: ["code", "$err_code"], errors: [],
+    });
+    const createRuntime = async (_o: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "import-validate-mcp",
+      maxRecords: input.maxRecords ?? 500, fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error", timeout: input.timeout ?? 30000,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const result = await tools.query({
+      sql: "IMPORT INTO APP100 (code) FROM CSV src BY NAME VALIDATE ONLY",
+      importSources: [{ name: "src", text: "code\nA\n" }],
+    });
+    expect(result).toMatchObject({ ok: true, type: "VALIDATION" });
+    await expect(tools.query({ sql: "IMPORT INTO APP100 (code) FROM CSV src BY NAME VALIDATE ONLY" }))
+      .rejects.toThrow("importSources");
+  });
+
   test("query: leading VALIDATE is read-only and forces truncate to error", async () => {
     const runtimeInputs: CreateKsqlRuntimeInput[] = [];
     const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => {

@@ -661,7 +661,7 @@ export function createKsqlMcpTools(
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }
 
-    const stmt = parseSqlStatement(validation.normalizedSql);
+    const stmt = parseSqlStatement(validation.normalizedSql, { import: importOptions.enableImport });
     const noAppApiNeeded = isNoFromSelectStatement(stmt);
 
     if (noAppApiNeeded) {
