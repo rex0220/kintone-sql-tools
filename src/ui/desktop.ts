@@ -2840,13 +2840,36 @@ async function confirmDialog(
 
 function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {
   const csv = detail.kind === "IMPORT_CSV_SUBTABLE_REPLACE";
-  const rows = detail.parents.flatMap((parent) => parent.tables.map((table) =>
-    `親${parent.parentRow} ${parent.mode} / ${table.table}: existing=${table.existingRows}, input=${table.inputRows}, update=${"updateRows" in table ? table.updateRows : 0}, add=${table.addRows}, delete=${table.deleteRows}${"rowIdNotFound" in table ? `, rowIdNotFound=${table.rowIdNotFound}` : ""}`
-  ));
+  // レコード数が増えてもダイアログが画面をはみ出さないよう、親を1件ずつ列挙せず
+  // テーブル別に集計する。削除は危険なので該当親だけ別途（上限付きで）表示する。
+  const agg = new Map<string, { existing: number; input: number; update: number; add: number; del: number; notFound: number }>();
+  for (const parent of detail.parents) for (const table of parent.tables) {
+    const a = agg.get(table.table) ?? { existing: 0, input: 0, update: 0, add: 0, del: 0, notFound: 0 };
+    a.existing += table.existingRows;
+    a.input += table.inputRows;
+    a.update += "updateRows" in table ? table.updateRows : 0;
+    a.add += table.addRows;
+    a.del += table.deleteRows;
+    a.notFound += "rowIdNotFound" in table ? table.rowIdNotFound : 0;
+    agg.set(table.table, a);
+  }
+  const tableLines = [...agg].map(([name, a]) =>
+    `  ${name}: existing=${a.existing}, input=${a.input}, update=${a.update}, add=${a.add}, delete=${a.del}${csv ? `, rowIdNotFound=${a.notFound}` : ""}`
+  );
+  const deletingParents = detail.parents.filter((p) => p.tables.some((t) => t.deleteRows > 0));
+  const CAP = 10;
+  const deleteLines = deletingParents.length === 0 ? [] : [
+    `削除が発生する親 ${deletingParents.length} 件:`,
+    ...deletingParents.slice(0, CAP).map((p) =>
+      `  親${p.parentRow}${"targetId" in p && p.targetId !== undefined ? ` ($id=${p.targetId})` : ""}: delete=${p.tables.reduce((s, t) => s + t.deleteRows, 0)}`),
+    ...(deletingParents.length > CAP ? [`  … 他 ${deletingParents.length - CAP} 件`] : []),
+  ];
   return showConfirmDialog(
     `${csv ? `【最重要警告】サブテーブル全置換・${detail.totalDeleteRows}行削除\n` : detail.hasDeletes ? "【最重要警告】既存サブテーブル行を削除・置換します。\n" : ""}`
     + `${csv ? "CSV" : "JSON"} IMPORT: 親 ${detail.parentsToWrite} 件 (INSERT ${detail.insertedParents}, UPDATE ${detail.updatedParents})\n`
-    + `${csv ? `既存行 ID を維持し、未知 ID は追加します (rowIdNotFound=${detail.rowIdNotFound})。` : "JSON の子行 ID は送信せず、全行を新規採番します。"}\n${rows.join("\n")}`,
+    + `${csv ? `既存行 ID を維持し、未知 ID は追加します (rowIdNotFound=${detail.rowIdNotFound})。` : "JSON の子行 ID は送信せず、全行を新規採番します。"}\n`
+    + `テーブル別合計:\n${tableLines.join("\n")}`
+    + `${deleteLines.length ? `\n${deleteLines.join("\n")}` : ""}`,
     true
   );
 }
