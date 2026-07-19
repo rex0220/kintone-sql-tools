@@ -2823,13 +2823,14 @@ async function confirmDialog(
 }
 
 function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {
+  const csv = detail.kind === "IMPORT_CSV_SUBTABLE_REPLACE";
   const rows = detail.parents.flatMap((parent) => parent.tables.map((table) =>
-    `親${parent.parentRow} ${parent.mode} / ${table.table}: existing=${table.existingRows}, input=${table.inputRows}, add=${table.addRows}, delete=${table.deleteRows}`
+    `親${parent.parentRow} ${parent.mode} / ${table.table}: existing=${table.existingRows}, input=${table.inputRows}, update=${"updateRows" in table ? table.updateRows : 0}, add=${table.addRows}, delete=${table.deleteRows}${"rowIdNotFound" in table ? `, rowIdNotFound=${table.rowIdNotFound}` : ""}`
   ));
   return showConfirmDialog(
-    `${detail.hasDeletes ? "【最重要警告】既存サブテーブル行を削除・置換します。\n" : ""}`
-    + `JSON IMPORT: 親 ${detail.parentsToWrite} 件 (INSERT ${detail.insertedParents}, UPDATE ${detail.updatedParents})\n`
-    + `JSON の子行 ID は送信せず、全行を新規採番します。\n${rows.join("\n")}`,
+    `${csv ? `【最重要警告】サブテーブル全置換・${detail.totalDeleteRows}行削除\n` : detail.hasDeletes ? "【最重要警告】既存サブテーブル行を削除・置換します。\n" : ""}`
+    + `${csv ? "CSV" : "JSON"} IMPORT: 親 ${detail.parentsToWrite} 件 (INSERT ${detail.insertedParents}, UPDATE ${detail.updatedParents})\n`
+    + `${csv ? `既存行 ID を維持し、未知 ID は追加します (rowIdNotFound=${detail.rowIdNotFound})。` : "JSON の子行 ID は送信せず、全行を新規採番します。"}\n${rows.join("\n")}`,
     true
   );
 }

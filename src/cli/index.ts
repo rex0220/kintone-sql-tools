@@ -2105,12 +2105,14 @@ async function run(): Promise<number> {
       }
       if (context?.importDetail) {
         const detail = context.importDetail;
+        const csv = detail.kind === "IMPORT_CSV_SUBTABLE_REPLACE";
         const lines = [
-          `[IMPORT JSON Confirm] parentsToWrite=${detail.parentsToWrite} insert=${detail.insertedParents} update=${detail.updatedParents}`,
-          `rowIdPolicy=DROP_AND_RENUMBER_ALL (JSON child rows are all newly numbered)`,
-          ...(detail.hasDeletes ? ["WARNING: existing subtable rows will be deleted/replaced."] : []),
+          ...(csv ? [`【最重要警告】サブテーブル全置換・${detail.totalDeleteRows}行削除`] : []),
+          `[IMPORT ${csv ? "CSV" : "JSON"} Confirm] parentsToWrite=${detail.parentsToWrite} insert=${detail.insertedParents} update=${detail.updatedParents}`,
+          csv ? `rowIdPolicy=PRESERVE_EXISTING rowIdNotFound=${detail.rowIdNotFound} invalidParents=${detail.invalidParents}` : `rowIdPolicy=DROP_AND_RENUMBER_ALL (JSON child rows are all newly numbered)`,
+          ...(!csv && detail.hasDeletes ? ["WARNING: existing subtable rows will be deleted/replaced."] : []),
           ...detail.parents.flatMap((parent) => parent.tables.map((table) =>
-            `parentRow=${parent.parentRow} mode=${parent.mode} table=${table.table} existing=${table.existingRows} input=${table.inputRows} add=${table.addRows} delete=${table.deleteRows}`
+            `parentRow=${parent.parentRow} mode=${parent.mode} table=${table.table} existing=${table.existingRows} input=${table.inputRows} update=${"updateRows" in table ? table.updateRows : 0} add=${table.addRows} delete=${table.deleteRows}${"rowIdNotFound" in table ? ` rowIdNotFound=${table.rowIdNotFound}` : ""}`
           )),
         ];
         process.stderr.write(`${lines.join("\n")}\n`);
@@ -2153,7 +2155,9 @@ async function run(): Promise<number> {
               throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
             }
             if (context?.importDetail) {
-              process.stderr.write(`[IMPORT JSON Confirm] ${JSON.stringify(context.importDetail)}\n`);
+              const importDetail = context.importDetail;
+              if (importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE") process.stderr.write(`【最重要警告】サブテーブル全置換・${importDetail.totalDeleteRows}行削除\n`);
+              process.stderr.write(`[IMPORT ${importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE" ? "CSV" : "JSON"} Confirm] ${JSON.stringify(importDetail)}\n`);
             }
             return true;
           }

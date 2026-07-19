@@ -54,5 +54,7 @@ export interface MaterializedImportRecord {
   top: ReadonlyMap<string, DecodedJsonValue | string>;
   subtables: ReadonlyMap<string, readonly MaterializedImportChildRow[]>;
   replacementTables: ReadonlySet<string>;
+  /** CSV Phase 5D lookup-only record number; never emitted in a payload. */
+  recordNumberSourceValue?: string;
 }
 export interface MaterializedImportRecords { records: readonly MaterializedImportRecord[]; }

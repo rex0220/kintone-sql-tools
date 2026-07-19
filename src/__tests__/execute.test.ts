@@ -420,7 +420,7 @@ test("Phase 5C JSON UPSERT replaces only present tables, uses revision, and expo
   expect(client.putCalls[0].records[0].record).not.toHaveProperty("Notes");
 });
 
-test("Phase 5C rejects JSON row IDs, duplicate UPSERT source, confirmation refusal, and CSV mutation", async () => {
+test("Phase 5C rejects JSON row IDs, duplicate UPSERT source, and confirmation refusal", async () => {
   const client = makeClient({ records: [], postIds: ["1"] });
   client.getFields = async () => phase5cFields();
   const run = (
@@ -439,11 +439,50 @@ test("Phase 5C rejects JSON row IDs, duplicate UPSERT source, confirmation refus
     if (count > 0) throw new Error("dmlMaxRows");
     return true;
   })).rejects.toThrow("dmlMaxRows");
-  await expect(execute("IMPORT INTO APP100 (code, Lines(text) ROW ID SOURCE rid) FROM CSV src BY NAME REPLACE SUBTABLES (Lines)", client, {
-    enableImport: true, supportsImportConfirmDetail: true, confirm: async () => true,
-    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode("*,$id,code,text,rid\n*,1,A,x,") }) }),
-  })).rejects.toThrow("not available until Phase 5D");
   expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("Phase 5D CSV preserves existing IDs, adds empty/unknown IDs, deletes missing IDs, and reports one shared detail", async () => {
+  const existing = makeTypedRecord({
+    $id: "7", $revision: "3", code: "A",
+    Lines: [{ id: "101", value: { text: { value: "old" } } }, { id: "102", value: { text: { value: "delete" } } }, { id: "103", value: { text: { value: "delete-too" } } }],
+    Notes: [{ id: "201", value: { note: { value: "keep" } } }],
+  });
+  const client = makeClient({ records: [existing] });
+  client.getFields = async () => phase5cFields();
+  let confirmed: DmlConfirmContext["importDetail"];
+  const csv = "*,recno,code,line_id,text\n*,7,A,101,new\n,7,A,999,unknown\n,7,A,,added\n";
+  const result = await execute("IMPORT UPDATE INTO APP100 (code, Lines(text) ROW ID SOURCE line_id) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Lines)", client, {
+    enableImport: true, supportsImportConfirmDetail: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+    confirm: async (_count, _operation, context) => { confirmed = context?.importDetail; return true; },
+    cacheContext: "phase5d-replace",
+  });
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: 1, importDetail: { kind: "IMPORT_CSV_SUBTABLE_REPLACE", rowIdPolicy: "PRESERVE_EXISTING", totalDeleteRows: 2, rowIdNotFound: 1 } });
+  expect(confirmed).toMatchObject({ parents: [{ tables: [{ table: "Lines", existingRows: 3, inputRows: 3, updateRows: 1, addRows: 2, deleteRows: 2, rowIdNotFound: 1 }] }] });
+  expect(client.putCalls).toEqual([{ app: 100, records: [{ id: 7, revision: 3, record: {
+    code: { value: "A" }, Lines: { value: [
+      { id: "101", value: { text: { value: "new" } } },
+      { value: { text: { value: "unknown" } } },
+      { value: { text: { value: "added" } } },
+    ] },
+  } }] }]);
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("Notes");
+});
+
+test("Phase 5D duplicate source row ID and rowIdOwnedElsewhere fail before PUT", async () => {
+  const records = [
+    makeTypedRecord({ $id: "7", $revision: "1", Lines: [{ id: "101", value: { text: { value: "x" } } }] }),
+    makeTypedRecord({ $id: "8", $revision: "1", Lines: [{ id: "888", value: { text: { value: "owned" } } }] }),
+  ];
+  const client = makeClient({ records }); client.getFields = async () => phase5cFields();
+  const run = (csv: string) => execute("IMPORT UPDATE INTO APP100 (Lines(text) ROW ID SOURCE rid) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Lines)", client, {
+    enableImport: true, supportsImportConfirmDetail: true, confirm: async () => true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+  });
+  await expect(run("*,recno,rid,text\n*,7,101,a\n,,101,b\n")).rejects.toThrow("ERR_SUBTABLE_ROW_ID_DUP_SOURCE");
+  await expect(run("*,recno,rid,text\n*,7,888,a\n")).rejects.toThrow("rowIdOwnedElsewhere");
   expect(client.putCalls).toHaveLength(0);
 });
 
