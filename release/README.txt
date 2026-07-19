@@ -1,9 +1,25 @@
-ksql 配布パッケージ (v3.4.0)
+ksql 配布パッケージ (v3.5.0)
 
-1. ksql-plugin-v3.4.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.5.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.5.0: 既存レコードの制約チェックとバッチ変数の参照拡張 (B41/B3/B10-B)。
+- B41: 既存レコードの制約チェック文 VALIDATE <app> [(fields)] [WHERE]
+  [CHECK WHEN ... THEN ...] [INTO #err] を追加。既存レコードを組み込み制約
+  (必須/数値上下限/文字数/選択肢/数値桁) とカスタムチェック (B37 構文) で
+  監査し、違反を $id/$err_field/$err_code/$err_message/$err_value の 5 列で
+  返す (INTO #err で複文再利用)。read-only (書き込み API 0 回・--allow-dml 不要)。
+  組み込み検証は生値 (USER/組織/グループ選択・複数選択の空も必須違反として検出)。
+  WHERE は KLIKE・サブクエリ・修飾参照を禁止。EXPLAIN VALIDATE は取得計画のみで
+  違反件数は出さない。
+- B3: 文字列配列のバッチ変数 SET @list=['A','B'] とカッコ無し IN @list /
+  NOT IN @list を追加 (通常の literal IN へ展開・IN (@a,@b) は従来どおり)。
+  空配列は真偽簡約し in () を送らない。更新系の恒真 WHERE は全件更新防止で
+  実行前エラー。
+- B10-B: SELECT 定数列 @x AS alias を追加 (文字列/数値の型を保持)。
+- 既存の正しいクエリの挙動変更なし (minor)。
 
 v3.4.0: DML カスタムチェックと文字列連結演算子 (B37/B38)。
 - B38: 文字列連結演算子 || を追加 (CONCAT と同義・NULL/空は空文字・加減算と
