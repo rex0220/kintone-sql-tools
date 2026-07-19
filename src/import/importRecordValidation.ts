@@ -90,9 +90,12 @@ function validateParent(
     if (!source.top.has(target.field)) continue;
     validateValue(source.top.get(target.field), topInfos.get(target.field)!, precision, top, target.field, errors, location(source, operation, target.field));
   }
+  const createValidationOnly: KintoneRecord = {};
   if (operation === "INSERT") for (const info of topInfos.values()) {
     if (info.fieldType === "SUBTABLE" || info.writable === false || source.top.has(info.code)) continue;
-    validateMissing(info, precision, top, errors, location(source, operation, info.code));
+    // Form-wide create validation must not expand the write payload beyond INTO targets.
+    // kintone applies defaults for omitted fields; emitting them also creates invalid FILE values.
+    validateMissing(info, precision, createValidationOnly, errors, location(source, operation, info.code));
   }
   const subtables = new Map<string, KintoneRecord[]>();
   for (const target of tableTargets) {
