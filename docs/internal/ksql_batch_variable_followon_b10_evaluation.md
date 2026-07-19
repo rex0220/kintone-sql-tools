@@ -74,3 +74,23 @@ B10 は Phase 1a §6 でスコープ外とした 2 つの後続項目：
 - 台帳 B10 行：「NULL 前提が陳腐化」→「A=設計上クローズ／B=小型後続（SELECT 定数列）」へ更新。
 - Phase 1a §6：NULL 行の訂正注記を「値 NULL を持たない設計・`SET @e=''` 代替」に統一（現状は「構文はあるが変数代入は拒否」まで）。
 - 次段：Part B に実需が出れば R2 仕様＋codex レビュー。Part A は追加作業なし。
+
+---
+
+## 7. codex レビュー結果（R1・2026-07-19・訂正）
+
+Claude が実機で裏取り済み。**Part A の方向（NULL 変数は作らない）は妥当**だが、**Part B の一部主張に誤りがあり訂正**する。Part B の設計はバンドル仕様 [ksql_batch_variable_reference_extension_spec.md](ksql_batch_variable_reference_extension_spec.md) が正式版として引き継ぐ。
+
+### P1（訂正）
+1. **「式内 @var は不可」は誤り＝既に回避策がある**。`SELECT CONCAT(@x,'') AS c` / `SELECT @x || 'Y' AS c` は**現状で動く**（実機: `@b||'Y'`→`XY`・`CONCAT(@b,'-',@n)`→`X-5`）。`@var` が式（`ScalarValueExpr` の関数引数・`||`）内なら実行前置換が効くため。→ **B10-B の未実装部分は「裸の `SELECT @x AS c`」と「数値型を保持した定数列」に限定**。「不可能→可能」ではなく**構文簡略化＋型保持**。価値は評価初稿より小さい。
+2. **「`resolveVariableRefs` 後は既存リテラル列になる／差分は主にパーサ」は誤り**。`resolveVariableRefs`（[execute.ts:1199](../../src/execute.ts)）は `VARIABLE` 子ノードを `STRING`/`NUMBER` へ置換するだけで**親の列ノードは変換しない**。`LITERAL_COL`（[ast.ts:194](../../src/types/ast.ts)）や `ARITH_COL`（[ast.ts:292](../../src/types/ast.ts)）へは変わらず、`project()` は各列種別を別処理（[process.ts:738/757/781](../../src/engine/process.ts)）。`SCALAR_VALUE_COL` の列メタは中身が数値でも**一律 string**（[execute.ts:2453](../../src/execute.ts)・ORDER BY 用意味型も string [process.ts:1049](../../src/engine/process.ts)）。→ **「数値変数→数値列」はタダでは成立しない**。専用の変数列ノードを作って解決時に親ごと `LITERAL_COL`/`ARITH_COL` へ変換するか、`SCALAR_VALUE_COL` に数値/文字列メタ推論を全消費箇所へ足す設計が要る（R2 で確定）。
+3. **規模「B15/B18 級」は過小**。Part B は SELECT 列パース＋AS 規則・親ノード変換・列メタ（文字/数値）・ORDER BY/HAVING alias 意味型・空結果スキーマ・UNION 型統合・SELECT-based DML・FROM なし・EXPLAIN/静的参照解析・SIMPLE/FULL_SCAN 両テストを横断。→ **小〜中規模**（単一ホットスポットではない）。
+
+### P2（改善・確定できた点）
+- **AS は v1 で必須**にすべき。裸 `SELECT @x` は合成列名が実行値由来（`'abc'`/`123`）になる（[process.ts:931](../../src/engine/process.ts)）→ `SELECT @x AS c` のみ受理。
+- **B2 空 SELECT 列スキーマは AS 付き列なら既存経路で成立**（`computeOutputKeys`/`computeExplicitOutputKeys` [process.ts:703/818](../../src/engine/process.ts)）→「要確認」でなく「0 行でも列保持・`SELECT *, @x AS c` は明示列復元・temp/CTE の `MaterializedTable.columns` にも保存」と明記可。
+- **SIMPLE 維持は正しい**（`resolveSelectMode` は非集約 `SCALAR_VALUE_COL` を FULL_SCAN 条件にしない [selectToKintone.ts:67](../../src/converter/selectToKintone.ts)・取得フィールドも増えない [同:225](../../src/converter/selectToKintone.ts)）。ただし「SIMPLE 維持」と「数値意味型維持」は別問題（上 P1-2）。
+- **Part A**: `SET @e=''` = `IS NULL` はスカラー値で裏取り済（[scalarCompare.ts:159](../../src/core/scalarCompare.ts)）。ただし**「すべての空セル＝空文字」は誤り**（複数値は `[]`）→ Part A の結論は**スカラー値に限定**して記述。NULL 伝播は「存在しない」でなく「現行言語が採用していない」（算術 `Number("")`・`CONCAT` 空連結・`COALESCE`/`NULLIF`/`ISNULL` が `""` を null 相当）と表現する。
+
+### 総合判定（codex）
+Part A「独立変数 null は作らない」は妥当（スカラー値に限定して記述）。Part B「優先低の独立後続」も妥当だが、**式内 @var の回避策があり実需は初稿より小・型/メタ配管は初稿より大**。規模は小〜中。実装着手は R1 からは不可、**AS 必須・AST 表現・数値意味型・既存式内変数との差分・テスト行列を R2 で確定してから**。
