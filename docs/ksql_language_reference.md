@@ -30,6 +30,7 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 16. [UPDATE](#16-update)
 17. [UPSERT](#17-upsert)
 18. [DELETE](#18-delete)
+18.1. [IMPORT（ファイル取込）](#181-importファイル取込v360)
 19. [サブテーブル仮想テーブル](#19-サブテーブル仮想テーブル)
 20. [REORDER](#20-reorder)
 21. [サブクエリ](#21-サブクエリ)
@@ -2114,6 +2115,132 @@ WHERE 作成日時 < '2020-01-01'
 > **CLI 拡張の制約:** `DELETE` での `APP@profile` 指定は未対応です。  
 > 例: `DELETE FROM APP100@guest WHERE ...` は  
 > `ArgumentError: @profile is not supported for DELETE yet.` で終了します。
+
+---
+
+## 18.1 IMPORT（ファイル取込・v3.6.0）
+
+CSV / JSON ファイルを、**射影・検証・不良行隔離・cli-kintone 互換**を備えて kintone アプリへ一括登録／更新する自己完結ステートメントです。既定では無効（capability gate off）で、**面がソースを名前で供給したときだけ有効**になります。SQL 本文にファイルパスは書きません（インジェクション防止・1 ソース最大 10 MiB）。
+
+### 構文
+
+```
+IMPORT [UPDATE] INTO APP<n> ( <取込先> )
+  FROM CSV|JSON <ソース名>
+  [ENCODING UTF8|SJIS]                     -- CSV のみ（既定 UTF8）
+  [NO HEADER [COLUMNS (col, ...)]]         -- CSV のみ
+  [SELECT <式>, ...]                        -- CSV のみ（位置指定の代わりに射影）
+  [BY NAME [IGNORE UNKNOWN COLUMNS]]        -- CSV のみ（ヘッダ＝フィールドコード）
+  [MATCH RECORD NUMBER SOURCE <ヘッダ>]      -- IMPORT UPDATE 必須
+  [ON DUPLICATE (キー, ...)]                 -- UPSERT
+  [REPLACE SUBTABLES (サブテーブル, ...)]     -- CSV サブテーブルのみ
+  [CHECK WHEN ... THEN ...]                 -- §17.3
+  [VALIDATE ONLY [INTO #err] | ON ERROR SKIP INTO #err [REJECT LIMIT n]]   -- §17.1 / §17.2
+```
+
+`<取込先>` は `フィールドコード`、またはサブテーブル `サブテーブルコード(子1, 子2) [ROW ID SOURCE <ヘッダ>]`（`ROW ID SOURCE` は子列リストの閉じ括弧の**後**）。
+
+### ソースの供給（面ごと）
+
+| 面 | 供給方法 |
+|---|---|
+| CLI | `--import-csv <name>=<path>` / `--import-json <name>=<path>`（反復可・指定で gate ON） |
+| MCP | 引数 `importSources: [{ name, text \| base64, encoding? }]`（inline・パス不可・指定で gate ON） |
+| プラグイン | ヘッダーの「ファイルを選択」（ソース名＝拡張子を除去し、識別子に使えない文字を `_` に正規化。`sales.csv` → `sales`、`sales 2026.csv` → `sales_2026`） |
+
+### CSV の取込
+
+列の対応は 3 通り:
+
+- **位置指定**（既定）: CSV 列を `INTO (...)` の順で対応。
+- **射影 `SELECT`**: 取込前に式変換（`CAST` / 関数 / `||` / `@var`）。`FROM` / `JOIN` / `WHERE` / `GROUP BY` / `ORDER BY` / `LIMIT` / サブクエリ / 修飾参照は不可（純粋な式の並びのみ・列数は取込先と一致）。
+- **`BY NAME`**: ヘッダ行をフィールドコードとして対応（cli-kintone 互換）。
+
+```sql
+-- 位置指定 + UPSERT
+IMPORT INTO APP100 (顧客コード, 金額)
+FROM CSV sales
+ON DUPLICATE (顧客コード);
+
+-- 射影で数値化
+IMPORT INTO APP100 (顧客コード, 金額)
+FROM CSV sales
+SELECT code, CAST(amount AS NUMBER) AS 金額;
+
+-- ヘッダ無し
+IMPORT INTO APP100 (顧客コード, 金額)
+FROM CSV sales NO HEADER COLUMNS (顧客コード, 金額);
+```
+
+- CSV は RFC 4180 準拠。`ENCODING` で UTF-8 / Shift_JIS、BOM 許容。
+
+### JSON の取込
+
+```sql
+IMPORT INTO APP100 (顧客コード, 金額) FROM JSON payload;
+```
+
+- **厳密 10 進デコード**（字句を保持し、安全整数のみ数値化。精度が必要な NUMBER は JSON 側で文字列として渡す）。
+- **全階層で重複キーを拒否**。`null` / 欠落 / 存在の区別あり。
+- JSON は UTF-8 固定（`ENCODING` 不可）。射影・`BY NAME`・`NO HEADER` は CSV 専用。
+
+### cli-kintone 互換（`BY NAME` ・レコード番号 UPDATE）
+
+`cli-kintone record export` の CSV をそのまま戻せます。
+
+- `BY NAME`: ヘッダをフィールドコードとして対応。**書込み不可の既知列**（`$id`・作成者・更新日時など）は監査ログを残して無視、**未知列**は既定で拒否（`IGNORE UNKNOWN COLUMNS` で無視）。複数値フィールドはセル内改行（LF）で分割。
+- `IMPORT UPDATE … MATCH RECORD NUMBER SOURCE <ヘッダ>`: レコード番号で既存レコードを**純 UPDATE**（INSERT 0・番号は照合専用で書き換えない）。`ON DUPLICATE` とは併用不可。
+
+```sql
+IMPORT UPDATE INTO APP100 (金額)
+FROM CSV exported BY NAME
+MATCH RECORD NUMBER SOURCE `レコード番号`;
+```
+
+### サブテーブルの取込
+
+意味論はソース種別で異なります。
+
+- **JSON（ネスト配列）**: 新規 INSERT / `ON DUPLICATE` UPSERT。行 ID を持たず、親内のサブテーブルは**全置換**（再採番）。`ROW ID SOURCE` は不可。
+- **CSV `*` 形式**（cli-kintone export）: **`IMPORT UPDATE` 専用**。`BY NAME` ＋ `MATCH RECORD NUMBER SOURCE` ＋ `REPLACE SUBTABLES (...)` ＋ 各サブテーブルの `ROW ID SOURCE <ヘッダ>` が必須。行 ID を保持して更新し、ソースに無い行は削除。
+
+```sql
+-- JSON: 明細を持つレコードを新規登録
+IMPORT INTO APP100 (顧客コード, 明細(品名, 数量)) FROM JSON payload;
+
+-- CSV *: 既存レコードの明細を全置換更新
+IMPORT UPDATE INTO APP100 (明細(品名, 数量) ROW ID SOURCE `明細_行ID`)
+FROM CSV exported BY NAME
+MATCH RECORD NUMBER SOURCE `レコード番号`
+REPLACE SUBTABLES (明細);
+```
+
+- **破壊的全置換（JSON のネスト配列／CSV の `REPLACE SUBTABLES`）は、削除内訳を確認表示できる面でのみ実行**（fail-closed）。プラグインは確認ダイアログに増減サマリを表示します。JSON UPSERT も既存の子行を削除して全置換します（`REPLACE SUBTABLES` は書かない・書くと構文エラー）。
+- **MCP はサブテーブル mutation を常に fail-closed**（削除内訳を対話承認できないため）。サブテーブル書込みは CLI / プラグインで行い、MCP は `ksql_query` の `VALIDATE ONLY`／`ksql_explain` の `EXPLAIN` まで。
+
+### 検証・チェック・隔離
+
+`VALIDATE ONLY`（§17.1）・`ON ERROR SKIP INTO #err`（§17.2）・`CHECK`（§17.3）を DML と同じ意味論で利用できます。なお §17.1 は一般 DML では「サブテーブル DML 非対応」ですが、**IMPORT のサブテーブルはその例外**で `VALIDATE ONLY` を実行できます（read-only のため全面で可）。
+
+```sql
+IMPORT INTO APP100 (顧客コード, 金額) FROM CSV sales BY NAME
+CHECK WHEN 金額 < 0 THEN '金額が負です'
+ON ERROR SKIP INTO #err REJECT LIMIT 100;
+SELECT * FROM #err;
+```
+
+**MCP の振り分け**: フラット（親のみ）の書込み IMPORT は `ksql_mutate`、`VALIDATE ONLY`（read-only）は `ksql_query`、`EXPLAIN` は `ksql_explain`、サブテーブル mutation は Unsupported。
+
+### 制限
+
+- **添付ファイル（FILE）は非対応**（cli-kintone を使う）。
+- **取込行数の上限 `maxRecords` は面・経路で異なる**（超過はサイレント切り捨てせず fail-closed）:
+  - CLI = 既定 **500**（`--max-records` で拡張）。
+  - プラグイン = 初期値 **3000**（UI で変更可）。
+  - MCP = 通常の書込み mutation は `dmlMaxRows`（＋1）で解決、`ON ERROR SKIP` / `VALIDATE ONLY` は通常の runtime `maxRecords` 解決に戻る。
+  - **CSV サブテーブル置換**では、同じ `maxRecords` が取込親件数だけでなく**行 ID 所有権検査のための既存レコード全件走査**にも適用される。既定を超える既存レコードがあると、取込件数が少なくても fail-closed になる。
+- **CSV のサブテーブルは UPDATE 専用**。新規登録は JSON。
+- 標準スペース・ゲストスペースの両方で動作。
 
 ---
 
