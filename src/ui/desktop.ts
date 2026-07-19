@@ -26,6 +26,8 @@ import type {
 import { createKintoneClient } from "./kintoneClient";
 import { renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
+import { createBrowserImportSource } from "./importFileSource";
+import type { BrowserImportSource } from "./importFileSource";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -78,6 +80,7 @@ interface RecordShowEvent {
 const fieldCache = new Map<number, FieldInfo[]>();
 let appListCache: KintoneAppInfo[] | null = null;
 let appListPending: Promise<KintoneAppInfo[]> | null = null;
+let selectedImportSource: BrowserImportSource | null = null;
 
 async function fetchFields(appId: number): Promise<FieldInfo[]> {
   if (fieldCache.has(appId)) return fieldCache.get(appId)!;
@@ -563,6 +566,23 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     editor.focus();
   });
 
+  const importPicker = el("input", "ksql-import-file", { type: "file", accept: ".csv,text/csv" }) as HTMLInputElement;
+  const importEncoding = el("select", "ksql-import-encoding") as HTMLSelectElement;
+  importEncoding.append(new Option("UTF8", "utf8"), new Option("SJIS", "sjis"));
+  const importStatus = el("span", "ksql-import-status");
+  importStatus.textContent = "IMPORT CSV: 未選択（gate OFF）";
+  const refreshImportSource = (): void => {
+    const file = importPicker.files?.[0];
+    selectedImportSource = file
+      ? createBrowserImportSource(file, importEncoding.value as "utf8" | "sjis")
+      : null;
+    importStatus.textContent = selectedImportSource
+      ? `IMPORT CSV: ${selectedImportSource.name} (${selectedImportSource.encoding.toUpperCase()})`
+      : "IMPORT CSV: 未選択（gate OFF）";
+  };
+  importPicker.addEventListener("change", refreshImportSource);
+  importEncoding.addEventListener("change", refreshImportSource);
+
   // 履歴ボタン
   const histBtn = el("button", "ksql-hist-btn", { id: "ksql-hist-btn" });
   histBtn.textContent = "履歴 ▼";
@@ -591,7 +611,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   };
   refreshOptSummary();
 
-  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary);
+  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary, importPicker, importEncoding, importStatus);
 
   // 履歴ドロップダウン（初期非表示）
   const histDropdown = el("div", "ksql-hist-dropdown", { id: "ksql-hist-dropdown" });
@@ -1877,7 +1897,7 @@ function closeHistoryDropdown(): void {
 /** 複文（バッチ）入力かどうか（パース不能な入力は false = 従来経路でエラー表示） */
 function isMultiStatementSql(sql: string): boolean {
   try {
-    return parseSqlStatements(sql).length > 1;
+    return parseSqlStatements(sql, { import: selectedImportSource !== null }).length > 1;
   } catch {
     return false;
   }
@@ -1890,7 +1910,7 @@ async function batchPlansToSelectResult(
   maxRecords: number
 ): Promise<SelectResult> {
   const plans = await buildBatchExplainPlans(
-    sql, client, undefined, "batch-explain", maxRecords, latestPanelCursorMaxActive
+    sql, client, undefined, "batch-explain", maxRecords, latestPanelCursorMaxActive, selectedImportSource !== null
   );
   const rows: Array<{ plan: string }> = [];
   plans.statements.forEach((p) => {
@@ -1971,7 +1991,7 @@ async function runBatchSql(
   options: { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number },
   explainOnly: boolean
 ): Promise<BatchRunOutcome> {
-  const statements = parseSqlStatements(sql);
+  const statements = parseSqlStatements(sql, { import: selectedImportSource !== null });
   const analysis = analyzeBatch(statements);
 
   // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
@@ -2019,6 +2039,8 @@ async function runBatchSql(
     tempTableMaxRows: options.tempTableMaxRows,
     fetchParallel: FETCH_PARALLEL_DEFAULT,
     confirm: analysis.containsDml ? batchConfirmDialog : undefined,
+    enableImport: selectedImportSource !== null,
+    importSource: selectedImportSource?.resolver,
   });
 
   const dmlSummary = buildDmlSummary(batch);
@@ -2140,7 +2162,7 @@ async function runSql(
     let isDmlSql = false;
     let surfaceForcesOnLimitError = false;
     try {
-      const stmt = parseSqlStatement(sql);
+      const stmt = parseSqlStatement(sql, { import: selectedImportSource !== null });
       isDmlSql = writesKintone(stmt);
       surfaceForcesOnLimitError = isDmlSql || (
         "validateOnly" in stmt && stmt.validateOnly === true
@@ -2171,6 +2193,8 @@ async function runSql(
       onLimitReached: surfaceForcesOnLimitError ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
       cursorMaxActive: latestPanelCursorMaxActive,
+      enableImport: selectedImportSource !== null,
+      importSource: selectedImportSource?.resolver,
     });
 
     lastResult = result;
