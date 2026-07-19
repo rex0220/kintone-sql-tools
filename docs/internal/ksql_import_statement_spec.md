@@ -1,7 +1,7 @@
 # B39 別案 — IMPORT 文（CSV → アプリ書込みの自己完結ステートメント）
 
 - 作成日: 2026-07-18
-- ステータス: **設計 R2・codex レビュー済（要 R3・実装着手不可）（2026-07-19）**。核心方針（IMPORT 文・フラット CSV・**サブテーブル IMPORT は v1 非対応＝codex 裏取り済み**・loader capability・SemVer minor）は妥当。ただし §10 に事実誤認/未確定（§11・P1×9）＝源経路は `runSelectLike` でなく3経路（要 `materializeDmlSource → MaterializedTable{columns,rows,columnMeta}`）・CSV 射影の出力列名/CHECK スコープ未確定・ヘッダ検証は実行時 preflight・源構文の `'path'` vs 名前付き `<source>` 矛盾・`update-key` ≠ `ON DUPLICATE`（複合キー/レコード番号）。**R3 必須6点は §11**。工数 概算 11〜18 人日。**テーブル(サブテーブル)可否の回答＝§10.4**: cli-kintone は `*` 複数行形式で可・kSQL は親 INSERT/UPSERT がサブテーブル子を書けず v1 非対応（v2 は cli-kintone 形式基準）。
+- ステータス: **設計 R3・codex レビュー待ち・フラット CSV 実装着手可（2026-07-19）**。R2 review の P1×9 を §12 で確定＝①共通 `materializeDmlSource → MaterializedTable{rows,columns,columnMeta}` を新設し INSERT_SELECT/UPSERT_SELECT/候補生成の3経路を接続②CSV 射影は式 `AS alias` 必須・単純列は元名継承・CHECK は射影後の一意列名参照③検証は parse（COLUMNS/JOIN/サブクエリ静的）と実行時 preflight（ヘッダ由来）に分割・順序=source存在→B34→CSV→書込み④名前付き `<source>` に統一（`'path'` 削除）・loader は遅延関数 `importSource(name)→{bytes,encoding?}`⑤ON DUPLICATE は複合キー・レコード番号キー/添付は v2。**サブテーブル IMPORT は v1 非対応（§10.4・codex 裏取り済み）**。工数 11〜18 人日・SemVer minor。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B39
 - 対比: [bind 案 R2](ksql_csv_bind_import_spec.md)・[評価](ksql_import_export_evaluation.md)
@@ -173,3 +173,45 @@ Claude が P1-1 を実ファイルで裏取り（`runSelectLike`=CREATE_TEMP_TAB
 
 ### 工数・総合
 概算 **11〜18 人日**（CLI のみ下側・全面 picker UI まで上側）。SemVer minor 妥当。**R3 の必須6点**＝①共通 `materializeDmlSource → MaterializedTable` 入口②通常 INSERT/UPSERT＋B12/B37 候補生成の全経路接続③CSV 射影の出力列名/alias/CHECK スコープ④ヘッダ依存検証は実行時 preflight⑤名前付き source 構文と loader 契約の一本化⑥cli-kintone 差分（レコード番号キー・複合キー）。サブテーブル v1 非対応・loader・単文/バッチ方針・minor は確定済み。
+
+---
+
+## 12. R3 確定事項（2026-07-19・Claude・コード裏取り・実装着手可）
+
+§11 の必須6点を確定する。フラット CSV IMPORT のみ（サブテーブル・添付・レコード番号キーは v2）。
+
+### 12.1 共通源入口 `materializeDmlSource → MaterializedTable`（R3-1・R3-2）
+- 新設 `materializeDmlSource(source, client, options, cacheContext, tempTables): Promise<MaterializedTable>`。戻り型は**既存 `MaterializedTable {rows: ProcessRow[]; columns: string[]; columnMeta?}`**（[execute.ts:253](../../src/execute.ts#L253)）。
+- `source` = `{kind:"SELECT", query} | {kind:"CSV", sourceName, encoding, hasHeader, columns?, projection?}`。
+  - SELECT: 現行の `executeQueryWithCte`/`executeSelect` を呼び SelectResult → `{rows, columns, columnMeta(WeakMap)}`（挙動不変）。
+  - CSV: loader → decode → RFC4180 パース →（射影評価）→ `ProcessRow[]`＋columns＋columnMeta（全 string・§12.3）。
+- **3経路を共通入口へ接続**（源だけ差し替えではなく）: `executeInsertSelect`（[execute.ts:4740](../../src/execute.ts#L4740)）・`executeUpsertSelect`（[5578](../../src/execute.ts#L5578)）・`materializeValidationCandidates`（[4189](../../src/execute.ts#L4189)）の源取得を `materializeDmlSource` 呼出しへ置換。以降（列数チェック [4746]・位置対応 `columns[i]→fields[i]` [4768 付近]・CHECK uniqueness/`assertInsertCheckRefs` [4281]・B34・B12 候補生成）は**現行のまま**（`{columns,rows,columnMeta}` 契約が既存と一致）。IMPORT は CSV source を渡すだけ。
+
+### 12.2 CSV 射影の出力列名・CHECK スコープ（R3-3）
+- **`SELECT <式>` は式に `AS alias` 必須**。**単純列参照は元 CSV 列名を継承**（`SELECT 顧客コード, 金額` は AS 省略可）。式（`CAST`/`CONCAT`/`||`）は合成名を作らず `AS alias` 必須。
+- 出力列名は**常に一意**（重複エラー）。射影省略（位置対応）時は CSV 列名がそのまま出力列名。
+- **CHECK は射影後の一意な出力列名を参照**（B37 と同一・`assertInsertCheckRefs` [execute.ts:4281](../../src/execute.ts#L4281) が既存どおり検証）。`SELECT 顧客コード, CAST(金額 AS NUMBER) AS 金額` なら CHECK は射影後 `金額` を参照（射影前 CSV 行は参照しない）。
+- 射影出力列数 = `INTO` 列数（現行チェック [4746] を流用）。
+
+### 12.3 CSV 列型・射影評価（R3-1 補足）
+- CSV 値は全て string。`materializeDmlSource(CSV)` の `columnMeta` は全列 `syntheticColumnMeta("string")`。数値/日付は射影の `CAST`/関数で明示、または書込み先型に委ねて既存 DML 検証（B34/B29）が捕捉。
+- 射影は `evalScalarValueExpr(expr, row)`（[evalFunc.ts:38](../../src/engine/evalFunc.ts#L38)）＝ProcessRow キー解決。CSV 行を ProcessRow 化して評価。**列参照は射影 AST（CASE 内条件まで再帰）で全 FieldRef を収集**して CSV 列集合へ事前検証（トップレベル走査だけでは CASE 条件を取りこぼす）。number 出力は `String()` 正規化。
+
+### 12.4 検証の時点分割・順序（R3-4）
+- **parse/analyze 時**（AST のみ・[batch.ts:179](../../src/core/batch.ts#L179)）: JOIN/サブクエリ/修飾参照の静的拒否・`COLUMNS`/`NO HEADER` の `c1..cn` への射影参照検証・射影出力列数チェック。
+- **実行時 preflight**（loader ヘッダ読取後・kintone 書込み前）: CSV ヘッダ由来列集合への射影/CHECK 参照検証・未知 CSV 列拒否・0 行判定（§3.5）。
+- **順序（P1-7）**: ①source 存在の同期 preflight（loader 未供給は `UnsupportedSourceError`・kintone API 前）→②B34 書込み先検証（`getFields`）→③CSV ロード/decode/パース/射影→④DML 検証/CHECK/書込み。
+
+### 12.5 名前付き source 構文と loader 契約の一本化（R3-5・§2/§5/§6 の矛盾解消）
+- **構文は名前付き `<source>` に統一**: `IMPORT INTO app (fields) FROM CSV <source> [ENCODING …] [NO HEADER] [COLUMNS(…)] [SELECT …] [ON DUPLICATE …] [CHECK …] [処分]`。**§2/§5 の `'<path>'` リテラルは削除**（面依存を SQL に埋めない）。
+- **loader = 遅延関数**（Map 直接公開でなく・codex P2-2）: `ExecuteOptions.importSource?: (name: string) => Promise<{ bytes: Uint8Array; encoding?: "utf8" | "sjis" }>`。source 型は公開 export・**文単位 cache**（同 source の多重ロード回避）・**最大 byte 上限**を仕様化。CLI=`--import-csv <name>=<path>`（fs）・プラグイン=picker・MCP=inline。Node `fs` は CLI/node に閉じ込め共有コアは bytes のみ（build.mjs=browser / build-cli.mjs=node 境界維持）。
+- **優先順位**: `ENCODING`/`NO HEADER`/`COLUMNS` は **SQL 明示が優先**、無ければ loader 供給値（loader は encoding を返せる）。
+
+### 12.6 cli-kintone との差分（R3-6）
+- `ON DUPLICATE (keys)` は **kSQL の複合キー**（`keyFields[]`・[ast.ts:655](../../src/types/ast.ts#L655)）。cli-kintone `--update-key` は単一キー。
+- **レコード番号キーは v1 非対応**（kSQL は RECORD_NUMBER を非書込みで拒否 [execute.ts:3940](../../src/execute.ts#L3940)・キーは `fields` に含める必要）。cli-kintone の「レコード番号 update-key UPSERT」は再現しない（v2 候補）。
+- UPSERT の重複: cli-kintone は CSV 順序処理だが kSQL は**源内キー重複を B12 候補生成でエラー**（[execute.ts:4270](../../src/execute.ts#L4270)）。IMPORT も同挙動。
+- ヘッダ名対応: cli-kintone は CSV ヘッダ名でフィールド対応、IMPORT は **INTO への位置対応**（射影で明示可）。添付は LF 区切り複数（v1 非対応）。
+
+### 12.7 実装着手可・工数・SemVer
+- R3 の6点を確定＝**フラット CSV IMPORT は実装着手可**。主コスト＝共通 `materializeDmlSource` 抽出＋3経路接続・CSV decoder/parser・loader capability＋面配線・パーサ・EXPLAIN。工数 **11〜18 人日**（CLI のみ下側・全面 picker UI まで上側）。**SemVer minor**。サブテーブル・添付・レコード番号キー・CSV↔アプリ JOIN は v2。
