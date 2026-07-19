@@ -21,4 +21,6 @@ export interface ImportMaterializedTable {
   rows: ProcessRow[];
   columns: string[];
   columnMeta?: ReadonlyMap<string, ImportColumnMeta>;
+  /** JSON-only: target field names explicitly present in each source record. */
+  importPresence?: readonly ReadonlySet<string>[];
 }

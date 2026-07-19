@@ -83,6 +83,7 @@ Options:
   --dry-run                  Parse and show execution plan only
   --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
   --import-csv <name=path>   Supply named CSV and enable experimental IMPORT (repeatable)
+  --import-json <name=path>  Supply named JSON and enable experimental IMPORT (repeatable)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
@@ -239,6 +240,7 @@ interface ParsedArgs {
   dateFormat: DisplayOptions["dateFormat"] | null;
   attachmentFormat: DisplayOptions["attachmentFormat"] | null;
   importCsv: Record<string, string>;
+  importJson: Record<string, string>;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -294,6 +296,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     dateFormat: null,
     attachmentFormat: null,
     importCsv: Object.create(null) as Record<string, string>,
+    importJson: Object.create(null) as Record<string, string>,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -334,8 +337,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const eq = raw.indexOf("=");
       if (eq <= 0 || eq === raw.length - 1) throw new Error("ArgumentError: --import-csv must use name=path.");
       const name = raw.slice(0, eq);
-      if (Object.prototype.hasOwnProperty.call(out.importCsv, name)) throw new Error(`ArgumentError: import source \"${name}\" is specified more than once.`);
+      if (Object.prototype.hasOwnProperty.call(out.importCsv, name) || Object.prototype.hasOwnProperty.call(out.importJson, name)) throw new Error(`ArgumentError: import source \"${name}\" is specified more than once.`);
       out.importCsv[name] = raw.slice(eq + 1);
+      i++;
+      continue;
+    }
+    if (a === "--import-json") {
+      const raw = v ?? "";
+      const eq = raw.indexOf("=");
+      if (eq <= 0 || eq === raw.length - 1) throw new Error("ArgumentError: --import-json must use name=path.");
+      const name = raw.slice(0, eq);
+      if (Object.prototype.hasOwnProperty.call(out.importJson, name) || Object.prototype.hasOwnProperty.call(out.importCsv, name)) {
+        throw new Error(`ArgumentError: import source \"${name}\" is specified more than once.`);
+      }
+      out.importJson[name] = raw.slice(eq + 1);
       i++;
       continue;
     }
@@ -1614,7 +1629,7 @@ async function run(): Promise<number> {
     }
 
     try {
-      const importEnabled = Object.keys(args.importCsv).length > 0;
+      const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
       const statements = parseSqlStatements(sql, { import: importEnabled });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
@@ -2032,7 +2047,7 @@ async function run(): Promise<number> {
   if (isBatchSql && args.dryRun) {
     try {
       const plans = await buildBatchExplainPlans(
-        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive, Object.keys(args.importCsv).length > 0
+        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive, Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2076,10 +2091,10 @@ async function run(): Promise<number> {
       }
     }
 
-    const importEnabled = Object.keys(args.importCsv).length > 0;
+    const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     const importSource = importEnabled
       ? (name: string) => {
-          const sourcePath = args.importCsv[name];
+          const sourcePath = args.importCsv[name] ?? args.importJson[name];
           return sourcePath === undefined ? undefined : { load: async () => ({ bytes: new Uint8Array(readFileSync(sourcePath)) }) };
         }
       : undefined;

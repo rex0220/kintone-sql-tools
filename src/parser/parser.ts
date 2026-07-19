@@ -488,29 +488,35 @@ export class Parser {
     const fields = this.parseIdentList();
     this.expect(TokenKind.RPAREN);
     this.expect(TokenKind.FROM);
-    if (!this.isSoftKeyword("CSV")) throw new ParseError("IMPORT FROM requires CSV in Phase 1.", this.peek());
+    if (!this.isSoftKeyword("CSV") && !this.isSoftKeyword("JSON")) throw new ParseError("IMPORT FROM requires CSV or JSON.", this.peek());
+    const sourceKind = this.peek().value.toUpperCase() as "CSV" | "JSON";
     this.advance();
     const sourceName = this.parseIdentifier();
     let encoding: "utf8" | "sjis" | undefined;
     let hasHeader = true;
     let columns: string[] | undefined;
     if (this.isSoftKeyword("ENCODING")) {
+      if (sourceKind === "JSON") throw new ParseError("JSON source is UTF-8 only; ENCODING is not allowed.", this.peek());
       this.advance();
       const value = this.parseIdentifier().toUpperCase();
       if (value !== "UTF8" && value !== "SJIS") throw new ParseError("ENCODING must be UTF8 or SJIS.", this.prev());
       encoding = value === "UTF8" ? "utf8" : "sjis";
     }
     if (this.peek().kind === TokenKind.NOT && this.peekAt(1).kind === TokenKind.IDENT && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      if (sourceKind === "JSON") throw new ParseError("NO HEADER is CSV-only.", this.peek());
       this.advance(); this.advance(); hasHeader = false;
     } else if (this.isSoftKeyword("NO") && this.peekAt(1).kind === TokenKind.IDENT && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      if (sourceKind === "JSON") throw new ParseError("NO HEADER is CSV-only.", this.peek());
       this.advance(); this.advance(); hasHeader = false;
     }
     if (this.isSoftKeyword("COLUMNS")) {
+      if (sourceKind === "JSON") throw new ParseError("COLUMNS is CSV-only.", this.peek());
       if (hasHeader) throw new ParseError("COLUMNS requires NO HEADER.", this.peek());
       this.advance(); this.expect(TokenKind.LPAREN); columns = this.parseIdentList(); this.expect(TokenKind.RPAREN);
     }
     let projection: SelectStatement | undefined;
     if (this.peek().kind === TokenKind.SELECT) {
+      if (sourceKind === "JSON") throw new ParseError("SELECT projection is CSV-only.", this.peek());
       projection = this.parseSelect();
       if (projection.from.cteName !== NO_FROM_CTE_NAME || projection.joins.length > 0) {
         throw new ParseError("IMPORT projection cannot use FROM or JOIN.", this.prev());
@@ -529,7 +535,9 @@ export class Parser {
     const control = this.parseDmlControlSuffix();
     return {
       type: "IMPORT", appId, fields,
-      source: { kind: "CSV", sourceName, encoding, hasHeader, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
+      source: sourceKind === "JSON"
+        ? { kind: "JSON", sourceName }
+        : { kind: "CSV", sourceName, encoding, hasHeader, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
       ...(keyFields ? { keyFields } : {}), ...checkGroups, ...control,
     };
   }

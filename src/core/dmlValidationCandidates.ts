@@ -47,6 +47,7 @@ export function validateDmlCandidates(
     candidate.record ??= {};
     const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
     for (const code of targetFields) {
+      if (!candidate.payload.has(code)) continue;
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!, numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
       else candidate.record[code] = { value: result.value };

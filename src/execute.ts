@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
@@ -109,7 +109,7 @@ import {
 } from "./core/optimization/whereCapability";
 import type { ImportSourceHandle, ImportSourceResolver } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
-import { materializeCsvDmlSource } from "./import/materializeDmlSource";
+import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
 import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
 
 // ============================================================
@@ -258,6 +258,7 @@ export interface MaterializedTable {
   readonly rows: ProcessRow[];
   readonly columns: string[];
   readonly columnMeta?: MaterializedColumnMetaMap;
+  readonly importPresence?: readonly ReadonlySet<string>[];
 }
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
@@ -265,7 +266,7 @@ const materializedMetaBySelectResult = new WeakMap<SelectResult, MaterializedCol
 const materializedMetaByValidationResult = new WeakMap<DmlValidationResult, MaterializedColumnMetaMap>();
 
 interface ImportExecutionSource {
-  source: CsvDmlSource;
+  source: CsvDmlSource | JsonDmlSource;
   handle: ImportSourceHandle;
   cache: Map<ImportSourceHandle, Promise<Awaited<ReturnType<ImportSourceHandle["load"]>>>>;
 }
@@ -4225,6 +4226,7 @@ async function materializeValidationCandidates(
 
   let rows: unknown[][];
   let sourceRows: ProcessRow[] | undefined;
+  let sourcePresence: readonly ReadonlySet<string>[] | undefined;
   let evaluationTypes: ReadonlyMap<string, string> | undefined;
   if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
     assertInsertCheckRefs(stmt, stmt.fields);
@@ -4236,7 +4238,7 @@ async function materializeValidationCandidates(
         : value
     ));
   } else {
-    const selectResult = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables);
+    const selectResult = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables, [...infoByCode.values()]);
     const hasChecks = (stmt.checkGroups?.length ?? 0) > 0;
     if (selectResult.columns.length < stmt.fields.length || (!hasChecks && selectResult.columns.length !== stmt.fields.length)) {
       throw new Error(`SELECT の列数（${selectResult.columns.length}）と DML のフィールド数（${stmt.fields.length}）が一致しません`);
@@ -4246,6 +4248,7 @@ async function materializeValidationCandidates(
     }
     assertInsertCheckRefs(stmt, selectResult.columns);
     sourceRows = selectResult.rows;
+    sourcePresence = selectResult.importPresence;
     const meta = selectResult.columnMeta;
     evaluationTypes = new Map(selectResult.columns.map((column) => {
       const columnMeta = meta?.get(column);
@@ -4261,7 +4264,9 @@ async function materializeValidationCandidates(
     rowNumber: index + 1,
     operation,
     mode: "create",
-    payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
+    payload: new Map(stmt.fields.flatMap((field, i) =>
+      sourcePresence && !sourcePresence[index]?.has(field) ? [] : [[field, values[i]]]
+    )),
     preErrors: [],
     record: {},
     evaluationRow: sourceRows?.[index] ?? Object.fromEntries(
@@ -4807,7 +4812,8 @@ async function materializeDmlSource(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  targetFields?: readonly KintoneFieldInfo[]
 ): Promise<MaterializedTable> {
   const imported = importSourceByDmlStatement.get(stmt);
   if (!imported) {
@@ -4818,7 +4824,14 @@ async function materializeDmlSource(
   }
   const payload = await loadImportSource(imported.handle, imported.cache);
   const rowLimit = options.maxRecords ?? 10_000;
-  const raw = materializeCsvDmlSource(imported.source, payload, rowLimit);
+  // JSON は INTO 名対応。呼び出し元が渡す field infos はアプリ全体を含み得るため、
+  // ここで stmt.fields（INTO 順）へ絞って materializer の列を確定する。
+  const targetByCode = new Map((targetFields ?? []).map((info) => [info.code, info]));
+  const jsonTargets = stmt.fields.map((code) => ({ code, fieldType: targetByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }));
+  const raw = imported.source.kind === "JSON"
+    ? materializeJsonDmlSource(imported.source, payload, jsonTargets, rowLimit)
+    : materializeCsvDmlSource(imported.source, payload, rowLimit);
+  if (imported.source.kind === "JSON") return raw;
   if (!imported.source.projection) return raw;
   const projection = bindImportProjection(imported.source.projection);
   const tables = new Map(tempTables ?? []);
@@ -4844,7 +4857,7 @@ async function executeInsertSelect(
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
-  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache);
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
   const { rows, columns } = sourceTable;
 
   // 3. 列数チェック
@@ -4867,15 +4880,16 @@ async function executeInsertSelect(
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   // 6. ProcessRow[] → KintoneRecord[]（列の位置で対応付け）
-  const allRecords = rows.map((row) => {
+  const allRecords = rows.map((row, rowIndex) => {
     const record: KintoneRecord = {};
     stmt.fields.forEach((field, i) => {
+      if (sourceTable.importPresence && !sourceTable.importPresence[rowIndex]?.has(field)) return;
       const raw = row[columns[i]] ?? "";
       record[field] = { value: convertProcessRowValue(raw, fieldTypes.get(field)) };
     });
     return record;
   });
-  assertValidDmlRecords(allRecords, stmt.fields, fieldInfos, numberPrecision);
+  allRecords.forEach((record) => assertValidDmlRecords([record], stmt.fields.filter((field) => field in record), fieldInfos, numberPrecision));
 
   // 7. 100 件ごとに POST
   const createdIds: string[][] = [];
@@ -5110,7 +5124,6 @@ async function executeUpsert(
   // 1. 各行のキー値を評価し、既存レコードを一括検索（in (...) チャンク）
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
-
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   const rowKeyValues: string[][] = stmt.values.map((row) =>
@@ -5694,7 +5707,7 @@ async function executeUpsertSelect(
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
-  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache);
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
   const { rows, columns } = sourceTable;
 
   if (columns.length !== stmt.fields.length) {
@@ -5715,19 +5728,21 @@ async function executeUpsertSelect(
 
   const toInsert: KintoneRecord[] = [];
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   // レコードを組み立て（SELECT 列 → UPSERT フィールドに位置対応でマップ）
-  const records: KintoneRecord[] = rows.map((row) => {
+  const records: KintoneRecord[] = rows.map((row, rowIndex) => {
     const record: KintoneRecord = {};
     stmt.fields.forEach((field, i) => {
-      record[field] = { value: row[columns[i]] ?? "" };
+      if (sourceTable.importPresence && !sourceTable.importPresence[rowIndex]?.has(field)) return;
+      const raw = row[columns[i]] ?? "";
+      record[field] = { value: sourceTable.importPresence ? convertProcessRowValue(raw, fieldTypes.get(field)) : raw };
     });
     return record;
   });
-  assertValidDmlRecords(records, stmt.fields, fieldInfos, numberPrecision);
+  records.forEach((record) => assertValidDmlRecords([record], stmt.fields.filter((field) => field in record), fieldInfos, numberPrecision));
 
   // キー値で既存レコードを一括検索（in (...) チャンク）
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const rowKeyValues: string[][] = records.map((record) =>
     stmt.keyFields.map((key) => String(record[key]?.value ?? ""))
   );
@@ -6427,10 +6442,17 @@ function buildExplainPlan(
     return [
       ...(label ? [label] : []),
       `IMPORT ${mode} INTO APP${query.appId}`,
-      `  source:        CSV ${query.source.sourceName}`,
-      `  encoding:      ${query.source.encoding ?? "UTF8 (or loader metadata)"}`,
-      `  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`,
-      `  projection:    ${query.source.projection ? "SELECT expressions" : "POSITION"}`,
+      `  source:        ${query.source.kind} ${query.source.sourceName}`,
+      `  sourceFormat:  ${query.source.kind}`,
+      `  encoding:      ${query.source.kind === "JSON" ? "UTF8 only" : query.source.encoding ?? "UTF8 (or loader metadata)"}`,
+      `  mapping:       ${query.source.kind === "JSON" ? "BY NAME (INTO order)" : query.source.projection ? "SELECT expressions" : "POSITION"}`,
+      ...(query.source.kind === "JSON" ? [
+        `  duplicateKeyPolicy: reject`,
+        `  numberLexemePolicy: preserve; JSON number accepts safe integer only`,
+        `  precisionTargetsRequireString: true`,
+        `  unknownKeyPolicy: reject`,
+        `  presenceAware: true`,
+      ] : [`  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`]),
       `  sourceLimit:   10485760 bytes / ${query.fields.length} target columns`,
       `  key:           ${query.keyFields?.join(", ") ?? "none"}`,
       `  checks:        ${query.checkGroups?.length ?? 0}`,

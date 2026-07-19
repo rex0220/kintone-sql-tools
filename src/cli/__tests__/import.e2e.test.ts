@@ -46,3 +46,25 @@ test("CLI --import-csv <name>=<path> supplies a named source to IMPORT", async (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("CLI --import-json <name>=<path> supplies a named source to IMPORT", async () => {
+  postRecords.mockClear();
+  const dir = mkdtempSync(join(tmpdir(), "ksql-import-json-e2e-"));
+  const jsonPath = join(dir, "people.json");
+  writeFileSync(jsonPath, '[{"name":"Alice","code":"A"}]', "utf8");
+  const stdout = jest.spyOn(process.stdout, "write").mockImplementation(() => true);
+  try {
+    const code = await runWithArgv([
+      "--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy", "--app", "100",
+      "--allow-dml", "--yes", "--format", "json", "--import-json", `people=${jsonPath}`,
+      "-e", "IMPORT INTO APP100 (code,name) FROM JSON people",
+    ]);
+    expect(code).toBe(0);
+    expect(postRecords).toHaveBeenCalledWith(expect.objectContaining({
+      records: [{ code: { value: "A" }, name: { value: "Alice" } }],
+    }));
+  } finally {
+    stdout.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
