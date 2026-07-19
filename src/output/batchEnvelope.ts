@@ -28,6 +28,7 @@ export interface BatchEnvelopeResultSet {
   invalidRows?: number;
   errorCount?: number;
   errTable?: string;
+  importDetail?: DmlValidationResult["importDetail"];
 }
 
 export interface BatchEnvelope {
@@ -138,6 +139,7 @@ export function buildBatchEnvelope(
         invalidRows: s.result.invalidRows,
         errorCount: s.result.errorCount,
         ...(s.result.errTable ? { errTable: s.result.errTable } : {}),
+        ...(s.result.importDetail ? { importDetail: s.result.importDetail } : {}),
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない

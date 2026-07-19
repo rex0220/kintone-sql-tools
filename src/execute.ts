@@ -110,6 +110,9 @@ import {
 import type { ImportSourceHandle, ImportSourceResolver } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
+import { materializeCliKintoneCsvImportRecords, materializeJsonImportRecords } from "./import/importRecordsMaterializer";
+import { prepareImportRecords } from "./import/importRecordValidation";
+import { IMPORT_VALIDATION_META_COLUMNS, materializeImportValidationErrors } from "./import/importErrors";
 import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
 import { preflightImportRecordNumbers } from "./import/recordNumberUpdate";
 
@@ -184,6 +187,8 @@ export interface KintoneFieldInfo {
   inSubtable?: boolean;
   /** false は計算・システム・ルックアップコピー先等の書込不可フィールド。 */
   writable?: boolean;
+  /** Phase 5: direct owning table. Undefined for top-level fields. */
+  subtableCode?: string;
 }
 
 // ============================================================
@@ -340,6 +345,15 @@ export interface DmlValidationResult {
   errors: ProcessRow[];
   errTable?: string;
   metrics?: ExecuteMetrics;
+  /** IMPORT Phase 5 read-only preflight detail. */
+  importDetail?: ImportValidationDetail;
+}
+
+export interface ImportValidationDetail {
+  preflight: "ACTUAL_DATA";
+  parents: { total: number; valid: number; invalid: number; mutationCandidates: number };
+  tables: Record<string, { parentsPresent: number; childRows: number; validChildRows: number; invalidChildRows: number }>;
+  writesKintone: false;
 }
 
 // ============================================================
@@ -4786,7 +4800,42 @@ async function executeImport(
   if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
   const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
   if (stmt.targets?.some((target) => target.kind === "SUBTABLE")) {
-    throw new Error("UnsupportedError: IMPORT subtable mutation requires the dedicated Phase 5 preflight/confirm path.");
+    if (!stmt.validateOnly) {
+      throw new Error("UnsupportedError: IMPORT subtable mutation is not available until Phase 5C/5D; use VALIDATE ONLY.");
+    }
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    const targets = stmt.targets;
+    const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+    const targetCodes = targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children);
+    const numberPrecision = fieldInfos.some((info) => targetCodes.includes(info.code) && info.fieldType === "NUMBER")
+      ? await getNumberPrecisionCached(stmt.appId, client, cacheContext)
+      : undefined;
+    const payload = await loadImportSource(handle, new Map());
+    const materialized = stmt.source.kind === "JSON"
+      ? materializeJsonImportRecords(stmt.source, payload, targets, options.maxRecords ?? 10_000)
+      : materializeCliKintoneCsvImportRecords(stmt.source, payload, targets, stmt.replaceSubtables ?? [], options.maxRecords ?? 10_000);
+    const operation = stmt.keyFields ? "UPSERT" : "INSERT";
+    const prepared = prepareImportRecords(materialized, targets, fieldInfos, numberPrecision, operation);
+    const payloadFields = [...new Set(targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children))];
+    const errors = materializeImportValidationErrors(prepared.errors, payloadFields);
+    const columns = [...payloadFields, ...IMPORT_VALIDATION_META_COLUMNS];
+    const invalidRows = prepared.invalidParentRows.size;
+    const detail: ImportValidationDetail = {
+      preflight: "ACTUAL_DATA",
+      parents: { total: prepared.parents.length, valid: prepared.parents.length - invalidRows, invalid: invalidRows, mutationCandidates: prepared.parents.filter((parent) => parent.valid).length },
+      tables: Object.fromEntries(prepared.tableCounts), writesKintone: false,
+    };
+    const result: DmlValidationResult = {
+      type: "VALIDATION", operation, validatedRows: prepared.parents.length,
+      validRows: prepared.parents.length - invalidRows, invalidRows, errorCount: errors.length,
+      columns, errors, importDetail: detail,
+      ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    };
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(
+      tempTables, stmt.validationErrorTable, columns, errors,
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+    );
+    return result;
   }
   if (stmt.writeMode === "UPDATE_RECORD_NUMBER") {
     return executeImportRecordNumberUpdate(
@@ -6622,6 +6671,7 @@ function buildExplainPlan(
       ];
     }
     const mode = query.keyFields ? "UPSERT" : "INSERT";
+    const hasSubtables = query.targets?.some((target) => target.kind === "SUBTABLE") === true;
     return [
       ...(label ? [label] : []),
       `IMPORT ${mode} INTO APP${query.appId}`,
@@ -6652,7 +6702,9 @@ function buildExplainPlan(
       `  checks:        ${query.checkGroups?.length ?? 0}`,
       `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
       `  gate:          enabled for this parse`,
-      `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
+      `  preflight:     ${query.validateOnly && hasSubtables ? "requires actual source load at execution; this EXPLAIN is static" : "requires load"}`,
+      ...(hasSubtables ? [`  Phase5B:       read-only validation only; normal mutation unsupported`] : []),
+      `  writesKintone: ${query.validateOnly || hasSubtables ? "false" : "true"}`,
       `  duplicateKey:  preflight before lookup/write (requires load)`,
     ];
   }

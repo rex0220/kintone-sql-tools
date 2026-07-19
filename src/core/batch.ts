@@ -321,6 +321,8 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     if (validationTable) {
       const payloadFields = stmt.type === "VALIDATE"
         ? ["$id", "$err_field", "$err_code", "$err_message", "$err_value"]
+        : stmt.type === "IMPORT" && stmt.targets?.some((target) => target.kind === "SUBTABLE")
+        ? [...new Set(stmt.targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children)), "$err_subtable", "$err_subrow", "$err_source_row"]
         : stmt.type === "UPDATE"
         ? ["$id", ...stmt.assignments.map((a) => a.field)]
         : ("fields" in stmt ? stmt.fields : []);

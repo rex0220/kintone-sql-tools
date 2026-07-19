@@ -37,7 +37,10 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
     );
     case "ASSERT": return renderSuccess(`アサーション成立: ${result.condition}`);
     case "VALIDATION": {
-      const summary = renderInfo(`検証 ${result.validatedRows} 件 / 正常 ${result.validRows} 件 / 不正 ${result.invalidRows} 件 / エラー ${result.errorCount} 件`);
+      const importSuffix = result.importDetail
+        ? ` / IMPORT実データpreflight / mutation候補 ${result.importDetail.parents.mutationCandidates} 件 / 書込み 0`
+        : "";
+      const summary = renderInfo(`検証 ${result.validatedRows} 件 / 正常 ${result.validRows} 件 / 不正 ${result.invalidRows} 件 / エラー ${result.errorCount} 件${importSuffix}`);
       if (result.errorCount === 0) return `${summary}${renderInfo("検証エラーはありません。")}`;
       return `${summary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
     }

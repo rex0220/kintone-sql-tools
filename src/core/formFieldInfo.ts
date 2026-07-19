@@ -32,7 +32,7 @@ export function buildScopedSubtableFieldIndex(
   for (const property of Object.values(properties)) {
     if (property.type !== "SUBTABLE") continue;
     const table = flattenFields({ [property.code]: { ...property, fields: undefined } }, lookupCopyFields)[0];
-    const children = flattenFields(property.fields ?? {}, lookupCopyFields, true);
+    const children = flattenFields(property.fields ?? {}, lookupCopyFields, true, property.code);
     result.set(property.code, { table, children: new Map(children.map((child) => [child.code, child])) });
   }
   return result;
@@ -48,7 +48,8 @@ export function flattenFormFieldProperties(
 function flattenFields(
   properties: Record<string, FormFieldProperty>,
   lookupCopyFields: Set<string>,
-  inSubtable = false
+  inSubtable = false,
+  subtableCode?: string
 ): KintoneFieldInfo[] {
   const out: KintoneFieldInfo[] = [];
   for (const field of Object.values(properties)) {
@@ -67,11 +68,12 @@ function flattenFields(
       maxLength: normalizeConstraintValue(field.maxLength),
       defaultValue: field.defaultValue,
       inSubtable,
+      ...(subtableCode ? { subtableCode } : {}),
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES.has(field.type),
     };
     info.semantics = resolveFieldSemantics(info);
     out.push(info);
-    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
+    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true, field.type === "SUBTABLE" ? field.code : subtableCode));
   }
   return out;
 }

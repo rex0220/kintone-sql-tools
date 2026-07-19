@@ -300,6 +300,7 @@ function toDmlValidationPayload(result: DmlValidationResult) {
     columns: result.columns,
     errors: result.errors,
     ...(result.errTable ? { errTable: result.errTable } : {}),
+    ...(result.importDetail ? { importDetail: result.importDetail } : {}),
   };
 }
 
