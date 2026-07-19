@@ -1,9 +1,19 @@
-ksql 配布パッケージ (v3.6.0)
+ksql 配布パッケージ (v3.6.1)
 
-1. ksql-plugin-v3.6.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.6.1.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.6.1: IMPORT の面 UX 改善・修正。
+- プラグイン: IMPORT のファイル選択 UI をヘッダー上部へ移動 (横スクロール解消)。
+- 既定ソース名を拡張子除去+識別子化 (plugin_import_10.csv → plugin_import_10)。
+  FROM CSV <名前> で参照可能に。
+- ファイル未選択の IMPORT エラーを面別案内に (plugin=ファイル選択 /
+  CLI=--import-csv/--import-json / MCP=importSources)。
+- DML 成功メッセージの「隔離 0 件 (undefined)」を修正。
+- プラグイン: サブテーブル全置換の確認ダイアログをサマリ表示に
+  (レコード数が増えても画面をはみ出さない)。
 
 v3.6.0: ファイル取込ステートメント IMPORT (B39)。
 - IMPORT INTO app (fields) FROM CSV|JSON <source> [射影/BY NAME]
