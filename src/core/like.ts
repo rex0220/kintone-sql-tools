@@ -33,6 +33,7 @@ export function whereHasLike(where: WhereExpr | null): boolean {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }
@@ -50,6 +51,7 @@ export function whereHasKlike(where: WhereExpr | null): boolean {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }

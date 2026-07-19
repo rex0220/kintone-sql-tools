@@ -3,6 +3,11 @@ import { Parser } from "../../parser/parser";
 import type { SelectStatement, WhereExpr } from "../../types/ast";
 import { KintoneQueryError, whereToKintone } from "../whereToKintone";
 
+test("resolved-only BOOLEAN は kintone query へ漏らさない", () => {
+  const constant: WhereExpr = { type: "BOOLEAN", value: false };
+  expect(() => whereToKintone(constant)).toThrow(/BOOLEAN predicate/);
+});
+
 function where(sql: string) {
   return (new Parser(new Lexer(sql).tokenize()).parse() as SelectStatement).where!;
 }

@@ -90,6 +90,123 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+test("B10-B: SELECT 変数列を既存 literal/number 列へ解決し CONCAT を維持する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const batch = await executeBatch(
+    "SET @s='X'; SET @n=10; SELECT @s AS s, @n AS n, @s || 'Y' AS concat FROM APP100",
+    client,
+    { cacheContext: "batch-variable-columns" }
+  );
+  expect(batch.ok).toBe(true);
+  const result = batch.statements[2].result as SelectResult;
+  expect(result.columns).toEqual(["s", "n", "concat"]);
+  expect(result.rows).toEqual(APP1.map(() => ({ s: "X", n: "10", concat: "XY" })));
+  expect(client.getCalls[0].query).not.toContain("X");
+});
+
+test("B3: 非空配列を literal IN に展開し、空配列を親 aware に簡約する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const expanded = await executeBatch(
+    "SET @l=['A社','B社']; SELECT 顧客名 FROM APP100 WHERE 顧客名 IN @l",
+    client,
+    { cacheContext: "batch-array-in" }
+  );
+  expect(expanded.ok).toBe(true);
+  expect(client.getCalls[0].query).toContain('顧客名 in ("A社","B社")');
+
+  const emptyClient = makeClient({ recordsByApp: { 100: APP1 } });
+  const empty = await executeBatch(
+    "SET @e=[]; SELECT 顧客名 FROM APP100 WHERE (売上 > 0 OR 顧客名 IN @e) AND 顧客名 IN @e",
+    emptyClient,
+    { cacheContext: "batch-array-empty" }
+  );
+  expect(empty.ok).toBe(true);
+  expect((empty.statements[1].result as SelectResult)).toMatchObject({ rows: [], columns: ["顧客名"] });
+  expect(emptyClient.getCalls).toHaveLength(0);
+
+  const trueClient = makeClient({ recordsByApp: { 100: APP1 } });
+  const trueResult = await executeBatch(
+    "SET @e=[]; SELECT 顧客名 FROM APP100 WHERE NOT (顧客名 IN @e)",
+    trueClient,
+    { cacheContext: "batch-array-true" }
+  );
+  expect(trueResult.ok).toBe(true);
+  expect(trueClient.getCalls[0].query).not.toMatch(/顧客名|\bin\s*\(\s*\)/i);
+});
+
+test("B3: 更新系は空配列簡約の root TRUE を拒否し root FALSE を no-op にする", async () => {
+  const trueClient = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
+  const rejected = await executeBatch(
+    "SET @e=[]; UPDATE APP100 SET 顧客名='X' WHERE 顧客名 NOT IN @e",
+    trueClient,
+    { cacheContext: "batch-array-dml-true" }
+  );
+  expect(rejected.ok).toBe(false);
+  expect(rejected.statements[1].error?.message).toMatch(/always true/);
+  expect(trueClient.getCalls).toHaveLength(0);
+  expect(trueClient.putCalls).toHaveLength(0);
+
+  const falseClient = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
+  const noOp = await executeBatch(
+    "SET @e=[]; UPDATE APP100 SET 顧客名='X' WHERE 顧客名 IN @e",
+    falseClient,
+    { cacheContext: "batch-array-dml-false" }
+  );
+  expect(noOp.ok).toBe(true);
+  expect(noOp.statements[1].result).toMatchObject({ type: "UPDATE", updatedCount: 0 });
+  expect(falseClient.getCalls).toHaveLength(0);
+  expect(falseClient.putCalls).toHaveLength(0);
+});
+
+test("B10-B: FROM なし・UNION・GROUP・DISTINCT と INSERT SELECT へ定数列を伝播する", async () => {
+  const noFrom = await executeBatch("SET @n=7; SELECT @n AS n", makeClient(), { cacheContext: "var-col-no-from" });
+  expect((noFrom.statements[1].result as SelectResult).rows).toEqual([{ n: "7" }]);
+
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const union = await executeBatch(
+    "SET @s='X'; SELECT @s AS c FROM APP100 UNION SELECT @s AS d FROM APP100",
+    client,
+    { cacheContext: "var-col-union" }
+  );
+  expect((union.statements[1].result as SelectResult)).toMatchObject({ columns: ["c"], rows: [{ c: "X" }] });
+
+  const grouped = await executeBatch(
+    "SET @s='X'; SELECT @s AS label, COUNT(*) AS count FROM APP100 GROUP BY 顧客名",
+    makeClient({ recordsByApp: { 100: APP1 } }),
+    { cacheContext: "var-col-group" }
+  );
+  expect((grouped.statements[1].result as SelectResult).rows).toHaveLength(3);
+  expect((grouped.statements[1].result as SelectResult).rows.every((row) => row.label === "X")).toBe(true);
+
+  const distinct = await executeBatch(
+    "SET @s='X'; SELECT DISTINCT @s AS c FROM APP100",
+    makeClient({ recordsByApp: { 100: APP1 } }),
+    { cacheContext: "var-col-distinct" }
+  );
+  expect((distinct.statements[1].result as SelectResult).rows).toEqual([{ c: "X" }]);
+
+  const insertClient = makeClient({ recordsByApp: { 100: APP1 }, fieldTypes: { label: "SINGLE_LINE_TEXT" } });
+  const inserted = await executeBatch(
+    "SET @s='X'; INSERT INTO APP200 (label) SELECT @s AS label FROM APP100",
+    insertClient,
+    { cacheContext: "var-col-insert-select" }
+  );
+  expect(inserted.ok).toBe(true);
+  expect(insertClient.postCalls.flatMap((call) => call.records)).toHaveLength(3);
+});
+
+test("B3: root FALSE の非 GROUP 集計は API なしで既存の空集合 1 行を返す", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const batch = await executeBatch(
+    "SET @e=[]; SELECT COUNT(*) AS count FROM APP100 WHERE 顧客名 IN @e",
+    client,
+    { cacheContext: "batch-array-empty-aggregate" }
+  );
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([{ count: "0" }]);
+  expect(client.getCalls).toHaveLength(0);
+});
+
 test("B23/B24 は temp・CTE を通り、LENGTH_CHAR=numeric／TRANSLATE=string の意味型を保つ", async () => {
   const client = makeClient({ recordsByApp: { 100: [
     makeRecord({ s: "aa", text: "2" }),

@@ -199,6 +199,13 @@ SELECT * FROM #before;
   SET @a = 'A'; SET @b = 'B';
   SELECT 顧客No FROM APP100 WHERE 顧客ランク IN (@a, @b);
   ```
+- **バッチ由来ラベルと配列条件**: 1 つの配列を複数文で使い回し、処理ラベルを結果へ付ける。
+  ```sql
+  SET @batch = NOW();
+  SET @ranks = ['A', 'B'];
+  SELECT @batch AS バッチID, 顧客No FROM APP100 WHERE 顧客ランク IN @ranks;
+  ```
+  空配列の `IN @ranks` は 0 件、`NOT IN @ranks` は全件条件になる。更新系で最終 WHERE が全件条件へ簡約される場合は安全のため拒否される。
 - **件数ゲートの DRY 化（スカラーサブクエリ代入・v2.3.0＝Phase 1b）**: `SET @cnt = (SELECT COUNT(*) ...)` で件数を**一度だけ**取得し、ゲート・記録・後続条件で使い回す。
   ```sql
   SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE 処理ステータス IN ('未処理'));

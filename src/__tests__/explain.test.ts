@@ -533,6 +533,20 @@ async function buildBatchExplainPlans(
   return buildBatchExplainPlansCore(sql, makeClient(), variables, "explain-test-batch");
 }
 
+test("B3: バッチ EXPLAIN は配列 SET を実値評価して空配列を実行同様に簡約する", async () => {
+  const plans = await buildBatchExplainPlans(
+    "SET @e=[]; SELECT 顧客名 FROM APP100 WHERE 顧客名 IN @e"
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toMatch(/constant false/);
+  expect(text).toMatch(/records API access: none/);
+  expect(text).not.toMatch(/in \(\)|not in \(\)/i);
+
+  await expect(buildBatchExplainPlans(
+    "SET @e=[]; DELETE FROM APP100 WHERE 顧客名 NOT IN @e"
+  )).rejects.toThrow(/always true/);
+});
+
 test("バッチ EXPLAIN: CREATE TEMP TABLE のプラン（スコープ・行数不明・内側の SELECT プラン）", async () => {
   const plans = await buildBatchExplainPlans(
     "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100 WHERE 売上 > 100;" +

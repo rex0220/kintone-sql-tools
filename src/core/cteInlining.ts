@@ -61,6 +61,7 @@ function stripCteAlias(where: WhereExpr | null, alias: string | null): WhereExpr
     case "GROUP":
       return { ...where, expr: stripCteAlias(where.expr, alias)! };
     case "EXISTS":
+    case "BOOLEAN":
       return where;
   }
 }

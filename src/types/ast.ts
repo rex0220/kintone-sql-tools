@@ -88,7 +88,7 @@ export interface SetVariableStatement {
   type: "SET_VARIABLE";
   /** @ を除き、小文字へ正規化した名前 */
   name: string;
-  expr: ScalarExpr;
+  expr: ScalarExpr | ArrayLiteral;
 }
 
 export interface DeclareVariableStatement {
@@ -204,7 +204,15 @@ export type SelectColumn =
   | StringFuncColumn        // UPPER(f) / CONCAT(a,b) / ... [AS alias]
   | ScalarValueColumn       // a || b / scalar-value arithmetic [AS alias]
   | WindowColumn            // ROW_NUMBER() OVER (...) AS alias
-  | ScalarSubqueryColumn;   // (SELECT ...) [AS alias]
+  | ScalarSubqueryColumn    // (SELECT ...) [AS alias]
+  | VariableColumn;         // @variable AS alias (batch resolver only)
+
+/** Batch-only SELECT column. Always resolved before execution. */
+export interface VariableColumn {
+  type: "VARIABLE_COL";
+  name: string;
+  alias: string;
+}
 
 export interface WildcardColumn {
   type: "WILDCARD";
@@ -376,7 +384,14 @@ export type WhereExpr =
   | LogicalExpr      // AND / OR
   | NotExpr          // NOT
   | GroupExpr        // (...)
-  | ExistsExpr;      // EXISTS (SELECT ...)
+  | ExistsExpr       // EXISTS (SELECT ...)
+  | BooleanPredicate; // resolved-only constant predicate
+
+/** Internal predicate produced while resolving an empty array variable. */
+export interface BooleanPredicate {
+  type: "BOOLEAN";
+  value: boolean;
+}
 
 /** EXISTS (SELECT ...) / NOT EXISTS (SELECT ...) */
 export interface ExistsExpr {
@@ -467,11 +482,18 @@ export type SqlValue =
   | SubqueryInList
   | ArithSqlValue
   | CaseSqlValue
-  | ScalarSubquery;
+  | ScalarSubquery
+  | VariableInList;
 
 /** バッチ変数参照。name は @ を除いた小文字。 */
 export interface VariableRef {
   type: "VARIABLE";
+  name: string;
+}
+
+/** Parenthesis-free IN @list batch reference. */
+export interface VariableInList {
+  type: "VARIABLE_IN_LIST";
   name: string;
 }
 

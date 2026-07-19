@@ -50,6 +50,7 @@ export function whereToKintone(expr: WhereExpr): string {
     case "NOT":       return convertNot(expr);
     case "GROUP":     return convertGroup(expr);
     case "EXISTS":    throw new KintoneQueryError("EXISTS は kintone クエリに変換できません");
+    case "BOOLEAN":   throw new KintoneQueryError("internal error: BOOLEAN predicate reached kintone query conversion");
   }
 }
 
@@ -184,6 +185,8 @@ function convertValue(value: SqlValue, op: CompareOp): string {
   switch (value.type) {
     case "VARIABLE":
       throw new KintoneQueryError(`未解決のバッチ変数 @${value.name} があります`);
+    case "VARIABLE_IN_LIST":
+      throw new KintoneQueryError(`未解決の配列変数 @${value.name} があります`);
     case "STRING":        return convertString(value);
     case "NUMBER":        return numberLiteralText(value);
     case "KINTONE_FUNC":  return convertKintoneFunc(value);

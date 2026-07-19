@@ -309,6 +309,9 @@ function collectConditionFields(expr: WhereExpr, out: Set<string>): void {
     case "GROUP":
       collectConditionFields(expr.expr, out);
       break;
+    case "EXISTS":
+    case "BOOLEAN":
+      break;
   }
 }
 
@@ -629,6 +632,8 @@ function convertDmlSqlValue(value: SqlValue, fieldType?: string): KintoneValue {
   switch (value.type) {
     case "VARIABLE":
       throw new DmlConvertError(`未解決のバッチ変数 @${value.name} があります`);
+    case "VARIABLE_IN_LIST":
+      throw new DmlConvertError(`未解決の配列変数 @${value.name} があります`);
     case "STRING":
       return convertString(value.value, fieldType);
     case "NUMBER":

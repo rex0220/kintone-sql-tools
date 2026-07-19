@@ -104,6 +104,7 @@ function collectKlikes(where: WhereExpr | null, out: Set<KlikeExpr>): void {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return;
   }
 }

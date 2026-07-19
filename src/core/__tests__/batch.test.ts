@@ -278,8 +278,8 @@ test("SET_VARIABLE は read-only で、参照索引と未使用警告を返す",
   const a = analyze("SET @Used = 10; SET @unused = 'x'; SELECT * FROM APP100 WHERE 売上 > @used");
   expect(a.isReadOnlyBatch).toBe(true);
   expect(a.variables).toEqual([
-    { name: "used", referencedBy: [2] },
-    { name: "unused", referencedBy: [] },
+    { name: "used", kind: "scalar", referencedBy: [2] },
+    { name: "unused", kind: "scalar", referencedBy: [] },
   ]);
   expect(a.warnings).toEqual(["variable @unused is never used."]);
 });
@@ -287,7 +287,7 @@ test("SET_VARIABLE は read-only で、参照索引と未使用警告を返す",
 test("DECLARE_VARIABLE は SET と名前空間・参照解析を共有する", () => {
   const a = analyze("DECLARE @p = 'x'; SELECT * FROM APP100 WHERE 顧客名 = @p");
   expect(a.isReadOnlyBatch).toBe(true);
-  expect(a.variables).toEqual([{ name: "p", referencedBy: [1] }]);
+  expect(a.variables).toEqual([{ name: "p", kind: "scalar", referencedBy: [1] }]);
   expect(a.statements[0]).toMatchObject({ statementType: "DECLARE_VARIABLE", isReadOnly: true });
   expect(() => analyze("DECLARE @x = 1; SET @X = 2")).toThrow(/already defined/);
   expect(() => analyze("DECLARE @x = 1")).toThrow(/DECLARE variable requires a batch/);
@@ -305,8 +305,8 @@ test("変数の未定義・前方参照・再代入を静的に拒否する", ()
 test("IN リスト内の変数を静的解析し、参照索引・未定義・前方参照を扱う", () => {
   const a = analyze("SET @a = 'A'; SET @b = 'B'; SELECT * FROM APP100 WHERE 種別 IN (@a, @b, 'C')");
   expect(a.variables).toEqual([
-    { name: "a", referencedBy: [2] },
-    { name: "b", referencedBy: [2] },
+    { name: "a", kind: "scalar", referencedBy: [2] },
+    { name: "b", kind: "scalar", referencedBy: [2] },
   ]);
   expect(() => analyze("SET @a = 'A'; SELECT * FROM APP100 WHERE 種別 IN (@a, @missing)"))
     .toThrow(/variable @missing is not defined/);
@@ -321,8 +321,8 @@ test("SET スカラーサブクエリ内の先行変数を汎用再帰で参照�
     "ASSERT @cnt >= 0"
   );
   expect(a.variables).toEqual([
-    { name: "cutoff", referencedBy: [1] },
-    { name: "cnt", referencedBy: [2] },
+    { name: "cutoff", kind: "scalar", referencedBy: [1] },
+    { name: "cnt", kind: "scalar", referencedBy: [2] },
   ]);
 });
 
@@ -334,6 +334,17 @@ test("SET スカラーサブクエリ内の一時テーブル参照を依存関�
   );
   expect(a.statements[1].tempTablesReferenced).toEqual(["#t"]);
   expect(a.statements[1].dependsOn).toEqual([0]);
+});
+
+test("array/scalar の定義 kind と参照 kind を validate-all-first で検査する", () => {
+  const a = analyze("SET @s='A'; SET @l=['A','B']; SELECT @s AS c FROM APP100 WHERE code IN @l");
+  expect(a.variables).toEqual([
+    { name: "s", kind: "scalar", referencedBy: [2] },
+    { name: "l", kind: "array", referencedBy: [2] },
+  ]);
+  expect(() => analyze("SET @s='A'; SELECT * FROM APP100 WHERE code IN @s")).toThrow(/scalar variable/);
+  expect(() => analyze("SET @l=['A']; SELECT @l AS c FROM APP100")).toThrow(/array variable/);
+  expect(() => analyze("SET @l=['A']; SELECT * FROM APP100 WHERE code IN (@l)")).toThrow(/array variable/);
 });
 
 test("単文 SET はエラー", () => {

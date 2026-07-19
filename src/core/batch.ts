@@ -91,8 +91,13 @@ export interface StatementAnalysis {
 
 export interface BatchVariableAnalysis {
   name: string;
+  kind: VariableDefinitionKind;
   referencedBy: number[];
 }
+
+export type VariableDefinitionKind = "scalar" | "array";
+export type VariableUseKind = "scalar" | "select-column" | "array-in-list";
+type VariableUse = { name: string; kind: VariableUseKind };
 
 /** バッチ全体の静的解析結果 */
 export interface BatchAnalysis {
@@ -140,15 +145,20 @@ function collectRefs(node: unknown, tempRefs: Set<string>, appIds: Set<number>):
   }
 }
 
-function collectVariableRefs(node: unknown, refs: Set<string>): void {
+function collectVariableRefs(node: unknown, refs: VariableUse[]): void {
   if (Array.isArray(node)) {
     for (const v of node) collectVariableRefs(v, refs);
     return;
   }
   if (node !== null && typeof node === "object") {
     const obj = node as Record<string, unknown>;
-    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
-      refs.add(obj["name"]);
+    const type = obj["type"];
+    if ((type === "VARIABLE" || type === "VARIABLE_COL" || type === "VARIABLE_IN_LIST")
+        && typeof obj["name"] === "string") {
+      refs.push({
+        name: obj["name"],
+        kind: type === "VARIABLE" ? "scalar" : type === "VARIABLE_COL" ? "select-column" : "array-in-list",
+      });
       return;
     }
     for (const v of Object.values(obj)) collectVariableRefs(v, refs);
@@ -206,7 +216,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const validationSchemas = new Map<string, string>();
   const createdOrder: string[] = [];
   const results: StatementAnalysis[] = [];
-  const variableDefs = new Map<string, { index: number; referencedBy: number[] }>();
+  const variableDefs = new Map<string, { index: number; kind: VariableDefinitionKind; referencedBy: number[] }>();
   const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
@@ -225,25 +235,45 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     const refs = new Set<string>();
     const stmtAppIds = new Set<number>();
     const dependsOn = new Set<number>();
-    const variableRefs = new Set<string>();
+    const variableRefs: VariableUse[] = [];
     collectVariableRefs(stmt, variableRefs);
+    const referencedThisStatement = new Set<string>();
 
-    for (const name of variableRefs) {
-      const def = variableDefs.get(name);
+    for (const use of variableRefs) {
+      const def = variableDefs.get(use.name);
       if (def === undefined) {
         throw new BatchAnalysisError(
-          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
+          `ParseError: variable @${use.name} is not defined before statement ${index + 1}.`,
           index
         );
       }
-      def.referencedBy.push(index);
+      if (def.kind === "scalar" && use.kind === "array-in-list") {
+        throw new BatchAnalysisError(
+          `ParseError: scalar variable @${use.name} cannot be used as IN @${use.name}; use IN (@${use.name}) instead.`,
+          index
+        );
+      }
+      if (def.kind === "array" && use.kind !== "array-in-list") {
+        throw new BatchAnalysisError(
+          `ParseError: array variable @${use.name} can only be used as IN @${use.name}.`,
+          index
+        );
+      }
+      if (!referencedThisStatement.has(use.name)) {
+        def.referencedBy.push(index);
+        referencedThisStatement.add(use.name);
+      }
     }
 
     if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
       if (variableDefs.has(stmt.name)) {
         throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
       }
-      variableDefs.set(stmt.name, { index, referencedBy: [] });
+      variableDefs.set(stmt.name, {
+        index,
+        kind: stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? "array" : "scalar",
+        referencedBy: [],
+      });
       variableOrder.push(stmt.name);
       if (variableOrder.length > MAX_BATCH_VARIABLES) {
         throw new BatchAnalysisError(
@@ -369,6 +399,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const needsCompleteInput = results.some((r) => r.requiresCompleteInput);
   const variables = variableOrder.map((name) => ({
     name,
+    kind: variableDefs.get(name)!.kind,
     referencedBy: [...variableDefs.get(name)!.referencedBy],
   }));
   return {

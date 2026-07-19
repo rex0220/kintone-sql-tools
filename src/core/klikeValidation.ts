@@ -174,6 +174,7 @@ function isDescendantOf(root: WhereExpr | null, target: object): boolean {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS": return false;
+    case "BOOLEAN": return false;
   }
 }
 

@@ -81,6 +81,7 @@ export function evalWhere(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): boolean {
   switch (expr.type) {
+    case "BOOLEAN":   return expr.value;
     case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
     case "NULL_CHECK": return evalNullCheck(expr, row);
     case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
@@ -337,6 +338,7 @@ function resolveValue(
 ): string {
   switch (value.type) {
     case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
+    case "VARIABLE_IN_LIST": throw new Error(`ParseError: unresolved batch array variable @${value.name}.`);
     case "STRING":       return value.value;
     case "NUMBER":       return numberLiteralText(value);
     case "KINTONE_FUNC": return resolveKintoneFunc(value.name);

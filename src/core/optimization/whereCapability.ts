@@ -93,6 +93,8 @@ function classifyNode(
   resolveField: WhereFieldSemanticsResolver
 ): PredicateCapabilityResult {
   switch (where.type) {
+    case "BOOLEAN":
+      return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
     case "BINARY":
       return classifyBinary(where.op, where.left, where.right.type, resolveField);
     case "NULL_CHECK":

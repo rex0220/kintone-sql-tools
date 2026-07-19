@@ -1,5 +1,10 @@
 import { evalWhere, type FieldTypeResolver } from "../evalWhere";
 import type { SelectStatement, WhereExpr } from "../../types/ast";
+
+test("resolved-only BOOLEAN をローカル評価できる", () => {
+  expect(evalWhere({ type: "BOOLEAN", value: true }, {})).toBe(true);
+  expect(evalWhere({ type: "BOOLEAN", value: false }, {})).toBe(false);
+});
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
 

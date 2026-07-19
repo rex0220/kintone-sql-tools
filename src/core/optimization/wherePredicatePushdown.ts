@@ -83,6 +83,7 @@ function extractAndLeaves(
     case "NULL_CHECK":
     case "NOT":
     case "EXISTS":
+    case "BOOLEAN":
       return null;
   }
 }
