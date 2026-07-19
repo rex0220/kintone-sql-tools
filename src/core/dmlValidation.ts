@@ -19,6 +19,7 @@ export type DmlValidationErrorCode =
   | "ERR_CHOICE_INVALID"
   | "ERR_KEY_EMPTY"
   | "ERR_KEY_DUP_SOURCE"
+  | "ERR_IMPORT_MULTI_EMPTY_ITEM"
   | "ERR_CHECK";
 
 export type DmlValueValidation =
@@ -136,6 +137,7 @@ export function normalizeRaw(raw: unknown, fieldType: string): KintoneValue {
   }
   return text;
 }
+
 
 function isSqlValue(value: unknown): value is SqlValue {
   return typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";

@@ -1,5 +1,6 @@
 import type { ProcessRow } from "../engine/process";
 import type { ImportEncoding } from "../types/ast";
+import type { DmlValidationErrorCode } from "../core/dmlValidation";
 
 export interface ImportSourcePayload {
   bytes: Uint8Array;
@@ -23,4 +24,16 @@ export interface ImportMaterializedTable {
   columnMeta?: ReadonlyMap<string, ImportColumnMeta>;
   /** JSON-only: target field names explicitly present in each source record. */
   importPresence?: readonly ReadonlySet<string>[];
+  /** BY NAME conversion failures, kept row-scoped for VALIDATE/SKIP. */
+  importRowErrors?: readonly (readonly ImportRowError[])[];
+  importAudit?: ImportColumnAudit;
+}
+
+export interface ImportRowError { field: string; code: DmlValidationErrorCode; message: string; }
+export interface IgnoredImportColumn { column: string; reason: string; nonEmptyCells: number; }
+export interface ImportColumnAudit {
+  mapping: "BY_NAME";
+  writtenColumns: readonly string[];
+  ignoredKnownColumns: readonly IgnoredImportColumn[];
+  ignoredUnknownColumns: readonly IgnoredImportColumn[];
 }

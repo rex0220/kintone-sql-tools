@@ -50,7 +50,13 @@ export function validateDmlCandidates(
       if (!candidate.payload.has(code)) continue;
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!, numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
-      else candidate.record[code] = { value: result.value };
+      else {
+        const original = candidate.payload.get(code);
+        const type = infoByCode.get(code)!.fieldType;
+        const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type)
+          && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+        candidate.record[code] = { value: preserveCodes ? original as Array<{ code: string }> : result.value };
+      }
     }
     if (validateMissingCreateFields && candidate.mode === "create") {
       for (const info of fieldInfos) {

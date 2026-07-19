@@ -697,6 +697,10 @@ export interface CsvDmlSource {
   /** Omitted means loader metadata, then UTF-8. */
   encoding?: ImportEncoding;
   hasHeader: boolean;
+  /** Header mapping policy. POSITION preserves the Phase 1 contract. */
+  mappingMode: "POSITION" | "BY_NAME";
+  /** BY_NAME-only opt-in for headers absent from the destination form. */
+  ignoreUnknownColumns: boolean;
   /** Valid only with NO HEADER. */
   columns?: string[];
   /** CSV-row projection. It is deliberately FROM-less. */

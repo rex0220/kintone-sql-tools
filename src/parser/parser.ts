@@ -529,6 +529,25 @@ export class Parser {
         throw new ParseError(`IMPORT projection has ${projection.columns.length} columns; target has ${fields.length}.`, this.prev());
       }
     }
+    let mappingMode: "POSITION" | "BY_NAME" = "POSITION";
+    let ignoreUnknownColumns = false;
+    if (this.peek().kind === TokenKind.BY || this.isSoftKeyword("BY")) {
+      if (sourceKind === "JSON") throw new ParseError("BY NAME is CSV-only.", this.peek());
+      this.advance();
+      if (!this.isSoftKeyword("NAME")) throw new ParseError("BY must be followed by NAME in IMPORT.", this.peek());
+      this.advance();
+      if (!hasHeader) throw new ParseError("BY NAME requires HEADER.", this.prev());
+      if (projection) throw new ParseError("BY NAME and SELECT projection are mutually exclusive.", this.prev());
+      mappingMode = "BY_NAME";
+      if (this.isSoftKeyword("IGNORE")) {
+        this.advance();
+        if (!this.isSoftKeyword("UNKNOWN")) throw new ParseError("IGNORE must be followed by UNKNOWN COLUMNS.", this.peek());
+        this.advance();
+        if (!this.isSoftKeyword("COLUMNS")) throw new ParseError("IGNORE UNKNOWN must be followed by COLUMNS.", this.peek());
+        this.advance();
+        ignoreUnknownColumns = true;
+      }
+    }
     let keyFields: string[] | undefined;
     if (this.peek().kind === TokenKind.ON && this.peekAt(1).kind === TokenKind.DUPLICATE) keyFields = this.parseOnDuplicate();
     const checkGroups = this.parseCheckGroups();
@@ -537,7 +556,7 @@ export class Parser {
       type: "IMPORT", appId, fields,
       source: sourceKind === "JSON"
         ? { kind: "JSON", sourceName }
-        : { kind: "CSV", sourceName, encoding, hasHeader, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
+        : { kind: "CSV", sourceName, encoding, hasHeader, mappingMode, ignoreUnknownColumns, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
       ...(keyFields ? { keyFields } : {}), ...checkGroups, ...control,
     };
   }
