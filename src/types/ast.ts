@@ -703,16 +703,22 @@ export interface CsvDmlSource {
   projection?: SelectStatement;
 }
 
+export interface JsonDmlSource {
+  kind: "JSON";
+  sourceName: string;
+}
+
 /** SELECT remains here so all three DML source paths share one materializer. */
 export type DmlSource =
   | { kind: "SELECT"; query: SelectStatement }
-  | CsvDmlSource;
+  | CsvDmlSource
+  | JsonDmlSource;
 
 export interface ImportStatement {
   type: "IMPORT";
   appId: number;
   fields: string[];
-  source: CsvDmlSource;
+  source: CsvDmlSource | JsonDmlSource;
   /** Presence selects UPSERT; absence selects INSERT. */
   keyFields?: string[];
   validateOnly?: boolean;

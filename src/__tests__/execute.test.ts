@@ -276,6 +276,122 @@ test("IMPORT CSV INSERT はnamed sourceを遅延loadして位置対応する", a
   ]);
 });
 
+test("IMPORT JSON INSERT は名前対応し、null と欠落を payload で区別する", async () => {
+  const client = makeClient({ records: [], postIds: ["1", "2"] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", defaultValue: "default" },
+  ];
+  const result = await execute("IMPORT INTO APP100 (code,name) FROM JSON people", client, {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode('[{"name":null,"code":"A"},{"code":"B"}]') }) }),
+    cacheContext: "import-json-insert",
+  });
+  expect(result).toMatchObject({ type: "INSERT", insertedCount: 2 });
+  expect(client.postCalls[0].records).toEqual([
+    { code: { value: "A" }, name: { value: "" } },
+    { code: { value: "B" } },
+  ]);
+});
+
+test("IMPORT JSON はアプリ全フィールドではなく INTO 2列へ名前対応する (INSERT/UPSERT/VALIDATE ONLY)", async () => {
+  const fields = [
+    { code: "a", label: "a", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "b", label: "b", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "extra1", label: "extra1", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "extra2", label: "extra2", fieldType: "NUMBER" },
+    { code: "extra3", label: "extra3", fieldType: "DATE" },
+  ];
+  const source = () => ({
+    load: async () => ({ bytes: new TextEncoder().encode('{"b":"B","a":"A"}') }),
+  });
+  const makeWideClient = () => {
+    const client = makeClient({ records: [], postIds: ["1"] });
+    client.getFields = async () => fields;
+    return client;
+  };
+
+  // 修正前は materializer が5列を返し、INTO/DML 2列との列数不一致で失敗していた。
+  const insertClient = makeWideClient();
+  await expect(execute("IMPORT INTO APP100 (a,b) FROM JSON src", insertClient, {
+    enableImport: true, importSource: source, cacheContext: "import-json-wide-insert",
+  })).resolves.toMatchObject({ type: "INSERT", insertedCount: 1 });
+  expect(insertClient.postCalls[0].records).toEqual([{ a: { value: "A" }, b: { value: "B" } }]);
+
+  const upsertClient = makeWideClient();
+  await expect(execute("IMPORT INTO APP100 (a,b) FROM JSON src ON DUPLICATE (a)", upsertClient, {
+    enableImport: true, importSource: source, cacheContext: "import-json-wide-upsert",
+  })).resolves.toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 0 });
+  expect(upsertClient.postCalls[0].records).toEqual([{ a: { value: "A" }, b: { value: "B" } }]);
+
+  const validateClient = makeWideClient();
+  await expect(execute("IMPORT INTO APP100 (a,b) FROM JSON src VALIDATE ONLY", validateClient, {
+    enableImport: true, importSource: source, cacheContext: "import-json-wide-validate",
+  })).resolves.toMatchObject({ type: "VALIDATION", validRows: 1, invalidRows: 0 });
+  expect(validateClient.postCalls).toHaveLength(0);
+  expect(validateClient.putCalls).toHaveLength(0);
+});
+
+test("IMPORT JSON UPSERT update は欠落 field を PUT から省略する", async () => {
+  const client = makeClient({ records: [makeRecord({ $id: "10", code: "A", name: "old" })] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await execute("IMPORT INTO APP100 (code,name) FROM JSON people ON DUPLICATE (code)", client, {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode('{"code":"A"}') }) }),
+    cacheContext: "import-json-upsert",
+  });
+  expect(client.putCalls[0].records).toEqual([{ id: 10, record: { code: { value: "A" } } }]);
+});
+
+test("IMPORT JSON decode failure and source duplicate key perform zero mutation", async () => {
+  for (const json of ['{"code":', '{"code":"A","code":"B"}']) {
+    const client = makeClient({ fieldTypes: { code: "SINGLE_LINE_TEXT" } });
+    await expect(execute("IMPORT INTO APP100 (code) FROM JSON bad", client, {
+      enableImport: true,
+      importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(json) }) }),
+      cacheContext: `import-json-bad-${json.length}`,
+    })).rejects.toThrow("ImportSourceError");
+    expect(client.postCalls).toHaveLength(0);
+    expect(client.putCalls).toHaveLength(0);
+  }
+});
+
+test("IMPORT JSON VALIDATE ONLY / ON ERROR SKIP share validation materialization and write only valid rows", async () => {
+  const source = () => ({ load: async () => ({ bytes: new TextEncoder().encode('[{"code":"OK"},{"code":null}]') }) });
+  const client = makeClient({ postIds: ["1"] });
+  client.getFields = async () => [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true }];
+  const spy = jest.spyOn(dmlSourceMaterializer, "materialize");
+  try {
+    const validation = await execute("IMPORT INTO APP100 (code) FROM JSON src VALIDATE ONLY", client, {
+      enableImport: true, importSource: source, cacheContext: "import-json-validate",
+    });
+    expect(validation).toMatchObject({ type: "VALIDATION", validRows: 1, invalidRows: 1 });
+    expect(client.postCalls).toHaveLength(0);
+    const skipped = await executeBatch(
+      "IMPORT INTO APP100 (code) FROM JSON src ON ERROR SKIP INTO #err; SELECT * FROM #err",
+      client,
+      { enableImport: true, importSource: source, cacheContext: "import-json-skip" }
+    );
+    expect(skipped.ok).toBe(true);
+    expect(client.postCalls.flatMap((call) => call.records)).toEqual([{ code: { value: "OK" } }]);
+    expect(spy).toHaveBeenCalledTimes(2);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("EXPLAIN IMPORT JSON exposes strict source policies", async () => {
+  const plan = await execute("EXPLAIN IMPORT INTO APP100 (code) FROM JSON people", makeClient(), { enableImport: true }) as SelectResult;
+  const text = plan.rows.map((row) => row.plan).join("\n");
+  expect(text).toContain("sourceFormat:  JSON");
+  expect(text).toContain("duplicateKeyPolicy: reject");
+  expect(text).toContain("precisionTargetsRequireString: true");
+  expect(text).toContain("presenceAware: true");
+});
+
 test("IMPORT CSV 射影は全式を評価し、列metaとINTO位置対応を保つ", async () => {
   const client = makeClient({ records: [], postIds: ["1"] });
   client.getFields = async () => [

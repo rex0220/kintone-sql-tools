@@ -4,7 +4,10 @@ import { Parser } from "../parser";
 const parse = (sql: string, enabled = true) => new Parser(new Lexer(sql).tokenize(), { import: enabled }).parse();
 
 describe("B39 IMPORT parser gate", () => {
-  test("is off by default", () => expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src", false)).toThrow("capability is disabled"));
+  test("is off by default", () => {
+    expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src", false)).toThrow("capability is disabled");
+    expect(() => parse("IMPORT INTO APP1 (a) FROM JSON src", false)).toThrow("capability is disabled");
+  });
   test("parses CSV options, projection, UPSERT, CHECK and disposition", () => {
     expect(parse("IMPORT INTO APP1 (a,b) FROM CSV src ENCODING SJIS NO HEADER COLUMNS(x,y) SELECT x, CAST(y AS NUMBER) ON DUPLICATE (a) CHECK WHEN y = '' THEN 'bad' ON ERROR SKIP INTO #err REJECT LIMIT 2")).toMatchObject({
       type: "IMPORT", appId: 1, fields: ["a", "b"],
@@ -15,6 +18,15 @@ describe("B39 IMPORT parser gate", () => {
   test("EXPLAIN dispatch and soft keyword field compatibility", () => {
     expect(parse("EXPLAIN IMPORT INTO APP1 (a) FROM CSV src")).toMatchObject({ type: "EXPLAIN", query: { type: "IMPORT" } });
     expect(parse("SELECT IMPORT, CSV, ENCODING, COLUMNS FROM APP1")).toMatchObject({ type: "SELECT" });
+  });
+  test("parses JSON as a soft source keyword and rejects CSV-only clauses", () => {
+    expect(parse("IMPORT INTO APP1 (a,b) FROM JSON src")).toMatchObject({
+      type: "IMPORT", fields: ["a", "b"], source: { kind: "JSON", sourceName: "src" },
+    });
+    expect(parse("SELECT JSON FROM APP1")).toMatchObject({ type: "SELECT" });
+    for (const suffix of ["ENCODING SJIS", "NO HEADER", "COLUMNS(a)", "SELECT a"]) {
+      expect(() => parse(`IMPORT INTO APP1 (a) FROM JSON src ${suffix}`)).toThrow(/JSON|CSV-only/);
+    }
   });
   test("rejects path literals and HEADER COLUMNS", () => {
     expect(() => parse("IMPORT INTO APP1 (a) FROM CSV 'x.csv'")).toThrow();

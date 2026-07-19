@@ -2,6 +2,8 @@ import type { CsvDmlSource } from "../types/ast";
 import type { ImportSourcePayload, ImportMaterializedTable } from "./types";
 import { decodeCsv } from "./csvDecoder";
 import { ImportSourceError } from "./sourceLoader";
+export { materializeJsonDmlSource } from "./jsonMaterializer";
+export type { JsonTargetField } from "./jsonMaterializer";
 
 /** Flat CSV half of the shared SELECT/CSV DML materialization boundary. */
 export function materializeCsvDmlSource(
