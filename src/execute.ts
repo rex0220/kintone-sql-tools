@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
@@ -107,6 +107,10 @@ import {
   type PredicateCapabilityResult,
   type WhereFieldSemanticsResolver,
 } from "./core/optimization/whereCapability";
+import type { ImportSourceHandle, ImportSourceResolver } from "./import/types";
+import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
+import { materializeCsvDmlSource } from "./import/materializeDmlSource";
+import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
 
 // ============================================================
 // kintone API クライアントインターフェース
@@ -250,7 +254,7 @@ export interface MaterializedColumnMeta {
 
 type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
 
-interface MaterializedTable {
+export interface MaterializedTable {
   readonly rows: ProcessRow[];
   readonly columns: string[];
   readonly columnMeta?: MaterializedColumnMetaMap;
@@ -259,6 +263,13 @@ interface MaterializedTable {
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
 const materializedMetaBySelectResult = new WeakMap<SelectResult, MaterializedColumnMetaMap>();
 const materializedMetaByValidationResult = new WeakMap<DmlValidationResult, MaterializedColumnMetaMap>();
+
+interface ImportExecutionSource {
+  source: CsvDmlSource;
+  handle: ImportSourceHandle;
+  cache: Map<ImportSourceHandle, Promise<Awaited<ReturnType<ImportSourceHandle["load"]>>>>;
+}
+const importSourceByDmlStatement = new WeakMap<object, ImportExecutionSource>();
 
 export interface InsertResult {
   type: "INSERT";
@@ -368,6 +379,10 @@ export interface ExecuteOptions {
   cacheContext?: string;
   /** EXPLAINへ表示するhost単位のprocess-local Cursor上限（1..5、既定2） */
   cursorMaxActive?: number;
+  /** Experimental B39 gate. Omitted/false keeps IMPORT unavailable. */
+  enableImport?: boolean;
+  /** Named, path-free source resolver. Used only when enableImport is true. */
+  importSource?: ImportSourceResolver;
 }
 
 // ============================================================
@@ -402,7 +417,7 @@ export async function execute(
 ): Promise<ExecuteResult> {
   const startedAt = Date.now();
   const cacheContext = resolveCacheContext(client, options.cacheContext);
-  const stmt = parseSql(sql);
+  const stmt = parseSql(sql, options.enableImport === true);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
   const collector: SearchAbortCollector = { aborted: false };
@@ -607,6 +622,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   validateKlikeStatement(stmt);
+  if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
     if (stmt.validationErrorTable) {
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
@@ -943,7 +959,7 @@ export async function executeBatch(
   client: KintoneClient,
   options: BatchExecuteOptions = {}
 ): Promise<BatchExecuteResult> {
-  const statements = parseSqlBatch(sql);
+  const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
@@ -1160,6 +1176,10 @@ async function executeBatchStatement(
     return { result };
   }
 
+  if (resolvedStmt.type === "IMPORT") {
+    return { result: await executeImport(resolvedStmt, client, options, cacheContext, tempTables) };
+  }
+
   if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
     const result = await executeDmlValidation(
       resolvedStmt,
@@ -1371,9 +1391,9 @@ function safeJsonStringify(v: unknown): string {
   }
 }
 
-function parseSqlBatch(sql: string): Statement[] {
+function parseSqlBatch(sql: string, enableImport = false): Statement[] {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens).parseStatements();
+  return new Parser(tokens, { import: enableImport }).parseStatements();
 }
 
 function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): Exclude<VarValue, { type: "array" }> {
@@ -2727,8 +2747,14 @@ async function inferSelectColumnMeta(
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
         meta = syntheticColumnMeta("number");
-      } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") {
+      } else if (column.type === "LITERAL_COL") {
         meta = syntheticColumnMeta("string");
+      } else if (column.type === "SCALAR_VALUE_COL") {
+        const expr = column.expr;
+        if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr);
+        else if (expr.type === "NUMBER" || expr.type === "SCALAR_ARITH") meta = syntheticColumnMeta("number");
+        else if (expr.type === "FIELD") meta = resolveField(expr);
+        else meta = syntheticColumnMeta("string");
       } else if (column.type === "STRFUNC_COL") {
         meta = stringFunctionColumnMeta(column.expr);
       } else if (column.type === "WINDOW_COL") {
@@ -4210,9 +4236,7 @@ async function materializeValidationCandidates(
         : value
     ));
   } else {
-    const selectResult = tempTables && tempTables.size > 0
-      ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext)
-      : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext, undefined, true);
+    const selectResult = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables);
     const hasChecks = (stmt.checkGroups?.length ?? 0) > 0;
     if (selectResult.columns.length < stmt.fields.length || (!hasChecks && selectResult.columns.length !== stmt.fields.length)) {
       throw new Error(`SELECT の列数（${selectResult.columns.length}）と DML のフィールド数（${stmt.fields.length}）が一致しません`);
@@ -4222,7 +4246,7 @@ async function materializeValidationCandidates(
     }
     assertInsertCheckRefs(stmt, selectResult.columns);
     sourceRows = selectResult.rows;
-    const meta = materializedMetaBySelectResult.get(selectResult);
+    const meta = selectResult.columnMeta;
     evaluationTypes = new Map(selectResult.columns.map((column) => {
       const columnMeta = meta?.get(column);
       const type = columnMeta?.fieldType
@@ -4252,13 +4276,17 @@ async function materializeValidationCandidates(
   }
   const fieldTypes = new Map([...infoByCode].map(([code, info]) => [code, info.fieldType]));
   const rowKeys = candidates.map((candidate) => stmt.keyFields.map((key) => renderValidationValue(candidate.payload.get(key))));
-  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
   const numeric = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
   const keyCounts = new Map<string, number>();
   for (const parts of rowKeys) {
     const key = upsertNormalizedKey(parts, numeric);
     keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
   }
+  const isImport = importSourceByDmlStatement.has(stmt);
+  if (isImport && [...keyCounts.values()].some((count) => count > 1)) {
+    throw new Error("ERR_KEY_DUP_SOURCE: UPSERT ソース内でキーが重複しています");
+  }
+  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
   candidates.forEach((candidate, index) => {
     const parts = rowKeys[index];
     const targetId = lookupUpsertTarget(targets, parts);
@@ -4267,7 +4295,7 @@ async function materializeValidationCandidates(
     stmt.keyFields.forEach((key, keyIndex) => {
       if (parts[keyIndex] === "") candidate.preErrors.push({ field: key, code: "ERR_KEY_EMPTY", message: `UPSERT キー ${key} は空にできません` });
     });
-    if ((keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
+    if (!isImport && (keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
       candidate.preErrors.push({ field: stmt.keyFields[0], code: "ERR_KEY_DUP_SOURCE", message: "UPSERT ソース内でキーが重複しています" });
     }
   });
@@ -4723,6 +4751,85 @@ async function executeInsert(
 // INSERT INTO ... SELECT
 // ============================================================
 
+function importPlaceholderSelect(): SelectStatement {
+  return {
+    type: "SELECT", distinct: false, columns: [],
+    from: { appId: 0, alias: null, cteName: NO_FROM_CTE_NAME }, joins: [], where: null,
+    groupBy: [], having: null, orderMode: "CANONICAL", orderBy: [], limit: null, offset: null,
+  };
+}
+
+async function executeImport(
+  stmt: ImportStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<ExecuteResult> {
+  // Capability/source existence is synchronous and deliberately precedes form API reads.
+  if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
+  const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
+  const common = {
+    appId: stmt.appId, fields: stmt.fields, select: importPlaceholderSelect(),
+    validateOnly: stmt.validateOnly, validationErrorTable: stmt.validationErrorTable,
+    onErrorSkip: stmt.onErrorSkip, errorTable: stmt.errorTable, rejectLimit: stmt.rejectLimit,
+    checkGroups: stmt.checkGroups,
+  };
+  const generated: InsertSelectStatement | UpsertSelectStatement = stmt.keyFields
+    ? { type: "UPSERT_SELECT", ...common, keyFields: stmt.keyFields }
+    : { type: "INSERT_SELECT", ...common };
+  importSourceByDmlStatement.set(generated, { source: stmt.source, handle, cache: new Map() });
+  if (generated.validateOnly) {
+    if (generated.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    const result = await executeDmlValidation(generated, client, { ...options, onLimitReached: "error" }, cacheContext, tempTables, 1);
+    if (generated.validationErrorTable && tempTables) {
+      appendValidationErrors(
+        tempTables, generated.validationErrorTable, result.columns, result.errors,
+        (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaByValidationResult.get(result) ?? new Map()
+      );
+    }
+    return result;
+  }
+  if (generated.onErrorSkip) {
+    if (!tempTables) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
+    return generated.type === "UPSERT_SELECT"
+      ? executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1)
+      : executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1);
+  }
+  return generated.type === "UPSERT_SELECT"
+    ? executeUpsertSelect(generated, client, options, cacheContext, tempTables)
+    : executeInsertSelect(generated, client, options, cacheContext, tempTables);
+}
+
+async function materializeDmlSource(
+  stmt: InsertSelectStatement | UpsertSelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<MaterializedTable> {
+  const imported = importSourceByDmlStatement.get(stmt);
+  if (!imported) {
+    const selected = tempTables && tempTables.size > 0
+      ? await executeQueryWithCte(stmt.select, client, options, tempTables, cacheContext, true)
+      : await executeSelect(stmt.select, client, options, cacheContext, undefined, true);
+    return { rows: selected.rows, columns: selected.columns, columnMeta: materializedMetaBySelectResult.get(selected) };
+  }
+  const payload = await loadImportSource(imported.handle, imported.cache);
+  const rowLimit = options.maxRecords ?? 10_000;
+  const raw = materializeCsvDmlSource(imported.source, payload, rowLimit);
+  if (!imported.source.projection) return raw;
+  const projection = bindImportProjection(imported.source.projection);
+  const tables = new Map(tempTables ?? []);
+  tables.set(IMPORT_PROJECTION_SOURCE, raw);
+  const selected = await executeQueryWithCte(projection, client, { ...options, onLimitReached: "error" }, tables, cacheContext, true);
+  return { rows: selected.rows, columns: selected.columns, columnMeta: materializedMetaBySelectResult.get(selected) };
+}
+
+/** Shared INSERT/UPSERT/validation source boundary; exported to make route conformance observable. */
+export const dmlSourceMaterializer = { materialize: materializeDmlSource };
+
 async function executeInsertSelect(
   stmt: InsertSelectStatement,
   client: KintoneClient,
@@ -4737,10 +4844,8 @@ async function executeInsertSelect(
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
-  const selectResult = cteCache !== undefined && cteCache.size > 0
-    ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
-    : await executeSelect(stmt.select, client, options, cacheContext);
-  const { rows, columns } = selectResult;
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache);
+  const { rows, columns } = sourceTable;
 
   // 3. 列数チェック
   if (columns.length !== stmt.fields.length) {
@@ -5589,10 +5694,8 @@ async function executeUpsertSelect(
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
 
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
-  const selectResult = cteCache !== undefined && cteCache.size > 0
-    ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext)
-    : await executeSelect(stmt.select, client, options, cacheContext);
-  const { rows, columns } = selectResult;
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache);
+  const { rows, columns } = sourceTable;
 
   if (columns.length !== stmt.fields.length) {
     const emptySourceHint = columns.length === 0 && rows.length === 0
@@ -5628,6 +5731,15 @@ async function executeUpsertSelect(
   const rowKeyValues: string[][] = records.map((record) =>
     stmt.keyFields.map((key) => String(record[key]?.value ?? ""))
   );
+  if (importSourceByDmlStatement.has(stmt)) {
+    const numericKey = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
+    const sourceKeys = new Set<string>();
+    for (const parts of rowKeyValues) {
+      const normalized = upsertNormalizedKey(parts, numericKey);
+      if (sourceKeys.has(normalized)) throw new Error("ERR_KEY_DUP_SOURCE: UPSERT ソース内でキーが重複しています");
+      sourceKeys.add(normalized);
+    }
+  }
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   records.forEach((record, rowIdx) => {
@@ -5703,10 +5815,10 @@ async function executeDescribe(
 // ヘルパー
 // ============================================================
 
-function parseSql(sql: string) {
+function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
-    const stmt = new Parser(tokens).parse();
+    const stmt = new Parser(tokens, { import: enableImport }).parse();
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -6105,9 +6217,10 @@ export async function buildBatchExplainPlans(
   injectedVariables?: Readonly<Record<string, string>>,
   cacheContext = "batch-explain",
   maxRecords = 10_000,
-  cursorMaxActive = 2
+  cursorMaxActive = 2,
+  enableImport = false
 ): Promise<BatchExplainResult> {
-  const statements = parseSqlBatch(sql);
+  const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
   validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = new Map<string, VarValue>();
@@ -6309,6 +6422,24 @@ function buildExplainPlan(
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
   if (query.type === "VALIDATE")      return buildValidatePlan(query, label);
+  if (query.type === "IMPORT") {
+    const mode = query.keyFields ? "UPSERT" : "INSERT";
+    return [
+      ...(label ? [label] : []),
+      `IMPORT ${mode} INTO APP${query.appId}`,
+      `  source:        CSV ${query.source.sourceName}`,
+      `  encoding:      ${query.source.encoding ?? "UTF8 (or loader metadata)"}`,
+      `  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`,
+      `  projection:    ${query.source.projection ? "SELECT expressions" : "POSITION"}`,
+      `  sourceLimit:   10485760 bytes / ${query.fields.length} target columns`,
+      `  key:           ${query.keyFields?.join(", ") ?? "none"}`,
+      `  checks:        ${query.checkGroups?.length ?? 0}`,
+      `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
+      `  gate:          enabled for this parse`,
+      `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
+      `  duplicateKey:  preflight before lookup/write (requires load)`,
+    ];
+  }
   return buildSelectPlan(query, label, capabilities, orderPlans);
 }
 

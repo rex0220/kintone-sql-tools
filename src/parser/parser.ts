@@ -98,6 +98,7 @@ import type {
   ScalarValueColumn,
   CheckGroup,
   ValidateStatement,
+  ImportStatement,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -161,6 +162,8 @@ export class ParseError extends Error {
 // Parser クラス
 // ------------------------------------------------------------
 
+export interface ParserCapabilities { import?: boolean; }
+
 export class Parser {
   private allowUnaryPlusNumber = false;
   private scalarAllowsAggregateArgs = true;
@@ -171,7 +174,10 @@ export class Parser {
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
   private tempTableRefs: Token[] = [];
 
-  constructor(private readonly tokens: Token[]) {}
+  constructor(
+    private readonly tokens: Token[],
+    private readonly capabilities: ParserCapabilities = {}
+  ) {}
 
   // ----------------------------------------------------------
   // 公開 API
@@ -256,6 +262,12 @@ export class Parser {
         if (upper === "DROP")   return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
+        if (upper === "IMPORT") {
+          if (!this.capabilities.import) {
+            throw new ParseError("IMPORT is not supported (capability is disabled).", tok);
+          }
+          return this.parseImport();
+        }
         break;
       }
       default:
@@ -454,10 +466,88 @@ export class Parser {
       query = this.parseReorder();
     } else if (tok.kind === TokenKind.IDENT && tok.value.toUpperCase() === "VALIDATE") {
       query = this.parseValidate();
+    } else if (tok.kind === TokenKind.IDENT && tok.value.toUpperCase() === "IMPORT") {
+      if (!this.capabilities.import) {
+        throw new ParseError("IMPORT is not supported (capability is disabled).", tok);
+      }
+      query = this.parseImport();
     } else {
       throw new ParseError("EXPLAIN の後には SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER / VALIDATE が必要です", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+
+  private parseImport(): ImportStatement {
+    this.advance(); // IMPORT (soft keyword)
+    this.expect(TokenKind.INTO);
+    this.rejectTempTableDml();
+    const target = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(target, this.prev());
+    if (subtableCode) throw new ParseError("IMPORT does not support subtables in Phase 1.", this.prev());
+    this.expect(TokenKind.LPAREN);
+    const fields = this.parseIdentList();
+    this.expect(TokenKind.RPAREN);
+    this.expect(TokenKind.FROM);
+    if (!this.isSoftKeyword("CSV")) throw new ParseError("IMPORT FROM requires CSV in Phase 1.", this.peek());
+    this.advance();
+    const sourceName = this.parseIdentifier();
+    let encoding: "utf8" | "sjis" | undefined;
+    let hasHeader = true;
+    let columns: string[] | undefined;
+    if (this.isSoftKeyword("ENCODING")) {
+      this.advance();
+      const value = this.parseIdentifier().toUpperCase();
+      if (value !== "UTF8" && value !== "SJIS") throw new ParseError("ENCODING must be UTF8 or SJIS.", this.prev());
+      encoding = value === "UTF8" ? "utf8" : "sjis";
+    }
+    if (this.peek().kind === TokenKind.NOT && this.peekAt(1).kind === TokenKind.IDENT && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      this.advance(); this.advance(); hasHeader = false;
+    } else if (this.isSoftKeyword("NO") && this.peekAt(1).kind === TokenKind.IDENT && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      this.advance(); this.advance(); hasHeader = false;
+    }
+    if (this.isSoftKeyword("COLUMNS")) {
+      if (hasHeader) throw new ParseError("COLUMNS requires NO HEADER.", this.peek());
+      this.advance(); this.expect(TokenKind.LPAREN); columns = this.parseIdentList(); this.expect(TokenKind.RPAREN);
+    }
+    let projection: SelectStatement | undefined;
+    if (this.peek().kind === TokenKind.SELECT) {
+      projection = this.parseSelect();
+      if (projection.from.cteName !== NO_FROM_CTE_NAME || projection.joins.length > 0) {
+        throw new ParseError("IMPORT projection cannot use FROM or JOIN.", this.prev());
+      }
+      if (projection.where || projection.groupBy.length || projection.having || projection.orderBy.length || projection.limit !== null || projection.offset !== null) {
+        throw new ParseError("IMPORT projection supports SELECT expressions only.", this.prev());
+      }
+      this.validateImportProjectionScope(projection, this.prev());
+      if (projection.columns.length !== fields.length) {
+        throw new ParseError(`IMPORT projection has ${projection.columns.length} columns; target has ${fields.length}.`, this.prev());
+      }
+    }
+    let keyFields: string[] | undefined;
+    if (this.peek().kind === TokenKind.ON && this.peekAt(1).kind === TokenKind.DUPLICATE) keyFields = this.parseOnDuplicate();
+    const checkGroups = this.parseCheckGroups();
+    const control = this.parseDmlControlSuffix();
+    return {
+      type: "IMPORT", appId, fields,
+      source: { kind: "CSV", sourceName, encoding, hasHeader, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
+      ...(keyFields ? { keyFields } : {}), ...checkGroups, ...control,
+    };
+  }
+
+  private validateImportProjectionScope(node: unknown, token: Token): void {
+    if (Array.isArray(node)) {
+      node.forEach((item) => this.validateImportProjectionScope(item, token));
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node as Record<string, unknown>;
+    if (value.type === "SCALAR_SUBQUERY" || value.type === "SCALAR_SUBQUERY_COL") {
+      throw new ParseError("IMPORT projection cannot use subqueries.", token);
+    }
+    if (typeof value.tableAlias === "string") {
+      throw new ParseError("IMPORT projection cannot use qualified column references.", token);
+    }
+    Object.values(value).forEach((item) => this.validateImportProjectionScope(item, token));
   }
 
   /** VALIDATE APP100 [(fields)] [WHERE ...] [CHECK ...] [INTO #err]. */

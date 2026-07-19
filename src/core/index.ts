@@ -47,5 +47,6 @@ export type {
 
 export type { PageFetchParams } from "../api/fetchAll";
 export type { KintoneCursorHandle, KintoneCursorOpenParams } from "../api/kintoneCursor";
-export type { Statement } from "../types/ast";
+export type { Statement, ImportStatement, DmlSource, CsvDmlSource, ImportEncoding } from "../types/ast";
+export type { ImportSourceHandle, ImportSourcePayload, ImportSourceResolver } from "../import/types";
 export type { DisplayOptions } from "./displayFormat";
