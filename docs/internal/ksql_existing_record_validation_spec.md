@@ -1,7 +1,7 @@
 # B41 v1 — 既存レコードの制約チェック（VALIDATE 文）仕様
 
 - 作成日: 2026-07-19
-- ステータス: **仕様 R3・codex レビュー待ち**（2026-07-19・保守 v1）。R2 review の P1×10 を §12 で確定（KLIKE/サブクエリ禁止＋`SelectResult`）＝`$err_value`=`renderValidationValue`（code 配列 JSON）・B29 は全 NUMBER 対象・VALIDATE 専用 collector・WHERE は plain＋local 再評価・result=`SelectResult`・単文 INTO 拒否・#err は B41 独自5列・onLimit は executor＋全 surface で強制・EXPLAIN/dispatch 配線・fetchAll は Cursor 非使用。工数 4.5〜8.5 人日維持・SemVer minor。核心（二系統・`{id,record,flat}`・read-only 方針）は R2 review で妥当と確認済み（§11）。R1 の 3 重大＋中を **§10 で確定**（Claude がコード裏取り済み）＝①**値は二系統**（組み込み＝生値 `record[code].value`／WHERE・CHECK＝flat `ProcessRow`／`$err_value`＝生値化。`isEmpty`（dmlValidation.ts:154）は空配列を空と判定するが flatten 済み `"[]"`（process.ts:85）は非空扱い→ProcessRow 直渡しは USER/ORG/GROUP/複数選択の必須違反を取り逃がす）②**内部行契約 `{id, record, flat}`** を fetch 直後保持（取得＝$id∪制約∪WHERE∪CHECK・executeSelect の projected 戻り値は流用しない）③**read-only 配管**（新文 `VALIDATE` を `isReadOnlyType`（dmlGuard.ts:64）へ・`isDmlType` に入れず `writesKintone=false`・`requiresCompleteInput=true`＝onLimit=truncate→error・StatementAnalysis/dispatch/MCP `ksql_query`・書込み API 0 回）。中＝CHECK は `evaluateCustomChecks(groups, flat, resolveFieldType)`（dmlCustomCheck.ts:61）で B37 再利用・`INTO #err` は温度テーブル実体化（append だけでは不足）・`$err_value` の CHECK 時は空・Cursor は v1 で $id ページング限定・EXPLAIN。**判定＝再利用成立・B37 より軽い（工数 4.5〜8.5 人日 ≈ B37 の 0.7〜0.9 倍・据え置き）**。詳細 §10。
+- ステータス: **仕様 R4・実装着手可**（2026-07-19・保守 v1）。R3 review の P1×5 を §13 で確定（$err_value 空値=""＋normalizeRaw export・修飾参照静的拒否・prefilter は extractSafePushdownLeaves＋local 再評価・サブクエリ専用静的拒否・#err は B12 validateOnly 分岐を範に固定5列＋列メタ・EXPLAIN 専用 plan builder）。核心（二系統・{id,record,flat}・read-only・SelectResult・raw fetch＋local 評価・NUMBER/onLimit）は R2/R3 review で妥当と確認済み。工数 4.5〜8.5 人日（計画上 6〜8.5 寄り）・SemVer minor。R2 review の P1×10 を §12 で確定（KLIKE/サブクエリ禁止＋`SelectResult`）＝`$err_value`=`renderValidationValue`（code 配列 JSON）・B29 は全 NUMBER 対象・VALIDATE 専用 collector・WHERE は plain＋local 再評価・result=`SelectResult`・単文 INTO 拒否・#err は B41 独自5列・onLimit は executor＋全 surface で強制・EXPLAIN/dispatch 配線・fetchAll は Cursor 非使用。工数 4.5〜8.5 人日維持・SemVer minor。核心（二系統・`{id,record,flat}`・read-only 方針）は R2 review で妥当と確認済み（§11）。R1 の 3 重大＋中を **§10 で確定**（Claude がコード裏取り済み）＝①**値は二系統**（組み込み＝生値 `record[code].value`／WHERE・CHECK＝flat `ProcessRow`／`$err_value`＝生値化。`isEmpty`（dmlValidation.ts:154）は空配列を空と判定するが flatten 済み `"[]"`（process.ts:85）は非空扱い→ProcessRow 直渡しは USER/ORG/GROUP/複数選択の必須違反を取り逃がす）②**内部行契約 `{id, record, flat}`** を fetch 直後保持（取得＝$id∪制約∪WHERE∪CHECK・executeSelect の projected 戻り値は流用しない）③**read-only 配管**（新文 `VALIDATE` を `isReadOnlyType`（dmlGuard.ts:64）へ・`isDmlType` に入れず `writesKintone=false`・`requiresCompleteInput=true`＝onLimit=truncate→error・StatementAnalysis/dispatch/MCP `ksql_query`・書込み API 0 回）。中＝CHECK は `evaluateCustomChecks(groups, flat, resolveFieldType)`（dmlCustomCheck.ts:61）で B37 再利用・`INTO #err` は温度テーブル実体化（append だけでは不足）・`$err_value` の CHECK 時は空・Cursor は v1 で $id ページング限定・EXPLAIN。**判定＝再利用成立・B37 より軽い（工数 4.5〜8.5 人日 ≈ B37 の 0.7〜0.9 倍・据え置き）**。詳細 §10。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B41
 - 評価: [ksql_existing_record_validation_evaluation.md](ksql_existing_record_validation_evaluation.md)
@@ -242,3 +242,43 @@ Claude が P1-1/6/9/10 を実ファイルで裏取り済み。**判定＝R3 必�
 - **onLimit**＝全 surface で VALIDATE が truncate を無視し error（境界＋満杯ページ含む）。
 - **EXPLAIN VALIDATE**＝取得フィールド/書込みなし/違反件数なしを表示。
 - **(fields)**＝未知/重複/サブテーブル子/システム/監査対象外の静的エラー。
+
+---
+
+## 13. R4 確定事項（2026-07-19・Claude・保守 v1・実装着手可）
+
+§12 R3 review の P1×5 を確定。コード裏取り済み。**これで実装着手可**。
+
+### 13.1 `$err_value` の空値＝空文字（P1-1）
+- **B41 専用レンダラ**: `$err_value = isEmptyDmlValue(生値) ? "" : renderValidationValue(normalizeRaw(生値, fieldType))`。`isEmptyDmlValue`（export 済・[dmlValidation.ts:144](../../src/core/dmlValidation.ts#L144)）で空配列/空文字/`null` を `""` に確定（`renderValidationValue([])` は `"[]"` を返すため必須）。非空は `normalizeRaw` で正規化後 `renderValidationValue`（NUMBER=raw・STRING・選択系=code 配列 JSON）。
+- **`normalizeRaw` を export**（現在 private・[dmlValidation.ts:121](../../src/core/dmlValidation.ts#L121)）。`renderValidationValue` 自体の契約は変えない（B12/B37 出力に影響させない）。
+
+### 13.2 修飾フィールド参照を静的拒否（P1-2）
+- v1 は WHERE / CHECK 内の**修飾参照（`tableAlias !== null`・`APP4221.金額` 形）を静的拒否**。VALIDATE は単一アプリで alias が無く、`flatten(record, null)`（[process.ts:78](../../src/engine/process.ts#L78)）は非修飾キーのみ生成・`evalWhere`（[evalWhere.ts:316](../../src/engine/evalWhere.ts#L316)）は修飾キーを直接引き非修飾へフォールバックしない→受理すると存在値を空と誤評価するため。非修飾のみ許可。
+
+### 13.3 prefilter アルゴリズム（P1-3）
+`whereToKintone` 単独は LIKE で例外（[whereToKintone.ts:60](../../src/converter/whereToKintone.ts#L60)）のため、取得 WHERE の押し下げは次の順:
+1. WHERE が **EXACT_PUSHDOWN** なら全体を `whereToKintone`。
+2. それ以外は **`extractSafePushdownLeaves`**（export 済・[wherePredicatePushdown.ts:34](../../src/core/optimization/wherePredicatePushdown.ts#L34)）を取得済み field type/options＋`allowKlike:false` で実行し、AND 安全 leaf だけを prefilter に。
+3. 安全 leaf が無ければ query=`""`（対象スコープ全件取得）。
+4. **どの場合も取得後に元 WHERE 全体を `evalWhere(flat, resolver)` で再評価**（正しさは local 評価で担保）。
+- **サブクエリ拒否は専用静的検証**：VALIDATE の WHERE を走査し `EXISTS`／`SUBQUERY_IN_LIST`／`SCALAR_SUBQUERY`（[ast.ts:373/533](../../src/types/ast.ts#L373)）を拒否（klikeValidation switch は KLIKE のみ）。KLIKE 拒否は `validateKlikeStatement` の switch（[klikeValidation.ts:43](../../src/core/klikeValidation.ts#L43)）へ VALIDATE case 追加。
+
+### 13.4 batch `INTO #err` の runtime 配線（P1-4）
+- 実行は **B12 の validateOnly 分岐を範とする VALIDATE 専用分岐**（[execute.ts:961-975](../../src/execute.ts#L961)：検証 → `validationErrorTable` があれば `appendValidationErrors(tempTables, table, columns, …)`。onLimitReached は `"error"` 固定）。**§12.7 が指した execute.ts:1031 は「temp 参照文」分岐で誤り**（訂正）。
+- `analyzeBatch`（[batch.ts:287](../../src/core/batch.ts#L287)）の schema signature は DML payload 列前提→VALIDATE は **常に B41 固定 5 列**（`fields` を signature に使わない）。runtime も固定 5 列を `appendValidationErrors` へ。列メタ＝`$id`=number・残り 4 列=string（B12 が `$id`/`$err_row` に数値意味型を付ける [execute.ts:3805](../../src/execute.ts#L3805) と同じ）。
+- 単文 `VALIDATE … INTO #err` 拒否＝[batch.ts:212](../../src/core/batch.ts#L212) の validationTable 抽出に VALIDATE の `errorTable` を追加。
+
+### 13.5 EXPLAIN 専用 plan builder（P1-5）
+- **VALIDATE 専用 plan builder** を用意し、`buildExplainPlan`（[execute.ts:5923](../../src/execute.ts#L5923)）で SELECT へ fallthrough させない（未知型 fallthrough は from/orderBy を参照して壊れる）。
+- `buildExplainWhereAnalysis`（[execute.ts:5615](../../src/execute.ts#L5615)）に VALIDATE を追加＝フォーム定義を取得し、NUMBER 対象があれば `getNumberPrecision` を読む。
+- traced client（[execute.ts:5600](../../src/execute.ts#L5600)）＋ metadata 表示型（[execute.ts:5585](../../src/execute.ts#L5585)）に **number precision 集合**を追加（現状 getFields/getProcessStatuses のみ）。
+- CLI の metadata 不要 dry-run 判定（[explainMetadata.ts:47](../../src/core/explainMetadata.ts#L47)）に VALIDATE を追加（WHERE 無しでもフォーム定義が要る）。
+- 単文・バッチ EXPLAIN 共通（execute.ts:5731 も同 builder）。表示＝取得フィールド和集合・WHERE capability・ページング方式・完全入力要否・フォーム定義/数値精度の読み込み。records/mutation API は呼ばない・違反件数は出さない。
+
+### 13.6 受入条件の追補（R4）
+- `$err_value`：空選択系/空複数選択=`""`（`"[]"` でない）・非空 USER=code 配列 JSON・NUMBER=raw。
+- 修飾参照 `APP4221.金額` を WHERE/CHECK に書くと静的エラー。
+- prefilter：`WHERE 金額>0 AND 件名 LIKE '%x%'` が「金額>0 を安全 leaf 押し下げ＋全体 local 再評価」で正しい違反集合。EXACT な WHERE は全体押し下げ。`IN (SELECT)`/EXISTS/スカラーサブクエリは静的エラー。
+- 単文 `VALIDATE … INTO #err` 拒否・複文で #err が固定 5 列（$id number・他 string）で実体化。
+- `EXPLAIN VALIDATE` が VALIDATE 専用 plan（SELECT fallthrough でない）・フォーム定義/数値精度の読み込み表示・書込み/違反件数なし。
