@@ -1,7 +1,7 @@
 # B39 別案 — IMPORT 文（CSV → アプリ書込みの自己完結ステートメント）
 
 - 作成日: 2026-07-18
-- ステータス: **設計 R2・codex レビュー待ち（2026-07-19）**。R1 review の残 3 重大を §10 で確定（Claude コード裏取り）＝①源 materializer 共通化（`executeInsertSelect` の `runSelectLike` 源を判別 union へ・`materializeSource → {columns,rows}`）②`ON ERROR SKIP`/`VALIDATE ONLY INTO` はバッチ限定（batch.ts:208）③CSV 射影の列スコープ検証（CSV 列のみ・アプリ/JOIN/サブクエリ/修飾参照 静的拒否）。**フラット CSV IMPORT は実装着手可**。**テーブル（サブテーブル）IMPORT の可否＝§10.4**: cli-kintone は `*` 複数行形式で対応するが、**kSQL の親 INSERT/UPSERT はサブテーブル子を書けない**（前提機能が別途要）→ **v1 非対応・v2 は cli-kintone `*` 形式を基準**。空 CSV=エラー（§3.5）・CLI 限定にしない（loader capability・§6）。SemVer minor。
+- ステータス: **設計 R2・codex レビュー済（要 R3・実装着手不可）（2026-07-19）**。核心方針（IMPORT 文・フラット CSV・**サブテーブル IMPORT は v1 非対応＝codex 裏取り済み**・loader capability・SemVer minor）は妥当。ただし §10 に事実誤認/未確定（§11・P1×9）＝源経路は `runSelectLike` でなく3経路（要 `materializeDmlSource → MaterializedTable{columns,rows,columnMeta}`）・CSV 射影の出力列名/CHECK スコープ未確定・ヘッダ検証は実行時 preflight・源構文の `'path'` vs 名前付き `<source>` 矛盾・`update-key` ≠ `ON DUPLICATE`（複合キー/レコード番号）。**R3 必須6点は §11**。工数 概算 11〜18 人日。**テーブル(サブテーブル)可否の回答＝§10.4**: cli-kintone は `*` 複数行形式で可・kSQL は親 INSERT/UPSERT がサブテーブル子を書けず v1 非対応（v2 は cli-kintone 形式基準）。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B39
 - 対比: [bind 案 R2](ksql_csv_bind_import_spec.md)・[評価](ksql_import_export_evaluation.md)
@@ -112,13 +112,14 @@ ON ERROR SKIP INTO #err;
 
 R1 review の残 3 重大を確定し、ユーザーの問い「テーブル（サブテーブル）のインポート可否」に回答する。
 
-### 10.1 源 materializer の共通化（重大①）
-- `executeInsertSelect`/`executeUpsertSelect` は源を `runSelectLike(resolvedStmt.query)` で実体化する（[execute.ts:1206](../../src/execute.ts#L1206) 付近）。IMPORT はこの**源取得だけ**を差し替える。
-- source を判別 union にする：`{kind:"SELECT", query} | {kind:"CSV", loader, encoding, hasHeader, columns, projection}`。共通 `materializeSource(source) -> {columns: string[], rows}` を抽出し、CSV 側は loader → RFC4180 パース → 射影評価で `{columns, rows}` を返す。以降（フィールド検証 B34・位置対応・`ON DUPLICATE`・`CHECK` B37・`ON ERROR SKIP` B12）は**完全に不変で再利用**。
+### 10.1 源 materializer の共通化（重大①・R3 で再設計・codex P1-1/2 訂正）
+- **訂正**: `runSelectLike`（[execute.ts:1259](../../src/execute.ts#L1259)）は `CREATE TEMP TABLE AS` 専用（呼出しは 1206 のみ）で、IMPORT の源ではない。実際の源取得は**3経路に分かれる**＝①通常 `executeInsertSelect`（`executeQueryWithCte`/`executeSelect`・[execute.ts:4726/4740](../../src/execute.ts#L4726)）②通常 `executeUpsertSelect`（[execute.ts:5578](../../src/execute.ts#L5578)）③`VALIDATE ONLY`/`ON ERROR SKIP`/CHECK の候補生成 `materializeValidationCandidates`（[execute.ts:4189](../../src/execute.ts#L4189)）。「源だけ差し替えれば下流不変」は誤り。
+- **R3 の設計**: 3経路が共有する **`materializeDmlSource(...) -> MaterializedTable {columns, rows, columnMeta}`** を新設（`{columns,rows}` だけでは不足＝CHECK の型判定に `columnMeta` が要る・[execute.ts:244](../../src/execute.ts#L244)）。source を `{kind:"SELECT", query} | {kind:"CSV", loader, encoding, hasHeader, columns, projection}` の判別 union にし、CSV 側は loader → RFC4180 → 射影評価で `MaterializedTable` を返す。以降（B34 検証・位置対応・`ON DUPLICATE`・B37 CHECK・B12）は**この共通入口に接続**して再利用（源差し替え1点ではない）。
 
 ### 10.2 `ON ERROR SKIP` / `VALIDATE ONLY INTO` はバッチ限定（重大②）
 - `IMPORT … ON ERROR SKIP INTO #err` は `#err` が batch-scoped temp のため、B12/B41 と同じく**単文では拒否**（[batch.ts:208](../../src/core/batch.ts#L208) の「requires a batch」判定に IMPORT の errorTable を含める）。
-- 単文 `IMPORT`（INTO なし）は INSERT/UPSERT の通常結果（affectedRows）を返す。`VALIDATE ONLY`（`#err` 無し）は単文可（報告のみ・書込み 0）。複文 `IMPORT … ON ERROR SKIP INTO #err; SELECT … FROM #err` は動作。
+- 単文 `IMPORT`（INTO なし）は既存 INSERT/UPSERT の結果（INSERT=`insertedCount`／UPSERT=`insertedCount`＋`updatedCount`・`affectedRows` は主に `ON ERROR SKIP` 経路）を返す。`VALIDATE ONLY`（`#err` 無し）は単文可（報告のみ・書込み 0）。複文 `IMPORT … ON ERROR SKIP INTO #err; SELECT … FROM #err` は動作。
+- 単文 INTO 拒否は batch.ts:208 だけでは不足＝`validationTable` 抽出・`#err` の生成/依存/payload schema 登録（[batch.ts:321](../../src/core/batch.ts#L321)）・`isDmlType`/`writesKintone`/`requiresCompleteInput`（[dmlGuard.ts:24](../../src/core/dmlGuard.ts#L24)）・単文/バッチの IMPORT dispatch も配線が要る（R3）。
 
 ### 10.3 CSV 射影の列スコープ検証（重大③）
 - `SELECT <式>` の参照は **CSV 列（ヘッダ／`COLUMNS`／`c1..cn`）のみ**。アプリ列・JOIN・サブクエリ・修飾参照は静的拒否（B41 の修飾参照拒否と同型）。検証は供給メタ（ヘッダ or `COLUMNS`）から列名集合を作り、射影式の FIELD 参照が集合に含まれるかを parse/analyze で確認。0 行判定（§3.5）はその後。
@@ -135,7 +136,9 @@ R1 review の残 3 重大を確定し、ユーザーの問い「テーブル（�
   "" ,"0008","栗田 健一",...,"3702","2021-04-01","人事部"     ← 同レコードのサブテーブル追加行
   ```
 - **kSQL の制約（可否の核心）**: kSQL の**親 `INSERT`/`UPSERT` はサブテーブル子フィールドを書けない**（[言語リファレンス](../ksql_language_reference.md)＝書込みはトップレベルのみ・サブテーブル子は文単位 `ArgumentError`）。サブテーブル DML（`APP$明細`）は**既存親の `_pid` 前提**でレコード新規作成はできない（`expandRowsForSubtableDml`／`buildSubtablePutParams` は既存親の行更新）。→ **「親レコード＋サブテーブル行を 1 文で作成/更新」する経路が現状ない**。
-- **結論**: **サブテーブル IMPORT は v1 では非対応**（§3.4 を維持）。実現には**前提機能＝親 `INSERT`/`UPSERT` のサブテーブル書込み対応**（現状の拒否を解く別機能・別バックログ）が先に必要。それが入れば IMPORT 側は「`*` グルーピング CSV パース → サブテーブル列を親レコードの配列ペイロードへ組み立て」を足すだけ（**cli-kintone の `*` 形式を v2 の設計基準**とする）。**v2 スコープ**として明記。
+- **結論**: **サブテーブル IMPORT は v1 では非対応**（§3.4 を維持・codex も「現状 親＋子を1文で作成/更新する経路がない・v1 非対応は正しい」と裏取り: 親DMLがサブテーブル子を拒否 [execute.ts:3944](../../src/execute.ts#L3944)・サブテーブル INSERT は `_pid` 必須 [execute.ts:5114](../../src/execute.ts#L5114)）。
+  - **前提の限定（codex P2-1）**: 「親 DML のサブテーブル書込み対応が**技術的必須**」ではない＝IMPORT 自身が親 payload＋サブテーブル配列を直接組み立てる実装も理論上可能。ただし本仕様の**「共通 DML 経路を再利用する方針」なら前提**になる。どちらを採るかは v2 で確定。
+  - **`*` 形式は単純グルーピングだけではない（codex P2-1）**: cli-kintone の CSV サブテーブルはテーブル識別列・複数テーブル・親フィールドは開始行のみ有効・空テーブル行の無視等を持つ（[cli-kintone CSV format](https://cli.kintone.dev/guide/formats/csv/)）。「配列ペイロードへ組み立てを足すだけ」は工数を過小評価。**v2 は cli-kintone の `*` 形式を設計基準**とし、上記の仕様差も取り込む。
 
 ### 10.5 cli-kintone 対照で確定した細目
 - `--update-key`（cli-kintone の一括更新キー）= kSQL の `ON DUPLICATE (key)`（UPSERT）。キーは「重複禁止の 文字列(1行)/数値」or レコード番号（kintone 制約と一致）。
@@ -145,3 +148,28 @@ R1 review の残 3 重大を確定し、ユーザーの問い「テーブル（�
 
 ### 10.6 実装可否・工数
 - 3 重大は既存機構の再利用で確定（源差し替え・単文 INTO 拒否・列スコープ検証）。**フラット CSV IMPORT は実装着手可**（源 materializer 抽出＋CSV パーサ＋loader capability＋パーサ）。サブテーブルは v2（前提機能待ち）。SemVer minor。codex R2 レビューで裏取り後に着手。
+
+---
+
+## 11. codex レビュー結果（R2・2026-07-19・要 R3）
+
+Claude が P1-1 を実ファイルで裏取り（`runSelectLike`=CREATE_TEMP_TABLE 専用 execute.ts:1206/1259・`executeInsertSelect`=executeQueryWithCte 4740・`materializeValidationCandidates`=4189）。**判定＝R3 必須・現状では実装着手不可**。核心方針（IMPORT 文・フラット CSV・サブテーブル v1 非対応・loader capability・SemVer minor）は妥当と確認。
+
+### P1（誤り・要修正）
+1. **§10.1 の実行経路誤認**（訂正済み）。源は3経路（INSERT_SELECT / UPSERT_SELECT / VALIDATE候補生成 materializeValidationCandidates）で、共通 `materializeDmlSource → MaterializedTable{columns,rows,columnMeta}` の新設が要る。`{columns,rows}` では CHECK 型判定の `columnMeta` が不足。
+2. **CSV 射影の出力列名契約が未確定**で B37 CHECK を再利用できない。CHECK は SELECT 出力列名を評価スコープに使い一意性必須・列に無い参照は拒否（[execute.ts:4216/4281/4233](../../src/execute.ts#L4216)）。→ R3 で「射影は `AS alias` 必須か／単純列参照は元名継承か／出力名重複の扱い／CHECK は射影前 CSV 行か射影後行か」を確定（自然なのは「CHECK は射影後の一意な出力列名を参照」）。
+3. **§10.3「parse/analyze でヘッダ由来の列集合を検証」は不可**。`analyzeBatch` は AST しか受けず loader データに触れない（[batch.ts:179](../../src/core/batch.ts#L179)）。→ 検証を分割: `COLUMNS`/`NO HEADER` の `c1..cn` と JOIN/サブクエリ/修飾参照は parse/analyze 時・**CSV ヘッダ由来と未知 CSV 列は loader でヘッダ読取後・kintone 書込み前の実行時 preflight**。
+4. **`ScalarValueExpr` は resolver 注入型でない**（訂正）。`evalScalarValueExpr(expr, row)`（[evalFunc.ts:38](../../src/engine/evalFunc.ts#L38)）は `ProcessRow` のキーで解決。→ 実装は「射影 AST の全 `FieldRef`（CASE 内条件まで再帰）を収集して CSV 列集合に事前検証 → CSV 行を ProcessRow 化 → 評価 → number は `String()` 正規化」。トップレベル FIELD 走査だけでは CASE 条件参照を取りこぼす。
+5. **単文 INTO 拒否は batch.ts:208 だけでは不足**（訂正済み・§10.2）。validationTable 抽出・#err schema/依存・dmlGuard 分類・IMPORT dispatch も要る。
+6. **源構文の矛盾**（§2/§5 の `FROM CSV '<path>'` vs §6 の `FROM CSV <source>`）。面非依存 loader を採るなら**名前付き `<source>` に統一**しパス文字列形式は削除。`encoding`/`hasHeader`/`columns` を SQL と loader の双方に持つ場合の優先順位も R3 で確定。
+7. **loader 未供給の preflight 位置**。B34 は源取得より先に書込み先 `getFields` を呼ぶ（[execute.ts:4735](../../src/execute.ts#L4735)）。§6「kintone API 前」を守るには文実行直前に **source 存在の同期 preflight** を置く。順序＝①source 存在(ローカル)→②B34 書込み先検証(metadata)→③CSV ロード/射影→④DML 検証/書込み。
+8. **`update-key` = `ON DUPLICATE` は完全同値でない**。kSQL は複合キー（`keyFields[]`・[ast.ts:655](../../src/types/ast.ts#L655)）・キーは `fields` に含め RECORD_NUMBER は非書込みで拒否（[execute.ts:3940](../../src/execute.ts#L3940)）。cli-kintone の「レコード番号 update-key UPSERT」は現行 `ON DUPLICATE` と不一致。→「概念的対応」に弱め、差分（複合キー可・レコード番号キー非対応・重複禁止の事前検証 or 既存 UPSERT 意味論委譲）を明記。
+9. **通常結果 `affectedRows` は結果型と不一致**（訂正済み・§10.2）。INSERT=insertedCount／UPSERT=insertedCount+updatedCount。
+
+### P2（改善）
+1. §10.4 サブテーブル: 事実は正しい（v1 非対応は妥当）が「別の親DML機能が**必須**」は言い過ぎ→「共通DML経路再利用なら前提」に限定（反映済み）。cli-kintone `*` 形式は識別列/複数テーブル/開始行のみ親/空行無視を持ち「組み立てを足すだけ」は過小（反映済み）。
+2. loader は `Map` 直接公開より**遅延 loader 関数** `importSource?: (name) => Promise<{bytes, encoding?}>` を推奨（plugin picker/CLI fs/MCP inline を同契約に）。source 型は公開 export・文単位 cache・最大 byte 上限も仕様化。ブラウザ境界（build.mjs=browser / build-cli.mjs=node）方針は妥当。
+3. cli-kintone 追加差分: ヘッダ名対応 vs INTO 位置対応・`--fields` はテーブル本体コード可(子単独不可)・添付は LF 区切り複数・レコード番号キーのアプリコード規則・cli-kintone UPSERT は CSV 順序処理だが kSQL は源内キー重複を B12 候補生成でエラー（[execute.ts:4270](../../src/execute.ts#L4270)）。
+
+### 工数・総合
+概算 **11〜18 人日**（CLI のみ下側・全面 picker UI まで上側）。SemVer minor 妥当。**R3 の必須6点**＝①共通 `materializeDmlSource → MaterializedTable` 入口②通常 INSERT/UPSERT＋B12/B37 候補生成の全経路接続③CSV 射影の出力列名/alias/CHECK スコープ④ヘッダ依存検証は実行時 preflight⑤名前付き source 構文と loader 契約の一本化⑥cli-kintone 差分（レコード番号キー・複合キー）。サブテーブル v1 非対応・loader・単文/バッチ方針・minor は確定済み。
