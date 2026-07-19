@@ -29,6 +29,7 @@ import { renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
+import { isImportCapabilityGateError, toPluginImportError } from "./importGateError";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -1906,7 +1907,14 @@ function closeHistoryDropdown(): void {
 function isMultiStatementSql(sql: string): boolean {
   try {
     return parseSqlStatements(sql, { import: selectedImportSource !== null }).length > 1;
-  } catch {
+  } catch (error) {
+    // 未選択の IMPORT gate で複文判定まで失敗した場合は、構文の分類だけ gate を
+    // 開いて再試行する。実行時の gate は維持され、表示時にファイル選択案内へ変換する。
+    if (selectedImportSource === null && isImportCapabilityGateError(error)) {
+      try {
+        return parseSqlStatements(sql, { import: true }).length > 1;
+      } catch { /* 構文自体が不正なら従来どおり単文経路でエラー表示する */ }
+    }
     return false;
   }
 }
@@ -2218,7 +2226,7 @@ async function runSql(
       resultArea.innerHTML = `<div class="ksql-info">キャンセルしました（対象: ${e.affectedCount} 件）</div>`;
     } else {
       if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows); // エラー時も履歴に保存
-      resultArea.innerHTML = renderError(e);
+      resultArea.innerHTML = renderError(toPluginImportError(e, selectedImportSource !== null));
     }
     return null;
   } finally {
