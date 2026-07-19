@@ -42,7 +42,7 @@
 | B5 | KLIKE 親レコード DML 解禁 | 改善 | 📝 **【B: 棚上げ】改善案・専用仕様が要る（2026-07-18 棚卸し）**。前提の検索打ち切り検出は **Node/CLI/MCP のみ整備済**（プラグインは `kintone.api()` がヘッダー非露出＝B7 未解決で安全前提が崩れる）。実装には①DML result 型への `warnings` 追加②プラグイン面を対象外にするか（Node 系限定解禁）③サブテーブル DML 恒久非対応、を確定する専用仕様が必要（v1 spec §3.5 に面依存性を追記済み） | 機能 | 中 | [v1 spec](internal/ksql_klike_native_search_spec.md) |
 | B6 | KLIKE 外部結合 非 nullable 側の押し下げ解禁 | 改善 | 📝 **【B: 棚上げ】改善案・棚上げ妥当（2026-07-18 棚卸し）**。INNER 限定は v3.2.0 でも有効（`klikePushdownPlan.ts:31`）。非 nullable 側判定は結合順・来歴付与を要する非自明な正しさ問題で、現状は将来メモ1行のみ。実需確認まで棚上げ・着手なら専用仕様から | 性能 | 低 | [v2 spec](internal/ksql_klike_pushdown_v2_spec.md) |
 | B7 | プラグインでの検索打ち切り検出（raw fetch 経路） | 改善 | 📝 **【B: 棚上げ】改善案・B5 従属（2026-07-18 棚卸し）**。Node 系は実装済・プラグインのみ未検出（`ui/kintoneClient.ts` が `searchAborted` 未設定）。案a=`kintone.api.url()` で raw fetch 化しヘッダー取得だが実機確認未着手。B5 をプラグインまで解禁する段で必須化する従属課題。当面は案b（プラグイン非検出を明記）で許容・棚上げ妥当 | 安全性 | 低 | [issue](internal/ksql_search_abort_warning_issue.md) |
-| B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 **【B: 棚上げ】提案・棚上げ妥当だが NULL 前提が陳腐化（2026-07-18 棚卸し）**。1b/1c は実装済・実需薄い（`SET @empty=''`・`IN (SELECT)` で代替可）。**NULL 側の 1a 根拠「`IS NULL` 構文なし」は誤り**＝v3.2.0 で `NULL` トークン・`IS NULL` 述語がフィールドには実装済（1a §6 に訂正注記）。再評価は「変数への NULL 代入＋変数 null の意味論」に論点を絞る。SELECT 列 `@var` は前提不変の純後続 | 機能 | 低 | [1a spec](internal/ksql_batch_variables_phase1a_spec.md) |
+| B10 | バッチ変数 後続：`NULL` 代入 / SELECT 列での `@var` 参照 | 改善 | 📝 **【B: 棚上げ→再評価済】評価 R1（2026-07-19）＝2部に分割**。**Part A（NULL 変数代入）はクローズ**＝kSQL は値 NULL を持たない設計（空文字）、`SET @e=''`＋フィールド `IS NULL` で実需充足（実機: 両者とも空7件）、変数だけ null は二層の不整合。**Part B（SELECT 列 `@var`）は小型純後続**＝リテラル列（実機動作）＋実行前置換が既にあり差分は列位置の受理が主・用途はバッチ由来ラベル。実需が出れば R2→実装（小規模） | 機能 | 低 | [評価](internal/ksql_batch_variable_followon_b10_evaluation.md) |
 
 ---
 
