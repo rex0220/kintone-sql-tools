@@ -41,7 +41,7 @@ ksql --help
 プラグイン版はリポジトリの `release` フォルダに配置しています。
 
 - `release/ksql-plugin-v1.0.0.zip`（kintone へアップロードするプラグイン本体）
-- `release/ksql-app-template-v1.0.0.zip`（ksql プラグインの専用アプリテンプレート）
+- `release/ksql-app-template-v1.11.0.zip`（ksql プラグインの専用アプリテンプレート）
 - `release/README.txt`（同梱物の説明）
 
 初回セットアップは次の流れです。
