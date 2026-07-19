@@ -8,6 +8,9 @@ import { parseSqlStatements } from "../sql";
 function analyze(sql: string) {
   return analyzeBatch(parseSqlStatements(sql));
 }
+function analyzeImport(sql: string) {
+  return analyzeBatch(parseSqlStatements(sql, { import: true }));
+}
 
 // ----------------------------------------------------------------
 // 分類とバッチサマリ
@@ -76,6 +79,17 @@ test("VALIDATE ONLY INTO の単文・異schema appendを拒否する", () => {
   expect(() => analyze(
     "INSERT INTO APP100 (x) VALUES ('a') VALIDATE ONLY INTO #err; " +
     "INSERT INTO APP100 (y) VALUES ('b') VALIDATE ONLY INTO #err"
+  )).toThrow("different payload schema");
+});
+
+test("Phase 5 IMPORT error table schema is extended without changing the existing validation schema", () => {
+  const phase5 = analyzeImport(
+    "IMPORT INTO APP100 (code, Lines(name)) FROM JSON src VALIDATE ONLY INTO #err; SELECT * FROM #err"
+  );
+  expect(phase5.statements[0].tempTablesCreated).toEqual(["#err"]);
+  expect(() => analyzeImport(
+    "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY INTO #err; " +
+    "IMPORT INTO APP100 (code, Lines(name)) FROM JSON src VALIDATE ONLY INTO #err"
   )).toThrow("different payload schema");
 });
 

@@ -359,10 +359,35 @@ test("Phase 5 subtable AST never falls through to the flat mutation path", async
   const load = jest.fn(async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[]}]') }));
   await expect(execute("IMPORT INTO APP100 (code, Lines(name)) FROM JSON src", client, {
     enableImport: true, importSource: () => ({ load }), cacheContext: "import-subtable-fail-closed",
-  })).rejects.toThrow("dedicated Phase 5 preflight/confirm path");
+  })).rejects.toThrow("not available until Phase 5C/5D");
   expect(load).not.toHaveBeenCalled();
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
+});
+
+test("Phase 5B subtable VALIDATE ONLY performs actual-data preflight with four-level errors and zero writes", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true, writable: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE", writable: false },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", required: true, writable: true, inSubtable: true, subtableCode: "Lines" },
+    { code: "qty", label: "qty", fieldType: "NUMBER", writable: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const load = jest.fn(async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[{"name":"","qty":123456789012345678901}]} , {"code":"B","Lines":[{"name":"ok","qty":"1"}]}]') }));
+  const result = await execute("IMPORT INTO APP100 (code, Lines(name,qty)) FROM JSON src VALIDATE ONLY", client, {
+    enableImport: true, importSource: () => ({ load }), cacheContext: "import-subtable-validate-only",
+  }) as DmlValidationResult;
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 2, validRows: 1, invalidRows: 1,
+    importDetail: { preflight: "ACTUAL_DATA", parents: { total: 2, valid: 1, invalid: 1, mutationCandidates: 1 }, writesKintone: false },
+  });
+  expect(result.errors).toEqual(expect.arrayContaining([
+    expect.objectContaining({ $err_row: "1", $err_field: "name", $err_subtable: "Lines", $err_subrow: "1", $err_source_row: null }),
+  ]));
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+  expect(client.deleteCalls).toHaveLength(0);
 });
 
 test("IMPORT CSV BY NAME はヘッダ順を INTO 順へ写像し NUMBER 字面と5型LFを保持する", async () => {

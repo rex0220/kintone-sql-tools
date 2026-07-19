@@ -22,7 +22,10 @@ export type DmlValidationErrorCode =
   | "ERR_IMPORT_MULTI_EMPTY_ITEM"
   | "ERR_RECORD_NUMBER_INVALID"
   | "ERR_RECORD_NUMBER_NOT_FOUND"
-  | "ERR_CHECK";
+  | "ERR_CHECK"
+  | "ERR_IMPORT_UNKNOWN_FIELD"
+  | "ERR_IMPORT_FIELD_OWNERSHIP"
+  | "ERR_IMPORT_UNSUPPORTED_FIELD";
 
 export type DmlValueValidation =
   | { ok: true; value: KintoneValue }
