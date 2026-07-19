@@ -2,7 +2,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExecuteOptions, ExecuteResult, KintoneClient } from "../../core";
 import type { CreateKsqlRuntimeInput, KsqlRuntime, KsqlRuntimeServerOptions } from "../../node/runtime";
-import { createKsqlMcpTools } from "../tools";
+import {
+  createKsqlMcpTools,
+  MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
+  toMcpImportError,
+} from "../tools";
 import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
 
 function makeClient(): KintoneClient {
@@ -553,7 +557,44 @@ describe("MCP tools", () => {
     });
     expect(Array.from((await optionsSeen[0].importSource?.("raw")?.load())!.bytes)).toEqual([0x81]);
     await expect(tools.validate({ sql: "IMPORT INTO APP100 (顧客名) FROM CSV raw" }))
-      .rejects.toThrow("capability is disabled");
+      .rejects.toThrow(MCP_IMPORT_SOURCE_REQUIRED_MESSAGE);
+  });
+
+  test.each([
+    ["ksql_validate", (tools: ReturnType<typeof createKsqlMcpTools>) => tools.validateTool({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+    })],
+    ["ksql_query", (tools: ReturnType<typeof createKsqlMcpTools>) => tools.queryTool({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+    })],
+    ["ksql_mutate", (tools: ReturnType<typeof createKsqlMcpTools>) => tools.mutateTool({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 1,
+    })],
+    ["ksql_explain", (tools: ReturnType<typeof createKsqlMcpTools>) => tools.explainTool({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+    })],
+  ])("%s は importSources 未指定の IMPORT gate を MCP 案内で返す", async (_name, callTool) => {
+    const result = await callTool(createKsqlMcpTools({ profile: "prod" }));
+    const payload = result.structuredContent as {
+      ok: false;
+      error: { code: string; message: string };
+    };
+    expect(result.isError).toBe(true);
+    expect(payload.error).toEqual({
+      code: "ParseError",
+      message: MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
+    });
+  });
+
+  test("MCP IMPORT 案内は gate かつ importSources 未指定の場合だけ適用する", () => {
+    const gateError = new Error("IMPORT is not supported (capability is disabled).");
+    const syntaxError = new Error("ParseError: unexpected token");
+    expect(toMcpImportError(syntaxError, false)).toBe(syntaxError);
+    expect(toMcpImportError(gateError, true)).toBe(gateError);
+    expect(gateError.message).toContain("capability is disabled");
   });
 
   test("IMPORT CSV inline text executes through the engine", async () => {

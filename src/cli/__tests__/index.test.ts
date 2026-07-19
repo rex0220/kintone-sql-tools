@@ -1,4 +1,5 @@
 import {
+  CLI_IMPORT_SOURCE_REQUIRED_MESSAGE,
   buildReplExecArgv,
   buildValidationOutput,
   extractAppIds,
@@ -9,9 +10,42 @@ import {
   parseConsoleMetaCommand,
   parseTokenMap,
   shouldExitOnEmpty,
+  runWithArgv,
+  toCliImportError,
 } from "../index";
 
+async function runCliCaptured(argv: string[]): Promise<{ code: number; stderr: string }> {
+  let stderr = "";
+  const errSpy = jest.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write);
+  try {
+    return { code: await runWithArgv(argv), stderr };
+  } finally {
+    errSpy.mockRestore();
+  }
+}
+
 describe("cli helpers", () => {
+  test.each([
+    ["単文", ["-e", "IMPORT INTO APP100 (name) FROM CSV people"]],
+    ["EXPLAIN", ["--dry-run", "-e", "IMPORT INTO APP100 (name) FROM CSV people"]],
+    ["バッチ", ["-e", "SELECT 1; IMPORT INTO APP100 (name) FROM CSV people"]],
+  ])("IMPORT gate はソース未指定の%s経路で CLI 案内になる", async (_label, argv) => {
+    const result = await runCliCaptured(argv);
+    expect(result.code).toBe(1);
+    expect(result.stderr.trim()).toBe(CLI_IMPORT_SOURCE_REQUIRED_MESSAGE);
+  });
+
+  test("CLI IMPORT 案内は gate かつソース未指定の場合だけ適用する", () => {
+    const gateError = new Error("IMPORT is not supported (capability is disabled).");
+    const syntaxError = new Error("ParseError: unexpected token");
+    expect(toCliImportError(syntaxError, false)).toBe(syntaxError);
+    expect(toCliImportError(gateError, true)).toBe(gateError);
+    expect(gateError.message).toContain("capability is disabled");
+  });
+
   test("VALIDATION resultをJSON契約とtableへ整形する", () => {
     const result = {
       type: "VALIDATION" as const,
