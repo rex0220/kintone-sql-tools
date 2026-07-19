@@ -220,11 +220,15 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
-    const validationTable = "validationErrorTable" in stmt && stmt.validationErrorTable
+    const validationTable = stmt.type === "VALIDATE" && stmt.errorTable
+      ? stmt.errorTable
+      : "validationErrorTable" in stmt && stmt.validationErrorTable
       ? stmt.validationErrorTable
       : ("onErrorSkip" in stmt && stmt.onErrorSkip ? stmt.errorTable ?? null : null);
     if (statements.length === 1 && validationTable) {
-      const message = "onErrorSkip" in stmt && stmt.onErrorSkip
+      const message = stmt.type === "VALIDATE"
+        ? "ArgumentError: VALIDATE INTO requires a batch."
+        : "onErrorSkip" in stmt && stmt.onErrorSkip
         ? "ArgumentError: ON ERROR SKIP requires a batch."
         : "ArgumentError: VALIDATE ONLY INTO requires a batch.";
       throw new BatchAnalysisError(message, index);
@@ -315,7 +319,9 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     }
 
     if (validationTable) {
-      const payloadFields = stmt.type === "UPDATE"
+      const payloadFields = stmt.type === "VALIDATE"
+        ? ["$id", "$err_field", "$err_code", "$err_message", "$err_value"]
+        : stmt.type === "UPDATE"
         ? ["$id", ...stmt.assignments.map((a) => a.field)]
         : ("fields" in stmt ? stmt.fields : []);
       const signature = JSON.stringify(payloadFields);

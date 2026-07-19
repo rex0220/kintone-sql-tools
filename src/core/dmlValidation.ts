@@ -118,7 +118,7 @@ function isValidTemporalInput(value: string, type: string): boolean {
   return isValidTemporal(normalized, "DATETIME");
 }
 
-function normalizeRaw(raw: unknown, fieldType: string): KintoneValue {
+export function normalizeRaw(raw: unknown, fieldType: string): KintoneValue {
   if (isSqlValue(raw)) {
     const normalized = normalizeDmlSqlValue(raw, fieldType);
     if (!normalized.ok) throw new Error(normalized.message);

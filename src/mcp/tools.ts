@@ -580,7 +580,7 @@ export function createKsqlMcpTools(
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
+        onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
         cursorMaxActive: input.cursorMaxActive,
@@ -631,7 +631,7 @@ export function createKsqlMcpTools(
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
+      onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
       timeout: input.timeout,
       cursorMaxActive: input.cursorMaxActive,
     });

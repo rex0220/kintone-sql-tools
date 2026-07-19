@@ -258,6 +258,31 @@ describe("MCP tools", () => {
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
   });
 
+  test("query: leading VALIDATE is read-only and forces truncate to error", async () => {
+    const runtimeInputs: CreateKsqlRuntimeInput[] = [];
+    const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => {
+      runtimeInputs.push(input);
+      return {
+        sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "validate-existing-mcp",
+        maxRecords: input.maxRecords ?? 500, fetchParallel: input.fetchParallel ?? 3,
+        onLimit: input.onLimit ?? "truncate", timeout: input.timeout ?? 30000,
+      };
+    };
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "SELECT", columns: ["$id", "$err_field", "$err_code", "$err_message", "$err_value"],
+      rows: [], rowCount: 0,
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const validation = await tools.validate({ sql: "VALIDATE APP100" });
+    expect(validation).toMatchObject({
+      isReadOnly: true, isDml: false, containsDml: false,
+      requiresCompleteInput: true, canRunWithQueryTool: true, requiresMutationTool: false,
+    });
+    const result = await tools.query({ sql: "VALIDATE APP100", onLimit: "truncate" });
+    expect(runtimeInputs[0].onLimit).toBe("error");
+    expect(result).toMatchObject({ ok: true, type: "SELECT", rowCount: 0 });
+  });
+
   test("query: 単文 ASSERT の不成立は AssertError で reject する", async () => {
     const createRuntime = async (
       _serverOptions: KsqlRuntimeServerOptions,

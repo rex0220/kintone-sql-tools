@@ -112,6 +112,21 @@ describe("CLI DML on-limit handling", () => {
     expect(postBodies).toHaveLength(0);
   });
 
+  test("leading VALIDATE needs no allow-dml and forces onLimit=error", async () => {
+    const { postBodies } = installFetchMock();
+    const res = await runCaptured([
+      ...DUMMY_AUTH,
+      "--max-records", "2",
+      "--on-limit", "truncate",
+      "-e", "VALIDATE APP100",
+    ]);
+
+    expect(res.code).toBe(1);
+    expect(res.stderr).toContain("note: onLimit=truncate is ignored for VALIDATE (forced to error)");
+    expect(res.stderr).toContain("取得件数が上限（2 件）を超えました。");
+    expect(postBodies).toHaveLength(0);
+  });
+
   test("--quiet suppresses the DML truncate note", async () => {
     installFetchMock();
     const res = await runCaptured([

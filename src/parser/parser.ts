@@ -97,6 +97,7 @@ import type {
   ConcatExpr,
   ScalarValueColumn,
   CheckGroup,
+  ValidateStatement,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -254,13 +255,14 @@ export class Parser {
         if (upper === "CREATE") return this.parseCreateTempTable();
         if (upper === "DROP")   return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
+        if (upper === "VALIDATE") return this.parseValidate();
         break;
       }
       default:
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT のいずれかで始まる SQL 文が必要です",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT のいずれかで始まる SQL 文が必要です",
       tok
     );
   }
@@ -450,10 +452,62 @@ export class Parser {
       query = this.parseDelete();
     } else if (tok.kind === TokenKind.REORDER) {
       query = this.parseReorder();
+    } else if (tok.kind === TokenKind.IDENT && tok.value.toUpperCase() === "VALIDATE") {
+      query = this.parseValidate();
     } else {
-      throw new ParseError("EXPLAIN の後には SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER が必要です", tok);
+      throw new ParseError("EXPLAIN の後には SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER / VALIDATE が必要です", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+
+  /** VALIDATE APP100 [(fields)] [WHERE ...] [CHECK ...] [INTO #err]. */
+  private parseValidate(): ValidateStatement {
+    const validateTok = this.advance(); // soft keyword VALIDATE
+    const name = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(name, this.prev());
+    if (subtableCode) {
+      throw new ParseError("VALIDATE はサブテーブル仮想テーブルを対象にできません", this.prev());
+    }
+
+    let fields: string[] | undefined;
+    if (this.consume(TokenKind.LPAREN)) {
+      fields = this.parseIdentList();
+      this.expect(TokenKind.RPAREN);
+    }
+    const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
+    const checks = this.parseCheckGroups();
+    let errorTable: string | undefined;
+    if (this.consume(TokenKind.INTO)) {
+      const tableTok = this.peek();
+      if (tableTok.kind !== TokenKind.IDENT || !tableTok.value.startsWith("#")) {
+        throw new ParseError("VALIDATE INTO には # で始まる一時テーブル名が必要です", tableTok);
+      }
+      errorTable = this.parseTableName();
+    }
+    const stmt: ValidateStatement = { type: "VALIDATE", appId, fields, where, ...checks, ...(errorTable ? { errorTable } : {}) };
+    this.assertValidateExpressions(stmt, validateTok);
+    return stmt;
+  }
+
+  /** v1 VALIDATE is single-app/local: subqueries and qualified references are rejected. */
+  private assertValidateExpressions(stmt: ValidateStatement, tok: Token): void {
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) { node.forEach(visit); return; }
+      if (node === null || typeof node !== "object") return;
+      const obj = node as Record<string, unknown>;
+      if (obj.type === "EXISTS" || obj.type === "SUBQUERY_IN_LIST" || obj.type === "SCALAR_SUBQUERY") {
+        throw new ParseError("VALIDATE の WHERE / CHECK にサブクエリは使用できません", tok);
+      }
+      if (obj.type === "FIELD" && obj.tableAlias !== null && obj.tableAlias !== undefined) {
+        throw new ParseError("VALIDATE の WHERE / CHECK では修飾フィールド参照を使用できません", tok);
+      }
+      if (obj.type === "FIELD_REF" && typeof obj.field === "string" && obj.field.includes(".")) {
+        throw new ParseError("VALIDATE の WHERE / CHECK では修飾フィールド参照を使用できません", tok);
+      }
+      Object.values(obj).forEach(visit);
+    };
+    visit(stmt.where);
+    visit(stmt.checkGroups);
   }
 
   // ----------------------------------------------------------

@@ -54,6 +54,7 @@ export function explainNeedsAppMetadata(statement: unknown): boolean {
     if (Array.isArray(node)) return node.some(visit);
 
     const item = node as Record<string, unknown>;
+    if (item["type"] === "VALIDATE") return true;
     if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node as SelectStatement)) {
       return true;
     }

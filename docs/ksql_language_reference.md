@@ -2070,6 +2070,26 @@ ON ERROR SKIP INTO #err;
 - メッセージは `||` / `CONCAT` でフィールドや `@var` を補間できます。**条件（`WHEN`）では `||` は使えません**（`CONCAT` を使う）。
 - 処分：`ON ERROR SKIP INTO #err` は該当行を隔離して残りを書き込み、`VALIDATE ONLY` は書かずに報告、処分節なしの素 DML は書き込み前に停止します。組み込み検証（必須・型・範囲・桁）とは独立に評価し、`#err` は組み込みエラー → カスタムエラーの順です。比較非対応の複合型を条件に使う等の評価不能は文全体エラー（行隔離しません）。サブテーブル DML には指定できません。`CHECK` は `CHECK WHEN` の並びのときだけキーワードになります（同名フィールドはバッククォート）。
 
+## 17.4 VALIDATE（既存レコードの読み取り監査）
+
+先頭の `VALIDATE` 文は、保存済みレコードへフォームの組み込み制約と任意の `CHECK` を適用する read-only 文です。DML 末尾の `VALIDATE ONLY` とは別文で、kintone の POST / PUT / DELETE API は呼びません。
+
+```sql
+VALIDATE APP100 (顧客コード, 金額)
+WHERE 作成日時 >= '2026-01-01'
+CHECK WHEN 金額 < 0 THEN '金額が負です';
+
+VALIDATE APP100 INTO #err;
+SELECT $id, $err_field, $err_code, $err_message, $err_value FROM #err;
+```
+
+- `(fields)` 省略時は、制約を持つトップレベルフィールドと全トップレベル `NUMBER` が対象です。指定時は未知・重複・サブテーブル子・システム・監査対象外フィールドを拒否します
+- 出力は `SELECT` と同じ結果集合で、固定列は `$id`, `$err_field`, `$err_code`, `$err_message`, `$err_value` です。1レコードに複数の違反があれば複数行になります。`CHECK` 違反の `$err_field` / `$err_value` は空です
+- `INTO #err` は複文バッチ専用です。単文では拒否され、複文では同じ固定5列（`$id` は数値、他は文字列）を一時テーブルへ実体化します
+- `WHERE` は通常比較、`BETWEEN`, リテラル `IN`, `IS NULL`, `LIKE` を使えます。`KLIKE`, サブクエリ, 修飾フィールド参照は使えません。安全な条件だけを取得時に押し下げ、取得後に元の条件全体を再評価します
+- 完全な監査集合が必要なため、全 surface で `onLimit=truncate` を無効化して error にします。取得は通常 records API の offset + `$id` keyset paging で、Cursor API は使いません
+- `EXPLAIN VALIDATE` はフォーム定義と、NUMBER 対象がある場合の数値精度だけを読みます。レコード API / mutation API は呼ばず、違反件数も算出しません
+
 ## 18. DELETE
 
 ```sql

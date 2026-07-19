@@ -33,6 +33,7 @@ export function isDmlType(type: string): boolean {
 
 export function isReadOnlyType(type: string): boolean {
   return type === "SELECT"
+    || type === "VALIDATE"
     || type === "UNION"
     || type === "WITH"
     || type === "EXPLAIN"
@@ -61,6 +62,8 @@ export function isReadOnlyStatement(stmt: Statement): boolean {
 export function requiresCompleteInput(stmt: Statement): boolean {
   if (isDmlType(stmt.type)) return true;
   switch (stmt.type) {
+    case "VALIDATE":
+      return true;
     case "SELECT":
       return selectRequiresCompleteInput(stmt);
     case "UNION":

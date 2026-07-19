@@ -75,6 +75,11 @@ function validateStatement(stmt: Statement): void {
         );
       }
       return;
+    case "VALIDATE":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError("KLIKE / NOT KLIKE は VALIDATE の WHERE / CHECK で使用できません");
+      }
+      return;
     case "SHOW_APPS":
     case "DESCRIBE":
     case "DROP_TEMP_TABLE":
