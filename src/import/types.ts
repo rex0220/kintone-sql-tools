@@ -27,6 +27,8 @@ export interface ImportMaterializedTable {
   /** BY NAME conversion failures, kept row-scoped for VALIDATE/SKIP. */
   importRowErrors?: readonly (readonly ImportRowError[])[];
   importAudit?: ImportColumnAudit;
+  /** Dedicated lookup-only CSV column, never part of the write payload. */
+  recordNumberSourceValues?: readonly string[];
 }
 
 export interface ImportRowError { field: string; code: DmlValidationErrorCode; message: string; }

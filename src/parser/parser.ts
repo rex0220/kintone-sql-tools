@@ -479,6 +479,11 @@ export class Parser {
 
   private parseImport(): ImportStatement {
     this.advance(); // IMPORT (soft keyword)
+    let writeMode: "UPDATE_RECORD_NUMBER" | undefined;
+    if (this.peek().kind === TokenKind.UPDATE) {
+      this.advance();
+      writeMode = "UPDATE_RECORD_NUMBER";
+    }
     this.expect(TokenKind.INTO);
     this.rejectTempTableDml();
     const target = this.parseIdentifier();
@@ -549,7 +554,24 @@ export class Parser {
       }
     }
     let keyFields: string[] | undefined;
+    let recordNumberSourceHeader: string | undefined;
+    if (this.isSoftKeyword("MATCH")) {
+      this.advance();
+      for (const word of ["RECORD", "NUMBER", "SOURCE"]) {
+        if (!this.isSoftKeyword(word)) throw new ParseError(`MATCH must be followed by RECORD NUMBER SOURCE <header>.`, this.peek());
+        this.advance();
+      }
+      recordNumberSourceHeader = this.parseIdentifier();
+    }
     if (this.peek().kind === TokenKind.ON && this.peekAt(1).kind === TokenKind.DUPLICATE) keyFields = this.parseOnDuplicate();
+    if (writeMode) {
+      if (sourceKind !== "CSV") throw new ParseError("IMPORT UPDATE supports CSV only.", this.prev());
+      if (mappingMode !== "BY_NAME") throw new ParseError("IMPORT UPDATE requires BY NAME.", this.prev());
+      if (!recordNumberSourceHeader) throw new ParseError("IMPORT UPDATE requires MATCH RECORD NUMBER SOURCE <header>.", this.peek());
+      if (keyFields) throw new ParseError("IMPORT UPDATE and ON DUPLICATE are mutually exclusive.", this.prev());
+    } else if (recordNumberSourceHeader) {
+      throw new ParseError("MATCH RECORD NUMBER SOURCE requires IMPORT UPDATE.", this.prev());
+    }
     const checkGroups = this.parseCheckGroups();
     const control = this.parseDmlControlSuffix();
     return {
@@ -557,6 +579,7 @@ export class Parser {
       source: sourceKind === "JSON"
         ? { kind: "JSON", sourceName }
         : { kind: "CSV", sourceName, encoding, hasHeader, mappingMode, ignoreUnknownColumns, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
+      ...(writeMode ? { writeMode, recordNumberSourceHeader } : {}),
       ...(keyFields ? { keyFields } : {}), ...checkGroups, ...control,
     };
   }
