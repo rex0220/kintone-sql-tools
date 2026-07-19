@@ -55,4 +55,25 @@ describe("B39 IMPORT parser gate", () => {
       .toThrow("requires IMPORT UPDATE");
     expect(parse("SELECT MATCH, RECORD, NUMBER, SOURCE FROM APP1")).toMatchObject({ type: "SELECT" });
   });
+  test("parses nested JSON targets without exposing row IDs", () => {
+    expect(parse("IMPORT INTO APP1 (code, Lines(name, qty), Notes(body)) FROM JSON src ON DUPLICATE (code)")).toMatchObject({
+      fields: ["code"],
+      targets: [
+        { kind: "FIELD", field: "code" },
+        { kind: "SUBTABLE", subtableCode: "Lines", children: ["name", "qty"] },
+        { kind: "SUBTABLE", subtableCode: "Notes", children: ["body"] },
+      ],
+    });
+    expect(() => parse("IMPORT INTO APP1 (Lines(name) ROW ID SOURCE rid) FROM JSON src")).toThrow("does not accept ROW ID");
+  });
+  test("parses cli-kintone table replacement and fails closed without its allow-list", () => {
+    expect(parse("IMPORT UPDATE INTO APP1 (code, Lines(name,qty) ROW ID SOURCE line_id) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Lines)")).toMatchObject({
+      fields: ["code"], replaceSubtables: ["Lines"],
+      targets: [{ kind: "FIELD" }, { kind: "SUBTABLE", subtableCode: "Lines", rowIdSourceHeader: "line_id" }],
+    });
+    expect(() => parse("IMPORT UPDATE INTO APP1 (Lines(name) ROW ID SOURCE rid) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno"))
+      .toThrow("requires REPLACE SUBTABLES");
+    expect(() => parse("IMPORT UPDATE INTO APP1 (Lines(name) ROW ID SOURCE rid) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Other)"))
+      .toThrow(/non-replaced|not declared/);
+  });
 });

@@ -490,7 +490,37 @@ export class Parser {
     const { appId, subtableCode } = extractTableRef(target, this.prev());
     if (subtableCode) throw new ParseError("IMPORT does not support subtables in Phase 1.", this.prev());
     this.expect(TokenKind.LPAREN);
-    const fields = this.parseIdentList();
+    const targets: ImportStatement["targets"] = [];
+    const fields: string[] = [];
+    const targetNames = new Set<string>();
+    while (true) {
+      const name = this.parseIdentifier();
+      if (targetNames.has(name)) throw new ParseError(`IMPORT target ${name} is declared more than once.`, this.prev());
+      targetNames.add(name);
+      if (this.peek().kind === TokenKind.LPAREN) {
+        this.advance();
+        const children = this.parseIdentList();
+        this.expect(TokenKind.RPAREN);
+        if (new Set(children).size !== children.length) {
+          throw new ParseError(`IMPORT subtable ${name} contains duplicate child declarations.`, this.prev());
+        }
+        let rowIdSourceHeader: string | undefined;
+        if (this.isSoftKeyword("ROW")) {
+          this.advance();
+          for (const word of ["ID", "SOURCE"]) {
+            if (!this.isSoftKeyword(word)) throw new ParseError(`ROW must be followed by ID SOURCE <header>.`, this.peek());
+            this.advance();
+          }
+          rowIdSourceHeader = this.parseIdentifier();
+        }
+        targets.push({ kind: "SUBTABLE", subtableCode: name, children, ...(rowIdSourceHeader ? { rowIdSourceHeader } : {}) });
+      } else {
+        fields.push(name);
+        targets.push({ kind: "FIELD", field: name });
+      }
+      if (this.peek().kind !== TokenKind.COMMA) break;
+      this.advance();
+    }
     this.expect(TokenKind.RPAREN);
     this.expect(TokenKind.FROM);
     if (!this.isSoftKeyword("CSV") && !this.isSoftKeyword("JSON")) throw new ParseError("IMPORT FROM requires CSV or JSON.", this.peek());
@@ -530,6 +560,9 @@ export class Parser {
         throw new ParseError("IMPORT projection supports SELECT expressions only.", this.prev());
       }
       this.validateImportProjectionScope(projection, this.prev());
+      if (targets.some((item) => item.kind === "SUBTABLE")) {
+        throw new ParseError("IMPORT subtable sources cannot use SELECT projection.", this.prev());
+      }
       if (projection.columns.length !== fields.length) {
         throw new ParseError(`IMPORT projection has ${projection.columns.length} columns; target has ${fields.length}.`, this.prev());
       }
@@ -564,6 +597,36 @@ export class Parser {
       recordNumberSourceHeader = this.parseIdentifier();
     }
     if (this.peek().kind === TokenKind.ON && this.peekAt(1).kind === TokenKind.DUPLICATE) keyFields = this.parseOnDuplicate();
+    let replaceSubtables: string[] | undefined;
+    // REPLACE predates IMPORT as a scalar-function token; accept that existing
+    // token without adding any of the Phase 5 words to the keyword table.
+    if (this.peek().kind === TokenKind.REPLACE || this.isSoftKeyword("REPLACE")) {
+      this.advance();
+      if (!this.isSoftKeyword("SUBTABLES")) throw new ParseError("REPLACE must be followed by SUBTABLES (...).", this.peek());
+      this.advance(); this.expect(TokenKind.LPAREN); replaceSubtables = this.parseIdentList(); this.expect(TokenKind.RPAREN);
+      if (new Set(replaceSubtables).size !== replaceSubtables.length) throw new ParseError("REPLACE SUBTABLES contains duplicates.", this.prev());
+    }
+    const subtableTargets = targets.filter((item): item is Extract<NonNullable<ImportStatement["targets"]>[number], { kind: "SUBTABLE" }> => item.kind === "SUBTABLE");
+    if (subtableTargets.length) {
+      if (projection) throw new ParseError("IMPORT subtables cannot use SELECT projection.", this.prev());
+      if (sourceKind === "JSON") {
+        if (subtableTargets.some((item) => item.rowIdSourceHeader)) throw new ParseError("JSON subtable IMPORT does not accept ROW ID SOURCE.", this.prev());
+        if (replaceSubtables) throw new ParseError("REPLACE SUBTABLES is CSV-only; JSON uses nested-array replacement semantics.", this.prev());
+      } else {
+        if (mappingMode !== "BY_NAME") throw new ParseError("CSV subtable IMPORT requires BY NAME.", this.prev());
+        if (!replaceSubtables) throw new ParseError("CSV subtable IMPORT requires REPLACE SUBTABLES (...).", this.prev());
+        const replacement = new Set(replaceSubtables);
+        for (const item of subtableTargets) {
+          if (!item.rowIdSourceHeader) throw new ParseError(`CSV subtable ${item.subtableCode} requires ROW ID SOURCE <header>.`, this.prev());
+          if (!replacement.has(item.subtableCode)) throw new ParseError(`IMPORT declares child columns for non-replaced subtable ${item.subtableCode}.`, this.prev());
+        }
+        for (const code of replacement) {
+          if (!subtableTargets.some((item) => item.subtableCode === code)) throw new ParseError(`REPLACE SUBTABLES target ${code} is not declared in INTO.`, this.prev());
+        }
+      }
+    } else if (replaceSubtables) {
+      throw new ParseError("REPLACE SUBTABLES requires subtable targets in INTO.", this.prev());
+    }
     if (writeMode) {
       if (sourceKind !== "CSV") throw new ParseError("IMPORT UPDATE supports CSV only.", this.prev());
       if (mappingMode !== "BY_NAME") throw new ParseError("IMPORT UPDATE requires BY NAME.", this.prev());
@@ -575,11 +638,12 @@ export class Parser {
     const checkGroups = this.parseCheckGroups();
     const control = this.parseDmlControlSuffix();
     return {
-      type: "IMPORT", appId, fields,
+      type: "IMPORT", appId, fields, targets,
       source: sourceKind === "JSON"
         ? { kind: "JSON", sourceName }
         : { kind: "CSV", sourceName, encoding, hasHeader, mappingMode, ignoreUnknownColumns, ...(columns ? { columns } : {}), ...(projection ? { projection } : {}) },
       ...(writeMode ? { writeMode, recordNumberSourceHeader } : {}),
+      ...(replaceSubtables ? { replaceSubtables } : {}),
       ...(keyFields ? { keyFields } : {}), ...checkGroups, ...control,
     };
   }

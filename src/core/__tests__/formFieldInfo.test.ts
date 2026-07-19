@@ -1,4 +1,4 @@
-import { flattenFormFieldProperties } from "../formFieldInfo";
+import { buildScopedSubtableFieldIndex, flattenFormFieldProperties } from "../formFieldInfo";
 
 test("TABLE.fields を再帰展開し、子フィールドの型・選択肢を保持する", () => {
   const fields = flattenFormFieldProperties({
@@ -49,6 +49,16 @@ test("TABLE.fields を再帰展開し、子フィールドの型・選択肢を�
   expect(fields.find((field) => field.code === "深い数値")?.semantics).toMatchObject({
     fieldType: "NUMBER", compareMode: "number", inSubtable: true,
   });
+});
+
+test("scoped subtable index preserves ownership for duplicate child codes", () => {
+  const index = buildScopedSubtableFieldIndex({
+    T1: { code: "T1", label: "T1", type: "SUBTABLE", fields: { value: { code: "value", label: "v1", type: "NUMBER" } } },
+    T2: { code: "T2", label: "T2", type: "SUBTABLE", fields: { value: { code: "value", label: "v2", type: "SINGLE_LINE_TEXT" } } },
+  });
+  expect(index.get("T1")?.children.get("value")?.fieldType).toBe("NUMBER");
+  expect(index.get("T2")?.children.get("value")?.fieldType).toBe("SINGLE_LINE_TEXT");
+  expect(index.get("T1")?.children.get("value")?.inSubtable).toBe(true);
 });
 
 test("VALIDATE ONLY用のフォーム制約メタデータを保持する", () => {

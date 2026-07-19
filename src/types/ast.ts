@@ -686,7 +686,7 @@ export interface InsertSelectStatement {
 }
 
 // ------------------------------------------------------------
-// IMPORT (B39 Phase 1: flat CSV)
+// IMPORT (B39)
 // ------------------------------------------------------------
 
 export type ImportEncoding = "utf8" | "sjis";
@@ -712,6 +712,16 @@ export interface JsonDmlSource {
   sourceName: string;
 }
 
+export type ImportTarget =
+  | { kind: "FIELD"; field: string }
+  | {
+      kind: "SUBTABLE";
+      subtableCode: string;
+      children: string[];
+      /** cli-kintone CSV row-id header. JSON deliberately has no row-id input. */
+      rowIdSourceHeader?: string;
+    };
+
 /** SELECT remains here so all three DML source paths share one materializer. */
 export type DmlSource =
   | { kind: "SELECT"; query: SelectStatement }
@@ -722,11 +732,15 @@ export interface ImportStatement {
   type: "IMPORT";
   appId: number;
   fields: string[];
+  /** Present for Phase 5 syntax; fields remains the top-level-only compatibility view. */
+  targets?: ImportTarget[];
   source: CsvDmlSource | JsonDmlSource;
   /** Dedicated pure-UPDATE mode; absence preserves INSERT/UPSERT behavior. */
   writeMode?: "UPDATE_RECORD_NUMBER";
   /** Exact, case-sensitive CSV header used only for record-number lookup. */
   recordNumberSourceHeader?: string;
+  /** CSV-only destructive replacement allow-list. */
+  replaceSubtables?: string[];
   /** Presence selects UPSERT; absence selects INSERT. */
   keyFields?: string[];
   validateOnly?: boolean;

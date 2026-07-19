@@ -4785,6 +4785,9 @@ async function executeImport(
   // Capability/source existence is synchronous and deliberately precedes form API reads.
   if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
   const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
+  if (stmt.targets?.some((target) => target.kind === "SUBTABLE")) {
+    throw new Error("UnsupportedError: IMPORT subtable mutation requires the dedicated Phase 5 preflight/confirm path.");
+  }
   if (stmt.writeMode === "UPDATE_RECORD_NUMBER") {
     return executeImportRecordNumberUpdate(
       stmt as ImportStatement & { writeMode: "UPDATE_RECORD_NUMBER" },

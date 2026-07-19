@@ -1,6 +1,7 @@
 import type { ProcessRow } from "../engine/process";
 import type { ImportEncoding } from "../types/ast";
 import type { DmlValidationErrorCode } from "../core/dmlValidation";
+import type { DecodedJsonValue } from "./jsonDecoder";
 
 export interface ImportSourcePayload {
   bytes: Uint8Array;
@@ -39,3 +40,19 @@ export interface ImportColumnAudit {
   ignoredKnownColumns: readonly IgnoredImportColumn[];
   ignoredUnknownColumns: readonly IgnoredImportColumn[];
 }
+
+/** Phase 5 two-level source model. Deliberately separate from flat ProcessRow. */
+export interface MaterializedImportChildRow {
+  childRowNumber: number;
+  sourceRowNumber?: number;
+  rowId?: string;
+  values: ReadonlyMap<string, DecodedJsonValue | string>;
+}
+export interface MaterializedImportRecord {
+  rowNumber: number;
+  markerRowNumber?: number;
+  top: ReadonlyMap<string, DecodedJsonValue | string>;
+  subtables: ReadonlyMap<string, readonly MaterializedImportChildRow[]>;
+  replacementTables: ReadonlySet<string>;
+}
+export interface MaterializedImportRecords { records: readonly MaterializedImportRecord[]; }
