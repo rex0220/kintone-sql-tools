@@ -4,6 +4,10 @@
 
 ## v3.5.0（2026-07-19）
 
+### 修正（正しさ）
+
+- **USER/ORGANIZATION/GROUP 選択フィールドの `INSERT / UPSERT … SELECT` payload を修正**。選択値の `[{code}]` を共通 DML 検証後も保持する。従来は `INSERT … SELECT` で検証正規化が `string[]` へ平坦化し、`UPSERT … SELECT` の更新側では JSON 文字列のままとなり、どちらも kintone REST の書込み形式と不一致だった。`INSERT … VALUES ('u1')` の従来変換（`[{code:'u1'}]`）は不変。
+
 ### 機能追加
 
 - **B41 既存レコードの制約チェック（`VALIDATE` 文）**。`VALIDATE <app> [(fields)] [WHERE …] [CHECK WHEN … THEN …] [INTO #err]` の read-only 監査文を追加。既存レコードを組み込み制約（必須・数値上下限・文字数・選択肢・B29 桁）とカスタムチェック（B37 構文）で検査し、違反を `$id / $err_field / $err_code / $err_message / $err_value` の 5 列で返す（`INTO #err` で複文再利用）。組み込み検証は生値（USER/ORG/GROUP 等の空配列を必須違反として検出）、WHERE・CHECK は flatten 値で評価する。read-only（書込み API 0 回・`--allow-dml` 不要・全 surface で `onLimit=truncate` を無効化）。WHERE は KLIKE・サブクエリ・修飾参照を静的拒否し、取得は `fetchAll`（offset＋`$id` keyset）＋安全 prefilter＋取得後ローカル再評価。`EXPLAIN VALIDATE` は取得フィールド・完全入力要否・metadata 利用を表示し、レコード/mutation API は呼ばず違反件数も出さない。単文 `VALIDATE … INTO #err` は temp スコープが無いため拒否。

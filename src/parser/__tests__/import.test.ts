@@ -28,6 +28,16 @@ describe("B39 IMPORT parser gate", () => {
       expect(() => parse(`IMPORT INTO APP1 (a) FROM JSON src ${suffix}`)).toThrow(/JSON|CSV-only/);
     }
   });
+
+  test("parses BY NAME soft keywords and enforces its Phase 3 exclusions", () => {
+    expect(parse("IMPORT INTO APP1 (a,b) FROM CSV src BY NAME IGNORE UNKNOWN COLUMNS")).toMatchObject({
+      source: { kind: "CSV", mappingMode: "BY_NAME", ignoreUnknownColumns: true },
+    });
+    expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src SELECT a BY NAME")).toThrow("mutually exclusive");
+    expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src NO HEADER BY NAME")).toThrow("requires HEADER");
+    expect(() => parse("IMPORT INTO APP1 (a) FROM JSON src BY NAME")).toThrow("CSV-only");
+    expect(parse("SELECT NAME, IGNORE, UNKNOWN, COLUMNS FROM APP1")).toMatchObject({ type: "SELECT" });
+  });
   test("rejects path literals and HEADER COLUMNS", () => {
     expect(() => parse("IMPORT INTO APP1 (a) FROM CSV 'x.csv'")).toThrow();
     expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src COLUMNS(a)")).toThrow("NO HEADER");

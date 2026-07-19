@@ -8,6 +8,7 @@ import {
   DeleteResult,
   OperationCancelledError,
   dmlSourceMaterializer,
+  DmlValidationResult,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type {
@@ -276,6 +277,136 @@ test("IMPORT CSV INSERT はnamed sourceを遅延loadして位置対応する", a
   ]);
 });
 
+test("IMPORT CSV BY NAME はヘッダ順を INTO 順へ写像し NUMBER 字面と5型LFを保持する", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "num", label: "num", fieldType: "NUMBER" },
+    { code: "cb", label: "cb", fieldType: "CHECK_BOX" },
+    { code: "ms", label: "ms", fieldType: "MULTI_SELECT" },
+    { code: "users", label: "users", fieldType: "USER_SELECT" },
+    { code: "orgs", label: "orgs", fieldType: "ORGANIZATION_SELECT" },
+    { code: "groups", label: "groups", fieldType: "GROUP_SELECT" },
+    { code: "calc", label: "calc", fieldType: "CALC", writable: false },
+    { code: "$id", label: "record number", fieldType: "RECORD_NUMBER", writable: false },
+    { code: "files", label: "files", fieldType: "FILE" },
+  ];
+  const csv = 'calc,groups,num,cb,ms,users,orgs,$id,files\nignored,"g1\ng2",12345678901234567890,"a\nb","m1\r\nm2","u1\nu2",o1,99,';
+  const imported = await execute("IMPORT INTO APP100 (num,cb,ms,users,orgs,groups) FROM CSV src BY NAME", client, {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+    cacheContext: "import-by-name-roundtrip",
+  });
+  expect(client.postCalls[0].records).toEqual([{
+    num: { value: "12345678901234567890" },
+    cb: { value: ["a", "b"] }, ms: { value: ["m1", "m2"] },
+    users: { value: [{ code: "u1" }, { code: "u2" }] },
+    orgs: { value: [{ code: "o1" }] }, groups: { value: [{ code: "g1" }, { code: "g2" }] },
+  }]);
+  expect((imported as InsertResult & { importAudit?: { ignoredKnownColumns: unknown[] } }).importAudit?.ignoredKnownColumns)
+    .toEqual(expect.arrayContaining([
+      expect.objectContaining({ column: "calc", nonEmptyCells: 1 }),
+      expect.objectContaining({ column: "$id", nonEmptyCells: 1 }),
+      expect.objectContaining({ column: "files", nonEmptyCells: 0 }),
+    ]));
+
+  const upsert = makeClient({ records: [], postIds: ["2"] });
+  upsert.getFields = client.getFields;
+  await execute("IMPORT INTO APP100 (num,cb,ms,users,orgs,groups) FROM CSV src BY NAME ON DUPLICATE (num)", upsert, {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+    cacheContext: "import-by-name-upsert-roundtrip",
+  });
+  expect(upsert.postCalls[0].records).toEqual(client.postCalls[0].records);
+  const precise = await execute("IMPORT INTO APP100 (num) FROM CSV src BY NAME VALIDATE ONLY", client, {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode("num\n123456789012345678901234567890") }) }),
+    cacheContext: "import-by-name-30-digit",
+  }) as DmlValidationResult;
+  expect(precise.errors).toEqual([expect.objectContaining({
+    num: "123456789012345678901234567890", $err_code: "ERR_NUMBER_INTEGER_DIGITS",
+    $err_message: expect.stringContaining("30 桁"),
+  })]);
+});
+
+test("IMPORT CSV BY NAME は未知列を既定拒否し opt-in 時だけ監査付きで無視する", async () => {
+  const source = () => ({ load: async () => ({ bytes: new TextEncoder().encode("code,mystery\nA,x\nB,") }) });
+  const make = () => {
+    const client = makeClient({ records: [], postIds: ["1", "2"] });
+    client.getFields = async () => [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" }];
+    return client;
+  };
+  const rejected = make();
+  await expect(execute("IMPORT INTO APP100 (code) FROM CSV src BY NAME", rejected, {
+    enableImport: true, importSource: source, cacheContext: "import-by-name-unknown-reject",
+  })).rejects.toThrow("ERR_IMPORT_UNKNOWN_COLUMN");
+  expect(rejected.postCalls).toHaveLength(0);
+
+  const allowed = make();
+  const spy = jest.spyOn(dmlSourceMaterializer, "materialize");
+  try {
+    const result = await execute("IMPORT INTO APP100 (code) FROM CSV src BY NAME IGNORE UNKNOWN COLUMNS", allowed, {
+      enableImport: true, importSource: source, cacheContext: "import-by-name-unknown-ignore",
+    });
+    const table = await spy.mock.results[0].value;
+    expect(table.importAudit?.ignoredUnknownColumns).toEqual([
+      { column: "mystery", reason: "unknown column ignored by explicit policy", nonEmptyCells: 1 },
+    ]);
+    expect((result as InsertResult & { importAudit?: unknown }).importAudit).toEqual(table.importAudit);
+  } finally { spy.mockRestore(); }
+});
+
+test("IMPORT CSV BY NAME schema errors are global; LF empty items are isolated by parent row", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "cb", label: "cb", fieldType: "CHECK_BOX" },
+  ];
+  const options = (csv: string, context: string) => ({
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+    cacheContext: context,
+  });
+  await expect(execute("IMPORT INTO APP100 (code,cb) FROM CSV src BY NAME", client,
+    options("code\nA", "import-by-name-missing"))).rejects.toThrow("ERR_IMPORT_MISSING_COLUMN");
+  const validated = await execute(
+    "IMPORT INTO APP100 (code,cb) FROM CSV src BY NAME VALIDATE ONLY",
+    client, options('code,cb\nOK,"a\nb"\nBAD,"x\n"', "import-by-name-lf-validate")
+  ) as DmlValidationResult;
+  expect(validated).toMatchObject({ validatedRows: 2, validRows: 1, invalidRows: 1 });
+  expect(validated.errors).toEqual([
+    expect.objectContaining({ code: "BAD", $err_field: "cb", $err_code: "ERR_IMPORT_MULTI_EMPTY_ITEM" }),
+  ]);
+  const batch = await executeBatch(
+    "IMPORT INTO APP100 (code,cb) FROM CSV src BY NAME ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    options('code,cb\nOK,"a\nb"\nBAD,"x\n"', "import-by-name-lf-isolation")
+  );
+  expect(batch.ok).toBe(true);
+  expect(client.postCalls.flatMap((call) => call.records)).toEqual([{ code: { value: "OK" }, cb: { value: ["a", "b"] } }]);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([
+    expect.objectContaining({ code: "BAD", $err_field: "cb", $err_code: "ERR_IMPORT_MULTI_EMPTY_ITEM" }),
+  ]);
+});
+
+test("IMPORT CSV BY NAME は非書込み/FILE の INTO 指定を拒否し EXPLAIN に互換契約を出す", async () => {
+  for (const [field, fieldType] of [["calc", "CALC"], ["files", "FILE"]] as const) {
+    const client = makeClient();
+    client.getFields = async () => [{ code: field, label: field, fieldType, writable: fieldType !== "CALC" }];
+    await expect(execute(`IMPORT INTO APP100 (${field}) FROM CSV src BY NAME`, client, {
+      enableImport: true,
+      importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(`${field}\nx`) }) }),
+      cacheContext: `import-by-name-nonwritable-${field}`,
+    })).rejects.toThrow("not writable");
+  }
+  const plan = await execute("EXPLAIN IMPORT INTO APP100 (num) FROM CSV src BY NAME IGNORE UNKNOWN COLUMNS", makeClient(), { enableImport: true }) as SelectResult;
+  const text = plan.rows.map((row) => row.plan).join("\n");
+  expect(text).toContain("mapping:       BY_NAME");
+  expect(text).toContain("multipleValueDelimiter: LF");
+  expect(text).toContain("sourceValueMode: string-preserving");
+  expect(text).toContain("roundTripNumericGuarantee");
+  expect(text).toContain("unknownColumnPolicy: ignore with audit/non-empty count");
+});
+
 test("IMPORT JSON INSERT は名前対応し、null と欠落を payload で区別する", async () => {
   const client = makeClient({ records: [], postIds: ["1", "2"] });
   client.getFields = async () => [
@@ -493,6 +624,63 @@ test("INSERT/UPSERT/検証候補は共通materializeDmlSourceを通り、通常S
   } finally {
     spy.mockRestore();
   }
+});
+
+test("非IMPORT INSERT/UPSERT SELECT は USER/ORG/GROUP の {code} 配列を REST payload まで保持する", async () => {
+  const selected = makeTypedRecord({
+    $id: "20", key: "A",
+    users: [{ code: "u1" }, { code: "u2" }],
+    orgs: [{ code: "o1" }], groups: [{ code: "g1" }],
+  });
+  const destination = makeTypedRecord({ $id: "10", key: "A" });
+  const fields = [
+    { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "users", label: "users", fieldType: "USER_SELECT" },
+    { code: "orgs", label: "orgs", fieldType: "ORGANIZATION_SELECT" },
+    { code: "groups", label: "groups", fieldType: "GROUP_SELECT" },
+  ];
+  const make = () => {
+    const client = makeClient({ recordsByApp: { 100: [destination], 200: [selected] }, postIds: ["1"] });
+    client.getFields = async () => fields;
+    return client;
+  };
+  const expected = {
+    key: { value: "A" },
+    users: { value: [{ code: "u1" }, { code: "u2" }] },
+    orgs: { value: [{ code: "o1" }] }, groups: { value: [{ code: "g1" }] },
+  };
+
+  const inserted = make();
+  await execute(
+    "INSERT INTO APP100 (key,users,orgs,groups) SELECT key,users,orgs,groups FROM APP200",
+    inserted, { cacheContext: "select-code-objects-insert" }
+  );
+  // preserveCodes 修正前は normalizeRaw({code}[]) が string[] へ平坦化していた。
+  expect(inserted.postCalls[0].records).toEqual([expected]);
+
+  const upserted = make();
+  await execute(
+    "UPSERT INTO APP100 (key,users,orgs,groups) SELECT key,users,orgs,groups FROM APP200 ON DUPLICATE (key)",
+    upserted, { cacheContext: "select-code-objects-upsert" }
+  );
+  expect(upserted.putCalls[0].records).toEqual([{ id: 10, record: expected }]);
+});
+
+test("非IMPORT VALUES の USER/ORG/GROUP 文字列変換は従来どおり {code} 配列を書く", async () => {
+  const client = makeClient({ postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "users", label: "users", fieldType: "USER_SELECT" },
+    { code: "orgs", label: "orgs", fieldType: "ORGANIZATION_SELECT" },
+    { code: "groups", label: "groups", fieldType: "GROUP_SELECT" },
+  ];
+  await execute(
+    "INSERT INTO APP100 (users,orgs,groups) VALUES ('u1','o1','g1')",
+    client, { cacheContext: "values-code-objects-unchanged" }
+  );
+  expect(client.postCalls[0].records).toEqual([{
+    users: { value: [{ code: "u1" }] },
+    orgs: { value: [{ code: "o1" }] }, groups: { value: [{ code: "g1" }] },
+  }]);
 });
 
 test("UPDATE VALIDATE ONLY は対象を読み取るがPUTせず$id順で検証する", async () => {

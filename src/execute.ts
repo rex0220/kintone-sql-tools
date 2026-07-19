@@ -259,6 +259,8 @@ export interface MaterializedTable {
   readonly columns: string[];
   readonly columnMeta?: MaterializedColumnMetaMap;
   readonly importPresence?: readonly ReadonlySet<string>[];
+  readonly importRowErrors?: readonly (readonly import("./import/types").ImportRowError[])[];
+  readonly importAudit?: import("./import/types").ImportColumnAudit;
 }
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
@@ -269,6 +271,7 @@ interface ImportExecutionSource {
   source: CsvDmlSource | JsonDmlSource;
   handle: ImportSourceHandle;
   cache: Map<ImportSourceHandle, Promise<Awaited<ReturnType<ImportSourceHandle["load"]>>>>;
+  audit?: import("./import/types").ImportColumnAudit;
 }
 const importSourceByDmlStatement = new WeakMap<object, ImportExecutionSource>();
 
@@ -3930,9 +3933,10 @@ async function buildSortKindsForSelect(
  * 型不明の場合は文字列のまま渡す。
  */
 function convertProcessRowValue(
-  raw: string,
+  raw: unknown,
   dstFieldType: string | undefined
 ): string | string[] | Array<{ code: string }> {
+  if (typeof raw !== "string") return raw as string[] | Array<{ code: string }>;
   const USER_TYPES  = new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
   const ARRAY_TYPES = new Set(["CHECK_BOX", "MULTI_SELECT"]);
 
@@ -4025,11 +4029,14 @@ function assertValidDmlRecords(
   records.forEach((record, rowIndex) => {
     for (const code of targetFields) {
       const info = infoByCode.get(code)!;
-      const result = validateAndNormalizeDmlValue(record[code]?.value ?? "", info, numberPrecision);
+      const original = record[code]?.value ?? "";
+      const result = validateAndNormalizeDmlValue(original, info, numberPrecision);
       if (!result.ok) {
         throw new Error(`DmlValidationError: ${result.code} ${result.message} (row=${rowIndex + 1}, field=${code})`);
       }
-      record[code] = { value: result.value };
+      const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(info.fieldType)
+        && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+      record[code] = { value: preserveCodes ? original : result.value };
     }
   });
 }
@@ -4227,6 +4234,7 @@ async function materializeValidationCandidates(
   let rows: unknown[][];
   let sourceRows: ProcessRow[] | undefined;
   let sourcePresence: readonly ReadonlySet<string>[] | undefined;
+  let sourceRowErrors: MaterializedTable["importRowErrors"];
   let evaluationTypes: ReadonlyMap<string, string> | undefined;
   if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
     assertInsertCheckRefs(stmt, stmt.fields);
@@ -4249,6 +4257,7 @@ async function materializeValidationCandidates(
     assertInsertCheckRefs(stmt, selectResult.columns);
     sourceRows = selectResult.rows;
     sourcePresence = selectResult.importPresence;
+    sourceRowErrors = selectResult.importRowErrors;
     const meta = selectResult.columnMeta;
     evaluationTypes = new Map(selectResult.columns.map((column) => {
       const columnMeta = meta?.get(column);
@@ -4267,7 +4276,7 @@ async function materializeValidationCandidates(
     payload: new Map(stmt.fields.flatMap((field, i) =>
       sourcePresence && !sourcePresence[index]?.has(field) ? [] : [[field, values[i]]]
     )),
-    preErrors: [],
+    preErrors: [...(sourceRowErrors?.[index] ?? [])],
     record: {},
     evaluationRow: sourceRows?.[index] ?? Object.fromEntries(
       stmt.fields.map((field, i) => [field, renderValidationValue(values[i])])
@@ -4783,7 +4792,12 @@ async function executeImport(
   const generated: InsertSelectStatement | UpsertSelectStatement = stmt.keyFields
     ? { type: "UPSERT_SELECT", ...common, keyFields: stmt.keyFields }
     : { type: "INSERT_SELECT", ...common };
-  importSourceByDmlStatement.set(generated, { source: stmt.source, handle, cache: new Map() });
+  const executionSource: ImportExecutionSource = { source: stmt.source, handle, cache: new Map() };
+  importSourceByDmlStatement.set(generated, executionSource);
+  const withAudit = <T extends ExecuteResult>(result: T): T => {
+    if (executionSource.audit) Object.assign(result, { importAudit: executionSource.audit });
+    return result;
+  };
   if (generated.validateOnly) {
     if (generated.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
     const result = await executeDmlValidation(generated, client, { ...options, onLimitReached: "error" }, cacheContext, tempTables, 1);
@@ -4794,17 +4808,19 @@ async function executeImport(
         materializedMetaByValidationResult.get(result) ?? new Map()
       );
     }
-    return result;
+    return withAudit(result);
   }
   if (generated.onErrorSkip) {
     if (!tempTables) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
-    return generated.type === "UPSERT_SELECT"
+    const result = await (generated.type === "UPSERT_SELECT"
       ? executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1)
-      : executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1);
+      : executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1));
+    return withAudit(result);
   }
-  return generated.type === "UPSERT_SELECT"
+  const result = await (generated.type === "UPSERT_SELECT"
     ? executeUpsertSelect(generated, client, options, cacheContext, tempTables)
-    : executeInsertSelect(generated, client, options, cacheContext, tempTables);
+    : executeInsertSelect(generated, client, options, cacheContext, tempTables));
+  return withAudit(result);
 }
 
 async function materializeDmlSource(
@@ -4830,7 +4846,8 @@ async function materializeDmlSource(
   const jsonTargets = stmt.fields.map((code) => ({ code, fieldType: targetByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }));
   const raw = imported.source.kind === "JSON"
     ? materializeJsonDmlSource(imported.source, payload, jsonTargets, rowLimit)
-    : materializeCsvDmlSource(imported.source, payload, rowLimit);
+    : materializeCsvDmlSource(imported.source, payload, rowLimit, stmt.fields, targetFields);
+  imported.audit = raw.importAudit;
   if (imported.source.kind === "JSON") return raw;
   if (!imported.source.projection) return raw;
   const projection = bindImportProjection(imported.source.projection);
@@ -4842,6 +4859,15 @@ async function materializeDmlSource(
 
 /** Shared INSERT/UPSERT/validation source boundary; exported to make route conformance observable. */
 export const dmlSourceMaterializer = { materialize: materializeDmlSource };
+
+function assertNoImportRowErrors(table: MaterializedTable): void {
+  for (let rowIndex = 0; rowIndex < (table.importRowErrors?.length ?? 0); rowIndex++) {
+    const first = table.importRowErrors?.[rowIndex]?.[0];
+    if (first) {
+      throw new Error(`DmlValidationError: ${first.code} ${first.message} (row=${rowIndex + 1}, field=${first.field})`);
+    }
+  }
+}
 
 async function executeInsertSelect(
   stmt: InsertSelectStatement,
@@ -4859,6 +4885,7 @@ async function executeInsertSelect(
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
   const { rows, columns } = sourceTable;
+  assertNoImportRowErrors(sourceTable);
 
   // 3. 列数チェック
   if (columns.length !== stmt.fields.length) {
@@ -5709,6 +5736,7 @@ async function executeUpsertSelect(
   // 2. SELECT を実行して結果行を取得（一時テーブル参照があれば注入経路で解決）
   const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
   const { rows, columns } = sourceTable;
+  assertNoImportRowErrors(sourceTable);
 
   if (columns.length !== stmt.fields.length) {
     const emptySourceHint = columns.length === 0 && rows.length === 0
@@ -5736,7 +5764,7 @@ async function executeUpsertSelect(
     stmt.fields.forEach((field, i) => {
       if (sourceTable.importPresence && !sourceTable.importPresence[rowIndex]?.has(field)) return;
       const raw = row[columns[i]] ?? "";
-      record[field] = { value: sourceTable.importPresence ? convertProcessRowValue(raw, fieldTypes.get(field)) : raw };
+      record[field] = { value: convertProcessRowValue(raw, fieldTypes.get(field)) };
     });
     return record;
   });
@@ -6445,14 +6473,25 @@ function buildExplainPlan(
       `  source:        ${query.source.kind} ${query.source.sourceName}`,
       `  sourceFormat:  ${query.source.kind}`,
       `  encoding:      ${query.source.kind === "JSON" ? "UTF8 only" : query.source.encoding ?? "UTF8 (or loader metadata)"}`,
-      `  mapping:       ${query.source.kind === "JSON" ? "BY NAME (INTO order)" : query.source.projection ? "SELECT expressions" : "POSITION"}`,
+      `  mapping:       ${query.source.kind === "JSON" ? "BY NAME (INTO order)" : query.source.projection ? "SELECT expressions" : query.source.mappingMode}`,
       ...(query.source.kind === "JSON" ? [
         `  duplicateKeyPolicy: reject`,
         `  numberLexemePolicy: preserve; JSON number accepts safe integer only`,
         `  precisionTargetsRequireString: true`,
         `  unknownKeyPolicy: reject`,
         `  presenceAware: true`,
-      ] : [`  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`]),
+      ] : [
+        `  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`,
+        ...(query.source.mappingMode === "BY_NAME" ? [
+          `  writtenColumns: ${query.fields.join(", ")}`,
+          `  knownExportColumns: audit and ignore with reason/non-empty count`,
+          `  unknownColumnPolicy: ${query.source.ignoreUnknownColumns ? "ignore with audit/non-empty count" : "ERR_IMPORT_UNKNOWN_COLUMN"}`,
+          `  multipleValueDelimiter: LF (CRLF or LF)`,
+          `  sourceValueMode: string-preserving`,
+          `  roundTripNumericGuarantee: exact CSV lexeme passes strict decimal validation`,
+          `  FILE: audit-ignore unless named in INTO (analyze error)`,
+        ] : []),
+      ]),
       `  sourceLimit:   10485760 bytes / ${query.fields.length} target columns`,
       `  key:           ${query.keyFields?.join(", ") ?? "none"}`,
       `  checks:        ${query.checkGroups?.length ?? 0}`,
