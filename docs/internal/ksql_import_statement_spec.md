@@ -1,7 +1,7 @@
 # B39 別案 — IMPORT 文（CSV → アプリ書込みの自己完結ステートメント）
 
 - 作成日: 2026-07-18
-- ステータス: **設計 R3・codex レビュー待ち・フラット CSV 実装着手可（2026-07-19）**。R2 review の P1×9 を §12 で確定＝①共通 `materializeDmlSource → MaterializedTable{rows,columns,columnMeta}` を新設し INSERT_SELECT/UPSERT_SELECT/候補生成の3経路を接続②CSV 射影は式 `AS alias` 必須・単純列は元名継承・CHECK は射影後の一意列名参照③検証は parse（COLUMNS/JOIN/サブクエリ静的）と実行時 preflight（ヘッダ由来）に分割・順序=source存在→B34→CSV→書込み④名前付き `<source>` に統一（`'path'` 削除）・loader は遅延関数 `importSource(name)→{bytes,encoding?}`⑤ON DUPLICATE は複合キー・レコード番号キー/添付は v2。**サブテーブル IMPORT は v1 非対応（§10.4・codex 裏取り済み）**。工数 11〜18 人日・SemVer minor。
+- ステータス: **設計 R4・Claude レビュー済（承認）・フラット CSV 実装着手可**（2026-07-19）。分担=codex 設計／Claude レビュー。R3 review の P1×4 を §13 で確定（Claude がコード裏取り・§13.9）＝共通源入口の内部契約を `MaterializedTable` に統一・射影後の意味型メタ推論・IMPORT UPSERT 全経路の源内キー重複 preflight・同期 source capability＋10 MiB 上限。**サブテーブル・添付・レコード番号キー・CSV↔アプリ JOIN は v2**。工数 17〜27 人日・SemVer minor。
 - 分担: Claude=仕様/観点・Codex=実装/テスト
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B39
 - 対比: [bind 案 R2](ksql_csv_bind_import_spec.md)・[評価](ksql_import_export_evaluation.md)
@@ -23,7 +23,7 @@ IMPORT 文は **「CSV を読み、必要なら射影して、アプリへ INSER
 
 ```text
 IMPORT INTO <app> ( <field1>, <field2>, ... )
-FROM CSV '<path>' [ ENCODING { UTF8 | SJIS } ] [ NO HEADER ] [ COLUMNS ( <c1>, <c2>, ... ) ]
+FROM CSV <source> [ ENCODING { UTF8 | SJIS } ] [ NO HEADER ] [ COLUMNS ( <c1>, <c2>, ... ) ]
 [ SELECT <式1>, <式2>, ... ]              -- 任意: CSV 列に対する射影（既定は位置対応）
 [ ON DUPLICATE ( <key> ) ]                -- 指定で UPSERT、無指定で INSERT
 [ CHECK WHEN <条件> THEN <メッセージ> ... ] -- B37
@@ -33,14 +33,14 @@ FROM CSV '<path>' [ ENCODING { UTF8 | SJIS } ] [ NO HEADER ] [ COLUMNS ( <c1>, <
 例:
 ```sql
 IMPORT INTO APP123 (顧客コード, 金額)
-FROM CSV 'sales.csv' ENCODING SJIS
+FROM CSV sales ENCODING SJIS
 SELECT 顧客コード, CAST(金額 AS NUMBER)
 ON DUPLICATE (顧客コード)
 CHECK WHEN CAST(金額 AS NUMBER) < 0 THEN CONCAT('金額が負: ', 金額)
 ON ERROR SKIP INTO #err;
 ```
 
-- `FROM CSV '<path>'`：CLI がローカルパスを読む。`IMPORT`/`CSV` はソフトキーワード（後述の予約語方針）。
+- `FROM CSV <source>`：面が供給する名前付き source。SQL にローカルパスは埋め込まない。`IMPORT`/`CSV` はソフトキーワード（後述の予約語方針）。
 - `COLUMNS (...)`：`NO HEADER` 時の CSV 列名（省略時 `c1..cn`）。ヘッダ有りは 1 行目を列名に。
 - `SELECT <式>`：**CSV 列を入力にした射影**（B38 の `ScalarValueExpr` を再利用・`CAST`/関数/`||`/`@var` 可）。**CSV 列のみのスコープ**（アプリ参照・JOIN・サブクエリ不可）。省略時は `INTO` 列へ**位置対応**。
 - 射影の出力列数 = `INTO` の列数（不一致はエラー）。
@@ -70,7 +70,7 @@ ON ERROR SKIP INTO #err;
 
 ## 5. パーサ・実行の要点
 
-- **パーサ**：`IMPORT INTO app (fields) FROM CSV '…' […] [SELECT …] [ON DUPLICATE …] [CHECK …] [処分]`。AST は `InsertSelect`/`UpsertSelect` に近い新ノード（源が `{ kind: "CSV_FILE", path, encoding, hasHeader, columns } ＋ 任意射影`）。`IMPORT`/`CSV`/`ENCODING`/`NO HEADER`/`COLUMNS` は**ソフトキーワード**（新規予約語を増やさない方針・`CHECK WHEN` 前例）。
+- **パーサ**：`IMPORT INTO app (fields) FROM CSV <source> […] [SELECT …] [ON DUPLICATE …] [CHECK …] [処分]`。AST は `InsertSelect`/`UpsertSelect` に近い新ノード（源が `{ kind: "CSV", sourceName, encoding, hasHeader, columns } ＋ 任意射影`）。`IMPORT`/`CSV`/`ENCODING`/`NO HEADER`/`COLUMNS` は**ソフトキーワード**（新規予約語を増やさない方針・`CHECK WHEN` 前例）。
 - **実行**：`executeInsertSelect`/`executeUpsertSelect`（[execute.ts:4446](../../src/execute.ts)/[5282](../../src/execute.ts)）の**源取得（SELECT 実行）を「CSV 読取→射影評価→rows」に分岐**。以降（フィールド検証・位置対応・`ON DUPLICATE`・`CHECK`・`ON ERROR SKIP`）は不変で再利用。
 - **CSV/エンコーディング**：`TextDecoder({fatal:true})`（SJIS/UTF8・不正バイトは error）・RFC4180 パース（引用符・`""`・セル内改行/カンマ・CRLF/LF）・BOM 除去・行幅不一致/空列名は error（行/列/ファイル名付き）。
 - **行数上限**：`tempTableMaxRows` 相当を CSV 読取段で適用。
@@ -215,3 +215,87 @@ Claude が P1-1 を実ファイルで裏取り（`runSelectLike`=CREATE_TEMP_TAB
 
 ### 12.7 実装着手可・工数・SemVer
 - R3 の6点を確定＝**フラット CSV IMPORT は実装着手可**。主コスト＝共通 `materializeDmlSource` 抽出＋3経路接続・CSV decoder/parser・loader capability＋面配線・パーサ・EXPLAIN。工数 **11〜18 人日**（CLI のみ下側・全面 picker UI まで上側）。**SemVer minor**。サブテーブル・添付・レコード番号キー・CSV↔アプリ JOIN は v2。
+
+---
+
+## 13. R4 確定事項（保守 v1・実装着手可）
+
+R3 review の P1×4 と P2 を、現行コードの契約に合わせて確定する。R4 の対象はフラット CSV の INSERT/UPSERT のみで、サブテーブル・添付・レコード番号キー・CSV↔アプリ JOIN は v2 のままとする。
+
+### 13.1 共通源入口の内部契約は `MaterializedTable`（P1-1）
+
+- `materializeDmlSource(source, client, options, cacheContext, tempTables): Promise<MaterializedTable>` を新設する。`MaterializedTable` は現行どおり `rows`・`columns`・任意の `columnMeta` を一体で保持する（[execute.ts:244-257](../../src/execute.ts#L244)）。`source` は公開 AST の `DmlSource = {kind:"SELECT"; query: SelectStatement} | {kind:"CSV"; sourceName:string; encoding?:ImportEncoding; hasHeader:boolean; columns?:string[]; projection?:ImportProjection[]}` とする。
+- `executeInsertSelect` の SELECT 実行（[execute.ts:4726-4743](../../src/execute.ts#L4726)）、`executeUpsertSelect` の SELECT 実行（[execute.ts:5578-5595](../../src/execute.ts#L5578)）、`materializeValidationCandidates` の SELECT 実行（[execute.ts:4189-4215](../../src/execute.ts#L4189)）をすべてこの関数へ接続し、3経路のローカル変数を `SelectResult` ではなく `MaterializedTable` にする。これは「源だけ差替え、下流不変」ではなく、**共通内部契約を `MaterializedTable` へ変更する再編**である。
+- CHECK/VALIDATE 経路は `materializedMetaBySelectResult.get(selectResult)` を廃止し、`table.columnMeta` を直接参照して `evaluationTypes` を構築する。現状は WeakMap からメタを取得し、数値メタがなければ `SINGLE_LINE_TEXT` に落としている（[execute.ts:4220-4233](../../src/execute.ts#L4220)）。通常 INSERT/UPSERT も同じ `table.rows`・`table.columns` を受け、既存の列数検査（[execute.ts:4745-4752](../../src/execute.ts#L4745), [execute.ts:5597-5603](../../src/execute.ts#L5597)）と位置対応 `columns[i] -> fields[i]`（[execute.ts:4764-4770](../../src/execute.ts#L4764), [execute.ts:5616-5623](../../src/execute.ts#L5616)）を再利用する。
+- **アダプタは SELECT 境界に一方向だけ置く**。既存 `executeSelect`/`executeQueryWithCte` の公開戻りは `SelectResult` のまま保ち、`materializeDmlSource` の SELECT 分岐内で `SelectResult -> MaterializedTable` に変換し、WeakMap のメタをそこで回収する。既存 CTE 実体化も同じ変換を行っている（[execute.ts:3043-3060](../../src/execute.ts#L3043)）。逆方向 `MaterializedTable -> SelectResult` はDML源処理には不要なので新設しない。公開 `SelectResult` とその WeakMap 契約は非DML利用者の互換性のため残す（[execute.ts:259-261](../../src/execute.ts#L259)）。
+
+### 13.2 CSV射影後の列メタは式から推論する（P1-2）
+
+- 射影**前**の生CSV列はすべて string とし、`fieldType:"KSQL_STRING"`・`sortKind:"string"`・string semantics を持つ。射影**後**は出力式ごとに `MaterializedColumnMeta` を作り、`MaterializedTable.columnMeta` に出力列名で格納する。CHECK が `fieldType`/`semantics.compareMode`/`sortKind` から比較型を決める現行動作（[execute.ts:4225-4232](../../src/execute.ts#L4225)）のため、射影後を一律 string にはしない。
+- 推論規則は次で固定する。(1) 単純列参照は入力列メタを継承、(2) 文字列リテラル・文字列関数・`CONCAT`・`||` は string、(3) 数値リテラル・`CAST(... AS NUMBER)`・算術式は number、(4) `CASE` は全 `THEN` と `ELSE` を再帰推論し、全枝 number なら number、全枝 string なら string、混在または `ELSE` なしは string、(5) `CAST(... AS 文字列型)` は string、(6) 変数、未対応CAST型、その他導出不能な式は安全側の string とする。number は `fieldType:"NUMBER"`・`sortKind:"number"`・number semantics、string は上記 string メタに正規化する。既存 SELECT も算術を number、文字列関数を関数メタ、それ以外の未確定スカラー/CASEを string と分類している（[execute.ts:1761-1785](../../src/execute.ts#L1761)）。
+- 射影参照検査はトップレベルだけでなく `ScalarValueExpr` 全体を再帰走査する。対象は `FieldRef`、`SCALAR_ARITH.left/right`、`CONCAT_OP.left/right`、全 `StringFuncExpr.args`、`CASE` の各 `condition` 内の FieldRef・各 `result`・`elseResult` である。AST上も `ScalarValueExpr` は関数・算術・連結・CASEを内包し（[ast.ts:774-786](../../src/types/ast.ts#L774)）、CASEは条件と枝値を別に持ち（[ast.ts:342-353](../../src/types/ast.ts#L342)）、関数引数も `ScalarValueExpr` を再帰的に含む（[ast.ts:302-309](../../src/types/ast.ts#L302)）。修飾参照・変数以外の未知列・サブクエリ・集約・JOINは v1 で拒否する。
+
+### 13.3 IMPORT UPSERTは全経路で源内キー重複を拒否する（P1-3）
+
+- **処分句の有無に関係なく**、IMPORT UPSERT は materialize/射影後かつkintone照合read前の共通preflightで源内キー重複を検査し、1件でもあれば書込み0件で `ERR_KEY_DUP_SOURCE` として文全体を拒否する。`VALIDATE ONLY`/`ON ERROR SKIP` の隔離対象にはしない。強い安全契約を全経路で同一にし、同一キーの行順で最終値が変わる意味論を導入しない。
+- 現状の `ERR_KEY_DUP_SOURCE` は候補生成内にしかなく（[execute.ts:4253-4273](../../src/execute.ts#L4253)）、通常 UPSERT SELECT は候補生成を通らず、照合結果を行ごとに insert/update へ振り分ける（[execute.ts:5626-5640](../../src/execute.ts#L5626)）。また CHECK 付きだけが検証側へ分岐する（[execute.ts:5586-5589](../../src/execute.ts#L5586)）。したがって既存関数に任せず、IMPORT専用の共通preflightとして明示的に追加する。
+- キーは `keyFields[]` の全要素からなる複合キーで比較する（ASTも配列契約、[ast.ts:655-666](../../src/types/ast.ts#L655)）。正規化は既存 `upsertNormalizedKey(parts,numeric)` と転送先 `fieldTypes` を再利用し、空キーは既存 `ERR_KEY_EMPTY` とする。キーは全て `INTO fields` に含む必要がある（[execute.ts:4250-4256](../../src/execute.ts#L4250)）。`RECORD_NUMBER` は非書込み型（[execute.ts:3939-3942](../../src/execute.ts#L3939)）なので v1 のキーに指定不可とする。
+
+### 13.4 loader順序・単一契約・byte上限（P1-4）
+
+- 方式 (b) を採る。公開型を次で固定する: `ImportSourceHandle = { load(): Promise<{bytes:Uint8Array; encoding?:"utf8"|"sjis"}> }`、`ExecuteOptions.importSource?: (name:string) => ImportSourceHandle | undefined`。resolver は**同期**で存在/capabilityだけを返し、bytes取得は `load()` まで遅延する。`hasImportSource` と非同期loaderの二本立てにはしない。
+- 実行順は (1) `importSource(sourceName)` を同期呼出しして handle の存在を確認、なければ `UnsupportedSourceError`、(2) B34相当の転送先フィールド検証、(3) `handle.load()`、(4) byte上限検査、(5) decode/CSV parse/射影、(6) IMPORT UPSERT重複preflight、DML検証/CHECK/confirm、書込み、とする。現行 INSERT/UPSERT SELECT が源取得より先に転送先を検査する順序（[execute.ts:4735-4742](../../src/execute.ts#L4735), [execute.ts:5587-5594](../../src/execute.ts#L5587)）を維持できる。handle と `load()` の Promise/結果は**文単位でキャッシュ**し、同じ文内で3経路から再解決・再読込しない。バッチの別文は別キャッシュとする。
+- `hasHeader` と `columns` はSQL ASTだけが所有し、loaderは供給しない。loaderが返せるメタは任意 `encoding` だけとし、SQLの `ENCODING` があればSQL優先、双方なければ UTF-8 とする。これでR3の「戻りはencodingのみ」と「loaderがhasHeader/columnsも供給」の矛盾を解消する。
+- 最大サイズは **10 MiB = 10,485,760 bytes/文/source**。共有エンジンの `IMPORT_SOURCE_MAX_BYTES` 既定値と `ExecuteOptions.importMaxBytes?: number`（正整数、既定10 MiB）で管理し、CLI/MCP/pluginはいずれも解決値を options に渡す。`load()` 後、decode前に `bytes.byteLength` を検査し、超過は `ArgumentError: import source <name> exceeds max bytes (<limit>).`、書込み0件とする。行数上限はbyte上限とは別に既存 `tempTableMaxRows` 相当を適用する。現行の実行上限が `ExecuteOptions` に集約され（[execute.ts:350-370](../../src/execute.ts#L350)）、バッチ実体化上限も各面から渡される（[cli/index.ts:2088-2106](../../src/cli/index.ts#L2088), [tools.ts:711-721](../../src/mcp/tools.ts#L711), [desktop.ts:2008-2021](../../src/ui/desktop.ts#L2008)）構造に合わせる。
+
+### 13.5 CSV列名・構文・公開型（P2）
+
+- 構文は§2・§5を含め全て `FROM CSV <source>` に統一する。`<source>` は識別子またはバッククォート識別子で、文字列pathは受け付けない。
+- HEADER時はBOM除去後の第1レコードを列名とし、trimや大小文字変換をせず完全一致で扱う。空ヘッダ名と重複ヘッダ名は、データ行の有無にかかわらず列番号付きParseError。HEADER時の `COLUMNS` は禁止する。`NO HEADER COLUMNS(c1,...)` は列数と各データ行幅の一致、空名なし、一意を必須とする。`NO HEADER` で `COLUMNS` 省略時は最初のデータ行幅から `c1..cn` を生成し、後続行も同幅を必須とする。CSV 0データ行は§3.5どおりエラー。
+- `ImportStatement`、`DmlSource`、`ImportEncoding`、`ImportSourceHandle` は export し、トップレベル `Statement` union（現状の列挙箇所 [ast.ts:15-34](../../src/types/ast.ts#L15)）と `ExplainStatement.query` に IMPORT を追加する。`ExecuteOptions` には §13.4 の `importSource` と `importMaxBytes` を追加する。共有コアは `Uint8Array` だけを扱い、Node `fs`・DOM `File`・MCP入力形式を持ち込まない。
+
+### 13.6 各実行面の配線範囲（P2）
+
+- **CLI**: `--import-csv <name>=<path>`（複数可）をparseし、同期resolverでnameを引き、handleの `load()` 内だけでfs読込する。単文 `execute` と `executeBatch` の両optionsへ `importSource`/`importMaxBytes` を渡す。現行の両呼出し位置は [cli/index.ts:2088-2121](../../src/cli/index.ts#L2088)。同名指定は引数エラー、未参照sourceは読まない。
+- **MCP**: `ksql_mutate` とDMLを許可するsaved-query入力に名前付きinline source（base64またはUTF-8 textの排他的union）と `importMaxBytes` を追加し、decodeしたbytesを返すhandle mapをruntimeから単文/バッチへ渡す。現行のmutate単文/バッチoptions配線は [tools.ts:700-730](../../src/mcp/tools.ts#L700), [tools.ts:782-804](../../src/mcp/tools.ts#L782)。read-only toolはIMPORTを拒否する。
+- **plugin**: 実行前pickerで選択した `File` をsource名へ束縛し、handleの `load()` で `arrayBuffer()` を読む。単文とバッチ双方へoptionsを渡す（現行呼出し [desktop.ts:2008-2021](../../src/ui/desktop.ts#L2008), [desktop.ts:2166-2174](../../src/ui/desktop.ts#L2166)）。未束縛sourceは実行前エラー。ビルド生成物 `plugin/js/desktop.js` は直接編集しない。
+- parser/analyze、単文dispatch、batchのDML分類・`VALIDATE ONLY`/`ON ERROR SKIP INTO` temp依存、EXPLAIN、CLI/MCP/pluginの入力schema/help、共有コアと各面の単体/統合testまでをv1実装範囲とする。
+
+### 13.7 工数・SemVer・着手判定
+
+- R3の11〜18人日は、共通入口を `MaterializedTable` に揃える3経路再編、CHECKのWeakMap依存除去、式型メタ推論、全UPSERT経路の重複preflight、3実行面の入力/UI・単文/バッチ全面配線を過小評価していた。現実的な段階見積りは、(1) AST/parser/analyze/EXPLAIN **3〜4人日**、(2) 共通materializer・3経路再編・CHECK改修 **4〜6人日**、(3) CSV decode/parser/列契約/byte・row上限 **3〜4人日**、(4) 射影評価・参照収集・型メタ推論 **3〜4人日**、(5) UPSERT重複preflight/B34/B12統合 **1.5〜2.5人日**、(6) CLI/MCP/plugin配線 **3〜4人日**、(7) 非回帰・文書・release確認 **2〜3人日**。一部並行化を見込み合計 **17〜27人日**（レビュー修正を除く）。
+- 新文・新公開option・各面入力の追加であり既存SQLの意味を変えないため **SemVer minor**。R4のP1×4は確定したので、Claude reviewで新たなP1が出ない限り**フラットCSV実装着手可**。サブテーブル等v2項目は着手条件に含めない。
+
+### 13.8 Claude レビュー用の要確認ポイント
+
+1. `MaterializedTable` への統一で、CHECK経路に `SelectResult`/WeakMap依存が残らず、通常INSERT/UPSERTの位置対応も維持されているか。
+2. CASE・関数引数・算術・`||`までの再帰参照収集と、混在/導出不能をstringへ倒す型メタ規則がB37比較契約と矛盾しないか。
+3. IMPORT UPSERTの重複preflightが処分句に左右されず、kintone照合read・confirm・書込みより前に全件拒否するか。
+4. 同期resolver→B34→`load()`→byte検査の順序と文単位cacheが、単文/バッチ/CHECKの全dispatchで一貫するか。
+5. `hasHeader`/`columns` はSQL、bytes/任意encodingはloaderという責務分離、10 MiB上限、HEADER/NO HEADER列名契約が各面とtestに同じ形で露出するか。
+6. CLI/MCP/pluginの単文・バッチ双方、DML分類、temp error table、EXPLAIN、help/schemaまで配線漏れがないか。
+
+---
+
+## 13.9 Claude レビュー結果（R4・2026-07-19・承認・実装着手可）
+
+codex 執筆の §13 を Claude がコードで裏取り。**判定＝承認・フラット CSV IMPORT は実装着手可**。P1×4 はいずれも現行契約に沿って正しく解決されている。
+
+### 裏取りで正確だった点
+- §13.1: `MaterializedTable`（[execute.ts:244-257](../../src/execute.ts#L244)）・候補生成の WeakMap columnMeta（[execute.ts:4225](../../src/execute.ts#L4225)）・位置対応 `columns[i]→fields[i]`・CTE の `SelectResult→MaterializedTable` 変換（3043-3060）。「共通内部契約を MaterializedTable へ変更・CHECK は columnMeta 直参照」は正しい修正。
+- §13.2: 既存 SELECT の列型分類（[execute.ts:1761-1785](../../src/execute.ts#L1761)＝ARITH→number・STRFUNC→関数メタ・LITERAL/CASE/SCALAR_VALUE→string）と、射影後型推論規則（算術/CAST NUMBER=number・文字列関数/CONCAT/||=string・CASE 共通型・導出不能=string）が整合。`ScalarValueExpr`/CASE/関数引数の再帰走査も AST（ast.ts:774/342/302）と一致。
+- §13.3: `ERR_KEY_DUP_SOURCE` は候補生成のみ（[execute.ts:4271](../../src/execute.ts#L4271)）・通常 UPSERT は insert/update 振り分け（5626）→ IMPORT 専用の共通 preflight 追加は妥当。複合キー・RECORD_NUMBER 非対応も正。
+- §13.4: `ExecuteOptions`（350-370）・CLI/MCP/plugin の options 配線（cli:2088・tools:700/782・desktop:2008/2166）確認。同期 resolver＋遅延 `load()`＋文単位 cache・hasHeader/columns は SQL・10 MiB 上限は R3 の契約矛盾を解消。
+
+### codex 6 確認ポイントへの回答
+1. MaterializedTable 統一で CHECK の WeakMap 依存除去・位置対応維持＝OK（§13.1 のとおり）。
+2. 再帰参照収集と混在/導出不能→string の型規則は B37 比較契約（columnMeta 由来）と矛盾しない＝OK。
+3. IMPORT UPSERT の重複 preflight が処分句非依存・照合read/confirm/書込み前に全件拒否＝OK。
+4. 同期 resolver→B34→`load()`→byte 検査の順序・文単位 cache が3経路で一貫＝OK（§13.4）。
+5. hasHeader/columns=SQL・bytes/任意 encoding=loader の責務分離・10 MiB・列名契約＝OK。
+6. CLI/MCP/plugin の単文/バッチ・DML 分類・temp error table・EXPLAIN・help/schema の配線範囲＝§13.5/13.6 で網羅。
+
+### 観察（実装時に留意・ブロッカーではない）
+- **IMPORT UPSERT は通常 `UPSERT … SELECT` より厳格**＝源内キー重複を無条件拒否する（通常 UPSERT SELECT は振り分けて処理）。CSV 取込の安全契約として妥当だが、両者の挙動差を言語リファレンス/レシピに明記すること（利用者が「UPSERT SELECT と同じ」と誤解しないため）。
+
+**着手条件**: §13 の確定（共通 materializeDmlSource・型メタ推論・重複 preflight・同期 loader・10 MiB）を守り、共通基盤→CSV パーサ/loader→3経路接続→各面配線→回帰の順。サブテーブル/添付/レコード番号キー/CSV↔アプリ JOIN は v2。
