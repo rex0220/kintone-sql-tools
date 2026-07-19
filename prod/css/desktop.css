@@ -638,6 +638,9 @@
   flex: 0 0 auto;
 }
 
+.ksql-import-file { max-width: 190px; }
+.ksql-import-status { align-self: center; color: #546e7a; font-size: 12px; }
+
 .ksql-run-btn,
 .ksql-explain-btn,
 .ksql-clear-btn {

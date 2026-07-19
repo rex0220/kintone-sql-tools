@@ -163,6 +163,37 @@ function requireSingleStatement(
 const DEFAULT_MAX_RECORDS = 500;
 const DEFAULT_ON_LIMIT: OnLimitMode = "error";
 
+type InlineImportInput = { importSources?: Array<{ name: string; text?: string; base64?: string; encoding?: "utf8" | "sjis" }> };
+
+function importCapability(input: InlineImportInput): Pick<ExecuteOptions, "enableImport" | "importSource"> {
+  const sources = input.importSources;
+  if (!sources || sources.length === 0) return {};
+  const byName = new Map<string, { bytes: Uint8Array; encoding?: "utf8" | "sjis" }>();
+  for (const source of sources) {
+    if (byName.has(source.name)) throw new Error(`ArgumentError: duplicate import source name: ${source.name}`);
+    let bytes: Uint8Array;
+    if (source.text !== undefined && source.base64 === undefined) {
+      bytes = new TextEncoder().encode(source.text);
+    } else if (source.base64 !== undefined && source.text === undefined) {
+      const normalized = source.base64.replace(/\s/g, "");
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalized)) {
+        throw new Error(`ArgumentError: invalid base64 for import source: ${source.name}`);
+      }
+      bytes = new Uint8Array(Buffer.from(normalized, "base64"));
+    } else {
+      throw new Error(`ArgumentError: import source ${source.name} requires exactly one of text or base64.`);
+    }
+    byName.set(source.name, { bytes, encoding: source.encoding });
+  }
+  return {
+    enableImport: true,
+    importSource: (name) => {
+      const source = byName.get(name);
+      return source ? { load: async () => source } : undefined;
+    },
+  };
+}
+
 function noOpClient(): KintoneClient {
   const fail = async (): Promise<never> => {
     throw new Error("No-op client should not be called.");
@@ -432,11 +463,12 @@ export function createKsqlMcpTools(
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const importOptions = importCapability(input);
     // validate-all-first: 全文をパース・分類し、1文でも不正なら全体を拒否
     //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
     let analysis: ReturnType<typeof analyzeBatch>;
     try {
-      const statements = parseSqlStatements(normalized.normalizedSql);
+      const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
@@ -504,12 +536,13 @@ export function createKsqlMcpTools(
 
   async function explain(input: ExplainInput): Promise<Record<string, unknown>> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const importOptions = importCapability(input);
     const appBindings = toExplainBindings(normalized.appBindingByMappedApp);
 
     // バッチ入力: 全文のプランを配列で返す（フェーズ2 M3。実行はしない）
     let statements: ReturnType<typeof parseSqlStatements>;
     try {
-      statements = parseSqlStatements(normalized.normalizedSql);
+      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
@@ -535,7 +568,8 @@ export function createKsqlMcpTools(
         undefined,
         explainCacheContext,
         runtime?.maxRecords ?? input.maxRecords,
-        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
+        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+        importOptions.enableImport
       );
       return {
         ok: true,
@@ -550,6 +584,7 @@ export function createKsqlMcpTools(
       cacheContext: explainCacheContext,
       maxRecords: runtime?.maxRecords ?? input.maxRecords,
       cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      ...importOptions,
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -565,6 +600,7 @@ export function createKsqlMcpTools(
     validated?: ValidationResult
   ): Promise<Record<string, unknown>> {
     const validation = validated ?? await validate(input);
+    const importOptions = importCapability(input);
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");
     }
@@ -600,6 +636,7 @@ export function createKsqlMcpTools(
         timeoutMs: runtime.timeout,
         cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
         variables: input.variables,
+        ...importOptions,
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
@@ -616,6 +653,7 @@ export function createKsqlMcpTools(
         maxRecords: input.maxRecords ?? DEFAULT_MAX_RECORDS,
         onLimitReached: input.onLimit ?? DEFAULT_ON_LIMIT,
         cacheContext: validation.cacheContext,
+        ...importOptions,
       });
       if (result.type === "ASSERT") return toAssertPayload(result);
       if (result.type === "VALIDATION") return toDmlValidationPayload(result);
@@ -641,6 +679,7 @@ export function createKsqlMcpTools(
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
       cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      ...importOptions,
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type === "VALIDATION") return toDmlValidationPayload(result);
@@ -661,6 +700,7 @@ export function createKsqlMcpTools(
     validation: BatchValidationResult,
     dmlMaxRows: number
   ): Promise<Record<string, unknown>> {
+    const importOptions = importCapability(input);
     if (!validation.containsDml) {
       throw new Error("ArgumentError: batch contains no DML statements. Use ksql_query.");
     }
@@ -719,6 +759,7 @@ export function createKsqlMcpTools(
       timeoutMs: runtime.timeout,
       cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
       variables: input.variables,
+      ...importOptions,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
           throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
@@ -753,6 +794,7 @@ export function createKsqlMcpTools(
     validated?: ValidationResult
   ): Promise<Record<string, unknown>> {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
+    const importOptions = importCapability(input);
 
     const validation = validated ?? await validate(input);
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
@@ -801,6 +843,7 @@ export function createKsqlMcpTools(
           }
           return true;
         },
+        ...importOptions,
       });
     } catch (err) {
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;

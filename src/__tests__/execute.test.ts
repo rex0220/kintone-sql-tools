@@ -1,11 +1,13 @@
 import {
   execute,
+  executeBatch,
   KintoneClient,
   SelectResult,
   InsertResult,
   UpdateResult,
   DeleteResult,
   OperationCancelledError,
+  dmlSourceMaterializer,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type {
@@ -199,12 +201,182 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
     client,
     { cacheContext: "validate-upsert" }
   );
-  expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 2, invalidRows: 2, errorCount: 2 });
+  expect(result).toMatchObject({
+    type: "VALIDATION", operation: "UPSERT", validatedRows: 2, validRows: 0, invalidRows: 2, errorCount: 2,
+  });
   if (result.type !== "VALIDATION") throw new Error("unexpected result");
-  expect(result.errors.every((row) => row.$err_code === "ERR_KEY_DUP_SOURCE")).toBe(true);
+  expect(result.errors.map((row) => row.$err_code)).toEqual(["ERR_KEY_DUP_SOURCE", "ERR_KEY_DUP_SOURCE"]);
   expect(client.getCalls.length).toBeGreaterThan(0);
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
+});
+
+test("IMPORT UPSERT はsource重複を照合read前に文全体拒否する", async () => {
+  const client = makeClient({ records: [] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await expect(execute(
+    "IMPORT INTO APP100 (code, name) FROM CSV people ON DUPLICATE (code)",
+    client,
+    {
+      enableImport: true,
+      importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode("code,name\nA,one\nA,two") }) }),
+      cacheContext: "import-upsert-duplicate",
+    }
+  )).rejects.toThrow("ERR_KEY_DUP_SOURCE");
+  expect(client.getCalls).toHaveLength(0);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("非IMPORT UPSERT SELECT はsource重複をhard throwせず従来どおり照合する", async () => {
+  const sourceRows = [
+    makeRecord({ $id: "1", code: "A", name: "one" }),
+    makeRecord({ $id: "2", code: "A", name: "two" }),
+  ];
+  const client = makeClient({ recordsByApp: { 100: [], 200: sourceRows }, postIds: ["1", "2"] });
+  client.getFields = async (appId) => appId === 100
+    ? [
+        { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+      ]
+    : [
+        { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+      ];
+  const result = await execute(
+    "UPSERT INTO APP100 (code, name) SELECT code, name FROM APP200 ON DUPLICATE (code)",
+    client,
+    { cacheContext: "non-import-upsert-select-duplicate" }
+  );
+  expect(result).toMatchObject({ type: "UPSERT", insertedCount: 2, updatedCount: 0 });
+  expect(client.getCalls.some((call) => call.app === 100)).toBe(true);
+  expect(client.postCalls.flatMap((call) => call.records)).toHaveLength(2);
+});
+
+test("IMPORT CSV INSERT はnamed sourceを遅延loadして位置対応する", async () => {
+  const client = makeClient({ records: [], postIds: ["1", "2"] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const load = jest.fn(async () => ({ bytes: new TextEncoder().encode("c,n\nA,Alice\nB,Bob") }));
+  const result = await execute("IMPORT INTO APP100 (code,name) FROM CSV people", client, {
+    enableImport: true,
+    importSource: (name) => name === "people" ? { load } : undefined,
+    cacheContext: "import-insert",
+  });
+  expect(result).toMatchObject({ type: "INSERT", insertedCount: 2 });
+  expect(load).toHaveBeenCalledTimes(1);
+  expect(client.postCalls[0].records).toEqual([
+    { code: { value: "A" }, name: { value: "Alice" } },
+    { code: { value: "B" }, name: { value: "Bob" } },
+  ]);
+});
+
+test("IMPORT CSV 射影は全式を評価し、列metaとINTO位置対応を保つ", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "dest_code", label: "dest_code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "金額", label: "金額", fieldType: "NUMBER" },
+    { code: "combined", label: "combined", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const options = {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode("code,amount,a,b\nA,12.5,x,y") }) }),
+    cacheContext: "import-projection",
+  };
+  const sourceSpy = jest.spyOn(dmlSourceMaterializer, "materialize");
+  try {
+    await execute(
+      "IMPORT INTO APP100 (dest_code, 金額, combined) FROM CSV src " +
+        "SELECT code, CAST(amount AS NUMBER) AS 金額, a || b AS c",
+      client,
+      options
+    );
+    const materialized = await sourceSpy.mock.results[0].value;
+    expect(materialized.columns).toEqual(["code", "金額", "c"]);
+    expect(materialized.columnMeta?.get("金額")).toMatchObject({
+      sortKind: "number", semantics: { compareMode: "number" },
+    });
+  } finally {
+    sourceSpy.mockRestore();
+  }
+  expect(client.postCalls[0].records).toEqual([{
+    dest_code: { value: "A" }, 金額: { value: "12.5" }, combined: { value: "xy" },
+  }]);
+  await expect(execute(
+    "IMPORT INTO APP100 (dest_code, 金額) FROM CSV src SELECT code",
+    makeClient({ fieldTypes: { dest_code: "SINGLE_LINE_TEXT", 金額: "NUMBER" } }),
+    { ...options, cacheContext: "import-projection-width" }
+  )).rejects.toThrow(/projection has 1 columns|列数/);
+});
+
+test("IMPORT ON ERROR SKIP/VALIDATE ONLY は不良行を#errorへ隔離し単文#errorを拒否する", async () => {
+  const csv = "code\nOK\nBAD\n";
+  const importSource = () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) });
+  const client = makeClient({ postIds: ["1"] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  // Projection creates one valid and one invalid row from a two-row fixture.
+  const twoRows = () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) });
+  const skipped = await executeBatch(
+    "IMPORT INTO APP100 (code) FROM CSV src SELECT CASE WHEN code = 'OK' THEN code ELSE '' END AS code " +
+      "ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { enableImport: true, importSource: twoRows, cacheContext: "import-skip" }
+  );
+  expect(skipped.ok).toBe(true);
+  expect(client.postCalls.flatMap((call) => call.records)).toHaveLength(1);
+  expect((skipped.statements[1].result as SelectResult).rows).toEqual([
+    expect.objectContaining({ code: "", $err_code: "ERR_REQUIRED" }),
+  ]);
+
+  const validationClient = makeClient();
+  validationClient.getFields = client.getFields;
+  const validated = await executeBatch(
+    "IMPORT INTO APP100 (code) FROM CSV src SELECT CASE WHEN code = 'OK' THEN code ELSE '' END AS code " +
+      "VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    validationClient,
+    { enableImport: true, importSource: twoRows, cacheContext: "import-validate" }
+  );
+  expect(validated.ok).toBe(true);
+  expect(validationClient.postCalls).toHaveLength(0);
+  expect((validated.statements[1].result as SelectResult).rows).toEqual([
+    expect.objectContaining({ code: "", $err_code: "ERR_REQUIRED" }),
+  ]);
+
+  await expect(execute(
+    "IMPORT INTO APP100 (code) FROM CSV src VALIDATE ONLY INTO #err",
+    client,
+    { enableImport: true, importSource, cacheContext: "import-validate-single" }
+  )).rejects.toThrow("requires a batch");
+});
+
+test("IMPORT gate/source absence fail before form API", async () => {
+  const client = makeClient({ records: [] });
+  await expect(execute("IMPORT INTO APP100 (code) FROM CSV missing", client, { enableImport: true })).rejects.toThrow("capability is not available");
+  expect(client.getFields).toBeDefined();
+  expect(client.postCalls).toHaveLength(0);
+});
+
+test("INSERT/UPSERT/検証候補は共通materializeDmlSourceを通り、通常SELECT経路も維持する", async () => {
+  const rows = [makeRecord({ $id: "1", code: "A", name: "Alice" })];
+  const client = makeClient({ records: rows, postIds: ["10"], fieldTypes: { code: "SINGLE_LINE_TEXT", name: "SINGLE_LINE_TEXT" } });
+  const spy = jest.spyOn(dmlSourceMaterializer, "materialize");
+  try {
+    await execute("INSERT INTO APP100 (code, name) SELECT code, name FROM APP200", client, { cacheContext: "source-route-insert" });
+    await execute("UPSERT INTO APP100 (code, name) SELECT code, name FROM APP200 ON DUPLICATE (code)", client, { cacheContext: "source-route-upsert" });
+    await execute("INSERT INTO APP100 (code, name) SELECT code, name FROM APP200 VALIDATE ONLY", client, { cacheContext: "source-route-validation" });
+    const selected = await execute("SELECT code FROM APP200", client, { cacheContext: "source-route-select" }) as SelectResult;
+    expect(selected.rows).toEqual([{ code: "A" }]);
+    expect(spy.mock.calls.map(([stmt]) => stmt.type)).toEqual(["INSERT_SELECT", "UPSERT_SELECT", "INSERT_SELECT"]);
+  } finally {
+    spy.mockRestore();
+  }
 });
 
 test("UPDATE VALIDATE ONLY は対象を読み取るがPUTせず$id順で検証する", async () => {

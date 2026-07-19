@@ -82,6 +82,7 @@ Options:
   --console                  Start interactive console mode
   --dry-run                  Parse and show execution plan only
   --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
+  --import-csv <name=path>   Supply named CSV and enable experimental IMPORT (repeatable)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
@@ -237,6 +238,7 @@ interface ParsedArgs {
   tableFormat: DisplayOptions["tableFormat"] | null;
   dateFormat: DisplayOptions["dateFormat"] | null;
   attachmentFormat: DisplayOptions["attachmentFormat"] | null;
+  importCsv: Record<string, string>;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -291,6 +293,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     tableFormat: null,
     dateFormat: null,
     attachmentFormat: null,
+    importCsv: Object.create(null) as Record<string, string>,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -323,6 +326,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
       }
       out.variables[name] = raw.slice(eq + 1);
+      i++;
+      continue;
+    }
+    if (a === "--import-csv") {
+      const raw = v ?? "";
+      const eq = raw.indexOf("=");
+      if (eq <= 0 || eq === raw.length - 1) throw new Error("ArgumentError: --import-csv must use name=path.");
+      const name = raw.slice(0, eq);
+      if (Object.prototype.hasOwnProperty.call(out.importCsv, name)) throw new Error(`ArgumentError: import source \"${name}\" is specified more than once.`);
+      out.importCsv[name] = raw.slice(eq + 1);
       i++;
       continue;
     }
@@ -1601,7 +1614,8 @@ async function run(): Promise<number> {
     }
 
     try {
-      const statements = parseSqlStatements(sql);
+      const importEnabled = Object.keys(args.importCsv).length > 0;
+      const statements = parseSqlStatements(sql, { import: importEnabled });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
@@ -1611,7 +1625,7 @@ async function run(): Promise<number> {
         isBatchSql = true;
         batchContainsDml = batchAnalysis.containsDml;
       } else {
-        const stmt = parseSqlStatement(sql);
+        const stmt = parseSqlStatement(sql, { import: importEnabled });
         parsedStmt = stmt;
         stmtType = getStatementType(stmt);
         isDmlStatement = writesKintone(stmt);
@@ -2018,7 +2032,7 @@ async function run(): Promise<number> {
   if (isBatchSql && args.dryRun) {
     try {
       const plans = await buildBatchExplainPlans(
-        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive
+        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive, Object.keys(args.importCsv).length > 0
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2062,6 +2076,13 @@ async function run(): Promise<number> {
       }
     }
 
+    const importEnabled = Object.keys(args.importCsv).length > 0;
+    const importSource = importEnabled
+      ? (name: string) => {
+          const sourcePath = args.importCsv[name];
+          return sourcePath === undefined ? undefined : { load: async () => ({ bytes: new Uint8Array(readFileSync(sourcePath)) }) };
+        }
+      : undefined;
     const confirm = async (count: number, operation: "UPDATE" | "DELETE" | "INSERT"): Promise<boolean> => {
       if (count > dmlMaxRows) {
         throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
@@ -2095,6 +2116,8 @@ async function run(): Promise<number> {
         timeoutMs: timeout,
         cursorMaxActive,
         variables: args.variables,
+        enableImport: importEnabled,
+        importSource,
         confirm: batchContainsDml
           ? async (count, operation) => {
             if (count > dmlMaxRows) {
@@ -2109,7 +2132,7 @@ async function run(): Promise<number> {
 
     let result = args.dryRun
       ? await execute(`EXPLAIN ${sql}`, client, {
-          maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive,
+          maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
         })
       : await execute(sql!, client, {
         maxRecords,
@@ -2118,6 +2141,8 @@ async function run(): Promise<number> {
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
         cursorMaxActive,
+        enableImport: importEnabled,
+        importSource,
       });
     // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）

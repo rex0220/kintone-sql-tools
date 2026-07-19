@@ -28,7 +28,8 @@ export function isDmlType(type: string): boolean {
     || type === "DELETE"
     || type === "UPSERT"
     || type === "UPSERT_SELECT"
-    || type === "REORDER";
+    || type === "REORDER"
+    || type === "IMPORT";
 }
 
 export function isReadOnlyType(type: string): boolean {

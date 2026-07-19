@@ -430,6 +430,7 @@ describe("MCP tools", () => {
       "dmlMaxRows",
       "dmlTotalMaxRows",
       "fetchParallel",
+      "importSources",
       "profile",
       "sql",
       "tempTableMaxRows",
@@ -454,7 +455,7 @@ describe("MCP tools", () => {
   });
 
   test("explain schema exposes planning inputs", () => {
-    expect(Object.keys(explainInputSchema.shape).sort()).toEqual(["cursorMaxActive", "maxRecords", "profile", "sql"]);
+    expect(Object.keys(explainInputSchema.shape).sort()).toEqual(["cursorMaxActive", "importSources", "maxRecords", "profile", "sql"]);
   });
 
   test("explainはmaxRecordsとcursorMaxActiveをruntimeと表示へ反映する", async () => {
@@ -509,6 +510,66 @@ describe("MCP tools", () => {
     expect(result.isError).toBe(true);
     expect(payload.error.code).toBe("ArgumentError");
     expect(payload.error.message).toContain("allowDml");
+  });
+
+  test("IMPORT CSV inline text enables the capability and supplies named bytes", async () => {
+    let seenOptions: ExecuteOptions | undefined;
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => ({
+        sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "import-text",
+        maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000, cursorMaxActive: 2,
+      }),
+      executeSql: async (_sql, _client, options) => {
+        seenOptions = options;
+        return { type: "INSERT", insertedCount: 1, createdIds: [["1"]] };
+      },
+    });
+    await expect(tools.mutate({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+      allowDml: true, confirmText: "yes", dmlMaxRows: 1,
+      importSources: [{ name: "people", text: "顧客名\nAlice\n", encoding: "utf8" }],
+    })).resolves.toMatchObject({ ok: true, type: "INSERT", insertedCount: 1 });
+    expect(seenOptions?.enableImport).toBe(true);
+    const loaded = await seenOptions?.importSource?.("people")?.load();
+    expect(new TextDecoder().decode(loaded?.bytes)).toBe("顧客名\nAlice\n");
+    expect(loaded?.encoding).toBe("utf8");
+  });
+
+  test("IMPORT CSV inline base64 supplies raw bytes; no source keeps gate off", async () => {
+    const optionsSeen: ExecuteOptions[] = [];
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => ({
+        sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "import-base64",
+        maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000, cursorMaxActive: 2,
+      }),
+      executeSql: async (_sql, _client, options) => {
+        optionsSeen.push(options ?? {});
+        return { type: "INSERT", insertedCount: 1, createdIds: [["1"]] };
+      },
+    });
+    await tools.mutate({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV raw", allowDml: true, confirmText: "yes", dmlMaxRows: 1,
+      importSources: [{ name: "raw", base64: "gQ==", encoding: "sjis" }],
+    });
+    expect(Array.from((await optionsSeen[0].importSource?.("raw")?.load())!.bytes)).toEqual([0x81]);
+    await expect(tools.validate({ sql: "IMPORT INTO APP100 (顧客名) FROM CSV raw" }))
+      .rejects.toThrow("capability is disabled");
+  });
+
+  test("IMPORT CSV inline text executes through the engine", async () => {
+    const client = makeClient();
+    client.postRecords = async ({ records }) => ({ ids: records.map((_record, index) => String(index + 1)) });
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => ({
+        sql: input.sql, profileName: "prod", client, cacheContext: "import-engine",
+        maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000, cursorMaxActive: 2,
+      }),
+    });
+    await expect(tools.mutate({
+      sql: "IMPORT INTO APP100 (顧客名) FROM CSV people",
+      allowDml: true, confirmText: "yes", dmlMaxRows: 1,
+      importSources: [{ name: "people", text: "顧客名\nAlice\n" }],
+    })).resolves.toMatchObject({ ok: true, type: "INSERT", insertedCount: 1 });
   });
 
   test("mutate rejects read-only SQL", async () => {

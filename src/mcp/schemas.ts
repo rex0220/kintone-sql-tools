@@ -28,11 +28,24 @@ const savedQueryName = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)
 const savedQueryTags = z.array(z.string().min(1))
   .describe("Tags for organizing saved queries.")
   .optional();
+const importSources = z.array(z.object({
+  name: z.string().min(1).describe("Source name referenced after FROM CSV."),
+  text: z.string().describe("Inline CSV text. Mutually exclusive with base64.").optional(),
+  base64: z.string().describe("Inline CSV bytes encoded as base64. Mutually exclusive with text.").optional(),
+  encoding: z.enum(["utf8", "sjis"]).describe("Optional source encoding metadata; SQL ENCODING takes precedence.").optional(),
+}).superRefine((source, ctx) => {
+  if ((source.text === undefined) === (source.base64 === undefined)) {
+    ctx.addIssue({ code: "custom", message: "Exactly one of text or base64 is required." });
+  }
+})).max(16)
+  .describe("Experimental IMPORT CSV named inline sources (maximum 16). Providing this enables IMPORT only for this tool call; paths are not accepted. Each source is limited to 10 MiB by the engine loader.")
+  .optional();
 
 export const validateInputSchema = z.object({
   sql: z.string().min(1)
     .describe("kSQL text to validate. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
   profile,
+  importSources,
 });
 
 export const explainInputSchema = z.object({
@@ -41,6 +54,7 @@ export const explainInputSchema = z.object({
   profile,
   maxRecords,
   cursorMaxActive,
+  importSources,
 });
 
 export const queryInputSchema = z.object({
@@ -53,6 +67,7 @@ export const queryInputSchema = z.object({
   tempTableMaxRows,
   timeout,
   cursorMaxActive,
+  importSources,
   continueOnError: z.boolean()
     .describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).")
     .optional(),
@@ -78,6 +93,7 @@ export const mutateInputSchema = z.object({
   tempTableMaxRows,
   timeout,
   cursorMaxActive,
+  importSources,
   dmlTotalMaxRows: z.number().int().positive()
     .describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.")
     .optional(),

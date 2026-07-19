@@ -31,7 +31,8 @@ export type Statement =
   | DropTempTableStatement
   | SetVariableStatement
   | DeclareVariableStatement
-  | AssertStatement;
+  | AssertStatement
+  | ImportStatement;
 
 // ------------------------------------------------------------
 // SHOW / DESCRIBE
@@ -62,7 +63,8 @@ export interface ExplainStatement {
     | UpdateStatement
     | DeleteStatement
     | ReorderStatement
-    | ValidateStatement;
+    | ValidateStatement
+    | ImportStatement;
 }
 
 // ------------------------------------------------------------
@@ -675,6 +677,44 @@ export interface InsertSelectStatement {
   appId: number;
   fields: string[];          // ターゲットフィールド（列順）
   select: SelectStatement;   // ソースクエリ
+  validateOnly?: boolean;
+  validationErrorTable?: string | null;
+  onErrorSkip?: boolean;
+  errorTable?: string;
+  rejectLimit?: number | null;
+  checkGroups?: CheckGroup[];
+}
+
+// ------------------------------------------------------------
+// IMPORT (B39 Phase 1: flat CSV)
+// ------------------------------------------------------------
+
+export type ImportEncoding = "utf8" | "sjis";
+
+export interface CsvDmlSource {
+  kind: "CSV";
+  sourceName: string;
+  /** Omitted means loader metadata, then UTF-8. */
+  encoding?: ImportEncoding;
+  hasHeader: boolean;
+  /** Valid only with NO HEADER. */
+  columns?: string[];
+  /** CSV-row projection. It is deliberately FROM-less. */
+  projection?: SelectStatement;
+}
+
+/** SELECT remains here so all three DML source paths share one materializer. */
+export type DmlSource =
+  | { kind: "SELECT"; query: SelectStatement }
+  | CsvDmlSource;
+
+export interface ImportStatement {
+  type: "IMPORT";
+  appId: number;
+  fields: string[];
+  source: CsvDmlSource;
+  /** Presence selects UPSERT; absence selects INSERT. */
+  keyFields?: string[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
   onErrorSkip?: boolean;
