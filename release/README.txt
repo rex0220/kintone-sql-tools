@@ -1,9 +1,27 @@
-ksql 配布パッケージ (v3.5.0)
+ksql 配布パッケージ (v3.6.0)
 
-1. ksql-plugin-v3.5.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.6.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.6.0: ファイル取込ステートメント IMPORT (B39)。
+- IMPORT INTO app (fields) FROM CSV|JSON <source> [射影/BY NAME]
+  [ON DUPLICATE] [CHECK] [VALIDATE ONLY | ON ERROR SKIP INTO #err] を追加。
+  ソースは面が名前付きで供給 (CLI --import-csv/--import-json・MCP inline
+  importSources・plugin file picker)。パスを SQL に埋めない・10 MiB/source・
+  source 供給時のみ有効。
+- CSV: RFC4180 (UTF-8/SJIS・BOM・セル内改行)・位置対応/SELECT 射影・源内キー重複拒否。
+- JSON: 厳密10進 (元字句保持・safe-int のみ数値・精度対象は string)・
+  全階層 duplicate key 拒否・欠落/null/presence 区別。
+- cli-kintone 互換 BY NAME: ヘッダ=フィールドコード名対応・非書込み/未知列の
+  監査付き無視 (IGNORE UNKNOWN COLUMNS)・複数値セル内 LF。
+- レコード番号純 UPDATE: IMPORT UPDATE ... MATCH RECORD NUMBER SOURCE。
+- サブテーブル: JSON ネスト＋cli-kintone CSV * 形式。破壊的全置換は
+  REPLACE SUBTABLES 必須＋削除件数 confirm、内訳表示不能面 (MCP) は fail-closed。
+- CLI/MCP/plugin 全面。添付ファイル (FILE) は対象外。
+- USER/組織/グループ選択の INSERT/UPSERT ... SELECT payload を [{code}] に修正。
+- 既存の正しいクエリの挙動変更なし (minor)。
 
 v3.5.0: 既存レコードの制約チェックとバッチ変数の参照拡張 (B41/B3/B10-B)。
 - B41: 既存レコードの制約チェック文 VALIDATE <app> [(fields)] [WHERE]

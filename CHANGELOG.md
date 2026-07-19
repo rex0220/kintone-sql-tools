@@ -2,11 +2,23 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## v3.5.0（2026-07-19）
+## v3.6.0（2026-07-19）
+
+### 機能追加
+
+- **B39 IMPORT 文（ファイル → アプリ取込の自己完結ステートメント）**。`IMPORT INTO app (fields) FROM CSV|JSON <source> [射影/BY NAME] [ON DUPLICATE] [CHECK] [VALIDATE ONLY | ON ERROR SKIP INTO #err [REJECT LIMIT]]` を追加。ソースは**面が名前付きで供給**（CLI `--import-csv`/`--import-json <name=path>`・MCP inline `importSources`・plugin file picker）でパスを SQL に埋めない。10 MiB/source・off-by-default（source 供給時のみ有効）。
+  - **CSV**: RFC4180（UTF-8/SJIS・BOM・セル内改行）・位置対応/`SELECT` 射影（`CAST`/関数/`||`/`@var`）・源内キー重複拒否。
+  - **JSON**: 厳密10進 decoder（元字句保持・safe-int のみ数値・精度対象は string 必須）・全階層 duplicate key 拒否・欠落/null/presence を区別。
+  - **cli-kintone 互換（BY NAME）**: ヘッダ＝フィールドコード名対応・既知非書込み/未知列の監査付き無視（`IGNORE UNKNOWN COLUMNS`）・複数値セル内 LF 分割。
+  - **レコード番号純 UPDATE**: `IMPORT UPDATE … MATCH RECORD NUMBER SOURCE <header>`（照合専用・INSERT 0・source 重複 global 拒否）。
+  - **サブテーブル**: JSON ネスト＋cli-kintone CSV `*` 形式。JSON は ID なし全置換（全子行新採番）、CSV は行 ID 維持更新・空/未知 ID 追加・欠落 ID 削除。破壊的全置換は `REPLACE SUBTABLES` 必須＋confirm で削除件数明示、内訳を表示できない面（MCP 等）は fail-closed。4層エラー位置（`$err_subtable/$err_subrow/$err_source_row`）・親単位隔離・`REJECT LIMIT` は invalid 親数。
+  - CLI/MCP/plugin 全面・cli-kintone v1.21.0 実 export で round-trip 実証。**添付ファイル（FILE）は対象外**。
 
 ### 修正（正しさ）
 
 - **USER/ORGANIZATION/GROUP 選択フィールドの `INSERT / UPSERT … SELECT` payload を修正**。選択値の `[{code}]` を共通 DML 検証後も保持する。従来は `INSERT … SELECT` で検証正規化が `string[]` へ平坦化し、`UPSERT … SELECT` の更新側では JSON 文字列のままとなり、どちらも kintone REST の書込み形式と不一致だった。`INSERT … VALUES ('u1')` の従来変換（`[{code:'u1'}]`）は不変。
+
+## v3.5.0（2026-07-19）
 
 ### 機能追加
 

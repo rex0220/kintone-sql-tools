@@ -437,7 +437,7 @@ export interface ExecuteOptions {
   cacheContext?: string;
   /** EXPLAINへ表示するhost単位のprocess-local Cursor上限（1..5、既定2） */
   cursorMaxActive?: number;
-  /** Experimental B39 gate. Omitted/false keeps IMPORT unavailable. */
+  /** B39 IMPORT gate (v3.6.0). Omitted/false keeps IMPORT unavailable. */
   enableImport?: boolean;
   /** Named, path-free source resolver. Used only when enableImport is true. */
   importSource?: ImportSourceResolver;
