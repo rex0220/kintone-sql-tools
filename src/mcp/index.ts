@@ -57,7 +57,7 @@ Options:
   --profile <name>   Default profile name
   -h, --help         Show help
 
-Experimental IMPORT CSV/JSON is call-scoped and disabled by default. Supply named
+IMPORT CSV/JSON is call-scoped and disabled by default. Supply named
 inline importSources (text or base64 bytes) to enable it; filesystem paths are not accepted.
 Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLAIN.
 JSON child IDs are rejected and replacement renumbers all rows.
@@ -81,13 +81,13 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_validate", {
     title: "Validate kSQL",
-    description: "Parse and validate kSQL without calling kintone APIs. Use this before executing generated SQL. Experimental IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Parse and validate kSQL without calling kintone APIs. Use this before executing generated SQL. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: validateInputShape,
   }, tools.validateTool);
 
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records. Experimental IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: explainInputShape,
   }, tools.explainTool);
 
@@ -98,7 +98,7 @@ export function createServer(args: ServerArgs): McpServer {
   }, tools.queryTool);
 
   server.registerTool("ksql_mutate", {
-    title: "Run mutating kSQL (experimental IMPORT CSV/JSON via importSources)",
+    title: "Run mutating kSQL (IMPORT CSV/JSON via importSources)",
     description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape,
   }, tools.mutateTool);

@@ -1199,8 +1199,8 @@ var require_util = __commonJS({
     })(Type || (exports2.Type = Type = {}));
     function getErrorPath(dataProp, dataPropType, jsPropertySyntax) {
       if (dataProp instanceof codegen_1.Name) {
-        const isNumber = dataPropType === Type.Num;
-        return jsPropertySyntax ? isNumber ? (0, codegen_1._)`"[" + ${dataProp} + "]"` : (0, codegen_1._)`"['" + ${dataProp} + "']"` : isNumber ? (0, codegen_1._)`"/" + ${dataProp}` : (0, codegen_1._)`"/" + ${dataProp}.replace(/~/g, "~0").replace(/\\//g, "~1")`;
+        const isNumber2 = dataPropType === Type.Num;
+        return jsPropertySyntax ? isNumber2 ? (0, codegen_1._)`"[" + ${dataProp} + "]"` : (0, codegen_1._)`"['" + ${dataProp} + "']"` : isNumber2 ? (0, codegen_1._)`"/" + ${dataProp}` : (0, codegen_1._)`"/" + ${dataProp}.replace(/~/g, "~0").replace(/\\//g, "~1")`;
       }
       return jsPropertySyntax ? (0, codegen_1.getProperty)(dataProp).toString() : "/" + escapeJsonPointer(dataProp);
     }
@@ -31563,8 +31563,9 @@ var ParseError = class extends Error {
   }
 };
 var Parser = class {
-  constructor(tokens) {
+  constructor(tokens, capabilities = {}) {
     this.tokens = tokens;
+    this.capabilities = capabilities;
     this.allowUnaryPlusNumber = false;
     this.scalarAllowsAggregateArgs = true;
     this.scalarAllowsCase = true;
@@ -31657,6 +31658,12 @@ var Parser = class {
         if (upper === "DROP") return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
+        if (upper === "IMPORT") {
+          if (!this.capabilities.import) {
+            throw new ParseError("IMPORT is not supported (capability is disabled).", tok);
+          }
+          return this.parseImport();
+        }
         break;
       }
       default:
@@ -31837,10 +31844,212 @@ var Parser = class {
       query = this.parseReorder();
     } else if (tok.kind === "IDENT" /* IDENT */ && tok.value.toUpperCase() === "VALIDATE") {
       query = this.parseValidate();
+    } else if (tok.kind === "IDENT" /* IDENT */ && tok.value.toUpperCase() === "IMPORT") {
+      if (!this.capabilities.import) {
+        throw new ParseError("IMPORT is not supported (capability is disabled).", tok);
+      }
+      query = this.parseImport();
     } else {
       throw new ParseError("EXPLAIN \u306E\u5F8C\u306B\u306F SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER / VALIDATE \u304C\u5FC5\u8981\u3067\u3059", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+  parseImport() {
+    this.advance();
+    let writeMode;
+    if (this.peek().kind === "UPDATE" /* UPDATE */) {
+      this.advance();
+      writeMode = "UPDATE_RECORD_NUMBER";
+    }
+    this.expect("INTO" /* INTO */);
+    this.rejectTempTableDml();
+    const target = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(target, this.prev());
+    if (subtableCode) throw new ParseError("IMPORT does not support subtables in Phase 1.", this.prev());
+    this.expect("(" /* LPAREN */);
+    const targets = [];
+    const fields = [];
+    const targetNames = /* @__PURE__ */ new Set();
+    while (true) {
+      const name = this.parseIdentifier();
+      if (targetNames.has(name)) throw new ParseError(`IMPORT target ${name} is declared more than once.`, this.prev());
+      targetNames.add(name);
+      if (this.peek().kind === "(" /* LPAREN */) {
+        this.advance();
+        const children = this.parseIdentList();
+        this.expect(")" /* RPAREN */);
+        if (new Set(children).size !== children.length) {
+          throw new ParseError(`IMPORT subtable ${name} contains duplicate child declarations.`, this.prev());
+        }
+        let rowIdSourceHeader;
+        if (this.isSoftKeyword("ROW")) {
+          this.advance();
+          for (const word of ["ID", "SOURCE"]) {
+            if (!this.isSoftKeyword(word)) throw new ParseError(`ROW must be followed by ID SOURCE <header>.`, this.peek());
+            this.advance();
+          }
+          rowIdSourceHeader = this.parseIdentifier();
+        }
+        targets.push({ kind: "SUBTABLE", subtableCode: name, children, ...rowIdSourceHeader ? { rowIdSourceHeader } : {} });
+      } else {
+        fields.push(name);
+        targets.push({ kind: "FIELD", field: name });
+      }
+      if (this.peek().kind !== "," /* COMMA */) break;
+      this.advance();
+    }
+    this.expect(")" /* RPAREN */);
+    this.expect("FROM" /* FROM */);
+    if (!this.isSoftKeyword("CSV") && !this.isSoftKeyword("JSON")) throw new ParseError("IMPORT FROM requires CSV or JSON.", this.peek());
+    const sourceKind = this.peek().value.toUpperCase();
+    this.advance();
+    const sourceName = this.parseIdentifier();
+    let encoding;
+    let hasHeader = true;
+    let columns;
+    if (this.isSoftKeyword("ENCODING")) {
+      if (sourceKind === "JSON") throw new ParseError("JSON source is UTF-8 only; ENCODING is not allowed.", this.peek());
+      this.advance();
+      const value = this.parseIdentifier().toUpperCase();
+      if (value !== "UTF8" && value !== "SJIS") throw new ParseError("ENCODING must be UTF8 or SJIS.", this.prev());
+      encoding = value === "UTF8" ? "utf8" : "sjis";
+    }
+    if (this.peek().kind === "NOT" /* NOT */ && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      if (sourceKind === "JSON") throw new ParseError("NO HEADER is CSV-only.", this.peek());
+      this.advance();
+      this.advance();
+      hasHeader = false;
+    } else if (this.isSoftKeyword("NO") && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "HEADER") {
+      if (sourceKind === "JSON") throw new ParseError("NO HEADER is CSV-only.", this.peek());
+      this.advance();
+      this.advance();
+      hasHeader = false;
+    }
+    if (this.isSoftKeyword("COLUMNS")) {
+      if (sourceKind === "JSON") throw new ParseError("COLUMNS is CSV-only.", this.peek());
+      if (hasHeader) throw new ParseError("COLUMNS requires NO HEADER.", this.peek());
+      this.advance();
+      this.expect("(" /* LPAREN */);
+      columns = this.parseIdentList();
+      this.expect(")" /* RPAREN */);
+    }
+    let projection;
+    if (this.peek().kind === "SELECT" /* SELECT */) {
+      if (sourceKind === "JSON") throw new ParseError("SELECT projection is CSV-only.", this.peek());
+      projection = this.parseSelect();
+      if (projection.from.cteName !== NO_FROM_CTE_NAME || projection.joins.length > 0) {
+        throw new ParseError("IMPORT projection cannot use FROM or JOIN.", this.prev());
+      }
+      if (projection.where || projection.groupBy.length || projection.having || projection.orderBy.length || projection.limit !== null || projection.offset !== null) {
+        throw new ParseError("IMPORT projection supports SELECT expressions only.", this.prev());
+      }
+      this.validateImportProjectionScope(projection, this.prev());
+      if (targets.some((item) => item.kind === "SUBTABLE")) {
+        throw new ParseError("IMPORT subtable sources cannot use SELECT projection.", this.prev());
+      }
+      if (projection.columns.length !== fields.length) {
+        throw new ParseError(`IMPORT projection has ${projection.columns.length} columns; target has ${fields.length}.`, this.prev());
+      }
+    }
+    let mappingMode = "POSITION";
+    let ignoreUnknownColumns = false;
+    if (this.peek().kind === "BY" /* BY */ || this.isSoftKeyword("BY")) {
+      if (sourceKind === "JSON") throw new ParseError("BY NAME is CSV-only.", this.peek());
+      this.advance();
+      if (!this.isSoftKeyword("NAME")) throw new ParseError("BY must be followed by NAME in IMPORT.", this.peek());
+      this.advance();
+      if (!hasHeader) throw new ParseError("BY NAME requires HEADER.", this.prev());
+      if (projection) throw new ParseError("BY NAME and SELECT projection are mutually exclusive.", this.prev());
+      mappingMode = "BY_NAME";
+      if (this.isSoftKeyword("IGNORE")) {
+        this.advance();
+        if (!this.isSoftKeyword("UNKNOWN")) throw new ParseError("IGNORE must be followed by UNKNOWN COLUMNS.", this.peek());
+        this.advance();
+        if (!this.isSoftKeyword("COLUMNS")) throw new ParseError("IGNORE UNKNOWN must be followed by COLUMNS.", this.peek());
+        this.advance();
+        ignoreUnknownColumns = true;
+      }
+    }
+    let keyFields;
+    let recordNumberSourceHeader;
+    if (this.isSoftKeyword("MATCH")) {
+      this.advance();
+      for (const word of ["RECORD", "NUMBER", "SOURCE"]) {
+        if (!this.isSoftKeyword(word)) throw new ParseError(`MATCH must be followed by RECORD NUMBER SOURCE <header>.`, this.peek());
+        this.advance();
+      }
+      recordNumberSourceHeader = this.parseIdentifier();
+    }
+    if (this.peek().kind === "ON" /* ON */ && this.peekAt(1).kind === "DUPLICATE" /* DUPLICATE */) keyFields = this.parseOnDuplicate();
+    let replaceSubtables;
+    if (this.peek().kind === "REPLACE" /* REPLACE */ || this.isSoftKeyword("REPLACE")) {
+      this.advance();
+      if (!this.isSoftKeyword("SUBTABLES")) throw new ParseError("REPLACE must be followed by SUBTABLES (...).", this.peek());
+      this.advance();
+      this.expect("(" /* LPAREN */);
+      replaceSubtables = this.parseIdentList();
+      this.expect(")" /* RPAREN */);
+      if (new Set(replaceSubtables).size !== replaceSubtables.length) throw new ParseError("REPLACE SUBTABLES contains duplicates.", this.prev());
+    }
+    const subtableTargets = targets.filter((item) => item.kind === "SUBTABLE");
+    if (subtableTargets.length) {
+      if (projection) throw new ParseError("IMPORT subtables cannot use SELECT projection.", this.prev());
+      if (sourceKind === "JSON") {
+        if (subtableTargets.some((item) => item.rowIdSourceHeader)) throw new ParseError("JSON subtable IMPORT does not accept ROW ID SOURCE.", this.prev());
+        if (replaceSubtables) throw new ParseError("REPLACE SUBTABLES is CSV-only; JSON uses nested-array replacement semantics.", this.prev());
+      } else {
+        if (writeMode !== "UPDATE_RECORD_NUMBER" || !recordNumberSourceHeader) throw new ParseError("CSV subtable IMPORT requires IMPORT UPDATE and MATCH RECORD NUMBER SOURCE.", this.prev());
+        if (mappingMode !== "BY_NAME") throw new ParseError("CSV subtable IMPORT requires BY NAME.", this.prev());
+        if (!replaceSubtables) throw new ParseError("CSV subtable IMPORT requires REPLACE SUBTABLES (...).", this.prev());
+        const replacement = new Set(replaceSubtables);
+        for (const item of subtableTargets) {
+          if (!item.rowIdSourceHeader) throw new ParseError(`CSV subtable ${item.subtableCode} requires ROW ID SOURCE <header>.`, this.prev());
+          if (!replacement.has(item.subtableCode)) throw new ParseError(`IMPORT declares child columns for non-replaced subtable ${item.subtableCode}.`, this.prev());
+        }
+        for (const code of replacement) {
+          if (!subtableTargets.some((item) => item.subtableCode === code)) throw new ParseError(`REPLACE SUBTABLES target ${code} is not declared in INTO.`, this.prev());
+        }
+      }
+    } else if (replaceSubtables) {
+      throw new ParseError("REPLACE SUBTABLES requires subtable targets in INTO.", this.prev());
+    }
+    if (writeMode) {
+      if (sourceKind !== "CSV") throw new ParseError("IMPORT UPDATE supports CSV only.", this.prev());
+      if (mappingMode !== "BY_NAME") throw new ParseError("IMPORT UPDATE requires BY NAME.", this.prev());
+      if (!recordNumberSourceHeader) throw new ParseError("IMPORT UPDATE requires MATCH RECORD NUMBER SOURCE <header>.", this.peek());
+      if (keyFields) throw new ParseError("IMPORT UPDATE and ON DUPLICATE are mutually exclusive.", this.prev());
+    } else if (recordNumberSourceHeader) {
+      throw new ParseError("MATCH RECORD NUMBER SOURCE requires IMPORT UPDATE.", this.prev());
+    }
+    const checkGroups = this.parseCheckGroups();
+    const control = this.parseDmlControlSuffix();
+    return {
+      type: "IMPORT",
+      appId,
+      fields,
+      targets,
+      source: sourceKind === "JSON" ? { kind: "JSON", sourceName } : { kind: "CSV", sourceName, encoding, hasHeader, mappingMode, ignoreUnknownColumns, ...columns ? { columns } : {}, ...projection ? { projection } : {} },
+      ...writeMode ? { writeMode, recordNumberSourceHeader } : {},
+      ...replaceSubtables ? { replaceSubtables } : {},
+      ...keyFields ? { keyFields } : {},
+      ...checkGroups,
+      ...control
+    };
+  }
+  validateImportProjectionScope(node, token) {
+    if (Array.isArray(node)) {
+      node.forEach((item) => this.validateImportProjectionScope(item, token));
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node;
+    if (value.type === "SCALAR_SUBQUERY" || value.type === "SCALAR_SUBQUERY_COL") {
+      throw new ParseError("IMPORT projection cannot use subqueries.", token);
+    }
+    if (typeof value.tableAlias === "string") {
+      throw new ParseError("IMPORT projection cannot use qualified column references.", token);
+    }
+    Object.values(value).forEach((item) => this.validateImportProjectionScope(item, token));
   }
   /** VALIDATE APP100 [(fields)] [WHERE ...] [CHECK ...] [INTO #err]. */
   parseValidate() {
@@ -34006,7 +34215,7 @@ function getStatementType(stmt) {
   return typeof obj.type === "string" ? obj.type : "UNKNOWN";
 }
 function isDmlType(type) {
-  return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
+  return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER" || type === "IMPORT";
 }
 function isReadOnlyType(type) {
   return type === "SELECT" || type === "VALIDATE" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
@@ -35491,7 +35700,7 @@ function analyzeBatch(statements) {
       dependsOn.add(at);
     }
     if (validationTable) {
-      const payloadFields = stmt.type === "VALIDATE" ? ["$id", "$err_field", "$err_code", "$err_message", "$err_value"] : stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
+      const payloadFields = stmt.type === "VALIDATE" ? ["$id", "$err_field", "$err_code", "$err_message", "$err_value"] : stmt.type === "IMPORT" && stmt.targets?.some((target) => target.kind === "SUBTABLE") ? [...new Set(stmt.targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children)), "$err_subtable", "$err_subrow", "$err_source_row"] : stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
       const signature = JSON.stringify(payloadFields);
       const at = defined.get(validationTable);
       if (at === void 0) {
@@ -38453,9 +38662,15 @@ function validateDmlCandidates(candidates, operation, payloadFields, targetField
     candidate.record ??= {};
     const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
     for (const code of targetFields) {
+      if (!candidate.payload.has(code)) continue;
       const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code), numberPrecision);
       if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
-      else candidate.record[code] = { value: result.value };
+      else {
+        const original = candidate.payload.get(code);
+        const type = infoByCode.get(code).fieldType;
+        const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type) && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+        candidate.record[code] = { value: preserveCodes ? original : result.value };
+      }
     }
     if (validateMissingCreateFields && candidate.mode === "create") {
       for (const info of fieldInfos) {
@@ -38717,6 +38932,862 @@ function unsupported(code, field, fieldType, operator) {
   return { capability: "UNSUPPORTED", reasons: [{ code, field, fieldType, operator }] };
 }
 
+// src/import/sourceLoader.ts
+var IMPORT_MAX_BYTES = 10 * 1024 * 1024;
+var ImportSourceError = class extends Error {
+  constructor(message) {
+    super(`ImportSourceError: ${message}`);
+    this.name = "ImportSourceError";
+  }
+};
+function resolveImportSource(name, resolver) {
+  if (!resolver) throw new ImportSourceError("IMPORT source capability is not available.");
+  const handle = resolver(name);
+  if (!handle) throw new ImportSourceError(`source "${name}" is not supplied.`);
+  return handle;
+}
+async function loadImportSource(handle, cache) {
+  let pending = cache.get(handle);
+  if (!pending) {
+    pending = handle.load().then((payload) => {
+      if (!(payload.bytes instanceof Uint8Array)) throw new ImportSourceError("loader must return Uint8Array bytes.");
+      if (payload.bytes.byteLength > IMPORT_MAX_BYTES) {
+        throw new ImportSourceError(`source exceeds the ${IMPORT_MAX_BYTES} byte limit.`);
+      }
+      return payload;
+    });
+    cache.set(handle, pending);
+  }
+  return pending;
+}
+
+// src/import/csvDecoder.ts
+function decodeImportText(bytes, encoding) {
+  try {
+    return new TextDecoder(encoding === "sjis" ? "shift_jis" : "utf-8", { fatal: true }).decode(bytes).replace(/^\uFEFF/, "");
+  } catch {
+    throw new ImportSourceError(`invalid ${encoding.toUpperCase()} byte sequence.`);
+  }
+}
+function parseRfc4180(text) {
+  const records = [];
+  let record2 = [];
+  let cell = "";
+  let quoted = false;
+  let afterQuote = false;
+  let i = 0;
+  const finishCell = () => {
+    record2.push(cell);
+    cell = "";
+    afterQuote = false;
+  };
+  const finishRecord = () => {
+    finishCell();
+    records.push(record2);
+    record2 = [];
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          cell += '"';
+          i += 2;
+          continue;
+        }
+        quoted = false;
+        afterQuote = true;
+        i++;
+        continue;
+      }
+      cell += ch;
+      i++;
+      continue;
+    }
+    if (afterQuote && ch !== "," && ch !== "\r" && ch !== "\n") {
+      throw new ImportSourceError(`unexpected character after closing quote at offset ${i}.`);
+    }
+    if (ch === '"') {
+      if (cell.length !== 0) throw new ImportSourceError(`quote in unquoted cell at offset ${i}.`);
+      quoted = true;
+      i++;
+      continue;
+    }
+    if (ch === ",") {
+      finishCell();
+      i++;
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      finishRecord();
+      i++;
+      continue;
+    }
+    cell += ch;
+    i++;
+  }
+  if (quoted) throw new ImportSourceError("unterminated quoted cell.");
+  if (cell.length > 0 || record2.length > 0 || afterQuote) finishRecord();
+  return records;
+}
+function assertColumns(columns) {
+  const seen = /* @__PURE__ */ new Set();
+  columns.forEach((column, index) => {
+    if (column === "") throw new ImportSourceError(`CSV column ${index + 1} has an empty name.`);
+    if (seen.has(column)) throw new ImportSourceError(`CSV column name "${column}" is duplicated.`);
+    seen.add(column);
+  });
+}
+function decodeCsv(bytes, options) {
+  const records = parseRfc4180(decodeImportText(bytes, options.encoding));
+  let columns;
+  let rows;
+  if (options.hasHeader) {
+    columns = records[0] ?? [];
+    rows = records.slice(1);
+  } else {
+    rows = records;
+    columns = options.columns ? [...options.columns] : Array.from({ length: rows[0]?.length ?? 0 }, (_, i) => `c${i + 1}`);
+  }
+  assertColumns(columns);
+  if (rows.length === 0) throw new ImportSourceError("CSV has no data rows.");
+  rows.forEach((row, i) => {
+    if (row.length !== columns.length) {
+      throw new ImportSourceError(`CSV row ${i + (options.hasHeader ? 2 : 1)} has ${row.length} cells; expected ${columns.length}.`);
+    }
+  });
+  return { columns, rows };
+}
+
+// src/import/convertImportCsvValue.ts
+var LF_MULTI_TYPES = /* @__PURE__ */ new Set([
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT"
+]);
+var USER_TYPES2 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
+var ImportCsvValueError = class extends Error {
+  constructor() {
+    super("multiple-value CSV cell contains an empty LF-delimited item");
+    this.code = "ERR_IMPORT_MULTI_EMPTY_ITEM";
+    this.name = "ImportCsvValueError";
+  }
+};
+function convertImportCsvValue(raw, type, options) {
+  void options;
+  if (!LF_MULTI_TYPES.has(type ?? "")) return raw;
+  if (raw === "") return [];
+  const items = raw.split(/\r\n|\n/);
+  if (items.some((item) => item === "")) throw new ImportCsvValueError();
+  return USER_TYPES2.has(type ?? "") ? items.map((code) => ({ code })) : items;
+}
+
+// src/import/jsonTokenizer.ts
+function fail(message, offset, line, column) {
+  throw new ImportSourceError(`JSON ${message} (offset=${offset}, line=${line}, column=${column}).`);
+}
+function decodeUtf8Json(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new ImportSourceError("JSON source is not valid UTF-8.");
+  }
+}
+function tokenizeJson(text) {
+  const tokens = [];
+  let i = 0, line = 1, column = 1;
+  const advance = () => {
+    const ch = text[i++];
+    if (ch === "\n") {
+      line++;
+      column = 1;
+    } else column++;
+    return ch;
+  };
+  const position = () => ({ offset: i, line, column });
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === " " || ch === "	" || ch === "\r" || ch === "\n") {
+      advance();
+      continue;
+    }
+    const start = position();
+    if ("{}[]:,".includes(ch)) {
+      advance();
+      tokens.push({ kind: "punct", value: ch, ...start });
+      continue;
+    }
+    if (ch === '"') {
+      advance();
+      let value = "";
+      let closed = false;
+      while (i < text.length) {
+        const c = advance();
+        if (c === '"') {
+          closed = true;
+          break;
+        }
+        if (c.charCodeAt(0) < 32) fail("string contains an unescaped control character", start.offset, start.line, start.column);
+        if (c !== "\\") {
+          value += c;
+          continue;
+        }
+        if (i >= text.length) fail("string has an unterminated escape", start.offset, start.line, start.column);
+        const esc2 = advance();
+        const simple = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "	" };
+        if (esc2 in simple) {
+          value += simple[esc2];
+          continue;
+        }
+        if (esc2 !== "u") fail(`has invalid escape \\${esc2}`, i - 2, line, Math.max(1, column - 2));
+        const hex3 = text.slice(i, i + 4);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex3)) fail("has invalid unicode escape", i, line, column);
+        for (let n = 0; n < 4; n++) advance();
+        const code = Number.parseInt(hex3, 16);
+        if (code >= 55296 && code <= 56319) {
+          if (text.slice(i, i + 2) !== "\\u" || !/^[0-9a-fA-F]{4}$/.test(text.slice(i + 2, i + 6))) fail("has an unpaired high surrogate", i, line, column);
+          advance();
+          advance();
+          const lowHex = text.slice(i, i + 4);
+          for (let n = 0; n < 4; n++) advance();
+          const low = Number.parseInt(lowHex, 16);
+          if (low < 56320 || low > 57343) fail("has an invalid surrogate pair", i - 4, line, Math.max(1, column - 4));
+          value += String.fromCodePoint(65536 + (code - 55296 << 10) + low - 56320);
+        } else if (code >= 56320 && code <= 57343) {
+          fail("has an unpaired low surrogate", i - 4, line, Math.max(1, column - 4));
+        } else value += String.fromCharCode(code);
+      }
+      if (!closed) fail("string is unterminated", start.offset, start.line, start.column);
+      tokens.push({ kind: "string", value, ...start });
+      continue;
+    }
+    const rest = text.slice(i);
+    const number4 = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(rest)?.[0];
+    if (number4) {
+      for (let n = 0; n < number4.length; n++) advance();
+      tokens.push({ kind: "number", lexeme: number4, ...start });
+      continue;
+    }
+    const literal2 = /^(true|false|null)/.exec(rest)?.[0];
+    if (literal2) {
+      for (let n = 0; n < literal2.length; n++) advance();
+      tokens.push({ kind: "literal", value: literal2 === "true" ? true : literal2 === "false" ? false : null, ...start });
+      continue;
+    }
+    fail(`has an unexpected token ${JSON.stringify(ch)}`, start.offset, start.line, start.column);
+  }
+  tokens.push({ kind: "eof", offset: i, line, column });
+  return tokens;
+}
+
+// src/import/jsonDecoder.ts
+function describe3(token) {
+  return token.kind === "eof" ? "end of input" : token.kind === "punct" ? token.value : token.kind;
+}
+function decodeJsonRecords(bytes) {
+  if (bytes.byteLength === 0) throw new ImportSourceError("JSON source is empty.");
+  const tokens = tokenizeJson(decodeUtf8Json(bytes));
+  let index = 0;
+  const fail3 = (message, token = tokens[index]) => {
+    throw new ImportSourceError(`JSON ${message} (offset=${token.offset}, line=${token.line}, column=${token.column}).`);
+  };
+  const isPunct = (token, value) => token.kind === "punct" && token.value === value;
+  const punct = (value) => {
+    const token = tokens[index];
+    if (token.kind !== "punct" || token.value !== value) fail3(`expected ${value}; found ${describe3(token)}`, token);
+    index++;
+  };
+  const parseValue = () => {
+    const token = tokens[index++];
+    if (token.kind === "string") return token.value;
+    if (token.kind === "number") return { kind: "number", lexeme: token.lexeme };
+    if (token.kind === "literal") return token.value;
+    if (token.kind === "punct" && token.value === "{") {
+      const object3 = /* @__PURE__ */ new Map();
+      if (isPunct(tokens[index], "}")) {
+        index++;
+        return object3;
+      }
+      while (true) {
+        const key = tokens[index++];
+        if (key.kind !== "string") return fail3(`object key must be a string; found ${describe3(key)}`, key);
+        const keyValue = key.value;
+        if (object3.has(keyValue)) fail3(`duplicate key ${JSON.stringify(keyValue)}`, key);
+        punct(":");
+        object3.set(keyValue, parseValue());
+        const separator = tokens[index];
+        if (isPunct(separator, "}")) {
+          index++;
+          break;
+        }
+        punct(",");
+      }
+      return object3;
+    }
+    if (token.kind === "punct" && token.value === "[") {
+      const array2 = [];
+      if (isPunct(tokens[index], "]")) {
+        index++;
+        return array2;
+      }
+      while (true) {
+        array2.push(parseValue());
+        const separator = tokens[index];
+        if (isPunct(separator, "]")) {
+          index++;
+          break;
+        }
+        punct(",");
+      }
+      return array2;
+    }
+    return fail3(`expected a value; found ${describe3(token)}`, token);
+  };
+  const root = parseValue();
+  if (tokens[index].kind !== "eof") fail3(`has trailing data; found ${describe3(tokens[index])}`);
+  const records = root instanceof Map ? [root] : Array.isArray(root) ? root : fail3("root must be an object or array.", tokens[0]);
+  if (records.length === 0) throw new ImportSourceError("JSON source contains no records.");
+  records.forEach((record2, i) => {
+    if (!(record2 instanceof Map)) throw new ImportSourceError(`JSON record ${i + 1} must be an object.`);
+  });
+  return records;
+}
+
+// src/import/jsonMaterializer.ts
+var STRING_ARRAY_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var CODE_ARRAY_TYPES = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
+function fail2(row, field, message) {
+  throw new ImportSourceError(`JSON field validation failed (row=${row}, field=${field}): ${message}`);
+}
+function isNumber(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && !(value instanceof Map) && value.kind === "number";
+}
+function materializeValue(value, target, row) {
+  if (value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") fail2(row, target.code, "boolean is not accepted.");
+  if (isNumber(value)) {
+    if (target.fieldType === "NUMBER") fail2(row, target.code, "precision target requires a JSON string.");
+    if (!/^-?(?:0|[1-9]\d*)$/.test(value.lexeme) || value.lexeme === "-0") {
+      fail2(row, target.code, `JSON number ${value.lexeme} must be a non-negative-zero safe integer lexeme.`);
+    }
+    const number4 = Number(value.lexeme);
+    if (!Number.isSafeInteger(number4)) fail2(row, target.code, `JSON number ${value.lexeme} is outside the safe integer range.`);
+    return String(number4);
+  }
+  if (value instanceof Map) fail2(row, target.code, "object is not accepted for a flat field.");
+  if (!Array.isArray(value)) fail2(row, target.code, "unsupported value type.");
+  if (!STRING_ARRAY_TYPES.has(target.fieldType) && !CODE_ARRAY_TYPES.has(target.fieldType)) {
+    fail2(row, target.code, "array is accepted only for multi-value fields.");
+  }
+  const strings = value.map((entry) => {
+    if (typeof entry !== "string") fail2(row, target.code, "array elements must be strings.");
+    return entry;
+  });
+  if (new Set(strings).size !== strings.length) fail2(row, target.code, "array elements must not contain duplicates.");
+  return CODE_ARRAY_TYPES.has(target.fieldType) ? JSON.stringify(strings.map((code) => ({ code }))) : JSON.stringify(strings);
+}
+function materializeJsonDmlSource(_source, payload, targets, maxRows) {
+  if (payload.encoding && payload.encoding !== "utf8") throw new ImportSourceError("JSON source is UTF-8 only.");
+  const records = decodeJsonRecords(payload.bytes);
+  if (records.length > maxRows) throw new ImportSourceError(`source rows (${records.length}) exceed maxRecords (${maxRows}).`);
+  const targetByCode = new Map(targets.map((target) => [target.code, target]));
+  if (targetByCode.size !== targets.length) throw new ImportSourceError("JSON target fields contain duplicates.");
+  const rows = [];
+  const importPresence = [];
+  records.forEach((record2, index) => {
+    for (const key of record2.keys()) {
+      if (!targetByCode.has(key)) fail2(index + 1, key, "unknown key (not declared in INTO).");
+    }
+    const row = {};
+    const present = /* @__PURE__ */ new Set();
+    for (const target of targets) {
+      if (!record2.has(target.code)) continue;
+      present.add(target.code);
+      row[target.code] = materializeValue(record2.get(target.code), target, index + 1);
+    }
+    rows.push(row);
+    importPresence.push(present);
+  });
+  return {
+    rows,
+    columns: targets.map((target) => target.code),
+    columnMeta: new Map(targets.map((target) => [target.code, { fieldType: target.fieldType }])),
+    importPresence
+  };
+}
+
+// src/import/materializeDmlSource.ts
+function materializeCsvDmlSource(source, payload, maxRows, targetCodes, fieldInfos, recordNumberSourceHeader) {
+  const decoded = decodeCsv(payload.bytes, {
+    encoding: source.encoding ?? payload.encoding ?? "utf8",
+    hasHeader: source.hasHeader,
+    columns: source.columns
+  });
+  if (decoded.rows.length > maxRows) {
+    throw new ImportSourceError(`source rows (${decoded.rows.length}) exceed maxRecords (${maxRows}).`);
+  }
+  if (source.mappingMode === "BY_NAME") {
+    if (!targetCodes || !fieldInfos) throw new Error("InternalError: BY NAME requires destination form metadata.");
+    if (new Set(targetCodes).size !== targetCodes.length) {
+      throw new ImportSourceError("ERR_IMPORT_HEADER_REUSED: a BY NAME header cannot be consumed more than once.");
+    }
+    const indexes = new Map(decoded.columns.map((column, index) => [column, index]));
+    for (const code of targetCodes) {
+      if (!indexes.has(code)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${code}" is missing.`);
+    }
+    const infoByCode = new Map(fieldInfos.map((info) => [info.code, info]));
+    const targetSet = new Set(targetCodes);
+    if (recordNumberSourceHeader && targetSet.has(recordNumberSourceHeader)) {
+      throw new ImportSourceError("ERR_IMPORT_HEADER_REUSED: record-number source header is lookup-only and cannot be a write target.");
+    }
+    if (recordNumberSourceHeader && !indexes.has(recordNumberSourceHeader)) {
+      throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${recordNumberSourceHeader}" is missing.`);
+    }
+    const ignoredKnownColumns = [];
+    const ignoredUnknownColumns = [];
+    const nonEmpty = (index) => decoded.rows.filter((row) => row[index] !== "").length;
+    const reasonFor = (info) => {
+      if (info.fieldType === "FILE") return "FILE attachment is outside flat IMPORT scope";
+      if (info.inSubtable || info.fieldType === "SUBTABLE") return "subtable field is not writable in Phase 3";
+      if (info.writable === false) return `non-writable ${info.fieldType} field`;
+      return `known export-only ${info.fieldType} field`;
+    };
+    for (const [index, column] of decoded.columns.entries()) {
+      if (targetSet.has(column) || column === recordNumberSourceHeader) continue;
+      const info = infoByCode.get(column);
+      if (info) ignoredKnownColumns.push({ column, reason: reasonFor(info), nonEmptyCells: nonEmpty(index) });
+      else if (!source.ignoreUnknownColumns) throw new ImportSourceError(`ERR_IMPORT_UNKNOWN_COLUMN: unknown CSV header "${column}".`);
+      else ignoredUnknownColumns.push({ column, reason: "unknown column ignored by explicit policy", nonEmptyCells: nonEmpty(index) });
+    }
+    for (const code of targetCodes) {
+      const info = infoByCode.get(code);
+      if (!info) throw new Error(`ArgumentError: DML target field ${code} does not exist.`);
+      if (info.inSubtable || info.writable === false || info.fieldType === "FILE" || info.fieldType === "SUBTABLE") {
+        throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
+      }
+    }
+    const importRowErrors = [];
+    const rows2 = decoded.rows.map((values) => {
+      const errors = [];
+      const row = {};
+      for (const code of targetCodes) {
+        const raw = values[indexes.get(code)];
+        try {
+          row[code] = convertImportCsvValue(raw, infoByCode.get(code)?.fieldType, { cliKintone: true });
+        } catch (error51) {
+          if (!(error51 instanceof ImportCsvValueError)) throw error51;
+          row[code] = raw;
+          errors.push({ field: code, code: error51.code, message: error51.message });
+        }
+      }
+      importRowErrors.push(errors);
+      return row;
+    });
+    return {
+      rows: rows2,
+      columns: [...targetCodes],
+      columnMeta: new Map(targetCodes.map((code) => [code, { fieldType: infoByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }])),
+      importRowErrors,
+      ...recordNumberSourceHeader ? { recordNumberSourceValues: decoded.rows.map((row) => row[indexes.get(recordNumberSourceHeader)]) } : {},
+      importAudit: { mapping: "BY_NAME", writtenColumns: [...targetCodes], ignoredKnownColumns, ignoredUnknownColumns }
+    };
+  }
+  const rows = decoded.rows.map((values) => Object.fromEntries(decoded.columns.map((column, i) => [column, values[i]])));
+  return {
+    rows,
+    columns: decoded.columns,
+    // CSV cells are decoded as strings; projections such as CAST may replace this metadata downstream.
+    columnMeta: new Map(decoded.columns.map((column) => [column, { fieldType: "SINGLE_LINE_TEXT" }]))
+  };
+}
+
+// src/import/importRecordsMaterializer.ts
+var sourceFail = (parentRow, code, message) => {
+  throw new ImportSourceError(`JSON subtable validation failed (parentRow=${parentRow}, field=${code}): ${message}`);
+};
+function materializeJsonImportRecords(_source, payload, targets, maxParents, maxChildRows = maxParents) {
+  if (payload.encoding && payload.encoding !== "utf8") throw new ImportSourceError("JSON source is UTF-8 only.");
+  const decoded = decodeJsonRecords(payload.bytes);
+  if (decoded.length > maxParents) throw new ImportSourceError(`source parent rows (${decoded.length}) exceed maxRecords (${maxParents}).`);
+  const targetByCode = new Map(targets.map((target) => [target.kind === "FIELD" ? target.field : target.subtableCode, target]));
+  if (targetByCode.size !== targets.length) throw new ImportSourceError("IMPORT targets contain duplicates.");
+  let childTotal = 0;
+  return {
+    records: decoded.map((record2, index) => {
+      const parentRow = index + 1;
+      for (const code of record2.keys()) if (!targetByCode.has(code)) sourceFail(parentRow, code, "unknown key (not declared in INTO).");
+      const top = /* @__PURE__ */ new Map();
+      const subtables = /* @__PURE__ */ new Map();
+      const replacementTables = /* @__PURE__ */ new Set();
+      for (const target of targets) {
+        const code = target.kind === "FIELD" ? target.field : target.subtableCode;
+        if (!record2.has(code)) continue;
+        const value = record2.get(code);
+        if (target.kind === "FIELD") {
+          if (value instanceof Map) sourceFail(parentRow, code, "object is not accepted for a top-level field.");
+          top.set(code, value);
+          continue;
+        }
+        if (!Array.isArray(value)) sourceFail(parentRow, code, "subtable value must be an array.");
+        replacementTables.add(code);
+        const children = new Set(target.children);
+        const rows = value.map((entry, childIndex) => {
+          if (!(entry instanceof Map)) sourceFail(parentRow, code, `childRow=${childIndex + 1} must be an object.`);
+          const child = entry;
+          for (const childCode of child.keys()) {
+            if (!children.has(childCode)) sourceFail(parentRow, childCode, `unknown child key in subtable ${code} at childRow=${childIndex + 1}.`);
+          }
+          childTotal++;
+          if (childTotal > maxChildRows) throw new ImportSourceError(`source child rows (${childTotal}) exceed limit (${maxChildRows}).`);
+          return { childRowNumber: childIndex + 1, values: child };
+        });
+        subtables.set(code, rows);
+      }
+      return { rowNumber: parentRow, top, subtables, replacementTables };
+    })
+  };
+}
+function materializeCliKintoneCsvImportRecords(source, payload, targets, replacementTables, maxParents, recordNumberSourceHeader) {
+  const decoded = decodeCsv(payload.bytes, {
+    encoding: source.encoding ?? payload.encoding ?? "utf8",
+    hasHeader: source.hasHeader,
+    columns: source.columns
+  });
+  if (!source.hasHeader || decoded.columns[0] !== "*") throw new ImportSourceError('ERR_IMPORT_MARKER: first CSV header must be "*".');
+  const indexes = new Map(decoded.columns.map((code, index) => [code, index]));
+  if (recordNumberSourceHeader && !indexes.has(recordNumberSourceHeader)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${recordNumberSourceHeader}" is missing.`);
+  const fields = targets.filter((target) => target.kind === "FIELD");
+  const tables = targets.filter((target) => target.kind === "SUBTABLE");
+  for (const field of fields) if (!indexes.has(field.field)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header "${field.field}" is missing.`);
+  for (const table of tables) {
+    if (!table.rowIdSourceHeader || !indexes.has(table.rowIdSourceHeader)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: row-ID header for ${table.subtableCode} is missing.`);
+    for (const child of table.children) if (!indexes.has(child)) throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required child header "${child}" is missing.`);
+  }
+  const records = [];
+  let current;
+  decoded.rows.forEach((cells, physicalIndex) => {
+    const sourceRowNumber = physicalIndex + 2;
+    const marker = cells[0];
+    if (marker !== "" && marker !== "*") throw new ImportSourceError(`ERR_IMPORT_MARKER: invalid marker ${JSON.stringify(marker)} at source row ${sourceRowNumber}.`);
+    if (marker === "*") {
+      if (records.length >= maxParents) throw new ImportSourceError(`source parent rows exceed maxRecords (${maxParents}).`);
+      current = {
+        rowNumber: records.length + 1,
+        markerRowNumber: sourceRowNumber,
+        top: new Map(fields.map((field) => [field.field, cells[indexes.get(field.field)]])),
+        subtables: new Map(tables.map((table) => [table.subtableCode, []])),
+        replacementTables: new Set(replacementTables),
+        ...recordNumberSourceHeader ? { recordNumberSourceValue: cells[indexes.get(recordNumberSourceHeader)] } : {}
+      };
+      records.push(current);
+    } else if (!current) {
+      throw new ImportSourceError(`ERR_IMPORT_MARKER: first data row must start a parent (source row ${sourceRowNumber}).`);
+    } else {
+      for (const field of fields) {
+        const continuationValue = cells[indexes.get(field.field)];
+        if (continuationValue !== "" && continuationValue !== current.top.get(field.field)) {
+          throw new ImportSourceError(`ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION: ${field.field} at source row ${sourceRowNumber}.`);
+        }
+      }
+      if (recordNumberSourceHeader) {
+        const continuationValue = cells[indexes.get(recordNumberSourceHeader)];
+        if (continuationValue !== "" && continuationValue !== current.recordNumberSourceValue) {
+          throw new ImportSourceError(`ERR_IMPORT_PARENT_VALUE_ON_CONTINUATION: ${recordNumberSourceHeader} at source row ${sourceRowNumber}.`);
+        }
+      }
+    }
+    for (const table of tables) {
+      const rowId = cells[indexes.get(table.rowIdSourceHeader)];
+      const values = new Map(table.children.map((child) => [child, cells[indexes.get(child)]]));
+      if (rowId === "" && [...values.values()].every((value) => value === "")) continue;
+      const rows = current.subtables.get(table.subtableCode);
+      rows.push({ childRowNumber: rows.length + 1, sourceRowNumber, ...rowId ? { rowId } : {}, values });
+    }
+  });
+  if (records.length === 0) throw new ImportSourceError("CSV has no parent rows.");
+  return { records };
+}
+
+// src/import/importRecordValidation.ts
+var USER_TYPES3 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
+var UNSUPPORTED_CHILD_TYPES = /* @__PURE__ */ new Set(["SUBTABLE", "FILE", "CALC", "RECORD_NUMBER", "CREATOR", "CREATED_TIME", "MODIFIER", "UPDATED_TIME", "STATUS", "STATUS_ASSIGNEE", "CATEGORY", "REFERENCE_TABLE"]);
+function assertImportRejectLimit(prepared, rejectLimit) {
+  if (rejectLimit != null && prepared.invalidParentRows.size > rejectLimit) {
+    throw new Error(`RejectLimitExceededError: rejected parents (${prepared.invalidParentRows.size}) exceed REJECT LIMIT (${rejectLimit}).`);
+  }
+}
+function prepareImportRecords(materialized, targets, fieldInfos, numberPrecision, operation) {
+  const topInfos = new Map(fieldInfos.filter((f) => !f.inSubtable).map((f) => [f.code, f]));
+  const scoped = /* @__PURE__ */ new Map();
+  for (const info of fieldInfos) if (info.inSubtable && info.subtableCode) {
+    let children = scoped.get(info.subtableCode);
+    if (!children) scoped.set(info.subtableCode, children = /* @__PURE__ */ new Map());
+    children.set(info.code, info);
+  }
+  const targetTop = targets.filter((t) => t.kind === "FIELD");
+  const targetTables = targets.filter((t) => t.kind === "SUBTABLE");
+  for (const target of targetTop) assertWritable(target.field, topInfos.get(target.field), void 0);
+  for (const target of targetTables) {
+    const table = topInfos.get(target.subtableCode);
+    if (!table || table.fieldType !== "SUBTABLE") throw new Error(`ArgumentError: IMPORT subtable ${target.subtableCode} does not exist.`);
+    const children = scoped.get(target.subtableCode) ?? /* @__PURE__ */ new Map();
+    for (const child of target.children) assertWritable(child, children.get(child), target.subtableCode);
+  }
+  const tableCounts = new Map(targetTables.map((t) => [t.subtableCode, { parentsPresent: 0, childRows: 0, validChildRows: 0, invalidChildRows: 0 }]));
+  const parents = materialized.records.map((record2) => validateParent(record2, targetTop, targetTables, topInfos, scoped, numberPrecision, operation, tableCounts));
+  const errors = parents.flatMap((parent) => [...parent.errors]);
+  return { parents, errors, invalidParentRows: new Set(parents.filter((p) => !p.valid).map((p) => p.parentRow)), tableCounts };
+}
+function validateParent(source, topTargets, tableTargets, topInfos, scoped, precision, operation, tableCounts) {
+  const errors = [];
+  const top = {};
+  for (const target of topTargets) {
+    if (!source.top.has(target.field)) continue;
+    validateValue(source.top.get(target.field), topInfos.get(target.field), precision, top, target.field, errors, location(source, operation, target.field));
+  }
+  const createValidationOnly = {};
+  if (operation === "INSERT") for (const info of topInfos.values()) {
+    if (info.fieldType === "SUBTABLE" || info.writable === false || source.top.has(info.code)) continue;
+    validateMissing(info, precision, createValidationOnly, errors, location(source, operation, info.code));
+  }
+  const subtables = /* @__PURE__ */ new Map();
+  for (const target of tableTargets) {
+    if (!source.subtables.has(target.subtableCode)) continue;
+    const count = tableCounts.get(target.subtableCode);
+    count.parentsPresent++;
+    const preparedRows = [];
+    for (const child of source.subtables.get(target.subtableCode)) {
+      count.childRows++;
+      const before = errors.length;
+      const record2 = {};
+      const infos = scoped.get(target.subtableCode);
+      for (const code of target.children) {
+        const info = infos.get(code);
+        const loc = location(source, operation, code, target.subtableCode, child.childRowNumber, child.sourceRowNumber ?? source.markerRowNumber);
+        if (child.values.has(code)) validateValue(child.values.get(code), info, precision, record2, code, errors, loc);
+        else validateMissing(info, precision, record2, errors, loc);
+      }
+      if (errors.length === before) {
+        count.validChildRows++;
+        preparedRows.push(record2);
+      } else count.invalidChildRows++;
+    }
+    subtables.set(target.subtableCode, preparedRows);
+  }
+  return { parentRow: source.rowNumber, valid: errors.length === 0, top, subtables, replacementTables: source.replacementTables, errors };
+}
+function assertWritable(code, info, table) {
+  if (!info) throw new Error(table ? `ArgumentError: IMPORT child ${code} does not belong to subtable ${table}.` : `ArgumentError: IMPORT top-level field ${code} does not exist.`);
+  if (info.writable === false || table && UNSUPPORTED_CHILD_TYPES.has(info.fieldType)) {
+    throw new Error(`ArgumentError: IMPORT ${table ? `child ${table}.${code}` : `field ${code}`} is not writable (${info.fieldType}).`);
+  }
+}
+function validateMissing(info, precision, record2, errors, loc) {
+  const raw = isEmptyDmlValue(info.defaultValue) ? "" : info.defaultValue;
+  validateValue(raw, info, precision, record2, info.code, errors, loc, !isEmptyDmlValue(info.defaultValue));
+}
+function validateValue(raw, info, precision, record2, code, errors, loc, isDefault = false) {
+  const normalizedRaw = decodeRaw(raw);
+  const result = validateAndNormalizeDmlValue(normalizedRaw, info, precision);
+  if (!result.ok) errors.push({ ...loc, code: result.code, message: isDefault ? `\u65E2\u5B9A\u5024: ${result.message}` : result.message });
+  else record2[code] = { value: preserveUserCodes(normalizedRaw, info) ? normalizedRaw : result.value };
+}
+function decodeRaw(raw) {
+  if (isJsonNumber(raw)) return raw.lexeme;
+  if (Array.isArray(raw)) return raw.map((value) => value instanceof Map ? value : isJsonNumber(value) ? value.lexeme : value);
+  return raw;
+}
+function isJsonNumber(raw) {
+  return typeof raw === "object" && raw !== null && raw.kind === "number";
+}
+function preserveUserCodes(raw, info) {
+  return USER_TYPES3.has(info.fieldType) && Array.isArray(raw) && raw.every((v) => typeof v === "object" && v !== null && "code" in v);
+}
+function location(source, operation, field, subtable, subrow, sourceRow) {
+  const physicalRow = sourceRow ?? source.markerRowNumber;
+  return { operation, parentRow: source.rowNumber, field, ...subtable ? { subtable } : {}, ...subrow == null ? {} : { subrow }, ...physicalRow == null ? {} : { sourceRow: physicalRow }, sourceValues: subtable ? source.subtables.get(subtable)?.[subrow - 1]?.values ?? /* @__PURE__ */ new Map() : source.top };
+}
+
+// src/import/importErrors.ts
+var IMPORT_VALIDATION_META_COLUMNS = [
+  "$err_statement",
+  "$err_operation",
+  "$err_row",
+  "$err_field",
+  "$err_subtable",
+  "$err_subrow",
+  "$err_source_row",
+  "$err_code",
+  "$err_message"
+];
+function materializeImportValidationErrors(errors, payloadFields, statementNumber = 1) {
+  return errors.map((error51) => {
+    const row = {};
+    for (const field of payloadFields) row[field] = error51.sourceValues.get(field) == null ? "" : render(error51.sourceValues.get(field));
+    row["$err_statement"] = String(statementNumber);
+    row["$err_operation"] = error51.operation;
+    row["$err_row"] = String(error51.parentRow);
+    row["$err_field"] = error51.field;
+    row["$err_subtable"] = error51.subtable ?? "";
+    row["$err_subrow"] = error51.subrow == null ? "" : String(error51.subrow);
+    row["$err_source_row"] = error51.sourceRow == null ? null : String(error51.sourceRow);
+    row["$err_code"] = error51.code;
+    row["$err_message"] = error51.message;
+    return row;
+  });
+}
+function render(value) {
+  if (value === null || value === void 0) return "";
+  if (typeof value === "object" && value !== null && "kind" in value && "lexeme" in value && value.kind === "number") {
+    return String(value.lexeme);
+  }
+  if (Array.isArray(value)) return JSON.stringify(value);
+  return String(value);
+}
+
+// src/import/subtablePayload.ts
+function buildImportRecordPayload(top, subtables, rowIdMode) {
+  const record2 = {};
+  for (const [code, value] of top) record2[code] = { value };
+  for (const [tableCode, sourceRows] of subtables) {
+    record2[tableCode] = {
+      value: sourceRows.map((sourceRow) => ({
+        ...rowIdMode === "PRESERVE" && sourceRow.rowId ? { id: sourceRow.rowId } : {},
+        value: Object.fromEntries([...sourceRow.values].map(([childCode, value]) => [childCode, { value }]))
+      }))
+    };
+  }
+  return record2;
+}
+function buildJsonImportRecordPayload(top, subtables) {
+  return buildImportRecordPayload(top, subtables, "DROP");
+}
+
+// src/import/jsonSubtableWritePlan.ts
+function assertJsonImportHasNoRowIds(materialized) {
+  for (const parent of materialized.records) for (const [table, rows] of parent.subtables) {
+    for (const row of rows) {
+      if (row.rowId !== void 0 || row.values.has("_rid") || row.values.has("id")) {
+        throw new Error(`ArgumentError: JSON IMPORT subtable ${table} does not accept _rid/id; rows are always newly numbered.`);
+      }
+    }
+  }
+}
+function buildJsonSubtableWritePlan(parents, targetIds, existingById) {
+  return parents.map((parent, index) => {
+    const targetId = targetIds[index];
+    const existing = targetId === void 0 ? void 0 : existingById.get(targetId);
+    if (targetId !== void 0 && !existing) throw new Error(`InternalError: IMPORT UPSERT target APP record ${targetId} was not loaded.`);
+    const tables = [...parent.subtables].map(([table, input]) => {
+      const raw = existing?.record[table]?.value;
+      const existingRows = Array.isArray(raw) ? raw.length : 0;
+      return { table, existingRows, inputRows: input.length, addRows: input.length, deleteRows: existingRows };
+    });
+    return {
+      parentRow: parent.parentRow,
+      mode: targetId === void 0 ? "INSERT" : "UPDATE",
+      ...targetId === void 0 ? {} : { targetId, revision: existing?.revision },
+      top: parent.top,
+      subtables: parent.subtables,
+      tables
+    };
+  });
+}
+
+// src/import/subtableReplacementPlan.ts
+function tableRows(record2, table) {
+  const raw = record2[table]?.value;
+  return Array.isArray(raw) ? raw : [];
+}
+function assertNoDuplicateCsvSubtableRowIds(records) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const parent of records) for (const [table, rows] of parent.subtables) for (const row of rows) {
+    if (!row.rowId) continue;
+    const key = `${table}\0${row.rowId}`;
+    if (seen.has(key)) throw new Error(`ERR_SUBTABLE_ROW_ID_DUP_SOURCE: duplicate row ID ${row.rowId} in ${table}`);
+    seen.set(key, parent.rowNumber);
+  }
+}
+function buildCsvSubtableReplacementPlan(sources, prepared, targetIds, existingById, ownership) {
+  return prepared.map((parent, index) => {
+    const source = sources[index];
+    const targetId = targetIds[index];
+    const existing = targetId === void 0 ? void 0 : existingById.get(targetId);
+    const errors = [...parent.errors];
+    if (!existing || targetId === void 0) return { parentRow: parent.parentRow, targetId: targetId ?? 0, valid: false, top: parent.top, subtables: /* @__PURE__ */ new Map(), tables: [], errors };
+    const subtables = /* @__PURE__ */ new Map();
+    const tables = [];
+    for (const table of parent.replacementTables) {
+      const current = tableRows(existing.record, table);
+      const currentIds = new Set(current.map((row) => row.id).filter((id) => !!id));
+      const input = source.subtables.get(table) ?? [];
+      const normalized = parent.subtables.get(table) ?? [];
+      let updateRows = 0, addRows = 0, rowIdNotFound = 0;
+      const payloadRows = input.map((row, rowIndex) => {
+        const normalizedRecord = normalized[rowIndex] ?? {};
+        if (row.rowId && currentIds.has(row.rowId)) {
+          updateRows++;
+          return { rowId: row.rowId, record: normalizedRecord };
+        }
+        if (row.rowId) {
+          const owners = ownership.get(row.rowId) ?? [];
+          if (owners.some((owner) => owner.parentId !== targetId || owner.table !== table)) errors.push({
+            operation: "UPDATE",
+            parentRow: parent.parentRow,
+            field: row.rowId,
+            subtable: table,
+            subrow: row.childRowNumber,
+            sourceRow: row.sourceRowNumber,
+            code: "ERR_IMPORT_FIELD_OWNERSHIP",
+            message: `rowIdOwnedElsewhere: ${row.rowId}`,
+            sourceValues: row.values
+          });
+          rowIdNotFound++;
+        }
+        addRows++;
+        return { record: normalizedRecord };
+      });
+      subtables.set(table, payloadRows);
+      tables.push({ table, existingRows: current.length, inputRows: input.length, updateRows, addRows, deleteRows: current.length - updateRows, rowIdNotFound });
+    }
+    return { parentRow: parent.parentRow, targetId, ...existing.revision === void 0 ? {} : { revision: existing.revision }, valid: errors.length === 0, top: parent.top, subtables, tables, errors };
+  });
+}
+
+// src/import/importProjection.ts
+var IMPORT_PROJECTION_SOURCE = "#__import_source";
+function bindImportProjection(projection) {
+  return { ...projection, from: { appId: 0, alias: null, cteName: IMPORT_PROJECTION_SOURCE } };
+}
+
+// src/import/recordNumberUpdate.ts
+function normalizeImportRecordNumber(raw) {
+  return /^[0-9]+$/.test(raw) ? raw.replace(/^0+(?=\d)/, "") : null;
+}
+function preflightImportRecordNumbers(values, header) {
+  const normalized = values.map(normalizeImportRecordNumber);
+  const seen = /* @__PURE__ */ new Set();
+  for (const key of normalized) {
+    if (key === null) continue;
+    if (seen.has(key)) {
+      throw new Error("ERR_RECORD_NUMBER_DUP_SOURCE: source contains a duplicate record number");
+    }
+    seen.add(key);
+  }
+  return {
+    normalized,
+    errors: normalized.map((key) => key === null ? [{
+      field: header,
+      code: "ERR_RECORD_NUMBER_INVALID",
+      message: `${header} must be a non-empty ASCII decimal record number`
+    }] : [])
+  };
+}
+
 // src/execute.ts
 var SEARCH_ABORTED_WARNING = "\u691C\u7D22\u304C 10 \u4E07\u4EF6\u3067\u6253\u3061\u5207\u3089\u308C\u3001\u7D50\u679C\u304C\u6B20\u843D\u3057\u305F\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002";
 var SearchAbortedError = class extends Error {
@@ -38727,6 +39798,7 @@ var SearchAbortedError = class extends Error {
 };
 var materializedMetaBySelectResult = /* @__PURE__ */ new WeakMap();
 var materializedMetaByValidationResult = /* @__PURE__ */ new WeakMap();
+var importSourceByDmlStatement = /* @__PURE__ */ new WeakMap();
 var defaultCacheContextByClient = /* @__PURE__ */ new WeakMap();
 var nextDefaultCacheContextId = 1;
 function resolveCacheContext(client, explicit) {
@@ -38741,7 +39813,7 @@ function resolveCacheContext(client, explicit) {
 async function execute(sql, client, options = {}) {
   const startedAt = Date.now();
   const cacheContext = resolveCacheContext(client, options.cacheContext);
-  const stmt = parseSql(sql);
+  const stmt = parseSql(sql, options.enableImport === true);
   const metrics = createEmptyMetrics();
   const countedClient = wrapClientWithMetrics(client, metrics);
   const collector = { aborted: false };
@@ -38921,6 +39993,7 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   validateKlikeStatement(stmt);
+  if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
     if (stmt.validationErrorTable) {
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
@@ -39143,7 +40216,7 @@ var BatchTimeoutError = class extends Error {
   }
 };
 async function executeBatch(sql, client, options = {}) {
-  const statements = parseSqlBatch(sql);
+  const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions = { ...options, variables: injectedVariables };
@@ -39196,11 +40269,12 @@ async function executeBatch(sql, client, options = {}) {
       const userConfirm = batchOptions.confirm;
       const stmtOptions = userConfirm ? {
         ...batchOptions,
-        confirm: (count, operation) => userConfirm(count, operation, {
+        confirm: (count, operation, detailContext) => userConfirm(count, operation, {
           statementIndex: i,
           statementCount: statements.length,
           statementType: info.statementType,
-          targetAppId: info.targetAppId
+          targetAppId: info.targetAppId,
+          ...detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}
         })
       } : batchOptions;
       const searchAbortCollector = { aborted: false };
@@ -39313,6 +40387,9 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
       );
     }
     return { result };
+  }
+  if (resolvedStmt.type === "IMPORT") {
+    return { result: await executeImport(resolvedStmt, client, options, cacheContext, tempTables) };
   }
   if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
     const result = await executeDmlValidation(
@@ -39475,9 +40552,9 @@ function safeJsonStringify(v) {
     return String(v);
   }
 }
-function parseSqlBatch(sql) {
+function parseSqlBatch(sql, enableImport = false) {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens).parseStatements();
+  return new Parser(tokens, { import: enableImport }).parseStatements();
 }
 function evaluateScalarExpr(expr) {
   switch (expr.type) {
@@ -40546,8 +41623,14 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
       }
     } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
       meta3 = syntheticColumnMeta("number");
-    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") {
+    } else if (column.type === "LITERAL_COL") {
       meta3 = syntheticColumnMeta("string");
+    } else if (column.type === "SCALAR_VALUE_COL") {
+      const expr = column.expr;
+      if (expr.type === "STRING_FUNC") meta3 = stringFunctionColumnMeta(expr);
+      else if (expr.type === "NUMBER" || expr.type === "SCALAR_ARITH") meta3 = syntheticColumnMeta("number");
+      else if (expr.type === "FIELD") meta3 = resolveField2(expr);
+      else meta3 = syntheticColumnMeta("string");
     } else if (column.type === "STRFUNC_COL") {
       meta3 = stringFunctionColumnMeta(column.expr);
     } else if (column.type === "WINDOW_COL") {
@@ -41361,9 +42444,10 @@ async function buildSortKindsForSelect(stmt, client, cacheContext) {
   return sortKinds;
 }
 function convertProcessRowValue(raw, dstFieldType) {
-  const USER_TYPES2 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
+  if (typeof raw !== "string") return raw;
+  const USER_TYPES4 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
   const ARRAY_TYPES3 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
-  if (USER_TYPES2.has(dstFieldType ?? "")) {
+  if (USER_TYPES4.has(dstFieldType ?? "")) {
     if (raw === "") return [];
     try {
       const parsed = JSON.parse(raw);
@@ -41428,11 +42512,13 @@ function assertValidDmlRecords(records, targetFields, fieldInfos, numberPrecisio
   records.forEach((record2, rowIndex) => {
     for (const code of targetFields) {
       const info = infoByCode.get(code);
-      const result = validateAndNormalizeDmlValue(record2[code]?.value ?? "", info, numberPrecision);
+      const original = record2[code]?.value ?? "";
+      const result = validateAndNormalizeDmlValue(original, info, numberPrecision);
       if (!result.ok) {
         throw new Error(`DmlValidationError: ${result.code} ${result.message} (row=${rowIndex + 1}, field=${code})`);
       }
-      record2[code] = { value: result.value };
+      const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(info.fieldType) && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+      record2[code] = { value: preserveCodes ? original : result.value };
     }
   });
 }
@@ -41592,6 +42678,8 @@ async function materializeValidationCandidates(stmt, operation, client, options,
   if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
   let rows;
   let sourceRows;
+  let sourcePresence;
+  let sourceRowErrors;
   let evaluationTypes;
   if (stmt.type === "INSERT" || stmt.type === "UPSERT") {
     assertInsertCheckRefs(stmt, stmt.fields);
@@ -41601,7 +42689,7 @@ async function materializeValidationCandidates(stmt, operation, client, options,
       (value, i) => value.type === "CASE_VALUE" ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType) : value
     ));
   } else {
-    const selectResult = tempTables && tempTables.size > 0 ? await executeQueryWithCte(stmt.select, client, { ...options, onLimitReached: "error" }, tempTables, cacheContext) : await executeSelect(stmt.select, client, { ...options, onLimitReached: "error" }, cacheContext, void 0, true);
+    const selectResult = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables, [...infoByCode.values()]);
     const hasChecks = (stmt.checkGroups?.length ?? 0) > 0;
     if (selectResult.columns.length < stmt.fields.length || !hasChecks && selectResult.columns.length !== stmt.fields.length) {
       throw new Error(`SELECT \u306E\u5217\u6570\uFF08${selectResult.columns.length}\uFF09\u3068 DML \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u6570\uFF08${stmt.fields.length}\uFF09\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093`);
@@ -41611,7 +42699,9 @@ async function materializeValidationCandidates(stmt, operation, client, options,
     }
     assertInsertCheckRefs(stmt, selectResult.columns);
     sourceRows = selectResult.rows;
-    const meta3 = materializedMetaBySelectResult.get(selectResult);
+    sourcePresence = selectResult.importPresence;
+    sourceRowErrors = selectResult.importRowErrors;
+    const meta3 = selectResult.columnMeta;
     evaluationTypes = new Map(selectResult.columns.map((column) => {
       const columnMeta = meta3?.get(column);
       const type = columnMeta?.fieldType ?? (columnMeta?.semantics?.compareMode === "number" || columnMeta?.sortKind === "number" ? "NUMBER" : "SINGLE_LINE_TEXT");
@@ -41624,8 +42714,10 @@ async function materializeValidationCandidates(stmt, operation, client, options,
     rowNumber: index + 1,
     operation,
     mode: "create",
-    payload: new Map(stmt.fields.map((field, i) => [field, values[i]])),
-    preErrors: [],
+    payload: new Map(stmt.fields.flatMap(
+      (field, i) => sourcePresence && !sourcePresence[index]?.has(field) ? [] : [[field, values[i]]]
+    )),
+    preErrors: [...sourceRowErrors?.[index] ?? []],
     record: {},
     evaluationRow: sourceRows?.[index] ?? Object.fromEntries(
       stmt.fields.map((field, i) => [field, renderValidationValue(values[i])])
@@ -41638,13 +42730,17 @@ async function materializeValidationCandidates(stmt, operation, client, options,
   }
   const fieldTypes = new Map([...infoByCode].map(([code, info]) => [code, info.fieldType]));
   const rowKeys = candidates.map((candidate) => stmt.keyFields.map((key) => renderValidationValue(candidate.payload.get(key))));
-  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
   const numeric = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
   const keyCounts = /* @__PURE__ */ new Map();
   for (const parts of rowKeys) {
     const key = upsertNormalizedKey(parts, numeric);
     keyCounts.set(key, (keyCounts.get(key) ?? 0) + 1);
   }
+  const isImport = importSourceByDmlStatement.has(stmt);
+  if (isImport && [...keyCounts.values()].some((count) => count > 1)) {
+    throw new Error("ERR_KEY_DUP_SOURCE: UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059");
+  }
+  const targets = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
   candidates.forEach((candidate, index) => {
     const parts = rowKeys[index];
     const targetId = lookupUpsertTarget(targets, parts);
@@ -41653,7 +42749,7 @@ async function materializeValidationCandidates(stmt, operation, client, options,
     stmt.keyFields.forEach((key, keyIndex) => {
       if (parts[keyIndex] === "") candidate.preErrors.push({ field: key, code: "ERR_KEY_EMPTY", message: `UPSERT \u30AD\u30FC ${key} \u306F\u7A7A\u306B\u3067\u304D\u307E\u305B\u3093` });
     });
-    if ((keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
+    if (!isImport && (keyCounts.get(upsertNormalizedKey(parts, numeric)) ?? 0) > 1) {
       candidate.preErrors.push({ field: stmt.keyFields[0], code: "ERR_KEY_DUP_SOURCE", message: "UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059" });
     }
   });
@@ -42013,12 +43109,508 @@ async function executeInsert(stmt, client, options, cacheContext) {
     insertedCount: createdIds.flat().length
   };
 }
+function importPlaceholderSelect() {
+  return {
+    type: "SELECT",
+    distinct: false,
+    columns: [],
+    from: { appId: 0, alias: null, cteName: NO_FROM_CTE_NAME },
+    joins: [],
+    where: null,
+    groupBy: [],
+    having: null,
+    orderMode: "CANONICAL",
+    orderBy: [],
+    limit: null,
+    offset: null
+  };
+}
+async function executeImport(stmt, client, options, cacheContext, tempTables) {
+  if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
+  const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
+  if (stmt.targets?.some((target) => target.kind === "SUBTABLE")) {
+    if (!stmt.validateOnly && !options.supportsImportConfirmDetail) {
+      throw new Error("UnsupportedError: IMPORT subtable mutation requires a surface that displays parent/table replacement and deletion detail; use VALIDATE ONLY/EXPLAIN.");
+    }
+    if (stmt.source.kind === "CSV") {
+      if (stmt.writeMode !== "UPDATE_RECORD_NUMBER" || !stmt.recordNumberSourceHeader) throw new Error("ArgumentError: CSV subtable replacement requires IMPORT UPDATE and MATCH RECORD NUMBER SOURCE.");
+      if (!stmt.replaceSubtables?.length) throw new Error("ArgumentError: CSV subtable replacement requires REPLACE SUBTABLES (...).");
+      const declared = new Set(stmt.targets.filter((target) => target.kind === "SUBTABLE").map((target) => target.subtableCode));
+      if (stmt.replaceSubtables.some((table) => !declared.has(table))) throw new Error("ArgumentError: REPLACE SUBTABLES contains a table not declared in INTO.");
+      for (const target of stmt.targets.filter((target2) => target2.kind === "SUBTABLE")) {
+        if (!target.rowIdSourceHeader || !stmt.replaceSubtables.includes(target.subtableCode)) throw new Error(`ArgumentError: CSV subtable ${target.subtableCode} requires ROW ID SOURCE and REPLACE SUBTABLES declaration.`);
+      }
+    }
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    const targets = stmt.targets;
+    const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+    const targetCodes = targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children);
+    const numberPrecision = fieldInfos.some((info) => targetCodes.includes(info.code) && info.fieldType === "NUMBER") ? await getNumberPrecisionCached(stmt.appId, client, cacheContext) : void 0;
+    const payload = await loadImportSource(handle, /* @__PURE__ */ new Map());
+    const materialized = stmt.source.kind === "JSON" ? materializeJsonImportRecords(stmt.source, payload, targets, options.maxRecords ?? 1e4) : materializeCliKintoneCsvImportRecords(stmt.source, payload, targets, stmt.replaceSubtables ?? [], options.maxRecords ?? 1e4, stmt.recordNumberSourceHeader);
+    const operation = stmt.source.kind === "CSV" ? "UPDATE" : stmt.keyFields ? "UPSERT" : "INSERT";
+    const prepared = prepareImportRecords(materialized, targets, fieldInfos, numberPrecision, operation);
+    if (stmt.source.kind === "CSV") return executeCsvSubtableReplacement(stmt, materialized, prepared, fieldInfos, client, options, tempTables);
+    assertImportRejectLimit(prepared, stmt.rejectLimit);
+    const payloadFields = [...new Set(targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children))];
+    const errors = materializeImportValidationErrors(prepared.errors, payloadFields);
+    const columns = [...payloadFields, ...IMPORT_VALIDATION_META_COLUMNS];
+    const invalidRows = prepared.invalidParentRows.size;
+    const detail = {
+      preflight: "ACTUAL_DATA",
+      parents: { total: prepared.parents.length, valid: prepared.parents.length - invalidRows, invalid: invalidRows, mutationCandidates: prepared.parents.filter((parent) => parent.valid).length },
+      tables: Object.fromEntries(prepared.tableCounts),
+      writesKintone: false
+    };
+    const result2 = {
+      type: "VALIDATION",
+      operation,
+      validatedRows: prepared.parents.length,
+      validRows: prepared.parents.length - invalidRows,
+      invalidRows,
+      errorCount: errors.length,
+      columns,
+      errors,
+      importDetail: detail,
+      ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}
+    };
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(
+      tempTables,
+      stmt.validationErrorTable,
+      columns,
+      errors,
+      options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      /* @__PURE__ */ new Map()
+    );
+    if (stmt.validateOnly) return result2;
+    assertJsonImportHasNoRowIds(materialized);
+    if (prepared.errors.length > 0 && !stmt.onErrorSkip) {
+      const first = prepared.errors[0];
+      throw new Error(`DmlValidationError: ${first.code} ${first.message} (row=${first.parentRow}, field=${first.field})`);
+    }
+    if (stmt.onErrorSkip) {
+      if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch and INTO error table.");
+      appendValidationErrors(
+        tempTables,
+        stmt.errorTable,
+        columns,
+        errors,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        /* @__PURE__ */ new Map()
+      );
+    }
+    const validParents = prepared.parents.filter((parent) => parent.valid);
+    const fieldTypes = new Map(fieldInfos.map((info) => [info.code, info.fieldType]));
+    const targetIds = validParents.map(() => void 0);
+    if (stmt.keyFields) {
+      for (const key of stmt.keyFields) if (!stmt.fields.includes(key)) {
+        throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C UPSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
+      }
+      const numeric = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
+      const sourceKeys = /* @__PURE__ */ new Set();
+      const rowKeys = validParents.map((parent) => stmt.keyFields.map((key) => String(parent.top[key]?.value ?? "")));
+      for (const parts of rowKeys) {
+        const normalized = upsertNormalizedKey(parts, numeric);
+        if (sourceKeys.has(normalized)) throw new Error("ERR_KEY_DUP_SOURCE: UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059");
+        sourceKeys.add(normalized);
+      }
+      const targetsIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes);
+      rowKeys.forEach((parts, index) => {
+        targetIds[index] = lookupUpsertTarget(targetsIndex, parts);
+      });
+    }
+    const tableCodes = targets.filter((target) => target.kind === "SUBTABLE").map((target) => target.subtableCode);
+    const existingById = /* @__PURE__ */ new Map();
+    const updateIds = targetIds.filter((id) => id !== void 0);
+    for (const chunk2 of splitChunks([...new Set(updateIds)], 100)) {
+      const response = await client.getRecords({ app: stmt.appId, query: `$id in (${chunk2.join(",")}) limit 500`, fields: ["$id", "$revision", ...tableCodes] });
+      for (const record2 of response.records) {
+        const id = Number(record2["$id"]?.value);
+        const revision = Number(record2["$revision"]?.value);
+        if (Number.isFinite(id)) existingById.set(id, { id, ...Number.isFinite(revision) ? { revision } : {}, record: record2 });
+      }
+    }
+    const writePlan = buildJsonSubtableWritePlan(validParents, targetIds, existingById);
+    const importDetail = {
+      kind: "IMPORT_JSON_SUBTABLE",
+      rowIdPolicy: "DROP_AND_RENUMBER_ALL",
+      parentsToWrite: writePlan.length,
+      insertedParents: writePlan.filter((parent) => parent.mode === "INSERT").length,
+      updatedParents: writePlan.filter((parent) => parent.mode === "UPDATE").length,
+      hasDeletes: writePlan.some((parent) => parent.tables.some((table) => table.deleteRows > 0)),
+      parents: writePlan.map((parent) => ({ parentRow: parent.parentRow, mode: parent.mode, ...parent.targetId === void 0 ? {} : { targetId: parent.targetId }, tables: parent.tables }))
+    };
+    if (writePlan.length > 0) {
+      if (!options.confirm) throw new Error("UnsupportedError: JSON IMPORT subtable mutation requires explicit confirmation detail approval.");
+      const ok = await options.confirm(writePlan.length, stmt.keyFields ? "UPDATE" : "INSERT", { statementIndex: 0, statementCount: 1, statementType: "IMPORT", targetAppId: stmt.appId, importDetail });
+      if (!ok) throw new OperationCancelledError(stmt.keyFields ? "UPDATE" : "INSERT", writePlan.length);
+    }
+    const toScalarMap = (record2) => new Map(
+      Object.entries(record2).map(([code, field]) => [code, field.value])
+    );
+    const payloadFor = (parent) => buildJsonImportRecordPayload(
+      toScalarMap(parent.top),
+      new Map([...parent.subtables].map(([table, rows]) => [table, rows.map((row) => ({ values: toScalarMap(row) }))]))
+    );
+    const inserts = writePlan.filter((parent) => parent.mode === "INSERT");
+    const updates = writePlan.filter((parent) => parent.mode === "UPDATE");
+    const createdIds = [];
+    for (let i = 0; i < inserts.length; i += 100) {
+      const response = await client.postRecords({ app: stmt.appId, records: inserts.slice(i, i + 100).map(payloadFor) });
+      createdIds.push(response.ids);
+    }
+    for (let i = 0; i < updates.length; i += 100) await client.putRecords({
+      app: stmt.appId,
+      records: updates.slice(i, i + 100).map((parent) => ({ id: parent.targetId, ...parent.revision === void 0 ? {} : { revision: parent.revision }, record: payloadFor(parent) }))
+    });
+    return stmt.keyFields ? { type: "UPSERT", insertedCount: createdIds.flat().length, updatedCount: updates.length, affectedRows: writePlan.length, skippedRows: prepared.invalidParentRows.size, rejectLimit: stmt.rejectLimit, ...stmt.errorTable ? { errTable: stmt.errorTable } : {}, importDetail } : { type: "INSERT", createdIds, insertedCount: createdIds.flat().length, affectedRows: writePlan.length, skippedRows: prepared.invalidParentRows.size, rejectLimit: stmt.rejectLimit, ...stmt.errorTable ? { errTable: stmt.errorTable } : {}, importDetail };
+  }
+  if (stmt.writeMode === "UPDATE_RECORD_NUMBER") {
+    return executeImportRecordNumberUpdate(
+      stmt,
+      handle,
+      client,
+      options,
+      cacheContext,
+      tempTables
+    );
+  }
+  const common = {
+    appId: stmt.appId,
+    fields: stmt.fields,
+    select: importPlaceholderSelect(),
+    validateOnly: stmt.validateOnly,
+    validationErrorTable: stmt.validationErrorTable,
+    onErrorSkip: stmt.onErrorSkip,
+    errorTable: stmt.errorTable,
+    rejectLimit: stmt.rejectLimit,
+    checkGroups: stmt.checkGroups
+  };
+  const generated = stmt.keyFields ? { type: "UPSERT_SELECT", ...common, keyFields: stmt.keyFields } : { type: "INSERT_SELECT", ...common };
+  const executionSource = { source: stmt.source, handle, cache: /* @__PURE__ */ new Map() };
+  importSourceByDmlStatement.set(generated, executionSource);
+  const withAudit = (result2) => {
+    if (executionSource.audit) Object.assign(result2, { importAudit: executionSource.audit });
+    return result2;
+  };
+  if (generated.validateOnly) {
+    if (generated.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    const result2 = await executeDmlValidation(generated, client, { ...options, onLimitReached: "error" }, cacheContext, tempTables, 1);
+    if (generated.validationErrorTable && tempTables) {
+      appendValidationErrors(
+        tempTables,
+        generated.validationErrorTable,
+        result2.columns,
+        result2.errors,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaByValidationResult.get(result2) ?? /* @__PURE__ */ new Map()
+      );
+    }
+    return withAudit(result2);
+  }
+  if (generated.onErrorSkip) {
+    if (!tempTables) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
+    const result2 = await (generated.type === "UPSERT_SELECT" ? executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1) : executeOnErrorSkip(generated, client, options, cacheContext, tempTables, 1));
+    return withAudit(result2);
+  }
+  const result = await (generated.type === "UPSERT_SELECT" ? executeUpsertSelect(generated, client, options, cacheContext, tempTables) : executeInsertSelect(generated, client, options, cacheContext, tempTables));
+  return withAudit(result);
+}
+async function executeCsvSubtableReplacement(stmt, materialized, preparedBase, fieldInfos, client, options, tempTables) {
+  if (!stmt.recordNumberSourceHeader || !stmt.replaceSubtables?.length) throw new Error("InternalError: incomplete CSV subtable replacement AST.");
+  assertNoDuplicateCsvSubtableRowIds(materialized.records);
+  const rawKeys = materialized.records.map((record2) => record2.recordNumberSourceValue ?? "");
+  const keyPlan = preflightImportRecordNumbers(rawKeys, stmt.recordNumberSourceHeader);
+  const tableCodes = [...stmt.replaceSubtables];
+  const ownershipTableCodes = [...new Set(fieldInfos.filter((info) => !info.inSubtable && info.fieldType === "SUBTABLE").map((info) => info.code))];
+  const allRecords = await fetchAll(client.getRecords, stmt.appId, "", ["$id", "$revision", ...ownershipTableCodes], {
+    maxRecords: options.maxRecords ?? 1e4,
+    parallel: options.fetchParallel ?? 1,
+    onLimit: "error"
+  });
+  const existingById = /* @__PURE__ */ new Map();
+  const ownership = /* @__PURE__ */ new Map();
+  for (const record2 of allRecords) {
+    const id = Number(record2["$id"]?.value);
+    const revision = Number(record2["$revision"]?.value);
+    if (!Number.isFinite(id)) continue;
+    existingById.set(id, { id, ...Number.isFinite(revision) ? { revision } : {}, record: record2 });
+    for (const table of ownershipTableCodes) {
+      const rows = record2[table]?.value;
+      if (!Array.isArray(rows)) continue;
+      for (const row of rows) if (row.id) {
+        const owners = ownership.get(row.id) ?? [];
+        owners.push({ parentId: id, table });
+        ownership.set(row.id, owners);
+      }
+    }
+  }
+  const targetIds = keyPlan.normalized.map((key) => key === null ? void 0 : Number(key));
+  const parents = preparedBase.parents.map((parent, index) => {
+    const errors2 = [...parent.errors];
+    for (const error51 of keyPlan.errors[index]) errors2.push({
+      operation: "UPDATE",
+      parentRow: parent.parentRow,
+      field: error51.field,
+      code: error51.code,
+      message: error51.message,
+      sourceValues: materialized.records[index].top
+    });
+    const targetId = targetIds[index];
+    if (targetId !== void 0 && !existingById.has(targetId)) errors2.push({
+      operation: "UPDATE",
+      parentRow: parent.parentRow,
+      field: stmt.recordNumberSourceHeader,
+      code: "ERR_RECORD_NUMBER_NOT_FOUND",
+      message: `record number ${targetId} does not exist in APP${stmt.appId}`,
+      sourceValues: materialized.records[index].top
+    });
+    return { ...parent, valid: errors2.length === 0, errors: errors2 };
+  });
+  const initialPlan = buildCsvSubtableReplacementPlan(materialized.records, parents, targetIds, existingById, ownership);
+  const planErrors = initialPlan.flatMap((parent) => [...parent.errors]);
+  const invalidParentRows = new Set(initialPlan.filter((parent) => !parent.valid).map((parent) => parent.parentRow));
+  const prepared = { ...preparedBase, parents, errors: planErrors, invalidParentRows };
+  assertImportRejectLimit(prepared, stmt.rejectLimit);
+  const validPlan = initialPlan.filter((parent) => parent.valid);
+  const allTables = initialPlan.flatMap((parent) => parent.tables);
+  const sum = (table, key) => allTables.filter((item) => item.table === table).reduce((n, item) => n + Number(item[key]), 0);
+  const tableDetail = Object.fromEntries(tableCodes.map((table) => [table, {
+    existingRows: sum(table, "existingRows"),
+    inputRows: sum(table, "inputRows"),
+    updateRows: sum(table, "updateRows"),
+    addRows: sum(table, "addRows"),
+    deleteRows: sum(table, "deleteRows"),
+    rowIdNotFound: sum(table, "rowIdNotFound")
+  }]));
+  const importDetail = {
+    kind: "IMPORT_CSV_SUBTABLE_REPLACE",
+    rowIdPolicy: "PRESERVE_EXISTING",
+    parentsToWrite: validPlan.length,
+    insertedParents: 0,
+    updatedParents: validPlan.length,
+    hasDeletes: validPlan.some((parent) => parent.tables.some((table) => table.deleteRows > 0)),
+    totalDeleteRows: validPlan.flatMap((parent) => parent.tables).reduce((n, table) => n + table.deleteRows, 0),
+    rowIdNotFound: validPlan.flatMap((parent) => parent.tables).reduce((n, table) => n + table.rowIdNotFound, 0),
+    invalidParents: invalidParentRows.size,
+    parents: validPlan.map((parent) => ({ parentRow: parent.parentRow, mode: "UPDATE", targetId: parent.targetId, tables: parent.tables }))
+  };
+  const payloadFields = [...new Set(stmt.targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children))];
+  const errors = materializeImportValidationErrors(planErrors, payloadFields);
+  const columns = [...payloadFields, ...IMPORT_VALIDATION_META_COLUMNS];
+  if (stmt.validateOnly) {
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(tempTables, stmt.validationErrorTable, columns, errors, options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, /* @__PURE__ */ new Map());
+    return {
+      type: "VALIDATION",
+      operation: "UPDATE",
+      validatedRows: parents.length,
+      validRows: parents.length - invalidParentRows.size,
+      invalidRows: invalidParentRows.size,
+      errorCount: errors.length,
+      columns,
+      errors,
+      ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {},
+      importDetail: { preflight: "ACTUAL_DATA", parents: { total: parents.length, valid: validPlan.length, invalid: invalidParentRows.size, mutationCandidates: validPlan.length }, tables: tableDetail, rowIdPolicy: "PRESERVE_EXISTING", rowIdNotFound: importDetail.rowIdNotFound, writesKintone: false }
+    };
+  }
+  if (planErrors.length && !stmt.onErrorSkip) {
+    const first = planErrors[0];
+    throw new Error(`DmlValidationError: ${first.code} ${first.message} (row=${first.parentRow}, field=${first.field})`);
+  }
+  if (stmt.onErrorSkip) {
+    if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch and INTO error table.");
+    appendValidationErrors(tempTables, stmt.errorTable, columns, errors, options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, /* @__PURE__ */ new Map());
+  }
+  if (validPlan.length) {
+    if (!options.supportsImportConfirmDetail || !options.confirm) throw new Error("UnsupportedError: CSV subtable replacement requires explicit rendered detail approval.");
+    const ok = await options.confirm(validPlan.length, "UPDATE", { statementIndex: 0, statementCount: 1, statementType: "IMPORT", targetAppId: stmt.appId, importDetail });
+    if (!ok) throw new OperationCancelledError("UPDATE", validPlan.length);
+  }
+  const scalarMap = (record2) => new Map(Object.entries(record2).map(([code, field]) => [code, field.value]));
+  for (const parent of validPlan) {
+    const record2 = buildImportRecordPayload(scalarMap(parent.top), new Map([...parent.subtables].map(([table, rows]) => [table, rows.map((row) => ({ ...row.rowId ? { rowId: row.rowId } : {}, values: scalarMap(row.record) }))])), "PRESERVE");
+    await client.putRecords({ app: stmt.appId, records: [{ id: parent.targetId, ...parent.revision === void 0 ? {} : { revision: parent.revision }, record: record2 }] });
+  }
+  return { type: "UPDATE", updatedCount: validPlan.length, affectedRows: validPlan.length, skippedRows: invalidParentRows.size, rejectLimit: stmt.rejectLimit, ...stmt.errorTable ? { errTable: stmt.errorTable } : {}, importDetail };
+}
+async function executeImportRecordNumberUpdate(stmt, handle, client, options, cacheContext, tempTables) {
+  if (stmt.source.kind !== "CSV" || stmt.source.mappingMode !== "BY_NAME" || !stmt.recordNumberSourceHeader) {
+    throw new Error("InternalError: invalid IMPORT UPDATE AST.");
+  }
+  if (new Set(stmt.fields).size !== stmt.fields.length) throw new Error("ArgumentError: DML target fields contain duplicates.");
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const payload = await loadImportSource(handle, /* @__PURE__ */ new Map());
+  const sourceTable = materializeCsvDmlSource(
+    stmt.source,
+    payload,
+    options.maxRecords ?? 1e4,
+    stmt.fields,
+    fieldInfos,
+    stmt.recordNumberSourceHeader
+  );
+  const keyValues = sourceTable.recordNumberSourceValues;
+  if (!keyValues) throw new Error("InternalError: record-number source values were not materialized.");
+  const keyPlan = preflightImportRecordNumbers(keyValues, stmt.recordNumberSourceHeader);
+  const matchedIds = /* @__PURE__ */ new Set();
+  const lookupKeys = [...new Set(keyPlan.normalized.filter((key) => key !== null))];
+  for (let i = 0; i < lookupKeys.length; i += 100) {
+    const chunk2 = lookupKeys.slice(i, i + 100);
+    const response = await client.getRecords({
+      app: stmt.appId,
+      query: `$id in (${chunk2.join(",")}) limit 500`,
+      fields: ["$id"]
+    });
+    for (const record2 of response.records) {
+      const id = record2["$id"]?.value;
+      if (typeof id === "string" && id !== "") matchedIds.add(id.replace(/^0+(?=\d)/, ""));
+    }
+  }
+  const infoByCode = new Map(fieldInfos.map((info) => [info.code, info]));
+  const evaluationTypes = new Map(stmt.fields.map((field) => [field, infoByCode.get(field)?.fieldType ?? "SINGLE_LINE_TEXT"]));
+  const candidates = sourceTable.rows.map((row, index) => {
+    const key = keyPlan.normalized[index];
+    const preErrors = [
+      ...sourceTable.importRowErrors?.[index] ?? [],
+      ...keyPlan.errors[index]
+    ];
+    if (key !== null && !matchedIds.has(key)) preErrors.push({
+      field: stmt.recordNumberSourceHeader,
+      code: "ERR_RECORD_NUMBER_NOT_FOUND",
+      message: `record number ${key} does not exist in APP${stmt.appId}`
+    });
+    return {
+      rowNumber: index + 1,
+      operation: "UPDATE",
+      mode: "update",
+      ...key !== null && matchedIds.has(key) ? { targetId: Number(key) } : {},
+      payload: new Map([
+        [stmt.recordNumberSourceHeader, keyValues[index]],
+        ...stmt.fields.map((field) => [field, row[field] ?? ""])
+      ]),
+      preErrors,
+      record: {},
+      evaluationRow: row,
+      evaluationFieldTypes: evaluationTypes
+    };
+  });
+  const diagnosticFields = [stmt.recordNumberSourceHeader, ...stmt.fields];
+  const validation = validateDmlCandidates(
+    candidates,
+    "UPDATE",
+    diagnosticFields,
+    stmt.fields,
+    fieldInfos,
+    1,
+    numberPrecision,
+    stmt.checkGroups ?? [],
+    false
+  );
+  const columns = [...diagnosticFields, ...VALIDATION_META_COLUMNS];
+  const validationResult = {
+    type: "VALIDATION",
+    operation: "UPDATE",
+    validatedRows: candidates.length,
+    validRows: candidates.length - validation.invalidRows,
+    invalidRows: validation.invalidRows,
+    errorCount: validation.errors.length,
+    columns,
+    errors: validation.errors,
+    ...stmt.validationErrorTable ?? stmt.errorTable ? { errTable: stmt.validationErrorTable ?? stmt.errorTable } : {}
+  };
+  Object.assign(validationResult, { importAudit: sourceTable.importAudit });
+  if (stmt.validateOnly) {
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(
+      tempTables,
+      stmt.validationErrorTable,
+      columns,
+      validation.errors,
+      options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      /* @__PURE__ */ new Map()
+    );
+    return validationResult;
+  }
+  if (!stmt.onErrorSkip && validation.invalidRows > 0) {
+    const first = validation.errors[0];
+    throw new Error(`DmlValidationError: ${first.$err_code} ${first.$err_message} (row=${first.$err_row}, field=${first.$err_field})`);
+  }
+  if (stmt.onErrorSkip) {
+    if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
+    appendValidationErrors(
+      tempTables,
+      stmt.errorTable,
+      columns,
+      validation.errors,
+      options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      /* @__PURE__ */ new Map()
+    );
+    if (stmt.rejectLimit != null && validation.invalidRows > stmt.rejectLimit) {
+      throw new RejectLimitExceededError(
+        `rejected rows (${validation.invalidRows}) exceed REJECT LIMIT (${stmt.rejectLimit}).`,
+        validationResult
+      );
+    }
+  }
+  const valid = candidates.filter((candidate) => !validation.invalidRowNumbers.has(candidate.rowNumber));
+  if (options.confirm) {
+    const ok = await options.confirm(valid.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", valid.length);
+  }
+  const updates = valid.map((candidate) => ({ id: candidate.targetId, record: candidate.record }));
+  for (let i = 0; i < updates.length; i += 100) {
+    await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  }
+  const result = {
+    type: "UPDATE",
+    updatedCount: updates.length,
+    ...stmt.onErrorSkip ? {
+      affectedRows: updates.length,
+      skippedRows: validation.invalidRows,
+      rejectLimit: stmt.rejectLimit ?? null,
+      errTable: stmt.errorTable
+    } : {}
+  };
+  Object.assign(result, { insertedCount: 0, importAudit: sourceTable.importAudit });
+  return result;
+}
+async function materializeDmlSource(stmt, client, options, cacheContext, tempTables, targetFields) {
+  const imported = importSourceByDmlStatement.get(stmt);
+  if (!imported) {
+    const selected2 = tempTables && tempTables.size > 0 ? await executeQueryWithCte(stmt.select, client, options, tempTables, cacheContext, true) : await executeSelect(stmt.select, client, options, cacheContext, void 0, true);
+    return { rows: selected2.rows, columns: selected2.columns, columnMeta: materializedMetaBySelectResult.get(selected2) };
+  }
+  const payload = await loadImportSource(imported.handle, imported.cache);
+  const rowLimit = options.maxRecords ?? 1e4;
+  const targetByCode = new Map((targetFields ?? []).map((info) => [info.code, info]));
+  const jsonTargets = stmt.fields.map((code) => ({ code, fieldType: targetByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }));
+  const raw = imported.source.kind === "JSON" ? materializeJsonDmlSource(imported.source, payload, jsonTargets, rowLimit) : materializeCsvDmlSource(imported.source, payload, rowLimit, stmt.fields, targetFields);
+  imported.audit = raw.importAudit;
+  if (imported.source.kind === "JSON") return raw;
+  if (!imported.source.projection) return raw;
+  const projection = bindImportProjection(imported.source.projection);
+  const tables = new Map(tempTables ?? []);
+  tables.set(IMPORT_PROJECTION_SOURCE, raw);
+  const selected = await executeQueryWithCte(projection, client, { ...options, onLimitReached: "error" }, tables, cacheContext, true);
+  return { rows: selected.rows, columns: selected.columns, columnMeta: materializedMetaBySelectResult.get(selected) };
+}
+var dmlSourceMaterializer = { materialize: materializeDmlSource };
+function assertNoImportRowErrors(table) {
+  for (let rowIndex = 0; rowIndex < (table.importRowErrors?.length ?? 0); rowIndex++) {
+    const first = table.importRowErrors?.[rowIndex]?.[0];
+    if (first) {
+      throw new Error(`DmlValidationError: ${first.code} ${first.message} (row=${rowIndex + 1}, field=${first.field})`);
+    }
+  }
+}
 async function executeInsertSelect(stmt, client, options, cacheContext, cteCache) {
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
-  const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
-  const { rows, columns } = selectResult;
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
+  const { rows, columns } = sourceTable;
+  assertNoImportRowErrors(sourceTable);
   if (columns.length !== stmt.fields.length) {
     const emptySourceHint = columns.length === 0 && rows.length === 0 ? "\u3002\u7D50\u679C\u304C 0 \u884C\u306E\u305F\u3081\u5217\u3092\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\uFF08SELECT * \u3092\u7A7A\u30BD\u30FC\u30B9\u306B\u4F7F\u3046\u3068\u5217\u3092\u6C7A\u5B9A\u3067\u304D\u307E\u305B\u3093\u3002\u660E\u793A\u5217\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF09" : "";
     throw new Error(
@@ -42030,15 +43622,16 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
     if (!ok) throw new OperationCancelledError("INSERT", rows.length);
   }
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const allRecords = rows.map((row) => {
+  const allRecords = rows.map((row, rowIndex) => {
     const record2 = {};
     stmt.fields.forEach((field, i) => {
+      if (sourceTable.importPresence && !sourceTable.importPresence[rowIndex]?.has(field)) return;
       const raw = row[columns[i]] ?? "";
       record2[field] = { value: convertProcessRowValue(raw, fieldTypes.get(field)) };
     });
     return record2;
   });
-  assertValidDmlRecords(allRecords, stmt.fields, fieldInfos, numberPrecision);
+  allRecords.forEach((record2) => assertValidDmlRecords([record2], stmt.fields.filter((field) => field in record2), fieldInfos, numberPrecision));
   const createdIds = [];
   for (let i = 0; i < allRecords.length; i += 100) {
     const batch = allRecords.slice(i, i + 100);
@@ -42431,9 +44024,9 @@ function expandRowsForSubtableDml(parents, subtableCode) {
   for (const parent of parents) {
     const parentId = String(parent["$id"]?.value ?? "");
     const parentRevision = getRevision(parent);
-    const tableRows = getMutableTableRows(parent, subtableCode);
-    for (let i = 0; i < tableRows.length; i++) {
-      const row = tableRows[i];
+    const tableRows2 = getMutableTableRows(parent, subtableCode);
+    for (let i = 0; i < tableRows2.length; i++) {
+      const row = tableRows2[i];
       const flat = {
         _pid: parentId,
         _rid: row.id ?? "",
@@ -42639,8 +44232,9 @@ async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, cteCache);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
-  const selectResult = cteCache !== void 0 && cteCache.size > 0 ? await executeQueryWithCte(stmt.select, client, options, cteCache, cacheContext) : await executeSelect(stmt.select, client, options, cacheContext);
-  const { rows, columns } = selectResult;
+  const sourceTable = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, cteCache, fieldInfos);
+  const { rows, columns } = sourceTable;
+  assertNoImportRowErrors(sourceTable);
   if (columns.length !== stmt.fields.length) {
     const emptySourceHint = columns.length === 0 && rows.length === 0 ? "\u3002\u7D50\u679C\u304C 0 \u884C\u306E\u305F\u3081\u5217\u3092\u7279\u5B9A\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\uFF08SELECT * \u3092\u7A7A\u30BD\u30FC\u30B9\u306B\u4F7F\u3046\u3068\u5217\u3092\u6C7A\u5B9A\u3067\u304D\u307E\u305B\u3093\u3002\u660E\u793A\u5217\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\uFF09" : "";
     throw new Error(
@@ -42654,18 +44248,29 @@ async function executeUpsertSelect(stmt, client, options, cacheContext, cteCache
   }
   const toInsert = [];
   const toUpdate = [];
-  const records = rows.map((row) => {
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const records = rows.map((row, rowIndex) => {
     const record2 = {};
     stmt.fields.forEach((field, i) => {
-      record2[field] = { value: row[columns[i]] ?? "" };
+      if (sourceTable.importPresence && !sourceTable.importPresence[rowIndex]?.has(field)) return;
+      const raw = row[columns[i]] ?? "";
+      record2[field] = { value: convertProcessRowValue(raw, fieldTypes.get(field)) };
     });
     return record2;
   });
-  assertValidDmlRecords(records, stmt.fields, fieldInfos, numberPrecision);
-  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  records.forEach((record2) => assertValidDmlRecords([record2], stmt.fields.filter((field) => field in record2), fieldInfos, numberPrecision));
   const rowKeyValues = records.map(
     (record2) => stmt.keyFields.map((key) => String(record2[key]?.value ?? ""))
   );
+  if (importSourceByDmlStatement.has(stmt)) {
+    const numericKey = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
+    const sourceKeys = /* @__PURE__ */ new Set();
+    for (const parts of rowKeyValues) {
+      const normalized = upsertNormalizedKey(parts, numericKey);
+      if (sourceKeys.has(normalized)) throw new Error("ERR_KEY_DUP_SOURCE: UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059");
+      sourceKeys.add(normalized);
+    }
+  }
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
   records.forEach((record2, rowIdx) => {
     const id = lookupUpsertTarget(targetIndex, rowKeyValues[rowIdx]);
@@ -42714,10 +44319,10 @@ async function executeDescribe(stmt, client, cacheContext) {
   }));
   return { type: "SELECT", rows, columns, rowCount: rows.length };
 }
-function parseSql(sql) {
+function parseSql(sql, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
-    const stmt = new Parser(tokens).parse();
+    const stmt = new Parser(tokens, { import: enableImport }).parse();
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -42973,8 +44578,8 @@ function explainMetadataLines(analysis) {
     ...[...analysis.numberPrecisionApps].sort((a, b) => a - b).map((appId) => `  metadata API: number precision APP${appId}`)
   ];
 }
-async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2) {
-  const statements = parseSqlBatch(sql);
+async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2, enableImport = false) {
+  const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements);
   validateDeclaredBatchVariables(statements, injectedVariables);
   const variables = /* @__PURE__ */ new Map();
@@ -43133,6 +44738,79 @@ function buildExplainPlan(query, label, capabilities, orderPlans) {
   if (query.type === "DELETE") return buildDeletePlan(query, label);
   if (query.type === "REORDER") return buildReorderPlan(query, label);
   if (query.type === "VALIDATE") return buildValidatePlan(query, label);
+  if (query.type === "IMPORT") {
+    if (query.writeMode === "UPDATE_RECORD_NUMBER") {
+      const csvTables = query.targets?.filter((target) => target.kind === "SUBTABLE") ?? [];
+      return [
+        ...label ? [label] : [],
+        `IMPORT UPDATE INTO APP${query.appId}`,
+        `  writeMode:     UPDATE_RECORD_NUMBER`,
+        `  source:        CSV ${query.source.sourceName}`,
+        `  keyHeader:     ${query.recordNumberSourceHeader}`,
+        `  mapping:       BY_NAME`,
+        `  parentRows:    requires source load`,
+        `  duplicate:     preflight before lookup/write`,
+        `  matched:       requires lookup`,
+        `  unmatched:     requires lookup`,
+        `  invalid:       requires source load`,
+        `  requiresLookup:true`,
+        `  inserted:      0`,
+        `  keyInPayload:  false`,
+        ...csvTables.length ? [
+          `  replaceSubtables: ${query.replaceSubtables?.join(", ") ?? "ERROR: required"}`,
+          `  subtableRowIdPolicy: PRESERVE existing; empty/unknown add without id`,
+          `  rowIdOwnership: owned elsewhere invalidates the parent`,
+          `  replacementDiff: existing/input/update/add/delete/rowIdNotFound requires actual-data preflight`,
+          `  confirmPolicy: highest warning "\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u5168\u7F6E\u63DB\u30FBN\u884C\u524A\u9664" plus per-table detail (including delete=0)`
+        ] : [],
+        `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
+        `  gate:          enabled for this parse`,
+        `  writesKintone: ${query.validateOnly ? "false" : "true"}`
+      ];
+    }
+    const mode = query.keyFields ? "UPSERT" : "INSERT";
+    const hasSubtables = query.targets?.some((target) => target.kind === "SUBTABLE") === true;
+    return [
+      ...label ? [label] : [],
+      `IMPORT ${mode} INTO APP${query.appId}`,
+      `  source:        ${query.source.kind} ${query.source.sourceName}`,
+      `  sourceFormat:  ${query.source.kind}`,
+      `  encoding:      ${query.source.kind === "JSON" ? "UTF8 only" : query.source.encoding ?? "UTF8 (or loader metadata)"}`,
+      `  mapping:       ${query.source.kind === "JSON" ? "BY NAME (INTO order)" : query.source.projection ? "SELECT expressions" : query.source.mappingMode}`,
+      ...query.source.kind === "JSON" ? [
+        `  duplicateKeyPolicy: reject`,
+        `  numberLexemePolicy: preserve; JSON number accepts safe integer only`,
+        `  precisionTargetsRequireString: true`,
+        `  unknownKeyPolicy: reject`,
+        `  presenceAware: true`,
+        ...hasSubtables ? [
+          `  subtableRowIdPolicy: reject _rid/id; DROP IDs and renumber every input row`,
+          `  subtableUpdatePolicy: present table replaces all rows; missing table is preserved; [] deletes all rows`,
+          `  confirmPolicy: parent/table existing/input/add/delete detail required; delete is highest warning`
+        ] : []
+      ] : [
+        `  header:        ${query.source.hasHeader ? "HEADER" : "NO HEADER"}`,
+        ...query.source.mappingMode === "BY_NAME" ? [
+          `  writtenColumns: ${query.fields.join(", ")}`,
+          `  knownExportColumns: audit and ignore with reason/non-empty count`,
+          `  unknownColumnPolicy: ${query.source.ignoreUnknownColumns ? "ignore with audit/non-empty count" : "ERR_IMPORT_UNKNOWN_COLUMN"}`,
+          `  multipleValueDelimiter: LF (CRLF or LF)`,
+          `  sourceValueMode: string-preserving`,
+          `  roundTripNumericGuarantee: exact CSV lexeme passes strict decimal validation`,
+          `  FILE: audit-ignore unless named in INTO (analyze error)`
+        ] : []
+      ],
+      `  sourceLimit:   10485760 bytes / ${query.fields.length} target columns`,
+      `  key:           ${query.keyFields?.join(", ") ?? "none"}`,
+      `  checks:        ${query.checkGroups?.length ?? 0}`,
+      `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
+      `  gate:          enabled for this parse`,
+      `  preflight:     ${query.validateOnly && hasSubtables ? "requires actual source load at execution; this EXPLAIN is static" : "requires load"}`,
+      ...hasSubtables ? [query.source.kind === "JSON" ? `  Phase5C:       JSON mutation requires detail-capable confirmation surface` : `  Phase5D:       CSV mutation requires detail-capable confirmation surface`] : [],
+      `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
+      `  duplicateKey:  preflight before lookup/write (requires load)`
+    ];
+  }
   return buildSelectPlan(query, label, capabilities, orderPlans);
 }
 function buildValidatePlan(stmt, label) {
@@ -43586,15 +45264,15 @@ var OperationCancelledError = class extends Error {
 };
 
 // src/core/sql.ts
-function parseSqlStatement(sql) {
+function parseSqlStatement(sql, capabilities = {}) {
   const tokens = new Lexer(sql).tokenize();
-  const stmt = new Parser(tokens).parse();
+  const stmt = new Parser(tokens, capabilities).parse();
   validateKlikeStatement(stmt);
   return stmt;
 }
-function parseSqlStatements(sql) {
+function parseSqlStatements(sql, capabilities = {}) {
   const tokens = new Lexer(sql).tokenize();
-  const statements = new Parser(tokens).parseStatements();
+  const statements = new Parser(tokens, capabilities).parseStatements();
   statements.forEach(validateKlikeStatement);
   return statements;
 }
@@ -43677,7 +45355,8 @@ function buildBatchEnvelope(batch, options = {}) {
         validRows: s.result.validRows,
         invalidRows: s.result.invalidRows,
         errorCount: s.result.errorCount,
-        ...s.result.errTable ? { errTable: s.result.errTable } : {}
+        ...s.result.errTable ? { errTable: s.result.errTable } : {},
+        ...s.result.importDetail ? { importDetail: s.result.importDetail } : {}
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       Object.assign(entry, toMutationSummary(s.result));
@@ -44057,7 +45736,7 @@ function clampInt(v, min, max) {
 function flattenFormFieldProperties(properties) {
   return flattenFields(properties, collectLookupCopyFields(properties));
 }
-function flattenFields(properties, lookupCopyFields, inSubtable = false) {
+function flattenFields(properties, lookupCopyFields, inSubtable = false, subtableCode) {
   const out = [];
   for (const field of Object.values(properties)) {
     const optionOrder = toOptionOrderMap(field.options);
@@ -44075,11 +45754,12 @@ function flattenFields(properties, lookupCopyFields, inSubtable = false) {
       maxLength: normalizeConstraintValue(field.maxLength),
       defaultValue: field.defaultValue,
       inSubtable,
+      ...subtableCode ? { subtableCode } : {},
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES2.has(field.type)
     };
     info.semantics = resolveFieldSemantics(info);
     out.push(info);
-    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true));
+    if (field.fields) out.push(...flattenFields(field.fields, lookupCopyFields, true, field.type === "SUBTABLE" ? field.code : subtableCode));
   }
   return out;
 }
@@ -45359,18 +47039,46 @@ function requireSingleStatement(validation, toolName) {
 }
 var DEFAULT_MAX_RECORDS = 500;
 var DEFAULT_ON_LIMIT = "error";
+function importCapability(input) {
+  const sources = input.importSources;
+  if (!sources || sources.length === 0) return {};
+  const byName = /* @__PURE__ */ new Map();
+  for (const source of sources) {
+    if (byName.has(source.name)) throw new Error(`ArgumentError: duplicate import source name: ${source.name}`);
+    let bytes;
+    if (source.text !== void 0 && source.base64 === void 0) {
+      bytes = new TextEncoder().encode(source.text);
+    } else if (source.base64 !== void 0 && source.text === void 0) {
+      const normalized = source.base64.replace(/\s/g, "");
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalized)) {
+        throw new Error(`ArgumentError: invalid base64 for import source: ${source.name}`);
+      }
+      bytes = new Uint8Array(Buffer.from(normalized, "base64"));
+    } else {
+      throw new Error(`ArgumentError: import source ${source.name} requires exactly one of text or base64.`);
+    }
+    byName.set(source.name, { bytes, encoding: source.encoding });
+  }
+  return {
+    enableImport: true,
+    importSource: (name) => {
+      const source = byName.get(name);
+      return source ? { load: async () => source } : void 0;
+    }
+  };
+}
 function noOpClient() {
-  const fail = async () => {
+  const fail3 = async () => {
     throw new Error("No-op client should not be called.");
   };
   return {
-    getRecords: fail,
-    openCursor: fail,
-    postRecords: fail,
-    putRecords: fail,
-    deleteRecords: fail,
-    getApps: fail,
-    getFields: fail,
+    getRecords: fail3,
+    openCursor: fail3,
+    postRecords: fail3,
+    putRecords: fail3,
+    deleteRecords: fail3,
+    getApps: fail3,
+    getFields: fail3,
     async getProcessStatuses() {
       return { enable: false, states: [] };
     },
@@ -45450,7 +47158,8 @@ function toDmlValidationPayload(result) {
     errorCount: result.errorCount,
     columns: result.columns,
     errors: result.errors,
-    ...result.errTable ? { errTable: result.errTable } : {}
+    ...result.errTable ? { errTable: result.errTable } : {},
+    ...result.importDetail ? { importDetail: result.importDetail } : {}
   };
 }
 function toMutationPayload(result) {
@@ -45571,9 +47280,10 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   const validationContexts = /* @__PURE__ */ new WeakMap();
   async function validate(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const importOptions = importCapability(input);
     let analysis;
     try {
-      const statements = parseSqlStatements(normalized.normalizedSql);
+      const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
@@ -45634,10 +47344,11 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   }
   async function explain(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
+    const importOptions = importCapability(input);
     const appBindings = toExplainBindings(normalized.appBindingByMappedApp);
     let statements;
     try {
-      statements = parseSqlStatements(normalized.normalizedSql);
+      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
     } catch (err) {
       throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
     }
@@ -45659,7 +47370,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         void 0,
         explainCacheContext,
         runtime?.maxRecords ?? input.maxRecords,
-        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
+        runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+        importOptions.enableImport
       );
       return {
         ok: true,
@@ -45672,7 +47384,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const result = await executeSql(explainSql(explainSourceSql), explainClient, {
       cacheContext: explainCacheContext,
       maxRecords: runtime?.maxRecords ?? input.maxRecords,
-      cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2
+      cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      ...importOptions
     });
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: EXPLAIN returned unexpected result type ${result.type}.`);
@@ -45684,6 +47397,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   }
   async function query(input, validated) {
     const validation = validated ?? await validate(input);
+    const importOptions = importCapability(input);
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");
     }
@@ -45716,7 +47430,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime2.timeout,
         cursorMaxActive: runtime2.cursorMaxActive ?? input.cursorMaxActive ?? 2,
-        variables: input.variables
+        variables: input.variables,
+        ...importOptions
       });
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
@@ -45729,7 +47444,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       const result2 = await executeSql(validation.normalizedSql, noOpClient(), {
         maxRecords: input.maxRecords ?? DEFAULT_MAX_RECORDS,
         onLimitReached: input.onLimit ?? DEFAULT_ON_LIMIT,
-        cacheContext: validation.cacheContext
+        cacheContext: validation.cacheContext,
+        ...importOptions
       });
       if (result2.type === "ASSERT") return toAssertPayload(result2);
       if (result2.type === "VALIDATION") return toDmlValidationPayload(result2);
@@ -45753,7 +47469,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
-      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2
+      cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      ...importOptions
     });
     if (result.type === "ASSERT") return toAssertPayload(result);
     if (result.type === "VALIDATION") return toDmlValidationPayload(result);
@@ -45763,6 +47480,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     return toSelectPayload(result);
   }
   async function mutateBatch(input, validation, dmlMaxRows) {
+    const importOptions = importCapability(input);
     if (!validation.containsDml) {
       throw new Error("ArgumentError: batch contains no DML statements. Use ksql_query.");
     }
@@ -45812,6 +47530,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       timeoutMs: runtime.timeout,
       cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
       variables: input.variables,
+      ...importOptions,
       confirm: async (count, operation) => {
         if (count > dmlMaxRows) {
           throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
@@ -45840,6 +47559,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   }
   async function mutate(input, validated) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
+    const importOptions = importCapability(input);
     const validation = validated ?? await validate(input);
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");
@@ -45882,7 +47602,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
             throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed dmlMaxRows (${dmlMaxRows}).`);
           }
           return true;
-        }
+        },
+        ...importOptions
       });
     } catch (err) {
       throw selectBasedDml ? appendSelectBasedDmlReadLimitHint(err) : err;
@@ -46052,15 +47773,27 @@ var timeout = external_exports.number().int().positive().describe("Request timeo
 var cursorMaxActive = external_exports.number().int().min(1).max(5).describe("Maximum active Cursor API handles per kintone host in this process (1-5, default 2). Later calls update the host limit; lowering it keeps existing cursors and delays new ones until active usage falls below the new limit. Create/Get are never automatically retried; capacity waits up to 30 seconds.").optional();
 var savedQueryName = external_exports.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/).describe("Saved query name (alphanumeric, '_' and '-', up to 64 chars).");
 var savedQueryTags = external_exports.array(external_exports.string().min(1)).describe("Tags for organizing saved queries.").optional();
+var importSources = external_exports.array(external_exports.object({
+  name: external_exports.string().min(1).describe("Source name referenced after FROM CSV."),
+  text: external_exports.string().describe("Inline CSV text. Mutually exclusive with base64.").optional(),
+  base64: external_exports.string().describe("Inline CSV bytes encoded as base64. Mutually exclusive with text.").optional(),
+  encoding: external_exports.enum(["utf8", "sjis"]).describe("Optional source encoding metadata; SQL ENCODING takes precedence.").optional()
+}).superRefine((source, ctx) => {
+  if (source.text === void 0 === (source.base64 === void 0)) {
+    ctx.addIssue({ code: "custom", message: "Exactly one of text or base64 is required." });
+  }
+})).max(16).describe("IMPORT CSV/JSON named inline sources (maximum 16). Nested subtable VALIDATE ONLY/EXPLAIN is supported, but mutation is fail-closed because MCP cannot interactively display and approve parent/table delete detail. JSON drops child IDs and renumbers; cli-kintone CSV preserves matching IDs and requires REPLACE SUBTABLES. Paths are not accepted; each source is limited to 10 MiB.").optional();
 var validateInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("kSQL text to validate. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
-  profile
+  profile,
+  importSources
 });
 var explainInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
   profile,
   maxRecords,
-  cursorMaxActive
+  cursorMaxActive,
+  importSources
 });
 var queryInputSchema = external_exports.object({
   sql: external_exports.string().min(1).describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;"),
@@ -46071,6 +47804,7 @@ var queryInputSchema = external_exports.object({
   tempTableMaxRows,
   timeout,
   cursorMaxActive,
+  importSources,
   continueOnError: external_exports.boolean().describe("Batch (multi-statement) only: keep executing subsequent statements after a runtime error (default false = fail-fast).").optional(),
   maxTotalRecords: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total rows returned across all result sets (default: unlimited).").optional(),
   variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
@@ -46085,6 +47819,7 @@ var mutateInputSchema = external_exports.object({
   tempTableMaxRows,
   timeout,
   cursorMaxActive,
+  importSources,
   dmlTotalMaxRows: external_exports.number().int().positive().describe("Batch (multi-statement) only: cap on total affected rows across the whole batch (default: per-statement dmlMaxRows only). DML batches always run fail-fast.").optional(),
   variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
@@ -46173,9 +47908,14 @@ Options:
   --config <path>    Config file path (default: ./ksql.config.json or KSQL_CONFIG)
   --profile <name>   Default profile name
   -h, --help         Show help
+
+IMPORT CSV/JSON is call-scoped and disabled by default. Supply named
+inline importSources (text or base64 bytes) to enable it; filesystem paths are not accepted.
+Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLAIN.
+JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.5.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.6.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -46187,12 +47927,12 @@ function createServer(args) {
   });
   server.registerTool("ksql_validate", {
     title: "Validate kSQL",
-    description: "Parse and validate kSQL without calling kintone APIs. Use this before executing generated SQL.",
+    description: "Parse and validate kSQL without calling kintone APIs. Use this before executing generated SQL. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: validateInputShape
   }, tools.validateTool);
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records.",
+    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: explainInputShape
   }, tools.explainTool);
   server.registerTool("ksql_query", {
@@ -46201,7 +47941,7 @@ function createServer(args) {
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
-    title: "Run mutating kSQL",
+    title: "Run mutating kSQL (IMPORT CSV/JSON via importSources)",
     description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
