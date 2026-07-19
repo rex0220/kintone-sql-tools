@@ -19,6 +19,7 @@ import {
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
+import { isImportCapabilityGateError } from "../import/importGateError";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
 import { envString, loadOptionalKsqlConfig, type OnLimitMode } from "../node/config";
 import {
@@ -162,6 +163,8 @@ function requireSingleStatement(
 
 const DEFAULT_MAX_RECORDS = 500;
 const DEFAULT_ON_LIMIT: OnLimitMode = "error";
+export const MCP_IMPORT_SOURCE_REQUIRED_MESSAGE =
+  "IMPORT には importSources（inline CSV/JSON）を指定してください。";
 
 type InlineImportInput = { importSources?: Array<{ name: string; text?: string; base64?: string; encoding?: "utf8" | "sjis" }> };
 
@@ -192,6 +195,16 @@ function importCapability(input: InlineImportInput): Pick<ExecuteOptions, "enabl
       return source ? { load: async () => source } : undefined;
     },
   };
+}
+
+/** MCP で importSources 未指定の IMPORT gate だけを面別案内へ置き換える。 */
+export function toMcpImportError(error: unknown, importEnabled: boolean): unknown {
+  if (importEnabled || !isImportCapabilityGateError(error)) return error;
+  if (error instanceof Error) {
+    error.message = MCP_IMPORT_SOURCE_REQUIRED_MESSAGE;
+    return error;
+  }
+  return MCP_IMPORT_SOURCE_REQUIRED_MESSAGE;
 }
 
 function noOpClient(): KintoneClient {
@@ -472,7 +485,8 @@ export function createKsqlMcpTools(
       const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
-      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()]
       .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
@@ -545,7 +559,8 @@ export function createKsqlMcpTools(
     try {
       statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
     } catch (err) {
-      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const needsAppMetadata = normalized.appBindingByMappedApp.size > 0
       && statements.some(explainNeedsAppMetadata);
@@ -646,7 +661,7 @@ export function createKsqlMcpTools(
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }
 
-    const stmt = parseSqlStatement(validation.normalizedSql);
+    const stmt = parseSqlStatement(validation.normalizedSql, { import: importOptions.enableImport });
     const noAppApiNeeded = isNoFromSelectStatement(stmt);
 
     if (noAppApiNeeded) {

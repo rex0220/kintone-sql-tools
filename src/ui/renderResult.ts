@@ -48,7 +48,9 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
 }
 
 function isolationSuffix(result: { skippedRows?: number; errTable?: string }): string {
-  return result.skippedRows === undefined ? "" : ` 隔離 ${result.skippedRows} 件（${result.errTable}）`;
+  // 隔離は ON ERROR SKIP INTO #err のときだけ。errTable が無ければ「（undefined）」を出さない。
+  if (result.skippedRows === undefined || result.errTable === undefined) return "";
+  return ` 隔離 ${result.skippedRows} 件（${result.errTable}）`;
 }
 
 export function renderError(err: unknown): string {

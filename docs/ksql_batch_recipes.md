@@ -451,6 +451,84 @@ SELECT 側の `WHERE` なら関数で「変換すると変わる行」だけを�
 
 ---
 
+## R11. ファイルからアプリへ取込む（`IMPORT`・v3.6.0）
+
+CSV / JSON ファイルを、**変換・検証・不良行隔離付きで**アプリへ取込む自己完結ステートメント。ソースは**面が名前付きで供給**し、SQL にパスを埋めません（`IMPORT` は source 供給時のみ有効＝off-by-default）。
+
+| 面 | ソース供給 |
+|---|---|
+| CLI | `--import-csv <name>=<path>` / `--import-json <name>=<path>` |
+| MCP | `importSources: [{ name, text \| base64, encoding? }]`（inline・パス不可） |
+| プラグイン | ヘッダーの「ファイルを選択」（ソース名＝拡張子を除去し識別子に使えない文字を `_` に正規化。`sales.csv` → `sales`、`sales 2026.csv` → `sales_2026`） |
+
+**フラット CSV を射影して UPSERT**（`CAST` で数値化・業務キーで重複判定）:
+```sql
+IMPORT INTO APP100 (顧客コード, 金額)
+FROM CSV sales
+SELECT code, CAST(amount AS NUMBER) AS 金額
+ON DUPLICATE (顧客コード);
+```
+
+**不良行を隔離して残りを流す**（`ON ERROR SKIP`・R6 と同じ思想）:
+```sql
+IMPORT INTO APP100 (顧客コード, 金額) FROM CSV sales BY NAME
+ON ERROR SKIP INTO #err;
+SELECT * FROM #err;
+```
+
+**JSON**（厳密10進・精度対象の NUMBER は string 供給・全階層 duplicate key 拒否）:
+```sql
+IMPORT INTO APP100 (顧客コード, 金額) FROM JSON payload;
+```
+
+- `VALIDATE ONLY` で**書込み前に全行検証**（`ksql_validate` は構文のみ・実行可否は VALIDATE ONLY で確認する）。
+- `CHECK WHEN … THEN …`（B37）で行レベル業務ルールを付与できる。
+- **取込行数の上限 `maxRecords` は面・経路で異なる**（超過は fail-closed・サイレント切り捨てなし）: CLI=既定 **500**（`--max-records`）／プラグイン=初期 **3000**（UI 可変）／MCP=通常 mutation は `dmlMaxRows`（＋1）で解決・`ON ERROR SKIP` / `VALIDATE ONLY` は runtime `maxRecords` に戻る。CSV サブテーブル置換では既存レコード全件走査にも同上限が効く（後述）。
+
+## R12. cli-kintone と round-trip する（`BY NAME`・レコード番号 UPDATE・サブテーブル・v3.6.0）
+
+kintone 公式 CLI `cli-kintone` で export した CSV を、そのまま kSQL へ戻せます。
+
+**フラット export を取込む**（ヘッダ＝フィールドコード名で対応・非書込み列は監査付き無視・複数値はセル内 LF）:
+```sql
+IMPORT INTO APP100 (顧客コード, 金額, 担当者)
+FROM CSV exported BY NAME IGNORE UNKNOWN COLUMNS;
+```
+
+**レコード番号をキーに既存レコードを更新**（純 UPDATE・INSERT 0・番号は照合専用）:
+```sql
+IMPORT UPDATE INTO APP100 (金額)
+FROM CSV exported BY NAME
+MATCH RECORD NUMBER SOURCE `レコード番号`;
+```
+
+**サブテーブル**（意味論が source で異なる）:
+- **JSON**（ネスト配列・**新規 INSERT / 業務キー UPSERT**・行 ID なし全置換）:
+```sql
+IMPORT INTO APP100 (顧客コード, 明細(品名, 数量)) FROM JSON payload;
+```
+- **CSV `*` 形式**（cli-kintone export・**既存レコードの UPDATE 全置換**・行 ID 維持更新/欠落削除）:
+```sql
+IMPORT UPDATE INTO APP100 (明細(品名, 数量) ROW ID SOURCE `明細_行ID`)
+FROM CSV exported BY NAME
+MATCH RECORD NUMBER SOURCE `レコード番号`
+REPLACE SUBTABLES (明細);
+```
+
+**cli-kintone との使い分け**:
+
+| 用途 | 推奨 |
+|---|---|
+| 添付ファイル込みの取込・単純な一括ロード | **cli-kintone** |
+| 取込時の変換（`CAST`/関数）・業務チェック・不良行隔離・SQL パイプライン統合・MCP/ブラウザから | **kSQL IMPORT** |
+
+- **添付ファイル（FILE）は kSQL IMPORT 非対応**（cli-kintone を使う）。
+- **CSV のサブテーブルは UPDATE 専用**（`REPLACE SUBTABLES` で全置換）。**新規 INSERT は JSON**。
+- **破壊的全置換は面が削除内訳を confirm 表示できるときだけ実行**（fail-closed）＋削除件数を明示。全置換の指定はソース種別で異なる＝**CSV は `REPLACE SUBTABLES` 必須／JSON はネスト配列が全置換対象**（JSON UPSERT も既存子行を削除するが `REPLACE SUBTABLES` は書かない・書くと構文エラー）。
+- **MCP はサブテーブル mutation を fail-closed**（削除内訳を対話承認できないため）→ サブテーブル書込みは CLI / プラグイン、MCP は `ksql_query` の `VALIDATE ONLY`／`ksql_explain` の `EXPLAIN` まで。
+- **CSV サブテーブル置換の走査上限**: 行 ID 所有権検査で既存レコードを全件走査するため、取込親が少数でも既存レコードが `maxRecords` を超えると fail-closed になる。
+- 標準スペース・**ゲストスペース**の両方で動作する。
+
 ## 適用限界（スケール指針）
 
 判断基準は総レコード数ではなく **「日次の実変更件数が API 制限と実行時間に収まるか」** です。

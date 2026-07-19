@@ -29,6 +29,7 @@ import { renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
+import { isImportCapabilityGateError, toPluginImportError } from "./importGateError";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -567,11 +568,12 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     editor.focus();
   });
 
-  const importPicker = el("input", "ksql-import-file", { type: "file", accept: ".csv,text/csv" }) as HTMLInputElement;
+  const importPicker = el("input", "ksql-import-file", { type: "file", accept: ".csv,.json,text/csv,application/json" }) as HTMLInputElement;
   const importEncoding = el("select", "ksql-import-encoding") as HTMLSelectElement;
   importEncoding.append(new Option("UTF8", "utf8"), new Option("SJIS", "sjis"));
   const importStatus = el("span", "ksql-import-status");
   importStatus.textContent = "IMPORT CSV: 未選択（gate OFF）";
+  importStatus.title = importStatus.textContent ?? "";
   const refreshImportSource = (): void => {
     const file = importPicker.files?.[0];
     selectedImportSource = file
@@ -580,6 +582,7 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     importStatus.textContent = selectedImportSource
       ? `IMPORT CSV: ${selectedImportSource.name} (${selectedImportSource.encoding.toUpperCase()})`
       : "IMPORT CSV: 未選択（gate OFF）";
+    importStatus.title = importStatus.textContent ?? "";
   };
   importPicker.addEventListener("change", refreshImportSource);
   importEncoding.addEventListener("change", refreshImportSource);
@@ -612,7 +615,12 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   };
   refreshOptSummary();
 
-  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary, importPicker, importEncoding, importStatus);
+  buttonRow.append(runBtn, explainBtn, clearBtn, histBtn, optBtn, optSummary);
+
+  // IMPORT のファイル選択・エンコーディング・状態はヘッダー上部（折りたたむの左）へ配置する
+  const importControls = el("div", "ksql-import-controls");
+  importControls.append(importPicker, importEncoding, importStatus);
+  header.insertBefore(importControls, toggle);
 
   // 履歴ドロップダウン（初期非表示）
   const histDropdown = el("div", "ksql-hist-dropdown", { id: "ksql-hist-dropdown" });
@@ -1899,7 +1907,14 @@ function closeHistoryDropdown(): void {
 function isMultiStatementSql(sql: string): boolean {
   try {
     return parseSqlStatements(sql, { import: selectedImportSource !== null }).length > 1;
-  } catch {
+  } catch (error) {
+    // 未選択の IMPORT gate で複文判定まで失敗した場合は、構文の分類だけ gate を
+    // 開いて再試行する。実行時の gate は維持され、表示時にファイル選択案内へ変換する。
+    if (selectedImportSource === null && isImportCapabilityGateError(error)) {
+      try {
+        return parseSqlStatements(sql, { import: true }).length > 1;
+      } catch { /* 構文自体が不正なら従来どおり単文経路でエラー表示する */ }
+    }
     return false;
   }
 }
@@ -1973,7 +1988,8 @@ function buildDmlSummary(batch: BatchExecuteResult): string[] {
     else if (r.type === "REORDER") detail = `reordered=${r.reorderedParentCount}`;
     else if (r.type === "VALIDATION") detail = `validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`;
     if (detail && (r.type === "INSERT" || r.type === "UPDATE" || r.type === "UPSERT") && r.skippedRows !== undefined) {
-      detail += ` affected=${r.affectedRows} skipped=${r.skippedRows} errTable=${r.errTable}`;
+      detail += ` affected=${r.affectedRows} skipped=${r.skippedRows}`
+        + (r.errTable === undefined ? "" : ` errTable=${r.errTable}`);
     }
     if (detail) lines.push(`[${s.index + 1}] ${s.type}: ${detail}`);
   }
@@ -2211,7 +2227,7 @@ async function runSql(
       resultArea.innerHTML = `<div class="ksql-info">キャンセルしました（対象: ${e.affectedCount} 件）</div>`;
     } else {
       if (!skipHistory) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows); // エラー時も履歴に保存
-      resultArea.innerHTML = renderError(e);
+      resultArea.innerHTML = renderError(toPluginImportError(e, selectedImportSource !== null));
     }
     return null;
   } finally {
@@ -2824,13 +2840,36 @@ async function confirmDialog(
 
 function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {
   const csv = detail.kind === "IMPORT_CSV_SUBTABLE_REPLACE";
-  const rows = detail.parents.flatMap((parent) => parent.tables.map((table) =>
-    `親${parent.parentRow} ${parent.mode} / ${table.table}: existing=${table.existingRows}, input=${table.inputRows}, update=${"updateRows" in table ? table.updateRows : 0}, add=${table.addRows}, delete=${table.deleteRows}${"rowIdNotFound" in table ? `, rowIdNotFound=${table.rowIdNotFound}` : ""}`
-  ));
+  // レコード数が増えてもダイアログが画面をはみ出さないよう、親を1件ずつ列挙せず
+  // テーブル別に集計する。削除は危険なので該当親だけ別途（上限付きで）表示する。
+  const agg = new Map<string, { existing: number; input: number; update: number; add: number; del: number; notFound: number }>();
+  for (const parent of detail.parents) for (const table of parent.tables) {
+    const a = agg.get(table.table) ?? { existing: 0, input: 0, update: 0, add: 0, del: 0, notFound: 0 };
+    a.existing += table.existingRows;
+    a.input += table.inputRows;
+    a.update += "updateRows" in table ? table.updateRows : 0;
+    a.add += table.addRows;
+    a.del += table.deleteRows;
+    a.notFound += "rowIdNotFound" in table ? table.rowIdNotFound : 0;
+    agg.set(table.table, a);
+  }
+  const tableLines = [...agg].map(([name, a]) =>
+    `  ${name}: existing=${a.existing}, input=${a.input}, update=${a.update}, add=${a.add}, delete=${a.del}${csv ? `, rowIdNotFound=${a.notFound}` : ""}`
+  );
+  const deletingParents = detail.parents.filter((p) => p.tables.some((t) => t.deleteRows > 0));
+  const CAP = 10;
+  const deleteLines = deletingParents.length === 0 ? [] : [
+    `削除が発生する親 ${deletingParents.length} 件:`,
+    ...deletingParents.slice(0, CAP).map((p) =>
+      `  親${p.parentRow}${"targetId" in p && p.targetId !== undefined ? ` ($id=${p.targetId})` : ""}: delete=${p.tables.reduce((s, t) => s + t.deleteRows, 0)}`),
+    ...(deletingParents.length > CAP ? [`  … 他 ${deletingParents.length - CAP} 件`] : []),
+  ];
   return showConfirmDialog(
     `${csv ? `【最重要警告】サブテーブル全置換・${detail.totalDeleteRows}行削除\n` : detail.hasDeletes ? "【最重要警告】既存サブテーブル行を削除・置換します。\n" : ""}`
     + `${csv ? "CSV" : "JSON"} IMPORT: 親 ${detail.parentsToWrite} 件 (INSERT ${detail.insertedParents}, UPDATE ${detail.updatedParents})\n`
-    + `${csv ? `既存行 ID を維持し、未知 ID は追加します (rowIdNotFound=${detail.rowIdNotFound})。` : "JSON の子行 ID は送信せず、全行を新規採番します。"}\n${rows.join("\n")}`,
+    + `${csv ? `既存行 ID を維持し、未知 ID は追加します (rowIdNotFound=${detail.rowIdNotFound})。` : "JSON の子行 ID は送信せず、全行を新規採番します。"}\n`
+    + `テーブル別合計:\n${tableLines.join("\n")}`
+    + `${deleteLines.length ? `\n${deleteLines.join("\n")}` : ""}`,
     true
   );
 }

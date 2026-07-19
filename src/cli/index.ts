@@ -52,6 +52,7 @@ import {
   type SqlProfileParseResult,
 } from "../node/appProfiles";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
+import { isImportCapabilityGateError } from "../import/importGateError";
 import {
   collectDmlTargetFields,
   getInsertValuesCount,
@@ -132,6 +133,19 @@ Options:
   -h, --help                 Show help
   -v, --version              Show version
 `;
+
+export const CLI_IMPORT_SOURCE_REQUIRED_MESSAGE =
+  "IMPORT にはソースが必要です。--import-csv <name=path> または --import-json <name=path> でファイルを指定してください。";
+
+/** CLI でソース未指定の IMPORT gate だけを面別案内へ置き換える。 */
+export function toCliImportError(error: unknown, importEnabled: boolean): unknown {
+  if (importEnabled || !isImportCapabilityGateError(error)) return error;
+  if (error instanceof Error) {
+    error.message = CLI_IMPORT_SOURCE_REQUIRED_MESSAGE;
+    return error;
+  }
+  return CLI_IMPORT_SOURCE_REQUIRED_MESSAGE;
+}
 
 type OutputFormat = "table" | "json" | "jsonl" | "csv" | "markdown";
 type OnLimitMode = "error" | "truncate";
@@ -1629,8 +1643,8 @@ async function run(): Promise<number> {
       return 2;
     }
 
+    const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     try {
-      const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
       const statements = parseSqlStatements(sql, { import: importEnabled });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
@@ -1669,7 +1683,8 @@ async function run(): Promise<number> {
             rewriteSegments: sqlDiagnosticContext.rewriteSegments,
           })
         : err;
-      process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
+      const surfaced = toCliImportError(restored, importEnabled);
+      process.stderr.write(`${surfaced instanceof Error ? surfaced.message : String(surfaced)}\n`);
       return 1;
     }
   }

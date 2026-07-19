@@ -7267,15 +7267,15 @@ var makeIssue = (params) => {
       message: issueData.message
     };
   }
-  let errorMessage = "";
+  let errorMessage2 = "";
   const maps = errorMaps.filter((m) => !!m).slice().reverse();
   for (const map2 of maps) {
-    errorMessage = map2(fullIssue, { data, defaultError: errorMessage }).message;
+    errorMessage2 = map2(fullIssue, { data, defaultError: errorMessage2 }).message;
   }
   return {
     ...issueData,
     path: fullPath,
-    message: errorMessage
+    message: errorMessage2
   };
 };
 function addIssueToContext(ctx, issueData) {
@@ -27067,19 +27067,19 @@ var getRefs = (options) => {
 };
 
 // node_modules/zod-to-json-schema/dist/esm/errorMessages.js
-function addErrorMessage(res, key, errorMessage, refs) {
+function addErrorMessage(res, key, errorMessage2, refs) {
   if (!refs?.errorMessages)
     return;
-  if (errorMessage) {
+  if (errorMessage2) {
     res.errorMessage = {
       ...res.errorMessage,
-      [key]: errorMessage
+      [key]: errorMessage2
     };
   }
 }
-function setResponseValueAndErrors(res, key, value, errorMessage, refs) {
+function setResponseValueAndErrors(res, key, value, errorMessage2, refs) {
   res[key] = value;
-  addErrorMessage(res, key, errorMessage, refs);
+  addErrorMessage(res, key, errorMessage2, refs);
 }
 
 // node_modules/zod-to-json-schema/dist/esm/getRelativePath.js
@@ -28390,8 +28390,8 @@ var Protocol = class {
                   if (queuedMessage.type === "response") {
                     resolver(message);
                   } else {
-                    const errorMessage = message;
-                    const error51 = new McpError(errorMessage.error.code, errorMessage.error.message, errorMessage.error.data);
+                    const errorMessage2 = message;
+                    const error51 = new McpError(errorMessage2.error.code, errorMessage2.error.message, errorMessage2.error.data);
                     resolver(error51);
                   }
                 } else {
@@ -29691,23 +29691,23 @@ var Server = class extends Protocol {
       const wrappedHandler = async (request, extra) => {
         const validatedRequest = safeParse2(CallToolRequestSchema, request);
         if (!validatedRequest.success) {
-          const errorMessage = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage}`);
+          const errorMessage2 = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage2}`);
         }
         const { params } = validatedRequest.data;
         const result = await Promise.resolve(handler(request, extra));
         if (params.task) {
           const taskValidationResult = safeParse2(CreateTaskResultSchema, result);
           if (!taskValidationResult.success) {
-            const errorMessage = taskValidationResult.error instanceof Error ? taskValidationResult.error.message : String(taskValidationResult.error);
-            throw new McpError(ErrorCode.InvalidParams, `Invalid task creation result: ${errorMessage}`);
+            const errorMessage2 = taskValidationResult.error instanceof Error ? taskValidationResult.error.message : String(taskValidationResult.error);
+            throw new McpError(ErrorCode.InvalidParams, `Invalid task creation result: ${errorMessage2}`);
           }
           return taskValidationResult.data;
         }
         const validationResult = safeParse2(CallToolResultSchema, result);
         if (!validationResult.success) {
-          const errorMessage = validationResult.error instanceof Error ? validationResult.error.message : String(validationResult.error);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call result: ${errorMessage}`);
+          const errorMessage2 = validationResult.error instanceof Error ? validationResult.error.message : String(validationResult.error);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call result: ${errorMessage2}`);
         }
         return validationResult.data;
       };
@@ -30201,12 +30201,12 @@ var McpServer = class {
    * @param errorMessage - The error message.
    * @returns The tool error result.
    */
-  createToolError(errorMessage) {
+  createToolError(errorMessage2) {
     return {
       content: [
         {
           type: "text",
-          text: errorMessage
+          text: errorMessage2
         }
       ],
       isError: true
@@ -30224,8 +30224,8 @@ var McpServer = class {
     const parseResult = await safeParseAsync2(schemaToParse, args);
     if (!parseResult.success) {
       const error51 = "error" in parseResult ? parseResult.error : "Unknown error";
-      const errorMessage = getParseErrorMessage(error51);
-      throw new McpError(ErrorCode.InvalidParams, `Input validation error: Invalid arguments for tool ${toolName}: ${errorMessage}`);
+      const errorMessage2 = getParseErrorMessage(error51);
+      throw new McpError(ErrorCode.InvalidParams, `Input validation error: Invalid arguments for tool ${toolName}: ${errorMessage2}`);
     }
     return parseResult.data;
   }
@@ -30249,8 +30249,8 @@ var McpServer = class {
     const parseResult = await safeParseAsync2(outputObj, result.structuredContent);
     if (!parseResult.success) {
       const error51 = "error" in parseResult ? parseResult.error : "Unknown error";
-      const errorMessage = getParseErrorMessage(error51);
-      throw new McpError(ErrorCode.InvalidParams, `Output validation error: Invalid structured content for tool ${toolName}: ${errorMessage}`);
+      const errorMessage2 = getParseErrorMessage(error51);
+      throw new McpError(ErrorCode.InvalidParams, `Output validation error: Invalid structured content for tool ${toolName}: ${errorMessage2}`);
     }
   }
   /**
@@ -30462,8 +30462,8 @@ var McpServer = class {
         const parseResult = await safeParseAsync2(argsObj, request.params.arguments);
         if (!parseResult.success) {
           const error51 = "error" in parseResult ? parseResult.error : "Unknown error";
-          const errorMessage = getParseErrorMessage(error51);
-          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for prompt ${request.params.name}: ${errorMessage}`);
+          const errorMessage2 = getParseErrorMessage(error51);
+          throw new McpError(ErrorCode.InvalidParams, `Invalid arguments for prompt ${request.params.name}: ${errorMessage2}`);
         }
         const args = parseResult.data;
         const cb = prompt.callback;
@@ -45432,6 +45432,17 @@ function restoreSqlContextError(err, sourceSql, context) {
   return err;
 }
 
+// src/import/importGateError.ts
+var IMPORT_CAPABILITY_GATE_MARKER = "capability is disabled";
+function errorMessage(error51) {
+  if (error51 instanceof Error) return error51.message;
+  if (typeof error51 === "string") return error51;
+  return null;
+}
+function isImportCapabilityGateError(error51) {
+  return errorMessage(error51)?.includes(IMPORT_CAPABILITY_GATE_MARKER) === true;
+}
+
 // src/node/config.ts
 var import_fs = require("fs");
 var LOGICAL_APP_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
@@ -47039,6 +47050,7 @@ function requireSingleStatement(validation, toolName) {
 }
 var DEFAULT_MAX_RECORDS = 500;
 var DEFAULT_ON_LIMIT = "error";
+var MCP_IMPORT_SOURCE_REQUIRED_MESSAGE = "IMPORT \u306B\u306F importSources\uFF08inline CSV/JSON\uFF09\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002";
 function importCapability(input) {
   const sources = input.importSources;
   if (!sources || sources.length === 0) return {};
@@ -47066,6 +47078,14 @@ function importCapability(input) {
       return source ? { load: async () => source } : void 0;
     }
   };
+}
+function toMcpImportError(error51, importEnabled) {
+  if (importEnabled || !isImportCapabilityGateError(error51)) return error51;
+  if (error51 instanceof Error) {
+    error51.message = MCP_IMPORT_SOURCE_REQUIRED_MESSAGE;
+    return error51;
+  }
+  return MCP_IMPORT_SOURCE_REQUIRED_MESSAGE;
 }
 function noOpClient() {
   const fail3 = async () => {
@@ -47286,7 +47306,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
-      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
     const statementValidations = analysis.statements.map((s2) => ({
@@ -47350,7 +47371,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     try {
       statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
     } catch (err) {
-      throw restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
+      throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const needsAppMetadata = normalized.appBindingByMappedApp.size > 0 && statements.some(explainNeedsAppMetadata);
     const runtime = needsAppMetadata ? await createRuntime(serverOptions, {
@@ -47438,7 +47460,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     if (!validation.isReadOnly) {
       throw new Error(`ArgumentError: ${validation.statementType} is not allowed by ksql_query. Use ksql_mutate.`);
     }
-    const stmt = parseSqlStatement(validation.normalizedSql);
+    const stmt = parseSqlStatement(validation.normalizedSql, { import: importOptions.enableImport });
     const noAppApiNeeded = isNoFromSelectStatement(stmt);
     if (noAppApiNeeded) {
       const result2 = await executeSql(validation.normalizedSql, noOpClient(), {
@@ -47915,7 +47937,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.6.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.6.1" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",

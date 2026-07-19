@@ -2,6 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.6.1（2026-07-19）
+
+### 改善・修正（B39 IMPORT の面 UX）
+
+- **プラグイン: IMPORT のファイル選択 UI をヘッダー上部へ移動**（下部ボタン行の横スクロールを解消）。
+- **既定ソース名を拡張子除去＋識別子化**（`plugin_import_10.csv` → `plugin_import_10`）。従来は `FROM CSV <ファイル名>` がドットで parse できなかった。日本語は保持・記号は `_`。
+- **ファイル未選択の IMPORT エラーを面別の案内に**（従来は共通の「capability is disabled」）。plugin=「ファイルを選択してください」／CLI=「--import-csv/--import-json でソースを指定」／MCP=「importSources を指定」。gate エラーかつ当該面ソース未供給のときだけ差し替え、他エラーは不変。
+- **DML 成功メッセージの「隔離 0 件（undefined）」を修正**。ON ERROR SKIP 無し（error table 未指定）のときは隔離句を出さない。
+- **プラグイン: サブテーブル全置換の確認ダイアログをサマリ表示に**。親を1件ずつ全列挙して画面をはみ出していたのを、テーブル別合計＋削除がある親のみ（上限付き）へ集約。レコード数が増えても行数が一定。
+
 ## v3.6.0（2026-07-19）
 
 ### 機能追加

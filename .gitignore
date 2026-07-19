@@ -34,4 +34,5 @@ pluginId.txt
 private.ppk
 .npm-cache/
 /.tmp/
+tmp
 *.tgz
