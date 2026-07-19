@@ -19,6 +19,8 @@ export interface NormalizedImportChildRow {
   readonly values: ReadonlyMap<string, ImportScalarPayloadValue>;
 }
 
+export type JsonImportChildRow = Omit<NormalizedImportChildRow, "rowId"> & { readonly rowId?: never };
+
 /** Dedicated recursive builder. A parent record and all its table rows stay indivisible. */
 export function buildImportRecordPayload(
   top: ReadonlyMap<string, ImportScalarPayloadValue>,
@@ -36,4 +38,13 @@ export function buildImportRecordPayload(
     };
   }
   return record;
+}
+
+
+/** JSON-only entry point: the DROP policy is not selectable by callers. */
+export function buildJsonImportRecordPayload(
+  top: ReadonlyMap<string, ImportScalarPayloadValue>,
+  subtables: ReadonlyMap<string, readonly JsonImportChildRow[]>
+): ImportParentRecordPayload {
+  return buildImportRecordPayload(top, subtables, "DROP");
 }

@@ -9,6 +9,7 @@ import {
   OperationCancelledError,
   dmlSourceMaterializer,
   DmlValidationResult,
+  DmlConfirmContext,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type {
@@ -359,9 +360,104 @@ test("Phase 5 subtable AST never falls through to the flat mutation path", async
   const load = jest.fn(async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[]}]') }));
   await expect(execute("IMPORT INTO APP100 (code, Lines(name)) FROM JSON src", client, {
     enableImport: true, importSource: () => ({ load }), cacheContext: "import-subtable-fail-closed",
-  })).rejects.toThrow("not available until Phase 5C/5D");
+  })).rejects.toThrow("requires a surface that displays parent/table replacement");
   expect(load).not.toHaveBeenCalled();
   expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+function phase5cFields() {
+  return [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true, writable: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "attachment", label: "attachment", fieldType: "FILE", writable: true },
+    { code: "choice", label: "choice", fieldType: "DROP_DOWN", defaultValue: "default-choice", writable: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE", writable: false },
+    { code: "Notes", label: "Notes", fieldType: "SUBTABLE", writable: false },
+    { code: "text", label: "text", fieldType: "SINGLE_LINE_TEXT", required: true, writable: true, inSubtable: true, subtableCode: "Lines" },
+    { code: "note", label: "note", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "Notes" },
+  ];
+}
+
+test("Phase 5C JSON nested INSERT posts each parent and every table as one ID-free record", async () => {
+  const client = makeClient({ records: [], postIds: ["10"] });
+  client.getFields = async () => phase5cFields();
+  let detail: DmlConfirmContext["importDetail"];
+  const result = await execute("IMPORT INTO APP100 (code, Lines(text), Notes(note)) FROM JSON src", client, {
+    enableImport: true, supportsImportConfirmDetail: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[{"text":"x"}],"Notes":[]}]') }) }),
+    confirm: async (_count, _operation, context) => { detail = context?.importDetail; return true; },
+    cacheContext: "phase5c-insert",
+  });
+  expect(result).toMatchObject({ type: "INSERT", insertedCount: 1, importDetail: { parentsToWrite: 1, rowIdPolicy: "DROP_AND_RENUMBER_ALL" } });
+  // Regression: form-wide create defaults previously leaked name/choice and FILE={value:""} outside INTO.
+  expect(client.postCalls[0].records).toEqual([{ code: { value: "A" }, Lines: { value: [{ value: { text: { value: "x" } } }] }, Notes: { value: [] } }]);
+  expect(JSON.stringify(client.postCalls[0])).not.toMatch(/"id"/);
+  expect(detail?.parents[0].tables).toEqual(expect.arrayContaining([
+    expect.objectContaining({ table: "Lines", existingRows: 0, inputRows: 1, addRows: 1, deleteRows: 0 }),
+  ]));
+});
+
+test("Phase 5C JSON UPSERT replaces only present tables, uses revision, and exposes [] deletion", async () => {
+  const existing = makeTypedRecord({
+    $id: "7", $revision: "3", code: "A",
+    Lines: [{ id: "101", value: { text: { value: "old" } } }, { id: "102", value: { text: { value: "old2" } } }],
+    Notes: [{ id: "201", value: { note: { value: "keep" } } }],
+  });
+  const client = makeClient({ records: [existing] });
+  client.getFields = async () => phase5cFields();
+  const result = await execute("IMPORT INTO APP100 (code, Lines(text), Notes(note)) FROM JSON src ON DUPLICATE (code)", client, {
+    enableImport: true, supportsImportConfirmDetail: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[]}]') }) }),
+    confirm: async (_count, _operation, context) => {
+      expect(context?.importDetail).toMatchObject({ hasDeletes: true, parents: [{ tables: [{ table: "Lines", existingRows: 2, inputRows: 0, addRows: 0, deleteRows: 2 }] }] });
+      return true;
+    }, cacheContext: "phase5c-upsert",
+  });
+  expect(result).toMatchObject({ type: "UPSERT", insertedCount: 0, updatedCount: 1 });
+  // Updating follows the same closed target set; absent Notes is preserved and Lines=[] deletes rows.
+  expect(client.putCalls[0].records).toEqual([{ id: 7, revision: 3, record: { code: { value: "A" }, Lines: { value: [] } } }]);
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("Notes");
+});
+
+test("Phase 5C rejects JSON row IDs, duplicate UPSERT source, confirmation refusal, and CSV mutation", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  client.getFields = async () => phase5cFields();
+  const run = (
+    json: string,
+    sql: string | undefined = "IMPORT INTO APP100 (code, Lines(text)) FROM JSON src",
+    confirm: NonNullable<NonNullable<Parameters<typeof execute>[2]>["confirm"]> = async () => true
+  ) => execute(sql ?? "IMPORT INTO APP100 (code, Lines(text)) FROM JSON src", client, {
+    enableImport: true, supportsImportConfirmDetail: true, confirm,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(json) }) }), cacheContext: `phase5c-${json.length}`,
+  });
+  await expect(run('[{"code":"A","Lines":[{"_rid":"1","text":"x"}]}]')).rejects.toThrow(/unknown child key|does not accept/);
+  await expect(run('[{"code":"A","Lines":[]},{"code":"A","Lines":[]}]', "IMPORT INTO APP100 (code, Lines(text)) FROM JSON src ON DUPLICATE (code)" )).rejects.toThrow("ERR_KEY_DUP_SOURCE");
+  await expect(run('[{"code":"B","Lines":[]}]', undefined, async () => false)).rejects.toBeInstanceOf(OperationCancelledError);
+  await expect(run('[{"code":"B","Lines":[]},{"code":"C","Lines":[{"text":""}]}]')).rejects.toThrow("DmlValidationError");
+  await expect(run('[{"code":"B","Lines":[]}]', undefined, async (count: number) => {
+    if (count > 0) throw new Error("dmlMaxRows");
+    return true;
+  })).rejects.toThrow("dmlMaxRows");
+  await expect(execute("IMPORT INTO APP100 (code, Lines(text) ROW ID SOURCE rid) FROM CSV src BY NAME REPLACE SUBTABLES (Lines)", client, {
+    enableImport: true, supportsImportConfirmDetail: true, confirm: async () => true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode("*,$id,code,text,rid\n*,1,A,x,") }) }),
+  })).rejects.toThrow("not available until Phase 5D");
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("Phase 5C UPSERT unmatched parent is inserted after lookup", async () => {
+  const client = makeClient({ records: [], postIds: ["8"] });
+  client.getFields = async () => phase5cFields();
+  const result = await execute("IMPORT INTO APP100 (code, Lines(text)) FROM JSON src ON DUPLICATE (code)", client, {
+    enableImport: true, supportsImportConfirmDetail: true, confirm: async () => true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode('[{"code":"NEW","Lines":[{"text":"n"}]}]') }) }),
+    cacheContext: "phase5c-upsert-unmatched",
+  });
+  expect(result).toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 0 });
+  // The unmatched UPSERT create payload must also exclude every form field outside INTO.
+  expect(client.postCalls[0].records).toEqual([{ code: { value: "NEW" }, Lines: { value: [{ value: { text: { value: "n" } } }] } }]);
   expect(client.putCalls).toHaveLength(0);
 });
 

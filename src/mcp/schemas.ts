@@ -38,7 +38,7 @@ const importSources = z.array(z.object({
     ctx.addIssue({ code: "custom", message: "Exactly one of text or base64 is required." });
   }
 })).max(16)
-  .describe("Experimental IMPORT CSV named inline sources (maximum 16). Providing this enables IMPORT only for this tool call; paths are not accepted. Each source is limited to 10 MiB by the engine loader.")
+  .describe("Experimental IMPORT CSV/JSON named inline sources (maximum 16). JSON nested subtable VALIDATE ONLY/EXPLAIN is supported, but mutation is fail-closed because MCP cannot interactively display and approve parent/table delete detail. JSON child IDs are never accepted and replacement would renumber every row. Paths are not accepted; each source is limited to 10 MiB.")
   .optional();
 
 export const validateInputSchema = z.object({

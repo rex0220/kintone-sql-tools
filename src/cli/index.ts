@@ -25,6 +25,7 @@ import {
   type AssertResult,
   type DmlValidationResult,
   type ExecuteResult,
+  type DmlConfirmContext,
   type KintoneClient,
   type SelectResult,
 } from "../core";
@@ -2098,9 +2099,21 @@ async function run(): Promise<number> {
           return sourcePath === undefined ? undefined : { load: async () => ({ bytes: new Uint8Array(readFileSync(sourcePath)) }) };
         }
       : undefined;
-    const confirm = async (count: number, operation: "UPDATE" | "DELETE" | "INSERT"): Promise<boolean> => {
+    const confirm = async (count: number, operation: "UPDATE" | "DELETE" | "INSERT", context?: DmlConfirmContext): Promise<boolean> => {
       if (count > dmlMaxRows) {
         throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
+      }
+      if (context?.importDetail) {
+        const detail = context.importDetail;
+        const lines = [
+          `[IMPORT JSON Confirm] parentsToWrite=${detail.parentsToWrite} insert=${detail.insertedParents} update=${detail.updatedParents}`,
+          `rowIdPolicy=DROP_AND_RENUMBER_ALL (JSON child rows are all newly numbered)`,
+          ...(detail.hasDeletes ? ["WARNING: existing subtable rows will be deleted/replaced."] : []),
+          ...detail.parents.flatMap((parent) => parent.tables.map((table) =>
+            `parentRow=${parent.parentRow} mode=${parent.mode} table=${table.table} existing=${table.existingRows} input=${table.inputRows} add=${table.addRows} delete=${table.deleteRows}`
+          )),
+        ];
+        process.stderr.write(`${lines.join("\n")}\n`);
       }
       if (yes) return true;
       if (args.console) return true;
@@ -2133,10 +2146,14 @@ async function run(): Promise<number> {
         variables: args.variables,
         enableImport: importEnabled,
         importSource,
+        supportsImportConfirmDetail: true,
         confirm: batchContainsDml
-          ? async (count, operation) => {
+          ? async (count, operation, context) => {
             if (count > dmlMaxRows) {
               throw new Error(`ArgumentError: ${operation} affected rows (${count}) exceed --dml-max-rows (${dmlMaxRows}).`);
+            }
+            if (context?.importDetail) {
+              process.stderr.write(`[IMPORT JSON Confirm] ${JSON.stringify(context.importDetail)}\n`);
             }
             return true;
           }
@@ -2158,6 +2175,7 @@ async function run(): Promise<number> {
         cursorMaxActive,
         enableImport: importEnabled,
         importSource,
+        supportsImportConfirmDetail: true,
       });
     // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）

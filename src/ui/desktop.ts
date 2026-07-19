@@ -18,6 +18,7 @@ import {
 import type {
   BatchExecuteResult,
   DmlConfirmContext,
+  ImportConfirmDetail,
   ExecuteResult,
   DmlValidationResult,
   KintoneAppInfo,
@@ -1945,6 +1946,7 @@ async function batchConfirmDialog(
   context?: DmlConfirmContext
 ): Promise<boolean> {
   if (!context) return confirmDialog(count, operation);
+  if (context.importDetail) return confirmImportDetailDialog(context.importDetail);
   const label = context.statementType.startsWith("UPSERT")
     ? "登録/更新"
     : operation === "UPDATE" ? "更新"
@@ -2039,6 +2041,7 @@ async function runBatchSql(
     tempTableMaxRows: options.tempTableMaxRows,
     fetchParallel: FETCH_PARALLEL_DEFAULT,
     confirm: analysis.containsDml ? batchConfirmDialog : undefined,
+    supportsImportConfirmDetail: true,
     enableImport: selectedImportSource !== null,
     importSource: selectedImportSource?.resolver,
   });
@@ -2187,6 +2190,7 @@ async function runSql(
 
     const result = await execute(sql, client, {
       confirm: confirmDialog,
+      supportsImportConfirmDetail: true,
       maxRecords: runtimeFetch.maxRecords,
       // DML では常に error（truncate だと SELECT-based DML のソース読み取りが
       // 黙って切り捨てられ部分書き込みになるため。バッチ側と同じ固定。仕様 §3.6）
@@ -2804,14 +2808,28 @@ function showConfirmDialog(message: string, danger = false): Promise<boolean> {
 
 async function confirmDialog(
   count: number,
-  operation: "UPDATE" | "DELETE" | "INSERT"
+  operation: "UPDATE" | "DELETE" | "INSERT",
+  context?: DmlConfirmContext
 ): Promise<boolean> {
+  if (context?.importDetail) return confirmImportDetailDialog(context.importDetail);
   const label =
     operation === "UPDATE" ? "更新"
     : operation === "DELETE" ? "削除"
     : "登録"; // INSERT ... SELECT（書き込み前に件数確定）
   return showConfirmDialog(
     `${count} 件のレコードを${label}します。よろしいですか？\nこの操作は元に戻せません。`,
+    true
+  );
+}
+
+function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {
+  const rows = detail.parents.flatMap((parent) => parent.tables.map((table) =>
+    `親${parent.parentRow} ${parent.mode} / ${table.table}: existing=${table.existingRows}, input=${table.inputRows}, add=${table.addRows}, delete=${table.deleteRows}`
+  ));
+  return showConfirmDialog(
+    `${detail.hasDeletes ? "【最重要警告】既存サブテーブル行を削除・置換します。\n" : ""}`
+    + `JSON IMPORT: 親 ${detail.parentsToWrite} 件 (INSERT ${detail.insertedParents}, UPDATE ${detail.updatedParents})\n`
+    + `JSON の子行 ID は送信せず、全行を新規採番します。\n${rows.join("\n")}`,
     true
   );
 }
