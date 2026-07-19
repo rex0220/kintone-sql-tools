@@ -13,10 +13,10 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - `EXPLAIN`
 - **型付きcanonical `ORDER BY`とkintone固有順を選ぶ`KORDER BY`**（v3.0.0）
 - **最大30桁のNUMBERをraw字句のまま比較する厳密10進primitive**（v3.3.0）
-- **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**（v1.4.0）
+- **バッチ実行（`;` 区切りの複文）と一時テーブル `CREATE TEMP TABLE #t AS SELECT ...`**
   - CLI / MCP: read-only バッチ + DML バッチ（一時テーブル経由の `INSERT ... SELECT` を含む）
   - プラグイン: read-only バッチのみ（最終結果を表示）
-- **`ASSERT`（実行時ゲート。DML 前の件数ガード / CLI ヘルスチェック）**（v1.10.0）
+- **`ASSERT`（実行時ゲート。DML 前の件数ガード / CLI ヘルスチェック）**
 - サブテーブル仮想テーブル（`APP100$明細`）
 - CLI 拡張 `APP@profile`
   - 同一 SQL 内で同一 APP の profile 混在を許可
