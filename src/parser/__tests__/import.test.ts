@@ -42,4 +42,17 @@ describe("B39 IMPORT parser gate", () => {
     expect(() => parse("IMPORT INTO APP1 (a) FROM CSV 'x.csv'")).toThrow();
     expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src COLUMNS(a)")).toThrow("NO HEADER");
   });
+  test("parses pure record-number UPDATE and enforces exclusions", () => {
+    expect(parse("IMPORT UPDATE INTO APP1 (a,b) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno")).toMatchObject({
+      type: "IMPORT", writeMode: "UPDATE_RECORD_NUMBER", recordNumberSourceHeader: "recno",
+      source: { kind: "CSV", mappingMode: "BY_NAME" },
+    });
+    expect(() => parse("IMPORT UPDATE INTO APP1 (a) FROM CSV src MATCH RECORD NUMBER SOURCE recno")).toThrow("requires BY NAME");
+    expect(() => parse("IMPORT UPDATE INTO APP1 (a) FROM CSV src BY NAME")).toThrow("requires MATCH RECORD NUMBER SOURCE");
+    expect(() => parse("IMPORT UPDATE INTO APP1 (a) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno ON DUPLICATE (a)"))
+      .toThrow("mutually exclusive");
+    expect(() => parse("IMPORT INTO APP1 (a) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno"))
+      .toThrow("requires IMPORT UPDATE");
+    expect(parse("SELECT MATCH, RECORD, NUMBER, SOURCE FROM APP1")).toMatchObject({ type: "SELECT" });
+  });
 });

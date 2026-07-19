@@ -20,6 +20,8 @@ export type DmlValidationErrorCode =
   | "ERR_KEY_EMPTY"
   | "ERR_KEY_DUP_SOURCE"
   | "ERR_IMPORT_MULTI_EMPTY_ITEM"
+  | "ERR_RECORD_NUMBER_INVALID"
+  | "ERR_RECORD_NUMBER_NOT_FOUND"
   | "ERR_CHECK";
 
 export type DmlValueValidation =

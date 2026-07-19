@@ -723,6 +723,10 @@ export interface ImportStatement {
   appId: number;
   fields: string[];
   source: CsvDmlSource | JsonDmlSource;
+  /** Dedicated pure-UPDATE mode; absence preserves INSERT/UPSERT behavior. */
+  writeMode?: "UPDATE_RECORD_NUMBER";
+  /** Exact, case-sensitive CSV header used only for record-number lookup. */
+  recordNumberSourceHeader?: string;
   /** Presence selects UPSERT; absence selects INSERT. */
   keyFields?: string[];
   validateOnly?: boolean;

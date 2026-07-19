@@ -33,6 +33,14 @@ function makeTypedRecord(fields: Record<string, unknown>): KintoneRecord {
   ) as KintoneRecord;
 }
 
+function importCsvOptions(csv: string, context: string) {
+  return {
+    enableImport: true,
+    importSource: () => ({ load: async () => ({ bytes: new TextEncoder().encode(csv) }) }),
+    cacheContext: context,
+  };
+}
+
 interface MockClientOptions {
   records?: KintoneRecord[];          // GET で返すレコード（全アプリ共通）
   recordsByApp?: Record<number, KintoneRecord[]>; // アプリ ID ごとにレコードを分ける
@@ -230,6 +238,75 @@ test("IMPORT UPSERT はsource重複を照合read前に文全体拒否する", as
   expect(client.getCalls).toHaveLength(0);
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
+});
+
+test("IMPORT UPDATE RECORD NUMBER は重複をread/write前拒否し、全一致を純PUTする", async () => {
+  const duplicate = makeClient({ fieldTypes: { name: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno",
+    duplicate, importCsvOptions("recno,name\n1,A\n001,B", "recnum-dup")
+  )).rejects.toThrow("ERR_RECORD_NUMBER_DUP_SOURCE");
+  expect(duplicate.getCalls).toHaveLength(0);
+  expect(duplicate.putCalls).toHaveLength(0);
+  expect(duplicate.postCalls).toHaveLength(0);
+
+  const client = makeClient({ records: [makeRecord({ $id: "1" }), makeRecord({ $id: "2" })], fieldTypes: { name: "SINGLE_LINE_TEXT" } });
+  let confirmed = -1;
+  const result = await execute(
+    "IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno",
+    client, { ...importCsvOptions("recno,name\n1,A\n2,B", "recnum-ok"), confirm: async (count, op) => { confirmed = count; expect(op).toBe("UPDATE"); return true; } }
+  ) as UpdateResult;
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: 2, insertedCount: 0 });
+  expect(confirmed).toBe(2);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls.flatMap((call) => call.records)).toEqual([
+    { id: 1, record: { name: { value: "A" } } },
+    { id: 2, record: { name: { value: "B" } } },
+  ]);
+});
+
+test("IMPORT UPDATE RECORD NUMBER の新旧混在はfail-fast/VALIDATE/SKIPでもINSERTしない", async () => {
+  const csv = "recno,name\n1,A\n,B\n9,C";
+  const fail = makeClient({ records: [makeRecord({ $id: "1" })], fieldTypes: { name: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno",
+    fail, importCsvOptions(csv, "recnum-fail")
+  )).rejects.toThrow("ERR_RECORD_NUMBER_INVALID");
+  expect(fail.putCalls).toHaveLength(0);
+  expect(fail.postCalls).toHaveLength(0);
+
+  const validate = makeClient({ records: [makeRecord({ $id: "1" })], fieldTypes: { name: "SINGLE_LINE_TEXT" } });
+  const validation = await execute(
+    "IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno VALIDATE ONLY",
+    validate, importCsvOptions(csv, "recnum-validate")
+  ) as DmlValidationResult;
+  expect(validation).toMatchObject({ operation: "UPDATE", validatedRows: 3, validRows: 1, invalidRows: 2 });
+  expect(validation.errors.map((row) => row.$err_code)).toEqual(["ERR_RECORD_NUMBER_INVALID", "ERR_RECORD_NUMBER_NOT_FOUND"]);
+  expect(validation.errors.map((row) => row.recno)).toEqual(["", "9"]);
+  expect(validate.putCalls).toHaveLength(0);
+  expect(validate.postCalls).toHaveLength(0);
+
+  const skip = makeClient({ records: [makeRecord({ $id: "1" })], fieldTypes: { name: "SINGLE_LINE_TEXT" } });
+  const batch = await executeBatch(
+    "IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    skip, importCsvOptions(csv, "recnum-skip")
+  );
+  expect(batch.statements[0].result).toMatchObject({ type: "UPDATE", updatedCount: 1, skippedRows: 2, insertedCount: 0 });
+  expect(skip.putCalls.flatMap((call) => call.records)).toEqual([{ id: 1, record: { name: { value: "A" } } }]);
+  expect(skip.postCalls).toHaveLength(0);
+});
+
+test("EXPLAIN IMPORT UPDATE exposes pure-update lookup contract", async () => {
+  const plan = await execute(
+    "EXPLAIN IMPORT UPDATE INTO APP100 (name) FROM CSV src BY NAME MATCH RECORD NUMBER SOURCE recno",
+    makeClient(), { enableImport: true }
+  ) as SelectResult;
+  const text = plan.rows.map((row) => row.plan).join("\n");
+  expect(text).toContain("writeMode:     UPDATE_RECORD_NUMBER");
+  expect(text).toContain("keyHeader:     recno");
+  expect(text).toContain("requiresLookup:true");
+  expect(text).toContain("inserted:      0");
+  expect(text).toContain("keyInPayload:  false");
 });
 
 test("非IMPORT UPSERT SELECT はsource重複をhard throwせず従来どおり照合する", async () => {

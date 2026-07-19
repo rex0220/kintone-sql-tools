@@ -111,6 +111,7 @@ import type { ImportSourceHandle, ImportSourceResolver } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
 import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
+import { preflightImportRecordNumbers } from "./import/recordNumberUpdate";
 
 // ============================================================
 // kintone API クライアントインターフェース
@@ -261,6 +262,7 @@ export interface MaterializedTable {
   readonly importPresence?: readonly ReadonlySet<string>[];
   readonly importRowErrors?: readonly (readonly import("./import/types").ImportRowError[])[];
   readonly importAudit?: import("./import/types").ImportColumnAudit;
+  readonly recordNumberSourceValues?: readonly string[];
 }
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
@@ -4783,6 +4785,12 @@ async function executeImport(
   // Capability/source existence is synchronous and deliberately precedes form API reads.
   if (!options.enableImport) throw new Error("UnsupportedError: IMPORT capability is disabled.");
   const handle = resolveImportSource(stmt.source.sourceName, options.importSource);
+  if (stmt.writeMode === "UPDATE_RECORD_NUMBER") {
+    return executeImportRecordNumberUpdate(
+      stmt as ImportStatement & { writeMode: "UPDATE_RECORD_NUMBER" },
+      handle, client, options, cacheContext, tempTables
+    );
+  }
   const common = {
     appId: stmt.appId, fields: stmt.fields, select: importPlaceholderSelect(),
     validateOnly: stmt.validateOnly, validationErrorTable: stmt.validationErrorTable,
@@ -4821,6 +4829,129 @@ async function executeImport(
     ? executeUpsertSelect(generated, client, options, cacheContext, tempTables)
     : executeInsertSelect(generated, client, options, cacheContext, tempTables));
   return withAudit(result);
+}
+
+async function executeImportRecordNumberUpdate(
+  stmt: ImportStatement & { writeMode: "UPDATE_RECORD_NUMBER" },
+  handle: ImportSourceHandle,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<UpdateResult | DmlValidationResult> {
+  if (stmt.source.kind !== "CSV" || stmt.source.mappingMode !== "BY_NAME" || !stmt.recordNumberSourceHeader) {
+    throw new Error("InternalError: invalid IMPORT UPDATE AST.");
+  }
+  if (new Set(stmt.fields).size !== stmt.fields.length) throw new Error("ArgumentError: DML target fields contain duplicates.");
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const payload = await loadImportSource(handle, new Map());
+  const sourceTable = materializeCsvDmlSource(
+    stmt.source, payload, options.maxRecords ?? 10_000, stmt.fields, fieldInfos, stmt.recordNumberSourceHeader
+  );
+  const keyValues = sourceTable.recordNumberSourceValues;
+  if (!keyValues) throw new Error("InternalError: record-number source values were not materialized.");
+  // Global duplicate preflight deliberately precedes every record lookup and mutation.
+  const keyPlan = preflightImportRecordNumbers(keyValues, stmt.recordNumberSourceHeader);
+
+  const matchedIds = new Set<string>();
+  const lookupKeys = [...new Set(keyPlan.normalized.filter((key): key is string => key !== null))];
+  for (let i = 0; i < lookupKeys.length; i += 100) {
+    const chunk = lookupKeys.slice(i, i + 100);
+    const response = await client.getRecords({
+      app: stmt.appId,
+      query: `$id in (${chunk.join(",")}) limit 500`,
+      fields: ["$id"],
+    });
+    for (const record of response.records) {
+      const id = record["$id"]?.value;
+      if (typeof id === "string" && id !== "") matchedIds.add(id.replace(/^0+(?=\d)/, ""));
+    }
+  }
+
+  const infoByCode = new Map(fieldInfos.map((info) => [info.code, info]));
+  const evaluationTypes = new Map(stmt.fields.map((field) => [field, infoByCode.get(field)?.fieldType ?? "SINGLE_LINE_TEXT"]));
+  const candidates = sourceTable.rows.map((row, index): DmlValidationCandidate => {
+    const key = keyPlan.normalized[index];
+    const preErrors = [
+      ...(sourceTable.importRowErrors?.[index] ?? []),
+      ...keyPlan.errors[index],
+    ];
+    if (key !== null && !matchedIds.has(key)) preErrors.push({
+      field: stmt.recordNumberSourceHeader!,
+      code: "ERR_RECORD_NUMBER_NOT_FOUND",
+      message: `record number ${key} does not exist in APP${stmt.appId}`,
+    });
+    return {
+      rowNumber: index + 1,
+      operation: "UPDATE",
+      mode: "update",
+      ...(key !== null && matchedIds.has(key) ? { targetId: Number(key) } : {}),
+      payload: new Map([
+        [stmt.recordNumberSourceHeader!, keyValues[index]],
+        ...stmt.fields.map((field): [string, unknown] => [field, row[field] ?? ""]),
+      ]),
+      preErrors,
+      record: {},
+      evaluationRow: row,
+      evaluationFieldTypes: evaluationTypes,
+    };
+  });
+  const diagnosticFields = [stmt.recordNumberSourceHeader, ...stmt.fields];
+  const validation = validateDmlCandidates(
+    candidates, "UPDATE", diagnosticFields, stmt.fields, fieldInfos, 1, numberPrecision, stmt.checkGroups ?? [], false
+  );
+  const columns = [...diagnosticFields, ...VALIDATION_META_COLUMNS];
+  const validationResult: DmlValidationResult = {
+    type: "VALIDATION", operation: "UPDATE", validatedRows: candidates.length,
+    validRows: candidates.length - validation.invalidRows,
+    invalidRows: validation.invalidRows, errorCount: validation.errors.length,
+    columns, errors: validation.errors,
+    ...((stmt.validationErrorTable ?? stmt.errorTable) ? { errTable: (stmt.validationErrorTable ?? stmt.errorTable)! } : {}),
+  };
+  Object.assign(validationResult, { importAudit: sourceTable.importAudit });
+  if (stmt.validateOnly) {
+    if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(
+      tempTables, stmt.validationErrorTable, columns, validation.errors,
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+    );
+    return validationResult;
+  }
+  if (!stmt.onErrorSkip && validation.invalidRows > 0) {
+    const first = validation.errors[0];
+    throw new Error(`DmlValidationError: ${first.$err_code} ${first.$err_message} (row=${first.$err_row}, field=${first.$err_field})`);
+  }
+  if (stmt.onErrorSkip) {
+    if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
+    appendValidationErrors(
+      tempTables, stmt.errorTable, columns, validation.errors,
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+    );
+    if (stmt.rejectLimit != null && validation.invalidRows > stmt.rejectLimit) {
+      throw new RejectLimitExceededError(
+        `rejected rows (${validation.invalidRows}) exceed REJECT LIMIT (${stmt.rejectLimit}).`, validationResult
+      );
+    }
+  }
+  const valid = candidates.filter((candidate) => !validation.invalidRowNumbers.has(candidate.rowNumber));
+  if (options.confirm) {
+    const ok = await options.confirm(valid.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", valid.length);
+  }
+  const updates = valid.map((candidate) => ({ id: candidate.targetId!, record: candidate.record! }));
+  for (let i = 0; i < updates.length; i += 100) {
+    await client.putRecords({ app: stmt.appId, records: updates.slice(i, i + 100) });
+  }
+  const result: UpdateResult = {
+    type: "UPDATE", updatedCount: updates.length,
+    ...(stmt.onErrorSkip ? {
+      affectedRows: updates.length, skippedRows: validation.invalidRows,
+      rejectLimit: stmt.rejectLimit ?? null, errTable: stmt.errorTable,
+    } : {}),
+  };
+  Object.assign(result, { insertedCount: 0, importAudit: sourceTable.importAudit });
+  return result;
 }
 
 async function materializeDmlSource(
@@ -6466,6 +6597,27 @@ function buildExplainPlan(
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
   if (query.type === "VALIDATE")      return buildValidatePlan(query, label);
   if (query.type === "IMPORT") {
+    if (query.writeMode === "UPDATE_RECORD_NUMBER") {
+      return [
+        ...(label ? [label] : []),
+        `IMPORT UPDATE INTO APP${query.appId}`,
+        `  writeMode:     UPDATE_RECORD_NUMBER`,
+        `  source:        CSV ${query.source.sourceName}`,
+        `  keyHeader:     ${query.recordNumberSourceHeader}`,
+        `  mapping:       BY_NAME`,
+        `  parentRows:    requires source load`,
+        `  duplicate:     preflight before lookup/write`,
+        `  matched:       requires lookup`,
+        `  unmatched:     requires lookup`,
+        `  invalid:       requires source load`,
+        `  requiresLookup:true`,
+        `  inserted:      0`,
+        `  keyInPayload:  false`,
+        `  disposition:   ${query.validateOnly ? "VALIDATE ONLY" : query.onErrorSkip ? `ON ERROR SKIP INTO ${query.errorTable}` : "fail-fast"}`,
+        `  gate:          enabled for this parse`,
+        `  writesKintone: ${query.validateOnly ? "false" : "true"}`,
+      ];
+    }
     const mode = query.keyFields ? "UPSERT" : "INSERT";
     return [
       ...(label ? [label] : []),

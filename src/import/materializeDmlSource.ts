@@ -13,7 +13,8 @@ export function materializeCsvDmlSource(
   payload: ImportSourcePayload,
   maxRows: number,
   targetCodes?: readonly string[],
-  fieldInfos?: readonly KintoneFieldInfo[]
+  fieldInfos?: readonly KintoneFieldInfo[],
+  recordNumberSourceHeader?: string
 ): ImportMaterializedTable {
   const decoded = decodeCsv(payload.bytes, {
     encoding: source.encoding ?? payload.encoding ?? "utf8",
@@ -34,6 +35,12 @@ export function materializeCsvDmlSource(
     }
     const infoByCode = new Map(fieldInfos.map((info) => [info.code, info]));
     const targetSet = new Set(targetCodes);
+    if (recordNumberSourceHeader && targetSet.has(recordNumberSourceHeader)) {
+      throw new ImportSourceError("ERR_IMPORT_HEADER_REUSED: record-number source header is lookup-only and cannot be a write target.");
+    }
+    if (recordNumberSourceHeader && !indexes.has(recordNumberSourceHeader)) {
+      throw new ImportSourceError(`ERR_IMPORT_MISSING_COLUMN: required header \"${recordNumberSourceHeader}\" is missing.`);
+    }
     const ignoredKnownColumns: IgnoredImportColumn[] = [];
     const ignoredUnknownColumns: IgnoredImportColumn[] = [];
     const nonEmpty = (index: number) => decoded.rows.filter((row) => row[index] !== "").length;
@@ -44,7 +51,7 @@ export function materializeCsvDmlSource(
       return `known export-only ${info.fieldType} field`;
     };
     for (const [index, column] of decoded.columns.entries()) {
-      if (targetSet.has(column)) continue;
+      if (targetSet.has(column) || column === recordNumberSourceHeader) continue;
       const info = infoByCode.get(column);
       if (info) ignoredKnownColumns.push({ column, reason: reasonFor(info), nonEmptyCells: nonEmpty(index) });
       else if (!source.ignoreUnknownColumns) throw new ImportSourceError(`ERR_IMPORT_UNKNOWN_COLUMN: unknown CSV header \"${column}\".`);
@@ -77,6 +84,7 @@ export function materializeCsvDmlSource(
       rows, columns: [...targetCodes],
       columnMeta: new Map(targetCodes.map((code) => [code, { fieldType: infoByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }])),
       importRowErrors,
+      ...(recordNumberSourceHeader ? { recordNumberSourceValues: decoded.rows.map((row) => row[indexes.get(recordNumberSourceHeader)!]) } : {}),
       importAudit: { mapping: "BY_NAME", writtenColumns: [...targetCodes], ignoredKnownColumns, ignoredUnknownColumns },
     };
   }
