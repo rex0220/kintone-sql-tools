@@ -31656,13 +31656,14 @@ var Parser = class {
         if (upper === "CREATE") return this.parseCreateTempTable();
         if (upper === "DROP") return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
+        if (upper === "VALIDATE") return this.parseValidate();
         break;
       }
       default:
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
       tok
     );
   }
@@ -31673,7 +31674,7 @@ var Parser = class {
     this.expect("SET" /* SET */);
     const variable = this.expect("VARIABLE" /* VARIABLE */, "SET \u306E\u5F8C\u306B\u306F\u5909\u6570\u540D\uFF08\u4F8B: @name\uFF09\u304C\u5FC5\u8981\u3067\u3059");
     this.expect("=" /* EQ */);
-    const expr = this.parseScalarExpr("SET", true);
+    const expr = this.peek().kind === "[" /* LBRACKET */ ? this.parseArrayLiteral() : this.parseScalarExpr("SET", true);
     return { type: "SET_VARIABLE", name: variable.value.slice(1).toLowerCase(), expr };
   }
   parseDeclareVariable() {
@@ -31834,10 +31835,62 @@ var Parser = class {
       query = this.parseDelete();
     } else if (tok.kind === "REORDER" /* REORDER */) {
       query = this.parseReorder();
+    } else if (tok.kind === "IDENT" /* IDENT */ && tok.value.toUpperCase() === "VALIDATE") {
+      query = this.parseValidate();
     } else {
-      throw new ParseError("EXPLAIN \u306E\u5F8C\u306B\u306F SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER \u304C\u5FC5\u8981\u3067\u3059", tok);
+      throw new ParseError("EXPLAIN \u306E\u5F8C\u306B\u306F SELECT / WITH / INSERT / UPSERT / UPDATE / DELETE / REORDER / VALIDATE \u304C\u5FC5\u8981\u3067\u3059", tok);
     }
     return { type: "EXPLAIN", query };
+  }
+  /** VALIDATE APP100 [(fields)] [WHERE ...] [CHECK ...] [INTO #err]. */
+  parseValidate() {
+    const validateTok = this.advance();
+    const name = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(name, this.prev());
+    if (subtableCode) {
+      throw new ParseError("VALIDATE \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u4EEE\u60F3\u30C6\u30FC\u30D6\u30EB\u3092\u5BFE\u8C61\u306B\u3067\u304D\u307E\u305B\u3093", this.prev());
+    }
+    let fields;
+    if (this.consume("(" /* LPAREN */)) {
+      fields = this.parseIdentList();
+      this.expect(")" /* RPAREN */);
+    }
+    const where = this.consume("WHERE" /* WHERE */) ? this.parseWhereExpr() : null;
+    const checks = this.parseCheckGroups();
+    let errorTable;
+    if (this.consume("INTO" /* INTO */)) {
+      const tableTok = this.peek();
+      if (tableTok.kind !== "IDENT" /* IDENT */ || !tableTok.value.startsWith("#")) {
+        throw new ParseError("VALIDATE INTO \u306B\u306F # \u3067\u59CB\u307E\u308B\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\u304C\u5FC5\u8981\u3067\u3059", tableTok);
+      }
+      errorTable = this.parseTableName();
+    }
+    const stmt = { type: "VALIDATE", appId, fields, where, ...checks, ...errorTable ? { errorTable } : {} };
+    this.assertValidateExpressions(stmt, validateTok);
+    return stmt;
+  }
+  /** v1 VALIDATE is single-app/local: subqueries and qualified references are rejected. */
+  assertValidateExpressions(stmt, tok) {
+    const visit = (node) => {
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+      if (node === null || typeof node !== "object") return;
+      const obj = node;
+      if (obj.type === "EXISTS" || obj.type === "SUBQUERY_IN_LIST" || obj.type === "SCALAR_SUBQUERY") {
+        throw new ParseError("VALIDATE \u306E WHERE / CHECK \u306B\u30B5\u30D6\u30AF\u30A8\u30EA\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      }
+      if (obj.type === "FIELD" && obj.tableAlias !== null && obj.tableAlias !== void 0) {
+        throw new ParseError("VALIDATE \u306E WHERE / CHECK \u3067\u306F\u4FEE\u98FE\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      }
+      if (obj.type === "FIELD_REF" && typeof obj.field === "string" && obj.field.includes(".")) {
+        throw new ParseError("VALIDATE \u306E WHERE / CHECK \u3067\u306F\u4FEE\u98FE\u30D5\u30A3\u30FC\u30EB\u30C9\u53C2\u7167\u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+      }
+      Object.values(obj).forEach(visit);
+    };
+    visit(stmt.where);
+    visit(stmt.checkGroups);
   }
   // ----------------------------------------------------------
   // ASSERT
@@ -32123,6 +32176,17 @@ var Parser = class {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
       const alias2 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
       return { type: "SCALAR_VALUE_COL", expr, alias: alias2 };
+    }
+    if (this.peek().kind === "VARIABLE" /* VARIABLE */) {
+      const variable = this.advance();
+      if (!this.consume("AS" /* AS */)) {
+        throw new ParseError("SELECT \u5217\u306E\u30D0\u30C3\u30C1\u5909\u6570\u306B\u306F AS alias \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+      }
+      return {
+        type: "VARIABLE_COL",
+        name: variable.value.slice(1).toLowerCase(),
+        alias: this.parseAliasName()
+      };
     }
     const windowFunc = this.tryWindowFunc();
     if (windowFunc !== null) {
@@ -32939,9 +33003,7 @@ var Parser = class {
     }
     if (this.consume("NOT" /* NOT */)) {
       if (this.consume("IN" /* IN */)) {
-        this.expect("(" /* LPAREN */);
-        const right2 = this.parseInListOrSubquery();
-        this.expect(")" /* RPAREN */);
+        const right2 = this.parseInRight();
         return { type: "BINARY", op: "NOT_IN", left: field, right: right2 };
       }
       if (this.consume("LIKE" /* LIKE */)) {
@@ -32958,9 +33020,7 @@ var Parser = class {
       );
     }
     if (this.consume("IN" /* IN */)) {
-      this.expect("(" /* LPAREN */);
-      const right2 = this.parseInListOrSubquery();
-      this.expect(")" /* RPAREN */);
+      const right2 = this.parseInRight();
       return { type: "BINARY", op: "IN", left: field, right: right2 };
     }
     if (this.consume("KLIKE" /* KLIKE */)) {
@@ -33127,6 +33187,18 @@ var Parser = class {
     );
   }
   // IN (...) — 値リストまたはサブクエリ
+  parseInRight() {
+    if (this.consume("(" /* LPAREN */)) {
+      const right = this.parseInListOrSubquery();
+      this.expect(")" /* RPAREN */);
+      return right;
+    }
+    const variable = this.expect(
+      "VARIABLE" /* VARIABLE */,
+      "IN / NOT IN \u306E\u5F8C\u306B\u306F (\u5024\u30EA\u30B9\u30C8\u307E\u305F\u306F SELECT) \u304B\u914D\u5217\u5909\u6570\u304C\u5FC5\u8981\u3067\u3059"
+    );
+    return { type: "VARIABLE_IN_LIST", name: variable.value.slice(1).toLowerCase() };
+  }
   parseInListOrSubquery() {
     if (this.peek().kind === "SELECT" /* SELECT */) {
       const query = this.parseSelect();
@@ -33937,7 +34009,7 @@ function isDmlType(type) {
   return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER";
 }
 function isReadOnlyType(type) {
-  return type === "SELECT" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
+  return type === "SELECT" || type === "VALIDATE" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
 }
 function writesKintone(stmt) {
   return isDmlType(stmt.type) && !("validateOnly" in stmt && stmt.validateOnly === true);
@@ -33948,6 +34020,8 @@ function isReadOnlyStatement(stmt) {
 function requiresCompleteInput(stmt) {
   if (isDmlType(stmt.type)) return true;
   switch (stmt.type) {
+    case "VALIDATE":
+      return true;
     case "SELECT":
       return selectRequiresCompleteInput(stmt);
     case "UNION":
@@ -33988,6 +34062,7 @@ function whereRequiresCompleteInput(where) {
     case "EXISTS":
       return selectRequiresCompleteInput(where.query);
     case "NULL_CHECK":
+    case "BOOLEAN":
       return false;
   }
 }
@@ -34011,6 +34086,8 @@ function getInsertValuesCount(stmt) {
 // src/engine/pushDownNot.ts
 function pushDownNot(expr) {
   switch (expr.type) {
+    case "BOOLEAN":
+      return { type: "BOOLEAN", value: !expr.value };
     case "BINARY": {
       const negated = negateOp(expr.op);
       if (negated === null) {
@@ -34090,6 +34167,7 @@ function whereHasLike(where) {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }
@@ -34105,6 +34183,7 @@ function whereHasKlike(where) {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }
@@ -34124,6 +34203,8 @@ function whereToKintone(expr) {
       return convertGroup(expr);
     case "EXISTS":
       throw new KintoneQueryError("EXISTS \u306F kintone \u30AF\u30A8\u30EA\u306B\u5909\u63DB\u3067\u304D\u307E\u305B\u3093");
+    case "BOOLEAN":
+      throw new KintoneQueryError("internal error: BOOLEAN predicate reached kintone query conversion");
   }
 }
 function convertBinary(expr) {
@@ -34202,6 +34283,8 @@ function convertValue(value, op) {
   switch (value.type) {
     case "VARIABLE":
       throw new KintoneQueryError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
+    case "VARIABLE_IN_LIST":
+      throw new KintoneQueryError(`\u672A\u89E3\u6C7A\u306E\u914D\u5217\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
     case "STRING":
       return convertString(value);
     case "NUMBER":
@@ -34281,6 +34364,8 @@ function resolveSelectMode(stmt) {
 function whereRequiresJsEval(where) {
   if (where === null) return false;
   switch (where.type) {
+    case "BOOLEAN":
+      return true;
     case "BINARY":
       return isFunc(where.left) || where.right.type === "ARITH_VALUE" || where.right.type === "CASE_VALUE" || where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY" || isLike(where);
     case "NULL_CHECK":
@@ -34675,6 +34760,7 @@ function collectRequiredFieldsByTable(stmt) {
         walkWhere(where.expr, phase);
         return;
       case "EXISTS":
+      case "BOOLEAN":
         return;
     }
   };
@@ -34713,6 +34799,8 @@ function collectRequiredFieldsByTable(stmt) {
         break;
       case "LITERAL_COL":
         break;
+      case "VARIABLE_COL":
+        throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "AGGREGATE":
         if (col.arg.type !== "WILDCARD") walkArith(col.arg, "select");
         break;
@@ -34888,6 +34976,7 @@ function stripCteAlias(where, alias) {
     case "GROUP":
       return { ...where, expr: stripCteAlias(where.expr, alias) };
     case "EXISTS":
+    case "BOOLEAN":
       return where;
   }
 }
@@ -34925,6 +35014,7 @@ function extractAndLeaves(where, accept) {
     case "NULL_CHECK":
     case "NOT":
     case "EXISTS":
+    case "BOOLEAN":
       return null;
   }
 }
@@ -35063,6 +35153,7 @@ function collectKlikes(where, out) {
     case "BINARY":
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return;
   }
 }
@@ -35117,6 +35208,11 @@ function validateStatement(stmt) {
         throw new KlikeValidationError(
           "KLIKE / NOT KLIKE \u306F\u5168 DML\uFF08UPDATE / DELETE / INSERT / UPSERT / REORDER\uFF09\u3067\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093"
         );
+      }
+      return;
+    case "VALIDATE":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError("KLIKE / NOT KLIKE \u306F VALIDATE \u306E WHERE / CHECK \u3067\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093");
       }
       return;
     case "SHOW_APPS":
@@ -35206,6 +35302,8 @@ function isDescendantOf(root, target) {
     case "NULL_CHECK":
     case "EXISTS":
       return false;
+    case "BOOLEAN":
+      return false;
   }
 }
 function walkWithoutNestedSelects(node, visitWhere) {
@@ -35267,8 +35365,12 @@ function collectVariableRefs(node, refs) {
   }
   if (node !== null && typeof node === "object") {
     const obj = node;
-    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
-      refs.add(obj["name"]);
+    const type = obj["type"];
+    if ((type === "VARIABLE" || type === "VARIABLE_COL" || type === "VARIABLE_IN_LIST") && typeof obj["name"] === "string") {
+      refs.push({
+        name: obj["name"],
+        kind: type === "VARIABLE" ? "scalar" : type === "VARIABLE_COL" ? "select-column" : "array-in-list"
+      });
       return;
     }
     for (const v of Object.values(obj)) collectVariableRefs(v, refs);
@@ -35309,9 +35411,9 @@ function analyzeBatch(statements) {
   const variableDefs = /* @__PURE__ */ new Map();
   const variableOrder = [];
   statements.forEach((stmt, index) => {
-    const validationTable = "validationErrorTable" in stmt && stmt.validationErrorTable ? stmt.validationErrorTable : "onErrorSkip" in stmt && stmt.onErrorSkip ? stmt.errorTable ?? null : null;
+    const validationTable = stmt.type === "VALIDATE" && stmt.errorTable ? stmt.errorTable : "validationErrorTable" in stmt && stmt.validationErrorTable ? stmt.validationErrorTable : "onErrorSkip" in stmt && stmt.onErrorSkip ? stmt.errorTable ?? null : null;
     if (statements.length === 1 && validationTable) {
-      const message = "onErrorSkip" in stmt && stmt.onErrorSkip ? "ArgumentError: ON ERROR SKIP requires a batch." : "ArgumentError: VALIDATE ONLY INTO requires a batch.";
+      const message = stmt.type === "VALIDATE" ? "ArgumentError: VALIDATE INTO requires a batch." : "onErrorSkip" in stmt && stmt.onErrorSkip ? "ArgumentError: ON ERROR SKIP requires a batch." : "ArgumentError: VALIDATE ONLY INTO requires a batch.";
       throw new BatchAnalysisError(message, index);
     }
     const statementType = getStatementType(stmt);
@@ -35320,23 +35422,43 @@ function analyzeBatch(statements) {
     const refs = /* @__PURE__ */ new Set();
     const stmtAppIds = /* @__PURE__ */ new Set();
     const dependsOn = /* @__PURE__ */ new Set();
-    const variableRefs = /* @__PURE__ */ new Set();
+    const variableRefs = [];
     collectVariableRefs(stmt, variableRefs);
-    for (const name of variableRefs) {
-      const def = variableDefs.get(name);
+    const referencedThisStatement = /* @__PURE__ */ new Set();
+    for (const use of variableRefs) {
+      const def = variableDefs.get(use.name);
       if (def === void 0) {
         throw new BatchAnalysisError(
-          `ParseError: variable @${name} is not defined before statement ${index + 1}.`,
+          `ParseError: variable @${use.name} is not defined before statement ${index + 1}.`,
           index
         );
       }
-      def.referencedBy.push(index);
+      if (def.kind === "scalar" && use.kind === "array-in-list") {
+        throw new BatchAnalysisError(
+          `ParseError: scalar variable @${use.name} cannot be used as IN @${use.name}; use IN (@${use.name}) instead.`,
+          index
+        );
+      }
+      if (def.kind === "array" && use.kind !== "array-in-list") {
+        throw new BatchAnalysisError(
+          `ParseError: array variable @${use.name} can only be used as IN @${use.name}.`,
+          index
+        );
+      }
+      if (!referencedThisStatement.has(use.name)) {
+        def.referencedBy.push(index);
+        referencedThisStatement.add(use.name);
+      }
     }
     if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
       if (variableDefs.has(stmt.name)) {
         throw new BatchAnalysisError(`ParseError: variable @${stmt.name} is already defined.`, index);
       }
-      variableDefs.set(stmt.name, { index, referencedBy: [] });
+      variableDefs.set(stmt.name, {
+        index,
+        kind: stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? "array" : "scalar",
+        referencedBy: []
+      });
       variableOrder.push(stmt.name);
       if (variableOrder.length > MAX_BATCH_VARIABLES) {
         throw new BatchAnalysisError(
@@ -35369,7 +35491,7 @@ function analyzeBatch(statements) {
       dependsOn.add(at);
     }
     if (validationTable) {
-      const payloadFields = stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
+      const payloadFields = stmt.type === "VALIDATE" ? ["$id", "$err_field", "$err_code", "$err_message", "$err_value"] : stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
       const signature = JSON.stringify(payloadFields);
       const at = defined.get(validationTable);
       if (at === void 0) {
@@ -35444,6 +35566,7 @@ function analyzeBatch(statements) {
   const needsCompleteInput = results.some((r) => r.requiresCompleteInput);
   const variables = variableOrder.map((name) => ({
     name,
+    kind: variableDefs.get(name).kind,
     referencedBy: [...variableDefs.get(name).referencedBy]
   }));
   return {
@@ -35720,6 +35843,7 @@ function whereNeedsFieldMetadata(where) {
     case "GROUP":
       return whereNeedsFieldMetadata(where.expr);
     case "EXISTS":
+    case "BOOLEAN":
       return false;
   }
 }
@@ -35744,6 +35868,7 @@ function explainNeedsAppMetadata(statement) {
     seen.add(node);
     if (Array.isArray(node)) return node.some(visit);
     const item = node;
+    if (item["type"] === "VALIDATE") return true;
     if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node)) {
       return true;
     }
@@ -36234,6 +36359,8 @@ function resolveFieldRef(row, field) {
 // src/engine/evalWhere.ts
 function evalWhere(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   switch (expr.type) {
+    case "BOOLEAN":
+      return expr.value;
     case "BINARY":
       return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
     case "NULL_CHECK":
@@ -36404,6 +36531,8 @@ function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2) {
   switch (value.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
+    case "VARIABLE_IN_LIST":
+      throw new Error(`ParseError: unresolved batch array variable @${value.name}.`);
     case "STRING":
       return value.value;
     case "NUMBER":
@@ -36719,6 +36848,9 @@ function collectConditionFields(expr, out) {
     case "GROUP":
       collectConditionFields(expr.expr, out);
       break;
+    case "EXISTS":
+    case "BOOLEAN":
+      break;
   }
 }
 function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new Map()) {
@@ -36934,6 +37066,8 @@ function convertDmlSqlValue(value, fieldType) {
   switch (value.type) {
     case "VARIABLE":
       throw new DmlConvertError(`\u672A\u89E3\u6C7A\u306E\u30D0\u30C3\u30C1\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
+    case "VARIABLE_IN_LIST":
+      throw new DmlConvertError(`\u672A\u89E3\u6C7A\u306E\u914D\u5217\u5909\u6570 @${value.name} \u304C\u3042\u308A\u307E\u3059`);
     case "STRING":
       return convertString2(value.value, fieldType);
     case "NUMBER":
@@ -37769,6 +37903,8 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, re
     const out = {};
     for (const [colIdx, col] of columns.entries()) {
       switch (col.type) {
+        case "VARIABLE_COL":
+          throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
         case "WILDCARD":
           Object.assign(out, stripParentShortcutColumns(row));
           break;
@@ -37872,6 +38008,8 @@ function computeExplicitOutputKeys(columns, defaultFieldKeys) {
 }
 function computeOutputKey(col, colIdx, defaultFieldKeys) {
   switch (col.type) {
+    case "VARIABLE_COL":
+      throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
     case "FIELD":
       return col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
     case "LITERAL_COL":
@@ -38386,6 +38524,11 @@ function renderValidationValue(value) {
   return String(value);
 }
 
+// src/core/existingRecordValidation.ts
+function renderExistingValidationValue(raw, fieldType) {
+  return isEmptyDmlValue(raw) ? "" : renderValidationValue(normalizeRaw(raw, fieldType));
+}
+
 // src/core/optimization/whereCapability.ts
 var RANGE_AND_EQUALITY = ["=", "!=", ">", "<", ">=", "<="];
 var EQUALITY_IN = ["=", "!=", "in", "not in"];
@@ -38460,6 +38603,8 @@ function classifyWhereCapability(where, resolveField2) {
 }
 function classifyNode(where, resolveField2) {
   switch (where.type) {
+    case "BOOLEAN":
+      return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
     case "BINARY":
       return classifyBinary(where.op, where.left, where.right.type, resolveField2);
     case "NULL_CHECK":
@@ -38786,6 +38931,8 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
   }
   switch (stmt.type) {
+    case "VALIDATE":
+      return executeExistingRecordValidation(stmt, client, options, cacheContext);
     case "SELECT":
       return executeSelect(stmt, client, options, cacheContext);
     case "UNION":
@@ -38830,6 +38977,144 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
     case "ASSERT":
       return executeAssert(stmt, client, options, cacheContext);
   }
+}
+var EXISTING_VALIDATION_COLUMNS = ["$id", "$err_field", "$err_code", "$err_message", "$err_value"];
+function hasAuditableConstraint(field) {
+  return field.required === true || field.minValue !== void 0 || field.maxValue !== void 0 || field.minLength !== void 0 || field.maxLength !== void 0 || field.optionOrder !== void 0;
+}
+function resolveExistingValidationTargets(stmt, fieldInfos) {
+  const byCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const auditable = (field) => !field.inSubtable && (field.fieldType === "NUMBER" || hasAuditableConstraint(field));
+  if (stmt.fields === void 0) return fieldInfos.filter(auditable);
+  const seen = /* @__PURE__ */ new Set();
+  return stmt.fields.map((code) => {
+    if (seen.has(code)) throw new Error(`ArgumentError: VALIDATE field ${code} is duplicated.`);
+    seen.add(code);
+    if (code === "$id") throw new Error("ArgumentError: VALIDATE cannot audit system field $id.");
+    const info = byCode.get(code);
+    if (!info) throw new Error(`ArgumentError: VALIDATE field ${code} does not exist.`);
+    if (info.inSubtable) throw new Error(`ArgumentError: VALIDATE field ${code} is a subtable child field.`);
+    if (!auditable(info)) throw new Error(`ArgumentError: VALIDATE field ${code} has no auditable constraint.`);
+    return info;
+  });
+}
+function collectValidateWhereFields(where) {
+  const fields = [];
+  const seen = /* @__PURE__ */ new Set();
+  const add = (field) => {
+    if (!seen.has(field)) {
+      seen.add(field);
+      fields.push(field);
+    }
+  };
+  const visit = (node) => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const obj = node;
+    if (obj.type === "FIELD" && typeof obj.field === "string") add(obj.field);
+    if (obj.type === "FIELD_REF" && typeof obj.field === "string") add(obj.field);
+    Object.values(obj).forEach(visit);
+  };
+  visit(where);
+  return fields;
+}
+function existingValidationColumnMeta() {
+  return new Map(EXISTING_VALIDATION_COLUMNS.map((column) => [column, {
+    fieldType: column === "$id" ? "KSQL_NUMBER" : "KSQL_STRING",
+    sortKind: column === "$id" ? "number" : "string",
+    semantics: syntheticSemantics(column === "$id" ? "number" : "string")
+  }]));
+}
+async function executeExistingRecordValidation(stmt, client, options, cacheContext) {
+  if (stmt.errorTable) throw new Error("ArgumentError: VALIDATE INTO requires a batch.");
+  return executeExistingRecordValidationCore(stmt, client, options, cacheContext);
+}
+async function executeExistingRecordValidationCore(stmt, client, options, cacheContext) {
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const targets = resolveExistingValidationTargets(stmt, fieldInfos);
+  const checkGroups = stmt.checkGroups ?? [];
+  const checkRefs2 = collectCheckFieldRefs(checkGroups);
+  for (const ref of checkRefs2) {
+    if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+      throw customCheckParseError(`CHECK \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F APP${stmt.appId} \u306B\u5B58\u5728\u3057\u307E\u305B\u3093`);
+    }
+  }
+  const evaluationTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  evaluationTypes.set("$id", "RECORD_NUMBER");
+  assertCheckComparisonTypes(stmt, evaluationTypes);
+  const whereFields = collectValidateWhereFields(stmt.where);
+  const requiredFields = [.../* @__PURE__ */ new Set([
+    "$id",
+    ...targets.map((field) => field.code),
+    ...whereFields,
+    ...checkRefs2.map((ref) => ref.field)
+  ])];
+  for (const field of whereFields) {
+    if (field !== "$id" && !infoByCode.has(field)) {
+      throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${stmt.appId}.`);
+    }
+  }
+  const numberPrecision = targets.some((field) => field.fieldType === "NUMBER") ? await getNumberPrecisionCached(stmt.appId, client, cacheContext) : void 0;
+  const semantics = (field) => field.field === "$id" ? resolveFieldSemantics({ fieldType: "__ID__" }) : infoByCode.get(field.field)?.semantics ?? (infoByCode.has(field.field) ? resolveFieldSemantics(infoByCode.get(field.field)) : void 0);
+  const capability = classifyWhereCapability(stmt.where, semantics);
+  if (capability.capability === "UNSUPPORTED") {
+    throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+  }
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const fieldOptions = new Map(fieldInfos.flatMap((field) => field.optionOrder ? [[field.code, new Set(Object.keys(field.optionOrder))]] : []));
+  const prefilter = stmt.where === null ? null : capability.capability === "EXACT_PUSHDOWN" ? stmt.where : extractSafePushdownLeaves(stmt.where, {
+    allowUnqualifiedFields: true,
+    fieldTypes,
+    fieldOptions,
+    allowKlike: false
+  });
+  const query = prefilter === null ? "" : whereToKintone(prefilter);
+  const records = await fetchAll(client.getRecords, stmt.appId, query, requiredFields, {
+    maxRecords: options.maxRecords ?? 1e4,
+    parallel: options.fetchParallel ?? 1,
+    onLimit: "error"
+  });
+  const validationRows = records.map((record2) => ({
+    id: String(record2["$id"]?.value ?? ""),
+    record: record2,
+    flat: flatten(record2, null)
+  })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
+  const rows = [];
+  for (const row of validationRows) {
+    for (const field of targets) {
+      const raw = row.record[field.code]?.value;
+      const validation = validateAndNormalizeDmlValue(raw, field, numberPrecision);
+      if (validation.ok) continue;
+      rows.push({
+        "$id": row.id,
+        "$err_field": field.code,
+        "$err_code": validation.code,
+        "$err_message": validation.message,
+        "$err_value": renderExistingValidationValue(raw, field.fieldType)
+      });
+    }
+    for (const check2 of evaluateCustomChecks(checkGroups, row.flat, (field) => evaluationTypes.get(field.field))) {
+      rows.push({
+        "$id": row.id,
+        "$err_field": "",
+        "$err_code": "ERR_CHECK",
+        "$err_message": check2.message,
+        "$err_value": ""
+      });
+    }
+  }
+  const result = {
+    type: "SELECT",
+    columns: [...EXISTING_VALIDATION_COLUMNS],
+    rows,
+    rowCount: rows.length
+  };
+  materializedMetaBySelectResult.set(result, existingValidationColumnMeta());
+  return result;
 }
 var TEMP_TABLE_MAX_ROWS = 1e4;
 function appendValidationErrors(tempTables, name, columns, rows, maxRows, columnMeta) {
@@ -38964,9 +39249,14 @@ async function executeBatch(sql, client, options = {}) {
 }
 async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables) {
   if (stmt.type === "SET_VARIABLE") {
-    const resolvedStmt2 = resolveVariableRefs(stmt, variables);
+    const resolvedStmt2 = resolveBatchVariableReferences(stmt, variables);
     validateKlikeStatement(resolvedStmt2);
-    if (resolvedStmt2.expr.type === "SCALAR_SUBQUERY") {
+    if (resolvedStmt2.expr.type === "ARRAY") {
+      variables.set(stmt.name, {
+        type: "array",
+        elements: resolvedStmt2.expr.elements.map((element) => ({ type: "string", value: element.value }))
+      });
+    } else if (resolvedStmt2.expr.type === "SCALAR_SUBQUERY") {
       try {
         const value = await evaluateScalarSubquery(
           resolvedStmt2.expr.query,
@@ -39003,8 +39293,27 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     }
     return {};
   }
-  const resolvedStmt = resolveVariableRefs(stmt, variables);
+  const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   validateKlikeStatement(resolvedStmt);
+  if (resolvedStmt.type === "VALIDATE") {
+    const result = await executeExistingRecordValidationCore(
+      resolvedStmt,
+      client,
+      { ...options, onLimitReached: "error" },
+      cacheContext
+    );
+    if (resolvedStmt.errorTable) {
+      appendValidationErrors(
+        tempTables,
+        resolvedStmt.errorTable,
+        result.columns,
+        result.rows,
+        options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta()
+      );
+    }
+    return { result };
+  }
   if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
     const result = await executeDmlValidation(
       resolvedStmt,
@@ -39189,9 +39498,9 @@ function evaluateScalarExpr(expr) {
     }
   }
 }
-function resolveVariableRefs(node, variables) {
+function resolveBatchVariableReferences(node, variables) {
   if (Array.isArray(node)) {
-    return node.map((v) => resolveVariableRefs(v, variables));
+    return node.map((v) => resolveBatchVariableReferences(v, variables));
   }
   if (node !== null && typeof node === "object") {
     const obj = node;
@@ -39200,13 +39509,71 @@ function resolveVariableRefs(node, variables) {
       if (value === void 0) {
         throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       }
+      if (value.type === "array") {
+        throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
+      }
       return value.type === "number" ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) } : { type: "STRING", value: value.value };
     }
-    return Object.fromEntries(
-      Object.entries(obj).map(([key, value]) => [key, resolveVariableRefs(value, variables)])
+    if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
+      const value = variables.get(obj["name"]);
+      if (value === void 0) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+      if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);
+      return value.type === "number" ? { type: "ARITH_COL", expr: { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }, alias: obj["alias"] } : { type: "LITERAL_COL", value: value.value, alias: obj["alias"] };
+    }
+    if (obj["type"] === "VARIABLE_IN_LIST") return obj;
+    const resolved = Object.fromEntries(
+      Object.entries(obj).map(([key, value]) => [key, resolveBatchVariableReferences(value, variables)])
     );
+    if (resolved["type"] === "BINARY") {
+      const right = resolved["right"];
+      if (right?.["type"] === "VARIABLE_IN_LIST" && typeof right["name"] === "string") {
+        const value = variables.get(right["name"]);
+        if (value === void 0) throw new Error(`ParseError: variable @${right["name"]} is not defined in this batch.`);
+        if (value.type !== "array") {
+          throw new Error(`ParseError: scalar variable @${right["name"]} cannot be used as IN @${right["name"]}; use IN (@${right["name"]}) instead.`);
+        }
+        if (value.elements.length === 0) {
+          return { type: "BOOLEAN", value: resolved["op"] === "NOT_IN" };
+        }
+        resolved["right"] = {
+          type: "IN_LIST",
+          values: value.elements.map((element) => ({ type: "STRING", value: element.value }))
+        };
+      }
+    }
+    const simplified = simplifyBooleanWhere(resolved);
+    if (simplified["type"] === "SELECT" && isBooleanNode(simplified["where"], true)) {
+      simplified["where"] = null;
+    }
+    if ((simplified["type"] === "UPDATE" || simplified["type"] === "DELETE" || simplified["type"] === "REORDER") && isBooleanNode(simplified["where"], true)) {
+      throw new Error("ArgumentError: empty-array simplification makes the target WHERE always true; use an explicit safe target condition.");
+    }
+    return simplified;
   }
   return node;
+}
+function isBooleanNode(value, expected) {
+  return value !== null && typeof value === "object" && value.type === "BOOLEAN" && (expected === void 0 || value.value === expected);
+}
+function simplifyBooleanWhere(obj) {
+  if (obj["type"] === "NOT" && isBooleanNode(obj["expr"])) {
+    return { type: "BOOLEAN", value: !obj["expr"].value };
+  }
+  if (obj["type"] === "GROUP" && isBooleanNode(obj["expr"])) return obj["expr"];
+  if (obj["type"] === "LOGICAL") {
+    const left = obj["left"];
+    const right = obj["right"];
+    if (obj["op"] === "AND") {
+      if (isBooleanNode(left, false) || isBooleanNode(right, false)) return { type: "BOOLEAN", value: false };
+      if (isBooleanNode(left, true)) return right;
+      if (isBooleanNode(right, true)) return left;
+    } else if (obj["op"] === "OR") {
+      if (isBooleanNode(left, true) || isBooleanNode(right, true)) return { type: "BOOLEAN", value: true };
+      if (isBooleanNode(left, false)) return right;
+      if (isBooleanNode(right, false)) return left;
+    }
+  }
+  return obj;
 }
 function findVariableRef(node) {
   if (Array.isArray(node)) {
@@ -39218,7 +39585,7 @@ function findVariableRef(node) {
   }
   if (node !== null && typeof node === "object") {
     const obj = node;
-    if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") return obj["name"];
+    if ((obj["type"] === "VARIABLE" || obj["type"] === "VARIABLE_COL" || obj["type"] === "VARIABLE_IN_LIST") && typeof obj["name"] === "string") return obj["name"];
     for (const value of Object.values(obj)) {
       const found = findVariableRef(value);
       if (found !== null) return found;
@@ -39461,6 +39828,7 @@ async function assertDmlWhereCapability(stmt, client, cacheContext) {
   if (stmt.subtableCode || stmt.type === "UPDATE" && stmt.from != null) return;
   const fields = whereNeedsFieldMetadata(stmt.where) ? await getFieldsCached(stmt.appId, client, cacheContext) : [];
   const byCode = new Map(fields.map((field) => [field.code, field]));
+  if (stmt.where.type === "BOOLEAN" && stmt.where.value === false) return;
   const result = classifyWhereCapability(stmt.where, (field) => {
     if (field.field === "$id") return resolveFieldSemantics({ fieldType: "__ID__" });
     const info = byCode.get(field.field);
@@ -39533,6 +39901,9 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
   }
   return result;
 }
+function isConstantFalseWhere(where) {
+  return where?.type === "BOOLEAN" && where.value === false;
+}
 function isNoFromSelect(stmt) {
   return stmt.from.appId === 0 && stmt.from.cteName === NO_FROM_CTE_NAME;
 }
@@ -39564,6 +39935,8 @@ function stringFuncHasFieldRef(expr) {
 function validateNoFromColumns(stmt) {
   for (const col of stmt.columns) {
     switch (col.type) {
+      case "VARIABLE_COL":
+        throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "LITERAL_COL":
         break;
       case "ARITH_COL":
@@ -39799,6 +40172,7 @@ function collectTypedInFieldRefs(expr, out) {
       return;
     case "NULL_CHECK":
     case "EXISTS":
+    case "BOOLEAN":
       return;
   }
 }
@@ -40261,7 +40635,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   validateKlikePushdownPlan(pushdownPlan);
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
-  const mainFetch = fetchTableRecordsForFullScan(
+  const constantFalse = isConstantFalseWhere(stmt.where);
+  const mainFetch = constantFalse ? Promise.resolve([]) : fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
     client,
@@ -40276,6 +40651,10 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   const parallelJoins = [];
   const onOptJoins = [];
   for (const join of stmt.joins) {
+    if (constantFalse) {
+      parallelJoins.push({ join, promise: Promise.resolve([]) });
+      continue;
+    }
     const jCond = join.table.alias ? tableConditions.get(join.table.alias) ?? null : null;
     if (jCond !== null) {
       parallelJoins.push({
@@ -41673,6 +42052,26 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
   };
 }
 async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
+  if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
+    const fieldInfos2 = await loadWritableTopLevelDmlFields(
+      stmt.appId,
+      stmt.assignments.map((assignment) => assignment.field),
+      client,
+      cacheContext
+    );
+    await loadNumberPrecisionForTargets(
+      stmt.appId,
+      stmt.assignments.map((assignment) => assignment.field),
+      fieldInfos2,
+      client,
+      cacheContext
+    );
+    const fieldTypes2 = await getFieldTypeMap(stmt.appId, client, cacheContext);
+    assertUpdateCheckRefs(stmt, fieldTypes2);
+    assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes2, stmt.appId));
+    await assertDmlWhereCapability(stmt, client, cacheContext);
+    return { type: "UPDATE", updatedCount: 0 };
+  }
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext, tempTables);
   if (stmt.subtableCode) {
     await assertDmlWhereCapability(stmt, client, cacheContext);
@@ -41693,6 +42092,7 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
     cacheContext
   );
   await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "UPDATE", updatedCount: 0 };
   if (stmt.from != null) {
     return executeUpdateFrom(stmt, stmt.from, client, options, cacheContext, tempTables);
   }
@@ -41774,6 +42174,7 @@ function collectUpdateFromTargetFields(stmt) {
 }
 async function executeDelete(stmt, client, options, cacheContext) {
   await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "DELETE", deletedCount: 0 };
   if (stmt.subtableCode) {
     return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
@@ -42156,6 +42557,7 @@ async function executeReorder(stmt, client, options, cacheContext) {
     cacheContext
   );
   const reorderFields = await getFieldsCached(stmt.appId, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) return { type: "REORDER", reorderedParentCount: 0 };
   const reorderSemanticsByCode = new Map(reorderFields.map((field) => [
     field.code,
     field.semantics ?? resolveFieldSemantics(field)
@@ -42382,6 +42784,8 @@ function collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCa
       }));
       break;
     }
+    case "BOOLEAN":
+      break;
   }
 }
 async function resolveSetSubqueries(assignments, client, options, cacheContext) {
@@ -42419,9 +42823,11 @@ async function resolveScalarColumns(columns, client, options, cacheContext, cteC
   pending.forEach(([i], idx) => cache.set(i, values[idx]));
   return cache;
 }
+var validateExplainInfo = /* @__PURE__ */ new WeakMap();
 async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords2 = 1e4) {
   const fieldApps = /* @__PURE__ */ new Set();
   const processStatusApps = /* @__PURE__ */ new Set();
+  const numberPrecisionApps = /* @__PURE__ */ new Set();
   const tracedClient = {
     ...client,
     getFields: async (appId) => {
@@ -42431,6 +42837,10 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
     getProcessStatuses: async (appId) => {
       processStatusApps.add(appId);
       return client.getProcessStatuses(appId);
+    },
+    getNumberPrecision: async (appId) => {
+      numberPrecisionApps.add(appId);
+      return client.getNumberPrecision(appId);
     }
   };
   const capabilities = /* @__PURE__ */ new Map();
@@ -42479,6 +42889,51 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
           }));
         }
       }
+    } else if (typed["type"] === "VALIDATE") {
+      const validate = node;
+      fieldApps.add(validate.appId);
+      const fields = await getFieldsCached(validate.appId, tracedClient, cacheContext);
+      const infoByCode = new Map(fields.map((field) => [field.code, field]));
+      const targets = resolveExistingValidationTargets(validate, fields);
+      const checks = collectCheckFieldRefs(validate.checkGroups ?? []);
+      const whereFields = collectValidateWhereFields(validate.where);
+      for (const ref of checks) {
+        if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+          throw customCheckParseError(`CHECK \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${ref.field} \u306F APP${validate.appId} \u306B\u5B58\u5728\u3057\u307E\u305B\u3093`);
+        }
+      }
+      for (const field of whereFields) {
+        if (field !== "$id" && !infoByCode.has(field)) {
+          throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${validate.appId}.`);
+        }
+      }
+      const types = new Map(fields.map((field) => [field.code, field.fieldType]));
+      types.set("$id", "RECORD_NUMBER");
+      assertCheckComparisonTypes(validate, types);
+      const capability = classifyWhereCapability(validate.where, (field) => field.field === "$id" ? resolveFieldSemantics({ fieldType: "__ID__" }) : infoByCode.get(field.field)?.semantics ?? (infoByCode.has(field.field) ? resolveFieldSemantics(infoByCode.get(field.field)) : void 0));
+      if (capability.capability === "UNSUPPORTED") {
+        throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
+      }
+      const fieldTypes = new Map(fields.map((field) => [field.code, field.fieldType]));
+      const fieldOptions = new Map(fields.flatMap((field) => field.optionOrder ? [[field.code, new Set(Object.keys(field.optionOrder))]] : []));
+      const prefilter = validate.where === null ? null : capability.capability === "EXACT_PUSHDOWN" ? validate.where : extractSafePushdownLeaves(validate.where, {
+        allowUnqualifiedFields: true,
+        fieldTypes,
+        fieldOptions,
+        allowKlike: false
+      });
+      const needsPrecision = targets.some((field) => field.fieldType === "NUMBER");
+      if (needsPrecision) {
+        numberPrecisionApps.add(validate.appId);
+        await getNumberPrecisionCached(validate.appId, tracedClient, cacheContext);
+      }
+      validateExplainInfo.set(validate, {
+        targetFields: targets.map((field) => field.code),
+        fetchFields: [.../* @__PURE__ */ new Set(["$id", ...targets.map((field) => field.code), ...whereFields, ...checks.map((ref) => ref.field)])],
+        capability,
+        prefilter,
+        numberPrecision: needsPrecision
+      });
     } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
       fieldApps.add(node.appId);
       await assertDmlWhereCapability(
@@ -42509,12 +42964,13 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
       }));
     }
   }
-  return { capabilities, orderPlans, fieldApps, processStatusApps };
+  return { capabilities, orderPlans, fieldApps, processStatusApps, numberPrecisionApps };
 }
 function explainMetadataLines(analysis) {
   return [
     ...[...analysis.fieldApps].sort((a, b) => a - b).map((appId) => `  metadata API: form definition APP${appId}`),
-    ...[...analysis.processStatusApps].sort((a, b) => a - b).map((appId) => `  metadata API: process status APP${appId}`)
+    ...[...analysis.processStatusApps].sort((a, b) => a - b).map((appId) => `  metadata API: process status APP${appId}`),
+    ...[...analysis.numberPrecisionApps].sort((a, b) => a - b).map((appId) => `  metadata API: number precision APP${appId}`)
   ];
 }
 async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2) {
@@ -42525,7 +42981,7 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
   const plans = [];
   for (let i = 0; i < statements.length; i++) {
     const stmt = statements[i];
-    const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveVariableRefs(stmt.expr, variables) } : stmt : resolveVariableRefs(stmt, variables);
+    const planStmt = stmt.type === "SET_VARIABLE" ? stmt.expr.type === "SCALAR_SUBQUERY" ? { ...stmt, expr: resolveBatchVariableReferences(stmt.expr, variables) } : stmt : resolveBatchVariableReferences(stmt, variables);
     validateKlikeStatement(planStmt);
     const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords2);
     const statementPlan = addCursorConcurrency(buildBatchStatementPlan(
@@ -42541,7 +42997,7 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
       plan: statementPlan.length === 0 ? metadataPlan : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)]
     });
     if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
-      variables.set(stmt.name, { type: "string", value: `@${stmt.name}` });
+      variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) } : { type: "string", value: `@${stmt.name}` });
     }
   }
   return { statementCount: statements.length, statements: plans };
@@ -42676,7 +43132,29 @@ function buildExplainPlan(query, label, capabilities, orderPlans) {
   if (query.type === "UPDATE") return buildUpdatePlan(query, label, capabilities, orderPlans);
   if (query.type === "DELETE") return buildDeletePlan(query, label);
   if (query.type === "REORDER") return buildReorderPlan(query, label);
+  if (query.type === "VALIDATE") return buildValidatePlan(query, label);
   return buildSelectPlan(query, label, capabilities, orderPlans);
+}
+function buildValidatePlan(stmt, label) {
+  const info = validateExplainInfo.get(stmt);
+  const lines = [];
+  if (label) lines.push(label);
+  lines.push(`VALIDATE APP${stmt.appId}`);
+  lines.push("  operation:     read-only existing-record constraint audit (writesKintone=false)");
+  lines.push("  fetch API:     GET records via offset + $id keyset paging (Cursor API unused)");
+  lines.push("  complete input: required (onLimit=truncate disabled)");
+  if (!info) {
+    lines.push("  metadata:      form definition required; number precision required for NUMBER targets");
+    return lines;
+  }
+  lines.push(`  WHERE capability: ${info.capability.capability}`);
+  lines.push(`  kintone query: ${info.prefilter === null ? "(\u5168\u4EF6\u53D6\u5F97)" : whereToKintone(info.prefilter)}`);
+  lines.push(`  audit fields:  ${info.targetFields.length === 0 ? "(\u306A\u3057)" : info.targetFields.join(", ")}`);
+  lines.push(`  fetch fields:  ${info.fetchFields.join(", ")}`);
+  lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
+  lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
+  lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");
+  return lines;
 }
 function buildSelectPlan(stmt, label, capabilities, orderPlans) {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
@@ -42689,6 +43167,12 @@ function buildSelectPlan(stmt, label, capabilities, orderPlans) {
   const lines = [];
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  if (isConstantFalseWhere(stmt.where)) {
+    lines.push("  predicate:     constant false");
+    lines.push("  records API access: none");
+    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
+    return lines;
+  }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
     if (orderPlan.reasonCodes.length > 0) lines.push(`  order reason:  ${orderPlan.reasonCodes.join(", ")}`);
@@ -42836,6 +43320,8 @@ function collectSubqueryPlans(stmt, capabilities, orderPlans) {
         break;
       case "NULL_CHECK":
         break;
+      case "BOOLEAN":
+        break;
     }
   };
   visitWhere(stmt.where);
@@ -42888,7 +43374,7 @@ function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   }
-  lines.push(`  api:           GET /k/v1/records.json \u2192 PUT /k/v1/records.json`);
+  lines.push(isConstantFalseWhere(stmt.where) ? "  api:           metadata validation only (records API access: none)" : `  api:           GET /k/v1/records.json \u2192 PUT /k/v1/records.json`);
   const setTypes = [];
   if (isArith) setTypes.push("\u7B97\u8853 SET\uFF08\u73FE\u5728\u5024\u3092\u53D6\u5F97\u3057\u3066\u8A08\u7B97\uFF09");
   if (isStringFunc) setTypes.push("\u6587\u5B57\u5217\u95A2\u6570 SET\uFF08\u73FE\u5728\u5024\u3092\u53D6\u5F97\u3057\u3066\u8A55\u4FA1\uFF09");
@@ -42919,7 +43405,7 @@ function buildDeletePlan(stmt, label) {
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
-  lines.push(`  api:           GET /k/v1/records.json \u2192 DELETE /k/v1/records.json`);
+  lines.push(isConstantFalseWhere(stmt.where) ? "  api:           metadata validation only (records API access: none)" : `  api:           GET /k/v1/records.json \u2192 DELETE /k/v1/records.json`);
   return lines;
 }
 function buildUpsertPlan(stmt, label) {
@@ -42959,7 +43445,7 @@ function buildReorderPlan(stmt, label) {
     `  table:  ${target}`,
     `  scope:  ${scope}`,
     `  by:     ${byStr}`,
-    `  api:    GET /k/v1/records.json\uFF08\u884C ID \u53D6\u5F97\uFF09\u2192 PUT /k/v1/records.json\uFF08id \u914D\u5217\u306E\u307F\u9001\u4FE1\uFF09`
+    isConstantFalseWhere(stmt.where) ? `  api:    metadata validation only (records API access: none)` : `  api:    GET /k/v1/records.json\uFF08\u884C ID \u53D6\u5F97\uFF09\u2192 PUT /k/v1/records.json\uFF08id \u914D\u5217\u306E\u307F\u9001\u4FE1\uFF09`
   ];
   if (!stmt.all && stmt.where) {
     lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where)}`);
@@ -42971,6 +43457,7 @@ function formatOrderByItem(item) {
   return `${key} ${item.direction}`;
 }
 function safeWhereToKintone(where) {
+  if (where.type === "BOOLEAN") return where.value ? "TRUE" : "FALSE (constant)";
   try {
     return whereToKintone(where);
   } catch {
@@ -45210,7 +45697,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
-        onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
+        onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
         timeout: input.timeout,
         tempTableMaxRows: input.tempTableMaxRows,
         cursorMaxActive: input.cursorMaxActive
@@ -45257,7 +45744,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       profile: input.profile,
       maxRecords: input.maxRecords,
       fetchParallel: input.fetchParallel,
-      onLimit: validation.containsValidationOnly ? "error" : input.onLimit,
+      onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
       timeout: input.timeout,
       cursorMaxActive: input.cursorMaxActive
     });
@@ -45559,7 +46046,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
 var profile = external_exports.string().min(1).describe("kintone connection profile name from ksql.config.json (default: the server's default profile).").optional();
 var maxRecords = external_exports.number().int().positive().describe("Maximum records fetched per SELECT (default 500).").optional();
 var fetchParallel = external_exports.number().int().min(1).max(10).describe("Number of parallel kintone record-fetch requests (1-10).").optional();
-var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always overrides 'truncate' to 'error'.").optional();
+var onLimit = external_exports.enum(["error", "truncate"]).describe("Behavior when maxRecords is exceeded: 'error' rejects, 'truncate' returns the first maxRecords rows (default 'error'). Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. Leading VALIDATE and DML VALIDATE ONLY always override 'truncate' to 'error'.").optional();
 var tempTableMaxRows = external_exports.number().int().positive().describe("Per-temp-table cap on materialized rows for CREATE TEMP TABLE ... AS SELECT (default 10000). Overflow always errors \u2014 'truncate' never applies to temp tables, so downstream statements never see silently truncated data. Raising this increases memory use (up to 16 temp tables per batch); prefer narrowing the SELECT with WHERE.").optional();
 var timeout = external_exports.number().int().positive().describe("Request timeout in milliseconds. For multi-statement batches this also acts as the total batch deadline.").optional();
 var cursorMaxActive = external_exports.number().int().min(1).max(5).describe("Maximum active Cursor API handles per kintone host in this process (1-5, default 2). Later calls update the host limit; lowering it keeps existing cursors and delays new ones until active usage falls below the new limit. Create/Get are never automatically retried; capacity waits up to 30 seconds.").optional();
@@ -45688,7 +46175,7 @@ Options:
   -h, --help         Show help
 `);
 }
-var SERVER_VERSION = true ? "3.4.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.5.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -45710,7 +46197,7 @@ function createServer(args) {
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE ONLY always treats onLimit=truncate as error. VALIDATE ONLY performs local Tier-0 validation with zero write API calls; NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, leading VALIDATE app existing-record audits, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE and VALIDATE ONLY always treat onLimit=truncate as error and perform zero write API calls. Existing-record VALIDATE applies built-in form constraints plus optional CHECK groups and can materialize its fixed five diagnostic columns with INTO #err in a batch. NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
