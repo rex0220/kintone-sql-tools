@@ -18,6 +18,26 @@ export interface FormFieldProperty {
   lookup?: { fieldMappings?: Array<{ field?: string }> };
 }
 
+export interface ScopedSubtableFieldIndex {
+  readonly table: KintoneFieldInfo;
+  readonly children: ReadonlyMap<string, KintoneFieldInfo>;
+}
+
+/** Keeps child ownership, which flattenFormFieldProperties intentionally loses. */
+export function buildScopedSubtableFieldIndex(
+  properties: Record<string, FormFieldProperty>
+): ReadonlyMap<string, ScopedSubtableFieldIndex> {
+  const lookupCopyFields = collectLookupCopyFields(properties);
+  const result = new Map<string, ScopedSubtableFieldIndex>();
+  for (const property of Object.values(properties)) {
+    if (property.type !== "SUBTABLE") continue;
+    const table = flattenFields({ [property.code]: { ...property, fields: undefined } }, lookupCopyFields)[0];
+    const children = flattenFields(property.fields ?? {}, lookupCopyFields, true);
+    result.set(property.code, { table, children: new Map(children.map((child) => [child.code, child])) });
+  }
+  return result;
+}
+
 /** TABLE.fields を含め、フォームフィールド定義を再帰的にフラット化する。 */
 export function flattenFormFieldProperties(
   properties: Record<string, FormFieldProperty>

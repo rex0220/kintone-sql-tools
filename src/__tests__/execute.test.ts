@@ -354,6 +354,17 @@ test("IMPORT CSV INSERT はnamed sourceを遅延loadして位置対応する", a
   ]);
 });
 
+test("Phase 5 subtable AST never falls through to the flat mutation path", async () => {
+  const client = makeClient({ records: [], postIds: ["1"] });
+  const load = jest.fn(async () => ({ bytes: new TextEncoder().encode('[{"code":"A","Lines":[]}]') }));
+  await expect(execute("IMPORT INTO APP100 (code, Lines(name)) FROM JSON src", client, {
+    enableImport: true, importSource: () => ({ load }), cacheContext: "import-subtable-fail-closed",
+  })).rejects.toThrow("dedicated Phase 5 preflight/confirm path");
+  expect(load).not.toHaveBeenCalled();
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("IMPORT CSV BY NAME はヘッダ順を INTO 順へ写像し NUMBER 字面と5型LFを保持する", async () => {
   const client = makeClient({ records: [], postIds: ["1"] });
   client.getFields = async () => [
