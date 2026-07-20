@@ -23,9 +23,10 @@ import type {
   DmlValidationResult,
   KintoneAppInfo,
   SelectResult,
+  Statement,
 } from "../core";
 import { createKintoneClient } from "./kintoneClient";
-import { renderResult, renderError, renderLoading } from "./renderResult";
+import { formatValidateIntoStats, renderBatchResult, renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
@@ -1937,11 +1938,11 @@ async function batchPlansToSelectResult(
   return { type: "SELECT", columns: ["plan"], rows, rowCount: rows.length };
 }
 
-/** バッチ実行の表示用結果（result = 最終結果セット、note = 情報行、dmlSummary = success した DML の影響件数） */
+/** バッチ実行の表示用結果（result = 最終結果セット、note = 情報行、statementSummary = 文順サマリ） */
 interface BatchRunOutcome {
   result: SelectResult | DmlValidationResult | null;
   note: string | null;
-  dmlSummary: string[];
+  statementSummary: string[];
   /** 確認ダイアログでキャンセルされた（履歴保存をスキップし note を情報表示する） */
   cancelled: boolean;
 }
@@ -1974,12 +1975,18 @@ async function batchConfirmDialog(
   );
 }
 
-/** success した DML 文の影響件数サマリ（"[2] UPSERT_SELECT: inserted=1 updated=1" 等） */
-function buildDmlSummary(batch: BatchExecuteResult): string[] {
+/** success した文の表示サマリ（DML 影響件数と VALIDATE INTO 統計） */
+function buildBatchStatementSummary(batch: BatchExecuteResult, statements: readonly Statement[]): string[] {
   const lines: string[] = [];
   for (const s of batch.statements) {
     if (s.status !== "success" || !s.result) continue;
     const r = s.result;
+    const statement = statements[s.index];
+    if (statement?.type === "VALIDATE" && statement.errorTable && r.type === "SELECT") {
+      const summary = formatValidateIntoStats(r, statement.errorTable);
+      if (summary) lines.push(summary);
+      continue;
+    }
     let detail: string | null = null;
     if (r.type === "INSERT") detail = `inserted=${r.insertedCount}`;
     else if (r.type === "UPDATE") detail = `updated=${r.updatedCount}`;
@@ -2018,7 +2025,7 @@ async function runBatchSql(
     return {
       result: await batchPlansToSelectResult(sql, client, options.maxRecords),
       note: null,
-      dmlSummary: [],
+      statementSummary: [],
       cancelled: false,
     };
   }
@@ -2037,7 +2044,7 @@ async function runBatchSql(
       return {
         result: null,
         note: `キャンセルしました（文 [${s.index + 1}/${analysis.statementCount}] の実行前確認。バッチは実行されていません）`,
-        dmlSummary: [],
+        statementSummary: [],
         cancelled: true,
       };
     }
@@ -2062,7 +2069,7 @@ async function runBatchSql(
     importSource: selectedImportSource?.resolver,
   });
 
-  const dmlSummary = buildDmlSummary(batch);
+  const statementSummary = buildBatchStatementSummary(batch, statements);
 
   if (!batch.ok) {
     const failed = batch.statements.find((s) => s.status === "error");
@@ -2072,7 +2079,7 @@ async function runBatchSql(
       const note = failed.index === 0
         ? `キャンセルしました（文 ${pos} で中断。実行された文はありません）`
         : `キャンセルしました（文 ${pos} で中断。[${failed.index}] までの実行結果は反映済みです）`;
-      return { result: null, note, dmlSummary, cancelled: true };
+      return { result: null, note, statementSummary, cancelled: true };
     }
     throw new Error(
       failed?.error
@@ -2084,20 +2091,24 @@ async function runBatchSql(
   // 最後に結果セットを返した文（SELECT / VALIDATION）のみ表示する。
   // 途中の SELECT 結果は表示しない（最終結果のみ、が本 UI の契約）
   const lastResultSet = [...batch.statements].reverse().find(
-    (s) => s.result?.type === "SELECT" || s.result?.type === "VALIDATION"
+    (s) => {
+      const statement = statements[s.index];
+      const materializedValidate = statement?.type === "VALIDATE" && !!statement.errorTable;
+      return !materializedValidate && (s.result?.type === "SELECT" || s.result?.type === "VALIDATION");
+    }
   );
   if (lastResultSet?.result?.type === "SELECT" || lastResultSet?.result?.type === "VALIDATION") {
     return {
       result: lastResultSet.result,
-      note: dmlSummary.length > 0 ? `バッチ ${batch.statementCount} 文を実行しました。` : null,
-      dmlSummary,
+      note: statementSummary.some((line) => line.startsWith("[")) ? `バッチ ${batch.statementCount} 文を実行しました。` : null,
+      statementSummary,
       cancelled: false,
     };
   }
   return {
     result: null,
     note: `バッチ ${batch.statementCount} 文を実行しました（結果セットなし）。`,
-    dmlSummary,
+    statementSummary,
     cancelled: false,
   };
 }
@@ -2154,24 +2165,21 @@ async function runSql(
     // 複文バッチ: 最終結果のみ表示（仕様 §8.4）。DML を含むバッチは
     // 文ごとの確認ダイアログ付きで実行（v1.9.0）
     if (isMultiStatementSql(sql)) {
-      const { result: batchResult, note, dmlSummary, cancelled } = await runBatchSql(sql, client, {
+      const { result: batchResult, note, statementSummary, cancelled } = await runBatchSql(sql, client, {
         maxRecords: runtimeFetch.maxRecords,
         onLimitReached: runtimeFetch.onLimitReached,
         tempTableMaxRows: runtimeFetch.tempTableMaxRows,
       }, batchExplainOnly);
       // キャンセル時は単文 DML キャンセルと同様、履歴に保存しない
       if (!skipHistory && !cancelled) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows);
-      const infoParts = [note, ...dmlSummary].filter((s): s is string => !!s);
-      const infoHtml = infoParts.length > 0
-        ? `<div class="ksql-info">${infoParts.join("<br>")}</div>`
-        : "";
+      const infoParts = [note, ...statementSummary].filter((s): s is string => !!s);
       if (batchResult) {
         lastResult = batchResult;
-        resultArea.innerHTML = infoHtml + renderResult(batchResult, resolvedOptions);
+        resultArea.innerHTML = renderBatchResult(batchResult, infoParts, resolvedOptions);
         bindResultTableFeatures(resultArea);
         return batchResult;
       }
-      resultArea.innerHTML = infoHtml || `<div class="ksql-info"></div>`;
+      resultArea.innerHTML = renderBatchResult(null, infoParts) || `<div class="ksql-info"></div>`;
       return null;
     }
 
