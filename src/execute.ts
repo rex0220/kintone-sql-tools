@@ -18,7 +18,7 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
-import { assertApplyExecutionScope, assertApplyScope } from "./core/applyPatchScope";
+import { assertApplyExecutionScope, assertApplyScope, isSinglePositiveRecordIdWhere } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
   collectApplySnapshotFields,
@@ -27,6 +27,7 @@ import {
   normalizeApplyPatchPlan,
   resolveApplyPatchMetadata,
 } from "./core/applyPatchPlanner";
+import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
 import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
 import {
   fieldSemanticsEqual,
@@ -119,6 +120,7 @@ import {
 } from "./core/existingRecordValidation";
 import {
   buildPostImageFieldIndex,
+  POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
   postImageNeedsNumberPrecision,
   validatePostImage,
 } from "./core/postImageValidation";
@@ -384,7 +386,7 @@ export interface DmlValidationResult {
   /** B44 APPLY safety-guard diagnostics. Absent for ordinary VALIDATE ONLY results. */
   guards?: ApplyGuardDetail;
   /** B44 REMOVE totals. Present for APPLY VALIDATE ONLY. */
-  deletedRows?: { readonly total: number; readonly parentRows: 0 | 1 };
+  deletedRows?: { readonly total: number; readonly parentRows: number };
 }
 
 export interface ApplyValidationDetail {
@@ -762,7 +764,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase10a", stmt);
-  assertApplyExecutionScope("phase10a", stmt);
+  assertApplyExecutionScope("phase10b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1364,7 +1366,7 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyScope("phase10a", resolvedStmt);
-  assertApplyExecutionScope("phase10a", resolvedStmt);
+  assertApplyExecutionScope("phase10b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5628,6 +5630,9 @@ async function executeApplyPatchUpdate(
   if (!stmt.validateOnly && options.allowApplyMutation !== true) {
     throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   }
+  if (!isSinglePositiveRecordIdWhere(stmt.where)) {
+    return executeMultipleParentApplyPreflight(stmt, client, options, cacheContext, statementNumber);
+  }
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
   const fields = collectApplySnapshotFields(stmt, fieldInfos);
@@ -5752,7 +5757,134 @@ async function executeApplyPatchUpdate(
   return { type: "UPDATE", updatedCount: plan.parentRows };
 }
 
-/** APPLY 二重ガードの既定値。親は単一 $id で実質常に1。子は1年分の日次データ（366行）を
+async function executeMultipleParentApplyPreflight(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(
+    options.dmlMaxSubtableRows,
+    "dmlMaxSubtableRows",
+    DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  );
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const baseQuery = updateToGetQuery(stmt).query;
+  const detectionLimit = dmlMaxRows + 1;
+  const snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
+    pageSize: Math.min(500, detectionLimit),
+    parallel: options.fetchParallel ?? 1,
+    maxRecords: detectionLimit,
+    stopAfter: detectionLimit,
+    onLimit: "error",
+  });
+  if (!stmt.validateOnly && snapshots.length > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${snapshots.length}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+
+  const prepared = await prepareApplyPatchWrite({
+    statement: stmt,
+    snapshots,
+    fieldInfos,
+    metadata,
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
+
+  // Phase 10c connects executePrepared(prepared). Phase 10b deliberately stops here.
+  throw new Error("UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected");
+}
+
+function materializePreparedApplyValidation(
+  stmt: UpdateStatement,
+  prepared: PreparedApplyWrite,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  type OperationAccumulator = {
+    kind: "PATCH" | "APPEND" | "REMOVE";
+    matchedRows?: number;
+    changedRows?: number;
+    addedRows?: number;
+    removedRows?: number;
+  };
+  type TableAccumulator = {
+    field: string;
+    operations: OperationAccumulator[];
+    changedSubtableRows: number;
+    deletedRows: number;
+  };
+  const validations = prepared.validations;
+  const errors = validations.flatMap((validation) => validation.errors);
+  const invalidRows = validations.reduce((sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0), 0);
+  const columns = validations[0]?.columns
+    ? [...validations[0].columns]
+    : [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.assignments.map((assignment) => assignment.field)).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const tableDetails = new Map<string, TableAccumulator>();
+  for (const plan of prepared.plans) {
+    for (const table of plan.tables) {
+      const existing = tableDetails.get(table.table);
+      const detail: TableAccumulator = existing ?? {
+        field: table.table,
+        operations: table.operations.map((operation): OperationAccumulator => ({ ...operation })),
+        changedSubtableRows: 0,
+        deletedRows: 0,
+      };
+      if (existing) {
+        table.operations.forEach((operation, index) => {
+          const target = detail.operations[index];
+          if (!target || target.kind !== operation.kind) {
+            throw new Error(`InternalError: APPLY operation shape differs between parents for ${table.table}.`);
+          }
+          if (operation.kind === "PATCH") {
+            target.matchedRows = (target.matchedRows ?? 0) + operation.matchedRows;
+            target.changedRows = (target.changedRows ?? 0) + operation.changedRows;
+          } else if (operation.kind === "APPEND") {
+            target.addedRows = (target.addedRows ?? 0) + operation.addedRows;
+          } else {
+            target.removedRows = (target.removedRows ?? 0) + operation.removedRows;
+          }
+        });
+      }
+      detail.changedSubtableRows += table.changedSubtableRows;
+      detail.deletedRows += table.deletedRows;
+      tableDetails.set(table.table, detail);
+    }
+  }
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "UPDATE",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: [...tableDetails.values()],
+    guards: prepared.guards,
+    deletedRows: {
+      total: prepared.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0),
+        0
+      ),
+      parentRows: prepared.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
+    },
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
+}
+
+/** APPLY 二重ガードの既定値。親は最大100件、子は1年分の日次データ（366行）を
  *  1文で扱えるよう 500 とする（kintone 制約由来ではなく、修復用途を賄う保守的既定）。 */
 export const DEFAULT_APPLY_MAX_ROWS = 100;
 export const DEFAULT_APPLY_MAX_SUBTABLE_ROWS = 500;

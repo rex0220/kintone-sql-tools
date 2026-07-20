@@ -6,7 +6,7 @@ import type {
 } from "../types/ast";
 
 export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a";
-export type ApplyExecutionPhase = "phase10a";
+export type ApplyExecutionPhase = "phase10a" | "phase10b";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -64,6 +64,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   readonly multipleParents: boolean;
 }>> = Object.freeze({
   phase10a: Object.freeze({ multipleParents: false }),
+  phase10b: Object.freeze({ multipleParents: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -173,7 +174,7 @@ export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement:
   if (statement.type !== "UPDATE" || !statement.applyBlocks?.length) return;
   const capabilities = APPLY_EXECUTION_CAPABILITIES[phase];
   if (!capabilities.multipleParents && !isSinglePositiveRecordIdWhere(statement.where)) {
-    throw new Error("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
+    throw new Error(`UnsupportedError: APPLY ${phase === "phase10a" ? "Phase 10a" : "Phase 10b"} execution does not support multiple-parent APPLY`);
   }
 }
 

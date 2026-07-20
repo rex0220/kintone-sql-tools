@@ -78,7 +78,8 @@ export function validatePostImage(
   record: Readonly<Record<string, { readonly value: unknown }>>,
   fieldIndex: PostImageFieldIndex,
   numberPrecision: NumberPrecision | undefined,
-  statementNumber: number
+  statementNumber: number,
+  parentRowNumber = 1
 ): PostImageValidationResult {
   const normalizedRecord = cloneRecord(record);
   const errors: ProcessRow[] = [];
@@ -92,14 +93,14 @@ export function validatePostImage(
     validation: { code: string; message: string },
     locator?: { subtable: string; subrow: number; subrowId: string }
   ): void => {
-    invalidRowNumbers.add(1);
+    invalidRowNumbers.add(parentRowNumber);
     const row: ProcessRow = {};
     for (const code of fieldIndex.payloadFields) {
       row[code] = code === "$id" ? parentId : renderValidationValue(record[code]?.value);
     }
     row["$err_statement"] = String(statementNumber);
     row["$err_operation"] = "UPDATE";
-    row["$err_row"] = "1";
+    row["$err_row"] = String(parentRowNumber);
     row["$err_field"] = field.code;
     row["$err_code"] = validation.code;
     row["$err_message"] = validation.message;

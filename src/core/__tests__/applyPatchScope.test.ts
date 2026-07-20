@@ -153,6 +153,7 @@ describe("Phase 10a syntax/execution capabilities", () => {
     expect(() => assertApplyScope("phase10a", stmt)).not.toThrow();
     expect(() => assertApplyExecutionScope("phase10a", stmt))
       .toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
+    expect(() => assertApplyExecutionScope("phase10b", stmt)).not.toThrow();
   });
 
   test.each([

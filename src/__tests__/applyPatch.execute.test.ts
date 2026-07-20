@@ -61,19 +61,25 @@ test("allowApplyMutation なしの mutation は API 前に fail-closed", async (
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
-test("Phase 10a: 複数親APPLYはexecuteでrecords/mutation API 0のままexecution gate拒否", async () => {
+test("Phase 10b: 複数親APPLY mutationは全GET/preflight後・write直前で拒否", async () => {
   const mock = makeClient([parent(), parent("9")]);
   const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態 IN ('open','hold') "
     + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
   await expect(execute(multipleParentSql, mock.client, {
     cacheContext: "apply-phase10a-api0", allowApplyMutation: true,
-  })).rejects.toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
-  for (const api of [mock.getFields, mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+  })).rejects.toThrow("UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected");
+  expect(mock.getFields).toHaveBeenCalledTimes(1);
+  expect(mock.getRecords).toHaveBeenCalledWith({
+    app: 4221,
+    query: '状態 in ("open","hold") order by $id asc limit 101 offset 0',
+    fields: ["$id", "$revision", "親", "親数値", "作成者", "テーブル", "別表"],
+  });
+  for (const api of [mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
 });
 
-test("Phase 10a: 複数親APPLYはexecuteBatchでもAPI 0でerror envelope化し後続をfail-fast", async () => {
+test("Phase 10b: 複数親APPLYはexecuteBatchでもGET後にerror envelope化しwrite 0", async () => {
   const mock = makeClient([parent(), parent("9")]);
   const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態='open' "
     + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS); SELECT * FROM APP4221";
@@ -84,13 +90,113 @@ test("Phase 10a: 複数親APPLYはexecuteBatchでもAPI 0でerror envelope化し
     status: "error",
     error: {
       code: "UnsupportedError",
-      message: "UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY",
+      message: "UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected",
     },
   });
   expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
-  for (const api of [mock.getFields, mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  for (const api of [mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
+});
+
+test("Phase 10b: 複数親VALIDATE ONLYは全親のapply/guards/validationを集計しwrite 0", async () => {
+  const first = parent("8", 2);
+  const second = parent("9", 1);
+  const mock = makeClient([first, second]);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' "
+      + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase10b-validate", dmlMaxRows: 2, dmlMaxSubtableRows: 2 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    validatedRows: 2,
+    validRows: 2,
+    invalidRows: 0,
+    apply: [{
+      field: "テーブル",
+      operations: [{ kind: "PATCH", matchedRows: 3, changedRows: 3 }],
+      changedSubtableRows: 3,
+    }],
+    guards: { parentRows: 2, subtableRows: 3, wouldExceed: true },
+  });
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: '親 = "before" order by $id asc limit 3 offset 0',
+  }));
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 10b: 一般WHERE 0件は空prepared由来の成功診断、単一$id 0件は従来どおりerror", async () => {
+  const empty = makeClient([]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='missing' "
+      + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS) VALIDATE ONLY",
+    empty.client,
+    { cacheContext: "apply-phase10b-empty" }
+  )).resolves.toMatchObject({
+    type: "VALIDATION", validatedRows: 0, validRows: 0, invalidRows: 0,
+    guards: { parentRows: 0, subtableRows: 0, wouldExceed: false },
+  });
+  expect(empty.putRecords).not.toHaveBeenCalled();
+
+  const single = makeClient([]);
+  await expect(execute(sql, single.client, {
+    cacheContext: "apply-phase10b-single-empty", allowApplyMutation: true,
+  })).rejects.toThrow("ArgumentError: APPLY parent $id 8 does not exist");
+});
+
+test("Phase 10b: dmlMaxRows+1件で超過を確定しtruncateせずwrite 0", async () => {
+  const mock = makeClient(Array.from({ length: 101 }, (_, index) => parent(String(index + 1))));
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: "apply-phase10b-overflow", allowApplyMutation: true, dmlMaxRows: 100 }
+  )).rejects.toThrow("ArgumentError: APPLY parent rows (101) exceed dmlMaxRows (100)");
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: '親 = "before" order by $id asc limit 101 offset 0',
+  }));
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 10b: VALIDATE ONLYはdmlMaxRows+1親をtruncateせず全件診断しwouldExceedを返す", async () => {
+  const mock = makeClient(Array.from({ length: 101 }, (_, index) => parent(String(index + 1))));
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase10b-validate-overflow", dmlMaxRows: 100, dmlMaxSubtableRows: 101 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    validatedRows: 101,
+    validRows: 101,
+    guards: { parentRows: 101, subtableRows: 101, wouldExceed: true },
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 10b: 複数親post-image validationは親別に集計し$error rowを保持する", async () => {
+  const constrained = fieldInfos.map((field) => field.code === "親"
+    ? { ...field, minLength: "2" }
+    : field);
+  const mock = makeClient([parent("8"), parent("9")], constrained);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='' WHERE 親='before' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase10b-validation-errors", dmlMaxRows: 2 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 2, validRows: 0, invalidRows: 2, errorCount: 2,
+  });
+  if (result.type !== "VALIDATION") throw new Error("expected validation result");
+  expect(result.errors.map((error) => [error.$id, error.$err_row])).toEqual([["8", "1"], ["9", "2"]]);
+  expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
 test(
