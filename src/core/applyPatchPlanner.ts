@@ -3,9 +3,11 @@ import type { KintoneRecord, KintoneValue } from "../converter/dmlToKintone";
 import {
   evaluateSubtableAssignmentValue,
   evaluateUpdateAssignmentValue,
+  evalCaseWhenValue,
+  toKintoneValue,
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
-import type { FieldRef, PatchOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import type { AppendOperation, FieldRef, InsertRow, PatchOperation, UpdateStatement, WhereExpr } from "../types/ast";
 
 export interface ApplySnapshotRow {
   readonly id: string;
@@ -34,11 +36,9 @@ interface ApplyPatchTablePlanBase {
   readonly postImageRows: readonly ApplyPatchPostImageRow[];
 }
 
-export interface ApplyPatchOperationPlan {
-  readonly kind: "PATCH";
-  readonly matchedRows: number;
-  readonly changedRows: number;
-}
+export type ApplyPatchOperationPlan =
+  | { readonly kind: "PATCH"; readonly matchedRows: number; readonly changedRows: number }
+  | { readonly kind: "APPEND"; readonly addedRows: number };
 
 export interface ApplyPatchOnlyTablePlan extends ApplyPatchTablePlanBase {
   readonly payloadShape: "PATCH_ONLY";
@@ -67,8 +67,8 @@ export interface ApplyPatchPlan {
 }
 
 export interface ApplyPatchMetadata {
-  readonly targetTable: KintoneFieldInfo;
-  readonly targetChildren: ReadonlyMap<string, KintoneFieldInfo>;
+  readonly targetTables: ReadonlyMap<string, KintoneFieldInfo>;
+  readonly childrenByTable: ReadonlyMap<string, ReadonlyMap<string, KintoneFieldInfo>>;
   readonly fieldsByCode: ReadonlyMap<string, KintoneFieldInfo>;
 }
 
@@ -99,33 +99,48 @@ export function resolveApplyPatchMetadata(
   statement: UpdateStatement,
   fieldInfos: readonly KintoneFieldInfo[]
 ): ApplyPatchMetadata {
-  const block = statement.applyBlocks?.[0];
-  if (!block) return argument("APPLY block is missing.");
+  const blocks = statement.applyBlocks;
+  if (!blocks?.length) return argument("APPLY block is missing.");
   const fieldsByCode = new Map(fieldInfos.map((field) => [field.code, field]));
-  const targetTable = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
-  if (!targetTable || targetTable.fieldType !== "SUBTABLE") {
-    return argument(`APPLY target ${block.field} is not a SUBTABLE.`);
-  }
-  const targetChildren = new Map(
-    fieldInfos.filter((field) => field.inSubtable && field.subtableCode === block.field)
-      .map((field) => [field.code, field])
-  );
+  const targetTables = new Map<string, KintoneFieldInfo>();
+  const childrenByTable = new Map<string, ReadonlyMap<string, KintoneFieldInfo>>();
 
   for (const assignment of statement.assignments) {
     assertWritableAssignment(assignment.field, null, fieldsByCode);
     assertParentReferences(assignment.value, fieldsByCode);
   }
-  for (const operation of block.operations) {
-    if (operation.kind !== "PATCH") continue;
-    for (const assignment of operation.assignments) {
-      assertWritableAssignment(assignment.field, block.field, fieldsByCode, targetChildren);
-      assertChildReferences(assignment.value, block.field, fieldsByCode, targetChildren);
+  for (const block of blocks) {
+    if (targetTables.has(block.field)) argument(`APPLY has more than one block for table ${block.field}.`);
+    const targetTable = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
+    if (!targetTable || targetTable.fieldType !== "SUBTABLE") {
+      return argument(`APPLY target ${block.field} is not a SUBTABLE.`);
     }
-    if (operation.selector.kind === "WHERE") {
-      assertChildReferences(operation.selector.where, block.field, fieldsByCode, targetChildren);
+    const targetChildren = new Map(
+      fieldInfos.filter((field) => field.inSubtable && field.subtableCode === block.field)
+        .map((field) => [field.code, field])
+    );
+    targetTables.set(block.field, targetTable);
+    childrenByTable.set(block.field, targetChildren);
+    for (const operation of block.operations) {
+      if (operation.kind === "PATCH") {
+        for (const assignment of operation.assignments) {
+          assertWritableAssignment(assignment.field, block.field, fieldsByCode, targetChildren);
+          assertChildReferences(assignment.value, block.field, fieldsByCode, targetChildren);
+        }
+        if (operation.selector.kind === "WHERE") {
+          assertChildReferences(operation.selector.where, block.field, fieldsByCode, targetChildren);
+        }
+      } else if (operation.kind === "APPEND") {
+        const specified = new Set<string>();
+        for (const field of operation.fields) {
+          if (specified.has(field)) argument(`APPLY APPEND specifies child ${field} more than once.`);
+          specified.add(field);
+          assertWritableAssignment(field, block.field, fieldsByCode, targetChildren);
+        }
+      }
     }
   }
-  return { targetTable, targetChildren, fieldsByCode };
+  return { targetTables, childrenByTable, fieldsByCode };
 }
 
 function assertParentReferences(
@@ -190,7 +205,7 @@ export function collectApplySnapshotFields(
     if (info.inSubtable || info.fieldType === "FILE") continue;
     fields.add(info.code);
   }
-  fields.add(metadata.targetTable.code);
+  for (const table of metadata.targetTables.values()) fields.add(table.code);
   for (const assignment of statement.assignments) {
     visitFieldReferences(assignment.value, (code) => {
       const info = metadata.fieldsByCode.get(code);
@@ -215,59 +230,87 @@ export function flattenSubtableSnapshotRow(
 export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatchPlan {
   const { statement, snapshot, fieldInfos } = input;
   const metadata = input.metadata ?? resolveApplyPatchMetadata(statement, fieldInfos);
-  const block = statement.applyBlocks![0];
   const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
-  const snapshotRows = readSnapshotRows(snapshot, block.field);
-  const seenRowIds = new Set<string>();
-  for (const row of snapshotRows) {
-    if (!row.id) argument(`APPLY snapshot for ${block.field} contains a row without _rid.`);
-    if (seenRowIds.has(row.id)) argument(`APPLY snapshot for ${block.field} contains duplicate _rid ${row.id}.`);
-    seenRowIds.add(row.id);
-  }
+  const tablePlans: ApplyPatchOnlyTablePlan[] = [];
+  for (const block of statement.applyBlocks!) {
+    const targetChildren = metadata.childrenByTable.get(block.field)!;
+    const snapshotRows = readSnapshotRows(snapshot, block.field);
+    const seenRowIds = new Set<string>();
+    for (const row of snapshotRows) {
+      if (!row.id) argument(`APPLY snapshot for ${block.field} contains a row without _rid.`);
+      if (seenRowIds.has(row.id)) argument(`APPLY snapshot for ${block.field} contains duplicate _rid ${row.id}.`);
+      seenRowIds.add(row.id);
+    }
 
-  const childTypeResolver: FieldTypeResolver = (field: FieldRef) =>
-    field.field === "_rid" ? "SINGLE_LINE_TEXT" : metadata.targetChildren.get(field.field)?.fieldType;
-  const resolved: Array<{ rowIndex: number; rowId: string; field: string; value: string }> = [];
-  const operationPlans: ApplyPatchOperationPlan[] = [];
-  const occupiedCells = new Set<string>();
-  for (const operation of block.operations) {
-    if (operation.kind !== "PATCH") continue;
-    const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
-    operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
-    for (const rowIndex of indices) {
-      const row = snapshotRows[rowIndex];
-      const flat = flattenSubtableSnapshotRow(row, rowIndex);
-      for (const assignment of operation.assignments) {
-        const key = `${row.id}\u0000${assignment.field}`;
-        if (occupiedCells.has(key)) argument(`APPLY patches cell ${row.id}.${assignment.field} more than once.`);
-        occupiedCells.add(key);
-        resolved.push({
-          rowIndex,
-          rowId: row.id,
-          field: assignment.field,
-          value: evaluateSubtableAssignmentValue(assignment.value, flat, childTypeResolver),
-        });
+    const childTypeResolver: FieldTypeResolver = (field: FieldRef) =>
+      field.field === "_rid" ? "SINGLE_LINE_TEXT" : targetChildren.get(field.field)?.fieldType;
+    const resolved: Array<{ rowIndex: number; field: string; value: string }> = [];
+    const appended: ApplyPatchPostImageRow[] = [];
+    const operationPlans: ApplyPatchOperationPlan[] = [];
+    const occupiedCells = new Set<string>();
+
+    // Every selector and PATCH RHS is evaluated only against snapshotRows. APPEND rows
+    // are accumulated separately and therefore cannot become visible to later operations.
+    for (const operation of block.operations) {
+      if (operation.kind === "APPEND") {
+        const rows = buildAppendRows(operation, targetChildren, block.field);
+        operationPlans.push({ kind: "APPEND", addedRows: rows.length });
+        appended.push(...rows);
+        continue;
+      }
+      if (operation.kind !== "PATCH") continue;
+      const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+      operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
+      for (const rowIndex of indices) {
+        const row = snapshotRows[rowIndex];
+        const flat = flattenSubtableSnapshotRow(row, rowIndex);
+        for (const assignment of operation.assignments) {
+          const key = `${row.id}\u0000${assignment.field}`;
+          if (occupiedCells.has(key)) argument(`APPLY patches cell ${row.id}.${assignment.field} more than once.`);
+          occupiedCells.add(key);
+          resolved.push({
+            rowIndex,
+            field: assignment.field,
+            value: evaluateSubtableAssignmentValue(assignment.value, flat, childTypeResolver),
+          });
+        }
       }
     }
-  }
 
-  const updatesByIndex = new Map<number, Record<string, { value: unknown }>>();
-  for (const cell of resolved) {
-    const updates = updatesByIndex.get(cell.rowIndex) ?? {};
-    updates[cell.field] = { value: cell.value };
-    updatesByIndex.set(cell.rowIndex, updates);
+    const updatesByIndex = new Map<number, Record<string, { value: unknown }>>();
+    for (const cell of resolved) {
+      const updates = updatesByIndex.get(cell.rowIndex) ?? {};
+      updates[cell.field] = { value: cell.value };
+      updatesByIndex.set(cell.rowIndex, updates);
+    }
+    const payloadRows: ApplyPatchPayloadRow[] = [
+      ...snapshotRows.map((row, index) => {
+        const updates = updatesByIndex.get(index);
+        return updates ? { id: row.id, value: updates } : { id: row.id };
+      }),
+      ...appended.map((row) => ({ value: row.value })),
+    ];
+    const postImageRows: ApplyPatchPostImageRow[] = [
+      ...snapshotRows.map((row, index) => ({
+        id: row.id,
+        value: { ...row.value, ...(updatesByIndex.get(index) ?? {}) },
+      })),
+      ...appended,
+    ];
+    tablePlans.push({
+      table: block.field,
+      operations: operationPlans,
+      payloadShape: "PATCH_ONLY",
+      changedSubtableRows: updatesByIndex.size + appended.length,
+      deletedRows: 0,
+      snapshotRowIds: snapshotRows.map((row) => row.id),
+      payloadRows,
+      postImageRows,
+    });
   }
-  const payloadRows: ApplyPatchPayloadRow[] = snapshotRows.map((row, index) => {
-    const updates = updatesByIndex.get(index);
-    return updates ? { id: row.id, value: updates } : { id: row.id };
-  });
-  const postImageRows: ApplyPatchPostImageRow[] = snapshotRows.map((row, index) => ({
-    id: row.id,
-    value: { ...row.value, ...(updatesByIndex.get(index) ?? {}) },
-  }));
 
   const parentRow = kintoneRecordToProcessRow(snapshot);
   const parentValues: Record<string, { value: KintoneValue }> = {};
@@ -279,26 +322,95 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   }
   const postImage: Record<string, { value: unknown }> = { ...snapshot } as unknown as Record<string, { value: unknown }>;
   Object.assign(postImage, parentValues);
-  postImage[block.field] = { value: postImageRows };
+  for (const table of tablePlans) postImage[table.table] = { value: table.postImageRows };
   return {
     app: statement.appId,
     parentId,
     revision,
     parentRows: 1,
-    changedSubtableRows: updatesByIndex.size,
+    changedSubtableRows: tablePlans.reduce((sum, table) => sum + table.changedSubtableRows, 0),
     parentValues,
     postImage,
-    tables: [{
-      table: block.field,
-      operations: operationPlans,
-      payloadShape: "PATCH_ONLY",
-      changedSubtableRows: updatesByIndex.size,
-      deletedRows: 0,
-      snapshotRowIds: snapshotRows.map((row) => row.id),
-      payloadRows,
-      postImageRows,
-    }],
+    tables: tablePlans,
   };
+}
+
+/** Apply the complete post-image validator's primitive normalization back to the write plan. */
+export function normalizeApplyPatchPlan(
+  plan: ApplyPatchPlan,
+  normalizedRecord: KintoneRecord
+): ApplyPatchPlan {
+  const tables = plan.tables.map((table) => {
+    const normalizedRows = normalizedRecord[table.table]?.value as unknown;
+    if (!Array.isArray(normalizedRows) || normalizedRows.length !== table.postImageRows.length) {
+      return argument(`APPLY normalized post-image for ${table.table} has an unexpected row count.`);
+    }
+    const payloadRows = table.payloadRows.map((payload, index) => {
+      const normalized = normalizedRows[index] as { value?: Record<string, { value: unknown }> };
+      if (!normalized?.value) return argument(`APPLY normalized post-image for ${table.table} row ${index + 1} has no value.`);
+      if (payload.id === undefined) return { value: normalized.value };
+      if (payload.value === undefined) return { id: payload.id };
+      return {
+        id: payload.id,
+        value: Object.fromEntries(Object.keys(payload.value).map((field) => [field, normalized.value![field]])),
+      };
+    });
+    return {
+      ...table,
+      payloadRows,
+      postImageRows: normalizedRows as ApplyPatchPostImageRow[],
+    };
+  });
+  const parentValues = Object.fromEntries(Object.keys(plan.parentValues).map((field) => [
+    field,
+    normalizedRecord[field] ?? plan.parentValues[field],
+  ])) as Record<string, { value: KintoneValue }>;
+  return {
+    ...plan,
+    parentValues,
+    tables,
+    postImage: normalizedRecord,
+  };
+}
+
+function buildAppendRows(
+  operation: AppendOperation,
+  children: ReadonlyMap<string, KintoneFieldInfo>,
+  table: string
+): ApplyPatchPostImageRow[] {
+  return operation.values.map((row) => ({
+    value: buildAppendValue(operation, row, children, table),
+  }));
+}
+
+function buildAppendValue(
+  operation: AppendOperation,
+  row: InsertRow,
+  children: ReadonlyMap<string, KintoneFieldInfo>,
+  table: string
+): Readonly<Record<string, { readonly value: unknown }>> {
+  if (row.length !== operation.fields.length) {
+    return argument(`APPLY APPEND for ${table} has ${row.length} values for ${operation.fields.length} fields.`);
+  }
+  const specified = new Map(operation.fields.map((field, index) => [field, row[index]]));
+  const value: Record<string, { value: unknown }> = {};
+  for (const field of children.values()) {
+    // FILE is opaque for existing rows and cannot be specified or emitted for APPEND.
+    if (field.fieldType === "FILE" || field.writable === false) continue;
+    const sqlValue = specified.get(field.code);
+    value[field.code] = { value: sqlValue === undefined
+      ? appendDefaultValue(field)
+      : sqlValue.type === "CASE_VALUE"
+        ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType)
+        : toKintoneValue(sqlValue, field.fieldType) };
+  }
+  return value;
+}
+
+function appendDefaultValue(field: KintoneFieldInfo): unknown {
+  if (field.defaultValue !== undefined && field.defaultValue !== null) return field.defaultValue;
+  return ["CHECK_BOX", "MULTI_SELECT", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]
+    .includes(field.fieldType) ? [] : "";
 }
 
 function resolvePatchTargets(

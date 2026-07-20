@@ -271,20 +271,26 @@ describe("MCP tools", () => {
       type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
       invalidRows: 0, errorCount: 0, columns: [], errors: [],
       apply: [{
-        field: "テーブル", operations: [{ kind: "PATCH", matchedRows: 2, changedRows: 2 }],
-        changedSubtableRows: 2, deletedRows: 0,
+        field: "テーブル", operations: [
+          { kind: "PATCH", matchedRows: 2, changedRows: 2 },
+          { kind: "APPEND", addedRows: 1 },
+        ],
+        changedSubtableRows: 3, deletedRows: 0,
       }],
       guards: {
         revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
-        subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false,
+        subtableRows: 3, dmlMaxSubtableRows: 500, wouldExceed: false,
       },
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const result = await tools.query({
-      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS) VALIDATE ONLY",
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS; APPEND (子) VALUES ('new')) VALIDATE ONLY",
     });
     expect(result).toMatchObject({
-      apply: [{ field: "テーブル", operations: [{ matchedRows: 2, changedRows: 2 }] }],
+      apply: [{ field: "テーブル", operations: [
+        { kind: "PATCH", matchedRows: 2, changedRows: 2 },
+        { kind: "APPEND", addedRows: 1 },
+      ] }],
       guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
     });
     expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
@@ -545,6 +551,15 @@ describe("MCP tools", () => {
     expect(client.getFields).not.toHaveBeenCalled();
     expect(client.getRecords).not.toHaveBeenCalled();
     expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (APPEND (子) VALUES ('new'))",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
 
     await expect(tools.mutate({
       sql: "SELECT 1; UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",

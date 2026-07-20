@@ -1,5 +1,5 @@
 import { execute, executeBatch, type KintoneClient, type KintoneFieldInfo, type SelectResult } from "../execute";
-import type { KintoneRecord } from "../converter/dmlToKintone";
+import type { KintonePutParams, KintoneRecord } from "../converter/dmlToKintone";
 
 const fieldInfos: KintoneFieldInfo[] = [
   { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
@@ -106,6 +106,37 @@ test("VALIDATE ONLY はガード超過を wouldExceed=true の成功診断にし
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
+test("VALIDATE ONLY apply[]はtable別PATCH/APPENDとtable横断追加合計を返す", async () => {
+  const mock = makeClient([parent()]);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS; APPEND (子) VALUES ('a'), ('b')) "
+      + "APPLY 別表 (APPEND (別子) VALUES ('c')) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-v11-validate-detail", dmlMaxRows: 1, dmlMaxSubtableRows: 4 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    apply: [
+      {
+        field: "テーブル",
+        operations: [
+          { kind: "PATCH", matchedRows: 1, changedRows: 1 },
+          { kind: "APPEND", addedRows: 2 },
+        ],
+        changedSubtableRows: 3,
+      },
+      {
+        field: "別表",
+        operations: [{ kind: "APPEND", addedRows: 1 }],
+        changedSubtableRows: 1,
+      },
+    ],
+    guards: { subtableRows: 4, dmlMaxSubtableRows: 4, wouldExceed: false },
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
 test("VALIDATE ONLY の post-image error は親単位/セル単位件数と固定列順を返す", async () => {
   const constrained = fieldInfos.map((field) => field.code === "別子" ? { ...field, required: true } : field);
   const invalid = parent();
@@ -175,6 +206,95 @@ test("二重ガード以内は revision 付き1-record PUTを1回だけ行う", 
   });
 });
 
+test("複数tableのPATCH/APPENDを1 recordへ合成し、defaultを明示payload化してFILEを送らない", async () => {
+  const infos: KintoneFieldInfo[] = [
+    ...fieldInfos.map((field) => field.code === "子" ? { ...field, defaultValue: "DEFAULT" } : field),
+    { code: "必須", label: "必須", fieldType: "SINGLE_LINE_TEXT", writable: true, required: true, inSubtable: true, subtableCode: "テーブル" },
+  ];
+  const record = parent();
+  (record.テーブル.value as any[])[0].value.必須 = { value: "existing" };
+  const mock = makeClient([record], infos);
+  const statement = "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+    + "APPLY テーブル (APPEND (必須) VALUES ('first'), ('second'); PATCH SET 子='patched' ALL ROWS) "
+    + "APPLY 別表 (APPEND (別子) VALUES ('other'))";
+  const confirm = jest.fn(async (_count, _operation, context) => {
+    expect(context?.applyDetail).toEqual({
+      kind: "APPLY_PATCH", parentRows: 1, changedSubtableRows: 4, addedSubtableRows: 3,
+      tables: [
+        { table: "テーブル", patchRows: 1, appendRows: 2 },
+        { table: "別表", patchRows: 0, appendRows: 1 },
+      ],
+      deletedRows: 0, revisionRequired: true,
+    });
+    return true;
+  });
+  await expect(execute(statement, mock.client, {
+    cacheContext: "apply-v11-multi", allowApplyMutation: true, confirm,
+  })).resolves.toMatchObject({ updatedCount: 1 });
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
+  const payload = (mock.putRecords.mock.calls as unknown as [[KintonePutParams]])[0][0];
+  expect(payload.records).toHaveLength(1);
+  expect(payload.records[0].record).toEqual({
+    親: { value: "after" },
+    テーブル: { value: [
+      { id: "101", value: { 子: { value: "patched" } } },
+      { value: { 子: { value: "DEFAULT" }, 必須: { value: "first" } } },
+      { value: { 子: { value: "DEFAULT" }, 必須: { value: "second" } } },
+    ] },
+    別表: { value: [{ value: { 別子: { value: "other" } } }] },
+  });
+});
+
+test("APPEND未指定required既定値なしとnumber precision違反をPUT前に拒否する", async () => {
+  const requiredInfos: KintoneFieldInfo[] = [
+    ...fieldInfos,
+    { code: "必須", label: "必須", fieldType: "SINGLE_LINE_TEXT", writable: true, required: true, inSubtable: true, subtableCode: "テーブル" },
+  ];
+  const requiredRecord = parent();
+  (requiredRecord.テーブル.value as any[])[0].value.必須 = { value: "existing" };
+  const requiredMock = makeClient([requiredRecord], requiredInfos);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (APPEND (子) VALUES ('x'))",
+    requiredMock.client,
+    { cacheContext: "apply-v11-required", allowApplyMutation: true }
+  )).rejects.toThrow(/APPLY post-image validation failed.*ERR_REQUIRED/);
+  expect(requiredMock.putRecords).not.toHaveBeenCalled();
+
+  const numberInfos: KintoneFieldInfo[] = [
+    ...fieldInfos,
+    { code: "子数値", label: "子数値", fieldType: "NUMBER", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  ];
+  const numberRecord = parent();
+  (numberRecord.テーブル.value as any[])[0].value.子数値 = { value: "1" };
+  const numberMock = makeClient([numberRecord], numberInfos);
+  numberMock.getNumberPrecision.mockResolvedValueOnce({ digits: 3, decimalPlaces: 1, roundingMode: "HALF_EVEN" });
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (APPEND (子数値) VALUES (100))",
+    numberMock.client,
+    { cacheContext: "apply-v11-precision", allowApplyMutation: true }
+  )).rejects.toThrow(/APPLY post-image validation failed.*ERR_NUMBER_INTEGER_DIGITS/);
+  expect(numberMock.putRecords).not.toHaveBeenCalled();
+});
+
+test("APPENDのmetadata既定値も通常値と同じchoice primitiveで検証する", async () => {
+  const infos: KintoneFieldInfo[] = [
+    ...fieldInfos,
+    {
+      code: "選択", label: "選択", fieldType: "DROP_DOWN", writable: true,
+      optionOrder: { A: 0 }, defaultValue: "UNKNOWN", inSubtable: true, subtableCode: "テーブル",
+    },
+  ];
+  const record = parent();
+  (record.テーブル.value as any[])[0].value.選択 = { value: "A" };
+  const mock = makeClient([record], infos);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (APPEND (子) VALUES ('x'))",
+    mock.client,
+    { cacheContext: "apply-v11-default-choice", allowApplyMutation: true }
+  )).rejects.toThrow(/APPLY post-image validation failed.*ERR_CHOICE_INVALID/);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
 test("親1・子501は既定子ガード500で PUT 0", async () => {
   const mock = makeClient([parent("8", 501)]);
   const allRowsSql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
@@ -232,7 +352,8 @@ test("全 preflight とガード完了後に applyDetail 付き confirm を1回�
       kind: "APPLY_PATCH",
       parentRows: 1,
       changedSubtableRows: 1,
-      tables: [{ table: "テーブル", patchRows: 1 }],
+      addedSubtableRows: 0,
+      tables: [{ table: "テーブル", patchRows: 1, appendRows: 0 }],
       deletedRows: 0,
       revisionRequired: true,
     });

@@ -57,6 +57,27 @@ test("PATCH_ONLY は全snapshot idと順序の保持を必須にする", () => {
   })).toThrow("PATCH_ONLY table テーブル must retain every snapshot row id in order");
 });
 
+test("PATCH_ONLY APPENDは全snapshot idの後ろに未採番value行を保持する", () => {
+  const plan = basePlan();
+  const table = plan.tables[0];
+  const appended = {
+    ...table,
+    operations: [...table.operations, { kind: "APPEND" as const, addedRows: 1 }],
+    changedSubtableRows: 2,
+    payloadRows: [...table.payloadRows, { value: { 子: { value: "new" } } }],
+    postImageRows: [...table.postImageRows, { value: { 子: { value: "new" } } }],
+  };
+  expect((applyPatchPlanToKintone({ ...plan, changedSubtableRows: 2, tables: [appended] })
+    .records[0].record.テーブル.value as unknown[])).toHaveLength(3);
+  expect(() => applyPatchPlanToKintone({
+    ...plan,
+    tables: [{
+      ...appended,
+      payloadRows: [appended.payloadRows[2], ...appended.payloadRows.slice(0, 2)],
+    }],
+  })).toThrow("must retain every snapshot row id in order");
+});
+
 test("PATCH_ONLY と FULL_SURVIVORS のtable単位shape混在を検証する", () => {
   const plan = basePlan();
   const converted = applyPatchPlanToKintone({

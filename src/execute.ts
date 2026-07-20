@@ -18,12 +18,13 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
-import { assertApplyV1Scope } from "./core/applyPatchScope";
+import { assertApplyScope } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
   collectApplySnapshotFields,
   flattenSubtableSnapshotRow,
   getApplyParentId,
+  normalizeApplyPatchPlan,
   resolveApplyPatchMetadata,
 } from "./core/applyPatchPlanner";
 import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
@@ -387,9 +388,10 @@ export interface DmlValidationResult {
 export interface ApplyValidationDetail {
   readonly field: string;
   readonly operations: readonly {
-    readonly kind: "PATCH";
-    readonly matchedRows: number;
-    readonly changedRows: number;
+    readonly kind: "PATCH" | "APPEND";
+    readonly matchedRows?: number;
+    readonly changedRows?: number;
+    readonly addedRows?: number;
   }[];
   readonly changedSubtableRows: number;
   readonly deletedRows: number;
@@ -445,9 +447,11 @@ export interface ApplyConfirmDetail {
   readonly kind: "APPLY_PATCH";
   readonly parentRows: number;
   readonly changedSubtableRows: number;
+  readonly addedSubtableRows: number;
   readonly tables: readonly {
     readonly table: string;
     readonly patchRows: number;
+    readonly appendRows: number;
   }[];
   readonly deletedRows: number;
   readonly revisionRequired: true;
@@ -750,7 +754,7 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyV1Scope(stmt);
+  assertApplyScope("v1.1", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1351,7 +1355,7 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyV1Scope(resolvedStmt);
+  assertApplyScope("v1.1", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5696,13 +5700,23 @@ async function executeApplyPatchUpdate(
     );
   }
 
-  const putParams = applyPatchPlanToKintone(plan);
+  const normalizedPlan = normalizeApplyPatchPlan(plan, validation.normalizedRecord);
+  const putParams = applyPatchPlanToKintone(normalizedPlan);
   if (options.confirm) {
+    const addedSubtableRows = plan.tables.reduce((sum, table) => sum + table.operations.reduce(
+      (tableSum, operation) => tableSum + (operation.kind === "APPEND" ? operation.addedRows : 0), 0
+    ), 0);
     const applyDetail: ApplyConfirmDetail = {
       kind: "APPLY_PATCH",
       parentRows: plan.parentRows,
       changedSubtableRows: plan.changedSubtableRows,
-      tables: plan.tables.map((table) => ({ table: table.table, patchRows: table.changedSubtableRows })),
+      addedSubtableRows,
+      tables: plan.tables.map((table) => {
+        const appendRows = table.operations.reduce(
+          (sum, operation) => sum + (operation.kind === "APPEND" ? operation.addedRows : 0), 0
+        );
+        return { table: table.table, patchRows: table.changedSubtableRows - appendRows, appendRows };
+      }),
       deletedRows: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
       revisionRequired: true,
     };
@@ -6567,7 +6581,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyV1Scope(stmt);
+    assertApplyScope("v1.1", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {

@@ -1,4 +1,4 @@
-import { assertApplyV1Scope } from "../applyPatchScope";
+import { assertApplyScope, assertApplyV1Scope } from "../applyPatchScope";
 import type { UpdateStatement } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
@@ -69,17 +69,46 @@ describe("assertApplyV1Scope", () => {
     )).toThrow(/UnsupportedError: APPLY v1 scope does not support UPDATE \.\.\. FROM/);
   });
 
-  test("EXPLAIN executor は Phase 2 でも APPLY を API 0 回で停止する", async () => {
+  test("EXPLAIN executor は APPLY metadata だけを読み records/mutation API 0", async () => {
       const calls = {
         getRecords: jest.fn(), openCursor: jest.fn(), postRecords: jest.fn(), putRecords: jest.fn(),
-        deleteRecords: jest.fn(), getApps: jest.fn(), getFields: jest.fn(),
+        deleteRecords: jest.fn(), getApps: jest.fn(), getFields: jest.fn(async () => [
+          { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+          { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+          { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+        ]),
         getNumberPrecision: jest.fn(), getProcessStatuses: jest.fn(),
       };
       const client = calls as unknown as KintoneClient;
       const statement = sql("$id = 8", "PATCH SET 子 = 'x' ALL ROWS");
-      await expect(execute(`EXPLAIN ${statement}`, client)).rejects.toThrow(
-        "UnsupportedError: APPLY execution is not enabled in this phase"
-      );
-      for (const fn of Object.values(calls)) expect(fn).not.toHaveBeenCalled();
+      await expect(execute(`EXPLAIN ${statement}`, client)).resolves.toMatchObject({ type: "SELECT" });
+      expect(calls.getFields).toHaveBeenCalledWith(4221);
+      for (const fn of [calls.getRecords, calls.openCursor, calls.postRecords, calls.putRecords, calls.deleteRecords]) {
+        expect(fn).not.toHaveBeenCalled();
+      }
+  });
+});
+
+describe("assertApplyScope v1.1", () => {
+  const validateV11 = (text: string): void => {
+    assertApplyScope("v1.1", new Parser(new Lexer(text).tokenize()).parse());
+  };
+
+  test("異なるtableの複数blockとPATCH/APPENDだけを明示許可する", () => {
+    expect(() => validateV11(
+      `${sql("$id = 8", "PATCH SET 子 = 'x' ALL ROWS; APPEND (子) VALUES ('a'), ('b')")}`
+      + " APPLY 別表 (APPEND (別子) VALUES ('y'))"
+    )).not.toThrow();
+  });
+
+  test("同一table複数blockはArgumentError、REMOVE/EXPECT/_idx/複数親はv1.1 UnsupportedError", () => {
+    expect(() => validateV11(`${sql("$id = 8", "PATCH SET 子='x' ALL ROWS")} APPLY テーブル (APPEND (子) VALUES ('y'))`))
+      .toThrow(/^ArgumentError: APPLY v1\.1 scope allows only one block for table テーブル/);
+    for (const statement of [
+      sql("$id = 8", "REMOVE ALL ROWS"),
+      sql("$id = 8", "PATCH SET 子='x' ALL ROWS EXPECT ROWS 1"),
+      sql("$id = 8", "PATCH SET 子='x' WHERE _idx=0"),
+      sql("$id = 8 OR $id = 9", "APPEND (子) VALUES ('x')"),
+    ]) expect(() => validateV11(statement)).toThrow(/^UnsupportedError: APPLY v1\.1 scope/);
   });
 });

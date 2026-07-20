@@ -126,6 +126,31 @@ describe("buildApplyPatchPlan", () => {
       snapshot: snapshot([{ id: "", value: {} }]), fieldInfos: fields,
     })).toThrow("row without _rid");
   });
+
+  test("複数tableを1 planへ合成し、APPENDをsnapshot PATCHから不可視のまま末尾・記述順に置く", () => {
+    const stmt = parseSqlStatement(
+      "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+      + "APPLY テーブル (APPEND (結果) VALUES (7), (8); PATCH SET 数値=9 ALL ROWS) "
+      + "APPLY 別表 (APPEND (別子) VALUES ('new'))"
+    ) as UpdateStatement;
+    const appendFields = fields.map((field) => field.code === "未指定" ? { ...field, defaultValue: "DEFAULT" } : field);
+    const plan = buildApplyPatchPlan({ statement: stmt, snapshot: snapshot(), fieldInfos: appendFields });
+
+    expect(plan.changedSubtableRows).toBe(5); // existing PATCH 2 + APPEND 2 + other table APPEND 1
+    expect(plan.tables.map((table) => table.table)).toEqual(["テーブル", "別表"]);
+    expect(plan.tables[0].operations).toEqual([
+      { kind: "APPEND", addedRows: 2 },
+      { kind: "PATCH", matchedRows: 2, changedRows: 2 },
+    ]);
+    expect(plan.tables[0].payloadRows).toEqual([
+      { id: "101", value: { 数値: { value: "9" } } },
+      { id: "102", value: { 数値: { value: "9" } } },
+      { value: { 数値: { value: "" }, 結果: { value: "7" }, 未指定: { value: "DEFAULT" } } },
+      { value: { 数値: { value: "" }, 結果: { value: "8" }, 未指定: { value: "DEFAULT" } } },
+    ]);
+    expect(plan.tables[0].postImageRows.slice(2).map((row) => row.value.結果.value)).toEqual(["7", "8"]);
+    expect(plan.tables[1].payloadRows).toEqual([{ value: { 別子: { value: "new" } } }]);
+  });
 });
 
 describe("resolveApplyPatchMetadata", () => {
@@ -137,5 +162,13 @@ describe("resolveApplyPatchMetadata", () => {
       .toThrow("is not writable (CALC)");
     expect(() => resolveApplyPatchMetadata(statement("PATCH SET _rid = 'x' ALL ROWS"), fields))
       .toThrow("is a system field");
+  });
+
+
+  test("APPEND指定field重複とFILE指定をrecords API前に拒否する", () => {
+    expect(() => resolveApplyPatchMetadata(statement("APPEND (結果, 結果) VALUES (1, 2)"), fields))
+      .toThrow("ArgumentError: APPLY APPEND specifies child 結果 more than once");
+    expect(() => resolveApplyPatchMetadata(statement("APPEND (子添付) VALUES ('x')"), fields))
+      .toThrow("ArgumentError: APPLY assignment target 子添付 is not writable (FILE)");
   });
 });

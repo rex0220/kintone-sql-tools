@@ -5,18 +5,48 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-const V1_CAPABILITIES = Object.freeze({
-  operations: new Set<ApplyOperation["kind"]>(["PATCH"]),
-  multipleBlocks: false,
-  expectRows: false,
-  updateFrom: false,
-  check: false,
-  onErrorSkip: false,
-  rejectLimit: false,
+export type ApplyScopeVersion = "v1" | "v1.1";
+
+const APPLY_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
+  readonly operations: ReadonlySet<ApplyOperation["kind"]>;
+  readonly multipleBlocks: boolean;
+  readonly expectRows: boolean;
+  readonly updateFrom: boolean;
+  readonly check: boolean;
+  readonly onErrorSkip: boolean;
+  readonly rejectLimit: boolean;
+}>> = Object.freeze({
+  v1: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH"]),
+    multipleBlocks: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
+  "v1.1": Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND"]),
+    multipleBlocks: true,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
 });
 
+let activeVersion: ApplyScopeVersion = "v1";
+
 function unsupported(feature: string): never {
-  throw new Error(`UnsupportedError: APPLY v1 scope does not support ${feature}`);
+  throw new Error(`UnsupportedError: APPLY ${activeVersion} scope does not support ${feature}`);
+}
+
+/* The active version is scoped to a synchronous validator invocation. */
+function withVersion<T>(version: ApplyScopeVersion, run: () => T): T {
+  const previous = activeVersion;
+  activeVersion = version;
+  try { return run(); } finally { activeVersion = previous; }
 }
 
 function updateWithApply(statement: Statement): UpdateStatement | null {
@@ -31,7 +61,14 @@ function updateWithApply(statement: Statement): UpdateStatement | null {
  * Phase 1 の明示 capability 集合。将来 node を AST に保持したまま、
  * v1 でレビュー済みの構文だけを実行入口へ通す。
  */
-export function assertApplyV1Scope(statement: Statement): void {
+export function assertApplyScope(version: ApplyScopeVersion, statement: Statement): void {
+  return withVersion(version, () => assertApplyScopeForCapabilities(statement, APPLY_CAPABILITIES[version]));
+}
+
+function assertApplyScopeForCapabilities(
+  statement: Statement,
+  capabilities: (typeof APPLY_CAPABILITIES)[ApplyScopeVersion]
+): void {
   const update = updateWithApply(statement);
   if (update === null) return;
   const blocks = update.applyBlocks!;
@@ -40,31 +77,43 @@ export function assertApplyV1Scope(statement: Statement): void {
   for (const block of blocks) {
     const key = block.field;
     if (seen.has(key)) {
-      throw new Error(`ArgumentError: APPLY v1 scope allows only one block for table ${block.field}`);
+      throw new Error(`ArgumentError: APPLY ${activeVersion} scope allows only one block for table ${block.field}`);
     }
     seen.add(key);
   }
-  if (!V1_CAPABILITIES.multipleBlocks && blocks.length !== 1) unsupported("multiple APPLY blocks in this phase");
+  if (!capabilities.multipleBlocks && blocks.length !== 1) unsupported("multiple APPLY blocks in this phase");
   if (update.subtableCode) unsupported("a subtable UPDATE as the parent statement in this phase");
-  if (!V1_CAPABILITIES.updateFrom && update.from != null) unsupported("UPDATE ... FROM in this phase");
-  if (!V1_CAPABILITIES.check && update.checkGroups?.length) unsupported("CHECK in this phase");
-  if (!V1_CAPABILITIES.onErrorSkip && update.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
-  if (!V1_CAPABILITIES.rejectLimit && update.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
+  if (!capabilities.updateFrom && update.from != null) unsupported("UPDATE ... FROM in this phase");
+  if (!capabilities.check && update.checkGroups?.length) unsupported("CHECK in this phase");
+  if (!capabilities.onErrorSkip && update.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
+  if (!capabilities.rejectLimit && update.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
   assertSinglePositiveRecordId(update.where);
 
-  for (const operation of blocks[0].operations) {
-    if (!V1_CAPABILITIES.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
-    if (operation.kind !== "PATCH") continue;
-    if (!V1_CAPABILITIES.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
-    if (operation.assignments.length === 0) unsupported("an empty PATCH operation in this phase");
-    for (const assignment of operation.assignments) {
-      if (assignment.field.includes(".")) {
-        unsupported("parent or qualified PATCH targets in this phase");
+  for (const block of blocks) {
+    for (const operation of block.operations) {
+      if (!capabilities.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
+      if (operation.kind === "APPEND") {
+        for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
+        assertSafeApplyNode(operation.values, "APPEND values");
+        continue;
       }
+      if (operation.kind !== "PATCH") continue;
+      if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
+      if (operation.assignments.length === 0) unsupported("an empty PATCH operation in this phase");
+      for (const assignment of operation.assignments) {
+        if (assignment.field.includes(".")) {
+          unsupported("parent or qualified PATCH targets in this phase");
+        }
+      }
+      assertSafeApplyNode(operation.assignments, "PATCH assignments");
+      if (operation.selector.kind === "WHERE") assertSafeChildPredicate(operation.selector.where);
     }
-    assertSafeApplyNode(operation.assignments, "PATCH assignments");
-    if (operation.selector.kind === "WHERE") assertSafeChildPredicate(operation.selector.where);
   }
+}
+
+/** Compatibility export for callers that explicitly need the original v1 gate. */
+export function assertApplyV1Scope(statement: Statement): void {
+  assertApplyScope("v1", statement);
 }
 
 function assertSinglePositiveRecordId(where: WhereExpr): void {

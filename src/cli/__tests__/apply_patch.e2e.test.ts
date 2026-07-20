@@ -74,8 +74,8 @@ test("APPLY mutation は --allow-dml/--yes 内で capability と二重 guard を
   ]);
   expect(result.code).toBe(0);
   expect(putRecords).toHaveBeenCalledTimes(1);
-  expect(result.stderr).toContain("[APPLY PATCH Confirm] parents=1 changedSubtableRows=1");
-  expect(result.stderr).toContain("table=テーブル PATCH=1");
+  expect(result.stderr).toContain("[APPLY PATCH/APPEND Confirm] parents=1 changedSubtableRows=1 addedSubtableRows=0");
+  expect(result.stderr).toContain("table=テーブル PATCH=1 APPEND=0");
   expect(result.stderr).toContain("deleted=0 revisionRequired=true");
   expect(result.stderr).toContain("no automatic retry");
   expect(result.stderr).toContain("irreversible");
@@ -99,7 +99,7 @@ test("APPLY mutation を含む batch にも capability と 100/100 境界を渡�
   ]);
   expect(result.code).toBe(0);
   expect(putRecords).toHaveBeenCalledTimes(1);
-  expect(result.stderr).toContain("[APPLY PATCH Confirm]");
+  expect(result.stderr).toContain("[APPLY PATCH/APPEND Confirm]");
 });
 
 test("APPLY dry-run は records API 0 で args > env > profile > default を表示する", async () => {

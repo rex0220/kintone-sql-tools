@@ -53,11 +53,20 @@ function assertTablePlan(table: ApplyPatchTablePlan): void {
   assertUniqueIds(payloadIds, `${table.table} payload`);
 
   if (table.payloadShape === "PATCH_ONLY") {
-    assertSameOrderedIds(snapshotIds, payloadIds,
+    const payloadPrefixIds = table.payloadRows.slice(0, snapshotIds.length)
+      .map((row) => row.id ?? "");
+    assertSameOrderedIds(snapshotIds, payloadPrefixIds,
       `APPLY PATCH_ONLY table ${table.table} must retain every snapshot row id in order.`);
-    const postIds = table.postImageRows.flatMap((row) => row.id === undefined ? [] : [row.id]);
-    assertSameOrderedIds(snapshotIds, postIds,
+    if (table.payloadRows.slice(snapshotIds.length).some((row) => row.id !== undefined)) {
+      argument(`APPLY PATCH_ONLY table ${table.table} must place every APPEND row after snapshot rows.`);
+    }
+    const postPrefixIds = table.postImageRows.slice(0, snapshotIds.length)
+      .map((row) => row.id ?? "");
+    assertSameOrderedIds(snapshotIds, postPrefixIds,
       `APPLY PATCH_ONLY table ${table.table} post-image must retain every snapshot row id in order.`);
+    if (table.postImageRows.slice(snapshotIds.length).some((row) => row.id !== undefined)) {
+      argument(`APPLY PATCH_ONLY table ${table.table} post-image must place every APPEND row after snapshot rows.`);
+    }
     return;
   }
 

@@ -43,7 +43,9 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
       const summary = renderInfo(`検証 ${result.validatedRows} 件 / 正常 ${result.validRows} 件 / 不正 ${result.invalidRows} 件 / エラー ${result.errorCount} 件${importSuffix}`);
       const applySummary = (result.apply ?? []).map((detail) => renderInfo(
         `APPLY ${detail.field}: ${detail.operations.map((operation) =>
-          `${operation.kind} 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
+          operation.kind === "APPEND"
+            ? `APPEND 追加 ${operation.addedRows}`
+            : `PATCH 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
         ).join("; ")} / 変更子行 ${detail.changedSubtableRows} / 削除 ${detail.deletedRows}`
       )).join("");
       const guardSummary = result.guards
