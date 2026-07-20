@@ -3,12 +3,39 @@ import { isPluginApplyStatement, resolvePluginApplyOptions } from "../applySurfa
 
 const APPLY = "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)";
 
-test("B44 Phase 16c: plugin は APPLY mutation だけ capability と固定 100/500 を渡す", () => {
+test("B48: plugin は最大取得件数を APPLY の親/子ガードに兼用する", () => {
+  expect(resolvePluginApplyOptions(parseSqlStatements(APPLY), 3000)).toEqual({
+    allowApplyMutation: true,
+    dmlMaxRows: 3000,
+    dmlMaxSubtableRows: 3000,
+  });
+});
+
+test("B48: 最大取得件数が floor 未満または未指定なら従来の 100/500 を維持する", () => {
+  expect(resolvePluginApplyOptions(parseSqlStatements(APPLY), 50)).toEqual({
+    allowApplyMutation: true,
+    dmlMaxRows: 100,
+    dmlMaxSubtableRows: 500,
+  });
   expect(resolvePluginApplyOptions(parseSqlStatements(APPLY))).toEqual({
     allowApplyMutation: true,
     dmlMaxRows: 100,
     dmlMaxSubtableRows: 500,
   });
+});
+
+test.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+  "B48: 非正整数の最大取得件数 %p は従来の floor へフォールバックする",
+  (maxRecords) => {
+    expect(resolvePluginApplyOptions(parseSqlStatements(APPLY), maxRecords)).toEqual({
+      allowApplyMutation: true,
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    });
+  }
+);
+
+test("B44 Phase 16c: VALIDATE ONLY は mutation capability を要求しない", () => {
   expect(resolvePluginApplyOptions(parseSqlStatements(`${APPLY} VALIDATE ONLY`))).toEqual({
     dmlMaxRows: 100,
     dmlMaxSubtableRows: 500,

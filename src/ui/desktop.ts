@@ -2022,7 +2022,7 @@ async function runBatchSql(
 ): Promise<BatchRunOutcome> {
   const statements = parseSqlStatements(sql, { import: selectedImportSource !== null });
   const analysis = analyzeBatch(statements);
-  const applyOptions = resolvePluginApplyOptions(statements);
+  const applyOptions = resolvePluginApplyOptions(statements, options.maxRecords);
 
   // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
   // → バッチ全体のプラン表示（metadata API のみ。2文目以降も実行しない）
@@ -2198,7 +2198,7 @@ async function runSql(
     try {
       const stmt = parseSqlStatement(sql, { import: selectedImportSource !== null });
       isDmlSql = writesKintone(stmt);
-      applyOptions = resolvePluginApplyOptions([stmt]);
+      applyOptions = resolvePluginApplyOptions([stmt], runtimeFetch.maxRecords);
       surfaceForcesOnLimitError = isDmlSql || (
         "validateOnly" in stmt && stmt.validateOnly === true
       ) || stmt.type === "VALIDATE";

@@ -5,14 +5,22 @@ export type PluginApplyOptions = Pick<
   "allowApplyMutation" | "dmlMaxRows" | "dmlMaxSubtableRows"
 >;
 
-/** Plugin は APPLY にだけ固定 100/500（親/子）と mutation capability を公開する。 */
-export function resolvePluginApplyOptions(statements: readonly Statement[]): PluginApplyOptions {
+/** Plugin は APPLY にだけ最大取得件数由来の親/子ガードと mutation capability を公開する。 */
+export function resolvePluginApplyOptions(
+  statements: readonly Statement[],
+  maxRecords?: number
+): PluginApplyOptions {
   const applyStatements = statements.filter(isPluginApplyStatement);
   if (applyStatements.length === 0) return {};
   const containsMutation = applyStatements.some((statement) => statement.validateOnly !== true);
+  const effectiveMaxRecords = typeof maxRecords === "number"
+    && Number.isInteger(maxRecords)
+    && maxRecords > 0
+    ? maxRecords
+    : 0;
   return {
-    dmlMaxRows: 100,
-    dmlMaxSubtableRows: 500,
+    dmlMaxRows: Math.max(100, effectiveMaxRecords),
+    dmlMaxSubtableRows: Math.max(500, effectiveMaxRecords),
     ...(containsMutation ? { allowApplyMutation: true } : {}),
   };
 }
