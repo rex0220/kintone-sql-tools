@@ -716,6 +716,7 @@ export function buildOutput(
       rowCount: result.rowCount,
       warnings: result.warnings ?? [],
       rows: result.rows,
+      ...(result.validateStats ? { validateStats: result.validateStats } : {}),
     };
     return JSON.stringify(obj, null, pretty ? 2 : 0);
   }
@@ -787,7 +788,12 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
   const parts = [`[${s.index + 1}] ${s.type}`, s.status];
   if (s.tempTable) parts.push(`temp=${s.tempTable}`);
   if (s.rowCount !== undefined) parts.push(`rows=${s.rowCount}`);
-  if (s.status === "success" && s.result?.type === "SELECT") parts.push(`rowCount=${s.result.rowCount}`);
+  if (s.status === "success" && s.result?.type === "SELECT") {
+    parts.push(`rowCount=${s.result.rowCount}`);
+    if (s.result.validateStats) {
+      parts.push(`errorRecords=${s.result.validateStats.errorRecords} errorCount=${s.result.validateStats.errorCount}`);
+    }
+  }
   if (s.status === "success" && s.result && s.result.type !== "SELECT") {
     const r = s.result;
     if (r.type === "INSERT") parts.push(`inserted=${r.insertedCount}`);
@@ -807,6 +813,13 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
   if (s.status === "error" && s.error) parts.push(s.error.message);
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
   return parts.join(" ");
+}
+
+export function buildSelectSummary(result: SelectResult): string {
+  const validateSummary = result.validateStats
+    ? ` errorRecords=${result.validateStats.errorRecords} errorCount=${result.validateStats.errorCount}`
+    : "";
+  return `rowCount=${result.rowCount}${validateSummary}`;
 }
 
 /**
@@ -2228,7 +2241,9 @@ async function run(): Promise<number> {
     if (outputPath) writeFileSync(outputPath, `${output}\n`, "utf-8");
     else if (output) process.stdout.write(`${output}\n`);
 
-    if (!quiet) process.stderr.write(`rowCount=${result.rowCount}\n`);
+    if (!quiet) {
+      process.stderr.write(`${buildSelectSummary(result)}\n`);
+    }
     if (shouldExitOnEmpty(args.dryRun, exitOnEmpty, result.rowCount)) return 1;
     return 0;
   } catch (err) {

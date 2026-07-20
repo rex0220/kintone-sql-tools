@@ -20,6 +20,10 @@ v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
 - SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,
   $err_count) へ生成時集約し、レコード横断の規模を把握。
   tempTableMaxRows は詳細/SUMMARY とも集約後行数に適用。
+- 詳細/SUMMARY の結果に validateStats (errorRecords=違反レコード数、
+  errorCount=集約前違反総数) を付与。0件でも0/0。プラグインは
+  「エラー n レコード / m 件（表示 r 行）」、CLI はサマリへ両値を表示。
+  JSON/MCP/バッチ結果にも含め、INTO #err 後の汎用 SELECT には付けない。
 - WHERE / CHECK のサブテーブル子参照は取得前に ArgumentError で拒否。
   NUMBER 子フィールドに数値精度検証を適用。
 - B46: 空 (未選択) の選択系フィールドを ERR_CHOICE_INVALID と誤判定する

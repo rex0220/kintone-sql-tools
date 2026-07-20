@@ -206,7 +206,7 @@ test("single result preserves fixed columns at zero errors and single INTO is re
   const result = await execute("VALIDATE APP41", valid.client, { cacheContext: "b41-empty" }) as SelectResult;
   expect(result).toMatchObject({ type: "SELECT", rowCount: 0, rows: [], columns: [
     "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
-  ] });
+  ], validateStats: { errorRecords: 0, errorCount: 0 } });
   await expect(execute("VALIDATE APP41 INTO #err", valid.client, { cacheContext: "b41-single-into" }))
     .rejects.toThrow("requires a batch");
 });
@@ -223,6 +223,8 @@ test("batch INTO materializes the fixed nine columns with locator and count meta
     "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
   ]);
   expect((batch.statements[1].result as SelectResult).rows).toHaveLength(2);
+  expect((batch.statements[0].result as SelectResult).validateStats).toEqual({ errorRecords: 1, errorCount: 2 });
+  expect((batch.statements[1].result as SelectResult).validateStats).toBeUndefined();
 });
 
 test("maxRecords is fail-closed even when truncate is requested and no write API is called", async () => {
@@ -312,6 +314,25 @@ test("B42 omitted targets audit child cells with stable 1-based and persistent r
   expect(calls.precision).toBe(1);
 });
 
+test("VALIDATE detail stats count distinct error records and pre-aggregation violations", async () => {
+  const { client } = makeClient({ fields: B42_FIELDS, records: [
+    record({
+      $id: "9", top: "ok",
+      T1: [subrow("a", { req: "" }), subrow("b", { req: "" })], T2: [],
+    }),
+    record({ $id: "10", top: "", T1: [subrow("c", { req: "ok" })], T2: [] }),
+  ] });
+  const result = await execute(
+    "VALIDATE APP41 (top,T1(req))",
+    client,
+    { cacheContext: "validate-stats-detail" }
+  ) as SelectResult;
+
+  expect(result.validateStats).toEqual({ errorRecords: 2, errorCount: 3 });
+  expect(result.rows).toHaveLength(2);
+  expect(result.rows.reduce((sum, row) => sum + Number(row.$err_count), 0)).toBe(3);
+});
+
 test("B42 zero-row table does not fire child required and scoped targets are resolved before fetch", async () => {
   const empty = makeClient({ fields: B42_FIELDS, records: [record({ $id: "1", top: "ok", T1: [], T2: [] })] });
   const result = await execute("VALIDATE APP41 (T1(req))", empty.client, { cacheContext: "b42-zero-row" }) as SelectResult;
@@ -365,6 +386,8 @@ test("B42 SUMMARY directly aggregates child rows and CHECK groups into the fixed
     { $id: "5", $err_subtable: "T1", $err_field: "num", $err_code: "ERR_NUMBER_INTEGER_DIGITS", $err_count: "2" },
     { $id: "5", $err_subtable: "", $err_field: "", $err_code: "ERR_CHECK", $err_count: "2" },
   ]));
+  expect(result.validateStats).toEqual({ errorRecords: 1, errorCount: 7 });
+  expect(result.rows.reduce((sum, row) => sum + Number(row.$err_count), 0)).toBe(7);
 });
 
 test("B42 detail groups by the original message, then decorates three-row child output only", async () => {
@@ -395,6 +418,7 @@ test("B42 SUMMARY preserves its five-column schema at zero errors", async () => 
   const result = await execute("VALIDATE APP41 SUMMARY", current.client, { cacheContext: "b42-summary-empty" }) as SelectResult;
   expect(result).toMatchObject({
     columns: ["$id", "$err_subtable", "$err_field", "$err_code", "$err_count"], rows: [], rowCount: 0,
+    validateStats: { errorRecords: 0, errorCount: 0 },
   });
 });
 

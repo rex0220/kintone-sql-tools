@@ -1,7 +1,8 @@
 import { mkdtempSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { buildOutput, parseTokenFile } from "../index";
+import { buildBatchStatementSummary, buildOutput, buildSelectSummary, parseTokenFile } from "../index";
+import type { BatchStatementResult, SelectResult } from "../../core";
 
 describe("cli integration helpers", () => {
   test("parseTokenFile normalizes APP keys", () => {
@@ -73,6 +74,22 @@ describe("cli integration helpers", () => {
     expect(markdown).toContain("| A\\|B | memo |");
     expect(markdown).toContain("| --- | --- |");
     expect(markdown).toContain("| x\\|y | line1<br>line2 |");
+  });
+
+  test("VALIDATE JSON includes validateStats and CLI summary appends both counts", () => {
+    const result: SelectResult = {
+      type: "SELECT", columns: ["$id", "$err_count"], rowCount: 1,
+      rows: [{ $id: "1", $err_count: "2" }],
+      validateStats: { errorRecords: 1, errorCount: 2 },
+    };
+    expect(JSON.parse(buildOutput(result, "json", false, false, {})).validateStats)
+      .toEqual({ errorRecords: 1, errorCount: 2 });
+    expect(buildSelectSummary(result)).toBe("rowCount=1 errorRecords=1 errorCount=2");
+
+    const summary = buildBatchStatementSummary({
+      index: 0, type: "VALIDATE", status: "success", result,
+    } as BatchStatementResult);
+    expect(summary).toBe("[1] VALIDATE success rowCount=1 errorRecords=1 errorCount=2");
   });
 });
 

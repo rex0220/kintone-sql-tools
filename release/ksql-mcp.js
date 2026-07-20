@@ -40242,7 +40242,11 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
   const rows = [];
   const detailRows = /* @__PURE__ */ new Map();
   const summaryRows = /* @__PURE__ */ new Map();
+  const errorRecordIds = /* @__PURE__ */ new Set();
+  let errorCount = 0;
   const appendError = (error51) => {
+    errorRecordIds.add(error51.id);
+    errorCount += 1;
     if (stmt.summary) {
       const key2 = JSON.stringify([error51.id, error51.subtable ?? "", error51.field, error51.code]);
       const current2 = summaryRows.get(key2);
@@ -40336,7 +40340,8 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
     type: "SELECT",
     columns: [...columns],
     rows,
-    rowCount: rows.length
+    rowCount: rows.length,
+    validateStats: { errorRecords: errorRecordIds.size, errorCount }
   };
   materializedMetaBySelectResult.set(result, existingValidationColumnMeta(stmt.summary === true));
   return result;
@@ -45500,7 +45505,8 @@ function buildBatchEnvelope(batch, options = {}) {
         columns: s.result.columns,
         rows: s.result.rows,
         rowCount: s.result.rowCount,
-        warnings: s.result.warnings ?? []
+        warnings: s.result.warnings ?? [],
+        ...s.result.validateStats ? { validateStats: s.result.validateStats } : {}
       });
     } else if (s.result?.type === "VALIDATION") {
       totalRows += s.result.errorCount;
@@ -47321,7 +47327,8 @@ function toSelectPayload(result) {
     columns: result.columns,
     rows: result.rows,
     rowCount: result.rowCount,
-    warnings: result.warnings ?? []
+    warnings: result.warnings ?? [],
+    ...result.validateStats ? { validateStats: result.validateStats } : {}
   };
 }
 function toAssertPayload(result) {

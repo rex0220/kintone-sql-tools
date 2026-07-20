@@ -148,7 +148,19 @@ message をキーに含めるのは、`CHECK` が `$err_field=''`、`$err_code='
 
 SUMMARY も `tempTableMaxRows` の対象であり、集約後の行数が上限を超えれば §3.5 と同じく error になる。SUMMARY は message・値・行ロケータを持たず、レコード横断の規模把握に使う。詳細9列は message 別のレコード内訳と全該当行のロケータリストを提供する。
 
-### 3.7 `$err_value` と B29 数値精度
+### 3.7 結果統計
+
+詳細／SUMMARY の両モードで、公開 `SelectResult` の optional フィールドとして次の統計を返す。
+
+```ts
+validateStats?: { errorRecords: number; errorCount: number }
+```
+
+`errorRecords` は違反を1件以上持つ distinct `$id` 数、`errorCount` は `appendError` 呼び出し総数、すなわち詳細／SUMMARY の集約前違反総数とする。したがって両モードとも結果行の `$err_count` 合計と一致する。違反0件でも `validateStats: { errorRecords: 0, errorCount: 0 }` を付ける。通常の SELECT 互換性を維持するため型は optional とし、汎用 SELECT、`SELECT * FROM #err`、EXPLAIN には付与しない。
+
+`VALIDATE … INTO #err` のバッチでは VALIDATE 文自身の `SelectResult` に統計を残し、一時表へは既存の固定列だけを実体化する。CLI の文サマリは `[1] VALIDATE success rowCount=… errorRecords=… errorCount=…`、単文サマリも `rowCount=… errorRecords=… errorCount=…` とする。JSON／MCP は `validateStats` を結果オブジェクトに含める。プラグインの結果ヘッダーは統計がある場合だけ `エラー {errorRecords} レコード / {errorCount} 件（表示 {rowCount} 行）` とし、ない結果は従来の `{rowCount} 件` を維持する。
+
+### 3.8 `$err_value` と B29 数値精度
 
 詳細モードの子セルでも B41 の `renderExistingValidationValue` を使う。空値・空配列は空文字、非空配列は code 配列 JSON、NUMBER は元字句を保持する（[existingRecordValidation.ts:1](../../src/core/existingRecordValidation.ts#L1)-[6](../../src/core/existingRecordValidation.ts#L6)）。子セルを flatten した文字列ではなく生値で検証・描画する。
 
@@ -280,6 +292,7 @@ SemVer を厳密に適用して固定結果 schema の加法変更も破壊的�
 - SUMMARY 結果0件でも5列 schema と列メタを保持する。`$id` / `$err_count` は number、他は string。
 - SUMMARY は詳細行を内部配列へ生成せず、トップレベル、複数子行、複数 error code を4列キーで正しく集約する。トップレベル count は通常1、子 count は該当行数になる。
 - CHECK の SUMMARY は `$err_subtable=''`, `$err_field=''`, `$err_code='ERR_CHECK'` で、同一親の発火 group 数を `$err_count` にする。詳細モードの CHECK message は非回帰。
+- 詳細／SUMMARY の `validateStats.errorCount` は集約前違反総数で各結果の `$err_count` 合計と一致し、`errorRecords` は distinct `$id` 数になる。0件でも0/0を返す。`INTO #err` の VALIDATE 文結果には付き、後段 SELECT には付かない。
 - `VALIDATE … INTO #err; SELECT … FROM #err` で詳細9列を参照できる。SUMMARY 5列も別一時表で参照できる。詳細と SUMMARY を同名 `#err` へ混在追記すると analyze 時に schema mismatch で fail-fast し、実行しない。
 - 詳細 / SUMMARY とも `tempTableMaxRows` は集約後行数へ適用し、超過時は既存行を変えず error になる。truncate / 部分成功にしない。
 - `WHERE` / `CHECK` の子参照は、演算子にかかわらず records API 前に一貫した `ArgumentError`。トップレベル WHERE/CHECK は非回帰。

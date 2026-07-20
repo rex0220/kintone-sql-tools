@@ -248,6 +248,11 @@ export interface SelectResult {
   columns: string[];
   /** 実際に返した行数（LIMIT 適用後） */
   rowCount: number;
+  /** VALIDATE の集約前エラー統計。汎用 SELECT には付与しない。 */
+  validateStats?: {
+    errorRecords: number;
+    errorCount: number;
+  };
   /** 実行時警告（例: 上限到達で打ち切り） */
   warnings?: string[];
   /** API 呼び出し計測値（execute() 経由の実行時のみ付与） */
@@ -926,10 +931,14 @@ async function executeExistingRecordValidationCore(
   const rows: ProcessRow[] = [];
   const detailRows = new Map<string, ProcessRow>();
   const summaryRows = new Map<string, ProcessRow>();
+  const errorRecordIds = new Set<string>();
+  let errorCount = 0;
   const appendError = (error: {
     id: string; field: string; code: string; message: string; value: string;
     subtable?: string; subrow?: number; subrowId?: string;
   }): void => {
+    errorRecordIds.add(error.id);
+    errorCount += 1;
     if (stmt.summary) {
       const key = JSON.stringify([error.id, error.subtable ?? "", error.field, error.code]);
       const current = summaryRows.get(key);
@@ -1017,6 +1026,7 @@ async function executeExistingRecordValidationCore(
     columns: [...columns],
     rows,
     rowCount: rows.length,
+    validateStats: { errorRecords: errorRecordIds.size, errorCount },
   };
   materializedMetaBySelectResult.set(result, existingValidationColumnMeta(stmt.summary === true));
   return result;

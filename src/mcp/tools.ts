@@ -289,6 +289,7 @@ function toSelectPayload(result: SelectResult) {
     rows: result.rows,
     rowCount: result.rowCount,
     warnings: result.warnings ?? [],
+    ...(result.validateStats ? { validateStats: result.validateStats } : {}),
   };
 }
 

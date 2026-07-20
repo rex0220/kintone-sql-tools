@@ -117,7 +117,10 @@ function renderSelect(result: SelectResult, opts: DisplayOptions): string {
     .join("");
 
   if (result.rows.length === 0) {
-    return `${warnHtml}${renderInfo("0 件でした。")}`;
+    const emptyMessage = result.validateStats
+      ? `エラー ${result.validateStats.errorRecords} レコード / ${result.validateStats.errorCount} 件（表示 0 行）`
+      : "0 件でした。";
+    return `${warnHtml}${renderInfo(emptyMessage)}`;
   }
 
   const headers = result.columns.length > 0 ? result.columns : Object.keys(viewRows[0]);
@@ -131,7 +134,9 @@ function renderSelect(result: SelectResult, opts: DisplayOptions): string {
   return `
 ${warnHtml}
 <div class="ksql-result-meta">
-  <span><span class="ksql-result-count">${result.rowCount}</span> 件</span>
+  <span>${result.validateStats
+    ? `エラー ${result.validateStats.errorRecords} レコード / ${result.validateStats.errorCount} 件（表示 <span class="ksql-result-count">${result.rowCount}</span> 行）`
+    : `<span class="ksql-result-count">${result.rowCount}</span> 件`}</span>
   <button type="button" class="ksql-result-full-btn" aria-label="全画面表示" title="全画面表示">⤢</button>
 </div>
 <div class="ksql-result-filter-row">
