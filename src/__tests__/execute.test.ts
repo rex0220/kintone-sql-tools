@@ -194,7 +194,15 @@ test("INSERT VALIDATE ONLY は全エラーを返しwrite APIを呼ばない", as
     type: "VALIDATION", operation: "INSERT", validatedRows: 2, validRows: 1, invalidRows: 1, errorCount: 2,
   });
   if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.columns).toEqual([
+    "code", "amount",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
   expect(result.errors.map((row) => row.$err_code)).toEqual(["ERR_REQUIRED", "ERR_RANGE_MAX"]);
+  expect(result.errors).toEqual(result.errors.map((row) => expect.objectContaining({
+    $err_value: "", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+  })));
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
   expect(result.metrics).toMatchObject({ postCalls: 0, putCalls: 0, deleteCalls: 0 });
@@ -215,10 +223,37 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
     type: "VALIDATION", operation: "UPSERT", validatedRows: 2, validRows: 0, invalidRows: 2, errorCount: 2,
   });
   if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.columns).toEqual([
+    "code", "name",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
   expect(result.errors.map((row) => row.$err_code)).toEqual(["ERR_KEY_DUP_SOURCE", "ERR_KEY_DUP_SOURCE"]);
+  expect(result.errors).toEqual(result.errors.map((row) => expect.objectContaining({
+    $err_value: "", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+  })));
   expect(client.getCalls.length).toBeGreaterThan(0);
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
+});
+
+test("INSERT VALIDATE ONLY はエラー0件でも10メタ列 schema を保持する", async () => {
+  const client = makeClient();
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const result = await execute(
+    "INSERT INTO APP100 (code) VALUES ('OK') VALIDATE ONLY",
+    client,
+    { cacheContext: "validate-insert-empty-errors-ten-meta" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors).toEqual([]);
+  expect(result.columns).toEqual([
+    "code",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
 });
 
 test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {

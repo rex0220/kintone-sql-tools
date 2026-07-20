@@ -25,6 +25,7 @@ export interface DmlValidationCandidate {
 
 export const VALIDATION_META_COLUMNS = [
   "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
 ] as const;
 
 export function validateDmlCandidates(
@@ -107,6 +108,10 @@ export function validateDmlCandidates(
       row["$err_field"] = error.field;
       row["$err_code"] = error.code;
       row["$err_message"] = error.message;
+      row["$err_value"] = "";
+      row["$err_subtable"] = "";
+      row["$err_subrow"] = "";
+      row["$err_subrow_id"] = "";
       errors.push(row);
     }
   }

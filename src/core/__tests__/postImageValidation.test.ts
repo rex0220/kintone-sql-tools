@@ -70,7 +70,7 @@ test("全 post-image を変更有無・対象 table に関係なく検証し 1-b
   ]);
   expect(result.errors[0]).toMatchObject({
     $id: "8", normalizedParent: "A,B", $err_statement: "4", $err_operation: "UPDATE",
-    $err_row: "1", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+    $err_row: "1", $err_value: "", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
   });
   expect(result.errors[2]).toMatchObject({ $err_subtable: "Target", $err_subrow: "1", $err_subrow_id: "t1" });
   expect(result.errors[3]).toMatchObject({ $err_subtable: "Target", $err_subrow: "2", $err_subrow_id: "t2" });
@@ -103,4 +103,11 @@ test("NUMBER が0行 table にしか定義されない post-image は precision 
   delete record.parentNumber;
   record.Other = { value: [] } as never;
   expect(postImageNeedsNumberPrecision(record, index)).toBe(false);
+});
+
+test("UPSERT operation は post-image error row にそのまま保持する", () => {
+  const index = buildPostImageFieldIndex(fields);
+  const result = validatePostImage(postImage(), index, undefined, 2, 4, "UPSERT");
+  expect(result.errors).not.toHaveLength(0);
+  expect(new Set(result.errors.map((row) => row.$err_operation))).toEqual(new Set(["UPSERT"]));
 });

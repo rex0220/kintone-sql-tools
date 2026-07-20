@@ -4801,12 +4801,10 @@ async function prepareDmlValidation(
     const info = infoByCode.get(column);
     if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info, stmt.appId));
   }
-  columnMeta.set("$err_statement", syntheticColumnMeta("number"));
-  columnMeta.set("$err_operation", syntheticColumnMeta("string"));
-  columnMeta.set("$err_row", syntheticColumnMeta("number"));
-  columnMeta.set("$err_field", syntheticColumnMeta("string"));
-  columnMeta.set("$err_code", syntheticColumnMeta("string"));
-  columnMeta.set("$err_message", syntheticColumnMeta("string"));
+  const numericValidationMeta = new Set<string>(["$err_statement", "$err_row"]);
+  for (const column of VALIDATION_META_COLUMNS) {
+    columnMeta.set(column, syntheticColumnMeta(numericValidationMeta.has(column) ? "number" : "string"));
+  }
   materializedMetaByValidationResult.set(result, columnMeta);
   return { result, candidates, invalidRowNumbers, columnMeta };
 }

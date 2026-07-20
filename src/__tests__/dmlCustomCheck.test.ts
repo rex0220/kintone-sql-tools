@@ -59,6 +59,9 @@ test("VALUES: group first-match, independent groups, message concat, and ERR_CHE
   expect(result.errors.map((row) => [row.$err_code, row.$err_field, row.$err_message])).toEqual([
     ["ERR_CHECK", "", "first=3"], ["ERR_CHECK", "", "b=2"],
   ]);
+  expect(result.errors).toEqual(result.errors.map((row) => expect.objectContaining({
+    $err_value: "", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+  })));
 });
 
 test("INSERT SELECT keeps trailing CHECK-only columns out of payload", async () => {
