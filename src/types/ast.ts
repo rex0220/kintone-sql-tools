@@ -72,11 +72,17 @@ export interface ExplainStatement {
 // ------------------------------------------------------------
 
 /** Existing-record constraint audit. This statement never writes to kintone. */
+export type ValidateTarget =
+  | { kind: "FIELD"; field: string }
+  | { kind: "SUBTABLE"; subtableCode: string; children: string[] };
+
 export interface ValidateStatement {
   type: "VALIDATE";
   appId: number;
-  /** Explicit audit targets. Omitted means constraints plus every top-level NUMBER. */
-  fields?: string[];
+  /** Explicit audit targets. Omitted means constraints plus every NUMBER, including subtable children. */
+  targets?: ValidateTarget[];
+  /** Aggregate violations by record, subtable, field, and error code. */
+  summary?: true;
   where: WhereExpr | null;
   checkGroups?: CheckGroup[];
   /** Batch-scoped materialization destination. */

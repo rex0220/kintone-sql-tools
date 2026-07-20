@@ -726,7 +726,18 @@ async function executeParsedStatement(
   }
 }
 
-const EXISTING_VALIDATION_COLUMNS = ["$id", "$err_field", "$err_code", "$err_message", "$err_value"];
+const EXISTING_VALIDATION_COLUMNS = [
+  "$id", "$err_field", "$err_code", "$err_message", "$err_value",
+  "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
+const EXISTING_VALIDATION_SUMMARY_COLUMNS = [
+  "$id", "$err_subtable", "$err_field", "$err_code", "$err_count",
+];
+
+interface ExistingValidationTarget {
+  field: KintoneFieldInfo;
+  subtableCode?: string;
+}
 
 function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
   return field.required === true
@@ -740,23 +751,63 @@ function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
 function resolveExistingValidationTargets(
   stmt: ValidateStatement,
   fieldInfos: readonly KintoneFieldInfo[]
-): KintoneFieldInfo[] {
-  const byCode = new Map(fieldInfos.map((field) => [field.code, field]));
-  const auditable = (field: KintoneFieldInfo) => !field.inSubtable
-    && (field.fieldType === "NUMBER" || hasAuditableConstraint(field));
-  if (stmt.fields === undefined) return fieldInfos.filter(auditable);
+): ExistingValidationTarget[] {
+  const topByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
+  const childrenByTable = new Map<string, KintoneFieldInfo[]>();
+  for (const field of fieldInfos) {
+    if (!field.inSubtable || !field.subtableCode) continue;
+    const children = childrenByTable.get(field.subtableCode) ?? [];
+    children.push(field);
+    childrenByTable.set(field.subtableCode, children);
+  }
+  const auditable = (field: KintoneFieldInfo) => field.fieldType === "NUMBER" || hasAuditableConstraint(field);
+  if (stmt.targets === undefined) return [
+    ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "SUBTABLE" && auditable(field)),
+    ...fieldInfos.filter((field) => field.inSubtable && !!field.subtableCode && auditable(field)),
+  ].map((field) => ({ field, ...(field.subtableCode ? { subtableCode: field.subtableCode } : {}) }));
 
+  const result: ExistingValidationTarget[] = [];
   const seen = new Set<string>();
-  return stmt.fields.map((code) => {
-    if (seen.has(code)) throw new Error(`ArgumentError: VALIDATE field ${code} is duplicated.`);
-    seen.add(code);
-    if (code === "$id") throw new Error("ArgumentError: VALIDATE cannot audit system field $id.");
-    const info = byCode.get(code);
-    if (!info) throw new Error(`ArgumentError: VALIDATE field ${code} does not exist.`);
-    if (info.inSubtable) throw new Error(`ArgumentError: VALIDATE field ${code} is a subtable child field.`);
-    if (!auditable(info)) throw new Error(`ArgumentError: VALIDATE field ${code} has no auditable constraint.`);
-    return info;
-  });
+  const add = (field: KintoneFieldInfo, subtableCode?: string): void => {
+    const key = subtableCode ? `${subtableCode}\u0000${field.code}` : field.code;
+    if (seen.has(key)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} が重複しています。`);
+    seen.add(key);
+    if (!auditable(field)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} には監査可能な制約がありません。`);
+    result.push({ field, ...(subtableCode ? { subtableCode } : {}) });
+  };
+  for (const target of stmt.targets) {
+    if (target.kind === "SUBTABLE") {
+      const children = childrenByTable.get(target.subtableCode);
+      if (!children) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} は存在しません。`);
+      if (target.children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} には1つ以上の子フィールドが必要です。`);
+      for (const code of target.children) {
+        const child = children.find((field) => field.code === code);
+        if (!child) {
+          const belongsElsewhere = [...childrenByTable.entries()].some(([table, fields]) => table !== target.subtableCode && fields.some((field) => field.code === code));
+          throw new Error(belongsElsewhere
+            ? `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に属していません。`
+            : `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に存在しません。`);
+        }
+        add(child, target.subtableCode);
+      }
+      continue;
+    }
+    const code = target.field;
+    if (code === "$id") throw new Error("ArgumentError: VALIDATE ではシステムフィールド $id を監査できません。");
+    const top = topByCode.get(code);
+    if (top?.fieldType === "SUBTABLE") {
+      const children = (childrenByTable.get(code) ?? []).filter(auditable);
+      if (children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${code} には監査可能な子フィールドがありません。`);
+      children.forEach((child) => add(child, code));
+      continue;
+    }
+    if (top) { add(top); continue; }
+    if ([...childrenByTable.values()].some((children) => children.some((field) => field.code === code))) {
+      throw new Error(`ArgumentError: VALIDATE の子フィールド ${code} は所有サブテーブルを含む T(${code}) 形式で指定してください。`);
+    }
+    throw new Error(`ArgumentError: VALIDATE のフィールド ${code} は存在しません。`);
+  }
+  return result;
 }
 
 function collectValidateWhereFields(where: WhereExpr | null): string[] {
@@ -775,11 +826,12 @@ function collectValidateWhereFields(where: WhereExpr | null): string[] {
   return fields;
 }
 
-function existingValidationColumnMeta(): MaterializedColumnMetaMap {
-  return new Map(EXISTING_VALIDATION_COLUMNS.map((column) => [column, {
-    fieldType: column === "$id" ? "KSQL_NUMBER" : "KSQL_STRING",
-    sortKind: column === "$id" ? "number" as const : "string" as const,
-    semantics: syntheticSemantics(column === "$id" ? "number" : "string"),
+function existingValidationColumnMeta(summary = false): MaterializedColumnMetaMap {
+  const columns = summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
+  return new Map(columns.map((column) => [column, {
+    fieldType: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "KSQL_NUMBER" : "KSQL_STRING",
+    sortKind: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" as const : "string" as const,
+    semantics: syntheticSemantics(column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" : "string"),
   }]));
 }
 
@@ -800,33 +852,40 @@ async function executeExistingRecordValidationCore(
   cacheContext: string
 ): Promise<SelectResult> {
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
-  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const infoByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
+  const childCodes = new Set(fieldInfos.filter((field) => field.inSubtable).map((field) => field.code));
   const targets = resolveExistingValidationTargets(stmt, fieldInfos);
   const checkGroups = stmt.checkGroups ?? [];
   const checkRefs = collectCheckFieldRefs(checkGroups);
   for (const ref of checkRefs) {
-    if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+    if (ref.field !== "$id" && !infoByCode.has(ref.field) && !childCodes.has(ref.field)) {
       throw customCheckParseError(`CHECK のフィールド ${ref.field} は APP${stmt.appId} に存在しません`);
     }
+    if (ref.field !== "$id" && !infoByCode.has(ref.field) && childCodes.has(ref.field)) {
+      throw new Error(`ArgumentError: VALIDATE の CHECK ではサブテーブル子フィールド ${ref.field} を参照できません。`);
+    }
   }
-  const evaluationTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const evaluationTypes = new Map([...infoByCode].map(([code, field]) => [code, field.fieldType]));
   evaluationTypes.set("$id", "RECORD_NUMBER");
   assertCheckComparisonTypes(stmt, evaluationTypes);
 
   const whereFields = collectValidateWhereFields(stmt.where);
   const requiredFields = [...new Set([
     "$id",
-    ...targets.map((field) => field.code),
+    ...targets.map((target) => target.subtableCode ?? target.field.code),
     ...whereFields,
     ...checkRefs.map((ref) => ref.field),
   ])];
   for (const field of whereFields) {
-    if (field !== "$id" && !infoByCode.has(field)) {
+    if (field !== "$id" && !infoByCode.has(field) && !childCodes.has(field)) {
       throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${stmt.appId}.`);
+    }
+    if (field !== "$id" && !infoByCode.has(field) && childCodes.has(field)) {
+      throw new Error(`ArgumentError: VALIDATE の WHERE ではサブテーブル子フィールド ${field} を参照できません。`);
     }
   }
 
-  const numberPrecision = targets.some((field) => field.fieldType === "NUMBER")
+  const numberPrecision = targets.some((target) => target.field.fieldType === "NUMBER")
     ? await getNumberPrecisionCached(stmt.appId, client, cacheContext)
     : undefined;
   const semantics = (field: FieldRef) => field.field === "$id"
@@ -838,8 +897,8 @@ async function executeExistingRecordValidationCore(
   if (capability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
   }
-  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
-  const fieldOptions = new Map(fieldInfos.flatMap((field) => field.optionOrder
+  const fieldTypes = new Map([...infoByCode].map(([code, field]) => [code, field.fieldType]));
+  const fieldOptions = new Map([...infoByCode.values()].flatMap((field) => field.optionOrder
     ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
     : []));
   const prefilter = stmt.where === null
@@ -865,36 +924,81 @@ async function executeExistingRecordValidationCore(
   })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
 
   const rows: ProcessRow[] = [];
-  for (const row of validationRows) {
-    for (const field of targets) {
-      const raw = row.record[field.code]?.value;
-      const validation = validateAndNormalizeDmlValue(raw, field, numberPrecision);
-      if (validation.ok) continue;
-      rows.push({
-        "$id": row.id,
-        "$err_field": field.code,
-        "$err_code": validation.code,
-        "$err_message": validation.message,
-        "$err_value": renderExistingValidationValue(raw, field.fieldType),
+  const summaryRows = new Map<string, ProcessRow>();
+  const appendError = (error: {
+    id: string; field: string; code: string; message: string; value: string;
+    subtable?: string; subrow?: number; subrowId?: string;
+  }): void => {
+    if (stmt.summary) {
+      const key = JSON.stringify([error.id, error.subtable ?? "", error.field, error.code]);
+      const current = summaryRows.get(key);
+      if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
+      else summaryRows.set(key, {
+        "$id": error.id,
+        "$err_subtable": error.subtable ?? "",
+        "$err_field": error.field,
+        "$err_code": error.code,
+        "$err_count": "1",
       });
+      return;
+    }
+    rows.push({
+      "$id": error.id,
+      "$err_field": error.field,
+      "$err_code": error.code,
+      "$err_message": error.message,
+      "$err_value": error.value,
+      "$err_subtable": error.subtable ?? "",
+      "$err_subrow": error.subrow === undefined ? "" : String(error.subrow),
+      "$err_subrow_id": error.subrowId ?? "",
+    });
+  };
+  const topTargets = targets.filter((target) => !target.subtableCode);
+  const subtableTargets = new Map<string, ExistingValidationTarget[]>();
+  for (const target of targets) {
+    if (!target.subtableCode) continue;
+    const children = subtableTargets.get(target.subtableCode) ?? [];
+    children.push(target);
+    subtableTargets.set(target.subtableCode, children);
+  }
+  for (const row of validationRows) {
+    for (const target of topTargets) {
+      const raw = row.record[target.field.code]?.value;
+      const validation = validateAndNormalizeDmlValue(raw, target.field, numberPrecision);
+      if (!validation.ok) appendError({
+        id: row.id, field: target.field.code, code: validation.code,
+        message: validation.message, value: renderExistingValidationValue(raw, target.field.fieldType),
+      });
+    }
+    for (const [tableCode, childTargets] of subtableTargets) {
+      const tableRows = row.record[tableCode]?.value;
+      if (!Array.isArray(tableRows)) continue;
+      for (let i = 0; i < tableRows.length; i++) {
+        const tableRow = tableRows[i] as { id?: string | number; value?: Record<string, { value?: unknown }> };
+        for (const target of childTargets) {
+          const raw = tableRow.value?.[target.field.code]?.value;
+          const validation = validateAndNormalizeDmlValue(raw, target.field, numberPrecision);
+          if (!validation.ok) appendError({
+            id: row.id, field: target.field.code, code: validation.code,
+            message: validation.message, value: renderExistingValidationValue(raw, target.field.fieldType),
+            subtable: tableCode, subrow: i + 1, subrowId: String(tableRow.id ?? ""),
+          });
+        }
+      }
     }
     for (const check of evaluateCustomChecks(checkGroups, row.flat, (field) => evaluationTypes.get(field.field))) {
-      rows.push({
-        "$id": row.id,
-        "$err_field": "",
-        "$err_code": "ERR_CHECK",
-        "$err_message": check.message,
-        "$err_value": "",
-      });
+      appendError({ id: row.id, field: "", code: "ERR_CHECK", message: check.message, value: "" });
     }
   }
+  if (stmt.summary) rows.push(...summaryRows.values());
+  const columns = stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   const result: SelectResult = {
     type: "SELECT",
-    columns: [...EXISTING_VALIDATION_COLUMNS],
+    columns: [...columns],
     rows,
     rowCount: rows.length,
   };
-  materializedMetaBySelectResult.set(result, existingValidationColumnMeta());
+  materializedMetaBySelectResult.set(result, existingValidationColumnMeta(stmt.summary === true));
   return result;
 }
 
@@ -1231,7 +1335,7 @@ async function executeBatchStatement(
         result.columns,
         result.rows,
         options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
-        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta()
+        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta(resolvedStmt.summary === true)
       );
     }
     return { result };
@@ -6462,6 +6566,7 @@ interface ExplainWhereAnalysis {
 interface ValidateExplainInfo {
   targetFields: string[];
   fetchFields: string[];
+  subtables: Map<string, number>;
   capability: PredicateCapabilityResult;
   prefilter: WhereExpr | null;
   numberPrecision: boolean;
@@ -6554,21 +6659,28 @@ async function buildExplainWhereAnalysis(
       const validate = node as ValidateStatement;
       fieldApps.add(validate.appId);
       const fields = await getFieldsCached(validate.appId, tracedClient, cacheContext);
-      const infoByCode = new Map(fields.map((field) => [field.code, field]));
+      const infoByCode = new Map(fields.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
+      const childCodes = new Set(fields.filter((field) => field.inSubtable).map((field) => field.code));
       const targets = resolveExistingValidationTargets(validate, fields);
       const checks = collectCheckFieldRefs(validate.checkGroups ?? []);
       const whereFields = collectValidateWhereFields(validate.where);
       for (const ref of checks) {
-        if (ref.field !== "$id" && !infoByCode.has(ref.field)) {
+        if (ref.field !== "$id" && !infoByCode.has(ref.field) && !childCodes.has(ref.field)) {
           throw customCheckParseError(`CHECK のフィールド ${ref.field} は APP${validate.appId} に存在しません`);
+        }
+        if (ref.field !== "$id" && !infoByCode.has(ref.field) && childCodes.has(ref.field)) {
+          throw new Error(`ArgumentError: VALIDATE の CHECK ではサブテーブル子フィールド ${ref.field} を参照できません。`);
         }
       }
       for (const field of whereFields) {
-        if (field !== "$id" && !infoByCode.has(field)) {
+        if (field !== "$id" && !infoByCode.has(field) && !childCodes.has(field)) {
           throw new Error(`ArgumentError: WHERE field ${field} does not exist in APP${validate.appId}.`);
         }
+        if (field !== "$id" && !infoByCode.has(field) && childCodes.has(field)) {
+          throw new Error(`ArgumentError: VALIDATE の WHERE ではサブテーブル子フィールド ${field} を参照できません。`);
+        }
       }
-      const types = new Map(fields.map((field) => [field.code, field.fieldType]));
+      const types = new Map([...infoByCode].map(([code, field]) => [code, field.fieldType]));
       types.set("$id", "RECORD_NUMBER");
       assertCheckComparisonTypes(validate, types);
       const capability = classifyWhereCapability(validate.where, (field) => field.field === "$id"
@@ -6579,8 +6691,8 @@ async function buildExplainWhereAnalysis(
       if (capability.capability === "UNSUPPORTED") {
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
       }
-      const fieldTypes = new Map(fields.map((field) => [field.code, field.fieldType]));
-      const fieldOptions = new Map(fields.flatMap((field) => field.optionOrder
+      const fieldTypes = new Map([...infoByCode].map(([code, field]) => [code, field.fieldType]));
+      const fieldOptions = new Map([...infoByCode.values()].flatMap((field) => field.optionOrder
         ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
         : []));
       const prefilter = validate.where === null
@@ -6593,14 +6705,16 @@ async function buildExplainWhereAnalysis(
               fieldOptions,
               allowKlike: false,
             });
-      const needsPrecision = targets.some((field) => field.fieldType === "NUMBER");
+      const needsPrecision = targets.some((target) => target.field.fieldType === "NUMBER");
       if (needsPrecision) {
         numberPrecisionApps.add(validate.appId);
         await getNumberPrecisionCached(validate.appId, tracedClient, cacheContext);
       }
       validateExplainInfo.set(validate, {
-        targetFields: targets.map((field) => field.code),
-        fetchFields: [...new Set(["$id", ...targets.map((field) => field.code), ...whereFields, ...checks.map((ref) => ref.field)])],
+        targetFields: targets.map((target) => target.subtableCode ? `${target.subtableCode}(${target.field.code})` : target.field.code),
+        fetchFields: [...new Set(["$id", ...targets.map((target) => target.subtableCode ?? target.field.code), ...whereFields, ...checks.map((ref) => ref.field)])],
+        subtables: new Map([...new Set(targets.flatMap((target) => target.subtableCode ? [target.subtableCode] : []))]
+          .map((table) => [table, targets.filter((target) => target.subtableCode === table).length])),
         capability,
         prefilter,
         numberPrecision: needsPrecision,
@@ -6975,6 +7089,12 @@ function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
   lines.push(`  kintone query: ${info.prefilter === null ? "(全件取得)" : whereToKintone(info.prefilter)}`);
   lines.push(`  audit fields:  ${info.targetFields.length === 0 ? "(なし)" : info.targetFields.join(", ")}`);
   lines.push(`  fetch fields:  ${info.fetchFields.join(", ")}`);
+  lines.push(`  mode:          ${stmt.summary ? "SUMMARY" : "DETAIL"}`);
+  if (info.subtables.size > 0) lines.push(`  subtable audit: ${[...info.subtables].map(([table, count]) => `${table}(${count} fields)`).join(", ")}`);
+  lines.push(`  output schema: ${(stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS).join(", ")}`);
+  lines.push(stmt.summary
+    ? "  aggregation:   record/subtable/field/code; row locator=none"
+    : "  row locator:   $err_subrow (1-based display order), $err_subrow_id (persistent row id)");
   lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
   lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");
