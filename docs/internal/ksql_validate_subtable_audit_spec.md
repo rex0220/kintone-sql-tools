@@ -1,7 +1,7 @@
 # B42 — `VALIDATE` サブテーブル子フィールド監査仕様
 
-- ステータス: 仕様 R1・Claude レビュー済（2026-07-20・P1×3 / P2×2 / P3×1＝§11。**R2 反映待ち**。引用 file:line は全数裏取り済みで正確・§6 の WHERE 潜在ギャップ指摘も実装確認で妥当。P1-3=エラー行爆発と SUMMARY はユーザー発案・方針承認済み）
-- 対象: B41 `VALIDATE APP…` のサブテーブルセル監査
+- ステータス: 仕様 R2・Claude 再レビュー済（2026-07-20・§11 の P1×3/P2×2/P3×1 を全て本文反映・R2 新規引用（soft keyword 実装／appendValidationErrors／VALIDATE バッチ経路／CHECK 先勝ち／台帳行番号）を全数裏取り一致・**指摘なし＝ユーザー承認で実装着手可**）
+- 対象: B41 `VALIDATE APP…` のサブテーブルセル監査と生成時集約 `SUMMARY`
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B42
 - 親仕様: [ksql_existing_record_validation_spec.md](ksql_existing_record_validation_spec.md) B41
 
@@ -9,20 +9,22 @@
 
 B41（v3.5.0）の `VALIDATE APP…` は、保存済みレコードを組み込み制約と任意の `CHECK` で検査する read-only 文である。一方、B41 v1 は対象をトップレベルフィールドに限定し、サブテーブルセル監査を「行番号付き」の v2 候補へ明示的に送った（[ksql_existing_record_validation_spec.md:15](ksql_existing_record_validation_spec.md#L15)、[同:89](ksql_existing_record_validation_spec.md#L89)）。言語リファレンスも、`(fields)` 省略時の対象を制約付きトップレベルフィールドと全トップレベル `NUMBER` としている（[ksql_language_reference.md:2087](../ksql_language_reference.md#L2087)）。したがって現状は文書と実装が一致した既知の対象外であり、silent regression ではない。
 
-しかし実利用では、テーブル内の必須、数値上下限、文字数、選択肢、B29 整数部桁超過が結果へ一切現れず、既存データ監査として実害のある抜けになる。台帳 B42 はこの不足を実需ありの実装候補として記録している（[ksql_issue_tracker.md:37](../ksql_issue_tracker.md#L37)）。現行実装も、既定対象から `inSubtable` を除外し、明示指定した子フィールドを `ArgumentError` にしている（[execute.ts:745](../../src/execute.ts#L745)、[execute.ts:756](../../src/execute.ts#L756)）。
+しかし実利用では、テーブル内の必須、数値上下限、文字数、選択肢、B29 整数部桁超過が結果へ一切現れず、既存データ監査として実害のある抜けになる。台帳 B42 はこの不足を実需ありの実装候補として記録している（[ksql_issue_tracker.md:37](../ksql_issue_tracker.md#L37)）。現行実装も、既定対象から `inSubtable` を除外し、明示指定した子フィールドを `ArgumentError` にしている（[execute.ts:745](../../src/execute.ts#L745)-[747](../../src/execute.ts#L747)、[execute.ts:754](../../src/execute.ts#L754)-[757](../../src/execute.ts#L757)）。
 
-本仕様の目的は、B41 の read-only、完全入力、組み込み検証の生値利用という契約を維持したまま、各サブテーブル行の監査を追加することである。推奨案は次のとおり。
+本仕様は、B41 の read-only、完全入力、組み込み検証の生値利用という契約を維持し、次を B42 v1 に一括して追加する。
 
 - `(fields)` 省略時は、トップレベルに加えて、制約を持つサブテーブル子フィールドと全子 `NUMBER` を既定対象に含める。
-- エラー位置は IMPORT の前例に合わせ、既存5列の後ろへ `$err_subtable` と `$err_subrow` を追加する。
-- `$err_subrow` は取得時の表示順を 1 から数えた序数とし、kintone の永続行 `id` は R1 では出力しない。
+- 詳細モードの固定スキーマは既存5列の末尾へ `$err_subtable`、`$err_subrow`、`$err_subrow_id` を加えた8列とする。
+- `$err_subrow` は取得時の表示順を1から数えた序数、`$err_subrow_id` は kintone の永続サブテーブル行 `id` とする。
 - `(fields)` はテーブルコードで子全体を選べる。子の限定は `テーブル(子, …)` とし、裸の子コードは拒否する。
+- 大量違反でも詳細行を生成せず集計できる `SUMMARY` を B42 v1 に同梱する。
 - `CHECK` と `WHERE` のサブテーブル子参照は対象外のままとする。
 
 ## 2. 構文
 
 ```sql
 VALIDATE <app> [ ( <target1>, <target2>, ... ) ]
+[ SUMMARY ]
 [ WHERE <トップレベル条件> ]
 [ CHECK WHEN <トップレベル条件> THEN <メッセージ> ... ]
 [ INTO #err ];
@@ -32,10 +34,12 @@ VALIDATE <app> [ ( <target1>, <target2>, ... ) ]
            | <テーブルコード> ( <子フィールド1>, <子フィールド2>, ... )
 ```
 
+`SUMMARY` の位置は `(fields)` の後、`WHERE` の前に確定する。現行 `parseValidate` は app と任意の field list を読んだ直後に `WHERE`、`CHECK`、`INTO` の順で読むため（[parser.ts:668](../../src/parser/parser.ts#L668)-[692](../../src/parser/parser.ts#L692)）、field list の直後で `SUMMARY` を消費すれば既存の句順を崩さない。`SUMMARY` は予約語に追加せず、`IDENT` の値を照合する soft keyword とする。B41 の文頭 `VALIDATE` は `IDENT` dispatch（[parser.ts:257](../../src/parser/parser.ts#L257)-[269](../../src/parser/parser.ts#L269)）、B37 の `CHECK` は `CHECK WHEN` の並びだけを認識する soft keyword（[parser.ts:2658](../../src/parser/parser.ts#L2658)-[2673](../../src/parser/parser.ts#L2673)）であり、共通 helper は `IDENT` と大文字化した値を照合する（[parser.ts:2735](../../src/parser/parser.ts#L2735)-[2736](../../src/parser/parser.ts#L2736)）。これは実装前の確定仕様であり、`SUMMARY` の AST flag と parser test は未実装・未確認である。
+
 例:
 
 ```sql
--- トップレベルと全サブテーブルの監査対象を自動導出
+-- トップレベルと全サブテーブルの監査対象を自動導出する詳細監査
 VALIDATE APP100;
 
 -- 明細テーブル内の監査可能な子をすべて監査
@@ -44,21 +48,34 @@ VALIDATE APP100 (明細);
 -- トップレベルの顧客コードと、明細の数量・単価だけを監査
 VALIDATE APP100 (顧客コード, 明細(数量, 単価)) INTO #err;
 SELECT $id, $err_field, $err_code, $err_message, $err_value,
-       $err_subtable, $err_subrow
+       $err_subtable, $err_subrow, $err_subrow_id
 FROM #err;
+
+-- 詳細行を作らず、親×テーブル×フィールド×コードで件数化
+VALIDATE APP100 SUMMARY INTO #summary;
 ```
 
-現行 parser は括弧内を平坦な識別子配列として読み（[parser.ts:677](../../src/parser/parser.ts#L677)-[680](../../src/parser/parser.ts#L680)）、AST も `fields?: string[]` である（[ast.ts:75](../../src/types/ast.ts#L75)-[83](../../src/types/ast.ts#L83)）。`テーブル(子…)` を採用する実装では、IMPORT の target と同様に親子スコープを保持する `ValidateTarget` union へ変更する。
+現行 parser は括弧内を平坦な識別子配列として読み（[parser.ts:677](../../src/parser/parser.ts#L677)-[680](../../src/parser/parser.ts#L680)）、AST も `fields?: string[]` である（[ast.ts:75](../../src/types/ast.ts#L75)-[83](../../src/types/ast.ts#L83)）。`テーブル(子…)` と `SUMMARY` を採用する実装では、IMPORT の target と同様に親子スコープを保持する `ValidateTarget` union と `summary?: true` 相当へ変更する。
 
 ### 2.1 `(fields)` の解決規則
 
 1. トップレベルの監査可能フィールドコードは、その1フィールドを選ぶ。
 2. テーブルコード単独は、そのテーブルに直接属する「制約あり、または `NUMBER`」の子フィールドすべてへ展開する。監査可能な子が0件なら `ArgumentError` とする。
 3. `テーブル(子…)` は、指定テーブルに直接属する監査可能な子だけを選ぶ。未知のテーブル、所属違い、重複、制約なしかつ非 `NUMBER` の子は、レコード取得前に `ArgumentError` とする。
-4. 裸の子フィールドコードは引き続き拒否する。ただし現行の一律メッセージ（[execute.ts:756](../../src/execute.ts#L756)）は、`VALIDATE child X requires an owning subtable target such as T(X)` 相当へ更新する。
+4. 裸の子フィールドコードは引き続き拒否する。ただし現行の一律メッセージ（[execute.ts:754](../../src/execute.ts#L754)-[757](../../src/execute.ts#L757)）は、`VALIDATE child X requires an owning subtable target such as T(X)` 相当へ更新する。
 5. 同じ実フィールドを、テーブル単独と `テーブル(子…)` の組合せ等で二重指定した場合も重複エラーとする。
 
-裸の子コードを採らない理由は、子コードをアプリ全体で一意と仮定できないためである。フォーム定義はテーブルごとの `fields` に子を保持し（[formFieldInfo.ts:27](../../src/core/formFieldInfo.ts#L27)-[36](../../src/core/formFieldInfo.ts#L36)）、現行テストも別テーブルの同名子コードを明示的に扱う（[formFieldInfo.test.ts:54](../../src/core/__tests__/formFieldInfo.test.ts#L54)-[61](../../src/core/__tests__/formFieldInfo.test.ts#L61)）。よって「kintone 制約により子コードはアプリ内で必ず一意」という前提は、本リポジトリからは確認できず、むしろ現行契約と矛盾する。[公式フォーム取得 API](https://cybozu.dev/ja/kintone/docs/rest-api/apps/form/get-form-fields/) も子定義をテーブルの `fields` 配下に返す。R1 はスコープ付き解決を必須とし、グローバル一意性には依存しない。
+裸の子コードを採らない理由は、子コードをアプリ全体で一意と仮定できないためである。フォーム定義はテーブルごとの `fields` に子を保持し（[formFieldInfo.ts:27](../../src/core/formFieldInfo.ts#L27)-[36](../../src/core/formFieldInfo.ts#L36)）、現行テストも別テーブルの同名子コードを明示的に扱う（[formFieldInfo.test.ts:54](../../src/core/__tests__/formFieldInfo.test.ts#L54)-[61](../../src/core/__tests__/formFieldInfo.test.ts#L61)）。よって B42 はスコープ付き解決を必須とし、グローバル一意性には依存しない。
+
+### 2.2 `VALIDATE APP100$明細` を採らない理由
+
+サブテーブル仮想テーブル `APP100$明細` は SELECT とサブテーブル DML の正式な言語形式であり、`_pid`、`_rid`、`_idx` を公開している（[ksql_language_reference.md:2247](../ksql_language_reference.md#L2247)-[2257](../ksql_language_reference.md#L2257)）。それでも B42 の監査対象指定には採らない。
+
+1. 仮想テーブル形式では、トップレベル違反と複数テーブルの子違反を1文で混在監査できない。
+2. 親 `VALIDATE APP100` の5列系と子 `VALIDATE APP100$明細` の8列系に `#err` が分かれ、同じ監査結果として扱えない。
+3. B41 の `WHERE` と `CHECK` は親レコード単位で評価する契約であり、子仮想行を主語にすると、一致子だけを監査するか親の全子を監査するかという別の意味論が必要になる。
+
+したがって、親アプリを主語にして `Table(child, …)` で対象をスコープする。現行 parser の仮想テーブル明示拒否（[parser.ts:671](../../src/parser/parser.ts#L671)-[675](../../src/parser/parser.ts#L675)）は維持し、メッセージを `VALIDATE APP100$明細 is not supported; use VALIDATE APP100 (明細)` 相当の親アプリ形式への案内へ更新する。
 
 ## 3. 意味論
 
@@ -69,9 +86,9 @@ FROM #err;
 - 制約を持つトップレベルフィールドと全トップレベル `NUMBER`。
 - 各サブテーブルに直接属する、制約を持つ子フィールドと全子 `NUMBER`。
 
-「制約あり」は B41 と同じく `required`、`minValue`、`maxValue`、`minLength`、`maxLength`、選択肢定義のいずれかを持つことをいう。現行判定はこれらを `hasAuditableConstraint` に集約し、さらに `NUMBER` を常時対象にする（[execute.ts:731](../../src/execute.ts#L731)-[747](../../src/execute.ts#L747)）。B42 はこの判定から `!field.inSubtable` だけを外すのではなく、親テーブルとの対応を維持した target へ組み替える。
+「制約あり」は B41 と同じく `required`、`minValue`、`maxValue`、`minLength`、`maxLength`、選択肢定義のいずれかを持つことをいう。現行判定はこれらを `hasAuditableConstraint` に集約し、さらに `NUMBER` を常時対象にする（[execute.ts:731](../../src/execute.ts#L731)-[747](../../src/execute.ts#L747)）。B42 は親テーブルとの対応を維持した target descriptor へ組み替える。
 
-子を既定対象へ含めるのは推奨かつ必須とする。明示指定時だけ対応すると、最も一般的な `VALIDATE APP100` に監査の抜けが残り、B42 の目的を満たさない。既存利用者では、同じ SQL の違反行が増える可能性がある。これは意図した監査範囲の拡大だが、互換性上は結果集合の変更であり、§8 の SemVer 判断へ反映する。
+子を既定対象へ含めるのは必須とする。明示指定時だけ対応すると、最も一般的な `VALIDATE APP100` に監査の抜けが残り、B42 の目的を満たさない。既存利用者では同じ SQL の違反行が増える可能性があるが、これは監査の抜けの修正であり、§8 の minor 判断へ反映する。
 
 ### 3.2 取得と行展開
 
@@ -85,148 +102,202 @@ $id
 ∪ CHECK 参照（トップレベルのみ）
 ```
 
-子コード自体を `fields` へ入れてはならない。[kintone の複数レコード取得 API](https://cybozu.dev/ja/kintone/docs/rest-api/records/get-records/) は、テーブル内フィールドを `fields` に直接指定できず、親テーブルコードを指定するとその全子を返す。現行 B41 は target のコードをそのまま `requiredFields` へ入れるため（[execute.ts:816](../../src/execute.ts#L816)-[822](../../src/execute.ts#L822)）、B42 では target の表示コードと fetch コードを分離する必要がある。取得済みの親レコードでは、テーブル値が行配列、その各要素が `id` と子セルの `value` を持つ形で既存サブテーブル adapter が処理している（[subtableAdapter.ts:18](../../src/converter/subtableAdapter.ts#L18)-[40](../../src/converter/subtableAdapter.ts#L40)）。
+子コード自体を `fields` へ入れてはならない。現行 B41 は target のコードをそのまま `requiredFields` へ入れるため（[execute.ts:816](../../src/execute.ts#L816)-[822](../../src/execute.ts#L822)）、B42 では target の表示コードと fetch コードを分離する。取得済みの親レコードでは、テーブル値が行配列、その各要素が `id` と子セルの `value` を持つ形で既存 adapter が処理している（[subtableAdapter.ts:18](../../src/converter/subtableAdapter.ts#L18)-[40](../../src/converter/subtableAdapter.ts#L40)）。
 
-レコードごとに、トップレベル検証後、対象テーブルをフォーム順、各テーブル行を取得時の表示順、対象子をフォーム順で走査する。明示指定時は target の記述順を優先し、テーブル内では行の表示順、子の記述順とする。最後に既存トップレベル `CHECK` を評価する。これにより同一入力に対する出力順を決定的にする。
+レコードごとに、トップレベル検証後、対象テーブルを**フォーム定義応答の列挙順**、各テーブル行を取得時の表示順、対象子をフォーム定義応答の列挙順で走査する。フォーム定義の flatten は `Object.values(properties)` を列挙する（[formFieldInfo.ts:48](../../src/core/formFieldInfo.ts#L48)-[56](../../src/core/formFieldInfo.ts#L56)）ため、同一入力に対して決定的だがフォームのレイアウト順は保証しない。明示指定時は target の記述順を優先し、テーブル内では行の表示順、子の記述順とする。最後に既存トップレベル `CHECK` を評価する。
 
-### 3.3 セル検証
+### 3.3 詳細モードのセル検証
 
-各子セルの生値 `tableRow.value[childCode].value` を、対応する子 `KintoneFieldInfo` とアプリの `numberPrecision` とともに `validateAndNormalizeDmlValue` へ渡す。フォーム flatten は子へ `required`、min/max、長さ、選択肢、`inSubtable`、`subtableCode` を付ける（[formFieldInfo.ts:58](../../src/core/formFieldInfo.ts#L58)-[76](../../src/core/formFieldInfo.ts#L76)）。検証 primitive 自体は `inSubtable` を分岐条件にせず、必須、数値、範囲、桁、長さ、選択肢を `KintoneFieldInfo` から評価する（[dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106)）。IMPORT も、スコープ解決した子 info を同じ primitive へ渡している（[importRecordValidation.ts:110](../../src/import/importRecordValidation.ts#L110)-[115](../../src/import/importRecordValidation.ts#L115)、[同:140](../../src/import/importRecordValidation.ts#L140)-[144](../../src/import/importRecordValidation.ts#L144)）。したがって子 info への再利用は成立する。
+各子セルの生値 `tableRow.value[childCode].value` を、対応する子 `KintoneFieldInfo` とアプリの `numberPrecision` とともに `validateAndNormalizeDmlValue` へ渡す。フォーム flatten は子へ `required`、min/max、長さ、選択肢、`inSubtable`、`subtableCode` を付ける（[formFieldInfo.ts:58](../../src/core/formFieldInfo.ts#L58)-[76](../../src/core/formFieldInfo.ts#L76)）。検証 primitive 自体は `inSubtable` を分岐条件にせず、必須、数値、範囲、桁、長さ、選択肢を `KintoneFieldInfo` から評価する（[dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106)）。IMPORT もスコープ解決した子 info を同じ primitive へ渡している（[importRecordValidation.ts:110](../../src/import/importRecordValidation.ts#L110)-[115](../../src/import/importRecordValidation.ts#L115)、[同:140](../../src/import/importRecordValidation.ts#L140)-[144](../../src/import/importRecordValidation.ts#L144)）。
 
-1セルの検証結果が NG なら1エラー行を出す。現行 primitive は順に検査して最初の違反を返すため、同一セルから同時に複数の組み込み違反を列挙しない。この優先規則はトップレベル B41 と同じである（[dmlValidation.ts:56](../../src/core/dmlValidation.ts#L56)-[105](../../src/core/dmlValidation.ts#L105)）。ただし全行・全対象子セルを走査するので、同じレコード、同じテーブル行に複数の不良セルがあればセルごとに別行となる。
+1セルの検証結果が NG なら1エラー行を出す。現行 primitive は順に検査して最初の違反を返すため、同一セルから同時に複数の組み込み違反を列挙しない（[dmlValidation.ts:56](../../src/core/dmlValidation.ts#L56)-[105](../../src/core/dmlValidation.ts#L105)）。ただし全行・全対象子セルを走査するので、同じレコード、同じテーブル行に複数の不良セルがあればセルごとに別行となる。
 
-サブテーブルが0行ならセルが存在しないため、子の `required` 等は発火しない。既存 adapter もテーブル配列が空なら子行を1件も生成しない（[subtableAdapter.ts:18](../../src/converter/subtableAdapter.ts#L18)-[23](../../src/converter/subtableAdapter.ts#L23)）。これは B12-A で確認された kintone 実挙動を継承する契約とする。ただし、その実機証跡は今回指定された B41 仕様および B12-A 文書内では行番号付きで再発見できなかったため、§9 の実機受入で再固定する。
+サブテーブルが0行ならセルが存在しないため、子の `required` 等は発火しない。既存 adapter もテーブル配列が空なら子行を1件も生成しない（[subtableAdapter.ts:18](../../src/converter/subtableAdapter.ts#L18)-[23](../../src/converter/subtableAdapter.ts#L23)）。これは B12-A（v2.13.0）の実機バグ修正時に kintone 実測で確定し auto-memory に記録された事項である。ただし workspace 文書内には行番号付き実機証跡がないため、B42 実機で**再確認・文書化**し、release gate とする。
 
-### 3.4 `$err_value`
+### 3.4 詳細行の爆発と `tempTableMaxRows`
 
-子セルでも B41 の `renderExistingValidationValue` をそのまま使う。空値・空配列は空文字、非空配列は code 配列 JSON、NUMBER は元字句を保持する（[existingRecordValidation.ts:1](../../src/core/existingRecordValidation.ts#L1)-[6](../../src/core/existingRecordValidation.ts#L6)）。子セルを flatten した文字列ではなく生値で検証・描画する。
+詳細モードの子違反行数の上限は、概念上 **親レコード数 × 各テーブル行数 × 対象子フィールド数** の積になる。複数テーブルでは各テーブルの積を合算し、さらにトップレベルと `CHECK` の違反行が加わる。たとえば 10,000 レコード × 明細20行 × 対象子3列なら、子違反だけで最大60万行になる。制約を後付けしたアプリの過去データ監査では全件違反が通常に起こり得るため、これは例外的な表示問題ではない。
 
-### 3.5 B29 数値精度
+`VALIDATE … INTO #err` は結果行を一時テーブルへ実体化する。既定上限は `TEMP_TABLE_MAX_ROWS = 10_000` で、`onLimitReached` を適用せず常に error とする（[execute.ts:910](../../src/execute.ts#L910)-[921](../../src/execute.ts#L921)）。append 前に既存行＋新規行を検査し、超過時は既存値を変更せず `ArgumentError` を投げる（[execute.ts:929](../../src/execute.ts#L929)-[950](../../src/execute.ts#L950)）。VALIDATE の batch 経路も `tempTableMaxRows` をこの append に渡す（[execute.ts:1220](../../src/execute.ts#L1220)-[1235](../../src/execute.ts#L1235)）。したがって詳細 `INTO` は上限到達時に truncate せず**監査文全体が error となり完走しない**。この挙動を詳細モードの契約とし、完全性を偽る部分結果は返さない。
 
-対象にトップレベルまたは子の `NUMBER` が1つでもあれば、アプリ単位の `getNumberPrecisionCached` を1回利用する。キャッシュは appId と cache context 単位で `client.getNumberPrecision` を共有するため、親子で別取得は不要である（[execute.ts:3682](../../src/execute.ts#L3682)-[3691](../../src/execute.ts#L3691)）。取得した精度は各子 `NUMBER` にも渡し、`digits - decimalPlaces` を超える整数部を `ERR_NUMBER_INTEGER_DIGITS` とする（[dmlValidation.ts:71](../../src/core/dmlValidation.ts#L71)-[80](../../src/core/dmlValidation.ts#L80)）。
+### 3.5 `SUMMARY` モード
 
-現行 core と EXPLAIN は `targets.some(fieldType === "NUMBER")` で精度要否を決める（[execute.ts:829](../../src/execute.ts#L829)-[831](../../src/execute.ts#L831)、[execute.ts:6596](../../src/execute.ts#L6596)-[6606](../../src/execute.ts#L6606)）。B42 target descriptor の子もこの判定へ含める。
+`SUMMARY` は詳細エラー行を作ってから GROUP BY するのではなく、セルを検査しながら次のキーへ直接加算する生成時集約である。
 
-## 4. エラー行スキーマ
+```text
+($id, $err_subtable, $err_field, $err_code)
+```
 
-固定スキーマを次の7列とし、既存5列の順序は変えない。
+結果は親レコード×テーブル×フィールド×コードにつき1行となり、テーブル行数の因子を `$err_count` に畳み込む。トップレベル組み込み違反は `$err_subtable=''` で、同じ親・フィールド・コードは通常1件である。子違反は同じ親・テーブル・子・コードに該当した行数を数える。値、表示位置、永続行 ID は詳細モードで取得するため、`$err_message`、`$err_value`、`$err_subrow`、`$err_subrow_id` は SUMMARY に持たせない。
 
-| 列 | 型メタ | トップレベル違反 | 子セル違反 |
+`CHECK` 違反は `$err_subtable=''`、`$err_field=''`、`$err_code='ERR_CHECK'` とし、同じ親で発火した CHECK group 数を `$err_count` に集約する。現行 CHECK 評価はグループ内先勝ち・グループ間独立で1 group につき最大1件を返し（[dmlCustomCheck.ts:60](../../src/core/dmlCustomCheck.ts#L60)-[75](../../src/core/dmlCustomCheck.ts#L75)）、B41 はそれぞれを空 field/value の `ERR_CHECK` 行にする（[execute.ts:881](../../src/execute.ts#L881)-[888](../../src/execute.ts#L888)）。SUMMARY は message を持たないため、同一親の異なる CHECK message も1行へ合算する。message 別の診断が必要なら詳細モードを使う。
+
+SUMMARY も `tempTableMaxRows` の対象であり、集約後の行数が上限を超えれば §3.4 と同じく error になる。SUMMARY は打ち切りではなく完全な件数集約なので、上限内なら詳細行を実体化できない規模でも完走できるが、無制限の完走を保証するものではない。
+
+### 3.6 `$err_value` と B29 数値精度
+
+詳細モードの子セルでも B41 の `renderExistingValidationValue` を使う。空値・空配列は空文字、非空配列は code 配列 JSON、NUMBER は元字句を保持する（[existingRecordValidation.ts:1](../../src/core/existingRecordValidation.ts#L1)-[6](../../src/core/existingRecordValidation.ts#L6)）。子セルを flatten した文字列ではなく生値で検証・描画する。
+
+対象にトップレベルまたは子の `NUMBER` が1つでもあれば、アプリ単位の `getNumberPrecisionCached` を1回利用する。取得した精度は各子 `NUMBER` にも渡し、`digits - decimalPlaces` を超える整数部を `ERR_NUMBER_INTEGER_DIGITS` とする（[dmlValidation.ts:71](../../src/core/dmlValidation.ts#L71)-[80](../../src/core/dmlValidation.ts#L80)）。現行 core と EXPLAIN は `targets.some(fieldType === "NUMBER")` で精度要否を決める（[execute.ts:829](../../src/execute.ts#L829)-[831](../../src/execute.ts#L831)、[execute.ts:6596](../../src/execute.ts#L6596)-[6607](../../src/execute.ts#L6607)）。B42 target descriptor の子もこの判定へ含める。
+
+## 4. 出力スキーマ
+
+### 4.1 詳細モード: 固定8列
+
+既存5列の名前・順序・値を変えず、末尾へ3列を加える。
+
+| 列 | 型メタ | トップレベル / CHECK 違反 | 子セル違反 |
 |---|---|---|---|
 | `$id` | number | 親レコード番号 | 親レコード番号 |
-| `$err_field` | string | トップレベルフィールドコード | 子フィールドコード |
+| `$err_field` | string | トップレベルフィールドコード / CHECK は空文字 | 子フィールドコード |
 | `$err_code` | string | 既存エラーコード | 既存エラーコード |
 | `$err_message` | string | 既存メッセージ | 既存メッセージ |
-| `$err_value` | string | 現在の生値の描画 | 子セルの現在の生値の描画 |
+| `$err_value` | string | 現在の生値の描画 / CHECK は空文字 | 子セルの現在の生値の描画 |
 | `$err_subtable` | string | 空文字 | 親テーブルコード |
-| `$err_subrow` | number | 空文字 | 取得時の表示順を 1 から数えた序数 |
+| `$err_subrow` | number | 空文字 | 取得時の表示順を1から数えた序数 |
+| `$err_subrow_id` | string | 空文字 | kintone サブテーブル行の永続 `id` |
 
-IMPORT は、子エラーの位置を `subtable` と `subrow` に保持し（[importRecordValidation.ts:12](../../src/import/importRecordValidation.ts#L12)-[18](../../src/import/importRecordValidation.ts#L18)）、`$err_subtable` / `$err_subrow` へ実体化する（[importErrors.ts:18](../../src/import/importErrors.ts#L18)-[25](../../src/import/importErrors.ts#L25)）。B42 はこの命名と「1-based 論理行」の意味を採用する。`$err_source_row` はファイル物理行専用なので追加しない。
+`$err_subrow_id` は仮想テーブル `APP100$明細` の `_rid` と同値である。adapter は保存済み `row.id` を `_rid` に格納し、同じ走査で `_idx` に0-based indexを格納する（[subtableAdapter.ts:23](../../src/converter/subtableAdapter.ts#L23)-[29](../../src/converter/subtableAdapter.ts#L29)）。詳細監査では同じ `row.id` を `$err_subrow_id`、`i + 1` を `$err_subrow` に出す。したがって仮想テーブルの `_idx` は **0-based**、監査の `$err_subrow` は **1-based** で基数が異なる。`#err` を `APP100$明細` へ突き合わせる場合、序数ではなく `$err_subrow_id = _rid` で結合する。
 
-`$err_subrow` は永続行 `id` ではなく、1-based 表示序数とする。B41 親仕様が「行番号付き」を要求し、IMPORT の `$err_subrow` も論理序数であり、監査結果を画面上の行へ対応付けやすいからである。既存 subtable 展開は0-based indexと永続 `row.id` の両方を保持する（[execute.ts:5873](../../src/execute.ts#L5873)-[5887](../../src/execute.ts#L5887)）ため、実装時は `rowIndex + 1` を出力できる。行の並べ替え後は同じセルの序数が変わり得る点を契約とする。永続 ID を使った自動修復は B41 の対象外（[ksql_existing_record_validation_spec.md:16](ksql_existing_record_validation_spec.md#L16)）であり、必要なら後続仕様で `$err_subrow_id` を加える。
+子違反の修復キーは `$id` と `$err_subrow_id` であり、次の形へ変換できる。サブテーブル UPDATE は `_rid` 条件が安全上必須である（[ksql_language_reference.md:2271](../ksql_language_reference.md#L2271)-[2284](../ksql_language_reference.md#L2284)）。
 
-トップレベル組み込み違反と `CHECK` 違反では、新2列を空文字にする。これにより既存5列の値と意味は維持され、明示列を選ぶ既存の後続 `SELECT $id, …, $err_value FROM #err` はそのまま動く。一方、`SELECT *`、CSVヘッダー、列数固定の利用者には2列追加が観測される。
+```sql
+UPDATE APP100$明細
+SET 数量 = 1
+WHERE _pid = <#err.$id> AND _rid = <#err.$err_subrow_id>;
+```
 
-現行は `EXISTING_VALIDATION_COLUMNS` が固定5列（[execute.ts:729](../../src/execute.ts#L729)）、`existingValidationColumnMeta` がその配列から型メタを作り（[execute.ts:778](../../src/execute.ts#L778)-[783](../../src/execute.ts#L783)）、batch analyzer が同じ5列を schema signature に直書きしている（[batch.ts:321](../../src/core/batch.ts#L321)-[329](../../src/core/batch.ts#L329)）。列追加時はこの3箇所を必ず同時に7列へ更新し、`$err_subrow` は number、`$err_subtable` は string とする。なお `existingValidationColumnMeta` の現在の「`$id` 以外は全て string」という分岐は `$err_subrow` に対応できないため、列別定義へ変更が必要である。
+現行は `EXISTING_VALIDATION_COLUMNS` が固定5列（[execute.ts:729](../../src/execute.ts#L729)）、`existingValidationColumnMeta` がその配列から型メタを作り（[execute.ts:778](../../src/execute.ts#L778)-[783](../../src/execute.ts#L783)）、batch analyzer が同じ5列を schema signature に直書きしている（[batch.ts:321](../../src/core/batch.ts#L321)-[329](../../src/core/batch.ts#L329)）。列追加時はこの3箇所を必ず同時に8列へ更新する。現在の「`$id` 以外は全て string」という型分岐は `$err_subrow` に対応できないため、列別定義へ変更する。
+
+### 4.2 SUMMARY: 固定5列
+
+| 列 | 型メタ | 意味 |
+|---|---|---|
+| `$id` | number | 親レコード番号 |
+| `$err_subtable` | string | 子違反の親テーブルコード。トップレベル / CHECK は空文字 |
+| `$err_field` | string | 違反フィールドコード。CHECK は空文字 |
+| `$err_code` | string | 既存エラーコード。CHECK は `ERR_CHECK` |
+| `$err_count` | number | 集約キーに属する違反件数 |
+
+`$err_count` の値・型メタ生成は未実装・未確認である。実装では `$id` と `$err_count` を `KSQL_NUMBER` / number semantics、残りを `KSQL_STRING` / string semantics とする。現行の synthetic meta は number/string の `fieldType`、`sortKind`、semantics を生成できる（[execute.ts:778](../../src/execute.ts#L778)-[783](../../src/execute.ts#L783)）ため、その列別定義を拡張する。
+
+詳細8列と SUMMARY 5列は別 schema signature である。同名 `#err` へ両者を追記すると、batch analyzer が payload field 配列を JSON signature 化し、不一致を analyze 時に fail-fast する既存規則をそのまま適用する（[batch.ts:321](../../src/core/batch.ts#L321)-[345](../../src/core/batch.ts#L345)）。実行時にも列名・順序・型メタ不一致を拒否する（[execute.ts:929](../../src/execute.ts#L929)-[944](../../src/execute.ts#L944)）。
 
 ## 5. 実装方針
 
-本節は将来の実装差分を特定するものであり、本 R1 起草ではコードを変更しない。
+本節は将来の実装差分を特定するものであり、本 R2 改稿ではコードを変更しない。
 
-### 5.1 フォームと target 解決
+### 5.1 parser・AST・target 解決
 
-- `src/core/formFieldInfo.ts`: `buildScopedSubtableFieldIndex` は `table -> children` と子の所有関係を既に保持する（[formFieldInfo.ts:21](../../src/core/formFieldInfo.ts#L21)-[38](../../src/core/formFieldInfo.ts#L38)）。B42 target 解決に再利用し、平坦 `byCode` だけに依存しない。
-- `src/types/ast.ts`: `ValidateStatement.fields?: string[]`（[ast.ts:75](../../src/types/ast.ts#L75)-[83](../../src/types/ast.ts#L83)）を、トップレベル/テーブル全体/テーブル内子指定を保持する target 配列へ変更する。
-- `src/parser/parser.ts`: 現行の `parseIdentList`（[parser.ts:677](../../src/parser/parser.ts#L677)-[680](../../src/parser/parser.ts#L680)）を、IMPORT と同型の入れ子 target parser へ置き換える。既存の平坦指定は同じ AST 意味へ変換し、既存 SQL を壊さない。
-- `src/execute.ts`: `resolveExistingValidationTargets`（[execute.ts:740](../../src/execute.ts#L740)-[760](../../src/execute.ts#L760)）の戻り値を、子なら `subtableCode` を必須で持つ descriptor にする。既定導出、所有関係、重複、裸の子拒否をここで fail-fast に確定する。
+- `src/parser/parser.ts`: 現行 `parseIdentList`（[parser.ts:677](../../src/parser/parser.ts#L677)-[680](../../src/parser/parser.ts#L680)）を入れ子 target parser へ置き換え、field list 直後・WHERE 直前に soft keyword `SUMMARY` を1回だけ受理する。重複、句順違反を parser test で拒否する。
+- `src/parser/parser.ts`: 仮想テーブル拒否（[parser.ts:671](../../src/parser/parser.ts#L671)-[675](../../src/parser/parser.ts#L675)）を維持し、親アプリ形式 `VALIDATE APP100 (明細)` へ誘導するメッセージへ更新する。
+- `src/types/ast.ts`: `ValidateStatement.fields?: string[]`（[ast.ts:75](../../src/types/ast.ts#L75)-[83](../../src/types/ast.ts#L83)）を scoped target 配列へ変更し、`summary?: true` 相当を加える。
+- `src/core/formFieldInfo.ts`: `buildScopedSubtableFieldIndex` が保持する `table -> children` と所有関係（[formFieldInfo.ts:21](../../src/core/formFieldInfo.ts#L21)-[38](../../src/core/formFieldInfo.ts#L38)）を target 解決に再利用する。
+- `src/execute.ts`: `resolveExistingValidationTargets`（[execute.ts:740](../../src/execute.ts#L740)-[760](../../src/execute.ts#L760)）を、子なら `subtableCode` を必須で持つ descriptor にする。既定導出、所有関係、重複、裸の子拒否を records fetch 前に確定する。
 
-### 5.2 取得と検証ループ
+### 5.2 取得・検証・集約
 
-- `src/execute.ts`: `requiredFields` 構築（[execute.ts:816](../../src/execute.ts#L816)-[822](../../src/execute.ts#L822)）では、子 target を親テーブルコードへ写像し、重複を除く。`WHERE` / `CHECK` の子参照は fetch 前に明示拒否する。
-- `src/execute.ts`: records fetch、raw/flat 行生成、組み込み検証、結果生成の本体（[execute.ts:856](../../src/execute.ts#L856)-[898](../../src/execute.ts#L898)）に、取得済みテーブル配列を展開する子セルループを追加する。トップレベルの `row.record[field.code].value` と同様に、子の生値を primitive と renderer へ渡す。
-- `src/core/dmlValidation.ts`: `validateAndNormalizeDmlValue` 自体には `inSubtable` による除外がなく再利用可能（[dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106)）。新しい子専用制約判定を重複実装しない。
-- `src/core/existingRecordValidation.ts`: `$err_value` 描画規則は現状のまま再利用する（[existingRecordValidation.ts:4](../../src/core/existingRecordValidation.ts#L4)-[6](../../src/core/existingRecordValidation.ts#L6)）。
+- `src/execute.ts`: `requiredFields` 構築（[execute.ts:816](../../src/execute.ts#L816)-[822](../../src/execute.ts#L822)）では、子 target を親テーブルコードへ写像し重複を除く。`WHERE` / `CHECK` の子参照は fetch 前に明示拒否する。
+- `src/execute.ts`: records fetch と結果生成本体（[execute.ts:856](../../src/execute.ts#L856)-[898](../../src/execute.ts#L898)）へ取得済みテーブル配列を展開する子セルループを追加する。詳細モードは8列行を生成し、SUMMARY は詳細行を生成せず4列キーの counter へ直接加算して最後に5列行へ変換する。
+- `src/core/dmlValidation.ts`: `validateAndNormalizeDmlValue` を親子で共有し、新しい子専用制約判定を重複実装しない（[dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106)）。
+- `src/core/existingRecordValidation.ts`: 詳細 `$err_value` の描画規則を再利用する（[existingRecordValidation.ts:1](../../src/core/existingRecordValidation.ts#L1)-[6](../../src/core/existingRecordValidation.ts#L6)）。
 
-### 5.3 出力、batch、EXPLAIN
+### 5.3 出力・batch・EXPLAIN・文書
 
-- `src/execute.ts`: `EXISTING_VALIDATION_COLUMNS`（[execute.ts:729](../../src/execute.ts#L729)）、`existingValidationColumnMeta`（[execute.ts:778](../../src/execute.ts#L778)-[783](../../src/execute.ts#L783)）、結果行生成（[execute.ts:873](../../src/execute.ts#L873)-[897](../../src/execute.ts#L897)）を7列契約へ同期する。
-- `src/core/batch.ts`: VALIDATE の固定 schema signature（[batch.ts:321](../../src/core/batch.ts#L321)-[329](../../src/core/batch.ts#L329)）を同じ7列へ更新する。旧5列 schema と新7列 schema の混在を許す条件分岐は設けない。
-- `src/execute.ts`: EXPLAIN metadata の `targetFields` / `fetchFields`（[execute.ts:6601](../../src/execute.ts#L6601)-[6607](../../src/execute.ts#L6607)）を、論理 target と親テーブル fetch に分ける。plan builder（[execute.ts:6962](../../src/execute.ts#L6962)-[6980](../../src/execute.ts#L6980)）へ §7 の表示を追加する。
-- テスト: `src/__tests__/existingRecordValidation.test.ts` の現行固定5列、子拒否、INTO、EXPLAIN テスト（[existingRecordValidation.test.ts:122](../../src/__tests__/existingRecordValidation.test.ts#L122)-[138](../../src/__tests__/existingRecordValidation.test.ts#L138)、[同:200](../../src/__tests__/existingRecordValidation.test.ts#L200)-[237](../../src/__tests__/existingRecordValidation.test.ts#L237)）を7列・新 target 規則へ更新し、§9 を追加する。
+- `src/execute.ts`: `EXISTING_VALIDATION_COLUMNS`（[execute.ts:729](../../src/execute.ts#L729)）、`existingValidationColumnMeta`（[execute.ts:778](../../src/execute.ts#L778)-[783](../../src/execute.ts#L783)）、結果行生成を詳細8列へ同期し、SUMMARY 5列の別定数・列別型メタを追加する。
+- `src/core/batch.ts`: VALIDATE の固定 schema signature（[batch.ts:321](../../src/core/batch.ts#L321)-[345](../../src/core/batch.ts#L345)）を `summary` flag で詳細8列 / SUMMARY 5列に分ける。同名一時表への異種追記は既存どおり analyze 時に拒否する。
+- `src/execute.ts`: EXPLAIN metadata の `targetFields` / `fetchFields`（[execute.ts:6601](../../src/execute.ts#L6601)-[6607](../../src/execute.ts#L6607)）を論理 target と親テーブル fetch に分け、plan builder（[execute.ts:6962](../../src/execute.ts#L6962)-[6980](../../src/execute.ts#L6980)）へ §7 の表示を追加する。
+- `src/__tests__/existingRecordValidation.test.ts`: 現行固定5列、子拒否、INTO、EXPLAIN テストを8列・新 target・SUMMARY 規則へ更新し、§9 を追加する。
+- `docs/ksql_language_reference.md`: §17.4 の構文、既定対象、詳細8列、SUMMARY 5列、爆発時 error、2段運用、§19 の `_rid` 修復レシピとの接続を改定する。固定スキーマの説明を7列や旧5列のまま残さない。
 
 ## 6. 対象外
 
 - `CHECK` からのテーブルコード、子フィールド、行番号、行 ID の参照。B37 はサブテーブル DML の `CHECK` を非対応としている（[ksql_custom_check_spec.md:149](ksql_custom_check_spec.md#L149)）。B42 は組み込み制約監査だけを子セルへ拡張し、子行スコープの式評価は設計しない。
-- `WHERE` からのサブテーブル子参照。親レコードをどの子行一致で選ぶかと、選ばれた親の全行を監査するか一致行だけを監査するかが別契約になるため、従来のトップレベル WHERE に限定する。現行 parser は修飾参照だけを明示拒否し（[parser.ts:697](../../src/parser/parser.ts#L697)-[715](../../src/parser/parser.ts#L715)）、executor の `infoByCode` には子も入る（[execute.ts:802](../../src/execute.ts#L802)-[816](../../src/execute.ts#L816)）。したがって「現行どおり拒否」を確実にするには、B42 実装時に `whereFields` の `inSubtable` を検査する明示ガードが必要である。現行コードだけからは全演算子での静的拒否を確認できず、この点は既存実装の潜在ギャップとして記録する。
+- `WHERE` からのサブテーブル子参照。親をどの子行一致で選ぶかと、選ばれた親の全行を監査するか一致行だけを監査するかが別契約になるため、トップレベル WHERE に限定する。現行 parser は修飾参照だけを明示拒否し（[parser.ts:697](../../src/parser/parser.ts#L697)-[715](../../src/parser/parser.ts#L715)）、executor の `infoByCode` には子も入る（[execute.ts:802](../../src/execute.ts#L802)-[827](../../src/execute.ts#L827)）。B42 実装時に `whereFields` / CHECK refs の `inSubtable` を検査する明示ガードが必要である。
 - `FILE`、`SUBTABLE` 自体、`CALC`、レコード番号、作成者/更新者、作成/更新日時、ステータス、作業者、カテゴリー、関連レコード等、B41 の組み込み制約監査に該当しない型。IMPORT も子 `FILE` 等を明示的な非対応型にしている（[importRecordValidation.ts:9](../../src/import/importRecordValidation.ts#L9)-[10](../../src/import/importRecordValidation.ts#L10)）。
-- ユニーク制約、レコード横断制約、違反の自動修復、永続サブテーブル行 ID を使う更新レシピ。B41 の対象外を維持する（[ksql_existing_record_validation_spec.md:16](ksql_existing_record_validation_spec.md#L16)）。
+- ユニーク制約、レコード横断制約、違反の自動修復。B42 は修復可能な永続ロケータとレシピを提供するが、監査結果から UPDATE 文を自動生成・実行しない。
 - 1セルから複数の組み込み違反を同時列挙する検証器への変更。現行の先勝ち primitive を維持する。
 
 ## 7. EXPLAIN・面
 
-`VALIDATE` は B42 後も read-only であり、CLI、MCP、プラグインの全面で提供する。B41 は engine 側の純検証として全面同一と定め（[ksql_existing_record_validation_spec.md:68](ksql_existing_record_validation_spec.md#L68)-[71](ksql_existing_record_validation_spec.md#L71)）、現行テストも read-only、非 DML、完全入力、書込みなしを固定している（[existingRecordValidation.test.ts:77](../../src/__tests__/existingRecordValidation.test.ts#L77)-[83](../../src/__tests__/existingRecordValidation.test.ts#L83)）。B42 は確認ダイアログ、`--allow-dml`、mutation capability を追加しない。
+`VALIDATE` は B42 後も read-only であり、CLI、MCP、プラグインの全面で提供する。現行テストは read-only、非 DML、完全入力、書込みなしを固定している（[existingRecordValidation.test.ts:77](../../src/__tests__/existingRecordValidation.test.ts#L77)-[83](../../src/__tests__/existingRecordValidation.test.ts#L83)）。B42 は確認ダイアログ、`--allow-dml`、mutation capability を追加しない。
 
 `EXPLAIN VALIDATE` は現在の read-only、records fetch、完全入力、WHERE capability、audit fields、fetch fields、数値精度、書込みなし、違反件数なしの表示（[execute.ts:6962](../../src/execute.ts#L6962)-[6980](../../src/execute.ts#L6980)）を維持し、次を追加・変更する。
 
 - `audit fields`: 子 target は `明細(数量, 単価)` のように親スコープ付きで表示する。
 - `fetch fields`: 子コードではなく実際に取得する親テーブルコードを表示する。
-- `subtable audit`: 対象テーブル、対象子数、`row locator=$err_subrow (1-based display order)` を表示する。
-- `output schema`: 既存5列＋`$err_subtable,$err_subrow` を表示する。
+- 詳細時 `subtable audit`: 対象テーブル、対象子数、`row locator=$err_subrow (1-based display order), $err_subrow_id (persistent row id)` を表示する。
+- 詳細時 `output schema`: 固定8列を表示する。
+- SUMMARY 時: `mode=SUMMARY`、固定5列 output schema、`aggregation=record/subtable/field/code`、`row locator=none` を表示する。
 - `number precision`: 子 `NUMBER` だけが対象の場合も `required` とする。
-- EXPLAIN 中は従来どおりフォーム定義と必要時の number precision metadata だけを読み、records API と mutation API を呼ばず、行数・違反件数・実際のサブテーブル行数を表示しない。現行テストはこの契約を固定している（[existingRecordValidation.test.ts:228](../../src/__tests__/existingRecordValidation.test.ts#L228)-[237](../../src/__tests__/existingRecordValidation.test.ts#L237)）。
+- EXPLAIN 中は従来どおりフォーム定義と必要時の number precision metadata だけを読み、records API と mutation API を呼ばず、行数・違反件数・実際のサブテーブル行数・集約後行数を表示しない。現行テストは records/mutation API 0 と違反件数なしを固定している（[existingRecordValidation.test.ts:228](../../src/__tests__/existingRecordValidation.test.ts#L228)-[237](../../src/__tests__/existingRecordValidation.test.ts#L237)）。
 
 ## 8. SemVer
 
-推奨は **major** とする。
+推奨は **minor（v3.7.0 相当）** とする。
 
-理由は次の2点が既存の公開観測結果を変えるためである。
+台帳 §2 の出荷前例では、B8 の `maxRecords` 意味論変更は v2.11.0 minor（[ksql_issue_tracker.md:67](../ksql_issue_tracker.md#L67)）、B13 の `MIN` / `MAX` 結果変更は v2.14.0 minor（[ksql_issue_tracker.md:64](../ksql_issue_tracker.md#L64)）、B9 の16桁超比較結果の修正は v3.3.0 minor（[ksql_issue_tracker.md:56](../ksql_issue_tracker.md#L56)）である。major の v3.0.0 は4面の比較意味論を全面刷新したリリースである（[ksql_issue_tracker.md:59](../ksql_issue_tracker.md#L59)）。
 
-1. `(fields)` 省略時に子を自動追加するため、従来0件またはN件だった同じ `VALIDATE APP…` が追加違反行を返し得る。
-2. B41 が固定5列として公開した結果（[ksql_language_reference.md:2088](../ksql_language_reference.md#L2088)-[2089](../ksql_language_reference.md#L2089)）を固定7列へ変えるため、`SELECT *`、CSVヘッダー、列数を検査する利用者に影響する。
+B42 により違反行が増えるのは B13 と同型の「監査の抜けの修正」である。詳細スキーマの追加3列は末尾加法で、既存5列の名前・順序・値・型は不変である。SUMMARY は新しい opt-in 構文である。以上から本プロジェクトの実績に従い minor とする。
 
-既存5列の列名、順序、値、型は維持し、トップレベル違反では新2列を空にするため、明示列参照の互換性は高い。しかし「結果行の増加」と「固定 schema の列追加」は単なる内部改善ではない。SemVer を厳密に適用するなら major が安全である。
-
-minor を選ぶ代替案は、サブテーブル監査を新しい明示 opt-in に限定し、既定対象と5列 schemaを維持することである。しかし、位置列のない5列では子エラーを十分に表せず、既定 `VALIDATE APP…` の監査の抜けも残るため推奨しない。プロジェクトが「診断結果への加法変更」を minor と扱う明文化済み方針を別途採用する場合だけ minor を再検討する。この方針は現行ファイルから未確認である。
+SemVer を厳密に適用して固定結果 schema の加法変更も破壊的とみなし major にする案は、R1 の代替論として履歴に残す。ただし本プロジェクトの出荷前例とは整合しないため R2 では採らない。
 
 ## 9. 受入条件
 
-### 9.1 単体・統合テスト
+### 9.1 parser・単体・統合テスト
 
 - `(fields)` 省略で、トップレベル対象に加えて全テーブルの制約付き子と全子 `NUMBER` が選ばれ、制約なし非 `NUMBER`、`FILE` 等は選ばれない。
-- 子の必須空、数値 min/max、文字列 min/maxLength、定義外選択肢、B29 整数部桁超過を検出する。各エラーは `$id`、子 `$err_field`、コード、メッセージ、描画済み生値、親 `$err_subtable`、1-based `$err_subrow` を持つ。
+- 子の必須空、数値 min/max、文字列 min/maxLength、定義外選択肢、B29 整数部桁超過を検出する。詳細行は `$id`、子 `$err_field`、コード、メッセージ、描画済み生値、親 `$err_subtable`、1-based `$err_subrow`、永続 `$err_subrow_id` を持つ。
 - 1親に複数テーブル、1テーブルに複数行、1行に複数不良セルがあるとき、全セルを走査して1セル1エラー行を生成し、順序が §3.2 の規則どおり安定する。
 - 0行テーブルでは子 required を含めエラー0件。1行目が空セルなら required 1件。
-- 同じ親にトップレベル違反、子セル違反、トップレベル `CHECK` 違反が混在する。トップレベルと `CHECK` の新2列は空、子だけ位置を持つ。
+- 同じ親にトップレベル違反、子セル違反、トップレベル `CHECK` 違反が混在する。トップレベルと CHECK の新3列は空、子だけ位置と永続 ID を持つ。
 - `VALIDATE APP (Table)` は Table の監査可能な子全体、`VALIDATE APP (Table(child1, child2))` は指定子だけを対象にする。未知テーブル、未知子、所属違い、重複、監査対象外、空 child list は fetch 前に失敗する。
 - 裸の子コードは、そのコードがたまたま1つしかなくても拒否する。別テーブルの同名子を `T1(value), T2(value)` で正しく分離する。
+- `VALIDATE APP100$明細` は専用 ParseError で拒否し、`VALIDATE APP100 (明細)` 形式を案内する。EXPLAIN でも同じ誘導になる。
+- `SUMMARY` は `(fields)` 後・WHERE 前だけで soft keyword として受理し、既存の同名フィールド / app identifier を予約語化しない。重複、WHERE 後、CHECK 後、INTO 後は ParseError とする。
 - requiredFields は子コードを含まず、親テーブルコードを1回だけ含む。トップレベル、WHERE、CHECK の必要列も失わない。
 - 子 `NUMBER` だけを選んだ場合も number precision API は1回だけ呼ばれ、整数部桁チェックが有効になる。NUMBER が無ければ呼ばない。
-- 結果0件でも7列 schema と列メタを保持する。`$id` と `$err_subrow` は number、それ以外は string。
-- `VALIDATE … INTO #err; SELECT … FROM #err` で7列を参照できる。特に `$err_subtable` / `$err_subrow` で絞り込み・並び替えでき、既存5列だけの後続 SELECT も動く。異なる validation schema の同一 `#err` 追記は analyze 時に fail-fast する。
+- 詳細結果0件でも8列 schema と列メタを保持する。`$id` と `$err_subrow` は number、`$err_subrow_id` と他列は string。
+- SUMMARY 結果0件でも5列 schema と列メタを保持する。`$id` / `$err_count` は number、他は string。
+- SUMMARY は詳細行を内部配列へ生成せず、トップレベル、複数子行、複数 error code を4列キーで正しく集約する。トップレベル count は通常1、子 count は該当行数になる。
+- CHECK の SUMMARY は `$err_subtable=''`, `$err_field=''`, `$err_code='ERR_CHECK'` で、同一親の発火 group 数を `$err_count` にする。詳細モードの CHECK message は非回帰。
+- `VALIDATE … INTO #err; SELECT … FROM #err` で詳細8列を参照できる。SUMMARY 5列も別一時表で参照できる。詳細と SUMMARY を同名 `#err` へ混在追記すると analyze 時に schema mismatch で fail-fast し、実行しない。
+- 詳細 `INTO` が `tempTableMaxRows` を超えると既存行を変えず error になる。truncate / 部分成功にしない。SUMMARY も集約後行数が上限を超えれば同じ規則で error になる。
 - `WHERE` / `CHECK` の子参照は、演算子にかかわらず records API 前に一貫した `ArgumentError`。トップレベル WHERE/CHECK は非回帰。
 - read-only、`onLimit=error`、Cursor未使用、POST/PUT/DELETE 0回を維持する。
-- EXPLAIN は親スコープ付き audit targets、親テーブル fetch、7列 schema、子 NUMBER 精度要否を示し、records/mutation API 0回、違反件数なしを維持する。
+- EXPLAIN 詳細は親スコープ付き target、親テーブル fetch、8列 schema、row locator、子 NUMBER 精度要否を示す。SUMMARY は5列 schema、集約キー、row locator none を示す。いずれも records/mutation API 0回、違反件数なしを維持する。
 
-### 9.2 実機確認
+### 9.2 実機確認・運用レシピ
 
-- 制約違反を持つ子セル（必須、数値上下限、文字数、選択肢）を保存済みレコードに用意し、期待する位置付き行が CLI、MCP、プラグインで一致する。
+- 制約違反を持つ子セル（必須、数値上下限、文字数、選択肢）を保存済みレコードに用意し、期待する位置付き詳細行が CLI、MCP、プラグインで一致する。
 - B29 用の子 `NUMBER` で、許容整数部桁数の境界値と1桁超過を確認する。
-- 0行テーブルで子 required が発火しないことを再確認し、証跡を残す。今回の調査では過去の「実機確定」を示す行番号付き証跡を必読ファイルから特定できなかったため、この確認を release gate とする。
-- 2行以上のテーブルで、表示順と `$err_subrow=1,2,…` が一致する。行を並べ替えて再取得した場合は新しい表示順へ追随する。
-- トップレベル違反と子違反の混在で、既存5列の値が変わらず、新2列がトップレベル行では空である。
-- `(fields)` 省略、テーブルコード、`テーブル(子…)`、裸の子拒否、別テーブル同名子を確認する。
-- `INTO #err` 後の `SELECT` で既存5列と新2列を取得し、`WHERE $err_subtable = '明細'`、`ORDER BY $err_subrow` が動く。
+- 0行テーブルで子 required が発火しないことを**過去実測の再確認**として実施し、行番号付き evidence に文書化する。これは B12-A（v2.13.0）実機バグ修正時の kintone 実測確定事項として auto-memory に記録済みだが、workspace 文書内に行番号付き証跡がないため release gate を維持する。
+- 2行以上のテーブルで、表示順と `$err_subrow=1,2,…`、保存済み行 `id` と `$err_subrow_id` が一致する。行を並べ替えた後は `$err_subrow` が新しい表示順へ追随し、`$err_subrow_id` は同じ行で不変である。
+- `#err` の子違反について、`$id` を `_pid`、`$err_subrow_id` を `_rid` に使った `UPDATE APP100$明細 … WHERE _pid=… AND _rid=…` で対象行だけを修復し、再監査でその違反が消えることを確認する。実更新は復旧可能な fixture と事前 snapshot を使う。
+- トップレベル違反と子違反の混在で、既存5列の値が変わらず、新3列がトップレベル行では空である。
+- `(fields)` 省略、テーブルコード、`テーブル(子…)`、裸の子拒否、仮想テーブル拒否と親形式への案内、別テーブル同名子を確認する。
+- `INTO #err` 後の SELECT で8列を取得し、`WHERE $err_subtable = '明細'`、`ORDER BY $err_subrow`、`$err_subrow_id = _rid` の突合が動く。
+- 詳細行が実体化できる少量 fixture に限り、次の既存 SQL 集計レシピが SUMMARY と同じ件数になることを確認する。このレシピは詳細 `#err` が `tempTableMaxRows` 内に収まる場合だけ使える。
+
+```sql
+VALIDATE APP100 INTO #err;
+SELECT $id, $err_subtable, $err_field, $err_code, COUNT(*) AS $err_count
+FROM #err
+GROUP BY $id, $err_subtable, $err_field, $err_code;
+```
+
+- 大量違反 fixture で、詳細 `VALIDATE … INTO #detail` は `tempTableMaxRows` 超過 error となり、同じ対象の `VALIDATE … SUMMARY INTO #summary` は集約後行数が上限内なら完走して完全件数を返す対比を CLI、MCP、プラグインで確認する。
+- 実運用の2段構えを文書と smoke で固定する: **SUMMARY で規模と対象を把握 → `WHERE` / `(fields)` で絞った詳細 VALIDATE → `$id` / `$err_subrow_id` で修復**。
 - EXPLAIN が records API を呼ばず、実行本体が書込み API を呼ばないことを各面で確認する。
 
 ## 10. 未決論点
 
-R1 の推奨案で実装を開始できるが、レビューで次を最終確認する。
+R2 の機能範囲、8列 / 5列 schema、SUMMARY の B42 v1 同梱、minor リリースは確定済みであり、実装開始を妨げる未決はない。再レビューでは次の最終形だけを確認する。
 
-1. **SemVer のリリース番号**: 本仕様は major を推奨する。診断結果の加法変更を minor とする既存プロジェクト方針があるなら、その文書根拠を提示して再判定する。
-2. **永続行 ID**: R1 は `$err_subrow` の1-based 表示序数だけを出す。将来の自動修復・行並べ替えをまたぐ突合が実需なら、`$err_subrow_id` の加法追加を別仕様にする。`$err_subrow` の意味を途中で ID に変えない。
-3. **子 target 構文**: 推奨は IMPORT と整合する `Table(child, …)`。代替は `Table.child` だが、現行 VALIDATE は修飾参照を拒否し（[parser.ts:706](../../src/parser/parser.ts#L706)-[710](../../src/parser/parser.ts#L710)）、target と WHERE/CHECK で `.` の意味が分かれるため非推奨。
-4. **子コードのグローバル一意性**: 現行コードとテストは別テーブル同名子を許す前提である。公式 UI 上の最新制約を実機で確認できても、R1 は scoped index を維持し、裸の子コード解決には使わない。
-5. **既存 WHERE 子参照の拒否**: 要求契約は拒否だが、現行 executor には全子参照を明示拒否する guard が見当たらない（§6）。B42 実装前に再現テストを追加し、現状が API エラー依存なら同時に静的 `ArgumentError` へ固定する。
+1. **子 target 構文の最終形**: 推奨・本文契約は IMPORT と整合する `Table(child, …)`。代替 `Table.child` は、現行 VALIDATE が修飾参照を拒否し（[parser.ts:706](../../src/parser/parser.ts#L706)-[710](../../src/parser/parser.ts#L710)）、target と WHERE/CHECK で `.` の意味が分かれるため非推奨。
+2. **WHERE / CHECK 子参照 guard の実装位置**: 要求契約は records API 前の静的拒否だが、現行 executor の存在チェックは flatten 済み子を素通りさせる（[execute.ts:802](../../src/execute.ts#L802)-[827](../../src/execute.ts#L827)）。実装時に target resolver と共通化するか、where/check refs の解決直後に置くかをテスト先行で確定する。
+
+SUMMARY を B42.1 へ分割し、B42 v1 を詳細モード＋少量 GROUP BY レシピだけで出す案は R1 レビュー時の代替案として存在した。しかし大量違反で監査が完走しない問題を残すため、ユーザー承認により不採用とし、R2 本文では B42 v1 同梱を契約とする。
 
 ## 11. R1 Claude レビュー（2026-07-20・全指摘コード裏取り済み）
 
@@ -265,3 +336,5 @@ R1 の推奨案で実装を開始できるが、レビューで次を最終確�
 ### P3-1 §3.2「フォーム順」は過大表現
 
 - 既定 target の列挙順は form fields API 応答の `Object.values` 列挙順（[formFieldInfo.ts:55](../../src/core/formFieldInfo.ts#L55)）であり、**フォームレイアウト順の保証はない**。「フォーム定義応答の列挙順（同一入力に対し決定的）」へ言い換える。
+
+**R2 反映済み（2026-07-20）**
