@@ -289,14 +289,15 @@ test("B42 omitted targets audit child cells with stable 1-based and persistent r
   const result = await execute("VALIDATE APP41 CHECK WHEN whereTop='x' THEN 'check'", client, { cacheContext: "b42-detail" }) as SelectResult;
   expect(result.columns).toEqual(["$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count"]);
   expect(result.rows).toEqual(expect.arrayContaining([
-    expect.objectContaining({ $id: "9", $err_field: "top", $err_subtable: "", $err_subrow: "", $err_subrow_id: "", $err_count: "1" }),
+    expect.objectContaining({ $id: "9", $err_field: "top", $err_message: "top は必須です", $err_subtable: "", $err_subrow: "", $err_subrow_id: "", $err_count: "1" }),
+    expect.objectContaining({ $err_field: "req", $err_message: "req は必須です（2行: 1,2）", $err_subtable: "T1", $err_subrow: "1,2", $err_count: "2" }),
     expect.objectContaining({ $err_field: "num", $err_code: "ERR_NUMBER_INTEGER_DIGITS", $err_value: "123", $err_subtable: "T1", $err_subrow: "1", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "choiceChild", $err_code: "ERR_CHOICE_INVALID", $err_subrow: "2", $err_subrow_id: "r20" }),
     expect.objectContaining({ $err_field: "minNum", $err_code: "ERR_RANGE_MIN", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "maxNum", $err_code: "ERR_RANGE_MAX", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "minText", $err_code: "ERR_LENGTH_MIN", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "maxText", $err_code: "ERR_LENGTH_MAX", $err_subrow_id: "r10" }),
-    expect.objectContaining({ $err_field: "req", $err_subtable: "T2", $err_subrow: "1", $err_subrow_id: "r30", $err_count: "1" }),
+    expect.objectContaining({ $err_field: "req", $err_message: "req は必須です", $err_subtable: "T2", $err_subrow: "1", $err_subrow_id: "r30", $err_count: "1" }),
     expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "check", $err_subtable: "", $err_subrow: "", $err_subrow_id: "", $err_count: "1" }),
   ]));
   expect(result.rows.map((row) => [row.$err_field, row.$err_subrow_id])).toEqual([
@@ -366,7 +367,7 @@ test("B42 SUMMARY directly aggregates child rows and CHECK groups into the fixed
   ]));
 });
 
-test("B42 detail groups identical messages and lists all three locators in first-occurrence order", async () => {
+test("B42 detail groups by the original message, then decorates three-row child output only", async () => {
   const { client } = makeClient({ fields: B42_FIELDS, records: [record({
     $id: "5", top: "", whereTop: "x",
     T1: [subrow("first", { minText: "x" }), subrow("second", { minText: "y" }), subrow("third", { minText: "z" })], T2: [],
@@ -376,9 +377,10 @@ test("B42 detail groups identical messages and lists all three locators in first
     client, { cacheContext: "b42-detail-group" }
   ) as SelectResult;
   expect(result.rows).toEqual([
-    expect.objectContaining({ $err_field: "top", $err_count: "1", $err_subrow: "", $err_subrow_id: "" }),
+    expect.objectContaining({ $err_field: "top", $err_message: "top は必須です", $err_count: "1", $err_subrow: "", $err_subrow_id: "" }),
     expect.objectContaining({
-      $err_field: "minText", $err_code: "ERR_LENGTH_MIN", $err_count: "3",
+      $err_field: "minText", $err_code: "ERR_LENGTH_MIN",
+      $err_message: "minText は 2 文字以上で指定してください（3行: 1,2,3）", $err_count: "3",
       $err_subrow: "1,2,3", $err_subrow_id: "first,second,third", $err_value: "x",
     }),
     expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "one", $err_count: "1" }),
@@ -400,13 +402,16 @@ test("B42 detail temp limit is applied after message aggregation", async () => {
   const records = [record({ $id: "1", top: "ok", T1: [subrow("a", { req: "" }), subrow("b", { req: "" })], T2: [] })];
   const detail = makeClient({ fields: B42_FIELDS, records });
   const detailBatch = await executeBatch(
-    "VALIDATE APP41 (T1(req)) INTO #detail; SELECT * FROM #detail",
+    "VALIDATE APP41 (T1(req)) INTO #detail; SELECT $id,$err_field,$err_code,$err_message,$err_value FROM #detail",
     detail.client, { cacheContext: "b42-detail-limit", tempTableMaxRows: 1 }
   );
   expect(detailBatch.ok).toBe(true);
   expect(detailBatch.statements[1].result).toMatchObject({
     rowCount: 1,
-    rows: [expect.objectContaining({ $err_subrow: "1,2", $err_subrow_id: "a,b", $err_count: "2" })],
+    rows: [{
+      $id: "1", $err_field: "req", $err_code: "ERR_REQUIRED",
+      $err_message: "req は必須です（2行: 1,2）", $err_value: "",
+    }],
   });
 
   const summary = makeClient({ fields: B42_FIELDS, records });

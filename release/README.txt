@@ -11,7 +11,10 @@ v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
   $err_subrow_id = 仮想テーブルの _rid / $err_count)。同一レコードの
   field + code + message を1行へ集約し、値は先頭違反行を保持。
   $err_subrow / $err_subrow_id は全該当行を先頭出現順のカンマ区切り
-  リストで保持 (切り捨てなし)。$err_subrow の型メタは string。
+  リストで保持 (切り捨てなし)。子違反が2件以上なら、集約後の message
+  末尾にも「（2行: 1,2）」形式で件数と同じ $err_subrow リストを付加。
+  count=1 の子違反とトップレベル/CHECK の message は従来どおり。
+  INTO #err にも装飾済み message を格納。$err_subrow の型メタは string。
 - scoped target: VALIDATE APP100 (テーブル) / (テーブル(子1, 子2))。
   裸の子コード・APP100$テーブル 形式は案内付きで拒否。
 - SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,

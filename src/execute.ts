@@ -1001,7 +1001,16 @@ async function executeExistingRecordValidationCore(
       appendError({ id: row.id, field: "", code: "ERR_CHECK", message: check.message, value: "" });
     }
   }
-  rows.push(...(stmt.summary ? summaryRows.values() : detailRows.values()));
+  if (stmt.summary) rows.push(...summaryRows.values());
+  else {
+    for (const row of detailRows.values()) {
+      const count = Number(row["$err_count"]);
+      if (row["$err_subtable"] !== "" && count >= 2) {
+        row["$err_message"] = `${row["$err_message"]}（${count}行: ${row["$err_subrow"]}）`;
+      }
+      rows.push(row);
+    }
+  }
   const columns = stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   const result: SelectResult = {
     type: "SELECT",

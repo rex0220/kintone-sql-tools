@@ -40321,7 +40321,16 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
       appendError({ id: row.id, field: "", code: "ERR_CHECK", message: check2.message, value: "" });
     }
   }
-  rows.push(...stmt.summary ? summaryRows.values() : detailRows.values());
+  if (stmt.summary) rows.push(...summaryRows.values());
+  else {
+    for (const row of detailRows.values()) {
+      const count = Number(row["$err_count"]);
+      if (row["$err_subtable"] !== "" && count >= 2) {
+        row["$err_message"] = `${row["$err_message"]}\uFF08${count}\u884C: ${row["$err_subrow"]}\uFF09`;
+      }
+      rows.push(row);
+    }
+  }
   const columns = stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   const result = {
     type: "SELECT",
