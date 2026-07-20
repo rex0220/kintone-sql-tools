@@ -371,6 +371,17 @@ test("EXPLAIN FULL_SCAN — JOIN", async () => {
   expect(plan.find((l) => l.includes("reason"))).toContain("JOIN あり");
 });
 
+test.each(["_pid = 1", "_rid = 'r1'", "_idx > 2"])(
+  "B45: EXPLAIN サブテーブル system 列は FULL_SCAN かつ押し下げ候補外: %s",
+  async (predicate) => {
+    const plan = await explain(`EXPLAIN SELECT _rid FROM APP100$明細 WHERE ${predicate}`);
+    expect(plan.find((line) => line.includes("mode"))).toContain("FULL_SCAN");
+    expect(plan.find((line) => line.includes("reason"))).toContain("サブテーブル仮想テーブル");
+    expect(plan.find((line) => line.includes("kintone query:"))).toContain("(全件取得)");
+    expect(plan.some((line) => line.includes("pushdown candidate:"))).toBe(false);
+  }
+);
+
 test("EXPLAIN FULL_SCAN — JOIN + GROUP BY でテーブル別必要フィールドを表示", async () => {
   const plan = await explain(
     "EXPLAIN SELECT a.顧客ランク AS 顧客ランク, FORMAT(SUM(b.合計費用),'#,##0') AS 合計 FROM APP89 AS a INNER JOIN APP88 AS b ON a.顧客名 = b.顧客名 GROUP BY a.顧客ランク"

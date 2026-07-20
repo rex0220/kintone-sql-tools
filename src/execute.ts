@@ -2057,10 +2057,18 @@ async function buildWhereFieldSemanticsResolver(
     if (order) statusOrdersByApp.set(appId, order);
   }));
 
-  const fromPhysical = (table: TableRef, field: string): ResolvedFieldSemantics | undefined => {
+  const fromPhysical = (
+    table: TableRef,
+    field: string,
+    allowSubtableSystemColumns: boolean
+  ): ResolvedFieldSemantics | undefined => {
     if (field === "$id") return withFieldSemanticSource(
       resolveFieldSemantics({ fieldType: "__ID__" }), table.appId, "$id"
     );
+    if (allowSubtableSystemColumns && table.subtableCode) {
+      if (field === "_rid") return syntheticSemantics("string");
+      if (field === "_idx" || field === "_pid") return syntheticSemantics("number");
+    }
     const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
     if (!info) return undefined;
     const base = info.semantics ?? resolveFieldSemantics(info);
@@ -2077,7 +2085,7 @@ async function buildWhereFieldSemanticsResolver(
   return (field) => {
     if (field.tableAlias !== null) {
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
-        return fromPhysical(stmt.from, field.field);
+        return fromPhysical(stmt.from, field.field, false);
       }
       const table = tables.find((candidate) => candidate.alias === field.tableAlias);
       if (!table) return undefined;
@@ -2085,22 +2093,23 @@ async function buildWhereFieldSemanticsResolver(
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
           ?? syntheticSemantics("string");
       }
-      return fromPhysical(table, field.field);
+      return fromPhysical(table, field.field, true);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
         return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics
           ?? syntheticSemantics("string");
       }
-      return fromPhysical(stmt.from, field.field);
+      return fromPhysical(stmt.from, field.field, true);
     }
     const matches = tables.flatMap((table): ResolvedFieldSemantics[] => {
       const semantics = table.cteName !== null
         ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
-        : fromPhysical(table, field.field);
+        : fromPhysical(table, field.field, true);
       return semantics ? [semantics] : [];
     });
     if (matches.length === 1) return matches[0];
+    if (tables.some((table) => subtableSystemFieldType(table, field.field) !== undefined)) return undefined;
     // JOIN の非修飾同名列は既存契約どおりローカル値として評価する。
     return matches.length > 1 ? syntheticSemantics("string") : undefined;
   };
@@ -2867,6 +2876,13 @@ function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   return field;
 }
 
+function subtableSystemFieldType(table: TableRef, field: string): string | undefined {
+  if (!table.subtableCode) return undefined;
+  if (field === "_rid") return "SINGLE_LINE_TEXT";
+  if (field === "_idx" || field === "_pid") return "NUMBER";
+  return undefined;
+}
+
 function materializedMetaFromFieldInfo(
   info: KintoneFieldInfo,
   sourceAppId?: number
@@ -2910,13 +2926,15 @@ function unsupportedColumnMeta(fieldType = "KSQL_ARRAY"): MaterializedColumnMeta
 }
 
 function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
-  if (field === "$id" || field === "_rid" || field === "_pid") {
+  if (field === "$id") {
     return {
       sortKind: "number",
       fieldType: "__ID__",
       semantics: resolveFieldSemantics({ fieldType: "__ID__" }),
     };
   }
+  if (field === "_rid") return syntheticColumnMeta("string");
+  if (field === "_pid" || field === "_idx") return syntheticColumnMeta("number");
   if (field === "$revision") return syntheticColumnMeta("number");
   return undefined;
 }
@@ -3144,22 +3162,24 @@ function buildSelectFieldTypeResolvers(
       }
       const table = tables.find((candidate) => candidate.alias === field.tableAlias);
       if (!table || table.cteName !== null) return undefined;
-      return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+      return subtableSystemFieldType(table, field.field)
+        ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return undefined;
-      return fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
+      return subtableSystemFieldType(stmt.from, field.field)
+        ?? fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
     }
 
     // CTE は列型来歴を持たないため、混在 JOIN の非修飾参照は一意と証明できない。
     if (tables.some((table) => table.cteName !== null)) return undefined;
-    const matches = physicalTables.filter((table) =>
-      fieldTypesByApp.get(table.appId)?.has(fieldCodeForTypeLookup(table, field.field))
-    );
-    if (matches.length !== 1) return undefined;
-    const table = matches[0];
-    return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+    const matches = physicalTables.flatMap((table): string[] => {
+      const type = subtableSystemFieldType(table, field.field)
+        ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+      return type ? [type] : [];
+    });
+    return matches.length === 1 ? matches[0] : undefined;
   };
 
   const having: FieldTypeResolver = (field) => {
