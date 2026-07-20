@@ -566,6 +566,17 @@ describe("MCP tools", () => {
     expect(client.putRecords).not.toHaveBeenCalled();
 
     await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' WHERE _idx=0)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.getRecords).not.toHaveBeenCalled();
+    expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
       sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (APPEND (子) VALUES ('new'))",
       allowDml: true,
       confirmText: "yes",

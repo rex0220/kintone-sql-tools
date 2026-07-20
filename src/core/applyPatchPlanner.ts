@@ -189,7 +189,7 @@ function assertChildReferences(
   targetChildren: ReadonlyMap<string, KintoneFieldInfo>
 ): void {
   visitFieldReferences(node, (code) => {
-    if (code === "_rid") return;
+    if (code === "_rid" || code === "_idx") return;
     if (targetChildren.has(code)) return;
     const field = fieldsByCode.get(code);
     if (field?.inSubtable) argument(`APPLY child reference ${code} does not belong to subtable ${table}.`);
@@ -277,7 +277,9 @@ function buildApplyPatchPlanForSnapshot(
     }
 
     const childTypeResolver: FieldTypeResolver = (field: FieldRef) =>
-      field.field === "_rid" ? "SINGLE_LINE_TEXT" : targetChildren.get(field.field)?.fieldType;
+      field.field === "_rid" ? "SINGLE_LINE_TEXT"
+        : field.field === "_idx" ? "NUMBER"
+          : targetChildren.get(field.field)?.fieldType;
     const resolved: Array<{ rowIndex: number; field: string; value: string }> = [];
     const appended: ApplyPatchPostImageRow[] = [];
     const operationPlans: ApplyPatchOperationPlan[] = [];
@@ -510,6 +512,10 @@ function resolveSelectorTargets(
   if (requestedRid !== null && indices.length === 0) {
     argument(`APPLY _rid ${requestedRid} does not exist in snapshot table ${table}.`);
   }
+  const requestedIdx = exactIdxSelectorValue(where);
+  if (requestedIdx !== null && indices.length === 0) {
+    argument(`APPLY _idx ${requestedIdx} does not exist in snapshot table ${table}.`);
+  }
   return indices;
 }
 
@@ -519,6 +525,14 @@ function exactRidSelectorValue(where: WhereExpr): string | null {
   if (where.right.type === "STRING") return where.right.value;
   if (where.right.type === "NUMBER") return where.right.raw ?? String(where.right.value);
   return null;
+}
+
+function exactIdxSelectorValue(where: WhereExpr): number | null {
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD"
+    || where.left.tableAlias !== null || where.left.field !== "_idx" || where.right.type !== "NUMBER") {
+    return null;
+  }
+  return Number.isSafeInteger(where.right.value) && where.right.value >= 0 ? where.right.value : null;
 }
 
 function readSnapshotRows(snapshot: KintoneRecord, table: string): ApplySnapshotRow[] {

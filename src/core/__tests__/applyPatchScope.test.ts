@@ -193,3 +193,37 @@ describe("Phase 10a syntax/execution capabilities", () => {
       .toThrow(/^UnsupportedError: APPLY phase10a scope/)
   );
 });
+
+describe("Phase 11 _idx syntax/execution capability", () => {
+  const parse = (text: string): UpdateStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as UpdateStatement;
+
+  test.each([
+    "PATCH SET 子='x' WHERE _idx=0",
+    "PATCH SET 子='x' WHERE _idx IN (0,2)",
+    "REMOVE WHERE _idx=0",
+    "REMOVE WHERE _idx IN (0,2)",
+  ])("PATCH/REMOVEの子selectorで_idxを許可する: %s", (operation) => {
+    const stmt = parse(sql("状態='open'", operation));
+    expect(() => assertApplyScope("phase11", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase11", stmt)).not.toThrow();
+    expect(() => assertApplyPublicWriteScope("phase11", stmt)).not.toThrow();
+  });
+
+  test("_idx代入先はsystem fieldとして拒否し、Phase 10aではselector解禁を先取りしない", () => {
+    expect(() => assertApplyScope("phase11", parse(sql("$id=8", "PATCH SET _idx=1 ALL ROWS"))))
+      .toThrow("ArgumentError: APPLY assignment target _idx is a system field");
+    expect(() => assertApplyScope("phase10a", parse(sql("$id=8", "PATCH SET 子='x' WHERE _idx=0"))))
+      .toThrow(/^UnsupportedError: APPLY phase10a scope/);
+  });
+
+  test.each([
+    "PATCH SET 子='x' WHERE _p.親='x'",
+    "PATCH SET 子='x' WHERE 子 IN (SELECT 子 FROM APP2)",
+    "PATCH SET 子='x' WHERE COUNT(*)>0",
+    "PATCH SET 子='x' WHERE 子 KLIKE 'x'",
+  ])("既存の危険な子selectorは継続拒否する: %s", (operation) => {
+    expect(() => assertApplyScope("phase11", parse(sql("$id=8", operation))))
+      .toThrow(/^UnsupportedError: APPLY phase11 scope/);
+  });
+});

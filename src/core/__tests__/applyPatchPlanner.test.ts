@@ -115,6 +115,51 @@ describe("buildApplyPatchPlan", () => {
     })).toThrow("ArgumentError: APPLY _rid 999 does not exist");
   });
 
+  test("_idxはsnapshotの0-based位置で先頭・中間・末尾を解決する", () => {
+    const record = snapshot([
+      { id: "101", value: { 数値: { value: "1" }, 結果: { value: "0" } } },
+      { id: "102", value: { 数値: { value: "2" }, 結果: { value: "0" } } },
+      { id: "103", value: { 数値: { value: "3" }, 結果: { value: "0" } } },
+    ]);
+    const plan = buildApplyPatchPlan({
+      statement: statement(
+        "PATCH SET 結果=10 WHERE _idx=0; "
+        + "PATCH SET 結果=20 WHERE _idx=1; PATCH SET 結果=30 WHERE _idx=2"
+      ),
+      snapshot: record,
+      fieldInfos: fields,
+    });
+    expect(plan.tables[0].postImageRows.map((row) => row.value.結果.value)).toEqual(["10", "20", "30"]);
+  });
+
+  test("_idx単一指定0行はArgumentError、IN/範囲の0行は一般述語no-opにする", () => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果=1 WHERE _idx=5"), snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY _idx 5 does not exist in snapshot table テーブル");
+    expect(() => buildApplyPatchPlan({
+      statement: statement("REMOVE WHERE _idx=0"), snapshot: snapshot([]), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY _idx 0 does not exist in snapshot table テーブル");
+
+    for (const operation of [
+      "PATCH SET 結果=1 WHERE _idx IN (5,6)",
+      "REMOVE WHERE _idx BETWEEN 5 AND 6",
+    ]) {
+      const plan = buildApplyPatchPlan({ statement: statement(operation), snapshot: snapshot(), fieldInfos: fields });
+      expect(plan.changedSubtableRows).toBe(0);
+    }
+  });
+
+  test("_idxと_ridの複合述語を同じsnapshot行で評価する", () => {
+    const plan = buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果=1 WHERE _idx=1 AND _rid='102'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(plan.tables[0].payloadRows).toEqual([
+      { id: "101" },
+      { id: "102", value: { 結果: { value: "1" } } },
+    ]);
+  });
+
   test("同一cell多重PATCHを拒否し、同一行別cellは許可する", () => {
     expect(() => buildApplyPatchPlan({
       statement: statement("PATCH SET 結果 = 1 ALL ROWS; PATCH SET 結果 = 2 WHERE _rid = '101'"),
@@ -257,6 +302,16 @@ describe("buildApplyPatchPlans", () => {
     expect(plans.map((plan) => plan.postImage["$id"].value)).toEqual(["8", "9"]);
   });
 
+  test("複数親の_idx=0を各親snapshot内で独立に解決しrevisionを保持する", () => {
+    const stmt = parseSqlStatement(
+      "UPDATE APP4221 SET 親='after' WHERE 親='before' "
+        + "APPLY テーブル (PATCH SET 結果=数値+10 WHERE _idx=0)"
+    ) as UpdateStatement;
+    const plans = buildApplyPatchPlans(stmt, [snapshotFor(8, 31, 1), snapshotFor(9, 41, 20)], fields);
+    expect(plans.map((plan) => plan.revision)).toEqual([31, 41]);
+    expect(plans.map((plan) => plan.tables[0].postImageRows[0].value.結果.value)).toEqual(["11", "30"]);
+  });
+
   test("snapshot parentId重複をArgumentErrorで拒否する", () => {
     expect(() => buildApplyPatchPlans(multipleParentStatement(), [snapshotFor(8), snapshotFor(8, 99)], fields))
       .toThrow("ArgumentError: APPLY snapshots contain duplicate parentId 8");
@@ -277,6 +332,8 @@ describe("resolveApplyPatchMetadata", () => {
     expect(() => resolveApplyPatchMetadata(statement("PATCH SET 計算 = 1 ALL ROWS"), nonWritable))
       .toThrow("is not writable (CALC)");
     expect(() => resolveApplyPatchMetadata(statement("PATCH SET _rid = 'x' ALL ROWS"), fields))
+      .toThrow("is a system field");
+    expect(() => resolveApplyPatchMetadata(statement("PATCH SET _idx = 1 ALL ROWS"), fields))
       .toThrow("is a system field");
   });
 

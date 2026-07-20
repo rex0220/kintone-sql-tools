@@ -776,8 +776,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase10a", stmt);
-  assertApplyExecutionScope("phase10d", stmt);
+  assertApplyScope("phase11", stmt);
+  assertApplyExecutionScope("phase11", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1380,8 +1380,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase10a", resolvedStmt);
-  assertApplyExecutionScope("phase10d", resolvedStmt);
+  assertApplyScope("phase11", resolvedStmt);
+  assertApplyExecutionScope("phase11", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5816,7 +5816,7 @@ async function executeMultipleParentApplyPreflight(
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  assertApplyPublicWriteScope("phase10d", stmt);
+  assertApplyPublicWriteScope("phase11", stmt);
   if (options.confirm) {
     const applyDetail = buildMultipleParentApplyConfirmDetail(prepared);
     const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
@@ -6808,7 +6808,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase10a", stmt);
+    assertApplyScope("phase11", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {

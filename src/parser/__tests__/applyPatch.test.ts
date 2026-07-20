@@ -34,6 +34,29 @@ describe("UPDATE APPLY parser", () => {
     expect(stmt).toMatchObject({ applyBlocks: [{ operations: [{ expectRows: expected }] }] });
   });
 
+  test("_idxの等値/IN selectorを0-based数値リテラルのASTとして保持する", () => {
+    const stmt = parseSqlStatement(`${prefix}APPLY テーブル (
+      PATCH SET 子='first' WHERE _idx=0;
+      REMOVE WHERE _idx IN (0,2)
+    )`);
+    expect(stmt).toMatchObject({ applyBlocks: [{ operations: [
+      {
+        kind: "PATCH",
+        selector: { kind: "WHERE", where: {
+          type: "BINARY", op: "=", left: { type: "FIELD", field: "_idx" },
+          right: { type: "NUMBER", value: 0 },
+        } },
+      },
+      {
+        kind: "REMOVE",
+        selector: { kind: "WHERE", where: {
+          type: "BINARY", op: "IN", left: { type: "FIELD", field: "_idx" },
+          right: { type: "IN_LIST", values: [{ type: "NUMBER", value: 0 }, { type: "NUMBER", value: 2 }] },
+        } },
+      },
+    ] }] });
+  });
+
   test("ブロック内セミコロン、末尾省略、文字列・コメント内セミコロンを区別する", () => {
     const statements = parseSqlStatements(`${prefix}APPLY テーブル (
       PATCH SET 子 = 'a;b' WHERE _rid = '1'; -- ; is data

@@ -452,6 +452,61 @@ test("二重ガード以内は revision 付き1-record PUTを1回だけ行う", 
   });
 });
 
+test("Phase 11: 単一親PATCHの_idx=0は先頭行だけをrevision付きPUTする", async () => {
+  const mock = makeClient([parent("8", 3)]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (PATCH SET 子='idx-first' WHERE _idx=0)",
+    mock.client,
+    { cacheContext: "apply-phase11-single-idx", allowApplyMutation: true }
+  )).resolves.toMatchObject({ type: "UPDATE", updatedCount: 1 });
+  const payload = (mock.putRecords.mock.calls as unknown as [[KintonePutParams]])[0][0];
+  expect(payload.records[0]).toMatchObject({ id: 8, revision: 3 });
+  expect(payload.records[0].record.テーブル.value).toEqual([
+    { id: "101", value: { 子: { value: "idx-first" } } },
+    { id: "102" },
+    { id: "103" },
+  ]);
+});
+
+test("Phase 11: 複数親REMOVEの_idx=0は各親の先頭行をrevision付きで削除する", async () => {
+  const first = parent("8", 2);
+  const second = parent("9", 2);
+  second["$revision"] = { value: "4" };
+  const mock = makeClient([first, second]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' APPLY テーブル (REMOVE WHERE _idx=0)",
+    mock.client,
+    { cacheContext: "apply-phase11-multi-idx", allowApplyMutation: true, dmlMaxRows: 2 }
+  )).resolves.toMatchObject({ type: "UPDATE", updatedCount: 2 });
+  const records = (mock.putRecords.mock.calls as unknown as [[KintonePutParams]])[0][0].records;
+  expect(records.map((record) => record.revision)).toEqual([3, 4]);
+  expect(records.map((record) =>
+    (record.record.テーブル.value as unknown as Array<{ id: string }>).map((row) => row.id)
+  )).toEqual([
+    ["102"], ["102"],
+  ]);
+});
+
+test("Phase 11: VALIDATE ONLYの_idx INはmatched/changedを反映しwrite 0", async () => {
+  const mock = makeClient([parent("8", 3)]);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+      + "APPLY テーブル (PATCH SET 子='selected' WHERE _idx IN (0,2)) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase11-validate-idx" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    apply: [{
+      field: "テーブル",
+      operations: [{ kind: "PATCH", matchedRows: 2, changedRows: 2 }],
+      changedSubtableRows: 2,
+    }],
+    guards: { subtableRows: 2, revisionRequired: true, wouldExceed: false },
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
 test("複数tableのPATCH/APPENDを1 recordへ合成し、defaultを明示payload化してFILEを送らない", async () => {
   const infos: KintoneFieldInfo[] = [
     ...fieldInfos.map((field) => field.code === "子" ? { ...field, defaultValue: "DEFAULT" } : field),

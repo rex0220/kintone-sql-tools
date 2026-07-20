@@ -5,13 +5,14 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
   readonly multipleBlocks: boolean;
   readonly multipleParents: boolean;
+  readonly idxSelectors: boolean;
   readonly expectRows: boolean;
   readonly updateFrom: boolean;
   readonly check: boolean;
@@ -22,6 +23,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     operations: new Set<ApplyOperation["kind"]>(["PATCH"]),
     multipleBlocks: false,
     multipleParents: false,
+    idxSelectors: false,
     expectRows: false,
     updateFrom: false,
     check: false,
@@ -32,6 +34,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND"]),
     multipleBlocks: true,
     multipleParents: false,
+    idxSelectors: false,
     expectRows: false,
     updateFrom: false,
     check: false,
@@ -42,6 +45,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     multipleBlocks: true,
     multipleParents: false,
+    idxSelectors: false,
     expectRows: false,
     updateFrom: false,
     check: false,
@@ -52,6 +56,18 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     multipleBlocks: true,
     multipleParents: true,
+    idxSelectors: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
+  phase11: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
     expectRows: false,
     updateFrom: false,
     check: false,
@@ -69,6 +85,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false }),
   phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false }),
   phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
+  phase11: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -134,19 +151,26 @@ function assertApplyScopeForCapabilities(
       }
       if (operation.kind === "REMOVE") {
         if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
-        if (operation.selector.kind === "WHERE") assertSafeChildPredicate(operation.selector.where);
+        if (operation.selector.kind === "WHERE") {
+          assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
+        }
         continue;
       }
       if (operation.kind !== "PATCH") continue;
       if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
       if (operation.assignments.length === 0) unsupported("an empty PATCH operation in this phase");
       for (const assignment of operation.assignments) {
+        if (assignment.field.startsWith("_") || assignment.field.startsWith("$")) {
+          throw new Error(`ArgumentError: APPLY assignment target ${assignment.field} is a system field.`);
+        }
         if (assignment.field.includes(".")) {
           unsupported("parent or qualified PATCH targets in this phase");
         }
       }
       assertSafeApplyNode(operation.assignments, "PATCH assignments");
-      if (operation.selector.kind === "WHERE") assertSafeChildPredicate(operation.selector.where);
+      if (operation.selector.kind === "WHERE") {
+        assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
+      }
     }
   }
 }
@@ -237,13 +261,13 @@ function assertSafeParentPredicateNode(node: unknown): void {
   for (const value of Object.values(item)) assertSafeParentPredicateNode(value);
 }
 
-function assertSafeChildPredicate(where: WhereExpr): void {
-  assertSafeApplyNode(where, "child row selectors");
+function assertSafeChildPredicate(where: WhereExpr, idxSelectors: boolean): void {
+  assertSafeApplyNode(where, "child row selectors", idxSelectors);
 }
 
-function assertSafeApplyNode(node: unknown, context: string): void {
+function assertSafeApplyNode(node: unknown, context: string, allowIdx = false): void {
   if (Array.isArray(node)) {
-    for (const value of node) assertSafeApplyNode(value, context);
+    for (const value of node) assertSafeApplyNode(value, context, allowIdx);
     return;
   }
   if (node === null || typeof node !== "object") return;
@@ -264,20 +288,20 @@ function assertSafeApplyNode(node: unknown, context: string): void {
     const alias = item["tableAlias"];
     const field = item["field"];
     if (alias !== null && alias !== undefined) unsupported(`qualified or parent field references in ${context}`);
-    assertSafeChildField(field, context);
+    assertSafeChildField(field, context, allowIdx);
   }
-  if (type === "FIELD_REF") assertSafeChildField(item["field"], context);
+  if (type === "FIELD_REF") assertSafeChildField(item["field"], context, allowIdx);
   if (kind === "PATCH" || kind === "APPEND" || kind === "REMOVE") {
     // Operation kinds are checked by the capability set above, not by traversal.
     return;
   }
-  for (const value of Object.values(item)) assertSafeApplyNode(value, context);
+  for (const value of Object.values(item)) assertSafeApplyNode(value, context, allowIdx);
 }
 
-function assertSafeChildField(field: unknown, context: string): void {
+function assertSafeChildField(field: unknown, context: string, allowIdx = false): void {
   if (typeof field !== "string") return;
   const lower = field.toLowerCase();
-  if (lower === "_idx") unsupported(`_idx in ${context}`);
+  if (lower === "_idx" && !allowIdx) unsupported(`_idx in ${context}`);
   if (lower.startsWith("_p.") || lower.includes(".")) unsupported(`parent or qualified field references in ${context}`);
   if (/^(count|sum|avg|min|max|group_concat)\s*\(/i.test(field)) {
     unsupported(`aggregate expressions in ${context}`);
