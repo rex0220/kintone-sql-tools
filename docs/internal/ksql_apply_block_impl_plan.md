@@ -550,16 +550,18 @@ parser/AST（UPDATE／INSERT／UPSERT）
 | 7 | v1.1: 複数APPLY／複数table＋APPEND | L | 1～6 | 合成／追加行検証／PATCH_ONLY shape／surface内訳 green |
 | 8 | v1.2: REMOVE＋payload形切替＋削除表示 | L | 7 | survivor完全性、shape混在、削除guard／UI green |
 | 9 | v1～v1.2統合・実機baseline（完了） | M | 1～8 | commit `017ebba`、実機／規模evidence |
-| 10 | 複数親UPDATE＋100件chunk | **XL** | 1～9 | 全件preflight、100/101/201、部分成功契約 green |
-| 11 | `_idx` selector | M | 10 | 0-based、0件、revision、複数親 green |
-| 12 | `EXPECT ROWS` 4形 | M | 10,11 | 親別・operation別guard、write 0 green |
-| 13 | INSERT初期行 | L | 7,10,12 | create post-image、POST chunk、既定値 green |
-| 14 | UPSERT ON INSERT／ON UPDATE | **XL** | 10～13 | parser分岐、混在preflight、部分成功表現 green |
-| 15 | 多値ADD／REMOVE | L | 10,12 | 5型payload、choice／空値、集合裁定 green |
-| 16 | CLI／plugin／MCP v2統合 | L | 10～15 | shared detail、surface smoke、MCP API 0 green |
+| 10a | 複数親: planner array＋scope（`buildApplyPatchPlans` : `readonly ApplyPatchPlan[]`・親WHERE 拡張・0/1/2/100/101 plan・PUT 0） | L | 1～9 | pure planner／scope green、execution 未接続 |
+| 10b | 複数親: executor 全件preflight＋converter 100件chunk＋部分成功契約 | L | 10a | 100→1・101→2・201→3 call、2nd chunk conflict の部分成功、preflight 前 PUT 0 green |
+| 11 | `_idx` selector | M | 10b | 0-based、0件、revision、複数親 green |
+| 12 | `EXPECT ROWS` 4形 | M | 10b,11 | 親別・operation別guard、write 0 green |
+| 13 | INSERT初期行 | L | 7,10b,12 | create post-image、POST chunk、既定値 green |
+| 14a | UPSERT: parser/AST＋scope（applyBlocks を Upsert/Insert へ・ON INSERT/ON UPDATE 分岐・UPSERT SELECT 拒否） | M | 10b～13 | parse／scope／句順／拒否 matrix green、execution 未接続 |
+| 14b | UPSERT: executor 分岐（create=初期APPEND・update=既存snapshot PATCH/APPEND/REMOVE・POST→PUT・部分成功） | L | 14a | 混在preflight、POST→PUT 順、部分成功表現、preflight 前 write 0 green |
+| 15 | 多値ADD／REMOVE | L | 10b,12 | 5型payload、choice／空値、集合裁定 green |
+| 16 | CLI／plugin／MCP v2統合 | L | 10b～15 | shared detail、surface smoke、MCP API 0 green |
 | 17 | 全統合・v2実機・release準備 | L | 1～16 | 全回帰、実機evidence、browser、release checklist |
 
-実装済み順は `1 → … → 9`。R3 は `10 → 11 → 12 → 13 → 14 → 15 → 16 → 17` とする。Phase 11と12、Phase 13と15は設計上の一部を並行検討できるが、共有scope／planner型の競合を避けるためcommit gateは表の順に直列化する。Phase 14はcreate/update双方が安定してから接続し、Phase 16でsurfaceを横断統合、Phase 17までversion bump／releaseを行わない。
+実装済み順は `1 → … → 9`。R3 は `10a → 10b → 11 → 12 → 13 → 14a → 14b → 15 → 16 → 17` とする。**XL だった Phase 10／14 は各2分割**（Claude レビュー §16・codex 1ラウンドの規模と review 粒度を L 以下に抑えるため）＝10a=planning/scope 層（execution 未接続・pure テスト）／10b=execution・converter・chunk 層、14a=parser/AST・scope 層（execution 未接続）／14b=executor 分岐層。Phase 11と12、Phase 13と15は設計上の一部を並行検討できるが、共有scope／planner型の競合を避けるためcommit gateは表の順に直列化する。Phase 14bはcreate/update双方が安定してから接続し、Phase 16でsurfaceを横断統合、Phase 17までversion bump／releaseを行わない。
 
 ## 13. 裏取りで判明した齟齬・レビュー判断事項
 
@@ -643,3 +645,14 @@ parser/AST（UPDATE／INSERT／UPSERT）
 **spec 同期の必須化（§13.4 冒頭の齟齬）**: 現行 spec §12 が「v2 は v3.8.0 でも対象外」と明記しており本決定と衝突する。**Phase 10 着手前に spec §5.1（`_idx` の「v2」）・§9（段階リリース）・§11.2・§12（対象外）をユーザー決定へ同期**すること（計画だけ先行した状態を残さない）。SemVer は minor 維持で妥当（新規 soft keyword の加法・既存 SQL 意味論不変）。
 
 **総括**: v2 を v3.8.0 へ同梱する Phase 10〜17 構成で**実装着手可**。ただし複数親（Phase 10）は本 B44 全体で最大の correctness surface（部分成功・non-transactional・全件 preflight gate）であり、Phase 10 を単独 gate として厳格にレビューする。実装順は Phase 10（複数親）→11（`_idx`）→12（EXPECT ROWS）→13（INSERT）→14（UPSERT）→15（多値）→16（面統合）→17（統合・実機・release）。Phase 10 の直前に spec 同期を行う。
+
+## 17. XL フェーズ分割（Claude・2026-07-20・ユーザー指摘）
+
+XL の Phase 10（複数親）・Phase 14（UPSERT）は codex 1ラウンド（実行10分上限）に収まりにくく diff が大きくレビュー粒度が粗くなるため、各2分割し全フェーズを **L 以下** にする。§9.4／§9.8 の作業項目はそのまま2フェーズへ振り分ける（内容は不変・gate だけ細分化）。
+
+- **Phase 10a（planner array＋scope・L）**: §9.4 作業項目1（scope へ `multipleParents` 追加・`assertSinglePositiveRecordId` を安全な親WHEREへ拡張・取得は `dmlMaxRows+1` で超過検知）＋2（`buildApplyPatchPlans(statement, snapshots) : readonly ApplyPatchPlan[]`・単数 pure 関数は残す・parentId 重複拒否）。**execution・converter は未接続**＝pure planner と scope の unit テストのみ。executor は従来どおり単一親のみ実行し、複数親一致は Phase 10a では `UnsupportedError`（実行 gate は 10b で開通）。
+- **Phase 10b（executor＋converter＋chunk・L）**: §9.4 作業項目3（executor を全snapshot GET→全plan→全validation→全guard→1 confirm→write へ）＋4（`applyPatchPlansToKintoneBatches` の100件chunk）＋5（`ApplyConfirmDetail` 複数親集計・非トランザクション/部分成功の result 明示）。**immutable な plans/batches 完成を write loop の構造 gate** とし、preflight 前 putCalls=0・部分成功・conflict 非retry を spy 固定。
+- **Phase 14a（parser/AST＋scope・M）**: §9.8 作業項目のうち parser（applyBlocks を InsertStatement／UpsertStatement へ・`ON DUPLICATE` 後に分岐句・UPSERT SELECT は明示拒否）と scope validator（insert 分岐=APPEND のみ・PATCH/REMOVE 禁止／update 分岐=PATCH/APPEND/REMOVE）。**execution 未接続**＝parse・scope・句順・拒否 matrix の unit テストのみ。
+- **Phase 14b（executor 分岐・L）**: §9.8 の分岐 planner／executor（create=Phase 13 planner の初期APPEND・update=Phase 10 planner の既存snapshot 操作・POST→PUT 順・部分成功 result）。混在 preflight 全件確定後に write。
+
+依存: 10a→10b→11→12→13→14a→14b→15→16→17。この分割で v2 側も全フェーズが L 以下となり、各 gate を codex 1ラウンド＋Claude レビューで安全に回せる。
