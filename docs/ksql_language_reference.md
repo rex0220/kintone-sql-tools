@@ -2297,6 +2297,47 @@ WHERE _pid = 123 AND _rid = '67890'
 
 ---
 
+## 19.1 APPLY ブロック（テーブル外・内の同時更新）
+
+`UPDATE` / `INSERT` / `UPSERT` に `APPLY` ブロックを付けると、**親（テーブル外）項目とサブテーブル（テーブル内）行を1文＝1 PUT レコードで同時に更新**できます。kintone は書き込み時にレコード全体を再検証するため、テーブル内に既存違反があるとテーブル外項目だけの `UPDATE` も失敗しますが、`APPLY` で違反セルへ妥当な値を同時にセットしてレコード全体を valid 化する「修復書き込み」が可能になります。
+
+```sql
+UPDATE APP100
+SET ステータス = '確定'
+WHERE $id = 5
+APPLY 明細 (
+  PATCH SET 数量 = 0 WHERE 数量 < 0;     -- 既存行のセル更新
+  APPEND (商品コード, 数量) VALUES ('A-001', 1);  -- 行追加
+  REMOVE WHERE 廃番 = 'true'            -- 行削除
+)
+```
+
+### 操作
+
+| 操作 | 意味 |
+|------|------|
+| `PATCH SET … {WHERE 行条件 \| ALL ROWS \| _idx = n \| _rid = 'id'}` | 既存行のセル更新（行 id・行順・未指定セルを保持） |
+| `APPEND (子…) VALUES (…)` | 行追加（未指定の子は既定値で明示補完） |
+| `REMOVE {WHERE 行条件 \| _idx = n \| _rid = 'id'}` | 行削除（存続行は全列を保持） |
+
+- **多値フィールド**（`CHECK_BOX` / `MULTI_SELECT` / `USER_SELECT` 等）: `APPLY <多値> (ADD '値'; REMOVE '値')`。
+- 1文に複数テーブル／多値の `APPLY` ブロックを併記できます。
+
+### 行アドレッシング・行数表明
+
+- 行セレクタ: `ALL ROWS`（**明示必須**）・`WHERE 行条件`・`_idx`（0-based）・`_rid`（行 ID）。
+- `EXPECT ROWS n | BETWEEN a AND b | AT LEAST n | AT MOST n` で対象行数を表明でき、不一致は書き込み前に `ArgumentError`。
+
+### 意味論・安全ルール
+
+- **スナップショット意味論**: セレクタと右辺は更新前スナップショットで評価し、同一文内の `APPEND` 行は同文の `PATCH`/`REMOVE` から見えません。
+- **post-image 検証**: 変異後のレコード全体を書き込み前に検証し、違反は行ロケータ付きで報告します。
+- **複数親**: 親 `WHERE` が複数レコードに一致する `UPDATE APPLY` に対応（1対象親=1 PUT・100件/チャンク・**非トランザクション**・自動リトライなし・部分成功あり）。`INSERT APPLY`（親作成＋初期行）・`UPSERT APPLY`（`ON INSERT` / `ON UPDATE` 分岐）も可。
+- **ガード**: revision ガード必須。`dmlMaxRows`（親件数）と `dmlMaxSubtableRows`（変更子行数・既定500）の二重ガード。プラグインは「最大取得件数」設定を両ガードへ兼用します。
+- **MCP**: すべての `APPLY` mutation は実行前に fail-closed（`allowDml` / `dmlMaxSubtableRows` でも解禁されません）。`VALIDATE ONLY` / `EXPLAIN` は許可。
+
+---
+
 ## 20. REORDER
 
 サブテーブル行を親単位で並び替えます。

@@ -1,9 +1,31 @@
-ksql 配布パッケージ (v3.7.0)
+ksql 配布パッケージ (v3.8.0)
 
-1. ksql-plugin-v3.7.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.8.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.8.0: APPLY ブロック (B44) ＋ プラグイン親/子ガード兼用 (B48)
+        ＋ サブテーブル SELECT のシステム列 WHERE (B45)。
+- APPLY ブロック (B44): UPDATE/INSERT/UPSERT に APPLY を付けて、
+  テーブル外項目とテーブル内 (サブテーブル) 行を1文=1 PUT で同時更新。
+  テーブル内に既存違反があるレコードの修復書き込みが可能になる。
+    UPDATE APP100 SET ステータス='確定' WHERE $id=5
+    APPLY 明細 (
+      PATCH SET 数量=0 WHERE 数量<0;
+      APPEND (商品コード, 数量) VALUES ('A-001', 1);
+      REMOVE WHERE 廃番='true'
+    )
+  - PATCH (既存行更新)/APPEND (行追加)/REMOVE (行削除)、多値 ADD/REMOVE。
+  - 行アドレッシング: ALL ROWS / WHERE 行条件 / _idx (0-based) / _rid。
+    EXPECT ROWS n | BETWEEN | AT LEAST | AT MOST で対象行数を表明。
+  - スナップショット意味論・post-image 検証 (書き込み前にレコード全体を検証)。
+  - 複数親 UPDATE / INSERT / UPSERT に対応 (非トランザクション・部分成功あり)。
+  - revision 必須＋二重ガード (dmlMaxRows 親件数 / dmlMaxSubtableRows 子行)。
+- プラグイン親/子ガード兼用 (B48): 「最大取得件数」設定 (既定3000) を
+  APPLY の親/子ガードへ兼用し、100 親超の一括更新を可能に (新設定 UI なし)。
+- サブテーブル SELECT のシステム列 WHERE (B45): _pid/_rid/_idx を
+  SELECT の WHERE/ORDER BY で使えるように修正 (_pid/_idx=数値・_rid=文字列)。
 
 v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
 - VALIDATE の既定対象にサブテーブル子フィールドを追加 (監査の抜けを修正)。

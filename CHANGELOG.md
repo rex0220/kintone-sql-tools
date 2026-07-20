@@ -2,6 +2,31 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.8.0（2026-07-21）
+
+### 機能追加（B44 APPLY ブロック＝テーブル外項目とテーブル内項目を1文=1 PUT で同時更新）
+
+- **`UPDATE/INSERT/UPSERT` に `APPLY` ブロックを新設**し、親（テーブル外）項目とサブテーブル（テーブル内）行を1文＝1 PUT record で同時に更新できるようにした。従来はテーブル内に既存違反があるとテーブル外項目だけの `UPDATE` も kintone の全体再検証（CB_VA01）で失敗し、DML だけでは修復できなかった問題を解消する。
+  - 構文: `UPDATE APPxxx SET … WHERE 親条件 APPLY <テーブル> ( PATCH SET … {WHERE 行条件 | ALL ROWS | _idx=… | _rid=…} [EXPECT ROWS …] ; APPEND (子…) VALUES (…) ; REMOVE … )`。1文に複数テーブルの `APPLY` ブロックを併記可。
+  - **PATCH**（既存行のセル更新・行 id/行順/未指定セルを保持）・**APPEND**（行追加・未指定子は既定値で明示補完）・**REMOVE**（行削除・存続行を全列列挙して保持）。多値フィールド（`CHECK_BOX`/`MULTI_SELECT`/`USER_SELECT` 等）は `APPLY <多値> (ADD …; REMOVE …)`。
+  - **スナップショット意味論**: セレクタ・右辺は更新前スナップショットで評価し、同一文内の `APPEND` 行は同文の `PATCH`/`REMOVE` から不可視。
+  - **post-image 検証**: 変異後のレコード全体を書き込み前に検証し、違反行を行ロケータ付きで報告（B43 相当のエンジンを新設）。
+  - **行アドレッシング**: `ALL ROWS`（明示必須）・`WHERE 行条件`・`_idx`（0-based・既存システム列）・`_rid`（行 id）。`EXPECT ROWS n | BETWEEN | AT LEAST | AT MOST` で対象行数を表明し、不一致は書き込み前に `ArgumentError`。
+  - **複数親**: 親 `WHERE` が複数レコードに一致する `UPDATE APPLY` に対応（1対象親=1 PUT record・100件/チャンク・非トランザクション・自動リトライなし・部分成功あり）。`INSERT APPLY`（親作成＋初期テーブル行）・`UPSERT APPLY`（`ON INSERT`/`ON UPDATE` 分岐）も対応。
+  - **安全ガード**: revision ガード必須・二重ガード（`dmlMaxRows`＝親件数／`dmlMaxSubtableRows`＝変更子行数・既定500）。**MCP は全 APPLY mutation を実行前に fail-closed**（`allowDml`/`dmlMaxSubtableRows` でも解禁されない・VALIDATE ONLY / EXPLAIN は許可）。
+  - CLI 実機・プラグイン実機で全機能を確認（複数親200件・INSERT/UPSERT 分岐・多値 ADD/REMOVE・`_idx`/`EXPECT ROWS`）。
+
+### 機能追加（B48 プラグインの APPLY 親/子ガードを「最大取得件数」から兼用）
+
+- **プラグインの複数親 APPLY で 100 親超を実行可能に**。新設定 UI を増やさず、既存の「最大取得件数」設定（既定3000）を親/子ガードへ兼用する: `dmlMaxRows = max(100, 最大取得件数)`・`dmlMaxSubtableRows = max(500, 最大取得件数)`。floor 付きで従来より厳しくならず後方互換（非正整数はフォールバック）。CLI（`--dml-max-rows` 等で明示）・MCP（fail-closed）・core 既定は不変。実機で親200件/子600件の APPLY 更新が success。
+
+### 修正（B45 サブテーブル SELECT の WHERE でシステム列 `_pid`/`_rid`/`_idx`）
+
+- **サブテーブル仮想テーブルの SELECT で `WHERE`/`ORDER BY` にシステム列を使えるようにした**。従来は `SELECT … FROM APPxxx$テーブル WHERE _pid = 7` が `WHERE_FIELD_UNRESOLVED` で実行前に失敗し、言語リファレンス §19 の記載例そのものが動かなかった（WHERE 述語分類器がシステム列のセマンティクスを持たなかったのが原因）。
+  - 比較型を確定: `_pid`/`_idx`＝数値・`_rid`＝文字列（不透明識別子）。全比較演算子・`BETWEEN`/`IN`/`IS NULL`/`LIKE` に対応（`KLIKE` は局所評価不能で対象外）。サブテーブル SELECT は常にローカル全件評価のため kintone へは押し下げない。
+  - 親項目ショートカット経由の `_p._pid` 等は無効（`WHERE_FIELD_UNRESOLVED` を維持）。`REORDER`/集計 `MIN`,`MAX`/DML は別経路のためスコープ外（非変更）。
+  - CLI 実機 全10項目 pass（`_idx > 8` の数値比較・`ORDER BY _idx DESC` の数値順を決定的に確認）。SemVer は patch 相当だが本版に同梱。
+
 ## v3.7.0（2026-07-20）
 
 ### 機能追加（B42 VALIDATE のサブテーブル子フィールド監査）
