@@ -1,22 +1,25 @@
-# B44 v1 `APPLY PATCH` 実装計画
+# B44 `APPLY` v1／v1.1／v1.2 実装計画 R2
 
-- ステータス: 実装計画 R1 **承認済み**（2026-07-20・codex 作成→Claude レビュー＝引用裏取り全一致・判断事項5件を §14 で裁定。Phase 1 から実装着手可）
+- ステータス: 実装計画 **R2・レビュー待ち**（2026-07-20 ユーザー決定: v1 `PATCH`、v1.1 複数 `APPLY`／複数テーブル／`APPEND`、v1.2 `REMOVE` を **v3.8.0 に一括同梱**。R1 の Phase 1～6 と Claude 裁定5件は維持）
 - 対象ブランチ: `feat/b44-apply-patch`
 - 正本仕様: [B44 APPLY ブロック仕様 R2](ksql_apply_block_spec.md)
 - 対象版: **v3.8.0**（SemVer minor）
-- 制約: 本計画では実装・版数更新・ビルド・リリース成果物更新を行わない。各 Phase は `実装 → 対象テスト → Claude review → 必要な修正` を完了条件とし、Phase 7 だけ実機 gate を追加する。
+- 制約: 本計画では実装・版数更新・ビルド・リリース成果物更新を行わない。各 Phase は `実装 → 対象テスト → Claude review → 必要な修正` を完了条件とし、最終 Phase 9 だけ実機 gate を追加する。実装フェーズは分けるがリリースは v3.8.0 の1回だけである。
 
 ## 1. 結論と実装方針
 
-B44 v1 は、既存のトップレベル UPDATE とサブテーブル仮想テーブル UPDATE を順番に呼ぶ機能にはしない。`UPDATE ... APPLY` 専用経路で、単一親の取得スナップショットから親 SET と子 PATCH を一つの post-image／PUT record へ合成する。
+B44 v1～v1.2 は、既存のトップレベル UPDATE とサブテーブル仮想テーブル DML を順番に呼ぶ機能にはしない。`UPDATE ... APPLY` 専用経路で、単一親の取得スナップショットから親 SET と全 `PATCH`／`APPEND`／`REMOVE` を一つの post-image／PUT record へ合成する。Phase 1～6 で v1、Phase 7 で v1.1、Phase 8 で v1.2、Phase 9 で全体を統合し、途中版は公開しない。
+
+R1のPhase 1～6の順序・完了gate・Claude裁定5件は変更しない。R2でPhase 2のplanner/converterへtable単位payload形を追記したのは、Phase 8のREMOVEを安全に接続する境界を先に型で固定し、全列挙形の列挙漏れをconverter単体で拒否するためである。Phase 1～6のv1許可集合やmutation開通時期は広げない。
 
 ```text
 parser/AST
-  → v1 scope validator（単一親・1 APPLY・PATCH のみ）
+  → phase-aware scope validator（単一親固定、許可操作を Phase ごとに拡張）
   → form metadata と GET field-set の解決
   → 単一親 snapshot GET（$id・$revision・親参照列・全 post-image 検証対象）
   → 子 selector を snapshot 上で解決
-  → 重複検出・親 SET／子 PATCH の post-image 合成
+  → 重複検出・親 SET／子 PATCH／APPEND／REMOVE の post-image 合成
+  → テーブル単位の payload 形選択
   → post-image 全体検証
   → dmlMaxRows／dmlMaxSubtableRows 判定
   → VALIDATE ONLY 結果、または確認後に revision 付き 1-record PUT
@@ -24,12 +27,14 @@ parser/AST
 
 安全上の不変条件は次のとおりとする。
 
-- v1 は親 `UPDATE`、`$id = <正の安全な整数>` の単一親、1文1サブテーブル、1 `APPLY`、`PATCH` のみを実行可能にする。
-- `APPEND`、`REMOVE`、`EXPECT ROWS`、`_idx`、複数 `APPLY` は AST まで識別し、共通 v1 scope validator が `UnsupportedError: ... is not supported in APPLY v1` 形式で拒否する。構文を知らないために一般 ParseError になる状態にはしない。
+- Phase 1～6（v1）は親 `UPDATE`、`$id = <正の安全な整数>` の単一親、1文1サブテーブル、1 `APPLY`、`PATCH` のみを実行可能にする。
+- Phase 7（v1.1）は単一親を維持したまま、複数 `APPLY`、**異なる**複数テーブル、`APPEND` を許可する。同一テーブルの複数ブロックは仕様 §4.2 どおり `ArgumentError` で拒否する（1テーブル1ブロック。複数操作は `;` で同一ブロック内に並べられるため表現力は失わない。§15 裁定3）。
+- Phase 8（v1.2）は上記に `REMOVE WHERE ...`／`REMOVE ALL ROWS` を加える。
+- `EXPECT ROWS` 実行、`_idx` selector、INSERT／UPSERT、複数親、複数値 field の `ADD`／`REMOVE` は Phase 8 後も v2 対象外である。AST まで識別し、phase-aware scope validator が対象フェーズ名付き `UnsupportedError` で拒否する。
 - malformed な句順、空ブロック、空操作、`APPLY SUBTABLE ...` は構文エラーであるため `ParseError` とする。
 - planner、post-image validator、guard は `src/execute.ts` の巨大関数へ埋め込まず、純粋関数中心の新規モジュールへ分離する。`execute.ts` は metadata／records API と mutation の orchestration に限定する。
 - Phase 1～3 では `UPDATE ... APPLY` の実 mutation dispatch を閉じる。Phase 4 で revision、全件先行検証、二重ガードが揃ってから CLI／plugin 用 core mutation を開通する。MCP mutation は Phase 6 後も閉じたままにする。
-- v1 は単一親なので PUT の100親チャンク処理を実装しない。planner の結果型を `ApplyParentPlan[]` とせず、まず単数 `ApplyPatchPlan` として固定し、将来の複数親 adapter が `readonly ApplyPatchPlan[]` をチャンク化できる境界を残す。
+- v1.2 まで単一親なので PUT の100親チャンク処理を実装しない。planner の結果型を `ApplyParentPlan[]` とせず、まず単数 `ApplyPatchPlan` として固定し、将来の複数親 adapter が `readonly ApplyPatchPlan[]` をチャンク化できる境界を残す。
 
 ## 2. 現行コードの裏取りと再利用境界
 
@@ -45,7 +50,7 @@ parser/AST
 | WHERE ローカル評価 | `src/engine/evalWhere.ts:76` の `evalWhere` | metadata で安全性を検査した後、取得済み全子行に対して selector を評価する。kintone query 押し下げを正集合にしない |
 | 子フィールド型解決 | `src/execute.ts:5787` の `buildSubtableFieldTypeResolver` と `src/execute.ts:2467` の typed-IN 参照収集 | APPLY 対象テーブルの子 metadata だけを使う resolver へ抽出・再利用し、他テーブル／親参照を fail-closed にする |
 | 子 assignment 評価 | `src/execute.ts:6110-6120` の `evalAssignmentValueForSubtable` | snapshot の `flat` 行を入力として PATCH 右辺を評価する。対応外 expression は既存同様に明示拒否し、将来拡張は一箇所に閉じる |
-| revision 付きサブテーブル PUT | `src/execute.ts:5881-5931` は親取得後、`getRevision` と `buildSubtablePatchPutParams` で revision を PUT に含める。`getRevision` は `src/execute.ts:6033-6036` | revision の取得・REST shape を再利用する。ただし B44 は親 SET とテーブルを同一 `record` に入れる専用 builder を新設し、revision 省略を型上許さない |
+| revision 付きサブテーブル PUT | 現行 UPDATE は全既存行を `id`、変更行だけ `value` 付きで送る（`src/execute.ts:5920-5930`、builder は `:6061-6081`）。現行 DELETE は削除対象を除外した `nextRows` 全体を `buildSubtablePutParams` へ渡す（`:5978-5985`、builder は `:6038-6058`）。`getRevision` は `:6033-6036` | revision の取得・REST shapeを参照する。B44 は親 SET と各tableを同一 `record` に入れ、REMOVE有無でtable payload形を選ぶ専用builderを新設し、revision省略を型上許さない |
 | form metadata | `src/core/formFieldInfo.ts:22-38` の table→children index、`src/core/formFieldInfo.ts:44-76` の `subtableCode` 付き flatten | APPLY target が SUBTABLE か、子が対象テーブル所属か、書込み可否、post-image 全フィールドを解決する共通 index として使う |
 | B42 子セル検証 | `src/execute.ts:756-815` が監査対象 metadata を解決し、`src/execute.ts:984-1005` がトップレベルと子セルを `validateAndNormalizeDmlValue` へ渡して1-based行番号／row idを付ける | metadata 導出、値の描画、子 locator の規則を共通 helper へ抽出する。B44 は変更セルだけでなく全 post-image を走査する |
 | 検証 primitive | `src/core/dmlValidation.ts:37-106` の `validateAndNormalizeDmlValue` | required、range、length、choice、NUMBER precision の正とする。B44 独自のセル検証を複製しない |
@@ -59,7 +64,7 @@ parser/AST
 - `src/core/applyPatchPlanner.ts`（新規）: API 非依存の snapshot→selector 解決→重複検出→post-image→PUT record draft を構築する。入力は AST、親 snapshot、解決済み metadata／field type、出力は immutable な plan とする。
 - `src/core/postImageValidation.ts`（新規）: 1親の全トップレベル値・全サブテーブル・全存続子行を検証し、B44 locator 付き error rows と normalized post-image を返す。B43 が後からプレーン DML に接続できるよう APPLY AST に依存させない。
 - `src/core/applyPatchTypes.ts`（新規候補）: `ApplyPatchPlan`、`ApplyValidationDetail`、`ApplyGuardDetail`、`ApplyConfirmDetail` を共有し、`execute.ts`／CLI／MCP／plugin の循環依存を避ける。型が小さければ `src/execute.ts` の公開型に置き、planner 内部型だけを新規ファイルに閉じてもよい。
-- `src/converter/applyPatchToKintone.ts`（新規）: revision を必須引数とし、親 assignment とサブテーブル payload を1個の `records[]` 要素へ合成する。既存 `updateToPutBatches`（`src/converter/dmlToKintone.ts:164-173`）は revision とテーブルを扱わないため変更しない。
+- `src/converter/applyPatchToKintone.ts`（新規）: revision を必須引数とし、親 assignment と複数サブテーブル payload を1個の `records[]` 要素へ合成する。planner がtableごとに決めた `PATCH_ONLY`／`FULL_SURVIVORS` shapeを型付き union で受け、converter側で暗黙に推測しない。既存 `updateToPutBatches`（`src/converter/dmlToKintone.ts:164-173`）は revision とテーブルを扱わないため変更しない。
 
 ## 3. Phase 1 — lexer/parser/AST と v1 scope（M）
 
@@ -126,6 +131,9 @@ parser/AST
 4. `src/converter/applyPatchToKintone.ts`（新規）
    - `{ app, records:[{ id, revision, record:{ ...parentValues, [table]:{value: rows} } }] }` を生成する。`revision` は required number とし、`0` fallback を許さない。
    - 現行 `getRevision`（`src/execute.ts:6033-6036`）は欠落を0にするため、B44用 `requireRevision` を新設し、欠落・非正整数を PUT 前に拒否する。
+   - table plan に `payloadShape: "PATCH_ONLY" | "FULL_SURVIVORS"` を必須化する。`PATCH`／`APPEND` だけのtableは、既存行を `id`、変更行だけ `value`、追加行を `value` で送るパッチ形を維持し、取得済み行IDが構造的に欠落しないことをassertする。
+   - `REMOVE` を1操作でも含むtableだけ `FULL_SURVIVORS` とし、削除後post-imageの存続行を元順序どおり全列挙する。REMOVEのない別tableまで全列挙形へ波及させない。
+   - `FULL_SURVIVORS` は列挙漏れ自体がkintone上の意図しない行削除になる高リスクshapeである。plannerは `snapshot row IDs = survivor IDs ∪ removed IDs`、各集合の重複なし・交差なしを証明し、converterはplan外でfilterしない。現行サブテーブルDELETEも `nextRows = rows.filter(...)` を全列挙builderへ渡す（`src/execute.ts:5978-5985`、`:6038-6058`）。
 5. `src/execute.ts:6110-6120`
    - 子 assignment evaluator を planner から使える leaf module へ抽出するか、同等の pure helper を共通化する。親 SET は既存 `updateToPutBatchesArith` の行評価ロジック（`src/converter/dmlToKintone.ts:214-230`、`:323` 以降）を1親用に抽出し、親／子とも同じ snapshot から評価する。
 
@@ -133,6 +141,7 @@ parser/AST
 
 - 新規 `src/core/__tests__/applyPatchPlanner.test.ts`: `_rid`／safe predicate／ALL ROWS、0件規則、snapshot評価、同一セル重複、同一行別セル、未知／重複rid、行順・id・未指定値保持、親SET合成。
 - 新規 `src/converter/__tests__/applyPatchToKintone.test.ts`: 1 parent＝1 `records[]` element、revision必須、親とtableが同じrecord、row payload保持。
+- converterテストにはtable単位shape混在（PATCH_ONLY table＋FULL_SURVIVORS table）を追加し、PATCH_ONLYの全snapshot id保持、FULL_SURVIVORSの全存続id・値・順序保持、1件でも存続行を落とした不正planの拒否を固定する。これは意図しない削除を防ぐ必須gateとする。
 - 新規 `src/__tests__/applyPatch.execute.test.ts`: mock client の GET fields/query と API順を固定し、この Phase では putCalls=0 の planner-only hook または VALIDATE用内部入口で確認する。
 
 ## 5. Phase 3 — post-image 全体検証（L）
@@ -280,43 +289,48 @@ parser/AST
 - `src/ui/desktop.ts` は既存の型エラー10件基準がrepo文書に残る（`docs/internal/ksql_batch_temp_table_implementation_plan.md:30`）。`tsc --noEmit` はファイル除外ではなくエラー総数と内容をbaseline比較し、B44由来の増分0件をgateとする。
 - pluginは `npm run build:plugin` 成功、生成 `prod/js/desktop.js` にASCII marker（例 `dmlMaxSubtableRows`）が含まれること、Firefox／Chromium双方の確認dialogを実機gateとする。
 
-## 9. Phase 7 — 統合・実機・リリース準備（M）
+## 9. Phase 7～9 — v1.1、v1.2、統合・実機・リリース準備
 
-### 9.1 着地点と依存
+### 9.1 Phase 7 — v1.1 複数合成＋`APPEND`（L）
 
-- 依存: Phase 1～6すべて。
-- 着地点: v1受入条件、APP4221実機12手順、surface smoke、文書／release metadataの準備が完了し、v3.8.0 release作業へ渡せる。Phase 7実装中も版数は上げない。
+- 依存: Phase 1～6。着地点は、単一親のまま複数 `APPLY`／複数tableと `APPEND` を同一snapshot・同一PUT recordへ合成できること。v1のPATCH経路とMCP fail-closedは維持する。
+- scope validatorを `assertApplyScope("v1.1")` 相当へ拡張し、許可集合を `{親UPDATE, 単一$id親, PATCH, APPEND, 複数APPLY, 複数table}` とする。`REMOVE`、`EXPECT ROWS`、`_idx`、INSERT／UPSERT、複数親、複数値ADD/REMOVEはこのPhaseでも拒否する。Phase 1で確立したAST保持＋analyzeBatch/executor共有というClaude裁定は変えない。
+- plannerは全blockのselector／RHSを更新前snapshotへ解決してからtable単位に合成する。同一tableの複数blockは §15 裁定3 により合成せず `ArgumentError`。同一cell多重PATCH、APPEND指定field重複をPUT前に拒否し、APPEND行は同文PATCHから不可視、追加順はSQL記述順で既存行末尾とする。
+- APPEND rowは未採番なので `value` のみを持つ。指定値の型・選択肢・長さ・required・B29整数部桁数／number precisionを検証・normalizeし、未指定childはフォーム既定値をmetadataから補う方針を実装候補とする。ただしkintoneが「PUTによる追加行の未指定childへフォーム既定値を自動投入するか」は推測せず、Phase 9実機結果でpayload補完責務を確定する。自動投入されない、または環境差がある場合はplannerが既定値を明示payload化する。
+- 既定値がなくrequiredな未指定childはPUT前error。既定値自体も通常値と同じprimitiveで検証し、NUMBERはappのprecision設定でnormalizeする。FILEは§14裁定どおり保存済みopaque値を未検証・payload非送信とし、APPENDでFILEを指定する機能は対象外とする。
+- `dmlMaxSubtableRows` はtable横断で `distinct PATCH既存行 ∪ APPEND新規行` を数える。同一既存行を複数blockでPATCHしても1、APPENDは1行ずつ1とする。
+- converterはPATCH／APPENDだけのtableを `PATCH_ONLY` に保ち、全snapshot row id＋変更cell＋新規rowだけを送る。APPEND追加のために既存rowの全childを列挙しない。
+- CLI／pluginの共有detailと確認UIをtable別 `PATCH`／`APPEND`、追加合計へ拡張する。MCPは§9.2の別capability検討を設計・テストに留め、v3.8.0で実mutationを開けるかはレビュー裁定がない限りfail-closedを維持する。
+- unit/integration gate: 複数block／table、snapshot不可視性、APPEND順序、required／default／precision、guard重複排除、PATCH_ONLY shapeの全既存id保持、1 parent＝1 record、PUT前全検証。
 
-### 9.2 統合テストと回帰
+### 9.2 Phase 8 — v1.2 `REMOVE` と削除表示（L）
 
-- 仕様 §11.1／§11.2 のv1項目を acceptance matrix で再実行し、各項目をテスト名／実機evidenceへリンクする。
-- APPLYなしUPDATE、UPDATE FROM、CHECK、VALIDATE ONLY、ON ERROR SKIP、仮想テーブルUPDATE／DELETE、B42 VALIDATE、IMPORT subtableの非回帰を重点確認する。
-- `npm test`、`npm run build:cli`、`npm run build:mcp`、`npm run build:mcpb`、`npm run build:plugin`、`npm run mcp:smoke`、`npm run mcp:pack-smoke` は実装完了時に実施する。本計画作成時は実行しない。
-- `npx tsc --noEmit` は既存 `desktop.ts` 10件との件数・内容差分で判定し、新規error 0を要求する。
-- 証跡を `docs/internal/evidence/b44_apply_patch_dev_smoke.md`（新規）へ保存する。
+- 依存: Phase 7。着地点は、`REMOVE WHERE ...`／`REMOVE ALL ROWS` を同一snapshotへ解決し、削除tableだけ安全な全存続行payloadへ切り替え、CLI／確認UI付きpluginから削除内訳を確認して実行できること。MCP mutationは仕様 §9.3の安全条項どおりfail-closedを維持する。
+- scope validatorの許可集合を `{v1.1集合 + REMOVE WHERE/ALL ROWS}` へ拡張する。`EXPECT ROWS`、`_idx`、INSERT／UPSERT、複数親、複数値fieldのADD/REMOVEは引き続きv2として拒否する。
+- plannerは全PATCH／REMOVE selectorを更新前snapshotへ解決する。同一cell多重PATCH、PATCH対象行とREMOVE対象行の重複、同一行の複数REMOVEをPUT前に拒否し、APPEND行はREMOVEから不可視とする。削除後の存続行順とAPPEND順を確定したpost-imageを検証する。
+- tableごとにpayload形を選ぶ。REMOVEなしtableは `PATCH_ONLY` のまま、REMOVEを1件でも含むtableだけ `FULL_SURVIVORS` とする。後者は全snapshot rowを `survivor ∪ removed` に過不足なく分割し、存続行のid・全child値・順序とAPPEND行を列挙する。現行DELETEの全列挙経路（`src/execute.ts:5978-5985`、`:6038-6058`）を参照するが、B44は親SET・他tableと同一recordへ合成する専用converterを使う。
+- 必須テストとして、REMOVE tableの先頭／中間／末尾／複数削除、0件一般述語、空table ALL ROWS、PATCH_ONLYとのshape混在、全削除、削除＋APPEND、存続行順・全値保持、revision conflict非retryを固定する。snapshotの存続rowを1件でもplan/payloadから落とすfixtureはconverterが拒否し、putCalls=0となることを確認する。
+- `ApplyConfirmDetail`／VALIDATE ONLY／CLI／pluginへtable別REMOVE件数、総削除行数、削除対象親数（単一親なので0/1）、revision必須、不可逆、非retryを追加する。確認UIの既存IMPORT内訳実装は `src/ui/desktop.ts:2841-2873` を表示設計の参照とし、IMPORT detailとは型を分離する。
+- 削除ガードは新設せず、まず既存計画どおり `dmlMaxSubtableRows = distinct PATCH既存行 ∪ REMOVE既存行 ∪ APPEND新規行` の合計をcoreで強制する案を推奨する。同一文の子行mutation総量を一つの上限で制限でき、Phase 4のcore強制・CLI flag・default 100を再利用でき、別上限同士の組合せで「総変更量は巨大だが削除だけ閾値内」という穴を作らないためである。
+- ただし削除は非可逆性が高いので、確認UIの削除内訳だけでは不足し「追加・変更とは独立したhard cap」が必要とレビュー判断された場合に限り `dmlMaxDeletedSubtableRows`（正整数、core必須、CLI/env/profile/schema/smoke同期）を追加する。その場合も `dmlMaxSubtableRows` を置換せず両方を満たすAND条件とする。
 
-### 9.3 仕様 §11.3 の実機12手順
+### 9.3 Phase 9 — 統合・実機・回帰（M）
 
-実機はAPP4221を使い、既存証拠fixture `$id=7` は一切更新しない。専用レコードは新しい一意キーで作成し、作成直後の `$id` を以後のSQLへ埋め込む。
+- 依存: Phase 1～8すべて。着地点はv1／v1.1／v1.2受入条件、APP4221実機、surface smoke、文書／release metadata準備が完了し、v3.8.0 release作業へ渡せること。Phase 9中も版数は上げない。
+- 仕様 §11.1／§11.2 の全対象項目をacceptance matrixで再実行する。APPLYなしUPDATE、UPDATE FROM、CHECK、VALIDATE ONLY、ON ERROR SKIP、仮想table UPDATE／DELETE、B42 VALIDATE、IMPORT subtableの非回帰を重点確認する。
+- `npm test`、`npm run build:cli`、`npm run build:mcp`、`npm run build:mcpb`、`npm run build:plugin`、`npm run mcp:smoke`、`npm run mcp:pack-smoke` は実装完了時に実施する。本計画作成時は実行しない。`npx tsc --noEmit` は既存 `desktop.ts` 10件との件数・内容差分で判定し、新規error 0を要求する。
+- 証跡を `docs/internal/evidence/b44_apply_patch_dev_smoke.md`（新規）へ保存する。実機はAPP4221を使い、既存証拠fixture `$id=7` は更新しない。
+- v1基礎12手順は仕様 §11.3を維持し、専用レコードのsnapshot保存、既存親子違反、従来UPDATEの`CB_VA01`、B42照合、B44 VALIDATE ONLY／mutation、未指定cell・id・行順保持、revision conflict、CLI／Firefox／Chromium／MCP、復元を行う。
+- APPEND実機: 既定値付き・required既定値なし・NUMBER精度対象childを持つ専用table/recordで、未指定childを省いた追加payloadを送る対照試験を行い、kintoneがフォーム既定値を投入するか、空値にするか、拒否するかをGET結果とraw request/responseで記録する。結果に基づきplanner明示補完の要否を確定し、VALIDATE ONLYのpost-imageと実PUT後imageが一致することを再確認する。
+- 複数合成実機: 2つ以上のAPPLY/tableでPATCH＋APPENDを同時実行し、1 record payload、各tableの既存id・順序保持、APPEND末尾順、table別件数を確認する。
+- REMOVE実機: 先頭／中間行を削除し、REMOVE tableだけが全存続行形、非REMOVE tableはパッチ形であるraw payloadを保存する。PUT後に削除対象だけが消え、存続行の全値・row id・相対順とAPPEND末尾順が一致することを確認する。GET後PUT前の別更新でrevision conflictを起こし、削除0、retry GET 0、別client更新保持を記録する。
+- CLI／Firefox／Chromiumの確認表示でPATCH／APPEND／REMOVE、総子行数、削除行数、削除対象親数が一致し、キャンセル時putCalls=0、MCP mutation fail-closedを確認する。最後に制約と専用recordを復元／削除し、`$id=7`非変更を記録する。
 
-1. APP4221へ「B44-YYYYMMDD-HHMMSS」等の一意な識別値を持つ専用レコードを作成する。GET結果から `$id`、`$revision`、トップレベル全値、`テーブル`の順序・全row id・全child値をJSON evidenceへ保存する。`$id != 7` をassertする。
-2. 復元用にフォーム設定／制約の変更前値を保存する。専用レコードだけに、トップレベル `文字列MIN` と `テーブル.文字列T2` の既存違反が同居する状態を作る。既存fixtureへ波及する制約変更の場合は、変更対象と復元手順を先に記録する。
-3. `UPDATE APP4221 SET 文字列MIN='ddd' WHERE $id=<専用ID>` を実行し、HTTP 400 `CB_VA01`、put成功0、親値不変を記録する。
-4. `UPDATE APP4221$テーブル SET 文字列T2='NNN' WHERE _pid=<専用ID> AND _rid='<対象rid>'` を実行し、残る親違反により `CB_VA01`、子値不変を記録する。
-5. B42 `VALIDATE APP4221 ... WHERE $id=<専用ID>` を実行し、親／子双方のerrorと、`$err_subrow_id` が手順1の対象row idに一致することを記録する。
-6. B44文へ `VALIDATE ONLY` を付け、`validatedRows=1`、`validRows=1`、`invalidRows=0`、PATCH matched/changed件数、parentRows=1、両guard、`wouldExceed=false`、putCalls相当0をCLI JSONで保存する。
-7. 同じB44 mutationをCLIの `--allow-dml --dml-max-rows 1 --dml-max-subtable-rows <安全値>` と確認付きで実行し、親と対象子cellが同じ操作で更新されたこと、updated parent count=1を確認する。
-8. 手順1 snapshotと再GETを比較し、対象外row、対象rowの未指定 `数値T1`、全row id、row順が完全一致することを機械比較／表で記録する。
-9. B42 VALIDATEを再実行し、対象の親／子違反が0になったことを確認する。
-10. revision conflict専用に同等の専用レコードをもう1件作るか手順7前の状態を再現し、B44がGETしたrevisionの後に別clientで更新してから旧revision PUTを送る test hook／debug手順を使う。競合error、retry GET 0、成功報告なし、別client更新保持を記録する。
-11. 同じSQLについて、CLIの件数表示、Firefox plugin dialog、Chromium plugin dialogを照合する。MCPではEXPLAINとquery VALIDATE ONLYが成功し、mutateは全approval入力を付けてもrecords/mutation API前にfail-closedとなることを記録する。
-12. 変更したフォーム制約を保存済み値へ戻し、専用レコードだけを削除または元状態へ復元する。最後に `$id=7` をGETし、試験前証拠fixtureの値／revisionに意図しない変更がないことを記録する。
-
-### 9.4 リリース準備
+### 9.4 最終リリース準備
 
 - 公開版は **v3.8.0**、SemVer **minor**。新しいsoft-keyword構文の加法追加であり、APPLYなしの既存SQL意味論を変えない。
 - Phase中は `package.json`、`package-lock.json`、`prod/manifest.json`、`CHANGELOG.md`、`release/`、dist／zipを更新しない。
-- release時の順序は、version bump（`package.json`／lock／`prod/manifest.json`）→ CHANGELOG／README／言語リファレンス／CLI tutorial／MCP説明／issue tracker B44同期 → 全成果物再ビルド → test/smoke/実機evidence確認 → version整合確認 → release artifact差替え、とする。
+- release時の順序は、Phase 1～9全gate完了 → version bump（`package.json`／lock／`prod/manifest.json`）→ CHANGELOG／README／言語リファレンス／CLI tutorial／MCP説明／issue tracker B44同期 → 全成果物再ビルド → test/smoke/実機evidence確認 → version整合確認 → release artifact差替え、とする。v1／v1.1／v1.2の途中release／途中version bumpは行わない。
 - 現行版は `package.json:3` と `prod/manifest.json:3` が3.7.0で一致している。v3.8.0 release gateでも、CLI `--version`、MCP bundle/package、plugin zip内manifest、releaseファイル名まで一致を確認する。
 
 ## 10. テスト責務と受入条件割付
@@ -329,19 +343,22 @@ parser/AST
 | revision、0行、二重guard、API順、conflict | planner guard | execute mock、batch fail-fast | 4 |
 | VALIDATE ONLY counts／guards、EXPLAIN API 0 | result formatter | INTO #err、MCP payload、plugin render | 5 |
 | CLI flag、MCP fail-closed、plugin confirm | 各surface unit | CLI e2e、MCP smoke、browser smoke | 6 |
-| §11.1／§11.2全体、APP4221 12手順 | regression suite | 実kintone、release artifacts | 7 |
+| 複数APPLY／table、APPEND、追加行post-image | planner／validator／converter | core mutation、CLI/plugin内訳 | 7 |
+| REMOVE、table単位payload shape、削除内訳 | planner集合証明／converter拒否 | core mutation、CLI/plugin削除確認 | 8 |
+| §11.1／§11.2全体、APPEND既定値、REMOVE実機 | regression suite | 実kintone、browser smoke、release artifacts | 9 |
 
-仕様 §11.2 にある次の項目はv1実行対象外なので、割付を明確に分ける。
+仕様 §11.2 にある項目はv3.8.0内の実装フェーズへ次のように割り付ける。
 
-- PATCH/REMOVE重複とAPPEND行の不可視性: Phase 1でREMOVE／APPEND ASTを保持し、v1 scopeの明示拒否をテストする。runtime semanticsの実装テストはv1.1／v1.2へ繰り越す。
-- 将来の複数親100件chunkと後続chunk失敗: v1では親 `$id` 単一条件のため実装・実行テストをしない。converter／plannerの単一親境界と「将来adapterがchunk化する」設計メモだけを残す。
+- PATCH/REMOVE重複とAPPEND行の不可視性: Phase 1でAST保持とv1拒否、Phase 7でAPPEND不可視性、Phase 8でPATCH/REMOVE重複のruntime semanticsを実装・テストする。
+- 複数親100件chunkと後続chunk失敗: v1.2まで親 `$id` 単一条件のため実装・実行テストをしない。converter／plannerの単一親境界と「将来adapterがchunk化する」設計メモだけを残し、v2へ繰り越す。
 - 未知・別親 `_rid`: v1単一親snapshot内の未知ridは実行テストする。「別親」はそのridが対象親snapshotに存在しないため同じunknownとして拒否されることをテストし、複数親固有の分類はv2へ繰り越す。
+- `EXPECT ROWS`、`_idx`、INSERT／UPSERT、複数親、複数値ADD/REMOVEはPhase 1でAST認識後に拒否し、Phase 7／8でも許可集合へ加えない。対象外回帰テストを各scope拡張時に再実行する。
 
 ## 11. リスクと対策
 
 | リスク | 具体的な失敗 | 対策／gate |
 |---|---|---|
-| 既存DML経路との混線 | 親UPDATE後に子UPDATEして部分成功、revisionが片方だけ、既存UPDATEの意味変更 | `executeApplyPatchUpdate` を通常／FROM／仮想table経路より先に分岐し、専用planner＋1record converterだけを使う。APPLYなし回帰をPhase 7で固定 |
+| 既存DML経路との混線 | 親UPDATE後に子UPDATEして部分成功、revisionが片方だけ、既存UPDATEの意味変更 | `executeApplyPatchUpdate` を通常／FROM／仮想table経路より先に分岐し、専用planner＋1record converterだけを使う。APPLYなし回帰をPhase 9で固定 |
 | snapshot意味論の破壊 | 先行PATCH結果を後続selector/RHSが読む、row順／idが変わる | operation解決用snapshotとpost-imageを別objectにし、全selector解決後にcopy-on-writeで合成。planner unitで順序と参照同一性を検査 |
 | post-image検証漏れ | 変更列だけ検証してB43と同じfalse passを再現 | `validateDmlCandidates`をB44から呼ばず、全form metadata×全post-image走査を独立module化。対象外table／未変更row fixtureを必須にする |
 | GET field-set過不足 | 親SET RHS、revision、対象外table既存違反を取得できない | field collectorをpure testし、mock getCallsのfieldsをexactにassert。完全post-imageを作れないfield typeは最初のrecords API前に明示拒否 |
@@ -350,8 +367,11 @@ parser/AST
 | plugin bundle肥大 | B42/B44 validator重複、Node module混入 | core leaf moduleを共有しbrowser-safeに保つ。build前後bytesを記録し、ASCII markerとbrowser buildをgateにする |
 | `desktop.ts`既存tsc errorとの干渉 | 既存10件を理由に新規errorを見落とす | 除外filterでなくbaselineの件数・error code・行内容を保存し、増分0で判定。esbuild成功だけを型安全の代替にしない |
 | revision欠落／0 fallback | `getRevision`の0補完でguardを形骸化 | B44専用`requireRevision`で存在・正整数を要求し、converterのrevisionをrequiredにする |
-| 将来複数親への過剰設計 | v1なのにchunk／rollback分岐を作り複雑化 | v1は単数plan・1 PUTに固定。API-independent planとconverter境界だけを保ち、array/chunk adapterはv2で追加 |
-| spec受入条件の将来項目混在 | v1でAPPEND/REMOVE/chunkまで実装してscope逸脱 | §10の割付どおり、v1は構文認識＋UnsupportedErrorまで。runtime semanticsは後続版へ明示繰越 |
+| payload形の誤選択 | REMOVEなしtableを全列挙して意図せず削除、REMOVE tableの存続行列挙漏れ | plannerがtable単位でPATCH_ONLY/FULL_SURVIVORSを明示し、snapshot＝survivor∪removedをassert。shape混在・列挙漏れ拒否・putCalls=0をPhase 2/8の必須テストにする |
+| APPEND既定値の推測違い | VALIDATE ONLY post-imageとkintone保存値がずれる | Phase 9で未指定childの実機対照試験を行い、結果が出るまでplanner明示補完の要否を確定扱いしない。required/default/precisionは追加行全体をPUT前検証 |
+| 削除guardの穴／過剰設定 | 削除だけ別capで総mutation量を迂回、または設定増でsurface drift | まず総和`dmlMaxSubtableRows`を推奨。独立hard capが必要との裁定時だけ`dmlMaxDeletedSubtableRows`をAND追加し、CLI/env/profile/MCP説明/smokeを同時同期 |
+| 将来複数親への過剰設計 | v1.2なのにchunk／rollback分岐を作り複雑化 | v1.2までは単数plan・1 PUTに固定。API-independent planとconverter境界だけを保ち、array/chunk adapterはv2で追加 |
+| phase scopeの誤開放 | v1.1でREMOVE、v1.2でEXPECT/_idx/複数親まで通る | version文字列比較でなく明示的capability集合をscope validatorへ渡し、各Phaseで許可・拒否matrixを全再実行する |
 
 ## 12. Phase規模・依存関係・完了gate
 
@@ -363,13 +383,15 @@ parser/AST
 | 4 | revision＋二重guard＋core mutation | M | 2,3 | guard/conflict/API順 integration green |
 | 5 | VALIDATE ONLY／EXPLAIN／診断 | M | 4 | result/INTO/EXPLAIN API 0 tests green |
 | 6 | CLI／MCP／plugin | L | 5 | surface tests、MCP smoke、plugin build／browser smoke準備 |
-| 7 | 統合・実機・release準備 | M | 1～6 | 全回帰、APP4221 12手順、evidence、release checklist |
+| 7 | v1.1: 複数APPLY／複数table＋APPEND | L | 1～6 | 合成／追加行検証／PATCH_ONLY shape／surface内訳 green |
+| 8 | v1.2: REMOVE＋payload形切替＋削除表示 | L | 7 | survivor完全性、shape混在、削除guard／UI green |
+| 9 | 統合・実機・release準備 | M | 1～8 | 全回帰、APPEND既定値／REMOVE実機、evidence、release checklist |
 
-実装順は `1 → 2 → 3 → 4 → 5 → 6 → 7` とする。Phase 2のconverter単体とPhase 3のvalidator骨格は作業上並行可能だが、post-image shapeをPhase 2 reviewで確定してからPhase 3を完了させる。Phase 6のCLI/MCP/pluginは同じ公開型を消費するため分割releaseせず、一つのPhase gateで揃える。
+実装順は `1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9` とする。Phase 2のconverter単体とPhase 3のvalidator骨格は作業上並行可能だが、post-image shapeをPhase 2 reviewで確定してからPhase 3を完了させる。Phase 7はPhase 6の公開型を複数table／APPENDへ拡張し、Phase 8はその合成結果へREMOVEとFULL_SURVIVORSを加える。Phase 9までversion bump／releaseせず、v3.8.0で一括公開する。
 
 ## 13. 裏取りで判明した齟齬・レビュー判断事項
 
-### 13.1 仕様内／現行実装との齟齬
+### 13.1 R1時点の仕様内／現行実装との齟齬（§14で処理済み）
 
 1. 正本仕様の冒頭 `docs/internal/ksql_apply_block_spec.md:3` は「実装着手はユーザー承認待ち」のままだが、本依頼ではR2を「実装着手可」と明示している。本計画は依頼を正として進める。実装開始前にspec statusだけを「実装着手可」へ同期するかClaude判断が必要である。
 2. 仕様 §11.2（`docs/internal/ksql_apply_block_spec.md:698-705`）には、v1対象外のREMOVE／APPEND／複数親chunkのruntime受入条件が含まれる。§9.1／§12を優先し、v1では構文認識・明示拒否または将来設計境界までとした。
@@ -378,13 +400,20 @@ parser/AST
 5. 現行 `DmlConfirmContext`（`src/execute.ts:411-422`）と`DmlValidationResult`（`:348-361`）はIMPORT detailしか持たない。B44件数表示をsurfaceごとに再計算せず、共有detail型を加法追加する必要がある。
 6. 現行CLIの`dmlMaxRows`はconfirm callback内で強制される（`src/cli/index.ts:2130-2133`）一方、pluginには同等の上限設定がない。B44の必須二重guardはcoreへ置かなければ全surfaceで保証できない。
 
-### 13.2 Claude／実装レビューで判断してほしい点
+### 13.2 R1のレビュー判断事項（§14で5件とも裁定済み）
 
 1. **scope errorの層**: 本計画は将来構文をAST化し、`assertApplyV1Scope`を`analyzeBatch`／executorで呼んで`UnsupportedError`にする。parser自体でthrowする案より「構文として識別」の証明が強いが、公開`parseSqlStatement`単体がv1外ASTを返す点を許容するか。
 2. **MCP query schema**: `VALIDATE ONLY`の`guards.wouldExceed`を利用者指定値で評価できるよう、`dmlMaxSubtableRows`をquery schemaにも出すか。出さない場合はdefault 100固定、mutate schemaには「解禁しない」説明だけを置く。
 3. **plugin guard設定**: v1単一親では親guardは常に1、子guard default100で十分として設定UIを増やさない案でよいか。CLIだけ明示flag、pluginはcore default＋確認dialogとなる。
 4. **GET fieldsとFILE**: post-image全体を検証するため全form field/tableを取得するが、FILEは仕様対象外である。APPLY対象レコードにFILEが存在するだけで拒否するのか、FILEを保存済みopaque値として未検証・payload非送信で許容するのかを確定する必要がある。後者が実用的だが「post-image全体検証」の例外をspecへ明記すべきである。
 5. **親0件**: §5.3は子selectorの0件規則だけを明記する。v1の`$id=<n>`単一親が存在しない場合、本計画はfail-closed `ArgumentError` とした。通常UPDATEの0件successに合わせるか、revision修復操作の安全性を優先してerrorにするかを確定したい。
+
+### 13.3 R2で追加したレビュー判断事項
+
+1. **削除guard**: `dmlMaxSubtableRows` をPATCH＋APPEND＋REMOVEのdistinct子行総和として維持し、専用 `dmlMaxDeletedSubtableRows` は追加しない推奨案でよいか。独立hard capを要求する場合は、総和guardを置換せずAND追加とする。
+2. **APPENDの既定値責務**: Phase 9実機で「追加行の未指定childへkintoneが既定値を投入するか」を確認するまで、planner補完方針を確定保留とするか。リリース契約を決定的にするため、実機結果にかかわらず常にmetadata既定値を明示payload化する案も比較して裁定してほしい。
+3. **同一tableの複数APPLY**: v1.1の「複数APPLYブロック」に同一tableの複数blockも含め、snapshot解決後に1 table planへ合成するか。それともR2では異なるtableだけ許可し、同一table重複は拒否するか。
+4. **MCP別capability**: R1裁定はv1 query schemaのguard値を既定100固定とした。仕様 §9.2の安全条項を維持しつつ、v1.1時点で削除ゼロをplanで証明できるPATCH（APPENDなし）だけmutation capabilityを開く検討を実施するか、v3.8.0では全APPLY mutation fail-closedのままにするか。
 
 ## 14. Claude レビュー（R1 承認・2026-07-20）
 
@@ -400,3 +429,15 @@ parser/AST
 
 **齟齬13.1 の処理**: ①spec ステータス行は本コミットで「実装着手中」へ同期（済）②③v1 スコープ（spec §9.1）優先の整理を承認＝§11.2/§4.3 の一般契約項目は §10 の割付どおり将来版へ明示繰越④⑤⑥は計画の新設方針（`requireRevision`・共有 detail 型・core 強制ガード）で解消される。
 
+## 15. Claude レビュー（R2 承認・2026-07-20）
+
+**裏取り**: R2 の新規引用をサンプリング検証し全一致（現行サブテーブル DELETE の全存続行列挙 execute.ts:5978-5985・UPDATE のパッチ形 payload・仕様 §4.2 の「同一フィールドコードの APPLY ブロック複数=ArgumentError」spec:275）。Phase 7/8/9 の分割・`PATCH_ONLY`/`FULL_SURVIVORS` のテーブル単位 payload 形選択と `snapshot = survivors ∪ removed` 完全性 assert・§11 の追加リスク4行（payload 形誤選択・APPEND 既定値・削除ガード・phase scope 誤開放）は妥当。**§1/§9.1 の同一テーブル複数ブロックの記述を裁定3に合わせて修正の上、承認**。
+
+**§13.3 判断事項の裁定**:
+
+1. **削除ガード = 単一 `dmlMaxSubtableRows`（PATCH∪APPEND∪REMOVE の distinct 子行総和）を承認**。専用 `dmlMaxDeletedSubtableRows` は v3.8.0 では追加しない。総 mutation 量を1つの core 上限で制御でき、複数上限の組合せ穴を作らない codex の論拠を支持。削除固有の安全は①確認 UI での削除内訳の必須表示②`FULL_SURVIVORS` の完全性 assert（列挙漏れ=converter 拒否・putCalls=0）③revision 必須、で担保する。独立 hard cap は実運用要望が出た時点で AND 条件として加法追加。
+2. **APPEND の既定値責務 = 「常に metadata 既定値を明示 payload 化」を採用**（実機結果に依らず契約を確定）。理由=①リリース契約が決定的になり、VALIDATE ONLY の post-image が送信値そのものと一致（kintone 挙動の予測が不要）②Phase 7 の実装が実機待ちでブロックしない。Phase 9 の実機対照試験は「明示補完値と kintone の自然挙動（未指定時）の一致確認」へ目的を変更し、kintone が明示補完 payload を拒否する等の齟齬が出た場合のみ再裁定する。既定値なしの required 未指定 child は計画どおり PUT 前 error。
+3. **同一テーブルの複数 APPLY ブロック = 拒否**（v1.1 でも許可しない）。仕様 §4.2 が既に ArgumentError と規定しており（裏取り済）、複数操作は同一ブロック内の `;` 区切りで表現できるため合成の複雑さに見合う価値がない。計画 §1/§9.1 は本裁定に合わせ修正済み。
+4. **MCP capability = v3.8.0 では全 APPLY mutation fail-closed のまま**。「削除ゼロを計画で証明できる PATCH のみ解禁」の検討は仕様 §9.2 の安全条項（10条件）を設計メモとして維持するに留める。理由=v3.8.0 のスコープ肥大回避と、MCP 解禁は承認 UI 不在下の安全論証そのものが独立の検証テーマであること。R1 裁定2（query schema へ `dmlMaxSubtableRows` を出さない・既定100固定）も維持。
+
+**総括**: v1/v1.1/v1.2 の v3.8.0 一括同梱を前提とした Phase 1〜9 構成で**実装着手可**。Phase 1（parser/AST + scope validator）から開始する。

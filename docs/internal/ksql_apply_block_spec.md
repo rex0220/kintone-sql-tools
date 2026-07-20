@@ -1,6 +1,6 @@
 # B44 — `APPLY` ブロックによるテーブル内外項目の同時更新仕様
 
-- ステータス: R2・**実装着手中（v3.8.0・2026-07-20〜）**。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（R1 承認済・Phase 1〜7）。codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）
+- ステータス: R2・**v3.8.0 実装計画 R2 レビュー中（2026-07-20〜）**。v1／v1.1／v1.2を同一releaseへ含める。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（R1 Phase 1～6・Claude裁定5件を維持し、Phase 7～9を追加）。codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）
 - 対象: B44「テーブル内外項目の同時更新」
 - 台帳: [ksql_issue_tracker.md B44](../ksql_issue_tracker.md#L39)
 - 前提: [B42 サブテーブル監査仕様](ksql_validate_subtable_audit_spec.md)・B43 DML post-image 事前検証
@@ -601,9 +601,11 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 
 既存プラグインは通常DML確認ダイアログを持ち（[desktop.ts:2825](../../src/ui/desktop.ts#L2825)-[2838](../../src/ui/desktop.ts#L2838)）、IMPORTではテーブル別の更新・追加・削除件数を表示している（[desktop.ts:2841](../../src/ui/desktop.ts#L2841)-[2873](../../src/ui/desktop.ts#L2873)。B44は後者と同等以上の内訳表示を使用する。
 
-## 9. 段階リリース
+## 9. v3.8.0 内の実装フェーズ
 
-### 9.1 v1 — 修復用 `PATCH`
+> **2026-07-20 ユーザー決定**: 以下の v1／v1.1／v1.2 は別release版を表す「段階リリース」ではなく、**v3.8.0を1回だけreleaseするための内部実装フェーズ**へ読み替える。v1をPhase 1～6、v1.1をPhase 7、v1.2をPhase 8で実装し、Phase 9で統合・実機・release準備を行う。各フェーズのreview gateは維持するが、途中版のversion bump・公開は行わない。§9.2のMCP別capabilityはあくまで検討事項、§9.3のREMOVE mutationはCLIと確認UIを持つpluginだけ、MCP mutationはfail-closedという安全条項を変更しない。
+
+### 9.1 v1（Phase 1～6）— 修復用 `PATCH`
 
 提供範囲を次に固定する。
 
@@ -620,7 +622,7 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - MCP mutationは閉じたまま。
 - `UPDATE … FROM`、`CHECK`、`ON ERROR SKIP` との併用は非対応。
 
-### 9.2 v1.1 — 複数テーブルと `APPEND`
+### 9.2 v1.1（Phase 7）— 複数テーブルと `APPEND`
 
 - 1文内の複数 `APPLY`。
 - 異なる複数サブテーブル。
@@ -629,7 +631,7 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - 子行追加を含めた `dmlMaxSubtableRows`。
 - 削除ゼロを計画で証明できる `PATCH` についてのみMCP別capabilityを検討。
 
-### 9.3 v1.2 — `REMOVE`
+### 9.3 v1.2（Phase 8）— `REMOVE`
 
 - `REMOVE WHERE …`。
 - `REMOVE ALL ROWS`。
@@ -671,7 +673,7 @@ APPLY 複数選択 (
 - `APPLY`を含まない既存UPDATEの構文・意味論・出力は変更しない。
 - v1のMCP mutationは既定で閉じるため、既存capabilityを暗黙に拡大しない。
 - 新設定 `dmlMaxSubtableRows` はAPPLY mutationにだけ適用する。
-- B42が先行リリースされる場合、B44 v1は **v3.8.0相当以降**のminor候補とするが、具体的な版番号はB43との同梱判断後に確定する。
+- B44 v1／v1.1／v1.2は **v3.8.0** に一括同梱する（2026-07-20ユーザー決定）。B43との実装順にかかわらず、B44の途中フェーズを別版としてreleaseしない。
 
 本リポジトリでは新機能と監査の正しさ改善をminorで提供しており、B42もminor判断である（[ksql_validate_subtable_audit_spec.md:235](ksql_validate_subtable_audit_spec.md#L235)-[243](ksql_validate_subtable_audit_spec.md#L243)）。
 
@@ -738,6 +740,8 @@ APPLY 複数選択 (
 
 R1およびv1では次を対象外とする。
 
+このうち「複数サブテーブル／複数 `APPLY`／`APPEND`」はv1.1（Phase 7）で、「`REMOVE`」はv1.2（Phase 8）で解禁する。v3.8.0最終scopeでも対象外のままなのは、親INSERT／UPSERT／DELETE、複数親、`_idx`、`EXPECT ROWS`実行、`UPDATE ... FROM`等の相関更新、複数値fieldの`ADD`／`REMOVE`、MCP実mutationなど、§9.4および下記のうちv1.1/v1.2で明示解禁していない項目である。
+
 - `APPLY SUBTABLE` noun構文。
 - 親INSERT、UPSERT、DELETE。
 - 複数親への適用。
@@ -771,4 +775,8 @@ R1およびv1では次を対象外とする。
 2. **P2-b B43 との関係**（§1・§12): 三段連携の記述だけでは「B44 実装で B43 も解決される」と誤読し得る → post-image 検証は `APPLY` 文限定・プレーン DML の B43 は独立課題として残る旨を明記し、§12 対象外にも追加。
 
 **判定**: 上記反映のうえで**仕様として実装着手可の水準**（着手はユーザー承認待ち）。codex 起草の意味論（スナップショット・二重ガード・段階リリース・MCP fail-closed）は無変更。
+
+### R2 フェーズ統合決定（2026-07-20・ユーザー決定）
+
+v1／v1.1／v1.2を別releaseにせず、v3.8.0内のPhase 1～8として段階実装し、Phase 9の統合・実機gate後に1回だけreleaseする。上記Claudeレビューのスナップショット・二重guard・MCP fail-closed等の安全判断は維持し、§9の表現だけを「段階リリース」から「実装フェーズ」へ読み替えた。
 
