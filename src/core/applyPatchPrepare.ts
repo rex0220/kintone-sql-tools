@@ -50,6 +50,8 @@ export interface PrepareApplyPatchWriteInput {
   readonly dmlMaxRows: number;
   readonly dmlMaxSubtableRows: number;
   readonly statementNumber?: number;
+  /** Original source row numbers when preparing UPSERT update candidates one by one. */
+  readonly parentRowNumbers?: readonly number[];
   /** Read-only metadata loader. No records writer can cross the prepare boundary. */
   readonly loadNumberPrecision?: () => Promise<NumberPrecision>;
 }
@@ -87,7 +89,13 @@ export async function prepareApplyPatchWrite(
     ? await input.loadNumberPrecision!()
     : undefined;
   const validationResults = rawPlans.map((plan, index) =>
-    validatePostImage(plan.postImage, fieldIndex, numberPrecision, statementNumber, index + 1)
+    validatePostImage(
+      plan.postImage,
+      fieldIndex,
+      numberPrecision,
+      statementNumber,
+      input.parentRowNumbers?.[index] ?? index + 1
+    )
   );
 
   if (!statement.validateOnly) {

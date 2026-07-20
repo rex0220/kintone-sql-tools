@@ -70,6 +70,8 @@ export interface PrepareApplyInsertInput {
   readonly dmlMaxRows: number;
   readonly dmlMaxSubtableRows: number;
   readonly statementNumber?: number;
+  /** Original source row numbers when a caller prepares a filtered VALUES subset. */
+  readonly parentRowNumbers?: readonly number[];
   readonly loadNumberPrecision?: () => Promise<NumberPrecision>;
 }
 
@@ -78,7 +80,6 @@ export function resolveApplyInsertMetadata(
   statement: InsertStatement,
   fieldInfos: readonly KintoneFieldInfo[]
 ): ApplyPatchMetadata {
-  if (!statement.applyBlocks?.length) return argument("APPLY block is missing.");
   if (new Set(statement.fields).size !== statement.fields.length) {
     return argument("DML target fields contain duplicates.");
   }
@@ -87,7 +88,7 @@ export function resolveApplyInsertMetadata(
 
   const targetTables = new Map<string, KintoneFieldInfo>();
   const childrenByTable = new Map<string, ReadonlyMap<string, KintoneFieldInfo>>();
-  for (const block of statement.applyBlocks) {
+  for (const block of statement.applyBlocks ?? []) {
     if (targetTables.has(block.field)) return argument(`APPLY has more than one block for table ${block.field}.`);
     const table = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
     if (!table || table.fieldType !== "SUBTABLE") return argument(`APPLY target ${block.field} is not a SUBTABLE.`);
@@ -118,11 +119,15 @@ export function resolveApplyInsertMetadata(
 export function buildApplyInsertCandidates(
   statement: InsertStatement,
   fieldInfos: readonly KintoneFieldInfo[],
-  metadata = resolveApplyInsertMetadata(statement, fieldInfos)
+  metadata = resolveApplyInsertMetadata(statement, fieldInfos),
+  parentRowNumbers?: readonly number[]
 ): readonly ApplyInsertCandidate[] {
   const fieldTypes: FieldTypeMap = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
   const parentRecords = insertToPostBatches(statement, fieldTypes).flatMap((batch) => batch.records);
-  const templates = statement.applyBlocks!.map((block): ApplyInsertTableCandidate => {
+  if (parentRowNumbers && parentRowNumbers.length !== parentRecords.length) {
+    throw new Error("InternalError: APPLY create parent row number count differs from VALUES rows.");
+  }
+  const templates = (statement.applyBlocks ?? []).map((block): ApplyInsertTableCandidate => {
     const children = metadata.childrenByTable.get(block.field)!;
     const rows = block.operations.flatMap((operation) =>
       buildApplyAppendRows(operation as AppendOperation, children, block.field)
@@ -144,7 +149,7 @@ export function buildApplyInsertCandidates(
       record[template.table] = { value: rows } as never;
     }
     return {
-      parentRowNumber: index + 1,
+      parentRowNumber: parentRowNumbers?.[index] ?? index + 1,
       tables: templates,
       postImage,
       record,
@@ -164,7 +169,7 @@ export async function prepareApplyInsert(input: PrepareApplyInsertInput): Promis
   assertPositiveLimit(dmlMaxRows, "dmlMaxRows");
   assertPositiveLimit(dmlMaxSubtableRows, "dmlMaxSubtableRows");
   const metadata = input.metadata ?? resolveApplyInsertMetadata(statement, fieldInfos);
-  const rawCandidates = buildApplyInsertCandidates(statement, fieldInfos, metadata);
+  const rawCandidates = buildApplyInsertCandidates(statement, fieldInfos, metadata, input.parentRowNumbers);
   // Create post-images contain only fields the client can supply. Generated/FILE fields are
   // deliberately outside both validation and POST payload ownership.
   const creatableFieldInfos = fieldInfos.filter((field) =>

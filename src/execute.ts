@@ -29,6 +29,11 @@ import {
 } from "./core/applyPatchPlanner";
 import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
 import { prepareApplyInsert, type PreparedApplyInsert } from "./core/applyInsertPrepare";
+import {
+  prepareApplyUpsert,
+  type ApplyUpsertMatch,
+  type PreparedApplyUpsert,
+} from "./core/applyUpsertPrepare";
 import { executePreparedApplyInsert } from "./core/applyInsertExecutePrepared";
 import {
   ApplyWritePartialFailureError,
@@ -401,6 +406,11 @@ export interface DmlValidationResult {
   apply?: ApplyValidationDetail[];
   /** B44 APPLY safety-guard diagnostics. Absent for ordinary VALIDATE ONLY results. */
   guards?: ApplyGuardDetail;
+  /** Phase 14b UPSERT APPLY branch diagnostics. */
+  applyBranches?: {
+    readonly create: { readonly apply: readonly ApplyValidationDetail[]; readonly guards: ApplyGuardDetail };
+    readonly update: { readonly apply: readonly ApplyValidationDetail[]; readonly guards: ApplyGuardDetail };
+  };
   /** B44 REMOVE totals. Present for APPLY VALIDATE ONLY. */
   deletedRows?: { readonly total: number; readonly parentRows: number };
 }
@@ -786,8 +796,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase14a", stmt);
-  assertApplyExecutionScope("phase14a", stmt);
+  assertApplyScope("phase14b", stmt);
+  assertApplyExecutionScope("phase14b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1197,7 +1207,7 @@ export async function executeBatch(
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   // Phase 14a: UPSERT APPLY を含む mutation は、先行文を含む一切の API 呼び出し前に閉じる。
-  statements.forEach((statement) => assertApplyExecutionScope("phase14a", statement));
+  statements.forEach((statement) => assertApplyExecutionScope("phase14b", statement));
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
@@ -1392,8 +1402,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase14a", resolvedStmt);
-  assertApplyExecutionScope("phase14a", resolvedStmt);
+  assertApplyScope("phase14b", resolvedStmt);
+  assertApplyExecutionScope("phase14b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -4305,6 +4315,64 @@ async function executeApplyInsertValidation(
   return materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos);
 }
 
+async function executeApplyUpsertValidation(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
+  const seenSourceKeys = new Set<string>();
+  for (const parts of rowKeyValues) {
+    const key = upsertNormalizedKey(parts, stmt.keyFields.map((field) => fieldTypes.get(field) === "NUMBER"));
+    if (seenSourceKeys.has(key)) {
+      throw new Error("ERR_KEY_DUP_SOURCE: UPSERT ソース内でキーが重複しています");
+    }
+    seenSourceKeys.add(key);
+  }
+  const targetIndex = await resolveUpsertTargets(
+    stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes
+  );
+  const targetIds = rowKeyValues.map((parts) => lookupUpsertTarget(targetIndex, parts));
+  const snapshotsById = new Map<number, KintoneRecord>();
+  const updateIds = [...new Set(targetIds.filter((id): id is number => id !== undefined))];
+  const snapshotFields = ["$id", "$revision", ...fieldInfos
+    .filter((field) => !field.inSubtable && field.fieldType !== "FILE")
+    .map((field) => field.code)];
+  for (const ids of splitChunks(updateIds, 100)) {
+    const response = await client.getRecords({
+      app: stmt.appId,
+      query: `$id in (${ids.join(",")}) limit 500`,
+      fields: [...new Set(snapshotFields)],
+    });
+    for (const snapshot of response.records) {
+      const id = Number(snapshot["$id"]?.value);
+      if (Number.isSafeInteger(id) && id > 0) snapshotsById.set(id, snapshot);
+    }
+  }
+  const matches: ApplyUpsertMatch[] = targetIds.map((targetId, sourceRowIndex) => ({
+    sourceRowIndex,
+    ...(targetId === undefined ? {} : { targetId, snapshot: snapshotsById.get(targetId) }),
+  }));
+  const prepared = await prepareApplyUpsert({
+    statement: stmt,
+    matches,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  return materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos);
+}
+
 async function executeApplyInsert(
   stmt: InsertStatement,
   client: KintoneClient,
@@ -4383,6 +4451,9 @@ async function executeDmlValidation(
 ): Promise<DmlValidationResult> {
   if (stmt.type === "INSERT" && stmt.applyBlocks?.length) {
     return executeApplyInsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
+  if (stmt.type === "UPSERT" && (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length)) {
+    return executeApplyUpsertValidation(stmt, client, options, cacheContext, statementNumber);
   }
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
     const result = await executeApplyPatchUpdate(
@@ -6113,6 +6184,102 @@ function materializePreparedApplyValidation(
   return result;
 }
 
+function materializePreparedApplyUpsertValidation(
+  stmt: UpsertStatement,
+  prepared: PreparedApplyUpsert,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  const createErrors = prepared.create.validations.flatMap((validation) => validation.errors);
+  const updateErrors = prepared.update.validations.flatMap((validation) => validation.errors);
+  const errors: ProcessRow[] = [...createErrors, ...updateErrors].map((error): ProcessRow => ({
+    ...error,
+    $err_operation: "UPSERT",
+  }));
+  const invalidRows = new Set(errors.map((error) => error.$err_row)).size;
+  const columns = prepared.create.validations[0]?.columns
+    ?? prepared.update.validations[0]?.columns
+    ?? [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const createApply: ApplyValidationDetail[] = (stmt.onInsertApplyBlocks ?? []).map((block) => {
+    const operations = block.operations.map((operation) => {
+      if (operation.kind !== "APPEND") throw new Error("InternalError: UPSERT ON INSERT contains a non-APPEND operation.");
+      return { kind: "APPEND" as const, addedRows: operation.values.length * prepared.create.guards.parentRows };
+    });
+    return {
+      field: block.field,
+      operations,
+      changedSubtableRows: operations.reduce((sum, operation) => sum + operation.addedRows, 0),
+      deletedRows: 0,
+    };
+  });
+  const updateApply = aggregateApplyValidationDetails(prepared.update);
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "UPSERT",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns: [...columns],
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: [...createApply, ...updateApply],
+    guards: prepared.guards,
+    applyBranches: {
+      create: { apply: createApply, guards: prepared.create.guards },
+      update: { apply: updateApply, guards: prepared.update.guards },
+    },
+    deletedRows: {
+      total: prepared.update.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0), 0
+      ),
+      parentRows: prepared.update.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
+    },
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta([...columns], fieldInfos, stmt.appId));
+  return result;
+}
+
+function aggregateApplyValidationDetails(prepared: PreparedApplyWrite): ApplyValidationDetail[] {
+  const details = new Map<string, ApplyValidationDetail>();
+  for (const plan of prepared.plans) {
+    for (const table of plan.tables) {
+      const existing = details.get(table.table);
+      if (!existing) {
+        details.set(table.table, {
+          field: table.table,
+          operations: table.operations.map((operation) => ({ ...operation })),
+          changedSubtableRows: table.changedSubtableRows,
+          deletedRows: table.deletedRows,
+        });
+        continue;
+      }
+      const operations = existing.operations.map((operation, index) => {
+        const incoming = table.operations[index];
+        if (!incoming || incoming.kind !== operation.kind) {
+          throw new Error(`InternalError: APPLY operation shape differs between parents for ${table.table}.`);
+        }
+        return operation.kind === "PATCH" && incoming.kind === "PATCH"
+          ? { kind: "PATCH" as const, matchedRows: (operation.matchedRows ?? 0) + incoming.matchedRows, changedRows: (operation.changedRows ?? 0) + incoming.changedRows }
+          : operation.kind === "APPEND" && incoming.kind === "APPEND"
+            ? { kind: "APPEND" as const, addedRows: (operation.addedRows ?? 0) + incoming.addedRows }
+            : operation.kind === "REMOVE" && incoming.kind === "REMOVE"
+              ? { kind: "REMOVE" as const, removedRows: (operation.removedRows ?? 0) + incoming.removedRows }
+              : operation;
+      });
+      details.set(table.table, {
+        field: existing.field,
+        operations,
+        changedSubtableRows: existing.changedSubtableRows + table.changedSubtableRows,
+        deletedRows: existing.deletedRows + table.deletedRows,
+      });
+    }
+  }
+  return [...details.values()];
+}
+
 /** APPLY 二重ガードの既定値。親は最大100件、子は1年分の日次データ（366行）を
  *  1文で扱えるよう 500 とする（kintone 制約由来ではなく、修復用途を賄う保守的既定）。 */
 export const DEFAULT_APPLY_MAX_ROWS = 100;
@@ -6267,17 +6434,7 @@ async function executeUpsert(
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
-  const rowKeyValues: string[][] = stmt.values.map((row) =>
-    stmt.keyFields.map((key) => {
-      const idx = stmt.fields.indexOf(key);
-      if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
-      const val = row[idx];
-      return val.type === "STRING" ? val.value
-        : val.type === "NUMBER" ? numberLiteralText(val)
-        : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
-        : val.elements.map((e) => e.value).join(",");
-    })
-  );
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   stmt.values.forEach((row, rowIdx) => {
@@ -6327,6 +6484,18 @@ async function executeUpsert(
     insertedCount: createdIds.flat().length,
     updatedCount:  toUpdate.length,
   };
+}
+
+function buildUpsertRowKeyValues(stmt: UpsertStatement): string[][] {
+  return stmt.values.map((row) => stmt.keyFields.map((key) => {
+    const idx = stmt.fields.indexOf(key);
+    if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
+    const val = row[idx];
+    return val.type === "STRING" ? val.value
+      : val.type === "NUMBER" ? numberLiteralText(val)
+      : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
+      : val.elements.map((element) => element.value).join(",");
+  }));
 }
 
 // ============================================================
@@ -6960,7 +7129,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase14a", stmt);
+    assertApplyScope("phase14b", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {

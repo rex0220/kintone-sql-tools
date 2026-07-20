@@ -227,7 +227,7 @@ test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API �
 
   const single = makeClient();
   await expect(execute(applySql, single, { cacheContext: "upsert-apply-closed-single" }))
-    .rejects.toThrow("UnsupportedError: APPLY Phase 14a UPSERT execution is not connected");
+    .rejects.toThrow("UnsupportedError: APPLY Phase 14b UPSERT execution is not connected");
   expect(single.getCalls).toHaveLength(0);
   expect(single.postCalls).toHaveLength(0);
   expect(single.putCalls).toHaveLength(0);
@@ -237,7 +237,7 @@ test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API �
     `SELECT value FROM APP200; ${applySql}`,
     batch,
     { cacheContext: "upsert-apply-closed-batch" }
-  )).rejects.toThrow("UnsupportedError: APPLY Phase 14a UPSERT execution is not connected");
+  )).rejects.toThrow("UnsupportedError: APPLY Phase 14b UPSERT execution is not connected");
   expect(batch.getCalls).toHaveLength(0);
   expect(batch.postCalls).toHaveLength(0);
   expect(batch.putCalls).toHaveLength(0);
@@ -249,6 +249,45 @@ test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API �
     { cacheContext: "upsert-no-apply-regression" }
   )).resolves.toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 0 });
   expect(plain.postCalls).toHaveLength(1);
+});
+
+test("B44 Phase 14b: UPSERT APPLY VALIDATE ONLY は照合後のcreate/update混在preparedを返しPOST/PUTしない", async () => {
+  const existing = {
+    "$id": { value: "9" },
+    "$revision": { value: "19" },
+    code: { value: "KOLD" },
+    name: { value: "before" },
+    表: { value: [{ id: "r1", value: { 子: { value: "old" } } }] },
+  } as unknown as KintoneRecord;
+  const client = makeClient({ records: [existing] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", writable: true, required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "表", label: "表", fieldType: "SUBTABLE", writable: false },
+    { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "表" },
+  ];
+  const result = await execute(
+    "UPSERT INTO APP100 (code, name) VALUES ('KNEW', 'create'), ('KOLD', 'update') ON DUPLICATE (code) "
+      + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial')) "
+      + "ON UPDATE APPLY 表 (PATCH SET 子='patched' ALL ROWS) VALIDATE ONLY",
+    client,
+    { cacheContext: "upsert-apply-phase14b", dmlMaxRows: 2, dmlMaxSubtableRows: 2 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    operation: "UPSERT",
+    validatedRows: 2,
+    validRows: 2,
+    guards: { parentRows: 2, subtableRows: 2, wouldExceed: false },
+    applyBranches: {
+      create: { guards: { parentRows: 1, subtableRows: 1, revisionRequired: false } },
+      update: { guards: { parentRows: 1, subtableRows: 1, revisionRequired: true } },
+    },
+  });
+  expect(client.getCalls.length).toBeGreaterThanOrEqual(2);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+  expect(result.metrics).toMatchObject({ postCalls: 0, putCalls: 0 });
 });
 
 test("IMPORT UPSERT はsource重複を照合read前に文全体拒否する", async () => {
