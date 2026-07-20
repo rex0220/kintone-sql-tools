@@ -2,6 +2,7 @@ import { applyPatchPlansToKintoneBatches } from "../converter/applyPatchToKinton
 import type { KintoneClient } from "../execute";
 import type { PreparedApplyWrite } from "./applyPatchPrepare";
 import { assertApplyInternalWriteScope } from "./applyPatchScope";
+import { withApplyDiagnosticProgress, type ApplyDiagnostic } from "./applyDiagnostic";
 
 /** Counts which remain committed when a later non-transactional chunk fails. */
 export interface ApplyWriteProgress {
@@ -11,6 +12,7 @@ export interface ApplyWriteProgress {
 }
 
 export interface ApplyWriteFailureDetail extends ApplyWriteProgress {
+  readonly diagnostic?: ApplyDiagnostic;
   /** Zero-based index in the prepared write batch array. */
   readonly failedChunkIndex: number;
   /** The failure happened while issuing this chunk; no retry is attempted. */
@@ -60,7 +62,8 @@ export class ApplyWritePartialFailureError extends Error {
  */
 export async function executePreparedApplyWrite(
   prepared: PreparedApplyWrite,
-  client: Pick<KintoneClient, "putRecords">
+  client: Pick<KintoneClient, "putRecords">,
+  diagnostic?: ApplyDiagnostic
 ): Promise<PreparedApplyWriteResult> {
   assertApplyInternalWriteScope("phase10c");
   const batches = applyPatchPlansToKintoneBatches(prepared);
@@ -79,6 +82,14 @@ export async function executePreparedApplyWrite(
         failedStage: "PUT_CHUNK",
         nonTransactional: true,
         retryAttempted: false,
+        ...(diagnostic ? { diagnostic: withApplyDiagnosticProgress(diagnostic, {
+          successfulChunks,
+          successfulParents,
+          failedChunkIndex,
+          failedStage: "PUT_CHUNK",
+          failedBranch: "UPDATE",
+          retryAttempted: false,
+        }) } : {}),
       }, cause);
     }
     successfulChunks += 1;

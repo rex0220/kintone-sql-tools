@@ -17,6 +17,14 @@ export type { ProcessStatusState } from "./processStatus";
 export { parseNumberPrecisionSettings, exactDecimalDigitCounts } from "./numberPrecision";
 export { ApplyWritePartialFailureError } from "./applyPatchExecutePrepared";
 export type { ApplyWriteProgress, ApplyWriteFailureDetail } from "./applyPatchExecutePrepared";
+export type {
+  ApplyDiagnostic,
+  ApplyDiagnosticBranch,
+  ApplyDiagnosticTarget,
+  ApplyDiagnosticOperation,
+  ApplyDiagnosticGuard,
+  ApplyDiagnosticChunk,
+} from "./applyDiagnostic";
 export { executePreparedApplyUpsert } from "./applyUpsertExecutePrepared";
 export type { PreparedApplyUpsertResult } from "./applyUpsertExecutePrepared";
 export type { NumberPrecision, NumberRoundingMode, RawNumberPrecisionSettings } from "./numberPrecision";

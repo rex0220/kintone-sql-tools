@@ -32,7 +32,9 @@ export interface BatchEnvelopeResultSet {
   importDetail?: DmlValidationResult["importDetail"];
   apply?: DmlValidationResult["apply"];
   guards?: DmlValidationResult["guards"];
+  applyBranches?: DmlValidationResult["applyBranches"];
   deletedRows?: DmlValidationResult["deletedRows"];
+  diagnostic?: DmlValidationResult["diagnostic"];
 }
 
 export interface BatchEnvelope {
@@ -60,6 +62,7 @@ function toMutationSummary(
       ...(result.successfulChunks !== undefined ? { successfulChunks: result.successfulChunks } : {}),
       ...(result.successfulParents !== undefined ? { successfulParents: result.successfulParents } : {}),
       ...(result.nonTransactional !== undefined ? { nonTransactional: result.nonTransactional } : {}),
+      ...(result.diagnostic !== undefined ? { diagnostic: result.diagnostic } : {}),
       ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
       ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
       ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
@@ -71,6 +74,7 @@ function toMutationSummary(
     ...(result.successfulChunks !== undefined ? { successfulChunks: result.successfulChunks } : {}),
     ...(result.successfulParents !== undefined ? { successfulParents: result.successfulParents } : {}),
     ...(result.nonTransactional !== undefined ? { nonTransactional: result.nonTransactional } : {}),
+    ...(result.diagnostic !== undefined ? { diagnostic: result.diagnostic } : {}),
     ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
     ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
     ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
@@ -85,6 +89,7 @@ function toMutationSummary(
       ...(result.successfulInsertChunks !== undefined ? { successfulInsertChunks: result.successfulInsertChunks } : {}),
       ...(result.successfulUpdateChunks !== undefined ? { successfulUpdateChunks: result.successfulUpdateChunks } : {}),
       ...(result.nonTransactional !== undefined ? { nonTransactional: result.nonTransactional } : {}),
+      ...(result.diagnostic !== undefined ? { diagnostic: result.diagnostic } : {}),
       ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
       ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
       ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
@@ -158,7 +163,9 @@ export function buildBatchEnvelope(
         ...(s.result.importDetail ? { importDetail: s.result.importDetail } : {}),
         ...(s.result.apply ? { apply: s.result.apply } : {}),
         ...(s.result.guards ? { guards: s.result.guards } : {}),
+        ...(s.result.applyBranches ? { applyBranches: s.result.applyBranches } : {}),
         ...(s.result.deletedRows ? { deletedRows: s.result.deletedRows } : {}),
+        ...(s.result.diagnostic ? { diagnostic: s.result.diagnostic } : {}),
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない

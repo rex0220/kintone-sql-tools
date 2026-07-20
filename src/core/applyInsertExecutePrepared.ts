@@ -5,6 +5,7 @@ import {
   type ApplyWriteProgress,
 } from "./applyPatchExecutePrepared";
 import { assertApplyInternalWriteScope } from "./applyPatchScope";
+import { withApplyDiagnosticProgress, type ApplyDiagnostic } from "./applyDiagnostic";
 
 export interface PreparedApplyInsertResult extends ApplyWriteProgress {
   readonly type: "INSERT";
@@ -19,7 +20,8 @@ export interface PreparedApplyInsertResult extends ApplyWriteProgress {
  */
 export async function executePreparedApplyInsert(
   prepared: PreparedApplyInsert,
-  client: Pick<KintoneClient, "postRecords">
+  client: Pick<KintoneClient, "postRecords">,
+  diagnostic?: ApplyDiagnostic
 ): Promise<PreparedApplyInsertResult> {
   assertApplyInternalWriteScope("phase13c");
   const createdIds: string[][] = [];
@@ -39,6 +41,14 @@ export async function executePreparedApplyInsert(
         failedStage: "POST_CHUNK",
         nonTransactional: true,
         retryAttempted: false,
+        ...(diagnostic ? { diagnostic: withApplyDiagnosticProgress(diagnostic, {
+          successfulChunks,
+          successfulParents,
+          failedChunkIndex,
+          failedStage: "POST_CHUNK",
+          failedBranch: "INSERT",
+          retryAttempted: false,
+        }) } : {}),
       }, cause);
     }
     successfulChunks += 1;

@@ -104,6 +104,47 @@ test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し
   expect(putRecords).not.toHaveBeenCalled();
 });
 
+test.each([
+  [
+    "INSERT",
+    "EXPLAIN INSERT INTO APP4221 (親) VALUES ('a'), ('b') APPLY テーブル (APPEND (子) VALUES ('x'))",
+    ["apply diagnostic:       INSERT", "apply branch:           insert", "  parent rows:          2",
+      "  chunks:               1 × max 100", "    operations:         APPEND=2"],
+  ],
+  [
+    "UPSERT",
+    "EXPLAIN UPSERT INTO APP4221 (親) VALUES ('a'), ('b') ON DUPLICATE (親) "
+      + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('x')) ON UPDATE APPLY タグ (ADD 'A'; REMOVE 'B')",
+    ["apply diagnostic:       UPSERT", "apply branch:           insert", "apply branch:           update",
+      "  parent rows:          unknown (records API not called)", "    operations:         ADD=unknown | REMOVE_VALUE=unknown"],
+  ],
+] as const)("Phase 16a: %s APPLY EXPLAINはshared静的診断とAPI 0を返す", async (_kind, sql, expected) => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const postRecords = jest.fn(async () => ({ ids: [] }));
+  const putRecords = jest.fn(async () => undefined);
+  const client: KintoneClient = {
+    ...makeClient(), getRecords, postRecords, putRecords,
+    getFields: async () => [
+      { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+      { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+      { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+      { code: "タグ", label: "タグ", fieldType: "MULTI_SELECT", writable: true },
+    ],
+  };
+  const result = await execute(sql, client, { cacheContext: `phase16a-explain-${_kind}` }) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+  expect(plan).toEqual(expect.arrayContaining([
+    ...expected,
+    "non-transactional:      true",
+    "partial success:        possible",
+    "records API:            0",
+    "mutation API:           0",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(postRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
+});
+
 // ----------------------------------------------------------------
 // SIMPLE モード
 // ----------------------------------------------------------------

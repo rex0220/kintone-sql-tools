@@ -42,6 +42,16 @@ import {
   type ApplyWriteFailureDetail,
   type ApplyWriteProgress,
 } from "./core/applyPatchExecutePrepared";
+import {
+  buildPreparedApplyInsertDiagnostic,
+  buildPreparedApplyUpdateDiagnostic,
+  buildPreparedApplyUpsertDiagnostic,
+  buildStaticApplyDiagnostic,
+  withApplyDiagnosticProgress,
+  type ApplyDiagnostic,
+  type ApplyDiagnosticBranch,
+  type ApplyDiagnosticTarget,
+} from "./core/applyDiagnostic";
 import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
 import {
   fieldSemanticsEqual,
@@ -336,6 +346,8 @@ export interface InsertResult {
   successfulChunks?: ApplyWriteProgress["successfulChunks"];
   successfulParents?: ApplyWriteProgress["successfulParents"];
   nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary INSERT. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -351,6 +363,8 @@ export interface UpdateResult {
   successfulChunks?: ApplyWriteProgress["successfulChunks"];
   successfulParents?: ApplyWriteProgress["successfulParents"];
   nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary UPDATE. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -375,6 +389,8 @@ export interface UpsertResult {
   successfulInsertChunks?: number;
   successfulUpdateChunks?: number;
   nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary UPSERT. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -420,6 +436,8 @@ export interface DmlValidationResult {
   };
   /** B44 REMOVE totals. Present for APPLY VALIDATE ONLY. */
   deletedRows?: { readonly total: number; readonly parentRows: number };
+  /** B44 shared APPLY diagnostic. Legacy apply/guards fields are derived from this detail. */
+  diagnostic?: ApplyDiagnostic;
 }
 
 export interface ApplyValidationDetail {
@@ -566,6 +584,8 @@ export interface DmlConfirmContext {
   importDetail?: ImportConfirmDetail;
   /** B44 APPLY preflight detail. Mutually exclusive with importDetail. */
   applyDetail?: ApplyConfirmDetail;
+  /** Phase 16a shared APPLY detail. Additive; applyDetail remains byte-for-byte compatible. */
+  applyDiagnostic?: ApplyDiagnostic;
 }
 
 export interface ExecuteOptions {
@@ -1335,6 +1355,7 @@ export async function executeBatch(
             targetAppId: info.targetAppId,
             ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
             ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
+            ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
           }),
         }
         : batchOptions;
@@ -4465,6 +4486,7 @@ async function executeApplyInsert(
     ),
     loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
   });
+  const diagnostic = buildPreparedApplyInsertDiagnostic(prepared);
 
   if (options.confirm) {
     const ok = await options.confirm(prepared.guards.parentRows, "INSERT", {
@@ -4472,43 +4494,16 @@ async function executeApplyInsert(
       statementCount: 1,
       statementType: "INSERT",
       targetAppId: stmt.appId,
-      applyDetail: buildApplyInsertConfirmDetail(prepared),
+      applyDetail: buildApplyConfirmDetailFromDiagnostic(diagnostic),
+      applyDiagnostic: diagnostic,
     });
     if (!ok) throw new OperationCancelledError("INSERT", prepared.guards.parentRows);
   }
 
-  return executePreparedApplyInsert(prepared, client);
-}
-
-function buildApplyInsertConfirmDetail(prepared: PreparedApplyInsert): ApplyConfirmDetail {
-  const tables = new Map<string, { table: string; patchRows: 0; appendRows: number; removeRows: 0 }>();
-  for (const candidate of prepared.candidates) {
-    for (const table of candidate.tables) {
-      const counts = tables.get(table.table) ?? {
-        table: table.table,
-        patchRows: 0 as const,
-        appendRows: 0,
-        removeRows: 0 as const,
-      };
-      counts.appendRows += table.addedRows;
-      tables.set(table.table, counts);
-    }
-  }
+  const result = await executePreparedApplyInsert(prepared, client, diagnostic);
   return {
-    kind: "APPLY_INSERT",
-    parentRows: prepared.guards.parentRows,
-    changedSubtableRows: prepared.guards.subtableRows,
-    addedSubtableRows: prepared.guards.subtableRows,
-    tables: [...tables.values()],
-    deletedRows: 0,
-    deletedParentRows: 0,
-    revisionRequired: false,
-    irreversible: true,
-    retryOnRevisionConflict: false,
-    nonTransactional: true,
-    partialSuccessPossible: true,
-    insertedParentRows: prepared.guards.parentRows,
-    initialSubtableRows: prepared.guards.subtableRows,
+    ...result,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, result),
   };
 }
 
@@ -4522,53 +4517,22 @@ async function executeApplyUpsert(
     throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   }
   const { prepared } = await prepareApplyUpsertForExecution(stmt, client, options, cacheContext, 1);
+  const diagnostic = buildPreparedApplyUpsertDiagnostic(prepared);
 
   if (options.confirm) {
-    const insert = buildApplyInsertConfirmDetail(prepared.create);
-    const update = buildMultipleParentApplyConfirmDetail(prepared.update);
-    const applyDetail: ApplyConfirmDetail = {
-      kind: "APPLY_UPSERT",
-      parentRows: prepared.guards.parentRows,
-      changedSubtableRows: prepared.guards.subtableRows,
-      addedSubtableRows: insert.addedSubtableRows + update.addedSubtableRows,
-      tables: mergeApplyConfirmTables(insert.tables, update.tables),
-      deletedRows: update.deletedRows,
-      deletedParentRows: update.deletedParentRows,
-      revisionRequired: prepared.guards.revisionRequired,
-      irreversible: true,
-      retryOnRevisionConflict: false,
-      nonTransactional: true,
-      partialSuccessPossible: true,
-      insertedParentRows: prepared.create.guards.parentRows,
-      initialSubtableRows: prepared.create.guards.subtableRows,
-      updatedParentRows: prepared.update.guards.parentRows,
-      applyBranches: {
-        insert: {
-          parentRows: prepared.create.guards.parentRows,
-          initialSubtableRows: prepared.create.guards.subtableRows,
-          tables: insert.tables,
-        },
-        update: {
-          parentRows: prepared.update.guards.parentRows,
-          changedSubtableRows: prepared.update.guards.subtableRows,
-          addedSubtableRows: update.addedSubtableRows,
-          tables: update.tables,
-          deletedRows: update.deletedRows,
-          deletedParentRows: update.deletedParentRows,
-        },
-      },
-    };
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic);
     const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
       statementIndex: 0,
       statementCount: 1,
       statementType: "UPSERT",
       targetAppId: stmt.appId,
       applyDetail,
+      applyDiagnostic: diagnostic,
     });
     if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
   }
 
-  const result = await executePreparedApplyUpsert(prepared, client);
+  const result = await executePreparedApplyUpsert(prepared, client, diagnostic);
   return {
     type: "UPSERT",
     insertedCount: result.insertedCount,
@@ -4578,6 +4542,7 @@ async function executeApplyUpsert(
     successfulInsertChunks: result.successfulInsertChunks,
     successfulUpdateChunks: result.successfulUpdateChunks,
     nonTransactional: result.nonTransactional,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, result),
   };
 }
 
@@ -4596,6 +4561,121 @@ function mergeApplyConfirmTables(
     } : { ...table });
   }
   return [...merged.values()];
+}
+
+function buildApplyConfirmDetailFromDiagnostic(
+  diagnostic: ApplyDiagnostic,
+  chunked = true
+): ApplyConfirmDetail {
+  const insert = diagnostic.branches.find((branch) => branch.branch === "insert");
+  const update = diagnostic.branches.find((branch) => branch.branch === "update");
+  const allTargets = diagnostic.branches.flatMap((branch) => branch.targets);
+  const tables = mergeApplyConfirmTables(
+    insert ? applyDiagnosticTables(insert) : [],
+    update ? applyDiagnosticTables(update) : []
+  );
+  const multiValues = mergeApplyDiagnosticMultiValues(allTargets);
+  const parentRows = diagnostic.branches.reduce((sum, branch) => sum + (branch.parentRows ?? 0), 0);
+  const changedSubtableRows = allTargets
+    .filter((target) => target.targetKind === "SUBTABLE")
+    .reduce((sum, target) => sum + (target.changedCount ?? 0), 0);
+  const addedSubtableRows = tables.reduce((sum, table) => sum + table.appendRows, 0);
+  const deletedRows = tables.reduce((sum, table) => sum + table.removeRows, 0);
+  const result: ApplyConfirmDetail = {
+    kind: diagnostic.statementKind === "UPDATE" ? "APPLY_PATCH"
+      : diagnostic.statementKind === "INSERT" ? "APPLY_INSERT" : "APPLY_UPSERT",
+    parentRows,
+    changedSubtableRows,
+    addedSubtableRows,
+    tables,
+    ...(multiValues.length > 0 ? { multiValues } : {}),
+    deletedRows,
+    deletedParentRows: diagnostic.branches.reduce((sum, branch) => sum + (branch.deletedParentRows ?? 0), 0),
+    revisionRequired: diagnostic.branches.some((branch) => branch.guards.revisionRequired),
+    irreversible: true,
+    retryOnRevisionConflict: false,
+    ...(chunked ? { nonTransactional: true as const, partialSuccessPossible: true as const } : {}),
+  };
+  if (diagnostic.statementKind === "INSERT" && insert) {
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE")
+        .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+    };
+  }
+  if (diagnostic.statementKind === "UPSERT" && insert && update) {
+    const insertTables = applyDiagnosticTables(insert);
+    const updateTables = applyDiagnosticTables(update);
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE")
+        .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+      updatedParentRows: update.parentRows ?? 0,
+      applyBranches: {
+        insert: {
+          parentRows: insert.parentRows ?? 0,
+          initialSubtableRows: insertTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: insertTables,
+        },
+        update: {
+          parentRows: update.parentRows ?? 0,
+          changedSubtableRows: update.targets.filter((target) => target.targetKind === "SUBTABLE")
+            .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+          addedSubtableRows: updateTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: updateTables,
+          deletedRows: updateTables.reduce((sum, table) => sum + table.removeRows, 0),
+          deletedParentRows: update.deletedParentRows ?? 0,
+        },
+      },
+    };
+  }
+  return result;
+}
+
+function applyDiagnosticTables(branch: ApplyDiagnosticBranch): ApplyConfirmDetail["tables"] {
+  return branch.targets.filter((target) => target.targetKind === "SUBTABLE").map((target) => {
+    const appendRows = operationCount(target, "APPEND");
+    const removeRows = operationCount(target, "REMOVE");
+    return {
+      table: target.field,
+      patchRows: (target.changedCount ?? 0) - appendRows - removeRows,
+      appendRows,
+      removeRows,
+    };
+  });
+}
+
+function operationCount(target: ApplyDiagnosticTarget, kind: ApplyDiagnostic["branches"][number]["targets"][number]["operations"][number]["kind"]): number {
+  return target.operations.filter((operation) => operation.kind === kind)
+    .reduce((sum, operation) => sum + (operation.count ?? 0), 0);
+}
+
+function mergeApplyDiagnosticMultiValues(
+  targets: readonly ApplyDiagnosticTarget[]
+): NonNullable<ApplyConfirmDetail["multiValues"]> {
+  type Detail = NonNullable<ApplyConfirmDetail["multiValues"]>[number];
+  const details = new Map<string, Detail>();
+  for (const target of targets.filter((item) => item.targetKind === "MULTI_VALUE")) {
+    const incoming: Detail = {
+      field: target.field,
+      fieldType: target.fieldType ?? "UNKNOWN",
+      addedValues: operationCount(target, "ADD"),
+      removedValues: operationCount(target, "REMOVE_VALUE"),
+      changedValues: target.changedCount ?? 0,
+      parents: (target.postImages ?? []).map((item) => ({ parentId: item.parentId, postImage: item.value })),
+    };
+    const current = details.get(target.field);
+    details.set(target.field, current ? {
+      ...current,
+      addedValues: current.addedValues + incoming.addedValues,
+      removedValues: current.removedValues + incoming.removedValues,
+      changedValues: current.changedValues + incoming.changedValues,
+      parents: [...current.parents, ...incoming.parents],
+    } : incoming);
+  }
+  return [...details.values()];
 }
 
 async function executeDmlValidation(
@@ -6028,6 +6108,19 @@ async function executeApplyPatchUpdate(
   const wouldExceed = plan.parentRows > dmlMaxRows
     || plan.changedSubtableRows > dmlMaxSubtableRows;
   if (stmt.validateOnly) {
+    const diagnostic = buildPreparedApplyUpdateDiagnostic({
+      plans: [plan],
+      records: applyPatchPlanToKintone(plan).records,
+      validations: [],
+      guards: {
+        revisionRequired: true,
+        parentRows: plan.parentRows,
+        dmlMaxRows,
+        subtableRows: plan.changedSubtableRows,
+        dmlMaxSubtableRows,
+        wouldExceed,
+      },
+    });
     const result: DmlValidationResult = {
       type: "VALIDATION",
       operation: "UPDATE",
@@ -6038,36 +6131,13 @@ async function executeApplyPatchUpdate(
       columns: [...validation.columns],
       errors: validation.errors,
       ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
-      apply: ([...plan.tables.map((table) => ({
-        field: table.table,
-        operations: table.operations,
-        changedSubtableRows: table.changedSubtableRows,
-        deletedRows: table.deletedRows,
-      })), ...plan.multiValues.map((multiValue) => ({
-        field: multiValue.field,
-        operations: multiValue.operations,
-        changedSubtableRows: 0,
-        deletedRows: 0,
-        multiValue: {
-          fieldType: multiValue.fieldType,
-          addedValues: multiValue.addedValues,
-          removedValues: multiValue.removedValues,
-          changedValues: multiValue.changedValues,
-          postImages: [{ parentId: plan.parentId, value: multiValue.postImageValue }],
-        },
-      }))] satisfies ApplyValidationDetail[]),
-      guards: {
-        revisionRequired: true,
-        parentRows: plan.parentRows,
-        dmlMaxRows,
-        subtableRows: plan.changedSubtableRows,
-        dmlMaxSubtableRows,
-        wouldExceed,
-      },
+      apply: applyValidationDetailsFromBranch(diagnostic.branches[0]),
+      guards: applyGuardFromDiagnosticBranch(diagnostic.branches[0]),
       deletedRows: {
         total: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
         parentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
       },
+      diagnostic,
     };
     materializedMetaByValidationResult.set(
       result,
@@ -6086,49 +6156,41 @@ async function executeApplyPatchUpdate(
 
   const normalizedPlan = normalizeApplyPatchPlan(plan, validation.normalizedRecord);
   const putParams = applyPatchPlanToKintone(normalizedPlan);
-  if (options.confirm) {
-    const addedSubtableRows = plan.tables.reduce((sum, table) => sum + table.operations.reduce(
-      (tableSum, operation) => tableSum + (operation.kind === "APPEND" ? operation.addedRows : 0), 0
-    ), 0);
-    const applyDetail: ApplyConfirmDetail = {
-      kind: "APPLY_PATCH",
-      parentRows: plan.parentRows,
-      changedSubtableRows: plan.changedSubtableRows,
-      addedSubtableRows,
-      tables: plan.tables.map((table) => {
-        const appendRows = table.operations.reduce(
-          (sum, operation) => sum + (operation.kind === "APPEND" ? operation.addedRows : 0), 0
-        );
-        const removeRows = table.deletedRows;
-        const patchRows = table.changedSubtableRows - appendRows - removeRows;
-        return { table: table.table, patchRows, appendRows, removeRows };
-      }),
-      ...(plan.multiValues.length > 0 ? { multiValues: plan.multiValues.map((multiValue) => ({
-        field: multiValue.field,
-        fieldType: multiValue.fieldType,
-        addedValues: multiValue.addedValues,
-        removedValues: multiValue.removedValues,
-        changedValues: multiValue.changedValues,
-        parents: [{ parentId: plan.parentId, postImage: multiValue.postImageValue }],
-      })) } : {}),
-      deletedRows: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
-      deletedParentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
+  const diagnostic = buildPreparedApplyUpdateDiagnostic({
+    plans: [normalizedPlan],
+    records: putParams.records,
+    validations: [],
+    guards: {
       revisionRequired: true,
-      irreversible: true,
-      retryOnRevisionConflict: false,
-    };
+      parentRows: plan.parentRows,
+      dmlMaxRows,
+      subtableRows: plan.changedSubtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed,
+    },
+  });
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic, false);
     const ok = await options.confirm(plan.parentRows, "UPDATE", {
       statementIndex: 0,
       statementCount: 1,
       statementType: "UPDATE",
       targetAppId: stmt.appId,
       applyDetail,
+      applyDiagnostic: diagnostic,
     });
     if (!ok) throw new OperationCancelledError("UPDATE", plan.parentRows);
   }
 
   await client.putRecords(putParams);
-  return { type: "UPDATE", updatedCount: plan.parentRows };
+  return {
+    type: "UPDATE",
+    updatedCount: plan.parentRows,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, {
+      successfulChunks: 1,
+      successfulParents: plan.parentRows,
+    }),
+  };
 }
 
 async function executeMultipleParentApplyPreflight(
@@ -6173,68 +6235,21 @@ async function executeMultipleParentApplyPreflight(
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
   assertApplyPublicWriteScope("phase15b", stmt);
+  const diagnostic = buildPreparedApplyUpdateDiagnostic(prepared);
   if (options.confirm) {
-    const applyDetail = buildMultipleParentApplyConfirmDetail(prepared);
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic);
     const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
       statementIndex: 0,
       statementCount: 1,
       statementType: "UPDATE",
       targetAppId: stmt.appId,
       applyDetail,
+      applyDiagnostic: diagnostic,
     });
     if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
   }
-  return executePreparedApplyWrite(prepared, client);
-}
-
-function buildMultipleParentApplyConfirmDetail(prepared: PreparedApplyWrite): ApplyConfirmDetail {
-  type TableCounts = { table: string; patchRows: number; appendRows: number; removeRows: number };
-  const tables = new Map<string, TableCounts>();
-  let addedSubtableRows = 0;
-  let deletedRows = 0;
-  let deletedParentRows = 0;
-  const multiValues = aggregateApplyMultiValueConfirmDetails(prepared);
-
-  for (const plan of prepared.plans) {
-    let parentHasDeletes = false;
-    for (const table of plan.tables) {
-      const counts = tables.get(table.table) ?? {
-        table: table.table,
-        patchRows: 0,
-        appendRows: 0,
-        removeRows: 0,
-      };
-      const appendRows = table.operations.reduce(
-        (sum, operation) => sum + (operation.kind === "APPEND" ? operation.addedRows : 0),
-        0
-      );
-      const removeRows = table.deletedRows;
-      counts.patchRows += table.changedSubtableRows - appendRows - removeRows;
-      counts.appendRows += appendRows;
-      counts.removeRows += removeRows;
-      tables.set(table.table, counts);
-      addedSubtableRows += appendRows;
-      deletedRows += removeRows;
-      parentHasDeletes ||= removeRows > 0;
-    }
-    if (parentHasDeletes) deletedParentRows += 1;
-  }
-
-  return {
-    kind: "APPLY_PATCH",
-    parentRows: prepared.guards.parentRows,
-    changedSubtableRows: prepared.guards.subtableRows,
-    addedSubtableRows,
-    tables: [...tables.values()],
-    ...(multiValues.length > 0 ? { multiValues } : {}),
-    deletedRows,
-    deletedParentRows,
-    revisionRequired: true,
-    irreversible: true,
-    retryOnRevisionConflict: false,
-    nonTransactional: true,
-    partialSuccessPossible: true,
-  };
+  const result = await executePreparedApplyWrite(prepared, client, diagnostic);
+  return { ...result, diagnostic: withApplyDiagnosticProgress(diagnostic, result) };
 }
 
 function materializePreparedApplyInsertValidation(
@@ -6254,6 +6269,8 @@ function materializePreparedApplyInsertValidation(
       ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
     ];
   const parentRows = prepared.guards.parentRows;
+  const diagnostic = buildPreparedApplyInsertDiagnostic(prepared);
+  const branch = diagnostic.branches[0];
   const result: DmlValidationResult = {
     type: "VALIDATION",
     operation: "INSERT",
@@ -6264,18 +6281,10 @@ function materializePreparedApplyInsertValidation(
     columns,
     errors,
     ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
-    apply: stmt.applyBlocks!.map((block) => {
-      const operations = block.operations.map((operation) => {
-        if (operation.kind !== "APPEND") {
-          throw new Error(`InternalError: prepared APPLY INSERT contains ${operation.kind}.`);
-        }
-        return { kind: "APPEND" as const, addedRows: operation.values.length * parentRows };
-      });
-      const changedSubtableRows = operations.reduce((sum, operation) => sum + operation.addedRows, 0);
-      return { field: block.field, operations, changedSubtableRows, deletedRows: 0 };
-    }),
-    guards: prepared.guards,
+    apply: applyValidationDetailsFromBranch(branch),
+    guards: applyGuardFromDiagnosticBranch(branch),
     deletedRows: { total: 0, parentRows: 0 },
+    diagnostic,
   };
   materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
   return result;
@@ -6286,19 +6295,6 @@ function materializePreparedApplyValidation(
   prepared: PreparedApplyWrite,
   fieldInfos: readonly KintoneFieldInfo[]
 ): DmlValidationResult {
-  type OperationAccumulator = {
-    kind: "PATCH" | "APPEND" | "REMOVE";
-    matchedRows?: number;
-    changedRows?: number;
-    addedRows?: number;
-    removedRows?: number;
-  };
-  type TableAccumulator = {
-    field: string;
-    operations: OperationAccumulator[];
-    changedSubtableRows: number;
-    deletedRows: number;
-  };
   const validations = prepared.validations;
   const errors = validations.flatMap((validation) => validation.errors);
   const invalidRows = validations.reduce((sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0), 0);
@@ -6308,37 +6304,7 @@ function materializePreparedApplyValidation(
       ...buildPostImageFieldIndex(fieldInfos, stmt.assignments.map((assignment) => assignment.field)).payloadFields,
       ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
     ];
-  const tableDetails = new Map<string, TableAccumulator>();
-  for (const plan of prepared.plans) {
-    for (const table of plan.tables) {
-      const existing = tableDetails.get(table.table);
-      const detail: TableAccumulator = existing ?? {
-        field: table.table,
-        operations: table.operations.map((operation): OperationAccumulator => ({ ...operation })),
-        changedSubtableRows: 0,
-        deletedRows: 0,
-      };
-      if (existing) {
-        table.operations.forEach((operation, index) => {
-          const target = detail.operations[index];
-          if (!target || target.kind !== operation.kind) {
-            throw new Error(`InternalError: APPLY operation shape differs between parents for ${table.table}.`);
-          }
-          if (operation.kind === "PATCH") {
-            target.matchedRows = (target.matchedRows ?? 0) + operation.matchedRows;
-            target.changedRows = (target.changedRows ?? 0) + operation.changedRows;
-          } else if (operation.kind === "APPEND") {
-            target.addedRows = (target.addedRows ?? 0) + operation.addedRows;
-          } else {
-            target.removedRows = (target.removedRows ?? 0) + operation.removedRows;
-          }
-        });
-      }
-      detail.changedSubtableRows += table.changedSubtableRows;
-      detail.deletedRows += table.deletedRows;
-      tableDetails.set(table.table, detail);
-    }
-  }
+  const diagnostic = buildPreparedApplyUpdateDiagnostic(prepared);
   const result: DmlValidationResult = {
     type: "VALIDATION",
     operation: "UPDATE",
@@ -6349,8 +6315,8 @@ function materializePreparedApplyValidation(
     columns,
     errors,
     ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
-    apply: [...tableDetails.values(), ...aggregateApplyMultiValueValidationDetails(prepared)],
-    guards: prepared.guards,
+    apply: applyValidationDetailsFromBranch(diagnostic.branches[0]),
+    guards: applyGuardFromDiagnosticBranch(diagnostic.branches[0]),
     deletedRows: {
       total: prepared.plans.reduce(
         (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0),
@@ -6358,6 +6324,7 @@ function materializePreparedApplyValidation(
       ),
       parentRows: prepared.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
     },
+    diagnostic,
   };
   materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
   return result;
@@ -6381,19 +6348,11 @@ function materializePreparedApplyUpsertValidation(
       ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
       ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
     ];
-  const createApply: ApplyValidationDetail[] = (stmt.onInsertApplyBlocks ?? []).map((block) => {
-    const operations = block.operations.map((operation) => {
-      if (operation.kind !== "APPEND") throw new Error("InternalError: UPSERT ON INSERT contains a non-APPEND operation.");
-      return { kind: "APPEND" as const, addedRows: operation.values.length * prepared.create.guards.parentRows };
-    });
-    return {
-      field: block.field,
-      operations,
-      changedSubtableRows: operations.reduce((sum, operation) => sum + operation.addedRows, 0),
-      deletedRows: 0,
-    };
-  });
-  const updateApply = aggregateApplyValidationDetails(prepared.update);
+  const diagnostic = buildPreparedApplyUpsertDiagnostic(prepared);
+  const insertBranch = diagnostic.branches.find((branch) => branch.branch === "insert")!;
+  const updateBranch = diagnostic.branches.find((branch) => branch.branch === "update")!;
+  const createApply = applyValidationDetailsFromBranch(insertBranch);
+  const updateApply = applyValidationDetailsFromBranch(updateBranch);
   const result: DmlValidationResult = {
     type: "VALIDATION",
     operation: "UPSERT",
@@ -6405,10 +6364,17 @@ function materializePreparedApplyUpsertValidation(
     errors,
     ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
     apply: [...createApply, ...updateApply],
-    guards: prepared.guards,
+    guards: {
+      revisionRequired: prepared.guards.revisionRequired,
+      parentRows: prepared.guards.parentRows,
+      dmlMaxRows: prepared.guards.dmlMaxRows,
+      subtableRows: prepared.guards.subtableRows,
+      dmlMaxSubtableRows: prepared.guards.dmlMaxSubtableRows,
+      wouldExceed: prepared.guards.wouldExceed,
+    },
     applyBranches: {
-      create: { apply: createApply, guards: prepared.create.guards },
-      update: { apply: updateApply, guards: prepared.update.guards },
+      create: { apply: createApply, guards: applyGuardFromDiagnosticBranch(insertBranch) },
+      update: { apply: updateApply, guards: applyGuardFromDiagnosticBranch(updateBranch) },
     },
     deletedRows: {
       total: prepared.update.plans.reduce(
@@ -6416,92 +6382,60 @@ function materializePreparedApplyUpsertValidation(
       ),
       parentRows: prepared.update.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
     },
+    diagnostic,
   };
   materializedMetaByValidationResult.set(result, applyValidationColumnMeta([...columns], fieldInfos, stmt.appId));
   return result;
 }
 
-function aggregateApplyValidationDetails(prepared: PreparedApplyWrite): ApplyValidationDetail[] {
-  const details = new Map<string, ApplyValidationDetail>();
-  for (const plan of prepared.plans) {
-    for (const table of plan.tables) {
-      const existing = details.get(table.table);
-      if (!existing) {
-        details.set(table.table, {
-          field: table.table,
-          operations: table.operations.map((operation) => ({ ...operation })),
-          changedSubtableRows: table.changedSubtableRows,
-          deletedRows: table.deletedRows,
-        });
-        continue;
-      }
-      const operations = existing.operations.map((operation, index) => {
-        const incoming = table.operations[index];
-        if (!incoming || incoming.kind !== operation.kind) {
-          throw new Error(`InternalError: APPLY operation shape differs between parents for ${table.table}.`);
-        }
-        return operation.kind === "PATCH" && incoming.kind === "PATCH"
-          ? { kind: "PATCH" as const, matchedRows: (operation.matchedRows ?? 0) + incoming.matchedRows, changedRows: (operation.changedRows ?? 0) + incoming.changedRows }
-          : operation.kind === "APPEND" && incoming.kind === "APPEND"
-            ? { kind: "APPEND" as const, addedRows: (operation.addedRows ?? 0) + incoming.addedRows }
-            : operation.kind === "REMOVE" && incoming.kind === "REMOVE"
-              ? { kind: "REMOVE" as const, removedRows: (operation.removedRows ?? 0) + incoming.removedRows }
-              : operation;
-      });
-      details.set(table.table, {
-        field: existing.field,
+function applyValidationDetailsFromBranch(branch: ApplyDiagnosticBranch): ApplyValidationDetail[] {
+  return branch.targets.map((target): ApplyValidationDetail => {
+    const operations = target.operations.map((operation) => ({
+      kind: operation.kind,
+      ...(operation.matchedRows !== undefined ? { matchedRows: operation.matchedRows ?? undefined } : {}),
+      ...(operation.changedRows !== undefined ? { changedRows: operation.changedRows ?? undefined } : {}),
+      ...(operation.addedRows !== undefined ? { addedRows: operation.addedRows ?? undefined } : {}),
+      ...(operation.removedRows !== undefined ? { removedRows: operation.removedRows ?? undefined } : {}),
+      ...(operation.value !== undefined ? { value: operation.value } : {}),
+      ...(operation.changed !== undefined ? { changed: operation.changed } : {}),
+    }));
+    if (target.targetKind === "SUBTABLE") {
+      return {
+        field: target.field,
         operations,
-        changedSubtableRows: existing.changedSubtableRows + table.changedSubtableRows,
-        deletedRows: existing.deletedRows + table.deletedRows,
-      });
+        changedSubtableRows: target.changedCount ?? 0,
+        deletedRows: operationCount(target, "REMOVE"),
+      };
     }
-  }
-  return [...details.values(), ...aggregateApplyMultiValueValidationDetails(prepared)];
+    return {
+      field: target.field,
+      operations,
+      changedSubtableRows: 0,
+      deletedRows: 0,
+      multiValue: {
+        fieldType: target.fieldType ?? "UNKNOWN",
+        addedValues: operationCount(target, "ADD"),
+        removedValues: operationCount(target, "REMOVE_VALUE"),
+        changedValues: target.changedCount ?? 0,
+        postImages: target.postImages ?? [],
+      },
+    };
+  });
 }
 
-function aggregateApplyMultiValueValidationDetails(prepared: PreparedApplyWrite): ApplyValidationDetail[] {
-  return aggregateApplyMultiValueConfirmDetails(prepared).map((detail) => ({
-    field: detail.field,
-    operations: prepared.plans.find((plan) => plan.multiValues.some((item) => item.field === detail.field))!
-      .multiValues.find((item) => item.field === detail.field)!.operations,
-    changedSubtableRows: 0,
-    deletedRows: 0,
-    multiValue: {
-      fieldType: detail.fieldType,
-      addedValues: detail.addedValues,
-      removedValues: detail.removedValues,
-      changedValues: detail.changedValues,
-      postImages: detail.parents.map((parent) => ({ parentId: parent.parentId, value: parent.postImage })),
-    },
-  }));
-}
-
-function aggregateApplyMultiValueConfirmDetails(
-  prepared: PreparedApplyWrite
-): NonNullable<ApplyConfirmDetail["multiValues"]> {
-  type Detail = NonNullable<ApplyConfirmDetail["multiValues"]>[number];
-  const details = new Map<string, Detail>();
-  for (const plan of prepared.plans) {
-    for (const multiValue of plan.multiValues) {
-      const existing = details.get(multiValue.field);
-      const parent = { parentId: plan.parentId, postImage: multiValue.postImageValue };
-      details.set(multiValue.field, existing ? {
-        ...existing,
-        addedValues: existing.addedValues + multiValue.addedValues,
-        removedValues: existing.removedValues + multiValue.removedValues,
-        changedValues: existing.changedValues + multiValue.changedValues,
-        parents: [...existing.parents, parent],
-      } : {
-        field: multiValue.field,
-        fieldType: multiValue.fieldType,
-        addedValues: multiValue.addedValues,
-        removedValues: multiValue.removedValues,
-        changedValues: multiValue.changedValues,
-        parents: [parent],
-      });
-    }
+function applyGuardFromDiagnosticBranch(branch: ApplyDiagnosticBranch): ApplyGuardDetail {
+  if (branch.guards.parentRows === null || branch.guards.subtableRows === null
+      || branch.guards.wouldExceed === null) {
+    throw new Error("InternalError: runtime APPLY diagnostic guard contains unknown counts.");
   }
-  return [...details.values()];
+  return {
+    revisionRequired: branch.guards.revisionRequired,
+    parentRows: branch.guards.parentRows,
+    dmlMaxRows: branch.guards.dmlMaxRows,
+    subtableRows: branch.guards.subtableRows,
+    dmlMaxSubtableRows: branch.guards.dmlMaxSubtableRows,
+    wouldExceed: branch.guards.wouldExceed,
+  };
 }
 
 /** APPLY 二重ガードの既定値。親は最大100件、子は1年分の日次データ（366行）を
@@ -7983,9 +7917,9 @@ function buildExplainPlan(
 ): string[] {
   if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
-  if (query.type === "INSERT")        return buildInsertPlan(query, label);
+  if (query.type === "INSERT")        return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
-  if (query.type === "UPSERT")        return buildUpsertPlan(query, label);
+  if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPDATE")        return buildUpdatePlan(
     query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows
@@ -8325,7 +8259,12 @@ function collectSubqueryPlans(
 // EXPLAIN — DML プラン
 // ============================================================
 
-function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
+function buildInsertPlan(
+  stmt: InsertStatement,
+  label?: string,
+  dmlMaxRows = DEFAULT_APPLY_MAX_ROWS,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+): string[] {
   const totalRows   = stmt.values.length;
   const batchCount  = Math.ceil(totalRows / 100);
   const lines: string[] = [];
@@ -8335,7 +8274,9 @@ function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
   lines.push(`  records: ${totalRows} 件（バッチ ${batchCount} 回 × 最大 100 件）`);
   lines.push(`  api:     POST /k/v1/records.json × ${batchCount}`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
-  return lines;
+  return stmt.applyBlocks?.length
+    ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))]
+    : lines;
 }
 
 function buildInsertSelectPlan(
@@ -8421,6 +8362,8 @@ function buildUpdateApplyPlan(
   dmlMaxRows: number,
   dmlMaxSubtableRows: number
 ): string[] {
+  const diagnostic = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
+  const branch = diagnostic.branches[0];
   const blocks = stmt.applyBlocks!;
   const operations: ApplyOperation[] = blocks.flatMap((block) => [...block.operations] as ApplyOperation[]);
   const selectorKinds = operations.map((operation) => {
@@ -8433,7 +8376,7 @@ function buildUpdateApplyPlan(
       ? "_rid"
       : "SAFE_PREDICATE";
   });
-  const operationKinds = [...new Set(operations.map((operation) => operation.kind))];
+  const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
   const hasRemove = operationKinds.includes("REMOVE");
   return [
     ...(label ? [label] : []),
@@ -8441,7 +8384,7 @@ function buildUpdateApplyPlan(
     `target app:             APP${stmt.appId}`,
     `parent selector:        ${safeWhereToKintone(stmt.where)}`,
     "parent cardinality:     single",
-    `apply target:           ${blocks.map((block) => `${block.field} (${block.targetKind})`).join(" | ")}`,
+    `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,
     "snapshot evaluation:    yes",
@@ -8457,8 +8400,7 @@ function buildUpdateApplyPlan(
     `dmlMaxRows:             ${dmlMaxRows}`,
     `dmlMaxSubtableRows:     ${dmlMaxSubtableRows}`,
     "MCP mutation:           disabled in v1",
-    "records API:            0",
-    "mutation API:           0",
+    ...formatStaticApplyDiagnostic(diagnostic),
   ];
 }
 
@@ -8474,10 +8416,15 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   return lines;
 }
 
-function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
+function buildUpsertPlan(
+  stmt: UpsertStatement,
+  label?: string,
+  dmlMaxRows = DEFAULT_APPLY_MAX_ROWS,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+): string[] {
   const totalRows  = stmt.values.length;
   const batchCount = Math.ceil(totalRows / 100);
-  return [
+  const lines = [
     ...(label ? [label] : []),
     `  [UPSERT]`,
     `  target:     APP${stmt.appId} (${stmt.appId})`,
@@ -8486,6 +8433,34 @@ function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
     `  fields:     ${stmt.fields.join(", ")}`,
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json × ${batchCount}`,
   ];
+  return stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length
+    ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))]
+    : lines;
+}
+
+function formatStaticApplyDiagnostic(diagnostic: ApplyDiagnostic): string[] {
+  const lines = [
+    `apply diagnostic:       ${diagnostic.statementKind}`,
+    `non-transactional:      ${diagnostic.nonTransactional}`,
+    `partial success:        ${diagnostic.partialSuccess.possible ? "possible" : "none"}`,
+  ];
+  for (const branch of diagnostic.branches) {
+    lines.push(
+      `apply branch:           ${branch.branch}`,
+      `  parent rows:          ${branch.parentRows === null ? "unknown (records API not called)" : branch.parentRows}`,
+      `  chunks:               ${branch.chunk.plannedChunks === null ? "unknown" : branch.chunk.plannedChunks} × max ${branch.chunk.size}`,
+      `  revision guard:       ${branch.guards.revisionRequired ? "required" : "not required"}`
+    );
+    for (const target of branch.targets) {
+      lines.push(
+        `  target:               ${target.field} (${target.targetKind})`,
+        `    operations:         ${target.operations.map((operation) => `${operation.kind}=${operation.count === null ? "unknown" : operation.count}`).join(" | ")}`,
+        `    changed count:      ${target.changedCount === null ? "unknown" : target.changedCount}`
+      );
+    }
+  }
+  lines.push("records API:            0", "mutation API:           0");
+  return lines;
 }
 
 function buildUpsertSelectPlan(

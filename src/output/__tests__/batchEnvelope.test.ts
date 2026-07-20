@@ -18,6 +18,20 @@ test("VALIDATION result set は optional apply/guards を伝播する", () => {
           revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
           subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false,
         },
+        applyBranches: {
+          create: { apply: [], guards: { revisionRequired: false, parentRows: 0, dmlMaxRows: 100, subtableRows: 0, dmlMaxSubtableRows: 500, wouldExceed: false } },
+          update: { apply: [], guards: { revisionRequired: true, parentRows: 1, dmlMaxRows: 100, subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false } },
+        },
+        diagnostic: {
+          statementKind: "UPDATE", nonTransactional: true, partialSuccess: { possible: true },
+          branches: [{
+            branch: "update", parentRows: 1, deletedParentRows: 0,
+            targets: [{ targetKind: "SUBTABLE", field: "テーブル", changedCount: 2,
+              operations: [{ kind: "PATCH", count: 2, matchedRows: 2, changedRows: 2 }] }],
+            guards: { revisionRequired: true, parentRows: 1, dmlMaxRows: 100, subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false },
+            chunk: { size: 100, plannedChunks: 1 },
+          }],
+        },
         deletedRows: { total: 0, parentRows: 0 },
       },
     }],
@@ -26,6 +40,8 @@ test("VALIDATION result set は optional apply/guards を伝播する", () => {
     apply: [{ operations: [{ matchedRows: 2, changedRows: 2 }] }],
     guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
     deletedRows: { total: 0, parentRows: 0 },
+    applyBranches: { update: { guards: { parentRows: 1 } } },
+    diagnostic: { statementKind: "UPDATE", branches: [{ branch: "update" }] },
   });
 });
 

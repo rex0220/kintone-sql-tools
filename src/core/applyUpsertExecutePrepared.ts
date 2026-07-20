@@ -5,6 +5,7 @@ import {
   type ApplyWriteProgress,
 } from "./applyPatchExecutePrepared";
 import { assertApplyInternalWriteScope } from "./applyPatchScope";
+import { withApplyDiagnosticProgress, type ApplyDiagnostic } from "./applyDiagnostic";
 
 export interface PreparedApplyUpsertResult extends ApplyWriteProgress {
   readonly type: "UPSERT";
@@ -22,7 +23,8 @@ export interface PreparedApplyUpsertResult extends ApplyWriteProgress {
  */
 export async function executePreparedApplyUpsert(
   prepared: PreparedApplyUpsert,
-  client: Pick<KintoneClient, "postRecords" | "putRecords">
+  client: Pick<KintoneClient, "postRecords" | "putRecords">,
+  diagnostic?: ApplyDiagnostic
 ): Promise<PreparedApplyUpsertResult> {
   assertApplyInternalWriteScope("phase14c");
   const createdIds: string[][] = [];
@@ -47,6 +49,18 @@ export async function executePreparedApplyUpsert(
         failedStage: "POST_CHUNK",
         nonTransactional: true,
         retryAttempted: false,
+        ...(diagnostic ? { diagnostic: withApplyDiagnosticProgress(diagnostic, {
+          successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+          successfulParents: successfulInserts + successfulUpdates,
+          successfulInserts,
+          successfulUpdates,
+          successfulInsertChunks,
+          successfulUpdateChunks,
+          failedChunkIndex,
+          failedStage: "POST_CHUNK",
+          failedBranch: "INSERT",
+          retryAttempted: false,
+        }) } : {}),
       }, cause);
     }
     successfulInsertChunks += 1;
@@ -68,6 +82,18 @@ export async function executePreparedApplyUpsert(
         failedStage: "PUT_CHUNK",
         nonTransactional: true,
         retryAttempted: false,
+        ...(diagnostic ? { diagnostic: withApplyDiagnosticProgress(diagnostic, {
+          successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+          successfulParents: successfulInserts + successfulUpdates,
+          successfulInserts,
+          successfulUpdates,
+          successfulInsertChunks,
+          successfulUpdateChunks,
+          failedChunkIndex,
+          failedStage: "PUT_CHUNK",
+          failedBranch: "UPDATE",
+          retryAttempted: false,
+        }) } : {}),
       }, cause);
     }
     successfulUpdateChunks += 1;

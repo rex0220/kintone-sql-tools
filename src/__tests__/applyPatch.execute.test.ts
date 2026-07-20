@@ -111,6 +111,18 @@ test("Phase 15b: 多値ADD/REMOVEをrevision付き1親1PUTへ接続し、確認d
           parents: [{ parentId: 8, postImage: [{ code: "u2" }, { code: "u3" }] }] }),
       ],
     }),
+    applyDiagnostic: expect.objectContaining({
+      statementKind: "UPDATE",
+      branches: [expect.objectContaining({
+        targets: [
+          expect.objectContaining({ targetKind: "MULTI_VALUE", field: "タグ", operations: [
+            expect.objectContaining({ kind: "REMOVE_VALUE", count: 1 }),
+            expect.objectContaining({ kind: "ADD", count: 1 }),
+          ] }),
+          expect.objectContaining({ targetKind: "MULTI_VALUE", field: "担当" }),
+        ],
+      })],
+    }),
   }));
 });
 
@@ -127,6 +139,15 @@ test("Phase 15b: VALIDATE ONLYは多値post-image/検証診断を返しPUTしな
       { field: "担当", multiValue: { fieldType: "USER_SELECT", addedValues: 1, removedValues: 1,
         postImages: [{ parentId: 8, value: [{ code: "u2" }, { code: "u3" }] }] } },
     ],
+    diagnostic: {
+      statementKind: "UPDATE",
+      branches: [{ targets: [
+        { targetKind: "MULTI_VALUE", field: "タグ", changedCount: 2, operations: [
+          { kind: "REMOVE_VALUE", value: "A", count: 1 }, { kind: "ADD", value: "C", count: 1 },
+        ] },
+        { targetKind: "MULTI_VALUE", field: "担当", changedCount: 2 },
+      ] }],
+    },
   });
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
@@ -168,6 +189,11 @@ test("Phase 15b: 多値の複数親を独立post-imageで100件chunkし、後続
       failedChunkIndex: 1,
       failedStage: "PUT_CHUNK",
       retryAttempted: false,
+      diagnostic: {
+        statementKind: "UPDATE",
+        branches: [{ targets: [{ targetKind: "MULTI_VALUE", field: "タグ" }] }],
+        partialSuccess: { successfulParents: 100, failedBranch: "update" },
+      },
     },
   });
   expect(mock.putRecords.mock.calls.map(([batch]) => batch.records.length)).toEqual([100, 1]);
@@ -224,6 +250,14 @@ test.each([
     updatedCount,
     successfulParents: 2,
     nonTransactional: true,
+    diagnostic: {
+      statementKind: "UPSERT",
+      branches: [
+        { branch: "insert", parentRows: insertedCount },
+        { branch: "update", parentRows: updatedCount },
+      ],
+      partialSuccess: { possible: true, successfulParents: 2 },
+    },
   });
   expect(mock.postRecords).toHaveBeenCalledTimes(insertedCount > 0 ? 1 : 0);
   expect(mock.putRecords).toHaveBeenCalledTimes(updatedCount > 0 ? 1 : 0);
@@ -260,9 +294,46 @@ test("Phase 14c: UPSERT APPLY confirmはprepared済みinsert/update内訳を1回
         update: expect.objectContaining({ parentRows: 1, changedSubtableRows: 1 }),
       },
     }),
+    applyDiagnostic: {
+      statementKind: "UPSERT",
+      branches: [
+        expect.objectContaining({ branch: "insert", parentRows: 1 }),
+        expect.objectContaining({ branch: "update", parentRows: 1 }),
+      ],
+      nonTransactional: true,
+      partialSuccess: { possible: true },
+    },
   }));
   expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.postRecords.mock.invocationCallOrder[0]);
   expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.putRecords.mock.invocationCallOrder[0]);
+});
+
+test("Phase 16a: UPSERT APPLY VALIDATE ONLYはinsert/update branchをshared診断から加法伝播する", async () => {
+  const mock = makeClient([upsertParent(9, "old")]);
+  const result = await execute(`${upsertApplySql} VALIDATE ONLY`, mock.client, {
+    cacheContext: "apply-phase16a-upsert-validate",
+    dmlMaxRows: 2,
+    dmlMaxSubtableRows: 2,
+  });
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    operation: "UPSERT",
+    applyBranches: {
+      create: { apply: [{ field: "テーブル", operations: [{ kind: "APPEND", addedRows: 1 }] }] },
+      update: { apply: [{ field: "テーブル", operations: [{ kind: "PATCH", changedRows: 1 }] }] },
+    },
+    diagnostic: {
+      statementKind: "UPSERT",
+      nonTransactional: true,
+      partialSuccess: { possible: true },
+      branches: [
+        { branch: "insert", parentRows: 1, targets: [{ field: "テーブル", operations: [{ kind: "APPEND", count: 1 }] }] },
+        { branch: "update", parentRows: 1, targets: [{ field: "テーブル", operations: [{ kind: "PATCH", count: 1 }] }] },
+      ],
+    },
+  });
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
 test("Phase 14c: create全件後のupdate 2nd chunk失敗を公開errorとbatch envelopeへ伝播しfail-fastする", async () => {
@@ -294,6 +365,14 @@ test("Phase 14c: create全件後のupdate 2nd chunk失敗を公開errorとbatch 
       failedBranch: "UPDATE",
       failedStage: "PUT_CHUNK",
       retryAttempted: false,
+      diagnostic: {
+        statementKind: "UPSERT",
+        partialSuccess: { successfulParents: 201, failedBranch: "update", retryAttempted: false },
+        branches: [
+          { branch: "insert", successfulParents: 101 },
+          { branch: "update", successfulParents: 100, chunk: { failedChunkIndex: 1, failedStage: "PUT_CHUNK" } },
+        ],
+      },
     },
   } });
   expect(batch.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
@@ -319,6 +398,11 @@ test("Phase 14c: UPSERT APPLY batch成功はbranch件数と進捗をenvelopeへ�
     successfulInsertChunks: 1,
     successfulUpdateChunks: 1,
     nonTransactional: true,
+    diagnostic: {
+      statementKind: "UPSERT",
+      branches: [{ branch: "insert" }, { branch: "update" }],
+      partialSuccess: { successfulParents: 2, successfulChunks: 2 },
+    },
   });
 });
 
@@ -372,6 +456,14 @@ test("Phase 13c: INSERT APPLYをprepare後confirm 1回からPOSTへ接続し初�
   expect(result).toMatchObject({
     type: "INSERT", insertedCount: 2, createdIds: [["1", "2"]],
     successfulChunks: 1, successfulParents: 2, nonTransactional: true,
+    diagnostic: {
+      statementKind: "INSERT", nonTransactional: true,
+      partialSuccess: { possible: true, successfulParents: 2 },
+      branches: [{
+        branch: "insert", parentRows: 2, chunk: { size: 100, plannedChunks: 1, successfulChunks: 1 },
+        targets: [{ targetKind: "SUBTABLE", field: "テーブル", operations: [{ kind: "APPEND", count: 4 }] }],
+      }],
+    },
   });
   expect(confirm).toHaveBeenCalledTimes(1);
   expect(confirm).toHaveBeenCalledWith(2, "INSERT", expect.objectContaining({
@@ -382,6 +474,7 @@ test("Phase 13c: INSERT APPLYをprepare後confirm 1回からPOSTへ接続し初�
       retryOnRevisionConflict: false, nonTransactional: true, partialSuccessPossible: true,
       insertedParentRows: 2, initialSubtableRows: 4,
     },
+    applyDiagnostic: expect.objectContaining({ statementKind: "INSERT" }),
   }));
   expect(mock.getFields.mock.invocationCallOrder[0]).toBeLessThan(confirm.mock.invocationCallOrder[0]);
   expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.postRecords.mock.invocationCallOrder[0]);
@@ -417,6 +510,11 @@ test("Phase 13c: 201親の2nd POST失敗は公開errorへ成功済み100親を�
   expect(caught).toMatchObject({ partialSuccess: {
     successfulChunks: 1, successfulParents: 100, failedChunkIndex: 1,
     failedStage: "POST_CHUNK", retryAttempted: false,
+    diagnostic: {
+      statementKind: "INSERT",
+      partialSuccess: { possible: true, successfulParents: 100, failedBranch: "insert", retryAttempted: false },
+      branches: [{ branch: "insert", chunk: { failedChunkIndex: 1, failedStage: "POST_CHUNK" } }],
+    },
   } });
   expect(mock.postRecords).toHaveBeenCalledTimes(2);
   expect(mock.getRecords).not.toHaveBeenCalled();
@@ -431,6 +529,7 @@ test("Phase 13c: INSERT APPLY batchは成功進捗をenvelopeへ渡し部分成�
   expect(buildBatchEnvelope(completed).statements[0]).toMatchObject({
     status: "success", insertedCount: 1, successfulChunks: 1,
     successfulParents: 1, nonTransactional: true,
+    diagnostic: { statementKind: "INSERT", branches: [{ branch: "insert" }], partialSuccess: { successfulParents: 1 } },
   });
 
   const partial = makeClient([]);
@@ -447,7 +546,10 @@ test("Phase 13c: INSERT APPLY batchは成功進捗をenvelopeへ渡し部分成�
   );
   expect(failed.statements[0]).toMatchObject({ status: "error", error: {
     code: "ApplyWritePartialFailureError",
-    partialSuccess: { successfulParents: 100, failedStage: "POST_CHUNK" },
+    partialSuccess: {
+      successfulParents: 100, failedStage: "POST_CHUNK",
+      diagnostic: { statementKind: "INSERT", partialSuccess: { failedBranch: "insert" } },
+    },
   } });
   expect(failed.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
   expect(partial.postRecords).toHaveBeenCalledTimes(2);
@@ -510,6 +612,29 @@ test("Phase 13b: 複数VALUES×固定templateのVALIDATE ONLYは二重guardを�
     validatedRows: 2,
     apply: [{ operations: [{ kind: "APPEND", addedRows: 4 }], changedSubtableRows: 4 }],
     guards: { parentRows: 2, subtableRows: 4, wouldExceed: true },
+  });
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 16a: INSERTの複数APPEND operation境界をshared診断と既存apply[]で同一に保つ", async () => {
+  const mock = makeClient([]);
+  const result = await execute(
+    "INSERT INTO APP4221 (親) VALUES ('p1'), ('p2') "
+      + "APPLY テーブル (APPEND (子) VALUES ('a'); APPEND (子) VALUES ('b'), ('c')) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase16a-insert-operations" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    apply: [{ operations: [
+      { kind: "APPEND", addedRows: 2 },
+      { kind: "APPEND", addedRows: 4 },
+    ] }],
+    diagnostic: { branches: [{ targets: [{ operations: [
+      { kind: "APPEND", count: 2, addedRows: 2 },
+      { kind: "APPEND", count: 4, addedRows: 4 },
+    ] }] }] },
   });
   expect(mock.postRecords).not.toHaveBeenCalled();
   expect(mock.putRecords).not.toHaveBeenCalled();
@@ -644,6 +769,11 @@ test("Phase 10d: 2nd chunk conflictは成功済み100親を公開errorに保持�
       failedStage: "PUT_CHUNK",
       nonTransactional: true,
       retryAttempted: false,
+      diagnostic: {
+        statementKind: "UPDATE",
+        partialSuccess: { successfulParents: 100, failedBranch: "update", retryAttempted: false },
+        branches: [{ branch: "update", chunk: { failedChunkIndex: 1, failedStage: "PUT_CHUNK" } }],
+      },
     },
   });
   expect(mock.getRecords).toHaveBeenCalledTimes(1);
@@ -663,6 +793,11 @@ test("Phase 10d: batch success envelopeへ進捗を伝播する", async () => {
     successfulChunks: 1,
     successfulParents: 2,
     nonTransactional: true,
+    diagnostic: {
+      statementKind: "UPDATE",
+      partialSuccess: { possible: true, successfulParents: 2, successfulChunks: 1 },
+      branches: [{ branch: "update", targets: [{ field: "テーブル", operations: [{ kind: "PATCH", count: 2 }] }] }],
+    },
   });
 });
 
@@ -713,6 +848,13 @@ test("Phase 10b: 複数親VALIDATE ONLYは全親のapply/guards/validationを集
       changedSubtableRows: 3,
     }],
     guards: { parentRows: 2, subtableRows: 3, wouldExceed: true },
+    diagnostic: {
+      statementKind: "UPDATE",
+      branches: [{
+        branch: "update", parentRows: 2,
+        targets: [{ targetKind: "SUBTABLE", field: "テーブル", operations: [{ kind: "PATCH", count: 3 }] }],
+      }],
+    },
   });
   expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
     query: '親 = "before" order by $id asc limit 3 offset 0',

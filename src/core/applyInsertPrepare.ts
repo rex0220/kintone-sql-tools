@@ -1,6 +1,6 @@
 import type { KintoneFieldInfo } from "../execute";
 import { insertToPostBatches, type FieldTypeMap, type KintoneRecord } from "../converter/dmlToKintone";
-import type { AppendOperation, InsertStatement } from "../types/ast";
+import type { AppendOperation, ApplyBlock, InsertStatement } from "../types/ast";
 import {
   appendDefaultValue,
   buildApplyAppendRows,
@@ -56,6 +56,8 @@ export type PreparedApplyInsertValidation = Readonly<Pick<
 
 /** Phase 13b boundary: immutable POST materials with no client/writer reference. */
 export interface PreparedApplyInsert {
+  /** Immutable operation template retained for shared diagnostics. */
+  readonly applyBlocks?: readonly ApplyBlock[];
   readonly candidates: readonly ApplyInsertCandidate[];
   readonly records: readonly KintoneRecord[];
   readonly batches: readonly PreparedApplyInsertBatch[];
@@ -245,6 +247,7 @@ export async function prepareApplyInsert(input: PrepareApplyInsertInput): Promis
     errorCount: result.errorCount,
   }));
   return deepFreeze({
+    applyBlocks: statement.applyBlocks ?? [],
     candidates,
     records,
     batches,
