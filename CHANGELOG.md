@@ -2,6 +2,18 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.7.0（2026-07-20）
+
+### 機能追加（B42 VALIDATE のサブテーブル子フィールド監査）
+
+- **`VALIDATE` の監査対象にサブテーブル子フィールドを追加**。`(fields)` 省略時の既定対象に、制約を持つ子フィールドと全子 `NUMBER` を含める（従来はトップレベルのみ＝テーブル内の必須/上下限/文字数/選択肢/数値精度違反が `#err` に一切出なかった監査の抜けを修正）。
+- **詳細出力を固定8列へ拡張**: 既存5列＋`$err_subtable`（テーブルコード）・`$err_subrow`（1-based 表示序数）・`$err_subrow_id`（永続行 ID＝仮想テーブルの `_rid` と同値）。トップレベル/`CHECK` 違反では追加3列は空。0行テーブルでは子の必須違反は発火しない。
+- **scoped target 構文**: `VALIDATE APP100 (テーブル)` でテーブルの監査可能な子すべて、`VALIDATE APP100 (テーブル(子1, 子2))` で指定子だけを監査。裸の子コードは所有テーブル形式へ誘導して拒否。`VALIDATE APP100$テーブル` は親形式への案内付きで拒否。
+- **生成時集約 `SUMMARY` モード**: `(fields)` 後・`WHERE` 前の soft keyword。詳細行を生成せず固定5列（`$id`, `$err_subtable`, `$err_field`, `$err_code`, `$err_count`）へ直接集約するため、レコード×テーブル行×子の積で膨らむ大量違反でも `tempTableMaxRows` に当たらず完走できる。詳細8列とは別スキーマで、同名一時表への混在追記は解析時に拒否。
+- **安全ガード**: `WHERE`/`CHECK` のサブテーブル子フィールド参照は records 取得前に `ArgumentError` で拒否（従来は存在チェックを素通りし得た潜在ギャップの封鎖）。NUMBER 子フィールドには数値精度（整数部桁数）検証を適用。
+- **`EXPLAIN VALIDATE`** に mode（DETAIL/SUMMARY）・subtable audit・output schema・row locator を表示（records/mutation API は従来どおり 0 回）。
+- 実機確認: 全9項目 pass（従来 0 行だった監査で子違反4件を検出＝実書き込み CB_VA01 の原因と一致・`$err_subrow_id`≡`_rid` 突合・SUMMARY 集約）。83 suites / 2,103 テスト green。
+
 ## v3.6.1（2026-07-19）
 
 ### 改善・修正（B39 IMPORT の面 UX）

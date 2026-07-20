@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v3.6.1)
+ksql 配布パッケージ (v3.7.0)
 
-1. ksql-plugin-v3.6.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.7.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
+- VALIDATE の既定対象にサブテーブル子フィールドを追加 (監査の抜けを修正)。
+- 詳細出力を固定8列へ拡張 ($err_subtable / $err_subrow 1-based /
+  $err_subrow_id = 仮想テーブルの _rid)。
+- scoped target: VALIDATE APP100 (テーブル) / (テーブル(子1, 子2))。
+  裸の子コード・APP100$テーブル 形式は案内付きで拒否。
+- SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,
+  $err_count) へ生成時集約。大量違反でも tempTableMaxRows に当たらず完走。
+- WHERE / CHECK のサブテーブル子参照は取得前に ArgumentError で拒否。
+  NUMBER 子フィールドに数値精度検証を適用。
 
 v3.6.1: IMPORT の面 UX 改善・修正。
 - プラグイン: IMPORT のファイル選択 UI をヘッダー上部へ移動 (横スクロール解消)。
