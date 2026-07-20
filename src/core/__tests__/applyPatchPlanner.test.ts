@@ -1,0 +1,125 @@
+import { parseSqlStatement } from "../sql";
+import type { KintoneFieldInfo } from "../../execute";
+import type { KintoneRecord } from "../../converter/dmlToKintone";
+import type { UpdateStatement } from "../../types/ast";
+import {
+  buildApplyPatchPlan,
+  collectApplySnapshotFields,
+  resolveApplyPatchMetadata,
+} from "../applyPatchPlanner";
+
+const fields: KintoneFieldInfo[] = [
+  { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+  { code: "親数値", label: "親数値", fieldType: "NUMBER", writable: true },
+  { code: "添付", label: "添付", fieldType: "FILE", writable: true },
+  { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+  { code: "数値", label: "数値", fieldType: "NUMBER", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  { code: "結果", label: "結果", fieldType: "NUMBER", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  { code: "未指定", label: "未指定", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  { code: "子添付", label: "子添付", fieldType: "FILE", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  { code: "別表", label: "別表", fieldType: "SUBTABLE", writable: false },
+  { code: "別子", label: "別子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "別表" },
+];
+
+function statement(operations: string, parentSet = "親 = 'after'"): UpdateStatement {
+  return parseSqlStatement(
+    `UPDATE APP4221 SET ${parentSet} WHERE $id = 8 APPLY テーブル (${operations})`
+  ) as UpdateStatement;
+}
+
+function snapshot(rows: Array<{ id: string; value: Record<string, { value: unknown }> }> = [
+  { id: "101", value: { 数値: { value: "1" }, 結果: { value: "0" }, 未指定: { value: "keep-a" } } },
+  { id: "102", value: { 数値: { value: "2" }, 結果: { value: "0" }, 未指定: { value: "keep-b" } } },
+]): KintoneRecord {
+  return {
+    "$id": { value: "8" },
+    "$revision": { value: "3" },
+    親: { value: "before" },
+    親数値: { value: "10" },
+    テーブル: { value: rows },
+    別表: { value: [] },
+  } as unknown as KintoneRecord;
+}
+
+describe("collectApplySnapshotFields", () => {
+  test("$id/$revision・全top-level/tableを重複なく集め、FILEとchild直指定を除外する", () => {
+    expect(collectApplySnapshotFields(statement("PATCH SET 結果 = 1 ALL ROWS"), fields)).toEqual([
+      "$id", "$revision", "親", "親数値", "テーブル", "別表",
+    ]);
+  });
+});
+
+describe("buildApplyPatchPlan", () => {
+  test("全 selector/RHS と親SETを更新前snapshotで評価し、行順/id/未指定cellを保持する", () => {
+    const stmt = statement(
+      "PATCH SET 数値 = 数値 + 1 WHERE _rid = '101'; " +
+      "PATCH SET 結果 = 数値 + 10 WHERE 数値 = 1",
+      "親数値 = 親数値 + 1"
+    );
+    const plan = buildApplyPatchPlan({ statement: stmt, snapshot: snapshot(), fieldInfos: fields });
+    expect(plan).toMatchObject({ app: 4221, parentId: 8, revision: 3 });
+    expect(plan.parentValues).toEqual({ 親数値: { value: "11" } });
+    expect(plan.tables[0].payloadShape).toBe("PATCH_ONLY");
+    expect(plan.tables[0].payloadRows).toEqual([
+      { id: "101", value: { 数値: { value: "2" }, 結果: { value: "11" } } },
+      { id: "102" },
+    ]);
+    expect(plan.tables[0].postImageRows).toEqual([
+      { id: "101", value: { 数値: { value: "2" }, 結果: { value: "11" }, 未指定: { value: "keep-a" } } },
+      { id: "102", value: { 数値: { value: "2" }, 結果: { value: "0" }, 未指定: { value: "keep-b" } } },
+    ]);
+    expect(plan.postImage.別表).toEqual({ value: [] });
+    expect(plan.postImage.親数値).toEqual({ value: "11" });
+  });
+
+  test.each([
+    ["一般述語0行", "PATCH SET 結果 = 1 WHERE 数値 = 999", snapshot()],
+    ["空table ALL ROWS", "PATCH SET 結果 = 1 ALL ROWS", snapshot([])],
+  ])("%s は no-op plan", (_label, operation, record) => {
+    const plan = buildApplyPatchPlan({ statement: statement(operation), snapshot: record, fieldInfos: fields });
+    expect(plan.tables[0].payloadRows).toEqual(plan.tables[0].snapshotRowIds.map((id) => ({ id })));
+  });
+
+  test("_rid 0行を ArgumentError にする", () => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1 WHERE _rid = '999'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY _rid 999 does not exist");
+  });
+
+  test("同一cell多重PATCHを拒否し、同一行別cellは許可する", () => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1 ALL ROWS; PATCH SET 結果 = 2 WHERE _rid = '101'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY patches cell 101.結果 more than once");
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1 WHERE _rid = '101'; PATCH SET 数値 = 2 WHERE _rid = '101'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).not.toThrow();
+  });
+
+  test("snapshot内の重複/未採番ridを拒否する", () => {
+    const duplicate = snapshot([
+      { id: "101", value: { 数値: { value: "1" } } },
+      { id: "101", value: { 数値: { value: "2" } } },
+    ]);
+    expect(() => buildApplyPatchPlan({ statement: statement("PATCH SET 結果 = 1 ALL ROWS"), snapshot: duplicate, fieldInfos: fields }))
+      .toThrow("duplicate _rid 101");
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1 ALL ROWS"),
+      snapshot: snapshot([{ id: "", value: {} }]), fieldInfos: fields,
+    })).toThrow("row without _rid");
+  });
+});
+
+describe("resolveApplyPatchMetadata", () => {
+  test("別table child・非writable/system代入を records API 前契約として拒否する", () => {
+    expect(() => resolveApplyPatchMetadata(statement("PATCH SET 別子 = 'x' ALL ROWS"), fields))
+      .toThrow("does not belong to subtable テーブル");
+    const nonWritable = [...fields, { code: "計算", label: "計算", fieldType: "CALC", writable: false, inSubtable: true, subtableCode: "テーブル" }];
+    expect(() => resolveApplyPatchMetadata(statement("PATCH SET 計算 = 1 ALL ROWS"), nonWritable))
+      .toThrow("is not writable (CALC)");
+    expect(() => resolveApplyPatchMetadata(statement("PATCH SET _rid = 'x' ALL ROWS"), fields))
+      .toThrow("is a system field");
+  });
+});

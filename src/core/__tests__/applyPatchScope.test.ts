@@ -69,9 +69,7 @@ describe("assertApplyV1Scope", () => {
     )).toThrow(/UnsupportedError: APPLY v1 scope does not support UPDATE \.\.\. FROM/);
   });
 
-  test.each(["", " VALIDATE ONLY", "EXPLAIN "])(
-    "executor は Phase 1 APPLY を API 0 回で停止する: %s",
-    async (mode) => {
+  test("EXPLAIN executor は Phase 2 でも APPLY を API 0 回で停止する", async () => {
       const calls = {
         getRecords: jest.fn(), openCursor: jest.fn(), postRecords: jest.fn(), putRecords: jest.fn(),
         deleteRecords: jest.fn(), getApps: jest.fn(), getFields: jest.fn(),
@@ -79,11 +77,9 @@ describe("assertApplyV1Scope", () => {
       };
       const client = calls as unknown as KintoneClient;
       const statement = sql("$id = 8", "PATCH SET 子 = 'x' ALL ROWS");
-      const text = mode === "EXPLAIN " ? `${mode}${statement}` : `${statement}${mode}`;
-      await expect(execute(text, client)).rejects.toThrow(
+      await expect(execute(`EXPLAIN ${statement}`, client)).rejects.toThrow(
         "UnsupportedError: APPLY execution is not enabled in this phase"
       );
       for (const fn of Object.values(calls)) expect(fn).not.toHaveBeenCalled();
-    }
-  );
+  });
 });

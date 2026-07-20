@@ -20,6 +20,14 @@ import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/bat
 import { requiresCompleteInput } from "./core/dmlGuard";
 import { assertApplyExecutionEnabled, assertApplyV1Scope } from "./core/applyPatchScope";
 import {
+  buildApplyPatchPlan,
+  collectApplySnapshotFields,
+  flattenSubtableSnapshotRow,
+  getApplyParentId,
+  resolveApplyPatchMetadata,
+} from "./core/applyPatchPlanner";
+import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
+import {
   fieldSemanticsEqual,
   resolveFieldSemantics,
   syntheticSemantics,
@@ -49,6 +57,7 @@ import {
   deleteToDeleteBatches,
   toKintoneValue,
   evalCaseWhenValue,
+  evaluateSubtableAssignmentValue,
   KintonePostParams,
   KintonePutParams,
   KintoneDeleteParams,
@@ -688,9 +697,12 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyV1Scope(stmt);
-  assertApplyExecutionEnabled(stmt);
+  if (!(stmt.type === "UPDATE" && stmt.applyBlocks?.length)) assertApplyExecutionEnabled(stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
+  if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
+    return executeUpdate(stmt, client, options, cacheContext);
+  }
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
     if (stmt.validationErrorTable) {
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
@@ -1352,7 +1364,9 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyV1Scope(resolvedStmt);
-  assertApplyExecutionEnabled(resolvedStmt);
+  if (!(resolvedStmt.type === "UPDATE" && resolvedStmt.applyBlocks?.length)) {
+    assertApplyExecutionEnabled(resolvedStmt);
+  }
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5499,6 +5513,9 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
+  if (stmt.applyBlocks?.length) {
+    return executeApplyPatchUpdate(stmt, client, cacheContext);
+  }
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos = await loadWritableTopLevelDmlFields(
       stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
@@ -5592,6 +5609,37 @@ async function executeUpdate(
   }
 
   return { type: "UPDATE", updatedCount: ids.length };
+}
+
+async function executeApplyPatchUpdate(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<UpdateResult> {
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const requestedId = getApplyParentId(stmt);
+  const response = await client.getRecords({
+    app: stmt.appId,
+    query: `$id = ${requestedId} limit 2`,
+    fields: [...fields],
+  });
+  if (response.records.length === 0) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} does not exist.`);
+  }
+  if (response.records.length !== 1) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} returned multiple records.`);
+  }
+  const actualId = Number(response.records[0]["$id"]?.value);
+  if (actualId !== requestedId) {
+    throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
+  }
+  requireRevision(response.records[0]);
+  const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
+  // Phase 2 は PUT draft の完全性まで検証するが mutation API へは接続しない。
+  applyPatchPlanToKintone(plan);
+  throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
 }
 
 async function executeUpdateFrom(
@@ -5913,7 +5961,7 @@ async function executeUpdateSubtable(
       if (a.field.startsWith("_")) {
         throw new Error(`サブテーブル UPDATE でシステム列「${a.field}」は更新できません`);
       }
-      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat, resolveFieldType) };
+      updates[a.field] = { value: evaluateSubtableAssignmentValue(a.value, t.flat, resolveFieldType) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -6012,16 +6060,12 @@ function expandRowsForSubtableDml(parents: KintoneRecord[], subtableCode: string
     for (let i = 0; i < tableRows.length; i++) {
       const row = tableRows[i];
       const flat: ProcessRow = {
+        ...flattenSubtableSnapshotRow(row, i),
         _pid: parentId,
-        _rid: row.id ?? "",
-        _idx: String(i),
       };
       for (const [k, v] of Object.entries(parent)) {
         if (k === subtableCode) continue;
         flat[`_p.${k}`] = normalizeUnknownToString(v?.value);
-      }
-      for (const [k, v] of Object.entries(row.value ?? {})) {
-        flat[k] = normalizeUnknownToString(v?.value);
       }
       out.push({ parent, parentId, parentRevision, rowIndex: i, rowId: row.id ?? "", row, flat });
     }
@@ -6110,18 +6154,6 @@ function buildSubtableReorderPutParams(
       },
     ],
   };
-}
-
-function evalAssignmentValueForSubtable(
-  value: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>["assignments"][number]["value"],
-  row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
-): string {
-  if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return numberLiteralText(value);
-  if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
-  throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
 function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number; raw?: string } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr }): string {

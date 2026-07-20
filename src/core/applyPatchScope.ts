@@ -58,8 +58,8 @@ export function assertApplyV1Scope(statement: Statement): void {
     if (!V1_CAPABILITIES.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
     if (operation.assignments.length === 0) unsupported("an empty PATCH operation in this phase");
     for (const assignment of operation.assignments) {
-      if (assignment.field.startsWith("_") || assignment.field.includes(".")) {
-        unsupported("system, parent, or qualified PATCH targets in this phase");
+      if (assignment.field.includes(".")) {
+        unsupported("parent or qualified PATCH targets in this phase");
       }
     }
     assertSafeApplyNode(operation.assignments, "PATCH assignments");
