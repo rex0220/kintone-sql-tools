@@ -6,7 +6,7 @@ import type {
 } from "../types/ast";
 
 export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -68,6 +68,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase10a: Object.freeze({ multipleParentPreflight: false, internalPreparedWrite: false, publicMultipleParentWrite: false }),
   phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false }),
   phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false }),
+  phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -181,7 +182,7 @@ export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement:
   }
 }
 
-/** Public mutation remains closed even after Phase 10c's internal writer exists. */
+/** Public multiple-parent mutation is available only from Phase 10d onward. */
 export function assertApplyPublicWriteScope(phase: ApplyExecutionPhase, statement: Statement): void {
   if (statement.type !== "UPDATE" || !statement.applyBlocks?.length
     || isSinglePositiveRecordIdWhere(statement.where)) return;

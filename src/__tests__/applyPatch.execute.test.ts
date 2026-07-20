@@ -1,5 +1,7 @@
 import { execute, executeBatch, type KintoneClient, type KintoneFieldInfo, type SelectResult } from "../execute";
 import type { KintonePutParams, KintoneRecord } from "../converter/dmlToKintone";
+import { ApplyWritePartialFailureError } from "../core/applyPatchExecutePrepared";
+import { buildBatchEnvelope } from "../output/batchEnvelope";
 
 const fieldInfos: KintoneFieldInfo[] = [
   { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
@@ -29,7 +31,7 @@ function parent(id = "8", childCount = 1): KintoneRecord {
 
 function makeClient(records: KintoneRecord[], infos = fieldInfos) {
   const getRecords = jest.fn(async () => ({ records }));
-  const putRecords = jest.fn(async () => undefined);
+  const putRecords = jest.fn(async (_params: KintonePutParams) => undefined);
   const openCursor = jest.fn(async () => { throw new Error("unexpected cursor"); });
   const postRecords = jest.fn(async () => { throw new Error("unexpected post"); });
   const deleteRecords = jest.fn(async () => { throw new Error("unexpected delete"); });
@@ -61,43 +63,146 @@ test("allowApplyMutation なしの mutation は API 前に fail-closed", async (
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
-test("Phase 10c: 複数親APPLY mutationは全GET/preflight後・public write直前で拒否", async () => {
+test("Phase 10d: 複数親mutationもallowApplyMutationなしならcoreでAPI 0 fail-closed", async () => {
   const mock = makeClient([parent(), parent("9")]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 状態='open' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: "apply-phase10d-no-capability" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(mock.getFields).not.toHaveBeenCalled();
+  expect(mock.getRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test.each([2, 100, 101])("Phase 10d: %i親APPLY mutationを1親1record・100件chunkで公開executeする", async (count) => {
+  const mock = makeClient(Array.from({ length: count }, (_, index) => parent(String(index + 1))));
   const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態 IN ('open','hold') "
     + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
   await expect(execute(multipleParentSql, mock.client, {
-    cacheContext: "apply-phase10a-api0", allowApplyMutation: true,
-  })).rejects.toThrow("UnsupportedError: APPLY Phase 10c public multiple-parent write is not connected");
-  expect(mock.getFields).toHaveBeenCalledTimes(1);
-  expect(mock.getRecords).toHaveBeenCalledWith({
-    app: 4221,
-    query: '状態 in ("open","hold") order by $id asc limit 101 offset 0',
-    fields: ["$id", "$revision", "親", "親数値", "作成者", "テーブル", "別表"],
+    cacheContext: `apply-phase10d-${count}`, allowApplyMutation: true,
+    dmlMaxRows: count, dmlMaxSubtableRows: count,
+  })).resolves.toMatchObject({
+    type: "UPDATE",
+    updatedCount: count,
+    successfulChunks: Math.ceil(count / 100),
+    successfulParents: count,
+    nonTransactional: true,
   });
-  for (const api of [mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+  expect(mock.getFields).toHaveBeenCalledTimes(1);
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    app: 4221,
+    query: `状態 in ("open","hold") order by $id asc limit ${count + 1} offset 0`,
+    fields: ["$id", "$revision", "親", "親数値", "作成者", "テーブル", "別表"],
+  }));
+  expect(mock.putRecords.mock.calls.map(([batch]) => batch.records.length))
+    .toEqual(count <= 100 ? [count] : [100, count - 100]);
+  expect(mock.putRecords.mock.calls.flatMap(([batch]) => batch.records)).toHaveLength(count);
+  for (const api of [mock.openCursor, mock.postRecords, mock.deleteRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
 });
 
-test("Phase 10c: 複数親APPLYはexecuteBatchでもGET後にerror envelope化しwrite 0", async () => {
+test("Phase 10d: 複数親confirm detailを全親・table別に集計し、prepare後write前に1回だけ確認する", async () => {
   const mock = makeClient([parent(), parent("9")]);
-  const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態='open' "
-    + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS); SELECT * FROM APP4221";
-  const result = await executeBatch(multipleParentSql, mock.client, {
-    cacheContext: "apply-phase10a-batch-api0", allowApplyMutation: true,
+  const confirm = jest.fn(async () => true);
+  await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 状態='open' "
+      + "APPLY テーブル (REMOVE ALL ROWS)",
+    mock.client,
+    { cacheContext: "apply-phase10d-confirm", allowApplyMutation: true, confirm, dmlMaxRows: 2 }
+  );
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm).toHaveBeenCalledWith(2, "UPDATE", expect.objectContaining({
+    applyDetail: {
+      kind: "APPLY_PATCH",
+      parentRows: 2,
+      changedSubtableRows: 2,
+      addedSubtableRows: 0,
+      tables: [{ table: "テーブル", patchRows: 0, appendRows: 0, removeRows: 2 }],
+      deletedRows: 2,
+      deletedParentRows: 2,
+      revisionRequired: true,
+      irreversible: true,
+      retryOnRevisionConflict: false,
+      nonTransactional: true,
+      partialSuccessPossible: true,
+    },
+  }));
+  expect(mock.getRecords.mock.invocationCallOrder[0]).toBeLessThan(confirm.mock.invocationCallOrder[0]);
+  expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.putRecords.mock.invocationCallOrder[0]);
+});
+
+test("Phase 10d: 2nd chunk conflictは成功済み100親を公開errorに保持しretryしない", async () => {
+  const mock = makeClient(Array.from({ length: 201 }, (_, index) => parent(String(index + 1))));
+  mock.putRecords
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error("ConflictError: revision mismatch"));
+  let caught: unknown;
+  try {
+    await execute(
+      "UPDATE APP4221 SET 親='after' WHERE 状態='open' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+      mock.client,
+      { cacheContext: "apply-phase10d-partial", allowApplyMutation: true, dmlMaxRows: 201, dmlMaxSubtableRows: 201 }
+    );
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(ApplyWritePartialFailureError);
+  expect(caught).toMatchObject({
+    partialSuccess: {
+      successfulChunks: 1,
+      successfulParents: 100,
+      failedChunkIndex: 1,
+      failedStage: "PUT_CHUNK",
+      nonTransactional: true,
+      retryAttempted: false,
+    },
   });
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).toHaveBeenCalledTimes(2);
+});
+
+test("Phase 10d: batch success envelopeへ進捗を伝播する", async () => {
+  const mock = makeClient([parent(), parent("9")]);
+  const result = await executeBatch(
+    "UPDATE APP4221 SET 親='after' WHERE 状態='open' APPLY テーブル (PATCH SET 子='patched' ALL ROWS)",
+    mock.client,
+    { cacheContext: "apply-phase10d-batch-success", allowApplyMutation: true, dmlMaxRows: 2 }
+  );
+  expect(buildBatchEnvelope(result).statements[0]).toMatchObject({
+    status: "success",
+    updatedCount: 2,
+    successfulChunks: 1,
+    successfulParents: 2,
+    nonTransactional: true,
+  });
+});
+
+test("Phase 10d: batch部分成功error envelopeへ成功済みprefixを伝播し後続文をfail-fastする", async () => {
+  const mock = makeClient(Array.from({ length: 201 }, (_, index) => parent(String(index + 1))));
+  mock.putRecords
+    .mockResolvedValueOnce(undefined)
+    .mockRejectedValueOnce(new Error("ConflictError: revision mismatch"));
+  const result = await executeBatch(
+    "UPDATE APP4221 SET 親='after' WHERE 状態='open' APPLY テーブル (PATCH SET 子='x' ALL ROWS); "
+      + "UPDATE APP4221 SET 親='later' WHERE $id=1",
+    mock.client,
+    { cacheContext: "apply-phase10d-batch-partial", allowApplyMutation: true, dmlMaxRows: 201, dmlMaxSubtableRows: 201 }
+  );
   expect(result.statements[0]).toMatchObject({
     status: "error",
     error: {
-      code: "UnsupportedError",
-      message: "UnsupportedError: APPLY Phase 10c public multiple-parent write is not connected",
+      code: "ApplyWritePartialFailureError",
+      partialSuccess: { successfulChunks: 1, successfulParents: 100, failedChunkIndex: 1 },
     },
   });
   expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
   expect(mock.getRecords).toHaveBeenCalledTimes(1);
-  for (const api of [mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
-    expect(api).not.toHaveBeenCalled();
-  }
+  expect(mock.putRecords).toHaveBeenCalledTimes(2);
+  expect(buildBatchEnvelope(result).statements[0]).toMatchObject({
+    error: { partialSuccess: { successfulParents: 100, retryAttempted: false } },
+  });
 });
 
 test("Phase 10b: 複数親VALIDATE ONLYは全親のapply/guards/validationを集計しwrite 0", async () => {

@@ -65,6 +65,9 @@ function toMutationSummary(
   }
   if (result.type === "UPDATE") return {
     updatedCount: result.updatedCount,
+    ...(result.successfulChunks !== undefined ? { successfulChunks: result.successfulChunks } : {}),
+    ...(result.successfulParents !== undefined ? { successfulParents: result.successfulParents } : {}),
+    ...(result.nonTransactional !== undefined ? { nonTransactional: result.nonTransactional } : {}),
     ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
     ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
     ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),

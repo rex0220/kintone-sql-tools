@@ -28,6 +28,12 @@ import {
   resolveApplyPatchMetadata,
 } from "./core/applyPatchPlanner";
 import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
+import {
+  ApplyWritePartialFailureError,
+  executePreparedApplyWrite,
+  type ApplyWriteFailureDetail,
+  type ApplyWriteProgress,
+} from "./core/applyPatchExecutePrepared";
 import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
 import {
   fieldSemanticsEqual,
@@ -329,6 +335,10 @@ export interface InsertResult {
 export interface UpdateResult {
   type: "UPDATE";
   updatedCount: number;
+  /** B44 multiple-parent APPLY progress. Absent for ordinary and single-parent UPDATE. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -460,10 +470,13 @@ export interface ApplyConfirmDetail {
     readonly removeRows: number;
   }[];
   readonly deletedRows: number;
-  readonly deletedParentRows: 0 | 1;
+  readonly deletedParentRows: number;
   readonly revisionRequired: true;
   readonly irreversible: true;
   readonly retryOnRevisionConflict: false;
+  /** Present for multiple-parent APPLY: later PUT chunks can fail after an earlier prefix committed. */
+  readonly nonTransactional?: true;
+  readonly partialSuccessPossible?: true;
 }
 
 // ============================================================
@@ -764,7 +777,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase10a", stmt);
-  assertApplyExecutionScope("phase10c", stmt);
+  assertApplyExecutionScope("phase10d", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1074,6 +1087,8 @@ export interface BatchExecuteOptions extends ExecuteOptions {
 export interface BatchStatementError {
   code: string;
   message: string;
+  /** Already committed prefix of a non-transactional APPLY statement. */
+  partialSuccess?: ApplyWriteFailureDetail;
 }
 
 function appendValidationErrors(
@@ -1366,7 +1381,7 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyScope("phase10a", resolvedStmt);
-  assertApplyExecutionScope("phase10c", resolvedStmt);
+  assertApplyExecutionScope("phase10d", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -1572,6 +1587,9 @@ async function runWithDeadline<T>(
  * reject するため、オブジェクト形式も解釈する（String(e) だと "[object Object]" になる）
  */
 function toBatchStatementError(e: unknown): BatchStatementError {
+  if (e instanceof ApplyWritePartialFailureError) {
+    return { code: e.name, message: e.message, partialSuccess: e.partialSuccess };
+  }
   if (e instanceof Error) {
     const name = e.name !== "Error" ? e.name : null;
     return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
@@ -5763,7 +5781,7 @@ async function executeMultipleParentApplyPreflight(
   options: ExecuteOptions,
   cacheContext: string,
   statementNumber: number
-): Promise<DmlValidationResult> {
+): Promise<UpdateResult | DmlValidationResult> {
   const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
   const dmlMaxSubtableRows = resolveApplyGuardLimit(
     options.dmlMaxSubtableRows,
@@ -5798,10 +5816,67 @@ async function executeMultipleParentApplyPreflight(
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  // Phase 10c implements executePrepared internally. Public routing remains
-  // deliberately disconnected until Phase 10d.
-  assertApplyPublicWriteScope("phase10c", stmt);
-  throw new Error("InternalError: unreachable APPLY Phase 10c public write gate");
+  assertApplyPublicWriteScope("phase10d", stmt);
+  if (options.confirm) {
+    const applyDetail = buildMultipleParentApplyConfirmDetail(prepared);
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+  return executePreparedApplyWrite(prepared, client);
+}
+
+function buildMultipleParentApplyConfirmDetail(prepared: PreparedApplyWrite): ApplyConfirmDetail {
+  type TableCounts = { table: string; patchRows: number; appendRows: number; removeRows: number };
+  const tables = new Map<string, TableCounts>();
+  let addedSubtableRows = 0;
+  let deletedRows = 0;
+  let deletedParentRows = 0;
+
+  for (const plan of prepared.plans) {
+    let parentHasDeletes = false;
+    for (const table of plan.tables) {
+      const counts = tables.get(table.table) ?? {
+        table: table.table,
+        patchRows: 0,
+        appendRows: 0,
+        removeRows: 0,
+      };
+      const appendRows = table.operations.reduce(
+        (sum, operation) => sum + (operation.kind === "APPEND" ? operation.addedRows : 0),
+        0
+      );
+      const removeRows = table.deletedRows;
+      counts.patchRows += table.changedSubtableRows - appendRows - removeRows;
+      counts.appendRows += appendRows;
+      counts.removeRows += removeRows;
+      tables.set(table.table, counts);
+      addedSubtableRows += appendRows;
+      deletedRows += removeRows;
+      parentHasDeletes ||= removeRows > 0;
+    }
+    if (parentHasDeletes) deletedParentRows += 1;
+  }
+
+  return {
+    kind: "APPLY_PATCH",
+    parentRows: prepared.guards.parentRows,
+    changedSubtableRows: prepared.guards.subtableRows,
+    addedSubtableRows,
+    tables: [...tables.values()],
+    deletedRows,
+    deletedParentRows,
+    revisionRequired: true,
+    irreversible: true,
+    retryOnRevisionConflict: false,
+    nonTransactional: true,
+    partialSuccessPossible: true,
+  };
 }
 
 function materializePreparedApplyValidation(

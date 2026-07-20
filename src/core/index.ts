@@ -15,6 +15,8 @@ export { explainNeedsAppMetadata, whereNeedsFieldMetadata } from "./explainMetad
 export type { CompareMode, ResolvedFieldSemantics } from "./fieldSemantics";
 export type { ProcessStatusState } from "./processStatus";
 export { parseNumberPrecisionSettings, exactDecimalDigitCounts } from "./numberPrecision";
+export { ApplyWritePartialFailureError } from "./applyPatchExecutePrepared";
+export type { ApplyWriteProgress, ApplyWriteFailureDetail } from "./applyPatchExecutePrepared";
 export type { NumberPrecision, NumberRoundingMode, RawNumberPrecisionSettings } from "./numberPrecision";
 
 export type {
@@ -25,6 +27,7 @@ export type {
   ExecuteResult,
   ExecuteMetrics,
   SelectResult,
+  UpdateResult,
   UpsertResult,
   AssertResult,
   DmlValidationResult,

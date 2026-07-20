@@ -45,3 +45,38 @@ test("既存 VALIDATION result set は apply/guards key を追加しない", () 
   expect(result).not.toHaveProperty("apply");
   expect(result).not.toHaveProperty("guards");
 });
+
+test("複数親 APPLY UPDATE の成功進捗を statement summary へ伝播する", () => {
+  const batch = {
+    ok: true,
+    statementCount: 1,
+    statements: [{
+      index: 0, type: "UPDATE", status: "success",
+      result: {
+        type: "UPDATE", updatedCount: 101,
+        successfulChunks: 2, successfulParents: 101, nonTransactional: true,
+      },
+    }],
+  } as unknown as BatchExecuteResult;
+  expect(buildBatchEnvelope(batch).statements[0]).toMatchObject({
+    updatedCount: 101,
+    successfulChunks: 2,
+    successfulParents: 101,
+    nonTransactional: true,
+  });
+});
+
+test("既存 UPDATE は APPLY progress key を追加しない", () => {
+  const batch = {
+    ok: true,
+    statementCount: 1,
+    statements: [{
+      index: 0, type: "UPDATE", status: "success",
+      result: { type: "UPDATE", updatedCount: 1 },
+    }],
+  } as unknown as BatchExecuteResult;
+  const statement = buildBatchEnvelope(batch).statements[0];
+  expect(statement).not.toHaveProperty("successfulChunks");
+  expect(statement).not.toHaveProperty("successfulParents");
+  expect(statement).not.toHaveProperty("nonTransactional");
+});
