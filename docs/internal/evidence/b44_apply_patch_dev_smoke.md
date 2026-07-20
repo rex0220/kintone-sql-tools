@@ -73,3 +73,16 @@ v2 の各機能を CLI から実行（複数親は Phase 10d で実証済み・�
 | V5 | **多値 APPLY**（MULTI_SELECT） | `SET 金額=9999 … APPLY 複数選択 (ADD 'M3'; REMOVE 'M1')`＝`["M1","M2"]`→`["M2","M3"]`（M1 除去・M3 末尾・親 SET と1 PUT 同居） |
 
 `_idx` セレクタ・EXPECT ROWS は unit/統合テストで検証済み（実機は SUBTABLE 行の位置指定・件数表明で機能）。CLI で v2 全機能が開通（plugin=16c・MCP=fail-closed 維持）。
+
+## Phase 17a 自動回帰（2026-07-21・v2 全実装後）
+
+v2 の全機能フェーズ（10a〜16d）実装完了後の自動ゲート。
+
+| ゲート | 結果 |
+|---|---|
+| `npm test` | 101 suites / 2,456 tests green（通常 99+2,431・subprocess 2+25） |
+| 全4面ビルド（plugin/cli/mcp/mcpb） | 成功（`ksql-plugin-v3.8.0.zip` 含む） |
+| `tsc --noEmit` | 総10件＝すべて既存 `desktop.ts`（DOM 型・B44 由来 0 件・baseline どおり） |
+| `mcp:smoke` / `mcp:pack-smoke` | ok（APPLY VALIDATE ONLY 許可・mutation fail-closed・drift guard） |
+
+v2 累積機能: 複数親（10・100親/chunk・部分成功）・`_idx`（11）・EXPECT ROWS（12）・INSERT 初期行（13）・UPSERT insert/update 分岐（14）・多値 ADD/REMOVE（15）。面: CLI/plugin 開通（16b/16c）・MCP 全経路 fail-closed（16d）。版数 3.8.0。
