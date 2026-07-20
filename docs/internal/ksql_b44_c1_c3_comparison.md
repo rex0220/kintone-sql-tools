@@ -231,6 +231,28 @@ VALIDATE ONLY;
 3. **v1.2**: `REMOVE`（削除内訳を表示・承認できる CLI/プラグインのみ）。
 4. **v2**: INSERT 初期行・UPSERT 分岐・複数親・`_idx`・一般述語・期待件数句。
 
+## 8. 導入語の再検討 — `APPLY SUBTABLE` の `SUBTABLE` は不要（2026-07-20・ユーザー指摘）
+
+**結論: `APPLY <フィールドコード> ( … )` を採用**（`SUBTABLE` noun を落とす）。
+
+1. **解析上不要**: soft keyword `APPLY` ＋識別子＋ `(` の3トークン先読みで確定（KLIKE・B42 `SUMMARY`・`GROUP_CONCAT` と同じ手法）。出現位置も親 WHERE 消費後の文末尾で固定。
+2. **型検証は実行時で一貫**: kSQL のパーサはメタデータ非依存が既存方針（DML 対象の存在・型チェックは execute 側＝`assertWritableTopLevelDmlFields` 等）。`APPLY x` の x が集合値フィールドでなければ ArgumentError（fail-closed）。仮想テーブル `APP100$明細` も noun を書かない前例。
+3. **`SUBTABLE` を残す利点は自己文書性のみ**（読者への明示・SQL Server `CROSS APPLY` との混同回避）。技術的必然はない。
+4. **noun を外す方が応用に有利**: APPLY の本質は「レコード内の**集合値フィールド**への変更計画の宣言」。第2ターゲットとして**複数値フィールド**（CHECK_BOX/MULTI_SELECT/USER_SELECT/ORGANIZATION_SELECT/GROUP_SELECT）の要素パッチが現実的:
+
+   ```sql
+   UPDATE APP100 SET 状態 = '対応中' WHERE $id = 7
+   APPLY 複数選択 (
+     ADD '重要';
+     REMOVE '新規'
+   )
+   ```
+
+   - 現行は `SET タグ = ARRAY('A','B')` の**全置換のみ**で「既存を保持して1要素追加」が書けない（読み取り→再構築が必要）＝タグ運用の実需。スナップショット意味論・post-image 検証（選択肢実在チェック＝P2a の optionOrder 検証を流用）・EXPECT ROWS もそのまま適用可。行 ID が無い分サブテーブルより単純（集合 ADD/REMOVE・重複 ADD は no-op か ArgumentError を仕様点に）。
+   - 動詞でサブ文法を分離: サブテーブル=`PATCH/APPEND/REMOVE WHERE`・多値=`ADD '値'`/`REMOVE '値'`（共有する `REMOVE` は後続トークン WHERE/文字列で区別）。動詞集合×フィールド型の整合は実行時検証。
+   - noun 方式だと拡張のたびにキーワードが増える（`APPLY MULTISELECT`?）。**一般形 `APPLY <field> (動詞…)` なら v1 サブテーブル限定→後方互換で拡張**。
+   - FILE（添付）は現行 kSQL が書き込み対象外のため当面対象外。
+
 ### Claude の裏取りメモ
 
 サンプリングした引用（`_rid` 条件必須 [execute.ts:5729](../../src/execute.ts#L5729)・VALIDATE ONLY 拒否 [parser.ts:2452](../../src/parser/parser.ts#L2452)・`_idx` 既存 0-based [subtableAdapter.ts:28](../../src/converter/subtableAdapter.ts#L28)・確認件数=子行数 [execute.ts:5757](../../src/execute.ts#L5757)・UPDATE は `$id` のみ取得/100 件チャンク/revision 無し [dmlToKintone.ts:149-168](../../src/converter/dmlToKintone.ts#L149-L168)）は**全て一致**。特に P1-1 は本文書 §3.1「既存文法をそのまま流用」・§4「実装規模: 中」の根拠を直接崩しており、**§4 の C3 実装規模は「中〜大」（合成プランナー・post-image 検証・ブロックパーサ新設）へ訂正**する。C3 推奨自体は覆らない（C1 との相対比較は不変＝C1 でも同じプランナーが必要になるため）。
