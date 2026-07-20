@@ -18,6 +18,7 @@ import {
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
+import type { Statement } from "../types/ast";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import { isImportCapabilityGateError } from "../import/importGateError";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
@@ -321,6 +322,15 @@ function toDmlValidationPayload(result: DmlValidationResult) {
   };
 }
 
+/** APPLY を持ち得る文種を一箇所で列挙し、将来の UPSERT 分岐追加も fail-closed にする。 */
+export function statementHasApplyBlocks(statement: Statement): boolean {
+  const target = statement.type === "EXPLAIN" ? statement.query : statement;
+  if (target.type !== "UPDATE" && target.type !== "INSERT" && target.type !== "UPSERT") return false;
+  const candidate = target as unknown as Record<string, unknown>;
+  return ["applyBlocks", "onInsertApplyBlocks", "onUpdateApplyBlocks"]
+    .some((key) => Array.isArray(candidate[key]) && candidate[key].length > 0);
+}
+
 function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertResult | DmlValidationResult>) {
   if (result.type === "INSERT") {
     return {
@@ -497,9 +507,8 @@ export function createKsqlMcpTools(
     const appBindings = [...normalized.appBindingByMappedApp.entries()]
       .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
     const hasApplyMutation = statements.some((statement) =>
-      statement.type === "UPDATE"
-      && (statement.applyBlocks?.length ?? 0) > 0
-      && statement.validateOnly !== true
+      statementHasApplyBlocks(statement)
+      && !("validateOnly" in statement && statement.validateOnly === true)
     );
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({

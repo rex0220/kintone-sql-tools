@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExecuteOptions, ExecuteResult, KintoneClient } from "../../core";
+import { parseSqlStatement, type ExecuteOptions, type ExecuteResult, type KintoneClient } from "../../core";
 import type { CreateKsqlRuntimeInput, KsqlRuntime, KsqlRuntimeServerOptions } from "../../node/runtime";
 import {
   createKsqlMcpTools,
   MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
+  statementHasApplyBlocks,
   toMcpImportError,
 } from "../tools";
 import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
@@ -528,6 +529,7 @@ describe("MCP tools", () => {
     const client = makeClient();
     client.getRecords = jest.fn(async () => ({ records: [] }));
     client.getFields = jest.fn(async () => []);
+    client.postRecords = jest.fn(async () => ({ ids: [] }));
     client.putRecords = jest.fn(async () => undefined);
     const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
         sql: input.sql,
@@ -593,6 +595,51 @@ describe("MCP tools", () => {
       dmlMaxSubtableRows: 999,
     })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
     expect(createRuntime).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.postRecords).not.toHaveBeenCalled();
+  });
+
+  test("B44 Phase 13a: statementHasApplyBlocks は UPDATE/INSERT を共通検出する", () => {
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPDATE APP1 SET 親='x' WHERE $id=1 APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "INSERT INTO APP1 (親) VALUES ('x') APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement("INSERT INTO APP1 (APPLY) VALUES ('x')"))).toBe(false);
+  });
+
+  test("B44 Phase 13a: INSERT APPLY の VALIDATE ONLY は read-only、EXPLAIN は許可する", async () => {
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client: makeClient(),
+      cacheContext: "mcp-insert-apply-read-only",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({ type: "SELECT", rows: [], columns: [], rowCount: 0 }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const sql = "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))";
+
+    await expect(tools.validate({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
+      isReadOnly: true,
+      canRunWithQueryTool: true,
+    });
+    await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toBeDefined();
+    await expect(tools.explain({ sql })).resolves.toBeDefined();
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(2);
   });
 
   test("B44 Phase 6: MCP APPLY schema は mutate 専用で、上限を上げても解禁しない", () => {

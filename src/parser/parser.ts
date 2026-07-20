@@ -2445,6 +2445,13 @@ export class Parser {
     // INSERT INTO ... SELECT ...
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
+      if (this.isApplyBlockStart()
+        || (this.prev().kind === TokenKind.IDENT
+          && this.prev().value.toUpperCase() === "APPLY"
+          && (this.peek().kind === TokenKind.IDENT || this.peek().kind === TokenKind.BIDENT)
+          && this.peekAt(1).kind === TokenKind.LPAREN)) {
+        throw new ParseError("INSERT INTO ... SELECT は APPLY に対応していません", this.prev());
+      }
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT はサブテーブル仮想テーブルでは未対応です", this.prev());
       }
@@ -2464,17 +2471,36 @@ export class Parser {
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
 
+    const applyBlocks: ApplyBlock[] = [];
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === TokenKind.IDENT
+      && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
+      throw new ParseError(
+        "APPLY SUBTABLE noun is not supported; use APPLY <field> (...)",
+        this.peek()
+      );
+    }
+    if (applyBlocks.length > 0 && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("APPLY ブロックの後に CHECK は指定できません", this.peek());
+    }
+    if (applyBlocks.length > 0 && (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("ON ERROR SKIP / REJECT LIMIT は APPLY と併用できません", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (this.isSoftKeyword("APPLY")) {
+      throw new ParseError("APPLY は CHECK / VALIDATE ONLY より前に指定してください", this.peek());
+    }
     if (subtableCode && checkGroups.checkGroups) {
       throw new ParseError("CHECK はサブテーブル INSERT に対応していません", this.prev());
     }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル INSERT に対応していません", this.prev());
     }
+    const apply = applyBlocks.length > 0 ? { applyBlocks } : {};
     return subtableCode
-      ? { type: "INSERT", appId, subtableCode, fields, values, ...checkGroups, ...validation }
-      : { type: "INSERT", appId, fields, values, ...checkGroups, ...validation };
+      ? { type: "INSERT", appId, subtableCode, fields, values, ...apply, ...checkGroups, ...validation }
+      : { type: "INSERT", appId, fields, values, ...apply, ...checkGroups, ...validation };
   }
 
   private parseUpsert(): UpsertStatement | UpsertSelectStatement {

@@ -1,5 +1,5 @@
 import { execute, executeBatch, type KintoneClient, type KintoneFieldInfo, type SelectResult } from "../execute";
-import type { KintonePutParams, KintoneRecord } from "../converter/dmlToKintone";
+import type { KintonePostParams, KintonePutParams, KintoneRecord } from "../converter/dmlToKintone";
 import { ApplyWritePartialFailureError } from "../core/applyPatchExecutePrepared";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 
@@ -33,7 +33,9 @@ function makeClient(records: KintoneRecord[], infos = fieldInfos) {
   const getRecords = jest.fn(async () => ({ records }));
   const putRecords = jest.fn(async (_params: KintonePutParams) => undefined);
   const openCursor = jest.fn(async () => { throw new Error("unexpected cursor"); });
-  const postRecords = jest.fn(async () => { throw new Error("unexpected post"); });
+  const postRecords = jest.fn(async (_params: KintonePostParams): Promise<{ ids: string[] }> => {
+    throw new Error("unexpected post");
+  });
   const deleteRecords = jest.fn(async () => { throw new Error("unexpected delete"); });
   const getFields = jest.fn(async () => infos);
   const getNumberPrecision = jest.fn(async () => ({ digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }));
@@ -53,6 +55,52 @@ function makeClient(records: KintoneRecord[], infos = fieldInfos) {
 
 const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
   "APPLY テーブル (PATCH SET 子 = 'patched' WHERE _rid = '101')";
+
+const insertApplySql = "INSERT INTO APP4221 (親) VALUES ('new') "
+  + "APPLY テーブル (APPEND (子) VALUES ('child'))";
+
+test("Phase 13a: INSERT APPLY mutation は公開 execute/batch で API 0 fail-closed", async () => {
+  const single = makeClient([]);
+  await expect(execute(insertApplySql, single.client, { cacheContext: "apply-phase13a-insert" }))
+    .rejects.toThrow("UnsupportedError: APPLY Phase 13a INSERT execution is not connected");
+  for (const api of [single.getFields, single.getRecords, single.openCursor, single.postRecords, single.putRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+
+  const batch = makeClient([]);
+  const result = await executeBatch(insertApplySql, batch.client, { cacheContext: "apply-phase13a-insert-batch" });
+  expect(result.statements[0]).toMatchObject({
+    status: "error",
+    error: { message: "UnsupportedError: APPLY Phase 13a INSERT execution is not connected" },
+  });
+  for (const api of [batch.getFields, batch.getRecords, batch.openCursor, batch.postRecords, batch.putRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+});
+
+test("Phase 13a: APPLY なし INSERT の既存 POST 経路は非回帰", async () => {
+  const mock = makeClient([]);
+  mock.postRecords.mockResolvedValue({ ids: ["1"] });
+  await expect(execute(
+    "INSERT INTO APP4221 (親) VALUES ('new')",
+    mock.client,
+    { cacheContext: "apply-phase13a-plain-insert" }
+  )).resolves.toMatchObject({ type: "INSERT", insertedCount: 1 });
+  expect(mock.postRecords).toHaveBeenCalledTimes(1);
+});
+
+test("Phase 13a: INSERT APPLY VALIDATE ONLY は read-only で mutation API 0", async () => {
+  const mock = makeClient([]);
+  await expect(execute(
+    `${insertApplySql} VALIDATE ONLY`,
+    mock.client,
+    { cacheContext: "apply-phase13a-insert-validate" }
+  )).resolves.toMatchObject({ type: "VALIDATION" });
+  expect(mock.getFields).toHaveBeenCalledTimes(1);
+  for (const api of [mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+});
 
 test("allowApplyMutation なしの mutation は API 前に fail-closed", async () => {
   const mock = makeClient([parent()]);

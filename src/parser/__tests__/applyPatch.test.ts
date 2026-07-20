@@ -105,3 +105,52 @@ describe("UPDATE APPLY parser", () => {
     });
   });
 });
+
+describe("INSERT APPLY parser", () => {
+  test("VALUES 後の APPEND を AST に保持し validation suffix を後置できる", () => {
+    const stmt = parseSqlStatement(
+      "INSERT INTO APP4221 (親) VALUES ('x'), ('y') "
+      + "APPLY テーブル (APPEND (子, 数値) VALUES ('a', 1), ('b', 2)) VALIDATE ONLY"
+    );
+    expect(stmt).toMatchObject({
+      type: "INSERT",
+      values: expect.any(Array),
+      validateOnly: true,
+      applyBlocks: [{
+        field: "テーブル",
+        operations: [{ kind: "APPEND", fields: ["子", "数値"], values: expect.any(Array) }],
+      }],
+    });
+  });
+
+  test("PATCH / REMOVE も将来構文として kind を失わず AST 化する", () => {
+    const stmt = parseSqlStatement(
+      "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル ("
+      + "PATCH SET 子='y' WHERE _idx=0 EXPECT ROWS 1; REMOVE ALL ROWS EXPECT ROWS 0)"
+    );
+    expect(stmt).toMatchObject({ applyBlocks: [{ operations: [
+      { kind: "PATCH", expectRows: { kind: "EXACT", count: 1 } },
+      { kind: "REMOVE", expectRows: { kind: "EXACT", count: 0 } },
+    ] }] });
+  });
+
+  test.each([
+    "INSERT INTO APP1 (親) VALUES ('x') VALIDATE ONLY APPLY 表 (APPEND (子) VALUES ('a'))",
+    "INSERT INTO APP1 (親) VALUES ('x') CHECK WHEN 親='x' THEN 'ng' APPLY 表 (APPEND (子) VALUES ('a'))",
+    "INSERT INTO APP1 (親) VALUES ('x') APPLY 表 (APPEND (子) VALUES ('a')) CHECK WHEN 親='x' THEN 'ng'",
+  ])("APPLY の句順違反を ParseError にする: %s", (sql) => {
+    expect(() => parseSqlStatement(sql)).toThrow(ParseError);
+  });
+
+  test("INSERT INTO ... SELECT と APPLY の併用を明示拒否する", () => {
+    expect(() => parseSqlStatement(
+      "INSERT INTO APP1 (親) SELECT 親 FROM APP2 APPLY 表 (APPEND (子) VALUES ('a'))"
+    )).toThrow("INSERT INTO ... SELECT は APPLY に対応していません");
+  });
+
+  test("APPLY は既存 INSERT の識別子として非回帰", () => {
+    const stmt = parseSqlStatement("INSERT INTO APP1 (APPLY) VALUES ('APPLY')");
+    expect(stmt).toMatchObject({ type: "INSERT", fields: ["APPLY"] });
+    expect(stmt).not.toHaveProperty("applyBlocks");
+  });
+});

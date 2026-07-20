@@ -621,6 +621,7 @@ export interface InsertStatement {
   subtableCode?: string | null;
   fields: string[];
   values: InsertRow[];
+  applyBlocks?: ApplyBlock[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
   onErrorSkip?: boolean;

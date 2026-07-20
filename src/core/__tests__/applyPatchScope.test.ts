@@ -6,7 +6,7 @@ import {
   assertApplyV1Scope,
   isSinglePositiveRecordIdWhere,
 } from "../applyPatchScope";
-import type { UpdateStatement } from "../../types/ast";
+import type { InsertStatement, UpdateStatement } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
 import { execute, type KintoneClient } from "../../execute";
@@ -249,5 +249,51 @@ describe("Phase 12 EXPECT ROWS syntax/execution capability", () => {
     expect(() => assertApplyScope("phase11", guardedPatch))
       .toThrow("UnsupportedError: APPLY phase11 scope does not support EXPECT ROWS");
     expect(() => parse(sql("$id=8", "APPEND (子) VALUES ('x') EXPECT ROWS 1"))).toThrow();
+  });
+});
+
+describe("Phase 13a INSERT syntax/execution capabilities", () => {
+  const parseInsert = (text: string): InsertStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as InsertStatement;
+  const insert = (operation: string, tail = "") =>
+    `INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (${operation}) ${tail}`;
+
+  test("INSERT APPLY は APPEND のみ syntax capability で許可する", () => {
+    const stmt = parseInsert(insert("APPEND (子) VALUES ('a'), ('b')"));
+    expect(() => assertApplyScope("phase13a", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase13a", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 13a INSERT execution is not connected");
+  });
+
+  test.each([
+    ["PATCH", "PATCH SET 子='x' ALL ROWS"],
+    ["REMOVE", "REMOVE ALL ROWS"],
+    ["EXPECT ROWS", "PATCH SET 子='x' ALL ROWS EXPECT ROWS 1"],
+    ["_idx", "REMOVE WHERE _idx=0"],
+  ])("INSERT APPLY の %s を scope で拒否する", (_label, operation) => {
+    expect(() => assertApplyScope("phase13a", parseInsert(insert(operation))))
+      .toThrow(/^UnsupportedError: APPLY phase13a scope does not support/);
+  });
+
+  test("VALIDATE ONLY は execution gate を通し、CHECK/ON ERROR は静的に閉じる", () => {
+    const validation = parseInsert(insert("APPEND (子) VALUES ('a')", "VALIDATE ONLY"));
+    expect(() => assertApplyScope("phase13a", validation)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase13a", validation)).not.toThrow();
+
+    const base = parseInsert(insert("APPEND (子) VALUES ('a')"));
+    for (const variant of [
+      { ...base, checkGroups: [{ rules: [] }] },
+      { ...base, onErrorSkip: true as const, errorTable: "#e" },
+    ]) {
+      expect(() => assertApplyScope("phase13a", variant)).toThrow(/^UnsupportedError: APPLY phase13a scope/);
+    }
+  });
+
+  test("Phase 12 は INSERT APPLY を先取りせず、APPLY なし INSERT は非回帰", () => {
+    expect(() => assertApplyScope("phase12", parseInsert(insert("APPEND (子) VALUES ('a')"))))
+      .toThrow("UnsupportedError: APPLY phase12 scope does not support INSERT in this phase");
+    const plain = parseInsert("INSERT INTO APP4221 (APPLY) VALUES ('x')");
+    expect(() => assertApplyScope("phase13a", plain)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase13a", plain)).not.toThrow();
   });
 });
