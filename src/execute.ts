@@ -6977,7 +6977,9 @@ export async function buildBatchExplainPlans(
   cacheContext = "batch-explain",
   maxRecords = 10_000,
   cursorMaxActive = 2,
-  enableImport = false
+  enableImport = false,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = 100
 ): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
@@ -6997,7 +6999,9 @@ export async function buildBatchExplainPlans(
         planStmt,
         analysis.statements[i],
         whereAnalysis.capabilities,
-        whereAnalysis.orderPlans
+        whereAnalysis.orderPlans,
+        dmlMaxRows,
+        dmlMaxSubtableRows
       ), cursorMaxActive);
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
@@ -7021,7 +7025,9 @@ function buildBatchStatementPlan(
   stmt: Statement,
   info: BatchAnalysis["statements"][number],
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = 100
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
@@ -7079,6 +7085,9 @@ function buildBatchStatementPlan(
       lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`));
     });
     return lines;
+  }
+  if (stmt.type === "UPDATE" && (stmt.applyBlocks?.length ?? 0) > 0) {
+    return buildExplainPlan(stmt, undefined, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows);
   }
   return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }

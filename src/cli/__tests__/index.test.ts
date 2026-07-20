@@ -189,6 +189,7 @@ describe("cli helpers", () => {
       "--yes",
       "--allow-without-where",
       "--dml-max-rows", "55",
+      "--dml-max-subtable-rows", "77",
       "--user-format", "name",
       "--array-format", "join",
       "-e", "SELECT * FROM APP100",
@@ -209,6 +210,7 @@ describe("cli helpers", () => {
     expect(args.yes).toBe(true);
     expect(args.allowWithoutWhere).toBe(true);
     expect(args.dmlMaxRows).toBe(55);
+    expect(args.dmlMaxSubtableRows).toBe(77);
     expect(args.userFormat).toBe("name");
     expect(args.arrayFormat).toBe("join");
     expect(args.executeSql).toContain("SELECT");
@@ -248,15 +250,27 @@ describe("cli helpers", () => {
     }
   });
 
-  test("buildReplExecArgv propagates temp-table-max-rows to console child exec", () => {
-    const base = parseArgs(["--console", "--temp-table-max-rows", "20000"]);
+  test("parseArgs validates dml-max-subtable-rows as positive safe integer", () => {
+    expect(parseArgs(["--dml-max-subtable-rows", "100", "-e", "SELECT 1"]).dmlMaxSubtableRows).toBe(100);
+    for (const invalid of ["0", "-1", "1.5", "abc", "9007199254740992"]) {
+      expect(() => parseArgs(["--dml-max-subtable-rows", invalid, "-e", "SELECT 1"]))
+        .toThrow(/--dml-max-subtable-rows must be a positive integer/);
+    }
+  });
+
+  test("buildReplExecArgv propagates temp/subtable guards to console child exec", () => {
+    const base = parseArgs(["--console", "--temp-table-max-rows", "20000", "--dml-max-subtable-rows", "77"]);
     const argv = buildReplExecArgv(base, "SELECT 1", false, null);
     const idx = argv.indexOf("--temp-table-max-rows");
     expect(idx).toBeGreaterThan(-1);
     expect(argv[idx + 1]).toBe("20000");
+    const subtableIdx = argv.indexOf("--dml-max-subtable-rows");
+    expect(subtableIdx).toBeGreaterThan(-1);
+    expect(argv[subtableIdx + 1]).toBe("77");
     // 未指定なら子実行 argv に現れない
     const argvDefault = buildReplExecArgv(parseArgs(["--console"]), "SELECT 1", false, null);
     expect(argvDefault).not.toContain("--temp-table-max-rows");
+    expect(argvDefault).not.toContain("--dml-max-subtable-rows");
   });
 
   test("parseArgs validates fetch-parallel range", () => {

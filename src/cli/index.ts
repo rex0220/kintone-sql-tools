@@ -129,6 +129,7 @@ Options:
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
   --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
+  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard (default: 100)
   --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
@@ -166,6 +167,8 @@ interface CliConfig {
     allowPhysicalAppRefs?: boolean;
     query?: {
       maxRecords?: number;
+      /** APPLY で変更できる子行数上限（既定 100）。 */
+      dmlMaxSubtableRows?: number;
       fetchParallel?: number;
       onLimit?: OnLimitMode;
       timeout?: number;
@@ -244,6 +247,7 @@ interface ParsedArgs {
   allowWithoutWhere: boolean;
   continueOnError: boolean;
   dmlMaxRows: number | null;
+  dmlMaxSubtableRows: number | null;
   maxConcurrent: number | null;
   cursorMaxActive: number | null;
   retry: number | null;
@@ -300,6 +304,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     allowWithoutWhere: false,
     continueOnError: false,
     dmlMaxRows: null,
+    dmlMaxSubtableRows: null,
     maxConcurrent: null,
     cursorMaxActive: null,
     retry: null,
@@ -485,6 +490,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
       continue;
     }
+    if (a === "--dml-max-subtable-rows") {
+      const n = Number(v);
+      if (!Number.isSafeInteger(n) || n <= 0) throw new Error("ArgumentError: --dml-max-subtable-rows must be a positive integer.");
+      out.dmlMaxSubtableRows = n;
+      i++;
+      continue;
+    }
     if (a === "--max-concurrent") {
       const n = Number(v);
       if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("ArgumentError: --max-concurrent must be an integer between 1 and 50.");
@@ -596,6 +608,16 @@ function normalizeUnique(values: string[]): string[] {
     out.push(v);
   }
   return out;
+}
+
+function formatApplyConfirmLines(detail: NonNullable<DmlConfirmContext["applyDetail"]>): string[] {
+  return [
+    `[APPLY PATCH Confirm] parents=${detail.parentRows} changedSubtableRows=${detail.changedSubtableRows}`,
+    ...detail.tables.map((table) => `table=${table.table} PATCH=${table.patchRows}`),
+    `deleted=${detail.deletedRows} revisionRequired=${detail.revisionRequired}`,
+    "revision conflict: no automatic retry",
+    "WARNING: this operation is irreversible.",
+  ];
 }
 
 function isSystemLikeFieldCode(code: string): boolean {
@@ -1076,6 +1098,7 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   pushOpt(argv, "--date-format", base.dateFormat);
   pushOpt(argv, "--attachment-format", base.attachmentFormat);
   pushOpt(argv, "--dml-max-rows", base.dmlMaxRows);
+  pushOpt(argv, "--dml-max-subtable-rows", base.dmlMaxSubtableRows);
   pushOpt(argv, "--max-concurrent", base.maxConcurrent);
   pushOpt(argv, "--cursor-max-active", base.cursorMaxActive);
   pushOpt(argv, "--retry", base.retry);
@@ -1452,6 +1475,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             `resolved-app-profiles=${lastResolvedProfiles}`,
             `allow-dml=${base.allowDml ? "on" : "off"}`,
             `dml-max-rows=${base.dmlMaxRows ?? "(default)"}`,
+            `dml-max-subtable-rows=${base.dmlMaxSubtableRows ?? "(default)"}`,
           ];
           process.stdout.write(`${lines.join("\n")}\n`);
           continue;
@@ -1630,6 +1654,8 @@ async function run(): Promise<number> {
   let isBatchSql = false;
   let batchContainsDml = false;
   let batchAnalysis: BatchAnalysis | null = null;
+  let containsApplyStatement = false;
+  let containsApplyMutation = false;
   let dryRunNeedsMetadata = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
@@ -1659,6 +1685,14 @@ async function run(): Promise<number> {
     const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     try {
       const statements = parseSqlStatements(sql, { import: importEnabled });
+      containsApplyStatement = statements.some((statement) =>
+        statement.type === "UPDATE" && (statement.applyBlocks?.length ?? 0) > 0
+      );
+      containsApplyMutation = statements.some((statement) =>
+        statement.type === "UPDATE"
+        && (statement.applyBlocks?.length ?? 0) > 0
+        && statement.validateOnly !== true
+      );
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
@@ -1741,6 +1775,10 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
+  const dmlMaxSubtableRows = args.dmlMaxSubtableRows
+    ?? envInt("KSQL_DML_MAX_SUBTABLE_ROWS")
+    ?? profile.query?.dmlMaxSubtableRows
+    ?? 100;
   const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
     parsedStmt !== null && typeof parsedStmt === "object" &&
     "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
@@ -2076,7 +2114,9 @@ async function run(): Promise<number> {
   if (isBatchSql && args.dryRun) {
     try {
       const plans = await buildBatchExplainPlans(
-        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive, Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0
+        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
+        Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
+        dmlMaxRows, dmlMaxSubtableRows
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2145,6 +2185,9 @@ async function run(): Promise<number> {
         ];
         process.stderr.write(`${lines.join("\n")}\n`);
       }
+      if (context?.applyDetail) {
+        process.stderr.write(`${formatApplyConfirmLines(context.applyDetail).join("\n")}\n`);
+      }
       if (yes) return true;
       if (args.console) return true;
       const label = sql?.replace(/\s+/g, " ").trim() ?? operation;
@@ -2177,6 +2220,11 @@ async function run(): Promise<number> {
         enableImport: importEnabled,
         importSource,
         supportsImportConfirmDetail: true,
+        ...(containsApplyStatement ? {
+          dmlMaxRows,
+          dmlMaxSubtableRows,
+        } : {}),
+        ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
         confirm: batchContainsDml
           ? async (count, operation, context) => {
             if (count > dmlMaxRows) {
@@ -2186,6 +2234,9 @@ async function run(): Promise<number> {
               const importDetail = context.importDetail;
               if (importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE") process.stderr.write(`【最重要警告】サブテーブル全置換・${importDetail.totalDeleteRows}行削除\n`);
               process.stderr.write(`[IMPORT ${importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE" ? "CSV" : "JSON"} Confirm] ${JSON.stringify(importDetail)}\n`);
+            }
+            if (context?.applyDetail) {
+              process.stderr.write(`${formatApplyConfirmLines(context.applyDetail).join("\n")}\n`);
             }
             return true;
           }
@@ -2197,6 +2248,7 @@ async function run(): Promise<number> {
     let result = args.dryRun
       ? await execute(`EXPLAIN ${sql}`, client, {
           maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
+          dmlMaxRows, dmlMaxSubtableRows,
         })
       : await execute(sql!, client, {
         maxRecords,
@@ -2208,6 +2260,11 @@ async function run(): Promise<number> {
         enableImport: importEnabled,
         importSource,
         supportsImportConfirmDetail: true,
+        ...(containsApplyStatement ? {
+          dmlMaxRows,
+          dmlMaxSubtableRows,
+        } : {}),
+        ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
       });
     // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）

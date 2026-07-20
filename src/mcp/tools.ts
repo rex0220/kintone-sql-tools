@@ -54,7 +54,7 @@ import {
 } from "./savedQueries";
 
 export type QueryInput = z.infer<typeof queryInputSchema>;
-export type MutateInput = z.infer<typeof mutateInputSchema>;
+export type MutateInput = z.input<typeof mutateInputSchema>;
 export type ExplainInput = z.infer<typeof explainInputSchema>;
 export type ValidateInput = z.infer<typeof validateInputSchema>;
 export type DescribeAppInput = z.infer<typeof describeAppInputSchema>;
@@ -477,6 +477,7 @@ export function createKsqlMcpTools(
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
   const validationContexts = new WeakMap<ValidationResult, ResolvedSqlContext>();
+  const applyMutationValidations = new WeakSet<ValidationResult>();
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
@@ -484,8 +485,9 @@ export function createKsqlMcpTools(
     // validate-all-first: 全文をパース・分類し、1文でも不正なら全体を拒否
     //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
     let analysis: ReturnType<typeof analyzeBatch>;
+    let statements: ReturnType<typeof parseSqlStatements>;
     try {
-      const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
+      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
@@ -493,6 +495,11 @@ export function createKsqlMcpTools(
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()]
       .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
+    const hasApplyMutation = statements.some((statement) =>
+      statement.type === "UPDATE"
+      && (statement.applyBlocks?.length ?? 0) > 0
+      && statement.validateOnly !== true
+    );
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
       index: s.index,
@@ -533,6 +540,7 @@ export function createKsqlMcpTools(
     if (analysis.statementCount > 1) {
       const result: BatchValidationResult = { ...common, batch: true };
       validationContexts.set(result, normalized.sqlContext);
+      if (hasApplyMutation) applyMutationValidations.add(result);
       return result;
     }
 
@@ -549,6 +557,7 @@ export function createKsqlMcpTools(
       appIds: s.appIds,
     };
     validationContexts.set(result, normalized.sqlContext);
+    if (hasApplyMutation) applyMutationValidations.add(result);
     return result;
   }
 
@@ -816,6 +825,9 @@ export function createKsqlMcpTools(
     const importOptions = importCapability(input);
 
     const validation = validated ?? await validate(input);
+    if (applyMutationValidations.has(validation)) {
+      throw new Error("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    }
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");
     }

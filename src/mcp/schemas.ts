@@ -89,6 +89,8 @@ export const mutateInputSchema = z.object({
     .describe('Must be the literal string "yes" to confirm execution.'),
   dmlMaxRows: z.number().int().positive()
     .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows by default, adjustable via tempTableMaxRows), so choose it by intended write count only."),
+  dmlMaxSubtableRows: z.number().int().positive().default(100)
+    .describe("APPLY changed-subtable-row cap (default 100). APPLY mutation is always rejected by v1 ksql_mutate; increasing this value does not enable it."),
   fetchParallel,
   tempTableMaxRows,
   timeout,

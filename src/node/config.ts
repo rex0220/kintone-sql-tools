@@ -29,6 +29,8 @@ export interface KsqlProfileConfig {
   allowPhysicalAppRefs?: boolean;
   query?: {
     maxRecords?: number;
+    /** APPLY で変更できる子行数上限（既定 100）。 */
+    dmlMaxSubtableRows?: number;
     fetchParallel?: number;
     onLimit?: OnLimitMode;
     timeout?: number;
@@ -156,6 +158,12 @@ export function validateKsqlConfig(config: KsqlConfig): KsqlConfig {
       const value = profile.query.cursorMaxActive;
       if (!Number.isSafeInteger(value) || value < 1 || value > 5) {
         throw argumentError(`query.cursorMaxActive for profile "${profileName}" must be an integer from 1 to 5.`);
+      }
+    }
+    if (profile.query?.dmlMaxSubtableRows !== undefined) {
+      const value = profile.query.dmlMaxSubtableRows;
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw argumentError(`query.dmlMaxSubtableRows for profile "${profileName}" must be a positive safe integer.`);
       }
     }
   }

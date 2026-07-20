@@ -71,6 +71,8 @@ function assertSchemas(tools) {
   assert("allowDml" in mutateProps, "ksql_mutate.allowDml input is missing.");
   assert("confirmText" in mutateProps, "ksql_mutate.confirmText input is missing.");
   assert("dmlMaxRows" in mutateProps, "ksql_mutate.dmlMaxRows input is missing.");
+  assert("dmlMaxSubtableRows" in mutateProps, "ksql_mutate.dmlMaxSubtableRows input is missing.");
+  assert(!("dmlMaxSubtableRows" in queryProps), "ksql_query must not expose dmlMaxSubtableRows.");
   assert(!("allowWithoutWhere" in mutateProps), "ksql_mutate must not expose allowWithoutWhere.");
 
   const saveQuery = getTool(tools, "ksql_save_query");
@@ -114,6 +116,7 @@ function assertToolDescriptions(tools) {
     // v1.7.0: temp ソースの読み取りは実体化 10,000 行で別建て
     // v1.11.0: 10,000 は既定値になり tempTableMaxRows で変更可
     "temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows)",
+    "APPLY mutation is always rejected by MCP v1",
   ];
   const query = getTool(tools, "ksql_query");
   for (const key of queryKeys) {
@@ -136,7 +139,7 @@ function assertToolDescriptions(tools) {
 function assertParamDescriptions(tools) {
   const described = {
     ksql_query: ["sql", "profile", "maxRecords", "fetchParallel", "onLimit", "tempTableMaxRows", "timeout", "continueOnError", "maxTotalRecords"],
-    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "fetchParallel", "tempTableMaxRows", "timeout", "dmlTotalMaxRows"],
+    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "dmlMaxSubtableRows", "fetchParallel", "tempTableMaxRows", "timeout", "dmlTotalMaxRows"],
   };
   for (const [toolName, params] of Object.entries(described)) {
     const props = getTool(tools, toolName).inputSchema?.properties ?? {};

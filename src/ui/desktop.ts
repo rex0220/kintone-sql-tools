@@ -31,6 +31,8 @@ import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
 import { isImportCapabilityGateError, toPluginImportError } from "./importGateError";
+import { buildApplyConfirmMessage } from "./applyConfirm";
+import { resolvePluginApplyOptions } from "./applySurface";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -1963,6 +1965,7 @@ async function batchConfirmDialog(
 ): Promise<boolean> {
   if (!context) return confirmDialog(count, operation);
   if (context.importDetail) return confirmImportDetailDialog(context.importDetail);
+  if (context.applyDetail) return confirmApplyDetailDialog(context.applyDetail);
   const label = context.statementType.startsWith("UPSERT")
     ? "登録/更新"
     : operation === "UPDATE" ? "更新"
@@ -2018,6 +2021,7 @@ async function runBatchSql(
 ): Promise<BatchRunOutcome> {
   const statements = parseSqlStatements(sql, { import: selectedImportSource !== null });
   const analysis = analyzeBatch(statements);
+  const applyOptions = resolvePluginApplyOptions(statements);
 
   // EXPLAIN ボタン経由、または先頭文が EXPLAIN のバッチ
   // → バッチ全体のプラン表示（metadata API のみ。2文目以降も実行しない）
@@ -2067,6 +2071,7 @@ async function runBatchSql(
     supportsImportConfirmDetail: true,
     enableImport: selectedImportSource !== null,
     importSource: selectedImportSource?.resolver,
+    ...applyOptions,
   });
 
   const statementSummary = buildBatchStatementSummary(batch, statements);
@@ -2187,10 +2192,12 @@ async function runSql(
     //（v1.9.0 仕様 §3.3。パース不能な入力はそのまま execute のエラー表示に任せる）
     let insertValuesConfirm: { count: number; appId: number | null } | null = null;
     let isDmlSql = false;
+    let applyOptions = {};
     let surfaceForcesOnLimitError = false;
     try {
       const stmt = parseSqlStatement(sql, { import: selectedImportSource !== null });
       isDmlSql = writesKintone(stmt);
+      applyOptions = resolvePluginApplyOptions([stmt]);
       surfaceForcesOnLimitError = isDmlSql || (
         "validateOnly" in stmt && stmt.validateOnly === true
       ) || stmt.type === "VALIDATE";
@@ -2223,6 +2230,7 @@ async function runSql(
       cursorMaxActive: latestPanelCursorMaxActive,
       enableImport: selectedImportSource !== null,
       importSource: selectedImportSource?.resolver,
+      ...applyOptions,
     });
 
     lastResult = result;
@@ -2836,6 +2844,7 @@ async function confirmDialog(
   context?: DmlConfirmContext
 ): Promise<boolean> {
   if (context?.importDetail) return confirmImportDetailDialog(context.importDetail);
+  if (context?.applyDetail) return confirmApplyDetailDialog(context.applyDetail);
   const label =
     operation === "UPDATE" ? "更新"
     : operation === "DELETE" ? "削除"
@@ -2844,6 +2853,10 @@ async function confirmDialog(
     `${count} 件のレコードを${label}します。よろしいですか？\nこの操作は元に戻せません。`,
     true
   );
+}
+
+function confirmApplyDetailDialog(detail: NonNullable<DmlConfirmContext["applyDetail"]>): Promise<boolean> {
+  return showConfirmDialog(buildApplyConfirmMessage(detail), true);
 }
 
 function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {

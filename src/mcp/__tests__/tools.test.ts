@@ -290,6 +290,22 @@ describe("MCP tools", () => {
     expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
   });
 
+  test("B44 Phase 6: validate/explain は APPLY AST を受理する", async () => {
+    const sql = "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)";
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "apply-explain-mcp",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({
+      type: "SELECT", columns: ["plan"], rows: [{ plan: "UPDATE APPLY PATCH" }], rowCount: 1,
+    }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    await expect(tools.validate({ sql })).resolves.toMatchObject({ statementType: "UPDATE", isDml: true });
+    await expect(tools.explain({ sql })).resolves.toMatchObject({ ok: true, rows: [{ plan: "UPDATE APPLY PATCH" }] });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(1);
+  });
+
   test("query: IMPORT ... VALIDATE ONLY は importSources 供給で capability gate を通す（回帰）", async () => {
     // 修正前は query の再パースに import フラグを渡しておらず「capability is disabled」で落ちていた。
     const executeSql = async (): Promise<ExecuteResult> => ({
@@ -485,6 +501,7 @@ describe("MCP tools", () => {
       "confirmText",
       "cursorMaxActive",
       "dmlMaxRows",
+      "dmlMaxSubtableRows",
       "dmlTotalMaxRows",
       "fetchParallel",
       "importSources",
@@ -499,13 +516,12 @@ describe("MCP tools", () => {
     expect("continueOnError" in mutateInputSchema.shape).toBe(false);
   });
 
-  test("B44 Phase 4: MCP mutate は allowApplyMutation を配線せず API 0 で fail-closed", async () => {
+  test("B44 Phase 6: MCP mutate は AST 判定で runtime/API 前に専用 fail-closed", async () => {
     const client = makeClient();
     client.getRecords = jest.fn(async () => ({ records: [] }));
     client.getFields = jest.fn(async () => []);
     client.putRecords = jest.fn(async () => undefined);
-    const tools = createKsqlMcpTools({ profile: "prod" }, {
-      createRuntime: async (_options, input) => ({
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
         sql: input.sql,
         profileName: "prod",
         client,
@@ -514,17 +530,38 @@ describe("MCP tools", () => {
         fetchParallel: 1,
         onLimit: "error",
         timeout: 30_000,
-      }),
+      }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime,
     });
     await expect(tools.mutate({
       sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 100,
-    })).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+      dmlMaxSubtableRows: 100,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
     expect(client.getFields).not.toHaveBeenCalled();
     expect(client.getRecords).not.toHaveBeenCalled();
     expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "SELECT 1; UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 999,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  test("B44 Phase 6: MCP APPLY schema は mutate 専用で、上限を上げても解禁しない", () => {
+    expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
+    const field = mutateInputSchema.shape.dmlMaxSubtableRows;
+    expect(field.safeParse(100).success).toBe(true);
+    for (const invalid of [0, -1, 1.5]) expect(field.safeParse(invalid).success).toBe(false);
+    expect(field.description).toContain("always rejected by v1 ksql_mutate");
   });
 
   test("tempTableMaxRows schema rejects 0 / negative / non-integer", () => {
