@@ -448,6 +448,7 @@ exports[`単文互換: UPDATE APPLY 1`] = `
           },
         },
       ],
+      "targetKind": "SUBTABLE",
     },
   ],
   "assignments": [

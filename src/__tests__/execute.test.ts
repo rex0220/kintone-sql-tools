@@ -251,6 +251,50 @@ test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単�
   expect(plain.postCalls).toHaveLength(1);
 });
 
+test("B44 Phase 15a: 多値 APPLY mutation はallowApplyMutation=trueでも単文・バッチともAPI 0で閉じ、SUBTABLE APPLYは既存gateを通る", async () => {
+  const multiSql = "UPDATE APP100 SET name='after' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')";
+
+  const single = makeClient();
+  await expect(execute(multiSql, single, {
+    cacheContext: "multi-apply-phase15a-single", allowApplyMutation: true,
+  })).rejects.toThrow("UnsupportedError: APPLY Phase 15a multi-value execution is not connected");
+  expect(single.getCalls).toHaveLength(0);
+  expect(single.postCalls).toHaveLength(0);
+  expect(single.putCalls).toHaveLength(0);
+
+  const batch = makeClient({ recordsByApp: { 200: [makeRecord({ value: "x" })] } });
+  await expect(executeBatch(
+    `SELECT value FROM APP200; ${multiSql}`,
+    batch,
+    { cacheContext: "multi-apply-phase15a-batch", allowApplyMutation: true }
+  )).rejects.toThrow("UnsupportedError: APPLY Phase 15a multi-value execution is not connected");
+  expect(batch.getCalls).toHaveLength(0);
+  expect(batch.postCalls).toHaveLength(0);
+  expect(batch.putCalls).toHaveLength(0);
+
+  const subtable = makeClient();
+  await expect(execute(
+    "UPDATE APP100 SET name='after' WHERE $id=1 APPLY rows (REMOVE ALL ROWS)",
+    subtable,
+    { cacheContext: "subtable-apply-phase15a-regression" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(subtable.getCalls).toHaveLength(0);
+});
+
+test("B44 Phase 15a: 多値 APPLY の EXPLAIN はrecords/mutation API 0でsyntax planを返す", async () => {
+  const client = makeClient({ fieldTypes: { name: "SINGLE_LINE_TEXT", tags: "MULTI_SELECT" } });
+  const result = await execute(
+    "EXPLAIN UPDATE APP100 SET name='after' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')",
+    client,
+    { cacheContext: "multi-apply-phase15a-explain" }
+  );
+  expect(result).toMatchObject({ type: "SELECT" });
+  expect(JSON.stringify(result)).toContain("tags (MULTI_VALUE)");
+  expect(client.getCalls).toHaveLength(0);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("B44 Phase 14b: UPSERT APPLY VALIDATE ONLY は照合後のcreate/update混在preparedを返しPOST/PUTしない", async () => {
   const existing = {
     "$id": { value: "9" },

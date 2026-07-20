@@ -4,6 +4,46 @@ import { ParseError } from "../parser";
 const prefix = "UPDATE APP4221 SET 親 = 'x' WHERE $id = 8 ";
 
 describe("UPDATE APPLY parser", () => {
+  test("ADD / 値REMOVEをmulti-value tagged blockとしてAST化し、行REMOVEは後続tokenで分岐する", () => {
+    const stmt = parseSqlStatement(`${prefix}APPLY 複数選択 (
+      ADD '重要'; REMOVE '新規'
+    ) APPLY テーブル (REMOVE WHERE _rid='101'; REMOVE ALL ROWS)`);
+    expect(stmt).toMatchObject({
+      applyBlocks: [
+        {
+          field: "複数選択",
+          targetKind: "MULTI_VALUE",
+          operations: [{ kind: "ADD", value: "重要" }, { kind: "REMOVE_VALUE", value: "新規" }],
+        },
+        {
+          field: "テーブル",
+          targetKind: "SUBTABLE",
+          operations: [
+            { kind: "REMOVE", selector: { kind: "WHERE" } },
+            { kind: "REMOVE", selector: { kind: "ALL_ROWS" } },
+          ],
+        },
+      ],
+    });
+  });
+
+  test.each([
+    "ADD '重要'; PATCH SET 子='x' ALL ROWS",
+    "REMOVE '新規'; REMOVE ALL ROWS",
+  ])("同一APPLY blockの行操作と多値操作の混在をParseErrorにする: %s", (operations) => {
+    expect(() => parseSqlStatement(`${prefix}APPLY 対象 (${operations})`))
+      .toThrow("1 つの APPLY ブロックに行操作と多値操作は混在できません");
+  });
+
+  test("ADDはsoft keywordのままフィールド名・aliasとして使える", () => {
+    expect(parseSqlStatement("UPDATE APP1 SET ADD = 'x' WHERE $id = 1")).toMatchObject({
+      type: "UPDATE", assignments: [{ field: "ADD" }],
+    });
+    expect(parseSqlStatement("SELECT ADD AS ADD FROM APP1 ADD")).toMatchObject({
+      type: "SELECT", from: { alias: "ADD" },
+    });
+  });
+
   test("PATCH / selector / EXPECT ROWS を AST に保持する", () => {
     const stmt = parseSqlStatement(`${prefix}APPLY テーブル (
       PATCH SET 子 = 'a', 数値 = 1 WHERE _rid = '101' EXPECT ROWS BETWEEN 1 AND 2;

@@ -626,6 +626,27 @@ describe("MCP tools", () => {
     expect(statementHasApplyBlocks(parseSqlStatement(
       "UPSERT INTO APP1 (APPLY) VALUES ('x') ON DUPLICATE (APPLY)"
     ))).toBe(false);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPDATE APP1 SET 親='x' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')"
+    ))).toBe(true);
+  });
+
+  test("B44 Phase 15a: MCP mutate は多値 APPLY をruntime/API前にfail-closedする", async () => {
+    const client = makeClient();
+    const createRuntime = jest.fn(async (): Promise<KsqlRuntime> => ({
+      sql: "", profileName: "prod", client, cacheContext: "mcp-multi-apply-phase15a",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY 複数選択 (ADD '重要'; REMOVE '新規')",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
   });
 
   test("B44 Phase 13a: INSERT APPLY の VALIDATE ONLY は read-only、EXPLAIN は許可する", async () => {

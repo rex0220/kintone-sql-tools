@@ -8,8 +8,8 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -154,6 +154,19 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     onErrorSkip: false,
     rejectLimit: false,
   }),
+  phase15a: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
 });
 
 const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
@@ -175,6 +188,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase14a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
   phase14b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
   phase14c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
+  phase15a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -247,6 +261,9 @@ function assertUpdateApplyOperations(
   for (const block of blocks) {
     for (const operation of block.operations) {
       if (!capabilities.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
+    }
+    assertApplyBlockOperationFamily(block);
+    for (const operation of block.operations) {
       if (operation.kind === "APPEND") {
         for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
         assertSafeApplyNode(operation.values, "APPEND values");
@@ -275,6 +292,40 @@ function assertUpdateApplyOperations(
         assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
       }
     }
+  }
+}
+
+function assertApplyBlockOperationFamily(block: ApplyBlock): void {
+  const hasSubtableOperation = block.operations.some((operation) =>
+    operation.kind === "PATCH" || operation.kind === "APPEND" || operation.kind === "REMOVE"
+  );
+  const hasMultiValueOperation = block.operations.some((operation) =>
+    operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"
+  );
+  if (hasSubtableOperation && hasMultiValueOperation) {
+    throw new Error("ArgumentError: APPLY block cannot mix row operations and multi-value operations.");
+  }
+  const expectedKind = hasMultiValueOperation ? "MULTI_VALUE" : "SUBTABLE";
+  if (block.targetKind !== expectedKind) {
+    throw new Error(`ArgumentError: APPLY block target kind ${String(block.targetKind)} does not match ${expectedKind} operations.`);
+  }
+}
+
+const MULTI_VALUE_FIELD_TYPES = new Set([
+  "MULTI_SELECT", "CHECK_BOX", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT",
+]);
+
+/** Phase 15b の metadata resolver が使う、target tagged union と field 型の拒否 matrix。 */
+export function assertApplyTargetFieldType(block: ApplyBlock, fieldType: string): void {
+  assertApplyBlockOperationFamily(block);
+  if (block.targetKind === "MULTI_VALUE") {
+    if (!MULTI_VALUE_FIELD_TYPES.has(fieldType)) {
+      throw new Error(`ArgumentError: APPLY multi-value operations require MULTI_SELECT, CHECK_BOX, USER_SELECT, ORGANIZATION_SELECT, or GROUP_SELECT target; ${block.field} is ${fieldType}.`);
+    }
+    return;
+  }
+  if (fieldType !== "SUBTABLE") {
+    throw new Error(`ArgumentError: APPLY row operations require a SUBTABLE target; ${block.field} is ${fieldType}.`);
   }
 }
 
@@ -356,6 +407,12 @@ export function isSinglePositiveRecordIdWhere(where: WhereExpr): boolean {
  */
 export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement: Statement): void {
   const capabilities = APPLY_EXECUTION_CAPABILITIES[phase];
+  const isValidationOnly = "validateOnly" in statement && statement.validateOnly === true;
+  if (statement.type !== "EXPLAIN"
+    && !isValidationOnly
+    && statementHasMultiValueApply(statement)) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} multi-value execution is not connected`);
+  }
   if (statement.type === "UPSERT"
     && (statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)) {
     if (statement.validateOnly !== true && !capabilities.upsertWrite) {
@@ -373,6 +430,18 @@ export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement:
   if (!capabilities.multipleParentPreflight && !isSinglePositiveRecordIdWhere(statement.where)) {
     throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} execution does not support multiple-parent APPLY`);
   }
+}
+
+export function statementHasMultiValueApply(statement: Statement): boolean {
+  const target = statement.type === "EXPLAIN" ? statement.query : statement;
+  const blocks = target.type === "UPDATE" || target.type === "INSERT"
+    ? target.applyBlocks ?? []
+    : target.type === "UPSERT"
+      ? [...(target.onInsertApplyBlocks ?? []), ...(target.onUpdateApplyBlocks ?? [])]
+      : [];
+  return blocks.some((block) => block.targetKind === "MULTI_VALUE"
+    || (block.operations as readonly ApplyOperation[])
+      .some((operation) => operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"));
 }
 
 /** Public multiple-parent mutation is available only from Phase 10d onward. */

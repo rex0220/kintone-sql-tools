@@ -3,6 +3,7 @@ import {
   assertApplyInternalWriteScope,
   assertApplyPublicWriteScope,
   assertApplyScope,
+  assertApplyTargetFieldType,
   assertApplyV1Scope,
   isSinglePositiveRecordIdWhere,
 } from "../applyPatchScope";
@@ -346,5 +347,53 @@ describe("Phase 14a UPSERT branch syntax/execution capabilities", () => {
     expect(() => assertApplyScope("phase13a", parseUpsert(upsert(
       "ON INSERT APPLY 表 (APPEND (子) VALUES ('a'))"
     )))).toThrow("UnsupportedError: APPLY phase13a scope does not support UPSERT in this phase");
+  });
+});
+
+describe("Phase 15a multi-value syntax/execution capabilities", () => {
+  const parseUpdate = (text: string): UpdateStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as UpdateStatement;
+  const update = (operations: string, tail = "") => parseUpdate(
+    `UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY 複数選択 (${operations}) ${tail}`
+  );
+
+  test("ADD/REMOVE_VALUEだけをMULTI_VALUE targetとして許可し、row targetとtagged unionで分ける", () => {
+    const multi = update("ADD '重要'; REMOVE '新規'");
+    expect(multi.applyBlocks?.[0]).toMatchObject({
+      targetKind: "MULTI_VALUE",
+      operations: [{ kind: "ADD" }, { kind: "REMOVE_VALUE" }],
+    });
+    expect(() => assertApplyScope("phase15a", multi)).not.toThrow();
+
+    const rows = parseUpdate(sql("$id=8", "PATCH SET 子='x' ALL ROWS; REMOVE WHERE 子='old'"));
+    expect(rows.applyBlocks?.[0]).toMatchObject({ targetKind: "SUBTABLE" });
+    expect(() => assertApplyScope("phase15a", rows)).not.toThrow();
+  });
+
+  test.each(["MULTI_SELECT", "CHECK_BOX", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"])(
+    "multi-value targetの5型matrixを許可する: %s",
+    (fieldType) => expect(() => assertApplyTargetFieldType(update("ADD 'x'").applyBlocks![0], fieldType)).not.toThrow()
+  );
+
+  test("型×動詞matrixはmulti op→SUBTABLEとrow op→multi-value型をArgumentErrorにする", () => {
+    expect(() => assertApplyTargetFieldType(update("REMOVE 'x'").applyBlocks![0], "SUBTABLE"))
+      .toThrow(/multi-value operations require/);
+    expect(() => assertApplyTargetFieldType(parseUpdate(sql("$id=8", "REMOVE ALL ROWS")).applyBlocks![0], "MULTI_SELECT"))
+      .toThrow(/row operations require a SUBTABLE/);
+  });
+
+  test("手組みASTでも行操作/値操作の混在をscopeで拒否する", () => {
+    const statement = update("ADD 'x'");
+    (statement.applyBlocks![0].operations as unknown[]).push({ kind: "REMOVE", selector: { kind: "ALL_ROWS" } });
+    expect(() => assertApplyScope("phase15a", statement))
+      .toThrow("ArgumentError: APPLY block cannot mix row operations and multi-value operations.");
+  });
+
+  test("multi-value mutation executionは閉じ、VALIDATE ONLYはgateを通し、SUBTABLE executionは非回帰", () => {
+    const mutation = update("ADD '重要'");
+    expect(() => assertApplyExecutionScope("phase15a", mutation))
+      .toThrow("UnsupportedError: APPLY Phase 15a multi-value execution is not connected");
+    expect(() => assertApplyExecutionScope("phase15a", update("REMOVE '新規'", "VALIDATE ONLY"))).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase15a", parseUpdate(sql("$id=8", "REMOVE ALL ROWS")))).not.toThrow();
   });
 });

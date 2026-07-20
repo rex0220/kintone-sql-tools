@@ -2800,10 +2800,26 @@ export class Parser {
       }
     }
     this.expect(TokenKind.RPAREN, "APPLY ブロックの末尾には ) が必要です");
-    return { field, operations };
+    const hasSubtableOperation = operations.some((operation) =>
+      operation.kind === "PATCH" || operation.kind === "APPEND" || operation.kind === "REMOVE"
+    );
+    const hasMultiValueOperation = operations.some((operation) =>
+      operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"
+    );
+    if (hasSubtableOperation && hasMultiValueOperation) {
+      throw new ParseError("1 つの APPLY ブロックに行操作と多値操作は混在できません", this.prev());
+    }
+    return hasMultiValueOperation
+      ? { field, targetKind: "MULTI_VALUE", operations: operations as Extract<ApplyBlock, { targetKind: "MULTI_VALUE" }>["operations"] }
+      : { field, targetKind: "SUBTABLE", operations: operations as Extract<ApplyBlock, { targetKind: "SUBTABLE" }>["operations"] };
   }
 
   private parseApplyOperation(): ApplyOperation {
+    if (this.isSoftKeyword("ADD")) {
+      this.advance();
+      const value = this.expect(TokenKind.STRING, "ADD の後には文字列リテラルが必要です").value;
+      return { kind: "ADD", value };
+    }
     if (this.isSoftKeyword("PATCH")) {
       this.advance();
       this.expect(TokenKind.SET, "PATCH の後には SET が必要です");
@@ -2832,11 +2848,14 @@ export class Parser {
     }
     if (this.isSoftKeyword("REMOVE")) {
       this.advance();
+      if (this.peek().kind === TokenKind.STRING) {
+        return { kind: "REMOVE_VALUE", value: this.advance().value };
+      }
       const selector = this.parseApplyRowSelector();
       const expectRows = this.parseExpectRowsGuard();
       return { kind: "REMOVE", selector, ...(expectRows ? { expectRows } : {}) };
     }
-    throw new ParseError("APPLY の操作には PATCH / APPEND / REMOVE が必要です", this.peek());
+    throw new ParseError("APPLY の操作には PATCH / APPEND / REMOVE / ADD が必要です", this.peek());
   }
 
   private parseApplyRowSelector(): RowSelector {

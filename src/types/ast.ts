@@ -784,12 +784,25 @@ export interface UpdateStatement {
   applyBlocks?: ApplyBlock[];
 }
 
-export interface ApplyBlock {
+export type ApplyBlock = SubtableApplyBlock | MultiValueApplyBlock;
+
+/** 行操作を持つ SUBTABLE 用 APPLY block。field 型との整合は metadata 解決時に検証する。 */
+export interface SubtableApplyBlock {
   field: string;
-  operations: ApplyOperation[];
+  targetKind: "SUBTABLE";
+  operations: SubtableApplyOperation[];
 }
 
-export type ApplyOperation = PatchOperation | AppendOperation | RemoveOperation;
+/** 集合要素操作を持つ複数値 field 用 APPLY block。field 型との整合は metadata 解決時に検証する。 */
+export interface MultiValueApplyBlock {
+  field: string;
+  targetKind: "MULTI_VALUE";
+  operations: MultiValueApplyOperation[];
+}
+
+export type ApplyOperation = SubtableApplyOperation | MultiValueApplyOperation;
+export type SubtableApplyOperation = PatchOperation | AppendOperation | RemoveOperation;
+export type MultiValueApplyOperation = AddOperation | RemoveValueOperation;
 
 export interface PatchOperation {
   kind: "PATCH";
@@ -810,6 +823,18 @@ export interface RemoveOperation {
   kind: "REMOVE";
   selector: RowSelector;
   expectRows?: ExpectRowsGuard;
+}
+
+/** 複数値 field の集合へ文字列値を追加する。実 mutation は Phase 15b で接続する。 */
+export interface AddOperation {
+  kind: "ADD";
+  value: string;
+}
+
+/** 複数値 field の集合から文字列値を除去する。行 REMOVE とは別 node。 */
+export interface RemoveValueOperation {
+  kind: "REMOVE_VALUE";
+  value: string;
 }
 
 export type RowSelector =

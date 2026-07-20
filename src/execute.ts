@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
@@ -820,8 +820,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase14c", stmt);
-  assertApplyExecutionScope("phase14c", stmt);
+  assertApplyScope("phase15a", stmt);
+  assertApplyExecutionScope("phase15a", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1231,7 +1231,7 @@ export async function executeBatch(
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
-  statements.forEach((statement) => assertApplyExecutionScope("phase14c", statement));
+  statements.forEach((statement) => assertApplyExecutionScope("phase15a", statement));
   if (options.allowApplyMutation !== true && statements.some((statement) =>
     statement.type === "UPSERT"
     && statement.validateOnly !== true
@@ -1433,8 +1433,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase14c", resolvedStmt);
-  assertApplyExecutionScope("phase14c", resolvedStmt);
+  assertApplyScope("phase15a", resolvedStmt);
+  assertApplyExecutionScope("phase15a", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -7262,7 +7262,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase14c", stmt);
+    assertApplyScope("phase15a", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -7605,7 +7605,10 @@ async function buildExplainWhereAnalysis(
       if (typed["type"] === "UPDATE" && (node as UpdateStatement).applyBlocks?.length) {
         const update = node as UpdateStatement;
         const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
-        resolveApplyPatchMetadata(update, fields);
+        // Phase 15a の multi-value block は構文だけを EXPLAIN し、metadata 診断は 15b で接続する。
+        if (update.applyBlocks!.every((block) => block.targetKind === "SUBTABLE")) {
+          resolveApplyPatchMetadata(update, fields);
+        }
       }
       await assertDmlWhereCapability(
         node as UpdateStatement | DeleteStatement,
@@ -8328,9 +8331,10 @@ function buildUpdateApplyPlan(
   dmlMaxSubtableRows: number
 ): string[] {
   const blocks = stmt.applyBlocks!;
-  const operations = blocks.flatMap((block) => block.operations);
+  const operations: ApplyOperation[] = blocks.flatMap((block) => [...block.operations] as ApplyOperation[]);
   const selectorKinds = operations.map((operation) => {
     if (operation.kind === "APPEND") return "APPEND";
+    if (operation.kind === "ADD" || operation.kind === "REMOVE_VALUE") return "VALUE_LITERAL";
     if (operation.selector.kind === "ALL_ROWS") return "ALL_ROWS";
     const where = operation.selector.where;
     return where.type === "BINARY" && where.op === "=" && where.left.type === "FIELD"
@@ -8346,7 +8350,7 @@ function buildUpdateApplyPlan(
     `target app:             APP${stmt.appId}`,
     `parent selector:        ${safeWhereToKintone(stmt.where)}`,
     "parent cardinality:     single",
-    `apply target:           ${blocks.map((block) => `${block.field} (SUBTABLE)`).join(" | ")}`,
+    `apply target:           ${blocks.map((block) => `${block.field} (${block.targetKind})`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,
     "snapshot evaluation:    yes",
