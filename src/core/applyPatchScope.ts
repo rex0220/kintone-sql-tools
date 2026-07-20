@@ -6,7 +6,7 @@ import type {
 } from "../types/ast";
 
 export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a";
-export type ApplyExecutionPhase = "phase10a" | "phase10b";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -61,10 +61,13 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
 });
 
 const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
-  readonly multipleParents: boolean;
+  readonly multipleParentPreflight: boolean;
+  readonly internalPreparedWrite: boolean;
+  readonly publicMultipleParentWrite: boolean;
 }>> = Object.freeze({
-  phase10a: Object.freeze({ multipleParents: false }),
-  phase10b: Object.freeze({ multipleParents: true }),
+  phase10a: Object.freeze({ multipleParentPreflight: false, internalPreparedWrite: false, publicMultipleParentWrite: false }),
+  phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false }),
+  phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -173,9 +176,29 @@ export function isSinglePositiveRecordIdWhere(where: WhereExpr): boolean {
 export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement: Statement): void {
   if (statement.type !== "UPDATE" || !statement.applyBlocks?.length) return;
   const capabilities = APPLY_EXECUTION_CAPABILITIES[phase];
-  if (!capabilities.multipleParents && !isSinglePositiveRecordIdWhere(statement.where)) {
-    throw new Error(`UnsupportedError: APPLY ${phase === "phase10a" ? "Phase 10a" : "Phase 10b"} execution does not support multiple-parent APPLY`);
+  if (!capabilities.multipleParentPreflight && !isSinglePositiveRecordIdWhere(statement.where)) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} execution does not support multiple-parent APPLY`);
   }
+}
+
+/** Public mutation remains closed even after Phase 10c's internal writer exists. */
+export function assertApplyPublicWriteScope(phase: ApplyExecutionPhase, statement: Statement): void {
+  if (statement.type !== "UPDATE" || !statement.applyBlocks?.length
+    || isSinglePositiveRecordIdWhere(statement.where)) return;
+  if (!APPLY_EXECUTION_CAPABILITIES[phase].publicMultipleParentWrite) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} public multiple-parent write is not connected`);
+  }
+}
+
+/** Only Phase 10c's internal prepared writer may cross the core write gate. */
+export function assertApplyInternalWriteScope(phase: ApplyExecutionPhase): void {
+  if (!APPLY_EXECUTION_CAPABILITIES[phase].internalPreparedWrite) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} internal prepared write is not available`);
+  }
+}
+
+function formatExecutionPhase(phase: ApplyExecutionPhase): string {
+  return `Phase ${phase.slice("phase".length)}`;
 }
 
 function assertSafeParentWhere(where: WhereExpr, multipleParents: boolean): void {

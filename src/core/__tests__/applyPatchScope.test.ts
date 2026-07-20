@@ -1,5 +1,7 @@
 import {
   assertApplyExecutionScope,
+  assertApplyInternalWriteScope,
+  assertApplyPublicWriteScope,
   assertApplyScope,
   assertApplyV1Scope,
   isSinglePositiveRecordIdWhere,
@@ -154,6 +156,14 @@ describe("Phase 10a syntax/execution capabilities", () => {
     expect(() => assertApplyExecutionScope("phase10a", stmt))
       .toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
     expect(() => assertApplyExecutionScope("phase10b", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase10c", stmt)).not.toThrow();
+    expect(() => assertApplyPublicWriteScope("phase10b", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 10b public multiple-parent write is not connected");
+    expect(() => assertApplyPublicWriteScope("phase10c", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 10c public multiple-parent write is not connected");
+    expect(() => assertApplyInternalWriteScope("phase10b"))
+      .toThrow("UnsupportedError: APPLY Phase 10b internal prepared write is not available");
+    expect(() => assertApplyInternalWriteScope("phase10c")).not.toThrow();
   });
 
   test.each([

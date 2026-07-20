@@ -1,5 +1,8 @@
 import type { ApplyPatchPlan, ApplyPatchTablePlan } from "../core/applyPatchPlanner";
+import type { PreparedApplyWrite } from "../core/applyPatchPrepare";
 import type { KintonePutParams, KintoneRecord } from "./dmlToKintone";
+
+const KINTONE_PUT_RECORD_LIMIT = 100;
 
 function argument(message: string): never {
   throw new Error(`ArgumentError: ${message}`);
@@ -41,6 +44,30 @@ export function applyPatchPlanToKintone(plan: ApplyPatchPlan): KintonePutParams 
 
 /** ファイル名と同じ短い公開名も提供する。 */
 export const applyPatchToKintone = applyPatchPlanToKintone;
+
+/**
+ * Fully prepared APPLY record materials -> kintone PUT batches.
+ *
+ * This boundary only chunks the immutable output of prepareApplyPatchWrite. It
+ * deliberately performs no planning, validation, re-fetch, or re-evaluation.
+ */
+export function applyPatchPlansToKintoneBatches(
+  prepared: PreparedApplyWrite
+): KintonePutParams[] {
+  if (prepared.records.length === 0) return [];
+  const app = prepared.plans[0]?.app;
+  if (!Number.isSafeInteger(app) || app <= 0 || prepared.plans.length !== prepared.records.length) {
+    return argument("prepared APPLY plans and records must have the same positive-app parent count.");
+  }
+  const batches: KintonePutParams[] = [];
+  for (let index = 0; index < prepared.records.length; index += KINTONE_PUT_RECORD_LIMIT) {
+    batches.push({
+      app,
+      records: prepared.records.slice(index, index + KINTONE_PUT_RECORD_LIMIT),
+    });
+  }
+  return batches;
+}
 
 function assertTablePlan(table: ApplyPatchTablePlan): void {
   const snapshotIds = assertUniqueIds(table.snapshotRowIds, `${table.table} snapshot`);

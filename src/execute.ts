@@ -18,7 +18,7 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
-import { assertApplyExecutionScope, assertApplyScope, isSinglePositiveRecordIdWhere } from "./core/applyPatchScope";
+import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
   collectApplySnapshotFields,
@@ -764,7 +764,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase10a", stmt);
-  assertApplyExecutionScope("phase10b", stmt);
+  assertApplyExecutionScope("phase10c", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1366,7 +1366,7 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyScope("phase10a", resolvedStmt);
-  assertApplyExecutionScope("phase10b", resolvedStmt);
+  assertApplyExecutionScope("phase10c", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5798,8 +5798,10 @@ async function executeMultipleParentApplyPreflight(
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  // Phase 10c connects executePrepared(prepared). Phase 10b deliberately stops here.
-  throw new Error("UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected");
+  // Phase 10c implements executePrepared internally. Public routing remains
+  // deliberately disconnected until Phase 10d.
+  assertApplyPublicWriteScope("phase10c", stmt);
+  throw new Error("InternalError: unreachable APPLY Phase 10c public write gate");
 }
 
 function materializePreparedApplyValidation(

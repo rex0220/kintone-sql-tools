@@ -1,5 +1,6 @@
 import type { ApplyPatchPlan } from "../../core/applyPatchPlanner";
-import { applyPatchPlanToKintone, requireRevision } from "../applyPatchToKintone";
+import type { PreparedApplyWrite } from "../../core/applyPatchPrepare";
+import { applyPatchPlansToKintoneBatches, applyPatchPlanToKintone, requireRevision } from "../applyPatchToKintone";
 import type { KintoneRecord } from "../dmlToKintone";
 
 function basePlan(): ApplyPatchPlan {
@@ -27,6 +28,27 @@ function basePlan(): ApplyPatchPlan {
   };
 }
 
+function prepared(count: number): PreparedApplyWrite {
+  const plans = Array.from({ length: count }, (_, index) => ({
+    ...basePlan(),
+    parentId: index + 1,
+    revision: index + 101,
+  }));
+  return {
+    plans,
+    records: plans.flatMap((plan) => applyPatchPlanToKintone(plan).records),
+    validations: [],
+    guards: {
+      revisionRequired: true,
+      parentRows: count,
+      dmlMaxRows: Math.max(1, count),
+      subtableRows: count,
+      dmlMaxSubtableRows: Math.max(1, count),
+      wouldExceed: false,
+    },
+  };
+}
+
 test("親SETとtableをrevision付きの単一 records[] elementへ合成する", () => {
   expect(applyPatchPlanToKintone(basePlan())).toEqual({
     app: 4221,
@@ -39,6 +61,20 @@ test("親SETとtableをrevision付きの単一 records[] elementへ合成する"
       },
     }],
   });
+});
+
+test.each([
+  [0, []],
+  [100, [100]],
+  [101, [100, 1]],
+  [201, [100, 100, 1]],
+] as const)("prepared %i親を最大100件のPUT batchへ変換する", (count, sizes) => {
+  const batches = applyPatchPlansToKintoneBatches(prepared(count));
+  expect(batches.map((batch) => batch.records.length)).toEqual(sizes);
+  expect(batches.flatMap((batch) => batch.records).map((record) => record.id))
+    .toEqual(Array.from({ length: count }, (_, index) => index + 1));
+  expect(batches.every((batch) => batch.app === 4221)).toBe(true);
+  expect(batches.flatMap((batch) => batch.records)).toHaveLength(count);
 });
 
 test.each([undefined, "", "0", 0, "x", 1.5])("requireRevision は欠落・非正整数を拒否する: %p", (value) => {

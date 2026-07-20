@@ -61,13 +61,13 @@ test("allowApplyMutation なしの mutation は API 前に fail-closed", async (
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
-test("Phase 10b: 複数親APPLY mutationは全GET/preflight後・write直前で拒否", async () => {
+test("Phase 10c: 複数親APPLY mutationは全GET/preflight後・public write直前で拒否", async () => {
   const mock = makeClient([parent(), parent("9")]);
   const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態 IN ('open','hold') "
     + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
   await expect(execute(multipleParentSql, mock.client, {
     cacheContext: "apply-phase10a-api0", allowApplyMutation: true,
-  })).rejects.toThrow("UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected");
+  })).rejects.toThrow("UnsupportedError: APPLY Phase 10c public multiple-parent write is not connected");
   expect(mock.getFields).toHaveBeenCalledTimes(1);
   expect(mock.getRecords).toHaveBeenCalledWith({
     app: 4221,
@@ -79,7 +79,7 @@ test("Phase 10b: 複数親APPLY mutationは全GET/preflight後・write直前で�
   }
 });
 
-test("Phase 10b: 複数親APPLYはexecuteBatchでもGET後にerror envelope化しwrite 0", async () => {
+test("Phase 10c: 複数親APPLYはexecuteBatchでもGET後にerror envelope化しwrite 0", async () => {
   const mock = makeClient([parent(), parent("9")]);
   const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態='open' "
     + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS); SELECT * FROM APP4221";
@@ -90,7 +90,7 @@ test("Phase 10b: 複数親APPLYはexecuteBatchでもGET後にerror envelope化�
     status: "error",
     error: {
       code: "UnsupportedError",
-      message: "UnsupportedError: APPLY Phase 10b prepared multiple-parent write is not connected",
+      message: "UnsupportedError: APPLY Phase 10c public multiple-parent write is not connected",
     },
   });
   expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
