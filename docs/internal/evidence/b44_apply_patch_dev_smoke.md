@@ -86,3 +86,17 @@ v2 の全機能フェーズ（10a〜16d）実装完了後の自動ゲート。
 | `mcp:smoke` / `mcp:pack-smoke` | ok（APPLY VALIDATE ONLY 許可・mutation fail-closed・drift guard） |
 
 v2 累積機能: 複数親（10・100親/chunk・部分成功）・`_idx`（11）・EXPECT ROWS（12）・INSERT 初期行（13）・UPSERT insert/update 分岐（14）・多値 ADD/REMOVE（15）。面: CLI/plugin 開通（16b/16c）・MCP 全経路 fail-closed（16d）。版数 3.8.0。
+
+## Phase 17b/17c 実機A/B（2026-07-21・_idx・EXPECT ROWS・全 v2）
+
+複数親（V1）・INSERT（V2）・UPSERT 分岐（V3/V4）・多値（V5）は前掲。ここでは `_idx`・EXPECT ROWS を実機確認（APP4223・B44-INS）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| W1 | `_idx=1` セレクタ | 2行目（_idx 1）だけ IDX1 に更新・0/2 不変 |
+| W2 | EXPECT ROWS 3（一致） | ALL ROWS 3行＝期待3で実行成功 |
+| W3 | EXPECT ROWS 5（違反） | `ArgumentError: … expected exactly 5, actual 3`（親$id/table/op/期待vs実数）・書込み0 |
+| W4 | `_idx=9` 消失 | `ArgumentError: APPLY _idx 9 does not exist in snapshot table テーブル`（消失を沈黙させない） |
+| W5 | `REMOVE WHERE _idx=0 EXPECT ROWS AT MOST 2` | _idx 0 削除→2行（境界内 pass） |
+
+**v2 全機能を CLI 実機で確認完了**（複数親100超は `--dml-max-rows` 引き上げ・多値は subtable ガード対象外）。plugin は v2 開通済（3.8.0 アップロード済・ブラウザ確認はユーザー）。MCP は全 APPLY mutation fail-closed（unit matrix＋smoke で固定・接続 MCP の live 確認は再起動要）。
