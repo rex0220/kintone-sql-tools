@@ -1,6 +1,6 @@
 # B43 — DML 事前検証の既存サブテーブル違反 false pass 解消仕様
 
-- ステータス: **R1 起草（2026-07-21）・未実装・Claude レビュー待ち**
+- ステータス: **R1・Claude レビュー Approved（2026-07-21）・v3.9.0 実装中**（実装計画: [ksql_b43_dml_prevalidation_impl_plan.md](ksql_b43_dml_prevalidation_impl_plan.md)）
 - 対象: プレーン `UPDATE` / `UPSERT` の update branch における `VALIDATE ONLY` / `ON ERROR SKIP`
 - 一次情報: [ksql_issue_tracker.md B43](../ksql_issue_tracker.md#L37)
 - 関連: [B42 サブテーブル監査](ksql_validate_subtable_audit_spec.md) / [B44 APPLY](ksql_apply_block_spec.md)
