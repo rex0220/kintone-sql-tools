@@ -1,6 +1,6 @@
 # B42 — `VALIDATE` サブテーブル子フィールド監査仕様
 
-- ステータス: 仕様 R3（2026-07-20 ユーザー要望「詳細モードの同一メッセージ集約」を反映・詳細9列／先頭行ロケータ／集約後 `tempTableMaxRows` を確定）
+- ステータス: 仕様 R4（2026-07-20 ユーザー指摘を反映・詳細9列／全該当行ロケータリスト／集約後 `tempTableMaxRows` を確定）
 - 対象: B41 `VALIDATE APP…` のサブテーブルセル監査と生成時集約 `SUMMARY`
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B42
 - 親仕様: [ksql_existing_record_validation_spec.md](ksql_existing_record_validation_spec.md) B41
@@ -15,7 +15,7 @@ B41（v3.5.0）の `VALIDATE APP…` は、保存済みレコードを組み込�
 
 - `(fields)` 省略時は、トップレベルに加えて、制約を持つサブテーブル子フィールドと全子 `NUMBER` を既定対象に含める。
 - 詳細モードの固定スキーマは既存5列の末尾へ `$err_subtable`、`$err_subrow`、`$err_subrow_id`、`$err_count` を加えた9列とする。
-- `$err_subrow` は取得時の表示順を1から数えた序数、`$err_subrow_id` は kintone の永続サブテーブル行 `id` とする。
+- `$err_subrow` は全該当行の1-based表示序数、`$err_subrow_id` は同順の全 kintone 永続サブテーブル行 `id` を、カンマ区切りリストとして保持する。
 - `(fields)` はテーブルコードで子全体を選べる。子の限定は `テーブル(子, …)` とし、裸の子コードは拒否する。
 - 大量違反でも詳細行を生成せず集計できる `SUMMARY` を B42 v1 に同梱する。
 - `CHECK` と `WHERE` のサブテーブル子参照は対象外のままとする。
@@ -122,7 +122,7 @@ $id
 ($id, $err_subtable, $err_field, $err_code, $err_message)
 ```
 
-`$err_count` はグループに属する違反件数を文字列化した数値とし、型メタは number とする。`$err_value`、`$err_subrow`、`$err_subrow_id` は走査順で最初に出現した違反の値を保持し、修復の起点となる先頭行ロケータを残す。`$err_count=1` の行は従来の詳細行と同じ意味である。グループの出力順は先頭出現順とし、現行の走査順（トップレベル → テーブル → 表示行 → 子フィールド → CHECK）を変えない。
+`$err_count` はグループに属する違反件数を文字列化した数値とし、型メタは number とする。`$err_value` は走査順で最初に出現した違反の値を保持する。`$err_subrow` はグループに属する全該当行の1-based表示序数、`$err_subrow_id` は同順の全行IDを、それぞれカンマ区切りリストで保持する（例: `"1,2"` / `"7224309,7224313"`）。暗黙の切り捨ては行わず、100行なら100要素を出す。`$err_count=1` の行は従来どおり単一値となり、リスト表現と自然に一致する。トップレベル／`CHECK` 違反は両ロケータ列とも空のままとする。グループの出力順と各リストの要素順は先頭出現順とし、現行の走査順（トップレベル → テーブル → 表示行 → 子フィールド → CHECK）を変えない。
 
 message をキーに含めるのは、`CHECK` が `$err_field=''`、`$err_code='ERR_CHECK'` のまま異なる message を複数返し得るためである。異なる message は別行を維持し、同一 message の CHECK は自然に集約する。CHECK はレコード単位で発火するため通常 `$err_count=1` となる。
 
@@ -144,7 +144,7 @@ message をキーに含めるのは、`CHECK` が `$err_field=''`、`$err_code='
 
 `CHECK` 違反は `$err_subtable=''`、`$err_field=''`、`$err_code='ERR_CHECK'` とし、同じ親で発火した CHECK group 数を `$err_count` に集約する。現行 CHECK 評価はグループ内先勝ち・グループ間独立で1 group につき最大1件を返し（[dmlCustomCheck.ts:60](../../src/core/dmlCustomCheck.ts#L60)-[75](../../src/core/dmlCustomCheck.ts#L75)）、B41 はそれぞれを空 field/value の `ERR_CHECK` 行にする（[execute.ts:881](../../src/execute.ts#L881)-[888](../../src/execute.ts#L888)）。SUMMARY は message を持たないため、同一親の異なる CHECK message も1行へ合算する。message 別の診断が必要なら詳細モードを使う。
 
-SUMMARY も `tempTableMaxRows` の対象であり、集約後の行数が上限を超えれば §3.5 と同じく error になる。SUMMARY は message・値・行ロケータを持たず、レコード横断の規模把握に使う。詳細9列は message 別のレコード内訳と先頭ロケータを提供する。
+SUMMARY も `tempTableMaxRows` の対象であり、集約後の行数が上限を超えれば §3.5 と同じく error になる。SUMMARY は message・値・行ロケータを持たず、レコード横断の規模把握に使う。詳細9列は message 別のレコード内訳と全該当行のロケータリストを提供する。
 
 ### 3.7 `$err_value` と B29 数値精度
 
@@ -166,20 +166,20 @@ SUMMARY も `tempTableMaxRows` の対象であり、集約後の行数が上限�
 | `$err_message` | string | 既存メッセージ | 既存メッセージ |
 | `$err_value` | string | 現在の生値の描画 / CHECK は空文字 | 子セルの現在の生値の描画 |
 | `$err_subtable` | string | 空文字 | 親テーブルコード |
-| `$err_subrow` | number | 空文字 | 取得時の表示順を1から数えた序数 |
-| `$err_subrow_id` | string | 空文字 | kintone サブテーブル行の永続 `id` |
+| `$err_subrow` | string | 空文字 | 全該当行の1-based表示序数を先頭出現順に並べたカンマ区切りリスト |
+| `$err_subrow_id` | string | 空文字 | 同順の全 kintone サブテーブル行永続 `id` のカンマ区切りリスト |
 | `$err_count` | number | グループ件数（通常1） | 同一 message グループの違反件数 |
 
-値はすべて従来どおり文字列で保持し、`$err_count` も `"1"`, `"100"` のような文字列化した数値とする。型メタは `$id`、`$err_subrow`、`$err_count` が number、他列が string である。集約時の `$err_value`、`$err_subrow`、`$err_subrow_id` はグループ先頭の値である。
+値はすべて従来どおり文字列で保持し、`$err_count` も `"1"`, `"100"` のような文字列化した数値とする。型メタは `$id` と `$err_count` が number、`$err_subrow` を含む他列が string である。集約時の `$err_value` はグループ先頭の値、`$err_subrow` / `$err_subrow_id` は全該当行を先頭出現順に並べたリストである。リスト要素数の暗黙上限は設けない。
 
-`$err_subrow_id` は仮想テーブル `APP100$明細` の `_rid` と同値である。adapter は保存済み `row.id` を `_rid` に格納し、同じ走査で `_idx` に0-based indexを格納する（[subtableAdapter.ts:23](../../src/converter/subtableAdapter.ts#L23)-[29](../../src/converter/subtableAdapter.ts#L29)）。詳細監査では同じ `row.id` を `$err_subrow_id`、`i + 1` を `$err_subrow` に出す。したがって仮想テーブルの `_idx` は **0-based**、監査の `$err_subrow` は **1-based** で基数が異なる。`#err` を `APP100$明細` へ突き合わせる場合、序数ではなく `$err_subrow_id = _rid` で結合する。
+`$err_subrow_id` の各要素は仮想テーブル `APP100$明細` の `_rid` と同値である。adapter は保存済み `row.id` を `_rid` に格納し、同じ走査で `_idx` に0-based indexを格納する（[subtableAdapter.ts:23](../../src/converter/subtableAdapter.ts#L23)-[29](../../src/converter/subtableAdapter.ts#L29)）。詳細監査では同じ `row.id` と `i + 1` を全該当行について同順にリストへ追加する。したがって仮想テーブルの `_idx` は **0-based**、監査の `$err_subrow` の各要素は **1-based** で基数が異なる。`#err` を `APP100$明細` へ突き合わせる場合は、`$err_subrow_id` を要素へ展開し、各要素を `_rid` と照合する。
 
-子違反の修復キーは `$id` と `$err_subrow_id` であり、次の形へ変換できる。サブテーブル UPDATE は `_rid` 条件が安全上必須である（[ksql_language_reference.md:2271](../ksql_language_reference.md#L2271)-[2284](../ksql_language_reference.md#L2284)）。
+子違反の修復キーは `$id` と `$err_subrow_id` の各要素であり、要素ごとに次の形へ変換できる。サブテーブル UPDATE は `_rid` 条件が安全上必須である（[ksql_language_reference.md:2271](../ksql_language_reference.md#L2271)-[2284](../ksql_language_reference.md#L2284)）。
 
 ```sql
 UPDATE APP100$明細
 SET 数量 = 1
-WHERE _pid = <#err.$id> AND _rid = <#err.$err_subrow_id>;
+WHERE _pid = <#err.$id> AND _rid = <#err.$err_subrow_id の各要素>;
 ```
 
 `EXISTING_VALIDATION_COLUMNS`、`existingValidationColumnMeta`、batch analyzer の schema signature は同じ固定9列を持つ。詳細と SUMMARY の双方で `$err_count` は `KSQL_NUMBER` / number semantics とする。
@@ -222,7 +222,7 @@ WHERE _pid = <#err.$id> AND _rid = <#err.$err_subrow_id>;
 - `src/execute.ts`: `EXISTING_VALIDATION_COLUMNS`、`existingValidationColumnMeta`、結果行生成を詳細9列へ同期し、SUMMARY 5列の別定数・列別型メタを維持する。
 - `src/core/batch.ts`: VALIDATE の固定 schema signature を `summary` flag で詳細9列 / SUMMARY 5列に分ける。同名一時表への異種追記は既存どおり analyze 時に拒否する。
 - `src/execute.ts`: EXPLAIN metadata の `targetFields` / `fetchFields`（[execute.ts:6601](../../src/execute.ts#L6601)-[6607](../../src/execute.ts#L6607)）を論理 target と親テーブル fetch に分け、plan builder（[execute.ts:6962](../../src/execute.ts#L6962)-[6980](../../src/execute.ts#L6980)）へ §7 の表示を追加する。
-- `src/__tests__/existingRecordValidation.test.ts`: 固定9列、同一 message 集約、先頭ロケータ、message 分離、集約後上限、batch signature、EXPLAIN を固定する。
+- `src/__tests__/existingRecordValidation.test.ts`: 固定9列、同一 message 集約、全該当行ロケータリスト、message 分離、集約後上限、batch signature、EXPLAIN を固定する。
 - `docs/ksql_language_reference.md`: §17.4 の詳細9列、集約規則、SUMMARY 5列との役割分担、§19 の `_rid` 修復レシピとの接続を改定する。
 
 ## 6. 対象外
@@ -243,7 +243,7 @@ WHERE _pid = <#err.$id> AND _rid = <#err.$err_subrow_id>;
 - `fetch fields`: 子コードではなく実際に取得する親テーブルコードを表示する。
 - 詳細時 `subtable audit`: 対象テーブル、対象子数を表示する。
 - 詳細時 `output schema`: 固定9列を表示する。
-- 詳細時 `row locator`: message 単位で集約し、`$err_subrow` / `$err_subrow_id` は先頭行であることを表示する。
+- 詳細時 `row locator`: message 単位で集約し、`$err_subrow` / `$err_subrow_id` が全該当行を先頭出現順で列挙することを表示する。
 - SUMMARY 時: `mode=SUMMARY`、固定5列 output schema、`aggregation=record/subtable/field/code`、`row locator=none` を表示する。
 - `number precision`: 子 `NUMBER` だけが対象の場合も `required` とする。
 - EXPLAIN 中は従来どおりフォーム定義と必要時の number precision metadata だけを読み、records API と mutation API を呼ばず、行数・違反件数・実際のサブテーブル行数・集約後行数を表示しない。現行テストは records/mutation API 0 と違反件数なしを固定している（[existingRecordValidation.test.ts:228](../../src/__tests__/existingRecordValidation.test.ts#L228)-[237](../../src/__tests__/existingRecordValidation.test.ts#L237)）。
@@ -263,7 +263,7 @@ SemVer を厳密に適用して固定結果 schema の加法変更も破壊的�
 ### 9.1 parser・単体・統合テスト
 
 - `(fields)` 省略で、トップレベル対象に加えて全テーブルの制約付き子と全子 `NUMBER` が選ばれ、制約なし非 `NUMBER`、`FILE` 等は選ばれない。
-- 子の必須空、数値 min/max、文字列 min/maxLength、定義外選択肢、B29 整数部桁超過を検出する。詳細行は `$id`、子 `$err_field`、コード、メッセージ、描画済み生値、親 `$err_subtable`、1-based `$err_subrow`、永続 `$err_subrow_id` を持つ。
+- 子の必須空、数値 min/max、文字列 min/maxLength、定義外選択肢、B29 整数部桁超過を検出する。詳細行は `$id`、子 `$err_field`、コード、メッセージ、先頭行の描画済み生値、親 `$err_subtable`、全該当行の1-based `$err_subrow` リスト、同順の永続 `$err_subrow_id` リストを持つ。
 - 1親に複数テーブル、1テーブルに複数行、1行に複数不良セルがあるとき、全セルを走査し、同一 message グループを先頭出現順で1行へ集約する。
 - 0行テーブルでは子 required を含めエラー0件。1行目が空セルなら required 1件。
 - 同じ親にトップレベル違反、子セル違反、トップレベル `CHECK` 違反が混在し、トップレベル / CHECK は count=1、子の同一 message は件数化される。
@@ -273,8 +273,8 @@ SemVer を厳密に適用して固定結果 schema の加法変更も破壊的�
 - `SUMMARY` は `(fields)` 後・WHERE 前だけで soft keyword として受理し、既存の同名フィールド / app identifier を予約語化しない。重複、WHERE 後、CHECK 後、INTO 後は ParseError とする。
 - requiredFields は子コードを含まず、親テーブルコードを1回だけ含む。トップレベル、WHERE、CHECK の必要列も失わない。
 - 子 `NUMBER` だけを選んだ場合も number precision API は1回だけ呼ばれ、整数部桁チェックが有効になる。NUMBER が無ければ呼ばない。
-- 詳細結果0件でも9列 schema と列メタを保持する。`$id`、`$err_subrow`、`$err_count` は number、他列は string。
-- 詳細は `($id, $err_subtable, $err_field, $err_code, $err_message)` で集約し、`$err_value` / `$err_subrow` / `$err_subrow_id` は先頭行、`$err_count` は文字列化した件数とする。異なる message は別行にする。
+- 詳細結果0件でも9列 schema と列メタを保持する。`$id`、`$err_count` は number、`$err_subrow` を含む他列は string。
+- 詳細は `($id, $err_subtable, $err_field, $err_code, $err_message)` で集約し、`$err_value` は先頭行、`$err_subrow` / `$err_subrow_id` は全該当行を先頭出現順・切り捨てなしで列挙し、`$err_count` は文字列化した件数とする。異なる message は別行にする。
 - SUMMARY 結果0件でも5列 schema と列メタを保持する。`$id` / `$err_count` は number、他は string。
 - SUMMARY は詳細行を内部配列へ生成せず、トップレベル、複数子行、複数 error code を4列キーで正しく集約する。トップレベル count は通常1、子 count は該当行数になる。
 - CHECK の SUMMARY は `$err_subtable=''`, `$err_field=''`, `$err_code='ERR_CHECK'` で、同一親の発火 group 数を `$err_count` にする。詳細モードの CHECK message は非回帰。
@@ -282,18 +282,18 @@ SemVer を厳密に適用して固定結果 schema の加法変更も破壊的�
 - 詳細 / SUMMARY とも `tempTableMaxRows` は集約後行数へ適用し、超過時は既存行を変えず error になる。truncate / 部分成功にしない。
 - `WHERE` / `CHECK` の子参照は、演算子にかかわらず records API 前に一貫した `ArgumentError`。トップレベル WHERE/CHECK は非回帰。
 - read-only、`onLimit=error`、Cursor未使用、POST/PUT/DELETE 0回を維持する。
-- EXPLAIN 詳細は親スコープ付き target、親テーブル fetch、9列 schema、message 集約、先頭 row locator、子 NUMBER 精度要否を示す。SUMMARY は5列 schema、集約キー、row locator none を示す。いずれも records/mutation API 0回、違反件数なしを維持する。
+- EXPLAIN 詳細は親スコープ付き target、親テーブル fetch、9列 schema、message 集約、全該当行の row locator リスト、子 NUMBER 精度要否を示す。SUMMARY は5列 schema、集約キー、row locator none を示す。いずれも records/mutation API 0回、違反件数なしを維持する。
 
 ### 9.2 実機確認・運用レシピ
 
 - 制約違反を持つ子セル（必須、数値上下限、文字数、選択肢）を保存済みレコードに用意し、期待する位置付き詳細行が CLI、MCP、プラグインで一致する。
 - B29 用の子 `NUMBER` で、許容整数部桁数の境界値と1桁超過を確認する。
 - 0行テーブルで子 required が発火しないことを**過去実測の再確認**として実施し、行番号付き evidence に文書化する。これは B12-A（v2.13.0）実機バグ修正時の kintone 実測確定事項として auto-memory に記録済みだが、workspace 文書内に行番号付き証跡がないため release gate を維持する。
-- 2行以上のテーブルで同一違反を発生させ、`$err_count` が行数、`$err_subrow` / `$err_subrow_id` が先頭違反行と一致する。行を並べ替えた後は先頭ロケータが新しい先頭違反行へ追随する。
-- `#err` の子違反について、`$id` を `_pid`、`$err_subrow_id` を `_rid` に使った `UPDATE APP100$明細 … WHERE _pid=… AND _rid=…` で対象行だけを修復し、再監査でその違反が消えることを確認する。実更新は復旧可能な fixture と事前 snapshot を使う。
+- 2行・3行以上のテーブルで同一違反を発生させ、`$err_count` が行数、`$err_subrow` / `$err_subrow_id` が全該当行を先頭出現順で列挙する。大量行でも暗黙に切り捨てない。行を並べ替えた後は両リストが新しい出現順へ追随する。
+- `#err` の子違反について、`$id` を `_pid`、展開した `$err_subrow_id` の各要素を `_rid` に使った `UPDATE APP100$明細 … WHERE _pid=… AND _rid=…` で対象行だけを修復し、再監査でその違反が消えることを確認する。実更新は復旧可能な fixture と事前 snapshot を使う。
 - トップレベル違反と子違反の混在で、既存5列の値が変わらず、ロケータ3列がトップレベル行では空、`$err_count=1` である。
 - `(fields)` 省略、テーブルコード、`テーブル(子…)`、裸の子拒否、仮想テーブル拒否と親形式への案内、別テーブル同名子を確認する。
-- `INTO #err` 後の SELECT で9列を取得し、`WHERE $err_subtable = '明細'`、`ORDER BY $err_subrow`、`$err_subrow_id = _rid` の突合が動く。
+- `INTO #err` 後の SELECT で9列を取得し、`WHERE $err_subtable = '明細'` が動く。`$err_subrow` は string リストとして扱い、`$err_subrow_id` は要素へ展開して `_rid` と突合する。
 - 詳細9列を SUMMARY と同じ粒度へ再集約する場合は、行数ではなく `$err_count` を合計する。
 
 ```sql
@@ -304,7 +304,7 @@ GROUP BY $id, $err_subtable, $err_field, $err_code;
 ```
 
 - 大量の同一違反 fixture で、詳細 `VALIDATE … INTO #detail` が1行へ集約され、`tempTableMaxRows=1` で完走することを確認する。異なる message / code により集約後行数が上限を超える場合は error とする。
-- 実運用の2段構えを文書と smoke で固定する: **SUMMARY で規模と対象を把握 → `WHERE` / `(fields)` で絞った詳細 VALIDATE → `$id` / `$err_subrow_id` で修復**。
+- 実運用の2段構えを文書と smoke で固定する: **SUMMARY で規模と対象を把握 → `WHERE` / `(fields)` で絞った詳細 VALIDATE → `$id` / 展開した `$err_subrow_id` の各要素で修復**。
 - EXPLAIN が records API を呼ばず、実行本体が書込み API を呼ばないことを各面で確認する。
 
 ## 10. 未決論点
@@ -325,7 +325,7 @@ SUMMARY を B42.1 へ分割し、B42 v1 を詳細モード＋少量 GROUP BY レ
 - kSQL は**サブテーブル仮想テーブル `APP100$明細` を SELECT/INSERT/UPDATE/DELETE/REORDER で正式対応済み**（言語リファレンス §19・[subtableAdapter.ts:12](../../src/converter/subtableAdapter.ts#L12)）。かつ **`UPDATE`/`DELETE` は安全のため `_rid`（永続行 ID）条件が必須**（言語 §19）。
 - B41/#err の看板ユースは「違反を後続文で使う」。トップレベル違反は `$id` がそのまま修復キーになるが、子セル違反の唯一の書込み経路は `UPDATE APP100$明細 … WHERE _pid = … AND _rid = …` ＝ **1-based 序数だけでは #err から修復文を組めない**（序数→`_rid` の人手変換が必要で、行の並べ替えで無効化もされる）。
 - IMPORT の `$err_subrow` が序数なのは**ソースがファイル行で ID を持たないから**。VALIDATE は保存済みレコードを読むため `row.id` が手元にある（[subtableAdapter.ts:27](../../src/converter/subtableAdapter.ts#L27)・[execute.ts:5877](../../src/execute.ts#L5877)）＝取得コスト増ゼロ。前提が異なるので前例の転用条件を満たさない。
-- **勧告**: R2 で `$err_subrow_id`（string・`_rid` と同値・トップレベル行は空）を追加し **8 列で一度に確定**する。未決論点2の「後続仕様で加法追加」は固定 schema 変更を2回踏む（7列→8列で batch signature・言語リファレンスを再改定）ため不採用。あわせて仮想テーブル `_idx`（0-based）と `$err_subrow`（1-based）の**基数不一致を §4 に明記**する（`#err` を `APP100$明細` へ突き合わせる利用者は `$err_subrow_id = _rid` で結合すればよい、と誘導）。
+- **勧告（R2 時点）**: `$err_subrow_id`（string・`_rid` と同値・トップレベル行は空）を追加し **8 列で一度に確定**する。未決論点2の「後続仕様で加法追加」は固定 schema 変更を2回踏む（7列→8列で batch signature・言語リファレンスを再改定）ため不採用。あわせて仮想テーブル `_idx`（0-based）と `$err_subrow`（1-based）の**基数不一致を §4 に明記**する。R4 では同一 message 集約後も全行を特定できるよう、`$err_subrow_id` を全 `_rid` のリストへ拡張し、突合時は要素展開する契約へ更新した。
 
 ### P1-2 代替構文 `VALIDATE APP100$明細` の検討が欠落
 
@@ -339,7 +339,7 @@ SUMMARY を B42.1 へ分割し、B42 v1 を詳細モード＋少量 GROUP BY レ
 - **R2 反映事項（3点）**:
   1. §3 に爆発シナリオと `tempTableMaxRows` 到達時の挙動（error で完走しない）を明記する（詳細モードの限界の文書化・必須）。
   2. 集約レシピを受入条件へ追加: `#err` は一時テーブルなので少量なら既存 SQL で集計できる（`SELECT $id, $err_subtable, $err_field, $err_code, COUNT(*) FROM #err GROUP BY …`）。ただし詳細行が実体化できる規模でしか使えないことを明記する。
-  3. **生成時集約 `SUMMARY` モードを仕様に含める**（推奨・スコープ抑制なら詳細モード＋レシピで v1 を出し B42.1 へ分割も可）: `VALIDATE APP100 SUMMARY [INTO #err]` は詳細行を作らず `$id, $err_subtable, $err_field, $err_code, $err_count` の集約行のみ生成する。行数が レコード数 × フィールド数 に圧縮され（テーブル行数の因子が消える）、打ち切りと違い**完全性を保ったまま**容量・表示を解決する。リポジトリ内前例=IMPORT のテーブル単位カウンタ（[importRecordValidation.ts:71](../../src/import/importRecordValidation.ts#L71)）。運用は2段構え: SUMMARY で規模把握 → `WHERE`/`(fields)` で絞った詳細 VALIDATE → `$err_subrow_id` で修復。
+  3. **生成時集約 `SUMMARY` モードを仕様に含める**（推奨・スコープ抑制なら詳細モード＋レシピで v1 を出し B42.1 へ分割も可）: `VALIDATE APP100 SUMMARY [INTO #err]` は詳細行を作らず `$id, $err_subtable, $err_field, $err_code, $err_count` の集約行のみ生成する。行数が レコード数 × フィールド数 に圧縮され（テーブル行数の因子が消える）、打ち切りと違い**完全性を保ったまま**容量・表示を解決する。リポジトリ内前例=IMPORT のテーブル単位カウンタ（[importRecordValidation.ts:71](../../src/import/importRecordValidation.ts#L71)）。運用は2段構え: SUMMARY で規模把握 → `WHERE`/`(fields)` で絞った詳細 VALIDATE → 展開した `$err_subrow_id` の各要素で修復。
 
 ### P2-1 SemVer major 推奨は本プロジェクトの出荷前例と不整合
 

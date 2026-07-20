@@ -40172,9 +40172,9 @@ function collectValidateWhereFields(where) {
 function existingValidationColumnMeta(summary = false) {
   const columns = summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   return new Map(columns.map((column) => [column, {
-    fieldType: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "KSQL_NUMBER" : "KSQL_STRING",
-    sortKind: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" : "string",
-    semantics: syntheticSemantics(column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" : "string")
+    fieldType: column === "$id" || column === "$err_count" ? "KSQL_NUMBER" : "KSQL_STRING",
+    sortKind: column === "$id" || column === "$err_count" ? "number" : "string",
+    semantics: syntheticSemantics(column === "$id" || column === "$err_count" ? "number" : "string")
   }]));
 }
 async function executeExistingRecordValidation(stmt, client, options, cacheContext) {
@@ -40258,8 +40258,13 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
     }
     const key = JSON.stringify([error51.id, error51.subtable ?? "", error51.field, error51.code, error51.message]);
     const current = detailRows.get(key);
-    if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
-    else detailRows.set(key, {
+    if (current) {
+      current["$err_count"] = String(Number(current["$err_count"]) + 1);
+      if (error51.subrow !== void 0) {
+        current["$err_subrow"] = `${current["$err_subrow"]},${error51.subrow}`;
+        current["$err_subrow_id"] = `${current["$err_subrow_id"]},${error51.subrowId ?? ""}`;
+      }
+    } else detailRows.set(key, {
       "$id": error51.id,
       "$err_field": error51.field,
       "$err_code": error51.code,
@@ -44978,7 +44983,7 @@ function buildValidatePlan(stmt, label) {
   lines.push(`  mode:          ${stmt.summary ? "SUMMARY" : "DETAIL"}`);
   if (info.subtables.size > 0) lines.push(`  subtable audit: ${[...info.subtables].map(([table, count]) => `${table}(${count} fields)`).join(", ")}`);
   lines.push(`  output schema: ${(stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS).join(", ")}`);
-  lines.push(stmt.summary ? "  aggregation:   record/subtable/field/code; row locator=none" : "  row locator:   grouped by message; $err_subrow (1-based display order) and $err_subrow_id (persistent row id) are from the first row");
+  lines.push(stmt.summary ? "  aggregation:   record/subtable/field/code; row locator=none" : "  row locator:   grouped by message; $err_subrow / $err_subrow_id list all matching rows (first-occurrence order)");
   lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
   lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");

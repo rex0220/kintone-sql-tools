@@ -211,7 +211,7 @@ test("single result preserves fixed columns at zero errors and single INTO is re
     .rejects.toThrow("requires a batch");
 });
 
-test("batch INTO materializes the fixed nine columns with numeric locator and count metadata", async () => {
+test("batch INTO materializes the fixed nine columns with locator and count metadata", async () => {
   const { client } = makeClient({ records: [record({ $id: "2", requiredText: "", n: "100" })] });
   const batch = await executeBatch(
     "VALIDATE APP41 (requiredText,n) INTO #err; SELECT $id,$err_field,$err_code,$err_message,$err_value,$err_subtable,$err_subrow,$err_subrow_id,$err_count FROM #err ORDER BY $id",
@@ -301,7 +301,7 @@ test("B42 omitted targets audit child cells with stable 1-based and persistent r
   ]));
   expect(result.rows.map((row) => [row.$err_field, row.$err_subrow_id])).toEqual([
     ["top", ""],
-    ["req", "r10"], ["num", "r10"], ["minNum", "r10"], ["maxNum", "r10"], ["minText", "r10"], ["maxText", "r10"],
+    ["req", "r10,r20"], ["num", "r10"], ["minNum", "r10"], ["maxNum", "r10"], ["minText", "r10"], ["maxText", "r10"],
     ["choiceChild", "r20"],
     ["req", "r30"],
     ["", ""],
@@ -366,7 +366,7 @@ test("B42 SUMMARY directly aggregates child rows and CHECK groups into the fixed
   ]));
 });
 
-test("B42 detail groups identical messages, preserves the first locator, and keeps different messages separate", async () => {
+test("B42 detail groups identical messages and lists all three locators in first-occurrence order", async () => {
   const { client } = makeClient({ fields: B42_FIELDS, records: [record({
     $id: "5", top: "", whereTop: "x",
     T1: [subrow("first", { minText: "x" }), subrow("second", { minText: "y" }), subrow("third", { minText: "z" })], T2: [],
@@ -379,7 +379,7 @@ test("B42 detail groups identical messages, preserves the first locator, and kee
     expect.objectContaining({ $err_field: "top", $err_count: "1", $err_subrow: "", $err_subrow_id: "" }),
     expect.objectContaining({
       $err_field: "minText", $err_code: "ERR_LENGTH_MIN", $err_count: "3",
-      $err_subrow: "1", $err_subrow_id: "first", $err_value: "x",
+      $err_subrow: "1,2,3", $err_subrow_id: "first,second,third", $err_value: "x",
     }),
     expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "one", $err_count: "1" }),
     expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "two", $err_count: "1" }),
@@ -406,7 +406,7 @@ test("B42 detail temp limit is applied after message aggregation", async () => {
   expect(detailBatch.ok).toBe(true);
   expect(detailBatch.statements[1].result).toMatchObject({
     rowCount: 1,
-    rows: [expect.objectContaining({ $err_subrow: "1", $err_subrow_id: "a", $err_count: "2" })],
+    rows: [expect.objectContaining({ $err_subrow: "1,2", $err_subrow_id: "a,b", $err_count: "2" })],
   });
 
   const summary = makeClient({ fields: B42_FIELDS, records });
@@ -417,6 +417,44 @@ test("B42 detail temp limit is applied after message aggregation", async () => {
   expect(summaryBatch.ok).toBe(true);
   expect(summaryBatch.statements[1].result).toMatchObject({
     rowCount: 1, rows: [{ $id: "1", $err_subtable: "T1", $err_field: "req", $err_code: "ERR_REQUIRED", $err_count: "2" }],
+  });
+});
+
+test("B42 detail INTO keeps subrow as string metadata and count as number metadata", async () => {
+  const locatorRows = Array.from({ length: 10 }, (_, index) => subrow(`r${index + 1}`, {
+    choiceChild: index === 1 ? "Z" : "A",
+    minText: index === 9 ? "x" : "ok",
+  }));
+  const locator = makeClient({ fields: B42_FIELDS, records: [record({
+    $id: "1", top: "ok", T1: locatorRows, T2: [],
+  })] });
+  const locatorBatch = await executeBatch(
+    "VALIDATE APP41 (T1(choiceChild,minText)) INTO #err; SELECT $err_field,$err_subrow FROM #err ORDER BY $err_subrow",
+    locator.client, { cacheContext: "b42-subrow-string-meta" }
+  );
+  expect(locatorBatch.statements[1].result).toMatchObject({
+    rows: [
+      { $err_field: "minText", $err_subrow: "10" },
+      { $err_field: "choiceChild", $err_subrow: "2" },
+    ],
+  });
+
+  const countRows = Array.from({ length: 10 }, (_, index) => subrow(`r${index + 1}`, {
+    req: index < 2 ? "" : "ok",
+    minText: "x",
+  }));
+  const count = makeClient({ fields: B42_FIELDS, records: [record({
+    $id: "1", top: "ok", T1: countRows, T2: [],
+  })] });
+  const countBatch = await executeBatch(
+    "VALIDATE APP41 (T1(req,minText)) INTO #err; SELECT $err_field,$err_count FROM #err ORDER BY $err_count",
+    count.client, { cacheContext: "b42-count-number-meta" }
+  );
+  expect(countBatch.statements[1].result).toMatchObject({
+    rows: [
+      { $err_field: "req", $err_count: "2" },
+      { $err_field: "minText", $err_count: "10" },
+    ],
   });
 });
 
@@ -435,7 +473,7 @@ test("B42 EXPLAIN reports scoped audit/fetch fields, schemas and row locator wit
   expect(detailPlan).toContain("$err_subrow_id");
   expect(detailPlan).toContain("$err_count");
   expect(detailPlan).toContain("grouped by message");
-  expect(detailPlan).toContain("from the first row");
+  expect(detailPlan).toContain("list all matching rows (first-occurrence order)");
   expect(detail.calls.get).toHaveLength(0);
   expect(detail.calls.precision).toBe(1);
 

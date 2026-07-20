@@ -829,9 +829,9 @@ function collectValidateWhereFields(where: WhereExpr | null): string[] {
 function existingValidationColumnMeta(summary = false): MaterializedColumnMetaMap {
   const columns = summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   return new Map(columns.map((column) => [column, {
-    fieldType: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "KSQL_NUMBER" : "KSQL_STRING",
-    sortKind: column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" as const : "string" as const,
-    semantics: syntheticSemantics(column === "$id" || column === "$err_subrow" || column === "$err_count" ? "number" : "string"),
+    fieldType: column === "$id" || column === "$err_count" ? "KSQL_NUMBER" : "KSQL_STRING",
+    sortKind: column === "$id" || column === "$err_count" ? "number" as const : "string" as const,
+    semantics: syntheticSemantics(column === "$id" || column === "$err_count" ? "number" : "string"),
   }]));
 }
 
@@ -945,7 +945,13 @@ async function executeExistingRecordValidationCore(
     }
     const key = JSON.stringify([error.id, error.subtable ?? "", error.field, error.code, error.message]);
     const current = detailRows.get(key);
-    if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
+    if (current) {
+      current["$err_count"] = String(Number(current["$err_count"]) + 1);
+      if (error.subrow !== undefined) {
+        current["$err_subrow"] = `${current["$err_subrow"]},${error.subrow}`;
+        current["$err_subrow_id"] = `${current["$err_subrow_id"]},${error.subrowId ?? ""}`;
+      }
+    }
     else detailRows.set(key, {
       "$id": error.id,
       "$err_field": error.field,
@@ -7099,7 +7105,7 @@ function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
   lines.push(`  output schema: ${(stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS).join(", ")}`);
   lines.push(stmt.summary
     ? "  aggregation:   record/subtable/field/code; row locator=none"
-    : "  row locator:   grouped by message; $err_subrow (1-based display order) and $err_subrow_id (persistent row id) are from the first row");
+    : "  row locator:   grouped by message; $err_subrow / $err_subrow_id list all matching rows (first-occurrence order)");
   lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
   lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");

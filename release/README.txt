@@ -9,7 +9,9 @@ v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
 - VALIDATE の既定対象にサブテーブル子フィールドを追加 (監査の抜けを修正)。
 - 詳細出力を固定9列へ拡張 ($err_subtable / $err_subrow 1-based /
   $err_subrow_id = 仮想テーブルの _rid / $err_count)。同一レコードの
-  field + code + message を1行へ集約し、値と行ロケータは先頭違反行を保持。
+  field + code + message を1行へ集約し、値は先頭違反行を保持。
+  $err_subrow / $err_subrow_id は全該当行を先頭出現順のカンマ区切り
+  リストで保持 (切り捨てなし)。$err_subrow の型メタは string。
 - scoped target: VALIDATE APP100 (テーブル) / (テーブル(子1, 子2))。
   裸の子コード・APP100$テーブル 形式は案内付きで拒否。
 - SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,
