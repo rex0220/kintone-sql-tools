@@ -41,6 +41,25 @@ test("VALIDATE ONLY はread-onlyだが完全入力を要求する", () => {
   expect(a.statements[0]).toMatchObject({ isDml: false, isReadOnly: true, isValidationOnly: true });
 });
 
+test("B44 Phase 1: APPLY mutation / VALIDATE ONLY を正しく分類する", () => {
+  const operation = "APPLY 明細 (PATCH SET 子 = 'x' ALL ROWS)";
+  const mutation = analyze(`UPDATE APP100 SET 親 = 'x' WHERE $id = 1 ${operation}`);
+  expect(mutation.statements[0]).toMatchObject({
+    statementType: "UPDATE", isDml: true, isReadOnly: false, requiresCompleteInput: true,
+  });
+  const validation = analyze(`UPDATE APP100 SET 親 = 'x' WHERE $id = 1 ${operation} VALIDATE ONLY`);
+  expect(validation.statements[0]).toMatchObject({
+    statementType: "UPDATE", isDml: false, isReadOnly: true,
+    isValidationOnly: true, requiresCompleteInput: true,
+  });
+});
+
+test("B44 Phase 1: batch は全実行前に APPLY scope を検証する", () => {
+  expect(() => analyze(
+    "SELECT * FROM APP100; UPDATE APP100 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (REMOVE ALL ROWS)"
+  )).toThrow(/UnsupportedError: APPLY v1 scope does not support REMOVE/);
+});
+
 test("B30: ORDER BY は SELECT / WINDOW / UNION / WITH / temp を横断して完全入力を要求する", () => {
   expect(analyze("SELECT * FROM APP100 ORDER BY name").requiresCompleteInput).toBe(true);
   expect(analyze(

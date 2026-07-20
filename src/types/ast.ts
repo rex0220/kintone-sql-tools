@@ -775,7 +775,47 @@ export interface UpdateStatement {
   errorTable?: string;
   rejectLimit?: number | null;
   checkGroups?: CheckGroup[];
+  /** UPDATE ... WHERE に続くサブテーブル変更計画。 */
+  applyBlocks?: ApplyBlock[];
 }
+
+export interface ApplyBlock {
+  field: string;
+  operations: ApplyOperation[];
+}
+
+export type ApplyOperation = PatchOperation | AppendOperation | RemoveOperation;
+
+export interface PatchOperation {
+  kind: "PATCH";
+  assignments: Assignment[];
+  selector: RowSelector;
+  expectRows?: ExpectRowsGuard;
+}
+
+/** v1.1 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */
+export interface AppendOperation {
+  kind: "APPEND";
+  fields: string[];
+  values: InsertRow[];
+}
+
+/** v1.2 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */
+export interface RemoveOperation {
+  kind: "REMOVE";
+  selector: RowSelector;
+  expectRows?: ExpectRowsGuard;
+}
+
+export type RowSelector =
+  | { kind: "WHERE"; where: WhereExpr }
+  | { kind: "ALL_ROWS" };
+
+export type ExpectRowsGuard =
+  | { kind: "EXACT"; count: number }
+  | { kind: "BETWEEN"; min: number; max: number }
+  | { kind: "AT_LEAST"; count: number }
+  | { kind: "AT_MOST"; count: number };
 
 export interface CheckGroup {
   rules: CheckRule[];

@@ -25,4 +25,10 @@ describe("explainNeedsAppMetadata", () => {
     );
     expect(statements.some(explainNeedsAppMetadata)).toBe(true);
   });
+
+  test("B44: APPLY target はフォーム metadata を必要とする", () => {
+    expect(explainNeedsAppMetadata(parseSqlStatement(
+      "EXPLAIN UPDATE APP88 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (PATCH SET 子 = 'x' ALL ROWS)"
+    ))).toBe(true);
+  });
 });

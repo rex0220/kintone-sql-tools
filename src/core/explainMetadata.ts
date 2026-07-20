@@ -62,6 +62,8 @@ export function explainNeedsAppMetadata(statement: unknown): boolean {
       && whereNeedsFieldMetadata((node as { where: WhereExpr }).where)) {
       return true;
     }
+    if (item["type"] === "UPDATE" && Array.isArray(item["applyBlocks"])
+      && item["applyBlocks"].length > 0) return true;
     return Object.values(item).some(visit);
   };
   return visit(statement);

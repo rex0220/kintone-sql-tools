@@ -18,6 +18,7 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
+import { assertApplyExecutionEnabled, assertApplyV1Scope } from "./core/applyPatchScope";
 import {
   fieldSemanticsEqual,
   resolveFieldSemantics,
@@ -686,6 +687,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
+  assertApplyV1Scope(stmt);
+  assertApplyExecutionEnabled(stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
@@ -1348,6 +1351,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
+  assertApplyV1Scope(resolvedStmt);
+  assertApplyExecutionEnabled(resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -6412,6 +6417,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
+    assertApplyV1Scope(stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {

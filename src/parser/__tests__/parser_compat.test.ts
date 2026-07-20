@@ -21,6 +21,8 @@ const CASES: Array<[string, string]> = [
   ["INSERT VALUES", "INSERT INTO APP100 (顧客名, 売上) VALUES ('A', 100), ('B', 200)"],
   ["INSERT SELECT", "INSERT INTO APP100 (顧客名) SELECT 顧客名 FROM APP200"],
   ["UPDATE", "UPDATE APP100 SET ステータス = '完了' WHERE $id = 1"],
+  ["UPDATE APPLY", "UPDATE APP100 SET APPLY = '親' WHERE $id = 1 APPLY APPLY (PATCH SET PATCH = '子' ALL ROWS) VALIDATE ONLY"],
+  ["APPLY soft keyword alias", "SELECT APPLY AS APPLY FROM APP100 APPLY"],
   ["DELETE", "DELETE FROM APP100 WHERE ステータス = '無効'"],
   ["UPSERT", "UPSERT INTO APP100 (顧客コード, ランク) VALUES ('C1', 'A') ON DUPLICATE (顧客コード)"],
   ["REORDER", "REORDER APP100$明細 BY 商品コード ASC WHERE _pid = 1"],
