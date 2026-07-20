@@ -12,7 +12,11 @@
 - **生成時集約 `SUMMARY` モード**: `(fields)` 後・`WHERE` 前の soft keyword。詳細行を生成せず固定5列（`$id`, `$err_subtable`, `$err_field`, `$err_code`, `$err_count`）へ直接集約するため、レコード×テーブル行×子の積で膨らむ大量違反でも `tempTableMaxRows` に当たらず完走できる。詳細8列とは別スキーマで、同名一時表への混在追記は解析時に拒否。
 - **安全ガード**: `WHERE`/`CHECK` のサブテーブル子フィールド参照は records 取得前に `ArgumentError` で拒否（従来は存在チェックを素通りし得た潜在ギャップの封鎖）。NUMBER 子フィールドには数値精度（整数部桁数）検証を適用。
 - **`EXPLAIN VALIDATE`** に mode（DETAIL/SUMMARY）・subtable audit・output schema・row locator を表示（records/mutation API は従来どおり 0 回）。
-- 実機確認: 全9項目 pass（従来 0 行だった監査で子違反4件を検出＝実書き込み CB_VA01 の原因と一致・`$err_subrow_id`≡`_rid` 突合・SUMMARY 集約）。83 suites / 2,103 テスト green。
+- 実機確認: 全9項目 pass（従来 0 行だった監査で子違反4件を検出＝実書き込み CB_VA01 の原因と一致・`$err_subrow_id`≡`_rid` 突合・SUMMARY 集約）。
+
+### 修正（B46 選択肢検証の空値 false positive）
+
+- **空（未選択）の選択系フィールドを `ERR_CHOICE_INVALID` と誤判定していた問題を修正**。選択肢照合に空値ガードが無く、空文字が `[""]` として定義済み選択肢と照合されていた（NUMBER・日時の検証には同ガードが既存）。実機パリティ裏付け＝kintone は空 `DROP_DOWN` の書き込みを受理し、`RADIO_BUTTON` への空指定もエラーにしない（黙って無視）。影響範囲＝`VALIDATE` 監査（トップレベル=v3.5.0 以降・サブテーブル子=本版）と DML 事前検証（`''` によるクリア書き込みの誤拒否）。必須チェック（`ERR_REQUIRED`）は従来どおり。83 suites / 2,105 テスト green。
 
 ## v3.6.1（2026-07-19）
 

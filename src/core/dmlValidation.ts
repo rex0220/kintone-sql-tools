@@ -97,7 +97,10 @@ export function validateAndNormalizeDmlValue(
       return { ok: false, code: "ERR_LENGTH_MAX", message: `${field.code} は ${max} 文字以下で指定してください` };
     }
   }
-  if (CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
+  // 空（未選択）は選択肢照合の対象外。kintone は空の DROP_DOWN 書き込みを受理し、
+  // RADIO への空指定もエラーにしない（黙って無視）ため、空を定義外扱いすると
+  // 監査・事前検証の両方で kintone より厳しい誤検出になる。必須性は上の ERR_REQUIRED が担う。
+  if (!isEmpty(value) && CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
     const selected = Array.isArray(value) ? value.map(String) : [String(value)];
     if (selected.some((choice) => !(choice in field.optionOrder!))) {
       return { ok: false, code: "ERR_CHOICE_INVALID", message: `${field.code} に定義外の選択肢があります` };

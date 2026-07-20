@@ -14,6 +14,18 @@ test("required / number range / length / choice を安定codeで返す", () => {
   expect(validateAndNormalizeDmlValue("X", field("DROP_DOWN", { optionOrder: { A: 0 } }))).toMatchObject({ ok: false, code: "ERR_CHOICE_INVALID" });
 });
 
+test("B46: 空（未選択）は選択肢照合の対象外（kintone は空の DROP_DOWN を受理・RADIO の空指定もエラーにしない実機パリティ）", () => {
+  expect(validateAndNormalizeDmlValue("", field("DROP_DOWN", { optionOrder: { A: 0 } }))).toMatchObject({ ok: true });
+  expect(validateAndNormalizeDmlValue("", field("RADIO_BUTTON", { optionOrder: { A: 0 } }))).toMatchObject({ ok: true });
+  expect(validateAndNormalizeDmlValue([], field("CHECK_BOX", { optionOrder: { A: 0 } }))).toMatchObject({ ok: true });
+  // 必須性は ERR_REQUIRED が担う（選択肢エラーへ化けない）
+  expect(validateAndNormalizeDmlValue("", field("DROP_DOWN", { required: true, optionOrder: { A: 0 } })))
+    .toMatchObject({ ok: false, code: "ERR_REQUIRED" });
+  // 非空の定義外は引き続き拒否
+  expect(validateAndNormalizeDmlValue(["A", "X"], field("MULTI_SELECT", { optionOrder: { A: 0 } })))
+    .toMatchObject({ ok: false, code: "ERR_CHOICE_INVALID" });
+});
+
 test("DATE/TIME/DATETIMEの実在性を検証する", () => {
   expect(validateAndNormalizeDmlValue("2025-02-29", field("DATE"))).toMatchObject({ ok: false, code: "ERR_TYPE_DATE" });
   expect(validateAndNormalizeDmlValue("23:59:59", field("TIME"))).toMatchObject({ ok: true });

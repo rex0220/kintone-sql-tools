@@ -15,6 +15,9 @@ v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
   $err_count) へ生成時集約。大量違反でも tempTableMaxRows に当たらず完走。
 - WHERE / CHECK のサブテーブル子参照は取得前に ArgumentError で拒否。
   NUMBER 子フィールドに数値精度検証を適用。
+- B46: 空 (未選択) の選択系フィールドを ERR_CHOICE_INVALID と誤判定する
+  false positive を修正 (kintone は空 DROP_DOWN を受理・RADIO の空指定も
+  エラーにしない実機パリティ)。
 
 v3.6.1: IMPORT の面 UX 改善・修正。
 - プラグイン: IMPORT のファイル選択 UI をヘッダー上部へ移動 (横スクロール解消)。

@@ -38581,7 +38581,7 @@ function validateAndNormalizeDmlValue(raw, field, numberPrecision) {
       return { ok: false, code: "ERR_LENGTH_MAX", message: `${field.code} \u306F ${max} \u6587\u5B57\u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
     }
   }
-  if (CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
+  if (!isEmpty(value) && CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
     const selected = Array.isArray(value) ? value.map(String) : [String(value)];
     if (selected.some((choice) => !(choice in field.optionOrder))) {
       return { ok: false, code: "ERR_CHOICE_INVALID", message: `${field.code} \u306B\u5B9A\u7FA9\u5916\u306E\u9078\u629E\u80A2\u304C\u3042\u308A\u307E\u3059` };

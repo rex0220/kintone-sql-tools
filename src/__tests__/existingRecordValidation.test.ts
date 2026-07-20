@@ -422,3 +422,16 @@ test("B42 EXPLAIN reports scoped audit/fetch fields, schemas and row locator wit
   expect(summaryPlan).toContain("row locator=none");
   expect(summary.calls.get).toHaveLength(0);
 });
+
+test("B46: 空（未選択）の選択系セルはトップレベル・子とも ERR_CHOICE_INVALID にしない", async () => {
+  const { client } = makeClient({ fields: B42_FIELDS.concat([
+    { code: "topChoice", label: "topChoice", fieldType: "DROP_DOWN", optionOrder: { A: 0 } },
+  ]), records: [record({
+    $id: "11", top: "ok", topChoice: "",
+    T1: [subrow("c1", { req: "x", choiceChild: "" })], T2: [],
+  })] });
+  const result = await execute(
+    "VALIDATE APP41 (topChoice, T1(choiceChild))", client, { cacheContext: "b46-empty-choice" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([]);
+});
