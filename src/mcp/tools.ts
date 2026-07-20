@@ -488,6 +488,8 @@ export function createKsqlMcpTools(
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
   const validationContexts = new WeakMap<ValidationResult, ResolvedSqlContext>();
+  // validate で得た共通 AST/analysis 判定を mutate まで保持する。
+  // SQL 文字列の再検索はせず、単文・batch とも runtime 生成前に同じ判定で閉じる。
   const applyMutationValidations = new WeakSet<ValidationResult>();
 
   async function validate(input: ValidateInput): Promise<ValidationResult> {
@@ -506,9 +508,8 @@ export function createKsqlMcpTools(
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()]
       .map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
-    const hasApplyMutation = statements.some((statement) =>
-      statementHasApplyBlocks(statement)
-      && !("validateOnly" in statement && statement.validateOnly === true)
+    const hasApplyMutation = statements.some((statement, index) =>
+      analysis.statements[index]?.isDml === true && statementHasApplyBlocks(statement)
     );
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
@@ -836,7 +837,7 @@ export function createKsqlMcpTools(
 
     const validation = validated ?? await validate(input);
     if (applyMutationValidations.has(validation)) {
-      throw new Error("UnsupportedError: APPLY mutation is disabled in MCP v1");
+      throw new Error("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
     }
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");

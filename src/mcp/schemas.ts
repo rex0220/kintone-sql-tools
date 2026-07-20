@@ -43,14 +43,14 @@ const importSources = z.array(z.object({
 
 export const validateInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
+    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation."),
   profile,
   importSources,
 });
 
 export const explainInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
+    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); EXPLAIN performs no record or mutation API calls."),
   profile,
   maxRecords,
   cursorMaxActive,
@@ -59,7 +59,7 @@ export const explainInputSchema = z.object({
 
 export const queryInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;"),
+    .describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
   profile,
   maxRecords,
   fetchParallel,
@@ -81,7 +81,7 @@ export const queryInputSchema = z.object({
 
 export const mutateInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"),
+    .describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t. Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is rejected by MCP v3.8.0 before runtime or records API creation."),
   profile,
   allowDml: z.literal(true)
     .describe("Must be true to acknowledge that this call writes to kintone."),
@@ -90,7 +90,7 @@ export const mutateInputSchema = z.object({
   dmlMaxRows: z.number().int().positive()
     .describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows by default, adjustable via tempTableMaxRows), so choose it by intended write count only."),
   dmlMaxSubtableRows: z.number().int().positive().default(500)
-    .describe("APPLY changed-subtable-row cap (default 500). APPLY mutation is always rejected by v1 ksql_mutate; increasing this value does not enable it."),
+    .describe("APPLY changed-subtable-row cap (default 500). Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is always rejected by MCP v3.8.0 before runtime or records API creation; allowDml and increasing dmlMaxSubtableRows do not enable it."),
   fetchParallel,
   tempTableMaxRows,
   timeout,

@@ -142,12 +142,51 @@ try {
         arguments: { sql: "SELECT 'ok' AS result" },
       },
     },
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "ksql_validate",
+        arguments: {
+          sql: "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) ON UPDATE APPLY テーブル (REMOVE ALL ROWS) VALIDATE ONLY",
+        },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "ksql_mutate",
+        arguments: {
+          sql: "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) ON INSERT APPLY テーブル (APPEND (子) VALUES ('new'))",
+          allowDml: true,
+          confirmText: "yes",
+          dmlMaxRows: 100,
+          dmlMaxSubtableRows: 999,
+        },
+      },
+    },
   ].map((msg) => JSON.stringify(msg)).join("\n") + "\n";
 
   const rpc = run(process.execPath, [serverPath], { cwd: tmpDir, input: rpcInput });
   const messages = readJsonLines(rpc.stdout);
   const validation = messages.find((message) => message.id === 2);
   assert(validation?.result?.structuredContent?.ok === true, "Packed ksql_validate smoke failed.");
+  const applyValidation = messages.find((message) => message.id === 3);
+  assert(
+    applyValidation?.result?.structuredContent?.ok === true
+      && applyValidation.result.structuredContent.isReadOnly === true,
+    "Packed APPLY VALIDATE ONLY smoke failed."
+  );
+  const applyMutation = messages.find((message) => message.id === 4);
+  assert(
+    applyMutation?.result?.structuredContent?.ok === false
+      && applyMutation.result.structuredContent.error?.code === "UnsupportedError"
+      && applyMutation.result.structuredContent.error?.message?.includes("MCP v3.8.0"),
+    "Packed APPLY mutation must fail closed before runtime."
+  );
 
   process.stdout.write("[mcp-pack-smoke] ok\n");
 } catch (err) {
