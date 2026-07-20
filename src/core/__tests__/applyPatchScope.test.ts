@@ -112,3 +112,22 @@ describe("assertApplyScope v1.1", () => {
     ]) expect(() => validateV11(statement)).toThrow(/^UnsupportedError: APPLY v1\.1 scope/);
   });
 });
+
+describe("assertApplyScope v1.2", () => {
+  const validateV12 = (text: string): void => {
+    assertApplyScope("v1.2", new Parser(new Lexer(text).tokenize()).parse());
+  };
+
+  test("v1.1集合にREMOVE WHERE/ALL ROWSを加法許可する", () => {
+    expect(() => validateV12(sql("$id = 8", "REMOVE WHERE 子 = 'x'; APPEND (子) VALUES ('new')"))).not.toThrow();
+    expect(() => validateV12(sql("$id = 8", "REMOVE ALL ROWS"))).not.toThrow();
+  });
+
+  test("EXPECT ROWS/_idx/複数親はv1.2でも明示拒否する", () => {
+    for (const statement of [
+      sql("$id = 8", "REMOVE ALL ROWS EXPECT ROWS 1"),
+      sql("$id = 8", "REMOVE WHERE _idx=0"),
+      sql("$id = 8 OR $id = 9", "REMOVE ALL ROWS"),
+    ]) expect(() => validateV12(statement)).toThrow(/^UnsupportedError: APPLY v1\.2 scope/);
+  });
+});

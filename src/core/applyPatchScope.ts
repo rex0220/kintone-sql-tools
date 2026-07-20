@@ -5,7 +5,7 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2";
 
 const APPLY_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -27,6 +27,15 @@ const APPLY_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   }),
   "v1.1": Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND"]),
+    multipleBlocks: true,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
+  "v1.2": Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     multipleBlocks: true,
     expectRows: false,
     updateFrom: false,
@@ -95,6 +104,11 @@ function assertApplyScopeForCapabilities(
       if (operation.kind === "APPEND") {
         for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
         assertSafeApplyNode(operation.values, "APPEND values");
+        continue;
+      }
+      if (operation.kind === "REMOVE") {
+        if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
+        if (operation.selector.kind === "WHERE") assertSafeChildPredicate(operation.selector.where);
         continue;
       }
       if (operation.kind !== "PATCH") continue;

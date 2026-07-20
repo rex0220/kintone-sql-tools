@@ -7,7 +7,7 @@ import {
   toKintoneValue,
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
-import type { AppendOperation, FieldRef, InsertRow, PatchOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import type { AppendOperation, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
 
 export interface ApplySnapshotRow {
   readonly id: string;
@@ -38,7 +38,8 @@ interface ApplyPatchTablePlanBase {
 
 export type ApplyPatchOperationPlan =
   | { readonly kind: "PATCH"; readonly matchedRows: number; readonly changedRows: number }
-  | { readonly kind: "APPEND"; readonly addedRows: number };
+  | { readonly kind: "APPEND"; readonly addedRows: number }
+  | { readonly kind: "REMOVE"; readonly removedRows: number };
 
 export interface ApplyPatchOnlyTablePlan extends ApplyPatchTablePlanBase {
   readonly payloadShape: "PATCH_ONLY";
@@ -137,6 +138,8 @@ export function resolveApplyPatchMetadata(
           specified.add(field);
           assertWritableAssignment(field, block.field, fieldsByCode, targetChildren);
         }
+      } else if (operation.kind === "REMOVE" && operation.selector.kind === "WHERE") {
+        assertChildReferences(operation.selector.where, block.field, fieldsByCode, targetChildren);
       }
     }
   }
@@ -234,7 +237,7 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
-  const tablePlans: ApplyPatchOnlyTablePlan[] = [];
+  const tablePlans: ApplyPatchTablePlan[] = [];
   for (const block of statement.applyBlocks!) {
     const targetChildren = metadata.childrenByTable.get(block.field)!;
     const snapshotRows = readSnapshotRows(snapshot, block.field);
@@ -251,6 +254,9 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
     const appended: ApplyPatchPostImageRow[] = [];
     const operationPlans: ApplyPatchOperationPlan[] = [];
     const occupiedCells = new Set<string>();
+    const patchedRowIndices = new Set<number>();
+    const removedRowIndices = new Set<number>();
+    const hasRemove = block.operations.some((operation) => operation.kind === "REMOVE");
 
     // Every selector and PATCH RHS is evaluated only against snapshotRows. APPEND rows
     // are accumulated separately and therefore cannot become visible to later operations.
@@ -261,11 +267,30 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
         appended.push(...rows);
         continue;
       }
+      if (operation.kind === "REMOVE") {
+        const indices = resolveRemoveTargets(operation, snapshotRows, childTypeResolver, block.field);
+        operationPlans.push({ kind: "REMOVE", removedRows: indices.length });
+        for (const rowIndex of indices) {
+          const rowId = snapshotRows[rowIndex].id;
+          if (patchedRowIndices.has(rowIndex)) {
+            argument(`APPLY row ${rowId} is selected by both PATCH and REMOVE.`);
+          }
+          if (removedRowIndices.has(rowIndex)) {
+            argument(`APPLY removes row ${rowId} more than once.`);
+          }
+          removedRowIndices.add(rowIndex);
+        }
+        continue;
+      }
       if (operation.kind !== "PATCH") continue;
       const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
       operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
       for (const rowIndex of indices) {
         const row = snapshotRows[rowIndex];
+        if (removedRowIndices.has(rowIndex)) {
+          argument(`APPLY row ${row.id} is selected by both PATCH and REMOVE.`);
+        }
+        patchedRowIndices.add(rowIndex);
         const flat = flattenSubtableSnapshotRow(row, rowIndex);
         for (const assignment of operation.assignments) {
           const key = `${row.id}\u0000${assignment.field}`;
@@ -286,30 +311,41 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
       updates[cell.field] = { value: cell.value };
       updatesByIndex.set(cell.rowIndex, updates);
     }
-    const payloadRows: ApplyPatchPayloadRow[] = [
-      ...snapshotRows.map((row, index) => {
-        const updates = updatesByIndex.get(index);
-        return updates ? { id: row.id, value: updates } : { id: row.id };
-      }),
-      ...appended.map((row) => ({ value: row.value })),
-    ];
-    const postImageRows: ApplyPatchPostImageRow[] = [
-      ...snapshotRows.map((row, index) => ({
+    const survivorRows: ApplyPatchPostImageRow[] = snapshotRows.flatMap((row, index) =>
+      removedRowIndices.has(index) ? [] : [{
         id: row.id,
         value: { ...row.value, ...(updatesByIndex.get(index) ?? {}) },
-      })),
-      ...appended,
-    ];
-    tablePlans.push({
+      }]
+    );
+    const postImageRows: ApplyPatchPostImageRow[] = [...survivorRows, ...appended];
+    const base = {
       table: block.field,
       operations: operationPlans,
-      payloadShape: "PATCH_ONLY",
-      changedSubtableRows: updatesByIndex.size + appended.length,
-      deletedRows: 0,
+      changedSubtableRows: updatesByIndex.size + removedRowIndices.size + appended.length,
+      deletedRows: removedRowIndices.size,
       snapshotRowIds: snapshotRows.map((row) => row.id),
-      payloadRows,
       postImageRows,
-    });
+    };
+    if (hasRemove) {
+      tablePlans.push({
+        ...base,
+        payloadShape: "FULL_SURVIVORS",
+        removedRowIds: snapshotRows.flatMap((row, index) => removedRowIndices.has(index) ? [row.id] : []),
+        payloadRows: postImageRows.map((row) => ({ ...(row.id === undefined ? {} : { id: row.id }), value: row.value })),
+      });
+    } else {
+      tablePlans.push({
+        ...base,
+        payloadShape: "PATCH_ONLY",
+        payloadRows: [
+          ...snapshotRows.map((row, index) => {
+            const updates = updatesByIndex.get(index);
+            return updates ? { id: row.id, value: updates } : { id: row.id };
+          }),
+          ...appended.map((row) => ({ value: row.value })),
+        ],
+      });
+    }
   }
 
   const parentRow = kintoneRecordToProcessRow(snapshot);
@@ -419,8 +455,26 @@ function resolvePatchTargets(
   resolveFieldType: FieldTypeResolver,
   table: string
 ): number[] {
-  if (operation.selector.kind === "ALL_ROWS") return rows.map((_, index) => index);
-  const where = operation.selector.where;
+  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+}
+
+function resolveRemoveTargets(
+  operation: RemoveOperation,
+  rows: readonly ApplySnapshotRow[],
+  resolveFieldType: FieldTypeResolver,
+  table: string
+): number[] {
+  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+}
+
+function resolveSelectorTargets(
+  selector: PatchOperation["selector"] | RemoveOperation["selector"],
+  rows: readonly ApplySnapshotRow[],
+  resolveFieldType: FieldTypeResolver,
+  table: string
+): number[] {
+  if (selector.kind === "ALL_ROWS") return rows.map((_, index) => index);
+  const where = selector.where;
   const indices = rows.flatMap((row, index) =>
     evalWhere(where, flattenSubtableSnapshotRow(row, index), resolveFieldType) ? [index] : []
   );

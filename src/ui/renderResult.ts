@@ -45,7 +45,9 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
         `APPLY ${detail.field}: ${detail.operations.map((operation) =>
           operation.kind === "APPEND"
             ? `APPEND 追加 ${operation.addedRows}`
-            : `PATCH 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
+            : operation.kind === "REMOVE"
+              ? `REMOVE 削除 ${operation.removedRows}`
+              : `PATCH 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
         ).join("; ")} / 変更子行 ${detail.changedSubtableRows} / 削除 ${detail.deletedRows}`
       )).join("");
       const guardSummary = result.guards
@@ -59,8 +61,11 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
             `子 ${result.guards.subtableRows}/${result.guards.dmlMaxSubtableRows} / revision 必須 / 書込み 0`
           )
         : "";
-      if (result.errorCount === 0) return `${summary}${applySummary}${guardSummary}${renderInfo("検証エラーはありません。")}`;
-      return `${summary}${applySummary}${guardSummary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
+      const deletedSummary = result.deletedRows
+        ? renderInfo(`削除合計 ${result.deletedRows.total} 行 / 削除対象親 ${result.deletedRows.parentRows} 件`)
+        : "";
+      if (result.errorCount === 0) return `${summary}${applySummary}${deletedSummary}${guardSummary}${renderInfo("検証エラーはありません。")}`;
+      return `${summary}${applySummary}${deletedSummary}${guardSummary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
     }
   }
 }

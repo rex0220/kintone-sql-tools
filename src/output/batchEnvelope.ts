@@ -32,6 +32,7 @@ export interface BatchEnvelopeResultSet {
   importDetail?: DmlValidationResult["importDetail"];
   apply?: DmlValidationResult["apply"];
   guards?: DmlValidationResult["guards"];
+  deletedRows?: DmlValidationResult["deletedRows"];
 }
 
 export interface BatchEnvelope {
@@ -146,6 +147,7 @@ export function buildBatchEnvelope(
         ...(s.result.importDetail ? { importDetail: s.result.importDetail } : {}),
         ...(s.result.apply ? { apply: s.result.apply } : {}),
         ...(s.result.guards ? { guards: s.result.guards } : {}),
+        ...(s.result.deletedRows ? { deletedRows: s.result.deletedRows } : {}),
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない

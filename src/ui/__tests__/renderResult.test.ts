@@ -29,17 +29,23 @@ test("APPLY VALIDATION は件数summaryとguard警告をHTML escapeして表示�
     type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
     invalidRows: 0, errorCount: 0, columns: [], errors: [],
     apply: [{
-      field: "<テーブル&>", operations: [{ kind: "PATCH", matchedRows: 2, changedRows: 1 }],
-      changedSubtableRows: 1, deletedRows: 0,
+      field: "<テーブル&>", operations: [
+        { kind: "PATCH", matchedRows: 2, changedRows: 1 },
+        { kind: "REMOVE", removedRows: 1 },
+      ],
+      changedSubtableRows: 2, deletedRows: 1,
     }],
     guards: {
       revisionRequired: true, parentRows: 1, dmlMaxRows: 1,
       subtableRows: 2, dmlMaxSubtableRows: 1, wouldExceed: true,
     },
+    deletedRows: { total: 1, parentRows: 1 },
   });
   expect(html).toContain("APPLY &lt;テーブル&amp;&gt;: PATCH 一致 2 / 変更 1");
+  expect(html).toContain("REMOVE 削除 1");
   expect(html).toContain('class="ksql-warn"');
   expect(html).toContain("安全ガード超過: 親 1/1, 子 2/1（書込み 0）");
+  expect(html).toContain("削除合計 1 行 / 削除対象親 1 件");
   expect(html).not.toContain("<テーブル&>");
 });
 

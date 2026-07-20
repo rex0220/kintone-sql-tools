@@ -187,7 +187,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
 
   statements.forEach((stmt, index) => {
     try {
-      assertApplyScope("v1.1", stmt);
+      assertApplyScope("v1.2", stmt);
       validateKlikeStatement(stmt);
     } catch (error) {
       if (error instanceof KlikeValidationError) {

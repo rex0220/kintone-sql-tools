@@ -86,7 +86,7 @@ test("PATCH_ONLY と FULL_SURVIVORS のtable単位shape混在を検証する", (
       ...plan.tables,
       {
         table: "別表",
-        operations: [{ kind: "PATCH", matchedRows: 1, changedRows: 1 }],
+        operations: [{ kind: "REMOVE", removedRows: 1 }],
         payloadShape: "FULL_SURVIVORS",
         changedSubtableRows: 1,
         deletedRows: 1,
@@ -111,7 +111,7 @@ test("FULL_SURVIVORS の列挙漏れ・集合交差を拒否する", () => {
   const plan = basePlan();
   const invalid = {
     table: "別表",
-    operations: [{ kind: "PATCH" as const, matchedRows: 1, changedRows: 1 }],
+    operations: [{ kind: "REMOVE" as const, removedRows: 1 }],
     payloadShape: "FULL_SURVIVORS" as const,
     changedSubtableRows: 1,
     deletedRows: 1,
@@ -121,9 +121,56 @@ test("FULL_SURVIVORS の列挙漏れ・集合交差を拒否する", () => {
     postImageRows: [{ id: "201", value: { 子: { value: "a" } } }],
   };
   expect(() => applyPatchPlanToKintone({ ...plan, tables: [invalid] }))
-    .toThrow("does not partition every snapshot row");
+    .toThrow("must retain every survivor in snapshot order");
   expect(() => applyPatchPlanToKintone({
     ...plan,
-    tables: [{ ...invalid, removedRowIds: ["201", "202", "203"] }],
+    tables: [{
+      ...invalid,
+      operations: [{ kind: "REMOVE", removedRows: 3 }],
+      deletedRows: 3,
+      removedRowIds: ["201", "202", "203"],
+    }],
   })).toThrow("intersecting survivor/removed id 201");
+});
+
+test("FULL_SURVIVORS payloadの存続行からchild値を1つでも落とすと拒否しPUTしない", async () => {
+  const putRecords = jest.fn(async (_params: unknown) => undefined);
+  const plan = basePlan();
+  const full = {
+    table: "別表",
+    operations: [{ kind: "REMOVE" as const, removedRows: 1 }],
+    payloadShape: "FULL_SURVIVORS" as const,
+    changedSubtableRows: 1,
+    deletedRows: 1,
+    snapshotRowIds: ["201", "202"],
+    removedRowIds: ["202"],
+    payloadRows: [{ id: "201", value: { 子: { value: "keep" } } }],
+    postImageRows: [{ id: "201", value: { 子: { value: "keep" }, 未指定: { value: "also-keep" } } }],
+  };
+  await expect((async () => {
+    const params = applyPatchPlanToKintone({ ...plan, tables: [full] });
+    await putRecords(params);
+  })()).rejects.toThrow("payload must contain every post-image child value");
+  expect(putRecords).not.toHaveBeenCalled();
+});
+
+test("FULL_SURVIVORS plan/payloadからsnapshot存続rowを1件落とすとconverter拒否・PUT 0", async () => {
+  const putRecords = jest.fn(async (_params: unknown) => undefined);
+  const plan = basePlan();
+  const omitted = {
+    table: "別表",
+    operations: [{ kind: "REMOVE" as const, removedRows: 1 }],
+    payloadShape: "FULL_SURVIVORS" as const,
+    changedSubtableRows: 1,
+    deletedRows: 1,
+    snapshotRowIds: ["201", "202", "203"],
+    removedRowIds: ["202"],
+    payloadRows: [{ id: "201", value: { 子: { value: "a" } } }],
+    postImageRows: [{ id: "201", value: { 子: { value: "a" } } }],
+  };
+  await expect((async () => {
+    const params = applyPatchPlanToKintone({ ...plan, tables: [omitted] });
+    await putRecords(params);
+  })()).rejects.toThrow("must retain every survivor in snapshot order");
+  expect(putRecords).not.toHaveBeenCalled();
 });

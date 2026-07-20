@@ -317,6 +317,7 @@ function toDmlValidationPayload(result: DmlValidationResult) {
     ...(result.importDetail ? { importDetail: result.importDetail } : {}),
     ...(result.apply ? { apply: result.apply } : {}),
     ...(result.guards ? { guards: result.guards } : {}),
+    ...(result.deletedRows ? { deletedRows: result.deletedRows } : {}),
   };
 }
 

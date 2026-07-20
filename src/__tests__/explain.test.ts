@@ -72,12 +72,12 @@ test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し
     "inserted rows visible:  no",
     "revision guard:         required",
     "revision:               unknown (records API not called)",
-    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes",
+    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=none",
     "post-image validation:  required (B43 equivalent)",
     "parent rows:            unknown (records API not called)",
     "matched subtable rows:  unknown (records API not called)",
     "validation errors:      unknown (records API not called)",
-    "deleted rows:           0 (static for PATCH)",
+    "deleted rows:           0 (static without REMOVE)",
     "dmlMaxRows:             7",
     "dmlMaxSubtableRows:     9",
     "MCP mutation:           disabled in v1",
@@ -89,6 +89,19 @@ test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し
   expect(getRecords).not.toHaveBeenCalled();
   expect(putRecords).not.toHaveBeenCalled();
   expect(plan.join("\n")).not.toMatch(/revision:\s+\d|matched subtable rows:\s+\d/);
+
+  const remove = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (REMOVE ALL ROWS)",
+    client,
+    { cacheContext: "apply-remove-explain" }
+  ) as SelectResult;
+  expect(remove.rows.map((row) => row.plan)).toEqual(expect.arrayContaining([
+    "operations:             REMOVE",
+    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=FULL_SURVIVORS",
+    "deleted rows:           unknown (records API not called)",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
 });
 
 // ----------------------------------------------------------------

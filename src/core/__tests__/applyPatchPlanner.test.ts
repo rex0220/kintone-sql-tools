@@ -151,6 +151,74 @@ describe("buildApplyPatchPlan", () => {
     expect(plan.tables[0].postImageRows.slice(2).map((row) => row.value.結果.value)).toEqual(["7", "8"]);
     expect(plan.tables[1].payloadRows).toEqual([{ value: { 別子: { value: "new" } } }]);
   });
+
+  test.each([
+    ["先頭", "101", ["102", "103"]],
+    ["中間", "102", ["101", "103"]],
+    ["末尾", "103", ["101", "102"]],
+  ])("REMOVE %s行はFULL_SURVIVORSで存続順と全値を保持する", (_label, rid, survivors) => {
+    const record = snapshot([
+      { id: "101", value: { 数値: { value: "1" }, 結果: { value: "11" }, 未指定: { value: "a" } } },
+      { id: "102", value: { 数値: { value: "2" }, 結果: { value: "22" }, 未指定: { value: "b" } } },
+      { id: "103", value: { 数値: { value: "3" }, 結果: { value: "33" }, 未指定: { value: "c" } } },
+    ]);
+    const plan = buildApplyPatchPlan({
+      statement: statement(`REMOVE WHERE _rid='${rid}'`), snapshot: record, fieldInfos: fields,
+    });
+    const table = plan.tables[0];
+    expect(table).toMatchObject({ payloadShape: "FULL_SURVIVORS", deletedRows: 1, changedSubtableRows: 1 });
+    expect(table.operations).toEqual([{ kind: "REMOVE", removedRows: 1 }]);
+    expect(table.postImageRows.map((row) => row.id)).toEqual(survivors);
+    expect(table.payloadRows).toEqual(table.postImageRows);
+  });
+
+  test("複数REMOVE・全削除・0件一般述語・空table ALL ROWSをsnapshot上で解決する", () => {
+    const multiple = buildApplyPatchPlan({
+      statement: statement("REMOVE WHERE 数値 >= 1"), snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(multiple.tables[0]).toMatchObject({ payloadShape: "FULL_SURVIVORS", deletedRows: 2 });
+    expect(multiple.tables[0].payloadRows).toEqual([]);
+
+    const zero = buildApplyPatchPlan({
+      statement: statement("REMOVE WHERE 数値 = 999"), snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(zero.tables[0]).toMatchObject({ payloadShape: "FULL_SURVIVORS", deletedRows: 0, changedSubtableRows: 0 });
+    expect(zero.tables[0].payloadRows).toEqual(zero.tables[0].postImageRows);
+
+    const empty = buildApplyPatchPlan({
+      statement: statement("REMOVE ALL ROWS"), snapshot: snapshot([]), fieldInfos: fields,
+    });
+    expect(empty.tables[0]).toMatchObject({ payloadShape: "FULL_SURVIVORS", deletedRows: 0 });
+    expect(empty.tables[0].payloadRows).toEqual([]);
+  });
+
+  test("REMOVE tableだけFULL_SURVIVORSにし、APPENDは削除selectorから不可視・存続行末尾に置く", () => {
+    const stmt = parseSqlStatement(
+      "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+      + "APPLY テーブル (APPEND (結果) VALUES (7), (8); REMOVE WHERE 数値=7) "
+      + "APPLY 別表 (APPEND (別子) VALUES ('new'))"
+    ) as UpdateStatement;
+    const plan = buildApplyPatchPlan({ statement: stmt, snapshot: snapshot(), fieldInfos: fields });
+    expect(plan.tables.map((table) => table.payloadShape)).toEqual(["FULL_SURVIVORS", "PATCH_ONLY"]);
+    expect(plan.tables[0]).toMatchObject({ deletedRows: 0, changedSubtableRows: 2 });
+    expect(plan.tables[0].postImageRows.map((row) => row.id)).toEqual(["101", "102", undefined, undefined]);
+    expect(plan.tables[0].postImageRows.slice(2).map((row) => row.value.結果.value)).toEqual(["7", "8"]);
+  });
+
+  test("PATCH/REMOVE行重複と同一行の複数REMOVEをPUT plan前に拒否する", () => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果=1 WHERE _rid='101'; REMOVE WHERE _rid='101'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY row 101 is selected by both PATCH and REMOVE");
+    expect(() => buildApplyPatchPlan({
+      statement: statement("REMOVE WHERE _rid='101'; PATCH SET 結果=1 WHERE _rid='101'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY row 101 is selected by both PATCH and REMOVE");
+    expect(() => buildApplyPatchPlan({
+      statement: statement("REMOVE WHERE _rid='101'; REMOVE WHERE 数値=1"),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY removes row 101 more than once");
+  });
 });
 
 describe("resolveApplyPatchMetadata", () => {

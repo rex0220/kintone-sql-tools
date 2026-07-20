@@ -221,10 +221,11 @@ test("複数tableのPATCH/APPENDを1 recordへ合成し、defaultを明示payloa
     expect(context?.applyDetail).toEqual({
       kind: "APPLY_PATCH", parentRows: 1, changedSubtableRows: 4, addedSubtableRows: 3,
       tables: [
-        { table: "テーブル", patchRows: 1, appendRows: 2 },
-        { table: "別表", patchRows: 0, appendRows: 1 },
+        { table: "テーブル", patchRows: 1, appendRows: 2, removeRows: 0 },
+        { table: "別表", patchRows: 0, appendRows: 1, removeRows: 0 },
       ],
-      deletedRows: 0, revisionRequired: true,
+      deletedRows: 0, deletedParentRows: 0, revisionRequired: true,
+      irreversible: true, retryOnRevisionConflict: false,
     });
     return true;
   });
@@ -353,9 +354,12 @@ test("全 preflight とガード完了後に applyDetail 付き confirm を1回�
       parentRows: 1,
       changedSubtableRows: 1,
       addedSubtableRows: 0,
-      tables: [{ table: "テーブル", patchRows: 1, appendRows: 0 }],
+      tables: [{ table: "テーブル", patchRows: 1, appendRows: 0, removeRows: 0 }],
       deletedRows: 0,
+      deletedParentRows: 0,
       revisionRequired: true,
+      irreversible: true,
+      retryOnRevisionConflict: false,
     });
     return false;
   });
@@ -372,6 +376,97 @@ test("revision conflict を再GET・retryせずそのまま失敗させる", asy
   await expect(execute(sql, mock.client, {
     cacheContext: "apply-revision-conflict", allowApplyMutation: true,
   })).rejects.toThrow("GAIA_CO02: revision conflict");
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
+});
+
+test("REMOVE tableだけFULL_SURVIVORS payloadに切替え、存続順・全child値とAPPEND順を保持する", async () => {
+  const record = parent("8", 3);
+  const rows = record.テーブル.value as any[];
+  rows[0].value.子.value = "a";
+  rows[1].value.子.value = "b";
+  rows[2].value.子.value = "c";
+  const mock = makeClient([record]);
+  const statement = "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+    + "APPLY テーブル (REMOVE WHERE _rid='102'; APPEND (子) VALUES ('new')) "
+    + "APPLY 別表 (APPEND (別子) VALUES ('other'))";
+  await expect(execute(statement, mock.client, {
+    cacheContext: "apply-remove-full-survivors", allowApplyMutation: true,
+  })).resolves.toMatchObject({ updatedCount: 1 });
+  const payload = (mock.putRecords.mock.calls as unknown as [[KintonePutParams]])[0][0];
+  expect(payload.records[0].record.テーブル.value).toEqual([
+    { id: "101", value: { 子: { value: "a" }, 子添付: { value: [{ fileKey: "opaque" }] } } },
+    { id: "103", value: { 子: { value: "c" }, 子添付: { value: [{ fileKey: "opaque" }] } } },
+    { value: { 子: { value: "new" } } },
+  ]);
+  expect(payload.records[0].record.別表.value).toEqual([{ value: { 別子: { value: "other" } } }]);
+});
+
+test("VALIDATE ONLYはREMOVE内訳・table別/合計削除数・削除対象親を返しPUT 0", async () => {
+  const mock = makeClient([parent("8", 3)]);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (REMOVE WHERE _rid='102') VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-remove-validate" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    apply: [{
+      field: "テーブル",
+      operations: [{ kind: "REMOVE", removedRows: 1 }],
+      changedSubtableRows: 1,
+      deletedRows: 1,
+    }],
+    deletedRows: { total: 1, parentRows: 1 },
+    guards: { subtableRows: 1, revisionRequired: true, wouldExceed: false },
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("削除確認detailはtable別REMOVE・総削除・削除対象親・不可逆・非retryを明示する", async () => {
+  const mock = makeClient([parent("8", 2)]);
+  const confirm = jest.fn(async (_count, _operation, context) => {
+    expect(context?.applyDetail).toEqual({
+      kind: "APPLY_PATCH",
+      parentRows: 1,
+      changedSubtableRows: 1,
+      addedSubtableRows: 0,
+      tables: [{ table: "テーブル", patchRows: 0, appendRows: 0, removeRows: 1 }],
+      deletedRows: 1,
+      deletedParentRows: 1,
+      revisionRequired: true,
+      irreversible: true,
+      retryOnRevisionConflict: false,
+    });
+    return false;
+  });
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (REMOVE WHERE _rid='101')",
+    mock.client,
+    { cacheContext: "apply-remove-confirm", allowApplyMutation: true, confirm }
+  )).rejects.toThrow("UPDATE をキャンセルしました");
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("PATCH∪REMOVE∪APPEND distinct総和がdmlMaxSubtableRows超過ならPUT 0", async () => {
+  const mock = makeClient([parent("8", 3)]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル ("
+      + "PATCH SET 子='x' WHERE _rid='101'; REMOVE WHERE _rid='102'; APPEND (子) VALUES ('new'))",
+    mock.client,
+    { cacheContext: "apply-remove-guard-union", allowApplyMutation: true, dmlMaxSubtableRows: 2 }
+  )).rejects.toThrow("APPLY changed subtable rows (3) exceed dmlMaxSubtableRows (2)");
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("REMOVE revision conflictも再GET・retryしない", async () => {
+  const mock = makeClient([parent("8", 2)]);
+  mock.putRecords.mockRejectedValueOnce(new Error("GAIA_CO02: revision conflict"));
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (REMOVE WHERE _rid='101')",
+    mock.client,
+    { cacheContext: "apply-remove-revision-conflict", allowApplyMutation: true }
+  )).rejects.toThrow("GAIA_CO02: revision conflict");
   expect(mock.getRecords).toHaveBeenCalledTimes(1);
   expect(mock.putRecords).toHaveBeenCalledTimes(1);
 });

@@ -54,10 +54,13 @@ test("B44 Phase 1: APPLY mutation / VALIDATE ONLY を正しく分類する", () 
   });
 });
 
-test("B44 Phase 7: batch は全実行前に APPLY v1.1 scope を検証する", () => {
+test("B44 Phase 8: batch は全実行前に APPLY v1.2 scope を検証する", () => {
   expect(() => analyze(
     "SELECT * FROM APP100; UPDATE APP100 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (REMOVE ALL ROWS)"
-  )).toThrow(/UnsupportedError: APPLY v1\.1 scope does not support REMOVE/);
+  )).not.toThrow();
+  expect(() => analyze(
+    "SELECT * FROM APP100; UPDATE APP100 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (REMOVE ALL ROWS EXPECT ROWS 1)"
+  )).toThrow(/UnsupportedError: APPLY v1\.2 scope does not support EXPECT ROWS/);
 });
 
 test("B30: ORDER BY は SELECT / WINDOW / UNION / WITH / temp を横断して完全入力を要求する", () => {

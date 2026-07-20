@@ -281,6 +281,7 @@ describe("MCP tools", () => {
         revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
         subtableRows: 3, dmlMaxSubtableRows: 500, wouldExceed: false,
       },
+      deletedRows: { total: 0, parentRows: 0 },
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const result = await tools.query({
@@ -292,6 +293,7 @@ describe("MCP tools", () => {
         { kind: "APPEND", addedRows: 1 },
       ] }],
       guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
+      deletedRows: { total: 0, parentRows: 0 },
     });
     expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
   });

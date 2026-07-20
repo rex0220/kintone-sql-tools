@@ -612,11 +612,11 @@ function normalizeUnique(values: string[]): string[] {
 
 function formatApplyConfirmLines(detail: NonNullable<DmlConfirmContext["applyDetail"]>): string[] {
   return [
-    `[APPLY PATCH/APPEND Confirm] parents=${detail.parentRows} changedSubtableRows=${detail.changedSubtableRows} addedSubtableRows=${detail.addedSubtableRows}`,
-    ...detail.tables.map((table) => `table=${table.table} PATCH=${table.patchRows} APPEND=${table.appendRows}`),
-    `deleted=${detail.deletedRows} revisionRequired=${detail.revisionRequired}`,
-    "revision conflict: no automatic retry",
-    "WARNING: this operation is irreversible.",
+    `[APPLY PATCH/APPEND/REMOVE Confirm] parents=${detail.parentRows} changedSubtableRows=${detail.changedSubtableRows} addedSubtableRows=${detail.addedSubtableRows}`,
+    ...detail.tables.map((table) => `table=${table.table} PATCH=${table.patchRows} APPEND=${table.appendRows} REMOVE=${table.removeRows}`),
+    `deleted=${detail.deletedRows} deletedParents=${detail.deletedParentRows} revisionRequired=${detail.revisionRequired}`,
+    `revision conflict retry=${detail.retryOnRevisionConflict}`,
+    `irreversible=${detail.irreversible}`,
   ];
 }
 

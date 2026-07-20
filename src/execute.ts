@@ -383,15 +383,18 @@ export interface DmlValidationResult {
   apply?: ApplyValidationDetail[];
   /** B44 APPLY safety-guard diagnostics. Absent for ordinary VALIDATE ONLY results. */
   guards?: ApplyGuardDetail;
+  /** B44 REMOVE totals. Present for APPLY VALIDATE ONLY. */
+  deletedRows?: { readonly total: number; readonly parentRows: 0 | 1 };
 }
 
 export interface ApplyValidationDetail {
   readonly field: string;
   readonly operations: readonly {
-    readonly kind: "PATCH" | "APPEND";
+    readonly kind: "PATCH" | "APPEND" | "REMOVE";
     readonly matchedRows?: number;
     readonly changedRows?: number;
     readonly addedRows?: number;
+    readonly removedRows?: number;
   }[];
   readonly changedSubtableRows: number;
   readonly deletedRows: number;
@@ -452,9 +455,13 @@ export interface ApplyConfirmDetail {
     readonly table: string;
     readonly patchRows: number;
     readonly appendRows: number;
+    readonly removeRows: number;
   }[];
   readonly deletedRows: number;
+  readonly deletedParentRows: 0 | 1;
   readonly revisionRequired: true;
+  readonly irreversible: true;
+  readonly retryOnRevisionConflict: false;
 }
 
 // ============================================================
@@ -754,7 +761,7 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("v1.1", stmt);
+  assertApplyScope("v1.2", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1355,7 +1362,7 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("v1.1", resolvedStmt);
+  assertApplyScope("v1.2", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -5684,6 +5691,10 @@ async function executeApplyPatchUpdate(
         dmlMaxSubtableRows,
         wouldExceed,
       },
+      deletedRows: {
+        total: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
+        parentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
+      },
     };
     materializedMetaByValidationResult.set(
       result,
@@ -5715,10 +5726,15 @@ async function executeApplyPatchUpdate(
         const appendRows = table.operations.reduce(
           (sum, operation) => sum + (operation.kind === "APPEND" ? operation.addedRows : 0), 0
         );
-        return { table: table.table, patchRows: table.changedSubtableRows - appendRows, appendRows };
+        const removeRows = table.deletedRows;
+        const patchRows = table.changedSubtableRows - appendRows - removeRows;
+        return { table: table.table, patchRows, appendRows, removeRows };
       }),
       deletedRows: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
+      deletedParentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
       revisionRequired: true,
+      irreversible: true,
+      retryOnRevisionConflict: false,
     };
     const ok = await options.confirm(plan.parentRows, "UPDATE", {
       statementIndex: 0,
@@ -6581,7 +6597,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("v1.1", stmt);
+    assertApplyScope("v1.2", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -7646,8 +7662,9 @@ function buildUpdateApplyPlan(
   dmlMaxRows: number,
   dmlMaxSubtableRows: number
 ): string[] {
-  const block = stmt.applyBlocks![0];
-  const selectorKinds = block.operations.map((operation) => {
+  const blocks = stmt.applyBlocks!;
+  const operations = blocks.flatMap((block) => block.operations);
+  const selectorKinds = operations.map((operation) => {
     if (operation.kind === "APPEND") return "APPEND";
     if (operation.selector.kind === "ALL_ROWS") return "ALL_ROWS";
     const where = operation.selector.where;
@@ -7656,26 +7673,27 @@ function buildUpdateApplyPlan(
       ? "_rid"
       : "SAFE_PREDICATE";
   });
-  const operationKinds = [...new Set(block.operations.map((operation) => operation.kind))];
+  const operationKinds = [...new Set(operations.map((operation) => operation.kind))];
+  const hasRemove = operationKinds.includes("REMOVE");
   return [
     ...(label ? [label] : []),
     "statement:              UPDATE APPLY",
     `target app:             APP${stmt.appId}`,
     `parent selector:        ${safeWhereToKintone(stmt.where)}`,
     "parent cardinality:     single",
-    `apply target:           ${block.field} (SUBTABLE)`,
+    `apply target:           ${blocks.map((block) => `${block.field} (SUBTABLE)`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,
     "snapshot evaluation:    yes",
     "inserted rows visible:  no",
     "revision guard:         required",
     "revision:               unknown (records API not called)",
-    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes",
+    `payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=${hasRemove ? "FULL_SURVIVORS" : "none"}`,
     "post-image validation:  required (B43 equivalent)",
     "parent rows:            unknown (records API not called)",
     "matched subtable rows:  unknown (records API not called)",
     "validation errors:      unknown (records API not called)",
-    "deleted rows:           0 (static for PATCH)",
+    `deleted rows:           ${hasRemove ? "unknown (records API not called)" : "0 (static without REMOVE)"}`,
     `dmlMaxRows:             ${dmlMaxRows}`,
     `dmlMaxSubtableRows:     ${dmlMaxSubtableRows}`,
     "MCP mutation:           disabled in v1",
