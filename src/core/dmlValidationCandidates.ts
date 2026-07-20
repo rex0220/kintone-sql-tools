@@ -39,6 +39,8 @@ export function validateDmlCandidates(
   validateMissingCreateFields = true,
   includePreErrors = true
 ): { errors: ProcessRow[]; invalidRows: number; invalidRowNumbers: Set<number> } {
+  // Existing DML contract: only fields present in each write payload are validated here.
+  // B44 APPLY must validate the complete post-image via validatePostImage instead.
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors: ProcessRow[] = [];
   const invalid = new Set<number>();

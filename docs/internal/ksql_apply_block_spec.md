@@ -386,6 +386,8 @@ GET: $id + $revision + 親SET参照列 + 対象サブテーブル全体
 - 将来の `APPEND` 行の必須、既定値、型、選択肢、長さ、数値範囲、B29整数部桁数。
 - 複数 `APPLY` 合成後の最終レコード。
 
+FILE は監査可能制約を持たないため post-image 検証の対象外とし、payload にも含めない（サブテーブルのパッチ形 payload は未送信セルを保持する）。
+
 検証対象メタデータの導出とセル検証はB42と共有する。B42 は子フィールドの生値と `KintoneFieldInfo` を `validateAndNormalizeDmlValue` へ渡し、必須、数値範囲・桁、文字列長、選択肢を検証する（[ksql_validate_subtable_audit_spec.md:109](ksql_validate_subtable_audit_spec.md#L109)-[115](ksql_validate_subtable_audit_spec.md#L115)。検証 primitive の実装箇所は [dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106) である。
 
 候補生成、親単位の invalid 判定、post-image 構築、行ロケータ付与はB44/B43用に新設する。セル単位 primitive だけを再利用し、「payload列だけの検証」に戻してはならない。

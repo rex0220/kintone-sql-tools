@@ -28,6 +28,7 @@ function makeClient(records: KintoneRecord[], infos = fieldInfos) {
   const getRecords = jest.fn(async () => ({ records }));
   const putRecords = jest.fn(async () => undefined);
   const getFields = jest.fn(async () => infos);
+  const getNumberPrecision = jest.fn(async () => ({ digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }));
   const client: KintoneClient = {
     getRecords,
     openCursor: async () => { throw new Error("unexpected cursor"); },
@@ -36,10 +37,10 @@ function makeClient(records: KintoneRecord[], infos = fieldInfos) {
     deleteRecords: async () => { throw new Error("unexpected delete"); },
     getApps: async () => [],
     getFields,
-    getNumberPrecision: async () => ({ digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" }),
+    getNumberPrecision,
     getProcessStatuses: async () => ({ enable: false, states: [] }),
   };
-  return { client, getRecords, putRecords, getFields };
+  return { client, getRecords, putRecords, getFields, getNumberPrecision };
 }
 
 const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
@@ -88,3 +89,56 @@ test("target/child/writable metadata error は records API 前に拒否する", 
   expect(missingTable.getRecords).not.toHaveBeenCalled();
 });
 
+test("post-image error は固定列順の診断を含む ArgumentError で停止し PUT 0", async () => {
+  const constrained = fieldInfos.map((field) => field.code === "別子"
+    ? { ...field, required: true }
+    : field.code === "子"
+      ? { ...field, minLength: "2" }
+      : field);
+  const invalid = parent();
+  invalid.別表 = { value: [{ id: "201", value: { 別子: { value: "" } } }] } as never;
+  const mock = makeClient([invalid], constrained);
+
+  let error: Error | undefined;
+  try {
+    await execute(sql, mock.client, { cacheContext: "apply-post-image-errors" });
+  } catch (caught) {
+    error = caught as Error;
+  }
+  expect(error?.message).toContain("ArgumentError: APPLY post-image validation failed");
+  const diagnostic = JSON.parse(error!.message.slice(error!.message.indexOf("{") )) as {
+    columns: string[]; errors: Array<Record<string, string>>;
+  };
+  expect(diagnostic.columns).toEqual([
+    "$id", "親",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
+  expect(diagnostic.errors).toEqual([
+    expect.objectContaining({
+      $id: "8", 親: "after", $err_field: "別子", $err_subtable: "別表", $err_subrow: "1", $err_subrow_id: "201",
+    }),
+  ]);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("トップレベル post-image error の locator 3列は空で $id は重複しない", async () => {
+  const constrained = fieldInfos.map((field) => field.code === "親数値"
+    ? { ...field, maxValue: "0" }
+    : field);
+  const mock = makeClient([parent()], constrained);
+  await expect(execute(sql, mock.client, { cacheContext: "apply-post-image-top-error" }))
+    .rejects.toThrow(/\"\$err_subtable\":\"\",\"\$err_subrow\":\"\",\"\$err_subrow_id\":\"\"/);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("post-image に NUMBER セルがない場合は precision cache を読まない", async () => {
+  const withoutNumbers = fieldInfos.filter((field) => field.code !== "親数値");
+  const record = parent();
+  delete record.親数値;
+  const mock = makeClient([record], withoutNumbers);
+  await expect(execute(sql, mock.client, { cacheContext: "apply-no-number-precision" }))
+    .rejects.toThrow("UnsupportedError: APPLY execution is not enabled in this phase");
+  expect(mock.getNumberPrecision).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});

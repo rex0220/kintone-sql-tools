@@ -110,7 +110,17 @@ import {
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
-import { renderExistingValidationValue } from "./core/existingRecordValidation";
+import {
+  buildValidationCellLocator,
+  renderExistingValidationValue,
+  resolveExistingValidationTargets,
+  type ExistingValidationTarget,
+} from "./core/existingRecordValidation";
+import {
+  buildPostImageFieldIndex,
+  postImageNeedsNumberPrecision,
+  validatePostImage,
+} from "./core/postImageValidation";
 import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, evaluateCustomChecks, type CheckFieldRef } from "./core/dmlCustomCheck";
 import {
   classifyWhereCapability,
@@ -754,82 +764,6 @@ const EXISTING_VALIDATION_SUMMARY_COLUMNS = [
   "$id", "$err_subtable", "$err_field", "$err_code", "$err_count",
 ];
 
-interface ExistingValidationTarget {
-  field: KintoneFieldInfo;
-  subtableCode?: string;
-}
-
-function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
-  return field.required === true
-    || field.minValue !== undefined
-    || field.maxValue !== undefined
-    || field.minLength !== undefined
-    || field.maxLength !== undefined
-    || field.optionOrder !== undefined;
-}
-
-function resolveExistingValidationTargets(
-  stmt: ValidateStatement,
-  fieldInfos: readonly KintoneFieldInfo[]
-): ExistingValidationTarget[] {
-  const topByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
-  const childrenByTable = new Map<string, KintoneFieldInfo[]>();
-  for (const field of fieldInfos) {
-    if (!field.inSubtable || !field.subtableCode) continue;
-    const children = childrenByTable.get(field.subtableCode) ?? [];
-    children.push(field);
-    childrenByTable.set(field.subtableCode, children);
-  }
-  const auditable = (field: KintoneFieldInfo) => field.fieldType === "NUMBER" || hasAuditableConstraint(field);
-  if (stmt.targets === undefined) return [
-    ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "SUBTABLE" && auditable(field)),
-    ...fieldInfos.filter((field) => field.inSubtable && !!field.subtableCode && auditable(field)),
-  ].map((field) => ({ field, ...(field.subtableCode ? { subtableCode: field.subtableCode } : {}) }));
-
-  const result: ExistingValidationTarget[] = [];
-  const seen = new Set<string>();
-  const add = (field: KintoneFieldInfo, subtableCode?: string): void => {
-    const key = subtableCode ? `${subtableCode}\u0000${field.code}` : field.code;
-    if (seen.has(key)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} が重複しています。`);
-    seen.add(key);
-    if (!auditable(field)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} には監査可能な制約がありません。`);
-    result.push({ field, ...(subtableCode ? { subtableCode } : {}) });
-  };
-  for (const target of stmt.targets) {
-    if (target.kind === "SUBTABLE") {
-      const children = childrenByTable.get(target.subtableCode);
-      if (!children) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} は存在しません。`);
-      if (target.children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} には1つ以上の子フィールドが必要です。`);
-      for (const code of target.children) {
-        const child = children.find((field) => field.code === code);
-        if (!child) {
-          const belongsElsewhere = [...childrenByTable.entries()].some(([table, fields]) => table !== target.subtableCode && fields.some((field) => field.code === code));
-          throw new Error(belongsElsewhere
-            ? `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に属していません。`
-            : `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に存在しません。`);
-        }
-        add(child, target.subtableCode);
-      }
-      continue;
-    }
-    const code = target.field;
-    if (code === "$id") throw new Error("ArgumentError: VALIDATE ではシステムフィールド $id を監査できません。");
-    const top = topByCode.get(code);
-    if (top?.fieldType === "SUBTABLE") {
-      const children = (childrenByTable.get(code) ?? []).filter(auditable);
-      if (children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${code} には監査可能な子フィールドがありません。`);
-      children.forEach((child) => add(child, code));
-      continue;
-    }
-    if (top) { add(top); continue; }
-    if ([...childrenByTable.values()].some((children) => children.some((field) => field.code === code))) {
-      throw new Error(`ArgumentError: VALIDATE の子フィールド ${code} は所有サブテーブルを含む T(${code}) 形式で指定してください。`);
-    }
-    throw new Error(`ArgumentError: VALIDATE のフィールド ${code} は存在しません。`);
-  }
-  return result;
-}
-
 function collectValidateWhereFields(where: WhereExpr | null): string[] {
   const fields: string[] = [];
   const seen = new Set<string>();
@@ -1013,11 +947,14 @@ async function executeExistingRecordValidationCore(
         for (const target of childTargets) {
           const raw = tableRow.value?.[target.field.code]?.value;
           const validation = validateAndNormalizeDmlValue(raw, target.field, numberPrecision);
-          if (!validation.ok) appendError({
+          if (!validation.ok) {
+            const locator = buildValidationCellLocator(tableCode, i, tableRow);
+            appendError({
             id: row.id, field: target.field.code, code: validation.code,
             message: validation.message, value: renderExistingValidationValue(raw, target.field.fieldType),
-            subtable: tableCode, subrow: i + 1, subrowId: String(tableRow.id ?? ""),
+            ...locator,
           });
+          }
         }
       }
     }
@@ -5637,7 +5574,21 @@ async function executeApplyPatchUpdate(
   }
   requireRevision(response.records[0]);
   const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
-  // Phase 2 は PUT draft の完全性まで検証するが mutation API へは接続しない。
+  const fieldIndex = buildPostImageFieldIndex(
+    fieldInfos,
+    stmt.assignments.map((assignment) => assignment.field)
+  );
+  const numberPrecision = postImageNeedsNumberPrecision(plan.postImage, fieldIndex)
+    ? await getNumberPrecisionCached(stmt.appId, client, cacheContext)
+    : undefined;
+  const validation = validatePostImage(plan.postImage, fieldIndex, numberPrecision, 1);
+  if (validation.errorCount > 0) {
+    throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+      columns: validation.columns,
+      errors: validation.errors,
+    })}`);
+  }
+  // Phase 3 は normalized post-image と PUT draft の完全性まで検証するが mutation API へは接続しない。
   applyPatchPlanToKintone(plan);
   throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
 }
