@@ -1,6 +1,6 @@
 # B42 — `VALIDATE` サブテーブル子フィールド監査仕様
 
-- ステータス: 仕様 R4（2026-07-20 ユーザー指摘を反映・詳細9列／全該当行ロケータリスト／集約後 `tempTableMaxRows` を確定）
+- ステータス: ✅ **v3.7.0 リリース済み**（2026-07-20・仕様 R4=詳細9列／同一メッセージ集約＋全該当行ロケータリスト＋メッセージ件数装飾／SUMMARY／validateStats。B46 選択肢空値 false positive 修正を同梱）
 - 対象: B41 `VALIDATE APP…` のサブテーブルセル監査と生成時集約 `SUMMARY`
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B42
 - 親仕様: [ksql_existing_record_validation_spec.md](ksql_existing_record_validation_spec.md) B41
