@@ -552,18 +552,29 @@ parser/AST（UPDATE／INSERT／UPSERT）
 | 9 | v1～v1.2統合・実機baseline（完了） | M | 1～8 | commit `017ebba`、実機／規模evidence |
 | 10a | 複数親: planner primitive の単一`$id`結合を解消＋`buildApplyPatchPlans`:`readonly ApplyPatchPlan[]`＋scope へ `multipleParents`＋**構文許可・実行閉の二軸 capability で公開 execute/batch を API 0 gate** | L | 1～9 | pure planner／scope green、公開経路 API 0 |
 | 10b | 複数親: 複数レコード GET（`dmlMaxRows+1` 超過検知）＋全親 preflight/validation/guard＋prepared immutable batches（`prepare()`）。**mutation はまだ閉じる** | L | 10a | 全件 preflight green、write 0（prepare のみ） |
-| 10c | 複数親: write loop＋100件chunk＋**部分成功 result/error 型**＋surface 伝播（成功済chunk/失敗stage） | L | 10b | 100→1・101→2・201→3 call、2nd chunk conflict で1st成功保持・非retry、部分成功明示 |
-| 11 | `_idx` selector | M | 10c | 0-based、0件、revision、複数親 green |
-| 12 | `EXPECT ROWS` 4形 | M | 10c,11 | 親別・operation別guard、write 0 green |
-| 13 | INSERT初期行（`InsertStatement.applyBlocks`＋parser＋create planner＋POST） | L | 7,10c,12 | create post-image、POST chunk、既定値 green |
-| 14a | UPSERT: parser/AST（`UpsertStatement` のみ・INSERT は 13 済）＋ON INSERT/ON UPDATE＋scope＋**実行閉 capability で公開経路 fail-closed（API 0）**＋UPSERT SELECT 拒否＋省略規則の spec 正本化 | M | 10c～13 | parse／scope／句順／拒否 matrix green、公開経路 API 0 |
+| 10c | 複数親: 100件chunk converter＋core write loop＋共通の**部分成功 result/error 型**。公開 execution capability は閉じたまま | L | 10b | internal executePrepared で100→1・101→2・201→3 call、2nd chunk conflictで成功済chunk/親数・失敗stage保持、非retry。公開経路API 0 |
+| 10d | 複数親: `execute`／`executeBatch` 開通＋batch envelope／共有confirm detailへの部分成功伝播。CLI/plugin固有描画はPhase 16 | M | 10c | 明示capability時だけ公開開通、batch envelopeで成功済み件数を欠落させない、MCP API 0 |
+| 11 | `_idx` selector | M | 10d | 0-based、0件、revision、複数親 green |
+| 12 | `EXPECT ROWS` 4形 | M | 10d,11 | 親別・operation別guard、write 0 green |
+| 13a | INSERT初期行: `InsertStatement.applyBlocks`＋parser/scope＋INSERT/UPSERTも拾う共通APPLY検出＋**実行閉/API 0 gate** | M | 7,10d,12 | parse/scope/拒否matrix、execute/batch/MCP mutation API 0、APPLYなしINSERT非回帰 |
+| 13b | INSERT初期行: create planner＋post-image/既定値/二重guard＋prepared POST batches。**mutation は閉じたまま** | L | 13a | 複数VALUES×template、全candidate preflight、POST 0 |
+| 13c | INSERT初期行: 100件POST converter/write＋Phase 10c部分成功型の再利用＋core明示capability開通 | M | 13b | 100/101 chunk、2nd POST失敗の成功済み件数、CLI/plugin/MCPは未開通 |
+| 14a | UPSERT: parser/AST（`UpsertStatement` のみ・INSERT は 13a 済）＋ON INSERT/ON UPDATE＋scope＋**実行閉 capability で公開経路 fail-closed（API 0）**＋UPSERT SELECT 拒否＋省略規則の spec 正本化 | M | 10d～13c | parse／scope／句順／拒否 matrix green、公開経路 API 0 |
 | 14b | UPSERT: create/update 分岐 planner＋混在 preflight（create=Phase13・update=Phase10 の再利用）。**mutation はまだ閉じる** | L | 14a | 分岐 planner／混在 preflight green、write 0 |
-| 14c | UPSERT: POST→PUT 実行＋branch/chunk 部分成功＋confirm の insert/update 内訳＋二重guard＋APPLYなしUPSERT 非回帰 | L | 14b | POST→PUT 順、部分成功表現、preflight 前 write 0 green |
-| 15 | 多値ADD／REMOVE | L | 10c,12 | 5型payload、choice／空値、集合裁定 green |
-| 16 | CLI／plugin／MCP v2統合 | L | 10c～15 | shared detail、surface smoke、MCP API 0 green |
-| 17 | 全統合・v2実機・release準備 | L | 1～16 | 全回帰、実機evidence、browser、release checklist |
+| 14c | UPSERT: internal POST→PUT write＋共通部分成功型（branch/chunk/stage）。**公開 execution capability は閉じたまま** | L | 14b | POST→PUT順、POST成功後PUT失敗を型で保持、公開経路API 0 |
+| 14d | UPSERT: `execute`／`executeBatch` 開通＋共有confirm detailのinsert/update内訳＋二重guard＋APPLYなしUPSERT非回帰 | M | 14c | 明示capability時だけ開通、confirm前write 0、batch envelope伝播、MCP API 0 |
+| 15a | 多値: `ADD`／値`REMOVE` AST/parser＋target tagged union/型×動詞scope。**execution は閉じる** | M | 10d,12,14d | parse曖昧性・5型metadata/scope・拒否matrix、公開write 0 |
+| 15b | 多値: 2 payload形の集合planner/validation/converter＋core実行 | L | 15a | 5型payload、choice／空値／required／順序／conflict裁定、複数親preflight |
+| 16a | v2 shared detail＋EXPLAIN／VALIDATE ONLY／batch診断契約 | M | 10d～15b | 文種/branch/table/field/chunk/非transaction情報のunit、mutation API 0 |
+| 16b | CLI v2統合 | M | 16a | confirm/escaping/100・101/部分成功 e2e、core guard迂回不可 |
+| 16c | plugin v2統合 | M | 16a,16b | render unit、plugin build、cancel API 0（実browserは17c） |
+| 16d | MCP v2統合 | M | 16a～16c | INSERT/UPSERT含むvalidate/explain成功、全APPLY mutate API 0、schema/smoke green |
+| 17a | 全自動回帰・build・smoke | M | 1～16d | npm test、CLI/MCP/MCPB/plugin build、MCP smoke/pack-smoke、tsc baseline |
+| 17b | v2実機A: 複数親UPDATE／`_idx`／EXPECT／多値＋100超部分成功 | L | 17a | raw payload/chunk/部分成功/非retry/復旧evidence |
+| 17c | v2実機B: INSERT／UPSERT＋CLI／Firefox／Chromium／MCP | L | 17b | POST/PUT分岐、surface表示/cancel、MCP fail-closed、復旧evidence |
+| 17d | v3.8.0 release準備 | L | 17c | version/docs/tracker/artifact整合、全build後のrelease checklist |
 
-実装済み順は `1 → … → 9`。R3 は `10a → 10b → 10c → 11 → 12 → 13 → 14a → 14b → 14c → 15 → 16 → 17` とする。**XL だった Phase 10／14 は各3分割**（詳細は §18・codex レビュー反映）＝planning/scope（execution 未接続・API 0 gate）／preflight 準備（mutation 閉）／write・部分成功、の3層。Phase 11と12、Phase 13と15は設計上の一部を並行検討できるが、共有scope／planner型の競合を避けるためcommit gateは表の順に直列化する。Phase 14cはcreate/update双方が安定してから接続し、Phase 16でsurfaceを横断統合、Phase 17までversion bump／releaseを行わない。
+実装済み順は `1 → … → 9`。§19 のL再検討後は `10a → 10b → 10c → 10d → 11 → 12 → 13a → 13b → 13c → 14a → 14b → 14c → 14d → 15a → 15b → 16a → 16b → 16c → 16d → 17a → 17b → 17c → 17d` とする。§18 の「planning/scope（execution閉）→preflight（mutation閉）→write・部分成功」という安全層は維持し、write と公開伝播が同居した 10c／14c だけを `core write（公開閉）→公開開通` に再分割する。INSERT／多値も同じ syntax→prepared/planner→write 境界へ揃え、surface は shared契約→CLI→plugin→MCP、最終gateは自動回帰→実機A→実機B→release準備の順に直列化する。version bump／release成果物更新は17dまで行わない。
 
 ## 13. 裏取りで判明した齟齬・レビュー判断事項
 
@@ -687,3 +698,72 @@ XL の Phase 10（複数親）・Phase 14（UPSERT）は codex 1ラウンド（�
 ### Claude 承認
 
 codex の P1×3 は裏取り一致。3 分割＋capability 二軸＋prepared 関数境界＋部分成功型の明示を**承認**。P2-4（14a の INSERT 重複除去・§9.8 の省略規則/guard/confirm/spec 同期/非回帰の明示配分）も反映済み。Phase 13/15 は分割不要（codex P3-9 と一致・L 上限内）。依存順は `10a→10b→10c→11→12→13→14a→14b→14c→15→16→17`。§12 表・実装順を本 §18 に同期済み。**この 3 分割を正とし、§16 の「Phase 10 を単独 gate」記述は §18 で 3 gate へ置換されたものとする**（codex P3-7 の時系列指摘に対応）。
+
+## 19. L フェーズ再検討（codex・2026-07-20）
+
+§18 までを判断履歴として維持した上で、現行 §12 の L フェーズを「独立にテスト可能」「codex 1ラウンド（実行10分・単一diff）」「安全契約をgate途中で開かない」の3条件で再評価した。結論は、**10a／10b／14bは据え置き、10c／13／14c／15／16／17は分割**である。実装済み7／8は現行基準ならL上限超過またはXL近似だったが、事後分割せず証跡だけを残す。
+
+### 19.1 判定一覧と実コード根拠
+
+| 旧Phase | 判定 | 規模・独立gateの根拠 |
+|---:|---|---|
+| 7 | 事後判定: XL近似（変更なし） | commit `822d978` は16 files、+558/-151。pure plannerだけでなく、scope（[applyPatchScope.ts:10](../../src/core/applyPatchScope.ts#L10)）、planner（[applyPatchPlanner.ts:98](../../src/core/applyPatchPlanner.ts#L98)）、converter（[applyPatchToKintone.ts:17](../../src/converter/applyPatchToKintone.ts#L17)）、executor（[execute.ts:5619](../../src/execute.ts#L5619)）、CLI（[cli/index.ts:613](../../src/cli/index.ts#L613)）まで横断した。単一commitでgreen/evidenceまで完了した事実は維持するが、今の10分基準なら syntax/planner と surface を分ける規模だった。 |
+| 8 | 事後判定: L上限超過（変更なし） | commit `fb81257` は21 files、+478/-83。plannerのREMOVE競合（[applyPatchPlanner.ts:263](../../src/core/applyPatchPlanner.ts#L263)）、converterの `FULL_SURVIVORS` 完全性（[applyPatchToKintone.ts:77](../../src/converter/applyPatchToKintone.ts#L77)）、confirm detail（[execute.ts:449](../../src/execute.ts#L449)）、plugin表示（[desktop.ts:2841](../../src/ui/desktop.ts#L2841)）を同時変更した。独立gate自体は成立し実装済みなので変更しない。 |
+| 10a | 据え置き L | 単一`$id`結合はscopeの [applyPatchScope.ts:99](../../src/core/applyPatchScope.ts#L99) とplannerのsnapshot照合 [applyPatchPlanner.ts:236](../../src/core/applyPatchPlanner.ts#L236) に局在する。pure array adapter＋二軸capability＋公開API 0でwriteを含まず、独立unit gateになる。 |
+| 10b | 据え置き L | 現行単一GET→plan→validationは [execute.ts:5619](../../src/execute.ts#L5619) 以降にまとまる。これを `prepare()` へ抽出し、既存converter/write（[execute.ts:5715](../../src/execute.ts#L5715)）へ到達させないため、複数GET・全件guardを含んでもwrite 0の独立gateが成立する。 |
+| 10c | **10c/10dへ分割** | 旧10cはconverter＋write loop＋部分成功型＋CLI/plugin/batch伝播を同居させていた。現行resultは `UpdateResult.updatedCount` だけ（[execute.ts:327](../../src/execute.ts#L327)）、batch envelopeも通常件数だけ（[batchEnvelope.ts:67](../../src/output/batchEnvelope.ts#L67)）、CLIも件数を直接読む（[cli/index.ts:628](../../src/cli/index.ts#L628)）。core write/error型と公開伝播を分けないと単一diffがXL近似になる。 |
+| 13 | **13a/13b/13cへ分割** | AST（[ast.ts:618](../../src/types/ast.ts#L618)）＋parser（[parser.ts:2450](../../src/parser/parser.ts#L2450)）＋create planner新設＋100件converter（[dmlToKintone.ts:109](../../src/converter/dmlToKintone.ts#L109)）＋POST loop（[execute.ts:4950](../../src/execute.ts#L4950)）を一度に抱える。またMCP検出はUPDATEだけ（[mcp/tools.ts:499](../../src/mcp/tools.ts#L499)）で、通常INSERT VALUESはconfirm非経由（[execute.ts:472](../../src/execute.ts#L472)）。Phase 16までsurface対応を遅らせたままexecutionを開くgateは安全でない。 |
+| 14b | 据え置き L | 既存UPSERTは照合後にcreate/update配列を作る（[execute.ts:5902](../../src/execute.ts#L5902)）。14bはPhase 13/10 plannerを再利用してprepared混在planを返すだけに限定し、POST/PUTを呼ばないため、分岐planner＋全件preflightの独立gateが成立する。 |
+| 14c | **14c/14dへ分割** | 現行 `UpsertResult` はinsert/update通常件数だけ（[execute.ts:344](../../src/execute.ts#L344)）。旧14cはPOST→PUT loop、branch/chunk部分成功、confirm内訳、二重guard、公開非回帰を同居させるため、core writeと公開開通を分ける。14c完了時はexecution capabilityを閉じ、14dで初めて `execute`/batchを開ける。 |
+| 15 | **15a/15bへ分割** | operation parserは現在PATCH/APPEND/行REMOVEの3分岐（[parser.ts:2727](../../src/parser/parser.ts#L2727)）で、metadata resolverはSUBTABLE限定（[applyPatchPlanner.ts:98](../../src/core/applyPatchPlanner.ts#L98)）。対象はchoice配列2型と主体object配列3型でpayload形が異なる（[dmlToKintone.ts:382](../../src/converter/dmlToKintone.ts#L382)）。AST/parser/型×動詞scopeと、5型の集合planner/validationを分ければ各gateがM/Lに収まる。 |
+| 16 | **16a/16b/16c/16dへ分割** | shared detail（[execute.ts:449](../../src/execute.ts#L449)）、CLI formatter（[cli/index.ts:613](../../src/cli/index.ts#L613)）、plugin dialog（[desktop.ts:2841](../../src/ui/desktop.ts#L2841)）、MCP AST検出/fail-close（[mcp/tools.ts:499](../../src/mcp/tools.ts#L499)、[mcp/tools.ts:829](../../src/mcp/tools.ts#L829)）は別のadapter/test/build境界である。3面×全v2 capabilityを1diffにすると独立gateを失うため、shared診断→CLI→plugin→MCPへ分ける。 |
+| 17 | **17a/17b/17c/17dへ分割** | automated gateだけでもtest＋4 build＋2 smokeがある（[package.json:22](../../package.json#L22)、[package.json:26](../../package.json#L26)）。さらに100超UPDATE部分成功、INSERT/UPSERT、多値、Firefox/Chromium、fixture復旧、version/manifest（[package.json:3](../../package.json#L3)、[manifest.json:3](../../prod/manifest.json#L3)）を同居させるのはXL。自動回帰、UPDATE系実機、create/upsert＋surface実機、release準備を独立gateにする。 |
+
+### 19.2 新フェーズ定義
+
+1. **10c core write（L）**: prepared batchesだけを入力に100件chunkでPUTし、成功済chunk/親数・失敗stageを持つ共通partial-success result/error型を定義する。公開execution capabilityは閉じたまま、internal testだけで2nd chunk conflictと非retryを固定する。
+2. **10d 公開伝播（M）**: `execute`／`executeBatch` の明示capabilityを開き、共通型をbatch envelope／confirm detailへ欠落なく渡す。CLI/plugin固有表示は16b/16c、MCP mutationは閉じたままにする。
+3. **13a INSERT syntax＋実行閉（M）**: `InsertStatement.applyBlocks`、APPEND-only parser/scope、APPLYなしINSERT非回帰を実装する。同時にUPDATE専用のMCP検出をstatement-kind共通helperへ置換し、INSERTと後続14aで追加するUPSERT APPLY mutationをASTでfail-closeできる土台を先に完成させる。公開execute/batch/MCPはAPI 0。
+4. **13b create prepared（L）**: VALUES各行×固定APPEND templateをcreate candidateへ展開し、既定値、post-image、`dmlMaxRows`／`dmlMaxSubtableRows`を全件確定してprepared POST batchesを返す。POST 0をgateとする。
+5. **13c POST write（M）**: 100件POST converter/writeを接続し、10cの共通partial-success型を再利用する。coreの明示capabilityだけ開き、CLI/pluginは16まで閉じる。
+6. **14c UPSERT core write（L）**: 14b prepared planをPOST→PUT順で実行し、branch/chunk/stageと成功済み件数を共通型へ記録する。公開executionは閉じたままにする。
+7. **14d UPSERT公開開通（M）**: `execute`／`executeBatch`、insert/update confirm内訳、二重guard、batch envelopeを接続し、APPLYなしUPSERT非回帰を固定する。MCPは13aの共通検出によりAPI 0を維持する。
+8. **15a 多値syntax/scope（M）**: `ADD`／値`REMOVE` node、行REMOVEとのtoken分岐、SUBTABLE／multi-value target tagged union、5型×動詞拒否matrixを実装する。executionは閉じる。
+9. **15b 多値planner/write（L）**: `string[]` 2型と`{code}[]` 3型を分けたpure集合planner、choice/空値/required/conflict検証、複数親prepared payloadを実装しcoreへ接続する。surface独自再集計は入れない。
+10. **16a shared診断（M）**: statement kind、branch、table/field別件数、chunk、非transaction、partial-success注意をsingle source of truthとして定義し、EXPLAIN／VALIDATE ONLY／batchへ加法伝播する。
+11. **16b CLI（M）**: shared detailだけをformatし、escaping、100/101、cancel、`--yes`でもguard必須をe2e固定する。
+12. **16c plugin（M）**: shared detailだけをdialog/renderへ渡し、unit＋plugin build＋cancel API 0をgateとする。Firefox/Chromium実機は17cへ送る。
+13. **16d MCP（M）**: 13aの共通AST検出をvalidate/explain/query/mutate/batch全経路でmatrix化し、全APPLY mutation API 0、schema、smokeを固定する。
+14. **17a 自動統合（M）**: test/build/tsc baseline/MCP smokeを実行し、v1～v2 acceptance matrixの自動項目を閉じる。
+15. **17b 実機A（L）**: 複数親UPDATE 0/2/100/101/200、2nd chunk失敗、`_idx`、EXPECT、多値を専用fixtureで検証し、raw payload・成功ID・復旧diffを証跡化する。
+16. **17c 実機B（L）**: INSERT/UPSERT分岐・POST→PUT部分成功とCLI／Firefox／Chromium／MCP fail-closedを検証し、fixture復旧とv2 evidenceを完了する。
+17. **17d release準備（L）**: v3.8.0のpackage/lock/manifest、CHANGELOG、README、reference、tutorial、MCP説明、tracker、全artifact/version整合を更新し、release可能状態だけを独立レビューする。
+
+### 19.3 依存順と安全境界
+
+正の実装順は §12 のとおり `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→14d→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。安全境界は次を不変条件とする。
+
+- syntaxを先に解禁するaフェーズは、公開 `execute`／`executeBatch`／MCP mutationを必ずAPI 0で閉じる。
+- preparedフェーズはwriterを引数に取らず、planning/metadata/validation/guard完了後の値だけをwriteフェーズへ渡す。
+- core writeフェーズ（10c/14c）はpartial-success型をinternal testできるが、公開execution capabilityは次フェーズまで閉じる。
+- CLI/pluginは各surfaceがshared detailを表示できるPhase 16b/16cまで新capabilityを開かない。MCPは全期間fail-closed。
+- 実機gateとrelease metadata/artifact更新を同一diffにしない。17b/17cの復旧・evidence完了後だけ17dへ進む。
+
+### 19.4 レビュアー確認事項
+
+1. 10c/14cを「internal core write・公開閉」、10d/14dを「公開開通」と分けることで、§18のcapability二軸とpartial-success型の意図を保てているか。
+2. 13aでMCPのUPDATE専用検出をstatement-kind共通helperへ前倒しし、INSERT/UPSERT構文追加時のsilent mutationを防ぐ配分でよいか。
+3. 13c/15bのcore capability開通後もCLI/pluginを16b/16cまで閉じる方針を、利用可能surfaceの段階差として許容するか。
+4. 実機を17b（UPDATE系＋多値）／17c（INSERT/UPSERT＋surface）へ分け、release準備を17dへ完全分離する粒度で、各10分レビューgateの証跡量が妥当か。
+
+### 19.5 Claude レビュー（§19 承認・2026-07-20）
+
+**裏取り**: codex の主要根拠を検証し一致。特に**13a の安全前倒しは実在ギャップ**＝現行 MCP の APPLY 検出は UPDATE 専用（[mcp/tools.ts:499](../../src/mcp/tools.ts#L499) `statement.type === "UPDATE" && applyBlocks?.length > 0`）で、INSERT/UPSERT に applyBlocks を足す際に検出を statement-kind 共通 helper へ広げないと **MCP 経由で INSERT/UPSERT APPLY が silent mutation する**（§18 の executeUpsert 見落としと同クラス）。ほか、INSERT VALUES の confirm 非経由（execute.ts:472 コメント）・batchEnvelope が `updatedCount` のみ伝播（batchEnvelope.ts:67）＝部分成功型の新設と伝播分離（10d/14d）の必要性も確認。**23 フェーズは細粒度だが、削除・複数親部分成功・silent mutation という本機能の安全リスクに対し「under-split で 10 分予算超過/レビュー不能 diff」を避ける方が価値が高く、各 gate が file:line で独立に裏付けられているため承認**。
+
+**codex の確認事項4件への裁定**:
+1. **10c/14c=internal core write（公開閉）・10d/14d=公開開通の分離を承認**。§18 の capability 二軸（execution 閉→開）と partial-success 型の意図を保つ。最もリスクの高い「新 result 型＋chunk 失敗意味論」を core だけで internal テストし、公開 routing は次フェーズまで fail-closed に保てる。
+2. **13a の MCP 検出前倒しを承認**（裏取り済＝必須）。INSERT/UPSERT 構文追加と同一フェーズで共通検出 helper を入れ、公開 execute/batch/MCP を API 0 に保つ。
+3. **core 開通後も CLI/plugin を 16b/16c まで閉じる段階差を承認**。core 強制ガードは surface に依存しないため、リッチ表示・確認 UI の遅延は安全性を損なわない（17 の実機は 16 の後なので CLI 配線は実機前に完了）。
+4. **実機 17b（UPDATE系＋_idx/EXPECT/多値）/17c（INSERT/UPSERT＋surface）と release 17d の完全分離を承認**。release を実機から隔離するのは §18 方針・v3.7.0 の運用実績と一致。
+
+**総括**: L 再検討後のフェーズ構成（v2＝10a〜17d の23分割）で**実装着手可**。実装順 `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→14d→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。着手前に spec §5.1/§9/§11.2/§12 をユーザー決定（v2 を v3.8.0 同梱）へ同期する（§16 の必須事項）。
