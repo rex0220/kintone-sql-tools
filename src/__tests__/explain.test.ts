@@ -42,6 +42,109 @@ async function explain(sql: string): Promise<string[]> {
   return result.rows.map((r) => r["plan"] as string);
 }
 
+test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し records/mutation API 0", async () => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const putRecords = jest.fn(async () => undefined);
+  const getFields = jest.fn(async () => [
+    { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+    { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  ]);
+  const client: KintoneClient = {
+    ...makeClient(), getRecords, putRecords, getFields,
+  };
+  const result = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE $id=8 " +
+      "APPLY テーブル (PATCH SET 子='x' WHERE 子='old')",
+    client,
+    { cacheContext: "apply-explain", dmlMaxRows: 7, dmlMaxSubtableRows: 9 }
+  ) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+  const expected = [
+    "statement:              UPDATE APPLY",
+    "target app:             APP4221",
+    "parent selector:        $id = 8",
+    "parent cardinality:     single",
+    "apply target:           テーブル (SUBTABLE)",
+    "operations:             PATCH",
+    "selector:               SAFE_PREDICATE",
+    "snapshot evaluation:    yes",
+    "inserted rows visible:  no",
+    "revision guard:         required",
+    "revision:               unknown (records API not called)",
+    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=none",
+    "post-image validation:  required (B43 equivalent)",
+    "parent rows:            unknown (records API not called)",
+    "matched subtable rows:  unknown (records API not called)",
+    "validation errors:      unknown (records API not called)",
+    "deleted rows:           0 (static without REMOVE)",
+    "dmlMaxRows:             7",
+    "dmlMaxSubtableRows:     9",
+    "MCP mutation:           disabled in v1",
+    "records API:            0",
+    "mutation API:           0",
+  ];
+  expect(plan.filter((line) => expected.includes(line))).toEqual(expected);
+  expect(getFields).toHaveBeenCalledWith(4221);
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
+  expect(plan.join("\n")).not.toMatch(/revision:\s+\d|matched subtable rows:\s+\d/);
+
+  const remove = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (REMOVE ALL ROWS)",
+    client,
+    { cacheContext: "apply-remove-explain" }
+  ) as SelectResult;
+  expect(remove.rows.map((row) => row.plan)).toEqual(expect.arrayContaining([
+    "operations:             REMOVE",
+    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=FULL_SURVIVORS",
+    "deleted rows:           unknown (records API not called)",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
+});
+
+test.each([
+  [
+    "INSERT",
+    "EXPLAIN INSERT INTO APP4221 (親) VALUES ('a'), ('b') APPLY テーブル (APPEND (子) VALUES ('x'))",
+    ["apply diagnostic:       INSERT", "apply branch:           insert", "  parent rows:          2",
+      "  chunks:               1 × max 100", "    operations:         APPEND=2"],
+  ],
+  [
+    "UPSERT",
+    "EXPLAIN UPSERT INTO APP4221 (親) VALUES ('a'), ('b') ON DUPLICATE (親) "
+      + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('x')) ON UPDATE APPLY タグ (ADD 'A'; REMOVE 'B')",
+    ["apply diagnostic:       UPSERT", "apply branch:           insert", "apply branch:           update",
+      "  parent rows:          unknown (records API not called)", "    operations:         ADD=unknown | REMOVE_VALUE=unknown"],
+  ],
+] as const)("Phase 16a: %s APPLY EXPLAINはshared静的診断とAPI 0を返す", async (_kind, sql, expected) => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const postRecords = jest.fn(async () => ({ ids: [] }));
+  const putRecords = jest.fn(async () => undefined);
+  const client: KintoneClient = {
+    ...makeClient(), getRecords, postRecords, putRecords,
+    getFields: async () => [
+      { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+      { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+      { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+      { code: "タグ", label: "タグ", fieldType: "MULTI_SELECT", writable: true },
+    ],
+  };
+  const result = await execute(sql, client, { cacheContext: `phase16a-explain-${_kind}` }) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+  expect(plan).toEqual(expect.arrayContaining([
+    ...expected,
+    "non-transactional:      true",
+    "partial success:        possible",
+    "records API:            0",
+    "mutation API:           0",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(postRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
+});
+
 // ----------------------------------------------------------------
 // SIMPLE モード
 // ----------------------------------------------------------------
@@ -267,6 +370,17 @@ test("EXPLAIN FULL_SCAN — JOIN", async () => {
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
   expect(plan.find((l) => l.includes("reason"))).toContain("JOIN あり");
 });
+
+test.each(["_pid = 1", "_rid = 'r1'", "_idx > 2"])(
+  "B45: EXPLAIN サブテーブル system 列は FULL_SCAN かつ押し下げ候補外: %s",
+  async (predicate) => {
+    const plan = await explain(`EXPLAIN SELECT _rid FROM APP100$明細 WHERE ${predicate}`);
+    expect(plan.find((line) => line.includes("mode"))).toContain("FULL_SCAN");
+    expect(plan.find((line) => line.includes("reason"))).toContain("サブテーブル仮想テーブル");
+    expect(plan.find((line) => line.includes("kintone query:"))).toContain("(全件取得)");
+    expect(plan.some((line) => line.includes("pushdown candidate:"))).toBe(false);
+  }
+);
 
 test("EXPLAIN FULL_SCAN — JOIN + GROUP BY でテーブル別必要フィールドを表示", async () => {
   const plan = await explain(

@@ -30871,8 +30871,8 @@ var import_node_process = __toESM(require("node:process"), 1);
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 var ReadBuffer = class {
-  append(chunk2) {
-    this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk2]) : chunk2;
+  append(chunk3) {
+    this._buffer = this._buffer ? Buffer.concat([this._buffer, chunk3]) : chunk3;
   }
   readMessage() {
     if (!this._buffer) {
@@ -30904,8 +30904,8 @@ var StdioServerTransport = class {
     this._stdout = _stdout;
     this._readBuffer = new ReadBuffer();
     this._started = false;
-    this._ondata = (chunk2) => {
-      this._readBuffer.append(chunk2);
+    this._ondata = (chunk3) => {
+      this._readBuffer.append(chunk3);
       this.processReadBuffer();
     };
     this._onerror = (error51) => {
@@ -33551,6 +33551,9 @@ var Parser = class {
     this.expect(")" /* RPAREN */);
     if (this.peek().kind === "SELECT" /* SELECT */) {
       const select = this.parseSelect();
+      if (this.isApplyBlockStart() || this.prev().kind === "IDENT" /* IDENT */ && this.prev().value.toUpperCase() === "APPLY" && (this.peek().kind === "IDENT" /* IDENT */ || this.peek().kind === "BIDENT" /* BIDENT */) && this.peekAt(1).kind === "(" /* LPAREN */) {
+        throw new ParseError("INSERT INTO ... SELECT \u306F APPLY \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+      }
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u4EEE\u60F3\u30C6\u30FC\u30D6\u30EB\u3067\u306F\u672A\u5BFE\u5FDC\u3067\u3059", this.prev());
       }
@@ -33566,15 +33569,33 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
       values.push(row);
     } while (this.consume("," /* COMMA */));
+    const applyBlocks = [];
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
+      throw new ParseError(
+        "APPLY SUBTABLE noun is not supported; use APPLY <field> (...)",
+        this.peek()
+      );
+    }
+    if (applyBlocks.length > 0 && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("APPLY \u30D6\u30ED\u30C3\u30AF\u306E\u5F8C\u306B CHECK \u306F\u6307\u5B9A\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
+    if (applyBlocks.length > 0 && (this.peek().kind === "ON" /* ON */ || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("ON ERROR SKIP / REJECT LIMIT \u306F APPLY \u3068\u4F75\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (this.isSoftKeyword("APPLY")) {
+      throw new ParseError("APPLY \u306F CHECK / VALIDATE ONLY \u3088\u308A\u524D\u306B\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.peek());
+    }
     if (subtableCode && checkGroups.checkGroups) {
       throw new ParseError("CHECK \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB INSERT \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
-    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values, ...checkGroups, ...validation } : { type: "INSERT", appId, fields, values, ...checkGroups, ...validation };
+    const apply = applyBlocks.length > 0 ? { applyBlocks } : {};
+    return subtableCode ? { type: "INSERT", appId, subtableCode, fields, values, ...apply, ...checkGroups, ...validation } : { type: "INSERT", appId, fields, values, ...apply, ...checkGroups, ...validation };
   }
   parseUpsert() {
     this.expect("UPSERT" /* UPSERT */);
@@ -33591,8 +33612,14 @@ var Parser = class {
     if (this.peek().kind === "SELECT" /* SELECT */) {
       const select = this.parseSelect();
       const keyFields2 = this.parseOnDuplicate();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT \u306F ON INSERT / ON UPDATE APPLY \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.peek());
+      }
       const checkGroups2 = this.parseCheckGroups();
       const validation2 = this.parseDmlControlSuffix();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT \u306F ON INSERT / ON UPDATE APPLY \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.peek());
+      }
       return { type: "UPSERT_SELECT", appId, fields, select, keyFields: keyFields2, ...checkGroups2, ...validation2 };
     }
     this.expect("VALUES" /* VALUES */);
@@ -33603,9 +33630,29 @@ var Parser = class {
       this.expect(")" /* RPAREN */);
     } while (this.consume("," /* COMMA */));
     const keyFields = this.parseOnDuplicate();
+    const applyBranches = this.parseUpsertApplyBranches();
+    const hasApplyBranches = applyBranches.onInsertApplyBlocks !== void 0 || applyBranches.onUpdateApplyBlocks !== void 0;
+    if (hasApplyBranches && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("UPSERT \u306E\u5206\u5C90 APPLY \u306F CHECK \u3068\u4F75\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
+    if (hasApplyBranches && (this.peek().kind === "ON" /* ON */ || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("UPSERT \u306E\u5206\u5C90 APPLY \u306F ON ERROR SKIP / REJECT LIMIT \u3068\u4F75\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
-    return { type: "UPSERT", appId, fields, values, keyFields, ...checkGroups, ...validation };
+    if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+      throw new ParseError("ON INSERT / ON UPDATE APPLY \u306F CHECK / VALIDATE ONLY \u3088\u308A\u524D\u306B\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.peek());
+    }
+    return {
+      type: "UPSERT",
+      appId,
+      fields,
+      values,
+      keyFields,
+      ...applyBranches,
+      ...checkGroups,
+      ...validation
+    };
   }
   parseOnDuplicate() {
     this.expectKeyword("ON" /* ON */, "UPSERT \u306B\u306F ON DUPLICATE (\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9) \u304C\u5FC5\u8981\u3067\u3059");
@@ -33619,6 +33666,35 @@ var Parser = class {
       throw new ParseError("ON DUPLICATE \u306B\u306F\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u6700\u4F4E 1 \u3064\u5FC5\u8981\u3067\u3059", this.prev());
     }
     return keyFields;
+  }
+  isUpsertApplyBranchStart() {
+    return this.peek().kind === "ON" /* ON */ && (this.peekAt(1).kind === "INSERT" /* INSERT */ || this.peekAt(1).kind === "UPDATE" /* UPDATE */);
+  }
+  parseUpsertApplyBranches() {
+    let onInsertApplyBlocks;
+    let onUpdateApplyBlocks;
+    while (this.isUpsertApplyBranchStart()) {
+      this.advance();
+      const branch = this.advance();
+      const isInsert = branch.kind === "INSERT" /* INSERT */;
+      if (isInsert && onInsertApplyBlocks || !isInsert && onUpdateApplyBlocks) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} APPLY \u306F 1 \u56DE\u3060\u3051\u6307\u5B9A\u3067\u304D\u307E\u3059`, branch);
+      }
+      if (!this.isApplyBlockStart()) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} \u306E\u5F8C\u306B\u306F APPLY \u30D6\u30ED\u30C3\u30AF\u304C\u5FC5\u8981\u3067\u3059`, this.peek());
+      }
+      const blocks = [];
+      while (this.isApplyBlockStart()) blocks.push(this.parseApplyBlock());
+      if (isInsert) onInsertApplyBlocks = blocks;
+      else onUpdateApplyBlocks = blocks;
+    }
+    if (this.isApplyBlockStart()) {
+      throw new ParseError("UPSERT \u306E APPLY \u306B\u306F ON INSERT \u307E\u305F\u306F ON UPDATE \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    return {
+      ...onInsertApplyBlocks ? { onInsertApplyBlocks } : {},
+      ...onUpdateApplyBlocks ? { onUpdateApplyBlocks } : {}
+    };
   }
   /** 配列リテラル ['val1', 'val2'] を解析して ArrayLiteral を返す */
   parseArrayLiteral() {
@@ -33715,6 +33791,17 @@ var Parser = class {
       );
     }
     const where = this.parseWhereExpr();
+    const applyBlocks = [];
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
+      throw new ParseError(
+        "APPLY SUBTABLE noun is not supported; use APPLY <field> (...)",
+        this.peek()
+      );
+    }
+    if (applyBlocks.length > 0 && this.peek().kind === "WHERE" /* WHERE */) {
+      throw new ParseError("\u89AA WHERE \u306F APPLY \u30D6\u30ED\u30C3\u30AF\u3088\u308A\u524D\u306B\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.peek());
+    }
     if (from !== null) {
       if (subtableCode) {
         throw new ParseError("\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE ... FROM \u306F\u30B5\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u305B\u3093", whereTok);
@@ -33737,16 +33824,144 @@ var Parser = class {
         whereTok
       );
     }
+    if (applyBlocks.length > 0 && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("APPLY \u30D6\u30ED\u30C3\u30AF\u306E\u5F8C\u306B CHECK \u306F\u6307\u5B9A\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
+    if (applyBlocks.length > 0 && (this.peek().kind === "ON" /* ON */ || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("ON ERROR SKIP / REJECT LIMIT \u306F APPLY \u3068\u4F75\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (this.isSoftKeyword("APPLY")) {
+      throw new ParseError("APPLY \u306F VALIDATE ONLY \u3088\u308A\u524D\u306B\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", this.peek());
+    }
     if (subtableCode && checkGroups.checkGroups) {
       throw new ParseError("CHECK \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
     }
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...checkGroups, ...validation };
-    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where, ...checkGroups, ...validation } : { type: "UPDATE", appId, assignments, where, ...checkGroups, ...validation };
+    const apply = applyBlocks.length > 0 ? { applyBlocks } : {};
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...apply, ...checkGroups, ...validation };
+    return subtableCode ? { type: "UPDATE", appId, subtableCode, assignments, where, ...apply, ...checkGroups, ...validation } : { type: "UPDATE", appId, assignments, where, ...apply, ...checkGroups, ...validation };
+  }
+  isApplyBlockStart() {
+    return this.isSoftKeyword("APPLY") && (this.peekAt(1).kind === "IDENT" /* IDENT */ || this.peekAt(1).kind === "BIDENT" /* BIDENT */) && this.peekAt(2).kind === "(" /* LPAREN */;
+  }
+  parseApplyBlock() {
+    this.advance();
+    const field = this.parseIdentifier();
+    this.expect("(" /* LPAREN */);
+    if (this.peek().kind === ")" /* RPAREN */ || this.peek().kind === ";" /* SEMICOLON */) {
+      throw new ParseError("APPLY \u30D6\u30ED\u30C3\u30AF\u306B\u306F\u64CD\u4F5C\u304C\u6700\u4F4E 1 \u3064\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    const operations = [];
+    while (true) {
+      operations.push(this.parseApplyOperation());
+      if (!this.consume(";" /* SEMICOLON */)) break;
+      if (this.peek().kind === ")" /* RPAREN */) break;
+      if (this.peek().kind === ";" /* SEMICOLON */) {
+        throw new ParseError("APPLY \u30D6\u30ED\u30C3\u30AF\u306B\u7A7A\u306E\u64CD\u4F5C\u306F\u6307\u5B9A\u3067\u304D\u307E\u305B\u3093", this.peek());
+      }
+    }
+    this.expect(")" /* RPAREN */, "APPLY \u30D6\u30ED\u30C3\u30AF\u306E\u672B\u5C3E\u306B\u306F ) \u304C\u5FC5\u8981\u3067\u3059");
+    const hasSubtableOperation = operations.some(
+      (operation) => operation.kind === "PATCH" || operation.kind === "APPEND" || operation.kind === "REMOVE"
+    );
+    const hasMultiValueOperation = operations.some(
+      (operation) => operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"
+    );
+    if (hasSubtableOperation && hasMultiValueOperation) {
+      throw new ParseError("1 \u3064\u306E APPLY \u30D6\u30ED\u30C3\u30AF\u306B\u884C\u64CD\u4F5C\u3068\u591A\u5024\u64CD\u4F5C\u306F\u6DF7\u5728\u3067\u304D\u307E\u305B\u3093", this.prev());
+    }
+    return hasMultiValueOperation ? { field, targetKind: "MULTI_VALUE", operations } : { field, targetKind: "SUBTABLE", operations };
+  }
+  parseApplyOperation() {
+    if (this.isSoftKeyword("ADD")) {
+      this.advance();
+      const value = this.expect("STRING" /* STRING */, "ADD \u306E\u5F8C\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059").value;
+      return { kind: "ADD", value };
+    }
+    if (this.isSoftKeyword("PATCH")) {
+      this.advance();
+      this.expect("SET" /* SET */, "PATCH \u306E\u5F8C\u306B\u306F SET \u304C\u5FC5\u8981\u3067\u3059");
+      const assignments = this.parseAssignments();
+      const selector = this.parseApplyRowSelector();
+      const expectRows = this.parseExpectRowsGuard();
+      return { kind: "PATCH", assignments, selector, ...expectRows ? { expectRows } : {} };
+    }
+    if (this.isSoftKeyword("APPEND")) {
+      this.advance();
+      this.expect("(" /* LPAREN */, "APPEND \u306E\u5F8C\u306B\u306F\u30D5\u30A3\u30FC\u30EB\u30C9\u4E00\u89A7\u304C\u5FC5\u8981\u3067\u3059");
+      if (this.peek().kind === ")" /* RPAREN */) {
+        throw new ParseError("APPEND \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u4E00\u89A7\u306F\u7A7A\u306B\u3067\u304D\u307E\u305B\u3093", this.peek());
+      }
+      const fields = [];
+      do
+        fields.push(this.parseIdentifier());
+      while (this.consume("," /* COMMA */));
+      this.expect(")" /* RPAREN */);
+      this.expect("VALUES" /* VALUES */, "APPEND \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u4E00\u89A7\u306E\u5F8C\u306B\u306F VALUES \u304C\u5FC5\u8981\u3067\u3059");
+      const values = [];
+      do {
+        this.expect("(" /* LPAREN */, "APPEND VALUES \u306E\u5404\u884C\u306F ( \u3067\u59CB\u3081\u3066\u304F\u3060\u3055\u3044");
+        values.push(this.parseInsertRow(fields.length));
+        this.expect(")" /* RPAREN */);
+      } while (this.consume("," /* COMMA */));
+      return { kind: "APPEND", fields, values };
+    }
+    if (this.isSoftKeyword("REMOVE")) {
+      this.advance();
+      if (this.peek().kind === "STRING" /* STRING */) {
+        return { kind: "REMOVE_VALUE", value: this.advance().value };
+      }
+      const selector = this.parseApplyRowSelector();
+      const expectRows = this.parseExpectRowsGuard();
+      return { kind: "REMOVE", selector, ...expectRows ? { expectRows } : {} };
+    }
+    throw new ParseError("APPLY \u306E\u64CD\u4F5C\u306B\u306F PATCH / APPEND / REMOVE / ADD \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+  }
+  parseApplyRowSelector() {
+    if (this.consume("WHERE" /* WHERE */)) return { kind: "WHERE", where: this.parseWhereExpr() };
+    if (this.consume("ALL" /* ALL */)) {
+      if (!this.isSoftKeyword("ROWS")) throw new ParseError("ALL \u306E\u5F8C\u306B\u306F ROWS \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+      this.advance();
+      return { kind: "ALL_ROWS" };
+    }
+    throw new ParseError("PATCH / REMOVE \u306B\u306F WHERE \u307E\u305F\u306F ALL ROWS \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+  }
+  parseExpectRowsGuard() {
+    if (!this.isSoftKeyword("EXPECT")) return void 0;
+    this.advance();
+    if (!this.isSoftKeyword("ROWS")) throw new ParseError("EXPECT \u306E\u5F8C\u306B\u306F ROWS \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    this.advance();
+    if (this.consume("BETWEEN" /* BETWEEN */)) {
+      const min = this.parseExpectRowsCount();
+      this.expect("AND" /* AND */, "EXPECT ROWS BETWEEN \u306E\u4E0B\u9650\u3068\u4E0A\u9650\u306F AND \u3067\u533A\u5207\u3063\u3066\u304F\u3060\u3055\u3044");
+      const max = this.parseExpectRowsCount();
+      if (min > max) throw new ParseError("EXPECT ROWS BETWEEN \u306E\u4E0B\u9650\u306F\u4E0A\u9650\u4EE5\u4E0B\u306B\u3057\u3066\u304F\u3060\u3055\u3044", this.peek());
+      return { kind: "BETWEEN", min, max };
+    }
+    if (this.isSoftKeyword("AT")) {
+      this.advance();
+      if (this.peek().value.toUpperCase() === "LEAST") {
+        this.advance();
+        return { kind: "AT_LEAST", count: this.parseExpectRowsCount() };
+      }
+      if (this.isSoftKeyword("MOST")) {
+        this.advance();
+        return { kind: "AT_MOST", count: this.parseExpectRowsCount() };
+      }
+      throw new ParseError("EXPECT ROWS AT \u306E\u5F8C\u306B\u306F LEAST \u307E\u305F\u306F MOST \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    return { kind: "EXACT", count: this.parseExpectRowsCount() };
+  }
+  parseExpectRowsCount() {
+    const tok = this.expect("NUMBER" /* NUMBER */, "EXPECT ROWS \u306B\u306F 0 \u4EE5\u4E0A\u306E\u6574\u6570\u304C\u5FC5\u8981\u3067\u3059");
+    if (!/^\d+$/.test(tok.value) || !Number.isSafeInteger(Number(tok.value))) {
+      throw new ParseError("EXPECT ROWS \u306F 0 \u4EE5\u4E0A\u306E\u5B89\u5168\u306A\u6574\u6570\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044", tok);
+    }
+    return Number(tok.value);
   }
   /** CHECK WHEN ... THEN ... blocks. CHECK is a soft keyword. */
   parseCheckGroups() {
@@ -34306,6 +34521,462 @@ function getInsertValuesCount(stmt) {
   const obj = stmt;
   if (obj.type !== "INSERT") return null;
   return Array.isArray(obj.values) ? obj.values.length : null;
+}
+
+// src/core/applyPatchScope.ts
+var APPLY_SYNTAX_CAPABILITIES = Object.freeze({
+  v1: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: false,
+    multipleParents: false,
+    idxSelectors: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  "v1.1": Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: false,
+    idxSelectors: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  "v1.2": Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: false,
+    idxSelectors: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase10a: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: false,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase11: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: false,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase12: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: false,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase13a: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: true,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase14a: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase14b: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase14c: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase15a: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  }),
+  phase15b: Object.freeze({
+    operations: /* @__PURE__ */ new Set(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false
+  })
+});
+var APPLY_EXECUTION_CAPABILITIES = Object.freeze({
+  phase10a: Object.freeze({ multipleParentPreflight: false, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase11: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase12: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
+  phase14a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
+  phase14b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
+  phase14c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
+  phase15a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
+  phase15b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true })
+});
+var activeVersion = "v1";
+function unsupported(feature) {
+  throw new Error(`UnsupportedError: APPLY ${activeVersion} scope does not support ${feature}`);
+}
+function withVersion(version2, run) {
+  const previous = activeVersion;
+  activeVersion = version2;
+  try {
+    return run();
+  } finally {
+    activeVersion = previous;
+  }
+}
+function statementWithApply(statement) {
+  const target = statement.type === "EXPLAIN" ? statement.query : statement;
+  if (target.type === "UPDATE" || target.type === "INSERT") {
+    return target.applyBlocks?.length ? target : null;
+  }
+  if (target.type === "UPSERT") {
+    return target.onInsertApplyBlocks?.length || target.onUpdateApplyBlocks?.length ? target : null;
+  }
+  return null;
+}
+function assertApplyScope(version2, statement) {
+  return withVersion(version2, () => assertApplyScopeForCapabilities(statement, APPLY_SYNTAX_CAPABILITIES[version2]));
+}
+function assertApplyScopeForCapabilities(statement, capabilities) {
+  const applyStatement = statementWithApply(statement);
+  if (applyStatement === null) return;
+  if (applyStatement.type === "UPSERT") {
+    assertUpsertApplyScope(applyStatement, capabilities);
+    return;
+  }
+  const blocks = applyStatement.applyBlocks;
+  assertUniqueApplyBlocks(blocks);
+  if (!capabilities.multipleBlocks && blocks.length !== 1) unsupported("multiple APPLY blocks in this phase");
+  if (applyStatement.type === "INSERT") {
+    assertInsertApplyScope(applyStatement, blocks, capabilities);
+    return;
+  }
+  const update = applyStatement;
+  if (update.subtableCode) unsupported("a subtable UPDATE as the parent statement in this phase");
+  if (!capabilities.updateFrom && update.from != null) unsupported("UPDATE ... FROM in this phase");
+  if (!capabilities.check && update.checkGroups?.length) unsupported("CHECK in this phase");
+  if (!capabilities.onErrorSkip && update.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
+  if (!capabilities.rejectLimit && update.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
+  assertSafeParentWhere(update.where, capabilities.multipleParents);
+  assertUpdateApplyOperations(blocks, capabilities);
+}
+function assertUpdateApplyOperations(blocks, capabilities) {
+  for (const block of blocks) {
+    for (const operation of block.operations) {
+      if (!capabilities.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
+    }
+    assertApplyBlockOperationFamily(block);
+    for (const operation of block.operations) {
+      if (operation.kind === "APPEND") {
+        for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
+        assertSafeApplyNode(operation.values, "APPEND values");
+        continue;
+      }
+      if (operation.kind === "REMOVE") {
+        if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
+        if (operation.selector.kind === "WHERE") {
+          assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
+        }
+        continue;
+      }
+      if (operation.kind !== "PATCH") continue;
+      if (!capabilities.expectRows && operation.expectRows) unsupported("EXPECT ROWS in this phase");
+      if (operation.assignments.length === 0) unsupported("an empty PATCH operation in this phase");
+      for (const assignment of operation.assignments) {
+        if (assignment.field.startsWith("_") || assignment.field.startsWith("$")) {
+          throw new Error(`ArgumentError: APPLY assignment target ${assignment.field} is a system field.`);
+        }
+        if (assignment.field.includes(".")) {
+          unsupported("parent or qualified PATCH targets in this phase");
+        }
+      }
+      assertSafeApplyNode(operation.assignments, "PATCH assignments");
+      if (operation.selector.kind === "WHERE") {
+        assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
+      }
+    }
+  }
+}
+function assertApplyBlockOperationFamily(block) {
+  const hasSubtableOperation = block.operations.some(
+    (operation) => operation.kind === "PATCH" || operation.kind === "APPEND" || operation.kind === "REMOVE"
+  );
+  const hasMultiValueOperation = block.operations.some(
+    (operation) => operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"
+  );
+  if (hasSubtableOperation && hasMultiValueOperation) {
+    throw new Error("ArgumentError: APPLY block cannot mix row operations and multi-value operations.");
+  }
+  const expectedKind = hasMultiValueOperation ? "MULTI_VALUE" : "SUBTABLE";
+  if (block.targetKind !== expectedKind) {
+    throw new Error(`ArgumentError: APPLY block target kind ${String(block.targetKind)} does not match ${expectedKind} operations.`);
+  }
+}
+var MULTI_VALUE_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "MULTI_SELECT",
+  "CHECK_BOX",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT"
+]);
+function assertApplyTargetFieldType(block, fieldType) {
+  assertApplyBlockOperationFamily(block);
+  if (block.targetKind === "MULTI_VALUE") {
+    if (!MULTI_VALUE_FIELD_TYPES.has(fieldType)) {
+      throw new Error(`ArgumentError: APPLY multi-value operations require MULTI_SELECT, CHECK_BOX, USER_SELECT, ORGANIZATION_SELECT, or GROUP_SELECT target; ${block.field} is ${fieldType}.`);
+    }
+    return;
+  }
+  if (fieldType !== "SUBTABLE") {
+    throw new Error(`ArgumentError: APPLY row operations require a SUBTABLE target; ${block.field} is ${fieldType}.`);
+  }
+}
+function assertUniqueApplyBlocks(blocks) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const block of blocks) {
+    if (seen.has(block.field)) {
+      throw new Error(`ArgumentError: APPLY ${activeVersion} scope allows only one block for table ${block.field}`);
+    }
+    seen.add(block.field);
+  }
+}
+function assertUpsertApplyScope(upsert, capabilities) {
+  if (!capabilities.upsert) unsupported("UPSERT in this phase");
+  if (!capabilities.check && upsert.checkGroups?.length) unsupported("CHECK in this phase");
+  if (!capabilities.onErrorSkip && upsert.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
+  if (!capabilities.rejectLimit && upsert.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
+  const insertBlocks = upsert.onInsertApplyBlocks ?? [];
+  const updateBlocks = upsert.onUpdateApplyBlocks ?? [];
+  assertUniqueApplyBlocks(insertBlocks);
+  assertUniqueApplyBlocks(updateBlocks);
+  if (!capabilities.multipleBlocks && (insertBlocks.length > 1 || updateBlocks.length > 1)) {
+    unsupported("multiple APPLY blocks in this phase");
+  }
+  assertAppendOnlyBlocks(insertBlocks, "UPSERT ON INSERT");
+  assertUpdateApplyOperations(updateBlocks, { ...capabilities, idxSelectors: false, expectRows: false });
+}
+function assertAppendOnlyBlocks(blocks, parent) {
+  for (const block of blocks) {
+    for (const operation of block.operations) {
+      if (operation.kind !== "APPEND") unsupported(`${operation.kind} for ${parent} in this phase`);
+      for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
+      assertSafeApplyNode(operation.values, "APPEND values");
+    }
+  }
+}
+function assertInsertApplyScope(insert, blocks, capabilities) {
+  if (!capabilities.insert) unsupported("INSERT in this phase");
+  if (insert.subtableCode) unsupported("a subtable INSERT as the parent statement in this phase");
+  if (!capabilities.check && insert.checkGroups?.length) unsupported("CHECK in this phase");
+  if (!capabilities.onErrorSkip && insert.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
+  if (!capabilities.rejectLimit && insert.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
+  assertAppendOnlyBlocks(blocks, "INSERT");
+}
+function isSinglePositiveRecordIdWhere(where) {
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD" || where.left.tableAlias !== null || where.left.field !== "$id" || where.right.type !== "NUMBER") {
+    return false;
+  }
+  const raw = where.right.raw ?? String(where.right.value);
+  return /^\d+$/.test(raw) && where.right.value > 0 && Number.isSafeInteger(where.right.value);
+}
+function assertApplyExecutionScope(phase, statement) {
+  const capabilities = APPLY_EXECUTION_CAPABILITIES[phase];
+  const isValidationOnly = "validateOnly" in statement && statement.validateOnly === true;
+  if (statement.type !== "EXPLAIN" && !isValidationOnly && statementHasMultiValueApply(statement) && phase !== "phase15b") {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} multi-value execution is not connected`);
+  }
+  if (statement.type === "UPSERT" && (statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)) {
+    if (statement.validateOnly !== true && !capabilities.upsertWrite) {
+      throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} UPSERT execution is not connected`);
+    }
+    return;
+  }
+  if (statement.type === "INSERT" && statement.applyBlocks?.length) {
+    if (statement.validateOnly !== true && !capabilities.insertWrite) {
+      throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} INSERT execution is not connected`);
+    }
+    return;
+  }
+  if (statement.type !== "UPDATE" || !statement.applyBlocks?.length) return;
+  if (!capabilities.multipleParentPreflight && !isSinglePositiveRecordIdWhere(statement.where)) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} execution does not support multiple-parent APPLY`);
+  }
+}
+function statementHasMultiValueApply(statement) {
+  const target = statement.type === "EXPLAIN" ? statement.query : statement;
+  const blocks = target.type === "UPDATE" || target.type === "INSERT" ? target.applyBlocks ?? [] : target.type === "UPSERT" ? [...target.onInsertApplyBlocks ?? [], ...target.onUpdateApplyBlocks ?? []] : [];
+  return blocks.some((block) => block.targetKind === "MULTI_VALUE" || block.operations.some((operation) => operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"));
+}
+function assertApplyPublicWriteScope(phase, statement) {
+  if (statement.type !== "UPDATE" || !statement.applyBlocks?.length || isSinglePositiveRecordIdWhere(statement.where)) return;
+  if (!APPLY_EXECUTION_CAPABILITIES[phase].publicMultipleParentWrite) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} public multiple-parent write is not connected`);
+  }
+}
+function assertApplyInternalWriteScope(phase) {
+  if (!APPLY_EXECUTION_CAPABILITIES[phase].internalPreparedWrite) {
+    throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} internal prepared write is not available`);
+  }
+}
+function formatExecutionPhase(phase) {
+  return `Phase ${phase.slice("phase".length)}`;
+}
+function assertSafeParentWhere(where, multipleParents) {
+  if (isSinglePositiveRecordIdWhere(where)) return;
+  if (where.type === "BINARY" && where.op === "=" && where.left.type === "FIELD" && where.left.tableAlias === null && where.left.field === "$id") {
+    unsupported("a parent $id that is not a positive safe integer in this phase");
+  }
+  if (!multipleParents) {
+    unsupported("a parent WHERE other than the single condition $id = <positive safe integer> in this phase");
+  }
+  assertSafeParentPredicateNode(where);
+}
+function assertSafeParentPredicateNode(node) {
+  if (Array.isArray(node)) {
+    for (const value of node) assertSafeParentPredicateNode(value);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const item = node;
+  const type = typeof item["type"] === "string" ? item["type"] : null;
+  const op = typeof item["op"] === "string" ? item["op"] : null;
+  if (op === "KLIKE" || op === "NOT_KLIKE") unsupported("KLIKE in parent WHERE");
+  if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "SUBQUERY_IN_LIST" || type === "EXISTS") {
+    unsupported("subqueries in parent WHERE");
+  }
+  if (type === "WINDOW_COL" || type === "AGGREGATE" || type === "AGG_REF" || type === "AGG_ARITH" || type === "ARITH_AGG_COL") unsupported("aggregate or window expressions in parent WHERE");
+  if ((type === "FIELD" || type === "FIELD_REF") && typeof item["field"] === "string" && /^(count|sum|avg|min|max|group_concat)\s*\(/i.test(item["field"])) {
+    unsupported("aggregate or window expressions in parent WHERE");
+  }
+  if (type === "KINTONE_FUNC") unsupported("non-deterministic kintone functions in parent WHERE");
+  for (const value of Object.values(item)) assertSafeParentPredicateNode(value);
+}
+function assertSafeChildPredicate(where, idxSelectors) {
+  assertSafeApplyNode(where, "child row selectors", idxSelectors);
+}
+function assertSafeApplyNode(node, context, allowIdx = false) {
+  if (Array.isArray(node)) {
+    for (const value of node) assertSafeApplyNode(value, context, allowIdx);
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const item = node;
+  const type = typeof item["type"] === "string" ? item["type"] : null;
+  const kind = typeof item["kind"] === "string" ? item["kind"] : null;
+  const op = typeof item["op"] === "string" ? item["op"] : null;
+  if (op === "KLIKE" || op === "NOT_KLIKE") unsupported(`KLIKE in ${context}`);
+  if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "SUBQUERY_IN_LIST" || type === "EXISTS") {
+    unsupported(`subqueries in ${context}`);
+  }
+  if (type === "WINDOW_COL" || type === "AGGREGATE" || type === "AGG_REF" || type === "AGG_ARITH" || type === "ARITH_AGG_COL") unsupported(`aggregate or window expressions in ${context}`);
+  if (type === "KINTONE_FUNC") unsupported(`non-deterministic kintone functions in ${context}`);
+  if (type === "FIELD") {
+    const alias = item["tableAlias"];
+    const field = item["field"];
+    if (alias !== null && alias !== void 0) unsupported(`qualified or parent field references in ${context}`);
+    assertSafeChildField(field, context, allowIdx);
+  }
+  if (type === "FIELD_REF") assertSafeChildField(item["field"], context, allowIdx);
+  if (kind === "PATCH" || kind === "APPEND" || kind === "REMOVE") {
+    return;
+  }
+  for (const value of Object.values(item)) assertSafeApplyNode(value, context, allowIdx);
+}
+function assertSafeChildField(field, context, allowIdx = false) {
+  if (typeof field !== "string") return;
+  const lower = field.toLowerCase();
+  if (lower === "_idx" && !allowIdx) unsupported(`_idx in ${context}`);
+  if (lower.startsWith("_p.") || lower.includes(".")) unsupported(`parent or qualified field references in ${context}`);
+  if (/^(count|sum|avg|min|max|group_concat)\s*\(/i.test(field)) {
+    unsupported(`aggregate expressions in ${context}`);
+  }
 }
 
 // src/engine/pushDownNot.ts
@@ -35607,9 +36278,13 @@ function analyzeBatch(statements) {
   }
   statements.forEach((stmt, index) => {
     try {
+      assertApplyScope("phase15b", stmt);
       validateKlikeStatement(stmt);
     } catch (error51) {
       if (error51 instanceof KlikeValidationError) {
+        throw new BatchAnalysisError(error51.message, index);
+      }
+      if (error51 instanceof Error && /^(UnsupportedError|ArgumentError): APPLY /.test(error51.message)) {
         throw new BatchAnalysisError(error51.message, index);
       }
       throw error51;
@@ -35873,40 +36548,6 @@ function fieldSemanticsEqual(left, right) {
   return true;
 }
 
-// src/core/batchVariables.ts
-var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-function normalizeBatchVariableName(name) {
-  if (!VARIABLE_NAME_RE.test(name)) {
-    throw new Error(
-      `ArgumentError: invalid variable name "${name}". Use a name without @ matching [A-Za-z_][A-Za-z0-9_]{0,63}.`
-    );
-  }
-  return name.toLowerCase();
-}
-function normalizeBatchVariables(input) {
-  const normalized = /* @__PURE__ */ Object.create(null);
-  for (const [rawName, value] of Object.entries(input ?? {})) {
-    const name = normalizeBatchVariableName(rawName);
-    if (Object.prototype.hasOwnProperty.call(normalized, name)) {
-      throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
-    }
-    normalized[name] = value;
-  }
-  return normalized;
-}
-function validateDeclaredBatchVariables(statements, input) {
-  const normalized = normalizeBatchVariables(input);
-  const declared = new Set(
-    statements.filter((stmt) => stmt.type === "DECLARE_VARIABLE").map((stmt) => stmt.name)
-  );
-  for (const name of Object.keys(normalized)) {
-    if (!declared.has(name)) {
-      throw new Error(`ArgumentError: injected variable @${name} is not declared.`);
-    }
-  }
-  return normalized;
-}
-
 // src/core/scalarCompare.ts
 function compareCodePointStrings(left, right) {
   const a = left[Symbol.iterator]();
@@ -36052,57 +36693,6 @@ function selectScalarExtreme(values, extreme) {
     const cmp = compare(candidate, best);
     return extreme === "greatest" ? cmp > 0 ? candidate : best : cmp < 0 ? candidate : best;
   });
-}
-
-// src/core/explainMetadata.ts
-function whereNeedsFieldMetadata(where) {
-  if (where === null) return false;
-  switch (where.type) {
-    case "BINARY":
-      return valueNeedsFieldMetadata(where.left);
-    case "NULL_CHECK":
-      return valueNeedsFieldMetadata(where.field);
-    case "LOGICAL":
-      return whereNeedsFieldMetadata(where.left) || whereNeedsFieldMetadata(where.right);
-    case "NOT":
-    case "GROUP":
-      return whereNeedsFieldMetadata(where.expr);
-    case "EXISTS":
-    case "BOOLEAN":
-      return false;
-  }
-}
-function valueNeedsFieldMetadata(value) {
-  if (Array.isArray(value)) return value.some(valueNeedsFieldMetadata);
-  if (value === null || typeof value !== "object") return false;
-  const item = value;
-  if (item["type"] === "FIELD") return item["field"] !== "$id";
-  if (item["type"] === "SELECT") return false;
-  return Object.values(item).some(valueNeedsFieldMetadata);
-}
-function selectNeedsOwnMetadata(statement) {
-  return whereNeedsFieldMetadata(statement.where) || statement.orderBy.length > 0 || statement.columns.some(
-    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
-  );
-}
-function explainNeedsAppMetadata(statement) {
-  const seen = /* @__PURE__ */ new Set();
-  const visit = (node) => {
-    if (node === null || typeof node !== "object") return false;
-    if (seen.has(node)) return false;
-    seen.add(node);
-    if (Array.isArray(node)) return node.some(visit);
-    const item = node;
-    if (item["type"] === "VALIDATE") return true;
-    if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node)) {
-      return true;
-    }
-    if ((item["type"] === "UPDATE" || item["type"] === "DELETE") && whereNeedsFieldMetadata(node.where)) {
-      return true;
-    }
-    return Object.values(item).some(visit);
-  };
-  return visit(statement);
 }
 
 // src/engine/evalFunc.ts
@@ -37084,19 +37674,9 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     const row = kintoneRecordToProcessRow(raw);
     const record2 = {};
     for (const { field, value } of stmt.assignments) {
-      if (value.type === "ARITH") {
-        record2[field] = { value: String(evalArith(value, raw)) };
-      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-        record2[field] = { value: String(evalScalarValueExpr(value, row)) };
-      } else if (value.type === "STRING_FUNC") {
-        record2[field] = { value: evalStringFunc(value, row) };
-      } else if (value.type === "CASE_VALUE") {
-        record2[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
-      } else if (value.type === "SOURCE_FIELD") {
-        throw new DmlConvertError("SOURCE_FIELD \u306F UPDATE ... FROM \u5C02\u7528\u3067\u3059");
-      } else {
-        record2[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
-      }
+      record2[field] = {
+        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw)
+      };
     }
     return { id, record: record2 };
   });
@@ -37104,6 +37684,27 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     app: stmt.appId,
     records: batch
   }));
+}
+function evaluateUpdateAssignmentValue(value, row, fieldType, raw) {
+  if (value.type === "ARITH") {
+    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row));
+  }
+  if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+    return String(evalScalarValueExpr(value, row));
+  }
+  if (value.type === "STRING_FUNC") return evalStringFunc(value, row);
+  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType);
+  if (value.type === "SOURCE_FIELD") {
+    throw new DmlConvertError("SOURCE_FIELD \u306F UPDATE ... FROM \u5C02\u7528\u3067\u3059");
+  }
+  return toKintoneValue(value, fieldType);
+}
+function evaluateSubtableAssignmentValue(value, row, resolveFieldType) {
+  if (value.type === "STRING") return value.value;
+  if (value.type === "NUMBER") return numberLiteralText(value);
+  if (value.type === "ARITH") return String(evalArithExpr(value, row));
+  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
+  throw new Error(`${value.type} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306E\u5024\u3068\u3057\u3066\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
 }
 var UPDATE_FROM_UNSUPPORTED_TYPES = /* @__PURE__ */ new Set([
   "CHECK_BOX",
@@ -37338,6 +37939,2112 @@ var DmlConvertError = class extends Error {
     this.name = "DmlConvertError";
   }
 };
+
+// src/core/applyMultiValuePlan.ts
+var STRING_ARRAY_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var CODE_ARRAY_TYPES = /* @__PURE__ */ new Set([
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT"
+]);
+function argument(message) {
+  throw new Error(`ArgumentError: ${message}`);
+}
+function buildApplyMultiValueFieldPlan(block, snapshotValue, field) {
+  const fieldType = requireMultiValueFieldType(field.fieldType, block.field);
+  const snapshotCodes = readSnapshotCodes(snapshotValue, fieldType, block.field);
+  const snapshotSet = new Set(snapshotCodes);
+  const addOrder = [];
+  const addSet = /* @__PURE__ */ new Set();
+  const removeSet = /* @__PURE__ */ new Set();
+  for (const operation of block.operations) {
+    const value = operation.value;
+    if (value === "") continue;
+    if (operation.kind === "ADD") {
+      if (!addSet.has(value)) addOrder.push(value);
+      addSet.add(value);
+    } else {
+      removeSet.add(value);
+    }
+  }
+  for (const value of addSet) {
+    if (removeSet.has(value)) {
+      argument(`APPLY multi-value field ${block.field} has conflicting ADD and REMOVE for ${JSON.stringify(value)}.`);
+    }
+  }
+  const survivorCodes = snapshotCodes.filter((value) => !removeSet.has(value));
+  const appendedCodes = addOrder.filter((value) => !snapshotSet.has(value));
+  const postImageCodes = [...survivorCodes, ...appendedCodes];
+  const actuallyRemoved = new Set(snapshotCodes.filter((value) => removeSet.has(value))).size;
+  const reportedAdds = /* @__PURE__ */ new Set();
+  const reportedRemoves = /* @__PURE__ */ new Set();
+  const operations = block.operations.map((operation) => {
+    const reported = operation.kind === "ADD" ? reportedAdds : reportedRemoves;
+    const first = !reported.has(operation.value);
+    reported.add(operation.value);
+    return {
+      kind: operation.kind,
+      value: operation.value,
+      changed: operation.value !== "" && first && (operation.kind === "ADD" ? !snapshotSet.has(operation.value) : snapshotSet.has(operation.value))
+    };
+  });
+  const postImageValue = STRING_ARRAY_TYPES.has(fieldType) ? postImageCodes : postImageCodes.map((code) => ({ code }));
+  return {
+    field: block.field,
+    fieldType,
+    operations,
+    postImageValue,
+    addedValues: appendedCodes.length,
+    removedValues: actuallyRemoved,
+    changedValues: appendedCodes.length + actuallyRemoved
+  };
+}
+function requireMultiValueFieldType(fieldType, field) {
+  if (STRING_ARRAY_TYPES.has(fieldType) || CODE_ARRAY_TYPES.has(fieldType)) {
+    return fieldType;
+  }
+  return argument(`APPLY multi-value target ${field} has unsupported type ${fieldType}.`);
+}
+function readSnapshotCodes(raw, fieldType, field) {
+  if (!Array.isArray(raw)) return argument(`APPLY snapshot for ${field} must be an array.`);
+  const codes = raw.map((item, index) => {
+    if (STRING_ARRAY_TYPES.has(fieldType)) {
+      if (typeof item !== "string") {
+        return argument(`APPLY snapshot for ${field} must contain string values (item ${index + 1}).`);
+      }
+      return item;
+    }
+    if (typeof item !== "object" || item === null || typeof item.code !== "string") {
+      return argument(`APPLY snapshot for ${field} must contain {code: string} values (item ${index + 1}).`);
+    }
+    return item.code;
+  });
+  return [...new Set(codes.filter((code) => code !== ""))];
+}
+
+// src/core/applyPatchPlanner.ts
+function argument2(message) {
+  throw new Error(`ArgumentError: ${message}`);
+}
+function getApplyParentId(statement) {
+  const where = statement.where;
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD" || where.left.tableAlias !== null || where.left.field !== "$id" || where.right.type !== "NUMBER" || !Number.isSafeInteger(where.right.value) || where.right.value <= 0) {
+    return argument2("APPLY parent selector must be a single positive $id.");
+  }
+  return where.right.value;
+}
+function resolveApplyPatchMetadata(statement, fieldInfos) {
+  const blocks = statement.applyBlocks;
+  if (!blocks?.length) return argument2("APPLY block is missing.");
+  const fieldsByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const targetTables = /* @__PURE__ */ new Map();
+  const targetMultiValueFields = /* @__PURE__ */ new Map();
+  const childrenByTable = /* @__PURE__ */ new Map();
+  for (const assignment of statement.assignments) {
+    assertWritableAssignment(assignment.field, null, fieldsByCode);
+    assertParentReferences(assignment.value, fieldsByCode);
+  }
+  for (const block of blocks) {
+    if (targetTables.has(block.field) || targetMultiValueFields.has(block.field)) {
+      argument2(`APPLY has more than one block for field ${block.field}.`);
+    }
+    if (statement.assignments.some((assignment) => assignment.field === block.field)) {
+      argument2(`APPLY target ${block.field} is also assigned by parent SET.`);
+    }
+    const target = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
+    if (!target) return block.targetKind === "SUBTABLE" ? argument2(`APPLY target ${block.field} is not a SUBTABLE.`) : argument2(`APPLY target ${block.field} does not exist as a top-level field.`);
+    assertApplyTargetFieldType(block, target.fieldType);
+    if (block.targetKind === "MULTI_VALUE") {
+      if (target.writable === false) argument2(`APPLY target ${block.field} is not writable (${target.fieldType}).`);
+      targetMultiValueFields.set(block.field, target);
+      continue;
+    }
+    const targetTable = target;
+    const targetChildren = new Map(
+      fieldInfos.filter((field) => field.inSubtable && field.subtableCode === block.field).map((field) => [field.code, field])
+    );
+    targetTables.set(block.field, targetTable);
+    childrenByTable.set(block.field, targetChildren);
+    for (const operation of block.operations) {
+      if (operation.kind === "PATCH") {
+        for (const assignment of operation.assignments) {
+          assertWritableAssignment(assignment.field, block.field, fieldsByCode, targetChildren);
+          assertChildReferences(assignment.value, block.field, fieldsByCode, targetChildren);
+        }
+        if (operation.selector.kind === "WHERE") {
+          assertChildReferences(operation.selector.where, block.field, fieldsByCode, targetChildren);
+        }
+      } else if (operation.kind === "APPEND") {
+        const specified = /* @__PURE__ */ new Set();
+        for (const field of operation.fields) {
+          if (specified.has(field)) argument2(`APPLY APPEND specifies child ${field} more than once.`);
+          specified.add(field);
+          assertWritableAssignment(field, block.field, fieldsByCode, targetChildren);
+        }
+      } else if (operation.kind === "REMOVE" && operation.selector.kind === "WHERE") {
+        assertChildReferences(operation.selector.where, block.field, fieldsByCode, targetChildren);
+      }
+    }
+  }
+  return { targetTables, targetMultiValueFields, childrenByTable, fieldsByCode };
+}
+function assertParentReferences(node, fieldsByCode) {
+  visitFieldReferences(node, (code) => {
+    if (code === "$id" || code === "$revision") return;
+    const field = fieldsByCode.get(code);
+    if (!field || field.inSubtable) argument2(`APPLY parent reference ${code} is not a top-level field.`);
+    if (field.fieldType === "FILE") argument2(`APPLY parent FILE reference ${code} is not supported.`);
+  });
+}
+function assertWritableAssignment(code, table, fieldsByCode, targetChildren) {
+  if (code.startsWith("_") || code.startsWith("$")) {
+    argument2(`APPLY assignment target ${code} is a system field.`);
+  }
+  const field = table === null ? [...fieldsByCode.values()].find((item) => item.code === code && !item.inSubtable) : targetChildren?.get(code);
+  if (!field) {
+    const elsewhere = fieldsByCode.get(code);
+    if (table !== null && elsewhere?.inSubtable) {
+      argument2(`APPLY child ${code} does not belong to subtable ${table}.`);
+    }
+    argument2(`APPLY ${table === null ? "parent field" : "child"} ${code} does not exist.`);
+  }
+  if (field.fieldType === "SUBTABLE" || field.fieldType === "FILE" || field.writable === false) {
+    argument2(`APPLY assignment target ${code} is not writable (${field.fieldType}).`);
+  }
+}
+function assertChildReferences(node, table, fieldsByCode, targetChildren) {
+  visitFieldReferences(node, (code) => {
+    if (code === "_rid" || code === "_idx") return;
+    if (targetChildren.has(code)) return;
+    const field = fieldsByCode.get(code);
+    if (field?.inSubtable) argument2(`APPLY child reference ${code} does not belong to subtable ${table}.`);
+    argument2(`APPLY child reference ${code} does not exist in subtable ${table}.`);
+  });
+}
+function collectApplySnapshotFields(statement, fieldInfos) {
+  const metadata = resolveApplyPatchMetadata(statement, fieldInfos);
+  const fields = /* @__PURE__ */ new Set(["$id", "$revision"]);
+  for (const info of fieldInfos) {
+    if (info.inSubtable || info.fieldType === "FILE") continue;
+    fields.add(info.code);
+  }
+  for (const table of metadata.targetTables.values()) fields.add(table.code);
+  for (const assignment of statement.assignments) {
+    visitFieldReferences(assignment.value, (code) => {
+      const info = metadata.fieldsByCode.get(code);
+      if (!info?.inSubtable && info?.fieldType !== "FILE") fields.add(code);
+    });
+  }
+  return [...fields];
+}
+function flattenSubtableSnapshotRow(row, rowIndex) {
+  const flat = { _rid: row.id ?? "", _idx: String(rowIndex) };
+  for (const [code, cell] of Object.entries(row.value ?? {})) {
+    flat[code] = normalizeUnknownToString(cell?.value);
+  }
+  return flat;
+}
+function buildApplyPatchPlan(input) {
+  const { statement, snapshot, fieldInfos } = input;
+  const metadata = input.metadata ?? resolveApplyPatchMetadata(statement, fieldInfos);
+  const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
+  const expectedParentId = getApplyParentId(statement);
+  if (parentId !== expectedParentId) argument2(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
+  return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+}
+function buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata = resolveApplyPatchMetadata(statement, fieldInfos)) {
+  const parentIds = /* @__PURE__ */ new Set();
+  return snapshots.map((snapshot) => {
+    const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
+    if (parentIds.has(parentId)) argument2(`APPLY snapshots contain duplicate parentId ${parentId}.`);
+    parentIds.add(parentId);
+    return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+  });
+}
+function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId) {
+  const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
+  const tablePlans = [];
+  const multiValuePlans = [];
+  for (const block of statement.applyBlocks) {
+    if (block.targetKind === "MULTI_VALUE") {
+      const field = metadata.targetMultiValueFields.get(block.field);
+      if (!field) argument2(`APPLY multi-value metadata for ${block.field} is missing.`);
+      multiValuePlans.push(buildApplyMultiValueFieldPlan(block, snapshot[block.field]?.value, field));
+      continue;
+    }
+    const targetChildren = metadata.childrenByTable.get(block.field);
+    const snapshotRows = readSnapshotRows(snapshot, block.field);
+    const seenRowIds = /* @__PURE__ */ new Set();
+    for (const row of snapshotRows) {
+      if (!row.id) argument2(`APPLY snapshot for ${block.field} contains a row without _rid.`);
+      if (seenRowIds.has(row.id)) argument2(`APPLY snapshot for ${block.field} contains duplicate _rid ${row.id}.`);
+      seenRowIds.add(row.id);
+    }
+    const childTypeResolver = (field) => field.field === "_rid" ? "SINGLE_LINE_TEXT" : field.field === "_idx" ? "NUMBER" : targetChildren.get(field.field)?.fieldType;
+    const resolved = [];
+    const appended = [];
+    const operationPlans = [];
+    const occupiedCells = /* @__PURE__ */ new Set();
+    const patchedRowIndices = /* @__PURE__ */ new Set();
+    const removedRowIndices = /* @__PURE__ */ new Set();
+    const hasRemove = block.operations.some((operation) => operation.kind === "REMOVE");
+    for (const [operationIndex, operation] of block.operations.entries()) {
+      if (operation.kind === "APPEND") {
+        const rows = buildApplyAppendRows(operation, targetChildren, block.field);
+        operationPlans.push({ kind: "APPEND", addedRows: rows.length });
+        appended.push(...rows);
+        continue;
+      }
+      if (operation.kind === "REMOVE") {
+        const indices2 = resolveRemoveTargets(operation, snapshotRows, childTypeResolver, block.field);
+        if (operation.expectRows) {
+          assertExpectRows(operation.expectRows, indices2.length, parentId, block.field, operationIndex, operation.kind);
+        }
+        operationPlans.push({ kind: "REMOVE", removedRows: indices2.length });
+        for (const rowIndex of indices2) {
+          const rowId = snapshotRows[rowIndex].id;
+          if (patchedRowIndices.has(rowIndex)) {
+            argument2(`APPLY row ${rowId} is selected by both PATCH and REMOVE.`);
+          }
+          if (removedRowIndices.has(rowIndex)) {
+            argument2(`APPLY removes row ${rowId} more than once.`);
+          }
+          removedRowIndices.add(rowIndex);
+        }
+        continue;
+      }
+      if (operation.kind !== "PATCH") continue;
+      const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+      if (operation.expectRows) {
+        assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
+      }
+      operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
+      for (const rowIndex of indices) {
+        const row = snapshotRows[rowIndex];
+        if (removedRowIndices.has(rowIndex)) {
+          argument2(`APPLY row ${row.id} is selected by both PATCH and REMOVE.`);
+        }
+        patchedRowIndices.add(rowIndex);
+        const flat = flattenSubtableSnapshotRow(row, rowIndex);
+        for (const assignment of operation.assignments) {
+          const key = `${row.id}\0${assignment.field}`;
+          if (occupiedCells.has(key)) argument2(`APPLY patches cell ${row.id}.${assignment.field} more than once.`);
+          occupiedCells.add(key);
+          resolved.push({
+            rowIndex,
+            field: assignment.field,
+            value: evaluateSubtableAssignmentValue(assignment.value, flat, childTypeResolver)
+          });
+        }
+      }
+    }
+    const updatesByIndex = /* @__PURE__ */ new Map();
+    for (const cell of resolved) {
+      const updates = updatesByIndex.get(cell.rowIndex) ?? {};
+      updates[cell.field] = { value: cell.value };
+      updatesByIndex.set(cell.rowIndex, updates);
+    }
+    const survivorRows = snapshotRows.flatMap(
+      (row, index) => removedRowIndices.has(index) ? [] : [{
+        id: row.id,
+        value: { ...row.value, ...updatesByIndex.get(index) ?? {} }
+      }]
+    );
+    const postImageRows = [...survivorRows, ...appended];
+    const base = {
+      table: block.field,
+      operations: operationPlans,
+      changedSubtableRows: updatesByIndex.size + removedRowIndices.size + appended.length,
+      deletedRows: removedRowIndices.size,
+      snapshotRowIds: snapshotRows.map((row) => row.id),
+      postImageRows
+    };
+    if (hasRemove) {
+      tablePlans.push({
+        ...base,
+        payloadShape: "FULL_SURVIVORS",
+        removedRowIds: snapshotRows.flatMap((row, index) => removedRowIndices.has(index) ? [row.id] : []),
+        payloadRows: postImageRows.map((row) => ({ ...row.id === void 0 ? {} : { id: row.id }, value: row.value }))
+      });
+    } else {
+      tablePlans.push({
+        ...base,
+        payloadShape: "PATCH_ONLY",
+        payloadRows: [
+          ...snapshotRows.map((row, index) => {
+            const updates = updatesByIndex.get(index);
+            return updates ? { id: row.id, value: updates } : { id: row.id };
+          }),
+          ...appended.map((row) => ({ value: row.value }))
+        ]
+      });
+    }
+  }
+  const parentRow = kintoneRecordToProcessRow2(snapshot);
+  const parentValues = {};
+  for (const assignment of statement.assignments) {
+    const fieldType = metadata.fieldsByCode.get(assignment.field)?.fieldType;
+    parentValues[assignment.field] = {
+      value: evaluateUpdateAssignmentValue(assignment.value, parentRow, fieldType, snapshot)
+    };
+  }
+  const postImage = { ...snapshot };
+  Object.assign(postImage, parentValues);
+  for (const table of tablePlans) postImage[table.table] = { value: table.postImageRows };
+  for (const multiValue of multiValuePlans) {
+    postImage[multiValue.field] = { value: multiValue.postImageValue };
+  }
+  return {
+    app: statement.appId,
+    parentId,
+    revision,
+    parentRows: 1,
+    changedSubtableRows: tablePlans.reduce((sum, table) => sum + table.changedSubtableRows, 0),
+    parentValues,
+    postImage,
+    tables: tablePlans,
+    multiValues: multiValuePlans
+  };
+}
+function assertExpectRows(guard, actual, parentId, table, operationIndex, operationKind) {
+  const matches = guard.kind === "EXACT" ? actual === guard.count : guard.kind === "BETWEEN" ? actual >= guard.min && actual <= guard.max : guard.kind === "AT_LEAST" ? actual >= guard.count : actual <= guard.count;
+  if (matches) return;
+  const expected = guard.kind === "EXACT" ? `exactly ${guard.count}` : guard.kind === "BETWEEN" ? `between ${guard.min} and ${guard.max}` : guard.kind === "AT_LEAST" ? `at least ${guard.count}` : `at most ${guard.count}`;
+  argument2(
+    `APPLY EXPECT ROWS mismatch for parent $id ${parentId}, table ${table}, operation ${operationIndex + 1} (${operationKind}): expected ${expected}, actual ${actual}.`
+  );
+}
+function normalizeApplyPatchPlan(plan, normalizedRecord) {
+  const tables = plan.tables.map((table) => {
+    const normalizedRows = normalizedRecord[table.table]?.value;
+    if (!Array.isArray(normalizedRows) || normalizedRows.length !== table.postImageRows.length) {
+      return argument2(`APPLY normalized post-image for ${table.table} has an unexpected row count.`);
+    }
+    const payloadRows = table.payloadRows.map((payload, index) => {
+      const normalized = normalizedRows[index];
+      if (!normalized?.value) return argument2(`APPLY normalized post-image for ${table.table} row ${index + 1} has no value.`);
+      if (payload.id === void 0) return { value: normalized.value };
+      if (payload.value === void 0) return { id: payload.id };
+      return {
+        id: payload.id,
+        value: Object.fromEntries(Object.keys(payload.value).map((field) => [field, normalized.value[field]]))
+      };
+    });
+    return {
+      ...table,
+      payloadRows,
+      postImageRows: normalizedRows
+    };
+  });
+  const parentValues = Object.fromEntries(Object.keys(plan.parentValues).map((field) => [
+    field,
+    normalizedRecord[field] ?? plan.parentValues[field]
+  ]));
+  const multiValues = plan.multiValues.map((multiValue) => {
+    const normalized = normalizedRecord[multiValue.field]?.value;
+    if (!Array.isArray(normalized)) {
+      return argument2(`APPLY normalized post-image for ${multiValue.field} is not an array.`);
+    }
+    return { ...multiValue, postImageValue: normalized };
+  });
+  return {
+    ...plan,
+    parentValues,
+    tables,
+    multiValues,
+    postImage: normalizedRecord
+  };
+}
+function buildApplyAppendRows(operation, children, table) {
+  return operation.values.map((row) => ({
+    value: buildAppendValue(operation, row, children, table)
+  }));
+}
+function buildAppendValue(operation, row, children, table) {
+  if (row.length !== operation.fields.length) {
+    return argument2(`APPLY APPEND for ${table} has ${row.length} values for ${operation.fields.length} fields.`);
+  }
+  const specified = new Map(operation.fields.map((field, index) => [field, row[index]]));
+  const value = {};
+  for (const field of children.values()) {
+    if (field.fieldType === "FILE" || field.writable === false) continue;
+    const sqlValue = specified.get(field.code);
+    value[field.code] = { value: sqlValue === void 0 ? appendDefaultValue(field) : sqlValue.type === "CASE_VALUE" ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType) : toKintoneValue(sqlValue, field.fieldType) };
+  }
+  return value;
+}
+function appendDefaultValue(field) {
+  if (field.defaultValue !== void 0 && field.defaultValue !== null) return field.defaultValue;
+  return ["CHECK_BOX", "MULTI_SELECT", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(field.fieldType) ? [] : "";
+}
+function resolvePatchTargets(operation, rows, resolveFieldType, table) {
+  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+}
+function resolveRemoveTargets(operation, rows, resolveFieldType, table) {
+  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+}
+function resolveSelectorTargets(selector, rows, resolveFieldType, table) {
+  if (selector.kind === "ALL_ROWS") return rows.map((_, index) => index);
+  const where = selector.where;
+  const indices = rows.flatMap(
+    (row, index) => evalWhere(where, flattenSubtableSnapshotRow(row, index), resolveFieldType) ? [index] : []
+  );
+  const requestedRid = exactRidSelectorValue(where);
+  if (requestedRid !== null && indices.length === 0) {
+    argument2(`APPLY _rid ${requestedRid} does not exist in snapshot table ${table}.`);
+  }
+  const requestedIdx = exactIdxSelectorValue(where);
+  if (requestedIdx !== null && indices.length === 0) {
+    argument2(`APPLY _idx ${requestedIdx} does not exist in snapshot table ${table}.`);
+  }
+  return indices;
+}
+function exactRidSelectorValue(where) {
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD" || where.left.tableAlias !== null || where.left.field !== "_rid") return null;
+  if (where.right.type === "STRING") return where.right.value;
+  if (where.right.type === "NUMBER") return where.right.raw ?? String(where.right.value);
+  return null;
+}
+function exactIdxSelectorValue(where) {
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD" || where.left.tableAlias !== null || where.left.field !== "_idx" || where.right.type !== "NUMBER") {
+    return null;
+  }
+  return Number.isSafeInteger(where.right.value) && where.right.value >= 0 ? where.right.value : null;
+}
+function readSnapshotRows(snapshot, table) {
+  const raw = snapshot[table]?.value;
+  if (!Array.isArray(raw)) return argument2(`APPLY snapshot field ${table} is not a subtable value.`);
+  return raw.map((row) => {
+    const item = row;
+    return {
+      id: typeof item.id === "string" ? item.id : "",
+      value: item.value && typeof item.value === "object" ? item.value : {}
+    };
+  });
+}
+function requirePositiveInteger(value, label) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0) argument2(`${label} must be a positive integer.`);
+  return n;
+}
+function kintoneRecordToProcessRow2(record2) {
+  const row = {};
+  for (const [code, cell] of Object.entries(record2)) {
+    row[code] = normalizeUnknownToString(cell?.value);
+  }
+  return row;
+}
+function normalizeUnknownToString(value) {
+  if (value === null || value === void 0) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+function visitFieldReferences(node, visit) {
+  if (Array.isArray(node)) {
+    node.forEach((item2) => visitFieldReferences(item2, visit));
+    return;
+  }
+  if (node === null || typeof node !== "object") return;
+  const item = node;
+  if ((item["type"] === "FIELD" || item["type"] === "FIELD_REF") && typeof item["field"] === "string") {
+    visit(item["field"]);
+  }
+  for (const value of Object.values(item)) visitFieldReferences(value, visit);
+}
+
+// src/converter/applyPatchToKintone.ts
+var KINTONE_PUT_RECORD_LIMIT = 100;
+function argument3(message) {
+  throw new Error(`ArgumentError: ${message}`);
+}
+function requireRevision(record2) {
+  const revision = Number(record2["$revision"]?.value);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    return argument3("APPLY snapshot $revision must be a positive integer.");
+  }
+  return revision;
+}
+function applyPatchPlanToKintone(plan) {
+  if (!Number.isSafeInteger(plan.parentId) || plan.parentId <= 0) {
+    return argument3("APPLY plan parentId must be a positive integer.");
+  }
+  if (!Number.isSafeInteger(plan.revision) || plan.revision <= 0) {
+    return argument3("APPLY plan revision must be a positive integer.");
+  }
+  const record2 = { ...plan.parentValues };
+  const seenFields = new Set(Object.keys(record2));
+  for (const multiValue of plan.multiValues) {
+    if (seenFields.has(multiValue.field)) {
+      argument3(`APPLY plan contains duplicate top-level field ${multiValue.field}.`);
+    }
+    seenFields.add(multiValue.field);
+    record2[multiValue.field] = { value: multiValue.postImageValue };
+  }
+  const seenTables = /* @__PURE__ */ new Set();
+  for (const table of plan.tables) {
+    if (seenFields.has(table.table)) argument3(`APPLY plan contains duplicate top-level field ${table.table}.`);
+    if (seenTables.has(table.table)) argument3(`APPLY plan contains duplicate table ${table.table}.`);
+    seenTables.add(table.table);
+    seenFields.add(table.table);
+    assertTablePlan(table);
+    record2[table.table] = { value: table.payloadRows };
+  }
+  return {
+    app: plan.app,
+    records: [{
+      id: plan.parentId,
+      revision: plan.revision,
+      record: record2
+    }]
+  };
+}
+function applyPatchPlansToKintoneBatches(prepared) {
+  if (prepared.records.length === 0) return [];
+  const app = prepared.plans[0]?.app;
+  if (!Number.isSafeInteger(app) || app <= 0 || prepared.plans.length !== prepared.records.length) {
+    return argument3("prepared APPLY plans and records must have the same positive-app parent count.");
+  }
+  const batches = [];
+  for (let index = 0; index < prepared.records.length; index += KINTONE_PUT_RECORD_LIMIT) {
+    batches.push({
+      app,
+      records: prepared.records.slice(index, index + KINTONE_PUT_RECORD_LIMIT)
+    });
+  }
+  return batches;
+}
+function assertTablePlan(table) {
+  const snapshotIds = assertUniqueIds(table.snapshotRowIds, `${table.table} snapshot`);
+  const payloadIds = table.payloadRows.flatMap((row) => row.id === void 0 ? [] : [row.id]);
+  for (const row of table.payloadRows) {
+    if (row.id === void 0 && row.value === void 0) {
+      argument3(`APPLY ${table.payloadShape} table ${table.table} contains an APPEND row without value.`);
+    }
+  }
+  assertUniqueIds(payloadIds, `${table.table} payload`);
+  if (table.payloadShape === "PATCH_ONLY") {
+    if (table.operations.some((operation) => operation.kind === "REMOVE")) {
+      argument3(`APPLY PATCH_ONLY table ${table.table} cannot contain REMOVE.`);
+    }
+    const payloadPrefixIds2 = table.payloadRows.slice(0, snapshotIds.length).map((row) => row.id ?? "");
+    assertSameOrderedIds(
+      snapshotIds,
+      payloadPrefixIds2,
+      `APPLY PATCH_ONLY table ${table.table} must retain every snapshot row id in order.`
+    );
+    if (table.payloadRows.slice(snapshotIds.length).some((row) => row.id !== void 0)) {
+      argument3(`APPLY PATCH_ONLY table ${table.table} must place every APPEND row after snapshot rows.`);
+    }
+    const postPrefixIds = table.postImageRows.slice(0, snapshotIds.length).map((row) => row.id ?? "");
+    assertSameOrderedIds(
+      snapshotIds,
+      postPrefixIds,
+      `APPLY PATCH_ONLY table ${table.table} post-image must retain every snapshot row id in order.`
+    );
+    if (table.postImageRows.slice(snapshotIds.length).some((row) => row.id !== void 0)) {
+      argument3(`APPLY PATCH_ONLY table ${table.table} post-image must place every APPEND row after snapshot rows.`);
+    }
+    return;
+  }
+  if (!table.operations.some((operation) => operation.kind === "REMOVE")) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} requires a REMOVE operation.`);
+  }
+  const removed = assertUniqueIds(table.removedRowIds, `${table.table} removed`);
+  if (table.deletedRows !== removed.length) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} deleted row count does not match removed ids.`);
+  }
+  if (table.payloadRows.length !== table.postImageRows.length) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} payload/post-image row counts must match.`);
+  }
+  const survivorIds = table.postImageRows.flatMap((row) => row.id === void 0 ? [] : [row.id]);
+  const removedSet = new Set(removed);
+  const survivorSet = new Set(survivorIds);
+  for (const id of removed) {
+    if (survivorSet.has(id)) argument3(`APPLY FULL_SURVIVORS table ${table.table} has intersecting survivor/removed id ${id}.`);
+  }
+  const expectedSurvivorIds = snapshotIds.filter((id) => !removedSet.has(id));
+  assertSameOrderedIds(
+    expectedSurvivorIds,
+    survivorIds,
+    `APPLY FULL_SURVIVORS table ${table.table} must retain every survivor in snapshot order.`
+  );
+  const payloadPrefixIds = table.payloadRows.slice(0, survivorIds.length).map((row) => row.id ?? "");
+  assertSameOrderedIds(
+    survivorIds,
+    payloadPrefixIds,
+    `APPLY FULL_SURVIVORS table ${table.table} payload must enumerate every survivor in order.`
+  );
+  if (table.payloadRows.slice(survivorIds.length).some((row) => row.id !== void 0) || table.postImageRows.slice(survivorIds.length).some((row) => row.id !== void 0)) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} must place every APPEND row after survivors.`);
+  }
+  if (table.payloadRows.some((row) => row.value === void 0)) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} requires values for every survivor.`);
+  }
+  if (table.payloadRows.some((row, index) => !deepEqual(row.value, table.postImageRows[index]?.value))) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} payload must contain every post-image child value.`);
+  }
+  const partition = /* @__PURE__ */ new Set([...survivorIds, ...removed]);
+  if (partition.size !== snapshotIds.length || snapshotIds.some((id) => !partition.has(id))) {
+    argument3(`APPLY FULL_SURVIVORS table ${table.table} does not partition every snapshot row.`);
+  }
+}
+function assertUniqueIds(ids, label) {
+  const out = [...ids];
+  const seen = /* @__PURE__ */ new Set();
+  for (const id of out) {
+    if (!id) argument3(`APPLY ${label} contains an empty row id.`);
+    if (seen.has(id)) argument3(`APPLY ${label} contains duplicate row id ${id}.`);
+    seen.add(id);
+  }
+  return out;
+}
+function assertSameOrderedIds(actual, expected, message) {
+  if (actual.length !== expected.length || actual.some((id, index) => id !== expected[index])) {
+    argument3(message);
+  }
+}
+function deepEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => deepEqual(value, right[index]));
+  }
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  const leftRecord = left;
+  const rightRecord = right;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightRecord, key) && deepEqual(leftRecord[key], rightRecord[key]));
+}
+
+// src/core/numberPrecision.ts
+function parseIntegerSetting(value, name, min, max) {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new Error(`SettingsError: numberPrecision.${name} must be an integer string.`);
+  }
+  let parsed = 0;
+  for (const digit of value) parsed = parsed * 10 + digit.charCodeAt(0) - 48;
+  if (parsed < min || parsed > max) {
+    throw new Error(`SettingsError: numberPrecision.${name} must be between ${min} and ${max}.`);
+  }
+  return parsed;
+}
+function parseNumberPrecisionSettings(response) {
+  const raw = response.numberPrecision;
+  if (raw === void 0 || raw === null || typeof raw !== "object") {
+    throw new Error("SettingsError: numberPrecision is missing from app settings.");
+  }
+  const digits = parseIntegerSetting(raw.digits, "digits", 1, 30);
+  const decimalPlaces = parseIntegerSetting(raw.decimalPlaces, "decimalPlaces", 0, 10);
+  const roundingMode = raw.roundingMode;
+  if (roundingMode !== "HALF_EVEN" && roundingMode !== "UP" && roundingMode !== "DOWN") {
+    throw new Error("SettingsError: numberPrecision.roundingMode is unsupported.");
+  }
+  return { digits, decimalPlaces, roundingMode };
+}
+function exactDecimalDigitCounts(value) {
+  if (value.sign === 0) return { integerDigits: 0, fractionDigits: 0 };
+  return {
+    integerDigits: Math.max(value.coefficient.length - value.scale, 0),
+    fractionDigits: Math.max(value.scale, 0)
+  };
+}
+
+// src/core/dmlValidation.ts
+var ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var CHOICE_TYPES = /* @__PURE__ */ new Set(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"]);
+function validateAndNormalizeDmlValue(raw, field, numberPrecision) {
+  if (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME") {
+    const original = rawScalarText(raw);
+    if (original !== "" && !isValidTemporalInput(original, field.fieldType)) {
+      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
+    }
+  }
+  let value;
+  try {
+    value = normalizeRaw(raw, field.fieldType);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, code: typeCode(field.fieldType), message };
+  }
+  if (field.required && isEmpty(value)) {
+    return { ok: false, code: "ERR_REQUIRED", message: `${field.code} \u306F\u5FC5\u9808\u3067\u3059` };
+  }
+  if (!isEmpty(value) && field.fieldType === "NUMBER") {
+    const text = String(value);
+    const decimal = parseExactDecimal(text);
+    if (decimal === null) {
+      return { ok: false, code: "ERR_TYPE_NUMBER", message: `${field.code} \u306F\u6570\u5024\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (field.minValue != null && compareDecimal(text, field.minValue) < 0) {
+      return { ok: false, code: "ERR_RANGE_MIN", message: `${field.code} \u306F ${field.minValue} \u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (field.maxValue != null && compareDecimal(text, field.maxValue) > 0) {
+      return { ok: false, code: "ERR_RANGE_MAX", message: `${field.code} \u306F ${field.maxValue} \u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (numberPrecision !== void 0) {
+      const { integerDigits } = exactDecimalDigitCounts(decimal);
+      const integerBudget = numberPrecision.digits - numberPrecision.decimalPlaces;
+      if (integerDigits > integerBudget) {
+        return {
+          ok: false,
+          code: "ERR_NUMBER_INTEGER_DIGITS",
+          message: `${field.code} \u306E\u6574\u6570\u90E8\u306F ${integerDigits} \u6841\u3067\u3059\u3002\u8A31\u5BB9\u306F ${integerBudget} \u6841\u307E\u3067\u3067\u3059 (digits=${numberPrecision.digits}, decimalPlaces=${numberPrecision.decimalPlaces})`
+        };
+      }
+    }
+  }
+  if (!isEmpty(value) && (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME")) {
+    if (!isValidTemporal(String(value), field.fieldType)) {
+      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
+    }
+  }
+  if (typeof value === "string") {
+    const length = value.length;
+    const min = field.minLength == null ? null : Number(field.minLength);
+    const max = field.maxLength == null ? null : Number(field.maxLength);
+    if (Number.isFinite(min) && length < min) {
+      return { ok: false, code: "ERR_LENGTH_MIN", message: `${field.code} \u306F ${min} \u6587\u5B57\u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+    if (Number.isFinite(max) && length > max) {
+      return { ok: false, code: "ERR_LENGTH_MAX", message: `${field.code} \u306F ${max} \u6587\u5B57\u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
+    }
+  }
+  if (!isEmpty(value) && CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
+    const selected = Array.isArray(value) ? value.map(String) : [String(value)];
+    if (selected.some((choice) => !(choice in field.optionOrder))) {
+      return { ok: false, code: "ERR_CHOICE_INVALID", message: `${field.code} \u306B\u5B9A\u7FA9\u5916\u306E\u9078\u629E\u80A2\u304C\u3042\u308A\u307E\u3059` };
+    }
+  }
+  return { ok: true, value };
+}
+function rawScalarText(raw) {
+  if (raw == null) return "";
+  if (isSqlValue(raw) && raw.type === "NUMBER") return numberLiteralText(raw);
+  if (isSqlValue(raw) && raw.type === "STRING") return raw.value;
+  return typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
+}
+function isValidTemporalInput(value, type) {
+  if (type === "DATE") return isValidTemporal(value.replace(/\//g, "-"), "DATE");
+  if (type === "TIME") return isValidTemporal(value, "TIME");
+  let normalized = value.replace(/\//g, "-").replace(" ", "T");
+  if (/T\d{2}:\d{2}$/.test(normalized)) normalized += ":00";
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized)) {
+    return isValidTemporal(normalized.slice(0, 10), "DATE") && isValidTemporal(normalized.slice(11), "TIME");
+  }
+  return isValidTemporal(normalized, "DATETIME");
+}
+function normalizeRaw(raw, fieldType) {
+  if (isSqlValue(raw)) {
+    const normalized = normalizeDmlSqlValue(raw, fieldType);
+    if (!normalized.ok) throw new Error(normalized.message);
+    return normalized.value;
+  }
+  if (Array.isArray(raw)) return raw.map((v) => typeof v === "object" && v !== null && "code" in v ? String(v.code) : String(v));
+  const text = raw == null ? "" : String(raw);
+  if (ARRAY_TYPES2.has(fieldType)) {
+    if (text === "") return [];
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {
+    }
+    return text.split(",").map((v) => v.trim());
+  }
+  return text;
+}
+function isSqlValue(value) {
+  return typeof value === "object" && value !== null && typeof value.type === "string";
+}
+function isEmptyDmlValue(value) {
+  if (value == null || value === "") return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (isSqlValue(value)) {
+    if (value.type === "STRING") return value.value === "";
+    if (value.type === "ARRAY") return value.elements.length === 0;
+  }
+  return false;
+}
+function isEmpty(value) {
+  return value === "" || Array.isArray(value) && value.length === 0;
+}
+function typeCode(type) {
+  return type === "NUMBER" ? "ERR_TYPE_NUMBER" : "ERR_TYPE_DATE";
+}
+function isValidTemporal(value, type) {
+  if (type === "TIME") {
+    const m2 = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+    return m2 !== null && Number(m2[1]) <= 23 && Number(m2[2]) <= 59 && Number(m2[3] ?? 0) <= 59;
+  }
+  const datePart = type === "DATE" ? value : value.slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const date5 = new Date(Date.UTC(year, month - 1, day));
+  if (date5.getUTCFullYear() !== year || date5.getUTCMonth() !== month - 1 || date5.getUTCDate() !== day) return false;
+  if (type === "DATE") return true;
+  const timePart = value.slice(11, value.endsWith("Z") ? -1 : value.length - 6).replace(/\.\d+$/, "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValidTemporal(timePart, "TIME");
+}
+
+// src/core/dmlValidationCandidates.ts
+var VALIDATION_META_COLUMNS = [
+  "$err_statement",
+  "$err_operation",
+  "$err_row",
+  "$err_field",
+  "$err_code",
+  "$err_message"
+];
+function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision, checkGroups = [], validateMissingCreateFields = true, includePreErrors = true) {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  const errors = [];
+  const invalid = /* @__PURE__ */ new Set();
+  let firstEvaluationError;
+  for (const candidate of candidates) {
+    candidate.record ??= {};
+    const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
+    for (const code of targetFields) {
+      if (!candidate.payload.has(code)) continue;
+      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code), numberPrecision);
+      if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
+      else {
+        const original = candidate.payload.get(code);
+        const type = infoByCode.get(code).fieldType;
+        const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type) && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+        candidate.record[code] = { value: preserveCodes ? original : result.value };
+      }
+    }
+    if (validateMissingCreateFields && candidate.mode === "create") {
+      for (const info of fieldInfos) {
+        if (info.inSubtable) continue;
+        if (candidate.payload.has(info.code)) continue;
+        const emptyDefault = isEmptyDmlValue(info.defaultValue);
+        if (!emptyDefault) {
+          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info, numberPrecision);
+          if (!defaultResult.ok) rowErrors.push({
+            field: info.code,
+            code: defaultResult.code,
+            message: `\u65E2\u5B9A\u5024: ${defaultResult.message}`
+          });
+        } else {
+          const emptyResult = validateAndNormalizeDmlValue("", info, numberPrecision);
+          if (!emptyResult.ok) {
+            rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
+          } else if (info.required) {
+            rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} \u306F\u5FC5\u9808\u3067\u3059` });
+          }
+        }
+      }
+    }
+    if (checkGroups.length > 0) {
+      const row = candidate.evaluationRow ?? Object.fromEntries(
+        [...candidate.payload].map(([field, value]) => [field, renderValidationValue(value)])
+      );
+      const types = candidate.evaluationFieldTypes;
+      const resolveType = (field) => {
+        const qualified = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
+        return types?.get(qualified) ?? types?.get(field.field);
+      };
+      try {
+        for (const custom2 of evaluateCustomChecks(checkGroups, row, resolveType)) {
+          rowErrors.push({ field: "", code: "ERR_CHECK", message: custom2.message });
+        }
+      } catch (error51) {
+        firstEvaluationError ??= error51;
+      }
+    }
+    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
+    for (const error51 of rowErrors) {
+      const row = {};
+      for (const field of payloadFields) row[field] = renderValidationValue(candidate.payload.get(field));
+      row["$err_statement"] = String(statementNumber);
+      row["$err_operation"] = operation;
+      row["$err_row"] = String(candidate.rowNumber);
+      row["$err_field"] = error51.field;
+      row["$err_code"] = error51.code;
+      row["$err_message"] = error51.message;
+      errors.push(row);
+    }
+  }
+  if (firstEvaluationError !== void 0) throw firstEvaluationError;
+  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
+}
+function renderValidationValue(value) {
+  if (value == null) return "";
+  if (typeof value === "object" && "type" in value) {
+    const sql = value;
+    if (sql.type === "NUMBER") return sql.raw ?? String(sql.value ?? "");
+    if (sql.type === "STRING") return String(sql.value ?? "");
+    if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
+  }
+  if (Array.isArray(value)) return JSON.stringify(value);
+  return String(value);
+}
+
+// src/core/existingRecordValidation.ts
+function buildValidationFieldMetadataIndex(fieldInfos) {
+  const topLevel = fieldInfos.filter((field) => !field.inSubtable);
+  const childrenByTable = /* @__PURE__ */ new Map();
+  for (const field of fieldInfos) {
+    if (!field.inSubtable || !field.subtableCode) continue;
+    const children = childrenByTable.get(field.subtableCode) ?? [];
+    children.push(field);
+    childrenByTable.set(field.subtableCode, children);
+  }
+  return {
+    topLevel,
+    topByCode: new Map(topLevel.map((field) => [field.code, field])),
+    childrenByTable
+  };
+}
+function hasAuditableConstraint(field) {
+  return field.required === true || field.minValue !== void 0 || field.maxValue !== void 0 || field.minLength !== void 0 || field.maxLength !== void 0 || field.optionOrder !== void 0;
+}
+function isExistingValidationAuditable(field) {
+  return field.fieldType === "NUMBER" || hasAuditableConstraint(field);
+}
+function buildValidationCellLocator(subtable, rowIndex, row) {
+  return { subtable, subrow: rowIndex + 1, subrowId: String(row.id ?? "") };
+}
+function resolveExistingValidationTargets(stmt, fieldInfos) {
+  const { topByCode, childrenByTable } = buildValidationFieldMetadataIndex(fieldInfos);
+  const auditable = isExistingValidationAuditable;
+  if (stmt.targets === void 0) return [
+    ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "SUBTABLE" && auditable(field)),
+    ...fieldInfos.filter((field) => field.inSubtable && !!field.subtableCode && auditable(field))
+  ].map((field) => ({ field, ...field.subtableCode ? { subtableCode: field.subtableCode } : {} }));
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  const add = (field, subtableCode) => {
+    const key = subtableCode ? `${subtableCode}\0${field.code}` : field.code;
+    if (seen.has(key)) throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${field.code} \u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059\u3002`);
+    seen.add(key);
+    if (!auditable(field)) throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${field.code} \u306B\u306F\u76E3\u67FB\u53EF\u80FD\u306A\u5236\u7D04\u304C\u3042\u308A\u307E\u305B\u3093\u3002`);
+    result.push({ field, ...subtableCode ? { subtableCode } : {} });
+  };
+  for (const target of stmt.targets) {
+    if (target.kind === "SUBTABLE") {
+      const children = childrenByTable.get(target.subtableCode);
+      if (!children) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
+      if (target.children.length === 0) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u306F1\u3064\u4EE5\u4E0A\u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u5FC5\u8981\u3067\u3059\u3002`);
+      for (const code2 of target.children) {
+        const child = children.find((field) => field.code === code2);
+        if (!child) {
+          const belongsElsewhere = [...childrenByTable.entries()].some(([table, fields]) => table !== target.subtableCode && fields.some((field) => field.code === code2));
+          throw new Error(belongsElsewhere ? `ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code2} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u5C5E\u3057\u3066\u3044\u307E\u305B\u3093\u3002` : `ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code2} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
+        }
+        add(child, target.subtableCode);
+      }
+      continue;
+    }
+    const code = target.field;
+    if (code === "$id") throw new Error("ArgumentError: VALIDATE \u3067\u306F\u30B7\u30B9\u30C6\u30E0\u30D5\u30A3\u30FC\u30EB\u30C9 $id \u3092\u76E3\u67FB\u3067\u304D\u307E\u305B\u3093\u3002");
+    const top = topByCode.get(code);
+    if (top?.fieldType === "SUBTABLE") {
+      const children = (childrenByTable.get(code) ?? []).filter(auditable);
+      if (children.length === 0) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${code} \u306B\u306F\u76E3\u67FB\u53EF\u80FD\u306A\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u3042\u308A\u307E\u305B\u3093\u3002`);
+      children.forEach((child) => add(child, code));
+      continue;
+    }
+    if (top) {
+      add(top);
+      continue;
+    }
+    if ([...childrenByTable.values()].some((children) => children.some((field) => field.code === code))) {
+      throw new Error(`ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code} \u306F\u6240\u6709\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u3092\u542B\u3080 T(${code}) \u5F62\u5F0F\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002`);
+    }
+    throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${code} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
+  }
+  return result;
+}
+function renderExistingValidationValue(raw, fieldType) {
+  return isEmptyDmlValue(raw) ? "" : renderValidationValue(normalizeRaw(raw, fieldType));
+}
+
+// src/core/postImageValidation.ts
+var NON_AUDIT_SYSTEM_TYPES = /* @__PURE__ */ new Set([
+  "CALC",
+  "RECORD_NUMBER",
+  "CREATOR",
+  "CREATED_TIME",
+  "MODIFIER",
+  "UPDATED_TIME",
+  "STATUS",
+  "STATUS_ASSIGNEE",
+  "CATEGORY",
+  "REFERENCE_TABLE"
+]);
+var POST_IMAGE_VALIDATION_SUFFIX_COLUMNS = [
+  ...VALIDATION_META_COLUMNS,
+  "$err_value",
+  "$err_subtable",
+  "$err_subrow",
+  "$err_subrow_id"
+];
+function buildPostImageFieldIndex(fieldInfos, payloadFields = ["$id"]) {
+  const metadata = buildValidationFieldMetadataIndex(fieldInfos);
+  const topLevel = metadata.topLevel.filter((field) => field.fieldType !== "SUBTABLE" && field.fieldType !== "FILE" && !NON_AUDIT_SYSTEM_TYPES.has(field.fieldType));
+  const subtables = /* @__PURE__ */ new Map();
+  for (const [tableCode, fields] of metadata.childrenByTable) {
+    subtables.set(tableCode, fields.filter((field) => field.fieldType !== "FILE"));
+  }
+  return {
+    topLevel,
+    subtables,
+    payloadFields: ["$id", ...new Set(payloadFields.filter((field) => field !== "$id"))]
+  };
+}
+function postImageNeedsNumberPrecision(record2, fieldIndex) {
+  if (fieldIndex.topLevel.some((field) => field.fieldType === "NUMBER" && field.code in record2)) return true;
+  for (const [tableCode, children] of fieldIndex.subtables) {
+    if (!children.some((field) => field.fieldType === "NUMBER")) continue;
+    const rows = record2[tableCode]?.value;
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const values = row?.value;
+      if (children.some((field) => field.fieldType === "NUMBER" && !!values && field.code in values)) return true;
+    }
+  }
+  return false;
+}
+function validatePostImage(record2, fieldIndex, numberPrecision, statementNumber, parentRowNumber = 1, operation = "UPDATE") {
+  const normalizedRecord = cloneRecord(record2);
+  const errors = [];
+  const invalidRowNumbers = /* @__PURE__ */ new Set();
+  const columns = [...fieldIndex.payloadFields, ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS];
+  const parentId = renderValidationValue(record2["$id"]?.value);
+  const appendError = (field, raw, validation, locator) => {
+    invalidRowNumbers.add(parentRowNumber);
+    const row = {};
+    for (const code of fieldIndex.payloadFields) {
+      row[code] = code === "$id" ? parentId : renderValidationValue(record2[code]?.value);
+    }
+    row["$err_statement"] = String(statementNumber);
+    row["$err_operation"] = operation;
+    row["$err_row"] = String(parentRowNumber);
+    row["$err_field"] = field.code;
+    row["$err_code"] = validation.code;
+    row["$err_message"] = validation.message;
+    row["$err_value"] = renderExistingValidationValue(raw, field.fieldType);
+    row["$err_subtable"] = locator?.subtable ?? "";
+    row["$err_subrow"] = locator ? String(locator.subrow) : "";
+    row["$err_subrow_id"] = locator?.subrowId ?? "";
+    errors.push(row);
+  };
+  for (const field of fieldIndex.topLevel) {
+    const raw = record2[field.code]?.value;
+    const result = validateAndNormalizeDmlValue(raw, field, numberPrecision);
+    if (!result.ok) appendError(field, raw, result);
+    else normalizedRecord[field.code] = { value: preserveCodeObjects(raw, field.fieldType, result.value) };
+  }
+  for (const [tableCode, children] of fieldIndex.subtables) {
+    const sourceRows = record2[tableCode]?.value;
+    if (!Array.isArray(sourceRows)) continue;
+    const normalizedRows = normalizedRecord[tableCode]?.value;
+    for (let rowIndex = 0; rowIndex < sourceRows.length; rowIndex++) {
+      const sourceRow = sourceRows[rowIndex];
+      const normalizedRow = normalizedRows[rowIndex];
+      for (const field of children) {
+        const raw = sourceRow.value?.[field.code]?.value;
+        const result = validateAndNormalizeDmlValue(raw, field, numberPrecision);
+        if (!result.ok) appendError(field, raw, result, buildValidationCellLocator(tableCode, rowIndex, sourceRow));
+        else {
+          normalizedRow.value ??= {};
+          normalizedRow.value[field.code] = { value: preserveCodeObjects(raw, field.fieldType, result.value) };
+        }
+      }
+    }
+  }
+  return {
+    normalizedRecord,
+    errors,
+    columns,
+    invalidRows: invalidRowNumbers.size,
+    invalidRowNumbers,
+    errorCount: errors.length
+  };
+}
+function preserveCodeObjects(raw, fieldType, normalized) {
+  return ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(fieldType) && Array.isArray(raw) && raw.every((item) => typeof item === "object" && item !== null && "code" in item) ? raw : normalized;
+}
+function cloneRecord(record2) {
+  const clone2 = {};
+  for (const [code, cell] of Object.entries(record2)) {
+    const value = cell?.value;
+    clone2[code] = { value: Array.isArray(value) ? value.map((item) => {
+      if (item === null || typeof item !== "object") return item;
+      const row = item;
+      if (!row.value) return { ...row };
+      return {
+        ...row,
+        value: Object.fromEntries(Object.entries(row.value).map(([field, child]) => [field, { ...child }]))
+      };
+    }) : value };
+  }
+  return clone2;
+}
+
+// src/core/applyPatchPrepare.ts
+async function prepareApplyPatchWrite(input) {
+  const {
+    statement,
+    snapshots,
+    fieldInfos,
+    metadata,
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber = 1
+  } = input;
+  assertPositiveLimit(dmlMaxRows, "dmlMaxRows");
+  assertPositiveLimit(dmlMaxSubtableRows, "dmlMaxSubtableRows");
+  for (const snapshot of snapshots) requireRevision(snapshot);
+  const rawPlans = buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata);
+  const fieldIndex = buildPostImageFieldIndex(
+    fieldInfos,
+    statement.assignments.map((assignment) => assignment.field)
+  );
+  const needsNumberPrecision = rawPlans.some(
+    (plan) => postImageNeedsNumberPrecision(plan.postImage, fieldIndex)
+  );
+  if (needsNumberPrecision && !input.loadNumberPrecision) {
+    throw new Error("InternalError: APPLY number precision loader is required for NUMBER post-images.");
+  }
+  const numberPrecision = needsNumberPrecision ? await input.loadNumberPrecision() : void 0;
+  const validationResults = rawPlans.map(
+    (plan, index) => validatePostImage(
+      plan.postImage,
+      fieldIndex,
+      numberPrecision,
+      statementNumber,
+      input.parentRowNumbers?.[index] ?? index + 1
+    )
+  );
+  if (!statement.validateOnly) {
+    const errors = validationResults.flatMap((validation) => validation.errors);
+    if (errors.length > 0) {
+      throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+        columns: validationResults[0]?.columns ?? [],
+        errors
+      })}`);
+    }
+  }
+  const parentRows = rawPlans.length;
+  const subtableRows = rawPlans.reduce((sum, plan) => sum + plan.changedSubtableRows, 0);
+  const wouldExceed = parentRows > dmlMaxRows || subtableRows > dmlMaxSubtableRows;
+  if (!statement.validateOnly && parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (!statement.validateOnly && subtableRows > dmlMaxSubtableRows) {
+    throw new Error(
+      `ArgumentError: APPLY changed subtable rows (${subtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`
+    );
+  }
+  const plans = rawPlans.map(
+    (plan, index) => normalizeApplyPatchPlan(plan, validationResults[index].normalizedRecord)
+  );
+  const records = plans.flatMap((plan) => applyPatchPlanToKintone(plan).records);
+  const validations = validationResults.map((validation) => ({
+    errors: validation.errors,
+    columns: validation.columns,
+    invalidRows: validation.invalidRows,
+    errorCount: validation.errorCount
+  }));
+  return deepFreeze({
+    plans,
+    records,
+    validations,
+    guards: {
+      revisionRequired: true,
+      parentRows,
+      dmlMaxRows,
+      subtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed
+    }
+  });
+}
+function assertPositiveLimit(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+}
+function deepFreeze(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze(child, seen);
+  return Object.freeze(value);
+}
+
+// src/core/applyInsertPrepare.ts
+var NON_WRITABLE_FIELD_TYPES = /* @__PURE__ */ new Set([
+  "CALC",
+  "RECORD_NUMBER",
+  "CREATOR",
+  "CREATED_TIME",
+  "MODIFIER",
+  "UPDATED_TIME",
+  "STATUS",
+  "STATUS_ASSIGNEE",
+  "CATEGORY",
+  "REFERENCE_TABLE"
+]);
+function resolveApplyInsertMetadata(statement, fieldInfos) {
+  if (new Set(statement.fields).size !== statement.fields.length) {
+    return argument4("DML target fields contain duplicates.");
+  }
+  const fieldsByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  for (const code of statement.fields) assertWritable(code, null, fieldsByCode);
+  const targetTables = /* @__PURE__ */ new Map();
+  const childrenByTable = /* @__PURE__ */ new Map();
+  for (const block of statement.applyBlocks ?? []) {
+    if (targetTables.has(block.field)) return argument4(`APPLY has more than one block for table ${block.field}.`);
+    const table = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
+    if (!table || table.fieldType !== "SUBTABLE") return argument4(`APPLY target ${block.field} is not a SUBTABLE.`);
+    const children = new Map(fieldInfos.filter((field) => field.inSubtable && field.subtableCode === block.field).map((field) => [field.code, field]));
+    targetTables.set(block.field, table);
+    childrenByTable.set(block.field, children);
+    for (const operation of block.operations) {
+      if (operation.kind !== "APPEND") return argument4(`APPLY INSERT supports APPEND only (${operation.kind}).`);
+      const specified = /* @__PURE__ */ new Set();
+      for (const code of operation.fields) {
+        if (specified.has(code)) return argument4(`APPLY APPEND specifies child ${code} more than once.`);
+        specified.add(code);
+        assertWritable(code, block.field, fieldsByCode, children);
+      }
+      for (const row of operation.values) {
+        if (row.length !== operation.fields.length) {
+          return argument4(`APPLY APPEND for ${block.field} has ${row.length} values for ${operation.fields.length} fields.`);
+        }
+      }
+    }
+  }
+  return { targetTables, targetMultiValueFields: /* @__PURE__ */ new Map(), childrenByTable, fieldsByCode };
+}
+function buildApplyInsertCandidates(statement, fieldInfos, metadata = resolveApplyInsertMetadata(statement, fieldInfos), parentRowNumbers) {
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const parentRecords = insertToPostBatches(statement, fieldTypes).flatMap((batch) => batch.records);
+  if (parentRowNumbers && parentRowNumbers.length !== parentRecords.length) {
+    throw new Error("InternalError: APPLY create parent row number count differs from VALUES rows.");
+  }
+  const templates = (statement.applyBlocks ?? []).map((block) => {
+    const children = metadata.childrenByTable.get(block.field);
+    const rows = block.operations.flatMap(
+      (operation) => buildApplyAppendRows(operation, children, block.field)
+    );
+    return { table: block.field, rows, addedRows: rows.length };
+  });
+  return parentRecords.map((parentRecord, index) => {
+    const postImage = {};
+    for (const field of fieldInfos) {
+      if (field.inSubtable || field.fieldType === "SUBTABLE" || field.fieldType === "FILE" || field.writable === false || NON_WRITABLE_FIELD_TYPES.has(field.fieldType)) continue;
+      postImage[field.code] = parentRecord[field.code] ?? { value: appendDefaultValue(field) };
+    }
+    const record2 = { ...parentRecord };
+    for (const template of templates) {
+      const rows = template.rows.map((row) => ({ value: row.value }));
+      postImage[template.table] = { value: rows };
+      record2[template.table] = { value: rows };
+    }
+    return {
+      parentRowNumber: parentRowNumbers?.[index] ?? index + 1,
+      tables: templates,
+      postImage,
+      record: record2
+    };
+  });
+}
+async function prepareApplyInsert(input) {
+  const {
+    statement,
+    fieldInfos,
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber = 1
+  } = input;
+  assertPositiveLimit2(dmlMaxRows, "dmlMaxRows");
+  assertPositiveLimit2(dmlMaxSubtableRows, "dmlMaxSubtableRows");
+  const metadata = input.metadata ?? resolveApplyInsertMetadata(statement, fieldInfos);
+  const rawCandidates = buildApplyInsertCandidates(statement, fieldInfos, metadata, input.parentRowNumbers);
+  const creatableFieldInfos = fieldInfos.filter(
+    (field) => field.fieldType === "SUBTABLE" || field.fieldType !== "FILE" && field.writable !== false && !NON_WRITABLE_FIELD_TYPES.has(field.fieldType)
+  );
+  const fieldIndex = buildPostImageFieldIndex(creatableFieldInfos, statement.fields);
+  const needsNumberPrecision = rawCandidates.some(
+    (candidate) => postImageNeedsNumberPrecision(candidate.postImage, fieldIndex)
+  );
+  if (needsNumberPrecision && !input.loadNumberPrecision) {
+    throw new Error("InternalError: APPLY number precision loader is required for NUMBER post-images.");
+  }
+  const numberPrecision = needsNumberPrecision ? await input.loadNumberPrecision() : void 0;
+  const results = rawCandidates.map((candidate) => validatePostImage(
+    candidate.postImage,
+    fieldIndex,
+    numberPrecision,
+    statementNumber,
+    candidate.parentRowNumber,
+    "INSERT"
+  ));
+  if (!statement.validateOnly) {
+    const errors = results.flatMap((result) => result.errors);
+    if (errors.length > 0) {
+      throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+        columns: results[0]?.columns ?? [],
+        errors
+      })}`);
+    }
+  }
+  const parentRows = rawCandidates.length;
+  const subtableRows = rawCandidates.reduce(
+    (sum, candidate) => sum + candidate.tables.reduce((tableSum, table) => tableSum + table.addedRows, 0),
+    0
+  );
+  const wouldExceed = parentRows > dmlMaxRows || subtableRows > dmlMaxSubtableRows;
+  if (!statement.validateOnly && parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (!statement.validateOnly && subtableRows > dmlMaxSubtableRows) {
+    throw new Error(`ArgumentError: APPLY changed subtable rows (${subtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`);
+  }
+  const candidates = rawCandidates.map((candidate, index) => {
+    const normalized = results[index].normalizedRecord;
+    const record2 = {};
+    for (const code of statement.fields) record2[code] = normalized[code];
+    for (const table of candidate.tables) {
+      const normalizedRows = normalized[table.table]?.value;
+      record2[table.table] = { value: table.rows.map((sourceRow, rowIndex) => ({
+        value: Object.fromEntries(Object.keys(sourceRow.value).map((code) => [
+          code,
+          normalizedRows[rowIndex]?.value?.[code] ?? sourceRow.value[code]
+        ]))
+      })) };
+    }
+    return { ...candidate, postImage: normalized, record: record2 };
+  });
+  const records = candidates.map((candidate) => candidate.record);
+  const batches = [];
+  for (let index = 0; index < records.length; index += 100) {
+    batches.push({ app: statement.appId, records: records.slice(index, index + 100) });
+  }
+  const validations = results.map((result) => ({
+    errors: result.errors,
+    columns: result.columns,
+    invalidRows: result.invalidRows,
+    errorCount: result.errorCount
+  }));
+  return deepFreeze2({
+    applyBlocks: statement.applyBlocks ?? [],
+    candidates,
+    records,
+    batches,
+    validations,
+    guards: {
+      revisionRequired: false,
+      parentRows,
+      dmlMaxRows,
+      subtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed
+    }
+  });
+}
+function assertWritable(code, table, fieldsByCode, children) {
+  if (code.startsWith("_") || code.startsWith("$")) return argument4(`APPLY assignment target ${code} is a system field.`);
+  const field = table === null ? [...fieldsByCode.values()].find((candidate) => candidate.code === code && !candidate.inSubtable) : children?.get(code);
+  if (!field) {
+    const elsewhere = fieldsByCode.get(code);
+    if (table !== null && elsewhere?.inSubtable) return argument4(`APPLY child ${code} does not belong to subtable ${table}.`);
+    return argument4(`APPLY ${table === null ? "parent field" : "child"} ${code} does not exist.`);
+  }
+  if (field.fieldType === "SUBTABLE" || field.fieldType === "FILE" || field.writable === false || NON_WRITABLE_FIELD_TYPES.has(field.fieldType)) {
+    return argument4(`APPLY assignment target ${code} is not writable (${field.fieldType}).`);
+  }
+}
+function assertPositiveLimit2(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+}
+function argument4(message) {
+  throw new Error(`ArgumentError: ${message}`);
+}
+function deepFreeze2(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze2(child, seen);
+  return Object.freeze(value);
+}
+
+// src/core/applyUpsertPrepare.ts
+async function prepareApplyUpsert(input) {
+  const { statement, matches, fieldInfos, dmlMaxRows, dmlMaxSubtableRows, statementNumber = 1 } = input;
+  assertPositiveLimit3(dmlMaxRows, "dmlMaxRows");
+  assertPositiveLimit3(dmlMaxSubtableRows, "dmlMaxSubtableRows");
+  assertMatchCoverage(statement, matches);
+  const createMatches = matches.filter((match) => match.targetId === void 0);
+  const updateMatches = matches.filter((match) => match.targetId !== void 0);
+  const createStatement = toInsertStatement(statement, createMatches.map((match) => match.sourceRowIndex));
+  const create = await prepareApplyInsert({
+    statement: createStatement,
+    fieldInfos,
+    metadata: resolveApplyInsertMetadata(createStatement, fieldInfos),
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber,
+    parentRowNumbers: createMatches.map((match) => match.sourceRowIndex + 1),
+    loadNumberPrecision: input.loadNumberPrecision
+  });
+  const updateParts = [];
+  const seenTargets = /* @__PURE__ */ new Set();
+  for (const match of updateMatches) {
+    const targetId = match.targetId;
+    if (seenTargets.has(targetId)) argument5(`UPSERT APPLY resolves more than one source row to parent $id ${targetId}.`);
+    seenTargets.add(targetId);
+    if (!match.snapshot) argument5(`UPSERT APPLY snapshot for parent $id ${targetId} is missing.`);
+    const snapshotId = Number(match.snapshot["$id"]?.value);
+    if (snapshotId !== targetId) argument5(`UPSERT APPLY snapshot $id ${snapshotId} does not match target $id ${targetId}.`);
+    const updateStatement = toUpdateStatement(statement, match.sourceRowIndex, targetId);
+    const metadata = updateStatement.applyBlocks?.length ? resolveApplyPatchMetadata(updateStatement, fieldInfos) : emptyPatchMetadata(fieldInfos);
+    updateParts.push(await prepareApplyPatchWrite({
+      statement: updateStatement,
+      snapshots: [match.snapshot],
+      fieldInfos,
+      metadata,
+      dmlMaxRows,
+      dmlMaxSubtableRows,
+      statementNumber,
+      parentRowNumbers: [match.sourceRowIndex + 1],
+      loadNumberPrecision: input.loadNumberPrecision
+    }));
+  }
+  const update = combineUpdatePrepared(updateParts, dmlMaxRows, dmlMaxSubtableRows);
+  const parentRows = create.guards.parentRows + update.guards.parentRows;
+  const subtableRows = create.guards.subtableRows + update.guards.subtableRows;
+  const wouldExceed = parentRows > dmlMaxRows || subtableRows > dmlMaxSubtableRows;
+  if (!statement.validateOnly) {
+    const validationErrors = [
+      ...create.validations.flatMap((validation) => validation.errors),
+      ...update.validations.flatMap((validation) => validation.errors)
+    ];
+    if (validationErrors.length > 0) {
+      throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+        columns: create.validations[0]?.columns ?? update.validations[0]?.columns ?? [],
+        errors: validationErrors
+      })}`);
+    }
+  }
+  if (!statement.validateOnly && parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (!statement.validateOnly && subtableRows > dmlMaxSubtableRows) {
+    throw new Error(`ArgumentError: APPLY changed subtable rows (${subtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`);
+  }
+  return deepFreeze3({
+    create,
+    update,
+    createBatches: create.batches,
+    updateBatches: chunk2(update.records, statement.appId),
+    guards: {
+      revisionRequired: update.guards.parentRows > 0,
+      parentRows,
+      dmlMaxRows,
+      subtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed,
+      create: create.guards,
+      update: update.guards
+    }
+  });
+}
+function toInsertStatement(statement, indices) {
+  return {
+    type: "INSERT",
+    appId: statement.appId,
+    fields: [...statement.fields],
+    values: indices.map((index) => statement.values[index]),
+    applyBlocks: statement.onInsertApplyBlocks ?? [],
+    // Branch planners must finish every candidate before mixed errors/guards are raised below.
+    validateOnly: true
+  };
+}
+function toUpdateStatement(statement, sourceRowIndex, targetId) {
+  const assignments = statement.fields.map((field, index) => ({
+    field,
+    value: statement.values[sourceRowIndex][index]
+  }));
+  return {
+    type: "UPDATE",
+    appId: statement.appId,
+    subtableCode: null,
+    assignments,
+    from: null,
+    where: {
+      type: "BINARY",
+      op: "=",
+      left: { type: "FIELD", tableAlias: null, field: "$id" },
+      right: { type: "NUMBER", value: targetId, raw: String(targetId) }
+    },
+    applyBlocks: statement.onUpdateApplyBlocks ?? [],
+    validateOnly: true
+  };
+}
+function emptyPatchMetadata(fieldInfos) {
+  return {
+    targetTables: /* @__PURE__ */ new Map(),
+    targetMultiValueFields: /* @__PURE__ */ new Map(),
+    childrenByTable: /* @__PURE__ */ new Map(),
+    fieldsByCode: new Map(fieldInfos.map((field) => [field.code, field]))
+  };
+}
+function combineUpdatePrepared(parts, dmlMaxRows, dmlMaxSubtableRows) {
+  const plans = parts.flatMap((part) => part.plans);
+  const records = parts.flatMap((part) => part.records);
+  const validations = parts.flatMap((part) => part.validations);
+  const subtableRows = plans.reduce((sum, plan) => sum + plan.changedSubtableRows, 0);
+  return deepFreeze3({
+    plans,
+    records,
+    validations,
+    guards: {
+      revisionRequired: true,
+      parentRows: plans.length,
+      dmlMaxRows,
+      subtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed: plans.length > dmlMaxRows || subtableRows > dmlMaxSubtableRows
+    }
+  });
+}
+function assertMatchCoverage(statement, matches) {
+  if (matches.length !== statement.values.length) {
+    throw new Error("InternalError: UPSERT APPLY match count differs from VALUES rows.");
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (const match of matches) {
+    if (!Number.isSafeInteger(match.sourceRowIndex) || match.sourceRowIndex < 0 || match.sourceRowIndex >= statement.values.length || seen.has(match.sourceRowIndex)) {
+      throw new Error("InternalError: UPSERT APPLY matches must cover each source row exactly once.");
+    }
+    seen.add(match.sourceRowIndex);
+  }
+}
+function chunk2(records, app) {
+  const batches = [];
+  for (let index = 0; index < records.length; index += 100) {
+    batches.push({ app, records: records.slice(index, index + 100) });
+  }
+  return batches;
+}
+function assertPositiveLimit3(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+}
+function argument5(message) {
+  throw new Error(`ArgumentError: ${message}`);
+}
+function deepFreeze3(value, seen = /* @__PURE__ */ new Set()) {
+  if (value === null || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const child of Object.values(value)) deepFreeze3(child, seen);
+  return Object.freeze(value);
+}
+
+// src/core/applyDiagnostic.ts
+function buildPreparedApplyUpdateDiagnostic(prepared) {
+  return diagnostic("UPDATE", [buildPreparedUpdateBranch(prepared)]);
+}
+function buildPreparedApplyInsertDiagnostic(prepared) {
+  return diagnostic("INSERT", [buildPreparedInsertBranch(prepared)]);
+}
+function buildPreparedApplyUpsertDiagnostic(prepared) {
+  return diagnostic("UPSERT", [
+    buildPreparedInsertBranch(prepared.create),
+    buildPreparedUpdateBranch(prepared.update)
+  ]);
+}
+function withApplyDiagnosticProgress(base, progress) {
+  const failedBranch = progress.failedBranch?.toLowerCase();
+  const branches = base.branches.map((branch) => {
+    const successfulParents = base.statementKind === "UPSERT" ? branch.branch === "insert" ? progress.successfulInserts : progress.successfulUpdates : progress.successfulParents;
+    const successfulChunks = base.statementKind === "UPSERT" ? branch.branch === "insert" ? progress.successfulInsertChunks : progress.successfulUpdateChunks : progress.successfulChunks;
+    const isFailedBranch = failedBranch === branch.branch;
+    return {
+      ...branch,
+      ...successfulParents !== void 0 ? { successfulParents } : {},
+      chunk: {
+        ...branch.chunk,
+        ...successfulChunks !== void 0 ? { successfulChunks } : {},
+        ...isFailedBranch && progress.failedChunkIndex !== void 0 ? { failedChunkIndex: progress.failedChunkIndex } : {},
+        ...isFailedBranch && progress.failedStage !== void 0 ? { failedStage: progress.failedStage } : {}
+      }
+    };
+  });
+  return {
+    ...base,
+    branches,
+    partialSuccess: {
+      possible: true,
+      successfulParents: progress.successfulParents,
+      successfulChunks: progress.successfulChunks,
+      ...failedBranch ? { failedBranch } : {},
+      ...progress.retryAttempted !== void 0 ? { retryAttempted: progress.retryAttempted } : {}
+    }
+  };
+}
+function buildStaticApplyDiagnostic(statement, dmlMaxRows, dmlMaxSubtableRows) {
+  if (statement.type === "UPDATE") {
+    return diagnostic("UPDATE", [staticBranch(
+      "update",
+      statement.applyBlocks ?? [],
+      null,
+      true,
+      dmlMaxRows,
+      dmlMaxSubtableRows
+    )]);
+  }
+  if (statement.type === "INSERT") {
+    return diagnostic("INSERT", [staticBranch(
+      "insert",
+      statement.applyBlocks ?? [],
+      statement.values.length,
+      false,
+      dmlMaxRows,
+      dmlMaxSubtableRows
+    )]);
+  }
+  return diagnostic("UPSERT", [
+    staticBranch("insert", statement.onInsertApplyBlocks ?? [], null, false, dmlMaxRows, dmlMaxSubtableRows),
+    staticBranch("update", statement.onUpdateApplyBlocks ?? [], null, true, dmlMaxRows, dmlMaxSubtableRows)
+  ]);
+}
+function diagnostic(statementKind, branches) {
+  return {
+    statementKind,
+    branches,
+    nonTransactional: true,
+    partialSuccess: { possible: true }
+  };
+}
+function buildPreparedInsertBranch(prepared) {
+  const targets = /* @__PURE__ */ new Map();
+  if (prepared.applyBlocks) {
+    for (const block of prepared.applyBlocks) {
+      const operations = block.operations.map((operation) => {
+        if (operation.kind !== "APPEND") {
+          throw new Error(`InternalError: prepared APPLY INSERT contains ${operation.kind}.`);
+        }
+        const addedRows = operation.values.length * prepared.guards.parentRows;
+        return { kind: "APPEND", count: addedRows, addedRows };
+      });
+      targets.set(block.field, {
+        targetKind: block.targetKind,
+        field: block.field,
+        operations,
+        changedCount: operations.reduce((sum, operation) => sum + (operation.addedRows ?? 0), 0)
+      });
+    }
+  } else {
+    for (const candidate of prepared.candidates) {
+      for (const table of candidate.tables) {
+        const current = targets.get(table.table);
+        const addedRows = current?.operations[0]?.addedRows ?? 0;
+        targets.set(table.table, {
+          targetKind: "SUBTABLE",
+          field: table.table,
+          operations: [{ kind: "APPEND", count: addedRows + table.addedRows, addedRows: addedRows + table.addedRows }],
+          changedCount: (current?.changedCount ?? 0) + table.addedRows
+        });
+      }
+    }
+  }
+  return {
+    branch: "insert",
+    parentRows: prepared.guards.parentRows,
+    targets: [...targets.values()],
+    guards: prepared.guards,
+    chunk: { size: 100, plannedChunks: prepared.batches.length },
+    deletedParentRows: 0
+  };
+}
+function buildPreparedUpdateBranch(prepared) {
+  const targets = /* @__PURE__ */ new Map();
+  let deletedParentRows = 0;
+  for (const plan of prepared.plans) {
+    let parentHasDeletes = false;
+    for (const table of plan.tables) {
+      const current = targets.get(table.table);
+      targets.set(table.table, {
+        targetKind: "SUBTABLE",
+        field: table.table,
+        operations: mergeOperations(current?.operations, table.operations.map((operation) => ({
+          ...operation,
+          count: operation.kind === "PATCH" ? operation.changedRows : operation.kind === "APPEND" ? operation.addedRows : operation.removedRows
+        }))),
+        changedCount: (current?.changedCount ?? 0) + table.changedSubtableRows
+      });
+      parentHasDeletes ||= table.deletedRows > 0;
+    }
+    for (const field of plan.multiValues) {
+      const current = targets.get(field.field);
+      const postImage = { parentId: plan.parentId, value: field.postImageValue };
+      targets.set(field.field, {
+        targetKind: "MULTI_VALUE",
+        field: field.field,
+        fieldType: field.fieldType,
+        operations: mergeOperations(current?.operations, field.operations.map((operation) => ({
+          kind: operation.kind,
+          value: operation.value,
+          count: operation.changed ? 1 : 0,
+          changed: operation.changed
+        }))),
+        changedCount: (current?.changedCount ?? 0) + field.changedValues,
+        postImages: [...current?.postImages ?? [], postImage]
+      });
+    }
+    if (parentHasDeletes) deletedParentRows += 1;
+  }
+  return {
+    branch: "update",
+    parentRows: prepared.guards.parentRows,
+    targets: [...targets.values()],
+    guards: prepared.guards,
+    chunk: { size: 100, plannedChunks: Math.ceil(prepared.records.length / 100) },
+    deletedParentRows
+  };
+}
+function mergeOperations(current, next) {
+  if (!current) return next.map((operation) => ({ ...operation }));
+  return next.map((operation, index) => {
+    const previous = current[index];
+    if (!previous || previous.kind !== operation.kind || previous.value !== operation.value) {
+      throw new Error("InternalError: APPLY diagnostic operation shape differs between parents.");
+    }
+    return {
+      ...operation,
+      ...previous.changed !== void 0 ? { changed: previous.changed } : {},
+      count: addNullable(previous.count, operation.count),
+      ...operation.matchedRows !== void 0 ? { matchedRows: addNullable(previous.matchedRows, operation.matchedRows) } : {},
+      ...operation.changedRows !== void 0 ? { changedRows: addNullable(previous.changedRows, operation.changedRows) } : {},
+      ...operation.addedRows !== void 0 ? { addedRows: addNullable(previous.addedRows, operation.addedRows) } : {},
+      ...operation.removedRows !== void 0 ? { removedRows: addNullable(previous.removedRows, operation.removedRows) } : {}
+    };
+  });
+}
+function addNullable(left, right) {
+  return left === null || left === void 0 || right === null ? null : left + right;
+}
+function staticBranch(branch, blocks, parentRows, revisionRequired, dmlMaxRows, dmlMaxSubtableRows) {
+  const targets = blocks.map((block) => {
+    const operations = block.operations.map((operation) => staticOperation(operation, parentRows));
+    const changedCount = operations.every((operation) => operation.count !== null) ? operations.reduce((sum, operation) => sum + operation.count, 0) : null;
+    return {
+      targetKind: block.targetKind,
+      field: block.field,
+      operations,
+      changedCount
+    };
+  });
+  const subtableTargets = targets.filter((target) => target.targetKind === "SUBTABLE");
+  const subtableRows = subtableTargets.every((target) => target.changedCount !== null) ? subtableTargets.reduce((sum, target) => sum + target.changedCount, 0) : null;
+  const wouldExceed = parentRows === null || subtableRows === null ? null : parentRows > dmlMaxRows || subtableRows > dmlMaxSubtableRows;
+  return {
+    branch,
+    parentRows,
+    targets,
+    guards: {
+      revisionRequired,
+      parentRows,
+      dmlMaxRows,
+      subtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed
+    },
+    chunk: { size: 100, plannedChunks: parentRows === null ? null : Math.ceil(parentRows / 100) },
+    deletedParentRows: branch === "insert" ? 0 : null
+  };
+}
+function staticOperation(operation, parentRows) {
+  if (operation.kind === "APPEND") {
+    const addedRows = parentRows === null ? null : operation.values.length * parentRows;
+    return { kind: operation.kind, count: addedRows, addedRows };
+  }
+  if (operation.kind === "PATCH") return { kind: operation.kind, count: null, matchedRows: null, changedRows: null };
+  if (operation.kind === "REMOVE") return { kind: operation.kind, count: null, removedRows: null };
+  return { kind: operation.kind, value: operation.value, count: null };
+}
+
+// src/core/applyPatchExecutePrepared.ts
+var ApplyWritePartialFailureError = class extends Error {
+  constructor(partialSuccess, cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const method = partialSuccess.failedStage === "POST_CHUNK" ? "POST" : "PUT";
+    const branch = partialSuccess.failedBranch ? ` UPSERT ${partialSuccess.failedBranch}` : "";
+    super(
+      `ApplyWritePartialFailureError: APPLY${branch} ${method} chunk ${partialSuccess.failedChunkIndex + 1} failed (index ${partialSuccess.failedChunkIndex}) after ${partialSuccess.successfulChunks} successful chunk(s) and ${partialSuccess.successfulParents} successful parent(s); writes are non-transactional and were not retried. Cause: ${detail}`
+    );
+    this.name = "ApplyWritePartialFailureError";
+    this.partialSuccess = partialSuccess;
+    this.cause = cause;
+  }
+};
+async function executePreparedApplyWrite(prepared, client, diagnostic2) {
+  assertApplyInternalWriteScope("phase10c");
+  const batches = applyPatchPlansToKintoneBatches(prepared);
+  let successfulChunks = 0;
+  let successfulParents = 0;
+  for (let failedChunkIndex = 0; failedChunkIndex < batches.length; failedChunkIndex += 1) {
+    const batch = batches[failedChunkIndex];
+    try {
+      await client.putRecords(batch);
+    } catch (cause) {
+      throw new ApplyWritePartialFailureError({
+        successfulChunks,
+        successfulParents,
+        failedChunkIndex,
+        failedStage: "PUT_CHUNK",
+        nonTransactional: true,
+        retryAttempted: false,
+        ...diagnostic2 ? { diagnostic: withApplyDiagnosticProgress(diagnostic2, {
+          successfulChunks,
+          successfulParents,
+          failedChunkIndex,
+          failedStage: "PUT_CHUNK",
+          failedBranch: "UPDATE",
+          retryAttempted: false
+        }) } : {}
+      }, cause);
+    }
+    successfulChunks += 1;
+    successfulParents += batch.records.length;
+  }
+  return {
+    type: "UPDATE",
+    updatedCount: successfulParents,
+    successfulChunks,
+    successfulParents,
+    nonTransactional: true
+  };
+}
+
+// src/core/applyInsertExecutePrepared.ts
+async function executePreparedApplyInsert(prepared, client, diagnostic2) {
+  assertApplyInternalWriteScope("phase13c");
+  const createdIds = [];
+  let successfulChunks = 0;
+  let successfulParents = 0;
+  for (let failedChunkIndex = 0; failedChunkIndex < prepared.batches.length; failedChunkIndex += 1) {
+    const batch = prepared.batches[failedChunkIndex];
+    try {
+      const response = await client.postRecords({ app: batch.app, records: [...batch.records] });
+      createdIds.push(response.ids);
+    } catch (cause) {
+      throw new ApplyWritePartialFailureError({
+        successfulChunks,
+        successfulParents,
+        failedChunkIndex,
+        failedStage: "POST_CHUNK",
+        nonTransactional: true,
+        retryAttempted: false,
+        ...diagnostic2 ? { diagnostic: withApplyDiagnosticProgress(diagnostic2, {
+          successfulChunks,
+          successfulParents,
+          failedChunkIndex,
+          failedStage: "POST_CHUNK",
+          failedBranch: "INSERT",
+          retryAttempted: false
+        }) } : {}
+      }, cause);
+    }
+    successfulChunks += 1;
+    successfulParents += batch.records.length;
+  }
+  return {
+    type: "INSERT",
+    createdIds,
+    insertedCount: successfulParents,
+    successfulChunks,
+    successfulParents,
+    nonTransactional: true
+  };
+}
+
+// src/core/applyUpsertExecutePrepared.ts
+async function executePreparedApplyUpsert(prepared, client, diagnostic2) {
+  assertApplyInternalWriteScope("phase14c");
+  const createdIds = [];
+  let successfulInsertChunks = 0;
+  let successfulUpdateChunks = 0;
+  let successfulInserts = 0;
+  let successfulUpdates = 0;
+  for (let failedChunkIndex = 0; failedChunkIndex < prepared.createBatches.length; failedChunkIndex += 1) {
+    const batch = prepared.createBatches[failedChunkIndex];
+    try {
+      const response = await client.postRecords({ app: batch.app, records: [...batch.records] });
+      createdIds.push(response.ids);
+    } catch (cause) {
+      throw new ApplyWritePartialFailureError({
+        successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+        successfulParents: successfulInserts + successfulUpdates,
+        successfulInserts,
+        successfulUpdates,
+        failedChunkIndex,
+        failedBranch: "INSERT",
+        failedStage: "POST_CHUNK",
+        nonTransactional: true,
+        retryAttempted: false,
+        ...diagnostic2 ? { diagnostic: withApplyDiagnosticProgress(diagnostic2, {
+          successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+          successfulParents: successfulInserts + successfulUpdates,
+          successfulInserts,
+          successfulUpdates,
+          successfulInsertChunks,
+          successfulUpdateChunks,
+          failedChunkIndex,
+          failedStage: "POST_CHUNK",
+          failedBranch: "INSERT",
+          retryAttempted: false
+        }) } : {}
+      }, cause);
+    }
+    successfulInsertChunks += 1;
+    successfulInserts += batch.records.length;
+  }
+  for (let failedChunkIndex = 0; failedChunkIndex < prepared.updateBatches.length; failedChunkIndex += 1) {
+    const batch = prepared.updateBatches[failedChunkIndex];
+    try {
+      await client.putRecords({ app: batch.app, records: [...batch.records] });
+    } catch (cause) {
+      throw new ApplyWritePartialFailureError({
+        successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+        successfulParents: successfulInserts + successfulUpdates,
+        successfulInserts,
+        successfulUpdates,
+        failedChunkIndex,
+        failedBranch: "UPDATE",
+        failedStage: "PUT_CHUNK",
+        nonTransactional: true,
+        retryAttempted: false,
+        ...diagnostic2 ? { diagnostic: withApplyDiagnosticProgress(diagnostic2, {
+          successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+          successfulParents: successfulInserts + successfulUpdates,
+          successfulInserts,
+          successfulUpdates,
+          successfulInsertChunks,
+          successfulUpdateChunks,
+          failedChunkIndex,
+          failedStage: "PUT_CHUNK",
+          failedBranch: "UPDATE",
+          retryAttempted: false
+        }) } : {}
+      }, cause);
+    }
+    successfulUpdateChunks += 1;
+    successfulUpdates += batch.records.length;
+  }
+  return {
+    type: "UPSERT",
+    createdIds,
+    insertedCount: successfulInserts,
+    updatedCount: successfulUpdates,
+    successfulChunks: successfulInsertChunks + successfulUpdateChunks,
+    successfulParents: successfulInserts + successfulUpdates,
+    successfulInsertChunks,
+    successfulUpdateChunks,
+    nonTransactional: true
+  };
+}
+
+// src/core/batchVariables.ts
+var VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+function normalizeBatchVariableName(name) {
+  if (!VARIABLE_NAME_RE.test(name)) {
+    throw new Error(
+      `ArgumentError: invalid variable name "${name}". Use a name without @ matching [A-Za-z_][A-Za-z0-9_]{0,63}.`
+    );
+  }
+  return name.toLowerCase();
+}
+function normalizeBatchVariables(input) {
+  const normalized = /* @__PURE__ */ Object.create(null);
+  for (const [rawName, value] of Object.entries(input ?? {})) {
+    const name = normalizeBatchVariableName(rawName);
+    if (Object.prototype.hasOwnProperty.call(normalized, name)) {
+      throw new Error(`ArgumentError: variable "${rawName}" is specified more than once.`);
+    }
+    normalized[name] = value;
+  }
+  return normalized;
+}
+function validateDeclaredBatchVariables(statements, input) {
+  const normalized = normalizeBatchVariables(input);
+  const declared = new Set(
+    statements.filter((stmt) => stmt.type === "DECLARE_VARIABLE").map((stmt) => stmt.name)
+  );
+  for (const name of Object.keys(normalized)) {
+    if (!declared.has(name)) {
+      throw new Error(`ArgumentError: injected variable @${name} is not declared.`);
+    }
+  }
+  return normalized;
+}
+
+// src/core/explainMetadata.ts
+function whereNeedsFieldMetadata(where) {
+  if (where === null) return false;
+  switch (where.type) {
+    case "BINARY":
+      return valueNeedsFieldMetadata(where.left);
+    case "NULL_CHECK":
+      return valueNeedsFieldMetadata(where.field);
+    case "LOGICAL":
+      return whereNeedsFieldMetadata(where.left) || whereNeedsFieldMetadata(where.right);
+    case "NOT":
+    case "GROUP":
+      return whereNeedsFieldMetadata(where.expr);
+    case "EXISTS":
+    case "BOOLEAN":
+      return false;
+  }
+}
+function valueNeedsFieldMetadata(value) {
+  if (Array.isArray(value)) return value.some(valueNeedsFieldMetadata);
+  if (value === null || typeof value !== "object") return false;
+  const item = value;
+  if (item["type"] === "FIELD") return item["field"] !== "$id";
+  if (item["type"] === "SELECT") return false;
+  return Object.values(item).some(valueNeedsFieldMetadata);
+}
+function selectNeedsOwnMetadata(statement) {
+  return whereNeedsFieldMetadata(statement.where) || statement.orderBy.length > 0 || statement.columns.some(
+    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
+  );
+}
+function explainNeedsAppMetadata(statement) {
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(visit);
+    const item = node;
+    if (item["type"] === "VALIDATE") return true;
+    if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node)) {
+      return true;
+    }
+    if ((item["type"] === "UPDATE" || item["type"] === "DELETE") && whereNeedsFieldMetadata(node.where)) {
+      return true;
+    }
+    if (item["type"] === "UPDATE" && Array.isArray(item["applyBlocks"]) && item["applyBlocks"].length > 0) return true;
+    return Object.values(item).some(visit);
+  };
+  return visit(statement);
+}
 
 // src/api/fetchAll.ts
 async function fetchAll(fetcher, app, query, fields, options = {}) {
@@ -38488,278 +41195,6 @@ function toFlatString(value) {
   }
 }
 
-// src/core/numberPrecision.ts
-function parseIntegerSetting(value, name, min, max) {
-  if (typeof value !== "string" || !/^\d+$/.test(value)) {
-    throw new Error(`SettingsError: numberPrecision.${name} must be an integer string.`);
-  }
-  let parsed = 0;
-  for (const digit of value) parsed = parsed * 10 + digit.charCodeAt(0) - 48;
-  if (parsed < min || parsed > max) {
-    throw new Error(`SettingsError: numberPrecision.${name} must be between ${min} and ${max}.`);
-  }
-  return parsed;
-}
-function parseNumberPrecisionSettings(response) {
-  const raw = response.numberPrecision;
-  if (raw === void 0 || raw === null || typeof raw !== "object") {
-    throw new Error("SettingsError: numberPrecision is missing from app settings.");
-  }
-  const digits = parseIntegerSetting(raw.digits, "digits", 1, 30);
-  const decimalPlaces = parseIntegerSetting(raw.decimalPlaces, "decimalPlaces", 0, 10);
-  const roundingMode = raw.roundingMode;
-  if (roundingMode !== "HALF_EVEN" && roundingMode !== "UP" && roundingMode !== "DOWN") {
-    throw new Error("SettingsError: numberPrecision.roundingMode is unsupported.");
-  }
-  return { digits, decimalPlaces, roundingMode };
-}
-function exactDecimalDigitCounts(value) {
-  if (value.sign === 0) return { integerDigits: 0, fractionDigits: 0 };
-  return {
-    integerDigits: Math.max(value.coefficient.length - value.scale, 0),
-    fractionDigits: Math.max(value.scale, 0)
-  };
-}
-
-// src/core/dmlValidation.ts
-var ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
-var CHOICE_TYPES = /* @__PURE__ */ new Set(["DROP_DOWN", "RADIO_BUTTON", "CHECK_BOX", "MULTI_SELECT"]);
-function validateAndNormalizeDmlValue(raw, field, numberPrecision) {
-  if (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME") {
-    const original = rawScalarText(raw);
-    if (original !== "" && !isValidTemporalInput(original, field.fieldType)) {
-      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
-    }
-  }
-  let value;
-  try {
-    value = normalizeRaw(raw, field.fieldType);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return { ok: false, code: typeCode(field.fieldType), message };
-  }
-  if (field.required && isEmpty(value)) {
-    return { ok: false, code: "ERR_REQUIRED", message: `${field.code} \u306F\u5FC5\u9808\u3067\u3059` };
-  }
-  if (!isEmpty(value) && field.fieldType === "NUMBER") {
-    const text = String(value);
-    const decimal = parseExactDecimal(text);
-    if (decimal === null) {
-      return { ok: false, code: "ERR_TYPE_NUMBER", message: `${field.code} \u306F\u6570\u5024\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
-    }
-    if (field.minValue != null && compareDecimal(text, field.minValue) < 0) {
-      return { ok: false, code: "ERR_RANGE_MIN", message: `${field.code} \u306F ${field.minValue} \u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
-    }
-    if (field.maxValue != null && compareDecimal(text, field.maxValue) > 0) {
-      return { ok: false, code: "ERR_RANGE_MAX", message: `${field.code} \u306F ${field.maxValue} \u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
-    }
-    if (numberPrecision !== void 0) {
-      const { integerDigits } = exactDecimalDigitCounts(decimal);
-      const integerBudget = numberPrecision.digits - numberPrecision.decimalPlaces;
-      if (integerDigits > integerBudget) {
-        return {
-          ok: false,
-          code: "ERR_NUMBER_INTEGER_DIGITS",
-          message: `${field.code} \u306E\u6574\u6570\u90E8\u306F ${integerDigits} \u6841\u3067\u3059\u3002\u8A31\u5BB9\u306F ${integerBudget} \u6841\u307E\u3067\u3067\u3059 (digits=${numberPrecision.digits}, decimalPlaces=${numberPrecision.decimalPlaces})`
-        };
-      }
-    }
-  }
-  if (!isEmpty(value) && (field.fieldType === "DATE" || field.fieldType === "TIME" || field.fieldType === "DATETIME")) {
-    if (!isValidTemporal(String(value), field.fieldType)) {
-      return { ok: false, code: "ERR_TYPE_DATE", message: `${field.code} \u306E\u65E5\u4ED8\u30FB\u6642\u523B\u5F62\u5F0F\u304C\u4E0D\u6B63\u3067\u3059` };
-    }
-  }
-  if (typeof value === "string") {
-    const length = value.length;
-    const min = field.minLength == null ? null : Number(field.minLength);
-    const max = field.maxLength == null ? null : Number(field.maxLength);
-    if (Number.isFinite(min) && length < min) {
-      return { ok: false, code: "ERR_LENGTH_MIN", message: `${field.code} \u306F ${min} \u6587\u5B57\u4EE5\u4E0A\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
-    }
-    if (Number.isFinite(max) && length > max) {
-      return { ok: false, code: "ERR_LENGTH_MAX", message: `${field.code} \u306F ${max} \u6587\u5B57\u4EE5\u4E0B\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044` };
-    }
-  }
-  if (!isEmpty(value) && CHOICE_TYPES.has(field.fieldType) && field.optionOrder) {
-    const selected = Array.isArray(value) ? value.map(String) : [String(value)];
-    if (selected.some((choice) => !(choice in field.optionOrder))) {
-      return { ok: false, code: "ERR_CHOICE_INVALID", message: `${field.code} \u306B\u5B9A\u7FA9\u5916\u306E\u9078\u629E\u80A2\u304C\u3042\u308A\u307E\u3059` };
-    }
-  }
-  return { ok: true, value };
-}
-function rawScalarText(raw) {
-  if (raw == null) return "";
-  if (isSqlValue(raw) && raw.type === "NUMBER") return numberLiteralText(raw);
-  if (isSqlValue(raw) && raw.type === "STRING") return raw.value;
-  return typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
-}
-function isValidTemporalInput(value, type) {
-  if (type === "DATE") return isValidTemporal(value.replace(/\//g, "-"), "DATE");
-  if (type === "TIME") return isValidTemporal(value, "TIME");
-  let normalized = value.replace(/\//g, "-").replace(" ", "T");
-  if (/T\d{2}:\d{2}$/.test(normalized)) normalized += ":00";
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(normalized)) {
-    return isValidTemporal(normalized.slice(0, 10), "DATE") && isValidTemporal(normalized.slice(11), "TIME");
-  }
-  return isValidTemporal(normalized, "DATETIME");
-}
-function normalizeRaw(raw, fieldType) {
-  if (isSqlValue(raw)) {
-    const normalized = normalizeDmlSqlValue(raw, fieldType);
-    if (!normalized.ok) throw new Error(normalized.message);
-    return normalized.value;
-  }
-  if (Array.isArray(raw)) return raw.map((v) => typeof v === "object" && v !== null && "code" in v ? String(v.code) : String(v));
-  const text = raw == null ? "" : String(raw);
-  if (ARRAY_TYPES2.has(fieldType)) {
-    if (text === "") return [];
-    try {
-      const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) return parsed.map(String);
-    } catch {
-    }
-    return text.split(",").map((v) => v.trim());
-  }
-  return text;
-}
-function isSqlValue(value) {
-  return typeof value === "object" && value !== null && typeof value.type === "string";
-}
-function isEmptyDmlValue(value) {
-  if (value == null || value === "") return true;
-  if (Array.isArray(value)) return value.length === 0;
-  if (isSqlValue(value)) {
-    if (value.type === "STRING") return value.value === "";
-    if (value.type === "ARRAY") return value.elements.length === 0;
-  }
-  return false;
-}
-function isEmpty(value) {
-  return value === "" || Array.isArray(value) && value.length === 0;
-}
-function typeCode(type) {
-  return type === "NUMBER" ? "ERR_TYPE_NUMBER" : "ERR_TYPE_DATE";
-}
-function isValidTemporal(value, type) {
-  if (type === "TIME") {
-    const m2 = /^(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
-    return m2 !== null && Number(m2[1]) <= 23 && Number(m2[2]) <= 59 && Number(m2[3] ?? 0) <= 59;
-  }
-  const datePart = type === "DATE" ? value : value.slice(0, 10);
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
-  if (!m) return false;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const date5 = new Date(Date.UTC(year, month - 1, day));
-  if (date5.getUTCFullYear() !== year || date5.getUTCMonth() !== month - 1 || date5.getUTCDate() !== day) return false;
-  if (type === "DATE") return true;
-  const timePart = value.slice(11, value.endsWith("Z") ? -1 : value.length - 6).replace(/\.\d+$/, "");
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && isValidTemporal(timePart, "TIME");
-}
-
-// src/core/dmlValidationCandidates.ts
-var VALIDATION_META_COLUMNS = [
-  "$err_statement",
-  "$err_operation",
-  "$err_row",
-  "$err_field",
-  "$err_code",
-  "$err_message"
-];
-function validateDmlCandidates(candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision, checkGroups = [], validateMissingCreateFields = true, includePreErrors = true) {
-  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
-  const errors = [];
-  const invalid = /* @__PURE__ */ new Set();
-  let firstEvaluationError;
-  for (const candidate of candidates) {
-    candidate.record ??= {};
-    const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
-    for (const code of targetFields) {
-      if (!candidate.payload.has(code)) continue;
-      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code), numberPrecision);
-      if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
-      else {
-        const original = candidate.payload.get(code);
-        const type = infoByCode.get(code).fieldType;
-        const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type) && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
-        candidate.record[code] = { value: preserveCodes ? original : result.value };
-      }
-    }
-    if (validateMissingCreateFields && candidate.mode === "create") {
-      for (const info of fieldInfos) {
-        if (info.inSubtable) continue;
-        if (candidate.payload.has(info.code)) continue;
-        const emptyDefault = isEmptyDmlValue(info.defaultValue);
-        if (!emptyDefault) {
-          const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info, numberPrecision);
-          if (!defaultResult.ok) rowErrors.push({
-            field: info.code,
-            code: defaultResult.code,
-            message: `\u65E2\u5B9A\u5024: ${defaultResult.message}`
-          });
-        } else {
-          const emptyResult = validateAndNormalizeDmlValue("", info, numberPrecision);
-          if (!emptyResult.ok) {
-            rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
-          } else if (info.required) {
-            rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} \u306F\u5FC5\u9808\u3067\u3059` });
-          }
-        }
-      }
-    }
-    if (checkGroups.length > 0) {
-      const row = candidate.evaluationRow ?? Object.fromEntries(
-        [...candidate.payload].map(([field, value]) => [field, renderValidationValue(value)])
-      );
-      const types = candidate.evaluationFieldTypes;
-      const resolveType = (field) => {
-        const qualified = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
-        return types?.get(qualified) ?? types?.get(field.field);
-      };
-      try {
-        for (const custom2 of evaluateCustomChecks(checkGroups, row, resolveType)) {
-          rowErrors.push({ field: "", code: "ERR_CHECK", message: custom2.message });
-        }
-      } catch (error51) {
-        firstEvaluationError ??= error51;
-      }
-    }
-    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
-    for (const error51 of rowErrors) {
-      const row = {};
-      for (const field of payloadFields) row[field] = renderValidationValue(candidate.payload.get(field));
-      row["$err_statement"] = String(statementNumber);
-      row["$err_operation"] = operation;
-      row["$err_row"] = String(candidate.rowNumber);
-      row["$err_field"] = error51.field;
-      row["$err_code"] = error51.code;
-      row["$err_message"] = error51.message;
-      errors.push(row);
-    }
-  }
-  if (firstEvaluationError !== void 0) throw firstEvaluationError;
-  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
-}
-function renderValidationValue(value) {
-  if (value == null) return "";
-  if (typeof value === "object" && "type" in value) {
-    const sql = value;
-    if (sql.type === "NUMBER") return sql.raw ?? String(sql.value ?? "");
-    if (sql.type === "STRING") return String(sql.value ?? "");
-    if (sql.type === "ARRAY") return JSON.stringify(sql.elements?.map((e) => e.value) ?? []);
-  }
-  if (Array.isArray(value)) return JSON.stringify(value);
-  return String(value);
-}
-
-// src/core/existingRecordValidation.ts
-function renderExistingValidationValue(raw, fieldType) {
-  return isEmptyDmlValue(raw) ? "" : renderValidationValue(normalizeRaw(raw, fieldType));
-}
-
 // src/core/optimization/whereCapability.ts
 var RANGE_AND_EQUALITY = ["=", "!=", ">", "<", ">=", "<="];
 var EQUALITY_IN = ["=", "!=", "in", "not in"];
@@ -38860,10 +41295,10 @@ function classifyBinary(op, left, rightType, resolveField2) {
   if (left.type !== "FIELD") return localExpression();
   const semantics = resolveField2(left);
   if (!semantics) {
-    return unsupported("WHERE_FIELD_UNRESOLVED", left.field, void 0, normalizeOperator(op));
+    return unsupported2("WHERE_FIELD_UNRESOLVED", left.field, void 0, normalizeOperator(op));
   }
   if (!hasLocalContract(semantics.fieldType, op)) {
-    return unsupported("WHERE_OPERATOR_UNSUPPORTED", left.field, semantics.fieldType, normalizeOperator(op));
+    return unsupported2("WHERE_OPERATOR_UNSUPPORTED", left.field, semantics.fieldType, normalizeOperator(op));
   }
   const nativeOp = normalizeOperator(op);
   const native = nativeWhereOperatorsForType(semantics.fieldType);
@@ -38893,9 +41328,9 @@ function classifyBinary(op, left, rightType, resolveField2) {
 }
 function classifyLocalOnlyField(field, operator, resolveField2) {
   const semantics = resolveField2(field);
-  if (!semantics) return unsupported("WHERE_FIELD_UNRESOLVED", field.field, void 0, operator);
+  if (!semantics) return unsupported2("WHERE_FIELD_UNRESOLVED", field.field, void 0, operator);
   if (!LOCAL_SCALAR_TYPES.has(semantics.fieldType) && !LOCAL_COLLECTION_TYPES.has(semantics.fieldType)) {
-    return unsupported("WHERE_OPERATOR_UNSUPPORTED", field.field, semantics.fieldType, operator);
+    return unsupported2("WHERE_OPERATOR_UNSUPPORTED", field.field, semantics.fieldType, operator);
   }
   return {
     capability: "LOCAL_ONLY",
@@ -38944,7 +41379,7 @@ function combineLogical(op, left, right) {
 function localExpression() {
   return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
 }
-function unsupported(code, field, fieldType, operator) {
+function unsupported2(code, field, fieldType, operator) {
   return { capability: "UNSUPPORTED", reasons: [{ code, field, fieldType, operator }] };
 }
 
@@ -39273,8 +41708,8 @@ function decodeJsonRecords(bytes) {
 }
 
 // src/import/jsonMaterializer.ts
-var STRING_ARRAY_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
-var CODE_ARRAY_TYPES = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
+var STRING_ARRAY_TYPES2 = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
+var CODE_ARRAY_TYPES2 = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
 function fail2(row, field, message) {
   throw new ImportSourceError(`JSON field validation failed (row=${row}, field=${field}): ${message}`);
 }
@@ -39296,7 +41731,7 @@ function materializeValue(value, target, row) {
   }
   if (value instanceof Map) fail2(row, target.code, "object is not accepted for a flat field.");
   if (!Array.isArray(value)) fail2(row, target.code, "unsupported value type.");
-  if (!STRING_ARRAY_TYPES.has(target.fieldType) && !CODE_ARRAY_TYPES.has(target.fieldType)) {
+  if (!STRING_ARRAY_TYPES2.has(target.fieldType) && !CODE_ARRAY_TYPES2.has(target.fieldType)) {
     fail2(row, target.code, "array is accepted only for multi-value fields.");
   }
   const strings = value.map((entry) => {
@@ -39304,7 +41739,7 @@ function materializeValue(value, target, row) {
     return entry;
   });
   if (new Set(strings).size !== strings.length) fail2(row, target.code, "array elements must not contain duplicates.");
-  return CODE_ARRAY_TYPES.has(target.fieldType) ? JSON.stringify(strings.map((code) => ({ code }))) : JSON.stringify(strings);
+  return CODE_ARRAY_TYPES2.has(target.fieldType) ? JSON.stringify(strings.map((code) => ({ code }))) : JSON.stringify(strings);
 }
 function materializeJsonDmlSource(_source, payload, targets, maxRows) {
   if (payload.encoding && payload.encoding !== "utf8") throw new ImportSourceError("JSON source is UTF-8 only.");
@@ -39546,12 +41981,12 @@ function prepareImportRecords(materialized, targets, fieldInfos, numberPrecision
   }
   const targetTop = targets.filter((t) => t.kind === "FIELD");
   const targetTables = targets.filter((t) => t.kind === "SUBTABLE");
-  for (const target of targetTop) assertWritable(target.field, topInfos.get(target.field), void 0);
+  for (const target of targetTop) assertWritable2(target.field, topInfos.get(target.field), void 0);
   for (const target of targetTables) {
     const table = topInfos.get(target.subtableCode);
     if (!table || table.fieldType !== "SUBTABLE") throw new Error(`ArgumentError: IMPORT subtable ${target.subtableCode} does not exist.`);
     const children = scoped.get(target.subtableCode) ?? /* @__PURE__ */ new Map();
-    for (const child of target.children) assertWritable(child, children.get(child), target.subtableCode);
+    for (const child of target.children) assertWritable2(child, children.get(child), target.subtableCode);
   }
   const tableCounts = new Map(targetTables.map((t) => [t.subtableCode, { parentsPresent: 0, childRows: 0, validChildRows: 0, invalidChildRows: 0 }]));
   const parents = materialized.records.map((record2) => validateParent(record2, targetTop, targetTables, topInfos, scoped, numberPrecision, operation, tableCounts));
@@ -39596,7 +42031,7 @@ function validateParent(source, topTargets, tableTargets, topInfos, scoped, prec
   }
   return { parentRow: source.rowNumber, valid: errors.length === 0, top, subtables, replacementTables: source.replacementTables, errors };
 }
-function assertWritable(code, info, table) {
+function assertWritable2(code, info, table) {
   if (!info) throw new Error(table ? `ArgumentError: IMPORT child ${code} does not belong to subtable ${table}.` : `ArgumentError: IMPORT top-level field ${code} does not exist.`);
   if (info.writable === false || table && UNSUPPORTED_CHILD_TYPES.has(info.fieldType)) {
     throw new Error(`ArgumentError: IMPORT ${table ? `child ${table}.${code}` : `field ${code}`} is not writable (${info.fieldType}).`);
@@ -40008,8 +42443,16 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
+  assertApplyScope("phase15b", stmt);
+  assertApplyExecutionScope("phase15b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
+  if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
+    if (stmt.validationErrorTable) {
+      throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    }
+    return executeUpdate(stmt, client, options, cacheContext);
+  }
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
     if (stmt.validationErrorTable) {
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
@@ -40052,7 +42495,9 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
         client,
         cacheContext,
         options.maxRecords ?? 1e4,
-        options.cursorMaxActive ?? 2
+        options.cursorMaxActive ?? 2,
+        stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS) : DEFAULT_APPLY_MAX_ROWS,
+        stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS
       );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -40085,67 +42530,6 @@ var EXISTING_VALIDATION_SUMMARY_COLUMNS = [
   "$err_code",
   "$err_count"
 ];
-function hasAuditableConstraint(field) {
-  return field.required === true || field.minValue !== void 0 || field.maxValue !== void 0 || field.minLength !== void 0 || field.maxLength !== void 0 || field.optionOrder !== void 0;
-}
-function resolveExistingValidationTargets(stmt, fieldInfos) {
-  const topByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
-  const childrenByTable = /* @__PURE__ */ new Map();
-  for (const field of fieldInfos) {
-    if (!field.inSubtable || !field.subtableCode) continue;
-    const children = childrenByTable.get(field.subtableCode) ?? [];
-    children.push(field);
-    childrenByTable.set(field.subtableCode, children);
-  }
-  const auditable = (field) => field.fieldType === "NUMBER" || hasAuditableConstraint(field);
-  if (stmt.targets === void 0) return [
-    ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "SUBTABLE" && auditable(field)),
-    ...fieldInfos.filter((field) => field.inSubtable && !!field.subtableCode && auditable(field))
-  ].map((field) => ({ field, ...field.subtableCode ? { subtableCode: field.subtableCode } : {} }));
-  const result = [];
-  const seen = /* @__PURE__ */ new Set();
-  const add = (field, subtableCode) => {
-    const key = subtableCode ? `${subtableCode}\0${field.code}` : field.code;
-    if (seen.has(key)) throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${field.code} \u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059\u3002`);
-    seen.add(key);
-    if (!auditable(field)) throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${field.code} \u306B\u306F\u76E3\u67FB\u53EF\u80FD\u306A\u5236\u7D04\u304C\u3042\u308A\u307E\u305B\u3093\u3002`);
-    result.push({ field, ...subtableCode ? { subtableCode } : {} });
-  };
-  for (const target of stmt.targets) {
-    if (target.kind === "SUBTABLE") {
-      const children = childrenByTable.get(target.subtableCode);
-      if (!children) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
-      if (target.children.length === 0) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u306F1\u3064\u4EE5\u4E0A\u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u5FC5\u8981\u3067\u3059\u3002`);
-      for (const code2 of target.children) {
-        const child = children.find((field) => field.code === code2);
-        if (!child) {
-          const belongsElsewhere = [...childrenByTable.entries()].some(([table, fields]) => table !== target.subtableCode && fields.some((field) => field.code === code2));
-          throw new Error(belongsElsewhere ? `ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code2} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u5C5E\u3057\u3066\u3044\u307E\u305B\u3093\u3002` : `ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code2} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${target.subtableCode} \u306B\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
-        }
-        add(child, target.subtableCode);
-      }
-      continue;
-    }
-    const code = target.field;
-    if (code === "$id") throw new Error("ArgumentError: VALIDATE \u3067\u306F\u30B7\u30B9\u30C6\u30E0\u30D5\u30A3\u30FC\u30EB\u30C9 $id \u3092\u76E3\u67FB\u3067\u304D\u307E\u305B\u3093\u3002");
-    const top = topByCode.get(code);
-    if (top?.fieldType === "SUBTABLE") {
-      const children = (childrenByTable.get(code) ?? []).filter(auditable);
-      if (children.length === 0) throw new Error(`ArgumentError: VALIDATE \u306E\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB ${code} \u306B\u306F\u76E3\u67FB\u53EF\u80FD\u306A\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u3042\u308A\u307E\u305B\u3093\u3002`);
-      children.forEach((child) => add(child, code));
-      continue;
-    }
-    if (top) {
-      add(top);
-      continue;
-    }
-    if ([...childrenByTable.values()].some((children) => children.some((field) => field.code === code))) {
-      throw new Error(`ArgumentError: VALIDATE \u306E\u5B50\u30D5\u30A3\u30FC\u30EB\u30C9 ${code} \u306F\u6240\u6709\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u3092\u542B\u3080 T(${code}) \u5F62\u5F0F\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002`);
-    }
-    throw new Error(`ArgumentError: VALIDATE \u306E\u30D5\u30A3\u30FC\u30EB\u30C9 ${code} \u306F\u5B58\u5728\u3057\u307E\u305B\u3093\u3002`);
-  }
-  return result;
-}
 function collectValidateWhereFields(where) {
   const fields = [];
   const seen = /* @__PURE__ */ new Set();
@@ -40308,16 +42692,17 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
         for (const target of childTargets) {
           const raw = tableRow.value?.[target.field.code]?.value;
           const validation = validateAndNormalizeDmlValue(raw, target.field, numberPrecision);
-          if (!validation.ok) appendError({
-            id: row.id,
-            field: target.field.code,
-            code: validation.code,
-            message: validation.message,
-            value: renderExistingValidationValue(raw, target.field.fieldType),
-            subtable: tableCode,
-            subrow: i + 1,
-            subrowId: String(tableRow.id ?? "")
-          });
+          if (!validation.ok) {
+            const locator = buildValidationCellLocator(tableCode, i, tableRow);
+            appendError({
+              id: row.id,
+              field: target.field.code,
+              code: validation.code,
+              message: validation.message,
+              value: renderExistingValidationValue(raw, target.field.fieldType),
+              ...locator
+            });
+          }
         }
       }
     }
@@ -40375,6 +42760,12 @@ var BatchTimeoutError = class extends Error {
 async function executeBatch(sql, client, options = {}) {
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
+  statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
+  if (options.allowApplyMutation !== true && statements.some(
+    (statement) => statementHasMultiValueApply(statement) || statement.type === "UPSERT" && statementHasApplyMutation(statement)
+  )) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions = { ...options, variables: injectedVariables };
   if (options.continueOnError && analysis.containsDml) {
@@ -40431,7 +42822,9 @@ async function executeBatch(sql, client, options = {}) {
           statementCount: statements.length,
           statementType: info.statementType,
           targetAppId: info.targetAppId,
-          ...detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}
+          ...detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {},
+          ...detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {},
+          ...detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}
         })
       } : batchOptions;
       const searchAbortCollector = { aborted: false };
@@ -40477,6 +42870,12 @@ async function executeBatch(sql, client, options = {}) {
     analysis,
     metrics
   };
+}
+function statementHasApplyMutation(statement) {
+  if (statement.type === "UPDATE" || statement.type === "INSERT") {
+    return statement.validateOnly !== true && Boolean(statement.applyBlocks?.length);
+  }
+  return statement.type === "UPSERT" && statement.validateOnly !== true && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
 async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables) {
   if (stmt.type === "SET_VARIABLE") {
@@ -40525,6 +42924,8 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     return {};
   }
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
+  assertApplyScope("phase15b", resolvedStmt);
+  assertApplyExecutionScope("phase15b", resolvedStmt);
   validateKlikeStatement(resolvedStmt);
   if (resolvedStmt.type === "VALIDATE") {
     const result = await executeExistingRecordValidationCore(
@@ -40686,6 +43087,9 @@ async function runWithDeadline(work, remainingMs, onTimeout) {
   }
 }
 function toBatchStatementError(e) {
+  if (e instanceof ApplyWritePartialFailureError) {
+    return { code: e.name, message: e.message, partialSuccess: e.partialSuccess };
+  }
   if (e instanceof Error) {
     const name = e.name !== "Error" ? e.name : null;
     return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
@@ -40968,12 +43372,16 @@ async function buildWhereFieldSemanticsResolver(stmt, client, cacheContext, mate
     const order = await loadProcessStatusOrder(appId, client, cacheContext);
     if (order) statusOrdersByApp.set(appId, order);
   }));
-  const fromPhysical = (table, field) => {
+  const fromPhysical = (table, field, allowSubtableSystemColumns) => {
     if (field === "$id") return withFieldSemanticSource(
       resolveFieldSemantics({ fieldType: "__ID__" }),
       table.appId,
       "$id"
     );
+    if (allowSubtableSystemColumns && table.subtableCode) {
+      if (field === "_rid") return syntheticSemantics("string");
+      if (field === "_idx" || field === "_pid") return syntheticSemantics("number");
+    }
     const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
     if (!info) return void 0;
     const base = info.semantics ?? resolveFieldSemantics(info);
@@ -40987,26 +43395,27 @@ async function buildWhereFieldSemanticsResolver(stmt, client, cacheContext, mate
   return (field) => {
     if (field.tableAlias !== null) {
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
-        return fromPhysical(stmt.from, field.field);
+        return fromPhysical(stmt.from, field.field, false);
       }
       const table = tables.find((candidate) => candidate.alias === field.tableAlias);
       if (!table) return void 0;
       if (table.cteName !== null) {
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics ?? syntheticSemantics("string");
       }
-      return fromPhysical(table, field.field);
+      return fromPhysical(table, field.field, true);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
         return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics ?? syntheticSemantics("string");
       }
-      return fromPhysical(stmt.from, field.field);
+      return fromPhysical(stmt.from, field.field, true);
     }
     const matches = tables.flatMap((table) => {
-      const semantics = table.cteName !== null ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics : fromPhysical(table, field.field);
+      const semantics = table.cteName !== null ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics : fromPhysical(table, field.field, true);
       return semantics ? [semantics] : [];
     });
     if (matches.length === 1) return matches[0];
+    if (tables.some((table) => subtableSystemFieldType(table, field.field) !== void 0)) return void 0;
     return matches.length > 1 ? syntheticSemantics("string") : void 0;
   };
 }
@@ -41608,6 +44017,12 @@ function fieldCodeForTypeLookup(table, field) {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
   return field;
 }
+function subtableSystemFieldType(table, field) {
+  if (!table.subtableCode) return void 0;
+  if (field === "_rid") return "SINGLE_LINE_TEXT";
+  if (field === "_idx" || field === "_pid") return "NUMBER";
+  return void 0;
+}
 function materializedMetaFromFieldInfo(info, sourceAppId) {
   const semantics = info.semantics ?? resolveFieldSemantics(info);
   return {
@@ -41637,13 +44052,15 @@ function unsupportedColumnMeta(fieldType = "KSQL_ARRAY") {
   };
 }
 function systemColumnMeta(field) {
-  if (field === "$id" || field === "_rid" || field === "_pid") {
+  if (field === "$id") {
     return {
       sortKind: "number",
       fieldType: "__ID__",
       semantics: resolveFieldSemantics({ fieldType: "__ID__" })
     };
   }
+  if (field === "_rid") return syntheticColumnMeta("string");
+  if (field === "_pid" || field === "_idx") return syntheticColumnMeta("number");
   if (field === "$revision") return syntheticColumnMeta("number");
   return void 0;
 }
@@ -41827,21 +44244,20 @@ function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         return fieldTypesByApp.get(stmt.from.appId)?.get(field.field);
       }
-      const table2 = tables.find((candidate) => candidate.alias === field.tableAlias);
-      if (!table2 || table2.cteName !== null) return void 0;
-      return fieldTypesByApp.get(table2.appId)?.get(fieldCodeForTypeLookup(table2, field.field));
+      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      if (!table || table.cteName !== null) return void 0;
+      return subtableSystemFieldType(table, field.field) ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return void 0;
-      return fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
+      return subtableSystemFieldType(stmt.from, field.field) ?? fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
     }
-    if (tables.some((table2) => table2.cteName !== null)) return void 0;
-    const matches = physicalTables.filter(
-      (table2) => fieldTypesByApp.get(table2.appId)?.has(fieldCodeForTypeLookup(table2, field.field))
-    );
-    if (matches.length !== 1) return void 0;
-    const table = matches[0];
-    return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+    if (tables.some((table) => table.cteName !== null)) return void 0;
+    const matches = physicalTables.flatMap((table) => {
+      const type = subtableSystemFieldType(table, field.field) ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+      return type ? [type] : [];
+    });
+    return matches.length === 1 ? matches[0] : void 0;
   };
   const having = (field) => {
     if (field.tableAlias === null && outputAliases.has(field.field)) return void 0;
@@ -42245,8 +44661,8 @@ async function resolveUpsertTargets(appId, keyFields, rowKeyValues, client, opti
     else batchFirstKeys.add(parts[0]);
   }
   const fields = ["$id", ...keyFields];
-  for (const chunk2 of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
-    const query = `${keyFields[0]} in (${chunk2.map(sqlQuote).join(",")})`;
+  for (const chunk3 of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
+    const query = `${keyFields[0]} in (${chunk3.map(sqlQuote).join(",")})`;
     const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords: maxRecords2, parallel });
     for (const rec of records) {
       const id = Number(rec["$id"]?.value);
@@ -42333,8 +44749,8 @@ async function tryFetchJoinRecordsBySourceKeys(stmt, join, tables, client, maxRe
   const chunks = splitChunks(values, JOIN_IN_CHUNK_SIZE);
   const merged = [];
   const seen = /* @__PURE__ */ new Set();
-  for (const chunk2 of chunks) {
-    const inClause = `${joinField} in (${chunk2.map(sqlQuote).join(",")})`;
+  for (const chunk3 of chunks) {
+    const inClause = `${joinField} in (${chunk3.map(sqlQuote).join(",")})`;
     const query = pushDownCond !== null ? `(${inClause}) and (${whereToKintone(pushDownCond)})` : inClause;
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, join.table.appId, query, fields, {
       parallel,
@@ -42626,7 +45042,7 @@ function convertProcessRowValue(raw, dstFieldType) {
   }
   return raw;
 }
-var NON_WRITABLE_FIELD_TYPES = /* @__PURE__ */ new Set([
+var NON_WRITABLE_FIELD_TYPES2 = /* @__PURE__ */ new Set([
   "CALC",
   "RECORD_NUMBER",
   "CREATOR",
@@ -42650,7 +45066,7 @@ function assertWritableTopLevelDmlFields(appId, targetFields, fieldInfos) {
         `ArgumentError: DML target field ${code} is inside a subtable. Use subtable DML syntax (for example, APP${appId}$\u30C6\u30FC\u30D6\u30EB).`
       );
     }
-    if (info.writable === false || NON_WRITABLE_FIELD_TYPES.has(info.fieldType)) {
+    if (info.writable === false || NON_WRITABLE_FIELD_TYPES2.has(info.fieldType)) {
       throw new Error(`ArgumentError: DML target field ${code} is not writable (${info.fieldType}).`);
     }
   }
@@ -42679,13 +45095,288 @@ function assertValidDmlRecords(records, targetFields, fieldInfos, numberPrecisio
     }
   });
 }
+async function executeApplyInsertValidation(stmt, client, options, cacheContext, statementNumber) {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext)
+  });
+  return materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos);
+}
+async function executeApplyUpsertValidation(stmt, client, options, cacheContext, statementNumber) {
+  const { fieldInfos, prepared } = await prepareApplyUpsertForExecution(
+    stmt,
+    client,
+    options,
+    cacheContext,
+    statementNumber
+  );
+  return materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos);
+}
+async function prepareApplyUpsertForExecution(stmt, client, options, cacheContext, statementNumber) {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
+  const seenSourceKeys = /* @__PURE__ */ new Set();
+  for (const parts of rowKeyValues) {
+    const key = upsertNormalizedKey(parts, stmt.keyFields.map((field) => fieldTypes.get(field) === "NUMBER"));
+    if (seenSourceKeys.has(key)) {
+      throw new Error("ERR_KEY_DUP_SOURCE: UPSERT \u30BD\u30FC\u30B9\u5185\u3067\u30AD\u30FC\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059");
+    }
+    seenSourceKeys.add(key);
+  }
+  const targetIndex = await resolveUpsertTargets(
+    stmt.appId,
+    stmt.keyFields,
+    rowKeyValues,
+    client,
+    options,
+    fieldTypes
+  );
+  const targetIds = rowKeyValues.map((parts) => lookupUpsertTarget(targetIndex, parts));
+  const snapshotsById = /* @__PURE__ */ new Map();
+  const updateIds = [...new Set(targetIds.filter((id) => id !== void 0))];
+  const snapshotFields = ["$id", "$revision", ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "FILE").map((field) => field.code)];
+  for (const ids of splitChunks(updateIds, 100)) {
+    const response = await client.getRecords({
+      app: stmt.appId,
+      query: `$id in (${ids.join(",")}) limit 500`,
+      fields: [...new Set(snapshotFields)]
+    });
+    for (const snapshot of response.records) {
+      const id = Number(snapshot["$id"]?.value);
+      if (Number.isSafeInteger(id) && id > 0) snapshotsById.set(id, snapshot);
+    }
+  }
+  const matches = targetIds.map((targetId, sourceRowIndex) => ({
+    sourceRowIndex,
+    ...targetId === void 0 ? {} : { targetId, snapshot: snapshotsById.get(targetId) }
+  }));
+  const prepared = await prepareApplyUpsert({
+    statement: stmt,
+    matches,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext)
+  });
+  return { fieldInfos, prepared };
+}
+async function executeApplyInsert(stmt, client, options, cacheContext) {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext)
+  });
+  const diagnostic2 = buildPreparedApplyInsertDiagnostic(prepared);
+  if (options.confirm) {
+    const ok = await options.confirm(prepared.guards.parentRows, "INSERT", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "INSERT",
+      targetAppId: stmt.appId,
+      applyDetail: buildApplyConfirmDetailFromDiagnostic(diagnostic2),
+      applyDiagnostic: diagnostic2
+    });
+    if (!ok) throw new OperationCancelledError("INSERT", prepared.guards.parentRows);
+  }
+  const result = await executePreparedApplyInsert(prepared, client, diagnostic2);
+  return {
+    ...result,
+    diagnostic: withApplyDiagnosticProgress(diagnostic2, result)
+  };
+}
+async function executeApplyUpsert(stmt, client, options, cacheContext) {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const { prepared } = await prepareApplyUpsertForExecution(stmt, client, options, cacheContext, 1);
+  const diagnostic2 = buildPreparedApplyUpsertDiagnostic(prepared);
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic2);
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPSERT",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic2
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+  const result = await executePreparedApplyUpsert(prepared, client, diagnostic2);
+  return {
+    type: "UPSERT",
+    insertedCount: result.insertedCount,
+    updatedCount: result.updatedCount,
+    successfulChunks: result.successfulChunks,
+    successfulParents: result.successfulParents,
+    successfulInsertChunks: result.successfulInsertChunks,
+    successfulUpdateChunks: result.successfulUpdateChunks,
+    nonTransactional: result.nonTransactional,
+    diagnostic: withApplyDiagnosticProgress(diagnostic2, result)
+  };
+}
+function mergeApplyConfirmTables(left, right) {
+  const merged = /* @__PURE__ */ new Map();
+  for (const table of [...left, ...right]) {
+    const current = merged.get(table.table);
+    merged.set(table.table, current ? {
+      table: table.table,
+      patchRows: current.patchRows + table.patchRows,
+      appendRows: current.appendRows + table.appendRows,
+      removeRows: current.removeRows + table.removeRows
+    } : { ...table });
+  }
+  return [...merged.values()];
+}
+function buildApplyConfirmDetailFromDiagnostic(diagnostic2, chunked = true) {
+  const insert = diagnostic2.branches.find((branch) => branch.branch === "insert");
+  const update = diagnostic2.branches.find((branch) => branch.branch === "update");
+  const allTargets = diagnostic2.branches.flatMap((branch) => branch.targets);
+  const tables = mergeApplyConfirmTables(
+    insert ? applyDiagnosticTables(insert) : [],
+    update ? applyDiagnosticTables(update) : []
+  );
+  const multiValues = mergeApplyDiagnosticMultiValues(allTargets);
+  const parentRows = diagnostic2.branches.reduce((sum, branch) => sum + (branch.parentRows ?? 0), 0);
+  const changedSubtableRows = allTargets.filter((target) => target.targetKind === "SUBTABLE").reduce((sum, target) => sum + (target.changedCount ?? 0), 0);
+  const addedSubtableRows = tables.reduce((sum, table) => sum + table.appendRows, 0);
+  const deletedRows = tables.reduce((sum, table) => sum + table.removeRows, 0);
+  const result = {
+    kind: diagnostic2.statementKind === "UPDATE" ? "APPLY_PATCH" : diagnostic2.statementKind === "INSERT" ? "APPLY_INSERT" : "APPLY_UPSERT",
+    parentRows,
+    changedSubtableRows,
+    addedSubtableRows,
+    tables,
+    ...multiValues.length > 0 ? { multiValues } : {},
+    deletedRows,
+    deletedParentRows: diagnostic2.branches.reduce((sum, branch) => sum + (branch.deletedParentRows ?? 0), 0),
+    revisionRequired: diagnostic2.branches.some((branch) => branch.guards.revisionRequired),
+    irreversible: true,
+    retryOnRevisionConflict: false,
+    ...chunked ? { nonTransactional: true, partialSuccessPossible: true } : {}
+  };
+  if (diagnostic2.statementKind === "INSERT" && insert) {
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE").reduce((sum, target) => sum + (target.changedCount ?? 0), 0)
+    };
+  }
+  if (diagnostic2.statementKind === "UPSERT" && insert && update) {
+    const insertTables = applyDiagnosticTables(insert);
+    const updateTables = applyDiagnosticTables(update);
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE").reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+      updatedParentRows: update.parentRows ?? 0,
+      applyBranches: {
+        insert: {
+          parentRows: insert.parentRows ?? 0,
+          initialSubtableRows: insertTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: insertTables
+        },
+        update: {
+          parentRows: update.parentRows ?? 0,
+          changedSubtableRows: update.targets.filter((target) => target.targetKind === "SUBTABLE").reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+          addedSubtableRows: updateTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: updateTables,
+          deletedRows: updateTables.reduce((sum, table) => sum + table.removeRows, 0),
+          deletedParentRows: update.deletedParentRows ?? 0
+        }
+      }
+    };
+  }
+  return result;
+}
+function applyDiagnosticTables(branch) {
+  return branch.targets.filter((target) => target.targetKind === "SUBTABLE").map((target) => {
+    const appendRows = operationCount(target, "APPEND");
+    const removeRows = operationCount(target, "REMOVE");
+    return {
+      table: target.field,
+      patchRows: (target.changedCount ?? 0) - appendRows - removeRows,
+      appendRows,
+      removeRows
+    };
+  });
+}
+function operationCount(target, kind) {
+  return target.operations.filter((operation) => operation.kind === kind).reduce((sum, operation) => sum + (operation.count ?? 0), 0);
+}
+function mergeApplyDiagnosticMultiValues(targets) {
+  const details = /* @__PURE__ */ new Map();
+  for (const target of targets.filter((item) => item.targetKind === "MULTI_VALUE")) {
+    const incoming = {
+      field: target.field,
+      fieldType: target.fieldType ?? "UNKNOWN",
+      addedValues: operationCount(target, "ADD"),
+      removedValues: operationCount(target, "REMOVE_VALUE"),
+      changedValues: target.changedCount ?? 0,
+      parents: (target.postImages ?? []).map((item) => ({ parentId: item.parentId, postImage: item.value }))
+    };
+    const current = details.get(target.field);
+    details.set(target.field, current ? {
+      ...current,
+      addedValues: current.addedValues + incoming.addedValues,
+      removedValues: current.removedValues + incoming.removedValues,
+      changedValues: current.changedValues + incoming.changedValues,
+      parents: [...current.parents, ...incoming.parents]
+    } : incoming);
+  }
+  return [...details.values()];
+}
 async function executeDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber) {
+  if (stmt.type === "INSERT" && stmt.applyBlocks?.length) {
+    return executeApplyInsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
+  if (stmt.type === "UPSERT" && (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length)) {
+    return executeApplyUpsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
+  if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
+    const result = await executeApplyPatchUpdate(
+      stmt,
+      client,
+      options,
+      cacheContext,
+      statementNumber
+    );
+    if (result.type !== "VALIDATION") {
+      throw new Error("InternalError: APPLY VALIDATE ONLY returned a mutation result.");
+    }
+    return result;
+  }
   return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
 }
 var RejectLimitExceededError = class extends Error {
-  constructor(message, diagnostic) {
+  constructor(message, diagnostic2) {
     super(`RejectLimitExceededError: ${message}`);
-    this.diagnostic = diagnostic;
+    this.diagnostic = diagnostic2;
     this.name = "RejectLimitExceededError";
   }
 };
@@ -43246,6 +45937,7 @@ async function executeCheckedPlainDml(stmt, client, options, cacheContext, tempT
   return { type: "UPSERT", insertedCount, updatedCount: updates.length };
 }
 async function executeInsert(stmt, client, options, cacheContext) {
+  if (stmt.applyBlocks?.length) return executeApplyInsert(stmt, client, options, cacheContext);
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
@@ -43379,8 +46071,8 @@ async function executeImport(stmt, client, options, cacheContext, tempTables) {
     const tableCodes = targets.filter((target) => target.kind === "SUBTABLE").map((target) => target.subtableCode);
     const existingById = /* @__PURE__ */ new Map();
     const updateIds = targetIds.filter((id) => id !== void 0);
-    for (const chunk2 of splitChunks([...new Set(updateIds)], 100)) {
-      const response = await client.getRecords({ app: stmt.appId, query: `$id in (${chunk2.join(",")}) limit 500`, fields: ["$id", "$revision", ...tableCodes] });
+    for (const chunk3 of splitChunks([...new Set(updateIds)], 100)) {
+      const response = await client.getRecords({ app: stmt.appId, query: `$id in (${chunk3.join(",")}) limit 500`, fields: ["$id", "$revision", ...tableCodes] });
       for (const record2 of response.records) {
         const id = Number(record2["$id"]?.value);
         const revision = Number(record2["$revision"]?.value);
@@ -43613,10 +46305,10 @@ async function executeImportRecordNumberUpdate(stmt, handle, client, options, ca
   const matchedIds = /* @__PURE__ */ new Set();
   const lookupKeys = [...new Set(keyPlan.normalized.filter((key) => key !== null))];
   for (let i = 0; i < lookupKeys.length; i += 100) {
-    const chunk2 = lookupKeys.slice(i, i + 100);
+    const chunk3 = lookupKeys.slice(i, i + 100);
     const response = await client.getRecords({
       app: stmt.appId,
-      query: `$id in (${chunk2.join(",")}) limit 500`,
+      query: `$id in (${chunk3.join(",")}) limit 500`,
       fields: ["$id"]
     });
     for (const record2 of response.records) {
@@ -43802,6 +46494,9 @@ async function executeInsertSelect(stmt, client, options, cacheContext, cteCache
   };
 }
 async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
+  if (stmt.applyBlocks?.length) {
+    return executeApplyPatchUpdate(stmt, client, options, cacheContext);
+  }
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos2 = await loadWritableTopLevelDmlFields(
       stmt.appId,
@@ -43889,6 +46584,376 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
   }
   return { type: "UPDATE", updatedCount: ids.length };
 }
+async function executeApplyPatchUpdate(stmt, client, options, cacheContext, statementNumber = 1) {
+  if (!stmt.validateOnly && options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  if (!isSinglePositiveRecordIdWhere(stmt.where)) {
+    return executeMultipleParentApplyPreflight(stmt, client, options, cacheContext, statementNumber);
+  }
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const requestedId = getApplyParentId(stmt);
+  const response = await client.getRecords({
+    app: stmt.appId,
+    query: `$id = ${requestedId} limit 2`,
+    fields: [...fields]
+  });
+  if (response.records.length === 0) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} does not exist.`);
+  }
+  if (response.records.length !== 1) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} returned multiple records.`);
+  }
+  const actualId = Number(response.records[0]["$id"]?.value);
+  if (actualId !== requestedId) {
+    throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
+  }
+  requireRevision(response.records[0]);
+  const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
+  const fieldIndex = buildPostImageFieldIndex(
+    fieldInfos,
+    stmt.assignments.map((assignment) => assignment.field)
+  );
+  const numberPrecision = postImageNeedsNumberPrecision(plan.postImage, fieldIndex) ? await getNumberPrecisionCached(stmt.appId, client, cacheContext) : void 0;
+  const validation = validatePostImage(plan.postImage, fieldIndex, numberPrecision, statementNumber);
+  if (!stmt.validateOnly && validation.errorCount > 0) {
+    throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+      columns: validation.columns,
+      errors: validation.errors
+    })}`);
+  }
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS);
+  const wouldExceed = plan.parentRows > dmlMaxRows || plan.changedSubtableRows > dmlMaxSubtableRows;
+  if (stmt.validateOnly) {
+    const diagnostic3 = buildPreparedApplyUpdateDiagnostic({
+      plans: [plan],
+      records: applyPatchPlanToKintone(plan).records,
+      validations: [],
+      guards: {
+        revisionRequired: true,
+        parentRows: plan.parentRows,
+        dmlMaxRows,
+        subtableRows: plan.changedSubtableRows,
+        dmlMaxSubtableRows,
+        wouldExceed
+      }
+    });
+    const result = {
+      type: "VALIDATION",
+      operation: "UPDATE",
+      validatedRows: 1,
+      validRows: validation.invalidRows === 0 ? 1 : 0,
+      invalidRows: validation.invalidRows === 0 ? 0 : 1,
+      errorCount: validation.errorCount,
+      columns: [...validation.columns],
+      errors: validation.errors,
+      ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {},
+      apply: applyValidationDetailsFromBranch(diagnostic3.branches[0]),
+      guards: applyGuardFromDiagnosticBranch(diagnostic3.branches[0]),
+      deletedRows: {
+        total: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
+        parentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0
+      },
+      diagnostic: diagnostic3
+    };
+    materializedMetaByValidationResult.set(
+      result,
+      applyValidationColumnMeta(validation.columns, fieldInfos, stmt.appId)
+    );
+    return result;
+  }
+  if (plan.parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${plan.parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (plan.changedSubtableRows > dmlMaxSubtableRows) {
+    throw new Error(
+      `ArgumentError: APPLY changed subtable rows (${plan.changedSubtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`
+    );
+  }
+  const normalizedPlan = normalizeApplyPatchPlan(plan, validation.normalizedRecord);
+  const putParams = applyPatchPlanToKintone(normalizedPlan);
+  const diagnostic2 = buildPreparedApplyUpdateDiagnostic({
+    plans: [normalizedPlan],
+    records: putParams.records,
+    validations: [],
+    guards: {
+      revisionRequired: true,
+      parentRows: plan.parentRows,
+      dmlMaxRows,
+      subtableRows: plan.changedSubtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed
+    }
+  });
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic2, false);
+    const ok = await options.confirm(plan.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic2
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", plan.parentRows);
+  }
+  await client.putRecords(putParams);
+  return {
+    type: "UPDATE",
+    updatedCount: plan.parentRows,
+    diagnostic: withApplyDiagnosticProgress(diagnostic2, {
+      successfulChunks: 1,
+      successfulParents: plan.parentRows
+    })
+  };
+}
+async function executeMultipleParentApplyPreflight(stmt, client, options, cacheContext, statementNumber) {
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(
+    options.dmlMaxSubtableRows,
+    "dmlMaxSubtableRows",
+    DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  );
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const baseQuery = updateToGetQuery(stmt).query;
+  const detectionLimit = dmlMaxRows + 1;
+  const snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
+    pageSize: Math.min(500, detectionLimit),
+    parallel: options.fetchParallel ?? 1,
+    maxRecords: detectionLimit,
+    stopAfter: detectionLimit,
+    onLimit: "error"
+  });
+  if (!stmt.validateOnly && snapshots.length > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${snapshots.length}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  const prepared = await prepareApplyPatchWrite({
+    statement: stmt,
+    snapshots,
+    fieldInfos,
+    metadata,
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext)
+  });
+  if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
+  assertApplyPublicWriteScope("phase15b", stmt);
+  const diagnostic2 = buildPreparedApplyUpdateDiagnostic(prepared);
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic2);
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic2
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+  const result = await executePreparedApplyWrite(prepared, client, diagnostic2);
+  return { ...result, diagnostic: withApplyDiagnosticProgress(diagnostic2, result) };
+}
+function materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos) {
+  const errors = prepared.validations.flatMap((validation) => validation.errors);
+  const invalidRows = prepared.validations.reduce(
+    (sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0),
+    0
+  );
+  const columns = prepared.validations[0]?.columns ? [...prepared.validations[0].columns] : [
+    ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+    ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS
+  ];
+  const parentRows = prepared.guards.parentRows;
+  const diagnostic2 = buildPreparedApplyInsertDiagnostic(prepared);
+  const branch = diagnostic2.branches[0];
+  const result = {
+    type: "VALIDATION",
+    operation: "INSERT",
+    validatedRows: parentRows,
+    validRows: parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {},
+    apply: applyValidationDetailsFromBranch(branch),
+    guards: applyGuardFromDiagnosticBranch(branch),
+    deletedRows: { total: 0, parentRows: 0 },
+    diagnostic: diagnostic2
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
+}
+function materializePreparedApplyValidation(stmt, prepared, fieldInfos) {
+  const validations = prepared.validations;
+  const errors = validations.flatMap((validation) => validation.errors);
+  const invalidRows = validations.reduce((sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0), 0);
+  const columns = validations[0]?.columns ? [...validations[0].columns] : [
+    ...buildPostImageFieldIndex(fieldInfos, stmt.assignments.map((assignment) => assignment.field)).payloadFields,
+    ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS
+  ];
+  const diagnostic2 = buildPreparedApplyUpdateDiagnostic(prepared);
+  const result = {
+    type: "VALIDATION",
+    operation: "UPDATE",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {},
+    apply: applyValidationDetailsFromBranch(diagnostic2.branches[0]),
+    guards: applyGuardFromDiagnosticBranch(diagnostic2.branches[0]),
+    deletedRows: {
+      total: prepared.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0),
+        0
+      ),
+      parentRows: prepared.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length
+    },
+    diagnostic: diagnostic2
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
+}
+function materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos) {
+  const createErrors = prepared.create.validations.flatMap((validation) => validation.errors);
+  const updateErrors = prepared.update.validations.flatMap((validation) => validation.errors);
+  const errors = [...createErrors, ...updateErrors].map((error51) => ({
+    ...error51,
+    $err_operation: "UPSERT"
+  }));
+  const invalidRows = new Set(errors.map((error51) => error51.$err_row)).size;
+  const columns = prepared.create.validations[0]?.columns ?? prepared.update.validations[0]?.columns ?? [
+    ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+    ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS
+  ];
+  const diagnostic2 = buildPreparedApplyUpsertDiagnostic(prepared);
+  const insertBranch = diagnostic2.branches.find((branch) => branch.branch === "insert");
+  const updateBranch = diagnostic2.branches.find((branch) => branch.branch === "update");
+  const createApply = applyValidationDetailsFromBranch(insertBranch);
+  const updateApply = applyValidationDetailsFromBranch(updateBranch);
+  const result = {
+    type: "VALIDATION",
+    operation: "UPSERT",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns: [...columns],
+    errors,
+    ...stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {},
+    apply: [...createApply, ...updateApply],
+    guards: {
+      revisionRequired: prepared.guards.revisionRequired,
+      parentRows: prepared.guards.parentRows,
+      dmlMaxRows: prepared.guards.dmlMaxRows,
+      subtableRows: prepared.guards.subtableRows,
+      dmlMaxSubtableRows: prepared.guards.dmlMaxSubtableRows,
+      wouldExceed: prepared.guards.wouldExceed
+    },
+    applyBranches: {
+      create: { apply: createApply, guards: applyGuardFromDiagnosticBranch(insertBranch) },
+      update: { apply: updateApply, guards: applyGuardFromDiagnosticBranch(updateBranch) }
+    },
+    deletedRows: {
+      total: prepared.update.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0),
+        0
+      ),
+      parentRows: prepared.update.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length
+    },
+    diagnostic: diagnostic2
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta([...columns], fieldInfos, stmt.appId));
+  return result;
+}
+function applyValidationDetailsFromBranch(branch) {
+  return branch.targets.map((target) => {
+    const operations = target.operations.map((operation) => ({
+      kind: operation.kind,
+      ...operation.matchedRows !== void 0 ? { matchedRows: operation.matchedRows ?? void 0 } : {},
+      ...operation.changedRows !== void 0 ? { changedRows: operation.changedRows ?? void 0 } : {},
+      ...operation.addedRows !== void 0 ? { addedRows: operation.addedRows ?? void 0 } : {},
+      ...operation.removedRows !== void 0 ? { removedRows: operation.removedRows ?? void 0 } : {},
+      ...operation.value !== void 0 ? { value: operation.value } : {},
+      ...operation.changed !== void 0 ? { changed: operation.changed } : {}
+    }));
+    if (target.targetKind === "SUBTABLE") {
+      return {
+        field: target.field,
+        operations,
+        changedSubtableRows: target.changedCount ?? 0,
+        deletedRows: operationCount(target, "REMOVE")
+      };
+    }
+    return {
+      field: target.field,
+      operations,
+      changedSubtableRows: 0,
+      deletedRows: 0,
+      multiValue: {
+        fieldType: target.fieldType ?? "UNKNOWN",
+        addedValues: operationCount(target, "ADD"),
+        removedValues: operationCount(target, "REMOVE_VALUE"),
+        changedValues: target.changedCount ?? 0,
+        postImages: target.postImages ?? []
+      }
+    };
+  });
+}
+function applyGuardFromDiagnosticBranch(branch) {
+  if (branch.guards.parentRows === null || branch.guards.subtableRows === null || branch.guards.wouldExceed === null) {
+    throw new Error("InternalError: runtime APPLY diagnostic guard contains unknown counts.");
+  }
+  return {
+    revisionRequired: branch.guards.revisionRequired,
+    parentRows: branch.guards.parentRows,
+    dmlMaxRows: branch.guards.dmlMaxRows,
+    subtableRows: branch.guards.subtableRows,
+    dmlMaxSubtableRows: branch.guards.dmlMaxSubtableRows,
+    wouldExceed: branch.guards.wouldExceed
+  };
+}
+var DEFAULT_APPLY_MAX_ROWS = 100;
+var DEFAULT_APPLY_MAX_SUBTABLE_ROWS = 500;
+function resolveApplyGuardLimit(value, name, fallback) {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+  return resolved;
+}
+function applyValidationColumnMeta(columns, fieldInfos, appId) {
+  const fields = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
+  const numericMeta = /* @__PURE__ */ new Set(["$id", "$err_statement", "$err_row"]);
+  const meta3 = /* @__PURE__ */ new Map();
+  for (const column of columns) {
+    if (column === "$id") {
+      meta3.set(column, {
+        sortKind: "number",
+        fieldType: "RECORD_NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "RECORD_NUMBER" })
+      });
+      continue;
+    }
+    const field = fields.get(column);
+    if (field) {
+      meta3.set(column, materializedMetaFromFieldInfo(field, appId));
+      continue;
+    }
+    meta3.set(column, syntheticColumnMeta(numericMeta.has(column) ? "number" : "string"));
+  }
+  return meta3;
+}
 async function executeUpdateFrom(stmt, from, client, options, cacheContext, tempTables) {
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
@@ -43950,20 +47015,16 @@ async function executeDelete(stmt, client, options, cacheContext) {
   return { type: "DELETE", deletedCount: ids.length };
 }
 async function executeUpsert(stmt, client, options, cacheContext) {
+  if (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length) {
+    return executeApplyUpsert(stmt, client, options, cacheContext);
+  }
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const toInsert = [];
   const toUpdate = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const rowKeyValues = stmt.values.map(
-    (row) => stmt.keyFields.map((key) => {
-      const idx = stmt.fields.indexOf(key);
-      if (idx === -1) throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C INSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
-      const val = row[idx];
-      return val.type === "STRING" ? val.value : val.type === "NUMBER" ? numberLiteralText(val) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((e) => e.value).join(",");
-    })
-  );
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
   stmt.values.forEach((row, rowIdx) => {
     const record2 = {};
@@ -44006,6 +47067,14 @@ async function executeUpsert(stmt, client, options, cacheContext) {
     insertedCount: createdIds.flat().length,
     updatedCount: toUpdate.length
   };
+}
+function buildUpsertRowKeyValues(stmt) {
+  return stmt.values.map((row) => stmt.keyFields.map((key) => {
+    const idx = stmt.fields.indexOf(key);
+    if (idx === -1) throw new Error(`ON DUPLICATE \u306E\u30AD\u30FC\u300C${key}\u300D\u304C INSERT \u30D5\u30A3\u30FC\u30EB\u30C9\u306B\u542B\u307E\u308C\u3066\u3044\u307E\u305B\u3093`);
+    const val = row[idx];
+    return val.type === "STRING" ? val.value : val.type === "NUMBER" ? numberLiteralText(val) : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {}) : val.elements.map((element) => element.value).join(",");
+  }));
 }
 async function buildSubtableFieldTypeResolver(appId, typedInRefs, client, cacheContext) {
   if (typedInRefs.length === 0) return void 0;
@@ -44103,7 +47172,7 @@ async function executeUpdateSubtable(stmt, client, options, cacheContext) {
       if (a.field.startsWith("_")) {
         throw new Error(`\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u3067\u30B7\u30B9\u30C6\u30E0\u5217\u300C${a.field}\u300D\u306F\u66F4\u65B0\u3067\u304D\u307E\u305B\u3093`);
       }
-      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat, resolveFieldType) };
+      updates[a.field] = { value: evaluateSubtableAssignmentValue(a.value, t.flat, resolveFieldType) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -44185,16 +47254,12 @@ function expandRowsForSubtableDml(parents, subtableCode) {
     for (let i = 0; i < tableRows2.length; i++) {
       const row = tableRows2[i];
       const flat = {
-        _pid: parentId,
-        _rid: row.id ?? "",
-        _idx: String(i)
+        ...flattenSubtableSnapshotRow(row, i),
+        _pid: parentId
       };
       for (const [k, v] of Object.entries(parent)) {
         if (k === subtableCode) continue;
-        flat[`_p.${k}`] = normalizeUnknownToString(v?.value);
-      }
-      for (const [k, v] of Object.entries(row.value ?? {})) {
-        flat[k] = normalizeUnknownToString(v?.value);
+        flat[`_p.${k}`] = normalizeUnknownToString2(v?.value);
       }
       out.push({ parent, parentId, parentRevision, rowIndex: i, rowId: row.id ?? "", row, flat });
     }
@@ -44261,20 +47326,13 @@ function buildSubtableReorderPutParams(appId, parentId, revision, subtableCode, 
     ]
   };
 }
-function evalAssignmentValueForSubtable(value, row, resolveFieldType) {
-  if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return numberLiteralText(value);
-  if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
-  throw new Error(`${value.type} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306E\u5024\u3068\u3057\u3066\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
-}
 function valueToString(value) {
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, {});
   return value.elements.map((e) => e.value).join(",");
 }
-function normalizeUnknownToString(value) {
+function normalizeUnknownToString2(value) {
   if (value === null || value === void 0) return "";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -44358,10 +47416,10 @@ function buildFlatRowForSort(parent, subtableCode, row, idx) {
   };
   for (const [k, v] of Object.entries(parent)) {
     if (k === subtableCode) continue;
-    flat[`_p.${k}`] = normalizeUnknownToString(v?.value);
+    flat[`_p.${k}`] = normalizeUnknownToString2(v?.value);
   }
   for (const [k, v] of Object.entries(row.value ?? {})) {
-    flat[k] = normalizeUnknownToString(v?.value);
+    flat[k] = normalizeUnknownToString2(v?.value);
   }
   return flat;
 }
@@ -44480,6 +47538,7 @@ function parseSql(sql, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
+    assertApplyScope("phase15b", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -44706,6 +47765,11 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
       });
     } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
       fieldApps.add(node.appId);
+      if (typed["type"] === "UPDATE" && node.applyBlocks?.length) {
+        const update = node;
+        const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
+        resolveApplyPatchMetadata(update, fields);
+      }
       await assertDmlWhereCapability(
         node,
         tracedClient,
@@ -44743,7 +47807,7 @@ function explainMetadataLines(analysis) {
     ...[...analysis.numberPrecisionApps].sort((a, b) => a - b).map((appId) => `  metadata API: number precision APP${appId}`)
   ];
 }
-async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2, enableImport = false) {
+async function buildBatchExplainPlans(sql, client, injectedVariables, cacheContext = "batch-explain", maxRecords2 = 1e4, cursorMaxActive2 = 2, enableImport = false, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements);
   validateDeclaredBatchVariables(statements, injectedVariables);
@@ -44758,7 +47822,9 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
       planStmt,
       analysis.statements[i],
       whereAnalysis.capabilities,
-      whereAnalysis.orderPlans
+      whereAnalysis.orderPlans,
+      dmlMaxRows,
+      dmlMaxSubtableRows
     ), cursorMaxActive2);
     const metadataPlan = explainMetadataLines(whereAnalysis);
     plans.push({
@@ -44772,7 +47838,7 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
   }
   return { statementCount: statements.length, statements: plans };
 }
-function buildBatchStatementPlan(stmt, info, capabilities, orderPlans) {
+function buildBatchStatementPlan(stmt, info, capabilities, orderPlans, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
@@ -44826,6 +47892,9 @@ function buildBatchStatementPlan(stmt, info, capabilities, orderPlans) {
     });
     return lines;
   }
+  if (stmt.type === "UPDATE" && (stmt.applyBlocks?.length ?? 0) > 0) {
+    return buildExplainPlan(stmt, void 0, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows);
+  }
   return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }
 function hasTempTableRef(node) {
@@ -44865,12 +47934,19 @@ function buildPlanForBatchQuery(query, info, capabilities, orderPlans) {
   lines.push("  note:          \u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u3078\u306E WHERE \u30D7\u30C3\u30B7\u30E5\u30C0\u30A6\u30F3\u306F\u884C\u308F\u308C\u306A\u3044");
   return lines;
 }
-async function executeExplain(stmt, client, cacheContext, maxRecords2, cursorMaxActive2) {
+async function executeExplain(stmt, client, cacheContext, maxRecords2, cursorMaxActive2, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords2);
   const lines = [
     ...explainMetadataLines(analysis),
     ...addCursorConcurrency(
-      buildExplainPlan(stmt.query, void 0, analysis.capabilities, analysis.orderPlans),
+      buildExplainPlan(
+        stmt.query,
+        void 0,
+        analysis.capabilities,
+        analysis.orderPlans,
+        dmlMaxRows,
+        dmlMaxSubtableRows
+      ),
       cursorMaxActive2
     )
   ];
@@ -44892,14 +47968,21 @@ function addCursorConcurrency(lines, cursorMaxActive2) {
   }
   return result;
 }
-function buildExplainPlan(query, label, capabilities, orderPlans) {
+function buildExplainPlan(query, label, capabilities, orderPlans, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   if (query.type === "UNION") return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH") return buildWithPlan(query, capabilities, orderPlans);
-  if (query.type === "INSERT") return buildInsertPlan(query, label);
+  if (query.type === "INSERT") return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
-  if (query.type === "UPSERT") return buildUpsertPlan(query, label);
+  if (query.type === "UPSERT") return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
-  if (query.type === "UPDATE") return buildUpdatePlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPDATE") return buildUpdatePlan(
+    query,
+    label,
+    capabilities,
+    orderPlans,
+    dmlMaxRows,
+    dmlMaxSubtableRows
+  );
   if (query.type === "DELETE") return buildDeletePlan(query, label);
   if (query.type === "REORDER") return buildReorderPlan(query, label);
   if (query.type === "VALIDATE") return buildValidatePlan(query, label);
@@ -45181,7 +48264,7 @@ function collectSubqueryPlans(stmt, capabilities, orderPlans) {
   if (stmt.having) visitWhere(stmt.having);
   return lines;
 }
-function buildInsertPlan(stmt, label) {
+function buildInsertPlan(stmt, label, dmlMaxRows = DEFAULT_APPLY_MAX_ROWS, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   const totalRows = stmt.values.length;
   const batchCount = Math.ceil(totalRows / 100);
   const lines = [];
@@ -45191,7 +48274,7 @@ function buildInsertPlan(stmt, label) {
   lines.push(`  records: ${totalRows} \u4EF6\uFF08\u30D0\u30C3\u30C1 ${batchCount} \u56DE \xD7 \u6700\u5927 100 \u4EF6\uFF09`);
   lines.push(`  api:     POST /k/v1/records.json \xD7 ${batchCount}`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
-  return lines;
+  return stmt.applyBlocks?.length ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))] : lines;
 }
 function buildInsertSelectPlan(stmt, label, capabilities, orderPlans) {
   const lines = [];
@@ -45204,7 +48287,10 @@ function buildInsertSelectPlan(stmt, label, capabilities, orderPlans) {
   lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
   return lines;
 }
-function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
+function buildUpdatePlan(stmt, label, capabilities, orderPlans, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
+  if (stmt.applyBlocks?.length) {
+    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows);
+  }
   const isArith = hasArithAssignment(stmt);
   const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
   const isRowDependent = hasRowDependentAssignment(stmt);
@@ -45246,6 +48332,45 @@ function buildUpdatePlan(stmt, label, capabilities, orderPlans) {
   }
   return lines;
 }
+function buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows) {
+  const diagnostic2 = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
+  const branch = diagnostic2.branches[0];
+  const blocks = stmt.applyBlocks;
+  const operations = blocks.flatMap((block) => [...block.operations]);
+  const selectorKinds = operations.map((operation) => {
+    if (operation.kind === "APPEND") return "APPEND";
+    if (operation.kind === "ADD" || operation.kind === "REMOVE_VALUE") return "VALUE_LITERAL";
+    if (operation.selector.kind === "ALL_ROWS") return "ALL_ROWS";
+    const where = operation.selector.where;
+    return where.type === "BINARY" && where.op === "=" && where.left.type === "FIELD" && where.left.tableAlias === null && where.left.field === "_rid" ? "_rid" : "SAFE_PREDICATE";
+  });
+  const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
+  const hasRemove = operationKinds.includes("REMOVE");
+  return [
+    ...label ? [label] : [],
+    "statement:              UPDATE APPLY",
+    `target app:             APP${stmt.appId}`,
+    `parent selector:        ${safeWhereToKintone(stmt.where)}`,
+    "parent cardinality:     single",
+    `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
+    `operations:             ${operationKinds.join(" | ")}`,
+    `selector:               ${selectorKinds.join(" | ")}`,
+    "snapshot evaluation:    yes",
+    "inserted rows visible:  no",
+    "revision guard:         required",
+    "revision:               unknown (records API not called)",
+    `payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=${hasRemove ? "FULL_SURVIVORS" : "none"}`,
+    "post-image validation:  required (B43 equivalent)",
+    "parent rows:            unknown (records API not called)",
+    "matched subtable rows:  unknown (records API not called)",
+    "validation errors:      unknown (records API not called)",
+    `deleted rows:           ${hasRemove ? "unknown (records API not called)" : "0 (static without REMOVE)"}`,
+    `dmlMaxRows:             ${dmlMaxRows}`,
+    `dmlMaxSubtableRows:     ${dmlMaxSubtableRows}`,
+    "MCP mutation:           disabled in v1",
+    ...formatStaticApplyDiagnostic(diagnostic2)
+  ];
+}
 function buildDeletePlan(stmt, label) {
   const lines = [];
   if (label) lines.push(label);
@@ -45255,10 +48380,10 @@ function buildDeletePlan(stmt, label) {
   lines.push(isConstantFalseWhere(stmt.where) ? "  api:           metadata validation only (records API access: none)" : `  api:           GET /k/v1/records.json \u2192 DELETE /k/v1/records.json`);
   return lines;
 }
-function buildUpsertPlan(stmt, label) {
+function buildUpsertPlan(stmt, label, dmlMaxRows = DEFAULT_APPLY_MAX_ROWS, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS) {
   const totalRows = stmt.values.length;
   const batchCount = Math.ceil(totalRows / 100);
-  return [
+  const lines = [
     ...label ? [label] : [],
     `  [UPSERT]`,
     `  target:     APP${stmt.appId} (${stmt.appId})`,
@@ -45267,6 +48392,31 @@ function buildUpsertPlan(stmt, label) {
     `  fields:     ${stmt.fields.join(", ")}`,
     `  api:        GET /k/v1/records.json\uFF08\u91CD\u8907\u5224\u5B9A\uFF09\u2192 POST \u307E\u305F\u306F PUT /k/v1/records.json \xD7 ${batchCount}`
   ];
+  return stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))] : lines;
+}
+function formatStaticApplyDiagnostic(diagnostic2) {
+  const lines = [
+    `apply diagnostic:       ${diagnostic2.statementKind}`,
+    `non-transactional:      ${diagnostic2.nonTransactional}`,
+    `partial success:        ${diagnostic2.partialSuccess.possible ? "possible" : "none"}`
+  ];
+  for (const branch of diagnostic2.branches) {
+    lines.push(
+      `apply branch:           ${branch.branch}`,
+      `  parent rows:          ${branch.parentRows === null ? "unknown (records API not called)" : branch.parentRows}`,
+      `  chunks:               ${branch.chunk.plannedChunks === null ? "unknown" : branch.chunk.plannedChunks} \xD7 max ${branch.chunk.size}`,
+      `  revision guard:       ${branch.guards.revisionRequired ? "required" : "not required"}`
+    );
+    for (const target of branch.targets) {
+      lines.push(
+        `  target:               ${target.field} (${target.targetKind})`,
+        `    operations:         ${target.operations.map((operation) => `${operation.kind}=${operation.count === null ? "unknown" : operation.count}`).join(" | ")}`,
+        `    changed count:      ${target.changedCount === null ? "unknown" : target.changedCount}`
+      );
+    }
+  }
+  lines.push("records API:            0", "mutation API:           0");
+  return lines;
 }
 function buildUpsertSelectPlan(stmt, label, capabilities, orderPlans) {
   const lines = [
@@ -45452,6 +48602,10 @@ function toMutationSummary(result) {
     return {
       insertedCount: result.insertedCount,
       createdIds: result.createdIds,
+      ...result.successfulChunks !== void 0 ? { successfulChunks: result.successfulChunks } : {},
+      ...result.successfulParents !== void 0 ? { successfulParents: result.successfulParents } : {},
+      ...result.nonTransactional !== void 0 ? { nonTransactional: result.nonTransactional } : {},
+      ...result.diagnostic !== void 0 ? { diagnostic: result.diagnostic } : {},
       ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
       ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
       ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
@@ -45460,6 +48614,10 @@ function toMutationSummary(result) {
   }
   if (result.type === "UPDATE") return {
     updatedCount: result.updatedCount,
+    ...result.successfulChunks !== void 0 ? { successfulChunks: result.successfulChunks } : {},
+    ...result.successfulParents !== void 0 ? { successfulParents: result.successfulParents } : {},
+    ...result.nonTransactional !== void 0 ? { nonTransactional: result.nonTransactional } : {},
+    ...result.diagnostic !== void 0 ? { diagnostic: result.diagnostic } : {},
     ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
     ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
     ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
@@ -45470,6 +48628,12 @@ function toMutationSummary(result) {
     return {
       insertedCount: result.insertedCount,
       updatedCount: result.updatedCount,
+      ...result.successfulChunks !== void 0 ? { successfulChunks: result.successfulChunks } : {},
+      ...result.successfulParents !== void 0 ? { successfulParents: result.successfulParents } : {},
+      ...result.successfulInsertChunks !== void 0 ? { successfulInsertChunks: result.successfulInsertChunks } : {},
+      ...result.successfulUpdateChunks !== void 0 ? { successfulUpdateChunks: result.successfulUpdateChunks } : {},
+      ...result.nonTransactional !== void 0 ? { nonTransactional: result.nonTransactional } : {},
+      ...result.diagnostic !== void 0 ? { diagnostic: result.diagnostic } : {},
       ...result.affectedRows !== void 0 ? { affectedRows: result.affectedRows } : {},
       ...result.skippedRows !== void 0 ? { skippedRows: result.skippedRows } : {},
       ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
@@ -45526,7 +48690,12 @@ function buildBatchEnvelope(batch, options = {}) {
         invalidRows: s.result.invalidRows,
         errorCount: s.result.errorCount,
         ...s.result.errTable ? { errTable: s.result.errTable } : {},
-        ...s.result.importDetail ? { importDetail: s.result.importDetail } : {}
+        ...s.result.importDetail ? { importDetail: s.result.importDetail } : {},
+        ...s.result.apply ? { apply: s.result.apply } : {},
+        ...s.result.guards ? { guards: s.result.guards } : {},
+        ...s.result.applyBranches ? { applyBranches: s.result.applyBranches } : {},
+        ...s.result.deletedRows ? { deletedRows: s.result.deletedRows } : {},
+        ...s.result.diagnostic ? { diagnostic: s.result.diagnostic } : {}
       });
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       Object.assign(entry, toMutationSummary(s.result));
@@ -45683,6 +48852,12 @@ function validateKsqlConfig(config2) {
       const value = profile2.query.cursorMaxActive;
       if (!Number.isSafeInteger(value) || value < 1 || value > 5) {
         throw argumentError(`query.cursorMaxActive for profile "${profileName}" must be an integer from 1 to 5.`);
+      }
+    }
+    if (profile2.query?.dmlMaxSubtableRows !== void 0) {
+      const value = profile2.query.dmlMaxSubtableRows;
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw argumentError(`query.dmlMaxSubtableRows for profile "${profileName}" must be a positive safe integer.`);
       }
     }
   }
@@ -45936,7 +49111,7 @@ function flattenFields(properties, lookupCopyFields, inSubtable = false, subtabl
       defaultValue: field.defaultValue,
       inSubtable,
       ...subtableCode ? { subtableCode } : {},
-      writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES2.has(field.type)
+      writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES3.has(field.type)
     };
     info.semantics = resolveFieldSemantics(info);
     out.push(info);
@@ -45944,7 +49119,7 @@ function flattenFields(properties, lookupCopyFields, inSubtable = false, subtabl
   }
   return out;
 }
-var NON_WRITABLE_FIELD_TYPES2 = /* @__PURE__ */ new Set([
+var NON_WRITABLE_FIELD_TYPES3 = /* @__PURE__ */ new Set([
   "CALC",
   "RECORD_NUMBER",
   "CREATOR",
@@ -47350,8 +50525,17 @@ function toDmlValidationPayload(result) {
     columns: result.columns,
     errors: result.errors,
     ...result.errTable ? { errTable: result.errTable } : {},
-    ...result.importDetail ? { importDetail: result.importDetail } : {}
+    ...result.importDetail ? { importDetail: result.importDetail } : {},
+    ...result.apply ? { apply: result.apply } : {},
+    ...result.guards ? { guards: result.guards } : {},
+    ...result.deletedRows ? { deletedRows: result.deletedRows } : {}
   };
+}
+function statementHasApplyBlocks(statement) {
+  const target = statement.type === "EXPLAIN" ? statement.query : statement;
+  if (target.type !== "UPDATE" && target.type !== "INSERT" && target.type !== "UPSERT") return false;
+  const candidate = target;
+  return ["applyBlocks", "onInsertApplyBlocks", "onUpdateApplyBlocks"].some((key) => Array.isArray(candidate[key]) && candidate[key].length > 0);
 }
 function toMutationPayload(result) {
   if (result.type === "INSERT") {
@@ -47469,18 +50653,23 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
   const validationContexts = /* @__PURE__ */ new WeakMap();
+  const applyMutationValidations = /* @__PURE__ */ new WeakSet();
   async function validate(input) {
     const normalized = normalizeSqlForTool(serverOptions, input.sql, input.profile);
     const importOptions = importCapability(input);
     let analysis;
+    let statements;
     try {
-      const statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
+      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
       analysis = analyzeBatch(statements);
     } catch (err) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
       throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const appBindings = [...normalized.appBindingByMappedApp.entries()].map(([mappedAppId, binding]) => toValidationBinding(mappedAppId, binding));
+    const hasApplyMutation = statements.some(
+      (statement, index) => analysis.statements[index]?.isDml === true && statementHasApplyBlocks(statement)
+    );
     const statementValidations = analysis.statements.map((s2) => ({
       index: s2.index,
       statementType: s2.statementType,
@@ -47518,6 +50707,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     if (analysis.statementCount > 1) {
       const result2 = { ...common, batch: true };
       validationContexts.set(result2, normalized.sqlContext);
+      if (hasApplyMutation) applyMutationValidations.add(result2);
       return result2;
     }
     const s = statementValidations[0];
@@ -47532,6 +50722,7 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       appIds: s.appIds
     };
     validationContexts.set(result, normalized.sqlContext);
+    if (hasApplyMutation) applyMutationValidations.add(result);
     return result;
   }
   async function explain(input) {
@@ -47754,6 +50945,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const dmlMaxRows = requireDmlApproval(input, "ksql_mutate");
     const importOptions = importCapability(input);
     const validation = validated ?? await validate(input);
+    if (applyMutationValidations.has(validation)) {
+      throw new Error("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    }
     if (!validation.batch && input.variables && Object.keys(input.variables).length > 0) {
       throw new Error("ArgumentError: variables require a batch containing DECLARE.");
     }
@@ -47977,19 +51171,19 @@ var importSources = external_exports.array(external_exports.object({
   }
 })).max(16).describe("IMPORT CSV/JSON named inline sources (maximum 16). Nested subtable VALIDATE ONLY/EXPLAIN is supported, but mutation is fail-closed because MCP cannot interactively display and approve parent/table delete detail. JSON drops child IDs and renumbers; cli-kintone CSV preserves matching IDs and requires REPLACE SUBTABLES. Paths are not accepted; each source is limited to 10 MiB.").optional();
 var validateInputSchema = external_exports.object({
-  sql: external_exports.string().min(1).describe("kSQL text to validate. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
+  sql: external_exports.string().min(1).describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation."),
   profile,
   importSources
 });
 var explainInputSchema = external_exports.object({
-  sql: external_exports.string().min(1).describe("kSQL text to explain. May contain multiple ;-separated statements (batch) and temp tables (#name)."),
+  sql: external_exports.string().min(1).describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); EXPLAIN performs no record or mutation API calls."),
   profile,
   maxRecords,
   cursorMaxActive,
   importSources
 });
 var queryInputSchema = external_exports.object({
-  sql: external_exports.string().min(1).describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t;"),
+  sql: external_exports.string().min(1).describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
   profile,
   maxRecords,
   fetchParallel,
@@ -48003,11 +51197,12 @@ var queryInputSchema = external_exports.object({
   variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
 var mutateInputSchema = external_exports.object({
-  sql: external_exports.string().min(1).describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t;"),
+  sql: external_exports.string().min(1).describe("DML kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; INSERT INTO APPx (...) SELECT ... FROM #t. Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is rejected by MCP v3.8.0 before runtime or records API creation."),
   profile,
   allowDml: external_exports.literal(true).describe("Must be true to acknowledge that this call writes to kintone."),
   confirmText: external_exports.literal("yes").describe('Must be the literal string "yes" to confirm execution.'),
   dmlMaxRows: external_exports.number().int().positive().describe("Per-statement cap on affected rows. The call fails before writing if any statement would exceed it; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500; temp tables hold at most 10000 rows by default, adjustable via tempTableMaxRows), so choose it by intended write count only."),
+  dmlMaxSubtableRows: external_exports.number().int().positive().default(500).describe("APPLY changed-subtable-row cap (default 500). Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is always rejected by MCP v3.8.0 before runtime or records API creation; allowDml and increasing dmlMaxSubtableRows do not enable it."),
   fetchParallel,
   tempTableMaxRows,
   timeout,
@@ -48108,7 +51303,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.7.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.8.0" : "0.0.0-dev";
 function createServer(args) {
   const server = new McpServer({
     name: "ksql-mcp",
@@ -48120,22 +51315,22 @@ function createServer(args) {
   });
   server.registerTool("ksql_validate", {
     title: "Validate kSQL",
-    description: "Parse and validate kSQL without calling kintone APIs. Use this before executing generated SQL. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Parse and validate kSQL without calling kintone APIs. All APPLY forms (UPDATE/INSERT/UPSERT/multi-value) are accepted for syntax and static validation, but this does not enable APPLY mutation. Use this before executing generated SQL. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: validateInputShape
   }, tools.validateTool);
   server.registerTool("ksql_explain", {
     title: "Explain kSQL",
-    description: "Return the schema-aware kSQL execution plan. Reads form metadata and, when needed, process status metadata; never reads or writes records. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Return the schema-aware kSQL execution plan, including every APPLY form (UPDATE/INSERT/UPSERT/multi-value). Reads form metadata and, when needed, process status metadata; never calls records or mutation APIs. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: explainInputShape
   }, tools.explainTool);
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, leading VALIDATE app existing-record audits, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE and VALIDATE ONLY always treat onLimit=truncate as error and perform zero write API calls. Existing-record VALIDATE applies built-in form constraints plus optional CHECK groups and can materialize its fixed five diagnostic columns with INTO #err in a batch. NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. Mutating DML is rejected.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, leading VALIDATE app existing-record audits, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE and VALIDATE ONLY always treat onLimit=truncate as error and perform zero write API calls. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY evaluates dmlMaxSubtableRows with the fixed default 500; ksql_query does not expose an override. Existing-record VALIDATE applies built-in form constraints plus optional CHECK groups and can materialize its fixed five diagnostic columns with INTO #err in a batch. NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. APPLY mutation remains fail-closed; mutating DML is rejected.",
     inputSchema: queryInputShape
   }, tools.queryTool);
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL (IMPORT CSV/JSON via importSources)",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is always rejected by MCP v3.8.0 before runtime or records API creation; allowDml and dmlMaxSubtableRows do not enable it. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows).",
     inputSchema: mutateInputShape
   }, tools.mutateTool);
   server.registerTool("ksql_describe_app", {

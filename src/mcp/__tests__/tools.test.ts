@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ExecuteOptions, ExecuteResult, KintoneClient } from "../../core";
+import { parseSqlStatement, type ExecuteOptions, type ExecuteResult, type KintoneClient } from "../../core";
 import type { CreateKsqlRuntimeInput, KsqlRuntime, KsqlRuntimeServerOptions } from "../../node/runtime";
 import {
   createKsqlMcpTools,
   MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
+  statementHasApplyBlocks,
   toMcpImportError,
 } from "../tools";
 import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
@@ -262,6 +263,58 @@ describe("MCP tools", () => {
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
   });
 
+  test("B44 Phase 5: query VALIDATE ONLY payload は apply/guards を欠落させず既定100を返す", async () => {
+    const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "apply-validate-mcp",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    });
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
+      invalidRows: 0, errorCount: 0, columns: [], errors: [],
+      apply: [{
+        field: "テーブル", operations: [
+          { kind: "PATCH", matchedRows: 2, changedRows: 2 },
+          { kind: "APPEND", addedRows: 1 },
+        ],
+        changedSubtableRows: 3, deletedRows: 0,
+      }],
+      guards: {
+        revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
+        subtableRows: 3, dmlMaxSubtableRows: 500, wouldExceed: false,
+      },
+      deletedRows: { total: 0, parentRows: 0 },
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const result = await tools.query({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS; APPEND (子) VALUES ('new')) VALIDATE ONLY",
+    });
+    expect(result).toMatchObject({
+      apply: [{ field: "テーブル", operations: [
+        { kind: "PATCH", matchedRows: 2, changedRows: 2 },
+        { kind: "APPEND", addedRows: 1 },
+      ] }],
+      guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
+      deletedRows: { total: 0, parentRows: 0 },
+    });
+    expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
+  });
+
+  test("B44 Phase 6: validate/explain は APPLY AST を受理する", async () => {
+    const sql = "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)";
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "apply-explain-mcp",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({
+      type: "SELECT", columns: ["plan"], rows: [{ plan: "UPDATE APPLY PATCH" }], rowCount: 1,
+    }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    await expect(tools.validate({ sql })).resolves.toMatchObject({ statementType: "UPDATE", isDml: true });
+    await expect(tools.explain({ sql })).resolves.toMatchObject({ ok: true, rows: [{ plan: "UPDATE APPLY PATCH" }] });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(1);
+  });
+
   test("query: IMPORT ... VALIDATE ONLY は importSources 供給で capability gate を通す（回帰）", async () => {
     // 修正前は query の再パースに import フラグを渡しておらず「capability is disabled」で落ちていた。
     const executeSql = async (): Promise<ExecuteResult> => ({
@@ -457,6 +510,7 @@ describe("MCP tools", () => {
       "confirmText",
       "cursorMaxActive",
       "dmlMaxRows",
+      "dmlMaxSubtableRows",
       "dmlTotalMaxRows",
       "fetchParallel",
       "importSources",
@@ -469,6 +523,281 @@ describe("MCP tools", () => {
     expect("allowWithoutWhere" in mutateInputSchema.shape).toBe(false);
     // DML バッチに続行オプションは存在しない（常に fail-fast）
     expect("continueOnError" in mutateInputSchema.shape).toBe(false);
+  });
+
+  test("B44 Phase 6: MCP mutate は AST 判定で runtime/API 前に専用 fail-closed", async () => {
+    const client = makeClient();
+    client.getRecords = jest.fn(async () => ({ records: [] }));
+    client.getFields = jest.fn(async () => []);
+    client.postRecords = jest.fn(async () => ({ ids: [] }));
+    client.putRecords = jest.fn(async () => undefined);
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+        sql: input.sql,
+        profileName: "prod",
+        client,
+        cacheContext: "mcp-apply-fail-closed",
+        maxRecords: 500,
+        fetchParallel: 1,
+        onLimit: "error",
+        timeout: 30_000,
+      }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime,
+    });
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.getFields).not.toHaveBeenCalled();
+    expect(client.getRecords).not.toHaveBeenCalled();
+    expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE 状態='open' APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.getRecords).not.toHaveBeenCalled();
+    expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' WHERE _idx=0)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.getRecords).not.toHaveBeenCalled();
+    expect(client.putRecords).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (APPEND (子) VALUES ('new'))",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "SELECT 1; UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 999,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+
+    await expect(tools.mutate({
+      sql: "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(client.postRecords).not.toHaveBeenCalled();
+  });
+
+  test("B44 Phase 14a: statementHasApplyBlocks は UPDATE/INSERT/UPSERT を共通検出する", () => {
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPDATE APP1 SET 親='x' WHERE $id=1 APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "INSERT INTO APP1 (親) VALUES ('x') APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON INSERT APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON UPDATE APPLY 表 (REMOVE ALL ROWS)"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement("INSERT INTO APP1 (APPLY) VALUES ('x')"))).toBe(false);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (APPLY) VALUES ('x') ON DUPLICATE (APPLY)"
+    ))).toBe(false);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPDATE APP1 SET 親='x' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')"
+    ))).toBe(true);
+  });
+
+  test("B44 Phase 15a: MCP mutate は多値 APPLY をruntime/API前にfail-closedする", async () => {
+    const client = makeClient();
+    const createRuntime = jest.fn(async (): Promise<KsqlRuntime> => ({
+      sql: "", profileName: "prod", client, cacheContext: "mcp-multi-apply-phase15a",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime });
+
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY 複数選択 (ADD '重要'; REMOVE '新規')",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+  });
+
+  test("B44 Phase 13a: INSERT APPLY の VALIDATE ONLY は read-only、EXPLAIN は許可する", async () => {
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client: makeClient(),
+      cacheContext: "mcp-insert-apply-read-only",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({ type: "SELECT", rows: [], columns: [], rowCount: 0 }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const sql = "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))";
+
+    await expect(tools.validate({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
+      isReadOnly: true,
+      canRunWithQueryTool: true,
+    });
+    await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toBeDefined();
+    await expect(tools.explain({ sql })).resolves.toBeDefined();
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(2);
+  });
+
+  test("B44 Phase 14a: UPSERT APPLY mutation は共通 helper で runtime 前拒否し、VALIDATE ONLY/EXPLAIN は許可する", async () => {
+    const client = makeClient();
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client,
+      cacheContext: "mcp-upsert-apply-phase14a",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({ type: "SELECT", rows: [], columns: [], rowCount: 0 }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const sql = "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('new'))";
+
+    await expect(tools.mutate({
+      sql,
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(executeSql).not.toHaveBeenCalled();
+
+    await expect(tools.validate({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
+      isReadOnly: true,
+      canRunWithQueryTool: true,
+    });
+    await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toBeDefined();
+    await expect(tools.explain({ sql })).resolves.toBeDefined();
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["複数親 UPDATE", "UPDATE APP4221 SET 親='x' WHERE 状態='open' APPLY テーブル (PATCH SET 子='y' ALL ROWS)"],
+    ["INSERT APPLY", "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))"],
+    ["UPSERT ON INSERT", "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) ON INSERT APPLY テーブル (APPEND (子) VALUES ('new'))"],
+    ["UPSERT ON UPDATE", "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) ON UPDATE APPLY テーブル (REMOVE ALL ROWS)"],
+    ["多値 ADD/REMOVE", "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY 複数選択 (ADD '重要'; REMOVE '新規')"],
+  ])("B44 Phase 16d MCP 全経路 matrix: %s", async (_kind, sql) => {
+    const client = makeClient();
+    const recordApis = [
+      jest.spyOn(client, "getRecords"),
+      jest.spyOn(client, "openCursor"),
+      jest.spyOn(client, "postRecords"),
+      jest.spyOn(client, "putRecords"),
+      jest.spyOn(client, "deleteRecords"),
+    ];
+    const allApis = [
+      ...recordApis,
+      jest.spyOn(client, "getApps"),
+      jest.spyOn(client, "getFields"),
+      jest.spyOn(client, "getProcessStatuses"),
+      jest.spyOn(client, "getNumberPrecision"),
+    ];
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client,
+      cacheContext: "mcp-apply-phase16d-matrix",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (executedSql: string): Promise<ExecuteResult> =>
+      /^\s*EXPLAIN\b/i.test(executedSql)
+        ? { type: "SELECT", columns: ["plan"], rows: [{ plan: "APPLY" }], rowCount: 1 }
+        : {
+            type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
+            invalidRows: 0, errorCount: 0, columns: [], errors: [],
+          }
+    );
+    const executeBatchSql = jest.fn(async (): Promise<never> => {
+      throw new Error("executeBatchSql should not be called for APPLY mutation.");
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql, executeBatchSql });
+
+    // validate: mutation 構文自体は静的検証を通す（API 0）。
+    await expect(tools.validate({ sql })).resolves.toMatchObject({ ok: true, isDml: true });
+
+    // query: 全 APPLY 形の VALIDATE ONLY は read-only として許可する。
+    await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
+      ok: true,
+      type: "VALIDATION",
+    });
+
+    // explain: 全 APPLY 形の plan を許可し、records/mutation API は呼ばない。
+    await expect(tools.explain({ sql })).resolves.toMatchObject({ ok: true, type: "SELECT" });
+    const runtimeCallsBeforeMutation = createRuntime.mock.calls.length;
+    const apiCallsBeforeMutation = allApis.map((api) => api.mock.calls.length);
+
+    const mutationInput = {
+      sql,
+      allowDml: true as const,
+      confirmText: "yes" as const,
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 999,
+    };
+    await expect(tools.mutate(mutationInput))
+      .rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+    await expect(tools.mutate({ ...mutationInput, sql: `SELECT 1; ${sql}` }))
+      .rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v3.8.0");
+
+    // query/EXPLAIN の read-only runtime だけを許可。mutate / mutate-batch は runtime生成も実行も 0。
+    expect(createRuntime).toHaveBeenCalledTimes(runtimeCallsBeforeMutation);
+    expect(executeSql).toHaveBeenCalledTimes(2);
+    expect(executeBatchSql).not.toHaveBeenCalled();
+    for (const api of recordApis) expect(api).not.toHaveBeenCalled();
+    allApis.forEach((api, index) => expect(api).toHaveBeenCalledTimes(apiCallsBeforeMutation[index]));
+  });
+
+  test("B44 Phase 16d: MCP APPLY schema は mutate 専用で、上限を上げても解禁しない", () => {
+    expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
+    const field = mutateInputSchema.shape.dmlMaxSubtableRows;
+    expect(field.safeParse(100).success).toBe(true);
+    for (const invalid of [0, -1, 1.5]) expect(field.safeParse(invalid).success).toBe(false);
+    expect(field.description).toContain("always rejected by MCP v3.8.0");
+    expect(field.description).toContain("UPDATE/INSERT/UPSERT/multi-value");
+    expect(field.description).toContain("before runtime or records API creation");
+    expect(field.description).toContain("allowDml");
   });
 
   test("tempTableMaxRows schema rejects 0 / negative / non-integer", () => {

@@ -621,6 +621,7 @@ export interface InsertStatement {
   subtableCode?: string | null;
   fields: string[];
   values: InsertRow[];
+  applyBlocks?: ApplyBlock[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
   onErrorSkip?: boolean;
@@ -648,6 +649,10 @@ export interface UpsertStatement {
   values: InsertRow[];
   /** ON DUPLICATE (フィールド名) — 重複判定キー */
   keyFields: string[];
+  /** 新規親を作成する分岐のサブテーブル初期行操作。省略時は undefined。 */
+  onInsertApplyBlocks?: ApplyBlock[];
+  /** 既存親を更新する分岐のサブテーブル操作。省略時は undefined。 */
+  onUpdateApplyBlocks?: ApplyBlock[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
   onErrorSkip?: boolean;
@@ -775,7 +780,72 @@ export interface UpdateStatement {
   errorTable?: string;
   rejectLimit?: number | null;
   checkGroups?: CheckGroup[];
+  /** UPDATE ... WHERE に続くサブテーブル変更計画。 */
+  applyBlocks?: ApplyBlock[];
 }
+
+export type ApplyBlock = SubtableApplyBlock | MultiValueApplyBlock;
+
+/** 行操作を持つ SUBTABLE 用 APPLY block。field 型との整合は metadata 解決時に検証する。 */
+export interface SubtableApplyBlock {
+  field: string;
+  targetKind: "SUBTABLE";
+  operations: SubtableApplyOperation[];
+}
+
+/** 集合要素操作を持つ複数値 field 用 APPLY block。field 型との整合は metadata 解決時に検証する。 */
+export interface MultiValueApplyBlock {
+  field: string;
+  targetKind: "MULTI_VALUE";
+  operations: MultiValueApplyOperation[];
+}
+
+export type ApplyOperation = SubtableApplyOperation | MultiValueApplyOperation;
+export type SubtableApplyOperation = PatchOperation | AppendOperation | RemoveOperation;
+export type MultiValueApplyOperation = AddOperation | RemoveValueOperation;
+
+export interface PatchOperation {
+  kind: "PATCH";
+  assignments: Assignment[];
+  selector: RowSelector;
+  expectRows?: ExpectRowsGuard;
+}
+
+/** v1.1 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */
+export interface AppendOperation {
+  kind: "APPEND";
+  fields: string[];
+  values: InsertRow[];
+}
+
+/** v1.2 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */
+export interface RemoveOperation {
+  kind: "REMOVE";
+  selector: RowSelector;
+  expectRows?: ExpectRowsGuard;
+}
+
+/** 複数値 field の集合へ文字列値を追加する。実 mutation は Phase 15b で接続する。 */
+export interface AddOperation {
+  kind: "ADD";
+  value: string;
+}
+
+/** 複数値 field の集合から文字列値を除去する。行 REMOVE とは別 node。 */
+export interface RemoveValueOperation {
+  kind: "REMOVE_VALUE";
+  value: string;
+}
+
+export type RowSelector =
+  | { kind: "WHERE"; where: WhereExpr }
+  | { kind: "ALL_ROWS" };
+
+export type ExpectRowsGuard =
+  | { kind: "EXACT"; count: number }
+  | { kind: "BETWEEN"; min: number; max: number }
+  | { kind: "AT_LEAST"; count: number }
+  | { kind: "AT_MOST"; count: number };
 
 export interface CheckGroup {
   rules: CheckRule[];

@@ -1,6 +1,6 @@
 # B44 — `APPLY` ブロックによるテーブル内外項目の同時更新仕様
 
-- ステータス: R2（2026-07-20・codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）。実装着手はユーザー承認待ち）
+- ステータス: **v3.8.0 実装中（2026-07-20〜）**。v1／v1.1／v1.2 は Phase 1～9 実装済（commit 017ebba・実機確認済）。**v2（複数親・INSERT/UPSERT・`_idx`・`EXPECT ROWS`・多値 ADD/REMOVE）も同一 v3.8.0 へ同梱**（2026-07-20 ユーザー決定）。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（Phase 10a〜17d の23分割・§18/§19 で XL/L を分割・Claude 承認済）。MCP 実 mutation は v2 でも全 APPLY で fail-closed
 - 対象: B44「テーブル内外項目の同時更新」
 - 台帳: [ksql_issue_tracker.md B44](../ksql_issue_tracker.md#L39)
 - 前提: [B42 サブテーブル監査仕様](ksql_validate_subtable_audit_spec.md)・B43 DML post-image 事前検証
@@ -305,7 +305,7 @@ v1 では `ALL ROWS` を「明示された常時真の安全な述語」とし�
 | セレクタ | 例 | 基準 | v1 |
 |---|---|---|---|
 | `_rid` | `WHERE _rid = '67890'` | kintone 永続行 ID | 対応 |
-| `_idx` | `WHERE _idx = 0` | 取得スナップショット内の0-based位置 | 非対応、v2 |
+| `_idx` | `WHERE _idx = 0` | 取得スナップショット内の0-based位置 | v3.8.0 Phase 11 |
 | 安全な述語 | `WHERE LENGTH(文字列T2) < 3` | 子行の取得時値 | 対応 |
 | 全行 | `ALL ROWS` | 取得スナップショットの全既存行 | 対応 |
 
@@ -385,6 +385,8 @@ GET: $id + $revision + 親SET参照列 + 対象サブテーブル全体
 - `PATCH` 後の子セル。
 - 将来の `APPEND` 行の必須、既定値、型、選択肢、長さ、数値範囲、B29整数部桁数。
 - 複数 `APPLY` 合成後の最終レコード。
+
+FILE は監査可能制約を持たないため post-image 検証の対象外とし、payload にも含めない（サブテーブルのパッチ形 payload は未送信セルを保持する）。
 
 検証対象メタデータの導出とセル検証はB42と共有する。B42 は子フィールドの生値と `KintoneFieldInfo` を `validateAndNormalizeDmlValue` へ渡し、必須、数値範囲・桁、文字列長、選択肢を検証する（[ksql_validate_subtable_audit_spec.md:109](ksql_validate_subtable_audit_spec.md#L109)-[115](ksql_validate_subtable_audit_spec.md#L115)。検証 primitive の実装箇所は [dmlValidation.ts:37](../../src/core/dmlValidation.ts#L37)-[106](../../src/core/dmlValidation.ts#L106) である。
 
@@ -531,7 +533,7 @@ PATCH対象の既存行
 ∪ APPENDする新規行
 ```
 
-同じ既存行の異なるセルを複数 `PATCH` する場合は1行と数える。既定値は100とし、正の安全な整数だけを許可する。
+同じ既存行の異なるセルを複数 `PATCH` する場合は1行と数える。既定値は500とし（1年分の日次データ366行を1文で扱える保守値。kintone 制約由来ではない）、正の安全な整数だけを許可する。親側 `dmlMaxRows` は既存 DML と同じ100（v1 は単一親のため実質常に1）。
 
 両件数は、全対象親のスナップショット取得、セレクタ解決、重複排除後、最初の PUT より前に確定する。どちらか一方でも上限を超えれば書き込みは0件とする。
 
@@ -601,9 +603,11 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 
 既存プラグインは通常DML確認ダイアログを持ち（[desktop.ts:2825](../../src/ui/desktop.ts#L2825)-[2838](../../src/ui/desktop.ts#L2838)）、IMPORTではテーブル別の更新・追加・削除件数を表示している（[desktop.ts:2841](../../src/ui/desktop.ts#L2841)-[2873](../../src/ui/desktop.ts#L2873)。B44は後者と同等以上の内訳表示を使用する。
 
-## 9. 段階リリース
+## 9. v3.8.0 内の実装フェーズ
 
-### 9.1 v1 — 修復用 `PATCH`
+> **2026-07-20 ユーザー決定**: 以下の v1／v1.1／v1.2 は別release版を表す「段階リリース」ではなく、**v3.8.0を1回だけreleaseするための内部実装フェーズ**へ読み替える。v1をPhase 1～6、v1.1をPhase 7、v1.2をPhase 8で実装し、Phase 9で統合・実機・release準備を行う。各フェーズのreview gateは維持するが、途中版のversion bump・公開は行わない。§9.2のMCP別capabilityはあくまで検討事項、§9.3のREMOVE mutationはCLIと確認UIを持つpluginだけ、MCP mutationはfail-closedという安全条項を変更しない。
+
+### 9.1 v1（Phase 1～6）— 修復用 `PATCH`
 
 提供範囲を次に固定する。
 
@@ -620,7 +624,7 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - MCP mutationは閉じたまま。
 - `UPDATE … FROM`、`CHECK`、`ON ERROR SKIP` との併用は非対応。
 
-### 9.2 v1.1 — 複数テーブルと `APPEND`
+### 9.2 v1.1（Phase 7）— 複数テーブルと `APPEND`
 
 - 1文内の複数 `APPLY`。
 - 異なる複数サブテーブル。
@@ -629,7 +633,7 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - 子行追加を含めた `dmlMaxSubtableRows`。
 - 削除ゼロを計画で証明できる `PATCH` についてのみMCP別capabilityを検討。
 
-### 9.3 v1.2 — `REMOVE`
+### 9.3 v1.2（Phase 8）— `REMOVE`
 
 - `REMOVE WHERE …`。
 - `REMOVE ALL ROWS`。
@@ -637,14 +641,17 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - CLI、確認UIを持つプラグインから提供。
 - MCP mutationは引き続きfail-closed。
 
-### 9.4 v2 — 文種・セレクタ・集合型拡張
+### 9.4 v2 — 文種・セレクタ・集合型拡張（**2026-07-20 ユーザー決定により v3.8.0 に同梱**）
 
-- INSERTの初期行。
-- UPSERTのinsert/update分岐。
-- 複数親。
-- `_idx` セレクタ。
-- `EXPECT ROWS`。
-- 複数値フィールドへの `ADD` / `REMOVE`。
+> **2026-07-20 ユーザー決定**: 下記 v2 も別release版でなく **v3.8.0 内の実装フェーズ**として同梱する。実装計画 [ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md) の Phase 10〜17（10a〜17d の23分割）で段階実装し、Phase 17 で統合・実機・release 準備を行う。各 review gate は維持するが途中版の version bump・公開は行わない。**MCP 実 mutation は v2 でも全 APPLY で fail-closed のまま**（実装計画 §16 裁定4）。
+
+- INSERTの初期行（Phase 13）。
+- UPSERTのinsert/update分岐（Phase 14）。
+- UPSERTで `ON INSERT` を省略した場合、新規親のサブテーブルはkintone既定値とし、`ON UPDATE` を省略した場合は既存サブテーブルを保持する。両方を省略した場合は現行UPSERTと同一とする。
+- 複数親（Phase 10・最大100親/chunk・非トランザクション・§4.3）。
+- `_idx` セレクタ（Phase 11）。
+- `EXPECT ROWS`（Phase 12）。
+- 複数値フィールドへの `ADD` / `REMOVE`（Phase 15）。
 
 複数値フィールドでも一般形は変えない。
 
@@ -671,7 +678,7 @@ APPLY 複数選択 (
 - `APPLY`を含まない既存UPDATEの構文・意味論・出力は変更しない。
 - v1のMCP mutationは既定で閉じるため、既存capabilityを暗黙に拡大しない。
 - 新設定 `dmlMaxSubtableRows` はAPPLY mutationにだけ適用する。
-- B42が先行リリースされる場合、B44 v1は **v3.8.0相当以降**のminor候補とするが、具体的な版番号はB43との同梱判断後に確定する。
+- B44 v1／v1.1／v1.2は **v3.8.0** に一括同梱する（2026-07-20ユーザー決定）。B43との実装順にかかわらず、B44の途中フェーズを別版としてreleaseしない。
 
 本リポジトリでは新機能と監査の正しさ改善をminorで提供しており、B42もminor判断である（[ksql_validate_subtable_audit_spec.md:235](ksql_validate_subtable_audit_spec.md#L235)-[243](ksql_validate_subtable_audit_spec.md#L243)）。
 
@@ -704,7 +711,7 @@ APPLY 複数選択 (
 - 将来の複数親テストでは100親ごとのチャンクになる。
 - 後続チャンク失敗時に先行チャンクが成功済みである非トランザクション性を結果・文書で隠さない。
 - 全post-image検証、重複検出、`dmlMaxRows`、`dmlMaxSubtableRows` 判定が最初のPUTより前に完了する。
-- 親1件・子101行では `dmlMaxRows=1` を満たしても、既定 `dmlMaxSubtableRows=100` で書き込み0件となる。
+- 親1件・子501行では `dmlMaxRows=1` を満たしても、既定 `dmlMaxSubtableRows=500` で書き込み0件となる。
 - 同一子行の複数セル変更は子件数1として数える。
 - post-image検証が親の非更新フィールド、対象外テーブル、未変更子行の既存違反も検出する。
 - 子エラーに `$id`、`$err_subtable='テーブル'`、1-based `$err_subrow`、`$err_subrow_id=_rid` が入る。
@@ -738,6 +745,8 @@ APPLY 複数選択 (
 
 R1およびv1では次を対象外とする。
 
+このうち「複数サブテーブル／複数 `APPLY`／`APPEND`」はv1.1（Phase 7）で、「`REMOVE`」はv1.2（Phase 8）で解禁する。v3.8.0最終scopeでも対象外のままなのは、親DELETE、`UPDATE ... FROM`等の相関更新、MCP実mutation、および下記の恒久非対応項目である。**親INSERT／UPSERT、複数親、`_idx`、`EXPECT ROWS`実行、複数値fieldの`ADD`／`REMOVE` は 2026-07-20 ユーザー決定により §9.4 の v2 として v3.8.0（Phase 10〜17）へ同梱する**（従来「対象外」だったが解禁）。
+
 - `APPLY SUBTABLE` noun構文。
 - 親INSERT、UPSERT、DELETE。
 - 複数親への適用。
@@ -753,7 +762,7 @@ R1およびv1では次を対象外とする。
 - 文全体のトランザクション、チャンク間ロールバック、補償更新。
 - サブテーブル間、親子間、レコード間の参照整合性検証。
 - FILEフィールド。
-- 複数値フィールドの `ADD` / `REMOVE`。一般形は維持するが提供はv2。
+- （複数値フィールドの `ADD` / `REMOVE` は §9.4 の v2 として v3.8.0 Phase 15 で提供＝対象外から解除）
 - MCPからの実mutation。
 - 現行 `APP<n>$テーブル` DMLの構文・安全規則変更。現行UPDATE/DELETEは引き続き `_rid` 条件を必須とする（[execute.ts:5722](../../src/execute.ts#L5722)-[5731](../../src/execute.ts#L5731)、[execute.ts:5802](../../src/execute.ts#L5802)-[5811](../../src/execute.ts#L5811)）。
 - 現行サブテーブルDMLへの `VALIDATE ONLY` / `ON ERROR SKIP` の追加。現行parserはこれらを明示拒否している（[parser.ts:2447](../../src/parser/parser.ts#L2447)-[2453](../../src/parser/parser.ts#L2453)、[parser.ts:2644](../../src/parser/parser.ts#L2644)-[2650](../../src/parser/parser.ts#L2650)）。
@@ -771,4 +780,8 @@ R1およびv1では次を対象外とする。
 2. **P2-b B43 との関係**（§1・§12): 三段連携の記述だけでは「B44 実装で B43 も解決される」と誤読し得る → post-image 検証は `APPLY` 文限定・プレーン DML の B43 は独立課題として残る旨を明記し、§12 対象外にも追加。
 
 **判定**: 上記反映のうえで**仕様として実装着手可の水準**（着手はユーザー承認待ち）。codex 起草の意味論（スナップショット・二重ガード・段階リリース・MCP fail-closed）は無変更。
+
+### R2 フェーズ統合決定（2026-07-20・ユーザー決定）
+
+v1／v1.1／v1.2を別releaseにせず、v3.8.0内のPhase 1～8として段階実装し、Phase 9の統合・実機gate後に1回だけreleaseする。上記Claudeレビューのスナップショット・二重guard・MCP fail-closed等の安全判断は維持し、§9の表現だけを「段階リリース」から「実装フェーズ」へ読み替えた。
 

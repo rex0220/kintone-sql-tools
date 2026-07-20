@@ -23,6 +23,7 @@ import {
   requiresCompleteInput,
   writesKintone,
 } from "./dmlGuard";
+import { assertApplyScope } from "./applyPatchScope";
 import { KlikeValidationError, validateKlikeStatement } from "./klikeValidation";
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
@@ -186,9 +187,14 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
 
   statements.forEach((stmt, index) => {
     try {
+      assertApplyScope("phase15b", stmt);
       validateKlikeStatement(stmt);
     } catch (error) {
       if (error instanceof KlikeValidationError) {
+        throw new BatchAnalysisError(error.message, index);
+      }
+      if (error instanceof Error
+        && /^(UnsupportedError|ArgumentError): APPLY /.test(error.message)) {
         throw new BatchAnalysisError(error.message, index);
       }
       throw error;

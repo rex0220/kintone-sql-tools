@@ -71,6 +71,8 @@ function assertSchemas(tools) {
   assert("allowDml" in mutateProps, "ksql_mutate.allowDml input is missing.");
   assert("confirmText" in mutateProps, "ksql_mutate.confirmText input is missing.");
   assert("dmlMaxRows" in mutateProps, "ksql_mutate.dmlMaxRows input is missing.");
+  assert("dmlMaxSubtableRows" in mutateProps, "ksql_mutate.dmlMaxSubtableRows input is missing.");
+  assert(!("dmlMaxSubtableRows" in queryProps), "ksql_query must not expose dmlMaxSubtableRows.");
   assert(!("allowWithoutWhere" in mutateProps), "ksql_mutate must not expose allowWithoutWhere.");
 
   const saveQuery = getTool(tools, "ksql_save_query");
@@ -96,12 +98,23 @@ function assertSchemas(tools) {
 // 「実装は正しいが tools/list のメタデータだけ古い」ズレを検出する。
 // 全文一致は文言調整のたびに壊れるため、実装能力を表すキー部分文字列のみを固定する。
 function assertToolDescriptions(tools) {
+  const validateKeys = [
+    "All APPLY forms (UPDATE/INSERT/UPSERT/multi-value)",
+    "does not enable APPLY mutation",
+  ];
+  const explainKeys = [
+    "every APPLY form (UPDATE/INSERT/UPSERT/multi-value)",
+    "never calls records or mutation APIs",
+  ];
   const queryKeys = [
     "multi-statement batches with temp tables",
     // v1.10.0: ASSERT は ksql_query で実行できる read-only 文
     "ASSERT",
     // v1.10.0: ASSERT 失敗は常にバッチ停止(continueOnError 無視)
     "always stops the batch",
+    // B44 Phase 16d: v2 全 APPLY 形の VALIDATE ONLY は read-only のまま許可
+    "UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY",
+    "fixed default 500",
   ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
@@ -114,7 +127,25 @@ function assertToolDescriptions(tools) {
     // v1.7.0: temp ソースの読み取りは実体化 10,000 行で別建て
     // v1.11.0: 10,000 は既定値になり tempTableMaxRows で変更可
     "temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows)",
+    // B44 Phase 16d: v2 全 APPLY mutation は controls に関係なく runtime/API 前に閉じる
+    "Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value)",
+    "always rejected by MCP v3.8.0 before runtime or records API creation",
+    "allowDml and dmlMaxSubtableRows do not enable it",
   ];
+  const validate = getTool(tools, "ksql_validate");
+  for (const key of validateKeys) {
+    assert(
+      typeof validate.description === "string" && validate.description.includes(key),
+      `ksql_validate.description must mention "${key}".`
+    );
+  }
+  const explain = getTool(tools, "ksql_explain");
+  for (const key of explainKeys) {
+    assert(
+      typeof explain.description === "string" && explain.description.includes(key),
+      `ksql_explain.description must mention "${key}".`
+    );
+  }
   const query = getTool(tools, "ksql_query");
   for (const key of queryKeys) {
     assert(
@@ -136,7 +167,7 @@ function assertToolDescriptions(tools) {
 function assertParamDescriptions(tools) {
   const described = {
     ksql_query: ["sql", "profile", "maxRecords", "fetchParallel", "onLimit", "tempTableMaxRows", "timeout", "continueOnError", "maxTotalRecords"],
-    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "fetchParallel", "tempTableMaxRows", "timeout", "dmlTotalMaxRows"],
+    ksql_mutate: ["sql", "profile", "allowDml", "confirmText", "dmlMaxRows", "dmlMaxSubtableRows", "fetchParallel", "tempTableMaxRows", "timeout", "dmlTotalMaxRows"],
   };
   for (const [toolName, params] of Object.entries(described)) {
     const props = getTool(tools, toolName).inputSchema?.properties ?? {};
@@ -188,6 +219,23 @@ function assertParamDescriptions(tools) {
     savedDmlMaxRowsDesc.includes("single-statement"),
     "ksql_run_saved_query.dmlMaxRows description must state saved queries are single-statement."
   );
+
+  // B44 Phase 16d: schema descriptions also pin the all-form APPLY boundary.
+  const querySqlDesc = getTool(tools, "ksql_query").inputSchema?.properties?.sql?.description ?? "";
+  assert(
+    querySqlDesc.includes("UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY")
+      && querySqlDesc.includes("fixed dmlMaxSubtableRows default 500"),
+    "ksql_query.sql description must document all APPLY VALIDATE ONLY forms and fixed cap."
+  );
+  const applyCapDesc = getTool(tools, "ksql_mutate")
+    .inputSchema?.properties?.dmlMaxSubtableRows?.description ?? "";
+  for (const key of [
+    "UPDATE/INSERT/UPSERT/multi-value",
+    "MCP v3.8.0 before runtime or records API creation",
+    "allowDml",
+  ]) {
+    assert(applyCapDesc.includes(key), `ksql_mutate.dmlMaxSubtableRows must mention "${key}".`);
+  }
 }
 
 async function main() {
@@ -240,6 +288,33 @@ async function main() {
     assert(
       validated.structuredContent?.statementType === "SELECT",
       "ksql_validate did not identify SELECT."
+    );
+
+    // B44 Phase 16d: offline smoke でも AST acceptance と runtime 前 fail-close を固定する。
+    // VALIDATE ONLY/EXPLAIN の全形許可は tools/list の description guard と unit matrix が担う。
+    const applySql = "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))";
+    const applyValidated = await client.callTool({
+      name: "ksql_validate",
+      arguments: { sql: `${applySql} VALIDATE ONLY` },
+    });
+    assert(applyValidated.structuredContent?.ok === true, "APPLY VALIDATE ONLY smoke failed.");
+    assert(applyValidated.structuredContent?.isReadOnly === true, "APPLY VALIDATE ONLY must be read-only.");
+
+    const applyMutation = await client.callTool({
+      name: "ksql_mutate",
+      arguments: {
+        sql: applySql,
+        allowDml: true,
+        confirmText: "yes",
+        dmlMaxRows: 100,
+        dmlMaxSubtableRows: 999,
+      },
+    });
+    assert(applyMutation.structuredContent?.ok === false, "APPLY mutation must be rejected.");
+    assert(
+      applyMutation.structuredContent?.error?.code === "UnsupportedError"
+        && applyMutation.structuredContent?.error?.message?.includes("MCP v3.8.0"),
+      "APPLY mutation must fail closed before runtime with UnsupportedError."
     );
 
     const explained = await client.callTool({

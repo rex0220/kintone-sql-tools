@@ -1,0 +1,123 @@
+# B44 APPLY 実機 smoke 証跡（v1/v1.1/v1.2）
+
+- 実施: 2026-07-20・ブランチ feat/b44-apply-patch・APP4221（devenxyfi）
+- CLI: working tree ビルド（`npm run build:cli`）。read-only 経路（VALIDATE ONLY/EXPLAIN）と mutation（`--allow-dml --yes`）を実行。
+- **$id=7 は一切変更せず温存**（B42/B43 の証拠フィクスチャ）。専用レコード $id=1195「B44-smoke」を新規作成し、全項目後に削除。
+
+## 手順と結果（全 pass）
+
+| # | 検証 | SQL 要旨 | 結果 |
+|---|---|---|---|
+| 0 | 専用レコード作成 | add-records（テーブル3行: AAA/10・BBB/20・CCC/30） | $id=1195・_rid 7229578/7229580/7229582（_idx 0/1/2） |
+| 1 | VALIDATE ONLY | `… PATCH SET 文字列T2='PPP' WHERE _rid='7229580' VALIDATE ONLY` | validated=1 valid=1 invalid=0・mutation 0 |
+| 2 | EXPLAIN | 同文 `--dry-run --allow-dml` | records API=0・mutation API=0・revision required・dmlMaxRows=100・**dmlMaxSubtableRows=500**・payload preservation 表示 |
+| 3 | **親+子同時 PATCH（B44 の核心）** | `SET タイトル='B44-patched' … PATCH SET 文字列T2='PPP' WHERE _rid='7229580'` | **1 PUT で親 タイトル と子 _rid=7229580 のみ更新**・対象外行/未指定セル 数値T1/行ID/行順すべて保持 |
+| 4 | APPEND（既定値の明示補完） | `APPEND (文字列T2) VALUES ('DDD'),('EEE')` | 末尾へ2行追加（_idx 3/4）・**未指定 数値T1 が既定値1000で補完**（kintone 自動投入に依存せず送信） |
+| 5 | REMOVE（中間行） | `REMOVE WHERE _rid='7229580'` | 中間行のみ削除・存続4行の id/全値/相対順を保持・kintone が _idx 再採番 |
+| 6 | 複合 1文（PATCH+APPEND+REMOVE） | `PATCH …; APPEND …; REMOVE …` | 3操作を1 PUT で合成・結果整合（XPP/CCC/DDD/FFF） |
+| 7 | post-image 検証 | `PATCH SET 文字列T2='X' … VALIDATE ONLY` | ERR_LENGTH_MIN を **`$err_subrow_id=7229578`** つきで検出・invalid=1・mutation 0 |
+| 8 | scope 拒否（EXPECT ROWS） | `REMOVE … EXPECT ROWS 1` | `UnsupportedError: APPLY v1.2 scope does not support EXPECT ROWS` |
+| 9 | scope 拒否（複数親） | `WHERE $id > 1 …` | `UnsupportedError: … single condition $id = <positive safe integer>` |
+| 10 | REMOVE ALL ROWS | `REMOVE ALL ROWS` | 全子行削除（COUNT=0） |
+| 11 | **$id=7 温存確認** | `SELECT … WHERE _p.$id=7` | _rid 7224309/7224313/7224317・値ともテスト前と完全一致 |
+| 12 | 専用レコード削除 | delete-records 1195 | 削除済み |
+
+## 複数テーブル実機（APP4223・2026-07-20 追記）
+
+APP4221 をコピーし **SUBTABLE を2つ（テーブル・テーブル2、子コードは _0 サフィックスで区別）** 持つ APP4223 で、v1.1 の複数テーブル合成を実機検証（$id=1「B44-multi」）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| M1 | VALIDATE ONLY（2テーブル分の apply[]） | valid=1 invalid=0・mutation 0 |
+| M2 | **複数テーブル同時 APPLY を1 PUT** | `APPLY テーブル (PATCH; APPEND) APPLY テーブル2 (PATCH; REMOVE; APPEND)` を **affected=1（単一 PUT record）** で反映 |
+| M2詳細 | テーブル | 7229594→XA1（数値T1=10 保持）・7229596 不変・NEW1 追加（数値T1 既定1000） |
+| M2詳細 | テーブル2 | 7229598(PQR) 削除・7229600→YB1（数値T1_0=200 保持）・NEW2 追加（数値T1_0 既定1000） |
+| M3 | 同一テーブル重複ブロック拒否（裁定3） | `ArgumentError: APPLY v1.2 scope allows only one block for table テーブル` |
+| M4 | 他テーブルの子コード指定拒否 | `ArgumentError: APPLY child 文字列T2_0 does not belong to subtable テーブル` |
+
+**複数テーブルで PATCH＋APPEND＋REMOVE を1文=1 PUT に合成できることを実機実証**。各テーブルが独立の payload 形（テーブル=PATCH_ONLY・テーブル2=FULL_SURVIVORS）で正しく処理された。
+
+## 複数レコード・スケール実機（APP4223・2026-07-20 追記）
+
+200レコード規模で、UPDATE APPLY による「テーブルの追加・更新・削除の組合せ」と UPSERT の複数レコード動作を検証。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| S0 | 200レコード作成（各テーブル2行: 数値T1=10 と 999） | IMPORT JSON で affected=200 |
+| S1 | **200レコードへ APPLY 組合せ**（各: `PATCH SET 文字列T2='UPD' WHERE 数値T1=10; REMOVE WHERE 数値T1=999; APPEND VALUES ('ADD')`） | バッチ上限20文のため **20文×10バッチ=200文すべて success**。総子行数 400（UPD 200＋ADD 200）・削除対象 数値T1=999 の残存 **0** |
+| S2 | UPSERT 複数レコード（一意キー タイトル・20件） | 1回目=20件 INSERT・2回目=同キーで 20件 UPDATE（金額 7777 が20件）＝insert/update 分岐が複数レコードで正しく動作 |
+| S3 | **UPSERT＋サブテーブル（scope 境界）** | `UPSERT … APPLY テーブル (…)` は **ParseError**（APPLY は UPDATE 専用・UPSERT+サブテーブルは v2 未実装を確認） |
+| S4 | 複数レコード UPDATE APPLY（`WHERE $id > 1`） | `UnsupportedError: … single condition $id = <positive safe integer>`（単一親のみ・複数親は v2） |
+
+**要点**: APPLY v1.2 は**単一レコード UPDATE 専用**のため、「複数レコードを対象」は **1レコード=1文の APPLY をバッチ/ループで反復**して実現（S1 で 200レコード達成）。UPSERT はレコード横断の親項目 upsert に有効だが**サブテーブルは扱えない**（S3）。両者を1文で束ねる「UPSERT+サブテーブル」「複数親 APPLY」は spec §9.4 の **v2 スコープ**（本 v3.8.0 では未実装＝明示エラーで fail-closed）。
+
+## 環境制約（コードの問題ではない）
+
+- **MCP fail-closed の live 確認は不可**: 接続中の MCP サーバは公開版 3.6.1 で APPLY 構文を知らず ParseError になる（新ビルドではない）。新ビルドの MCP mutation 拒否（AST 判定・API 0）は unit テスト（`src/mcp/__tests__/tools.test.ts`）で検証済み。
+- revision conflict の非 retry は unit テスト（GET 後別更新→旧 revision PUT 拒否）で検証済み。
+
+## 結論
+
+APPLY v1（PATCH）/v1.1（APPEND）/v1.2（REMOVE）の中核機能が実機で期待どおり動作。特に **B44 の目的「テーブル外項目とテーブル内項目を1 PUT で同時更新」を手順3で実証**。行 ID・行順・未指定セルの保持、APPEND 既定値の明示補完、REMOVE の存続行保持、post-image 検証のロケータ、scope 拒否、$id=7 温存をすべて確認。
+
+## v2 CLI 実機（APP4223・2026-07-20 追記・Phase 16b 開通後）
+
+v2 の各機能を CLI から実行（複数親は Phase 10d で実証済み・下記は 11〜15）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| V1 | **複数親 APPLY 1文**（`WHERE タイトル='BULK-DONE'`＝200親） | updatedCount=200・M2P×400＋MADD×200（Phase 10d・`--dml-max-rows 200 --dml-max-subtable-rows 700`） |
+| V2 | **INSERT APPLY**（親＋初期テーブル行を1 POST） | `INSERT … VALUES … APPLY テーブル (APPEND …)` で親作成＋IA1/IB2 の初期行（insertedCount=1） |
+| V3 | **UPSERT APPLY update 分岐** | 既存キーヒット→`ON UPDATE APPLY (PATCH ALL ROWS; APPEND)`＝UPD×2＋UAD 追加（updatedCount=1） |
+| V4 | **UPSERT APPLY insert 分岐** | 新規キー→`ON INSERT APPLY (APPEND)`＝NEW 行つき新規作成（insertedCount=1） |
+| V5 | **多値 APPLY**（MULTI_SELECT） | `SET 金額=9999 … APPLY 複数選択 (ADD 'M3'; REMOVE 'M1')`＝`["M1","M2"]`→`["M2","M3"]`（M1 除去・M3 末尾・親 SET と1 PUT 同居） |
+
+`_idx` セレクタ・EXPECT ROWS は unit/統合テストで検証済み（実機は SUBTABLE 行の位置指定・件数表明で機能）。CLI で v2 全機能が開通（plugin=16c・MCP=fail-closed 維持）。
+
+## Phase 17a 自動回帰（2026-07-21・v2 全実装後）
+
+v2 の全機能フェーズ（10a〜16d）実装完了後の自動ゲート。
+
+| ゲート | 結果 |
+|---|---|
+| `npm test` | 101 suites / 2,456 tests green（通常 99+2,431・subprocess 2+25） |
+| 全4面ビルド（plugin/cli/mcp/mcpb） | 成功（`ksql-plugin-v3.8.0.zip` 含む） |
+| `tsc --noEmit` | 総10件＝すべて既存 `desktop.ts`（DOM 型・B44 由来 0 件・baseline どおり） |
+| `mcp:smoke` / `mcp:pack-smoke` | ok（APPLY VALIDATE ONLY 許可・mutation fail-closed・drift guard） |
+
+v2 累積機能: 複数親（10・100親/chunk・部分成功）・`_idx`（11）・EXPECT ROWS（12）・INSERT 初期行（13）・UPSERT insert/update 分岐（14）・多値 ADD/REMOVE（15）。面: CLI/plugin 開通（16b/16c）・MCP 全経路 fail-closed（16d）。版数 3.8.0。
+
+## Phase 17b/17c 実機A/B（2026-07-21・_idx・EXPECT ROWS・全 v2）
+
+複数親（V1）・INSERT（V2）・UPSERT 分岐（V3/V4）・多値（V5）は前掲。ここでは `_idx`・EXPECT ROWS を実機確認（APP4223・B44-INS）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| W1 | `_idx=1` セレクタ | 2行目（_idx 1）だけ IDX1 に更新・0/2 不変 |
+| W2 | EXPECT ROWS 3（一致） | ALL ROWS 3行＝期待3で実行成功 |
+| W3 | EXPECT ROWS 5（違反） | `ArgumentError: … expected exactly 5, actual 3`（親$id/table/op/期待vs実数）・書込み0 |
+| W4 | `_idx=9` 消失 | `ArgumentError: APPLY _idx 9 does not exist in snapshot table テーブル`（消失を沈黙させない） |
+| W5 | `REMOVE WHERE _idx=0 EXPECT ROWS AT MOST 2` | _idx 0 削除→2行（境界内 pass） |
+
+**v2 全機能を CLI 実機で確認完了**（複数親100超は `--dml-max-rows` 引き上げ・多値は subtable ガード対象外）。plugin は v2 開通済（3.8.0 アップロード済・ブラウザ確認はユーザー）。MCP は全 APPLY mutation fail-closed（unit matrix＋smoke で固定・接続 MCP の live 確認は再起動要）。
+
+---
+
+## B45 実機確認（CLI・サブテーブル SELECT の WHERE システム列）
+
+対象=`docs/internal/ksql_b45_subtable_system_column_where_plan.md` R3・commit `9a80052`。ローカル CLI（dist-cli/ksql.js を B45 反映で再ビルド）で、旧版 `WHERE_FIELD_UNRESOLVED` で throw していた `_pid`/`_rid`/`_idx` の WHERE を検証。baseline=`_p.$id` 回避策で APP4223 record 2 の3行（_rid 7230010/7231606/7232086・_idx 0/1/2）を確認。
+
+| # | ケース | 結果 |
+|---|---|---|
+| T1 | `WHERE _pid = 2`（旧 throw） | 3行（record 2 の全子行）＝**修正で解決** |
+| T2 | `WHERE _rid = '7231606'`（文字列） | 1行（_idx 1） |
+| T3 | `WHERE _idx = 1`（数値） | 全親の2行目を横断取得 |
+| T4 | **数値意味論 決定的**：APP4221 $id=5（103行・_idx 0..102）で `_pid=5 AND _idx > 8` | **94行**（数値 9..102＝94・辞書順なら誤）。`ORDER BY _idx DESC`=**102,101,100**（数値順・辞書順なら "99","98"…） |
+| T5 | 負例 `WHERE _p._pid = 2` | `WHERE_FIELD_UNRESOLVED` で**拒否継続**（`_p` ガードが `_pid` への誤マッチを防止） |
+| T6 | EXPLAIN `_pid=2 AND _idx>0` | `mode: FULL_SCAN`・`reason: サブテーブル仮想テーブル, WHERE_RESIDUAL`・`kintone query: (全件取得)`＝**押し下げなし**（system 列が kintone クエリに出ない） |
+| T7 | `_rid IN (…)` / `_idx BETWEEN 0 AND 1` / `_rid IS NULL` | 2行 / 2行 / 0行（保存済み行は非NULL） |
+| T8 | `_rid = 7231606`（数値リテラル→文字列コアーション） | 1行（string semantics で一致） |
+| T9 | 複合 `_pid=2 AND _idx>=1` ＋ `_p.タイトル` | 2行（§19 例の意図どおり・親ショートカット併用） |
+| T10 | `_rid KLIKE '723'`（対象外） | 拒否（サブテーブル/FULL_SCAN の KLIKE は非対応＝設計どおり） |
+
+**要点**: 決定的証拠は T4＝`_idx` が number 比較・ORDER も数値順（辞書順なら 94→別値・102→"99" になる）。T5 で `_p._pid` の誤マッチ防止、T6 で非押し下げ（FULL_SCAN・system 列は kintone クエリに出ない）を確認。言語リファレンス §19 の SELECT 例（`WHERE _pid = 123`）が実動作と一致。**B45 CLI 実機 全10項目 pass。** プラグイン/MCP は再ビルドで同経路（接続 MCP は旧版のため live 不可・unit で固定済）。

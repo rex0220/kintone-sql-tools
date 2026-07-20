@@ -14,10 +14,45 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
+import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere, statementHasMultiValueApply } from "./core/applyPatchScope";
+import {
+  buildApplyPatchPlan,
+  collectApplySnapshotFields,
+  flattenSubtableSnapshotRow,
+  getApplyParentId,
+  normalizeApplyPatchPlan,
+  resolveApplyPatchMetadata,
+} from "./core/applyPatchPlanner";
+import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
+import { prepareApplyInsert, type PreparedApplyInsert } from "./core/applyInsertPrepare";
+import {
+  prepareApplyUpsert,
+  type ApplyUpsertMatch,
+  type PreparedApplyUpsert,
+} from "./core/applyUpsertPrepare";
+import { executePreparedApplyInsert } from "./core/applyInsertExecutePrepared";
+import { executePreparedApplyUpsert } from "./core/applyUpsertExecutePrepared";
+import {
+  ApplyWritePartialFailureError,
+  executePreparedApplyWrite,
+  type ApplyWriteFailureDetail,
+  type ApplyWriteProgress,
+} from "./core/applyPatchExecutePrepared";
+import {
+  buildPreparedApplyInsertDiagnostic,
+  buildPreparedApplyUpdateDiagnostic,
+  buildPreparedApplyUpsertDiagnostic,
+  buildStaticApplyDiagnostic,
+  withApplyDiagnosticProgress,
+  type ApplyDiagnostic,
+  type ApplyDiagnosticBranch,
+  type ApplyDiagnosticTarget,
+} from "./core/applyDiagnostic";
+import { applyPatchPlanToKintone, requireRevision } from "./converter/applyPatchToKintone";
 import {
   fieldSemanticsEqual,
   resolveFieldSemantics,
@@ -48,6 +83,7 @@ import {
   deleteToDeleteBatches,
   toKintoneValue,
   evalCaseWhenValue,
+  evaluateSubtableAssignmentValue,
   KintonePostParams,
   KintonePutParams,
   KintoneDeleteParams,
@@ -100,7 +136,18 @@ import {
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
-import { renderExistingValidationValue } from "./core/existingRecordValidation";
+import {
+  buildValidationCellLocator,
+  renderExistingValidationValue,
+  resolveExistingValidationTargets,
+  type ExistingValidationTarget,
+} from "./core/existingRecordValidation";
+import {
+  buildPostImageFieldIndex,
+  POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+  postImageNeedsNumberPrecision,
+  validatePostImage,
+} from "./core/postImageValidation";
 import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, evaluateCustomChecks, type CheckFieldRef } from "./core/dmlCustomCheck";
 import {
   classifyWhereCapability,
@@ -295,6 +342,12 @@ export interface InsertResult {
   /** 作成されたレコード ID（バッチごと） */
   createdIds: string[][];
   insertedCount: number;
+  /** B44 INSERT APPLY progress. Absent for ordinary INSERT. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary INSERT. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -306,6 +359,12 @@ export interface InsertResult {
 export interface UpdateResult {
   type: "UPDATE";
   updatedCount: number;
+  /** B44 multiple-parent APPLY progress. Absent for ordinary and single-parent UPDATE. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary UPDATE. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -324,6 +383,14 @@ export interface UpsertResult {
   type: "UPSERT";
   insertedCount: number;
   updatedCount: number;
+  /** B44 UPSERT APPLY progress. Absent for ordinary UPSERT. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  successfulInsertChunks?: number;
+  successfulUpdateChunks?: number;
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
+  /** B44 shared APPLY diagnostic. Absent for ordinary UPSERT. */
+  diagnostic?: ApplyDiagnostic;
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -358,6 +425,51 @@ export interface DmlValidationResult {
   metrics?: ExecuteMetrics;
   /** IMPORT Phase 5 read-only preflight detail. */
   importDetail?: ImportValidationDetail;
+  /** B44 APPLY operation counts. Absent for ordinary VALIDATE ONLY results. */
+  apply?: ApplyValidationDetail[];
+  /** B44 APPLY safety-guard diagnostics. Absent for ordinary VALIDATE ONLY results. */
+  guards?: ApplyGuardDetail;
+  /** Phase 14b UPSERT APPLY branch diagnostics. */
+  applyBranches?: {
+    readonly create: { readonly apply: readonly ApplyValidationDetail[]; readonly guards: ApplyGuardDetail };
+    readonly update: { readonly apply: readonly ApplyValidationDetail[]; readonly guards: ApplyGuardDetail };
+  };
+  /** B44 REMOVE totals. Present for APPLY VALIDATE ONLY. */
+  deletedRows?: { readonly total: number; readonly parentRows: number };
+  /** B44 shared APPLY diagnostic. Legacy apply/guards fields are derived from this detail. */
+  diagnostic?: ApplyDiagnostic;
+}
+
+export interface ApplyValidationDetail {
+  readonly field: string;
+  readonly operations: readonly {
+    readonly kind: "PATCH" | "APPEND" | "REMOVE" | "ADD" | "REMOVE_VALUE";
+    readonly matchedRows?: number;
+    readonly changedRows?: number;
+    readonly addedRows?: number;
+    readonly removedRows?: number;
+    readonly value?: string;
+    readonly changed?: boolean;
+  }[];
+  readonly changedSubtableRows: number;
+  readonly deletedRows: number;
+  /** Phase 15b collection diagnostics; absent for SUBTABLE APPLY. */
+  readonly multiValue?: {
+    readonly fieldType: string;
+    readonly addedValues: number;
+    readonly removedValues: number;
+    readonly changedValues: number;
+    readonly postImages: readonly { readonly parentId: number; readonly value: readonly unknown[] }[];
+  };
+}
+
+export interface ApplyGuardDetail {
+  readonly revisionRequired: boolean;
+  readonly parentRows: number;
+  readonly dmlMaxRows: number;
+  readonly subtableRows: number;
+  readonly dmlMaxSubtableRows: number;
+  readonly wouldExceed: boolean;
 }
 
 export interface ImportValidationDetail {
@@ -397,6 +509,57 @@ export interface CsvImportConfirmDetail {
 }
 export type ImportConfirmDetail = JsonImportConfirmDetail | CsvImportConfirmDetail;
 
+export interface ApplyConfirmDetail {
+  readonly kind: "APPLY_PATCH" | "APPLY_INSERT" | "APPLY_UPSERT";
+  readonly parentRows: number;
+  readonly changedSubtableRows: number;
+  readonly addedSubtableRows: number;
+  readonly tables: readonly {
+    readonly table: string;
+    readonly patchRows: number;
+    readonly appendRows: number;
+    readonly removeRows: number;
+  }[];
+  /** Prepared collection post-images. Phase 16 surfaces may render this without re-planning. */
+  readonly multiValues?: readonly {
+    readonly field: string;
+    readonly fieldType: string;
+    readonly addedValues: number;
+    readonly removedValues: number;
+    readonly changedValues: number;
+    readonly parents: readonly { readonly parentId: number; readonly postImage: readonly unknown[] }[];
+  }[];
+  readonly deletedRows: number;
+  readonly deletedParentRows: number;
+  readonly revisionRequired: boolean;
+  readonly irreversible: true;
+  readonly retryOnRevisionConflict: false;
+  /** Present for chunked APPLY: a later PUT/POST can fail after an earlier prefix committed. */
+  readonly nonTransactional?: true;
+  readonly partialSuccessPossible?: true;
+  /** Present for INSERT APPLY so Phase 16 surfaces need not infer create semantics. */
+  readonly insertedParentRows?: number;
+  /** Initial child rows included in the POST create image. */
+  readonly initialSubtableRows?: number;
+  /** Present for UPSERT APPLY so surfaces need not infer branch counts. */
+  readonly updatedParentRows?: number;
+  readonly applyBranches?: {
+    readonly insert: {
+      readonly parentRows: number;
+      readonly initialSubtableRows: number;
+      readonly tables: ApplyConfirmDetail["tables"];
+    };
+    readonly update: {
+      readonly parentRows: number;
+      readonly changedSubtableRows: number;
+      readonly addedSubtableRows: number;
+      readonly tables: ApplyConfirmDetail["tables"];
+      readonly deletedRows: number;
+      readonly deletedParentRows: number;
+    };
+  };
+}
+
 // ============================================================
 // オプション
 // ============================================================
@@ -419,6 +582,10 @@ export interface DmlConfirmContext {
   targetAppId: number | null;
   /** Phase 5C destructive replacement audit. Optional for backward compatibility. */
   importDetail?: ImportConfirmDetail;
+  /** B44 APPLY preflight detail. Mutually exclusive with importDetail. */
+  applyDetail?: ApplyConfirmDetail;
+  /** Phase 16a shared APPLY detail. Additive; applyDetail remains byte-for-byte compatible. */
+  applyDiagnostic?: ApplyDiagnostic;
 }
 
 export interface ExecuteOptions {
@@ -448,6 +615,12 @@ export interface ExecuteOptions {
   importSource?: ImportSourceResolver;
   /** The surface promises to render importDetail before returning true. */
   supportsImportConfirmDetail?: boolean;
+  /** APPLY parent-row hard cap. Positive safe integer; core default is 100. */
+  dmlMaxRows?: number;
+  /** APPLY changed-child-row hard cap. Positive safe integer; core default is 100. */
+  dmlMaxSubtableRows?: number;
+  /** Surface capability gate. Omitted/false keeps APPLY mutation unavailable. */
+  allowApplyMutation?: boolean;
 }
 
 // ============================================================
@@ -686,8 +859,16 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
+  assertApplyScope("phase15b", stmt);
+  assertApplyExecutionScope("phase15b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
+  if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
+    if (stmt.validationErrorTable) {
+      throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
+    }
+    return executeUpdate(stmt, client, options, cacheContext);
+  }
   if ("validateOnly" in stmt && stmt.validateOnly === true) {
     if (stmt.validationErrorTable) {
       throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
@@ -716,7 +897,11 @@ async function executeParsedStatement(
       client,
       cacheContext,
       options.maxRecords ?? 10_000,
-      options.cursorMaxActive ?? 2
+      options.cursorMaxActive ?? 2,
+      stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
+        ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS) : DEFAULT_APPLY_MAX_ROWS,
+      stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
+        ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS
     );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -738,82 +923,6 @@ const EXISTING_VALIDATION_COLUMNS = [
 const EXISTING_VALIDATION_SUMMARY_COLUMNS = [
   "$id", "$err_subtable", "$err_field", "$err_code", "$err_count",
 ];
-
-interface ExistingValidationTarget {
-  field: KintoneFieldInfo;
-  subtableCode?: string;
-}
-
-function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
-  return field.required === true
-    || field.minValue !== undefined
-    || field.maxValue !== undefined
-    || field.minLength !== undefined
-    || field.maxLength !== undefined
-    || field.optionOrder !== undefined;
-}
-
-function resolveExistingValidationTargets(
-  stmt: ValidateStatement,
-  fieldInfos: readonly KintoneFieldInfo[]
-): ExistingValidationTarget[] {
-  const topByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
-  const childrenByTable = new Map<string, KintoneFieldInfo[]>();
-  for (const field of fieldInfos) {
-    if (!field.inSubtable || !field.subtableCode) continue;
-    const children = childrenByTable.get(field.subtableCode) ?? [];
-    children.push(field);
-    childrenByTable.set(field.subtableCode, children);
-  }
-  const auditable = (field: KintoneFieldInfo) => field.fieldType === "NUMBER" || hasAuditableConstraint(field);
-  if (stmt.targets === undefined) return [
-    ...fieldInfos.filter((field) => !field.inSubtable && field.fieldType !== "SUBTABLE" && auditable(field)),
-    ...fieldInfos.filter((field) => field.inSubtable && !!field.subtableCode && auditable(field)),
-  ].map((field) => ({ field, ...(field.subtableCode ? { subtableCode: field.subtableCode } : {}) }));
-
-  const result: ExistingValidationTarget[] = [];
-  const seen = new Set<string>();
-  const add = (field: KintoneFieldInfo, subtableCode?: string): void => {
-    const key = subtableCode ? `${subtableCode}\u0000${field.code}` : field.code;
-    if (seen.has(key)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} が重複しています。`);
-    seen.add(key);
-    if (!auditable(field)) throw new Error(`ArgumentError: VALIDATE のフィールド ${field.code} には監査可能な制約がありません。`);
-    result.push({ field, ...(subtableCode ? { subtableCode } : {}) });
-  };
-  for (const target of stmt.targets) {
-    if (target.kind === "SUBTABLE") {
-      const children = childrenByTable.get(target.subtableCode);
-      if (!children) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} は存在しません。`);
-      if (target.children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${target.subtableCode} には1つ以上の子フィールドが必要です。`);
-      for (const code of target.children) {
-        const child = children.find((field) => field.code === code);
-        if (!child) {
-          const belongsElsewhere = [...childrenByTable.entries()].some(([table, fields]) => table !== target.subtableCode && fields.some((field) => field.code === code));
-          throw new Error(belongsElsewhere
-            ? `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に属していません。`
-            : `ArgumentError: VALIDATE の子フィールド ${code} はサブテーブル ${target.subtableCode} に存在しません。`);
-        }
-        add(child, target.subtableCode);
-      }
-      continue;
-    }
-    const code = target.field;
-    if (code === "$id") throw new Error("ArgumentError: VALIDATE ではシステムフィールド $id を監査できません。");
-    const top = topByCode.get(code);
-    if (top?.fieldType === "SUBTABLE") {
-      const children = (childrenByTable.get(code) ?? []).filter(auditable);
-      if (children.length === 0) throw new Error(`ArgumentError: VALIDATE のサブテーブル ${code} には監査可能な子フィールドがありません。`);
-      children.forEach((child) => add(child, code));
-      continue;
-    }
-    if (top) { add(top); continue; }
-    if ([...childrenByTable.values()].some((children) => children.some((field) => field.code === code))) {
-      throw new Error(`ArgumentError: VALIDATE の子フィールド ${code} は所有サブテーブルを含む T(${code}) 形式で指定してください。`);
-    }
-    throw new Error(`ArgumentError: VALIDATE のフィールド ${code} は存在しません。`);
-  }
-  return result;
-}
 
 function collectValidateWhereFields(where: WhereExpr | null): string[] {
   const fields: string[] = [];
@@ -998,11 +1107,14 @@ async function executeExistingRecordValidationCore(
         for (const target of childTargets) {
           const raw = tableRow.value?.[target.field.code]?.value;
           const validation = validateAndNormalizeDmlValue(raw, target.field, numberPrecision);
-          if (!validation.ok) appendError({
+          if (!validation.ok) {
+            const locator = buildValidationCellLocator(tableCode, i, tableRow);
+            appendError({
             id: row.id, field: target.field.code, code: validation.code,
             message: validation.message, value: renderExistingValidationValue(raw, target.field.fieldType),
-            subtable: tableCode, subrow: i + 1, subrowId: String(tableRow.id ?? ""),
+            ...locator,
           });
+          }
         }
       }
     }
@@ -1058,6 +1170,8 @@ export interface BatchExecuteOptions extends ExecuteOptions {
 export interface BatchStatementError {
   code: string;
   message: string;
+  /** Already committed prefix of a non-transactional APPLY statement. */
+  partialSuccess?: ApplyWriteFailureDetail;
 }
 
 function appendValidationErrors(
@@ -1155,6 +1269,14 @@ export async function executeBatch(
 ): Promise<BatchExecuteResult> {
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
+  // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
+  statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
+  if (options.allowApplyMutation !== true && statements.some((statement) =>
+    statementHasMultiValueApply(statement)
+    || (statement.type === "UPSERT" && statementHasApplyMutation(statement))
+  )) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
@@ -1232,6 +1354,8 @@ export async function executeBatch(
             statementType: info.statementType,
             targetAppId: info.targetAppId,
             ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
+            ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
+            ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
           }),
         }
         : batchOptions;
@@ -1282,6 +1406,15 @@ export async function executeBatch(
     analysis,
     metrics,
   };
+}
+
+function statementHasApplyMutation(statement: Statement): boolean {
+  if (statement.type === "UPDATE" || statement.type === "INSERT") {
+    return statement.validateOnly !== true && Boolean(statement.applyBlocks?.length);
+  }
+  return statement.type === "UPSERT"
+    && statement.validateOnly !== true
+    && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
 
 /** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
@@ -1348,6 +1481,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
+  assertApplyScope("phase15b", resolvedStmt);
+  assertApplyExecutionScope("phase15b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -1553,6 +1688,9 @@ async function runWithDeadline<T>(
  * reject するため、オブジェクト形式も解釈する（String(e) だと "[object Object]" になる）
  */
 function toBatchStatementError(e: unknown): BatchStatementError {
+  if (e instanceof ApplyWritePartialFailureError) {
+    return { code: e.name, message: e.message, partialSuccess: e.partialSuccess };
+  }
   if (e instanceof Error) {
     const name = e.name !== "Error" ? e.name : null;
     return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
@@ -1919,10 +2057,18 @@ async function buildWhereFieldSemanticsResolver(
     if (order) statusOrdersByApp.set(appId, order);
   }));
 
-  const fromPhysical = (table: TableRef, field: string): ResolvedFieldSemantics | undefined => {
+  const fromPhysical = (
+    table: TableRef,
+    field: string,
+    allowSubtableSystemColumns: boolean
+  ): ResolvedFieldSemantics | undefined => {
     if (field === "$id") return withFieldSemanticSource(
       resolveFieldSemantics({ fieldType: "__ID__" }), table.appId, "$id"
     );
+    if (allowSubtableSystemColumns && table.subtableCode) {
+      if (field === "_rid") return syntheticSemantics("string");
+      if (field === "_idx" || field === "_pid") return syntheticSemantics("number");
+    }
     const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
     if (!info) return undefined;
     const base = info.semantics ?? resolveFieldSemantics(info);
@@ -1939,7 +2085,7 @@ async function buildWhereFieldSemanticsResolver(
   return (field) => {
     if (field.tableAlias !== null) {
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
-        return fromPhysical(stmt.from, field.field);
+        return fromPhysical(stmt.from, field.field, false);
       }
       const table = tables.find((candidate) => candidate.alias === field.tableAlias);
       if (!table) return undefined;
@@ -1947,22 +2093,23 @@ async function buildWhereFieldSemanticsResolver(
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
           ?? syntheticSemantics("string");
       }
-      return fromPhysical(table, field.field);
+      return fromPhysical(table, field.field, true);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
         return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics
           ?? syntheticSemantics("string");
       }
-      return fromPhysical(stmt.from, field.field);
+      return fromPhysical(stmt.from, field.field, true);
     }
     const matches = tables.flatMap((table): ResolvedFieldSemantics[] => {
       const semantics = table.cteName !== null
         ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
-        : fromPhysical(table, field.field);
+        : fromPhysical(table, field.field, true);
       return semantics ? [semantics] : [];
     });
     if (matches.length === 1) return matches[0];
+    if (tables.some((table) => subtableSystemFieldType(table, field.field) !== undefined)) return undefined;
     // JOIN の非修飾同名列は既存契約どおりローカル値として評価する。
     return matches.length > 1 ? syntheticSemantics("string") : undefined;
   };
@@ -2729,6 +2876,13 @@ function fieldCodeForTypeLookup(table: TableRef, field: string): string {
   return field;
 }
 
+function subtableSystemFieldType(table: TableRef, field: string): string | undefined {
+  if (!table.subtableCode) return undefined;
+  if (field === "_rid") return "SINGLE_LINE_TEXT";
+  if (field === "_idx" || field === "_pid") return "NUMBER";
+  return undefined;
+}
+
 function materializedMetaFromFieldInfo(
   info: KintoneFieldInfo,
   sourceAppId?: number
@@ -2772,13 +2926,15 @@ function unsupportedColumnMeta(fieldType = "KSQL_ARRAY"): MaterializedColumnMeta
 }
 
 function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
-  if (field === "$id" || field === "_rid" || field === "_pid") {
+  if (field === "$id") {
     return {
       sortKind: "number",
       fieldType: "__ID__",
       semantics: resolveFieldSemantics({ fieldType: "__ID__" }),
     };
   }
+  if (field === "_rid") return syntheticColumnMeta("string");
+  if (field === "_pid" || field === "_idx") return syntheticColumnMeta("number");
   if (field === "$revision") return syntheticColumnMeta("number");
   return undefined;
 }
@@ -3006,22 +3162,24 @@ function buildSelectFieldTypeResolvers(
       }
       const table = tables.find((candidate) => candidate.alias === field.tableAlias);
       if (!table || table.cteName !== null) return undefined;
-      return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+      return subtableSystemFieldType(table, field.field)
+        ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return undefined;
-      return fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
+      return subtableSystemFieldType(stmt.from, field.field)
+        ?? fieldTypesByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, field.field));
     }
 
     // CTE は列型来歴を持たないため、混在 JOIN の非修飾参照は一意と証明できない。
     if (tables.some((table) => table.cteName !== null)) return undefined;
-    const matches = physicalTables.filter((table) =>
-      fieldTypesByApp.get(table.appId)?.has(fieldCodeForTypeLookup(table, field.field))
-    );
-    if (matches.length !== 1) return undefined;
-    const table = matches[0];
-    return fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+    const matches = physicalTables.flatMap((table): string[] => {
+      const type = subtableSystemFieldType(table, field.field)
+        ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
+      return type ? [type] : [];
+    });
+    return matches.length === 1 ? matches[0] : undefined;
   };
 
   const having: FieldTypeResolver = (field) => {
@@ -4232,6 +4390,314 @@ function assertValidDmlRecords(
   });
 }
 
+/** Phase 13b read-only create preflight. The prepared POST batches stay below the writer boundary. */
+async function executeApplyInsertValidation(
+  stmt: InsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  return materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos);
+}
+
+async function executeApplyUpsertValidation(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const { fieldInfos, prepared } = await prepareApplyUpsertForExecution(
+    stmt, client, options, cacheContext, statementNumber
+  );
+  return materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos);
+}
+
+async function prepareApplyUpsertForExecution(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<{ fieldInfos: readonly KintoneFieldInfo[]; prepared: PreparedApplyUpsert }> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
+  const seenSourceKeys = new Set<string>();
+  for (const parts of rowKeyValues) {
+    const key = upsertNormalizedKey(parts, stmt.keyFields.map((field) => fieldTypes.get(field) === "NUMBER"));
+    if (seenSourceKeys.has(key)) {
+      throw new Error("ERR_KEY_DUP_SOURCE: UPSERT ソース内でキーが重複しています");
+    }
+    seenSourceKeys.add(key);
+  }
+  const targetIndex = await resolveUpsertTargets(
+    stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes
+  );
+  const targetIds = rowKeyValues.map((parts) => lookupUpsertTarget(targetIndex, parts));
+  const snapshotsById = new Map<number, KintoneRecord>();
+  const updateIds = [...new Set(targetIds.filter((id): id is number => id !== undefined))];
+  const snapshotFields = ["$id", "$revision", ...fieldInfos
+    .filter((field) => !field.inSubtable && field.fieldType !== "FILE")
+    .map((field) => field.code)];
+  for (const ids of splitChunks(updateIds, 100)) {
+    const response = await client.getRecords({
+      app: stmt.appId,
+      query: `$id in (${ids.join(",")}) limit 500`,
+      fields: [...new Set(snapshotFields)],
+    });
+    for (const snapshot of response.records) {
+      const id = Number(snapshot["$id"]?.value);
+      if (Number.isSafeInteger(id) && id > 0) snapshotsById.set(id, snapshot);
+    }
+  }
+  const matches: ApplyUpsertMatch[] = targetIds.map((targetId, sourceRowIndex) => ({
+    sourceRowIndex,
+    ...(targetId === undefined ? {} : { targetId, snapshot: snapshotsById.get(targetId) }),
+  }));
+  const prepared = await prepareApplyUpsert({
+    statement: stmt,
+    matches,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  return { fieldInfos, prepared };
+}
+
+async function executeApplyInsert(
+  stmt: InsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<InsertResult> {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  const diagnostic = buildPreparedApplyInsertDiagnostic(prepared);
+
+  if (options.confirm) {
+    const ok = await options.confirm(prepared.guards.parentRows, "INSERT", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "INSERT",
+      targetAppId: stmt.appId,
+      applyDetail: buildApplyConfirmDetailFromDiagnostic(diagnostic),
+      applyDiagnostic: diagnostic,
+    });
+    if (!ok) throw new OperationCancelledError("INSERT", prepared.guards.parentRows);
+  }
+
+  const result = await executePreparedApplyInsert(prepared, client, diagnostic);
+  return {
+    ...result,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, result),
+  };
+}
+
+async function executeApplyUpsert(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<UpsertResult> {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const { prepared } = await prepareApplyUpsertForExecution(stmt, client, options, cacheContext, 1);
+  const diagnostic = buildPreparedApplyUpsertDiagnostic(prepared);
+
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic);
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPSERT",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+
+  const result = await executePreparedApplyUpsert(prepared, client, diagnostic);
+  return {
+    type: "UPSERT",
+    insertedCount: result.insertedCount,
+    updatedCount: result.updatedCount,
+    successfulChunks: result.successfulChunks,
+    successfulParents: result.successfulParents,
+    successfulInsertChunks: result.successfulInsertChunks,
+    successfulUpdateChunks: result.successfulUpdateChunks,
+    nonTransactional: result.nonTransactional,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, result),
+  };
+}
+
+function mergeApplyConfirmTables(
+  left: ApplyConfirmDetail["tables"],
+  right: ApplyConfirmDetail["tables"]
+): ApplyConfirmDetail["tables"] {
+  const merged = new Map<string, ApplyConfirmDetail["tables"][number]>();
+  for (const table of [...left, ...right]) {
+    const current = merged.get(table.table);
+    merged.set(table.table, current ? {
+      table: table.table,
+      patchRows: current.patchRows + table.patchRows,
+      appendRows: current.appendRows + table.appendRows,
+      removeRows: current.removeRows + table.removeRows,
+    } : { ...table });
+  }
+  return [...merged.values()];
+}
+
+function buildApplyConfirmDetailFromDiagnostic(
+  diagnostic: ApplyDiagnostic,
+  chunked = true
+): ApplyConfirmDetail {
+  const insert = diagnostic.branches.find((branch) => branch.branch === "insert");
+  const update = diagnostic.branches.find((branch) => branch.branch === "update");
+  const allTargets = diagnostic.branches.flatMap((branch) => branch.targets);
+  const tables = mergeApplyConfirmTables(
+    insert ? applyDiagnosticTables(insert) : [],
+    update ? applyDiagnosticTables(update) : []
+  );
+  const multiValues = mergeApplyDiagnosticMultiValues(allTargets);
+  const parentRows = diagnostic.branches.reduce((sum, branch) => sum + (branch.parentRows ?? 0), 0);
+  const changedSubtableRows = allTargets
+    .filter((target) => target.targetKind === "SUBTABLE")
+    .reduce((sum, target) => sum + (target.changedCount ?? 0), 0);
+  const addedSubtableRows = tables.reduce((sum, table) => sum + table.appendRows, 0);
+  const deletedRows = tables.reduce((sum, table) => sum + table.removeRows, 0);
+  const result: ApplyConfirmDetail = {
+    kind: diagnostic.statementKind === "UPDATE" ? "APPLY_PATCH"
+      : diagnostic.statementKind === "INSERT" ? "APPLY_INSERT" : "APPLY_UPSERT",
+    parentRows,
+    changedSubtableRows,
+    addedSubtableRows,
+    tables,
+    ...(multiValues.length > 0 ? { multiValues } : {}),
+    deletedRows,
+    deletedParentRows: diagnostic.branches.reduce((sum, branch) => sum + (branch.deletedParentRows ?? 0), 0),
+    revisionRequired: diagnostic.branches.some((branch) => branch.guards.revisionRequired),
+    irreversible: true,
+    retryOnRevisionConflict: false,
+    ...(chunked ? { nonTransactional: true as const, partialSuccessPossible: true as const } : {}),
+  };
+  if (diagnostic.statementKind === "INSERT" && insert) {
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE")
+        .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+    };
+  }
+  if (diagnostic.statementKind === "UPSERT" && insert && update) {
+    const insertTables = applyDiagnosticTables(insert);
+    const updateTables = applyDiagnosticTables(update);
+    return {
+      ...result,
+      insertedParentRows: insert.parentRows ?? 0,
+      initialSubtableRows: insert.targets.filter((target) => target.targetKind === "SUBTABLE")
+        .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+      updatedParentRows: update.parentRows ?? 0,
+      applyBranches: {
+        insert: {
+          parentRows: insert.parentRows ?? 0,
+          initialSubtableRows: insertTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: insertTables,
+        },
+        update: {
+          parentRows: update.parentRows ?? 0,
+          changedSubtableRows: update.targets.filter((target) => target.targetKind === "SUBTABLE")
+            .reduce((sum, target) => sum + (target.changedCount ?? 0), 0),
+          addedSubtableRows: updateTables.reduce((sum, table) => sum + table.appendRows, 0),
+          tables: updateTables,
+          deletedRows: updateTables.reduce((sum, table) => sum + table.removeRows, 0),
+          deletedParentRows: update.deletedParentRows ?? 0,
+        },
+      },
+    };
+  }
+  return result;
+}
+
+function applyDiagnosticTables(branch: ApplyDiagnosticBranch): ApplyConfirmDetail["tables"] {
+  return branch.targets.filter((target) => target.targetKind === "SUBTABLE").map((target) => {
+    const appendRows = operationCount(target, "APPEND");
+    const removeRows = operationCount(target, "REMOVE");
+    return {
+      table: target.field,
+      patchRows: (target.changedCount ?? 0) - appendRows - removeRows,
+      appendRows,
+      removeRows,
+    };
+  });
+}
+
+function operationCount(target: ApplyDiagnosticTarget, kind: ApplyDiagnostic["branches"][number]["targets"][number]["operations"][number]["kind"]): number {
+  return target.operations.filter((operation) => operation.kind === kind)
+    .reduce((sum, operation) => sum + (operation.count ?? 0), 0);
+}
+
+function mergeApplyDiagnosticMultiValues(
+  targets: readonly ApplyDiagnosticTarget[]
+): NonNullable<ApplyConfirmDetail["multiValues"]> {
+  type Detail = NonNullable<ApplyConfirmDetail["multiValues"]>[number];
+  const details = new Map<string, Detail>();
+  for (const target of targets.filter((item) => item.targetKind === "MULTI_VALUE")) {
+    const incoming: Detail = {
+      field: target.field,
+      fieldType: target.fieldType ?? "UNKNOWN",
+      addedValues: operationCount(target, "ADD"),
+      removedValues: operationCount(target, "REMOVE_VALUE"),
+      changedValues: target.changedCount ?? 0,
+      parents: (target.postImages ?? []).map((item) => ({ parentId: item.parentId, postImage: item.value })),
+    };
+    const current = details.get(target.field);
+    details.set(target.field, current ? {
+      ...current,
+      addedValues: current.addedValues + incoming.addedValues,
+      removedValues: current.removedValues + incoming.removedValues,
+      changedValues: current.changedValues + incoming.changedValues,
+      parents: [...current.parents, ...incoming.parents],
+    } : incoming);
+  }
+  return [...details.values()];
+}
+
 async function executeDmlValidation(
   stmt: ValidationStatement,
   client: KintoneClient,
@@ -4240,6 +4706,21 @@ async function executeDmlValidation(
   tempTables: Map<string, MaterializedTable> | undefined,
   statementNumber: number
 ): Promise<DmlValidationResult> {
+  if (stmt.type === "INSERT" && stmt.applyBlocks?.length) {
+    return executeApplyInsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
+  if (stmt.type === "UPSERT" && (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length)) {
+    return executeApplyUpsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
+  if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
+    const result = await executeApplyPatchUpdate(
+      stmt, client, options, cacheContext, statementNumber
+    );
+    if (result.type !== "VALIDATION") {
+      throw new Error("InternalError: APPLY VALIDATE ONLY returned a mutation result.");
+    }
+    return result;
+  }
   return (await prepareDmlValidation(stmt, client, options, cacheContext, tempTables, statementNumber)).result;
 }
 
@@ -4929,6 +5410,7 @@ async function executeInsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<InsertResult> {
+  if (stmt.applyBlocks?.length) return executeApplyInsert(stmt, client, options, cacheContext);
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);
@@ -5494,6 +5976,9 @@ async function executeUpdate(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
+  if (stmt.applyBlocks?.length) {
+    return executeApplyPatchUpdate(stmt, client, options, cacheContext) as Promise<UpdateResult>;
+  }
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos = await loadWritableTopLevelDmlFields(
       stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
@@ -5587,6 +6072,430 @@ async function executeUpdate(
   }
 
   return { type: "UPDATE", updatedCount: ids.length };
+}
+
+async function executeApplyPatchUpdate(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber = 1
+): Promise<UpdateResult | DmlValidationResult> {
+  if (!stmt.validateOnly && options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  if (!isSinglePositiveRecordIdWhere(stmt.where)) {
+    return executeMultipleParentApplyPreflight(stmt, client, options, cacheContext, statementNumber);
+  }
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const requestedId = getApplyParentId(stmt);
+  const response = await client.getRecords({
+    app: stmt.appId,
+    query: `$id = ${requestedId} limit 2`,
+    fields: [...fields],
+  });
+  if (response.records.length === 0) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} does not exist.`);
+  }
+  if (response.records.length !== 1) {
+    throw new Error(`ArgumentError: APPLY parent $id ${requestedId} returned multiple records.`);
+  }
+  const actualId = Number(response.records[0]["$id"]?.value);
+  if (actualId !== requestedId) {
+    throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
+  }
+  requireRevision(response.records[0]);
+  const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
+  const fieldIndex = buildPostImageFieldIndex(
+    fieldInfos,
+    stmt.assignments.map((assignment) => assignment.field)
+  );
+  const numberPrecision = postImageNeedsNumberPrecision(plan.postImage, fieldIndex)
+    ? await getNumberPrecisionCached(stmt.appId, client, cacheContext)
+    : undefined;
+  const validation = validatePostImage(plan.postImage, fieldIndex, numberPrecision, statementNumber);
+  if (!stmt.validateOnly && validation.errorCount > 0) {
+    throw new Error(`ArgumentError: APPLY post-image validation failed: ${JSON.stringify({
+      columns: validation.columns,
+      errors: validation.errors,
+    })}`);
+  }
+
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS);
+  const wouldExceed = plan.parentRows > dmlMaxRows
+    || plan.changedSubtableRows > dmlMaxSubtableRows;
+  if (stmt.validateOnly) {
+    const diagnostic = buildPreparedApplyUpdateDiagnostic({
+      plans: [plan],
+      records: applyPatchPlanToKintone(plan).records,
+      validations: [],
+      guards: {
+        revisionRequired: true,
+        parentRows: plan.parentRows,
+        dmlMaxRows,
+        subtableRows: plan.changedSubtableRows,
+        dmlMaxSubtableRows,
+        wouldExceed,
+      },
+    });
+    const result: DmlValidationResult = {
+      type: "VALIDATION",
+      operation: "UPDATE",
+      validatedRows: 1,
+      validRows: validation.invalidRows === 0 ? 1 : 0,
+      invalidRows: validation.invalidRows === 0 ? 0 : 1,
+      errorCount: validation.errorCount,
+      columns: [...validation.columns],
+      errors: validation.errors,
+      ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+      apply: applyValidationDetailsFromBranch(diagnostic.branches[0]),
+      guards: applyGuardFromDiagnosticBranch(diagnostic.branches[0]),
+      deletedRows: {
+        total: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
+        parentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
+      },
+      diagnostic,
+    };
+    materializedMetaByValidationResult.set(
+      result,
+      applyValidationColumnMeta(validation.columns, fieldInfos, stmt.appId)
+    );
+    return result;
+  }
+  if (plan.parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${plan.parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (plan.changedSubtableRows > dmlMaxSubtableRows) {
+    throw new Error(
+      `ArgumentError: APPLY changed subtable rows (${plan.changedSubtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`
+    );
+  }
+
+  const normalizedPlan = normalizeApplyPatchPlan(plan, validation.normalizedRecord);
+  const putParams = applyPatchPlanToKintone(normalizedPlan);
+  const diagnostic = buildPreparedApplyUpdateDiagnostic({
+    plans: [normalizedPlan],
+    records: putParams.records,
+    validations: [],
+    guards: {
+      revisionRequired: true,
+      parentRows: plan.parentRows,
+      dmlMaxRows,
+      subtableRows: plan.changedSubtableRows,
+      dmlMaxSubtableRows,
+      wouldExceed,
+    },
+  });
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic, false);
+    const ok = await options.confirm(plan.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", plan.parentRows);
+  }
+
+  await client.putRecords(putParams);
+  return {
+    type: "UPDATE",
+    updatedCount: plan.parentRows,
+    diagnostic: withApplyDiagnosticProgress(diagnostic, {
+      successfulChunks: 1,
+      successfulParents: plan.parentRows,
+    }),
+  };
+}
+
+async function executeMultipleParentApplyPreflight(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<UpdateResult | DmlValidationResult> {
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(
+    options.dmlMaxSubtableRows,
+    "dmlMaxSubtableRows",
+    DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  );
+  const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  const fields = collectApplySnapshotFields(stmt, fieldInfos);
+  const baseQuery = updateToGetQuery(stmt).query;
+  const detectionLimit = dmlMaxRows + 1;
+  const snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
+    pageSize: Math.min(500, detectionLimit),
+    parallel: options.fetchParallel ?? 1,
+    maxRecords: detectionLimit,
+    stopAfter: detectionLimit,
+    onLimit: "error",
+  });
+  if (!stmt.validateOnly && snapshots.length > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${snapshots.length}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+
+  const prepared = await prepareApplyPatchWrite({
+    statement: stmt,
+    snapshots,
+    fieldInfos,
+    metadata,
+    dmlMaxRows,
+    dmlMaxSubtableRows,
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
+
+  assertApplyPublicWriteScope("phase15b", stmt);
+  const diagnostic = buildPreparedApplyUpdateDiagnostic(prepared);
+  if (options.confirm) {
+    const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic);
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+      applyDiagnostic: diagnostic,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+  const result = await executePreparedApplyWrite(prepared, client, diagnostic);
+  return { ...result, diagnostic: withApplyDiagnosticProgress(diagnostic, result) };
+}
+
+function materializePreparedApplyInsertValidation(
+  stmt: InsertStatement,
+  prepared: PreparedApplyInsert,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  const errors = prepared.validations.flatMap((validation) => validation.errors);
+  const invalidRows = prepared.validations.reduce(
+    (sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0),
+    0
+  );
+  const columns = prepared.validations[0]?.columns
+    ? [...prepared.validations[0].columns]
+    : [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const parentRows = prepared.guards.parentRows;
+  const diagnostic = buildPreparedApplyInsertDiagnostic(prepared);
+  const branch = diagnostic.branches[0];
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "INSERT",
+    validatedRows: parentRows,
+    validRows: parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: applyValidationDetailsFromBranch(branch),
+    guards: applyGuardFromDiagnosticBranch(branch),
+    deletedRows: { total: 0, parentRows: 0 },
+    diagnostic,
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
+}
+
+function materializePreparedApplyValidation(
+  stmt: UpdateStatement,
+  prepared: PreparedApplyWrite,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  const validations = prepared.validations;
+  const errors = validations.flatMap((validation) => validation.errors);
+  const invalidRows = validations.reduce((sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0), 0);
+  const columns = validations[0]?.columns
+    ? [...validations[0].columns]
+    : [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.assignments.map((assignment) => assignment.field)).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const diagnostic = buildPreparedApplyUpdateDiagnostic(prepared);
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "UPDATE",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: applyValidationDetailsFromBranch(diagnostic.branches[0]),
+    guards: applyGuardFromDiagnosticBranch(diagnostic.branches[0]),
+    deletedRows: {
+      total: prepared.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0),
+        0
+      ),
+      parentRows: prepared.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
+    },
+    diagnostic,
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
+}
+
+function materializePreparedApplyUpsertValidation(
+  stmt: UpsertStatement,
+  prepared: PreparedApplyUpsert,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  const createErrors = prepared.create.validations.flatMap((validation) => validation.errors);
+  const updateErrors = prepared.update.validations.flatMap((validation) => validation.errors);
+  const errors: ProcessRow[] = [...createErrors, ...updateErrors].map((error): ProcessRow => ({
+    ...error,
+    $err_operation: "UPSERT",
+  }));
+  const invalidRows = new Set(errors.map((error) => error.$err_row)).size;
+  const columns = prepared.create.validations[0]?.columns
+    ?? prepared.update.validations[0]?.columns
+    ?? [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const diagnostic = buildPreparedApplyUpsertDiagnostic(prepared);
+  const insertBranch = diagnostic.branches.find((branch) => branch.branch === "insert")!;
+  const updateBranch = diagnostic.branches.find((branch) => branch.branch === "update")!;
+  const createApply = applyValidationDetailsFromBranch(insertBranch);
+  const updateApply = applyValidationDetailsFromBranch(updateBranch);
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "UPSERT",
+    validatedRows: prepared.guards.parentRows,
+    validRows: prepared.guards.parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns: [...columns],
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: [...createApply, ...updateApply],
+    guards: {
+      revisionRequired: prepared.guards.revisionRequired,
+      parentRows: prepared.guards.parentRows,
+      dmlMaxRows: prepared.guards.dmlMaxRows,
+      subtableRows: prepared.guards.subtableRows,
+      dmlMaxSubtableRows: prepared.guards.dmlMaxSubtableRows,
+      wouldExceed: prepared.guards.wouldExceed,
+    },
+    applyBranches: {
+      create: { apply: createApply, guards: applyGuardFromDiagnosticBranch(insertBranch) },
+      update: { apply: updateApply, guards: applyGuardFromDiagnosticBranch(updateBranch) },
+    },
+    deletedRows: {
+      total: prepared.update.plans.reduce(
+        (sum, plan) => sum + plan.tables.reduce((tableSum, table) => tableSum + table.deletedRows, 0), 0
+      ),
+      parentRows: prepared.update.plans.filter((plan) => plan.tables.some((table) => table.deletedRows > 0)).length,
+    },
+    diagnostic,
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta([...columns], fieldInfos, stmt.appId));
+  return result;
+}
+
+function applyValidationDetailsFromBranch(branch: ApplyDiagnosticBranch): ApplyValidationDetail[] {
+  return branch.targets.map((target): ApplyValidationDetail => {
+    const operations = target.operations.map((operation) => ({
+      kind: operation.kind,
+      ...(operation.matchedRows !== undefined ? { matchedRows: operation.matchedRows ?? undefined } : {}),
+      ...(operation.changedRows !== undefined ? { changedRows: operation.changedRows ?? undefined } : {}),
+      ...(operation.addedRows !== undefined ? { addedRows: operation.addedRows ?? undefined } : {}),
+      ...(operation.removedRows !== undefined ? { removedRows: operation.removedRows ?? undefined } : {}),
+      ...(operation.value !== undefined ? { value: operation.value } : {}),
+      ...(operation.changed !== undefined ? { changed: operation.changed } : {}),
+    }));
+    if (target.targetKind === "SUBTABLE") {
+      return {
+        field: target.field,
+        operations,
+        changedSubtableRows: target.changedCount ?? 0,
+        deletedRows: operationCount(target, "REMOVE"),
+      };
+    }
+    return {
+      field: target.field,
+      operations,
+      changedSubtableRows: 0,
+      deletedRows: 0,
+      multiValue: {
+        fieldType: target.fieldType ?? "UNKNOWN",
+        addedValues: operationCount(target, "ADD"),
+        removedValues: operationCount(target, "REMOVE_VALUE"),
+        changedValues: target.changedCount ?? 0,
+        postImages: target.postImages ?? [],
+      },
+    };
+  });
+}
+
+function applyGuardFromDiagnosticBranch(branch: ApplyDiagnosticBranch): ApplyGuardDetail {
+  if (branch.guards.parentRows === null || branch.guards.subtableRows === null
+      || branch.guards.wouldExceed === null) {
+    throw new Error("InternalError: runtime APPLY diagnostic guard contains unknown counts.");
+  }
+  return {
+    revisionRequired: branch.guards.revisionRequired,
+    parentRows: branch.guards.parentRows,
+    dmlMaxRows: branch.guards.dmlMaxRows,
+    subtableRows: branch.guards.subtableRows,
+    dmlMaxSubtableRows: branch.guards.dmlMaxSubtableRows,
+    wouldExceed: branch.guards.wouldExceed,
+  };
+}
+
+/** APPLY 二重ガードの既定値。親は最大100件、子は1年分の日次データ（366行）を
+ *  1文で扱えるよう 500 とする（kintone 制約由来ではなく、修復用途を賄う保守的既定）。 */
+export const DEFAULT_APPLY_MAX_ROWS = 100;
+export const DEFAULT_APPLY_MAX_SUBTABLE_ROWS = 500;
+
+function resolveApplyGuardLimit(value: number | undefined, name: string, fallback: number): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+  return resolved;
+}
+
+function applyValidationColumnMeta(
+  columns: readonly string[],
+  fieldInfos: readonly KintoneFieldInfo[],
+  appId: number
+): MaterializedColumnMetaMap {
+  const fields = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
+  const numericMeta = new Set(["$id", "$err_statement", "$err_row"]);
+  const meta = new Map<string, MaterializedColumnMeta>();
+  for (const column of columns) {
+    if (column === "$id") {
+      meta.set(column, {
+        sortKind: "number",
+        fieldType: "RECORD_NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "RECORD_NUMBER" }),
+      });
+      continue;
+    }
+    const field = fields.get(column);
+    if (field) {
+      meta.set(column, materializedMetaFromFieldInfo(field, appId));
+      continue;
+    }
+    meta.set(column, syntheticColumnMeta(numericMeta.has(column) ? "number" : "string"));
+  }
+  return meta;
 }
 
 async function executeUpdateFrom(
@@ -5694,6 +6603,9 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
+  if (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length) {
+    return executeApplyUpsert(stmt, client, options, cacheContext);
+  }
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
@@ -5703,17 +6615,7 @@ async function executeUpsert(
   const toUpdate: { id: number; record: KintoneRecord }[] = [];
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
-  const rowKeyValues: string[][] = stmt.values.map((row) =>
-    stmt.keyFields.map((key) => {
-      const idx = stmt.fields.indexOf(key);
-      if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
-      const val = row[idx];
-      return val.type === "STRING" ? val.value
-        : val.type === "NUMBER" ? numberLiteralText(val)
-        : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
-        : val.elements.map((e) => e.value).join(",");
-    })
-  );
+  const rowKeyValues = buildUpsertRowKeyValues(stmt);
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   stmt.values.forEach((row, rowIdx) => {
@@ -5763,6 +6665,18 @@ async function executeUpsert(
     insertedCount: createdIds.flat().length,
     updatedCount:  toUpdate.length,
   };
+}
+
+function buildUpsertRowKeyValues(stmt: UpsertStatement): string[][] {
+  return stmt.values.map((row) => stmt.keyFields.map((key) => {
+    const idx = stmt.fields.indexOf(key);
+    if (idx === -1) throw new Error(`ON DUPLICATE のキー「${key}」が INSERT フィールドに含まれていません`);
+    const val = row[idx];
+    return val.type === "STRING" ? val.value
+      : val.type === "NUMBER" ? numberLiteralText(val)
+      : val.type === "CASE_VALUE" ? evalCaseWhen(val.expr, {})
+      : val.elements.map((element) => element.value).join(",");
+  }));
 }
 
 // ============================================================
@@ -5908,7 +6822,7 @@ async function executeUpdateSubtable(
       if (a.field.startsWith("_")) {
         throw new Error(`サブテーブル UPDATE でシステム列「${a.field}」は更新できません`);
       }
-      updates[a.field] = { value: evalAssignmentValueForSubtable(a.value, t.flat, resolveFieldType) };
+      updates[a.field] = { value: evaluateSubtableAssignmentValue(a.value, t.flat, resolveFieldType) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -6007,16 +6921,12 @@ function expandRowsForSubtableDml(parents: KintoneRecord[], subtableCode: string
     for (let i = 0; i < tableRows.length; i++) {
       const row = tableRows[i];
       const flat: ProcessRow = {
+        ...flattenSubtableSnapshotRow(row, i),
         _pid: parentId,
-        _rid: row.id ?? "",
-        _idx: String(i),
       };
       for (const [k, v] of Object.entries(parent)) {
         if (k === subtableCode) continue;
         flat[`_p.${k}`] = normalizeUnknownToString(v?.value);
-      }
-      for (const [k, v] of Object.entries(row.value ?? {})) {
-        flat[k] = normalizeUnknownToString(v?.value);
       }
       out.push({ parent, parentId, parentRevision, rowIndex: i, rowId: row.id ?? "", row, flat });
     }
@@ -6105,18 +7015,6 @@ function buildSubtableReorderPutParams(
       },
     ],
   };
-}
-
-function evalAssignmentValueForSubtable(
-  value: Extract<Awaited<ReturnType<typeof parseSql>>, { type: "UPDATE" }>["assignments"][number]["value"],
-  row: ProcessRow,
-  resolveFieldType?: FieldTypeResolver
-): string {
-  if (value.type === "STRING") return value.value;
-  if (value.type === "NUMBER") return numberLiteralText(value);
-  if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
-  throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
 function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number; raw?: string } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr }): string {
@@ -6412,6 +7310,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
+    assertApplyScope("phase15b", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -6751,6 +7650,11 @@ async function buildExplainWhereAnalysis(
       });
     } else if (typed["type"] === "UPDATE" || typed["type"] === "DELETE") {
       fieldApps.add((node as UpdateStatement | DeleteStatement).appId);
+      if (typed["type"] === "UPDATE" && (node as UpdateStatement).applyBlocks?.length) {
+        const update = node as UpdateStatement;
+        const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
+        resolveApplyPatchMetadata(update, fields);
+      }
       await assertDmlWhereCapability(
         node as UpdateStatement | DeleteStatement,
         tracedClient,
@@ -6821,7 +7725,9 @@ export async function buildBatchExplainPlans(
   cacheContext = "batch-explain",
   maxRecords = 10_000,
   cursorMaxActive = 2,
-  enableImport = false
+  enableImport = false,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
@@ -6841,7 +7747,9 @@ export async function buildBatchExplainPlans(
         planStmt,
         analysis.statements[i],
         whereAnalysis.capabilities,
-        whereAnalysis.orderPlans
+        whereAnalysis.orderPlans,
+        dmlMaxRows,
+        dmlMaxSubtableRows
       ), cursorMaxActive);
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
@@ -6865,7 +7773,9 @@ function buildBatchStatementPlan(
   stmt: Statement,
   info: BatchAnalysis["statements"][number],
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
@@ -6924,6 +7834,9 @@ function buildBatchStatementPlan(
     });
     return lines;
   }
+  if (stmt.type === "UPDATE" && (stmt.applyBlocks?.length ?? 0) > 0) {
+    return buildExplainPlan(stmt, undefined, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows);
+  }
   return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
 }
 
@@ -6979,13 +7892,18 @@ async function executeExplain(
   client: KintoneClient,
   cacheContext: string,
   maxRecords: number,
-  cursorMaxActive: number
+  cursorMaxActive: number,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): Promise<SelectResult> {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
   const lines = [
     ...explainMetadataLines(analysis),
     ...addCursorConcurrency(
-      buildExplainPlan(stmt.query, undefined, analysis.capabilities, analysis.orderPlans),
+      buildExplainPlan(
+        stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
+        dmlMaxRows, dmlMaxSubtableRows
+      ),
       cursorMaxActive
     ),
   ];
@@ -7013,15 +7931,19 @@ function buildExplainPlan(
   query: ExplainStatement["query"],
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
   if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
-  if (query.type === "INSERT")        return buildInsertPlan(query, label);
+  if (query.type === "INSERT")        return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
-  if (query.type === "UPSERT")        return buildUpsertPlan(query, label);
+  if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
-  if (query.type === "UPDATE")        return buildUpdatePlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPDATE")        return buildUpdatePlan(
+    query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows
+  );
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
   if (query.type === "VALIDATE")      return buildValidatePlan(query, label);
@@ -7357,7 +8279,12 @@ function collectSubqueryPlans(
 // EXPLAIN — DML プラン
 // ============================================================
 
-function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
+function buildInsertPlan(
+  stmt: InsertStatement,
+  label?: string,
+  dmlMaxRows = DEFAULT_APPLY_MAX_ROWS,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+): string[] {
   const totalRows   = stmt.values.length;
   const batchCount  = Math.ceil(totalRows / 100);
   const lines: string[] = [];
@@ -7367,7 +8294,9 @@ function buildInsertPlan(stmt: InsertStatement, label?: string): string[] {
   lines.push(`  records: ${totalRows} 件（バッチ ${batchCount} 回 × 最大 100 件）`);
   lines.push(`  api:     POST /k/v1/records.json × ${batchCount}`);
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
-  return lines;
+  return stmt.applyBlocks?.length
+    ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))]
+    : lines;
 }
 
 function buildInsertSelectPlan(
@@ -7391,8 +8320,13 @@ function buildUpdatePlan(
   stmt: UpdateStatement,
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  dmlMaxRows = 100,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
+  if (stmt.applyBlocks?.length) {
+    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows);
+  }
   const isArith  = hasArithAssignment(stmt);
   const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
   const isRowDependent = hasRowDependentAssignment(stmt);
@@ -7442,6 +8376,54 @@ function buildUpdatePlan(
   return lines;
 }
 
+function buildUpdateApplyPlan(
+  stmt: UpdateStatement,
+  label: string | undefined,
+  dmlMaxRows: number,
+  dmlMaxSubtableRows: number
+): string[] {
+  const diagnostic = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
+  const branch = diagnostic.branches[0];
+  const blocks = stmt.applyBlocks!;
+  const operations: ApplyOperation[] = blocks.flatMap((block) => [...block.operations] as ApplyOperation[]);
+  const selectorKinds = operations.map((operation) => {
+    if (operation.kind === "APPEND") return "APPEND";
+    if (operation.kind === "ADD" || operation.kind === "REMOVE_VALUE") return "VALUE_LITERAL";
+    if (operation.selector.kind === "ALL_ROWS") return "ALL_ROWS";
+    const where = operation.selector.where;
+    return where.type === "BINARY" && where.op === "=" && where.left.type === "FIELD"
+      && where.left.tableAlias === null && where.left.field === "_rid"
+      ? "_rid"
+      : "SAFE_PREDICATE";
+  });
+  const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
+  const hasRemove = operationKinds.includes("REMOVE");
+  return [
+    ...(label ? [label] : []),
+    "statement:              UPDATE APPLY",
+    `target app:             APP${stmt.appId}`,
+    `parent selector:        ${safeWhereToKintone(stmt.where)}`,
+    "parent cardinality:     single",
+    `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
+    `operations:             ${operationKinds.join(" | ")}`,
+    `selector:               ${selectorKinds.join(" | ")}`,
+    "snapshot evaluation:    yes",
+    "inserted rows visible:  no",
+    "revision guard:         required",
+    "revision:               unknown (records API not called)",
+    `payload preservation:   row ids=yes, row order=yes, unpatched cells=yes, remove tables=${hasRemove ? "FULL_SURVIVORS" : "none"}`,
+    "post-image validation:  required (B43 equivalent)",
+    "parent rows:            unknown (records API not called)",
+    "matched subtable rows:  unknown (records API not called)",
+    "validation errors:      unknown (records API not called)",
+    `deleted rows:           ${hasRemove ? "unknown (records API not called)" : "0 (static without REMOVE)"}`,
+    `dmlMaxRows:             ${dmlMaxRows}`,
+    `dmlMaxSubtableRows:     ${dmlMaxSubtableRows}`,
+    "MCP mutation:           disabled in v1",
+    ...formatStaticApplyDiagnostic(diagnostic),
+  ];
+}
+
 function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
@@ -7454,10 +8436,15 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   return lines;
 }
 
-function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
+function buildUpsertPlan(
+  stmt: UpsertStatement,
+  label?: string,
+  dmlMaxRows = DEFAULT_APPLY_MAX_ROWS,
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+): string[] {
   const totalRows  = stmt.values.length;
   const batchCount = Math.ceil(totalRows / 100);
-  return [
+  const lines = [
     ...(label ? [label] : []),
     `  [UPSERT]`,
     `  target:     APP${stmt.appId} (${stmt.appId})`,
@@ -7466,6 +8453,34 @@ function buildUpsertPlan(stmt: UpsertStatement, label?: string): string[] {
     `  fields:     ${stmt.fields.join(", ")}`,
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json × ${batchCount}`,
   ];
+  return stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length
+    ? [...lines, ...formatStaticApplyDiagnostic(buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows))]
+    : lines;
+}
+
+function formatStaticApplyDiagnostic(diagnostic: ApplyDiagnostic): string[] {
+  const lines = [
+    `apply diagnostic:       ${diagnostic.statementKind}`,
+    `non-transactional:      ${diagnostic.nonTransactional}`,
+    `partial success:        ${diagnostic.partialSuccess.possible ? "possible" : "none"}`,
+  ];
+  for (const branch of diagnostic.branches) {
+    lines.push(
+      `apply branch:           ${branch.branch}`,
+      `  parent rows:          ${branch.parentRows === null ? "unknown (records API not called)" : branch.parentRows}`,
+      `  chunks:               ${branch.chunk.plannedChunks === null ? "unknown" : branch.chunk.plannedChunks} × max ${branch.chunk.size}`,
+      `  revision guard:       ${branch.guards.revisionRequired ? "required" : "not required"}`
+    );
+    for (const target of branch.targets) {
+      lines.push(
+        `  target:               ${target.field} (${target.targetKind})`,
+        `    operations:         ${target.operations.map((operation) => `${operation.kind}=${operation.count === null ? "unknown" : operation.count}`).join(" | ")}`,
+        `    changed count:      ${target.changedCount === null ? "unknown" : target.changedCount}`
+      );
+    }
+  }
+  lines.push("records API:            0", "mutation API:           0");
+  return lines;
 }
 
 function buildUpsertSelectPlan(

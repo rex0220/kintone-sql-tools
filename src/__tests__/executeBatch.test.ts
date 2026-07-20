@@ -104,6 +104,35 @@ test("B10-B: SELECT 変数列を既存 literal/number 列へ解決し CONCAT を
   expect(client.getCalls[0].query).not.toContain("X");
 });
 
+test("B44 Phase 4: APPLY の未完了planは文単位fail-fastとなり後続文を書かない", async () => {
+  const record = makeTypedRecord({
+    $id: "8",
+    $revision: "3",
+    親: "before",
+    テーブル: Array.from({ length: 101 }, (_, index) => ({
+      id: String(101 + index),
+      value: { 子: { value: "old" } },
+    })),
+  });
+  const client = makeClient({ recordsByApp: { 4221: [record] } });
+  client.getFields = async () => [
+    { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+    { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  ];
+  const result = await executeBatch(
+    "UPDATE APP4221 SET 親='first' WHERE $id=8 APPLY テーブル (PATCH SET 子='x' ALL ROWS); " +
+    "UPDATE APP4221 SET 親='second' WHERE $id=8",
+    client,
+    { cacheContext: "apply-batch-fail-fast", allowApplyMutation: true, dmlMaxRows: 1, dmlMaxSubtableRows: 100 }
+  );
+  expect(result.ok).toBe(false);
+  expect(result.statements[0]).toMatchObject({ status: "error" });
+  expect(result.statements[0].error?.message).toContain("dmlMaxSubtableRows (100)");
+  expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+  expect(client.putCalls).toHaveLength(0);
+});
+
 test("B3: 非空配列を literal IN に展開し、空配列を親 aware に簡約する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const expanded = await executeBatch(

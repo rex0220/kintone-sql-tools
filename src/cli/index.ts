@@ -12,6 +12,7 @@ import {
   executeBatch,
   buildBatchExplainPlans,
   formatDisplayText,
+  ApplyWritePartialFailureError,
   OperationCancelledError,
   parseSqlStatement,
   parseSqlStatements,
@@ -26,6 +27,8 @@ import {
   type DmlValidationResult,
   type ExecuteResult,
   type DmlConfirmContext,
+  type ApplyDiagnostic,
+  type ApplyWriteFailureDetail,
   type KintoneClient,
   type SelectResult,
 } from "../core";
@@ -128,7 +131,8 @@ Options:
   --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT/REORDER execution
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
-  --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
+  --dml-max-rows <n>         Max affected parent rows for DML/APPLY guard (default: 100)
+  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard; multi-value fields excluded (default: 500)
   --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
@@ -166,6 +170,8 @@ interface CliConfig {
     allowPhysicalAppRefs?: boolean;
     query?: {
       maxRecords?: number;
+      /** APPLY で変更できる子行数上限（既定 100）。 */
+      dmlMaxSubtableRows?: number;
       fetchParallel?: number;
       onLimit?: OnLimitMode;
       timeout?: number;
@@ -244,6 +250,7 @@ interface ParsedArgs {
   allowWithoutWhere: boolean;
   continueOnError: boolean;
   dmlMaxRows: number | null;
+  dmlMaxSubtableRows: number | null;
   maxConcurrent: number | null;
   cursorMaxActive: number | null;
   retry: number | null;
@@ -300,6 +307,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     allowWithoutWhere: false,
     continueOnError: false,
     dmlMaxRows: null,
+    dmlMaxSubtableRows: null,
     maxConcurrent: null,
     cursorMaxActive: null,
     retry: null,
@@ -485,6 +493,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
       continue;
     }
+    if (a === "--dml-max-subtable-rows") {
+      const n = Number(v);
+      if (!Number.isSafeInteger(n) || n <= 0) throw new Error("ArgumentError: --dml-max-subtable-rows must be a positive integer.");
+      out.dmlMaxSubtableRows = n;
+      i++;
+      continue;
+    }
     if (a === "--max-concurrent") {
       const n = Number(v);
       if (!Number.isInteger(n) || n < 1 || n > 50) throw new Error("ArgumentError: --max-concurrent must be an integer between 1 and 50.");
@@ -596,6 +611,107 @@ function normalizeUnique(values: string[]): string[] {
     out.push(v);
   }
   return out;
+}
+
+function diagnosticCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? "unknown" : String(value);
+}
+
+function diagnosticOperationCount(
+  target: ApplyDiagnostic["branches"][number]["targets"][number],
+  kind: ApplyDiagnostic["branches"][number]["targets"][number]["operations"][number]["kind"]
+): number | null {
+  const operations = target.operations.filter((operation) => operation.kind === kind);
+  if (operations.some((operation) => operation.count === null)) return null;
+  return operations.reduce((sum, operation) => sum + (operation.count ?? 0), 0);
+}
+
+/** CLI renders the Phase 16a shared diagnostic directly; no surface-local recounting. */
+export function formatApplyDiagnosticLines(detail: ApplyDiagnostic): string[] {
+  const parentRows = detail.branches.reduce<number | null>(
+    (sum, branch) => sum === null || branch.parentRows === null ? null : sum + branch.parentRows,
+    0
+  );
+  const plannedChunks = detail.branches.reduce<number | null>(
+    (sum, branch) => sum === null || branch.chunk.plannedChunks === null ? null : sum + branch.chunk.plannedChunks,
+    0
+  );
+  const subtableTargets = detail.branches.flatMap((branch) =>
+    branch.targets.filter((target) => target.targetKind === "SUBTABLE")
+  );
+  const changedSubtableRows = subtableTargets.reduce<number | null>(
+    (sum, target) => sum === null || target.changedCount === null ? null : sum + target.changedCount,
+    0
+  );
+  const addedSubtableRows = subtableTargets.reduce<number | null>((sum, target) => {
+    const count = diagnosticOperationCount(target, "APPEND");
+    return sum === null || count === null ? null : sum + count;
+  }, 0);
+  const deletedRows = subtableTargets.reduce<number | null>((sum, target) => {
+    const count = diagnosticOperationCount(target, "REMOVE");
+    return sum === null || count === null ? null : sum + count;
+  }, 0);
+  const deletedParentRows = detail.branches.reduce<number | null>(
+    (sum, branch) => sum === null || branch.deletedParentRows === null ? null : sum + branch.deletedParentRows,
+    0
+  );
+  const revisionRequired = detail.branches.some((branch) => branch.guards.revisionRequired);
+  const lines = [
+    `[APPLY Confirm] statement=${detail.statementKind} parents=${diagnosticCount(parentRows)} chunks=${diagnosticCount(plannedChunks)} chunkSize=100`
+    + ` changedSubtableRows=${diagnosticCount(changedSubtableRows)} addedSubtableRows=${diagnosticCount(addedSubtableRows)}`,
+  ];
+  for (const branch of detail.branches) {
+    const initialSubtableRows = branch.branch === "insert"
+      ? branch.targets.filter((target) => target.targetKind === "SUBTABLE")
+        .reduce<number | null>((sum, target) => sum === null || target.changedCount === null ? null : sum + target.changedCount, 0)
+      : undefined;
+    lines.push(
+      `branch=${branch.branch} parents=${diagnosticCount(branch.parentRows)}`
+      + (branch.branch === "insert" ? ` createdParents=${diagnosticCount(branch.parentRows)} initialSubtableRows=${diagnosticCount(initialSubtableRows)}` : "")
+      + ` chunks=${diagnosticCount(branch.chunk.plannedChunks)}`
+    );
+    for (const target of branch.targets) {
+      if (target.targetKind === "SUBTABLE") {
+        lines.push(
+          `table=${target.field} PATCH=${diagnosticCount(diagnosticOperationCount(target, "PATCH"))}`
+          + ` APPEND=${diagnosticCount(diagnosticOperationCount(target, "APPEND"))}`
+          + ` REMOVE=${diagnosticCount(diagnosticOperationCount(target, "REMOVE"))}`
+        );
+      } else {
+        lines.push(
+          `multiValue=${target.field} fieldType=${target.fieldType ?? "UNKNOWN"}`
+          + ` ADD=${diagnosticCount(diagnosticOperationCount(target, "ADD"))}`
+          + ` REMOVE=${diagnosticCount(diagnosticOperationCount(target, "REMOVE_VALUE"))}`
+        );
+      }
+    }
+    lines.push(
+      `branch=${branch.branch} deletedParents=${diagnosticCount(branch.deletedParentRows)}`
+      + ` revisionRequired=${branch.guards.revisionRequired}`
+      + ` guardParents=${diagnosticCount(branch.guards.parentRows)}/${branch.guards.dmlMaxRows}`
+      + ` guardSubtableRows=${diagnosticCount(branch.guards.subtableRows)}/${branch.guards.dmlMaxSubtableRows}`
+    );
+  }
+  lines.push(
+    `deleted=${diagnosticCount(deletedRows)} deletedParents=${diagnosticCount(deletedParentRows)} revisionRequired=${revisionRequired}`,
+    "revision conflict retry=false",
+    "irreversible=true"
+  );
+  lines.push("WARNING: nonTransactional=true partialSuccessPossible=true retryOnRevisionConflict=false; a later chunk may fail after earlier parents committed.");
+  return lines;
+}
+
+function formatApplyPartialSuccessLines(detail: ApplyWriteFailureDetail): string[] {
+  const failedBranch = detail.failedBranch
+    ?? detail.diagnostic?.partialSuccess.failedBranch?.toUpperCase();
+  return [
+    `[APPLY Partial Success] successfulChunks=${detail.successfulChunks} successfulParents=${detail.successfulParents}`
+    + (detail.successfulInserts !== undefined ? ` successfulInserts=${detail.successfulInserts}` : "")
+    + (detail.successfulUpdates !== undefined ? ` successfulUpdates=${detail.successfulUpdates}` : "")
+    + (failedBranch !== undefined ? ` failedBranch=${failedBranch}` : "")
+    + ` failedStage=${detail.failedStage} failedChunk=${detail.failedChunkIndex + 1}`,
+    "WARNING: already successful writes remain committed; APPLY is non-transactional and no retry was attempted.",
+  ];
 }
 
 function isSystemLikeFieldCode(code: string): boolean {
@@ -810,7 +926,22 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     const r = s.result;
     parts.push(`validated=${r.validatedRows} valid=${r.validRows} invalid=${r.invalidRows} errors=${r.errorCount}`);
   }
-  if (s.status === "error" && s.error) parts.push(s.error.message);
+  if (s.status === "error" && s.error) {
+    parts.push(s.error.message);
+    const partial = s.error.partialSuccess;
+    if (partial) {
+      const failedBranch = partial.failedBranch
+        ?? partial.diagnostic?.partialSuccess.failedBranch?.toUpperCase();
+      parts.push(
+        `partialSuccess successfulChunks=${partial.successfulChunks} successfulParents=${partial.successfulParents}`,
+        ...(partial.successfulInserts !== undefined ? [`successfulInserts=${partial.successfulInserts}`] : []),
+        ...(partial.successfulUpdates !== undefined ? [`successfulUpdates=${partial.successfulUpdates}`] : []),
+        ...(failedBranch !== undefined ? [`failedBranch=${failedBranch}`] : []),
+        `failedStage=${partial.failedStage}`,
+        `failedChunk=${partial.failedChunkIndex + 1}`
+      );
+    }
+  }
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
   return parts.join(" ");
 }
@@ -1076,6 +1207,7 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   pushOpt(argv, "--date-format", base.dateFormat);
   pushOpt(argv, "--attachment-format", base.attachmentFormat);
   pushOpt(argv, "--dml-max-rows", base.dmlMaxRows);
+  pushOpt(argv, "--dml-max-subtable-rows", base.dmlMaxSubtableRows);
   pushOpt(argv, "--max-concurrent", base.maxConcurrent);
   pushOpt(argv, "--cursor-max-active", base.cursorMaxActive);
   pushOpt(argv, "--retry", base.retry);
@@ -1452,6 +1584,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             `resolved-app-profiles=${lastResolvedProfiles}`,
             `allow-dml=${base.allowDml ? "on" : "off"}`,
             `dml-max-rows=${base.dmlMaxRows ?? "(default)"}`,
+            `dml-max-subtable-rows=${base.dmlMaxSubtableRows ?? "(default)"}`,
           ];
           process.stdout.write(`${lines.join("\n")}\n`);
           continue;
@@ -1630,6 +1763,8 @@ async function run(): Promise<number> {
   let isBatchSql = false;
   let batchContainsDml = false;
   let batchAnalysis: BatchAnalysis | null = null;
+  let containsApplyStatement = false;
+  let containsApplyMutation = false;
   let dryRunNeedsMetadata = false;
   if (args.diagRecordId === null) {
     sql = args.executeSql;
@@ -1659,6 +1794,20 @@ async function run(): Promise<number> {
     const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     try {
       const statements = parseSqlStatements(sql, { import: importEnabled });
+      const hasApply = (statement: typeof statements[number]): boolean =>
+        (statement.type === "UPDATE" || statement.type === "INSERT")
+          ? (statement.applyBlocks?.length ?? 0) > 0
+          : statement.type === "UPSERT"
+            ? (statement.onInsertApplyBlocks?.length ?? 0) > 0 || (statement.onUpdateApplyBlocks?.length ?? 0) > 0
+            : false;
+      containsApplyStatement = statements.some(hasApply);
+      containsApplyMutation = statements.some((statement) => {
+        if (!hasApply(statement)) return false;
+        if (statement.type === "UPDATE" || statement.type === "INSERT" || statement.type === "UPSERT") {
+          return statement.validateOnly !== true;
+        }
+        return false;
+      });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
@@ -1741,6 +1890,10 @@ async function run(): Promise<number> {
   const yes = args.yes || envBool("KSQL_YES") === true || Boolean(profile.dml?.yes);
   const allowWithoutWhere = args.allowWithoutWhere || envBool("KSQL_ALLOW_WITHOUT_WHERE") === true || Boolean(profile.dml?.allowWithoutWhere);
   const dmlMaxRows = args.dmlMaxRows ?? envInt("KSQL_DML_MAX_ROWS") ?? profile.dml?.maxRows ?? 100;
+  const dmlMaxSubtableRows = args.dmlMaxSubtableRows
+    ?? envInt("KSQL_DML_MAX_SUBTABLE_ROWS")
+    ?? profile.query?.dmlMaxSubtableRows
+    ?? 500;
   const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
     parsedStmt !== null && typeof parsedStmt === "object" &&
     "validateOnly" in parsedStmt && parsedStmt.validateOnly === true
@@ -2076,7 +2229,9 @@ async function run(): Promise<number> {
   if (isBatchSql && args.dryRun) {
     try {
       const plans = await buildBatchExplainPlans(
-        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive, Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0
+        sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
+        Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
+        dmlMaxRows, dmlMaxSubtableRows
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2145,6 +2300,9 @@ async function run(): Promise<number> {
         ];
         process.stderr.write(`${lines.join("\n")}\n`);
       }
+      if (context?.applyDiagnostic) {
+        process.stderr.write(`${formatApplyDiagnosticLines(context.applyDiagnostic).join("\n")}\n`);
+      }
       if (yes) return true;
       if (args.console) return true;
       const label = sql?.replace(/\s+/g, " ").trim() ?? operation;
@@ -2177,6 +2335,11 @@ async function run(): Promise<number> {
         enableImport: importEnabled,
         importSource,
         supportsImportConfirmDetail: true,
+        ...(containsApplyStatement ? {
+          dmlMaxRows,
+          dmlMaxSubtableRows,
+        } : {}),
+        ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
         confirm: batchContainsDml
           ? async (count, operation, context) => {
             if (count > dmlMaxRows) {
@@ -2186,6 +2349,9 @@ async function run(): Promise<number> {
               const importDetail = context.importDetail;
               if (importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE") process.stderr.write(`【最重要警告】サブテーブル全置換・${importDetail.totalDeleteRows}行削除\n`);
               process.stderr.write(`[IMPORT ${importDetail.kind === "IMPORT_CSV_SUBTABLE_REPLACE" ? "CSV" : "JSON"} Confirm] ${JSON.stringify(importDetail)}\n`);
+            }
+            if (context?.applyDiagnostic) {
+              process.stderr.write(`${formatApplyDiagnosticLines(context.applyDiagnostic).join("\n")}\n`);
             }
             return true;
           }
@@ -2197,6 +2363,7 @@ async function run(): Promise<number> {
     let result = args.dryRun
       ? await execute(`EXPLAIN ${sql}`, client, {
           maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
+          dmlMaxRows, dmlMaxSubtableRows,
         })
       : await execute(sql!, client, {
         maxRecords,
@@ -2208,6 +2375,11 @@ async function run(): Promise<number> {
         enableImport: importEnabled,
         importSource,
         supportsImportConfirmDetail: true,
+        ...(containsApplyStatement ? {
+          dmlMaxRows,
+          dmlMaxSubtableRows,
+        } : {}),
+        ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
       });
     // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）
@@ -2253,9 +2425,18 @@ async function run(): Promise<number> {
           rewriteSegments: sqlDiagnosticContext.rewriteSegments,
         })
       : err;
-    if (restored instanceof OperationCancelledError) {
-      process.stderr.write(`${restored.message}\n`);
+    const cancelled = err instanceof OperationCancelledError
+      ? err
+      : restored instanceof OperationCancelledError ? restored : null;
+    if (cancelled) {
+      process.stderr.write(`${cancelled.message}\n`);
       return 2;
+    }
+    const partialFailure = err instanceof ApplyWritePartialFailureError
+      ? err
+      : restored instanceof ApplyWritePartialFailureError ? restored : null;
+    if (partialFailure) {
+      process.stderr.write(`${formatApplyPartialSuccessLines(partialFailure.partialSuccess).join("\n")}\n`);
     }
     process.stderr.write(`${restored instanceof Error ? restored.message : String(restored)}\n`);
     return toExitCodeFromError(restored);

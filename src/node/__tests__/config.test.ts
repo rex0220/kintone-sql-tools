@@ -17,6 +17,14 @@ describe("logical app config", () => {
         .toThrow(/cursorMaxActive.*1 to 5/);
     }
   });
+  test("query.dmlMaxSubtableRows は正の safe integer だけを受理する", () => {
+    expect(validateKsqlConfig({ profiles: { prod: { query: { dmlMaxSubtableRows: 123 } } } })
+      .profiles?.prod.query?.dmlMaxSubtableRows).toBe(123);
+    for (const dmlMaxSubtableRows of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => validateKsqlConfig({ profiles: { prod: { query: { dmlMaxSubtableRows } } } }))
+        .toThrow(/query\.dmlMaxSubtableRows.*positive safe integer/);
+    }
+  });
   test("logicalApps を受理し、ASCII 大文字キーへ正規化する", () => {
     const config: KsqlConfig = {
       profiles: {

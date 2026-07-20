@@ -99,6 +99,10 @@ import type {
   CheckGroup,
   ValidateStatement,
   ImportStatement,
+  ApplyBlock,
+  ApplyOperation,
+  RowSelector,
+  ExpectRowsGuard,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
@@ -2441,6 +2445,13 @@ export class Parser {
     // INSERT INTO ... SELECT ...
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
+      if (this.isApplyBlockStart()
+        || (this.prev().kind === TokenKind.IDENT
+          && this.prev().value.toUpperCase() === "APPLY"
+          && (this.peek().kind === TokenKind.IDENT || this.peek().kind === TokenKind.BIDENT)
+          && this.peekAt(1).kind === TokenKind.LPAREN)) {
+        throw new ParseError("INSERT INTO ... SELECT は APPLY に対応していません", this.prev());
+      }
       if (subtableCode) {
         throw new ParseError("INSERT INTO ... SELECT はサブテーブル仮想テーブルでは未対応です", this.prev());
       }
@@ -2460,17 +2471,36 @@ export class Parser {
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
 
+    const applyBlocks: ApplyBlock[] = [];
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === TokenKind.IDENT
+      && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
+      throw new ParseError(
+        "APPLY SUBTABLE noun is not supported; use APPLY <field> (...)",
+        this.peek()
+      );
+    }
+    if (applyBlocks.length > 0 && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("APPLY ブロックの後に CHECK は指定できません", this.peek());
+    }
+    if (applyBlocks.length > 0 && (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("ON ERROR SKIP / REJECT LIMIT は APPLY と併用できません", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (this.isSoftKeyword("APPLY")) {
+      throw new ParseError("APPLY は CHECK / VALIDATE ONLY より前に指定してください", this.peek());
+    }
     if (subtableCode && checkGroups.checkGroups) {
       throw new ParseError("CHECK はサブテーブル INSERT に対応していません", this.prev());
     }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル INSERT に対応していません", this.prev());
     }
+    const apply = applyBlocks.length > 0 ? { applyBlocks } : {};
     return subtableCode
-      ? { type: "INSERT", appId, subtableCode, fields, values, ...checkGroups, ...validation }
-      : { type: "INSERT", appId, fields, values, ...checkGroups, ...validation };
+      ? { type: "INSERT", appId, subtableCode, fields, values, ...apply, ...checkGroups, ...validation }
+      : { type: "INSERT", appId, fields, values, ...apply, ...checkGroups, ...validation };
   }
 
   private parseUpsert(): UpsertStatement | UpsertSelectStatement {
@@ -2492,8 +2522,14 @@ export class Parser {
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
       const keyFields = this.parseOnDuplicate();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT は ON INSERT / ON UPDATE APPLY に対応していません", this.peek());
+      }
       const checkGroups = this.parseCheckGroups();
       const validation = this.parseDmlControlSuffix();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT は ON INSERT / ON UPDATE APPLY に対応していません", this.peek());
+      }
       return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...checkGroups, ...validation };
     }
 
@@ -2508,9 +2544,24 @@ export class Parser {
     } while (this.consume(TokenKind.COMMA));
 
     const keyFields = this.parseOnDuplicate();
+    const applyBranches = this.parseUpsertApplyBranches();
+    const hasApplyBranches = applyBranches.onInsertApplyBlocks !== undefined
+      || applyBranches.onUpdateApplyBlocks !== undefined;
+    if (hasApplyBranches && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("UPSERT の分岐 APPLY は CHECK と併用できません", this.peek());
+    }
+    if (hasApplyBranches && (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("UPSERT の分岐 APPLY は ON ERROR SKIP / REJECT LIMIT と併用できません", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
-    return { type: "UPSERT", appId, fields, values, keyFields, ...checkGroups, ...validation };
+    if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+      throw new ParseError("ON INSERT / ON UPDATE APPLY は CHECK / VALIDATE ONLY より前に指定してください", this.peek());
+    }
+    return {
+      type: "UPSERT", appId, fields, values, keyFields,
+      ...applyBranches, ...checkGroups, ...validation,
+    };
   }
 
   private parseOnDuplicate(): string[] {
@@ -2525,6 +2576,38 @@ export class Parser {
       throw new ParseError("ON DUPLICATE にはキーフィールドが最低 1 つ必要です", this.prev());
     }
     return keyFields;
+  }
+
+  private isUpsertApplyBranchStart(): boolean {
+    return this.peek().kind === TokenKind.ON
+      && (this.peekAt(1).kind === TokenKind.INSERT || this.peekAt(1).kind === TokenKind.UPDATE);
+  }
+
+  private parseUpsertApplyBranches(): Pick<UpsertStatement, "onInsertApplyBlocks" | "onUpdateApplyBlocks"> {
+    let onInsertApplyBlocks: ApplyBlock[] | undefined;
+    let onUpdateApplyBlocks: ApplyBlock[] | undefined;
+    while (this.isUpsertApplyBranchStart()) {
+      this.advance(); // ON
+      const branch = this.advance(); // INSERT / UPDATE
+      const isInsert = branch.kind === TokenKind.INSERT;
+      if ((isInsert && onInsertApplyBlocks) || (!isInsert && onUpdateApplyBlocks)) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} APPLY は 1 回だけ指定できます`, branch);
+      }
+      if (!this.isApplyBlockStart()) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} の後には APPLY ブロックが必要です`, this.peek());
+      }
+      const blocks: ApplyBlock[] = [];
+      while (this.isApplyBlockStart()) blocks.push(this.parseApplyBlock());
+      if (isInsert) onInsertApplyBlocks = blocks;
+      else onUpdateApplyBlocks = blocks;
+    }
+    if (this.isApplyBlockStart()) {
+      throw new ParseError("UPSERT の APPLY には ON INSERT または ON UPDATE が必要です", this.peek());
+    }
+    return {
+      ...(onInsertApplyBlocks ? { onInsertApplyBlocks } : {}),
+      ...(onUpdateApplyBlocks ? { onUpdateApplyBlocks } : {}),
+    };
   }
 
   /** 配列リテラル ['val1', 'val2'] を解析して ArrayLiteral を返す */
@@ -2634,6 +2717,19 @@ export class Parser {
     }
     const where = this.parseWhereExpr();
 
+    const applyBlocks: ApplyBlock[] = [];
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === TokenKind.IDENT
+      && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
+      throw new ParseError(
+        "APPLY SUBTABLE noun is not supported; use APPLY <field> (...)",
+        this.peek()
+      );
+    }
+    if (applyBlocks.length > 0 && this.peek().kind === TokenKind.WHERE) {
+      throw new ParseError("親 WHERE は APPLY ブロックより前に指定してください", this.peek());
+    }
+
     if (from !== null) {
       if (subtableCode) {
         throw new ParseError("サブテーブル UPDATE ... FROM はサポートしていません", whereTok);
@@ -2657,18 +2753,154 @@ export class Parser {
       );
     }
 
+    if (applyBlocks.length > 0 && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("APPLY ブロックの後に CHECK は指定できません", this.peek());
+    }
+    if (applyBlocks.length > 0 && (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("ON ERROR SKIP / REJECT LIMIT は APPLY と併用できません", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
+    if (this.isSoftKeyword("APPLY")) {
+      throw new ParseError("APPLY は VALIDATE ONLY より前に指定してください", this.peek());
+    }
     if (subtableCode && checkGroups.checkGroups) {
       throw new ParseError("CHECK はサブテーブル UPDATE に対応していません", this.prev());
     }
     if (subtableCode && (validation.validateOnly || validation.onErrorSkip)) {
       throw new ParseError("VALIDATE ONLY / ON ERROR SKIP はサブテーブル UPDATE に対応していません", this.prev());
     }
-    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...checkGroups, ...validation };
+    const apply = applyBlocks.length > 0 ? { applyBlocks } : {};
+    if (from !== null) return { type: "UPDATE", appId, assignments, where, from, ...apply, ...checkGroups, ...validation };
     return subtableCode
-      ? { type: "UPDATE", appId, subtableCode, assignments, where, ...checkGroups, ...validation }
-      : { type: "UPDATE", appId, assignments, where, ...checkGroups, ...validation };
+      ? { type: "UPDATE", appId, subtableCode, assignments, where, ...apply, ...checkGroups, ...validation }
+      : { type: "UPDATE", appId, assignments, where, ...apply, ...checkGroups, ...validation };
+  }
+
+  private isApplyBlockStart(): boolean {
+    return this.isSoftKeyword("APPLY")
+      && (this.peekAt(1).kind === TokenKind.IDENT || this.peekAt(1).kind === TokenKind.BIDENT)
+      && this.peekAt(2).kind === TokenKind.LPAREN;
+  }
+
+  private parseApplyBlock(): ApplyBlock {
+    this.advance(); // APPLY
+    const field = this.parseIdentifier();
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN || this.peek().kind === TokenKind.SEMICOLON) {
+      throw new ParseError("APPLY ブロックには操作が最低 1 つ必要です", this.peek());
+    }
+    const operations: ApplyOperation[] = [];
+    while (true) {
+      operations.push(this.parseApplyOperation());
+      if (!this.consume(TokenKind.SEMICOLON)) break;
+      if (this.peek().kind === TokenKind.RPAREN) break;
+      if (this.peek().kind === TokenKind.SEMICOLON) {
+        throw new ParseError("APPLY ブロックに空の操作は指定できません", this.peek());
+      }
+    }
+    this.expect(TokenKind.RPAREN, "APPLY ブロックの末尾には ) が必要です");
+    const hasSubtableOperation = operations.some((operation) =>
+      operation.kind === "PATCH" || operation.kind === "APPEND" || operation.kind === "REMOVE"
+    );
+    const hasMultiValueOperation = operations.some((operation) =>
+      operation.kind === "ADD" || operation.kind === "REMOVE_VALUE"
+    );
+    if (hasSubtableOperation && hasMultiValueOperation) {
+      throw new ParseError("1 つの APPLY ブロックに行操作と多値操作は混在できません", this.prev());
+    }
+    return hasMultiValueOperation
+      ? { field, targetKind: "MULTI_VALUE", operations: operations as Extract<ApplyBlock, { targetKind: "MULTI_VALUE" }>["operations"] }
+      : { field, targetKind: "SUBTABLE", operations: operations as Extract<ApplyBlock, { targetKind: "SUBTABLE" }>["operations"] };
+  }
+
+  private parseApplyOperation(): ApplyOperation {
+    if (this.isSoftKeyword("ADD")) {
+      this.advance();
+      const value = this.expect(TokenKind.STRING, "ADD の後には文字列リテラルが必要です").value;
+      return { kind: "ADD", value };
+    }
+    if (this.isSoftKeyword("PATCH")) {
+      this.advance();
+      this.expect(TokenKind.SET, "PATCH の後には SET が必要です");
+      const assignments = this.parseAssignments();
+      const selector = this.parseApplyRowSelector();
+      const expectRows = this.parseExpectRowsGuard();
+      return { kind: "PATCH", assignments, selector, ...(expectRows ? { expectRows } : {}) };
+    }
+    if (this.isSoftKeyword("APPEND")) {
+      this.advance();
+      this.expect(TokenKind.LPAREN, "APPEND の後にはフィールド一覧が必要です");
+      if (this.peek().kind === TokenKind.RPAREN) {
+        throw new ParseError("APPEND のフィールド一覧は空にできません", this.peek());
+      }
+      const fields: string[] = [];
+      do fields.push(this.parseIdentifier()); while (this.consume(TokenKind.COMMA));
+      this.expect(TokenKind.RPAREN);
+      this.expect(TokenKind.VALUES, "APPEND のフィールド一覧の後には VALUES が必要です");
+      const values: InsertRow[] = [];
+      do {
+        this.expect(TokenKind.LPAREN, "APPEND VALUES の各行は ( で始めてください");
+        values.push(this.parseInsertRow(fields.length));
+        this.expect(TokenKind.RPAREN);
+      } while (this.consume(TokenKind.COMMA));
+      return { kind: "APPEND", fields, values };
+    }
+    if (this.isSoftKeyword("REMOVE")) {
+      this.advance();
+      if (this.peek().kind === TokenKind.STRING) {
+        return { kind: "REMOVE_VALUE", value: this.advance().value };
+      }
+      const selector = this.parseApplyRowSelector();
+      const expectRows = this.parseExpectRowsGuard();
+      return { kind: "REMOVE", selector, ...(expectRows ? { expectRows } : {}) };
+    }
+    throw new ParseError("APPLY の操作には PATCH / APPEND / REMOVE / ADD が必要です", this.peek());
+  }
+
+  private parseApplyRowSelector(): RowSelector {
+    if (this.consume(TokenKind.WHERE)) return { kind: "WHERE", where: this.parseWhereExpr() };
+    if (this.consume(TokenKind.ALL)) {
+      if (!this.isSoftKeyword("ROWS")) throw new ParseError("ALL の後には ROWS が必要です", this.peek());
+      this.advance();
+      return { kind: "ALL_ROWS" };
+    }
+    throw new ParseError("PATCH / REMOVE には WHERE または ALL ROWS が必要です", this.peek());
+  }
+
+  private parseExpectRowsGuard(): ExpectRowsGuard | undefined {
+    if (!this.isSoftKeyword("EXPECT")) return undefined;
+    this.advance();
+    if (!this.isSoftKeyword("ROWS")) throw new ParseError("EXPECT の後には ROWS が必要です", this.peek());
+    this.advance();
+    if (this.consume(TokenKind.BETWEEN)) {
+      const min = this.parseExpectRowsCount();
+      this.expect(TokenKind.AND, "EXPECT ROWS BETWEEN の下限と上限は AND で区切ってください");
+      const max = this.parseExpectRowsCount();
+      if (min > max) throw new ParseError("EXPECT ROWS BETWEEN の下限は上限以下にしてください", this.peek());
+      return { kind: "BETWEEN", min, max };
+    }
+    if (this.isSoftKeyword("AT")) {
+      this.advance();
+      if (this.peek().value.toUpperCase() === "LEAST") {
+        this.advance();
+        return { kind: "AT_LEAST", count: this.parseExpectRowsCount() };
+      }
+      if (this.isSoftKeyword("MOST")) {
+        this.advance();
+        return { kind: "AT_MOST", count: this.parseExpectRowsCount() };
+      }
+      throw new ParseError("EXPECT ROWS AT の後には LEAST または MOST が必要です", this.peek());
+    }
+    return { kind: "EXACT", count: this.parseExpectRowsCount() };
+  }
+
+  private parseExpectRowsCount(): number {
+    const tok = this.expect(TokenKind.NUMBER, "EXPECT ROWS には 0 以上の整数が必要です");
+    if (!/^\d+$/.test(tok.value) || !Number.isSafeInteger(Number(tok.value))) {
+      throw new ParseError("EXPECT ROWS は 0 以上の安全な整数で指定してください", tok);
+    }
+    return Number(tok.value);
   }
 
   /** CHECK WHEN ... THEN ... blocks. CHECK is a soft keyword. */

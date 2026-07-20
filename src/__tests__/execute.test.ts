@@ -221,6 +221,119 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
+  const applySql = "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code) "
+    + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial'))";
+
+  const single = makeClient();
+  await expect(execute(applySql, single, { cacheContext: "upsert-apply-closed-single" }))
+    .rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(single.getCalls).toHaveLength(0);
+  expect(single.postCalls).toHaveLength(0);
+  expect(single.putCalls).toHaveLength(0);
+
+  const batch = makeClient({ recordsByApp: { 200: [makeRecord({ value: "x" })] } });
+  await expect(executeBatch(
+    `SELECT value FROM APP200; ${applySql}`,
+    batch,
+    { cacheContext: "upsert-apply-closed-batch" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(batch.getCalls).toHaveLength(0);
+  expect(batch.postCalls).toHaveLength(0);
+  expect(batch.putCalls).toHaveLength(0);
+
+  const plain = makeClient({ records: [], postIds: ["1"], fieldTypes: { code: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code)",
+    plain,
+    { cacheContext: "upsert-no-apply-regression" }
+  )).resolves.toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 0 });
+  expect(plain.postCalls).toHaveLength(1);
+});
+
+test("B44 Phase 15b: 多値 APPLY mutation はallowApplyMutationなしなら単文・バッチともAPI 0で閉じる", async () => {
+  const multiSql = "UPDATE APP100 SET name='after' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')";
+
+  const single = makeClient();
+  await expect(execute(multiSql, single, {
+    cacheContext: "multi-apply-phase15b-single",
+  })).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(single.getCalls).toHaveLength(0);
+  expect(single.postCalls).toHaveLength(0);
+  expect(single.putCalls).toHaveLength(0);
+
+  const batch = makeClient({ recordsByApp: { 200: [makeRecord({ value: "x" })] } });
+  await expect(executeBatch(
+    `SELECT value FROM APP200; ${multiSql}`,
+    batch,
+    { cacheContext: "multi-apply-phase15b-batch" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(batch.getCalls).toHaveLength(0);
+  expect(batch.postCalls).toHaveLength(0);
+  expect(batch.putCalls).toHaveLength(0);
+
+  const subtable = makeClient();
+  await expect(execute(
+    "UPDATE APP100 SET name='after' WHERE $id=1 APPLY rows (REMOVE ALL ROWS)",
+    subtable,
+    { cacheContext: "subtable-apply-phase15a-regression" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(subtable.getCalls).toHaveLength(0);
+});
+
+test("B44 Phase 15b: 多値 APPLY の EXPLAIN はrecords/mutation API 0でsyntax planを返す", async () => {
+  const client = makeClient({ fieldTypes: { name: "SINGLE_LINE_TEXT", tags: "MULTI_SELECT" } });
+  const result = await execute(
+    "EXPLAIN UPDATE APP100 SET name='after' WHERE $id=1 APPLY tags (ADD '重要'; REMOVE '新規')",
+    client,
+    { cacheContext: "multi-apply-phase15b-explain" }
+  );
+  expect(result).toMatchObject({ type: "SELECT" });
+  expect(JSON.stringify(result)).toContain("tags (MULTI_VALUE)");
+  expect(client.getCalls).toHaveLength(0);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B44 Phase 14b: UPSERT APPLY VALIDATE ONLY は照合後のcreate/update混在preparedを返しPOST/PUTしない", async () => {
+  const existing = {
+    "$id": { value: "9" },
+    "$revision": { value: "19" },
+    code: { value: "KOLD" },
+    name: { value: "before" },
+    表: { value: [{ id: "r1", value: { 子: { value: "old" } } }] },
+  } as unknown as KintoneRecord;
+  const client = makeClient({ records: [existing] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", writable: true, required: true },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "表", label: "表", fieldType: "SUBTABLE", writable: false },
+    { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "表" },
+  ];
+  const result = await execute(
+    "UPSERT INTO APP100 (code, name) VALUES ('KNEW', 'create'), ('KOLD', 'update') ON DUPLICATE (code) "
+      + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial')) "
+      + "ON UPDATE APPLY 表 (PATCH SET 子='patched' ALL ROWS) VALIDATE ONLY",
+    client,
+    { cacheContext: "upsert-apply-phase14b", dmlMaxRows: 2, dmlMaxSubtableRows: 2 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    operation: "UPSERT",
+    validatedRows: 2,
+    validRows: 2,
+    guards: { parentRows: 2, subtableRows: 2, wouldExceed: false },
+    applyBranches: {
+      create: { guards: { parentRows: 1, subtableRows: 1, revisionRequired: false } },
+      update: { guards: { parentRows: 1, subtableRows: 1, revisionRequired: true } },
+    },
+  });
+  expect(client.getCalls.length).toBeGreaterThanOrEqual(2);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+  expect(result.metrics).toMatchObject({ postCalls: 0, putCalls: 0 });
+});
+
 test("IMPORT UPSERT はsource重複を照合read前に文全体拒否する", async () => {
   const client = makeClient({ records: [] });
   client.getFields = async () => [
@@ -2882,6 +2995,279 @@ test("SELECT サブテーブル仮想テーブル + _p.項目", async () => {
   expect(result.rowCount).toBe(2);
   expect(result.rows[0]).toEqual({ "_p.案件名": "案件A", 商品コード: "A-001", _rid: "r1" });
   expect(result.rows[1]).toEqual({ "_p.案件名": "案件A", 商品コード: "A-002", _rid: "r2" });
+});
+
+function makeB45Parent(
+  id: string,
+  rows: Array<{ id?: string; code: string }>,
+  parentName = `parent-${id}`
+): KintoneRecord {
+  return {
+    $id: { value: id },
+    親名: { value: parentName },
+    明細: {
+      value: rows.map((row) => ({
+        ...(row.id === undefined ? {} : { id: row.id }),
+        value: { コード: { value: row.code } },
+      })),
+    },
+  } as unknown as KintoneRecord;
+}
+
+test("B45: サブテーブル system 列の比較演算子をローカル評価する", async () => {
+  const client = makeClient({
+    records: [makeB45Parent("7", [
+      { id: "9007199254740993", code: "A" },
+      { id: "r2", code: "B" },
+      { id: "r3", code: "C" },
+      { id: "r4", code: "D" },
+    ])],
+    fieldTypes: { 親名: "SINGLE_LINE_TEXT", コード: "SINGLE_LINE_TEXT" },
+  });
+  const cases = [
+    ["_pid = 7", ["A", "B", "C", "D"]],
+    ["_rid = '9007199254740993'", ["A"]],
+    ["_idx = 1", ["B"]],
+    ["_rid != 'r2'", ["A", "C", "D"]],
+    ["_idx <> 1", ["A", "C", "D"]],
+    ["_idx < 2", ["A", "B"]],
+    ["_idx <= 2", ["A", "B", "C"]],
+    ["_idx > 2", ["D"]],
+    ["_idx >= 2", ["C", "D"]],
+    ["_idx BETWEEN 1 AND 2", ["B", "C"]],
+    ["_idx IN (0, 2)", ["A", "C"]],
+    ["_idx NOT IN (0, 2)", ["B", "D"]],
+    ["_rid LIKE 'r_'", ["B", "C", "D"]],
+    ["_rid NOT LIKE 'r_'", ["A"]],
+  ] as const;
+
+  for (const [predicate, expected] of cases) {
+    const result = await execute(
+      `SELECT コード FROM APP100$明細 WHERE ${predicate} ORDER BY _idx`,
+      client,
+      { cacheContext: `b45-operators-${predicate}` }
+    ) as SelectResult;
+    expect(result.rows.map((row) => row.コード)).toEqual(expected);
+  }
+
+  await expect(execute(
+    "SELECT コード FROM APP100$明細 WHERE _rid KLIKE 'r%'",
+    client,
+    { cacheContext: "b45-klike-out-of-scope" }
+  )).rejects.toThrow(/KLIKE|unsupported/i);
+});
+
+test("B45: system 列は alias 修飾と一意な JOIN 非修飾で解決する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeB45Parent("1", [{ id: "007", code: "K" }])],
+      200: [makeRecord({ コード: "K", ラベル: "joined" })],
+    },
+    fieldTypes: { コード: "SINGLE_LINE_TEXT", ラベル: "SINGLE_LINE_TEXT" },
+  });
+  const aliased = await execute(
+    "SELECT t._rid FROM APP100$明細 AS t WHERE t._pid = 1",
+    client,
+    { cacheContext: "b45-alias" }
+  ) as SelectResult;
+  expect(aliased.rows.map((row) => row._rid)).toEqual(["007"]);
+
+  const joined = await execute(
+    "SELECT a._rid, b.ラベル FROM APP100$明細 AS a INNER JOIN APP200 AS b " +
+      "ON a.コード = b.コード WHERE _pid = 1",
+    client,
+    { cacheContext: "b45-join-unique" }
+  ) as SelectResult;
+  expect(joined.rows).toEqual([{ _rid: "007", ラベル: "joined" }]);
+
+  const joinQualified = await execute(
+    "SELECT a._rid FROM APP100$明細 AS a INNER JOIN APP200 AS b " +
+      "ON a.コード = b.コード WHERE a._rid = '007'",
+    client,
+    { cacheContext: "b45-join-qualified" }
+  ) as SelectResult;
+  expect(joinQualified.rows.map((row) => row._rid)).toEqual(["007"]);
+
+  const joinUniqueRid = await execute(
+    "SELECT a._rid FROM APP100$明細 AS a INNER JOIN APP200 AS b " +
+      "ON a.コード = b.コード WHERE _rid = '007'",
+    client,
+    { cacheContext: "b45-join-unique-rid" }
+  ) as SelectResult;
+  expect(joinUniqueRid.rows.map((row) => row._rid)).toEqual(["007"]);
+});
+
+test.each([
+  [
+    "サブテーブル同士",
+    "SELECT a._rid FROM APP100$明細 AS a INNER JOIN APP101$明細 AS b " +
+      "ON a.コード = b.コード WHERE _pid = 1",
+    undefined,
+  ],
+  [
+    "通常物理アプリの同名実列",
+    "SELECT a._rid FROM APP100$明細 AS a INNER JOIN APP200 AS b " +
+      "ON a.コード = b.コード WHERE _pid = 1",
+    { _pid: "1" },
+  ],
+] as const)("B45: JOIN 非修飾 system 列の衝突（%s）は拒否する", async (_label, sql, physicalFields) => {
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeB45Parent("1", [{ id: "a", code: "K" }])],
+      101: [makeB45Parent("1", [{ id: "b", code: "K" }])],
+      200: [makeRecord({ コード: "K", ...(physicalFields ?? {}) })],
+    },
+    fieldTypes: { コード: "SINGLE_LINE_TEXT", ...(physicalFields ? { _pid: "NUMBER" } : {}) },
+  });
+  await expect(execute(sql, client, { cacheContext: `b45-collision-${_label}` }))
+    .rejects.toThrow(/field=_pid.*WHERE_FIELD_UNRESOLVED/);
+});
+
+test("B45: typed IN は no-JOIN・alias・一意な JOIN で system 列型を維持する", async () => {
+  const rows = Array.from({ length: 11 }, (_, idx) => ({
+    id: idx === 0 ? "007" : `r${idx}`,
+    code: String(idx),
+  }));
+  const client = makeClient({
+    recordsByApp: {
+      100: [makeB45Parent("1", rows)],
+      200: [makeRecord({ コード: "10" })],
+    },
+    fieldTypes: { コード: "SINGLE_LINE_TEXT" },
+  });
+
+  const text = await execute(
+    "SELECT _rid FROM APP100$明細 WHERE _rid IN ('007')",
+    client,
+    { cacheContext: "b45-in-text" }
+  ) as SelectResult;
+  expect(text.rows.map((row) => row._rid)).toEqual(["007"]);
+
+  const aliasNumber = await execute(
+    "SELECT t._pid FROM APP100$明細 AS t WHERE t._pid IN ('001')",
+    client,
+    { cacheContext: "b45-in-alias-number" }
+  ) as SelectResult;
+  expect(aliasNumber.rowCount).toBe(11);
+
+  const joinNumber = await execute(
+    "SELECT a._idx FROM APP100$明細 AS a INNER JOIN APP200 AS b ON a.コード = b.コード " +
+      "WHERE _idx IN ('010')",
+    client,
+    { cacheContext: "b45-in-join-number" }
+  ) as SelectResult;
+  expect(joinNumber.rows.map((row) => row._idx)).toEqual(["10"]);
+});
+
+test("B45: _rid の文字列型・_idx の数値型と NULL_CHECK 規約を維持する", async () => {
+  const rows = Array.from({ length: 11 }, (_, idx) => ({
+    ...(idx === 1 ? {} : { id: idx === 0 ? "9007199254740993" : String(10 - idx) }),
+    code: String(idx),
+  }));
+  const client = makeClient({ records: [makeB45Parent("1", rows)] });
+
+  const largeRid = await execute(
+    "SELECT _rid FROM APP100$明細 WHERE _rid = '9007199254740993'",
+    client,
+    { cacheContext: "b45-large-rid" }
+  ) as SelectResult;
+  expect(largeRid.rows.map((row) => row._rid)).toEqual(["9007199254740993"]);
+
+  const numericIdx = await execute(
+    "SELECT _idx FROM APP100$明細 WHERE _idx > 2 ORDER BY _idx",
+    client,
+    { cacheContext: "b45-number-idx" }
+  ) as SelectResult;
+  expect(numericIdx.rows.map((row) => row._idx)).toEqual(["3", "4", "5", "6", "7", "8", "9", "10"]);
+
+  const nullRows = await execute(
+    "SELECT _idx FROM APP100$明細 WHERE _rid IS NULL",
+    client,
+    { cacheContext: "b45-rid-null" }
+  ) as SelectResult;
+  expect(nullRows.rows.map((row) => row._idx)).toEqual(["1"]);
+  const notNullRows = await execute(
+    "SELECT _idx FROM APP100$明細 WHERE _rid IS NOT NULL",
+    client,
+    { cacheContext: "b45-rid-not-null" }
+  ) as SelectResult;
+  expect(notNullRows.rowCount).toBe(10);
+});
+
+test("B45: CTE/UNION 後段と ORDER/GROUP で system 列型を維持する", async () => {
+  const rows = Array.from({ length: 11 }, (_, idx) => ({
+    id: idx === 0 ? "2" : idx === 1 ? "10" : `r${idx}`,
+    code: String(idx),
+  }));
+  const client = makeClient({ records: [makeB45Parent("2", rows)] });
+
+  const cteIdx = await execute(
+    "WITH x AS (SELECT _idx FROM APP100$明細) SELECT * FROM x WHERE _idx > 2 ORDER BY _idx",
+    client,
+    { cacheContext: "b45-cte-idx" }
+  ) as SelectResult;
+  expect(cteIdx.rows.map((row) => row._idx)).toEqual(["3", "4", "5", "6", "7", "8", "9", "10"]);
+
+  const cteRid = await execute(
+    "WITH x AS (SELECT _rid FROM APP100$明細) SELECT * FROM x ORDER BY _rid LIMIT 2",
+    client,
+    { cacheContext: "b45-cte-rid" }
+  ) as SelectResult;
+  expect(cteRid.rows.map((row) => row._rid)).toEqual(["10", "2"]);
+
+  const directRidOrder = await execute(
+    "SELECT _rid FROM APP100$明細 ORDER BY _rid LIMIT 2",
+    client,
+    { cacheContext: "b45-order-rid" }
+  ) as SelectResult;
+  expect(directRidOrder.rows.map((row) => row._rid)).toEqual(["10", "2"]);
+
+  const pidClient = makeClient({ records: [
+    makeB45Parent("2", [{ id: "p2", code: "2" }]),
+    makeB45Parent("10", [{ id: "p10", code: "10" }]),
+  ] });
+  const ctePid = await execute(
+    "WITH x AS (SELECT _pid FROM APP100$明細 UNION ALL SELECT _pid FROM APP100$明細) " +
+      "SELECT * FROM x WHERE _pid < 3",
+    pidClient,
+    { cacheContext: "b45-union-pid" }
+  ) as SelectResult;
+  expect(ctePid.rows.map((row) => row._pid)).toEqual(["2", "2"]);
+
+  const ordered = await execute(
+    "SELECT _idx FROM APP100$明細 WHERE _idx IN (0, 2, 10) ORDER BY _idx",
+    client,
+    { cacheContext: "b45-order-idx" }
+  ) as SelectResult;
+  expect(ordered.rows.map((row) => row._idx)).toEqual(["0", "2", "10"]);
+
+  const grouped = await execute(
+    "SELECT _idx, COUNT(*) AS n FROM APP100$明細 GROUP BY _idx ORDER BY _idx",
+    client,
+    { cacheContext: "b45-group-idx" }
+  ) as SelectResult;
+  expect(grouped.rows.map((row) => row._idx)).toEqual(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+});
+
+test("B45: _p の親列と通常子列は回帰せず system 列の誤修飾だけ拒否する", async () => {
+  const client = makeClient({
+    records: [makeB45Parent("1", [{ id: "r1", code: "K" }], "parent-1")],
+    fieldTypes: { 親名: "SINGLE_LINE_TEXT", コード: "SINGLE_LINE_TEXT" },
+  });
+  const accepted = await execute(
+    "SELECT _rid FROM APP100$明細 WHERE _p.$id = 1 AND _p.親名 = 'parent-1' AND コード = 'K'",
+    client,
+    { cacheContext: "b45-parent-regression" }
+  ) as SelectResult;
+  expect(accepted.rows.map((row) => row._rid)).toEqual(["r1"]);
+
+  for (const field of ["_pid", "_rid", "_idx"]) {
+    await expect(execute(
+      `SELECT _rid FROM APP100$明細 WHERE _p.${field} = 1`,
+      client,
+      { cacheContext: `b45-parent-guard-${field}` }
+    )).rejects.toThrow(new RegExp(`field=${field}.*WHERE_FIELD_UNRESOLVED`));
+  }
 });
 
 test("SELECT _p.* 親項目一括展開", async () => {

@@ -3,7 +3,26 @@
 //（バッチ強化第1弾 A3: case "ASSERT" がないと表示が undefined になる）
 // ============================================================
 
-import { formatValidateIntoStats, renderBatchResult, renderResult } from "../renderResult";
+import { formatValidateIntoStats, renderBatchResult, renderError, renderResult } from "../renderResult";
+
+const sharedDiagnostic = {
+  statementKind: "UPDATE" as const,
+  branches: [{
+    branch: "update" as const, parentRows: 2, deletedParentRows: 1, successfulParents: 2,
+    chunk: { size: 100 as const, plannedChunks: 1, successfulChunks: 1 },
+    guards: { revisionRequired: true, parentRows: 2, dmlMaxRows: 100, subtableRows: 3, dmlMaxSubtableRows: 500, wouldExceed: false },
+    targets: [
+      { targetKind: "SUBTABLE" as const, field: "<明細&>", changedCount: 2, operations: [
+        { kind: "PATCH" as const, count: 1, matchedRows: 2, changedRows: 1 }, { kind: "REMOVE" as const, count: 1 },
+      ] },
+      { targetKind: "MULTI_VALUE" as const, field: "<タグ>", fieldType: "MULTI_SELECT", changedCount: 1, operations: [
+        { kind: "ADD" as const, count: 1, value: "<重要&>" },
+      ] },
+    ],
+  }],
+  nonTransactional: true as const,
+  partialSuccess: { possible: true as const, successfulParents: 2, successfulChunks: 1 },
+};
 
 test("ASSERT 成功は success 表示を返す（undefined にならない）", () => {
   const html = renderResult({ type: "ASSERT", condition: "(SELECT COUNT(*) FROM APP100) = 3" });
@@ -22,6 +41,87 @@ test("VALIDATIONは件数サマリとエラー表を表示する", () => {
   });
   expect(html).toContain("検証 1 件");
   expect(html).toContain("ERR_REQUIRED");
+});
+
+test("APPLY VALIDATION は件数summaryとguard警告をHTML escapeして表示する", () => {
+  const html = renderResult({
+    type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
+    invalidRows: 0, errorCount: 0, columns: [], errors: [],
+    apply: [{
+      field: "<テーブル&>", operations: [
+        { kind: "PATCH", matchedRows: 2, changedRows: 1 },
+        { kind: "REMOVE", removedRows: 1 },
+      ],
+      changedSubtableRows: 2, deletedRows: 1,
+    }],
+    guards: {
+      revisionRequired: true, parentRows: 1, dmlMaxRows: 1,
+      subtableRows: 2, dmlMaxSubtableRows: 1, wouldExceed: true,
+    },
+    deletedRows: { total: 1, parentRows: 1 },
+  });
+  expect(html).toContain("APPLY &lt;テーブル&amp;&gt;: PATCH 一致 2 / 変更 1");
+  expect(html).toContain("REMOVE 削除 1");
+  expect(html).toContain('class="ksql-warn"');
+  expect(html).toContain("安全ガード超過: 親 1/1, 子 2/1（書込み 0）");
+  expect(html).toContain("削除合計 1 行 / 削除対象親 1 件");
+  expect(html).not.toContain("<テーブル&>");
+});
+
+test("既存 VALIDATION は APPLY summary/guardを追加表示しない", () => {
+  const html = renderResult({
+    type: "VALIDATION", operation: "INSERT", validatedRows: 0, validRows: 0,
+    invalidRows: 0, errorCount: 0, columns: [], errors: [],
+  });
+  expect(html).not.toContain("APPLY");
+  expect(html).not.toContain("安全ガード");
+});
+
+test("Phase 16c: VALIDATE ONLYはshared detailで複数親/table/多値/guardをescape表示する", () => {
+  const html = renderResult({
+    type: "VALIDATION", operation: "UPDATE", validatedRows: 2, validRows: 2,
+    invalidRows: 0, errorCount: 0, columns: [], errors: [], diagnostic: sharedDiagnostic,
+  });
+  expect(html).toContain("APPLY UPDATE: 親 2 件");
+  expect(html).toContain("table=&lt;明細&amp;&gt;: PATCH 1 / APPEND 0 / REMOVE 1");
+  expect(html).toContain("PATCH 一致 2 / 変更 1");
+  expect(html).toContain("multiValue=&lt;タグ&gt; (MULTI_SELECT): ADD 1 value=&lt;重要&amp;&gt;");
+  expect(html).toContain("guard: 親 2/100 / 子 3/500 / revision 必須: はい");
+  expect(html).toContain("APPLY VALIDATE ONLY（書込み 0）");
+  expect(html).not.toContain("<重要&>");
+});
+
+test("Phase 16c: APPLY実行成功はshared detailの成功進捗を表示する", () => {
+  const html = renderResult({ type: "UPDATE", updatedCount: 2, diagnostic: sharedDiagnostic });
+  expect(html).toContain("2 件のレコードを更新しました");
+  expect(html).toContain("成功進捗: 親 2 件 / chunk 1");
+  expect(html).toContain("非トランザクション");
+});
+
+test("Phase 16c: APPLY部分失敗は成功prefix・失敗stage・shared detailをescape表示する", () => {
+  const diagnostic = {
+    ...sharedDiagnostic,
+    branches: [{
+      ...sharedDiagnostic.branches[0], successfulParents: 1,
+      chunk: { ...sharedDiagnostic.branches[0].chunk, successfulChunks: 1, failedChunkIndex: 1, failedStage: "PUT_CHUNK" as const },
+    }],
+    partialSuccess: {
+      possible: true as const, successfulParents: 1, successfulChunks: 1,
+      failedBranch: "update" as const, retryAttempted: false as const,
+    },
+  };
+  const html = renderError({
+    partialSuccess: {
+      successfulParents: 1, successfulChunks: 1, nonTransactional: true,
+      failedChunkIndex: 1, failedStage: "PUT_CHUNK", failedBranch: "UPDATE",
+      retryAttempted: false, diagnostic,
+    },
+  });
+  expect(html).toContain("APPLY 部分成功: 成功親 1 件 / 成功 chunk 1");
+  expect(html).toContain("失敗 UPDATE PUT_CHUNK chunk 2");
+  expect(html).toContain("【部分成功】失敗分岐 UPDATE / stage PUT_CHUNK / chunk 2");
+  expect(html).toContain("table=&lt;明細&amp;&gt;");
+  expect(html).not.toContain("<明細&>");
 });
 
 test("VALIDATE SelectResult はエラーレコード数・エラー件数・表示行数を表示する", () => {

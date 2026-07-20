@@ -330,19 +330,9 @@ export function updateToPutBatchesArith(
     const row = kintoneRecordToProcessRow(raw);
     const record: KintoneRecord = {};
     for (const { field, value } of stmt.assignments) {
-      if (value.type === "ARITH") {
-        record[field] = { value: String(evalArith(value, raw)) };
-      } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-        record[field] = { value: String(evalScalarValueExpr(value, row)) };
-      } else if (value.type === "STRING_FUNC") {
-        record[field] = { value: evalStringFunc(value, row) };
-      } else if (value.type === "CASE_VALUE") {
-        record[field] = { value: evalCaseWhenValue(value.expr, row, fieldTypes.get(field)) };
-      } else if (value.type === "SOURCE_FIELD") {
-        throw new DmlConvertError("SOURCE_FIELD は UPDATE ... FROM 専用です");
-      } else {
-        record[field] = { value: toKintoneValue(value, fieldTypes.get(field)) };
-      }
+      record[field] = {
+        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw),
+      };
     }
     return { id, record };
   });
@@ -350,6 +340,43 @@ export function updateToPutBatchesArith(
     app: stmt.appId,
     records: batch,
   }));
+}
+
+/**
+ * UPDATE の SET 右辺を更新前行だけから評価する pure helper。
+ * B44 planner と従来 UPDATE が同じ評価 primitive を共有する。
+ */
+export function evaluateUpdateAssignmentValue(
+  value: UpdateStatement["assignments"][number]["value"],
+  row: ProcessRow,
+  fieldType?: string,
+  raw?: KintoneRecord
+): KintoneValue {
+  if (value.type === "ARITH") {
+    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row));
+  }
+  if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
+    return String(evalScalarValueExpr(value, row));
+  }
+  if (value.type === "STRING_FUNC") return evalStringFunc(value, row);
+  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType);
+  if (value.type === "SOURCE_FIELD") {
+    throw new DmlConvertError("SOURCE_FIELD は UPDATE ... FROM 専用です");
+  }
+  return toKintoneValue(value, fieldType);
+}
+
+/** 従来サブテーブル UPDATE と APPLY PATCH が共有する限定 evaluator。 */
+export function evaluateSubtableAssignmentValue(
+  value: UpdateStatement["assignments"][number]["value"],
+  row: ProcessRow,
+  resolveFieldType?: import("../engine/evalWhere").FieldTypeResolver
+): string {
+  if (value.type === "STRING") return value.value;
+  if (value.type === "NUMBER") return numberLiteralText(value);
+  if (value.type === "ARITH") return String(evalArithExpr(value, row));
+  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
+  throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
 const UPDATE_FROM_UNSUPPORTED_TYPES = new Set([

@@ -111,3 +111,19 @@ test("create バリデーションで未指定フィールドの空値にも min
   expect(result.errors).toEqual([expect.objectContaining({ $err_field: "memo", $err_code: "ERR_LENGTH_MIN" })]);
   expect(result.invalidRows).toBe(1);
 });
+
+test("既存 DML validation は payload-only のままで非 payload post-image 違反を見ない", () => {
+  const fieldInfos = [
+    { code: "payload", label: "payload", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "outsidePayload", label: "outsidePayload", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const result = validateDmlCandidates([{
+    rowNumber: 1,
+    operation: "UPDATE",
+    mode: "update",
+    payload: new Map([["payload", "ok"]]),
+    preErrors: [],
+  }], "UPDATE", ["payload"], ["payload", "outsidePayload"], fieldInfos, 1);
+  expect(result.errors).toEqual([]);
+  expect(result.invalidRows).toBe(0);
+});

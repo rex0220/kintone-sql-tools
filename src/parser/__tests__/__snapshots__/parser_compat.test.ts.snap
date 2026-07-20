@@ -1,5 +1,32 @@
 // Jest Snapshot v1, https://goo.gl/fbAQLP
 
+exports[`単文互換: APPLY soft keyword alias 1`] = `
+{
+  "columns": [
+    {
+      "alias": "apply",
+      "field": "APPLY",
+      "type": "FIELD",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APPLY",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "orderMode": "CANONICAL",
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
 exports[`単文互換: DELETE 1`] = `
 {
   "appId": 100,
@@ -381,6 +408,61 @@ exports[`単文互換: UPDATE 1`] = `
     },
   ],
   "type": "UPDATE",
+  "where": {
+    "left": {
+      "field": "$id",
+      "tableAlias": null,
+      "type": "FIELD",
+    },
+    "op": "=",
+    "right": {
+      "raw": "1",
+      "type": "NUMBER",
+      "value": 1,
+    },
+    "type": "BINARY",
+  },
+}
+`;
+
+exports[`単文互換: UPDATE APPLY 1`] = `
+{
+  "appId": 100,
+  "applyBlocks": [
+    {
+      "field": "APPLY",
+      "operations": [
+        {
+          "assignments": [
+            {
+              "field": "PATCH",
+              "value": {
+                "type": "STRING",
+                "value": "子",
+              },
+            },
+          ],
+          "kind": "PATCH",
+          "selector": {
+            "kind": "ALL_ROWS",
+          },
+        },
+      ],
+      "targetKind": "SUBTABLE",
+    },
+  ],
+  "assignments": [
+    {
+      "field": "APPLY",
+      "value": {
+        "type": "STRING",
+        "value": "親",
+      },
+    },
+  ],
+  "type": "UPDATE",
+  "validateOnly": true,
+  "validationErrorTable": null,
   "where": {
     "left": {
       "field": "$id",
