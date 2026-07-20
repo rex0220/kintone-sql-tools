@@ -25,10 +25,20 @@ export function applyPatchPlanToKintone(plan: ApplyPatchPlan): KintonePutParams 
     return argument("APPLY plan revision must be a positive integer.");
   }
   const record: Record<string, { value: unknown }> = { ...plan.parentValues };
+  const seenFields = new Set(Object.keys(record));
+  for (const multiValue of plan.multiValues) {
+    if (seenFields.has(multiValue.field)) {
+      argument(`APPLY plan contains duplicate top-level field ${multiValue.field}.`);
+    }
+    seenFields.add(multiValue.field);
+    record[multiValue.field] = { value: multiValue.postImageValue };
+  }
   const seenTables = new Set<string>();
   for (const table of plan.tables) {
+    if (seenFields.has(table.table)) argument(`APPLY plan contains duplicate top-level field ${table.table}.`);
     if (seenTables.has(table.table)) argument(`APPLY plan contains duplicate table ${table.table}.`);
     seenTables.add(table.table);
+    seenFields.add(table.table);
     assertTablePlan(table);
     record[table.table] = { value: table.payloadRows };
   }

@@ -396,4 +396,11 @@ describe("Phase 15a multi-value syntax/execution capabilities", () => {
     expect(() => assertApplyExecutionScope("phase15a", update("REMOVE '新規'", "VALIDATE ONLY"))).not.toThrow();
     expect(() => assertApplyExecutionScope("phase15a", parseUpdate(sql("$id=8", "REMOVE ALL ROWS")))).not.toThrow();
   });
+
+  test("Phase 15b は同じsyntax matrixのcore mutation executionを開通する", () => {
+    const mutation = update("ADD '重要'; REMOVE '新規'");
+    expect(() => assertApplyScope("phase15b", mutation)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase15b", mutation)).not.toThrow();
+    expect(() => assertApplyPublicWriteScope("phase15b", mutation)).not.toThrow();
+  });
 });

@@ -63,6 +63,119 @@ const upsertApplySql = "UPSERT INTO APP4221 (親) VALUES ('new'), ('old') ON DUP
   + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('initial')) "
   + "ON UPDATE APPLY テーブル (PATCH SET 子='patched' WHERE 子='old')";
 
+const multiApplySql = "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+  + "APPLY タグ (REMOVE 'A'; ADD 'C') APPLY 担当 (REMOVE 'u1'; ADD 'u3')";
+
+const multiFieldInfos: KintoneFieldInfo[] = [
+  ...fieldInfos,
+  { code: "タグ", label: "タグ", fieldType: "MULTI_SELECT", writable: true, optionOrder: { A: 0, B: 1, C: 2 } },
+  { code: "担当", label: "担当", fieldType: "USER_SELECT", writable: true },
+];
+
+function multiParent(): KintoneRecord {
+  return {
+    ...parent(),
+    タグ: { value: ["A", "B"] },
+    担当: { value: [{ code: "u1", name: "User 1" }, { code: "u2", name: "User 2" }] },
+  } as unknown as KintoneRecord;
+}
+
+test("Phase 15b: 多値ADD/REMOVEをrevision付き1親1PUTへ接続し、確認detailはprepared post-imageを渡す", async () => {
+  const mock = makeClient([multiParent()], multiFieldInfos);
+  const confirm = jest.fn(async () => true);
+  const result = await execute(multiApplySql, mock.client, {
+    cacheContext: "apply-phase15b-multi-single",
+    allowApplyMutation: true,
+    confirm,
+  });
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: 1 });
+  expect(mock.putRecords).toHaveBeenCalledWith({
+    app: 4221,
+    records: [{
+      id: 8,
+      revision: 3,
+      record: {
+        親: { value: "after" },
+        タグ: { value: ["B", "C"] },
+        担当: { value: [{ code: "u2" }, { code: "u3" }] },
+      },
+    }],
+  });
+  expect(confirm).toHaveBeenCalledWith(1, "UPDATE", expect.objectContaining({
+    applyDetail: expect.objectContaining({
+      tables: [],
+      multiValues: [
+        expect.objectContaining({ field: "タグ", addedValues: 1, removedValues: 1,
+          parents: [{ parentId: 8, postImage: ["B", "C"] }] }),
+        expect.objectContaining({ field: "担当", addedValues: 1, removedValues: 1,
+          parents: [{ parentId: 8, postImage: [{ code: "u2" }, { code: "u3" }] }] }),
+      ],
+    }),
+  }));
+});
+
+test("Phase 15b: VALIDATE ONLYは多値post-image/検証診断を返しPUTしない", async () => {
+  const mock = makeClient([multiParent()], multiFieldInfos);
+  const result = await execute(`${multiApplySql} VALIDATE ONLY`, mock.client, {
+    cacheContext: "apply-phase15b-multi-validate",
+  });
+  expect(result).toMatchObject({
+    type: "VALIDATION", operation: "UPDATE", validatedRows: 1, errorCount: 0,
+    apply: [
+      { field: "タグ", multiValue: { fieldType: "MULTI_SELECT", addedValues: 1, removedValues: 1,
+        postImages: [{ parentId: 8, value: ["B", "C"] }] } },
+      { field: "担当", multiValue: { fieldType: "USER_SELECT", addedValues: 1, removedValues: 1,
+        postImages: [{ parentId: 8, value: [{ code: "u2" }, { code: "u3" }] }] } },
+    ],
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 15b: SUBTABLEと多値APPLYを同一文の同じPUT recordへ共存させる", async () => {
+  const mock = makeClient([multiParent()], multiFieldInfos);
+  await execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 "
+      + "APPLY タグ (ADD 'C') APPLY テーブル (PATCH SET 子='patched' ALL ROWS)",
+    mock.client,
+    { cacheContext: "apply-phase15b-mixed", allowApplyMutation: true }
+  );
+  expect(mock.putRecords).toHaveBeenCalledWith(expect.objectContaining({ records: [expect.objectContaining({
+    record: expect.objectContaining({
+      親: { value: "after" }, タグ: { value: ["A", "B", "C"] },
+      テーブル: { value: [{ id: "101", value: { 子: { value: "patched" } } }] },
+    }),
+  })] }));
+});
+
+test("Phase 15b: 多値の複数親を独立post-imageで100件chunkし、後続失敗をpartial-success型で返す", async () => {
+  const records = Array.from({ length: 101 }, (_, index) => ({
+    ...multiParent(),
+    "$id": { value: String(index + 1) },
+    "$revision": { value: String(index + 10) },
+    タグ: { value: index % 2 === 0 ? ["A"] : ["B"] },
+  })) as unknown as KintoneRecord[];
+  const mock = makeClient(records, multiFieldInfos);
+  mock.putRecords.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("revision conflict"));
+  const promise = execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' APPLY タグ (REMOVE 'A'; ADD 'C')",
+    mock.client,
+    { cacheContext: "apply-phase15b-multi-partial", allowApplyMutation: true, dmlMaxRows: 101 }
+  );
+  await expect(promise).rejects.toMatchObject({
+    partialSuccess: {
+      successfulChunks: 1,
+      successfulParents: 100,
+      failedChunkIndex: 1,
+      failedStage: "PUT_CHUNK",
+      retryAttempted: false,
+    },
+  });
+  expect(mock.putRecords.mock.calls.map(([batch]) => batch.records.length)).toEqual([100, 1]);
+  expect(mock.putRecords.mock.calls[0][0].records[0].record.タグ).toEqual({ value: ["C"] });
+  expect(mock.putRecords.mock.calls[0][0].records[1].record.タグ).toEqual({ value: ["B", "C"] });
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+});
+
 function upsertParent(id: number, key: string): KintoneRecord {
   const record = parent(String(id));
   record.親 = { value: key };

@@ -11,7 +11,12 @@ export function resolvePluginApplyOptions(statements: readonly Statement[]): Plu
     statement.type === "UPDATE" && (statement.applyBlocks?.length ?? 0) > 0
   );
   if (applyUpdates.length === 0) return {};
-  const containsMutation = applyUpdates.some((statement) => statement.validateOnly !== true);
+  // Phase 15b opens only the core capability. Until Phase 16c can render the
+  // prepared collection detail, plugin mutation remains fail-closed.
+  const containsMutation = applyUpdates.some((statement) =>
+    statement.validateOnly !== true
+    && statement.applyBlocks!.every((block) => block.targetKind === "SUBTABLE")
+  );
   return {
     dmlMaxRows: 100,
     dmlMaxSubtableRows: 500,

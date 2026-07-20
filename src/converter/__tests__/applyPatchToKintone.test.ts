@@ -11,6 +11,7 @@ function basePlan(): ApplyPatchPlan {
     parentRows: 1,
     changedSubtableRows: 1,
     parentValues: { 親: { value: "after" } },
+    multiValues: [],
     postImage: { 親: { value: "after" } },
     tables: [{
       table: "テーブル",

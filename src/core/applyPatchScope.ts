@@ -8,8 +8,8 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -167,6 +167,19 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     onErrorSkip: false,
     rejectLimit: false,
   }),
+  phase15b: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
 });
 
 const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
@@ -189,6 +202,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase14b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
   phase14c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
   phase15a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
+  phase15b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -410,7 +424,8 @@ export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement:
   const isValidationOnly = "validateOnly" in statement && statement.validateOnly === true;
   if (statement.type !== "EXPLAIN"
     && !isValidationOnly
-    && statementHasMultiValueApply(statement)) {
+    && statementHasMultiValueApply(statement)
+    && phase !== "phase15b") {
     throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} multi-value execution is not connected`);
   }
   if (statement.type === "UPSERT"

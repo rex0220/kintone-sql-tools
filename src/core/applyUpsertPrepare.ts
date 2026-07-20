@@ -182,6 +182,7 @@ function toUpdateStatement(statement: UpsertStatement, sourceRowIndex: number, t
 function emptyPatchMetadata(fieldInfos: readonly KintoneFieldInfo[]): ApplyPatchMetadata {
   return {
     targetTables: new Map(),
+    targetMultiValueFields: new Map(),
     childrenByTable: new Map(),
     fieldsByCode: new Map(fieldInfos.map((field) => [field.code, field])),
   };

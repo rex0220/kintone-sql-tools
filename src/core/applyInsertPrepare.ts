@@ -112,7 +112,7 @@ export function resolveApplyInsertMetadata(
       }
     }
   }
-  return { targetTables, childrenByTable, fieldsByCode };
+  return { targetTables, targetMultiValueFields: new Map(), childrenByTable, fieldsByCode };
 }
 
 /** Expand every VALUES parent with the same fixed APPLY APPEND template. */

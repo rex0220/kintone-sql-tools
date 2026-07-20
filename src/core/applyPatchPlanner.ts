@@ -8,6 +8,8 @@ import {
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
 import type { AppendOperation, ExpectRowsGuard, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import { buildApplyMultiValueFieldPlan, type ApplyMultiValueFieldPlan } from "./applyMultiValuePlan";
+import { assertApplyTargetFieldType } from "./applyPatchScope";
 
 export interface ApplySnapshotRow {
   readonly id: string;
@@ -63,12 +65,15 @@ export interface ApplyPatchPlan {
   readonly changedSubtableRows: number;
   readonly parentValues: Readonly<Record<string, { readonly value: KintoneValue }>>;
   readonly tables: readonly ApplyPatchTablePlan[];
+  /** Top-level collection fields replaced with their complete post-image arrays. */
+  readonly multiValues: readonly ApplyMultiValueFieldPlan[];
   /** Phase 3 validation が走査する、FILE を opaque のまま保持した全record post-image。 */
   readonly postImage: Readonly<Record<string, { readonly value: unknown }>>;
 }
 
 export interface ApplyPatchMetadata {
   readonly targetTables: ReadonlyMap<string, KintoneFieldInfo>;
+  readonly targetMultiValueFields: ReadonlyMap<string, KintoneFieldInfo>;
   readonly childrenByTable: ReadonlyMap<string, ReadonlyMap<string, KintoneFieldInfo>>;
   readonly fieldsByCode: ReadonlyMap<string, KintoneFieldInfo>;
 }
@@ -104,6 +109,7 @@ export function resolveApplyPatchMetadata(
   if (!blocks?.length) return argument("APPLY block is missing.");
   const fieldsByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const targetTables = new Map<string, KintoneFieldInfo>();
+  const targetMultiValueFields = new Map<string, KintoneFieldInfo>();
   const childrenByTable = new Map<string, ReadonlyMap<string, KintoneFieldInfo>>();
 
   for (const assignment of statement.assignments) {
@@ -111,11 +117,23 @@ export function resolveApplyPatchMetadata(
     assertParentReferences(assignment.value, fieldsByCode);
   }
   for (const block of blocks) {
-    if (targetTables.has(block.field)) argument(`APPLY has more than one block for table ${block.field}.`);
-    const targetTable = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
-    if (!targetTable || targetTable.fieldType !== "SUBTABLE") {
-      return argument(`APPLY target ${block.field} is not a SUBTABLE.`);
+    if (targetTables.has(block.field) || targetMultiValueFields.has(block.field)) {
+      argument(`APPLY has more than one block for field ${block.field}.`);
     }
+    if (statement.assignments.some((assignment) => assignment.field === block.field)) {
+      argument(`APPLY target ${block.field} is also assigned by parent SET.`);
+    }
+    const target = fieldInfos.find((field) => field.code === block.field && !field.inSubtable);
+    if (!target) return block.targetKind === "SUBTABLE"
+      ? argument(`APPLY target ${block.field} is not a SUBTABLE.`)
+      : argument(`APPLY target ${block.field} does not exist as a top-level field.`);
+    assertApplyTargetFieldType(block, target.fieldType);
+    if (block.targetKind === "MULTI_VALUE") {
+      if (target.writable === false) argument(`APPLY target ${block.field} is not writable (${target.fieldType}).`);
+      targetMultiValueFields.set(block.field, target);
+      continue;
+    }
+    const targetTable = target;
     const targetChildren = new Map(
       fieldInfos.filter((field) => field.inSubtable && field.subtableCode === block.field)
         .map((field) => [field.code, field])
@@ -143,7 +161,7 @@ export function resolveApplyPatchMetadata(
       }
     }
   }
-  return { targetTables, childrenByTable, fieldsByCode };
+  return { targetTables, targetMultiValueFields, childrenByTable, fieldsByCode };
 }
 
 function assertParentReferences(
@@ -266,7 +284,14 @@ function buildApplyPatchPlanForSnapshot(
 ): ApplyPatchPlan {
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
   const tablePlans: ApplyPatchTablePlan[] = [];
+  const multiValuePlans: ApplyMultiValueFieldPlan[] = [];
   for (const block of statement.applyBlocks!) {
+    if (block.targetKind === "MULTI_VALUE") {
+      const field = metadata.targetMultiValueFields.get(block.field);
+      if (!field) argument(`APPLY multi-value metadata for ${block.field} is missing.`);
+      multiValuePlans.push(buildApplyMultiValueFieldPlan(block, snapshot[block.field]?.value, field));
+      continue;
+    }
     const targetChildren = metadata.childrenByTable.get(block.field)!;
     const snapshotRows = readSnapshotRows(snapshot, block.field);
     const seenRowIds = new Set<string>();
@@ -395,6 +420,9 @@ function buildApplyPatchPlanForSnapshot(
   const postImage: Record<string, { value: unknown }> = { ...snapshot } as unknown as Record<string, { value: unknown }>;
   Object.assign(postImage, parentValues);
   for (const table of tablePlans) postImage[table.table] = { value: table.postImageRows };
+  for (const multiValue of multiValuePlans) {
+    postImage[multiValue.field] = { value: multiValue.postImageValue };
+  }
   return {
     app: statement.appId,
     parentId,
@@ -404,6 +432,7 @@ function buildApplyPatchPlanForSnapshot(
     parentValues,
     postImage,
     tables: tablePlans,
+    multiValues: multiValuePlans,
   };
 }
 
@@ -461,10 +490,18 @@ export function normalizeApplyPatchPlan(
     field,
     normalizedRecord[field] ?? plan.parentValues[field],
   ])) as Record<string, { value: KintoneValue }>;
+  const multiValues = plan.multiValues.map((multiValue) => {
+    const normalized = normalizedRecord[multiValue.field]?.value;
+    if (!Array.isArray(normalized)) {
+      return argument(`APPLY normalized post-image for ${multiValue.field} is not an array.`);
+    }
+    return { ...multiValue, postImageValue: normalized } as ApplyMultiValueFieldPlan;
+  });
   return {
     ...plan,
     parentValues,
     tables,
+    multiValues,
     postImage: normalizedRecord,
   };
 }

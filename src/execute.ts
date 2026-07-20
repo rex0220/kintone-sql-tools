@@ -18,7 +18,7 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
-import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere } from "./core/applyPatchScope";
+import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere, statementHasMultiValueApply } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
   collectApplySnapshotFields,
@@ -425,14 +425,24 @@ export interface DmlValidationResult {
 export interface ApplyValidationDetail {
   readonly field: string;
   readonly operations: readonly {
-    readonly kind: "PATCH" | "APPEND" | "REMOVE";
+    readonly kind: "PATCH" | "APPEND" | "REMOVE" | "ADD" | "REMOVE_VALUE";
     readonly matchedRows?: number;
     readonly changedRows?: number;
     readonly addedRows?: number;
     readonly removedRows?: number;
+    readonly value?: string;
+    readonly changed?: boolean;
   }[];
   readonly changedSubtableRows: number;
   readonly deletedRows: number;
+  /** Phase 15b collection diagnostics; absent for SUBTABLE APPLY. */
+  readonly multiValue?: {
+    readonly fieldType: string;
+    readonly addedValues: number;
+    readonly removedValues: number;
+    readonly changedValues: number;
+    readonly postImages: readonly { readonly parentId: number; readonly value: readonly unknown[] }[];
+  };
 }
 
 export interface ApplyGuardDetail {
@@ -491,6 +501,15 @@ export interface ApplyConfirmDetail {
     readonly patchRows: number;
     readonly appendRows: number;
     readonly removeRows: number;
+  }[];
+  /** Prepared collection post-images. Phase 16 surfaces may render this without re-planning. */
+  readonly multiValues?: readonly {
+    readonly field: string;
+    readonly fieldType: string;
+    readonly addedValues: number;
+    readonly removedValues: number;
+    readonly changedValues: number;
+    readonly parents: readonly { readonly parentId: number; readonly postImage: readonly unknown[] }[];
   }[];
   readonly deletedRows: number;
   readonly deletedParentRows: number;
@@ -820,8 +839,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase15a", stmt);
-  assertApplyExecutionScope("phase15a", stmt);
+  assertApplyScope("phase15b", stmt);
+  assertApplyExecutionScope("phase15b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1231,11 +1250,10 @@ export async function executeBatch(
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
-  statements.forEach((statement) => assertApplyExecutionScope("phase15a", statement));
+  statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
   if (options.allowApplyMutation !== true && statements.some((statement) =>
-    statement.type === "UPSERT"
-    && statement.validateOnly !== true
-    && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)
+    statementHasMultiValueApply(statement)
+    || (statement.type === "UPSERT" && statementHasApplyMutation(statement))
   )) {
     throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   }
@@ -1369,6 +1387,15 @@ export async function executeBatch(
   };
 }
 
+function statementHasApplyMutation(statement: Statement): boolean {
+  if (statement.type === "UPDATE" || statement.type === "INSERT") {
+    return statement.validateOnly !== true && Boolean(statement.applyBlocks?.length);
+  }
+  return statement.type === "UPSERT"
+    && statement.validateOnly !== true
+    && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
+}
+
 /** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
 async function executeBatchStatement(
   stmt: Statement,
@@ -1433,8 +1460,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase15a", resolvedStmt);
-  assertApplyExecutionScope("phase15a", resolvedStmt);
+  assertApplyScope("phase15b", resolvedStmt);
+  assertApplyExecutionScope("phase15b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -6011,12 +6038,24 @@ async function executeApplyPatchUpdate(
       columns: [...validation.columns],
       errors: validation.errors,
       ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
-      apply: plan.tables.map((table) => ({
+      apply: ([...plan.tables.map((table) => ({
         field: table.table,
         operations: table.operations,
         changedSubtableRows: table.changedSubtableRows,
         deletedRows: table.deletedRows,
-      })),
+      })), ...plan.multiValues.map((multiValue) => ({
+        field: multiValue.field,
+        operations: multiValue.operations,
+        changedSubtableRows: 0,
+        deletedRows: 0,
+        multiValue: {
+          fieldType: multiValue.fieldType,
+          addedValues: multiValue.addedValues,
+          removedValues: multiValue.removedValues,
+          changedValues: multiValue.changedValues,
+          postImages: [{ parentId: plan.parentId, value: multiValue.postImageValue }],
+        },
+      }))] satisfies ApplyValidationDetail[]),
       guards: {
         revisionRequired: true,
         parentRows: plan.parentRows,
@@ -6064,6 +6103,14 @@ async function executeApplyPatchUpdate(
         const patchRows = table.changedSubtableRows - appendRows - removeRows;
         return { table: table.table, patchRows, appendRows, removeRows };
       }),
+      ...(plan.multiValues.length > 0 ? { multiValues: plan.multiValues.map((multiValue) => ({
+        field: multiValue.field,
+        fieldType: multiValue.fieldType,
+        addedValues: multiValue.addedValues,
+        removedValues: multiValue.removedValues,
+        changedValues: multiValue.changedValues,
+        parents: [{ parentId: plan.parentId, postImage: multiValue.postImageValue }],
+      })) } : {}),
       deletedRows: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
       deletedParentRows: plan.tables.some((table) => table.deletedRows > 0) ? 1 : 0,
       revisionRequired: true,
@@ -6125,7 +6172,7 @@ async function executeMultipleParentApplyPreflight(
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  assertApplyPublicWriteScope("phase13b", stmt);
+  assertApplyPublicWriteScope("phase15b", stmt);
   if (options.confirm) {
     const applyDetail = buildMultipleParentApplyConfirmDetail(prepared);
     const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
@@ -6146,6 +6193,7 @@ function buildMultipleParentApplyConfirmDetail(prepared: PreparedApplyWrite): Ap
   let addedSubtableRows = 0;
   let deletedRows = 0;
   let deletedParentRows = 0;
+  const multiValues = aggregateApplyMultiValueConfirmDetails(prepared);
 
   for (const plan of prepared.plans) {
     let parentHasDeletes = false;
@@ -6178,6 +6226,7 @@ function buildMultipleParentApplyConfirmDetail(prepared: PreparedApplyWrite): Ap
     changedSubtableRows: prepared.guards.subtableRows,
     addedSubtableRows,
     tables: [...tables.values()],
+    ...(multiValues.length > 0 ? { multiValues } : {}),
     deletedRows,
     deletedParentRows,
     revisionRequired: true,
@@ -6300,7 +6349,7 @@ function materializePreparedApplyValidation(
     columns,
     errors,
     ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
-    apply: [...tableDetails.values()],
+    apply: [...tableDetails.values(), ...aggregateApplyMultiValueValidationDetails(prepared)],
     guards: prepared.guards,
     deletedRows: {
       total: prepared.plans.reduce(
@@ -6404,6 +6453,51 @@ function aggregateApplyValidationDetails(prepared: PreparedApplyWrite): ApplyVal
         operations,
         changedSubtableRows: existing.changedSubtableRows + table.changedSubtableRows,
         deletedRows: existing.deletedRows + table.deletedRows,
+      });
+    }
+  }
+  return [...details.values(), ...aggregateApplyMultiValueValidationDetails(prepared)];
+}
+
+function aggregateApplyMultiValueValidationDetails(prepared: PreparedApplyWrite): ApplyValidationDetail[] {
+  return aggregateApplyMultiValueConfirmDetails(prepared).map((detail) => ({
+    field: detail.field,
+    operations: prepared.plans.find((plan) => plan.multiValues.some((item) => item.field === detail.field))!
+      .multiValues.find((item) => item.field === detail.field)!.operations,
+    changedSubtableRows: 0,
+    deletedRows: 0,
+    multiValue: {
+      fieldType: detail.fieldType,
+      addedValues: detail.addedValues,
+      removedValues: detail.removedValues,
+      changedValues: detail.changedValues,
+      postImages: detail.parents.map((parent) => ({ parentId: parent.parentId, value: parent.postImage })),
+    },
+  }));
+}
+
+function aggregateApplyMultiValueConfirmDetails(
+  prepared: PreparedApplyWrite
+): NonNullable<ApplyConfirmDetail["multiValues"]> {
+  type Detail = NonNullable<ApplyConfirmDetail["multiValues"]>[number];
+  const details = new Map<string, Detail>();
+  for (const plan of prepared.plans) {
+    for (const multiValue of plan.multiValues) {
+      const existing = details.get(multiValue.field);
+      const parent = { parentId: plan.parentId, postImage: multiValue.postImageValue };
+      details.set(multiValue.field, existing ? {
+        ...existing,
+        addedValues: existing.addedValues + multiValue.addedValues,
+        removedValues: existing.removedValues + multiValue.removedValues,
+        changedValues: existing.changedValues + multiValue.changedValues,
+        parents: [...existing.parents, parent],
+      } : {
+        field: multiValue.field,
+        fieldType: multiValue.fieldType,
+        addedValues: multiValue.addedValues,
+        removedValues: multiValue.removedValues,
+        changedValues: multiValue.changedValues,
+        parents: [parent],
       });
     }
   }
@@ -7262,7 +7356,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase15a", stmt);
+    assertApplyScope("phase15b", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
@@ -7605,10 +7699,7 @@ async function buildExplainWhereAnalysis(
       if (typed["type"] === "UPDATE" && (node as UpdateStatement).applyBlocks?.length) {
         const update = node as UpdateStatement;
         const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
-        // Phase 15a の multi-value block は構文だけを EXPLAIN し、metadata 診断は 15b で接続する。
-        if (update.applyBlocks!.every((block) => block.targetKind === "SUBTABLE")) {
-          resolveApplyPatchMetadata(update, fields);
-        }
+        resolveApplyPatchMetadata(update, fields);
       }
       await assertDmlWhereCapability(
         node as UpdateStatement | DeleteStatement,

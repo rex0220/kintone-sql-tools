@@ -1692,6 +1692,8 @@ async function run(): Promise<number> {
         statement.type === "UPDATE"
         && (statement.applyBlocks?.length ?? 0) > 0
         && statement.validateOnly !== true
+        // Phase 15b core data exists, but CLI-specific rendering opens in 16b.
+        && statement.applyBlocks!.every((block) => block.targetKind === "SUBTABLE")
       );
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       if (statements.length > 1) {
