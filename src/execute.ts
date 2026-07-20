@@ -29,6 +29,7 @@ import {
 } from "./core/applyPatchPlanner";
 import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
 import { prepareApplyInsert, type PreparedApplyInsert } from "./core/applyInsertPrepare";
+import { executePreparedApplyInsert } from "./core/applyInsertExecutePrepared";
 import {
   ApplyWritePartialFailureError,
   executePreparedApplyWrite,
@@ -325,6 +326,10 @@ export interface InsertResult {
   /** 作成されたレコード ID（バッチごと） */
   createdIds: string[][];
   insertedCount: number;
+  /** B44 INSERT APPLY progress. Absent for ordinary INSERT. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -460,7 +465,7 @@ export interface CsvImportConfirmDetail {
 export type ImportConfirmDetail = JsonImportConfirmDetail | CsvImportConfirmDetail;
 
 export interface ApplyConfirmDetail {
-  readonly kind: "APPLY_PATCH";
+  readonly kind: "APPLY_PATCH" | "APPLY_INSERT";
   readonly parentRows: number;
   readonly changedSubtableRows: number;
   readonly addedSubtableRows: number;
@@ -472,12 +477,16 @@ export interface ApplyConfirmDetail {
   }[];
   readonly deletedRows: number;
   readonly deletedParentRows: number;
-  readonly revisionRequired: true;
+  readonly revisionRequired: boolean;
   readonly irreversible: true;
   readonly retryOnRevisionConflict: false;
-  /** Present for multiple-parent APPLY: later PUT chunks can fail after an earlier prefix committed. */
+  /** Present for chunked APPLY: a later PUT/POST can fail after an earlier prefix committed. */
   readonly nonTransactional?: true;
   readonly partialSuccessPossible?: true;
+  /** Present for INSERT APPLY so Phase 16 surfaces need not infer create semantics. */
+  readonly insertedParentRows?: number;
+  /** Initial child rows included in the POST create image. */
+  readonly initialSubtableRows?: number;
 }
 
 // ============================================================
@@ -778,7 +787,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase13a", stmt);
-  assertApplyExecutionScope("phase13b", stmt);
+  assertApplyExecutionScope("phase13c", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1382,7 +1391,7 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyScope("phase13a", resolvedStmt);
-  assertApplyExecutionScope("phase13b", resolvedStmt);
+  assertApplyExecutionScope("phase13c", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -4294,6 +4303,74 @@ async function executeApplyInsertValidation(
   return materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos);
 }
 
+async function executeApplyInsert(
+  stmt: InsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<InsertResult> {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+
+  if (options.confirm) {
+    const ok = await options.confirm(prepared.guards.parentRows, "INSERT", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "INSERT",
+      targetAppId: stmt.appId,
+      applyDetail: buildApplyInsertConfirmDetail(prepared),
+    });
+    if (!ok) throw new OperationCancelledError("INSERT", prepared.guards.parentRows);
+  }
+
+  return executePreparedApplyInsert(prepared, client);
+}
+
+function buildApplyInsertConfirmDetail(prepared: PreparedApplyInsert): ApplyConfirmDetail {
+  const tables = new Map<string, { table: string; patchRows: 0; appendRows: number; removeRows: 0 }>();
+  for (const candidate of prepared.candidates) {
+    for (const table of candidate.tables) {
+      const counts = tables.get(table.table) ?? {
+        table: table.table,
+        patchRows: 0 as const,
+        appendRows: 0,
+        removeRows: 0 as const,
+      };
+      counts.appendRows += table.addedRows;
+      tables.set(table.table, counts);
+    }
+  }
+  return {
+    kind: "APPLY_INSERT",
+    parentRows: prepared.guards.parentRows,
+    changedSubtableRows: prepared.guards.subtableRows,
+    addedSubtableRows: prepared.guards.subtableRows,
+    tables: [...tables.values()],
+    deletedRows: 0,
+    deletedParentRows: 0,
+    revisionRequired: false,
+    irreversible: true,
+    retryOnRevisionConflict: false,
+    nonTransactional: true,
+    partialSuccessPossible: true,
+    insertedParentRows: prepared.guards.parentRows,
+    initialSubtableRows: prepared.guards.subtableRows,
+  };
+}
+
 async function executeDmlValidation(
   stmt: ValidationStatement,
   client: KintoneClient,
@@ -5003,6 +5080,7 @@ async function executeInsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<InsertResult> {
+  if (stmt.applyBlocks?.length) return executeApplyInsert(stmt, client, options, cacheContext);
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   if (stmt.subtableCode) {
     return executeInsertSubtable(stmt, client, options, cacheContext);

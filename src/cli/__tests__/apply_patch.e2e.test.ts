@@ -38,6 +38,7 @@ jest.mock("../nodeKintoneClient", () => ({
 import { runWithArgv } from "../index";
 
 const SQL = "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
+const INSERT_SQL = "INSERT INTO APP4221 (親) VALUES ('new') APPLY テーブル (APPEND (子) VALUES ('child'))";
 const BASE = ["--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy"];
 
 async function captured(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -100,6 +101,16 @@ test("APPLY mutation を含む batch にも capability と 100/100 境界を渡�
   expect(result.code).toBe(0);
   expect(putRecords).toHaveBeenCalledTimes(1);
   expect(result.stderr).toContain("[APPLY PATCH/APPEND/REMOVE Confirm]");
+});
+
+test("Phase 13c: CLIはINSERT APPLY capabilityをPhase 16bまで開かずPOST 0", async () => {
+  const result = await captured([
+    ...BASE, "--allow-dml", "--yes", "-e", INSERT_SQL,
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(postRecords).not.toHaveBeenCalled();
+  expect(getRecords).not.toHaveBeenCalled();
 });
 
 test("APPLY dry-run は records API 0 で args > env > profile > default を表示する", async () => {

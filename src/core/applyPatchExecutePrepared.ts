@@ -11,10 +11,10 @@ export interface ApplyWriteProgress {
 }
 
 export interface ApplyWriteFailureDetail extends ApplyWriteProgress {
-  /** Zero-based index in the prepared PUT batch array. */
+  /** Zero-based index in the prepared write batch array. */
   readonly failedChunkIndex: number;
-  /** The failure happened while issuing this chunk's PUT; no retry is attempted. */
-  readonly failedStage: "PUT_CHUNK";
+  /** The failure happened while issuing this chunk; no retry is attempted. */
+  readonly failedStage: "PUT_CHUNK" | "POST_CHUNK";
   readonly retryAttempted: false;
 }
 
@@ -34,8 +34,9 @@ export class ApplyWritePartialFailureError extends Error {
 
   constructor(partialSuccess: ApplyWriteFailureDetail, cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);
+    const method = partialSuccess.failedStage === "POST_CHUNK" ? "POST" : "PUT";
     super(
-      `ApplyWritePartialFailureError: APPLY PUT chunk ${partialSuccess.failedChunkIndex + 1} failed `
+      `ApplyWritePartialFailureError: APPLY ${method} chunk ${partialSuccess.failedChunkIndex + 1} failed `
       + `(index ${partialSuccess.failedChunkIndex}) after ${partialSuccess.successfulChunks} successful chunk(s) `
       + `and ${partialSuccess.successfulParents} successful parent(s); writes are non-transactional and were not retried. Cause: ${detail}`
     );

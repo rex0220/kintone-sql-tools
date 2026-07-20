@@ -59,10 +59,10 @@ const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
 const insertApplySql = "INSERT INTO APP4221 (親) VALUES ('new') "
   + "APPLY テーブル (APPEND (子) VALUES ('child'))";
 
-test("Phase 13b: INSERT APPLY mutation は公開 execute/batch で API 0 fail-closed", async () => {
+test("Phase 13c: allowApplyMutationなしのINSERT APPLYはexecute/batchでAPI 0 fail-closed", async () => {
   const single = makeClient([]);
   await expect(execute(insertApplySql, single.client, { cacheContext: "apply-phase13a-insert" }))
-    .rejects.toThrow("UnsupportedError: APPLY Phase 13b INSERT execution is not connected");
+    .rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   for (const api of [single.getFields, single.getRecords, single.openCursor, single.postRecords, single.putRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
@@ -71,11 +71,108 @@ test("Phase 13b: INSERT APPLY mutation は公開 execute/batch で API 0 fail-cl
   const result = await executeBatch(insertApplySql, batch.client, { cacheContext: "apply-phase13a-insert-batch" });
   expect(result.statements[0]).toMatchObject({
     status: "error",
-    error: { message: "UnsupportedError: APPLY Phase 13b INSERT execution is not connected" },
+    error: { message: "UnsupportedError: APPLY mutation requires allowApplyMutation=true" },
   });
   for (const api of [batch.getFields, batch.getRecords, batch.openCursor, batch.postRecords, batch.putRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
+});
+
+test("Phase 13c: INSERT APPLYをprepare後confirm 1回からPOSTへ接続し初期子行を作成する", async () => {
+  const mock = makeClient([]);
+  mock.postRecords.mockImplementation(async (batch) => ({
+    ids: batch.records.map((_record, index) => String(index + 1)),
+  }));
+  const confirm = jest.fn(async () => true);
+  const result = await execute(
+    "INSERT INTO APP4221 (親) VALUES ('p1'), ('p2') "
+      + "APPLY テーブル (APPEND (子) VALUES ('c1'), ('c2'))",
+    mock.client,
+    { cacheContext: "apply-phase13c-insert-success", allowApplyMutation: true, confirm,
+      dmlMaxRows: 2, dmlMaxSubtableRows: 4 }
+  );
+  expect(result).toMatchObject({
+    type: "INSERT", insertedCount: 2, createdIds: [["1", "2"]],
+    successfulChunks: 1, successfulParents: 2, nonTransactional: true,
+  });
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm).toHaveBeenCalledWith(2, "INSERT", expect.objectContaining({
+    applyDetail: {
+      kind: "APPLY_INSERT", parentRows: 2, changedSubtableRows: 4, addedSubtableRows: 4,
+      tables: [{ table: "テーブル", patchRows: 0, appendRows: 4, removeRows: 0 }],
+      deletedRows: 0, deletedParentRows: 0, revisionRequired: false, irreversible: true,
+      retryOnRevisionConflict: false, nonTransactional: true, partialSuccessPossible: true,
+      insertedParentRows: 2, initialSubtableRows: 4,
+    },
+  }));
+  expect(mock.getFields.mock.invocationCallOrder[0]).toBeLessThan(confirm.mock.invocationCallOrder[0]);
+  expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.postRecords.mock.invocationCallOrder[0]);
+  expect(mock.postRecords).toHaveBeenCalledWith({ app: 4221, records: [
+    { 親: { value: "p1" }, テーブル: { value: [
+      { value: { 子: { value: "c1" } } }, { value: { 子: { value: "c2" } } },
+    ] } },
+    { 親: { value: "p2" }, テーブル: { value: [
+      { value: { 子: { value: "c1" } } }, { value: { 子: { value: "c2" } } },
+    ] } },
+  ] });
+  for (const api of [mock.getRecords, mock.openCursor, mock.putRecords, mock.deleteRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+});
+
+test("Phase 13c: 201親の2nd POST失敗は公開errorへ成功済み100親を保持する", async () => {
+  const mock = makeClient([]);
+  mock.postRecords
+    .mockResolvedValueOnce({ ids: Array.from({ length: 100 }, (_, index) => String(index + 1)) })
+    .mockRejectedValueOnce(new Error("CB_VA01: invalid record"));
+  const values = Array.from({ length: 201 }, (_, index) => `('p${index + 1}')`).join(", ");
+  let caught: unknown;
+  try {
+    await execute(
+      `INSERT INTO APP4221 (親) VALUES ${values} APPLY テーブル (APPEND (子) VALUES ('c'))`,
+      mock.client,
+      { cacheContext: "apply-phase13c-insert-partial", allowApplyMutation: true,
+        dmlMaxRows: 201, dmlMaxSubtableRows: 201 }
+    );
+  } catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(ApplyWritePartialFailureError);
+  expect(caught).toMatchObject({ partialSuccess: {
+    successfulChunks: 1, successfulParents: 100, failedChunkIndex: 1,
+    failedStage: "POST_CHUNK", retryAttempted: false,
+  } });
+  expect(mock.postRecords).toHaveBeenCalledTimes(2);
+  expect(mock.getRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 13c: INSERT APPLY batchは成功進捗をenvelopeへ渡し部分成功時はfail-fast", async () => {
+  const success = makeClient([]);
+  success.postRecords.mockResolvedValue({ ids: ["1"] });
+  const completed = await executeBatch(insertApplySql, success.client, {
+    cacheContext: "apply-phase13c-insert-batch-success", allowApplyMutation: true,
+  });
+  expect(buildBatchEnvelope(completed).statements[0]).toMatchObject({
+    status: "success", insertedCount: 1, successfulChunks: 1,
+    successfulParents: 1, nonTransactional: true,
+  });
+
+  const partial = makeClient([]);
+  partial.postRecords
+    .mockResolvedValueOnce({ ids: Array.from({ length: 100 }, (_, index) => String(index + 1)) })
+    .mockRejectedValueOnce(new Error("CB_VA01"));
+  const values = Array.from({ length: 201 }, (_, index) => `('p${index + 1}')`).join(", ");
+  const failed = await executeBatch(
+    `INSERT INTO APP4221 (親) VALUES ${values} APPLY テーブル (APPEND (子) VALUES ('c')); `
+      + "INSERT INTO APP4221 (親) VALUES ('later')",
+    partial.client,
+    { cacheContext: "apply-phase13c-insert-batch-partial", allowApplyMutation: true,
+      dmlMaxRows: 201, dmlMaxSubtableRows: 201 }
+  );
+  expect(failed.statements[0]).toMatchObject({ status: "error", error: {
+    code: "ApplyWritePartialFailureError",
+    partialSuccess: { successfulParents: 100, failedStage: "POST_CHUNK" },
+  } });
+  expect(failed.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+  expect(partial.postRecords).toHaveBeenCalledTimes(2);
 });
 
 test("Phase 13a: APPLY なし INSERT の既存 POST 経路は非回帰", async () => {

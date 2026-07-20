@@ -15,3 +15,9 @@ test("B44 Phase 6: plugin は APPLY mutation だけ capability と固定 100/100
   });
   expect(resolvePluginApplyOptions(parseSqlStatements("UPDATE APP4221 SET 親='x' WHERE $id=8"))).toEqual({});
 });
+
+test("Phase 13c: pluginはINSERT APPLY capabilityをPhase 16cまで開かない", () => {
+  expect(resolvePluginApplyOptions(parseSqlStatements(
+    "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('c'))"
+  ))).toEqual({});
+});
