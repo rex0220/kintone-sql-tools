@@ -39,6 +39,8 @@ import { runWithArgv } from "../index";
 
 const SQL = "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
 const INSERT_SQL = "INSERT INTO APP4221 (親) VALUES ('new') APPLY テーブル (APPEND (子) VALUES ('child'))";
+const UPSERT_SQL = "UPSERT INTO APP4221 (親) VALUES ('new') ON DUPLICATE (親) "
+  + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('child'))";
 const BASE = ["--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy"];
 
 async function captured(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -111,6 +113,17 @@ test("Phase 13c: CLIはINSERT APPLY capabilityをPhase 16bまで開かずPOST 0"
   expect(result.stderr).toContain("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   expect(postRecords).not.toHaveBeenCalled();
   expect(getRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 14c: CLIはUPSERT APPLY capabilityをPhase 16bまで開かずrecords API 0", async () => {
+  const result = await captured([
+    ...BASE, "--allow-dml", "--yes", "-e", UPSERT_SQL,
+  ]);
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(postRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
 });
 
 test("APPLY dry-run は records API 0 で args > env > profile > default を表示する", async () => {

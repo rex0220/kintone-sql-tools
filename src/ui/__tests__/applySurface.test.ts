@@ -21,3 +21,10 @@ test("Phase 13c: pluginはINSERT APPLY capabilityをPhase 16cまで開かない"
     "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('c'))"
   ))).toEqual({});
 });
+
+test("Phase 14c: pluginはUPSERT APPLY capabilityをPhase 16cまで開かない", () => {
+  expect(resolvePluginApplyOptions(parseSqlStatements(
+    "UPSERT INTO APP4221 (親) VALUES ('x') ON DUPLICATE (親) "
+      + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('c'))"
+  ))).toEqual({});
+});

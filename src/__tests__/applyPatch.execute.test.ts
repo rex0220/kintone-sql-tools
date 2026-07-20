@@ -59,6 +59,171 @@ const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
 const insertApplySql = "INSERT INTO APP4221 (親) VALUES ('new') "
   + "APPLY テーブル (APPEND (子) VALUES ('child'))";
 
+const upsertApplySql = "UPSERT INTO APP4221 (親) VALUES ('new'), ('old') ON DUPLICATE (親) "
+  + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('initial')) "
+  + "ON UPDATE APPLY テーブル (PATCH SET 子='patched' WHERE 子='old')";
+
+function upsertParent(id: number, key: string): KintoneRecord {
+  const record = parent(String(id));
+  record.親 = { value: key };
+  return record;
+}
+
+test("Phase 14c: allowApplyMutationなしのUPSERT APPLYはexecute/batchでAPI 0 fail-closed", async () => {
+  const single = makeClient([]);
+  await expect(execute(upsertApplySql, single.client, { cacheContext: "apply-phase14c-upsert-closed" }))
+    .rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  for (const api of [single.getFields, single.getRecords, single.openCursor, single.postRecords, single.putRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+
+  const batch = makeClient([]);
+  await expect(executeBatch(
+    upsertApplySql,
+    batch.client,
+    { cacheContext: "apply-phase14c-upsert-batch-closed" }
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  for (const api of [batch.getFields, batch.getRecords, batch.openCursor, batch.postRecords, batch.putRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+});
+
+test.each([
+  ["all create", [], 2, 0],
+  ["all update", [upsertParent(8, "new"), upsertParent(9, "old")], 0, 2],
+  ["mixed", [upsertParent(9, "old")], 1, 1],
+] as const)("Phase 14c: UPSERT APPLY core %sをprepare後POST→PUTで実行する", async (
+  _label, records, insertedCount, updatedCount
+) => {
+  const mock = makeClient([...records]);
+  mock.postRecords.mockImplementation(async (batch) => ({
+    ids: batch.records.map((_record, index) => String(index + 100)),
+  }));
+  const result = await execute(upsertApplySql, mock.client, {
+    cacheContext: `apply-phase14c-upsert-${_label}`,
+    allowApplyMutation: true,
+    dmlMaxRows: 2,
+    dmlMaxSubtableRows: 2,
+  });
+  expect(result).toMatchObject({
+    type: "UPSERT",
+    insertedCount,
+    updatedCount,
+    successfulParents: 2,
+    nonTransactional: true,
+  });
+  expect(mock.postRecords).toHaveBeenCalledTimes(insertedCount > 0 ? 1 : 0);
+  expect(mock.putRecords).toHaveBeenCalledTimes(updatedCount > 0 ? 1 : 0);
+  if (insertedCount > 0 && updatedCount > 0) {
+    expect(mock.postRecords.mock.invocationCallOrder[0]).toBeLessThan(mock.putRecords.mock.invocationCallOrder[0]);
+  }
+});
+
+test("Phase 14c: UPSERT APPLY confirmはprepared済みinsert/update内訳を1回だけ渡しwrite前に完了する", async () => {
+  const mock = makeClient([upsertParent(9, "old")]);
+  mock.postRecords.mockResolvedValue({ ids: ["100"] });
+  const confirm = jest.fn(async () => true);
+  await expect(execute(upsertApplySql, mock.client, {
+    cacheContext: "apply-phase14c-upsert-confirm",
+    allowApplyMutation: true,
+    dmlMaxRows: 2,
+    dmlMaxSubtableRows: 2,
+    confirm,
+  })).resolves.toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 1 });
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm).toHaveBeenCalledWith(2, "UPDATE", expect.objectContaining({
+    statementType: "UPSERT",
+    applyDetail: expect.objectContaining({
+      kind: "APPLY_UPSERT",
+      parentRows: 2,
+      insertedParentRows: 1,
+      initialSubtableRows: 1,
+      updatedParentRows: 1,
+      revisionRequired: true,
+      nonTransactional: true,
+      partialSuccessPossible: true,
+      applyBranches: {
+        insert: expect.objectContaining({ parentRows: 1, initialSubtableRows: 1 }),
+        update: expect.objectContaining({ parentRows: 1, changedSubtableRows: 1 }),
+      },
+    }),
+  }));
+  expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.postRecords.mock.invocationCallOrder[0]);
+  expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.putRecords.mock.invocationCallOrder[0]);
+});
+
+test("Phase 14c: create全件後のupdate 2nd chunk失敗を公開errorとbatch envelopeへ伝播しfail-fastする", async () => {
+  const updates = Array.from({ length: 101 }, (_, index) => upsertParent(index + 1, `u${index}`));
+  const values = [
+    ...Array.from({ length: 101 }, (_, index) => `('n${index}')`),
+    ...Array.from({ length: 101 }, (_, index) => `('u${index}')`),
+  ].join(", ");
+  const sql = `UPSERT INTO APP4221 (親) VALUES ${values} ON DUPLICATE (親) `
+    + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('initial')) "
+    + "ON UPDATE APPLY テーブル (PATCH SET 子='patched' WHERE 子='old')";
+  const mock = makeClient(updates);
+  mock.postRecords.mockImplementation(async (batch) => ({ ids: batch.records.map((_record, index) => String(index + 1)) }));
+  mock.putRecords.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("GAIA_CO02"));
+
+  const batch = await executeBatch(`${sql}; INSERT INTO APP4221 (親) VALUES ('later')`, mock.client, {
+    cacheContext: "apply-phase14c-upsert-partial",
+    allowApplyMutation: true,
+    dmlMaxRows: 202,
+    dmlMaxSubtableRows: 202,
+  });
+  expect(batch.statements[0]).toMatchObject({ status: "error", error: {
+    code: "ApplyWritePartialFailureError",
+    partialSuccess: {
+      successfulParents: 201,
+      successfulInserts: 101,
+      successfulUpdates: 100,
+      failedChunkIndex: 1,
+      failedBranch: "UPDATE",
+      failedStage: "PUT_CHUNK",
+      retryAttempted: false,
+    },
+  } });
+  expect(batch.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+  expect(mock.postRecords).toHaveBeenCalledTimes(2);
+  expect(mock.putRecords).toHaveBeenCalledTimes(2);
+});
+
+test("Phase 14c: UPSERT APPLY batch成功はbranch件数と進捗をenvelopeへ伝播する", async () => {
+  const mock = makeClient([upsertParent(9, "old")]);
+  mock.postRecords.mockResolvedValue({ ids: ["100"] });
+  const batch = await executeBatch(upsertApplySql, mock.client, {
+    cacheContext: "apply-phase14c-upsert-batch-success",
+    allowApplyMutation: true,
+    dmlMaxRows: 2,
+    dmlMaxSubtableRows: 2,
+  });
+  expect(buildBatchEnvelope(batch).statements[0]).toMatchObject({
+    status: "success",
+    insertedCount: 1,
+    updatedCount: 1,
+    successfulChunks: 2,
+    successfulParents: 2,
+    successfulInsertChunks: 1,
+    successfulUpdateChunks: 1,
+    nonTransactional: true,
+  });
+});
+
+test("Phase 14c: UPSERT APPLYの合算二重guardはconfirm/write前に拒否する", async () => {
+  const mock = makeClient([upsertParent(9, "old")]);
+  const confirm = jest.fn(async () => true);
+  await expect(execute(upsertApplySql, mock.client, {
+    cacheContext: "apply-phase14c-upsert-guard",
+    allowApplyMutation: true,
+    dmlMaxRows: 1,
+    dmlMaxSubtableRows: 2,
+    confirm,
+  })).rejects.toThrow("ArgumentError: APPLY parent rows (2) exceed dmlMaxRows (1).");
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
 test("Phase 13c: allowApplyMutationなしのINSERT APPLYはexecute/batchでAPI 0 fail-closed", async () => {
   const single = makeClient([]);
   await expect(execute(insertApplySql, single.client, { cacheContext: "apply-phase13a-insert" }))

@@ -15,6 +15,11 @@ export interface ApplyWriteFailureDetail extends ApplyWriteProgress {
   readonly failedChunkIndex: number;
   /** The failure happened while issuing this chunk; no retry is attempted. */
   readonly failedStage: "PUT_CHUNK" | "POST_CHUNK";
+  /** UPSERT branch-local failure context. Absent for INSERT/UPDATE APPLY. */
+  readonly failedBranch?: "INSERT" | "UPDATE";
+  /** Already committed UPSERT parents, split by branch. */
+  readonly successfulInserts?: number;
+  readonly successfulUpdates?: number;
   readonly retryAttempted: false;
 }
 
@@ -35,8 +40,9 @@ export class ApplyWritePartialFailureError extends Error {
   constructor(partialSuccess: ApplyWriteFailureDetail, cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);
     const method = partialSuccess.failedStage === "POST_CHUNK" ? "POST" : "PUT";
+    const branch = partialSuccess.failedBranch ? ` UPSERT ${partialSuccess.failedBranch}` : "";
     super(
-      `ApplyWritePartialFailureError: APPLY ${method} chunk ${partialSuccess.failedChunkIndex + 1} failed `
+      `ApplyWritePartialFailureError: APPLY${branch} ${method} chunk ${partialSuccess.failedChunkIndex + 1} failed `
       + `(index ${partialSuccess.failedChunkIndex}) after ${partialSuccess.successfulChunks} successful chunk(s) `
       + `and ${partialSuccess.successfulParents} successful parent(s); writes are non-transactional and were not retried. Cause: ${detail}`
     );

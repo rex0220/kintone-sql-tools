@@ -80,6 +80,11 @@ function toMutationSummary(
   if (result.type === "UPSERT") {
     return {
       insertedCount: result.insertedCount, updatedCount: result.updatedCount,
+      ...(result.successfulChunks !== undefined ? { successfulChunks: result.successfulChunks } : {}),
+      ...(result.successfulParents !== undefined ? { successfulParents: result.successfulParents } : {}),
+      ...(result.successfulInsertChunks !== undefined ? { successfulInsertChunks: result.successfulInsertChunks } : {}),
+      ...(result.successfulUpdateChunks !== undefined ? { successfulUpdateChunks: result.successfulUpdateChunks } : {}),
+      ...(result.nonTransactional !== undefined ? { nonTransactional: result.nonTransactional } : {}),
       ...(result.affectedRows !== undefined ? { affectedRows: result.affectedRows } : {}),
       ...(result.skippedRows !== undefined ? { skippedRows: result.skippedRows } : {}),
       ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),

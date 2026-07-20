@@ -80,3 +80,28 @@ test("既存 UPDATE は APPLY progress key を追加しない", () => {
   expect(statement).not.toHaveProperty("successfulParents");
   expect(statement).not.toHaveProperty("nonTransactional");
 });
+
+test("UPSERT APPLY envelopeはbranch別を含む成功進捗を保持する", () => {
+  const batch = {
+    ok: true,
+    statementCount: 1,
+    statements: [{
+      index: 0, type: "UPSERT", status: "success",
+      result: {
+        type: "UPSERT", insertedCount: 101, updatedCount: 1,
+        successfulChunks: 3, successfulParents: 102,
+        successfulInsertChunks: 2, successfulUpdateChunks: 1,
+        nonTransactional: true,
+      },
+    }],
+  } as unknown as BatchExecuteResult;
+  expect(buildBatchEnvelope(batch).statements[0]).toMatchObject({
+    insertedCount: 101,
+    updatedCount: 1,
+    successfulChunks: 3,
+    successfulParents: 102,
+    successfulInsertChunks: 2,
+    successfulUpdateChunks: 1,
+    nonTransactional: true,
+  });
+});

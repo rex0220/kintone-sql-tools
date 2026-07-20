@@ -221,13 +221,13 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
   expect(client.putCalls).toHaveLength(0);
 });
 
-test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
+test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
   const applySql = "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code) "
     + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial'))";
 
   const single = makeClient();
   await expect(execute(applySql, single, { cacheContext: "upsert-apply-closed-single" }))
-    .rejects.toThrow("UnsupportedError: APPLY Phase 14b UPSERT execution is not connected");
+    .rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   expect(single.getCalls).toHaveLength(0);
   expect(single.postCalls).toHaveLength(0);
   expect(single.putCalls).toHaveLength(0);
@@ -237,7 +237,7 @@ test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API �
     `SELECT value FROM APP200; ${applySql}`,
     batch,
     { cacheContext: "upsert-apply-closed-batch" }
-  )).rejects.toThrow("UnsupportedError: APPLY Phase 14b UPSERT execution is not connected");
+  )).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   expect(batch.getCalls).toHaveLength(0);
   expect(batch.postCalls).toHaveLength(0);
   expect(batch.putCalls).toHaveLength(0);

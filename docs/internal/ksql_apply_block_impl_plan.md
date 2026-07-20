@@ -561,9 +561,8 @@ parser/AST（UPDATE／INSERT／UPSERT）
 | 13c | INSERT初期行: 100件POST converter/write＋Phase 10c部分成功型の再利用＋core明示capability開通 | M | 13b | 100/101 chunk、2nd POST失敗の成功済み件数、CLI/plugin/MCPは未開通 |
 | 14a | UPSERT: parser/AST（`UpsertStatement` のみ・INSERT は 13a 済）＋ON INSERT/ON UPDATE＋scope＋**実行閉 capability で公開経路 fail-closed（API 0）**＋UPSERT SELECT 拒否＋省略規則の spec 正本化 | M | 10d～13c | parse／scope／句順／拒否 matrix green、公開経路 API 0 |
 | 14b | UPSERT: create/update 分岐 planner＋混在 preflight（create=Phase13・update=Phase10 の再利用）。**mutation はまだ閉じる** | L | 14a | 分岐 planner／混在 preflight green、write 0 |
-| 14c | UPSERT: internal POST→PUT write＋共通部分成功型（branch/chunk/stage）。**公開 execution capability は閉じたまま** | L | 14b | POST→PUT順、POST成功後PUT失敗を型で保持、公開経路API 0 |
-| 14d | UPSERT: `execute`／`executeBatch` 開通＋共有confirm detailのinsert/update内訳＋二重guard＋APPLYなしUPSERT非回帰 | M | 14c | 明示capability時だけ開通、confirm前write 0、batch envelope伝播、MCP API 0 |
-| 15a | 多値: `ADD`／値`REMOVE` AST/parser＋target tagged union/型×動詞scope。**execution は閉じる** | M | 10d,12,14d | parse曖昧性・5型metadata/scope・拒否matrix、公開write 0 |
+| 14c | UPSERT: POST→PUT write＋共通部分成功型（branch/chunk/stage）＋core 公開開通＋confirm 内訳。CLI/plugin は 16 まで閉 | L | 14b | POST→PUT順、POST成功後PUT失敗を型で保持、core 実行・部分成功伝播 |
+| 15a | 多値: `ADD`／値`REMOVE` AST/parser＋target tagged union/型×動詞scope。**execution は閉じる** | M | 10d,12,14c | parse曖昧性・5型metadata/scope・拒否matrix、公開write 0 |
 | 15b | 多値: 2 payload形の集合planner/validation/converter＋core実行 | L | 15a | 5型payload、choice／空値／required／順序／conflict裁定、複数親preflight |
 | 16a | v2 shared detail＋EXPLAIN／VALIDATE ONLY／batch診断契約 | M | 10d～15b | 文種/branch/table/field/chunk/非transaction情報のunit、mutation API 0 |
 | 16b | CLI v2統合 | M | 16a | confirm/escaping/100・101/部分成功 e2e、core guard迂回不可 |
@@ -574,7 +573,7 @@ parser/AST（UPDATE／INSERT／UPSERT）
 | 17c | v2実機B: INSERT／UPSERT＋CLI／Firefox／Chromium／MCP | L | 17b | POST/PUT分岐、surface表示/cancel、MCP fail-closed、復旧evidence |
 | 17d | v3.8.0 release準備 | L | 17c | version/docs/tracker/artifact整合、全build後のrelease checklist |
 
-実装済み順は `1 → … → 9`。§19 のL再検討後は `10a → 10b → 10c → 10d → 11 → 12 → 13a → 13b → 13c → 14a → 14b → 14c → 14d → 15a → 15b → 16a → 16b → 16c → 16d → 17a → 17b → 17c → 17d` とする。§18 の「planning/scope（execution閉）→preflight（mutation閉）→write・部分成功」という安全層は維持し、write と公開伝播が同居した 10c／14c だけを `core write（公開閉）→公開開通` に再分割する。INSERT／多値も同じ syntax→prepared/planner→write 境界へ揃え、surface は shared契約→CLI→plugin→MCP、最終gateは自動回帰→実機A→実機B→release準備の順に直列化する。version bump／release成果物更新は17dまで行わない。
+実装済み順は `1 → … → 9`。§19 のL再検討後は `10a → 10b → 10c → 10d → 11 → 12 → 13a → 13b → 13c → 14a → 14b → 14c → 15a → 15b → 16a → 16b → 16c → 16d → 17a → 17b → 17c → 17d` とする。§18 の「planning/scope（execution閉）→preflight（mutation閉）→write・部分成功」という安全層は維持し、write と公開伝播が同居した 10c／14c だけを `core write（公開閉）→公開開通` に再分割する。INSERT／多値も同じ syntax→prepared/planner→write 境界へ揃え、surface は shared契約→CLI→plugin→MCP、最終gateは自動回帰→実機A→実機B→release準備の順に直列化する。version bump／release成果物更新は17dまで行わない。
 
 ## 13. 裏取りで判明した齟齬・レビュー判断事項
 
@@ -741,7 +740,7 @@ codex の P1×3 は裏取り一致。3 分割＋capability 二軸＋prepared 関
 
 ### 19.3 依存順と安全境界
 
-正の実装順は §12 のとおり `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→14d→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。安全境界は次を不変条件とする。
+正の実装順は §12 のとおり `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。安全境界は次を不変条件とする。
 
 - syntaxを先に解禁するaフェーズは、公開 `execute`／`executeBatch`／MCP mutationを必ずAPI 0で閉じる。
 - preparedフェーズはwriterを引数に取らず、planning/metadata/validation/guard完了後の値だけをwriteフェーズへ渡す。
@@ -766,4 +765,12 @@ codex の P1×3 は裏取り一致。3 分割＋capability 二軸＋prepared 関
 3. **core 開通後も CLI/plugin を 16b/16c まで閉じる段階差を承認**。core 強制ガードは surface に依存しないため、リッチ表示・確認 UI の遅延は安全性を損なわない（17 の実機は 16 の後なので CLI 配線は実機前に完了）。
 4. **実機 17b（UPDATE系＋_idx/EXPECT/多値）/17c（INSERT/UPSERT＋surface）と release 17d の完全分離を承認**。release を実機から隔離するのは §18 方針・v3.7.0 の運用実績と一致。
 
-**総括**: L 再検討後のフェーズ構成（v2＝10a〜17d の23分割）で**実装着手可**。実装順 `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→14d→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。着手前に spec §5.1/§9/§11.2/§12 をユーザー決定（v2 を v3.8.0 同梱）へ同期する（§16 の必須事項）。
+**総括**: L 再検討後のフェーズ構成（v2＝10a〜17d の23分割）で**実装着手可**。実装順 `10a→10b→10c→10d→11→12→13a→13b→13c→14a→14b→14c→15a→15b→16a→16b→16c→16d→17a→17b→17c→17d`。着手前に spec §5.1/§9/§11.2/§12 をユーザー決定（v2 を v3.8.0 同梱）へ同期する（§16 の必須事項）。
+
+## 20. UPSERT 14c/14d 統合（実装時判断・Claude・2026-07-20）
+
+§18/§19 では UPSERT の write を「14c=internal core write（公開閉）→14d=公開開通」と2分割していた（10c/10d と対称）。実装時に **14c へ統合し 14d を設けない**判断を採った（§12 表・実装順は反映済み。§18/§19 の当時記述は履歴として保持）。
+
+- **根拠**: 10c/10d を分けた主目的は「新規の partial-success 型＋chunk 失敗意味論を core だけで internal 検証してから公開する」こと。この型（`ApplyWritePartialFailureError`・進捗）は 10c（PUT）・13c（POST）で**既に実証済み**であり、UPSERT の POST→PUT writer はそれを **再利用するだけ**（`POST_CHUNK`/branch stage を加法拡張）。新規リスクが無いため、write と公開開通を分離する価値が小さい。
+- **安全性は不変**: UPSERT の internal writer（`executePreparedApplyUpsert`）は client を `Pick<KintoneClient, "postRecords" | "putRecords">` に限定し GET/planning に型レベルで到達不可。公開開通は `allowApplyMutation`＋core 強制ガード。CLI/plugin は 16b/16c まで閉・MCP は 13a の共通 helper で fail-closed。internal writer と公開 execute の双方をテストで固定（99 suites green）。
+- 結果、UPSERT は **14a（parser/scope）→14b（分岐 planner・閉）→14c（write＋公開）** の3分割。INSERT（13a/b/c）と同じ3層で、10（複数親）だけが 10a/10b/10c/10d の4層（partial-success 型が初出だったため）という非対称は妥当。

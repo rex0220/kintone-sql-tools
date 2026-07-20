@@ -35,6 +35,7 @@ import {
   type PreparedApplyUpsert,
 } from "./core/applyUpsertPrepare";
 import { executePreparedApplyInsert } from "./core/applyInsertExecutePrepared";
+import { executePreparedApplyUpsert } from "./core/applyUpsertExecutePrepared";
 import {
   ApplyWritePartialFailureError,
   executePreparedApplyWrite,
@@ -368,6 +369,12 @@ export interface UpsertResult {
   type: "UPSERT";
   insertedCount: number;
   updatedCount: number;
+  /** B44 UPSERT APPLY progress. Absent for ordinary UPSERT. */
+  successfulChunks?: ApplyWriteProgress["successfulChunks"];
+  successfulParents?: ApplyWriteProgress["successfulParents"];
+  successfulInsertChunks?: number;
+  successfulUpdateChunks?: number;
+  nonTransactional?: ApplyWriteProgress["nonTransactional"];
   affectedRows?: number;
   skippedRows?: number;
   rejectLimit?: number | null;
@@ -475,7 +482,7 @@ export interface CsvImportConfirmDetail {
 export type ImportConfirmDetail = JsonImportConfirmDetail | CsvImportConfirmDetail;
 
 export interface ApplyConfirmDetail {
-  readonly kind: "APPLY_PATCH" | "APPLY_INSERT";
+  readonly kind: "APPLY_PATCH" | "APPLY_INSERT" | "APPLY_UPSERT";
   readonly parentRows: number;
   readonly changedSubtableRows: number;
   readonly addedSubtableRows: number;
@@ -497,6 +504,23 @@ export interface ApplyConfirmDetail {
   readonly insertedParentRows?: number;
   /** Initial child rows included in the POST create image. */
   readonly initialSubtableRows?: number;
+  /** Present for UPSERT APPLY so surfaces need not infer branch counts. */
+  readonly updatedParentRows?: number;
+  readonly applyBranches?: {
+    readonly insert: {
+      readonly parentRows: number;
+      readonly initialSubtableRows: number;
+      readonly tables: ApplyConfirmDetail["tables"];
+    };
+    readonly update: {
+      readonly parentRows: number;
+      readonly changedSubtableRows: number;
+      readonly addedSubtableRows: number;
+      readonly tables: ApplyConfirmDetail["tables"];
+      readonly deletedRows: number;
+      readonly deletedParentRows: number;
+    };
+  };
 }
 
 // ============================================================
@@ -796,8 +820,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase14b", stmt);
-  assertApplyExecutionScope("phase14b", stmt);
+  assertApplyScope("phase14c", stmt);
+  assertApplyExecutionScope("phase14c", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1206,8 +1230,15 @@ export async function executeBatch(
 ): Promise<BatchExecuteResult> {
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
-  // Phase 14a: UPSERT APPLY を含む mutation は、先行文を含む一切の API 呼び出し前に閉じる。
-  statements.forEach((statement) => assertApplyExecutionScope("phase14b", statement));
+  // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
+  statements.forEach((statement) => assertApplyExecutionScope("phase14c", statement));
+  if (options.allowApplyMutation !== true && statements.some((statement) =>
+    statement.type === "UPSERT"
+    && statement.validateOnly !== true
+    && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)
+  )) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
@@ -1402,8 +1433,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase14b", resolvedStmt);
-  assertApplyExecutionScope("phase14b", resolvedStmt);
+  assertApplyScope("phase14c", resolvedStmt);
+  assertApplyExecutionScope("phase14c", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -4322,6 +4353,19 @@ async function executeApplyUpsertValidation(
   cacheContext: string,
   statementNumber: number
 ): Promise<DmlValidationResult> {
+  const { fieldInfos, prepared } = await prepareApplyUpsertForExecution(
+    stmt, client, options, cacheContext, statementNumber
+  );
+  return materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos);
+}
+
+async function prepareApplyUpsertForExecution(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<{ fieldInfos: readonly KintoneFieldInfo[]; prepared: PreparedApplyUpsert }> {
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const fieldTypes = new Map(fieldInfos.map((field) => [field.code, field.fieldType]));
   const rowKeyValues = buildUpsertRowKeyValues(stmt);
@@ -4370,7 +4414,7 @@ async function executeApplyUpsertValidation(
     statementNumber,
     loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
   });
-  return materializePreparedApplyUpsertValidation(stmt, prepared, fieldInfos);
+  return { fieldInfos, prepared };
 }
 
 async function executeApplyInsert(
@@ -4439,6 +4483,92 @@ function buildApplyInsertConfirmDetail(prepared: PreparedApplyInsert): ApplyConf
     insertedParentRows: prepared.guards.parentRows,
     initialSubtableRows: prepared.guards.subtableRows,
   };
+}
+
+async function executeApplyUpsert(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<UpsertResult> {
+  if (options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  const { prepared } = await prepareApplyUpsertForExecution(stmt, client, options, cacheContext, 1);
+
+  if (options.confirm) {
+    const insert = buildApplyInsertConfirmDetail(prepared.create);
+    const update = buildMultipleParentApplyConfirmDetail(prepared.update);
+    const applyDetail: ApplyConfirmDetail = {
+      kind: "APPLY_UPSERT",
+      parentRows: prepared.guards.parentRows,
+      changedSubtableRows: prepared.guards.subtableRows,
+      addedSubtableRows: insert.addedSubtableRows + update.addedSubtableRows,
+      tables: mergeApplyConfirmTables(insert.tables, update.tables),
+      deletedRows: update.deletedRows,
+      deletedParentRows: update.deletedParentRows,
+      revisionRequired: prepared.guards.revisionRequired,
+      irreversible: true,
+      retryOnRevisionConflict: false,
+      nonTransactional: true,
+      partialSuccessPossible: true,
+      insertedParentRows: prepared.create.guards.parentRows,
+      initialSubtableRows: prepared.create.guards.subtableRows,
+      updatedParentRows: prepared.update.guards.parentRows,
+      applyBranches: {
+        insert: {
+          parentRows: prepared.create.guards.parentRows,
+          initialSubtableRows: prepared.create.guards.subtableRows,
+          tables: insert.tables,
+        },
+        update: {
+          parentRows: prepared.update.guards.parentRows,
+          changedSubtableRows: prepared.update.guards.subtableRows,
+          addedSubtableRows: update.addedSubtableRows,
+          tables: update.tables,
+          deletedRows: update.deletedRows,
+          deletedParentRows: update.deletedParentRows,
+        },
+      },
+    };
+    const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPSERT",
+      targetAppId: stmt.appId,
+      applyDetail,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", prepared.guards.parentRows);
+  }
+
+  const result = await executePreparedApplyUpsert(prepared, client);
+  return {
+    type: "UPSERT",
+    insertedCount: result.insertedCount,
+    updatedCount: result.updatedCount,
+    successfulChunks: result.successfulChunks,
+    successfulParents: result.successfulParents,
+    successfulInsertChunks: result.successfulInsertChunks,
+    successfulUpdateChunks: result.successfulUpdateChunks,
+    nonTransactional: result.nonTransactional,
+  };
+}
+
+function mergeApplyConfirmTables(
+  left: ApplyConfirmDetail["tables"],
+  right: ApplyConfirmDetail["tables"]
+): ApplyConfirmDetail["tables"] {
+  const merged = new Map<string, ApplyConfirmDetail["tables"][number]>();
+  for (const table of [...left, ...right]) {
+    const current = merged.get(table.table);
+    merged.set(table.table, current ? {
+      table: table.table,
+      patchRows: current.patchRows + table.patchRows,
+      appendRows: current.appendRows + table.appendRows,
+      removeRows: current.removeRows + table.removeRows,
+    } : { ...table });
+  }
+  return [...merged.values()];
 }
 
 async function executeDmlValidation(
@@ -6425,6 +6555,9 @@ async function executeUpsert(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpsertResult> {
+  if (stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length) {
+    return executeApplyUpsert(stmt, client, options, cacheContext);
+  }
   if (stmt.checkGroups?.length) return executeCheckedPlainDml(stmt, client, options, cacheContext);
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
@@ -7129,7 +7262,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase14b", stmt);
+    assertApplyScope("phase14c", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {
