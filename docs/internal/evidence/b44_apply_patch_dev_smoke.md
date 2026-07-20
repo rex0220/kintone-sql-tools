@@ -100,3 +100,24 @@ v2 累積機能: 複数親（10・100親/chunk・部分成功）・`_idx`（11�
 | W5 | `REMOVE WHERE _idx=0 EXPECT ROWS AT MOST 2` | _idx 0 削除→2行（境界内 pass） |
 
 **v2 全機能を CLI 実機で確認完了**（複数親100超は `--dml-max-rows` 引き上げ・多値は subtable ガード対象外）。plugin は v2 開通済（3.8.0 アップロード済・ブラウザ確認はユーザー）。MCP は全 APPLY mutation fail-closed（unit matrix＋smoke で固定・接続 MCP の live 確認は再起動要）。
+
+---
+
+## B45 実機確認（CLI・サブテーブル SELECT の WHERE システム列）
+
+対象=`docs/internal/ksql_b45_subtable_system_column_where_plan.md` R3・commit `9a80052`。ローカル CLI（dist-cli/ksql.js を B45 反映で再ビルド）で、旧版 `WHERE_FIELD_UNRESOLVED` で throw していた `_pid`/`_rid`/`_idx` の WHERE を検証。baseline=`_p.$id` 回避策で APP4223 record 2 の3行（_rid 7230010/7231606/7232086・_idx 0/1/2）を確認。
+
+| # | ケース | 結果 |
+|---|---|---|
+| T1 | `WHERE _pid = 2`（旧 throw） | 3行（record 2 の全子行）＝**修正で解決** |
+| T2 | `WHERE _rid = '7231606'`（文字列） | 1行（_idx 1） |
+| T3 | `WHERE _idx = 1`（数値） | 全親の2行目を横断取得 |
+| T4 | **数値意味論 決定的**：APP4221 $id=5（103行・_idx 0..102）で `_pid=5 AND _idx > 8` | **94行**（数値 9..102＝94・辞書順なら誤）。`ORDER BY _idx DESC`=**102,101,100**（数値順・辞書順なら "99","98"…） |
+| T5 | 負例 `WHERE _p._pid = 2` | `WHERE_FIELD_UNRESOLVED` で**拒否継続**（`_p` ガードが `_pid` への誤マッチを防止） |
+| T6 | EXPLAIN `_pid=2 AND _idx>0` | `mode: FULL_SCAN`・`reason: サブテーブル仮想テーブル, WHERE_RESIDUAL`・`kintone query: (全件取得)`＝**押し下げなし**（system 列が kintone クエリに出ない） |
+| T7 | `_rid IN (…)` / `_idx BETWEEN 0 AND 1` / `_rid IS NULL` | 2行 / 2行 / 0行（保存済み行は非NULL） |
+| T8 | `_rid = 7231606`（数値リテラル→文字列コアーション） | 1行（string semantics で一致） |
+| T9 | 複合 `_pid=2 AND _idx>=1` ＋ `_p.タイトル` | 2行（§19 例の意図どおり・親ショートカット併用） |
+| T10 | `_rid KLIKE '723'`（対象外） | 拒否（サブテーブル/FULL_SCAN の KLIKE は非対応＝設計どおり） |
+
+**要点**: 決定的証拠は T4＝`_idx` が number 比較・ORDER も数値順（辞書順なら 94→別値・102→"99" になる）。T5 で `_p._pid` の誤マッチ防止、T6 で非押し下げ（FULL_SCAN・system 列は kintone クエリに出ない）を確認。言語リファレンス §19 の SELECT 例（`WHERE _pid = 123`）が実動作と一致。**B45 CLI 実機 全10項目 pass。** プラグイン/MCP は再ビルドで同経路（接続 MCP は旧版のため live 不可・unit で固定済）。
