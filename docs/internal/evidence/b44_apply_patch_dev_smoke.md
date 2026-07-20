@@ -22,10 +22,24 @@
 | 11 | **$id=7 温存確認** | `SELECT … WHERE _p.$id=7` | _rid 7224309/7224313/7224317・値ともテスト前と完全一致 |
 | 12 | 専用レコード削除 | delete-records 1195 | 削除済み |
 
+## 複数テーブル実機（APP4223・2026-07-20 追記）
+
+APP4221 をコピーし **SUBTABLE を2つ（テーブル・テーブル2、子コードは _0 サフィックスで区別）** 持つ APP4223 で、v1.1 の複数テーブル合成を実機検証（$id=1「B44-multi」）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| M1 | VALIDATE ONLY（2テーブル分の apply[]） | valid=1 invalid=0・mutation 0 |
+| M2 | **複数テーブル同時 APPLY を1 PUT** | `APPLY テーブル (PATCH; APPEND) APPLY テーブル2 (PATCH; REMOVE; APPEND)` を **affected=1（単一 PUT record）** で反映 |
+| M2詳細 | テーブル | 7229594→XA1（数値T1=10 保持）・7229596 不変・NEW1 追加（数値T1 既定1000） |
+| M2詳細 | テーブル2 | 7229598(PQR) 削除・7229600→YB1（数値T1_0=200 保持）・NEW2 追加（数値T1_0 既定1000） |
+| M3 | 同一テーブル重複ブロック拒否（裁定3） | `ArgumentError: APPLY v1.2 scope allows only one block for table テーブル` |
+| M4 | 他テーブルの子コード指定拒否 | `ArgumentError: APPLY child 文字列T2_0 does not belong to subtable テーブル` |
+
+**複数テーブルで PATCH＋APPEND＋REMOVE を1文=1 PUT に合成できることを実機実証**。各テーブルが独立の payload 形（テーブル=PATCH_ONLY・テーブル2=FULL_SURVIVORS）で正しく処理された。
+
 ## 環境制約（コードの問題ではない）
 
 - **MCP fail-closed の live 確認は不可**: 接続中の MCP サーバは公開版 3.6.1 で APPLY 構文を知らず ParseError になる（新ビルドではない）。新ビルドの MCP mutation 拒否（AST 判定・API 0）は unit テスト（`src/mcp/__tests__/tools.test.ts`）で検証済み。
-- 複数テーブル（v1.1 の異なるテーブル合成）は APP4221 が SUBTABLE を1つ（テーブル）しか持たないため実機では未検証。unit/統合テスト（`applyPatchPlanner`/`applyPatch.execute`）で検証済み。
 - revision conflict の非 retry は unit テスト（GET 後別更新→旧 revision PUT 拒否）で検証済み。
 
 ## 結論
