@@ -227,3 +227,27 @@ describe("Phase 11 _idx syntax/execution capability", () => {
       .toThrow(/^UnsupportedError: APPLY phase11 scope/);
   });
 });
+
+describe("Phase 12 EXPECT ROWS syntax/execution capability", () => {
+  const parse = (text: string): UpdateStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as UpdateStatement;
+
+  test.each([
+    "PATCH SET 子='x' ALL ROWS EXPECT ROWS 2",
+    "PATCH SET 子='x' ALL ROWS EXPECT ROWS BETWEEN 1 AND 2",
+    "REMOVE ALL ROWS EXPECT ROWS AT LEAST 1",
+    "REMOVE ALL ROWS EXPECT ROWS AT MOST 2",
+  ])("PATCH/REMOVEのEXPECT ROWS 4形をsyntax/executionとも許可する: %s", (operation) => {
+    const stmt = parse(sql("状態='open'", operation));
+    expect(() => assertApplyScope("phase12", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase12", stmt)).not.toThrow();
+    expect(() => assertApplyPublicWriteScope("phase12", stmt)).not.toThrow();
+  });
+
+  test("Phase 11ではEXPECTを継続拒否し、APPENDにはEXPECT ROWS文法がない", () => {
+    const guardedPatch = parse(sql("$id=8", "PATCH SET 子='x' ALL ROWS EXPECT ROWS 1"));
+    expect(() => assertApplyScope("phase11", guardedPatch))
+      .toThrow("UnsupportedError: APPLY phase11 scope does not support EXPECT ROWS");
+    expect(() => parse(sql("$id=8", "APPEND (子) VALUES ('x') EXPECT ROWS 1"))).toThrow();
+  });
+});

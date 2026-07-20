@@ -2778,7 +2778,9 @@ export class Parser {
     if (this.consume(TokenKind.BETWEEN)) {
       const min = this.parseExpectRowsCount();
       this.expect(TokenKind.AND, "EXPECT ROWS BETWEEN の下限と上限は AND で区切ってください");
-      return { kind: "BETWEEN", min, max: this.parseExpectRowsCount() };
+      const max = this.parseExpectRowsCount();
+      if (min > max) throw new ParseError("EXPECT ROWS BETWEEN の下限は上限以下にしてください", this.peek());
+      return { kind: "BETWEEN", min, max };
     }
     if (this.isSoftKeyword("AT")) {
       this.advance();

@@ -234,6 +234,24 @@ test("Phase 10b: 複数親VALIDATE ONLYは全親のapply/guards/validationを集
   expect(mock.postRecords).not.toHaveBeenCalled();
 });
 
+test.each([
+  ["mutation", ""],
+  ["VALIDATE ONLY", " VALIDATE ONLY"],
+])("Phase 12: EXPECT ROWS違反は%sでもArgumentErrorで全件preflightしwrite 0", async (_label, tail) => {
+  const mock = makeClient([parent("8", 1), parent("9", 2)]);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 親='before' "
+      + `APPLY テーブル (PATCH SET 子='patched' ALL ROWS EXPECT ROWS 1)${tail}`,
+    mock.client,
+    { cacheContext: `apply-phase12-expect-${_label}`, allowApplyMutation: true, dmlMaxRows: 2 }
+  )).rejects.toThrow(
+    "ArgumentError: APPLY EXPECT ROWS mismatch for parent $id 9, table テーブル, operation 1 (PATCH): expected exactly 1, actual 2."
+  );
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+});
+
 test("Phase 10b: 一般WHERE 0件は空prepared由来の成功診断、単一$id 0件は従来どおりerror", async () => {
   const empty = makeClient([]);
   await expect(execute(

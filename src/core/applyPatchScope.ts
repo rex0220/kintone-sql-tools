@@ -5,8 +5,8 @@ import type {
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -74,6 +74,17 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     onErrorSkip: false,
     rejectLimit: false,
   }),
+  phase12: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
 });
 
 const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
@@ -86,6 +97,7 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false }),
   phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
   phase11: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
+  phase12: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";

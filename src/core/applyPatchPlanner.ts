@@ -7,7 +7,7 @@ import {
   toKintoneValue,
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
-import type { AppendOperation, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import type { AppendOperation, ExpectRowsGuard, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
 
 export interface ApplySnapshotRow {
   readonly id: string;
@@ -290,7 +290,7 @@ function buildApplyPatchPlanForSnapshot(
 
     // Every selector and PATCH RHS is evaluated only against snapshotRows. APPEND rows
     // are accumulated separately and therefore cannot become visible to later operations.
-    for (const operation of block.operations) {
+    for (const [operationIndex, operation] of block.operations.entries()) {
       if (operation.kind === "APPEND") {
         const rows = buildAppendRows(operation, targetChildren, block.field);
         operationPlans.push({ kind: "APPEND", addedRows: rows.length });
@@ -299,6 +299,9 @@ function buildApplyPatchPlanForSnapshot(
       }
       if (operation.kind === "REMOVE") {
         const indices = resolveRemoveTargets(operation, snapshotRows, childTypeResolver, block.field);
+        if (operation.expectRows) {
+          assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
+        }
         operationPlans.push({ kind: "REMOVE", removedRows: indices.length });
         for (const rowIndex of indices) {
           const rowId = snapshotRows[rowIndex].id;
@@ -314,6 +317,9 @@ function buildApplyPatchPlanForSnapshot(
       }
       if (operation.kind !== "PATCH") continue;
       const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+      if (operation.expectRows) {
+        assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
+      }
       operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
       for (const rowIndex of indices) {
         const row = snapshotRows[rowIndex];
@@ -399,6 +405,30 @@ function buildApplyPatchPlanForSnapshot(
     postImage,
     tables: tablePlans,
   };
+}
+
+/** EXPECT ROWS is a per-parent, per-operation preflight guard. */
+export function assertExpectRows(
+  guard: ExpectRowsGuard,
+  actual: number,
+  parentId: number,
+  table: string,
+  operationIndex: number,
+  operationKind: "PATCH" | "REMOVE"
+): void {
+  const matches = guard.kind === "EXACT" ? actual === guard.count
+    : guard.kind === "BETWEEN" ? actual >= guard.min && actual <= guard.max
+      : guard.kind === "AT_LEAST" ? actual >= guard.count
+        : actual <= guard.count;
+  if (matches) return;
+  const expected = guard.kind === "EXACT" ? `exactly ${guard.count}`
+    : guard.kind === "BETWEEN" ? `between ${guard.min} and ${guard.max}`
+      : guard.kind === "AT_LEAST" ? `at least ${guard.count}`
+        : `at most ${guard.count}`;
+  argument(
+    `APPLY EXPECT ROWS mismatch for parent $id ${parentId}, table ${table}, `
+    + `operation ${operationIndex + 1} (${operationKind}): expected ${expected}, actual ${actual}.`
+  );
 }
 
 /** Apply the complete post-image validator's primitive normalization back to the write plan. */

@@ -34,6 +34,13 @@ describe("UPDATE APPLY parser", () => {
     expect(stmt).toMatchObject({ applyBlocks: [{ operations: [{ expectRows: expected }] }] });
   });
 
+  test("EXPECT ROWS BETWEENの逆範囲とAPPEND後のEXPECTをparse errorにする", () => {
+    expect(() => parseSqlStatement("UPDATE APP1 SET 親='x' WHERE $id=1 APPLY 表 (PATCH SET 子='x' ALL ROWS EXPECT ROWS BETWEEN 2 AND 1)"))
+      .toThrow("EXPECT ROWS BETWEEN の下限は上限以下にしてください");
+    expect(() => parseSqlStatement("UPDATE APP1 SET 親='x' WHERE $id=1 APPLY 表 (APPEND (子) VALUES ('x') EXPECT ROWS 1)"))
+      .toThrow();
+  });
+
   test("_idxの等値/IN selectorを0-based数値リテラルのASTとして保持する", () => {
     const stmt = parseSqlStatement(`${prefix}APPLY テーブル (
       PATCH SET 子='first' WHERE _idx=0;

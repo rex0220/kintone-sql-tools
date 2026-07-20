@@ -160,6 +160,49 @@ describe("buildApplyPatchPlan", () => {
     ]);
   });
 
+  test.each([
+    ["EXACT", "EXPECT ROWS 2", "EXPECT ROWS 1", "exactly 1"],
+    ["BETWEEN", "EXPECT ROWS BETWEEN 1 AND 2", "EXPECT ROWS BETWEEN 3 AND 4", "between 3 and 4"],
+    ["AT LEAST", "EXPECT ROWS AT LEAST 2", "EXPECT ROWS AT LEAST 3", "at least 3"],
+    ["AT MOST", "EXPECT ROWS AT MOST 2", "EXPECT ROWS AT MOST 1", "at most 1"],
+  ])("EXPECT ROWS %s は境界を含めてpass/failする", (_kind, passing, failing, expectedText) => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement(`PATCH SET 結果=1 ALL ROWS ${passing}`), snapshot: snapshot(), fieldInfos: fields,
+    })).not.toThrow();
+    expect(() => buildApplyPatchPlan({
+      statement: statement(`PATCH SET 結果=1 ALL ROWS ${failing}`), snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow(
+      `ArgumentError: APPLY EXPECT ROWS mismatch for parent $id 8, table テーブル, operation 1 (PATCH): expected ${expectedText}, actual 2.`
+    );
+  });
+
+  test("PATCH/REMOVEを実マッチ既存行数で操作別に評価する", () => {
+    const plan = buildApplyPatchPlan({
+      statement: statement(
+        "PATCH SET 結果=1 WHERE 数値=1 EXPECT ROWS 1; REMOVE WHERE 数値=2 EXPECT ROWS 1"
+      ),
+      snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(plan.tables[0].operations).toEqual([
+      { kind: "PATCH", matchedRows: 1, changedRows: 1 },
+      { kind: "REMOVE", removedRows: 1 },
+    ]);
+    expect(() => buildApplyPatchPlan({
+      statement: statement(
+        "PATCH SET 結果=1 WHERE 数値=1 EXPECT ROWS 1; REMOVE ALL ROWS EXPECT ROWS 1"
+      ),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow(/operation 2 \(REMOVE\): expected exactly 1, actual 2/);
+  });
+
+  test.each(["_rid='999'", "_idx=9"])(
+    "EXPECT ROWS 0より単一%s対象消失errorを優先する",
+    (selector) => expect(() => buildApplyPatchPlan({
+      statement: statement(`PATCH SET 結果=1 WHERE ${selector} EXPECT ROWS 0`),
+      snapshot: snapshot(), fieldInfos: fields,
+    })).toThrow(new RegExp(`ArgumentError: APPLY ${selector.startsWith("_rid") ? "_rid 999" : "_idx 9"} does not exist`))
+  );
+
   test("同一cell多重PATCHを拒否し、同一行別cellは許可する", () => {
     expect(() => buildApplyPatchPlan({
       statement: statement("PATCH SET 結果 = 1 ALL ROWS; PATCH SET 結果 = 2 WHERE _rid = '101'"),
@@ -310,6 +353,19 @@ describe("buildApplyPatchPlans", () => {
     const plans = buildApplyPatchPlans(stmt, [snapshotFor(8, 31, 1), snapshotFor(9, 41, 20)], fields);
     expect(plans.map((plan) => plan.revision)).toEqual([31, 41]);
     expect(plans.map((plan) => plan.tables[0].postImageRows[0].value.結果.value)).toEqual(["11", "30"]);
+  });
+
+  test("EXPECT ROWSは複数親の各snapshotで独立評価し、1親でも違反なら全体を拒否する", () => {
+    const stmt = parseSqlStatement(
+      "UPDATE APP4221 SET 親='after' WHERE 親='before' "
+        + "APPLY テーブル (PATCH SET 結果=1 ALL ROWS EXPECT ROWS 1)"
+    ) as UpdateStatement;
+    expect(() => buildApplyPatchPlans(stmt, [
+      snapshotFor(8),
+      { ...snapshotFor(9), テーブル: snapshot().テーブル },
+    ], fields)).toThrow(
+      "ArgumentError: APPLY EXPECT ROWS mismatch for parent $id 9, table テーブル, operation 1 (PATCH): expected exactly 1, actual 2."
+    );
   });
 
   test("snapshot parentId重複をArgumentErrorで拒否する", () => {
