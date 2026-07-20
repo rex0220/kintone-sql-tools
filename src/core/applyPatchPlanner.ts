@@ -25,6 +25,9 @@ export interface ApplyPatchPostImageRow {
 
 interface ApplyPatchTablePlanBase {
   readonly table: string;
+  /** Distinct existing/new child rows changed by this table plan. */
+  readonly changedSubtableRows: number;
+  readonly deletedRows: number;
   readonly snapshotRowIds: readonly string[];
   readonly payloadRows: readonly ApplyPatchPayloadRow[];
   readonly postImageRows: readonly ApplyPatchPostImageRow[];
@@ -46,6 +49,10 @@ export interface ApplyPatchPlan {
   readonly app: number;
   readonly parentId: number;
   readonly revision: number;
+  /** v1 is a single-parent contract; a built plan always represents one parent. */
+  readonly parentRows: 1;
+  /** Distinct (parentId, table, rowId) child rows changed across the plan. */
+  readonly changedSubtableRows: number;
   readonly parentValues: Readonly<Record<string, { readonly value: KintoneValue }>>;
   readonly tables: readonly ApplyPatchTablePlan[];
   /** Phase 3 validation が走査する、FILE を opaque のまま保持した全record post-image。 */
@@ -268,11 +275,15 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
     app: statement.appId,
     parentId,
     revision,
+    parentRows: 1,
+    changedSubtableRows: updatesByIndex.size,
     parentValues,
     postImage,
     tables: [{
       table: block.field,
       payloadShape: "PATCH_ONLY",
+      changedSubtableRows: updatesByIndex.size,
+      deletedRows: 0,
       snapshotRowIds: snapshotRows.map((row) => row.id),
       payloadRows,
       postImageRows,

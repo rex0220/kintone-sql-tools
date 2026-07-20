@@ -13,13 +13,16 @@ const fieldInfos: KintoneFieldInfo[] = [
   { code: "別子", label: "別子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "別表" },
 ];
 
-function parent(id = "8"): KintoneRecord {
+function parent(id = "8", childCount = 1): KintoneRecord {
   return {
     "$id": { value: id },
     "$revision": { value: "3" },
     親: { value: "before" },
     親数値: { value: "1" },
-    テーブル: { value: [{ id: "101", value: { 子: { value: "old" }, 子添付: { value: [{ fileKey: "opaque" }] } } }] },
+    テーブル: { value: Array.from({ length: childCount }, (_, index) => ({
+      id: String(101 + index),
+      value: { 子: { value: "old" }, 子添付: { value: [{ fileKey: "opaque" }] } },
+    })) },
     別表: { value: [] },
   } as unknown as KintoneRecord;
 }
@@ -46,11 +49,20 @@ function makeClient(records: KintoneRecord[], infos = fieldInfos) {
 const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
   "APPLY テーブル (PATCH SET 子 = 'patched' WHERE _rid = '101')";
 
-test.each(["", " VALIDATE ONLY"])(
-  "APPLY は metadata→専用単一GET→plan/draft 後に停止し PUT しない: %s",
-  async (tail) => {
+test("allowApplyMutation なしの mutation は API 前に fail-closed", async () => {
+  const mock = makeClient([parent()]);
+  await expect(execute(sql, mock.client, { cacheContext: "apply-no-capability" }))
+    .rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  expect(mock.getFields).not.toHaveBeenCalled();
+  expect(mock.getRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test(
+  "VALIDATE ONLY は metadata→専用単一GET→plan/draft 後に従来どおり停止し PUT しない",
+  async () => {
     const mock = makeClient([parent()]);
-    await expect(execute(`${sql}${tail}`, mock.client, { cacheContext: `apply-exact-${tail}` }))
+    await expect(execute(`${sql} VALIDATE ONLY`, mock.client, { cacheContext: "apply-validate-draft" }))
       .rejects.toThrow("UnsupportedError: APPLY execution is not enabled in this phase");
     expect(mock.getFields).toHaveBeenCalledWith(4221);
     expect(mock.getRecords).toHaveBeenCalledTimes(1);
@@ -63,13 +75,112 @@ test.each(["", " VALIDATE ONLY"])(
   }
 );
 
+test("二重ガード以内は revision 付き1-record PUTを1回だけ行う", async () => {
+  const mock = makeClient([parent()]);
+  await expect(execute(sql, mock.client, {
+    cacheContext: "apply-success", allowApplyMutation: true, dmlMaxRows: 1, dmlMaxSubtableRows: 1,
+  })).resolves.toMatchObject({ type: "UPDATE", updatedCount: 1 });
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).toHaveBeenCalledWith({
+    app: 4221,
+    records: [{
+      id: 8,
+      revision: 3,
+      record: {
+        親: { value: "after" },
+        テーブル: { value: [{ id: "101", value: { 子: { value: "patched" } } }] },
+      },
+    }],
+  });
+});
+
+test("親1・子101は既定子ガード100で PUT 0", async () => {
+  const mock = makeClient([parent("8", 101)]);
+  const allRowsSql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
+    "APPLY テーブル (PATCH SET 子 = 'patched' ALL ROWS)";
+  await expect(execute(allRowsSql, mock.client, { cacheContext: "apply-default-child-guard", allowApplyMutation: true }))
+    .rejects.toThrow("ArgumentError: APPLY changed subtable rows (101) exceed dmlMaxSubtableRows (100)");
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("親ガードと両ガードの正整数契約を core で強制する", async () => {
+  const parentGuard = makeClient([parent()]);
+  await expect(execute(sql, parentGuard.client, {
+    cacheContext: "apply-parent-guard", allowApplyMutation: true, dmlMaxRows: 0,
+  })).rejects.toThrow("ArgumentError: dmlMaxRows must be a positive safe integer");
+  expect(parentGuard.putRecords).not.toHaveBeenCalled();
+
+  const childGuard = makeClient([parent()]);
+  await expect(execute(sql, childGuard.client, {
+    cacheContext: "apply-child-guard-invalid", allowApplyMutation: true, dmlMaxSubtableRows: 1.5,
+  })).rejects.toThrow("ArgumentError: dmlMaxSubtableRows must be a positive safe integer");
+  expect(childGuard.putRecords).not.toHaveBeenCalled();
+});
+
+test.each([
+  [
+    "unknown rid",
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (PATCH SET 子='x' WHERE _rid='999')",
+    /ArgumentError: APPLY _rid 999 does not exist/,
+  ],
+  [
+    "duplicate cell",
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (" +
+      "PATCH SET 子='x' ALL ROWS; PATCH SET 子='y' WHERE _rid='101')",
+    /ArgumentError: APPLY patches cell 101\.子 more than once/,
+  ],
+] as const)("%s は plan 完了前に拒否し PUT 0", async (_label, statement, error) => {
+  const mock = makeClient([parent()]);
+  await expect(execute(statement, mock.client, {
+    cacheContext: `apply-plan-${_label}`, allowApplyMutation: true,
+  })).rejects.toThrow(error);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("全 preflight とガード完了後に applyDetail 付き confirm を1回呼び、拒否なら PUT 0", async () => {
+  const mock = makeClient([parent()]);
+  const confirm = jest.fn(async (count, operation, context) => {
+    expect(mock.getFields).toHaveBeenCalledTimes(1);
+    expect(mock.getRecords).toHaveBeenCalledTimes(1);
+    expect(mock.getNumberPrecision).toHaveBeenCalledTimes(1);
+    expect(mock.putRecords).not.toHaveBeenCalled();
+    expect(count).toBe(1);
+    expect(operation).toBe("UPDATE");
+    expect(context?.importDetail).toBeUndefined();
+    expect(context?.applyDetail).toEqual({
+      kind: "APPLY_PATCH",
+      parentRows: 1,
+      changedSubtableRows: 1,
+      tables: [{ table: "テーブル", patchRows: 1 }],
+      deletedRows: 0,
+      revisionRequired: true,
+    });
+    return false;
+  });
+  await expect(execute(sql, mock.client, {
+    cacheContext: "apply-confirm-order", allowApplyMutation: true, confirm,
+  })).rejects.toThrow("UPDATE をキャンセルしました（対象: 1 件）");
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("revision conflict を再GET・retryせずそのまま失敗させる", async () => {
+  const mock = makeClient([parent()]);
+  mock.putRecords.mockRejectedValueOnce(new Error("GAIA_CO02: revision conflict"));
+  await expect(execute(sql, mock.client, {
+    cacheContext: "apply-revision-conflict", allowApplyMutation: true,
+  })).rejects.toThrow("GAIA_CO02: revision conflict");
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
+});
+
 test.each([
   ["0件", [], /ArgumentError: APPLY parent \$id 8 does not exist/],
   ["2件", [parent(), parent()], /ArgumentError: APPLY parent \$id 8 returned multiple records/],
   ["$id不一致", [parent("9")], /ArgumentError: APPLY snapshot \$id 9 does not match requested \$id 8/],
 ] as const)("親GETの%sを fail-closed にし PUT 0", async (_label, records, error) => {
   const mock = makeClient([...records]);
-  await expect(execute(sql, mock.client, { cacheContext: `apply-parent-${_label}` })).rejects.toThrow(error);
+  await expect(execute(sql, mock.client, { cacheContext: `apply-parent-${_label}`, allowApplyMutation: true })).rejects.toThrow(error);
   expect(mock.getRecords).toHaveBeenCalledTimes(1);
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
@@ -78,13 +189,13 @@ test("target/child/writable metadata error は records API 前に拒否する", 
   const wrongChild = makeClient([parent()]);
   const wrongChildSql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
     "APPLY テーブル (PATCH SET 別子 = 'x' ALL ROWS)";
-  await expect(execute(wrongChildSql, wrongChild.client, { cacheContext: "apply-wrong-child" }))
+  await expect(execute(wrongChildSql, wrongChild.client, { cacheContext: "apply-wrong-child", allowApplyMutation: true }))
     .rejects.toThrow("ArgumentError: APPLY child 別子 does not belong to subtable テーブル");
   expect(wrongChild.getRecords).not.toHaveBeenCalled();
   expect(wrongChild.putRecords).not.toHaveBeenCalled();
 
   const missingTable = makeClient([parent()], fieldInfos.filter((field) => field.code !== "テーブル"));
-  await expect(execute(sql, missingTable.client, { cacheContext: "apply-missing-table" }))
+  await expect(execute(sql, missingTable.client, { cacheContext: "apply-missing-table", allowApplyMutation: true }))
     .rejects.toThrow("ArgumentError: APPLY target テーブル is not a SUBTABLE");
   expect(missingTable.getRecords).not.toHaveBeenCalled();
 });
@@ -101,7 +212,7 @@ test("post-image error は固定列順の診断を含む ArgumentError で停止
 
   let error: Error | undefined;
   try {
-    await execute(sql, mock.client, { cacheContext: "apply-post-image-errors" });
+    await execute(sql, mock.client, { cacheContext: "apply-post-image-errors", allowApplyMutation: true });
   } catch (caught) {
     error = caught as Error;
   }
@@ -127,7 +238,7 @@ test("トップレベル post-image error の locator 3列は空で $id は重�
     ? { ...field, maxValue: "0" }
     : field);
   const mock = makeClient([parent()], constrained);
-  await expect(execute(sql, mock.client, { cacheContext: "apply-post-image-top-error" }))
+  await expect(execute(sql, mock.client, { cacheContext: "apply-post-image-top-error", allowApplyMutation: true }))
     .rejects.toThrow(/\"\$err_subtable\":\"\",\"\$err_subrow\":\"\",\"\$err_subrow_id\":\"\"/);
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
@@ -137,8 +248,8 @@ test("post-image に NUMBER セルがない場合は precision cache を読ま�
   const record = parent();
   delete record.親数値;
   const mock = makeClient([record], withoutNumbers);
-  await expect(execute(sql, mock.client, { cacheContext: "apply-no-number-precision" }))
-    .rejects.toThrow("UnsupportedError: APPLY execution is not enabled in this phase");
+  await expect(execute(sql, mock.client, { cacheContext: "apply-no-number-precision", allowApplyMutation: true }))
+    .resolves.toMatchObject({ updatedCount: 1 });
   expect(mock.getNumberPrecision).not.toHaveBeenCalled();
-  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
 });

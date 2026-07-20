@@ -130,10 +130,3 @@ function assertSafeChildField(field: unknown, context: string): void {
     unsupported(`aggregate expressions in ${context}`);
   }
 }
-
-/** Phase 1 executor gate. Call only after assertApplyV1Scope. */
-export function assertApplyExecutionEnabled(statement: Statement): void {
-  if (updateWithApply(statement) !== null) {
-    throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
-  }
-}

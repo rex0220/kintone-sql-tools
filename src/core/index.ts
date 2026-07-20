@@ -19,6 +19,7 @@ export type { NumberPrecision, NumberRoundingMode, RawNumberPrecisionSettings } 
 
 export type {
   DmlConfirmContext,
+  ApplyConfirmDetail,
   ImportConfirmDetail,
   ExecuteOptions,
   ExecuteResult,

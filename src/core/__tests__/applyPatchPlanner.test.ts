@@ -57,7 +57,7 @@ describe("buildApplyPatchPlan", () => {
       "親数値 = 親数値 + 1"
     );
     const plan = buildApplyPatchPlan({ statement: stmt, snapshot: snapshot(), fieldInfos: fields });
-    expect(plan).toMatchObject({ app: 4221, parentId: 8, revision: 3 });
+    expect(plan).toMatchObject({ app: 4221, parentId: 8, revision: 3, parentRows: 1, changedSubtableRows: 1 });
     expect(plan.parentValues).toEqual({ 親数値: { value: "11" } });
     expect(plan.tables[0].payloadShape).toBe("PATCH_ONLY");
     expect(plan.tables[0].payloadRows).toEqual([
@@ -78,6 +78,22 @@ describe("buildApplyPatchPlan", () => {
   ])("%s は no-op plan", (_label, operation, record) => {
     const plan = buildApplyPatchPlan({ statement: statement(operation), snapshot: record, fieldInfos: fields });
     expect(plan.tables[0].payloadRows).toEqual(plan.tables[0].snapshotRowIds.map((id) => ({ id })));
+    expect(plan.changedSubtableRows).toBe(0);
+    expect(plan.tables[0]).toMatchObject({ changedSubtableRows: 0, deletedRows: 0 });
+  });
+
+  test("同一行の複数cellは1、異なる行は行数どおり distinct count にする", () => {
+    const one = buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1, 数値 = 9 WHERE _rid = '101'"),
+      snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(one.changedSubtableRows).toBe(1);
+
+    const two = buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果 = 1 ALL ROWS"),
+      snapshot: snapshot(), fieldInfos: fields,
+    });
+    expect(two.changedSubtableRows).toBe(2);
   });
 
   test("_rid 0行を ArgumentError にする", () => {

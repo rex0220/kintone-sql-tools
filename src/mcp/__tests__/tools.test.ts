@@ -471,6 +471,34 @@ describe("MCP tools", () => {
     expect("continueOnError" in mutateInputSchema.shape).toBe(false);
   });
 
+  test("B44 Phase 4: MCP mutate は allowApplyMutation を配線せず API 0 で fail-closed", async () => {
+    const client = makeClient();
+    client.getRecords = jest.fn(async () => ({ records: [] }));
+    client.getFields = jest.fn(async () => []);
+    client.putRecords = jest.fn(async () => undefined);
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => ({
+        sql: input.sql,
+        profileName: "prod",
+        client,
+        cacheContext: "mcp-apply-fail-closed",
+        maxRecords: 500,
+        fetchParallel: 1,
+        onLimit: "error",
+        timeout: 30_000,
+      }),
+    });
+    await expect(tools.mutate({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS)",
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+    expect(client.getFields).not.toHaveBeenCalled();
+    expect(client.getRecords).not.toHaveBeenCalled();
+    expect(client.putRecords).not.toHaveBeenCalled();
+  });
+
   test("tempTableMaxRows schema rejects 0 / negative / non-integer", () => {
     for (const schema of [queryInputSchema, mutateInputSchema]) {
       const base = schema === queryInputSchema

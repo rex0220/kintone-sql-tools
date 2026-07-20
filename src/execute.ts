@@ -18,7 +18,7 @@ import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertS
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { requiresCompleteInput } from "./core/dmlGuard";
-import { assertApplyExecutionEnabled, assertApplyV1Scope } from "./core/applyPatchScope";
+import { assertApplyV1Scope } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
   collectApplySnapshotFields,
@@ -417,6 +417,18 @@ export interface CsvImportConfirmDetail {
 }
 export type ImportConfirmDetail = JsonImportConfirmDetail | CsvImportConfirmDetail;
 
+export interface ApplyConfirmDetail {
+  readonly kind: "APPLY_PATCH";
+  readonly parentRows: number;
+  readonly changedSubtableRows: number;
+  readonly tables: readonly {
+    readonly table: string;
+    readonly patchRows: number;
+  }[];
+  readonly deletedRows: number;
+  readonly revisionRequired: true;
+}
+
 // ============================================================
 // オプション
 // ============================================================
@@ -439,6 +451,8 @@ export interface DmlConfirmContext {
   targetAppId: number | null;
   /** Phase 5C destructive replacement audit. Optional for backward compatibility. */
   importDetail?: ImportConfirmDetail;
+  /** B44 APPLY preflight detail. Mutually exclusive with importDetail. */
+  applyDetail?: ApplyConfirmDetail;
 }
 
 export interface ExecuteOptions {
@@ -468,6 +482,12 @@ export interface ExecuteOptions {
   importSource?: ImportSourceResolver;
   /** The surface promises to render importDetail before returning true. */
   supportsImportConfirmDetail?: boolean;
+  /** APPLY parent-row hard cap. Positive safe integer; core default is 100. */
+  dmlMaxRows?: number;
+  /** APPLY changed-child-row hard cap. Positive safe integer; core default is 100. */
+  dmlMaxSubtableRows?: number;
+  /** Surface capability gate. Omitted/false keeps APPLY mutation unavailable. */
+  allowApplyMutation?: boolean;
 }
 
 // ============================================================
@@ -707,7 +727,9 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyV1Scope(stmt);
-  if (!(stmt.type === "UPDATE" && stmt.applyBlocks?.length)) assertApplyExecutionEnabled(stmt);
+  if (stmt.type === "EXPLAIN" && stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length) {
+    throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
+  }
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1184,6 +1206,7 @@ export async function executeBatch(
             statementType: info.statementType,
             targetAppId: info.targetAppId,
             ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
+            ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
           }),
         }
         : batchOptions;
@@ -1301,8 +1324,8 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyV1Scope(resolvedStmt);
-  if (!(resolvedStmt.type === "UPDATE" && resolvedStmt.applyBlocks?.length)) {
-    assertApplyExecutionEnabled(resolvedStmt);
+  if (resolvedStmt.type === "EXPLAIN" && resolvedStmt.query.type === "UPDATE" && resolvedStmt.query.applyBlocks?.length) {
+    throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
   }
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
@@ -5451,7 +5474,7 @@ async function executeUpdate(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<UpdateResult> {
   if (stmt.applyBlocks?.length) {
-    return executeApplyPatchUpdate(stmt, client, cacheContext);
+    return executeApplyPatchUpdate(stmt, client, options, cacheContext);
   }
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos = await loadWritableTopLevelDmlFields(
@@ -5551,8 +5574,12 @@ async function executeUpdate(
 async function executeApplyPatchUpdate(
   stmt: UpdateStatement,
   client: KintoneClient,
+  options: ExecuteOptions,
   cacheContext: string
 ): Promise<UpdateResult> {
+  if (!stmt.validateOnly && options.allowApplyMutation !== true) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
   const fields = collectApplySnapshotFields(stmt, fieldInfos);
@@ -5588,9 +5615,52 @@ async function executeApplyPatchUpdate(
       errors: validation.errors,
     })}`);
   }
-  // Phase 3 は normalized post-image と PUT draft の完全性まで検証するが mutation API へは接続しない。
-  applyPatchPlanToKintone(plan);
-  throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
+  const putParams = applyPatchPlanToKintone(plan);
+  // VALIDATE ONLY result wiring belongs to Phase 5. Preserve the Phase 3 draft-only path.
+  if (stmt.validateOnly) {
+    throw new Error("UnsupportedError: APPLY execution is not enabled in this phase");
+  }
+
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows");
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows");
+  if (plan.parentRows > dmlMaxRows) {
+    throw new Error(`ArgumentError: APPLY parent rows (${plan.parentRows}) exceed dmlMaxRows (${dmlMaxRows}).`);
+  }
+  if (plan.changedSubtableRows > dmlMaxSubtableRows) {
+    throw new Error(
+      `ArgumentError: APPLY changed subtable rows (${plan.changedSubtableRows}) exceed dmlMaxSubtableRows (${dmlMaxSubtableRows}).`
+    );
+  }
+
+  if (options.confirm) {
+    const applyDetail: ApplyConfirmDetail = {
+      kind: "APPLY_PATCH",
+      parentRows: plan.parentRows,
+      changedSubtableRows: plan.changedSubtableRows,
+      tables: plan.tables.map((table) => ({ table: table.table, patchRows: table.changedSubtableRows })),
+      deletedRows: plan.tables.reduce((sum, table) => sum + table.deletedRows, 0),
+      revisionRequired: true,
+    };
+    const ok = await options.confirm(plan.parentRows, "UPDATE", {
+      statementIndex: 0,
+      statementCount: 1,
+      statementType: "UPDATE",
+      targetAppId: stmt.appId,
+      applyDetail,
+    });
+    if (!ok) throw new OperationCancelledError("UPDATE", plan.parentRows);
+  }
+
+  await client.putRecords(putParams);
+  return { type: "UPDATE", updatedCount: plan.parentRows };
+}
+
+function resolveApplyGuardLimit(value: number | undefined, name: string): number {
+  const resolved = value ?? 100;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+  }
+  return resolved;
 }
 
 async function executeUpdateFrom(

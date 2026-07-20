@@ -7,11 +7,15 @@ function basePlan(): ApplyPatchPlan {
     app: 4221,
     parentId: 8,
     revision: 3,
+    parentRows: 1,
+    changedSubtableRows: 1,
     parentValues: { 親: { value: "after" } },
     postImage: { 親: { value: "after" } },
     tables: [{
       table: "テーブル",
       payloadShape: "PATCH_ONLY",
+      changedSubtableRows: 1,
+      deletedRows: 0,
       snapshotRowIds: ["101", "102"],
       payloadRows: [{ id: "101", value: { 子: { value: "patched" } } }, { id: "102" }],
       postImageRows: [
@@ -61,6 +65,8 @@ test("PATCH_ONLY と FULL_SURVIVORS のtable単位shape混在を検証する", (
       {
         table: "別表",
         payloadShape: "FULL_SURVIVORS",
+        changedSubtableRows: 1,
+        deletedRows: 1,
         snapshotRowIds: ["201", "202", "203"],
         removedRowIds: ["202"],
         payloadRows: [
@@ -83,6 +89,8 @@ test("FULL_SURVIVORS の列挙漏れ・集合交差を拒否する", () => {
   const invalid = {
     table: "別表",
     payloadShape: "FULL_SURVIVORS" as const,
+    changedSubtableRows: 1,
+    deletedRows: 1,
     snapshotRowIds: ["201", "202", "203"],
     removedRowIds: ["202"],
     payloadRows: [{ id: "201", value: { 子: { value: "a" } } }],
