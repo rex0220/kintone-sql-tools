@@ -412,7 +412,89 @@ MCP では、既存のサブテーブル DML と同じ分類になるため、�
 - **CODEX X3（`_p.` 書き込み）は CLAUDE に無い視点**: 既存構文の再利用が最大で修復文が最短になるが、親 INSERT/UPSERT が不自然になるため「UPDATE 修復専用の小拡張」と自己評価している。C1 とは鏡像関係（親主語 vs 子主語）。
 - **UPSERT の分岐**: X1/X2 は `ON INSERT` / `ON UPDATE` 分岐を明示（CLAUDE は v1 対象外に退避）。分岐構文は表現力が高い分、句順・省略時挙動の仕様点が増える。
 
-## 5. 次のステップ
+## 5. 他 RDB の類似構文（前例調査・2026-07-20・Web 裏取り済み）
+
+「親行＋ネスト構造（コレクション/子行/文書）を UPDATE する」構文の前例。B44 の各案が先行例に対応することが確認できた。
+
+### 5.1 Couchbase N1QL / SQL++ — 親フィールドと配列要素の同一文 SET（B44 要件に最も近い前例）
+
+```sql
+UPDATE route t USE KEYS "route_10003"
+SET meta(t).expiration = 7*24*60*60,
+    s.codeshare = NULL FOR s IN schedule END;
+```
+
+- **1つの UPDATE の SET に、通常の代入と `FOR var IN 配列 (WHEN 条件)? END` 付きの配列要素代入を混在**できる（公式ドキュメント Example 7）。`WHEN` が行セレクタ（`UPDATE … SET er.firstName='x' FOR er IN recipients.emailRecipients WHEN er.emailAddress='abc@gmail.com' END`）。
+- 文書（=レコード）単位の原子更新で、削除は `UNSET`（同じく FOR 対応）に分離＝**パッチと削除の構文分離**まで B44 の芯と一致。
+- 対応: CLAUDE C1（条件セレクタ付きセルパス）・CODEX X1 の PATCH に相当。**「親＋子を同一文・パッチ意味論」は実在する**ことの実証。
+
+### 5.2 Oracle オブジェクトリレーショナル（NESTED TABLE / VARRAY）— 構造の最類似・二本立て構文
+
+kintone サブテーブルに構造が最も近い（子行集合が親の列）。構文は**二本立て**:
+
+```sql
+-- (a) piecewise: TABLE() 式で子を主語にして行単位 UPDATE（親列は同時更新不可）
+UPDATE TABLE(SELECT d.dept_emps FROM department_persons d
+             WHERE d.dept_no = 101) p
+   SET VALUE(p) = person_typ(2, 'Diane Smith', '1-650-555-0148')
+ WHERE p.idno = 2;
+
+-- (b) atomic: コレクションコンストラクタで全置換（VARRAY はこちらのみ）
+UPDATE region_tab r SET r.countries = v_country WHERE r.region_id = 2;
+```
+
+- (a) は kSQL の `APPxxx$テーブル` / CODEX X3 と同型（**親項目を同時更新できない弱点まで一致**。公式ドキュメントに親＋piecewise の複合例は無い）。
+- (b) は C2/X2 の `ROWS(...)` と同型（置換意味論・親列との同時 SET は通常の複数代入として可能）。
+
+### 5.3 BigQuery（GoogleSQL）— ARRAY&lt;STRUCT&gt; 列を式で再構築
+
+```sql
+UPDATE t
+SET 状態 = '再構築済',
+    comments = ARRAY(SELECT AS STRUCT * REPLACE('fixed' AS text)
+                     FROM UNNEST(comments))
+WHERE id = 7;
+```
+
+- 配列列への代入は常に**全体再構築（置換）**だが、`UNNEST → SELECT AS STRUCT * REPLACE → ARRAY()` で実質パッチを表現。追加は `ARRAY_CONCAT`。親列との同時 SET は通常の複数代入。
+- 対応: C2/X2 の置換意味論＋「既存行を SELECT で運ぶ」発想。専用構文を増やさない代わりに書き味が重い（B44 でいえば「IMPORT で全行書き直し」に近い体験）。
+
+### 5.4 PostgreSQL — 配列添字・複合型フィールドへの直接代入
+
+```sql
+UPDATE contacts SET phones[2] = '(408)-589-5843';
+UPDATE t SET compcol[2].x = 24;  -- 複合型配列の要素フィールド（制限あり）
+```
+
+- SQL:1999 系の配列要素代入。**セルパス代入（C1 の形）は標準系にも前例がある**。行セレクタが「添字」であり、kintone のような行 ID/述語ベースではない点が相違。
+
+### 5.5 SQL Server / MySQL — JSON パッチ関数
+
+```sql
+-- SQL Server（1呼び出し1パス・ネストで複数）
+UPDATE Products SET ProductData = JSON_MODIFY(ProductData, '$.suppliers[0].rating', 4.9) WHERE …;
+-- MySQL（1呼び出しで複数パス可）
+UPDATE users SET profile = JSON_SET(profile, '$.roles[0]', 'superadmin', '$.name', 'x') WHERE …;
+```
+
+- 構文でなく**関数適用**でネスト文書をパッチ。パス言語（`$.a[0].b`）が行アドレッシング。親列との同時 SET は通常の複数代入で可能。
+- 対応: 「関数で逃がす」第4の選択肢だが、kSQL はフィールド型検証（B43）と統合したいので構文案（C1/X1）の方が筋が良い。
+
+### 5.6 まとめ（B44 各案と前例の対応）
+
+| B44 案 | 前例 | 示唆 |
+|---|---|---|
+| C1 セルパス SET（パッチ） | N1QL FOR/WHEN・PostgreSQL 添字代入 | 親＋子の同一文パッチは実在。条件セレクタも N1QL WHEN が前例 |
+| X1 PATCH/APPEND/REPLACE 句 | N1QL（SET/UNSET の分離）・SQL 標準外の句追加は Oracle TABLE() も同類 | 破壊性の構文分離は N1QL の SET/UNSET 分離と同じ発想 |
+| C2/X2 ROWS リテラル（置換） | Oracle コレクションコンストラクタ・BigQuery ARRAY() 再構築 | 置換意味論の前例は厚い。INSERT 初期行にも自然 |
+| X3 子主語＋`_p.` 書き込み | Oracle TABLE() piecewise | **Oracle も親列は同時更新不可**＝X3 の弱点は前例でも未解決 |
+
+- どの主要 RDB にも「**子行 ID＋述語で選んでパッチ**」と「**全置換**」の対は存在し、B44 の PATCH/REPLACE 分離は業界慣行と整合する。
+- SQL 標準（SQL:2023 まで）には「ネスト表の部分更新 DML」は無い＝**どの前例もベンダー拡張**。kSQL が独自句（X1）や独自セレクタ（C1）を足すことは特異ではない。
+
+出典: [Oracle: Operations on Collection Data Types](https://docs.oracle.com/en/database/oracle/oracle-database/18/adobj/operations-on-collection-data-types.html) / [Couchbase N1QL UPDATE](https://docs.couchbase.com/cloud/n1ql/n1ql-language-reference/update.html) / [BigQuery DML syntax](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax) / [PostgreSQL Arrays](https://www.postgresql.org/docs/current/arrays.html) / [SQL Server JSON_MODIFY](https://learn.microsoft.com/en-us/sql/t-sql/functions/json-modify-transact-sql?view=sql-server-ver17) / [MySQL JSON_SET](https://dev.mysql.com/doc/refman/8.0/en/json-modification-functions.html)
+
+## 6. 次のステップ
 
 1. 両案を突き合わせて構文候補を 1〜2 案に絞る（ユーザー判断）。
 2. 絞った案で仕様 R1 起草 → codex レビュー（B42 実装との順序も決める: 行ロケータ `_rid` の露出は B42 が先）。
