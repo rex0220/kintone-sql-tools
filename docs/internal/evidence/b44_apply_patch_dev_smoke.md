@@ -59,3 +59,17 @@ APP4221 をコピーし **SUBTABLE を2つ（テーブル・テーブル2、子�
 ## 結論
 
 APPLY v1（PATCH）/v1.1（APPEND）/v1.2（REMOVE）の中核機能が実機で期待どおり動作。特に **B44 の目的「テーブル外項目とテーブル内項目を1 PUT で同時更新」を手順3で実証**。行 ID・行順・未指定セルの保持、APPEND 既定値の明示補完、REMOVE の存続行保持、post-image 検証のロケータ、scope 拒否、$id=7 温存をすべて確認。
+
+## v2 CLI 実機（APP4223・2026-07-20 追記・Phase 16b 開通後）
+
+v2 の各機能を CLI から実行（複数親は Phase 10d で実証済み・下記は 11〜15）。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| V1 | **複数親 APPLY 1文**（`WHERE タイトル='BULK-DONE'`＝200親） | updatedCount=200・M2P×400＋MADD×200（Phase 10d・`--dml-max-rows 200 --dml-max-subtable-rows 700`） |
+| V2 | **INSERT APPLY**（親＋初期テーブル行を1 POST） | `INSERT … VALUES … APPLY テーブル (APPEND …)` で親作成＋IA1/IB2 の初期行（insertedCount=1） |
+| V3 | **UPSERT APPLY update 分岐** | 既存キーヒット→`ON UPDATE APPLY (PATCH ALL ROWS; APPEND)`＝UPD×2＋UAD 追加（updatedCount=1） |
+| V4 | **UPSERT APPLY insert 分岐** | 新規キー→`ON INSERT APPLY (APPEND)`＝NEW 行つき新規作成（insertedCount=1） |
+| V5 | **多値 APPLY**（MULTI_SELECT） | `SET 金額=9999 … APPLY 複数選択 (ADD 'M3'; REMOVE 'M1')`＝`["M1","M2"]`→`["M2","M3"]`（M1 除去・M3 末尾・親 SET と1 PUT 同居） |
+
+`_idx` セレクタ・EXPECT ROWS は unit/統合テストで検証済み（実機は SUBTABLE 行の位置指定・件数表明で機能）。CLI で v2 全機能が開通（plugin=16c・MCP=fail-closed 維持）。
