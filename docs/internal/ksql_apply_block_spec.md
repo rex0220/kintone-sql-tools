@@ -1,6 +1,6 @@
 # B44 — `APPLY` ブロックによるテーブル内外項目の同時更新仕様
 
-- ステータス: R2・**v3.8.0 実装計画 R2 レビュー中（2026-07-20〜）**。v1／v1.1／v1.2を同一releaseへ含める。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（R1 Phase 1～6・Claude裁定5件を維持し、Phase 7～9を追加）。codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）
+- ステータス: **v3.8.0 実装中（2026-07-20〜）**。v1／v1.1／v1.2 は Phase 1～9 実装済（commit 017ebba・実機確認済）。**v2（複数親・INSERT/UPSERT・`_idx`・`EXPECT ROWS`・多値 ADD/REMOVE）も同一 v3.8.0 へ同梱**（2026-07-20 ユーザー決定）。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（Phase 10a〜17d の23分割・§18/§19 で XL/L を分割・Claude 承認済）。MCP 実 mutation は v2 でも全 APPLY で fail-closed
 - 対象: B44「テーブル内外項目の同時更新」
 - 台帳: [ksql_issue_tracker.md B44](../ksql_issue_tracker.md#L39)
 - 前提: [B42 サブテーブル監査仕様](ksql_validate_subtable_audit_spec.md)・B43 DML post-image 事前検証
@@ -305,7 +305,7 @@ v1 では `ALL ROWS` を「明示された常時真の安全な述語」とし�
 | セレクタ | 例 | 基準 | v1 |
 |---|---|---|---|
 | `_rid` | `WHERE _rid = '67890'` | kintone 永続行 ID | 対応 |
-| `_idx` | `WHERE _idx = 0` | 取得スナップショット内の0-based位置 | 非対応、v2 |
+| `_idx` | `WHERE _idx = 0` | 取得スナップショット内の0-based位置 | v3.8.0 Phase 11 |
 | 安全な述語 | `WHERE LENGTH(文字列T2) < 3` | 子行の取得時値 | 対応 |
 | 全行 | `ALL ROWS` | 取得スナップショットの全既存行 | 対応 |
 
@@ -641,14 +641,16 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 - CLI、確認UIを持つプラグインから提供。
 - MCP mutationは引き続きfail-closed。
 
-### 9.4 v2 — 文種・セレクタ・集合型拡張
+### 9.4 v2 — 文種・セレクタ・集合型拡張（**2026-07-20 ユーザー決定により v3.8.0 に同梱**）
 
-- INSERTの初期行。
-- UPSERTのinsert/update分岐。
-- 複数親。
-- `_idx` セレクタ。
-- `EXPECT ROWS`。
-- 複数値フィールドへの `ADD` / `REMOVE`。
+> **2026-07-20 ユーザー決定**: 下記 v2 も別release版でなく **v3.8.0 内の実装フェーズ**として同梱する。実装計画 [ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md) の Phase 10〜17（10a〜17d の23分割）で段階実装し、Phase 17 で統合・実機・release 準備を行う。各 review gate は維持するが途中版の version bump・公開は行わない。**MCP 実 mutation は v2 でも全 APPLY で fail-closed のまま**（実装計画 §16 裁定4）。
+
+- INSERTの初期行（Phase 13）。
+- UPSERTのinsert/update分岐（Phase 14）。
+- 複数親（Phase 10・最大100親/chunk・非トランザクション・§4.3）。
+- `_idx` セレクタ（Phase 11）。
+- `EXPECT ROWS`（Phase 12）。
+- 複数値フィールドへの `ADD` / `REMOVE`（Phase 15）。
 
 複数値フィールドでも一般形は変えない。
 
@@ -742,7 +744,7 @@ APPLY 複数選択 (
 
 R1およびv1では次を対象外とする。
 
-このうち「複数サブテーブル／複数 `APPLY`／`APPEND`」はv1.1（Phase 7）で、「`REMOVE`」はv1.2（Phase 8）で解禁する。v3.8.0最終scopeでも対象外のままなのは、親INSERT／UPSERT／DELETE、複数親、`_idx`、`EXPECT ROWS`実行、`UPDATE ... FROM`等の相関更新、複数値fieldの`ADD`／`REMOVE`、MCP実mutationなど、§9.4および下記のうちv1.1/v1.2で明示解禁していない項目である。
+このうち「複数サブテーブル／複数 `APPLY`／`APPEND`」はv1.1（Phase 7）で、「`REMOVE`」はv1.2（Phase 8）で解禁する。v3.8.0最終scopeでも対象外のままなのは、親DELETE、`UPDATE ... FROM`等の相関更新、MCP実mutation、および下記の恒久非対応項目である。**親INSERT／UPSERT、複数親、`_idx`、`EXPECT ROWS`実行、複数値fieldの`ADD`／`REMOVE` は 2026-07-20 ユーザー決定により §9.4 の v2 として v3.8.0（Phase 10〜17）へ同梱する**（従来「対象外」だったが解禁）。
 
 - `APPLY SUBTABLE` noun構文。
 - 親INSERT、UPSERT、DELETE。
@@ -759,7 +761,7 @@ R1およびv1では次を対象外とする。
 - 文全体のトランザクション、チャンク間ロールバック、補償更新。
 - サブテーブル間、親子間、レコード間の参照整合性検証。
 - FILEフィールド。
-- 複数値フィールドの `ADD` / `REMOVE`。一般形は維持するが提供はv2。
+- （複数値フィールドの `ADD` / `REMOVE` は §9.4 の v2 として v3.8.0 Phase 15 で提供＝対象外から解除）
 - MCPからの実mutation。
 - 現行 `APP<n>$テーブル` DMLの構文・安全規則変更。現行UPDATE/DELETEは引き続き `_rid` 条件を必須とする（[execute.ts:5722](../../src/execute.ts#L5722)-[5731](../../src/execute.ts#L5731)、[execute.ts:5802](../../src/execute.ts#L5802)-[5811](../../src/execute.ts#L5811)）。
 - 現行サブテーブルDMLへの `VALIDATE ONLY` / `ON ERROR SKIP` の追加。現行parserはこれらを明示拒否している（[parser.ts:2447](../../src/parser/parser.ts#L2447)-[2453](../../src/parser/parser.ts#L2453)、[parser.ts:2644](../../src/parser/parser.ts#L2644)-[2650](../../src/parser/parser.ts#L2650)）。
