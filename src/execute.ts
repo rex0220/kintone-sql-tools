@@ -28,6 +28,7 @@ import {
   resolveApplyPatchMetadata,
 } from "./core/applyPatchPlanner";
 import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
+import { prepareApplyInsert, type PreparedApplyInsert } from "./core/applyInsertPrepare";
 import {
   ApplyWritePartialFailureError,
   executePreparedApplyWrite,
@@ -413,7 +414,7 @@ export interface ApplyValidationDetail {
 }
 
 export interface ApplyGuardDetail {
-  readonly revisionRequired: true;
+  readonly revisionRequired: boolean;
   readonly parentRows: number;
   readonly dmlMaxRows: number;
   readonly subtableRows: number;
@@ -777,7 +778,7 @@ async function executeParsedStatement(
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase13a", stmt);
-  assertApplyExecutionScope("phase13a", stmt);
+  assertApplyExecutionScope("phase13b", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1381,7 +1382,7 @@ async function executeBatchStatement(
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
   assertApplyScope("phase13a", resolvedStmt);
-  assertApplyExecutionScope("phase13a", resolvedStmt);
+  assertApplyExecutionScope("phase13b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -4269,6 +4270,30 @@ function assertValidDmlRecords(
   });
 }
 
+/** Phase 13b read-only create preflight. The prepared POST batches stay below the writer boundary. */
+async function executeApplyInsertValidation(
+  stmt: InsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  statementNumber: number
+): Promise<DmlValidationResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const prepared = await prepareApplyInsert({
+    statement: stmt,
+    fieldInfos,
+    dmlMaxRows: resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS),
+    dmlMaxSubtableRows: resolveApplyGuardLimit(
+      options.dmlMaxSubtableRows,
+      "dmlMaxSubtableRows",
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+    ),
+    statementNumber,
+    loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
+  });
+  return materializePreparedApplyInsertValidation(stmt, prepared, fieldInfos);
+}
+
 async function executeDmlValidation(
   stmt: ValidationStatement,
   client: KintoneClient,
@@ -4277,6 +4302,9 @@ async function executeDmlValidation(
   tempTables: Map<string, MaterializedTable> | undefined,
   statementNumber: number
 ): Promise<DmlValidationResult> {
+  if (stmt.type === "INSERT" && stmt.applyBlocks?.length) {
+    return executeApplyInsertValidation(stmt, client, options, cacheContext, statementNumber);
+  }
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
     const result = await executeApplyPatchUpdate(
       stmt, client, options, cacheContext, statementNumber
@@ -5816,7 +5844,7 @@ async function executeMultipleParentApplyPreflight(
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  assertApplyPublicWriteScope("phase13a", stmt);
+  assertApplyPublicWriteScope("phase13b", stmt);
   if (options.confirm) {
     const applyDetail = buildMultipleParentApplyConfirmDetail(prepared);
     const ok = await options.confirm(prepared.guards.parentRows, "UPDATE", {
@@ -5877,6 +5905,50 @@ function buildMultipleParentApplyConfirmDetail(prepared: PreparedApplyWrite): Ap
     nonTransactional: true,
     partialSuccessPossible: true,
   };
+}
+
+function materializePreparedApplyInsertValidation(
+  stmt: InsertStatement,
+  prepared: PreparedApplyInsert,
+  fieldInfos: readonly KintoneFieldInfo[]
+): DmlValidationResult {
+  const errors = prepared.validations.flatMap((validation) => validation.errors);
+  const invalidRows = prepared.validations.reduce(
+    (sum, validation) => sum + (validation.invalidRows > 0 ? 1 : 0),
+    0
+  );
+  const columns = prepared.validations[0]?.columns
+    ? [...prepared.validations[0].columns]
+    : [
+      ...buildPostImageFieldIndex(fieldInfos, stmt.fields).payloadFields,
+      ...POST_IMAGE_VALIDATION_SUFFIX_COLUMNS,
+    ];
+  const parentRows = prepared.guards.parentRows;
+  const result: DmlValidationResult = {
+    type: "VALIDATION",
+    operation: "INSERT",
+    validatedRows: parentRows,
+    validRows: parentRows - invalidRows,
+    invalidRows,
+    errorCount: errors.length,
+    columns,
+    errors,
+    ...(stmt.validationErrorTable ? { errTable: stmt.validationErrorTable } : {}),
+    apply: stmt.applyBlocks!.map((block) => {
+      const operations = block.operations.map((operation) => {
+        if (operation.kind !== "APPEND") {
+          throw new Error(`InternalError: prepared APPLY INSERT contains ${operation.kind}.`);
+        }
+        return { kind: "APPEND" as const, addedRows: operation.values.length * parentRows };
+      });
+      const changedSubtableRows = operations.reduce((sum, operation) => sum + operation.addedRows, 0);
+      return { field: block.field, operations, changedSubtableRows, deletedRows: 0 };
+    }),
+    guards: prepared.guards,
+    deletedRows: { total: 0, parentRows: 0 },
+  };
+  materializedMetaByValidationResult.set(result, applyValidationColumnMeta(columns, fieldInfos, stmt.appId));
+  return result;
 }
 
 function materializePreparedApplyValidation(

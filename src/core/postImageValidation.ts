@@ -79,7 +79,8 @@ export function validatePostImage(
   fieldIndex: PostImageFieldIndex,
   numberPrecision: NumberPrecision | undefined,
   statementNumber: number,
-  parentRowNumber = 1
+  parentRowNumber = 1,
+  operation: "INSERT" | "UPDATE" = "UPDATE"
 ): PostImageValidationResult {
   const normalizedRecord = cloneRecord(record);
   const errors: ProcessRow[] = [];
@@ -99,7 +100,7 @@ export function validatePostImage(
       row[code] = code === "$id" ? parentId : renderValidationValue(record[code]?.value);
     }
     row["$err_statement"] = String(statementNumber);
-    row["$err_operation"] = "UPDATE";
+    row["$err_operation"] = operation;
     row["$err_row"] = String(parentRowNumber);
     row["$err_field"] = field.code;
     row["$err_code"] = validation.code;

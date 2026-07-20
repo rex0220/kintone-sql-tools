@@ -59,10 +59,10 @@ const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
 const insertApplySql = "INSERT INTO APP4221 (親) VALUES ('new') "
   + "APPLY テーブル (APPEND (子) VALUES ('child'))";
 
-test("Phase 13a: INSERT APPLY mutation は公開 execute/batch で API 0 fail-closed", async () => {
+test("Phase 13b: INSERT APPLY mutation は公開 execute/batch で API 0 fail-closed", async () => {
   const single = makeClient([]);
   await expect(execute(insertApplySql, single.client, { cacheContext: "apply-phase13a-insert" }))
-    .rejects.toThrow("UnsupportedError: APPLY Phase 13a INSERT execution is not connected");
+    .rejects.toThrow("UnsupportedError: APPLY Phase 13b INSERT execution is not connected");
   for (const api of [single.getFields, single.getRecords, single.openCursor, single.postRecords, single.putRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
@@ -71,7 +71,7 @@ test("Phase 13a: INSERT APPLY mutation は公開 execute/batch で API 0 fail-cl
   const result = await executeBatch(insertApplySql, batch.client, { cacheContext: "apply-phase13a-insert-batch" });
   expect(result.statements[0]).toMatchObject({
     status: "error",
-    error: { message: "UnsupportedError: APPLY Phase 13a INSERT execution is not connected" },
+    error: { message: "UnsupportedError: APPLY Phase 13b INSERT execution is not connected" },
   });
   for (const api of [batch.getFields, batch.getRecords, batch.openCursor, batch.postRecords, batch.putRecords]) {
     expect(api).not.toHaveBeenCalled();
@@ -89,17 +89,81 @@ test("Phase 13a: APPLY なし INSERT の既存 POST 経路は非回帰", async (
   expect(mock.postRecords).toHaveBeenCalledTimes(1);
 });
 
-test("Phase 13a: INSERT APPLY VALIDATE ONLY は read-only で mutation API 0", async () => {
+test("Phase 13b: INSERT APPLY VALIDATE ONLY はprepared診断を返して mutation API 0", async () => {
   const mock = makeClient([]);
   await expect(execute(
     `${insertApplySql} VALIDATE ONLY`,
     mock.client,
     { cacheContext: "apply-phase13a-insert-validate" }
-  )).resolves.toMatchObject({ type: "VALIDATION" });
+  )).resolves.toMatchObject({
+    type: "VALIDATION",
+    operation: "INSERT",
+    validatedRows: 1,
+    validRows: 1,
+    apply: [{
+      field: "テーブル",
+      operations: [{ kind: "APPEND", addedRows: 1 }],
+      changedSubtableRows: 1,
+      deletedRows: 0,
+    }],
+    guards: {
+      revisionRequired: false,
+      parentRows: 1,
+      subtableRows: 1,
+      dmlMaxRows: 100,
+      dmlMaxSubtableRows: 500,
+      wouldExceed: false,
+    },
+  });
   expect(mock.getFields).toHaveBeenCalledTimes(1);
   for (const api of [mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
     expect(api).not.toHaveBeenCalled();
   }
+});
+
+test("Phase 13b: 複数VALUES×固定templateのVALIDATE ONLYは二重guardを診断しPOST 0", async () => {
+  const mock = makeClient([]);
+  const result = await execute(
+    "INSERT INTO APP4221 (親) VALUES ('p1'), ('p2') "
+      + "APPLY テーブル (APPEND (子) VALUES ('c1'), ('c2')) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase13b-insert-multi-validate", dmlMaxRows: 1, dmlMaxSubtableRows: 3 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    operation: "INSERT",
+    validatedRows: 2,
+    apply: [{ operations: [{ kind: "APPEND", addedRows: 4 }], changedSubtableRows: 4 }],
+    guards: { parentRows: 2, subtableRows: 4, wouldExceed: true },
+  });
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 13b: INSERT APPLY post-imageは未指定required親子を重複なく各1件診断しPOST 0", async () => {
+  const constrained = fieldInfos.map((field) => {
+    if (field.code === "親数値") return { ...field, required: true };
+    if (field.code === "子") return { ...field, required: true };
+    return field;
+  });
+  constrained.push({
+    code: "省略用", label: "省略用", fieldType: "SINGLE_LINE_TEXT", writable: true,
+    inSubtable: true, subtableCode: "テーブル",
+  });
+  const mock = makeClient([], constrained);
+  const result = await execute(
+    "INSERT INTO APP4221 (親) VALUES ('new') APPLY テーブル (APPEND (省略用) VALUES ('x')) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-phase13b-insert-required" }
+  );
+  expect(result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 2 });
+  if (result.type !== "VALIDATION") throw new Error("expected validation");
+  expect(result.errors.map((error) => [error.$err_field, error.$err_code])).toEqual([
+    ["親数値", "ERR_REQUIRED"],
+    ["子", "ERR_REQUIRED"],
+  ]);
+  expect(result.errors.every((error) => error.$err_operation === "INSERT")).toBe(true);
+  expect(mock.postRecords).not.toHaveBeenCalled();
 });
 
 test("allowApplyMutation なしの mutation は API 前に fail-closed", async () => {

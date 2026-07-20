@@ -292,7 +292,7 @@ function buildApplyPatchPlanForSnapshot(
     // are accumulated separately and therefore cannot become visible to later operations.
     for (const [operationIndex, operation] of block.operations.entries()) {
       if (operation.kind === "APPEND") {
-        const rows = buildAppendRows(operation, targetChildren, block.field);
+        const rows = buildApplyAppendRows(operation, targetChildren, block.field);
         operationPlans.push({ kind: "APPEND", addedRows: rows.length });
         appended.push(...rows);
         continue;
@@ -469,7 +469,8 @@ export function normalizeApplyPatchPlan(
   };
 }
 
-function buildAppendRows(
+/** Shared APPEND row builder for UPDATE and create prepared planning. */
+export function buildApplyAppendRows(
   operation: AppendOperation,
   children: ReadonlyMap<string, KintoneFieldInfo>,
   table: string
@@ -503,7 +504,8 @@ function buildAppendValue(
   return value;
 }
 
-function appendDefaultValue(field: KintoneFieldInfo): unknown {
+/** Metadata default materialization used by every APPLY APPEND payload. */
+export function appendDefaultValue(field: KintoneFieldInfo): unknown {
   if (field.defaultValue !== undefined && field.defaultValue !== null) return field.defaultValue;
   return ["CHECK_BOX", "MULTI_SELECT", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]
     .includes(field.fieldType) ? [] : "";
