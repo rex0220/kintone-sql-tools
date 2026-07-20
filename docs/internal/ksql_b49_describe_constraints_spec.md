@@ -1,7 +1,7 @@
 # B49 — DESCRIBE 制約付き JSON 出力仕様 R1
 
 - 作成日: 2026-07-21
-- ステータス: **R1（仕様案・未実装）**
+- ステータス: **R1（仕様案）・SUPERSEDED（2026-07-21）** → [B49 R2 — MCP 読み取り専用メタデータ API](ksql_b49_mcp_readonly_metadata_api_spec.md) へ置換。SQL 拡張（DESCRIBE AS JSON）は不採用。R2 の `resource:"fields"` が本 R1 の目的（Claude が制約 JSON を読む）を内包する。
 - 対象: B49「MCP の `DESCRIBE` がフィールド制約を返さず、Claude が kintone API を別途呼ぶ」
 - 一次情報: [ksql_issue_tracker.md B49](../ksql_issue_tracker.md#L40)
 - 関連仕様: [言語リファレンス §14](../ksql_language_reference.md#L1433)、[multi-statement / temp table spec](ksql_batch_temp_table_spec.md)
