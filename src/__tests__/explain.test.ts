@@ -42,6 +42,55 @@ async function explain(sql: string): Promise<string[]> {
   return result.rows.map((r) => r["plan"] as string);
 }
 
+test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し records/mutation API 0", async () => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const putRecords = jest.fn(async () => undefined);
+  const getFields = jest.fn(async () => [
+    { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+    { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+  ]);
+  const client: KintoneClient = {
+    ...makeClient(), getRecords, putRecords, getFields,
+  };
+  const result = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE $id=8 " +
+      "APPLY テーブル (PATCH SET 子='x' WHERE 子='old')",
+    client,
+    { cacheContext: "apply-explain", dmlMaxRows: 7, dmlMaxSubtableRows: 9 }
+  ) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+  const expected = [
+    "statement:              UPDATE APPLY",
+    "target app:             APP4221",
+    "parent selector:        $id = 8",
+    "parent cardinality:     single",
+    "apply target:           テーブル (SUBTABLE)",
+    "operations:             PATCH",
+    "selector:               SAFE_PREDICATE",
+    "snapshot evaluation:    yes",
+    "inserted rows visible:  no",
+    "revision guard:         required",
+    "revision:               unknown (records API not called)",
+    "payload preservation:   row ids=yes, row order=yes, unpatched cells=yes",
+    "post-image validation:  required (B43 equivalent)",
+    "parent rows:            unknown (records API not called)",
+    "matched subtable rows:  unknown (records API not called)",
+    "validation errors:      unknown (records API not called)",
+    "deleted rows:           0 (static for PATCH)",
+    "dmlMaxRows:             7",
+    "dmlMaxSubtableRows:     9",
+    "MCP mutation:           disabled in v1",
+    "records API:            0",
+    "mutation API:           0",
+  ];
+  expect(plan.filter((line) => expected.includes(line))).toEqual(expected);
+  expect(getFields).toHaveBeenCalledWith(4221);
+  expect(getRecords).not.toHaveBeenCalled();
+  expect(putRecords).not.toHaveBeenCalled();
+  expect(plan.join("\n")).not.toMatch(/revision:\s+\d|matched subtable rows:\s+\d/);
+});
+
 // ----------------------------------------------------------------
 // SIMPLE モード
 // ----------------------------------------------------------------

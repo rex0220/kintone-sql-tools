@@ -262,6 +262,34 @@ describe("MCP tools", () => {
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
   });
 
+  test("B44 Phase 5: query VALIDATE ONLY payload は apply/guards を欠落させず既定100を返す", async () => {
+    const createRuntime = async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql, profileName: "prod", client: makeClient(), cacheContext: "apply-validate-mcp",
+      maxRecords: 500, fetchParallel: 1, onLimit: "error", timeout: 30_000,
+    });
+    const executeSql = async (): Promise<ExecuteResult> => ({
+      type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
+      invalidRows: 0, errorCount: 0, columns: [], errors: [],
+      apply: [{
+        field: "テーブル", operations: [{ kind: "PATCH", matchedRows: 2, changedRows: 2 }],
+        changedSubtableRows: 2, deletedRows: 0,
+      }],
+      guards: {
+        revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
+        subtableRows: 2, dmlMaxSubtableRows: 100, wouldExceed: false,
+      },
+    });
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const result = await tools.query({
+      sql: "UPDATE APP4221 SET 親='x' WHERE $id=8 APPLY テーブル (PATCH SET 子='y' ALL ROWS) VALIDATE ONLY",
+    });
+    expect(result).toMatchObject({
+      apply: [{ field: "テーブル", operations: [{ matchedRows: 2, changedRows: 2 }] }],
+      guards: { dmlMaxSubtableRows: 100, wouldExceed: false },
+    });
+    expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
+  });
+
   test("query: IMPORT ... VALIDATE ONLY は importSources 供給で capability gate を通す（回帰）", async () => {
     // 修正前は query の再パースに import フラグを渡しておらず「capability is disabled」で落ちていた。
     const executeSql = async (): Promise<ExecuteResult> => ({

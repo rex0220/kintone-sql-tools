@@ -25,12 +25,19 @@ export interface ApplyPatchPostImageRow {
 
 interface ApplyPatchTablePlanBase {
   readonly table: string;
+  readonly operations: readonly ApplyPatchOperationPlan[];
   /** Distinct existing/new child rows changed by this table plan. */
   readonly changedSubtableRows: number;
   readonly deletedRows: number;
   readonly snapshotRowIds: readonly string[];
   readonly payloadRows: readonly ApplyPatchPayloadRow[];
   readonly postImageRows: readonly ApplyPatchPostImageRow[];
+}
+
+export interface ApplyPatchOperationPlan {
+  readonly kind: "PATCH";
+  readonly matchedRows: number;
+  readonly changedRows: number;
 }
 
 export interface ApplyPatchOnlyTablePlan extends ApplyPatchTablePlanBase {
@@ -224,10 +231,12 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   const childTypeResolver: FieldTypeResolver = (field: FieldRef) =>
     field.field === "_rid" ? "SINGLE_LINE_TEXT" : metadata.targetChildren.get(field.field)?.fieldType;
   const resolved: Array<{ rowIndex: number; rowId: string; field: string; value: string }> = [];
+  const operationPlans: ApplyPatchOperationPlan[] = [];
   const occupiedCells = new Set<string>();
   for (const operation of block.operations) {
     if (operation.kind !== "PATCH") continue;
     const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+    operationPlans.push({ kind: "PATCH", matchedRows: indices.length, changedRows: indices.length });
     for (const rowIndex of indices) {
       const row = snapshotRows[rowIndex];
       const flat = flattenSubtableSnapshotRow(row, rowIndex);
@@ -281,6 +290,7 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
     postImage,
     tables: [{
       table: block.field,
+      operations: operationPlans,
       payloadShape: "PATCH_ONLY",
       changedSubtableRows: updatesByIndex.size,
       deletedRows: 0,

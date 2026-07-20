@@ -315,6 +315,8 @@ function toDmlValidationPayload(result: DmlValidationResult) {
     errors: result.errors,
     ...(result.errTable ? { errTable: result.errTable } : {}),
     ...(result.importDetail ? { importDetail: result.importDetail } : {}),
+    ...(result.apply ? { apply: result.apply } : {}),
+    ...(result.guards ? { guards: result.guards } : {}),
   };
 }
 

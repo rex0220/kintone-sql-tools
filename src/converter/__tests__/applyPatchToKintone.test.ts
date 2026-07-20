@@ -13,6 +13,7 @@ function basePlan(): ApplyPatchPlan {
     postImage: { 親: { value: "after" } },
     tables: [{
       table: "テーブル",
+      operations: [{ kind: "PATCH", matchedRows: 1, changedRows: 1 }],
       payloadShape: "PATCH_ONLY",
       changedSubtableRows: 1,
       deletedRows: 0,
@@ -64,6 +65,7 @@ test("PATCH_ONLY と FULL_SURVIVORS のtable単位shape混在を検証する", (
       ...plan.tables,
       {
         table: "別表",
+        operations: [{ kind: "PATCH", matchedRows: 1, changedRows: 1 }],
         payloadShape: "FULL_SURVIVORS",
         changedSubtableRows: 1,
         deletedRows: 1,
@@ -88,6 +90,7 @@ test("FULL_SURVIVORS の列挙漏れ・集合交差を拒否する", () => {
   const plan = basePlan();
   const invalid = {
     table: "別表",
+    operations: [{ kind: "PATCH" as const, matchedRows: 1, changedRows: 1 }],
     payloadShape: "FULL_SURVIVORS" as const,
     changedSubtableRows: 1,
     deletedRows: 1,

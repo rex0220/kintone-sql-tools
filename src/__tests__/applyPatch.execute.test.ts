@@ -1,4 +1,4 @@
-import { execute, type KintoneClient, type KintoneFieldInfo } from "../execute";
+import { execute, executeBatch, type KintoneClient, type KintoneFieldInfo, type SelectResult } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 
 const fieldInfos: KintoneFieldInfo[] = [
@@ -59,11 +59,26 @@ test("allowApplyMutation なしの mutation は API 前に fail-closed", async (
 });
 
 test(
-  "VALIDATE ONLY は metadata→専用単一GET→plan/draft 後に従来どおり停止し PUT しない",
+  "VALIDATE ONLY は共通plan/validation/guardの全件数を返し confirm/PUT しない",
   async () => {
     const mock = makeClient([parent()]);
-    await expect(execute(`${sql} VALIDATE ONLY`, mock.client, { cacheContext: "apply-validate-draft" }))
-      .rejects.toThrow("UnsupportedError: APPLY execution is not enabled in this phase");
+    const confirm = jest.fn(async () => true);
+    await expect(execute(`${sql} VALIDATE ONLY`, mock.client, {
+      cacheContext: "apply-validate", confirm, dmlMaxRows: 2, dmlMaxSubtableRows: 3,
+    })).resolves.toMatchObject({
+      type: "VALIDATION", operation: "UPDATE",
+      validatedRows: 1, validRows: 1, invalidRows: 0, errorCount: 0,
+      apply: [{
+        field: "テーブル",
+        operations: [{ kind: "PATCH", matchedRows: 1, changedRows: 1 }],
+        changedSubtableRows: 1,
+        deletedRows: 0,
+      }],
+      guards: {
+        revisionRequired: true, parentRows: 1, dmlMaxRows: 2,
+        subtableRows: 1, dmlMaxSubtableRows: 3, wouldExceed: false,
+      },
+    });
     expect(mock.getFields).toHaveBeenCalledWith(4221);
     expect(mock.getRecords).toHaveBeenCalledTimes(1);
     expect(mock.getRecords).toHaveBeenCalledWith({
@@ -71,9 +86,75 @@ test(
       query: "$id = 8 limit 2",
       fields: ["$id", "$revision", "親", "親数値", "作成者", "テーブル", "別表"],
     });
+    expect(confirm).not.toHaveBeenCalled();
     expect(mock.putRecords).not.toHaveBeenCalled();
   }
 );
+
+test("VALIDATE ONLY はガード超過を wouldExceed=true の成功診断にして mutation 0", async () => {
+  const mock = makeClient([parent("8", 2)]);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE $id=8 APPLY テーブル (PATCH SET 子='x' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "apply-validate-guard", dmlMaxRows: 1, dmlMaxSubtableRows: 1 }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION",
+    apply: [{ operations: [{ matchedRows: 2, changedRows: 2 }], changedSubtableRows: 2 }],
+    guards: { parentRows: 1, subtableRows: 2, wouldExceed: true },
+  });
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("VALIDATE ONLY の post-image error は親単位/セル単位件数と固定列順を返す", async () => {
+  const constrained = fieldInfos.map((field) => field.code === "別子" ? { ...field, required: true } : field);
+  const invalid = parent();
+  invalid.別表 = { value: [{ id: "201", value: { 別子: { value: "" } } }] } as never;
+  const mock = makeClient([invalid], constrained);
+  const result = await execute(`${sql} VALIDATE ONLY`, mock.client, { cacheContext: "apply-validate-errors" });
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 1,
+  });
+  if (result.type !== "VALIDATION") throw new Error("expected validation result");
+  expect(result.columns).toEqual([
+    "$id", "親",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("APPLY VALIDATE ONLY INTO #err は batch で固定列/型を実体化し後続SELECTへ列順を保つ", async () => {
+  const constrained = fieldInfos.map((field) => field.code === "別子" ? { ...field, required: true } : field);
+  const invalid = parent();
+  invalid.別表 = { value: Array.from({ length: 10 }, (_, index) => ({
+    id: String(201 + index), value: { 別子: { value: "" } },
+  })) } as never;
+  const mock = makeClient([invalid], constrained);
+  const batch = await executeBatch(
+    `${sql} VALIDATE ONLY INTO #err; SELECT * FROM #err ORDER BY $err_subrow`,
+    mock.client,
+    { cacheContext: "apply-validate-into" }
+  );
+  expect(batch.ok).toBe(true);
+  const selected = batch.statements[1].result as SelectResult;
+  expect(selected.columns).toEqual([
+    "$id", "親",
+    "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+    "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+  ]);
+  expect(selected.rows[0]).toMatchObject({ $id: "8", $err_subrow: "1", $err_subrow_id: "201" });
+  // B42 locator と同じ string metadata。number 扱いなら "2" が先になる。
+  expect(selected.rows.slice(0, 3).map((row) => row.$err_subrow)).toEqual(["1", "10", "2"]);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("APPLY VALIDATE ONLY INTO #err は単文では拒否する", async () => {
+  const mock = makeClient([parent()]);
+  await expect(execute(`${sql} VALIDATE ONLY INTO #err`, mock.client, { cacheContext: "apply-into-single" }))
+    .rejects.toThrow("ArgumentError: VALIDATE ONLY INTO requires a batch");
+  expect(mock.getRecords).not.toHaveBeenCalled();
+});
 
 test("二重ガード以内は revision 付き1-record PUTを1回だけ行う", async () => {
   const mock = makeClient([parent()]);

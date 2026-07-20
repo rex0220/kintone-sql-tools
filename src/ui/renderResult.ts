@@ -41,8 +41,24 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
         ? ` / IMPORT実データpreflight / mutation候補 ${result.importDetail.parents.mutationCandidates} 件 / 書込み 0`
         : "";
       const summary = renderInfo(`検証 ${result.validatedRows} 件 / 正常 ${result.validRows} 件 / 不正 ${result.invalidRows} 件 / エラー ${result.errorCount} 件${importSuffix}`);
-      if (result.errorCount === 0) return `${summary}${renderInfo("検証エラーはありません。")}`;
-      return `${summary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
+      const applySummary = (result.apply ?? []).map((detail) => renderInfo(
+        `APPLY ${detail.field}: ${detail.operations.map((operation) =>
+          `${operation.kind} 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
+        ).join("; ")} / 変更子行 ${detail.changedSubtableRows} / 削除 ${detail.deletedRows}`
+      )).join("");
+      const guardSummary = result.guards
+        ? result.guards.wouldExceed
+          ? `<div class="ksql-warn">${escHtml(
+            `安全ガード超過: 親 ${result.guards.parentRows}/${result.guards.dmlMaxRows}, ` +
+            `子 ${result.guards.subtableRows}/${result.guards.dmlMaxSubtableRows}（書込み 0）`
+          )}</div>`
+          : renderInfo(
+            `安全ガード: 親 ${result.guards.parentRows}/${result.guards.dmlMaxRows}, ` +
+            `子 ${result.guards.subtableRows}/${result.guards.dmlMaxSubtableRows} / revision 必須 / 書込み 0`
+          )
+        : "";
+      if (result.errorCount === 0) return `${summary}${applySummary}${guardSummary}${renderInfo("検証エラーはありません。")}`;
+      return `${summary}${applySummary}${guardSummary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
     }
   }
 }

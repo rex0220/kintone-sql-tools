@@ -24,6 +24,34 @@ test("VALIDATIONは件数サマリとエラー表を表示する", () => {
   expect(html).toContain("ERR_REQUIRED");
 });
 
+test("APPLY VALIDATION は件数summaryとguard警告をHTML escapeして表示する", () => {
+  const html = renderResult({
+    type: "VALIDATION", operation: "UPDATE", validatedRows: 1, validRows: 1,
+    invalidRows: 0, errorCount: 0, columns: [], errors: [],
+    apply: [{
+      field: "<テーブル&>", operations: [{ kind: "PATCH", matchedRows: 2, changedRows: 1 }],
+      changedSubtableRows: 1, deletedRows: 0,
+    }],
+    guards: {
+      revisionRequired: true, parentRows: 1, dmlMaxRows: 1,
+      subtableRows: 2, dmlMaxSubtableRows: 1, wouldExceed: true,
+    },
+  });
+  expect(html).toContain("APPLY &lt;テーブル&amp;&gt;: PATCH 一致 2 / 変更 1");
+  expect(html).toContain('class="ksql-warn"');
+  expect(html).toContain("安全ガード超過: 親 1/1, 子 2/1（書込み 0）");
+  expect(html).not.toContain("<テーブル&>");
+});
+
+test("既存 VALIDATION は APPLY summary/guardを追加表示しない", () => {
+  const html = renderResult({
+    type: "VALIDATION", operation: "INSERT", validatedRows: 0, validRows: 0,
+    invalidRows: 0, errorCount: 0, columns: [], errors: [],
+  });
+  expect(html).not.toContain("APPLY");
+  expect(html).not.toContain("安全ガード");
+});
+
 test("VALIDATE SelectResult はエラーレコード数・エラー件数・表示行数を表示する", () => {
   const html = renderResult({
     type: "SELECT", columns: ["$id", "$err_count"], rowCount: 1,
