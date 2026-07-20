@@ -27,6 +27,7 @@ export interface BatchEnvelopeResultSet {
   validRows?: number;
   invalidRows?: number;
   errorCount?: number;
+  validateStats?: SelectResult["validateStats"];
   errTable?: string;
   importDetail?: DmlValidationResult["importDetail"];
 }
@@ -120,6 +121,7 @@ export function buildBatchEnvelope(
         rows: s.result.rows,
         rowCount: s.result.rowCount,
         warnings: s.result.warnings ?? [],
+        ...(s.result.validateStats ? { validateStats: s.result.validateStats } : {}),
       });
     } else if (s.result?.type === "VALIDATION") {
       totalRows += s.result.errorCount;

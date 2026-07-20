@@ -670,14 +670,30 @@ export class Parser {
     const validateTok = this.advance(); // soft keyword VALIDATE
     const name = this.parseIdentifier();
     const { appId, subtableCode } = extractTableRef(name, this.prev());
-    if (subtableCode) {
-      throw new ParseError("VALIDATE はサブテーブル仮想テーブルを対象にできません", this.prev());
-    }
+    if (subtableCode) throw new ParseError(
+      `VALIDATE APP${appId}$${subtableCode} はサポートされていません。VALIDATE APP${appId} (${subtableCode}) を使用してください`,
+      this.prev()
+    );
 
-    let fields: string[] | undefined;
+    let targets: ValidateStatement["targets"];
     if (this.consume(TokenKind.LPAREN)) {
-      fields = this.parseIdentList();
+      targets = [];
+      do {
+        const field = this.parseIdentifier();
+        if (this.consume(TokenKind.LPAREN)) {
+          const children = this.peek().kind === TokenKind.RPAREN ? [] : this.parseIdentList();
+          this.expect(TokenKind.RPAREN);
+          targets.push({ kind: "SUBTABLE", subtableCode: field, children });
+        } else {
+          targets.push({ kind: "FIELD", field });
+        }
+      } while (this.consume(TokenKind.COMMA));
       this.expect(TokenKind.RPAREN);
+    }
+    let summary: true | undefined;
+    if (this.isSoftKeyword("SUMMARY")) {
+      this.advance();
+      summary = true;
     }
     const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
     const checks = this.parseCheckGroups();
@@ -689,7 +705,7 @@ export class Parser {
       }
       errorTable = this.parseTableName();
     }
-    const stmt: ValidateStatement = { type: "VALIDATE", appId, fields, where, ...checks, ...(errorTable ? { errorTable } : {}) };
+    const stmt: ValidateStatement = { type: "VALIDATE", appId, targets, ...(summary ? { summary } : {}), where, ...checks, ...(errorTable ? { errorTable } : {}) };
     this.assertValidateExpressions(stmt, validateTok);
     return stmt;
   }

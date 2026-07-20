@@ -34,7 +34,10 @@ function makeClient(recordsByApp: Record<number, KintoneRecord[]> = {}): Kintone
     async getFields(appId) {
       const codes = new Set((recordsByApp[appId] ?? []).flatMap((record) => Object.keys(record)));
       return [...codes].filter((code) => !code.startsWith("$"))
-        .map((code) => ({ code, label: code, fieldType: code === "売上" ? "NUMBER" : "SINGLE_LINE_TEXT" }));
+        .map((code) => ({
+          code, label: code, fieldType: code === "売上" ? "NUMBER" : "SINGLE_LINE_TEXT",
+          required: code === "顧客名" ? true : undefined,
+        }));
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
     async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
@@ -186,4 +189,18 @@ test("json: --quiet で stderr のサマリ行を抑止する", async () => {
   const batch = await runBatch(BATCH_SQL);
   const { stderr } = callWriteBatchOutput(batch, { format: "json", quiet: true });
   expect(stderr).toBe("");
+});
+
+test("VALIDATE INTO: 文結果だけに統計を付け、CLIサマリとbatch JSONへ公開する", async () => {
+  const batch = await executeBatch(
+    "VALIDATE APP100 (顧客名) INTO #err; SELECT * FROM #err",
+    makeClient({ 100: [makeRecord({ $id: "1", 顧客名: "" })] })
+  );
+  const { stdout, stderr } = callWriteBatchOutput(batch, { format: "json" });
+  const parsed = JSON.parse(stdout);
+
+  expect(parsed.results[0].validateStats).toEqual({ errorRecords: 1, errorCount: 1 });
+  expect(parsed.results[1].validateStats).toBeUndefined();
+  expect(stderr).toContain("[1] VALIDATE success rowCount=1 errorRecords=1 errorCount=1");
+  expect(stderr).toContain("[2] SELECT success rowCount=1");
 });

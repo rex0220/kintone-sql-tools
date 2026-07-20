@@ -295,7 +295,8 @@ describe("MCP tools", () => {
     };
     const executeSql = async (): Promise<ExecuteResult> => ({
       type: "SELECT", columns: ["$id", "$err_field", "$err_code", "$err_message", "$err_value"],
-      rows: [], rowCount: 0,
+      rows: [{ $id: "1", $err_field: "code", $err_code: "ERR_REQUIRED", $err_message: "required", $err_value: "" }],
+      rowCount: 1, validateStats: { errorRecords: 1, errorCount: 2 },
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const validation = await tools.validate({ sql: "VALIDATE APP100" });
@@ -305,7 +306,10 @@ describe("MCP tools", () => {
     });
     const result = await tools.query({ sql: "VALIDATE APP100", onLimit: "truncate" });
     expect(runtimeInputs[0].onLimit).toBe("error");
-    expect(result).toMatchObject({ ok: true, type: "SELECT", rowCount: 0 });
+    expect(result).toMatchObject({
+      ok: true, type: "SELECT", rowCount: 1,
+      validateStats: { errorRecords: 1, errorCount: 2 },
+    });
   });
 
   test("query: 単文 ASSERT の不成立は AssertError で reject する", async () => {

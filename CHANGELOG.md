@@ -2,6 +2,23 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.7.0（2026-07-20）
+
+### 機能追加（B42 VALIDATE のサブテーブル子フィールド監査）
+
+- **`VALIDATE` の監査対象にサブテーブル子フィールドを追加**。`(fields)` 省略時の既定対象に、制約を持つ子フィールドと全子 `NUMBER` を含める（従来はトップレベルのみ＝テーブル内の必須/上下限/文字数/選択肢/数値精度違反が `#err` に一切出なかった監査の抜けを修正）。
+- **詳細出力を固定9列へ拡張し、同一メッセージを集約**: 既存5列＋`$err_subtable`（テーブルコード）・`$err_subrow`（該当する全1-based表示序数のカンマ区切りリスト）・`$err_subrow_id`（同順の全永続行 ID＝仮想テーブルの `_rid`）・`$err_count`（件数）。装飾前の元 message を含む `($id, $err_subtable, $err_field, $err_code, $err_message)` ごとに1行とし、`$err_value` は先頭違反行、ロケータリストは全該当行を先頭出現順・切り捨てなしで保持する。サブテーブル違反が2件以上なら集約後の message 末尾へ `（2行: 1,2）` の形式で件数と `$err_subrow` リストを付加し、`INTO #err` にも装飾済み message を格納する。count=1の子違反とトップレベル/`CHECK` の message は不変。異なる元 message は別行。トップレベル/`CHECK` のロケータ3列は空で通常 count=1。`$err_subrow` の型メタは string、`$err_count` は number。`tempTableMaxRows` は集約後行数へ適用する。0行テーブルでは子の必須違反は発火しない。
+- **scoped target 構文**: `VALIDATE APP100 (テーブル)` でテーブルの監査可能な子すべて、`VALIDATE APP100 (テーブル(子1, 子2))` で指定子だけを監査。裸の子コードは所有テーブル形式へ誘導して拒否。`VALIDATE APP100$テーブル` は親形式への案内付きで拒否。
+- **生成時集約 `SUMMARY` モード**: `(fields)` 後・`WHERE` 前の soft keyword。詳細行を生成せず固定5列（`$id`, `$err_subtable`, `$err_field`, `$err_code`, `$err_count`）へ直接集約する。レコード横断の規模把握を担い、全該当行ロケータリスト付きの詳細9列とは別スキーマ。同名一時表への混在追記は解析時に拒否。
+- **VALIDATE 結果へ集約前エラー統計を追加**: 詳細／SUMMARY とも `validateStats.errorRecords`（違反を持つ distinct `$id` 数）と `validateStats.errorCount`（集約前違反総数＝`$err_count` 合計）を返し、0件でも0/0を保持する。プラグインの結果ヘッダーは `エラー n レコード / m 件（表示 r 行）`、CLI サマリは `errorRecords=n errorCount=m` を表示。JSON／MCP／バッチ結果にも含めるが、`INTO #err` 後の汎用 SELECT へは引き継がない。
+- **安全ガード**: `WHERE`/`CHECK` のサブテーブル子フィールド参照は records 取得前に `ArgumentError` で拒否（従来は存在チェックを素通りし得た潜在ギャップの封鎖）。NUMBER 子フィールドには数値精度（整数部桁数）検証を適用。
+- **`EXPLAIN VALIDATE`** に mode（DETAIL/SUMMARY）・subtable audit・output schema・row locator を表示（records/mutation API は従来どおり 0 回）。
+- 実機確認: 全9項目 pass（従来 0 行だった監査で子違反4件を検出＝実書き込み CB_VA01 の原因と一致・`$err_subrow_id`≡`_rid` 突合・SUMMARY 集約）。
+
+### 修正（B46 選択肢検証の空値 false positive）
+
+- **空（未選択）の選択系フィールドを `ERR_CHOICE_INVALID` と誤判定していた問題を修正**。選択肢照合に空値ガードが無く、空文字が `[""]` として定義済み選択肢と照合されていた（NUMBER・日時の検証には同ガードが既存）。実機パリティ裏付け＝kintone は空 `DROP_DOWN` の書き込みを受理し、`RADIO_BUTTON` への空指定もエラーにしない（黙って無視）。影響範囲＝`VALIDATE` 監査（トップレベル=v3.5.0 以降・サブテーブル子=本版）と DML 事前検証（`''` によるクリア書き込みの誤拒否）。必須チェック（`ERR_REQUIRED`）は従来どおり。83 suites / 2,107 テスト green。
+
 ## v3.6.1（2026-07-19）
 
 ### 改善・修正（B39 IMPORT の面 UX）

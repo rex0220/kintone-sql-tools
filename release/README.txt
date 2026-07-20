@@ -1,9 +1,34 @@
-ksql 配布パッケージ (v3.6.1)
+ksql 配布パッケージ (v3.7.0)
 
-1. ksql-plugin-v3.6.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.7.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
+- VALIDATE の既定対象にサブテーブル子フィールドを追加 (監査の抜けを修正)。
+- 詳細出力を固定9列へ拡張 ($err_subtable / $err_subrow 1-based /
+  $err_subrow_id = 仮想テーブルの _rid / $err_count)。同一レコードの
+  field + code + message を1行へ集約し、値は先頭違反行を保持。
+  $err_subrow / $err_subrow_id は全該当行を先頭出現順のカンマ区切り
+  リストで保持 (切り捨てなし)。子違反が2件以上なら、集約後の message
+  末尾にも「（2行: 1,2）」形式で件数と同じ $err_subrow リストを付加。
+  count=1 の子違反とトップレベル/CHECK の message は従来どおり。
+  INTO #err にも装飾済み message を格納。$err_subrow の型メタは string。
+- scoped target: VALIDATE APP100 (テーブル) / (テーブル(子1, 子2))。
+  裸の子コード・APP100$テーブル 形式は案内付きで拒否。
+- SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,
+  $err_count) へ生成時集約し、レコード横断の規模を把握。
+  tempTableMaxRows は詳細/SUMMARY とも集約後行数に適用。
+- 詳細/SUMMARY の結果に validateStats (errorRecords=違反レコード数、
+  errorCount=集約前違反総数) を付与。0件でも0/0。プラグインは
+  「エラー n レコード / m 件（表示 r 行）」、CLI はサマリへ両値を表示。
+  JSON/MCP/バッチ結果にも含め、INTO #err 後の汎用 SELECT には付けない。
+- WHERE / CHECK のサブテーブル子参照は取得前に ArgumentError で拒否。
+  NUMBER 子フィールドに数値精度検証を適用。
+- B46: 空 (未選択) の選択系フィールドを ERR_CHOICE_INVALID と誤判定する
+  false positive を修正 (kintone は空 DROP_DOWN を受理・RADIO の空指定も
+  エラーにしない実機パリティ)。
 
 v3.6.1: IMPORT の面 UX 改善・修正。
 - プラグイン: IMPORT のファイル選択 UI をヘッダー上部へ移動 (横スクロール解消)。

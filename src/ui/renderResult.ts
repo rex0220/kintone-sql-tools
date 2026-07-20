@@ -47,6 +47,22 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
   }
 }
 
+/** バッチの情報行を文順に並べ、最終結果セットを続けて描画する。 */
+export function renderBatchResult(
+  result: ExecuteResult | null,
+  infoLines: readonly string[],
+  opts: DisplayOptions = {}
+): string {
+  const infoHtml = infoLines.map(renderInfo).join("");
+  return `${infoHtml}${result ? renderResult(result, opts) : ""}`;
+}
+
+/** VALIDATE INTO は結果表を表示せず、実体化した統計を情報行として表示する。 */
+export function formatValidateIntoStats(result: SelectResult, tempName: string): string | null {
+  if (!result.validateStats) return null;
+  return `VALIDATE: エラー ${result.validateStats.errorRecords} レコード / ${result.validateStats.errorCount} 件（${tempName} へ ${result.rowCount} 行）`;
+}
+
 function isolationSuffix(result: { skippedRows?: number; errTable?: string }): string {
   // 隔離は ON ERROR SKIP INTO #err のときだけ。errTable が無ければ「（undefined）」を出さない。
   if (result.skippedRows === undefined || result.errTable === undefined) return "";
@@ -117,7 +133,10 @@ function renderSelect(result: SelectResult, opts: DisplayOptions): string {
     .join("");
 
   if (result.rows.length === 0) {
-    return `${warnHtml}${renderInfo("0 件でした。")}`;
+    const emptyMessage = result.validateStats
+      ? `エラー ${result.validateStats.errorRecords} レコード / ${result.validateStats.errorCount} 件（表示 0 行）`
+      : "0 件でした。";
+    return `${warnHtml}${renderInfo(emptyMessage)}`;
   }
 
   const headers = result.columns.length > 0 ? result.columns : Object.keys(viewRows[0]);
@@ -131,7 +150,9 @@ function renderSelect(result: SelectResult, opts: DisplayOptions): string {
   return `
 ${warnHtml}
 <div class="ksql-result-meta">
-  <span><span class="ksql-result-count">${result.rowCount}</span> 件</span>
+  <span>${result.validateStats
+    ? `エラー ${result.validateStats.errorRecords} レコード / ${result.validateStats.errorCount} 件（表示 <span class="ksql-result-count">${result.rowCount}</span> 行）`
+    : `<span class="ksql-result-count">${result.rowCount}</span> 件`}</span>
   <button type="button" class="ksql-result-full-btn" aria-label="全画面表示" title="全画面表示">⤢</button>
 </div>
 <div class="ksql-result-filter-row">
