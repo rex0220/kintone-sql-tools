@@ -1,6 +1,6 @@
 # B44 C1/C3 比較検討 — テーブル内外項目の同時変更（行追加・削除・INSERT・UPSERT を含む）
 
-- ステータス: 検討ドラフト R1（2026-07-20・[アイデア集](ksql_b44_syntax_ideas.md) の絞り込みフェーズ・仕様前）
+- ステータス: 検討ドラフト R1 ＋ **codex レビュー済（2026-07-20・条件付き支持・§7 参照。§3〜§5 の初稿は §7 の修正で読み替える）**・[アイデア集](ksql_b44_syntax_ideas.md) の絞り込みフェーズ・仕様前
 - 経緯: ユーザー判断で **C1（セルパス SET）と C3（子操作ブロック）に絞って比較**。X3（子主語 `_p.`）は**複数テーブルの更新に対応できない**ため除外。X1 の破壊性分類（PATCH/APPEND/REPLACE）と X2/C2 の `ROWS(...)` リテラルは部品として取り込む。
 - 課題: [台帳 B44](../ksql_issue_tracker.md)
 
@@ -174,3 +174,63 @@ ON UPDATE TABLE テーブル DO (
 6. `VALIDATE ONLY`（B43）と `EXPLAIN` の出力形式（ブロック内の操作別件数・削除予定行の明示）。
 7. IMPORT（REPLACE SUBTABLES）との役割分担の明文化（全置換は IMPORT・部分操作は C3）。
 8. MCP fail-closed の細分化（`DELETE` を含むブロックのみ fail-closed とし、UPDATE/INSERT のみのブロックを解禁するか）。
+
+## 7. codex レビュー結果（2026-07-20・Claude が主要引用を全て裏取り済み・一致）
+
+**総合判定 = C3 の骨格（親 DML に子操作ブロックを付加し、1 親の 1 PUT record へ合成）は条件付き支持。ただし §3〜§5 初稿のままの採用は不支持**で、以下を覆す。
+
+### P1（採用前に必ず解決・全て裏取り一致）
+
+- **P1-1 「既存サブテーブル DML 文法をそのまま流用」は不成立**。ブロック内は対象名・`_pid` の暗黙化に加え、①現行 UPDATE/DELETE は**安全のため `_rid` 条件必須**（言語リファレンス §19・[execute.ts:5729](../../src/execute.ts#L5729) `hasRidCondition`）＝C3 の述語/`_idx`/WHERE 省略セレクタは**新規の意味論**②現行サブテーブル DML は `VALIDATE ONLY`/`ON ERROR SKIP` を明示拒否（[parser.ts:2452](../../src/parser/parser.ts#L2452)）＝B43 連携も新設。**再利用できるのは式 AST・WHERE 評価器・型変換の一部**で、ブロック AST・スコープ解決・静的検証・実行計画は新設＝§4 の「実装規模: 中」は楽観的。
+- **P1-2 既存 executor の逐次呼び出しでは 1 親=1 PUT にならない**。現行のサブテーブル INSERT/UPDATE/DELETE は各自が親 GET→PUT する独立 executor・親 UPDATE 通常経路は `$id` のみ取得し revision 無しで 100 件チャンク PUT（[dmlToKintone.ts:149-168](../../src/converter/dmlToKintone.ts#L149-L168)）。**専用の合成プランナー（親対象の全件スナップショット→メモリ上合成→全件検証→1 親 1 PUT record）が必要**。
+- **P1-3 「記述順・後勝ち」の手続き的意味論は危険→スナップショット意味論で固定**: 全 UPDATE/DELETE セレクタは GET 時点の同一スナップショットに対して評価・INSERT 行は同文の UPDATE/DELETE から不可視・同一セル多重更新や UPDATE/DELETE 対象の重複は ArgumentError・同一テーブルのブロック重複禁止。ブロックは「逐次実行する DO」でなく**「1 つの変更計画を宣言する APPLY」**。
+- **P1-4 B43 連携は「更新値だけの検証」では不十分**: PUT 後状態（post-image）＝親の非更新項目・全サブテーブルの全存続行・INSERT 行の必須/既定値/数値精度・複数テーブル合成後の最終レコードを検証する必要。`validateAndNormalizeDmlValue` はセル単位で流用可だが候補生成・エラー行ロケータ・親単位隔離は新実装。**C3 v1 は B42 の子フィールドメタ処理を共有し B43 相当の post-image 検証と同時提供すべき**。
+- **P1-5 MCP 解禁は「DELETE トークンの有無」だけでは弱い**: サブテーブル PUT は行集合 payload で**既存行 ID の欠落=削除**。緩和は実行計画から `deletedRows=0`・既存行 ID 集合の完全保存・行順不変・`_rid` 不明/重複/別親は書き込み前拒否・revision 必須・EXPLAIN/VALIDATE ONLY で件数開示、を証明できる場合に限定。既存仮想テーブル DML を含め **MCP capability 判定を AST レベルで統一**する。
+- **P1-6 `dmlMaxRows`=親件数のみは安全性後退**（1 親に数千子行なら `dmlMaxRows=1` で大量変更が通る。現行サブテーブル DML の確認件数は**子対象行数**＝[execute.ts:5757](../../src/execute.ts#L5757)）→**二重ガード**: `dmlMaxRows`=親レコード数＋`dmlMaxSubtableRows`=子行変更合計（削除解禁面では `dmlMaxDeletedSubtableRows` も）。全件数は最初の PUT 前に確定。
+- **P1-7 原子性の正確な表現**: kintone PUT は 100 レコード単位分割のため「1 文=1 PUT」ではなく**「1 対象親=1 PUT record・API は 100 親ずつ・文全体はトランザクションでない」**と明記（チャンク間失敗で先行分が残る）。
+
+### P2（仕様 R1 で明記）
+
+- **P2-1 導入語**: `TABLE`/`DO` は予約語でなく字句衝突は無いが、`DO` は逐次実行を連想させスナップショット意味論と不整合・「TABLE」が 3 用法目→ **`APPLY SUBTABLE <code> ( … )` を推奨**（soft keyword）。
+- **P2-2 親 WHERE はブロックより前**（`UPDATE … SET … WHERE 親条件 APPLY SUBTABLE …`）。`VALIDATE ONLY` 等は全ブロックの後。
+- **P2-3 ブロック内 `;`**: 括弧深度を理解するブロックパーサが所有すれば衝突回避可。回帰テスト必須（バッチ `;` 併用・文字列/コメント内 `;`・コンソール継続入力・末尾 `;` 省略・空ブロック）。
+- **P2-4 セレクタ規則**: `_idx` は**既存契約どおり 0-based**（言語リファレンス §19・[subtableAdapter.ts:28](../../src/converter/subtableAdapter.ts#L28)。比較文書初稿の 1-based は誤り→アイデア集 §7 も訂正済み）・`_idx` 使用時 revision 必須・`_rid`/`_idx` の 0 行マッチは既定エラー（修復対象消失を沈黙させない）・一般述語の 0 行は no-op・全行は WHERE 省略でなく **`ALL ROWS` で明示**・任意で `EXPECT ROWS n` 期待件数句。
+- **P2-5 複数親**: 各親のサブテーブルを独立名前空間として評価。固定 `_rid` は通常 1 親にしか存在しない→ v1 は親条件 `$id = …` 限定か、複数親では述語/全行のみ許可が安全。
+- **P2-6 UPSERT 分岐の省略時挙動**: `ON INSERT` 省略=新規親のテーブルは kintone 既定・`ON UPDATE` 省略=既存テーブル完全保持・両省略=現行 UPSERT と同一・insert 分岐では PATCH/REMOVE 禁止・分岐判定と post-image 検証と件数ガードは最初の POST/PUT 前に完了。
+
+### P3（任意）
+
+- **P3-1 内部動詞を `PATCH` / `APPEND` / `REMOVE` に**（既存 DML と誤解されない・EXPLAIN/MCP 分類と一致）。
+- **P3-2 C1 セルパスは同一プランナーへの脱糖として将来追加可**（C3 executor 完成前に別実装を作らないことが条件）。
+
+### 改善後の推奨構文（codex 案・R1 のベースライン）
+
+```sql
+UPDATE APP4221
+SET 文字列MIN = 'ddd'
+WHERE $id = 7
+
+APPLY SUBTABLE テーブル (
+  PATCH SET 文字列T2 = 'NNN' WHERE LENGTH(文字列T2) < 3 EXPECT ROWS BETWEEN 1 AND 10;
+  PATCH SET 数値T1 = 10 WHERE _rid = '67890' EXPECT ROWS 1;
+  APPEND (文字列T1, 数値T1) VALUES ('c', 3), ('d', 4);
+  REMOVE WHERE 数値T1 = 0 EXPECT ROWS AT MOST 5
+)
+
+APPLY SUBTABLE テーブル2 (
+  PATCH SET フラグ = '済' ALL ROWS
+)
+
+VALIDATE ONLY;
+```
+
+### 段階リリース（codex 案）
+
+1. **v1**: 親 UPDATE＋1 サブテーブル＋`PATCH` のみ（親 `$id` 条件・子 `_rid` または安全な述語・revision 必須・VALIDATE ONLY/EXPLAIN 同時提供・MCP mutation は閉じたまま）。
+2. **v1.1**: 複数サブテーブル・`APPEND`。削除ゼロを計画で証明できる PATCH のみ MCP 別 capability を検討。
+3. **v1.2**: `REMOVE`（削除内訳を表示・承認できる CLI/プラグインのみ）。
+4. **v2**: INSERT 初期行・UPSERT 分岐・複数親・`_idx`・一般述語・期待件数句。
+
+### Claude の裏取りメモ
+
+サンプリングした引用（`_rid` 条件必須 [execute.ts:5729](../../src/execute.ts#L5729)・VALIDATE ONLY 拒否 [parser.ts:2452](../../src/parser/parser.ts#L2452)・`_idx` 既存 0-based [subtableAdapter.ts:28](../../src/converter/subtableAdapter.ts#L28)・確認件数=子行数 [execute.ts:5757](../../src/execute.ts#L5757)・UPDATE は `$id` のみ取得/100 件チャンク/revision 無し [dmlToKintone.ts:149-168](../../src/converter/dmlToKintone.ts#L149-L168)）は**全て一致**。特に P1-1 は本文書 §3.1「既存文法をそのまま流用」・§4「実装規模: 中」の根拠を直接崩しており、**§4 の C3 実装規模は「中〜大」（合成プランナー・post-image 検証・ブロックパーサ新設）へ訂正**する。C3 推奨自体は覆らない（C1 との相対比較は不変＝C1 でも同じプランナーが必要になるため）。
