@@ -494,7 +494,80 @@ UPDATE users SET profile = JSON_SET(profile, '$.roles[0]', 'superadmin', '$.name
 
 出典: [Oracle: Operations on Collection Data Types](https://docs.oracle.com/en/database/oracle/oracle-database/18/adobj/operations-on-collection-data-types.html) / [Couchbase N1QL UPDATE](https://docs.couchbase.com/cloud/n1ql/n1ql-language-reference/update.html) / [BigQuery DML syntax](https://cloud.google.com/bigquery/docs/reference/standard-sql/dml-syntax) / [PostgreSQL Arrays](https://www.postgresql.org/docs/current/arrays.html) / [SQL Server JSON_MODIFY](https://learn.microsoft.com/en-us/sql/t-sql/functions/json-modify-transact-sql?view=sql-server-ver17) / [MySQL JSON_SET](https://dev.mysql.com/doc/refman/8.0/en/json-modification-functions.html)
 
-## 6. 次のステップ
+## 6. 評価: 修復ユースケースでの「簡潔さ」（2026-07-20・ユーザー指示の評価軸）
+
+評価軸 = **制約違反のあるレコードでテーブル内外の項目を同時に変更する目的で、どれだけ簡潔に書けるか**。全案を同一シナリオ（実機 B43 の APP4221 $id=7: 親 `文字列MIN='ddd'` ＋ テーブル内 `文字列T2` の minLength 違反 2 行を修復）で書き比べる。
+
+### 6.1 同一シナリオの書き比べ
+
+```sql
+-- C1: セルパス SET（述語セレクタ利用時・4行）
+UPDATE APP4221
+SET 文字列MIN = 'ddd',
+    テーブル[LENGTH(文字列T2) < 3].文字列T2 = 'NNN'
+WHERE $id = 7
+
+-- X3: 子主語 + _p.（4行・新構文は SET 内の _p. のみ）
+UPDATE APP4221$テーブル
+SET _p.文字列MIN = 'ddd',
+    文字列T2 = 'NNN'
+WHERE _pid = 7 AND LENGTH(文字列T2) < 3
+
+-- X1: PATCH SUBTABLE 句（6行・codex v1 案のまま=_rid 必須なので事前 SELECT がもう1文要る）
+UPDATE APP4221
+SET 文字列MIN = 'ddd'
+PATCH SUBTABLE テーブル
+  SET 文字列T2 = 'NNN'
+  WHERE _rid IN ('101', '102')   -- ←この '101','102' を得る SELECT が別途必要
+WHERE $id = 7
+
+-- C3: 子操作ブロック（6行・述語可）
+UPDATE APP4221 SET 文字列MIN = 'ddd'
+TABLE テーブル DO (
+  UPDATE SET 文字列T2 = 'NNN' WHERE LENGTH(文字列T2) < 3
+)
+WHERE $id = 7
+
+-- X2: ROWS PATCH（_rid 列挙が本体・事前 SELECT 必須）
+UPDATE APP4221
+SET 文字列MIN = 'ddd',
+    テーブル PATCH (_rid, 文字列T2) = ROWS(('101','NNN'), ('102','NNN'))
+WHERE $id = 7
+
+-- C2: ROWS 置換（全行の全列を列挙し直す必要＝修復用途では書けない）
+```
+
+### 6.2 評価表
+
+| 案 | 簡潔さ | `_rid` 事前取得 | 評価 |
+|---|---|---|---|
+| **C1 セルパス** | **◎**（1セル=SET 1行・親と混在・複数テーブルも可） | **不要**（述語/位置セレクタ） | 手書き修復と汎用性の両立で最良 |
+| **X3 子主語 `_p.`** | **◎**（最短・新構文最小＝既存仮想テーブル DML の SET に `_p.` を足すだけ・WHERE は既存意味論そのまま） | **不要**（既存 WHERE に述語） | 修復専用なら最有力。ただし親のみ更新・複数サブテーブル・INSERT/UPSERT に伸びない構造的制約 |
+| C3 ブロック | ○（ブロック1層分長い・述語可） | 不要 | 表現力最大だが修復には過剰 |
+| X1 PATCH 句 | ○〜△（句形式で長め。**codex v1 の `_rid` 必須が簡潔さを大きく損なう**＝事前 SELECT で実質2文・行別値は CASE でさらに冗長） | 案のまま=必須 → **述語/位置を許可すれば不要化できる** | 破壊性の句名分類は残す価値あり |
+| X2 ROWS PATCH | △（`_rid` 列挙が本体） | 必須 | 手書きには不向き。B42 `#err` から機械生成する一括修復では逆に最適（`$err_subrow_id`→`_rid` 直結） |
+| C2 ROWS 置換 | ×（保持したい行も全列挙＝置換意味論が修復と根本的に不整合） | 必須＋全行内容 | 修復用途から除外（INSERT 初期行専用） |
+
+**結論**: 簡潔さの軸では **X3 と C1 が双璧**。X3 は「今回の目的（修復）」に限れば最短・実装最小だが、B44 全体（INSERT/UPSERT・複数テーブル・親のみ更新）へ伸びない。**汎用形は C1（または X1 に述語/位置セレクタを許可した形）、修復専用の速効形として X3 を先行**、という2段構えが有力。X1 v1 の「`_rid` 必須」は安全側だが、本評価軸（簡潔さ）とユーザーの運用（事前取得なしで書きたい）に反するため、採るなら述語/位置セレクタの解禁が前提。
+
+## 7. 行アドレッシングの再検討 — `_rid` 事前取得問題と行位置指定（2026-07-20・ユーザー指摘）
+
+**問題**: `_rid` は安定した行 ID だが、値を知るには先に `SELECT _rid FROM APPxxx$テーブル WHERE …` でテーブル情報を取得する必要がある（=手書き修復が実質2文になる）。B42 監査経由なら `$err_subrow_id` として自動で手に入るが、**レコード画面を見ながら「3行目を直したい」と書く人間には `_rid` は見えない**（kintone UI は行 ID を表示しない。REST GET には含まれる＝MCP/プログラム経路では取得済みのことが多い、という非対称）。
+
+候補となる行の特定方法（セレクタはどの案に載せても共通部品にできる）:
+
+| 方法 | 例 | 事前取得 | 安全性 | 用途 |
+|---|---|---|---|---|
+| ① `_rid`（行 ID） | `[_rid = '101']` / `WHERE _rid = '101'` | 必要 | ◎ 行の増減・並べ替えに不変。消えた行は fail-closed（対象なし） | B42 `#err` 駆動の機械生成・一括修復 |
+| ② **行位置 `_idx`（1-based・読み取り専用擬似列）** | `[_idx = 2]` / `WHERE _idx IN (1, 3)` | **不要**（画面で数えられる） | △ 実行間で行の追加/削除/REORDER があるとズレて**別の行を静かに更新**し得る → **revision ガードで◎に引き上げ可**（下記） | 人間の手書き・単発修復 |
+| ③ 述語（子フィールド条件） | `[LENGTH(文字列T2) < 3]` / `WHERE 文字列T2 = ''` | **不要** | ○ 意図した行「集合」に当たる。想定外マッチは `VALIDATE ONLY` プレビューで確認 | 違反セルの一括修復（B44 の中心） |
+| ④ 全行 `[*]` | `[*]` / WHERE 省略 | 不要 | ○ 対象が明示的に全行 | 列一括の正規化 |
+
+**②の安全化 = kintone の楽観ロック（revision）を使う**: エンジンは 1 文の中で「レコード GET（行順・revision 取得）→ 位置を解決 → 同 revision 付きで PUT」を行う。読み取りと書き込みの間に他者が更新していれば kintone が PUT を拒否（GAIA_CO*）＝**位置ズレの静かな誤更新を構造的に排除できる**。この revision ガードは②に限らず B44 のパッチ書き込み全般（①③④）に既定で付ける価値がある（現行 DML は revision を使っていない）。なお codex X1 v1 は `_idx` 禁止を提案していたが、それは revision ガード無し前提の判断であり、ガード導入で再考の余地がある。
+
+**設計方針（提案)**: 行セレクタを**共通文法**（`_rid` / `_idx` / 述語 / `*`）として定義し、採用する構文案（C1 の `[…]`・X1/C3 の子 WHERE・X3 の WHERE）のどれにも同じものを載せる。`_idx` は読み取り専用擬似列として `SELECT`（`APPxxx$テーブル` の出力列）にも追加すると、事前確認 SELECT →修復文の往復が同じ語彙で書ける。既存のサブテーブル仮想テーブル DML への `_idx` 追加は B44 本体と独立に先行出荷も可能（小型・後方互換）。
+
+## 8. 次のステップ
 
 1. 両案を突き合わせて構文候補を 1〜2 案に絞る（ユーザー判断）。
 2. 絞った案で仕様 R1 起草 → codex レビュー（B42 実装との順序も決める: 行ロケータ `_rid` の露出は B42 が先）。
