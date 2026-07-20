@@ -236,6 +236,34 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
+  return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+}
+
+/**
+ * Phase 10a の複数親 planning primitive。
+ * 親 identity は WHERE selector ではなく各 snapshot 自身の `$id` から確定する。
+ */
+export function buildApplyPatchPlans(
+  statement: UpdateStatement,
+  snapshots: readonly KintoneRecord[],
+  fieldInfos: readonly KintoneFieldInfo[],
+  metadata: ApplyPatchMetadata = resolveApplyPatchMetadata(statement, fieldInfos)
+): readonly ApplyPatchPlan[] {
+  const parentIds = new Set<number>();
+  return snapshots.map((snapshot) => {
+    const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
+    if (parentIds.has(parentId)) argument(`APPLY snapshots contain duplicate parentId ${parentId}.`);
+    parentIds.add(parentId);
+    return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+  });
+}
+
+function buildApplyPatchPlanForSnapshot(
+  statement: UpdateStatement,
+  snapshot: KintoneRecord,
+  metadata: ApplyPatchMetadata,
+  parentId: number
+): ApplyPatchPlan {
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
   const tablePlans: ApplyPatchTablePlan[] = [];
   for (const block of statement.applyBlocks!) {

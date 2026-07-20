@@ -1,4 +1,9 @@
-import { assertApplyScope, assertApplyV1Scope } from "../applyPatchScope";
+import {
+  assertApplyExecutionScope,
+  assertApplyScope,
+  assertApplyV1Scope,
+  isSinglePositiveRecordIdWhere,
+} from "../applyPatchScope";
 import type { UpdateStatement } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
@@ -130,4 +135,47 @@ describe("assertApplyScope v1.2", () => {
       sql("$id = 8 OR $id = 9", "REMOVE ALL ROWS"),
     ]) expect(() => validateV12(statement)).toThrow(/^UnsupportedError: APPLY v1\.2 scope/);
   });
+});
+
+describe("Phase 10a syntax/execution capabilities", () => {
+  const parse = (text: string): UpdateStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as UpdateStatement;
+
+  test.each([
+    "状態 = 'open'",
+    "金額 >= 10 AND 金額 <= 20",
+    "金額 BETWEEN 10 AND 20",
+    "状態 IN ('open', 'hold')",
+    "備考 IS NULL",
+    "件名 LIKE 'A%'",
+  ])("安全な一般親WHEREをsyntax capabilityで許可する: %s", (where) => {
+    const stmt = parse(sql(where, "PATCH SET 子='x' ALL ROWS"));
+    expect(() => assertApplyScope("phase10a", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase10a", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
+  });
+
+  test.each([
+    "件名 KLIKE 'A'",
+    "$id IN (SELECT $id FROM APP2)",
+    "COUNT(*) > 0",
+  ])("危険な一般親WHEREはsyntax capabilityでも拒否する: %s", (where) => {
+    expect(() => assertApplyScope("phase10a", parse(sql(where, "PATCH SET 子='x' ALL ROWS"))))
+      .toThrow(/^UnsupportedError: APPLY phase10a scope/);
+  });
+
+  test("単一$id完全一致を構文判定し、既存execution capabilityを維持する", () => {
+    const exact = parse(sql("$id = 8", "PATCH SET 子='x' ALL ROWS"));
+    const general = parse(sql("$id = 8 AND 状態='open'", "PATCH SET 子='x' ALL ROWS"));
+    expect(isSinglePositiveRecordIdWhere(exact.where)).toBe(true);
+    expect(isSinglePositiveRecordIdWhere(general.where)).toBe(false);
+    expect(() => assertApplyScope("phase10a", exact)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase10a", exact)).not.toThrow();
+  });
+
+  test.each(["$id = 0", "$id = -1", "$id = 1.5"])(
+    "不正な単一$idは一般WHEREへ格上げしない: %s",
+    (where) => expect(() => assertApplyScope("phase10a", parse(sql(where, "PATCH SET 子='x' ALL ROWS"))))
+      .toThrow(/^UnsupportedError: APPLY phase10a scope/)
+  );
 });

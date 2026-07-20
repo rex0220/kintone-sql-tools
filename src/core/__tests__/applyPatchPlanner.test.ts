@@ -4,6 +4,7 @@ import type { KintoneRecord } from "../../converter/dmlToKintone";
 import type { UpdateStatement } from "../../types/ast";
 import {
   buildApplyPatchPlan,
+  buildApplyPatchPlans,
   collectApplySnapshotFields,
   resolveApplyPatchMetadata,
 } from "../applyPatchPlanner";
@@ -39,6 +40,17 @@ function snapshot(rows: Array<{ id: string; value: Record<string, { value: unkno
     テーブル: { value: rows },
     別表: { value: [] },
   } as unknown as KintoneRecord;
+}
+
+function snapshotFor(parentId: number, revision = parentId + 10, childValue = parentId): KintoneRecord {
+  const record = snapshot([{
+    id: "101",
+    value: { 数値: { value: String(childValue) }, 結果: { value: "0" }, 未指定: { value: `keep-${parentId}` } },
+  }]);
+  record["$id"] = { value: String(parentId) };
+  record["$revision"] = { value: String(revision) };
+  record.親数値 = { value: String(parentId) };
+  return record;
 }
 
 describe("collectApplySnapshotFields", () => {
@@ -218,6 +230,42 @@ describe("buildApplyPatchPlan", () => {
       statement: statement("REMOVE WHERE _rid='101'; REMOVE WHERE 数値=1"),
       snapshot: snapshot(), fieldInfos: fields,
     })).toThrow("ArgumentError: APPLY removes row 101 more than once");
+  });
+});
+
+describe("buildApplyPatchPlans", () => {
+  const multipleParentStatement = () => parseSqlStatement(
+    "UPDATE APP4221 SET 親数値=親数値+1 WHERE 親='before' "
+      + "APPLY テーブル (PATCH SET 結果=数値+10 ALL ROWS)"
+  ) as UpdateStatement;
+
+  test.each([0, 1, 2, 100, 101])("%i snapshotsを入力順の独立planへ変換する", (count) => {
+    const snapshots = Array.from({ length: count }, (_, index) => snapshotFor(index + 1));
+    const plans = buildApplyPatchPlans(multipleParentStatement(), snapshots, fields);
+    expect(plans).toHaveLength(count);
+    expect(plans.map((plan) => plan.parentId)).toEqual(snapshots.map((_, index) => index + 1));
+    expect(plans.map((plan) => plan.revision)).toEqual(snapshots.map((_, index) => index + 11));
+  });
+
+  test("各親のselector/RHS/post-imageを各snapshot内だけで独立に解決する", () => {
+    const plans = buildApplyPatchPlans(multipleParentStatement(), [
+      snapshotFor(8, 3, 1),
+      snapshotFor(9, 4, 20),
+    ], fields);
+    expect(plans.map((plan) => plan.parentValues.親数値.value)).toEqual(["9", "10"]);
+    expect(plans.map((plan) => plan.tables[0].postImageRows[0].value.結果.value)).toEqual(["11", "30"]);
+    expect(plans.map((plan) => plan.postImage["$id"].value)).toEqual(["8", "9"]);
+  });
+
+  test("snapshot parentId重複をArgumentErrorで拒否する", () => {
+    expect(() => buildApplyPatchPlans(multipleParentStatement(), [snapshotFor(8), snapshotFor(8, 99)], fields))
+      .toThrow("ArgumentError: APPLY snapshots contain duplicate parentId 8");
+  });
+
+  test("単数版は従来どおりstatement selectorとの$id一致を要求する", () => {
+    expect(() => buildApplyPatchPlan({
+      statement: statement("PATCH SET 結果=1 ALL ROWS"), snapshot: snapshotFor(9), fieldInfos: fields,
+    })).toThrow("ArgumentError: APPLY snapshot $id 9 does not match requested $id 8");
   });
 });
 

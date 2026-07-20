@@ -30,20 +30,23 @@ function parent(id = "8", childCount = 1): KintoneRecord {
 function makeClient(records: KintoneRecord[], infos = fieldInfos) {
   const getRecords = jest.fn(async () => ({ records }));
   const putRecords = jest.fn(async () => undefined);
+  const openCursor = jest.fn(async () => { throw new Error("unexpected cursor"); });
+  const postRecords = jest.fn(async () => { throw new Error("unexpected post"); });
+  const deleteRecords = jest.fn(async () => { throw new Error("unexpected delete"); });
   const getFields = jest.fn(async () => infos);
   const getNumberPrecision = jest.fn(async () => ({ digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }));
   const client: KintoneClient = {
     getRecords,
-    openCursor: async () => { throw new Error("unexpected cursor"); },
-    postRecords: async () => { throw new Error("unexpected post"); },
+    openCursor,
+    postRecords,
     putRecords,
-    deleteRecords: async () => { throw new Error("unexpected delete"); },
+    deleteRecords,
     getApps: async () => [],
     getFields,
     getNumberPrecision,
     getProcessStatuses: async () => ({ enable: false, states: [] }),
   };
-  return { client, getRecords, putRecords, getFields, getNumberPrecision };
+  return { client, getRecords, openCursor, postRecords, putRecords, deleteRecords, getFields, getNumberPrecision };
 }
 
 const sql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
@@ -56,6 +59,38 @@ test("allowApplyMutation なしの mutation は API 前に fail-closed", async (
   expect(mock.getFields).not.toHaveBeenCalled();
   expect(mock.getRecords).not.toHaveBeenCalled();
   expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("Phase 10a: 複数親APPLYはexecuteでrecords/mutation API 0のままexecution gate拒否", async () => {
+  const mock = makeClient([parent(), parent("9")]);
+  const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態 IN ('open','hold') "
+    + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS)";
+  await expect(execute(multipleParentSql, mock.client, {
+    cacheContext: "apply-phase10a-api0", allowApplyMutation: true,
+  })).rejects.toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
+  for (const api of [mock.getFields, mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
+});
+
+test("Phase 10a: 複数親APPLYはexecuteBatchでもAPI 0でerror envelope化し後続をfail-fast", async () => {
+  const mock = makeClient([parent(), parent("9")]);
+  const multipleParentSql = "UPDATE APP4221 SET 親='after' WHERE 状態='open' "
+    + "APPLY テーブル (PATCH SET 子='patched' ALL ROWS); SELECT * FROM APP4221";
+  const result = await executeBatch(multipleParentSql, mock.client, {
+    cacheContext: "apply-phase10a-batch-api0", allowApplyMutation: true,
+  });
+  expect(result.statements[0]).toMatchObject({
+    status: "error",
+    error: {
+      code: "UnsupportedError",
+      message: "UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY",
+    },
+  });
+  expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "fail-fast" });
+  for (const api of [mock.getFields, mock.getRecords, mock.openCursor, mock.postRecords, mock.putRecords, mock.deleteRecords]) {
+    expect(api).not.toHaveBeenCalled();
+  }
 });
 
 test(
