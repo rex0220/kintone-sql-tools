@@ -276,7 +276,7 @@ describe("MCP tools", () => {
       }],
       guards: {
         revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
-        subtableRows: 2, dmlMaxSubtableRows: 100, wouldExceed: false,
+        subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false,
       },
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
@@ -285,7 +285,7 @@ describe("MCP tools", () => {
     });
     expect(result).toMatchObject({
       apply: [{ field: "テーブル", operations: [{ matchedRows: 2, changedRows: 2 }] }],
-      guards: { dmlMaxSubtableRows: 100, wouldExceed: false },
+      guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
     });
     expect("dmlMaxSubtableRows" in queryInputSchema.shape).toBe(false);
   });
@@ -539,7 +539,7 @@ describe("MCP tools", () => {
       allowDml: true,
       confirmText: "yes",
       dmlMaxRows: 100,
-      dmlMaxSubtableRows: 100,
+      dmlMaxSubtableRows: 500,
     })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
     expect(createRuntime).not.toHaveBeenCalled();
     expect(client.getFields).not.toHaveBeenCalled();

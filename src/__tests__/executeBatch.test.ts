@@ -124,7 +124,7 @@ test("B44 Phase 4: APPLY の未完了planは文単位fail-fastとなり後続文
     "UPDATE APP4221 SET 親='first' WHERE $id=8 APPLY テーブル (PATCH SET 子='x' ALL ROWS); " +
     "UPDATE APP4221 SET 親='second' WHERE $id=8",
     client,
-    { cacheContext: "apply-batch-fail-fast", allowApplyMutation: true, dmlMaxRows: 1 }
+    { cacheContext: "apply-batch-fail-fast", allowApplyMutation: true, dmlMaxRows: 1, dmlMaxSubtableRows: 100 }
   );
   expect(result.ok).toBe(false);
   expect(result.statements[0]).toMatchObject({ status: "error" });

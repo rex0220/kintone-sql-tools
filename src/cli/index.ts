@@ -129,7 +129,7 @@ Options:
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
   --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
-  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard (default: 100)
+  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard (default: 500)
   --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
@@ -1778,7 +1778,7 @@ async function run(): Promise<number> {
   const dmlMaxSubtableRows = args.dmlMaxSubtableRows
     ?? envInt("KSQL_DML_MAX_SUBTABLE_ROWS")
     ?? profile.query?.dmlMaxSubtableRows
-    ?? 100;
+    ?? 500;
   const isValidationOnly = batchAnalysis?.containsValidationOnly === true || (
     parsedStmt !== null && typeof parsedStmt === "object" &&
     "validateOnly" in parsedStmt && parsedStmt.validateOnly === true

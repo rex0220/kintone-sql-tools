@@ -5,7 +5,7 @@ export type PluginApplyOptions = Pick<
   "allowApplyMutation" | "dmlMaxRows" | "dmlMaxSubtableRows"
 >;
 
-/** Plugin は APPLY にだけ固定 100/100 と mutation capability を公開する。 */
+/** Plugin は APPLY にだけ固定 100/500（親/子）と mutation capability を公開する。 */
 export function resolvePluginApplyOptions(statements: readonly Statement[]): PluginApplyOptions {
   const applyUpdates = statements.filter((statement): statement is Extract<Statement, { type: "UPDATE" }> =>
     statement.type === "UPDATE" && (statement.applyBlocks?.length ?? 0) > 0
@@ -14,7 +14,7 @@ export function resolvePluginApplyOptions(statements: readonly Statement[]): Plu
   const containsMutation = applyUpdates.some((statement) => statement.validateOnly !== true);
   return {
     dmlMaxRows: 100,
-    dmlMaxSubtableRows: 100,
+    dmlMaxSubtableRows: 500,
     ...(containsMutation ? { allowApplyMutation: true } : {}),
   };
 }

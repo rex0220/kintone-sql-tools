@@ -16,14 +16,14 @@ test("VALIDATION result set は optional apply/guards を伝播する", () => {
         }],
         guards: {
           revisionRequired: true, parentRows: 1, dmlMaxRows: 100,
-          subtableRows: 2, dmlMaxSubtableRows: 100, wouldExceed: false,
+          subtableRows: 2, dmlMaxSubtableRows: 500, wouldExceed: false,
         },
       },
     }],
   } as unknown as BatchExecuteResult;
   expect(buildBatchEnvelope(batch).results[0]).toMatchObject({
     apply: [{ operations: [{ matchedRows: 2, changedRows: 2 }] }],
-    guards: { dmlMaxSubtableRows: 100, wouldExceed: false },
+    guards: { dmlMaxSubtableRows: 500, wouldExceed: false },
   });
 });
 

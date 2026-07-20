@@ -119,7 +119,7 @@ test("APPLY dry-run は records API 0 で args > env > profile > default を表�
     const profile = await captured([...BASE, "--config", configPath, "--dry-run", "--allow-dml", "-e", SQL]);
     expect(profile.stdout).toContain("dmlMaxSubtableRows:     33");
     const defaults = await captured([...BASE, "--dry-run", "--allow-dml", "-e", SQL]);
-    expect(defaults.stdout).toContain("dmlMaxSubtableRows:     100");
+    expect(defaults.stdout).toContain("dmlMaxSubtableRows:     500");
     expect(getRecords).not.toHaveBeenCalled();
     expect(postRecords).not.toHaveBeenCalled();
     expect(putRecords).not.toHaveBeenCalled();

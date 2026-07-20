@@ -175,12 +175,12 @@ test("二重ガード以内は revision 付き1-record PUTを1回だけ行う", 
   });
 });
 
-test("親1・子101は既定子ガード100で PUT 0", async () => {
-  const mock = makeClient([parent("8", 101)]);
+test("親1・子501は既定子ガード500で PUT 0", async () => {
+  const mock = makeClient([parent("8", 501)]);
   const allRowsSql = "UPDATE APP4221 SET 親 = 'after' WHERE $id = 8 " +
     "APPLY テーブル (PATCH SET 子 = 'patched' ALL ROWS)";
   await expect(execute(allRowsSql, mock.client, { cacheContext: "apply-default-child-guard", allowApplyMutation: true }))
-    .rejects.toThrow("ArgumentError: APPLY changed subtable rows (101) exceed dmlMaxSubtableRows (100)");
+    .rejects.toThrow("ArgumentError: APPLY changed subtable rows (501) exceed dmlMaxSubtableRows (500)");
   expect(mock.putRecords).not.toHaveBeenCalled();
 });
 

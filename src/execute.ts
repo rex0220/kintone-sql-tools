@@ -789,9 +789,9 @@ async function executeParsedStatement(
       options.maxRecords ?? 10_000,
       options.cursorMaxActive ?? 2,
       stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
-        ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows") : 100,
+        ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS) : DEFAULT_APPLY_MAX_ROWS,
       stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
-        ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows") : 100
+        ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS
     );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -5651,8 +5651,8 @@ async function executeApplyPatchUpdate(
     })}`);
   }
 
-  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows");
-  const dmlMaxSubtableRows = resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows");
+  const dmlMaxRows = resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS);
+  const dmlMaxSubtableRows = resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS);
   const wouldExceed = plan.parentRows > dmlMaxRows
     || plan.changedSubtableRows > dmlMaxSubtableRows;
   if (stmt.validateOnly) {
@@ -5720,8 +5720,13 @@ async function executeApplyPatchUpdate(
   return { type: "UPDATE", updatedCount: plan.parentRows };
 }
 
-function resolveApplyGuardLimit(value: number | undefined, name: string): number {
-  const resolved = value ?? 100;
+/** APPLY 二重ガードの既定値。親は単一 $id で実質常に1。子は1年分の日次データ（366行）を
+ *  1文で扱えるよう 500 とする（kintone 制約由来ではなく、修復用途を賄う保守的既定）。 */
+export const DEFAULT_APPLY_MAX_ROWS = 100;
+export const DEFAULT_APPLY_MAX_SUBTABLE_ROWS = 500;
+
+function resolveApplyGuardLimit(value: number | undefined, name: string, fallback: number): number {
+  const resolved = value ?? fallback;
   if (!Number.isSafeInteger(resolved) || resolved <= 0) {
     throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
   }
@@ -6979,7 +6984,7 @@ export async function buildBatchExplainPlans(
   cursorMaxActive = 2,
   enableImport = false,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = 100
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): Promise<BatchExplainResult> {
   const statements = parseSqlBatch(sql, enableImport);
   const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
@@ -7027,7 +7032,7 @@ function buildBatchStatementPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = 100
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
@@ -7146,7 +7151,7 @@ async function executeExplain(
   maxRecords: number,
   cursorMaxActive: number,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = 100
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): Promise<SelectResult> {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
   const lines = [
@@ -7185,7 +7190,7 @@ function buildExplainPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = 100
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
   if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
@@ -7567,7 +7572,7 @@ function buildUpdatePlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = 100
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): string[] {
   if (stmt.applyBlocks?.length) {
     return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows);
