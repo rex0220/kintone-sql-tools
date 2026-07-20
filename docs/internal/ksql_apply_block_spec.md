@@ -647,6 +647,7 @@ CLI mutation は既存のDML許可・確認に加え、次を必須とする。
 
 - INSERTの初期行（Phase 13）。
 - UPSERTのinsert/update分岐（Phase 14）。
+- UPSERTで `ON INSERT` を省略した場合、新規親のサブテーブルはkintone既定値とし、`ON UPDATE` を省略した場合は既存サブテーブルを保持する。両方を省略した場合は現行UPSERTと同一とする。
 - 複数親（Phase 10・最大100親/chunk・非トランザクション・§4.3）。
 - `_idx` セレクタ（Phase 11）。
 - `EXPECT ROWS`（Phase 12）。

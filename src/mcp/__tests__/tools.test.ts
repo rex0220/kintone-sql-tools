@@ -607,14 +607,25 @@ describe("MCP tools", () => {
     expect(client.postRecords).not.toHaveBeenCalled();
   });
 
-  test("B44 Phase 13a: statementHasApplyBlocks は UPDATE/INSERT を共通検出する", () => {
+  test("B44 Phase 14a: statementHasApplyBlocks は UPDATE/INSERT/UPSERT を共通検出する", () => {
     expect(statementHasApplyBlocks(parseSqlStatement(
       "UPDATE APP1 SET 親='x' WHERE $id=1 APPLY 表 (APPEND (子) VALUES ('a'))"
     ))).toBe(true);
     expect(statementHasApplyBlocks(parseSqlStatement(
       "INSERT INTO APP1 (親) VALUES ('x') APPLY 表 (APPEND (子) VALUES ('a'))"
     ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON INSERT APPLY 表 (APPEND (子) VALUES ('a'))"
+    ))).toBe(true);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON UPDATE APPLY 表 (REMOVE ALL ROWS)"
+    ))).toBe(true);
     expect(statementHasApplyBlocks(parseSqlStatement("INSERT INTO APP1 (APPLY) VALUES ('x')"))).toBe(false);
+    expect(statementHasApplyBlocks(parseSqlStatement(
+      "UPSERT INTO APP1 (APPLY) VALUES ('x') ON DUPLICATE (APPLY)"
+    ))).toBe(false);
   });
 
   test("B44 Phase 13a: INSERT APPLY の VALIDATE ONLY は read-only、EXPLAIN は許可する", async () => {
@@ -631,6 +642,42 @@ describe("MCP tools", () => {
     const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({ type: "SELECT", rows: [], columns: [], rowCount: 0 }));
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const sql = "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))";
+
+    await expect(tools.validate({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
+      isReadOnly: true,
+      canRunWithQueryTool: true,
+    });
+    await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toBeDefined();
+    await expect(tools.explain({ sql })).resolves.toBeDefined();
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(executeSql).toHaveBeenCalledTimes(2);
+  });
+
+  test("B44 Phase 14a: UPSERT APPLY mutation は共通 helper で runtime 前拒否し、VALIDATE ONLY/EXPLAIN は許可する", async () => {
+    const client = makeClient();
+    const createRuntime = jest.fn(async (_options: KsqlRuntimeServerOptions, input: CreateKsqlRuntimeInput): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: "prod",
+      client,
+      cacheContext: "mcp-upsert-apply-phase14a",
+      maxRecords: 500,
+      fetchParallel: 1,
+      onLimit: "error",
+      timeout: 30_000,
+    }));
+    const executeSql = jest.fn(async (): Promise<ExecuteResult> => ({ type: "SELECT", rows: [], columns: [], rowCount: 0 }));
+    const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
+    const sql = "UPSERT INTO APP4221 (key) VALUES ('K1') ON DUPLICATE (key) "
+      + "ON INSERT APPLY テーブル (APPEND (子) VALUES ('new'))";
+
+    await expect(tools.mutate({
+      sql,
+      allowDml: true,
+      confirmText: "yes",
+      dmlMaxRows: 100,
+    })).rejects.toThrow("UnsupportedError: APPLY mutation is disabled in MCP v1");
+    expect(createRuntime).not.toHaveBeenCalled();
+    expect(executeSql).not.toHaveBeenCalled();
 
     await expect(tools.validate({ sql: `${sql} VALIDATE ONLY` })).resolves.toMatchObject({
       isReadOnly: true,

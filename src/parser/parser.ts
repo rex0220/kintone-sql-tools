@@ -2522,8 +2522,14 @@ export class Parser {
     if (this.peek().kind === TokenKind.SELECT) {
       const select = this.parseSelect();
       const keyFields = this.parseOnDuplicate();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT は ON INSERT / ON UPDATE APPLY に対応していません", this.peek());
+      }
       const checkGroups = this.parseCheckGroups();
       const validation = this.parseDmlControlSuffix();
+      if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+        throw new ParseError("UPSERT INTO ... SELECT は ON INSERT / ON UPDATE APPLY に対応していません", this.peek());
+      }
       return { type: "UPSERT_SELECT", appId, fields, select, keyFields, ...checkGroups, ...validation };
     }
 
@@ -2538,9 +2544,24 @@ export class Parser {
     } while (this.consume(TokenKind.COMMA));
 
     const keyFields = this.parseOnDuplicate();
+    const applyBranches = this.parseUpsertApplyBranches();
+    const hasApplyBranches = applyBranches.onInsertApplyBlocks !== undefined
+      || applyBranches.onUpdateApplyBlocks !== undefined;
+    if (hasApplyBranches && this.isSoftKeyword("CHECK")) {
+      throw new ParseError("UPSERT の分岐 APPLY は CHECK と併用できません", this.peek());
+    }
+    if (hasApplyBranches && (this.peek().kind === TokenKind.ON || this.isSoftKeyword("REJECT"))) {
+      throw new ParseError("UPSERT の分岐 APPLY は ON ERROR SKIP / REJECT LIMIT と併用できません", this.peek());
+    }
     const checkGroups = this.parseCheckGroups();
     const validation = this.parseDmlControlSuffix();
-    return { type: "UPSERT", appId, fields, values, keyFields, ...checkGroups, ...validation };
+    if (this.isUpsertApplyBranchStart() || this.isApplyBlockStart()) {
+      throw new ParseError("ON INSERT / ON UPDATE APPLY は CHECK / VALIDATE ONLY より前に指定してください", this.peek());
+    }
+    return {
+      type: "UPSERT", appId, fields, values, keyFields,
+      ...applyBranches, ...checkGroups, ...validation,
+    };
   }
 
   private parseOnDuplicate(): string[] {
@@ -2555,6 +2576,38 @@ export class Parser {
       throw new ParseError("ON DUPLICATE にはキーフィールドが最低 1 つ必要です", this.prev());
     }
     return keyFields;
+  }
+
+  private isUpsertApplyBranchStart(): boolean {
+    return this.peek().kind === TokenKind.ON
+      && (this.peekAt(1).kind === TokenKind.INSERT || this.peekAt(1).kind === TokenKind.UPDATE);
+  }
+
+  private parseUpsertApplyBranches(): Pick<UpsertStatement, "onInsertApplyBlocks" | "onUpdateApplyBlocks"> {
+    let onInsertApplyBlocks: ApplyBlock[] | undefined;
+    let onUpdateApplyBlocks: ApplyBlock[] | undefined;
+    while (this.isUpsertApplyBranchStart()) {
+      this.advance(); // ON
+      const branch = this.advance(); // INSERT / UPDATE
+      const isInsert = branch.kind === TokenKind.INSERT;
+      if ((isInsert && onInsertApplyBlocks) || (!isInsert && onUpdateApplyBlocks)) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} APPLY は 1 回だけ指定できます`, branch);
+      }
+      if (!this.isApplyBlockStart()) {
+        throw new ParseError(`ON ${isInsert ? "INSERT" : "UPDATE"} の後には APPLY ブロックが必要です`, this.peek());
+      }
+      const blocks: ApplyBlock[] = [];
+      while (this.isApplyBlockStart()) blocks.push(this.parseApplyBlock());
+      if (isInsert) onInsertApplyBlocks = blocks;
+      else onUpdateApplyBlocks = blocks;
+    }
+    if (this.isApplyBlockStart()) {
+      throw new ParseError("UPSERT の APPLY には ON INSERT または ON UPDATE が必要です", this.peek());
+    }
+    return {
+      ...(onInsertApplyBlocks ? { onInsertApplyBlocks } : {}),
+      ...(onUpdateApplyBlocks ? { onUpdateApplyBlocks } : {}),
+    };
   }
 
   /** 配列リテラル ['val1', 'val2'] を解析して ArrayLiteral を返す */

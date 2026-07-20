@@ -6,7 +6,7 @@ import {
   assertApplyV1Scope,
   isSinglePositiveRecordIdWhere,
 } from "../applyPatchScope";
-import type { InsertStatement, UpdateStatement } from "../../types/ast";
+import type { InsertStatement, UpdateStatement, UpsertStatement } from "../../types/ast";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
 import { execute, type KintoneClient } from "../../execute";
@@ -295,5 +295,56 @@ describe("Phase 13a INSERT syntax/execution capabilities", () => {
     const plain = parseInsert("INSERT INTO APP4221 (APPLY) VALUES ('x')");
     expect(() => assertApplyScope("phase13a", plain)).not.toThrow();
     expect(() => assertApplyExecutionScope("phase13a", plain)).not.toThrow();
+  });
+});
+
+describe("Phase 14a UPSERT branch syntax/execution capabilities", () => {
+  const parseUpsert = (text: string): UpsertStatement =>
+    new Parser(new Lexer(text).tokenize()).parse() as UpsertStatement;
+  const upsert = (branches = "") =>
+    `UPSERT INTO APP4221 (key, 親) VALUES ('K1', 'x') ON DUPLICATE (key) ${branches}`;
+
+  test("ON INSERT は APPEND のみ、ON UPDATE は PATCH/APPEND/REMOVE を許可する", () => {
+    const stmt = parseUpsert(upsert(
+      "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial')) "
+      + "ON UPDATE APPLY 表 (PATCH SET 子='x' ALL ROWS; APPEND (子) VALUES ('new'); REMOVE WHERE 子='old')"
+    ));
+    expect(() => assertApplyScope("phase14a", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase14a", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 14a UPSERT execution is not connected");
+  });
+
+  test.each([
+    ["ON INSERT PATCH", "ON INSERT APPLY 表 (PATCH SET 子='x' ALL ROWS)"],
+    ["ON INSERT REMOVE", "ON INSERT APPLY 表 (REMOVE ALL ROWS)"],
+    ["ON UPDATE EXPECT", "ON UPDATE APPLY 表 (PATCH SET 子='x' ALL ROWS EXPECT ROWS 1)"],
+    ["ON UPDATE _idx", "ON UPDATE APPLY 表 (REMOVE WHERE _idx=0)"],
+  ])("UPSERT APPLY の未解禁 capability を拒否する: %s", (_label, branches) => {
+    expect(() => assertApplyScope("phase14a", parseUpsert(upsert(branches))))
+      .toThrow(/^UnsupportedError: APPLY phase14a scope/);
+  });
+
+  test("将来の多値 operation node も phase14a では fail-closed にする", () => {
+    const base = parseUpsert(upsert("ON UPDATE APPLY 表 (APPEND (子) VALUES ('x'))"));
+    const futureMultiValue = {
+      ...base,
+      onUpdateApplyBlocks: [{ field: "複数選択", operations: [{ kind: "ADD", value: "重要" }] }],
+    } as unknown as UpsertStatement;
+    expect(() => assertApplyScope("phase14a", futureMultiValue))
+      .toThrow("UnsupportedError: APPLY phase14a scope does not support ADD in this phase");
+  });
+
+  test("VALIDATE ONLY と分岐省略は許可し、Phase 13a は UPSERT APPLY を先取りしない", () => {
+    const validation = parseUpsert(upsert("ON UPDATE APPLY 表 (REMOVE ALL ROWS) VALIDATE ONLY"));
+    expect(() => assertApplyScope("phase14a", validation)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase14a", validation)).not.toThrow();
+    expect(validation.onInsertApplyBlocks).toBeUndefined();
+
+    const plain = parseUpsert(upsert());
+    expect(() => assertApplyScope("phase14a", plain)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase14a", plain)).not.toThrow();
+    expect(() => assertApplyScope("phase13a", parseUpsert(upsert(
+      "ON INSERT APPLY 表 (APPEND (子) VALUES ('a'))"
+    )))).toThrow("UnsupportedError: APPLY phase13a scope does not support UPSERT in this phase");
   });
 });

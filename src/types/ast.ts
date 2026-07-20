@@ -649,6 +649,10 @@ export interface UpsertStatement {
   values: InsertRow[];
   /** ON DUPLICATE (フィールド名) — 重複判定キー */
   keyFields: string[];
+  /** 新規親を作成する分岐のサブテーブル初期行操作。省略時は undefined。 */
+  onInsertApplyBlocks?: ApplyBlock[];
+  /** 既存親を更新する分岐のサブテーブル操作。省略時は undefined。 */
+  onUpdateApplyBlocks?: ApplyBlock[];
   validateOnly?: boolean;
   validationErrorTable?: string | null;
   onErrorSkip?: boolean;

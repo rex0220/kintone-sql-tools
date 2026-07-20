@@ -154,3 +154,63 @@ describe("INSERT APPLY parser", () => {
     expect(stmt).not.toHaveProperty("applyBlocks");
   });
 });
+
+describe("UPSERT branch APPLY parser", () => {
+  const base = "UPSERT INTO APP4221 (key, 親) VALUES ('K1', 'x') ON DUPLICATE (key)";
+
+  test("ON INSERT / ON UPDATE を順不同で分岐別 AST に保持する", () => {
+    const stmt = parseSqlStatement(
+      `${base} ON UPDATE APPLY テーブル (`
+      + "PATCH SET 子='updated' WHERE _idx=0 EXPECT ROWS 1; REMOVE ALL ROWS; APPEND (子) VALUES ('new')"
+      + ") ON INSERT APPLY テーブル (APPEND (子) VALUES ('initial')) VALIDATE ONLY"
+    );
+    expect(stmt).toMatchObject({
+      type: "UPSERT",
+      validateOnly: true,
+      onInsertApplyBlocks: [{ field: "テーブル", operations: [{ kind: "APPEND" }] }],
+      onUpdateApplyBlocks: [{ field: "テーブル", operations: [
+        { kind: "PATCH", expectRows: { kind: "EXACT", count: 1 } },
+        { kind: "REMOVE" },
+        { kind: "APPEND" },
+      ] }],
+    });
+  });
+
+  test("片方または両方の分岐省略を undefined で表す", () => {
+    const insertOnly = parseSqlStatement(`${base} ON INSERT APPLY 表 (APPEND (子) VALUES ('a'))`);
+    expect(insertOnly).toHaveProperty("onInsertApplyBlocks");
+    expect(insertOnly).not.toHaveProperty("onUpdateApplyBlocks");
+
+    const updateOnly = parseSqlStatement(`${base} ON UPDATE APPLY 表 (REMOVE ALL ROWS)`);
+    expect(updateOnly).not.toHaveProperty("onInsertApplyBlocks");
+    expect(updateOnly).toHaveProperty("onUpdateApplyBlocks");
+
+    const neither = parseSqlStatement(base);
+    expect(neither).not.toHaveProperty("onInsertApplyBlocks");
+    expect(neither).not.toHaveProperty("onUpdateApplyBlocks");
+  });
+
+  test.each([
+    `${base} ON INSERT APPLY 表 (APPEND (子) VALUES ('a')) ON INSERT APPLY 別表 (APPEND (子) VALUES ('b'))`,
+    `${base} APPLY 表 (APPEND (子) VALUES ('a'))`,
+    `${base} VALIDATE ONLY ON UPDATE APPLY 表 (REMOVE ALL ROWS)`,
+    `${base} ON INSERT APPLY 表 (APPEND (子) VALUES ('a')) CHECK WHEN 親='x' THEN 'ng'`,
+    `${base} ON UPDATE APPLY 表 (REMOVE ALL ROWS) ON ERROR SKIP INTO #err`,
+  ])("分岐重複・句順違反・CHECK/ON ERROR 併用を拒否する: %s", (sql) => {
+    expect(() => parseSqlStatement(sql)).toThrow(ParseError);
+  });
+
+  test("UPSERT SELECT と分岐 APPLY の併用を明示拒否する", () => {
+    expect(() => parseSqlStatement(
+      "UPSERT INTO APP1 (key) SELECT key FROM APP2 ON DUPLICATE (key) "
+      + "ON UPDATE APPLY 表 (PATCH SET 子='x' ALL ROWS)"
+    )).toThrow("UPSERT INTO ... SELECT は ON INSERT / ON UPDATE APPLY に対応していません");
+  });
+
+  test("APPLY は既存 UPSERT の識別子として非回帰", () => {
+    const stmt = parseSqlStatement("UPSERT INTO APP1 (APPLY) VALUES ('x') ON DUPLICATE (APPLY)");
+    expect(stmt).toMatchObject({ type: "UPSERT", fields: ["APPLY"], keyFields: ["APPLY"] });
+    expect(stmt).not.toHaveProperty("onInsertApplyBlocks");
+    expect(stmt).not.toHaveProperty("onUpdateApplyBlocks");
+  });
+});

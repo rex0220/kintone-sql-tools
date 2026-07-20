@@ -4,15 +4,17 @@ import type {
   InsertStatement,
   Statement,
   UpdateStatement,
+  UpsertStatement,
   WhereExpr,
 } from "../types/ast";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
   readonly insert: boolean;
+  readonly upsert: boolean;
   readonly multipleBlocks: boolean;
   readonly multipleParents: boolean;
   readonly idxSelectors: boolean;
@@ -25,6 +27,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   v1: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH"]),
     insert: false,
+    upsert: false,
     multipleBlocks: false,
     multipleParents: false,
     idxSelectors: false,
@@ -37,6 +40,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   "v1.1": Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND"]),
     insert: false,
+    upsert: false,
     multipleBlocks: true,
     multipleParents: false,
     idxSelectors: false,
@@ -49,6 +53,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   "v1.2": Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     insert: false,
+    upsert: false,
     multipleBlocks: true,
     multipleParents: false,
     idxSelectors: false,
@@ -61,6 +66,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   phase10a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     insert: false,
+    upsert: false,
     multipleBlocks: true,
     multipleParents: true,
     idxSelectors: false,
@@ -73,6 +79,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   phase11: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     insert: false,
+    upsert: false,
     multipleBlocks: true,
     multipleParents: true,
     idxSelectors: true,
@@ -85,6 +92,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   phase12: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     insert: false,
+    upsert: false,
     multipleBlocks: true,
     multipleParents: true,
     idxSelectors: true,
@@ -97,6 +105,20 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   phase13a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
     insert: true,
+    upsert: false,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+  }),
+  phase14a: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
+    insert: true,
+    upsert: true,
     multipleBlocks: true,
     multipleParents: true,
     idxSelectors: true,
@@ -113,16 +135,18 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   readonly internalPreparedWrite: boolean;
   readonly publicMultipleParentWrite: boolean;
   readonly insertWrite: boolean;
+  readonly upsertWrite: boolean;
 }>> = Object.freeze({
-  phase10a: Object.freeze({ multipleParentPreflight: false, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false }),
-  phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false }),
-  phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false, insertWrite: false }),
-  phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false }),
-  phase11: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false }),
-  phase12: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false }),
-  phase13a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false }),
-  phase13b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false }),
-  phase13c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true }),
+  phase10a: Object.freeze({ multipleParentPreflight: false, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: false, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: false, insertWrite: false, upsertWrite: false }),
+  phase10d: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase11: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase12: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: false, upsertWrite: false }),
+  phase13c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
+  phase14a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: false }),
 });
 
 let activeVersion: ApplyScopeVersion = "v1";
@@ -138,12 +162,15 @@ function withVersion<T>(version: ApplyScopeVersion, run: () => T): T {
   try { return run(); } finally { activeVersion = previous; }
 }
 
-type StatementWithApply = UpdateStatement | InsertStatement;
+type StatementWithApply = UpdateStatement | InsertStatement | UpsertStatement;
 
 function statementWithApply(statement: Statement): StatementWithApply | null {
   const target = statement.type === "EXPLAIN" ? statement.query : statement;
   if (target.type === "UPDATE" || target.type === "INSERT") {
     return target.applyBlocks?.length ? target : null;
+  }
+  if (target.type === "UPSERT") {
+    return target.onInsertApplyBlocks?.length || target.onUpdateApplyBlocks?.length ? target : null;
   }
   return null;
 }
@@ -162,16 +189,13 @@ function assertApplyScopeForCapabilities(
 ): void {
   const applyStatement = statementWithApply(statement);
   if (applyStatement === null) return;
+  if (applyStatement.type === "UPSERT") {
+    assertUpsertApplyScope(applyStatement, capabilities);
+    return;
+  }
   const blocks = applyStatement.applyBlocks!;
 
-  const seen = new Set<string>();
-  for (const block of blocks) {
-    const key = block.field;
-    if (seen.has(key)) {
-      throw new Error(`ArgumentError: APPLY ${activeVersion} scope allows only one block for table ${block.field}`);
-    }
-    seen.add(key);
-  }
+  assertUniqueApplyBlocks(blocks);
   if (!capabilities.multipleBlocks && blocks.length !== 1) unsupported("multiple APPLY blocks in this phase");
   if (applyStatement.type === "INSERT") {
     assertInsertApplyScope(applyStatement, blocks, capabilities);
@@ -185,6 +209,13 @@ function assertApplyScopeForCapabilities(
   if (!capabilities.rejectLimit && update.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
   assertSafeParentWhere(update.where, capabilities.multipleParents);
 
+  assertUpdateApplyOperations(blocks, capabilities);
+}
+
+function assertUpdateApplyOperations(
+  blocks: readonly ApplyBlock[],
+  capabilities: (typeof APPLY_SYNTAX_CAPABILITIES)[ApplyScopeVersion]
+): void {
   for (const block of blocks) {
     for (const operation of block.operations) {
       if (!capabilities.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
@@ -219,6 +250,46 @@ function assertApplyScopeForCapabilities(
   }
 }
 
+function assertUniqueApplyBlocks(blocks: readonly ApplyBlock[]): void {
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    if (seen.has(block.field)) {
+      throw new Error(`ArgumentError: APPLY ${activeVersion} scope allows only one block for table ${block.field}`);
+    }
+    seen.add(block.field);
+  }
+}
+
+function assertUpsertApplyScope(
+  upsert: UpsertStatement,
+  capabilities: (typeof APPLY_SYNTAX_CAPABILITIES)[ApplyScopeVersion]
+): void {
+  if (!capabilities.upsert) unsupported("UPSERT in this phase");
+  if (!capabilities.check && upsert.checkGroups?.length) unsupported("CHECK in this phase");
+  if (!capabilities.onErrorSkip && upsert.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
+  if (!capabilities.rejectLimit && upsert.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
+
+  const insertBlocks = upsert.onInsertApplyBlocks ?? [];
+  const updateBlocks = upsert.onUpdateApplyBlocks ?? [];
+  assertUniqueApplyBlocks(insertBlocks);
+  assertUniqueApplyBlocks(updateBlocks);
+  if (!capabilities.multipleBlocks && (insertBlocks.length > 1 || updateBlocks.length > 1)) {
+    unsupported("multiple APPLY blocks in this phase");
+  }
+  assertAppendOnlyBlocks(insertBlocks, "UPSERT ON INSERT");
+  assertUpdateApplyOperations(updateBlocks, { ...capabilities, idxSelectors: false, expectRows: false });
+}
+
+function assertAppendOnlyBlocks(blocks: readonly ApplyBlock[], parent: string): void {
+  for (const block of blocks) {
+    for (const operation of block.operations) {
+      if (operation.kind !== "APPEND") unsupported(`${operation.kind} for ${parent} in this phase`);
+      for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
+      assertSafeApplyNode(operation.values, "APPEND values");
+    }
+  }
+}
+
 function assertInsertApplyScope(
   insert: InsertStatement,
   blocks: readonly ApplyBlock[],
@@ -229,13 +300,7 @@ function assertInsertApplyScope(
   if (!capabilities.check && insert.checkGroups?.length) unsupported("CHECK in this phase");
   if (!capabilities.onErrorSkip && insert.onErrorSkip) unsupported("ON ERROR SKIP in this phase");
   if (!capabilities.rejectLimit && insert.rejectLimit != null) unsupported("REJECT LIMIT in this phase");
-  for (const block of blocks) {
-    for (const operation of block.operations) {
-      if (operation.kind !== "APPEND") unsupported(`${operation.kind} for INSERT in this phase`);
-      for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
-      assertSafeApplyNode(operation.values, "APPEND values");
-    }
-  }
+  assertAppendOnlyBlocks(blocks, "INSERT");
 }
 
 /** Compatibility export for callers that explicitly need the original v1 gate. */
@@ -263,6 +328,13 @@ export function isSinglePositiveRecordIdWhere(where: WhereExpr): boolean {
  */
 export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement: Statement): void {
   const capabilities = APPLY_EXECUTION_CAPABILITIES[phase];
+  if (statement.type === "UPSERT"
+    && (statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)) {
+    if (statement.validateOnly !== true && !capabilities.upsertWrite) {
+      throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} UPSERT execution is not connected`);
+    }
+    return;
+  }
   if (statement.type === "INSERT" && statement.applyBlocks?.length) {
     if (statement.validateOnly !== true && !capabilities.insertWrite) {
       throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} INSERT execution is not connected`);

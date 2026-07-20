@@ -786,8 +786,8 @@ async function executeParsedStatement(
   if (unresolved !== null) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
-  assertApplyScope("phase13a", stmt);
-  assertApplyExecutionScope("phase13c", stmt);
+  assertApplyScope("phase14a", stmt);
+  assertApplyExecutionScope("phase14a", stmt);
   validateKlikeStatement(stmt);
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -1196,6 +1196,8 @@ export async function executeBatch(
 ): Promise<BatchExecuteResult> {
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
+  // Phase 14a: UPSERT APPLY を含む mutation は、先行文を含む一切の API 呼び出し前に閉じる。
+  statements.forEach((statement) => assertApplyExecutionScope("phase14a", statement));
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
@@ -1390,8 +1392,8 @@ async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase13a", resolvedStmt);
-  assertApplyExecutionScope("phase13c", resolvedStmt);
+  assertApplyScope("phase14a", resolvedStmt);
+  assertApplyExecutionScope("phase14a", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
 
@@ -6958,7 +6960,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase13a", stmt);
+    assertApplyScope("phase14a", stmt);
     validateKlikeStatement(stmt);
     return stmt;
   } catch (e) {

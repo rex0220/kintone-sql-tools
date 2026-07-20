@@ -221,6 +221,36 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B44 Phase 14a: UPSERT APPLY mutation は単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
+  const applySql = "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code) "
+    + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial'))";
+
+  const single = makeClient();
+  await expect(execute(applySql, single, { cacheContext: "upsert-apply-closed-single" }))
+    .rejects.toThrow("UnsupportedError: APPLY Phase 14a UPSERT execution is not connected");
+  expect(single.getCalls).toHaveLength(0);
+  expect(single.postCalls).toHaveLength(0);
+  expect(single.putCalls).toHaveLength(0);
+
+  const batch = makeClient({ recordsByApp: { 200: [makeRecord({ value: "x" })] } });
+  await expect(executeBatch(
+    `SELECT value FROM APP200; ${applySql}`,
+    batch,
+    { cacheContext: "upsert-apply-closed-batch" }
+  )).rejects.toThrow("UnsupportedError: APPLY Phase 14a UPSERT execution is not connected");
+  expect(batch.getCalls).toHaveLength(0);
+  expect(batch.postCalls).toHaveLength(0);
+  expect(batch.putCalls).toHaveLength(0);
+
+  const plain = makeClient({ records: [], postIds: ["1"], fieldTypes: { code: "SINGLE_LINE_TEXT" } });
+  await expect(execute(
+    "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code)",
+    plain,
+    { cacheContext: "upsert-no-apply-regression" }
+  )).resolves.toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 0 });
+  expect(plain.postCalls).toHaveLength(1);
+});
+
 test("IMPORT UPSERT はsource重複を照合read前に文全体拒否する", async () => {
   const client = makeClient({ records: [] });
   client.getFields = async () => [
