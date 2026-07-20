@@ -1,6 +1,6 @@
 # B44 — `APPLY` ブロックによるテーブル内外項目の同時更新仕様
 
-- ステータス: R2（2026-07-20・codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）。実装着手はユーザー承認待ち）
+- ステータス: R2・**実装着手中（v3.8.0・2026-07-20〜）**。実装計画=[ksql_apply_block_impl_plan.md](ksql_apply_block_impl_plan.md)（R1 承認済・Phase 1〜7）。codex 起草 R1 → Claude レビュー済＝主要引用の裏取り全一致・P2×2 を R2 反映（§13）
 - 対象: B44「テーブル内外項目の同時更新」
 - 台帳: [ksql_issue_tracker.md B44](../ksql_issue_tracker.md#L39)
 - 前提: [B42 サブテーブル監査仕様](ksql_validate_subtable_audit_spec.md)・B43 DML post-image 事前検証
