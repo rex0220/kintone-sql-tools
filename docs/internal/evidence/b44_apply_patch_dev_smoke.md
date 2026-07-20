@@ -37,6 +37,20 @@ APP4221 をコピーし **SUBTABLE を2つ（テーブル・テーブル2、子�
 
 **複数テーブルで PATCH＋APPEND＋REMOVE を1文=1 PUT に合成できることを実機実証**。各テーブルが独立の payload 形（テーブル=PATCH_ONLY・テーブル2=FULL_SURVIVORS）で正しく処理された。
 
+## 複数レコード・スケール実機（APP4223・2026-07-20 追記）
+
+200レコード規模で、UPDATE APPLY による「テーブルの追加・更新・削除の組合せ」と UPSERT の複数レコード動作を検証。
+
+| # | 検証 | 結果 |
+|---|---|---|
+| S0 | 200レコード作成（各テーブル2行: 数値T1=10 と 999） | IMPORT JSON で affected=200 |
+| S1 | **200レコードへ APPLY 組合せ**（各: `PATCH SET 文字列T2='UPD' WHERE 数値T1=10; REMOVE WHERE 数値T1=999; APPEND VALUES ('ADD')`） | バッチ上限20文のため **20文×10バッチ=200文すべて success**。総子行数 400（UPD 200＋ADD 200）・削除対象 数値T1=999 の残存 **0** |
+| S2 | UPSERT 複数レコード（一意キー タイトル・20件） | 1回目=20件 INSERT・2回目=同キーで 20件 UPDATE（金額 7777 が20件）＝insert/update 分岐が複数レコードで正しく動作 |
+| S3 | **UPSERT＋サブテーブル（scope 境界）** | `UPSERT … APPLY テーブル (…)` は **ParseError**（APPLY は UPDATE 専用・UPSERT+サブテーブルは v2 未実装を確認） |
+| S4 | 複数レコード UPDATE APPLY（`WHERE $id > 1`） | `UnsupportedError: … single condition $id = <positive safe integer>`（単一親のみ・複数親は v2） |
+
+**要点**: APPLY v1.2 は**単一レコード UPDATE 専用**のため、「複数レコードを対象」は **1レコード=1文の APPLY をバッチ/ループで反復**して実現（S1 で 200レコード達成）。UPSERT はレコード横断の親項目 upsert に有効だが**サブテーブルは扱えない**（S3）。両者を1文で束ねる「UPSERT+サブテーブル」「複数親 APPLY」は spec §9.4 の **v2 スコープ**（本 v3.8.0 では未実装＝明示エラーで fail-closed）。
+
 ## 環境制約（コードの問題ではない）
 
 - **MCP fail-closed の live 確認は不可**: 接続中の MCP サーバは公開版 3.6.1 で APPLY 構文を知らず ParseError になる（新ビルドではない）。新ビルドの MCP mutation 拒否（AST 判定・API 0）は unit テスト（`src/mcp/__tests__/tools.test.ts`）で検証済み。
