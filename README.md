@@ -203,8 +203,8 @@ Options:
   --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT/REORDER execution
   --yes                      Skip DML confirmation prompt
   --allow-without-where      Allow UPDATE/DELETE without WHERE
-  --dml-max-rows <n>         Max affected rows for DML guard (default: 100)
-  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard (default: 500)
+  --dml-max-rows <n>         Max affected parent rows for DML/APPLY guard (default: 100)
+  --dml-max-subtable-rows <n> Max changed subtable rows for APPLY guard; multi-value fields excluded (default: 500)
   --continue-on-error        Batch: keep executing after a statement error (read-only batch only)
   -h, --help                 Show help
   -v, --version              Show version
