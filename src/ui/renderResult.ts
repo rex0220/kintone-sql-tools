@@ -2,7 +2,8 @@
 // renderResult — ExecuteResult を HTML 文字列に変換する
 // ============================================================
 
-import type { ExecuteResult, SelectResult, UpsertResult, ProcessRow } from "../core";
+import type { ApplyDiagnostic, ApplyWriteFailureDetail, ExecuteResult, SelectResult, UpsertResult, ProcessRow } from "../core";
+import { buildApplyConfirmMessage } from "./applyConfirm";
 
 // ============================================================
 // 表示オプション
@@ -28,20 +29,23 @@ export interface DisplayOptions {
 export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): string {
   switch (result.type) {
     case "SELECT": return renderSelect(result, opts);
-    case "INSERT": return renderSuccess(`${result.insertedCount} 件のレコードを登録しました。${isolationSuffix(result)}`);
-    case "UPDATE": return renderSuccess(`${result.updatedCount} 件のレコードを更新しました。${isolationSuffix(result)}`);
+    case "INSERT": return renderSuccess(`${result.insertedCount} 件のレコードを登録しました。${isolationSuffix(result)}`)
+      + renderApplyDiagnostic(result.diagnostic);
+    case "UPDATE": return renderSuccess(`${result.updatedCount} 件のレコードを更新しました。${isolationSuffix(result)}`)
+      + renderApplyDiagnostic(result.diagnostic);
     case "DELETE": return renderSuccess(`${result.deletedCount} 件のレコードを削除しました。`);
     case "REORDER": return renderSuccess(`${result.reorderedParentCount} 件の親レコードで並び順を更新しました。`);
     case "UPSERT": return renderSuccess(
       `登録 ${result.insertedCount} 件 / 更新 ${result.updatedCount} 件${isolationSuffix(result)}`
-    );
+    ) + renderApplyDiagnostic(result.diagnostic);
     case "ASSERT": return renderSuccess(`アサーション成立: ${result.condition}`);
     case "VALIDATION": {
       const importSuffix = result.importDetail
         ? ` / IMPORT実データpreflight / mutation候補 ${result.importDetail.parents.mutationCandidates} 件 / 書込み 0`
         : "";
       const summary = renderInfo(`検証 ${result.validatedRows} 件 / 正常 ${result.validRows} 件 / 不正 ${result.invalidRows} 件 / エラー ${result.errorCount} 件${importSuffix}`);
-      const applySummary = (result.apply ?? []).map((detail) => renderInfo(
+      const sharedApplySummary = renderApplyDiagnostic(result.diagnostic, true);
+      const applySummary = result.diagnostic ? "" : (result.apply ?? []).map((detail) => renderInfo(
         `APPLY ${detail.field}: ${detail.operations.map((operation) =>
           operation.kind === "APPEND"
             ? `APPEND 追加 ${operation.addedRows}`
@@ -50,7 +54,7 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
               : `PATCH 一致 ${operation.matchedRows} / 変更 ${operation.changedRows}`
         ).join("; ")} / 変更子行 ${detail.changedSubtableRows} / 削除 ${detail.deletedRows}`
       )).join("");
-      const guardSummary = result.guards
+      const guardSummary = result.diagnostic ? "" : result.guards
         ? result.guards.wouldExceed
           ? `<div class="ksql-warn">${escHtml(
             `安全ガード超過: 親 ${result.guards.parentRows}/${result.guards.dmlMaxRows}, ` +
@@ -61,11 +65,11 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
             `子 ${result.guards.subtableRows}/${result.guards.dmlMaxSubtableRows} / revision 必須 / 書込み 0`
           )
         : "";
-      const deletedSummary = result.deletedRows
+      const deletedSummary = result.diagnostic ? "" : result.deletedRows
         ? renderInfo(`削除合計 ${result.deletedRows.total} 行 / 削除対象親 ${result.deletedRows.parentRows} 件`)
         : "";
-      if (result.errorCount === 0) return `${summary}${applySummary}${deletedSummary}${guardSummary}${renderInfo("検証エラーはありません。")}`;
-      return `${summary}${applySummary}${deletedSummary}${guardSummary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
+      if (result.errorCount === 0) return `${summary}${sharedApplySummary}${applySummary}${deletedSummary}${guardSummary}${renderInfo("検証エラーはありません。")}`;
+      return `${summary}${sharedApplySummary}${applySummary}${deletedSummary}${guardSummary}${renderSelect({ type: "SELECT", columns: result.columns, rows: result.errors, rowCount: result.errorCount }, opts)}`;
     }
   }
 }
@@ -116,7 +120,34 @@ export function renderError(err: unknown): string {
 
   const displayLines = lines.filter((line) => line.trim() !== "");
   const html = (displayLines.length > 0 ? displayLines : [fallback]).map((l) => escHtml(l)).join("<br>");
-  return `<div class="ksql-error"><span class="ksql-error-icon">⚠</span>${html}</div>`;
+  const partial = applyPartialFailure(err);
+  const partialHtml = partial
+    ? `<div class="ksql-warn">${escHtml(
+      `APPLY 部分成功: 成功親 ${partial.successfulParents} 件 / 成功 chunk ${partial.successfulChunks}`
+      + ` / 失敗 ${partial.failedBranch ?? ""} ${partial.failedStage} chunk ${partial.failedChunkIndex + 1}`
+      + "。成功済み書込みは残り、自動 retry は行われません。"
+    )}</div>${renderApplyDiagnostic(partial.diagnostic)}`
+    : "";
+  return `<div class="ksql-error"><span class="ksql-error-icon">⚠</span>${html}</div>${partialHtml}`;
+}
+
+function renderApplyDiagnostic(detail: ApplyDiagnostic | undefined, validateOnly = false): string {
+  return detail
+    ? `<div class="ksql-apply-detail">${validateOnly ? "APPLY VALIDATE ONLY（書込み 0）<br>" : ""}${buildApplyConfirmMessage(detail)}</div>`
+    : "";
+}
+
+function applyPartialFailure(value: unknown): ApplyWriteFailureDetail | null {
+  if (typeof value !== "object" || value === null || !("partialSuccess" in value)) return null;
+  const partial = (value as { partialSuccess?: unknown }).partialSuccess;
+  if (typeof partial !== "object" || partial === null) return null;
+  const candidate = partial as Partial<ApplyWriteFailureDetail>;
+  return typeof candidate.successfulParents === "number"
+    && typeof candidate.successfulChunks === "number"
+    && typeof candidate.failedStage === "string"
+    && typeof candidate.failedChunkIndex === "number"
+    ? partial as ApplyWriteFailureDetail
+    : null;
 }
 
 interface KintoneApiError {

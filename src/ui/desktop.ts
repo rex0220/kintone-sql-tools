@@ -31,8 +31,8 @@ import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
 import { isImportCapabilityGateError, toPluginImportError } from "./importGateError";
-import { buildApplyConfirmMessage } from "./applyConfirm";
-import { resolvePluginApplyOptions } from "./applySurface";
+import { resolvePluginApplyConfirmHtml } from "./applyConfirm";
+import { isPluginApplyStatement, resolvePluginApplyOptions } from "./applySurface";
 
 type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
@@ -1965,7 +1965,8 @@ async function batchConfirmDialog(
 ): Promise<boolean> {
   if (!context) return confirmDialog(count, operation);
   if (context.importDetail) return confirmImportDetailDialog(context.importDetail);
-  if (context.applyDetail) return confirmApplyDetailDialog(context.applyDetail);
+  const applyHtml = resolvePluginApplyConfirmHtml(context);
+  if (applyHtml !== null) return showConfirmDialog(applyHtml, true, true);
   const label = context.statementType.startsWith("UPSERT")
     ? "登録/更新"
     : operation === "UPDATE" ? "更新"
@@ -2202,7 +2203,9 @@ async function runSql(
         "validateOnly" in stmt && stmt.validateOnly === true
       ) || stmt.type === "VALIDATE";
       const count = getInsertValuesCount(stmt);
-      if (isDmlSql && count !== null) {
+      // APPLY INSERT は core が prepared shared detail 付き confirm を呼ぶため、
+      // 通常 INSERT VALUES 用の静的確認を重ねて表示しない。
+      if (isDmlSql && count !== null && !isPluginApplyStatement(stmt)) {
         const appId = (stmt as { appId?: unknown }).appId;
         insertValuesConfirm = { count, appId: typeof appId === "number" ? appId : null };
       }
@@ -2798,7 +2801,7 @@ function buildOptionsPanel(opts: DisplayOptions, onChange: () => void): HTMLElem
  * Promise ベースのカスタム確認ダイアログを表示する。
  * resolve(true) = OK、resolve(false) = キャンセル。
  */
-function showConfirmDialog(message: string, danger = false): Promise<boolean> {
+function showConfirmDialog(message: string, danger = false, trustedEscapedHtml = false): Promise<boolean> {
   return new Promise((resolve) => {
     // オーバーレイ
     const overlay = el("div", "ksql-dialog-overlay");
@@ -2807,7 +2810,8 @@ function showConfirmDialog(message: string, danger = false): Promise<boolean> {
     const dialog = el("div", "ksql-dialog");
 
     const msgEl = el("div", "ksql-dialog-message");
-    msgEl.textContent = message;
+    if (trustedEscapedHtml) msgEl.innerHTML = message;
+    else msgEl.textContent = message;
 
     const btnRow = el("div", "ksql-dialog-btn-row");
 
@@ -2844,7 +2848,8 @@ async function confirmDialog(
   context?: DmlConfirmContext
 ): Promise<boolean> {
   if (context?.importDetail) return confirmImportDetailDialog(context.importDetail);
-  if (context?.applyDetail) return confirmApplyDetailDialog(context.applyDetail);
+  const applyHtml = context ? resolvePluginApplyConfirmHtml(context) : null;
+  if (applyHtml !== null) return showConfirmDialog(applyHtml, true, true);
   const label =
     operation === "UPDATE" ? "更新"
     : operation === "DELETE" ? "削除"
@@ -2853,10 +2858,6 @@ async function confirmDialog(
     `${count} 件のレコードを${label}します。よろしいですか？\nこの操作は元に戻せません。`,
     true
   );
-}
-
-function confirmApplyDetailDialog(detail: NonNullable<DmlConfirmContext["applyDetail"]>): Promise<boolean> {
-  return showConfirmDialog(buildApplyConfirmMessage(detail), true);
 }
 
 function confirmImportDetailDialog(detail: ImportConfirmDetail): Promise<boolean> {

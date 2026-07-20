@@ -308,6 +308,21 @@ test("Phase 14c: UPSERT APPLY confirmはprepared済みinsert/update内訳を1回
   expect(confirm.mock.invocationCallOrder[0]).toBeLessThan(mock.putRecords.mock.invocationCallOrder[0]);
 });
 
+test("Phase 16c: plugin confirm相当のUPSERT APPLY cancelはPOST/PUT API 0", async () => {
+  const mock = makeClient([upsertParent(9, "old")]);
+  const confirm = jest.fn(async () => false);
+  await expect(execute(upsertApplySql, mock.client, {
+    cacheContext: "apply-phase16c-plugin-cancel",
+    allowApplyMutation: true,
+    dmlMaxRows: 2,
+    dmlMaxSubtableRows: 2,
+    confirm,
+  })).rejects.toThrow("UPDATE をキャンセルしました");
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
 test("Phase 16a: UPSERT APPLY VALIDATE ONLYはinsert/update branchをshared診断から加法伝播する", async () => {
   const mock = makeClient([upsertParent(9, "old")]);
   const result = await execute(`${upsertApplySql} VALIDATE ONLY`, mock.client, {
