@@ -205,22 +205,22 @@ test("single result preserves fixed columns at zero errors and single INTO is re
   const valid = makeClient({ fields: [{ code: "n", label: "n", fieldType: "NUMBER" }], records: [record({ $id: "1", n: "1" })] });
   const result = await execute("VALIDATE APP41", valid.client, { cacheContext: "b41-empty" }) as SelectResult;
   expect(result).toMatchObject({ type: "SELECT", rowCount: 0, rows: [], columns: [
-    "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+    "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
   ] });
   await expect(execute("VALIDATE APP41 INTO #err", valid.client, { cacheContext: "b41-single-into" }))
     .rejects.toThrow("requires a batch");
 });
 
-test("batch INTO materializes the fixed eight columns with numeric locator metadata", async () => {
+test("batch INTO materializes the fixed nine columns with numeric locator and count metadata", async () => {
   const { client } = makeClient({ records: [record({ $id: "2", requiredText: "", n: "100" })] });
   const batch = await executeBatch(
-    "VALIDATE APP41 (requiredText,n) INTO #err; SELECT $id,$err_field,$err_code,$err_message,$err_value,$err_subtable,$err_subrow,$err_subrow_id FROM #err ORDER BY $id",
+    "VALIDATE APP41 (requiredText,n) INTO #err; SELECT $id,$err_field,$err_code,$err_message,$err_value,$err_subtable,$err_subrow,$err_subrow_id,$err_count FROM #err ORDER BY $id",
     client,
     { cacheContext: "b41-batch-into" }
   );
   expect(batch.ok).toBe(true);
   expect((batch.statements[1].result as SelectResult).columns).toEqual([
-    "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+    "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
   ]);
   expect((batch.statements[1].result as SelectResult).rows).toHaveLength(2);
 });
@@ -287,22 +287,22 @@ test("B42 omitted targets audit child cells with stable 1-based and persistent r
     T2: [subrow("r30", { req: "" })],
   })] });
   const result = await execute("VALIDATE APP41 CHECK WHEN whereTop='x' THEN 'check'", client, { cacheContext: "b42-detail" }) as SelectResult;
-  expect(result.columns).toEqual(["$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id"]);
+  expect(result.columns).toEqual(["$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count"]);
   expect(result.rows).toEqual(expect.arrayContaining([
-    expect.objectContaining({ $id: "9", $err_field: "top", $err_subtable: "", $err_subrow: "", $err_subrow_id: "" }),
+    expect.objectContaining({ $id: "9", $err_field: "top", $err_subtable: "", $err_subrow: "", $err_subrow_id: "", $err_count: "1" }),
     expect.objectContaining({ $err_field: "num", $err_code: "ERR_NUMBER_INTEGER_DIGITS", $err_value: "123", $err_subtable: "T1", $err_subrow: "1", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "choiceChild", $err_code: "ERR_CHOICE_INVALID", $err_subrow: "2", $err_subrow_id: "r20" }),
     expect.objectContaining({ $err_field: "minNum", $err_code: "ERR_RANGE_MIN", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "maxNum", $err_code: "ERR_RANGE_MAX", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "minText", $err_code: "ERR_LENGTH_MIN", $err_subrow_id: "r10" }),
     expect.objectContaining({ $err_field: "maxText", $err_code: "ERR_LENGTH_MAX", $err_subrow_id: "r10" }),
-    expect.objectContaining({ $err_field: "req", $err_subtable: "T2", $err_subrow: "1", $err_subrow_id: "r30" }),
-    expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "check", $err_subtable: "", $err_subrow: "", $err_subrow_id: "" }),
+    expect.objectContaining({ $err_field: "req", $err_subtable: "T2", $err_subrow: "1", $err_subrow_id: "r30", $err_count: "1" }),
+    expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "check", $err_subtable: "", $err_subrow: "", $err_subrow_id: "", $err_count: "1" }),
   ]));
   expect(result.rows.map((row) => [row.$err_field, row.$err_subrow_id])).toEqual([
     ["top", ""],
     ["req", "r10"], ["num", "r10"], ["minNum", "r10"], ["maxNum", "r10"], ["minText", "r10"], ["maxText", "r10"],
-    ["req", "r20"], ["choiceChild", "r20"],
+    ["choiceChild", "r20"],
     ["req", "r30"],
     ["", ""],
   ]);
@@ -366,6 +366,26 @@ test("B42 SUMMARY directly aggregates child rows and CHECK groups into the fixed
   ]));
 });
 
+test("B42 detail groups identical messages, preserves the first locator, and keeps different messages separate", async () => {
+  const { client } = makeClient({ fields: B42_FIELDS, records: [record({
+    $id: "5", top: "", whereTop: "x",
+    T1: [subrow("first", { minText: "x" }), subrow("second", { minText: "y" }), subrow("third", { minText: "z" })], T2: [],
+  })] });
+  const result = await execute(
+    "VALIDATE APP41 (top,T1(minText)) CHECK WHEN whereTop='x' THEN 'one' CHECK WHEN top='' THEN 'two'",
+    client, { cacheContext: "b42-detail-group" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([
+    expect.objectContaining({ $err_field: "top", $err_count: "1", $err_subrow: "", $err_subrow_id: "" }),
+    expect.objectContaining({
+      $err_field: "minText", $err_code: "ERR_LENGTH_MIN", $err_count: "3",
+      $err_subrow: "1", $err_subrow_id: "first", $err_value: "x",
+    }),
+    expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "one", $err_count: "1" }),
+    expect.objectContaining({ $err_field: "", $err_code: "ERR_CHECK", $err_message: "two", $err_count: "1" }),
+  ]);
+});
+
 test("B42 SUMMARY preserves its five-column schema at zero errors", async () => {
   const current = makeClient({ fields: B42_FIELDS, records: [record({
     $id: "1", top: "ok", T1: [], T2: [],
@@ -376,15 +396,18 @@ test("B42 SUMMARY preserves its five-column schema at zero errors", async () => 
   });
 });
 
-test("B42 detail temp limit fails while generation-time SUMMARY fits after aggregation", async () => {
+test("B42 detail temp limit is applied after message aggregation", async () => {
   const records = [record({ $id: "1", top: "ok", T1: [subrow("a", { req: "" }), subrow("b", { req: "" })], T2: [] })];
   const detail = makeClient({ fields: B42_FIELDS, records });
   const detailBatch = await executeBatch(
     "VALIDATE APP41 (T1(req)) INTO #detail; SELECT * FROM #detail",
     detail.client, { cacheContext: "b42-detail-limit", tempTableMaxRows: 1 }
   );
-  expect(detailBatch.statements[0].status).toBe("error");
-  expect(detailBatch.statements[1].status).toBe("skipped");
+  expect(detailBatch.ok).toBe(true);
+  expect(detailBatch.statements[1].result).toMatchObject({
+    rowCount: 1,
+    rows: [expect.objectContaining({ $err_subrow: "1", $err_subrow_id: "a", $err_count: "2" })],
+  });
 
   const summary = makeClient({ fields: B42_FIELDS, records });
   const summaryBatch = await executeBatch(
@@ -410,7 +433,9 @@ test("B42 EXPLAIN reports scoped audit/fetch fields, schemas and row locator wit
   expect(detailPlan).toContain("T1(num)");
   expect(detailPlan).toContain("fetch fields:  $id, T1");
   expect(detailPlan).toContain("$err_subrow_id");
-  expect(detailPlan).toContain("1-based display order");
+  expect(detailPlan).toContain("$err_count");
+  expect(detailPlan).toContain("grouped by message");
+  expect(detailPlan).toContain("from the first row");
   expect(detail.calls.get).toHaveLength(0);
   expect(detail.calls.precision).toBe(1);
 

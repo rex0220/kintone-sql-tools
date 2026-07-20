@@ -728,7 +728,7 @@ async function executeParsedStatement(
 
 const EXISTING_VALIDATION_COLUMNS = [
   "$id", "$err_field", "$err_code", "$err_message", "$err_value",
-  "$err_subtable", "$err_subrow", "$err_subrow_id",
+  "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
 ];
 const EXISTING_VALIDATION_SUMMARY_COLUMNS = [
   "$id", "$err_subtable", "$err_field", "$err_code", "$err_count",
@@ -924,6 +924,7 @@ async function executeExistingRecordValidationCore(
   })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
 
   const rows: ProcessRow[] = [];
+  const detailRows = new Map<string, ProcessRow>();
   const summaryRows = new Map<string, ProcessRow>();
   const appendError = (error: {
     id: string; field: string; code: string; message: string; value: string;
@@ -942,7 +943,10 @@ async function executeExistingRecordValidationCore(
       });
       return;
     }
-    rows.push({
+    const key = JSON.stringify([error.id, error.subtable ?? "", error.field, error.code, error.message]);
+    const current = detailRows.get(key);
+    if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
+    else detailRows.set(key, {
       "$id": error.id,
       "$err_field": error.field,
       "$err_code": error.code,
@@ -951,6 +955,7 @@ async function executeExistingRecordValidationCore(
       "$err_subtable": error.subtable ?? "",
       "$err_subrow": error.subrow === undefined ? "" : String(error.subrow),
       "$err_subrow_id": error.subrowId ?? "",
+      "$err_count": "1",
     });
   };
   const topTargets = targets.filter((target) => !target.subtableCode);
@@ -990,7 +995,7 @@ async function executeExistingRecordValidationCore(
       appendError({ id: row.id, field: "", code: "ERR_CHECK", message: check.message, value: "" });
     }
   }
-  if (stmt.summary) rows.push(...summaryRows.values());
+  rows.push(...(stmt.summary ? summaryRows.values() : detailRows.values()));
   const columns = stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   const result: SelectResult = {
     type: "SELECT",
@@ -7094,7 +7099,7 @@ function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
   lines.push(`  output schema: ${(stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS).join(", ")}`);
   lines.push(stmt.summary
     ? "  aggregation:   record/subtable/field/code; row locator=none"
-    : "  row locator:   $err_subrow (1-based display order), $err_subrow_id (persistent row id)");
+    : "  row locator:   grouped by message; $err_subrow (1-based display order) and $err_subrow_id (persistent row id) are from the first row");
   lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
   lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");

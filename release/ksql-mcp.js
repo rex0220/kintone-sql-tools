@@ -35716,7 +35716,7 @@ function analyzeBatch(statements) {
       dependsOn.add(at);
     }
     if (validationTable) {
-      const payloadFields = stmt.type === "VALIDATE" ? stmt.summary ? ["$id", "$err_subtable", "$err_field", "$err_code", "$err_count"] : ["$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id"] : stmt.type === "IMPORT" && stmt.targets?.some((target) => target.kind === "SUBTABLE") ? [...new Set(stmt.targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children)), "$err_subtable", "$err_subrow", "$err_source_row"] : stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
+      const payloadFields = stmt.type === "VALIDATE" ? stmt.summary ? ["$id", "$err_subtable", "$err_field", "$err_code", "$err_count"] : ["$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count"] : stmt.type === "IMPORT" && stmt.targets?.some((target) => target.kind === "SUBTABLE") ? [...new Set(stmt.targets.flatMap((target) => target.kind === "FIELD" ? [target.field] : target.children)), "$err_subtable", "$err_subrow", "$err_source_row"] : stmt.type === "UPDATE" ? ["$id", ...stmt.assignments.map((a) => a.field)] : "fields" in stmt ? stmt.fields : [];
       const signature = JSON.stringify(payloadFields);
       const at = defined.get(validationTable);
       if (at === void 0) {
@@ -40075,7 +40075,8 @@ var EXISTING_VALIDATION_COLUMNS = [
   "$err_value",
   "$err_subtable",
   "$err_subrow",
-  "$err_subrow_id"
+  "$err_subrow_id",
+  "$err_count"
 ];
 var EXISTING_VALIDATION_SUMMARY_COLUMNS = [
   "$id",
@@ -40239,13 +40240,14 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
     flat: flatten(record2, null)
   })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
   const rows = [];
+  const detailRows = /* @__PURE__ */ new Map();
   const summaryRows = /* @__PURE__ */ new Map();
   const appendError = (error51) => {
     if (stmt.summary) {
-      const key = JSON.stringify([error51.id, error51.subtable ?? "", error51.field, error51.code]);
-      const current = summaryRows.get(key);
-      if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
-      else summaryRows.set(key, {
+      const key2 = JSON.stringify([error51.id, error51.subtable ?? "", error51.field, error51.code]);
+      const current2 = summaryRows.get(key2);
+      if (current2) current2["$err_count"] = String(Number(current2["$err_count"]) + 1);
+      else summaryRows.set(key2, {
         "$id": error51.id,
         "$err_subtable": error51.subtable ?? "",
         "$err_field": error51.field,
@@ -40254,7 +40256,10 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
       });
       return;
     }
-    rows.push({
+    const key = JSON.stringify([error51.id, error51.subtable ?? "", error51.field, error51.code, error51.message]);
+    const current = detailRows.get(key);
+    if (current) current["$err_count"] = String(Number(current["$err_count"]) + 1);
+    else detailRows.set(key, {
       "$id": error51.id,
       "$err_field": error51.field,
       "$err_code": error51.code,
@@ -40262,7 +40267,8 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
       "$err_value": error51.value,
       "$err_subtable": error51.subtable ?? "",
       "$err_subrow": error51.subrow === void 0 ? "" : String(error51.subrow),
-      "$err_subrow_id": error51.subrowId ?? ""
+      "$err_subrow_id": error51.subrowId ?? "",
+      "$err_count": "1"
     });
   };
   const topTargets = targets.filter((target) => !target.subtableCode);
@@ -40310,7 +40316,7 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
       appendError({ id: row.id, field: "", code: "ERR_CHECK", message: check2.message, value: "" });
     }
   }
-  if (stmt.summary) rows.push(...summaryRows.values());
+  rows.push(...stmt.summary ? summaryRows.values() : detailRows.values());
   const columns = stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS;
   const result = {
     type: "SELECT",
@@ -44972,7 +44978,7 @@ function buildValidatePlan(stmt, label) {
   lines.push(`  mode:          ${stmt.summary ? "SUMMARY" : "DETAIL"}`);
   if (info.subtables.size > 0) lines.push(`  subtable audit: ${[...info.subtables].map(([table, count]) => `${table}(${count} fields)`).join(", ")}`);
   lines.push(`  output schema: ${(stmt.summary ? EXISTING_VALIDATION_SUMMARY_COLUMNS : EXISTING_VALIDATION_COLUMNS).join(", ")}`);
-  lines.push(stmt.summary ? "  aggregation:   record/subtable/field/code; row locator=none" : "  row locator:   $err_subrow (1-based display order), $err_subrow_id (persistent row id)");
+  lines.push(stmt.summary ? "  aggregation:   record/subtable/field/code; row locator=none" : "  row locator:   grouped by message; $err_subrow (1-based display order) and $err_subrow_id (persistent row id) are from the first row");
   lines.push(`  number precision: ${info.numberPrecision ? "required" : "not required"}`);
   lines.push("  local checks:  original WHERE re-evaluation + built-in constraints + CHECK groups");
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");

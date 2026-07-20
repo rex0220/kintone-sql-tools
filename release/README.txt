@@ -7,12 +7,14 @@ ksql 配布パッケージ (v3.7.0)
 
 v3.7.0: VALIDATE のサブテーブル子フィールド監査 (B42)。
 - VALIDATE の既定対象にサブテーブル子フィールドを追加 (監査の抜けを修正)。
-- 詳細出力を固定8列へ拡張 ($err_subtable / $err_subrow 1-based /
-  $err_subrow_id = 仮想テーブルの _rid)。
+- 詳細出力を固定9列へ拡張 ($err_subtable / $err_subrow 1-based /
+  $err_subrow_id = 仮想テーブルの _rid / $err_count)。同一レコードの
+  field + code + message を1行へ集約し、値と行ロケータは先頭違反行を保持。
 - scoped target: VALIDATE APP100 (テーブル) / (テーブル(子1, 子2))。
   裸の子コード・APP100$テーブル 形式は案内付きで拒否。
 - SUMMARY モード: 固定5列 ($id, $err_subtable, $err_field, $err_code,
-  $err_count) へ生成時集約。大量違反でも tempTableMaxRows に当たらず完走。
+  $err_count) へ生成時集約し、レコード横断の規模を把握。
+  tempTableMaxRows は詳細/SUMMARY とも集約後行数に適用。
 - WHERE / CHECK のサブテーブル子参照は取得前に ArgumentError で拒否。
   NUMBER 子フィールドに数値精度検証を適用。
 - B46: 空 (未選択) の選択系フィールドを ERR_CHOICE_INVALID と誤判定する

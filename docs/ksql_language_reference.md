@@ -2090,9 +2090,9 @@ VALIDATE APP100 SUMMARY INTO #summary;
 ```
 
 - `(fields)` 省略時は、制約を持つトップレベル／サブテーブル子フィールドと、トップレベル／子の全 `NUMBER` が対象です。テーブルコード単独はそのテーブルの監査可能な子すべて、`テーブル(子1, 子2)` は指定した子だけを選びます。裸の子コード、未知・所属違い・重複・監査対象外は取得前に拒否します
-- 詳細出力は固定8列 `$id`, `$err_field`, `$err_code`, `$err_message`, `$err_value`, `$err_subtable`, `$err_subrow`, `$err_subrow_id` です。子違反では `$err_subrow` が1-based表示序数、`$err_subrow_id` が永続行ID（仮想テーブルの `_rid` と同値）です。トップレベル／`CHECK` 違反の追加3列は空です。0行テーブルでは子の必須違反は発火しません
-- `SUMMARY` は `(fields)` 後・`WHERE` 前に置く soft keyword です。詳細行を生成せず、固定5列 `$id`, `$err_subtable`, `$err_field`, `$err_code`, `$err_count` へ直接集約します。大量監査では、まず SUMMARY で規模を把握し、`WHERE` / `(fields)` で絞った詳細監査から `$id` / `$err_subrow_id` を使って修復します
-- `INTO #err` は複文バッチ専用です。詳細8列と SUMMARY 5列は別スキーマで、同名一時表への混在追記は解析時に拒否します。`tempTableMaxRows` は詳細行または集約後行へ適用し、超過時は部分結果を残さずエラーにします
+- 詳細出力は固定9列 `$id`, `$err_field`, `$err_code`, `$err_message`, `$err_value`, `$err_subtable`, `$err_subrow`, `$err_subrow_id`, `$err_count` です。同一レコードの違反を `($id, $err_subtable, $err_field, $err_code, $err_message)` で集約し、`$err_count` に件数を文字列化して格納します。異なる message は別行です。出力は先頭出現順で、`$err_value` / `$err_subrow` / `$err_subrow_id` はグループ先頭の値を保持します。子違反の `$err_subrow` は1-based表示序数、`$err_subrow_id` は永続行ID（仮想テーブルの `_rid` と同値）です。トップレベル／`CHECK` のロケータ3列は空で、通常 `$err_count=1` です。0行テーブルでは子の必須違反は発火しません
+- `SUMMARY` は `(fields)` 後・`WHERE` 前に置く soft keyword です。詳細行を生成せず、固定5列 `$id`, `$err_subtable`, `$err_field`, `$err_code`, `$err_count` へ直接集約します。SUMMARY はレコード横断の規模把握、詳細9列は message 別のレコード内訳と先頭ロケータに使います
+- `INTO #err` は複文バッチ専用です。詳細9列と SUMMARY 5列は別スキーマで、同名一時表への混在追記は解析時に拒否します。`tempTableMaxRows` はどちらも集約後行数へ適用し、超過時は部分結果を残さずエラーにします
 - `WHERE` は通常比較、`BETWEEN`, リテラル `IN`, `IS NULL`, `LIKE` を使えます。`KLIKE`, サブクエリ, 修飾フィールド参照、サブテーブル子参照は使えません。`CHECK` もトップレベル参照だけです。安全な条件だけを取得時に押し下げ、取得後に元の条件全体を再評価します
 - 完全な監査集合が必要なため、全 surface で `onLimit=truncate` を無効化して error にします。取得は通常 records API の offset + `$id` keyset paging で、Cursor API は使いません
 - `EXPLAIN VALIDATE` はフォーム定義と、NUMBER 対象がある場合の数値精度だけを読みます。レコード API / mutation API は呼ばず、違反件数も算出しません
