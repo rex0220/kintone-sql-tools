@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { assertResourceCatalog } from "./mcp-resource-smoke.mjs";
 
 const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageJson = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf8"));
@@ -83,6 +84,7 @@ async function smokeLauncher(entries) {
       listed.tools.some((tool) => tool.name === "ksql_validate"),
       "MCPB launcher smoke did not expose ksql_validate."
     );
+    await assertResourceCatalog(client, assert, { extended: false });
   } finally {
     await client.close().catch(() => {});
   }

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { assertResourceCatalog } from "./mcp-resource-smoke.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = resolve(rootDir, "dist-mcp", "ksql-mcp.js");
@@ -12,6 +13,9 @@ const packageVersion = JSON.parse(
   readFileSync(resolve(rootDir, "package.json"), "utf8")
 ).version;
 const smokeSavedQueriesPath = resolve(rootDir, ".tmp", "mcp-smoke-queries.json");
+const resourceIoGuardPath = resolve(rootDir, "scripts", "mcp-resource-io-guard.cjs");
+const resourceIoGuardLog = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.log`);
+const resourceIoGuardActive = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.active`);
 const expectedTools = [
   "ksql_validate",
   "ksql_explain",
@@ -324,14 +328,19 @@ function assertParamDescriptions(tools) {
 
 async function main() {
   assertBundleIsSelfContained();
+  mkdirSync(dirname(resourceIoGuardLog), { recursive: true });
+  rmSync(resourceIoGuardLog, { force: true });
+  rmSync(resourceIoGuardActive, { force: true });
 
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath],
+    args: ["--require", resourceIoGuardPath, serverPath],
     cwd: rootDir,
     env: {
       ...process.env,
       KSQL_SAVED_QUERIES: smokeSavedQueriesPath,
+      KSQL_RESOURCE_IO_GUARD_LOG: resourceIoGuardLog,
+      KSQL_RESOURCE_IO_GUARD_ACTIVE: resourceIoGuardActive,
     },
     stderr: "pipe",
   });
@@ -368,6 +377,43 @@ async function main() {
     assertSchemas(listed.tools);
     assertToolDescriptions(listed.tools);
     assertParamDescriptions(listed.tools);
+
+    await assertResourceCatalog(client, assert);
+    // Activate only after startup and valid reads, so every rejected URI below is proven
+    // not to fall through to filesystem or network access in the server process.
+    writeFileSync(resourceIoGuardActive, "active\n", "utf8");
+    for (const uri of [
+      "ksql://language-reference/99-nope",
+      "ksql://language-reference/..",
+      "ksql://language-reference/https%3A%2F%2Fevil.example",
+      "https://evil.example/ksql-resource",
+    ]) {
+      let rejected = false;
+      try {
+        await client.readResource({ uri });
+      } catch (err) {
+        rejected = true;
+        const message = err instanceof Error ? err.message : String(err);
+        assert(
+          !existsSync(resourceIoGuardLog),
+          `Rejected resource URI attempted filesystem/network I/O:\n${
+            existsSync(resourceIoGuardLog) ? readFileSync(resourceIoGuardLog, "utf8") : ""
+          }`
+        );
+        assert(
+          message.includes("-32602") || /invalid|unknown/i.test(message),
+          `${uri} must fail with InvalidParams-equivalent error.`
+        );
+      }
+      assert(rejected, `${uri} must be rejected.`);
+    }
+    assert(
+      !existsSync(resourceIoGuardLog),
+      `Rejected resource URI attempted filesystem/network I/O:\n${
+        existsSync(resourceIoGuardLog) ? readFileSync(resourceIoGuardLog, "utf8") : ""
+      }`
+    );
+    rmSync(resourceIoGuardActive, { force: true });
 
     // サーバー申告バージョンの package.json 同期(fix_plan D4/D5)
     const serverVersion = client.getServerVersion()?.version;
@@ -469,6 +515,8 @@ async function main() {
     process.stdout.write("[mcp-smoke] ok\n");
   } finally {
     await client.close().catch(() => {});
+    rmSync(resourceIoGuardLog, { force: true });
+    rmSync(resourceIoGuardActive, { force: true });
   }
 }
 

@@ -4,6 +4,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  RESOURCE_INDEX_URIS,
+  RESOURCE_TEMPLATE_URIS,
+  indexedUris,
+  chapterUri,
+  textResource,
+} from "./mcp-resource-smoke.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const tmpRoot = resolve(rootDir, ".tmp");
@@ -212,6 +219,7 @@ try {
   );
 
   const packageDir = resolve(tmpDir, "node_modules", "@rex0220", "kintone-sql-tools");
+  assert(!existsSync(resolve(packageDir, "docs")), "Packed package must not contain docs/.");
   const installedPackageJson = JSON.parse(readFileSync(resolve(packageDir, "package.json"), "utf8"));
   assert(!installedPackageJson.dependencies, "Published package should not declare runtime dependencies.");
 
@@ -303,6 +311,20 @@ try {
         arguments: { resource: "layout", app: 1, lang: "ja" },
       },
     },
+    { jsonrpc: "2.0", id: 9, method: "resources/list", params: {} },
+    { jsonrpc: "2.0", id: 10, method: "resources/templates/list", params: {} },
+    {
+      jsonrpc: "2.0",
+      id: 11,
+      method: "resources/read",
+      params: { uri: "ksql://language-reference" },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 12,
+      method: "resources/read",
+      params: { uri: "ksql://language-reference/02-select" },
+    },
   ].map((msg) => JSON.stringify(msg)).join("\n") + "\n";
 
   const rpc = run(process.execPath, [serverPath], { cwd: tmpDir, input: rpcInput });
@@ -355,6 +377,43 @@ try {
     messages.find((message) => message.id === 8),
     "Packed metadata layout lang branch"
   );
+  const resources = messages.find((message) => message.id === 9)?.result?.resources;
+  assert(
+    JSON.stringify(resources?.map(({ uri }) => uri)) === JSON.stringify(RESOURCE_INDEX_URIS),
+    "Packed resources/list must expose the two fixed indexes."
+  );
+  const resourceTemplates = messages.find((message) => message.id === 10)
+    ?.result?.resourceTemplates;
+  assert(
+    JSON.stringify(resourceTemplates?.map(({ uriTemplate }) => uriTemplate))
+      === JSON.stringify(RESOURCE_TEMPLATE_URIS),
+    "Packed resources/templates/list must expose the section and recipe templates."
+  );
+  const packedIndex = textResource(
+    messages.find((message) => message.id === 11)?.result,
+    RESOURCE_INDEX_URIS[0],
+    assert,
+    "Packed language index"
+  );
+  const packedLanguageUris = indexedUris(
+    packedIndex,
+    RESOURCE_INDEX_URIS[0],
+    /^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$/,
+    assert,
+    "Packed language"
+  );
+  const packedSelectUri = chapterUri(packedLanguageUris, "02-", assert, "Packed SELECT chapter");
+  assert(
+    packedSelectUri === "ksql://language-reference/02-select",
+    "Packed SELECT URI must match the P2-generated key used by the standalone request."
+  );
+  const packedSelect = textResource(
+    messages.find((message) => message.id === 12)?.result,
+    packedSelectUri,
+    assert,
+    "Packed SELECT chapter"
+  );
+  assert(packedSelect.includes("## 2. SELECT"), "Packed SELECT chapter source text is missing.");
 
   process.stdout.write("[mcp-pack-smoke] ok\n");
 } catch (err) {
