@@ -18,6 +18,8 @@ export interface DmlValidationCandidate {
   record?: KintoneRecord;
   /** UPDATE / UPSERT-update の書き込み先レコード ID。 */
   targetId?: number;
+  /** 通常 UPDATE validation の共有 GET で取得した complete snapshot。書込みには使用しない。 */
+  validationSnapshot?: KintoneRecord;
   /** CHECK 専用の読み取り行。書込み payload とは分離する。 */
   evaluationRow?: ProcessRow;
   evaluationFieldTypes?: ReadonlyMap<string, string>;

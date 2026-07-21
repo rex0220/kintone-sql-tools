@@ -383,6 +383,225 @@ test("B43 Phase 2: 10メタ列 columnMeta は plain DML error table の同一 sc
   expect(client.putCalls).toHaveLength(0);
 });
 
+test("B43 Phase 3: 定数 UPDATE VALIDATE ONLY は共有 complete snapshot から非SET子2行違反を検出する", async () => {
+  const records = [makeTypedRecord({
+    $id: "7", memo: "old", requiredTop: "ok",
+    Lines: [
+      { id: "line-1", value: { child: { value: "x" } } },
+      { id: "line-2", value: { child: { value: "y" } } },
+    ],
+    Other: [{ id: "other-1", value: { note: { value: "keep" } } }],
+  })];
+  const client = makeClient({ records });
+  client.getFields = async () => [
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+    { code: "Other", label: "Other", fieldType: "SUBTABLE" },
+    { code: "note", label: "note", fieldType: "SINGLE_LINE_TEXT", inSubtable: true, subtableCode: "Other" },
+  ];
+
+  const result = await execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 7 VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase3-app4221" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  // Phase 3 前は sparse SET payload だけを検証し validRows=1/errorCount=0 だった false pass の反転。
+  expect(result).toMatchObject({ validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 2 });
+  expect(result.errors.map((row) => [row.$err_field, row.$err_subrow, row.$err_subrow_id])).toEqual([
+    ["child", "1", "line-1"], ["child", "2", "line-2"],
+  ]);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].fields).toEqual([
+    "$id", "memo", "requiredTop", "Lines", "Other",
+  ]);
+  expect(client.getCalls[0].fields).not.toContain("child");
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 3: 複数親・逆順 fetch も1共有GETで$id昇順 candidate/error を作る", async () => {
+  const records = [
+    makeTypedRecord({
+      $id: "2", memo: "old",
+      Lines: [{ id: "line-2", value: { child: { value: "y" } } }],
+    }),
+    makeTypedRecord({
+      $id: "1", memo: "old",
+      Lines: [{ id: "line-1", value: { child: { value: "x" } } }],
+    }),
+  ];
+  const client = makeClient({ records });
+  client.getFields = async () => [
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id in (1, 2) VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase3-shared-get-order" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(client.getCalls).toHaveLength(1);
+  expect(result.errors.map((row) => [row.$id, row.$err_row])).toEqual([
+    ["1", "1"], ["2", "2"],
+  ]);
+});
+
+test("B43 Phase 3: 行依存 SET は式評価とpost-imageで共有GETしnormalized sparse PUTだけを書く", async () => {
+  const client = makeClient({
+    records: [makeTypedRecord({
+      $id: "1", source: "A", choice: ["A"], outside: "keep",
+      Lines: [{ id: "line-1", value: { child: { value: "ok" } } }],
+    })],
+  });
+  client.getFields = async () => [
+    { code: "source", label: "source", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "choice", label: "choice", fieldType: "CHECK_BOX", optionOrder: { A: 0, B: 1 } },
+    { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const batch = await executeBatch(
+    "UPDATE APP100 SET choice = CONCAT(source, ',B') WHERE $id = 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b43-phase3-row-dependent" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining([
+    "$id", "source", "choice", "outside", "Lines",
+  ]));
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toEqual([
+    { id: 1, record: { choice: { value: ["A", "B"] } } },
+  ]);
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("source");
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("outside");
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("Lines");
+});
+
+test("B43 Phase 3: CHECK付き定数 SET は同じcomplete GET recordをCHECKとpost-imageに共有する", async () => {
+  const client = makeClient({
+    records: [makeTypedRecord({
+      $id: "1", amount: "2", cap: "3", outside: "ok",
+      Lines: [{ id: "line-1", value: { child: { value: "ok" } } }],
+    })],
+  });
+  client.getFields = async () => [
+    { code: "amount", label: "amount", fieldType: "NUMBER" },
+    { code: "cap", label: "cap", fieldType: "NUMBER" },
+    { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET amount = 9 WHERE $id = 1 CHECK WHEN amount < cap THEN 'old=' || amount VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase3-check-constant" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(client.getCalls).toHaveLength(1);
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining([
+    "$id", "amount", "cap", "outside", "Lines",
+  ]));
+  expect(result.errors).toEqual([expect.objectContaining({
+    amount: "9", $err_code: "ERR_CHECK", $err_message: "old=2",
+  })]);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 3: 対象0件は0集計、snapshot欠落/重複/不正ID/上限超過は文全体fail-closed", async () => {
+  const empty = makeClient({ records: [] });
+  empty.getFields = async () => [
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const result = await execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 999 VALIDATE ONLY",
+    empty,
+    { cacheContext: "b43-phase3-zero" }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 0, validRows: 0, invalidRows: 0, errorCount: 0,
+  });
+  expect(empty.putCalls).toHaveLength(0);
+
+  const duplicate = makeClient({ records: [
+    makeRecord({ $id: "1", memo: "old" }), makeRecord({ $id: "1", memo: "old" }),
+  ] });
+  duplicate.getFields = empty.getFields;
+  const duplicateBatch = await executeBatch(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    duplicate,
+    { cacheContext: "b43-phase3-duplicate-id" }
+  );
+  expect(duplicateBatch).toMatchObject({ ok: false });
+  expect(duplicateBatch.statements[0].error?.message).toContain("duplicate $id");
+  expect(duplicate.putCalls).toHaveLength(0);
+
+  const invalid = makeClient({ records: [makeRecord({ $id: "bad", memo: "old" })] });
+  invalid.getFields = empty.getFields;
+  await expect(execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id > 0 VALIDATE ONLY",
+    invalid,
+    { cacheContext: "b43-phase3-invalid-id" }
+  )).rejects.toThrow("invalid $id");
+  expect(invalid.putCalls).toHaveLength(0);
+
+  const missing = makeClient({ records: [makeRecord({ $id: "1", memo: "old" })] });
+  missing.getFields = empty.getFields;
+  await expect(execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 1 VALIDATE ONLY",
+    missing,
+    {
+      cacheContext: "b43-phase3-missing-snapshot",
+      loadUpdateModeSnapshots: async () => new Map(),
+    }
+  )).rejects.toThrow("snapshot is missing");
+  expect(missing.putCalls).toHaveLength(0);
+
+  const overLimit = makeClient({ records: [
+    makeRecord({ $id: "1", memo: "old" }), makeRecord({ $id: "2", memo: "old" }),
+  ] });
+  overLimit.getFields = empty.getFields;
+  await expect(execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id > 0 VALIDATE ONLY",
+    overLimit,
+    { cacheContext: "b43-phase3-over-limit", maxRecords: 1, onLimitReached: "truncate" }
+  )).rejects.toThrow("取得件数が上限");
+  expect(overLimit.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 3 D6: 処分節なし通常UPDATEのGET field setは従来どおり最小", async () => {
+  const constant = makeClient({
+    records: [makeRecord({ $id: "1", source: "old", memo: "old" })],
+    fieldTypes: { source: "SINGLE_LINE_TEXT", memo: "SINGLE_LINE_TEXT" },
+  });
+  await execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 1",
+    constant,
+    { cacheContext: "b43-phase3-d6-constant" }
+  );
+  expect(constant.getCalls[0].fields).toEqual(["$id"]);
+
+  const dependent = makeClient({
+    records: [makeRecord({ $id: "1", source: "ab", memo: "old" })],
+    fieldTypes: { source: "SINGLE_LINE_TEXT", memo: "SINGLE_LINE_TEXT" },
+  });
+  await execute(
+    "UPDATE APP100 SET memo = CONCAT(source, 'x') WHERE $id = 1",
+    dependent,
+    { cacheContext: "b43-phase3-d6-dependent" }
+  );
+  expect(dependent.getCalls[0].fields).toEqual(["$id", "source"]);
+});
+
 test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
   const applySql = "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code) "
     + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial'))";
