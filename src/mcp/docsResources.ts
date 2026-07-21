@@ -41,7 +41,10 @@ export const KSQL_FUNCTION_CATALOG = Object.freeze({
     "FORMAT", "CAST", "YEAR", "MONTH", "DAY", "DATE_FORMAT", "DATEDIFF", "DATE_ADD",
     "LAST_DAY", "CURRENT_DATE", "CURRENT_TIMESTAMP",
   ] as const),
-  aggregate: frozenList(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT"] as const),
+  aggregate: frozenList([
+    "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT",
+    "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN",
+  ] as const),
   window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK"] as const),
   contextual: frozenList(["TODAY", "NOW", "LOGINUSER"] as const),
   aliases: frozenList([

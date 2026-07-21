@@ -47,6 +47,16 @@ test("CHECK parser: soft keyword boundary, groups, and CASE rejection", () => {
     .toThrow("CASE");
 });
 
+test.each(["STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN"])(
+  "B56: CHECK 内の %s は既存集約と同じ明示エラーで拒否する",
+  async (func) => {
+    await expect(execute(
+      `INSERT INTO APP1 (a) VALUES (1) CHECK WHEN ${func}(a) > 0 THEN 'bad' VALIDATE ONLY`,
+      client({}, { a: "NUMBER" })
+    )).rejects.toThrow("CHECK に集約関数は使用できません");
+  }
+);
+
 test("VALUES: group first-match, independent groups, message concat, and ERR_CHECK", async () => {
   const c = client({}, { a: "NUMBER", b: "NUMBER" });
   const result = await execute(

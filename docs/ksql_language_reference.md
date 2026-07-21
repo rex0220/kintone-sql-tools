@@ -265,7 +265,7 @@ WHERE 税込金額 = 金額 * 1.1
 
 ### 算術の精度と空セル（重要な制約）
 
-算術式は **IEEE 754 倍精度浮動小数点（JavaScript の number）** で評価し、結果の丸め・量子化は行いません。次の制約があります。
+算術式は **IEEE 754 倍精度浮動小数点（JavaScript の number）** で評価し、結果の丸め・量子化は行いません。`SUM` / `AVG` と統計集約（分散・標準偏差・中央値）も binary64 で計算します。統計集約は厳密 10 進演算の対象外です。次の制約があります。
 
 **1. 小数の表現誤差**（桁数によらず、値に依存して発生します）
 
@@ -993,6 +993,11 @@ GROUP BY 担当者, ステータス
 | `MAX(フィールド)` | 最大値 | 空文字・NULL はスキップ |
 | `MIN(フィールド)` | 最小値 | 空文字・NULL はスキップ |
 | `GROUP_CONCAT([DISTINCT] 引数 [SEPARATOR '区切り'])` | 文字列連結 | 空文字・NULL はスキップ |
+| `VAR_POP([DISTINCT] 引数)` | 母集団分散 | 空文字・NULL はスキップ |
+| `VAR_SAMP([DISTINCT] 引数)` | 標本分散 | 空文字・NULL はスキップ |
+| `STDDEV_POP([DISTINCT] 引数)` | 母集団標準偏差 | 空文字・NULL はスキップ |
+| `STDDEV_SAMP([DISTINCT] 引数)` | 標本標準偏差 | 空文字・NULL はスキップ |
+| `MEDIAN([DISTINCT] 引数)` | 中央値 | 空文字・NULL はスキップ |
 
 > **`MAX`/`MIN` の比較規則**: 実アプリの NUMBER と数値形式 CALC は数値順、テキスト・選択・日時フィールドと文字列形式 CALC は UTF-16 辞書順で比較します。日時の時系列順と一致するのは kintone が返す正規化形式（DATE=`YYYY-MM-DD`、TIME=`HH:mm`、DATETIME/作成日時/更新日時=`...Z`）が前提です。確定できた型メタが一時テーブル/CTEにも伝播するため、素通し列・集約・算術・リテラルを経由した再集約でも同じ比較規則を使います。複数値・ユーザー等の対象外型、同名列が競合する JOIN、型を確定しない文字列関数・CASE・スカラーサブクエリ由来の列は、従来の数値経路を使うため非数値値が `NaN` になります。
 
@@ -1021,6 +1026,23 @@ FROM APP100 GROUP BY 顧客ID
 - 結果を長さで切り捨てません。書き込み先フィールドの最大文字数を超えた場合は書き込み時の検証エラーになります
 - `GROUP_CONCAT` は予約語です。同名フィールドは `` `GROUP_CONCAT` `` とバッククォートで囲みます。`SEPARATOR` は通常のフィールド名としても使えます
 
+### 統計集約
+
+`VAR_POP` / `VAR_SAMP` / `STDDEV_POP` / `STDDEV_SAMP` / `MEDIAN` は数値分布を集計します。分散と標準偏差は Welford 法、中央値は数値昇順で求めます。偶数件の中央値は中央 2 値の binary64 平均です。
+
+```sql
+SELECT 部署, STDDEV_SAMP(金額) AS 標準偏差, MEDIAN(金額) AS 中央値
+FROM APP100
+GROUP BY 部署
+```
+
+- 収集した値に数値化できない値または `Infinity` / `-Infinity` があれば `ArgumentError` になります
+- 5 関数は完全入力を必要とします。`onLimit=truncate` を指定しても上限到達時はエラーとなり、部分集合の統計値を返しません
+- `DISTINCT` は Number 化後の数値同値で重複を除きます。たとえば `"1"` と `"01"` は同じ値です。既存の 6 集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` / `GROUP_CONCAT`）は従来どおり文字列単位です
+- `*` は指定できません。引数にはフィールドまたは算術式を 1 つ指定します
+- 無印の `STDDEV` / `VARIANCE` は別名ではなく非対応です。母集団・標本のどちらかが方言で異なるため、`_POP` / `_SAMP` を明示してください
+- 5 関数は予約語です。同名フィールドは `` `MEDIAN` `` のようにバッククォートで囲みます
+
 ### DISTINCT 付き集計
 
 ```sql
@@ -1042,9 +1064,11 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 | `COUNT(*)` / `COUNT(f)` / `COUNT(DISTINCT f)` | `0` |
 | `SUM` / `AVG` / `MAX` / `MIN` | `0`（**標準 SQL の NULL とは異なります**） |
 | `GROUP_CONCAT` | `""`（空文字） |
+| `VAR_POP` / `STDDEV_POP` / `VAR_SAMP` / `STDDEV_SAMP` / `MEDIAN` | `""`（空文字） |
 
 - 「対象なし（COUNT = 0）」と「合計が 0」を区別したい場合は COUNT を併用してください
 - GROUP BY が**ある**場合は従来どおり 0 行を返します（グループが存在しないため）
+- 1 件だけのグループでは `VAR_SAMP` / `STDDEV_SAMP` は空文字、`VAR_POP` / `STDDEV_POP` は `0`、`MEDIAN` はその値です
 - これにより ASSERT の健全性チェック `ASSERT (SELECT COUNT(*) ... WHERE 異常条件) = 0` が該当 0 件（健全時）に成立します（§26 ASSERT）
 
 ---
@@ -1053,6 +1077,8 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 
 GROUP BY 後の集計結果に対してフィルタをかけます。  
 HAVING 句には集計関数・GROUP BY フィールドを使用できます。
+
+直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。式引数の統計量は SELECT で alias を付け、その alias を HAVING から参照してください。
 
 ```sql
 SELECT 部署, COUNT(*) AS 件数

@@ -344,8 +344,22 @@ function evalAggregate(
     strValues.push(strVal);
   }
 
-  // DISTINCT: 文字列レベルで重複除去
-  const eff = distinct ? [...new Set(strValues)] : strValues;
+  const statistical = func === "STDDEV_POP" || func === "STDDEV_SAMP"
+    || func === "VAR_POP" || func === "VAR_SAMP" || func === "MEDIAN";
+
+  // 既存 6 集計は文字列単位、統計集計は Number 化後の数値同値単位で DISTINCT を行う。
+  const numericValues = statistical ? strValues.map((value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error(`ArgumentError: ${func} の引数に非数値または非有限の値があります: ${value}`);
+    }
+    return numeric;
+  }) : null;
+  const eff = distinct
+    ? statistical
+      ? [...new Set(numericValues!)]
+      : [...new Set(strValues)]
+    : statistical ? numericValues! : strValues;
 
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
@@ -354,22 +368,54 @@ function evalAggregate(
     ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
     : undefined;
   if (func === "MIN" || func === "MAX") {
-    if (eff.length === 0) return 0;
+    const comparableValues = eff as string[];
+    if (comparableValues.length === 0) return 0;
     const semantics = typeof comparison === "string"
       ? syntheticSemantics(comparison)
       : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
-    let result = eff[0];
-    for (const candidate of eff.slice(1)) {
+    let result = comparableValues[0];
+    for (const candidate of comparableValues.slice(1)) {
       const cmp = compareCanonicalValues(candidate, result, semantics);
       if ((func === "MAX" && cmp > 0) || (func === "MIN" && cmp < 0)) result = candidate;
     }
     return result;
   }
 
-  const nums = eff.map(Number);
+  const nums = statistical ? eff as number[] : (eff as string[]).map(Number);
   switch (func) {
     case "SUM": return nums.reduce((a, b) => a + b, 0);
     case "AVG": return nums.length === 0 ? 0 : nums.reduce((a, b) => a + b, 0) / nums.length;
+    case "MEDIAN": {
+      if (nums.length === 0) return "";
+      const sorted = [...nums].sort((a, b) => a - b);
+      const middle = Math.floor(sorted.length / 2);
+      return sorted.length % 2 === 1
+        ? sorted[middle]
+        : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+    case "VAR_POP":
+    case "VAR_SAMP":
+    case "STDDEV_POP":
+    case "STDDEV_SAMP": {
+      const sample = func === "VAR_SAMP" || func === "STDDEV_SAMP";
+      if (nums.length === 0 || (sample && nums.length < 2)) return "";
+      // Welford を先頭値からの差分に適用し、大きな共通オフセットによる丸め誤差を抑える。
+      const origin = nums[0];
+      let count = 0;
+      let mean = 0;
+      let m2 = 0;
+      for (const rawValue of nums) {
+        const value = rawValue - origin;
+        count++;
+        const delta = value - mean;
+        mean += delta / count;
+        m2 += delta * (value - mean);
+      }
+      const variance = Math.max(0, m2 / (sample ? count - 1 : count));
+      return func === "STDDEV_POP" || func === "STDDEV_SAMP"
+        ? Math.sqrt(variance)
+        : variance;
+    }
   }
 }
 
@@ -1122,7 +1168,9 @@ function deriveOutputOrderSemantics(columns: SelectColumn[]): Map<string, Resolv
     if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
       result.set(column.alias, syntheticSemantics("number"));
     } else if (column.type === "AGGREGATE") {
-      if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+      if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG"
+        || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP"
+        || column.func === "VAR_POP" || column.func === "VAR_SAMP" || column.func === "MEDIAN") {
         result.set(column.alias, syntheticSemantics("number"));
       } else if (column.func === "GROUP_CONCAT") {
         result.set(column.alias, syntheticSemantics("string"));

@@ -113,6 +113,8 @@ describe("ksql_app_metadata MCP surface", () => {
         "Complete function catalog",
         "CURRENT_TIMESTAMP",
         "GROUP_CONCAT",
+        "STDDEV_POP",
+        "MEDIAN",
         "DENSE_RANK",
         "LOGINUSER",
         "SUBSTR→SUBSTRING",
