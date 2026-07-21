@@ -1,7 +1,7 @@
 # B58 — MODE 集約関数（最頻値・カテゴリデータ対応）
 
 - 起票日: 2026-07-22
-- ステータス: 📝 **起票（B56 実装完了後の後続候補・仕様前）**
+- ステータス: 📋 **[仕様 R2](ksql_b58_mode_aggregate_spec.md) 確定・実装着手（2026-07-22・codex 仕様レビュー P1×4 反映済＝タイ規則 total-order 化・型メタ 5＋2 経路・resolver 収集条件・DISTINCT/`*` ParseError）**
 - 種別: 改善（集計関数の拡充）
 - 効果種別: 機能（カテゴリデータの分析・MCP 分析用途）
 - 関連: **B56**（統計集約＝完全入力契約・空文字規約・`*` 拒否 helper・カタログ同期の型をそのまま再利用）／**B55**（MCP 全量関数カタログ同期）
@@ -33,7 +33,7 @@ B56 の統計 5 関数は数値限定のため、**文字列（カテゴリ）�
 3. **タイは決定的規則**: 同数タイのときは **canonical 比較順（v3 型付き比較）で最小の値**を返す。Oracle/PostgreSQL の「不定」は kSQL の決定性原則（コードポイント順・v3 ordering）に反するため採らない。
 4. **空集合＝空文字**（B56 §4.3 の「定義できない統計量＝空文字」規約を踏襲）。
 5. **完全入力必須**: 部分集合の最頻値は誤るため、B56 の `completeInputReasons` に乗せる（reason は STATISTICAL_AGGREGATE 共用か MODE 独立かを R1 で決定）。
-6. **`MODE(*)` は ParseError**（B56 の `aggregateAcceptsWildcard` helper へ追加するだけ）。
+6. **`MODE(*)` は ParseError**（B56 の `aggregateAcceptsWildcard` の allow-list へ **MODE を追加しない**だけで SELECT/HAVING 両経路が拒否になる。R1 の「追加するだけ」は逆＝codex 指摘で訂正）。
 7. **論点**: `DISTINCT` の扱い（全値が頻度 1 になり無意味→ParseError で拒否か、黙って受けるか）・型メタ（引数列の型を透過＝MIN/MAX の source meta 継承方式が候補）・予約語 `MODE` の衝突リスク（一般的な単語＝同名フィールドコードがあり得る。バッククォート注記必須・B19 前例）。
 
 ## 4. 実装コスト見込み
