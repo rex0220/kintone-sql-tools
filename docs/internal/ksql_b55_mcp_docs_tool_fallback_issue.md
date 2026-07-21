@@ -1,7 +1,7 @@
 # B55 — MCP resources 非対応クライアント向けドキュメント到達手段（tool フォールバック）
 
 - 起票日: 2026-07-21
-- ステータス: **実装済み（2026-07-21・branch feat/b55-mcp-docs-tool c4da29d・全 2,729 テスト＋mcp:smoke/pack-smoke/mcpb-verify green・MCP 実機＝resources 非対応経路の確認待ち）**（[仕様 R2.1](ksql_b55_mcp_docs_tool_spec.md) / [計画 R1](ksql_b55_impl_plan.md)）
+- ステータス: **実装済み・実機 PASS（2026-07-21・v3.12.0・resources 非対応経路でプローブ抑止＋全量回答を確認＝[evidence](evidence/b55_claude_desktop_smoke.md)・リリース手順のみ残）**（[仕様 R2.1](ksql_b55_mcp_docs_tool_spec.md) / [計画 R1](ksql_b55_impl_plan.md)）
 - 種別: 改善（MCP discoverability の残課題）
 - 効果種別: 機能（discoverability・回答の正確さ）
 - 関連: **B50**（MCP discoverability・言語リファレンス/レシピの MCP resource 公開＝v3.9.0）／**B49**（read-only ツールの前例 `ksql_app_metadata`）

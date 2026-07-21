@@ -1,4 +1,4 @@
-- ステータス: 計画 R1 **実装完了（2026-07-21・Phase 0〜5 全ステップ＋Phase 6 Step 6-1 実施済み・c4da29d）**。自動 gate 全 green（npm test 2,729=110+2 suites・mcp:smoke・pack-smoke・build:mcpb・mcpb-verify）。instructions 実測 257 語・4 段落（guard 240〜280 語）・annotations は SDK ^1.29.0 対応につき採用。残=MCP 実機（resources 非対応経路）→ Step 6-2（版数 v3.12.0・リリース）
+- ステータス: 計画 R1 **実装完了（2026-07-21・Phase 0〜5 全ステップ＋Phase 6 Step 6-1 実施済み・c4da29d）**。自動 gate 全 green（npm test 2,729=110+2 suites・mcp:smoke・pack-smoke・build:mcpb・mcpb-verify）。instructions 実測 257 語・4 段落（guard 240〜280 語）・annotations は SDK ^1.29.0 対応につき採用。Step 6-2 版数 3.12.0 更新・release アセット差し替え済（1107139）。**MCP 実機 PASS（resources 非対応経路・[evidence](evidence/b55_claude_desktop_smoke.md)）**。残=PR→merge→tag v3.12.0→GitHub Release→npm publish
 
 # B55 — MCP read-only ドキュメントツール `ksql_docs` 実装計画
 
