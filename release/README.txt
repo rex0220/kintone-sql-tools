@@ -1,9 +1,23 @@
-ksql 配布パッケージ (v3.8.0)
+ksql 配布パッケージ (v3.9.0)
 
-1. ksql-plugin-v3.8.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.9.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.9.0: DML 事前検証の complete post-image (B43)
+        ＋ MCP 読み取り専用メタデータ API (B49)
+        ＋ MCP の能力・方言 discoverability (B50)。
+- B43: UPDATE/UPSERT の VALIDATE ONLY / ON ERROR SKIP が、更新対象レコードの
+  post-image (レコード全体・サブテーブル子行を含む) を検証。SET 対象外の
+  既存違反による false pass を解消し、ON ERROR SKIP は違反親を隔離 (true
+  isolation)。通常の UPDATE/UPSERT 実行の挙動は不変。
+- B49: MCP 新ツール ksql_app_metadata。app/fields(制約付き)/layout/settings/
+  status/views/reports/customize を生 JSON で取得 (固定 GET allowlist・
+  読み取り専用)。SQL/DML 構築前の制約確認に使える。
+- B50: MCP server instructions で kSQL の能力・方言を案内。言語リファレンスと
+  レシピを MCP resource (ksql://language-reference / ksql://recipes) で公開。
+  ※ MCP の変更は MCP クライアント (Claude 等) から利用する機能です。
 
 v3.8.0: APPLY ブロック (B44) ＋ プラグイン親/子ガード兼用 (B48)
         ＋ サブテーブル SELECT のシステム列 WHERE (B45)。
