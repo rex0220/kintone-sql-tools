@@ -1,6 +1,16 @@
 import type { KintoneClient } from "../core";
 import { getGlobalRequestGate, withRequestGate } from "../api/requestGate";
-import { createNodeKintoneClient } from "../cli/nodeKintoneClient";
+import {
+  createNodeKintoneConnection,
+  type NodeKintoneConnection,
+  type TokenResolver,
+} from "../cli/nodeKintoneClient";
+import type {
+  AllowedMetadataRequest,
+  KintoneMetadataReader,
+  MetadataEnvironment,
+  RawMetadataResult,
+} from "./kintoneMetadata";
 import {
   type AppBinding,
   type SqlRewriteSegment,
@@ -73,6 +83,7 @@ export interface ResolvedRuntimeContext {
   sqlContext: ResolvedSqlContext;
   tokenByMappedApp: Map<number, string>;
   clientsByProfile: Map<string, KintoneClient>;
+  metadataReaderByProfile: Map<string, KintoneMetadataReader>;
 }
 
 // ResolvedSqlContext の公開型・列挙プロパティに token/password を含めず、
@@ -200,6 +211,29 @@ export interface KsqlRuntime {
   tempTableMaxRows?: number;
 }
 
+export type KintoneMetadataAppRef = number | `LAPP_${string}`;
+
+export interface CreateKintoneMetadataRuntimeInput {
+  app: KintoneMetadataAppRef;
+  profile?: string;
+  request: AllowedMetadataRequest;
+  timeout?: number;
+  cursorMaxActive?: number;
+  debug?: boolean;
+  debugHeaders?: boolean;
+  log?: (line: string) => void;
+}
+
+export interface KintoneMetadataRuntime {
+  sourceApp: KintoneMetadataAppRef;
+  mappedAppId: number;
+  resolvedAppId: number;
+  profileName: string;
+  environment: MetadataEnvironment;
+  cacheContext: string;
+  metadata: RawMetadataResult;
+}
+
 export function resolveDefaultProfile(
   config: KsqlConfig,
   serverOptions: KsqlRuntimeServerOptions,
@@ -210,6 +244,142 @@ export function resolveDefaultProfile(
     ?? envString("KSQL_PROFILE")
     ?? config.defaultProfile
     ?? "dev";
+}
+
+interface ConnectionBuildInput {
+  sqlContext: ResolvedSqlContext;
+  config: KsqlConfig;
+  mappedAppIds: readonly number[];
+  appProfileByApp: ReadonlyMap<number, string>;
+  usedProfiles: ReadonlySet<string>;
+  timeout: number;
+  cursorMaxActive: number;
+  debug?: boolean;
+  debugHeaders?: boolean;
+  log?: (line: string) => void;
+}
+
+function buildRuntimeConnections(input: ConnectionBuildInput): {
+  tokenByMappedApp: Map<number, string>;
+  clientsByProfile: Map<string, KintoneClient>;
+  metadataReaderByProfile: Map<string, KintoneMetadataReader>;
+} {
+  const profileName = input.sqlContext.profileName;
+  const defaultProfile = input.config.profiles?.[profileName] ?? {};
+  const allTokenByMappedApp = new Map<number, string>();
+  const missingAppProfiles: string[] = [];
+  const tokenMapEnv = envString("KSQL_TOKEN_MAP");
+  const mapFromEnv = tokenMapEnv ? parseTokenMap(tokenMapEnv) : {};
+  const singleToken = envString("KSQL_TOKEN");
+  const pendingConnections: Array<{
+    profileName: string;
+    baseUrl: string;
+    resolver: TokenResolver;
+  }> = [];
+
+  for (const pName of input.usedProfiles) {
+    const profile = pName === profileName
+      ? defaultProfile
+      : (input.config.profiles?.[pName] ?? null);
+    if (!profile) throw new Error(`ArgumentError: profile "${pName}" is not defined.`);
+
+    const baseUrl = envString("KSQL_BASE_URL") ?? profile.baseUrl ?? "";
+    const guestSpaceId = envInt("KSQL_GUEST_SPACE_ID") ?? profile.guestSpaceId ?? null;
+    if (!baseUrl) {
+      throw new Error(`AuthError: --base-url is required for profile "${pName}".`);
+    }
+
+    const authReq = envAuth("KSQL_AUTH") ?? profile.auth ?? "auto";
+    const username = envString("KSQL_USERNAME") ?? profile.username ?? null;
+    const passwordFromEnvRef = profile.passwordEnv ? envString(profile.passwordEnv) : null;
+    const password = envString("KSQL_PASSWORD") ?? passwordFromEnvRef ?? profile.password ?? null;
+    const hasUserPass = Boolean(username && password);
+    const auth = authReq === "auto" ? (hasUserPass ? "userpass" : "token") : authReq;
+    const common = {
+      guestSpaceId,
+      cursorMaxActive: input.cursorMaxActive,
+      timeoutMs: input.timeout,
+      debug: input.debug,
+      debugHeaders: input.debugHeaders,
+      log: input.log,
+    };
+
+    if (auth === "userpass") {
+      if (!username || !password) {
+        throw new Error(`AuthError: username/password are required for profile "${pName}".`);
+      }
+      pendingConnections.push({
+        profileName: pName,
+        baseUrl,
+        resolver: { ...common, auth: { type: "userpass", username, password } },
+      });
+      continue;
+    }
+
+    const mapFromConfig = Object.fromEntries(
+      Object.entries(profile.tokenMap ?? {}).map(([k, v]) => [
+        normalizeAppKey(k),
+        resolveTokenValue(String(v)),
+      ])
+    );
+    const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv };
+    const assignedAppIds = input.mappedAppIds.filter(
+      (appId) => input.appProfileByApp.get(appId) === pName
+    );
+    const resolvedTokens = resolveTokenByMappedApp({
+      mappedAppIds: assignedAppIds,
+      profileName: pName,
+      bindings: input.sqlContext.bindings,
+      logicalBindingLabels: input.sqlContext.logicalBindingLabels,
+      effectiveTokenMap,
+      singleToken,
+    });
+    const tokenByApp = resolvedTokens.tokenByPhysicalApp;
+    for (const [mappedAppId, token] of resolvedTokens.tokenByMappedApp) {
+      allTokenByMappedApp.set(mappedAppId, token);
+    }
+    missingAppProfiles.push(...resolvedTokens.missing);
+    if (assignedAppIds.length === 0 && singleToken) tokenByApp.set(0, singleToken);
+
+    pendingConnections.push({
+      profileName: pName,
+      baseUrl,
+      resolver: {
+        ...common,
+        auth: {
+          type: "token",
+          resolveToken(appId: number): string {
+            const token = tokenByApp.get(appId) ?? tokenByApp.get(0);
+            if (!token) {
+              throw new Error(`AuthError: token is not resolved for APP${appId}@${pName}.`);
+            }
+            return token;
+          },
+        },
+      },
+    });
+  }
+
+  if (missingAppProfiles.length > 0) {
+    throw new Error(`AuthError: token is missing for ${missingAppProfiles.join(", ")}.`);
+  }
+
+  const connectionsByProfile = new Map<string, NodeKintoneConnection>();
+  for (const pending of pendingConnections) {
+    connectionsByProfile.set(
+      pending.profileName,
+      createNodeKintoneConnection(pending.baseUrl, pending.resolver)
+    );
+  }
+  return {
+    tokenByMappedApp: allTokenByMappedApp,
+    clientsByProfile: new Map(
+      [...connectionsByProfile].map(([name, connection]) => [name, connection.client])
+    ),
+    metadataReaderByProfile: new Map(
+      [...connectionsByProfile].map(([name, connection]) => [name, connection.metadataReader])
+    ),
+  };
 }
 
 export async function createKsqlRuntime(
@@ -270,95 +440,24 @@ export async function createKsqlRuntime(
   }
 
   const usedProfiles = new Set<string>([...appProfileByApp.values(), profileName]);
-  const profileClientMap = new Map<string, KintoneClient>();
-  const allTokenByMappedApp = new Map<number, string>();
-  const missingAppProfiles: string[] = [];
-  const tokenMapEnv = envString("KSQL_TOKEN_MAP");
-  const mapFromEnv = tokenMapEnv ? parseTokenMap(tokenMapEnv) : {};
-  const singleToken = envString("KSQL_TOKEN");
-
-  for (const pName of usedProfiles) {
-    const p = pName === profileName ? profile : (config.profiles?.[pName] ?? null);
-    if (!p) throw new Error(`ArgumentError: profile "${pName}" is not defined.`);
-
-    const baseUrl = envString("KSQL_BASE_URL") ?? p.baseUrl ?? "";
-    const guestSpaceId = envInt("KSQL_GUEST_SPACE_ID") ?? p.guestSpaceId ?? null;
-    if (!baseUrl) {
-      throw new Error(`AuthError: --base-url is required for profile "${pName}".`);
-    }
-
-    const authReq = envAuth("KSQL_AUTH") ?? p.auth ?? "auto";
-    const username = envString("KSQL_USERNAME") ?? p.username ?? null;
-    const passwordFromEnvRef = p.passwordEnv ? envString(p.passwordEnv) : null;
-    const password = envString("KSQL_PASSWORD") ?? passwordFromEnvRef ?? p.password ?? null;
-    const hasUserPass = Boolean(username && password);
-    const auth = authReq === "auto" ? (hasUserPass ? "userpass" : "token") : authReq;
-
-    if (auth === "userpass") {
-      if (!username || !password) {
-        throw new Error(`AuthError: username/password are required for profile "${pName}".`);
-      }
-      profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
-        guestSpaceId,
-        cursorMaxActive,
-        timeoutMs: timeout,
-        debug: input.debug,
-        debugHeaders: input.debugHeaders,
-        log: input.log,
-        auth: { type: "userpass", username, password },
-      }));
-      continue;
-    }
-
-    const mapFromConfig = Object.fromEntries(
-      Object.entries(p.tokenMap ?? {}).map(([k, v]) => [normalizeAppKey(k), resolveTokenValue(String(v))])
-    );
-    const effectiveTokenMap: Record<string, string> = { ...mapFromConfig, ...mapFromEnv };
-    const assignedAppIds = appIds.filter((appId) => appProfileByApp.get(appId) === pName);
-    const resolvedTokens = resolveTokenByMappedApp({
-      mappedAppIds: assignedAppIds,
-      profileName: pName,
-      bindings: sqlContext.bindings,
-      logicalBindingLabels: sqlContext.logicalBindingLabels,
-      effectiveTokenMap,
-      singleToken,
-    });
-    const tokenByApp = resolvedTokens.tokenByPhysicalApp;
-    for (const [mappedAppId, token] of resolvedTokens.tokenByMappedApp) {
-      allTokenByMappedApp.set(mappedAppId, token);
-    }
-    missingAppProfiles.push(...resolvedTokens.missing);
-
-    if (assignedAppIds.length === 0 && singleToken) {
-      tokenByApp.set(0, singleToken);
-    }
-
-    profileClientMap.set(pName, createNodeKintoneClient(baseUrl, {
-      guestSpaceId,
-      cursorMaxActive,
-      timeoutMs: timeout,
-      debug: input.debug,
-      debugHeaders: input.debugHeaders,
-      log: input.log,
-      auth: {
-        type: "token",
-        resolveToken(appId: number): string {
-          const token = tokenByApp.get(appId) ?? tokenByApp.get(0);
-          if (!token) throw new Error(`AuthError: token is not resolved for APP${appId}@${pName}.`);
-          return token;
-        },
-      },
-    }));
-  }
-
-  if (missingAppProfiles.length > 0) {
-    throw new Error(`AuthError: token is missing for ${missingAppProfiles.join(", ")}.`);
-  }
+  const connections = buildRuntimeConnections({
+    sqlContext,
+    config,
+    mappedAppIds: appIds,
+    appProfileByApp,
+    usedProfiles,
+    timeout,
+    cursorMaxActive,
+    debug: input.debug,
+    debugHeaders: input.debugHeaders,
+    log: input.log,
+  });
 
   const runtimeContext: ResolvedRuntimeContext = {
     sqlContext,
-    tokenByMappedApp: allTokenByMappedApp,
-    clientsByProfile: profileClientMap,
+    tokenByMappedApp: connections.tokenByMappedApp,
+    clientsByProfile: connections.clientsByProfile,
+    metadataReaderByProfile: connections.metadataReaderByProfile,
   };
 
   const defaultClient = runtimeContext.clientsByProfile.get(profileName);
@@ -443,5 +542,103 @@ export async function createKsqlRuntime(
     timeout,
     cursorMaxActive,
     tempTableMaxRows,
+  };
+}
+
+const LOGICAL_METADATA_APP_REF_RE = /^LAPP_[A-Za-z][A-Za-z0-9_]{0,63}$/i;
+
+function metadataAppRefSql(app: KintoneMetadataAppRef): string {
+  if (typeof app === "number") {
+    if (!Number.isSafeInteger(app) || app <= 0) {
+      throw new Error("ArgumentError: app must be a positive safe integer or LAPP_<NAME>.");
+    }
+    return `SELECT * FROM APP${app}`;
+  }
+  if (!LOGICAL_METADATA_APP_REF_RE.test(app)) {
+    throw new Error("ArgumentError: app must be a positive safe integer or LAPP_<NAME>.");
+  }
+  return `SELECT * FROM ${app}`;
+}
+
+/**
+ * Resolves one allowlisted metadata request through the same config, app binding,
+ * token, connection, and process-global read-only gate used by the SQL runtime.
+ * This path intentionally does not invoke the SQL parser or executor.
+ */
+export async function createKintoneMetadataRuntime(
+  serverOptions: KsqlRuntimeServerOptions,
+  input: CreateKintoneMetadataRuntimeInput
+): Promise<KintoneMetadataRuntime> {
+  const syntheticSql = metadataAppRefSql(input.app);
+  const sqlContext = resolveSqlContext(serverOptions, syntheticSql, input.profile);
+  const config = privateConfigSnapshots.get(sqlContext);
+  if (!config) {
+    throw new Error("InternalError: private config snapshot is missing for resolved SQL context.");
+  }
+  if (input.profile !== undefined && config.profiles?.[sqlContext.profileName] === undefined) {
+    throw new Error(`ArgumentError: profile "${sqlContext.profileName}" is not defined.`);
+  }
+
+  const mappedAppIds = extractAppIds(sqlContext.normalizedSql);
+  if (mappedAppIds.length !== 1) {
+    throw new Error("InternalError: metadata app resolution must produce exactly one app binding.");
+  }
+  const mappedAppId = mappedAppIds[0];
+  const binding = resolveRuntimeBinding(sqlContext, mappedAppId);
+  const profile = binding.profile === sqlContext.profileName
+    ? (config.profiles?.[sqlContext.profileName] ?? {})
+    : config.profiles?.[binding.profile];
+  if (!profile) {
+    throw new Error(`ArgumentError: profile "${binding.profile}" is not defined.`);
+  }
+
+  const timeout = input.timeout
+    ?? envInt("KSQL_TIMEOUT")
+    ?? profile.query?.timeout
+    ?? 30000;
+  const cursorMaxActive = input.cursorMaxActive
+    ?? envInt("KSQL_CURSOR_MAX_ACTIVE")
+    ?? profile.query?.cursorMaxActive
+    ?? 2;
+  if (!Number.isSafeInteger(cursorMaxActive) || cursorMaxActive < 1 || cursorMaxActive > 5) {
+    throw new Error("ArgumentError: cursorMaxActive must be an integer from 1 to 5.");
+  }
+
+  const connections = buildRuntimeConnections({
+    sqlContext,
+    config,
+    mappedAppIds,
+    appProfileByApp: new Map([[mappedAppId, binding.profile]]),
+    usedProfiles: new Set([binding.profile]),
+    timeout,
+    cursorMaxActive,
+    debug: input.debug,
+    debugHeaders: input.debugHeaders,
+    log: input.log,
+  });
+  const reader = connections.metadataReaderByProfile.get(binding.profile);
+  if (!reader) {
+    throw new Error(
+      `AuthError: metadata reader for profile "${binding.profile}" is not resolved for APP${mappedAppId}.`
+    );
+  }
+
+  const gate = getGlobalRequestGate(resolveRequestGateOptions({
+    maxConcurrent: profile.query?.maxConcurrent,
+    maxRetries: profile.query?.retry,
+    baseDelayMs: profile.query?.retryBaseDelayMs,
+    maxDelayMs: profile.query?.retryMaxDelayMs,
+  }));
+  const metadata = await gate.runReadOnly(
+    () => reader.getMetadata(input.request, binding.appId)
+  );
+  return {
+    sourceApp: input.app,
+    mappedAppId,
+    resolvedAppId: binding.appId,
+    profileName: binding.profile,
+    environment: metadata.environment,
+    cacheContext: sqlContext.cacheContext,
+    metadata,
   };
 }
