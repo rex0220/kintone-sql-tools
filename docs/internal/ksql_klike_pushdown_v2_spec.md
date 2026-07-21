@@ -73,9 +73,9 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 - **v2 minimal: KLIKE 押し下げは「JOIN が無い、または全 JOIN が INNER」のときだけ許可**。LEFT/RIGHT/FULL を含む SELECT に KLIKE があれば**拒否**（メイン側 KLIKE は安全だが、minimal では join 種別で単純に判定）。
 - 将来: nullable 側判定（結合順・保存側/nullable 側の解析）や取得行への KLIKE 適用済み来歴付与で、非 nullable 側の KLIKE を解禁。
 
-#### 将来課題 B6 — 外部結合の非 nullable（保存）側の KLIKE 押し下げ解禁（📝 保留・低優先・2026-07-21 解説追記）
+#### 将来課題 B6 — 外部結合の非 nullable（保存）側の KLIKE 押し下げ解禁（⏸ 却下・代替策あり・2026-07-21）
 
-**状態**: 保留（専用仕様なし・実需未確認）。効果種別=性能・優先度=低。着手するなら本節を起点に専用仕様から。台帳 B6。
+**状態**: **却下（2026-07-21）**。下記「回避策」で用途を安全・等価にカバーできるため、専用実装（非 nullable 側判定に結合順/来歴解析が必要・誤ると P0 誤結果再導入・実需未確認）はリスクに見合わず却下とした。台帳 §3。以下は判断の記録。
 
 **何を解禁するか**: 現状は `stmt.joins.every(j => j.type === "INNER")`（[klikePushdownPlan.ts:63](../../src/core/optimization/klikePushdownPlan.ts#L63)）で、LEFT/RIGHT/FULL を1つでも含む SELECT は KLIKE 押し下げを**一律拒否**する。しかし外部結合でも **非 nullable（保存）側の KLIKE は本来安全に押し下げられる**。B6 はその判定を入れて非 nullable 側だけ解禁する（nullable 側は拒否のまま）。
 
