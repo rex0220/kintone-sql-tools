@@ -73,6 +73,20 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 - **v2 minimal: KLIKE 押し下げは「JOIN が無い、または全 JOIN が INNER」のときだけ許可**。LEFT/RIGHT/FULL を含む SELECT に KLIKE があれば**拒否**（メイン側 KLIKE は安全だが、minimal では join 種別で単純に判定）。
 - 将来: nullable 側判定（結合順・保存側/nullable 側の解析）や取得行への KLIKE 適用済み来歴付与で、非 nullable 側の KLIKE を解禁。
 
+#### 将来課題 B6 — 外部結合の非 nullable（保存）側の KLIKE 押し下げ解禁（📝 保留・低優先・2026-07-21 解説追記）
+
+**状態**: 保留（専用仕様なし・実需未確認）。効果種別=性能・優先度=低。着手するなら本節を起点に専用仕様から。台帳 B6。
+
+**何を解禁するか**: 現状は `stmt.joins.every(j => j.type === "INNER")`（[klikePushdownPlan.ts:63](../../src/core/optimization/klikePushdownPlan.ts#L63)）で、LEFT/RIGHT/FULL を1つでも含む SELECT は KLIKE 押し下げを**一律拒否**する。しかし外部結合でも **非 nullable（保存）側の KLIKE は本来安全に押し下げられる**。B6 はその判定を入れて非 nullable 側だけ解禁する（nullable 側は拒否のまま）。
+
+**なぜ一律拒否なのか（[P0] の再掲）**: `applyJoin`（[process.ts:90](../../src/engine/process.ts#L90)）は外部結合の未一致側に**空行**を生成する。例 `A LEFT JOIN B` では A（左）=保存側=**非 nullable**、B（右）=未一致時に空行=**nullable 側**。
+- **nullable 側（B）の KLIKE を押し下げると誤結果**: fetch で非一致の B 行が落ち、LEFT JOIN が空 B 行を再生成する。**KLIKE は JS 再評価できない**（押し下げ済み集合＝`appliedKlikes` に無ければ評価不能で throw）ため、その空行の KLIKE を安全に false 化できず、本来除外すべき行が残り得る。数値/LIKE は JS 残余評価で空行が偽になり超集合性が効くが、**KLIKE は再評価不可なので超集合性だけでは安全にならない**。
+- **非 nullable 側（A）の KLIKE は安全**: 保存側の行は空合成されないため、fetch で絞った集合がそのまま正しい。
+
+**なぜ非自明（＝棚上げの理由）**: 「どちらが非 nullable（保存）側か」は **join 種別＋結合順の解析**が要る。`A LEFT JOIN B` は A が保存側、`A RIGHT JOIN B` は B が保存側、複数 JOIN や混在ではさらに複雑。誤ると P0 の誤結果を再導入するため、**来歴（どのテーブルが保存側か）を正しく付与する設計**が前提。v2 minimal は安全側に倒して join 種別だけで単純判定している。最も単純な第一歩は「メイン（FROM）テーブルは LEFT JOIN 連鎖で常に保存側 → メイン側 KLIKE のみ外部結合でも解禁」だが、RIGHT JOIN の保存側や被結合テーブルの保存側まで一般化するには上記の来歴解析が必要。
+
+**効果と判断**: 効果は「外部結合 ＋ 保存側フィールドの KLIKE ＋ 大規模アプリ」という**狭いケースの性能改善**に限られ、実需も確認されていない。誤結果リスク（正しさ）に対して費用対効果が低いため保留が妥当。実需が出たら、非 nullable 側判定の正しさ設計を主眼とする専用仕様で着手する。
+
 ### 2.7 CTE インライン化後の AST で計画を作る（[P1]）
 R1時点では検証用と実行用のインライン化が別実装で、実行側だけが `stripCteAlias` 相当の処理を行っていた。ノード同一性・対象テーブル判定（§2.1/2.2）を使う v2 では、この差で検証・抽出の集合が乖離する。
 - **実装**: `src/core/cteInlining.ts` の `canInlineSingleCte` / `buildInlinedQuery` に集約し、インライン化後の AST に対して押し下げ計画（§2.1）を生成する。同じ AST をfetch・JS評価へ渡し、EXPLAINにも`effective: inlined CTE`として表示する。
