@@ -91,6 +91,11 @@ const APP1 = [
   makeRecord({ $id: "3", 顧客名: "C社", 売上: "500" }),
 ];
 
+const DML_VALIDATION_META_COLUMNS = [
+  "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
+
 test("B10-B: SELECT 変数列を既存 literal/number 列へ解決し CONCAT を維持する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const batch = await executeBatch(
@@ -323,7 +328,7 @@ test("エラー0件のVALIDATE ONLY INTOも列schemaを保持する", async () =
   const selected = batch.statements[1].result;
   expect(selected).toMatchObject({ type: "SELECT", rowCount: 0 });
   if (selected?.type !== "SELECT") throw new Error("unexpected result");
-  expect(selected.columns).toContain("$err_code");
+  expect(selected.columns).toEqual(["code", ...DML_VALIDATION_META_COLUMNS]);
 });
 
 test("#err ペイロード型は元SELECTではなくDML対象フィールドから宣言する", async () => {
@@ -581,6 +586,192 @@ test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () 
   );
   expect(batch.statements[1].result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 1 });
   expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 6: post-image違反親だけを隔離しVALIDATE ONLYと同じerrors順で正常親だけPUTする", async () => {
+  const records = [
+    makeRecord({ $id: "1", dest: "before", requiredTop: "ok" }),
+    makeRecord({ $id: "2", dest: "before", requiredTop: "" }),
+    makeRecord({ $id: "3", dest: "before", requiredTop: "ok" }),
+  ];
+  const fields = async () => [
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const validationClient = makeClient({ recordsByApp: { 100: records } });
+  validationClient.getFields = fields;
+  const validation = await executeBatch(
+    "UPDATE APP100 SET dest = 'after' WHERE $id >= 1 VALIDATE ONLY INTO #err; SELECT * FROM #err",
+    validationClient,
+    { cacheContext: "b43-phase6-validate-isolation" }
+  );
+  const validationResult = validation.statements[0].result as DmlValidationResult;
+
+  const isolationClient = makeClient({ recordsByApp: { 100: records } });
+  isolationClient.getFields = fields;
+  const confirmed: number[] = [];
+  const isolation = await executeBatch(
+    "UPDATE APP100 SET dest = 'after' WHERE $id >= 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    isolationClient,
+    {
+      cacheContext: "b43-phase6-on-error-isolation",
+      confirm: async (count) => { confirmed.push(count); return true; },
+    }
+  );
+
+  expect(validationResult).toMatchObject({ validatedRows: 3, validRows: 2, invalidRows: 1, errorCount: 1 });
+  expect(isolation.statements[0].result).toMatchObject({
+    type: "UPDATE", updatedCount: 2, affectedRows: 2, skippedRows: 1,
+  });
+  expect((isolation.statements[1].result as SelectResult).rows).toEqual(validationResult.errors);
+  expect(confirmed).toEqual([2]);
+  expect(isolationClient.putCalls).toHaveLength(1);
+  expect(isolationClient.putCalls[0].records).toEqual([
+    { id: 1, record: { dest: { value: "after" } } },
+    { id: 3, record: { dest: { value: "after" } } },
+  ]);
+});
+
+test("B43 Phase 6: 201候補の全PUT chunkからpost-image違反親を除外し100件以下に保つ", async () => {
+  const invalidIds = new Set([1, 101, 201]);
+  const records = Array.from({ length: 201 }, (_, index) => makeRecord({
+    $id: String(index + 1),
+    dest: "before",
+    requiredTop: invalidIds.has(index + 1) ? "" : "ok",
+  }));
+  const client = makeClient({ recordsByApp: { 100: records } });
+  client.getFields = async () => [
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+
+  const batch = await executeBatch(
+    "UPDATE APP100 SET dest = 'after' WHERE $id >= 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b43-phase6-put-chunks" }
+  );
+
+  expect(batch.statements[0].result).toMatchObject({
+    type: "UPDATE", updatedCount: 198, affectedRows: 198, skippedRows: 3,
+  });
+  expect(client.putCalls.map((call) => call.records.length)).toEqual([100, 98]);
+  const writtenIds = client.putCalls.flatMap((call) => call.records).map((record: any) => record.id);
+  expect(writtenIds).toHaveLength(198);
+  expect(writtenIds.some((id) => invalidIds.has(id))).toBe(false);
+});
+
+test("B43 Phase 6: post-image invalidRowsのREJECT LIMIT超過はconfirm・PUTより前に停止する", async () => {
+  const client = makeClient({ recordsByApp: { 100: [
+    makeRecord({ $id: "1", dest: "before", requiredTop: "" }),
+    makeRecord({ $id: "2", dest: "before", requiredTop: "ok" }),
+  ] } });
+  client.getFields = async () => [
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  const confirmed: number[] = [];
+
+  const batch = await executeBatch(
+    "UPDATE APP100 SET dest = 'after' WHERE $id >= 1 ON ERROR SKIP INTO #err REJECT LIMIT 0; SELECT * FROM #err",
+    client,
+    {
+      cacheContext: "b43-phase6-reject-post-image",
+      confirm: async (count) => { confirmed.push(count); return true; },
+    }
+  );
+
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[0]).toMatchObject({
+    status: "error",
+    error: { code: "RejectLimitExceededError" },
+    result: { type: "VALIDATION", invalidRows: 1, errorCount: 1 },
+  });
+  expect(confirmed).toEqual([]);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 6: 同一UPSERT親のpreError・CHECK・post-image複数違反を1 invalidRowに数える", async () => {
+  const target = makeTypedRecord({
+    $id: "7", code: "", amount: "1", requiredTop: "",
+    Lines: [{ id: "line-1", value: { child: { value: "x" } } }],
+  });
+  const client = makeClient({ recordsByApp: { 100: [target] } });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+  ];
+
+  const batch = await executeBatch(
+    "UPSERT INTO APP100 (code, amount) VALUES ('', 11) ON DUPLICATE (code) " +
+      "CHECK WHEN amount > 0 THEN 'positive' ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b43-phase6-distinct-invalid" }
+  );
+  const errors = (batch.statements[1].result as SelectResult).rows;
+
+  expect(batch.statements[0].result).toMatchObject({
+    type: "UPSERT", affectedRows: 0, skippedRows: 1,
+  });
+  expect(errors.map((row) => row.$err_code)).toEqual([
+    "ERR_KEY_EMPTY", "ERR_RANGE_MAX", "ERR_REQUIRED", "ERR_LENGTH_MIN", "ERR_CHECK",
+  ]);
+  expect(new Set(errors.map((row) => row.$err_row))).toEqual(new Set(["1"]));
+  expect(errors).toHaveLength(5);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 6: #err runtime schema mismatchは既存appendを置換せずON ERROR SKIP writerを呼ばない", async () => {
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 100
+    ? [{ code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", required: true }]
+    : [{ code: "code", label: "code", fieldType: "NUMBER" }];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (code) VALUES ('') VALIDATE ONLY INTO #err; " +
+      "INSERT INTO APP200 (code) VALUES ('bad') ON ERROR SKIP INTO #err",
+    client,
+    { cacheContext: "b43-phase6-schema-atomic" }
+  );
+
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[0]).toMatchObject({
+    status: "success", result: { type: "VALIDATION", errorCount: 1 },
+  });
+  expect(batch.statements[1].error?.message).toContain("validation error table #err has a different schema");
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 6: API-time PUT errorは候補隔離へ変換せず最初のchunkでfail-fastする", async () => {
+  const records = Array.from({ length: 201 }, (_, index) => makeRecord({
+    $id: String(index + 1), dest: "before", requiredTop: "ok",
+  }));
+  const client = makeClient({ recordsByApp: { 100: records } });
+  client.getFields = async () => [
+    { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+  ];
+  client.putRecords = async (params) => {
+    client.putCalls.push({ app: params.app, records: [...params.records] });
+    throw new Error("GAIA_CO02: mock revision conflict");
+  };
+
+  const batch = await executeBatch(
+    "UPDATE APP100 SET dest = 'after' WHERE $id >= 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: "b43-phase6-api-fail-fast" }
+  );
+
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[0]).toMatchObject({ status: "error" });
+  expect(batch.statements[0].error?.message).toContain("GAIA_CO02");
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toHaveLength(100);
+  expect(client.postCalls).toHaveLength(0);
 });
 
 test("B43 Phase 4: UPDATE FROM $id join は共有target GETで非SETトップレベル・子違反を検出する", async () => {

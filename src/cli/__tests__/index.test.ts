@@ -14,6 +14,11 @@ import {
   toCliImportError,
 } from "../index";
 
+const DML_VALIDATION_COLUMNS = [
+  "code", "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
+
 async function runCliCaptured(argv: string[]): Promise<{ code: number; stderr: string }> {
   let stderr = "";
   const errSpy = jest.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
@@ -51,12 +56,18 @@ describe("cli helpers", () => {
       type: "VALIDATION" as const,
       operation: "INSERT" as const,
       validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 1,
-      columns: ["code", "$err_code"], errors: [{ code: "", $err_code: "ERR_REQUIRED" }],
+      columns: DML_VALIDATION_COLUMNS,
+      errors: [{
+        code: "", $err_statement: "1", $err_operation: "INSERT", $err_row: "1",
+        $err_field: "code", $err_code: "ERR_REQUIRED", $err_message: "required", $err_value: "",
+        $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+      }],
     };
     expect(JSON.parse(buildValidationOutput(result, "json", false, false, {}))).toMatchObject({
       ok: true, type: "VALIDATION", errorCount: 1,
     });
     expect(buildValidationOutput(result, "table", false, false, {})).toContain("ERR_REQUIRED");
+    expect(buildValidationOutput(result, "table", false, false, {})).toContain("$err_subrow_id");
   });
   test("parseTokenMap normalizes app keys", () => {
     const m = parseTokenMap("APP100=t1,101=t2");

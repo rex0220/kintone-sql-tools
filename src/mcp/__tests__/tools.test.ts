@@ -10,6 +10,11 @@ import {
 } from "../tools";
 import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
 
+const DML_VALIDATION_COLUMNS = [
+  "code", "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
+
 function makeClient(): KintoneClient {
   return {
     async getRecords() { return { records: [] }; },
@@ -250,7 +255,7 @@ describe("MCP tools", () => {
     };
     const executeSql = async (): Promise<ExecuteResult> => ({
       type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 1,
-      invalidRows: 0, errorCount: 0, columns: ["code", "$err_code"], errors: [],
+      invalidRows: 0, errorCount: 0, columns: DML_VALIDATION_COLUMNS, errors: [],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const validation = await tools.validate({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY" });
@@ -261,6 +266,7 @@ describe("MCP tools", () => {
     const result = await tools.query({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY", onLimit: "truncate" });
     expect(runtimeInputs[0].onLimit).toBe("error");
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
+    expect(result.columns).toEqual(DML_VALIDATION_COLUMNS);
   });
 
   test("B44 Phase 5: query VALIDATE ONLY payload は apply/guards を欠落させず既定100を返す", async () => {
