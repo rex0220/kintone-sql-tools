@@ -1,9 +1,21 @@
-ksql 配布パッケージ (v3.9.0)
+ksql 配布パッケージ (v3.10.0)
 
-1. ksql-plugin-v3.9.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.10.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.10.0: プラグインの検索打ち切り検出 (B7)
+         ＋ APPLY 複数親 UPDATE の親 WHERE で LIKE/KLIKE (B47)
+         ＋ 通常の親 UPDATE/DELETE の WHERE で KLIKE (B5)。
+- B7: プラグインでも like/not like の 10 万件検索打ち切り (X-Cybozu-Warning) を
+  検出できるようにした (getRecords のみ raw fetch 化・URL 4KB 超は POST override)。
+  DML の fail-closed がプラグインでも効き、SELECT では打ち切り警告が付く。
+- B47: APPLY 複数親 UPDATE の親 WHERE で LIKE / KLIKE を使えるようにした。
+  安全プレフィルタで取得後に元の WHERE を JS 再評価し、一致した親だけを更新する。
+- B5: 通常 (APPLY なし) の親 UPDATE / DELETE の WHERE で KLIKE を使えるようにした
+  (kintone ネイティブ like へ変換・exact pushdown)。LIKE は通常 DML では引き続き
+  不可、サブテーブル DML の KLIKE も不可。10 万件打ち切り時は fail-closed。
 
 v3.9.0: DML 事前検証の complete post-image (B43)
         ＋ MCP 読み取り専用メタデータ API (B49)
