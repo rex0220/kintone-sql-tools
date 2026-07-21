@@ -87,6 +87,24 @@ v1 は「KLIKE ∧ FULL_SCAN → 拒否」。v2 は次に緩和する（**§2.1 
 
 **効果と判断**: 効果は「外部結合 ＋ 保存側フィールドの KLIKE ＋ 大規模アプリ」という**狭いケースの性能改善**に限られ、実需も確認されていない。誤結果リスク（正しさ）に対して費用対効果が低いため保留が妥当。実需が出たら、非 nullable 側判定の正しさ設計を主眼とする専用仕様で着手する。
 
+**回避策（推奨・実データ確認済み 2026-07-21）**: 非 nullable（保存）側の KLIKE ＋ 外部結合は、**一時テーブルを KLIKE で作ってから JOIN する**ことで既存機能だけで安全に実現できる。B6 の実用ケースをほぼ完全にカバーするため、当面 B6 の実装は不要。
+
+```sql
+-- 現状拒否される形（KLIKE は JS 再評価不可で外部結合下は文ごと拒否）:
+-- SELECT ... FROM A LEFT JOIN B ON ... WHERE A.件名 KLIKE '至急';
+
+-- 回避策（等価・安全・高速）:
+CREATE TEMP TABLE #a AS SELECT ... FROM A WHERE 件名 KLIKE '至急';  -- JOIN なし→KLIKE 押し下げ OK・実体化
+SELECT ... FROM #a LEFT JOIN B ON ...;                             -- KLIKE なし→制約に触れない
+```
+
+- **なぜ安全か**: KLIKE は「JOIN なしの単純 SELECT（一時テーブル作成）」でのみ使う → §2.6 の [P0]（外部結合の空行を KLIKE→true が誤って通す）が原理的に起きない。一時テーブルは KLIKE 一致行の確定集合として実体化され、続く LEFT JOIN には KLIKE が無い。
+- **なぜ等価か**: 一時テーブル #a は「A の KLIKE 一致行」＝保存側そのもの。`#a LEFT JOIN B` は未一致 B を NULL 埋めするため、`A LEFT JOIN B WHERE A.KLIKE ...` と同じ結果になる。
+- **性能**: KLIKE は一時テーブル作成時に kintone へ押し下がるため、native 検索の速度を維持する。
+- **制約**: KLIKE は10万件未満に絞る（一時テーブル実体化も打ち切り時は fail-closed）。JOIN 相手 B はクライアント側で全件取得するため常識的なサイズにする（JOIN 一般の性質）。nullable 側の KLIKE はこの回避策でも等価にならない（が、それは元々安全でない別物）。
+- **必ず一時テーブルを使う（WITH は不可）**: 同じことを `WITH a AS (SELECT ... KLIKE ...) SELECT ... FROM a LEFT JOIN B` と書くと**誤結果になる**。これは KLIKE と無関係の別バグ（複数 CTE の CTE 間 JOIN が左 CTE の列を空にし行を重複させる＝**B51**・[ksql_b51_cte_to_cte_join_wrong_result_issue.md](ksql_b51_cte_to_cte_join_wrong_result_issue.md)）による。一時テーブル（`CREATE TEMP TABLE ... AS SELECT`）は実体化経路で正しく動くため、本回避策は必ず一時テーブルで書く。
+- **実データ確認**: APP730 で `CREATE TEMP TABLE #gifu AS SELECT ... WHERE 都道府県K KLIKE 'ギフケン' AND レコード番号 IN (1..5)` → `#gifu LEFT JOIN #b ON レコード番号` で、一致3件は結合列を持ち未一致2件は NULL 埋め＝`A LEFT JOIN B WHERE A.KLIKE` と等価な結果を確認した。同一論理の WITH 版は B51 のため誤結果だった（対照）。
+
 ### 2.7 CTE インライン化後の AST で計画を作る（[P1]）
 R1時点では検証用と実行用のインライン化が別実装で、実行側だけが `stripCteAlias` 相当の処理を行っていた。ノード同一性・対象テーブル判定（§2.1/2.2）を使う v2 では、この差で検証・抽出の集合が乖離する。
 - **実装**: `src/core/cteInlining.ts` の `canInlineSingleCte` / `buildInlinedQuery` に集約し、インライン化後の AST に対して押し下げ計画（§2.1）を生成する。同じ AST をfetch・JS評価へ渡し、EXPLAINにも`effective: inlined CTE`として表示する。
