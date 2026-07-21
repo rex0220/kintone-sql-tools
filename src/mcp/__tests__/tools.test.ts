@@ -54,6 +54,7 @@ describe("MCP tools", () => {
     expect(Object.keys(registered)).toEqual([
       "ksql_validate", "ksql_explain", "ksql_query", "ksql_mutate",
       "ksql_describe_app", "ksql_app_metadata", "ksql_show_apps",
+      "ksql_docs",
       "ksql_save_query", "ksql_list_queries", "ksql_get_query",
       "ksql_run_saved_query", "ksql_delete_query",
     ]);
@@ -64,7 +65,10 @@ describe("MCP tools", () => {
       expect(registered.ksql_describe_app.description).toContain(key);
     }
     expect(registered.ksql_query.description).toContain("ksql://language-reference");
+    expect(registered.ksql_query.description).toContain("ksql_docs when resources are unavailable");
     expect(registered.ksql_mutate.description).toContain("ksql://language-reference");
+    expect(registered.ksql_mutate.description).toContain("ksql_docs when resources are unavailable");
+    expect(registered.ksql_validate.description).toContain("Do not use validate probing");
   });
 
   test("logical validation payload は source/binding を公開し、EXPLAIN はmappedAppIdを公開しない", async () => {

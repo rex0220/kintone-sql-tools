@@ -390,7 +390,7 @@ function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertR
   };
 }
 
-function toErrorPayload(err: unknown) {
+export function toErrorPayload(err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
   const codeMatch = message.match(/^([A-Za-z]+Error):/);
   const errorName = err instanceof Error && err.name !== "Error" ? err.name : null;

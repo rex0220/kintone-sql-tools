@@ -129,6 +129,13 @@ export const showAppsInputSchema = z.object({
   timeout,
 });
 
+export const ksqlDocsInputSchema = z.object({
+  section: z.string().max(128).optional(),
+}).strict();
+
+// Pass the strict root schema itself to McpServer so unknown properties are rejected.
+export const ksqlDocsInputShape = ksqlDocsInputSchema;
+
 export const ksqlAppMetadataInputSchema = z.discriminatedUnion("resource", [
   z.object({
     resource: kintoneMetadataResource.extract(["app"]),

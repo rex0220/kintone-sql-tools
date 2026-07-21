@@ -4,7 +4,14 @@ import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildDocsResourceMap } from "../docsResourceBuilder.cjs";
-import { KSQL_DOCS } from "../docsResources";
+import {
+  KSQL_DOCS,
+  KSQL_DOCS_INDEX,
+  KSQL_DOCS_SECTION_KEYS,
+  KSQL_FUNCTION_CATALOG,
+  LANGUAGE_SECTION_KEYS,
+  RECIPE_KEYS,
+} from "../docsResources";
 import { createServer } from "../index";
 
 const languageSource = readFileSync(resolve("docs/ksql_language_reference.md"), "utf8");
@@ -52,6 +59,25 @@ describe("B50 embedded documentation resources", () => {
     expect(KSQL_DOCS.recipes.sections.r12.heading).toContain("cli-kintone");
     expect(Object.isFrozen(KSQL_DOCS)).toBe(true);
     expect(Object.isFrozen(KSQL_DOCS.languageReference.sections)).toBe(true);
+    expect(Object.isFrozen(KSQL_FUNCTION_CATALOG)).toBe(true);
+    for (const values of Object.values(KSQL_FUNCTION_CATALOG)) {
+      expect(Object.isFrozen(values)).toBe(true);
+    }
+    expect(KSQL_DOCS_SECTION_KEYS).toHaveLength(40);
+    expect(new Set(KSQL_DOCS_SECTION_KEYS).size).toBe(40);
+    expect(KSQL_DOCS_SECTION_KEYS).toEqual([
+      "language-reference",
+      ...LANGUAGE_SECTION_KEYS.map((key) => `language-reference/${key}`),
+      "recipes",
+      ...RECIPE_KEYS.map((key) => `recipes/${key}`),
+    ]);
+    expect(KSQL_DOCS_INDEX.indexOf(KSQL_DOCS.languageReference.index.trimEnd())).toBeLessThan(
+      KSQL_DOCS_INDEX.indexOf(KSQL_DOCS.recipes.index.trimEnd())
+    );
+    for (const key of KSQL_DOCS_SECTION_KEYS) expect(KSQL_DOCS_INDEX).toContain(`- ${key}`);
+    expect(KSQL_DOCS_INDEX).toContain('ksql_docs {"section":"language-reference/05-string-number-functions"}');
+    expect(KSQL_DOCS.languageReference.sections["05-string-number-functions"].text)
+      .toContain("`SUBSTR` → `SUBSTRING`");
   });
 
   test("lists and reads indexes/templates and rejects every non-allowlisted key without I/O", async () => {
@@ -77,6 +103,25 @@ describe("B50 embedded documentation resources", () => {
         "ksql://language-reference/{section}",
         "ksql://recipes/{recipe}",
       ]);
+
+      const languageCompletion = await client.complete({
+        ref: { type: "ref/resource", uri: "ksql://language-reference/{section}" },
+        argument: { name: "section", value: "05-" },
+      });
+      expect(languageCompletion.completion.values).toEqual(
+        LANGUAGE_SECTION_KEYS.filter((key) => key.startsWith("05-"))
+      );
+      expect(languageCompletion.completion.values.map((key) => `language-reference/${key}`)).toEqual(
+        KSQL_DOCS_SECTION_KEYS.filter((key) => key.startsWith("language-reference/05-"))
+      );
+      const recipeCompletion = await client.complete({
+        ref: { type: "ref/resource", uri: "ksql://recipes/{recipe}" },
+        argument: { name: "recipe", value: "r1" },
+      });
+      expect(recipeCompletion.completion.values).toEqual(["r1", "r10", "r11", "r12"]);
+      expect(recipeCompletion.completion.values.map((key) => `recipes/${key}`)).toEqual(
+        KSQL_DOCS_SECTION_KEYS.filter((key) => /^recipes\/r1(?:0|1|2)?$/.test(key))
+      );
 
       const index = await client.readResource({ uri: "ksql://language-reference" });
       expect(index.contents[0]).toMatchObject({

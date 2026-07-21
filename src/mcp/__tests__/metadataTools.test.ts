@@ -61,6 +61,7 @@ describe("ksql_app_metadata MCP surface", () => {
       "ksql_describe_app",
       "ksql_app_metadata",
       "ksql_show_apps",
+      "ksql_docs",
       "ksql_save_query",
       "ksql_list_queries",
       "ksql_get_query",
@@ -80,7 +81,9 @@ describe("ksql_app_metadata MCP surface", () => {
     }
     for (const toolName of ["ksql_query", "ksql_mutate"]) {
       expect(registered[toolName].description).toContain("ksql://language-reference");
+      expect(registered[toolName].description).toContain("ksql_docs when resources are unavailable");
     }
+    expect(registered.ksql_validate.description).toContain("Do not use validate probing");
     expect(metadata.inputSchema).toBe(ksqlAppMetadataInputShape);
     expect([...KINTONE_METADATA_RESOURCES]).toEqual([
       "app", "fields", "layout", "settings", "status", "views", "reports", "customize",
@@ -97,15 +100,23 @@ describe("ksql_app_metadata MCP surface", () => {
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
-      expect(instructions?.trim().split(/\s+/).length).toBeGreaterThanOrEqual(150);
-      expect(instructions?.trim().split(/\s+/).length).toBeLessThanOrEqual(220);
-      expect(instructions?.trim().split(/\n\n/)).toHaveLength(3);
+      expect(instructions?.trim().split(/\s+/).length).toBeGreaterThanOrEqual(240);
+      expect(instructions?.trim().split(/\s+/).length).toBeLessThanOrEqual(280);
+      expect(instructions?.trim().split(/\n\n/)).toHaveLength(4);
       for (const key of [
         "not generic SQL",
         "VALIDATE ONLY",
         "ksql_app_metadata",
         "ksql://language-reference",
         "APPLY mutation is disabled",
+        "ksql_docs",
+        "Complete function catalog",
+        "CURRENT_TIMESTAMP",
+        "GROUP_CONCAT",
+        "DENSE_RANK",
+        "LOGINUSER",
+        "SUBSTR→SUBSTRING",
+        "IFNULL",
       ]) {
         expect(instructions).toContain(key);
       }

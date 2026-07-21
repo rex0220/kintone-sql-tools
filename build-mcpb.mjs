@@ -63,6 +63,7 @@ const manifest = {
     { name: "ksql_describe_app", description: "Describe a kintone app." },
     { name: "ksql_app_metadata", description: "Inspect raw read-only app metadata and field constraints before generating SQL or DML." },
     { name: "ksql_show_apps", description: "List all kintone apps by profile; for one known app use ksql_app_metadata." },
+    { name: "ksql_docs", description: "Read embedded kSQL documentation through a read-only tool when MCP resources are unavailable; call ksql_docs without arguments for the index." },
     { name: "ksql_save_query", description: "Save a kSQL query." },
     { name: "ksql_list_queries", description: "List saved kSQL queries." },
     { name: "ksql_get_query", description: "Get a saved kSQL query." },

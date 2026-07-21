@@ -5,15 +5,18 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   KSQL_DOCS,
+  KSQL_FUNCTION_CATALOG,
   LANGUAGE_SECTION_KEYS,
   RECIPE_KEYS,
+  resolveKsqlDocsSection,
 } from "./docsResources";
-import { createKsqlMcpTools } from "./tools";
+import { createKsqlMcpTools, toErrorPayload, toToolResult } from "./tools";
 import {
   describeAppInputShape,
   explainInputShape,
   listQueriesInputShape,
   ksqlAppMetadataInputShape,
+  ksqlDocsInputShape,
   mutateInputShape,
   queryInputShape,
   runSavedQueryInputShape,
@@ -76,25 +79,15 @@ JSON child IDs are rejected and replacement renumbers all rows.
 declare const __KSQL_VERSION__: string;
 const SERVER_VERSION = typeof __KSQL_VERSION__ === "string" ? __KSQL_VERSION__ : "0.0.0-dev";
 
-export const KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. It supports SELECT,
-JOIN, aggregates, CTEs, UNION, ROW_NUMBER/RANK/DENSE_RANK, GROUP_CONCAT,
-INSERT/UPDATE/UPSERT/DELETE, UPDATE ... FROM, subtable virtual tables
-(APPxxx$table with _pid/_rid/_idx), REORDER, IMPORT, VALIDATE/VALIDATE ONLY,
-ON ERROR SKIP, CHECK, KLIKE, KORDER BY, and multi-statement batches with temp
-tables and SET/DECLARE @variables. LAPP_<NAME> resolves logical apps.
+const FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog — Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; LOGINUSER resolves to an empty string in Node/MCP). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL, STDDEV, and MEDIAN do not exist. Use ksql_docs for arguments and constraints.`;
 
-Important dialect rules: LIKE/NOT LIKE uses JavaScript semantics and is not a
-kintone-native predicate; JOIN ON accepts one equality only; FROM (SELECT ...)
-derived tables are unsupported (use WITH or a temp table); numeric arithmetic
-treats an empty cell as 0. APPLY syntax can be validated/explained and used with
-VALIDATE ONLY, but APPLY mutation is disabled by this MCP server.
+export const KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. It supports SELECT, JOIN, aggregates, CTEs, UNION, window functions, DML, subtable virtual tables, REORDER, IMPORT, VALIDATE/VALIDATE ONLY, ON ERROR SKIP, CHECK, KLIKE, KORDER BY, multi-statement batches, temp tables, @variables, and LAPP_<NAME> logical apps.
 
-Validate generated syntax with ksql_validate before execution. For DML form/data
-preflight, execute the statement with VALIDATE ONLY through ksql_query before
-ksql_mutate. Use ksql_app_metadata (especially resource=fields/settings) to
-inspect raw app constraints before generating SQL or DML. Read
-ksql://language-reference and ksql://recipes for section indexes, then read only
-the relevant section resource.`;
+Key rules: LIKE/NOT LIKE has JavaScript semantics; JOIN ON accepts one equality; derived tables are unsupported (use WITH or temp tables); empty numeric cells become 0 in arithmetic. APPLY may be validated, explained, or used with VALIDATE ONLY, but APPLY mutation is disabled by this MCP server.
+
+Before execution, use ksql_validate. Before DML, run VALIDATE ONLY through ksql_query, inspect constraints with ksql_app_metadata, then use ksql_mutate. Read ksql://language-reference and ksql://recipes, or call ksql_docs when resources are unavailable. Start ksql_docs without arguments and read only needed sections. Do not probe ksql_validate to discover functions or syntax.
+
+${FUNCTION_CATALOG_PARAGRAPH}`;
 
 const MARKDOWN_MIME_TYPE = "text/markdown";
 
@@ -113,6 +106,14 @@ function invalidResourceKey(kind: string, key: string): never {
   throw new McpError(ErrorCode.InvalidParams, `Unknown kSQL ${kind} resource key: ${key}`);
 }
 
+function toDocsSuccessResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+function toDocsErrorResult(err: unknown) {
+  return toToolResult(toErrorPayload(err), true);
+}
+
 export function createServer(args: ServerArgs): McpServer {
   const server = new McpServer(
     {
@@ -128,7 +129,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_validate", {
     title: "Validate kSQL",
-    description: "Parse and validate kSQL without calling kintone APIs. All APPLY forms (UPDATE/INSERT/UPSERT/multi-value) are accepted for syntax and static validation, but this does not enable APPLY mutation. Use this before executing generated SQL. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Parse and validate kSQL without calling kintone APIs. All APPLY forms (UPDATE/INSERT/UPSERT/multi-value) are accepted for syntax and static validation, but this does not enable APPLY mutation. Use this before executing generated SQL. Do not use validate probing to discover functions or syntax; call ksql_docs instead. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: validateInputShape,
   }, tools.validateTool);
 
@@ -140,13 +141,13 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_query", {
     title: "Run read-only kSQL",
-    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, leading VALIDATE app existing-record audits, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE and VALIDATE ONLY always treat onLimit=truncate as error and perform zero write API calls. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY evaluates dmlMaxSubtableRows with the fixed default 500; ksql_query does not expose an override. Existing-record VALIDATE applies built-in form constraints plus optional CHECK groups and can materialize its fixed five diagnostic columns with INTO #err in a batch. NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. APPLY mutation remains fail-closed; mutating DML is rejected. For kSQL dialect details, follow the server instructions and read ksql://language-reference.",
+    description: "Execute read-only kSQL: SELECT, WITH, UNION, EXPLAIN, SHOW APPS, DESCRIBE, ASSERT, leading VALIDATE app existing-record audits, and INSERT/UPSERT/UPDATE ... VALIDATE ONLY. ASSERT failure always stops the batch. Local ORDER BY plans require complete input and fail instead of returning a truncated top-N; REST top-N and KORDER_NATIVE do not fetch a partial candidate set. VALIDATE and VALIDATE ONLY always treat onLimit=truncate as error and perform zero write API calls. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY evaluates dmlMaxSubtableRows with the fixed default 500; ksql_query does not expose an override. Existing-record VALIDATE applies built-in form constraints plus optional CHECK groups and can materialize its fixed five diagnostic columns with INTO #err in a batch. NUMBER targets use the app numberPrecision settings for integer-digit validation and fail closed if settings cannot be read. Excess fractional digits pass through for kintone to round automatically. Supports multi-statement batches with temp tables, including VALIDATE ONLY INTO #err for later SELECT. APPLY mutation remains fail-closed; mutating DML is rejected. For kSQL dialect details, follow the server instructions and read ksql://language-reference (or call ksql_docs when resources are unavailable).",
     inputSchema: queryInputShape,
   }, tools.queryTool);
 
   server.registerTool("ksql_mutate", {
     title: "Run mutating kSQL (IMPORT CSV/JSON via importSources)",
-    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is always rejected by MCP v3.8.0 before runtime or records API creation; allowDml and dmlMaxSubtableRows do not enable it. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows). For kSQL dialect details, follow the server instructions and read ksql://language-reference.",
+    description: "Execute DML kSQL with explicit allowDml, confirmText, and dmlMaxRows safety controls. Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value) is always rejected by MCP v3.8.0 before runtime or records API creation; allowDml and dmlMaxSubtableRows do not enable it. Supports multi-statement DML batches with temp tables. ON ERROR SKIP INTO #err optionally isolates local Tier-0 validation failures and writes only valid rows; REJECT LIMIT stops with zero writes while returning diagnostics. NUMBER targets use the destination app numberPrecision settings for integer-digit validation in normal, validation-only, and skip paths; settings failures are fail-closed. Excess fractional digits pass through for kintone to round automatically. INSERT/UPSERT INTO app ... SELECT supports app sources, temp tables, or joins of both. UPDATE ... FROM supports copying scalar fields from an app or temp table by matching target $id or a single-line-text/number business key to one source key. For UPSERT, dmlMaxRows counts inserts + updates. dmlMaxRows caps affected rows only, not source reads: source SELECT, ON ERROR SKIP candidates, and UPDATE ... FROM app reads use the runtime maxRecords (KSQL_MAX_RECORDS / profile query.maxRecords, default 500); temp tables hold at most 10000 rows by default (adjustable via tempTableMaxRows). For kSQL dialect details, follow the server instructions and read ksql://language-reference (or call ksql_docs when resources are unavailable).",
     inputSchema: mutateInputShape,
   }, tools.mutateTool);
 
@@ -168,6 +169,19 @@ export function createServer(args: ServerArgs): McpServer {
       "Return the full app list (id, name, description) for the selected profile using SHOW APPS. This enumerates every app and can be large on big domains; use it only to discover an unknown app id by name. When you already know the target app, fetch just that one with ksql_app_metadata (resource=app for basics via GET /k/v1/app.json, or fields/settings for constraints) instead of listing all apps.",
     inputSchema: showAppsInputShape,
   }, tools.showAppsTool);
+
+  server.registerTool("ksql_docs", {
+    title: "Read kSQL documentation",
+    description: "Read the embedded kSQL language reference and recipes through a read-only tool when MCP resources are unavailable. Call without arguments for the complete section index.",
+    inputSchema: ksqlDocsInputShape,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, ({ section }) => {
+    try {
+      return toDocsSuccessResult(resolveKsqlDocsSection(section));
+    } catch (err) {
+      return toDocsErrorResult(err);
+    }
+  });
 
   server.registerTool("ksql_save_query", {
     title: "Save kSQL query",
