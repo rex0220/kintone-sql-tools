@@ -1,7 +1,7 @@
 # B56 — 統計集約関数の拡充（STDDEV_POP/STDDEV_SAMP/VAR_POP/VAR_SAMP/MEDIAN）
 
 - 起票日: 2026-07-22
-- ステータス: 📝 **[仕様 R2](ksql_b56_statistical_aggregates_spec.md) 起草済（2026-07-22・codex 仕様レビュー R1→R2 反映済・ユーザー承認待ち）**。起票時 codex レビュー（P1×1/P2×5/P3×1）反映済
+- ステータス: 📋 **[仕様 R2.1](ksql_b56_statistical_aggregates_spec.md) 承認済・実装着手（2026-07-22・R2-Q1/Q2 は主要 RDB 前例調査で確定）**。起票時 codex レビュー（P1×1/P2×5/P3×1）反映済
 - 種別: 改善（集計関数の拡充）
 - 効果種別: 機能・性能（MCP クライアントのコンテキスト消費削減）
 - 関連: **B55**（MCP instructions 全量関数カタログ＝追加時の同期必須）／**B14**（temp/CTE 列の型メタ伝播）／**B9**（厳密10進比較）

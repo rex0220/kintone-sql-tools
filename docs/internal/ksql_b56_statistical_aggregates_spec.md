@@ -1,6 +1,6 @@
 # B56 仕様 — 統計集約関数（STDDEV_POP / STDDEV_SAMP / VAR_POP / VAR_SAMP / MEDIAN）
 
-- ステータス: 📝 **仕様 R2（2026-07-22・codex レビュー R1→R2 反映済・ユーザー承認待ち）**
+- ステータス: 📋 **仕様 R2.1（2026-07-22・ユーザー承認済＝R2-Q1 空文字規約 / R2-Q2 ArgumentError 規約を確定・実装着手可）**。§10 の主要 RDB 前例調査（Web 裏取り）が両決定の根拠
 - 起票: [B56 issue](ksql_b56_statistical_aggregates_issue.md)
 - 種別: 改善（集計関数の拡充）／SemVer: **minor**（純追加・既存挙動不変）
 - 関連: B55（MCP 全量関数カタログ同期）／B14（型メタ）／B9（厳密10進・本機能は binary64）／B30（完全入力 fail-closed の前例）
@@ -148,7 +148,35 @@ onLimit=truncate: disabled
 10. **非回帰**: 既存 6 集計（NaN 伝播・文字列 DISTINCT・truncate 挙動を含めて不変）・全テスト green・B55 drift guard / 語数 guard green。
 11. **予約語**: バッククォートで同名フィールド参照可。
 
-## 9. 残論点（ユーザー判断）
+## 9. 解決済み論点（2026-07-22・ユーザー承認）
 
-- R2-Q1: §4.3「未定義統計量=空文字」の採否（代替: `NaN` 文字列 / 実行時 ArgumentError。空文字案は kintone 空セルとの同型性が根拠）。
-- R2-Q2: §4.1「非数値・非有限は ArgumentError」の採否（代替: SUM/AVG 同様の NaN 伝播。ArgumentError 案は fail-closed 原則が根拠・SUM/AVG との文内非対称は許容する）。
+- **R2-Q1: §4.3「未定義統計量=空文字」を採用（確定）**。根拠=§10 前例調査＝主要 4 RDB すべてが空集合・`_SAMP` 1 件で NULL を返す（クエリは落とさない）。kSQL に NULL 出力はなく空文字が NULL 相当。R1 の 0 案は Oracle 無印 `STDDEV` だけの歴史的例外挙動（PostgreSQL は同挙動を 2003 年に誤りとして NULL へ修正）。
+- **R2-Q2: §4.1「非数値・非有限は ArgumentError」を採用（確定）**。根拠=§10 前例調査＝PostgreSQL/Oracle/SQL Server の 3/4 がエラー。MySQL のみ 0 へ黙変換（warning）で、これは「静かに誤った統計値」を生む側＝kSQL の fail-closed 原則に反する。
+
+## 10. 前例調査（主要 RDB の実挙動・2026-07-22・Web 裏取り済）
+
+### 10.1 空集合・1 件の返り値
+
+| | 0 件（空集合） | `_SAMP` 系 1 件 | 無印 1 件 |
+|---|---|---|---|
+| MySQL | NULL（公式マニュアルが 7 関数すべてで明記） | NULL（2 件未満は NULL） | NULL（無印 STD/STDDEV/VARIANCE=**母集団**の方言） |
+| PostgreSQL | NULL | NULL（「入力 1 行なら NULL」を明文化） | NULL（無印=**標本**の別名） |
+| Oracle | NULL | NULL（`STDDEV_SAMP`） | **0**（無印 `STDDEV` のみ。公式が「`_SAMP` との違いは 1 行で 0 を返すこと」と明記＝歴史的例外） |
+| SQL Server | NULL | NULL（`STDEV`=標本） | —（無印なし・STDEV/STDEVP の 2 本立て） |
+
+→ 「定義できない統計量は NULL・クエリは落とさない」が業界標準。kSQL の空文字（kintone 空セル）は NULL と同型。
+
+### 10.2 非数値入力
+
+| | 挙動 |
+|---|---|
+| MySQL | 暗黙 cast で計算続行（非数値文字列→0・warning のみ）＝唯一の寛容派 |
+| PostgreSQL | エラー（型システムが text への適用を拒否・cast 不能値は invalid input syntax） |
+| Oracle | 実行時エラー（ORA-01722 invalid number） |
+| SQL Server | エラー（STDEV 等は数値型引数のみ） |
+
+### 10.3 その他の裏付け
+
+- **無印を追加しない判断（§2.2）**: MySQL=母集団 vs PostgreSQL/Oracle=標本と、現役 RDB 間で無印の意味が実際に割れている。
+- **MEDIAN**: ネイティブ集計を持つのは Oracle のみ（空集合→NULL）。他は `PERCENTILE_CONT` 代替＝kSQL の「MEDIAN 採用・PERCENTILE_CONT 見送り」は Oracle 前例＋構文コスト回避の構成。
+- 出典: MySQL 8.4 Reference Manual（aggregate-functions）・Oracle Database SQL Reference（STDDEV）・ORACLE-BASE・PostgreSQL メーリングリスト（2003 年の stddev 1 行=0 修正）。
