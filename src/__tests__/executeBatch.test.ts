@@ -493,7 +493,7 @@ test("ON ERROR SKIP の #err 上限超過は prepared plan を書き込まない
   expect(client.postCalls).toHaveLength(0);
 });
 
-test("ON ERROR SKIP UPSERT は targetIndex を再取得せず合格行だけ更新する", async () => {
+test("ON ERROR SKIP UPSERT は targetIndex を再取得せず照合後snapshotを取得して合格行だけ更新する", async () => {
   const client = makeClient({ recordsByApp: {
     100: [makeRecord({ $id: "7", code: "A", name: "old" })],
   } });
@@ -511,7 +511,10 @@ test("ON ERROR SKIP UPSERT は targetIndex を再取得せず合格行だけ更�
   expect(batch.statements[0].result).toMatchObject({
     type: "UPSERT", insertedCount: 0, updatedCount: 1, affectedRows: 1, skippedRows: 1,
   });
-  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(1);
+  expect(client.getCalls.filter((call) => call.app === 100)).toEqual([
+    expect.objectContaining({ fields: ["$id", "code"] }),
+    expect.objectContaining({ query: "$id in (7) limit 500", fields: ["$id", "code", "name"] }),
+  ]);
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(1);
   expect(client.putCalls[0].records).toEqual([

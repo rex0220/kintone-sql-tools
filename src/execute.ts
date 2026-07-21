@@ -4792,7 +4792,11 @@ async function prepareDmlValidation(
   const updateCandidates = candidates.filter((candidate) => candidate.mode === "update");
   const productionUpdateLoader = stmt.type === "UPDATE"
     ? loadMaterializedUpdateSnapshots
-    : undefined;
+    : stmt.type.startsWith("UPSERT")
+      ? (input: DmlUpdateModeSnapshotLoadInput) => loadUpsertValidationSnapshots(
+        input, client, options.maxRecords ?? 10_000
+      )
+      : undefined;
   const updateSnapshotLoader = options.loadUpdateModeSnapshots ?? productionUpdateLoader;
   const usePreparedPostImages = updateCandidates.length > 0 && updateSnapshotLoader !== undefined;
   const preparedPostImages = new Map<number, ReturnType<typeof validatePostImage>>();
@@ -5217,6 +5221,57 @@ async function loadMaterializedUpdateSnapshots(
       throw new Error(`InternalError: duplicate UPDATE validation candidate target: ${candidate.targetId}.`);
     }
     snapshots.set(candidate.targetId, candidate.validationSnapshot);
+  }
+  return snapshots;
+}
+
+async function loadUpsertValidationSnapshots(
+  input: DmlUpdateModeSnapshotLoadInput,
+  client: KintoneClient,
+  maxRecords: number
+): Promise<ReadonlyMap<number, KintoneRecord>> {
+  const updateIds = [...new Set(input.candidates.map((candidate) => {
+    const id = candidate.targetId;
+    if (!Number.isSafeInteger(id) || id === undefined || id <= 0) {
+      throw new Error(
+        `InternalError: invalid targetId in UPSERT validation candidate: ${String(id)}.`
+      );
+    }
+    return id;
+  }))];
+  if (updateIds.length > maxRecords) {
+    throw new FetchAllLimitError(
+      `取得件数が上限（${maxRecords} 件）を超えました。WHERE 句で絞り込むか、maxRecords を引き上げてください。`
+    );
+  }
+
+  const requestedIds = new Set(updateIds);
+  const snapshots = new Map<number, KintoneRecord>();
+  for (const ids of splitChunks(updateIds, 100)) {
+    const response = await client.getRecords({
+      app: input.appId,
+      query: `$id in (${ids.join(",")}) limit 500`,
+      fields: [...new Set(input.fields)],
+    });
+    for (const snapshot of response.records) {
+      const rawId = snapshot["$id"]?.value;
+      const id = Number(rawId);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(`InternalError: invalid $id in UPSERT validation snapshot: ${String(rawId)}.`);
+      }
+      if (!requestedIds.has(id)) {
+        throw new Error(`InternalError: unexpected $id in UPSERT validation snapshot: ${id}.`);
+      }
+      if (snapshots.has(id)) {
+        throw new Error(`InternalError: duplicate $id in UPSERT validation snapshot: ${id}.`);
+      }
+      snapshots.set(id, snapshot);
+    }
+  }
+  for (const id of updateIds) {
+    if (!snapshots.has(id)) {
+      throw new Error(`InternalError: update-mode snapshot is missing for record ${id}.`);
+    }
   }
   return snapshots;
 }

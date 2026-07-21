@@ -123,6 +123,32 @@ function makePagedClient(
   return client;
 }
 
+function makeUpsertSnapshotClient(
+  targets: KintoneRecord[],
+  snapshotResponse?: (ids: number[], records: KintoneRecord[]) => KintoneRecord[]
+): ReturnType<typeof makeClient> {
+  const client = makeClient({ records: targets });
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    const idMatch = params.query.match(/^\$id in \(([^)]*)\) limit 500$/);
+    if (idMatch) {
+      const ids = idMatch[1].split(",").filter(Boolean).map(Number);
+      const requested = new Set(ids);
+      const records = targets.filter((record) => requested.has(Number(record["$id"]?.value)));
+      return { records: snapshotResponse ? snapshotResponse(ids, records) : records };
+    }
+    const keyMatch = params.query.match(/\bcode in \(([^)]*)\)/);
+    if (keyMatch) {
+      const keys = new Set([...keyMatch[1].matchAll(/"((?:\\.|[^"])*)"/g)].map((match) =>
+        JSON.parse(`"${match[1]}"`) as string
+      ));
+      return { records: targets.filter((record) => keys.has(String(record.code?.value ?? ""))) };
+    }
+    return { records: targets };
+  };
+  return client;
+}
+
 test("FULL_SCAN WHERE/CASE/HAVINGは16桁超NUMBERを同じ厳密比較器で評価する", async () => {
   const records = [
     makeRecord({ $id: "1", kind: "low", n: "9007199254740992" }),
@@ -602,6 +628,259 @@ test("B43 Phase 3 D6: 処分節なし通常UPDATEのGET field setは従来どお
   expect(dependent.getCalls[0].fields).toEqual(["$id", "source"]);
 });
 
+test("B43 Phase 5: UPSERT-update VALIDATE ONLY は照合後snapshot GETで非SET子違反をUPSERTとして検出する", async () => {
+  const target = makeTypedRecord({
+    $id: "7",
+    code: "A",
+    memo: "before",
+    Lines: [{ id: "line-1", value: { child: { value: "x" } } }],
+  });
+  const client = makeClient({ records: [target] });
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+  ];
+
+  const result = await execute(
+    "UPSERT INTO APP100 (code, memo) VALUES ('A', 'after') ON DUPLICATE (code) VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase5-upsert-update-subtable" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(result).toMatchObject({ validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 1 });
+  expect(result.errors).toEqual([expect.objectContaining({
+    code: "A",
+    memo: "after",
+    $err_operation: "UPSERT",
+    $err_field: "child",
+    $err_value: "x",
+    $err_subtable: "Lines",
+    $err_subrow: "1",
+    $err_subrow_id: "line-1",
+  })]);
+  expect(client.getCalls).toHaveLength(2);
+  expect(client.getCalls[1]).toMatchObject({
+    app: 100,
+    query: "$id in (7) limit 500",
+    fields: ["$id", "code", "memo", "Lines"],
+  });
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test.each([
+  { name: "0 IDs", count: 0, expectedGets: 0 },
+  { name: "1 ID", count: 1, expectedGets: 1 },
+  { name: "100 IDs", count: 100, expectedGets: 1 },
+  { name: "101 IDs", count: 101, expectedGets: 2 },
+])("B43 Phase 5: $name はdistinct target IDを最大100件ずつsnapshot GETする", async ({ count, expectedGets }) => {
+  const targets = Array.from({ length: count }, (_, index) => makeRecord({
+    $id: String(index + 1), code: `K${index + 1}`, memo: "before",
+  }));
+  const client = makeUpsertSnapshotClient(targets);
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const values = count === 0
+    ? "('NEW', 'after')"
+    : Array.from({ length: count }, (_, index) => `('K${index + 1}', 'after')`).join(",");
+
+  const result = await execute(
+    `UPSERT INTO APP100 (code, memo) VALUES ${values} ON DUPLICATE (code) VALIDATE ONLY`,
+    client,
+    { cacheContext: `b43-phase5-chunks-${count}` }
+  );
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: Math.max(1, count), invalidRows: 0,
+  });
+
+  const snapshotGets = client.getCalls.filter((call) => call.query.startsWith("$id in ("));
+  expect(snapshotGets).toHaveLength(expectedGets);
+  const fetchedIds = snapshotGets.flatMap((call) => {
+    const ids = call.query.match(/^\$id in \(([^)]*)\) limit 500$/)?.[1].split(",").filter(Boolean) ?? [];
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBeLessThanOrEqual(100);
+    expect(call.fields).not.toContain("$revision");
+    return ids;
+  });
+  expect(new Set(fetchedIds).size).toBe(fetchedIds.length);
+  expect(fetchedIds).toHaveLength(count);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 5: 重複targetIdは1 snapshot GETにdistinct化し、create/update混在は元source rowを維持する", async () => {
+  const target = makeTypedRecord({
+    $id: "7", code: "A", memo: "before",
+    Lines: [{ id: "line-1", value: { child: { value: "x" } } }],
+  });
+  const duplicate = makeUpsertSnapshotClient([target]);
+  duplicate.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await execute(
+    "UPSERT INTO APP100 (code, memo) VALUES ('A', 'x'), ('A', 'y') ON DUPLICATE (code) VALIDATE ONLY",
+    duplicate,
+    { cacheContext: "b43-phase5-duplicate-target" }
+  );
+  expect(duplicate.getCalls.filter((call) => call.query.startsWith("$id in ("))).toEqual([
+    expect.objectContaining({ query: "$id in (7) limit 500" }),
+  ]);
+
+  const mixed = makeUpsertSnapshotClient([target]);
+  mixed.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+  ];
+  const result = await execute(
+    "UPSERT INTO APP100 (code, memo) VALUES ('B', ''), ('A', 'after') ON DUPLICATE (code) VALIDATE ONLY",
+    mixed,
+    { cacheContext: "b43-phase5-mixed-rows" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+  expect(result.errors.map((error) => ({
+    row: error.$err_row,
+    code: error.$err_code,
+    operation: error.$err_operation,
+    value: error.$err_value,
+    subtable: error.$err_subtable,
+    subrow: error.$err_subrow,
+    subrowId: error.$err_subrow_id,
+  }))).toEqual([
+    { row: "1", code: "ERR_REQUIRED", operation: "UPSERT", value: "", subtable: "", subrow: "", subrowId: "" },
+    { row: "2", code: "ERR_LENGTH_MIN", operation: "UPSERT", value: "x", subtable: "Lines", subrow: "1", subrowId: "line-1" },
+  ]);
+  expect(mixed.getCalls.filter((call) => call.query.startsWith("$id in ("))).toHaveLength(1);
+});
+
+test.each([
+  { name: "missing", response: () => [] as KintoneRecord[], message: "snapshot is missing" },
+  { name: "duplicate", response: (_ids: number[], records: KintoneRecord[]) => [records[0], records[0]], message: "duplicate $id" },
+  { name: "invalid $id", response: () => [makeRecord({ $id: "bad", code: "A", memo: "before" })], message: "invalid $id" },
+])("B43 Phase 5: UPSERT snapshot $name はwrite 0で文全体fail-closed", async ({ response, message }) => {
+  const client = makeUpsertSnapshotClient(
+    [makeRecord({ $id: "7", code: "A", memo: "before" })],
+    response
+  );
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const batch = await executeBatch(
+    "UPSERT INTO APP100 (code, memo) VALUES ('A', 'after') ON DUPLICATE (code) " +
+      "ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    { cacheContext: `b43-phase5-fail-${message}` }
+  );
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[0].error?.message).toContain(message);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 5: UPSERT snapshot maxRecords超過はwrite前にfail-closed", async () => {
+  const targets = Array.from({ length: 51 }, (_, index) => makeRecord({
+    $id: String(index + 1), code: `K${index + 1}`, memo: "before",
+  }));
+  const client = makeUpsertSnapshotClient(targets);
+  client.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  const values = targets.map((_target, index) => `('K${index + 1}', 'after')`).join(",");
+  await expect(execute(
+    `UPSERT INTO APP100 (code, memo) VALUES ${values} ON DUPLICATE (code) VALIDATE ONLY`,
+    client,
+    { cacheContext: "b43-phase5-over-limit", maxRecords: 50, onLimitReached: "truncate" }
+  )).rejects.toThrow("取得件数が上限");
+  expect(client.getCalls.filter((call) => call.query.startsWith("$id in ("))).toHaveLength(0);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 5: UPSERT SELECTとIMPORT生成UPSERTのupdate branchもsnapshot loaderを通る", async () => {
+  const target = makeRecord({ $id: "7", code: "A", memo: "before", requiredTop: "" });
+  const source = makeRecord({ $id: "1", code: "A", memo: "after" });
+  const selectClient = makeClient({ recordsByApp: { 100: [target], 200: [source] } });
+  selectClient.getFields = async (appId) => appId === 100
+    ? [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+    ]
+    : [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  selectClient.getRecords = async (params) => {
+    selectClient.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    return { records: params.app === 200 ? [source] : [target] };
+  };
+  const selected = await execute(
+    "UPSERT INTO APP100 (code, memo) SELECT code, memo FROM APP200 ON DUPLICATE (code) VALIDATE ONLY",
+    selectClient,
+    { cacheContext: "b43-phase5-upsert-select" }
+  );
+  expect(selected).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 1 });
+  expect(selectClient.getCalls.filter((call) => call.app === 100 && call.query.startsWith("$id in ("))).toEqual([
+    expect.objectContaining({ query: "$id in (7) limit 500" }),
+  ]);
+
+  const importClient = makeUpsertSnapshotClient([target]);
+  importClient.getFields = selectClient.getFields;
+  const imported = await execute(
+    "IMPORT INTO APP100 (code, memo) FROM CSV src BY NAME ON DUPLICATE (code) VALIDATE ONLY",
+    importClient,
+    importCsvOptions("code,memo\nA,after", "b43-phase5-import-upsert")
+  );
+  expect(imported).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 1 });
+  expect(importClient.getCalls.filter((call) => call.query.startsWith("$id in ("))).toEqual([
+    expect.objectContaining({ query: "$id in (7) limit 500" }),
+  ]);
+});
+
+test("B43 Phase 5 D6: 処分節なしplain UPSERT/UPSERT SELECTは追加snapshot GETなし", async () => {
+  const target = makeRecord({ $id: "7", code: "A", memo: "before", outside: "keep" });
+  const valuesClient = makeClient({ records: [target] });
+  valuesClient.getFields = async () => [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT" },
+  ];
+  await execute(
+    "UPSERT INTO APP100 (code, memo) VALUES ('A', 'after') ON DUPLICATE (code)",
+    valuesClient,
+    { cacheContext: "b43-phase5-d6-values" }
+  );
+  expect(valuesClient.getCalls).toHaveLength(1);
+  expect(valuesClient.getCalls[0].fields).toEqual(["$id", "code"]);
+  expect(valuesClient.putCalls).toHaveLength(1);
+
+  const source = makeRecord({ $id: "1", code: "A", memo: "after" });
+  const selectClient = makeClient({ recordsByApp: { 100: [target], 200: [source] } });
+  selectClient.getFields = async (appId) => appId === 100
+    ? valuesClient.getFields(100)
+    : [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+  await execute(
+    "UPSERT INTO APP100 (code, memo) SELECT code, memo FROM APP200 ON DUPLICATE (code)",
+    selectClient,
+    { cacheContext: "b43-phase5-d6-select" }
+  );
+  const targetGets = selectClient.getCalls.filter((call) => call.app === 100);
+  expect(targetGets).toHaveLength(1);
+  expect(targetGets[0].fields).toEqual(["$id", "code"]);
+  expect(selectClient.putCalls).toHaveLength(1);
+});
+
 test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {
   const applySql = "UPSERT INTO APP100 (code) VALUES ('A') ON DUPLICATE (code) "
     + "ON INSERT APPLY 表 (APPEND (子) VALUES ('initial'))";
@@ -912,6 +1191,10 @@ test("Phase 5C JSON UPSERT replaces only present tables, uses revision, and expo
   // Updating follows the same closed target set; absent Notes is preserved and Lines=[] deletes rows.
   expect(client.putCalls[0].records).toEqual([{ id: 7, revision: 3, record: { code: { value: "A" }, Lines: { value: [] } } }]);
   expect(client.putCalls[0].records[0].record).not.toHaveProperty("Notes");
+  // B43 Phase 5 の plain validation loader はこの IMPORT 固有置換経路へ入らない。
+  expect(client.getCalls.filter((call) => call.query.startsWith("$id in ("))).toEqual([
+    expect.objectContaining({ fields: ["$id", "$revision", "Lines", "Notes"] }),
+  ]);
 });
 
 test("Phase 5C rejects JSON row IDs, duplicate UPSERT source, and confirmation refusal", async () => {
