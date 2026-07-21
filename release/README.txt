@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v3.11.0)
+ksql 配布パッケージ (v3.12.0)
 
-1. ksql-plugin-v3.11.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.12.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.12.0: MCP に read-only ドキュメントツール ksql_docs を追加 (B55)。
+- MCP resources を中継しないクライアント (リモート接続のプロキシ等) でも、
+  ksql_docs ツールだけで言語リファレンス・レシピの索引と各章本文を読める。
+  引数なしで全章キーの索引、section 指定 (resource と同じキー語彙・
+  ksql:// URI 形も可) で 1 章を返す。kintone API 呼び出しゼロ。
+- server instructions に全量の関数カタログ (scalar/aggregate/window/
+  contextual/alias/syntax) を掲載し、AI が validate 試行錯誤で関数の有無を
+  推定する行動を抑止。ksql_validate/ksql_query/ksql_mutate の説明にも
+  ksql_docs への導線を追記。
+- プラグイン・CLI の SQL 挙動に変更なし (MCP のみの追加)。
 
 v3.11.0: CTE 関連の 2 バグ修正。
 - B51: 複数の CTE を CTE 同士で JOIN すると、左 CTE の列が空になり行が重複し
