@@ -179,13 +179,28 @@ test("UPDATE WHERE ワイルドカードなし LIKE も安全のため拒否", (
   expect(() => updateToGetQuery(stmt)).toThrow("親レコード DML には JS 評価経路がない");
 });
 
-test("親 UPDATE / DELETE でも KLIKE を中央ガードで拒否する", () => {
+test("B5: 親 UPDATE / 行依存 UPDATE / DELETE の KLIKE を native query へ変換する", () => {
   const update = parse("UPDATE APP100 SET f = 'v' WHERE 件名 KLIKE '報告'") as UpdateStatement;
-  const del = parse("DELETE FROM APP100 WHERE 件名 NOT KLIKE '一時'") as DeleteStatement;
-  expect(() => updateToGetQuery(update)).toThrow(DmlConvertError);
-  expect(() => updateToGetQuery(update)).toThrow(/通常の親レコード DML/);
-  expect(() => updateToGetQuery(update)).toThrow(/APPLY 複数親 UPDATE/);
-  expect(() => deleteToGetQuery(del)).toThrow(DmlConvertError);
+  const rowDependent = parse(
+    "UPDATE APP100 SET 金額 = 金額 + 1 WHERE 件名 NOT KLIKE '一時'"
+  ) as UpdateStatement;
+  const del = parse("DELETE FROM APP100 WHERE NOT (件名 KLIKE '一時')") as DeleteStatement;
+
+  expect(updateToGetQuery(update).query).toBe('件名 like "報告"');
+  expect(updateToGetQueryForArith(rowDependent).query).toBe('件名 not like "一時"');
+  expect(deleteToGetQuery(del).query).toBe('(件名 not like "一時")');
+});
+
+test("B5: OR / NOT 配下も WHERE 全体を native query へ変換する", () => {
+  const update = parse(
+    "UPDATE APP100 SET f = 'v' WHERE 件名 KLIKE '報告' OR 種別 = 'A'"
+  ) as UpdateStatement;
+  const del = parse(
+    "DELETE FROM APP100 WHERE NOT (件名 KLIKE '報告' OR 種別 = 'A')"
+  ) as DeleteStatement;
+
+  expect(updateToGetQuery(update).query).toBe('件名 like "報告" or 種別 = "A"');
+  expect(deleteToGetQuery(del).query).toBe('(件名 not like "報告" and 種別 != "A")');
 });
 
 test("UPDATE WHERE IN → kintone クエリ", () => {

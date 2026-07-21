@@ -26,7 +26,7 @@ export class KlikeValidationError extends Error {
  * - KLIKE は WHERE だけで使用可能。FULL_SCAN では共有計画に入る AND リーフに限定
  * - 右辺は文字列または未解決のバッチ変数だけ
  * - kintone が検索語から除外する % は拒否
- * - DML は APPLY 複数親 UPDATE の安全な親 WHERE だけを carve-out し、他は拒否
+ * - DML は通常親 UPDATE / DELETE と APPLY 複数親 UPDATE の安全な親 WHERE だけを carve-out
  */
 export function validateKlikeStatement(stmt: Statement): void {
   validateStatement(stmt);
@@ -69,21 +69,62 @@ function validateStatement(stmt: Statement): void {
         validateNestedSelects(stmt);
         return;
       }
+      if (containsKlike(stmt) && stmt.subtableCode) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE はサブテーブル UPDATE の WHERE では使用できません"
+        );
+      }
+      if (
+        !stmt.applyBlocks?.length && !stmt.subtableCode && whereHasKlike(stmt.where)
+        && !containsKlikeOutsideWhereAndNestedSelects(stmt, stmt.where)
+      ) {
+        validateKlikeWhereExpressions(stmt.where);
+        validateNestedSelects(stmt);
+        return;
+      }
       if (containsKlike(stmt)) {
         throw new KlikeValidationError(
-          "KLIKE / NOT KLIKE は通常の DML では使用できません。APPLY 複数親 UPDATE の安全な親 WHERE だけが対応しています"
+          "KLIKE / NOT KLIKE は通常親 UPDATE の WHERE、または APPLY 複数親 UPDATE の安全な親 WHERE だけで使用できます"
+        );
+      }
+      return;
+    case "DELETE":
+      if (containsKlike(stmt) && stmt.subtableCode) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE はサブテーブル DELETE の WHERE では使用できません"
+        );
+      }
+      if (!stmt.subtableCode && whereHasKlike(stmt.where)) {
+        validateKlikeWhereExpressions(stmt.where);
+        validateNestedSelects(stmt);
+        return;
+      }
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE は通常親 DELETE の WHERE だけで使用できます"
         );
       }
       return;
     case "INSERT":
     case "INSERT_SELECT":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE は INSERT / INSERT SELECT では使用できません"
+        );
+      }
+      return;
     case "UPSERT":
     case "UPSERT_SELECT":
-    case "DELETE":
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE は UPSERT / UPSERT SELECT では使用できません"
+        );
+      }
+      return;
     case "REORDER":
       if (containsKlike(stmt)) {
         throw new KlikeValidationError(
-          "KLIKE / NOT KLIKE は全 DML（UPDATE / DELETE / INSERT / UPSERT / REORDER）で使用できません"
+          "KLIKE / NOT KLIKE はサブテーブル REORDER の WHERE では使用できません"
         );
       }
       return;
@@ -195,6 +236,27 @@ function containsKlike(node: unknown): boolean {
   walkObjects(node, (obj) => {
     if (obj.type === "BINARY" && (obj.op === "KLIKE" || obj.op === "NOT_KLIKE")) found = true;
   });
+  return found;
+}
+
+/** 通常親 DML の carve-out を親 WHERE と nested SELECT だけに限定する。 */
+function containsKlikeOutsideWhereAndNestedSelects(node: unknown, allowedWhere: WhereExpr): boolean {
+  let found = false;
+  const visit = (value: unknown): void => {
+    if (found || value === allowedWhere || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    if (obj.type === "SELECT") return;
+    if (obj.type === "BINARY" && (obj.op === "KLIKE" || obj.op === "NOT_KLIKE")) {
+      found = true;
+      return;
+    }
+    for (const child of Object.values(obj)) visit(child);
+  };
+  visit(node);
   return found;
 }
 

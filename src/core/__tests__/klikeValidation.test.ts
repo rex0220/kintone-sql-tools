@@ -62,13 +62,38 @@ test("非インライン CTE / 一時テーブル上の KLIKE はインメモリ
 });
 
 test.each([
-  ["UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'", /通常の DML/],
-  ["DELETE FROM APP100 WHERE 件名 NOT KLIKE '至急'", /全 DML/],
-  ["REORDER APP100$明細 BY 商品名 WHERE _rid = '1' AND 商品名 KLIKE '至急'", /全 DML/],
-  ["INSERT INTO APP100 (件名) SELECT 件名 FROM APP200 WHERE 件名 KLIKE '至急'", /全 DML/],
-  ["EXPLAIN UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'", /通常の DML/],
-])("B47-P3: 通常DMLのKLIKE拒否を維持する — %s", (sql, message) => {
+  "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'",
+  "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急' OR 種別 = 'A'",
+  "UPDATE APP100 SET 状態 = '完了' WHERE NOT (件名 KLIKE '至急' OR 種別 = 'A')",
+  "DELETE FROM APP100 WHERE 件名 NOT KLIKE '至急'",
+  "EXPLAIN UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'",
+])("B5: 通常親 UPDATE / DELETE の WHERE KLIKE を許可する — %s", (sql) => {
+  expect(() => validateKlikeStatement(raw(sql))).not.toThrow();
+});
+
+test.each([
+  ["UPDATE APP100$明細 SET 商品名 = 'x' WHERE 商品名 KLIKE '至急'", /サブテーブル UPDATE/],
+  ["DELETE FROM APP100$明細 WHERE 商品名 NOT KLIKE '至急'", /サブテーブル DELETE/],
+  ["REORDER APP100$明細 BY 商品名 WHERE _rid = '1' AND 商品名 KLIKE '至急'", /REORDER/],
+  ["INSERT INTO APP100 (件名) SELECT 件名 FROM APP200 WHERE 件名 KLIKE '至急'", /INSERT/],
+  ["UPSERT INTO APP100 (件名) SELECT 件名 FROM APP200 WHERE 件名 KLIKE '至急' ON DUPLICATE (件名)", /UPSERT/],
+  ["VALIDATE APP100 WHERE 件名 KLIKE '至急'", /VALIDATE/],
+])("B5: 対象外 DML の KLIKE を文種・対象種が分かるエラーで拒否する — %s", (sql, message) => {
   expect(() => validateKlikeStatement(raw(sql as string))).toThrow(message as RegExp);
+});
+
+test.each([
+  "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE 'A%B'",
+  "DELETE FROM APP100 WHERE 件名 KLIKE 1",
+])("B5: 通常親 DML でも KLIKE の既存右辺制約を維持する — %s", (sql) => {
+  expect(() => validateKlikeStatement(raw(sql))).toThrow();
+});
+
+test("B5: UPDATE の carve-out は WHERE 外の CHECK KLIKE を巻き込まない", () => {
+  expect(() => validateKlikeStatement(raw(
+    "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急' " +
+    "CHECK WHEN 備考 KLIKE '危険' THEN 'bad' VALIDATE ONLY"
+  ))).toThrow(/通常親 UPDATE の WHERE/);
 });
 
 test.each([

@@ -8719,6 +8719,10 @@ function buildUpdatePlan(
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   }
+  if (!stmt.subtableCode) {
+    lines.push("  selection: exact native pushdown; JS residual none");
+    lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
+  }
   lines.push(isConstantFalseWhere(stmt.where)
     ? "  api:           metadata validation only (records API access: none)"
     : `  api:           GET /k/v1/records.json → PUT /k/v1/records.json`);
@@ -8820,6 +8824,10 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  if (!stmt.subtableCode) {
+    lines.push("  selection: exact native pushdown; JS residual none");
+    lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
+  }
   lines.push(isConstantFalseWhere(stmt.where)
     ? "  api:           metadata validation only (records API access: none)"
     : `  api:           GET /k/v1/records.json → DELETE /k/v1/records.json`);

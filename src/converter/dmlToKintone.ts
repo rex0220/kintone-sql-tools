@@ -29,16 +29,9 @@ import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr, evalScalarValueExpr } from "../engine/evalFunc";
-import { whereHasKlike, whereHasLike } from "../core/like";
+import { whereHasLike } from "../core/like";
 
 function assertDmlWhereIsSafe(where: WhereExpr): void {
-  if (whereHasKlike(where)) {
-    throw new DmlConvertError(
-      "UPDATE / DELETE の WHERE に KLIKE / NOT KLIKE は使用できません。" +
-      "通常の親レコード DML には、native KLIKE の完全適用を証明して残余評価する専用経路がないため、安全上拒否しています。" +
-      "APPLY 複数親 UPDATE だけは専用の親選択 preflight を使用します。"
-    );
-  }
   if (!whereHasLike(where)) return;
   throw new DmlConvertError(
     "UPDATE / DELETE の WHERE に LIKE / NOT LIKE は使用できません。" +
