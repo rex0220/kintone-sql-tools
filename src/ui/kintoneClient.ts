@@ -22,9 +22,81 @@ import { getCursorLeaseManager } from "../api/cursorLeaseManager";
 import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
 import { installCursorPageLifecycle, registerCursorHandle } from "./cursorPageLifecycle";
 import { parseNumberPrecisionSettings } from "../core/numberPrecision";
+import { isSearchAbortedWarning } from "../core/searchAbortWarning";
 
-type KintoneApiWithUrl = typeof kintone.api & { url(path: string, guest: boolean): string };
+type KintoneApiWithUrl = typeof kintone.api & {
+  url(path: string, guest: boolean): string;
+  urlForGet(path: string, params: object, isGuestSpace: boolean): string;
+};
 const apiUrl = (path: string) => (kintone.api as KintoneApiWithUrl).url(path, true);
+const RECORDS_PATH = "/k/v1/records.json";
+const GET_URL_MAX_BYTES = 4096;
+
+function buildRecordsRequest(params: PageFetchParams): { url: string; init: RequestInit } {
+  const requestParams: { app: number; query: string; fields?: string[] } = {
+    app: params.app,
+    query: params.query,
+    ...(params.fields.length > 0 ? { fields: params.fields } : {}),
+  };
+  const apiWithUrl = kintone.api as KintoneApiWithUrl;
+  const getUrl = apiWithUrl.urlForGet(RECORDS_PATH, requestParams, true);
+  const commonHeaders = { "X-Requested-With": "XMLHttpRequest" };
+
+  if (new TextEncoder().encode(getUrl).byteLength <= GET_URL_MAX_BYTES) {
+    return {
+      url: getUrl,
+      init: {
+        method: "GET",
+        credentials: "include",
+        headers: commonHeaders,
+      },
+    };
+  }
+
+  return {
+    url: apiUrl(RECORDS_PATH),
+    init: {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        ...commonHeaders,
+        "X-HTTP-Method-Override": "GET",
+        "Content-Type": "application/json",
+        "X-Cybozu-Request-Token": kintone.getRequestToken(),
+      },
+      body: JSON.stringify(requestParams),
+    },
+  };
+}
+
+async function readRawFetchError(response: Response): Promise<unknown> {
+  try {
+    const body = await response.json() as unknown;
+    if (body !== null && typeof body === "object") {
+      const shaped = body as { code?: unknown; id?: unknown; message?: unknown; errors?: unknown };
+      const error = toDetailedApiError({
+        code: shaped.code,
+        id: shaped.id,
+        message: shaped.message,
+        errors: shaped.errors,
+        status: response.status,
+      });
+      if (error instanceof Error
+        && typeof (error as Error & { status?: unknown }).status !== "number") {
+        Object.assign(error, { status: response.status });
+      }
+      return error;
+    }
+    const cause = body;
+    const error = new Error(`kintone API error: HTTP ${response.status}`);
+    Object.assign(error, { status: response.status, cause });
+    return toDetailedApiError(error);
+  } catch (cause) {
+    const error = new Error(`kintone API error: HTTP ${response.status} の応答を JSON として解析できません`);
+    Object.assign(error, { status: response.status, cause });
+    return toDetailedApiError(error);
+  }
+}
 
 /** pluginのkintone.api rejectはHTTP statusを公開しないため、このsurfaceだけcode単独を許可する。 */
 export function isPluginAlreadyReleasedCursorError(error: unknown): boolean {
@@ -94,14 +166,21 @@ export function createKintoneClient(options: { cursorMaxActive?: number } = {}):
   if (typeof window !== "undefined") installCursorPageLifecycle(window);
   return {
     async getRecords(params: PageFetchParams) {
-      const res = await api<{ records: Record<string, { value: string }>[] }>(
-        "/k/v1/records.json", "GET", {
-          app:    params.app,
-          query:  params.query,
-          fields: params.fields.length > 0 ? params.fields : undefined,
+      try {
+        const request = buildRecordsRequest(params);
+        const response = await fetch(request.url, request.init);
+        if (!response.ok) throw await readRawFetchError(response);
+
+        const body = await response.json() as {
+          records: Record<string, { value: string }>[];
+        };
+        if (isSearchAbortedWarning(response.headers.get("X-Cybozu-Warning"))) {
+          return { records: body.records, searchAborted: true };
         }
-      );
-      return { records: res.records };
+        return { records: body.records };
+      } catch (error) {
+        throw toDetailedApiError(error);
+      }
     },
 
     async openCursor(params) {

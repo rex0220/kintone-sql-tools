@@ -171,12 +171,19 @@ describe("Phase 10a syntax/execution capabilities", () => {
   });
 
   test.each([
-    "件名 KLIKE 'A'",
     "$id IN (SELECT $id FROM APP2)",
     "COUNT(*) > 0",
   ])("危険な一般親WHEREはsyntax capabilityでも拒否する: %s", (where) => {
     expect(() => assertApplyScope("phase10a", parse(sql(where, "PATCH SET 子='x' ALL ROWS"))))
       .toThrow(/^UnsupportedError: APPLY phase10a scope/);
+  });
+
+  test("B47-P3: 親KLIKEは複数親能力を持つUPDATE APPLYだけsyntax gateを通す", () => {
+    const stmt = parse(sql("件名 KLIKE 'A'", "PATCH SET 子='x' ALL ROWS"));
+    expect(() => assertApplyScope("phase10a", stmt)).not.toThrow();
+    expect(() => assertApplyExecutionScope("phase10a", stmt))
+      .toThrow("UnsupportedError: APPLY Phase 10a execution does not support multiple-parent APPLY");
+    expect(() => assertApplyScope("phase15b", stmt)).not.toThrow();
   });
 
   test("単一$id完全一致を構文判定し、既存execution capabilityを維持する", () => {

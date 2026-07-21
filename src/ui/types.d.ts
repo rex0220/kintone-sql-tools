@@ -10,6 +10,8 @@ declare const kintone: {
     params: Record<string, unknown>
   ): Promise<T>;
 
+  getRequestToken(): string;
+
   plugin: {
     app: {
       getConfig(pluginId: string): Record<string, string>;

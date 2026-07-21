@@ -1,491 +1,339 @@
-# B47 — APPLY 複数親 UPDATE の親 WHERE における LIKE 仕様 R1
+# B47 — APPLY 複数親 UPDATE の親 WHERE LIKE / KLIKE 仕様 R2
 
 - 作成日: 2026-07-21
-- ステータス: **R1（仕様案・未実装）**
+- 改稿日: 2026-07-21
+- ステータス: **R2（実装着手可・未実装）**
+- 対象リリース: **v3.10.0**
 - 対象: B47「APPLY 複数親 UPDATE の WHERE で `LIKE` / `KLIKE` が使えない」
-- 一次情報: [ksql_issue_tracker.md B47](../ksql_issue_tracker.md#L39)
+- 必須先行: [B7 プラグイン検索打ち切り検出仕様 R2](ksql_search_abort_warning_issue.md)
 - 関連仕様: [B44 APPLY block spec](ksql_apply_block_spec.md)、[LIKE predicate pushdown spec](ksql_like_predicate_pushdown_spec.md)、[B45 subtable system column WHERE plan](ksql_b45_subtable_system_column_where_plan.md)
 
-## 1. 症状
+## 1. 目的と決定
 
-次の B44 複数親 APPLY UPDATE は、親 `WHERE` の `LIKE` に到達した時点で `DmlConvertError` となり、records API / mutation API を呼ばずに拒否される。
+B44 の APPLY 複数親 UPDATE に限り、親 `WHERE` の `LIKE` / `NOT LIKE` と `KLIKE` / `NOT KLIKE` を解禁する。
 
 ```sql
 UPDATE APP4223
 SET 金額 = 1
-WHERE タイトル LIKE 'B44%'
+WHERE 金額 > 0
+  AND タイトル LIKE 'B44%'
+  AND 説明 KLIKE '至急'
 APPLY テーブル (...);
 ```
 
-表示される現行エラーは次である。
+R2 の決定は次のとおりである。
+
+1. LIKE と KLIKE を同時対応する。
+2. 親候補を安全な prefilter で取得し、元の親 WHERE 全体を `evalWhere` で残余評価する。
+3. KLIKE は native `like` / `not like` として必ず prefilter へ適用し、その同一 AST ノードだけを `appliedKlikes` として `evalWhere` へ渡す。
+4. 安全に押し下げられない KLIKE が1つでもあれば、文全体を API 呼び出し前に拒否する。
+5. candidate は `maxRecords` まで最後まで取得し、残余評価後の target にだけ `dmlMaxRows`、confirm、guard、diagnostic を適用する。
+6. B7 完了を v3.10.0 の先行ゲートとし、完了後は CLI / MCP / plugin の面ゲートを設けない。
+7. APPLY なしの通常 UPDATE / DELETE の fail-closed は変更しない。
+
+B47 は parser や LIKE evaluator を新設する課題ではない。既存 SELECT の safe pushdown、KLIKE applied-node 証明、JS WHERE 評価を、B44 の「snapshot 取得」と「全 snapshot の plan 化」の間へ接続する課題である。
+
+## 2. 現行コードによる原因確定
+
+### 2.1 converter は親 DML の LIKE / KLIKE を一律拒否する
+
+`assertDmlWhereIsSafe` は KLIKE を先に、LIKE を次に拒否する（[src/converter/dmlToKintone.ts:34-46](../../src/converter/dmlToKintone.ts#L34)）。通常 UPDATE の `updateToGetQuery` はこの checker を通してから親 WHERE 全体を `whereToKintone` へ渡す（[src/converter/dmlToKintone.ts:145-158](../../src/converter/dmlToKintone.ts#L145)）。DELETE も同じ構造である（[src/converter/dmlToKintone.ts:488-500](../../src/converter/dmlToKintone.ts#L488)）。
+
+したがって、LIKE / KLIKE を parser が受理しても通常親 DML には到達しない。現行 KLIKE エラーの「検索打ち切りを検出できないため、全 DML で拒否」という説明は、Node 系の fail-closed 実装後の事実とは一致せず、B47 のカーブアウトと併せて更新対象とする。
+
+### 2.2 B44 複数親は WHERE 全体を push-down し、返った全 snapshot を対象化する
+
+単一の正の `$id` selector でない APPLY UPDATE は `executeMultipleParentApplyPreflight` に分岐する（[src/execute.ts:6292-6304](../../src/execute.ts#L6292)）。現行 preflight は `updateToGetQuery(stmt).query` をそのまま `baseQuery` にし、`dmlMaxRows + 1` 件で早期停止する（[src/execute.ts:6431-6458](../../src/execute.ts#L6431)）。
 
 ```text
-UPDATE / DELETE の WHERE に LIKE / NOT LIKE は使用できません。
-LIKE は kSQL の意味論に従って JS で評価する必要がありますが、親レコード DML には JS 評価経路がないため、安全上拒否しました。
-SELECT で対象レコード番号を確認し、IN または完全一致で対象を指定してください。
-```
-
-根拠は [src/converter/dmlToKintone.ts:34-46](../../src/converter/dmlToKintone.ts#L34) である。
-
-```ts
-function assertDmlWhereIsSafe(where: WhereExpr): void {
-  if (whereHasKlike(where)) {
-    throw new DmlConvertError(
-      "UPDATE / DELETE の WHERE に KLIKE / NOT KLIKE は使用できません。" +
-      "kintone キーワード検索の打ち切りを検出できないため、全 DML で安全上拒否しています。"
-    );
-  }
-  if (!whereHasLike(where)) return;
-  throw new DmlConvertError(
-    "UPDATE / DELETE の WHERE に LIKE / NOT LIKE は使用できません。" +
-    "LIKE は kSQL の意味論に従って JS で評価する必要がありますが、親レコード DML には JS 評価経路がないため、安全上拒否しました。" +
-    "SELECT で対象レコード番号を確認し、IN または完全一致で対象を指定してください。"
-  );
-}
-```
-
-現行の回避策は、一次情報どおり完全一致、`IN (...)`、または SELECT で確認した `$id IN (...)` で対象親を明示することである。
-
-## 2. 原因（実コードによる事実確定）
-
-### 2.1 parser は LIKE/KLIKE を別の比較演算子として保持する
-
-parser は `LIKE` / `NOT LIKE` を `BINARY` の `LIKE` / `NOT_LIKE`、`KLIKE` / `NOT KLIKE` を `KLIKE` / `NOT_KLIKE` として AST に保持する。`KLIKE` の右辺だけは文字列またはバッチ変数に限定される（[src/parser/parser.ts:2047-2082](../../src/parser/parser.ts#L2047)、[src/parser/parser.ts:2085-2118](../../src/parser/parser.ts#L2085)）。
-
-```ts
-if (this.consume(TokenKind.LIKE)) {
-  const pattern = this.parseSqlValue();
-  return { type: "BINARY", op: "NOT_LIKE", left: field, right: pattern };
-}
-if (this.consume(TokenKind.KLIKE)) {
-  const pattern = this.parseKlikePattern();
-  return { type: "BINARY", op: "NOT_KLIKE", left: field, right: pattern };
-}
-// ...
-if (this.consume(TokenKind.KLIKE)) {
-  const pattern = this.parseKlikePattern();
-  return { type: "BINARY", op: "KLIKE", left: field, right: pattern };
-}
-// ...
-case TokenKind.LIKE:  return "LIKE";
-```
-
-したがって原因は parser が構文を受理しないことではない。構文受理後の DML 変換・実行経路が fail-closed である。
-
-### 2.2 whereToKintone は LIKE を拒否し、KLIKE だけを native like に変換する
-
-`whereToKintone` のトップレベル switch は `WhereExpr` の構造型だけを扱い、`BINARY` を `convertBinary` へ渡す（[src/converter/whereToKintone.ts:45-55](../../src/converter/whereToKintone.ts#L45)）。`STRING_FUNC` は `WhereExpr` の直下ケースではなく、左辺の `FUNC_FIELD` として後段で拒否される（[src/converter/whereToKintone.ts:165-170](../../src/converter/whereToKintone.ts#L165)）。LIKE の本体は `convertBinary` 冒頭で常に拒否される（[src/converter/whereToKintone.ts:61-70](../../src/converter/whereToKintone.ts#L61)）。
-
-```ts
-function convertBinary(expr: BinaryExpr): string {
-  if (isLike(expr)) {
-    throw new KintoneQueryError(
-      "LIKE / NOT LIKE は kintone クエリに変換できません（常に JS 評価が必要です）"
-    );
-  }
-  const left = convertField(expr.left);
-  const op = convertOp(expr.op);
-  const right = convertValue(expr.right, expr.op);
-  return `${left} ${op} ${right}`;
-}
-```
-
-一方、演算子変換は KLIKE だけを kintone native `like` / `not like` へ通す（[src/converter/whereToKintone.ts:84-99](../../src/converter/whereToKintone.ts#L84)）。
-
-```ts
-case "LIKE":      return "like";
-case "NOT_LIKE": return "not like";
-case "KLIKE":     return "like";
-case "NOT_KLIKE": return "not like";
-```
-
-ここで `LIKE` の case が残っていても、`convertBinary` の `isLike(expr)` が先に throw するため到達しない。KLIKE は `isLike` ではないので到達する。
-
-### 2.3 親 DML は WHERE 全体を kintone query にする前提で、JS 再評価を持たない
-
-通常 UPDATE の対象取得は `assertDmlWhereIsSafe` 後に `whereToKintone(stmt.where)` をそのまま query にする（[src/converter/dmlToKintone.ts:145-158](../../src/converter/dmlToKintone.ts#L145)）。
-
-```ts
-export function updateToGetQuery(stmt: UpdateStatement): KintoneGetForDmlParams {
-  assertDmlWhereIsSafe(stmt.where);
-  const checkFields = collectUpdateCheckTargetFields(stmt);
-  return {
-    app: stmt.appId,
-    query: whereToKintone(stmt.where),
-    fields: ["$id", ...checkFields],
-    totalCount: false,
-  };
-}
-```
-
-DELETE も同じく WHERE 全体を query に変換する（[src/converter/dmlToKintone.ts:488-500](../../src/converter/dmlToKintone.ts#L488)）。この設計では query が返した集合がそのまま更新・削除対象であり、LIKE を JS で再評価する段がないため、v2.0.0 以降の fail-closed と整合する。
-
-## 3. B44 複数親 WHERE 評価経路の事実確定
-
-### 3.1 結論: 全件 GET 後の JS 親選択ではなく、WHERE 全体を kintone へ push-down している
-
-台帳 B47 の「B44 複数親は全件 GET してから JS で post-image を組む」という記述のうち、**post-image を取得 snapshot から JS で組む点は正しいが、対象親をアプリ全件 GET 後に JS で絞る点は現行コードと一致しない**。
-
-単一 `$id` 以外の APPLY UPDATE は `executeMultipleParentApplyPreflight` へ分岐する（[src/execute.ts:6082-6089](../../src/execute.ts#L6082)）。その中では `updateToGetQuery(stmt).query` を `baseQuery` とし、`fetchAll` に渡している（[src/execute.ts:6216-6240](../../src/execute.ts#L6216)）。
-
-```ts
-if (!isSinglePositiveRecordIdWhere(stmt.where)) {
-  return executeMultipleParentApplyPreflight(stmt, client, options, cacheContext, statementNumber);
-}
-
-// executeMultipleParentApplyPreflight
-const fields = collectApplySnapshotFields(stmt, fieldInfos);
-const baseQuery = updateToGetQuery(stmt).query;
-const detectionLimit = dmlMaxRows + 1;
-const snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
-  pageSize: Math.min(500, detectionLimit),
-  parallel: options.fetchParallel ?? 1,
-  maxRecords: detectionLimit,
-  stopAfter: detectionLimit,
-  onLimit: "error",
-});
-```
-
-`updateToGetQuery` は §2.3 のとおり WHERE 全体を `whereToKintone` へ渡す。従って現行の親選択は次である。
-
-```text
-親 WHERE 全体
+original parent WHERE
   -> assertDmlWhereIsSafe
-  -> whereToKintone（WHERE 全体の exact push-down）
-  -> fetchAll（query に一致した snapshot だけ）
+  -> whereToKintone(WHERE 全体)
+  -> fetchAll(exact target snapshots, stopAfter=dmlMaxRows+1)
   -> prepareApplyPatchWrite
-  -> PUT
 ```
 
-### 3.2 buildApplyPatchPlans は渡された全 snapshot を対象化し、親 WHERE を再評価しない
+`prepareApplyPatchWrite` は入力 snapshot を `buildApplyPatchPlans` へ渡し、その全 plan に post-image validation と guard を適用する（[src/core/applyPatchPrepare.ts:59-77](../../src/core/applyPatchPrepare.ts#L59)、[src/core/applyPatchPrepare.ts:91-126](../../src/core/applyPatchPrepare.ts#L91)）。`buildApplyPatchPlans` 自身も `snapshots.map(...)` で全 snapshot を無条件に plan 化し、親 WHERE を評価しない（[src/core/applyPatchPlanner.ts:260-276](../../src/core/applyPatchPlanner.ts#L260)）。
 
-`prepareApplyPatchWrite` は受け取った `snapshots` をそのまま `buildApplyPatchPlans` へ渡し、その後 post-image 検証とガードを行う（[src/core/applyPatchPrepare.ts:59-77](../../src/core/applyPatchPrepare.ts#L59)、[src/core/applyPatchPrepare.ts:91-126](../../src/core/applyPatchPrepare.ts#L91)）。
+B47 はこの planner / prepare 契約を変更しない。必ずその手前で target snapshot だけへ絞る。
 
-```ts
-for (const snapshot of snapshots) requireRevision(snapshot);
-const rawPlans = buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata);
-// ... validatePostImage for every raw plan ...
-const parentRows = rawPlans.length;
-// ... guards ...
-const records = plans.flatMap((plan) => applyPatchPlanToKintone(plan).records);
-```
+## 3. 流用する既存評価機構
 
-`buildApplyPatchPlans` は `snapshots.map(...)` で全 snapshot を親計画へ変換するだけで、`statement.where` を `evalWhere` へ渡さない（[src/core/applyPatchPlanner.ts:260-276](../../src/core/applyPatchPlanner.ts#L260)）。
+### 3.1 LIKE は `evalWhere` の既存意味論を使う
 
-```ts
-export function buildApplyPatchPlans(/* ... */): readonly ApplyPatchPlan[] {
-  const parentIds = new Set<number>();
-  return snapshots.map((snapshot) => {
-    const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
-    if (parentIds.has(parentId)) argument(`APPLY snapshots contain duplicate parentId ${parentId}.`);
-    parentIds.add(parentId);
-    return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
-  });
-}
-```
+`evalWhere` は AST を再帰評価し、`LIKE` / `NOT LIKE` は既存 `matchLike` に到達する。`matchLike` は wildcard なしを contains、`%` と `_` を正規表現へ変換して評価する（[src/engine/evalWhere.ts:75-94](../../src/engine/evalWhere.ts#L75)、[src/engine/evalWhere.ts:410-445](../../src/engine/evalWhere.ts#L410)）。B47 で LIKE を native kintone `like` に読み替えない。SELECT と同じ JS evaluator を使う。
 
-従って、現状の B44 複数親に SELECT の `FULL_SCAN + evalWhere` をそのまま「既にある経路」として流用することはできない。B47 の実装には、親 snapshot の取得 query を exact WHERE から安全プレフィルタへ変更し、取得後の親 WHERE 全体再評価を**新たに接続する**必要がある。
+親 snapshot の平坦化には SELECT でも使う `flatten(record, alias)` が既にある（[src/engine/process.ts:78-91](../../src/engine/process.ts#L78)）。APPLY planner 内にも snapshot を `ProcessRow` へ変換する同等処理が存在する（[src/core/applyPatchPlanner.ts:627-633](../../src/core/applyPatchPlanner.ts#L627)）。B47 の親選択は共通 `flatten` と、field metadata に基づく既存 field type / semantics resolver を用い、文字列化や型判定を独自実装しない。
 
-## 4. SELECT 側の LIKE / KLIKE 評価
+### 3.2 KLIKE は applied-node 証明付きで評価する
 
-### 4.1 LIKE は FULL_SCAN を要求する
+`buildKlikePushdownPlan` は safe prefilter 条件と `appliedKlikes` を同じ抽出結果から作り、元 WHERE に含まれる全 KLIKE も収集する（[src/core/optimization/klikePushdownPlan.ts:16-25](../../src/core/optimization/klikePushdownPlan.ts#L16)、[src/core/optimization/klikePushdownPlan.ts:27-82](../../src/core/optimization/klikePushdownPlan.ts#L27)）。`unappliedKlikes(plan)` は元 WHERE にあるが押し下げ済み集合にないノードを返す（[src/core/optimization/klikePushdownPlan.ts:85-86](../../src/core/optimization/klikePushdownPlan.ts#L85)）。
 
-`resolveSelectMode` は `whereRequiresJsEval` が true なら FULL_SCAN とし、`whereRequiresJsEval` は `isLike(where)` を JS 評価必須と判定する（[src/converter/selectToKintone.ts:57-83](../../src/converter/selectToKintone.ts#L57)、[src/converter/selectToKintone.ts:87-101](../../src/converter/selectToKintone.ts#L87)）。
+`evalWhere` は KLIKE / NOT KLIKE ノードをローカル検索しない。渡された `appliedKlikes` が同じ object identity のノードを含む場合だけ true とし、含まなければ throw する（[src/engine/evalWhere.ts:101-117](../../src/engine/evalWhere.ts#L101)）。SELECT 実行も同じ pushdown plan を fetch と残余評価へ共有している（[src/execute.ts:3243-3248](../../src/execute.ts#L3243)、[src/execute.ts:3355-3363](../../src/execute.ts#L3355)）。
 
-```ts
-if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
+この設計により、native query が既に KLIKE を満たした候補だけを返した事実を、残余評価で再利用できる。KLIKE の JS evaluator は追加しない。
 
-case "BINARY":
-  return isFunc(where.left)
-    || /* ... */
-    || isLike(where);
-```
+### 3.3 safe leaf 抽出の境界
 
-FULL_SCAN は安全な押し下げ計画を作り、候補を取得した後、`runFullScan` に元の statement と計画上の `appliedKlikes` を渡す（[src/execute.ts:3229-3248](../../src/execute.ts#L3229)、[src/execute.ts:3333-3347](../../src/execute.ts#L3333)）。`runFullScan` は元の WHERE 全体を `applyFilter` へ渡し、各行を `evalWhere` で再評価する（[src/engine/process.ts:1081-1117](../../src/engine/process.ts#L1081)、[src/engine/process.ts:185-194](../../src/engine/process.ts#L185)）。
+`extractSafePushdownLeaves` は AND の安全 leaf だけを抽出し、OR / NOT / NULL_CHECK / EXISTS を subtree ごと除外する（[src/core/optimization/wherePredicatePushdown.ts:27-39](../../src/core/optimization/wherePredicatePushdown.ts#L27)、[src/core/optimization/wherePredicatePushdown.ts:63-88](../../src/core/optimization/wherePredicatePushdown.ts#L63)）。KLIKE / NOT KLIKE は `allowKlike !== false`、対象 field、文字列値という条件で safe leaf になり得る（[src/core/optimization/wherePredicatePushdown.ts:91-112](../../src/core/optimization/wherePredicatePushdown.ts#L91)）。
 
-```ts
-const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
-// ... fetch candidate records ...
-const { rows, columns } = runFullScan({
-  tables,
-  stmt,
-  // ...
-  appliedKlikes: pushdownPlan.appliedKlikes,
-});
+B47 では単一親テーブル、非修飾親 field、実 field metadata を前提に `allowKlike: true` を明示する。LIKE は safe leaf に含めず JS 残余評価へ残す。
 
-// runFullScan
-rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
-```
+## 4. 対象範囲
 
-### 4.2 B47 で流用すべき LIKE evaluator
-
-`evalWhere` は論理式・括弧・否定を再帰評価し（[src/engine/evalWhere.ts:80-95](../../src/engine/evalWhere.ts#L80)）、`LIKE` / `NOT_LIKE` を `matchLike` へ渡す（[src/engine/evalWhere.ts:147-155](../../src/engine/evalWhere.ts#L147)）。
-
-```ts
-if (op === "LIKE") {
-  const pattern = resolveValue(right, row, resolveFieldType);
-  return matchLike(leftStr, pattern);
-}
-if (op === "NOT_LIKE") {
-  const pattern = resolveValue(right, row, resolveFieldType);
-  return !matchLike(leftStr, pattern);
-}
-```
-
-`matchLike` は wildcard なしを contains、`%` を任意長、`_` を1文字として Unicode regexp で評価する（[src/engine/evalWhere.ts:410-445](../../src/engine/evalWhere.ts#L410)）。B47 は新しい LIKE 実装を作らず、親 snapshot を `ProcessRow` に flatten した上で、この `evalWhere` / `matchLike` 経路を共有しなければならない。
-
-### 4.3 KLIKE は局所評価できない
-
-`evalWhere` は KLIKE ノードが「押し下げ済み集合」に含まれる場合だけ true 扱いし、それ以外は throw する（[src/engine/evalWhere.ts:101-117](../../src/engine/evalWhere.ts#L101)）。
-
-```ts
-if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
-  if (appliedKlikes?.has(expr)) return true;
-  throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
-}
-```
-
-SELECT の KLIKE は `buildKlikePushdownPlan` が query 条件と `appliedKlikes` を同一抽出結果から作り、fetch と JS 残余評価で共有する専用設計である（[src/core/optimization/klikePushdownPlan.ts:16-24](../../src/core/optimization/klikePushdownPlan.ts#L16)、[src/core/optimization/klikePushdownPlan.ts:37-82](../../src/core/optimization/klikePushdownPlan.ts#L37)）。B45 も同じ理由でサブテーブル SELECT の局所 WHERE から KLIKE を対象外にした前例がある（[docs/internal/ksql_b45_subtable_system_column_where_plan.md:109-120](ksql_b45_subtable_system_column_where_plan.md#L109)）。
-
-## 5. 設計
-
-### 5.1 スコープ
-
-R1 の推奨スコープは次に限定する。
+対象は次の条件をすべて満たす文だけである。
 
 ```text
 UPDATE <physical app>
 SET ...
-WHERE <parent predicate containing LIKE / NOT LIKE>
+WHERE <parent predicate containing LIKE and/or KLIKE>
 APPLY ...
 ```
 
-かつ `isSinglePositiveRecordIdWhere(stmt.where) === false` で複数親 preflight に入る文だけを対象とする。
+- `stmt.type === "UPDATE"`
+- `stmt.applyBlocks.length > 0`
+- `isSinglePositiveRecordIdWhere(stmt.where) === false`
+- B44 の `executeMultipleParentApplyPreflight` に入る
 
-- **対象**: B44 APPLY 複数親 UPDATE の親 WHERE にある `LIKE` / `NOT LIKE`。
-- **対象外**: APPLY なしの通常親 UPDATE / DELETE。これらは query の返却集合を直接対象にするため、JS 再評価を追加するなら DML 全体の別設計になる。
-- **対象外**: 単一 `$id` APPLY。LIKE を含む時点で単一 `$id` selector ではないため B47 の実需と交差しない。
-- **対象外**: INSERT APPLY。INSERT には既存親を選ぶ WHERE がない。
-- **対象外**: UPSERT APPLY。既存親選択は `ON DUPLICATE` キー解決であり、UPDATE 文の親 WHERE を持たない。
-- **対象外**: 親 DELETE APPLY。B44 自体が親 DELETE APPLY を提供していない。
+対象外は次のとおりである。
 
-この限定により、通常親 DML の fail-closed 契約を変更せず、B44 の「対象親 snapshot を取得してから全親を prepare する」専用経路だけを拡張する。
+- APPLY なしの通常親 UPDATE / DELETE
+- 単一 `$id` APPLY
+- INSERT APPLY / UPSERT APPLY
+- 親 DELETE APPLY
+- サブテーブル DML の WHERE
+- `UPDATE ... FROM`、相関更新、CTE / 一時表を親 selector にする拡張
 
-### 5.2 LIKE 解禁方法
+## 5. 設計
 
-#### 選択肢 A: query を空にして全件取得後、WHERE 全体を JS 評価
+### 5.1 専用 parent selection plan
 
-意味論は単純だが、アプリ全件が `maxRecords` の対象となり、既存の安全押し下げ資産を使わない。現行 B44 は `dmlMaxRows + 1` 件で早期停止できるが、JS フィルタ前の候補数は更新対象数ではないため、この早期停止もそのまま使えない。
+APPLY 複数親 preflight に、元 WHERE から次を一度に作る専用 plan を導入する。
 
-#### 選択肢 B: 安全 prefilter を push-down し、取得完了後に WHERE 全体を JS 再評価（推奨）
-
-SELECT の前例と同じ二段階にする。
-
-```text
-P = extractSafePushdownLeaves(parent WHERE, allowKlike=false, metadata...)
-C = fetchAll(kintone query = P, onLimit=error)
-T = C.filter(snapshot => evalWhere(original parent WHERE, flatten(snapshot), resolvers...))
-prepareApplyPatchWrite(snapshots=T)
+```ts
+interface ApplyParentSelectionPlan {
+  readonly prefilter: WhereExpr | null;
+  readonly appliedKlikes: ReadonlySet<KlikeExpr>;
+  readonly unappliedKlikes: readonly KlikeExpr[];
+}
 ```
 
-`extractSafePushdownLeaves` は AND の安全な leaf だけを抽出し、OR / NOT / NULL_CHECK / EXISTS を subtree ごと除外する既存 primitive である（[src/core/optimization/wherePredicatePushdown.ts:27-39](../../src/core/optimization/wherePredicatePushdown.ts#L27)、[src/core/optimization/wherePredicatePushdown.ts:63-88](../../src/core/optimization/wherePredicatePushdown.ts#L63)）。B47 では `allowKlike: false` を明示する。
+この plan は `buildKlikePushdownPlan` と同じ抽出処理を共有する。実装は、既存関数へ単一物理 app の SELECT-compatible view を渡すか、既存関数の main-table 部分を共通 primitive に抽出して SELECT と B47 の両方から呼ぶ。抽出ロジックや KLIKE 収集を B47 用に複製してはならない。
 
-安全 leaf がなければ query は空になり、選択肢 A と同じ全件取得になる。安全 leaf があれば候補を減らせるが、最終対象は必ず元の WHERE 全体を `evalWhere` した結果だけとする。
+最重要不変条件は、`prefilter` に含めた KLIKE leaf と `appliedKlikes` の要素が、元 `stmt.where` 内の**同一 AST node object**であることである。leaf の clone、再parse、値だけを使ったノード再生成は禁止する。`evalWhere` の `Set.has(expr)` が object identity を検査するためである（[src/engine/evalWhere.ts:108-110](../../src/engine/evalWhere.ts#L108)）。
 
-### 5.3 取得上限と dmlMaxRows
+### 5.2 親選択の繋ぎ替え（LIKE / KLIKE 共通の本体）
 
-現行の `detectionLimit = dmlMaxRows + 1`、`maxRecords = stopAfter = detectionLimit` は、kintone query が対象集合を exact に返すことを前提にする（[src/execute.ts:6232-6242](../../src/execute.ts#L6232)）。安全 prefilter は超集合を返し得るため、B47 LIKE 経路にはそのまま使えない。
-
-R1 推奨契約:
-
-1. prefilter 候補集合は `options.maxRecords ?? 10_000` を上限に `onLimit: "error"` で**最後まで**取得する。
-2. 候補取得が上限で未完了なら書き込み0件で fail-closed とする。truncate は許可しない。
-3. 全候補へ元 WHERE を JS 評価した後の `T.length` に `dmlMaxRows` を適用する。
-4. `VALIDATE ONLY` も同じ候補取得・再評価を行い、実対象だけを `validatedRows` / `guards.parentRows` に数える。
-5. LIKE を含まない従来経路は、既存の `dmlMaxRows + 1` 早期検出を維持して性能回帰を避ける。
-
-候補件数を `dmlMaxRows` と比較してはならない。安全 prefilter の false positive が多いだけで、本来 `dmlMaxRows` 内の mutation を誤拒否するためである。
-
-### 5.4 KLIKE 方針
-
-#### R1 推奨: KLIKE / NOT KLIKE は非対応継続
-
-理由は次のとおり。
-
-- KLIKE は `matchLike` で局所評価できず、native query へ確実に適用したノードだけを `appliedKlikes` として残余評価へ渡す専用証明が必要である（§4.3）。
-- APPLY 親 WHERE の scope checker 自体も KLIKE を明示拒否する（[src/core/applyPatchScope.ts:494-514](../../src/core/applyPatchScope.ts#L494)）。
-- DML converter も KLIKE を LIKE より先に明示拒否する（[src/converter/dmlToKintone.ts:34-40](../../src/converter/dmlToKintone.ts#L34)）。
-- B45 でも局所評価経路の KLIKE は対象外とした（§4.3）。
-- B47 の症状を直す最小価値は SQL LIKE の解禁であり、KLIKE の native 検索意味論・適用済みノード証明まで同時に広げる必要はない。
-
-なお、現行 `execute()` は非 SELECT 文の `getRecords` が `searchAborted` を返すと `SearchAbortedError` を投げる fail-closed wrapper を持つ（[src/execute.ts:651-666](../../src/execute.ts#L651)、[src/execute.ts:787-800](../../src/execute.ts#L787)）。従って `dmlToKintone.ts:38` の「打ち切りを検出できない」というエラー文は現在の共通 wrapper と整合しておらず、KLIKE を将来検討する際はこの文言も別途監査対象になる。ただし検出可能になったことだけで、局所評価不能・`appliedKlikes` 証明の問題は解消しない。
-
-R1 では既存の KLIKE 拒否を維持し、回避策を含む明示エラーを返す。
+現行の `updateToGetQuery(stmt).query -> fetchAll -> prepareApplyPatchWrite` を、APPLY 複数親の LIKE / KLIKE 経路だけ次へ置き換える。
 
 ```text
-APPLY 複数親 UPDATE の親 WHERE に KLIKE / NOT KLIKE は使用できません。
-KLIKE は JavaScript で再評価できないため、完全一致、IN、または SELECT で確認した $id IN (...) を使用してください。
+1. field metadata / semantics を解決
+2. selectionPlan = shared KLIKE + safe-pushdown planner(original WHERE)
+3. unappliedKlikes が非空なら文全体を拒否（records API 0回）
+4. prefilter を whereToKintone で query 化（null なら空 query）
+5. candidate snapshots を maxRecords / onLimit:error で最後まで取得
+6. candidate を flatten(snapshot, null)
+7. evalWhere(original WHERE, row, fieldTypeResolver,
+             selectionPlan.appliedKlikes, fieldSemanticsResolver)
+8. true の snapshot だけを targets とする
+9. prepareApplyPatchWrite(snapshots=targets)
+10. confirm -> PUT chunks
 ```
 
-### 5.5 scope checker と converter の境界
+`buildApplyPatchPlans` の「渡された全 snapshot を無条件 plan 化する」性質は崩さない。残余評価は `prepareApplyPatchWrite` より必ず前に完了し、target だけを渡す。prepare 後に除外すると、post-image validation、guard、confirm、diagnostic、PUT records が false positive を含むため禁止する。
 
-LIKE を許可する変更は `assertDmlWhereIsSafe` を全 DML 一律に緩めてはならない。推奨する責務分離は次である。
+LIKE だけの WHERE でも同じ経路を使う。KLIKE がなければ `appliedKlikes` は空集合でよい。LIKE/KLIKE を含まない既存 APPLY 複数親文は、現行 exact pushdown と `dmlMaxRows + 1` 早期停止を維持し、性能回帰を避ける。
 
-- 通常 `updateToGetQuery` / `deleteToGetQuery`: 現状どおり LIKE/KLIKE を拒否。
-- APPLY 複数親 LIKE 専用の preflight planner: safe prefilter を生成し、元 WHERE の JS 再評価を必須化。
-- `assertSafeParentWhere`: LIKE は既に一般ノード走査を通過できるため、新たに広域許可を加えない。KLIKE 拒否は維持。
-- `prepareApplyPatchWrite`: 対象選択責務を混ぜず、フィルタ済み snapshot だけを受け取る現行契約を維持。
+### 5.3 完全性、`maxRecords`、`dmlMaxRows`
 
-この境界なら、`buildApplyPatchPlans` が全入力 snapshot を更新対象化する性質を変えず、誤更新防止を呼び出し側の「必ず filter 済み」契約で固定できる。
+現行 preflight は exact query の返却件数を対象件数として扱えるため、`dmlMaxRows + 1` を `maxRecords` と `stopAfter` に設定している（[src/execute.ts:6438-6458](../../src/execute.ts#L6438)）。B47 の prefilter は LIKE 等の false positive を含む超集合なので、この早期停止を使えない。
 
-## 6. 正しさ
+B47 経路の取得契約を次に固定する。
 
-### 6.1 超集合性
+1. candidate は `options.maxRecords ?? 10_000` を上限にする。`fetchAll` 自体の default も 10,000 である（[src/api/fetchAll.ts:46-60](../../src/api/fetchAll.ts#L46)、[src/api/fetchAll.ts:79-92](../../src/api/fetchAll.ts#L79)）。
+2. `onLimit: "error"` とし、`stopAfter` を設定せず、短い最終ページまで取得する。
+3. candidate が上限を超える、または完全取得できない場合は confirm / PUT 前に fail-closed とする。truncate は禁止する。
+4. 元 WHERE の JS 残余評価後に確定した `targets.length` にだけ `dmlMaxRows` を適用する。
+5. confirm count、`guards.parentRows`、VALIDATE ONLY の `validatedRows` / `validRows`、diagnostic の親件数には target 数だけを流す。
+6. candidate 数を対象数として扱わない。candidate 101件、target 1件、`dmlMaxRows=1` は許可される。
 
-安全 prefilter `P` と元 WHERE `W` について、次を必須不変条件とする。
+KLIKE は native query に適用されるため、返却 candidate が native 適用集合として完全であることが必要である。検索打ち切り時は既存 DML wrapper の `failClosed=true` により `SearchAbortedError` を throw し、書き込み0件で閉じる（[src/execute.ts:801-817](../../src/execute.ts#L801)。単文の文種別切替は [src/execute.ts:665-688](../../src/execute.ts#L665)、バッチは [src/execute.ts:1376-1390](../../src/execute.ts#L1376)）。
+
+### 5.4 KLIKE 全面解禁と B7 依存
+
+R2 は KLIKE / NOT KLIKE を対応対象とする。根拠は次の組合せである。
+
+- `buildKlikePushdownPlan` が native query 条件と `appliedKlikes` を同じ抽出から生成する。
+- `unappliedKlikes` が安全に押し下げられない KLIKE を列挙できる。
+- `evalWhere` が applied-node identity を確認し、押し下げ済み KLIKE を true として残余 WHERE を評価する。
+- DML の検索打ち切りは既に fail-closed である。
+- B7 により plugin `getRecords` も `searchAborted` を返せる。
+
+v3.10.0 の実装順は **B7 → B47** とし、B7 の受入完了後は CLI / MCP / plugin に面ゲートを設けない。同じ SQL を全 surface で受理する。
+
+ただし依存のフォールバック条件を実装仕様として残す。B7 が未達、または plugin 実機で `X-Cybozu-Warning` が露出せず検索打ち切りを検出できない場合、plugin の KLIKE / NOT KLIKE を実行継続してはならない。その場合だけ plugin は API 呼び出し前に fail-closed で拒否し、B47 KLIKE は Node / CLI / MCP 限定とする。B7 完了を前提とする v3.10.0 正式リリースでは、この fallback は発火しないことが期待値である。
+
+#### unapplied KLIKE の拒否
+
+`selectionPlan.unappliedKlikes.length > 0` なら、文全体を records API 前に拒否する。代表例は OR / NOT 配下の KLIKE、対象親以外の修飾、未解決値などである。OR / NOT の片側だけを押し下げてはいけない。
+
+エラーメッセージは blanket rejection ではなく、安全に押せない KLIKE に限定する。
 
 ```text
-{ snapshot | JS evalWhere(W) = true }
+APPLY 複数親 UPDATE の親 WHERE に、安全に押し下げられない KLIKE / NOT KLIKE があります。
+OR / NOT 配下など native query へ完全に適用できない KLIKE は使用できません。
+WHERE を AND の安全な KLIKE 条件へ書き換えるか、SELECT で確認した $id IN (...) を使用してください。
+```
+
+### 5.5 scope checker / converter のカーブアウト
+
+LIKE / KLIKE の許可は APPLY 複数親 preflight 専用である。
+
+- 通常 `updateToGetQuery` / `deleteToGetQuery` は現行 `assertDmlWhereIsSafe` を通し、LIKE / KLIKE を拒否し続ける。
+- APPLY 複数親 B47 経路は、通常 converter を一律緩和せず、専用 parent selection planner から prefilter query を作る。
+- `assertSafeParentWhere` の KLIKE 拒否は、B47 専用経路で selection plan と `unappliedKlikes` 検査が成立した場合だけカーブアウトする。`assertSafeParentPredicateNode` の他の拒否条件は維持する（[src/core/applyPatchScope.ts:482-514](../../src/core/applyPatchScope.ts#L482)）。
+- `dmlToKintone.ts` の LIKE / KLIKE 拒否も B47 専用経路だけ迂回し、通常 DML の checker 自体を削除・広域緩和しない。
+- `prepareApplyPatchWrite` は選択責務を持たず、filter 済み snapshot だけを受け取る。
+
+通常親 UPDATE / DELETE の「WHERE 全体を exact push-down できない文は拒否する」という fail-closed 契約は不変である。
+
+## 6. 正しさの不変条件
+
+### 6.1 LIKE は prefilter の超集合性で守る
+
+元 WHERE を `W`、safe prefilter を `P` とすると、LIKE を含む親選択は次を満たさなければならない。
+
+```text
+{ snapshot | evalWhere(W) = true }
   subset-of
 { snapshot | kintone query(P) returns snapshot }
 ```
 
-取得集合が JS 真集合の超集合であれば、取得後の `evalWhere(W)` が false positive を除去する。逆に prefilter が狭いと、取得されなかった真の親を再評価できず、静かな未更新になる。既存の pushdown 仕様も同じ包含条件を正しさの生命線としている（[docs/internal/ksql_like_predicate_pushdown_spec.md:33-47](ksql_like_predicate_pushdown_spec.md#L33)）。
+LIKE 自体を kintone native `like` として prefilter に使わない。kSQL LIKE と native KLIKE は別意味論であり、native LIKE を近似として使うと真の target を落とし得る。safe leaf がなければ `P = null`、すなわち空 query で全 candidate を取得する。
 
-従って次を禁止する。
+### 6.2 KLIKE は native 適用集合の完全性で守る
 
-- LIKE 自体を kintone native `like` として prefilter に使う。
+KLIKE ノード `K` は次の全条件を満たす場合だけ許可する。
+
+1. `K` が safe prefilter に含まれる。
+2. `K` と同一 object identity が `appliedKlikes` に含まれる。
+3. native query の全ページを取得する。
+4. `searchAborted` を全 surface で検出し、DML が fail-closed になる。
+5. `unappliedKlikes` が空である。
+
+`evalWhere` が `K` を true とするのは、candidate が native query により既に `K` を満たしたためである。`appliedKlikes` を field / pattern の値一致で再構築してはならない。
+
+### 6.3 禁止事項
+
+- LIKE を native `like` / `not like` として押し下げる。
 - OR / NOT subtree の一部だけを抜き出す。
-- 型不明の一般フィールド比較を推測で押し下げる。
-- 候補取得を truncate して、その prefix だけを対象集合とする。
-- prefilter の候補数を更新対象数としてガード・confirm・診断へ流す。
+- `unappliedKlikes` を警告だけで無視して実行する。
+- candidate を truncate し、その prefix だけを target 候補にする。
+- `dmlMaxRows + 1` で candidate 取得を早期停止する。
+- candidate 数を target 数として guard、confirm、VALIDATE ONLY、diagnostic へ流す。
+- `prepareApplyPatchWrite` 後に残余評価する。
+- KLIKE node を clone / reparse して `appliedKlikes` へ入れる。
+- B7 未達の plugin で KLIKE を警告付き実行する。
 
-### 6.2 対象外親を更新しない
+### 6.4 preflight と write の順序
 
-`buildApplyPatchPlans` は入力 snapshot を無条件に plan 化する（§3.2）。従って実装時には次の順序を固定する。
+次を最初の PUT より前に完了する。
 
 ```text
-fetch candidates
--> flatten parent snapshots
--> evalWhere(original WHERE)
--> targets only
--> prepare all targets
+complete candidate fetch
+-> search-abort / maxRecords check
+-> original WHERE residual evaluation
+-> target dmlMaxRows check
+-> all target post-image validation
+-> all guards
 -> confirm
 -> PUT chunks
 ```
 
-`prepare` より後でフィルタしてはならない。post-image validation、guard、confirm、diagnostic、PUT records のすべてが対象外親を含む危険がある。
+prepared records の100件 chunk、revision 指定、後続 chunk 失敗時の partial-success は既存契約を維持する。B47 は親選択までの preflight だけを変更する。
 
-### 6.3 post-image 検証との整合
+## 7. EXPLAIN / 診断 / エラー
 
-フィルタ後の対象 `T` だけを `prepareApplyPatchWrite` に渡せば、現行の全対象親 post-image 検証、正規化、`dmlMaxRows` / `dmlMaxSubtableRows` 判定はそのまま維持される（[src/core/applyPatchPrepare.ts:91-126](../../src/core/applyPatchPrepare.ts#L91)）。対象選択は更新前 snapshot に対して一度だけ行い、親 `SET` 後の値で WHERE を再判定しない。
+EXPLAIN は records API を呼ばず、少なくとも次を表示できるようにする。
 
-### 6.4 チャンク・部分成功との整合
+- parent selection: safe prefilter + JS residual evaluation
+- kintone prefilter（なければ `(なし)`）
+- applied KLIKE 件数
+- unapplied KLIKE がある場合の unsupported 理由
+- candidate limit: `maxRecords`, `onLimit=error`, no `stopAfter`
+- target guard: residual evaluation 後に `dmlMaxRows`
+- search abort: DML fail-closed、plugin は B7 依存
 
-prepared records は100件単位に chunk される（[src/converter/applyPatchToKintone.ts:59-79](../../src/converter/applyPatchToKintone.ts#L59)）。実行は chunk を順次 PUT し、後続失敗時は成功済み親数を持つ `ApplyWritePartialFailureError` を返す（[src/core/applyPatchExecutePrepared.ts:57-93](../../src/core/applyPatchExecutePrepared.ts#L57)）。B47 は対象選択までの preflight だけを変え、次を維持する。
+実行時の `FetchAllLimitError`、`SearchAbortedError`、post-image validation error、confirm cancel は最初の PUT 前に伝播する。KLIKE の blanket rejection 文は削除し、§5.4 の unapplied KLIKE 専用メッセージに置き換える。通常 DML の LIKE / KLIKE エラーは維持するが、検索打ち切りに関する古い事実説明は現行契約に合わせて改稿する。
 
-- 全候補取得、全 WHERE 再評価、全対象 post-image 検証、全 guard を最初の PUT 前に完了する。
-- chunk はフィルタ後の対象順に100親ずつ作る。
-- revision conflict 時に WHERE を再評価・再取得・再試行しない。
-- 後続 chunk 失敗時の先行成功はロールバックしない。
+## 8. テスト観点
 
-### 6.5 search abort / maxRecords
+### 8.1 route / boundary
 
-候補集合が不完全なら真の対象親が未取得の可能性があるため、mutation は必ず書き込み0件で閉じる。`SearchAbortedError` と `FetchAllLimitError` は confirm / PUT より前に伝播させる。SELECT の truncate 警告方式を mutation に持ち込まない。
+- APPLY 複数親 LIKE / KLIKE は専用 parent selection preflight に入る。
+- LIKE/KLIKE を含まない APPLY 複数親は現行 exact pushdown と `dmlMaxRows+1` 早期停止を維持する。
+- 通常 UPDATE / DELETE の LIKE / KLIKE は従来どおり API 0回で拒否する。
+- INSERT / UPSERT APPLY、単一 `$id` APPLY、subtable DML は非回帰。
+- `assertSafeParentWhere` と `assertDmlWhereIsSafe` のカーブアウトが B47 route 外へ漏れない。
 
-## 7. SemVer
+### 8.2 LIKE parent selection
 
-B47 は従来エラーだった APPLY 複数親 UPDATE の構文を成功可能にする、後方互換な受理範囲拡大である。既存の成功文の意味論を変えず、新構文・新オプションも追加しないが、利用者が観測できる機能追加なので **minor** を推奨する。
+- `タイトル LIKE 'B44%'`: 空 prefilter から全 candidate を取得し、一致 parent だけを prepare / PUT。
+- `金額 > 0 AND タイトル LIKE 'B44%'`: safe 数値 leaf だけを押し下げ、元 WHERE 全体で残余評価。
+- `タイトル LIKE 'B44%' OR 金額 > 0`: OR の片側を押し下げず、超集合を完全取得して評価。
+- `NOT (タイトル LIKE 'B44%')`: NOT subtree を押し下げず正しく評価。
+- wildcard なし contains、`%`、`_`、空文字、Unicode、NOT LIKE が SELECT と同じ結果。
+- prefilter false positive が prepare、confirm、diagnostic、PUT records に混入しない。
 
-現行 package version は `3.8.0`（[package.json:1-3](../../package.json#L1)）。実装する場合の候補は `3.9.0` 以降であり、`3.8.x` patch へ入れない。patch は不具合修正とも解釈できるが、DML の安全上の明示拒否を解禁する変更は影響面が大きく、minor の方が契約変更を正確に伝える。
+### 8.3 KLIKE parent selection / node identity
 
-## 8. 費用対効果
+- `説明 KLIKE '至急'`: native `like` query に入り、同一 node が `appliedKlikes` に含まれ、残余評価が成功する。
+- `説明 NOT KLIKE '至急'`: native `not like` query と applied-node 証明が成立する。
+- `金額 > 0 AND 説明 KLIKE '至急' AND タイトル LIKE 'B44%'`: native KLIKE + safe leaf の candidate を、LIKE 残余で target 化する。
+- OR / NOT 配下 KLIKE は `unappliedKlikes` 非空となり、records API 0回で専用エラー。
+- applied node を clone した負例で `evalWhere` が throw し、identity 契約を固定する。
+- 複数 KLIKE の一部だけ applied なら文全体を拒否する。
+- Node / CLI / MCP / plugin で同じ許可結果。B7 fallback 条件の unit test では plugin だけ API 0回で fail-closed。
 
-### 8.1 利益
+### 8.4 limits / fail-closed
 
-- B44 の複数親修復を、タイトル prefix 等の自然な業務条件で一文実行できる。
-- `$id` の事前列挙を不要にし、SELECT と UPDATE の間の対象変動・転記ミスを減らせる。
-- LIKE evaluator と safe pushdown primitive は既存資産を共有できる。
+- candidate 101件、target 1件、`dmlMaxRows=1`: 許可し、confirm count は1。
+- candidate 101件、target 2件、`dmlMaxRows=1`: PUT 0回で拒否。
+- candidate が `maxRecords` を超える: `FetchAllLimitError`、confirm / PUT 0回。
+- KLIKE response が `searchAborted:true`: `SearchAbortedError`、confirm / PUT 0回。
+- plugin raw Fetch の警告ヘッダーでも同じ DML fail-closed。
+- candidate 数が VALIDATE ONLY / guard / diagnostic の対象件数へ流れない。
 
-### 8.2 費用・リスク
+### 8.5 VALIDATE ONLY / EXPLAIN / write
 
-- 現行 B44 は exact push-down + `dmlMaxRows + 1` 早期停止であり、単なる `evalWhere` 1行追加ではない。取得計画、型メタ、field resolver、上限意味論、diagnostic/EXPLAIN の同期が必要になる。
-- LIKE 単独ではアプリ全件 snapshot（post-image 検証に必要な広い fields を含む）を読み得る。`maxRecords` 到達で利用不能なアプリもある。
-- safe prefilter の包含性を崩すと「対象親を静かに未更新」という重大な不具合になる。
-- KLIKE まで同時対応すると、native 検索・適用済みノード・search abort の別設計が増える。
+- VALIDATE ONLY は candidate GET と残余評価を行うが mutation API は0回。
+- `validatedRows`、`validRows`、`guards.parentRows` は target 数。
+- EXPLAIN は API 0回で prefilter、residual、KLIKE applied/unapplied、limit policy、B7 依存を表示。
+- target 0件は PUT 0回、confirm / diagnostic の親件数0。
+- 101 target は100 + 1 chunk。後続失敗の既存 partial-success detail は不変。
+- revision conflict で再取得・WHERE 再評価・自動 retry をしない。
 
-### 8.3 判断材料
+## 9. SemVer / リリース
 
-台帳が示す完全一致、`IN`、`$id IN (...)` は安全かつ既に利用可能であり、B44 v3.8.0 の追加修正として急ぐ費用対効果は低い。R1 の推奨判断は次である。
+B47 は安全上拒否していた APPLY 複数親 UPDATE の受理範囲を広げる利用者可視の機能追加であり **minor** とする。B7 も plugin に新しい警告／fail-closed 契機を加える minor 改善であるため、両方を **v3.10.0** に同梱する。現行 package version は `3.9.0`（[package.json:1-3](../../package.json#L1)）。
 
-- **v3.8.x では見送り継続**。
-- 実需が「事前 SELECT + `$id IN`」では不足すると確認できた場合、**LIKE のみを minor feature として実装推奨**。
-- KLIKE は別課題へ分離。
+リリース順序は次である。
 
-実装判断前に、実アプリでの対象件数、LIKE と AND 併記できる安全 prefilter の有無、`maxRecords` 内で候補を取得しきれる割合を確認する。
+1. B7 を実装し、plugin raw Fetch の unit と通常 / guest 実機ゲートを確認する。
+2. B47 の LIKE / KLIKE parent selection を実装する。
+3. 通常 DML fail-closed 非回帰、unapplied KLIKE 拒否、全 surface を検証する。
+4. v3.10.0 として同梱する。
 
-## 9. テスト観点
+B7 が受入未完了なら、plugin KLIKE の全面解禁を release-ready と判定しない。
 
-実装時は修正前 fail / 修正後 pass を同じ SQL で示す。
+## 10. スコープ外
 
-### 9.1 parser / scope / converter
-
-- `LIKE` / `NOT LIKE` AST は変更しない。
-- APPLY 複数親 LIKE は専用 preflight に入り、通常 `updateToGetQuery` の一律緩和を起こさない。
-- 通常 UPDATE / DELETE の LIKE は従来エラーを維持する。
-- APPLY 親 KLIKE / NOT KLIKE は明示エラーを維持する。
-- INSERT APPLY / UPSERT APPLY の既存経路に変化がない。
-
-### 9.2 親選択
-
-- `タイトル LIKE 'B44%'`: query は空、全候補取得後に一致親だけを PUT。
-- `金額 > 0 AND タイトル LIKE 'B44%'`: 安全と判定された leaf だけ query に入り、元 WHERE 全体の再評価で対象を確定。
-- `タイトル LIKE 'B44%' OR 金額 > 0`: OR の片側だけを押し下げず、全候補取得後に再評価。
-- `NOT (タイトル LIKE 'B44%')`: NOT subtree を押し下げず、JS で正しく否定評価。
-- `LIKE` / `NOT LIKE`、wildcard なし contains、`%`、`_`、空文字、Unicode を SELECT と同じ期待値で固定。
-- バッチ変数を LIKE 右辺に使う場合、変数解決後の AST を評価する。
-- 対象0件は PUT 0回、confirm/diagnostic の親件数0。
-- 候補に「LIKE 不一致だが prefilter 一致」の親を混ぜ、PUT records に絶対に入らないことを検証する。
-
-### 9.3 上限・安全性
-
-- 候補101件・実対象1件・`dmlMaxRows=1`: 候補数では拒否せず、全候補評価後に1件を許可する。
-- 候補101件・実対象2件・`dmlMaxRows=1`: 最初の PUT 前に拒否する。
-- 候補が `maxRecords` を超える: 書き込み0件で `FetchAllLimitError`。
-- native search abort: 書き込み0件で `SearchAbortedError`。
-- post-image 検証エラー: 全対象の prepare 後、書き込み0件。
-- confirm cancel: PUT 0件。
-- 101対象: 100 + 1 chunk。後続失敗は既存 partial-success detail を維持する。
-- revision conflict: 再取得・再評価・retry なし。
-
-### 9.4 VALIDATE ONLY / EXPLAIN / surface
-
-- `VALIDATE ONLY` の `validatedRows`、`validRows`、`guards.parentRows` は候補数でなく LIKE 後の実対象数。
-- `VALIDATE ONLY` は records GET を行うが mutation API 0回。
-- EXPLAIN は records API 0回を維持し、`parent WHERE: JS re-evaluation`、safe prefilter、candidate limit policy、KLIKE unsupported を表示する。
-- CLI / plugin の confirm 親件数はフィルタ後件数。
-- MCP の既存 APPLY mutation fail-closed は変更しない。
-
-## 10. 決定点
-
-| ID | 選択肢 | R1 推奨 | 理由 |
-|---|---|---|---|
-| D1 スコープ | APPLY 複数親 UPDATE のみ / 通常親 DML まで拡大 | **APPLY 複数親 UPDATE のみ** | snapshot prepare 経路に限定し、通常 DML の直接 push-down 契約を変えない |
-| D2 LIKE 取得 | 全件 GET / safe prefilter + JS 全体再評価 | **safe prefilter + JS 全体再評価** | 現行は exact push-down。既存 primitive を使いつつ超集合性を維持できる |
-| D3 candidate limit | `dmlMaxRows+1` を維持 / `maxRecords` まで完全取得 | **`maxRecords`・onLimit=error** | prefilter 候補数は実対象数ではない |
-| D4 KLIKE | 同時対応 / 非対応継続 | **非対応継続** | 局所評価不能で applied-node 証明が別設計。B45 前例とも一致 |
-| D5 SemVer | patch / minor | **minor** | 安全上拒否していた DML 受理範囲の利用者可視な拡大 |
-| D6 投資判断 | 即実装 / 実需確認まで見送り | **v3.8.x は見送り、実需確認後に minor で実装** | 回避策あり。取得計画・上限・正しさの変更は小さくない |
-
-## 11. スコープ外
-
-- APPLY なしの UPDATE / DELETE における LIKE / KLIKE。
-- KLIKE / NOT KLIKE の APPLY 親 WHERE 対応。
-- kintone native `like` と kSQL LIKE の意味論統一。
-- LIKE の JS evaluator 自体の意味論変更。
+- APPLY なしの UPDATE / DELETE における LIKE / KLIKE 解禁。
+- kSQL LIKE と kintone native KLIKE の意味論統一。
+- LIKE / KLIKE evaluator 自体の意味論変更。
+- OR / NOT 配下 KLIKE の分解・集合演算による高度な pushdown。
 - INSERT / UPSERT APPLY のキー探索変更。
-- 親 DELETE APPLY、`UPDATE ... FROM`、相関更新、CTE/一時表を親 selector にする拡張。
-- `maxRecords` を超える巨大候補集合の streaming filter / cursor 化。
+- 親 DELETE APPLY、`UPDATE ... FROM`、相関更新、CTE / 一時表 selector。
+- `maxRecords` を超える巨大 candidate 集合の streaming filter / cursor 化。
 - B44 の chunk、revision、partial-success、post-image validation 契約の変更。
-- MCP APPLY mutation gate の緩和。
-
+- MCP APPLY mutation gate 自体の緩和。

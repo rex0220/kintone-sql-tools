@@ -1,7 +1,10 @@
 import type { SelectStatement, WhereExpr } from "../../types/ast";
 import type { KlikeExpr } from "../like";
 import { isKlike } from "../like";
-import { extractSafePushdownLeaves } from "./wherePredicatePushdown";
+import {
+  extractSafePushdownLeaves,
+  type SafePushdownOptions,
+} from "./wherePredicatePushdown";
 
 export interface KlikePushdownMetadata {
   fieldTypesByApp?: ReadonlyMap<number, ReadonlyMap<string, string>>;
@@ -24,6 +27,35 @@ export interface KlikePushdownPlan {
   allKlikes: readonly KlikeExpr[];
 }
 
+interface SingleTableKlikePushdownOptions extends SafePushdownOptions {
+  /** SELECT の subtable / CTE / alias なし JOIN では main-table 抽出自体を行わない。 */
+  readonly extractCondition?: boolean;
+}
+
+export interface SingleTableKlikePushdownPlan {
+  readonly condition: WhereExpr | null;
+  readonly appliedKlikes: ReadonlySet<KlikeExpr>;
+  readonly allKlikes: readonly KlikeExpr[];
+}
+
+/**
+ * 単一テーブルの safe prefilter と KLIKE identity 集合を同じ AST から作る共有 primitive。
+ * 抽出器が返す leaf を clone せず、そのまま appliedKlikes へ収集する。
+ */
+export function buildSingleTableKlikePushdownPlan(
+  where: WhereExpr | null,
+  options: SingleTableKlikePushdownOptions = {}
+): SingleTableKlikePushdownPlan {
+  const condition = where !== null && options.extractCondition !== false
+    ? extractSafePushdownLeaves(where, options)
+    : null;
+  const appliedKlikes = new Set<KlikeExpr>();
+  collectKlikes(condition, appliedKlikes);
+  const allKlikes = new Set<KlikeExpr>();
+  collectKlikes(where, allKlikes);
+  return { condition, appliedKlikes, allKlikes: [...allKlikes] };
+}
+
 export function buildKlikePushdownPlan(
   stmt: SelectStatement,
   options: KlikePushdownPlanOptions = {}
@@ -34,25 +66,17 @@ export function buildKlikePushdownPlan(
     allowUnresolvedKlikeVariables: options.allowUnresolvedVariables,
   };
 
-  let mainCondition: WhereExpr | null = null;
-  if (stmt.where !== null && !stmt.from.subtableCode && stmt.from.cteName === null) {
-    if (stmt.joins.length === 0) {
-      mainCondition = extractSafePushdownLeaves(stmt.where, {
-        ...common,
-        tableAlias: stmt.from.alias ?? undefined,
-        allowUnqualifiedFields: true,
-        fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
-        fieldOptions: options.fieldOptionsByApp?.get(stmt.from.appId),
-      });
-    } else if (stmt.from.alias) {
-      mainCondition = extractSafePushdownLeaves(stmt.where, {
-        ...common,
-        tableAlias: stmt.from.alias,
-        fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
-        fieldOptions: options.fieldOptionsByApp?.get(stmt.from.appId),
-      });
-    }
-  }
+  const mainIsPhysical = !stmt.from.subtableCode && stmt.from.cteName === null;
+  const mainHasUsableAlias = stmt.joins.length === 0 || stmt.from.alias !== null;
+  const mainPlan = buildSingleTableKlikePushdownPlan(stmt.where, {
+    ...common,
+    extractCondition: mainIsPhysical && mainHasUsableAlias,
+    tableAlias: stmt.from.alias ?? undefined,
+    allowUnqualifiedFields: stmt.joins.length === 0,
+    fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
+    fieldOptions: options.fieldOptionsByApp?.get(stmt.from.appId),
+  });
+  const mainCondition = mainPlan.condition;
 
   const joinConditions = new Map<string, WhereExpr>();
   if (stmt.where !== null) {
@@ -68,17 +92,14 @@ export function buildKlikePushdownPlan(
     }
   }
 
-  const appliedKlikes = new Set<KlikeExpr>();
-  collectKlikes(mainCondition, appliedKlikes);
+  const appliedKlikes = new Set<KlikeExpr>(mainPlan.appliedKlikes);
   for (const condition of joinConditions.values()) collectKlikes(condition, appliedKlikes);
 
-  const allKlikes = new Set<KlikeExpr>();
-  collectKlikes(stmt.where, allKlikes);
   return {
     mainCondition,
     joinConditions,
     appliedKlikes,
-    allKlikes: [...allKlikes],
+    allKlikes: mainPlan.allKlikes,
   };
 }
 

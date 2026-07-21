@@ -488,19 +488,21 @@ function assertSafeParentWhere(where: WhereExpr, multipleParents: boolean): void
   if (!multipleParents) {
     unsupported("a parent WHERE other than the single condition $id = <positive safe integer> in this phase");
   }
-  assertSafeParentPredicateNode(where);
+  // B47: KLIKE の例外は複数親能力を持つ UPDATE APPLY の親 WHERE だけに閉じる。
+  // 単一 $id は上で return 済みであり、子 selector / INSERT / UPSERT は別 checker を通る。
+  assertSafeParentPredicateNode(where, multipleParents);
 }
 
-function assertSafeParentPredicateNode(node: unknown): void {
+function assertSafeParentPredicateNode(node: unknown, allowKlike: boolean): void {
   if (Array.isArray(node)) {
-    for (const value of node) assertSafeParentPredicateNode(value);
+    for (const value of node) assertSafeParentPredicateNode(value, allowKlike);
     return;
   }
   if (node === null || typeof node !== "object") return;
   const item = node as Record<string, unknown>;
   const type = typeof item["type"] === "string" ? item["type"] : null;
   const op = typeof item["op"] === "string" ? item["op"] : null;
-  if (op === "KLIKE" || op === "NOT_KLIKE") unsupported("KLIKE in parent WHERE");
+  if (!allowKlike && (op === "KLIKE" || op === "NOT_KLIKE")) unsupported("KLIKE in parent WHERE");
   if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "SUBQUERY_IN_LIST" || type === "EXISTS") {
     unsupported("subqueries in parent WHERE");
   }
@@ -511,7 +513,7 @@ function assertSafeParentPredicateNode(node: unknown): void {
     unsupported("aggregate or window expressions in parent WHERE");
   }
   if (type === "KINTONE_FUNC") unsupported("non-deterministic kintone functions in parent WHERE");
-  for (const value of Object.values(item)) assertSafeParentPredicateNode(value);
+  for (const value of Object.values(item)) assertSafeParentPredicateNode(value, allowKlike);
 }
 
 function assertSafeChildPredicate(where: WhereExpr, idxSelectors: boolean): void {

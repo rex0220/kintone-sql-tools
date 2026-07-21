@@ -17,6 +17,7 @@ import { createKintoneCursorHandle } from "../api/kintoneCursor";
 import { getCursorLeaseManager } from "../api/cursorLeaseManager";
 import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
 import { parseNumberPrecisionSettings } from "../core/numberPrecision";
+import { isSearchAbortedWarning } from "../core/searchAbortWarning";
 import {
   InvalidJsonResponseError,
   KINTONE_METADATA_MAX_RESPONSE_BYTES,
@@ -44,8 +45,6 @@ export interface TokenResolver {
     | { type: "token"; resolveToken: (appId: number) => string }
     | { type: "userpass"; username: string; password: string };
 }
-
-const SEARCH_ABORTED_HEADER_VALUE = "Filter aborted because of too many search results";
 
 interface JsonResponse<T> {
   body: T;
@@ -131,10 +130,9 @@ export function createNodeKintoneConnection(
     if (tokenResolver.debug) {
       tokenResolver.log?.(`[debug] response status=${res.status}`);
     }
-    const warning = res.headers.get("X-Cybozu-Warning") ?? "";
     return {
       response: res,
-      searchAborted: warning.includes(SEARCH_ABORTED_HEADER_VALUE),
+      searchAborted: isSearchAbortedWarning(res.headers.get("X-Cybozu-Warning")),
     };
   }
 

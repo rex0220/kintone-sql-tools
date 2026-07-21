@@ -100,6 +100,7 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
+import { buildApplyParentSelectionPlan, type ApplyParentSelectionPlan } from "./core/optimization/applyParentSelectionPlan";
 import {
   planCanonicalOrder,
   type CanonicalOrderPlan,
@@ -870,7 +871,7 @@ async function executeParsedStatement(
   cacheContext: string
 ): Promise<ExecuteResult> {
   const unresolved = findVariableRef(stmt);
-  if (unresolved !== null) {
+  if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase15b", stmt);
@@ -6443,16 +6444,22 @@ async function executeMultipleParentApplyPreflight(
   );
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
-  const fields = collectApplySnapshotFields(stmt, fieldInfos);
-  const baseQuery = updateToGetQuery(stmt).query;
-  const detectionLimit = dmlMaxRows + 1;
-  const snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
-    pageSize: Math.min(500, detectionLimit),
-    parallel: options.fetchParallel ?? 1,
-    maxRecords: detectionLimit,
-    stopAfter: detectionLimit,
-    onLimit: "error",
-  });
+  let snapshots: KintoneRecord[];
+  if (usesApplyParentResidualSelection(stmt)) {
+    snapshots = await selectApplyParentSnapshots(stmt, client, options, fieldInfos, cacheContext);
+  } else {
+    // B47 carve-out 外は従来の exact DML converter と dmlMaxRows+1 早期停止を維持する。
+    const fields = collectApplySnapshotFields(stmt, fieldInfos);
+    const baseQuery = updateToGetQuery(stmt).query;
+    const detectionLimit = dmlMaxRows + 1;
+    snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
+      pageSize: Math.min(500, detectionLimit),
+      parallel: options.fetchParallel ?? 1,
+      maxRecords: detectionLimit,
+      stopAfter: detectionLimit,
+      onLimit: "error",
+    });
+  }
   if (!stmt.validateOnly && snapshots.length > dmlMaxRows) {
     throw new Error(`ArgumentError: APPLY parent rows (${snapshots.length}) exceed dmlMaxRows (${dmlMaxRows}).`);
   }
@@ -6485,6 +6492,148 @@ async function executeMultipleParentApplyPreflight(
   }
   const result = await executePreparedApplyWrite(prepared, client, diagnostic);
   return { ...result, diagnostic: withApplyDiagnosticProgress(diagnostic, result) };
+}
+
+/** B47 carve-out: APPLY 複数親 UPDATE の親 WHERE に LIKE / KLIKE がある場合だけ。 */
+function usesApplyParentResidualSelection(stmt: UpdateStatement): boolean {
+  return (stmt.applyBlocks?.length ?? 0) > 0
+    && !isSinglePositiveRecordIdWhere(stmt.where)
+    && (whereHasLike(stmt.where) || whereHasKlike(stmt.where));
+}
+
+function isApplyParentKlikeStatement(stmt: Statement): boolean {
+  const target = stmt.type === "EXPLAIN" ? stmt.query : stmt;
+  return target.type === "UPDATE"
+    && usesApplyParentResidualSelection(target)
+    && whereHasKlike(target.where);
+}
+
+const APPLY_PARENT_UNAPPLIED_KLIKE_ERROR =
+  "APPLY 複数親 UPDATE の親 WHERE に、安全に押し下げられない KLIKE / NOT KLIKE があります。\n" +
+  "OR / NOT 配下など native query へ完全に適用できない KLIKE は使用できません。\n" +
+  "WHERE を AND の安全な KLIKE 条件へ書き換えるか、SELECT で確認した $id IN (...) を使用してください。";
+
+function assertApplyParentKlikesFullyApplied(plan: ApplyParentSelectionPlan): void {
+  if (plan.unappliedKlikes.length > 0) throw new Error(`UnsupportedError: ${APPLY_PARENT_UNAPPLIED_KLIKE_ERROR}`);
+}
+
+async function selectApplyParentSnapshots(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  fieldInfos: readonly KintoneFieldInfo[],
+  cacheContext: string
+): Promise<KintoneRecord[]> {
+  const topLevelInfos = fieldInfos.filter((field) => !field.inSubtable);
+  const infoByCode = new Map(topLevelInfos.map((field) => [field.code, field]));
+  const fieldTypes = new Map(topLevelInfos.map((field) => [field.code, field.fieldType]));
+  const fieldOptions = new Map(topLevelInfos.flatMap((field) => field.optionOrder
+    ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
+    : []));
+  const selectionPlan = buildApplyParentSelectionPlan(stmt.where, { fieldTypes, fieldOptions });
+  // native 適用集合の完全性を records API より前に確定する。一部適用での継続は禁止。
+  assertApplyParentKlikesFullyApplied(selectionPlan);
+  const prefilterQuery = selectionPlan.prefilter === null
+    ? ""
+    : whereToKintone(selectionPlan.prefilter);
+
+  // updateToGetQuery は LIKE を拒否する通常 DML 用 converter のため、この route では呼ばない。
+  // APPLY/SET 用 snapshot に加え、元 WHERE の残余評価に必要な親フィールドを必ず取得する。
+  const fields = new Set(collectApplySnapshotFields(stmt, fieldInfos));
+  for (const field of collectApplyParentWhereFields(stmt.where)) fields.add(field);
+  const resolvers = await buildApplyParentFieldResolvers(
+    stmt.appId,
+    stmt.where,
+    infoByCode,
+    client,
+    cacheContext
+  );
+  const candidates = await fetchAll(
+    client.getRecords,
+    stmt.appId,
+    prefilterQuery,
+    [...fields],
+    {
+      maxRecords: options.maxRecords ?? 10_000,
+      parallel: options.fetchParallel ?? 1,
+      onLimit: "error",
+      // prefilter は target の超集合なので stopAfter を設定せず最後まで取得する。
+    }
+  );
+
+  return candidates
+    .map((snapshot) => ({ snapshot, row: flatten(snapshot, null) }))
+    .filter(({ row }) => evalWhere(
+      stmt.where,
+      row,
+      resolvers.fieldTypeResolver,
+      selectionPlan.appliedKlikes,
+      resolvers.fieldSemanticsResolver
+    ))
+    .map(({ snapshot }) => snapshot);
+}
+
+function collectApplyParentWhereFields(where: WhereExpr): string[] {
+  return collectValidateWhereFields(where);
+}
+
+interface ApplyParentFieldResolvers {
+  readonly fieldTypeResolver: FieldTypeResolver;
+  readonly fieldSemanticsResolver: FieldSemanticsResolver;
+}
+
+/** SELECT と同じ field type / field semantics primitive を単一の親物理 app に結ぶ。 */
+async function buildApplyParentFieldResolvers(
+  appId: number,
+  where: WhereExpr,
+  infoByCode: ReadonlyMap<string, KintoneFieldInfo>,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<ApplyParentFieldResolvers> {
+  const orderedFields = collectOrderedWhereFields(where);
+  const needsStatusOrder = [...orderedFields].some((field) => infoByCode.get(field)?.fieldType === "STATUS");
+  const statusOrder = needsStatusOrder
+    ? await loadProcessStatusOrder(appId, client, cacheContext)
+    : undefined;
+
+  const fieldTypeResolver: FieldTypeResolver = (field) => field.field === "$id"
+    ? "NUMBER"
+    : infoByCode.get(field.field)?.fieldType;
+  const fieldSemanticsResolver: FieldSemanticsResolver = (field) => {
+    if (field.field === "$id") {
+      return withFieldSemanticSource(resolveFieldSemantics({ fieldType: "__ID__" }), appId, "$id");
+    }
+    const info = infoByCode.get(field.field);
+    if (!info) return undefined;
+    const base = info.semantics ?? resolveFieldSemantics(info);
+    const semantics = info.fieldType === "STATUS" && statusOrder
+      ? { ...base, optionOrder: statusOrder }
+      : base;
+    return withFieldSemanticSource(semantics, appId, info.code);
+  };
+  return { fieldTypeResolver, fieldSemanticsResolver };
+}
+
+function collectOrderedWhereFields(where: WhereExpr): ReadonlySet<string> {
+  const fields = new Set<string>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "SELECT") return;
+    if (value["type"] === "BINARY" && [">", "<", ">=", "<="].includes(String(value["op"]))) {
+      const left = value["left"] as Record<string, unknown> | undefined;
+      if (left?.["type"] === "FIELD" && typeof left["field"] === "string") {
+        fields.add(left["field"] as string);
+      }
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(where);
+  return fields;
 }
 
 function materializePreparedApplyInsertValidation(
@@ -7717,6 +7866,7 @@ interface ValidateExplainInfo {
 }
 
 const validateExplainInfo = new WeakMap<ValidateStatement, ValidateExplainInfo>();
+const applyParentExplainPlan = new WeakMap<UpdateStatement, ApplyParentSelectionPlan>();
 
 async function buildExplainWhereAnalysis(
   query: unknown,
@@ -7869,12 +8019,21 @@ async function buildExplainWhereAnalysis(
         const update = node as UpdateStatement;
         const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
         resolveApplyPatchMetadata(update, fields);
+        if (usesApplyParentResidualSelection(update)) {
+          const topLevel = fields.filter((field) => !field.inSubtable);
+          const selectionPlan = buildApplyParentSelectionPlan(update.where, {
+            fieldTypes: new Map(topLevel.map((field) => [field.code, field.fieldType])),
+            fieldOptions: new Map(topLevel.flatMap((field) => field.optionOrder
+              ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
+              : [])),
+          });
+          applyParentExplainPlan.set(update, selectionPlan);
+        }
       }
-      await assertDmlWhereCapability(
-        node as UpdateStatement | DeleteStatement,
-        tracedClient,
-        cacheContext
-      );
+      const dml = node as UpdateStatement | DeleteStatement;
+      if (dml.type !== "UPDATE" || !usesApplyParentResidualSelection(dml)) {
+        await assertDmlWhereCapability(dml, tracedClient, cacheContext);
+      }
     }
     await Promise.all(Object.values(typed).map(visit));
   };
@@ -8117,7 +8276,7 @@ async function executeExplain(
     ...addCursorConcurrency(
       buildExplainPlan(
         stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
-        dmlMaxRows, dmlMaxSubtableRows
+        dmlMaxRows, dmlMaxSubtableRows, maxRecords
       ),
       cursorMaxActive
     ),
@@ -8148,7 +8307,8 @@ function buildExplainPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  maxRecords = 10_000
 ): string[] {
   if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
@@ -8157,7 +8317,7 @@ function buildExplainPlan(
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPDATE")        return buildUpdatePlan(
-    query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows
+    query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows, maxRecords
   );
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
@@ -8537,10 +8697,11 @@ function buildUpdatePlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  maxRecords = 10_000
 ): string[] {
   if (stmt.applyBlocks?.length) {
-    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows);
+    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows, maxRecords);
   }
   const isArith  = hasArithAssignment(stmt);
   const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
@@ -8557,6 +8718,10 @@ function buildUpdatePlan(
     lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
   } else {
     lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  }
+  if (!stmt.subtableCode) {
+    lines.push("  selection: exact native pushdown; JS residual none");
+    lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
   }
   lines.push(isConstantFalseWhere(stmt.where)
     ? "  api:           metadata validation only (records API access: none)"
@@ -8595,7 +8760,8 @@ function buildUpdateApplyPlan(
   stmt: UpdateStatement,
   label: string | undefined,
   dmlMaxRows: number,
-  dmlMaxSubtableRows: number
+  dmlMaxSubtableRows: number,
+  maxRecords: number
 ): string[] {
   const diagnostic = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
   const branch = diagnostic.branches[0];
@@ -8613,12 +8779,25 @@ function buildUpdateApplyPlan(
   });
   const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
   const hasRemove = operationKinds.includes("REMOVE");
+  const selectionPlan = applyParentExplainPlan.get(stmt);
+  const selectionLines = selectionPlan ? [
+    "parent selection:       safe prefilter + JS residual evaluation",
+    `kintone prefilter:      ${selectionPlan.prefilter === null ? "(none; empty query)" : whereToKintone(selectionPlan.prefilter)}`,
+    "JS residual:            original parent WHERE",
+    `applied KLIKE:          ${selectionPlan.appliedKlikes.size}`,
+    `unapplied KLIKE:        ${selectionPlan.unappliedKlikes.length}${selectionPlan.unappliedKlikes.length > 0
+      ? " (unsupported: cannot be fully applied to native query)" : ""}`,
+    `candidate limit:        maxRecords=${maxRecords}, onLimit=error, stopAfter=none`,
+    `target guard:           dmlMaxRows=${dmlMaxRows} after JS residual evaluation`,
+    "search abort:           DML fail-closed (B7-P3; all surfaces, no surface gate)",
+  ] : [];
   return [
     ...(label ? [label] : []),
     "statement:              UPDATE APPLY",
     `target app:             APP${stmt.appId}`,
     `parent selector:        ${safeWhereToKintone(stmt.where)}`,
-    "parent cardinality:     single",
+    `parent cardinality:     ${isSinglePositiveRecordIdWhere(stmt.where) ? "single" : "multiple"}`,
+    ...selectionLines,
     `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,
@@ -8645,6 +8824,10 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
   lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  if (!stmt.subtableCode) {
+    lines.push("  selection: exact native pushdown; JS residual none");
+    lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
+  }
   lines.push(isConstantFalseWhere(stmt.where)
     ? "  api:           metadata validation only (records API access: none)"
     : `  api:           GET /k/v1/records.json → DELETE /k/v1/records.json`);

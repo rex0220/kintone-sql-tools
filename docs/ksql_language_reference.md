@@ -691,9 +691,9 @@ WHERE 件名 NOT KLIKE '保留'
   ```
 - FULL_SCANでの制約: ORまたは`NOT (...)`配下、サブテーブル、CTE／一時テーブル上のKLIKEは使用できません。JOINとの併用は、すべてのJOINが`INNER JOIN`で、KLIKEのフィールドをテーブルエイリアスで明示した場合だけ許可します。`LEFT JOIN` / `RIGHT JOIN`を含むSELECTでは、安全側にKLIKEを拒否します。直接の`NOT KLIKE`はANDリーフとして使用できます。
 - 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
-- UPDATE、DELETE、INSERT ... SELECT、UPSERT ... SELECT、REORDERを含むすべてのDMLでは引き続き使用できません。
+- DML では次の親レコード DML の WHERE で使用できます（v3.10.0）: **通常（APPLY なし）の親 `UPDATE` / `DELETE`**、および **APPLY 複数親 `UPDATE` の親 WHERE**。前者は WHERE 全体を kintone クエリへ exact 変換して対象を解決するため `OR` / `NOT` 配下の KLIKE も使用できます。後者は安全プレフィルタ＋残余評価のため、`OR` / `NOT` 配下など native query に完全適用できない KLIKE は使用できません。**サブテーブル `UPDATE` / `DELETE`・`REORDER`・`INSERT` / `INSERT ... SELECT`・`UPSERT` / `UPSERT ... SELECT`・独立した `VALIDATE` では引き続き使用できません**（JS 評価経路のため）。SQL `LIKE` / `NOT LIKE` は通常 DML では引き続き使用できません（JS 評価が必要）。
 - 利用可能なフィールドは[kintone公式の演算子対応表](https://cybozu.dev/ja/kintone/docs/overview/query/)に従います。文字列1行・複数行、リッチエディター、リンク、添付ファイルなどが対象です。非対応フィールドはkintone APIエラーになります。
-- kintoneはキーワード一致が10万件に達すると検索を打ち切ります。CLI / MCP はレスポンス警告を検出し、SELECT では結果欠落の可能性を警告します。読み取り結果を書き込みや一時テーブル実体化に使う場合は、不完全な対象集合で実行しないようエラーにします。プラグインの `kintone.api()` はレスポンスヘッダーを公開しないため、現時点ではこの打ち切りを検出できません。プラグインでは十分に絞り込めるキーワードを指定してください。
+- kintoneはキーワード一致が10万件に達すると検索を打ち切ります。**CLI / MCP / プラグインすべてで打ち切りを検出します**（プラグインは v3.10.0 で raw fetch によりレスポンスヘッダー `X-Cybozu-Warning` を読み取ります）。SELECT では結果欠落の可能性を警告します。読み取り結果を書き込みや一時テーブル実体化に使う場合、および KLIKE を含む親 DML の対象解決では、不完全な対象集合で実行しないよう `SearchAbortedError` でエラー終了し、書き込み0件で fail-closed とします。
 - `KLIKE` は予約語です。同名フィールドを参照するときは `` `KLIKE` `` と記述します。
 
 ### IN / NOT IN（値リストによる一致・除外）
@@ -2487,7 +2487,7 @@ ON a.金額 > b.下限金額
 
 ### LIKE の挙動
 
-LIKEはワイルドカードの有無にかかわらず常にJavaScriptで評価し、kintoneへ押し下げません。ワイルドカードなしはkSQL独自の部分一致（`includes`）です。通常の親レコードDMLではLIKEを使用できません。詳細は「LIKE / NOT LIKE（部分一致・除外）」を参照してください。
+LIKEはワイルドカードの有無にかかわらず常にJavaScriptで評価し、kintoneへ押し下げません。ワイルドカードなしはkSQL独自の部分一致（`includes`）です。通常の親レコードDMLではLIKEを使用できません（**例外**: v3.10.0 以降、APPLY 複数親 `UPDATE` の親 WHERE では LIKE を使用できます＝安全プレフィルタで取得後に元 WHERE を JS 再評価します。通常の親 UPDATE/DELETE では KLIKE のみ使用でき LIKE は使用できません）。詳細は「LIKE / NOT LIKE（部分一致・除外）」を参照してください。
 
 ---
 

@@ -66,6 +66,21 @@ test("X-Cybozu-Warning の既知メッセージを searchAborted に変換する
   expect(response).toEqual({ records: [], searchAborted: true });
 });
 
+test("複数警告中の既知メッセージを searchAborted に変換する", async () => {
+  globalThis.fetch = jest.fn(async () => jsonResponse(
+    { records: [] },
+    {
+      headers: {
+        "X-Cybozu-Warning":
+          "another warning; Filter aborted because of too many search results; final warning",
+      },
+    }
+  ));
+
+  const response = await makeClient().getRecords({ app: 1, query: "limit 1", fields: [] });
+  expect(response).toEqual({ records: [], searchAborted: true });
+});
+
 test("CB_IL02 リトライ後の成功レスポンでも警告ヘッダーを検出する", async () => {
   globalThis.fetch = jest.fn()
     .mockResolvedValueOnce(jsonResponse({ code: "CB_IL02" }, { status: 400 }))

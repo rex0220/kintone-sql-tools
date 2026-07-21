@@ -72,6 +72,24 @@ const multiFieldInfos: KintoneFieldInfo[] = [
   { code: "担当", label: "担当", fieldType: "USER_SELECT", writable: true },
 ];
 
+const likeParentFieldInfos: KintoneFieldInfo[] = [
+  ...fieldInfos,
+  { code: "タイトル", label: "タイトル", fieldType: "SINGLE_LINE_TEXT", writable: true },
+  { code: "説明", label: "説明", fieldType: "MULTI_LINE_TEXT", writable: true },
+  { code: "備考", label: "備考", fieldType: "MULTI_LINE_TEXT", writable: true },
+  { code: "金額", label: "金額", fieldType: "NUMBER", writable: true },
+];
+
+function likeParent(id: string, title: string, amount = "1", description = "", note = ""): KintoneRecord {
+  return {
+    ...parent(id),
+    タイトル: { value: title },
+    説明: { value: description },
+    備考: { value: note },
+    金額: { value: amount },
+  } as unknown as KintoneRecord;
+}
+
 function multiParent(): KintoneRecord {
   return {
     ...parent(),
@@ -927,6 +945,246 @@ test("Phase 10b: dmlMaxRows+1件で超過を確定しtruncateせずwrite 0", asy
   }));
   expect(mock.putRecords).not.toHaveBeenCalled();
   expect(mock.postRecords).not.toHaveBeenCalled();
+});
+
+test("B47-P2: 親LIKEはnative pushせず全candidateからtargetだけをprepare/PUTする", async () => {
+  const mock = makeClient([
+    likeParent("1", "B44-alpha"),
+    likeParent("2", "other"),
+    likeParent("3", "B44-beta"),
+  ], likeParentFieldInfos);
+  const confirm = jest.fn(async () => true);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE タイトル LIKE 'B44%' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: "b47-p2-like", allowApplyMutation: true, confirm, dmlMaxRows: 2 }
+  );
+
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: 2 });
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: "order by $id asc limit 500 offset 0",
+    fields: expect.arrayContaining(["$id", "$revision", "タイトル"]),
+  }));
+  const getCalls = mock.getRecords.mock.calls as unknown as Array<[{ query: string }]>;
+  expect(getCalls[0]?.[0].query).not.toMatch(/\blike\b/i);
+  expect(confirm).toHaveBeenCalledWith(2, "UPDATE", expect.any(Object));
+  expect(mock.putRecords.mock.calls.flatMap(([batch]) => batch.records.map((record) => record.id)))
+    .toEqual([1, 3]);
+});
+
+test("B47-P2: ANDのsafe数値leafだけをprefilterしLIKEは元WHEREで残余評価する", async () => {
+  const mock = makeClient([
+    likeParent("1", "B44-hit", "10"),
+    likeParent("2", "other", "10"),
+    likeParent("3", "B44-zero", "0"),
+  ], likeParentFieldInfos);
+  await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 金額 > 0 AND タイトル LIKE 'B44%' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: "b47-p2-prefilter", allowApplyMutation: true, dmlMaxRows: 1 }
+  );
+
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: "金額 > 0 order by $id asc limit 500 offset 0",
+    fields: expect.arrayContaining(["金額", "タイトル"]),
+  }));
+  expect(mock.putRecords.mock.calls.flatMap(([batch]) => batch.records.map((record) => record.id)))
+    .toEqual([1]);
+});
+
+test.each([
+  ["タイトル LIKE 'B44%' OR 金額 > 0", [1, 2]],
+  ["タイトル NOT LIKE 'B44%'", [2, 3]],
+])("B47-P2: OR/NOT LIKEはpartial pushdownせず完全candidateをJS評価する: %s", async (where, ids) => {
+  const mock = makeClient([
+    likeParent("1", "B44-hit", "0"),
+    likeParent("2", "other", "1"),
+    likeParent("3", "other", "0"),
+  ], likeParentFieldInfos);
+  await execute(
+    `UPDATE APP4221 SET 親='after' WHERE ${where} APPLY テーブル (PATCH SET 子='x' ALL ROWS)`,
+    mock.client,
+    { cacheContext: `b47-p2-tree-${String(where)}`, allowApplyMutation: true, dmlMaxRows: ids.length }
+  );
+
+  const getCalls = mock.getRecords.mock.calls as unknown as Array<[{ query: string }]>;
+  expect(getCalls[0]?.[0].query).toBe("order by $id asc limit 500 offset 0");
+  expect(mock.putRecords.mock.calls.flatMap(([batch]) => batch.records.map((record) => record.id)))
+    .toEqual(ids);
+});
+
+test.each([
+  ["LIKE", "B44", "xxB44yy", true],
+  ["LIKE", "%", "任意", true],
+  ["LIKE", "B_4", "B猫4", true],
+  ["LIKE", "", "", true],
+  ["LIKE", "東京_支店", "東京一支店", true],
+  ["LIKE", "B44%", "other", false],
+  ["NOT LIKE", "B44%", "other", true],
+  ["NOT LIKE", "B44%", "B44-hit", false],
+])("B47-P2: SELECT evaluatorと同じLIKE意味論を使う: %s %s", async (op, pattern, title, matches) => {
+  const mock = makeClient([likeParent("1", title)], likeParentFieldInfos);
+  const result = await execute(
+    `UPDATE APP4221 SET 親='after' WHERE タイトル ${op} '${pattern}' `
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: `b47-p2-pattern-${op}-${pattern}`, allowApplyMutation: true, dmlMaxRows: 1 }
+  );
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: matches ? 1 : 0 });
+  expect(mock.putRecords).toHaveBeenCalledTimes(matches ? 1 : 0);
+});
+
+test("B47-P2: dmlMaxRowsはcandidateではなくtargetだけに適用する", async () => {
+  const oneTarget = makeClient(Array.from({ length: 101 }, (_, index) =>
+    likeParent(String(index + 1), index === 100 ? "B44-hit" : "other")
+  ), likeParentFieldInfos);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE タイトル LIKE 'B44%' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    oneTarget.client,
+    { cacheContext: "b47-p2-candidate-101-target-1", allowApplyMutation: true, dmlMaxRows: 1 }
+  )).resolves.toMatchObject({ type: "UPDATE", updatedCount: 1 });
+  expect(oneTarget.putRecords).toHaveBeenCalledTimes(1);
+
+  const twoTargets = makeClient(Array.from({ length: 101 }, (_, index) =>
+    likeParent(String(index + 1), index >= 99 ? "B44-hit" : "other")
+  ), likeParentFieldInfos);
+  const confirm = jest.fn(async () => true);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE タイトル LIKE 'B44%' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    twoTargets.client,
+    { cacheContext: "b47-p2-candidate-101-target-2", allowApplyMutation: true, confirm, dmlMaxRows: 1 }
+  )).rejects.toThrow("ArgumentError: APPLY parent rows (2) exceed dmlMaxRows (1)");
+  expect(confirm).not.toHaveBeenCalled();
+  expect(twoTargets.putRecords).not.toHaveBeenCalled();
+});
+
+test("B47-P2: candidate上限はtruncate指定でもfail-closedしconfirm/PUTしない", async () => {
+  const mock = makeClient(Array.from({ length: 101 }, (_, index) =>
+    likeParent(String(index + 1), index === 100 ? "B44-hit" : "other")
+  ), likeParentFieldInfos);
+  const confirm = jest.fn(async () => true);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE タイトル LIKE 'B44%' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    {
+      cacheContext: "b47-p2-candidate-limit", allowApplyMutation: true, confirm,
+      dmlMaxRows: 1, maxRecords: 100, onLimitReached: "truncate",
+    }
+  )).rejects.toThrow("取得件数が上限（100 件）を超えました");
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("B47-P2: VALIDATE ONLYもcandidate取得と残余評価を行いtarget件数だけを返す", async () => {
+  const mock = makeClient([
+    likeParent("1", "B44-hit"),
+    likeParent("2", "other"),
+  ], likeParentFieldInfos);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE タイトル LIKE 'B44%' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "b47-p2-validate", dmlMaxRows: 1 }
+  );
+
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 1,
+    guards: { parentRows: 1, wouldExceed: false },
+  });
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.deleteRecords).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["KLIKE", '説明 like "至急"'],
+  ["NOT KLIKE", '説明 not like "至急"'],
+])("B47-P3: 親%sをnative prefilterへ入れ同一node証明で残余評価する", async (op, native) => {
+  const mock = makeClient([likeParent("1", "target", "1", op === "KLIKE" ? "至急です" : "通常")], likeParentFieldInfos);
+  const result = await execute(
+    `UPDATE APP4221 SET 親='after' WHERE 説明 ${op} '至急' APPLY テーブル (PATCH SET 子='x' ALL ROWS)`,
+    mock.client,
+    { cacheContext: `b47-p3-${op}`, allowApplyMutation: true, dmlMaxRows: 1 }
+  );
+
+  expect(result).toMatchObject({ type: "UPDATE", updatedCount: 1 });
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: `${native} order by $id asc limit 500 offset 0`,
+    fields: expect.arrayContaining(["説明"]),
+  }));
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
+});
+
+test("B47-P3: safe scalar + KLIKEで候補取得しLIKEだけをJS残余評価する", async () => {
+  const mock = makeClient([
+    likeParent("1", "B44-hit", "10", "至急"),
+    likeParent("2", "other", "10", "至急"),
+  ], likeParentFieldInfos);
+  await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 金額 > 0 AND 説明 KLIKE '至急' AND タイトル LIKE 'B44%' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    mock.client,
+    { cacheContext: "b47-p3-mixed", allowApplyMutation: true, dmlMaxRows: 1 }
+  );
+
+  expect(mock.getRecords).toHaveBeenCalledWith(expect.objectContaining({
+    query: '金額 > 0 and 説明 like "至急" order by $id asc limit 500 offset 0',
+  }));
+  expect(mock.putRecords.mock.calls.flatMap(([batch]) => batch.records.map((record) => record.id))).toEqual([1]);
+});
+
+test("B47-P3: KLIKEのVALIDATE ONLYは親選択を行いmutation API 0", async () => {
+  const mock = makeClient([likeParent("1", "target", "1", "至急")], likeParentFieldInfos);
+  const result = await execute(
+    "UPDATE APP4221 SET 親='after' WHERE 説明 KLIKE '至急' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS) VALIDATE ONLY",
+    mock.client,
+    { cacheContext: "b47-p3-klike-validate", dmlMaxRows: 1 }
+  );
+
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 1,
+    guards: { parentRows: 1, wouldExceed: false },
+  });
+  expect(mock.getRecords).toHaveBeenCalledTimes(1);
+  expect(mock.putRecords).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
+  expect(mock.deleteRecords).not.toHaveBeenCalled();
+});
+
+test.each([
+  "説明 KLIKE '至急' OR 金額 > 0",
+  "NOT (説明 KLIKE '至急')",
+  "APP999.説明 KLIKE '至急'",
+  "説明 KLIKE @q",
+  "説明 KLIKE '至急' AND (備考 NOT KLIKE '保留' OR 金額 > 0)",
+])("B47-P3: unapplied KLIKEは専用errorでrecords API前に文全体を拒否する: %s", async (where) => {
+  const mock = makeClient([likeParent("1", "target", "1", "至急")], likeParentFieldInfos);
+  await expect(execute(
+    `UPDATE APP4221 SET 親='after' WHERE ${where} APPLY テーブル (PATCH SET 子='x' ALL ROWS)`,
+    mock.client,
+    { cacheContext: `b47-p3-unapplied-${where}`, allowApplyMutation: true }
+  )).rejects.toThrow("APPLY 複数親 UPDATE の親 WHERE に、安全に押し下げられない KLIKE / NOT KLIKE があります");
+  expect(mock.getRecords).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
+});
+
+test("B47-P3: searchAbortedは既存DML wrapperでfail-closedしconfirm/PUT 0", async () => {
+  const mock = makeClient([likeParent("1", "target", "1", "至急")], likeParentFieldInfos);
+  const getRecords = jest.fn(async () => ({
+    records: [likeParent("1", "target", "1", "至急")], searchAborted: true,
+  }));
+  const confirm = jest.fn(async () => true);
+  await expect(execute(
+    "UPDATE APP4221 SET 親='after' WHERE 説明 KLIKE '至急' APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    { ...mock.client, getRecords },
+    { cacheContext: "b47-p3-abort", allowApplyMutation: true, confirm }
+  )).rejects.toMatchObject({ name: "SearchAbortedError" });
+  expect(confirm).not.toHaveBeenCalled();
+  expect(mock.putRecords).not.toHaveBeenCalled();
 });
 
 test("Phase 10b: VALIDATE ONLYはdmlMaxRows+1親をtruncateせず全件診断しwouldExceedを返す", async () => {
