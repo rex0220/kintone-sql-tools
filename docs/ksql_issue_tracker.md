@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-21
 - 現在の最新リリース: **v3.11.0 リリース完了（2026-07-21・PR #188 マージ・tag/GitHub Release 公開・アセット3点・npm publish 済み `@rex0220/kintone-sql-tools` latest 3.11.0）**。B51 複数 CTE の CTE 間 JOIN 誤結果 修正＋B52 単一 CTE 列別名インライン化 unknown field 修正。全2,718 green・実機 PASS（APP730）。前版 v3.10.0（B7/B47/B5）。
-- 次回リリース計画: v3.11.0 リリース完了。→次候補=**B40/B53**（大型・方向判断）／**B54**（User API・評価）。**棚上げ**＝B4。**B6 は代替策ありで却下（§3）**。
+- 次回リリース計画: v3.11.0 リリース完了。→**候補は B40/B53（大型・方向判断）と B54（User API・評価）の3件のみ**。**B4（保存クエリ :name）は保留・B6（KLIKE 外部結合）は代替策ありで却下＝どちらも §3（候補外）**。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -30,14 +30,13 @@
 
 ## 1. バックログ（未リリース・要対応）
 
-進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。**残るは A: 大型候補（B40=プロパティグラフ／B53=再帰 CTE `WITH RECURSIVE`/`CYCLE`＝**同じ用途で方向判断が必要**）、評価（B54=User API ユーザー/組織/グループ read-only 対応・B53 と相乗）、B: 棚上げ・低優先（B4）**。B6（KLIKE 外部結合）は代替策（一時テーブル/CTE で KLIKE→JOIN）ありで**却下**（§3）。B42（監査・v3.7.0）→B44（修復・v3.8.0）→B43（事前検証・v3.9.0）で三段テーマ完結。B7/B47/B5（プラグイン打ち切り検出＋親 DML の LIKE/KLIKE）は v3.10.0、B51/B52（CTE 間 JOIN 誤結果＋CTE 列別名インライン）は v3.11.0 同梱。
+進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。**候補は3件のみ: 大型候補（B40=プロパティグラフ／B53=再帰 CTE `WITH RECURSIVE`/`CYCLE`＝**同じ用途で方向判断が必要**）＋評価（B54=User API ユーザー/組織/グループ read-only 対応・B53 と相乗）**。**B4（保存クエリ :name）は保留、B6（KLIKE 外部結合）は代替策ありで却下＝どちらも §3（候補外）**。B42（監査・v3.7.0）→B44（修復・v3.8.0）→B43（事前検証・v3.9.0）で三段テーマ完結。B7/B47/B5（プラグイン打ち切り検出＋親 DML の LIKE/KLIKE）は v3.10.0、B51/B52（CTE 間 JOIN 誤結果＋CTE 列別名インライン）は v3.11.0 同梱。
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
 | B54 | User API（ユーザー・組織・グループ情報）対応 | 改善 | 📝 **【A: 評価】起票（2026-07-21）**。cybozu.com 共通 [User API](https://cybozu.dev/ja/common/docs/user-api/)（`/v1/` 配下・users/organizations/groups＋役職/所属）を kSQL から**読み取り**クエリ可能に。現状はアプリレコード（`/k/v1/records.json`）のみ→ユーザーの `email`/`employeeNumber`/所属/役職、組織の**階層（`parentCode`）**、グループ所属などが扱えない。固有価値＝USER_SELECT 等の code→属性解決・組織階層展開・所属照会・ディレクトリ単体クエリ。設計案＝`__USERS__`/`__ORGS__`/`__GROUPS__` の**read-only 仮想テーブル**で SELECT/JOIN（B49 の read-only GET allowlist 思想・書き込みは恒久非対応）。取得は一括＋メモリ（B53 戦略 B・maxRecords 内）。**組織階層は B53 再帰 CTE と強く相乗**。課題＝別ベースパス `/v1/`（面ごと対応）・権限（一部 cybozu.com 管理者要）・ページング・結合キー（code）。Phase1＝3 仮想テーブルの主要平坦列＋SELECT/JOIN（Node/CLI/MCP）→Phase2＝所属関係テーブル。**次＝実需確認・権限/面の実機確認・方向確定なら Phase1 仕様 R1** | 機能 | 中 | [B54 eval](internal/ksql_b54_user_api_directory_evaluation.md)（関連: [B49](internal/ksql_b49_mcp_readonly_metadata_api_spec.md) / [B53](internal/ksql_b53_recursive_cte_cycle_evaluation.md)） |
 | B53 | `WITH RECURSIVE` / `CYCLE` 句（再帰 CTE） | 改善 | 📝 **【A: 評価・方向判断】起票（2026-07-21）**。SQL 標準の再帰 CTE（`WITH RECURSIVE`・SQL:1999）＋循環検出（`CYCLE`・SQL:2016）。現状 kSQL は再帰/推移閉包を表現できない（言語 §22「再帰 CTE 非対応」）→**階層展開（BOM/組織図）・到達可能性・可変長経路・循環検出**が不能 or 極めて冗長。**B40（プロパティグラフ）と同じ用途の別アプローチ**＝どちらを採るか要判断（両方は過剰）。B53 の利点＝SQL 標準で馴染み・**v3.11.0 で堅牢化した CTE 機構＋UNION ALL を土台**にでき、B40 の新 MATCH 副言語より学習/実装の見通しが良い可能性。実現＝kintone にサーバ再帰なし→**反復 fixpoint 実行**（seed→再帰項を新規行が出なくなるまで適用）。**終了保証が最重要**＝CYCLE or 深さ/行境界を必須にし超過は fail-closed（B40 の「爆発は有界 fail-closed」と同思想・実件数は事前に読めない）。Phase1 案＝単一再帰 CTE＋必須境界＋CYCLE 最小形（循環打ち切り＋mark 列）。実需は探索的＝大型投資の是非が判断ポイント。**次＝B40 と併せた方向判断→方向が B53 なら Phase1 仕様 R1** | 機能 | 中 | [B53 eval](internal/ksql_b53_recursive_cte_cycle_evaluation.md)（関連: [B40 eval](internal/ksql_property_graph_evaluation.md)） |
 | B40 | グラフデータモデル（SQL/PGQ・プロパティグラフ／`MATCH`） | 改善 | 📝 **【A: 実装候補】Phase1 仕様 R1・codex レビュー済・要 R2（大規模 19〜31 人日 ≈ 2〜3× B37・探索的需要・2026-07-19）**。SQL:2023 の `CREATE PROPERTY GRAPH`＋`GRAPH_TABLE MATCH (a)-[t]->(b)`。ノード=アプリ・エッジ=2 外部キーのアプリ。**固有価値=可変長 `{m,n}`/到達可能性/循環検出**（現状 kSQL は再帰CTEなし・JOIN 単一等値・派生テーブルなしで**表現不能 or 極めて冗長**）。障害=kintone にグラフエンジンなし→**クライアント全件取得＋メモリ走査**（可変長は爆発リスク・境界と fail-closed 必須）・**実装最大級**（新 MATCH 副言語＋グラフ実行エンジン）・標準は新しい（Oracle 先行）。段階案=Phase1 固定長+循環検出（境界付き MVP）→Phase2 可変長/到達可能性。**実需確認済（2026-07-19）=規模 小(数千件以下)→性能リスクほぼ消滅・全面 engine 側→面配管不要＝2 大リスク緩和。用途 BOM/循環に関心だが具体需要は探索的。固定/可変 両方段階的**。Phase1 仕様 R1＋codex レビュー済（[spec](internal/ksql_property_graph_phase1_spec.md)）。**工数確定＝19〜31 人日 ≈ B37 単体の 2〜3 倍**（新 FROM ソース＋バッチスコープ定義＋型付き副言語＋パターン評価器）。技術的に実装可能・要 R2（FROM lowering・KEY/REFERENCES 契約・graph WHERE resolver・爆発は有界 fail-closed・EXPLAIN 実件数不可・LAPP プラグイン非対応の 10 点）。需要は探索的なので**大規模投資の是非が判断ポイント**。可変長(Phase2・BOM 本命)は別途 | 機能 | 中 | [eval](internal/ksql_property_graph_evaluation.md) |
-| B4 | 保存クエリのパラメータ化 `:name` | 改善 | 📝 **【B: 棚上げ】価値評価の再検討が必要（2026-07-18 棚卸し）**。仕様（詳細 R2）は流用可能水準だが、**評価が `@var`（DECLARE 外部注入）実装前に書かれ重複を未検討**。B4 の中核価値「外部から動的値を安全注入」は `@var` が既に提供済み。残る固有価値は「カタログ永続化＋保存クエリでの利用」だけで、それも「保存クエリの単文制約を緩めて DECLARE+SELECT バッチ＋既存 @var」の軽量路線の方が安い。着手前に @var との差分で再評価（eval に追記済み） | 機能 | 中 | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 
 ---
 
@@ -100,6 +99,7 @@
 | 実行ログ自動記録 / 更新前スナップショット退避 / チャンク実行・レジューム | ⏸ 保留 | ログは `@batch_id`＋現行 INSERT で運用可・スナップショットは `#before` レシピで代替・チャンクは適用限界の外（数十万件級は連携方式見直しが先）。バッチ強化 [roadmap](internal/ksql_batch_processing_roadmap.md) | [roadmap](internal/ksql_batch_processing_roadmap.md) |
 | 複数 SQL の並列実行 | ⏸ 対象外 | 順次バッチのみ採用。並列は評価時に対象外化 | [eval](internal/multi-statement-temp-table-evaluation.md) |
 | `bulkRequest`（M5） | ⏸ 保留 | v1.4.0 では見送り。実機スパイクとセットで判断 | [temp-table](internal/ksql_batch_temp_table_spec.md) |
+| B4 保存クエリのパラメータ化 `:name` | ⏸ 保留（候補外・2026-07-21） | 中核価値「外部から動的値を安全注入」は `@var`（DECLARE 外部注入）が既に提供済み。残る固有価値は「カタログ永続化＋保存クエリでの利用」だけで、それも「保存クエリの単文制約を緩めて DECLARE+SELECT バッチ＋既存 @var」の軽量路線の方が安い。仕様 R2 は流用可能水準だが実需未確認。着手前に @var との差分で再評価（実需が出たら候補へ戻す） | [eval](internal/ksql_saved_query_params_evaluation.md) / [draft](internal/ksql_saved_query_params_spec.md) |
 | B6 KLIKE 外部結合 非 nullable 側の押し下げ解禁 | ⏸ 却下（代替策あり・2026-07-21） | **回避策で用途を安全にカバーできるため却下**。外部結合の非 nullable 側で KLIKE を高速化したい場合は「**KLIKE で一時テーブル/CTE を作ってから JOIN**」で等価に実現できる（KLIKE は JOIN なしの単純 SELECT で押し下げ・実体化集合を LEFT JOIN・v3.11.0 の B51 修正で CTE 版も可・実データ確認済み）。専用実装（非 nullable 側判定に結合順/来歴解析が必要・誤ると P0 誤結果再導入）はリスクに見合わず、実需も未確認。詳細と回避策は v2 spec §2.6 | [v2 spec §2.6](internal/ksql_klike_pushdown_v2_spec.md) |
 
 ---
