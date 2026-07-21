@@ -102,8 +102,18 @@ SELECT ... FROM #a LEFT JOIN B ON ...;                             -- KLIKE な�
 - **なぜ等価か**: 一時テーブル #a は「A の KLIKE 一致行」＝保存側そのもの。`#a LEFT JOIN B` は未一致 B を NULL 埋めするため、`A LEFT JOIN B WHERE A.KLIKE ...` と同じ結果になる。
 - **性能**: KLIKE は一時テーブル作成時に kintone へ押し下がるため、native 検索の速度を維持する。
 - **制約**: KLIKE は10万件未満に絞る（一時テーブル実体化も打ち切り時は fail-closed）。JOIN 相手 B はクライアント側で全件取得するため常識的なサイズにする（JOIN 一般の性質）。nullable 側の KLIKE はこの回避策でも等価にならない（が、それは元々安全でない別物）。
-- **必ず一時テーブルを使う（WITH は不可）**: 同じことを `WITH a AS (SELECT ... KLIKE ...) SELECT ... FROM a LEFT JOIN B` と書くと**誤結果になる**。これは KLIKE と無関係の別バグ（複数 CTE の CTE 間 JOIN が左 CTE の列を空にし行を重複させる＝**B51**・[ksql_b51_cte_to_cte_join_wrong_result_issue.md](ksql_b51_cte_to_cte_join_wrong_result_issue.md)）による。一時テーブル（`CREATE TEMP TABLE ... AS SELECT`）は実体化経路で正しく動くため、本回避策は必ず一時テーブルで書く。
-- **実データ確認**: APP730 で `CREATE TEMP TABLE #gifu AS SELECT ... WHERE 都道府県K KLIKE 'ギフケン' AND レコード番号 IN (1..5)` → `#gifu LEFT JOIN #b ON レコード番号` で、一致3件は結合列を持ち未一致2件は NULL 埋め＝`A LEFT JOIN B WHERE A.KLIKE` と等価な結果を確認した。同一論理の WITH 版は B51 のため誤結果だった（対照）。
+- **一時テーブルと WITH（CTE）のどちらでも書ける（v3.11.0 以降）**: 本回避策は一時テーブル（`CREATE TEMP TABLE ... AS SELECT`）でも WITH（CTE）でも書ける。KLIKE は「JOIN なしの単純 SELECT」＝一時テーブル本体 or CTE 本体で使い、外側の LEFT JOIN には KLIKE を含めない。
+  ```sql
+  -- 一時テーブル版
+  CREATE TEMP TABLE #a AS SELECT ... FROM A WHERE 件名 KLIKE '至急';
+  SELECT ... FROM #a a LEFT JOIN #b b ON ...;
+
+  -- WITH（CTE）版（v3.11.0 以降）
+  WITH a AS (SELECT ... FROM A WHERE 件名 KLIKE '至急'), b AS (SELECT ... FROM B ...)
+  SELECT ... FROM a LEFT JOIN b ON ...;
+  ```
+  **注意（v3.10.0 以前）**: v3.10.0 以前は WITH の CTE 間 JOIN に別バグ（B51＝左 CTE の列が空・行重複・LEFT 未一致欠落）があり誤結果になった。**v3.11.0 の B51 修正（effective alias）で解消**（[ksql_b51_cte_to_cte_join_wrong_result_issue.md](ksql_b51_cte_to_cte_join_wrong_result_issue.md)）。v3.11.0 以降はどちらでも正しい。
+- **実データ確認**: APP730 で①一時テーブル版 `#gifu(KLIKE ギフケン,IN 1..5) LEFT JOIN #b(IN 1..3)`②WITH 版 `WITH a AS(...KLIKE ギフケン...IN 1..5), b AS(...IN 1..3) SELECT ... FROM a LEFT JOIN b` の**両方**で、一致3件は結合列を持ち未一致2件は NULL 埋め＝`A LEFT JOIN B WHERE A.KLIKE` と等価な結果を確認した（②は v3.11.0 の B51 修正後）。
 
 ### 2.7 CTE インライン化後の AST で計画を作る（[P1]）
 R1時点では検証用と実行用のインライン化が別実装で、実行側だけが `stripCteAlias` 相当の処理を行っていた。ノード同一性・対象テーブル判定（§2.1/2.2）を使う v2 では、この差で検証・抽出の集合が乖離する。
