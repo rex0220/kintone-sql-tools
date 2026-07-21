@@ -206,6 +206,11 @@ function assertToolDescriptions(tools) {
     "type",
     "ksql_app_metadata",
   ];
+  const showAppsKeys = [
+    "enumerates every app",
+    "unknown app id by name",
+    "ksql_app_metadata",
+  ];
   const validate = getTool(tools, "ksql_validate");
   for (const key of validateKeys) {
     assert(
@@ -246,6 +251,13 @@ function assertToolDescriptions(tools) {
     assert(
       typeof describe.description === "string" && describe.description.includes(key),
       `ksql_describe_app.description must mention "${key}".`
+    );
+  }
+  const showApps = getTool(tools, "ksql_show_apps");
+  for (const key of showAppsKeys) {
+    assert(
+      typeof showApps.description === "string" && showApps.description.includes(key),
+      `ksql_show_apps.description must mention "${key}".`
     );
   }
 }

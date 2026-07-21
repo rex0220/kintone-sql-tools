@@ -53056,7 +53056,7 @@ function createServer(args) {
   }, tools.appMetadataTool);
   server.registerTool("ksql_show_apps", {
     title: "Show kintone apps",
-    description: "Return the app list for the selected profile using SHOW APPS.",
+    description: "Return the full app list (id, name, description) for the selected profile using SHOW APPS. This enumerates every app and can be large on big domains; use it only to discover an unknown app id by name. When you already know the target app, fetch just that one with ksql_app_metadata (resource=app for basics via GET /k/v1/app.json, or fields/settings for constraints) instead of listing all apps.",
     inputSchema: showAppsInputShape
   }, tools.showAppsTool);
   server.registerTool("ksql_save_query", {

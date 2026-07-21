@@ -26,7 +26,7 @@
 - **Claude が kSQL の独自機能・方言を認識できるよう、MCP の発見性を強化**した。従来は各ツールの description とモデル学習知識だけが手がかりで、`APPLY`/`KLIKE`/`KORDER`/ウィンドウ関数/`UPDATE…FROM`/サブテーブル仮想テーブル/`IMPORT`/`VALIDATE`/バッチ変数/`LAPP_` 等や、LIKE=JS 評価・JOIN 単一等値・派生テーブル非対応・空セル=0 といった方言が伝わりにくかった。
   - **MCP server `instructions` を追加**（能力索引＋方言の要注意点＋行動導線）。「まず `ksql_validate`、DML のデータ/フォーム事前検証は `VALIDATE ONLY`、フォーム制約は `ksql_app_metadata`、詳細は言語リファレンス resource」を案内。APPLY は validate/explain/VALIDATE ONLY で使えるが **APPLY mutation は本 MCP で無効**であることを明記。
   - **言語リファレンスとバッチレシピを MCP resource として公開**: 固定 index（`ksql://language-reference`・`ksql://recipes`）と章別テンプレート（`ksql://language-reference/{section}`・`ksql://recipes/{recipe}`）。本文は build 時に bundle へ embed し（実行時ファイル依存なし）、章はオンデマンド取得。未知 key は fail-closed。
-  - **tool description を用途起点へ改善**: `ksql_app_metadata`（制約取得の主経路・安全語は保持）・`ksql_describe_app`（3列と `ksql_app_metadata` への誘導）・`ksql_query`/`ksql_mutate`（言語リファレンスへの導線）。MCPB manifest の `ksql_app_metadata` 欠落も是正。
+  - **tool description を用途起点へ改善**: `ksql_app_metadata`（制約取得の主経路・安全語は保持）・`ksql_describe_app`（3列と `ksql_app_metadata` への誘導）・`ksql_query`/`ksql_mutate`（言語リファレンスへの導線）・**`ksql_show_apps`（全アプリ列挙で大規模ドメインでは肥大化しうるため、id 判明時は `ksql_app_metadata`（`resource:"app"`＝`GET /k/v1/app.json` 等）で単一アプリ取得へ誘導）**。MCPB manifest の `ksql_app_metadata` 欠落も是正。
   - 純加法・非破壊（既存ツール schema/動作・SQL/core/プラグイン不変）。SemVer=minor。
 
 ## v3.8.0（2026-07-21）
