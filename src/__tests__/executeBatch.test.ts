@@ -11,6 +11,7 @@ import {
   executeBatch,
   KintoneClient,
   SelectResult,
+  DmlValidationResult,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
@@ -37,11 +38,11 @@ interface MockOptions {
 }
 
 function makeClient(opts: MockOptions = {}): KintoneClient & {
-  getCalls: { app: number; query: string }[];
+  getCalls: { app: number; query: string; fields: string[] }[];
   postCalls: { app: number; records: unknown[] }[];
   putCalls: { app: number; records: unknown[] }[];
 } {
-  const getCalls: { app: number; query: string }[] = [];
+  const getCalls: { app: number; query: string; fields: string[] }[] = [];
   const postCalls: { app: number; records: unknown[] }[] = [];
   const putCalls: { app: number; records: unknown[] }[] = [];
   return {
@@ -49,7 +50,7 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
     postCalls,
     putCalls,
     async getRecords(params) {
-      getCalls.push({ app: params.app, query: params.query ?? "" });
+      getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
       if (opts.delayMs) {
         await new Promise((r) => setTimeout(r, opts.delayMs));
       }
@@ -576,6 +577,49 @@ test("UPDATE FROM VALIDATE ONLY は候補を検証してPUTしない", async () 
     { cacheContext: "validate-update-from" }
   );
   expect(batch.statements[1].result).toMatchObject({ type: "VALIDATION", invalidRows: 1, errorCount: 1 });
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 4: UPDATE FROM $id join は共有target GETで非SETトップレベル・子違反を検出する", async () => {
+  const client = makeClient({ recordsByApp: {
+    200: [makeRecord({ k: "7", src: "after" })],
+    100: [makeTypedRecord({
+      $id: "7", dest: "before", requiredTop: "",
+      Lines: [{ id: "line-1", value: { child: { value: "x" } } }],
+    })],
+  } });
+  client.getFields = async (appId) => appId === 100
+    ? [
+      { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "requiredTop", label: "requiredTop", fieldType: "SINGLE_LINE_TEXT", required: true },
+      { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+      { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", minLength: "2", inSubtable: true, subtableCode: "Lines" },
+    ]
+    : [
+      { code: "k", label: "k", fieldType: "NUMBER" },
+      { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    ];
+
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #src AS SELECT k, src FROM APP200; " +
+    "UPDATE APP100 SET dest = s.src FROM #src s WHERE APP100.$id = s.k VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase4-id-complete-snapshot" }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect(batch.statements[1].result).toMatchObject({
+    type: "VALIDATION", validatedRows: 1, validRows: 0, invalidRows: 1, errorCount: 2,
+  });
+  const validation = batch.statements[1].result as DmlValidationResult;
+  expect(validation.errors.map((row) => [row.$err_field, row.$err_subrow, row.$err_subrow_id])).toEqual([
+    ["requiredTop", "", ""],
+    ["child", "1", "line-1"],
+  ]);
+  const targetGets = client.getCalls.filter((call) => call.app === 100);
+  expect(targetGets).toHaveLength(1);
+  expect(targetGets[0].fields).toEqual(["$id", "dest", "requiredTop", "Lines"]);
+  expect(targetGets[0].fields).not.toContain("child");
   expect(client.putCalls).toHaveLength(0);
 });
 

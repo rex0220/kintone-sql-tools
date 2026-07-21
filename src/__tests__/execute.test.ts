@@ -3917,6 +3917,7 @@ test("UPDATE FROM APP: ソース値・リテラル・ターゲット算術を行
     { id: 1, record: { dest: { value: "A" }, status: { value: "done" }, amount: { value: "20" } } },
     { id: 2, record: { dest: { value: "B" }, status: { value: "done" }, amount: { value: "40" } } },
   ]);
+  expect(client.getCalls.find((call) => call.app === 100)?.fields).toEqual(["$id", "amount"]);
 });
 
 test("UPDATE FROM APP: 正規化後の重複キーは全 PUT 前に拒否", async () => {
@@ -4233,6 +4234,147 @@ test("UPDATE FROM APP VALIDATE ONLY: 通常実行と同じ業務キーmatchedだ
   expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 1, invalidRows: 1, errorCount: 1 });
   if (result.type !== "VALIDATION") throw new Error("unexpected result");
   expect(result.errors.map((row) => row.$id)).toEqual(["1"]);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 4: business-key join はsource対応・$id順$row・target GET 1回を維持する", async () => {
+  const source = [
+    makeRecord({ code: "K2", src: "after-2" }),
+    makeRecord({ code: "K1", src: "after-1" }),
+  ];
+  const target = [
+    makeTypedRecord({
+      $id: "2", key: "K2", dest: "before-2", outside: "x",
+      Lines: [{ id: "line-2", value: { child: { value: "ok" } } }],
+    }),
+    makeTypedRecord({
+      $id: "1", key: "K1", dest: "before-1", outside: "y",
+      Lines: [{ id: "line-1", value: { child: { value: "ok" } } }],
+    }),
+  ];
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 200
+    ? [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", minLength: "2" },
+      { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+      { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true, subtableCode: "Lines" },
+    ];
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    return { records: params.app === 200 ? source : target };
+  };
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE key = s.code VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase4-business-row-mapping" }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(result.errors.map((row) => [row.$id, row.dest, row.$err_row, row.$err_field])).toEqual([
+    ["1", "after-1", "1", "outside"],
+    ["2", "after-2", "2", "outside"],
+  ]);
+  const targetGets = client.getCalls.filter((call) => call.app === 100);
+  expect(targetGets).toHaveLength(1);
+  expect(targetGets[0].fields).toEqual(["$id", "key", "dest", "outside", "Lines"]);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 4: UPDATE FROM snapshot欠落・不正/重複$id・上限超過はwrite 0でfail-closed", async () => {
+  const fields = async (appId: number) => appId === 200
+    ? [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", required: true },
+    ];
+  const sql = "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE key = s.code VALIDATE ONLY";
+
+  const missing = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "K", src: "after" })],
+    100: [makeRecord({ $id: "1", key: "K", dest: "before", outside: "ok" })],
+  } });
+  missing.getFields = fields;
+  await expect(execute(sql, missing, {
+    cacheContext: "b43-phase4-missing-snapshot",
+    loadUpdateModeSnapshots: async () => new Map(),
+  })).rejects.toThrow("snapshot is missing");
+  expect(missing.putCalls).toHaveLength(0);
+
+  for (const [name, target, message] of [
+    ["invalid", [makeRecord({ $id: "bad", key: "K", dest: "before", outside: "ok" })], /対象レコード番号が不正|invalid \$id/],
+    ["duplicate", [
+      makeRecord({ $id: "1", key: "K", dest: "before", outside: "ok" }),
+      makeRecord({ $id: "01", key: "K", dest: "before", outside: "ok" }),
+    ], /duplicate \$id/],
+  ] as const) {
+    const client = makeClient({ recordsByApp: {
+      200: [makeRecord({ code: "K", src: "after" })],
+      100: [...target],
+    } });
+    client.getFields = fields;
+    await expect(execute(sql, client, { cacheContext: `b43-phase4-${name}-id` }))
+      .rejects.toThrow(message);
+    expect(client.putCalls).toHaveLength(0);
+  }
+
+  const overLimit = makeClient({ recordsByApp: {
+    200: [makeRecord({ code: "K", src: "after" })],
+    100: [
+      makeRecord({ $id: "1", key: "K", dest: "before", outside: "ok" }),
+      makeRecord({ $id: "2", key: "K", dest: "before", outside: "ok" }),
+    ],
+  } });
+  overLimit.getFields = fields;
+  await expect(execute(sql, overLimit, {
+    cacheContext: "b43-phase4-over-limit", maxRecords: 1, onLimitReached: "truncate",
+  })).rejects.toThrow("取得件数が上限");
+  expect(overLimit.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 4: 51 source keys のVALIDATE ONLYはtarget GET 2回のままN+1しない", async () => {
+  const source = Array.from({ length: 51 }, (_, i) => makeRecord({ code: `K${i + 1}`, src: `v${i + 1}` }));
+  const target = Array.from({ length: 51 }, (_, i) => makeRecord({
+    $id: String(i + 1), key: `K${i + 1}`, dest: "before", outside: "ok",
+  }));
+  const client = makeClient();
+  client.getFields = async (appId) => appId === 200
+    ? [
+      { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "src", label: "src", fieldType: "SINGLE_LINE_TEXT" },
+    ]
+    : [
+      { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "dest", label: "dest", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", required: true },
+    ];
+  client.getRecords = async (params) => {
+    client.getCalls.push({ app: params.app, query: params.query ?? "", fields: [...(params.fields ?? [])] });
+    if (params.app === 200) return { records: source };
+    const keys = new Set([...params.query.matchAll(/"(K\d+)"/g)].map((match) => match[1]));
+    return { records: target.filter((record) => keys.has(String(record.key.value))) };
+  };
+
+  const result = await execute(
+    "UPDATE APP100 SET dest = s.src FROM APP200 s WHERE key = s.code VALIDATE ONLY",
+    client,
+    { cacheContext: "b43-phase4-two-target-chunks", maxRecords: 100 }
+  );
+
+  expect(result).toMatchObject({
+    type: "VALIDATION", validatedRows: 51, validRows: 51, invalidRows: 0, errorCount: 0,
+  });
+  expect(client.getCalls.filter((call) => call.app === 100)).toHaveLength(2);
   expect(client.putCalls).toHaveLength(0);
 });
 

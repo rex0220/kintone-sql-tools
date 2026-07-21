@@ -4787,10 +4787,10 @@ async function prepareDmlValidation(
   const snapshotFields = collectDmlPrevalidationSnapshotFields(fieldIndex);
   const candidates = (await materializeValidationCandidates(
     stmt, operation, client, options, cacheContext, tempTables, infoByCode,
-    stmt.type === "UPDATE" && stmt.from == null ? snapshotFields : undefined
+    stmt.type === "UPDATE" ? snapshotFields : undefined
   )).sort((left, right) => left.rowNumber - right.rowNumber);
   const updateCandidates = candidates.filter((candidate) => candidate.mode === "update");
-  const productionUpdateLoader = stmt.type === "UPDATE" && stmt.from == null
+  const productionUpdateLoader = stmt.type === "UPDATE"
     ? loadMaterializedUpdateSnapshots
     : undefined;
   const updateSnapshotLoader = options.loadUpdateModeSnapshots ?? productionUpdateLoader;
@@ -5125,7 +5125,11 @@ async function materializeUpdateValidationCandidates(
   tempTables?: Map<string, MaterializedTable>,
   snapshotFields?: readonly string[]
 ): Promise<DmlValidationCandidate[]> {
-  if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
+  if (stmt.from) {
+    return materializeUpdateFromValidationCandidates(
+      stmt, stmt.from, client, options, cacheContext, tempTables, snapshotFields
+    );
+  }
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
@@ -5256,20 +5260,27 @@ async function materializeUpdateFromValidationCandidates(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  snapshotFields?: readonly string[]
 ): Promise<DmlValidationCandidate[]> {
   const scope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
   assertCheckComparisonTypes(stmt, scope.evaluationTypes);
-  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
+  const matched = await resolveUpdateFromMatchedRecords(
+    stmt, from, client, options, cacheContext, tempTables, snapshotFields
+  );
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
   const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
+  const snapshotsById = snapshotFields
+    ? indexDmlUpdateSnapshots(matched.map((pair) => pair.target))
+    : new Map<number, KintoneRecord>();
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1, operation: "UPDATE", mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
     record: entry.record,
     targetId: entry.id,
+    validationSnapshot: snapshotsById.get(entry.id),
     evaluationRow: updateFromEvaluationRow(matchedById.get(entry.id), stmt.appId, from.alias),
     evaluationFieldTypes: scope.evaluationTypes,
   }));
@@ -5293,7 +5304,8 @@ async function resolveUpdateFromMatchedRecords(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  snapshotFields?: readonly string[]
 ): Promise<Array<{ target: KintoneRecord; source: ProcessRow }>> {
   const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
   const checkScope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
@@ -5328,7 +5340,11 @@ async function resolveUpdateFromMatchedRecords(
   if (sourceByKey.size === 0) return [];
 
   const maxRecords = options.maxRecords ?? 10_000;
-  const targetFields = [...new Set([...collectUpdateFromTargetFields(stmt), ...checkScope.targetFields])];
+  const targetFields = [...new Set([
+    ...collectUpdateFromTargetFields(stmt),
+    ...checkScope.targetFields,
+    ...(snapshotFields ?? []),
+  ])];
   const filterQuery = from.targetFilter === null
     ? ""
     : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: undefined }).query;
