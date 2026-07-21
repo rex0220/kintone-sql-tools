@@ -7,6 +7,7 @@ import {
   describeAppInputShape,
   explainInputShape,
   listQueriesInputShape,
+  ksqlAppMetadataInputShape,
   mutateInputShape,
   queryInputShape,
   runSavedQueryInputShape,
@@ -108,6 +109,12 @@ export function createServer(args: ServerArgs): McpServer {
     description: "Return field definitions for a kintone app using DESCRIBE APPxxx.",
     inputSchema: describeAppInputShape,
   }, tools.describeAppTool);
+
+  server.registerTool("ksql_app_metadata", {
+    title: "Get kintone app metadata",
+    description: "Read-only app metadata (GET) from a fixed allowlist; records and mutation operations are not available.",
+    inputSchema: ksqlAppMetadataInputShape,
+  }, tools.appMetadataTool);
 
   server.registerTool("ksql_show_apps", {
     title: "Show kintone apps",

@@ -25,7 +25,10 @@ import { isNoFromSelectStatement } from "../node/dmlGuard";
 import { envString, loadOptionalKsqlConfig, type OnLimitMode } from "../node/config";
 import {
   createKsqlRuntime,
+  createKintoneMetadataRuntime,
   resolveSqlContext,
+  type CreateKintoneMetadataRuntimeInput,
+  type KintoneMetadataRuntime,
   type CreateKsqlRuntimeInput,
   type KsqlRuntime,
   type KsqlRuntimeServerOptions,
@@ -35,6 +38,7 @@ import {
   describeAppInputSchema,
   explainInputSchema,
   listQueriesInputSchema,
+  ksqlAppMetadataInputSchema,
   mutateInputSchema,
   queryInputSchema,
   runSavedQueryInputSchema,
@@ -60,6 +64,7 @@ export type ExplainInput = z.infer<typeof explainInputSchema>;
 export type ValidateInput = z.infer<typeof validateInputSchema>;
 export type DescribeAppInput = z.infer<typeof describeAppInputSchema>;
 export type ShowAppsInput = z.infer<typeof showAppsInputSchema>;
+export type KsqlAppMetadataInput = z.infer<typeof ksqlAppMetadataInputSchema>;
 export type ListQueriesInput = z.infer<typeof listQueriesInputSchema>;
 export type SaveQueryInput = z.infer<typeof saveQueryInputSchema>;
 export type SavedQueryNameInput = z.infer<typeof savedQueryNameInputSchema>;
@@ -70,6 +75,10 @@ export interface KsqlMcpToolDependencies {
     serverOptions: KsqlRuntimeServerOptions,
     input: CreateKsqlRuntimeInput
   ) => Promise<KsqlRuntime>;
+  createMetadataRuntime?: (
+    serverOptions: KsqlRuntimeServerOptions,
+    input: CreateKintoneMetadataRuntimeInput
+  ) => Promise<KintoneMetadataRuntime>;
   executeSql?: (
     sql: string,
     client: KintoneClient,
@@ -394,6 +403,24 @@ function toErrorPayload(err: unknown) {
   };
 }
 
+function sanitizeMetadataError(err: unknown): unknown {
+  if (err instanceof Error && err.name === "KintoneApiError") {
+    const apiError = err as Error & { status?: unknown; code?: unknown };
+    if (Number.isInteger(apiError.status)) {
+      const safe = new Error(
+        `kintone API error ${String(apiError.status)}`
+        + (typeof apiError.code === "string" && apiError.code.length > 0
+          ? ` (${apiError.code})`
+          : "")
+        + "."
+      );
+      safe.name = "KintoneApiError";
+      return safe;
+    }
+  }
+  return err;
+}
+
 function requireDmlApproval(
   input: { allowDml?: unknown; confirmText?: unknown; dmlMaxRows?: unknown },
   toolName: string,
@@ -485,6 +512,7 @@ export function createKsqlMcpTools(
   deps: KsqlMcpToolDependencies = {}
 ) {
   const createRuntime = deps.createRuntime ?? createKsqlRuntime;
+  const createMetadataRuntime = deps.createMetadataRuntime ?? createKintoneMetadataRuntime;
   const executeSql = deps.executeSql ?? execute;
   const executeBatchSql = deps.executeBatchSql ?? executeBatch;
   const validationContexts = new WeakMap<ValidationResult, ResolvedSqlContext>();
@@ -908,6 +936,40 @@ export function createKsqlMcpTools(
     });
   }
 
+  async function appMetadata(input: KsqlAppMetadataInput): Promise<Record<string, unknown>> {
+    // The MCP server validates this shape first. Keep every non-routing key when
+    // the raw handler is called directly as a second-line defence: P1's mapper
+    // then rejects unknown HTTP-like inputs instead of silently discarding them.
+    const { app, profile, ...request } = input as KsqlAppMetadataInput & Record<string, unknown>;
+    let runtime: KintoneMetadataRuntime;
+    try {
+      runtime = await createMetadataRuntime(serverOptions, {
+        app: app as CreateKintoneMetadataRuntimeInput["app"],
+        profile,
+        request: request as CreateKintoneMetadataRuntimeInput["request"],
+      });
+    } catch (err) {
+      throw sanitizeMetadataError(err);
+    }
+    const metadata = runtime.metadata;
+    return {
+      ok: true,
+      type: "KINTONE_METADATA",
+      resource: metadata.resource,
+      environment: metadata.environment,
+      request: {
+        method: "GET",
+        endpoint: metadata.path,
+        app: runtime.sourceApp,
+        resolvedAppId: runtime.resolvedAppId,
+        profile: runtime.profileName,
+        params: metadata.params,
+      },
+      responseBytes: metadata.responseBytes,
+      data: metadata.data,
+    };
+  }
+
   async function showApps(input: ShowAppsInput): Promise<Record<string, unknown>> {
     return await query({
       sql: "SHOW APPS",
@@ -1037,6 +1099,7 @@ export function createKsqlMcpTools(
     explain,
     query,
     mutate,
+    appMetadata,
     describeApp,
     showApps,
     saveQuery,
@@ -1048,6 +1111,9 @@ export function createKsqlMcpTools(
     explainTool: (input: ExplainInput) => runSafely(() => explain(input)),
     queryTool: (input: QueryInput) => runSafely(() => query(input)),
     mutateTool: (input: MutateInput) => runSafely(() => mutate(input)),
+    appMetadataTool: (input: unknown) => runSafely(
+      () => appMetadata(ksqlAppMetadataInputSchema.parse(input))
+    ),
     describeAppTool: (input: DescribeAppInput) => runSafely(() => describeApp(input)),
     showAppsTool: (input: ShowAppsInput) => runSafely(() => showApps(input)),
     saveQueryTool: (input: SaveQueryInput) => runSafely(() => saveQuery(input)),
