@@ -1,73 +1,162 @@
-# 課題: kintone 検索打ち切り（10 万件）警告 `X-Cybozu-Warning` の検出（P0）
+# B7 — プラグイン検索打ち切り検出仕様 R2
 
 - 作成日: 2026-07-15
-- ステータス: **実装済み・v2.10.0 リリース済（検索打ち切り 10万件検出・X-Cybozu-Warning・SELECT は警告／DML・一時テーブル実体化は fail-closed）。FROM なし実体化バグ（[ksql_fromless_select_materialize_bug.md](ksql_fromless_select_materialize_bug.md)）と同一 v2.10.0 で対応**
-- 更新履歴: R2=独立起票・plugin (b) 方針。R3=codex レビュー反映（[P0-1] 単発 GET・合成境界の取りこぼし→実行単位コレクター／[P0-2] 算術 UPDATE 経路も fail-closed／[P1] 契約を `searchAborted?:boolean`＋`onSearchAborted` に確定・一時テーブル実体化はエラー・INSERT/UPSERT SELECT の扱い明記／[P2] plugin (b) を全文統一／受入テスト拡充）。実装=Node ヘッダー検出・実行文単位コレクター・読取後書込の fail-closed・plugin 非検出ドキュメントを反映。
-- 分担: Claude=仕様/観点、Codex=実装/テスト
-- 位置づけ: **KLIKE（v2.8/v2.9 リリース済）の親 DML 解禁の必須ゲート**、かつ **SELECT の安全性強化**（現状 KLIKE は大規模アプリで 10 万件超の一致がサイレントに欠落する）。KLIKE v1/v2 はこの検出なしでもリリース済（SELECT は完全結果非保証を文書化・DML は全拒否で安全）。
-- **plugin 方針（確定）**: `kintone.api()` はヘッダー非露出のため、**まず Node/CLI/MCP で検出**（`X-Cybozu-Warning`）、**plugin は当面「検索打ち切りを検出しない」と明記**（案b）。plugin の raw fetch 化（案a）は後続の別作業。
-- 関連コード: `src/api/fetchAll.ts`（`KintoneGetResponse` / `fetchAll`）、`src/cli/nodeKintoneClient.ts`（`requestJson`・`getRecords`）、`src/ui/kintoneClient.ts`（`api()` / `getRecords`）、SELECT の警告伝播（`executeFullScanSelect` / SIMPLE 取得経路の `warnings`）
+- 改稿日: 2026-07-21
+- ステータス: **R2（実装着手可・未実装）**
+- 対象リリース: **v3.10.0（B47 と同梱）**
+- 対象: B7「プラグインでの検索打ち切り検出（raw fetch 経路）」
+- 前提実装: Node / CLI / MCP の検索打ち切り検出と、実行文種別ごとの警告／fail-closed 切替は実装済み
+- 後続依存: [B47 APPLY 複数親 UPDATE の親 WHERE LIKE/KLIKE 仕様 R2](ksql_b47_apply_parent_where_like_spec.md)
 
-## 0. 課題
+## 1. 目的
 
-kintone REST の `like` / `not like` は、キーワード一致が **10 万件に達すると検索を打ち切り**、レスポンスヘッダー `X-Cybozu-Warning: Filter aborted because of too many search results` を返す（[公式](https://cybozu.dev/ja/kintone/docs/rest-api/records/get-records/)）。しかし現状クライアントは**ヘッダーを読まず本文のみ**を扱うため、**結果がサイレントに欠落**する:
+kintone のレコード取得は、`like` / `not like` による検索が 10 万件に達すると処理を打ち切り、HTTP レスポンスヘッダー `X-Cybozu-Warning: Filter aborted because of too many search results` を返す。Node クライアントはこのヘッダーを読んで `searchAborted` を返すが、現行プラグインの `getRecords` は `kintone.api()` の本文しか受け取れず、打ち切りを実行エンジンへ通知できない。
 
-- `KintoneGetResponse`（[fetchAll.ts:27](../../src/api/fetchAll.ts#L27)）は `{ records }` のみ。
-- Node の `requestJson`（[nodeKintoneClient.ts:36](../../src/cli/nodeKintoneClient.ts#L36)）は JSON 本文のみ返す（`fetch` の `response.headers` を捨てている）。
-- プラグインの `api()`（[kintoneClient.ts:58](../../src/ui/kintoneClient.ts#L58)）は `kintone.api()` の**本文のみ**。`kintone.api()` は**レスポンスヘッダーを露出しない**。
+B7 の目的は、プラグインの `getRecords` でも同じヘッダーを検出し、既存の `KintoneGetResponse.searchAborted` を立てることである。これにより次の2つを実現する。
 
-> 本警告は KLIKE 専用ではなく、**kintone が検索を打ち切る任意のクエリ**（`like` 等）に共通。汎用の安全性改善。
+1. DML の既存 fail-closed をプラグインでも一様に効かせる。これは B47 で KLIKE を全 surface に解禁する安全前提である。
+2. プラグイン SELECT が検索打ち切りで静かに切り詰められた場合、既存の警告を結果へ付ける。
 
-## 1. スコープ（R3・全レコード取得経路を漏れなく）
+`execute()` は文を parse した後、`wrapClientWithSearchAbort(..., !isSelectLikeStatement(stmt))` を適用しており、SELECT / UNION / WITH だけ `failClosed=false`、それ以外は `true` になる（[src/execute.ts:665-688](../../src/execute.ts#L665)、[src/execute.ts:801-817](../../src/execute.ts#L801)、[src/execute.ts:851-862](../../src/execute.ts#L851)）。バッチも文ごとに SELECT / UNION / WITH かを判定して同じ wrapper と警告付与を行う（[src/execute.ts:1376-1390](../../src/execute.ts#L1376)）。したがって B7 は実行エンジンの分岐を増やさず、プラグイン client が正しい `searchAborted` を返すことに集中する。
 
-### 1.1 内部契約（確定・[P1]）
-- **`KintoneGetResponse` に `searchAborted?: boolean` を追加**（`warnings?: string[]` 案は不採用）。省略時=打ち切りなし（後方互換）。
-  ```ts
-  interface KintoneGetResponse { records: KintoneRecord[]; searchAborted?: boolean; }
-  ```
-- **`fetchAll` に `onSearchAborted?: () => void` コールバックを追加**（後方互換）。ページング内で打ち切りを検出したら 1 回以上呼ぶ。
-- **責務分離**: Node クライアント側で `X-Cybozu-Warning: Filter aborted…` の既知メッセージを判定し、実行エンジンには**型付き boolean（`searchAborted`）だけ**を渡す（実行側は文字列を解釈しない）。
-- **検出タイミング（重要）**: **先頭ページ・短い最終ページ・並列取得の全レスポンス**について、早期 return より**先に**検出する（1 レスポンスでも打ち切りなら aborted）。
+## 2. 現状と不足
 
-### 1.2 検出（Node/CLI/MCP・plugin 非検出）
-- **Node**: `requestJson`/`getRecords`（[nodeKintoneClient.ts:36](../../src/cli/nodeKintoneClient.ts#L36)）で `res.headers.get("X-Cybozu-Warning")` を読み、既知メッセージなら `KintoneGetResponse.searchAborted=true`。`fetch` の `Response` からヘッダー取得可能（確認済み）。`CB_IL02` リトライ後の最終レスポンスでも判定する。
-- **plugin（[P2]・確定 (b)）**: `kintone.api()` はヘッダー非露出のため、**plugin は当面「検索打ち切りを検出しない」**（`searchAborted` を付けない）。ドキュメントに明記。raw fetch 化（`kintone.api.url()`）は**別課題**（後続）。→ §1 全体・本文とも (b) に統一。
+### 2.1 伝播契約は既に存在する
 
-### 1.3 伝播＝実行単位の集約コレクター（[P0-1]・**fetchAll だけでは不足**）
-警告は「`fetchAll` → SELECT」だけでなく、**単発 GET を含む全レコード取得**で発生し得る。取りこぼす経路:
-- **SIMPLE 単発 GET**: `useSingleGet`（[execute.ts:1055](../../src/execute.ts#L1055)・`LIMIT<=500` 等）は `client.getRecords()` を直接呼び `fetchAll` を通らない（例: `SELECT … KLIKE … LIMIT 100`）。
-- **合成境界で子の警告が捨てられる**: UNION（[execute.ts:1542](../../src/execute.ts#L1542)）・CTE 実体化（[1580](../../src/execute.ts#L1580)）・CTE 文脈 UNION（[1620](../../src/execute.ts#L1620)）・WHERE/CASE/EXISTS 等のサブクエリ（[3248](../../src/execute.ts#L3248)）。
+`KintoneGetResponse` は `searchAborted?: boolean` を持ち、`PageFetcher` の戻り値として `fetchAll` まで運べる（[src/api/fetchAll.ts:26-40](../../src/api/fetchAll.ts#L26)）。`fetchAll` は先頭ページを早期 return より前に検査し、並列ページも全レスポンスを検査して `onSearchAborted` を呼べる（[src/api/fetchAll.ts:108-128](../../src/api/fetchAll.ts#L108)、[src/api/fetchAll.ts:164-194](../../src/api/fetchAll.ts#L164)、[src/api/fetchAll.ts:210-212](../../src/api/fetchAll.ts#L210)）。また、実行側 wrapper は単発 `getRecords` の戻り値も直接検査する（[src/execute.ts:801-817](../../src/execute.ts#L801)）。
 
-→ **設計（推奨・漏れに強い）**: **実行単位（execute/runSelectLike 呼び出し）に「打ち切りコレクター」を 1 つ持ち、単発 GET・fetchAll・サブクエリ・合成の全レコード取得がそこへ集約**する。SELECT 結果の `warnings` に「検索が 10 万件で打ち切られ、結果が欠落した可能性があります」を 1 回付す。EXPLAIN でも注記可。（代替: 各合成境界で子の warnings を確実にマージ。ただしコレクター方式の方が新経路追加に強い。）
+よって新しいレスポンス型、警告配列、コールバックは不要である。プラグイン `getRecords` が `{ records, searchAborted?: true }` を返せば、単発 GET と `fetchAll` の両方に既存契約が届く。
 
-### 1.4 DML は全「読取後書込」経路を fail-closed（[P0-2]・**resolveDmlTargetIds だけでは不足**）
-打ち切りを検出したら、**確認コールバック・PUT/DELETE より前に fail-closed で停止**（サイレントな一部更新/削除を防ぐ）。対象経路:
-- 親 `UPDATE` の**通常経路**（`resolveDmlTargetIds`）
-- 親 `UPDATE` の**算術式経路**（`fetchRecordsForSharedPlan` 直接呼び・[execute.ts:2384](../../src/execute.ts#L2384)）
-- 親 `DELETE`
-- 将来解禁するその他の読取後書込経路（KLIKE 親 DML 等）
+### 2.2 Node は検出済みだが定数が private である
 
-### 1.5 一時テーブル実体化はエラー（[P1]）
-`CREATE TEMP TABLE AS SELECT` は SELECT 結果の行だけ保存し `result.warnings` を捨てる（[execute.ts:618](../../src/execute.ts#L618)）。打ち切り済み一時テーブルを後続が**完全な集合として使う**ため通常 SELECT より危険。→ **実体化時は警告でなくエラー**（既存 `onLimitReached:"error"` と同じ思想）。
-- **`INSERT … SELECT` / `UPSERT … SELECT`**（SELECT 結果を書込に使う経路）は、**本バージョンで同様にエラー化するか将来課題にするかを実装時に明記**（推奨=書込前提の経路は実体化と同様にエラー化）。
+Node クライアントは現在、ファイルローカルの `SEARCH_ABORTED_HEADER_VALUE` と `res.headers.get("X-Cybozu-Warning")` の `includes` 判定を使う（[src/cli/nodeKintoneClient.ts:48-52](../../src/cli/nodeKintoneClient.ts#L48)、[src/cli/nodeKintoneClient.ts:125-138](../../src/cli/nodeKintoneClient.ts#L125)）。`getRecords` は判定結果が true のときだけ本文へ `searchAborted: true` を合成する（[src/cli/nodeKintoneClient.ts:246-270](../../src/cli/nodeKintoneClient.ts#L246)）。
 
-## 2. 受入（R3）
-- **SIMPLE 単発 GET**（`LIMIT<=500`）で打ち切り → SELECT が警告付き。
-- **`fetchAll` の先頭・後続・並列ページ**いずれの打ち切りも検出（早期 return より先）。
-- **UNION・CTE・サブクエリ**を含む合成 SELECT でも子の打ち切りが最終 `warnings` に伝播。
-- **`CREATE TEMP TABLE AS SELECT`** は打ち切りで**エラー**（実体化しない）。
-- **通常 UPDATE・算術 UPDATE・DELETE** は打ち切りで**書込前に停止**（fail-closed）。
-- **Node の `CB_IL02` リトライ後レスポンス**でも検出。
-- **plugin は警告情報なし**（`searchAborted` 付かない）で後方互換。
-- **打ち切りなし**は従来どおり（警告なし・既存 SELECT/DML/バッチ・テスト不変）。
-- 10 万件の実測が困難なため、**ヘッダー注入のモック/スタブ**で検出・伝播・停止を検証（実データ再現は未検証と明記）。
+B7 ではこのメッセージ定数と判定規則を共通モジュールへ移し、Node と plugin が同じ定数／helper を参照する。文字列を2箇所へ重複定義してはならない。
 
-## 3. 位置づけ（KLIKE との関係）
-- **KLIKE v1**: SIMPLE SELECT 限定・全 DML 拒否・「完全結果非保証」を文書化 → 本課題**未完成でも安全にリリース可**。
-- **本課題完成後**: SELECT 警告を強化 → その後 **KLIKE 親レコード DML 解禁を別仕様で再レビュー**（サブテーブル DML は JS 評価のため恒久非対応）。
+### 2.3 プラグインは本文だけを返している
 
-## 4. 進め方
-1. 実装: `KintoneGetResponse.searchAborted` ＋ `fetchAll.onSearchAborted` 追加 → Node クライアントでヘッダー判定（plugin/dryRun/noOp は付けない）→ **実行単位コレクター**で単発 GET・fetchAll・サブクエリ・合成の取得を集約 → SELECT `warnings` 伝播 → **一時テーブル実体化・全 DML 読取後書込経路を fail-closed** → plugin 非検出をドキュメント明記。
-2. 実機/モック: ヘッダー注入スタブで §2 受入を検証。
-3. **FROM なし実体化バグと同一 minor バージョンでリリース**。
-4. 後続（別課題）: plugin の raw fetch 化（案a）／KLIKE 親レコード DML 解禁（本課題完成が前提・サブテーブル DML は恒久非対応）。
+プラグイン adapter は `KintoneApiWithUrl` と `apiUrl(path) = kintone.api.url(path, true)` を既に持つ（[src/ui/kintoneClient.ts:26-27](../../src/ui/kintoneClient.ts#L26)）。しかし `getRecords` は共通 `api()` helper を通じて `kintone.api()` を呼び、本文の `records` だけを返すため、`searchAborted` を設定できない（[src/ui/kintoneClient.ts:80-105](../../src/ui/kintoneClient.ts#L80)）。
+
+この不足は `getRecords` に限定される。カーソル、書き込み、アプリ一覧、フィールド、数値精度、プロセス管理設定は同じ `api()` helper を使うが（[src/ui/kintoneClient.ts:107-203](../../src/ui/kintoneClient.ts#L107)）、検索打ち切りヘッダーを契約化する対象は `GET /k/v1/records.json` である。
+
+## 3. 設計
+
+### 3.1 案aを採用する
+
+プラグイン `createKintoneClient().getRecords` だけを、`kintone.api()` から次の raw Fetch 経路へ変更する。
+
+```text
+kintone.api.url("/k/v1/records.json", true)
+  -> GET query string を付与
+  -> same-origin fetch(url, {
+       method: "GET",
+       credentials: "include",
+       headers: { "X-Requested-With": "XMLHttpRequest" }
+     })
+  -> HTTP status / JSON body を検査
+  -> X-Cybozu-Warning を共通 helper で判定
+  -> { records, searchAborted?: true }
+```
+
+URL の query string は現行 `PageFetchParams` と同じ意味を保ち、`app`、`query`、および空でない場合の `fields` を records API の GET 形式で直列化する。`fields` は配列パラメータとして各値を欠落なく送る。`getRecords` は型上も実装上も GET 専用であり、現行呼び出しも `api(..., "GET", ...)` に固定されている（[src/ui/kintoneClient.ts:96-103](../../src/ui/kintoneClient.ts#L96)）。POST / PUT / DELETE を raw Fetch へ広げない。
+
+### 3.2 ヘッダー判定と定数共有
+
+共通モジュールに少なくとも次の責務を置く。
+
+- `SEARCH_ABORTED_HEADER_VALUE = "Filter aborted because of too many search results"`
+- `X-Cybozu-Warning` の値がその文字列を `includes` するかを判定する pure helper
+
+Node の現行判定は複数警告を含み得るヘッダーに対する `includes` であり、完全一致へ狭めない（[src/cli/nodeKintoneClient.ts:134-137](../../src/cli/nodeKintoneClient.ts#L134)）。plugin も同じ helper を使い、該当時だけ `searchAborted: true` を返す。該当しない警告、ヘッダーなし、空文字ではプロパティを省略する。
+
+共通モジュールは Node 専用 API に依存しない場所へ置き、plugin bundle と CLI bundle の双方から import できるものとする。
+
+### 3.3 認証・same-origin・guest space
+
+- URL は既存の `apiUrl(path)`、すなわち `(kintone.api as KintoneApiWithUrl).url(path, true)` を必ず使う（[src/ui/kintoneClient.ts:26-27](../../src/ui/kintoneClient.ts#L26)。`true` は現在の adapter が全 REST 呼び出しで使っている guest-aware URL 生成契約である）。
+- Fetch は `credentials: "include"` を明示し、ログインセッション cookie を送る。
+- `X-Requested-With: XMLHttpRequest` を付与する。
+- URL を別 origin へ書き換えない。生成 URL と現在ページが同一 origin であることを前提にする。
+
+ただし、`kintone.api.url(path, true)` が通常 space / guest space で生成する実 URL、および `X-Cybozu-Warning` がブラウザー Fetch の `Response.headers` に実際に露出することは、このリポジトリのコードだけでは証明できない。通常 space と guest space の双方を実機受入ゲートにする。
+
+### 3.4 エラー契約を維持する
+
+現行 `api()` は `kintone.api()` の reject を `toDetailedApiError` へ渡し、`message`、`code`、field-level `errors`、`status` を Error に保持する（[src/ui/kintoneClient.ts:36-77](../../src/ui/kintoneClient.ts#L36)、[src/ui/kintoneClient.ts:80-90](../../src/ui/kintoneClient.ts#L80)）。raw Fetch の `getRecords` でも利用者可視のこの契約を維持する。
+
+1. `res.ok === false` なら可能な限り JSON body を読み、`{ code, id, message, errors, status: res.status }` 形へ整えて `toDetailedApiError` で変換して throw する。
+2. JSON error body に `code` があれば Error の `name` / `code` へ通し、field-level `errors` があれば message に畳み込む。
+3. JSON でないエラー応答、空 body、ネットワーク拒否も、元の原因と HTTP status が失われない Error にする。
+4. 非 2xx 応答を成功 body として扱わず、エラー応答の `X-Cybozu-Warning` から `searchAborted` を返さない。
+
+raw Fetch 専用 helper を追加してもよいが、既存の書き込み等が使う `api()` と `toDetailedApiError` の挙動は変更しない。
+
+### 3.5 変更しない API
+
+raw Fetch 化するのは `createKintoneClient().getRecords` のみである。
+
+- cursor create/get/delete は現行 `kintone.api()` のまま。
+- `postRecords` / `putRecords` / `deleteRecords` は現行のまま。
+- `getApps` / `getFields` / `getNumberPrecision` / `getProcessStatuses` は現行のまま。
+- Node / CLI / MCP の通信方式と fail-closed ロジックは変更しない。ただし Node の定数／判定 helper の import 元だけは共有化のため変更対象になり得る。
+
+## 4. 実行時契約
+
+### 4.1 SELECT / UNION / WITH
+
+`searchAborted: true` を受けた wrapper は collector を立てるが throw せず、最終結果が SELECT の場合に既存警告を重複なく付ける（[src/execute.ts:801-817](../../src/execute.ts#L801)、[src/execute.ts:855-862](../../src/execute.ts#L855)）。警告文と SELECT の行選択・上限・truncate 契約は変更しない。B7 は、従来プラグインだけ欠落していた検出入力を供給するものである。
+
+### 4.2 DML
+
+非 SELECT 文では同じ wrapper が `SearchAbortedError` を `getRecords` の戻り直後に投げる（[src/execute.ts:801-817](../../src/execute.ts#L801)。エラー型と文言は [src/execute.ts:213-218](../../src/execute.ts#L213)）。confirm、POST、PUT、DELETE より前に伝播し、書き込み0件で fail-closed とする。B7 は新しい DML 分岐を追加しない。
+
+### 4.3 B47 との依存
+
+B47 の KLIKE 親選択は native `like` / `not like` が返した候補集合の完全性を必要とする。Node / CLI / MCP は既に検索打ち切りを検出できるが、プラグイン全面解禁には B7 が必須である。
+
+- 実装順は **B7 → B47** とする。
+- B7 の実機受入まで完了した場合、B47 に surface gate は設けない。
+- B7 が未達または実機でヘッダー非露出と判明した場合、B47 KLIKE は plugin で fail-closed に拒否し、Node / CLI / MCP 限定へフォールバックする。警告を出して実行継続してはならない。
+
+## 5. 非対象
+
+- Node / CLI / MCP の検索打ち切り検出方式の再設計。
+- plugin の書き込み API の raw Fetch 化。
+- cursor API のヘッダー検出。
+- SELECT 打ち切り時の意味論変更。既存 `attachSearchAbortWarning` に載るだけである。
+- 検索打ち切りそのものの回避、再試行、分割検索、完全結果の合成。
+- B47 の親 WHERE evaluator／prefilter 実装。
+
+## 6. 受入テスト
+
+### 6.1 unit / client-level
+
+- `kintone.api.url("/k/v1/records.json", true)` の戻り URLを使い、GET、`credentials:"include"`、`X-Requested-With: XMLHttpRequest` が設定される。
+- `app`、`query`、複数 `fields` が GET query string に正しく直列化され、空 fields は不要な配列要素を送らない。
+- 200 + `X-Cybozu-Warning` に共通メッセージあり → `{ records, searchAborted: true }`。
+- 200 + ヘッダーなし／別警告 → `{ records }` で `searchAborted` なし。
+- Node と plugin の双方が同じ定数／helper を参照し、既存 Node テストが非回帰。
+- 400 等の JSON error body から `message`、`code`、`errors`、`status` が既存 Error 契約へ移る。
+- JSON でないエラー、空 body、Fetch rejection が明示的な Error になる。
+- `getFields`、cursor、書き込み等は `kintone.api()` を使い続ける。
+- plugin client の `searchAborted: true` を `execute()` へ渡し、SELECT は警告、DML は `SearchAbortedError`、DML mutation API は0回になる。
+
+### 6.2 実機
+
+優先する実機検証は、10万件を超えて native `like` / `not like` の検索打ち切りを起こせる大規模アプリを通常 space と guest space に用意することである。各 surface で次を確認する。
+
+1. 通常 space の SELECT が完了し、検索打ち切り警告を表示する。
+2. 通常 space の読取後 DML が `SearchAbortedError` となり、confirm 前・書き込み0件で終わる。
+3. guest space でも URL、認証、GET query、ヘッダー露出、SELECT 警告、DML fail-closed が同じ結果になる。
+4. 打ち切りなしの通常応答が従来どおり動く。
+5. 権限エラーや不正 query のエラー応答で code / 詳細 message が維持される。
+
+10万件超アプリを準備できない場合、ブラウザー開発環境・検証 proxy 等で同一オリジン応答へ `X-Cybozu-Warning` を強制注入できるなら、それを準実機検証としてよい。ただし、kintone 本番応答でのヘッダー露出を確認したとは記録しない。
+
+いずれの実機手段も使えない場合は、Fetch `Response` と `headers.get` を mock した plugin client-level unit test を代替ゲートとする。この場合も SELECT 警告／DML fail-closed／書き込み0件まで結合検査し、リリースノートへ「実際の10万件応答、guest space、ブラウザーでのヘッダー露出は未検証」と明記する。B47 KLIKE を plugin へ全面解禁するかは §4.3 のフォールバック条件に従う。
+
+## 7. SemVer / リリース
+
+B7 単独でも、プラグインに新しい SELECT 警告と DML fail-closed の発火契機を追加する利用者可視の安全性改善であるため **minor** とする。B47 と同梱し **v3.10.0** でリリースする。
+
+リリース順序は、B7 の unit・実機ゲートを通した後に B47 KLIKE の plugin 全面解禁を有効化する。package の現行 version は `3.9.0`（[package.json:1-3](../../package.json#L1)）。
