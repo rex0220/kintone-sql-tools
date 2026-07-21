@@ -48,6 +48,47 @@ export interface KintoneMetadataRequestPlan {
   authCapability: MetadataAuthCapability;
 }
 
+export interface RawMetadataResult {
+  resource: KintoneMetadataResource;
+  environment: MetadataEnvironment;
+  /** Allowlisted relative endpoint. It never contains the host or base URL. */
+  path: string;
+  /** Mapper-produced, normalized query values only. */
+  params: Readonly<Record<string, string>>;
+  responseBytes: number;
+  /** Parsed kintone response, preserved without normalization. */
+  data: Record<string, unknown>;
+}
+
+export interface KintoneMetadataReader {
+  getMetadata(
+    request: AllowedMetadataRequest,
+    resolvedAppId: number
+  ): Promise<RawMetadataResult>;
+}
+
+export const KINTONE_METADATA_MAX_RESPONSE_BYTES = 2_097_152;
+
+export class ResponseTooLargeError extends Error {
+  constructor(
+    readonly maxBytes: number = KINTONE_METADATA_MAX_RESPONSE_BYTES,
+    readonly responseBytes?: number
+  ) {
+    super(`ResponseTooLargeError: kintone metadata response exceeds ${maxBytes} bytes.`);
+    this.name = "ResponseTooLargeError";
+  }
+}
+
+export class InvalidJsonResponseError extends Error {
+  readonly cause?: unknown;
+
+  constructor(cause?: unknown) {
+    super("InvalidJsonResponseError: kintone metadata response is not valid JSON.");
+    this.name = "InvalidJsonResponseError";
+    this.cause = cause;
+  }
+}
+
 export class ArgumentError extends Error {
   constructor(message: string) {
     super(`ArgumentError: ${message}`);

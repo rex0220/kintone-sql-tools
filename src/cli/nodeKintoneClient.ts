@@ -17,6 +17,14 @@ import { createKintoneCursorHandle } from "../api/kintoneCursor";
 import { getCursorLeaseManager } from "../api/cursorLeaseManager";
 import { CursorCreateOutcomeUnknownError } from "../core/errors/cursorErrors";
 import { parseNumberPrecisionSettings } from "../core/numberPrecision";
+import {
+  InvalidJsonResponseError,
+  KINTONE_METADATA_MAX_RESPONSE_BYTES,
+  type KintoneMetadataReader,
+  type RawMetadataResult,
+  ResponseTooLargeError,
+  mapKintoneMetadataRequest,
+} from "../node/kintoneMetadata";
 
 export class KintoneApiError extends Error {
   constructor(readonly status: number, readonly code: string | undefined, bodyText: string) {
@@ -44,20 +52,25 @@ interface JsonResponse<T> {
   searchAborted: boolean;
 }
 
-export function createNodeKintoneClient(
+export interface NodeKintoneConnection {
+  client: KintoneClient;
+  metadataReader: KintoneMetadataReader;
+}
+
+export function createNodeKintoneConnection(
   baseUrl: string,
   tokenResolver: TokenResolver
-): KintoneClient {
+): NodeKintoneConnection {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const apiBasePath = tokenResolver.guestSpaceId && tokenResolver.guestSpaceId > 0
     ? `/k/guest/${tokenResolver.guestSpaceId}/v1`
     : "/k/v1";
 
-  async function requestJsonResponse<T>(
+  async function requestResponse(
     path: string,
     init: RequestInit,
     appIdForToken: number
-  ): Promise<JsonResponse<T>> {
+  ): Promise<{ response: Response; searchAborted: boolean }> {
     const headers = new Headers(init.headers ?? {});
     if (tokenResolver.auth.type === "token") {
       headers.set("X-Cybozu-API-Token", tokenResolver.auth.resolveToken(appIdForToken));
@@ -120,8 +133,20 @@ export function createNodeKintoneClient(
     }
     const warning = res.headers.get("X-Cybozu-Warning") ?? "";
     return {
-      body: await res.json() as T,
+      response: res,
       searchAborted: warning.includes(SEARCH_ABORTED_HEADER_VALUE),
+    };
+  }
+
+  async function requestJsonResponse<T>(
+    path: string,
+    init: RequestInit,
+    appIdForToken: number
+  ): Promise<JsonResponse<T>> {
+    const { response, searchAborted } = await requestResponse(path, init, appIdForToken);
+    return {
+      body: await response.json() as T,
+      searchAborted,
     };
   }
 
@@ -131,6 +156,59 @@ export function createNodeKintoneClient(
     appIdForToken: number
   ): Promise<T> {
     return (await requestJsonResponse<T>(path, init, appIdForToken)).body;
+  }
+
+  async function requestCappedMetadataJson(
+    path: string,
+    init: { method: "GET" },
+    appIdForToken: number
+  ): Promise<{ data: Record<string, unknown>; responseBytes: number }> {
+    const { response } = await requestResponse(path, init, appIdForToken);
+    const contentLength = response.headers.get("Content-Length");
+    if (contentLength !== null && /^\d+$/.test(contentLength.trim())) {
+      const declaredBytes = Number(contentLength);
+      if (declaredBytes > KINTONE_METADATA_MAX_RESPONSE_BYTES) {
+        try {
+          await response.body?.cancel();
+        } catch { /* cancellation failure must not mask the deterministic size error */ }
+        throw new ResponseTooLargeError(KINTONE_METADATA_MAX_RESPONSE_BYTES, declaredBytes);
+      }
+    }
+
+    const chunks: Uint8Array[] = [];
+    let responseBytes = 0;
+    if (response.body !== null) {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        responseBytes += value.byteLength;
+        if (responseBytes > KINTONE_METADATA_MAX_RESPONSE_BYTES) {
+          try {
+            await reader.cancel();
+          } catch { /* cancellation failure must not mask the deterministic size error */ }
+          throw new ResponseTooLargeError(KINTONE_METADATA_MAX_RESPONSE_BYTES, responseBytes);
+        }
+        chunks.push(value);
+      }
+    }
+
+    const bytes = new Uint8Array(responseBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    let data: unknown;
+    try {
+      data = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+    } catch (cause) {
+      throw new InvalidJsonResponseError(cause);
+    }
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      throw new InvalidJsonResponseError();
+    }
+    return { data: data as Record<string, unknown>, responseBytes };
   }
 
   function shouldRetryWithRecordNumberOrder(path: string, bodyText: string): boolean {
@@ -154,7 +232,7 @@ export function createNodeKintoneClient(
     return `${base}query=${nextQuery}${tail.length > 0 ? `&${tail.join("&")}` : ""}`;
   }
 
-  return {
+  const client: KintoneClient = {
     async getRecords(params: PageFetchParams) {
       const queryPart = `query=${encodeURIComponent(params.query)}`;
       const appPart = `app=${encodeURIComponent(String(params.app))}`;
@@ -342,4 +420,38 @@ export function createNodeKintoneClient(
       };
     },
   };
+
+  const metadataReader: KintoneMetadataReader = {
+    async getMetadata(request, resolvedAppId): Promise<RawMetadataResult> {
+      const plan = mapKintoneMetadataRequest(
+        request,
+        resolvedAppId,
+        apiBasePath,
+        tokenResolver.auth.type
+      );
+      const query = plan.params.toString();
+      const { data, responseBytes } = await requestCappedMetadataJson(
+        `${plan.path}${query.length > 0 ? `?${query}` : ""}`,
+        { method: "GET" },
+        resolvedAppId
+      );
+      return {
+        resource: plan.resource,
+        environment: plan.environment,
+        path: plan.path,
+        params: Object.fromEntries(plan.params.entries()),
+        responseBytes,
+        data,
+      };
+    },
+  };
+
+  return { client, metadataReader };
+}
+
+export function createNodeKintoneClient(
+  baseUrl: string,
+  tokenResolver: TokenResolver
+): KintoneClient {
+  return createNodeKintoneConnection(baseUrl, tokenResolver).client;
 }
