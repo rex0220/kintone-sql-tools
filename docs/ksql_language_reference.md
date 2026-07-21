@@ -2005,7 +2005,7 @@ WHERE ステータス = '有効'
 VALIDATE ONLY;
 ```
 
-検証対象は必須、数値・日付・時刻・日時、数値範囲、文字列長、選択肢、UPSERTキーの空値・ソース内重複です。1行に複数の問題があればエラーも複数行になります。結果には `validatedRows` / `validRows` / `invalidRows` / `errorCount` と、入力ペイロード列および `$err_*` 診断列が含まれます。
+検証対象は必須、数値・日付・時刻・日時、数値範囲、文字列長、選択肢、UPSERTキーの空値・ソース内重複です（`UPDATE`/`UPSERT` update 分岐は後述の post-image によりレコード全体・サブテーブル子行も対象）。1行に複数の問題があればエラーも複数行になります。結果には `validatedRows` / `validRows` / `invalidRows` / `errorCount` と、入力ペイロード列および `$err_*` 診断列（`$err_statement` / `$err_operation` / `$err_row` / `$err_field` / `$err_code` / `$err_message` / `$err_value` / `$err_subtable` / `$err_subrow` / `$err_subrow_id` の10列。v3.9.0 以降）が含まれます。子セル以外の違反では末尾4列（`$err_value` / `$err_subtable` / `$err_subrow` / `$err_subrow_id`）は空文字です。
 
 複文バッチでは `VALIDATE ONLY INTO #err` とすると、同じエラー行を後続文から一時テーブルとして参照できます。同名 `#err` は入力列構成が同じ場合だけ追記でき、異なるschemaまたは `tempTableMaxRows` 超過は既存行を変更せずエラーになります。
 
@@ -2024,11 +2024,12 @@ SELECT * FROM #err;
 - 完全な候補集合が必要なため、`onLimit=truncate` / CLI `--on-limit truncate` / プラグインのtruncate設定は無視され、常にerrorとして扱われます
 - ローカル検証は通常の書き込み経路より厳密な場合があります。検証エラーはkSQLが検出したTier 0問題であり、同じ値をkintone APIが必ず拒否するという予測ではありません
 - 検証通過は書き込み成功を保証しません。権限、競合、ユーザー実在性、既存レコードとの一意制約衝突などAPI実行時の問題は対象外です
-- `UPDATE ... VALIDATE ONLY` はSET対象列だけを検証します。一方、kintoneはPUT時にレコード全体を再検証するため、制約を後から追加したアプリなどでは、既存レコードのSET対象外フィールド（サブテーブル子を含む）に残る必須・文字列長等の違反値によって本実行が失敗することがあります。この場合はAPI実行時エラーとしてfail-fastになります
+- **`UPDATE` / `UPSERT`（update 分岐）の `VALIDATE ONLY` は、SET 対象列だけでなく、更新対象レコードの取得スナップショットに SET を適用した「post-image（レコード全体）」を検証します（v3.9.0・B43）。** これにより、SET 対象外のトップレベル項目や**サブテーブル子行に残る既存違反**（必須・文字列長・数値範囲・選択肢・数値精度）も書き込み前に検出します。kintone は PUT 時にレコード全体を再検証するため、この検証は本実行時の `CB_VA01` を前倒しで捕捉します。子違反は `$err_subtable`（テーブルコード）・`$err_subrow`（1-based 行序数）・`$err_subrow_id`（永続行 ID＝仮想テーブルの `_rid`）で位置を示します。プレーンな `UPDATE`/`UPSERT` 実行（`VALIDATE ONLY`/`ON ERROR SKIP` なし）の取得挙動は変わりません
+- この検証のため、`UPDATE`/`UPSERT` の `VALIDATE ONLY` は対象レコードの完全なスナップショット（`$id`＋検証対象トップレベル＋全サブテーブル）を取得します。`UPDATE` は既存 GET の取得列を拡張し、`UPSERT` は照合後に更新対象 ID を100件ずつまとめて追加取得します（対象1件ごとの追加 GET は行いません）
 
 ## 17.2 ON ERROR SKIP（事前検証エラー行の隔離）
 
-複文バッチ内の親レコード `INSERT` / `UPSERT` / `UPDATE` に `ON ERROR SKIP INTO #err` を付けると、`VALIDATE ONLY` と同じTier 0検証で不正になった行を `#err` へ隔離し、合格行だけを書き込みます。書き込みを行うため、MCPでは `ksql_mutate` とDML承認、CLIでは `--allow-dml` が必要です。
+複文バッチ内の親レコード `INSERT` / `UPSERT` / `UPDATE` に `ON ERROR SKIP INTO #err` を付けると、`VALIDATE ONLY` と同じTier 0検証で不正になった行を `#err` へ隔離し、合格行だけを書き込みます。書き込みを行うため、MCPでは `ksql_mutate` とDML承認、CLIでは `--allow-dml` が必要です。**`UPDATE` / `UPSERT`（update 分岐）では §17.1 の post-image 検証により、更新対象レコードのサブテーブル子を含む既存違反を持つ親も隔離対象になります（v3.9.0・B43）。** これにより、既存違反レコード1件が同一チャンクの合格行まで巻き添えにして `CB_VA01` で失敗する事態を防ぎ、合格親だけを確実に書き込みます。
 
 ```sql
 INSERT INTO APP100 (顧客コード, 金額)
@@ -2043,7 +2044,7 @@ SELECT * FROM #err;
 - `ON ERROR SKIP` は `INTO #err` 必須のバッチ専用構文です。単文では使用できません
 - 結果には既存のoperation別件数に加えて `affectedRows` / `skippedRows` / `rejectLimit` / `errTable` が含まれます
 - `dmlMaxRows` と `dmlTotalMaxRows` は隔離後に実際に書き込む行数へ適用されます。ソース取得は通常の `maxRecords` で制御されます
-- kintone APIが書き込み時に返す権限・競合・一意制約・既存レコード全体の再検証エラーなどは隔離せず、従来どおりfail-fastです
+- 組み込み制約（必須・文字列長・数値範囲・選択肢・数値精度）の既存違反は、update 分岐では post-image 検証で事前に検出・隔離されます（v3.9.0・B43）。一方、kintone APIが書き込み時に返す権限・競合・一意制約・ユーザー実在性などの実行時エラーは隔離せず、従来どおりfail-fastです
 
 ---
 

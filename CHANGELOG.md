@@ -2,6 +2,17 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.9.0（未リリース）
+
+### 修正（B43 DML 事前検証が既存サブテーブル違反を検出しない false pass の解消）
+
+- **`UPDATE` / `UPSERT`（update 分岐）の `VALIDATE ONLY` / `ON ERROR SKIP` が、更新対象レコードの「post-image（レコード全体）」を検証するようにした**。従来は送信ペイロード（SET 対象列）だけを検証していたため、SET 対象外のトップレベル項目や**サブテーブル子行に残る既存違反**（必須・文字列長・数値範囲・選択肢・数値精度）を見逃し、`VALIDATE ONLY` が合格と誤報告（false pass）していた。kintone は PUT 時にレコード全体を再検証するため、この違反は本実行時に `CB_VA01` を引き起こし、`ON ERROR SKIP` でも隔離できずチャンク全体が失敗していた。
+  - B44 で新設した complete-record validator（`validatePostImage`）を再利用し、取得スナップショットに SET を適用した post-image を検証する。検証はトップレベル＋全サブテーブル子行を対象とする（full record）。
+  - **エラー診断列を10列へ統一**（`$err_statement` / `$err_operation` / `$err_row` / `$err_field` / `$err_code` / `$err_message` / `$err_value` / `$err_subtable` / `$err_subrow` / `$err_subrow_id`）。子違反は所有テーブルコード・1-based 行序数・永続行 ID（≡仮想テーブルの `_rid`）で位置を示す。INSERT / UPSERT-create / トップレベルのみの違反では末尾4列は空文字。
+  - **`ON ERROR SKIP` は既存サブテーブル違反を持つ親を隔離**するようになり、既存違反1件による同一チャンクの巻き添え失敗を防ぐ（true isolation）。`REJECT LIMIT` も post-image 違反を含めて書き込み前に判定する。
+  - 取得: `UPDATE` は既存 GET の取得列を complete snapshot へ拡張、`UPSERT` は照合後に更新対象 ID を100件ずつ追加取得（対象1件ごとの追加 GET はしない）。**プレーンな `UPDATE` / `UPSERT` 実行（`VALIDATE ONLY` / `ON ERROR SKIP` なし）の取得・書き込み挙動は変わらない**。権限・競合・一意制約・ユーザー実在性などの API 実行時エラーは従来どおり fail-fast。
+  - CLI 実機で確認: APP4221 `$id=7` の false pass 反転（`validRows=1/errorCount=0` → `validRows=0/errorCount=2`・`$err_subrow_id`≡`_rid`）・既存違反なしレコードの no-false-positive・`ON ERROR SKIP` の true isolation（書き込み0）。全2,515 テスト green。SemVer=minor。
+
 ## v3.8.0（2026-07-21）
 
 ### 機能追加（B44 APPLY ブロック＝テーブル外項目とテーブル内項目を1文=1 PUT で同時更新）
