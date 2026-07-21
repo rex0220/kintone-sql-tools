@@ -1,7 +1,7 @@
 # B49 — MCP 読み取り専用 kintone メタデータ API 仕様 R2
 
 - 作成日: 2026-07-21
-- ステータス: **R2（仕様案・未実装）**
+- ステータス: **R2・Claude レビュー Approved・v3.9.0 実装中**（実装計画: [ksql_b49_mcp_readonly_metadata_api_impl_plan.md](ksql_b49_mcp_readonly_metadata_api_impl_plan.md)）
 - 対象: B49「MCP から取得系（GET）kintone REST API（フィールド／フォーム／アプリ情報等）を安全に汎用実行する」
 - 一次情報: [ksql_issue_tracker.md B49](../ksql_issue_tracker.md#L40)
 - 旧仕様: [B49 R1 — DESCRIBE 制約付き JSON 出力](ksql_b49_describe_constraints_spec.md)

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { assertResourceCatalog } from "./mcp-resource-smoke.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = resolve(rootDir, "dist-mcp", "ksql-mcp.js");
@@ -12,12 +13,16 @@ const packageVersion = JSON.parse(
   readFileSync(resolve(rootDir, "package.json"), "utf8")
 ).version;
 const smokeSavedQueriesPath = resolve(rootDir, ".tmp", "mcp-smoke-queries.json");
+const resourceIoGuardPath = resolve(rootDir, "scripts", "mcp-resource-io-guard.cjs");
+const resourceIoGuardLog = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.log`);
+const resourceIoGuardActive = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.active`);
 const expectedTools = [
   "ksql_validate",
   "ksql_explain",
   "ksql_query",
   "ksql_mutate",
   "ksql_describe_app",
+  "ksql_app_metadata",
   "ksql_show_apps",
   "ksql_save_query",
   "ksql_list_queries",
@@ -49,7 +54,59 @@ function getTool(tools, name) {
   return tool;
 }
 
+const metadataResources = [
+  "app",
+  "fields",
+  "layout",
+  "settings",
+  "status",
+  "views",
+  "reports",
+  "customize",
+];
+
+const forbiddenMetadataInputs = ["url", "path", "method", "body", "query", "ids"];
+
+function assertMetadataSchema(tools) {
+  const metadata = getTool(tools, "ksql_app_metadata");
+  const schema = metadata.inputSchema ?? {};
+  const props = schema.properties ?? {};
+  assert(schema.type === "object", "ksql_app_metadata input schema must be an object.");
+  assert(schema.additionalProperties === false, "ksql_app_metadata input schema must be strict.");
+  assert(
+    JSON.stringify([...(schema.required ?? [])].sort()) === JSON.stringify(["app", "resource"]),
+    "ksql_app_metadata must require exactly resource and app."
+  );
+  assert(
+    JSON.stringify(Object.keys(props).sort())
+      === JSON.stringify(["app", "lang", "preview", "profile", "resource"]),
+    "ksql_app_metadata must expose only the branch keys resource/app/profile/preview/lang."
+  );
+  assert(
+    JSON.stringify([...(props.resource?.enum ?? [])].sort())
+      === JSON.stringify([...metadataResources].sort()),
+    "ksql_app_metadata.resource must expose the exact fixed eight-resource allowlist."
+  );
+  for (const key of forbiddenMetadataInputs) {
+    assert(!(key in props), `ksql_app_metadata must not expose ${key}.`);
+  }
+}
+
+function assertMetadataSchemaError(result, label) {
+  const text = result?.content?.find((item) => item.type === "text")?.text ?? "";
+  assert(result?.isError === true, `${label} must return isError=true.`);
+  assert(result?.structuredContent === undefined, `${label} must fail before the metadata handler.`);
+  assert(
+    text.includes("MCP error -32602")
+      && text.includes("Input validation error")
+      && text.includes("ksql_app_metadata"),
+    `${label} must return a JSON-RPC schema error.`
+  );
+}
+
 function assertSchemas(tools) {
+  assertMetadataSchema(tools);
+
   const explain = getTool(tools, "ksql_explain");
   const explainProps = explain.inputSchema?.properties ?? {};
   assert("sql" in explainProps, "ksql_explain.sql input is missing.");
@@ -115,6 +172,7 @@ function assertToolDescriptions(tools) {
     // B44 Phase 16d: v2 全 APPLY 形の VALIDATE ONLY は read-only のまま許可
     "UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY",
     "fixed default 500",
+    "ksql://language-reference",
   ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
@@ -131,6 +189,27 @@ function assertToolDescriptions(tools) {
     "Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value)",
     "always rejected by MCP v3.8.0 before runtime or records API creation",
     "allowDml and dmlMaxSubtableRows do not enable it",
+    "ksql://language-reference",
+  ];
+  const metadataKeys = [
+    "fields",
+    "constraints",
+    "raw",
+    "read-only",
+    "fixed GET allowlist",
+    "records",
+    "mutation",
+  ];
+  const describeKeys = [
+    "field code",
+    "label",
+    "type",
+    "ksql_app_metadata",
+  ];
+  const showAppsKeys = [
+    "enumerates every app",
+    "unknown app id by name",
+    "ksql_app_metadata",
   ];
   const validate = getTool(tools, "ksql_validate");
   for (const key of validateKeys) {
@@ -158,6 +237,27 @@ function assertToolDescriptions(tools) {
     assert(
       typeof mutate.description === "string" && mutate.description.includes(key),
       `ksql_mutate.description must mention "${key}".`
+    );
+  }
+  const metadata = getTool(tools, "ksql_app_metadata");
+  for (const key of metadataKeys) {
+    assert(
+      typeof metadata.description === "string" && metadata.description.includes(key),
+      `ksql_app_metadata.description must mention "${key}".`
+    );
+  }
+  const describe = getTool(tools, "ksql_describe_app");
+  for (const key of describeKeys) {
+    assert(
+      typeof describe.description === "string" && describe.description.includes(key),
+      `ksql_describe_app.description must mention "${key}".`
+    );
+  }
+  const showApps = getTool(tools, "ksql_show_apps");
+  for (const key of showAppsKeys) {
+    assert(
+      typeof showApps.description === "string" && showApps.description.includes(key),
+      `ksql_show_apps.description must mention "${key}".`
     );
   }
 }
@@ -240,14 +340,19 @@ function assertParamDescriptions(tools) {
 
 async function main() {
   assertBundleIsSelfContained();
+  mkdirSync(dirname(resourceIoGuardLog), { recursive: true });
+  rmSync(resourceIoGuardLog, { force: true });
+  rmSync(resourceIoGuardActive, { force: true });
 
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath],
+    args: ["--require", resourceIoGuardPath, serverPath],
     cwd: rootDir,
     env: {
       ...process.env,
       KSQL_SAVED_QUERIES: smokeSavedQueriesPath,
+      KSQL_RESOURCE_IO_GUARD_LOG: resourceIoGuardLog,
+      KSQL_RESOURCE_IO_GUARD_ACTIVE: resourceIoGuardActive,
     },
     stderr: "pipe",
   });
@@ -263,6 +368,18 @@ async function main() {
   try {
     await client.connect(transport);
 
+    const instructions = client.getInstructions();
+    assert(typeof instructions === "string" && instructions.trim().length > 0, "Server instructions are missing.");
+    for (const key of [
+      "not generic SQL",
+      "VALIDATE ONLY",
+      "ksql_app_metadata",
+      "ksql://language-reference",
+      "APPLY mutation is disabled",
+    ]) {
+      assert(instructions.includes(key), `Server instructions must mention "${key}".`);
+    }
+
     const listed = await client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();
     assert(
@@ -272,6 +389,43 @@ async function main() {
     assertSchemas(listed.tools);
     assertToolDescriptions(listed.tools);
     assertParamDescriptions(listed.tools);
+
+    await assertResourceCatalog(client, assert);
+    // Activate only after startup and valid reads, so every rejected URI below is proven
+    // not to fall through to filesystem or network access in the server process.
+    writeFileSync(resourceIoGuardActive, "active\n", "utf8");
+    for (const uri of [
+      "ksql://language-reference/99-nope",
+      "ksql://language-reference/..",
+      "ksql://language-reference/https%3A%2F%2Fevil.example",
+      "https://evil.example/ksql-resource",
+    ]) {
+      let rejected = false;
+      try {
+        await client.readResource({ uri });
+      } catch (err) {
+        rejected = true;
+        const message = err instanceof Error ? err.message : String(err);
+        assert(
+          !existsSync(resourceIoGuardLog),
+          `Rejected resource URI attempted filesystem/network I/O:\n${
+            existsSync(resourceIoGuardLog) ? readFileSync(resourceIoGuardLog, "utf8") : ""
+          }`
+        );
+        assert(
+          message.includes("-32602") || /invalid|unknown/i.test(message),
+          `${uri} must fail with InvalidParams-equivalent error.`
+        );
+      }
+      assert(rejected, `${uri} must be rejected.`);
+    }
+    assert(
+      !existsSync(resourceIoGuardLog),
+      `Rejected resource URI attempted filesystem/network I/O:\n${
+        existsSync(resourceIoGuardLog) ? readFileSync(resourceIoGuardLog, "utf8") : ""
+      }`
+    );
+    rmSync(resourceIoGuardActive, { force: true });
 
     // サーバー申告バージョンの package.json 同期(fix_plan D4/D5)
     const serverVersion = client.getServerVersion()?.version;
@@ -345,9 +499,36 @@ async function main() {
       "ksql_list_queries did not return a queries array."
     );
 
+    // B49 P4: schema rejects arbitrary HTTP/record inputs before the metadata
+    // handler can create a runtime or perform network I/O.
+    const metadataHttpAttack = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: {
+        resource: "records",
+        app: 1,
+        method: "POST",
+        path: "/k/v1/records.json",
+      },
+    });
+    assertMetadataSchemaError(metadataHttpAttack, "ksql_app_metadata arbitrary HTTP attack");
+
+    // Pin the discriminated branches that the root tools/list schema mirrors.
+    const metadataAppPreview = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: { resource: "app", app: 1, preview: true },
+    });
+    assertMetadataSchemaError(metadataAppPreview, "ksql_app_metadata app preview branch");
+    const metadataLayoutLang = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: { resource: "layout", app: 1, lang: "ja" },
+    });
+    assertMetadataSchemaError(metadataLayoutLang, "ksql_app_metadata layout lang branch");
+
     process.stdout.write("[mcp-smoke] ok\n");
   } finally {
     await client.close().catch(() => {});
+    rmSync(resourceIoGuardLog, { force: true });
+    rmSync(resourceIoGuardActive, { force: true });
   }
 }
 

@@ -130,11 +130,17 @@ import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintone
 export type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
 import {
   renderValidationValue,
+  materializeDmlUpdateModeSparseRecords,
   validateDmlCandidates,
   VALIDATION_META_COLUMNS,
   type DmlValidationCandidate,
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
+import {
+  buildDmlValidationPostImage,
+  collectDmlPrevalidationSnapshotFields,
+  mergeDmlCandidateValidation,
+} from "./core/dmlPrevalidation";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
 import {
   buildValidationCellLocator,
@@ -621,6 +627,14 @@ export interface ExecuteOptions {
   dmlMaxSubtableRows?: number;
   /** Surface capability gate. Omitted/false keeps APPLY mutation unavailable. */
   allowApplyMutation?: boolean;
+  /** B43 snapshot loader seam. Usually omitted; normal UPDATE validation reuses its shared GET. */
+  loadUpdateModeSnapshots?: (input: DmlUpdateModeSnapshotLoadInput) => Promise<ReadonlyMap<number, KintoneRecord>>;
+}
+
+export interface DmlUpdateModeSnapshotLoadInput {
+  readonly appId: number;
+  readonly candidates: readonly DmlValidationCandidate[];
+  readonly fields: readonly string[];
 }
 
 // ============================================================
@@ -4765,15 +4779,96 @@ async function prepareDmlValidation(
     await assertDmlWhereCapability(stmt, client, cacheContext);
   }
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
-  const numberPrecision = await loadNumberPrecisionForTargets(
+  let numberPrecision = await loadNumberPrecisionForTargets(
     stmt.appId, targetFields, fieldInfos, client, cacheContext
   );
 
-  const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
-  const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
+  const fieldIndex = buildPostImageFieldIndex(fieldInfos, payloadFields);
+  const snapshotFields = collectDmlPrevalidationSnapshotFields(fieldIndex);
+  const candidates = (await materializeValidationCandidates(
+    stmt, operation, client, options, cacheContext, tempTables, infoByCode,
+    stmt.type === "UPDATE" ? snapshotFields : undefined
+  )).sort((left, right) => left.rowNumber - right.rowNumber);
+  const updateCandidates = candidates.filter((candidate) => candidate.mode === "update");
+  const productionUpdateLoader = stmt.type === "UPDATE"
+    ? loadMaterializedUpdateSnapshots
+    : stmt.type.startsWith("UPSERT")
+      ? (input: DmlUpdateModeSnapshotLoadInput) => loadUpsertValidationSnapshots(
+        input, client, options.maxRecords ?? 10_000
+      )
+      : undefined;
+  const updateSnapshotLoader = options.loadUpdateModeSnapshots ?? productionUpdateLoader;
+  const usePreparedPostImages = updateCandidates.length > 0 && updateSnapshotLoader !== undefined;
+  const preparedPostImages = new Map<number, ReturnType<typeof validatePostImage>>();
+  if (usePreparedPostImages) {
+    materializeDmlUpdateModeSparseRecords(updateCandidates, targetFields, fieldInfos);
+    const snapshots = await updateSnapshotLoader!({
+      appId: stmt.appId,
+      candidates: updateCandidates,
+      fields: snapshotFields,
+    });
+    const postImages = new Map<number, KintoneRecord>();
+    for (const candidate of updateCandidates) {
+      if (candidate.targetId === undefined) {
+        throw new Error(`InternalError: update-mode validation candidate has no targetId (row=${candidate.rowNumber}).`);
+      }
+      const snapshot = snapshots.get(candidate.targetId);
+      if (!snapshot) {
+        throw new Error(`InternalError: update-mode snapshot is missing for record ${candidate.targetId}.`);
+      }
+      const postImage = buildDmlValidationPostImage(snapshot, candidate.record ?? {});
+      postImages.set(candidate.rowNumber, postImage);
+    }
+    if (numberPrecision === undefined && [...postImages.values()].some((record) =>
+      postImageNeedsNumberPrecision(record, fieldIndex)
+    )) {
+      numberPrecision = await getNumberPrecisionCached(stmt.appId, client, cacheContext);
+    }
+    for (const candidate of updateCandidates) {
+      const postImage = postImages.get(candidate.rowNumber);
+      if (!postImage) throw new Error(`InternalError: validation post-image is missing for row ${candidate.rowNumber}.`);
+      preparedPostImages.set(candidate.rowNumber, validatePostImage(
+        postImage, fieldIndex, numberPrecision, statementNumber, candidate.rowNumber, operation
+      ));
+    }
+  }
+  const candidateValidation = validateDmlCandidates(
     candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision,
-    stmt.checkGroups ?? [], validateMissingCreateFields, includePreErrors
+    stmt.checkGroups ?? [], validateMissingCreateFields, includePreErrors,
+    { validateUpdateBuiltIns: !usePreparedPostImages }
   );
+  let { errors, invalidRows, invalidRowNumbers } = candidateValidation;
+  if (usePreparedPostImages) {
+    const detailsByRow = new Map(candidateValidation.candidateResults.map((detail) => [detail.rowNumber, detail]));
+    errors = [];
+    invalidRowNumbers = new Set<number>();
+    for (const candidate of candidates) {
+      const detail = detailsByRow.get(candidate.rowNumber);
+      if (!detail) throw new Error(`InternalError: validation detail is missing for row ${candidate.rowNumber}.`);
+      if (candidate.mode === "create") {
+        const candidateErrors = [...detail.preErrors, ...detail.builtInErrors, ...detail.checkErrors];
+        errors.push(...candidateErrors);
+        if (candidateErrors.length > 0) invalidRowNumbers.add(candidate.rowNumber);
+        continue;
+      }
+      const postImageValidation = preparedPostImages.get(candidate.rowNumber);
+      if (!postImageValidation) {
+        throw new Error(`InternalError: prepared post-image validation is missing for row ${candidate.rowNumber}.`);
+      }
+      const merged = mergeDmlCandidateValidation({
+        rowNumber: candidate.rowNumber,
+        setFields: targetFields,
+        normalizedPostImage: postImageValidation.normalizedRecord,
+        preErrors: detail.preErrors,
+        postImageErrors: postImageValidation.errors,
+        checkErrors: detail.checkErrors,
+      });
+      candidate.record = merged.writeRecord;
+      errors.push(...merged.errors);
+      for (const rowNumber of merged.invalidRowNumbers) invalidRowNumbers.add(rowNumber);
+    }
+    invalidRows = invalidRowNumbers.size;
+  }
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result: DmlValidationResult = {
     type: "VALIDATION",
@@ -4801,12 +4896,10 @@ async function prepareDmlValidation(
     const info = infoByCode.get(column);
     if (info) columnMeta.set(column, materializedMetaFromFieldInfo(info, stmt.appId));
   }
-  columnMeta.set("$err_statement", syntheticColumnMeta("number"));
-  columnMeta.set("$err_operation", syntheticColumnMeta("string"));
-  columnMeta.set("$err_row", syntheticColumnMeta("number"));
-  columnMeta.set("$err_field", syntheticColumnMeta("string"));
-  columnMeta.set("$err_code", syntheticColumnMeta("string"));
-  columnMeta.set("$err_message", syntheticColumnMeta("string"));
+  const numericValidationMeta = new Set<string>(["$err_statement", "$err_row"]);
+  for (const column of VALIDATION_META_COLUMNS) {
+    columnMeta.set(column, syntheticColumnMeta(numericValidationMeta.has(column) ? "number" : "string"));
+  }
   materializedMetaByValidationResult.set(result, columnMeta);
   return { result, candidates, invalidRowNumbers, columnMeta };
 }
@@ -4899,9 +4992,14 @@ async function materializeValidationCandidates(
   options: ExecuteOptions,
   cacheContext: string,
   tempTables: Map<string, MaterializedTable> | undefined,
-  infoByCode: Map<string, KintoneFieldInfo>
+  infoByCode: Map<string, KintoneFieldInfo>,
+  updateSnapshotFields?: readonly string[]
 ): Promise<DmlValidationCandidate[]> {
-  if (stmt.type === "UPDATE") return materializeUpdateValidationCandidates(stmt, client, options, cacheContext, tempTables);
+  if (stmt.type === "UPDATE") {
+    return materializeUpdateValidationCandidates(
+      stmt, client, options, cacheContext, tempTables, updateSnapshotFields
+    );
+  }
 
   let rows: unknown[][];
   let sourceRows: ProcessRow[] | undefined;
@@ -5028,36 +5126,55 @@ async function materializeUpdateValidationCandidates(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  snapshotFields?: readonly string[]
 ): Promise<DmlValidationCandidate[]> {
-  if (stmt.from) return materializeUpdateFromValidationCandidates(stmt, stmt.from, client, options, cacheContext, tempTables);
+  if (stmt.from) {
+    return materializeUpdateFromValidationCandidates(
+      stmt, stmt.from, client, options, cacheContext, tempTables, snapshotFields
+    );
+  }
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
   assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
   let records: Array<{ id: number; record: KintoneRecord }>;
   let evaluationById = new Map<number, KintoneRecord>();
+  let snapshotsById = new Map<number, KintoneRecord>();
   if (hasRowDependentAssignment(stmt)) {
     const getParams = updateToGetQueryForArith(stmt);
-    const fields = [...new Set([...getParams.fields, ...checkTargetFields])];
+    const fields = [...new Set([...getParams.fields, ...checkTargetFields, ...(snapshotFields ?? [])])];
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
       maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
     });
-    evaluationById = new Map(resolved.records.map((record) => [Number(record["$id"]?.value), record]));
+    snapshotsById = indexDmlUpdateSnapshots(resolved.records);
+    evaluationById = snapshotsById;
     records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt);
     if (checkTargetFields.length > 0) {
-      const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, [...new Set(["$id", ...checkTargetFields])], {
+      const fields = [...new Set(["$id", ...checkTargetFields, ...(snapshotFields ?? [])])];
+      const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
         maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
       });
-      evaluationById = new Map(resolved.records.map((record) => [Number(record["$id"]?.value), record]));
+      snapshotsById = indexDmlUpdateSnapshots(resolved.records);
+      evaluationById = snapshotsById;
       records = updateToPutBatches(stmt, [...evaluationById.keys()], fieldTypes).flatMap((batch) => batch.records);
     } else {
-      const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
-        maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1,
-      });
-      records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+      if (snapshotFields) {
+        const resolved = await fetchRecordsForSharedPlan(
+          client.getRecords, getParams.app, getParams.query, [...snapshotFields], {
+            maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
+          }
+        );
+        snapshotsById = indexDmlUpdateSnapshots(resolved.records);
+        records = updateToPutBatches(stmt, [...snapshotsById.keys()], fieldTypes).flatMap((batch) => batch.records);
+      } else {
+        const resolved = await resolveDmlTargetIds(client.getRecords, getParams.app, getParams.query, {
+          maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1,
+        });
+        records = updateToPutBatches(stmt, resolved.ids, fieldTypes).flatMap((batch) => batch.records);
+      }
     }
   }
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
@@ -5068,9 +5185,95 @@ async function materializeUpdateValidationCandidates(
     preErrors: [],
     record: entry.record,
     targetId: entry.id,
+    validationSnapshot: snapshotsById.get(entry.id),
     evaluationRow: updateEvaluationRow(evaluationById.get(entry.id), stmt.appId),
     evaluationFieldTypes: updateEvaluationTypes(fieldTypes, stmt.appId),
   }));
+}
+
+function indexDmlUpdateSnapshots(records: readonly KintoneRecord[]): Map<number, KintoneRecord> {
+  const snapshots = new Map<number, KintoneRecord>();
+  for (const record of records) {
+    const rawId = record["$id"]?.value;
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`InternalError: invalid $id in UPDATE validation snapshot: ${String(rawId)}.`);
+    }
+    if (snapshots.has(id)) {
+      throw new Error(`InternalError: duplicate $id in UPDATE validation snapshot: ${id}.`);
+    }
+    snapshots.set(id, record);
+  }
+  return snapshots;
+}
+
+async function loadMaterializedUpdateSnapshots(
+  input: DmlUpdateModeSnapshotLoadInput
+): Promise<ReadonlyMap<number, KintoneRecord>> {
+  const snapshots = new Map<number, KintoneRecord>();
+  for (const candidate of input.candidates) {
+    if (candidate.targetId === undefined || !candidate.validationSnapshot) {
+      throw new Error(
+        `InternalError: update-mode snapshot is missing for record ${String(candidate.targetId)}.`
+      );
+    }
+    if (snapshots.has(candidate.targetId)) {
+      throw new Error(`InternalError: duplicate UPDATE validation candidate target: ${candidate.targetId}.`);
+    }
+    snapshots.set(candidate.targetId, candidate.validationSnapshot);
+  }
+  return snapshots;
+}
+
+async function loadUpsertValidationSnapshots(
+  input: DmlUpdateModeSnapshotLoadInput,
+  client: KintoneClient,
+  maxRecords: number
+): Promise<ReadonlyMap<number, KintoneRecord>> {
+  const updateIds = [...new Set(input.candidates.map((candidate) => {
+    const id = candidate.targetId;
+    if (!Number.isSafeInteger(id) || id === undefined || id <= 0) {
+      throw new Error(
+        `InternalError: invalid targetId in UPSERT validation candidate: ${String(id)}.`
+      );
+    }
+    return id;
+  }))];
+  if (updateIds.length > maxRecords) {
+    throw new FetchAllLimitError(
+      `取得件数が上限（${maxRecords} 件）を超えました。WHERE 句で絞り込むか、maxRecords を引き上げてください。`
+    );
+  }
+
+  const requestedIds = new Set(updateIds);
+  const snapshots = new Map<number, KintoneRecord>();
+  for (const ids of splitChunks(updateIds, 100)) {
+    const response = await client.getRecords({
+      app: input.appId,
+      query: `$id in (${ids.join(",")}) limit 500`,
+      fields: [...new Set(input.fields)],
+    });
+    for (const snapshot of response.records) {
+      const rawId = snapshot["$id"]?.value;
+      const id = Number(rawId);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        throw new Error(`InternalError: invalid $id in UPSERT validation snapshot: ${String(rawId)}.`);
+      }
+      if (!requestedIds.has(id)) {
+        throw new Error(`InternalError: unexpected $id in UPSERT validation snapshot: ${id}.`);
+      }
+      if (snapshots.has(id)) {
+        throw new Error(`InternalError: duplicate $id in UPSERT validation snapshot: ${id}.`);
+      }
+      snapshots.set(id, snapshot);
+    }
+  }
+  for (const id of updateIds) {
+    if (!snapshots.has(id)) {
+      throw new Error(`InternalError: update-mode snapshot is missing for record ${id}.`);
+    }
+  }
+  return snapshots;
 }
 
 function assertUpdateCheckRefs(stmt: UpdateStatement, targetTypes: ReadonlyMap<string, string>): string[] {
@@ -5112,20 +5315,27 @@ async function materializeUpdateFromValidationCandidates(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  snapshotFields?: readonly string[]
 ): Promise<DmlValidationCandidate[]> {
   const scope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
   assertCheckComparisonTypes(stmt, scope.evaluationTypes);
-  const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
+  const matched = await resolveUpdateFromMatchedRecords(
+    stmt, from, client, options, cacheContext, tempTables, snapshotFields
+  );
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
   const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
+  const snapshotsById = snapshotFields
+    ? indexDmlUpdateSnapshots(matched.map((pair) => pair.target))
+    : new Map<number, KintoneRecord>();
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
     rowNumber: index + 1, operation: "UPDATE", mode: "update",
     payload: new Map<string, unknown>([["$id", String(entry.id)], ...stmt.assignments.map((a) => [a.field, entry.record[a.field]?.value ?? ""] as [string, unknown])]),
     preErrors: [],
     record: entry.record,
     targetId: entry.id,
+    validationSnapshot: snapshotsById.get(entry.id),
     evaluationRow: updateFromEvaluationRow(matchedById.get(entry.id), stmt.appId, from.alias),
     evaluationFieldTypes: scope.evaluationTypes,
   }));
@@ -5149,7 +5359,8 @@ async function resolveUpdateFromMatchedRecords(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  tempTables?: Map<string, MaterializedTable>
+  tempTables?: Map<string, MaterializedTable>,
+  snapshotFields?: readonly string[]
 ): Promise<Array<{ target: KintoneRecord; source: ProcessRow }>> {
   const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
   const checkScope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
@@ -5184,7 +5395,11 @@ async function resolveUpdateFromMatchedRecords(
   if (sourceByKey.size === 0) return [];
 
   const maxRecords = options.maxRecords ?? 10_000;
-  const targetFields = [...new Set([...collectUpdateFromTargetFields(stmt), ...checkScope.targetFields])];
+  const targetFields = [...new Set([
+    ...collectUpdateFromTargetFields(stmt),
+    ...checkScope.targetFields,
+    ...(snapshotFields ?? []),
+  ])];
   const filterQuery = from.targetFilter === null
     ? ""
     : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: undefined }).query;

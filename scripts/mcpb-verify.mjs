@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { assertResourceCatalog } from "./mcp-resource-smoke.mjs";
 
 const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageJson = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf8"));
@@ -83,6 +84,7 @@ async function smokeLauncher(entries) {
       listed.tools.some((tool) => tool.name === "ksql_validate"),
       "MCPB launcher smoke did not expose ksql_validate."
     );
+    await assertResourceCatalog(client, assert, { extended: false });
   } finally {
     await client.close().catch(() => {});
   }
@@ -119,6 +121,14 @@ async function main() {
   );
   assert(manifest.user_config?.configPath?.type === "file", "configPath must use file picker type.");
   assert(manifest.user_config?.configPath?.required === true, "configPath must be required.");
+  const metadataTool = manifest.tools?.find((tool) => tool.name === "ksql_app_metadata");
+  assert(metadataTool, "MCPB manifest must include ksql_app_metadata.");
+  assert(
+    typeof metadataTool.description === "string"
+      && metadataTool.description.includes("raw")
+      && metadataTool.description.includes("constraints"),
+    "MCPB ksql_app_metadata description must be purpose-oriented."
+  );
 
   const launcher = entries.get("server/index.js").toString("utf8");
   assert(launcher.startsWith("#!/usr/bin/env node"), "MCPB launcher must keep the node shebang.");

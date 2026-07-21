@@ -5,6 +5,11 @@
 
 import { formatValidateIntoStats, renderBatchResult, renderError, renderResult } from "../renderResult";
 
+const DML_VALIDATION_COLUMNS = [
+  "code", "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
+
 const sharedDiagnostic = {
   statementKind: "UPDATE" as const,
   branches: [{
@@ -36,11 +41,16 @@ test("ASSERT 成功は success 表示を返す（undefined にならない）", 
 test("VALIDATIONは件数サマリとエラー表を表示する", () => {
   const html = renderResult({
     type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 0,
-    invalidRows: 1, errorCount: 1, columns: ["code", "$err_code"],
-    errors: [{ code: "", $err_code: "ERR_REQUIRED" }],
+    invalidRows: 1, errorCount: 1, columns: DML_VALIDATION_COLUMNS,
+    errors: [{
+      code: "", $err_statement: "1", $err_operation: "INSERT", $err_row: "1",
+      $err_field: "code", $err_code: "ERR_REQUIRED", $err_message: "required", $err_value: "",
+      $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
+    }],
   });
   expect(html).toContain("検証 1 件");
   expect(html).toContain("ERR_REQUIRED");
+  expect(html).toContain("$err_subrow_id");
 });
 
 test("APPLY VALIDATION は件数summaryとguard警告をHTML escapeして表示する", () => {

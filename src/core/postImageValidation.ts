@@ -2,7 +2,11 @@ import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { KintoneFieldInfo } from "../execute";
 import type { ProcessRow } from "../engine/process";
 import { validateAndNormalizeDmlValue } from "./dmlValidation";
-import { VALIDATION_META_COLUMNS, renderValidationValue } from "./dmlValidationCandidates";
+import {
+  VALIDATION_META_COLUMNS,
+  renderValidationValue,
+  type ValidationOperation,
+} from "./dmlValidationCandidates";
 import {
   buildValidationFieldMetadataIndex,
   buildValidationCellLocator,
@@ -31,10 +35,7 @@ export interface PostImageValidationResult {
   readonly errorCount: number;
 }
 
-export const POST_IMAGE_VALIDATION_SUFFIX_COLUMNS = [
-  ...VALIDATION_META_COLUMNS,
-  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
-] as const;
+export const POST_IMAGE_VALIDATION_SUFFIX_COLUMNS = VALIDATION_META_COLUMNS;
 
 export function buildPostImageFieldIndex(
   fieldInfos: readonly KintoneFieldInfo[],
@@ -80,7 +81,7 @@ export function validatePostImage(
   numberPrecision: NumberPrecision | undefined,
   statementNumber: number,
   parentRowNumber = 1,
-  operation: "INSERT" | "UPDATE" = "UPDATE"
+  operation: ValidationOperation = "UPDATE"
 ): PostImageValidationResult {
   const normalizedRecord = cloneRecord(record);
   const errors: ProcessRow[] = [];

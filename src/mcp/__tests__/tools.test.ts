@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseSqlStatement, type ExecuteOptions, type ExecuteResult, type KintoneClient } from "../../core";
 import type { CreateKsqlRuntimeInput, KsqlRuntime, KsqlRuntimeServerOptions } from "../../node/runtime";
+import { createServer } from "../index";
 import {
   createKsqlMcpTools,
   MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
@@ -9,6 +10,11 @@ import {
   toMcpImportError,
 } from "../tools";
 import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
+
+const DML_VALIDATION_COLUMNS = [
+  "code", "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
+  "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
+];
 
 function makeClient(): KintoneClient {
   return {
@@ -38,6 +44,27 @@ describe("MCP tools", () => {
     } else {
       process.env.KSQL_SAVED_QUERIES = savedQueriesEnv;
     }
+  });
+
+  test("B50 tools/list descriptions expose metadata roles and the dialect reference", () => {
+    const registered = (createServer({ help: false }) as unknown as {
+      _registeredTools: Record<string, { description?: string }>;
+    })._registeredTools;
+
+    expect(Object.keys(registered)).toEqual([
+      "ksql_validate", "ksql_explain", "ksql_query", "ksql_mutate",
+      "ksql_describe_app", "ksql_app_metadata", "ksql_show_apps",
+      "ksql_save_query", "ksql_list_queries", "ksql_get_query",
+      "ksql_run_saved_query", "ksql_delete_query",
+    ]);
+    for (const key of ["fields", "constraints", "raw", "fixed GET allowlist", "records", "mutation"]) {
+      expect(registered.ksql_app_metadata.description).toContain(key);
+    }
+    for (const key of ["field code", "label", "type", "ksql_app_metadata"]) {
+      expect(registered.ksql_describe_app.description).toContain(key);
+    }
+    expect(registered.ksql_query.description).toContain("ksql://language-reference");
+    expect(registered.ksql_mutate.description).toContain("ksql://language-reference");
   });
 
   test("logical validation payload は source/binding を公開し、EXPLAIN はmappedAppIdを公開しない", async () => {
@@ -250,7 +277,7 @@ describe("MCP tools", () => {
     };
     const executeSql = async (): Promise<ExecuteResult> => ({
       type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 1,
-      invalidRows: 0, errorCount: 0, columns: ["code", "$err_code"], errors: [],
+      invalidRows: 0, errorCount: 0, columns: DML_VALIDATION_COLUMNS, errors: [],
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const validation = await tools.validate({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY" });
@@ -261,6 +288,7 @@ describe("MCP tools", () => {
     const result = await tools.query({ sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY", onLimit: "truncate" });
     expect(runtimeInputs[0].onLimit).toBe("error");
     expect(result).toMatchObject({ ok: true, type: "VALIDATION", validatedRows: 1, errorCount: 0 });
+    expect(result.columns).toEqual(DML_VALIDATION_COLUMNS);
   });
 
   test("B44 Phase 5: query VALIDATE ONLY payload は apply/guards を欠落させず既定100を返す", async () => {

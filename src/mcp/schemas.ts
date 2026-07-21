@@ -1,10 +1,17 @@
 import { z } from "zod";
+import { KINTONE_METADATA_LANGS, KINTONE_METADATA_RESOURCES } from "../node/kintoneMetadata";
 
 // パラメータ説明は .describe() に書く(MCP の tools/list で JSON Schema の
 // description としてクライアントの LLM に渡る。TypeScript コメントは渡らない)
 const profile = z.string().min(1)
   .describe("kintone connection profile name from ksql.config.json (default: the server's default profile).")
   .optional();
+const kintoneMetadataResource = z.enum(KINTONE_METADATA_RESOURCES);
+const kintoneMetadataLang = z.enum(KINTONE_METADATA_LANGS);
+const kintoneMetadataAppRef = z.union([
+  z.number().int().positive(),
+  z.string().regex(/^LAPP_[A-Za-z][A-Za-z0-9_]{0,63}$/i),
+]).describe("Positive kintone app ID or logical app name LAPP_<NAME>.");
 const maxRecords = z.number().int().positive()
   .describe("Maximum records fetched per SELECT (default 500).")
   .optional();
@@ -120,6 +127,50 @@ export const showAppsInputSchema = z.object({
   fetchParallel,
   onLimit,
   timeout,
+});
+
+export const ksqlAppMetadataInputSchema = z.discriminatedUnion("resource", [
+  z.object({
+    resource: kintoneMetadataResource.extract(["app"]),
+    app: kintoneMetadataAppRef,
+    profile,
+    preview: z.literal(false).optional(),
+  }).strict(),
+  z.object({
+    resource: kintoneMetadataResource.extract(["layout", "customize"]),
+    app: kintoneMetadataAppRef,
+    profile,
+    preview: z.boolean().optional(),
+  }).strict(),
+  z.object({
+    resource: kintoneMetadataResource.extract(["fields", "settings", "status", "views", "reports"]),
+    app: kintoneMetadataAppRef,
+    profile,
+    preview: z.boolean().optional(),
+    lang: kintoneMetadataLang.optional(),
+  }).strict(),
+]);
+
+// McpServer 1.29 publishes only root object schemas in tools/list. Keep the
+// discriminated union above as the branch contract, and mirror its public keys
+// in a strict root object whose refinement delegates to that union.
+export const ksqlAppMetadataInputShape = z.object({
+  resource: kintoneMetadataResource,
+  app: kintoneMetadataAppRef,
+  profile,
+  preview: z.boolean().optional(),
+  lang: kintoneMetadataLang.optional(),
+}).strict().superRefine((input, ctx) => {
+  const parsed = ksqlAppMetadataInputSchema.safeParse(input);
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      ctx.addIssue({
+        code: "custom",
+        path: issue.path,
+        message: issue.message,
+      });
+    }
+  }
 });
 
 export const listQueriesInputSchema = z.object({});
