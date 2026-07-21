@@ -11,6 +11,21 @@ const rootDir = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packageJson = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf8"));
 const mcpbPath = resolve(rootDir, "dist-mcpb", "ksql-mcp.mcpb");
 const smokeDir = resolve(rootDir, ".tmp", "mcpb-verify");
+const expectedTools = [
+  "ksql_validate",
+  "ksql_explain",
+  "ksql_query",
+  "ksql_mutate",
+  "ksql_describe_app",
+  "ksql_app_metadata",
+  "ksql_show_apps",
+  "ksql_docs",
+  "ksql_save_query",
+  "ksql_list_queries",
+  "ksql_get_query",
+  "ksql_run_saved_query",
+  "ksql_delete_query",
+];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -81,9 +96,13 @@ async function smokeLauncher(entries) {
     await client.connect(transport);
     const listed = await client.listTools();
     assert(
-      listed.tools.some((tool) => tool.name === "ksql_validate"),
-      "MCPB launcher smoke did not expose ksql_validate."
+      JSON.stringify(listed.tools.map((tool) => tool.name)) === JSON.stringify(expectedTools),
+      `MCPB launcher tool list mismatch: ${listed.tools.map((tool) => tool.name).join(", ")}`
     );
+    const docs = await client.callTool({ name: "ksql_docs", arguments: {} });
+    assert(docs.content?.length === 1 && docs.content[0]?.type === "text", "MCPB launcher ksql_docs must return one text item.");
+    assert(!("structuredContent" in docs), "MCPB launcher ksql_docs success must be text-only.");
+    assert(docs.content[0].text.includes("language-reference/05-string-number-functions"), "MCPB launcher ksql_docs index is incomplete.");
     await assertResourceCatalog(client, assert, { extended: false });
   } finally {
     await client.close().catch(() => {});
@@ -121,6 +140,10 @@ async function main() {
   );
   assert(manifest.user_config?.configPath?.type === "file", "configPath must use file picker type.");
   assert(manifest.user_config?.configPath?.required === true, "configPath must be required.");
+  assert(
+    JSON.stringify(manifest.tools?.map((tool) => tool.name)) === JSON.stringify(expectedTools),
+    `MCPB manifest tool list mismatch: ${manifest.tools?.map((tool) => tool.name).join(", ")}`
+  );
   const metadataTool = manifest.tools?.find((tool) => tool.name === "ksql_app_metadata");
   assert(metadataTool, "MCPB manifest must include ksql_app_metadata.");
   assert(
@@ -129,6 +152,14 @@ async function main() {
       && metadataTool.description.includes("constraints"),
     "MCPB ksql_app_metadata description must be purpose-oriented."
   );
+  const docsTool = manifest.tools?.find((tool) => tool.name === "ksql_docs");
+  assert(docsTool, "MCPB manifest must include ksql_docs.");
+  for (const key of ["read-only", "resources", "ksql_docs"]) {
+    assert(
+      typeof docsTool.description === "string" && docsTool.description.includes(key),
+      `MCPB ksql_docs description must mention ${key}.`
+    );
+  }
 
   const launcher = entries.get("server/index.js").toString("utf8");
   assert(launcher.startsWith("#!/usr/bin/env node"), "MCPB launcher must keep the node shebang.");

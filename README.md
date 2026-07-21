@@ -71,6 +71,8 @@ npm run build:plugin
   - 一時テーブルで中間結果をサーバー内に保持し、AI のコンテキスト消費を抑えたい場合
   - validation / EXPLAIN で論理名から最終的な物理アプリ ID への解決を確認したい場合
 
+言語リファレンス・レシピは MCP resources（`ksql://language-reference` / `ksql://recipes`）に加えて、read-only ツール **`ksql_docs`** でも読めます。中継環境（リモート接続のプロキシ等）が resources を通さないクライアントでは、`ksql_docs` を引数なしで呼ぶと全章キーの索引が返るので、必要な章だけ `{"section":"language-reference/05-string-number-functions"}` の形で取得してください。
+
 注意:
 
 - `APP@profile` と `LAPP_<NAME>[@profile]` は Node.js runtime（CLI / MCP）の拡張です。plugin 側では非対応です。

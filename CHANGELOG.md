@@ -2,7 +2,20 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## v3.11.0（未リリース）
+## v3.12.0（未リリース）
+
+### 機能追加（B55 MCP read-only ドキュメントツール `ksql_docs`＋全量関数カタログ instructions）
+
+- **MCP に read-only ツール `ksql_docs` を追加した**。MCP resources / prompts はクライアント任意機能であり、Claude Desktop のデバイスブリッジ（リモート接続のプロキシ）のように **tools だけ中継し resources を通さない経路**では、B50（v3.9.0）で公開した言語リファレンス resource（`ksql://language-reference`）に到達できない（実測: AI が `ksql_validate` 総当たりで不完全な関数一覧を推定する事態が発生）。`ksql_docs` はどのクライアントでも届く tool 経由で同じ embed 済みドキュメントへ到達する導線を提供する。
+  - **引数なし**＝言語リファレンス・レシピ両索引＋全 40 有効キーの統合インデックスを返す。**`section` 指定**＝B50 resource と同一のキー語彙（`language-reference/<26 章キー>`・`recipes/r1..r12`・`ksql://` URI 形も受理）で 1 章の markdown を返す。曖昧マッチ・部分一致はしない（fail-closed）。
+  - **二層エラー契約**: 未知プロパティ・非文字列・128 文字超は schema 層で拒否（`-32602`）。文字列として妥当だがキーとして無効（未知キー・空文字）は、有効キー族と「引数なしで全キー一覧」への誘導を含む `ArgumentError`（既存エラー envelope とバイト互換・`isError: true`）。
+  - **安全性**: 固定 map lookup のみで kintone API・資格情報・ネットワーク・（配布 bundle runtime では）ファイルシステムに一切触れない。資格情報や有効な config がなくても応答する。`annotations: { readOnlyHint: true, openWorldHint: false }` 付き。成功応答は markdown テキストのみ（structuredContent なし）。
+- **server instructions を再構成し、kSQL の全量関数カタログを掲載した**（scalar 43・aggregate 6・window 3・contextual 3（`TODAY`/`NOW`/`LOGINUSER`）・alias 5（`SUBSTR`→`SUBSTRING`・`CONVERT`→`CAST`・`CEILING`→`CEIL`・`TRUNC`→`TRUNCATE`・`POW`→`POWER`）・syntax（`IF(...)`・`||` ほか））。「この一覧が全量・他方言関数（`IFNULL`/`STDDEV`/`MEDIAN` 等）は存在しない・関数の有無を validate の試行錯誤で推定しない」を明示し、`ksql_validate` / `ksql_query` / `ksql_mutate` の description にも `ksql_docs` への導線を追記した。
+  - カタログはパーサの実受理集合（token map・IDENT 先読み・集計/ウィンドウ/文脈関数）と**双方向のドリフトガードテスト**で固定し、関数追加時のカタログ更新漏れをテストで検出する。
+- 言語リファレンス §5 に `SUBSTR`（`SUBSTRING` の別名）とエイリアスの canonical 対応注記を追記した。
+- **プラグイン・CLI の SQL 実行挙動に変更はない**（パーサは受理表の内部定数化のみで AST・エラー文言不変・全 2,729 テスト green）。SemVer=minor。
+
+## v3.11.0（2026-07-21）
 
 ### 修正（B51 複数 CTE の CTE 間 JOIN が誤結果を返す・silent wrong results）
 

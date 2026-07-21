@@ -423,7 +423,7 @@ FROM APP100
 | `RTRIM` | `RTRIM(フィールド)` | 右側の空白を除去 |
 | `LENGTH` | `LENGTH(フィールド)` | UTF-16 コードユニット数（kintone の文字数）を返す |
 | `LENGTH_CHAR` | `LENGTH_CHAR(フィールド)` | Unicode コードポイント数を返す |
-| `SUBSTRING` | `SUBSTRING(フィールド, 開始 [, 長さ])` | 部分文字列（1-indexed） |
+| `SUBSTRING` | `SUBSTRING(フィールド, 開始 [, 長さ])` | 部分文字列（1-indexed、`SUBSTR` も可） |
 | `LEFT` | `LEFT(値, 文字数)` | 先頭から指定文字数を返す |
 | `RIGHT` | `RIGHT(値, 文字数)` | 末尾から指定文字数を返す |
 | `INSTR` | `INSTR(値, 検索文字列)` | 検索位置を 1-indexed で返す（見つからなければ `0`） |
@@ -565,6 +565,8 @@ SELECT FORMAT(達成率, '0.00%') AS 達成率表示 FROM APP100
 |------|------|------|
 | `CAST` | `CAST(フィールド AS 型)` | 型変換 |
 | `CONVERT` | `CONVERT(フィールド, 型)` | 型変換（`CAST` の別記法） |
+
+> 関数エイリアスの canonical 対応は `SUBSTR` → `SUBSTRING`、`CONVERT` → `CAST`、`CEILING` → `CEIL`、`TRUNC` → `TRUNCATE`、`POW` → `POWER` です。
 
 型名: `TEXT` / `VARCHAR` / `CHAR` → 文字列、`NUMBER` / `INT` / `INTEGER` / `DECIMAL` / `FLOAT` → 数値
 

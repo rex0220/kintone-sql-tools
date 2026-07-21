@@ -112,6 +112,93 @@ const MAX_BATCH_STATEMENTS = 20;
 // BETWEEN 展開用の型エイリアス（ローカル）
 type ExpandedBetween = LogicalExpr;
 
+export const PARSER_SCALAR_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, StringFuncName>>> = Object.freeze({
+  [TokenKind.UPPER]: "UPPER",
+  [TokenKind.LOWER]: "LOWER",
+  [TokenKind.TRIM]: "TRIM",
+  [TokenKind.LTRIM]: "LTRIM",
+  [TokenKind.RTRIM]: "RTRIM",
+  [TokenKind.LENGTH]: "LENGTH",
+  [TokenKind.LENGTH_CHAR]: "LENGTH_CHAR",
+  [TokenKind.SUBSTRING]: "SUBSTRING",
+  [TokenKind.SUBSTR]: "SUBSTRING",
+  [TokenKind.LEFT]: "LEFT",
+  [TokenKind.RIGHT]: "RIGHT",
+  [TokenKind.INSTR]: "INSTR",
+  [TokenKind.CONCAT]: "CONCAT",
+  [TokenKind.REPLACE]: "REPLACE",
+  [TokenKind.REGEXP_LIKE]: "REGEXP_LIKE",
+  [TokenKind.REGEXP_REPLACE]: "REGEXP_REPLACE",
+  [TokenKind.REGEXP_SUBSTR]: "REGEXP_SUBSTR",
+  [TokenKind.TRANSLATE]: "TRANSLATE",
+  [TokenKind.COALESCE]: "COALESCE",
+  [TokenKind.ISNULL]: "ISNULL",
+  [TokenKind.NULLIF]: "NULLIF",
+  [TokenKind.GREATEST]: "GREATEST",
+  [TokenKind.LEAST]: "LEAST",
+  [TokenKind.LPAD]: "LPAD",
+  [TokenKind.RPAD]: "RPAD",
+  [TokenKind.ROUND]: "ROUND",
+  [TokenKind.FLOOR]: "FLOOR",
+  [TokenKind.CEIL]: "CEIL",
+  [TokenKind.CEILING]: "CEIL",
+  [TokenKind.TRUNCATE]: "TRUNCATE",
+  [TokenKind.TRUNC]: "TRUNCATE",
+  [TokenKind.ABS]: "ABS",
+  [TokenKind.MOD]: "MOD",
+  [TokenKind.POWER]: "POWER",
+  [TokenKind.POW]: "POWER",
+  [TokenKind.SQRT]: "SQRT",
+  [TokenKind.FORMAT]: "FORMAT",
+  [TokenKind.CAST]: "CAST",
+  [TokenKind.CONVERT]: "CAST",
+  [TokenKind.YEAR]: "YEAR",
+  [TokenKind.MONTH]: "MONTH",
+  [TokenKind.DAY]: "DAY",
+  [TokenKind.DATE_FORMAT]: "DATE_FORMAT",
+  [TokenKind.DATEDIFF]: "DATEDIFF",
+  [TokenKind.DATE_ADD]: "DATE_ADD",
+  [TokenKind.LAST_DAY]: "LAST_DAY",
+});
+
+export const PARSER_IDENT_SCALAR_FUNCTIONS = Object.freeze([
+  "CURRENT_DATE", "CURRENT_TIMESTAMP",
+] as const satisfies readonly StringFuncName[]);
+
+export const PARSER_AGGREGATE_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, AggregateFunc>>> = Object.freeze({
+  [TokenKind.COUNT]: "COUNT",
+  [TokenKind.SUM]: "SUM",
+  [TokenKind.AVG]: "AVG",
+  [TokenKind.MAX]: "MAX",
+  [TokenKind.MIN]: "MIN",
+  [TokenKind.GROUP_CONCAT]: "GROUP_CONCAT",
+});
+
+export const PARSER_WINDOW_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, WindowFunc>>> = Object.freeze({
+  [TokenKind.ROW_NUMBER]: "ROW_NUMBER",
+  [TokenKind.RANK]: "RANK",
+  [TokenKind.DENSE_RANK]: "DENSE_RANK",
+});
+
+export const PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, KintoneFunction["name"]>>> = Object.freeze({
+  [TokenKind.TODAY]: "TODAY",
+  [TokenKind.NOW]: "NOW",
+  [TokenKind.LOGINUSER]: "LOGINUSER",
+});
+
+export function isContextualFunctionToken(kind: TokenKind): boolean {
+  return PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[kind] !== undefined;
+}
+
+export const PARSER_FUNCTION_SPELLINGS = Object.freeze(Array.from(new Set([
+  ...Object.keys(PARSER_SCALAR_FUNCTION_TOKEN_MAP),
+  ...PARSER_IDENT_SCALAR_FUNCTIONS,
+  ...Object.keys(PARSER_AGGREGATE_FUNCTION_TOKEN_MAP),
+  ...Object.keys(PARSER_WINDOW_FUNCTION_TOKEN_MAP),
+  ...Object.keys(PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP),
+  "IF",
+])));
+
 // ------------------------------------------------------------
 // トークン列 → テキスト再構成（ASSERT のエラーメッセージ用）
 // ------------------------------------------------------------
@@ -344,13 +431,14 @@ export class Parser {
       this.advance();
       return { type: "STRING", value: tok.value };
     }
-    if (tok.kind === TokenKind.LOGINUSER) {
+    const contextualFunction = PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[tok.kind];
+    if (contextualFunction === "LOGINUSER") {
       throw new ParseError(
         `${context} の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）`,
         tok
       );
     }
-    if (tok.kind === TokenKind.TODAY || tok.kind === TokenKind.NOW) {
+    if (contextualFunction !== undefined) {
       return this.parseSqlValue() as KintoneFunction;
     }
     const expr = this.parseArithAddSub();
@@ -1167,12 +1255,7 @@ export class Parser {
   }
 
   private tryWindowFunc(): WindowFunc | null {
-    switch (this.peek().kind) {
-      case TokenKind.ROW_NUMBER: return "ROW_NUMBER";
-      case TokenKind.RANK: return "RANK";
-      case TokenKind.DENSE_RANK: return "DENSE_RANK";
-      default: return null;
-    }
+    return PARSER_WINDOW_FUNCTION_TOKEN_MAP[this.peek().kind] ?? null;
   }
 
   private parseWindowColumn(func: WindowFunc): WindowColumn {
@@ -1602,63 +1685,16 @@ export class Parser {
   private tryStringFuncName(): StringFuncName | null {
     // LEFT / RIGHT は JOIN 修飾子でもあるため、直後が "(" の場合だけ関数とする。
     if (this.peekAt(1).kind === TokenKind.LPAREN) {
-      if (this.peek().kind === TokenKind.LEFT) return "LEFT";
-      if (this.peek().kind === TokenKind.RIGHT) return "RIGHT";
+      const conditional = PARSER_SCALAR_FUNCTION_TOKEN_MAP[this.peek().kind];
+      if (conditional === "LEFT" || conditional === "RIGHT") return conditional;
     }
-
-    const map: Partial<Record<TokenKind, StringFuncName>> = {
-      [TokenKind.UPPER]:     "UPPER",
-      [TokenKind.LOWER]:     "LOWER",
-      [TokenKind.TRIM]:      "TRIM",
-      [TokenKind.LTRIM]:     "LTRIM",
-      [TokenKind.RTRIM]:     "RTRIM",
-      [TokenKind.LENGTH]:    "LENGTH",
-      [TokenKind.LENGTH_CHAR]: "LENGTH_CHAR",
-      [TokenKind.SUBSTRING]: "SUBSTRING",
-      [TokenKind.SUBSTR]:    "SUBSTRING",
-      [TokenKind.CONCAT]:    "CONCAT",
-      [TokenKind.REPLACE]:   "REPLACE",
-      [TokenKind.REGEXP_LIKE]: "REGEXP_LIKE",
-      [TokenKind.REGEXP_REPLACE]: "REGEXP_REPLACE",
-      [TokenKind.REGEXP_SUBSTR]: "REGEXP_SUBSTR",
-      [TokenKind.TRANSLATE]: "TRANSLATE",
-      [TokenKind.COALESCE]:  "COALESCE",
-      [TokenKind.NULLIF]:    "NULLIF",
-      [TokenKind.ISNULL]:    "ISNULL",
-      [TokenKind.INSTR]:     "INSTR",
-      [TokenKind.GREATEST]:  "GREATEST",
-      [TokenKind.LEAST]:     "LEAST",
-      [TokenKind.LPAD]:      "LPAD",
-      [TokenKind.RPAD]:      "RPAD",
-      [TokenKind.CAST]:      "CAST",
-      [TokenKind.CONVERT]:   "CAST",   // CONVERT → CAST に正規化
-      [TokenKind.FORMAT]:    "FORMAT",
-      [TokenKind.ROUND]:     "ROUND",
-      [TokenKind.FLOOR]:     "FLOOR",
-      [TokenKind.CEIL]:      "CEIL",
-      [TokenKind.CEILING]:   "CEIL",   // CEILING → CEIL に正規化
-      [TokenKind.TRUNCATE]:  "TRUNCATE",
-      [TokenKind.TRUNC]:     "TRUNCATE", // TRUNC → TRUNCATE に正規化
-      [TokenKind.YEAR]:        "YEAR",
-      [TokenKind.MONTH]:       "MONTH",
-      [TokenKind.DAY]:         "DAY",
-      [TokenKind.DATE_FORMAT]: "DATE_FORMAT",
-      [TokenKind.DATEDIFF]:    "DATEDIFF",
-      [TokenKind.DATE_ADD]:    "DATE_ADD",
-      [TokenKind.LAST_DAY]:    "LAST_DAY",
-      [TokenKind.ABS]:         "ABS",
-      [TokenKind.MOD]:         "MOD",
-      [TokenKind.POWER]:       "POWER",
-      [TokenKind.POW]:         "POWER",  // POW → POWER に正規化
-      [TokenKind.SQRT]:        "SQRT",
-    };
-    const byKind = map[this.peek().kind] ?? null;
-    if (byKind !== null) return byKind;
+    const byKind = PARSER_SCALAR_FUNCTION_TOKEN_MAP[this.peek().kind] ?? null;
+    if (byKind !== null && byKind !== "LEFT" && byKind !== "RIGHT") return byKind;
 
     // キーワード登録なしの関数名: IDENT で名前を先読みし、直後に '(' がある場合のみ関数と判断
     if (this.peek().kind === TokenKind.IDENT) {
       const name = this.peek().value.toUpperCase();
-      if (name === "CURRENT_DATE" || name === "CURRENT_TIMESTAMP") {
+      if ((PARSER_IDENT_SCALAR_FUNCTIONS as readonly string[]).includes(name)) {
         // 1トークン先が '(' であれば関数呼び出し
         if (this.peekAt(1).kind === TokenKind.LPAREN) {
           return name as StringFuncName;
@@ -1768,16 +1804,7 @@ export class Parser {
   }
 
   private tryAggregateFunc(): AggregateFunc | null {
-    const map: Partial<Record<TokenKind, AggregateFunc>> = {
-      [TokenKind.COUNT]: "COUNT",
-      [TokenKind.SUM]:   "SUM",
-      [TokenKind.AVG]:   "AVG",
-      [TokenKind.MAX]:   "MAX",
-      [TokenKind.MIN]:   "MIN",
-      [TokenKind.GROUP_CONCAT]: "GROUP_CONCAT",
-    };
-    const kind = this.peek().kind;
-    return map[kind] ?? null;
+    return PARSER_AGGREGATE_FUNCTION_TOKEN_MAP[this.peek().kind] ?? null;
   }
 
   /** 集計関数参照を読む。SELECT 列の alias は呼び出し側で式全体の後に処理する。 */
@@ -2215,17 +2242,13 @@ export class Parser {
     }
 
     // kintone 専用関数
-    if (
-      tok.kind === TokenKind.TODAY ||
-      tok.kind === TokenKind.NOW ||
-      tok.kind === TokenKind.LOGINUSER
-    ) {
+    if (isContextualFunctionToken(tok.kind)) {
       this.advance();
       this.expect(TokenKind.LPAREN);
       this.expect(TokenKind.RPAREN);
       return {
         type: "KINTONE_FUNC",
-        name: tok.value as KintoneFunction["name"],
+        name: PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[tok.kind]!,
       } satisfies KintoneFunction;
     }
 
@@ -3153,11 +3176,7 @@ export class Parser {
     // 文字列リテラルは算術不可
     if (tok.kind === TokenKind.STRING) return this.parseSqlValue();
     // kintone 専用関数（TODAY / NOW / LOGINUSER）
-    if (
-      tok.kind === TokenKind.TODAY ||
-      tok.kind === TokenKind.NOW   ||
-      tok.kind === TokenKind.LOGINUSER
-    ) return this.parseSqlValue();
+    if (isContextualFunctionToken(tok.kind)) return this.parseSqlValue();
     // IN_LIST は WHERE 専用
     if (tok.kind === TokenKind.IN) return this.parseSqlValue();
     // CASE WHEN ... END → CaseSqlValue

@@ -24,6 +24,7 @@ const expectedTools = [
   "ksql_describe_app",
   "ksql_app_metadata",
   "ksql_show_apps",
+  "ksql_docs",
   "ksql_save_query",
   "ksql_list_queries",
   "ksql_get_query",
@@ -158,6 +159,8 @@ function assertToolDescriptions(tools) {
   const validateKeys = [
     "All APPLY forms (UPDATE/INSERT/UPSERT/multi-value)",
     "does not enable APPLY mutation",
+    "Do not use validate probing",
+    "call ksql_docs instead",
   ];
   const explainKeys = [
     "every APPLY form (UPDATE/INSERT/UPSERT/multi-value)",
@@ -173,6 +176,7 @@ function assertToolDescriptions(tools) {
     "UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY",
     "fixed default 500",
     "ksql://language-reference",
+    "ksql_docs when resources are unavailable",
   ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
@@ -190,6 +194,7 @@ function assertToolDescriptions(tools) {
     "always rejected by MCP v3.8.0 before runtime or records API creation",
     "allowDml and dmlMaxSubtableRows do not enable it",
     "ksql://language-reference",
+    "ksql_docs when resources are unavailable",
   ];
   const metadataKeys = [
     "fields",
@@ -376,14 +381,22 @@ async function main() {
       "ksql_app_metadata",
       "ksql://language-reference",
       "APPLY mutation is disabled",
+      "ksql_docs",
+      "Complete function catalog",
+      "CURRENT_TIMESTAMP",
+      "GROUP_CONCAT",
+      "DENSE_RANK",
+      "LOGINUSER",
+      "SUBSTR→SUBSTRING",
+      "IFNULL",
     ]) {
       assert(instructions.includes(key), `Server instructions must mention "${key}".`);
     }
 
     const listed = await client.listTools();
-    const toolNames = listed.tools.map((tool) => tool.name).sort();
+    const toolNames = listed.tools.map((tool) => tool.name);
     assert(
-      JSON.stringify(toolNames) === JSON.stringify([...expectedTools].sort()),
+      JSON.stringify(toolNames) === JSON.stringify(expectedTools),
       `Unexpected tool list: ${toolNames.join(", ")}`
     );
     assertSchemas(listed.tools);
@@ -394,6 +407,31 @@ async function main() {
     // Activate only after startup and valid reads, so every rejected URI below is proven
     // not to fall through to filesystem or network access in the server process.
     writeFileSync(resourceIoGuardActive, "active\n", "utf8");
+    const docsIndex = await client.callTool({ name: "ksql_docs", arguments: {} });
+    assert(docsIndex.content?.length === 1 && docsIndex.content[0]?.type === "text", "ksql_docs index must return one text item.");
+    assert(!("structuredContent" in docsIndex), "ksql_docs success must not return structuredContent.");
+    assert(docsIndex.content[0].text.includes("language-reference/05-string-number-functions"), "ksql_docs index is missing language keys.");
+    const docsChapter = await client.callTool({
+      name: "ksql_docs",
+      arguments: { section: "language-reference/05-string-number-functions" },
+    });
+    assert(docsChapter.content?.length === 1 && docsChapter.content[0]?.type === "text", "ksql_docs chapter must return one text item.");
+    assert(!("structuredContent" in docsChapter), "ksql_docs chapter success must not return structuredContent.");
+    assert(docsChapter.content[0].text.includes("SUBSTRING"), "ksql_docs function chapter is missing expected text.");
+    const docsUnknown = await client.callTool({
+      name: "ksql_docs",
+      arguments: { section: "STDDEV" },
+    });
+    const expectedDocsError = {
+      ok: false,
+      error: {
+        code: "ArgumentError",
+        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r12. Call ksql_docs without arguments for the full key list.",
+      },
+    };
+    assert(docsUnknown.isError === true, "Unknown ksql_docs key must be an application error.");
+    assert(JSON.stringify(docsUnknown.structuredContent) === JSON.stringify(expectedDocsError), "Unexpected ksql_docs error envelope.");
+    assert(docsUnknown.content?.[0]?.text === JSON.stringify(expectedDocsError, null, 2), "ksql_docs error text must be byte-compatible.");
     for (const uri of [
       "ksql://language-reference/99-nope",
       "ksql://language-reference/..",

@@ -27,3 +27,67 @@ export const KSQL_DOCS: KsqlDocsResourceMap =
 
 export const LANGUAGE_SECTION_KEYS = Object.freeze(Object.keys(KSQL_DOCS.languageReference.sections));
 export const RECIPE_KEYS = Object.freeze(Object.keys(KSQL_DOCS.recipes.sections));
+
+function frozenList<const T extends readonly string[]>(values: T): T {
+  return Object.freeze(values);
+}
+
+export const KSQL_FUNCTION_CATALOG = Object.freeze({
+  scalar: frozenList([
+    "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM", "LENGTH", "LENGTH_CHAR", "SUBSTRING",
+    "LEFT", "RIGHT", "INSTR", "CONCAT", "REPLACE", "REGEXP_LIKE", "REGEXP_REPLACE",
+    "REGEXP_SUBSTR", "TRANSLATE", "COALESCE", "ISNULL", "NULLIF", "GREATEST", "LEAST",
+    "LPAD", "RPAD", "ROUND", "FLOOR", "CEIL", "TRUNCATE", "ABS", "MOD", "POWER", "SQRT",
+    "FORMAT", "CAST", "YEAR", "MONTH", "DAY", "DATE_FORMAT", "DATEDIFF", "DATE_ADD",
+    "LAST_DAY", "CURRENT_DATE", "CURRENT_TIMESTAMP",
+  ] as const),
+  aggregate: frozenList(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT"] as const),
+  window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK"] as const),
+  contextual: frozenList(["TODAY", "NOW", "LOGINUSER"] as const),
+  aliases: frozenList([
+    "SUBSTR→SUBSTRING", "CONVERT→CAST", "CEILING→CEIL", "TRUNC→TRUNCATE", "POW→POWER",
+  ] as const),
+  syntax: frozenList([
+    "IF(cond, then, else)", "||", "LIKE", "KLIKE", "IN", "BETWEEN", "IS NULL", "CASE WHEN",
+  ] as const),
+});
+
+export const KSQL_DOCS_SECTION_KEYS = Object.freeze([
+  "language-reference",
+  ...LANGUAGE_SECTION_KEYS.map((key) => `language-reference/${key}`),
+  "recipes",
+  ...RECIPE_KEYS.map((key) => `recipes/${key}`),
+]);
+
+export function buildKsqlDocsIndex(): string {
+  return [
+    KSQL_DOCS.languageReference.index.trimEnd(),
+    'Tool fallback example: ksql_docs {"section":"language-reference/05-string-number-functions"}',
+    KSQL_DOCS.recipes.index.trimEnd(),
+    'Tool fallback example: ksql_docs {"section":"recipes/r1"}',
+    "## ksql_docs section keys",
+    ...KSQL_DOCS_SECTION_KEYS.map((key) => `- ${key}`),
+  ].join("\n\n");
+}
+
+export const KSQL_DOCS_INDEX = buildKsqlDocsIndex();
+
+const VALID_KEY_HINT =
+  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r12. "
+  + "Call ksql_docs without arguments for the full key list.";
+
+export function resolveKsqlDocsSection(section?: string): string {
+  if (section === undefined) return KSQL_DOCS_INDEX;
+  const key = section.trim().replace(/^ksql:\/\//, "");
+  if (key === "language-reference") return KSQL_DOCS.languageReference.index;
+  if (key === "recipes") return KSQL_DOCS.recipes.index;
+  if (key.startsWith("language-reference/")) {
+    const text = KSQL_DOCS.languageReference.sections[key.slice("language-reference/".length)]?.text;
+    if (text !== undefined) return text;
+  }
+  if (key.startsWith("recipes/")) {
+    const text = KSQL_DOCS.recipes.sections[key.slice("recipes/".length)]?.text;
+    if (text !== undefined) return text;
+  }
+  throw new Error(`ArgumentError: Unknown ksql_docs section key: ${key}. ${VALID_KEY_HINT}`);
+}
