@@ -1,6 +1,6 @@
 # B55 — MCP read-only ドキュメントツール `ksql_docs` 仕様（R2）
 
-- ステータス: **仕様 R2（2026-07-21・codex R1 レビュー反映済み・実装承認待ち）**
+- ステータス: **R2.1 実装済み（2026-07-21・feat/b55-mcp-docs-tool c4da29d・自動 gate 全 green・実機待ち）**
 - 課題: [B55 issue](ksql_b55_mcp_docs_tool_fallback_issue.md)（§6 に根本原因確定＝中継プロキシが resources/prompts capability を通さない）
 - 関連: **B50**（`docsResourceBuilder.cjs` の embed・章別 resource template・fail-closed key＝本仕様の土台）／**B49**（read-only ツールの前例）
 - 対象面: **Node MCP のみ**（core interface / SQL / CLI / plugin 非改変）
