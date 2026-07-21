@@ -2,6 +2,7 @@ import { parseSqlStatement } from "../../core/sql";
 import { TokenKind } from "../../lexer/tokens";
 import {
   PARSER_FUNCTION_SPELLINGS,
+  PARSER_AGGREGATE_FUNCTIONS,
   PARSER_SCALAR_FUNCTION_TOKEN_MAP,
 } from "../../parser/parser";
 import { KSQL_FUNCTION_CATALOG } from "../docsResources";
@@ -27,6 +28,11 @@ describe("B55 complete function catalog", () => {
   test("catalog and parser accepted spellings match in both directions", () => {
     expect(sorted([...catalogSpellings].filter((name) => !parserSpellings.has(name)))).toEqual([]);
     expect(sorted([...parserSpellings].filter((name) => !catalogSpellings.has(name)))).toEqual([]);
+  });
+
+  test("aggregate catalog matches the frozen parser aggregate acceptance set", () => {
+    expect(sorted(KSQL_FUNCTION_CATALOG.aggregate)).toEqual(sorted(PARSER_AGGREGATE_FUNCTIONS));
+    expect(KSQL_FUNCTION_CATALOG.aggregate).toHaveLength(11);
   });
 
   test("fixture keys match parser spellings in both directions and every SQL parses", () => {

@@ -263,14 +263,16 @@ export interface LiteralColumn {
 
 export interface AggregateColumn {
   type: "AGGREGATE";
-  func: AggregateFunc;    // COUNT / SUM / AVG / MAX / MIN / GROUP_CONCAT
+  func: AggregateFunc;
   distinct: boolean;      // COUNT(DISTINCT f)
   arg: WildcardColumn | ArithNode;  // COUNT(*) → WILDCARD、それ以外は算術式
   separator?: string;     // GROUP_CONCAT の区切り文字（未指定時は ","）
   alias: string | null;
 }
 
-export type AggregateFunc = "COUNT" | "SUM" | "AVG" | "MAX" | "MIN" | "GROUP_CONCAT";
+export type AggregateFunc =
+  | "COUNT" | "SUM" | "AVG" | "MAX" | "MIN" | "GROUP_CONCAT"
+  | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" | "MEDIAN";
 
 export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
 

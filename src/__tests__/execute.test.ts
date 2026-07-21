@@ -1915,6 +1915,61 @@ test("B30: truncated local ORDER BY は部分候補の top-1 を返さず fail-c
   )).rejects.toThrow("ORDER BYの正しい結果には完全な候補集合が必要");
 });
 
+test.each([
+  "SELECT STDDEV_POP(金額) + 1 AS adjusted FROM APP100",
+  "SELECT FORMAT(STDDEV_POP(金額), 2) AS formatted FROM APP100",
+])("B56: 統計集約 %s は truncate 上限で理由つき fail-closed", async (sql) => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    金額: String(i + 1),
+  }));
+  const client = makePagedClient(records);
+
+  await expect(execute(sql, client, {
+    maxRecords: 100,
+    onLimitReached: "truncate",
+  })).rejects.toThrow(/統計集約の正しい結果.*complete input reason: STATISTICAL_AGGREGATE/);
+});
+
+test("B56: 統計集約は maxRecords 以内なら truncate 指定でも成功する", async () => {
+  const client = makePagedClient([
+    makeRecord({ $id: "1", 金額: "1" }),
+    makeRecord({ $id: "2", 金額: "2" }),
+    makeRecord({ $id: "3", 金額: "3" }),
+  ]);
+  const result = await execute(
+    "SELECT MEDIAN(金額) AS med FROM APP100",
+    client,
+    { maxRecords: 100, onLimitReached: "truncate" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ med: "2" }]);
+  expect(result.warnings).toEqual([]);
+});
+
+test.each([
+  "HAVING MEDIAN(金額) > 1",
+  "HAVING med > 1",
+])("B56: SELECT にある統計集約を %s で評価する", async (having) => {
+  const client = makeClient({ records: [
+    makeRecord({ $id: "1", kind: "A", 金額: "1" }),
+    makeRecord({ $id: "2", kind: "A", 金額: "3" }),
+    makeRecord({ $id: "3", kind: "B", 金額: "1" }),
+  ], fieldTypes: { 金額: "NUMBER" } });
+  const result = await execute(
+    `SELECT kind, MEDIAN(金額) AS med FROM APP100 GROUP BY kind ${having}`,
+    client
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ kind: "A", med: "2" }]);
+});
+
+test("B56: SELECT にない HAVING 直接統計集約は追加計算しない", async () => {
+  const result = await execute(
+    "SELECT kind, COUNT(*) AS count FROM APP100 GROUP BY kind HAVING MEDIAN(金額) > 1",
+    makeClient({ records: [makeRecord({ $id: "1", kind: "A", 金額: "3" })] })
+  ) as SelectResult;
+  expect(result.rows).toEqual([]);
+});
+
 test("B27: $id canonical REST top-N は B30 の完全入力要求を免除する", async () => {
   const records = Array.from({ length: 101 }, (_, i) => makeRecord({ $id: String(i + 1) }));
   const client = makePagedClient(records);

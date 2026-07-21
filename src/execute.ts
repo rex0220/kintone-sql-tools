@@ -17,7 +17,7 @@ import { Parser, ParseError } from "./parser/parser";
 import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
-import { requiresCompleteInput } from "./core/dmlGuard";
+import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
 import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere, statementHasMultiValueApply } from "./core/applyPatchScope";
 import {
   buildApplyPatchPlan,
@@ -1464,7 +1464,9 @@ async function executeBatchStatement(
           || first?.type === "ARITH_AGG_COL"
           || first?.type === "WINDOW_COL"
           || (first?.type === "AGGREGATE"
-            && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"));
+            && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
+              || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
+              || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
         const numberValue = numeric ? Number(value) : Number.NaN;
         variables.set(stmt.name, numeric && Number.isFinite(numberValue)
           ? { type: "number", value: numberValue, raw: value }
@@ -2268,9 +2270,10 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completeInputRequired = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR"
-    ? requiresCompleteInput({ ...stmt, orderBy: [] })
-    : requiresCompleteInput(stmt);
+  const completeReasons = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR"
+    ? completeInputReasons({ ...stmt, orderBy: [] })
+    : completeInputReasons(stmt);
+  const completeInputRequired = completeReasons.size > 0;
   const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
   const effectiveOptions = truncateWasDisabled
     ? { ...options, onLimitReached: "error" as const }
@@ -2293,7 +2296,7 @@ async function executeSelect(
   } catch (error) {
     if (completeInputRequired && error instanceof FetchAllLimitError) {
       throw new FetchAllLimitError(
-        "ORDER BYの正しい結果には完全な候補集合が必要です。" +
+        completeInputErrorPrefix(completeReasons) +
         (truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
         error.message
       );
@@ -2304,6 +2307,14 @@ async function executeSelect(
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
   }
   return result;
+}
+
+function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
+  const reasonList = [...reasons].join(", ");
+  const subject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE")
+    ? "統計集約の正しい結果"
+    : "ORDER BYの正しい結果";
+  return `${subject}には完全な候補集合が必要です。complete input reason: ${reasonList}。`;
 }
 
 function isConstantFalseWhere(where: WhereExpr | null): boolean {
@@ -3109,7 +3120,9 @@ async function inferSelectColumnMeta(
       } else if (column.type === "AGGREGATE") {
         if (column.func === "GROUP_CONCAT") {
           meta = syntheticColumnMeta("string");
-        } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG") {
+        } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG"
+          || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP"
+          || column.func === "VAR_POP" || column.func === "VAR_SAMP" || column.func === "MEDIAN") {
           meta = syntheticColumnMeta("number");
         } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
           const source = resolveField(aggregateFieldRef(column.arg.field));
@@ -8515,8 +8528,15 @@ function buildSelectPlan(
       lines.push(`  scan rows:     ${orderPlan.scanRows}`);
     }
   }
-  if (orderPlan?.requiresCompleteInput ?? requiresCompleteInput(stmt)) {
-    lines.push("  complete input: required (ORDER BY / window ORDER BY; onLimit=truncate disabled)");
+  const explainedStmt = orderPlan && !orderPlan.requiresCompleteInput
+    ? { ...stmt, orderBy: [] }
+    : stmt;
+  const completeReasons = completeInputReasons(explainedStmt);
+  if (orderPlan?.requiresCompleteInput) completeReasons.add("LOCAL_ORDER");
+  if (completeReasons.size > 0) {
+    lines.push("  complete input: required (onLimit=truncate disabled)");
+    lines.push(`  complete input reason: ${[...completeReasons].join(", ")}`);
+    lines.push("  onLimit=truncate: disabled");
   }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
     lines.push(`  reason:        ${reasons.join(", ")}`);

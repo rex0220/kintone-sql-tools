@@ -38,7 +38,7 @@ function collectRefs(root: unknown): CheckFieldRef[] {
     for (const value of Object.values(obj)) visit(value);
   };
   const add = (tableAlias: string | null, field: string): void => {
-    if (/^(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\(/i.test(field)) {
+    if (/^(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN)\(/i.test(field)) {
       throw customCheckParseError("CHECK に集約関数は使用できません");
     }
     const key = `${tableAlias ?? ""}\u0000${field}`;

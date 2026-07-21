@@ -1298,6 +1298,44 @@ test("SET COUNT は対象0件でも文字列0として束縛できる", async ()
   expect(r.ok).toBe(true);
 });
 
+test("B56: SET スカラーサブクエリの統計結果を数値変数として後段利用する", async () => {
+  const mock = makeClient({ recordsByApp: {
+    8114: [
+      makeRecord({ $id: "1", 売上: "1" }),
+      makeRecord({ $id: "2", 売上: "3" }),
+    ],
+    8116: [makeRecord({ $id: "1", 売上: "3" })],
+  } });
+  const r = await executeBatch(
+    "SET @v = (SELECT VAR_POP(売上) FROM APP8114); SELECT $id FROM APP8116 WHERE 売上 > @v",
+    mock
+  );
+  expect(r.ok).toBe(true);
+  expect(mock.getCalls.find((call) => call.app === 8116)?.query).toContain("売上 > 1");
+  expect(mock.getCalls.find((call) => call.app === 8116)?.query).not.toContain('売上 > "1"');
+});
+
+test("B56: temp 実体化後の統計列を数値順で ORDER BY する", async () => {
+  const r = await executeBatch(
+    "CREATE TEMP TABLE #stats AS " +
+      "SELECT kind, MEDIAN(x) AS med FROM APP8115 GROUP BY kind;" +
+      "SELECT kind, med FROM #stats ORDER BY med",
+    makeClient({
+      recordsByApp: { 8115: [
+        makeRecord({ $id: "1", kind: "A", x: "1" }),
+        makeRecord({ $id: "2", kind: "A", x: "3" }),
+        makeRecord({ $id: "3", kind: "B", x: "9" }),
+        makeRecord({ $id: "4", kind: "B", x: "11" }),
+      ] },
+      fieldTypes: { x: "NUMBER" },
+    })
+  );
+  expect((r.statements[1].result as SelectResult).rows).toEqual([
+    { kind: "A", med: "2" },
+    { kind: "B", med: "10" },
+  ]);
+});
+
 test("単文のSETスカラーサブクエリはバッチ必須として拒否する", async () => {
   await expect(execute(
     "SET @cnt = (SELECT COUNT(*) FROM APP8112)",

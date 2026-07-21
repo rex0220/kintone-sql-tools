@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 機能追加（B56 統計集約関数）
+
+- `STDDEV_POP` / `STDDEV_SAMP` / `VAR_POP` / `VAR_SAMP` / `MEDIAN` を追加した。分散・標準偏差は Welford 法、中央値は数値昇順で計算し、未定義の統計量は空文字を返す。統計集約は完全入力を必須とし、上限到達時に部分集合の値を返さない。
+- MCP server instructions の全量関数カタログを aggregate 6 件から 11 件へ更新し、無印 `STDDEV` / `VARIANCE` は非対応であることを明記した（instructions 272 語、240〜280 語 guard 内）。`ksql_docs` の埋め込み言語リファレンスと smoke guard も同期した。
+- 上記 5 語は新しい予約語。同名フィールドはバッククォートで囲んで参照できる。無印の `STDDEV` / `VARIANCE` は意味が方言間で異なるため非対応。
+
 ## v3.12.0（2026-07-21）
 
 ### 機能追加（B55 MCP read-only ドキュメントツール `ksql_docs`＋全量関数カタログ instructions）

@@ -765,5 +765,5 @@ function scalarValueLabel(expr: ScalarValueExpr): string {
 }
 
 function isAggregateSyntheticName(name: string): boolean {
-  return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT)\(/i.test(name);
+  return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN)\(/i.test(name);
 }

@@ -44,6 +44,17 @@ test("GROUP_CONCAT は予約語、SEPARATOR は通常の識別子として読む
   ]);
 });
 
+test("B56 の統計集約 5 関数を予約語として読む", () => {
+  expect(kinds("STDDEV_POP STDDEV_SAMP VAR_POP VAR_SAMP MEDIAN")).toEqual([
+    TokenKind.STDDEV_POP,
+    TokenKind.STDDEV_SAMP,
+    TokenKind.VAR_POP,
+    TokenKind.VAR_SAMP,
+    TokenKind.MEDIAN,
+    TokenKind.EOF,
+  ]);
+});
+
 test("B19 の追加関数名を予約語として読む", () => {
   expect(kinds("TRUNCATE TRUNC INSTR GREATEST LEAST LPAD RPAD LAST_DAY")).toEqual([
     TokenKind.TRUNCATE,

@@ -172,7 +172,29 @@ export const PARSER_AGGREGATE_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenK
   [TokenKind.MAX]: "MAX",
   [TokenKind.MIN]: "MIN",
   [TokenKind.GROUP_CONCAT]: "GROUP_CONCAT",
+  [TokenKind.STDDEV_POP]: "STDDEV_POP",
+  [TokenKind.STDDEV_SAMP]: "STDDEV_SAMP",
+  [TokenKind.VAR_POP]: "VAR_POP",
+  [TokenKind.VAR_SAMP]: "VAR_SAMP",
+  [TokenKind.MEDIAN]: "MEDIAN",
 });
+
+export const PARSER_AGGREGATE_FUNCTIONS = Object.freeze(
+  Object.values(PARSER_AGGREGATE_FUNCTION_TOKEN_MAP).filter(
+    (func): func is AggregateFunc => func !== undefined
+  )
+);
+
+export const PARSER_AGGREGATE_WILDCARD_FUNCTIONS = Object.freeze([
+  "COUNT", "SUM", "AVG", "MAX", "MIN",
+] as const satisfies readonly AggregateFunc[]);
+
+const PARSER_AGGREGATE_WILDCARD_FUNCTION_SET: ReadonlySet<AggregateFunc> =
+  new Set(PARSER_AGGREGATE_WILDCARD_FUNCTIONS);
+
+export function aggregateAcceptsWildcard(func: AggregateFunc): boolean {
+  return PARSER_AGGREGATE_WILDCARD_FUNCTION_SET.has(func);
+}
 
 export const PARSER_WINDOW_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, WindowFunc>>> = Object.freeze({
   [TokenKind.ROW_NUMBER]: "ROW_NUMBER",
@@ -207,6 +229,8 @@ export const PARSER_FUNCTION_SPELLINGS = Object.freeze(Array.from(new Set([
 const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.IDENT, TokenKind.BIDENT,
   TokenKind.COUNT, TokenKind.SUM, TokenKind.AVG, TokenKind.MAX, TokenKind.MIN,
+  TokenKind.GROUP_CONCAT, TokenKind.STDDEV_POP, TokenKind.STDDEV_SAMP,
+  TokenKind.VAR_POP, TokenKind.VAR_SAMP, TokenKind.MEDIAN,
   TokenKind.ROW_NUMBER, TokenKind.RANK, TokenKind.DENSE_RANK,
   TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
@@ -1816,8 +1840,8 @@ export class Parser {
 
     let arg: AggregateColumn["arg"];
     if (this.consume(TokenKind.STAR)) {
-      if (func === "GROUP_CONCAT") {
-        throw new ParseError("GROUP_CONCAT(*) は使用できません。フィールドまたは式を指定してください", this.prev());
+      if (!aggregateAcceptsWildcard(func)) {
+        throw new ParseError(`${func}(*) は使用できません。フィールドまたは式を指定してください`, this.prev());
       }
       arg = { type: "WILDCARD" };
     } else {
@@ -2168,8 +2192,8 @@ export class Parser {
       const distinct = this.consume(TokenKind.DISTINCT);
       let argStr: string;
       if (this.consume(TokenKind.STAR)) {
-        if (aggFunc === "GROUP_CONCAT") {
-          throw new ParseError("GROUP_CONCAT(*) は使用できません。フィールドまたは式を指定してください", this.prev());
+        if (!aggregateAcceptsWildcard(aggFunc)) {
+          throw new ParseError(`${aggFunc}(*) は使用できません。フィールドまたは式を指定してください`, this.prev());
         }
         argStr = "*";
       } else {

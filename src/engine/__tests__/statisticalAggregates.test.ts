@@ -1,4 +1,4 @@
-import { requiresCompleteInput } from "../../core/dmlGuard";
+import { completeInputReasons, requiresCompleteInput } from "../../core/dmlGuard";
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
 import type { SelectStatement, Statement } from "../../types/ast";
@@ -130,6 +130,22 @@ test("B56: 統計集約は入れ子の式・CTE・UNION・スカラーサブク�
     parse("SELECT x FROM APP100 UNION ALL SELECT VAR_SAMP(x) FROM APP200"),
   ];
   for (const stmt of statements) expect(requiresCompleteInput(stmt)).toBe(true);
+});
+
+test("B56: HAVING の直接統計集約も完全入力理由として検出する", () => {
+  const stmt = parse("SELECT kind, MEDIAN(x) AS med FROM APP100 GROUP BY kind HAVING MEDIAN(x) > 0");
+  expect([...completeInputReasons(stmt)]).toContain("STATISTICAL_AGGREGATE");
+});
+
+test("B56: 同一値の統計量と空文字だけの入力を処理する", () => {
+  const stmt = parseSelect(
+    "SELECT VAR_POP(x) AS vp, VAR_SAMP(x) AS vs, STDDEV_POP(x) AS sp, " +
+      "STDDEV_SAMP(x) AS ss, MEDIAN(x) AS med FROM APP100"
+  );
+  expect(applyGroupBy(Array.from({ length: 100 }, () => ({ x: "5" })), stmt.groupBy, stmt.columns)[0])
+    .toMatchObject({ vp: "0", vs: "0", sp: "0", ss: "0", med: "5" });
+  expect(applyGroupBy([{ x: "" }, { x: "" }], stmt.groupBy, stmt.columns)[0])
+    .toMatchObject({ vp: "", vs: "", sp: "", ss: "", med: "" });
 });
 
 test("B56: 既存集約の DISTINCT と空集合規約は不変", () => {

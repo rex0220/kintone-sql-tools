@@ -72,6 +72,11 @@ export const enum TokenKind {
   MAX   = "MAX",
   MIN   = "MIN",
   GROUP_CONCAT = "GROUP_CONCAT",
+  STDDEV_POP = "STDDEV_POP",
+  STDDEV_SAMP = "STDDEV_SAMP",
+  VAR_POP = "VAR_POP",
+  VAR_SAMP = "VAR_SAMP",
+  MEDIAN = "MEDIAN",
 
   // キーワード ― ウィンドウ関数（OVER / PARTITION はソフトキーワード）
   ROW_NUMBER = "ROW_NUMBER",
@@ -238,6 +243,11 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["MAX",       TokenKind.MAX],
   ["MIN",       TokenKind.MIN],
   ["GROUP_CONCAT", TokenKind.GROUP_CONCAT],
+  ["STDDEV_POP", TokenKind.STDDEV_POP],
+  ["STDDEV_SAMP", TokenKind.STDDEV_SAMP],
+  ["VAR_POP", TokenKind.VAR_POP],
+  ["VAR_SAMP", TokenKind.VAR_SAMP],
+  ["MEDIAN", TokenKind.MEDIAN],
   ["ROW_NUMBER", TokenKind.ROW_NUMBER],
   ["RANK",       TokenKind.RANK],
   ["DENSE_RANK", TokenKind.DENSE_RANK],
