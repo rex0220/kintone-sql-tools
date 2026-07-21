@@ -43,7 +43,7 @@ export const KSQL_FUNCTION_CATALOG = Object.freeze({
   ] as const),
   aggregate: frozenList([
     "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT",
-    "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN",
+    "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
   ] as const),
   window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK"] as const),
   contextual: frozenList(["TODAY", "NOW", "LOGINUSER"] as const),

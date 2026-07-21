@@ -67,7 +67,7 @@ export type CompleteInputReason =
   | "STATISTICAL_AGGREGATE";
 
 const STATISTICAL_AGGREGATES: ReadonlySet<string> = new Set([
-  "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN",
+  "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
 ]);
 
 function addReasons(target: Set<CompleteInputReason>, source: Iterable<CompleteInputReason>): void {
@@ -83,7 +83,7 @@ function containsStatisticalAggregate(value: unknown, seen = new Set<object>()):
     && typeof record.func === "string"
     && STATISTICAL_AGGREGATES.has(record.func)) return true;
   if (record.type === "FIELD" && typeof record.field === "string"
-    && /^(STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN)\(/i.test(record.field)) return true;
+    && /^(STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN|MODE)\(/i.test(record.field)) return true;
   return Object.values(record).some((child) => Array.isArray(child)
     ? child.some((entry) => containsStatisticalAggregate(entry, seen))
     : containsStatisticalAggregate(child, seen));

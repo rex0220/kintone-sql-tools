@@ -10,6 +10,13 @@
 - MCP server instructions の全量関数カタログを aggregate 6 件から 11 件へ更新し、無印 `STDDEV` / `VARIANCE` は非対応であることを明記した（instructions 272 語、240〜280 語 guard 内）。`ksql_docs` の埋め込み言語リファレンスと smoke guard も同期した。
 - 上記 5 語は新しい予約語。同名フィールドはバッククォートで囲んで参照できる。無印の `STDDEV` / `VARIANCE` は意味が方言間で異なるため非対応。
 
+### 機能追加（B58 MODE 集約関数）
+
+- `MODE(引数)` を追加した。空セルを除く文字列の完全一致単位で最頻値を返し、同頻度では引数型の canonical 順、その同値では raw コードポイント順で最小の値を選ぶため、取得順に依存しない。空集合・全空セルは空文字を返す。
+- `MODE` は統計集約の完全入力契約を共有し、`onLimit=truncate` の上限到達時は部分集合の値を返さずエラーにする。`MODE(*)` と `MODE(DISTINCT x)` は非対応。
+- MCP server instructions の全量関数カタログを aggregate 11 件から 12 件へ更新し、言語リファレンス、fixtures、drift guard、smoke guard を同期した（instructions 274 語、240〜280 語 guard 内）。
+- `MODE` は新しい予約語。同名フィールドは `` `MODE` `` のようにバッククォートで囲んで参照できる。`MODEL` など長い識別子は影響を受けない。
+
 ## v3.12.0（2026-07-21）
 
 ### 機能追加（B55 MCP read-only ドキュメントツール `ksql_docs`＋全量関数カタログ instructions）

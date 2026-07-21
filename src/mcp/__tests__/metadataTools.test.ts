@@ -100,8 +100,7 @@ describe("ksql_app_metadata MCP surface", () => {
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
-      expect(instructions?.trim().split(/\s+/).length).toBeGreaterThanOrEqual(240);
-      expect(instructions?.trim().split(/\s+/).length).toBeLessThanOrEqual(280);
+      expect(instructions?.trim().split(/\s+/).length).toBe(274);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(4);
       for (const key of [
         "not generic SQL",
@@ -115,6 +114,7 @@ describe("ksql_app_metadata MCP surface", () => {
         "GROUP_CONCAT",
         "STDDEV_POP",
         "MEDIAN",
+        "MODE",
         "DENSE_RANK",
         "LOGINUSER",
         "SUBSTR→SUBSTRING",

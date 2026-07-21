@@ -317,6 +317,7 @@ try {
     "GROUP_CONCAT",
     "STDDEV_POP",
     "MEDIAN",
+    "MODE",
     "DENSE_RANK",
     "LOGINUSER",
     "SUBSTR→SUBSTRING",

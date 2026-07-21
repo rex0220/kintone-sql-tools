@@ -177,6 +177,7 @@ export const PARSER_AGGREGATE_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenK
   [TokenKind.VAR_POP]: "VAR_POP",
   [TokenKind.VAR_SAMP]: "VAR_SAMP",
   [TokenKind.MEDIAN]: "MEDIAN",
+  [TokenKind.MODE]: "MODE",
 });
 
 export const PARSER_AGGREGATE_FUNCTIONS = Object.freeze(
@@ -230,7 +231,7 @@ const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.IDENT, TokenKind.BIDENT,
   TokenKind.COUNT, TokenKind.SUM, TokenKind.AVG, TokenKind.MAX, TokenKind.MIN,
   TokenKind.GROUP_CONCAT, TokenKind.STDDEV_POP, TokenKind.STDDEV_SAMP,
-  TokenKind.VAR_POP, TokenKind.VAR_SAMP, TokenKind.MEDIAN,
+  TokenKind.VAR_POP, TokenKind.VAR_SAMP, TokenKind.MEDIAN, TokenKind.MODE,
   TokenKind.ROW_NUMBER, TokenKind.RANK, TokenKind.DENSE_RANK,
   TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
@@ -1837,6 +1838,10 @@ export class Parser {
     this.expect(TokenKind.LPAREN);
 
     const distinct = this.consume(TokenKind.DISTINCT);
+    const distinctToken = distinct ? this.prev() : null;
+    if (func === "MODE" && distinctToken) {
+      throw new ParseError("MODE では DISTINCT は使用できません", distinctToken);
+    }
 
     let arg: AggregateColumn["arg"];
     if (this.consume(TokenKind.STAR)) {
@@ -2190,6 +2195,10 @@ export class Parser {
       this.advance(); // 関数名トークンを消費
       this.expect(TokenKind.LPAREN);
       const distinct = this.consume(TokenKind.DISTINCT);
+      const distinctToken = distinct ? this.prev() : null;
+      if (aggFunc === "MODE" && distinctToken) {
+        throw new ParseError("MODE では DISTINCT は使用できません", distinctToken);
+      }
       let argStr: string;
       if (this.consume(TokenKind.STAR)) {
         if (!aggregateAcceptsWildcard(aggFunc)) {

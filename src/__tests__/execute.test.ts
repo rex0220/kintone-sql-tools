@@ -1946,6 +1946,39 @@ test("B56: 統計集約は maxRecords 以内なら truncate 指定でも成功�
   expect(result.warnings).toEqual([]);
 });
 
+test("B58: MODE は truncate 上限で統計集約理由つき fail-closed", async () => {
+  const records = Array.from({ length: 101 }, (_, i) => makeRecord({
+    $id: String(i + 1),
+    区分: i % 2 === 0 ? "A" : "B",
+  }));
+  await expect(execute(
+    "SELECT MODE(区分) AS mode FROM APP100",
+    makePagedClient(records),
+    { maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow(/統計集約の正しい結果.*complete input reason: STATISTICAL_AGGREGATE/);
+});
+
+test("B58: MODE alias の HAVING/ORDER BY は引数フィールドの型 semantics を継承する", async () => {
+  const records = [
+    makeRecord({ $id: "1", kind: "A", num: "10", text: "10" }),
+    makeRecord({ $id: "2", kind: "A", num: "10", text: "10" }),
+    makeRecord({ $id: "3", kind: "B", num: "2", text: "2" }),
+    makeRecord({ $id: "4", kind: "B", num: "2", text: "2" }),
+  ];
+  const client = makeClient({ records, fieldTypes: { num: "NUMBER", text: "SINGLE_LINE_TEXT" } });
+  const numeric = await execute(
+    "SELECT kind, MODE(num) AS m FROM APP100 GROUP BY kind HAVING m > 5 ORDER BY m",
+    client
+  ) as SelectResult;
+  expect(numeric.rows).toEqual([{ kind: "A", m: "10" }]);
+
+  const text = await execute(
+    "SELECT kind, MODE(text) AS m FROM APP100 GROUP BY kind HAVING m < '2' ORDER BY m",
+    client
+  ) as SelectResult;
+  expect(text.rows).toEqual([{ kind: "A", m: "10" }]);
+});
+
 test.each([
   "HAVING MEDIAN(金額) > 1",
   "HAVING med > 1",

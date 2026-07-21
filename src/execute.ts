@@ -1460,13 +1460,23 @@ async function executeBatchStatement(
           tempTables
         );
         const first = resolvedStmt.expr.query.columns[0];
-        const numeric = first?.type === "ARITH_COL"
+        let numeric = first?.type === "ARITH_COL"
           || first?.type === "ARITH_AGG_COL"
           || first?.type === "WINDOW_COL"
           || (first?.type === "AGGREGATE"
             && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
               || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
               || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
+        if (first?.type === "AGGREGATE" && first.func === "MODE") {
+          const meta = (await inferSelectColumnMeta(
+            resolvedStmt.expr.query,
+            ["__scalar__"],
+            client,
+            cacheContext,
+            tempTables
+          )).get("__scalar__");
+          numeric = meta?.semantics?.compareMode === "number" || meta?.sortKind === "number";
+        }
         const numberValue = numeric ? Number(value) : Number.NaN;
         variables.set(stmt.name, numeric && Number.isFinite(numberValue)
           ? { type: "number", value: numberValue, raw: value }
@@ -2149,7 +2159,7 @@ function buildHavingFieldSemanticsResolver(
     else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
       semantics = syntheticSemantics("number");
     } else if (column.type === "AGGREGATE") {
-      if (column.func === "MIN" || column.func === "MAX") {
+      if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
         semantics = column.arg.type === "FIELD_REF"
           ? rowResolver(aggregateFieldRef(column.arg.field))
           : syntheticSemantics("number");
@@ -2740,7 +2750,7 @@ function collectAggregateRef(
   arg: { type: string; field?: string },
   out: FieldRef[]
 ): void {
-  if ((func === "MIN" || func === "MAX") && arg.type === "FIELD_REF" && arg.field) {
+  if ((func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF" && arg.field) {
     out.push(aggregateFieldRef(arg.field));
   }
 }
@@ -2810,7 +2820,7 @@ function aggregateSortKind(info: KintoneFieldInfo): "number" | "string" | undefi
   return AGGREGATE_STRING_FIELD_TYPES.has(info.fieldType) ? "string" : undefined;
 }
 
-/** MIN/MAX の直接フィールド参照だけに必要なフォーム定義を読み、集約専用resolverを返す。 */
+/** MIN/MAX/MODE の直接フィールド参照だけに必要なフォーム定義を読み、集約専用resolverを返す。 */
 async function loadAggregateSortKindResolver(
   stmt: SelectStatement,
   client: KintoneClient,
@@ -3032,7 +3042,7 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     || column.type === "PARENT_WILDCARD"
     || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
-      && (column.func === "MIN" || column.func === "MAX")
+      && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE")
       && column.arg.type === "FIELD_REF")
   );
 }
@@ -3124,9 +3134,11 @@ async function inferSelectColumnMeta(
           || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP"
           || column.func === "VAR_POP" || column.func === "VAR_SAMP" || column.func === "MEDIAN") {
           meta = syntheticColumnMeta("number");
-        } else if ((column.func === "MIN" || column.func === "MAX") && column.arg.type === "FIELD_REF") {
+        } else if ((column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type === "FIELD_REF") {
           const source = resolveField(aggregateFieldRef(column.arg.field));
           if (source) meta = source;
+        } else if (column.func === "MODE") {
+          meta = syntheticColumnMeta("number");
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
         meta = syntheticColumnMeta("number");
@@ -4220,7 +4232,7 @@ async function buildOrderSemanticsForSelect(
       if (column.expr.elseResult) candidates.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
       meta = mergeExpressionColumnMeta(candidates);
     } else if (column.type === "AGGREGATE") {
-      if (column.func === "MIN" || column.func === "MAX") {
+      if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
         meta = column.arg.type === "FIELD_REF"
           ? resolveField(aggregateFieldRef(column.arg.field))
           : syntheticColumnMeta("number");

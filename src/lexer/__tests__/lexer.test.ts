@@ -55,6 +55,14 @@ test("B56 の統計集約 5 関数を予約語として読む", () => {
   ]);
 });
 
+test("B58 の MODE を予約語として読み、MODEL は識別子のまま", () => {
+  expect(kinds("MODE MODEL")).toEqual([
+    TokenKind.MODE,
+    TokenKind.IDENT,
+    TokenKind.EOF,
+  ]);
+});
+
 test("B19 の追加関数名を予約語として読む", () => {
   expect(kinds("TRUNCATE TRUNC INSTR GREATEST LEAST LPAD RPAD LAST_DAY")).toEqual([
     TokenKind.TRUNCATE,
