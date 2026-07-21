@@ -168,6 +168,36 @@ test("INNER JOIN: 一致する行のみ", () => {
   expect(result[0]["b.会社"]).toBe("A社");
 });
 
+test("INNER JOIN: JOIN キーのプロパティ不存在と空文字値を区別する", () => {
+  const emptyValueLeft: ProcessRow[] = [{ "a.顧客ID": "", 顧客ID: "" }];
+  const emptyValueRight: ProcessRow[] = [{ "b.顧客ID": "", 顧客ID: "" }];
+  expect(applyJoin(emptyValueLeft, emptyValueRight, joinClause)).toHaveLength(1);
+
+  expect(() => applyJoin(
+    [{ "a.other": "L" }],
+    emptyValueRight,
+    joinClause
+  )).toThrow(/JOIN key a\.顧客ID is not available/);
+
+  expect(() => applyJoin(
+    emptyValueLeft,
+    [{ "b.other": "R" }],
+    joinClause
+  )).toThrow(/JOIN key b\.顧客ID is not available/);
+});
+
+test("INNER JOIN: 0 行側は保存済み列スキーマで JOIN キー不存在を検出する", () => {
+  expect(() => applyJoin([], rightRows, joinClause, {
+    leftColumns: ["a.別列", "別列"],
+    rightColumns: ["b.顧客ID", "顧客ID"],
+  })).toThrow(/JOIN key a\.顧客ID is not available/);
+
+  expect(applyJoin([], rightRows, joinClause, {
+    leftColumns: ["a.顧客ID", "顧客ID"],
+    rightColumns: ["b.顧客ID", "顧客ID"],
+  })).toEqual([]);
+});
+
 test("LEFT JOIN: 右に存在しない行は空文字で残る", () => {
   const leftJoin: JoinClause = { ...joinClause, type: "LEFT" };
   const result = applyJoin(leftRows, rightRows, leftJoin);

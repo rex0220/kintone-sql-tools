@@ -2102,7 +2102,7 @@ async function buildWhereFieldSemanticsResolver(
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         return fromPhysical(stmt.from, field.field, false);
       }
-      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === field.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) {
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
@@ -2668,9 +2668,13 @@ function collectSelectTypedInFieldRefs(stmt: SelectStatement): FieldRef[] {
   return refs;
 }
 
+function effectiveTableAlias(table: TableRef): string | null {
+  return table.alias ?? table.cteName;
+}
+
 function findTableForAlias(stmt: SelectStatement, alias: string): TableRef | undefined {
   return [stmt.from, ...stmt.joins.map((join) => join.table)]
-    .find((table) => table.alias === alias);
+    .find((table) => effectiveTableAlias(table) === alias);
 }
 
 function physicalSelectTables(stmt: SelectStatement): TableRef[] {
@@ -2850,7 +2854,7 @@ async function loadAggregateSortKindResolver(
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
       } else {
-        const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+        const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
         if (!table) return undefined;
         if (table.cteName !== null) {
           return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.semantics
@@ -2880,7 +2884,7 @@ async function loadAggregateSortKindResolver(
     }
     if (!info) return undefined;
     const sourceTable = ref.tableAlias !== null
-      ? tables.find((table) => table.alias === ref.tableAlias)
+      ? tables.find((table) => effectiveTableAlias(table) === ref.tableAlias)
       : stmt.joins.length === 0 ? stmt.from : undefined;
     return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
@@ -3045,7 +3049,7 @@ async function inferSelectColumnMeta(
         const info = physicalInfos.get(stmt.from.appId)?.get(ref.field);
         return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
       }
-      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
@@ -3175,7 +3179,7 @@ function buildSelectFieldTypeResolvers(
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         return fieldTypesByApp.get(stmt.from.appId)?.get(field.field);
       }
-      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === field.tableAlias);
       if (!table || table.cteName !== null) return undefined;
       return subtableSystemFieldType(table, field.field)
         ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
@@ -3525,6 +3529,40 @@ async function executeFullScanWithCte(
   cteCache: Map<string, MaterializedTable>,
   cacheContext: string
 ): Promise<SelectResult> {
+  const hiddenQualifiedAliases = new Set<string>();
+  const withEffectiveAlias = (table: TableRef): TableRef => {
+    if (table.alias !== null || table.cteName === null) return table;
+    const alias = effectiveTableAlias(table)!;
+    hiddenQualifiedAliases.add(alias);
+    return { ...table, alias };
+  };
+  stmt = {
+    ...stmt,
+    from: withEffectiveAlias(stmt.from),
+    joins: stmt.joins.map((join) => ({ ...join, table: withEffectiveAlias(join.table) })),
+  };
+
+  const aliases = new Set<string>();
+  for (const table of [stmt.from, ...stmt.joins.map((join) => join.table)]) {
+    const alias = effectiveTableAlias(table);
+    if (alias === null) continue;
+    if (aliases.has(alias)) {
+      throw new Error(`ArgumentError: effective alias ${alias} is used by multiple tables.`);
+    }
+    aliases.add(alias);
+  }
+
+  const requireMaterializedTable = (name: string): MaterializedTable => {
+    const table = cteCache.get(name);
+    if (!table) {
+      throw new Error(`ArgumentError: materialized source ${name} is not available.`);
+    }
+    return table;
+  };
+  for (const table of [stmt.from, ...stmt.joins.map((join) => join.table)]) {
+    if (table.cteName !== null) requireMaterializedTable(table.cteName);
+  }
+
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
@@ -3575,11 +3613,13 @@ async function executeFullScanWithCte(
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
   const tables = new Map<string | null, KintoneRecord[]>();
+  const tableColumns = new Map<string | null, readonly string[]>();
 
   // メインテーブル取得
   if (stmt.from.cteName != null) {
-    const table = cteCache.get(stmt.from.cteName);
-    tables.set(stmt.from.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
+    const table = requireMaterializedTable(stmt.from.cteName);
+    tables.set(stmt.from.alias, table.rows.map(processRowToKintoneRecord));
+    tableColumns.set(stmt.from.alias, table.columns);
   } else {
     const mainRecords = await fetchTableRecordsForFullScan(
       stmt,
@@ -3599,8 +3639,9 @@ async function executeFullScanWithCte(
   // JOIN テーブル取得
   const joinFetches = stmt.joins.map(async (join) => {
     if (join.table.cteName != null) {
-      const table = cteCache.get(join.table.cteName);
-      tables.set(join.table.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
+      const table = requireMaterializedTable(join.table.cteName);
+      tables.set(join.table.alias, table.rows.map(processRowToKintoneRecord));
+      tableColumns.set(join.table.alias, table.columns);
     } else {
       const pushDownCond = join.table.alias
         ? (pushdownPlan.joinConditions.get(join.table.alias) ?? null)
@@ -3635,7 +3676,7 @@ async function executeFullScanWithCte(
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
-    ? cteCache.get(stmt.from.cteName)?.columns
+    ? requireMaterializedTable(stmt.from.cteName).columns
     : undefined;
   const { rows, columns } = runFullScan({
     tables,
@@ -3651,6 +3692,8 @@ async function executeFullScanWithCte(
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
     sourceColumns,
+    tableColumns,
+    hiddenQualifiedAliases,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -4124,7 +4167,7 @@ async function buildOrderSemanticsForSelect(
         const info = infosByApp.get(stmt.from.appId)?.get(ref.field);
         return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : undefined;
       }
-      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));

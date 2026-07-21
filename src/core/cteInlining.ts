@@ -6,6 +6,10 @@ export function canInlineSingleCte(stmt: WithStatement): boolean {
   if (stmt.ctes.length !== 1) return false;
   const cteDef = stmt.ctes[0];
   if (cteDef.query.type !== "SELECT" || resolveSelectMode(cteDef.query) !== "SIMPLE") return false;
+  if (!cteDef.query.columns.every(
+    (column) => column.type === "WILDCARD"
+      || (column.type === "FIELD" && (column.alias === null || column.alias === column.field))
+  )) return false;
   const finalQuery = stmt.query;
   if (finalQuery.type !== "SELECT") return false;
   if (finalQuery.from.cteName !== cteDef.name || finalQuery.joins.length > 0) return false;

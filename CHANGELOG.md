@@ -2,6 +2,22 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.11.0（未リリース）
+
+### 修正（B51 複数 CTE の CTE 間 JOIN が誤結果を返す・silent wrong results）
+
+- **2つ以上の CTE を定義し CTE 同士を JOIN すると、左 CTE の投影列が空になり行が重複し、LEFT JOIN の未一致行が欠落する不具合を修正した**。エラーにならず誤った行・列を返す silent wrong results で、誤ったデータでの判断や書き戻しにつながり得た。
+  - 原因: CTE / 一時テーブル参照が**明示 alias を持たないと `alias: null`** になり（物理アプリはテーブル名を既定 alias にするが CTE/temp はしない）、最終 JOIN で実体化テーブルを格納する `Map` が `null` キーで衝突して片方を上書きし、さらに修飾キー（`a.aid`）が生成されず JOIN キーが空文字として全行一致し直積になっていた。
+  - 修正: `effectiveTableAlias = table.alias ?? table.cteName` を導入し、テーブル識別・JOIN の修飾解決・WHERE / SELECT / ORDER BY / GROUP BY / 集計メタデータ解決に一貫して適用（明示 alias があればそれを優先）。パーサは変更せず「テーブル識別用 alias」と「出力列の見せ方」を分離したため `SELECT * FROM c` の出力列名は従来どおり非修飾のまま。あわせて **effective alias の衝突を実行前に拒否**し、実体化キャッシュの miss を明示エラー化、`applyJoin` は「空文字の値」と「JOIN キー列が構造的に存在しない」を区別して後者を明確なエラーにした（silent wrong results の増幅を停止）。
+  - 実機（APP730）で確認: `WITH a AS(...), b AS(...) SELECT a.aid,b.bid FROM a INNER JOIN b ON a.aid=b.bid` が正しく2行（左列も正しい値）・LEFT JOIN で未一致行が NULL 埋めで保持・`SELECT * FROM c` は非回帰。一時テーブルの JOIN・物理アプリ JOIN・window / GROUP BY / UNION の CTE も非回帰。SemVer=minor。
+
+### 修正（B52 単一 CTE の列別名がインライン化で解決されず unknown field）
+
+- **単一 CTE 本体で列に `AS 別名`（や式・リテラル）を付けて外側で参照すると `unknown field code(s)` エラーになる不具合を修正した**（`WITH a AS (SELECT レコード番号 AS aid FROM APPx) SELECT a.aid FROM a`）。
+  - 原因: 単一 CTE のインライン化判定 `canInlineSingleCte` が CTE 出力別名を考慮せず、`buildInlinedQuery` が別名（`aid`）を物理フィールドへ写像しないまま物理アプリへ問い合わせていた。
+  - 修正: インライン化するのを **`SELECT *`・別名なしの単純フィールド・物理名と同名の別名のみ**に限定し、**名前が変わる列別名・式・リテラル・関数・CASE を含む CTE はインライン化せず実体化経路へ回す**（B51 の effective alias 修正により実体化経路は別名を正しく解決する）。`SELECT *` や同名フィールドだけの CTE は従来どおりインライン化＋WHERE の kintone 押し下げ（SIMPLE 化）を維持する。実行・事前検証・EXPLAIN は同じ判定を共有する。
+  - 実機で確認: 別名 CTE の参照・算術式 CTE が正しく実体化・`SELECT *` CTE はインライン化＋WHERE 押し下げ維持。SemVer=minor。
+
 ## v3.10.0（2026-07-21）
 
 ### 機能追加（B47 APPLY 複数親 UPDATE の親 WHERE で LIKE / KLIKE を解禁）

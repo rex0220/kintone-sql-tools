@@ -109,7 +109,11 @@ export function flatten(record: KintoneRecord, alias: string | null): ProcessRow
 export function applyJoin(
   leftRows: ProcessRow[],
   rightRows: ProcessRow[],
-  join: JoinClause
+  join: JoinClause,
+  columns: {
+    leftColumns?: readonly string[];
+    rightColumns?: readonly string[];
+  } = {}
 ): ProcessRow[] {
   const { on, type: joinType } = join;
   const leftKey  = on.left.tableAlias
@@ -118,6 +122,9 @@ export function applyJoin(
   const rightKey = on.right.tableAlias
     ? `${on.right.tableAlias}.${on.right.field}`
     : on.right.field;
+
+  assertJoinKeyAvailable(leftRows, leftKey, columns.leftColumns);
+  assertJoinKeyAvailable(rightRows, rightKey, columns.rightColumns);
 
   // ── RIGHT JOIN ──────────────────────────────────────────────
   if (joinType === "RIGHT") {
@@ -130,7 +137,7 @@ export function applyJoin(
       else leftIndex.set(k, [lRow]);
     }
     const emptyLeft: ProcessRow = {};
-    for (const key of Object.keys(leftRows[0] ?? {})) emptyLeft[key] = "";
+    for (const key of columns.leftColumns ?? Object.keys(leftRows[0] ?? {})) emptyLeft[key] = "";
 
     const result: ProcessRow[] = [];
     for (const rRow of rightRows) {
@@ -159,7 +166,7 @@ export function applyJoin(
 
   // LEFT JOIN: 右側が存在しない場合の空行テンプレート（RIGHT JOIN 側と同形）
   const emptyRight: ProcessRow = {};
-  for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
+  for (const key of columns.rightColumns ?? Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
 
   for (const lRow of leftRows) {
     const k = lRow[leftKey] ?? "";
@@ -176,6 +183,20 @@ export function applyJoin(
   }
 
   return result;
+}
+
+/** JOIN キーの空文字値は許可し、プロパティ自体の欠落だけを拒否する。 */
+function assertJoinKeyAvailable(
+  rows: readonly ProcessRow[],
+  key: string,
+  savedColumns?: readonly string[]
+): void {
+  const missing = rows.length > 0
+    ? rows.some((row) => !Object.prototype.hasOwnProperty.call(row, key))
+    : savedColumns !== undefined && !savedColumns.includes(key);
+  if (missing) {
+    throw new Error(`ArgumentError: JOIN key ${key} is not available in the materialized table.`);
+  }
 }
 
 // ============================================================
@@ -691,11 +712,15 @@ export function project(
   scalarCache?: Map<number, string>,
   resolveFieldType?: FieldTypeResolver,
   sourceColumns?: readonly string[],
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  hiddenQualifiedAliases?: ReadonlySet<string>
 ): { rows: ProcessRow[]; columns: string[] } {
   // SELECT * → そのまま全フィールド
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
-    const projected = rows.map((row) => stripParentShortcutColumns(row));
+    const projected = rows.map((row) => stripHiddenQualifiedColumns(
+      stripParentShortcutColumns(row),
+      hiddenQualifiedAliases
+    ));
     const cols = projected.length > 0 ? Object.keys(projected[0]) : [...(sourceColumns ?? [])];
     return { rows: projected, columns: cols };
   }
@@ -721,7 +746,10 @@ export function project(
         case "VARIABLE_COL":
           throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
         case "WILDCARD":
-          Object.assign(out, stripParentShortcutColumns(row));
+          Object.assign(out, stripHiddenQualifiedColumns(
+            stripParentShortcutColumns(row),
+            hiddenQualifiedAliases
+          ));
           break;
         case "PARENT_WILDCARD": {
           const parentKeys = Object.keys(row).filter((k) => k.startsWith("_p.")).sort();
@@ -1048,6 +1076,43 @@ export interface FullScanInput {
   appliedKlikes?: ReadonlySet<object>;
   /** 単一の実体化ソースが保持する出力列。0 行の単独 SELECT * にのみ使う。 */
   sourceColumns?: readonly string[];
+  /** 0 行でも JOIN キーを検証するための、alias ごとの保存済みソース列。 */
+  tableColumns?: ReadonlyMap<string | null, readonly string[]>;
+  /** 実行時だけ補った alias。SELECT * の出力には修飾キーを露出させない。 */
+  hiddenQualifiedAliases?: ReadonlySet<string>;
+}
+
+function stripHiddenQualifiedColumns(
+  row: ProcessRow,
+  hiddenQualifiedAliases?: ReadonlySet<string>
+): ProcessRow {
+  if (!hiddenQualifiedAliases || hiddenQualifiedAliases.size === 0) return row;
+  const out: ProcessRow = {};
+  for (const [key, value] of Object.entries(row)) {
+    if ([...hiddenQualifiedAliases].some((alias) => key.startsWith(`${alias}.`))) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function flattenedColumns(columns: readonly string[] | undefined, alias: string | null): string[] | undefined {
+  if (columns === undefined) return undefined;
+  return alias
+    ? columns.flatMap((column) => [`${alias}.${column}`, column])
+    : [...columns];
+}
+
+function mergeKnownColumns(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+  rows: readonly ProcessRow[]
+): string[] | undefined {
+  if (left === undefined && right === undefined && rows.length === 0) return undefined;
+  return [...new Set([
+    ...(left ?? []),
+    ...(right ?? []),
+    ...Object.keys(rows[0] ?? {}),
+  ])];
 }
 
 function deriveOutputOrderSemantics(columns: SelectColumn[]): Map<string, ResolvedFieldSemantics> {
@@ -1093,6 +1158,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     aggregateSortKindResolver,
     appliedKlikes,
     sourceColumns,
+    tableColumns,
+    hiddenQualifiedAliases,
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -1102,13 +1169,27 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   const mainAlias = stmt.from.alias;
   const mainRecords = tables.get(mainAlias) ?? tables.get(null) ?? [];
   rows = mainRecords.map((r) => flatten(r, mainAlias));
+  let knownColumns = mergeKnownColumns(
+    flattenedColumns(tableColumns?.get(mainAlias), mainAlias),
+    undefined,
+    rows
+  );
 
   // 2. join
   for (const join of stmt.joins) {
     const rightAlias = join.table.alias;
     const rightRecords = tables.get(rightAlias) ?? [];
     const rightRows = rightRecords.map((r) => flatten(r, rightAlias));
-    rows = applyJoin(rows, rightRows, join);
+    const rightColumns = mergeKnownColumns(
+      flattenedColumns(tableColumns?.get(rightAlias), rightAlias),
+      undefined,
+      rightRows
+    );
+    rows = applyJoin(rows, rightRows, join, {
+      leftColumns: knownColumns,
+      rightColumns,
+    });
+    knownColumns = mergeKnownColumns(knownColumns, rightColumns, rows);
   }
 
   // 3. filter — JS 側 WHERE 評価
@@ -1140,5 +1221,13 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   rows = applyLimit(rows, stmt.limit, stmt.offset);
 
   // 10. project
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns, fieldSemanticsResolver);
+  return project(
+    rows,
+    stmt.columns,
+    scalarCache,
+    fieldTypeResolver,
+    sourceColumns,
+    fieldSemanticsResolver,
+    hiddenQualifiedAliases
+  );
 }

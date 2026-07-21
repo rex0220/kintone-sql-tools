@@ -36603,6 +36603,9 @@ function canInlineSingleCte(stmt) {
   if (stmt.ctes.length !== 1) return false;
   const cteDef = stmt.ctes[0];
   if (cteDef.query.type !== "SELECT" || resolveSelectMode(cteDef.query) !== "SIMPLE") return false;
+  if (!cteDef.query.columns.every(
+    (column) => column.type === "WILDCARD" || column.type === "FIELD" && (column.alias === null || column.alias === column.field)
+  )) return false;
   const finalQuery = stmt.query;
   if (finalQuery.type !== "SELECT") return false;
   if (finalQuery.from.cteName !== cteDef.name || finalQuery.joins.length > 0) return false;
@@ -41433,10 +41436,12 @@ function flatten(record2, alias) {
   }
   return row;
 }
-function applyJoin(leftRows, rightRows, join) {
+function applyJoin(leftRows, rightRows, join, columns = {}) {
   const { on, type: joinType } = join;
   const leftKey = on.left.tableAlias ? `${on.left.tableAlias}.${on.left.field}` : on.left.field;
   const rightKey = on.right.tableAlias ? `${on.right.tableAlias}.${on.right.field}` : on.right.field;
+  assertJoinKeyAvailable(leftRows, leftKey, columns.leftColumns);
+  assertJoinKeyAvailable(rightRows, rightKey, columns.rightColumns);
   if (joinType === "RIGHT") {
     const leftIndex = /* @__PURE__ */ new Map();
     for (const lRow of leftRows) {
@@ -41446,7 +41451,7 @@ function applyJoin(leftRows, rightRows, join) {
       else leftIndex.set(k, [lRow]);
     }
     const emptyLeft = {};
-    for (const key of Object.keys(leftRows[0] ?? {})) emptyLeft[key] = "";
+    for (const key of columns.leftColumns ?? Object.keys(leftRows[0] ?? {})) emptyLeft[key] = "";
     const result2 = [];
     for (const rRow of rightRows) {
       const k = rRow[rightKey] ?? "";
@@ -41468,7 +41473,7 @@ function applyJoin(leftRows, rightRows, join) {
   }
   const result = [];
   const emptyRight = {};
-  for (const key of Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
+  for (const key of columns.rightColumns ?? Object.keys(rightRows[0] ?? {})) emptyRight[key] = "";
   for (const lRow of leftRows) {
     const k = lRow[leftKey] ?? "";
     const matched = rightIndex.get(k) ?? [];
@@ -41481,6 +41486,12 @@ function applyJoin(leftRows, rightRows, join) {
     }
   }
   return result;
+}
+function assertJoinKeyAvailable(rows, key, savedColumns) {
+  const missing = rows.length > 0 ? rows.some((row) => !Object.prototype.hasOwnProperty.call(row, key)) : savedColumns !== void 0 && !savedColumns.includes(key);
+  if (missing) {
+    throw new Error(`ArgumentError: JOIN key ${key} is not available in the materialized table.`);
+  }
 }
 function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
   if (where === null) return rows;
@@ -41780,9 +41791,12 @@ function applyLimit(rows, limit, offset) {
   if (limit === null) return rows.slice(start);
   return rows.slice(start, start + limit);
 }
-function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, resolveFieldSemantics2) {
+function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, resolveFieldSemantics2, hiddenQualifiedAliases) {
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
-    const projected2 = rows.map((row) => stripParentShortcutColumns(row));
+    const projected2 = rows.map((row) => stripHiddenQualifiedColumns(
+      stripParentShortcutColumns(row),
+      hiddenQualifiedAliases
+    ));
     const cols = projected2.length > 0 ? Object.keys(projected2[0]) : [...sourceColumns ?? []];
     return { rows: projected2, columns: cols };
   }
@@ -41802,7 +41816,10 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, re
         case "VARIABLE_COL":
           throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
         case "WILDCARD":
-          Object.assign(out, stripParentShortcutColumns(row));
+          Object.assign(out, stripHiddenQualifiedColumns(
+            stripParentShortcutColumns(row),
+            hiddenQualifiedAliases
+          ));
           break;
         case "PARENT_WILDCARD": {
           const parentKeys = Object.keys(row).filter((k) => k.startsWith("_p.")).sort();
@@ -42055,6 +42072,27 @@ function resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind) {
     args: expr.args.map((arg) => resolveAggInStringFuncArg(arg, rows, resolveAggSortKind))
   };
 }
+function stripHiddenQualifiedColumns(row, hiddenQualifiedAliases) {
+  if (!hiddenQualifiedAliases || hiddenQualifiedAliases.size === 0) return row;
+  const out = {};
+  for (const [key, value] of Object.entries(row)) {
+    if ([...hiddenQualifiedAliases].some((alias) => key.startsWith(`${alias}.`))) continue;
+    out[key] = value;
+  }
+  return out;
+}
+function flattenedColumns(columns, alias) {
+  if (columns === void 0) return void 0;
+  return alias ? columns.flatMap((column) => [`${alias}.${column}`, column]) : [...columns];
+}
+function mergeKnownColumns(left, right, rows) {
+  if (left === void 0 && right === void 0 && rows.length === 0) return void 0;
+  return [.../* @__PURE__ */ new Set([
+    ...left ?? [],
+    ...right ?? [],
+    ...Object.keys(rows[0] ?? {})
+  ])];
+}
 function deriveOutputOrderSemantics(columns) {
   const result = /* @__PURE__ */ new Map();
   for (const column of columns) {
@@ -42089,7 +42127,9 @@ function runFullScan(input) {
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes,
-    sourceColumns
+    sourceColumns,
+    tableColumns,
+    hiddenQualifiedAliases
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -42097,11 +42137,25 @@ function runFullScan(input) {
   const mainAlias = stmt.from.alias;
   const mainRecords = tables.get(mainAlias) ?? tables.get(null) ?? [];
   rows = mainRecords.map((r) => flatten(r, mainAlias));
+  let knownColumns = mergeKnownColumns(
+    flattenedColumns(tableColumns?.get(mainAlias), mainAlias),
+    void 0,
+    rows
+  );
   for (const join of stmt.joins) {
     const rightAlias = join.table.alias;
     const rightRecords = tables.get(rightAlias) ?? [];
     const rightRows = rightRecords.map((r) => flatten(r, rightAlias));
-    rows = applyJoin(rows, rightRows, join);
+    const rightColumns = mergeKnownColumns(
+      flattenedColumns(tableColumns?.get(rightAlias), rightAlias),
+      void 0,
+      rightRows
+    );
+    rows = applyJoin(rows, rightRows, join, {
+      leftColumns: knownColumns,
+      rightColumns
+    });
+    knownColumns = mergeKnownColumns(knownColumns, rightColumns, rows);
   }
   rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
   if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
@@ -42114,7 +42168,15 @@ function runFullScan(input) {
   }
   rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds, effectiveOrderSemantics);
   rows = applyLimit(rows, stmt.limit, stmt.offset);
-  return project(rows, stmt.columns, scalarCache, fieldTypeResolver, sourceColumns, fieldSemanticsResolver);
+  return project(
+    rows,
+    stmt.columns,
+    scalarCache,
+    fieldTypeResolver,
+    sourceColumns,
+    fieldSemanticsResolver,
+    hiddenQualifiedAliases
+  );
 }
 
 // src/converter/subtableAdapter.ts
@@ -44450,7 +44512,7 @@ async function buildWhereFieldSemanticsResolver(stmt, client, cacheContext, mate
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         return fromPhysical(stmt.from, field.field, false);
       }
-      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === field.tableAlias);
       if (!table) return void 0;
       if (table.cteName !== null) {
         return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics ?? syntheticSemantics("string");
@@ -44884,8 +44946,11 @@ function collectSelectTypedInFieldRefs(stmt) {
   }
   return refs;
 }
+function effectiveTableAlias(table) {
+  return table.alias ?? table.cteName;
+}
 function findTableForAlias(stmt, alias) {
-  return [stmt.from, ...stmt.joins.map((join) => join.table)].find((table) => table.alias === alias);
+  return [stmt.from, ...stmt.joins.map((join) => join.table)].find((table) => effectiveTableAlias(table) === alias);
 }
 function physicalSelectTables(stmt) {
   return [stmt.from, ...stmt.joins.map((join) => join.table)].filter((table) => table.cteName === null);
@@ -45037,7 +45102,7 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         info = fieldInfosByApp.get(stmt.from.appId)?.get(ref.field);
       } else {
-        const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+        const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
         if (!table) return void 0;
         if (table.cteName !== null) {
           return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string");
@@ -45062,7 +45127,7 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
       return matches[0];
     }
     if (!info) return void 0;
-    const sourceTable = ref.tableAlias !== null ? tables.find((table) => table.alias === ref.tableAlias) : stmt.joins.length === 0 ? stmt.from : void 0;
+    const sourceTable = ref.tableAlias !== null ? tables.find((table) => effectiveTableAlias(table) === ref.tableAlias) : stmt.joins.length === 0 ? stmt.from : void 0;
     return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
 }
@@ -45192,7 +45257,7 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
         const info2 = physicalInfos.get(stmt.from.appId)?.get(ref.field);
         return info2 ? materializedMetaFromFieldInfo(info2, stmt.from.appId) : void 0;
       }
-      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return void 0;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
@@ -45297,7 +45362,7 @@ function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
       if (field.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
         return fieldTypesByApp.get(stmt.from.appId)?.get(field.field);
       }
-      const table = tables.find((candidate) => candidate.alias === field.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === field.tableAlias);
       if (!table || table.cteName !== null) return void 0;
       return subtableSystemFieldType(table, field.field) ?? fieldTypesByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, field.field));
     }
@@ -45522,6 +45587,37 @@ async function executeQueryWithCte(query, client, options, cteCache, cacheContex
   return result;
 }
 async function executeFullScanWithCte(stmt, client, options, cteCache, cacheContext) {
+  const hiddenQualifiedAliases = /* @__PURE__ */ new Set();
+  const withEffectiveAlias = (table) => {
+    if (table.alias !== null || table.cteName === null) return table;
+    const alias = effectiveTableAlias(table);
+    hiddenQualifiedAliases.add(alias);
+    return { ...table, alias };
+  };
+  stmt = {
+    ...stmt,
+    from: withEffectiveAlias(stmt.from),
+    joins: stmt.joins.map((join) => ({ ...join, table: withEffectiveAlias(join.table) }))
+  };
+  const aliases = /* @__PURE__ */ new Set();
+  for (const table of [stmt.from, ...stmt.joins.map((join) => join.table)]) {
+    const alias = effectiveTableAlias(table);
+    if (alias === null) continue;
+    if (aliases.has(alias)) {
+      throw new Error(`ArgumentError: effective alias ${alias} is used by multiple tables.`);
+    }
+    aliases.add(alias);
+  }
+  const requireMaterializedTable = (name) => {
+    const table = cteCache.get(name);
+    if (!table) {
+      throw new Error(`ArgumentError: materialized source ${name} is not available.`);
+    }
+    return table;
+  };
+  for (const table of [stmt.from, ...stmt.joins.map((join) => join.table)]) {
+    if (table.cteName !== null) requireMaterializedTable(table.cteName);
+  }
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
@@ -45568,9 +45664,11 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   orderByMetaPromise.catch(() => {
   });
   const tables = /* @__PURE__ */ new Map();
+  const tableColumns = /* @__PURE__ */ new Map();
   if (stmt.from.cteName != null) {
-    const table = cteCache.get(stmt.from.cteName);
-    tables.set(stmt.from.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
+    const table = requireMaterializedTable(stmt.from.cteName);
+    tables.set(stmt.from.alias, table.rows.map(processRowToKintoneRecord));
+    tableColumns.set(stmt.from.alias, table.columns);
   } else {
     const mainRecords = await fetchTableRecordsForFullScan(
       stmt,
@@ -45588,8 +45686,9 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   }
   const joinFetches = stmt.joins.map(async (join) => {
     if (join.table.cteName != null) {
-      const table = cteCache.get(join.table.cteName);
-      tables.set(join.table.alias, (table?.rows ?? []).map(processRowToKintoneRecord));
+      const table = requireMaterializedTable(join.table.cteName);
+      tables.set(join.table.alias, table.rows.map(processRowToKintoneRecord));
+      tableColumns.set(join.table.alias, table.columns);
     } else {
       const pushDownCond = join.table.alias ? pushdownPlan.joinConditions.get(join.table.alias) ?? null : null;
       const optimized = await tryFetchJoinRecordsBySourceKeys(
@@ -45620,7 +45719,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   await Promise.all(joinFetches);
   const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
-  const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null ? cteCache.get(stmt.from.cteName)?.columns : void 0;
+  const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null ? requireMaterializedTable(stmt.from.cteName).columns : void 0;
   const { rows, columns } = runFullScan({
     tables,
     stmt,
@@ -45634,7 +45733,9 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
-    sourceColumns
+    sourceColumns,
+    tableColumns,
+    hiddenQualifiedAliases
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -45936,7 +46037,7 @@ async function buildOrderSemanticsForSelect(stmt, client, cacheContext, material
         const info2 = infosByApp.get(stmt.from.appId)?.get(ref.field);
         return info2 ? materializedMetaFromFieldInfo(info2, stmt.from.appId) : void 0;
       }
-      const table = tables.find((candidate) => candidate.alias === ref.tableAlias);
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return void 0;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
@@ -53200,7 +53301,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.10.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.11.0" : "0.0.0-dev";
 var KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. It supports SELECT,
 JOIN, aggregates, CTEs, UNION, ROW_NUMBER/RANK/DENSE_RANK, GROUP_CONCAT,
 INSERT/UPDATE/UPSERT/DELETE, UPDATE ... FROM, subtable virtual tables
