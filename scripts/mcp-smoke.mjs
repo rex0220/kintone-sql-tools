@@ -168,6 +168,7 @@ function assertToolDescriptions(tools) {
     // B44 Phase 16d: v2 全 APPLY 形の VALIDATE ONLY は read-only のまま許可
     "UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY",
     "fixed default 500",
+    "ksql://language-reference",
   ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
@@ -184,11 +185,22 @@ function assertToolDescriptions(tools) {
     "Every APPLY mutation form (UPDATE/INSERT/UPSERT/multi-value)",
     "always rejected by MCP v3.8.0 before runtime or records API creation",
     "allowDml and dmlMaxSubtableRows do not enable it",
+    "ksql://language-reference",
   ];
   const metadataKeys = [
-    "Read-only app metadata",
-    "fixed allowlist",
-    "records and mutation operations are not available",
+    "fields",
+    "constraints",
+    "raw",
+    "read-only",
+    "fixed GET allowlist",
+    "records",
+    "mutation",
+  ];
+  const describeKeys = [
+    "field code",
+    "label",
+    "type",
+    "ksql_app_metadata",
   ];
   const validate = getTool(tools, "ksql_validate");
   for (const key of validateKeys) {
@@ -223,6 +235,13 @@ function assertToolDescriptions(tools) {
     assert(
       typeof metadata.description === "string" && metadata.description.includes(key),
       `ksql_app_metadata.description must mention "${key}".`
+    );
+  }
+  const describe = getTool(tools, "ksql_describe_app");
+  for (const key of describeKeys) {
+    assert(
+      typeof describe.description === "string" && describe.description.includes(key),
+      `ksql_describe_app.description must mention "${key}".`
     );
   }
 }
@@ -327,6 +346,18 @@ async function main() {
 
   try {
     await client.connect(transport);
+
+    const instructions = client.getInstructions();
+    assert(typeof instructions === "string" && instructions.trim().length > 0, "Server instructions are missing.");
+    for (const key of [
+      "not generic SQL",
+      "VALIDATE ONLY",
+      "ksql_app_metadata",
+      "ksql://language-reference",
+      "APPLY mutation is disabled",
+    ]) {
+      assert(instructions.includes(key), `Server instructions must mention "${key}".`);
+    }
 
     const listed = await client.listTools();
     const toolNames = listed.tools.map((tool) => tool.name).sort();

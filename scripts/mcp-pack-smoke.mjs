@@ -131,14 +131,38 @@ function assertPackedMetadataTool(tools) {
     assert(!(key in props), `Packed metadata schema must not expose ${key}.`);
   }
   for (const key of [
-    "Read-only app metadata",
-    "fixed allowlist",
-    "records and mutation operations are not available",
+    "fields",
+    "constraints",
+    "raw",
+    "read-only",
+    "fixed GET allowlist",
+    "records",
+    "mutation",
   ]) {
     assert(
       typeof metadata.description === "string" && metadata.description.includes(key),
       `Packed ksql_app_metadata.description must mention "${key}".`
     );
+  }
+}
+
+function assertPackedToolDescriptions(tools) {
+  const required = {
+    ksql_app_metadata: [
+      "fields", "constraints", "raw", "read-only", "fixed GET allowlist", "records", "mutation",
+    ],
+    ksql_describe_app: ["field code", "label", "type", "ksql_app_metadata"],
+    ksql_query: ["ksql://language-reference"],
+    ksql_mutate: ["ksql://language-reference"],
+  };
+  for (const [toolName, keys] of Object.entries(required)) {
+    const description = tools.find((tool) => tool.name === toolName)?.description;
+    for (const key of keys) {
+      assert(
+        typeof description === "string" && description.includes(key),
+        `Packed ${toolName}.description must mention "${key}".`
+      );
+    }
   }
 }
 
@@ -283,6 +307,18 @@ try {
 
   const rpc = run(process.execPath, [serverPath], { cwd: tmpDir, input: rpcInput });
   const messages = readJsonLines(rpc.stdout);
+  const initialized = messages.find((message) => message.id === 1);
+  const instructions = initialized?.result?.instructions;
+  assert(typeof instructions === "string" && instructions.trim().length > 0, "Packed initialize instructions are missing.");
+  for (const key of [
+    "not generic SQL",
+    "VALIDATE ONLY",
+    "ksql_app_metadata",
+    "ksql://language-reference",
+    "APPLY mutation is disabled",
+  ]) {
+    assert(instructions.includes(key), `Packed initialize instructions must mention "${key}".`);
+  }
   const listed = messages.find((message) => message.id === 2);
   assert(Array.isArray(listed?.result?.tools), "Packed tools/list response is missing.");
   const packedToolNames = listed.result.tools.map((tool) => tool.name).sort();
@@ -291,6 +327,7 @@ try {
     `Unexpected packed tool list: ${packedToolNames.join(", ")}`
   );
   assertPackedMetadataTool(listed.result.tools);
+  assertPackedToolDescriptions(listed.result.tools);
   const validation = messages.find((message) => message.id === 3);
   assert(validation?.result?.structuredContent?.ok === true, "Packed ksql_validate smoke failed.");
   const applyValidation = messages.find((message) => message.id === 4);

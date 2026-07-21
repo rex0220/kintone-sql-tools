@@ -119,6 +119,14 @@ async function main() {
   );
   assert(manifest.user_config?.configPath?.type === "file", "configPath must use file picker type.");
   assert(manifest.user_config?.configPath?.required === true, "configPath must be required.");
+  const metadataTool = manifest.tools?.find((tool) => tool.name === "ksql_app_metadata");
+  assert(metadataTool, "MCPB manifest must include ksql_app_metadata.");
+  assert(
+    typeof metadataTool.description === "string"
+      && metadataTool.description.includes("raw")
+      && metadataTool.description.includes("constraints"),
+    "MCPB ksql_app_metadata description must be purpose-oriented."
+  );
 
   const launcher = entries.get("server/index.js").toString("utf8");
   assert(launcher.startsWith("#!/usr/bin/env node"), "MCPB launcher must keep the node shebang.");

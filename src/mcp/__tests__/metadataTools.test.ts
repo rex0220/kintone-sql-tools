@@ -69,10 +69,18 @@ describe("ksql_app_metadata MCP surface", () => {
     ]);
     const metadata = registered.ksql_app_metadata;
     expect(metadata.title).toBe("Get kintone app metadata");
-    expect(metadata.description).toContain("Read-only app metadata (GET)");
-    expect(metadata.description).toContain("fixed allowlist");
-    expect(metadata.description).toContain("records");
-    expect(metadata.description).toContain("mutation");
+    for (const key of [
+      "fields", "constraints", "raw", "read-only", "fixed GET allowlist", "records", "mutation",
+    ]) {
+      expect(metadata.description).toContain(key);
+    }
+    const describe = registered.ksql_describe_app;
+    for (const key of ["field code", "label", "type", "ksql_app_metadata"]) {
+      expect(describe.description).toContain(key);
+    }
+    for (const toolName of ["ksql_query", "ksql_mutate"]) {
+      expect(registered[toolName].description).toContain("ksql://language-reference");
+    }
     expect(metadata.inputSchema).toBe(ksqlAppMetadataInputShape);
     expect([...KINTONE_METADATA_RESOURCES]).toEqual([
       "app", "fields", "layout", "settings", "status", "views", "reports", "customize",
@@ -87,6 +95,20 @@ describe("ksql_app_metadata MCP surface", () => {
     try {
       await server.connect(serverTransport);
       await client.connect(clientTransport);
+      const instructions = client.getInstructions();
+      expect(instructions).toBeTruthy();
+      expect(instructions?.trim().split(/\s+/).length).toBeGreaterThanOrEqual(150);
+      expect(instructions?.trim().split(/\s+/).length).toBeLessThanOrEqual(220);
+      expect(instructions?.trim().split(/\n\n/)).toHaveLength(3);
+      for (const key of [
+        "not generic SQL",
+        "VALIDATE ONLY",
+        "ksql_app_metadata",
+        "ksql://language-reference",
+        "APPLY mutation is disabled",
+      ]) {
+        expect(instructions).toContain(key);
+      }
       const listed = await client.listTools();
       const metadata = listed.tools.find((tool) => tool.name === "ksql_app_metadata");
       expect(metadata).toMatchObject({

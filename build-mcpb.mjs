@@ -61,6 +61,7 @@ const manifest = {
     { name: "ksql_query", description: "Execute read-only kSQL." },
     { name: "ksql_mutate", description: "Execute DML kSQL with explicit safety approvals." },
     { name: "ksql_describe_app", description: "Describe a kintone app." },
+    { name: "ksql_app_metadata", description: "Inspect raw read-only app metadata and field constraints before generating SQL or DML." },
     { name: "ksql_show_apps", description: "Show kintone apps." },
     { name: "ksql_save_query", description: "Save a kSQL query." },
     { name: "ksql_list_queries", description: "List saved kSQL queries." },
