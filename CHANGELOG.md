@@ -2,7 +2,34 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## v3.9.0（未リリース）
+## v3.10.0（未リリース）
+
+### 機能追加（B47 APPLY 複数親 UPDATE の親 WHERE で LIKE / KLIKE を解禁）
+
+- **`UPDATE ... APPLY`（複数親）の親 WHERE に `LIKE` / `NOT LIKE` と `KLIKE` / `NOT KLIKE` を使えるようにした**。従来はどちらも実行前に拒否され、対象親は完全一致・`IN`・`$id IN (...)` でしか指定できなかった。
+  - **親選択を「安全プレフィルタ → 元 WHERE の JS 残余評価 → 一致した親だけを更新」に再構成**。`LIKE` は kintone へ押し下げず JS（`matchLike`）で評価し、安全に押し下げられる述語（数値比較・`KLIKE` など）だけを kintone プレフィルタにする。取得した候補は元 WHERE 全体で再評価し、**一致した親（target）だけ**を検証・確認・書き込みへ渡す（候補数 ≠ 対象数）。
+  - **完全性のための取得契約**: 候補は `maxRecords`（既定 10,000）まで `onLimit=error` で**最後まで**取得し、上限超過や取得未完了は書き込み前に fail-closed。`dmlMaxRows` は残余評価後の target 数にだけ適用する。
+  - **`KLIKE` は kintone ネイティブ検索**のため、`OR` / `NOT` 配下など native query に完全適用できない `KLIKE`（unapplied）は**レコード API 呼び出し前に専用エラーで拒否**する（一部だけ適用しない）。10 万件検索打ち切り時は既存の DML fail-closed（`SearchAbortedError`・書き込み 0）で保護（B7 によりプラグインでも検出）。
+  - **スコープは APPLY 複数親 UPDATE の親 WHERE 限定**。通常の `UPDATE` / `DELETE`（APPLY なし）・単一 `$id` APPLY・`INSERT` / `UPSERT` / サブテーブル DML では `LIKE` / `KLIKE` を引き続き拒否する（fail-closed 契約は不変）。`EXPLAIN` は親選択計画（プレフィルタ・残余・applied/unapplied・上限・fail-closed）をレコード API 0 回で表示する。
+  - 実機（APP4223）で確認: LIKE `'UPS-01%'` が候補 223 件→対象 10 件だけを更新し非対象（UPS-001〜009・UPS-020・BULK-MULTI）は不変・`KLIKE` の native 選択・`OR` 配下 KLIKE の API 前拒否・通常 DML の KLIKE 拒否（非回帰）。SemVer=minor。
+
+### 機能追加（B5 通常の親 UPDATE / DELETE の WHERE で KLIKE を解禁）
+
+- **APPLY を持たない通常のトップレベル `UPDATE` / `DELETE` の WHERE で `KLIKE` / `NOT KLIKE` を使えるようにした**。従来はどちらも実行前に拒否されていた。
+  - kSQL は WHERE 全体を kintone クエリへ変換して対象を解決する（返った集合がそのまま更新/削除対象）。`KLIKE` は kintone ネイティブの `like` / `not like` へ変換できるため、この既存経路にそのまま乗る（新しい対象選択エンジンは追加しない）。B47（APPLY）と異なり **JS 残余評価は不要**で、`OR` / `NOT` 配下の `KLIKE` も WHERE 全体を exact に変換できれば使用できる。
+  - **`LIKE` / `NOT LIKE` は通常 DML で引き続き拒否**（JS 評価が必要で、通常 DML の対象解決に残余評価の段がないため）。WHERE 全体を kintone クエリで表現できない述語（`LIKE`・関数・算術・CASE・EXISTS・ネイティブ `like` 非対応の型など）は既存の EXACT_PUSHDOWN ガードで実行前に拒否する。
+  - **サブテーブル `UPDATE` / `DELETE` / `REORDER` の `KLIKE` は引き続き非対応**（親を全取得して JS で評価する経路のため）。`INSERT` / `UPSERT` / 独立した `VALIDATE` の `KLIKE` も拒否のまま。
+  - **10 万件検索打ち切り時は既存の DML fail-closed（`SearchAbortedError`・書き込み 0）で保護**する（B7 によりプラグインでも検出）。対象が一部だけ欠落したまま更新/削除する事故を防ぐ。`EXPLAIN` はネイティブ `like`・`exact native pushdown; JS residual none`・`search abort: DML fail-closed` を表示する。
+  - 実機（APP730・618,525 件）で確認: `都道府県K KLIKE 'ケン'`（10 万件超一致）が `SearchAbortedError` で書き込み 0（B47-P4 で未確認だった KLIKE DML の打ち切り fail-closed を補完）・一県のみに絞った `KLIKE` UPDATE が対象だけを更新し非対象は不変・サブテーブル KLIKE と通常 DML の LIKE は拒否。SemVer=minor。
+
+### 機能追加（B7 プラグインでの検索打ち切り検出）
+
+- **プラグインでも `like` / `not like` の 10 万件検索打ち切り（`X-Cybozu-Warning`）を検出できるようにした**。従来 Node / CLI / MCP だけがヘッダーで打ち切りを検出でき、プラグインは `kintone.api()` がレスポンスヘッダーを露出しないため未検出だった（＝結果の静かな欠落・KLIKE を親 DML で使う際の安全前提が崩れる）。
+  - プラグインの `getRecords` **だけ**を、`kintone.api()` から same-origin の raw `fetch` へ変更してレスポンスヘッダーを読めるようにした。**GET クエリの直列化は自前実装せず kintone に委譲**する（短い GET は `kintone.api.urlForGet()` が生成した URL、URL が 4KB を超える場合は kintone.api() と同じく POST + `X-HTTP-Method-Override: GET` へ自動切替し body は標準 JSON）。どちらの経路でも `X-Cybozu-Warning` を共通判定して `searchAborted` を返す。
+  - 効果: **DML の fail-closed（`SearchAbortedError`）がプラグインでも一様に効く**（B47 の KLIKE 全 surface 解禁の前提）。プラグインの SELECT が打ち切りで静かに切り詰められた場合に警告が付く。エラー契約（`toDetailedApiError`）維持・`getRecords` 以外の API は `kintone.api()` のまま。
+  - 実機（APP730・618,525 レコード・通常 space）で確認: `都道府県K KLIKE 'ケン'` で打ち切り警告表示・`=` では警告なし・`レコード番号 IN (1..500)`（URL >4KB）が 414 なく 500 件返却（POST override）。SemVer=minor。
+
+## v3.9.0（2026-07-21）
 
 ### 修正（B43 DML 事前検証が既存サブテーブル違反を検出しない false pass の解消）
 
