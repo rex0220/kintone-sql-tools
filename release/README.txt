@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v3.10.0)
+ksql 配布パッケージ (v3.11.0)
 
-1. ksql-plugin-v3.10.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.11.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.11.0: CTE 関連の 2 バグ修正。
+- B51: 複数の CTE を CTE 同士で JOIN すると、左 CTE の列が空になり行が重複し
+  LEFT JOIN の未一致行が消える不具合を修正 (誤った結果を返す silent wrong
+  results)。CTE/一時テーブル参照の暗黙 alias (CTE 名) を実行経路で一貫して使う
+  ようにした。
+- B52: 単一 CTE の列に AS 別名 (や式) を付けて外側で参照すると unknown field に
+  なる不具合を修正。別名/式ありの CTE はインライン化せず実体化する。
+  SELECT * や同名フィールドの CTE は従来どおりインライン化 (WHERE 押し下げ) を維持。
 
 v3.10.0: プラグインの検索打ち切り検出 (B7)
          ＋ APPLY 複数親 UPDATE の親 WHERE で LIKE/KLIKE (B47)
