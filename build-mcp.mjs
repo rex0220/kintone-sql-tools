@@ -5,10 +5,15 @@
 import * as esbuild from "esbuild";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { resolve } from "path";
+import { buildDocsResourceMap } from "./src/mcp/docsResourceBuilder.cjs";
 
 if (!existsSync("dist-mcp")) mkdirSync("dist-mcp");
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
+const embeddedDocs = buildDocsResourceMap(
+  readFileSync(resolve("docs/ksql_language_reference.md"), "utf8"),
+  readFileSync(resolve("docs/ksql_batch_recipes.md"), "utf8")
+);
 
 await esbuild.build({
   entryPoints: [resolve("src/mcp/index.ts")],
@@ -18,7 +23,10 @@ await esbuild.build({
   target: ["node18"],
   format: "cjs",
   // サーバー申告バージョン(serverInfo.version)を package.json と同期する
-  define: { __KSQL_VERSION__: JSON.stringify(pkg.version) },
+  define: {
+    __KSQL_VERSION__: JSON.stringify(pkg.version),
+    __KSQL_DOCS__: JSON.stringify(embeddedDocs),
+  },
 });
 
 const outPath = "dist-mcp/ksql-mcp.js";

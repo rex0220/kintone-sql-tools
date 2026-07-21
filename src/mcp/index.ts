@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import {
+  KSQL_DOCS,
+  LANGUAGE_SECTION_KEYS,
+  RECIPE_KEYS,
+} from "./docsResources";
 import { createKsqlMcpTools } from "./tools";
 import {
   describeAppInputShape,
@@ -90,6 +96,23 @@ inspect raw app constraints before generating SQL or DML. Read
 ksql://language-reference and ksql://recipes for section indexes, then read only
 the relevant section resource.`;
 
+const MARKDOWN_MIME_TYPE = "text/markdown";
+
+function staticTextResource(uri: string, text: string) {
+  return { contents: [{ uri, mimeType: MARKDOWN_MIME_TYPE, text }] };
+}
+
+function requiredTemplateKey(value: string | string[], kind: string): string {
+  if (typeof value !== "string") {
+    throw new McpError(ErrorCode.InvalidParams, `Invalid ${kind} resource key.`);
+  }
+  return value;
+}
+
+function invalidResourceKey(kind: string, key: string): never {
+  throw new McpError(ErrorCode.InvalidParams, `Unknown kSQL ${kind} resource key: ${key}`);
+}
+
 export function createServer(args: ServerArgs): McpServer {
   const server = new McpServer(
     {
@@ -174,6 +197,56 @@ export function createServer(args: ServerArgs): McpServer {
     description: "Delete a saved kSQL query from the local saved query catalog.",
     inputSchema: savedQueryNameInputShape,
   }, tools.deleteQueryTool);
+
+  server.registerResource("ksql-language-reference", "ksql://language-reference", {
+    description: "Index of kSQL syntax, dialect rules, and section resources.",
+    mimeType: MARKDOWN_MIME_TYPE,
+  }, () => staticTextResource("ksql://language-reference", KSQL_DOCS.languageReference.index));
+
+  server.registerResource("ksql-recipes", "ksql://recipes", {
+    description: "Index of safe, rerunnable kSQL batch recipes.",
+    mimeType: MARKDOWN_MIME_TYPE,
+  }, () => staticTextResource("ksql://recipes", KSQL_DOCS.recipes.index));
+
+  server.registerResource(
+    "ksql-language-reference-section",
+    new ResourceTemplate("ksql://language-reference/{section}", {
+      list: undefined,
+      complete: {
+        section: (value) => LANGUAGE_SECTION_KEYS.filter((key) => key.startsWith(value)),
+      },
+    }),
+    {
+      description: "One allowlisted chapter of the embedded kSQL language reference.",
+      mimeType: MARKDOWN_MIME_TYPE,
+    },
+    (uri, variables) => {
+      const key = requiredTemplateKey(variables.section, "language-reference section");
+      const section = KSQL_DOCS.languageReference.sections[key];
+      if (!section) invalidResourceKey("language-reference section", key);
+      return staticTextResource(uri.href, section.text);
+    }
+  );
+
+  server.registerResource(
+    "ksql-recipe",
+    new ResourceTemplate("ksql://recipes/{recipe}", {
+      list: undefined,
+      complete: {
+        recipe: (value) => RECIPE_KEYS.filter((key) => key.startsWith(value)),
+      },
+    }),
+    {
+      description: "One allowlisted chapter of the embedded kSQL batch recipes.",
+      mimeType: MARKDOWN_MIME_TYPE,
+    },
+    (uri, variables) => {
+      const key = requiredTemplateKey(variables.recipe, "recipe");
+      const recipe = KSQL_DOCS.recipes.sections[key];
+      if (!recipe) invalidResourceKey("recipe", key);
+      return staticTextResource(uri.href, recipe.text);
+    }
+  );
 
   return server;
 }
