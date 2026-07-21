@@ -18,6 +18,7 @@ const expectedTools = [
   "ksql_query",
   "ksql_mutate",
   "ksql_describe_app",
+  "ksql_app_metadata",
   "ksql_show_apps",
   "ksql_save_query",
   "ksql_list_queries",
@@ -49,7 +50,59 @@ function getTool(tools, name) {
   return tool;
 }
 
+const metadataResources = [
+  "app",
+  "fields",
+  "layout",
+  "settings",
+  "status",
+  "views",
+  "reports",
+  "customize",
+];
+
+const forbiddenMetadataInputs = ["url", "path", "method", "body", "query", "ids"];
+
+function assertMetadataSchema(tools) {
+  const metadata = getTool(tools, "ksql_app_metadata");
+  const schema = metadata.inputSchema ?? {};
+  const props = schema.properties ?? {};
+  assert(schema.type === "object", "ksql_app_metadata input schema must be an object.");
+  assert(schema.additionalProperties === false, "ksql_app_metadata input schema must be strict.");
+  assert(
+    JSON.stringify([...(schema.required ?? [])].sort()) === JSON.stringify(["app", "resource"]),
+    "ksql_app_metadata must require exactly resource and app."
+  );
+  assert(
+    JSON.stringify(Object.keys(props).sort())
+      === JSON.stringify(["app", "lang", "preview", "profile", "resource"]),
+    "ksql_app_metadata must expose only the branch keys resource/app/profile/preview/lang."
+  );
+  assert(
+    JSON.stringify([...(props.resource?.enum ?? [])].sort())
+      === JSON.stringify([...metadataResources].sort()),
+    "ksql_app_metadata.resource must expose the exact fixed eight-resource allowlist."
+  );
+  for (const key of forbiddenMetadataInputs) {
+    assert(!(key in props), `ksql_app_metadata must not expose ${key}.`);
+  }
+}
+
+function assertMetadataSchemaError(result, label) {
+  const text = result?.content?.find((item) => item.type === "text")?.text ?? "";
+  assert(result?.isError === true, `${label} must return isError=true.`);
+  assert(result?.structuredContent === undefined, `${label} must fail before the metadata handler.`);
+  assert(
+    text.includes("MCP error -32602")
+      && text.includes("Input validation error")
+      && text.includes("ksql_app_metadata"),
+    `${label} must return a JSON-RPC schema error.`
+  );
+}
+
 function assertSchemas(tools) {
+  assertMetadataSchema(tools);
+
   const explain = getTool(tools, "ksql_explain");
   const explainProps = explain.inputSchema?.properties ?? {};
   assert("sql" in explainProps, "ksql_explain.sql input is missing.");
@@ -132,6 +185,11 @@ function assertToolDescriptions(tools) {
     "always rejected by MCP v3.8.0 before runtime or records API creation",
     "allowDml and dmlMaxSubtableRows do not enable it",
   ];
+  const metadataKeys = [
+    "Read-only app metadata",
+    "fixed allowlist",
+    "records and mutation operations are not available",
+  ];
   const validate = getTool(tools, "ksql_validate");
   for (const key of validateKeys) {
     assert(
@@ -158,6 +216,13 @@ function assertToolDescriptions(tools) {
     assert(
       typeof mutate.description === "string" && mutate.description.includes(key),
       `ksql_mutate.description must mention "${key}".`
+    );
+  }
+  const metadata = getTool(tools, "ksql_app_metadata");
+  for (const key of metadataKeys) {
+    assert(
+      typeof metadata.description === "string" && metadata.description.includes(key),
+      `ksql_app_metadata.description must mention "${key}".`
     );
   }
 }
@@ -344,6 +409,31 @@ async function main() {
       Array.isArray(listedQueries.structuredContent?.queries),
       "ksql_list_queries did not return a queries array."
     );
+
+    // B49 P4: schema rejects arbitrary HTTP/record inputs before the metadata
+    // handler can create a runtime or perform network I/O.
+    const metadataHttpAttack = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: {
+        resource: "records",
+        app: 1,
+        method: "POST",
+        path: "/k/v1/records.json",
+      },
+    });
+    assertMetadataSchemaError(metadataHttpAttack, "ksql_app_metadata arbitrary HTTP attack");
+
+    // Pin the discriminated branches that the root tools/list schema mirrors.
+    const metadataAppPreview = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: { resource: "app", app: 1, preview: true },
+    });
+    assertMetadataSchemaError(metadataAppPreview, "ksql_app_metadata app preview branch");
+    const metadataLayoutLang = await client.callTool({
+      name: "ksql_app_metadata",
+      arguments: { resource: "layout", app: 1, lang: "ja" },
+    });
+    assertMetadataSchemaError(metadataLayoutLang, "ksql_app_metadata layout lang branch");
 
     process.stdout.write("[mcp-smoke] ok\n");
   } finally {

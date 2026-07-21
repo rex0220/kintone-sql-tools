@@ -10,6 +10,31 @@ const tmpRoot = resolve(rootDir, ".tmp");
 const tmpDir = resolve(tmpRoot, `mcp-pack-smoke-${process.pid}`);
 const npmExecPath = process.env.npm_execpath;
 const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+const expectedTools = [
+  "ksql_validate",
+  "ksql_explain",
+  "ksql_query",
+  "ksql_mutate",
+  "ksql_describe_app",
+  "ksql_app_metadata",
+  "ksql_show_apps",
+  "ksql_save_query",
+  "ksql_list_queries",
+  "ksql_get_query",
+  "ksql_run_saved_query",
+  "ksql_delete_query",
+];
+const metadataResources = [
+  "app",
+  "fields",
+  "layout",
+  "settings",
+  "status",
+  "views",
+  "reports",
+  "customize",
+];
+const forbiddenMetadataInputs = ["url", "path", "method", "body", "query", "ids"];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -81,6 +106,54 @@ function readJsonLines(stdout) {
     .map((line) => JSON.parse(line));
 }
 
+function assertPackedMetadataTool(tools) {
+  const metadata = tools.find((tool) => tool.name === "ksql_app_metadata");
+  assert(metadata, "Packed ksql_app_metadata tool is missing.");
+  const schema = metadata.inputSchema ?? {};
+  const props = schema.properties ?? {};
+  assert(schema.type === "object", "Packed metadata input schema must be an object.");
+  assert(schema.additionalProperties === false, "Packed metadata input schema must be strict.");
+  assert(
+    JSON.stringify([...(schema.required ?? [])].sort()) === JSON.stringify(["app", "resource"]),
+    "Packed metadata schema must require exactly resource and app."
+  );
+  assert(
+    JSON.stringify(Object.keys(props).sort())
+      === JSON.stringify(["app", "lang", "preview", "profile", "resource"]),
+    "Packed metadata schema must expose only the branch keys resource/app/profile/preview/lang."
+  );
+  assert(
+    JSON.stringify([...(props.resource?.enum ?? [])].sort())
+      === JSON.stringify([...metadataResources].sort()),
+    "Packed metadata resource enum must be the exact fixed eight-resource allowlist."
+  );
+  for (const key of forbiddenMetadataInputs) {
+    assert(!(key in props), `Packed metadata schema must not expose ${key}.`);
+  }
+  for (const key of [
+    "Read-only app metadata",
+    "fixed allowlist",
+    "records and mutation operations are not available",
+  ]) {
+    assert(
+      typeof metadata.description === "string" && metadata.description.includes(key),
+      `Packed ksql_app_metadata.description must mention "${key}".`
+    );
+  }
+}
+
+function assertPackedMetadataSchemaError(message, label) {
+  const text = message?.result?.content?.find((item) => item.type === "text")?.text ?? "";
+  assert(message?.result?.isError === true, `${label} must return isError=true.`);
+  assert(message?.result?.structuredContent === undefined, `${label} must fail before the metadata handler.`);
+  assert(
+    text.includes("MCP error -32602")
+      && text.includes("Input validation error")
+      && text.includes("ksql_app_metadata"),
+    `${label} must return the packed JSON-RPC schema error envelope.`
+  );
+}
+
 function cleanup(paths) {
   for (const target of paths) {
     if (!target || !existsSync(target)) continue;
@@ -136,6 +209,12 @@ try {
     {
       jsonrpc: "2.0",
       id: 2,
+      method: "tools/list",
+      params: {},
+    },
+    {
+      jsonrpc: "2.0",
+      id: 3,
       method: "tools/call",
       params: {
         name: "ksql_validate",
@@ -144,7 +223,7 @@ try {
     },
     {
       jsonrpc: "2.0",
-      id: 3,
+      id: 4,
       method: "tools/call",
       params: {
         name: "ksql_validate",
@@ -155,7 +234,7 @@ try {
     },
     {
       jsonrpc: "2.0",
-      id: 4,
+      id: 5,
       method: "tools/call",
       params: {
         name: "ksql_mutate",
@@ -168,24 +247,76 @@ try {
         },
       },
     },
+    {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "ksql_app_metadata",
+        arguments: {
+          resource: "records",
+          app: 1,
+          method: "POST",
+          path: "/k/v1/records.json",
+        },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "ksql_app_metadata",
+        arguments: { resource: "app", app: 1, preview: true },
+      },
+    },
+    {
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/call",
+      params: {
+        name: "ksql_app_metadata",
+        arguments: { resource: "layout", app: 1, lang: "ja" },
+      },
+    },
   ].map((msg) => JSON.stringify(msg)).join("\n") + "\n";
 
   const rpc = run(process.execPath, [serverPath], { cwd: tmpDir, input: rpcInput });
   const messages = readJsonLines(rpc.stdout);
-  const validation = messages.find((message) => message.id === 2);
+  const listed = messages.find((message) => message.id === 2);
+  assert(Array.isArray(listed?.result?.tools), "Packed tools/list response is missing.");
+  const packedToolNames = listed.result.tools.map((tool) => tool.name).sort();
+  assert(
+    JSON.stringify(packedToolNames) === JSON.stringify([...expectedTools].sort()),
+    `Unexpected packed tool list: ${packedToolNames.join(", ")}`
+  );
+  assertPackedMetadataTool(listed.result.tools);
+  const validation = messages.find((message) => message.id === 3);
   assert(validation?.result?.structuredContent?.ok === true, "Packed ksql_validate smoke failed.");
-  const applyValidation = messages.find((message) => message.id === 3);
+  const applyValidation = messages.find((message) => message.id === 4);
   assert(
     applyValidation?.result?.structuredContent?.ok === true
       && applyValidation.result.structuredContent.isReadOnly === true,
     "Packed APPLY VALIDATE ONLY smoke failed."
   );
-  const applyMutation = messages.find((message) => message.id === 4);
+  const applyMutation = messages.find((message) => message.id === 5);
   assert(
     applyMutation?.result?.structuredContent?.ok === false
       && applyMutation.result.structuredContent.error?.code === "UnsupportedError"
       && applyMutation.result.structuredContent.error?.message?.includes("MCP v3.8.0"),
     "Packed APPLY mutation must fail closed before runtime."
+  );
+  assertPackedMetadataSchemaError(
+    messages.find((message) => message.id === 6),
+    "Packed metadata arbitrary HTTP attack"
+  );
+  assertPackedMetadataSchemaError(
+    messages.find((message) => message.id === 7),
+    "Packed metadata app preview branch"
+  );
+  assertPackedMetadataSchemaError(
+    messages.find((message) => message.id === 8),
+    "Packed metadata layout lang branch"
   );
 
   process.stdout.write("[mcp-pack-smoke] ok\n");
