@@ -41,24 +41,39 @@ B7 ではこのメッセージ定数と判定規則を共通モジュールへ�
 
 ## 3. 設計
 
-### 3.1 案aを採用する
+### 3.1 案aを採用する（直列化は kintone に委譲する）
 
-プラグイン `createKintoneClient().getRecords` だけを、`kintone.api()` から次の raw Fetch 経路へ変更する。
+プラグイン `createKintoneClient().getRecords` だけを、`kintone.api()` から raw Fetch 経路へ変更する。**query string の直列化を自前で再実装しない**（変換ミスのリスクを避けるため、kintone 自身の URL 生成 API を使う）。
+
+kintone の公式仕様で確定した事実（[kintone REST API リクエスト送信](https://cybozu.dev/ja/kintone/docs/js-api/api/kintone-rest-api-request/)、[クエリ文字列付き URL 取得](https://cybozu.dev/ja/kintone/docs/js-api/api/get-url-including-query/)）:
+
+- `kintone.api()` は本文しか返さずレスポンスヘッダーを露出しない。ヘッダーが必要なケースは公式が Fetch / XMLHttpRequest の利用を案内している。
+- **URL が 4KB を超える GET は、kintone.api() 内部で自動的に `X-HTTP-Method-Override: GET` を付与して POST 送信される**。本ツールは FULL_SCAN で長い `query` / 多数 `fields` を送るため、この分岐を無視すると 414 で大規模取得が壊れる。
+- `kintone.api.urlForGet(path, params, isGuestSpace)` は **kintone 自身が** `fields:['x']` を `fields[0]=x` の形式で URL エンコードして直列化した GET URL を返す（公式サンプルで確認）。
+
+したがって次の2経路にする。両経路で `X-Cybozu-Warning` を読む。
 
 ```text
-kintone.api.url("/k/v1/records.json", true)
-  -> GET query string を付与
-  -> same-origin fetch(url, {
-       method: "GET",
-       credentials: "include",
-       headers: { "X-Requested-With": "XMLHttpRequest" }
-     })
-  -> HTTP status / JSON body を検査
-  -> X-Cybozu-Warning を共通 helper で判定
-  -> { records, searchAborted?: true }
+[短い GET（生成 URL ≤ 4KB）]
+  url = kintone.api.urlForGet("/k/v1/records.json", { app, query, fields }, true)  // kintone が直列化
+  -> fetch(url, { method:"GET", credentials:"include",
+                  headers:{ "X-Requested-With":"XMLHttpRequest" } })
+
+[長い GET（生成 URL > 4KB）＝kintone.api() と同じ 4KB 閾値で POST override]
+  url = kintone.api.url("/k/v1/records.json", true)
+  -> fetch(url, { method:"POST", credentials:"include",
+                  headers:{ "X-Requested-With":"XMLHttpRequest",
+                            "X-HTTP-Method-Override":"GET",
+                            "Content-Type":"application/json",
+                            "X-Cybozu-Request-Token": kintone.getRequestToken() },
+                  body: JSON.stringify({ app, query, fields }) })   // 標準 JSON・自前直列化なし
+
+両経路 -> HTTP status / JSON body 検査 -> isSearchAbortedWarning(X-Cybozu-Warning) -> { records, searchAborted?: true }
 ```
 
-URL の query string は現行 `PageFetchParams` と同じ意味を保ち、`app`、`query`、および空でない場合の `fields` を records API の GET 形式で直列化する。`fields` は配列パラメータとして各値を欠落なく送る。`getRecords` は型上も実装上も GET 専用であり、現行呼び出しも `api(..., "GET", ...)` に固定されている（[src/ui/kintoneClient.ts:96-103](../../src/ui/kintoneClient.ts#L96)）。POST / PUT / DELETE を raw Fetch へ広げない。
+**設計の要点＝自前直列化をしない**: 危険な GET クエリの配列直列化は `kintone.api.urlForGet`（kintone の実装）に委譲し、POST override 経路の body は標準 `JSON.stringify`。自前ロジックは①**4KB 閾値の判定**（`urlForGet` が返した URL のバイト長で GET/POST を分岐＝kintone.api() と同一閾値）②**POST 時の CSRF トークン付与**（`kintone.getRequestToken()`）の2点だけに限定し、いずれも単体テストで固定する。`getRecords` は GET セマンティクスのみ（現行 `api(..., "GET", ...)`・[src/ui/kintoneClient.ts:96-103](../../src/ui/kintoneClient.ts#L96)）。POST override は「GET を transport だけ POST にする」ものであり、書き込み API（POST/PUT/DELETE の records mutation）を raw Fetch へ広げない。
+
+補足: 4KB 閾値・CSRF 要否・POST override 経路での `X-Cybozu-Warning` 露出は kintone 実挙動に依存するため、通常/guest space の実機ゲート（§6.2）で確認する。閾値が実機とずれても壊れないよう、POST override 経路自体は URL 長に関わらず常に安全側で動く実装（長さで壊れない）にする。
 
 ### 3.2 ヘッダー判定と定数共有
 
@@ -131,9 +146,9 @@ B47 の KLIKE 親選択は native `like` / `not like` が返した候補集合�
 
 ### 6.1 unit / client-level
 
-- `kintone.api.url("/k/v1/records.json", true)` の戻り URLを使い、GET、`credentials:"include"`、`X-Requested-With: XMLHttpRequest` が設定される。
-- `app`、`query`、複数 `fields` が GET query string に正しく直列化され、空 fields は不要な配列要素を送らない。
-- 200 + `X-Cybozu-Warning` に共通メッセージあり → `{ records, searchAborted: true }`。
+- **短い GET**: `kintone.api.urlForGet("/k/v1/records.json", { app, query, fields }, true)` の戻り URL を使い、`method:"GET"`・`credentials:"include"`・`X-Requested-With: XMLHttpRequest`。直列化は urlForGet に委譲し、自前で query string を組まない（fields 直列化を test では urlForGet の戻り値で確認）。空 fields は params から省く。
+- **長い GET（生成 URL > 4KB）**: `kintone.api.url(...)` へ `method:"POST"`・`X-HTTP-Method-Override:"GET"`・`Content-Type:"application/json"`・CSRF トークン・`body=JSON.stringify({app,query,fields})`。**この経路でも `X-Cybozu-Warning` を読む**。4KB 前後の境界（例: 長い query）で GET/POST が正しく切り替わる。
+- 200 + `X-Cybozu-Warning` に共通メッセージあり → `{ records, searchAborted: true }`（GET/POST override 両経路）。
 - 200 + ヘッダーなし／別警告 → `{ records }` で `searchAborted` なし。
 - Node と plugin の双方が同じ定数／helper を参照し、既存 Node テストが非回帰。
 - 400 等の JSON error body から `message`、`code`、`errors`、`status` が既存 Error 契約へ移る。
