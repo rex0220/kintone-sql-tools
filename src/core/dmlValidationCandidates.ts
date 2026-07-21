@@ -1,6 +1,6 @@
 import type { KintoneFieldInfo } from "../execute";
 import type { ProcessRow } from "../engine/process";
-import { isEmptyDmlValue, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
+import { isEmptyDmlValue, normalizeRaw, validateAndNormalizeDmlValue, type DmlValidationErrorCode } from "./dmlValidation";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { NumberPrecision } from "./numberPrecision";
 import type { CheckGroup, FieldRef } from "../types/ast";
@@ -28,6 +28,43 @@ export const VALIDATION_META_COLUMNS = [
   "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
 ] as const;
 
+export interface DmlCandidateValidationResult {
+  readonly rowNumber: number;
+  readonly preErrors: ProcessRow[];
+  readonly builtInErrors: ProcessRow[];
+  readonly checkErrors: ProcessRow[];
+}
+
+export interface ValidateDmlCandidatesOptions {
+  /** B43 prepared post-image path owns update-mode built-in validation. */
+  readonly validateUpdateBuiltIns?: boolean;
+}
+
+/** Prepare only the sparse write shape needed to build an update-mode post-image. */
+export function materializeDmlUpdateModeSparseRecords(
+  candidates: readonly DmlValidationCandidate[],
+  targetFields: readonly string[],
+  fieldInfos: readonly KintoneFieldInfo[]
+): void {
+  const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
+  for (const candidate of candidates) {
+    if (candidate.mode !== "update") continue;
+    candidate.record ??= {};
+    for (const code of targetFields) {
+      if (!candidate.payload.has(code)) continue;
+      const original = candidate.payload.get(code);
+      const type = infoByCode.get(code)!.fieldType;
+      const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type)
+        && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+      let normalized: unknown = original;
+      try {
+        normalized = normalizeRaw(original, type);
+      } catch { /* validatePostImage owns the deterministic error row. */ }
+      candidate.record[code] = { value: preserveCodes ? original as Array<{ code: string }> : normalized as never };
+    }
+  }
+}
+
 export function validateDmlCandidates(
   candidates: DmlValidationCandidate[],
   operation: ValidationOperation,
@@ -38,28 +75,40 @@ export function validateDmlCandidates(
   numberPrecision?: NumberPrecision,
   checkGroups: readonly CheckGroup[] = [],
   validateMissingCreateFields = true,
-  includePreErrors = true
-): { errors: ProcessRow[]; invalidRows: number; invalidRowNumbers: Set<number> } {
-  // Existing DML contract: only fields present in each write payload are validated here.
-  // B44 APPLY must validate the complete post-image via validatePostImage instead.
+  includePreErrors = true,
+  validationOptions: ValidateDmlCandidatesOptions = {}
+): {
+  errors: ProcessRow[];
+  invalidRows: number;
+  invalidRowNumbers: Set<number>;
+  candidateResults: DmlCandidateValidationResult[];
+} {
+  // Create-mode and the pre-B43 fallback validate payload cells here. The prepared B43
+  // update-mode path delegates every built-in cell check to validatePostImage.
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
   const errors: ProcessRow[] = [];
   const invalid = new Set<number>();
+  const candidateResults: DmlCandidateValidationResult[] = [];
+  if (validationOptions.validateUpdateBuiltIns === false) {
+    materializeDmlUpdateModeSparseRecords(candidates, targetFields, fieldInfos);
+  }
   let firstEvaluationError: unknown;
   for (const candidate of candidates) {
     candidate.record ??= {};
-    const rowErrors = includePreErrors ? [...candidate.preErrors] : [];
+    const preErrors = includePreErrors ? [...candidate.preErrors] : [];
+    const builtInErrors: Array<{ field: string; code: DmlValidationErrorCode; message: string }> = [];
+    const checkErrors: Array<{ field: string; code: DmlValidationErrorCode; message: string }> = [];
+    const validateBuiltIns = candidate.mode === "create" || validationOptions.validateUpdateBuiltIns !== false;
     for (const code of targetFields) {
       if (!candidate.payload.has(code)) continue;
-      const result = validateAndNormalizeDmlValue(candidate.payload.get(code), infoByCode.get(code)!, numberPrecision);
-      if (!result.ok) rowErrors.push({ field: code, code: result.code, message: result.message });
-      else {
-        const original = candidate.payload.get(code);
-        const type = infoByCode.get(code)!.fieldType;
-        const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type)
-          && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
-        candidate.record[code] = { value: preserveCodes ? original as Array<{ code: string }> : result.value };
-      }
+      const original = candidate.payload.get(code);
+      const type = infoByCode.get(code)!.fieldType;
+      const preserveCodes = ["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(type)
+        && Array.isArray(original) && original.every((item) => typeof item === "object" && item !== null && "code" in item);
+      if (!validateBuiltIns) continue;
+      const result = validateAndNormalizeDmlValue(original, infoByCode.get(code)!, numberPrecision);
+      if (!result.ok) builtInErrors.push({ field: code, code: result.code, message: result.message });
+      else candidate.record[code] = { value: preserveCodes ? original as Array<{ code: string }> : result.value };
     }
     if (validateMissingCreateFields && candidate.mode === "create") {
       for (const info of fieldInfos) {
@@ -68,15 +117,15 @@ export function validateDmlCandidates(
         const emptyDefault = isEmptyDmlValue(info.defaultValue);
         if (!emptyDefault) {
           const defaultResult = validateAndNormalizeDmlValue(info.defaultValue, info, numberPrecision);
-          if (!defaultResult.ok) rowErrors.push({
+          if (!defaultResult.ok) builtInErrors.push({
             field: info.code, code: defaultResult.code, message: `既定値: ${defaultResult.message}`,
           });
         } else {
           const emptyResult = validateAndNormalizeDmlValue("", info, numberPrecision);
           if (!emptyResult.ok) {
-            rowErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
+            builtInErrors.push({ field: info.code, code: emptyResult.code, message: emptyResult.message });
           } else if (info.required) {
-            rowErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} は必須です` });
+            builtInErrors.push({ field: info.code, code: "ERR_REQUIRED", message: `${info.code} は必須です` });
           }
         }
       }
@@ -92,14 +141,13 @@ export function validateDmlCandidates(
       };
       try {
         for (const custom of evaluateCustomChecks(checkGroups, row, resolveType)) {
-          rowErrors.push({ field: "", code: "ERR_CHECK", message: custom.message });
+          checkErrors.push({ field: "", code: "ERR_CHECK", message: custom.message });
         }
       } catch (error) {
         firstEvaluationError ??= error;
       }
     }
-    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
-    for (const error of rowErrors) {
+    const materializeErrors = (source: readonly { field: string; code: DmlValidationErrorCode; message: string }[]): ProcessRow[] => source.map((error) => {
       const row: ProcessRow = {};
       for (const field of payloadFields) row[field] = renderValidationValue(candidate.payload.get(field));
       row["$err_statement"] = String(statementNumber);
@@ -112,11 +160,21 @@ export function validateDmlCandidates(
       row["$err_subtable"] = "";
       row["$err_subrow"] = "";
       row["$err_subrow_id"] = "";
-      errors.push(row);
-    }
+      return row;
+    });
+    const materialized = {
+      rowNumber: candidate.rowNumber,
+      preErrors: materializeErrors(preErrors),
+      builtInErrors: materializeErrors(builtInErrors),
+      checkErrors: materializeErrors(checkErrors),
+    };
+    candidateResults.push(materialized);
+    const rowErrors = [...materialized.preErrors, ...materialized.builtInErrors, ...materialized.checkErrors];
+    if (rowErrors.length > 0) invalid.add(candidate.rowNumber);
+    errors.push(...rowErrors);
   }
   if (firstEvaluationError !== undefined) throw firstEvaluationError;
-  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid };
+  return { errors, invalidRows: invalid.size, invalidRowNumbers: invalid, candidateResults };
 }
 
 export function renderValidationValue(value: unknown): string {

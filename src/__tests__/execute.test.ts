@@ -229,6 +229,9 @@ test("UPSERT VALIDATE ONLY は照合readのみ行いsource重複を全行へ返�
     "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
   ]);
   expect(result.errors.map((row) => row.$err_code)).toEqual(["ERR_KEY_DUP_SOURCE", "ERR_KEY_DUP_SOURCE"]);
+  expect(result.errors.map((row) => row.$err_message)).toEqual([
+    "UPSERT ソース内でキーが重複しています", "UPSERT ソース内でキーが重複しています",
+  ]);
   expect(result.errors).toEqual(result.errors.map((row) => expect.objectContaining({
     $err_value: "", $err_subtable: "", $err_subrow: "", $err_subrow_id: "",
   })));
@@ -254,6 +257,130 @@ test("INSERT VALIDATE ONLY はエラー0件でも10メタ列 schema を保持す
     "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
     "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
   ]);
+});
+
+test("B43 Phase 2: loader seam は update-mode を pre -> full post-image -> CHECK・row順で統合し SET 違反を二重計上しない", async () => {
+  const target = makeRecord({ $id: "10", key: "A" });
+  const client = makeClient({ records: [target] });
+  client.getFields = async () => [
+    { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "amount", label: "amount", fieldType: "NUMBER", maxValue: "10" },
+    { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const loaded: number[][] = [];
+  const result = await execute(
+    "UPSERT INTO APP100 (key,amount) VALUES ('A',11),('A',11) ON DUPLICATE (key) " +
+    "CHECK WHEN amount > 0 THEN 'check' VALIDATE ONLY",
+    client,
+    {
+      cacheContext: "b43-phase2-order",
+      loadUpdateModeSnapshots: async ({ candidates, fields }) => {
+        loaded.push(candidates.map((candidate) => candidate.targetId!));
+        expect(fields).toEqual(["$id", "key", "amount", "outside", "Lines"]);
+        return new Map([[10, {
+          "$id": { value: "10" }, key: { value: "A" }, amount: { value: "1" }, outside: { value: "" },
+          Lines: { value: [{ id: "line-1", value: { child: { value: "" } } }] },
+        } as unknown as KintoneRecord]]);
+      },
+    }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(loaded).toEqual([[10, 10]]);
+  expect(result.errors.map((row) => [row.$err_row, row.$err_code])).toEqual([
+    ["1", "ERR_KEY_DUP_SOURCE"], ["1", "ERR_RANGE_MAX"], ["1", "ERR_REQUIRED"], ["1", "ERR_REQUIRED"], ["1", "ERR_CHECK"],
+    ["2", "ERR_KEY_DUP_SOURCE"], ["2", "ERR_RANGE_MAX"], ["2", "ERR_REQUIRED"], ["2", "ERR_REQUIRED"], ["2", "ERR_CHECK"],
+  ]);
+  expect(result.errors.filter((row) => row.$err_field === "amount" && row.$err_code === "ERR_RANGE_MAX")).toHaveLength(2);
+  expect(result.invalidRows).toBe(2);
+});
+
+test("B43 Phase 2: normalized post-image から SET field だけを sparse PUT record へ射影する", async () => {
+  const target = makeTypedRecord({
+    $id: "1", choice: ["A"], outside: "keep",
+    Lines: [{ id: "line-1", value: { child: { value: "ok" } } }],
+  });
+  const client = makeClient({ records: [target] });
+  client.getFields = async () => [
+    { code: "choice", label: "choice", fieldType: "CHECK_BOX", optionOrder: { A: 0, B: 1 } },
+    { code: "outside", label: "outside", fieldType: "SINGLE_LINE_TEXT", required: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE" },
+    { code: "child", label: "child", fieldType: "SINGLE_LINE_TEXT", required: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const batch = await executeBatch(
+    "UPDATE APP100 SET choice = 'A,B' WHERE $id = 1 ON ERROR SKIP INTO #err; SELECT * FROM #err",
+    client,
+    {
+      cacheContext: "b43-phase2-sparse",
+      loadUpdateModeSnapshots: async () => new Map([[1, target]]),
+    }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect(client.putCalls).toHaveLength(1);
+  expect(client.putCalls[0].records).toEqual([{ id: 1, record: { choice: { value: ["A", "B"] } } }]);
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("outside");
+  expect(client.putCalls[0].records[0].record).not.toHaveProperty("Lines");
+});
+
+test("B43 Phase 2: 非 SET の full post-image NUMBER にも共通 precision を適用する", async () => {
+  const target = makeRecord({ $id: "1", memo: "old", outsideNumber: "123" });
+  const client = makeClient({ records: [target] });
+  client.getFields = async () => [
+    { code: "memo", label: "memo", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "outsideNumber", label: "outsideNumber", fieldType: "NUMBER" },
+  ];
+  client.getNumberPrecision = async () => ({ digits: 2, decimalPlaces: 0, roundingMode: "HALF_EVEN" });
+  const result = await execute(
+    "UPDATE APP100 SET memo = 'new' WHERE $id = 1 VALIDATE ONLY",
+    client,
+    {
+      cacheContext: "b43-phase2-full-precision",
+      loadUpdateModeSnapshots: async () => new Map([[1, target]]),
+    }
+  );
+  if (result.type !== "VALIDATION") throw new Error("unexpected result");
+
+  expect(result.errors).toEqual([expect.objectContaining({
+    $err_field: "outsideNumber", $err_code: "ERR_NUMBER_INTEGER_DIGITS",
+  })]);
+  expect(result.invalidRows).toBe(1);
+  expect(client.putCalls).toHaveLength(0);
+});
+
+test("B43 Phase 2: 10メタ列 columnMeta は plain DML error table の同一 schema append を維持する", async () => {
+  const target = makeRecord({ $id: "1", value: "1" });
+  const client = makeClient({ records: [target] });
+  client.getFields = async () => [
+    { code: "value", label: "value", fieldType: "NUMBER", maxValue: "10" },
+  ];
+  const batch = await executeBatch(
+    "INSERT INTO APP100 (value) VALUES (11) VALIDATE ONLY INTO #create_err; " +
+    "UPSERT INTO APP100 (value) VALUES (11) ON DUPLICATE (value) VALIDATE ONLY INTO #create_err; " +
+    "UPDATE APP100 SET value = 11 WHERE $id = 1 VALIDATE ONLY INTO #update_err; " +
+    "UPDATE APP100 SET value = 12 WHERE $id = 1 VALIDATE ONLY INTO #update_err; " +
+    "SELECT $err_statement, $err_operation FROM #create_err ORDER BY $err_statement; " +
+    "SELECT $err_statement, $err_operation FROM #update_err ORDER BY $err_statement",
+    client,
+    {
+      cacheContext: "b43-phase2-column-meta-append",
+      loadUpdateModeSnapshots: async () => new Map([[1, target]]),
+    }
+  );
+
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[4].result as SelectResult).rows).toEqual([
+    { $err_statement: "1", $err_operation: "INSERT" },
+    { $err_statement: "2", $err_operation: "UPSERT" },
+  ]);
+  expect((batch.statements[5].result as SelectResult).rows).toEqual([
+    { $err_statement: "3", $err_operation: "UPDATE" },
+    { $err_statement: "4", $err_operation: "UPDATE" },
+  ]);
+  expect(client.postCalls).toHaveLength(0);
+  expect(client.putCalls).toHaveLength(0);
 });
 
 test("B44 Phase 14c: UPSERT APPLY mutation はallowApplyMutationなしなら単文・バッチとも全 API 前に閉じ、通常 UPSERT は非回帰", async () => {

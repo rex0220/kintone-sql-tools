@@ -130,11 +130,17 @@ import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintone
 export type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
 import {
   renderValidationValue,
+  materializeDmlUpdateModeSparseRecords,
   validateDmlCandidates,
   VALIDATION_META_COLUMNS,
   type DmlValidationCandidate,
   type ValidationOperation,
 } from "./core/dmlValidationCandidates";
+import {
+  buildDmlValidationPostImage,
+  collectDmlPrevalidationSnapshotFields,
+  mergeDmlCandidateValidation,
+} from "./core/dmlPrevalidation";
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
 import {
   buildValidationCellLocator,
@@ -621,6 +627,17 @@ export interface ExecuteOptions {
   dmlMaxSubtableRows?: number;
   /** Surface capability gate. Omitted/false keeps APPLY mutation unavailable. */
   allowApplyMutation?: boolean;
+  /**
+   * B43 Phase 2 test seam. Production snapshot loading is connected in later phases;
+   * omitting this hook preserves the existing records API path and call count.
+   */
+  loadUpdateModeSnapshots?: (input: DmlUpdateModeSnapshotLoadInput) => Promise<ReadonlyMap<number, KintoneRecord>>;
+}
+
+export interface DmlUpdateModeSnapshotLoadInput {
+  readonly appId: number;
+  readonly candidates: readonly DmlValidationCandidate[];
+  readonly fields: readonly string[];
 }
 
 // ============================================================
@@ -4765,15 +4782,86 @@ async function prepareDmlValidation(
     await assertDmlWhereCapability(stmt, client, cacheContext);
   }
   const infoByCode = new Map(fieldInfos.map((field) => [field.code, field]));
-  const numberPrecision = await loadNumberPrecisionForTargets(
+  let numberPrecision = await loadNumberPrecisionForTargets(
     stmt.appId, targetFields, fieldInfos, client, cacheContext
   );
 
-  const candidates = await materializeValidationCandidates(stmt, operation, client, options, cacheContext, tempTables, infoByCode);
-  const { errors, invalidRows, invalidRowNumbers } = validateDmlCandidates(
+  const candidates = (await materializeValidationCandidates(
+    stmt, operation, client, options, cacheContext, tempTables, infoByCode
+  )).sort((left, right) => left.rowNumber - right.rowNumber);
+  const updateCandidates = candidates.filter((candidate) => candidate.mode === "update");
+  const usePreparedPostImages = updateCandidates.length > 0 && options.loadUpdateModeSnapshots !== undefined;
+  const preparedPostImages = new Map<number, ReturnType<typeof validatePostImage>>();
+  if (usePreparedPostImages) {
+    materializeDmlUpdateModeSparseRecords(updateCandidates, targetFields, fieldInfos);
+    const fieldIndex = buildPostImageFieldIndex(fieldInfos, payloadFields);
+    const snapshots = await options.loadUpdateModeSnapshots!({
+      appId: stmt.appId,
+      candidates: updateCandidates,
+      fields: collectDmlPrevalidationSnapshotFields(fieldIndex),
+    });
+    const postImages = new Map<number, KintoneRecord>();
+    for (const candidate of updateCandidates) {
+      if (candidate.targetId === undefined) {
+        throw new Error(`InternalError: update-mode validation candidate has no targetId (row=${candidate.rowNumber}).`);
+      }
+      const snapshot = snapshots.get(candidate.targetId);
+      if (!snapshot) {
+        throw new Error(`InternalError: update-mode snapshot is missing for record ${candidate.targetId}.`);
+      }
+      const postImage = buildDmlValidationPostImage(snapshot, candidate.record ?? {});
+      postImages.set(candidate.rowNumber, postImage);
+    }
+    if (numberPrecision === undefined && [...postImages.values()].some((record) =>
+      postImageNeedsNumberPrecision(record, fieldIndex)
+    )) {
+      numberPrecision = await getNumberPrecisionCached(stmt.appId, client, cacheContext);
+    }
+    for (const candidate of updateCandidates) {
+      const postImage = postImages.get(candidate.rowNumber);
+      if (!postImage) throw new Error(`InternalError: validation post-image is missing for row ${candidate.rowNumber}.`);
+      preparedPostImages.set(candidate.rowNumber, validatePostImage(
+        postImage, fieldIndex, numberPrecision, statementNumber, candidate.rowNumber, operation
+      ));
+    }
+  }
+  const candidateValidation = validateDmlCandidates(
     candidates, operation, payloadFields, targetFields, fieldInfos, statementNumber, numberPrecision,
-    stmt.checkGroups ?? [], validateMissingCreateFields, includePreErrors
+    stmt.checkGroups ?? [], validateMissingCreateFields, includePreErrors,
+    { validateUpdateBuiltIns: !usePreparedPostImages }
   );
+  let { errors, invalidRows, invalidRowNumbers } = candidateValidation;
+  if (usePreparedPostImages) {
+    const detailsByRow = new Map(candidateValidation.candidateResults.map((detail) => [detail.rowNumber, detail]));
+    errors = [];
+    invalidRowNumbers = new Set<number>();
+    for (const candidate of candidates) {
+      const detail = detailsByRow.get(candidate.rowNumber);
+      if (!detail) throw new Error(`InternalError: validation detail is missing for row ${candidate.rowNumber}.`);
+      if (candidate.mode === "create") {
+        const candidateErrors = [...detail.preErrors, ...detail.builtInErrors, ...detail.checkErrors];
+        errors.push(...candidateErrors);
+        if (candidateErrors.length > 0) invalidRowNumbers.add(candidate.rowNumber);
+        continue;
+      }
+      const postImageValidation = preparedPostImages.get(candidate.rowNumber);
+      if (!postImageValidation) {
+        throw new Error(`InternalError: prepared post-image validation is missing for row ${candidate.rowNumber}.`);
+      }
+      const merged = mergeDmlCandidateValidation({
+        rowNumber: candidate.rowNumber,
+        setFields: targetFields,
+        normalizedPostImage: postImageValidation.normalizedRecord,
+        preErrors: detail.preErrors,
+        postImageErrors: postImageValidation.errors,
+        checkErrors: detail.checkErrors,
+      });
+      candidate.record = merged.writeRecord;
+      errors.push(...merged.errors);
+      for (const rowNumber of merged.invalidRowNumbers) invalidRowNumbers.add(rowNumber);
+    }
+    invalidRows = invalidRowNumbers.size;
+  }
   const columns = [...payloadFields, ...VALIDATION_META_COLUMNS];
   const result: DmlValidationResult = {
     type: "VALIDATION",
