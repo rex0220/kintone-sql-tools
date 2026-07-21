@@ -32,7 +32,7 @@ describe("B55 complete function catalog", () => {
 
   test("aggregate catalog matches the frozen parser aggregate acceptance set", () => {
     expect(sorted(KSQL_FUNCTION_CATALOG.aggregate)).toEqual(sorted(PARSER_AGGREGATE_FUNCTIONS));
-    expect(KSQL_FUNCTION_CATALOG.aggregate).toHaveLength(11);
+    expect(KSQL_FUNCTION_CATALOG.aggregate).toHaveLength(12);
   });
 
   test("fixture keys match parser spellings in both directions and every SQL parses", () => {

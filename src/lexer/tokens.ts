@@ -77,6 +77,7 @@ export const enum TokenKind {
   VAR_POP = "VAR_POP",
   VAR_SAMP = "VAR_SAMP",
   MEDIAN = "MEDIAN",
+  MODE = "MODE",
 
   // キーワード ― ウィンドウ関数（OVER / PARTITION はソフトキーワード）
   ROW_NUMBER = "ROW_NUMBER",
@@ -248,6 +249,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["VAR_POP", TokenKind.VAR_POP],
   ["VAR_SAMP", TokenKind.VAR_SAMP],
   ["MEDIAN", TokenKind.MEDIAN],
+  ["MODE", TokenKind.MODE],
   ["ROW_NUMBER", TokenKind.ROW_NUMBER],
   ["RANK",       TokenKind.RANK],
   ["DENSE_RANK", TokenKind.DENSE_RANK],

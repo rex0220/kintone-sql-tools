@@ -272,7 +272,7 @@ export interface AggregateColumn {
 
 export type AggregateFunc =
   | "COUNT" | "SUM" | "AVG" | "MAX" | "MIN" | "GROUP_CONCAT"
-  | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" | "MEDIAN";
+  | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" | "MEDIAN" | "MODE";
 
 export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
 

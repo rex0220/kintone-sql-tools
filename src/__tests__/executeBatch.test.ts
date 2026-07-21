@@ -1315,6 +1315,71 @@ test("B56: SET スカラーサブクエリの統計結果を数値変数とし�
   expect(mock.getCalls.find((call) => call.app === 8116)?.query).not.toContain('売上 > "1"');
 });
 
+test("B58: SET MODE は数値列・文字列・算術式・型不明 temp の型契約を守る", async () => {
+  const numericClient = makeClient({
+    recordsByApp: {
+      8201: [makeRecord({ $id: "1", x: "10" }), makeRecord({ $id: "2", x: "10" }), makeRecord({ $id: "3", x: "2" })],
+      8202: [makeRecord({ $id: "1", x: "20" })],
+    },
+    fieldTypes: { x: "NUMBER" },
+  });
+  const numeric = await executeBatch(
+    "SET @m = (SELECT MODE(x) FROM APP8201); SELECT $id FROM APP8202 WHERE x = @m",
+    numericClient,
+    { cacheContext: "b58-set-number" }
+  );
+  expect(numeric.ok).toBe(true);
+  expect(numericClient.getCalls.find((call) => call.app === 8202)?.query).toContain("x = 10");
+  expect(numericClient.getCalls.find((call) => call.app === 8202)?.query).not.toContain('x = "10"');
+
+  const textClient = makeClient({
+    recordsByApp: {
+      8203: [makeRecord({ $id: "1", code: "A" }), makeRecord({ $id: "2", code: "A" })],
+      8204: [makeRecord({ $id: "1", code: "Z" })],
+    },
+    fieldTypes: { code: "SINGLE_LINE_TEXT" },
+  });
+  const text = await executeBatch(
+    "SET @m = (SELECT MODE(code) FROM APP8203); SELECT $id FROM APP8204 WHERE code = @m",
+    textClient,
+    { cacheContext: "b58-set-text" }
+  );
+  expect(text.ok).toBe(true);
+  expect(textClient.getCalls.find((call) => call.app === 8204)?.query).toContain('code = "A"');
+
+  const expressionClient = makeClient({
+    recordsByApp: {
+      8205: [makeRecord({ $id: "1", x: "10" }), makeRecord({ $id: "2", x: "10" })],
+      8206: [makeRecord({ $id: "1", x: "20" })],
+    },
+    fieldTypes: { x: "NUMBER" },
+  });
+  const expression = await executeBatch(
+    "SET @m = (SELECT MODE(x + 0) FROM APP8205); SELECT $id FROM APP8206 WHERE x = @m",
+    expressionClient,
+    { cacheContext: "b58-set-expression" }
+  );
+  expect(expression.ok).toBe(true);
+  expect(expressionClient.getCalls.find((call) => call.app === 8206)?.query).toContain("x = 10");
+
+  const unknownClient = makeClient({
+    recordsByApp: {
+      8207: [makeRecord({ $id: "1", code: "10" })],
+      8208: [makeRecord({ $id: "1", code: "20" })],
+    },
+    fieldTypes: { code: "SINGLE_LINE_TEXT" },
+  });
+  const unknown = await executeBatch(
+    "CREATE TEMP TABLE #u AS SELECT (SELECT code FROM APP8207 LIMIT 1) AS v FROM APP8207 LIMIT 1;" +
+      "SET @m = (SELECT MODE(v) FROM #u);" +
+      "SELECT $id FROM APP8208 WHERE code = @m",
+    unknownClient,
+    { cacheContext: "b58-set-unknown-temp" }
+  );
+  expect(unknown.ok).toBe(true);
+  expect(unknownClient.getCalls.find((call) => call.app === 8208)?.query).toContain('code = "10"');
+});
+
 test("B56: temp 実体化後の統計列を数値順で ORDER BY する", async () => {
   const r = await executeBatch(
     "CREATE TEMP TABLE #stats AS " +

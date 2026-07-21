@@ -937,6 +937,13 @@ test("B56: EXPLAIN は統計集約の完全入力理由を表示する", async (
   expect(plan).toContain("  onLimit=truncate: disabled");
 });
 
+test("B58: EXPLAIN は MODE の完全入力理由を表示する", async () => {
+  const plan = await explain("EXPLAIN SELECT MODE(ステータス) AS mode FROM APP100");
+  expect(plan).toContain("  complete input: required (onLimit=truncate disabled)");
+  expect(plan).toContain("  complete input reason: STATISTICAL_AGGREGATE");
+  expect(plan).toContain("  onLimit=truncate: disabled");
+});
+
 test("B56: constant-false WHERE の EXPLAIN は完全入力表示を免除する", async () => {
   const plans = await buildBatchExplainPlans(
     "SET @empty=[]; SELECT MEDIAN(金額) AS med FROM APP100 WHERE 金額 IN @empty"

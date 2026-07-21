@@ -55,12 +55,12 @@ import {
   resolveFieldRef,
   evalScalarValueExpr,
 } from "./evalFunc";
-import { compareCanonicalValues } from "../core/scalarCompare";
+import { compareCanonicalValues, compareCodePointStrings } from "../core/scalarCompare";
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
 
 export { ProcessRow };
 
-/** MIN/MAX の直接フィールド参照を数値順・文字列順へ分類する。 */
+/** MIN/MAX/MODE の直接フィールド参照に比較 semantics を解決する。 */
 export type AggregateSortKindResolver =
   (field: FieldRef) => "number" | "string" | ResolvedFieldSemantics | undefined;
 
@@ -364,15 +364,35 @@ function evalAggregate(
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
 
-  const comparison = (func === "MIN" || func === "MAX") && arg.type === "FIELD_REF"
+  const comparison = (func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF"
     ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
     : undefined;
+  const semantics = typeof comparison === "string"
+    ? syntheticSemantics(comparison)
+    : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
+  if (func === "MODE") {
+    if (strValues.length === 0) return "";
+    const frequencies = new Map<string, number>();
+    for (const value of strValues) frequencies.set(value, (frequencies.get(value) ?? 0) + 1);
+    let result = "";
+    let maxFrequency = 0;
+    for (const [candidate, frequency] of frequencies) {
+      if (frequency > maxFrequency) {
+        result = candidate;
+        maxFrequency = frequency;
+        continue;
+      }
+      if (frequency !== maxFrequency) continue;
+      const canonical = compareCanonicalValues(candidate, result, semantics);
+      if (canonical < 0 || (canonical === 0 && compareCodePointStrings(candidate, result) < 0)) {
+        result = candidate;
+      }
+    }
+    return result;
+  }
   if (func === "MIN" || func === "MAX") {
     const comparableValues = eff as string[];
     if (comparableValues.length === 0) return 0;
-    const semantics = typeof comparison === "string"
-      ? syntheticSemantics(comparison)
-      : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
     let result = comparableValues[0];
     for (const candidate of comparableValues.slice(1)) {
       const cmp = compareCanonicalValues(candidate, result, semantics);
@@ -1116,7 +1136,7 @@ export interface FullScanInput {
   /** HAVING 用。集計列 alias を物理フィールドと誤認しない解決器 */
   havingFieldTypeResolver?: FieldTypeResolver;
   havingFieldSemanticsResolver?: FieldSemanticsResolver;
-  /** MIN/MAX の直接フィールド参照用ソート種別解決器。 */
+  /** MIN/MAX/MODE の直接フィールド参照用比較 semantics 解決器。 */
   aggregateSortKindResolver?: AggregateSortKindResolver;
   /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
   appliedKlikes?: ReadonlySet<object>;
