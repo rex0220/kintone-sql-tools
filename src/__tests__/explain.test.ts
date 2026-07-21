@@ -104,6 +104,68 @@ test("B44 Phase 5: UPDATE APPLY EXPLAIN は固定順の静的planだけを返し
   expect(putRecords).not.toHaveBeenCalled();
 });
 
+test("B47-P3: UPDATE APPLY EXPLAINはselection planとfail-closed契約をrecords API 0で表示する", async () => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const client: KintoneClient = {
+    ...makeClient(),
+    getRecords,
+    getFields: async () => [
+      { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+      { code: "金額", label: "金額", fieldType: "NUMBER", writable: true },
+      { code: "タイトル", label: "タイトル", fieldType: "SINGLE_LINE_TEXT", writable: true },
+      { code: "説明", label: "説明", fieldType: "MULTI_LINE_TEXT", writable: true },
+      { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+      { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+    ],
+  };
+  const result = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE 金額 > 0 AND 説明 KLIKE '至急' AND タイトル LIKE 'B44%' "
+      + "APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    client,
+    { cacheContext: "b47-p3-explain", maxRecords: 321, dmlMaxRows: 7 }
+  ) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+
+  expect(plan).toEqual(expect.arrayContaining([
+    "parent cardinality:     multiple",
+    "parent selection:       safe prefilter + JS residual evaluation",
+    'kintone prefilter:      金額 > 0 and 説明 like "至急"',
+    "JS residual:            original parent WHERE",
+    "applied KLIKE:          1",
+    "unapplied KLIKE:        0",
+    "candidate limit:        maxRecords=321, onLimit=error, stopAfter=none",
+    "target guard:           dmlMaxRows=7 after JS residual evaluation",
+    "search abort:           DML fail-closed (B7-P3; all surfaces, no surface gate)",
+    "records API:            0",
+    "mutation API:           0",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+});
+
+test("B47-P3: UPDATE APPLY EXPLAINはunapplied KLIKE件数とunsupported理由をAPI 0で表示する", async () => {
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const client: KintoneClient = {
+    ...makeClient(), getRecords,
+    getFields: async () => [
+      { code: "親", label: "親", fieldType: "SINGLE_LINE_TEXT", writable: true },
+      { code: "説明", label: "説明", fieldType: "MULTI_LINE_TEXT", writable: true },
+      { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE", writable: false },
+      { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "テーブル" },
+    ],
+  };
+  const result = await execute(
+    "EXPLAIN UPDATE APP4221 SET 親='after' WHERE NOT (説明 KLIKE '至急') APPLY テーブル (PATCH SET 子='x' ALL ROWS)",
+    client,
+    { cacheContext: "b47-p3-explain-unapplied" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.plan)).toEqual(expect.arrayContaining([
+    "kintone prefilter:      (none; empty query)",
+    "applied KLIKE:          0",
+    "unapplied KLIKE:        1 (unsupported: cannot be fully applied to native query)",
+  ]));
+  expect(getRecords).not.toHaveBeenCalled();
+});
+
 test.each([
   [
     "INSERT",

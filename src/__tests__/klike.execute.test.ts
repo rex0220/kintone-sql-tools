@@ -138,7 +138,7 @@ test("KLIKE を含む DML は対象取得・書き込み前に拒否する", asy
   await expect(execute(
     "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'",
     client
-  )).rejects.toThrow(/全 DML/);
+  )).rejects.toThrow(/通常の DML/);
   expect(client.getCalls).toHaveLength(0);
   expect(client.writeCalls).toBe(0);
 });

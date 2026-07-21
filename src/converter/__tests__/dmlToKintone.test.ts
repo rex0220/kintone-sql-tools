@@ -183,7 +183,8 @@ test("親 UPDATE / DELETE でも KLIKE を中央ガードで拒否する", () =>
   const update = parse("UPDATE APP100 SET f = 'v' WHERE 件名 KLIKE '報告'") as UpdateStatement;
   const del = parse("DELETE FROM APP100 WHERE 件名 NOT KLIKE '一時'") as DeleteStatement;
   expect(() => updateToGetQuery(update)).toThrow(DmlConvertError);
-  expect(() => updateToGetQuery(update)).toThrow(/全 DML/);
+  expect(() => updateToGetQuery(update)).toThrow(/通常の親レコード DML/);
+  expect(() => updateToGetQuery(update)).toThrow(/APPLY 複数親 UPDATE/);
   expect(() => deleteToGetQuery(del)).toThrow(DmlConvertError);
 });
 

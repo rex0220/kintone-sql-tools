@@ -100,7 +100,7 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
-import { buildApplyParentSelectionPlan } from "./core/optimization/applyParentSelectionPlan";
+import { buildApplyParentSelectionPlan, type ApplyParentSelectionPlan } from "./core/optimization/applyParentSelectionPlan";
 import {
   planCanonicalOrder,
   type CanonicalOrderPlan,
@@ -871,7 +871,7 @@ async function executeParsedStatement(
   cacheContext: string
 ): Promise<ExecuteResult> {
   const unresolved = findVariableRef(stmt);
-  if (unresolved !== null) {
+  if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
   }
   assertApplyScope("phase15b", stmt);
@@ -6494,11 +6494,27 @@ async function executeMultipleParentApplyPreflight(
   return { ...result, diagnostic: withApplyDiagnosticProgress(diagnostic, result) };
 }
 
-/** P2 carve-out: APPLY 複数親 UPDATE の親 WHERE に LIKE / NOT LIKE がある場合だけ。 */
+/** B47 carve-out: APPLY 複数親 UPDATE の親 WHERE に LIKE / KLIKE がある場合だけ。 */
 function usesApplyParentResidualSelection(stmt: UpdateStatement): boolean {
   return (stmt.applyBlocks?.length ?? 0) > 0
     && !isSinglePositiveRecordIdWhere(stmt.where)
-    && whereHasLike(stmt.where);
+    && (whereHasLike(stmt.where) || whereHasKlike(stmt.where));
+}
+
+function isApplyParentKlikeStatement(stmt: Statement): boolean {
+  const target = stmt.type === "EXPLAIN" ? stmt.query : stmt;
+  return target.type === "UPDATE"
+    && usesApplyParentResidualSelection(target)
+    && whereHasKlike(target.where);
+}
+
+const APPLY_PARENT_UNAPPLIED_KLIKE_ERROR =
+  "APPLY 複数親 UPDATE の親 WHERE に、安全に押し下げられない KLIKE / NOT KLIKE があります。\n" +
+  "OR / NOT 配下など native query へ完全に適用できない KLIKE は使用できません。\n" +
+  "WHERE を AND の安全な KLIKE 条件へ書き換えるか、SELECT で確認した $id IN (...) を使用してください。";
+
+function assertApplyParentKlikesFullyApplied(plan: ApplyParentSelectionPlan): void {
+  if (plan.unappliedKlikes.length > 0) throw new Error(`UnsupportedError: ${APPLY_PARENT_UNAPPLIED_KLIKE_ERROR}`);
 }
 
 async function selectApplyParentSnapshots(
@@ -6515,6 +6531,8 @@ async function selectApplyParentSnapshots(
     ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
     : []));
   const selectionPlan = buildApplyParentSelectionPlan(stmt.where, { fieldTypes, fieldOptions });
+  // native 適用集合の完全性を records API より前に確定する。一部適用での継続は禁止。
+  assertApplyParentKlikesFullyApplied(selectionPlan);
   const prefilterQuery = selectionPlan.prefilter === null
     ? ""
     : whereToKintone(selectionPlan.prefilter);
@@ -7848,6 +7866,7 @@ interface ValidateExplainInfo {
 }
 
 const validateExplainInfo = new WeakMap<ValidateStatement, ValidateExplainInfo>();
+const applyParentExplainPlan = new WeakMap<UpdateStatement, ApplyParentSelectionPlan>();
 
 async function buildExplainWhereAnalysis(
   query: unknown,
@@ -8000,12 +8019,21 @@ async function buildExplainWhereAnalysis(
         const update = node as UpdateStatement;
         const fields = await getFieldsCached(update.appId, tracedClient, cacheContext);
         resolveApplyPatchMetadata(update, fields);
+        if (usesApplyParentResidualSelection(update)) {
+          const topLevel = fields.filter((field) => !field.inSubtable);
+          const selectionPlan = buildApplyParentSelectionPlan(update.where, {
+            fieldTypes: new Map(topLevel.map((field) => [field.code, field.fieldType])),
+            fieldOptions: new Map(topLevel.flatMap((field) => field.optionOrder
+              ? [[field.code, new Set(Object.keys(field.optionOrder))] as const]
+              : [])),
+          });
+          applyParentExplainPlan.set(update, selectionPlan);
+        }
       }
-      await assertDmlWhereCapability(
-        node as UpdateStatement | DeleteStatement,
-        tracedClient,
-        cacheContext
-      );
+      const dml = node as UpdateStatement | DeleteStatement;
+      if (dml.type !== "UPDATE" || !usesApplyParentResidualSelection(dml)) {
+        await assertDmlWhereCapability(dml, tracedClient, cacheContext);
+      }
     }
     await Promise.all(Object.values(typed).map(visit));
   };
@@ -8248,7 +8276,7 @@ async function executeExplain(
     ...addCursorConcurrency(
       buildExplainPlan(
         stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
-        dmlMaxRows, dmlMaxSubtableRows
+        dmlMaxRows, dmlMaxSubtableRows, maxRecords
       ),
       cursorMaxActive
     ),
@@ -8279,7 +8307,8 @@ function buildExplainPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  maxRecords = 10_000
 ): string[] {
   if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
   if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
@@ -8288,7 +8317,7 @@ function buildExplainPlan(
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
   if (query.type === "UPDATE")        return buildUpdatePlan(
-    query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows
+    query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows, maxRecords
   );
   if (query.type === "DELETE")        return buildDeletePlan(query, label);
   if (query.type === "REORDER")       return buildReorderPlan(query, label);
@@ -8668,10 +8697,11 @@ function buildUpdatePlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  maxRecords = 10_000
 ): string[] {
   if (stmt.applyBlocks?.length) {
-    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows);
+    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows, maxRecords);
   }
   const isArith  = hasArithAssignment(stmt);
   const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
@@ -8726,7 +8756,8 @@ function buildUpdateApplyPlan(
   stmt: UpdateStatement,
   label: string | undefined,
   dmlMaxRows: number,
-  dmlMaxSubtableRows: number
+  dmlMaxSubtableRows: number,
+  maxRecords: number
 ): string[] {
   const diagnostic = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
   const branch = diagnostic.branches[0];
@@ -8744,12 +8775,25 @@ function buildUpdateApplyPlan(
   });
   const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
   const hasRemove = operationKinds.includes("REMOVE");
+  const selectionPlan = applyParentExplainPlan.get(stmt);
+  const selectionLines = selectionPlan ? [
+    "parent selection:       safe prefilter + JS residual evaluation",
+    `kintone prefilter:      ${selectionPlan.prefilter === null ? "(none; empty query)" : whereToKintone(selectionPlan.prefilter)}`,
+    "JS residual:            original parent WHERE",
+    `applied KLIKE:          ${selectionPlan.appliedKlikes.size}`,
+    `unapplied KLIKE:        ${selectionPlan.unappliedKlikes.length}${selectionPlan.unappliedKlikes.length > 0
+      ? " (unsupported: cannot be fully applied to native query)" : ""}`,
+    `candidate limit:        maxRecords=${maxRecords}, onLimit=error, stopAfter=none`,
+    `target guard:           dmlMaxRows=${dmlMaxRows} after JS residual evaluation`,
+    "search abort:           DML fail-closed (B7-P3; all surfaces, no surface gate)",
+  ] : [];
   return [
     ...(label ? [label] : []),
     "statement:              UPDATE APPLY",
     `target app:             APP${stmt.appId}`,
     `parent selector:        ${safeWhereToKintone(stmt.where)}`,
-    "parent cardinality:     single",
+    `parent cardinality:     ${isSinglePositiveRecordIdWhere(stmt.where) ? "single" : "multiple"}`,
+    ...selectionLines,
     `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,

@@ -62,11 +62,18 @@ test("非インライン CTE / 一時テーブル上の KLIKE はインメモリ
 });
 
 test.each([
-  "UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'",
-  "DELETE FROM APP100 WHERE 件名 NOT KLIKE '至急'",
-  "REORDER APP100$明細 BY 商品名 WHERE _rid = '1' AND 商品名 KLIKE '至急'",
-  "INSERT INTO APP100 (件名) SELECT 件名 FROM APP200 WHERE 件名 KLIKE '至急'",
-  "EXPLAIN UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'",
-])("ネストした SELECT を含む全 DML で KLIKE を拒否する — %s", (sql) => {
-  expect(() => validateKlikeStatement(raw(sql))).toThrow(/全 DML/);
+  ["UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'", /通常の DML/],
+  ["DELETE FROM APP100 WHERE 件名 NOT KLIKE '至急'", /全 DML/],
+  ["REORDER APP100$明細 BY 商品名 WHERE _rid = '1' AND 商品名 KLIKE '至急'", /全 DML/],
+  ["INSERT INTO APP100 (件名) SELECT 件名 FROM APP200 WHERE 件名 KLIKE '至急'", /全 DML/],
+  ["EXPLAIN UPDATE APP100 SET 状態 = '完了' WHERE 件名 KLIKE '至急'", /通常の DML/],
+])("B47-P3: 通常DMLのKLIKE拒否を維持する — %s", (sql, message) => {
+  expect(() => validateKlikeStatement(raw(sql as string))).toThrow(message as RegExp);
+});
+
+test.each([
+  "UPDATE APP100 SET 状態='完了' WHERE 件名 KLIKE '至急' APPLY 明細 (PATCH SET 商品名='x' ALL ROWS)",
+  "EXPLAIN UPDATE APP100 SET 状態='完了' WHERE 件名 NOT KLIKE '至急' APPLY 明細 (PATCH SET 商品名='x' ALL ROWS)",
+])("B47-P3: APPLY複数親UPDATEの親KLIKEだけ共通validationを通す — %s", (sql) => {
+  expect(() => validateKlikeStatement(raw(sql))).not.toThrow();
 });

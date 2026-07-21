@@ -2,6 +2,7 @@ import { resolveSelectMode } from "../converter/selectToKintone";
 import { isKlike, whereHasKlike } from "./like";
 import { buildInlinedQuery, canInlineSingleCte } from "./cteInlining";
 import { buildKlikePushdownPlan, unappliedKlikes, type KlikePushdownPlan } from "./optimization/klikePushdownPlan";
+import { isSinglePositiveRecordIdWhere } from "./applyPatchScope";
 import type {
   SelectStatement,
   Statement,
@@ -25,7 +26,7 @@ export class KlikeValidationError extends Error {
  * - KLIKE は WHERE だけで使用可能。FULL_SCAN では共有計画に入る AND リーフに限定
  * - 右辺は文字列または未解決のバッチ変数だけ
  * - kintone が検索語から除外する % は拒否
- * - DML はネストした SELECT を含めて全面拒否
+ * - DML は APPLY 複数親 UPDATE の安全な親 WHERE だけを carve-out し、他は拒否
  */
 export function validateKlikeStatement(stmt: Statement): void {
   validateStatement(stmt);
@@ -62,11 +63,22 @@ function validateStatement(stmt: Statement): void {
     case "ASSERT":
       validateNestedSelects(stmt);
       return;
+    case "UPDATE":
+      if (stmt.applyBlocks?.length && !isSinglePositiveRecordIdWhere(stmt.where) && whereHasKlike(stmt.where)) {
+        validateKlikeWhereExpressions(stmt.where);
+        validateNestedSelects(stmt);
+        return;
+      }
+      if (containsKlike(stmt)) {
+        throw new KlikeValidationError(
+          "KLIKE / NOT KLIKE は通常の DML では使用できません。APPLY 複数親 UPDATE の安全な親 WHERE だけが対応しています"
+        );
+      }
+      return;
     case "INSERT":
     case "INSERT_SELECT":
     case "UPSERT":
     case "UPSERT_SELECT":
-    case "UPDATE":
     case "DELETE":
     case "REORDER":
       if (containsKlike(stmt)) {
@@ -85,6 +97,23 @@ function validateStatement(stmt: Statement): void {
     case "DROP_TEMP_TABLE":
       return;
   }
+}
+
+function validateKlikeWhereExpressions(where: WhereExpr): void {
+  walkWithoutNestedSelects(where, (expr) => {
+    if (!isKlike(expr)) return;
+    const right = expr.right;
+    if (right.type !== "STRING" && right.type !== "VARIABLE") {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE の右辺には文字列リテラルまたは文字列バッチ変数が必要です"
+      );
+    }
+    if (right.type === "STRING" && right.value.includes("%")) {
+      throw new KlikeValidationError(
+        "KLIKE / NOT KLIKE の検索語に % は使用できません。SQL ワイルドカード検索には LIKE を使用してください"
+      );
+    }
+  });
 }
 
 function validateSelectLike(query: SelectStatement | UnionStatement | WithStatement): void {
