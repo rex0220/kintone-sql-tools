@@ -1,7 +1,7 @@
 # B59 — `ORDER BY <alias>` が黙って無視される（silent wrong order）
 
 - 起票日: 2026-07-22
-- ステータス: 🐞 **起票（B57 実機で発見・診断一次済み・修正未着手）**
+- ステータス: 📋 **[修正仕様 R2](ksql_b59_orderby_alias_fix_spec.md) 確定・実装着手（2026-07-22・影響マトリクス実測済＝集計/WINDOW/CTE alias は正常・非集計 alias が全滅。codex 仕様レビューで R1 前提誤り2件を訂正＝未知キーは既に ORDER_KEY_UNRESOLVED fail-closed・解決優先は alias 完全一致で三層統一）**
 - 種別: バグ（正しさ・silent wrong results 級）
 - 効果種別: 正しさ
 - 優先: **高**（エラーにならず誤った並びを返す）
