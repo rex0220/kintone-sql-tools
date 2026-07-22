@@ -2,6 +2,15 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.16.0（2026-07-23）
+
+### 機能追加（B64 集計関数引数のスカラー値式対応）
+
+- 集計関数の引数を算術式限定から `AggregateArgExpr = ArithNode | ScalarValueExpr` へ拡張し、全 12 集計（`SUM`/`COUNT`/`AVG`/`MIN`/`MAX`/`GROUP_CONCAT`/統計集約/`MODE`）で `CASE` 式・`||` 連結・裸のスカラー変数 `@var` を受理するようにした。条件付き集計 `SUM(CASE WHEN 区分='受注' THEN 売上 END)` を直接書ける（従来は CTE 経由の回避が必要だった）。旧算術式引数を優先する二段パースで既存 AST・結果・snapshot は不変。
+- 比較・述語（`SUM(売上 > 0)` など）は kSQL に boolean 型がないため引き続き非対応とし、`CASE` で値を明示する専用エラーで案内する。サブクエリ・ネスト集約・`MODE(DISTINCT)` も従来どおり拒否する。
+- 評価は集計入力専用の nullable 評価を導入し、`CASE` の非一致（ELSE 省略）は集計から除外、一致した空セル・明示 `ELSE ''` は `MIN`/`MAX` の canonical empty band に残す。`MIN`/`MAX`/`MODE` の比較メタは引数式全体から推論する。`GROUP_CONCAT`・統計集約・`MODE` の既存の空値・完全入力・DISTINCT 規約は維持する。
+- `HAVING` の集計参照を SELECT と共通の AST ベース canonical serializer へ統合し、空白・キーワード大小に依存しない合成名で SELECT 列キーと byte 一致させる。SQL 挙動は新規受理構文の追加のみで既存は不変（SemVer=minor）。
+
 ## v3.15.0（2026-07-22）
 
 ### 改善（B62 AI 可視性の注記強化）

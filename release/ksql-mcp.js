@@ -32371,6 +32371,121 @@ function numberLiteralText(node) {
   return toPlainDecimal(source) ?? source;
 }
 
+// src/core/aggregateExpression.ts
+init_define_KSQL_DOCS();
+function quote(value) {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+function arithLabel(node, topLevel = false) {
+  if (node.type === "FIELD_REF") return node.field;
+  if (node.type === "NUMBER") return numberLiteralText(node);
+  if (node.type === "STRING_FUNC") return stringFuncLabel(node);
+  const label = `${arithLabel(node.left)}${node.op}${arithLabel(node.right)}`;
+  return topLevel ? label : `(${label})`;
+}
+function fieldValueLabel(value) {
+  if (value.type === "FIELD") return value.tableAlias ? `${value.tableAlias}.${value.field}` : value.field;
+  if (value.type === "FUNC_FIELD") return stringFuncLabel(value.expr);
+  if (value.type === "ARITH_FIELD") return arithLabel(value.expr);
+  return caseLabel(value.expr);
+}
+function sqlValueLabel(value) {
+  switch (value.type) {
+    case "STRING":
+      return quote(value.value);
+    case "NUMBER":
+      return numberLiteralText(value);
+    case "VARIABLE":
+      return `@${value.name}`;
+    case "VARIABLE_IN_LIST":
+      return `@${value.name}`;
+    case "KINTONE_FUNC":
+      return `${value.name}()`;
+    case "ARRAY":
+      return `[${value.elements.map((entry) => quote(entry.value)).join(",")}]`;
+    case "IN_LIST":
+      return `(${value.values.map(sqlValueLabel).join(",")})`;
+    case "ARITH_VALUE":
+      return arithLabel(value.expr);
+    case "CASE_VALUE":
+      return caseLabel(value.expr);
+    case "SUBQUERY_IN_LIST":
+      return "(SUBQUERY)";
+    case "SCALAR_SUBQUERY":
+      return "(SUBQUERY)";
+  }
+}
+function whereLabel(expr) {
+  switch (expr.type) {
+    case "BINARY":
+      return `${fieldValueLabel(expr.left)} ${expr.op.replace("_", " ")} ${sqlValueLabel(expr.right)}`;
+    case "NULL_CHECK":
+      return `${fieldValueLabel(expr.field)} IS ${expr.not ? "NOT " : ""}NULL`;
+    case "LOGICAL":
+      return `(${whereLabel(expr.left)} ${expr.op} ${whereLabel(expr.right)})`;
+    case "NOT":
+      return `NOT (${whereLabel(expr.expr)})`;
+    case "GROUP":
+      return `(${whereLabel(expr.expr)})`;
+    case "BOOLEAN":
+      return expr.value ? "TRUE" : "FALSE";
+    case "EXISTS":
+      return `${expr.not ? "NOT " : ""}EXISTS (SUBQUERY)`;
+  }
+}
+function caseResultLabel(result) {
+  if (result.type === "ARRAY") return `[${result.elements.map((entry) => quote(entry.value)).join(",")}]`;
+  if (result.type === "FIELD_REF" || result.type === "ARITH") return arithLabel(result);
+  return scalarValueLabel(result);
+}
+function caseLabel(expr) {
+  const branches = expr.branches.map((branch) => `WHEN ${whereLabel(branch.condition)} THEN ${caseResultLabel(branch.result)}`).join(" ");
+  const otherwise = expr.elseResult === null ? "" : ` ELSE ${caseResultLabel(expr.elseResult)}`;
+  return `CASE ${branches}${otherwise} END`;
+}
+function stringFuncArgLabel(arg) {
+  if (arg.type === "AGG_REF") return aggregateSyntheticName(arg.func, arg.distinct, arg.arg);
+  if (arg.type === "AGG_ARITH") return aggregateOperandLabel(arg);
+  return scalarValueLabel(arg);
+}
+function stringFuncLabel(expr) {
+  return `${expr.func}(${expr.args.map(stringFuncArgLabel).join(",")})`;
+}
+function scalarValueLabel(expr) {
+  switch (expr.type) {
+    case "STRING":
+      return quote(expr.value);
+    case "NUMBER":
+      return numberLiteralText(expr);
+    case "VARIABLE":
+      return `@${expr.name}`;
+    case "FIELD":
+      return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
+    case "STRING_FUNC":
+      return stringFuncLabel(expr);
+    case "CASE_WHEN":
+      return caseLabel(expr);
+    case "SCALAR_ARITH":
+      return `(${scalarValueLabel(expr.left)}${expr.op}${scalarValueLabel(expr.right)})`;
+    case "CONCAT_OP":
+      return `(${scalarValueLabel(expr.left)}||${scalarValueLabel(expr.right)})`;
+  }
+}
+function aggregateArgLabel(arg) {
+  if (arg.type === "WILDCARD") return "*";
+  if (arg.type === "FIELD_REF" || arg.type === "ARITH") return arithLabel(arg, true);
+  return scalarValueLabel(arg);
+}
+function aggregateSyntheticName(func, distinct, arg) {
+  const label = aggregateArgLabel(arg);
+  return distinct ? `${func}(DISTINCT ${label})` : `${func}(${label})`;
+}
+function aggregateOperandLabel(node) {
+  if (node.type === "NUMBER") return numberLiteralText(node);
+  if (node.type === "AGG_REF") return aggregateSyntheticName(node.func, node.distinct, node.arg);
+  return `${aggregateOperandLabel(node.left)}${node.op}${aggregateOperandLabel(node.right)}`;
+}
+
 // src/parser/parser.ts
 var MAX_BATCH_STATEMENTS = 20;
 var PARSER_SCALAR_FUNCTION_TOKEN_MAP = Object.freeze({
@@ -32574,6 +32689,7 @@ var Parser = class {
     this.scalarAllowsAggregateArgs = true;
     this.scalarAllowsCase = true;
     this.pos = 0;
+    this.insideAggregateArg = 0;
     /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
     this.cteNames = /* @__PURE__ */ new Set();
     /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
@@ -33402,7 +33518,7 @@ var Parser = class {
     if (this.consume("*" /* STAR */)) {
       return { type: "WILDCARD" };
     }
-    if (this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
+    if (this.tryAggregateFunc() === null && this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
       const alias2 = this.consume("AS" /* AS */) ? this.parseAliasName() : null;
       return { type: "SCALAR_VALUE_COL", expr, alias: alias2 };
@@ -33674,7 +33790,12 @@ var Parser = class {
       if (!allowCase) throw new ParseError("\u3053\u306E\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u3067\u306F CASE \u3092\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
       return this.parseCaseWhenExpr();
     }
-    if (this.tryAggregateFunc() !== null) throw new ParseError("\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306B\u96C6\u7D04\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    if (this.tryAggregateFunc() !== null) {
+      throw new ParseError(
+        this.insideAggregateArg > 0 ? "\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093" : "\u30B9\u30AB\u30E9\u30FC\u5024\u5F0F\u306B\u96C6\u7D04\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093",
+        tok
+      );
+    }
     if (this.tryStringFuncName() !== null) return this.parseStringFuncExpr();
     if (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) {
       this.advance();
@@ -33823,6 +33944,9 @@ var Parser = class {
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
   parseCaseResult() {
     const tok = this.peek();
+    if (this.insideAggregateArg > 0 && this.tryAggregateFunc() !== null) {
+      throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
+    }
     if (tok.kind === "[" /* LBRACKET */) {
       return this.parseArrayLiteral();
     }
@@ -33966,7 +34090,7 @@ var Parser = class {
       }
       arg = { type: "WILDCARD" };
     } else {
-      arg = this.parseArithAddSub();
+      arg = this.parseAggregateArgExpr();
     }
     let separator;
     if (this.isSoftKeyword("SEPARATOR")) {
@@ -33984,6 +34108,60 @@ var Parser = class {
       arg,
       ...separator !== void 0 ? { separator } : {}
     };
+  }
+  isAggregateArgEnd() {
+    return this.peek().kind === ")" /* RPAREN */ || this.isSoftKeyword("SEPARATOR");
+  }
+  /** 旧算術 AST を優先し、新規形だけ ScalarValueExpr として読む。 */
+  parseAggregateArgExpr() {
+    const start = this.pos;
+    try {
+      const legacy = this.parseArithAddSub();
+      if (this.isAggregateArgEnd()) return legacy;
+    } catch {
+    }
+    this.pos = start;
+    this.insideAggregateArg++;
+    try {
+      let expr;
+      try {
+        expr = this.parseScalarValueExpr({ allowCase: true, allowAggregateArgs: false });
+      } catch (error51) {
+        if (error51 instanceof ParseError) {
+          if (error51.message.includes("\u6BD4\u8F03\u30FB\u8FF0\u8A9E")) {
+            throw new ParseError(
+              "\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u306B\u6BD4\u8F03\u30FB\u8FF0\u8A9E\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002CASE \u3067\u5024\u3092\u660E\u793A\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u4F8B: SUM(CASE WHEN amount > 0 THEN 1 ELSE 0 END)",
+              error51.token
+            );
+          }
+          if (error51.message.includes("\u96C6\u7D04\u95A2\u6570")) {
+            throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", error51.token);
+          }
+        }
+        throw error51;
+      }
+      if (!this.isAggregateArgEnd()) {
+        throw new ParseError(
+          "\u3053\u306E\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5F62\u5F0F\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002CASE \u3067\u5024\u3092\u660E\u793A\u3059\u308B\u304B\u3001CTE \u3067\u5F0F\u3092\u5217\u306B\u3057\u3066\u304B\u3089\u96C6\u8A08\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+          this.peek()
+        );
+      }
+      this.assertNoNestedAggregate(expr);
+      return expr;
+    } finally {
+      this.insideAggregateArg--;
+    }
+  }
+  assertNoNestedAggregate(expr) {
+    const visit = (value) => {
+      if (value === null || typeof value !== "object") return;
+      const node = value;
+      if (node.type === "AGG_REF" || node.type === "AGG_ARITH") {
+        throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
+      }
+      for (const child of Object.values(node)) visit(child);
+    };
+    visit(expr);
   }
   // ----------------------------------------------------------
   // FROM / JOIN
@@ -34253,31 +34431,11 @@ var Parser = class {
     }
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      this.advance();
-      this.expect("(" /* LPAREN */);
-      const distinct = this.consume("DISTINCT" /* DISTINCT */);
-      const distinctToken = distinct ? this.prev() : null;
-      if (aggFunc === "MODE" && distinctToken) {
-        throw new ParseError("MODE \u3067\u306F DISTINCT \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", distinctToken);
+      if (this.insideAggregateArg > 0) {
+        throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
       }
-      let argStr;
-      if (this.consume("*" /* STAR */)) {
-        if (!aggregateAcceptsWildcard(aggFunc)) {
-          throw new ParseError(`${aggFunc}(*) \u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093\u3002\u30D5\u30A3\u30FC\u30EB\u30C9\u307E\u305F\u306F\u5F0F\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044`, this.prev());
-        }
-        argStr = "*";
-      } else {
-        argStr = this.parseIdentifier();
-      }
-      if (this.isSoftKeyword("SEPARATOR")) {
-        const separatorToken = this.advance();
-        if (aggFunc !== "GROUP_CONCAT") {
-          throw new ParseError("SEPARATOR \u306F GROUP_CONCAT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059", separatorToken);
-        }
-        this.expect("STRING" /* STRING */, "SEPARATOR \u306E\u5F8C\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
-      }
-      this.expect(")" /* RPAREN */);
-      const syntheticName = distinct ? `${aggFunc}(DISTINCT ${argStr})` : `${aggFunc}(${argStr})`;
+      const ref = this.parseAggregateRef(aggFunc);
+      const syntheticName = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
       return { type: "FIELD", tableAlias: null, field: syntheticName };
     }
     if (this.peek().kind === "CASE" /* CASE */) {
@@ -36422,13 +36580,17 @@ function collectCaseResultScalarFields(result, out) {
 }
 function collectAggOperandFields(node, out) {
   if (node.type === "AGG_REF") {
-    if (node.arg.type !== "WILDCARD") collectArithNode(node.arg, out);
+    if (node.arg.type !== "WILDCARD") collectAggregateArgFields(node.arg, out);
     return;
   }
   if (node.type === "AGG_ARITH") {
     collectAggOperandFields(node.left, out);
     collectAggOperandFields(node.right, out);
   }
+}
+function collectAggregateArgFields(node, out) {
+  if (node.type === "FIELD_REF" || node.type === "ARITH") collectArithNode(node, out);
+  else collectScalarValueFields(node, out);
 }
 function hasAggregateInStringFuncExpr(expr) {
   return expr.args.some((arg) => {
@@ -36575,7 +36737,7 @@ function collectRequiredFieldsByTable(stmt) {
   };
   const walkAgg = (node, phase = "select") => {
     if (node.type === "AGG_REF") {
-      if (node.arg.type !== "WILDCARD") walkArith(node.arg, phase);
+      if (node.arg.type !== "WILDCARD") walkAggregateArg(node.arg, phase);
       return;
     }
     if (node.type === "AGG_ARITH") {
@@ -36608,6 +36770,13 @@ function collectRequiredFieldsByTable(stmt) {
       return;
     }
     if (expr.type === "CASE_WHEN") walkCase(expr, phase);
+  };
+  const walkAggregateArg = (expr, phase = "select") => {
+    if (expr.type === "FIELD_REF" || expr.type === "ARITH") {
+      walkArith(expr, phase);
+      return;
+    }
+    walkScalar(expr, phase);
   };
   const walkCaseResult = (result, phase = "select") => {
     if (result.type === "ARRAY") return;
@@ -36710,7 +36879,7 @@ function collectRequiredFieldsByTable(stmt) {
       case "VARIABLE_COL":
         throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "AGGREGATE":
-        if (col.arg.type !== "WILDCARD") walkArith(col.arg, "select");
+        if (col.arg.type !== "WILDCARD") walkAggregateArg(col.arg, "select");
         break;
       case "ARITH_AGG_COL":
         walkAgg(col.expr, "select");
@@ -36790,44 +36959,6 @@ function collectSelectOutputNames(columns) {
     }
   }
   return names;
-}
-function aggregateSyntheticName(func, distinct, arg) {
-  const argStr = arg.type === "WILDCARD" ? "*" : arithNodeLabel(arg);
-  return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
-}
-function arithNodeLabel(node) {
-  if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER") return numberLiteralText(node);
-  if (node.type === "STRING_FUNC") return stringFuncLabel(node);
-  return `(${arithNodeLabel(node.left)}${node.op}${arithNodeLabel(node.right)})`;
-}
-function stringFuncLabel(expr) {
-  const args = expr.args.map((a) => {
-    if (a.type === "AGG_REF") return aggregateSyntheticName(a.func, a.distinct, a.arg);
-    if (a.type === "AGG_ARITH") return "agg_arith";
-    return scalarValueLabel(a);
-  });
-  return `${expr.func}(${args.join(",")})`;
-}
-function scalarValueLabel(expr) {
-  switch (expr.type) {
-    case "STRING":
-      return `'${expr.value}'`;
-    case "NUMBER":
-      return numberLiteralText(expr);
-    case "VARIABLE":
-      return `@${expr.name}`;
-    case "FIELD":
-      return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
-    case "STRING_FUNC":
-      return stringFuncLabel(expr);
-    case "CASE_WHEN":
-      return "case";
-    case "SCALAR_ARITH":
-      return `(${scalarValueLabel(expr.left)}${expr.op}${scalarValueLabel(expr.right)})`;
-    case "CONCAT_OP":
-      return `(${scalarValueLabel(expr.left)}||${scalarValueLabel(expr.right)})`;
-  }
 }
 function isAggregateSyntheticName(name) {
   return /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN|MODE)\(/i.test(name);
@@ -37874,6 +38005,38 @@ function evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2
     }
   }
 }
+function evalScalarValueExprNullable(expr, row, resolveFieldType, resolveFieldSemantics2) {
+  switch (expr.type) {
+    case "CASE_WHEN":
+      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2);
+    case "SCALAR_ARITH": {
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2);
+      if (left === null || right === null) return null;
+      const l = Number(left);
+      const r = Number(right);
+      switch (expr.op) {
+        case "+":
+          return l + r;
+        case "-":
+          return l - r;
+        case "*":
+          return l * r;
+        case "/":
+          return r !== 0 ? l / r : NaN;
+        case "%":
+          return r !== 0 ? l % r : NaN;
+      }
+    }
+    case "CONCAT_OP": {
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2);
+      return `${left ?? ""}${right ?? ""}`;
+    }
+    default:
+      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2);
+  }
+}
 function applyRoundOp(op, num, digits) {
   const factor = Math.pow(10, digits);
   const raw = Math[op](num * factor) / factor;
@@ -38583,6 +38746,20 @@ function evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2) {
   }
   return "";
 }
+function evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2) {
+  for (const branch of expr.branches) {
+    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2)) {
+      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics2);
+    }
+  }
+  return expr.elseResult === null ? null : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics2);
+}
+function evalCaseResultNullable(result, row, resolveFieldType, resolveFieldSemantics2) {
+  if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
+  if (result.type === "FIELD_REF") return row[result.field] ?? "";
+  if (result.type === "ARITH") return evalArithExpr(result, row);
+  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics2);
+}
 function evalCaseResult(result, row, resolveFieldType, resolveFieldSemantics2) {
   if (result.type === "ARRAY") return result.elements.map((e) => e.value).join(",");
   if (result.type === "FIELD_REF") {
@@ -38816,13 +38993,17 @@ function collectScalarValueFields2(expr, out) {
 }
 function collectAggOperandFields2(node, out) {
   if (node.type === "AGG_REF") {
-    if (node.arg.type !== "WILDCARD") collectArithNode2(node.arg, out);
+    if (node.arg.type !== "WILDCARD") collectAggregateArgFields2(node.arg, out);
     return;
   }
   if (node.type === "AGG_ARITH") {
     collectAggOperandFields2(node.left, out);
     collectAggOperandFields2(node.right, out);
   }
+}
+function collectAggregateArgFields2(node, out) {
+  if (node.type === "FIELD_REF" || node.type === "ARITH") collectArithNode2(node, out);
+  else collectScalarValueFields2(node, out);
 }
 function collectCaseResultFields(result, out) {
   if (result.type === "ARRAY") return;
@@ -41851,7 +42032,7 @@ function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind) {
     }
     for (const col of columns) {
       if (col.type === "AGGREGATE") {
-        const syntheticKey = aggregateSyntheticName2(col.func, col.distinct, col.arg);
+        const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
         const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
         outRow[col.alias ?? syntheticKey] = value;
         if (col.alias) outRow[syntheticKey] = value;
@@ -41888,10 +42069,16 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
       const raw = row[arg.field];
       if (raw === void 0 || raw === "" && func !== "MIN" && func !== "MAX") continue;
       strVal = raw;
-    } else {
+    } else if (arg.type === "ARITH" || arg.type === "NUMBER" || arg.type === "STRING_FUNC") {
       const n = evalArithExpr(arg, row);
       if (isNaN(n)) continue;
       strVal = String(n);
+    } else {
+      const value = evalScalarValueExprNullable(arg, row);
+      if (value === null) continue;
+      if (value === "" && func !== "MIN" && func !== "MAX") continue;
+      if (typeof value === "number" && Number.isNaN(value)) continue;
+      strVal = String(value);
     }
     strValues.push(strVal);
   }
@@ -41906,8 +42093,8 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
   const eff = distinct ? statistical ? [...new Set(numericValues)] : [...new Set(strValues)] : statistical ? numericValues : strValues;
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
-  const comparison = (func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF" ? resolveAggSortKind?.(toAggregateFieldRef(arg.field)) : void 0;
-  const semantics = typeof comparison === "string" ? syntheticSemantics(comparison) : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
+  const comparison = func === "MIN" || func === "MAX" || func === "MODE" ? resolveAggregateArgSemantics(arg, resolveAggSortKind) : void 0;
+  const semantics = typeof comparison === "string" ? syntheticSemantics(comparison) : comparison ?? (arg.type === "FIELD_REF" || arg.type === "FIELD" || arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "CASE_WHEN" ? syntheticSemantics("string") : syntheticSemantics("number"));
   if (func === "MODE") {
     if (strValues.length === 0) return "";
     const frequencies = /* @__PURE__ */ new Map();
@@ -41995,17 +42182,24 @@ function evalAggArithExpr(node, rows, resolveAggSortKind) {
   }
 }
 function aggArithDefaultKey(node) {
-  if (node.type === "NUMBER") return numberLiteralText(node);
-  if (node.type === "AGG_REF") return aggregateSyntheticName2(node.func, node.distinct, node.arg);
-  return `${aggArithDefaultKey(node.left)}${node.op}${aggArithDefaultKey(node.right)}`;
+  return aggregateOperandLabel(node);
 }
-function aggregateArgLabel(arg) {
-  if (arg.type === "WILDCARD") return "*";
-  return arithColDefaultKey(arg);
-}
-function aggregateSyntheticName2(func, distinct, arg) {
-  const argStr = aggregateArgLabel(arg);
-  return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
+function resolveAggregateArgSemantics(arg, resolver) {
+  if (arg.type === "FIELD_REF") return resolver?.(toAggregateFieldRef(arg.field)) ?? "string";
+  if (arg.type === "FIELD") return resolver?.(arg) ?? "string";
+  if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return "number";
+  if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return "string";
+  if (arg.type === "STRING_FUNC") {
+    const numeric = /* @__PURE__ */ new Set(["LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE", "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT", "DAYOFWEEK", "QUARTER", "WEEK"]);
+    if (arg.func === "CAST") return arg.args[1]?.type === "STRING" && arg.args[1].value === "NUMBER" ? "number" : "string";
+    return numeric.has(arg.func) ? "number" : "string";
+  }
+  const results = [...arg.branches.map((branch) => branch.result), ...arg.elseResult === null ? [] : [arg.elseResult]].filter((result) => result.type !== "ARRAY").map((result) => resolveAggregateArgSemantics(result, resolver));
+  if (results.length === 0 || results.some((result) => result === void 0)) return "string";
+  const kinds = results.map((result) => typeof result === "string" ? result : result.compareMode === "number" || result.compareMode === "recordNumber" ? "number" : "string");
+  if (!kinds.every((kind) => kind === kinds[0])) return "string";
+  const first = results[0];
+  return results.every((result) => JSON.stringify(result) === JSON.stringify(first)) ? first : kinds[0];
 }
 function applyHaving(rows, having, resolveFieldType, resolveFieldSemantics2) {
   if (having === null) return rows;
@@ -42151,7 +42345,7 @@ function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, reso
         evaluators.set(alias, () => column.value);
         break;
       case "AGGREGATE": {
-        const source = aggregateSyntheticName2(column.func, column.distinct, column.arg);
+        const source = aggregateSyntheticName(column.func, column.distinct, column.arg);
         evaluators.set(alias, (row) => row[alias] ?? row[source] ?? "0");
         break;
       }
@@ -42276,7 +42470,7 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns, re
           break;
         }
         case "AGGREGATE": {
-          const srcKey = aggregateSyntheticName2(col.func, col.distinct, col.arg);
+          const srcKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
           const dstKey = outputKeys?.[colIdx] ?? col.alias ?? srcKey;
           out[dstKey] = row[col.alias ?? srcKey] ?? row[srcKey] ?? "0";
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(dstKey);
@@ -42362,7 +42556,7 @@ function computeOutputKey(col, colIdx, defaultFieldKeys) {
     case "LITERAL_COL":
       return col.alias ?? `'${col.value}'`;
     case "AGGREGATE":
-      return col.alias ?? aggregateSyntheticName2(col.func, col.distinct, col.arg);
+      return col.alias ?? aggregateSyntheticName(col.func, col.distinct, col.arg);
     case "ARITH_AGG_COL":
       return col.alias ?? aggArithDefaultKey(col.expr);
     case "ARITH_COL":
@@ -44986,7 +45180,14 @@ async function buildWhereFieldSemanticsResolver(stmt, client, cacheContext, mate
   };
 }
 function selectCaseConditionsNeedFieldMetadata(stmt) {
-  return stmt.columns.some((column) => column.type === "CASE_COL" && column.expr.branches.some((branch) => whereNeedsFieldMetadata(branch.condition)));
+  const visit = (value) => {
+    if (value === null || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some(visit);
+    const node = value;
+    if (node.type === "CASE_WHEN" && node.branches?.some((branch) => whereNeedsFieldMetadata(branch.condition))) return true;
+    return Object.values(node).some(visit);
+  };
+  return stmt.columns.some(visit);
 }
 function buildHavingFieldSemanticsResolver(stmt, rowResolver) {
   const aliases = /* @__PURE__ */ new Map();
@@ -44998,7 +45199,17 @@ function buildHavingFieldSemanticsResolver(stmt, rowResolver) {
       semantics = syntheticSemantics("number");
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
-        semantics = column.arg.type === "FIELD_REF" ? rowResolver(aggregateFieldRef(column.arg.field)) : syntheticSemantics("number");
+        if (column.arg.type !== "WILDCARD") {
+          semantics = inferAggregateArgMeta(column.arg, (ref) => {
+            const resolved = rowResolver(ref);
+            if (!resolved) return void 0;
+            return {
+              sortKind: resolved.compareMode === "number" || resolved.compareMode === "recordNumber" ? "number" : "string",
+              fieldType: resolved.fieldType,
+              semantics: resolved
+            };
+          }).semantics;
+        }
       } else {
         semantics = column.func === "GROUP_CONCAT" ? syntheticSemantics("string") : syntheticSemantics("number");
       }
@@ -45447,8 +45658,38 @@ function aggregateFieldRef(field) {
   return dot > 0 ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field };
 }
 function collectAggregateRef(func, arg, out) {
-  if ((func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF" && arg.field) {
+  if (func !== "MIN" && func !== "MAX" && func !== "MODE" || arg.type === "WILDCARD") return;
+  collectAggregateArgFieldRefs(arg, out);
+}
+function collectAggregateArgFieldRefs(arg, out) {
+  if (arg.type === "FIELD_REF") {
     out.push(aggregateFieldRef(arg.field));
+    return;
+  }
+  if (arg.type === "FIELD") {
+    out.push(arg);
+    return;
+  }
+  if (arg.type === "ARITH") {
+    collectAggregateArgFieldRefs(arg.left, out);
+    collectAggregateArgFieldRefs(arg.right, out);
+    return;
+  }
+  if (arg.type === "SCALAR_ARITH" || arg.type === "CONCAT_OP") {
+    collectAggregateArgFieldRefs(arg.left, out);
+    collectAggregateArgFieldRefs(arg.right, out);
+    return;
+  }
+  if (arg.type === "STRING_FUNC") {
+    for (const child of arg.args) {
+      if (child.type !== "AGG_REF" && child.type !== "AGG_ARITH") collectAggregateArgFieldRefs(child, out);
+    }
+    return;
+  }
+  if (arg.type === "CASE_WHEN") {
+    for (const result of [...arg.branches.map((branch) => branch.result), ...arg.elseResult ? [arg.elseResult] : []]) {
+      if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
+    }
   }
 }
 function collectAggregateOperandRefs(node, out) {
@@ -45559,7 +45800,7 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
     const base = info.semantics ?? resolveFieldSemantics(info);
     return info.fieldType === "STATUS" && statusOrdersByApp.has(appId) ? { ...base, optionOrder: statusOrdersByApp.get(appId) } : base;
   };
-  return (ref) => {
+  const resolveRef2 = (ref) => {
     let info;
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
@@ -45593,6 +45834,7 @@ async function loadAggregateSortKindResolver(stmt, client, cacheContext, materia
     const sourceTable = ref.tableAlias !== null ? tables.find((table) => effectiveTableAlias(table) === ref.tableAlias) : stmt.joins.length === 0 ? stmt.from : void 0;
     return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
+  return resolveRef2;
 }
 function fieldCodeForTypeLookup(table, field) {
   if (table.subtableCode && field.startsWith("_p.")) return field.slice(3);
@@ -45702,9 +45944,19 @@ function mergeExpressionColumnMeta(candidates) {
   }
   return unknownStringColumnMeta();
 }
+function inferAggregateArgMeta(arg, resolveField2) {
+  if (arg.type === "FIELD_REF") return resolveField2(aggregateFieldRef(arg.field)) ?? unknownStringColumnMeta();
+  if (arg.type === "FIELD") return resolveField2(arg) ?? unknownStringColumnMeta();
+  if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
+  if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return syntheticColumnMeta("string");
+  if (arg.type === "STRING_FUNC") return stringFunctionColumnMeta(arg);
+  const results = arg.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField2));
+  if (arg.elseResult) results.push(caseResultColumnMeta(arg.elseResult, resolveField2));
+  return mergeExpressionColumnMeta(results);
+}
 function selectNeedsSourceColumnMeta(stmt) {
   return stmt.columns.some(
-    (column) => column.type === "FIELD" || column.type === "WILDCARD" || column.type === "PARENT_WILDCARD" || column.type === "CASE_COL" || column.type === "AGGREGATE" && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type === "FIELD_REF"
+    (column) => column.type === "FIELD" || column.type === "WILDCARD" || column.type === "PARENT_WILDCARD" || column.type === "CASE_COL" || column.type === "AGGREGATE" && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE")
   );
 }
 async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, materializedTables) {
@@ -45775,11 +46027,8 @@ async function inferSelectColumnMeta(stmt, outputColumns, client, cacheContext, 
         meta3 = syntheticColumnMeta("string");
       } else if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG" || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP" || column.func === "VAR_POP" || column.func === "VAR_SAMP" || column.func === "MEDIAN") {
         meta3 = syntheticColumnMeta("number");
-      } else if ((column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type === "FIELD_REF") {
-        const source = resolveField2(aggregateFieldRef(column.arg.field));
-        if (source) meta3 = source;
-      } else if (column.func === "MODE") {
-        meta3 = syntheticColumnMeta("number");
+      } else if ((column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type !== "WILDCARD") {
+        meta3 = inferAggregateArgMeta(column.arg, resolveField2);
       }
     } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
       meta3 = syntheticColumnMeta("number");
@@ -46545,7 +46794,7 @@ async function buildOrderSemanticsForSelect(stmt, client, cacheContext, material
       meta3 = mergeExpressionColumnMeta(candidates);
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
-        meta3 = column.arg.type === "FIELD_REF" ? resolveField2(aggregateFieldRef(column.arg.field)) : syntheticColumnMeta("number");
+        if (column.arg.type !== "WILDCARD") meta3 = inferAggregateArgMeta(column.arg, resolveField2);
       } else {
         meta3 = column.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
       }
@@ -53923,7 +54172,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.15.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.16.0" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; LOGINUSER resolves to an empty string in Node/MCP). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged families plus JOIN, aggregates, windows, subtable virtual tables, CHECK, KLIKE, KORDER BY, @variables, and LAPP_<NAME>.
 
