@@ -115,6 +115,7 @@ import {
   flatten,
   ProcessRow,
   applyOrderBy,
+  buildOrderByAliasEvaluator,
   applyLimit,
   applyWindow,
   OptionOrderMap,
@@ -2502,7 +2503,13 @@ async function executeSimpleSelect(
       stmt.orderBy,
       orderMeta.optionOrders,
       orderMeta.sortKinds,
-      orderMeta.semantics
+      orderMeta.semantics,
+      buildOrderByAliasEvaluator(
+        stmt.columns,
+        undefined,
+        fieldTypeResolvers.row,
+        projectionSemanticsResolver
+      )
     );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }

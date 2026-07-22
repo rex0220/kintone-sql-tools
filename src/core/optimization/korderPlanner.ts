@@ -19,6 +19,10 @@ export interface KorderPlanInput {
   readonly hasKlike: boolean;
 }
 
+function hasSelectOutputAlias(stmt: SelectStatement, name: string): boolean {
+  return stmt.columns.some((column) => "alias" in column && column.alias === name);
+}
+
 export function planKorder(input: KorderPlanInput): CanonicalOrderPlan {
   const { stmt } = input;
   const reasons: string[] = [];
@@ -39,6 +43,10 @@ export function planKorder(input: KorderPlanInput): CanonicalOrderPlan {
     const semantics = input.orderSemantics.get(name);
     if (!semantics) {
       reasons.push(`KORDER_KEY_UNRESOLVED(field=${name})`);
+      continue;
+    }
+    if (hasSelectOutputAlias(stmt, name)) {
+      reasons.push(`KORDER_KEY_NOT_DIRECT_FIELD(field=${name})`);
       continue;
     }
     if (name === "$id") continue;

@@ -368,16 +368,21 @@ export function evalCaseWhen(
 ): string {
   for (const branch of expr.branches) {
     if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics)) {
-      return evalCaseResult(branch.result, row);
+      return evalCaseResult(branch.result, row, resolveFieldType, resolveFieldSemantics);
     }
   }
   if (expr.elseResult !== null) {
-    return evalCaseResult(expr.elseResult, row);
+    return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics);
   }
   return ""; // NULL 相当
 }
 
-function evalCaseResult(result: CaseResult, row: ProcessRow): string {
+function evalCaseResult(
+  result: CaseResult,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string {
   if (result.type === "ARRAY")       return result.elements.map((e) => e.value).join(",");
   // 旧 CASE 経路が生成済み AST を受ける互換分岐。
   if ((result as { type: string }).type === "FIELD_REF") {
@@ -386,7 +391,7 @@ function evalCaseResult(result: CaseResult, row: ProcessRow): string {
   if ((result as { type: string }).type === "ARITH") {
     return String(evalArithExpr(result as unknown as ArithNode, row));
   }
-  return String(evalScalarValueExpr(result as ScalarValueExpr, row));
+  return String(evalScalarValueExpr(result as ScalarValueExpr, row, resolveFieldType, resolveFieldSemantics));
 }
 
 export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {

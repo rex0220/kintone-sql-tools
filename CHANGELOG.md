@@ -4,6 +4,13 @@
 
 ## 未リリース
 
+### 修正（B59 `ORDER BY` の SELECT alias 値解決）
+
+- トップレベルの通常 `ORDER BY` で、非集計 SELECT 列の alias（直接フィールド・算術式・文字列/日付関数・CASE・スカラー値式・リテラル・スカラーサブクエリ）を射影前の入力行から評価し、SIMPLE のローカルソートと FULL_SCAN の両経路で正しく並べるよう修正した。GROUP BY／DISTINCT／UNION 各分岐／サブテーブル仮想テーブルでも同じ規則を使う。
+- 値解決は SELECT alias の完全一致を入力行フィールドより優先し、重複 alias は SELECT 出力と同じく後勝ちとする。ドットを含む alias も完全一致を優先する。比較型（数値・STATUS 定義順など）、未知キーの `ORDER_KEY_UNRESOLVED` fail-closed、既存の集計／WINDOW alias・合成名・関数直書き ORDER BY は維持する。
+- alias evaluator はトップレベルの通常 `ORDER BY` だけに供給し、`OVER (ORDER BY ...)` では同一 SELECT alias を解決しない。`$id` やドットを含む SELECT alias が REST top-N／KORDER の直接物理列判定へ混入しない planner guard も追加した。
+- **互換性注意:** 従来 no-op だった alias ORDER BY の結果順が変わる。エラーにならず元の取得順を返していた不具合の正しさ修正であり、SemVer は minor とする。
+
 ### 機能追加（B56 統計集約関数）
 
 - `STDDEV_POP` / `STDDEV_SAMP` / `VAR_POP` / `VAR_SAMP` / `MEDIAN` を追加した。分散・標準偏差は Welford 法、中央値は数値昇順で計算し、未定義の統計量は空文字を返す。統計集約は完全入力を必須とし、上限到達時に部分集合の値を返さない。

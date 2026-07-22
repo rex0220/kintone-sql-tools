@@ -12,7 +12,7 @@ import type {
   ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
-import type { ProcessRow } from "./evalWhere";
+import type { FieldSemanticsResolver, FieldTypeResolver, ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
 import { evalCaseWhen } from "./evalWhere";
 
@@ -36,26 +36,31 @@ export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
 }
 
 /** 新 ScalarValueExpr 専用評価器。旧 ArithNode 評価器とは入口を分離する。 */
-export function evalScalarValueExpr(expr: ScalarValueExpr, row: ProcessRow): string | number {
+export function evalScalarValueExpr(
+  expr: ScalarValueExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string | number {
   switch (expr.type) {
     case "STRING": return expr.value;
     case "NUMBER": return expr.value;
     case "FIELD": return resolveFieldRef(row, expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field);
     case "VARIABLE":
       throw new Error(`ArgumentError: unresolved variable @${expr.name} reached scalar evaluator.`);
-    case "STRING_FUNC": return evalStringFunc(expr, row);
-    case "CASE_WHEN": return evalCaseWhen(expr, row);
+    case "STRING_FUNC": return evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics);
+    case "CASE_WHEN": return evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics);
     case "CONCAT_OP": {
       // CONCAT の空値・文字列化規則を唯一の実装として再利用する。
       return evalStringFunc({
         type: "STRING_FUNC",
         func: "CONCAT",
         args: [expr.left, expr.right],
-      }, row);
+      }, row, resolveFieldType, resolveFieldSemantics);
     }
     case "SCALAR_ARITH": {
-      const left = Number(evalScalarValueExpr(expr.left, row));
-      const right = Number(evalScalarValueExpr(expr.right, row));
+      const left = Number(evalScalarValueExpr(expr.left, row, resolveFieldType, resolveFieldSemantics));
+      const right = Number(evalScalarValueExpr(expr.right, row, resolveFieldType, resolveFieldSemantics));
       switch (expr.op) {
         case "+": return left + right;
         case "-": return left - right;
@@ -268,8 +273,13 @@ function replaceNthMatch(input: string, globalRe: RegExp, replacement: string, n
 // 文字列・数値関数
 // ============================================================
 
-export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
-  const args = expr.args.map((a) => evalStringFuncArg(a, row));
+export function evalStringFunc(
+  expr: StringFuncExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string {
+  const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics));
   switch (expr.func) {
     case "UPPER":  return (args[0] ?? "").toUpperCase();
     case "LOWER":  return (args[0] ?? "").toLowerCase();
@@ -658,12 +668,17 @@ function formatWithComma(num: number, digits: number): string {
   return decStr ? `${intFmt}.${decStr}` : intFmt;
 }
 
-export function evalStringFuncArg(arg: StringFuncArg, row: ProcessRow): string {
+export function evalStringFuncArg(
+  arg: StringFuncArg,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string {
   // 集計引数は GROUP BY 評価側で事前解決される想定。
   // ここに到達した場合は行コンテキストのみのため空文字を返して安全側に倒す。
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
   if (arg.type === "NUMBER") return numberLiteralText(arg);
-  return String(evalScalarValueExpr(arg, row));
+  return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics));
 }
 
 export function resolveFieldRef(row: ProcessRow, field: string): string {
