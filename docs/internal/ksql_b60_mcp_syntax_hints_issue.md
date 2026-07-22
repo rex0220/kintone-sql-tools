@@ -1,7 +1,7 @@
 # B60 — MCP 構文ヒント（Statement syntax catalog）: AI が kSQL 構文を発明せず正しく組み立てられるように
 
 - 起票日: 2026-07-22
-- ステータス: 🚧 **実装済み・Claude Code AI 行動検証 PASS×2・Claude Desktop 検証待ち＝リリースホールド（2026-07-22・全2,840 green・stdio 配線確認 502語・[仕様 R2](ksql_b60_mcp_syntax_hints_spec.md)・[検証証跡](evidence/b60_syntax_hints_smoke.md)）**
+- ステータス: ✅ **v3.14.0 リリース済み（2026-07-22・release PR #214・tag/GitHub Release 公開・npm publish 待ち）。AI 行動検証 両面 PASS（Claude Code×2・Claude Desktop=発端環境・[検証証跡](evidence/b60_syntax_hints_smoke.md)）**
 - 種別: 改善（MCP discoverability・B50/B55 の後続）
 - 効果種別: 機能（AI クライアントの SQL 組み立て精度・リトライ削減）
 - 関連: **B55**（instructions 全量関数カタログ＝同型の解決の前例・実機でプローブ行動消滅を実証）／**B50**（MCP discoverability）
