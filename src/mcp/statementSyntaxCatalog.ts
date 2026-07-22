@@ -38,7 +38,7 @@ export const STATEMENT_SYNTAX_COMMON_NOTES = [
   "INTO #err requires a multi-statement batch (ON ERROR SKIP always; VALIDATE ONLY / VALIDATE only when INTO is used).",
   "APPLY may precede VALIDATE ONLY but cannot combine with CHECK or ON ERROR SKIP.",
   "Subtable DML does not accept CHECKS/CONTROL.",
-  "These are all supported top-level statement families. Bracketed clauses are schematic; before first use, verify the referenced ksql_docs section. Do not invent other statement families or clause orders.",
+  "These are all supported top-level statement families. Bracketed clauses are schematic; before first use, verify the referenced ksql_docs section. Do not invent other statement families or clause orders. UPDATE CHECK sees pre-update values; to test the new value, repeat the SET expression inside CHECK. Variable names start with ASCII letter/_; see ksql_docs for placement rules.",
 ] as const;
 
 export const STATEMENT_SYNTAX_CATALOG = {

@@ -1811,7 +1811,11 @@ SET 正規化名 = UPPER(名称),
 WHERE $id IN (1, 2, 3)
 ```
 
-`UPPER` / `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` / `TRANSLATE` / `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` などの文字列関数を使用できます。`LPAD('7', 5, '0')` と `REGEXP_LIKE(...)` の結果は、見た目が数値でも文字列のまま書き込まれます。`VALIDATE ONLY` と `ON ERROR SKIP` は、関数を評価した後の値を検証します。正規表現のホスト差は保存データの差になり得るため、書き込みに使う実行面と版を固定してください。
+`UPPER` / `CONCAT` / `REPLACE` / `SUBSTRING` / `LEFT` / `RIGHT` / `TRANSLATE` / `REGEXP_LIKE` / `REGEXP_REPLACE` / `REGEXP_SUBSTR` などの文字列関数を使用できます。`LPAD('7', 5, '0')` と `REGEXP_LIKE(...)` の結果は、見た目が数値でも文字列のまま書き込まれます。`VALIDATE ONLY` と `ON ERROR SKIP` は、関数を評価した後の値を検証します。
+
+これは書き込み候補に対する組み込み制約検証です。CHECK の評価行は別で、通常 UPDATE は更新前の既存値を参照します。新値を検査する場合は SET 式を CHECK に再掲してください。INSERT/UPSERT/UPDATE FROM を含む文種別の評価行は §17.3 を参照してください。
+
+正規表現のホスト差は保存データの差になり得るため、書き込みに使う実行面と版を固定してください。
 
 次の範囲は非対応です。
 
@@ -2737,6 +2741,38 @@ WHERE 処理ステータス = '未処理';
 | 上限 | 変数の防御上限は **64 個**。ただしバッチ全体の**最大 20 文**（§25 冒頭）が先に効くため、`SET` も 1 文ずつ数える現状の実効上限は **20 個以下** |
 | 演算 | 式内の `+` は**数値加算**。文字列連結は `CONCAT()` を使う。**SET の右辺から別の変数は参照できません**（`SET @b = @a + 1` は不可） |
 | 束縛 | 値としてバインド（文字列連結ではない）ため、**SQL インジェクションは発生しません**。変数に入るのは値のみで、アプリ ID・フィールドコード・演算子など識別子のパラメータ化はできません |
+
+#### スカラー変数の配置詳細
+
+上の「参照できる位置」は概要です。配置の文法境界は次の表を正とします。ID は parser と batch analyzer の特性化テストに一対一で対応します。
+
+| ID | 使える配置 | 境界 |
+|---|---|---|
+| A01 | WHERE の比較右辺 | `列 >= @x` のように右辺の直接値として使える。VALIDATE WHERE、APPLY PATCH/REMOVE WHERE も同じ条件文法を使う |
+| A02 | HAVING の比較右辺 | 集約結果との比較右辺に使える |
+| A03 | CHECK WHEN 条件 | 比較右辺に使える。CHECK の評価行は §17.3 を参照 |
+| A04 | CASE / IF 条件 | 条件内の比較右辺に使える |
+| A05 | KLIKE 右辺 | `列 KLIKE @x` / `列 NOT KLIKE @x` のパターン値に使える |
+| A06 | IN リスト要素 | スカラー変数を `IN (@a, @b)` の要素に使える |
+| A07 | カッコ無し IN | 文字列配列変数だけを `IN @list` / `NOT IN @list` に使える |
+| A08 | SELECT 定数列 | `SELECT @x AS alias`（AS 必須）でスカラー値を列として実体化できる |
+| A09 | IMPORT SELECT 射影 | IMPORT の SELECT 射影でも `@x AS alias`（AS 必須）を使える |
+| A10 | UPDATE SET 値 | 通常 UPDATE の SET 右辺の直接値に使える |
+| A11 | UPDATE FROM SET 値 | UPDATE FROM の SET 右辺の直接値にも使える |
+| A12 | ASSERT オペランド | 比較・BETWEEN の直接オペランドに使える |
+| A13 | SET のスカラーサブクエリ内 | 先行変数を `(SELECT ... WHERE 列 = @a)` のように参照できる。外側の SET 式とは別扱い |
+
+| ID | 使えない配置 | 境界 |
+|---|---|---|
+| R01 | VALUES の直接要素 | INSERT / UPSERT / APPEND の `VALUES (@x)` は不可。VALUES が受理する CASE / IF の内部では条件・式に変数が入り得る |
+| R02 | 件数・位置を表す固定数値句 | `LIMIT @n` / `OFFSET @n` は不可。EXPECT ROWS / REJECT LIMIT も変数化できない |
+| R03 | 条件左辺・構造位置 | `@x = 列` は不可。GROUP BY / ORDER BY、アプリ ID・フィールドコード・演算子などの識別子位置にも置けない |
+| R04 | 外側の SET / DECLARE 式 | `SET @b = @a / 2` と `DECLARE @b = @a` は不可。A13 の SET スカラーサブクエリ内だけが先行変数参照の例外 |
+| R05 | ASCII 規則外の変数名 | 変数名は `@[A-Za-z_][A-Za-z0-9_]{0,63}`（最大 64 文字）で、名前は小文字へ正規化される。`@max金額` は `@max` と `金額` の 2 トークンに分かれ、変数名として受理されない |
+
+変数から直接始まる一般算術式は、比較右辺・ASSERT・単独 SELECT 変数列の専用分岐では使えません（例: `金額 >= @avg / 2`）。B38 の一般スカラー式へ入る関数引数や `||` 連結では、変数を算術に参加させられる場合があります。
+
+派生値は元の SET のスカラーサブクエリ内で同時に計算する（`SET @half = (SELECT AVG(金額)/2 FROM …)`）か、条件側を変形する（`金額 * 2 >= @avg`）。既存変数から別の SET 変数を直接導出することはできない。VALUES に値を入れたい場合は temp テーブル＋`@x AS 列`（AS 必須）で実体化する。
 
 #### スカラーサブクエリ代入 `SET @x = (SELECT ...)`
 

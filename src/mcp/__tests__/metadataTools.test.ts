@@ -89,6 +89,7 @@ describe("ksql_app_metadata MCP surface", () => {
     expect(registered.ksql_mutate.description).toContain("{VALUES|SELECT} CHECKS →");
     expect(registered.ksql_mutate.description).toContain("ON ERROR SKIP INTO #err [REJECT LIMIT n]");
     expect(registered.ksql_mutate.description).toContain("only in a multi-statement batch");
+    expect(registered.ksql_mutate.description).toContain("pre-update values");
     expect(registered.ksql_validate.description).toContain("Do not use validate probing");
     expect(metadata.inputSchema).toBe(ksqlAppMetadataInputShape);
     expect([...KINTONE_METADATA_RESOURCES]).toEqual([
@@ -107,7 +108,7 @@ describe("ksql_app_metadata MCP surface", () => {
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
       const instructionWords = instructions?.trim().split(/\s+/).length;
-      expect(instructionWords).toBe(502);
+      expect(instructionWords).toBe(529);
       expect(instructionWords).toBeLessThanOrEqual(550);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);
       for (const key of [
@@ -116,6 +117,7 @@ describe("ksql_app_metadata MCP surface", () => {
         "ksql_app_metadata",
         "ksql://language-reference",
         "APPLY mutation is disabled",
+        "pre-update values",
         "ksql_docs",
         "Statement templates",
         "ON ERROR SKIP INTO",
