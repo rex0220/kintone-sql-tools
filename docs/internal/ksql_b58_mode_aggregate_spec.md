@@ -1,6 +1,6 @@
 # B58 仕様 — MODE 集約関数（最頻値・カテゴリデータ対応）
 
-- ステータス: 🚧 **実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・codex 実装→Claude コードレビュー承認・全 2,784 テスト green・mcp:smoke/pack-smoke ok・[実機証跡](evidence/b58_mode_aggregate_smoke.md)＝実データでタイ決定性含む全 10 ケース PASS）**。仕様 R2（codex レビュー P1×4/P2×4/P3×3 反映済）
+- ステータス: ✅ **v3.13.0 リリース済み（2026-07-22・release PR #210・tag/GitHub Release 公開・npm publish 待ち）。実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・codex 実装→Claude コードレビュー承認・全 2,784 テスト green・mcp:smoke/pack-smoke ok・[実機証跡](evidence/b58_mode_aggregate_smoke.md)＝実データでタイ決定性含む全 10 ケース PASS）**。仕様 R2（codex レビュー P1×4/P2×4/P3×3 反映済）
 - 起票: [B58 issue](ksql_b58_mode_aggregate_issue.md)（前例調査済＝MySQL/SQL Server なし・PG `mode() WITHIN GROUP`・Oracle `STATS_MODE`・分析系は素の `MODE(x)`・ANSI 標準外・タイは各 RDB とも不定）
 - 種別: 改善（集計関数の拡充）／SemVer: **minor**（純追加・既存挙動不変）
 - 関連: **B56**（統計集約＝完全入力契約・空文字規約・カタログ同期を再利用）／B55（MCP 全量関数カタログ同期）

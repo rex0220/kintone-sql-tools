@@ -1,7 +1,7 @@
 # B58 — MODE 集約関数（最頻値・カテゴリデータ対応）
 
 - 起票日: 2026-07-22
-- ステータス: 🚧 **実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[仕様 R2](ksql_b58_mode_aggregate_spec.md)・[実機証跡](evidence/b58_mode_aggregate_smoke.md)）**
+- ステータス: ✅ **v3.13.0 リリース済み（2026-07-22・release PR #210・tag/GitHub Release 公開・npm publish 待ち）。実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[仕様 R2](ksql_b58_mode_aggregate_spec.md)・[実機証跡](evidence/b58_mode_aggregate_smoke.md)）**
 - 種別: 改善（集計関数の拡充）
 - 効果種別: 機能（カテゴリデータの分析・MCP 分析用途）
 - 関連: **B56**（統計集約＝完全入力契約・空文字規約・`*` 拒否 helper・カタログ同期の型をそのまま再利用）／**B55**（MCP 全量関数カタログ同期）

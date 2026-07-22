@@ -1,6 +1,6 @@
 # B57 仕様 — 日付集計軸関数（DAYOFWEEK / QUARTER / WEEK ＋ DATE_FORMAT 指定子 %w %a %v %G）
 
-- ステータス: 📋 **仕様 R2（2026-07-22・codex レビュー R1→R2 反映済＝P1×5/P2×5/P3×3 全件裏取り一致・残論点なし・実装着手可）**
+- ステータス: ✅ **v3.13.0 リリース済み（2026-07-22・release PR #210・tag/GitHub Release 公開・npm publish 待ち）**。仕様 R2（codex レビュー R1→R2 反映済＝P1×5/P2×5/P3×3 全件裏取り一致）
 - 実装: ✅ **仕様 R2 どおり実装済み（2026-07-22）**。契約テスト先行（実装前 23 fail / 2 pass）・`npm test` 第1段 2,786件 / 第2段 25件 green・B55 scalar 46件 / instructions 277語へ同期済み
 - 起票: [B57 issue](ksql_b57_date_axis_functions_issue.md)（起票時 codex レビュー反映済）
 - 種別: 改善（日付関数の拡充）／SemVer: **minor**（純追加・既存挙動不変）
