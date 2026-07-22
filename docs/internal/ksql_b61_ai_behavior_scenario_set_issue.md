@@ -1,7 +1,7 @@
 # B61 — AI 行動検証シナリオセットの拡充（B60 の継続運用）
 
 - 起票日: 2026-07-22
-- ステータス: 📝 **起票＋シナリオ台帳の初回実施済み（2026-07-22・Claude Code 面 5 シナリオ 5/5 PASS＝[証跡](evidence/b61_scenario_smoke_claude_code.md)・表記摩擦の新規検出なし。残=スクリプト半自動化・Desktop 面・失敗観測ループの運用化）**
+- ステータス: 📝 **起票＋シナリオ台帳の2 ラウンド実施済み（2026-07-22・Claude Code 面 計 11 シナリオ 11/11 PASS＝DML 系 5＋SELECT/JOIN・オプション組合せ 6・[証跡](evidence/b61_scenario_smoke_claude_code.md)。構文発明ゼロ。**Q6 で改善候補 2 件を観測＝@変数の使用可能位置の可視性**（算術オペランド不可・SET 右辺の変数参照不可が読み取れず各 1 回自己修正）。残=変数制約の注記強化検討・スクリプト半自動化・Desktop 面・失敗観測ループの運用化）**
 - 種別: 改善（品質保証・MCP discoverability の継続運用）
 - 効果種別: 機能（AI クライアントの SQL 組み立て精度の面的担保）
 - 関連: **B60**（Statement syntax catalog＝検証対象・[evidence](evidence/b60_syntax_hints_smoke.md)）／B55（関数カタログ）
