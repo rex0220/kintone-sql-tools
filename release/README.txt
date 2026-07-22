@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v3.13.0)
+ksql 配布パッケージ (v3.14.0)
 
-1. ksql-plugin-v3.13.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.14.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.14.0: MCP の構文ヒント (B60)。
+- MCP server instructions に全文型の構文カタログ (Statement templates) を追加。
+  AI クライアントが INSERT の ON ERROR SKIP INTO #err などの kSQL 固有構文を
+  発明せず、正しい骨格で組み立てられるようにする。ksql_query / ksql_mutate の
+  説明にも構文テンプレートを追記。
+- カタログの全構文例はパーサ受理テストで固定 (載っている構文は必ず通る)。
+- 言語リファレンス §24 の EXPLAIN 対応一覧に VALIDATE / IMPORT を追記 (記載漏れ修正)。
+- プラグイン・CLI の SQL 挙動に変更なし (MCP のみの追加)。
 
 v3.13.0: 関数拡充 3 件とバグ修正 1 件。
 - B56: 統計集約 STDDEV_POP / STDDEV_SAMP / VAR_POP / VAR_SAMP / MEDIAN を追加。
