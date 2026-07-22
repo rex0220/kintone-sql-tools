@@ -1,6 +1,6 @@
 # B60 仕様 — MCP Statement syntax catalog（AI の構文発明を抑止する構文ヒント）
 
-- ステータス: 🚧 **実装済み・Claude Code AI 行動検証 PASS×2・Claude Desktop 検証待ち＝リリースホールド（2026-07-22・全2,840 green・stdio 配線確認 502語・[検証証跡](evidence/b60_syntax_hints_smoke.md)）**
+- ステータス: ✅ **v3.14.0 リリース済み（2026-07-22・release PR #214・tag/GitHub Release 公開・npm publish 待ち）。AI 行動検証 両面 PASS（Claude Code×2・Claude Desktop=発端環境・[検証証跡](evidence/b60_syntax_hints_smoke.md)）**
 - 起票: [B60 issue](ksql_b60_mcp_syntax_hints_issue.md)
 - 種別: 改善（MCP discoverability）／SemVer: **minor**（MCP instructions / tool description＋言語リファレンス §24 の drift 修正のみ・SQL 挙動・schema・resources 不変）
 - 関連: **B55**（instructions 全量関数カタログ＝同型解決の前例）／B50
