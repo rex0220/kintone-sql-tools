@@ -25,10 +25,12 @@ import type {
   TableRef,
   AggregateFunc,
   ScalarValueExpr,
+  AggregateArgExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
+import { aggregateSyntheticName } from "../core/aggregateExpression";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -300,13 +302,18 @@ function collectCaseResultScalarFields(result: CaseResult, out: string[]): void 
 
 function collectAggOperandFields(node: AggOperand, out: string[]): void {
   if (node.type === "AGG_REF") {
-    if (node.arg.type !== "WILDCARD") collectArithNode(node.arg, out);
+    if (node.arg.type !== "WILDCARD") collectAggregateArgFields(node.arg, out);
     return;
   }
   if (node.type === "AGG_ARITH") {
     collectAggOperandFields(node.left, out);
     collectAggOperandFields(node.right, out);
   }
+}
+
+function collectAggregateArgFields(node: AggregateArgExpr, out: string[]): void {
+  if (node.type === "FIELD_REF" || node.type === "ARITH") collectArithNode(node, out);
+  else collectScalarValueFields(node, out);
 }
 
 function hasAggregateInStringFuncExpr(expr: StringFuncExpr): boolean {
@@ -491,7 +498,7 @@ function collectRequiredFieldsByTable(
 
   const walkAgg = (node: AggOperand, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
     if (node.type === "AGG_REF") {
-      if (node.arg.type !== "WILDCARD") walkArith(node.arg, phase);
+      if (node.arg.type !== "WILDCARD") walkAggregateArg(node.arg, phase);
       return;
     }
     if (node.type === "AGG_ARITH") {
@@ -524,6 +531,17 @@ function collectRequiredFieldsByTable(
       return;
     }
     if (expr.type === "CASE_WHEN") walkCase(expr, phase);
+  };
+
+  const walkAggregateArg = (
+    expr: AggregateArgExpr,
+    phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"
+  ): void => {
+    if (expr.type === "FIELD_REF" || expr.type === "ARITH") {
+      walkArith(expr, phase);
+      return;
+    }
+    walkScalar(expr, phase);
   };
 
   const walkCaseResult = (result: CaseResult, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
@@ -641,7 +659,7 @@ function collectRequiredFieldsByTable(
       case "VARIABLE_COL":
         throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
       case "AGGREGATE":
-        if (col.arg.type !== "WILDCARD") walkArith(col.arg, "select");
+        if (col.arg.type !== "WILDCARD") walkAggregateArg(col.arg, "select");
         break;
       case "ARITH_AGG_COL":
         walkAgg(col.expr, "select");
@@ -724,44 +742,6 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
     }
   }
   return names;
-}
-
-function aggregateSyntheticName(
-  func: AggregateFunc,
-  distinct: boolean,
-  arg: { type: "WILDCARD" } | ArithNode
-): string {
-  const argStr = arg.type === "WILDCARD" ? "*" : arithNodeLabel(arg);
-  return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
-}
-
-function arithNodeLabel(node: ArithNode): string {
-  if (node.type === "FIELD_REF") return node.field;
-  if (node.type === "NUMBER") return numberLiteralText(node);
-  if (node.type === "STRING_FUNC") return stringFuncLabel(node);
-  return `(${arithNodeLabel(node.left)}${node.op}${arithNodeLabel(node.right)})`;
-}
-
-function stringFuncLabel(expr: StringFuncExpr): string {
-  const args = expr.args.map((a) => {
-    if (a.type === "AGG_REF") return aggregateSyntheticName(a.func, a.distinct, a.arg);
-    if (a.type === "AGG_ARITH") return "agg_arith";
-    return scalarValueLabel(a);
-  });
-  return `${expr.func}(${args.join(",")})`;
-}
-
-function scalarValueLabel(expr: ScalarValueExpr): string {
-  switch (expr.type) {
-    case "STRING": return `'${expr.value}'`;
-    case "NUMBER": return numberLiteralText(expr);
-    case "VARIABLE": return `@${expr.name}`;
-    case "FIELD": return expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field;
-    case "STRING_FUNC": return stringFuncLabel(expr);
-    case "CASE_WHEN": return "case";
-    case "SCALAR_ARITH": return `(${scalarValueLabel(expr.left)}${expr.op}${scalarValueLabel(expr.right)})`;
-    case "CONCAT_OP": return `(${scalarValueLabel(expr.left)}||${scalarValueLabel(expr.right)})`;
-  }
 }
 
 function isAggregateSyntheticName(name: string): boolean {

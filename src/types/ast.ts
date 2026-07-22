@@ -265,7 +265,7 @@ export interface AggregateColumn {
   type: "AGGREGATE";
   func: AggregateFunc;
   distinct: boolean;      // COUNT(DISTINCT f)
-  arg: WildcardColumn | ArithNode;  // COUNT(*) → WILDCARD、それ以外は算術式
+  arg: WildcardColumn | AggregateArgExpr;  // COUNT(*) → WILDCARD、それ以外は集計引数式
   separator?: string;     // GROUP_CONCAT の区切り文字（未指定時は ","）
   alias: string | null;
 }
@@ -931,6 +931,9 @@ export type ScalarValueExpr =
   | ConcatExpr
   | CaseWhenExpr;
 
+/** 集計引数。既存 SQL は ArithNode のまま保持し、新規の値式だけ ScalarValueExpr を使う。 */
+export type AggregateArgExpr = ArithNode | ScalarValueExpr;
+
 /** ScalarValueExpr 専用の算術式。旧 ArithNode/LegacyArithExpr とは分離する。 */
 export interface ArithExpr {
   type: "SCALAR_ARITH";
@@ -987,7 +990,7 @@ export interface AggregateRef {
   type: "AGG_REF";
   func: AggregateFunc;
   distinct: boolean;
-  arg: WildcardColumn | ArithNode;
+  arg: WildcardColumn | AggregateArgExpr;
   separator?: string;
 }
 

@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -2144,8 +2144,14 @@ async function buildWhereFieldSemanticsResolver(
 }
 
 function selectCaseConditionsNeedFieldMetadata(stmt: SelectStatement): boolean {
-  return stmt.columns.some((column) => column.type === "CASE_COL"
-    && column.expr.branches.some((branch) => whereNeedsFieldMetadata(branch.condition)));
+  const visit = (value: unknown): boolean => {
+    if (value === null || typeof value !== "object") return false;
+    if (Array.isArray(value)) return value.some(visit);
+    const node = value as { type?: string; branches?: Array<{ condition: WhereExpr }> };
+    if (node.type === "CASE_WHEN" && node.branches?.some((branch) => whereNeedsFieldMetadata(branch.condition))) return true;
+    return Object.values(node).some(visit);
+  };
+  return stmt.columns.some(visit);
 }
 
 function buildHavingFieldSemanticsResolver(
@@ -2161,9 +2167,17 @@ function buildHavingFieldSemanticsResolver(
       semantics = syntheticSemantics("number");
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
-        semantics = column.arg.type === "FIELD_REF"
-          ? rowResolver(aggregateFieldRef(column.arg.field))
-          : syntheticSemantics("number");
+        if (column.arg.type !== "WILDCARD") {
+          semantics = inferAggregateArgMeta(column.arg, (ref) => {
+            const resolved = rowResolver(ref);
+            if (!resolved) return undefined;
+            return {
+              sortKind: resolved.compareMode === "number" || resolved.compareMode === "recordNumber" ? "number" : "string",
+              fieldType: resolved.fieldType,
+              semantics: resolved,
+            };
+          }).semantics;
+        }
       } else {
         semantics = column.func === "GROUP_CONCAT" ? syntheticSemantics("string") : syntheticSemantics("number");
       }
@@ -2754,11 +2768,36 @@ function aggregateFieldRef(field: string): FieldRef {
 
 function collectAggregateRef(
   func: string,
-  arg: { type: string; field?: string },
+  arg: AggregateArgExpr | { type: "WILDCARD" },
   out: FieldRef[]
 ): void {
-  if ((func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF" && arg.field) {
-    out.push(aggregateFieldRef(arg.field));
+  if (func !== "MIN" && func !== "MAX" && func !== "MODE" || arg.type === "WILDCARD") return;
+  collectAggregateArgFieldRefs(arg, out);
+}
+
+function collectAggregateArgFieldRefs(arg: AggregateArgExpr, out: FieldRef[]): void {
+  if (arg.type === "FIELD_REF") { out.push(aggregateFieldRef(arg.field)); return; }
+  if (arg.type === "FIELD") { out.push(arg); return; }
+  if (arg.type === "ARITH") {
+    collectAggregateArgFieldRefs(arg.left, out);
+    collectAggregateArgFieldRefs(arg.right, out);
+    return;
+  }
+  if (arg.type === "SCALAR_ARITH" || arg.type === "CONCAT_OP") {
+    collectAggregateArgFieldRefs(arg.left, out);
+    collectAggregateArgFieldRefs(arg.right, out);
+    return;
+  }
+  if (arg.type === "STRING_FUNC") {
+    for (const child of arg.args) {
+      if (child.type !== "AGG_REF" && child.type !== "AGG_ARITH") collectAggregateArgFieldRefs(child, out);
+    }
+    return;
+  }
+  if (arg.type === "CASE_WHEN") {
+    for (const result of [...arg.branches.map((branch) => branch.result), ...(arg.elseResult ? [arg.elseResult] : [])]) {
+      if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
+    }
   }
 }
 
@@ -2876,7 +2915,7 @@ async function loadAggregateSortKindResolver(
       : base;
   };
 
-  return (ref) => {
+  const resolveRef = (ref: FieldRef): ResolvedFieldSemantics | undefined => {
     let info: KintoneFieldInfo | undefined;
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
@@ -2916,6 +2955,8 @@ async function loadAggregateSortKindResolver(
       : stmt.joins.length === 0 ? stmt.from : undefined;
     return semanticsForInfo(info, sourceTable?.appId ?? stmt.from.appId);
   };
+
+  return resolveRef;
 }
 
 function fieldCodeForTypeLookup(table: TableRef, field: string): string {
@@ -3043,6 +3084,20 @@ function mergeExpressionColumnMeta(
   return unknownStringColumnMeta();
 }
 
+function inferAggregateArgMeta(
+  arg: AggregateArgExpr,
+  resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
+): MaterializedColumnMeta {
+  if (arg.type === "FIELD_REF") return resolveField(aggregateFieldRef(arg.field)) ?? unknownStringColumnMeta();
+  if (arg.type === "FIELD") return resolveField(arg) ?? unknownStringColumnMeta();
+  if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
+  if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return syntheticColumnMeta("string");
+  if (arg.type === "STRING_FUNC") return stringFunctionColumnMeta(arg);
+  const results = arg.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
+  if (arg.elseResult) results.push(caseResultColumnMeta(arg.elseResult, resolveField));
+  return mergeExpressionColumnMeta(results);
+}
+
 function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
   return stmt.columns.some((column) =>
     column.type === "FIELD"
@@ -3050,8 +3105,7 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     || column.type === "PARENT_WILDCARD"
     || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
-      && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE")
-      && column.arg.type === "FIELD_REF")
+      && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE"))
   );
 }
 
@@ -3142,11 +3196,8 @@ async function inferSelectColumnMeta(
           || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP"
           || column.func === "VAR_POP" || column.func === "VAR_SAMP" || column.func === "MEDIAN") {
           meta = syntheticColumnMeta("number");
-        } else if ((column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type === "FIELD_REF") {
-          const source = resolveField(aggregateFieldRef(column.arg.field));
-          if (source) meta = source;
-        } else if (column.func === "MODE") {
-          meta = syntheticColumnMeta("number");
+        } else if ((column.func === "MIN" || column.func === "MAX" || column.func === "MODE") && column.arg.type !== "WILDCARD") {
+          meta = inferAggregateArgMeta(column.arg, resolveField);
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
         meta = syntheticColumnMeta("number");
@@ -4241,9 +4292,7 @@ async function buildOrderSemanticsForSelect(
       meta = mergeExpressionColumnMeta(candidates);
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
-        meta = column.arg.type === "FIELD_REF"
-          ? resolveField(aggregateFieldRef(column.arg.field))
-          : syntheticColumnMeta("number");
+        if (column.arg.type !== "WILDCARD") meta = inferAggregateArgMeta(column.arg, resolveField);
       } else {
         meta = column.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
       }

@@ -37,6 +37,7 @@ import type {
   FieldRef,
   WindowColumn,
   ScalarValueExpr,
+  AggregateArgExpr,
   CaseResult,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
@@ -54,9 +55,11 @@ import {
   applyRoundOp,
   resolveFieldRef,
   evalScalarValueExpr,
+  evalScalarValueExprNullable,
 } from "./evalFunc";
 import { compareCanonicalValues, compareCodePointStrings } from "../core/scalarCompare";
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
+import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
 
 export { ProcessRow };
 
@@ -316,7 +319,7 @@ function evalGroupByKey(key: GroupByKey, row: ProcessRow): string {
 function evalAggregate(
   func: AggregateFunc,
   distinct: boolean,
-  arg: WildcardColumn | ArithNode,
+  arg: WildcardColumn | AggregateArgExpr,
   separator: string | undefined,
   rows: ProcessRow[],
   resolveAggSortKind?: AggregateSortKindResolver
@@ -335,11 +338,17 @@ function evalAggregate(
       const raw = row[arg.field];
       if (raw === undefined || (raw === "" && func !== "MIN" && func !== "MAX")) continue;
       strVal = raw;
-    } else {
+    } else if (arg.type === "ARITH" || arg.type === "NUMBER" || arg.type === "STRING_FUNC") {
       // 算術式 / 関数: 数値として評価し NaN はスキップ
       const n = evalArithExpr(arg, row);
       if (isNaN(n)) continue;
       strVal = String(n);
+    } else {
+      const value = evalScalarValueExprNullable(arg, row);
+      if (value === null) continue;
+      if (value === "" && func !== "MIN" && func !== "MAX") continue;
+      if (typeof value === "number" && Number.isNaN(value)) continue;
+      strVal = String(value);
     }
     strValues.push(strVal);
   }
@@ -364,12 +373,15 @@ function evalAggregate(
   if (func === "COUNT") return eff.length;
   if (func === "GROUP_CONCAT") return eff.join(separator ?? ",");
 
-  const comparison = (func === "MIN" || func === "MAX" || func === "MODE") && arg.type === "FIELD_REF"
-    ? resolveAggSortKind?.(toAggregateFieldRef(arg.field))
+  const comparison = (func === "MIN" || func === "MAX" || func === "MODE")
+    ? resolveAggregateArgSemantics(arg, resolveAggSortKind)
     : undefined;
   const semantics = typeof comparison === "string"
     ? syntheticSemantics(comparison)
-    : comparison ?? (arg.type === "FIELD_REF" ? syntheticSemantics("string") : syntheticSemantics("number"));
+    : comparison ?? (arg.type === "FIELD_REF" || arg.type === "FIELD" || arg.type === "STRING"
+      || arg.type === "CONCAT_OP" || arg.type === "CASE_WHEN"
+      ? syntheticSemantics("string")
+      : syntheticSemantics("number"));
   if (func === "MODE") {
     if (strValues.length === 0) return "";
     const frequencies = new Map<string, number>();
@@ -468,25 +480,32 @@ function evalAggArithExpr(
 
 /** alias なし時のデフォルトキー名: "SUM(金額)*1.1" 形式 */
 function aggArithDefaultKey(node: AggOperand): string {
-  if (node.type === "NUMBER")    return numberLiteralText(node);
-  if (node.type === "AGG_REF")   return aggregateSyntheticName(node.func, node.distinct, node.arg);
-  return `${aggArithDefaultKey(node.left)}${node.op}${aggArithDefaultKey(node.right)}`;
+  return aggregateOperandLabel(node);
 }
 
-/** 集計関数の引数を表示用文字列に変換する */
-function aggregateArgLabel(arg: WildcardColumn | ArithNode): string {
-  if (arg.type === "WILDCARD") return "*";
-  return arithColDefaultKey(arg); // FIELD_REF / NUMBER / ARITH / STRING_FUNC を処理済み
-}
-
-// "COUNT(*)" / "SUM(金額)" / "SUM(単価*数量)" / "COUNT(DISTINCT 種別)" 形式の合成名
-function aggregateSyntheticName(
-  func: AggregateFunc,
-  distinct: boolean,
-  arg: WildcardColumn | ArithNode
-): string {
-  const argStr = aggregateArgLabel(arg);
-  return distinct ? `${func}(DISTINCT ${argStr})` : `${func}(${argStr})`;
+function resolveAggregateArgSemantics(
+  arg: AggregateArgExpr,
+  resolver?: AggregateSortKindResolver
+): "number" | "string" | ResolvedFieldSemantics | undefined {
+  if (arg.type === "FIELD_REF") return resolver?.(toAggregateFieldRef(arg.field)) ?? "string";
+  if (arg.type === "FIELD") return resolver?.(arg) ?? "string";
+  if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return "number";
+  if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return "string";
+  if (arg.type === "STRING_FUNC") {
+    const numeric = new Set(["LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE", "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT", "DAYOFWEEK", "QUARTER", "WEEK"]);
+    if (arg.func === "CAST") return arg.args[1]?.type === "STRING" && arg.args[1].value === "NUMBER" ? "number" : "string";
+    return numeric.has(arg.func) ? "number" : "string";
+  }
+  const results = [...arg.branches.map((branch) => branch.result), ...(arg.elseResult === null ? [] : [arg.elseResult])]
+    .filter((result) => result.type !== "ARRAY")
+    .map((result) => resolveAggregateArgSemantics(result as AggregateArgExpr, resolver));
+  if (results.length === 0 || results.some((result) => result === undefined)) return "string";
+  const kinds = results.map((result) => typeof result === "string"
+    ? result
+    : result!.compareMode === "number" || result!.compareMode === "recordNumber" ? "number" : "string");
+  if (!kinds.every((kind) => kind === kinds[0])) return "string";
+  const first = results[0];
+  return results.every((result) => JSON.stringify(result) === JSON.stringify(first)) ? first : kinds[0];
 }
 
 // ============================================================

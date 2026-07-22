@@ -14,7 +14,7 @@ import type {
 import { numberLiteralText } from "../types/ast";
 import type { FieldSemanticsResolver, FieldTypeResolver, ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
-import { evalCaseWhen } from "./evalWhere";
+import { evalCaseWhen, evalCaseWhenNullable } from "./evalWhere";
 
 // ============================================================
 // 算術式
@@ -69,6 +69,40 @@ export function evalScalarValueExpr(
         case "%": return right !== 0 ? left % right : NaN;
       }
     }
+  }
+}
+
+/** 集計入力用。表示/DML の空文字 NULL 互換を変えず、CASE の NULL だけを保持する。 */
+export function evalScalarValueExprNullable(
+  expr: ScalarValueExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string | number | null {
+  switch (expr.type) {
+    case "CASE_WHEN":
+      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics);
+    case "SCALAR_ARITH": {
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics);
+      if (left === null || right === null) return null;
+      const l = Number(left);
+      const r = Number(right);
+      switch (expr.op) {
+        case "+": return l + r;
+        case "-": return l - r;
+        case "*": return l * r;
+        case "/": return r !== 0 ? l / r : NaN;
+        case "%": return r !== 0 ? l % r : NaN;
+      }
+    }
+    case "CONCAT_OP": {
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics);
+      return `${left ?? ""}${right ?? ""}`;
+    }
+    default:
+      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics);
   }
 }
 
