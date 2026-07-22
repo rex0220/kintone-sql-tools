@@ -1,6 +1,6 @@
 <!-- タイトル: AI に SQL 方言を使わせる検証ループ — 30 シナリオで見つけた「validate では捕まらない誤り」 -->
 
-前編「Claude への kSQL 構文の教え方」（公開後に URL を設定）では、AI が独自 SQL の構文を「発明」する問題を MCP instructions の構文カタログで解決しました。ただし記事はこう締めています——**「まだ 1 シナリオの成功でしかない」**。
+前編「[Claude への MCP kSQL 構文の教え方 — AI は独自 SQL の構文を「発明」する](https://qiita.com/rex0220/items/4d9fc0ed48ebd5b32a7b)」では、AI が独自 SQL の構文を「発明」する問題を MCP instructions の構文カタログで解決しました。ただし記事はこう締めています——**「まだ 1 シナリオの成功でしかない」**。
 
 本記事はその続きです。検証シナリオを 1 → 30 に増やしてループを回した結果、**未定義のトップレベル文型・句順の発明はゼロのまま**（方言制約に阻まれた ParseError と自己修正は観測しています）でしたが、代わりに**もっと厄介な誤り**——`ksql_validate` が通るのに意味がずれる SQL——を 1 件検出しました。見つけて、直して、同じ依頼の再検証で解消を実証するまでの記録と、そこから得た手法をまとめます。
 
@@ -10,7 +10,7 @@
 
 関連記事
 
-- 前編: Claude への kSQL 構文の教え方（公開後に URL を設定）
+- 前編: [Claude への MCP kSQL 構文の教え方 — AI は独自 SQL の構文を「発明」する](https://qiita.com/rex0220/items/4d9fc0ed48ebd5b32a7b)
 - [rex0220 kintone-sql-tools の紹介](https://qiita.com/rex0220/items/b604519f03ad1494f8be)
 - [rex0220 kSQL 言語リファレンス](https://qiita.com/rex0220/items/e089fddf4229d74be699)
 
