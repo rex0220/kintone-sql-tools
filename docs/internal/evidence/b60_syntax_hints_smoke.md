@@ -29,6 +29,14 @@ initialize 応答の instructions を直接取得: **502 語・5 段落**・`Sta
 
 1 回目にモデルが `CREATE TEMP TABLE ... AS ( ... )` と**括弧付き**で書いて ParseError→自己修正した。原因＝カタログ表記 `AS(SELECT...|WITH...)` のグルーピング括弧がリテラルに見える（WITH の括弧はリテラルなので非対称）。→ template を `AS SELECT...|AS WITH...` へ修正（502 語で exact 再固定）し、**2 回目は初回から括弧なしで正解**。
 
-## 4. 残（リリース前・仕様 §6-8 の第 2 面）
+## 4. Claude Desktop AI 行動検証（仕様 §6-8 の第 2 面・発端環境・**PASS**）
 
-- **Claude Desktop（ユーザー確認）**: 新ビルド `dist-mcpb/ksql-mcp.mcpb`（または `dist-mcp/ksql-mcp.js` 指定）で同じ依頼を実施し、`ON ERROR SKIP INTO #err` の一発組み立てを確認。**完了までリリース（版数確定・release アセット差し替え）はホールド**。
+2026-07-22・ユーザー実施。v3.14.0 の `ksql-mcp.mcpb` をインストール（同一版は上書き不可のため版数を先行確定）し、「APP4149 へ一時テーブルから不正行を隔離しつつ INSERT」を依頼。
+
+**結果: PASS**（発端事象の構文発明は再現せず）:
+
+- `INSERT INTO APP4149 ... SELECT ... FROM #staging ON ERROR SKIP INTO #err REJECT LIMIT 100` を**一発で正しい位置に配置・`REJECT LIMIT` まで自発使用**。`ksql_validate` ok（`isOnErrorSkip:true`・`#err` 生成・`tempOnlySource:true`）・`ksql_explain` ok
+- **行動規範どおり `ksql_docs` を先に読んでから組み立て**（索引→R6/INSERT/バッチ章→R5→スキーマ確認）
+- 期待以上の理解: 5 文バッチ（`#staging` 実体化→`ASSERT` 件数ゲート→本体→`GROUP_CONCAT($err_message)` の隔離サマリ）・**Tier 0 とランタイムエラーの境界を正確に説明**（unique 制約・USER_SELECT/LOOKUP は隔離対象外→フィールドセットから主担当を除外）・意図的不正 4 行の設計（選択肢外・非数値・maxLength 超）・実行には `ksql_mutate` が必要という導線・R6 書き戻しパターンの提案
+
+**両面（Claude Code ×2・Claude Desktop ×1）PASS＝リリースホールド解除**。
