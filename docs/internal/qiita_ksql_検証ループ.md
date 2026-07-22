@@ -14,6 +14,41 @@
 - [rex0220 kintone-sql-tools の紹介](https://qiita.com/rex0220/items/b604519f03ad1494f8be)
 - [rex0220 kSQL 言語リファレンス](https://qiita.com/rex0220/items/e089fddf4229d74be699)
 
+## 開発環境: 人間 + 2 つの AI
+
+この検証ループ（と kSQL の開発そのもの）は、**VSCode 上の Claude Code と、CLI の codex という 2 つの AI を役割分担**させて回しています。人間が渡すのは意図だけです。
+
+```mermaid
+flowchart TB
+    Dev(["開発者<br/>意図だけを日本語で"])
+    subgraph IDE["VSCode（IDE）"]
+        CC["Claude Code<br/>仕様ドラフト・レビュー・<br/>git 操作・行動検証・台帳同期"]
+    end
+    Codex["codex CLI<br/>sandbox 実装・独立レビュー<br/>（git 操作はしない）"]
+    subgraph KSQL["kSQL ツール（両 AI が利用可）"]
+        MCP["MCP サーバー<br/>ksql_validate / ksql_docs …"]
+        CLI["kSQL CLI"]
+    end
+    Repo[("リポジトリ / ビルド成果物")]
+
+    Dev --> CC
+    CC <-->|"① 仕様 R1・レビュー依頼／② 指摘・実装差分"| Codex
+    CC --> MCP
+    CC --> CLI
+    Codex --> MCP
+    Codex --> CLI
+    CC -->|"③ 独立検証・commit・PR"| Repo
+    Repo -->|"ビルド成果物を明示指定"| CC
+```
+
+役割分担はこうです。
+
+- **Claude Code（VSCode 拡張）**: 仕様のドラフト（R1）・レビュー・独立検証・**git 操作（commit / PR / merge / tag）**・headless の行動検証・課題台帳とメモリの同期。オーケストレーション役。
+- **codex（CLI）**: sandbox 内での実装と独立レビュー。**git は触りません**——sandbox が `.git` への書き込みを弾くため、コミットは必ず Claude 側に寄せる分担にしています。
+- **両 AI が kSQL の MCP サーバーと CLI を利用できる**のが要点です。`ksql_validate` / `ksql_docs` などの MCP ツールも、CLI も、どちらの AI からも叩けるので、**実装した側（codex）とレビューする側（Claude）が、同じエンジンで独立に SQL を突き合わせられます**。この検証ループの headless 実行も、この「AI が kSQL ツールを直接使える」構成の上に成り立っています。
+
+典型的な 1 周は「意図 → Claude が仕様 R1 → codex がレビュー → Claude が R2 → codex が実装 → Claude が独立検証してコミット」です。人間は要所で承認するだけで、ドキュメント・実装・レビューが 1 日で一巡します。
+
 ## 検証ループの作り方
 
 仕組みは単純で、**headless の Claude Code に、ビルドしたての MCP サーバーを明示指定して、意図だけを日本語で依頼する**だけです。
