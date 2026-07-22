@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 機能追加（B60 MCP Statement syntax catalog）
+
+- MCP server instructions に、全18文型 family の構文骨格を専用 `STATEMENT_SYNTAX_CATALOG` から生成する `Statement templates` 段落を追加した。共通の `CHECKS` / `CONTROL`、句順、バッチ専用 `INTO #err`、APPLY・サブテーブル DML の併用制約、全 family 網羅宣言を常時提示し、初出文型は `ksql_docs` で確認して構文を発明しない行動規範を追加した。
+- `ksql_query` / `ksql_mutate` の description に各 surface で利用できる validation / DML tail の文型を追加した。catalog の全 example は parser の AST type と照合し、バッチ例は `analyzeBatch`、危険な句順は負例で固定した。instructions は5段落・500語（上限550語 guard）とした。
+- MCP smoke / pack smoke / MCPB launcher verification に `Statement templates` と `ON ERROR SKIP INTO` の代表語を追加し、言語リファレンス §24 の EXPLAIN 対応一覧へ `VALIDATE` / `IMPORT` を同期した。SQL runtime、tool schema、`ksql_docs`、resource、envelope は変更していない。
+
 ## v3.13.0（2026-07-22）
 
 ### 修正（B59 `ORDER BY` の SELECT alias 値解決）

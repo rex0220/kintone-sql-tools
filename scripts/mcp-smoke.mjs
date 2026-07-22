@@ -168,6 +168,8 @@ function assertToolDescriptions(tools) {
   ];
   const queryKeys = [
     "multi-statement batches with temp tables",
+    "VALIDATE ONLY [INTO #err]",
+    "leading VALIDATE APPn ... [INTO #err]",
     // v1.10.0: ASSERT は ksql_query で実行できる read-only 文
     "ASSERT",
     // v1.10.0: ASSERT 失敗は常にバッチ停止(continueOnError 無視)
@@ -180,6 +182,8 @@ function assertToolDescriptions(tools) {
   ];
   const mutateKeys = [
     "multi-statement DML batches with temp tables",
+    "{VALUES|SELECT} CHECKS →",
+    "ON ERROR SKIP INTO #err [REJECT LIMIT n]",
     // v1.7.0: SELECT-based DML のソース制限を最終解消(APP / temp / 混在とも可)
     "supports app sources, temp tables, or joins of both",
     // v1.6.0: dmlMaxRows は UPSERT では insert + update 合計
@@ -382,6 +386,8 @@ async function main() {
       "ksql://language-reference",
       "APPLY mutation is disabled",
       "ksql_docs",
+      "Statement templates",
+      "ON ERROR SKIP INTO",
       "Complete function catalog",
       "CURRENT_TIMESTAMP",
       "DAYOFWEEK",
