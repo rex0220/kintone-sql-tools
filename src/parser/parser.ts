@@ -94,6 +94,7 @@ import type {
   WindowColumn,
   WindowFunc,
   ScalarValueExpr,
+  AggregateArgExpr,
   ConcatExpr,
   ScalarValueColumn,
   CheckGroup,
@@ -104,6 +105,7 @@ import type {
   RowSelector,
   ExpectRowsGuard,
 } from "../types/ast";
+import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { NO_FROM_CTE_NAME } from "../types/ast";
 
 /** バッチ(複文)の文数上限 */
@@ -289,6 +291,7 @@ export class Parser {
   private scalarAllowsAggregateArgs = true;
   private scalarAllowsCase = true;
   private pos = 0;
+  private insideAggregateArg = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
@@ -1163,7 +1166,7 @@ export class Parser {
     }
 
     // `||` のない既存列は従来 AST を維持する。
-    if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
+    if (this.tryAggregateFunc() === null && this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "SCALAR_VALUE_COL", expr, alias } satisfies ScalarValueColumn;
@@ -1497,7 +1500,14 @@ export class Parser {
       if (!allowCase) throw new ParseError("このスカラー値式では CASE を使用できません", tok);
       return this.parseCaseWhenExpr();
     }
-    if (this.tryAggregateFunc() !== null) throw new ParseError("スカラー値式に集約関数は使用できません", tok);
+    if (this.tryAggregateFunc() !== null) {
+      throw new ParseError(
+        this.insideAggregateArg > 0
+          ? "集計関数の引数内に集計関数は使用できません"
+          : "スカラー値式に集約関数は使用できません",
+        tok
+      );
+    }
     if (this.tryStringFuncName() !== null) return this.parseStringFuncExpr();
     if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
       this.advance();
@@ -1681,6 +1691,9 @@ export class Parser {
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
   private parseCaseResult(): CaseResult {
     const tok = this.peek();
+    if (this.insideAggregateArg > 0 && this.tryAggregateFunc() !== null) {
+      throw new ParseError("集計関数の引数内に集計関数は使用できません", tok);
+    }
     // 配列リテラル: ['val1', 'val2'] → ArrayLiteral
     if (tok.kind === TokenKind.LBRACKET) {
       return this.parseArrayLiteral();
@@ -1854,7 +1867,7 @@ export class Parser {
       }
       arg = { type: "WILDCARD" };
     } else {
-      arg = this.parseArithAddSub(); // フィールド名・算術式・関数呼び出し
+      arg = this.parseAggregateArgExpr();
     }
 
     let separator: string | undefined;
@@ -1874,6 +1887,64 @@ export class Parser {
       arg,
       ...(separator !== undefined ? { separator } : {}),
     };
+  }
+
+  private isAggregateArgEnd(): boolean {
+    return this.peek().kind === TokenKind.RPAREN || this.isSoftKeyword("SEPARATOR");
+  }
+
+  /** 旧算術 AST を優先し、新規形だけ ScalarValueExpr として読む。 */
+  private parseAggregateArgExpr(): AggregateArgExpr {
+    const start = this.pos;
+    try {
+      const legacy = this.parseArithAddSub();
+      if (this.isAggregateArgEnd()) return legacy;
+    } catch {
+      // ScalarValueExpr で読み直す。
+    }
+    this.pos = start;
+    this.insideAggregateArg++;
+    try {
+      let expr: ScalarValueExpr;
+      try {
+        expr = this.parseScalarValueExpr({ allowCase: true, allowAggregateArgs: false });
+      } catch (error) {
+        if (error instanceof ParseError) {
+          if (error.message.includes("比較・述語")) {
+            throw new ParseError(
+              "集計関数の引数に比較・述語は使用できません。CASE で値を明示してください。例: SUM(CASE WHEN amount > 0 THEN 1 ELSE 0 END)",
+              error.token
+            );
+          }
+          if (error.message.includes("集約関数")) {
+            throw new ParseError("集計関数の引数内に集計関数は使用できません", error.token);
+          }
+        }
+        throw error;
+      }
+      if (!this.isAggregateArgEnd()) {
+        throw new ParseError(
+          "この集計関数の引数形式は使用できません。CASE で値を明示するか、CTE で式を列にしてから集計してください。",
+          this.peek()
+        );
+      }
+      this.assertNoNestedAggregate(expr);
+      return expr;
+    } finally {
+      this.insideAggregateArg--;
+    }
+  }
+
+  private assertNoNestedAggregate(expr: AggregateArgExpr): void {
+    const visit = (value: unknown): void => {
+      if (value === null || typeof value !== "object") return;
+      const node = value as { type?: string; [key: string]: unknown };
+      if (node.type === "AGG_REF" || node.type === "AGG_ARITH") {
+        throw new ParseError("集計関数の引数内に集計関数は使用できません", this.peek());
+      }
+      for (const child of Object.values(node)) visit(child);
+    };
+    visit(expr);
   }
 
   // ----------------------------------------------------------
@@ -2196,33 +2267,11 @@ export class Parser {
     // 集計関数（HAVING のみ）
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      this.advance(); // 関数名トークンを消費
-      this.expect(TokenKind.LPAREN);
-      const distinct = this.consume(TokenKind.DISTINCT);
-      const distinctToken = distinct ? this.prev() : null;
-      if (aggFunc === "MODE" && distinctToken) {
-        throw new ParseError("MODE では DISTINCT は使用できません", distinctToken);
+      if (this.insideAggregateArg > 0) {
+        throw new ParseError("集計関数の引数内に集計関数は使用できません", this.peek());
       }
-      let argStr: string;
-      if (this.consume(TokenKind.STAR)) {
-        if (!aggregateAcceptsWildcard(aggFunc)) {
-          throw new ParseError(`${aggFunc}(*) は使用できません。フィールドまたは式を指定してください`, this.prev());
-        }
-        argStr = "*";
-      } else {
-        argStr = this.parseIdentifier();
-      }
-      if (this.isSoftKeyword("SEPARATOR")) {
-        const separatorToken = this.advance();
-        if (aggFunc !== "GROUP_CONCAT") {
-          throw new ParseError("SEPARATOR は GROUP_CONCAT でのみ使用できます", separatorToken);
-        }
-        this.expect(TokenKind.STRING, "SEPARATOR の後には文字列リテラルが必要です");
-      }
-      this.expect(TokenKind.RPAREN);
-      const syntheticName = distinct
-        ? `${aggFunc}(DISTINCT ${argStr})`
-        : `${aggFunc}(${argStr})`;
+      const ref = this.parseAggregateRef(aggFunc);
+      const syntheticName = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
       return { type: "FIELD", tableAlias: null, field: syntheticName };
     }
 

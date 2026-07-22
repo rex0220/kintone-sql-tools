@@ -23,7 +23,7 @@ import type {
   ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
-import { evalStringFunc, evalArithExpr, evalScalarValueExpr, resolveFieldRef } from "./evalFunc";
+import { evalStringFunc, evalArithExpr, evalScalarValueExpr, evalScalarValueExprNullable, resolveFieldRef } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
 import {
@@ -375,6 +375,35 @@ export function evalCaseWhen(
     return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics);
   }
   return ""; // NULL 相当
+}
+
+/** 集計入力専用 CASE 評価。ELSE 省略だけを null として保持する。 */
+export function evalCaseWhenNullable(
+  expr: CaseWhenExpr,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string | number | null {
+  for (const branch of expr.branches) {
+    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics)) {
+      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics);
+    }
+  }
+  return expr.elseResult === null
+    ? null
+    : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics);
+}
+
+function evalCaseResultNullable(
+  result: CaseResult,
+  row: ProcessRow,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): string | number | null {
+  if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
+  if (result.type === "FIELD_REF") return row[result.field] ?? "";
+  if (result.type === "ARITH") return evalArithExpr(result, row);
+  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics);
 }
 
 function evalCaseResult(

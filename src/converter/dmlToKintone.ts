@@ -23,6 +23,7 @@ import type {
   CaseResult,
   WhereExpr,
   ScalarValueExpr,
+  AggregateArgExpr,
 } from "../types/ast";
 import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
@@ -261,13 +262,18 @@ function collectScalarValueFields(expr: ScalarValueExpr, out: Set<string>): void
 
 function collectAggOperandFields(node: AggOperand, out: Set<string>): void {
   if (node.type === "AGG_REF") {
-    if (node.arg.type !== "WILDCARD") collectArithNode(node.arg, out);
+    if (node.arg.type !== "WILDCARD") collectAggregateArgFields(node.arg, out);
     return;
   }
   if (node.type === "AGG_ARITH") {
     collectAggOperandFields(node.left, out);
     collectAggOperandFields(node.right, out);
   }
+}
+
+function collectAggregateArgFields(node: AggregateArgExpr, out: Set<string>): void {
+  if (node.type === "FIELD_REF" || node.type === "ARITH") collectArithNode(node, out);
+  else collectScalarValueFields(node, out);
 }
 
 function collectCaseResultFields(result: CaseResult, out: Set<string>): void {

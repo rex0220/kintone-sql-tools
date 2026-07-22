@@ -1202,6 +1202,48 @@ test("SET スカラーサブクエリを1回だけ評価し、COUNT結果を複�
   expect(client.getCalls.filter((call) => call.app === 8101)).toHaveLength(1);
 });
 
+test("B64-M04: CASE 集計の型メタを CTE 後段の MIN/MAX・ORDER BY へ伝播する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      6401: [
+        makeRecord({ grp: "A", p: "yes", n: "10" }),
+        makeRecord({ grp: "B", p: "yes", n: "2" }),
+      ],
+    },
+    fieldTypes: { grp: "SINGLE_LINE_TEXT", p: "SINGLE_LINE_TEXT", n: "NUMBER" },
+  });
+  const result = await executeBatch(
+    "WITH t AS (SELECT grp, MIN(CASE WHEN p = 'yes' THEN n END) AS v FROM APP6401 GROUP BY grp) " +
+    "SELECT v FROM t WHERE v < 20 ORDER BY v",
+    client,
+    { cacheContext: "b64-m04-cte-meta" }
+  );
+  expect(result.ok).toBe(true);
+  expect((result.statements[0].result as SelectResult).rows).toEqual([{ v: "2" }, { v: "10" }]);
+});
+
+test("B64-M05: SET スカラーサブクエリは CASE 集計の number/string 型を保持する", async () => {
+  const client = makeClient({
+    recordsByApp: {
+      6402: [
+        makeRecord({ p: "yes", n: "2", label: "A" }),
+        makeRecord({ p: "yes", n: "4", label: "B" }),
+        makeRecord({ p: "no", n: "100", label: "X" }),
+      ],
+    },
+    fieldTypes: { p: "SINGLE_LINE_TEXT", n: "NUMBER", label: "SINGLE_LINE_TEXT" },
+  });
+  const result = await executeBatch(
+    "SET @total = (SELECT SUM(CASE WHEN p = 'yes' THEN n END) FROM APP6402);" +
+    "SET @labels = (SELECT GROUP_CONCAT(CASE WHEN p = 'yes' THEN label END SEPARATOR '/') FROM APP6402);" +
+    "ASSERT @total = 6; ASSERT @labels = 'A/B'",
+    client,
+    { cacheContext: "b64-m05-set-meta" }
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements.map((statement) => statement.status)).toEqual(["success", "success", "success", "success"]);
+});
+
 test("SET スカラーサブクエリは先行変数をWHEREで参照できる", async () => {
   const client = makeClient({ recordsByApp: { 8102: APP1 } });
   const r = await executeBatch(
