@@ -77,14 +77,14 @@
 
 | # | シナリオ | 核心結果 | 判定 |
 |---|---|---|---|
-| N1 | REORDER |  期待形そのまま（/_pid 混同なし・VALIDATE ONLY 付加なし） | PASS |
-| N2 | EXPLAIN の使い分け |  正配置＋**「ローカル整列かは実行しないと分からない」「validate はフィールド実在を確認しない」と分かる/分からないを正確に区別**（メタ認識） | PASS |
-| N3 | UNION ALL | 重複保持の理由つきで  を選択・列位置一致 | PASS |
-| N4 | GROUP_CONCAT 決定的順序（負性） | 関数内 ORDER BY 非対応・「連結順=収集順」を正しく認識した上で、**temp 事前ソートで収集順を固定する正当な決定性手法**を提示（DISTINCT 初出順維持・選択肢定義順の注意も正確） | PASS（期待超え） |
-| N5 | 空セル 0 意味論 |  で行除外＋「未入力が『1』という偽の結果として混入」の正確な説明 | PASS |
-| N6 | 相関 EXISTS（負性） | **相関サブクエリ非対応を正しく認識**し、（意味論の等価性証明つき）と MAX 集約 CTE+1:1 JOIN の**非相関再定式化 2 案**・重複の出る自己 JOIN は明示的に不採用 | PASS（期待超え） |
-| N7 | IMPORT UPDATE | （照合専用・列リスト外・INSERT 0 保証・R12 引用・inline CSV で validate） | PASS |
-| N8 | VALIDATE SUMMARY | ＋「SUMMARY 5 列はレコード単位のまま」の理解に基づく GROUP BY 畳み込みの 2 文構成 | PASS（期待超え） |
+| N1 | REORDER | `REORDER APP4221$テーブル BY 数値T1 DESC WHERE _pid = 5` 期待形そのまま（`$id`/`_pid` 混同なし・VALIDATE ONLY 付加なし） | PASS |
+| N2 | EXPLAIN の使い分け | `EXPLAIN SELECT … ORDER BY 金額 DESC LIMIT 10` 正配置＋**「ローカル整列かは実行しないと分からない」「validate はフィールド実在を確認しない」と分かる/分からないを正確に区別**（メタ認識） | PASS |
+| N3 | UNION ALL | 重複保持の理由つきで `UNION ALL` を選択・列位置一致 | PASS |
+| N4 | GROUP_CONCAT 決定的順序（負性） | 関数内 ORDER BY 非対応・「連結順=収集順」を正しく認識した上で、**temp 事前ソート（`CREATE TEMP TABLE #sorted AS SELECT … ORDER BY タイトル` → `GROUP_CONCAT(DISTINCT … SEPARATOR ' / ')`）で収集順を固定する正当な決定性手法**を提示（DISTINCT 初出順維持・選択肢定義順の注意も正確） | PASS（期待超え） |
+| N5 | 空セル 0 意味論 | `WHERE 数値MIN IS NOT NULL` で行除外＋「未入力が『1』という偽の結果として混入」の正確な説明 | PASS |
+| N6 | 相関 EXISTS（負性） | **相関サブクエリ非対応を正しく認識**し、`RANK() OVER (PARTITION BY …) … WHERE rk > 1`（意味論の等価性証明つき）と MAX 集約 CTE＋1:1 JOIN の**非相関再定式化 2 案**・重複の出る自己 JOIN は明示的に不採用 | PASS（期待超え） |
+| N7 | IMPORT UPDATE | `IMPORT UPDATE INTO APP4221 (金額, 日付) FROM CSV updates BY NAME MATCH RECORD NUMBER SOURCE` （レコード番号は照合専用・列リスト外・INSERT 0 保証・R12 引用・inline CSV で validate） | PASS |
+| N8 | VALIDATE SUMMARY | `VALIDATE APP4221 (タイトル, 数値MIN, テーブル(数値T1)) SUMMARY INTO #summary`＋「SUMMARY 5 列はレコード単位のまま」の理解に基づく GROUP BY 畳み込みの 2 文構成 | PASS（期待超え） |
 
 ## 累計と限界（正直な記録）
 
