@@ -1,6 +1,6 @@
 # B60 仕様 — MCP Statement syntax catalog（AI の構文発明を抑止する構文ヒント）
 
-- ステータス: 📋 **仕様 R2（2026-07-22・codex レビュー R1→R2 反映済＝P1×8/P2×5/P3×4 全件裏取り一致・実装着手可）**
+- ステータス: 🚧 **実装済み・Claude Code AI 行動検証 PASS×2・Claude Desktop 検証待ち＝リリースホールド（2026-07-22・全2,840 green・stdio 配線確認 502語・[検証証跡](evidence/b60_syntax_hints_smoke.md)）**
 - 起票: [B60 issue](ksql_b60_mcp_syntax_hints_issue.md)
 - 種別: 改善（MCP discoverability）／SemVer: **minor**（MCP instructions / tool description＋言語リファレンス §24 の drift 修正のみ・SQL 挙動・schema・resources 不変）
 - 関連: **B55**（instructions 全量関数カタログ＝同型解決の前例）／B50
@@ -89,10 +89,13 @@ families or clause orders.
 2. UPSERT example は必ず `ON DUPLICATE` を含む・UPDATE FROM example は alias とソース修飾列を含む・APPLY example は VALIDATE ONLY で通り CHECK/ON ERROR 併用で落ちる・IMPORT example は `{import:true}` で検査。
 3. instructions: 5 段落・語数 exact＋上限・代表語。descriptions 追記。mcp-smoke / pack-smoke / **mcpb-verify（instructions 確認込み）** green。
 4. 言語リファレンス §24 に VALIDATE / IMPORT 追記（EXPLAIN allowlist と一致）。
-5. MCP stdio 実機: initialize 応答の instructions に Statement templates 段落。
+5. MCP stdio 実機: initialize 応答の instructions に Statement templates 段落（配線検証）。
 6. 非回帰: 全テスト green・関数カタログ段落/既存 guard/`ksql_docs` 不変。
 7. spec・issue・tracker の 3 箇所ステータス同期（各マイルストーンで）。
-8. （リリース後・ユーザー確認）Claude Desktop で `ON ERROR SKIP INTO #err` を一発で正しく組み立てる。
+8. **リリース前の AI 行動検証（2 面・ビルド結果を使用）**:
+   - **Claude Code（自動化可）**: headless `claude -p` を新ビルド `dist-mcp/ksql-mcp.js` 指定の MCP 設定で起動し、「不正行を隔離しながら INSERT するバッチ」を依頼→ `ON ERROR SKIP INTO #err [REJECT LIMIT n]` を**一発で正しく組み立てる**ことを確認（Claude Code は MCP server instructions をモデルへ提示するクライアント＝本セッションの system prompt で実証済み。**stale server 注意＝常駐サーバーでなく新ビルドを明示指定**）。
+   - **Claude Desktop（ユーザー確認）**: 新ビルドの `ksql-mcp.mcpb`（または dist-mcp 指定）で同じ依頼を実施（B55 のデバイスブリッジ経路＝B60 の発端環境での最終確認）。
+   - **両面の検証完了までリリース（版数確定・release アセット差し替え）をホールド**する。
 
 ## 7. 同期箇所
 

@@ -174,8 +174,8 @@ function assertPackedToolDescriptions(tools) {
     ],
     ksql_describe_app: ["field code", "label", "type", "ksql_app_metadata"],
     ksql_validate: ["Do not use validate probing", "call ksql_docs instead"],
-    ksql_query: ["ksql://language-reference", "ksql_docs when resources are unavailable"],
-    ksql_mutate: ["ksql://language-reference", "ksql_docs when resources are unavailable"],
+    ksql_query: ["ksql://language-reference", "ksql_docs when resources are unavailable", "VALIDATE ONLY [INTO #err]", "leading VALIDATE APPn ... [INTO #err]"],
+    ksql_mutate: ["ksql://language-reference", "ksql_docs when resources are unavailable", "{VALUES|SELECT} CHECKS →", "ON ERROR SKIP INTO #err [REJECT LIMIT n]"],
   };
   for (const [toolName, keys] of Object.entries(required)) {
     const description = tools.find((tool) => tool.name === toolName)?.description;
@@ -312,6 +312,8 @@ try {
     "ksql://language-reference",
     "APPLY mutation is disabled",
     "ksql_docs",
+    "Statement templates",
+    "ON ERROR SKIP INTO",
     "Complete function catalog",
     "CURRENT_TIMESTAMP",
     "DAYOFWEEK",

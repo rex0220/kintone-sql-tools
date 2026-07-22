@@ -83,6 +83,12 @@ describe("ksql_app_metadata MCP surface", () => {
       expect(registered[toolName].description).toContain("ksql://language-reference");
       expect(registered[toolName].description).toContain("ksql_docs when resources are unavailable");
     }
+    expect(registered.ksql_query.description).toContain("VALIDATE ONLY [INTO #err]");
+    expect(registered.ksql_query.description).toContain("leading VALIDATE APPn ... [INTO #err]");
+    expect(registered.ksql_query.description).not.toContain("ON ERROR SKIP INTO #err");
+    expect(registered.ksql_mutate.description).toContain("{VALUES|SELECT} CHECKS →");
+    expect(registered.ksql_mutate.description).toContain("ON ERROR SKIP INTO #err [REJECT LIMIT n]");
+    expect(registered.ksql_mutate.description).toContain("only in a multi-statement batch");
     expect(registered.ksql_validate.description).toContain("Do not use validate probing");
     expect(metadata.inputSchema).toBe(ksqlAppMetadataInputShape);
     expect([...KINTONE_METADATA_RESOURCES]).toEqual([
@@ -100,8 +106,10 @@ describe("ksql_app_metadata MCP surface", () => {
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
-      expect(instructions?.trim().split(/\s+/).length).toBe(277);
-      expect(instructions?.trim().split(/\n\n/)).toHaveLength(4);
+      const instructionWords = instructions?.trim().split(/\s+/).length;
+      expect(instructionWords).toBe(502);
+      expect(instructionWords).toBeLessThanOrEqual(550);
+      expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);
       for (const key of [
         "not generic SQL",
         "VALIDATE ONLY",
@@ -109,6 +117,8 @@ describe("ksql_app_metadata MCP surface", () => {
         "ksql://language-reference",
         "APPLY mutation is disabled",
         "ksql_docs",
+        "Statement templates",
+        "ON ERROR SKIP INTO",
         "Complete function catalog",
         "CURRENT_TIMESTAMP",
         "DAYOFWEEK",
