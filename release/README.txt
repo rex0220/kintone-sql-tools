@@ -1,9 +1,26 @@
-ksql 配布パッケージ (v3.12.0)
+ksql 配布パッケージ (v3.13.0)
 
-1. ksql-plugin-v3.12.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.13.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.13.0: 関数拡充 3 件とバグ修正 1 件。
+- B56: 統計集約 STDDEV_POP / STDDEV_SAMP / VAR_POP / VAR_SAMP / MEDIAN を追加。
+  分散・標準偏差は Welford 法、中央値は数値昇順。統計集約は完全入力必須で、
+  onLimit=truncate でも上限到達時はエラーになり部分集合の値を返さない。
+  未定義の統計量 (0 件・_SAMP の 1 件) は空文字、非数値の入力は ArgumentError。
+  無印 STDDEV / VARIANCE は方言間で意味が異なるため非対応 (明示形のみ)。
+- B57: 日付集計軸 DAYOFWEEK (1=日曜)・QUARTER・WEEK (ISO-8601 固定) と、
+  DATE_FORMAT の %w (0=日曜)・%a (日本語曜日)・%v (ISO 週番号)・
+  %G (ISO week-year) を追加。週次ラベルは %G-%v を推奨 (%Y-%v は年跨ぎ週で誤る)。
+  新 3 関数は実在する日付のみ受理し、不正日付は空文字。
+- B58: MODE (最頻値) を追加。カテゴリデータ (ドロップダウン・ステータス等) 向けの
+  文字列頻度カウント。同数タイは canonical 比較順の最小値を返す決定的規則。
+- B59: SELECT 列の別名 (AS alias) を ORDER BY に指定すると黙って無視され
+  元の行順のまま返る不具合を修正。従来並ばなかったクエリの結果順が変わる。
+- 新しい予約語: STDDEV_POP STDDEV_SAMP VAR_POP VAR_SAMP MEDIAN MODE
+  DAYOFWEEK QUARTER WEEK (同名フィールドはバッククォートで参照)。
 
 v3.12.0: MCP に read-only ドキュメントツール ksql_docs を追加 (B55)。
 - MCP resources を中継しないクライアント (リモート接続のプロキシ等) でも、
