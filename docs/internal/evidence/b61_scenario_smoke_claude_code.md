@@ -40,9 +40,27 @@
 
 いずれも validate によるセルフリカバリで最終形に到達したが、**変数の使用可能位置（比較右辺・IN 要素・関数引数のみ／算術オペナンド不可・SET 右辺の変数参照不可）がカタログ/説明から読み取れない**＝instructions か `ksql_docs` 該当章の注記強化の改善候補として記録。
 
+## 第 3 ラウンド（2026-07-22・バッチ/WITH/CHECK 3 シナリオ）: 2 PASS・**1 意味論 FAIL（初の実質失敗）**
+
+| # | シナリオ | 結果 | 判定 |
+|---|---|---|---|
+| R3-1 | 一時テーブル＋ASSERT ゲート | `CREATE TEMP TABLE #agg AS …; ASSERT (SELECT COUNT(*) FROM #agg) >= 1; SELECT …`（「ASSERT 不成立は continueOnError でも必ず停止」の細部仕様まで正確） | PASS |
+| R3-2 | 複数 CTE＋CTE 間結合 | `WITH per_dd AS (…), overall AS (…) SELECT … FROM per_dd d INNER JOIN overall o ON d.k = o.k`（**B51 修正経路**・「JOIN は等値 1 個のみ」を**定数キー `1 AS k`** で回避するクロス結合の応用） | PASS |
+| R3-3 | UPDATE＋CHECK 業務ルール（引き上げ後 10 万超を隔離） | `CHECK WHEN 金額 > 100000 …`＝**更新前値で判定する別物**（正= `金額 * 1.1 > 100000`）。構文は正しく `ksql_validate` ok:true | **構文 PASS・意味論 FAIL** |
+
+### R3-3 の分析（B61 初の実質失敗・最重要の発見）
+
+- 言語リファレンス §17.3 の正: 「`UPDATE` は**更新前の既存値**（書き込む新値を検査したいときは SET 式を書く: `SET 数量 = 数量 - 出庫数` に対し `WHEN 数量 - 出庫数 < 0`）」（:2155）
+- モデルは §16 の「`VALIDATE ONLY`/`ON ERROR SKIP` は SET 右辺の関数を評価した**後**の値を検証」（＝**組み込み制約検証**の記述）を **CHECK に誤適用**し、「CHECK は post-image 評価」と自信を持って逆の説明をした
+- **構文 guard（ksql_validate ok:true）ではこの層は捕まらない**＝「カタログが正しい≠AI が正しく読める≠**AI が意味論まで正しく使える**」の三層目を実証。行動検証（B61）でしか検出できない失敗クラス
+
+### 改善候補（R3-3 起点・観測 #3）
+
+「**組み込み検証は post 値・CHECK は更新前値**」という非対称が §16/§17.3 に分かれて記載され混同しやすい。対策候補: ①言語リファレンス §16 の当該文へ「CHECK の参照値は §17.3（UPDATE は更新前値）」の相互参照を追記②`ksql_mutate` description か instructions 共通注記へ「UPDATE の CHECK is pre-update values; test new values by repeating the SET expression」の 1 文（+15 語程度）を追加。
+
 ## 累計と限界（正直な記録）
 
-- 累計 **11 シナリオ 11/11 PASS**（DML 系 5＋読み取り系 6）・構文発明ゼロ・カタログ表記の摩擦の新規検出なし（Q6 の 2 件はカタログでなく変数制約の可視性）。
+- 累計 **14 シナリオ・13 PASS＋1 意味論 FAIL**（DML 系 5＋読み取り系 6＋バッチ/WITH/CHECK 3）。構文発明はゼロのまま＝カタログ（B60）は機能。**FAIL は意味論層（CHECK の参照値）＝行動検証でしか検出できないクラス**で、改善候補 3 件（@変数の使用可能位置 2＋CHECK 参照値の可視性 1）を獲得。
 - **各シナリオ 1 回・単一クライアント（Claude Code）・単一モデル**での結果。Desktop 面・複数回の安定性・弱いモデルでの成立は未確認。
 - 判定は `ksql_validate` まで（実行はしていない）。
 - B61 本体（スクリプト半自動化・失敗観測→台帳追加ループ・リリースゲート化）は未実装＝本記録は**シナリオ台帳の手動実施（2 ラウンド）**。
