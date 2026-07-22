@@ -1,6 +1,6 @@
 # B59 修正仕様 — `ORDER BY <alias>` の黙殺を解消（alias 値解決の追加）
 
-- ステータス: 🚧 **修正仕様 R2 どおり実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[実機証跡](evidence/b59_orderby_alias_smoke.md)）**。契約テスト先行（実装前 13 fail / 4 pass）・`npm test` 2,809＋25 全 green（Claude 独立実行一致）・mcp:smoke/pack-smoke ok
+- ステータス: ✅ **v3.13.0 リリース済み（2026-07-22・release PR #210・tag/GitHub Release 公開・npm publish 待ち）。修正仕様 R2 どおり実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[実機証跡](evidence/b59_orderby_alias_smoke.md)）**。契約テスト先行（実装前 13 fail / 4 pass）・`npm test` 2,809＋25 全 green（Claude 独立実行一致）・mcp:smoke/pack-smoke ok
 - 起票: [B59 issue](ksql_b59_orderby_alias_ignored_issue.md)
 - 種別: バグ修正（正しさ・silent wrong order）／SemVer: **minor**（B9 前例＝観測結果が変わる正しさ修正を minor 出荷・CHANGELOG に「従来 no-op だった alias ORDER BY の結果順が変わる」を明記）
 - 関連: B26/B27（v3 整列意味論・order planner）／v2.1.2（集計算術 alias の同種修正前例）

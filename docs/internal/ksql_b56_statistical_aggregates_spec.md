@@ -1,6 +1,6 @@
 # B56 仕様 — 統計集約関数（STDDEV_POP / STDDEV_SAMP / VAR_POP / VAR_SAMP / MEDIAN）
 
-- ステータス: 🚧 **実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・codex 実装→Claude コードレビュー承認・全 2,769 テスト green・mcp:smoke/pack-smoke ok・[実機証跡](evidence/b56_statistical_aggregates_smoke.md)＝統計6値の外部照合一致・全9ケース PASS）**。仕様 R2.1（ユーザー承認済＝R2-Q1 空文字規約 / R2-Q2 ArgumentError 規約・§10 の主要 RDB 前例調査が根拠）
+- ステータス: ✅ **v3.13.0 リリース済み（2026-07-22・release PR #210・tag/GitHub Release 公開・npm publish 待ち）。実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・codex 実装→Claude コードレビュー承認・全 2,769 テスト green・mcp:smoke/pack-smoke ok・[実機証跡](evidence/b56_statistical_aggregates_smoke.md)＝統計6値の外部照合一致・全9ケース PASS）**。仕様 R2.1（ユーザー承認済＝R2-Q1 空文字規約 / R2-Q2 ArgumentError 規約・§10 の主要 RDB 前例調査が根拠）
 - 起票: [B56 issue](ksql_b56_statistical_aggregates_issue.md)
 - 種別: 改善（集計関数の拡充）／SemVer: **minor**（純追加・既存挙動不変）
 - 関連: B55（MCP 全量関数カタログ同期）／B14（型メタ）／B9（厳密10進・本機能は binary64）／B30（完全入力 fail-closed の前例）
