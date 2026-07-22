@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## 未リリース
+## v3.13.0（2026-07-22）
 
 ### 修正（B59 `ORDER BY` の SELECT alias 値解決）
 
