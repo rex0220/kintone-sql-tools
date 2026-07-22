@@ -123,3 +123,13 @@ test("SELECT alias は物理列コードとして扱わない", () => {
     { orderSemantics: map }
   )).toThrow(/KORDER_KEY_NOT_DIRECT_FIELD/);
 });
+
+test.each([
+  ["$id", "$id"],
+  ["a.value", "a.value"],
+] as const)("SELECT alias %s は同名の直接列 semantics があっても KORDER で拒否する", (alias, fieldCode) => {
+  expect(() => plan(
+    `SELECT 金額 AS \`${alias}\` FROM APP100 KORDER BY \`${alias}\` LIMIT 5`,
+    { orderSemantics: new Map([[alias, semantics(fieldCode, "NUMBER")]]) }
+  )).toThrow(new RegExp(`KORDER_KEY_NOT_DIRECT_FIELD\\(field=${alias.replace("$", "\\$")}\\)`));
+});

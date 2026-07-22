@@ -32,6 +32,13 @@ test("$id + exact WHERE + LIMIT 5 だけを canonical REST top-N にする", () 
   });
 });
 
+test("$id という SELECT alias は canonical REST top-N の直接列とみなさない", () => {
+  expect(plan("SELECT 文字列 AS `$id` FROM APP100 ORDER BY `$id` LIMIT 5")).toMatchObject({
+    kind: "CANONICAL_LOCAL",
+    reasonCodes: expect.arrayContaining(["ORDER_KEY_NOT_REST_EQUIVALENT"]),
+  });
+});
+
 test.each([
   ["SELECT $id FROM APP100 ORDER BY レコード番号 LIMIT 5", "ORDER_KEY_NOT_REST_EQUIVALENT"],
   ["SELECT $id FROM APP100 ORDER BY 文字列 LIMIT 5", "ORDER_KEY_NOT_REST_EQUIVALENT"],

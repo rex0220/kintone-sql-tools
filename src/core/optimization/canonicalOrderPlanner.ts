@@ -50,6 +50,10 @@ function fieldSemantics(
   return item.key.type === "FIELD_NAME" ? semantics.get(item.key.name) : undefined;
 }
 
+function hasSelectOutputAlias(stmt: SelectStatement, name: string): boolean {
+  return stmt.columns.some((column) => "alias" in column && column.alias === name);
+}
+
 /**
  * 通常 ORDER BY の実行主体を決める純粋 planner。
  * 初期 REST top-N allowlist は $id だけであり、REST が受理する他型を流用しない。
@@ -87,7 +91,7 @@ export function planCanonicalOrder(input: CanonicalOrderPlanInput): CanonicalOrd
   }
 
   const allRestEquivalent = stmt.orderBy.length > 0 && windowOrderBy.length === 0 && stmt.orderBy.every((item) =>
-    item.key.type === "FIELD_NAME" && item.key.name === "$id"
+    item.key.type === "FIELD_NAME" && item.key.name === "$id" && !hasSelectOutputAlias(stmt, item.key.name)
   );
   if (!allRestEquivalent) reasons.push("ORDER_KEY_NOT_REST_EQUIVALENT");
   if (input.whereCapability !== "EXACT_PUSHDOWN") reasons.push("WHERE_NOT_EXACT");

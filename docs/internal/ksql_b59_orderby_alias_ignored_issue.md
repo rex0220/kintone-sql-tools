@@ -1,7 +1,7 @@
 # B59 — `ORDER BY <alias>` が黙って無視される（silent wrong order）
 
 - 起票日: 2026-07-22
-- ステータス: 🐞 **起票（B57 実機で発見・診断一次済み・修正未着手）**
+- ステータス: 🚧 **[修正仕様 R2](ksql_b59_orderby_alias_fix_spec.md) どおり実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[実機証跡](evidence/b59_orderby_alias_smoke.md)＝旧 NG 5 種の before/after 全 ✅・発見時再現クエリ 1,3,4 正順・既存 ✅ 群非回帰）**。alias evaluator を FULL_SCAN stage 8 と SIMPLE local sort に限定注入・planner guard・契約テスト先行 13 fail / 4 pass→`npm test` 2,809＋25 全 green（Claude 独立実行一致）
 - 種別: バグ（正しさ・silent wrong results 級）
 - 効果種別: 正しさ
 - 優先: **高**（エラーにならず誤った並びを返す）
@@ -46,4 +46,4 @@ GROUP BY DAYOFWEEK(日付) ORDER BY DAYOFWEEK(日付);
 
 ## 5. 次アクション
 
-- 影響マトリクス調査（§3）→ 修正方針確定 → 仕様/修正 spec → codex 実装 → 実機。
+- B57 発見時の再現クエリを含む実機確認 → v3.13.0 同梱のリリース判断。

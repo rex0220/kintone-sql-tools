@@ -588,17 +588,19 @@ function buildDistinctKeyBuilder(
 export type OptionOrderMap = Map<string, Map<string, number>>;
 export type FieldSortKindMap = Map<string, "number" | "string">;
 export type FieldSemanticsMap = ReadonlyMap<string, ResolvedFieldSemantics>;
+export type OrderByAliasEvaluator = (name: string, row: ProcessRow) => string | undefined;
 
 export function applyOrderBy(
   rows: ProcessRow[],
   orderBy: OrderByItem[],
   optionOrders?: OptionOrderMap,
   sortKinds?: FieldSortKindMap,
-  fieldSemantics?: FieldSemanticsMap
+  fieldSemantics?: FieldSemanticsMap,
+  aliasEvaluator?: OrderByAliasEvaluator
 ): ProcessRow[] {
   if (orderBy.length === 0) return rows;
 
-  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics).rows.map((item) => item.row);
+  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics, aliasEvaluator).rows.map((item) => item.row);
 }
 
 interface DecoratedSortRow {
@@ -616,7 +618,8 @@ function sortDecoratedRows(
   orderBy: OrderByItem[],
   optionOrders?: OptionOrderMap,
   sortKinds?: FieldSortKindMap,
-  fieldSemantics?: FieldSemanticsMap
+  fieldSemantics?: FieldSemanticsMap,
+  aliasEvaluator?: OrderByAliasEvaluator
 ): DecoratedSortResult {
 
   // キーごとの比較設定（選択肢順マップ / ソート種別）を 1 回だけ解決
@@ -646,7 +649,7 @@ function sortDecoratedRows(
   const decorated: DecoratedSortRow[] = rows.map((row) => ({
     row,
     keys: orderBy.map(({ key }, i): SortKey => {
-      const s = evalOrderKey(key, row);
+      const s = evalOrderKey(key, row, aliasEvaluator);
       return { s };
     }),
   }));
@@ -689,12 +692,73 @@ const NUMERIC_ORDER_FUNCTIONS = new Set([
   "DAYOFWEEK", "QUARTER", "WEEK",
 ]);
 
-function evalOrderKey(key: OrderByKey, row: ProcessRow): string {
+function evalOrderKey(key: OrderByKey, row: ProcessRow, aliasEvaluator?: OrderByAliasEvaluator): string {
   switch (key.type) {
-    case "FIELD_NAME": return row[key.name] ?? "";
+    case "FIELD_NAME": return aliasEvaluator?.(key.name, row) ?? row[key.name] ?? "";
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
   }
+}
+
+/** SELECT 出力 alias を、project 前の入力行から評価する resolver に事前コンパイルする。 */
+export function buildOrderByAliasEvaluator(
+  columns: SelectColumn[],
+  scalarCache?: Map<number, string>,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
+): OrderByAliasEvaluator {
+  const evaluators = new Map<string, (row: ProcessRow) => string>();
+  for (const [columnIndex, column] of columns.entries()) {
+    if (!("alias" in column) || column.alias === null) continue;
+    const alias = column.alias;
+    switch (column.type) {
+      case "FIELD":
+        evaluators.set(alias, (row) => resolveFieldRef(row, column.field));
+        break;
+      case "LITERAL_COL":
+        evaluators.set(alias, () => column.value);
+        break;
+      case "AGGREGATE": {
+        const source = aggregateSyntheticName(column.func, column.distinct, column.arg);
+        evaluators.set(alias, (row) => row[alias] ?? row[source] ?? "0");
+        break;
+      }
+      case "ARITH_AGG_COL": {
+        const source = aggArithDefaultKey(column.expr);
+        evaluators.set(alias, (row) => row[alias] ?? row[source] ?? "0");
+        break;
+      }
+      case "WINDOW_COL":
+        evaluators.set(alias, (row) => row[alias] ?? "");
+        break;
+      case "ARITH_COL":
+        evaluators.set(alias, (row) => String(evalArithExpr(column.expr, row)));
+        break;
+      case "STRFUNC_COL": {
+        const source = stringFuncDefaultKey(column.expr);
+        evaluators.set(alias, (row) => hasAggregateInStringFuncExpr(column.expr)
+          ? row[alias] ?? row[source] ?? evalStringFunc(column.expr, row, resolveFieldType, resolveFieldSemantics)
+          : evalStringFunc(column.expr, row, resolveFieldType, resolveFieldSemantics));
+        break;
+      }
+      case "CASE_COL":
+        evaluators.set(alias, (row) => evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics));
+        break;
+      case "SCALAR_VALUE_COL": {
+        const source = scalarValueDefaultKey(column.expr);
+        evaluators.set(alias, (row) => scalarValueHasAggregate(column.expr)
+          ? row[alias] ?? row[source] ?? ""
+          : String(evalScalarValueExpr(column.expr, row, resolveFieldType, resolveFieldSemantics)));
+        break;
+      }
+      case "SCALAR_SUBQUERY_COL":
+        evaluators.set(alias, () => scalarCache?.get(columnIndex) ?? "");
+        break;
+      case "VARIABLE_COL":
+        break;
+    }
+  }
+  return (name, row) => evaluators.get(name)?.(row);
 }
 
 // ============================================================
@@ -868,9 +932,9 @@ export function project(
           const key = outputKeys?.[colIdx] ?? col.alias ?? stringFuncDefaultKey(col.expr);
           if (hasAggregateInStringFuncExpr(col.expr)) {
             const srcKey = stringFuncDefaultKey(col.expr);
-            out[key] = row[col.alias ?? srcKey] ?? row[srcKey] ?? evalStringFunc(col.expr, row);
+            out[key] = row[col.alias ?? srcKey] ?? row[srcKey] ?? evalStringFunc(col.expr, row, resolveFieldType, resolveFieldSemantics);
           } else {
-            out[key] = evalStringFunc(col.expr, row);
+            out[key] = evalStringFunc(col.expr, row, resolveFieldType, resolveFieldSemantics);
           }
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
@@ -880,7 +944,7 @@ export function project(
           const srcKey = scalarValueDefaultKey(col.expr);
           out[key] = scalarValueHasAggregate(col.expr)
             ? row[col.alias ?? srcKey] ?? row[srcKey] ?? ""
-            : String(evalScalarValueExpr(col.expr, row));
+            : String(evalScalarValueExpr(col.expr, row, resolveFieldType, resolveFieldSemantics));
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -1284,7 +1348,14 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 8. ORDER BY
-  rows = applyOrderBy(rows, stmt.orderBy, optionOrders, sortKinds, effectiveOrderSemantics);
+  rows = applyOrderBy(
+    rows,
+    stmt.orderBy,
+    optionOrders,
+    sortKinds,
+    effectiveOrderSemantics,
+    buildOrderByAliasEvaluator(stmt.columns, scalarCache, fieldTypeResolver, fieldSemanticsResolver)
+  );
 
   // 9. LIMIT / OFFSET
   rows = applyLimit(rows, stmt.limit, stmt.offset);

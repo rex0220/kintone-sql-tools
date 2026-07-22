@@ -1160,6 +1160,26 @@ ORDER BY 部署 ASC, 金額 DESC
 - `ASC` — 昇順（省略可、デフォルト）
 - `DESC` — 降順
 
+### SELECT alias によるソート
+
+トップレベルの通常 `ORDER BY` では、SELECT 出力 alias をキーとして参照できます。alias の値は SELECT 式と同じ規則・型で評価してからソートします。
+
+```sql
+SELECT 金額 AS amount
+FROM APP100
+ORDER BY amount DESC
+
+SELECT DAYOFWEEK(日付) AS weekday
+FROM APP100
+ORDER BY weekday ASC
+```
+
+- ORDER BY 名が SELECT alias と入力行フィールドの両方に完全一致する場合は、**SELECT alias を優先**します。ドットを含む alias も完全一致を先に判定するため、同名の修飾物理列にはその ORDER BY からアクセスできません
+- 同じ alias を複数の SELECT 列へ指定した場合は、出力と同じく**後に記述した列が優先**されます
+- alias に一致しない名前は従来どおり入力行フィールドとして解決します。どちらにも解決できない名前は `ORDER_KEY_UNRESOLVED` で実行前に拒否します
+- この alias 解決はトップレベルの通常 `ORDER BY` だけに適用します。`OVER (ORDER BY ...)` から同一 SELECT の alias は参照できません。必要な場合は CTE または一時テーブルで一度列を実体化してください
+- `KORDER BY` は SELECT alias を直接物理列として扱いません
+
 ### canonical順（v3.0.0）
 
 通常の`ORDER BY`は、REST取得・FULL_SCAN・一時テーブル・CLI・MCP・プラグインのどの経路でも、同じkSQL canonical比較規則を使います。
