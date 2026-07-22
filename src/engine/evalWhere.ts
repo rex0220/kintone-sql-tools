@@ -166,6 +166,7 @@ function evalOp(
 const NUMERIC_STRING_FUNCTIONS = new Set([
   "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
   "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
+  "DAYOFWEEK", "QUARTER", "WEEK",
 ]);
 
 function semanticsForLeft(

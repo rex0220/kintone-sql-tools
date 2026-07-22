@@ -17,6 +17,13 @@
 - MCP server instructions の全量関数カタログを aggregate 11 件から 12 件へ更新し、言語リファレンス、fixtures、drift guard、smoke guard を同期した（instructions 274 語、240〜280 語 guard 内）。
 - `MODE` は新しい予約語。同名フィールドは `` `MODE` `` のようにバッククォートで囲んで参照できる。`MODEL` など長い識別子は影響を受けない。
 
+### 機能追加（B57 日付集計軸関数）
+
+- `DAYOFWEEK(日付)`（1=日曜〜7=土曜）、`QUARTER(日付)`、ISO-8601 固定の `WEEK(日付)` を追加した。新3関数は実在する `YYYY-MM-DD` のみを受理し、不正日付では空文字を返す。
+- `DATE_FORMAT` に `%w`（0=日曜〜6=土曜）、`%a`（kSQL 定義の日本語短縮曜日）、`%v`（2桁ISO週番号）、`%G`（ISO week-year）を追加した。週次ラベルは `%G-%v` を推奨する。不正日付では新4指定子だけを空文字へ置換し、既存9指定子の挙動は変更しない。
+- MCP server instructions の全量関数カタログを scalar 43 件から 46 件へ更新し、言語リファレンス、fixtures、drift guard、smoke guard を同期した（instructions 277 語）。
+- `DAYOFWEEK` / `QUARTER` / `WEEK` は新しい予約語。同名フィールドはバッククォートで囲んで参照できる。`WEEKLY` など前方一致する長い識別子は影響を受けない。
+
 ## v3.12.0（2026-07-21）
 
 ### 機能追加（B55 MCP read-only ドキュメントツール `ksql_docs`＋全量関数カタログ instructions）

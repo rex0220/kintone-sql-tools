@@ -35,6 +35,10 @@ describe("B55 complete function catalog", () => {
     expect(KSQL_FUNCTION_CATALOG.aggregate).toHaveLength(12);
   });
 
+  test("scalar catalog contains all 46 canonical functions", () => {
+    expect(KSQL_FUNCTION_CATALOG.scalar).toHaveLength(46);
+  });
+
   test("fixture keys match parser spellings in both directions and every SQL parses", () => {
     expect(sorted([...fixtureSpellings].filter((name) => !parserSpellings.has(name)))).toEqual([]);
     expect(sorted([...parserSpellings].filter((name) => !fixtureSpellings.has(name)))).toEqual([]);
