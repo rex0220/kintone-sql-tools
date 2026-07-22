@@ -58,9 +58,22 @@
 
 「**組み込み検証は post 値・CHECK は更新前値**」という非対称が §16/§17.3 に分かれて記載され混同しやすい。対策候補: ①言語リファレンス §16 の当該文へ「CHECK の参照値は §17.3（UPDATE は更新前値）」の相互参照を追記②`ksql_mutate` description か instructions 共通注記へ「UPDATE の CHECK is pre-update values; test new values by repeating the SET expression」の 1 文（+15 語程度）を追加。
 
+## 第 4 ラウンド（2026-07-22・変数×5 文型／CHECK×4 文型の組合せ 8 シナリオ）: 8/8 PASS
+
+| # | シナリオ | 核心結果 | 判定 |
+|---|---|---|---|
+| V1 | 配列変数×SELECT | `SET @targets = ['d1','d2']; … WHERE ドロップダウン IN @targets`（**カッコ無し IN @list**＝B3 の方言形） | PASS |
+| V2 | スカラー変数×UPDATE | `SET @maxAmount = (SELECT MAX…); UPDATE … SET 金額 = @maxAmount WHERE 金額 IS NULL`（**`@max金額` が ParseError→ASCII 名へ自己修正**＝変数名規約の可視性・観測 #4） | PASS |
+| V3 | 時刻変数×UPSERT | `VALUES` に @変数不可→`UPSERT SELECT` に UNION 直結不可→**temp 実体化＋`@start AS 日時`（定数列）へ 2 段自己回復**。「時刻を 1 回だけ評価して固定」（R4 レシピ）引用（VALUES @var 不可＝観測 #5・変数配置ファミリー） | PASS |
+| V5 | 変数×DELETE | **MEDIAN は数値専用→`DATEDIFF` 日数化→`MEDIAN`→`FLOOR`→`DATE_ADD` 復元**の迂回を自力構成。件数変数→確認 SELECT→ASSERT→DELETE の 5 文 | PASS |
+| C1 | CHECK×UPDATE（在庫引当） | `CHECK WHEN 数値MIN - 3 < 0`（**SET 式を CHECK に再掲**）＋「**更新前の既存値を参照（§17.3）**」の正しい説明・空セル 0→−3 隔離の edge まで。**R3-3 と合わせ n=2 で 1 FAIL/1 PASS**＝文書の実例に一致する場面では正答・表現が変わると §16 と混同 → 相互参照注記の価値を裏付け | PASS |
+| C2 | CHECK×INSERT | temp→`INSERT … SELECT … CHECK WHEN 金額 < 1 THEN '…' \|\| 金額 ON ERROR SKIP INTO #err`→`#err` 確認の正配置（今回スキーマ未確認のまま列名を仮定＝自己申告あり・describe 未使用＝**スキーマ確認行動の揺れ**・観測 #6） | PASS |
+| C3 | CHECK×UPSERT | `ON DUPLICATE (タイトル)`→`CHECK`→`ON ERROR SKIP` の正しい句順・境界値（=100 万は正常）の判定も正確 | PASS |
+| C4 | CHECK×DELETE（**負性**） | **「CHECK/VALIDATE ONLY/ON ERROR SKIP は DELETE 不可」を根拠つきで正答**し、保護条件の WHERE 直接埋め込み＋ASSERT 二重ゲート＋監査スナップショット＋**非アトミック整合 ASSERT**＋空セル 0 扱い防御（`金額 IS NOT NULL`）。自書きの恒真検査を無意味と気づき除去 | PASS |
+
 ## 累計と限界（正直な記録）
 
-- 累計 **14 シナリオ・13 PASS＋1 意味論 FAIL**（DML 系 5＋読み取り系 6＋バッチ/WITH/CHECK 3）。構文発明はゼロのまま＝カタログ（B60）は機能。**FAIL は意味論層（CHECK の参照値）＝行動検証でしか検出できないクラス**で、改善候補 3 件（@変数の使用可能位置 2＋CHECK 参照値の可視性 1）を獲得。
+- 累計 **22 シナリオ・21 PASS＋1 意味論 FAIL**（DML 5＋読み取り 6＋バッチ/WITH/CHECK 3＋変数×文型/CHECK×文型 8）。構文発明はゼロのまま＝カタログ（B60）は機能。改善候補・観測は計 6 件: ①@変数は算術オペランド不可②SET 右辺の変数参照不可③CHECK 参照値の可視性（§16/§17.3・n=2 で 1 FAIL/1 PASS）④変数名は ASCII のみ⑤VALUES に @変数不可⑥スキーマ確認行動の揺れ（運用/プロンプト側）。①②④⑤は「変数の使用可能位置・規約」ファミリーに集約可能。
 - **各シナリオ 1 回・単一クライアント（Claude Code）・単一モデル**での結果。Desktop 面・複数回の安定性・弱いモデルでの成立は未確認。
 - 判定は `ksql_validate` まで（実行はしていない）。
 - B61 本体（スクリプト半自動化・失敗観測→台帳追加ループ・リリースゲート化）は未実装＝本記録は**シナリオ台帳の手動実施（2 ラウンド）**。
