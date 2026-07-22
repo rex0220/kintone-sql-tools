@@ -10,6 +10,7 @@ Claude（AI クライアント）に kintone 用の SQL 方言「kSQL」で DML 
 
 関連記事
 
+- 続編: [AI に SQL 方言を使わせる検証ループ — 30 シナリオで見つけた「validate では捕まらない誤り」](https://qiita.com/rex0220/items/7f229c87a20f2d45777c)
 - [rex0220 kintone-sql-tools の紹介](https://qiita.com/rex0220/items/b604519f03ad1494f8be)
 - [rex0220 kSQL プラグイン](https://qiita.com/rex0220/items/ed9e101cb28b0ed40869)
 - [rex0220 kSQL 言語リファレンス](https://qiita.com/rex0220/items/e089fddf4229d74be699)
@@ -280,7 +281,7 @@ instructions に 1 文（`UPDATE CHECK sees pre-update values; to test the new v
 2. **AI が正しく読める** — 表記の摩擦。行動検証で見つかる（括弧誤読など）
 3. **AI が意味論まで正しく使える** — validate が通っても意味がずれる層。**構文 validate や機械 guard では捕まらず、意図と意味論を照合する行動検証や期待結果つきの実行テストが要る**
 
-30 シナリオの詳しい中身（「できない」と言うべき場面のテスト、AI が期待を超えてきた回答、検証する側の間違い）は続編に書きました。
+30 シナリオの詳しい中身（「できない」と言うべき場面のテスト、AI が期待を超えてきた回答、検証する側の間違い）は続編「[AI に SQL 方言を使わせる検証ループ](https://qiita.com/rex0220/items/7f229c87a20f2d45777c)」に書きました。
 
 この仕組みは kSQL v3.14.0（構文カタログ）と v3.15.0（注記強化）に入っています。MCP サーバーの導入手順はリポジトリの README を参照してください。
 
