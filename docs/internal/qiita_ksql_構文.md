@@ -1,6 +1,8 @@
-<!-- タイトル: Claude への kSQL 構文の教え方 — AI は独自 SQL の構文を「発明」する -->
+<!-- タイトル: Claude への MCP kSQL 構文の教え方 — AI は独自 SQL の構文を「発明」する -->
 
-Claude（AI クライアント）に kintone 用の SQL 方言「kSQL」で DML を書かせたら、**存在しない構文を自信満々に組み立てた**——という実際に起きた問題と、それを MCP server instructions の「構文カタログ」で解決した話です。記事の後半に、解決後の Claude Desktop の実際の回答と生成された SQL をそのまま載せています。独自の DSL や SQL 方言を AI に使わせたい人に向けて、うまくいった設計と検証方法をまとめます。
+Claude（AI クライアント）に kintone 用の SQL 方言「kSQL」で DML を書かせたら、**存在しない構文を自信満々に組み立てた**——という実際に起きた問題と、それを MCP server instructions の「構文カタログ」で解決した話です。
+
+記事の後半に、解決後の Claude Desktop の実際の回答と生成された SQL をそのまま載せています。独自の DSL や SQL 方言を AI に使わせたい人に向けて、うまくいった設計と検証方法をまとめます。
 
 リポジトリ:
 
@@ -67,6 +69,50 @@ statement families or clause orders.
 2. **句順・併用規則も明示する**: 「CHECKS は CONTROL の前」「VALIDATE ONLY と ON ERROR SKIP は択一」「INTO #err はバッチ専用」——今回の失敗の再発防止に直結する制約です
 3. **completeness を宣言する**: 「これが全文型。他の文型や句順を発明するな」。関数カタログで効いた「発明禁止の明言」の構文版です
 4. **行動規範を足す**: 「初めて使う文型は、組み立てる前に `ksql_docs`（ドキュメント取得ツール）で該当章を確認する」
+
+## カタログはどうやって Claude に届くのか（MCP の仕組み）
+
+「instructions に載せる」と書きましたが、これがどう Claude に伝わるのかを見ておきます。ここを理解すると「なぜ instructions を選んだのか」が明確になります。
+
+### initialize 応答の instructions フィールド
+
+MCP では、クライアント（Claude Desktop / Claude Code）がサーバーへ接続すると、最初に `initialize` というハンドシェイクが行われます。サーバーはこの応答に **`instructions` フィールド**（MCP 仕様で定義された文字列）を含めることができ、kSQL サーバーは構文カタログをここに載せています。
+
+```mermaid
+sequenceDiagram
+    participant U as ユーザー
+    participant C as Claude Desktop / Claude Code
+    participant S as kSQL MCP サーバー
+    participant M as Claude（モデル）
+
+    C->>S: initialize（接続時に1回）
+    S-->>C: instructions（構文カタログ 502語 を含む）
+    C->>M: システムプロンプトに instructions を注入
+    Note over M: この時点でモデルは<br/>全18文型の骨格を「見て」いる
+    U->>M: 「不正行を隔離しながら INSERT して」
+    M->>M: カタログの INSERT + CONTROL 骨格で組み立て<br/>（構文を発明しない）
+    M->>S: ksql_validate で検証
+    S-->>M: ok:true
+```
+
+重要なのは、クライアントが instructions を**モデルのシステムプロンプトへ注入する**ことです。つまりモデルは、ユーザーが何か頼む前から——**ツールを1つも呼ばないうちから——カタログを「見て」います**。「AI が構文を調べに行ってくれるか」に賭ける必要がありません。
+
+手元で確認するのも簡単で、サーバーを直接起動して `initialize` を送ると、応答の `instructions` にカタログ段落がそのまま入っているのが見えます。
+
+### なぜ instructions なのか: 4 つの伝達経路の使い分け
+
+MCP サーバーからモデルへ情報を渡す経路は 1 つではありません。kSQL サーバーでは特性に応じて使い分けています。
+
+| 経路 | モデルに届くタイミング | 特性 | kSQL での用途 |
+|---|---|---|---|
+| **instructions** | **接続時から常時** | 全会話で必ず見える。ただし毎会話トークンを消費 | **構文カタログ・関数カタログ・行動規範**（発明を防ぐには常時可視が必須） |
+| tool description | ツール一覧として常時 | ツールを選ぶ瞬間に効く | `ksql_mutate` に DML 末尾句のテンプレート |
+| tool 呼び出し（`ksql_docs`） | モデルが読みに行ったとき | 詳細を必要なだけ。ただし「読みに行く」行動が前提 | IMPORT の全オプションなど長大な文法の詳細 |
+| resources | クライアント依存 | **Claude Desktop のリモート接続経路では中継されない**（実測） | 補助（当てにしない） |
+
+この使い分けが今回の設計の芯です。**「構文を発明させない」ためには、骨格が常に視界に入っている必要がある**——だから常時可視の instructions。一方で全文法を instructions に書くとトークンを浪費するので、**骨格だけを 502 語に圧縮して常時提示し、詳細は `ksql_docs` へ読みに行かせる**（そのための行動規範）という 2 段構えにしています。
+
+実際、前章の Claude Desktop の回答をもう一度見ると、この 2 段構えのとおりに動いています。カタログで `INSERT ... ON ERROR SKIP INTO #err` の骨格を知った上で、組み立て前に `ksql_docs` で隔離パターンの章（R6）を読みに行っています。
 
 ## 信頼性の担保: 「カタログに載る構文は必ずパーサを通る」
 
