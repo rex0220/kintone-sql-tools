@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 改善（B62 AI 可視性の注記強化）
+
+- MCP instructions と `ksql_mutate` description に、通常 `UPDATE` の `CHECK` は更新前値を参照し、新値の検査には SET 式の再掲が必要である旨を追記しました。
+- 言語リファレンスに `CHECK` の評価行への相互参照と、スカラー変数の配置境界・変数名規則・回避レシピを追加しました。
+- 既存 parser / batch analyzer の変数配置境界をテーブル駆動テストで固定しました。SQL の挙動変更はありません。
+
 ## v3.14.0（2026-07-22）
 
 ### 機能追加（B60 MCP Statement syntax catalog）

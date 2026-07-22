@@ -184,6 +184,7 @@ function assertToolDescriptions(tools) {
     "multi-statement DML batches with temp tables",
     "{VALUES|SELECT} CHECKS →",
     "ON ERROR SKIP INTO #err [REJECT LIMIT n]",
+    "pre-update values",
     // v1.7.0: SELECT-based DML のソース制限を最終解消(APP / temp / 混在とも可)
     "supports app sources, temp tables, or joins of both",
     // v1.6.0: dmlMaxRows は UPSERT では insert + update 合計
