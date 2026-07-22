@@ -155,6 +155,9 @@ export const PARSER_SCALAR_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind
   [TokenKind.YEAR]: "YEAR",
   [TokenKind.MONTH]: "MONTH",
   [TokenKind.DAY]: "DAY",
+  [TokenKind.DAYOFWEEK]: "DAYOFWEEK",
+  [TokenKind.QUARTER]: "QUARTER",
+  [TokenKind.WEEK]: "WEEK",
   [TokenKind.DATE_FORMAT]: "DATE_FORMAT",
   [TokenKind.DATEDIFF]: "DATEDIFF",
   [TokenKind.DATE_ADD]: "DATE_ADD",
@@ -245,6 +248,7 @@ const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.TRUNCATE, TokenKind.TRUNC,
   TokenKind.ABS, TokenKind.MOD, TokenKind.POWER, TokenKind.POW, TokenKind.SQRT,
   TokenKind.YEAR, TokenKind.MONTH, TokenKind.DAY,
+  TokenKind.DAYOFWEEK, TokenKind.QUARTER, TokenKind.WEEK,
   TokenKind.DATE_FORMAT, TokenKind.DATEDIFF, TokenKind.DATE_ADD, TokenKind.LAST_DAY,
   TokenKind.IF,
 ]);

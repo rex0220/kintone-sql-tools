@@ -398,6 +398,15 @@ export function evalStringFunc(expr: StringFuncExpr, row: ProcessRow): string {
       const d = args[0] ?? "";
       return d.length >= 10 ? String(parseInt(d.slice(8, 10), 10)) : "";
     }
+    case "DAYOFWEEK":
+      assertArity(expr.func, args, 1, 1);
+      return isValidYmd(args[0]) ? String(dayOfWeekIndex(args[0]) + 1) : "";
+    case "QUARTER":
+      assertArity(expr.func, args, 1, 1);
+      return isValidYmd(args[0]) ? String(Math.ceil(Number(args[0].slice(5, 7)) / 3)) : "";
+    case "WEEK":
+      assertArity(expr.func, args, 1, 1);
+      return isValidYmd(args[0]) ? String(isoWeekNumber(args[0])) : "";
     case "DATE_FORMAT":
       return applyDateFormat(args[0] ?? "", args[1] ?? "");
     case "DATEDIFF":
@@ -457,6 +466,54 @@ function parseDateParts(s: string): {
   };
 }
 
+function ymdUtcDate(dateStr: string): Date {
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(
+    Number(dateStr.slice(0, 4)),
+    Number(dateStr.slice(5, 7)) - 1,
+    Number(dateStr.slice(8, 10))
+  );
+  return date;
+}
+
+/** 先頭 10 文字が YYYY-MM-DD で、暦上も実在することを round-trip で検証する。 */
+export function isValidYmd(dateStr: string): boolean {
+  const ymd = dateStr.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return false;
+  const date = ymdUtcDate(ymd);
+  return date.getUTCFullYear() === Number(ymd.slice(0, 4))
+    && date.getUTCMonth() + 1 === Number(ymd.slice(5, 7))
+    && date.getUTCDate() === Number(ymd.slice(8, 10));
+}
+
+/** 0=日曜〜6=土曜。 */
+export function dayOfWeekIndex(dateStr: string): number {
+  return ymdUtcDate(dateStr).getUTCDay();
+}
+
+function isoWeekThursday(dateStr: string): Date {
+  const date = ymdUtcDate(dateStr);
+  const isoDay = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - isoDay);
+  return date;
+}
+
+/** ISO-8601 week-year。 */
+export function isoWeekYear(dateStr: string): number {
+  return isoWeekThursday(dateStr).getUTCFullYear();
+}
+
+/** ISO-8601 週番号（木曜日を含む週が W01）。 */
+export function isoWeekNumber(dateStr: string): number {
+  const thursday = isoWeekThursday(dateStr);
+  const year = thursday.getUTCFullYear();
+  const jan4 = ymdUtcDate(`${String(year).padStart(4, "0")}-01-04`);
+  const jan4IsoDay = jan4.getUTCDay() || 7;
+  jan4.setUTCDate(jan4.getUTCDate() + 4 - jan4IsoDay);
+  return 1 + Math.round((thursday.getTime() - jan4.getTime()) / (7 * 86_400_000));
+}
+
 /**
  * DATE_FORMAT — MySQL 互換の書式整形
  *
@@ -470,20 +527,33 @@ function parseDateParts(s: string): {
  *   %H  → 2桁時(00-23) 例: 09
  *   %i  → 2桁分(00-59) 例: 07
  *   %s  → 2桁秒(00-59) 例: 00
+ *   %w  → 曜日番号(日曜=0〜土曜=6)
+ *   %a  → kSQL 定義の日本語短縮曜日(日〜土)
+ *   %v  → ISO 週番号(01-53)
+ *   %G  → ISO week-year
  */
 function applyDateFormat(dateStr: string, pattern: string): string {
   if (!dateStr || dateStr.length < 10) return "";
   const { y, mo, d, h, mi, sec } = parseDateParts(dateStr);
-  return pattern
-    .replace(/%Y/g, y)
-    .replace(/%y/g, y.slice(2))
-    .replace(/%m/g, mo)
-    .replace(/%c/g, String(parseInt(mo, 10)))
-    .replace(/%d/g, d)
-    .replace(/%e/g, String(parseInt(d, 10)))
-    .replace(/%H/g, h)
-    .replace(/%i/g, mi)
-    .replace(/%s/g, sec);
+  const validYmd = isValidYmd(dateStr);
+  return pattern.replace(/%[YymcdeHiswavG]/g, (specifier) => {
+    switch (specifier) {
+      case "%Y": return y;
+      case "%y": return y.slice(2);
+      case "%m": return mo;
+      case "%c": return String(parseInt(mo, 10));
+      case "%d": return d;
+      case "%e": return String(parseInt(d, 10));
+      case "%H": return h;
+      case "%i": return mi;
+      case "%s": return sec;
+      case "%w": return validYmd ? String(dayOfWeekIndex(dateStr)) : "";
+      case "%a": return validYmd ? ["日", "月", "火", "水", "木", "金", "土"][dayOfWeekIndex(dateStr)] : "";
+      case "%v": return validYmd ? String(isoWeekNumber(dateStr)).padStart(2, "0") : "";
+      case "%G": return validYmd ? String(isoWeekYear(dateStr)).padStart(4, "0") : "";
+      default: return specifier;
+    }
+  });
 }
 
 /**

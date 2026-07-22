@@ -304,7 +304,7 @@ export type StringFuncName =
   | "GREATEST" | "LEAST"
   | "ROUND" | "FLOOR" | "CEIL" | "TRUNCATE"
   | "CAST"  | "FORMAT"
-  | "YEAR"  | "MONTH" | "DAY"
+  | "YEAR"  | "MONTH" | "DAY" | "DAYOFWEEK" | "QUARTER" | "WEEK"
   | "DATE_FORMAT" | "DATEDIFF" | "DATE_ADD" | "LAST_DAY"
   | "ABS" | "MOD" | "POWER" | "SQRT"
   | "CURRENT_DATE" | "CURRENT_TIMESTAMP";

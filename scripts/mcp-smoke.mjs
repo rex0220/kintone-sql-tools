@@ -384,6 +384,9 @@ async function main() {
       "ksql_docs",
       "Complete function catalog",
       "CURRENT_TIMESTAMP",
+      "DAYOFWEEK",
+      "QUARTER",
+      "WEEK",
       "GROUP_CONCAT",
       "STDDEV_POP",
       "MEDIAN",
@@ -421,6 +424,7 @@ async function main() {
     assert(docsChapter.content?.length === 1 && docsChapter.content[0]?.type === "text", "ksql_docs chapter must return one text item.");
     assert(!("structuredContent" in docsChapter), "ksql_docs chapter success must not return structuredContent.");
     assert(docsChapter.content[0].text.includes("SUBSTRING"), "ksql_docs function chapter is missing expected text.");
+    assert(docsChapter.content[0].text.includes("DAYOFWEEK"), "ksql_docs function chapter is missing DAYOFWEEK.");
     const docsUnknown = await client.callTool({
       name: "ksql_docs",
       arguments: { section: "STDDEV" },

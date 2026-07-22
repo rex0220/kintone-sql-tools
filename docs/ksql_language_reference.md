@@ -577,11 +577,16 @@ SELECT CAST(コード AS NUMBER) AS コード数値 FROM APP100
 
 ### 日付・日時関数
 
+> **`WEEK()` は ISO-8601 固定です。MySQL `WEEK()` の既定 mode 0 とは互換性がなく、mode 引数は指定できません。** 週は月曜始まりで、その年の木曜日を含む週が W01 です。
+
 | 関数 | 構文 | 説明 |
 |------|------|------|
 | `YEAR` | `YEAR(フィールド)` | 年を返す |
 | `MONTH` | `MONTH(フィールド)` | 月を返す（1〜12） |
 | `DAY` | `DAY(フィールド)` | 日を返す（1〜31） |
+| `DAYOFWEEK` | `DAYOFWEEK(日付)` | 曜日番号を返す（1=日曜〜7=土曜） |
+| `QUARTER` | `QUARTER(日付)` | 四半期を返す（1〜3月=1、10〜12月=4） |
+| `WEEK` | `WEEK(日付)` | ISO-8601 週番号をゼロ埋めなしで返す（1〜53） |
 | `DATE_FORMAT` | `DATE_FORMAT(フィールド, フォーマット)` | 日付を書式化 |
 | `DATEDIFF` | `DATEDIFF(日付1, 日付2)` | 日数差（日付1 − 日付2） |
 | `DATE_ADD` | `DATE_ADD(日付, 加算値, 単位)` | 日付加算（単位は `'YEAR'` / `'MONTH'` / `'DAY'`） |
@@ -591,6 +596,8 @@ SELECT CAST(コード AS NUMBER) AS コード数値 FROM APP100
 
 ```sql
 SELECT YEAR(作成日時) AS 年, MONTH(作成日時) AS 月 FROM APP100
+SELECT DAYOFWEEK(受注日) AS 曜日番号, QUARTER(受注日) AS 四半期 FROM APP100
+SELECT DATE_FORMAT(受注日, '%G-%v') AS ISO週, COUNT(*) FROM APP100 GROUP BY DATE_FORMAT(受注日, '%G-%v')
 SELECT DATEDIFF(TODAY(), 期限日) AS 残日数 FROM APP100
 SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 年月 FROM APP100
 SELECT DATE_ADD(期限日, -1, 'MONTH') AS 前月, LAST_DAY(期限日) AS 月末日 FROM APP100
@@ -603,9 +610,29 @@ SELECT *, CURRENT_DATE() AS 今日 FROM APP100
 SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
 ```
 
+`DATE_FORMAT` は次の指定子に対応します。ISO 週ラベルには、暦年 `%Y` ではなく ISO week-year `%G` を使う **`%G-%v`** を推奨します（年をまたぐ週で `%Y-%v` は誤った組み合わせになります）。
+
+| 指定子 | 値 |
+|---|---|
+| `%Y` | 4桁年 |
+| `%y` | 2桁年 |
+| `%m` | 2桁月（`01`〜`12`） |
+| `%c` | 月（`1`〜`12`） |
+| `%d` | 2桁日（`01`〜`31`） |
+| `%e` | 日（`1`〜`31`） |
+| `%H` | 2桁時（`00`〜`23`） |
+| `%i` | 2桁分（`00`〜`59`） |
+| `%s` | 2桁秒（`00`〜`59`） |
+| `%w` | 曜日番号（0=日曜〜6=土曜） |
+| `%a` | **kSQL 定義**の日本語短縮曜日（`日`〜`土`。MySQL の英語短縮名とは非互換） |
+| `%v` | ISO 週番号（`01`〜`53`） |
+| `%G` | ISO week-year（4桁） |
+
+新しい日付軸関数と `%w` / `%a` / `%v` / `%G` は、先頭10文字が `YYYY-MM-DD` で暦上実在する日付の場合だけ値を返します。不正日付では関数は空文字になり、`DATE_FORMAT` は新しい指定子だけを空文字へ置換します。たとえば `DATE_FORMAT('2026-02-31', '%Y|%w|%G-%v')` は `2026||-` です。既存9指定子は従来どおり文字列部分を整形します。未対応指定子、単独 `%`、`%%Y` は従来どおり素通しです。
+
 `DATE_ADD` の単位は大文字小文字を区別しません。`YEAR` / `MONTH` / `DAY` 以外を指定すると、リテラル・フィールド参照のどちらでも実行時に `ArgumentError` になります。`DATE_SUB` はありません。減算は加算値に負数を指定してください（`DATE_ADD(期限日, -1, 'MONTH')`）。
 
-- `LAST_DAY` は予約語です。同名フィールドは `` `LAST_DAY` `` とバッククォートで囲みます。
+- `DAYOFWEEK` / `QUARTER` / `WEEK` / `LAST_DAY` は予約語です。同名フィールドは `` `WEEK` `` のようにバッククォートで囲みます。`WEEKLY` のような長い識別子は影響を受けません。
 
 > **`CURRENT_DATE()` / `CURRENT_TIMESTAMP()` はキーワードではありません。**  
 > `()` があれば関数、なければフィールド参照として扱われます。  

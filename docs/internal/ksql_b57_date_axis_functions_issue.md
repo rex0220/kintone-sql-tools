@@ -1,7 +1,7 @@
 # B57 — 日付集計軸関数（DAYOFWEEK / QUARTER / WEEK ＋ DATE_FORMAT 指定子）
 
 - 起票日: 2026-07-22
-- ステータス: 📝 **起票・codex レビュー反映済（2026-07-22・P1×1/P2×3/P3×2 全件コード裏取り一致→本文へ反映）。次＝仕様 R1**
+- ステータス: 🚧 **[仕様 R2](ksql_b57_date_axis_functions_spec.md) どおり実装済み・CLI 実機 PASS・リリース待ち（2026-07-22・[実機証跡](evidence/b57_date_axis_smoke.md)＝ISO 週境界・不正日付個別空置換・DAYOFWEEK=%w+1 恒等・GROUP BY/WHERE/ORDER BY・引数エラーの全ケース）**。契約テスト先行（実装前 23 fail / 2 pass）・`npm test` 2,786＋25 全 green（Claude 独立実行一致）・B55 カタログ scalar 46 / instructions 277 語同期済み。実機で `ORDER BY <alias>` の黙殺（既存バグ・LENGTH でも再現）を発見→ **B59 起票**（B57 非起因）
 - 種別: 改善（日付関数の拡充）
 - 効果種別: 機能（業務レポートの集計軸）
 - 関連: **B55**（MCP instructions 全量関数カタログ＝追加時の同期必須）／**B56**（統計集約と組で「エンジン側集計」を完結させる）

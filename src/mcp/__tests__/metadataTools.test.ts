@@ -100,7 +100,7 @@ describe("ksql_app_metadata MCP surface", () => {
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
-      expect(instructions?.trim().split(/\s+/).length).toBe(274);
+      expect(instructions?.trim().split(/\s+/).length).toBe(277);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(4);
       for (const key of [
         "not generic SQL",
@@ -111,6 +111,9 @@ describe("ksql_app_metadata MCP surface", () => {
         "ksql_docs",
         "Complete function catalog",
         "CURRENT_TIMESTAMP",
+        "DAYOFWEEK",
+        "QUARTER",
+        "WEEK",
         "GROUP_CONCAT",
         "STDDEV_POP",
         "MEDIAN",
