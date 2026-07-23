@@ -68,7 +68,10 @@ import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import { whereNeedsFieldMetadata } from "./core/explainMetadata";
-import { normalizeGroupingSpec } from "./core/grouping";
+import {
+  normalizeGroupingSpec,
+  type ResolvedGroupingSpec,
+} from "./core/grouping";
 import {
   validateGroupingPlanning,
   type GroupingFieldResolver,
@@ -2346,9 +2349,11 @@ async function executeSelect(
   return result;
 }
 
-/** TODO(B65 Step 2/3): remove this local gate only when the grouping-set engine is connected. */
+/** TODO(B65 Step 3): open only after GROUPING() value/type/order evaluation is connected. */
 export const B65_EXECUTION_CLOSED_MESSAGE =
-  "UnsupportedError: B65 grouping sets are not yet executable (Phase1 Step 1 gate; planned to open in Step 2/3).";
+  "UnsupportedError: B65 grouping sets are not yet executable (Phase1 Step 2 gate; planned to open in Step 3).";
+
+const resolvedGroupingSpecs = new WeakMap<SelectStatement, ResolvedGroupingSpec>();
 
 function assertB65ExecutionOpen(stmt: SelectStatement): void {
   if (normalizeGroupingSpec(stmt).type === "GROUPING_SETS") {
@@ -2486,12 +2491,14 @@ async function validateSelectGroupingPlanning(
   cacheContext: string,
   materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<void> {
+  resolvedGroupingSpecs.delete(stmt);
   const normalized = normalizeGroupingSpec(stmt);
   const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_')
     || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
   if (normalized.type === "NONE" && !hasGroupingNodes) return;
   const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
-  validateGroupingPlanning(stmt, resolver);
+  const resolvedSpec = validateGroupingPlanning(stmt, resolver);
+  if (resolvedSpec) resolvedGroupingSpecs.set(stmt, resolvedSpec);
 }
 
 function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
@@ -3608,6 +3615,7 @@ async function executeFullScanSelect(
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: pushdownPlan.appliedKlikes,
+    resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
   });
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
@@ -3941,6 +3949,7 @@ async function executeFullScanWithCte(
     sourceColumns,
     tableColumns,
     hiddenQualifiedAliases,
+    resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }

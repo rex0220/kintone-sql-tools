@@ -5,7 +5,11 @@ import type {
   SelectColumn,
   SelectStatement,
 } from "../types/ast";
-import { normalizeGroupingSpec } from "./grouping";
+import {
+  normalizeGroupingSpec,
+  resolveGroupingSpec,
+  type ResolvedGroupingSpec,
+} from "./grouping";
 
 export interface ResolvedGroupingField {
   canonicalId: string;
@@ -157,7 +161,7 @@ export function validateGroupingPlanning(
   stmt: SelectStatement,
   resolve: GroupingFieldResolver,
   planningGuardHook: GroupingPlanningGuardHook = () => undefined
-): void {
+): ResolvedGroupingSpec | null {
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs: GroupingRef[] = [];
   for (const column of stmt.columns) {
@@ -180,7 +184,7 @@ export function validateGroupingPlanning(
     if (groupingRefs.length > 0) {
       throw new Error("ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
     }
-    return;
+    return null;
   }
 
   if (stmt.distinct) {
@@ -198,12 +202,13 @@ export function validateGroupingPlanning(
     throw new Error("ArgumentError: B65 wildcard projection is not supported in Phase1.");
   }
 
+  const resolvedSpec = resolveGroupingSpec(stmt, resolve)!;
   const canonicalItems = new Set<string>();
   const resolvedItems: ResolvedGroupingField[] = [];
-  for (const item of normalized.allItems) {
-    const resolved = resolve(item);
+  for (const item of resolvedSpec.allItems) {
+    const resolved = item;
     if (!resolved.physical) {
-      throw new Error(`ArgumentError: B65 grouping item ${displayField(item)} must resolve to a physical APP field.`);
+      throw new Error(`ArgumentError: B65 grouping item ${displayField(item.field)} must resolve to a physical APP field.`);
     }
     if (!canonicalItems.has(resolved.canonicalId)) {
       canonicalItems.add(resolved.canonicalId);
@@ -263,4 +268,5 @@ export function validateGroupingPlanning(
       );
     }
   }
+  return resolvedSpec;
 }

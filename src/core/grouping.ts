@@ -4,6 +4,25 @@ import type {
   NormalizedGroupingSpec,
   SelectStatement,
 } from "../types/ast";
+import type {
+  GroupingFieldResolver,
+  ResolvedGroupingField,
+} from "./groupingValidation";
+
+export interface ResolvedGroupingItem extends ResolvedGroupingField {
+  field: GroupingFieldItem;
+}
+
+export interface ResolvedGroupingSet {
+  items: readonly ResolvedGroupingItem[];
+}
+
+export interface ResolvedGroupingSpec {
+  type: "GROUPING_SETS";
+  source: "ROLLUP" | "GROUPING_SETS";
+  allItems: readonly ResolvedGroupingItem[];
+  sets: readonly ResolvedGroupingSet[];
+}
 
 function groupingFieldSyntaxKey(item: GroupingFieldItem): string {
   return `${item.tableAlias ?? ""}\u0000${item.field}`;
@@ -47,4 +66,41 @@ export function normalizeGroupingSpec(stmt: SelectStatement): NormalizedGrouping
 
 export function hasGroupingClause(stmt: SelectStatement): boolean {
   return normalizeGroupingSpec(stmt).type !== "NONE";
+}
+
+/**
+ * Resolve parser identities once against physical metadata, then pass this
+ * immutable execution shape to the engine. Canonically identical syntax items
+ * share the allItems identity while duplicate sets/items remain explicit.
+ */
+export function resolveGroupingSpec(
+  stmt: SelectStatement,
+  resolve: GroupingFieldResolver
+): ResolvedGroupingSpec | null {
+  const normalized = normalizeGroupingSpec(stmt);
+  if (normalized.type !== "GROUPING_SETS") return null;
+
+  const byCanonicalId = new Map<string, ResolvedGroupingItem>();
+  const resolveItem = (field: GroupingFieldItem): ResolvedGroupingItem => {
+    const resolved = resolve(field);
+    const existing = byCanonicalId.get(resolved.canonicalId);
+    if (existing) return existing;
+    const item = { ...resolved, field };
+    byCanonicalId.set(item.canonicalId, item);
+    return item;
+  };
+
+  const allItems = normalized.allItems.map(resolveItem).filter(
+    (item, index, items) =>
+      items.findIndex((candidate) => candidate.canonicalId === item.canonicalId) === index
+  );
+  const sets = normalized.sets.map((set) => ({
+    items: set.items.map(resolveItem),
+  }));
+  return {
+    type: "GROUPING_SETS",
+    source: normalized.source,
+    allItems,
+    sets,
+  };
 }
