@@ -2,6 +2,15 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.17.0（2026-07-23）
+
+### 機能追加（B65 小計・総計 ROLLUP / GROUPING SETS / GROUPING）
+
+- `GROUP BY ROLLUP(...)`、`GROUP BY GROUPING SETS (...)`、`GROUPING(field)` を追加し、1 クエリで明細・小計・総計を同じ結果へ出力できるようにした。`GROUPING()` で実データの空セルと super-aggregate 行を判別でき、通常の `ORDER BY GROUPING(field)` で総計行を末尾へ寄せられる。B64 の条件付き集計とも併用できる。
+- Phase1 の grouping item と `GROUPING()` 引数は物理／修飾フィールド参照だけを受理する。B65 文は完全入力を必須とし、`onLimit=truncate` による部分結果を返さない。展開後の grouping set 数・item 数・生成行数には安全上限を設け、超過時は planning／実行時に fail-closed で終了する。重複 grouping set は保持する。
+- engine はクライアント側で複数 grouping set を個別集計して縦結合し、set から除外された grouped 列を空文字で上書きする。`GROUPING()` は物理列や alias と衝突しない sidecar の membership から `0` / `1` を評価する。
+- `CUBE`、HAVING 内の `GROUPING()`、`SELECT DISTINCT`、`KORDER BY`、ウィンドウ関数との併用、および grouping element の入れ子・混在は Phase1 の対象外。新規集計構文を追加する後方互換な機能追加のため SemVer は minor。
+
 ## v3.16.1（2026-07-23）
 
 ### ドキュメント（B64 を言語リファレンスへ反映）
