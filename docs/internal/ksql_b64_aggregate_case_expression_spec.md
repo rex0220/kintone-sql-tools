@@ -1,6 +1,6 @@
 # B64 仕様 R2 — 集計関数引数のスカラー値式対応（CASE / `||` / `@var`）
 
-- ステータス: 📋 仕様 R2 確定（Claude レビュー反映・実装待ち）
+- ステータス: ✅ リリース済み（v3.16.0・2026-07-23・実装 PR #240→release #241→npm latest 3.16.0・実機 PASS・言語リファレンス §4/§8/§9 反映済み）。以下は仕様 R2 の記録。
 - 種別: 改善（集計関数引数の式文法拡張）／SemVer: minor 想定
 - 優先: 中
 - 関連: [B64 issue](ksql_b64_aggregate_case_expression_issue.md)／[B14 型メタ](ksql_temp_column_type_meta_spec.md)／[B16 GROUP_CONCAT](ksql_group_concat_spec.md)／[B37 CHECK](ksql_custom_check_spec.md)／[B38 `||`](ksql_concat_operator_spec.md)／[B56 統計集約](ksql_b56_statistical_aggregates_spec.md)／[B58 MODE](ksql_b58_mode_aggregate_spec.md)／[文字列・空セル意味論](ksql_string_semantics.md)

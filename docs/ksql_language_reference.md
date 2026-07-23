@@ -303,7 +303,7 @@ kintone の未設定値は空文字で、算術式では 0 に変換されます
 
 ## 4. CASE WHEN
 
-条件分岐した値を返します。SELECT 列・WHERE 句・UPDATE SET で使用できます。
+条件分岐した値を返します。SELECT 列・WHERE 句・UPDATE SET、および v3.16.0 以降は集計関数の引数で使用できます。
 
 ```sql
 CASE
@@ -387,9 +387,10 @@ WHERE 担当者 = 'user1'
 ### 共通ルール
 
 - THEN / ELSE の値には文字列リテラル・数値・フィールド参照・算術式・関数呼び出し・**配列リテラル `[...]`** を使用できます
-- ELSE を省略すると、どの条件にも合致しない場合に空文字（NULL 相当）を返します
+- ELSE を省略すると、どの条件にも合致しない場合は NULL 相当になります。集計関数の引数では候補から除外され、それ以外の表示・更新では空文字として扱われます
 - IF(条件, then値, else値) は CASE WHEN の短縮記法として使用できます
 - 配列リテラルを THEN/ELSE で返す場合、フィールド型に応じて自動変換されます（INSERT VALUES / UPDATE SET）
+- 集計関数の引数で使う `CASE` の結果はスカラー値に限ります。配列リテラル・サブクエリ・集計関数は THEN / ELSE に指定できません
 
 ### WHEN 条件の評価
 
@@ -1017,8 +1018,8 @@ GROUP BY 担当者, ステータス
 | `COUNT(フィールド)` | 空でない行数 | 空文字・NULL はスキップ |
 | `SUM(フィールド)` | 合計 | 空文字・NULL はスキップ |
 | `AVG(フィールド)` | 平均 | 空文字・NULL はスキップ |
-| `MAX(フィールド)` | 最大値 | 空文字・NULL はスキップ |
-| `MIN(フィールド)` | 最小値 | 空文字・NULL はスキップ |
+| `MAX(フィールド)` | 最大値 | NULL はスキップ。選択された空セルは canonical empty band の候補 |
+| `MIN(フィールド)` | 最小値 | NULL はスキップ。選択された空セルは canonical empty band の候補 |
 | `GROUP_CONCAT([DISTINCT] 引数 [SEPARATOR '区切り'])` | 文字列連結 | 空文字・NULL はスキップ |
 | `VAR_POP([DISTINCT] 引数)` | 母集団分散 | 空文字・NULL はスキップ |
 | `VAR_SAMP([DISTINCT] 引数)` | 標本分散 | 空文字・NULL はスキップ |
@@ -1027,13 +1028,41 @@ GROUP BY 担当者, ステータス
 | `MEDIAN([DISTINCT] 引数)` | 中央値 | 空文字・NULL はスキップ |
 | `MODE(引数)` | 最頻値 | 空文字・NULL は候補から除外 |
 
-> **`MAX`/`MIN`/`MODE` の比較規則**: 実アプリの NUMBER と数値形式 CALC は数値順、テキスト・選択・日時フィールドと文字列形式 CALC はコードポイント順、選択肢・STATUS は定義順で比較します。日時の時系列順と一致するのは kintone が返す正規化形式（DATE=`YYYY-MM-DD`、TIME=`HH:mm`、DATETIME/作成日時/更新日時=`...Z`）が前提です。確定できた型メタは一時テーブル/CTEにも伝播します。`MODE` の算術式引数は数値順、型メタ不明の直接フィールド参照は安全側のコードポイント順です。
+> **`MAX`/`MIN`/`MODE` の比較規則**: 実アプリの NUMBER と数値形式 CALC は数値順、テキスト・選択・日時フィールドと文字列形式 CALC はコードポイント順、選択肢・STATUS は定義順で比較します。日時の時系列順と一致するのは kintone が返す正規化形式（DATE=`YYYY-MM-DD`、TIME=`HH:mm`、DATETIME/作成日時/更新日時=`...Z`）が前提です。確定できた型メタは一時テーブル/CTEにも伝播します。`CASE` 引数は全分岐が同じ型ならその型、型が混在するか不明なら文字列として比較します。`MODE` の算術式引数は数値順、型メタ不明の直接フィールド参照は安全側のコードポイント順です。
 
 ```sql
 SELECT COUNT(*) AS 総件数, SUM(金額) AS 合計金額, AVG(金額) AS 平均金額
 FROM APP100
 WHERE ステータス = '完了'
 ```
+
+### 集計関数の引数に式を指定（v3.16.0）
+
+引数を取る全 12 集計関数に、従来のフィールド・算術式・関数呼び出しに加えて、`CASE` 式・`||` 連結・スカラー変数 `@var` を指定できます。関数ごとの空値・完全入力・`DISTINCT` 規約は変わりません。
+
+```sql
+-- 条件付き集計
+SELECT
+  部署,
+  SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) AS 受注売上,
+  COUNT(CASE WHEN ステータス = '受注' THEN 1 END) AS 受注件数
+FROM APP100
+GROUP BY 部署
+
+-- カテゴリを列へ展開する横持ちピボット
+SELECT
+  部署,
+  SUM(CASE WHEN ステータス = '受注'   THEN 売上 ELSE 0 END) AS 受注,
+  SUM(CASE WHEN ステータス = '提案中' THEN 売上 ELSE 0 END) AS 提案中
+FROM APP100
+GROUP BY 部署
+```
+
+- `CASE` の `ELSE` を省略した非一致行は集計から除外されます。したがって `COUNT(CASE WHEN 条件 THEN 1 END)` は一致件数です
+- 条件に一致して選択された空セルと、明示した `ELSE ''` は、`MIN` / `MAX` では既存の canonical empty band の候補に残ります。`SUM` / `AVG` / `GROUP_CONCAT` / 統計集約 / `MODE` の空値規約は従来どおりです
+- 比較・述語そのものを値にする `SUM(売上 > 0)` は使用できません。`SUM(CASE WHEN 売上 > 0 THEN 1 ELSE 0 END)` のように値を明示してください（ParseError でもこの形を案内します）
+- サブクエリと集計の入れ子（`SUM(SUM(x))`）は引数に指定できません。`MODE(DISTINCT ...)` も引き続き使用できません
+- `HAVING SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) > 1000000` も同じ書き方で使用できます。既存の算術式引数の挙動は変わりません
 
 ### GROUP_CONCAT
 
@@ -1071,10 +1100,10 @@ GROUP BY 部署
 - 収集した値に数値化できない値または `Infinity` / `-Infinity` があれば `ArgumentError` になります
 - 6 関数は完全入力を必要とします。`onLimit=truncate` を指定しても上限到達時はエラーとなり、部分集合の統計値を返しません
 - `DISTINCT` は Number 化後の数値同値で重複を除きます。たとえば `"1"` と `"01"` は同じ値です。既存の 6 集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` / `GROUP_CONCAT`）は従来どおり文字列単位です
-- `*` は指定できません。引数にはフィールドまたは算術式を 1 つ指定します
+- `*` は指定できません。引数にはフィールド、算術式、または前掲の `CASE` 式・`||` 連結・スカラー変数を 1 つ指定します
 - `MODE` の同頻度候補は引数型の canonical 順で最小の値を選びます。canonical 同値（数値列の `"1"` と `"01"` など）は raw 文字列のコードポイント順を二次キーにするため、入力順によらず決定的です
-- `MODE` は未選択（空セル）を候補に含めません。未選択件数は `COUNT(*) - COUNT(フィールド)` で確認してください
-- `MODE(DISTINCT x)` は使用できません。`MODE(COALESCE(フィールド, '未選択'))` も算術式扱いで数値評価されるため、未選択をカテゴリ化する用途には使えません。必要なら CTE または一時テーブルで文字列列として実体化してから `MODE` を適用してください
+- `MODE` は未選択（空セル）を候補に含めません。未選択件数は `COUNT(*) - COUNT(フィールド)` で確認してください。未選択をカテゴリ化する場合は `MODE(CASE WHEN フィールド = '' THEN '未選択' ELSE フィールド END)` と明示できます
+- `MODE(DISTINCT x)` は使用できません。`MODE(COALESCE(フィールド, '未選択'))` は算術式扱いで数値評価されるため、この用途では前項の `CASE` を使用してください
 - 無印の `STDDEV` / `VARIANCE` は別名ではなく非対応です。母集団・標本のどちらかが方言で異なるため、`_POP` / `_SAMP` を明示してください
 - 6 関数は予約語です。`MODE` を含む同名フィールドは `` `MODE` `` のようにバッククォートで囲みます。`MODEL` など長い識別子は影響を受けません
 
@@ -1115,7 +1144,7 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 GROUP BY 後の集計結果に対してフィルタをかけます。  
 HAVING 句には集計関数・GROUP BY フィールドを使用できます。
 
-直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。式引数の統計量は SELECT で alias を付け、その alias を HAVING から参照してください。
+直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。v3.16.0 以降の `CASE` 式引数も同じ規則で直接記述でき、SELECT で付けた alias から参照する書き方も有効です。
 
 ```sql
 SELECT 部署, COUNT(*) AS 件数
@@ -1129,6 +1158,14 @@ SELECT 担当者, SUM(金額) AS 合計
 FROM APP100
 GROUP BY 担当者
 HAVING SUM(金額) > 1000000
+```
+
+```sql
+SELECT 部署,
+       SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) AS 受注売上
+FROM APP100
+GROUP BY 部署
+HAVING SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) > 1000000
 ```
 
 WHERE との違い:

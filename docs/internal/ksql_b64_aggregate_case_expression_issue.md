@@ -1,6 +1,6 @@
 # B64 — 集計関数の引数に CASE 式（条件付き集計 `SUM(CASE WHEN … END)`）が指定不可
 
-- ステータス: 📝 **【A: 評価・方向判断】起票（2026-07-23）**。集計関数の引数に `CASE` 式を書けず、条件付き集計（`SUM(CASE WHEN cond THEN 1 ELSE 0 END)` 等）が直接表現できない。回避策（CTE で CASE 列を作ってから集計）は存在。仕様前・実需/方針の確認待ち。
+- ステータス: ✅ **リリース済み（v3.16.0・2026-07-23）**。集計関数の引数に `CASE` 式・`||`・裸 `@var` を全12集計で受理（比較式は恒久拒否で CASE 誘導）。実装 PR #240→release #241→npm latest 3.16.0・実機 PASS。仕様は [spec R2](ksql_b64_aggregate_case_expression_spec.md)、言語リファレンス §4/§8/§9 反映済み。以下は起票時の記録。
 - 種別: 機能（式・集計）
 - 優先: 中
 - 関連: [B37 CHECK（CASE 相当の条件式）](ksql_custom_check_spec.md) / [B16 GROUP_CONCAT](ksql_group_concat_spec.md) / [B56 統計集約](ksql_b56_statistical_aggregates_spec.md) / 言語 §（集計関数・CASE 式）
