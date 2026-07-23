@@ -11,6 +11,7 @@
 
 import { Token, TokenKind, KEYWORDS } from "../lexer/tokens";
 import { makeNumberLiteral, numberLiteralText } from "../types/ast";
+import { expandCubeGroupingSets } from "../core/grouping";
 import type {
   Statement,
   SelectStatement,
@@ -1067,7 +1068,7 @@ export class Parser {
       } else if (this.isRollupStart()) {
         grouping = this.parseRollupClause();
       } else if (this.isCubeStart()) {
-        throw new ParseError("B65: CUBE is not supported in Phase1.", this.peek());
+        grouping = this.parseCubeClause();
       } else {
         groupBy = this.parseGroupByKeys();
       }
@@ -2628,6 +2629,26 @@ export class Parser {
     return {
       type: "GROUPING_SETS",
       source: "ROLLUP",
+      allItems: this.groupingAllItems(sets),
+      sets,
+    };
+  }
+
+  private parseCubeClause(): GroupingSpec {
+    this.advance(); // CUBE
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("B65: CUBE requires at least one field.", this.peek());
+    }
+    const items: GroupingFieldItem[] = [];
+    do {
+      items.push(this.parseGroupingFieldItem());
+    } while (this.consume(TokenKind.COMMA));
+    this.expect(TokenKind.RPAREN);
+    const sets = expandCubeGroupingSets(items);
+    return {
+      type: "GROUPING_SETS",
+      source: "CUBE",
       allItems: this.groupingAllItems(sets),
       sets,
     };

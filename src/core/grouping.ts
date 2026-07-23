@@ -27,9 +27,37 @@ export interface ResolvedGroupingSet {
 
 export interface ResolvedGroupingSpec {
   type: "GROUPING_SETS";
-  source: "ROLLUP" | "GROUPING_SETS";
+  source: "ROLLUP" | "GROUPING_SETS" | "CUBE";
   allItems: readonly ResolvedGroupingItem[];
   sets: readonly ResolvedGroupingSet[];
+}
+
+/**
+ * Expand a field-only CUBE after proving its power-set cardinality is within
+ * the candidate set limit. Duplicate argument positions and resulting
+ * equivalent sets remain explicit.
+ */
+export function expandCubeGroupingSets(items: readonly GroupingFieldItem[]): GroupingSet[] {
+  let expandedSetCount = 1;
+  for (const _item of items) {
+    if (expandedSetCount > Math.floor(B65_MAX_GROUPING_SETS / 2)) {
+      const rejectedSetCount = expandedSetCount * 2;
+      throw new Error(
+        `ArgumentError: B65 expanded grouping set count ${rejectedSetCount} exceeds limit ` +
+        `${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
+      );
+    }
+    expandedSetCount *= 2;
+  }
+
+  let sets: GroupingSet[] = [{ items: [] }];
+  for (const item of items) {
+    sets = sets.flatMap((set) => [
+      { items: [...set.items, item] },
+      { items: [...set.items] },
+    ]);
+  }
+  return sets;
 }
 
 function groupingFieldSyntaxKey(item: GroupingFieldItem): string {

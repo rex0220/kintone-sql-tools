@@ -632,7 +632,7 @@ export interface GroupingSet {
 
 export interface GroupingSpec {
   type: "GROUPING_SETS";
-  source: "GROUPING_SETS" | "ROLLUP";
+  source: "GROUPING_SETS" | "ROLLUP" | "CUBE";
   allItems: GroupingFieldItem[];
   sets: GroupingSet[];
 }
@@ -642,7 +642,7 @@ export type NormalizedGroupingSpec =
   | { type: "PLAIN"; allItems: GroupByKey[]; sets: readonly [GroupByKey[]] }
   | {
       type: "GROUPING_SETS";
-      source: "GROUPING_SETS" | "ROLLUP";
+      source: "GROUPING_SETS" | "ROLLUP" | "CUBE";
       allItems: GroupingFieldItem[];
       sets: GroupingSet[];
     };

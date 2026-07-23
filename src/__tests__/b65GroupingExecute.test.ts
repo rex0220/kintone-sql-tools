@@ -357,3 +357,119 @@ test("B65-X01: EXPLAIN は candidate guard・完全入力・local order を静�
   ]));
   expect(mock.recordCalls).toBe(0);
 });
+
+test("B65-CU02: CUBE(a,b) は 4 set と各軸の正しい GROUPING bit を返す", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 GROUP BY CUBE(地域,会社名) " +
+    "ORDER BY GROUPING(地域), 地域, GROUPING(会社名), 会社名",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-cu02" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "A", g_region: "0", g_company: "0", total: "10" },
+    { 地域: "東", 会社名: "B", g_region: "0", g_company: "0", total: "20" },
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "A", g_region: "0", g_company: "0", total: "5" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+    { 地域: "", 会社名: "A", g_region: "1", g_company: "0", total: "15" },
+    { 地域: "", 会社名: "B", g_region: "1", g_company: "0", total: "20" },
+    { 地域: "", 会社名: "", g_region: "1", g_company: "1", total: "35" },
+  ]);
+});
+
+test("B65-CU04: CUBE は CASE label・ORDER・HAVING GROUPING・B64 条件付き集計を共用する", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10", 商談フェーズ: "受注" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20", 商談フェーズ: "提案中" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5", 商談フェーズ: "受注" }),
+  ];
+  const result = await execute(
+    "SELECT CASE WHEN GROUPING(地域)=1 THEN '全地域' ELSE 地域 END AS region_label, " +
+    "CASE WHEN GROUPING(会社名)=1 THEN '全社' ELSE 会社名 END AS company_label, " +
+    "GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(CASE WHEN 商談フェーズ='受注' THEN 売上 ELSE 0 END) AS won " +
+    "FROM APP4149 GROUP BY CUBE(地域,会社名) " +
+    "HAVING GROUPING(地域)=0 AND GROUPING(会社名)=1 " +
+    "ORDER BY GROUPING(地域), region_label",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-cu04" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { region_label: "東", company_label: "全社", g_region: "0", g_company: "1", won: "10" },
+    { region_label: "西", company_label: "全社", g_region: "0", g_company: "1", won: "5" },
+  ]);
+});
+
+test("B65-CU05: CUBE(a,a) は同値 set を dedupe しない", async () => {
+  const result = await execute(
+    "SELECT a, GROUPING(a) AS g, COUNT(*) AS n FROM APP1 GROUP BY CUBE(a,a) " +
+    "ORDER BY GROUPING(a), a",
+    client({ 1: [
+      record({ $id: "1", a: "A" }),
+      record({ $id: "2", a: "B" }),
+    ] }),
+    { cacheContext: "b65-cu05" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { a: "A", g: "0", n: "1" },
+    { a: "A", g: "0", n: "1" },
+    { a: "A", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "", g: "1", n: "2" },
+  ]);
+});
+
+test("B65-CU03/CU07: 6 field CUBE は実行でき 7 field は static/実行とも fetch-free 拒否する", async () => {
+  const fields = Array.from({ length: 7 }, (_, index) => `f${index + 1}`);
+  const sixSql = `SELECT COUNT(*) AS n FROM APP1 GROUP BY CUBE(${fields.slice(0, 6).join(",")})`;
+  expect(() => analyzeBatch(parseSqlStatements(sixSql))).not.toThrow();
+  const acceptedClient = client(
+    { 1: [record(Object.fromEntries(fields.map((field) => [field, "x"])))] },
+    Object.fromEntries(fields.map((field) => [field, "SINGLE_LINE_TEXT"]))
+  );
+  const accepted = await execute(sixSql, acceptedClient, {
+    cacheContext: "b65-cu03-six",
+  }) as SelectResult;
+  expect(accepted.rows).toHaveLength(64);
+
+  const sevenSql = `SELECT COUNT(*) AS n FROM APP1 GROUP BY CUBE(${fields.join(",")})`;
+  expect(() => analyzeBatch(parseSqlStatements(sevenSql)))
+    .toThrow(/128.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
+  const rejectedClient = client(
+    { 1: [] },
+    Object.fromEntries(fields.map((field) => [field, "SINGLE_LINE_TEXT"]))
+  );
+  await expect(execute(sevenSql, rejectedClient, { cacheContext: "b65-cu03-seven" }))
+    .rejects.toThrow(/128.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
+  expect(rejectedClient.recordCalls).toBe(0);
+});
+
+test("B65-CU08: EXPLAIN は source=CUBE と展開後 set 数・limit を表示する", async () => {
+  const mock = client({ 1: [] }, {
+    a: "SINGLE_LINE_TEXT",
+    b: "SINGLE_LINE_TEXT",
+    x: "NUMBER",
+  });
+  const result = await execute(
+    "EXPLAIN SELECT a, b, SUM(x) FROM APP1 GROUP BY CUBE(a,b)",
+    mock,
+    { cacheContext: "b65-cu08" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.plan)).toEqual(expect.arrayContaining([
+    "  grouping source: CUBE",
+    "  grouping sets: 4 (limit: 64)",
+    "  grouping items: 2 (limit: 16)",
+  ]));
+  expect(mock.recordCalls).toBe(0);
+});
