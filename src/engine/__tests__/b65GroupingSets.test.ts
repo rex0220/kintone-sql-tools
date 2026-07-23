@@ -5,7 +5,10 @@ import {
   resolveGroupingSpec,
   type ResolvedGroupingSpec,
 } from "../../core/grouping";
-import type { GroupingFieldResolver } from "../../core/groupingValidation";
+import {
+  validateGroupingPlanning,
+  type GroupingFieldResolver,
+} from "../../core/groupingValidation";
 import {
   applyDistinct,
   applyGroupingSets,
@@ -13,6 +16,7 @@ import {
   applyLimit,
   applyOrderBy,
   applyWindow,
+  buildDistinctTuple,
   project,
   type ProcessRow,
 } from "../process";
@@ -180,8 +184,8 @@ describe("B65 Phase1 Step 2 grouping-set engine", () => {
     ]);
   });
 
-  test("generated-row guard: limit+1 bucket は部分結果を返さず dedicated error", () => {
-    const stmt = parse("SELECT a, COUNT(*) AS n FROM APP1 GROUP BY ROLLUP(a)");
+  test("B65-SD10: generated-row guard は DISTINCT の dedupe 見込みでも免除しない", () => {
+    const stmt = parse("SELECT DISTINCT a FROM APP1 GROUP BY ROLLUP(a)");
     expect(() => applyGroupingSets(
       [{ a: "A" }, { a: "B" }],
       resolved(stmt),
@@ -189,5 +193,39 @@ describe("B65 Phase1 Step 2 grouping-set engine", () => {
       undefined,
       { maxGeneratedRows: 2 }
     )).toThrow(/GROUPING_OUTPUT_LIMIT_EXCEEDED/);
+  });
+
+  test("B65-SD09: project と DISTINCT tuple は全明示列型を同じ evaluator で評価する", () => {
+    const stmt = parse(
+      "SELECT a AS field_value, 'x' AS literal_value, SUM(x) AS aggregate_value, " +
+      "SUM(x)+1 AS aggregate_arith_value, a||'!' AS scalar_value, UPPER(a) AS string_value, " +
+      "CASE WHEN a='A' THEN 'case-a' ELSE 'case-other' END AS case_value, " +
+      "GROUPING(a) AS grouping_value, (SELECT 'sub') AS subquery_value " +
+      "FROM APP1 GROUP BY ROLLUP(a)"
+    );
+    const planned = validateGroupingPlanning(stmt, (field) => ({
+      canonicalId: `APP1:${field.field}`,
+      directKey: field.field,
+      unqualifiedBridgeKey: field.field,
+      physical: true,
+    }));
+    if (!planned) throw new Error("test requires a B65 grouping spec");
+    const rows = applyGroupingSets(
+      [{ a: "A", x: "2" }],
+      planned,
+      stmt.columns
+    );
+    const scalarCache = new Map([[8, "sub"]]);
+
+    for (const row of rows) {
+      const tuple = buildDistinctTuple(stmt.columns, row, { scalarCache });
+      const projected = project(rows.length > 0 ? [row] : [], stmt.columns, scalarCache).rows[0];
+      expect(tuple).toEqual(stmt.columns.map((column) => {
+        if (!("alias" in column) || column.alias === null) {
+          throw new Error("test requires unique aliases");
+        }
+        return projected[column.alias];
+      }));
+    }
   });
 });

@@ -71,23 +71,22 @@ describe("MCP tools", () => {
     expect(registered.ksql_validate.description).toContain("Do not use validate probing");
   });
 
-  test("B65-SV10: ksql_validate は DISTINCT + ROLLUP を static に拒否する", async () => {
+  test("B65-SD12: ksql_validate は DISTINCT + ROLLUP を static に受理する", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     const result = await tools.validateTool({
       sql: "SELECT DISTINCT 会社名, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名)",
     });
     const payload = result.structuredContent as {
-      ok: false;
-      error: { code: string; message: string };
+      ok: true;
+      statementType: string;
+      requiresCompleteInput: boolean;
     };
 
-    expect(result.isError).toBe(true);
-    expect(payload).toEqual({
-      ok: false,
-      error: {
-        code: "ArgumentError",
-        message: "ArgumentError: B65 SELECT DISTINCT is not supported in Phase1.",
-      },
+    expect(result.isError).toBe(false);
+    expect(payload).toMatchObject({
+      ok: true,
+      statementType: "SELECT",
+      requiresCompleteInput: true,
     });
   });
 

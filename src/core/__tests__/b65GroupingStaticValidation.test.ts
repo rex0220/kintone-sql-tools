@@ -45,13 +45,6 @@ function withWindowGrouping(): SelectStatement {
 
 const staticRejections = [
   [
-    "B65-SV01",
-    () => parseSelect(
-      "SELECT DISTINCT 会社名, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名)"
-    ),
-    "ArgumentError: B65 SELECT DISTINCT is not supported in Phase1.",
-  ],
-  [
     "B65-SV02",
     withKorderGrouping,
     "ArgumentError: B65 KORDER BY is not supported in Phase1.",
@@ -142,10 +135,17 @@ test.each([
     "CREATE TEMP TABLE #x AS " +
       "SELECT DISTINCT 会社名 FROM APP1 GROUP BY ROLLUP(会社名); SELECT * FROM #x",
   ],
-])("B65-SV07: analyzeBatch walker は %s の nested SELECT を検証する", (_name, sql) => {
-  expect(() => analyze(sql)).toThrow(
-    "ArgumentError: B65 SELECT DISTINCT is not supported in Phase1."
+])("B65-SD01: analyzeBatch walker は %s の B65 DISTINCT を受理する", (_name, sql) => {
+  expect(() => analyze(sql)).not.toThrow();
+});
+
+test("B65-SD02: DISTINCT + ROLLUP は analyzeBatch/static/planning で一貫して受理する", () => {
+  const stmt = parseSelect(
+    "SELECT DISTINCT 会社名, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名)"
   );
+  expect(() => analyzeBatch([stmt])).not.toThrow();
+  expect(() => validateGroupingStatic(stmt)).not.toThrow();
+  expect(() => validateGroupingPlanning(stmt, resolve)).not.toThrow();
 });
 
 test("B65-SV08: 看板 ROLLUP/GROUPING/CASE/ORDER BY は static で受理する", () => {

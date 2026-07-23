@@ -219,9 +219,6 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
     return;
   }
 
-  if (stmt.distinct) {
-    throw new Error("ArgumentError: B65 SELECT DISTINCT is not supported in Phase1.");
-  }
   if (stmt.orderMode === "KINTONE_NATIVE") {
     throw new Error("ArgumentError: B65 KORDER BY is not supported in Phase1.");
   }

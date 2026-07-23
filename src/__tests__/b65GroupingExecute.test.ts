@@ -473,3 +473,81 @@ test("B65-CU08: EXPLAIN は source=CUBE と展開後 set 数・limit を表示�
   ]));
   expect(mock.recordCalls).toBe(0);
 });
+
+test("B65-SD04: ROLLUP の同一表示値は GROUPING 投影の有無どおり dedupe する", async () => {
+  const mock = client({ 1: [record({ $id: "1", a: "" })] });
+  const withoutGrouping = await execute(
+    "SELECT DISTINCT a FROM APP1 GROUP BY ROLLUP(a)",
+    mock,
+    { cacheContext: "b65-sd04-without-grouping" }
+  ) as SelectResult;
+  const withGrouping = await execute(
+    "SELECT DISTINCT a, GROUPING(a) AS g FROM APP1 GROUP BY ROLLUP(a) ORDER BY g",
+    mock,
+    { cacheContext: "b65-sd04-with-grouping" }
+  ) as SelectResult;
+
+  expect(withoutGrouping.rows).toEqual([{ a: "" }]);
+  expect(withGrouping.rows).toEqual([{ a: "", g: "0" }, { a: "", g: "1" }]);
+});
+
+test("B65-SD05: 重複 GROUPING SETS は非 DISTINCT で保持し DISTINCT で投影行だけ dedupe する", async () => {
+  const mock = client({ 1: [record({ $id: "1", a: "A" })] });
+  const plain = await execute(
+    "SELECT a FROM APP1 GROUP BY GROUPING SETS ((a),(a))",
+    mock,
+    { cacheContext: "b65-sd05-plain" }
+  ) as SelectResult;
+  const distinct = await execute(
+    "SELECT DISTINCT a FROM APP1 GROUP BY GROUPING SETS ((a),(a))",
+    mock,
+    { cacheContext: "b65-sd05-distinct" }
+  ) as SelectResult;
+
+  expect(plain.rows).toEqual([{ a: "A" }, { a: "A" }]);
+  expect(distinct.rows).toEqual([{ a: "A" }]);
+});
+
+test("B65-SD06: CASE が同じ表示ラベルへ畳み込む grouping 行を DISTINCT で dedupe する", async () => {
+  const result = await execute(
+    "SELECT DISTINCT CASE WHEN GROUPING(a)=1 THEN 'same' ELSE 'same' END AS label " +
+    "FROM APP1 GROUP BY ROLLUP(a)",
+    client({ 1: [record({ $id: "1", a: "A" })] }),
+    { cacheContext: "b65-sd06" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ label: "same" }]);
+});
+
+test("B65-SD07: CUBE + HAVING GROUPING + DISTINCT は重複 set 出力を正しく dedupe する", async () => {
+  const result = await execute(
+    "SELECT DISTINCT a, GROUPING(a) AS g FROM APP1 GROUP BY CUBE(a,a) " +
+    "HAVING GROUPING(a)=0 ORDER BY a",
+    client({ 1: [
+      record({ $id: "1", a: "A" }),
+      record({ $id: "2", a: "B" }),
+    ] }),
+    { cacheContext: "b65-sd07" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ a: "A", g: "0" }, { a: "B", g: "0" }]);
+});
+
+test("B65-SD08: aggregate/string/scalar DISTINCT は set ごとの materialize 値を読む", async () => {
+  const result = await execute(
+    "SELECT DISTINCT SUM(x) AS total, CONCAT(SUM(x),'x') AS text_total, " +
+    "FORMAT(SUM(x),'0')||'y' AS scalar_total " +
+    "FROM APP1 GROUP BY ROLLUP(a) ORDER BY total",
+    client({ 1: [
+      record({ $id: "1", a: "A", x: "1" }),
+      record({ $id: "2", a: "B", x: "2" }),
+    ] }, { x: "NUMBER" }),
+    { cacheContext: "b65-sd08" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { total: "1", text_total: "1x", scalar_total: "1y" },
+    { total: "2", text_total: "2x", scalar_total: "2y" },
+    { total: "3", text_total: "3x", scalar_total: "3y" },
+  ]);
+});

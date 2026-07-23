@@ -51,7 +51,6 @@ describe("B65 Phase1 Step 1 planning validator", () => {
 
   test.each([
     ["GROUPING arg outside allItems", "SELECT GROUPING(b), SUM(x) FROM APP1 GROUP BY ROLLUP(a)", /NOT_ITEM/],
-    ["SELECT DISTINCT", "SELECT DISTINCT a, SUM(x) FROM APP1 GROUP BY ROLLUP(a)", /SELECT DISTINCT/],
     ["wildcard", "SELECT *, SUM(x) FROM APP1 GROUP BY ROLLUP(a)", /wildcard/],
     ["non-grouped dependency", "SELECT b, SUM(x) FROM APP1 GROUP BY ROLLUP(a)", /NON_GROUPED/],
     ["aggregate alias collision", "SELECT a, SUM(x) AS a FROM APP1 GROUP BY ROLLUP(a)", /ALIAS_COLLISION/],
@@ -60,6 +59,13 @@ describe("B65 Phase1 Step 1 planning validator", () => {
     ["GROUPING without B65", "SELECT GROUPING(a) FROM APP1 GROUP BY a", /requires GROUP BY/],
   ])("B65 Step1 planning rejection: %s", (_name, sql, message) => {
     expect(() => validateGroupingPlanning(parse(sql), resolver(["a", "b", "x"]))).toThrow(message);
+  });
+
+  test("B65-SD03: planning は SELECT DISTINCT + ROLLUP を受理する", () => {
+    expect(() => validateGroupingPlanning(
+      parse("SELECT DISTINCT a, SUM(x) FROM APP1 GROUP BY ROLLUP(a)"),
+      resolver(["a", "x"])
+    )).not.toThrow();
   });
 
   test("narrow alias rule は看板 CASE alias を受理する", () => {

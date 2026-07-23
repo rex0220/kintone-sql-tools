@@ -2033,3 +2033,40 @@ test("DISTINCT *: 同一値の行は重複除去される", () => {
   const result = applyDistinct(rows, stmt.columns);
   expect(result).toHaveLength(2);
 });
+
+test("B65-SD11: 非 B65 DISTINCT の qualified FIELD / _p.* / raw wildcard 契約を維持する", () => {
+  const qualified = parseSelect("SELECT DISTINCT t.a FROM APP100 AS t");
+  expect(applyDistinct(
+    [{ "t.a": "A", a: "fallback-1" }, { "t.a": "A", a: "fallback-2" }],
+    qualified.columns
+  )).toHaveLength(1);
+
+  const parent = parseSelect("SELECT DISTINCT _p.* FROM APP100$明細");
+  expect(applyDistinct(
+    [{ "_p.id": "1", child: "x" }, { "_p.id": "1", child: "y" }],
+    parent.columns
+  )).toHaveLength(1);
+
+  const wildcard = parseSelect("SELECT DISTINCT * FROM APP100");
+  expect(applyDistinct(
+    [{ a: "A", "t.a": "hidden-1" }, { a: "A", "t.a": "hidden-2" }],
+    wildcard.columns
+  )).toHaveLength(2);
+});
+
+test("B65-SD13: DISTINCT tuple は重複出力名でも列位置を落とさない", () => {
+  const stmt = parseSelect("SELECT DISTINCT a AS same, b AS same FROM APP100");
+  const rows = [
+    { a: "A", b: "same-output" },
+    { a: "B", b: "same-output" },
+    { a: "A", b: "same-output" },
+  ];
+
+  // project の object 表現は後勝ちで同じだが、DISTINCT は SELECT list 2列を保持する。
+  expect(project(rows, stmt.columns).rows).toEqual([
+    { same: "same-output" },
+    { same: "same-output" },
+    { same: "same-output" },
+  ]);
+  expect(applyDistinct(rows, stmt.columns)).toEqual([rows[0], rows[1]]);
+});
