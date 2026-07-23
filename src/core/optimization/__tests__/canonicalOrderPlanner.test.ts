@@ -104,3 +104,44 @@ test("JOIN の曖昧な非修飾 ORDER key は専用 planning error にする", 
     hasKlike: false,
   })).toThrow(/ambiguous column reference.*ORDER_KEY_AMBIGUOUS/);
 });
+
+test("B65-O04: direct GROUPING_KEY は未解決 field 扱いにせず CANONICAL_LOCAL にする", () => {
+  const stmt = statement(
+    "SELECT GROUPING(a) AS g, SUM(x) AS total FROM APP100 " +
+    "GROUP BY ROLLUP(a) ORDER BY GROUPING(a), total DESC"
+  );
+  expect(planCanonicalOrder({
+    stmt,
+    staticMode: resolveSelectMode(stmt),
+    whereCapability: "EXACT_PUSHDOWN",
+    orderSemantics: new Map([
+      ["total", resolveFieldSemantics({ fieldType: "NUMBER" })],
+    ]),
+    maxRecords: 10_000,
+    hasKlike: false,
+  })).toMatchObject({
+    kind: "CANONICAL_LOCAL",
+    requiresCompleteInput: true,
+    localOrderBy: true,
+    reasonCodes: expect.arrayContaining(["ORDER_KEY_NOT_REST_EQUIVALENT", "QUERY_SHAPE_LOCAL"]),
+  });
+});
+
+test("B65-O04: GROUPING alias は number semantics があれば ORDER_KEY_UNRESOLVED にならない", () => {
+  const stmt = statement(
+    "SELECT GROUPING(a) AS g, SUM(x) FROM APP100 GROUP BY ROLLUP(a) ORDER BY g"
+  );
+  expect(planCanonicalOrder({
+    stmt,
+    staticMode: resolveSelectMode(stmt),
+    whereCapability: "EXACT_PUSHDOWN",
+    orderSemantics: new Map([
+      ["g", resolveFieldSemantics({ fieldType: "NUMBER" })],
+    ]),
+    maxRecords: 10_000,
+    hasKlike: false,
+  })).toMatchObject({
+    kind: "CANONICAL_LOCAL",
+    reasonCodes: expect.not.arrayContaining(["ORDER_KEY_UNRESOLVED"]),
+  });
+});

@@ -210,6 +210,8 @@ export interface SelectStatement {
   joins: JoinClause[];
   where: WhereExpr | null;
   groupBy: GroupByKey[];
+  /** B65 grouping-set syntax only. Absent for ordinary GROUP BY compatibility. */
+  grouping?: GroupingSpec;
   having: WhereExpr | null;
   orderMode: "CANONICAL" | "KINTONE_NATIVE";
   orderBy: OrderByItem[];
@@ -229,6 +231,7 @@ export type SelectColumn =
   | CaseColumn              // CASE WHEN ... END [AS alias]
   | StringFuncColumn        // UPPER(f) / CONCAT(a,b) / ... [AS alias]
   | ScalarValueColumn       // a || b / scalar-value arithmetic [AS alias]
+  | GroupingColumn          // GROUPING(field) [AS alias]
   | WindowColumn            // ROW_NUMBER() OVER (...) AS alias
   | ScalarSubqueryColumn    // (SELECT ...) [AS alias]
   | VariableColumn;         // @variable AS alias (batch resolver only)
@@ -329,6 +332,18 @@ export interface StringFuncColumn {
 export interface ScalarValueColumn {
   type: "SCALAR_VALUE_COL";
   expr: ScalarValueExpr;
+  alias: string | null;
+}
+
+/** B65 aggregate-context discriminator. Kept out of the general scalar union. */
+export interface GroupingRef {
+  type: "GROUPING_REF";
+  field: FieldRef;
+}
+
+export interface GroupingColumn {
+  type: "GROUPING_COL";
+  ref: GroupingRef;
   alias: string | null;
 }
 
@@ -472,7 +487,12 @@ export interface GroupExpr {
 // ------------------------------------------------------------
 
 /** WHERE の左辺 */
-export type FieldValue = FieldRef | FuncFieldValue | ArithFieldValue | CaseFieldValue;
+export type FieldValue =
+  | FieldRef
+  | FuncFieldValue
+  | ArithFieldValue
+  | CaseFieldValue
+  | GroupingFieldValue;
 
 /** 通常のフィールド参照: [alias.]field */
 export interface FieldRef {
@@ -497,6 +517,11 @@ export interface ArithFieldValue {
 export interface CaseFieldValue {
   type: "CASE_FIELD";
   expr: CaseWhenExpr;
+}
+
+export interface GroupingFieldValue {
+  type: "GROUPING_FIELD";
+  ref: GroupingRef;
 }
 
 /** WHERE の右辺（リテラル・kintone 関数・算術式・CASE WHEN） */
@@ -598,6 +623,30 @@ export type GroupByKey =
   | { type: "ARITH_KEY"; expr: ArithNode }        // GROUP BY 金額 * 1.1
   | { type: "FUNC_KEY";  expr: StringFuncExpr };  // GROUP BY SUBSTRING(作成日時, 1, 7)
 
+/** B65 Phase1 grouping items are physical field references only. */
+export type GroupingFieldItem = FieldRef;
+
+export interface GroupingSet {
+  items: GroupingFieldItem[];
+}
+
+export interface GroupingSpec {
+  type: "GROUPING_SETS";
+  source: "GROUPING_SETS" | "ROLLUP";
+  allItems: GroupingFieldItem[];
+  sets: GroupingSet[];
+}
+
+export type NormalizedGroupingSpec =
+  | { type: "NONE" }
+  | { type: "PLAIN"; allItems: GroupByKey[]; sets: readonly [GroupByKey[]] }
+  | {
+      type: "GROUPING_SETS";
+      source: "GROUPING_SETS" | "ROLLUP";
+      allItems: GroupingFieldItem[];
+      sets: GroupingSet[];
+    };
+
 // ------------------------------------------------------------
 // ORDER BY
 // ------------------------------------------------------------
@@ -606,7 +655,8 @@ export type GroupByKey =
 export type OrderByKey =
   | { type: "FIELD_NAME"; name: string }        // ORDER BY 名前 / alias
   | { type: "ARITH_KEY"; expr: ArithNode }       // ORDER BY 金額 * 1.1
-  | { type: "FUNC_KEY";  expr: StringFuncExpr }; // ORDER BY UPPER(名前)
+  | { type: "FUNC_KEY";  expr: StringFuncExpr }  // ORDER BY UPPER(名前)
+  | { type: "GROUPING_KEY"; ref: GroupingRef };  // ORDER BY GROUPING(field)
 
 export interface OrderByItem {
   key: OrderByKey;

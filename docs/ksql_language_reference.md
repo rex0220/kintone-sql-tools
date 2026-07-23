@@ -1064,6 +1064,52 @@ GROUP BY 部署
 - サブクエリと集計の入れ子（`SUM(SUM(x))`）は引数に指定できません。`MODE(DISTINCT ...)` も引き続き使用できません
 - `HAVING SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) > 1000000` も同じ書き方で使用できます。既存の算術式引数の挙動は変わりません
 
+### 小計・総計（ROLLUP / GROUPING SETS / GROUPING）
+
+`GROUP BY ROLLUP(a[, b ...])` と `GROUP BY GROUPING SETS ((...), (...), ())` は、明細に加えて小計・総計行を同じ結果へ出力します。1 クエリで必要な階層をまとめて集計できます。
+
+```sql
+-- 単一列 ROLLUP: 会社別明細と総計
+SELECT 会社名, SUM(売上) AS 売上合計
+FROM APP4149
+GROUP BY ROLLUP(会社名)
+
+-- 複数列 ROLLUP: 地域×会社明細、地域小計、総計
+SELECT 地域, 会社名, SUM(売上) AS 売上合計
+FROM APP4149
+GROUP BY ROLLUP(地域, 会社名)
+
+-- 必要な階層だけを明示
+SELECT 地域, 会社名, SUM(売上) AS 売上合計
+FROM APP4149
+GROUP BY GROUPING SETS ((地域, 会社名), (地域), ())
+```
+
+`GROUPING(field)` は、その行で `field` が集約された super-aggregate 行なら `1`、グループキーとして残っていれば `0` を返します。小計・総計行の grouped 列は空文字になるため、実データの空セルとの判別にはフィールド値ではなく `GROUPING(field)` を使用します。通常の `ORDER BY GROUPING(会社名)` を昇順で指定すると、総計行を末尾へ寄せられます（§10 も参照）。
+
+```sql
+SELECT
+  CASE WHEN GROUPING(会社名) = 1 THEN '合計' ELSE 会社名 END AS 会社名,
+  GROUPING(会社名) AS grouping_company,
+  COUNT(*) AS 案件数,
+  SUM(売上) AS 売上合計,
+  SUM(CASE WHEN 商談フェーズ = '受注' THEN 売上 ELSE 0 END) AS 受注済売上,
+  SUM(CASE WHEN 商談フェーズ IN ('提案中','内示') THEN 売上 ELSE 0 END) AS 見込売上
+FROM APP4149
+GROUP BY ROLLUP(会社名)
+ORDER BY GROUPING(会社名), 売上合計 DESC
+```
+
+この例は B64 の条件付き集計と併用し、会社別明細と総計を返します。`grouping_company` は実データと総計行を機械的に判別する値です。
+
+- grouping item と `GROUPING()` の引数は、APP の物理フィールド参照または修飾フィールド参照だけです。式・SELECT alias・CTE／一時テーブルの実体化列は使用できません
+- `CUBE`、`ROLLUP` / `GROUPING SETS` の入れ子、通常 item と grouping-set の混在、`GROUPING()` の式引数・複数引数、`GROUPING_ID` は未対応です
+- `GROUPING()` は SELECT 列、SELECT の CASE 条件、トップレベルの通常 `ORDER BY` で使用できます。HAVING 内では使用できません
+- `SELECT DISTINCT`、`KORDER BY`、ウィンドウ関数との併用はできません
+- 小計・総計は全入力に依存するため、常に完全入力が必要です。`onLimit=truncate` は使用できず、取得上限へ到達した場合は部分結果を返さずエラーになります
+- 展開後の grouping set 数、grouping item 数、生成行数には安全上限があります。超過時は planning または実行時に fail-closed でエラーとなり、部分結果を返しません
+- 重複する grouping set は除去せず、その分の結果行を保持します。`SELECT DISTINCT` は別機能であり、Phase1 では併用できません
+
 ### GROUP_CONCAT
 
 `GROUP_CONCAT` はグループ内の空でない値を収集順に連結します。既定の区切り文字は `,` です。
@@ -1146,6 +1192,8 @@ HAVING 句には集計関数・GROUP BY フィールドを使用できます。
 
 直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。v3.16.0 以降の `CASE` 式引数も同じ規則で直接記述でき、SELECT で付けた alias から参照する書き方も有効です。
 
+B65 の通常 HAVING（`GROUPING()` を含まないもの）は grouping set の集約後に各行へ作用します。`GROUPING()` を HAVING 内で使うのは Phase1 では未対応のため、SELECT 列・SELECT の CASE 条件・トップレベルの通常 `ORDER BY` で使用してください。
+
 ```sql
 SELECT 部署, COUNT(*) AS 件数
 FROM APP100
@@ -1216,6 +1264,17 @@ ORDER BY weekday ASC
 - alias に一致しない名前は従来どおり入力行フィールドとして解決します。どちらにも解決できない名前は `ORDER_KEY_UNRESOLVED` で実行前に拒否します
 - この alias 解決はトップレベルの通常 `ORDER BY` だけに適用します。`OVER (ORDER BY ...)` から同一 SELECT の alias は参照できません。必要な場合は CTE または一時テーブルで一度列を実体化してください
 - `KORDER BY` は SELECT alias を直接物理列として扱いません
+
+### GROUPING() による小計・総計行のソート
+
+B65 の通常 `ORDER BY GROUPING(field)` を昇順で指定すると、`GROUPING(field)=1` となる super-aggregate（小計・総計）行を末尾へ寄せられます。B65 文は FULL_SCAN で取得後にローカルソートします。
+
+```sql
+SELECT 会社名, GROUPING(会社名) AS grouping_company, SUM(売上) AS 売上合計
+FROM APP4149
+GROUP BY ROLLUP(会社名)
+ORDER BY GROUPING(会社名), 売上合計 DESC
+```
 
 ### canonical順（v3.0.0）
 

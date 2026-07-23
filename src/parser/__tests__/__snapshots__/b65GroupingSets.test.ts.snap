@@ -1,0 +1,279 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`B65 Phase1 Step 1 parser B65-P01: ROLLUP は単一・複数列を prefix set へ展開する: multiple 1`] = `
+{
+  "columns": [
+    {
+      "alias": null,
+      "field": "a",
+      "type": "FIELD",
+    },
+    {
+      "alias": null,
+      "field": "b",
+      "type": "FIELD",
+    },
+    {
+      "alias": null,
+      "arg": {
+        "field": "x",
+        "type": "FIELD_REF",
+      },
+      "distinct": false,
+      "func": "SUM",
+      "type": "AGGREGATE",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP1",
+    "appId": 1,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "grouping": {
+    "allItems": [
+      {
+        "field": "a",
+        "tableAlias": null,
+        "type": "FIELD",
+      },
+      {
+        "field": "b",
+        "tableAlias": null,
+        "type": "FIELD",
+      },
+    ],
+    "sets": [
+      {
+        "items": [
+          {
+            "field": "a",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+          {
+            "field": "b",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+        ],
+      },
+      {
+        "items": [
+          {
+            "field": "a",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+        ],
+      },
+      {
+        "items": [],
+      },
+    ],
+    "source": "ROLLUP",
+    "type": "GROUPING_SETS",
+  },
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "orderMode": "CANONICAL",
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
+exports[`B65 Phase1 Step 1 parser B65-P01: ROLLUP は単一・複数列を prefix set へ展開する: single 1`] = `
+{
+  "columns": [
+    {
+      "alias": null,
+      "field": "a",
+      "type": "FIELD",
+    },
+    {
+      "alias": null,
+      "arg": {
+        "field": "x",
+        "type": "FIELD_REF",
+      },
+      "distinct": false,
+      "func": "SUM",
+      "type": "AGGREGATE",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP1",
+    "appId": 1,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "grouping": {
+    "allItems": [
+      {
+        "field": "a",
+        "tableAlias": null,
+        "type": "FIELD",
+      },
+    ],
+    "sets": [
+      {
+        "items": [
+          {
+            "field": "a",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+        ],
+      },
+      {
+        "items": [],
+      },
+    ],
+    "source": "ROLLUP",
+    "type": "GROUPING_SETS",
+  },
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "orderMode": "CANONICAL",
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
+exports[`B65 Phase1 Step 1 parser B65-P03: GROUPING は SELECT・CASE 条件・direct ORDER BY の dedicated node 1`] = `
+{
+  "columns": [
+    {
+      "alias": "g",
+      "ref": {
+        "field": {
+          "field": "a",
+          "tableAlias": null,
+          "type": "FIELD",
+        },
+        "type": "GROUPING_REF",
+      },
+      "type": "GROUPING_COL",
+    },
+    {
+      "alias": "a",
+      "expr": {
+        "branches": [
+          {
+            "condition": {
+              "left": {
+                "ref": {
+                  "field": {
+                    "field": "a",
+                    "tableAlias": null,
+                    "type": "FIELD",
+                  },
+                  "type": "GROUPING_REF",
+                },
+                "type": "GROUPING_FIELD",
+              },
+              "op": "=",
+              "right": {
+                "raw": "1",
+                "type": "NUMBER",
+                "value": 1,
+              },
+              "type": "BINARY",
+            },
+            "result": {
+              "type": "STRING",
+              "value": "total",
+            },
+          },
+        ],
+        "elseResult": {
+          "field": "a",
+          "type": "FIELD_REF",
+        },
+        "type": "CASE_WHEN",
+      },
+      "type": "CASE_COL",
+    },
+    {
+      "alias": "total",
+      "arg": {
+        "field": "x",
+        "type": "FIELD_REF",
+      },
+      "distinct": false,
+      "func": "SUM",
+      "type": "AGGREGATE",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "APP1",
+    "appId": 1,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "grouping": {
+    "allItems": [
+      {
+        "field": "a",
+        "tableAlias": null,
+        "type": "FIELD",
+      },
+    ],
+    "sets": [
+      {
+        "items": [
+          {
+            "field": "a",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+        ],
+      },
+      {
+        "items": [],
+      },
+    ],
+    "source": "ROLLUP",
+    "type": "GROUPING_SETS",
+  },
+  "having": null,
+  "joins": [],
+  "limit": null,
+  "offset": null,
+  "orderBy": [
+    {
+      "direction": "ASC",
+      "key": {
+        "ref": {
+          "field": {
+            "field": "a",
+            "tableAlias": null,
+            "type": "FIELD",
+          },
+          "type": "GROUPING_REF",
+        },
+        "type": "GROUPING_KEY",
+      },
+    },
+    {
+      "direction": "DESC",
+      "key": {
+        "name": "total",
+        "type": "FIELD_NAME",
+      },
+    },
+  ],
+  "orderMode": "CANONICAL",
+  "type": "SELECT",
+  "where": null,
+}
+`;

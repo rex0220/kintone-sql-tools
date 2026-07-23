@@ -174,6 +174,9 @@ function convertField(field: FieldValue): string {
   if (field.type === "CASE_FIELD") {
     throw new KintoneQueryError("WHERE 句の CASE WHEN は kintone クエリに変換できません");
   }
+  if (field.type === "GROUPING_FIELD") {
+    throw new KintoneQueryError("GROUPING() は kintone クエリに変換できません");
+  }
   return quoteIdentifier(field.field);
 }
 

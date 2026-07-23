@@ -30,6 +30,10 @@ function fieldValueLabel(value: FieldValue): string {
   if (value.type === "FIELD") return value.tableAlias ? `${value.tableAlias}.${value.field}` : value.field;
   if (value.type === "FUNC_FIELD") return stringFuncLabel(value.expr);
   if (value.type === "ARITH_FIELD") return arithLabel(value.expr);
+  if (value.type === "GROUPING_FIELD") {
+    const field = value.ref.field;
+    return `GROUPING(${field.tableAlias ? `${field.tableAlias}.` : ""}${field.field})`;
+  }
   return caseLabel(value.expr);
 }
 

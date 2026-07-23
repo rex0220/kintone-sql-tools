@@ -39,6 +39,21 @@ test("ウィンドウ列は FULL_SCAN を強制する", () => {
   expect(resolveSelectMode(stmt)).toBe("FULL_SCAN");
 });
 
+test("B65-F01: GROUPING SETS (()) だけでも FULL_SCAN", () => {
+  const stmt = parseSelect("SELECT COUNT(*) FROM APP100 GROUP BY GROUPING SETS (())");
+  expect(resolveSelectMode(stmt)).toBe("FULL_SCAN");
+});
+
+test("B65-F02: 全 set の field を table 別に一度収集し GROUPING arg を追加投影しない", () => {
+  const stmt = parseSelect(
+    "SELECT l.a, r.b, GROUPING(l.a) AS ga, GROUPING(r.b) AS gb, COUNT(*) AS n " +
+    "FROM APP1 l JOIN APP2 r ON l.id=r.id " +
+    "GROUP BY GROUPING SETS ((l.a),(r.b),())"
+  );
+  expect(selectToFetchAllFields(stmt, stmt.from)).toEqual(["a", "id"]);
+  expect(selectToFetchAllFields(stmt, stmt.joins[0].table)).toEqual(["b", "id"]);
+});
+
 test("SELECT しないウィンドウキーも取得フィールドへ含める", () => {
   const stmt = parseSelect(
     "SELECT a.k, ROW_NUMBER() OVER (PARTITION BY a.k ORDER BY a.d DESC, a.n + 1) AS rn FROM APP100 a"

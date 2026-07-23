@@ -31,6 +31,7 @@ import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
+import { normalizeGroupingSpec } from "../core/grouping";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -70,7 +71,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
   if (stmt.from.subtableCode) return "FULL_SCAN";
   if (stmt.joins.some((j) => j.table.subtableCode)) return "FULL_SCAN";
   if (stmt.joins.length > 0) return "FULL_SCAN";
-  if (stmt.groupBy.length > 0) return "FULL_SCAN";
+  if (normalizeGroupingSpec(stmt).type !== "NONE") return "FULL_SCAN";
   if (stmt.distinct) return "FULL_SCAN";
   if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some((c) =>
@@ -574,6 +575,11 @@ function collectRequiredFieldsByTable(
       walkArith(fv.expr, phase);
       return;
     }
+    if (fv.type === "GROUPING_FIELD") {
+      // GROUPING(arg) is virtual state. Its physical source is collected once
+      // from normalized grouping allItems below.
+      return;
+    }
     walkCase(fv.expr, phase);
   };
 
@@ -640,6 +646,10 @@ function collectRequiredFieldsByTable(
       walkArith(k.expr, phase);
       return;
     }
+    if (k.type === "GROUPING_KEY") {
+      // GROUPING(arg) is not an additional physical projection field.
+      return;
+    }
     walkStringFunc(k.expr, phase);
   };
 
@@ -676,6 +686,9 @@ function collectRequiredFieldsByTable(
       case "SCALAR_VALUE_COL":
         walkScalar(col.expr, "select");
         break;
+      case "GROUPING_COL":
+        // allItems is the single physical-field source for GROUPING(arg).
+        break;
       case "SCALAR_SUBQUERY_COL":
         break;
       case "WINDOW_COL":
@@ -690,7 +703,15 @@ function collectRequiredFieldsByTable(
     addFieldRef(join.on.right.field, join.on.right.tableAlias, "where");
   }
   walkWhere(stmt.where, "where");
-  for (const gk of stmt.groupBy) walkGroupByKey(gk);
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "PLAIN") {
+    for (const item of grouping.allItems) walkGroupByKey(item);
+  } else if (grouping.type === "GROUPING_SETS") {
+    for (const item of grouping.allItems) {
+      // B65 items cannot resolve through SELECT aliases: always source-first.
+      addFieldRef(item.field, item.tableAlias, "select");
+    }
+  }
   walkWhere(stmt.having, "having");
   for (const ob of stmt.orderBy) walkOrderByKey(ob.key);
 
@@ -731,6 +752,11 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
     }
     if (col.type === "SCALAR_VALUE_COL") {
       if (col.alias) names.add(col.alias);
+      continue;
+    }
+    if (col.type === "GROUPING_COL") {
+      names.add(col.alias
+        ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`);
       continue;
     }
     if (col.type === "SCALAR_SUBQUERY_COL") {

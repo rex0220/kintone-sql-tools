@@ -31,6 +31,7 @@ import {
   syntheticSemantics,
   type ResolvedFieldSemantics,
 } from "../core/fieldSemantics";
+import { evalGroupingRef } from "./groupingRowMeta";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -203,6 +204,7 @@ function semanticsForLeft(
     });
     if (modes.length > 0 && modes.every((mode) => mode.compareMode === modes[0].compareMode)) return modes[0];
   }
+  if (left.type === "GROUPING_FIELD") return syntheticSemantics("number");
   return syntheticSemantics("string");
 }
 
@@ -324,6 +326,7 @@ function resolveField(
   if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
+  if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
   // エイリアス付き: "a.フィールド"
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`

@@ -60,6 +60,16 @@ import {
 import { compareCanonicalValues, compareCodePointStrings } from "../core/scalarCompare";
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
 import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
+import {
+  B65_MAX_GENERATED_ROWS,
+  normalizeGroupingSpec,
+  type ResolvedGroupingItem,
+  type ResolvedGroupingSpec,
+} from "../core/grouping";
+import {
+  attachGroupingRowMeta,
+  evalGroupingRef,
+} from "./groupingRowMeta";
 
 export { ProcessRow };
 
@@ -275,34 +285,134 @@ export function applyGroupBy(
       }
     }
 
-    // 集計カラムを評価
-    for (const col of columns) {
-      if (col.type === "AGGREGATE") {
-        const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
-        const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
-        outRow[col.alias ?? syntheticKey] = value;
-        // HAVING / ORDER BY は集計を合成名（例: SUM(売上)）のフィールド参照として
-        // 解決するため、alias 付きでも合成名キーを併記する（project で出力からは落ちる）。
-        // これがないと「集計列に alias を付けると HAVING が常に偽になる」
-        // （row["SUM(売上)"] → "" → Number("") = 0 → 0 > 0 = false）
-        if (col.alias) outRow[syntheticKey] = value;
-      } else if (col.type === "ARITH_AGG_COL") {
-        const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
-        outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
-      } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
-        const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
-        const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
-        outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
-      } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr)) {
-        const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
-        const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
-        outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
-      }
-    }
+    materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind);
 
     result.push(outRow);
   }
   return result;
+}
+
+interface GroupingBucketNode {
+  children: Map<string, GroupingBucketNode>;
+  rows?: ProcessRow[];
+}
+
+/**
+ * Evaluate expanded grouping sets in explicit order. A nested Map is used as a
+ * structural tuple key, so embedded NULs or other separators cannot collide.
+ * Only the current set's buckets are retained.
+ */
+export function applyGroupingSets(
+  rows: ProcessRow[],
+  spec: ResolvedGroupingSpec,
+  columns: SelectColumn[],
+  resolveAggSortKind?: AggregateSortKindResolver,
+  limits: { maxGeneratedRows?: number } = {}
+): ProcessRow[] {
+  const result: ProcessRow[] = [];
+  let generatedRows = 0;
+  const countBucket = (): void => {
+    generatedRows++;
+    if (limits.maxGeneratedRows !== undefined && generatedRows > limits.maxGeneratedRows) {
+      throw new Error(
+        `LimitError: B65 generated grouping rows ${generatedRows} exceed limit ${limits.maxGeneratedRows} ` +
+        "(reason=GROUPING_OUTPUT_LIMIT_EXCEEDED)."
+      );
+    }
+  };
+
+  for (const set of spec.sets) {
+    const root: GroupingBucketNode = { children: new Map() };
+    const buckets: ProcessRow[][] = [];
+
+    for (const row of rows) {
+      let node = root;
+      for (const item of set.items) {
+        const value = groupingItemValue(item, row);
+        let child = node.children.get(value);
+        if (!child) {
+          child = { children: new Map() };
+          node.children.set(value, child);
+        }
+        node = child;
+      }
+      if (!node.rows) {
+        countBucket();
+        node.rows = [];
+        buckets.push(node.rows);
+      }
+      node.rows.push(row);
+    }
+
+    // An empty set has one bucket even for empty input. Non-empty sets do not.
+    if (rows.length === 0 && set.items.length === 0) {
+      countBucket();
+      root.rows = [];
+      buckets.push(root.rows);
+    }
+
+    const includedCanonicalIds = new Set(set.items.map((item) => item.canonicalId));
+    for (const groupRows of buckets) {
+      const outRow: ProcessRow = { ...groupRows[0] };
+      const includedValues = new Map<string, string>();
+      for (const item of set.items) {
+        if (!includedValues.has(item.canonicalId)) {
+          includedValues.set(item.canonicalId, groupingItemValue(item, groupRows[0]));
+        }
+      }
+
+      // Conservative Step 2 interpretation: only metadata-resolved runtime keys
+      // are overwritten. No inferred aliases or ambiguous unqualified bridges.
+      for (const item of spec.allItems) {
+        const value = includedValues.get(item.canonicalId) ?? "";
+        outRow[item.directKey] = value;
+        if (item.unqualifiedBridgeKey !== null) {
+          outRow[item.unqualifiedBridgeKey] = value;
+        }
+      }
+
+      materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind);
+      attachGroupingRowMeta(outRow, includedCanonicalIds);
+      result.push(outRow);
+    }
+  }
+
+  return result;
+}
+
+function groupingItemValue(item: ResolvedGroupingItem, row: ProcessRow | undefined): string {
+  if (!row) return "";
+  return row[item.directKey]
+    ?? (item.unqualifiedBridgeKey === null ? undefined : row[item.unqualifiedBridgeKey])
+    ?? "";
+}
+
+function materializeAggregateColumns(
+  outRow: ProcessRow,
+  groupRows: ProcessRow[],
+  columns: SelectColumn[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): void {
+  for (const col of columns) {
+    if (col.type === "AGGREGATE") {
+      const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
+      const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
+      outRow[col.alias ?? syntheticKey] = value;
+      // HAVING / ORDER BY resolve aggregate expressions through the synthetic key.
+      if (col.alias) outRow[syntheticKey] = value;
+    } else if (col.type === "ARITH_AGG_COL") {
+      const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
+      outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
+    } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
+      const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
+      const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
+      outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
+    } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr)) {
+      const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
+      const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
+      outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
+    }
+  }
 }
 
 /** GROUP BY キーをグループ分け用文字列に評価する */
@@ -647,6 +757,7 @@ function sortDecoratedRows(
     if (key.type === "FUNC_KEY") {
       return { semantics: syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(key.expr.func) ? "number" : "string") };
     }
+    if (key.type === "GROUPING_KEY") return { semantics: syntheticSemantics("number") };
     const semantics = fieldSemantics?.get(key.name);
     if (semantics) return { semantics };
     const orderMap = optionOrders?.get(key.name);
@@ -716,6 +827,7 @@ function evalOrderKey(key: OrderByKey, row: ProcessRow, aliasEvaluator?: OrderBy
     case "FIELD_NAME": return aliasEvaluator?.(key.name, row) ?? row[key.name] ?? "";
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
+    case "GROUPING_KEY": return evalGroupingRef(key.ref, row);
   }
 }
 
@@ -772,6 +884,9 @@ export function buildOrderByAliasEvaluator(
       }
       case "SCALAR_SUBQUERY_COL":
         evaluators.set(alias, () => scalarCache?.get(columnIndex) ?? "");
+        break;
+      case "GROUPING_COL":
+        evaluators.set(alias, (row) => evalGroupingRef(column.ref, row));
         break;
       case "VARIABLE_COL":
         break;
@@ -947,6 +1062,14 @@ export function project(
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
+        case "GROUPING_COL": {
+          const key = outputKeys?.[colIdx]
+            ?? col.alias
+            ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
+          out[key] = evalGroupingRef(col.ref, row);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
         case "STRFUNC_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? stringFuncDefaultKey(col.expr);
           if (hasAggregateInStringFuncExpr(col.expr)) {
@@ -1037,6 +1160,8 @@ function computeOutputKey(
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_VALUE_COL":
       return col.alias ?? scalarValueDefaultKey(col.expr);
+    case "GROUPING_COL":
+      return col.alias ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
     case "WINDOW_COL":
@@ -1230,6 +1355,8 @@ export interface FullScanInput {
   tableColumns?: ReadonlyMap<string | null, readonly string[]>;
   /** 実行時だけ補った alias。SELECT * の出力には修飾キーを露出させない。 */
   hiddenQualifiedAliases?: ReadonlySet<string>;
+  /** Metadata-resolved B65 identity. Public execution remains gated until Step 3. */
+  resolvedGroupingSpec?: ResolvedGroupingSpec;
 }
 
 function stripHiddenQualifiedColumns(
@@ -1312,6 +1439,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     sourceColumns,
     tableColumns,
     hiddenQualifiedAliases,
+    resolvedGroupingSpec,
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -1351,8 +1479,25 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
-  if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
-    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "GROUPING_SETS") {
+    if (!resolvedGroupingSpec) {
+      throw new Error("internal error: B65 grouping sets require a metadata-resolved grouping spec.");
+    }
+    rows = applyGroupingSets(
+      rows,
+      resolvedGroupingSpec,
+      stmt.columns,
+      aggregateSortKindResolver,
+      { maxGeneratedRows: B65_MAX_GENERATED_ROWS }
+    );
+  } else if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
+    rows = applyGroupBy(
+      rows,
+      grouping.type === "PLAIN" ? grouping.allItems : [],
+      stmt.columns,
+      aggregateSortKindResolver
+    );
   }
 
   // 5. HAVING
