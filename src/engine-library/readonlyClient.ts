@@ -8,7 +8,7 @@ const WRITE_METHODS = new Set<PropertyKey>([
   "deleteRecords",
 ]);
 
-class ClientOperationError extends Error {
+export class ClientOperationError extends Error {
   readonly cause: unknown;
 
   constructor(cause: unknown) {

@@ -4,6 +4,7 @@ import {
   type SelectResult,
 } from "../execute";
 import { normalizeEngineError } from "./errors";
+import { withCursorScope } from "./cursorScope";
 import { validateQueryOptions } from "./options";
 import { projectReadonlyClient } from "./readonlyClient";
 import {
@@ -45,10 +46,13 @@ export async function runQuery(
   try {
     const invocation = validateQueryOptions(options, "run");
     guardRunQuerySql(sql);
-    const result = await execute(
-      sql,
-      projectReadonlyClient(invocation.client),
-      invocation.executeOptions
+    const result = await withCursorScope(
+      invocation.client,
+      (client) => execute(
+        sql,
+        projectReadonlyClient(client),
+        invocation.executeOptions
+      )
     );
     assertSelectResult(result);
     return {
@@ -70,10 +74,13 @@ export async function explainQuery(
 ): Promise<ExplainResult> {
   try {
     const invocation = validateQueryOptions(options, "explain");
-    const result = await execute(
-      guardExplainQuerySql(sql),
-      projectReadonlyClient(invocation.client),
-      invocation.executeOptions
+    const result = await withCursorScope(
+      invocation.client,
+      (client) => execute(
+        guardExplainQuerySql(sql),
+        projectReadonlyClient(client),
+        invocation.executeOptions
+      )
     );
     assertSelectResult(result);
     const lines = result.rows.map((row) => String(row.plan ?? ""));

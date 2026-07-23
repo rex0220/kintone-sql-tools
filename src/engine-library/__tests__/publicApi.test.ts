@@ -31,9 +31,10 @@ function makeClient(overrides: Partial<ReadonlyKintoneClient> = {}): ReadonlyKin
   };
 }
 
-test("Step 2 runtime entry exposes only the implemented public values", () => {
+test("runtime entry exposes only the implemented public values", () => {
   expect(Object.keys(publicApi).sort()).toEqual([
     "KsqlEngineError",
+    "createReadonlyKintoneClient",
     "explainQuery",
     "runQuery",
     "version",

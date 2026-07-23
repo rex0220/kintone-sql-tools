@@ -1,4 +1,5 @@
 import { KsqlEngineError } from "./errors";
+import { createReadonlyKintoneClient } from "./browserClient";
 import { explainQuery, runQuery } from "./query";
 
 declare const __KSQL_ENGINE_VERSION__: string;
@@ -8,7 +9,12 @@ export const version: string =
     ? __KSQL_ENGINE_VERSION__
     : "0.0.0-dev";
 
-export { explainQuery, KsqlEngineError, runQuery };
+export {
+  createReadonlyKintoneClient,
+  explainQuery,
+  KsqlEngineError,
+  runQuery,
+};
 
 export type {
   CreateReadonlyKintoneClientOptions,
