@@ -47,7 +47,7 @@ const sales = [
   record({ $id: "3", 会社名: "A", 売上: "10", 商談フェーズ: "受注" }),
 ];
 
-test("B65 billboard end-to-end: CASE/discriminator/direct ORDER を engine 経由で評価し total を末尾にする", async () => {
+test("B65-M01: 看板 SQL は CASE/discriminator と会社明細を返し total を末尾にする", async () => {
   const result = await execute(
     "SELECT CASE WHEN GROUPING(会社名)=1 THEN '合計' ELSE 会社名 END AS 会社名, " +
     "GROUPING(会社名) AS grouping_company, COUNT(*) AS 案件数, SUM(売上) AS 売上合計, " +
@@ -79,7 +79,7 @@ test("B65-O02: direct GROUPING key と GROUPING alias は同じ順序を返す",
   expect(direct.rows[direct.rows.length - 1]).toMatchObject({ 会社名: "", g: "1", total: "35" });
 });
 
-test("B65-F03: truncate 上限では GROUPING_SETS reason の FetchAllLimitError となり部分結果を返さない", async () => {
+test("B65-M04/F03: 共通 core は truncate 上限で GROUPING_SETS reason の fail-closed", async () => {
   const records = Array.from({ length: 101 }, (_, index) =>
     record({ $id: String(index + 1), 会社名: `C${index}`, 売上: "1" })
   );
@@ -91,6 +91,58 @@ test("B65-F03: truncate 上限では GROUPING_SETS reason の FetchAllLimitError
   )).rejects.toThrow(
     /小計・総計の正しい結果.*complete input reason: GROUPING_SETS.*onLimit=truncateは使用できません/
   );
+});
+
+test("B65-M02: 2列 ROLLUP は明細・地域小計・総計と正しい GROUPING bit を返す", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 GROUP BY ROLLUP(地域,会社名) " +
+    "ORDER BY GROUPING(地域), 地域, GROUPING(会社名), 会社名",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-m02" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "A", g_region: "0", g_company: "0", total: "10" },
+    { 地域: "東", 会社名: "B", g_region: "0", g_company: "0", total: "20" },
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "A", g_region: "0", g_company: "0", total: "5" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+    { 地域: "", 会社名: "", g_region: "1", g_company: "1", total: "35" },
+  ]);
+});
+
+test("B65-M03: 明示 GROUPING SETS は不要階層を作らず ORDER BY が明示 set 順を上書きする", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 " +
+    "GROUP BY GROUPING SETS ((),(地域),(地域,会社名)) " +
+    "ORDER BY GROUPING(地域), 地域, GROUPING(会社名), total DESC",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-m03" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "B", g_region: "0", g_company: "0", total: "20" },
+    { 地域: "東", 会社名: "A", g_region: "0", g_company: "0", total: "10" },
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "A", g_region: "0", g_company: "0", total: "5" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+    { 地域: "", 会社名: "", g_region: "1", g_company: "1", total: "35" },
+  ]);
+  expect(result.rows).not.toContainEqual(expect.objectContaining({
+    地域: "", 会社名: "A", g_region: "1", g_company: "0",
+  }));
 });
 
 test("B65-F06: materialized CTE 併用経路も物理 APP fetch に完全入力 policy を適用する", async () => {

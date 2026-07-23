@@ -496,6 +496,22 @@ async function main() {
       "ksql_validate did not identify SELECT."
     );
 
+    // B65-M01: built MCP server accepts the billboard ROLLUP/GROUPING shape offline.
+    // Value-level rows are fixed by the mock-client core execute tests.
+    const b65Validated = await client.callTool({
+      name: "ksql_validate",
+      arguments: {
+        sql: "SELECT CASE WHEN GROUPING(会社名)=1 THEN '合計' ELSE 会社名 END AS 会社名, " +
+          "GROUPING(会社名) AS grouping_company, SUM(売上) AS total " +
+          "FROM APP4149 GROUP BY ROLLUP(会社名) ORDER BY GROUPING(会社名), total DESC",
+      },
+    });
+    assert(b65Validated.structuredContent?.ok === true, "B65 billboard validate smoke failed.");
+    assert(
+      b65Validated.structuredContent?.statementType === "SELECT",
+      "B65 billboard validate smoke did not identify SELECT."
+    );
+
     // B44 Phase 16d: offline smoke でも AST acceptance と runtime 前 fail-close を固定する。
     // VALIDATE ONLY/EXPLAIN の全形許可は tools/list の description guard と unit matrix が担う。
     const applySql = "INSERT INTO APP4221 (親) VALUES ('x') APPLY テーブル (APPEND (子) VALUES ('new'))";

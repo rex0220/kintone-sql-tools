@@ -32,6 +32,7 @@
     "mcp:kintone-smoke": "node scripts/mcp-kintone-smoke.mjs",
     "mcp:verify": "npm run build:mcp && npm run mcp:smoke && npm run mcp:pack-smoke",
     "mcpb:verify": "npm run build:mcp && npm run build:mcpb && node scripts/mcpb-verify.mjs",
+    "benchmark:b65": "node --expose-gc scripts/b65-grouping-benchmark.mjs",
     "mcp:inspector": "npx -y @modelcontextprotocol/inspector node dist-mcp/ksql-mcp.js",
     "prepack": "npm run build:cli && npm run build:mcp && npm run build:mcpb",
     "start": "run-p develop upload",
