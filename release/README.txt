@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v3.16.1)
+ksql 配布パッケージ (v3.17.0)
 
-1. ksql-plugin-v3.16.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.17.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.17.0: 小計・総計 (ROLLUP / GROUPING SETS / GROUPING) 対応 (B65)。
+- GROUP BY ROLLUP(会社名) や GROUP BY GROUPING SETS ((...),()) で、明細に加えて
+  小計・総計行を同じ結果に 1 クエリで出せる。GROUPING(会社名) で合計行を判別し
+  (CASE で '合計' ラベル)、ORDER BY GROUPING(会社名) で末尾へ寄せられる。
+  B64 の条件付き集計 SUM(CASE WHEN ...) と併用可。
+- Phase1 は grouping item・GROUPING 引数が物理フィールドのみ。小計/総計は
+  完全入力が必要で onLimit=truncate 不可。安全上限を超えると fail-closed。
+  CUBE / HAVING 内 GROUPING / SELECT DISTINCT 併用は対象外 (Phase2 以降)。
 
 v3.16.1: 言語リファレンスに B64 (集計内 CASE) を反映 (ドキュメントのみ)。
 - MCP の ksql_docs が返す言語リファレンス §4/§8/§9 に、集計関数の引数で
