@@ -1,6 +1,6 @@
 <!-- タイトル: 続・会社別に売上を集計して — kSQL v3.16.0 の「集計内 CASE」対応で AI の集計は1クエリになった -->
 
-前回（[Claude Desktop に「会社別に売上を集計して」と頼むと kSQL MCP は何をするのか](https://github.com/rex0220/kintone-sql-tools)）では、AI が自然言語の依頼からアプリ構造を辿り、売上の在処を突き止めて段階的に集計する過程を追いました。そのとき AI は **「集計関数の引数に `CASE` は書けない」** という当時の制約にぶつかり、`SUM(CASE WHEN …)` を避けて **会社別集計と会社×フェーズ別集計を別々に取得し、後から統合** していました。
+前回（[Claude Desktop に「会社別に売上を集計して」と頼むと kSQL MCP は何をするのか](https://qiita.com/rex0220/items/60f5ee4b22fb2f90dada)）では、AI が自然言語の依頼からアプリ構造を辿り、売上の在処を突き止めて段階的に集計する過程を追いました。そのとき AI は **「集計関数の引数に `CASE` は書けない」** という当時の制約にぶつかり、`SUM(CASE WHEN …)` を避けて **会社別集計と会社×フェーズ別集計を別々に取得し、後から統合** していました。
 
 その制約は **v3.16.0（機能追加 B64）で解消** しました。本記事では、同じ「会社別に売上等の集計を」という依頼が、**条件付き集計 `SUM(CASE WHEN … END)` を使って、会社別表は 1 クエリ、全体サマリを加えても 2 クエリに収まる** ようになったことを、実データで示します。
 
@@ -174,7 +174,7 @@ kSQL MCP は「SQL を書ける AI に kintone を触らせる」ためのツー
 
 関連記事
 
-- 前回（対応前）: Claude Desktop に「会社別に売上を集計して」と頼むと kSQL MCP は何をするのか
+- 前回（対応前）: [Claude Desktop に「会社別に売上を集計して」と頼むと kSQL MCP は何をするのか](https://qiita.com/rex0220/items/60f5ee4b22fb2f90dada)
 - [Claude への MCP kSQL 構文の教え方 — AI は独自 SQL の構文を「発明」する](https://qiita.com/rex0220/items/4d9fc0ed48ebd5b32a7b)
 - [AI に SQL 方言を使わせる検証ループ — 30 シナリオで見つけた「validate では捕まらない誤り」](https://qiita.com/rex0220/items/7f229c87a20f2d45777c)
 - [rex0220 kintone-sql-tools の紹介](https://qiita.com/rex0220/items/b604519f03ad1494f8be)
