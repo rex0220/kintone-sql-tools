@@ -77,7 +77,7 @@ export function buildKsqlDocsIndex(): string {
 export const KSQL_DOCS_INDEX = buildKsqlDocsIndex();
 
 const VALID_KEY_HINT =
-  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r12. "
+  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r13. "
   + "Call ksql_docs without arguments for the full key list.";
 
 export function resolveKsqlDocsSection(section?: string): string {

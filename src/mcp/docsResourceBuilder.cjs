@@ -154,8 +154,8 @@ function buildDocsResourceMap(languageSource, recipesSource) {
   });
   const recipeSections = parseRequiredSections(recipesSource, {
     label: "recipes",
-    count: 12,
-    headingPattern: /^##\s+R([1-9]|1[0-2])\.\s+(.+)$/gm,
+    count: 13,
+    headingPattern: /^##\s+R([1-9]|1\d)\.\s+(.+)$/gm,
     keyFor: (number) => `r${number}`,
     uriBase: recipesUri,
     ignoreBoundary: () => false,
