@@ -7,7 +7,7 @@ import {
 } from "./grouping";
 
 export interface GroupingExplainMetadata {
-  source: "ROLLUP" | "GROUPING_SETS";
+  source: "ROLLUP" | "GROUPING_SETS" | "CUBE";
   expandedSetCount: number;
   groupingItemCount: number;
   setLimit: number;

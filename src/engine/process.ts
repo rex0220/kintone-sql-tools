@@ -642,10 +642,17 @@ export function applyHaving(
  */
 export function applyDistinct(
   rows: ProcessRow[],
-  columns: SelectColumn[]
+  columns: SelectColumn[],
+  scalarCache?: Map<number, string>,
+  resolveFieldType?: FieldTypeResolver,
+  resolveFieldSemantics?: FieldSemanticsResolver
 ): ProcessRow[] {
   if (rows.length === 0) return rows;
-  const keyFor = buildDistinctKeyBuilder(rows, columns);
+  const keyFor = buildDistinctKeyBuilder(rows, columns, {
+    scalarCache,
+    resolveFieldType,
+    resolveFieldSemantics,
+  });
   const seen = new Set<string>();
   return rows.filter((row) => {
     const key = keyFor(row);
@@ -665,16 +672,18 @@ export function applyDistinct(
  */
 function buildDistinctKeyBuilder(
   rows: ProcessRow[],
-  columns: SelectColumn[]
+  columns: SelectColumn[],
+  context: SelectColumnEvaluationContext
 ): (row: ProcessRow) => string {
-  // SELECT * → 全行のキー集合の union（後続行にのみ存在するキーも判定に含める）
+  // SELECT * → 全行のキー集合の union（後続行にのみ存在するキーも判定に含める）。
+  // DISTINCT の既存契約どおり hidden qualified key と _p.* も raw row の一部として扱う。
+  let sortedWildcardKeys: string[] = [];
   if (columns.some((c) => c.type === "WILDCARD")) {
     const allKeys = new Set<string>();
     for (const row of rows) {
       for (const k of Object.keys(row)) allKeys.add(k);
     }
-    const keys = [...allKeys].sort();
-    return (row) => JSON.stringify(keys.map((k) => (row[k] !== undefined ? row[k] : null)));
+    sortedWildcardKeys = [...allKeys].sort();
   }
 
   // _p.* の union（PARENT_WILDCARD がある場合のみ収集）
@@ -689,25 +698,12 @@ function buildDistinctKeyBuilder(
     sortedParentKeys = [...parentKeys].sort();
   }
 
-  return (row) => {
-    const values: Array<string | null> = [];
-    for (const col of columns) {
-      if (col.type === "FIELD") {
-        values.push(row[col.field] ?? "");
-        continue;
-      }
-      if (col.type === "WINDOW_COL") {
-        values.push(row[col.alias] ?? "");
-        continue;
-      }
-      if (col.type === "PARENT_WILDCARD") {
-        for (const k of sortedParentKeys) {
-          values.push(row[k] !== undefined ? row[k] : null);
-        }
-      }
-    }
-    return JSON.stringify(values);
+  const distinctContext: SelectColumnEvaluationContext = {
+    ...context,
+    wildcardKeys: sortedWildcardKeys,
+    parentWildcardKeys: sortedParentKeys,
   };
+  return (row) => JSON.stringify(buildDistinctTuple(columns, row, distinctContext));
 }
 
 // ============================================================
@@ -964,6 +960,126 @@ export function applyLimit(
 // project — SELECT 列プロジェクション
 // ============================================================
 
+export interface SelectColumnEvaluationContext {
+  scalarCache?: Map<number, string>;
+  resolveFieldType?: FieldTypeResolver;
+  resolveFieldSemantics?: FieldSemanticsResolver;
+  /** WILDCARD を固定順で評価する場合のキー。DISTINCT は全行 union を渡す。 */
+  wildcardKeys?: readonly string[];
+  /** PARENT_WILDCARD を固定順で評価する場合の _p.* キー。 */
+  parentWildcardKeys?: readonly string[];
+}
+
+interface ExpandedSelectColumnValue {
+  kind: "EXPANDED";
+  entries: ReadonlyArray<readonly [string, string | null]>;
+}
+
+export type SelectColumnValue = string | ExpandedSelectColumnValue;
+
+/**
+ * SELECT 列1個を project / DISTINCT 共通の意味論で評価する。
+ *
+ * 集計を含む列は applyGroupBy()/applyGroupingSets() が materialize 済みの
+ * alias / synthetic key を読む。ここでは groupRows を受け取らず、再集計しない。
+ */
+export function evaluateSelectColumnValue(
+  column: SelectColumn,
+  row: ProcessRow,
+  columnIndex: number,
+  context: SelectColumnEvaluationContext = {}
+): SelectColumnValue {
+  switch (column.type) {
+    case "VARIABLE_COL":
+      throw new Error(`internal error: unresolved SELECT variable @${column.name}`);
+    case "WILDCARD": {
+      const keys = context.wildcardKeys ?? Object.keys(row);
+      return {
+        kind: "EXPANDED",
+        entries: keys.map((key) => [key, row[key] !== undefined ? row[key] : null] as const),
+      };
+    }
+    case "PARENT_WILDCARD": {
+      const keys = context.parentWildcardKeys
+        ?? Object.keys(row).filter((key) => key.startsWith("_p.")).sort();
+      return {
+        kind: "EXPANDED",
+        entries: keys.map((key) => [key, row[key] !== undefined ? row[key] : null] as const),
+      };
+    }
+    case "FIELD":
+      return resolveFieldRef(row, column.field);
+    case "LITERAL_COL":
+      return column.value;
+    case "AGGREGATE": {
+      const source = aggregateSyntheticName(column.func, column.distinct, column.arg);
+      return row[column.alias ?? source] ?? row[source] ?? "0";
+    }
+    case "ARITH_AGG_COL": {
+      const source = column.alias ?? aggArithDefaultKey(column.expr);
+      return row[source] ?? "0";
+    }
+    case "ARITH_COL":
+      return String(evalArithExpr(column.expr, row));
+    case "CASE_COL":
+      return evalCaseWhen(
+        column.expr,
+        row,
+        context.resolveFieldType,
+        context.resolveFieldSemantics
+      );
+    case "GROUPING_COL":
+      return evalGroupingRef(column.ref, row);
+    case "STRFUNC_COL": {
+      const source = stringFuncDefaultKey(column.expr);
+      return hasAggregateInStringFuncExpr(column.expr)
+        ? row[column.alias ?? source]
+          ?? row[source]
+          ?? evalStringFunc(
+            column.expr,
+            row,
+            context.resolveFieldType,
+            context.resolveFieldSemantics
+          )
+        : evalStringFunc(
+          column.expr,
+          row,
+          context.resolveFieldType,
+          context.resolveFieldSemantics
+        );
+    }
+    case "SCALAR_VALUE_COL": {
+      const source = scalarValueDefaultKey(column.expr);
+      return scalarValueHasAggregate(column.expr)
+        ? row[column.alias ?? source] ?? row[source] ?? ""
+        : String(evalScalarValueExpr(
+          column.expr,
+          row,
+          context.resolveFieldType,
+          context.resolveFieldSemantics
+        ));
+    }
+    case "SCALAR_SUBQUERY_COL":
+      return context.scalarCache?.get(columnIndex) ?? "";
+    case "WINDOW_COL":
+      return row[column.alias] ?? "";
+  }
+}
+
+/** SELECT list を列位置順の DISTINCT tuple へ評価する。 */
+export function buildDistinctTuple(
+  columns: SelectColumn[],
+  row: ProcessRow,
+  context: SelectColumnEvaluationContext = {}
+): readonly unknown[] {
+  return columns.map((column, columnIndex) => {
+    const value = evaluateSelectColumnValue(column, row, columnIndex, context);
+    return typeof value === "string"
+      ? value
+      : value.entries.map(([, entryValue]) => entryValue);
+  });
+}
+
 /**
  * 処理済み行から SELECT 句で指定された列だけを取り出し、
  * AS alias があれば alias 名に変換して返す。
@@ -982,10 +1098,22 @@ export function project(
 ): { rows: ProcessRow[]; columns: string[] } {
   // SELECT * → そのまま全フィールド
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
-    const projected = rows.map((row) => stripHiddenQualifiedColumns(
-      stripParentShortcutColumns(row),
-      hiddenQualifiedAliases
-    ));
+    const projected = rows.map((row) => {
+      const visible = stripHiddenQualifiedColumns(
+        stripParentShortcutColumns(row),
+        hiddenQualifiedAliases
+      );
+      const value = evaluateSelectColumnValue(columns[0], row, 0, {
+        wildcardKeys: Object.keys(visible),
+      });
+      const out: ProcessRow = {};
+      if (typeof value !== "string") {
+        for (const [key, entryValue] of value.entries) {
+          if (entryValue !== null) out[key] = entryValue;
+        }
+      }
+      return out;
+    });
     const cols = projected.length > 0 ? Object.keys(projected[0]) : [...(sourceColumns ?? [])];
     return { rows: projected, columns: cols };
   }
@@ -1006,59 +1134,72 @@ export function project(
 
   const projected = rows.map((row, rowIdx) => {
     const out: ProcessRow = {};
+    const evaluationContext: SelectColumnEvaluationContext = {
+      scalarCache,
+      resolveFieldType,
+      resolveFieldSemantics,
+      wildcardKeys: Object.keys(stripHiddenQualifiedColumns(
+        stripParentShortcutColumns(row),
+        hiddenQualifiedAliases
+      )),
+      parentWildcardKeys: Object.keys(row).filter((key) => key.startsWith("_p.")).sort(),
+    };
     for (const [colIdx, col] of columns.entries()) {
+      const value = evaluateSelectColumnValue(col, row, colIdx, evaluationContext);
       switch (col.type) {
         case "VARIABLE_COL":
-          throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
+          // evaluateSelectColumnValue() throws before reaching this branch.
+          break;
         case "WILDCARD":
-          Object.assign(out, stripHiddenQualifiedColumns(
-            stripParentShortcutColumns(row),
-            hiddenQualifiedAliases
-          ));
+          if (typeof value !== "string") {
+            for (const [key, entryValue] of value.entries) {
+              if (entryValue !== null) out[key] = entryValue;
+            }
+          }
           break;
         case "PARENT_WILDCARD": {
-          const parentKeys = Object.keys(row).filter((k) => k.startsWith("_p.")).sort();
-          for (const key of parentKeys) {
-            out[key] = row[key] ?? "";
-            if (rowIdx === 0) orderedKeys.push(key);
+          if (typeof value !== "string") {
+            for (const [key, entryValue] of value.entries) {
+              if (entryValue !== null) out[key] = entryValue;
+              if (rowIdx === 0) orderedKeys.push(key);
+            }
           }
           break;
         }
         case "FIELD": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? defaultFieldKeys.get(colIdx) ?? col.field;
-          out[key] = resolveFieldRef(row, col.field);
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "LITERAL_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? `'${col.value}'`;
-          out[key] = col.value;
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "AGGREGATE": {
           const srcKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
           const dstKey = outputKeys?.[colIdx] ?? col.alias ?? srcKey;
-          out[dstKey] = row[col.alias ?? srcKey] ?? row[srcKey] ?? "0";
+          out[dstKey] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(dstKey);
           break;
         }
         case "ARITH_AGG_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? aggArithDefaultKey(col.expr);
-          out[key] = row[key] ?? "0";
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "ARITH_COL": {
-          const val = evalArithExpr(col.expr, row);
           const key = outputKeys?.[colIdx] ?? col.alias ?? arithColDefaultKey(col.expr);
-          out[key] = String(val);
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
-          out[key] = evalCaseWhen(col.expr, row, resolveFieldType, resolveFieldSemantics);
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -1066,39 +1207,31 @@ export function project(
           const key = outputKeys?.[colIdx]
             ?? col.alias
             ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
-          out[key] = evalGroupingRef(col.ref, row);
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "STRFUNC_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? stringFuncDefaultKey(col.expr);
-          if (hasAggregateInStringFuncExpr(col.expr)) {
-            const srcKey = stringFuncDefaultKey(col.expr);
-            out[key] = row[col.alias ?? srcKey] ?? row[srcKey] ?? evalStringFunc(col.expr, row, resolveFieldType, resolveFieldSemantics);
-          } else {
-            out[key] = evalStringFunc(col.expr, row, resolveFieldType, resolveFieldSemantics);
-          }
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "SCALAR_VALUE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? scalarValueDefaultKey(col.expr);
-          const srcKey = scalarValueDefaultKey(col.expr);
-          out[key] = scalarValueHasAggregate(col.expr)
-            ? row[col.alias ?? srcKey] ?? row[srcKey] ?? ""
-            : String(evalScalarValueExpr(col.expr, row, resolveFieldType, resolveFieldSemantics));
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "SCALAR_SUBQUERY_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "(subquery)";
-          out[key] = scalarCache?.get(colIdx) ?? "";
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "WINDOW_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias;
-          out[key] = row[col.alias] ?? "";
+          out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
@@ -1508,7 +1641,13 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
 
   // 7. DISTINCT
   if (stmt.distinct) {
-    rows = applyDistinct(rows, stmt.columns);
+    rows = applyDistinct(
+      rows,
+      stmt.columns,
+      scalarCache,
+      fieldTypeResolver,
+      fieldSemanticsResolver
+    );
   }
 
   // 8. ORDER BY

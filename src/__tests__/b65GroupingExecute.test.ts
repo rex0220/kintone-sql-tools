@@ -1,5 +1,7 @@
 import { execute, type KintoneClient, type SelectResult } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import { analyzeBatch } from "../core/batch";
+import { parseSqlStatements } from "../core/sql";
 
 function record(fields: Record<string, string>): KintoneRecord {
   return Object.fromEntries(Object.entries(fields).map(([code, value]) => [code, { value }]));
@@ -79,13 +81,116 @@ test("B65-O02: direct GROUPING key と GROUPING alias は同じ順序を返す",
   expect(direct.rows[direct.rows.length - 1]).toMatchObject({ 会社名: "", g: "1", total: "35" });
 });
 
-test("B65-M04/F03: 共通 core は truncate 上限で GROUPING_SETS reason の fail-closed", async () => {
+test.each([
+  [
+    "B65-H01",
+    1,
+    [{ 会社名: "", g: "1", total: "35" }],
+  ],
+  [
+    "B65-H02",
+    0,
+    [
+      { 会社名: "", g: "0", total: "5" },
+      { 会社名: "A", g: "0", total: "30" },
+    ],
+  ],
+] as const)("%s: HAVING GROUPING(会社名)=%i は membership で階層を絞る", async (
+  _id,
+  groupingValue,
+  expected
+) => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    `FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=${groupingValue} ` +
+    "ORDER BY 会社名",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: `b65-having-${groupingValue}` }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual(expected);
+});
+
+test("B65-H03: 複数列 ROLLUP の membership 組合せで地域小計だけ返す", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 GROUP BY ROLLUP(地域,会社名) " +
+    "HAVING GROUPING(地域)=0 AND GROUPING(会社名)=1 ORDER BY 地域",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h03" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+  ]);
+});
+
+test("B65-H04: HAVING GROUPING は set ごとの集計条件と AND 併用できる", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=1 AND SUM(売上)>0",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h04" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 会社名: "", g: "1", total: "35" }]);
+});
+
+test("B65-H04-OR: HAVING GROUPING は set ごとの集計条件と OR 併用できる", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=1 OR SUM(売上)=30 ORDER BY GROUPING(会社名), 会社名",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h04-or" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 会社名: "A", g: "0", total: "30" },
+    { 会社名: "", g: "1", total: "35" },
+  ]);
+});
+
+test("B65-H05: 空セル detail は total と値が同じ空文字でも membership で区別する", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=0 AND 会社名=''",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h05" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 会社名: "", g: "0", total: "5" }]);
+});
+
+test("B65-H08: analyzeBatch 受理後の実行でも HAVING GROUPING は同じ結果を返す", async () => {
+  const sql =
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=1";
+  expect(() => analyzeBatch(parseSqlStatements(sql))).not.toThrow();
+
+  const result = await execute(
+    sql,
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h08" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ 会社名: "", g: "1", total: "35" }]);
+});
+
+test("B65-M04/F03/H09: HAVING GROUPING で結果を減らしても完全入力 policy は免除しない", async () => {
   const records = Array.from({ length: 101 }, (_, index) =>
     record({ $id: String(index + 1), 会社名: `C${index}`, 売上: "1" })
   );
   await expect(execute(
     "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
-    "FROM APP4149 GROUP BY ROLLUP(会社名)",
+    "FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=1",
     client({ 4149: records }, { 売上: "NUMBER" }),
     { cacheContext: "b65-complete-input", maxRecords: 100, onLimitReached: "truncate" }
   )).rejects.toThrow(
@@ -251,4 +356,198 @@ test("B65-X01: EXPLAIN は candidate guard・完全入力・local order を静�
     expect.stringMatching(/order plan:\s+CANONICAL_LOCAL/),
   ]));
   expect(mock.recordCalls).toBe(0);
+});
+
+test("B65-CU02: CUBE(a,b) は 4 set と各軸の正しい GROUPING bit を返す", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 GROUP BY CUBE(地域,会社名) " +
+    "ORDER BY GROUPING(地域), 地域, GROUPING(会社名), 会社名",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-cu02" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "A", g_region: "0", g_company: "0", total: "10" },
+    { 地域: "東", 会社名: "B", g_region: "0", g_company: "0", total: "20" },
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "A", g_region: "0", g_company: "0", total: "5" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+    { 地域: "", 会社名: "A", g_region: "1", g_company: "0", total: "15" },
+    { 地域: "", 会社名: "B", g_region: "1", g_company: "0", total: "20" },
+    { 地域: "", 会社名: "", g_region: "1", g_company: "1", total: "35" },
+  ]);
+});
+
+test("B65-CU04: CUBE は CASE label・ORDER・HAVING GROUPING・B64 条件付き集計を共用する", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10", 商談フェーズ: "受注" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20", 商談フェーズ: "提案中" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5", 商談フェーズ: "受注" }),
+  ];
+  const result = await execute(
+    "SELECT CASE WHEN GROUPING(地域)=1 THEN '全地域' ELSE 地域 END AS region_label, " +
+    "CASE WHEN GROUPING(会社名)=1 THEN '全社' ELSE 会社名 END AS company_label, " +
+    "GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(CASE WHEN 商談フェーズ='受注' THEN 売上 ELSE 0 END) AS won " +
+    "FROM APP4149 GROUP BY CUBE(地域,会社名) " +
+    "HAVING GROUPING(地域)=0 AND GROUPING(会社名)=1 " +
+    "ORDER BY GROUPING(地域), region_label",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-cu04" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { region_label: "東", company_label: "全社", g_region: "0", g_company: "1", won: "10" },
+    { region_label: "西", company_label: "全社", g_region: "0", g_company: "1", won: "5" },
+  ]);
+});
+
+test("B65-CU05: CUBE(a,a) は同値 set を dedupe しない", async () => {
+  const result = await execute(
+    "SELECT a, GROUPING(a) AS g, COUNT(*) AS n FROM APP1 GROUP BY CUBE(a,a) " +
+    "ORDER BY GROUPING(a), a",
+    client({ 1: [
+      record({ $id: "1", a: "A" }),
+      record({ $id: "2", a: "B" }),
+    ] }),
+    { cacheContext: "b65-cu05" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { a: "A", g: "0", n: "1" },
+    { a: "A", g: "0", n: "1" },
+    { a: "A", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "B", g: "0", n: "1" },
+    { a: "", g: "1", n: "2" },
+  ]);
+});
+
+test("B65-CU03/CU07: 6 field CUBE は実行でき 7 field は static/実行とも fetch-free 拒否する", async () => {
+  const fields = Array.from({ length: 7 }, (_, index) => `f${index + 1}`);
+  const sixSql = `SELECT COUNT(*) AS n FROM APP1 GROUP BY CUBE(${fields.slice(0, 6).join(",")})`;
+  expect(() => analyzeBatch(parseSqlStatements(sixSql))).not.toThrow();
+  const acceptedClient = client(
+    { 1: [record(Object.fromEntries(fields.map((field) => [field, "x"])))] },
+    Object.fromEntries(fields.map((field) => [field, "SINGLE_LINE_TEXT"]))
+  );
+  const accepted = await execute(sixSql, acceptedClient, {
+    cacheContext: "b65-cu03-six",
+  }) as SelectResult;
+  expect(accepted.rows).toHaveLength(64);
+
+  const sevenSql = `SELECT COUNT(*) AS n FROM APP1 GROUP BY CUBE(${fields.join(",")})`;
+  expect(() => analyzeBatch(parseSqlStatements(sevenSql)))
+    .toThrow(/128.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
+  const rejectedClient = client(
+    { 1: [] },
+    Object.fromEntries(fields.map((field) => [field, "SINGLE_LINE_TEXT"]))
+  );
+  await expect(execute(sevenSql, rejectedClient, { cacheContext: "b65-cu03-seven" }))
+    .rejects.toThrow(/128.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
+  expect(rejectedClient.recordCalls).toBe(0);
+});
+
+test("B65-CU08: EXPLAIN は source=CUBE と展開後 set 数・limit を表示する", async () => {
+  const mock = client({ 1: [] }, {
+    a: "SINGLE_LINE_TEXT",
+    b: "SINGLE_LINE_TEXT",
+    x: "NUMBER",
+  });
+  const result = await execute(
+    "EXPLAIN SELECT a, b, SUM(x) FROM APP1 GROUP BY CUBE(a,b)",
+    mock,
+    { cacheContext: "b65-cu08" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.plan)).toEqual(expect.arrayContaining([
+    "  grouping source: CUBE",
+    "  grouping sets: 4 (limit: 64)",
+    "  grouping items: 2 (limit: 16)",
+  ]));
+  expect(mock.recordCalls).toBe(0);
+});
+
+test("B65-SD04: ROLLUP の同一表示値は GROUPING 投影の有無どおり dedupe する", async () => {
+  const mock = client({ 1: [record({ $id: "1", a: "" })] });
+  const withoutGrouping = await execute(
+    "SELECT DISTINCT a FROM APP1 GROUP BY ROLLUP(a)",
+    mock,
+    { cacheContext: "b65-sd04-without-grouping" }
+  ) as SelectResult;
+  const withGrouping = await execute(
+    "SELECT DISTINCT a, GROUPING(a) AS g FROM APP1 GROUP BY ROLLUP(a) ORDER BY g",
+    mock,
+    { cacheContext: "b65-sd04-with-grouping" }
+  ) as SelectResult;
+
+  expect(withoutGrouping.rows).toEqual([{ a: "" }]);
+  expect(withGrouping.rows).toEqual([{ a: "", g: "0" }, { a: "", g: "1" }]);
+});
+
+test("B65-SD05: 重複 GROUPING SETS は非 DISTINCT で保持し DISTINCT で投影行だけ dedupe する", async () => {
+  const mock = client({ 1: [record({ $id: "1", a: "A" })] });
+  const plain = await execute(
+    "SELECT a FROM APP1 GROUP BY GROUPING SETS ((a),(a))",
+    mock,
+    { cacheContext: "b65-sd05-plain" }
+  ) as SelectResult;
+  const distinct = await execute(
+    "SELECT DISTINCT a FROM APP1 GROUP BY GROUPING SETS ((a),(a))",
+    mock,
+    { cacheContext: "b65-sd05-distinct" }
+  ) as SelectResult;
+
+  expect(plain.rows).toEqual([{ a: "A" }, { a: "A" }]);
+  expect(distinct.rows).toEqual([{ a: "A" }]);
+});
+
+test("B65-SD06: CASE が同じ表示ラベルへ畳み込む grouping 行を DISTINCT で dedupe する", async () => {
+  const result = await execute(
+    "SELECT DISTINCT CASE WHEN GROUPING(a)=1 THEN 'same' ELSE 'same' END AS label " +
+    "FROM APP1 GROUP BY ROLLUP(a)",
+    client({ 1: [record({ $id: "1", a: "A" })] }),
+    { cacheContext: "b65-sd06" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ label: "same" }]);
+});
+
+test("B65-SD07: CUBE + HAVING GROUPING + DISTINCT は重複 set 出力を正しく dedupe する", async () => {
+  const result = await execute(
+    "SELECT DISTINCT a, GROUPING(a) AS g FROM APP1 GROUP BY CUBE(a,a) " +
+    "HAVING GROUPING(a)=0 ORDER BY a",
+    client({ 1: [
+      record({ $id: "1", a: "A" }),
+      record({ $id: "2", a: "B" }),
+    ] }),
+    { cacheContext: "b65-sd07" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ a: "A", g: "0" }, { a: "B", g: "0" }]);
+});
+
+test("B65-SD08: aggregate/string/scalar DISTINCT は set ごとの materialize 値を読む", async () => {
+  const result = await execute(
+    "SELECT DISTINCT SUM(x) AS total, CONCAT(SUM(x),'x') AS text_total, " +
+    "FORMAT(SUM(x),'0')||'y' AS scalar_total " +
+    "FROM APP1 GROUP BY ROLLUP(a) ORDER BY total",
+    client({ 1: [
+      record({ $id: "1", a: "A", x: "1" }),
+      record({ $id: "2", a: "B", x: "2" }),
+    ] }, { x: "NUMBER" }),
+    { cacheContext: "b65-sd08" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { total: "1", text_total: "1x", scalar_total: "1y" },
+    { total: "2", text_total: "2x", scalar_total: "2y" },
+    { total: "3", text_total: "3x", scalar_total: "3y" },
+  ]);
 });

@@ -65,6 +65,15 @@ describe("B65 Phase1 Step 4 candidate guards", () => {
     )).toThrow(/65.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
   });
 
+  test("B65-CU03: CUBE は 64 set まで展開し 128 set は展開前 guard で拒否する", () => {
+    const fields = (count: number) =>
+      Array.from({ length: count }, (_, index) => `f${index + 1}`).join(",");
+    const accepted = parse(`SELECT COUNT(*) FROM APP1 GROUP BY CUBE(${fields(6)})`);
+    expect(accepted.grouping?.sets).toHaveLength(B65_MAX_GROUPING_SETS);
+    expect(() => parse(`SELECT COUNT(*) FROM APP1 GROUP BY CUBE(${fields(7)})`))
+      .toThrow(/128.*64.*GROUPING_SET_LIMIT_EXCEEDED/);
+  });
+
   test("B65-G01/G03: 50,000 rows は成功し、50,001 行目を作る前に専用 reason で失敗する", () => {
     const stmt = parse("SELECT a, COUNT(*) AS n FROM APP1 GROUP BY GROUPING SETS ((a))");
     const spec = resolveGroupingSpec(stmt, resolve)!;
@@ -92,10 +101,10 @@ describe("B65 Phase1 Step 4 candidate guards", () => {
     );
   });
 
-  test("B65-G03: runFullScan は HAVING/LIMIT より前に generated-row guard を適用する", () => {
+  test("B65-G03/H10: runFullScan は HAVING GROUPING/LIMIT より前に generated-row guard を適用する", () => {
     const stmt = parse(
       "SELECT a, COUNT(*) AS n FROM APP1 GROUP BY GROUPING SETS ((a)) " +
-      "HAVING COUNT(*) < 0 LIMIT 1"
+      "HAVING GROUPING(a)=1 AND COUNT(*) < 0 LIMIT 1"
     );
     const spec = resolveGroupingSpec(stmt, resolve)!;
     const records = Array.from(

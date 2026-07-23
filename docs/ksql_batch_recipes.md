@@ -561,11 +561,12 @@ ORDER BY GROUPING(会社名), 売上合計 DESC
 - **`ORDER BY GROUPING(会社名), 売上合計 DESC`** で、明細（`0`）を先に・総計（`1`）を末尾に置けます。
 - **階層小計**は複数列 ROLLUP で: `GROUP BY ROLLUP(地域, 会社名)` は「地域×会社の明細 → 地域小計 → 総計」を出します（`GROUPING(地域)` / `GROUPING(会社名)` で各段を判別）。出す階層を選びたいときは `GROUP BY GROUPING SETS ((地域, 会社名), (地域), ())` と明示します。
 
-**注意（Phase1・v3.17.0）**
+**注意（v3.18.0 時点）**
 
 - grouping item と `GROUPING()` の引数は**物理フィールドのみ**（式・SELECT alias・一時テーブル/CTE 実体化列は不可）。
 - 小計・総計は**全入力に依存**するため常に完全入力が必要です。`onLimit=truncate` は使えず、取得上限に達すると**部分結果を返さずエラー**（fail-closed）。展開後の set 数・item 数・生成行数にも安全上限があります。読み取り専用なので `ksql_query` で実行できます。
-- **未対応（Phase2 以降）**: `CUBE`、`HAVING` 内 `GROUPING()`、`SELECT DISTINCT` との併用、`KORDER BY`・ウィンドウ関数との併用。詳細は言語リファレンス [§8](ksql_language_reference.md#8-group-by--集計関数)。
+- **v3.18.0 で対応**: `CUBE(a, b, ...)`（全 `2^n` 組合せ＝各軸の小計と総計。`2^n` が上限超なら取得前に拒否）、`HAVING` 内 `GROUPING()`（`= 1` で総計・小計だけ、`= 0` で明細だけ）、`SELECT DISTINCT` との併用（`GROUPING()` を投影しないと表示値一致行は 1 行に集約）。
+- **未対応**: `KORDER BY`・ウィンドウ関数との併用、`GROUPING()` の式引数・複数引数・`GROUPING_ID`、grouping-set の入れ子・通常 item との混在。詳細は言語リファレンス [§8](ksql_language_reference.md#8-group-by--集計関数)。
 
 ## 適用限界（スケール指針）
 

@@ -8952,7 +8952,13 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
   if (grouping.type === "PLAIN")
     r.push("GROUP BY あり");
   else if (grouping.type === "GROUPING_SETS")
-    r.push(grouping.source === "ROLLUP" ? "ROLLUP あり" : "GROUPING SETS あり");
+    r.push(
+      grouping.source === "ROLLUP"
+        ? "ROLLUP あり"
+        : grouping.source === "CUBE"
+          ? "CUBE あり"
+          : "GROUPING SETS あり"
+    );
   if (stmt.distinct)
     r.push("DISTINCT あり");
   if (stmt.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"))

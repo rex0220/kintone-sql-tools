@@ -161,12 +161,17 @@ test("B65-A04: HAVING は全 set 縦結合後に各行へ作用し未選択の�
   expect(direct.rows).toEqual([]);
 });
 
-test("B65-A05: HAVING GROUPING は records fetch 前の明示拒否を維持する", async () => {
-  const mock = client(aggregateRows, { 金額: "NUMBER" });
-  await expect(execute(
-    "SELECT 地域, SUM(金額) FROM APP1 GROUP BY ROLLUP(地域) HAVING GROUPING(地域)=0",
-    mock,
+test("B65-A05/H06: HAVING GROUPING は B64 条件付き集計・B56 統計の set 結果と併用する", async () => {
+  const result = await execute(
+    "SELECT 地域, GROUPING(地域) AS g, " +
+    "SUM(CASE WHEN 状態='受注' THEN 金額 ELSE 0 END) AS 受注額, " +
+    "MEDIAN(金額) AS med FROM APP1 WHERE 地域!='除外' GROUP BY ROLLUP(地域) " +
+    "HAVING GROUPING(地域)=1 AND 受注額>0 AND med>0",
+    client(aggregateRows, { 金額: "NUMBER" }),
     { cacheContext: "b65-a05" }
-  )).rejects.toThrow(/GROUPING\(\).*only allowed in SELECT/);
-  expect(mock.recordCalls).toBe(0);
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "", g: "1", 受注額: "21", med: "6.5" },
+  ]);
 });

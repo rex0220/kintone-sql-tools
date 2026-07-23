@@ -11,6 +11,7 @@
 
 import { Token, TokenKind, KEYWORDS } from "../lexer/tokens";
 import { makeNumberLiteral, numberLiteralText } from "../types/ast";
+import { expandCubeGroupingSets } from "../core/grouping";
 import type {
   Statement,
   SelectStatement,
@@ -289,14 +290,16 @@ export class ParseError extends Error {
 
 export interface ParserCapabilities { import?: boolean; }
 
+type GroupingFieldContext = "FORBIDDEN" | "SELECT_CASE" | "HAVING";
+
 export class Parser {
   private allowUnaryPlusNumber = false;
   private scalarAllowsAggregateArgs = true;
   private scalarAllowsCase = true;
   private pos = 0;
   private insideAggregateArg = 0;
-  /** GROUPING(field) is only legal while parsing a SELECT CASE condition. */
-  private groupingFieldAllowedDepth = 0;
+  /** GROUPING(field) is limited to the explicitly selected query context. */
+  private groupingFieldContext: GroupingFieldContext = "FORBIDDEN";
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
@@ -1065,7 +1068,7 @@ export class Parser {
       } else if (this.isRollupStart()) {
         grouping = this.parseRollupClause();
       } else if (this.isCubeStart()) {
-        throw new ParseError("B65: CUBE is not supported in Phase1.", this.peek());
+        grouping = this.parseCubeClause();
       } else {
         groupBy = this.parseGroupByKeys();
       }
@@ -1073,7 +1076,7 @@ export class Parser {
         throw new ParseError("B65: ordinary GROUP BY items cannot be mixed with grouping elements.", this.peek());
       }
       if (this.consume(TokenKind.HAVING)) {
-        having = this.parseWhereExpr();
+        having = this.parseWhereExpr("HAVING");
       }
     }
 
@@ -1724,12 +1727,7 @@ export class Parser {
 
   private parseCaseCondition(allowGroupingCondition: boolean): WhereExpr {
     if (!allowGroupingCondition) return this.parseWhereExpr();
-    this.groupingFieldAllowedDepth++;
-    try {
-      return this.parseWhereExpr();
-    } finally {
-      this.groupingFieldAllowedDepth--;
-    }
+    return this.parseWhereExpr("SELECT_CASE");
   }
 
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
@@ -2111,8 +2109,16 @@ export class Parser {
   // WHERE 式（再帰下降・優先順位付き）
   // ----------------------------------------------------------
 
-  private parseWhereExpr(): WhereExpr {
-    return this.parseOrExpr();
+  private parseWhereExpr(
+    groupingFieldContext: GroupingFieldContext = this.groupingFieldContext
+  ): WhereExpr {
+    const previousContext = this.groupingFieldContext;
+    this.groupingFieldContext = groupingFieldContext;
+    try {
+      return this.parseOrExpr();
+    } finally {
+      this.groupingFieldContext = previousContext;
+    }
   }
 
   // OR（最低優先度）
@@ -2302,9 +2308,9 @@ export class Parser {
       throw new ParseError("B65: GROUPING_ID is not supported in Phase1.", this.peek());
     }
     if (this.isGroupingFunctionStart()) {
-      if (this.groupingFieldAllowedDepth === 0) {
+      if (this.groupingFieldContext === "FORBIDDEN" || this.insideAggregateArg > 0) {
         throw new ParseError(
-          "B65: GROUPING() is only allowed in SELECT, SELECT CASE conditions, and direct ORDER BY.",
+          "B65: GROUPING() is only allowed in SELECT, SELECT CASE conditions, HAVING, and direct ORDER BY.",
           this.peek()
         );
       }
@@ -2623,6 +2629,26 @@ export class Parser {
     return {
       type: "GROUPING_SETS",
       source: "ROLLUP",
+      allItems: this.groupingAllItems(sets),
+      sets,
+    };
+  }
+
+  private parseCubeClause(): GroupingSpec {
+    this.advance(); // CUBE
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("B65: CUBE requires at least one field.", this.peek());
+    }
+    const items: GroupingFieldItem[] = [];
+    do {
+      items.push(this.parseGroupingFieldItem());
+    } while (this.consume(TokenKind.COMMA));
+    this.expect(TokenKind.RPAREN);
+    const sets = expandCubeGroupingSets(items);
+    return {
+      type: "GROUPING_SETS",
+      source: "CUBE",
       allItems: this.groupingAllItems(sets),
       sets,
     };

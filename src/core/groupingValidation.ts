@@ -78,6 +78,21 @@ function collectGroupingRefs(node: unknown, out: GroupingRef[]): void {
   Object.values(value).forEach((item) => collectGroupingRefs(item, out));
 }
 
+function collectAggregateArgumentGroupingRefs(node: unknown, out: GroupingRef[]): void {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
+    return;
+  }
+  const value = node as Record<string, unknown>;
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+  if (value["type"] === "AGGREGATE" || value["type"] === "AGG_REF") {
+    collectGroupingRefs(value["arg"], out);
+    return;
+  }
+  Object.values(value).forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
+}
+
 function collectNonAggregateFieldRefs(node: unknown, out: FieldRef[]): void {
   if (node === null || typeof node !== "object") return;
   if (Array.isArray(node)) {
@@ -181,16 +196,19 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
   for (const column of stmt.columns) {
     if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
   }
+  collectGroupingRefs(stmt.having, groupingRefs);
   collectGroupingRefs(stmt.orderBy, groupingRefs);
   const forbiddenGroupingRefs: GroupingRef[] = [];
   collectGroupingRefs(stmt.where, forbiddenGroupingRefs);
-  collectGroupingRefs(stmt.having, forbiddenGroupingRefs);
+  collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
   for (const column of stmt.columns) {
     if (column.type === "WINDOW_COL") collectGroupingRefs(column, forbiddenGroupingRefs);
   }
   if (forbiddenGroupingRefs.length > 0) {
     throw new Error(
-      "ArgumentError: B65 GROUPING() is not allowed in WHERE, HAVING, JOIN, window, aggregate arguments, or DML expressions in Phase1."
+      "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
     );
   }
 
@@ -201,9 +219,6 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
     return;
   }
 
-  if (stmt.distinct) {
-    throw new Error("ArgumentError: B65 SELECT DISTINCT is not supported in Phase1.");
-  }
   if (stmt.orderMode === "KINTONE_NATIVE") {
     throw new Error("ArgumentError: B65 KORDER BY is not supported in Phase1.");
   }
@@ -233,6 +248,7 @@ export function validateGroupingPlanning(
   for (const column of stmt.columns) {
     if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
   }
+  collectGroupingRefs(stmt.having, groupingRefs);
   collectGroupingRefs(stmt.orderBy, groupingRefs);
 
   if (normalized.type !== "GROUPING_SETS") {
