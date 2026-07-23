@@ -20,11 +20,15 @@
    - `ksql-engine-3.19.0-smoke-x.umd.js`
    - `ksql-engine-4.0.0-smoke-y.umd.js`
 
-3. リポジトリルートをHTTP配信する。
+3. リポジトリルートをHTTP配信する（**依存ゼロの Node 静的サーバ**。Windows で python が未導入／ストア版スタブでも動く）。
 
    ```powershell
-   python -m http.server 8765 --directory .
+   node scripts/serve-static.mjs 8765
    ```
+
+   起動すると配信ルートと fixture URL が表示される。停止は Ctrl+C。
+   （python が使える環境なら `python -m http.server 8765 --directory .` でも可。ただし
+   Windows のストア版 python はバージョンも返さず起動しないため、上の Node 版を推奨する。）
 
 4. 対象ブラウザで次を開く。
 
