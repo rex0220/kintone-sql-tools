@@ -23,7 +23,7 @@ describe("B50 embedded documentation resources", () => {
 
     expect(Object.keys(docs.languageReference.sections)).toHaveLength(26);
     expect(Object.keys(docs.recipes.sections)).toEqual(
-      Array.from({ length: 12 }, (_, index) => `r${index + 1}`)
+      Array.from({ length: 13 }, (_, index) => `r${index + 1}`)
     );
     expect(docs.languageReference.sections["02-select"].text).toContain("## 2. SELECT");
     expect(docs.languageReference.sections["10-order-by"].text).toContain("## 10.1 ウィンドウ関数");
@@ -63,8 +63,8 @@ describe("B50 embedded documentation resources", () => {
     for (const values of Object.values(KSQL_FUNCTION_CATALOG)) {
       expect(Object.isFrozen(values)).toBe(true);
     }
-    expect(KSQL_DOCS_SECTION_KEYS).toHaveLength(40);
-    expect(new Set(KSQL_DOCS_SECTION_KEYS).size).toBe(40);
+    expect(KSQL_DOCS_SECTION_KEYS).toHaveLength(41);
+    expect(new Set(KSQL_DOCS_SECTION_KEYS).size).toBe(41);
     expect(KSQL_DOCS_SECTION_KEYS).toEqual([
       "language-reference",
       ...LANGUAGE_SECTION_KEYS.map((key) => `language-reference/${key}`),
@@ -118,9 +118,9 @@ describe("B50 embedded documentation resources", () => {
         ref: { type: "ref/resource", uri: "ksql://recipes/{recipe}" },
         argument: { name: "recipe", value: "r1" },
       });
-      expect(recipeCompletion.completion.values).toEqual(["r1", "r10", "r11", "r12"]);
+      expect(recipeCompletion.completion.values).toEqual(["r1", "r10", "r11", "r12", "r13"]);
       expect(recipeCompletion.completion.values.map((key) => `recipes/${key}`)).toEqual(
-        KSQL_DOCS_SECTION_KEYS.filter((key) => /^recipes\/r1(?:0|1|2)?$/.test(key))
+        KSQL_DOCS_SECTION_KEYS.filter((key) => /^recipes\/r1(?:0|1|2|3)?$/.test(key))
       );
 
       const index = await client.readResource({ uri: "ksql://language-reference" });

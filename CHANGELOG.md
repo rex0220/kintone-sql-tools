@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.17.1（2026-07-23）
+
+### ドキュメント（B65 の解説・レシピを反映）
+
+- バッチレシピ集に **R13「明細＋小計・総計を 1 クエリで作る（`ROLLUP` / `GROUPING`）」** を追加した。会社別明細に総計行を足す看板クエリ（`GROUP BY ROLLUP` ＋ `GROUPING()` ＋ B64 条件付き集計）と、複数列 ROLLUP の階層小計・`GROUPING SETS` の選択的階層・Phase1 制約を掲載した。
+- 言語リファレンス §8/§10 の B65 例のアプリを `APP4149` から汎用の `APP100` に統一した（複数列 ROLLUP・`GROUPING SETS` の例が実在アプリに存在しないフィールドを参照していた問題の解消）。
+- MCP の `ksql_docs` が返すレシピ集・言語リファレンスにこれらが反映される。SQL / パーサ / エンジンの挙動は v3.17.0 から変更していない（ドキュメントのみ・SemVer=patch）。
+
 ## v3.17.0（2026-07-23）
 
 ### 機能追加（B65 小計・総計 ROLLUP / GROUPING SETS / GROUPING）

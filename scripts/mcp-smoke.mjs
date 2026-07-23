@@ -440,7 +440,7 @@ async function main() {
       ok: false,
       error: {
         code: "ArgumentError",
-        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r12. Call ksql_docs without arguments for the full key list.",
+        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r13. Call ksql_docs without arguments for the full key list.",
       },
     };
     assert(docsUnknown.isError === true, "Unknown ksql_docs key must be an application error.");

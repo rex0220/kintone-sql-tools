@@ -1,9 +1,14 @@
-ksql 配布パッケージ (v3.17.0)
+ksql 配布パッケージ (v3.17.1)
 
-1. ksql-plugin-v3.17.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.17.1.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.17.1: B65 の解説・レシピをドキュメントへ反映 (ドキュメントのみ)。
+- バッチレシピ集に R13「明細＋小計・総計を 1 クエリで作る (ROLLUP / GROUPING)」を追加。
+- 言語リファレンス §8/§10 の B65 例を APP4149 から汎用の APP100 に統一。
+- MCP の ksql_docs が返すレシピ・言語リファレンスに反映。SQL 挙動は v3.17.0 から不変。
 
 v3.17.0: 小計・総計 (ROLLUP / GROUPING SETS / GROUPING) 対応 (B65)。
 - GROUP BY ROLLUP(会社名) や GROUP BY GROUPING SETS ((...),()) で、明細に加えて
