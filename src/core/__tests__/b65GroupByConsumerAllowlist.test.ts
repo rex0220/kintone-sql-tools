@@ -29,6 +29,6 @@ test("B65 consumer allowlist: production の直接 .groupBy 参照を AST 境界
     "src/core/grouping.ts:44",
     "src/core/grouping.ts:48",
     "src/core/grouping.ts:50",
-    "src/parser/parser.ts:688",
+    "src/parser/parser.ts:690",
   ].sort());
 });

@@ -1,5 +1,7 @@
 import { execute, type KintoneClient, type SelectResult } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import { analyzeBatch } from "../core/batch";
+import { parseSqlStatements } from "../core/sql";
 
 function record(fields: Record<string, string>): KintoneRecord {
   return Object.fromEntries(Object.entries(fields).map(([code, value]) => [code, { value }]));
@@ -79,13 +81,116 @@ test("B65-O02: direct GROUPING key と GROUPING alias は同じ順序を返す",
   expect(direct.rows[direct.rows.length - 1]).toMatchObject({ 会社名: "", g: "1", total: "35" });
 });
 
-test("B65-M04/F03: 共通 core は truncate 上限で GROUPING_SETS reason の fail-closed", async () => {
+test.each([
+  [
+    "B65-H01",
+    1,
+    [{ 会社名: "", g: "1", total: "35" }],
+  ],
+  [
+    "B65-H02",
+    0,
+    [
+      { 会社名: "", g: "0", total: "5" },
+      { 会社名: "A", g: "0", total: "30" },
+    ],
+  ],
+] as const)("%s: HAVING GROUPING(会社名)=%i は membership で階層を絞る", async (
+  _id,
+  groupingValue,
+  expected
+) => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    `FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=${groupingValue} ` +
+    "ORDER BY 会社名",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: `b65-having-${groupingValue}` }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual(expected);
+});
+
+test("B65-H03: 複数列 ROLLUP の membership 組合せで地域小計だけ返す", async () => {
+  const rows = [
+    record({ $id: "1", 地域: "東", 会社名: "A", 売上: "10" }),
+    record({ $id: "2", 地域: "東", 会社名: "B", 売上: "20" }),
+    record({ $id: "3", 地域: "西", 会社名: "A", 売上: "5" }),
+  ];
+  const result = await execute(
+    "SELECT 地域, 会社名, GROUPING(地域) AS g_region, GROUPING(会社名) AS g_company, " +
+    "SUM(売上) AS total FROM APP4149 GROUP BY ROLLUP(地域,会社名) " +
+    "HAVING GROUPING(地域)=0 AND GROUPING(会社名)=1 ORDER BY 地域",
+    client({ 4149: rows }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h03" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 地域: "東", 会社名: "", g_region: "0", g_company: "1", total: "30" },
+    { 地域: "西", 会社名: "", g_region: "0", g_company: "1", total: "5" },
+  ]);
+});
+
+test("B65-H04: HAVING GROUPING は set ごとの集計条件と AND 併用できる", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=1 AND SUM(売上)>0",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h04" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 会社名: "", g: "1", total: "35" }]);
+});
+
+test("B65-H04-OR: HAVING GROUPING は set ごとの集計条件と OR 併用できる", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=1 OR SUM(売上)=30 ORDER BY GROUPING(会社名), 会社名",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h04-or" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 会社名: "A", g: "0", total: "30" },
+    { 会社名: "", g: "1", total: "35" },
+  ]);
+});
+
+test("B65-H05: 空セル detail は total と値が同じ空文字でも membership で区別する", async () => {
+  const result = await execute(
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=0 AND 会社名=''",
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h05" }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 会社名: "", g: "0", total: "5" }]);
+});
+
+test("B65-H08: analyzeBatch 受理後の実行でも HAVING GROUPING は同じ結果を返す", async () => {
+  const sql =
+    "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
+    "FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=1";
+  expect(() => analyzeBatch(parseSqlStatements(sql))).not.toThrow();
+
+  const result = await execute(
+    sql,
+    client({ 4149: sales }, { 売上: "NUMBER" }),
+    { cacheContext: "b65-h08" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ 会社名: "", g: "1", total: "35" }]);
+});
+
+test("B65-M04/F03/H09: HAVING GROUPING で結果を減らしても完全入力 policy は免除しない", async () => {
   const records = Array.from({ length: 101 }, (_, index) =>
     record({ $id: String(index + 1), 会社名: `C${index}`, 売上: "1" })
   );
   await expect(execute(
     "SELECT 会社名, GROUPING(会社名) AS g, SUM(売上) AS total " +
-    "FROM APP4149 GROUP BY ROLLUP(会社名)",
+    "FROM APP4149 GROUP BY ROLLUP(会社名) HAVING GROUPING(会社名)=1",
     client({ 4149: records }, { 売上: "NUMBER" }),
     { cacheContext: "b65-complete-input", maxRecords: 100, onLimitReached: "truncate" }
   )).rejects.toThrow(

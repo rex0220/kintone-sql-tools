@@ -45,6 +45,21 @@ describe("B65 Phase1 Step 1 parser", () => {
     )).toMatchSnapshot();
   });
 
+  test("B65-H01: HAVING GROUPING は dedicated field-value node として受理する", () => {
+    const stmt = parse(
+      "SELECT a, SUM(x) AS total FROM APP1 GROUP BY ROLLUP(a) HAVING GROUPING(a)=1"
+    );
+    expect(stmt.having).toMatchObject({
+      type: "BINARY",
+      left: {
+        type: "GROUPING_FIELD",
+        ref: { type: "GROUPING_REF", field: { type: "FIELD", field: "a" } },
+      },
+      op: "=",
+      right: { type: "NUMBER", value: 1 },
+    });
+  });
+
   test.each([
     ["CUBE", "SELECT a FROM APP1 GROUP BY CUBE(a)"],
     ["ROLLUP expression", "SELECT a FROM APP1 GROUP BY ROLLUP(a||b)"],
@@ -57,10 +72,19 @@ describe("B65 Phase1 Step 1 parser", () => {
     ["GROUPING expression", "SELECT GROUPING(a||b) FROM APP1 GROUP BY ROLLUP(a,b)"],
     ["GROUPING_ID", "SELECT GROUPING_ID(a) FROM APP1 GROUP BY ROLLUP(a)"],
     ["WHERE GROUPING", "SELECT a FROM APP1 WHERE GROUPING(a)=0 GROUP BY ROLLUP(a)"],
-    ["HAVING GROUPING", "SELECT a FROM APP1 GROUP BY ROLLUP(a) HAVING GROUPING(a)=0"],
     ["window ORDER GROUPING", "SELECT ROW_NUMBER() OVER (ORDER BY GROUPING(a)) AS n FROM APP1"],
+    ["window PARTITION GROUPING", "SELECT ROW_NUMBER() OVER (PARTITION BY GROUPING(a)) AS n FROM APP1"],
     ["window with B65", "SELECT ROW_NUMBER() OVER (ORDER BY a) AS n FROM APP1 GROUP BY ROLLUP(a)"],
     ["aggregate argument", "SELECT SUM(GROUPING(a)) FROM APP1 GROUP BY ROLLUP(a)"],
+    [
+      "HAVING aggregate argument",
+      "SELECT a, SUM(x) FROM APP1 GROUP BY ROLLUP(a) HAVING SUM(GROUPING(a))>0",
+    ],
+    [
+      "HAVING GROUPING arithmetic",
+      "SELECT a, SUM(x) FROM APP1 GROUP BY ROLLUP(a) HAVING GROUPING(a)+1>0",
+    ],
+    ["JOIN ON GROUPING", "SELECT a FROM APP1 JOIN APP2 b ON GROUPING(a)=0"],
     ["DML expression", "UPDATE APP1 SET x=GROUPING(a) WHERE $id=1"],
     ["KORDER", "SELECT a FROM APP1 GROUP BY ROLLUP(a) KORDER BY a LIMIT 1"],
     ["GROUP BY DISTINCT", "SELECT a FROM APP1 GROUP BY DISTINCT ROLLUP(a)"],

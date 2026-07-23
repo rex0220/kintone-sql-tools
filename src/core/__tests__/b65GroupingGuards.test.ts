@@ -92,10 +92,10 @@ describe("B65 Phase1 Step 4 candidate guards", () => {
     );
   });
 
-  test("B65-G03: runFullScan は HAVING/LIMIT より前に generated-row guard を適用する", () => {
+  test("B65-G03/H10: runFullScan は HAVING GROUPING/LIMIT より前に generated-row guard を適用する", () => {
     const stmt = parse(
       "SELECT a, COUNT(*) AS n FROM APP1 GROUP BY GROUPING SETS ((a)) " +
-      "HAVING COUNT(*) < 0 LIMIT 1"
+      "HAVING GROUPING(a)=1 AND COUNT(*) < 0 LIMIT 1"
     );
     const spec = resolveGroupingSpec(stmt, resolve)!;
     const records = Array.from(

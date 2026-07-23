@@ -107,7 +107,7 @@ test("B65-SV06: forbidden context の GROUPING() も static/planning 共通で�
     field: { type: "FIELD", tableAlias: null, field: "会社名" },
   } as unknown as SelectStatement["where"];
   const message =
-    "ArgumentError: B65 GROUPING() is not allowed in WHERE, HAVING, JOIN, window, aggregate arguments, or DML expressions in Phase1.";
+    "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions.";
 
   expect(() => analyzeBatch([stmt])).toThrow(message);
   expect(() => validateGroupingStatic(stmt)).toThrow(message);
@@ -169,4 +169,26 @@ test("B65-SV09: metadata 依存の membership 拒否は static では前倒し�
   expect(() => validateGroupingPlanning(stmt, resolve)).toThrow(
     "reason=B65_GROUPING_ARG_NOT_ITEM"
   );
+});
+
+test("B65-H08: HAVING GROUPING は analyzeBatch/static/planning で一貫して受理する", () => {
+  const stmt = parseSelect(
+    "SELECT 会社名, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名) " +
+    "HAVING GROUPING(会社名)=1"
+  );
+
+  expect(() => analyzeBatch([stmt])).not.toThrow();
+  expect(() => validateGroupingStatic(stmt)).not.toThrow();
+  expect(() => validateGroupingPlanning(stmt, resolve)).not.toThrow();
+});
+
+test("B65-H11: 通常 GROUP BY の HAVING GROUPING は static/planning とも B65 必須で拒否する", () => {
+  const stmt = parseSelect(
+    "SELECT 会社名, SUM(売上) FROM APP1 GROUP BY 会社名 HAVING GROUPING(会社名)=0"
+  );
+  const message = "ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.";
+
+  expect(() => analyzeBatch([stmt])).toThrow(message);
+  expect(() => validateGroupingStatic(stmt)).toThrow(message);
+  expect(() => validateGroupingPlanning(stmt, resolve)).toThrow(message);
 });

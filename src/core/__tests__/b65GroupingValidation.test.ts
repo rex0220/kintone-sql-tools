@@ -92,6 +92,15 @@ describe("B65 Phase1 Step 1 planning validator", () => {
     expect(() => validateGroupingPlanning(stmt, resolver(["a", "x"]))).not.toThrow();
   });
 
+  test("B65-H07: HAVING GROUPING argument は allItems membership を planning で検証する", () => {
+    const stmt = parse(
+      "SELECT a, SUM(x) FROM APP1 GROUP BY ROLLUP(a) HAVING GROUPING(b)=1"
+    );
+    expect(() => validateGroupingPlanning(stmt, resolver(["a", "b", "x"]))).toThrow(
+      /B65_GROUPING_ARG_NOT_ITEM/
+    );
+  });
+
   test("B65-E30: JOIN の修飾 canonical identity を分離して受理する", () => {
     const stmt = parse(
       "SELECT l.code, r.code, GROUPING(l.code), SUM(l.x) FROM APP1 l " +
