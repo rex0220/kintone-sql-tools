@@ -5,6 +5,11 @@
 - Firefox: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰 PASS**
 - Chrome: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰 PASS**
 - 注意: Node test / JSDOM / VM smoke は、この実ブラウザ gate の代替ではない
+- Step 9 注記: この実ブラウザ gate は **3.18.0 build** に対して実施済み。v3.19.0
+  release candidate での変更は package/manifest/public registry key 等の**版数 metadata、
+  公開 docs、release 成果物準備のみ**で、engine/plugin source の意味論は変更していない。
+  3.19.0 の自動 build/UMD/version/pack gate は再実行済みだが、実ブラウザは再実行して
+  いない。この差分境界を、3.19.0 実ブラウザ gate を再度行うかの判断材料とする。
 
 ## 1. 前提
 

@@ -1,6 +1,6 @@
 {
   "name": "@rex0220/kintone-sql-tools",
-  "version": "3.18.0",
+  "version": "3.19.0",
   "description": "kintone SQL plugin, CLI, and MCP tools (ksql)",
   "publishConfig": {
     "access": "public"
@@ -39,6 +39,7 @@
     "engine:bundle-guard": "node scripts/engine-bundle-guard.mjs",
     "engine:declaration-smoke": "node scripts/engine-declaration-smoke.mjs",
     "engine:pack-smoke": "node scripts/engine-pack-smoke.mjs",
+    "engine:docs-smoke": "node scripts/engine-docs-examples-smoke.mjs",
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "mcp:pack-smoke": "node scripts/mcp-pack-smoke.mjs",
     "mcp:kintone-smoke": "node scripts/mcp-kintone-smoke.mjs",

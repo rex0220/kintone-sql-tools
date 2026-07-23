@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-23
 - 現在の最新リリース: **v3.18.0（2026-07-23・npm latest 3.18.0）＝B65 小計・総計 Phase2 コア4件（CUBE / HAVING 内 GROUPING() / SELECT DISTINCT 併用 / static validate 一致）**。詳細は §2。
-- 次回リリース計画: **v3.19.0（B66 エンジンの read-only ライブラリ公開・minor 純加法）に着手**（仕様 R2 確定・ブランチ `feat/b66-engine-library-phase1`・実装計画作成中）。他候補4件＝**B61**（AI 行動検証・運用化）/**B53**（再帰 CTE・仕様 R2 済＝実需待ち）/**B54**（User API・評価）/**B63**（プラグイン構文ヘルプ・評価）。保留/却下（B40/B65-P2/B4/B6）は §3。
+- 次回リリース計画: **v3.19.0 release candidate 準備完了（B66 read-only engine library・minor 純加法）**。Step 1〜9、5面 build、release 3成果物、全自動 gate、Step 8 Firefox/Chrome gate が完了。commit/tag/Release/npm publish は Claude／ユーザー側。他候補4件＝**B61**（AI 行動検証・運用化）/**B53**（再帰 CTE・仕様 R2 済＝実需待ち）/**B54**（User API・評価）/**B63**（プラグイン構文ヘルプ・評価）。保留/却下（B40/B65-P2/B4/B6）は §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -30,7 +30,7 @@
 
 ## 1. バックログ（未リリース・要対応）
 
-進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。**B66（エンジンの read-only ライブラリ公開）に着手（v3.19.0・minor 純加法・ブランチ `feat/b66-engine-library-phase1`）**。他候補4件＝B61（AI 行動検証の運用化）／B53（再帰 CTE・仕様 R2 済＝実需待ち棚上げ）／B54（User API・評価）／B63（プラグイン構文ヘルプ・評価）。保留/却下（B40／B65-P2／B4／B6）は §3、リリース済みは §2。
+進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。**B66（エンジンの read-only ライブラリ公開）は v3.19.0 release candidate 準備完了（minor 純加法）**。他候補4件＝B61（AI 行動検証の運用化）／B53（再帰 CTE・仕様 R2 済＝実需待ち棚上げ）／B54（User API・評価）／B63（プラグイン構文ヘルプ・評価）。保留/却下（B40／B65-P2／B4／B6）は §3、リリース済みは §2。
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
@@ -38,7 +38,7 @@
 | B53 | `WITH RECURSIVE` / `CYCLE` 句（再帰 CTE） | 改善 | 📝 **方向確定（2026-07-23）＝B40 と二者択一で B53 採用**（BOM 多段展開が B53 Phase1 で完結・B40 は可変長 Phase2 が別途必要）。SQL:1999 `WITH RECURSIVE`＋SQL:2016 `CYCLE`。単一再帰 CTE＋必須境界＋CYCLE 最小形・戦略 B（アプリ1回実体化＋メモリ反復）。**仕様 R2・Claude レビュー済＝実装着手可能水準で凍結・実需待ちで棚上げ**（R1→codex→レビュー→R2 で指摘4件反映済み・§13・§5.3 規模目安あり）。**実装着手は BOM/循環の具体ユースケース確認後**（見積り 18〜29 人日の大型投資・B40 と同じく資産化） | 機能 | 中 | [B53 spec R2](internal/ksql_b53_recursive_cte_cycle_phase1_spec.md) / [eval](internal/ksql_b53_recursive_cte_cycle_evaluation.md) |
 | B54 | User API（ユーザー・組織・グループ情報）対応 | 改善 | 📝 **評価**。cybozu.com 共通 [User API](https://cybozu.dev/ja/common/docs/user-api/)（`/v1/`・users/orgs/groups）を `__USERS__`/`__ORGS__`/`__GROUPS__` の read-only 仮想テーブルで SELECT/JOIN 可能に。組織階層（`parentCode`）は B53 と相乗。論点＝別ベースパス `/v1/`・権限・ページング・結合キー（code）。**次＝実需確認・権限/面の実機確認→方向確定なら Phase1 仕様 R1** | 機能 | 中 | [B54 eval](internal/ksql_b54_user_api_directory_evaluation.md) |
 | B63 | プラグイン面での SQL 構文・関数の説明表示 | 改善 | 📝 **評価・方向判断**。プラグインの SQL 入力画面から構文骨格・関数・方言差をその場参照（B55/B60 の人手書き面版）。既存の機械同期済みカタログ（B60 骨格＋B55 関数＋言語リファレンス）を再利用し二重管理しない。論点＝表示範囲/供給方式/UI 形態。**次＝実需・UI 方針確認→方向確定なら Phase1 仕様 R1** | 機能 | 中 | [B63 eval](internal/ksql_b63_plugin_syntax_help_evaluation.md) |
-| B66 | kSQL エンジンのライブラリ公開（他プラグインからの利用） | 改善 | 📝 **仕様 R2・Claude レビュー済＝実装着手可能水準**（R1→codex→レビュー〔指摘5件〕→R2 反映済み・§12）。エンジンは `execute(sql, client, options)`＋`KintoneClient` で transport 分離済み・`kintone.api` アダプタ既存＝**エンジン改変ほぼ不要**。Phase1＝read-only ライブラリ（`runQuery`/`explainQuery`・read-only 二重強制〔parse allowlist＋書込みメソッド無し client＋bypass 正規化〕・型隔離・npm `./engine` ESM/CJS＋UMD・**バージョン共存＝UMD version registry/per-instance/Cursor lease 非協調明記**）。Phase2＝DML `runMutation`。概算 4〜7 人日。§3.3 検索打ち切りは常時 fail-closed で確定（部分＋warning は Phase2 opt-in）。**仕様 R2 確定・対象 v3.19.0（minor・純加法）・実装計画 codex 作成→Claude レビュー承認済み**（9 Step・各 gate・ブランチ `feat/b66-engine-library-phase1`）。**Step 1（import グラフ監査）完了＝forbidden 群 0・A（execute() 同梱）120,556 B gzip／B floor 47,593 B gzip・DML 死にコード ≈31 KB gzip**。**オーナー判断＝A（DML 同梱で出荷・§4.4 を forbidden 群 0 維持に緩和・read router 抽出 B は v3.20.0 fast-follow）**。見積り 5.5〜9.5 人日。**Step 8（受入テスト・全非回帰）完全完了＝§8 と 1対1 の受入 matrix・公開 export snapshot〔5 value/20 type・内部型0〕・回帰 497/497・3159 green・production 無改変＋実ブラウザ gate 充足（Firefox/Chrome とも engine fixture〔primary・UMD 2版共存〕と plugin 非回帰が PASS・2026-07-24 ユーザー実施）。次＝Step 9（docs・v3.19.0 化・release 準備）** | 機能 | 中 | [B66 spec R2](internal/ksql_b66_engine_library_phase1_spec.md) / [impl plan](internal/ksql_b66_impl_plan.md) / [import 監査](internal/evidence/b66_engine_import_graph.md) |
+| B66 | kSQL エンジンのライブラリ公開（他プラグインからの利用） | 改善 | 🚧 **Phase1 Step 1〜9 実装完了・v3.19.0 release candidate**。判断 A＝DML/APPLY/IMPORT dead code 同梱、forbidden 群 0、read-only 二重強制。npm `./engine` ESM/CJS＋UMD version registry、browser/BYO、全cell string、search abort hard error、per-query Cursor closeを公開。初回baseline＝ESM 444,578 B min / 119,684 B gzip、CJS 445,113 B / 119,990 B、UMD 445,605 B / 120,031 B。`npm test` 3,184 green・snapshot 21不変、5面 build、MCP/MCPB、bundle/declaration/pack/UMD、pack済み docs 例が全PASS。Firefox/Chrome engine fixture＋plugin非回帰もPASS（3.18.0 build、3.19.0差分は版数metadata/docs/release準備のみ）。release 3成果物更新済み。**残＝Claude/ユーザーによるレビュー、commit、tag、GitHub Release、npm publish**。Phase2 `runMutation` と read router抽出は対象外。 | 機能 | 中 | [B66 spec R2](internal/ksql_b66_engine_library_phase1_spec.md) / [public guide](ksql_engine_library.md) / [acceptance](internal/evidence/b66_engine_acceptance.md) |
 
 ---
 

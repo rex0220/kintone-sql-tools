@@ -1,6 +1,6 @@
 # B66 Phase1 実装計画 — read-only kSQL エンジン・ライブラリ公開
 
-- ステータス: 📋 実装計画（仕様 R2・対象 v3.19.0）**・Claude レビュー済＝承認（1点の再フレームあり・§16）**。9 Step 段階マージ・各 Step gate・Step 1 停止 gate・エンジン非改変原則は妥当。**再フレーム＝§4.4 の read-path-only は安全要件でなくサイズ/品質目標なので、Step 1 の判断は「抽出 or 停止」の二択でなく3択（A: DML 同梱で出荷＋§4.4 緩和／B: 機械抽出／C: 停止）とし、A を既定候補にする**（詳細 §16）。
+- ステータス: ✅ **Step 1〜9 実装完了・v3.19.0 release candidate（2026-07-24）**。判断 A（DML 同梱・forbidden 群 0）で公開 docs、evidence、3.19.0 metadata、5面 build、release 3成果物、全 gate、pack 済み ESM/CJS/UMD docs 例まで完了。git/commit/tag/Release/publish は未実施で Claude／ユーザー作業。
 - 正仕様: [B66 Phase1 仕様 R2](ksql_b66_engine_library_phase1_spec.md)
 - 背景評価: [B66 評価](ksql_b66_engine_library_evaluation.md)
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B66
@@ -614,3 +614,11 @@ Step 2〜5はsource-levelにmergeできるが、Step 6までnpm public subpath�
 - **監査完了**（[evidence](evidence/b66_engine_import_graph.md)・`scripts/engine-import-graph.mjs`＋`scripts/engine-read-floor-probe.ts`）。**forbidden 群（MCP/docs/catalog/zod/SDK/Node builtin）は全条件 0**。A（execute() 同梱）browser 449,713 B min / 120,556 B gzip・71 inputs（うち 38 が DML/APPLY/IMPORT 到達）。B floor 190,029 B min / 47,593 B gzip・34 inputs。A−B floor ≈73 KB gzip（楽観上限）・DML 専用死にコード独立寄与 ≈31 KB gzip（現実的削減量）。`npm test` 3,025 green・build 4面 PASS・src 無変更。
 - **オーナー判断＝A（DML 同梱で出荷・§4.4 緩和）。** read-only の安全性は §3 二重強制で保証・DML は実行不能な dead code。read router 機械抽出（B）は core execute() を触るためライブラリ採用実証後の fast-follow（v3.20.0 候補）とする。spec §4.4 に緩和を反映済み。
 - **→ Step 2（public DTO＋runQuery/explainQuery）へ進む。** 以後 §3.3.7 の「B か停止」は「A 採用」で解消。エンジン本体は無改変を貫く。
+
+### 16.2 Step 9 完了（2026-07-24）
+
+- `docs/ksql_engine_library.md` を公開し、ESM/CJS/UMD、public API/型、全cell string、BYO 6 read method、guest/proxy責務、error/options、read-only拒否、search abort hard error、Cursor close、複数copy運用を記載。UMD は `window.ksql.get("3.19.0")` の exact 選択を必須化。
+- package/lock/prod manifest/release metadata/CHANGELOG を 3.19.0 へ同期し、`npm run build` で plugin/CLI/MCP/MCPB/engine を全面再生成。release の plugin zip、`ksql-mcp.mcpb`、`ksql-mcp.js` を同じ候補から更新。
+- `npm test` は 145 suites / 3,184 tests PASS、snapshot 21件不変。MCP smoke/pack、MCPB verify、engine bundle/declaration/pack/UMD、pack 済み ESM/CJS/UMD docs 例は全 PASS。
+- 初回 production bundle baseline: ESM 444,578 B min / 119,684 B gzip、CJS 445,113 B / 119,990 B、UMD 445,605 B / 120,031 B。全 forbidden 0。
+- Step 8 の Firefox/Chrome gate は 3.18.0 build で PASS 済み。3.19.0 の実装差は版数 metadata と docs/release preparation のみで、engine/plugin source意味論は不変。再実行判断の材料として browser evidence に明記。

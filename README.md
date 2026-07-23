@@ -5,6 +5,10 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 - kintone プラグイン（UI）
 - CLI（`ksql`）
 - MCP サーバー（AI クライアントから kintone を SQL 操作。Claude Desktop 用 MCPB 同梱）
+- read-only エンジン・ライブラリ（ESM / CJS / UMD）
+
+他の kintone プラグインやカスタマイズへ read-only kSQL エンジンを組み込む場合は、
+[エンジン・ライブラリ利用ガイド](docs/ksql_engine_library.md)を参照してください。
 
 ## 機能概要
 

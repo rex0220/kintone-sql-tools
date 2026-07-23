@@ -9,6 +9,10 @@
 - Node 条件: CJS、Node、Node 18
 - gzip 条件: minified JavaScript、gzip level 9、mtime 0
 
+> Step 9（2026-07-24）: 判断 A を維持した production entry の初回 baseline は
+> ESM 444,578 B min / 119,684 B gzip、CJS 445,113 B / 119,990 B、
+> UMD 445,605 B / 120,031 B。3形式とも forbidden 0。
+
 この Step は監査だけであり、`src/` は変更していない。B floor の
 `scripts/engine-read-floor-probe.ts` も public API や実行可能な read router ではない。
 parser と現行 read path で使用する module を直接 import した、抽出後 bundle の楽観的な
