@@ -172,15 +172,10 @@ function keyDependencies(key: OrderByKey): FieldRef[] {
 }
 
 /**
- * Metadata-backed B65 planning validation. The resolver is shared with the
- * execution layer's physical table/field metadata and must fail on unknown or
- * ambiguous references.
+ * AST-only B65 validation shared by parse/static validation and metadata-backed
+ * execution planning.
  */
-export function validateGroupingPlanning(
-  stmt: SelectStatement,
-  resolve: GroupingFieldResolver,
-  planningGuardHook: GroupingPlanningGuardHook = () => undefined
-): ResolvedGroupingSpec | null {
+export function validateGroupingStatic(stmt: SelectStatement): void {
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs: GroupingRef[] = [];
   for (const column of stmt.columns) {
@@ -203,7 +198,7 @@ export function validateGroupingPlanning(
     if (groupingRefs.length > 0) {
       throw new Error("ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
     }
-    return null;
+    return;
   }
 
   if (stmt.distinct) {
@@ -219,6 +214,29 @@ export function validateGroupingPlanning(
     column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
   )) {
     throw new Error("ArgumentError: B65 wildcard projection is not supported in Phase1.");
+  }
+}
+
+/**
+ * Metadata-backed B65 planning validation. The resolver is shared with the
+ * execution layer's physical table/field metadata and must fail on unknown or
+ * ambiguous references.
+ */
+export function validateGroupingPlanning(
+  stmt: SelectStatement,
+  resolve: GroupingFieldResolver,
+  planningGuardHook: GroupingPlanningGuardHook = () => undefined
+): ResolvedGroupingSpec | null {
+  validateGroupingStatic(stmt);
+  const normalized = normalizeGroupingSpec(stmt);
+  const groupingRefs: GroupingRef[] = [];
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
+  }
+  collectGroupingRefs(stmt.orderBy, groupingRefs);
+
+  if (normalized.type !== "GROUPING_SETS") {
+    return null;
   }
 
   const resolvedSpec = resolveGroupingSpec(stmt, resolve)!;

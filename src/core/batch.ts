@@ -12,7 +12,7 @@
 // 静的検証部分であり、kintone へのアクセスは一切行わない。
 // ============================================================
 
-import type { Statement } from "../types/ast";
+import type { SelectStatement, Statement } from "../types/ast";
 import {
   getInsertValuesCount,
   getStatementType,
@@ -25,6 +25,7 @@ import {
 } from "./dmlGuard";
 import { assertApplyScope } from "./applyPatchScope";
 import { KlikeValidationError, validateKlikeStatement } from "./klikeValidation";
+import { validateGroupingStatic } from "./groupingValidation";
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
 export const MAX_TEMP_TABLES = 16;
@@ -166,6 +167,21 @@ function collectVariableRefs(node: unknown, refs: VariableUse[]): void {
   }
 }
 
+/** Apply AST-only grouping validation to every query level in a statement. */
+function validateGroupingStaticQueries(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const value of node) validateGroupingStaticQueries(value);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const obj = node as Record<string, unknown>;
+    if (obj["type"] === "SELECT") {
+      validateGroupingStatic(node as SelectStatement);
+    }
+    for (const value of Object.values(obj)) validateGroupingStaticQueries(value);
+  }
+}
+
 // ------------------------------------------------------------
 // 本体
 // ------------------------------------------------------------
@@ -186,6 +202,14 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   }
 
   statements.forEach((stmt, index) => {
+    try {
+      validateGroupingStaticQueries(stmt);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new BatchAnalysisError(error.message, index);
+      }
+      throw error;
+    }
     try {
       assertApplyScope("phase15b", stmt);
       validateKlikeStatement(stmt);
