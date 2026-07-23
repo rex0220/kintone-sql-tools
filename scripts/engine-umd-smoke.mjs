@@ -2,7 +2,7 @@
 
 import * as esbuild from "esbuild";
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -16,6 +16,7 @@ const versions = ["3.19.0-smoke-x", "4.0.0-smoke-y"];
 const builtPackage = JSON.parse(
   await readFile(resolve(rootDir, "package.json"), "utf8")
 );
+const writeBrowserFixtures = process.argv.includes("--write-browser-fixtures");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -63,6 +64,20 @@ async function closeAll(handles) {
 const bundles = Object.fromEntries(
   await Promise.all(versions.map(async (version) => [version, await build(version)]))
 );
+if (writeBrowserFixtures) {
+  const outputDir = resolve(rootDir, ".tmp", "engine-browser-smoke");
+  await mkdir(outputDir, { recursive: true });
+  await Promise.all(
+    versions.map((version) =>
+      writeFile(
+        resolve(outputDir, `ksql-engine-${version}.umd.js`),
+        bundles[version],
+        "utf8"
+      )
+    )
+  );
+  console.log(`[engine-umd-smoke] browser fixtures -> ${outputDir}`);
+}
 
 for (const order of [versions, [...versions].reverse()]) {
   const fixture = createEngineUmdHost();
@@ -242,9 +257,61 @@ for (const order of [versions, [...versions].reverse()]) {
   assert(umd?.version === builtPackage.version, "UMD version/key != package version");
   assert(esm.version === builtPackage.version, "ESM version != package version");
   assert(cjs.version === builtPackage.version, "CJS version != package version");
+
+  const publicNames = [
+    "KsqlEngineError",
+    "createReadonlyKintoneClient",
+    "explainQuery",
+    "runQuery",
+    "version",
+  ];
+  for (const [surface, engine] of Object.entries({ ESM: esm, CJS: cjs, UMD: umd })) {
+    assert(
+      JSON.stringify(Object.keys(engine).sort()) === JSON.stringify(publicNames),
+      `${surface} public names mismatch: ${Object.keys(engine).sort().join(",")}`
+    );
+  }
+  const byo = {
+    getRecords: async () => ({ records: [] }),
+    openCursor: async () => ({
+      totalCount: 0,
+      nextPage: async () => ({ records: [], next: false }),
+      close: async () => undefined,
+    }),
+    getApps: async () => [],
+    getFields: async () => [],
+    getNumberPrecision: async () => ({
+      digits: 30,
+      decimalPlaces: 10,
+      roundingMode: "HALF_EVEN",
+    }),
+    getProcessStatuses: async () => ({ enable: false, states: [] }),
+  };
+  const normalizeResult = (result) => ({
+    type: result.type,
+    rows: result.rows,
+    columns: result.columns,
+    rowCount: result.rowCount,
+    warnings: result.warnings,
+    metrics: {
+      recordGetCalls: result.metrics.recordGetCalls,
+      fetchedRows: result.metrics.fetchedRows,
+      cursorRecordsScanned: result.metrics.cursorRecordsScanned,
+    },
+  });
+  const results = await Promise.all(
+    [esm, cjs, umd].map((engine) =>
+      engine.runQuery("SELECT 1 AS one", { client: byo }).then(normalizeResult)
+    )
+  );
+  assert(
+    results.every((result) => JSON.stringify(result) === JSON.stringify(results[0])),
+    "ESM/CJS/UMD runQuery results differ"
+  );
 }
 
 console.log(
   `[engine-umd-smoke] registry order/duplicate/collision, ${versions.join(" + ")}, ` +
-  `per-version Cursor isolation, globals=0, package=${builtPackage.version}: ok`
+  `per-version Cursor isolation, globals=0, public names/result parity, ` +
+  `package=${builtPackage.version}: ok`
 );

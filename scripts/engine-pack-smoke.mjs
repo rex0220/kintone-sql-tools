@@ -120,6 +120,18 @@ try {
   for (const name of required) {
     assert(existsSync(resolve(installedDir, name)), `Packed package is missing ${name}.`);
   }
+  for (const directory of ["dist-cli", "dist-mcp", "dist-mcpb", "dist-engine"]) {
+    assert(
+      existsSync(resolve(installedDir, directory)),
+      `Packed package is missing ${directory}/.`
+    );
+  }
+  assert(
+    ["index.mjs", "index.cjs", "ksql-engine.umd.js", "index.d.ts"].every(
+      (name) => existsSync(resolve(installedDir, "dist-engine", name))
+    ),
+    "Packed package is missing one of the four public engine artifacts."
+  );
 
   for (const fixture of ["engine-consumer-esm", "engine-consumer-cjs"]) {
     const destination = resolve(smokeDir, fixture);
@@ -158,7 +170,8 @@ try {
   );
 
   console.log(
-    `[engine-pack-smoke] ${packageName} ESM/CJS/types/bins/artifacts: ok`
+    `[engine-pack-smoke] ${packageName} existing bins/3 dist + engine 4 artifacts, ` +
+    `ESM/CJS/types/runtime: ok`
   );
 } finally {
   if (tarballPath && existsSync(tarballPath)) {

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>B66 kSQL engine browser smoke</title>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 76rem; }
+    button, input { font: inherit; }
+    pre { background: #111827; color: #e5e7eb; padding: 1rem; white-space: pre-wrap; }
+    .pass { color: #16794a; } .fail { color: #b42318; }
+  </style>
+</head>
+<body>
+  <h1>B66 kSQL engine browser smoke</h1>
+  <p>
+    The primary UMD is loaded from <code>../../dist-engine/ksql-engine.umd.js</code>.
+    Build it first. Use the optional file picker to load a differently-versioned
+    UMD for the two-version check.
+  </p>
+  <p>
+    <button id="run">Run primary smoke</button>
+    <label>Secondary UMD <input id="secondary" type="file" accept=".js"></label>
+    <button id="run-secondary">Load secondary and check coexistence</button>
+  </p>
+  <pre id="output">Ready.</pre>
+
+  <script>
+    (() => {
+      "use strict";
+      const state = window.__b66Smoke = {
+        apiCalls: [], fetchCalls: [], listeners: [], mutations: 0,
+        activeCursors: new Set(), cursorSequence: 0, cursorPage: new Map()
+      };
+      const originalAddEventListener = window.addEventListener.bind(window);
+      window.addEventListener = function(type, listener, options) {
+        state.listeners.push(type);
+        return originalAddEventListener(type, listener, options);
+      };
+      const records = {
+        6601: [
+          { $id: { value: "1" }, key: { value: "K1" }, kind: { value: "A" } },
+          { $id: { value: "2" }, key: { value: "K2" }, kind: { value: "A" } },
+          { $id: { value: "3" }, key: { value: "K3" }, kind: { value: "B" } }
+        ],
+        6602: [
+          { $id: { value: "11" }, key: { value: "K1" } },
+          { $id: { value: "12" }, key: { value: "K2" } }
+        ]
+      };
+      const fields = app => {
+        const codes = new Set((records[app] || []).flatMap(Object.keys));
+        return Object.fromEntries([...codes].filter(code => !code.startsWith("$"))
+          .map(code => [code, { code, label: code, type: "SINGLE_LINE_TEXT" }]));
+      };
+      const api = async (url, method, params = {}) => {
+        state.apiCalls.push({ url, method, params });
+        if (url.endsWith("/records/cursor.json")) {
+          if (method === "POST") {
+            const id = `cursor-${++state.cursorSequence}`;
+            state.activeCursors.add(id);
+            state.cursorPage.set(id, 0);
+            return { id, totalCount: "501" };
+          }
+          if (method === "GET") {
+            const page = state.cursorPage.get(params.id) || 0;
+            state.cursorPage.set(params.id, page + 1);
+            const start = page === 0 ? 1 : 501;
+            const count = page === 0 ? 500 : 1;
+            return {
+              records: Array.from({ length: count }, (_, index) => ({
+                $id: { value: String(start + index) }
+              })),
+              next: true
+            };
+          }
+          if (method === "DELETE") {
+            state.activeCursors.delete(params.id);
+            return {};
+          }
+        }
+        if (url.endsWith("/apps.json")) {
+          return { apps: [{ appId: "6601", name: "B66 fixture", description: "browser smoke" }] };
+        }
+        if (url.endsWith("/app/form/fields.json")) return { properties: fields(Number(params.app)) };
+        if (url.endsWith("/app/settings.json")) {
+          return { numberPrecision: { digits: "30", decimalPlaces: "10", roundingMode: "HALF_EVEN" } };
+        }
+        if (url.endsWith("/app/status.json")) return { enable: false, states: null };
+        throw new Error(`Unexpected API call: ${method} ${url}`);
+      };
+      api.url = path => `https://example.cybozu.com${path}`;
+      api.urlForGet = (path, params) =>
+        `https://example.cybozu.com${path}?app=${encodeURIComponent(params.app)}`;
+      window.kintone = { api, getRequestToken: () => "b66-fixture-token" };
+      window.fetch = async input => {
+        state.fetchCalls.push(String(input));
+        const app = Number(new URL(String(input)).searchParams.get("app"));
+        return new Response(JSON.stringify({ records: records[app] || [] }), {
+          status: 200, headers: { "Content-Type": "application/json" }
+        });
+      };
+    })();
+  </script>
+  <script src="../../dist-engine/ksql-engine.umd.js"></script>
+  <script>
+    (() => {
+      "use strict";
+      const output = document.getElementById("output");
+      const assert = (condition, message) => {
+        if (!condition) throw new Error(message);
+      };
+      const logResult = value => {
+        output.className = value.ok ? "pass" : "fail";
+        output.textContent = JSON.stringify(value, null, 2);
+      };
+      const publicNames = [
+        "KsqlEngineError", "createReadonlyKintoneClient",
+        "explainQuery", "runQuery", "version"
+      ];
+      const readMethods = client => ({
+        getRecords: client.getRecords.bind(client),
+        openCursor: client.openCursor.bind(client),
+        getApps: client.getApps.bind(client),
+        getFields: client.getFields.bind(client),
+        getNumberPrecision: client.getNumberPrecision.bind(client),
+        getProcessStatuses: client.getProcessStatuses.bind(client)
+      });
+
+      async function runSurface(engine, label, client) {
+        const queries = [
+          ["join-group", "SELECT a.kind, COUNT(*) AS count FROM APP6601 a INNER JOIN APP6602 b ON a.key = b.key GROUP BY a.kind"],
+          ["with", "WITH x AS (SELECT kind FROM APP6601) SELECT kind FROM x ORDER BY kind"],
+          ["union-all", "SELECT 'left' AS side UNION ALL SELECT 'right' AS side"],
+          ["show-apps", "SHOW APPS"],
+          ["describe", "DESCRIBE APP6601"]
+        ];
+        const results = {};
+        for (const [id, sql] of queries) {
+          const result = await engine.runQuery(sql, { client, maxRecords: 1000 });
+          assert(result.type === "query" && result.rowCount === result.rows.length, `${label}:${id}`);
+          results[id] = { rows: result.rowCount, columns: result.columns.map(item => item.name) };
+        }
+        const explainBefore = {
+          fetch: window.__b66Smoke.fetchCalls.length,
+          cursor: window.__b66Smoke.apiCalls.filter(call => call.url.endsWith("/records/cursor.json")).length
+        };
+        const explained = await engine.explainQuery("SELECT kind FROM APP6601", { client });
+        assert(explained.type === "explain" && explained.lines.length > 0, `${label}:explain`);
+        assert(window.__b66Smoke.fetchCalls.length === explainBefore.fetch, `${label}:EXPLAIN records GET`);
+        assert(
+          window.__b66Smoke.apiCalls.filter(call => call.url.endsWith("/records/cursor.json")).length === explainBefore.cursor,
+          `${label}:EXPLAIN Cursor`
+        );
+        const cursor = await engine.runQuery(
+          "SELECT $id FROM APP6601 KORDER BY $id LIMIT 501",
+          { client, maxRecords: 501 }
+        );
+        assert(cursor.rowCount === 501 && window.__b66Smoke.activeCursors.size === 0, `${label}:cursor close`);
+        return results;
+      }
+
+      async function runPrimary() {
+        const registry = window.ksql;
+        assert(registry && typeof registry.get === "function", "window.ksql registry missing");
+        const versions = Object.keys(registry.versions);
+        assert(versions.length >= 1, "primary version missing");
+        const engine = registry.get(versions[0]);
+        assert(engine.version === versions[0], "registry key/version mismatch");
+        assert(JSON.stringify(Object.keys(engine).sort()) === JSON.stringify(publicNames.slice().sort()), "public names mismatch");
+        const listenersBefore = window.__b66Smoke.listeners.filter(
+          type => type === "pagehide" || type === "beforeunload"
+        ).length;
+        const browserResult = await runSurface(
+          engine, "browser", engine.createReadonlyKintoneClient({ cursorMaxActive: 1 })
+        );
+        const base = engine.createReadonlyKintoneClient({ cursorMaxActive: 1 });
+        const byo = readMethods(base);
+        byo.postRecords = async () => { window.__b66Smoke.mutations += 1; };
+        const byoResult = await runSurface(engine, "BYO", byo);
+        for (const sql of [
+          "SELECT kind FROM APP6601",
+          "SELECT a.kind FROM APP6601 a JOIN APP6602 b ON a.key = b.key",
+          "SELECT kind, COUNT(*) AS count FROM APP6601 GROUP BY kind"
+        ]) {
+          const aborted = readMethods(base);
+          aborted.getRecords = async () => ({
+            records: [{ kind: { value: "must-not-escape" } }],
+            searchAborted: true
+          });
+          await engine.runQuery(sql, { client: aborted }).then(
+            () => { throw new Error(`search abort accepted: ${sql}`); },
+            error => assert(error.code === "SEARCH_ABORTED", `wrong abort error: ${error.code}`)
+          );
+        }
+        let errorCloseCalls = 0;
+        const cursorError = readMethods(base);
+        cursorError.openCursor = async () => ({
+          totalCount: 501,
+          nextPage: async () => { throw Object.assign(new Error("fixture cursor failure"), { status: 503 }); },
+          close: async () => { errorCloseCalls += 1; }
+        });
+        await engine.runQuery(
+          "SELECT $id FROM APP6601 KORDER BY $id LIMIT 501",
+          { client: cursorError, maxRecords: 501 }
+        ).then(
+          () => { throw new Error("cursor error unexpectedly succeeded"); },
+          error => assert(error.code === "CLIENT_ERROR", `wrong cursor error: ${error.code}`)
+        );
+        assert(errorCloseCalls === 1, `cursor error close count=${errorCloseCalls}`);
+        for (const sql of [
+          "INSERT INTO APP1 (a) VALUES (1)",
+          "UPDATE APP1 SET a = 1 WHERE $id = 1",
+          "DELETE FROM APP1 WHERE $id = 1"
+        ]) {
+          await engine.runQuery(sql, { client: byo }).then(
+            () => { throw new Error(`write accepted: ${sql}`); },
+            error => assert(error.code === "READ_ONLY_VIOLATION", `wrong readonly error: ${error.code}`)
+          );
+        }
+        assert(window.__b66Smoke.mutations === 0, "mutation method was called");
+        assert(
+          window.__b66Smoke.listeners.filter(type => type === "pagehide" || type === "beforeunload").length === listenersBefore,
+          "global lifecycle listener added"
+        );
+        return {
+          version: engine.version,
+          browserResult,
+          byoResult,
+          searchAbortShapes: 3,
+          cursorErrorCloseCalls: errorCloseCalls,
+          mutationCalls: 0,
+          cursorActive: 0
+        };
+      }
+
+      document.getElementById("run").addEventListener("click", async () => {
+        try { logResult({ ok: true, ...(await runPrimary()) }); }
+        catch (error) { logResult({ ok: false, message: error.message, stack: error.stack }); }
+      });
+
+      document.getElementById("run-secondary").addEventListener("click", async () => {
+        try {
+          const file = document.getElementById("secondary").files[0];
+          assert(file, "Select a differently-versioned UMD file first.");
+          const registry = window.ksql;
+          const before = Object.keys(registry.versions);
+          const firstEntries = Object.fromEntries(before.map(version => [version, registry.get(version)]));
+          const script = document.createElement("script");
+          script.textContent = await file.text();
+          document.head.appendChild(script);
+          const after = Object.keys(registry.versions);
+          assert(after.length === before.length + 1, "secondary version was not added exactly once");
+          for (const version of before) assert(registry.get(version) === firstEntries[version], `${version} overwritten`);
+          const added = after.find(version => !before.includes(version));
+          assert(registry.get(added).version === added, "secondary get/version mismatch");
+          logResult({ ok: true, versions: after, registryIdentityPreserved: window.ksql === registry });
+        } catch (error) {
+          logResult({ ok: false, message: error.message, stack: error.stack });
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

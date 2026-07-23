@@ -47,6 +47,18 @@ const inputRules = [
     /\.(?:css|scss|sass|less)$/.test(name)],
 ];
 
+const emittedStringRules = [
+  ["embedded-doc-path", /docs\/(?:internal\/)?ksql|docs\\(?:internal\\)?ksql/i],
+  [
+    "embedded-catalog",
+    /statementSyntaxCatalog|STATEMENT_SYNTAX_CATALOG|ksql_statement_catalog/i,
+  ],
+  [
+    "embedded-mcp-instructions",
+    /KSQL_MCP_INSTRUCTIONS|mcp\/instructions|mcp\\instructions/i,
+  ],
+];
+
 const normalize = (value) =>
   value.replaceAll("\\", "/").replace(/^.*?\/(?=(?:src|docs|node_modules)\/)/, "");
 
@@ -90,6 +102,11 @@ for (const metaName of readdirSync(metaDir).filter((name) =>
   forbidden.Buffer = /\bBuffer\b/.test(code.toString("utf8"))
     ? ["emitted JavaScript"]
     : [];
+  for (const [id, pattern] of emittedStringRules) {
+    forbidden[id] = pattern.test(code.toString("utf8"))
+      ? ["emitted JavaScript"]
+      : [];
+  }
 
   for (const [id, matches] of Object.entries(forbidden)) {
     if (matches.length > 0) {
