@@ -2,6 +2,19 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.18.0（2026-07-23）
+
+### 小計・総計（B65）Phase2 — CUBE / HAVING 内 GROUPING() / SELECT DISTINCT 併用
+
+v3.17.0 で入れた小計・総計（`ROLLUP` / `GROUPING SETS` / `GROUPING()`）に、Phase2 のコア3機能を追加した。engine の集計・空文字上書き・membership sidecar・完全入力・安全上限は Phase1 の仕組みをそのまま共用し、SQL の既存挙動（通常 `GROUP BY`・`ROLLUP`・`GROUPING SETS`・非 B65）は変えていない（純加法的 minor）。
+
+- **CUBE（field-only）**: `GROUP BY CUBE(a, b, ...)` を全 `2^n` の grouping set へ展開し、各軸の小計と総計を 1 クエリに出せるようにした。`ROLLUP(a, b)` が `(a, b)`・`(a)`・`()` だけを作るのに対し、`CUBE(a, b)` は `(b)` も加えて両軸の小計を揃える。`2^n` は配列を作る前に安全計算し、展開後の grouping set 数が上限（既定 64）を超える列数（7 列以上）は取得前に `GROUPING_SET_LIMIT_EXCEEDED` で拒否する。式・要素の入れ子・通常 item との混在は従来どおり拒否。
+- **HAVING 内 GROUPING()**: `HAVING GROUPING(会社名) = 1`（総計・小計行だけ）／`= 0`（明細行だけ）を、`HAVING GROUPING(会社名) = 1 AND SUM(売上) > 0` のように集計条件と組み合わせて絞り込めるようにした。`GROUPING()` は行の所属 grouping set から `0` / `1` を返す membership 判定で、grouped 列が空文字の明細行と総計行を取り違えない。`WHERE`・JOIN 条件・集計関数の引数・ウィンドウ定義の中では引き続き使用不可。
+- **SELECT DISTINCT 併用**: Phase1 の「`SELECT DISTINCT` + B65 は非対応」という一括拒否を解除し、標準 SELECT の直交性を回復した。`project()` と `applyDistinct()` の列投影を単一の evaluator へ統合し、DISTINCT を SELECT 出力列全体の評価値（列位置＋値）で判定する。`GROUPING()` を投影していれば明細（`0`）と小計・総計（`1`）は別行のまま残り、投影しておらず全表示値が同じ行だけが 1 行にまとまる。`GROUP BY DISTINCT` は別機能で引き続き拒否。集計値は materialize 済みの値だけを読み、DISTINCT 評価で再集計しない。
+- **ksql_validate の受理範囲を実行と一致**: `SELECT DISTINCT ... ROLLUP` などを純 AST 段階でも受理し、v3.17.0 の「`ksql_validate` は ok なのに実行で拒否」という食い違いを解消した（#8 の static 検証拡張）。
+- 言語リファレンス §8/§9 とバッチレシピ R13 の注意書きを Phase2 対応状態へ更新した（`ksql_docs` にも反映）。
+- `SELECT DISTINCT` / `HAVING` / `LIMIT` で結果行が減る見込みでも、小計・総計は全入力に依存するため安全上限は緩めない（fail-closed のまま）。`KORDER BY`・ウィンドウ関数との併用、`GROUPING()` の式引数・複数引数・`GROUPING_ID` は引き続き未対応。
+
 ## v3.17.1（2026-07-23）
 
 ### ドキュメント（B65 の解説・レシピを反映）
