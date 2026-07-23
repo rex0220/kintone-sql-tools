@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-23
 - 現在の最新リリース: **v3.18.0（2026-07-23・feat PR #247→release PR #248・tag v3.18.0・GitHub Release 公開・アセット3点・npm publish 済み latest 3.18.0＝npm view 確認＋release/ mcpb・mcp.js 更新漏れを PR #249 で 3.18.0 同期）＝リリース完全完了**＝B65 小計・総計 Phase2 コア4件（#1 field-only CUBE / #2 HAVING 内 GROUPING() / #5 SELECT DISTINCT 併用 / #8 static validate 一致）。各機能を独立 codex 実装→Claude レビュー＋独立検証→branch dist-cli 実データプローブ→コミットして束ねリリース。全 3,000+25 green・実機 PASS（デプロイ済み MCP で CUBE+HAVING GROUPING+DISTINCT 統合 15行・3軸合計20整合・ksql_docs §8 反映）。SQL 既存挙動不変（純加法的 minor）。前版 v3.17.1（B65 docs・patch）/v3.17.0（B65 Phase1）/v3.16.1（B64 docs）。
-- 次回リリース計画: v3.18.0 リリース完全完了（npm publish 済み latest 3.18.0）。残バックログ=**B61（AI 行動検証シナリオ・5 ラウンド 30 件実施済み・運用化残）/B40/B53（大型・方向判断）/B54（User API・評価）/B63（プラグイン構文ヘルプ・評価）/B65-P2（B65 Phase2 残＝第二波 #6 CTE/temp 実体化列・別仕様 #3 式 item/#7 window/#4 GROUPING_ID＝コア4件は v3.18.0 で完了・残は実需待ちで優先度低）の6件**。**B65 プラグイン実機 smoke は Phase1 で済み（2階層 ROLLUP 確認）・Phase2 プラグイン面はお手すきで任意**。**B4（保存クエリ :name）は保留・B6（KLIKE 外部結合）は代替策ありで却下＝どちらも §3（候補外）**。
+- 次回リリース計画: **未定（バックログから選定）**。直近の v3.18.0 は完了済み（npm publish 済み latest 3.18.0）。残バックログ6件は評価・方向判断・実需待ちの段階で、着手が確定した機能はない=**B61（AI 行動検証シナリオ・5 ラウンド 30 件実施済み・運用化残）/B40/B53（大型・方向判断）/B54（User API・評価）/B63（プラグイン構文ヘルプ・評価）/B65-P2（B65 Phase2 残＝第二波 #6 CTE/temp 実体化列・別仕様 #3 式 item/#7 window/#4 GROUPING_ID＝コア4件は v3.18.0 で完了・残は実需待ちで優先度低）**。**B65 プラグイン実機 smoke は Phase1 で済み（2階層 ROLLUP 確認）・Phase2 プラグイン面はお手すきで任意**。**B4（保存クエリ :name）は保留・B6（KLIKE 外部結合）は代替策ありで却下＝どちらも §3（候補外）**。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
