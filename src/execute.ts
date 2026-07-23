@@ -889,7 +889,6 @@ async function executeParsedStatement(
   validateKlikeStatement(stmt);
   if (stmt.type !== "EXPLAIN") {
     await validateStatementGroupingPlanning(stmt, client, cacheContext);
-    assertStatementB65ExecutionOpen(stmt);
   }
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
@@ -2274,7 +2273,6 @@ async function executeSelect(
 ): Promise<SelectResult> {
   let result: SelectResult;
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
-  assertB65ExecutionOpen(stmt);
   if (isNoFromSelect(stmt)) {
     result = executeNoFromSelect(stmt);
     if (captureColumnMeta) {
@@ -2310,23 +2308,16 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completeReasons = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR"
-    ? completeInputReasons({ ...stmt, orderBy: [] })
-    : completeInputReasons(stmt);
-  const completeInputRequired = completeReasons.size > 0;
-  const truncateWasDisabled = completeInputRequired && options.onLimitReached === "truncate";
-  const effectiveOptions = truncateWasDisabled
-    ? { ...options, onLimitReached: "error" as const }
-    : options;
+  const completePolicy = buildCompleteInputPolicy(stmt, options, orderPlan);
 
   try {
     if (mode === "SIMPLE") {
-      result = await executeSimpleSelect(stmt, client, effectiveOptions, cacheContext, orderPlan, orderMeta);
+      result = await executeSimpleSelect(stmt, client, completePolicy.effectiveOptions, cacheContext, orderPlan, orderMeta);
     } else {
       result = await executeFullScanSelect(
         stmt,
         client,
-        effectiveOptions,
+        completePolicy.effectiveOptions,
         cacheContext,
         cteCache,
         whereCapability.capability === "EXACT_PUSHDOWN",
@@ -2334,14 +2325,7 @@ async function executeSelect(
       );
     }
   } catch (error) {
-    if (completeInputRequired && error instanceof FetchAllLimitError) {
-      throw new FetchAllLimitError(
-        completeInputErrorPrefix(completeReasons) +
-        (truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
-        error.message
-      );
-    }
-    throw error;
+    throwCompleteInputError(completePolicy, error);
   }
   if (captureColumnMeta) {
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
@@ -2349,17 +2333,7 @@ async function executeSelect(
   return result;
 }
 
-/** TODO(B65 Step 3): open only after GROUPING() value/type/order evaluation is connected. */
-export const B65_EXECUTION_CLOSED_MESSAGE =
-  "UnsupportedError: B65 grouping sets are not yet executable (Phase1 Step 2 gate; planned to open in Step 3).";
-
 const resolvedGroupingSpecs = new WeakMap<SelectStatement, ResolvedGroupingSpec>();
-
-function assertB65ExecutionOpen(stmt: SelectStatement): void {
-  if (normalizeGroupingSpec(stmt).type === "GROUPING_SETS") {
-    throw new Error(B65_EXECUTION_CLOSED_MESSAGE);
-  }
-}
 
 async function validateStatementGroupingPlanning(
   statement: unknown,
@@ -2382,19 +2356,6 @@ async function validateStatementGroupingPlanning(
     for (const child of Object.values(value)) await visit(child);
   };
   await visit(statement);
-}
-
-function statementHasB65Grouping(statement: unknown): boolean {
-  if (statement === null || typeof statement !== "object") return false;
-  if (Array.isArray(statement)) return statement.some(statementHasB65Grouping);
-  const value = statement as Record<string, unknown>;
-  if (value["type"] === "SELECT"
-    && normalizeGroupingSpec(statement as SelectStatement).type === "GROUPING_SETS") return true;
-  return Object.values(value).some(statementHasB65Grouping);
-}
-
-function assertStatementB65ExecutionOpen(statement: unknown): void {
-  if (statementHasB65Grouping(statement)) throw new Error(B65_EXECUTION_CLOSED_MESSAGE);
 }
 
 async function buildGroupingFieldResolver(
@@ -2505,8 +2466,62 @@ function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): st
   const reasonList = [...reasons].join(", ");
   const subject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE")
     ? "統計集約の正しい結果"
-    : "ORDER BYの正しい結果";
+    : reasons.size === 1 && reasons.has("GROUPING_SETS")
+      ? "小計・総計の正しい結果"
+      : reasons.has("GROUPING_SETS")
+        ? "クエリの正しい結果"
+        : "ORDER BYの正しい結果";
   return `${subject}には完全な候補集合が必要です。complete input reason: ${reasonList}。`;
+}
+
+interface CompleteInputPolicy {
+  reasons: ReadonlySet<CompleteInputReason>;
+  effectiveOptions: ExecuteOptions;
+  truncateWasDisabled: boolean;
+}
+
+function buildCompleteInputPolicy(
+  stmt: SelectStatement,
+  options: ExecuteOptions,
+  orderPlan: CanonicalOrderPlan | null
+): CompleteInputPolicy {
+  // A REST/KORDER plan consumes only the top-level order. Nested/window/B65
+  // requirements remain visible through the existing recursive reason walker.
+  const reasons = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+    || orderPlan?.kind === "KORDER_NATIVE"
+    || orderPlan?.kind === "KORDER_CURSOR"
+    ? completeInputReasons({ ...stmt, orderBy: [] })
+    : completeInputReasons(stmt);
+  const truncateWasDisabled = reasons.size > 0 && options.onLimitReached === "truncate";
+  return {
+    reasons,
+    effectiveOptions: truncateWasDisabled
+      ? { ...options, onLimitReached: "error" as const }
+      : options,
+    truncateWasDisabled,
+  };
+}
+
+function throwCompleteInputError(policy: CompleteInputPolicy, error: unknown): never {
+  if (policy.reasons.size > 0 && error instanceof FetchAllLimitError) {
+    throw new FetchAllLimitError(
+      completeInputErrorPrefix(policy.reasons) +
+      (policy.truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
+      error.message
+    );
+  }
+  throw error;
+}
+
+async function withCompleteInputPolicy<T>(
+  policy: CompleteInputPolicy,
+  action: () => Promise<T>
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    throwCompleteInputError(policy, error);
+  }
 }
 
 function isConstantFalseWhere(where: WhereExpr | null): boolean {
@@ -3369,6 +3384,8 @@ async function inferSelectColumnMeta(
         }
       } else if (column.type === "ARITH_AGG_COL" || column.type === "ARITH_COL") {
         meta = syntheticColumnMeta("number");
+      } else if (column.type === "GROUPING_COL") {
+        meta = syntheticColumnMeta("number");
       } else if (column.type === "LITERAL_COL") {
         meta = syntheticColumnMeta("string");
       } else if (column.type === "SCALAR_VALUE_COL") {
@@ -3783,7 +3800,7 @@ async function executeFullScanWithCte(
   cacheContext: string
 ): Promise<SelectResult> {
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
-  assertB65ExecutionOpen(stmt);
+  const resolvedGroupingSpec = resolvedGroupingSpecs.get(stmt);
   const hiddenQualifiedAliases = new Set<string>();
   const withEffectiveAlias = (table: TableRef): TableRef => {
     if (table.alias !== null || table.cteName === null) return table;
@@ -3833,16 +3850,18 @@ async function executeFullScanWithCte(
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
   const orderMeta = await buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
-  if (hasCanonicalOrder(stmt)) {
-    (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
+  const orderPlan = hasCanonicalOrder(stmt)
+    ? (stmt.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
       stmt,
       staticMode: "FULL_SCAN",
       whereCapability: whereCapability.capability,
       orderSemantics: orderMeta.semantics,
       maxRecords,
       hasKlike: whereHasKlike(stmt.where),
-    });
-  }
+    })
+    : null;
+  const completePolicy = buildCompleteInputPolicy(stmt, options, orderPlan);
+  const effectiveOptions = completePolicy.effectiveOptions;
 
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
@@ -3862,7 +3881,7 @@ async function executeFullScanWithCte(
   validateKlikePushdownPlan(pushdownPlan);
 
   // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
+  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, effectiveOptions, cacheContext, cteCache);
   const orderByMetaPromise = Promise.resolve(orderMeta);
   scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
@@ -3876,23 +3895,23 @@ async function executeFullScanWithCte(
     tables.set(stmt.from.alias, table.rows.map(processRowToKintoneRecord));
     tableColumns.set(stmt.from.alias, table.columns);
   } else {
-    const mainRecords = await fetchTableRecordsForFullScan(
+    const mainRecords = await withCompleteInputPolicy(completePolicy, () => fetchTableRecordsForFullScan(
       stmt,
       stmt.from,
       client,
       maxRecords,
       parallel,
       true,
-      options.onLimitReached ?? "error",
+      effectiveOptions.onLimitReached ?? "error",
       warnings,
       pushdownPlan.mainCondition,
       whereCapability.capability === "EXACT_PUSHDOWN"
-    );
+    ));
     tables.set(stmt.from.alias, mainRecords);
   }
 
   // JOIN テーブル取得
-  const joinFetches = stmt.joins.map(async (join) => {
+  const joinFetches = stmt.joins.map((join) => withCompleteInputPolicy(completePolicy, async () => {
     if (join.table.cteName != null) {
       const table = requireMaterializedTable(join.table.cteName);
       tables.set(join.table.alias, table.rows.map(processRowToKintoneRecord));
@@ -3908,7 +3927,7 @@ async function executeFullScanWithCte(
         client,
         maxRecords,
         parallel,
-        options.onLimitReached ?? "error",
+        effectiveOptions.onLimitReached ?? "error",
         warnings,
         pushDownCond
       );
@@ -3919,13 +3938,13 @@ async function executeFullScanWithCte(
         maxRecords,
         parallel,
         false,
-        options.onLimitReached ?? "error",
+        effectiveOptions.onLimitReached ?? "error",
         warnings,
         pushDownCond
       );
       tables.set(join.table.alias, joinRecords);
     }
-  });
+  }));
   await Promise.all(joinFetches);
 
   const scalarCache = await scalarCachePromise;
@@ -3949,7 +3968,7 @@ async function executeFullScanWithCte(
     sourceColumns,
     tableColumns,
     hiddenQualifiedAliases,
-    resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
+    resolvedGroupingSpec,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -4454,6 +4473,8 @@ async function buildOrderSemanticsForSelect(
     let meta: MaterializedColumnMeta | undefined;
     if (column.type === "FIELD") meta = resolveField(aggregateFieldRef(column.field));
     else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+      meta = syntheticColumnMeta("number");
+    } else if (column.type === "GROUPING_COL") {
       meta = syntheticColumnMeta("number");
     } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta = syntheticColumnMeta("string");
     else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr);

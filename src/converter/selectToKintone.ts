@@ -751,6 +751,11 @@ function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
       if (col.alias) names.add(col.alias);
       continue;
     }
+    if (col.type === "GROUPING_COL") {
+      names.add(col.alias
+        ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`);
+      continue;
+    }
     if (col.type === "SCALAR_SUBQUERY_COL") {
       names.add(col.alias ?? "(subquery)");
       continue;

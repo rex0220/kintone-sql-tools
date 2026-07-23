@@ -12,6 +12,7 @@ import type {
   WhereExpr,
 } from "../types/ast";
 import { NO_FROM_CTE_NAME } from "../types/ast";
+import { normalizeGroupingSpec } from "./grouping";
 
 export type StatementType = Statement["type"] | "UNKNOWN";
 
@@ -64,7 +65,8 @@ export type CompleteInputReason =
   | "VALIDATE"
   | "LOCAL_ORDER"
   | "WINDOW_ORDER"
-  | "STATISTICAL_AGGREGATE";
+  | "STATISTICAL_AGGREGATE"
+  | "GROUPING_SETS";
 
 const STATISTICAL_AGGREGATES: ReadonlySet<string> = new Set([
   "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
@@ -138,6 +140,7 @@ function unionCompleteInputReasons(stmt: UnionStatement): Set<CompleteInputReaso
 
 function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputReason> {
   const reasons = new Set<CompleteInputReason>();
+  if (normalizeGroupingSpec(stmt).type === "GROUPING_SETS") reasons.add("GROUPING_SETS");
   if (stmt.orderBy.length > 0) reasons.add("LOCAL_ORDER");
   for (const column of stmt.columns) {
     if (column.type === "WINDOW_COL" && column.orderBy.length > 0) reasons.add("WINDOW_ORDER");

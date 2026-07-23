@@ -67,6 +67,7 @@ import {
 } from "../core/grouping";
 import {
   attachGroupingRowMeta,
+  evalGroupingRef,
 } from "./groupingRowMeta";
 
 export { ProcessRow };
@@ -825,8 +826,7 @@ function evalOrderKey(key: OrderByKey, row: ProcessRow, aliasEvaluator?: OrderBy
     case "FIELD_NAME": return aliasEvaluator?.(key.name, row) ?? row[key.name] ?? "";
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
-    case "GROUPING_KEY":
-      throw new Error("internal error: B65 GROUPING_KEY reached evaluator while the Step 1 execution gate is closed.");
+    case "GROUPING_KEY": return evalGroupingRef(key.ref, row);
   }
 }
 
@@ -883,6 +883,9 @@ export function buildOrderByAliasEvaluator(
       }
       case "SCALAR_SUBQUERY_COL":
         evaluators.set(alias, () => scalarCache?.get(columnIndex) ?? "");
+        break;
+      case "GROUPING_COL":
+        evaluators.set(alias, (row) => evalGroupingRef(column.ref, row));
         break;
       case "VARIABLE_COL":
         break;
@@ -1055,6 +1058,14 @@ export function project(
         case "CASE_COL": {
           const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
           out[key] = evalCaseWhen(col.expr, row, resolveFieldType, resolveFieldSemantics);
+          if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
+          break;
+        }
+        case "GROUPING_COL": {
+          const key = outputKeys?.[colIdx]
+            ?? col.alias
+            ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
+          out[key] = evalGroupingRef(col.ref, row);
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }

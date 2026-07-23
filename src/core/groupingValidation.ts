@@ -10,6 +10,7 @@ import {
   resolveGroupingSpec,
   type ResolvedGroupingSpec,
 } from "./grouping";
+import { bindGroupingRefCanonicalId } from "../engine/groupingRowMeta";
 
 export interface ResolvedGroupingField {
   canonicalId: string;
@@ -128,6 +129,7 @@ function validateGroupingRefMembership(
       `ArgumentError: B65 GROUPING argument ${displayField(ref.field)} is not present in grouping allItems (reason=B65_GROUPING_ARG_NOT_ITEM).`
     );
   }
+  bindGroupingRefCanonicalId(ref, resolved.canonicalId);
 }
 
 function validateDependency(
