@@ -30,6 +30,11 @@ export function parseError(message: string, cause?: unknown): KsqlEngineError {
   return new KsqlEngineError("PARSE_ERROR", message, cause);
 }
 
+export function searchAborted(): KsqlEngineError {
+  const cause = new SearchAbortedError();
+  return new KsqlEngineError("SEARCH_ABORTED", cause.message, cause);
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim() !== "") return error.message;
   if (

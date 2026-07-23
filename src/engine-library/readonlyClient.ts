@@ -1,5 +1,5 @@
 import type { KintoneClient } from "../execute";
-import { readOnlyViolation } from "./errors";
+import { readOnlyViolation, searchAborted } from "./errors";
 import type { ReadonlyKintoneClient } from "./publicTypes";
 
 const WRITE_METHODS = new Set<PropertyKey>([
@@ -48,8 +48,11 @@ export function projectReadonlyClient(client: ReadonlyKintoneClient): KintoneCli
   const getProcessStatuses = client.getProcessStatuses.bind(client);
 
   const target = Object.assign(Object.create(null) as Record<PropertyKey, unknown>, {
-    getRecords: (params: Parameters<typeof getRecords>[0]) =>
-      clientCall(() => getRecords(params)),
+    getRecords: async (params: Parameters<typeof getRecords>[0]) => {
+      const result = await clientCall(() => getRecords(params));
+      if (result.searchAborted === true) throw searchAborted();
+      return result;
+    },
     openCursor: async (params: Parameters<typeof openCursor>[0]) => {
       const handle = await clientCall(() => openCursor(params));
       const nextPage = handle.nextPage.bind(handle);
