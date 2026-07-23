@@ -1,8 +1,8 @@
 # B65 Phase2 — 小計・総計の拡張候補（仕様案＋効果評価）
 
-- ステータス: 📝【A: 評価・方向判断】起票（2026-07-23）
+- ステータス: ⏸ 保留（残4件・代替策あり・実需待ち・2026-07-23）。**コア4件（#8 static validate / #2 HAVING GROUPING / #1 field-only CUBE / #5 SELECT DISTINCT）は v3.18.0 で出荷済み**。残＝#6 CTE/temp 実体化列・#3 式 grouping item・#7 window 併用・#4 GROUPING_ID。いずれも新能力でなく書き方の直接性のみで代替策あり（#4=複数 `GROUPING()`・#7 順位=CTE 2段形・#3=#6 の下位互換・#6=kintone 計算フィールド追加で迂回）。実需が出るなら **#6 が起点**。台帳 §3（保留）へ移動
 - 種別: 機能／UX（`GROUP BY`・集計後処理・事前検証の拡張）
-- 優先: 中（#8 UX 改善だけは高・独立先行候補）
+- 優先: 低（残4件は実需待ち・保留）
 - 関連: [B65 Phase1 仕様 R2](ksql_b65_rollup_grouping_sets_spec.md)／[B65 Phase1 実装計画](ksql_b65_impl_plan.md)／[B65 Phase1 codex 評価](ksql_b65_rollup_grouping_sets_evaluation.md)／[B64 条件付き集計](ksql_b64_aggregate_case_expression_spec.md)／[B56 統計集約・完全入力](ksql_b56_statistical_aggregates_spec.md)／[B59 ORDER BY alias](ksql_b59_orderby_alias_fix_spec.md)／[B40 有界 fail-closed](ksql_property_graph_phase1_spec.md)
 
 ## 1. 結論
