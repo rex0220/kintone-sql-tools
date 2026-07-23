@@ -1,9 +1,20 @@
-ksql 配布パッケージ (v3.17.1)
+ksql 配布パッケージ (v3.18.0)
 
-1. ksql-plugin-v3.17.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.18.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.18.0: 小計・総計 (B65) Phase2 — CUBE / HAVING 内 GROUPING() / SELECT DISTINCT 併用。
+- GROUP BY CUBE(a, b) で全 2^n 組合せ (各軸の小計と総計) を 1 クエリに出せる。
+  展開後の grouping set 数が上限を超える列数 (既定 7 列以上) は取得前に拒否。
+- HAVING 内で GROUPING(会社名)=1 (総計・小計だけ)/=0 (明細だけ) を集計条件と
+  組み合わせて絞り込める。WHERE/JOIN/集計引数/window では GROUPING() は不可。
+- SELECT DISTINCT を B65 と併用できる (Phase1 の一括拒否を解除)。GROUPING() を
+  投影しない表示用クエリで、表示値が一致する明細/総計行を 1 行にまとめられる。
+  GROUPING() を投影すれば明細(0)と小計・総計(1)は別行のまま残る。
+- ksql_validate が DISTINCT+ROLLUP を受理 (v3.17.0 の validate ok/実行拒否を解消)。
+- 通常 GROUP BY・ROLLUP・GROUPING SETS・非 B65 の SQL 挙動は不変 (純加法的 minor)。
 
 v3.17.1: B65 の解説・レシピをドキュメントへ反映 (ドキュメントのみ)。
 - バッチレシピ集に R13「明細＋小計・総計を 1 クエリで作る (ROLLUP / GROUPING)」を追加。
