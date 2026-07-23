@@ -1064,9 +1064,9 @@ GROUP BY 部署
 - サブクエリと集計の入れ子（`SUM(SUM(x))`）は引数に指定できません。`MODE(DISTINCT ...)` も引き続き使用できません
 - `HAVING SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) > 1000000` も同じ書き方で使用できます。既存の算術式引数の挙動は変わりません
 
-### 小計・総計（ROLLUP / GROUPING SETS / GROUPING）
+### 小計・総計（ROLLUP / CUBE / GROUPING SETS / GROUPING）
 
-`GROUP BY ROLLUP(a[, b ...])` と `GROUP BY GROUPING SETS ((...), (...), ())` は、明細に加えて小計・総計行を同じ結果へ出力します。1 クエリで必要な階層をまとめて集計できます。
+`GROUP BY ROLLUP(a[, b ...])`、`GROUP BY CUBE(a[, b ...])`、`GROUP BY GROUPING SETS ((...), (...), ())` は、明細に加えて小計・総計行を同じ結果へ出力します。1 クエリで必要な階層をまとめて集計できます。
 
 ```sql
 -- 単一列 ROLLUP: 会社別明細と総計
@@ -1079,11 +1079,18 @@ SELECT 地域, 会社名, SUM(売上) AS 売上合計
 FROM APP100
 GROUP BY ROLLUP(地域, 会社名)
 
+-- CUBE: 明細に加え、地域小計・会社小計・総計をすべて出力
+SELECT 地域, 会社名, SUM(売上) AS 売上合計
+FROM APP100
+GROUP BY CUBE(地域, 会社名)
+
 -- 必要な階層だけを明示
 SELECT 地域, 会社名, SUM(売上) AS 売上合計
 FROM APP100
 GROUP BY GROUPING SETS ((地域, 会社名), (地域), ())
 ```
+
+`ROLLUP(a, b)` は `(a, b)`、`(a)`、`()` の階層だけを作ります。`CUBE(a, b)` は加えて `(b)` も作り、`(a, b)`・`(a)`・`(b)`・`()` の全 `2^n` 組合せ（各軸の小計と総計）を出力します。両軸の小計を揃えたいときに使います。
 
 `GROUPING(field)` は、その行で `field` が集約された super-aggregate 行なら `1`、グループキーとして残っていれば `0` を返します。小計・総計行の grouped 列は空文字になるため、実データの空セルとの判別にはフィールド値ではなく `GROUPING(field)` を使用します。通常の `ORDER BY GROUPING(会社名)` を昇順で指定すると、総計行を末尾へ寄せられます（§10 も参照）。
 
@@ -1102,13 +1109,13 @@ ORDER BY GROUPING(会社名), 売上合計 DESC
 
 この例は B64 の条件付き集計と併用し、会社別明細と総計を返します。`grouping_company` は実データと総計行を機械的に判別する値です。
 
-- grouping item と `GROUPING()` の引数は、APP の物理フィールド参照または修飾フィールド参照だけです。式・SELECT alias・CTE／一時テーブルの実体化列は使用できません
-- `CUBE`、`ROLLUP` / `GROUPING SETS` の入れ子、通常 item と grouping-set の混在、`GROUPING()` の式引数・複数引数、`GROUPING_ID` は未対応です
-- `GROUPING()` は SELECT 列、SELECT の CASE 条件、トップレベルの通常 `ORDER BY` で使用できます。HAVING 内では使用できません
-- `SELECT DISTINCT`、`KORDER BY`、ウィンドウ関数との併用はできません
-- 小計・総計は全入力に依存するため、常に完全入力が必要です。`onLimit=truncate` は使用できず、取得上限へ到達した場合は部分結果を返さずエラーになります
-- 展開後の grouping set 数、grouping item 数、生成行数には安全上限があります。超過時は planning または実行時に fail-closed でエラーとなり、部分結果を返しません
-- 重複する grouping set は除去せず、その分の結果行を保持します。`SELECT DISTINCT` は別機能であり、Phase1 では併用できません
+- grouping item（`ROLLUP` / `CUBE` / `GROUPING SETS` の要素）と `GROUPING()` の引数は、APP の物理フィールド参照または修飾フィールド参照だけです。式・SELECT alias・CTE／一時テーブルの実体化列は使用できません
+- `ROLLUP` / `CUBE` / `GROUPING SETS` の入れ子、通常 item と grouping-set の混在、`GROUPING()` の式引数・複数引数、`GROUPING_ID` は未対応です
+- `GROUPING()` は SELECT 列、SELECT の CASE 条件、トップレベルの通常 `ORDER BY`、`HAVING`（`HAVING` は v3.18.0 以降）で使用できます。`HAVING GROUPING(会社名) = 1` は総計行だけ、`= 0` は明細＋小計だけに絞り込めます
+- `SELECT DISTINCT` を併用できます（v3.18.0 以降）。`KORDER BY`・ウィンドウ関数との併用はできません
+- 小計・総計は全入力に依存するため、常に完全入力が必要です。`onLimit=truncate` は使用できず、取得上限へ到達した場合は部分結果を返さずエラーになります。`SELECT DISTINCT`・`HAVING`・`LIMIT` で結果行が減る見込みでも上限は緩みません
+- 展開後の grouping set 数、grouping item 数、生成行数には安全上限があります。超過時は planning または実行時に fail-closed でエラーとなり、部分結果を返しません。`CUBE(a, b, ...)` は展開後 `2^n` の grouping set を作るため、上限を超える列数（既定上限では 7 列以上）は取得前に拒否されます
+- 重複する grouping set は除去せず、その分の結果行を保持します。`SELECT DISTINCT` は grouping set 自体を消さず、SELECT 出力列の値が完全一致する行だけを除去します。`GROUPING()` を SELECT していれば明細（`0`）と小計・総計（`1`）は別行のまま残り、SELECT しておらず全投影値が同じ行は 1 行にまとまります
 
 ### GROUP_CONCAT
 
@@ -1192,7 +1199,7 @@ HAVING 句には集計関数・GROUP BY フィールドを使用できます。
 
 直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。v3.16.0 以降の `CASE` 式引数も同じ規則で直接記述でき、SELECT で付けた alias から参照する書き方も有効です。
 
-B65 の通常 HAVING（`GROUPING()` を含まないもの）は grouping set の集約後に各行へ作用します。`GROUPING()` を HAVING 内で使うのは Phase1 では未対応のため、SELECT 列・SELECT の CASE 条件・トップレベルの通常 `ORDER BY` で使用してください。
+B65 の HAVING は grouping set の集約後に各行へ作用します。通常の集計条件に加え、v3.18.0 以降は `HAVING` 内で `GROUPING(field)` を使用できます。`HAVING GROUPING(会社名) = 1` は総計・小計行だけ、`= 0` は明細行だけを残し、`HAVING GROUPING(会社名) = 1 AND SUM(売上) > 0` のように集計条件と組み合わせられます。`GROUPING()` は行の所属 grouping set から `0` / `1` を返す membership 判定であり、grouped 列が空文字の明細行と総計行を取り違えません。`WHERE`・JOIN 条件・集計関数の引数・ウィンドウ定義の中では `GROUPING()` は使用できません。
 
 ```sql
 SELECT 部署, COUNT(*) AS 件数
