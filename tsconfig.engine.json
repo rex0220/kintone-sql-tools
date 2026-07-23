@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "declarationDir": ".tmp/engine-declarations",
+    "emitDeclarationOnly": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": false,
+    "outDir": null,
+    "rootDir": "src",
+    "stripInternal": true
+  },
+  "files": [
+    "src/ui/types.d.ts",
+    "src/engine-library/index.ts"
+  ],
+  "include": []
+}

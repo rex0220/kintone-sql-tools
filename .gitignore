@@ -4,6 +4,7 @@
 /dist-cli
 /dist-mcp
 /dist-mcpb
+/dist-engine
 
 # TypeScript build artifacts in src/
 src/**/*.js
