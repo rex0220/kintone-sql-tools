@@ -52,11 +52,13 @@ runQuery("SELECT 'ok' AS status, 19 AS release", { client })
 ```html
 <script src="./ksql-engine.umd.js"></script>
 <script>
-  const engine = window.ksql.get("3.19.0");
-  const client = engine.createReadonlyKintoneClient();
+  // 変数名は consumer 側のコードに残るため、汎用的な `engine` ではなく
+  // kSQL のものと分かる名前（`ksqlEngine` 等）を推奨する。
+  const ksqlEngine = window.ksql.get("3.19.0");
+  const client = ksqlEngine.createReadonlyKintoneClient();
 
-  engine.runQuery("SELECT 'ok' AS status, 19 AS release", { client })
-    .then((result) => console.log(engine.version, result.rows))
+  ksqlEngine.runQuery("SELECT 'ok' AS status, 19 AS release", { client })
+    .then((result) => console.log(ksqlEngine.version, result.rows))
     .catch(console.error);
 </script>
 ```
