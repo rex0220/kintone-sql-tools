@@ -3,7 +3,7 @@
 - 対象: B66 Phase1 Step 8 / 仕様 §8
 - fixture: `scripts/engine-browser-smoke/index.html`
 - Firefox: **ユーザー実施待ち**
-- Chrome: **ユーザー実施待ち**
+- Chrome: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰は未実施**
 - 注意: Node test / JSDOM / VM smoke は、この実ブラウザ gate の代替ではない
 
 ## 1. 前提
@@ -72,14 +72,14 @@ fixture は実kintoneへの通信を行わない。HTML内の mock browser host 
 
 ### Chrome 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- Chrome version:
-- primary UMD version:
-- 結果JSON:
-- Console error:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- Chrome version: 未記録
+- primary UMD version: `3.18.0`（`dist-engine/ksql-engine.umd.js` build 済み）
+- 結果JSON: `ok: true`（詳細 JSON 未記録）
+- Console error: 未記録
+- スクリーンショット: 未取得
+- 備考: §3 の全確認項目を含む primary smoke が PASS。version/JSON/スクショの詳細欄は追記可。
 
 ## 4. UMD 2version 共存
 
@@ -114,15 +114,15 @@ registry保持、listener 0はこの節の実機結果が必要である。
 
 ### Chrome 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- load order:
-- `versions`:
-- registry identity:
-- listener増分:
-- Console warning/error:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- load order: primary `3.18.0`（dist-engine）→ secondary（`.tmp/engine-browser-smoke/` の別版 UMD）
+- `versions`: primary と secondary の両版を保持（`ok: true`）
+- registry identity: `registryIdentityPreserved: true`
+- listener増分: 未記録
+- Console warning/error: 未記録
+- スクリーンショット: 未取得
+- 備考: 初回は Secondary UMD 未選択のため `ok:false`（ファイル未選択の意味）。ファイル選択後に PASS。逆順ロード／もう一方のファイルでの再確認は未実施。
 
 ## 5. plugin browser非回帰
 
@@ -168,7 +168,7 @@ Step 8 計画 §10.4.7 の既存plugin面も、今回buildした
 ## 6. 最終判定欄
 
 - Firefox engine fixture: **ユーザー実施待ち**
-- Chrome engine fixture: **ユーザー実施待ち**
+- Chrome engine fixture: **PASS（2026-07-24・§3 primary / §4 2版共存）**
 - Firefox plugin regression: **ユーザー実施待ち**
 - Chrome plugin regression: **ユーザー実施待ち**
 - 両browserで全項目PASS後の判定:
