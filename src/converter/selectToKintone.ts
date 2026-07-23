@@ -31,6 +31,7 @@ import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
+import { normalizeGroupingSpec } from "../core/grouping";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -70,7 +71,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
   if (stmt.from.subtableCode) return "FULL_SCAN";
   if (stmt.joins.some((j) => j.table.subtableCode)) return "FULL_SCAN";
   if (stmt.joins.length > 0) return "FULL_SCAN";
-  if (stmt.groupBy.length > 0) return "FULL_SCAN";
+  if (normalizeGroupingSpec(stmt).type !== "NONE") return "FULL_SCAN";
   if (stmt.distinct) return "FULL_SCAN";
   if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some((c) =>
@@ -574,6 +575,10 @@ function collectRequiredFieldsByTable(
       walkArith(fv.expr, phase);
       return;
     }
+    if (fv.type === "GROUPING_FIELD") {
+      addFieldRef(fv.ref.field.field, fv.ref.field.tableAlias, phase);
+      return;
+    }
     walkCase(fv.expr, phase);
   };
 
@@ -640,6 +645,10 @@ function collectRequiredFieldsByTable(
       walkArith(k.expr, phase);
       return;
     }
+    if (k.type === "GROUPING_KEY") {
+      addFieldRef(k.ref.field.field, k.ref.field.tableAlias, phase);
+      return;
+    }
     walkStringFunc(k.expr, phase);
   };
 
@@ -676,6 +685,9 @@ function collectRequiredFieldsByTable(
       case "SCALAR_VALUE_COL":
         walkScalar(col.expr, "select");
         break;
+      case "GROUPING_COL":
+        addFieldRef(col.ref.field.field, col.ref.field.tableAlias, "select");
+        break;
       case "SCALAR_SUBQUERY_COL":
         break;
       case "WINDOW_COL":
@@ -691,6 +703,12 @@ function collectRequiredFieldsByTable(
   }
   walkWhere(stmt.where, "where");
   for (const gk of stmt.groupBy) walkGroupByKey(gk);
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "GROUPING_SETS") {
+    for (const item of grouping.allItems) {
+      addFieldRef(item.field, item.tableAlias, "groupBy");
+    }
+  }
   walkWhere(stmt.having, "having");
   for (const ob of stmt.orderBy) walkOrderByKey(ob.key);
 

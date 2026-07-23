@@ -1,5 +1,6 @@
 import { resolveSelectMode } from "../converter/selectToKintone";
 import type { FieldValue, SelectStatement, WhereExpr, WithStatement } from "../types/ast";
+import { hasGroupingClause } from "./grouping";
 
 /** 実行・検証・EXPLAIN が共有する単一 CTE のインライン化判定。 */
 export function canInlineSingleCte(stmt: WithStatement): boolean {
@@ -13,7 +14,7 @@ export function canInlineSingleCte(stmt: WithStatement): boolean {
   const finalQuery = stmt.query;
   if (finalQuery.type !== "SELECT") return false;
   if (finalQuery.from.cteName !== cteDef.name || finalQuery.joins.length > 0) return false;
-  if (finalQuery.groupBy.length > 0 || finalQuery.distinct) return false;
+  if (hasGroupingClause(finalQuery) || finalQuery.distinct) return false;
   return !finalQuery.columns.some(
     (column) => column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL"
   );

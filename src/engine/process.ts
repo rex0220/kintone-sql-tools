@@ -60,6 +60,7 @@ import {
 import { compareCanonicalValues, compareCodePointStrings } from "../core/scalarCompare";
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
 import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
+import { normalizeGroupingSpec } from "../core/grouping";
 
 export { ProcessRow };
 
@@ -647,6 +648,7 @@ function sortDecoratedRows(
     if (key.type === "FUNC_KEY") {
       return { semantics: syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(key.expr.func) ? "number" : "string") };
     }
+    if (key.type === "GROUPING_KEY") return { semantics: syntheticSemantics("number") };
     const semantics = fieldSemantics?.get(key.name);
     if (semantics) return { semantics };
     const orderMap = optionOrders?.get(key.name);
@@ -716,6 +718,8 @@ function evalOrderKey(key: OrderByKey, row: ProcessRow, aliasEvaluator?: OrderBy
     case "FIELD_NAME": return aliasEvaluator?.(key.name, row) ?? row[key.name] ?? "";
     case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":   return evalStringFunc(key.expr, row);
+    case "GROUPING_KEY":
+      throw new Error("internal error: B65 GROUPING_KEY reached evaluator while the Step 1 execution gate is closed.");
   }
 }
 
@@ -1037,6 +1041,8 @@ function computeOutputKey(
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_VALUE_COL":
       return col.alias ?? scalarValueDefaultKey(col.expr);
+    case "GROUPING_COL":
+      return col.alias ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
     case "SCALAR_SUBQUERY_COL":
       return col.alias ?? "(subquery)";
     case "WINDOW_COL":
@@ -1351,7 +1357,11 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する
-  if (stmt.groupBy.length > 0 || hasAggregateColumns(stmt.columns)) {
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "GROUPING_SETS") {
+    throw new Error("internal error: B65 grouping sets reached runFullScan while the Step 1 execution gate is closed.");
+  }
+  if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
   }
 

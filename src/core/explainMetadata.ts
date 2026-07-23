@@ -1,4 +1,5 @@
 import type { SelectStatement, WhereExpr } from "../types/ast";
+import { normalizeGroupingSpec } from "./grouping";
 
 /**
  * WHERE の capability 判定にフォーム定義が必要かを返す。
@@ -35,6 +36,7 @@ function valueNeedsFieldMetadata(value: unknown): boolean {
 
 function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
   return whereNeedsFieldMetadata(statement.where)
+    || normalizeGroupingSpec(statement).type === "GROUPING_SETS"
     || statement.orderBy.length > 0
     || statement.columns.some((column) =>
       column.type === "WINDOW_COL" && column.orderBy.length > 0

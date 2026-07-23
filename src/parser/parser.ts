@@ -58,6 +58,9 @@ import type {
   AggOperand,
   AggregateRef,
   GroupByKey,
+  GroupingSpec,
+  GroupingFieldItem,
+  GroupingRef,
   UpdateStatement,
   Assignment,
   DeleteStatement,
@@ -292,6 +295,8 @@ export class Parser {
   private scalarAllowsCase = true;
   private pos = 0;
   private insideAggregateArg = 0;
+  /** GROUPING(field) is only legal while parsing a SELECT CASE condition. */
+  private groupingFieldAllowedDepth = 0;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
@@ -680,7 +685,8 @@ export class Parser {
       if (projection.from.cteName !== NO_FROM_CTE_NAME || projection.joins.length > 0) {
         throw new ParseError("IMPORT projection cannot use FROM or JOIN.", this.prev());
       }
-      if (projection.where || projection.groupBy.length || projection.having || projection.orderBy.length || projection.limit !== null || projection.offset !== null) {
+      if (projection.where || projection.groupBy.length || projection.grouping !== undefined
+        || projection.having || projection.orderBy.length || projection.limit !== null || projection.offset !== null) {
         throw new ParseError("IMPORT projection supports SELECT expressions only.", this.prev());
       }
       this.validateImportProjectionScope(projection, this.prev());
@@ -1047,10 +1053,25 @@ export class Parser {
     const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
 
     let groupBy: GroupByKey[] = [];
+    let grouping: GroupingSpec | undefined;
     let having: WhereExpr | null = null;
     if (this.consume(TokenKind.GROUP)) {
       this.expect(TokenKind.BY);
-      groupBy = this.parseGroupByKeys();
+      if (this.peek().kind === TokenKind.DISTINCT || this.isSoftKeyword("DISTINCT")) {
+        throw new ParseError("B65: GROUP BY DISTINCT is not supported in Phase1.", this.peek());
+      }
+      if (this.isGroupingSetsStart()) {
+        grouping = this.parseGroupingSetsClause();
+      } else if (this.isRollupStart()) {
+        grouping = this.parseRollupClause();
+      } else if (this.isCubeStart()) {
+        throw new ParseError("B65: CUBE is not supported in Phase1.", this.peek());
+      } else {
+        groupBy = this.parseGroupByKeys();
+      }
+      if (grouping && this.peek().kind === TokenKind.COMMA) {
+        throw new ParseError("B65: ordinary GROUP BY items cannot be mixed with grouping elements.", this.peek());
+      }
       if (this.consume(TokenKind.HAVING)) {
         having = this.parseWhereExpr();
       }
@@ -1080,8 +1101,11 @@ export class Parser {
 
     const hasWindow = columns.some((column) => column.type === "WINDOW_COL");
     const hasAggregate = columns.some((column) => this.selectColumnHasAggregate(column));
-    if (hasWindow && (groupBy.length > 0 || hasAggregate)) {
+    if (hasWindow && (groupBy.length > 0 || grouping !== undefined || hasAggregate)) {
       throw new ParseError("ウィンドウ関数は GROUP BY / 集計関数と同じ SELECT では使用できません", this.peek());
+    }
+    if (grouping && orderMode === "KINTONE_NATIVE") {
+      throw new ParseError("B65: KORDER BY cannot be combined with grouping sets in Phase1.", this.peek());
     }
 
     return {
@@ -1092,6 +1116,7 @@ export class Parser {
       joins,
       where,
       groupBy,
+      ...(grouping ? { grouping } : {}),
       having,
       orderMode,
       orderBy,
@@ -1165,6 +1190,15 @@ export class Parser {
       return { type: "WILDCARD" };
     }
 
+    if (this.isUnsupportedGroupingIdStart()) {
+      throw new ParseError("B65: GROUPING_ID is not supported in Phase1.", this.peek());
+    }
+    if (this.isGroupingFunctionStart()) {
+      const ref = this.parseGroupingRef();
+      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return { type: "GROUPING_COL", ref, alias };
+    }
+
     // `||` のない既存列は従来 AST を維持する。
     if (this.tryAggregateFunc() === null && this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
@@ -1192,14 +1226,14 @@ export class Parser {
 
     // CASE WHEN ... END [AS alias]
     if (this.peek().kind === TokenKind.CASE) {
-      const expr = this.parseCaseWhenExpr();
+      const expr = this.parseCaseWhenExpr(true);
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "CASE_COL", expr, alias } satisfies CaseColumn;
     }
 
     // IF(cond, then, else) [AS alias] → CASE WHEN として処理
     if (this.peek().kind === TokenKind.IF) {
-      const expr = this.parseIfExpr();
+      const expr = this.parseIfExpr(true);
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "CASE_COL", expr, alias } satisfies CaseColumn;
     }
@@ -1311,7 +1345,7 @@ export class Parser {
     }
 
     const orderBy = this.consume(TokenKind.ORDER)
-      ? (this.expect(TokenKind.BY), this.parseOrderBy())
+      ? (this.expect(TokenKind.BY), this.parseOrderBy(false))
       : [];
     this.expect(TokenKind.RPAREN);
 
@@ -1647,10 +1681,10 @@ export class Parser {
   // ──────────────────────────────────────────────────
 
   /** IF(条件, then値, else値) → CaseWhenExpr に変換 */
-  private parseIfExpr(): CaseWhenExpr {
+  private parseIfExpr(allowGroupingCondition = false): CaseWhenExpr {
     this.advance(); // IF を消費
     this.expect(TokenKind.LPAREN);
-    const condition = this.parseWhereExpr();
+    const condition = this.parseCaseCondition(allowGroupingCondition);
     this.expect(TokenKind.COMMA);
     const thenResult = this.parseCaseResult();
     this.expect(TokenKind.COMMA);
@@ -1663,13 +1697,13 @@ export class Parser {
     };
   }
 
-  private parseCaseWhenExpr(): CaseWhenExpr {
+  private parseCaseWhenExpr(allowGroupingCondition = false): CaseWhenExpr {
     this.expect(TokenKind.CASE);
     const branches: CaseWhenClause[] = [];
 
     while (this.peek().kind === TokenKind.WHEN) {
       this.advance(); // WHEN を消費
-      const condition = this.parseWhereExpr();
+      const condition = this.parseCaseCondition(allowGroupingCondition);
       this.expect(TokenKind.THEN);
       const result = this.parseCaseResult();
       branches.push({ condition, result });
@@ -1686,6 +1720,16 @@ export class Parser {
 
     this.expect(TokenKind.END);
     return { type: "CASE_WHEN", branches, elseResult };
+  }
+
+  private parseCaseCondition(allowGroupingCondition: boolean): WhereExpr {
+    if (!allowGroupingCondition) return this.parseWhereExpr();
+    this.groupingFieldAllowedDepth++;
+    try {
+      return this.parseWhereExpr();
+    } finally {
+      this.groupingFieldAllowedDepth--;
+    }
   }
 
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
@@ -2254,6 +2298,18 @@ export class Parser {
   // - 集計関数（HAVING のみ）: COUNT(*) / SUM(f) ...
   // - 通常フィールド参照: [alias.]field
   private parseFieldValue(): FieldValue {
+    if (this.isUnsupportedGroupingIdStart()) {
+      throw new ParseError("B65: GROUPING_ID is not supported in Phase1.", this.peek());
+    }
+    if (this.isGroupingFunctionStart()) {
+      if (this.groupingFieldAllowedDepth === 0) {
+        throw new ParseError(
+          "B65: GROUPING() is only allowed in SELECT, SELECT CASE conditions, and direct ORDER BY.",
+          this.peek()
+        );
+      }
+      return { type: "GROUPING_FIELD", ref: this.parseGroupingRef() };
+    }
     // 文字列・数値関数: UPPER(f) / LENGTH(f) / ROUND(f,2) / ...
     if (this.tryStringFuncName() !== null) {
       const expr = this.parseStringFuncExpr();
@@ -2457,9 +2513,136 @@ export class Parser {
   private parseGroupByKeys(): GroupByKey[] {
     const keys: GroupByKey[] = [];
     do {
+      if (keys.length > 0 && (this.isRollupStart() || this.isGroupingSetsStart() || this.isCubeStart())) {
+        throw new ParseError("B65: ordinary GROUP BY items cannot be mixed with grouping elements.", this.peek());
+      }
       keys.push(this.parseGroupByKey());
     } while (this.consume(TokenKind.COMMA));
     return keys;
+  }
+
+  private isRollupStart(): boolean {
+    return this.isSoftKeyword("ROLLUP") && this.peekAt(1).kind === TokenKind.LPAREN;
+  }
+
+  private isCubeStart(): boolean {
+    return this.isSoftKeyword("CUBE") && this.peekAt(1).kind === TokenKind.LPAREN;
+  }
+
+  private isGroupingSetsStart(): boolean {
+    return this.isSoftKeyword("GROUPING")
+      && this.peekAt(1).kind === TokenKind.IDENT
+      && this.peekAt(1).value.toUpperCase() === "SETS"
+      && this.peekAt(2).kind === TokenKind.LPAREN;
+  }
+
+  private isGroupingFunctionStart(): boolean {
+    return this.isSoftKeyword("GROUPING") && this.peekAt(1).kind === TokenKind.LPAREN;
+  }
+
+  private isUnsupportedGroupingIdStart(): boolean {
+    return this.isSoftKeyword("GROUPING_ID") && this.peekAt(1).kind === TokenKind.LPAREN;
+  }
+
+  private groupingItemSyntaxKey(item: GroupingFieldItem): string {
+    return `${item.tableAlias ?? ""}\u0000${item.field}`;
+  }
+
+  private groupingAllItems(sets: { items: GroupingFieldItem[] }[]): GroupingFieldItem[] {
+    const seen = new Set<string>();
+    const allItems: GroupingFieldItem[] = [];
+    for (const set of sets) {
+      for (const item of set.items) {
+        const key = this.groupingItemSyntaxKey(item);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        allItems.push(item);
+      }
+    }
+    return allItems;
+  }
+
+  private parseGroupingFieldItem(): GroupingFieldItem {
+    if (this.isRollupStart() || this.isGroupingSetsStart() || this.isCubeStart()) {
+      throw new ParseError("B65: nested grouping elements are not supported in Phase1.", this.peek());
+    }
+    const token = this.peek();
+    const field = this.parseQualifiedIdent();
+    if (this.peek().kind !== TokenKind.COMMA && this.peek().kind !== TokenKind.RPAREN) {
+      throw new ParseError("B65: grouping items must be physical field references only.", token);
+    }
+    return { type: "FIELD", tableAlias: field.tableAlias, field: field.field };
+  }
+
+  private parseGroupingSetsClause(): GroupingSpec {
+    this.advance(); // GROUPING
+    this.advance(); // SETS
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("B65: GROUPING SETS requires at least one grouping set; use (()) for the empty set.", this.peek());
+    }
+    const sets: { items: GroupingFieldItem[] }[] = [];
+    do {
+      if (this.consume(TokenKind.LPAREN)) {
+        const items: GroupingFieldItem[] = [];
+        if (this.peek().kind !== TokenKind.RPAREN) {
+          do {
+            items.push(this.parseGroupingFieldItem());
+          } while (this.consume(TokenKind.COMMA));
+        }
+        this.expect(TokenKind.RPAREN);
+        sets.push({ items });
+      } else {
+        sets.push({ items: [this.parseGroupingFieldItem()] });
+      }
+    } while (this.consume(TokenKind.COMMA));
+    this.expect(TokenKind.RPAREN);
+    return {
+      type: "GROUPING_SETS",
+      source: "GROUPING_SETS",
+      allItems: this.groupingAllItems(sets),
+      sets,
+    };
+  }
+
+  private parseRollupClause(): GroupingSpec {
+    this.advance(); // ROLLUP
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("B65: ROLLUP requires at least one field.", this.peek());
+    }
+    const items: GroupingFieldItem[] = [];
+    do {
+      items.push(this.parseGroupingFieldItem());
+    } while (this.consume(TokenKind.COMMA));
+    this.expect(TokenKind.RPAREN);
+    const sets = Array.from(
+      { length: items.length + 1 },
+      (_, index) => ({ items: items.slice(0, items.length - index) })
+    );
+    return {
+      type: "GROUPING_SETS",
+      source: "ROLLUP",
+      allItems: this.groupingAllItems(sets),
+      sets,
+    };
+  }
+
+  private parseGroupingRef(): GroupingRef {
+    const start = this.advance(); // GROUPING
+    this.expect(TokenKind.LPAREN);
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("B65: GROUPING() requires exactly one physical field argument.", this.peek());
+    }
+    const field = this.parseQualifiedIdent();
+    if (this.peek().kind !== TokenKind.RPAREN) {
+      throw new ParseError("B65: GROUPING() requires exactly one physical field argument.", start);
+    }
+    this.expect(TokenKind.RPAREN);
+    return {
+      type: "GROUPING_REF",
+      field: { type: "FIELD", tableAlias: field.tableAlias, field: field.field },
+    };
   }
 
   /**
@@ -2491,10 +2674,10 @@ export class Parser {
     return { type: "FIELD_NAME", name };
   }
 
-  private parseOrderBy(): OrderByItem[] {
+  private parseOrderBy(allowGrouping = true): OrderByItem[] {
     const items: OrderByItem[] = [];
     do {
-      const key = this.parseOrderByKey();
+      const key = this.parseOrderByKey(allowGrouping);
       let direction: "ASC" | "DESC" = "ASC";
       if (this.consume(TokenKind.DESC))  direction = "DESC";
       else this.consume(TokenKind.ASC); // ASC は省略可
@@ -2510,7 +2693,16 @@ export class Parser {
    *   フィールド + 算術: 金額 * 1.1
    *   フィールド名/alias: 名前 / total
    */
-  private parseOrderByKey(): OrderByKey {
+  private parseOrderByKey(allowGrouping = true): OrderByKey {
+    if (this.isUnsupportedGroupingIdStart()) {
+      throw new ParseError("B65: GROUPING_ID is not supported in Phase1.", this.peek());
+    }
+    if (this.isGroupingFunctionStart()) {
+      if (!allowGrouping) {
+        throw new ParseError("B65: GROUPING() is not allowed in window ORDER BY.", this.peek());
+      }
+      return { type: "GROUPING_KEY", ref: this.parseGroupingRef() };
+    }
     // 文字列・数値関数
     if (this.tryStringFuncName() !== null) {
       const funcExpr = this.parseStringFuncExpr();

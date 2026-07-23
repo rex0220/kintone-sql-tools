@@ -324,6 +324,9 @@ function resolveField(
   if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
+  if (field.type === "GROUPING_FIELD") {
+    throw new Error("internal error: B65 GROUPING_FIELD reached evaluator while the Step 1 execution gate is closed.");
+  }
   // エイリアス付き: "a.フィールド"
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`

@@ -68,6 +68,12 @@ import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import { whereNeedsFieldMetadata } from "./core/explainMetadata";
+import { normalizeGroupingSpec } from "./core/grouping";
+import {
+  validateGroupingPlanning,
+  type GroupingFieldResolver,
+  type ResolvedGroupingField,
+} from "./core/groupingValidation";
 import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
@@ -878,6 +884,10 @@ async function executeParsedStatement(
   assertApplyScope("phase15b", stmt);
   assertApplyExecutionScope("phase15b", stmt);
   validateKlikeStatement(stmt);
+  if (stmt.type !== "EXPLAIN") {
+    await validateStatementGroupingPlanning(stmt, client, cacheContext);
+    assertStatementB65ExecutionOpen(stmt);
+  }
   if (stmt.type === "IMPORT") return executeImport(stmt, client, options, cacheContext);
   if (stmt.type === "UPDATE" && stmt.applyBlocks?.length) {
     if (stmt.validationErrorTable) {
@@ -2009,7 +2019,7 @@ async function evaluateScalarSubquery(
  */
 function withScalarProbeLimit(query: SelectStatement): { query: SelectStatement; probed: boolean } {
   const hasAgg =
-    query.groupBy.length > 0 ||
+    normalizeGroupingSpec(query).type !== "NONE" ||
     query.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL");
   if (hasAgg || query.distinct || query.limit !== null) return { query, probed: false };
   return { query: { ...query, limit: 2 }, probed: true };
@@ -2260,6 +2270,8 @@ async function executeSelect(
   captureColumnMeta = false
 ): Promise<SelectResult> {
   let result: SelectResult;
+  await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
+  assertB65ExecutionOpen(stmt);
   if (isNoFromSelect(stmt)) {
     result = executeNoFromSelect(stmt);
     if (captureColumnMeta) {
@@ -2332,6 +2344,154 @@ async function executeSelect(
     materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
   }
   return result;
+}
+
+/** TODO(B65 Step 2/3): remove this local gate only when the grouping-set engine is connected. */
+export const B65_EXECUTION_CLOSED_MESSAGE =
+  "UnsupportedError: B65 grouping sets are not yet executable (Phase1 Step 1 gate; planned to open in Step 2/3).";
+
+function assertB65ExecutionOpen(stmt: SelectStatement): void {
+  if (normalizeGroupingSpec(stmt).type === "GROUPING_SETS") {
+    throw new Error(B65_EXECUTION_CLOSED_MESSAGE);
+  }
+}
+
+async function validateStatementGroupingPlanning(
+  statement: unknown,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  const seen = new Set<object>();
+  const visit = async (node: unknown): Promise<void> => {
+    if (node === null || typeof node !== "object") return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const item of node) await visit(item);
+      return;
+    }
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "SELECT") {
+      await validateSelectGroupingPlanning(node as SelectStatement, client, cacheContext);
+    }
+    for (const child of Object.values(value)) await visit(child);
+  };
+  await visit(statement);
+}
+
+function statementHasB65Grouping(statement: unknown): boolean {
+  if (statement === null || typeof statement !== "object") return false;
+  if (Array.isArray(statement)) return statement.some(statementHasB65Grouping);
+  const value = statement as Record<string, unknown>;
+  if (value["type"] === "SELECT"
+    && normalizeGroupingSpec(statement as SelectStatement).type === "GROUPING_SETS") return true;
+  return Object.values(value).some(statementHasB65Grouping);
+}
+
+function assertStatementB65ExecutionOpen(statement: unknown): void {
+  if (statementHasB65Grouping(statement)) throw new Error(B65_EXECUTION_CLOSED_MESSAGE);
+}
+
+async function buildGroupingFieldResolver(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<GroupingFieldResolver> {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const physicalTables = tables.filter((table) => table.cteName === null);
+  const infosByApp = new Map<number, Map<string, KintoneFieldInfo>>(
+    await Promise.all([...new Set(physicalTables.map((table) => table.appId))].map(async (appId) => {
+      const infos = await getFieldsCached(appId, client, cacheContext);
+      return [appId, new Map(infos.map((info) => [info.code, info]))] as const;
+    }))
+  );
+
+  const physicalMatch = (table: TableRef, field: string): string | null => {
+    if (field === "$id") return "$id";
+    const code = fieldCodeForTypeLookup(table, field);
+    return infosByApp.get(table.appId)?.has(code) ? code : null;
+  };
+  const materializedHas = (table: TableRef, field: string): boolean => {
+    if (table.cteName === null) return false;
+    const materialized = materializedTables?.get(table.cteName);
+    // EXPLAIN cannot materialize CTE/temp rows. Conservatively require qualification
+    // when an unqualified B65 field shares a statement with an unknown materialized source.
+    return materialized ? materialized.columns.includes(field) : true;
+  };
+  const resolved = (
+    table: TableRef,
+    tableIndex: number,
+    field: FieldRef,
+    code: string
+  ): ResolvedGroupingField => {
+    const sameNamePhysical = tables.filter((candidate) =>
+      candidate.cteName === null && physicalMatch(candidate, field.field) !== null
+    ).length;
+    const sameNameMaterialized = tables.some((candidate) => materializedHas(candidate, field.field));
+    const alias = effectiveTableAlias(table);
+    return {
+      canonicalId: `source:${tableIndex}:APP${table.appId}:${code}`,
+      directKey: field.tableAlias && alias ? `${field.tableAlias}.${field.field}` : field.field,
+      unqualifiedBridgeKey:
+        sameNamePhysical === 1 && !sameNameMaterialized ? field.field : null,
+      physical: true,
+    };
+  };
+
+  return (field): ResolvedGroupingField => {
+    if (field.tableAlias !== null) {
+      const tableIndex = tables.findIndex((table) => effectiveTableAlias(table) === field.tableAlias);
+      if (tableIndex < 0) {
+        throw new Error(`ArgumentError: B65 field ${field.tableAlias}.${field.field} has an unknown table alias.`);
+      }
+      const table = tables[tableIndex];
+      if (table.cteName !== null) {
+        throw new Error(
+          `ArgumentError: B65 field ${field.tableAlias}.${field.field} resolves to materialized source ${table.cteName}; physical APP fields are required.`
+        );
+      }
+      const code = physicalMatch(table, field.field);
+      if (code === null) {
+        throw new Error(`ArgumentError: B65 field ${field.tableAlias}.${field.field} does not exist in APP${table.appId}.`);
+      }
+      return resolved(table, tableIndex, field, code);
+    }
+
+    const physicalMatches = tables.flatMap((table, tableIndex) => {
+      if (table.cteName !== null) return [];
+      const code = physicalMatch(table, field.field);
+      return code === null ? [] : [{ table, tableIndex, code }];
+    });
+    const materializedMatches = tables.filter((table) => materializedHas(table, field.field));
+    if (physicalMatches.length + materializedMatches.length > 1) {
+      throw new Error(`ArgumentError: B65 field ${field.field} is ambiguous across multiple sources.`);
+    }
+    if (physicalMatches.length === 1 && materializedMatches.length === 0) {
+      const match = physicalMatches[0];
+      return resolved(match.table, match.tableIndex, field, match.code);
+    }
+    if (materializedMatches.length === 1) {
+      throw new Error(
+        `ArgumentError: B65 field ${field.field} resolves to a materialized CTE/temp column; physical APP fields are required.`
+      );
+    }
+    throw new Error(`ArgumentError: B65 field ${field.field} does not exist in a physical APP source.`);
+  };
+}
+
+async function validateSelectGroupingPlanning(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<void> {
+  const normalized = normalizeGroupingSpec(stmt);
+  const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_')
+    || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
+  if (normalized.type === "NONE" && !hasGroupingNodes) return;
+  const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
+  validateGroupingPlanning(stmt, resolver);
 }
 
 function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
@@ -2417,7 +2577,8 @@ function validateNoFromColumns(stmt: SelectStatement): void {
 }
 
 function executeNoFromSelect(stmt: SelectStatement): SelectResult {
-  if (stmt.joins.length > 0 || stmt.where || stmt.groupBy.length > 0 || stmt.having || stmt.orderBy.length > 0 || stmt.distinct) {
+  if (stmt.joins.length > 0 || stmt.where || normalizeGroupingSpec(stmt).type !== "NONE"
+    || stmt.having || stmt.orderBy.length > 0 || stmt.distinct) {
     throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
   }
   validateNoFromColumns(stmt);
@@ -3613,6 +3774,8 @@ async function executeFullScanWithCte(
   cteCache: Map<string, MaterializedTable>,
   cacheContext: string
 ): Promise<SelectResult> {
+  await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
+  assertB65ExecutionOpen(stmt);
   const hiddenQualifiedAliases = new Set<string>();
   const withEffectiveAlias = (table: TableRef): TableRef => {
     if (table.alias !== null || table.cteName === null) return table;
@@ -7635,7 +7798,9 @@ function compareByOrder(
       ? resolveSemantics(aggregateFieldRef(item.key.name))
       : item.key.type === "ARITH_KEY"
         ? syntheticSemantics("number")
-        : stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string");
+        : item.key.type === "FUNC_KEY"
+          ? stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string")
+          : syntheticSemantics("number");
     const cmp = compareCanonicalValues(av, bv, semantics ?? syntheticSemantics("string"));
     if (cmp !== 0) return item.direction === "ASC" ? cmp : -cmp;
   }
@@ -7650,6 +7815,8 @@ function evalOrderKeyForRow(key: OrderByKey, row: ProcessRow): string {
       return String(evalArithExpr(key.expr, row));
     case "FUNC_KEY":
       return evalStringFunc(key.expr, row);
+    case "GROUPING_KEY":
+      throw new Error("ArgumentError: GROUPING() is not supported in REORDER BY.");
   }
 }
 
@@ -8032,6 +8199,7 @@ async function buildExplainWhereAnalysis(
     const typed = node as Record<string, unknown>;
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
+      await validateSelectGroupingPlanning(select, tracedClient, cacheContext);
       const physicalApps = [select.from, ...select.joins.map((join) => join.table)]
         .filter((table) => table.cteName === null)
         .map((table) => table.appId);
@@ -8720,8 +8888,11 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
     r.push("サブテーブル仮想テーブル");
   if (stmt.joins.length > 0)
     r.push("JOIN あり");
-  if (stmt.groupBy.length > 0)
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "PLAIN")
     r.push("GROUP BY あり");
+  else if (grouping.type === "GROUPING_SETS")
+    r.push(grouping.source === "ROLLUP" ? "ROLLUP あり" : "GROUPING SETS あり");
   if (stmt.distinct)
     r.push("DISTINCT あり");
   if (stmt.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"))
