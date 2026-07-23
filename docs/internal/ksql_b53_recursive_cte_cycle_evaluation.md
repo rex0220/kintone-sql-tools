@@ -1,7 +1,7 @@
 # B53 — WITH RECURSIVE / CYCLE 句（再帰 CTE）評価
 
 - 起票日: 2026-07-21
-- ステータス: **起票（評価・仕様前・優先度未確定）**
+- ステータス: **方向判断済（2026-07-23）＝B40 との二者択一で B53 採用・次は Phase1 仕様 R1**。決め手＝本命の BOM 多段展開が B53 Phase1 の `WITH RECURSIVE ... UNION ALL` で完結し累計員数も経路上で持てる（§1 例）。B40 は Phase1 が固定長のみで BOM 展開は可変長 Phase2 が別途必要＝Phase1 同士では B53 が明確に優位。B40 は §3 保留へ。実需（BOM/循環）は探索的なので大型投資の着手可否は別途。
 - 種別: 改善（新機能・大型候補）
 - 効果種別: 機能
 - 関連: **B40 プロパティグラフ**（同じ用途＝到達可能性/循環検出の別アプローチ・[ksql_property_graph_evaluation.md](ksql_property_graph_evaluation.md)）／B51・B52（CTE 経路の正しさ修正・v3.11.0 で実体化 CTE が堅牢化）
