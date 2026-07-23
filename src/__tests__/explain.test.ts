@@ -952,3 +952,22 @@ test("B56: constant-false WHERE の EXPLAIN は完全入力表示を免除する
   expect(plan).toContain("  records API access: none");
   expect(plan.some((line) => line.includes("complete input"))).toBe(false);
 });
+
+test("B65-X01: constant-false WHERE でも grouping/guard/complete-input 静的情報を保持する", async () => {
+  const plans = await buildBatchExplainPlans(
+    "SET @empty=[]; " +
+    "SELECT 顧客名, GROUPING(顧客名) AS g, COUNT(*) AS n FROM APP100 " +
+    "WHERE 顧客名 IN @empty GROUP BY ROLLUP(顧客名)"
+  );
+  const plan = plans.statements[1].plan;
+  expect(plan).toEqual(expect.arrayContaining([
+    "  grouping source: ROLLUP",
+    "  grouping sets: 2 (limit: 64)",
+    "  grouping items: 1 (limit: 16)",
+    "  grouping output rows: runtime checked (limit: 50000, before HAVING/DISTINCT/LIMIT)",
+    "  complete input: required (onLimit=truncate disabled)",
+    "  complete input reason: GROUPING_SETS",
+    expect.stringMatching(/order plan:\s+CANONICAL_LOCAL/),
+    "  records API access: none",
+  ]));
+});

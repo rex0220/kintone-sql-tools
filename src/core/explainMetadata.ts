@@ -1,5 +1,36 @@
 import type { SelectStatement, WhereExpr } from "../types/ast";
-import { normalizeGroupingSpec } from "./grouping";
+import {
+  B65_MAX_GENERATED_ROWS,
+  B65_MAX_GROUPING_ITEMS,
+  B65_MAX_GROUPING_SETS,
+  normalizeGroupingSpec,
+} from "./grouping";
+
+export interface GroupingExplainMetadata {
+  source: "ROLLUP" | "GROUPING_SETS";
+  expandedSetCount: number;
+  groupingItemCount: number;
+  setLimit: number;
+  itemLimit: number;
+  outputRowLimit: number;
+}
+
+/** B65 static plan facts. No Records API or runtime row count is involved. */
+export function buildGroupingExplainMetadata(
+  statement: SelectStatement,
+  canonicalItemCount?: number
+): GroupingExplainMetadata | null {
+  const grouping = normalizeGroupingSpec(statement);
+  if (grouping.type !== "GROUPING_SETS") return null;
+  return {
+    source: grouping.source,
+    expandedSetCount: grouping.sets.length,
+    groupingItemCount: canonicalItemCount ?? grouping.allItems.length,
+    setLimit: B65_MAX_GROUPING_SETS,
+    itemLimit: B65_MAX_GROUPING_ITEMS,
+    outputRowLimit: B65_MAX_GENERATED_ROWS,
+  };
+}
 
 /**
  * WHERE の capability 判定にフォーム定義が必要かを返す。

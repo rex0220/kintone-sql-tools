@@ -6,6 +6,8 @@ import type {
   SelectStatement,
 } from "../types/ast";
 import {
+  B65_MAX_GROUPING_ITEMS,
+  B65_MAX_GROUPING_SETS,
   normalizeGroupingSpec,
   resolveGroupingSpec,
   type ResolvedGroupingSpec,
@@ -23,8 +25,8 @@ export type GroupingFieldResolver = (field: FieldRef) => ResolvedGroupingField;
 
 /** Step 4 wires the candidate limits to this Step 1 planning hook. */
 export type GroupingPlanningGuardReason =
-  | "B65_GROUPING_SET_LIMIT"
-  | "B65_GROUPING_ITEM_LIMIT";
+  | "GROUPING_SET_LIMIT_EXCEEDED"
+  | "GROUPING_ITEM_LIMIT_EXCEEDED";
 
 export interface GroupingPlanningGuardFacts {
   /** Expanded ROLLUP sets and explicit duplicate sets are counted independently. */
@@ -34,6 +36,21 @@ export interface GroupingPlanningGuardFacts {
 }
 
 export type GroupingPlanningGuardHook = (facts: GroupingPlanningGuardFacts) => void;
+
+export const enforceGroupingPlanningCandidateLimits: GroupingPlanningGuardHook = (facts) => {
+  if (facts.expandedSetCount > B65_MAX_GROUPING_SETS) {
+    throw new Error(
+      `ArgumentError: B65 expanded grouping set count ${facts.expandedSetCount} exceeds limit ` +
+      `${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
+    );
+  }
+  if (facts.canonicalItemCount > B65_MAX_GROUPING_ITEMS) {
+    throw new Error(
+      `ArgumentError: B65 canonical grouping item count ${facts.canonicalItemCount} exceeds limit ` +
+      `${B65_MAX_GROUPING_ITEMS} (reason=GROUPING_ITEM_LIMIT_EXCEEDED).`
+    );
+  }
+};
 
 function displayField(field: FieldRef): string {
   return field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
@@ -217,8 +234,6 @@ export function validateGroupingPlanning(
       resolvedItems.push(resolved);
     }
   }
-  // Step 1 exposes stable, canonical planning facts only. Effective candidate
-  // constants and rejection boundaries are deliberately wired in Step 4.
   planningGuardHook({
     expandedSetCount: normalized.sets.length,
     canonicalItemCount: canonicalItems.size,

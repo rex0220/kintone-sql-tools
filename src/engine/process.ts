@@ -61,6 +61,7 @@ import { compareCanonicalValues, compareCodePointStrings } from "../core/scalarC
 import { syntheticSemantics, type ResolvedFieldSemantics } from "../core/fieldSemantics";
 import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
 import {
+  B65_MAX_GENERATED_ROWS,
   normalizeGroupingSpec,
   type ResolvedGroupingItem,
   type ResolvedGroupingSpec,
@@ -315,7 +316,7 @@ export function applyGroupingSets(
     if (limits.maxGeneratedRows !== undefined && generatedRows > limits.maxGeneratedRows) {
       throw new Error(
         `LimitError: B65 generated grouping rows ${generatedRows} exceed limit ${limits.maxGeneratedRows} ` +
-        "(reason=B65_GROUPING_GENERATED_ROW_LIMIT)."
+        "(reason=GROUPING_OUTPUT_LIMIT_EXCEEDED)."
       );
     }
   };
@@ -1483,9 +1484,20 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     if (!resolvedGroupingSpec) {
       throw new Error("internal error: B65 grouping sets require a metadata-resolved grouping spec.");
     }
-    rows = applyGroupingSets(rows, resolvedGroupingSpec, stmt.columns, aggregateSortKindResolver);
+    rows = applyGroupingSets(
+      rows,
+      resolvedGroupingSpec,
+      stmt.columns,
+      aggregateSortKindResolver,
+      { maxGeneratedRows: B65_MAX_GENERATED_ROWS }
+    );
   } else if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
-    rows = applyGroupBy(rows, stmt.groupBy, stmt.columns, aggregateSortKindResolver);
+    rows = applyGroupBy(
+      rows,
+      grouping.type === "PLAIN" ? grouping.allItems : [],
+      stmt.columns,
+      aggregateSortKindResolver
+    );
   }
 
   // 5. HAVING

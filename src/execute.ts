@@ -67,12 +67,16 @@ import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompar
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
-import { whereNeedsFieldMetadata } from "./core/explainMetadata";
+import {
+  buildGroupingExplainMetadata,
+  whereNeedsFieldMetadata,
+} from "./core/explainMetadata";
 import {
   normalizeGroupingSpec,
   type ResolvedGroupingSpec,
 } from "./core/grouping";
 import {
+  enforceGroupingPlanningCandidateLimits,
   validateGroupingPlanning,
   type GroupingFieldResolver,
   type ResolvedGroupingField,
@@ -2458,7 +2462,11 @@ async function validateSelectGroupingPlanning(
     || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
   if (normalized.type === "NONE" && !hasGroupingNodes) return;
   const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
-  const resolvedSpec = validateGroupingPlanning(stmt, resolver);
+  const resolvedSpec = validateGroupingPlanning(
+    stmt,
+    resolver,
+    enforceGroupingPlanningCandidateLimits
+  );
   if (resolvedSpec) resolvedGroupingSpecs.set(stmt, resolvedSpec);
 }
 
@@ -8773,14 +8781,27 @@ function buildSelectPlan(
     reasons.push(...whereCapability.reasons.map((reason) => reason.code));
   }
   const lines: string[] = [];
+  const groupingMetadata = buildGroupingExplainMetadata(
+    stmt,
+    resolvedGroupingSpecs.get(stmt)?.allItems.length
+  );
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
-  if (isConstantFalseWhere(stmt.where)) {
-    lines.push("  predicate:     constant false");
-    lines.push("  records API access: none");
-    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
-    return lines;
+  if (groupingMetadata) {
+    lines.push(`  grouping source: ${groupingMetadata.source}`);
+    lines.push(
+      `  grouping sets: ${groupingMetadata.expandedSetCount} ` +
+      `(limit: ${groupingMetadata.setLimit})`
+    );
+    lines.push(
+      `  grouping items: ${groupingMetadata.groupingItemCount} ` +
+      `(limit: ${groupingMetadata.itemLimit})`
+    );
+    lines.push(
+      `  grouping output rows: runtime checked (limit: ${groupingMetadata.outputRowLimit}, ` +
+      "before HAVING/DISTINCT/LIMIT)"
+    );
   }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
@@ -8794,16 +8815,25 @@ function buildSelectPlan(
       lines.push("  cursor page size: 500");
       lines.push(`  scan rows:     ${orderPlan.scanRows}`);
     }
+  } else if (groupingMetadata) {
+    lines.push("  order plan:    CANONICAL_LOCAL");
   }
   const explainedStmt = orderPlan && !orderPlan.requiresCompleteInput
     ? { ...stmt, orderBy: [] }
     : stmt;
   const completeReasons = completeInputReasons(explainedStmt);
   if (orderPlan?.requiresCompleteInput) completeReasons.add("LOCAL_ORDER");
-  if (completeReasons.size > 0) {
+  const constantFalse = isConstantFalseWhere(stmt.where);
+  if (completeReasons.size > 0 && (!constantFalse || groupingMetadata !== null)) {
     lines.push("  complete input: required (onLimit=truncate disabled)");
     lines.push(`  complete input reason: ${[...completeReasons].join(", ")}`);
     lines.push("  onLimit=truncate: disabled");
+  }
+  if (constantFalse) {
+    lines.push("  predicate:     constant false");
+    lines.push("  records API access: none");
+    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
+    return lines;
   }
   if (mode === "FULL_SCAN" && reasons.length > 0) {
     lines.push(`  reason:        ${reasons.join(", ")}`);

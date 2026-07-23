@@ -124,6 +124,30 @@ test("B65 planning errors remain fetch-free after execution gate removal", async
   }
 });
 
+test("B65-G01: candidate set/item planning guard は records fetch 前に fail-closed", async () => {
+  const sets = Array.from({ length: 65 }, () => "()").join(",");
+  const fields = Array.from({ length: 17 }, (_, index) => `f${index + 1}`);
+  const cases = [
+    [
+      `SELECT COUNT(*) FROM APP1 GROUP BY GROUPING SETS (${sets})`,
+      /65.*64.*GROUPING_SET_LIMIT_EXCEEDED/,
+    ],
+    [
+      `SELECT COUNT(*) FROM APP1 GROUP BY GROUPING SETS ((${fields.join(",")}))`,
+      /17.*16.*GROUPING_ITEM_LIMIT_EXCEEDED/,
+    ],
+  ] as const;
+  for (const [sql, message] of cases) {
+    const mock = client(
+      { 1: [] },
+      Object.fromEntries(fields.map((field) => [field, "SINGLE_LINE_TEXT"]))
+    );
+    await expect(execute(sql, mock, { cacheContext: `b65-guard-${message.source}` }))
+      .rejects.toThrow(message);
+    expect(mock.recordCalls).toBe(0);
+  }
+});
+
 test("B65-O05: KORDER BY 併用は records fetch 前に拒否する", async () => {
   const mock = client({ 1: [] }, { a: "SINGLE_LINE_TEXT", x: "NUMBER" });
   await expect(execute(
@@ -152,5 +176,27 @@ test("B65 EXPLAIN remains records API free", async () => {
     mock,
     { cacheContext: "b65-explain" }
   )).resolves.toMatchObject({ type: "SELECT" });
+  expect(mock.recordCalls).toBe(0);
+});
+
+test("B65-X01: EXPLAIN は candidate guard・完全入力・local order を静的表示する", async () => {
+  const mock = client({ 1: [] }, { a: "SINGLE_LINE_TEXT", x: "NUMBER" });
+  const result = await execute(
+    "EXPLAIN SELECT a, GROUPING(a) AS g, SUM(x) AS total FROM APP1 " +
+    "GROUP BY GROUPING SETS ((a),(),(a))",
+    mock,
+    { cacheContext: "b65-explain-static" }
+  ) as SelectResult;
+  const plan = result.rows.map((row) => row.plan);
+  expect(plan).toEqual(expect.arrayContaining([
+    expect.stringMatching(/mode:\s+FULL_SCAN/),
+    "  grouping source: GROUPING_SETS",
+    "  grouping sets: 3 (limit: 64)",
+    "  grouping items: 1 (limit: 16)",
+    "  grouping output rows: runtime checked (limit: 50000, before HAVING/DISTINCT/LIMIT)",
+    "  complete input: required (onLimit=truncate disabled)",
+    "  complete input reason: GROUPING_SETS",
+    expect.stringMatching(/order plan:\s+CANONICAL_LOCAL/),
+  ]));
   expect(mock.recordCalls).toBe(0);
 });

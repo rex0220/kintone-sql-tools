@@ -9,6 +9,14 @@ import type {
   ResolvedGroupingField,
 } from "./groupingValidation";
 
+/**
+ * B65 Phase1 Step 4 candidate limits.
+ * Effective values remain subject to the Step 5 Node/browser benchmark.
+ */
+export const B65_MAX_GROUPING_SETS = 64;
+export const B65_MAX_GROUPING_ITEMS = 16;
+export const B65_MAX_GENERATED_ROWS = 50_000;
+
 export interface ResolvedGroupingItem extends ResolvedGroupingField {
   field: GroupingFieldItem;
 }

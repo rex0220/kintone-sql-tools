@@ -188,6 +188,6 @@ describe("B65 Phase1 Step 2 grouping-set engine", () => {
       stmt.columns,
       undefined,
       { maxGeneratedRows: 2 }
-    )).toThrow(/B65_GROUPING_GENERATED_ROW_LIMIT/);
+    )).toThrow(/GROUPING_OUTPUT_LIMIT_EXCEEDED/);
   });
 });

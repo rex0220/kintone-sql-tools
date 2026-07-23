@@ -576,7 +576,8 @@ function collectRequiredFieldsByTable(
       return;
     }
     if (fv.type === "GROUPING_FIELD") {
-      addFieldRef(fv.ref.field.field, fv.ref.field.tableAlias, phase);
+      // GROUPING(arg) is virtual state. Its physical source is collected once
+      // from normalized grouping allItems below.
       return;
     }
     walkCase(fv.expr, phase);
@@ -646,7 +647,7 @@ function collectRequiredFieldsByTable(
       return;
     }
     if (k.type === "GROUPING_KEY") {
-      addFieldRef(k.ref.field.field, k.ref.field.tableAlias, phase);
+      // GROUPING(arg) is not an additional physical projection field.
       return;
     }
     walkStringFunc(k.expr, phase);
@@ -686,7 +687,7 @@ function collectRequiredFieldsByTable(
         walkScalar(col.expr, "select");
         break;
       case "GROUPING_COL":
-        addFieldRef(col.ref.field.field, col.ref.field.tableAlias, "select");
+        // allItems is the single physical-field source for GROUPING(arg).
         break;
       case "SCALAR_SUBQUERY_COL":
         break;
@@ -702,11 +703,13 @@ function collectRequiredFieldsByTable(
     addFieldRef(join.on.right.field, join.on.right.tableAlias, "where");
   }
   walkWhere(stmt.where, "where");
-  for (const gk of stmt.groupBy) walkGroupByKey(gk);
   const grouping = normalizeGroupingSpec(stmt);
-  if (grouping.type === "GROUPING_SETS") {
+  if (grouping.type === "PLAIN") {
+    for (const item of grouping.allItems) walkGroupByKey(item);
+  } else if (grouping.type === "GROUPING_SETS") {
     for (const item of grouping.allItems) {
-      addFieldRef(item.field, item.tableAlias, "groupBy");
+      // B65 items cannot resolve through SELECT aliases: always source-first.
+      addFieldRef(item.field, item.tableAlias, "select");
     }
   }
   walkWhere(stmt.having, "having");
