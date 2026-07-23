@@ -1071,17 +1071,17 @@ GROUP BY 部署
 ```sql
 -- 単一列 ROLLUP: 会社別明細と総計
 SELECT 会社名, SUM(売上) AS 売上合計
-FROM APP4149
+FROM APP100
 GROUP BY ROLLUP(会社名)
 
 -- 複数列 ROLLUP: 地域×会社明細、地域小計、総計
 SELECT 地域, 会社名, SUM(売上) AS 売上合計
-FROM APP4149
+FROM APP100
 GROUP BY ROLLUP(地域, 会社名)
 
 -- 必要な階層だけを明示
 SELECT 地域, 会社名, SUM(売上) AS 売上合計
-FROM APP4149
+FROM APP100
 GROUP BY GROUPING SETS ((地域, 会社名), (地域), ())
 ```
 
@@ -1095,7 +1095,7 @@ SELECT
   SUM(売上) AS 売上合計,
   SUM(CASE WHEN 商談フェーズ = '受注' THEN 売上 ELSE 0 END) AS 受注済売上,
   SUM(CASE WHEN 商談フェーズ IN ('提案中','内示') THEN 売上 ELSE 0 END) AS 見込売上
-FROM APP4149
+FROM APP100
 GROUP BY ROLLUP(会社名)
 ORDER BY GROUPING(会社名), 売上合計 DESC
 ```
@@ -1271,7 +1271,7 @@ B65 の通常 `ORDER BY GROUPING(field)` を昇順で指定すると、`GROUPING
 
 ```sql
 SELECT 会社名, GROUPING(会社名) AS grouping_company, SUM(売上) AS 売上合計
-FROM APP4149
+FROM APP100
 GROUP BY ROLLUP(会社名)
 ORDER BY GROUPING(会社名), 売上合計 DESC
 ```
