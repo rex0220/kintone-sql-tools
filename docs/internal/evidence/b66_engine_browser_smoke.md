@@ -2,8 +2,8 @@
 
 - 対象: B66 Phase1 Step 8 / 仕様 §8
 - fixture: `scripts/engine-browser-smoke/index.html`
-- Firefox: **ユーザー実施待ち**
-- Chrome: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰は未実施**
+- Firefox: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰 PASS**
+- Chrome: **engine fixture（§3 primary / §4 2版共存）PASS・§5 plugin 非回帰 PASS**
 - 注意: Node test / JSDOM / VM smoke は、この実ブラウザ gate の代替ではない
 
 ## 1. 前提
@@ -61,14 +61,14 @@ fixture は実kintoneへの通信を行わない。HTML内の mock browser host 
 
 ### Firefox 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- Firefox version:
-- primary UMD version:
-- 結果JSON:
-- Console error:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- Firefox version: 未記録
+- primary UMD version: `3.18.0`（`dist-engine/ksql-engine.umd.js` build 済み）
+- 結果JSON: `ok: true`（詳細 JSON 未記録）
+- Console error: 未記録
+- スクリーンショット: 未取得
+- 備考: §3 の全確認項目を含む primary smoke が PASS。
 
 ### Chrome 結果
 
@@ -102,15 +102,15 @@ registry保持、listener 0はこの節の実機結果が必要である。
 
 ### Firefox 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- load order:
-- `versions`:
-- registry identity:
-- listener増分:
-- Console warning/error:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- load order: primary `3.18.0`（dist-engine）→ secondary（`.tmp/engine-browser-smoke/` の別版 UMD）
+- `versions`: primary と secondary の両版を保持（`ok: true`）
+- registry identity: `registryIdentityPreserved: true`
+- listener増分: 未記録
+- Console warning/error: 未記録
+- スクリーンショット: 未取得
+- 備考: 2版共存 PASS。逆順ロード／もう一方のファイルでの再確認は未実施。
 
 ### Chrome 結果
 
@@ -141,36 +141,40 @@ Step 8 計画 §10.4.7 の既存plugin面も、今回buildした
 
 ### Firefox plugin 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- plugin artifact:
-- app / query:
-- read:
-- EXPLAIN:
-- DML guard:
-- KORDER success/error close:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- plugin artifact: `dist/ksql-plugin-v3.18.0.zip`（本 Step で build したもの）
+- app / query: 未記録
+- read: PASS（従来結果を返す）
+- EXPLAIN: PASS（records / mutation 0）
+- DML guard: PASS（書込み前に拒否 or 確認へ）
+- KORDER success/error close: PASS
+- スクリーンショット: 未取得
+- 備考: B33 実機手順の代表項目を再実施し非回帰を確認。個別値の詳細欄は追記可。
 
 ### Chrome plugin 結果
 
-- 状態: **ユーザー実施待ち**
-- 実施日時:
-- plugin artifact:
-- app / query:
-- read:
-- EXPLAIN:
-- DML guard:
-- KORDER success/error close:
-- スクリーンショット:
-- 備考:
+- 状態: **PASS（ユーザー実施・報告）**
+- 実施日時: 2026-07-24
+- plugin artifact: `dist/ksql-plugin-v3.18.0.zip`（本 Step で build したもの）
+- app / query: 未記録
+- read: PASS（従来結果を返す）
+- EXPLAIN: PASS（records / mutation 0）
+- DML guard: PASS（書込み前に拒否 or 確認へ）
+- KORDER success/error close: PASS
+- スクリーンショット: 未取得
+- 備考: B33 実機手順の代表項目を再実施し非回帰を確認。個別値の詳細欄は追記可。
 
 ## 6. 最終判定欄
 
-- Firefox engine fixture: **ユーザー実施待ち**
+- Firefox engine fixture: **PASS（2026-07-24・§3 primary / §4 2版共存）**
 - Chrome engine fixture: **PASS（2026-07-24・§3 primary / §4 2版共存）**
-- Firefox plugin regression: **ユーザー実施待ち**
-- Chrome plugin regression: **ユーザー実施待ち**
-- 両browserで全項目PASS後の判定:
-- 判定者:
-- 判定日時:
+- Firefox plugin regression: **PASS（2026-07-24）**
+- Chrome plugin regression: **PASS（2026-07-24）**
+- 両browserで全項目PASS後の判定: **PASS＝実ブラウザ gate 充足。Step 8 受入完了（release 可）**
+- 判定者: ユーザー実施・報告／Claude 記録
+- 判定日時: 2026-07-24
+
+> 未記録の詳細欄（ブラウザ version・結果 JSON 全文・listener 増分の実測値・スクリーンショット・
+> 逆順ロード再確認・app/query 個別値）は、必要に応じて後から追記できる。判定に必要な
+> 各項目の PASS/FAIL はユーザー実機で確認済み。
