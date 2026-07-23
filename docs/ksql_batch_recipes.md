@@ -529,6 +529,44 @@ REPLACE SUBTABLES (明細);
 - **CSV サブテーブル置換の走査上限**: 行 ID 所有権検査で既存レコードを全件走査するため、取込親が少数でも既存レコードが `maxRecords` を超えると fail-closed になる。
 - 標準スペース・**ゲストスペース**の両方で動作する。
 
+---
+
+## R13. 明細＋小計・総計を 1 クエリで作る（`ROLLUP` / `GROUPING`・v3.17.0）
+
+レポートやダッシュボードの定番「会社別の明細に**全体合計を 1 行足す**」を、`GROUP BY ROLLUP` と `GROUPING()` で 1 クエリ・1 結果セットにまとめます。B64（v3.16.0）の条件付き集計 `SUM(CASE WHEN … END)` とそのまま併用できます。
+
+```sql
+SELECT
+  CASE WHEN GROUPING(会社名) = 1 THEN '合計' ELSE 会社名 END AS 会社名,
+  COUNT(*) AS 案件数,
+  SUM(売上) AS 売上合計,
+  SUM(CASE WHEN 商談フェーズ = '受注'          THEN 売上 ELSE 0 END) AS 受注済売上,
+  SUM(CASE WHEN 商談フェーズ IN ('提案中','内示') THEN 売上 ELSE 0 END) AS 見込売上,
+  SUM(CASE WHEN 商談フェーズ = '受注'          THEN 1   ELSE 0 END) AS 受注件数
+FROM APP100
+GROUP BY ROLLUP(会社名)
+ORDER BY GROUPING(会社名), 売上合計 DESC
+```
+
+結果は「会社別の明細行（`GROUPING(会社名)=0`）」に続いて、最後に「総計行（`=1`）」が 1 行付きます。
+
+| 会社名 | 案件数 | 売上合計 | 受注済売上 | 見込売上 | 受注件数 |
+|---|--:|--:|--:|--:|--:|
+| （各社の明細…売上合計の降順） | … | … | … | … | … |
+| **合計** | **20** | **81,800,000** | **40,800,000** | **41,000,000** | **8** |
+
+**ポイント**
+
+- `GROUPING(field)` は、その行で `field` が集約された小計・総計行なら `1`、グループキーで残っていれば `0`。**総計行の `会社名` は空文字**になるので、`CASE WHEN GROUPING(会社名)=1 THEN '合計' …` でラベル化します。機械的に判別したいときは `GROUPING(会社名) AS g` を列に出します（実データの空セルと総計行を値だけでは区別できないため）。
+- **`ORDER BY GROUPING(会社名), 売上合計 DESC`** で、明細（`0`）を先に・総計（`1`）を末尾に置けます。
+- **階層小計**は複数列 ROLLUP で: `GROUP BY ROLLUP(地域, 会社名)` は「地域×会社の明細 → 地域小計 → 総計」を出します（`GROUPING(地域)` / `GROUPING(会社名)` で各段を判別）。出す階層を選びたいときは `GROUP BY GROUPING SETS ((地域, 会社名), (地域), ())` と明示します。
+
+**注意（Phase1・v3.17.0）**
+
+- grouping item と `GROUPING()` の引数は**物理フィールドのみ**（式・SELECT alias・一時テーブル/CTE 実体化列は不可）。
+- 小計・総計は**全入力に依存**するため常に完全入力が必要です。`onLimit=truncate` は使えず、取得上限に達すると**部分結果を返さずエラー**（fail-closed）。展開後の set 数・item 数・生成行数にも安全上限があります。読み取り専用なので `ksql_query` で実行できます。
+- **未対応（Phase2 以降）**: `CUBE`、`HAVING` 内 `GROUPING()`、`SELECT DISTINCT` との併用、`KORDER BY`・ウィンドウ関数との併用。詳細は言語リファレンス [§8](ksql_language_reference.md#8-group-by--集計関数)。
+
 ## 適用限界（スケール指針）
 
 判断基準は総レコード数ではなく **「日次の実変更件数が API 制限と実行時間に収まるか」** です。
