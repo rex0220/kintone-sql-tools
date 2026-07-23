@@ -83,8 +83,12 @@ fixture は実kintoneへの通信を行わない。HTML内の mock browser host 
 
 ## 4. UMD 2version 共存
 
-1. `Secondary UMD` で `.tmp/engine-browser-smoke/` のうち、primaryの
-   `3.18.0` と異なる任意の1ファイルを選ぶ。
+1. **先に** `Secondary UMD` のファイル入力で `.tmp/engine-browser-smoke/` のうち
+   primary（`3.18.0`）と異なる任意の1ファイルを選ぶ。
+   - `ksql-engine-3.19.0-smoke-x.umd.js` または `ksql-engine-4.0.0-smoke-y.umd.js`
+   - **未選択のままボタンを押すと** `No file chosen...`（旧版は
+     `Select a differently-versioned UMD file first.`）で `ok:false` になる。これは
+     不具合ではなくファイル未選択の意味。
 2. `Load secondary and check coexistence` を押す。
 3. 結果JSONが `"ok": true` で、`versions` に primary と secondary の両方が
    あり、`registryIdentityPreserved: true` であることを確認する。

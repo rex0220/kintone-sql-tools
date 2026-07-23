@@ -14,10 +14,20 @@
 <body>
   <h1>B66 kSQL engine browser smoke</h1>
   <p>
-    The primary UMD is loaded from <code>../../dist-engine/ksql-engine.umd.js</code>.
-    Build it first. Use the optional file picker to load a differently-versioned
-    UMD for the two-version check.
+    The primary UMD is loaded from <code>../../dist-engine/ksql-engine.umd.js</code>
+    (built version, e.g. <code>3.18.0</code>). Build it first with
+    <code>npm run build:engine</code>.
   </p>
+  <p>
+    <strong>Two-version check:</strong> you must pick a file in
+    <em>Secondary UMD</em> <strong>before</strong> pressing the second button.
+    Generate the candidates with
+    <code>node scripts/engine-umd-smoke.mjs --write-browser-fixtures</code>, then choose one of:
+  </p>
+  <ul>
+    <li><code>.tmp/engine-browser-smoke/ksql-engine-3.19.0-smoke-x.umd.js</code></li>
+    <li><code>.tmp/engine-browser-smoke/ksql-engine-4.0.0-smoke-y.umd.js</code></li>
+  </ul>
   <p>
     <button id="run">Run primary smoke</button>
     <label>Secondary UMD <input id="secondary" type="file" accept=".js"></label>
@@ -242,7 +252,11 @@
       document.getElementById("run-secondary").addEventListener("click", async () => {
         try {
           const file = document.getElementById("secondary").files[0];
-          assert(file, "Select a differently-versioned UMD file first.");
+          assert(
+            file,
+            "No file chosen. Pick a UMD in the 'Secondary UMD' file input first "
+              + "(e.g. .tmp/engine-browser-smoke/ksql-engine-3.19.0-smoke-x.umd.js), then press this button."
+          );
           const registry = window.ksql;
           const before = Object.keys(registry.versions);
           const firstEntries = Object.fromEntries(before.map(version => [version, registry.get(version)]));
