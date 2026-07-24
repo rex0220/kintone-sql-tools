@@ -438,6 +438,26 @@ kintone query: 作成日時 < FROM_TODAY(5, DAYS)
 
 ## 11. Phase2 引き継ぎ（対象外）
 
+### 11.1 最優先候補: SUPERSET_PREFILTER（相対日付 prefilter ＋ 残余のみ client 評価）
+
+**実機で最初に踏まれた制約（2026-07-24・v3.20.0 browser smoke）**。次のような、相対日付 exact 述語と押し下げ不能述語の AND は Phase1 では文全体が fail-closed になる。
+
+```sql
+SELECT 都道府県, 更新日時 FROM APP730
+WHERE 更新日時 >= YESTERDAY()      -- exact 押し下げ可能
+AND   LENGTH(都道府県) > 1          -- 押し下げ不能（client scalar）→ FULL_SCAN 化
+-- → YESTERDAY: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+```
+
+Phase1 は「WHERE 全体が exact でなければ拒否」に倒したが、これは実用上かなり制約的で、利用者が自然に踏む。理想は **SUPERSET_PREFILTER**＝相対日付 exact leaf（`更新日時 >= YESTERDAY()`）を kintone へ**プレフィルタとして押し下げ**（サーバ評価は1回）、取得した superset に対して**残余の押し下げ不能述語（`LENGTH(都道府県) > 1`）だけを client 評価**する。相対日付関数は client で再評価しない（サーバ結果を再利用）。
+
+- 実装の難所: 現行 FULL_SCAN / SUPERSET_PREFILTER の client 再評価は WHERE **全体**を `evalWhere` で再評価する。相対日付 leaf を「押し下げ済み＝client 側では常に真」として残余評価から**除外**する plan surgery が要る（LIKE の safe-leaf prefilter に相対日付 leaf を組み込み、残余評価では当該 leaf を skip）。B67 の runtime backstop はそのままにし、残余評価に相対日付 leaf を到達させない。
+- 忠実性: プレフィルタはサーバ評価なので superset は正しい。残余は非日付述語だけなので client 評価で問題ない。相対日付の TZ / 週境界 / 月末は Phase1 と同じくサーバに委ねる。
+- 対象: AND の一部だけ exact なケース（`相対日付 exact AND 非押し下げ`）。OR や JOIN 後残余は別途慎重に判断。
+- Phase1 の回避策（記録）: 押し下げ可能な述語へ置換（例 `都道府県 != ''`）／リテラル日付化（server-相対を失う）。CTE / temp 二段は Phase1 では拒否（相対日付は materialized 経路も対象外）。
+
+### 11.2 その他
+
 - `PRIMARY_ORGANIZATION()` と、B54 User API / 実行ユーザー文脈の整理。
 - 相対日付関数の client 評価。kintone と一致するタイムゾーン、週境界、月日繰越、期間比較を公式根拠と実機で固定した場合に限り検討する。
 - FULL_SCAN、JOIN後残余、VALIDATE、派生 / temp / CTE列、サブテーブル、関連レコードでの利用。
