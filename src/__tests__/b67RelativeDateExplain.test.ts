@@ -1,4 +1,10 @@
-import { execute, type KintoneClient } from "../execute";
+import {
+  execute,
+  renderRelativeDateResidualWhere,
+  type KintoneClient,
+} from "../execute";
+import { parseSqlStatement } from "../core/sql";
+import type { SelectStatement, WhereExpr } from "../types/ast";
 
 function makeClient() {
   const calls = {
@@ -21,7 +27,17 @@ function makeClient() {
     getApps: async () => [],
     getFields: async () => [
       { code: "作成日時", label: "作成日時", fieldType: "CREATED_TIME" },
+      { code: "更新日時", label: "更新日時", fieldType: "UPDATED_TIME" },
       { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "備考", label: "備考", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE" },
+      {
+        code: "子",
+        label: "子",
+        fieldType: "SINGLE_LINE_TEXT",
+        inSubtable: true,
+        subtableCode: "テーブル",
+      },
     ],
     getProcessStatuses: async () => ({ enable: false, states: [] }),
     getNumberPrecision: async () => ({
@@ -84,4 +100,170 @@ test("拒否 EXPLAIN は具体的 R2 reason を保持し GET/Cursor plan を表�
   await expect(execute(sql, executed.client))
     .rejects.toThrow(/WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED/);
   expectNoExecutionApi(executed.calls);
+});
+
+test("Phase2 mixed EXPLAIN は共有 prefilterPlan から server/residual/評価0を表示する", async () => {
+  const sql = "SELECT $id FROM APP100 "
+    + "WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1";
+  const explained = makeClient();
+  const text = planText(await execute(`EXPLAIN ${sql}`, explained.client));
+
+  expect(text).toMatch(/mode:\s+FULL_SCAN/);
+  expect(text).toContain("where capability: SUPERSET_PREFILTER");
+  expect(text).toContain("relative date function: YESTERDAY");
+  expect(text).toContain("relative date evaluation: kintone server exact prefilter");
+  expect(text).toContain("field: 更新日時 (UPDATED_TIME)");
+  expect(text).toContain("operator: >=");
+  expect(text).toContain("server prefilter: 更新日時 >= YESTERDAY()");
+  expect(text).toContain("client residual: LENGTH(件名) > 1");
+  expect(text).toContain("relative date client evaluations: 0");
+  expect(text).toContain("kintone query: 更新日時 >= YESTERDAY()");
+  expect(text).not.toContain("kintone query: (なし)");
+  expectNoExecutionApi(explained.calls);
+
+  const executed = makeClient();
+  await execute(sql, executed.client);
+  expect(executed.calls.records.mock.calls[0][0].query).toBe(
+    "更新日時 >= YESTERDAY() order by $id asc limit 500 offset 0"
+  );
+});
+
+test("Phase2 複数 leaf は detail を列挙し合成 prefilter/residual を各1回だけ表示する", async () => {
+  const explained = makeClient();
+  const text = planText(await execute(
+    "EXPLAIN SELECT $id FROM APP100 WHERE 更新日時 >= YESTERDAY() "
+      + "AND 作成日時 <= TOMORROW() "
+      + "AND LENGTH(件名) > 1 AND 備考 LIKE 'A%'",
+    explained.client
+  ));
+
+  expect(text.match(/relative date function: YESTERDAY/g)).toHaveLength(1);
+  expect(text.match(/relative date function: TOMORROW/g)).toHaveLength(1);
+  expect(text).toContain("field: 更新日時 (UPDATED_TIME)");
+  expect(text).toContain("field: 作成日時 (CREATED_TIME)");
+  expect(text).toContain("operator: >=");
+  expect(text).toContain("operator: <=");
+  expect(text.match(/server prefilter:/g)).toHaveLength(1);
+  expect(text.match(/client residual:/g)).toHaveLength(1);
+  expect(text).toContain("更新日時 >= YESTERDAY()");
+  expect(text).toContain("作成日時 <= TOMORROW()");
+  expect(text).toContain("LENGTH(件名) > 1");
+  expect(text).toContain("備考 LIKE 'A%'");
+  expectNoExecutionApi(explained.calls);
+});
+
+test("Phase1 pure exact の relative 表示行は従来と byte-identical", async () => {
+  const text = planText(await execute(
+    "EXPLAIN SELECT 作成日時 FROM APP100 WHERE 作成日時 < FROM_TODAY(5, DAYS)",
+    makeClient().client
+  ));
+  const allLines = text.split("\n");
+  const relativeStart = allLines.indexOf("  relative date function: FROM_TODAY");
+  const relativeLines = allLines.slice(relativeStart, relativeStart + 7);
+
+  expect(relativeLines).toEqual([
+    "  relative date function: FROM_TODAY",
+    "  evaluation: kintone server",
+    "  field: 作成日時 (CREATED_TIME)",
+    "  operator: <",
+    "  where capability: EXACT_PUSHDOWN",
+    "  client evaluation: forbidden",
+    "  kintone query: 作成日時 < FROM_TODAY(5, DAYS)",
+  ]);
+  expect(text).not.toContain("SUPERSET_PREFILTER");
+  expect(text).not.toContain("client residual:");
+  expect(text).not.toContain("relative date client evaluations:");
+});
+
+test.each([
+  [
+    "OR",
+    "SELECT $id FROM APP100 WHERE 更新日時 >= YESTERDAY() OR LENGTH(件名) > 1",
+  ],
+  [
+    "NOT",
+    "SELECT $id FROM APP100 "
+      + "WHERE NOT (更新日時 >= YESTERDAY() AND LENGTH(件名) > 1)",
+  ],
+  [
+    "KORDER",
+    "SELECT $id FROM APP100 WHERE 更新日時 >= YESTERDAY() "
+      + "AND LENGTH(件名) > 1 KORDER BY $id LIMIT 10",
+  ],
+  [
+    "DML",
+    "UPDATE APP100 SET 件名 = 'x' "
+      + "WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
+  ],
+  [
+    "JOIN",
+    "SELECT a.更新日時 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.更新日時 >= YESTERDAY()",
+  ],
+  [
+    "VALIDATE",
+    "VALIDATE APP100 WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
+  ],
+  [
+    "subtable",
+    "UPDATE APP100$テーブル SET 子 = 'x' WHERE 更新日時 >= YESTERDAY()",
+  ],
+])("%s reject は execution と同じ reason を表示し executable query を出さない", async (
+  _label,
+  sql
+) => {
+  const explained = makeClient();
+  const text = planText(await execute(`EXPLAIN ${sql}`, explained.client));
+  expect(text).toContain("plan status: rejected");
+  expect(text).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
+  expect(text).not.toContain("kintone query:");
+  expect(text).not.toContain("server prefilter:");
+  expectNoExecutionApi(explained.calls);
+
+  const executed = makeClient();
+  await expect(execute(sql, executed.client))
+    .rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
+  expectNoExecutionApi(executed.calls);
+});
+
+function parsedWhere(sql: string): WhereExpr {
+  const stmt = parseSqlStatement(sql) as SelectStatement;
+  if (stmt.where === null) throw new Error("WHERE fixture required");
+  return stmt.where;
+}
+
+test.each([
+  ["BINARY/function", "SELECT * FROM APP100 WHERE LENGTH(件名) > 1", "LENGTH(件名) > 1"],
+  [
+    "LOGICAL/LIKE/KLIKE",
+    "SELECT * FROM APP100 WHERE 件名 LIKE 'A%' AND 備考 KLIKE '至急'",
+    "(件名 LIKE 'A%' AND 備考 KLIKE '至急')",
+  ],
+  [
+    "NOT/GROUP",
+    "SELECT * FROM APP100 WHERE NOT (件名 NOT LIKE 'A%')",
+    "NOT ((件名 NOT LIKE 'A%'))",
+  ],
+  [
+    "NULL_CHECK",
+    "SELECT * FROM APP100 WHERE 件名 IS NOT NULL",
+    "件名 IS NOT NULL",
+  ],
+])("residual renderer は %s を読みやすく表示する", (_label, sql, expected) => {
+  expect(renderRelativeDateResidualWhere(parsedWhere(sql))).toBe(expected);
+});
+
+test("residual renderer は未知 shape でも throw せず安全な token へ退避する", () => {
+  expect(() => renderRelativeDateResidualWhere(
+    { type: "FUTURE_NODE", payload: BigInt(1) } as unknown as WhereExpr
+  )).not.toThrow();
+  expect(renderRelativeDateResidualWhere(
+    { type: "FUTURE_NODE" } as unknown as WhereExpr
+  )).toBe("<expr>");
+  expect(renderRelativeDateResidualWhere({
+    type: "BINARY",
+    op: "=",
+    left: { type: "FUTURE_FIELD" },
+    right: { type: "FUTURE_VALUE" },
+  } as unknown as WhereExpr)).toBe("<expr> = <expr>");
 });

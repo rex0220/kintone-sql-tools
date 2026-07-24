@@ -1482,6 +1482,8 @@ export interface FullScanInput {
   aggregateSortKindResolver?: AggregateSortKindResolver;
   /** kintone プレフィルタで適用済みの KLIKE ノード。集合外は evalWhere が拒否する。 */
   appliedKlikes?: ReadonlySet<object>;
+  /** undefined は元 WHERE、null は残余なし、WhereExpr はその残余だけを評価する。 */
+  residualWhere?: WhereExpr | null;
   /** 単一の実体化ソースが保持する出力列。0 行の単独 SELECT * にのみ使う。 */
   sourceColumns?: readonly string[];
   /** 0 行でも JOIN キーを検証するための、alias ごとの保存済みソース列。 */
@@ -1608,7 +1610,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   // 3. filter — JS 側 WHERE 評価
   // JOIN があれば常に適用（kintone クエリでは複数テーブルの結合条件を表現不可）
   // JOIN がなくても WHERE に関数が含まれる場合は kintone 側でフィルタできないため JS で評価
-  rows = applyFilter(rows, stmt.where, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
+  const filterWhere = input.residualWhere !== undefined ? input.residualWhere : stmt.where;
+  rows = applyFilter(rows, filterWhere, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
 
   // 4. GROUP BY + 集計
   // GROUP BY がなくても集計関数があれば全行を1グループとして集計する

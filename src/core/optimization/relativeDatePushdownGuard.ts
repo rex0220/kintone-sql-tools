@@ -15,6 +15,10 @@ import {
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../relativeDateFunction";
 import type {
+  RelativeDatePrefilterDecomposition,
+  RelativeDatePrefilterPlan,
+} from "./relativeDatePrefilterPlan";
+import type {
   PredicateCapabilityReason,
   PredicateCapabilityResult,
 } from "./whereCapability";
@@ -36,6 +40,8 @@ export interface RelativeDatePlanNode {
   readonly selectMode?: SelectMode;
   readonly capability?: PredicateCapabilityResult;
   readonly restQuery?: string;
+  readonly prefilterPlan?: RelativeDatePrefilterPlan;
+  readonly phase2PrefilterEligible?: boolean;
   readonly clientWhereEvaluation: boolean;
   readonly allowed: boolean;
 }
@@ -56,6 +62,9 @@ export interface RelativeDatePushdownPlan {
 export interface RelativeDateCapabilityResolver {
   select(select: SelectStatement): Promise<PredicateCapabilityResult>;
   dml(statement: UpdateStatement | DeleteStatement): Promise<PredicateCapabilityResult>;
+  prefilterDecomposition?(
+    select: SelectStatement
+  ): Promise<RelativeDatePrefilterDecomposition | null>;
 }
 
 interface WalkCandidate {
@@ -64,6 +73,7 @@ interface WalkCandidate {
   readonly where: WhereExpr | null;
   readonly functionNames: readonly string[];
   readonly path: string;
+  readonly allowPhase2Prefilter?: boolean;
 }
 
 function relativeDateFunctionNamesInNode(node: unknown, stopAtNestedSelect: boolean): string[] {
@@ -124,7 +134,8 @@ function collectSelect(
   select: SelectStatement,
   path: string,
   candidates: WalkCandidate[],
-  forceForbidden: boolean
+  forceForbidden: boolean,
+  allowPhase2 = true
 ): void {
   const functionNames = relativeDateFunctionNamesInWhere(select.where);
   if (functionNames.length > 0) {
@@ -134,10 +145,17 @@ function collectSelect(
       where: select.where,
       functionNames,
       path,
+      allowPhase2Prefilter: allowPhase2,
     });
   }
   nestedSelects(select, select).forEach((nested, index) =>
-    collectSelect(nested, `${path}.select-source[${index}]`, candidates, forceForbidden)
+    collectSelect(
+      nested,
+      `${path}.select-source[${index}]`,
+      candidates,
+      forceForbidden,
+      allowPhase2
+    )
   );
 }
 
@@ -246,19 +264,47 @@ function collectStatement(
         }
       }
       nestedSelects(statement, statement).forEach((select, index) =>
-        collectSelect(select, `${path}.select-source[${index}]`, candidates, forceForbidden)
+        collectSelect(
+          select,
+          `${path}.select-source[${index}]`,
+          candidates,
+          forceForbidden,
+          false
+        )
       );
       return;
     }
     default:
       nestedSelects(statement, statement).forEach((select, index) =>
-        collectSelect(select, `${path}.select-source[${index}]`, candidates, forceForbidden)
+        collectSelect(
+          select,
+          `${path}.select-source[${index}]`,
+          candidates,
+          forceForbidden,
+          false
+        )
       );
   }
 }
 
-function serializationContainsFunctions(query: string, names: readonly string[]): boolean {
+export function serializationContainsFunctions(query: string, names: readonly string[]): boolean {
   return names.every((name) => new RegExp(`\\b${name}\\s*\\(`).test(query));
+}
+
+/**
+ * Phase2 A の第2許可候補を、実行副作用なしで判定する。
+ * decomposition の eligible 契約に加えて物理 source と実行 mode を再確認する。
+ */
+export function allowRelativeDatePrefilterPlan(
+  select: SelectStatement,
+  decomposition: RelativeDatePrefilterDecomposition
+): boolean {
+  return decomposition.eligible === true
+    && resolveSelectMode(select) === "FULL_SCAN"
+    && select.orderMode !== "KINTONE_NATIVE"
+    && select.from.cteName === null
+    && !select.from.subtableCode
+    && select.joins.length === 0;
 }
 
 function rejectedNode(candidate: WalkCandidate): RelativeDatePlanNode {
@@ -343,7 +389,7 @@ export async function buildRelativeDatePushdownPlan(
       } catch {
         restQuery = "";
       }
-      const allowed =
+      let allowed =
         physicalTopLevel
         && selectMode === "SIMPLE"
         // Canonical ORDER BY may switch to a local complete-input plan. Phase 1
@@ -351,6 +397,24 @@ export async function buildRelativeDatePushdownPlan(
         && (select.orderBy.length === 0 || select.orderMode === "KINTONE_NATIVE")
         && capability.capability === "EXACT_PUSHDOWN"
         && serializationContainsFunctions(restQuery, candidate.functionNames);
+      let prefilterPlan: RelativeDatePrefilterPlan | undefined;
+      let phase2PrefilterEligible: boolean | undefined;
+      if (
+        !allowed
+        && candidate.allowPhase2Prefilter !== false
+        && capability.capability === "SUPERSET_PREFILTER"
+        && resolver.prefilterDecomposition
+      ) {
+        const decomposition = await resolver.prefilterDecomposition(select);
+        if (
+          decomposition?.eligible === true
+          && allowRelativeDatePrefilterPlan(select, decomposition)
+        ) {
+          prefilterPlan = decomposition.plan;
+          phase2PrefilterEligible = true;
+          allowed = true;
+        }
+      }
       const node: RelativeDatePlanNode = {
         kind: candidate.kind,
         source: candidate.source,
@@ -359,6 +423,7 @@ export async function buildRelativeDatePushdownPlan(
         selectMode,
         capability,
         restQuery,
+        ...(prefilterPlan ? { prefilterPlan, phase2PrefilterEligible } : {}),
         clientWhereEvaluation: !allowed,
         allowed,
       };

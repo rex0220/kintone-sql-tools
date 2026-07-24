@@ -75,10 +75,6 @@ test.each([
   ],
   ["DISTINCT", "SELECT DISTINCT 日付 FROM APP100 WHERE 日付 = YESTERDAY()"],
   ["normal ORDER BY", "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() ORDER BY 日付"],
-  [
-    "SUPERSET/LOCAL residual",
-    "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1",
-  ],
   ["unsupported field type", "SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()"],
   [
     "nonexact KORDER",

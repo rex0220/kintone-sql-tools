@@ -60,6 +60,32 @@ test("flatten: null / undefined は空文字へ正規化し、他の値形式は
   });
 });
 
+test("runFullScan residualWhere は undefined / null / WhereExpr を区別する", () => {
+  const stmt = parseSelect("SELECT 件名 FROM APP100 WHERE 状態 = 'keep'");
+  const residual = parseSelect(
+    "SELECT 件名 FROM APP100 WHERE 件名 LIKE 'A%'"
+  ).where;
+  const tables = new Map([[null, [
+    makeRecord({ 件名: "Alpha", 状態: "keep" }),
+    makeRecord({ 件名: "Beta", 状態: "keep" }),
+    makeRecord({ 件名: "Able", 状態: "drop" }),
+  ]]]);
+
+  expect(runFullScan({ tables, stmt }).rows).toEqual([
+    { 件名: "Alpha" },
+    { 件名: "Beta" },
+  ]);
+  expect(runFullScan({ tables, stmt, residualWhere: null }).rows).toEqual([
+    { 件名: "Alpha" },
+    { 件名: "Beta" },
+    { 件名: "Able" },
+  ]);
+  expect(runFullScan({ tables, stmt, residualWhere: residual }).rows).toEqual([
+    { 件名: "Alpha" },
+    { 件名: "Able" },
+  ]);
+});
+
 // ----------------------------------------------------------------
 // applyWindow
 // ----------------------------------------------------------------
