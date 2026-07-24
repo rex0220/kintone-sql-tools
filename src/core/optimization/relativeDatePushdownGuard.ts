@@ -14,7 +14,17 @@ import {
   isRelativeDateFunctionName,
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../relativeDateFunction";
-import type { PredicateCapabilityResult } from "./whereCapability";
+import type {
+  PredicateCapabilityReason,
+  PredicateCapabilityResult,
+} from "./whereCapability";
+
+export type RelativeDatePlanReasonCode =
+  | "WHERE_RELATIVE_DATE_ARGUMENT_INVALID"
+  | "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED"
+  | "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED"
+  | "WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED"
+  | "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN";
 
 export type RelativeDatePlanNodeKind = "SELECT" | "DML" | "FORBIDDEN";
 
@@ -37,7 +47,9 @@ export interface RelativeDatePushdownPlan {
   readonly rejection?: {
     readonly functionName: string;
     readonly path: string;
-    readonly code: typeof WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN;
+    /** 最も具体的な R2 reason。reasonCodes は診断で失ってはならない全理由。 */
+    readonly code: RelativeDatePlanReasonCode;
+    readonly reasonCodes: readonly RelativeDatePlanReasonCode[];
   };
 }
 
@@ -260,6 +272,36 @@ function rejectedNode(candidate: WalkCandidate): RelativeDatePlanNode {
   };
 }
 
+function relativeDateReasonCodes(
+  capability: PredicateCapabilityResult | undefined
+): RelativeDatePlanReasonCode[] {
+  const codes = (capability?.reasons ?? [])
+    .filter((reason): reason is PredicateCapabilityReason & { functionName: string } =>
+      reason.functionName !== undefined
+    )
+    .map((reason) => reason.code)
+    .filter((code): code is RelativeDatePlanReasonCode => code.startsWith("WHERE_RELATIVE_DATE_"));
+  if (!codes.includes(WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN)) {
+    codes.push(WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN);
+  }
+  return [...new Set(codes)];
+}
+
+function rejectionFor(
+  candidate: WalkCandidate,
+  capability?: PredicateCapabilityResult
+): NonNullable<RelativeDatePushdownPlan["rejection"]> {
+  const reasonCodes = relativeDateReasonCodes(capability);
+  return {
+    functionName: candidate.functionNames[0],
+    path: candidate.path,
+    code: reasonCodes.find((code) =>
+      code !== WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+    ) ?? WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
+    reasonCodes,
+  };
+}
+
 /**
  * Execution と EXPLAIN が共有する B67 plan walk。
  *
@@ -283,11 +325,7 @@ export async function buildRelativeDatePushdownPlan(
         hasRelativeDate: true,
         nodes,
         allowed: false,
-        rejection: {
-          functionName: candidate.functionNames[0],
-          path: candidate.path,
-          code: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
-        },
+        rejection: rejectionFor(candidate),
       };
     }
 
@@ -330,11 +368,7 @@ export async function buildRelativeDatePushdownPlan(
           hasRelativeDate: true,
           nodes,
           allowed: false,
-          rejection: {
-            functionName: candidate.functionNames[0],
-            path: candidate.path,
-            code: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
-          },
+          rejection: rejectionFor(candidate, capability),
         };
       }
       continue;
@@ -367,11 +401,7 @@ export async function buildRelativeDatePushdownPlan(
         hasRelativeDate: true,
         nodes,
         allowed: false,
-        rejection: {
-          functionName: candidate.functionNames[0],
-          path: candidate.path,
-          code: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
-        },
+        rejection: rejectionFor(candidate, capability),
       };
     }
   }
@@ -385,8 +415,13 @@ export async function buildRelativeDatePushdownPlan(
 
 export function assertRelativeDatePushdownPlan(plan: RelativeDatePushdownPlan): void {
   if (!plan.allowed && plan.rejection) {
+    const details = plan.rejection.reasonCodes.filter((code) =>
+      code !== WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+    );
     throw new Error(
-      `${plan.rejection.functionName}: ${plan.rejection.code} (path=${plan.rejection.path})`
+      `${plan.rejection.functionName}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}` +
+      `${details.length > 0 ? ` (reason=${details.join(", ")})` : ""} ` +
+      `(path=${plan.rejection.path})`
     );
   }
 }

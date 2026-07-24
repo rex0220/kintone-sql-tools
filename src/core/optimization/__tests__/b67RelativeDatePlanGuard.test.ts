@@ -134,3 +134,16 @@ test("WITH は inline plan を1物理 SELECTとして判定し、非inline mater
   expect(materialized.allowed).toBe(false);
   expect(materialized.rejection?.path).toContain("cte[0]");
 });
+
+test("schema nonexact は具体的 R2 reason と exact-pushdown 必須 reason の双方を保持する", async () => {
+  const result = await plan("SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()");
+  expect(result.allowed).toBe(false);
+  expect(result.rejection).toMatchObject({
+    functionName: "YESTERDAY",
+    code: "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED",
+    reasonCodes: [
+      "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED",
+      "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN",
+    ],
+  });
+});

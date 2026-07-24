@@ -496,6 +496,36 @@ async function main() {
       "ksql_validate did not identify SELECT."
     );
 
+    // B67: validate は metadata なしで構文/引数だけを確認し、schema-aware
+    // 実行可能性を断定しない。EXPLAIN の最終判定は shared engine reason を返す。
+    const b67Sql = "SELECT $id FROM APP1 WHERE $id = YESTERDAY()";
+    const b67Validated = await client.callTool({
+      name: "ksql_validate",
+      arguments: { sql: b67Sql },
+    });
+    assert(b67Validated.structuredContent?.ok === true, "B67 validate smoke failed.");
+    assert(
+      b67Validated.structuredContent?.validationScope === "syntax-and-arguments-only"
+        && b67Validated.structuredContent?.executionValidated === false,
+      "B67 validate must defer final schema-aware execution validation."
+    );
+    const b67Explained = await client.callTool({
+      name: "ksql_explain",
+      arguments: { sql: b67Sql },
+    });
+    const b67Plan = JSON.stringify(b67Explained.structuredContent);
+    assert(b67Explained.structuredContent?.ok === true, "B67 explain smoke failed.");
+    assert(
+      b67Plan.includes("YESTERDAY")
+        && b67Plan.includes("WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED")
+        && b67Plan.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"),
+      "B67 explain must expose the shared engine function/reason codes."
+    );
+    assert(
+      !b67Plan.includes("KORDER_NATIVE") && !b67Plan.includes("KORDER_CURSOR"),
+      "B67 rejected EXPLAIN must not expose an executable GET/Cursor plan."
+    );
+
     // B65-M01: built MCP server accepts the billboard ROLLUP/GROUPING shape offline.
     // Value-level rows are fixed by the mock-client core execute tests.
     const b65Validated = await client.callTool({

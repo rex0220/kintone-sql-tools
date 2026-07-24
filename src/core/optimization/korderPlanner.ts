@@ -1,7 +1,10 @@
 import type { SelectStatement } from "../../types/ast";
 import type { SelectMode } from "../../converter/selectToKintone";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
-import type { PredicateCapability } from "./whereCapability";
+import type {
+  PredicateCapability,
+  PredicateCapabilityReason,
+} from "./whereCapability";
 import type { CanonicalOrderPlan } from "./canonicalOrderPlanner";
 
 const KORDER_NATIVE_FIELD_TYPES = new Set([
@@ -14,6 +17,7 @@ export interface KorderPlanInput {
   readonly stmt: SelectStatement;
   readonly staticMode: SelectMode;
   readonly whereCapability: PredicateCapability;
+  readonly whereReasons?: readonly PredicateCapabilityReason[];
   readonly orderSemantics: ReadonlyMap<string, ResolvedFieldSemantics>;
   readonly maxRecords: number;
   readonly hasKlike: boolean;
@@ -30,7 +34,13 @@ export function planKorder(input: KorderPlanInput): CanonicalOrderPlan {
   if (stmt.from.cteName !== null || stmt.from.subtableCode || input.staticMode !== "SIMPLE") {
     reasons.push("KORDER_QUERY_SHAPE_UNSUPPORTED");
   }
-  if (input.whereCapability !== "EXACT_PUSHDOWN") reasons.push("KORDER_WHERE_NOT_EXACT");
+  if (input.whereCapability !== "EXACT_PUSHDOWN") {
+    // B67 の具体 reason を汎用 KORDER reason より先に保持する。
+    reasons.push(...(input.whereReasons ?? [])
+      .filter((reason) => reason.functionName !== undefined)
+      .map((reason) => reason.code));
+    reasons.push("KORDER_WHERE_NOT_EXACT");
+  }
   if (input.hasKlike) reasons.push("KORDER_KLIKE_UNSUPPORTED");
   if (stmt.orderBy.length === 0) reasons.push("KORDER_KEY_REQUIRED");
 

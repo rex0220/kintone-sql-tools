@@ -1,7 +1,10 @@
 import type { OrderByItem, SelectStatement } from "../../types/ast";
 import type { SelectMode } from "../../converter/selectToKintone";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
-import type { PredicateCapability } from "./whereCapability";
+import type {
+  PredicateCapability,
+  PredicateCapabilityReason,
+} from "./whereCapability";
 
 export type CanonicalOrderPlanKind =
   | "CANONICAL_REST_TOP_N"
@@ -35,6 +38,7 @@ export interface CanonicalOrderPlanInput {
   readonly stmt: SelectStatement;
   readonly staticMode: SelectMode;
   readonly whereCapability: PredicateCapability;
+  readonly whereReasons?: readonly PredicateCapabilityReason[];
   readonly orderSemantics: ReadonlyMap<string, ResolvedFieldSemantics>;
   readonly maxRecords: number;
   readonly hasKlike: boolean;

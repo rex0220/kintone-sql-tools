@@ -887,12 +887,20 @@ async function assertRelativeDateExecutionPlan(
   client: KintoneClient,
   cacheContext: string
 ): Promise<RelativeDatePushdownPlan> {
-  const plan = await buildRelativeDatePushdownPlan(stmt, {
+  const plan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
+  assertRelativeDatePushdownPlan(plan);
+  return plan;
+}
+
+async function resolveRelativeDateExecutionPlan(
+  stmt: Statement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<RelativeDatePushdownPlan> {
+  return buildRelativeDatePushdownPlan(stmt, {
     select: (select) => resolveSelectWhereCapability(select, client, cacheContext),
     dml: (dml) => resolveDmlWhereCapability(dml, client, cacheContext),
   });
-  assertRelativeDatePushdownPlan(plan);
-  return plan;
 }
 
 /** パース済み Statement を種別でルーティングして実行する（単文・バッチ共通の入口） */
@@ -902,7 +910,9 @@ async function executeParsedStatement(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<ExecuteResult> {
-  const relativeDatePlan = await assertRelativeDateExecutionPlan(stmt, client, cacheContext);
+  const relativeDatePlan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
+  // EXPLAIN は拒否計画そのものを副作用なしで表示する。実行文だけ fail-closed にする。
+  if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
   const unresolved = findVariableRef(stmt);
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
@@ -2339,6 +2349,7 @@ async function executeSelect(
         stmt,
         staticMode: mode,
         whereCapability: whereCapability.capability,
+        whereReasons: whereCapability.reasons,
         orderSemantics: orderMeta.semantics,
         maxRecords: options.maxRecords ?? 10_000,
         hasKlike: whereHasKlike(stmt.where),
@@ -3903,6 +3914,7 @@ async function executeFullScanWithCte(
       stmt,
       staticMode: "FULL_SCAN",
       whereCapability: whereCapability.capability,
+      whereReasons: whereCapability.reasons,
       orderSemantics: orderMeta.semantics,
       maxRecords,
       hasKlike: whereHasKlike(stmt.where),
@@ -8224,6 +8236,7 @@ interface ExplainWhereAnalysis {
   fieldApps: Set<number>;
   processStatusApps: Set<number>;
   numberPrecisionApps: Set<number>;
+  relativeDatePlan: RelativeDatePushdownPlan;
 }
 
 interface ValidateExplainInfo {
@@ -8242,7 +8255,8 @@ async function buildExplainWhereAnalysis(
   query: unknown,
   client: KintoneClient,
   cacheContext: string,
-  maxRecords = 10_000
+  maxRecords = 10_000,
+  relativeDatePlan?: RelativeDatePushdownPlan
 ): Promise<ExplainWhereAnalysis> {
   const fieldApps = new Set<number>();
   const processStatusApps = new Set<number>();
@@ -8265,6 +8279,12 @@ async function buildExplainWhereAnalysis(
   const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
   const orderPlans = new Map<SelectStatement, CanonicalOrderPlan>();
   const seen = new Set<object>();
+  const sharedRelativeDatePlan = relativeDatePlan
+    ?? await resolveRelativeDateExecutionPlan(query as Statement, tracedClient, cacheContext);
+  const relativeNodeFor = (source: object) => sharedRelativeDatePlan.nodes.find((node) =>
+    node.source === source
+    || JSON.stringify(node.source) === JSON.stringify(source)
+  );
 
   const visit = async (node: unknown): Promise<void> => {
     if (node === null || typeof node !== "object") return;
@@ -8287,7 +8307,8 @@ async function buildExplainWhereAnalysis(
         physicalApps.forEach((appId) => fieldApps.add(appId));
       }
       const capability = await resolveSelectWhereCapability(select, tracedClient, cacheContext);
-      if (capability.capability === "UNSUPPORTED") {
+      const relativeNode = relativeNodeFor(select);
+      if (capability.capability === "UNSUPPORTED" && !relativeNode) {
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
       }
       capabilities.set(select, capability);
@@ -8306,7 +8327,7 @@ async function buildExplainWhereAnalysis(
           .some((table) => table.cteName !== null);
         // batch EXPLAIN は temp/CTE の実体化前には列意味型を確定できない。
         // 実行時 planner は materialized metadata を受けて同じ検査を行う。
-        if (hasCanonicalOrder(select) && !hasUnmaterializedSource) {
+        if (hasCanonicalOrder(select) && !hasUnmaterializedSource && relativeNode?.allowed !== false) {
           const mode = capability.capability === "EXACT_PUSHDOWN"
             ? resolveSelectMode(select)
             : "FULL_SCAN";
@@ -8314,6 +8335,7 @@ async function buildExplainWhereAnalysis(
             stmt: select,
             staticMode: mode,
             whereCapability: capability.capability,
+            whereReasons: capability.reasons,
             orderSemantics: meta.semantics,
             maxRecords,
             hasKlike: whereHasKlike(select.where),
@@ -8402,7 +8424,8 @@ async function buildExplainWhereAnalysis(
         }
       }
       const dml = node as UpdateStatement | DeleteStatement;
-      if (dml.type !== "UPDATE" || !usesApplyParentResidualSelection(dml)) {
+      if ((dml.type !== "UPDATE" || !usesApplyParentResidualSelection(dml))
+        && relativeNodeFor(dml)?.allowed !== false) {
         await assertDmlWhereCapability(dml, tracedClient, cacheContext);
       }
     }
@@ -8414,23 +8437,32 @@ async function buildExplainWhereAnalysis(
     && canInlineSingleCte(query as WithStatement)) {
     const inlined = buildInlinedQuery(query as WithStatement);
     const capability = await resolveSelectWhereCapability(inlined, tracedClient, cacheContext);
-    if (capability.capability === "UNSUPPORTED") {
+    const relativeNode = relativeNodeFor(inlined);
+    if (capability.capability === "UNSUPPORTED" && !relativeNode) {
       throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
     }
     capabilities.set(inlined, capability);
-    if (hasCanonicalOrder(inlined)) {
+    if (hasCanonicalOrder(inlined) && relativeNode?.allowed !== false) {
       const meta = await buildOrderByMetaForSelect(inlined, tracedClient, cacheContext);
       orderPlans.set(inlined, (inlined.orderMode === "KINTONE_NATIVE" ? planKorder : planCanonicalOrder)({
         stmt: inlined,
         staticMode: capability.capability === "EXACT_PUSHDOWN" ? resolveSelectMode(inlined) : "FULL_SCAN",
         whereCapability: capability.capability,
+        whereReasons: capability.reasons,
         orderSemantics: meta.semantics,
         maxRecords,
         hasKlike: whereHasKlike(inlined.where),
       }));
     }
   }
-  return { capabilities, orderPlans, fieldApps, processStatusApps, numberPrecisionApps };
+  return {
+    capabilities,
+    orderPlans,
+    fieldApps,
+    processStatusApps,
+    numberPrecisionApps,
+    relativeDatePlan: sharedRelativeDatePlan,
+  };
 }
 
 function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
@@ -8442,6 +8474,38 @@ function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
     ...[...analysis.numberPrecisionApps].sort((a, b) => a - b)
       .map((appId) => `  metadata API: number precision APP${appId}`),
   ];
+}
+
+function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
+  if (!plan.hasRelativeDate) return [];
+  if (!plan.allowed && plan.rejection) {
+    return [
+      `  relative date function: ${plan.rejection.functionName}`,
+      "  plan status: rejected",
+      `  reason: ${plan.rejection.reasonCodes.join(", ")}`,
+      "  client evaluation: forbidden",
+      "  records/cursor/mutation API during EXPLAIN: none",
+    ];
+  }
+
+  const lines: string[] = [];
+  for (const node of plan.nodes) {
+    for (const functionName of node.functionNames) {
+      const detail = node.capability?.reasons.find((reason) =>
+        reason.functionName === functionName
+      );
+      lines.push(
+        `  relative date function: ${functionName}`,
+        "  evaluation: kintone server",
+        `  field: ${detail?.field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
+        `  operator: ${detail?.operator ?? "(unknown)"}`,
+        `  where capability: ${node.capability?.capability ?? "(unknown)"}`,
+        "  client evaluation: forbidden",
+        `  kintone query: ${node.restQuery || "(なし)"}`
+      );
+    }
+  }
+  return lines;
 }
 
 // ------------------------------------------------------------
@@ -8487,15 +8551,27 @@ export async function buildBatchExplainPlans(
           : stmt)
         : resolveBatchVariableReferences(stmt, variables);
       validateKlikeStatement(planStmt);
-      const whereAnalysis = await buildExplainWhereAnalysis(planStmt, client, cacheContext, maxRecords);
-      const statementPlan = addCursorConcurrency(buildBatchStatementPlan(
+      const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, cacheContext);
+      const whereAnalysis = await buildExplainWhereAnalysis(
         planStmt,
-        analysis.statements[i],
-        whereAnalysis.capabilities,
-        whereAnalysis.orderPlans,
-        dmlMaxRows,
-        dmlMaxSubtableRows
-      ), cursorMaxActive);
+        client,
+        cacheContext,
+        maxRecords,
+        relativeDatePlan
+      );
+      const statementPlan = relativeDatePlan.hasRelativeDate && !relativeDatePlan.allowed
+        ? relativeDateExplainLines(relativeDatePlan)
+        : [
+            ...relativeDateExplainLines(relativeDatePlan),
+            ...addCursorConcurrency(buildBatchStatementPlan(
+              planStmt,
+              analysis.statements[i],
+              whereAnalysis.capabilities,
+              whereAnalysis.orderPlans,
+              dmlMaxRows,
+              dmlMaxSubtableRows
+            ), cursorMaxActive),
+          ];
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
         index: i,
@@ -8641,19 +8717,31 @@ async function executeExplain(
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
   /** Step 5 の execution と同じ walk 結果。Step 6 の表示拡張はこの値を消費する。 */
-  _relativeDatePlan?: RelativeDatePushdownPlan
+  relativeDatePlan?: RelativeDatePushdownPlan
 ): Promise<SelectResult> {
-  const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
-  const lines = [
-    ...explainMetadataLines(analysis),
-    ...addCursorConcurrency(
-      buildExplainPlan(
-        stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
-        dmlMaxRows, dmlMaxSubtableRows, maxRecords
-      ),
-      cursorMaxActive
-    ),
-  ];
+  const sharedPlan = relativeDatePlan
+    ?? await resolveRelativeDateExecutionPlan(stmt.query, client, cacheContext);
+  const analysis = await buildExplainWhereAnalysis(
+    stmt.query,
+    client,
+    cacheContext,
+    maxRecords,
+    sharedPlan
+  );
+  const relativeLines = relativeDateExplainLines(sharedPlan);
+  const lines = sharedPlan.hasRelativeDate && !sharedPlan.allowed
+    ? [...explainMetadataLines(analysis), ...relativeLines]
+    : [
+        ...explainMetadataLines(analysis),
+        ...relativeLines,
+        ...addCursorConcurrency(
+          buildExplainPlan(
+            stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
+            dmlMaxRows, dmlMaxSubtableRows, maxRecords
+          ),
+          cursorMaxActive
+        ),
+      ];
   return {
     type: "SELECT",
     columns: ["plan"],
