@@ -32,6 +32,10 @@ import {
   type ResolvedFieldSemantics,
 } from "../core/fieldSemantics";
 import { evalGroupingRef } from "./groupingRowMeta";
+import {
+  isRelativeDateFunctionName,
+  WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
+} from "../core/relativeDateFunction";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -345,7 +349,7 @@ function resolveValue(
     case "VARIABLE_IN_LIST": throw new Error(`ParseError: unresolved batch array variable @${value.name}.`);
     case "STRING":       return value.value;
     case "NUMBER":       return numberLiteralText(value);
-    case "KINTONE_FUNC": return resolveKintoneFunc(value.name);
+    case "KINTONE_FUNC": return resolveKintoneFuncValue(value.name as string);
     case "IN_LIST":           return ""; // IN は evalOp で別処理
     case "SUBQUERY_IN_LIST":  return ""; // IN (SELECT) は evalOp で別処理
     case "SCALAR_SUBQUERY":   return (value as ResolvedScalarSubquery).resolved;
@@ -441,6 +445,23 @@ export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string 
     case "LOGINUSER":
       // kintone 環境外では解決不能 → 空文字（比較が常に false になる）
       return "";
+  }
+}
+
+function resolveKintoneFuncValue(name: string): string {
+  if (isRelativeDateFunctionName(name)) {
+    throw new Error(
+      `${name}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}`
+    );
+  }
+
+  switch (name) {
+    case "TODAY":
+    case "NOW":
+    case "LOGINUSER":
+      return resolveKintoneFunc(name);
+    default:
+      throw new Error(`InternalError: unexpected KINTONE_FUNC name: ${name}`);
   }
 }
 

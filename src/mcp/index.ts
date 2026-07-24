@@ -132,7 +132,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_validate", {
     title: "Validate kSQL",
-    description: "Parse and validate kSQL without calling kintone APIs. All APPLY forms (UPDATE/INSERT/UPSERT/multi-value) are accepted for syntax and static validation, but this does not enable APPLY mutation. Use this before executing generated SQL. Do not use validate probing to discover functions or syntax; call ksql_docs instead. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
+    description: "Parse and validate kSQL without calling kintone APIs. All APPLY forms (UPDATE/INSERT/UPSERT/multi-value) are accepted for syntax and static validation, but this does not enable APPLY mutation. Relative-date validation here covers syntax and arguments only; ksql_query/ksql_explain/runtime makes the final schema-aware decision. Use this before executing generated SQL. Do not use validate probing to discover functions or syntax; call ksql_docs instead. IMPORT CSV/JSON is enabled only when named inline importSources are supplied.",
     inputSchema: validateInputShape,
   }, tools.validateTool);
 

@@ -9,7 +9,12 @@ import {
   statementHasApplyBlocks,
   toMcpImportError,
 } from "../tools";
-import { explainInputSchema, mutateInputSchema, queryInputSchema } from "../schemas";
+import {
+  explainInputSchema,
+  mutateInputSchema,
+  queryInputSchema,
+  validateInputSchema,
+} from "../schemas";
 
 const DML_VALIDATION_COLUMNS = [
   "code", "$err_statement", "$err_operation", "$err_row", "$err_field", "$err_code", "$err_message",
@@ -88,6 +93,20 @@ describe("MCP tools", () => {
       statementType: "SELECT",
       requiresCompleteInput: true,
     });
+  });
+
+  test("B67: ksql_validate は相対日付を構文/引数だけ検査し実行可能とは断定しない", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(tools.validate({
+      sql: "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY()",
+    })).resolves.toMatchObject({
+      ok: true,
+      validationScope: "syntax-and-arguments-only",
+      executionValidated: false,
+      finalValidation: "ksql_query/ksql_explain/runtime schema-aware plan",
+    });
+    expect(validateInputSchema.shape.sql.description)
+      .toContain("final schema-aware decision");
   });
 
   test("logical validation payload は source/binding を公開し、EXPLAIN はmappedAppIdを公開しない", async () => {

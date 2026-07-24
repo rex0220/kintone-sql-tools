@@ -39,6 +39,16 @@ describe("B55 complete function catalog", () => {
     expect(KSQL_FUNCTION_CATALOG.scalar).toHaveLength(46);
   });
 
+  test("contextual catalog preserves the legacy prefix and lists all B67 relative-date functions", () => {
+    expect(KSQL_FUNCTION_CATALOG.contextual).toEqual([
+      "TODAY", "NOW", "LOGINUSER",
+      "YESTERDAY", "TOMORROW", "FROM_TODAY",
+      "THIS_WEEK", "LAST_WEEK", "NEXT_WEEK",
+      "THIS_MONTH", "LAST_MONTH", "NEXT_MONTH",
+      "THIS_YEAR", "LAST_YEAR", "NEXT_YEAR",
+    ]);
+  });
+
   test("fixture keys match parser spellings in both directions and every SQL parses", () => {
     expect(sorted([...fixtureSpellings].filter((name) => !parserSpellings.has(name)))).toEqual([]);
     expect(sorted([...parserSpellings].filter((name) => !fixtureSpellings.has(name)))).toEqual([]);
@@ -46,6 +56,22 @@ describe("B55 complete function catalog", () => {
       expect(() => parseSqlStatement(sql)).not.toThrow();
       expect(sql).toContain(spelling);
     }
+  });
+
+  test("B67 fixtures cover every official relative-date argument shape", () => {
+    const fixtures = Object.values(KSQL_FUNCTION_SQL_FIXTURES).join("\n");
+    for (const unit of ["DAYS", "WEEKS", "MONTHS", "YEARS"]) {
+      expect(fixtures).toContain(`FROM_TODAY(${unit === "DAYS" ? "-7" : unit === "WEEKS" ? "2" : unit === "MONTHS" ? "0" : "1"}, ${unit})`);
+    }
+    for (const weekday of [
+      "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY",
+    ]) {
+      expect(fixtures).toContain(`(${weekday})`);
+    }
+    expect(fixtures).toContain("THIS_WEEK()");
+    expect(fixtures).toContain("THIS_MONTH()");
+    expect(fixtures).toContain("LAST_MONTH(LAST)");
+    expect(fixtures).toContain("NEXT_MONTH(31)");
   });
 
   test("each documented alias maps to its documented canonical AST name", () => {

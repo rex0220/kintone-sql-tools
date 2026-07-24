@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,6 +17,7 @@ const smokeSavedQueriesPath = resolve(rootDir, ".tmp", "mcp-smoke-queries.json")
 const resourceIoGuardPath = resolve(rootDir, "scripts", "mcp-resource-io-guard.cjs");
 const resourceIoGuardLog = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.log`);
 const resourceIoGuardActive = resolve(rootDir, ".tmp", `mcp-resource-io-guard-${process.pid}.active`);
+const b67ConfigPath = resolve(rootDir, ".tmp", `mcp-smoke-b67-config-${process.pid}.json`);
 const expectedTools = [
   "ksql_validate",
   "ksql_explain",
@@ -353,6 +355,65 @@ async function main() {
   mkdirSync(dirname(resourceIoGuardLog), { recursive: true });
   rmSync(resourceIoGuardLog, { force: true });
   rmSync(resourceIoGuardActive, { force: true });
+  rmSync(b67ConfigPath, { force: true });
+
+  const b67HttpCalls = [];
+  const b67Server = createServer((req, res) => {
+    const requestUrl = new URL(req.url ?? "/", "http://127.0.0.1");
+    b67HttpCalls.push({
+      path: requestUrl.pathname,
+      method: req.method ?? "GET",
+      query: requestUrl.searchParams.get("query"),
+    });
+    res.setHeader("Content-Type", "application/json");
+    if (requestUrl.pathname.endsWith("/app/form/fields.json")) {
+      res.end(JSON.stringify({
+        properties: {
+          日付: { code: "日付", label: "日付", type: "DATE" },
+          件名: { code: "件名", label: "件名", type: "SINGLE_LINE_TEXT" },
+        },
+      }));
+      return;
+    }
+    if (requestUrl.pathname.endsWith("/app/status.json")) {
+      res.end(JSON.stringify({ enable: false, states: {} }));
+      return;
+    }
+    if (requestUrl.pathname.endsWith("/app/settings.json")) {
+      res.end(JSON.stringify({
+        numberPrecision: {
+          digits: "30",
+          decimalPlaces: "10",
+          roundingMode: "HALF_EVEN",
+        },
+      }));
+      return;
+    }
+    if (requestUrl.pathname.endsWith("/records.json") && req.method === "GET") {
+      res.end(JSON.stringify({ records: [] }));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({
+      code: "UNEXPECTED_B67_SMOKE_API",
+      message: `${req.method ?? "GET"} ${requestUrl.pathname}`,
+    }));
+  });
+  await new Promise((resolveListen) => b67Server.listen(0, "127.0.0.1", resolveListen));
+  const b67Address = b67Server.address();
+  assert(
+    b67Address !== null && typeof b67Address !== "string",
+    "B67 MCP smoke server did not expose a TCP port."
+  );
+  writeFileSync(b67ConfigPath, JSON.stringify({
+    defaultProfile: "smoke",
+    profiles: {
+      smoke: {
+        baseUrl: `http://127.0.0.1:${b67Address.port}`,
+        tokenMap: { APP100: "fixture-token" },
+      },
+    },
+  }), "utf8");
 
   const transport = new StdioClientTransport({
     command: process.execPath,
@@ -363,6 +424,7 @@ async function main() {
       KSQL_SAVED_QUERIES: smokeSavedQueriesPath,
       KSQL_RESOURCE_IO_GUARD_LOG: resourceIoGuardLog,
       KSQL_RESOURCE_IO_GUARD_ACTIVE: resourceIoGuardActive,
+      KSQL_CONFIG: b67ConfigPath,
     },
     stderr: "pipe",
   });
@@ -400,6 +462,9 @@ async function main() {
       "MODE",
       "DENSE_RANK",
       "LOGINUSER",
+      "YESTERDAY",
+      "FROM_TODAY",
+      "NEXT_YEAR",
       "SUBSTR→SUBSTRING",
       "IFNULL",
     ]) {
@@ -432,6 +497,9 @@ async function main() {
     assert(!("structuredContent" in docsChapter), "ksql_docs chapter success must not return structuredContent.");
     assert(docsChapter.content[0].text.includes("SUBSTRING"), "ksql_docs function chapter is missing expected text.");
     assert(docsChapter.content[0].text.includes("DAYOFWEEK"), "ksql_docs function chapter is missing DAYOFWEEK.");
+    assert(docsChapter.content[0].text.includes("FROM_TODAY"), "ksql_docs function chapter is missing B67 relative-date functions.");
+    assert(docsChapter.content[0].text.includes("server-only"), "ksql_docs function chapter is missing the B67 server-only boundary.");
+    assert(docsChapter.content[0].text.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"), "ksql_docs function chapter is missing the B67 exact-pushdown reason code.");
     const docsUnknown = await client.callTool({
       name: "ksql_docs",
       arguments: { section: "STDDEV" },
@@ -494,6 +562,94 @@ async function main() {
     assert(
       validated.structuredContent?.statementType === "SELECT",
       "ksql_validate did not identify SELECT."
+    );
+
+    // B67: validate は metadata なしで構文/引数だけを確認し、schema-aware
+    // 実行可能性を断定しない。EXPLAIN の最終判定は shared engine reason を返す。
+    const b67Sql =
+      "SELECT 日付 FROM APP100 WHERE 日付 >= FROM_TODAY(-7, DAYS) LIMIT 1";
+    const b67Validated = await client.callTool({
+      name: "ksql_validate",
+      arguments: { sql: b67Sql },
+    });
+    assert(b67Validated.structuredContent?.ok === true, "B67 validate smoke failed.");
+    assert(
+      b67Validated.structuredContent?.validationScope === "syntax-and-arguments-only"
+        && b67Validated.structuredContent?.executionValidated === false,
+      "B67 validate must defer final schema-aware execution validation."
+    );
+    const b67Explained = await client.callTool({
+      name: "ksql_explain",
+      arguments: { sql: b67Sql },
+    });
+    const b67Plan = JSON.stringify(b67Explained.structuredContent);
+    assert(b67Explained.structuredContent?.ok === true, "B67 explain smoke failed.");
+    assert(
+      b67Plan.includes("FROM_TODAY")
+        && b67Plan.includes("EXACT_PUSHDOWN")
+        && b67Plan.includes("日付 >= FROM_TODAY(-7, DAYS)"),
+      "B67 explain must expose the shared engine exact plan and query byte."
+    );
+    const b67RecordsBefore = b67HttpCalls.filter(({ path }) => path.endsWith("/records.json")).length;
+    assert(b67RecordsBefore === 0, "B67 explain must not call records API.");
+    assert(
+      !b67Plan.includes("KORDER_NATIVE") && !b67Plan.includes("KORDER_CURSOR"),
+      "B67 SIMPLE EXPLAIN must not report a KORDER plan."
+    );
+    const b67Queried = await client.callTool({
+      name: "ksql_query",
+      arguments: { sql: b67Sql, maxRecords: 10, onLimit: "error" },
+    });
+    assert(
+      b67Queried.structuredContent?.ok === true
+        && b67Queried.structuredContent?.rowCount === 0,
+      "B67 schema-aware positive query smoke failed."
+    );
+    const b67RecordsCalls = b67HttpCalls.filter(({ path }) => path.endsWith("/records.json"));
+    assert(
+      b67RecordsCalls.length === 1
+        && b67RecordsCalls[0].method === "GET"
+        && b67RecordsCalls[0].query
+          === "日付 >= FROM_TODAY(-7, DAYS) order by $id asc limit 1",
+      `B67 MCP query byte mismatch: ${JSON.stringify(b67RecordsCalls)}`
+    );
+    const b67RejectedSql = "SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()";
+    const b67RejectedExplain = await client.callTool({
+      name: "ksql_explain",
+      arguments: { sql: b67RejectedSql },
+    });
+    const b67RejectedPlan = JSON.stringify(b67RejectedExplain.structuredContent);
+    assert(
+      b67RejectedExplain.structuredContent?.ok === true
+        && b67RejectedPlan.includes("YESTERDAY")
+        && b67RejectedPlan.includes("WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED")
+        && b67RejectedPlan.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"),
+      "B67 rejected explain must expose the shared engine function/reason codes."
+    );
+    const b67RejectedQuery = await client.callTool({
+      name: "ksql_query",
+      arguments: { sql: b67RejectedSql, maxRecords: 10, onLimit: "error" },
+    });
+    const b67RejectedError = JSON.stringify(b67RejectedQuery.structuredContent);
+    assert(
+      b67RejectedQuery.structuredContent?.ok === false
+        && b67RejectedError.includes("YESTERDAY")
+        && b67RejectedError.includes("WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED")
+        && b67RejectedError.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"),
+      "B67 rejected query and explain must expose the same shared engine function/reason codes."
+    );
+    assert(
+      b67HttpCalls.filter(({ path }) => path.endsWith("/records.json")).length === 1,
+      "B67 rejected explain/query must not add a records API call."
+    );
+    const b67Invalid = await client.callTool({
+      name: "ksql_validate",
+      arguments: { sql: "SELECT 日付 FROM APP100 WHERE 日付 = FROM_TODAY(1.5, DAYS)" },
+    });
+    assert(
+      b67Invalid.structuredContent?.ok === false
+        && JSON.stringify(b67Invalid.structuredContent).includes("ParseError"),
+      "B67 validate must reject invalid relative-date arguments at syntax validation."
     );
 
     // B65-M01: built MCP server accepts the billboard ROLLUP/GROUPING shape offline.
@@ -595,8 +751,10 @@ async function main() {
     process.stdout.write("[mcp-smoke] ok\n");
   } finally {
     await client.close().catch(() => {});
+    await new Promise((resolveClose) => b67Server.close(() => resolveClose()));
     rmSync(resourceIoGuardLog, { force: true });
     rmSync(resourceIoGuardActive, { force: true });
+    rmSync(b67ConfigPath, { force: true });
   }
 }
 

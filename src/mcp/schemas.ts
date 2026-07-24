@@ -50,7 +50,7 @@ const importSources = z.array(z.object({
 
 export const validateInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation."),
+    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
   profile,
   importSources,
 });

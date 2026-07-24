@@ -45,7 +45,11 @@ import type {
   SqlValue,
   StringLiteral,
   NumberLiteral,
-  KintoneFunction,
+  LegacyKintoneFunction,
+  RelativeDateFunction,
+  RelativeDateMonthDay,
+  RelativeDatePeriodUnit,
+  RelativeDateWeekday,
   InList,
   VariableInList,
   SubqueryInList,
@@ -111,6 +115,10 @@ import type {
 } from "../types/ast";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { NO_FROM_CTE_NAME } from "../types/ast";
+import {
+  RELATIVE_DATE_FUNCTION_NAMES,
+  isRelativeDateFunctionName,
+} from "../core/relativeDateFunction";
 
 /** バッチ(複文)の文数上限 */
 const MAX_BATCH_STATEMENTS = 20;
@@ -212,7 +220,7 @@ export const PARSER_WINDOW_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind
   [TokenKind.DENSE_RANK]: "DENSE_RANK",
 });
 
-export const PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, KintoneFunction["name"]>>> = Object.freeze({
+export const PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, LegacyKintoneFunction["name"]>>> = Object.freeze({
   [TokenKind.TODAY]: "TODAY",
   [TokenKind.NOW]: "NOW",
   [TokenKind.LOGINUSER]: "LOGINUSER",
@@ -222,12 +230,35 @@ export function isContextualFunctionToken(kind: TokenKind): boolean {
   return PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[kind] !== undefined;
 }
 
+/** Contextual IDENT spellings; none of these are lexer keywords. */
+export const PARSER_IDENT_RELATIVE_DATE_FUNCTIONS = Object.freeze(
+  [...RELATIVE_DATE_FUNCTION_NAMES]
+);
+
+const RELATIVE_DATE_PERIOD_UNITS: ReadonlySet<string> =
+  new Set(["DAYS", "WEEKS", "MONTHS", "YEARS"]);
+const RELATIVE_DATE_WEEKDAYS: ReadonlySet<string> = new Set([
+  "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY",
+]);
+
+function isRelativeDatePeriodUnit(value: string): value is RelativeDatePeriodUnit {
+  return RELATIVE_DATE_PERIOD_UNITS.has(value);
+}
+
+function isRelativeDateWeekday(value: string): value is RelativeDateWeekday {
+  return RELATIVE_DATE_WEEKDAYS.has(value);
+}
+
+function isRelativeDateMonthDay(value: number): value is RelativeDateMonthDay {
+  return Number.isInteger(value) && value >= 1 && value <= 31;
+}
+
 export const PARSER_FUNCTION_SPELLINGS = Object.freeze(Array.from(new Set([
   ...Object.keys(PARSER_SCALAR_FUNCTION_TOKEN_MAP),
   ...PARSER_IDENT_SCALAR_FUNCTIONS,
   ...Object.keys(PARSER_AGGREGATE_FUNCTION_TOKEN_MAP),
   ...Object.keys(PARSER_WINDOW_FUNCTION_TOKEN_MAP),
-  ...Object.keys(PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP),
+  ...Object.keys(PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP), ...PARSER_IDENT_RELATIVE_DATE_FUNCTIONS,
   "IF",
 ])));
 
@@ -300,6 +331,8 @@ export class Parser {
   private insideAggregateArg = 0;
   /** GROUPING(field) is limited to the explicitly selected query context. */
   private groupingFieldContext: GroupingFieldContext = "FORBIDDEN";
+  /** True only while parsing an actual SQL WHERE clause (including nested groups). */
+  private allowRelativeDateFunctions = false;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
@@ -479,7 +512,7 @@ export class Parser {
       );
     }
     if (contextualFunction !== undefined) {
-      return this.parseSqlValue() as KintoneFunction;
+      return this.parseSqlValue() as LegacyKintoneFunction;
     }
     const expr = this.parseArithAddSub();
     this.rejectNonScalarExpr(expr, tok, context);
@@ -828,7 +861,7 @@ export class Parser {
       this.advance();
       summary = true;
     }
-    const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
+    const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr(undefined, true) : null;
     const checks = this.parseCheckGroups();
     let errorTable: string | undefined;
     if (this.consume(TokenKind.INTO)) {
@@ -1053,7 +1086,7 @@ export class Parser {
 
     const joins = hasFrom ? this.parseJoins() : [];
 
-    const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr() : null;
+    const where = this.consume(TokenKind.WHERE) ? this.parseWhereExpr(undefined, true) : null;
 
     let groupBy: GroupByKey[] = [];
     let grouping: GroupingSpec | undefined;
@@ -2110,14 +2143,18 @@ export class Parser {
   // ----------------------------------------------------------
 
   private parseWhereExpr(
-    groupingFieldContext: GroupingFieldContext = this.groupingFieldContext
+    groupingFieldContext: GroupingFieldContext | undefined = this.groupingFieldContext,
+    allowRelativeDateFunctions: boolean = this.allowRelativeDateFunctions
   ): WhereExpr {
     const previousContext = this.groupingFieldContext;
-    this.groupingFieldContext = groupingFieldContext;
+    const previousAllowRelativeDateFunctions = this.allowRelativeDateFunctions;
+    this.groupingFieldContext = groupingFieldContext ?? previousContext;
+    this.allowRelativeDateFunctions = allowRelativeDateFunctions;
     try {
       return this.parseOrExpr();
     } finally {
       this.groupingFieldContext = previousContext;
+      this.allowRelativeDateFunctions = previousAllowRelativeDateFunctions;
     }
   }
 
@@ -2214,9 +2251,9 @@ export class Parser {
 
     // BETWEEN low AND high → field >= low AND field <= high に展開
     if (this.consume(TokenKind.BETWEEN)) {
-      const low  = this.parseSqlValue();
+      const low  = this.parseWhereSqlValue();
       this.expect(TokenKind.AND);
-      const high = this.parseSqlValue();
+      const high = this.parseWhereSqlValue();
       return {
         type: "LOGICAL",
         op: "AND",
@@ -2259,7 +2296,7 @@ export class Parser {
 
     // 比較演算子
     const op = this.parseCompareOp();
-    const right = this.parseSqlValue();
+    const right = this.parseWhereSqlValue();
     return { type: "BINARY", op, left: field, right } satisfies BinaryExpr;
   }
 
@@ -2375,6 +2412,117 @@ export class Parser {
   }
 
   // 右辺の値
+  private parseWhereSqlValue(): SqlValue {
+    const tok = this.peek();
+    if (
+      this.allowRelativeDateFunctions
+      && tok.kind === TokenKind.IDENT
+      && this.peekAt(1).kind === TokenKind.LPAREN
+      && isRelativeDateFunctionName(tok.value.toUpperCase())
+    ) {
+      return this.parseRelativeDateFunction();
+    }
+    return this.parseSqlValue();
+  }
+
+  private parseRelativeDateFunction(): RelativeDateFunction {
+    const nameToken = this.expect(TokenKind.IDENT);
+    const name = nameToken.value.toUpperCase();
+    this.expect(TokenKind.LPAREN);
+
+    switch (name) {
+      case "YESTERDAY":
+      case "TOMORROW":
+      case "THIS_YEAR":
+      case "LAST_YEAR":
+      case "NEXT_YEAR":
+        this.expect(TokenKind.RPAREN, `${name}() は引数を受け取りません`);
+        return { type: "KINTONE_FUNC", name, args: { kind: "NONE" } };
+
+      case "FROM_TODAY": {
+        let sign = "";
+        if (this.consume(TokenKind.MINUS)) sign = "-";
+        if (this.peek().kind === TokenKind.PLUS) {
+          throw new ParseError("FROM_TODAY の offset に + 符号は使用できません", this.peek());
+        }
+        const offsetToken = this.expect(
+          TokenKind.NUMBER,
+          "FROM_TODAY には整数 offset と単位が必要です"
+        );
+        if (!/^\d+$/.test(offsetToken.value)) {
+          throw new ParseError("FROM_TODAY の offset は10進整数で指定してください", offsetToken);
+        }
+        const rawOffset = `${sign}${offsetToken.value}`;
+        const offset = Number(rawOffset);
+        if (!Number.isSafeInteger(offset)) {
+          throw new ParseError("FROM_TODAY の offset は安全な整数の範囲で指定してください", offsetToken);
+        }
+        this.expect(TokenKind.COMMA, "FROM_TODAY の offset と単位はカンマで区切ってください");
+        const unitToken = this.expect(
+          TokenKind.IDENT,
+          "FROM_TODAY の単位には非引用の DAYS / WEEKS / MONTHS / YEARS が必要です"
+        );
+        const unit = unitToken.value.toUpperCase();
+        if (!isRelativeDatePeriodUnit(unit)) {
+          throw new ParseError("FROM_TODAY の単位には DAYS / WEEKS / MONTHS / YEARS が必要です", unitToken);
+        }
+        this.expect(TokenKind.RPAREN, "FROM_TODAY は offset と単位の2引数だけを受け取ります");
+        const offsetText = String(offset === 0 ? 0 : offset);
+        return {
+          type: "KINTONE_FUNC",
+          name,
+          args: { kind: "FROM_TODAY", offset, offsetText, unit },
+        };
+      }
+
+      case "THIS_WEEK":
+      case "LAST_WEEK":
+      case "NEXT_WEEK": {
+        let weekday: RelativeDateWeekday | null = null;
+        if (this.peek().kind !== TokenKind.RPAREN) {
+          const weekdayToken = this.expect(
+            TokenKind.IDENT,
+            `${name} の曜日には非引用の SUNDAY ... SATURDAY が必要です`
+          );
+          const candidate = weekdayToken.value.toUpperCase();
+          if (!isRelativeDateWeekday(candidate)) {
+            throw new ParseError(`${name} の曜日が不正です`, weekdayToken);
+          }
+          weekday = candidate;
+        }
+        this.expect(TokenKind.RPAREN, `${name} は曜日を最大1個だけ受け取ります`);
+        return { type: "KINTONE_FUNC", name, args: { kind: "WEEK", weekday } };
+      }
+
+      case "THIS_MONTH":
+      case "LAST_MONTH":
+      case "NEXT_MONTH": {
+        let day: RelativeDateMonthDay | "LAST" | null = null;
+        if (this.peek().kind !== TokenKind.RPAREN) {
+          const dayToken = this.peek();
+          if (dayToken.kind === TokenKind.IDENT && dayToken.value.toUpperCase() === "LAST") {
+            this.advance();
+            day = "LAST";
+          } else if (dayToken.kind === TokenKind.NUMBER && /^\d+$/.test(dayToken.value)) {
+            this.advance();
+            const candidate = Number(dayToken.value);
+            if (!isRelativeDateMonthDay(candidate)) {
+              throw new ParseError(`${name} の日は 1 から 31 で指定してください`, dayToken);
+            }
+            day = candidate;
+          } else {
+            throw new ParseError(`${name} の日は非引用の LAST または 1 から 31 が必要です`, dayToken);
+          }
+        }
+        this.expect(TokenKind.RPAREN, `${name} は日を最大1個だけ受け取ります`);
+        return { type: "KINTONE_FUNC", name, args: { kind: "MONTH", day } };
+      }
+
+      default:
+        throw new ParseError(`未知の相対日付関数 ${name} です`, nameToken);
+    }
+  }
+
   private parseSqlValue(): SqlValue {
     const tok = this.peek();
 
@@ -2397,7 +2545,7 @@ export class Parser {
       return {
         type: "KINTONE_FUNC",
         name: PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[tok.kind]!,
-      } satisfies KintoneFunction;
+      } satisfies LegacyKintoneFunction;
     }
 
     // CASE WHEN ... END を右辺として使う
@@ -3042,7 +3190,7 @@ export class Parser {
         whereTok
       );
     }
-    const where = this.parseWhereExpr();
+    const where = this.parseWhereExpr(undefined, true);
 
     const applyBlocks: ApplyBlock[] = [];
     while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
@@ -3186,7 +3334,7 @@ export class Parser {
   }
 
   private parseApplyRowSelector(): RowSelector {
-    if (this.consume(TokenKind.WHERE)) return { kind: "WHERE", where: this.parseWhereExpr() };
+    if (this.consume(TokenKind.WHERE)) return { kind: "WHERE", where: this.parseWhereExpr(undefined, true) };
     if (this.consume(TokenKind.ALL)) {
       if (!this.isSoftKeyword("ROWS")) throw new ParseError("ALL の後には ROWS が必要です", this.peek());
       this.advance();
@@ -3554,7 +3702,7 @@ export class Parser {
         whereTok
       );
     }
-    const where = this.parseWhereExpr();
+    const where = this.parseWhereExpr(undefined, true);
 
     return subtableCode
       ? { type: "DELETE", appId, subtableCode, where }
@@ -3592,7 +3740,7 @@ export class Parser {
       if (!this.consume(TokenKind.WHERE)) {
         throw new ParseError("REORDER には WHERE 句が必須です（誤操作防止）", whereTok);
       }
-      where = this.parseWhereExpr();
+      where = this.parseWhereExpr(undefined, true);
     }
 
     return {

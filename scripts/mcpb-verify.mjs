@@ -96,7 +96,10 @@ async function smokeLauncher(entries) {
     await client.connect(transport);
     const instructions = client.getInstructions();
     assert(typeof instructions === "string" && instructions.trim().length > 0, "MCPB launcher instructions are missing.");
-    for (const key of ["Statement templates", "ON ERROR SKIP INTO", "Complete function catalog"]) {
+    for (const key of [
+      "Statement templates", "ON ERROR SKIP INTO", "Complete function catalog",
+      "YESTERDAY", "FROM_TODAY", "NEXT_YEAR",
+    ]) {
       assert(instructions.includes(key), `MCPB launcher instructions must mention "${key}".`);
     }
     const listed = await client.listTools();

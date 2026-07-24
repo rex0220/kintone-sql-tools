@@ -28,6 +28,7 @@ import type {
   StringLiteral,
   NumberLiteral,
   KintoneFunction,
+  RelativeDateFunction,
   InList,
   CompareOp,
 } from "../types/ast";
@@ -214,8 +215,87 @@ function convertString(v: StringLiteral): string {
 }
 
 function convertKintoneFunc(v: KintoneFunction): string {
-  // TODAY() / NOW() / LOGINUSER() はそのまま出力
-  return `${v.name}()`;
+  switch (v.name) {
+    case "TODAY":
+    case "NOW":
+    case "LOGINUSER":
+      // TODAY() / NOW() / LOGINUSER() はそのまま出力
+      return `${v.name}()`;
+  }
+  return convertRelativeDateFunction(v);
+}
+
+function convertRelativeDateFunction(v: RelativeDateFunction): string {
+  switch (v.name) {
+    case "YESTERDAY":
+    case "TOMORROW":
+    case "THIS_YEAR":
+    case "LAST_YEAR":
+    case "NEXT_YEAR":
+      if (v.args?.kind !== "NONE") return failInvalidRelativeDateFunction();
+      return `${v.name}()`;
+
+    case "FROM_TODAY":
+      if (
+        v.args?.kind !== "FROM_TODAY" ||
+        !isValidRelativeDateOffset(v.args.offset, v.args.offsetText) ||
+        !RELATIVE_DATE_PERIOD_UNITS.has(v.args.unit)
+      ) {
+        return failInvalidRelativeDateFunction();
+      }
+      return `${v.name}(${v.args.offsetText}, ${v.args.unit})`;
+
+    case "THIS_WEEK":
+    case "LAST_WEEK":
+    case "NEXT_WEEK":
+      if (
+        v.args?.kind !== "WEEK" ||
+        (v.args.weekday !== null && !RELATIVE_DATE_WEEKDAYS.has(v.args.weekday))
+      ) {
+        return failInvalidRelativeDateFunction();
+      }
+      return v.args.weekday === null
+        ? `${v.name}()`
+        : `${v.name}(${v.args.weekday})`;
+
+    case "THIS_MONTH":
+    case "LAST_MONTH":
+    case "NEXT_MONTH":
+      if (
+        v.args?.kind !== "MONTH" ||
+        !isValidRelativeDateMonthDay(v.args.day)
+      ) {
+        return failInvalidRelativeDateFunction();
+      }
+      return v.args.day === null
+        ? `${v.name}()`
+        : `${v.name}(${v.args.day})`;
+  }
+  return failInvalidRelativeDateFunction();
+}
+
+const RELATIVE_DATE_PERIOD_UNITS = new Set(["DAYS", "WEEKS", "MONTHS", "YEARS"]);
+const RELATIVE_DATE_WEEKDAYS = new Set([
+  "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY",
+  "THURSDAY", "FRIDAY", "SATURDAY",
+]);
+
+function isValidRelativeDateOffset(offset: number, offsetText: string): boolean {
+  if (!Number.isSafeInteger(offset)) return false;
+  if (!/^(?:0|[1-9]\d*|-[1-9]\d*)$/.test(offsetText)) return false;
+  return Number(offsetText) === offset;
+}
+
+function isValidRelativeDateMonthDay(day: unknown): boolean {
+  return day === null ||
+    day === "LAST" ||
+    (typeof day === "number" && Number.isInteger(day) && day >= 1 && day <= 31);
+}
+
+function failInvalidRelativeDateFunction(): never {
+  throw new KintoneQueryError(
+    "internal error: invalid relative date function AST reached kintone query conversion"
+  );
 }
 
 function convertInList(v: InList, op: CompareOp): string {

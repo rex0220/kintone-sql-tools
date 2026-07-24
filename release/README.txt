@@ -1,20 +1,20 @@
-ksql 配布パッケージ (v3.19.0)
+ksql 配布パッケージ (v3.20.0)
 
 release 成果物:
-- ksql-plugin-v3.19.0.zip
-- ksql-mcp.mcpb (manifest version 3.19.0)
-- ksql-mcp.js (MCP server version 3.19.0)
+- ksql-plugin-v3.20.0.zip
+- ksql-mcp.mcpb (manifest version 3.20.0)
+- ksql-mcp.js (MCP server version 3.20.0)
 
-1. ksql-plugin-v3.19.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.20.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-v3.19.0: B66 read-only kSQL エンジン・ライブラリ公開 Phase1。
+v3.20.0: B66 read-only kSQL エンジン・ライブラリ公開 Phase1。
 - npm の @rex0220/kintone-sql-tools/engine から ESM/CJS、dist-engine の UMD から
   read-only engine を利用できる。公開 API/型、全値 string、BYO client 契約、
   error/options/read-only 拒否範囲は docs/ksql_engine_library.md を参照。
-- UMD は window.ksql.get("3.19.0") で版を明示する。npm 取込可能な plugin は
+- UMD は window.ksql.get("3.20.0") で版を明示する。npm 取込可能な plugin は
   npm bundle を優先する。
 - 純加法的 minor。既存 SQL、plugin、CLI、MCP、MCPB の挙動は不変。
 

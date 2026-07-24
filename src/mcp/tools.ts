@@ -19,6 +19,7 @@ import {
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
 import type { Statement } from "../types/ast";
+import { isRelativeDateFunctionName } from "../core/relativeDateFunction";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import { isImportCapabilityGateError } from "../import/importGateError";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
@@ -340,6 +341,18 @@ export function statementHasApplyBlocks(statement: Statement): boolean {
     .some((key) => Array.isArray(candidate[key]) && candidate[key].length > 0);
 }
 
+function containsRelativeDateFunction(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsRelativeDateFunction);
+  if (value === null || typeof value !== "object") return false;
+  const node = value as Record<string, unknown>;
+  if (node["type"] === "KINTONE_FUNC"
+    && typeof node["name"] === "string"
+    && isRelativeDateFunctionName(node["name"])) {
+    return true;
+  }
+  return Object.values(node).some(containsRelativeDateFunction);
+}
+
 function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertResult | DmlValidationResult>) {
   if (result.type === "INSERT") {
     return {
@@ -539,6 +552,7 @@ export function createKsqlMcpTools(
     const hasApplyMutation = statements.some((statement, index) =>
       analysis.statements[index]?.isDml === true && statementHasApplyBlocks(statement)
     );
+    const requiresSchemaAwareValidation = statements.some(containsRelativeDateFunction);
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
       index: s.index,
@@ -574,6 +588,11 @@ export function createKsqlMcpTools(
       hasProfileSyntax: normalized.hasProfileSyntax,
       cacheContext: normalized.cacheContext,
       appBindings,
+      ...(requiresSchemaAwareValidation ? {
+        validationScope: "syntax-and-arguments-only" as const,
+        executionValidated: false as const,
+        finalValidation: "ksql_query/ksql_explain/runtime schema-aware plan" as const,
+      } : {}),
     };
 
     if (analysis.statementCount > 1) {

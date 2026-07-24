@@ -1,5 +1,6 @@
 import type { CompareOp, FieldRef, FieldValue, SqlValue, WhereExpr } from "../../types/ast";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
+import { isRelativeDateFunctionName } from "../relativeDateFunction";
 
 export type PredicateCapability =
   | "EXACT_PUSHDOWN"
@@ -14,10 +15,16 @@ export interface PredicateCapabilityReason {
     | "WHERE_SUPERSET_PREFILTER"
     | "WHERE_FIELD_UNRESOLVED"
     | "WHERE_OPERATOR_UNSUPPORTED"
-    | "WHERE_EXPRESSION_LOCAL_ONLY";
+    | "WHERE_EXPRESSION_LOCAL_ONLY"
+    | "WHERE_RELATIVE_DATE_ARGUMENT_INVALID"
+    | "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED"
+    | "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED"
+    | "WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED"
+    | "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN";
   readonly field?: string;
   readonly fieldType?: string;
   readonly operator?: string;
+  readonly functionName?: string;
 }
 
 export interface PredicateCapabilityResult {
@@ -32,6 +39,10 @@ export type WhereFieldSemanticsResolver = (
 type NativeOperator = "=" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "not in" | "like" | "not like";
 
 const RANGE_AND_EQUALITY = ["=", "!=", ">", "<", ">=", "<="] as const;
+const RELATIVE_DATE_FIELD_TYPES = new Set([
+  "DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME",
+]);
+const RELATIVE_DATE_OPERATORS = new Set<NativeOperator>(RANGE_AND_EQUALITY);
 const EQUALITY_IN = ["=", "!=", "in", "not in"] as const;
 const NATIVE_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
   ["RECORD_NUMBER", new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
@@ -96,7 +107,7 @@ function classifyNode(
     case "BOOLEAN":
       return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
     case "BINARY":
-      return classifyBinary(where.op, where.left, where.right.type, resolveField);
+      return classifyBinary(where.op, where.left, where.right, resolveField);
     case "NULL_CHECK":
       if (where.field.type !== "FIELD") return localExpression();
       return classifyLocalOnlyField(where.field, where.not ? "IS NOT NULL" : "IS NULL", resolveField);
@@ -107,9 +118,14 @@ function classifyNode(
     case "NOT": {
       const inner = classifyNode(where.expr, resolveField);
       // 上位集合の補集合は上位集合ではないため、NOT の外へ prefilter 能力を漏らさない。
-      return inner.capability === "SUPERSET_PREFILTER"
-        ? { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] }
-        : inner;
+      if (inner.capability !== "SUPERSET_PREFILTER") return inner;
+      if (!hasRelativeDateReason(inner.reasons)) {
+        return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
+      }
+      return requireExactRelativeDatePushdown({
+        capability: "LOCAL_ONLY",
+        reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }, ...inner.reasons],
+      });
     }
     case "LOGICAL": {
       const left = classifyNode(where.left, resolveField);
@@ -122,9 +138,12 @@ function classifyNode(
 function classifyBinary(
   op: CompareOp,
   left: FieldValue,
-  rightType: SqlValue["type"],
+  right: SqlValue,
   resolveField: WhereFieldSemanticsResolver
 ): PredicateCapabilityResult {
+  if (right.type === "KINTONE_FUNC" && isRelativeDateFunctionName(right.name)) {
+    return classifyRelativeDateBinary(op, left, right, resolveField);
+  }
   if (left.type !== "FIELD") return localExpression();
   const semantics = resolveField(left);
   if (!semantics) {
@@ -136,8 +155,8 @@ function classifyBinary(
 
   const nativeOp = normalizeOperator(op);
   const native = nativeWhereOperatorsForType(semantics.fieldType);
-  const rightCanPush = rightType === "STRING" || rightType === "NUMBER" || rightType === "IN_LIST"
-    || rightType === "KINTONE_FUNC";
+  const rightCanPush = right.type === "STRING" || right.type === "NUMBER" || right.type === "IN_LIST"
+    || isLegacyKintoneFunction(right);
   const structureAllows = !semantics.requiresCollectionOperators || (nativeOp !== "=" && nativeOp !== "!=");
   const sqlLikeIsResidual = op === "LIKE" || op === "NOT_LIKE";
   if (rightCanPush && structureAllows && native.has(nativeOp) && !sqlLikeIsResidual) {
@@ -160,6 +179,119 @@ function classifyBinary(
       operator: nativeOp,
     }],
   };
+}
+
+function isLegacyKintoneFunction(value: SqlValue): boolean {
+  return value.type === "KINTONE_FUNC"
+    && (value.name === "TODAY" || value.name === "NOW" || value.name === "LOGINUSER");
+}
+
+function classifyRelativeDateBinary(
+  op: CompareOp,
+  left: FieldValue,
+  right: Extract<SqlValue, { type: "KINTONE_FUNC" }>,
+  resolveField: WhereFieldSemanticsResolver
+): PredicateCapabilityResult {
+  const operator = normalizeOperator(op);
+  const functionName = right.name;
+  if (left.type !== "FIELD") {
+    return relativeDateUnsupported(
+      "WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED",
+      functionName,
+      undefined,
+      undefined,
+      operator
+    );
+  }
+
+  const semantics = resolveField(left);
+  if (!semantics) {
+    return relativeDateUnsupported(
+      "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED",
+      functionName,
+      left.field,
+      undefined,
+      operator
+    );
+  }
+  if (!hasValidRelativeDateArguments(right)) {
+    return relativeDateUnsupported(
+      "WHERE_RELATIVE_DATE_ARGUMENT_INVALID",
+      functionName,
+      left.field,
+      semantics.fieldType,
+      operator
+    );
+  }
+  if (!RELATIVE_DATE_OPERATORS.has(operator)) {
+    return relativeDateUnsupported(
+      "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED",
+      functionName,
+      left.field,
+      semantics.fieldType,
+      operator
+    );
+  }
+  if (
+    !RELATIVE_DATE_FIELD_TYPES.has(semantics.fieldType)
+    || semantics.inSubtable
+    || semantics.requiresCollectionOperators
+  ) {
+    return relativeDateUnsupported(
+      "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED",
+      functionName,
+      left.field,
+      semantics.fieldType,
+      operator
+    );
+  }
+
+  return {
+    capability: "EXACT_PUSHDOWN",
+    reasons: [{
+      code: "WHERE_EXACT",
+      functionName,
+      field: left.field,
+      fieldType: semantics.fieldType,
+      operator,
+    }],
+  };
+}
+
+function hasValidRelativeDateArguments(
+  value: Extract<SqlValue, { type: "KINTONE_FUNC" }>
+): boolean {
+  if (!("args" in value) || !value.args) return false;
+  switch (value.name) {
+    case "YESTERDAY":
+    case "TOMORROW":
+    case "THIS_YEAR":
+    case "LAST_YEAR":
+    case "NEXT_YEAR":
+      return value.args.kind === "NONE";
+    case "FROM_TODAY":
+      return value.args.kind === "FROM_TODAY"
+        && Number.isSafeInteger(value.args.offset)
+        && value.args.offsetText === String(value.args.offset === 0 ? 0 : value.args.offset)
+        && (value.args.unit === "DAYS" || value.args.unit === "WEEKS"
+          || value.args.unit === "MONTHS" || value.args.unit === "YEARS");
+    case "THIS_WEEK":
+    case "LAST_WEEK":
+    case "NEXT_WEEK":
+      return value.args.kind === "WEEK"
+        && (value.args.weekday === null || value.args.weekday === "SUNDAY"
+          || value.args.weekday === "MONDAY" || value.args.weekday === "TUESDAY"
+          || value.args.weekday === "WEDNESDAY" || value.args.weekday === "THURSDAY"
+          || value.args.weekday === "FRIDAY" || value.args.weekday === "SATURDAY");
+    case "THIS_MONTH":
+    case "LAST_MONTH":
+    case "NEXT_MONTH":
+      return value.args.kind === "MONTH"
+        && (value.args.day === null || value.args.day === "LAST"
+          || (Number.isInteger(value.args.day) && value.args.day >= 1 && value.args.day <= 31));
+    default:
+      return false;
+  }
 }
 
 function classifyLocalOnlyField(
@@ -205,19 +337,19 @@ function combineLogical(
 ): PredicateCapabilityResult {
   const reasons = [...left.reasons, ...right.reasons];
   if (left.capability === "UNSUPPORTED" || right.capability === "UNSUPPORTED") {
-    return { capability: "UNSUPPORTED", reasons };
+    return requireExactRelativeDatePushdown({ capability: "UNSUPPORTED", reasons });
   }
   if (left.capability === "EXACT_PUSHDOWN" && right.capability === "EXACT_PUSHDOWN") {
     return { capability: "EXACT_PUSHDOWN", reasons };
   }
   if (op === "AND" && (left.capability === "EXACT_PUSHDOWN" || right.capability === "EXACT_PUSHDOWN"
     || left.capability === "SUPERSET_PREFILTER" || right.capability === "SUPERSET_PREFILTER")) {
-    return {
+    return requireExactRelativeDatePushdown({
       capability: "SUPERSET_PREFILTER",
       reasons: [{ code: "WHERE_SUPERSET_PREFILTER" }, ...reasons],
-    };
+    });
   }
-  return { capability: "LOCAL_ONLY", reasons };
+  return requireExactRelativeDatePushdown({ capability: "LOCAL_ONLY", reasons });
 }
 
 function localExpression(): PredicateCapabilityResult {
@@ -231,4 +363,53 @@ function unsupported(
   operator?: string
 ): PredicateCapabilityResult {
   return { capability: "UNSUPPORTED", reasons: [{ code, field, fieldType, operator }] };
+}
+
+type RelativeDateReasonCode =
+  | "WHERE_RELATIVE_DATE_ARGUMENT_INVALID"
+  | "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED"
+  | "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED"
+  | "WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED";
+
+function relativeDateUnsupported(
+  code: RelativeDateReasonCode,
+  functionName: string,
+  field?: string,
+  fieldType?: string,
+  operator?: string
+): PredicateCapabilityResult {
+  return requireExactRelativeDatePushdown({
+    capability: "UNSUPPORTED",
+    reasons: [{ code, functionName, field, fieldType, operator }],
+  });
+}
+
+function hasRelativeDateReason(reasons: readonly PredicateCapabilityReason[]): boolean {
+  return reasons.some((reason) => reason.functionName !== undefined);
+}
+
+function requireExactRelativeDatePushdown(
+  result: PredicateCapabilityResult
+): PredicateCapabilityResult {
+  if (
+    result.capability === "EXACT_PUSHDOWN"
+    || !hasRelativeDateReason(result.reasons)
+    || result.reasons.some((reason) => reason.code === "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN")
+  ) {
+    return result;
+  }
+  const relative = result.reasons.find((reason) => reason.functionName !== undefined)!;
+  return {
+    capability: result.capability,
+    reasons: [
+      ...result.reasons,
+      {
+        code: "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN",
+        functionName: relative.functionName,
+        field: relative.field,
+        fieldType: relative.fieldType,
+        operator: relative.operator,
+      },
+    ],
+  };
 }

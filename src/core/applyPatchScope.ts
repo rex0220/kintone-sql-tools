@@ -7,6 +7,7 @@ import type {
   UpsertStatement,
   WhereExpr,
 } from "../types/ast";
+import { isRelativeDateFunctionName } from "./relativeDateFunction";
 
 export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
 export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
@@ -512,7 +513,13 @@ function assertSafeParentPredicateNode(node: unknown, allowKlike: boolean): void
     && /^(count|sum|avg|min|max|group_concat)\s*\(/i.test(item["field"])) {
     unsupported("aggregate or window expressions in parent WHERE");
   }
-  if (type === "KINTONE_FUNC") unsupported("non-deterministic kintone functions in parent WHERE");
+  // B67 relative-date functions are parsed here so the shared plan guard can
+  // reject APPLY with the public exact-pushdown reason before any parent load.
+  // Legacy TODAY/NOW/LOGINUSER keep the existing APPLY scope rejection.
+  if (type === "KINTONE_FUNC"
+    && !(typeof item["name"] === "string" && isRelativeDateFunctionName(item["name"]))) {
+    unsupported("non-deterministic kintone functions in parent WHERE");
+  }
   for (const value of Object.values(item)) assertSafeParentPredicateNode(value, allowKlike);
 }
 
@@ -537,7 +544,10 @@ function assertSafeApplyNode(node: unknown, context: string, allowIdx = false): 
   }
   if (type === "WINDOW_COL" || type === "AGGREGATE" || type === "AGG_REF" || type === "AGG_ARITH"
     || type === "ARITH_AGG_COL") unsupported(`aggregate or window expressions in ${context}`);
-  if (type === "KINTONE_FUNC") unsupported(`non-deterministic kintone functions in ${context}`);
+  if (type === "KINTONE_FUNC"
+    && !(typeof item["name"] === "string" && isRelativeDateFunctionName(item["name"]))) {
+    unsupported(`non-deterministic kintone functions in ${context}`);
+  }
 
   if (type === "FIELD") {
     const alias = item["tableAlias"];
