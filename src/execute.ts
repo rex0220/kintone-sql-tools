@@ -180,6 +180,7 @@ import {
   buildRelativeDatePushdownPlan,
   type RelativeDatePushdownPlan,
 } from "./core/optimization/relativeDatePushdownGuard";
+import { decomposeRelativeDatePrefilter } from "./core/optimization/relativeDatePrefilterPlan";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -900,6 +901,15 @@ async function resolveRelativeDateExecutionPlan(
   return buildRelativeDatePushdownPlan(stmt, {
     select: (select) => resolveSelectWhereCapability(select, client, cacheContext),
     dml: (dml) => resolveDmlWhereCapability(dml, client, cacheContext),
+    prefilterDecomposition: async (select) => {
+      if (select.where === null) return null;
+      const resolver = await buildWhereFieldSemanticsResolver(
+        select,
+        client,
+        cacheContext
+      );
+      return decomposeRelativeDatePrefilter(select, resolver);
+    },
   });
 }
 

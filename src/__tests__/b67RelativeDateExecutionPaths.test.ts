@@ -115,6 +115,19 @@ test.each([
   expectNoExecutionApi(calls);
 });
 
+test("Step 2 の eligible mixed WHERE も runtime では取得前拒否を維持する", async () => {
+  const { client, calls } = makeClient();
+  await expect(execute(
+    "SELECT 更新日時 FROM APP100 "
+      + "WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
+    client,
+    { confirm: calls.confirm }
+  )).rejects.toThrow(
+    /YESTERDAY: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/
+  );
+  expectNoExecutionApi(calls);
+});
+
 test("CREATE TEMP TABLE materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {
   const { client, calls } = makeClient();
   const result = await executeBatch(
