@@ -1,7 +1,7 @@
 # B67 Phase1 — kintone REST クエリ関数（相対日付）押し下げ仕様
 
 - 作成日: 2026-07-24
-- ステータス: **R1（codex 起草）→ Claude レビュー済＝実装着手可能水準（要 R2 反映1点・§14）**（2026-07-24）。方針 A（押し下げ専用・fail-closed）は妥当で、安全性の3前提（B32 が KINTONE_FUNC を一律 EXACT_PUSHDOWN／FULL_SCAN が evalWhere で WHERE 再評価／BETWEEN は `>= AND <=` 展開）をコードで裏取り済み。**要 R2＝§5.3 の runtime backstop は現状コードに無い**（`resolveKintoneFunc` は default なし switch で相対日付名は silent に `undefined`）ので明示 fail-closed の追加を必須要件化する（§14）。
+- ステータス: **仕様 R2・Claude レビュー済＝実装着手可能水準**（2026-07-24）。方針 A（押し下げ専用・server-only・fail-closed）を維持し、R1 レビュー指摘（§14）を §5.2/§5.3/§10.4 へ反映＝再レビューで妥当（backstop 挿入点 `evalWhere.ts:348` の `case "KINTONE_FUNC": resolveKintoneFunc(value.name)` をコードで確認・現状 default なし switch の silent undefined を明示 throw 化する要件と bypass テストが入った）。未決の公開意味論なし。**次＝実装着手可否の判断**（見積り 6〜10 人日）。
 - 方針: **A — 押し下げネイティブ**。相対日付関数は kintone REST クエリへそのまま出力し、kintone に評価させる。client 評価へはフォールバックしない。
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B67
 - 起草ブリーフ: [ksql_b67_phase1_spec_r1_brief.md](ksql_b67_phase1_spec_r1_brief.md)
@@ -199,6 +199,8 @@ date_field "BETWEEN" relative_or_literal "AND" relative_or_literal
 - UPDATE FROM、サブテーブル UPDATE / DELETE、APPLY 親選択、REORDER 等、取得後に WHERE を再評価する経路。
 - B32 が `SUPERSET_PREFILTER` / `LOCAL_ONLY` / `UNSUPPORTED` を返す WHERE。
 
+この到達経路の網羅は二段で担保する。第一段は planner 側の型 × 演算子 × 関数 allowlist と plan walk で、相対日付関数を含む計画を `EXACT_PUSHDOWN` か取得前拒否のどちらかに確定する。第二段は §5.3 の runtime backstop で、planner の経路列挙に漏れや将来 drift があっても、`evalWhere` に到達した相対日付関数を silent-wrong-result にしない。backstop は最後の砦であり、第一段の網羅検査を省略する理由にはしない。両段を §10.4 の受入条件とする。
+
 通常 SELECT は、関数を含む SELECT ノードが SIMPLE であり、REST query の結果を WHERE 再評価なしで利用できる場合に限り許可する。`KORDER BY` は `korderPlanner.ts` が要求する `staticMode=SIMPLE` かつ `whereCapability=EXACT_PUSHDOWN` を満たす場合、`KORDER_NATIVE` / `KORDER_CURSOR` の双方で許可する。Cursor へ切り替わっても同じ WHERE query をサーバへ渡し、client 評価を追加しない。
 
 トップレベル UPDATE / DELETE は、既存 B32 DML 境界が WHERE 全体の `EXACT_PUSHDOWN` を要求し、取得後の相対関数評価を行わない経路だけを許可する。`VALIDATE ONLY` を付けた DML でも対象選択経路が同じ条件を満たさなければならない。
@@ -219,7 +221,9 @@ parse 時に確定する誤りは ParseError、schema / plan 時に確定する�
 
 「取得前」とはレコード取得・Cursor作成・mutation・confirm の前を指す。型解決に必要なフォームメタデータ API は許可する。拒否時は records GET / Cursor POST・GET・DELETE / record mutation / confirm が0回で、部分結果を返さない。
 
-実装漏れで相対日付関数が `evalWhere` に到達した場合は、空文字や現在時刻へ解決せず `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で内部 fail-closed する。この防御は planner の代替ではない。
+現状コードには、この runtime backstop は存在しない。`src/engine/evalWhere.ts:348` の `KINTONE_FUNC` 評価は無条件に `resolveKintoneFunc(value.name)` へ dispatch し、同 `resolveKintoneFunc`（同ファイル:429）は `name: "TODAY" | "NOW" | "LOGINUSER"` に対する default 節なしの switch である。このため、型境界を越えて `FROM_TODAY` 等の相対日付関数名が渡ると、どの case にも一致せず `undefined` を silent 返却する。さらに `src/execute.ts:1070` の取得後 WHERE 再評価は `evalWhere(stmt.where, ...)` を呼ぶため、planner から漏れた関数が誤った比較値として使われ得る。
+
+したがって実装では、`evalWhere` の `KINTONE_FUNC` dispatch または `resolveKintoneFunc` のいずれか、すなわち相対日付関数が client 値へ変換される前の共通評価境界に明示 backstop を必ず追加する。相対日付関数名を受けた場合は、必ず関数名と `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を含むエラーを throw し、`undefined`、空文字、現在時刻その他の client 値へ解決してはならない。既存 `TODAY()` / `NOW()` / `LOGINUSER()` の3 case はそのまま維持する。この防御は §5.2 の planner allowlist / plan walk の代替ではなく、列挙漏れがあっても silent-wrong を防ぐ最後の砦である。
 
 ## 6. serialize
 
@@ -416,7 +420,9 @@ kintone query: 作成日時 < FROM_TODAY(5, DAYS)
 ### 10.4 押し下げ・fail-closed
 
 - SIMPLE SELECT の全相対日付比較で records GET の query に関数が入り、client evaluator 呼出し0。
-- JOIN残余、集約、window、DISTINCT、通常 ORDER BY、CTE実体化、VALIDATE、サブテーブル DML、UPDATE FROM、APPLY、REORDER で、関数が client 評価へ流れず `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`。records / cursor / mutation / confirm 0。
+- planner の型 × 演算子 × 関数 allowlist と plan walk が、JOIN残余、集約、window、DISTINCT、通常 ORDER BY、CTE実体化、VALIDATE、サブテーブル DML、UPDATE FROM、APPLY、REORDER を含む取得後評価計画を record API 前に `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で拒否する。records / cursor / mutation / confirm 0。
+- planner を test seam で意図的に bypass し、相対日付関数を FULL_SCAN / `evalWhere` へ到達させても、`undefined`、空文字、現在時刻その他の誤値で評価せず、関数名と `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を含むエラーを throw して fail-closed する。
+- planner allowlist / plan walk と runtime backstop の両テストを必須とし、経路列挙漏れや将来 drift があっても silent-wrong-result を許さない。
 - AND / OR の一部だけが exact でも、statement が WHERE 全体を client 再評価する計画なら拒否する。
 - KORDER の SIMPLE + exact 条件は native / cursor の双方で同じ WHERE query を使用する。非exact条件は existing KORDER fallback をせず拒否する。
 - EXPLAIN と実行の capability / reason code が一致する。
@@ -476,4 +482,4 @@ R1 として公開意味論上の未解決論点はない。実装着手前の R
 1. **【最重要・正しさ／R2 必須】§5.3 の runtime backstop は現状コードに存在しないので明示追加を必須要件化する。** `resolveKintoneFunc`（`src/engine/evalWhere.ts:429`）は `name: "TODAY" | "NOW" | "LOGINUSER"` に対する **default 節のない switch** であり、相対日付名（例 `FROM_TODAY`）が万一 evalWhere 経由で渡ると**どの case にも一致せず `undefined` を silent 返却**する（fail-closed しない＝silent-wrong-result）。§5.3 は「evalWhere に到達したら `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で内部 fail-closed」と意図を書いているが、これは**実装で明示的に throw を足さない限り成立しない**。R2 で「`resolveKintoneFunc`（または evalWhere の `KINTONE_FUNC` dispatch）で相対日付名は必ず throw する」を要件として明記し、受入条件（§10.4）に「planner を test seam で意図的に bypass し相対日付関数を FULL_SCAN へ通しても、`undefined` や誤値でなく `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で fail-closed する」テストを追加する。これで §5.2 の経路列挙漏れ（§12(a) リスク）に対する真の防御網になる。
 2. **【R2 で強調】§5.2 の evalWhere 到達経路の網羅は planner 側 allowlist と backstop の二段で担保する。** 経路列挙（FULL_SCAN/JOIN 残余/VALIDATE/temp・CTE/サブテーブル DML/UPDATE FROM/APPLY/REORDER）は planner の drift に弱いので、指摘1の backstop を「列挙漏れがあっても silent-wrong にならない最後の砦」と位置づけ、両方を受入条件にする。
 
-指摘1を R2 本文（§5.3・§10.4）へ反映すれば実装着手可能水準。それ以外の公開意味論・判断は R1 で確定。
+**R1→R2 で反映済み**（指摘1＝§5.3 / §10.4、指摘2＝§5.2 / §5.3 / §10.4）。上記レビュー原文は申し送りと反映状況の記録として維持する。それ以外の公開意味論・判断、および §13 の決着表は R1 から変更しない。
