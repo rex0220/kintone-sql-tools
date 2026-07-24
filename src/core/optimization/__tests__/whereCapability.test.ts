@@ -76,3 +76,15 @@ test("未知フィールド・未知型はfail-closedにする", () => {
   expect(classify("SELECT x FROM APP1 WHERE x = 'A'", { x: { fieldType: "FUTURE_FIELD" } }).capability)
     .toBe("UNSUPPORTED");
 });
+
+test.each([
+  ["TODAY", "TIME", ">", "EXACT_PUSHDOWN"],
+  ["NOW", "NUMBER", ">=", "EXACT_PUSHDOWN"],
+  ["LOGINUSER", "SINGLE_LINE_TEXT", "=", "EXACT_PUSHDOWN"],
+  ["TODAY", "SINGLE_LINE_TEXT", ">", "LOCAL_ONLY"],
+  ["NOW", "CHECK_BOX", "=", "LOCAL_ONLY"],
+  ["LOGINUSER", "FUTURE_FIELD", "=", "UNSUPPORTED"],
+] as const)("既存関数 %s は B32 の従来型×演算子分類を維持する", (name, fieldType, op, expected) => {
+  expect(classify(`SELECT x FROM APP1 WHERE x ${op} ${name}()`, { x: { fieldType } }).capability)
+    .toBe(expected);
+});
