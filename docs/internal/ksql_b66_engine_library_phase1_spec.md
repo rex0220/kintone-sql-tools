@@ -1,7 +1,7 @@
 # B66 Phase1 — read-only kSQL エンジン・ライブラリ公開仕様
 
 - 作成日: 2026-07-23
-- ステータス: **Phase1 実装完了・v3.19.0 release candidate（2026-07-24）**。仕様 R2 の公開意味論は変更せず、判断 A（DML/APPLY/IMPORT は実行不能な dead code として bundle 同梱）で Step 1〜9 を完了。read-only 二重強制、型隔離、検索打ち切り常時 fail-closed、ESM/CJS/UMD、version registry、browser/BYO client、per-query Cursor close を実装し、全自動 gate と Firefox/Chrome の Step 8 実ブラウザ gate が PASS。初回 production bundle baseline は ESM **444,578 B min / 119,684 B gzip**、CJS **445,113 B / 119,990 B**、UMD **445,605 B / 120,031 B**（全 forbidden 0）。
+- ステータス: ✅ **v3.19.0 リリース完全完了（2026-07-24・PR #254→tag v3.19.0→GitHub Release〔アセット3点〕→npm publish 済み latest 3.19.0）**。仕様 R2 の公開意味論は変更せず、判断 A（DML/APPLY/IMPORT は実行不能な dead code として bundle 同梱）で Step 1〜9 を完了。read-only 二重強制、型隔離、検索打ち切り常時 fail-closed、ESM/CJS/UMD、version registry、browser/BYO client、per-query Cursor close を実装し、全自動 gate と Firefox/Chrome の Step 8 実ブラウザ gate が PASS。初回 production bundle baseline は ESM **444,578 B min / 119,684 B gzip**、CJS **445,113 B / 119,990 B**、UMD **445,605 B / 120,031 B**（全 forbidden 0）。
 - 対象リリース: **v3.19.0（minor・純加法）**。既存 `execute()`/CLI/MCP/plugin/SQL 挙動は不変で、`./engine` サブパス＋UMD の追加のみ＝破壊的変更なしのため SemVer minor（単一バージョン線＝package version と一致・ライブラリ公開 `version` も 3.19.0）。
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B66
 - 起草ブリーフ: [ksql_b66_phase1_spec_r1_brief.md](ksql_b66_phase1_spec_r1_brief.md)
