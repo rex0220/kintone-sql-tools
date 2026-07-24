@@ -1,20 +1,44 @@
-ksql 配布パッケージ (v3.20.0)
+ksql 配布パッケージ (v3.21.0)
 
 release 成果物:
-- ksql-plugin-v3.20.0.zip
-- ksql-mcp.mcpb (manifest version 3.20.0)
-- ksql-mcp.js (MCP server version 3.20.0)
+- ksql-plugin-v3.21.0.zip
+- ksql-mcp.mcpb (manifest version 3.21.0)
+- ksql-mcp.js (MCP server version 3.21.0)
 
-1. ksql-plugin-v3.20.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.21.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-v3.20.0: B66 read-only kSQL エンジン・ライブラリ公開 Phase1。
+v3.21.0: 相対日付の prefilter ＋残余 client 評価 (B67 Phase2 A)。
+- 相対日付 (YESTERDAY / FROM_TODAY 等) の exact leaf が「相対日付を含まない残余」
+  (例 LENGTH(都道府県) > 1・通常 LIKE) と AND で結ばれた単一物理アプリの SELECT で、
+  相対日付 leaf だけを kintone クエリの prefilter に押し下げ、残余だけを取得後に
+  クライアント評価できるようにした (SUPERSET_PREFILTER)。相対日付の client 評価は 0 回。
+- v3.20.0 では文全体を fail-closed していたケース。EXPLAIN は where capability:
+  SUPERSET_PREFILTER / server prefilter / client residual / relative date client
+  evaluations: 0 を表示する。
+- OR/NOT 内の相対日付・KORDER BY・DML の対象選択・INSERT/UPSERT ... SELECT の
+  source・JOIN・VALIDATE・派生表は従来どおり fail-closed。pure-exact な相対日付は
+  非回帰 (DML source を含め従来どおり許可)。
+- 純加法的 minor。既存 SQL、plugin、CLI、MCP、MCPB の挙動は不変。
+
+v3.20.0: kintone REST クエリ関数 (相対日付) の押し下げ (B67 Phase1)。
+- 相対日付12関数 (YESTERDAY / TOMORROW / FROM_TODAY(n, DAYS|WEEKS|MONTHS|YEARS) /
+  THIS_WEEK / LAST_WEEK / NEXT_WEEK / THIS_MONTH / LAST_MONTH / NEXT_MONTH /
+  THIS_YEAR / LAST_YEAR / NEXT_YEAR) を WHERE で使えるようにした。
+  例: SELECT * FROM APP730 WHERE 作成日時 < FROM_TODAY(5, DAYS)。
+- 方針=押し下げネイティブ (server-only)。関数を kintone クエリへ素通しし、時刻・
+  タイムゾーン・週境界・月末は kintone サーバが評価する。押し下げできない場合は
+  レコード取得前に fail-closed (client 評価へフォールバックしない)。
+- 対象は日付系4型 × 比較6演算子の WHERE 右辺と BETWEEN 境界のみ。既存の
+  TODAY()/NOW()/LOGINUSER() は挙動・出力とも不変。純加法的 minor。
+
+v3.19.0: B66 read-only kSQL エンジン・ライブラリ公開 Phase1。
 - npm の @rex0220/kintone-sql-tools/engine から ESM/CJS、dist-engine の UMD から
   read-only engine を利用できる。公開 API/型、全値 string、BYO client 契約、
   error/options/read-only 拒否範囲は docs/ksql_engine_library.md を参照。
-- UMD は window.ksql.get("3.20.0") で版を明示する。npm 取込可能な plugin は
+- UMD は window.ksql.get("3.19.0") で版を明示する。npm 取込可能な plugin は
   npm bundle を優先する。
 - 純加法的 minor。既存 SQL、plugin、CLI、MCP、MCPB の挙動は不変。
 

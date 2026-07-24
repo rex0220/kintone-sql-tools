@@ -2,6 +2,19 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.21.0（2026-07-25）
+
+### 機能追加（B67 Phase2 A＝相対日付 prefilter ＋残余 client 評価・SUPERSET_PREFILTER）
+
+- 相対日付関数（`YESTERDAY` / `FROM_TODAY(...)` ほか12関数）の exact leaf が、**相対日付を含まない残余**（例 `LENGTH(都道府県) > 1`・通常 `LIKE`）と `AND` で結ばれた**単一物理アプリの SELECT** で使えるようになった。相対日付 leaf だけを kintone REST クエリの prefilter として exact pushdown し、取得後は残余だけを client 評価する（例: `SELECT 都道府県, 更新日時 FROM APP730 WHERE 更新日時 >= YESTERDAY() AND LENGTH(都道府県) > 1`）。
+- v3.20.0 では上記のような「相対日付 exact ＋押し下げ不能残余」の AND は文全体を fail-closed していた。Phase2 A はこれを prefilter ＋残余で共存させる。相対日付の値・比較は依然すべて kintone サーバが決定し、**相対日付の client 評価は 0 回**（planner allowlist ＋ evalWhere backstop の二段で保証）。
+- `BETWEEN` 展開の各境界・複数の相対日付 leaf・`KLIKE` や押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載る。KLIKE の object identity と `appliedKlikes` 契約は不変。
+- `ksql_explain` は Phase2 の計画で `where capability: SUPERSET_PREFILTER` / `server prefilter:` / `client residual:` / `relative date client evaluations: 0` / `kintone query:` を表示する。純 exact（残余なし）の相対日付は従来どおり `EXACT_PUSHDOWN` / `client evaluation: forbidden` を表示（表示 byte 不変）。
+- 次はレコード・Cursor・mutation API の前に fail-closed を維持する（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）: 相対日付が `OR` の枝・`NOT` 配下／`KORDER BY`（native・Cursor）／`UPDATE` / `DELETE` の対象選択／**`INSERT` / `UPSERT ... SELECT` の DML source SELECT**／JOIN 後残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表。pure-exact な相対日付は従来どおり（DML source を含め）許可され、非回帰。
+- Node engine・CLI・MCP・プラグインで同一の受理判定と REST クエリ。`ksql_validate` は構文・引数のみ検査し、実行可否は `ksql_query` / `ksql_explain` / 実行時の schema-aware 判定で確定する。
+- Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は対象外。
+- SemVer=minor（純加法・既存 SQL / CLI / MCP / plugin の挙動不変）。
+
 ## v3.20.0（2026-07-24）
 
 ### 機能追加（B67 kintone REST クエリ関数＝相対日付の押し下げ）
