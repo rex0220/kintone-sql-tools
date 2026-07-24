@@ -73,6 +73,7 @@ interface WalkCandidate {
   readonly where: WhereExpr | null;
   readonly functionNames: readonly string[];
   readonly path: string;
+  readonly allowPhase2Prefilter?: boolean;
 }
 
 function relativeDateFunctionNamesInNode(node: unknown, stopAtNestedSelect: boolean): string[] {
@@ -133,7 +134,8 @@ function collectSelect(
   select: SelectStatement,
   path: string,
   candidates: WalkCandidate[],
-  forceForbidden: boolean
+  forceForbidden: boolean,
+  allowPhase2 = true
 ): void {
   const functionNames = relativeDateFunctionNamesInWhere(select.where);
   if (functionNames.length > 0) {
@@ -143,10 +145,17 @@ function collectSelect(
       where: select.where,
       functionNames,
       path,
+      allowPhase2Prefilter: allowPhase2,
     });
   }
   nestedSelects(select, select).forEach((nested, index) =>
-    collectSelect(nested, `${path}.select-source[${index}]`, candidates, forceForbidden)
+    collectSelect(
+      nested,
+      `${path}.select-source[${index}]`,
+      candidates,
+      forceForbidden,
+      allowPhase2
+    )
   );
 }
 
@@ -255,13 +264,25 @@ function collectStatement(
         }
       }
       nestedSelects(statement, statement).forEach((select, index) =>
-        collectSelect(select, `${path}.select-source[${index}]`, candidates, forceForbidden)
+        collectSelect(
+          select,
+          `${path}.select-source[${index}]`,
+          candidates,
+          forceForbidden,
+          false
+        )
       );
       return;
     }
     default:
       nestedSelects(statement, statement).forEach((select, index) =>
-        collectSelect(select, `${path}.select-source[${index}]`, candidates, forceForbidden)
+        collectSelect(
+          select,
+          `${path}.select-source[${index}]`,
+          candidates,
+          forceForbidden,
+          false
+        )
       );
   }
 }
@@ -380,6 +401,7 @@ export async function buildRelativeDatePushdownPlan(
       let phase2PrefilterEligible: boolean | undefined;
       if (
         !allowed
+        && candidate.allowPhase2Prefilter !== false
         && capability.capability === "SUPERSET_PREFILTER"
         && resolver.prefilterDecomposition
       ) {
