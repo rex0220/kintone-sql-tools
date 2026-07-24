@@ -1,8 +1,6 @@
 import {
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../../core/relativeDateFunction";
-import { Lexer } from "../../lexer/lexer";
-import { Parser } from "../../parser/parser";
 import type { SqlValue, WhereExpr } from "../../types/ast";
 import { evalWhere } from "../evalWhere";
 
@@ -37,9 +35,4 @@ test.each([
 test("未知の KINTONE_FUNC 名も default-deny する", () => {
   expect(() => evalWhere(relativeDateComparison("UNKNOWN_KINTONE_FUNC"), { 日付: "" }))
     .toThrow("InternalError: unexpected KINTONE_FUNC name: UNKNOWN_KINTONE_FUNC");
-});
-
-test("Step 1 では相対日付 SQL の parser 受理を開かない", () => {
-  const sql = "SELECT * FROM APP1 WHERE 日付 = YESTERDAY()";
-  expect(() => new Parser(new Lexer(sql).tokenize()).parse()).toThrow();
 });

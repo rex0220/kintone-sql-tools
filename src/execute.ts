@@ -66,6 +66,10 @@ import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
+import {
+  isRelativeDateFunctionName,
+  WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
+} from "./core/relativeDateFunction";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -877,6 +881,43 @@ function attachSearchAbortWarning(
   return { ...result, warnings: [...warnings] };
 }
 
+function findRelativeDateFunctionName(node: unknown): string | null {
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const name = findRelativeDateFunctionName(item);
+      if (name !== null) return name;
+    }
+    return null;
+  }
+  if (node === null || typeof node !== "object") return null;
+  const object = node as Record<string, unknown>;
+  if (
+    object["type"] === "KINTONE_FUNC"
+    && typeof object["name"] === "string"
+    && isRelativeDateFunctionName(object["name"])
+  ) {
+    return object["name"];
+  }
+  for (const value of Object.values(object)) {
+    const name = findRelativeDateFunctionName(value);
+    if (name !== null) return name;
+  }
+  return null;
+}
+
+/**
+ * B67 Step 2 temporary fail-closed gate.
+ * Step 5 replaces this whole-statement rejection with the schema-aware exact
+ * pushdown plan gate. Keep it before records/Cursor/mutation/confirm and every
+ * client-side evaluator.
+ */
+function assertRelativeDateExecutionPreflight(stmt: Statement): void {
+  const name = findRelativeDateFunctionName(stmt);
+  if (name !== null) {
+    throw new Error(`${name}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}`);
+  }
+}
+
 /** パース済み Statement を種別でルーティングして実行する（単文・バッチ共通の入口） */
 async function executeParsedStatement(
   stmt: Statement,
@@ -884,6 +925,7 @@ async function executeParsedStatement(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<ExecuteResult> {
+  assertRelativeDateExecutionPreflight(stmt);
   const unresolved = findVariableRef(stmt);
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);

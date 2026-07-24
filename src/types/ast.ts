@@ -129,7 +129,7 @@ export interface DeclareVariableStatement {
 export type ScalarExpr =
   | StringLiteral
   | NumberLiteral
-  | KintoneFunction
+  | LegacyKintoneFunction
   | StringFuncExpr
   | ScalarArithExpr
   | ScalarSubquery;
@@ -593,11 +593,52 @@ export function numberLiteralText(node: NumberLiteral): string {
   return toPlainDecimal(source) ?? source;
 }
 
-/** kintone 専用関数: TODAY() / NOW() / LOGINUSER() */
-export interface KintoneFunction {
+/** Legacy kintone functions. Keep this runtime shape byte-for-byte stable. */
+export interface LegacyKintoneFunction {
   type: "KINTONE_FUNC";
   name: "TODAY" | "NOW" | "LOGINUSER";
 }
+
+export type RelativeDatePeriodUnit = "DAYS" | "WEEKS" | "MONTHS" | "YEARS";
+
+export type RelativeDateWeekday =
+  | "SUNDAY" | "MONDAY" | "TUESDAY" | "WEDNESDAY"
+  | "THURSDAY" | "FRIDAY" | "SATURDAY";
+
+export type RelativeDateMonthDay =
+  | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10
+  | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20
+  | 21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31;
+
+/** Server-only relative date functions accepted only by the WHERE value parser. */
+export type RelativeDateFunction =
+  | {
+      type: "KINTONE_FUNC";
+      name: "YESTERDAY" | "TOMORROW" | "THIS_YEAR" | "LAST_YEAR" | "NEXT_YEAR";
+      args: { kind: "NONE" };
+    }
+  | {
+      type: "KINTONE_FUNC";
+      name: "FROM_TODAY";
+      args: {
+        kind: "FROM_TODAY";
+        offset: number;
+        offsetText: string;
+        unit: RelativeDatePeriodUnit;
+      };
+    }
+  | {
+      type: "KINTONE_FUNC";
+      name: "THIS_WEEK" | "LAST_WEEK" | "NEXT_WEEK";
+      args: { kind: "WEEK"; weekday: RelativeDateWeekday | null };
+    }
+  | {
+      type: "KINTONE_FUNC";
+      name: "THIS_MONTH" | "LAST_MONTH" | "NEXT_MONTH";
+      args: { kind: "MONTH"; day: RelativeDateMonthDay | "LAST" | null };
+    };
+
+export type KintoneFunction = LegacyKintoneFunction | RelativeDateFunction;
 
 /** IN (v1, v2, ...) */
 export interface InList {
