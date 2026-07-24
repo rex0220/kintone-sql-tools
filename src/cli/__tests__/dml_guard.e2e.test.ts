@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawn } from "child_process";
+import { createServer } from "http";
 
 jest.setTimeout(20000);
 
@@ -47,6 +48,108 @@ test("DML is rejected without --allow-dml", async () => {
   expect(res.code).toBe(2);
   expect(res.stderr).toContain("DML is disabled");
 });
+
+test("built CLI B67 smoke は代表query/EXPLAINと拒否reasonを共有engineから返し負例execution API 0", async () => {
+  const requests: Array<{ url: string; method: string }> = [];
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url ?? "", method: req.method ?? "GET" });
+    res.setHeader("Content-Type", "application/json");
+    if (req.url?.includes("/app/form/fields.json")) {
+      res.end(JSON.stringify({
+        properties: {
+          日付: { code: "日付", label: "日付", type: "DATE" },
+          件名: { code: "件名", label: "件名", type: "SINGLE_LINE_TEXT" },
+        },
+      }));
+      return;
+    }
+    if (req.url?.includes("/app/status.json")) {
+      res.end(JSON.stringify({ enable: false, states: {} }));
+      return;
+    }
+    if (req.url?.includes("/app/settings.json")) {
+      res.end(JSON.stringify({
+        numberPrecision: {
+          digits: "30",
+          decimalPlaces: "10",
+          roundingMode: "HALF_EVEN",
+        },
+      }));
+      return;
+    }
+    if (req.url?.includes("/records.json") && req.method === "GET") {
+      res.end(JSON.stringify({ records: [] }));
+      return;
+    }
+    res.statusCode = 500;
+    res.end(JSON.stringify({ code: "UNEXPECTED_EXECUTION_API", message: req.url }));
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("B67 CLI smoke server did not expose a TCP port.");
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "ksql-b67-cli-smoke-"));
+  const configPath = join(dir, "ksql.config.json");
+  writeFileSync(configPath, JSON.stringify({
+    defaultProfile: "smoke",
+    profiles: {
+      smoke: {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        tokenMap: { APP100: "fixture-token" },
+      },
+    },
+  }));
+  try {
+    const accepted = await runCli([
+      "--config", configPath,
+      "--dry-run",
+      "-e", "SELECT 日付 FROM APP100 WHERE 日付 >= FROM_TODAY(-7, DAYS) LIMIT 1",
+    ]);
+    if (accepted.skipped) return;
+    if (accepted.code !== 0) {
+      throw new Error(`B67 built CLI positive failed: ${JSON.stringify(accepted)}`);
+    }
+    expect(accepted.stdout).toContain("relative date function: FROM_TODAY");
+    expect(accepted.stdout).toContain("kintone query: 日付 >= FROM_TODAY(-7, DAYS)");
+    expect(accepted.stdout).toContain("client evaluation: forbidden");
+
+    const executed = await runCli([
+      "--config", configPath,
+      "--format", "json",
+      "-e", "SELECT 日付 FROM APP100 WHERE 日付 >= FROM_TODAY(-7, DAYS) LIMIT 1",
+    ]);
+    if (executed.code !== 0) {
+      throw new Error(`B67 built CLI execution failed: ${JSON.stringify(executed)}`);
+    }
+    const positiveRecords = requests.filter(({ url }) => url.includes("/records.json"));
+    expect(positiveRecords).toHaveLength(1);
+    expect(new URL(positiveRecords[0].url, "http://127.0.0.1").searchParams.get("query"))
+      .toBe("日付 >= FROM_TODAY(-7, DAYS) order by $id asc limit 1");
+
+    const recordsBeforeRejection = positiveRecords.length;
+    const rejected = await runCli([
+      "--config", configPath,
+      "--dry-run",
+      "-e", "SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()",
+    ]);
+    expect(rejected.code).toBe(0);
+    expect(`${rejected.stdout}\n${rejected.stderr}`)
+      .toContain("WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED");
+    expect(`${rejected.stdout}\n${rejected.stderr}`)
+      .toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
+
+    expect(requests.filter(({ url }) => url.includes("/records.json")))
+      .toHaveLength(recordsBeforeRejection);
+    expect(requests.some(({ url }) => url.includes("/records/cursor.json"))).toBe(false);
+    expect(requests.some(({ method }) => method !== "GET")).toBe(false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  }
+}, 20000);
 
 test("UPDATE without WHERE is rejected by default", async () => {
   const res = await runCli(["--dry-run", "--allow-dml", "-e", "UPDATE APP88 SET 状態='完了'"]);

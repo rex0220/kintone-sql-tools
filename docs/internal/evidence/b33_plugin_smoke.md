@@ -30,3 +30,11 @@
 ## 判定
 
 **B33 の release blocker はすべて解消。** 未実施 3 点（⑥の操作確認・⑦・⑧の通信ゼロ明示）は、エンジン共有＋CLI/MCP 実測＋ビルド検証で本質をカバー済みの低リスク項目として記録する。
+
+## B67 相対日付の追加 browser harness
+
+B67 Phase1 はB33の完了判定と混ぜず、同一buildのFirefox / Chromeで別途実施する。
+SQL fixture、query byte、`evalWhere` 0回のconditional-breakpoint計測、API 0、
+server結果の貼付欄は
+[b67_relative_date_browser_smoke.md](b67_relative_date_browser_smoke.md) を使用する。
+現状は **ユーザー実施待ち**であり、Node testやplugin build成功では代替しない。

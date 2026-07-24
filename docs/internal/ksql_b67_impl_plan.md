@@ -1,6 +1,6 @@
 # B67 Phase1 実装計画 — kintone 相対日付関数の exact pushdown
 
-- ステータス: 📋 実装計画（仕様 R2 準拠）**・Claude レビュー済＝承認（2026-07-24）**。8 Step・各 Step gate・**Step 1 = runtime backstop を planner より先に独立導入**（R1/R2 レビューの核心）・§1.3 の code 裏取り表（evalWhere dispatch/resolveKintoneFunc default なし switch/whereCapability 一律 KINTONE_FUNC/execute.ts FULL_SCAN 再評価/BETWEEN 展開）が Claude 検証済みと一致・既存3関数 byte 不変を共通 gate に含む＝そのまま着手可能。**次＝実装着手可否の判断（7.0〜11.5 人日）**。
+- ステータス: **Step 1〜8実装・Node / CLI / MCP自動gate完了（2026-07-24）、browser release gate未完了**。B67対象14 suites / 1,109 tests、全面`npm test`通常155 suites / 4,146 tests＋CLI subprocess 2 suites / 26 tests、snapshot 22件、plugin / CLI / MCP / MCPB / engine build、MCP smoke / pack / MCPB verify、engine配布smokeは全green。Firefox / Chrome実機はNodeで代替せず[手順・evidence](evidence/b67_relative_date_browser_smoke.md)を用意し、**ユーザー実施待ち**。
 - 正仕様: [B67 Phase1 仕様 R2](ksql_b67_rest_query_functions_phase1_spec.md)
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B67
 - 手本: [B66 実装計画](ksql_b66_impl_plan.md)／[B65 実装計画](ksql_b65_impl_plan.md)
@@ -418,6 +418,10 @@ B55／B60の完全関数カタログへ12関数をcontextualとして追加し�
 想定: **0.5〜0.75人日**。
 
 ## 10. Step 8 — 受入 matrix、全面 smoke、実ブラウザ手順
+
+**実施結果（2026-07-24）:** 受入matrixと自動gateは完了。実測は
+[acceptance evidence](evidence/b67_relative_date_acceptance.md)へ記録した。
+Firefox / Chromeはfixtureと手順書のみ作成し、**ユーザー実施待ち**。
 
 ### 10.1 目的
 

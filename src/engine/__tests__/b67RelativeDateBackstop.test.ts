@@ -2,7 +2,7 @@ import {
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../../core/relativeDateFunction";
 import type { SqlValue, WhereExpr } from "../../types/ast";
-import { evalWhere } from "../evalWhere";
+import { evalWhere, resolveKintoneFunc } from "../evalWhere";
 
 function relativeDateComparison(name: string): WhereExpr {
   const right = {
@@ -35,4 +35,11 @@ test.each([
 test("未知の KINTONE_FUNC 名も default-deny する", () => {
   expect(() => evalWhere(relativeDateComparison("UNKNOWN_KINTONE_FUNC"), { 日付: "" }))
     .toThrow("InternalError: unexpected KINTONE_FUNC name: UNKNOWN_KINTONE_FUNC");
+});
+
+test("legacy TODAY/NOW/LOGINUSER resolver の既存3ケースを変更しない", () => {
+  expect(resolveKintoneFunc("TODAY")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  expect(resolveKintoneFunc("NOW"))
+    .toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  expect(resolveKintoneFunc("LOGINUSER")).toBe("");
 });

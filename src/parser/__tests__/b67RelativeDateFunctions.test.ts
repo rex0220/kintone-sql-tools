@@ -127,6 +127,8 @@ test.each([
   "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.日付 = YESTERDAY()",
   "SELECT COUNT(*) FROM APP100 GROUP BY YESTERDAY()",
   "SELECT * FROM APP100 ORDER BY YESTERDAY()",
+  "SELECT * FROM APP100 WHERE YESTERDAY() = 日付",
+  "SELECT * FROM APP100 WHERE 日付 = YESTERDAY() + 1",
 ])("WHERE 比較右辺以外では parse 可能にしない: %s", (sql) => {
   expect(() => parseSqlStatement(sql)).toThrow();
 });

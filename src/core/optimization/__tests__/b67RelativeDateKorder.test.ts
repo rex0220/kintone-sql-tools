@@ -56,6 +56,10 @@ test("KORDER_NATIVE と KORDER_CURSOR は同じ relative-date WHERE byte を使�
 
   const nativeQuery = native.calls.records.mock.calls[0][0].query;
   const cursorQuery = cursor.calls.cursorOpen.mock.calls[0][0].query;
+  expect(nativeQuery)
+    .toBe("日付 >= FROM_TODAY(-7, DAYS) order by $id asc limit 10");
+  expect(cursorQuery)
+    .toBe("日付 >= FROM_TODAY(-7, DAYS) order by $id asc");
   expect(wherePrefix(nativeQuery)).toBe("日付 >= FROM_TODAY(-7, DAYS)");
   expect(wherePrefix(cursorQuery)).toBe(wherePrefix(nativeQuery));
   expect(evaluator).not.toHaveBeenCalled();
