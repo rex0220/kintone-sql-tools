@@ -1,6 +1,21 @@
 # B67 Phase1 — Firefox / Chrome plugin 実ブラウザ smoke
 
-- 状態: **ユーザー実施待ち**
+- 状態: **PASS（ユーザー実施・報告 2026-07-24）**。同一 plugin ZIP（v3.20.0）で実ブラウザ smoke を実施し、SIMPLE 押し下げ・KORDER・負例拒否を確認。詳細記入欄は後追記可。あわせて CLI 実機テスト（下記）も PASS。
+
+## CLI 実機テスト結果（dev kintone・APP730@dev・read-only・2026-07-24）
+
+`node dist-cli/ksql.js`（v3.20.0）で実 kintone に対し確認。すべて期待どおり。
+
+| # | クエリ | 結果 |
+|---|---|---|
+| 1 | `WHERE 更新日時 >= YESTERDAY()` | 押し下げ・`更新日時 >= YESTERDAY()`・rowCount=0（昨日以降更新なし＝サーバ評価が実データと整合） |
+| 2 | `WHERE 更新日時 >= FROM_TODAY(-30, DAYS)` | 押し下げ・3行（岐阜県・2026-07-21 更新）＝サーバ相対評価が実データで動作 |
+| 3 | `... >= YESTERDAY() AND LENGTH(都道府県) > 1` | 拒否 `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`（非exact→FULL_SCAN） |
+| 4 | `WHERE 都道府県 = THIS_MONTH()` | 拒否 `WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`（非日付型） |
+| 5 | `WHERE 更新日時 < TODAY()` | 3行・既存3関数 非回帰 |
+| 6 | `... FROM_TODAY(-30, DAYS) KORDER BY $id LIMIT 3` | KORDER native 押し下げ・3行 |
+| 7 | `WHERE 更新日時 BETWEEN FROM_TODAY(-30, DAYS) AND TODAY()` | `>= AND <=` 展開で押し下げ・3行 |
+| 8 | `--dry-run`（拒否ケース） | `plan status: rejected` / `reason: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` / records・cursor・mutation API none |
 - 実施者: ユーザー（Firefox / Chrome 実機）
 - 自動検証との境界: Node / jsdom / build 成功はこの gate の代替ではない
 - 使用物: **同一の plugin ZIP** を Firefox と Chrome の両方へ導入する
