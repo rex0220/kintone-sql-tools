@@ -229,6 +229,28 @@ await runQuery("SELECT $id FROM APP100 KORDER BY $id LIMIT 501", {
 上限**です。超過は Cursor 作成前に fail-closed になります。kintone 側のホスト単位の
 上限は最大 5 で、独立コピー間では協調しません（[複数コピーと Cursor 上限](#複数コピーと-cursor-上限)）。
 
+### KLIKE との関係
+
+`KLIKE`（kintone ネイティブ検索への押し下げ）を使うクエリは **Cursor を使いません**。
+`KORDER BY` が `KLIKE` との併用を受け付けないためです。
+
+```js
+// NG: KORDER BY と KLIKE は併用できない
+// → EXECUTION_ERROR / message に KORDER_KLIKE_UNSUPPORTED
+await runQuery("SELECT $id FROM APP100 WHERE 名前 KLIKE 'ケン' KORDER BY $id LIMIT 501", { client });
+
+// OK: KLIKE は WHERE がネイティブ like へ押し下がる（Cursor は使わない）
+await runQuery("SELECT $id FROM APP100 WHERE 名前 KLIKE 'ケン' ORDER BY $id", { client });
+```
+
+そのため `KLIKE` で並び順が必要なときは `ORDER BY`（ローカル整列）を使うか、順序を
+指定せず既定順のまま受け取ります。
+
+**注意**: `KLIKE` は kintone 側で検索が実行されるため、ヒット件数が多いと
+**10 万件の検索打ち切り**に当たりやすくなります。打ち切りが起きた場合は
+（他のクエリ形と同様に）常に `SEARCH_ABORTED` の hard error で、部分結果は返りません。
+広くヒットする `KLIKE` は他の条件で絞り込んでください。
+
 ## error code
 
 `KsqlEngineError.code` は次の固定 union です。
