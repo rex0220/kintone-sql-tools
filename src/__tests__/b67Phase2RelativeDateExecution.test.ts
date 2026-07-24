@@ -8,6 +8,7 @@ import { resolveFieldSemantics } from "../core/fieldSemantics";
 import { decomposeRelativeDatePrefilter } from "../core/optimization/relativeDatePrefilterPlan";
 import { parseSqlStatement } from "../core/sql";
 import type { SelectStatement, WhereExpr } from "../types/ast";
+import * as evalWhereModule from "../engine/evalWhere";
 
 function record(id: number, fields: Record<string, string>): KintoneRecord {
   return {
@@ -59,6 +60,7 @@ function rows(result: unknown): SelectResult {
 }
 
 test("relative prefilter を GET に載せ、LENGTH residual だけで結果を絞る", async () => {
+  const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
   const { client, getRecords } = makeClient(async () => ({
     records: [
       record(1, { 更新日時: "2026-07-24T00:00:00Z", 件名: "A" }),
@@ -77,6 +79,11 @@ test("relative prefilter を GET に載せ、LENGTH residual だけで結果を�
   expect(getRecords.mock.calls[0][0].query).toBe(
     "更新日時 >= YESTERDAY() order by $id asc limit 500 offset 0"
   );
+  expect(evaluator).toHaveBeenCalled();
+  for (const [residual] of evaluator.mock.calls) {
+    expect(relativeNames(residual)).toEqual([]);
+  }
+  evaluator.mockRestore();
 });
 
 test("複数ページでも relative base predicate を維持する", async () => {

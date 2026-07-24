@@ -8508,6 +8508,127 @@ function explainMetadataLines(analysis: ExplainWhereAnalysis): string[] {
   ];
 }
 
+function renderResidualOperator(op: unknown): string {
+  switch (op) {
+    case "NOT_LIKE": return "NOT LIKE";
+    case "NOT_KLIKE": return "NOT KLIKE";
+    case "NOT_IN": return "NOT IN";
+    case "LIKE":
+    case "KLIKE":
+    case "IN":
+    case "=":
+    case "!=":
+    case "<>":
+    case ">":
+    case "<":
+    case ">=":
+    case "<=":
+      return op;
+    default:
+      return "<op>";
+  }
+}
+
+function relativeReasonOperator(op: string): string {
+  return op === "<>" ? "!=" : op;
+}
+
+function renderResidualValue(node: unknown): string {
+  if (node === null || typeof node !== "object") return "<expr>";
+  const value = node as Record<string, unknown>;
+  switch (value["type"]) {
+    case "FIELD":
+      return typeof value["field"] === "string"
+        ? `${typeof value["tableAlias"] === "string" ? `${value["tableAlias"]}.` : ""}${value["field"]}`
+        : "<expr>";
+    case "FIELD_REF":
+      return typeof value["field"] === "string" ? value["field"] : "<expr>";
+    case "NUMBER":
+      return typeof value["raw"] === "string"
+        ? value["raw"]
+        : typeof value["value"] === "number" ? String(value["value"]) : "<expr>";
+    case "STRING":
+      return typeof value["value"] === "string"
+        ? `'${value["value"].replace(/'/g, "''")}'`
+        : "<expr>";
+    case "VARIABLE":
+      return typeof value["name"] === "string" ? `@${value["name"]}` : "<expr>";
+    case "VARIABLE_IN_LIST":
+      return typeof value["name"] === "string" ? `@${value["name"]}` : "<expr>";
+    case "STRING_FUNC": {
+      if (typeof value["func"] !== "string" || !Array.isArray(value["args"])) return "<expr>";
+      return `${value["func"]}(${value["args"].map(renderResidualValue).join(", ")})`;
+    }
+    case "FUNC_FIELD":
+    case "ARITH_FIELD":
+    case "CASE_FIELD":
+    case "ARITH_VALUE":
+    case "CASE_VALUE":
+      return renderResidualValue(value["expr"]);
+    case "GROUPING_FIELD":
+      return `GROUPING(${renderResidualValue(value["ref"])})`;
+    case "GROUPING_REF":
+      return renderResidualValue(value["field"]);
+    case "ARITH":
+    case "SCALAR_ARITH":
+    case "CONCAT_OP":
+      return `(${renderResidualValue(value["left"])} ${
+        typeof value["op"] === "string"
+          ? value["op"]
+          : value["type"] === "CONCAT_OP" ? "||" : "<op>"
+      } ${renderResidualValue(value["right"])})`;
+    case "KINTONE_FUNC":
+      return typeof value["name"] === "string" ? `${value["name"]}(...)` : "<expr>";
+    case "IN_LIST":
+      return Array.isArray(value["values"])
+        ? `(${value["values"].map(renderResidualValue).join(", ")})`
+        : "<expr>";
+    case "ARRAY":
+      return Array.isArray(value["elements"])
+        ? `[${value["elements"].map(renderResidualValue).join(", ")}]`
+        : "<expr>";
+    case "CASE":
+    case "CASE_WHEN":
+      return "CASE ... END";
+    default:
+      return "<expr>";
+  }
+}
+
+/**
+ * Phase2 EXPLAIN 専用の診断 renderer。
+ * REST query の生成には使わず、未知の AST shape でも必ず安全な表示へ退避する。
+ */
+export function renderRelativeDateResidualWhere(where: WhereExpr): string {
+  try {
+    const node = where as unknown as Record<string, unknown>;
+    switch (node["type"]) {
+      case "BINARY":
+        return `${renderResidualValue(node["left"])} ${renderResidualOperator(node["op"])} ${
+          renderResidualValue(node["right"])
+        }`;
+      case "NULL_CHECK":
+        return `${renderResidualValue(node["field"])} IS ${
+          node["not"] === true ? "NOT " : ""
+        }NULL`;
+      case "LOGICAL":
+        return `(${renderRelativeDateResidualWhere(node["left"] as WhereExpr)} ${
+          node["op"] === "AND" || node["op"] === "OR" ? node["op"] : "<op>"
+        } ${renderRelativeDateResidualWhere(node["right"] as WhereExpr)})`;
+      case "NOT":
+        return `NOT (${renderRelativeDateResidualWhere(node["expr"] as WhereExpr)})`;
+      case "GROUP":
+        return `(${renderRelativeDateResidualWhere(node["expr"] as WhereExpr)})`;
+      case "BOOLEAN":
+        return node["value"] === true ? "TRUE" : node["value"] === false ? "FALSE" : "<expr>";
+      default:
+        return "<expr>";
+    }
+  } catch {
+    return "<expr>";
+  }
+}
+
 function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
   if (!plan.hasRelativeDate) return [];
   if (!plan.allowed && plan.rejection) {
@@ -8522,6 +8643,40 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
 
   const lines: string[] = [];
   for (const node of plan.nodes) {
+    const prefilterPlan = node.prefilterPlan;
+    if (
+      node.allowed
+      && prefilterPlan?.prefilterWhere
+      && prefilterPlan.residualWhere
+    ) {
+      for (const leaf of prefilterPlan.exactRelativeLeaves) {
+        const functionName = leaf.right.type === "KINTONE_FUNC"
+          ? leaf.right.name
+          : "(unknown)";
+        const field = leaf.left.type === "FIELD" ? leaf.left.field : undefined;
+        const operator = relativeReasonOperator(leaf.op);
+        const detail = node.capability?.reasons.find((reason) =>
+          reason.functionName === functionName
+          && (field === undefined || reason.field === field)
+          && reason.operator === operator
+        );
+        lines.push(
+          `  relative date function: ${functionName}`,
+          "  relative date evaluation: kintone server exact prefilter",
+          `  field: ${detail?.field ?? field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
+          `  operator: ${detail?.operator ?? operator}`
+        );
+      }
+      const serverPrefilter = whereToKintone(prefilterPlan.prefilterWhere);
+      lines.push(
+        "  where capability: SUPERSET_PREFILTER",
+        `  server prefilter: ${serverPrefilter}`,
+        `  client residual: ${renderRelativeDateResidualWhere(prefilterPlan.residualWhere)}`,
+        "  relative date client evaluations: 0",
+        `  kintone query: ${serverPrefilter}`
+      );
+      continue;
+    }
     for (const functionName of node.functionNames) {
       const detail = node.capability?.reasons.find((reason) =>
         reason.functionName === functionName
