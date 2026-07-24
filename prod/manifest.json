@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "version": "3.19.0",
+  "version": "3.20.0",
   "type": "APP",
   "name": {
     "ja": "kSQL",
@@ -12,12 +12,20 @@
   },
   "icon": "image/icon.png",
   "desktop": {
-    "js":  ["js/desktop.js"],
-    "css": ["css/desktop.css"]
+    "js": [
+      "js/desktop.js"
+    ],
+    "css": [
+      "css/desktop.css"
+    ]
   },
   "config": {
     "html": "html/config.html",
-    "js":   ["js/config.js"],
-    "css":  ["css/config.css"]
+    "js": [
+      "js/config.js"
+    ],
+    "css": [
+      "css/config.css"
+    ]
   }
 }

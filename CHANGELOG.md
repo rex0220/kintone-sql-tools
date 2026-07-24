@@ -2,6 +2,19 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.20.0（2026-07-24）
+
+### 機能追加（B67 kintone REST クエリ関数＝相対日付の押し下げ）
+
+- kintone のクエリ関数のうち相対日付12関数（`YESTERDAY` / `TOMORROW` / `FROM_TODAY(n, DAYS|WEEKS|MONTHS|YEARS)` / `THIS_WEEK` / `LAST_WEEK` / `NEXT_WEEK` / `THIS_MONTH` / `LAST_MONTH` / `NEXT_MONTH` / `THIS_YEAR` / `LAST_YEAR` / `NEXT_YEAR`）を `WHERE` で使えるようにした。例: `SELECT * FROM APP730 WHERE 作成日時 < FROM_TODAY(5, DAYS)`。
+- **方針＝押し下げネイティブ（server-only）**。関数を kintone REST クエリへそのまま出力し、リクエスト時刻・タイムゾーン・週境界・月末を kintone サーバが評価する。kSQL は日付へ解決しない。
+- 対象は日付系フィールド（`DATE` / `DATETIME` / 作成日時 / 更新日時）× 比較演算子（`=` `!=` `<` `<=` `>` `>=`）の `WHERE` 右辺と、`BETWEEN` の境界のみ。`IN` / `NOT IN`・非日付フィールド・関数左辺は不可。
+- **押し下げできない場合はレコード取得前に fail-closed**（client 評価にフォールバックしない）。FULL_SCAN・JOIN 残余・集約・window・DISTINCT・通常 `ORDER BY`・一時テーブル・実体化 CTE・`VALIDATE`・サブテーブル DML・`UPDATE FROM`・`APPLY`・`REORDER` で関数付き比較が残る場合は、records / Cursor / mutation を発行せずエラーにする。planner の allowlist と evalWhere の runtime backstop の二段で保証する。
+- EXPLAIN はサーバ評価であることと押し下げ後の kintone クエリを表示し、`KORDER BY`（native / Cursor）でも同じ関数表現で押し下げる。既存の `TODAY()` / `NOW()` / `LOGINUSER()` は挙動・出力とも不変。
+- Node engine ライブラリ・CLI・MCP・プラグインで同一の受理判定と REST クエリ。`ksql_validate` は構文・引数のみ検査し、実行可否は `ksql_query` / `ksql_explain` の schema-aware 判定で確定する。
+- Phase2 対象外: `PRIMARY_ORGANIZATION()` と相対日付関数の client 評価（FULL_SCAN 対応）。
+- SemVer=minor（純加法・既存 SQL / CLI / MCP / plugin の挙動不変）。
+
 ## v3.19.0（2026-07-24）
 
 ### 機能追加（B66 read-only kSQL エンジン・ライブラリ公開 Phase1）
