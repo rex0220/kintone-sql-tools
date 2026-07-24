@@ -1,6 +1,6 @@
 # B66 Phase1 実装計画 — read-only kSQL エンジン・ライブラリ公開
 
-- ステータス: ✅ **Step 1〜9 実装完了・v3.19.0 release candidate（2026-07-24）**。判断 A（DML 同梱・forbidden 群 0）で公開 docs、evidence、3.19.0 metadata、5面 build、release 3成果物、全 gate、pack 済み ESM/CJS/UMD docs 例まで完了。git/commit/tag/Release/publish は未実施で Claude／ユーザー作業。
+- ステータス: ✅ **Step 1〜9 完了・v3.19.0 リリース完全完了（2026-07-24・npm latest 3.19.0）**。判断 A（DML 同梱・forbidden 群 0）で公開 docs、evidence、3.19.0 metadata、5面 build、release 3成果物、全 gate、pack 済み ESM/CJS/UMD docs 例まで完了。git/commit/tag/Release/publish は未実施で Claude／ユーザー作業。
 - 正仕様: [B66 Phase1 仕様 R2](ksql_b66_engine_library_phase1_spec.md)
 - 背景評価: [B66 評価](ksql_b66_engine_library_evaluation.md)
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B66
