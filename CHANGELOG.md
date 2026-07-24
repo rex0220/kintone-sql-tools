@@ -2,6 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.19.0（2026-07-24）
+
+### 機能追加（B66 read-only kSQL エンジン・ライブラリ公開 Phase1）
+
+- 他の kintone プラグイン／カスタマイズから利用できる read-only エンジンを `@rex0220/kintone-sql-tools/engine` と UMD `window.ksql` version registry で公開した。ESM / CJS / UMD、公開 `.d.ts`、browser `createReadonlyKintoneClient()`、BYO readonly client に対応。
+- 公開 API は `version`、`createReadonlyKintoneClient()`、`runQuery()`、`explainQuery()`、`KsqlEngineError` と専用 DTO のみ。結果セルはすべて文字列。DML / APPLY / IMPORT / VALIDATE / temp / batch 等は parse allowlist と write method を持たない client 射影で二重に拒否する。
+- 検索打ち切りは常に `SEARCH_ABORTED` の hard error とし、部分結果を返さない。Cursor は query の成功／失敗にかかわらず終了時に close し、browser adapter の lease と lifecycle は instance 内へ閉じる。
+- 公開面・利用上の制約・複数コピー時の Cursor 合算運用は [エンジン・ライブラリ利用ガイド](docs/ksql_engine_library.md) に記載。
+- `./engine` subpath と UMD を追加する純加法的 minor release。既存 SQL、`execute()`、plugin、CLI、MCP、MCPB の挙動は変更していない。
+
 ## v3.18.0（2026-07-23）
 
 ### 小計・総計（B65）Phase2 — CUBE / HAVING 内 GROUPING() / SELECT DISTINCT 併用

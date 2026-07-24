@@ -1,8 +1,8 @@
 # B66 Phase1 — read-only kSQL エンジン・ライブラリ公開仕様
 
 - 作成日: 2026-07-23
-- ステータス: **仕様 R2・Claude レビュー済＝実装着手可能水準**（2026-07-23）。R1 レビュー指摘5件（§12）を R2 本文へ反映（§3.2 bypass 正規化／§4.4 import グラフ監査／§4.5 バージョン共存〔UMD registry・per-instance・Cursor lease 非協調＝実コード監査済み〕／§2.1 string 明示／§3.3 UX 注記）＝再レビューで全数妥当・新規の綻びなし。公開意味論の2核心（read-only 二重強制／型隔離）は不変。**オーナー判断も決着（2026-07-23）＝§3.3 検索打ち切りは常時 fail-closed で確定・部分結果＋warning は将来 Phase2 の明示 opt-in**。未決の仕様/オーナー論点はなく、**実装着手可否の判断のみ**（見積り 4〜7 人日）。
-- 対象リリース: 未定
+- ステータス: **Phase1 実装完了・v3.19.0 release candidate（2026-07-24）**。仕様 R2 の公開意味論は変更せず、判断 A（DML/APPLY/IMPORT は実行不能な dead code として bundle 同梱）で Step 1〜9 を完了。read-only 二重強制、型隔離、検索打ち切り常時 fail-closed、ESM/CJS/UMD、version registry、browser/BYO client、per-query Cursor close を実装し、全自動 gate と Firefox/Chrome の Step 8 実ブラウザ gate が PASS。初回 production bundle baseline は ESM **444,578 B min / 119,684 B gzip**、CJS **445,113 B / 119,990 B**、UMD **445,605 B / 120,031 B**（全 forbidden 0）。
+- 対象リリース: **v3.19.0（minor・純加法）**。既存 `execute()`/CLI/MCP/plugin/SQL 挙動は不変で、`./engine` サブパス＋UMD の追加のみ＝破壊的変更なしのため SemVer minor（単一バージョン線＝package version と一致・ライブラリ公開 `version` も 3.19.0）。
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B66
 - 起草ブリーフ: [ksql_b66_phase1_spec_r1_brief.md](ksql_b66_phase1_spec_r1_brief.md)
 - 評価: [ksql_b66_engine_library_evaluation.md](ksql_b66_engine_library_evaluation.md)
@@ -216,10 +216,10 @@ BYO client に余分なプロパティが存在しても構造型だけでは禁
 
 ### 4.4 build 内容
 
-R2 実装着手の最初に engine entry の import グラフ監査を行い、`execute()` の推移依存が MCP instructions、docs、statement catalog、zod、MCP SDK を引かないことを確定する。いずれかを引く場合は、forbidden module 検査だけで済ませず engine 用 entry／依存の分割が必要である。監査と必要な entry 分割が完了するまで bundle 実装へ進まない。
+> **Step 1 監査結果とオーナー判断（2026-07-23・決定＝A）。** import グラフ監査（[evidence](evidence/b66_engine_import_graph.md)）で **forbidden 群（MCP instructions/docs/statement catalog/zod/MCP SDK/Node builtin）は全条件 0**を確認。一方 `execute()` は DML/APPLY/IMPORT モジュール（38件）まで到達する。baseline＝A（execute() 同梱）browser 449,713 B min / **120,556 B gzip**、read-only floor probe 190,029 B min / 47,593 B gzip、DML 専用死にコードの独立寄与 ≈31 KB gzip。**判断＝選択肢 A を採用**＝read path 以外の DML/APPLY/IMPORT コードは read-only bundle に **実行不能な dead code として残置**し、read-only の安全性は §3 の二重強制で保証する（bundle 除外は安全要件でない）。**§4.4 の「read path だけを bundle」は forbidden 群 0 の維持に緩和**し、DML/APPLY/IMPORT の完全除外（read router のクリーン機械抽出＝選択肢 B）は**将来最適化（fast-follow・v3.20.0 候補）**とする。以下の bundle 内容の箇条書きは B（抽出）達成時の理想像であり、v3.19.0 Phase1 では forbidden 群 0＋baseline 記録を必須要件とする。
 
-- engine entry から到達する parser、planner、converter、read-only executor、browser readonly adapter だけを bundle する。
-- MCP instructions、言語リファレンス／recipe 埋め込み、statement catalog、MCP SDK、zod、CLI argument / profile / credential 処理、plugin UI / config / manifest / CSS を含めない。
+- （B 達成時の理想）engine entry から到達する parser、planner、converter、read-only executor、browser readonly adapter だけを bundle する。**v3.19.0（A）では DML/APPLY/IMPORT の dead code 同梱を許容する。**
+- MCP instructions、言語リファレンス／recipe 埋め込み、statement catalog、MCP SDK、zod、CLI argument / profile / credential 処理、plugin UI / config / manifest / CSS を含めない（**A でも必須・監査で 0 確認済み**）。
 - browser / UMD bundle に `fs`、`path`、`child_process`、`Buffer` 等の Node 専用参照または Node builtin import を含めない。
 - tree-shaking 後の metafile を保存して forbidden module 検査を行い、minified / gzip サイズを release artifact に記録する。R2 では既存 engine の実測前に恣意的な容量上限を置かず、初回値を以後の回帰基準にする。
 
