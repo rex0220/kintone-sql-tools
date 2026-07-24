@@ -186,7 +186,11 @@ function isLegacyKintoneFunction(value: SqlValue): boolean {
     && (value.name === "TODAY" || value.name === "NOW" || value.name === "LOGINUSER");
 }
 
-function classifyRelativeDateBinary(
+/**
+ * B67 の相対日付比較 leaf を単体で判定する共有 classifier。
+ * WHERE 全体の合成規則を通さず、Phase 1 と同じ exact 条件だけを確認する。
+ */
+export function classifyRelativeDateBinary(
   op: CompareOp,
   left: FieldValue,
   right: Extract<SqlValue, { type: "KINTONE_FUNC" }>,

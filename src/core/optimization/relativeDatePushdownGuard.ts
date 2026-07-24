@@ -257,7 +257,7 @@ function collectStatement(
   }
 }
 
-function serializationContainsFunctions(query: string, names: readonly string[]): boolean {
+export function serializationContainsFunctions(query: string, names: readonly string[]): boolean {
   return names.every((name) => new RegExp(`\\b${name}\\s*\\(`).test(query));
 }
 
