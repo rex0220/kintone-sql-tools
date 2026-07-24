@@ -1,7 +1,7 @@
 # B67 Phase2 A — 相対日付 exact prefilter ＋残余 client 評価仕様
 
 - 作成日: 2026-07-24
-- ステータス: **仕様 R1（codex 起草）→ Claude レビュー済＝設計妥当**（2026-07-24）。核心（相対日付 exact leaf を explicit prefilter で押し下げ＋residualWhere〔相対日付 leaf 除去済み〕を FULL_SCAN filter 入力にし client 再評価しない・backstop 維持）は妥当。ブリーフの LIKE/KLIKE 混同を R1 が是正（`extractSafePushdownLeaves` は KLIKE/$id/型確認 NUMBER/選択 IN を扱い通常 SQL LIKE は残余 JS＝相対日付分解は汎用抽出器に負わせず隣接追加）。8論点決着・AND 限定・OR/KORDER/DML/JOIN/VALIDATE は対象外で明示。実装前 R2 精査＝共有 helper 名・空 residual の EXPLAIN 表記・browser fixture の3点（公開意味論は未決なし）。B67 Phase1（v3.20.0）とは独立の後続。
+- ステータス: **仕様 R2＝実装着手可能水準**（2026-07-25）。R1（codex 起草）→ Claude レビュー済＝設計妥当。核心（相対日付 exact leaf を explicit prefilter で押し下げ＋residualWhere〔相対日付 leaf 除去済み〕を FULL_SCAN filter 入力にし client 再評価しない・backstop 維持）は妥当。ブリーフの LIKE/KLIKE 混同を R1 が是正（`extractSafePushdownLeaves` は KLIKE/$id/型確認 NUMBER/選択 IN を扱い通常 SQL LIKE は残余 JS＝相対日付分解は汎用抽出器に負わせず隣接追加）。8論点決着・AND 限定・OR/KORDER/DML/JOIN/VALIDATE は対象外で明示。**R2 で §13 の非意味論 3 点を §14 に決着**（識別子名・空 residual の EXPLAIN 表記＝Phase1 exact 表示へ委任・browser fixture 方針）。公開意味論の未決なし。**次＝実装計画（codex 起草→Claude レビュー）→ ブランチ切って Step 実装**（見積り 5〜8 人日）。B67 Phase1（v3.20.0）とは独立の後続。
 - 方針: **SUPERSET_PREFILTER**。相対日付 exact leaf は kintone server で1回だけ評価し、取得後は相対日付 leaf を除いた残余だけを client 評価する。
 - 正: [B67 Phase1 仕様 R2](ksql_b67_rest_query_functions_phase1_spec.md)（特に §5、§11.1）
 - 起草ブリーフ: [B67 Phase2 SUPERSET_PREFILTER 仕様 R1 ブリーフ](ksql_b67_phase2_prefilter_spec_r1_brief.md)
@@ -352,3 +352,24 @@ Phase2 A の公開意味論とブリーフの8論点に未決はない。実装�
 3. browser smoke に使用する物理 app / field と、相対日付境界を跨がず再現可能な fixture。
 
 KORDER、DML、JOIN、VALIDATE、OR / NOT、client相対日付評価は未決ではなく、Phase2 A では明示的に対象外と決着済みである。
+
+## 14. R2 決着（§13 の非意味論 3 点）
+
+いずれも公開意味論に影響しない実装詳細であり、R2 で次に固定する。
+
+### 14.1 共有 plan / helper / 入力 field の識別子名
+
+- 分解 plan object: `RelativeDatePrefilterPlan`。field は §3.3 の列挙どおり `prefilterWhere` / `residualWhere` / `exactRelativeLeaves` / `relativeFunctionNames` / `appliedKlikes` / `capability` / `reasons`。EXPLAIN と実行が共有する不可分オブジェクトとし、prefilter と residual を別々に再解析する経路は作らない（§3.3・§5.3）。
+- 分解 helper: `decomposeRelativeDatePrefilter(stmt, formMeta)`（core の共有 planner）。`extractSafePushdownLeaves` の責務・allowlist は変更せず、その結果と relative exact leaves を合成する隣接関数として置く（§12 論点4）。
+- FULL_SCAN 入力: `FullScanInput.residualWhere`（optional）。未設定時は従来どおり `stmt.where` を filter 入力とし、Phase2 A の plan が成立したときだけ `residualWhere` を明示的に渡す。元 statement は破壊的変更しない（§5.3）。
+- guard 第2許可形: `relativeDatePushdownGuard` 内の `allowRelativeDatePrefilterPlan(plan)`。§5.2 の全条件（single-app FULL_SCAN・no JOIN/subtable/materialized・no KORDER・SUPERSET_PREFILTER・AND-only 分解成功・prefilter serialize 成功・residual client 評価可・residual 内相対日付 occurrence 0）を満たすときだけ Phase1 拒否理由を実行拒否に用いない。
+
+### 14.2 空 residual の EXPLAIN 表記
+
+新表記（`(none; server exact)` 等）は追加せず、**Phase1 exact 表示へ委任する**。SUPERSET_PREFILTER ケースは §2.1 の定義上 `R`（相対日付を含まない client 評価残余）が必ず存在するため residual は非 null であり、空 residual になるのは相対日付 leaf だけの純 exact（Phase1）ケースに限られる。その場合は従来どおり `EXACT_PUSHDOWN` / `client evaluation: forbidden` を表示し、SUPERSET_PREFILTER へ昇格させない（§7 と一致）。EXPLAIN が `SUPERSET_PREFILTER` を表示するときは常に `client residual` 行が1つ以上ある。
+
+### 14.3 browser smoke fixture 方針
+
+- 相対日付境界を跨いでも結果が変わらない**広い窓**を用いる。既定候補は APP730@dev の `更新日時 >= FROM_TODAY(-3650, DAYS) AND LENGTH(都道府県) > 0`（10年窓で当日実行時刻に依存せず全件が prefilter を通過し、residual の client 評価だけが件数を決める）。
+- 検証観点は「同一 SQL・同一 app metadata で Node/CLI/MCP と同じ prefilter query・residual 結果・EXPLAIN・reason」（§8・§9.3）と、browser clock / timezone を参照しないこと。
+- 最終的な物理アプリ / フィールドは smoke 実施時にユーザー環境で確定してよい。fixture は境界跨ぎで flaky にならない窓であることだけを要件とする。
