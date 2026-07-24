@@ -184,6 +184,51 @@ client が `searchAborted: true` を返した場合、simple query、JOIN、GROU
 query が開いた Cursor は、成功、query error、次ページ error のいずれでも query 終了時
 に `close()` します。close error が主 error を隠すことはありません。
 
+## Cursor が使われる条件
+
+`openCursor()`（kintone の Cursor API `/records/cursor.json`）が呼ばれるのは、
+**`KORDER BY` の窓が単発 GET に収まらない場合だけ**です。それ以外の読み取りでは
+呼ばれません。
+
+### 使われる
+
+`KORDER BY` を含み、かつ次の**いずれか**に当てはまるとき（＝単発 GET の条件を
+満たさないとき）:
+
+- `LIMIT` が **500 超**
+- `OFFSET` が **10,000 超**
+- `LIMIT` が `maxRecords` 超
+
+さらに Cursor 実行には **`OFFSET + LIMIT ≤ maxRecords`** が必要です。これを超えると
+**レコード取得も Cursor 作成もせずに**失敗し、**別方式へフォールバックしません**。
+公開 `code` は `EXECUTION_ERROR` で、`message` に理由
+`KORDER_SCAN_ROWS_EXCEEDS_MAX_RECORDS(scanRows=..., maxRecords=...)` を含みます。
+`maxRecords` を上げるか、`LIMIT` / `OFFSET` を小さくするか、`ORDER BY`（ローカル整列）
+へ切り替えてください。
+
+```js
+// Cursor を使う（LIMIT 501 > 500）
+await runQuery("SELECT $id FROM APP100 KORDER BY $id LIMIT 501", {
+  client,
+  maxRecords: 1000,   // OFFSET + LIMIT = 501 ≤ maxRecords が必要
+});
+```
+
+### 使われない
+
+- **通常の `SELECT` / `ORDER BY` / JOIN / 集計 / CTE などのページング**。1万件超でも
+  Cursor API ではなく `$id` シーク方式（前ページ末尾の `$id` より大きい行を取得）で
+  進みます。したがって `openCursor()` は呼ばれず、`cursorMaxActive` も影響しません。
+- `KORDER BY` でも窓が単発 GET に収まる場合（`LIMIT ≤ 500` かつ `OFFSET ≤ 10,000`
+  かつ `LIMIT ≤ maxRecords`）。
+- `explainQuery()`。plan の生成のみでレコード取得も Cursor 作成も行いません。
+
+### 上限
+
+`cursorMaxActive`（既定 2・1〜5）は **その client instance 内で同時に開ける Cursor の
+上限**です。超過は Cursor 作成前に fail-closed になります。kintone 側のホスト単位の
+上限は最大 5 で、独立コピー間では協調しません（[複数コピーと Cursor 上限](#複数コピーと-cursor-上限)）。
+
 ## error code
 
 `KsqlEngineError.code` は次の固定 union です。
