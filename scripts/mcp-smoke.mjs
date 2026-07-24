@@ -400,6 +400,9 @@ async function main() {
       "MODE",
       "DENSE_RANK",
       "LOGINUSER",
+      "YESTERDAY",
+      "FROM_TODAY",
+      "NEXT_YEAR",
       "SUBSTR→SUBSTRING",
       "IFNULL",
     ]) {
@@ -432,6 +435,9 @@ async function main() {
     assert(!("structuredContent" in docsChapter), "ksql_docs chapter success must not return structuredContent.");
     assert(docsChapter.content[0].text.includes("SUBSTRING"), "ksql_docs function chapter is missing expected text.");
     assert(docsChapter.content[0].text.includes("DAYOFWEEK"), "ksql_docs function chapter is missing DAYOFWEEK.");
+    assert(docsChapter.content[0].text.includes("FROM_TODAY"), "ksql_docs function chapter is missing B67 relative-date functions.");
+    assert(docsChapter.content[0].text.includes("server-only"), "ksql_docs function chapter is missing the B67 server-only boundary.");
+    assert(docsChapter.content[0].text.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"), "ksql_docs function chapter is missing the B67 exact-pushdown reason code.");
     const docsUnknown = await client.callTool({
       name: "ksql_docs",
       arguments: { section: "STDDEV" },

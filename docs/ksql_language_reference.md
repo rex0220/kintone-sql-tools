@@ -639,6 +639,31 @@ SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
 > `()` があれば関数、なければフィールド参照として扱われます。  
 > kintone 専用の `TODAY()` / `NOW()` と異なり、SELECT 列でも使用できます。
 
+#### kintone 相対日付関数
+
+次の12関数は、WHERE の比較右辺で kintone REST query へそのまま渡す **server-only** 関数です。Node / CLI / MCP / プラグインのローカル時計では評価せず、kintone サーバーが関数の値・期間と比較結果を決定します。
+
+| 分類 | 関数と引数 |
+|---|---|
+| 前日・翌日 | `YESTERDAY()` / `TOMORROW()` |
+| 相対期間 | `FROM_TODAY(n, unit)`。`n` は `-9,007,199,254,740,991`〜`9,007,199,254,740,991` の10進安全整数、`unit` は `DAYS` / `WEEKS` / `MONTHS` / `YEARS` |
+| 週 | `THIS_WEEK([weekday])` / `LAST_WEEK([weekday])` / `NEXT_WEEK([weekday])`。曜日は `SUNDAY`〜`SATURDAY`、省略時は週全体 |
+| 月 | `THIS_MONTH([day])` / `LAST_MONTH([day])` / `NEXT_MONTH([day])`。`day` は `1`〜`31` / `LAST`、省略時は月全体 |
+| 年 | `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()` |
+
+```sql
+SELECT * FROM APP100 WHERE 作成日時 < FROM_TODAY(5, DAYS)
+SELECT * FROM APP100 WHERE 更新日時 = THIS_WEEK(MONDAY)
+SELECT * FROM APP100 WHERE 日付 = LAST_MONTH(LAST)
+SELECT * FROM APP100
+WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
+```
+
+- 対象はトップレベルの物理 `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
+- 相対日付関数を含む条件は kintone REST query への **exact pushdown が必須**です。client fallback はありません。FULL_SCAN、JOIN、派生結果、残余評価などローカル再評価が必要な計画では、レコード・Cursor・mutation API の前に fail-closed します。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
+- 診断 reason code は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` です。
+- 関数名、`DAYS` / `WEEKS` / `MONTHS` / `YEARS`、曜日、`LAST` は hard keyword ではなく、該当する WHERE 値・引数位置だけで解釈する soft keyword です。同名フィールドは通常どおり使えます。関数呼び出しとの曖昧さを避ける場合は `` `FROM_TODAY` ``、`` `LAST` `` のようにバッククォートで退避してください。引用した単位・曜日・`LAST` は関数引数としては受理しません。
+
 ### 関数のネスト
 
 関数の引数に別の関数を指定できます。
@@ -672,6 +697,10 @@ WHERE 担当者 != '山田'
 ```
 
 > 右辺の値にはバッチ変数 `@名前` も指定できます（→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)）。
+
+### 相対日付関数
+
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、WHERE 全体を exact pushdown できない場合に client 評価へ切り替えません。関数一覧、引数、型・演算子、reason code、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
 
 ### 型付き比較（v3.0.0）
 

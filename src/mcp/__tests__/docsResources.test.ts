@@ -78,6 +78,12 @@ describe("B50 embedded documentation resources", () => {
     expect(KSQL_DOCS_INDEX).toContain('ksql_docs {"section":"language-reference/05-string-number-functions"}');
     expect(KSQL_DOCS.languageReference.sections["05-string-number-functions"].text)
       .toContain("`SUBSTR` → `SUBSTRING`");
+    expect(KSQL_DOCS.languageReference.sections["05-string-number-functions"].text)
+      .toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
+    expect(KSQL_DOCS.languageReference.sections["06-where"].text)
+      .toContain("server-only");
+    expect(KSQL_DOCS.languageReference.sections["06-where"].text)
+      .toContain("exact pushdown");
   });
 
   test("lists and reads indexes/templates and rejects every non-allowlisted key without I/O", async () => {

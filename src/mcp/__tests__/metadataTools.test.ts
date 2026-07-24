@@ -108,7 +108,7 @@ describe("ksql_app_metadata MCP surface", () => {
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
       const instructionWords = instructions?.trim().split(/\s+/).length;
-      expect(instructionWords).toBe(529);
+      expect(instructionWords).toBe(541);
       expect(instructionWords).toBeLessThanOrEqual(550);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);
       for (const key of [

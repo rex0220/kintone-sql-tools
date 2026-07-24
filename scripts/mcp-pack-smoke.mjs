@@ -325,6 +325,9 @@ try {
     "MODE",
     "DENSE_RANK",
     "LOGINUSER",
+    "YESTERDAY",
+    "FROM_TODAY",
+    "NEXT_YEAR",
     "SUBSTR→SUBSTRING",
     "IFNULL",
   ]) {
