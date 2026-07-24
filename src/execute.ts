@@ -66,10 +66,6 @@ import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
-import {
-  isRelativeDateFunctionName,
-  WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
-} from "./core/relativeDateFunction";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -179,6 +175,11 @@ import {
   type PredicateCapabilityResult,
   type WhereFieldSemanticsResolver,
 } from "./core/optimization/whereCapability";
+import {
+  assertRelativeDatePushdownPlan,
+  buildRelativeDatePushdownPlan,
+  type RelativeDatePushdownPlan,
+} from "./core/optimization/relativeDatePushdownGuard";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -881,41 +882,17 @@ function attachSearchAbortWarning(
   return { ...result, warnings: [...warnings] };
 }
 
-function findRelativeDateFunctionName(node: unknown): string | null {
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const name = findRelativeDateFunctionName(item);
-      if (name !== null) return name;
-    }
-    return null;
-  }
-  if (node === null || typeof node !== "object") return null;
-  const object = node as Record<string, unknown>;
-  if (
-    object["type"] === "KINTONE_FUNC"
-    && typeof object["name"] === "string"
-    && isRelativeDateFunctionName(object["name"])
-  ) {
-    return object["name"];
-  }
-  for (const value of Object.values(object)) {
-    const name = findRelativeDateFunctionName(value);
-    if (name !== null) return name;
-  }
-  return null;
-}
-
-/**
- * B67 Step 2 temporary fail-closed gate.
- * Step 5 replaces this whole-statement rejection with the schema-aware exact
- * pushdown plan gate. Keep it before records/Cursor/mutation/confirm and every
- * client-side evaluator.
- */
-function assertRelativeDateExecutionPreflight(stmt: Statement): void {
-  const name = findRelativeDateFunctionName(stmt);
-  if (name !== null) {
-    throw new Error(`${name}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}`);
-  }
+async function assertRelativeDateExecutionPlan(
+  stmt: Statement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<RelativeDatePushdownPlan> {
+  const plan = await buildRelativeDatePushdownPlan(stmt, {
+    select: (select) => resolveSelectWhereCapability(select, client, cacheContext),
+    dml: (dml) => resolveDmlWhereCapability(dml, client, cacheContext),
+  });
+  assertRelativeDatePushdownPlan(plan);
+  return plan;
 }
 
 /** パース済み Statement を種別でルーティングして実行する（単文・バッチ共通の入口） */
@@ -925,7 +902,7 @@ async function executeParsedStatement(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<ExecuteResult> {
-  assertRelativeDateExecutionPreflight(stmt);
+  const relativeDatePlan = await assertRelativeDateExecutionPlan(stmt, client, cacheContext);
   const unresolved = findVariableRef(stmt);
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
@@ -975,7 +952,8 @@ async function executeParsedStatement(
       stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
         ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS) : DEFAULT_APPLY_MAX_ROWS,
       stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
-        ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+        ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+      relativeDatePlan
     );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -1504,6 +1482,7 @@ async function executeBatchStatement(
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
     validateKlikeStatement(resolvedStmt);
+    await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
     if (resolvedStmt.expr.type === "ARRAY") {
       variables.set(stmt.name, {
         type: "array",
@@ -1571,6 +1550,7 @@ async function executeBatchStatement(
   assertApplyExecutionScope("phase15b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateKlikeStatement(resolvedStmt);
+  await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
 
   if (resolvedStmt.type === "VALIDATE") {
     const result = await executeExistingRecordValidationCore(
@@ -2281,25 +2261,43 @@ function hasCanonicalOrder(stmt: SelectStatement): boolean {
   );
 }
 
-async function assertDmlWhereCapability(
+async function resolveDmlWhereCapability(
   stmt: UpdateStatement | DeleteStatement,
   client: KintoneClient,
   cacheContext: string
-): Promise<void> {
+): Promise<PredicateCapabilityResult> {
   // サブテーブルDMLは既存どおり親を取得してローカル評価する。B32はREST対象選択経路を扱う。
   // UPDATE ... FROM の WHERE はソースとの結合条件で、専用の照合器が対象を決める。
-  if (stmt.subtableCode || (stmt.type === "UPDATE" && stmt.from != null)) return;
+  if (stmt.subtableCode || (stmt.type === "UPDATE" && stmt.from != null)) {
+    return {
+      capability: "LOCAL_ONLY",
+      reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }],
+    };
+  }
   const fields = whereNeedsFieldMetadata(stmt.where)
     ? await getFieldsCached(stmt.appId, client, cacheContext)
     : [];
   const byCode = new Map(fields.map((field) => [field.code, field]));
-  if (stmt.where.type === "BOOLEAN" && stmt.where.value === false) return;
-  const result = classifyWhereCapability(stmt.where, (field) => {
+  if (stmt.where.type === "BOOLEAN" && stmt.where.value === false) {
+    return classifyWhereCapability(null, () => undefined);
+  }
+  return classifyWhereCapability(stmt.where, (field) => {
     // UPDATE/DELETE の対象は単一アプリ。パーサが保持する APP100. 修飾も同じ対象列を指す。
     if (field.field === "$id") return resolveFieldSemantics({ fieldType: "__ID__" });
     const info = byCode.get(field.field);
     return info?.semantics ?? (info ? resolveFieldSemantics(info) : undefined);
   });
+}
+
+async function assertDmlWhereCapability(
+  stmt: UpdateStatement | DeleteStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  // Existing local target-selection routes retain their established behavior.
+  // B67 rejects relative-date use in these routes in the statement plan guard.
+  if (stmt.subtableCode || (stmt.type === "UPDATE" && stmt.from != null)) return;
+  const result = await resolveDmlWhereCapability(stmt, client, cacheContext);
   if (result.capability !== "EXACT_PUSHDOWN") {
     throw new DmlConvertError(
       `WHERE predicate cannot be represented by kintone REST (${formatWhereCapabilityFailure(result)})`
@@ -8641,7 +8639,9 @@ async function executeExplain(
   maxRecords: number,
   cursorMaxActive: number,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  /** Step 5 の execution と同じ walk 結果。Step 6 の表示拡張はこの値を消費する。 */
+  _relativeDatePlan?: RelativeDatePushdownPlan
 ): Promise<SelectResult> {
   const analysis = await buildExplainWhereAnalysis(stmt.query, client, cacheContext, maxRecords);
   const lines = [

@@ -1,8 +1,4 @@
-import {
-  WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
-} from "../../core/relativeDateFunction";
 import { parseSqlStatement } from "../../core/sql";
-import { execute, type KintoneClient } from "../../execute";
 import { Lexer } from "../../lexer/lexer";
 import { KEYWORDS, TokenKind } from "../../lexer/tokens";
 import type {
@@ -154,34 +150,3 @@ test("関数名・引数語と同名の通常 field/alias と backtick 退避を
   )).not.toThrow();
 });
 
-test("暫定 preflight は SELECT/DML を records/Cursor/mutation/confirm/client評価より前に一律拒否する", async () => {
-  const calls = {
-    getRecords: jest.fn(),
-    openCursor: jest.fn(),
-    postRecords: jest.fn(),
-    putRecords: jest.fn(),
-    deleteRecords: jest.fn(),
-    getApps: jest.fn(),
-    getFields: jest.fn(),
-    getNumberPrecision: jest.fn(),
-    getProcessStatuses: jest.fn(),
-    confirm: jest.fn(),
-  };
-  const client = calls as unknown as KintoneClient;
-
-  for (const sql of [
-    "SELECT * FROM APP100 WHERE 日付 = YESTERDAY() KORDER BY $id",
-    "UPDATE APP100 SET 状態 = '完了' WHERE 日付 = YESTERDAY()",
-    "DELETE FROM APP100 WHERE 日付 = YESTERDAY()",
-  ]) {
-    await expect(execute(sql, client, { confirm: calls.confirm }))
-      .rejects.toThrow(`YESTERDAY: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}`);
-  }
-
-  expect(calls.getRecords).not.toHaveBeenCalled();
-  expect(calls.openCursor).not.toHaveBeenCalled();
-  expect(calls.postRecords).not.toHaveBeenCalled();
-  expect(calls.putRecords).not.toHaveBeenCalled();
-  expect(calls.deleteRecords).not.toHaveBeenCalled();
-  expect(calls.confirm).not.toHaveBeenCalled();
-});
