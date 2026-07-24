@@ -1,7 +1,7 @@
 # B67 Phase1 — kintone REST クエリ関数（相対日付）押し下げ仕様
 
 - 作成日: 2026-07-24
-- ステータス: **仕様 R2・Claude レビュー済＝実装着手可能水準**（2026-07-24）。方針 A（押し下げ専用・server-only・fail-closed）を維持し、R1 レビュー指摘（§14）を §5.2/§5.3/§10.4 へ反映＝再レビューで妥当（backstop 挿入点 `evalWhere.ts:348` の `case "KINTONE_FUNC": resolveKintoneFunc(value.name)` をコードで確認・現状 default なし switch の silent undefined を明示 throw 化する要件と bypass テストが入った）。未決の公開意味論なし。**次＝実装着手可否の判断**（見積り 6〜10 人日）。
+- ステータス: **✅ リリース済み（v3.20.0・2026-07-24）**。方針 A（押し下げ専用・server-only・fail-closed）で相対日付12関数を実装（8 Step・feat PR #259→tag v3.20.0→GitHub Release→npm publish latest 3.20.0）。R1 レビュー指摘（§14）を §5.2/§5.3/§10.4 へ反映済み（backstop `evalWhere.ts` の `resolveKintoneFuncValue` で相対日付名を明示 throw 化＋bypass テスト）。全 `npm test` 155 suites/4,146＋CLI subprocess 26 green・実機 PASS（実 dev kintone CLI 8ケース／Firefox・Chrome プラグイン smoke／デプロイ済み MCP v3.20.0 で EXACT_PUSHDOWN・fail-closed 確認）。**Phase2 A（SUPERSET_PREFILTER）は別 spec で R1 起草済み**（[Phase2 A spec R1](ksql_b67_phase2_superset_prefilter_spec.md)・v3.21.0 候補）。
 - 方針: **A — 押し下げネイティブ**。相対日付関数は kintone REST クエリへそのまま出力し、kintone に評価させる。client 評価へはフォールバックしない。
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B67
 - 起草ブリーフ: [ksql_b67_phase1_spec_r1_brief.md](ksql_b67_phase1_spec_r1_brief.md)
