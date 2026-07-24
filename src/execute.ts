@@ -176,11 +176,15 @@ import {
   type WhereFieldSemanticsResolver,
 } from "./core/optimization/whereCapability";
 import {
+  allowRelativeDatePrefilterPlan,
   assertRelativeDatePushdownPlan,
   buildRelativeDatePushdownPlan,
   type RelativeDatePushdownPlan,
 } from "./core/optimization/relativeDatePushdownGuard";
-import { decomposeRelativeDatePrefilter } from "./core/optimization/relativeDatePrefilterPlan";
+import {
+  decomposeRelativeDatePrefilter,
+  type RelativeDatePrefilterPlan,
+} from "./core/optimization/relativeDatePrefilterPlan";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -2349,6 +2353,17 @@ async function executeSelect(
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
+  let prefilterPlan: RelativeDatePrefilterPlan | undefined;
+  if (whereCapability.capability === "SUPERSET_PREFILTER") {
+    const resolver = await buildWhereFieldSemanticsResolver(stmt, client, cacheContext, cteCache);
+    const decomposition = decomposeRelativeDatePrefilter(stmt, resolver);
+    if (
+      decomposition.eligible
+      && allowRelativeDatePrefilterPlan(stmt, decomposition)
+    ) {
+      prefilterPlan = decomposition.plan;
+    }
+  }
   const staticMode = resolveSelectMode(stmt);
   const mode: SelectMode = whereCapability.capability === "EXACT_PUSHDOWN"
     ? staticMode
@@ -2386,7 +2401,8 @@ async function executeSelect(
         cacheContext,
         cteCache,
         whereCapability.capability === "EXACT_PUSHDOWN",
-        orderMeta
+        orderMeta,
+        prefilterPlan
       );
     }
   } catch (error) {
@@ -3554,7 +3570,8 @@ async function executeFullScanSelect(
   cacheContext: string,
   cteCache?: Map<string, MaterializedTable>,
   allowOriginalWherePushdown = true,
-  preloadedOrderMeta?: OrderByMeta
+  preloadedOrderMeta?: OrderByMeta,
+  prefilterPlan?: RelativeDatePrefilterPlan
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -3588,6 +3605,10 @@ async function executeFullScanSelect(
   validateKlikePushdownPlan(pushdownPlan);
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
+  if (prefilterPlan && allowOriginalWherePushdown) {
+    throw new Error("internal error: relative-date prefilter must disable original WHERE pushdown.");
+  }
+  const mainFetchCondition = prefilterPlan ? prefilterPlan.prefilterWhere : mainPushDown;
 
   // メインテーブルのフェッチを開始（await しない）
   const constantFalse = isConstantFalseWhere(stmt.where);
@@ -3600,7 +3621,7 @@ async function executeFullScanSelect(
     true,
     options.onLimitReached ?? "error",
     warnings,
-    mainPushDown,
+    mainFetchCondition,
     allowOriginalWherePushdown
   );
 
@@ -3700,7 +3721,8 @@ async function executeFullScanSelect(
     havingFieldTypeResolver: fieldTypeResolvers.having,
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
-    appliedKlikes: pushdownPlan.appliedKlikes,
+    appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
+    ...(prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
   });
 

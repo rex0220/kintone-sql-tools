@@ -368,7 +368,7 @@ export async function buildRelativeDatePushdownPlan(
       } catch {
         restQuery = "";
       }
-      const allowed =
+      let allowed =
         physicalTopLevel
         && selectMode === "SIMPLE"
         // Canonical ORDER BY may switch to a local complete-input plan. Phase 1
@@ -390,6 +390,7 @@ export async function buildRelativeDatePushdownPlan(
         ) {
           prefilterPlan = decomposition.plan;
           phase2PrefilterEligible = true;
+          allowed = true;
         }
       }
       const node: RelativeDatePlanNode = {

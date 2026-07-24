@@ -119,23 +119,22 @@ test.each([
   }
 );
 
-test("eligible mixed SELECT は候補 plan を保持するが outer assert は拒否を維持する", async () => {
+test("eligible mixed SELECT は第2許可形として plan を保持し outer assert を通る", async () => {
   const result = await buildRelativeDatePushdownPlan(
     select(MIXED_SQL),
     resolver()
   );
 
-  expect(result.allowed).toBe(false);
+  expect(result.allowed).toBe(true);
   expect(result.nodes).toHaveLength(1);
   expect(result.nodes[0]).toMatchObject({
-    allowed: false,
-    clientWhereEvaluation: true,
+    allowed: true,
+    clientWhereEvaluation: false,
     phase2PrefilterEligible: true,
     capability: { capability: "SUPERSET_PREFILTER" },
   });
   expect(result.nodes[0].prefilterPlan).toBeDefined();
-  expect(() => assertRelativeDatePushdownPlan(result))
-    .toThrow(/YESTERDAY: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
+  expect(() => assertRelativeDatePushdownPlan(result)).not.toThrow();
 });
 
 test.each([
