@@ -2,7 +2,7 @@
 
 - 対象: B67 Phase2 A（SUPERSET_PREFILTER）
 - 版: v3.21.0 予定
-- ステータス: **未実施（release gate・ユーザー実施待ち）**
+- ステータス: **PASS（2026-07-25・ユーザー実施）**。Firefox/Chrome プラグイン実機で、相対日付 exact leaf ＋残余の mixed SELECT が prefilter＋残余で正しく動作し、拒否例（DML source・OR・KORDER）が fail-closed することを確認。
 
 ## 手順（Node で代替しない）
 
@@ -29,4 +29,8 @@ SELECT * FROM APP730 WHERE 更新日時 >= YESTERDAY() AND LENGTH(都道府県) 
 
 ## 結果
 
-（ユーザー実施後に追記）
+- **PASS（2026-07-25・ユーザー実施）**。Firefox / Chrome プラグイン実機で確認:
+  - 正例（mixed prefilter＋残余）: 相対日付 leaf が server prefilter に載り、残余が client 評価される動作を確認。
+  - 拒否例（DML source SELECT・OR 内相対日付・KORDER）: いずれも fail-closed。
+  - 既存 Phase1 pure-exact（`FROM_TODAY(...)` 単独）は非回帰。
+- これにより v3.21.0 の browser release gate を満たす。
