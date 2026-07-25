@@ -1,7 +1,7 @@
 # B69 Phase1 — engine ライブラリ `QueryColumn` 列メタ公開 仕様
 
 - 作成日: 2026-07-25
-- ステータス: **仕様 R2 確定（codex クロスレビュー反映・Claude 実コード裏取り済）＝実装着手可能水準**（2026-07-25）。R1（Claude 起草）→ Claude 自己検証＋実エンジンプローブ（§10・真のブロッカー＝execute() 結果コピーで列メタ WeakMap が外れる、を特定・実メタ値確定・R1 の過剰設計2点是正）→ **codex クロスレビュー（§11・§10 が見落とした P1 を4件検出＝source が CASE/MIN/MAX/MODE と CTE へ漏れる／capture フラグ流用は内部実体化も true のため不十分→専用フラグ要／UNION 文言不一致／guard script 名）を Claude が全数裏取り**。**残オーナー判断1点＝§11.3 CTE/temp provenance 契約（推奨=opaque）**。他は確定。実装は WIP ブランチ `feat/b69-query-column-metadata` を起点に §11.8 To-Do で。§2〜§9 は R1 本文（§10/§11 が上書き・訂正する）。
+- ステータス: **仕様 R2 完全確定（codex クロスレビュー反映・Claude 実コード裏取り・オーナー判断済）＝実装着手可能**（2026-07-25）。R1（Claude 起草）→ Claude 自己検証＋実エンジンプローブ（§10・真のブロッカー＝execute() 結果コピーで列メタ WeakMap が外れる、を特定・実メタ値確定・R1 の過剰設計2点是正）→ **codex クロスレビュー（§11・§10 が見落とした P1 を4件検出）を Claude が全数裏取り**→ **CTE/temp provenance＝opaque（オーナー決定 §11.3）**。未決なし。実装は WIP ブランチ `feat/b69-query-column-metadata` を起点に §11.8 To-Do で（実装は codex・レビューは Claude・git は Claude）。§2〜§9 は R1 本文（§10/§11 が上書き・訂正する）。
 - 正: [B69 評価](ksql_b69_query_column_metadata_evaluation.md)／起草ブリーフ [HANDOFF-column-meta-v3.22.md](HANDOFF-column-meta-v3.22.md)
 - 前提: B66 engine ライブラリ（[spec](ksql_b66_engine_library_phase1_spec.md)／[利用ガイド](../ksql_engine_library.md)）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B69
@@ -214,11 +214,11 @@ codex 復帰後にクロスレビューを実施し、Claude が全指摘を実�
 
 **確定解**: **公開 `sourceApp` は「直接の単純フィールド参照列」（＋ system 列）に限定**する。CASE/MIN/MAX/MODE/算術/スカラーサブクエリ等、式・集計でラップされた列は下地メタが field source を持っていても `sourceApp` を**出さない**。実装は「直接フィールド参照列である」ことを識別して source を出す（例: 出力列の AST 種別が FIELD/system のときのみ／または式・集計経路で source を除去）。受入に `SELECT MIN(会社名)`・`CASE … 会社名` → `sourceApp` undefined を追加。
 
-### 11.3 P1 — CTE/temp の provenance 契約を確定（要オーナー判断）
+### 11.3 P1 — CTE/temp の provenance 契約＝**opaque（オーナー決定 2026-07-25）**
 
 **裏取り**: 物理フィールド source は CTE 実体化メタにも格納され（[execute.ts:3835 付近](../../src/execute.ts)）、最終 CTE フィールド解決はそれをそのまま返す。よって CTE 経由でも `sourceApp` が出得るが、§2 は「CTE/一時テーブル由来は undefined」。単一 CTE inline（最適化）では物理 SELECT 化されるため、**inline/materialize で `sourceApp` の有無が変わる最適化依存**が生じる。
 
-**確定解（推奨）**: **CTE/temp/派生を跨いだ列は `sourceApp` を出さない（opaque）**を契約とし、最適化依存を避けるため **CTE を含む文（inline 済みでも）では直接フィールド参照列にも `sourceApp` を付けない**方針を推奨（決定性優先）。または「究極の物理 provenance を通す」も可。§2 の文言を確定した契約へ合わせて改訂する。**要オーナー/codex 最終判断**（Pro の $id→レコード遷移用途は単一物理 APP の直参照で足りる想定）。
+**確定解（オーナー決定＝opaque）**: **CTE/temp/派生を跨いだ列は `sourceApp` を出さない（opaque）**。決定性優先で最適化依存を避けるため、**`WITH`/CTE/一時テーブルを含む文では、たとえ単一 CTE inline されても直接フィールド参照列に `sourceApp` を付けない**（inline/materialize で挙動不変）。§2 の文言もこの契約へ改訂する（「CTE/temp/派生を跨いだ列の sourceApp は undefined」）。`sourceApp` が出るのは **CTE を含まない単一物理アプリ文の直接フィールド参照列（＋ system 列）** のみ。受入に「CTE 経由の直参照列 → sourceApp undefined（inline/materialize とも）」を追加。
 
 ### 11.4 P1 — UNION の文言を実装へ合わせる
 
@@ -242,7 +242,7 @@ codex 復帰後にクロスレビューを実施し、Claude が全指摘を実�
 1. **P1-1**: `execute()` 返却オブジェクトへ列メタ WeakMap を引き継ぐ（§11.7）。
 2. **P1（§11.1）**: `includePublicSystemSource` 専用フラグを導入し、system 列 source をライブラリ top-level のみに付与。cross-app `$id` の実体化 source-free 回帰テスト（**`INSERT INTO #t` は runQuery 非対応のため、内部 materialization を叩く supported 経路でテスト**）。
 3. **P1（§11.2）**: `sourceApp` を直接フィールド参照列＋system 列に限定（式・集計は undefined）。受入 `MIN(会社名)`/`CASE…会社名`。
-4. **P1（§11.3）**: CTE/temp provenance 契約を確定（推奨=opaque）→ §2 改訂＋テスト。**要オーナー判断**。
+4. **P1（§11.3）**: CTE/temp provenance＝**opaque 確定（オーナー決定）**。CTE を含む文は inline/materialize とも `sourceApp` を出さない→ §2 改訂＋inline/materialize 両方の受入テスト。
 5. **P1（§11.4）**: UNION の §5/§7 文言を `mergeUnionColumnMeta` 実挙動へ改訂。
 6. **P2（§11.5）**: unknown 列 degrade（KSQL_UNKNOWN/string）を契約化・`unsupported` は undefined。
 7. `columnMeta.test.ts` test4 を定義済みフィールドへ・test1〜3 は実値どおり。JOIN 修飾/曖昧・WILDCARD/`_p.*`・CASE/MIN/MAX の受入追加。
