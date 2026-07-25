@@ -89,11 +89,11 @@ export interface RunQueryOptions {
 export interface QueryColumn {
   name: string;
   valueType: "string";
-  /** 元 kintone フィールド型または導出型（例: NUMBER / DROP_DOWN / KSQL_NUMBER）。解決不能な列は undefined。 */
+  /** 元 kintone フィールド型または導出型（例: NUMBER / DROP_DOWN / KSQL_NUMBER / KSQL_UNKNOWN）。 */
   fieldType?: string;
   /** ソート比較器の種別。undefined の列は文字列比較を既定とする。 */
   sortKind?: "number" | "string";
-  /** 単純フィールド参照列（$id 等システム列含む）の参照元アプリ ID。式・集計列は undefined。 */
+  /** 非 CTE の直接フィールド参照列（$id 等含む）の参照元アプリ ID。式・集計・CTE 列は undefined。 */
   sourceApp?: number;
 }
 

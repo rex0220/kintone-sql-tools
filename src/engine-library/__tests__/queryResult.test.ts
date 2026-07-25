@@ -107,6 +107,7 @@ test("runQuery copies SELECT into the stable query envelope", async () => {
     "SELECT b, a FROM APP1",
     expect.any(Object),
     {
+      captureColumnMeta: true,
       maxRecords: 100,
       onLimitReached: "truncate",
       fetchParallel: 2,

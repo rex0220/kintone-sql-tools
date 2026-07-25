@@ -342,6 +342,8 @@ export interface MaterializedColumnMeta {
   readonly sortKind?: "number" | "string";
   readonly fieldType?: string;
   readonly semantics?: ResolvedFieldSemantics;
+  /** engine ライブラリへ公開する直接参照列の物理アプリ。内部実体化の同定には使わない。 */
+  readonly publicSourceApp?: number;
 }
 
 export type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
@@ -626,7 +628,7 @@ export interface DmlConfirmContext {
 
 export interface ExecuteOptions {
   /**
-   * SELECT / WITH / UNION の実行結果に列メタ（fieldType・sortKind・semantics.source）を
+   * SELECT / WITH / UNION の実行結果に列メタ（fieldType・sortKind・semantics）を
    * 関連付ける。有効時は getSelectColumnMeta(result) で取得できる。既定 false（従来動作）。
    */
   captureColumnMeta?: boolean;
@@ -720,7 +722,12 @@ export async function execute(
     cacheContext
   );
   metrics.elapsedMs = Date.now() - startedAt;
-  return { ...attachSearchAbortWarning(result, collector), metrics };
+  const finalResult = { ...attachSearchAbortWarning(result, collector), metrics };
+  if (result.type === "SELECT") {
+    const columnMeta = materializedMetaBySelectResult.get(result);
+    if (columnMeta) materializedMetaBySelectResult.set(finalResult as SelectResult, columnMeta);
+  }
+  return finalResult;
 }
 
 function createEmptyMetrics(): ExecuteMetrics {
@@ -965,8 +972,23 @@ async function executeParsedStatement(
   }
   switch (stmt.type) {
     case "VALIDATE":      return executeExistingRecordValidation(stmt, client, options, cacheContext);
-    case "SELECT":        return executeSelect(stmt, client, options, cacheContext, undefined, options.captureColumnMeta === true);
-    case "UNION":         return executeUnion(stmt, client, options, cacheContext, options.captureColumnMeta === true);
+    case "SELECT":        return executeSelect(
+      stmt,
+      client,
+      options,
+      cacheContext,
+      undefined,
+      options.captureColumnMeta === true,
+      options.captureColumnMeta === true
+    );
+    case "UNION":         return executeUnion(
+      stmt,
+      client,
+      options,
+      cacheContext,
+      options.captureColumnMeta === true,
+      options.captureColumnMeta === true
+    );
     case "WITH":          return executeWith(stmt, client, options, cacheContext, undefined, options.captureColumnMeta === true);
     case "INSERT":        return executeInsert(stmt, client, options, cacheContext);
     case "INSERT_SELECT": return executeInsertSelect(stmt, client, options, cacheContext);
@@ -2347,14 +2369,18 @@ async function executeSelect(
   /** CTE / 一時テーブルのキャッシュ。サブクエリ解決に引き継ぐ（トップレベルの
    *  FROM / JOIN 参照は executeQueryWithCte 側で処理済みの前提） */
   cteCache?: Map<string, MaterializedTable>,
-  captureColumnMeta = false
+  captureColumnMeta = false,
+  forLibraryCapture = false
 ): Promise<SelectResult> {
   let result: SelectResult;
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   if (isNoFromSelect(stmt)) {
     result = executeNoFromSelect(stmt);
     if (captureColumnMeta) {
-      materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+      materializedMetaBySelectResult.set(
+        result,
+        await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
+      );
     }
     return result;
   }
@@ -2419,7 +2445,10 @@ async function executeSelect(
     throwCompleteInputError(completePolicy, error);
   }
   if (captureColumnMeta) {
-    materializedMetaBySelectResult.set(result, await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache));
+    materializedMetaBySelectResult.set(
+      result,
+      await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
+    );
   }
   return result;
 }
@@ -3305,13 +3334,6 @@ function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
   return undefined;
 }
 
-/** システム列メタに参照元アプリを関連付ける（$id からのレコード遷移用の来歴）。 */
-function systemColumnMetaWithSource(field: string, appId: number): MaterializedColumnMeta | undefined {
-  const meta = systemColumnMeta(field);
-  if (!meta?.semantics) return meta;
-  return { ...meta, semantics: withFieldSemanticSource(meta.semantics, appId, field) };
-}
-
 const NUMBER_RETURNING_STRING_FUNCTIONS = new Set([
   "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
   "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
@@ -3399,7 +3421,8 @@ async function inferSelectColumnMeta(
   outputColumns: readonly string[],
   client: KintoneClient,
   cacheContext: string,
-  materializedTables?: ReadonlyMap<string, MaterializedTable>
+  materializedTables?: ReadonlyMap<string, MaterializedTable>,
+  forLibraryCapture = false
 ): Promise<MaterializedColumnMetaMap> {
   const physicalInfos = new Map<number, Map<string, KintoneFieldInfo>>();
   if (selectNeedsSourceColumnMeta(stmt)) {
@@ -3411,6 +3434,9 @@ async function inferSelectColumnMeta(
   }
 
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const canExposePublicSource = forLibraryCapture
+    && materializedTables === undefined
+    && tables.every((table) => table.cteName === null);
   const resolveField = (ref: FieldRef): MaterializedColumnMeta | undefined => {
     if (ref.tableAlias !== null) {
       if (ref.tableAlias === "_p" && stmt.from.subtableCode && stmt.from.cteName === null) {
@@ -3421,13 +3447,13 @@ async function inferSelectColumnMeta(
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMetaWithSource(ref.field, table.appId);
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
-      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMetaWithSource(ref.field, stmt.from.appId);
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
 
     const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
@@ -3437,10 +3463,27 @@ async function inferSelectColumnMeta(
         return [materialized.columnMeta?.get(ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMetaWithSource(ref.field, table.appId);
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
       return meta ? [meta] : [];
     });
     return matches.length === 1 ? matches[0] : undefined;
+  };
+  const resolvePublicSourceApp = (ref: FieldRef): number | undefined => {
+    if (!canExposePublicSource) return undefined;
+    const matches = tables.filter((table) => {
+      if (ref.tableAlias !== null && effectiveTableAlias(table) !== ref.tableAlias) return false;
+      const fieldCode = fieldCodeForTypeLookup(table, ref.field);
+      return physicalInfos.get(table.appId)?.has(fieldCode) === true
+        || systemColumnMeta(ref.field) !== undefined;
+    });
+    return matches.length === 1 ? matches[0].appId : undefined;
+  };
+  const withPublicSource = (
+    meta: MaterializedColumnMeta | undefined,
+    ref: FieldRef
+  ): MaterializedColumnMeta | undefined => {
+    const publicSourceApp = resolvePublicSourceApp(ref);
+    return meta && publicSourceApp !== undefined ? { ...meta, publicSourceApp } : meta;
   };
 
   const inferred = new Map<string, MaterializedColumnMeta>();
@@ -3449,7 +3492,8 @@ async function inferSelectColumnMeta(
   if (stmt.columns.length === 1
     && (stmt.columns[0].type === "WILDCARD" || stmt.columns[0].type === "PARENT_WILDCARD")) {
     for (const output of outputColumns) {
-      const meta = resolveField(aggregateFieldRef(output));
+      const ref = aggregateFieldRef(output);
+      const meta = withPublicSource(resolveField(ref), ref);
       if (meta) inferred.set(output, meta);
     }
     return inferred;
@@ -3458,7 +3502,8 @@ async function inferSelectColumnMeta(
   if (hasWildcard) {
     // ワイルドカード展開済みの実列名だけを解決する。別名・計算列は下の明示列処理で補う。
     for (const output of outputColumns) {
-      const meta = resolveField(aggregateFieldRef(output));
+      const ref = aggregateFieldRef(output);
+      const meta = withPublicSource(resolveField(ref), ref);
       if (meta) inferred.set(output, meta);
     }
   }
@@ -3473,7 +3518,8 @@ async function inferSelectColumnMeta(
       if (!output) return;
       let meta: MaterializedColumnMeta | undefined;
       if (column.type === "FIELD") {
-        meta = resolveField(aggregateFieldRef(column.field));
+        const ref = aggregateFieldRef(column.field);
+        meta = withPublicSource(resolveField(ref), ref);
       } else if (column.type === "AGGREGATE") {
         if (column.func === "GROUP_CONCAT") {
           meta = syntheticColumnMeta("string");
@@ -3521,7 +3567,19 @@ function mergeUnionColumnMeta(left: SelectResult, right: SelectResult): Material
     const a = leftMeta?.get(column);
     const rightColumn = right.columns[index];
     const b = rightColumn === undefined ? undefined : rightMeta?.get(rightColumn);
-    if (a && b) merged.set(column, mergeExpressionColumnMeta([a, b]));
+    if (a && b) {
+      const combined = mergeExpressionColumnMeta([a, b]);
+      const publicSourceApp = a.publicSourceApp === b.publicSourceApp
+        ? a.publicSourceApp
+        : undefined;
+      const { publicSourceApp: _discarded, ...withoutPublicSource } = combined;
+      merged.set(
+        column,
+        publicSourceApp === undefined
+          ? withoutPublicSource
+          : { ...withoutPublicSource, publicSourceApp }
+      );
+    }
     else if (a || b) merged.set(column, unknownStringColumnMeta());
   });
   return merged;
@@ -3755,14 +3813,15 @@ async function executeUnion(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
-  captureColumnMeta = false
+  captureColumnMeta = false,
+  forLibraryCapture = false
 ): Promise<SelectResult> {
   // 左辺（ネストした UNION 対応）と右辺を並列実行
   const [leftResult, rightResult] = await Promise.all([
     stmt.left.type === "UNION"
-      ? executeUnion(stmt.left, client, options, cacheContext, captureColumnMeta)
-      : executeSelect(stmt.left, client, options, cacheContext, undefined, captureColumnMeta),
-    executeSelect(stmt.right, client, options, cacheContext, undefined, captureColumnMeta),
+      ? executeUnion(stmt.left, client, options, cacheContext, captureColumnMeta, forLibraryCapture)
+      : executeSelect(stmt.left, client, options, cacheContext, undefined, captureColumnMeta, forLibraryCapture),
+    executeSelect(stmt.right, client, options, cacheContext, undefined, captureColumnMeta, forLibraryCapture),
   ]);
 
   // 右辺の行を左辺のカラム名に位置対応でリマップ
@@ -3818,7 +3877,7 @@ async function executeWith(
   // CTE を展開して WHERE をまとめて REST API に渡す。
   // 一時テーブル注入時はインライン化しない（CTE 本体が #temp を参照し得るため）
   if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
-    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext, undefined, captureColumnMeta);
+    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext, undefined, captureColumnMeta, false);
   }
 
   // CTE 名 → 実体化結果のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
@@ -3889,7 +3948,7 @@ async function executeQueryWithCte(
   if (!hasCteRef) {
     // トップレベルに CTE 参照なし → 通常の SELECT 実行。
     // ただしサブクエリ内の CTE / 一時テーブル参照があり得るため cteCache は引き継ぐ
-    return executeSelect(query, client, options, cacheContext, cteCache, captureColumnMeta);
+    return executeSelect(query, client, options, cacheContext, cteCache, captureColumnMeta, false);
   }
 
   // CTE 参照あり → FULL_SCAN で CTE 行を注入

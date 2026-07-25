@@ -102,12 +102,34 @@ value export は次の5つです。
 type QueryResult = {
   type: "query";
   rows: readonly Readonly<Record<string, string>>[];
-  columns: readonly { name: string; valueType: "string" }[];
+  columns: readonly {
+    name: string;
+    valueType: "string";
+    fieldType?: string;
+    sortKind?: "number" | "string";
+    sourceApp?: number;
+  }[];
   rowCount: number;
   warnings: readonly string[];
   metrics: QueryMetrics;
 };
 ```
+
+`QueryColumn` の追加メタはすべて optional です。
+
+- `fieldType`: 元の kintone フィールド型（`NUMBER`、`DROP_DOWN`、`__ID__` など）、
+  または engine が導出した擬似型（`KSQL_NUMBER`、`KSQL_STRING`、
+  `KSQL_UNKNOWN` など）。
+- `sortKind`: 列の比較種別。決定できる場合は `"number"` または `"string"`。
+  unsupported な列では `undefined`。型が安全に確定しない列は
+  `KSQL_UNKNOWN` / `"string"` へ degrade する場合があります。
+- `sourceApp`: CTE / 一時テーブルを介さない物理 SELECT で、出力列が直接の
+  フィールド参照または `$id` 等のシステム列として一意な物理アプリへ解決できる場合の
+  app ID。式、集計、CASE、曖昧な JOIN 列、CTE / 一時テーブル由来の列では
+  `undefined` です。UNION では左右が同じ app ID に一致するときだけ保持します。
+
+`undefined` のメタ項目は結果オブジェクト自体に含まれません。consumer は追加メタの
+存在を前提にせず、必要に応じてフォールバックしてください。
 
 `QueryMetrics` は `recordGetCalls`、`fetchedRows`、`elapsedMs`、
 `cursorRecordsScanned` の4項目です。`ExplainResult` は `lines`、`text` と

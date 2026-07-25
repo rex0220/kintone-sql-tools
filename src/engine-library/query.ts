@@ -44,8 +44,10 @@ function copyStringRow(row: Readonly<Record<string, unknown>>): Readonly<Record<
 function toPublicColumn(name: string, meta: MaterializedColumnMetaMap | undefined) {
   const columnMeta = meta?.get(name);
   const fieldType = columnMeta?.fieldType ?? columnMeta?.semantics?.fieldType;
-  const sortKind = columnMeta?.sortKind;
-  const sourceApp = columnMeta?.semantics?.source?.appId;
+  const compareMode = columnMeta?.semantics?.compareMode;
+  const sortKind = columnMeta?.sortKind
+    ?? (compareMode === "number" || compareMode === "string" ? compareMode : undefined);
+  const sourceApp = columnMeta?.publicSourceApp;
   return {
     name,
     valueType: "string" as const,

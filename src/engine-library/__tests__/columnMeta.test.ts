@@ -1,6 +1,5 @@
-/* QueryColumn の列メタ(fieldType / sortKind / sourceApp)公開のテスト(v3.22.0)。
- * runQuery の実フロー(モック client)で 3 系統を検証する:
- *   ①単純フィールド参照 ②集計関数 ③文字列・日付関数(導出列) */
+/* QueryColumn の列メタ(fieldType / sortKind / sourceApp)公開を
+ * runQuery の実フロー（モック client）で検証する。 */
 import { runQuery, type QueryColumn, type ReadonlyKintoneClient } from "../index";
 
 const records = [
@@ -91,7 +90,67 @@ test("日付関数の導出列は文字列系メタになる", async () => {
 });
 
 test("メタ非対応の後方互換: name / valueType は従来どおり", async () => {
-  const result = await runQuery("SELECT 顧客名 FROM APP100", { client: makeClient() });
-  expect(result.columns[0]?.name).toBe("顧客名");
+  const result = await runQuery("SELECT ステータス FROM APP100", { client: makeClient() });
+  expect(result.columns[0]?.name).toBe("ステータス");
   expect(result.columns[0]?.valueType).toBe("string");
+});
+
+test("MIN / CASE は物理フィールドを継承しても sourceApp を公開しない", async () => {
+  const minResult = await runQuery(
+    "SELECT MIN(ステータス) AS m FROM APP100",
+    { client: makeClient() }
+  );
+  expect(minResult.columns[0]).toMatchObject({
+    name: "m", fieldType: "DROP_DOWN", sortKind: "string",
+  });
+  expect(minResult.columns[0]?.sourceApp).toBeUndefined();
+
+  const caseResult = await runQuery(
+    "SELECT CASE WHEN 受注金額 > 0 THEN ステータス ELSE '' END AS c FROM APP100",
+    { client: makeClient() }
+  );
+  expect(caseResult.columns[0]).toMatchObject({
+    name: "c", fieldType: "KSQL_UNKNOWN", sortKind: "string",
+  });
+  expect(caseResult.columns[0]?.sourceApp).toBeUndefined();
+});
+
+test("CTE の列来歴は inline / materialize とも opaque", async () => {
+  const inline = await runQuery(
+    "WITH t AS (SELECT $id, ステータス FROM APP100) SELECT $id, ステータス FROM t",
+    { client: makeClient() }
+  );
+  expect(inline.columns[0]).toMatchObject({ fieldType: "__ID__", sortKind: "number" });
+  expect(inline.columns[1]).toMatchObject({ fieldType: "DROP_DOWN", sortKind: "string" });
+  expect(inline.columns.every((column) => column.sourceApp === undefined)).toBe(true);
+
+  // CTE を2個にして単一 CTE inline 最適化を外し、実体化経路を通す。
+  const materialized = await runQuery(
+    "WITH t AS (SELECT $id, ステータス FROM APP100), "
+      + "unused AS (SELECT $id FROM APP100) "
+      + "SELECT $id, ステータス FROM t",
+    { client: makeClient() }
+  );
+  expect(materialized.columns[0]).toMatchObject({ fieldType: "__ID__", sortKind: "number" });
+  expect(materialized.columns[1]).toMatchObject({ fieldType: "DROP_DOWN", sortKind: "string" });
+  expect(materialized.columns.every((column) => column.sourceApp === undefined)).toBe(true);
+});
+
+test("UNION は左右の直接参照元 app が一致するときだけ sourceApp を保持する", async () => {
+  const sameApp = await runQuery(
+    "SELECT ステータス FROM APP100 UNION ALL SELECT ステータス FROM APP100",
+    { client: makeClient() }
+  );
+  expect(sameApp.columns[0]).toMatchObject({
+    fieldType: "DROP_DOWN", sortKind: "string", sourceApp: 100,
+  });
+
+  const differentApps = await runQuery(
+    "SELECT ステータス FROM APP100 UNION ALL SELECT ステータス FROM APP200",
+    { client: makeClient() }
+  );
+  expect(differentApps.columns[0]).toMatchObject({
+    fieldType: "DROP_DOWN", sortKind: "string",
+  });
+  expect(differentApps.columns[0]?.sourceApp).toBeUndefined();
 });
