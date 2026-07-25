@@ -952,6 +952,10 @@ WHERE SUBSTRING(郵便番号, 1, 3) = '100'
 
 ### kintone 専用関数
 
+kintone の [クエリ関数](https://cybozu.dev/ja/kintone/docs/overview/query/#function) に対応する関数です。値・比較は kintone サーバーが決定します（server-only）。
+
+**基本の3関数**（`WHERE` の比較値のほか、`SELECT` 列や `SET @var` など式の位置でも使用可）:
+
 | 関数 | 意味 |
 |------|------|
 | `TODAY()` | 今日の日付（`YYYY-MM-DD` 形式） |
@@ -963,6 +967,18 @@ WHERE 作成日時 >= TODAY()
 WHERE 期限日 < TODAY()
 WHERE 担当者 = LOGINUSER()
 ```
+
+**相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
+
+日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。相対日付を含む条件を安全に押し下げられない計画（`OR` / `NOT` 内・`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表）はレコード取得前に fail-closed します。ただし、相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれた単一物理アプリ SELECT では、相対日付 leaf を prefilter に押し下げ、残余だけを client 評価します（v3.21.0 / `SUPERSET_PREFILTER`）。関数一覧・引数・型・演算子・reason code・prefilter＋残余の規則は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+
+```sql
+WHERE 作成日時 < FROM_TODAY(5, DAYS)
+WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
+WHERE 更新日時 >= YESTERDAY() AND LENGTH(都道府県) > 1   -- prefilter＋残余（v3.21.0）
+```
+
+> kintone クエリ関数のうち `PRIMARY_ORGANIZATION()` は未対応です。
 
 ---
 
