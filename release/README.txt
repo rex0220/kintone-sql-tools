@@ -1,14 +1,22 @@
-ksql 配布パッケージ (v3.21.0)
+ksql 配布パッケージ (v3.22.0)
 
 release 成果物:
-- ksql-plugin-v3.21.0.zip
-- ksql-mcp.mcpb (manifest version 3.21.0)
-- ksql-mcp.js (MCP server version 3.21.0)
+- ksql-plugin-v3.22.0.zip
+- ksql-mcp.mcpb (manifest version 3.22.0)
+- ksql-mcp.js (MCP server version 3.22.0)
 
-1. ksql-plugin-v3.21.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.22.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.22.0: engine ライブラリの QueryColumn 列メタ公開 (B69)。
+- engine ライブラリ (npm ./engine / UMD) の runQuery() が返す QueryColumn に、
+  fieldType / sortKind / sourceApp の 3 フィールドを後方互換で追加。列の型・ソート種別・
+  参照元アプリ ID を取得できる。sourceApp は CTE/一時テーブルを含まない単一物理アプリ文の
+  直接フィールド参照列 ($id 等含む) のみで、式・集計・JOIN 曖昧・CTE 経由は付かない。
+- kSQL の SQL 方言・パーサ・実行意味論・結果は不変。プラグイン/CLI/MCP の挙動も不変
+  (列メタはライブラリ結果の付随情報)。純加法的 minor。
 
 v3.21.0: 相対日付の prefilter ＋残余 client 評価 (B67 Phase2 A)。
 - 相対日付 (YESTERDAY / FROM_TODAY 等) の exact leaf が「相対日付を含まない残余」

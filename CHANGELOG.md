@@ -2,6 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.22.0（2026-07-25）
+
+### 機能追加（B69 engine ライブラリの `QueryColumn` 列メタ公開）
+
+- engine ライブラリ（B66）の `runQuery()` が返す `QueryColumn` に、列メタを**後方互換の追加**として公開した。`fieldType?`（元 kintone フィールド型または導出擬似型 `KSQL_NUMBER` / `KSQL_STRING` / `KSQL_UNKNOWN` 等）・`sortKind?`（`"number"` / `"string"`）・`sourceApp?`（参照元アプリ ID）の3 optional フィールド。既存 consumer は無影響。
+- `sourceApp` は **CTE / 一時テーブルを含まない単一物理アプリ文の、直接フィールド参照列（`$id` 等システム列を含む）** にのみ付く。`CASE` / `MIN` / `MAX` / `MODE` / 集計 / 算術など式でラップされた列、JOIN で曖昧な列、CTE / 一時テーブルを経由した列（inline / materialize とも）は `sourceApp` を付けない（provenance opaque）。
+- 追加フィールドはすべて primitive で、engine 内部型は公開面へ一切 re-export しない（型隔離を維持・`.d.ts` は 5 value / 20 type のまま）。
+- **kSQL の SQL 方言・パーサ・実行意味論・結果は不変**。列メタはライブラリ結果の付随情報で、SQL の言語機能ではない（CLI / MCP / プラグインの挙動・言語リファレンスは不変）。engine 本体の実行意味論・内部メタの `semantics.source`・一時テーブル append 互換（`fieldSemanticsEqual`）も不変。
+- SemVer=minor（純加法・既定 off の opt-in capture・既存 SQL / CLI / MCP / plugin 挙動不変）。
+
 ## v3.21.0（2026-07-25）
 
 ### 機能追加（B67 Phase2 A＝相対日付 prefilter ＋残余 client 評価・SUPERSET_PREFILTER）
