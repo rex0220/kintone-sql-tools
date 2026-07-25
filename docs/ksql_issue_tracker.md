@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-07-25
 - 現在の最新リリース: **v3.22.0（2026-07-25・npm latest 3.22.0）＝B69 engine ライブラリ `QueryColumn` 列メタ公開（fieldType/sortKind/sourceApp・SQL 挙動不変）＝リリース完全完了**。詳細は §2。
-- 次回リリース計画: **未定（バックログから選定）**。候補5件＝**B61**（AI 行動検証・運用化）/**B53**（再帰 CTE・仕様 R2 済＝実需待ち）/**B54**（User API・評価）/**B63**（プラグイン構文ヘルプ・評価）/**B68**（ライブラリの read-only 拡張・評価）。**B67 Phase2 B**（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は Phase2 A の対象外として棚上げ（実需待ち）。保留/却下（B40/B65-P2/B4/B6）は §3。
+- 次回リリース計画: **未定（バックログから選定）**。候補6件＝**B61**（AI 行動検証・運用化）/**B53**（再帰 CTE・仕様 R2 済＝実需待ち）/**B54**（User API・評価）/**B63**（プラグイン構文ヘルプ・評価）/**B68**（ライブラリの read-only 拡張・評価）/**B70**（`engine:docs-smoke` version pin 自動化・保守）。**B67 Phase2 B**（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は Phase2 A の対象外として棚上げ（実需待ち）。保留/却下（B40/B65-P2/B4/B6）は §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -30,7 +30,7 @@
 
 ## 1. バックログ（未リリース・要対応）
 
-進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。着手確定の機能はなく、**候補5件＝B61（AI 行動検証の運用化）／B53（再帰 CTE・仕様 R2 済＝実需待ち棚上げ）／B54（User API・評価）／B63（プラグイン構文ヘルプ・評価）／B68（ライブラリの read-only 拡張・VALIDATE/一時テーブルバッチ・評価）**。**B67 Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は Phase2 A 対象外として実需待ち**。保留/却下（B40／B65-P2／B4／B6）は §3、リリース済みは §2（B69=v3.22.0・B67 Phase2 A=v3.21.0・B67 Phase1=v3.20.0・B66=v3.19.0）。
+進捗が動くのはここ。優先度は「正しさ/安全性 > 機能 > 性能改善の上積み」で暫定。着手確定の機能はなく、**候補6件＝B61（AI 行動検証の運用化）／B53（再帰 CTE・仕様 R2 済＝実需待ち棚上げ）／B54（User API・評価）／B63（プラグイン構文ヘルプ・評価）／B68（ライブラリの read-only 拡張・VALIDATE/一時テーブルバッチ・評価）／B70（`engine:docs-smoke` version pin 自動化・保守小粒）**。**B67 Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は Phase2 A 対象外として実需待ち**。保留/却下（B40／B65-P2／B4／B6）は §3、リリース済みは §2（B69=v3.22.0・B67 Phase2 A=v3.21.0・B67 Phase1=v3.20.0・B66=v3.19.0）。
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
@@ -39,6 +39,7 @@
 | B54 | User API（ユーザー・組織・グループ情報）対応 | 改善 | 📝 **評価**。cybozu.com 共通 [User API](https://cybozu.dev/ja/common/docs/user-api/)（`/v1/`・users/orgs/groups）を `__USERS__`/`__ORGS__`/`__GROUPS__` の read-only 仮想テーブルで SELECT/JOIN 可能に。組織階層（`parentCode`）は B53 と相乗。論点＝別ベースパス `/v1/`・権限・ページング・結合キー（code）。**次＝実需確認・権限/面の実機確認→方向確定なら Phase1 仕様 R1** | 機能 | 中 | [B54 eval](internal/ksql_b54_user_api_directory_evaluation.md) |
 | B63 | プラグイン面での SQL 構文・関数の説明表示 | 改善 | 📝 **評価・方向判断**。プラグインの SQL 入力画面から構文骨格・関数・方言差をその場参照（B55/B60 の人手書き面版）。既存の機械同期済みカタログ（B60 骨格＋B55 関数＋言語リファレンス）を再利用し二重管理しない。論点＝表示範囲/供給方式/UI 形態。**次＝実需・UI 方針確認→方向確定なら Phase1 仕様 R1** | 機能 | 中 | [B63 eval](internal/ksql_b63_plugin_syntax_help_evaluation.md) |
 | B68 | kSQL read-only ライブラリの read-only 機能拡張（VALIDATE・一時テーブルバッチ） | 改善 | 📝 **評価**（2026-07-24 起票）。B66 ライブラリ（v3.19.0）の `runQuery` は単文 SELECT/WITH/UNION/SHOW APPS/DESCRIBE のみで、**read-only なのに使えない**2機能を課題化＝①`VALIDATE`（既存レコード監査・書込み0・B41）②一時テーブルを使うバッチ処理（複文・#temp 実体化・@var の read-only サブセット）。現状 statementGuard の allowlist 外で `READ_ONLY_VIOLATION`（実コード確認）＝**除外は安全性でなくスコープ最小化**（B66 §1.2）。B66 Phase2（runMutation=DML）とは**直交**（書込みなし）で独立先行可。段階＝Phase A VALIDATE〔allowlist 追加＋結果 DTO・小〜中〕→Phase B read-only 一時テーブルバッチ〔runBatch 相当の複文 API＋temp lifecycle＋文別 read-only 強制・中〜大〕。論点＝API 形状（runQuery 拡張 vs runValidate/runBatch）・read-only バッチ境界（temp 書込みは可だが実 kintone mutation 不可を statementGuard で厳密化）。**次＝実需確認→方向確定なら Phase A から Phase1 仕様 R1** | 機能 | 中 | [B68 eval](internal/ksql_b68_engine_library_readonly_extensions_evaluation.md) |
+| B70 | `engine:docs-smoke` の version pin 自動化 | 改善 | 📝 **起票（小粒）**（2026-07-25）。`scripts/engine-docs-examples-smoke.mjs` が engine UMD version registry 例の検証で版数（`exactVersion` ＋ `N AS release`）を**ハードコード**しており、毎リリースで手動 bump しないと必ず失敗する。**v3.20.0/v3.21.0 で bump 忘れにより壊れたまま放置**（B69 実装中に検出・v3.22.0 で手動同期して green 化）。`engine:docs-smoke` は pack/install を伴い重いため標準 gate（npm test/build/prepack）外で silently 腐る。**対策 A（推奨）＝`package.json` の version を実行時に読む**（以後 bump 不要・`release` リテラルは version 由来へ導出 or 単純化）。補完 B＝「pin==package.version」の軽量整合 guard。テストスクリプトのみ改修で SQL/engine/公開面 影響なし・0.25〜0.5 人日。着手時に他 guard/fixture のハードコード版数も横断確認 | 保守 | 低 | [B70 issue](internal/ksql_b70_docs_smoke_version_pin_issue.md) |
 
 ---
 
