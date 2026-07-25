@@ -344,7 +344,7 @@ export interface MaterializedColumnMeta {
   readonly semantics?: ResolvedFieldSemantics;
 }
 
-type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
+export type MaterializedColumnMetaMap = ReadonlyMap<string, MaterializedColumnMeta>;
 
 export interface MaterializedTable {
   readonly rows: ProcessRow[];
@@ -358,6 +358,11 @@ export interface MaterializedTable {
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
 const materializedMetaBySelectResult = new WeakMap<SelectResult, MaterializedColumnMetaMap>();
+
+/** ExecuteOptions.captureColumnMeta 有効時に関連付けた列メタを取得する（なければ undefined）。 */
+export function getSelectColumnMeta(result: SelectResult): MaterializedColumnMetaMap | undefined {
+  return materializedMetaBySelectResult.get(result);
+}
 const materializedMetaByValidationResult = new WeakMap<DmlValidationResult, MaterializedColumnMetaMap>();
 
 interface ImportExecutionSource {
@@ -620,6 +625,11 @@ export interface DmlConfirmContext {
 }
 
 export interface ExecuteOptions {
+  /**
+   * SELECT / WITH / UNION の実行結果に列メタ（fieldType・sortKind・semantics.source）を
+   * 関連付ける。有効時は getSelectColumnMeta(result) で取得できる。既定 false（従来動作）。
+   */
+  captureColumnMeta?: boolean;
   /**
    * UPDATE / DELETE（および INSERT_SELECT の書き込み）実行前に呼ばれる確認コールバック。
    * false を返すとキャンセルして OperationCancelledError を投げる。
@@ -955,9 +965,9 @@ async function executeParsedStatement(
   }
   switch (stmt.type) {
     case "VALIDATE":      return executeExistingRecordValidation(stmt, client, options, cacheContext);
-    case "SELECT":        return executeSelect(stmt, client, options, cacheContext);
-    case "UNION":         return executeUnion(stmt, client, options, cacheContext);
-    case "WITH":          return executeWith(stmt, client, options, cacheContext);
+    case "SELECT":        return executeSelect(stmt, client, options, cacheContext, undefined, options.captureColumnMeta === true);
+    case "UNION":         return executeUnion(stmt, client, options, cacheContext, options.captureColumnMeta === true);
+    case "WITH":          return executeWith(stmt, client, options, cacheContext, undefined, options.captureColumnMeta === true);
     case "INSERT":        return executeInsert(stmt, client, options, cacheContext);
     case "INSERT_SELECT": return executeInsertSelect(stmt, client, options, cacheContext);
     case "UPSERT":        return executeUpsert(stmt, client, options, cacheContext);
@@ -3295,6 +3305,13 @@ function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
   return undefined;
 }
 
+/** システム列メタに参照元アプリを関連付ける（$id からのレコード遷移用の来歴）。 */
+function systemColumnMetaWithSource(field: string, appId: number): MaterializedColumnMeta | undefined {
+  const meta = systemColumnMeta(field);
+  if (!meta?.semantics) return meta;
+  return { ...meta, semantics: withFieldSemanticSource(meta.semantics, appId, field) };
+}
+
 const NUMBER_RETURNING_STRING_FUNCTIONS = new Set([
   "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
   "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
@@ -3404,13 +3421,13 @@ async function inferSelectColumnMeta(
       if (!table) return undefined;
       if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMetaWithSource(ref.field, table.appId);
     }
 
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
-      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
+      return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMetaWithSource(ref.field, stmt.from.appId);
     }
 
     const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
@@ -3420,7 +3437,7 @@ async function inferSelectColumnMeta(
         return [materialized.columnMeta?.get(ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
-      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
+      const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMetaWithSource(ref.field, table.appId);
       return meta ? [meta] : [];
     });
     return matches.length === 1 ? matches[0] : undefined;
@@ -3737,14 +3754,15 @@ async function executeUnion(
   stmt: UnionStatement,
   client: KintoneClient,
   options: ExecuteOptions,
-  cacheContext: string
+  cacheContext: string,
+  captureColumnMeta = false
 ): Promise<SelectResult> {
   // 左辺（ネストした UNION 対応）と右辺を並列実行
   const [leftResult, rightResult] = await Promise.all([
     stmt.left.type === "UNION"
-      ? executeUnion(stmt.left, client, options, cacheContext)
-      : executeSelect(stmt.left, client, options, cacheContext),
-    executeSelect(stmt.right, client, options, cacheContext),
+      ? executeUnion(stmt.left, client, options, cacheContext, captureColumnMeta)
+      : executeSelect(stmt.left, client, options, cacheContext, undefined, captureColumnMeta),
+    executeSelect(stmt.right, client, options, cacheContext, undefined, captureColumnMeta),
   ]);
 
   // 右辺の行を左辺のカラム名に位置対応でリマップ
@@ -3763,7 +3781,11 @@ async function executeUnion(
   // UNION（重複排除）vs UNION ALL（そのまま）
   const rows = stmt.all ? combined : deduplicateRows(combined, leftCols);
 
-  return { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+  const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
+  }
+  return result;
 }
 
 /** 行の重複を取り除く（すべてのカラム値が等しい行を1件に） */

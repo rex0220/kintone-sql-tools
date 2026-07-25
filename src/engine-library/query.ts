@@ -1,6 +1,8 @@
 import {
   execute,
+  getSelectColumnMeta,
   type ExecuteMetrics,
+  type MaterializedColumnMetaMap,
   type SelectResult,
 } from "../execute";
 import { normalizeEngineError } from "./errors";
@@ -39,6 +41,20 @@ function copyStringRow(row: Readonly<Record<string, unknown>>): Readonly<Record<
   );
 }
 
+function toPublicColumn(name: string, meta: MaterializedColumnMetaMap | undefined) {
+  const columnMeta = meta?.get(name);
+  const fieldType = columnMeta?.fieldType ?? columnMeta?.semantics?.fieldType;
+  const sortKind = columnMeta?.sortKind;
+  const sourceApp = columnMeta?.semantics?.source?.appId;
+  return {
+    name,
+    valueType: "string" as const,
+    ...(fieldType !== undefined ? { fieldType } : {}),
+    ...(sortKind !== undefined ? { sortKind } : {}),
+    ...(sourceApp !== undefined ? { sourceApp } : {}),
+  };
+}
+
 export async function runQuery(
   sql: string,
   options: RunQueryOptions
@@ -51,14 +67,15 @@ export async function runQuery(
       (client) => execute(
         sql,
         projectReadonlyClient(client),
-        invocation.executeOptions
+        { ...invocation.executeOptions, captureColumnMeta: true }
       )
     );
     assertSelectResult(result);
+    const columnMeta = getSelectColumnMeta(result);
     return {
       type: "query",
       rows: result.rows.map(copyStringRow),
-      columns: result.columns.map((name) => ({ name, valueType: "string" as const })),
+      columns: result.columns.map((name) => toPublicColumn(name, columnMeta)),
       rowCount: result.rowCount,
       warnings: [...(result.warnings ?? [])],
       metrics: mapMetrics(result.metrics),
