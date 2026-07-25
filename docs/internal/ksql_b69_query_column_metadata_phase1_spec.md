@@ -1,7 +1,7 @@
 # B69 Phase1 — engine ライブラリ `QueryColumn` 列メタ公開 仕様
 
 - 作成日: 2026-07-25
-- ステータス: **仕様 R2 完全確定（codex クロスレビュー反映・Claude 実コード裏取り・オーナー判断済）＝実装着手可能**（2026-07-25）。R1（Claude 起草）→ Claude 自己検証＋実エンジンプローブ（§10・真のブロッカー＝execute() 結果コピーで列メタ WeakMap が外れる、を特定・実メタ値確定・R1 の過剰設計2点是正）→ **codex クロスレビュー（§11・§10 が見落とした P1 を4件検出）を Claude が全数裏取り**→ **CTE/temp provenance＝opaque（オーナー決定 §11.3）**。未決なし。実装は WIP ブランチ `feat/b69-query-column-metadata` を起点に §11.8 To-Do で（実装は codex・レビューは Claude・git は Claude）。§2〜§9 は R1 本文（§10/§11 が上書き・訂正する）。
+- ステータス: **🚧 実装済み・PR/リリース待ち**（2026-07-25・ブランチ `feat/b69-query-column-metadata`・commit e4ef98b）。仕様 R2 完全確定（codex クロスレビュー反映・Claude 実コード裏取り・オーナー判断済）→ §11.8 To-Do を codex 実装→Claude 実コードレビュー→全ゲート green（全 npm test 4,250＋CLI 26・snapshot 22 不変・build 全面・engine guard 群〔docs-smoke/declaration-smoke 5値20型/bundle-guard〕）。内部実行意味論・内部メタ semantics.source は不変。次＝PR→merge→次 minor リリース。以下は仕様本文。R1（Claude 起草）→ Claude 自己検証＋実エンジンプローブ（§10・真のブロッカー＝execute() 結果コピーで列メタ WeakMap が外れる、を特定・実メタ値確定・R1 の過剰設計2点是正）→ **codex クロスレビュー（§11・§10 が見落とした P1 を4件検出）を Claude が全数裏取り**→ **CTE/temp provenance＝opaque（オーナー決定 §11.3）**。未決なし。実装は WIP ブランチ `feat/b69-query-column-metadata` を起点に §11.8 To-Do で（実装は codex・レビューは Claude・git は Claude）。§2〜§9 は R1 本文（§10/§11 が上書き・訂正する）。
 - 正: [B69 評価](ksql_b69_query_column_metadata_evaluation.md)／起草ブリーフ [HANDOFF-column-meta-v3.22.md](HANDOFF-column-meta-v3.22.md)
 - 前提: B66 engine ライブラリ（[spec](ksql_b66_engine_library_phase1_spec.md)／[利用ガイド](../ksql_engine_library.md)）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B69

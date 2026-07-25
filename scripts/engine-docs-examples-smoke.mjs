@@ -17,7 +17,7 @@ import {
 const rootDir = resolve(import.meta.dirname, "..");
 const smokeDir = resolve(rootDir, ".tmp", "engine-docs-examples-smoke");
 const packageName = "@rex0220/kintone-sql-tools";
-const exactVersion = "3.19.0";
+const exactVersion = "3.22.0";
 let tarballPath;
 
 function assert(condition, message) {
@@ -72,8 +72,8 @@ try {
   const esmSource = `
 import { createReadonlyKintoneClient, runQuery, version } from "${packageName}/engine";
 const client = createReadonlyKintoneClient();
-const result = await runQuery("SELECT 'ok' AS status, 19 AS release", { client, maxRecords: 3000, cursorMaxActive: 2 });
-if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "19") process.exit(1);
+const result = await runQuery("SELECT 'ok' AS status, 22 AS release", { client, maxRecords: 3000, cursorMaxActive: 2 });
+if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "22") process.exit(1);
 `;
   writeFileSync(resolve(smokeDir, "example.mjs"), esmSource, "utf8");
   run(process.execPath, ["example.mjs"], { cwd: smokeDir });
@@ -85,8 +85,8 @@ if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.ro
 const { createReadonlyKintoneClient, runQuery, version } = require("${packageName}/engine");
 (async () => {
   const client = createReadonlyKintoneClient();
-  const result = await runQuery("SELECT 'ok' AS status, 19 AS release", { client });
-  if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "19") process.exit(1);
+  const result = await runQuery("SELECT 'ok' AS status, 22 AS release", { client });
+  if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "22") process.exit(1);
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
   writeFileSync(resolve(cjsDir, "example.cjs"), cjsSource, "utf8");
@@ -108,11 +108,11 @@ const { createReadonlyKintoneClient, runQuery, version } = require("${packageNam
   assert(engine?.version === exactVersion, "UMD exact registry version missing");
   const client = engine.createReadonlyKintoneClient();
   const result = await engine.runQuery(
-    "SELECT 'ok' AS status, 19 AS release",
+    "SELECT 'ok' AS status, 22 AS release",
     { client }
   );
   assert(
-    result.rows[0].status === "ok" && result.rows[0].release === "19",
+    result.rows[0].status === "ok" && result.rows[0].release === "22",
     "UMD documentation query result mismatch"
   );
 
