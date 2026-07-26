@@ -7,6 +7,7 @@ import type {
 import type { KlikeExpr } from "../like";
 import {
   isRelativeDateFunctionName,
+  isServerOnlyWhereFunctionName,
 } from "../relativeDateFunction";
 import type {
   RelativeDatePrefilterPlan,
@@ -80,7 +81,7 @@ export function buildRelativeDateFullScanExactPlan(
   if (selectMode !== "FULL_SCAN" && !hasCanonicalOrder) return null;
   if (capability.capability !== "EXACT_PUSHDOWN") return null;
 
-  const occurrences = relativeDateFunctionOccurrencesInWhere(select.where);
+  const occurrences = serverOnlyFunctionOccurrencesInWhere(select.where);
   if (occurrences.length === 0) return null;
   if (!sameOccurrenceList(occurrences, relativeFunctionNames)) return null;
   if (
@@ -93,7 +94,7 @@ export function buildRelativeDateFullScanExactPlan(
   const prefilterPlan: RelativeDatePrefilterPlan = {
     prefilterWhere: select.where,
     residualWhere: null,
-    exactRelativeLeaves: collectExactRelativeLeaves(select.where),
+    exactRelativeLeaves: collectExactServerFunctionLeaves(select.where),
     relativeFunctionNames: new Set(occurrences),
     appliedKlikes: new Set<KlikeExpr>(),
     capability: capability.capability,
@@ -141,6 +142,10 @@ function assertRelativeDateFullScanExactPlan(
 }
 
 export function relativeDateFunctionOccurrencesInWhere(where: WhereExpr): string[] {
+  return serverOnlyFunctionOccurrencesInWhere(where).filter(isRelativeDateFunctionName);
+}
+
+export function serverOnlyFunctionOccurrencesInWhere(where: WhereExpr): string[] {
   const names: string[] = [];
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {
@@ -153,7 +158,7 @@ export function relativeDateFunctionOccurrencesInWhere(where: WhereExpr): string
     if (
       value["type"] === "KINTONE_FUNC"
       && typeof value["name"] === "string"
-      && isRelativeDateFunctionName(value["name"])
+      && isServerOnlyWhereFunctionName(value["name"])
     ) {
       names.push(value["name"]);
       return;
@@ -164,14 +169,14 @@ export function relativeDateFunctionOccurrencesInWhere(where: WhereExpr): string
   return names;
 }
 
-function collectExactRelativeLeaves(where: WhereExpr): BinaryExpr[] {
+function collectExactServerFunctionLeaves(where: WhereExpr): BinaryExpr[] {
   const leaves: BinaryExpr[] = [];
   const visit = (node: WhereExpr): void => {
     switch (node.type) {
       case "BINARY":
         if (
           node.right.type === "KINTONE_FUNC"
-          && isRelativeDateFunctionName(node.right.name)
+          && isServerOnlyWhereFunctionName(node.right.name)
         ) {
           leaves.push(node);
         }
@@ -208,7 +213,7 @@ function serializedMultisetContains(
 ): boolean {
   const expected = new Map<string, number>();
   for (const name of expectedNames) {
-    if (!isRelativeDateFunctionName(name)) return false;
+    if (!isServerOnlyWhereFunctionName(name)) return false;
     expected.set(name, (expected.get(name) ?? 0) + 1);
   }
   for (const [name, count] of expected) {

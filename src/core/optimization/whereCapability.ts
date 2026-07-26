@@ -1,6 +1,9 @@
 import type { CompareOp, FieldRef, FieldValue, SqlValue, WhereExpr } from "../../types/ast";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
-import { isRelativeDateFunctionName } from "../relativeDateFunction";
+import {
+  LEGACY_KINTONE_FUNCTION_NAMES,
+  isRelativeDateFunctionName,
+} from "../relativeDateFunction";
 
 export type PredicateCapability =
   | "EXACT_PUSHDOWN"
@@ -48,7 +51,6 @@ const RELATIVE_DATE_FIELD_TYPES = new Set([
   "DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME",
 ]);
 const RELATIVE_DATE_OPERATORS = new Set<NativeOperator>(RANGE_AND_EQUALITY);
-const LEGACY_KINTONE_FUNCTION_NAMES = new Set(["TODAY", "NOW", "LOGINUSER"]);
 const LEGACY_KINTONE_FUNCTION_FIELD_TYPES = new Map<string, ReadonlySet<string>>([
   ["TODAY", new Set(["DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME"])],
   ["NOW", new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"])],

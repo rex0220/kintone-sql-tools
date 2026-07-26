@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -194,9 +194,10 @@ import {
 } from "./core/optimization/relativeDatePrefilterPlan";
 import {
   buildRelativeDateFullScanExactPlan,
-  relativeDateFunctionOccurrencesInWhere,
+  serverOnlyFunctionOccurrencesInWhere,
   type RelativeDateFullScanExactPlan,
 } from "./core/optimization/relativeDateFullScanExactPlan";
+import { isRelativeDateFunctionName } from "./core/relativeDateFunction";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -208,7 +209,6 @@ import { assertJsonImportHasNoRowIds, buildJsonSubtableWritePlan, type JsonImpor
 import { assertNoDuplicateCsvSubtableRowIds, buildCsvSubtableReplacementPlan, type CsvImportTableWriteDetail } from "./import/subtableReplacementPlan";
 import { bindImportProjection, IMPORT_PROJECTION_SOURCE } from "./import/importProjection";
 import { preflightImportRecordNumbers } from "./import/recordNumberUpdate";
-
 // ============================================================
 // kintone API クライアントインターフェース
 // ============================================================
@@ -2437,7 +2437,7 @@ async function executeSelect(
       capability: whereCapability,
       context: { allowFullScanExact: true },
       serializedWholeWhere,
-      relativeFunctionNames: relativeDateFunctionOccurrencesInWhere(stmt.where),
+      relativeFunctionNames: serverOnlyFunctionOccurrencesInWhere(stmt.where),
     }) ?? undefined;
     if (fullScanExactPlan) prefilterPlan = fullScanExactPlan.prefilterPlan;
   }
@@ -8912,10 +8912,13 @@ export function renderRelativeDateResidualWhere(where: WhereExpr): string {
 }
 
 function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
-  if (!plan.hasRelativeDate) return [];
+  if (!plan.hasServerOnlyWhereFunction) return [];
   if (!plan.allowed && plan.rejection) {
+    const label = isRelativeDateFunctionName(plan.rejection.functionName)
+      ? "relative date function"
+      : "kintone function";
     return [
-      `  relative date function: ${plan.rejection.functionName}`,
+      `  ${label}: ${plan.rejection.functionName}`,
       "  plan status: rejected",
       `  reason: ${plan.rejection.reasonCodes.join(", ")}`,
       "  client evaluation: forbidden",
@@ -8943,8 +8946,8 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
           && reason.operator === operator
         );
         lines.push(
-          `  relative date function: ${functionName}`,
-          "  relative date evaluation: kintone server whole-WHERE exact",
+          `  ${serverFunctionLabel(functionName)}: ${functionName}`,
+          `  ${serverFunctionEvaluationLabel(functionName)}: kintone server whole-WHERE exact`,
           `  field: ${detail?.field ?? field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
           `  operator: ${detail?.operator ?? operator}`
         );
@@ -8955,7 +8958,9 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
         "  where capability: EXACT_PUSHDOWN",
         `  server predicate: ${wholeWhereQuery}`,
         "  client residual: (none)",
-        "  relative date client evaluations: 0",
+        `  ${serverFunctionClientEvaluationLabel(
+          fullScanExactPlan.prefilterPlan.exactRelativeLeaves
+        )}: 0`,
         `  kintone query: ${wholeWhereQuery}`
       );
       continue;
@@ -8978,8 +8983,8 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
           && reason.operator === operator
         );
         lines.push(
-          `  relative date function: ${functionName}`,
-          "  relative date evaluation: kintone server exact prefilter",
+          `  ${serverFunctionLabel(functionName)}: ${functionName}`,
+          `  ${serverFunctionEvaluationLabel(functionName)}: kintone server exact prefilter`,
           `  field: ${detail?.field ?? field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
           `  operator: ${detail?.operator ?? operator}`
         );
@@ -8989,7 +8994,7 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
         "  where capability: SUPERSET_PREFILTER",
         `  server prefilter: ${serverPrefilter}`,
         `  client residual: ${renderRelativeDateResidualWhere(prefilterPlan.residualWhere)}`,
-        "  relative date client evaluations: 0",
+        `  ${serverFunctionClientEvaluationLabel(prefilterPlan.exactRelativeLeaves)}: 0`,
         `  kintone query: ${serverPrefilter}`
       );
       continue;
@@ -8998,6 +9003,19 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
       const detail = node.capability?.reasons.find((reason) =>
         reason.functionName === functionName
       );
+      if (!isRelativeDateFunctionName(functionName)) {
+        lines.push(
+          `  kintone function: ${functionName}`,
+          "  kintone function evaluation: kintone server",
+          `  field: ${detail?.field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
+          `  operator: ${detail?.operator ?? "(unknown)"}`,
+          `  where capability: ${node.capability?.capability ?? "(unknown)"}`,
+          "  client residual: (none)",
+          "  kintone function client evaluations: 0",
+          `  kintone query: ${node.restQuery || "(なし)"}`
+        );
+        continue;
+      }
       lines.push(
         `  relative date function: ${functionName}`,
         "  evaluation: kintone server",
@@ -9010,6 +9028,29 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
     }
   }
   return lines;
+}
+
+function serverFunctionLabel(functionName: string): string {
+  return isRelativeDateFunctionName(functionName)
+    ? "relative date function"
+    : "kintone function";
+}
+
+function serverFunctionEvaluationLabel(functionName: string): string {
+  return isRelativeDateFunctionName(functionName)
+    ? "relative date evaluation"
+    : "kintone function evaluation";
+}
+
+function serverFunctionClientEvaluationLabel(
+  leaves: readonly BinaryExpr[]
+): string {
+  return leaves.every((leaf) =>
+    leaf.right.type === "KINTONE_FUNC"
+    && isRelativeDateFunctionName(leaf.right.name)
+  )
+    ? "relative date client evaluations"
+    : "kintone function client evaluations";
 }
 
 // ------------------------------------------------------------
@@ -9063,7 +9104,8 @@ export async function buildBatchExplainPlans(
         maxRecords,
         relativeDatePlan
       );
-      const statementPlan = relativeDatePlan.hasRelativeDate && !relativeDatePlan.allowed
+      const statementPlan =
+        relativeDatePlan.hasServerOnlyWhereFunction && !relativeDatePlan.allowed
         ? relativeDateExplainLines(relativeDatePlan)
         : [
             ...relativeDateExplainLines(relativeDatePlan),
@@ -9233,7 +9275,7 @@ async function executeExplain(
     sharedPlan
   );
   const relativeLines = relativeDateExplainLines(sharedPlan);
-  const lines = sharedPlan.hasRelativeDate && !sharedPlan.allowed
+  const lines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed
     ? [...explainMetadataLines(analysis), ...relativeLines]
     : [
         ...explainMetadataLines(analysis),

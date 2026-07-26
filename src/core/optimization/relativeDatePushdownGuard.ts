@@ -11,12 +11,15 @@ import type {
 } from "../../types/ast";
 import { buildInlinedQuery, canInlineSingleCte } from "../cteInlining";
 import {
+  isLegacyKintoneFunctionName,
   isRelativeDateFunctionName,
+  isServerOnlyWhereFunctionName,
+  WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN,
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../relativeDateFunction";
 import {
   buildRelativeDateFullScanExactPlan,
-  relativeDateFunctionOccurrencesInWhere,
+  serverOnlyFunctionOccurrencesInWhere,
   type RelativeDateFullScanExactPlan,
 } from "./relativeDateFullScanExactPlan";
 import type {
@@ -29,6 +32,10 @@ import type {
 } from "./whereCapability";
 
 export type RelativeDatePlanReasonCode =
+  | "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED"
+  | "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED"
+  | "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED"
+  | "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN"
   | "WHERE_RELATIVE_DATE_ARGUMENT_INVALID"
   | "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED"
   | "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED"
@@ -55,6 +62,7 @@ export interface RelativeDatePlanNode {
 
 export interface RelativeDatePushdownPlan {
   readonly hasRelativeDate: boolean;
+  readonly hasServerOnlyWhereFunction: boolean;
   readonly nodes: readonly RelativeDatePlanNode[];
   readonly allowed: boolean;
   readonly rejection?: {
@@ -98,7 +106,7 @@ function relativeDateFunctionNamesInNode(node: unknown, stopAtNestedSelect: bool
     if (
       value["type"] === "KINTONE_FUNC"
       && typeof value["name"] === "string"
-      && isRelativeDateFunctionName(value["name"])
+      && isServerOnlyWhereFunctionName(value["name"])
       && !seen.has(value["name"])
     ) {
       seen.add(value["name"]);
@@ -158,7 +166,7 @@ function collectSelect(
       path,
       allowPhase2Prefilter: allowPhase2,
       allowFullScanExact,
-      relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(select.where!),
+      relativeFunctionOccurrences: serverOnlyFunctionOccurrencesInWhere(select.where!),
     });
   }
   nestedSelects(select, select).forEach((nested, index) =>
@@ -268,7 +276,7 @@ function collectStatement(
           functionNames,
           path,
           allowFullScanExact: false,
-          relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(statement.where!),
+          relativeFunctionOccurrences: serverOnlyFunctionOccurrencesInWhere(statement.where!),
         });
       }
       nestedSelects(statement, statement).forEach((select, index) =>
@@ -291,7 +299,7 @@ function collectStatement(
           functionNames,
           path,
           allowFullScanExact: false,
-          relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(statement.where!),
+          relativeFunctionOccurrences: serverOnlyFunctionOccurrencesInWhere(statement.where!),
         });
       }
       if (statement.type === "UPDATE" && statement.applyBlocks?.length) {
@@ -335,7 +343,16 @@ function collectStatement(
 }
 
 export function serializationContainsFunctions(query: string, names: readonly string[]): boolean {
-  return names.every((name) => new RegExp(`\\b${name}\\s*\\(`).test(query));
+  const expected = new Map<string, number>();
+  for (const name of names) {
+    if (!isServerOnlyWhereFunctionName(name)) return false;
+    expected.set(name, (expected.get(name) ?? 0) + 1);
+  }
+  for (const [name, count] of expected) {
+    const matches = query.match(new RegExp(`\\b${name}\\s*\\(`, "g"));
+    if ((matches?.length ?? 0) < count) return false;
+  }
+  return true;
 }
 
 /**
@@ -365,16 +382,29 @@ function rejectedNode(candidate: WalkCandidate): RelativeDatePlanNode {
   };
 }
 
-function relativeDateReasonCodes(
+function serverFunctionReasonCodes(
+  functionName: string,
   capability: PredicateCapabilityResult | undefined
 ): RelativeDatePlanReasonCode[] {
   const codes = (capability?.reasons ?? [])
     .filter((reason): reason is PredicateCapabilityReason & { functionName: string } =>
-      reason.functionName !== undefined
+      reason.functionName === functionName
     )
     .map((reason) => reason.code)
-    .filter((code): code is RelativeDatePlanReasonCode => code.startsWith("WHERE_RELATIVE_DATE_"));
-  if (!codes.includes(WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN)) {
+    .filter((code): code is RelativeDatePlanReasonCode =>
+      code.startsWith("WHERE_RELATIVE_DATE_")
+      || code.startsWith("WHERE_KINTONE_FUNCTION_")
+    );
+  if (isLegacyKintoneFunctionName(functionName)) {
+    if (!codes.some((code) =>
+      code !== WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN
+    )) {
+      codes.unshift("WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED");
+    }
+    if (!codes.includes(WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN)) {
+      codes.push(WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN);
+    }
+  } else if (!codes.includes(WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN)) {
     codes.push(WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN);
   }
   return [...new Set(codes)];
@@ -384,13 +414,17 @@ function rejectionFor(
   candidate: WalkCandidate,
   capability?: PredicateCapabilityResult
 ): NonNullable<RelativeDatePushdownPlan["rejection"]> {
-  const reasonCodes = relativeDateReasonCodes(capability);
+  const functionName = candidate.functionNames[0];
+  const requiresExact = isLegacyKintoneFunctionName(functionName)
+    ? WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN
+    : WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN;
+  const reasonCodes = serverFunctionReasonCodes(functionName, capability);
   return {
-    functionName: candidate.functionNames[0],
+    functionName,
     path: candidate.path,
     code: reasonCodes.find((code) =>
-      code !== WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
-    ) ?? WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
+      code !== requiresExact
+    ) ?? requiresExact,
     reasonCodes,
   };
 }
@@ -415,7 +449,8 @@ export async function buildRelativeDatePushdownPlan(
       const node = rejectedNode(candidate);
       nodes.push(node);
       return {
-        hasRelativeDate: true,
+        hasRelativeDate: candidate.functionNames.some(isRelativeDateFunctionName),
+        hasServerOnlyWhereFunction: true,
         nodes,
         allowed: false,
         rejection: rejectionFor(candidate),
@@ -443,7 +478,10 @@ export async function buildRelativeDatePushdownPlan(
         // only opens the explicit KORDER server plan for relative-date WHERE.
         && (select.orderBy.length === 0 || select.orderMode === "KINTONE_NATIVE")
         && capability.capability === "EXACT_PUSHDOWN"
-        && serializationContainsFunctions(restQuery, candidate.functionNames);
+        && serializationContainsFunctions(
+          restQuery,
+          candidate.relativeFunctionOccurrences
+        );
       let prefilterPlan: RelativeDatePrefilterPlan | undefined;
       let phase2PrefilterEligible: boolean | undefined;
       if (
@@ -495,7 +533,10 @@ export async function buildRelativeDatePushdownPlan(
       nodes.push(node);
       if (!allowed) {
         return {
-          hasRelativeDate: true,
+          hasRelativeDate: candidates.some((entry) =>
+            entry.functionNames.some(isRelativeDateFunctionName)
+          ),
+          hasServerOnlyWhereFunction: true,
           nodes,
           allowed: false,
           rejection: rejectionFor(candidate, capability),
@@ -514,7 +555,10 @@ export async function buildRelativeDatePushdownPlan(
     }
     const allowed =
       capability.capability === "EXACT_PUSHDOWN"
-      && serializationContainsFunctions(restQuery, candidate.functionNames);
+      && serializationContainsFunctions(
+        restQuery,
+        candidate.relativeFunctionOccurrences
+      );
     const node: RelativeDatePlanNode = {
       kind: candidate.kind,
       source: candidate.source,
@@ -528,7 +572,10 @@ export async function buildRelativeDatePushdownPlan(
     nodes.push(node);
     if (!allowed) {
       return {
-        hasRelativeDate: true,
+        hasRelativeDate: candidates.some((entry) =>
+          entry.functionNames.some(isRelativeDateFunctionName)
+        ),
+        hasServerOnlyWhereFunction: true,
         nodes,
         allowed: false,
         rejection: rejectionFor(candidate, capability),
@@ -537,7 +584,10 @@ export async function buildRelativeDatePushdownPlan(
   }
 
   return {
-    hasRelativeDate: candidates.length > 0,
+    hasRelativeDate: candidates.some((entry) =>
+      entry.functionNames.some(isRelativeDateFunctionName)
+    ),
+    hasServerOnlyWhereFunction: candidates.length > 0,
     nodes,
     allowed: true,
   };
@@ -545,11 +595,14 @@ export async function buildRelativeDatePushdownPlan(
 
 export function assertRelativeDatePushdownPlan(plan: RelativeDatePushdownPlan): void {
   if (!plan.allowed && plan.rejection) {
+    const requiresExact = isLegacyKintoneFunctionName(plan.rejection.functionName)
+      ? WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN
+      : WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN;
     const details = plan.rejection.reasonCodes.filter((code) =>
-      code !== WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+      code !== requiresExact
     );
     throw new Error(
-      `${plan.rejection.functionName}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}` +
+      `${plan.rejection.functionName}: ${requiresExact}` +
       `${details.length > 0 ? ` (reason=${details.join(", ")})` : ""} ` +
       `(path=${plan.rejection.path})`
     );

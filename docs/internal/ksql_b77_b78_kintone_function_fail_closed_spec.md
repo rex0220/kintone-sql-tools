@@ -647,3 +647,36 @@ R1 は **major を推奨**している。Claude も同意する。理由は次�
   **TZ が一致していれば正しく動いていた**点が異なる。
 
 ただし最終判断はオーナーに残る。
+
+
+## 18. Step 5（docs）で必ず是正する既存記述の誤り
+
+B75 のレビューで2件、B77/B78 Step 2 のレビューで1件、**言語リファレンスの相対日付まわりに
+実挙動と食い違う記述**が見つかっている。B74 が「docs の不正確さ」で起票された経緯もあるため、
+**Step 5 では書き足しより既存記述の是正を優先すること。**
+
+| # | 誤った記述 | 実挙動（実測） | 状態 |
+|---|---|---|---|
+| 1 | 「`UNION` の枝は fail-closed」 | **トップレベルの UNION は枝ごとに判定**され、各枝が条件を満たせば使える。閉じているのは実体化文脈（CTE 本体 / `WITH` 最終 / 一時テーブル source）が UNION の場合のみ | B75 Step 4 で是正済み |
+| 2 | 「DML の対象選択と `INSERT`/`UPSERT ... SELECT` の source は fail-closed」 | **whole-WHERE exact なら可**・prefilter＋残余は不可 | B75 Step 4 で是正済み |
+| 3 | 「`KORDER BY`（native・Cursor とも）は fail-closed」 | **whole-WHERE exact なら通る**。getRecords 経路・Cursor 経路の**両方**で確認済み | **Step 5 で要是正** |
+
+### 18.1 #3 の実測（2026-07-27）
+
+```
+SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() KORDER BY 日付 LIMIT 5
+→ OK  q=[日付 = YESTERDAY() order by 日付 asc limit 5]
+
+SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() KORDER BY 日付 LIMIT 600   （maxRecords 5000）
+→ OK  CURSOR q=[日付 = YESTERDAY() order by 日付 asc]
+
+SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1 KORDER BY 日付 LIMIT 5
+→ REJECT （非 exact のため。KORDER が理由ではない）
+```
+
+guard の第1許可形が `(orderBy.length === 0 || orderMode === "KINTONE_NATIVE")` を条件に
+含めており、**KORDER は明示的に開かれている**（コード内コメントも
+「Phase 1 only opens the explicit KORDER server plan for relative-date WHERE」と述べている）。
+
+正しい記述は「**KORDER は whole-WHERE exact のときだけ使える。prefilter＋残余（第2許可形）や
+FULL_SCAN_EXACT（第3許可形）では使えない**」である。`TODAY()` / `NOW()` も同じ。
