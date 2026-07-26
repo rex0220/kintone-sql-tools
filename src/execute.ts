@@ -8937,9 +8937,7 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
       && fullScanExactPlan
     ) {
       for (const leaf of fullScanExactPlan.prefilterPlan.exactRelativeLeaves) {
-        const functionName = leaf.right.type === "KINTONE_FUNC"
-          ? leaf.right.name
-          : "(unknown)";
+        const functionName = serverFunctionNameOfExplainLeaf(leaf);
         const field = leaf.left.type === "FIELD" ? leaf.left.field : undefined;
         const operator = relativeReasonOperator(leaf.op);
         const detail = node.capability?.reasons.find((reason) =>
@@ -8974,9 +8972,7 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
       && prefilterPlan.residualWhere
     ) {
       for (const leaf of prefilterPlan.exactRelativeLeaves) {
-        const functionName = leaf.right.type === "KINTONE_FUNC"
-          ? leaf.right.name
-          : "(unknown)";
+        const functionName = serverFunctionNameOfExplainLeaf(leaf);
         const field = leaf.left.type === "FIELD" ? leaf.left.field : undefined;
         const operator = relativeReasonOperator(leaf.op);
         const detail = node.capability?.reasons.find((reason) =>
@@ -9036,6 +9032,18 @@ function serverFunctionLabel(functionName: string): string {
   return isRelativeDateFunctionName(functionName)
     ? "relative date function"
     : "kintone function";
+}
+
+function serverFunctionNameOfExplainLeaf(leaf: BinaryExpr): string {
+  if (leaf.right.type === "KINTONE_FUNC") return leaf.right.name;
+  if (
+    leaf.right.type === "IN_LIST"
+    && leaf.right.values.length === 1
+    && leaf.right.values[0].type === "KINTONE_FUNC"
+  ) {
+    return leaf.right.values[0].name;
+  }
+  return "(unknown)";
 }
 
 function serverFunctionEvaluationLabel(functionName: string): string {
