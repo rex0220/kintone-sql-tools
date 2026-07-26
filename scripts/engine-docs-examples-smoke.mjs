@@ -17,7 +17,9 @@ import {
 const rootDir = resolve(import.meta.dirname, "..");
 const smokeDir = resolve(rootDir, ".tmp", "engine-docs-examples-smoke");
 const packageName = "@rex0220/kintone-sql-tools";
-const exactVersion = "3.25.0";
+const packageVersion = JSON.parse(
+  readFileSync(resolve(rootDir, "package.json"), "utf8")
+).version;
 let tarballPath;
 
 function assert(condition, message) {
@@ -72,8 +74,8 @@ try {
   const esmSource = `
 import { createReadonlyKintoneClient, runQuery, version } from "${packageName}/engine";
 const client = createReadonlyKintoneClient();
-const result = await runQuery("SELECT 'ok' AS status, 25 AS release", { client, maxRecords: 3000, cursorMaxActive: 2 });
-if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "25") process.exit(1);
+const result = await runQuery("SELECT 'ok' AS status, 1 AS release", { client, maxRecords: 3000, cursorMaxActive: 2 });
+if (version !== "${packageVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "1") process.exit(1);
 `;
   writeFileSync(resolve(smokeDir, "example.mjs"), esmSource, "utf8");
   run(process.execPath, ["example.mjs"], { cwd: smokeDir });
@@ -85,8 +87,8 @@ if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.ro
 const { createReadonlyKintoneClient, runQuery, version } = require("${packageName}/engine");
 (async () => {
   const client = createReadonlyKintoneClient();
-  const result = await runQuery("SELECT 'ok' AS status, 25 AS release", { client });
-  if (version !== "${exactVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "25") process.exit(1);
+  const result = await runQuery("SELECT 'ok' AS status, 1 AS release", { client });
+  if (version !== "${packageVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "1") process.exit(1);
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
   writeFileSync(resolve(cjsDir, "example.cjs"), cjsSource, "utf8");
@@ -104,20 +106,20 @@ const { createReadonlyKintoneClient, runQuery, version } = require("${packageNam
   );
   const fixture = createEngineUmdHost();
   loadEngineUmd(umd, fixture, "packed-ksql-engine.umd.js");
-  const engine = fixture.host.ksql.get(exactVersion);
-  assert(engine?.version === exactVersion, "UMD exact registry version missing");
+  const engine = fixture.host.ksql.get(packageVersion);
+  assert(engine?.version === packageVersion, "UMD exact registry version missing");
   const client = engine.createReadonlyKintoneClient();
   const result = await engine.runQuery(
-    "SELECT 'ok' AS status, 25 AS release",
+    "SELECT 'ok' AS status, 1 AS release",
     { client }
   );
   assert(
-    result.rows[0].status === "ok" && result.rows[0].release === "25",
+    result.rows[0].status === "ok" && result.rows[0].release === "1",
     "UMD documentation query result mismatch"
   );
 
   console.log(
-    `[engine-docs-examples-smoke] packed ESM/CJS/UMD ${exactVersion}: ok`
+    `[engine-docs-examples-smoke] packed ESM/CJS/UMD ${packageVersion}: ok`
   );
 } finally {
   if (tarballPath && existsSync(tarballPath)) rmSync(tarballPath, { force: true });

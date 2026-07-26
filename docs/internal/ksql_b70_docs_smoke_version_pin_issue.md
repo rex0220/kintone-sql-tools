@@ -2,7 +2,7 @@
 
 - 起票: 2026-07-25
 - **2026-07-27 改題・スコープ拡大**（v3.25.0 のリリース準備で実害が出たため）
-- ステータス: 📝 **起票（優先 中）**。未着手。旧題は「`engine:docs-smoke` の version pin 自動化」。
+- ステータス: 🔧 **実装完了・未リリース（2026-07-27）**。`scripts/version-sync-guard.mjs` を新設し `prepack` と `npm test` の双方に配線。`build.mjs` が `prod/manifest.json` を自動同期、`engine-docs-examples-smoke.mjs` のハードコードは廃止。**7 ケースの破壊テストで全箇所を検出することを確認済み**（§6）。
 
 ## 1. 事象（改題の理由）
 
@@ -89,3 +89,46 @@ B69 の実装中に検出して v3.22.0 で手動同期して green 化した経
 
 小粒だが、**利用者が目にする版数を誤って配布しかけた**実績があるため、
 起票時の「低」から **中** へ引き上げる。次のリリースでも同じ漏れが起きうる。
+
+
+## 6. 実装結果（2026-07-27）
+
+### 6.1 追加・変更
+
+| ファイル | 内容 |
+|---|---|
+| `scripts/version-sync-guard.mjs`（新規） | `package.json` の `version` を単一の真実として一致を検査 |
+| `package.json` | `version:check` を追加し、**`prepack` と `test` の両方**に配線 |
+| `build.mjs` | `prod/manifest.json` を `package.json` の版数で**自動同期してからパック**。version フィールドが1つであることを検証し、**文字列置換で他フィールド・整形・キー順を保持** |
+| `scripts/engine-docs-examples-smoke.mjs` | `exactVersion` を廃し**実行時に `package.json` を読む**。`N AS release` は版数非依存の `1 AS release` へ単純化＝**以後 bump 不要** |
+
+### 6.2 破壊テストによる検証（Claude 実施）
+
+各箇所を1つずつ壊してガードが失敗することを確認した。**7 ケースすべて検出**。
+
+```
+検出 OK   package-lock.json      - package-lock.json version: expected "3.25.0", found "9.9.9"
+検出 OK   prod/manifest.json     - prod/manifest.json version: expected "3.25.0", found "9.9.9"
+検出 OK   release/VERSION.txt    - release/VERSION.txt: expected "v3.25.0", found "v9.9.9"
+検出 OK   release/README.txt     - (package heading) / (plugin artifact name) / (MCPB manifest version) の3パターン
+検出 OK   zip 実在               - release/ksql-plugin-v3.25.0.zip: expected release plugin zip to exist
+```
+
+**v3.25.0 で漏らした3箇所（`package-lock.json` / `prod/manifest.json` / smoke）は、
+いずれも今後は自動で止まる。**
+
+### 6.3 設計判断
+
+- **README の履歴版数は検査対象外**。全体を現行版へ一致させると履歴記述を壊すため、
+  冒頭の現行リリース表記（見出し・成果物名・手順の zip 名・manifest / MCP server version）だけを検査する。
+- **zip 実在検査を `npm test` にも含めた**。版数 bump 後に該当 zip が未作成なら
+  通常テストの冒頭で失敗する。リリース前に気づける代わりに、
+  bump 直後・ビルド前は `npm test` が失敗する点は意図した動作である。
+- `prod/manifest.json` は `JSON.stringify` せず、**唯一の `version` 値だけを文字列置換**する。
+  復元前後の SHA-256 が同一であることを確認済み。
+
+### 6.4 残る手動作業
+
+`package-lock.json` は `npm install --package-lock-only` が必要（ガードで検出はできる）。
+`release/` 成果物のビルドと `CHANGELOG` の版数見出し確定も手動のまま。
+**「漏れたまま配布する」ことは構造的に不可能になった**が、bump 作業自体は自動化していない。
