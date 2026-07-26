@@ -10,6 +10,27 @@ release 成果物:
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
+次回リリース (Unreleased): B75+B77+B78 の移行案内。
+- 注意: これは minor リリースですが破壊的変更を含み、^3 の利用者にも自動更新で届きます。
+  WHERE の TODAY() / NOW() / LOGINUSER() は kintone REST query へ安全に押し下げられる形だけを
+  許可し、従来 client 評価へ落ちていた形はレコード取得前に
+  WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN で拒否します。ユーザー系・複数選択系への
+  型に合わない演算子も、silent 0 rows ではなく WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE で
+  拒否します。
+- 新たにエラーになる例:
+    WHERE 作成者 = 'taro'
+    WHERE 日付 = NOW()
+    WHERE $id >= TODAY()
+  このほか、押し下げ不能な OR / NOT / JOIN / 入れ子 SELECT / 実体化文脈の UNION 枝にある
+  TODAY() / NOW() / LOGINUSER() も取得前エラーになります。
+- 移行方法: ユーザー系・複数選択系は in / not in を使う、WHERE 全体または関数 leaf を
+  押し下げ可能な形にする、TODAY() / NOW() を固定の日付・日時リテラルへ置換する。
+- 機能追加: 従来 kSQL で表現できなかった WHERE 作成者 in (LOGINUSER()) を追加。
+  TODAY() / NOW() は相対日付関数と同じ server-only 計画になり、たとえば
+  WHERE 日付 = TODAY() AND LENGTH(件名) > 1 は日付条件を server prefilter へ押し下げて
+  client は残余だけを評価します。B75 により whole-WHERE exact なら CTE 本体・WITH の
+  最終 SELECT・一時テーブル source でも使えます。
+
 v3.24.0: 相対日付を集計クエリでも使えるように (B72)。
 - WHERE 全体が kintone クエリへ押し下げ可能なら、GROUP BY / SELECT DISTINCT / 集計関数 /
   ウィンドウ関数 / 通常の ORDER BY を含む文でも相対日付関数 (THIS_MONTH 等) を使えるように
@@ -18,9 +39,10 @@ v3.24.0: 相対日付を集計クエリでも使えるように (B72)。
 - 従来は「押し下げ不能な述語を AND で足すと通るのに、純粋に exact な条件だけだと拒否される」
   逆転が起きていた。本修正でこれを解消。WHERE 全体を一度だけサーバーへ送り、取得後の
   クライアント側 WHERE 評価は行わない (相対日付のクライアント評価は従来どおり 0 回)。
-- 引き続き取得前に拒否: KORDER BY、UPDATE/DELETE の対象選択、INSERT/UPSERT ... SELECT の
-  source、JOIN、VALIDATE、サブテーブル、一時テーブル・実体化 CTE・派生表、OR/NOT に絡んで
-  WHERE 全体が exact にならない場合。
+- 引き続き取得前に拒否: JOIN、VALIDATE、サブテーブル、一時テーブル・実体化 CTE・派生表、
+  OR/NOT に絡んで WHERE 全体が exact にならない場合。KORDER BY と UPDATE/DELETE の対象選択、
+  INSERT/UPSERT ... SELECT の source は whole-WHERE exact に限り使用でき、prefilter＋残余や
+  FULL_SCAN_EXACT では使えません。
 - 純加法的 minor。従来動いていたクエリの結果は変わらない。
 
 v3.23.0: GROUP BY のエイリアスが黙って誤集計するバグを修正 (B71)。
@@ -51,9 +73,10 @@ v3.21.0: 相対日付の prefilter ＋残余 client 評価 (B67 Phase2 A)。
 - v3.20.0 では文全体を fail-closed していたケース。EXPLAIN は where capability:
   SUPERSET_PREFILTER / server prefilter / client residual / relative date client
   evaluations: 0 を表示する。
-- OR/NOT 内の相対日付・KORDER BY・DML の対象選択・INSERT/UPSERT ... SELECT の
-  source・JOIN・VALIDATE・派生表は従来どおり fail-closed。pure-exact な相対日付は
-  非回帰 (DML source を含め従来どおり許可)。
+- OR/NOT 内で whole-WHERE exact にならない相対日付、prefilter＋残余または
+  FULL_SCAN_EXACT の KORDER BY・DML の対象選択・INSERT/UPSERT ... SELECT の source、
+  JOIN・VALIDATE・派生表は従来どおり fail-closed。whole-WHERE exact な相対日付は
+  KORDER / DML source を含め従来どおり許可。
 - 純加法的 minor。既存 SQL、plugin、CLI、MCP、MCPB の挙動は不変。
 
 v3.20.0: kintone REST クエリ関数 (相対日付) の押し下げ (B67 Phase1)。

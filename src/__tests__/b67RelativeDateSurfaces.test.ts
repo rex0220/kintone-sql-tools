@@ -75,7 +75,11 @@ test("CLI/MCP/plugin/Node library は shared engine を import し B67 allowlist
 
 const B72_FIELDS: KintoneFieldInfo[] = [
   { code: "日付", label: "日付", fieldType: "DATE" },
+  { code: "日時", label: "日時", fieldType: "DATETIME" },
   { code: "区分", label: "区分", fieldType: "SINGLE_LINE_TEXT" },
+  { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
+  { code: "作成者", label: "作成者", fieldType: "CREATOR" },
+  { code: "グループ", label: "グループ", fieldType: "GROUP_SELECT" },
   { code: "子", label: "子", fieldType: "SINGLE_LINE_TEXT", inSubtable: true, subtableCode: "テーブル" },
   { code: "テーブル", label: "テーブル", fieldType: "SUBTABLE" },
 ];
@@ -154,11 +158,14 @@ function reasonPath(text: string): { reason: string; path: string } {
 
 const B72_PLAN_FACTS = [
   "relative date evaluation:",
+  "kintone function:",
+  "kintone function evaluation:",
   "where capability:",
   "server predicate:",
   "client residual:",
   "client evaluation:",
   "relative date client evaluations:",
+  "kintone function client evaluations:",
   "kintone query:",
 ] as const;
 
@@ -183,7 +190,11 @@ async function captureCli(
       return new Response(JSON.stringify({
         properties: {
           日付: { code: "日付", label: "日付", type: "DATE" },
+          日時: { code: "日時", label: "日時", type: "DATETIME" },
           区分: { code: "区分", label: "区分", type: "SINGLE_LINE_TEXT" },
+          件名: { code: "件名", label: "件名", type: "SINGLE_LINE_TEXT" },
+          作成者: { code: "作成者", label: "作成者", type: "CREATOR" },
+          グループ: { code: "グループ", label: "グループ", type: "GROUP_SELECT" },
           テーブル: {
             code: "テーブル",
             label: "テーブル",
@@ -246,7 +257,7 @@ async function captureCli(
   }
 }
 
-describe("B75 Step 4 plugin/CLI/MCP/engine-library surface parity", () => {
+describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () => {
   const dir = mkdtempSync(join(tmpdir(), "ksql-b72-surfaces-"));
   const configPath = join(dir, "ksql.config.json");
 
@@ -293,6 +304,19 @@ describe("B75 Step 4 plugin/CLI/MCP/engine-library surface parity", () => {
       "SIMPLE CTE",
       "WITH c AS (SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY()) SELECT * FROM c",
     ],
+    [
+      "TODAY Phase2 prefilter",
+      "SELECT 日付, 件名 FROM APP100 "
+        + "WHERE 日付 = TODAY() AND LENGTH(件名) > 1",
+    ],
+    [
+      "LOGINUSER singleton IN",
+      "SELECT 作成者 FROM APP100 WHERE 作成者 IN (LOGINUSER())",
+    ],
+    [
+      "TODAY whole-WHERE exact KORDER native",
+      "SELECT 日付 FROM APP100 WHERE 日付 = TODAY() KORDER BY 日付 LIMIT 5",
+    ],
   ])("%s は accept/query/EXPLAIN が4面で一致する", async (_label, sql) => {
     // plugin は desktop.ts から同じ execute を直接 import するため、ここでは共有 engine 呼出しを
     // plugin surface の実行プロキシとして使う。共有 import 自体は上の静的 parity test で固定する。
@@ -322,6 +346,82 @@ describe("B75 Step 4 plugin/CLI/MCP/engine-library surface parity", () => {
     expect(surfacePlanFacts(libraryExplain)).toEqual(surfacePlanFacts(pluginExplain));
     expect(surfacePlanFacts(mcpExplain)).toEqual(surfacePlanFacts(pluginExplain));
     expect(surfacePlanFacts(cliPlanText(cliExplain.stdout))).toEqual(surfacePlanFacts(pluginExplain));
+  });
+
+  test.each([
+    [
+      "DATE × NOW",
+      "SELECT 日付 FROM APP100 WHERE 日付 = NOW()",
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+    ],
+    [
+      "record id × TODAY",
+      "SELECT $id FROM APP100 WHERE $id >= TODAY()",
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+    ],
+    [
+      "GROUP_SELECT × LOGINUSER",
+      "SELECT グループ FROM APP100 WHERE グループ IN (LOGINUSER())",
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+    ],
+    [
+      "non-exact OR × LOGINUSER",
+      "SELECT 作成者 FROM APP100 "
+        + "WHERE 作成者 IN (LOGINUSER()) OR LENGTH(件名) > 1",
+      "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN",
+    ],
+  ])("%s は reason と records API 0 が4面で一致する", async (
+    _label,
+    sql,
+    reason
+  ) => {
+    const plugin = makeB72Client();
+    const pluginExplain = planText(await execute(`EXPLAIN ${sql}`, plugin.client) as SelectResult);
+    const library = makeB72Client();
+    const libraryExplain = (await explainQuery(sql, { client: library.client })).text;
+    const mcp = makeB72Client();
+    const mcpExplain = mcpPlanText(await mcpTools(mcp.client).explain({ sql }));
+    const cliExplain = await captureCli(configPath, sql, true);
+    const cliText = cliPlanText(cliExplain.stdout);
+    const diagnostic = (text: string) =>
+      text.split(/\r?\n/).find((line) => line.includes(reason))?.trim() ?? "";
+
+    expect(diagnostic(pluginExplain)).toContain(reason);
+    expect(diagnostic(libraryExplain)).toBe(diagnostic(pluginExplain));
+    expect(diagnostic(mcpExplain)).toBe(diagnostic(pluginExplain));
+    expect(diagnostic(cliText)).toBe(diagnostic(pluginExplain));
+    expect(cliExplain.code).toBe(0);
+    expect(plugin.queries).toEqual([]);
+    expect(library.queries).toEqual([]);
+    expect(mcp.queries).toEqual([]);
+    expect(cliExplain.queries).toEqual([]);
+  });
+
+  test("CREATOR × = は実行 error と records API 0 が4面で一致する", async () => {
+    const sql = "SELECT 作成者 FROM APP100 WHERE 作成者 = 'taro'";
+    const reason = "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE";
+    const plugin = makeB72Client();
+    const library = makeB72Client();
+    const mcp = makeB72Client();
+
+    const pluginError = await execute(sql, plugin.client)
+      .then(() => "", (error: unknown) => String(error));
+    const libraryError = await runQuery(sql, { client: library.client })
+      .then(() => "", (error: unknown) => String(error));
+    const mcpError = await mcpTools(mcp.client).query({ sql })
+      .then(() => "", (error: unknown) => String(error));
+    const cli = await captureCli(configPath, sql, false);
+    const diagnostic = (text: string) => text.slice(text.indexOf("ArgumentError:"));
+
+    expect(pluginError).toContain(reason);
+    expect(diagnostic(libraryError)).toBe(diagnostic(pluginError));
+    expect(diagnostic(mcpError)).toBe(diagnostic(pluginError));
+    expect(`${cli.stdout}\n${cli.stderr}`).toContain(reason);
+    expect(cli.code).toBe(2);
+    expect(plugin.queries).toEqual([]);
+    expect(library.queries).toEqual([]);
+    expect(mcp.queries).toEqual([]);
+    expect(cli.queries).toEqual([]);
   });
 
   test.each([

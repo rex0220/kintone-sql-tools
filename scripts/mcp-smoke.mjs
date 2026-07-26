@@ -500,6 +500,12 @@ async function main() {
     assert(docsChapter.content[0].text.includes("FROM_TODAY"), "ksql_docs function chapter is missing B67 relative-date functions.");
     assert(docsChapter.content[0].text.includes("server-only"), "ksql_docs function chapter is missing the B67 server-only boundary.");
     assert(docsChapter.content[0].text.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN"), "ksql_docs function chapter is missing the B67 exact-pushdown reason code.");
+    assert(docsChapter.content[0].text.includes("作成者 in (LOGINUSER())"), "ksql_docs function chapter is missing B78 LOGINUSER singleton IN.");
+    assert(docsChapter.content[0].text.includes("グループ選択には使用できません"), "ksql_docs function chapter is missing the B78 GROUP_SELECT boundary.");
+    assert(docsChapter.content[0].text.includes("`DATE` には使用不可"), "ksql_docs function chapter is missing the B77 DATE x NOW boundary.");
+    assert(docsChapter.content[0].text.includes("実行環境のローカルタイムゾーン"), "ksql_docs function chapter is missing CURRENT_* local-TZ semantics.");
+    assert(docsChapter.content[0].text.includes("whole-WHERE exact"), "ksql_docs function chapter is missing the corrected KORDER boundary.");
+    assert(docsChapter.content[0].text.includes("FULL_SCAN_EXACT"), "ksql_docs function chapter is missing the corrected KORDER rejection shapes.");
     const docsUnknown = await client.callTool({
       name: "ksql_docs",
       arguments: { section: "STDDEV" },
