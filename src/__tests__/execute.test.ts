@@ -2707,6 +2707,19 @@ test("SELECT: 未存在フィールドコードを指定するとエラー", asy
   ).rejects.toThrow("ArgumentError: unknown field code(s): 存在しない (APP100)");
 });
 
+test("SELECT: getFields() にない kintone system field 名も未存在フィールドとして拒否する", async () => {
+  const client = makeClient();
+  client.getFields = async (_appId) => ([
+    { code: "名前", label: "名前", fieldType: "SINGLE_LINE_TEXT" },
+  ]);
+
+  await expect(
+    execute("SELECT ステータス FROM APP100", client, {
+      cacheContext: "unknown-kintone-system-field-test",
+    })
+  ).rejects.toThrow("ArgumentError: unknown field code(s): ステータス (APP100)");
+});
+
 test("SELECT COUNT(*) GROUP BY（FULL_SCAN モード）", async () => {
   const records = [
     makeRecord({ 種別: "A", 金額: "100" }),
@@ -5874,7 +5887,8 @@ test("WITH — CTE 内で UNION ALL", async () => {
 });
 
 test("WITH: 非インライン CTE の空 SELECT * は実体化時の列を返す", async () => {
-  const client = makeClient({ recordsByApp: { 100: [] } });
+  // B71 Step 2: 0 rows でも GROUP BY の物理列は source schema から解決する。
+  const client = makeClient({ recordsByApp: { 100: [] }, fieldTypes: { a: "SINGLE_LINE_TEXT" } });
   const result = await execute(
     `WITH c AS (
        SELECT a, COUNT(*) AS cnt FROM APP100 GROUP BY a

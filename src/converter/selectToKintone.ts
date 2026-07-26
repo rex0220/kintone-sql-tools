@@ -32,6 +32,10 @@ import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { normalizeGroupingSpec } from "../core/grouping";
+import type {
+  PlainGroupByResolution,
+  PlainGroupByResolutionPlan,
+} from "../core/optimization/plainGroupByPlan";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -189,9 +193,10 @@ export function selectToFetchAllParams(
  */
 export function selectToFetchAllFields(
   stmt: SelectStatement,
-  targetTable: TableRef
+  targetTable: TableRef,
+  plainGroupByPlan?: PlainGroupByResolutionPlan
 ): string[] {
-  const plan = collectRequiredFieldsByTable(stmt);
+  const plan = collectRequiredFieldsByTable(stmt, plainGroupByPlan);
   const target = plan.get(targetTable);
   if (!target) return [];
   if (target.allFields) return [];
@@ -348,8 +353,10 @@ interface RequiredFieldState {
 }
 
 function collectRequiredFieldsByTable(
-  stmt: SelectStatement
+  stmt: SelectStatement,
+  plainGroupByPlan?: PlainGroupByResolutionPlan
 ): Map<TableRef, RequiredFieldState> {
+  const allTables = [stmt.from, ...stmt.joins.map((j) => j.table)];
   const physicalTables = [stmt.from, ...stmt.joins.map((j) => j.table)]
     .filter((t) => t.cteName === null);
   const states = new Map<TableRef, RequiredFieldState>();
@@ -410,7 +417,8 @@ function collectRequiredFieldsByTable(
 
   const addFieldName = (
     rawName: string,
-    phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"
+    phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select",
+    groupResolution?: PlainGroupByResolution
   ) => {
     if (!rawName || rawName === "*") return;
 
@@ -432,6 +440,18 @@ function collectRequiredFieldsByTable(
       if (target) {
         markAll(target);
         return;
+      }
+      return;
+    }
+
+    // B71: plan 済み plain GROUP BY は schema 解決結果を唯一の取得列根拠にする。
+    // PHYSICAL だけを確定 source に追加し、alias は従来どおり取得対象にしない。
+    if (phase === "groupBy" && groupResolution !== undefined) {
+      if (groupResolution.kind === "PHYSICAL") {
+        const source = allTables[groupResolution.sourceIndex];
+        if (source?.cteName === null) {
+          addFieldToTable(source, groupResolution.fieldCode);
+        }
       }
       return;
     }
@@ -625,9 +645,9 @@ function collectRequiredFieldsByTable(
     }
   };
 
-  const walkGroupByKey = (k: GroupByKey) => {
+  const walkGroupByKey = (k: GroupByKey, resolution?: PlainGroupByResolution) => {
     if (k.type === "FIELD_NAME") {
-      addFieldName(k.name, "groupBy");
+      addFieldName(k.name, "groupBy", resolution);
       return;
     }
     if (k.type === "ARITH_KEY") {
@@ -705,7 +725,9 @@ function collectRequiredFieldsByTable(
   walkWhere(stmt.where, "where");
   const grouping = normalizeGroupingSpec(stmt);
   if (grouping.type === "PLAIN") {
-    for (const item of grouping.allItems) walkGroupByKey(item);
+    grouping.allItems.forEach((item, index) =>
+      walkGroupByKey(item, plainGroupByPlan?.items[index])
+    );
   } else if (grouping.type === "GROUPING_SETS") {
     for (const item of grouping.allItems) {
       // B65 items cannot resolve through SELECT aliases: always source-first.

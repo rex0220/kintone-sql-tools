@@ -1,5 +1,6 @@
 import { aggregateSyntheticName } from "../aggregateExpression";
 import { containsAggregate } from "../groupingValidation";
+import { APP_SYSTEM_FIELD_CODES } from "../systemFields";
 import type {
   GroupByKey,
   SelectColumn,
@@ -110,7 +111,6 @@ export interface PlainGroupBySourceSchema {
   readonly columns: readonly string[];
 }
 
-const APP_SYSTEM_COLUMNS = ["$id", "$revision"] as const;
 const SUBTABLE_SYSTEM_COLUMNS = ["_pid", "_rid", "_idx"] as const;
 
 function unique(values: readonly string[]): string[] {
@@ -120,7 +120,10 @@ function unique(values: readonly string[]): string[] {
 function sourceColumns(input: PlainGroupBySourceSchemaInput): string[] {
   switch (input.kind) {
     case "APP":
-      return unique([...input.fieldCodes, ...APP_SYSTEM_COLUMNS]);
+      return unique([
+        ...input.fieldCodes,
+        ...APP_SYSTEM_FIELD_CODES,
+      ]);
     case "SUBTABLE":
       return unique([
         ...input.childFieldCodes,
