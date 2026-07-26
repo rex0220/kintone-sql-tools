@@ -1,9 +1,9 @@
 # B77 + B78 — kintone 関数 fail-closed／ユーザー・複数値フィールド演算子仕様
 
 - 作成日: 2026-07-27
-- 版: **R1（Claude レビュー待ち）**
-- ステータス: **仕様起草。実装未着手**
-- 対象リリース: **B75 と同一リリース**
+- 版: **R1（codex 起草・Claude 承認済み／§17）**
+- ステータス: ✅ **リリース済み（v3.25.0・2026-07-27）**。5 Step 完了。版数は §17.6 のオーナー決定どおり minor。
+- 対象リリース: **v3.25.0（B75 と同一リリース）**
 - SemVer 推奨: **major**（§13）
 - オーナー決定: [B77 issue §0](ksql_b77_today_now_loginuser_fail_closed_issue.md#0-オーナー決定2026-07-27)／[B78 issue §0](ksql_b78_user_field_loginuser_issue.md#0-オーナー決定2026-07-27)
 - 設計前提: [B67 評価](ksql_b67_rest_query_functions_evaluation.md)／[B72 spec](ksql_b72_relative_date_fullscan_exact_spec.md)

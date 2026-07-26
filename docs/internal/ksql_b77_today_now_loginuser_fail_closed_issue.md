@@ -1,7 +1,7 @@
 # B77 `TODAY()` / `NOW()` / `LOGINUSER()` が相対日付 fail-closed の対象外
 
 - 起票: 2026-07-26（B75 Step 1 のレビュー中に発見）
-- ステータス: ✅ **方針決定済み（2026-07-27 オーナー決定）＝案 A（fail-closed 統一）**。実装未着手。詳細は §0。
+- ステータス: ✅ **リリース済み（v3.25.0・2026-07-27）＝オーナー決定 案 A: fail-closed 統一**。実装は [B77+B78 仕様 R1](ksql_b77_b78_kintone_function_fail_closed_spec.md) の 5 Step。**実機 PASS**＝`TODAY()` の Phase2A が `YESTERDAY()` と同一 EXPLAIN。
   追加調査で `LOGINUSER()` が**環境判定なしに無条件で空文字を返す**ことが判明し、優先度を上げた（§3.1）。
 - 関連: [B67 Phase1/Phase2 A](ksql_b67_phase2_impl_plan.md) / [B72](ksql_b72_relative_date_fullscan_exact_spec.md) / [B75](ksql_b75_relative_date_cte_temp_evaluation.md)
 
