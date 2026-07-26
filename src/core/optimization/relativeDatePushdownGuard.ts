@@ -196,7 +196,7 @@ function collectWith(
   inheritedForbidden: boolean
 ): void {
   if (!inheritedForbidden && canInlineSingleCte(statement)) {
-    collectSelect(buildInlinedQuery(statement), `${path}.inlined`, candidates, false, true, false);
+    collectSelect(buildInlinedQuery(statement), `${path}.inlined`, candidates, false, true, true);
     return;
   }
   statement.ctes.forEach((cte, index) => {
@@ -210,7 +210,7 @@ function collectWith(
     }
   });
   if (statement.query.type === "SELECT") {
-    collectSelect(statement.query, `${path}.main`, candidates, true, true, false);
+    collectSelect(statement.query, `${path}.main`, candidates, false, false, true, true);
   } else {
     collectUnion(statement.query, `${path}.main`, candidates, true, false);
   }
