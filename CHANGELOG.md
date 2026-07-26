@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## Unreleased
+## v3.25.0（2026-07-27）
 
 > **⚠ 破壊的変更（minor リリース）:** `^3` の利用者にも自動更新で届きます。`WHERE` の
 > `TODAY()` / `NOW()` / `LOGINUSER()` は、kintone REST query へ安全に押し下げられる形だけを

@@ -1,16 +1,16 @@
-ksql 配布パッケージ (v3.24.0)
+ksql 配布パッケージ (v3.25.0)
 
 release 成果物:
-- ksql-plugin-v3.24.0.zip
-- ksql-mcp.mcpb (manifest version 3.24.0)
-- ksql-mcp.js (MCP server version 3.24.0)
+- ksql-plugin-v3.25.0.zip
+- ksql-mcp.mcpb (manifest version 3.25.0)
+- ksql-mcp.js (MCP server version 3.25.0)
 
-1. ksql-plugin-v3.24.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.25.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-次回リリース (Unreleased): B75+B77+B78 の移行案内。
+本リリース (v3.25.0): B75+B77+B78。
 - 注意: これは minor リリースですが破壊的変更を含み、^3 の利用者にも自動更新で届きます。
   WHERE の TODAY() / NOW() / LOGINUSER() は kintone REST query へ安全に押し下げられる形だけを
   許可し、従来 client 評価へ落ちていた形はレコード取得前に
