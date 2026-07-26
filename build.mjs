@@ -8,7 +8,7 @@
 import * as esbuild from "esbuild";
 import { execSync } from "child_process";
 
-import { readFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 
 const watch     = process.argv.includes("--watch");
 const pluginIdFromEnv = (process.env.KSQL_PLUGIN_ID ?? "").trim();
@@ -29,6 +29,32 @@ const PPK = ppkFromEnvPath || (existsSync(localPpkPath) ? localPpkPath : "");
 const packageJson = JSON.parse(readFileSync("package.json", "utf-8"));
 const OUT_ZIP   = `dist/ksql-plugin-v${packageJson.version}.zip`;
 const PLUGIN_DIR = "prod";
+const MANIFEST_PATH = `${PLUGIN_DIR}/manifest.json`;
+
+function synchronizeManifestVersion() {
+  const source = readFileSync(MANIFEST_PATH, "utf-8");
+  const manifest = JSON.parse(source);
+  if (manifest.version === packageJson.version) return;
+
+  const versionPattern = /("version"\s*:\s*")[^"]*(")/;
+  const matches = source.match(new RegExp(versionPattern.source, "g")) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(
+      `[kSQL] ${MANIFEST_PATH}: expected exactly one version field, found ${matches.length}`
+    );
+  }
+
+  const updated = source.replace(
+    versionPattern,
+    (_match, prefix, suffix) => `${prefix}${packageJson.version}${suffix}`
+  );
+  writeFileSync(MANIFEST_PATH, updated, "utf-8");
+  console.log(
+    `[kSQL] synchronized ${MANIFEST_PATH} version → ${packageJson.version}`
+  );
+}
+
+synchronizeManifestVersion();
 
 const sharedOpts = {
   bundle:    true,
