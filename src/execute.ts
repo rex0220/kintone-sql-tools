@@ -192,6 +192,11 @@ import {
   decomposeRelativeDatePrefilter,
   type RelativeDatePrefilterPlan,
 } from "./core/optimization/relativeDatePrefilterPlan";
+import {
+  buildRelativeDateFullScanExactPlan,
+  relativeDateFunctionOccurrencesInWhere,
+  type RelativeDateFullScanExactPlan,
+} from "./core/optimization/relativeDateFullScanExactPlan";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -2402,7 +2407,9 @@ async function executeSelect(
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
+  const staticMode = resolveSelectMode(stmt);
   let prefilterPlan: RelativeDatePrefilterPlan | undefined;
+  let fullScanExactPlan: RelativeDateFullScanExactPlan | undefined;
   if (whereCapability.capability === "SUPERSET_PREFILTER") {
     const resolver = await buildWhereFieldSemanticsResolver(stmt, client, cacheContext, cteCache);
     const decomposition = decomposeRelativeDatePrefilter(stmt, resolver);
@@ -2413,7 +2420,27 @@ async function executeSelect(
       prefilterPlan = decomposition.plan;
     }
   }
-  const staticMode = resolveSelectMode(stmt);
+  if (
+    prefilterPlan === undefined
+    && whereCapability.capability === "EXACT_PUSHDOWN"
+    && stmt.where !== null
+  ) {
+    let serializedWholeWhere: string | null = null;
+    try {
+      serializedWholeWhere = whereToKintone(stmt.where);
+    } catch {
+      serializedWholeWhere = null;
+    }
+    fullScanExactPlan = buildRelativeDateFullScanExactPlan({
+      select: stmt,
+      selectMode: staticMode,
+      capability: whereCapability,
+      context: { allowFullScanExact: true },
+      serializedWholeWhere,
+      relativeFunctionNames: relativeDateFunctionOccurrencesInWhere(stmt.where),
+    }) ?? undefined;
+    if (fullScanExactPlan) prefilterPlan = fullScanExactPlan.prefilterPlan;
+  }
   const mode: SelectMode = whereCapability.capability === "EXACT_PUSHDOWN"
     ? staticMode
     : "FULL_SCAN";
@@ -2437,19 +2464,42 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completePolicy = buildCompleteInputPolicy(stmt, options, orderPlan);
+  const completePolicy = buildCompleteInputPolicy(
+    stmt,
+    options,
+    orderPlan,
+    fullScanExactPlan,
+    staticMode
+  );
+  const failClosedForB72Local =
+    fullScanExactPlan !== undefined
+    && (
+      staticMode === "FULL_SCAN"
+      || orderPlan?.kind === "CANONICAL_LOCAL"
+    );
+  const executionClient = failClosedForB72Local
+    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
+    : client;
 
   try {
     if (mode === "SIMPLE") {
-      result = await executeSimpleSelect(stmt, client, completePolicy.effectiveOptions, cacheContext, orderPlan, orderMeta);
+      result = await executeSimpleSelect(
+        stmt,
+        executionClient,
+        completePolicy.effectiveOptions,
+        cacheContext,
+        orderPlan,
+        orderMeta
+      );
     } else {
       result = await executeFullScanSelect(
         stmt,
-        client,
+        executionClient,
         completePolicy.effectiveOptions,
         cacheContext,
         cteCache,
-        whereCapability.capability === "EXACT_PUSHDOWN",
+        whereCapability.capability === "EXACT_PUSHDOWN"
+          && prefilterPlan === undefined,
         orderMeta,
         prefilterPlan,
         plainGroupByPlan
@@ -2714,6 +2764,7 @@ function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): st
     : reasons.size === 1 && reasons.has("GROUPING_SETS")
       ? "小計・総計の正しい結果"
       : reasons.has("GROUPING_SETS")
+        || reasons.has("RELATIVE_DATE_FULL_SCAN_EXACT")
         ? "クエリの正しい結果"
         : "ORDER BYの正しい結果";
   return `${subject}には完全な候補集合が必要です。complete input reason: ${reasonList}。`;
@@ -2728,7 +2779,9 @@ interface CompleteInputPolicy {
 function buildCompleteInputPolicy(
   stmt: SelectStatement,
   options: ExecuteOptions,
-  orderPlan: CanonicalOrderPlan | null
+  orderPlan: CanonicalOrderPlan | null,
+  fullScanExactPlan?: RelativeDateFullScanExactPlan,
+  staticMode: SelectMode = resolveSelectMode(stmt)
 ): CompleteInputPolicy {
   // A REST/KORDER plan consumes only the top-level order. Nested/window/B65
   // requirements remain visible through the existing recursive reason walker.
@@ -2737,6 +2790,15 @@ function buildCompleteInputPolicy(
     || orderPlan?.kind === "KORDER_CURSOR"
     ? completeInputReasons({ ...stmt, orderBy: [] })
     : completeInputReasons(stmt);
+  if (
+    fullScanExactPlan
+    && (
+      staticMode === "FULL_SCAN"
+      || orderPlan?.kind === "CANONICAL_LOCAL"
+    )
+  ) {
+    reasons.add("RELATIVE_DATE_FULL_SCAN_EXACT");
+  }
   const truncateWasDisabled = reasons.size > 0 && options.onLimitReached === "truncate";
   return {
     reasons,

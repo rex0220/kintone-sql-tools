@@ -66,7 +66,8 @@ export type CompleteInputReason =
   | "LOCAL_ORDER"
   | "WINDOW_ORDER"
   | "STATISTICAL_AGGREGATE"
-  | "GROUPING_SETS";
+  | "GROUPING_SETS"
+  | "RELATIVE_DATE_FULL_SCAN_EXACT";
 
 const STATISTICAL_AGGREGATES: ReadonlySet<string> = new Set([
   "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",

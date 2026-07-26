@@ -80,7 +80,7 @@ export function buildRelativeDateFullScanExactPlan(
   if (selectMode !== "FULL_SCAN" && !hasCanonicalOrder) return null;
   if (capability.capability !== "EXACT_PUSHDOWN") return null;
 
-  const occurrences = collectRelativeFunctionOccurrences(select.where);
+  const occurrences = relativeDateFunctionOccurrencesInWhere(select.where);
   if (occurrences.length === 0) return null;
   if (!sameOccurrenceList(occurrences, relativeFunctionNames)) return null;
   if (
@@ -140,7 +140,7 @@ function assertRelativeDateFullScanExactPlan(
   }
 }
 
-function collectRelativeFunctionOccurrences(where: WhereExpr): string[] {
+export function relativeDateFunctionOccurrencesInWhere(where: WhereExpr): string[] {
   const names: string[] = [];
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {
