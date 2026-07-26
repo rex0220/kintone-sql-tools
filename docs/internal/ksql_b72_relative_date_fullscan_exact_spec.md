@@ -1,7 +1,7 @@
 # B72 Phase1 — 相対日付の whole-WHERE exact ＋ local-processing 許可仕様
 
 - 作成日: 2026-07-26
-- ステータス: **仕様 R1（codex 起草）→ Claude レビュー済＝実装着手可能**（2026-07-26）。Claude が実コードで裏取り＝①第1許可形の `(orderBy.length === 0 || orderMode === "KINTONE_NATIVE")` 条件とコメント「Canonical ORDER BY may switch to a local complete-input plan」を確認し、**第3許可形に canonical ORDER BY を含める必要がある**という設計判断が正しいことを確認（`relativeDatePushdownGuard.ts:393-399`）②**`executeSimpleSelect` に `applyFilter`/`evalWhere` は無く** `baseQuery = whereToKintone(stmt.where)` を server へ送るだけ＝canonical ORDER BY ケースは **guard 許可だけで成立**（runtime 配線不要・実装が単純化）③`allowOriginalWherePushdown` の渡し（`execute.ts:2452`）と B71 plan の配線も記述どおり。**残オーナー判断なし**。次＝§10 の Step 1 から実装。
+- ステータス: **✅ リリース済み（v3.24.0・2026-07-26）**。feat PR #277→tag v3.24.0→GitHub Release→npm publish（latest 3.24.0）。**実機 PASS**＝プラグイン（ユーザー実施）＋デプロイ済み MCP v3.24.0。実機 smoke で `RELATIVE_DATE_FULL_SCAN_EXACT` complete-input reason の過剰制約（相対日付だけ truncate 不可）が判明し、オーナー決定 A で撤回（§7 参照）。
 - 対象リリース: **v3.24.0 候補**
 - SemVer: **minor**
 - 評価: [B72 評価](ksql_b72_relative_date_fullscan_exact_evaluation.md)
