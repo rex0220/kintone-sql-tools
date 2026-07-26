@@ -5,6 +5,7 @@ import type {
   WhereExpr,
 } from "../../types/ast";
 import { numberLiteralText } from "../../types/ast";
+import { whereToKintone } from "../../converter/whereToKintone";
 import { resolveFieldSemantics } from "../fieldSemantics";
 import { classifyWhereCapability } from "./whereCapability";
 
@@ -80,6 +81,15 @@ const DATETIME_EQUALITY_TYPES = new Set([
   "UPDATED_TIME",
 ]);
 
+const STEP2_EQUALITY_TYPES = new Set([
+  "SINGLE_LINE_TEXT",
+  "DATE",
+  "TIME",
+  "DATETIME",
+  "CREATED_TIME",
+  "UPDATED_TIME",
+]);
+
 /**
  * FIELD を alias / appId / field schema の三者で解決する。
  * 非修飾 field は全 source のうち実在先がちょうど1つの場合だけ OWNED になる。
@@ -150,6 +160,109 @@ export function buildJoinPushdownPlan(
     relation: fragment.relation,
   }));
   return Object.freeze({ items: Object.freeze(items) });
+}
+
+/**
+ * B76 Phase A Step 2 の runtime 対象だけを計画する。
+ * AND spine 上の DATE/TIME/DATETIME 系・SINGLE_LINE_TEXT の `=` leaf に限定し、
+ * OR / GROUP その他の Step 3 対象は公開 classifier が採用可能でもここでは有効化しない。
+ */
+export function buildJoinPushdownStep2Plan(
+  where: WhereExpr | null,
+  sources: readonly JoinPushdownSource[]
+): JoinPushdownPlan {
+  if (where === null) return Object.freeze({ items: Object.freeze([]) });
+  const fragments = mergeAndFragments(classifyStep2AndLeaves(where, sources));
+  const items = fragments.map((fragment) => Object.freeze({
+    targetAlias: fragment.owner.alias,
+    appId: fragment.owner.appId,
+    predicate: fragment.predicate,
+    relation: fragment.relation,
+  }));
+  return Object.freeze({ items: Object.freeze(items) });
+}
+
+/**
+ * 型メタ取得前に Step 2 候補の有無だけを調べる。
+ * false positive は許すが、OR / GROUP 配下を候補にして Step 3 を先行させない。
+ */
+export function hasJoinPushdownStep2Candidate(where: WhereExpr | null): boolean {
+  if (where === null) return false;
+  if (where.type === "BINARY") {
+    return where.op === "="
+      && where.left.type === "FIELD"
+      && where.right.type === "STRING"
+      && where.right.value !== "";
+  }
+  return where.type === "LOGICAL"
+    && where.op === "AND"
+    && (hasJoinPushdownStep2Candidate(where.left) || hasJoinPushdownStep2Candidate(where.right));
+}
+
+/**
+ * alias を捨てる serializer の直前で、plan item の全 field ownership を再検査する。
+ * plan の破損・別 APP への誤送信は全件取得へ黙ってフォールバックせず内部エラーにする。
+ */
+export function serializeJoinPushdownItem(
+  item: JoinPushdownItem,
+  sources: readonly JoinPushdownSource[]
+): string {
+  assertStep2PredicateOwnership(item.predicate, item, sources);
+  return whereToKintone(item.predicate);
+}
+
+function classifyStep2AndLeaves(
+  where: WhereExpr,
+  sources: readonly JoinPushdownSource[]
+): readonly Fragment[] {
+  if (where.type === "LOGICAL" && where.op === "AND") {
+    return mergeAndFragments([
+      ...classifyStep2AndLeaves(where.left, sources),
+      ...classifyStep2AndLeaves(where.right, sources),
+    ]);
+  }
+  if (where.type !== "BINARY") return [];
+  const classification = classifyJoinPushdownLeaf(where, sources);
+  if (classification.relation !== "superset" || classification.owner === undefined) return [];
+  const fieldType = classification.owner.source.fieldTypes.get(classification.owner.fieldCode);
+  if (fieldType === undefined || !STEP2_EQUALITY_TYPES.has(fieldType)) return [];
+  return [{
+    owner: classification.owner,
+    predicate: where,
+    relation: "superset",
+  }];
+}
+
+function assertStep2PredicateOwnership(
+  predicate: WhereExpr,
+  item: JoinPushdownItem,
+  sources: readonly JoinPushdownSource[]
+): void {
+  if (predicate.type === "LOGICAL" && predicate.op === "AND") {
+    assertStep2PredicateOwnership(predicate.left, item, sources);
+    assertStep2PredicateOwnership(predicate.right, item, sources);
+    return;
+  }
+  if (predicate.type !== "BINARY"
+    || predicate.op !== "="
+    || predicate.left.type !== "FIELD"
+    || predicate.right.type !== "STRING") {
+    throw joinOwnershipError(item, "predicate shape is outside the Step 2 serializer contract");
+  }
+  const owner = resolveJoinFieldOwner(predicate.left, sources);
+  if (owner.status !== "OWNED"
+    || owner.alias !== item.targetAlias
+    || owner.appId !== item.appId
+    || owner.source.sourceKind !== "APP") {
+    throw joinOwnershipError(item, `field ${predicate.left.field} is not uniquely owned by the target`);
+  }
+}
+
+function joinOwnershipError(item: JoinPushdownItem, reason: string): Error {
+  return new Error(
+    `InternalError: JOIN pushdown ownership guard failed for `
+    + `${item.targetAlias}/APP${item.appId}: ${reason}.`
+  );
 }
 
 function classifyTree(

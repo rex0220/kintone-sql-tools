@@ -113,6 +113,12 @@ import {
   extractTypedPushdownCandidates,
 } from "./core/optimization/wherePredicatePushdown";
 import { buildKlikePushdownPlan } from "./core/optimization/klikePushdownPlan";
+import {
+  buildJoinPushdownStep2Plan,
+  hasJoinPushdownStep2Candidate,
+  serializeJoinPushdownItem,
+  type JoinPushdownSource,
+} from "./core/optimization/joinPredicatePushdown";
 import { buildApplyParentSelectionPlan, type ApplyParentSelectionPlan } from "./core/optimization/applyParentSelectionPlan";
 import {
   planCanonicalOrder,
@@ -3080,6 +3086,47 @@ interface TypedPushdownMeta {
   fieldOptionsByApp: Map<number, FieldOptionsMap>;
 }
 
+interface RuntimeJoinStep2Plan {
+  readonly queriesByAlias: ReadonlyMap<string, string>;
+}
+
+async function buildRuntimeJoinStep2Plan(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<RuntimeJoinStep2Plan> {
+  if (stmt.joins.length === 0
+    || !hasJoinPushdownStep2Candidate(stmt.where)
+    || stmt.joins.some((join) => join.type !== "INNER")) {
+    return { queriesByAlias: new Map() };
+  }
+
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  if (tables.some((table) =>
+    table.alias === null || table.cteName !== null || Boolean(table.subtableCode)
+  )) {
+    return { queriesByAlias: new Map() };
+  }
+
+  const fieldTypesByApp = new Map<number, FieldTypeMap>();
+  await Promise.all([...new Set(tables.map((table) => table.appId))].map(async (appId) => {
+    fieldTypesByApp.set(appId, await getFieldTypeMap(appId, client, cacheContext));
+  }));
+  const sources: JoinPushdownSource[] = tables.map((table) => ({
+    alias: table.alias!,
+    appId: table.appId,
+    sourceKind: "APP",
+    fieldTypes: fieldTypesByApp.get(table.appId)!,
+  }));
+  const plan = buildJoinPushdownStep2Plan(stmt.where, sources);
+  const queriesByAlias = new Map<string, string>();
+  for (const item of plan.items) {
+    // §6.2: alias を捨てる serializer の直前に ownership を fail-loud 再検査する。
+    queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+  }
+  return { queriesByAlias };
+}
+
 async function loadTypedPushdownMeta(
   stmt: SelectStatement,
   client: KintoneClient,
@@ -3831,10 +3878,11 @@ async function executeFullScanSelect(
 
   // 一般 NUMBER 比較または選択系 IN 候補がある物理アプリだけ、押し下げ用メタを取得する。
   // typedInFieldTypes は最終 JS 評価用で役割が異なるため、統合しない。
-  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
+  const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver, joinStep2Plan] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
     loadTypedInFieldTypes(stmt, client, cacheContext),
     loadAggregateSortKindResolver(stmt, client, cacheContext, cteCache),
+    buildRuntimeJoinStep2Plan(stmt, client, cacheContext),
   ]);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
   const fieldSemanticsResolver = await buildWhereFieldSemanticsResolver(
@@ -3855,6 +3903,9 @@ async function executeFullScanSelect(
     throw new Error("internal error: relative-date prefilter must disable original WHERE pushdown.");
   }
   const mainFetchCondition = prefilterPlan ? prefilterPlan.prefilterWhere : mainPushDown;
+  const mainStep2Query = stmt.from.alias
+    ? (joinStep2Plan.queriesByAlias.get(stmt.from.alias) ?? "")
+    : "";
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
   const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
@@ -3872,7 +3923,8 @@ async function executeFullScanSelect(
     warnings,
     mainFetchCondition,
     allowOriginalWherePushdown,
-    plainGroupByPlan
+    plainGroupByPlan,
+    mainStep2Query
   );
 
   // JOIN テーブルを push-down の有無で振り分け
@@ -3888,7 +3940,10 @@ async function executeFullScanSelect(
       continue;
     }
     const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
-    if (jCond !== null) {
+    const step2Query = join.table.alias
+      ? (joinStep2Plan.queriesByAlias.get(join.table.alias) ?? "")
+      : "";
+    if (jCond !== null || step2Query !== "") {
       parallelJoins.push({
         join,
         promise: fetchTableRecordsForFullScan(
@@ -3902,7 +3957,8 @@ async function executeFullScanSelect(
           warnings,
           jCond,
           true,
-          plainGroupByPlan
+          plainGroupByPlan,
+          step2Query
         ),
       });
     } else {
@@ -3938,7 +3994,8 @@ async function executeFullScanSelect(
       options.onLimitReached ?? "error",
       warnings,
       null,
-      plainGroupByPlan
+      plainGroupByPlan,
+      ""
     );
     const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
       stmt,
@@ -3951,7 +4008,8 @@ async function executeFullScanSelect(
       warnings,
       null,
       true,
-      plainGroupByPlan
+      plainGroupByPlan,
+      ""
     );
     tables.set(join.table.alias, joinRecords);
   }));
@@ -4356,7 +4414,8 @@ async function fetchTableRecordsForFullScan(
   warnings: Set<string>,
   pushDownCond: WhereExpr | null = null,
   allowOriginalWherePushdown = true,
-  plainGroupByPlan?: PlainGroupByResolutionPlan
+  plainGroupByPlan?: PlainGroupByResolutionPlan,
+  additionalPushQuery = ""
 ): Promise<KintoneRecord[]> {
   const fields = selectToFetchAllFields(stmt, table, plainGroupByPlan);
   const onTruncate = (max: number): void => {
@@ -4366,7 +4425,13 @@ async function fetchTableRecordsForFullScan(
     const baseQuery = isMainTable && allowOriginalWherePushdown
       ? selectToFetchAllParams(stmt, table.appId).query
       : "";
-    const pushQuery = pushDownCond !== null ? whereToKintone(pushDownCond) : "";
+    const pushQueries = [
+      pushDownCond !== null ? whereToKintone(pushDownCond) : "",
+      additionalPushQuery,
+    ].filter((query) => query !== "");
+    const pushQuery = pushQueries.length > 1
+      ? pushQueries.map((query) => `(${query})`).join(" and ")
+      : (pushQueries[0] ?? "");
     const query = baseQuery && pushQuery
       ? `(${baseQuery}) and (${pushQuery})`
       : baseQuery || pushQuery;
@@ -4552,7 +4617,8 @@ async function tryFetchJoinRecordsBySourceKeys(
   onLimit: "error" | "truncate",
   warnings: Set<string>,
   pushDownCond: WhereExpr | null = null,
-  plainGroupByPlan?: PlainGroupByResolutionPlan
+  plainGroupByPlan?: PlainGroupByResolutionPlan,
+  additionalPushQuery = ""
 ): Promise<KintoneRecord[] | null> {
   if (join.type !== "INNER") return null;
   if (!join.table.alias) return null;
@@ -4606,9 +4672,14 @@ async function tryFetchJoinRecordsBySourceKeys(
 
   for (const chunk of chunks) {
     const inClause = `${joinField} in (${chunk.map(sqlQuote).join(",")})`;
-    const query = pushDownCond !== null
-      ? `(${inClause}) and (${whereToKintone(pushDownCond)})`
-      : inClause;
+    const pushQueries = [
+      pushDownCond !== null ? whereToKintone(pushDownCond) : "",
+      additionalPushQuery,
+    ].filter((query) => query !== "");
+    const query = pushQueries.reduce(
+      (combined, pushQuery) => `(${combined}) and (${pushQuery})`,
+      inClause
+    );
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, join.table.appId, query, fields, {
       parallel,
       maxRecords,

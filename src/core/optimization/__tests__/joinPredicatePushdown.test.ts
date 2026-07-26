@@ -3,8 +3,11 @@ import { Parser } from "../../../parser/parser";
 import type { BinaryExpr, SelectStatement, WhereExpr } from "../../../types/ast";
 import {
   buildJoinPushdownPlan,
+  buildJoinPushdownStep2Plan,
   classifyJoinPushdownLeaf,
   resolveJoinFieldOwner,
+  serializeJoinPushdownItem,
+  type JoinPushdownItem,
   type JoinPushdownSource,
   type JoinPushdownSourceKind,
 } from "../joinPredicatePushdown";
@@ -339,6 +342,75 @@ describe("B76 §5.4 tree composition", () => {
     expect(Object.isFrozen(plan.items)).toBe(true);
     expect(Object.isFrozen(plan.items[0])).toBe(true);
     expect(plan.items[0].predicate).toBe(expr);
+  });
+});
+
+describe("B76 Phase A Step 2 runtime boundary / serializer guard", () => {
+  const left = source("a", 100, [
+    { code: "same", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "date", fieldType: "DATE" },
+    { code: "number", fieldType: "NUMBER" },
+  ]);
+  const right = source("b", 200, [
+    { code: "same", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "time", fieldType: "TIME" },
+  ]);
+
+  test("AND leaf の指定型 = だけを alias 別 superset item にする", () => {
+    const plan = buildJoinPushdownStep2Plan(
+      where(
+        "SELECT * FROM APP100 a WHERE "
+        + "a.same = 'A' AND a.date = '2026-07-27' AND b.time = '09:30' AND a.number = 1"
+      ),
+      [left, right]
+    );
+    expect(plan.items.map((item) => [
+      item.targetAlias,
+      item.relation,
+      serializeJoinPushdownItem(item, [left, right]),
+    ])).toEqual([
+      ["a", "superset", 'same = "A" and date = "2026-07-27"'],
+      ["b", "superset", 'time = "09:30"'],
+    ]);
+  });
+
+  test("Step 3 対象の OR / GROUP と既存 NUMBER は runtime plan に入れない", () => {
+    expect(buildJoinPushdownStep2Plan(
+      where("SELECT * FROM APP100 a WHERE a.same = 'A' OR a.date = '2026-07-27'"),
+      [left, right]
+    ).items).toEqual([]);
+    expect(buildJoinPushdownStep2Plan(
+      where("SELECT * FROM APP100 a WHERE (a.same = 'A')"),
+      [left, right]
+    ).items).toEqual([]);
+    expect(buildJoinPushdownStep2Plan(
+      where("SELECT * FROM APP100 a WHERE a.number = 1"),
+      [left, right]
+    ).items).toEqual([]);
+  });
+
+  test("同名 field は修飾正例だけ serialize し、非修飾は採用しない", () => {
+    const qualified = buildJoinPushdownStep2Plan(
+      where("SELECT * FROM APP100 a WHERE a.same = 'A'"),
+      [left, right]
+    );
+    expect(serializeJoinPushdownItem(qualified.items[0], [left, right])).toBe('same = "A"');
+    expect(buildJoinPushdownStep2Plan(
+      where("SELECT * FROM APP100 a WHERE same = 'A'"),
+      [left, right]
+    ).items).toEqual([]);
+  });
+
+  test("item と異なる alias/appId は serializer 前に fail-loud にする", () => {
+    const predicate = where("SELECT * FROM APP100 a WHERE b.same = 'B'");
+    const corrupted: JoinPushdownItem = {
+      targetAlias: "a",
+      appId: 100,
+      predicate,
+      relation: "superset",
+    };
+    expect(() => serializeJoinPushdownItem(corrupted, [left, right]))
+      .toThrow("InternalError: JOIN pushdown ownership guard failed for a/APP100");
   });
 });
 

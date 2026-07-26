@@ -3684,7 +3684,7 @@ test("FULL_SCAN: JOIN は各アプリの NUMBER 候補だけをプレフィル�
   expect(client.getCalls.find((call) => call.app === 99107)?.query).toContain("数量 = 3");
 });
 
-test("FULL_SCAN: JOIN の $id 条件は維持し、テキスト等値は押し下げない", async () => {
+test("FULL_SCAN: JOIN の既存 $id 条件を維持し、Step 2 テキスト等値も押し下げる", async () => {
   const client = makeClient({
     recordsByApp: {
       100: [makeRecord({ $id: "1", 顧客ID: "C1", 文字列: "A社" })],
@@ -3692,15 +3692,16 @@ test("FULL_SCAN: JOIN の $id 条件は維持し、テキスト等値は押し�
     },
   });
 
-  await execute(
+  const result = await execute(
     "SELECT a.$id FROM APP100 AS a INNER JOIN APP101 AS b ON a.顧客ID = b.顧客ID " +
     "WHERE b.$id >= 10 AND b.状態 = '完了' AND a.文字列 LIKE '%A%'",
     client
-  );
+  ) as SelectResult;
 
+  expect(result.rows).toEqual([{ $id: "1" }]);
   const joinCall = client.getCalls.find((call) => call.app === 101);
   expect(joinCall?.query).toContain("$id >= 10");
-  expect(joinCall?.query).not.toContain("状態");
+  expect(joinCall?.query).toContain('状態 = "完了"');
 });
 
 test("FULL_SCAN: サブテーブルは $id / サブテーブル本体 / _p.参照親項目のみ取得", async () => {
