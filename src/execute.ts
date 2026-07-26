@@ -2468,8 +2468,8 @@ async function executeSelect(
 }
 
 /**
- * B71 Step 2: source schema が揃った SELECT 単位で plain GROUP BY を解決する。
- * alias は Step 3 まで fail-closed とし、records/cursor API より前に拒否する。
+ * B71: source schema が揃った SELECT 単位で plain GROUP BY を解決する。
+ * 確定した plan は fetch と pre-group 評価で共有する。
  */
 async function buildRuntimePlainGroupByPlan(
   stmt: SelectStatement,
@@ -2527,15 +2527,14 @@ function assertRuntimePlainGroupByPlan(
   plan: PlainGroupByResolutionPlan
 ): void {
   plan.items.forEach((item, index) => {
-    if (item.kind === "EXPRESSION" || item.kind === "PHYSICAL" || item.kind === "UNKNOWN") return;
+    if (
+      item.kind === "EXPRESSION"
+      || item.kind === "PHYSICAL"
+      || item.kind === "ALIAS_SAFE"
+      || item.kind === "UNKNOWN"
+    ) return;
     const key = groupBy[index];
     const name = key?.type === "FIELD_NAME" ? key.name : "(expression)";
-    if (item.kind === "ALIAS_SAFE") {
-      throw new Error(
-        `ArgumentError: GROUP BY alias ${name} is not yet supported ` +
-        "(reason=GROUP_BY_ALIAS_NOT_YET_SUPPORTED)."
-      );
-    }
     if (item.kind === "ALIAS_REJECT") {
       if (item.reason === "DUPLICATE") {
         throw new Error(
@@ -3913,6 +3912,7 @@ async function executeFullScanSelect(
     appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
     ...(prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
+    plainGroupByPlan,
   });
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
@@ -4270,6 +4270,7 @@ async function executeFullScanWithCte(
     tableColumns,
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
+    plainGroupByPlan,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }

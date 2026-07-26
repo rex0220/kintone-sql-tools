@@ -85,7 +85,7 @@ function firstFields(client: B71Client, app = 100): string[] {
   return client.getCalls.find((call) => call.app === app)?.fields ?? [];
 }
 
-describe("B71 Step 2 schema-aware PHYSICAL resolution", () => {
+describe("B71 Step 3 schema-aware PHYSICAL / ALIAS_SAFE resolution", () => {
   test.each([
     {
       name: "S1",
@@ -115,15 +115,69 @@ describe("B71 Step 2 schema-aware PHYSICAL resolution", () => {
   });
 
   test.each([
-    ["A1 DATE_FORMAT", "SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 年月, COUNT(*) AS c FROM APP100 GROUP BY 年月"],
-    ["A2 field", "SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g"],
-    ["A3 arithmetic", "SELECT 金額 * 2 AS m, COUNT(*) AS c FROM APP100 GROUP BY m"],
-    ["literal", "SELECT 'fixed' AS g, COUNT(*) AS c FROM APP100 GROUP BY g"],
-    ["scalar subquery", "SELECT (SELECT 区分 FROM APP200 LIMIT 1) AS g, COUNT(*) AS c FROM APP100 GROUP BY g"],
-  ])("%s alias は Step 2 reason code で records API 前に拒否する", async (_name, sql) => {
+    ["A1 DATE_FORMAT", "DATE_FORMAT(作成日時, '%Y-%m')", "年月", "DATE_FORMAT(作成日時, '%Y-%m')"],
+    ["A2 field", "区分", "g", "区分"],
+    ["A3 arithmetic", "金額 * 2", "m", "金額 * 2"],
+    ["literal", "'fixed'", "g", "LEFT(区分, 0)"],
+    ["CASE", "CASE WHEN 区分 = 'A' THEN 'A' ELSE 'B' END", "g", "区分"],
+    ["string function", "LOWER(区分)", "g", "LOWER(区分)"],
+    ["concat", "区分 || '-group'", "g", "区分"],
+    ["scalar subquery", "(SELECT 区分 FROM APP200 LIMIT 1)", "g", "LEFT(区分, 0)"],
+  ])("%s alias は同じ partition の direct GROUP BY 結果と一致する", async (
+    name,
+    expression,
+    alias,
+    directGroup
+  ) => {
+    const clientOptions = name === "scalar subquery"
+      ? { records: {
+          100: [
+            record({ $id: "1", 金額: "10", 区分: "A", 作成日時: "2026-01-01T00:00:00Z" }),
+            record({ $id: "2", 金額: "20", 区分: "A", 作成日時: "2026-01-02T00:00:00Z" }),
+            record({ $id: "3", 金額: "30", 区分: "B", 作成日時: "2026-02-01T00:00:00Z" }),
+          ],
+          200: [record({ $id: "11", 区分: "A" })],
+        } }
+      : {};
+    const aliasClient = makeClient(clientOptions);
+    const directClient = makeClient(clientOptions);
+    const aliased = await execute(
+      `SELECT ${expression} AS ${alias}, COUNT(*) AS c FROM APP100 GROUP BY ${alias}`,
+      aliasClient
+    ) as SelectResult;
+    const direct = await execute(
+      `SELECT ${expression} AS ${alias}, COUNT(*) AS c FROM APP100 GROUP BY ${directGroup}`,
+      directClient
+    ) as SelectResult;
+    expect(aliased.rows).toEqual(direct.rows);
+    expect(aliased.rowCount).toBe(direct.rowCount);
+  });
+
+  test("alias-only GROUP BY は alias 名を fetch せず SELECT 式の依存列だけを取得する", async () => {
     const client = makeClient();
-    await expect(execute(sql, client)).rejects.toThrow(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/);
-    expect(client.getCalls).toHaveLength(0);
+    await execute(
+      "SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 年月, COUNT(*) AS c FROM APP100 GROUP BY 年月",
+      client
+    );
+    expect(firstFields(client)).toEqual(["作成日時", "$id"]);
+    expect(firstFields(client)).not.toContain("年月");
+  });
+
+  test("PHYSICAL + ALIAS_SAFE + direct expression を item 順に組み合わせられる", async () => {
+    const aliasClient = makeClient();
+    const directClient = makeClient();
+    const aliased = await execute(
+      "SELECT 区分, DATE_FORMAT(作成日時, '%Y-%m') AS 年月, 金額 * 2 AS 倍額, COUNT(*) AS c " +
+      "FROM APP100 GROUP BY 区分, 年月, 金額 * 2",
+      aliasClient
+    ) as SelectResult;
+    const direct = await execute(
+      "SELECT 区分, DATE_FORMAT(作成日時, '%Y-%m') AS 年月, 金額 * 2 AS 倍額, COUNT(*) AS c " +
+      "FROM APP100 GROUP BY 区分, DATE_FORMAT(作成日時, '%Y-%m'), 金額 * 2",
+      directClient
+    ) as SelectResult;
+    expect(aliased.rows).toEqual(direct.rows);
+    expect(firstFields(aliasClient)).toEqual(["区分", "作成日時", "金額", "$id"]);
   });
 
   test.each([
@@ -284,96 +338,67 @@ describe("B71 Step 2 subtable/materialized schema", () => {
   });
 });
 
-describe("B71 Step 2 nested SELECT paths", () => {
-  test("CTE body: PHYSICAL positive / alias reject", async () => {
+describe("B71 Step 3 nested SELECT paths", () => {
+  test("CTE body: ALIAS_SAFE positive", async () => {
     const positive = makeClient();
     const result = await execute(
-      "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分) SELECT * FROM c",
+      "WITH c AS (SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g) SELECT * FROM c",
       positive
     ) as SelectResult;
     expect(result.rowCount).toBe(2);
-
-    const rejected = makeClient();
-    await expect(execute(
-      "WITH c AS (SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g) SELECT * FROM c",
-      rejected
-    )).rejects.toThrow(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/);
-    expect(rejected.getCalls).toHaveLength(0);
+    expect(result.rows).toEqual([{ g: "A", c: "2" }, { g: "B", c: "1" }]);
   });
 
-  test("UNION branches: PHYSICAL positive / alias reject", async () => {
+  test("UNION の左右 branch: ALIAS_SAFE positive", async () => {
     const positive = makeClient();
     const result = await execute(
-      "SELECT 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分 " +
-      "UNION ALL SELECT 区分, COUNT(*) AS c FROM APP200 GROUP BY 区分",
+      "SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g " +
+      "UNION ALL SELECT 区分 AS g, COUNT(*) AS c FROM APP200 GROUP BY g",
       positive
     ) as SelectResult;
     expect(result.rowCount).toBe(4);
-
-    const rejected = makeClient();
-    await expect(execute(
-      "SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g " +
-      "UNION ALL SELECT 区分 AS g, COUNT(*) AS c FROM APP200 GROUP BY g",
-      rejected
-    )).rejects.toThrow(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/);
-    expect(rejected.getCalls).toHaveLength(0);
   });
 
-  test("scalar subquery body: PHYSICAL positive / alias reject", async () => {
+  test("scalar subquery body: ALIAS_SAFE positive", async () => {
     const positive = makeClient({
       records: {
         100: [record({ $id: "1", 区分: "outer" })],
-        200: [record({ $id: "2", 区分: "inner" })],
+        200: [
+          record({ $id: "2", 区分: "inner" }),
+          record({ $id: "3", 区分: "inner" }),
+        ],
       },
     });
-    await expect(execute(
-      "SELECT (SELECT COUNT(*) FROM APP200 GROUP BY 区分) AS n FROM APP100 LIMIT 1",
-      positive
-    )).resolves.toBeDefined();
-
-    const rejected = makeClient();
-    await expect(execute(
+    const result = await execute(
       "SELECT (SELECT 区分 AS g FROM APP200 GROUP BY g) AS n FROM APP100 LIMIT 1",
-      rejected
-    )).rejects.toThrow(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/);
-    expect(rejected.getCalls).toHaveLength(0);
+      positive
+    ) as SelectResult;
+    expect(result.rows).toEqual([{ n: "inner" }]);
   });
 
-  test("DML source SELECT: PHYSICAL positive / alias reject", async () => {
+  test("DML source SELECT: ALIAS_SAFE positive", async () => {
     const positive = makeClient();
-    await expect(execute(
-      "INSERT INTO APP900 (区分) SELECT 区分 FROM APP100 GROUP BY 区分 VALIDATE ONLY",
-      positive
-    )).resolves.toBeDefined();
-    expect(positive.getCalls.length).toBeGreaterThan(0);
-
-    const rejected = makeClient();
-    await expect(execute(
+    const result = await execute(
       "INSERT INTO APP900 (区分) SELECT 区分 AS g FROM APP100 GROUP BY g VALIDATE ONLY",
-      rejected
-    )).rejects.toThrow(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/);
-    expect(rejected.getCalls).toHaveLength(0);
-    expect(rejected.postCalls).toHaveLength(0);
+      positive
+    );
+    expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 2, errorCount: 0 });
+    expect(positive.getCalls.length).toBeGreaterThan(0);
+    expect(positive.postCalls).toHaveLength(0);
   });
 
-  test("CREATE TEMP TABLE AS SELECT: PHYSICAL positive / alias reject", async () => {
+  test("CREATE TEMP TABLE AS SELECT: ALIAS_SAFE positive", async () => {
     const positive = makeClient();
-    await expect(executeBatch(
-      "CREATE TEMP TABLE #t AS SELECT 区分 FROM APP100 GROUP BY 区分; SELECT * FROM #t",
-      positive
-    )).resolves.toBeDefined();
-
-    const rejected = makeClient();
     const batch = await executeBatch(
-      "CREATE TEMP TABLE #t AS SELECT 区分 AS g FROM APP100 GROUP BY g; SELECT * FROM #t",
-      rejected
+      "CREATE TEMP TABLE #t AS SELECT 区分 AS g, COUNT(*) AS c FROM APP100 GROUP BY g; " +
+      "SELECT * FROM #t",
+      positive
     );
-    expect(batch).toMatchObject({ ok: false });
-    expect(batch.statements[0]).toMatchObject({
-      status: "error",
-      error: { message: expect.stringMatching(/GROUP_BY_ALIAS_NOT_YET_SUPPORTED/) },
+    expect(batch).toMatchObject({ ok: true });
+    expect(batch.statements[1]).toMatchObject({
+      status: "success",
+      result: { rows: [{ g: "A", c: "2" }, { g: "B", c: "1" }] },
     });
-    expect(rejected.getCalls).toHaveLength(0);
   });
 });
 
