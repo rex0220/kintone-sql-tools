@@ -1,8 +1,20 @@
 # B78 ユーザー系フィールドのログインユーザー絞り込みが機能しない／`=` が黙って0件
 
 - 起票: 2026-07-27（B77 の追加調査中に、実機 console での確認をきっかけに発見）
-- ステータス: 📝 **評価・起票（優先 高／機能欠落＋silent wrong result）**。未着手。
+- ステータス: ✅ **方針決定済み（2026-07-27 オーナー決定）＝(a)(b) とも実施**。実装未着手。詳細は §0。
 - 関連: [B77 TODAY/NOW/LOGINUSER の fail-closed 対象外](ksql_b77_today_now_loginuser_fail_closed_issue.md) / [B54 User API](../ksql_issue_tracker.md) / [B67 関数評価](ksql_b67_rest_query_functions_evaluation.md)
+
+## 0. オーナー決定（2026-07-27）
+
+**(a) と (b) の両方を実施する。B77（案 A＝fail-closed 統一）と同一リリースで出す。**
+
+- **(a) `IN` / `NOT IN` リストに kintone 関数（`LOGINUSER()` 等）を書けるようにする。**
+  ユーザー系フィールドで唯一妥当な演算子が `in` である以上、これが無いと機能が存在しない。純加法。
+- **(b) `CREATOR` / `MODIFIER` / `CHECK_BOX` / `MULTI_SELECT` への `in` / `not in` 以外の演算子を
+  取得前に拒否する**（`USER_SELECT` と同じ扱いに揃える）。破壊的変更だが、
+  **現状これらは常に0件**なので正しい結果は失われない。
+  `DROP_DOWN` / `RADIO_BUTTON` は値が素の文字列で局所評価が正しいため**対象外**。
+- (a) で押し下げできない位置に来た `LOGINUSER()` は、**B77 の決定に従い fail-closed** とする。
 
 ## 1. 事象
 
