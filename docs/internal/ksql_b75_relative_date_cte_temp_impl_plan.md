@@ -1,7 +1,7 @@
 # B75 実装計画 — 相対日付を CTE 本体・一時テーブルでも使えるように（第4許可形）
 
 - 作成: 2026-07-26（Claude 起草）
-- ステータス: 📝 **計画（未着手）**。実装は codex、レビューは Claude。
+- ステータス: ✅ **リリース済み（v3.25.0・2026-07-27）**。Step 1〜4 完了。Step 3 で Steps 1-2 が `inheritedForbidden` を無効化していた回帰も修正。
 - 評価: [B75 eval](ksql_b75_relative_date_cte_temp_evaluation.md) / 前提: [B72 spec](ksql_b72_relative_date_fullscan_exact_spec.md)
 
 ## 0. 前提の実証（着手前に済ませてある）

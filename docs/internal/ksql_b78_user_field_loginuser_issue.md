@@ -1,7 +1,7 @@
 # B78 ユーザー系フィールドのログインユーザー絞り込みが機能しない／`=` が黙って0件
 
 - 起票: 2026-07-27（B77 の追加調査中に、実機 console での確認をきっかけに発見）
-- ステータス: ✅ **方針決定済み（2026-07-27 オーナー決定）＝(a)(b) とも実施**。実装未着手。詳細は §0。
+- ステータス: ✅ **リリース済み（v3.25.0・2026-07-27）＝オーナー決定 (a)(b) とも実施**。**実機 PASS**＝`作成者 in (LOGINUSER())` が押し下げ（`kintone query: 作成者 in (LOGINUSER())`・client 評価 0）／`作成者 = '...'` が `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で拒否。
 - 関連: [B77 TODAY/NOW/LOGINUSER の fail-closed 対象外](ksql_b77_today_now_loginuser_fail_closed_issue.md) / [B54 User API](../ksql_issue_tracker.md) / [B67 関数評価](ksql_b67_rest_query_functions_evaluation.md)
 
 ## 0. オーナー決定（2026-07-27）
