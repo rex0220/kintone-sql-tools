@@ -47548,9 +47548,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
   const completePolicy = buildCompleteInputPolicy(
     stmt,
     options,
-    orderPlan,
-    fullScanExactPlan,
-    staticMode
+    orderPlan
   );
   const failClosedForB72Local = fullScanExactPlan !== void 0 && (staticMode === "FULL_SCAN" || orderPlan?.kind === "CANONICAL_LOCAL");
   const executionClient = failClosedForB72Local ? wrapClientWithSearchAbort(client, { aborted: false }, true) : client;
@@ -47765,14 +47763,11 @@ async function validateSelectGroupingPlanning(stmt, client, cacheContext, materi
 }
 function completeInputErrorPrefix(reasons) {
   const reasonList = [...reasons].join(", ");
-  const subject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE") ? "\u7D71\u8A08\u96C6\u7D04\u306E\u6B63\u3057\u3044\u7D50\u679C" : reasons.size === 1 && reasons.has("GROUPING_SETS") ? "\u5C0F\u8A08\u30FB\u7DCF\u8A08\u306E\u6B63\u3057\u3044\u7D50\u679C" : reasons.has("GROUPING_SETS") || reasons.has("RELATIVE_DATE_FULL_SCAN_EXACT") ? "\u30AF\u30A8\u30EA\u306E\u6B63\u3057\u3044\u7D50\u679C" : "ORDER BY\u306E\u6B63\u3057\u3044\u7D50\u679C";
+  const subject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE") ? "\u7D71\u8A08\u96C6\u7D04\u306E\u6B63\u3057\u3044\u7D50\u679C" : reasons.size === 1 && reasons.has("GROUPING_SETS") ? "\u5C0F\u8A08\u30FB\u7DCF\u8A08\u306E\u6B63\u3057\u3044\u7D50\u679C" : reasons.has("GROUPING_SETS") ? "\u30AF\u30A8\u30EA\u306E\u6B63\u3057\u3044\u7D50\u679C" : "ORDER BY\u306E\u6B63\u3057\u3044\u7D50\u679C";
   return `${subject}\u306B\u306F\u5B8C\u5168\u306A\u5019\u88DC\u96C6\u5408\u304C\u5FC5\u8981\u3067\u3059\u3002complete input reason: ${reasonList}\u3002`;
 }
-function buildCompleteInputPolicy(stmt, options, orderPlan, fullScanExactPlan, staticMode = resolveSelectMode(stmt)) {
+function buildCompleteInputPolicy(stmt, options, orderPlan) {
   const reasons = orderPlan?.kind === "CANONICAL_REST_TOP_N" || orderPlan?.kind === "KORDER_NATIVE" || orderPlan?.kind === "KORDER_CURSOR" ? completeInputReasons({ ...stmt, orderBy: [] }) : completeInputReasons(stmt);
-  if (fullScanExactPlan && (staticMode === "FULL_SCAN" || orderPlan?.kind === "CANONICAL_LOCAL")) {
-    reasons.add("RELATIVE_DATE_FULL_SCAN_EXACT");
-  }
   const truncateWasDisabled = reasons.size > 0 && options.onLimitReached === "truncate";
   return {
     reasons,
