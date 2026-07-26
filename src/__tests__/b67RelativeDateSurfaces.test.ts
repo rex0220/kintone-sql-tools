@@ -262,6 +262,11 @@ describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
       "SELECT 区分, COUNT(*) AS c FROM APP100 "
         + "WHERE 日付 = THIS_MONTH() OR 日付 = LAST_MONTH() GROUP BY 区分",
     ],
+    [
+      "materialized CTE",
+      "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 "
+        + "WHERE 日付 = THIS_MONTH() GROUP BY 区分) SELECT * FROM c",
+    ],
   ])("%s は accept/query/EXPLAIN が3面で一致する", async (_label, sql) => {
     const node = makeB72Client();
     await execute(sql, node.client);
@@ -305,11 +310,6 @@ describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
       "subtable",
       "SELECT 子, COUNT(*) AS c FROM APP100$テーブル "
         + "WHERE 日付 = THIS_MONTH() GROUP BY 子",
-    ],
-    [
-      "materialized CTE",
-      "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 "
-        + "WHERE 日付 = THIS_MONTH() GROUP BY 区分) SELECT * FROM c",
     ],
   ])("%s は reject/reason/records API 0 が3面で一致する", async (_label, sql) => {
     const node = makeB72Client();

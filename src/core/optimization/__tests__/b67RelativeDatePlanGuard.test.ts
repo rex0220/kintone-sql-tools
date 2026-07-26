@@ -93,10 +93,6 @@ test.each([
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1",
   ],
   [
-    "materialized CTE",
-    "WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT d FROM c",
-  ],
-  [
     "UPDATE FROM",
     "UPDATE APP100 SET 状態 = s.状態 FROM APP200 AS s "
     + "WHERE APP100.$id = s.$id AND 日付 = YESTERDAY()",
@@ -138,7 +134,7 @@ test("UNION は SELECT node ごとに SIMPLE / FULL_SCAN_EXACT を判定する",
   });
 });
 
-test("WITH は inline plan を1物理 SELECTとして判定し、非inline materializationを拒否する", async () => {
+test("WITH は inline plan と materialized CTE 本体の exact WHERE を許可する", async () => {
   const inlined = await plan(
     "WITH c AS (SELECT * FROM APP100 WHERE 日付 >= FROM_TODAY(-7, DAYS)) "
     + "SELECT 日付 FROM c WHERE 日付 <= TOMORROW()"
@@ -152,8 +148,40 @@ test("WITH は inline plan を1物理 SELECTとして判定し、非inline mater
   const materialized = await plan(
     "WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT d FROM c"
   );
-  expect(materialized.allowed).toBe(false);
-  expect(materialized.rejection?.path).toContain("cte[0]");
+  expect(materialized.allowed).toBe(true);
+  expect(materialized.nodes).toHaveLength(1);
+  expect(materialized.nodes[0]).toMatchObject({
+    path: "statement.cte[0]",
+    selectMode: "SIMPLE",
+    allowed: true,
+    clientWhereEvaluation: false,
+  });
+
+  const aggregate = await plan(
+    "WITH c AS (SELECT COUNT(*) AS n FROM APP100 WHERE 日付 = YESTERDAY()) SELECT * FROM c"
+  );
+  expect(aggregate.allowed).toBe(true);
+  expect(aggregate.nodes[0]).toMatchObject({
+    path: "statement.cte[0]",
+    allowForm: "FULL_SCAN_EXACT",
+    allowed: true,
+    clientWhereEvaluation: false,
+    prefilterPlan: { residualWhere: null },
+  });
+});
+
+test("materialized CTE 本体の入れ子 SELECT は exact WHERE でも fail-closed を維持する", async () => {
+  const result = await plan(
+    "WITH c AS (SELECT (SELECT 日付 FROM APP200 WHERE 日付 = YESTERDAY() LIMIT 1) AS d "
+    + "FROM APP100) SELECT * FROM c"
+  );
+  expect(result.allowed).toBe(false);
+  expect(result.rejection?.path).toContain("cte[0].select-source[0]");
+  expect(result.nodes[result.nodes.length - 1]).toMatchObject({
+    kind: "FORBIDDEN",
+    allowed: false,
+    clientWhereEvaluation: true,
+  });
 });
 
 test("schema nonexact は具体的 R2 reason と exact-pushdown 必須 reason の双方を保持する", async () => {

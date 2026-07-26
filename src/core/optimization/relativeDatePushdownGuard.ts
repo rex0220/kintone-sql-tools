@@ -145,7 +145,8 @@ function collectSelect(
   candidates: WalkCandidate[],
   forceForbidden: boolean,
   allowPhase2 = true,
-  allowFullScanExact = true
+  allowFullScanExact = true,
+  forceNestedForbidden = forceForbidden
 ): void {
   const functionNames = relativeDateFunctionNamesInWhere(select.where);
   if (functionNames.length > 0) {
@@ -165,9 +166,10 @@ function collectSelect(
       nested,
       `${path}.select-source[${index}]`,
       candidates,
-      forceForbidden,
-      allowPhase2,
-      allowFullScanExact
+      forceNestedForbidden,
+      forceNestedForbidden ? false : allowPhase2,
+      forceNestedForbidden ? false : allowFullScanExact,
+      forceNestedForbidden
     )
   );
 }
@@ -199,7 +201,10 @@ function collectWith(
   }
   statement.ctes.forEach((cte, index) => {
     if (cte.query.type === "SELECT") {
-      collectSelect(cte.query, `${path}.cte[${index}]`, candidates, true, true, false);
+      // B75: materialized CTE bodies may use relative dates only when the whole
+      // WHERE is pushed down exactly. Phase2 residuals and nested SELECTs remain
+      // fail-closed because neither path has been verified for CTE materialization.
+      collectSelect(cte.query, `${path}.cte[${index}]`, candidates, false, false, true, true);
     } else if (cte.query.type === "UNION") {
       collectUnion(cte.query, `${path}.cte[${index}]`, candidates, true, false);
     }
