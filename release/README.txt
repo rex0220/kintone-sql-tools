@@ -1,14 +1,27 @@
-ksql 配布パッケージ (v3.23.0)
+ksql 配布パッケージ (v3.24.0)
 
 release 成果物:
-- ksql-plugin-v3.23.0.zip
-- ksql-mcp.mcpb (manifest version 3.23.0)
-- ksql-mcp.js (MCP server version 3.23.0)
+- ksql-plugin-v3.24.0.zip
+- ksql-mcp.mcpb (manifest version 3.24.0)
+- ksql-mcp.js (MCP server version 3.24.0)
 
-1. ksql-plugin-v3.23.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.24.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.24.0: 相対日付を集計クエリでも使えるように (B72)。
+- WHERE 全体が kintone クエリへ押し下げ可能なら、GROUP BY / SELECT DISTINCT / 集計関数 /
+  ウィンドウ関数 / 通常の ORDER BY を含む文でも相対日付関数 (THIS_MONTH 等) を使えるように
+  した。従来はこれらを含むと取得前に拒否されていた。
+  例: SELECT 区分, COUNT(*) FROM APP100 WHERE 日付 = THIS_MONTH() GROUP BY 区分
+- 従来は「押し下げ不能な述語を AND で足すと通るのに、純粋に exact な条件だけだと拒否される」
+  逆転が起きていた。本修正でこれを解消。WHERE 全体を一度だけサーバーへ送り、取得後の
+  クライアント側 WHERE 評価は行わない (相対日付のクライアント評価は従来どおり 0 回)。
+- 引き続き取得前に拒否: KORDER BY、UPDATE/DELETE の対象選択、INSERT/UPSERT ... SELECT の
+  source、JOIN、VALIDATE、サブテーブル、一時テーブル・実体化 CTE・派生表、OR/NOT に絡んで
+  WHERE 全体が exact にならない場合。
+- 純加法的 minor。従来動いていたクエリの結果は変わらない。
 
 v3.23.0: GROUP BY のエイリアスが黙って誤集計するバグを修正 (B71)。
 - GROUP BY に SELECT のエイリアスを指定すると、エラーにならないまま全行が 1 グループへ
