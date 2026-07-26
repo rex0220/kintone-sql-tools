@@ -192,6 +192,11 @@ import {
   decomposeRelativeDatePrefilter,
   type RelativeDatePrefilterPlan,
 } from "./core/optimization/relativeDatePrefilterPlan";
+import {
+  buildRelativeDateFullScanExactPlan,
+  relativeDateFunctionOccurrencesInWhere,
+  type RelativeDateFullScanExactPlan,
+} from "./core/optimization/relativeDateFullScanExactPlan";
 import type { ImportSourceHandle, ImportSourceResolver, MaterializedImportRecords } from "./import/types";
 import { loadImportSource, resolveImportSource } from "./import/sourceLoader";
 import { materializeCsvDmlSource, materializeJsonDmlSource } from "./import/materializeDmlSource";
@@ -2402,7 +2407,9 @@ async function executeSelect(
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
+  const staticMode = resolveSelectMode(stmt);
   let prefilterPlan: RelativeDatePrefilterPlan | undefined;
+  let fullScanExactPlan: RelativeDateFullScanExactPlan | undefined;
   if (whereCapability.capability === "SUPERSET_PREFILTER") {
     const resolver = await buildWhereFieldSemanticsResolver(stmt, client, cacheContext, cteCache);
     const decomposition = decomposeRelativeDatePrefilter(stmt, resolver);
@@ -2413,7 +2420,27 @@ async function executeSelect(
       prefilterPlan = decomposition.plan;
     }
   }
-  const staticMode = resolveSelectMode(stmt);
+  if (
+    prefilterPlan === undefined
+    && whereCapability.capability === "EXACT_PUSHDOWN"
+    && stmt.where !== null
+  ) {
+    let serializedWholeWhere: string | null = null;
+    try {
+      serializedWholeWhere = whereToKintone(stmt.where);
+    } catch {
+      serializedWholeWhere = null;
+    }
+    fullScanExactPlan = buildRelativeDateFullScanExactPlan({
+      select: stmt,
+      selectMode: staticMode,
+      capability: whereCapability,
+      context: { allowFullScanExact: true },
+      serializedWholeWhere,
+      relativeFunctionNames: relativeDateFunctionOccurrencesInWhere(stmt.where),
+    }) ?? undefined;
+    if (fullScanExactPlan) prefilterPlan = fullScanExactPlan.prefilterPlan;
+  }
   const mode: SelectMode = whereCapability.capability === "EXACT_PUSHDOWN"
     ? staticMode
     : "FULL_SCAN";
@@ -2437,19 +2464,40 @@ async function executeSelect(
   );
   // REST top-N がトップレベル ORDER BY を完全に担う場合だけ、B30 の完全入力要求から
   // その ORDER BY を除く。window / subquery ORDER BY の要求は残す。
-  const completePolicy = buildCompleteInputPolicy(stmt, options, orderPlan);
+  const completePolicy = buildCompleteInputPolicy(
+    stmt,
+    options,
+    orderPlan
+  );
+  const failClosedForB72Local =
+    fullScanExactPlan !== undefined
+    && (
+      staticMode === "FULL_SCAN"
+      || orderPlan?.kind === "CANONICAL_LOCAL"
+    );
+  const executionClient = failClosedForB72Local
+    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
+    : client;
 
   try {
     if (mode === "SIMPLE") {
-      result = await executeSimpleSelect(stmt, client, completePolicy.effectiveOptions, cacheContext, orderPlan, orderMeta);
+      result = await executeSimpleSelect(
+        stmt,
+        executionClient,
+        completePolicy.effectiveOptions,
+        cacheContext,
+        orderPlan,
+        orderMeta
+      );
     } else {
       result = await executeFullScanSelect(
         stmt,
-        client,
+        executionClient,
         completePolicy.effectiveOptions,
         cacheContext,
         cteCache,
-        whereCapability.capability === "EXACT_PUSHDOWN",
+        whereCapability.capability === "EXACT_PUSHDOWN"
+          && prefilterPlan === undefined,
         orderMeta,
         prefilterPlan,
         plainGroupByPlan
@@ -8877,6 +8925,41 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
 
   const lines: string[] = [];
   for (const node of plan.nodes) {
+    const fullScanExactPlan = node.fullScanExactPlan;
+    if (
+      node.allowed
+      && node.allowForm === "FULL_SCAN_EXACT"
+      && fullScanExactPlan
+    ) {
+      for (const leaf of fullScanExactPlan.prefilterPlan.exactRelativeLeaves) {
+        const functionName = leaf.right.type === "KINTONE_FUNC"
+          ? leaf.right.name
+          : "(unknown)";
+        const field = leaf.left.type === "FIELD" ? leaf.left.field : undefined;
+        const operator = relativeReasonOperator(leaf.op);
+        const detail = node.capability?.reasons.find((reason) =>
+          reason.functionName === functionName
+          && (field === undefined || reason.field === field)
+          && reason.operator === operator
+        );
+        lines.push(
+          `  relative date function: ${functionName}`,
+          "  relative date evaluation: kintone server whole-WHERE exact",
+          `  field: ${detail?.field ?? field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
+          `  operator: ${detail?.operator ?? operator}`
+        );
+      }
+      // 実行時に node へ確定済みの plan をそのまま表示し、EXPLAIN 側では再計画しない。
+      const wholeWhereQuery = fullScanExactPlan.serializedWholeWhere;
+      lines.push(
+        "  where capability: EXACT_PUSHDOWN",
+        `  server predicate: ${wholeWhereQuery}`,
+        "  client residual: (none)",
+        "  relative date client evaluations: 0",
+        `  kintone query: ${wholeWhereQuery}`
+      );
+      continue;
+    }
     const prefilterPlan = node.prefilterPlan;
     if (
       node.allowed

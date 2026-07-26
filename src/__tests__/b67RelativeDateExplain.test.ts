@@ -14,18 +14,9 @@ function makeClient() {
       nextPage: async () => ({ records: [], next: false }),
       close: async () => undefined,
     })),
-    post: jest.fn(async () => ({ ids: [] })),
-    put: jest.fn(async () => undefined),
-    delete: jest.fn(async () => undefined),
-  };
-  const client: KintoneClient = {
-    getRecords: calls.records,
-    openCursor: calls.cursorOpen,
-    postRecords: calls.post,
-    putRecords: calls.put,
-    deleteRecords: calls.delete,
-    getApps: async () => [],
-    getFields: async () => [
+    fields: jest.fn(async () => [
+      { code: "日付", label: "日付", fieldType: "DATE" },
+      { code: "区分", label: "区分", fieldType: "SINGLE_LINE_TEXT" },
       { code: "作成日時", label: "作成日時", fieldType: "CREATED_TIME" },
       { code: "更新日時", label: "更新日時", fieldType: "UPDATED_TIME" },
       { code: "件名", label: "件名", fieldType: "SINGLE_LINE_TEXT" },
@@ -38,7 +29,19 @@ function makeClient() {
         inSubtable: true,
         subtableCode: "テーブル",
       },
-    ],
+    ]),
+    post: jest.fn(async () => ({ ids: [] })),
+    put: jest.fn(async () => undefined),
+    delete: jest.fn(async () => undefined),
+  };
+  const client: KintoneClient = {
+    getRecords: calls.records,
+    openCursor: calls.cursorOpen,
+    postRecords: calls.post,
+    putRecords: calls.put,
+    deleteRecords: calls.delete,
+    getApps: async () => [],
+    getFields: calls.fields,
     getProcessStatuses: async () => ({ enable: false, states: [] }),
     getNumberPrecision: async () => ({
       digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN",
@@ -128,6 +131,58 @@ test("Phase2 mixed EXPLAIN は共有 prefilterPlan から server/residual/評価
   );
 });
 
+test.each([
+  [
+    "FULL_SCAN",
+    "SELECT 区分, COUNT(*) AS c FROM APP100 "
+      + "WHERE 日付 = THIS_MONTH() OR 日付 = LAST_MONTH() GROUP BY 区分",
+  ],
+  [
+    "canonical ORDER BY",
+    "SELECT 日付 FROM APP100 WHERE 日付 = THIS_MONTH() ORDER BY 日付",
+  ],
+])("B72 %s EXPLAIN は node の whole-WHERE exact plan と評価0を表示する", async (
+  _name,
+  sql
+) => {
+  const explained = makeClient();
+  const text = planText(await execute(`EXPLAIN ${sql}`, explained.client));
+
+  expect(text).toContain("relative date evaluation: kintone server whole-WHERE exact");
+  expect(text).toContain("where capability: EXACT_PUSHDOWN");
+  expect(text).toContain("server predicate: ");
+  expect(text).toContain("client residual: (none)");
+  expect(text).toContain("relative date client evaluations: 0");
+  const predicate = text.match(/server predicate: (.+)/)?.[1];
+  const query = text.match(/kintone query: (.+)/)?.[1];
+  expect(predicate).toBeDefined();
+  expect(query).toBe(predicate);
+  expect(text).not.toContain("server prefilter:");
+  expectNoExecutionApi(explained.calls);
+});
+
+test("B72 exact OR EXPLAIN は全関数を列挙し whole query を一度だけ表示する", async () => {
+  const explained = makeClient();
+  const text = planText(await execute(
+    "EXPLAIN SELECT 区分, COUNT(*) AS c FROM APP100 "
+      + "WHERE 日付 = THIS_MONTH() OR 日付 = LAST_MONTH() GROUP BY 区分",
+    explained.client
+  ));
+
+  expect(text.match(/relative date function: THIS_MONTH/g)).toHaveLength(1);
+  expect(text.match(/relative date function: LAST_MONTH/g)).toHaveLength(1);
+  expect(text.match(/server predicate:/g)).toHaveLength(1);
+  expect(text.match(/client residual:/g)).toHaveLength(1);
+  expect(text.match(/relative date client evaluations: 0/g)).toHaveLength(1);
+  expect(text).toContain(
+    "server predicate: 日付 = THIS_MONTH() or 日付 = LAST_MONTH()"
+  );
+  expect(text).toContain(
+    "kintone query: 日付 = THIS_MONTH() or 日付 = LAST_MONTH()"
+  );
+  expectNoExecutionApi(explained.calls);
+});
+
 test("Phase2 複数 leaf は detail を列挙し合成 prefilter/residual を各1回だけ表示する", async () => {
   const explained = makeClient();
   const text = planText(await execute(
@@ -173,6 +228,29 @@ test("Phase1 pure exact の relative 表示行は従来と byte-identical", asyn
   expect(text).not.toContain("SUPERSET_PREFILTER");
   expect(text).not.toContain("client residual:");
   expect(text).not.toContain("relative date client evaluations:");
+});
+
+test("Phase2 A の relative 表示行は従来と byte-identical", async () => {
+  const text = planText(await execute(
+    "EXPLAIN SELECT $id FROM APP100 "
+      + "WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
+    makeClient().client
+  ));
+  const allLines = text.split("\n");
+  const relativeStart = allLines.indexOf("  relative date function: YESTERDAY");
+  const relativeLines = allLines.slice(relativeStart, relativeStart + 9);
+
+  expect(relativeLines).toEqual([
+    "  relative date function: YESTERDAY",
+    "  relative date evaluation: kintone server exact prefilter",
+    "  field: 更新日時 (UPDATED_TIME)",
+    "  operator: >=",
+    "  where capability: SUPERSET_PREFILTER",
+    "  server prefilter: 更新日時 >= YESTERDAY()",
+    "  client residual: LENGTH(件名) > 1",
+    "  relative date client evaluations: 0",
+    "  kintone query: 更新日時 >= YESTERDAY()",
+  ]);
 });
 
 test.each([

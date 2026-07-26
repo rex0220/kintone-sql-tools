@@ -663,20 +663,22 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 - 相対日付関数を含む条件は、レコード取得前に kintone REST query への押し下げ計画が確定できる場合だけ実行できます。相対日付関数そのものを client の時計で評価することはありません（client fallback なし・相対日付の client 評価は常に 0 回）。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
 - **相対日付関数を使える形は次の2つだけです**。
 
-  1. **単純な SELECT（SIMPLE 実行）で `WHERE` 全体を exact pushdown できる形**。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。
+  1. **`WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等にも拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。**`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません。`ksql_explain` は `relative date evaluation: kintone server whole-WHERE exact`・`client residual: (none)`・`relative date client evaluations: 0` を表示）。
 
      ```sql
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH()
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH() OR 日付 = LAST_MONTH()   -- OR も可（両辺とも押し下げ可能なため）
+     SELECT 区分, COUNT(*) AS 件数 FROM APP100
+     WHERE 日付 = THIS_MONTH() GROUP BY 区分                                  -- 集計クエリでも可（v3.24.0）
+     SELECT * FROM APP100 WHERE 日付 = THIS_MONTH() ORDER BY 日付             -- 通常の ORDER BY も可（v3.24.0）
      ```
 
   2. **prefilter ＋残余（v3.21.0）**: 単一の物理アプリを読む SELECT で、相対日付の exact leaf が「相対日付を含まない残余」（例 `LENGTH(都道府県) > 1`・`LIKE`）と `AND` で結ばれている場合。相対日付 leaf だけを kintone REST query の prefilter として押し下げ、取得後は残余だけを client 評価します（`ksql_explain` は `where capability: SUPERSET_PREFILTER`・`server prefilter:`・`client residual:`・`relative date client evaluations: 0` を表示）。相対日付の値・比較は依然すべて kintone サーバーが決定します。`BETWEEN` 展開の各境界や複数の相対日付 leaf、`KLIKE`・押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載ります。この形は `GROUP BY` などで FULL_SCAN になっていても使用できます。
 
 - 次の計画は、相対日付を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
 
-  - **`WHERE` 全体が押し下げ可能でも、文が FULL_SCAN になる場合**（`GROUP BY`・`SELECT DISTINCT`・集計関数・ウィンドウ関数・通常の `ORDER BY` を含むとき）。集計クエリで最初に踏みやすい制約です。**回避策**: 上記2の形にする（相対日付以外の絞り込み条件を `AND` で併記する）か、`WHERE` に相対日付を使わずリテラル日付を指定します。
-  - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。
-  - `KORDER BY`（native・Cursor とも）／`UPDATE` / `DELETE` など DML の対象選択／`INSERT` / `UPSERT ... SELECT` の source SELECT／JOIN 後の残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表を入力とする計画。
+  - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。**回避策**: 押し下げ可能な述語へ置換する（例 `都道府県 != ''`）か、上記2の形（相対日付 leaf と残余を `AND` で結ぶ）にします。
+  - `KORDER BY`（native・Cursor とも）／`UPDATE` / `DELETE` など DML の対象選択／`INSERT` / `UPSERT ... SELECT` の source SELECT／JOIN／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表を入力とする計画。
 - 診断 reason code は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` です。
 - 関数名、`DAYS` / `WEEKS` / `MONTHS` / `YEARS`、曜日、`LAST` は hard keyword ではなく、該当する WHERE 値・引数位置だけで解釈する soft keyword です。同名フィールドは通常どおり使えます。関数呼び出しとの曖昧さを避ける場合は `` `FROM_TODAY` ``、`` `LAST` `` のようにバッククォートで退避してください。引用した単位・曜日・`LAST` は関数引数としては受理しません。
 
@@ -716,7 +718,7 @@ WHERE 担当者 != '山田'
 
 ### 相対日付関数
 
-`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**単純な SELECT（SIMPLE）で `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれた単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。**`WHERE` 全体が押し下げ可能でも `GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` で FULL_SCAN になる場合は fail-closed**（集計クエリで最も踏みやすい制約）。`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表も fail-closed です。関数一覧、引数、型・演算子、reason code、prefilter＋残余の規則、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**`WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。**v3.24.0 以降は `GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれた単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表は fail-closed です。関数一覧、引数、型・演算子、reason code、prefilter＋残余の規則、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
 
 ### 型付き比較（v3.0.0）
 
@@ -984,7 +986,7 @@ WHERE 担当者 = LOGINUSER()
 
 **相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
 
-日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。使えるのは **SIMPLE 実行で `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可）と、**相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれた単一物理アプリ SELECT**（相対日付 leaf を prefilter に押し下げ残余だけ client 評価・v3.21.0 / `SUPERSET_PREFILTER`）の2つです。**`WHERE` 全体が押し下げ可能でも `GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` で FULL_SCAN になる場合**、および `KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表はレコード取得前に fail-closed します。関数一覧・引数・型・演算子・reason code・prefilter＋残余の規則は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。使えるのは **`WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。**v3.24.0 以降は `GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**）と、**相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれた単一物理アプリ SELECT**（相対日付 leaf を prefilter に押し下げ残余だけ client 評価・v3.21.0 / `SUPERSET_PREFILTER`）の2つです。`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表はレコード取得前に fail-closed します。関数一覧・引数・型・演算子・reason code・prefilter＋残余の規則は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
 
 ```sql
 WHERE 作成日時 < FROM_TODAY(5, DAYS)

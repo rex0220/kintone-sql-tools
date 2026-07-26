@@ -60,10 +60,6 @@ test.each([
 });
 
 test.each([
-  [
-    "JOIN",
-    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id WHERE a.日付 = YESTERDAY()",
-  ],
   ["aggregate", "SELECT COUNT(*) FROM APP100 WHERE 日付 = YESTERDAY()"],
   [
     "window",
@@ -71,6 +67,27 @@ test.each([
   ],
   ["DISTINCT", "SELECT DISTINCT 日付 FROM APP100 WHERE 日付 = YESTERDAY()"],
   ["canonical ORDER", "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() ORDER BY 日付"],
+])("%s は第三 allow-form FULL_SCAN_EXACT で許可する", async (_label, sql) => {
+  const result = await plan(sql);
+  expect(result.allowed).toBe(true);
+  expect(result.nodes).toHaveLength(1);
+  expect(result.nodes[0]).toMatchObject({
+    allowed: true,
+    allowForm: "FULL_SCAN_EXACT",
+    clientWhereEvaluation: false,
+    capability: { capability: "EXACT_PUSHDOWN" },
+    prefilterPlan: {
+      residualWhere: null,
+      capability: "EXACT_PUSHDOWN",
+    },
+  });
+});
+
+test.each([
+  [
+    "JOIN",
+    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id WHERE a.日付 = YESTERDAY()",
+  ],
   [
     "local expression",
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1",
@@ -98,7 +115,7 @@ test.each([
   });
 });
 
-test("UNION は SELECT node ごとの混在正負を判定する", async () => {
+test("UNION は SELECT node ごとに SIMPLE / FULL_SCAN_EXACT を判定する", async () => {
   const positive = await plan(
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
     + "UNION ALL SELECT 日付 FROM APP200 WHERE 日付 = TOMORROW()"
@@ -111,10 +128,14 @@ test("UNION は SELECT node ごとの混在正負を判定する", async () => {
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
     + "UNION ALL SELECT COUNT(*) FROM APP200 WHERE 日付 = TOMORROW()"
   );
-  expect(mixed.allowed).toBe(false);
+  expect(mixed.allowed).toBe(true);
   expect(mixed.nodes).toHaveLength(2);
   expect(mixed.nodes[0].allowed).toBe(true);
-  expect(mixed.nodes[1].allowed).toBe(false);
+  expect(mixed.nodes[1]).toMatchObject({
+    allowed: true,
+    allowForm: "FULL_SCAN_EXACT",
+    clientWhereEvaluation: false,
+  });
 });
 
 test("WITH は inline plan を1物理 SELECTとして判定し、非inline materializationを拒否する", async () => {

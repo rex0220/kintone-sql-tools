@@ -67,14 +67,6 @@ test.each([
     "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
     + "WHERE a.日付 = YESTERDAY()",
   ],
-  ["aggregate", "SELECT COUNT(*) FROM APP100 WHERE 日付 = YESTERDAY()"],
-  [
-    "window",
-    "SELECT 日付, ROW_NUMBER() OVER (ORDER BY 日付) AS rn "
-    + "FROM APP100 WHERE 日付 = YESTERDAY()",
-  ],
-  ["DISTINCT", "SELECT DISTINCT 日付 FROM APP100 WHERE 日付 = YESTERDAY()"],
-  ["normal ORDER BY", "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() ORDER BY 日付"],
   ["unsupported field type", "SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()"],
   [
     "nonexact KORDER",
@@ -175,7 +167,7 @@ test.each([
     .toContain("YESTERDAY()");
 });
 
-test("UNION は各 SELECT node を事前計画してから取得し、混在負例では両 branch 0", async () => {
+test("UNION は SIMPLE / FULL_SCAN_EXACT の各 SELECT node を事前計画してから取得する", async () => {
   const positive = makeClient();
   await expect(execute(
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
@@ -186,13 +178,15 @@ test("UNION は各 SELECT node を事前計画してから取得し、混在負�
   expect(positive.calls.records.mock.calls[0][0].query).toContain("YESTERDAY()");
   expect(positive.calls.records.mock.calls[1][0].query).toContain("TOMORROW()");
 
-  const negative = makeClient();
+  const mixed = makeClient();
   await expect(execute(
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
     + "UNION ALL SELECT COUNT(*) FROM APP200 WHERE 日付 = TOMORROW()",
-    negative.client
-  )).rejects.toThrow(/TOMORROW: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
-  expectNoExecutionApi(negative.calls);
+    mixed.client
+  )).resolves.toMatchObject({ type: "SELECT" });
+  expect(mixed.calls.records).toHaveBeenCalledTimes(2);
+  expect(mixed.calls.records.mock.calls[0][0].query).toContain("YESTERDAY()");
+  expect(mixed.calls.records.mock.calls[1][0].query).toContain("TOMORROW()");
 });
 
 test("WITH inline は body/main の各 WHERE を1つの物理 REST queryへ統合する", async () => {

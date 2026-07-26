@@ -14,6 +14,11 @@ import {
   isRelativeDateFunctionName,
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../relativeDateFunction";
+import {
+  buildRelativeDateFullScanExactPlan,
+  relativeDateFunctionOccurrencesInWhere,
+  type RelativeDateFullScanExactPlan,
+} from "./relativeDateFullScanExactPlan";
 import type {
   RelativeDatePrefilterDecomposition,
   RelativeDatePrefilterPlan,
@@ -42,6 +47,8 @@ export interface RelativeDatePlanNode {
   readonly restQuery?: string;
   readonly prefilterPlan?: RelativeDatePrefilterPlan;
   readonly phase2PrefilterEligible?: boolean;
+  readonly fullScanExactPlan?: RelativeDateFullScanExactPlan;
+  readonly allowForm?: "FULL_SCAN_EXACT";
   readonly clientWhereEvaluation: boolean;
   readonly allowed: boolean;
 }
@@ -74,6 +81,8 @@ interface WalkCandidate {
   readonly functionNames: readonly string[];
   readonly path: string;
   readonly allowPhase2Prefilter?: boolean;
+  readonly allowFullScanExact: boolean;
+  readonly relativeFunctionOccurrences: readonly string[];
 }
 
 function relativeDateFunctionNamesInNode(node: unknown, stopAtNestedSelect: boolean): string[] {
@@ -135,7 +144,8 @@ function collectSelect(
   path: string,
   candidates: WalkCandidate[],
   forceForbidden: boolean,
-  allowPhase2 = true
+  allowPhase2 = true,
+  allowFullScanExact = true
 ): void {
   const functionNames = relativeDateFunctionNamesInWhere(select.where);
   if (functionNames.length > 0) {
@@ -146,6 +156,8 @@ function collectSelect(
       functionNames,
       path,
       allowPhase2Prefilter: allowPhase2,
+      allowFullScanExact,
+      relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(select.where!),
     });
   }
   nestedSelects(select, select).forEach((nested, index) =>
@@ -154,7 +166,8 @@ function collectSelect(
       `${path}.select-source[${index}]`,
       candidates,
       forceForbidden,
-      allowPhase2
+      allowPhase2,
+      allowFullScanExact
     )
   );
 }
@@ -163,11 +176,15 @@ function collectUnion(
   union: UnionStatement,
   path: string,
   candidates: WalkCandidate[],
-  forceForbidden: boolean
+  forceForbidden: boolean,
+  allowFullScanExact = true
 ): void {
-  if (union.left.type === "UNION") collectUnion(union.left, `${path}.left`, candidates, forceForbidden);
-  else collectSelect(union.left, `${path}.left`, candidates, forceForbidden);
-  collectSelect(union.right, `${path}.right`, candidates, forceForbidden);
+  if (union.left.type === "UNION") {
+    collectUnion(union.left, `${path}.left`, candidates, forceForbidden, allowFullScanExact);
+  } else {
+    collectSelect(union.left, `${path}.left`, candidates, forceForbidden, true, allowFullScanExact);
+  }
+  collectSelect(union.right, `${path}.right`, candidates, forceForbidden, true, allowFullScanExact);
 }
 
 function collectWith(
@@ -177,20 +194,20 @@ function collectWith(
   inheritedForbidden: boolean
 ): void {
   if (!inheritedForbidden && canInlineSingleCte(statement)) {
-    collectSelect(buildInlinedQuery(statement), `${path}.inlined`, candidates, false);
+    collectSelect(buildInlinedQuery(statement), `${path}.inlined`, candidates, false, true, false);
     return;
   }
   statement.ctes.forEach((cte, index) => {
     if (cte.query.type === "SELECT") {
-      collectSelect(cte.query, `${path}.cte[${index}]`, candidates, true);
+      collectSelect(cte.query, `${path}.cte[${index}]`, candidates, true, true, false);
     } else if (cte.query.type === "UNION") {
-      collectUnion(cte.query, `${path}.cte[${index}]`, candidates, true);
+      collectUnion(cte.query, `${path}.cte[${index}]`, candidates, true, false);
     }
   });
   if (statement.query.type === "SELECT") {
-    collectSelect(statement.query, `${path}.main`, candidates, true);
+    collectSelect(statement.query, `${path}.main`, candidates, true, true, false);
   } else {
-    collectUnion(statement.query, `${path}.main`, candidates, true);
+    collectUnion(statement.query, `${path}.main`, candidates, true, false);
   }
 }
 
@@ -212,8 +229,8 @@ function collectStatement(
       return;
     case "CREATE_TEMP_TABLE":
       if (statement.query.type === "WITH") collectWith(statement.query, `${path}.query`, candidates, true);
-      else if (statement.query.type === "UNION") collectUnion(statement.query, `${path}.query`, candidates, true);
-      else collectSelect(statement.query, `${path}.query`, candidates, true);
+      else if (statement.query.type === "UNION") collectUnion(statement.query, `${path}.query`, candidates, true, false);
+      else collectSelect(statement.query, `${path}.query`, candidates, true, true, false);
       return;
     case "EXPLAIN":
       collectStatement(statement.query, `${path}.query`, candidates, forceForbidden);
@@ -228,10 +245,12 @@ function collectStatement(
           where: statement.where,
           functionNames,
           path,
+          allowFullScanExact: false,
+          relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(statement.where!),
         });
       }
       nestedSelects(statement, statement).forEach((select, index) =>
-        collectSelect(select, `${path}.select-source[${index}]`, candidates, true)
+        collectSelect(select, `${path}.select-source[${index}]`, candidates, true, true, false)
       );
       return;
     }
@@ -249,6 +268,8 @@ function collectStatement(
           where: statement.where,
           functionNames,
           path,
+          allowFullScanExact: false,
+          relativeFunctionOccurrences: relativeDateFunctionOccurrencesInWhere(statement.where!),
         });
       }
       if (statement.type === "UPDATE" && statement.applyBlocks?.length) {
@@ -260,6 +281,8 @@ function collectStatement(
             where: null,
             functionNames: applyFunctions,
             path: `${path}.apply`,
+            allowFullScanExact: false,
+            relativeFunctionOccurrences: [],
           });
         }
       }
@@ -269,6 +292,7 @@ function collectStatement(
           `${path}.select-source[${index}]`,
           candidates,
           forceForbidden,
+          false,
           false
         )
       );
@@ -281,6 +305,7 @@ function collectStatement(
           `${path}.select-source[${index}]`,
           candidates,
           forceForbidden,
+          false,
           false
         )
       );
@@ -415,6 +440,21 @@ export async function buildRelativeDatePushdownPlan(
           allowed = true;
         }
       }
+      let fullScanExactPlan: RelativeDateFullScanExactPlan | undefined;
+      if (!allowed && capability.capability === "EXACT_PUSHDOWN") {
+        fullScanExactPlan = buildRelativeDateFullScanExactPlan({
+          select,
+          selectMode,
+          capability,
+          context: { allowFullScanExact: candidate.allowFullScanExact },
+          serializedWholeWhere: restQuery || null,
+          relativeFunctionNames: candidate.relativeFunctionOccurrences,
+        }) ?? undefined;
+        if (fullScanExactPlan) {
+          prefilterPlan = fullScanExactPlan.prefilterPlan;
+          allowed = true;
+        }
+      }
       const node: RelativeDatePlanNode = {
         kind: candidate.kind,
         source: candidate.source,
@@ -424,6 +464,9 @@ export async function buildRelativeDatePushdownPlan(
         capability,
         restQuery,
         ...(prefilterPlan ? { prefilterPlan, phase2PrefilterEligible } : {}),
+        ...(fullScanExactPlan
+          ? { fullScanExactPlan, allowForm: fullScanExactPlan.allowForm }
+          : {}),
         clientWhereEvaluation: !allowed,
         allowed,
       };
