@@ -2518,23 +2518,38 @@ async function buildRuntimePlainGroupByPlan(
   );
   const groupBy = stmt.groupBy;
   const plan = planPlainGroupByResolution(groupBy, stmt.columns, schemas);
-  assertRuntimePlainGroupByPlan(groupBy, plan);
+  assertRuntimePlainGroupByPlan(stmt, groupBy, plan);
   return plan;
 }
 
 function assertRuntimePlainGroupByPlan(
+  stmt: SelectStatement,
   groupBy: readonly GroupByKey[],
   plan: PlainGroupByResolutionPlan
 ): void {
+  const physicalAppIds = [
+    stmt.from,
+    ...stmt.joins.map((join) => join.table),
+  ].flatMap((source) => source.cteName === null ? [source.appId] : []);
+  const uniquePhysicalAppIds = [...new Set(physicalAppIds)];
+  const primaryPhysicalAppId = uniquePhysicalAppIds.length === 1
+    ? uniquePhysicalAppIds[0]
+    : stmt.from.cteName === null
+      ? stmt.from.appId
+      : null;
+
   plan.items.forEach((item, index) => {
     if (
       item.kind === "EXPRESSION"
       || item.kind === "PHYSICAL"
       || item.kind === "ALIAS_SAFE"
-      || item.kind === "UNKNOWN"
     ) return;
     const key = groupBy[index];
     const name = key?.type === "FIELD_NAME" ? key.name : "(expression)";
+    if (item.kind === "UNKNOWN") {
+      const appSuffix = primaryPhysicalAppId === null ? "" : ` (APP${primaryPhysicalAppId})`;
+      throw new Error(`ArgumentError: unknown field code(s): ${item.name}${appSuffix}`);
+    }
     if (item.kind === "ALIAS_REJECT") {
       if (item.reason === "DUPLICATE") {
         throw new Error(
@@ -2975,7 +2990,7 @@ async function validateSelectFieldCodes(
   } else {
     const tables = [stmt.from, ...stmt.joins.map((j) => j.table)].filter((t) => t.cteName === null);
     for (const table of tables) {
-      // B71 の plan は fetch 専用。UNKNOWN は従来どおり raw AST から検証する。
+      // B71 の plan で解決済みの GROUP BY field を含む、取得対象列を検証する。
       addFields(table.appId, selectToFetchAllFields(stmt, table));
     }
   }
