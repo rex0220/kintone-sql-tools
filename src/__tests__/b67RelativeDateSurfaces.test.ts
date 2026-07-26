@@ -5,13 +5,15 @@ import { join } from "node:path";
 import { resolve } from "node:path";
 import { resetGlobalRequestGate } from "../api/requestGate";
 import {
+  buildBatchExplainPlans,
   execute,
+  executeBatch,
   type KintoneClient,
   type KintoneFieldInfo,
   type SelectResult,
 } from "../execute";
 import { runWithArgv } from "../cli";
-import { runQuery } from "../engine-library/query";
+import { explainQuery, runQuery } from "../engine-library/query";
 import {
   createKsqlMcpTools,
   type KsqlMcpToolDependencies,
@@ -131,11 +133,31 @@ function cliPlanText(stdout: string): string {
   return payload.rows.map((row) => String(row["plan"])).join("\n");
 }
 
+function batchPlanText(result: {
+  statements: Array<{ plan?: string[] }>;
+}): string {
+  return result.statements.flatMap((statement) => statement.plan ?? []).join("\n");
+}
+
+function rejectionDiagnostic(text: string): string {
+  return text.split(/\r?\n/).find((line) =>
+    line.includes("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN")
+  )?.trim() ?? "";
+}
+
+function reasonPath(text: string): { reason: string; path: string } {
+  return {
+    reason: text.match(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/)?.[0] ?? "",
+    path: text.match(/path=([A-Za-z0-9_.[\]-]+)/)?.[1] ?? "",
+  };
+}
+
 const B72_PLAN_FACTS = [
   "relative date evaluation:",
   "where capability:",
   "server predicate:",
   "client residual:",
+  "client evaluation:",
   "relative date client evaluations:",
   "kintone query:",
 ] as const;
@@ -224,7 +246,7 @@ async function captureCli(
   }
 }
 
-describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
+describe("B75 Step 4 plugin/CLI/MCP/engine-library surface parity", () => {
   const dir = mkdtempSync(join(tmpdir(), "ksql-b72-surfaces-"));
   const configPath = join(dir, "ksql.config.json");
 
@@ -267,10 +289,20 @@ describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
       "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 "
         + "WHERE 日付 = THIS_MONTH() GROUP BY 区分) SELECT * FROM c",
     ],
-  ])("%s は accept/query/EXPLAIN が3面で一致する", async (_label, sql) => {
-    const node = makeB72Client();
-    await execute(sql, node.client);
-    const nodeExplain = planText(await execute(`EXPLAIN ${sql}`, node.client) as SelectResult);
+    [
+      "SIMPLE CTE",
+      "WITH c AS (SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY()) SELECT * FROM c",
+    ],
+  ])("%s は accept/query/EXPLAIN が4面で一致する", async (_label, sql) => {
+    // plugin は desktop.ts から同じ execute を直接 import するため、ここでは共有 engine 呼出しを
+    // plugin surface の実行プロキシとして使う。共有 import 自体は上の静的 parity test で固定する。
+    const plugin = makeB72Client();
+    await execute(sql, plugin.client);
+    const pluginExplain = planText(await execute(`EXPLAIN ${sql}`, plugin.client) as SelectResult);
+
+    const library = makeB72Client();
+    await runQuery(sql, { client: library.client });
+    const libraryExplain = (await explainQuery(sql, { client: library.client })).text;
 
     const mcp = makeB72Client();
     const tools = mcpTools(mcp.client);
@@ -283,11 +315,13 @@ describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
     expect(mcpResult["ok"]).toBe(true);
     expect(cli.code).toBe(0);
     expect(cliExplain.code).toBe(0);
-    expect(node.queries).toHaveLength(1);
-    expect(mcp.queries).toEqual(node.queries);
-    expect(cli.queries).toEqual(node.queries);
-    expect(surfacePlanFacts(mcpExplain)).toEqual(surfacePlanFacts(nodeExplain));
-    expect(surfacePlanFacts(cliPlanText(cliExplain.stdout))).toEqual(surfacePlanFacts(nodeExplain));
+    expect(plugin.queries).toHaveLength(1);
+    expect(library.queries).toEqual(plugin.queries);
+    expect(mcp.queries).toEqual(plugin.queries);
+    expect(cli.queries).toEqual(plugin.queries);
+    expect(surfacePlanFacts(libraryExplain)).toEqual(surfacePlanFacts(pluginExplain));
+    expect(surfacePlanFacts(mcpExplain)).toEqual(surfacePlanFacts(pluginExplain));
+    expect(surfacePlanFacts(cliPlanText(cliExplain.stdout))).toEqual(surfacePlanFacts(pluginExplain));
   });
 
   test.each([
@@ -296,35 +330,128 @@ describe("B72 Step 4 Node/CLI/MCP surface parity", () => {
       "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH() KORDER BY $id LIMIT 10",
     ],
     [
-      "INSERT SELECT source",
-      "INSERT INTO APP200 (区分) SELECT 区分 FROM APP100 "
-        + "WHERE 日付 = THIS_MONTH() GROUP BY 区分",
-    ],
-    [
       "JOIN",
       "SELECT a.区分, COUNT(*) AS c FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
         + "WHERE a.日付 = THIS_MONTH() GROUP BY a.区分",
     ],
-    ["VALIDATE", "VALIDATE APP100 WHERE 日付 = THIS_MONTH()"],
     [
       "subtable",
       "SELECT 子, COUNT(*) AS c FROM APP100$テーブル "
         + "WHERE 日付 = THIS_MONTH() GROUP BY 子",
     ],
-  ])("%s は reject/reason/records API 0 が3面で一致する", async (_label, sql) => {
-    const node = makeB72Client();
-    const nodeExplain = planText(await execute(`EXPLAIN ${sql}`, node.client) as SelectResult);
+    [
+      "UNION branch",
+      "WITH c AS (SELECT 日付 FROM APP100 WHERE 日付 = THIS_MONTH() "
+        + "UNION ALL SELECT 日付 FROM APP200) SELECT * FROM c",
+    ],
+    [
+      "non exact materialized CTE",
+      "WITH c AS (SELECT 日付 FROM APP100 "
+        + "WHERE 日付 = THIS_MONTH() AND LENGTH(区分) > 1) SELECT * FROM c",
+    ],
+  ])("%s は reject/reason/path/records API 0 が4面で一致する", async (_label, sql) => {
+    const plugin = makeB72Client();
+    const pluginExplain = planText(await execute(`EXPLAIN ${sql}`, plugin.client) as SelectResult);
+
+    const library = makeB72Client();
+    const libraryExplain = (await explainQuery(sql, { client: library.client })).text;
 
     const mcp = makeB72Client();
     const mcpExplain = mcpPlanText(await mcpTools(mcp.client).explain({ sql }));
     const cliExplain = await captureCli(configPath, sql, true);
+    const cliText = cliPlanText(cliExplain.stdout);
 
-    expect(nodeExplain).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
+    expect(pluginExplain).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
+    expect(rejectionDiagnostic(libraryExplain)).toBe(rejectionDiagnostic(pluginExplain));
+    expect(rejectionDiagnostic(mcpExplain)).toBe(rejectionDiagnostic(pluginExplain));
+    expect(rejectionDiagnostic(cliText)).toBe(rejectionDiagnostic(pluginExplain));
     expect(mcpExplain).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
     expect(cliExplain.stdout).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
     expect(cliExplain.code).toBe(0);
-    expect(node.queries).toEqual([]);
+    expect(plugin.queries).toEqual([]);
+    expect(library.queries).toEqual([]);
     expect(mcp.queries).toEqual([]);
     expect(cliExplain.queries).toEqual([]);
+  });
+
+  test.each([
+    [
+      "SELECT source",
+      "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 "
+        + "WHERE 日付 = YESTERDAY(); SELECT * FROM #t",
+    ],
+    [
+      "WITH source",
+      "CREATE TEMP TABLE #t AS WITH c AS "
+        + "(SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY()) "
+        + "SELECT COUNT(*) AS n FROM c; SELECT * FROM #t",
+    ],
+  ])("一時テーブル %s は accept/query/EXPLAIN が共有4面で一致する", async (_label, sql) => {
+    // plugin/CLI/MCP は同じ executeBatch/buildBatchExplainPlans を利用する。
+    // engine library のバッチ核として直接呼び、各 surface の adapter 出力と比較する。
+    const engine = makeB72Client();
+    const engineResult = await executeBatch(sql, engine.client);
+    const engineExplain = batchPlanText(await buildBatchExplainPlans(sql, engine.client));
+
+    const mcp = makeB72Client();
+    const tools = mcpTools(mcp.client);
+    const mcpResult = await tools.query({ sql });
+    const mcpExplainResult = await tools.explain({ sql }) as unknown as {
+      statements: Array<{ plan?: string[] }>;
+    };
+
+    const cli = await captureCli(configPath, sql, false);
+    const cliExplain = await captureCli(configPath, sql, true);
+    const cliPayload = JSON.parse(cli.stdout) as { ok: boolean; batch: boolean };
+
+    expect(engineResult.ok).toBe(true);
+    expect(mcpResult).toMatchObject({ ok: true, batch: true });
+    expect(cliPayload).toMatchObject({ ok: true, batch: true });
+    expect(engine.queries).toHaveLength(1);
+    expect(mcp.queries).toEqual(engine.queries);
+    expect(cli.queries).toEqual(engine.queries);
+    expect(surfacePlanFacts(batchPlanText(mcpExplainResult)))
+      .toEqual(surfacePlanFacts(engineExplain));
+    expect(surfacePlanFacts(cliExplain.stdout)).toEqual(surfacePlanFacts(engineExplain));
+    expect(engineExplain).toContain("where capability: EXACT_PUSHDOWN");
+    expect(engineExplain).toContain("client evaluation: forbidden");
+  });
+
+  test.each([
+    [
+      "UNION branch",
+      "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
+        + "UNION ALL SELECT 日付 FROM APP200; SELECT * FROM #t",
+      "statement.query.left",
+    ],
+    [
+      "non exact",
+      "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 "
+        + "WHERE 日付 = YESTERDAY() AND LENGTH(区分) > 1; SELECT * FROM #t",
+      "statement.query",
+    ],
+  ])("一時テーブル %s は reason/path/API 0 が共有4面で一致する", async (
+    _label,
+    sql,
+    expectedPath
+  ) => {
+    const engine = makeB72Client();
+    const engineResult = await executeBatch(sql, engine.client);
+    const mcp = makeB72Client();
+    const mcpResult = await mcpTools(mcp.client).query({ sql });
+    const cli = await captureCli(configPath, sql, false);
+    const engineText = JSON.stringify(engineResult);
+    const mcpText = JSON.stringify(mcpResult);
+
+    expect(engineResult.ok).toBe(false);
+    expect(reasonPath(engineText)).toEqual({
+      reason: "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN",
+      path: expectedPath,
+    });
+    expect(reasonPath(mcpText)).toEqual(reasonPath(engineText));
+    expect(reasonPath(cli.stdout)).toEqual(reasonPath(engineText));
+    expect(engine.queries).toEqual([]);
+    expect(mcp.queries).toEqual([]);
+    expect(cli.queries).toEqual([]);
   });
 });

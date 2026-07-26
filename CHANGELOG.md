@@ -2,6 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased
+
+### 機能追加（B75 相対日付を CTE・一時テーブルでも使えるように）
+
+- **その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合、実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `... AS WITH ...` の source、単一 CTE のインライン展開でも相対日付関数を使えるようにした**。集計・SIMPLE の両経路で相対日付はサーバーへそのまま渡し、client 側では評価しない。
+- JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合、および `WHERE` 全体が exact にならない形は引き続き取得前に fail-closed する（トップレベルの `UNION` は従来どおり枝ごとに判定する）。
+- DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は従来どおり whole-WHERE exact のみ可で、prefilter＋client 残余は使えない。
+- `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1` のような prefilter＋client 残余は、トップレベルの単一物理アプリ SELECT では使える一方、CTE 本体・`WITH` の最終 SELECT・一時テーブル source では引き続き使えない。該当する場合は CTE／一時テーブルへ切り出さずトップレベルで実行する。
+- 一時テーブルの実体化上限は通常の `maxRecords` ではなく専用の `tempTableMaxRows` を使い、超過時は `onLimit` の設定にかかわらず、日付リテラル／相対日付とも同じエラーになる。
+
 ## v3.24.0（2026-07-26）
 
 ### 機能追加（B72 相対日付を集計クエリでも使えるように）
