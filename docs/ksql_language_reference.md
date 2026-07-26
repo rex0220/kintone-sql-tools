@@ -659,11 +659,11 @@ SELECT * FROM APP100
 WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 ```
 
-- 対象はトップレベルの物理 `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
+- 対象は単一の物理アプリに由来する `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
 - 相対日付関数を含む条件は、レコード取得前に kintone REST query への押し下げ計画が確定できる場合だけ実行できます。相対日付関数そのものを client の時計で評価することはありません（client fallback なし・相対日付の client 評価は常に 0 回）。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
 - **相対日付関数を使える形は次の2つだけです**。
 
-  1. **`WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等にも拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。**`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません。`ksql_explain` は `relative date evaluation: kintone server whole-WHERE exact`・`client residual: (none)`・`relative date client evaluations: 0` を表示）。
+  1. **その SELECT の `WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等、B75 で CTE・一時テーブル source に拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。トップレベル SELECT に加え、**実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `CREATE TEMP TABLE ... AS WITH ...` の source、単一 CTE のインライン展開**でも使用できます。`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても構いません（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません。`ksql_explain` は `relative date evaluation: kintone server whole-WHERE exact`・`client residual: (none)`・`relative date client evaluations: 0` を表示）。
 
      ```sql
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH()
@@ -671,6 +671,13 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
      SELECT 区分, COUNT(*) AS 件数 FROM APP100
      WHERE 日付 = THIS_MONTH() GROUP BY 区分                                  -- 集計クエリでも可（v3.24.0）
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH() ORDER BY 日付             -- 通常の ORDER BY も可（v3.24.0）
+     WITH 月別 AS (
+       SELECT 区分, COUNT(*) AS 件数 FROM APP100
+       WHERE 日付 = THIS_MONTH() GROUP BY 区分
+     )
+     SELECT * FROM 月別                                                        -- 実体化 CTE 本体でも可
+     CREATE TEMP TABLE #今月 AS
+     SELECT * FROM APP100 WHERE 日付 = THIS_MONTH()                            -- 一時テーブル source でも可
      ```
 
   2. **prefilter ＋残余（v3.21.0）**: 単一の物理アプリを読む SELECT で、相対日付の exact leaf が「相対日付を含まない残余」（例 `LENGTH(都道府県) > 1`・`LIKE`）と `AND` で結ばれている場合。相対日付 leaf だけを kintone REST query の prefilter として押し下げ、取得後は残余だけを client 評価します（`ksql_explain` は `where capability: SUPERSET_PREFILTER`・`server prefilter:`・`client residual:`・`relative date client evaluations: 0` を表示）。相対日付の値・比較は依然すべて kintone サーバーが決定します。`BETWEEN` 展開の各境界や複数の相対日付 leaf、`KLIKE`・押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載ります。この形は `GROUP BY` などで FULL_SCAN になっていても使用できます。
@@ -678,7 +685,9 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 - 次の計画は、相対日付を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
 
   - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。**回避策**: 押し下げ可能な述語へ置換する（例 `都道府県 != ''`）か、上記2の形（相対日付 leaf と残余を `AND` で結ぶ）にします。
-  - `KORDER BY`（native・Cursor とも）／`UPDATE` / `DELETE` など DML の対象選択／`INSERT` / `UPSERT ... SELECT` の source SELECT／JOIN／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表を入力とする計画。
+  - `KORDER BY`（native・Cursor とも）／JOIN／`VALIDATE`／サブテーブル／入れ子 SELECT（スカラーサブクエリ等）／派生表を入力とする計画。**実体化 CTE 本体・`WITH` の最終クエリ・一時テーブル source が `UNION` の場合**（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば使用できます）。**DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、上記2の prefilter＋残余は使用できません。
+- **CTE・一時テーブルに残る非対称**: 押し下げ不能な述語が `AND` で混ざる形（例 `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1`）は、トップレベルの単一物理アプリ SELECT では上記2の prefilter＋残余として使用できますが、**CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使用できません**。これらの実体化経路では、その SELECT の `WHERE` 全体が exact である必要があります。該当する場合は CTE や一時テーブルへ切り出さず、トップレベル SELECT として書いてください。
+- 一時テーブルの実体化行数には通常の `maxRecords` とは別に専用の `tempTableMaxRows`（既定 10,000）が適用されます。超過時は `onLimit` の設定にかかわらず常にエラーで、日付リテラルと相対日付で扱いは同一です。
 - 診断 reason code は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` です。
 - 関数名、`DAYS` / `WEEKS` / `MONTHS` / `YEARS`、曜日、`LAST` は hard keyword ではなく、該当する WHERE 値・引数位置だけで解釈する soft keyword です。同名フィールドは通常どおり使えます。関数呼び出しとの曖昧さを避ける場合は `` `FROM_TODAY` ``、`` `LAST` `` のようにバッククォートで退避してください。引用した単位・曜日・`LAST` は関数引数としては受理しません。
 
@@ -718,7 +727,7 @@ WHERE 担当者 != '山田'
 
 ### 相対日付関数
 
-`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**`WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。**v3.24.0 以降は `GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれた単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表は fail-closed です。関数一覧、引数、型・演算子、reason code、prefilter＋残余の規則、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。後者の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`KORDER BY`・JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**は fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。 なお **DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）では、その `WHERE` 全体が exact な形だけが使え、prefilter＋client 残余の形は使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
 
 ### 型付き比較（v3.0.0）
 
@@ -986,7 +995,7 @@ WHERE 担当者 = LOGINUSER()
 
 **相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
 
-日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。使えるのは **`WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。**v3.24.0 以降は `GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても使用できます**）と、**相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれた単一物理アプリ SELECT**（相対日付 leaf を prefilter に押し下げ残余だけ client 評価・v3.21.0 / `SUPERSET_PREFILTER`）の2つです。`KORDER BY`・DML の対象選択と `INSERT` / `UPSERT ... SELECT` の source・JOIN・`VALIDATE`・派生表はレコード取得前に fail-closed します。関数一覧・引数・型・演算子・reason code・prefilter＋残余の規則は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。使えるのは **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf を prefilter に押し下げ残余だけ client 評価・v3.21.0 / `SUPERSET_PREFILTER`）の2つです。後者は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`KORDER BY`・JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**はレコード取得前に fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。 なお **DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）では、その `WHERE` 全体が exact な形だけが使え、prefilter＋client 残余の形は使えません。** 関数一覧・引数・型・演算子・reason code・残る非対称は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
 
 ```sql
 WHERE 作成日時 < FROM_TODAY(5, DAYS)
@@ -1681,6 +1690,22 @@ SELECT * FROM 対象 WHERE 金額 > 1000
 - CTE が複数ある
 - CTE 本体に GROUP BY / 集計関数がある
 - 最終クエリで CTE を JOIN している
+
+### CTE と相対日付
+
+実体化 CTE の本体、`WITH` の最終 SELECT、単一 CTE のインライン展開では、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または `WHERE` 全体が exact にならない形では使用できません。
+
+```sql
+WITH 月別 AS (
+  SELECT 区分, COUNT(*) AS 件数
+  FROM APP100
+  WHERE 日付 = THIS_MONTH()
+  GROUP BY 区分
+)
+SELECT * FROM 月別
+```
+
+`WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1` のような prefilter＋client 残余の形はトップレベル SELECT では使えますが、CTE 本体や `WITH` の最終 SELECTでは使えません。その場合は CTE に切り出さずトップレベルで書きます。
 
 ### CTE 内での SHOW APPS / DESCRIBE
 
@@ -2850,6 +2875,8 @@ SELECT 部門 FROM APP200;
 
 `CREATE TEMP TABLE #名前 AS SELECT ...` で SELECT 結果をバッチ内に実体化し、後続の文から `FROM` / `JOIN` / サブクエリで参照できます。
 
+source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または押し下げ不能な述語が混ざる形では使用できません。後者は一時テーブルへ切り出さずトップレベル SELECT として書きます。
+
 ```sql
 -- 相関サブクエリの回避例
 CREATE TEMP TABLE #latest AS
@@ -2869,7 +2896,7 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 | 名前 | `#` + 識別子（例: `#temp` / `#集計`）。`#` は一時テーブル名の先頭のみで有効。エイリアスには使用不可 |
 | 寿命 | **バッチ内のみ**。呼び出し終了で自動破棄（呼び出しをまたぐ参照は不可） |
 | 破棄 | `DROP TEMP TABLE #名前`（主にメモリの早期解放用。DROP 後の同名再 CREATE は可） |
-| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。行数上限は `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグインは「⚙ オプション → 取得」の「一時テーブル上限(行)」。空欄 = 既定）。変更しても超過時は truncate されず常にエラー |
+| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。通常の取得上限 `maxRecords` ではなく専用の `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグインは「⚙ オプション → 取得」の「一時テーブル上限(行)」。空欄 = 既定）。変更しても超過時は truncate されず常にエラーで、日付リテラルと相対日付で扱いは同一 |
 | DML | 一時テーブルへの INSERT / UPDATE / DELETE は非対応 |
 | 実行 | 参照は常にインメモリ FULL_SCAN（kintone クエリへの WHERE プッシュダウンは効かない） |
 

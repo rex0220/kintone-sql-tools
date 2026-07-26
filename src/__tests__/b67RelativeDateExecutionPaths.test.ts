@@ -2,14 +2,26 @@ import {
   execute,
   executeBatch,
   type KintoneClient,
+  type SelectResult,
 } from "../execute";
+import type { KintoneRecord } from "../converter/dmlToKintone";
 import * as evalWhereModule from "../engine/evalWhere";
 
 function makeClient() {
   const cursorGet = jest.fn(async () => ({ records: [], next: false }));
   const cursorDelete = jest.fn(async () => undefined);
+  const source = {
+    $id: { value: "1" },
+    日付: { value: "2026-07-25" },
+  } as KintoneRecord;
   const calls = {
-    records: jest.fn(async (_params: Parameters<KintoneClient["getRecords"]>[0]) => ({ records: [] })),
+    records: jest.fn(async (params: Parameters<KintoneClient["getRecords"]>[0]) => ({
+      records: [Object.fromEntries(
+        (params.fields ?? []).flatMap((code) =>
+          source[code] === undefined ? [] : [[code, source[code]]]
+        )
+      ) as KintoneRecord],
+    })),
     cursorOpen: jest.fn(async (_params: Parameters<KintoneClient["openCursor"]>[0]) => ({
       totalCount: 0,
       nextPage: cursorGet,
@@ -73,10 +85,6 @@ test.each([
     "SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1 "
     + "KORDER BY $id LIMIT 10",
   ],
-  [
-    "materialized CTE",
-    "WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT d FROM c",
-  ],
   ["existing VALIDATE", "VALIDATE APP100 WHERE 日付 = YESTERDAY()"],
   ["subtable UPDATE", "UPDATE APP100$テーブル SET 子 = 'x' WHERE 日付 = YESTERDAY()"],
   ["subtable DELETE", "DELETE FROM APP100$テーブル WHERE 日付 = YESTERDAY()"],
@@ -103,10 +111,11 @@ test.each([
   expectNoExecutionApi(calls);
 });
 
-test("CREATE TEMP TABLE materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {
+test("CREATE TEMP TABLE UNION materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {
   const { client, calls } = makeClient();
   const result = await executeBatch(
-    "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY(); "
+    "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
+    + "UNION ALL SELECT 日付 FROM APP200; "
     + "SELECT * FROM #t",
     client,
     { confirm: calls.confirm }
@@ -144,6 +153,27 @@ test.each([
   expect(calls.records).toHaveBeenCalled();
   const query = calls.records.mock.calls.map(([params]) => params.query).join("\n");
   expect(query).toMatch(/YESTERDAY\(\)|FROM_TODAY\(-7, DAYS\)/);
+  expect(calls.post).not.toHaveBeenCalled();
+  expect(calls.put).not.toHaveBeenCalled();
+  expect(calls.delete).not.toHaveBeenCalled();
+});
+
+test("materialized SIMPLE CTE は requested fieldsだけで実行し client評価なしの正しい結果を返す", async () => {
+  const { client, calls } = makeClient();
+  const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+  const result = await execute(
+    "WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT d FROM c",
+    client
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ d: "2026-07-25" }]);
+  expect(evaluator).not.toHaveBeenCalled();
+  expect(calls.records).toHaveBeenCalledTimes(1);
+  expect(calls.records.mock.calls[0][0]).toMatchObject({
+    fields: ["日付", "$id"],
+    query: "日付 = YESTERDAY() order by $id asc limit 500 offset 0",
+  });
+  expect(calls.cursorOpen).not.toHaveBeenCalled();
   expect(calls.post).not.toHaveBeenCalled();
   expect(calls.put).not.toHaveBeenCalled();
   expect(calls.delete).not.toHaveBeenCalled();

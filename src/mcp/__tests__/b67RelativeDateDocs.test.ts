@@ -59,4 +59,30 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
     expect(functionSection).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
     expect(functionSection).toContain("client fallback");
   });
+
+  test("B75 CTE/temp exact-pushdown contract is embedded into ksql_docs without a second source", () => {
+    const functionSection = resolveKsqlDocsSection(
+      "language-reference/05-string-number-functions"
+    );
+    const whereSection = resolveKsqlDocsSection("language-reference/06-where");
+    const cteSection = resolveKsqlDocsSection("language-reference/13-with-cte");
+    const batchSection = resolveKsqlDocsSection("language-reference/25-batch-temp-tables");
+
+    for (const text of [functionSection, whereSection]) {
+      expect(text).toContain("実体化 CTE");
+      expect(text).toContain("一時テーブル source");
+      expect(text).toContain("WHERE` 全体");
+      expect(text).toContain("UNION");
+      expect(text).toContain("入れ子 SELECT");
+    }
+    expect(functionSection).toContain("CTE・一時テーブルに残る非対称");
+    expect(functionSection).toContain("トップレベル SELECT として書いてください");
+    expect(functionSection).toContain("tempTableMaxRows");
+    expect(cteSection).toContain("### CTE と相対日付");
+    expect(batchSection).toContain("日付リテラルと相対日付で扱いは同一");
+
+    for (const text of [languageSource, functionSection, whereSection]) {
+      expect(text).not.toContain("一時テーブル・実体化 CTE・派生表");
+    }
+  });
 });

@@ -415,22 +415,36 @@ describe("B72 Step 2 must-stay-rejected", () => {
     expectNoExecutionApi(calls);
   });
 
-  test("materialized CTE は records/cursor/mutation/confirm 0", async () => {
+  test("materialized CTE は whole WHERE を押し下げ client 相対日付評価0で正しく集計する", async () => {
     const { client, calls } = makeClient();
-    await expect(execute(
-      "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 "
-      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分) SELECT * FROM c",
-      client,
-      { confirm: calls.confirm }
-    )).rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
-    expectNoExecutionApi(calls);
+    const sql = "WITH c AS (SELECT 区分, COUNT(*) AS c FROM APP100 "
+      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分) SELECT * FROM c";
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+    const result = await execute(sql, client, { confirm: calls.confirm }) as SelectResult;
+
+    expect(result.rows).toEqual([{ 区分: "A", c: "2" }, { 区分: "B", c: "1" }]);
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(calls.records).toHaveBeenCalledTimes(1);
+    expect(firstRequest(calls)).toMatchObject({
+      fields: ["区分", "日付", "$id"],
+      query: "日付 = THIS_MONTH() order by $id asc limit 500 offset 0",
+    });
+    const explained = planText(await execute(`EXPLAIN ${sql}`, client) as SelectResult);
+    expect(explained).toContain("client residual: (none)");
+    expect(explained).toContain("relative date client evaluations: 0");
+    expect(calls.cursorOpen).not.toHaveBeenCalled();
+    expect(calls.post).not.toHaveBeenCalled();
+    expect(calls.put).not.toHaveBeenCalled();
+    expect(calls.delete).not.toHaveBeenCalled();
+    expect(calls.confirm).not.toHaveBeenCalled();
   });
 
-  test("CREATE TEMP TABLE source は batchでも records/cursor/mutation/confirm 0", async () => {
+  test("CREATE TEMP TABLE UNION source は batchでも records/cursor/mutation/confirm 0", async () => {
     const { client, calls } = makeClient();
     const result = await executeBatch(
       "CREATE TEMP TABLE #t AS SELECT 区分, COUNT(*) AS c FROM APP100 "
-      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分; SELECT * FROM #t",
+      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分 "
+      + "UNION ALL SELECT 区分, COUNT(*) AS c FROM APP200 GROUP BY 区分; SELECT * FROM #t",
       client,
       { confirm: calls.confirm }
     );

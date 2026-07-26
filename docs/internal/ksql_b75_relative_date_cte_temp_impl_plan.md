@@ -64,9 +64,12 @@ WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT * F
 
 ### 非スコープ（fail-closed 継続）
 
-- **第1許可形（SIMPLE＋whole exact）／第2許可形（Phase2 A prefilter＋client 残余）を CTE で開くこと。**
-  第2は client 残余評価が残る形で、CTE 実体化と組み合わせたときの挙動を実験で判別できていない。
-  **本課題では第3許可形（whole WHERE exact ＋ client 残余 0）だけを開く。**
+- **第2許可形（B67 Phase2 A の prefilter＋client 残余）を CTE 本体で開くこと。**
+  client 残余評価が残る形で、CTE 実体化と組み合わせたときの挙動を実験で判別できていない。
+  CTE 本体と `.main` には `allowPhase2 = false` を渡して閉じたままにする。
+  （§0.1 の訂正により**第1許可形は開く**。インライン展開経路はインライン後が通常の物理 SELECT と
+  同一のため `allowPhase2 = true` のままでよい。）
+- **CTE 本体・`.main` の入れ子 SELECT**（スカラーサブクエリ等）。`forceNestedForbidden` で fail-closed を維持する。
 - `UNION` 枝、再帰 CTE（B53 領域）、相互参照 CTE
 - KORDER（そもそも CTE 内では構文エラー「KORDER BY は利用者へ結果を返すトップレベル SELECT でのみ使用できます」＝二重防御が既にある）
 - JOIN を含む CTE 本体（B72 の plan builder が `joins.length > 0` で null を返すため自動的に閉じたまま。B76 の領域）
@@ -136,6 +139,31 @@ CTE 本体の中のスカラーサブクエリ等が意図せず開かないか�
 
 書き換え後は「押し下げられること・client 評価が 0 であること・結果が正しいこと」を固定する。
 **JOIN を含む CTE 本体・UNION 枝・DML source など、依然拒否される形の fail-closed テストは残すこと。**
+
+## 2.6 【Step 2 レビューで判明】残る非対称（本課題では閉じない）
+
+第2許可形（B67 Phase2 A の prefilter＋client 残余）を CTE 本体で閉じた結果、
+**同じ WHERE がトップレベルでは通り CTE 本体では拒否される**非対称が残る。
+
+```
+SELECT COUNT(*) AS n FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1
+→ OK（Phase2 A で 日付 = YESTERDAY() を押し下げ・LENGTH は client 残余）
+
+WITH c AS (SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() AND LENGTH(件名) > 1) SELECT COUNT(*) AS n FROM c
+→ NG（path=statement.cte[0]）
+```
+
+これは **Step 1 で意図的に `allowPhase2 = false` にした結果**であり、欠陥ではない。
+ただし B72 が解消したのと同じ class の非対称なので、**放置すると同じ指摘を受ける**。
+
+- 本課題（B75）では閉じない。CTE 実体化と client 残余の組み合わせが未検証のため。
+- **Step 4 の docs でこの制約を明記すること。**
+- 解消するなら別 Step ないし別課題とし、「CTE 本体で client 残余評価が起きても
+  相対日付リーフだけは採用済み（client 評価 0）」であることを実測で確認してから開くこと。
+
+なお、**単一 CTE がインライン展開される形は `.main` 経路を通らない**（`canInlineSingleCte` が
+先に効いて CTE が消える）。`.main` が CTE を読む形の fail-closed は、
+インライン不可の場合（複数 CTE・最終に集計など）にのみ観測できる。
 
 ## 3. 受入条件（各 Step 共通）
 
