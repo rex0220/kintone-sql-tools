@@ -15,7 +15,12 @@ export interface PredicateCapabilityReason {
     | "WHERE_SUPERSET_PREFILTER"
     | "WHERE_FIELD_UNRESOLVED"
     | "WHERE_OPERATOR_UNSUPPORTED"
+    | "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE"
     | "WHERE_EXPRESSION_LOCAL_ONLY"
+    | "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED"
+    | "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED"
+    | "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED"
+    | "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN"
     | "WHERE_RELATIVE_DATE_ARGUMENT_INVALID"
     | "WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED"
     | "WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED"
@@ -43,6 +48,17 @@ const RELATIVE_DATE_FIELD_TYPES = new Set([
   "DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME",
 ]);
 const RELATIVE_DATE_OPERATORS = new Set<NativeOperator>(RANGE_AND_EQUALITY);
+const LEGACY_KINTONE_FUNCTION_NAMES = new Set(["TODAY", "NOW", "LOGINUSER"]);
+const LEGACY_KINTONE_FUNCTION_FIELD_TYPES = new Map<string, ReadonlySet<string>>([
+  ["TODAY", new Set(["DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME"])],
+  ["NOW", new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"])],
+  ["LOGINUSER", new Set(["CREATOR", "MODIFIER", "USER_SELECT"])],
+]);
+const LEGACY_KINTONE_FUNCTION_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
+  ["TODAY", new Set(RANGE_AND_EQUALITY)],
+  ["NOW", new Set(RANGE_AND_EQUALITY)],
+  ["LOGINUSER", new Set(["in", "not in"])],
+]);
 const EQUALITY_IN = ["=", "!=", "in", "not in"] as const;
 const NATIVE_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
   ["RECORD_NUMBER", new Set([...RANGE_AND_EQUALITY, "in", "not in"])],
@@ -69,6 +85,17 @@ const NATIVE_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
   ["ORGANIZATION_SELECT", new Set(["in", "not in"])],
   ["GROUP_SELECT", new Set(["in", "not in"])],
   ["STATUS", new Set(EQUALITY_IN)],
+]);
+
+/**
+ * B78 の局所意味論を制限する partial policy。
+ * 未掲載型へ一般化せず、既存の hasLocalContract() に委譲する。
+ */
+const LOCAL_VALID_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
+  ["CREATOR", new Set(["in", "not in"])],
+  ["MODIFIER", new Set(["in", "not in"])],
+  ["CHECK_BOX", new Set(["in", "not in"])],
+  ["MULTI_SELECT", new Set(["in", "not in"])],
 ]);
 
 const LOCAL_SCALAR_TYPES = new Set([
@@ -122,7 +149,7 @@ function classifyNode(
       if (!hasRelativeDateReason(inner.reasons)) {
         return { capability: "LOCAL_ONLY", reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }] };
       }
-      return requireExactRelativeDatePushdown({
+      return requireExactFunctionPushdown({
         capability: "LOCAL_ONLY",
         reasons: [{ code: "WHERE_EXPRESSION_LOCAL_ONLY" }, ...inner.reasons],
       });
@@ -144,16 +171,27 @@ function classifyBinary(
   if (right.type === "KINTONE_FUNC" && isRelativeDateFunctionName(right.name)) {
     return classifyRelativeDateBinary(op, left, right, resolveField);
   }
+  if (right.type === "KINTONE_FUNC" && isLegacyKintoneFunction(right)) {
+    return classifyLegacyKintoneFunctionBinary(op, left, right, resolveField);
+  }
   if (left.type !== "FIELD") return localExpression();
   const semantics = resolveField(left);
   if (!semantics) {
     return unsupported("WHERE_FIELD_UNRESOLVED", left.field, undefined, normalizeOperator(op));
   }
+  const nativeOp = normalizeOperator(op);
+  if (!isLocallyValidOperator(semantics.fieldType, nativeOp)) {
+    return unsupported(
+      "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE",
+      left.field,
+      semantics.fieldType,
+      nativeOp
+    );
+  }
   if (!hasLocalContract(semantics.fieldType, op)) {
-    return unsupported("WHERE_OPERATOR_UNSUPPORTED", left.field, semantics.fieldType, normalizeOperator(op));
+    return unsupported("WHERE_OPERATOR_UNSUPPORTED", left.field, semantics.fieldType, nativeOp);
   }
 
-  const nativeOp = normalizeOperator(op);
   const native = nativeWhereOperatorsForType(semantics.fieldType);
   const rightCanPush = right.type === "STRING" || right.type === "NUMBER" || right.type === "IN_LIST"
     || isLegacyKintoneFunction(right);
@@ -183,7 +221,69 @@ function classifyBinary(
 
 function isLegacyKintoneFunction(value: SqlValue): boolean {
   return value.type === "KINTONE_FUNC"
-    && (value.name === "TODAY" || value.name === "NOW" || value.name === "LOGINUSER");
+    && LEGACY_KINTONE_FUNCTION_NAMES.has(value.name);
+}
+
+/**
+ * TODAY / NOW / LOGINUSER の公式 field type × operator 契約を判定する。
+ * LOGINUSER の公開 IN-list parser 配線は Step 3 で行う。
+ */
+function classifyLegacyKintoneFunctionBinary(
+  op: CompareOp,
+  left: FieldValue,
+  right: Extract<SqlValue, { type: "KINTONE_FUNC" }>,
+  resolveField: WhereFieldSemanticsResolver
+): PredicateCapabilityResult {
+  const operator = normalizeOperator(op);
+  const functionName = right.name;
+  if (!LEGACY_KINTONE_FUNCTION_NAMES.has(functionName) || left.type !== "FIELD") {
+    return legacyKintoneFunctionUnsupported(
+      "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED",
+      functionName,
+      undefined,
+      undefined,
+      operator
+    );
+  }
+
+  const semantics = resolveField(left);
+  const validFieldTypes = LEGACY_KINTONE_FUNCTION_FIELD_TYPES.get(functionName)!;
+  if (
+    !semantics
+    || !validFieldTypes.has(semantics.fieldType)
+    || semantics.inSubtable
+    || semantics.requiresCollectionOperators
+  ) {
+    return legacyKintoneFunctionUnsupported(
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+      functionName,
+      left.field,
+      semantics?.fieldType,
+      operator
+    );
+  }
+
+  const validOperators = LEGACY_KINTONE_FUNCTION_OPERATORS.get(functionName)!;
+  if (!validOperators.has(operator)) {
+    return legacyKintoneFunctionUnsupported(
+      "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED",
+      functionName,
+      left.field,
+      semantics.fieldType,
+      operator
+    );
+  }
+
+  return {
+    capability: "EXACT_PUSHDOWN",
+    reasons: [{
+      code: "WHERE_EXACT",
+      functionName,
+      field: left.field,
+      fieldType: semantics.fieldType,
+      operator,
+    }],
+  };
 }
 
 /**
@@ -305,6 +405,14 @@ function classifyLocalOnlyField(
 ): PredicateCapabilityResult {
   const semantics = resolveField(field);
   if (!semantics) return unsupported("WHERE_FIELD_UNRESOLVED", field.field, undefined, operator);
+  if (!isLocallyValidOperator(semantics.fieldType, operator)) {
+    return unsupported(
+      "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE",
+      field.field,
+      semantics.fieldType,
+      operator
+    );
+  }
   if (!LOCAL_SCALAR_TYPES.has(semantics.fieldType) && !LOCAL_COLLECTION_TYPES.has(semantics.fieldType)) {
     return unsupported("WHERE_OPERATOR_UNSUPPORTED", field.field, semantics.fieldType, operator);
   }
@@ -312,6 +420,11 @@ function classifyLocalOnlyField(
     capability: "LOCAL_ONLY",
     reasons: [{ code: "WHERE_RESIDUAL", field: field.field, fieldType: semantics.fieldType, operator }],
   };
+}
+
+function isLocallyValidOperator(fieldType: string, operator: string): boolean {
+  const policy = LOCAL_VALID_OPERATORS.get(fieldType);
+  return policy === undefined || policy.has(operator as NativeOperator);
 }
 
 function hasLocalContract(fieldType: string, op: CompareOp): boolean {
@@ -341,19 +454,19 @@ function combineLogical(
 ): PredicateCapabilityResult {
   const reasons = [...left.reasons, ...right.reasons];
   if (left.capability === "UNSUPPORTED" || right.capability === "UNSUPPORTED") {
-    return requireExactRelativeDatePushdown({ capability: "UNSUPPORTED", reasons });
+    return requireExactFunctionPushdown({ capability: "UNSUPPORTED", reasons });
   }
   if (left.capability === "EXACT_PUSHDOWN" && right.capability === "EXACT_PUSHDOWN") {
     return { capability: "EXACT_PUSHDOWN", reasons };
   }
   if (op === "AND" && (left.capability === "EXACT_PUSHDOWN" || right.capability === "EXACT_PUSHDOWN"
     || left.capability === "SUPERSET_PREFILTER" || right.capability === "SUPERSET_PREFILTER")) {
-    return requireExactRelativeDatePushdown({
+    return requireExactFunctionPushdown({
       capability: "SUPERSET_PREFILTER",
       reasons: [{ code: "WHERE_SUPERSET_PREFILTER" }, ...reasons],
     });
   }
-  return requireExactRelativeDatePushdown({ capability: "LOCAL_ONLY", reasons });
+  return requireExactFunctionPushdown({ capability: "LOCAL_ONLY", reasons });
 }
 
 function localExpression(): PredicateCapabilityResult {
@@ -361,12 +474,33 @@ function localExpression(): PredicateCapabilityResult {
 }
 
 function unsupported(
-  code: "WHERE_FIELD_UNRESOLVED" | "WHERE_OPERATOR_UNSUPPORTED",
+  code:
+    | "WHERE_FIELD_UNRESOLVED"
+    | "WHERE_OPERATOR_UNSUPPORTED"
+    | "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE",
   field?: string,
   fieldType?: string,
   operator?: string
 ): PredicateCapabilityResult {
   return { capability: "UNSUPPORTED", reasons: [{ code, field, fieldType, operator }] };
+}
+
+type LegacyKintoneFunctionReasonCode =
+  | "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED"
+  | "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED"
+  | "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED";
+
+function legacyKintoneFunctionUnsupported(
+  code: LegacyKintoneFunctionReasonCode,
+  functionName: string,
+  field?: string,
+  fieldType?: string,
+  operator?: string
+): PredicateCapabilityResult {
+  return requireExactFunctionPushdown({
+    capability: "UNSUPPORTED",
+    reasons: [{ code, functionName, field, fieldType, operator }],
+  });
 }
 
 type RelativeDateReasonCode =
@@ -389,7 +523,19 @@ function relativeDateUnsupported(
 }
 
 function hasRelativeDateReason(reasons: readonly PredicateCapabilityReason[]): boolean {
-  return reasons.some((reason) => reason.functionName !== undefined);
+  return reasons.some((reason) =>
+    reason.code.startsWith("WHERE_RELATIVE_DATE_")
+    || (reason.functionName !== undefined && isRelativeDateFunctionName(reason.functionName))
+  );
+}
+
+function hasLegacyKintoneFunctionReason(
+  reasons: readonly PredicateCapabilityReason[]
+): boolean {
+  return reasons.some((reason) =>
+    reason.code.startsWith("WHERE_KINTONE_FUNCTION_")
+    || (reason.functionName !== undefined && LEGACY_KINTONE_FUNCTION_NAMES.has(reason.functionName))
+  );
 }
 
 function requireExactRelativeDatePushdown(
@@ -402,7 +548,10 @@ function requireExactRelativeDatePushdown(
   ) {
     return result;
   }
-  const relative = result.reasons.find((reason) => reason.functionName !== undefined)!;
+  const relative = result.reasons.find((reason) =>
+    reason.code.startsWith("WHERE_RELATIVE_DATE_")
+    || (reason.functionName !== undefined && isRelativeDateFunctionName(reason.functionName))
+  )!;
   return {
     capability: result.capability,
     reasons: [
@@ -416,4 +565,43 @@ function requireExactRelativeDatePushdown(
       },
     ],
   };
+}
+
+function requireExactLegacyKintoneFunctionPushdown(
+  result: PredicateCapabilityResult
+): PredicateCapabilityResult {
+  if (
+    result.capability === "EXACT_PUSHDOWN"
+    || !hasLegacyKintoneFunctionReason(result.reasons)
+    || result.reasons.some((reason) =>
+      reason.code === "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN"
+    )
+  ) {
+    return result;
+  }
+  const legacy = result.reasons.find((reason) =>
+    reason.code.startsWith("WHERE_KINTONE_FUNCTION_")
+    || (reason.functionName !== undefined && LEGACY_KINTONE_FUNCTION_NAMES.has(reason.functionName))
+  )!;
+  return {
+    capability: result.capability,
+    reasons: [
+      ...result.reasons,
+      {
+        code: "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN",
+        functionName: legacy.functionName,
+        field: legacy.field,
+        fieldType: legacy.fieldType,
+        operator: legacy.operator,
+      },
+    ],
+  };
+}
+
+function requireExactFunctionPushdown(
+  result: PredicateCapabilityResult
+): PredicateCapabilityResult {
+  return requireExactLegacyKintoneFunctionPushdown(
+    requireExactRelativeDatePushdown(result)
+  );
 }

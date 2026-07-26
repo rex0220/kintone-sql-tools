@@ -2312,7 +2312,7 @@ async function resolveSelectWhereCapability(
 
 function formatWhereCapabilityFailure(result: PredicateCapabilityResult): string {
   const reason = result.reasons.find((candidate) =>
-    candidate.code === "WHERE_FIELD_UNRESOLVED" || candidate.code === "WHERE_OPERATOR_UNSUPPORTED"
+    candidate.code === "WHERE_FIELD_UNRESOLVED" || candidate.code === "WHERE_OPERATOR_UNSUPPORTED" || candidate.code === "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE"
   ) ?? result.reasons[0];
   const details = [
     reason?.field ? `field=${reason.field}` : null,
