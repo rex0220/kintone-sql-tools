@@ -17,7 +17,7 @@
 - `ksql_explain` はこの形で `relative date evaluation: kintone server whole-WHERE exact` / `client residual: (none)` / `relative date client evaluations: 0` と押し下げ後のクエリを表示する。Phase1（SIMPLE 全体 exact）と Phase2 A（prefilter＋残余）の表示は不変。
 - `OR` を含む条件も、`WHERE` 全体が押し下げ可能であれば同様に使用できる。
 - 引き続きレコード取得前に fail-closed するもの: `KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT、JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。
-- 新たに許可された形でも `maxRecords` 超過・検索打ち切り時は fail-closed で、部分的な集計結果を返さない。
+- 新たに許可された形の `maxRecords` 超過時の扱いは、**同じクエリをリテラル日付で書いた場合と同一**（`onLimit=truncate` を指定していれば truncate、既定の `onLimit=error` ならエラー）。相対日付を使うことで追加の制約は課さない。一方、kintone の検索打ち切り（10 万件）は利用者が選んだ設定ではないため、従来どおり fail-closed で部分結果を返さない。
 - SemVer=minor（純加法。従来拒否されていたクエリが成功するようになるだけで、既存の成功クエリの結果は不変）。
 
 ## v3.23.0（2026-07-26）

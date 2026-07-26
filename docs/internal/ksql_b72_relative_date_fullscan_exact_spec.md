@@ -341,19 +341,20 @@ B72 は候補集合の取得前 predicateだけを変え、完全入力が必要
 
 現行は local ORDER、window ORDER、統計集計、grouping setsをcomplete-input reasonとして列挙する一方、plain GROUP BY、通常集計、DISTINCTは列挙していない（`src/core/dmlGuard.ts:63-69,141-155`）。complete-input reasonがあると `onLimitReached="truncate"` を `"error"` へ強制し（`src/execute.ts:2728-2747`）、上限到達時は部分結果でなく説明付き `FetchAllLimitError` を返す（同 `:2750-2758`）。
 
-B72で新規に許可するlocal-processing形は、いずれもwhole-WHEREに一致した**完全な候補集合**がなければ正しい集計・重複排除・window・順序結果を保証できない。以前は実行前拒否だったため、B72 allow-formに限り `RELATIVE_DATE_FULL_SCAN_EXACT` 相当のcomplete-input reasonを追加し、次へ固定する。
+B72 の whole-WHERE exact planには、相対日付固有のcomplete-input reasonを追加しない。`maxRecords` と `onLimitReached` は、WHEREの相対日付関数を同値な日付リテラルへ置き換えたqueryと**完全に同じ規則**に従う。ユーザーが明示的に `onLimitReached="truncate"` を選んだ場合、plain GROUP BY、DISTINCT、通常集計など、同値なリテラル日付queryがtruncate可能な形はB72でも同様にtruncateする。
 
-- `FULL_SCAN_EXACT` は plain GROUP BY、DISTINCT、通常/統計集計、window、式ORDERを含め、常に `onLimitReached="error"`。
-- canonical `ORDER BY` のうち `CANONICAL_LOCAL` は同じくcomplete-input。`CANONICAL_REST_TOP_N` はserverが最終windowを返す既存計画なので新reasonを追加しない。
+- local ORDER、window ORDER、統計集計、grouping setsなど、そのquery形状に既存complete-input reasonがある場合は従来どおり `onLimitReached="error"` へ強制する。B72を理由にこれらを弱めない。
+- `CANONICAL_REST_TOP_N` など既存計画がtop-level ORDERをserverで完結する場合も、同値なリテラル日付queryと同じ既存規則を使う。
 - `maxRecords` は**server predicate適用後の候補取得件数**に対して適用する。
-- B72 complete-input queryで `onLimitReached="truncate"` を指定しても部分結果を返さない。
-- 相対日付を含まない既存queryやB72以外のSELECTに、この新reasonを逆適用しない。
+- `RELATIVE_DATE_FULL_SCAN_EXACT` のような相対日付固有のcomplete-input reasonは設けない。
+
+> 実機smokeで、同値な日付リテラルqueryはtruncateできる一方、相対日付queryだけが `RELATIVE_DATE_FULL_SCAN_EXACT` によりerrorになる非対称を確認したため、2026-07-26にこの規則へ訂正した。
 
 ### 7.2 `SearchAbortedError`
 
 現行 wrapper は `searchAborted` を収集し、fail-closed contextでは `SearchAbortedError` をthrowする（`src/execute.ts:850-865`）。通常read-only SELECTはwarning付与である（同 `:709-737`）が、この既存契約をB72のlocal集計へそのまま適用すると部分集計を成功結果として返し得る。
 
-B72では第三 allow-formのうち完全候補をlocal処理する計画をsearch-abort fail-closed contextとして扱い、`searchAborted: true` は **`SearchAbortedError`** とする。実装はstatement種別だけで決める現行wrapperの一般条件を全SELECTへ広げず、B72 shared plan / effective order planで対象を限定する。
+B72では第三 allow-formのうち完全候補をlocal処理する計画をsearch-abort fail-closed contextとして扱い、`searchAborted: true` は **`SearchAbortedError`** とする。これはユーザーが明示的に選ぶtruncateとは異なり、kintone側の10万件打切りによる不完全入力であるため、7.1の訂正後も緩和しない。実装はstatement種別だけで決める現行wrapperの一般条件を全SELECTへ広げず、B72 shared plan / effective order planで対象を限定する。
 
 - `FULL_SCAN_EXACT` と `CANONICAL_LOCAL` はwarning付き部分結果を返さない。
 - `CANONICAL_REST_TOP_N` は既存server-window契約を維持する。
@@ -446,7 +447,7 @@ canonical `ORDER BY` が `executeSimpleSelect()` 経路でも、第三 allow-for
 
 ### 9.5 complete-input・EXPLAIN・surface
 
-26. plain GROUP BY / DISTINCT /通常集計 / local ORDER / window /統計集計 / grouping setsのB72形で `maxRecords`超過時に部分結果を返さない。`onLimitReached="truncate"` はB72 complete-input reasonによりerror。
+26. plain GROUP BY / DISTINCT /通常集計 / canonical REST ORDERのB72形は、同値な日付リテラルqueryと `maxRecords` / `onLimitReached` の結果が一致する。truncate可能な形は両方truncateし、`onLimitReached="error"` は両方error。local ORDER / window /統計集計 / grouping setsは既存complete-input reasonを維持する。
 27. B72 `FULL_SCAN_EXACT` / `CANONICAL_LOCAL` の `searchAborted: true` は `SearchAbortedError`、retry 0、成功result 0。B72以外の通常read-only SELECT warning契約は変えない。
 28. EXPLAINはB72専用のwhole-WHERE exact、residual none、client evaluations 0、kintone queryを表示する。
 29. Phase1 SIMPLE exactとPhase2 A SUPERSET_PREFILTERのEXPLAIN snapshotをbyte非回帰する。
@@ -467,7 +468,7 @@ canonical `ORDER BY` が `executeSimpleSelect()` 経路でも、第三 allow-for
 | Step | 変更 | 単独merge時の公開挙動 | 見積 |
 |---|---|---|---:|
 | 1. pure exact plan foundation | `buildRelativeDateFullScanExactPlan()`、context bit、plan invariant、unit testを追加。guard / runtime未配線 | **完全不変**。pure helper未使用 | 0.5〜0.75人日 |
-| 2. guard allow ＋ safe runtime同時配線 | 第三 allow-formをguardへ追加。同じmergeで`executeSelect()` plan作成、`allowOriginalWherePushdown = exact && !prefilterPlan`、whole-WHERE push、`residualWhere=null`、B72 complete-input reason、plan-aware SearchAborted fail-closedを配線。GROUP/DISTINCT/aggregate/window/canonical ORDER positive、上限・検索打切り、全must-reject testを追加 | 対象queryだけ正しく成功。guardだけ先行してclient backstopへ漏れる状態や、部分集計を返す中間状態を作らない。KORDER/DML/CTE/JOINは閉じたまま | 1.0〜1.5人日 |
+| 2. guard allow ＋ safe runtime同時配線 | 第三 allow-formをguardへ追加。同じmergeで`executeSelect()` plan作成、`allowOriginalWherePushdown = exact && !prefilterPlan`、whole-WHERE push、`residualWhere=null`、plan-aware SearchAborted fail-closedを配線。complete-inputは同値な日付リテラルqueryの既存reasonだけを使う。GROUP/DISTINCT/aggregate/window/canonical ORDER positive、上限・検索打切り、全must-reject testを追加 | 対象queryだけ正しく成功。guardだけ先行してclient backstopへ漏れる状態や、部分集計を返す中間状態を作らない。KORDER/DML/CTE/JOINは閉じたまま | 1.0〜1.5人日 |
 | 3. EXPLAIN / B71 acceptance | B72専用EXPLAIN、OR exact、B71 alias/PHYSICAL合成、fields-respecting mockを追加。Phase1/Phase2 snapshot非回帰 | 実行・fail-closed意味論はStep 2と同じ。診断と機能間合成の証拠を完成 | 0.5〜0.75人日 |
 | 4. docs / 4面 / release gate | language reference §5/§6/quick reference、CHANGELOG、issue tracker、CLI/MCP/plugin/browser smoke、docs guardsを更新 | 意味論はStep 2と同じ。公開契約とrelease gateを同期 | 0.5〜1.0人日 |
 
@@ -521,7 +522,7 @@ B74の訂正文言を単純に巻き戻してはならない。B74が明確化�
 | 4 | canonical ORDER | static SIMPLEでも第三 allow-formに含める。`executeSimpleSelect()`のwhole-WHERE server queryを使い、client WHERE評価なし。 |
 | 5 | OR | whole-WHERE exactなら含める。AND-only decomposition不要。non-exact OR / NOTは拒否維持。 |
 | 6 | B71 | plain GROUP BY plan・fields・evaluationを不変維持。B72はquery predicateとresidualだけを変更。fields-respecting mock必須。 |
-| 7 | complete input | B72 local-processing用reasonを追加し、plain GROUP BY / DISTINCT /通常集計を含めmaxRecords・truncate・search abortで部分結果を返さない。B72以外の既存SELECT契約は不変。 |
+| 7 | complete input | 相対日付固有reasonは追加しない。同値な日付リテラルqueryとmaxRecords / truncateを対称にし、query形状由来の既存reasonは維持する。Search abortはB72 plan-aware fail-closedのまま。 |
 | 8 | EXPLAIN | `EXACT_PUSHDOWN`、whole server predicate、residual none、client evaluations 0、queryを表示。Phase1/Phase2表示不変。 |
 | 9 | SemVer | minor、v3.24.0候補。 |
 

@@ -2467,9 +2467,7 @@ async function executeSelect(
   const completePolicy = buildCompleteInputPolicy(
     stmt,
     options,
-    orderPlan,
-    fullScanExactPlan,
-    staticMode
+    orderPlan
   );
   const failClosedForB72Local =
     fullScanExactPlan !== undefined
@@ -2764,7 +2762,6 @@ function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): st
     : reasons.size === 1 && reasons.has("GROUPING_SETS")
       ? "小計・総計の正しい結果"
       : reasons.has("GROUPING_SETS")
-        || reasons.has("RELATIVE_DATE_FULL_SCAN_EXACT")
         ? "クエリの正しい結果"
         : "ORDER BYの正しい結果";
   return `${subject}には完全な候補集合が必要です。complete input reason: ${reasonList}。`;
@@ -2779,9 +2776,7 @@ interface CompleteInputPolicy {
 function buildCompleteInputPolicy(
   stmt: SelectStatement,
   options: ExecuteOptions,
-  orderPlan: CanonicalOrderPlan | null,
-  fullScanExactPlan?: RelativeDateFullScanExactPlan,
-  staticMode: SelectMode = resolveSelectMode(stmt)
+  orderPlan: CanonicalOrderPlan | null
 ): CompleteInputPolicy {
   // A REST/KORDER plan consumes only the top-level order. Nested/window/B65
   // requirements remain visible through the existing recursive reason walker.
@@ -2790,15 +2785,6 @@ function buildCompleteInputPolicy(
     || orderPlan?.kind === "KORDER_CURSOR"
     ? completeInputReasons({ ...stmt, orderBy: [] })
     : completeInputReasons(stmt);
-  if (
-    fullScanExactPlan
-    && (
-      staticMode === "FULL_SCAN"
-      || orderPlan?.kind === "CANONICAL_LOCAL"
-    )
-  ) {
-    reasons.add("RELATIVE_DATE_FULL_SCAN_EXACT");
-  }
   const truncateWasDisabled = reasons.size > 0 && options.onLimitReached === "truncate";
   return {
     reasons,

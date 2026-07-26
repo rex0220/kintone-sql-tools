@@ -289,14 +289,79 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
     expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
   });
 
-  test("maxRecords + truncate でも B72 complete-input は部分集計を返さない", async () => {
-    const { client } = makeClient();
+  test.each([
+    {
+      name: "plain GROUP BY",
+      relativeSql: "SELECT 区分, COUNT(*) AS c FROM APP100 "
+        + "WHERE 日付 >= THIS_MONTH() GROUP BY 区分",
+      literalSql: "SELECT 区分, COUNT(*) AS c FROM APP100 "
+        + "WHERE 日付 >= '2026-07-01' GROUP BY 区分",
+      truncatedRows: [{ 区分: "A", c: "2" }],
+    },
+    {
+      name: "DISTINCT",
+      relativeSql: "SELECT DISTINCT 区分 FROM APP100 WHERE 日付 >= THIS_MONTH()",
+      literalSql: "SELECT DISTINCT 区分 FROM APP100 WHERE 日付 >= '2026-07-01'",
+      truncatedRows: [{ 区分: "A" }],
+    },
+    {
+      name: "aggregate",
+      relativeSql: "SELECT SUM(金額) AS total FROM APP100 WHERE 日付 >= THIS_MONTH()",
+      literalSql: "SELECT SUM(金額) AS total FROM APP100 WHERE 日付 >= '2026-07-01'",
+      truncatedRows: [{ total: "30" }],
+    },
+  ])("$name は maxRecords overflow時も literal/relative が対称", async ({
+    relativeSql,
+    literalSql,
+    truncatedRows,
+  }) => {
+    const truncateOptions = { maxRecords: 2, onLimitReached: "truncate" as const };
+    const relativeTruncate = await execute(
+      relativeSql,
+      makeClient().client,
+      truncateOptions
+    ) as SelectResult;
+    const literalTruncate = await execute(
+      literalSql,
+      makeClient().client,
+      truncateOptions
+    ) as SelectResult;
+    expect(relativeTruncate.rows).toEqual(truncatedRows);
+    expect(literalTruncate.rows).toEqual(truncatedRows);
+
+    const errorOptions = { maxRecords: 2, onLimitReached: "error" as const };
     await expect(execute(
-      "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH()",
-      client,
-      { maxRecords: 1, onLimitReached: "truncate" }
-    )).rejects.toThrow(/RELATIVE_DATE_FULL_SCAN_EXACT/);
+      relativeSql,
+      makeClient().client,
+      errorOptions
+    )).rejects.toThrow(/上限（2 件）/);
+    await expect(execute(
+      literalSql,
+      makeClient().client,
+      errorOptions
+    )).rejects.toThrow(/上限（2 件）/);
   });
+
+  test.each(["truncate", "error"] as const)(
+    "canonical local ORDER BY は onLimit=%s でも既存LOCAL_ORDER規則がliteral/relativeで対称",
+    async (onLimitReached) => {
+      const options = { maxRecords: 2, onLimitReached };
+      const relativeSql = "SELECT 日付 FROM APP100 "
+        + "WHERE 日付 >= THIS_MONTH() ORDER BY 日付 DESC";
+      const literalSql = "SELECT 日付 FROM APP100 "
+        + "WHERE 日付 >= '2026-07-01' ORDER BY 日付 DESC";
+      await expect(execute(
+        relativeSql,
+        makeClient().client,
+        options
+      )).rejects.toThrow(/complete input reason: LOCAL_ORDER/);
+      await expect(execute(
+        literalSql,
+        makeClient().client,
+        options
+      )).rejects.toThrow(/complete input reason: LOCAL_ORDER/);
+    }
+  );
 
   test("searchAborted は B72 local-processing で warning結果にせず fail-closed", async () => {
     const { client, calls } = makeClient({ searchAborted: true });
