@@ -1,7 +1,7 @@
 # B71 — `GROUP BY` のエイリアス指定が黙って誤集計する（silent wrong results）
 
 - 作成日: 2026-07-26
-- ステータス: **🐞 バグ確認済み・未着手**（2026-07-26）。実エンジンのプローブで再現・根因特定済み。**優先度: 高**（誤った集計値をエラーなしで返す＝BI 用途で最も危険なクラス。B51 と同種）。
+- ステータス: **✅ 修正済み・リリース済み（v3.23.0・2026-07-26）**。仕様 R3 に基づく4 Step 実装で解消。実機 PASS。詳細は [spec R3](ksql_b71_groupby_alias_phase1_spec.md)。
 - 報告元: kSQL Dashboard Pro（`kSQLエンジン報告-20260726.md` 報告1・Pro 側課題 K-14）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B71
 - 関連: B59（ORDER BY alias 黙殺修正・v3.13.0）／B51（CTE JOIN silent wrong results・v3.11.0）

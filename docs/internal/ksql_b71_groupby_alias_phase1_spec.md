@@ -1,7 +1,7 @@
 # B71 Phase1 — `GROUP BY` のエイリアス解決 仕様
 
 - 作成日: 2026-07-26
-- ステータス: **仕様 R3 確定＝実装着手可能（オーナー決定 A＝フル実装）**（2026-07-26）。R1（Claude 起草）→ codex レビュー「実装不可」→ R2（Claude 改訂）→ codex 再レビュー「まだ実装不可・P1 5件」→ **役割交代して R3 を codex 起草 → Claude レビューで実コード裏取り・P1 5件の解決を確認**。**§9（R3）が最新かつ authoritative**。§1〜7＝R1（一部**誤り**・§8.1 が訂正）、§8＝R2（§9 が上書き）。実装は §9.10 の Step 1〜4（見積 8〜11.5 人日・同一 minor で release）。
+- ステータス: **✅ リリース済み（v3.23.0・2026-07-26）**。feat PR #274→tag v3.23.0→GitHub Release→npm publish（latest 3.23.0）。**実機 PASS**＝デプロイ済み MCP で alias GROUP BY が実フィールド指定と完全一致。§9（R3）が実装された設計（§1〜7＝R1・一部誤り／§8＝R2・§9 が上書き）。
 - 課題: [B71 issue](ksql_b71_groupby_alias_wrong_result_issue.md)
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B71
 - 関連: B59（ORDER BY alias 黙殺修正・v3.13.0・`buildOrderByAliasEvaluator`）／B65（ROLLUP・GROUPING SETS）／B51（silent wrong results の前例）
