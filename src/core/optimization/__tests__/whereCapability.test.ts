@@ -142,6 +142,21 @@ function classifyLegacy(
   );
 }
 
+function classifyLoginUserInList(fieldType: string, op: "IN" | "NOT_IN") {
+  return classifyWhereCapability(
+    {
+      type: "BINARY",
+      op,
+      left: { type: "FIELD", tableAlias: null, field: "x" },
+      right: {
+        type: "IN_LIST",
+        values: [{ type: "KINTONE_FUNC", name: "LOGINUSER" }],
+      },
+    },
+    () => resolveFieldSemantics({ fieldType })
+  );
+}
+
 describe("B77 legacy kintone function field type × operator classifier", () => {
   test.each([
     ["TODAY", "DATE"],
@@ -201,6 +216,37 @@ describe("B77 legacy kintone function field type × operator classifier", () => 
       fieldType: "GROUP_SELECT",
       operator: "in",
     });
+  });
+
+  test.each([
+    "CREATOR",
+    "MODIFIER",
+    "USER_SELECT",
+  ] as const)("singleton IN-list LOGINUSER × %s は IN / NOT IN exact", (fieldType) => {
+    for (const op of ["IN", "NOT_IN"] as const) {
+      expect(classifyLoginUserInList(fieldType, op)).toMatchObject({
+        capability: "EXACT_PUSHDOWN",
+        reasons: [{
+          code: "WHERE_EXACT",
+          functionName: "LOGINUSER",
+          fieldType,
+          operator: op === "IN" ? "in" : "not in",
+        }],
+      });
+    }
+  });
+
+  test("singleton IN-list でも GROUP_SELECT × LOGINUSER は unsupported", () => {
+    const result = classifyLoginUserInList("GROUP_SELECT", "IN");
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+        functionName: "LOGINUSER",
+        fieldType: "GROUP_SELECT",
+        operator: "in",
+      }),
+    ]));
   });
 
   test("DATE × NOW は field type unsupported", () => {

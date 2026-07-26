@@ -640,10 +640,14 @@ export type RelativeDateFunction =
 
 export type KintoneFunction = LegacyKintoneFunction | RelativeDateFunction;
 
+/** The only kintone function supported as an IN-list element. */
+export type InListFunction =
+  Omit<LegacyKintoneFunction, "name"> & { name: "LOGINUSER" };
+
 /** IN (v1, v2, ...) */
 export interface InList {
   type: "IN_LIST";
-  values: (StringLiteral | NumberLiteral | VariableRef)[];
+  values: (StringLiteral | NumberLiteral | VariableRef | InListFunction)[];
 }
 
 /** IN (SELECT ...) / NOT IN (SELECT ...) */

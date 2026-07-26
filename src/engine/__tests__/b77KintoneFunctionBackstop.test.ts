@@ -29,3 +29,14 @@ test("非 WHERE 用 resolveKintoneFunc は TODAY/NOW/LOGINUSER の既存契約�
   expect(resolveKintoneFunc("NOW")).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   expect(resolveKintoneFunc("LOGINUSER")).toBe("");
 });
+
+test("planner bypass で IN (LOGINUSER()) が client evaluator に到達すると fail-closed", () => {
+  const statement = parseSqlStatement(
+    "SELECT * FROM APP100 WHERE 作成者 IN (LOGINUSER())"
+  ) as SelectStatement;
+  if (statement.where === null) throw new Error("WHERE fixture expected");
+  const where = statement.where;
+  expect(() => evalWhere(where, {
+    作成者: JSON.stringify([{ code: "user" }]),
+  })).toThrow(/LOGINUSER: WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN/);
+});

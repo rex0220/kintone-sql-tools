@@ -286,6 +286,12 @@ function assertResolvedInListValues(
   if (unresolved?.type === "VARIABLE") {
     throw new Error(`ParseError: unresolved batch variable @${unresolved.name}.`);
   }
+  const serverOnlyFunction = values.find((item) => item.type === "KINTONE_FUNC");
+  if (serverOnlyFunction?.type === "KINTONE_FUNC") {
+    throw new Error(
+      `${serverOnlyFunction.name}: ${WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN}`
+    );
+  }
 }
 
 // ------------------------------------------------------------

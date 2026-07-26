@@ -272,10 +272,21 @@ function collectServerFunctionLeavesOnAndSpine(
 }
 
 function serverFunctionNameOf(leaf: BinaryExpr): string | null {
-  return leaf.right.type === "KINTONE_FUNC"
+  if (
+    leaf.right.type === "KINTONE_FUNC"
     && isServerOnlyWhereFunctionName(leaf.right.name)
-    ? leaf.right.name
-    : null;
+  ) {
+    return leaf.right.name;
+  }
+  if (
+    leaf.right.type === "IN_LIST"
+    && leaf.right.values.length === 1
+    && leaf.right.values[0].type === "KINTONE_FUNC"
+    && isServerOnlyWhereFunctionName(leaf.right.values[0].name)
+  ) {
+    return leaf.right.values[0].name;
+  }
+  return null;
 }
 
 function collectServerFunctionOccurrences(where: WhereExpr): BinaryExpr[] {

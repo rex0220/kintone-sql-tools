@@ -175,8 +175,16 @@ function collectExactServerFunctionLeaves(where: WhereExpr): BinaryExpr[] {
     switch (node.type) {
       case "BINARY":
         if (
-          node.right.type === "KINTONE_FUNC"
-          && isServerOnlyWhereFunctionName(node.right.name)
+          (
+            node.right.type === "KINTONE_FUNC"
+            && isServerOnlyWhereFunctionName(node.right.name)
+          )
+          || (
+            node.right.type === "IN_LIST"
+            && node.right.values.length === 1
+            && node.right.values[0].type === "KINTONE_FUNC"
+            && isServerOnlyWhereFunctionName(node.right.values[0].name)
+          )
         ) {
           leaves.push(node);
         }

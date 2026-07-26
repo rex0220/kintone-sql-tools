@@ -8860,7 +8860,9 @@ function renderResidualValue(node: unknown): string {
           : value["type"] === "CONCAT_OP" ? "||" : "<op>"
       } ${renderResidualValue(value["right"])})`;
     case "KINTONE_FUNC":
-      return typeof value["name"] === "string" ? `${value["name"]}(...)` : "<expr>";
+      return typeof value["name"] === "string"
+        ? value["name"] === "LOGINUSER" ? "LOGINUSER()" : `${value["name"]}(...)`
+        : "<expr>";
     case "IN_LIST":
       return Array.isArray(value["values"])
         ? `(${value["values"].map(renderResidualValue).join(", ")})`

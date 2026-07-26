@@ -1,4 +1,11 @@
-import type { CompareOp, FieldRef, FieldValue, SqlValue, WhereExpr } from "../../types/ast";
+import type {
+  CompareOp,
+  FieldRef,
+  FieldValue,
+  InListFunction,
+  SqlValue,
+  WhereExpr,
+} from "../../types/ast";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
 import {
   LEGACY_KINTONE_FUNCTION_NAMES,
@@ -176,6 +183,23 @@ function classifyBinary(
   if (right.type === "KINTONE_FUNC" && isLegacyKintoneFunction(right)) {
     return classifyLegacyKintoneFunctionBinary(op, left, right, resolveField);
   }
+  if (right.type === "IN_LIST") {
+    const functions = right.values.filter(
+      (value): value is InListFunction => value.type === "KINTONE_FUNC"
+    );
+    if (functions.length > 0) {
+      if (right.values.length === 1 && functions.length === 1) {
+        return classifyLegacyKintoneFunctionBinary(op, left, functions[0], resolveField);
+      }
+      return legacyKintoneFunctionUnsupported(
+        "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED",
+        functions[0].name,
+        left.type === "FIELD" ? left.field : undefined,
+        left.type === "FIELD" ? resolveField(left)?.fieldType : undefined,
+        normalizeOperator(op)
+      );
+    }
+  }
   if (left.type !== "FIELD") return localExpression();
   const semantics = resolveField(left);
   if (!semantics) {
@@ -228,7 +252,7 @@ function isLegacyKintoneFunction(value: SqlValue): boolean {
 
 /**
  * TODAY / NOW / LOGINUSER の公式 field type × operator 契約を判定する。
- * LOGINUSER の公開 IN-list parser 配線は Step 3 で行う。
+ * LOGINUSER は singleton IN-list 要素として同じ判定へ配線する。
  */
 function classifyLegacyKintoneFunctionBinary(
   op: CompareOp,
