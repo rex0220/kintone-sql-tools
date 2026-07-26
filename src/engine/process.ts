@@ -42,6 +42,7 @@ import type {
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import type { PlainGroupByResolutionPlan } from "../core/optimization/plainGroupByPlan";
 import {
   evalWhere,
   evalCaseWhen,
@@ -251,12 +252,25 @@ export function applyGroupBy(
   rows: ProcessRow[],
   groupByKeys: GroupByKey[],
   columns: SelectColumn[],
-  resolveAggSortKind?: AggregateSortKindResolver
+  resolveAggSortKind?: AggregateSortKindResolver,
+  resolutionPlan?: PlainGroupByResolutionPlan,
+  aliasEvaluationContext: SelectColumnEvaluationContext = {}
 ): ProcessRow[] {
+  if (resolutionPlan && resolutionPlan.items.length !== groupByKeys.length) {
+    throw new Error("InternalError: plain GROUP BY resolution plan length does not match group keys.");
+  }
   // グループキー → 行リスト
   const groups = new Map<string, ProcessRow[]>();
   for (const row of rows) {
-    const key = groupByKeys.map((k) => evalGroupByKey(k, row)).join("\x00");
+    const key = groupByKeys.map((groupKey, index) =>
+      evalGroupByKey(
+        groupKey,
+        row,
+        resolutionPlan?.items[index],
+        columns,
+        aliasEvaluationContext
+      )
+    ).join("\x00");
     const bucket = groups.get(key);
     if (bucket) bucket.push(row);
     else groups.set(key, [row]);
@@ -416,8 +430,38 @@ function materializeAggregateColumns(
 }
 
 /** GROUP BY キーをグループ分け用文字列に評価する */
-function evalGroupByKey(key: GroupByKey, row: ProcessRow): string {
-  if (key.type === "FIELD_NAME") return row[key.name] ?? "";
+function evalGroupByKey(
+  key: GroupByKey,
+  row: ProcessRow,
+  resolution: PlainGroupByResolutionPlan["items"][number] | undefined,
+  columns: SelectColumn[],
+  aliasEvaluationContext: SelectColumnEvaluationContext
+): string {
+  if (key.type === "FIELD_NAME") {
+    if (!resolution) return row[key.name] ?? "";
+    if (resolution.kind === "PHYSICAL") return row[resolution.runtimeKey] ?? "";
+    if (resolution.kind === "ALIAS_SAFE") {
+      const column = columns[resolution.columnIndex];
+      if (!column) {
+        throw new Error(
+          `InternalError: GROUP BY alias column index ${resolution.columnIndex} is out of range.`
+        );
+      }
+      const value = evaluateSelectColumnValue(
+        column,
+        row,
+        resolution.columnIndex,
+        aliasEvaluationContext
+      );
+      if (typeof value !== "string") {
+        throw new Error("InternalError: GROUP BY alias resolved to an expanded SELECT column.");
+      }
+      return value;
+    }
+    throw new Error(
+      `InternalError: unresolved plain GROUP BY item ${resolution.kind} reached evaluation.`
+    );
+  }
   if (key.type === "FUNC_KEY")   return evalStringFunc(key.expr, row);
   return String(evalArithExpr(key.expr, row)); // ARITH_KEY
 }
@@ -1492,6 +1536,8 @@ export interface FullScanInput {
   hiddenQualifiedAliases?: ReadonlySet<string>;
   /** Metadata-resolved B65 identity. Public execution remains gated until Step 3. */
   resolvedGroupingSpec?: ResolvedGroupingSpec;
+  /** SELECT-local に確定した B71 plain GROUP BY 解決計画。 */
+  plainGroupByPlan?: PlainGroupByResolutionPlan;
 }
 
 function stripHiddenQualifiedColumns(
@@ -1575,6 +1621,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     tableColumns,
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
+    plainGroupByPlan,
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -1632,7 +1679,13 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
       rows,
       grouping.type === "PLAIN" ? grouping.allItems : [],
       stmt.columns,
-      aggregateSortKindResolver
+      aggregateSortKindResolver,
+      grouping.type === "PLAIN" ? plainGroupByPlan : undefined,
+      {
+        scalarCache,
+        resolveFieldType: fieldTypeResolver,
+        resolveFieldSemantics: fieldSemanticsResolver,
+      }
     );
   }
 

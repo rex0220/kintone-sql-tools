@@ -1,14 +1,26 @@
-ksql 配布パッケージ (v3.22.0)
+ksql 配布パッケージ (v3.23.0)
 
 release 成果物:
-- ksql-plugin-v3.22.0.zip
-- ksql-mcp.mcpb (manifest version 3.22.0)
-- ksql-mcp.js (MCP server version 3.22.0)
+- ksql-plugin-v3.23.0.zip
+- ksql-mcp.mcpb (manifest version 3.23.0)
+- ksql-mcp.js (MCP server version 3.23.0)
 
-1. ksql-plugin-v3.22.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.23.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
+
+v3.23.0: GROUP BY のエイリアスが黙って誤集計するバグを修正 (B71)。
+- GROUP BY に SELECT のエイリアスを指定すると、エラーにならないまま全行が 1 グループへ
+  潰れていた不具合を修正。例: SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 年月, COUNT(*)
+  ... GROUP BY 年月 が「1 グループ・件数=全件」を返していた。
+- 注意: 結果が変わります。従来これらのクエリが返していた値は誤りでした。修正後は
+  GROUP BY DATE_FORMAT(...) と同じ正しい集計になります。
+- 名前の解決は「同名フィールドが優先 → 無ければ SELECT のエイリアス」(標準 SQL/MySQL と
+  同じ)。エイリアスが実フィールド名と衝突していたクエリも正しく集計されるようになります。
+- 集計関数のエイリアス (GROUP BY 件数 where COUNT(*) AS 件数) など、グループ化前に値が
+  確定しない指定はレコード取得前にエラーになります (従来は黙って誤結果)。
+- ORDER BY のエイリアス・HAVING・DISTINCT・ROLLUP/GROUPING SETS の挙動は不変。
 
 v3.22.0: engine ライブラリの QueryColumn 列メタ公開 (B69)。
 - engine ライブラリ (npm ./engine / UMD) の runQuery() が返す QueryColumn に、

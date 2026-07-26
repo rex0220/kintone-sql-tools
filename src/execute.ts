@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -121,6 +121,13 @@ import {
 import { planKorder } from "./core/optimization/korderPlanner";
 import { executeKorderCursor } from "./core/optimization/korderCursorExecutor";
 import { buildKorderCursorQuery } from "./converter/korderCursorQuery";
+import {
+  planPlainGroupByResolution,
+  resolvePlainGroupBySourceSchemas,
+  type PlainGroupByResolutionPlan,
+  type PlainGroupBySourceSchemaInput,
+} from "./core/optimization/plainGroupByPlan";
+import { isSystemLikeFieldCode } from "./core/systemFields";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -2384,6 +2391,12 @@ async function executeSelect(
     }
     return result;
   }
+  const plainGroupByPlan = await buildRuntimePlainGroupByPlan(
+    stmt,
+    client,
+    cacheContext,
+    cteCache
+  );
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
   const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
   if (whereCapability.capability === "UNSUPPORTED") {
@@ -2438,7 +2451,8 @@ async function executeSelect(
         cteCache,
         whereCapability.capability === "EXACT_PUSHDOWN",
         orderMeta,
-        prefilterPlan
+        prefilterPlan,
+        plainGroupByPlan
       );
     }
   } catch (error) {
@@ -2451,6 +2465,113 @@ async function executeSelect(
     );
   }
   return result;
+}
+
+/**
+ * B71: source schema が揃った SELECT 単位で plain GROUP BY を解決する。
+ * 確定した plan は fetch と pre-group 評価で共有する。
+ */
+async function buildRuntimePlainGroupByPlan(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>
+): Promise<PlainGroupByResolutionPlan | undefined> {
+  if (stmt.groupBy.length === 0) return undefined;
+
+  const sources = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const inputs = await Promise.all(sources.map(async (source): Promise<PlainGroupBySourceSchemaInput> => {
+    if (source.cteName !== null) {
+      const materialized = materializedTables?.get(source.cteName);
+      if (!materialized) {
+        throw new Error(`InternalError: materialized schema ${source.cteName} is not available for GROUP BY planning.`);
+      }
+      return { kind: "MATERIALIZED", columns: materialized.columns };
+    }
+
+    const fields = await getFieldsCached(source.appId, client, cacheContext);
+    if (!source.subtableCode) {
+      return {
+        kind: "APP",
+        fieldCodes: fields.filter((field) => !field.inSubtable).map((field) => field.code),
+      };
+    }
+
+    const exactChildren = fields.filter((field) =>
+      field.inSubtable && field.subtableCode === source.subtableCode
+    );
+    // 古い埋め込み client は subtableCode を省略することがあるため、
+    // 対象表を一意に絞れない metadata では従来の全 child code を採る。
+    const childFields = exactChildren.length > 0
+      ? exactChildren
+      : fields.filter((field) => field.inSubtable && field.subtableCode === undefined);
+    return {
+      kind: "SUBTABLE",
+      childFieldCodes: childFields.map((field) => field.code),
+      parentFieldCodes: fields.filter((field) => !field.inSubtable).map((field) => field.code),
+    };
+  }));
+
+  const schemas = resolvePlainGroupBySourceSchemas(
+    stmt,
+    (_source, sourceIndex) => inputs[sourceIndex]
+  );
+  const groupBy = stmt.groupBy;
+  const plan = planPlainGroupByResolution(groupBy, stmt.columns, schemas);
+  assertRuntimePlainGroupByPlan(stmt, groupBy, plan);
+  return plan;
+}
+
+function assertRuntimePlainGroupByPlan(
+  stmt: SelectStatement,
+  groupBy: readonly GroupByKey[],
+  plan: PlainGroupByResolutionPlan
+): void {
+  const physicalAppIds = [
+    stmt.from,
+    ...stmt.joins.map((join) => join.table),
+  ].flatMap((source) => source.cteName === null ? [source.appId] : []);
+  const uniquePhysicalAppIds = [...new Set(physicalAppIds)];
+  const primaryPhysicalAppId = uniquePhysicalAppIds.length === 1
+    ? uniquePhysicalAppIds[0]
+    : stmt.from.cteName === null
+      ? stmt.from.appId
+      : null;
+
+  plan.items.forEach((item, index) => {
+    if (
+      item.kind === "EXPRESSION"
+      || item.kind === "PHYSICAL"
+      || item.kind === "ALIAS_SAFE"
+    ) return;
+    const key = groupBy[index];
+    const name = key?.type === "FIELD_NAME" ? key.name : "(expression)";
+    if (item.kind === "UNKNOWN") {
+      const appSuffix = primaryPhysicalAppId === null ? "" : ` (APP${primaryPhysicalAppId})`;
+      throw new Error(`ArgumentError: unknown field code(s): ${item.name}${appSuffix}`);
+    }
+    if (item.kind === "ALIAS_REJECT") {
+      if (item.reason === "DUPLICATE") {
+        throw new Error(
+          `ArgumentError: GROUP BY alias ${name} is ambiguous across multiple SELECT columns ` +
+          "(reason=GROUP_BY_ALIAS_AMBIGUOUS)."
+        );
+      }
+      if (item.reason === "POST_GROUP_ONLY") {
+        throw new Error(
+          `ArgumentError: GROUP BY alias ${name} requires post-group evaluation ` +
+          "(reason=GROUP_BY_ALIAS_POST_GROUP_ONLY)."
+        );
+      }
+      throw new Error(
+        `ArgumentError: GROUP BY alias ${name} depends on aggregate evaluation ` +
+        "(reason=GROUP_BY_ALIAS_AGGREGATE)."
+      );
+    }
+    throw new Error(
+      `InternalError: deferred GROUP BY field ${item.name} reached runtime planning.`
+    );
+  });
 }
 
 const resolvedGroupingSpecs = new WeakMap<SelectStatement, ResolvedGroupingSpec>();
@@ -2869,6 +2990,7 @@ async function validateSelectFieldCodes(
   } else {
     const tables = [stmt.from, ...stmt.joins.map((j) => j.table)].filter((t) => t.cteName === null);
     for (const table of tables) {
+      // B71 の plan で解決済みの GROUP BY field を含む、取得対象列を検証する。
       addFields(table.appId, selectToFetchAllFields(stmt, table));
     }
   }
@@ -3646,7 +3768,8 @@ async function executeFullScanSelect(
   cteCache?: Map<string, MaterializedTable>,
   allowOriginalWherePushdown = true,
   preloadedOrderMeta?: OrderByMeta,
-  prefilterPlan?: RelativeDatePrefilterPlan
+  prefilterPlan?: RelativeDatePrefilterPlan,
+  plainGroupByPlan?: PlainGroupByResolutionPlan
 ): Promise<SelectResult> {
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
@@ -3685,6 +3808,9 @@ async function executeFullScanSelect(
   }
   const mainFetchCondition = prefilterPlan ? prefilterPlan.prefilterWhere : mainPushDown;
 
+  // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
+  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
+
   // メインテーブルのフェッチを開始（await しない）
   const constantFalse = isConstantFalseWhere(stmt.where);
   const mainFetch = constantFalse ? Promise.resolve([]) : fetchTableRecordsForFullScan(
@@ -3697,7 +3823,8 @@ async function executeFullScanSelect(
     options.onLimitReached ?? "error",
     warnings,
     mainFetchCondition,
-    allowOriginalWherePushdown
+    allowOriginalWherePushdown,
+    plainGroupByPlan
   );
 
   // JOIN テーブルを push-down の有無で振り分け
@@ -3725,7 +3852,9 @@ async function executeFullScanSelect(
           false,
           options.onLimitReached ?? "error",
           warnings,
-          jCond
+          jCond,
+          true,
+          plainGroupByPlan
         ),
       });
     } else {
@@ -3733,13 +3862,10 @@ async function executeFullScanSelect(
     }
   }
 
-  // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
-  // （レコードに依存しないため、フェッチ完了を待つ必要がない）
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
+  // ORDER BY メタ情報はレコード取得と並行して解決する。
   const orderByMetaPromise = preloadedOrderMeta
     ? Promise.resolve(preloadedOrderMeta)
     : buildOrderByMetaForSelect(stmt, client, cacheContext, cteCache);
-  scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
   // メインテーブルの完了を待つ
@@ -3763,7 +3889,8 @@ async function executeFullScanSelect(
       parallel,
       options.onLimitReached ?? "error",
       warnings,
-      null
+      null,
+      plainGroupByPlan
     );
     const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
       stmt,
@@ -3774,13 +3901,14 @@ async function executeFullScanSelect(
       false,
       options.onLimitReached ?? "error",
       warnings,
-      null
+      null,
+      true,
+      plainGroupByPlan
     );
     tables.set(join.table.alias, joinRecords);
   }));
 
-  // 並行解決していたスカラーサブクエリ・ORDER BY メタ情報を回収
-  const scalarCache = await scalarCachePromise;
+  // 並行解決していた ORDER BY メタ情報を回収
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
 
   // JS 集計パイプライン
@@ -3799,6 +3927,7 @@ async function executeFullScanSelect(
     appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
     ...(prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
+    plainGroupByPlan,
   });
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
@@ -3973,6 +4102,12 @@ async function executeFullScanWithCte(
 ): Promise<SelectResult> {
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   const resolvedGroupingSpec = resolvedGroupingSpecs.get(stmt);
+  const plainGroupByPlan = await buildRuntimePlainGroupByPlan(
+    stmt,
+    client,
+    cacheContext,
+    cteCache
+  );
   const hiddenQualifiedAliases = new Set<string>();
   const withEffectiveAlias = (table: TableRef): TableRef => {
     if (table.alias !== null || table.cteName === null) return table;
@@ -4053,10 +4188,15 @@ async function executeFullScanWithCte(
   const pushdownPlan = buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
 
-  // フィールド定義・スカラーサブクエリはレコード取得と並行して解決する
-  const scalarCachePromise = resolveScalarColumns(stmt.columns, client, effectiveOptions, cacheContext, cteCache);
+  // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
+  const scalarCache = await resolveScalarColumns(
+    stmt.columns,
+    client,
+    effectiveOptions,
+    cacheContext,
+    cteCache
+  );
   const orderByMetaPromise = Promise.resolve(orderMeta);
-  scalarCachePromise.catch(() => { /* 後段の await で再スロー（未処理拒否の抑止のみ） */ });
   orderByMetaPromise.catch(() => { /* 同上 */ });
 
   const tables = new Map<string | null, KintoneRecord[]>();
@@ -4078,7 +4218,8 @@ async function executeFullScanWithCte(
       effectiveOptions.onLimitReached ?? "error",
       warnings,
       pushdownPlan.mainCondition,
-      whereCapability.capability === "EXACT_PUSHDOWN"
+      whereCapability.capability === "EXACT_PUSHDOWN",
+      plainGroupByPlan
     ));
     tables.set(stmt.from.alias, mainRecords);
   }
@@ -4102,7 +4243,8 @@ async function executeFullScanWithCte(
         parallel,
         effectiveOptions.onLimitReached ?? "error",
         warnings,
-        pushDownCond
+        pushDownCond,
+        plainGroupByPlan
       );
       const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
         stmt,
@@ -4113,14 +4255,15 @@ async function executeFullScanWithCte(
         false,
         effectiveOptions.onLimitReached ?? "error",
         warnings,
-        pushDownCond
+        pushDownCond,
+        true,
+        plainGroupByPlan
       );
       tables.set(join.table.alias, joinRecords);
     }
   }));
   await Promise.all(joinFetches);
 
-  const scalarCache = await scalarCachePromise;
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
     ? requireMaterializedTable(stmt.from.cteName).columns
@@ -4142,6 +4285,7 @@ async function executeFullScanWithCte(
     tableColumns,
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
+    plainGroupByPlan,
   });
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -4163,9 +4307,10 @@ async function fetchTableRecordsForFullScan(
   onLimit: "error" | "truncate",
   warnings: Set<string>,
   pushDownCond: WhereExpr | null = null,
-  allowOriginalWherePushdown = true
+  allowOriginalWherePushdown = true,
+  plainGroupByPlan?: PlainGroupByResolutionPlan
 ): Promise<KintoneRecord[]> {
-  const fields = selectToFetchAllFields(stmt, table);
+  const fields = selectToFetchAllFields(stmt, table, plainGroupByPlan);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
   };
@@ -4358,7 +4503,8 @@ async function tryFetchJoinRecordsBySourceKeys(
   parallel: number,
   onLimit: "error" | "truncate",
   warnings: Set<string>,
-  pushDownCond: WhereExpr | null = null
+  pushDownCond: WhereExpr | null = null,
+  plainGroupByPlan?: PlainGroupByResolutionPlan
 ): Promise<KintoneRecord[] | null> {
   if (join.type !== "INNER") return null;
   if (!join.table.alias) return null;
@@ -4401,7 +4547,7 @@ async function tryFetchJoinRecordsBySourceKeys(
     return null;
   }
 
-  const fields = selectToFetchAllFields(stmt, join.table);
+  const fields = selectToFetchAllFields(stmt, join.table, plainGroupByPlan);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
   };
@@ -4463,10 +4609,6 @@ function setScopedCacheValue<T>(
     root.set(cacheContext, scoped);
   }
   scoped.set(appId, value);
-}
-
-function isSystemLikeFieldCode(code: string): boolean {
-  return code.startsWith("_") || code.startsWith("$");
 }
 
 async function getFieldsCached(appId: number, client: KintoneClient, cacheContext: string): Promise<KintoneFieldInfo[]> {
@@ -8346,6 +8488,7 @@ async function resolveScalarColumns(
 interface ExplainWhereAnalysis {
   capabilities: Map<SelectStatement, PredicateCapabilityResult>;
   orderPlans: Map<SelectStatement, CanonicalOrderPlan>;
+  plainGroupByPlans: Map<SelectStatement, PlainGroupByResolutionPlan>;
   fieldApps: Set<number>;
   processStatusApps: Set<number>;
   numberPrecisionApps: Set<number>;
@@ -8391,6 +8534,7 @@ async function buildExplainWhereAnalysis(
   };
   const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
   const orderPlans = new Map<SelectStatement, CanonicalOrderPlan>();
+  const plainGroupByPlans = new Map<SelectStatement, PlainGroupByResolutionPlan>();
   const seen = new Set<object>();
   const sharedRelativeDatePlan = relativeDatePlan
     ?? await resolveRelativeDateExecutionPlan(query as Statement, tracedClient, cacheContext);
@@ -8411,6 +8555,16 @@ async function buildExplainWhereAnalysis(
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
       await validateSelectGroupingPlanning(select, tracedClient, cacheContext);
+      const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)]
+        .some((table) => table.cteName !== null);
+      if (normalizeGroupingSpec(select).type === "PLAIN" && !hasUnmaterializedSource) {
+        const plainPlan = await buildRuntimePlainGroupByPlan(
+          select,
+          tracedClient,
+          cacheContext
+        );
+        if (plainPlan) plainGroupByPlans.set(select, plainPlan);
+      }
       const physicalApps = [select.from, ...select.joins.map((join) => join.table)]
         .filter((table) => table.cteName === null)
         .map((table) => table.appId);
@@ -8436,8 +8590,6 @@ async function buildExplainWhereAnalysis(
             }
           }
         }
-        const hasUnmaterializedSource = [select.from, ...select.joins.map((join) => join.table)]
-          .some((table) => table.cteName !== null);
         // batch EXPLAIN は temp/CTE の実体化前には列意味型を確定できない。
         // 実行時 planner は materialized metadata を受けて同じ検査を行う。
         if (hasCanonicalOrder(select) && !hasUnmaterializedSource && relativeNode?.allowed !== false) {
@@ -8571,6 +8723,7 @@ async function buildExplainWhereAnalysis(
   return {
     capabilities,
     orderPlans,
+    plainGroupByPlans,
     fieldApps,
     processStatusApps,
     numberPrecisionApps,
@@ -9005,7 +9158,7 @@ async function executeExplain(
         ...addCursorConcurrency(
           buildExplainPlan(
             stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
-            dmlMaxRows, dmlMaxSubtableRows, maxRecords
+            dmlMaxRows, dmlMaxSubtableRows, maxRecords, analysis.plainGroupByPlans
           ),
           cursorMaxActive
         ),
@@ -9037,14 +9190,15 @@ function buildExplainPlan(
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
-  maxRecords = 10_000
+  maxRecords = 10_000,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
-  if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans);
-  if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans);
+  if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans, plainGroupByPlans);
+  if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans, plainGroupByPlans);
   if (query.type === "INSERT")        return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
-  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans);
+  if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
-  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans);
+  if (query.type === "UPSERT_SELECT") return buildUpsertSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
   if (query.type === "UPDATE")        return buildUpdatePlan(
     query, label, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows, maxRecords
   );
@@ -9126,7 +9280,7 @@ function buildExplainPlan(
       `  duplicateKey:  preflight before lookup/write (requires load)`,
     ];
   }
-  return buildSelectPlan(query, label, capabilities, orderPlans);
+  return buildSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
 }
 
 function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
@@ -9161,13 +9315,17 @@ function buildSelectPlan(
   stmt: SelectStatement,
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities
     ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
     : undefined);
   const orderPlan = orderPlans?.get(stmt) ?? (orderPlans
     ? [...orderPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
+    : undefined);
+  const plainGroupByPlan = plainGroupByPlans?.get(stmt) ?? (plainGroupByPlans
+    ? [...plainGroupByPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
     : undefined);
   const mode = orderPlan?.kind === "CANONICAL_LOCAL"
     ? "FULL_SCAN"
@@ -9200,6 +9358,31 @@ function buildSelectPlan(
       `  grouping output rows: runtime checked (limit: ${groupingMetadata.outputRowLimit}, ` +
       "before HAVING/DISTINCT/LIMIT)"
     );
+  }
+  const normalizedGrouping = normalizeGroupingSpec(stmt);
+  if (normalizedGrouping.type === "PLAIN") {
+    const groupBy = normalizedGrouping.allItems;
+    if (plainGroupByPlan) {
+      plainGroupByPlan.items.forEach((item, index) => {
+        const key = groupBy[index];
+        if (key?.type !== "FIELD_NAME") return;
+        if (item.kind === "PHYSICAL") {
+          lines.push(
+            `  group key ${key.name}: PHYSICAL ` +
+            `(source=${item.sourceIndex}, field=${item.fieldCode})`
+          );
+        }
+      });
+    } else if ([stmt.from, ...stmt.joins.map((join) => join.table)]
+      .some((table) => table.cteName !== null)) {
+      for (const key of groupBy) {
+        if (key.type === "FIELD_NAME") {
+          lines.push(
+            `  group key ${key.name}: DEFERRED (materialized schema unavailable)`
+          );
+        }
+      }
+    }
   }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
@@ -9250,7 +9433,7 @@ function buildSelectPlan(
   } else {
     const pushdownPlan = buildKlikePushdownPlan(stmt);
     // メインテーブル
-    const mainFields = selectToFetchAllFields(stmt, stmt.from);
+    const mainFields = selectToFetchAllFields(stmt, stmt.from, plainGroupByPlan);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
     const mainPushDown = pushdownPlan.mainCondition;
     const mainCandidate = extractMainTypedPushdownCandidate(stmt);
@@ -9271,7 +9454,7 @@ function buildSelectPlan(
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
     for (const join of stmt.joins) {
-      const joinFields = selectToFetchAllFields(stmt, join.table);
+      const joinFields = selectToFetchAllFields(stmt, join.table, plainGroupByPlan);
       const joinAliasStr = join.table.alias ? ` AS ${join.table.alias}` : "";
       const joinType  = join.type === "INNER" ? "JOIN" : `${join.type} JOIN`;
       const joinPushDown = join.table.alias
@@ -9291,14 +9474,15 @@ function buildSelectPlan(
     }
   }
 
-  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans));
+  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans, plainGroupByPlans));
   return lines;
 }
 
 function buildUnionPlan(
   stmt: UnionStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   // UnionStatement は left / right の二分木 — 左辺を再帰的に展開して全 SELECT を収集
   const selects: SelectStatement[] = [];
@@ -9312,7 +9496,7 @@ function buildUnionPlan(
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans));
   });
   return lines;
 }
@@ -9320,22 +9504,32 @@ function buildUnionPlan(
 function buildWithPlan(
   stmt: WithStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans));
       lines.push("");
     }
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
-    lines.push(...buildExplainPlan(stmt.query, "[main]", capabilities, orderPlans));
+    lines.push(...buildExplainPlan(
+      stmt.query,
+      "[main]",
+      capabilities,
+      orderPlans,
+      100,
+      DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+      10_000,
+      plainGroupByPlans
+    ));
   }
   if (canInlineSingleCte(stmt)) {
     lines.push("");
     const inlined = buildInlinedQuery(stmt);
-    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans));
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans));
   }
   return lines;
 }
@@ -9377,7 +9571,8 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
 function collectSubqueryPlans(
   stmt: SelectStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   const lines: string[] = [];
   let idx = 1;
@@ -9387,14 +9582,14 @@ function collectSubqueryPlans(
     switch (w.type) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
         }
         break;
       case "EXISTS":
-        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans));
+        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
         break;
       case "LOGICAL":  visitWhere(w.left); visitWhere(w.right); break;
       case "NOT":
@@ -9408,7 +9603,7 @@ function collectSubqueryPlans(
 
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
-      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans));
+      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
     }
   }
 
@@ -9445,7 +9640,8 @@ function buildInsertSelectPlan(
   stmt: InsertSelectStatement,
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   const lines: string[] = [];
   if (label) lines.push(label);
@@ -9454,7 +9650,7 @@ function buildInsertSelectPlan(
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
   return lines;
 }
 
@@ -9652,7 +9848,8 @@ function buildUpsertSelectPlan(
   stmt: UpsertSelectStatement,
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
 ): string[] {
   const lines: string[] = [
     ...(label ? [label] : []),
@@ -9663,7 +9860,7 @@ function buildUpsertSelectPlan(
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
     ``,
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
   return lines;
 }
 

@@ -118,7 +118,7 @@ function collectNonAggregateFieldRefs(node: unknown, out: FieldRef[]): void {
   Object.values(value).forEach((item) => collectNonAggregateFieldRefs(item, out));
 }
 
-function containsAggregate(node: unknown): boolean {
+export function containsAggregate(node: unknown): boolean {
   if (node === null || typeof node !== "object") return false;
   if (Array.isArray(node)) return node.some(containsAggregate);
   const value = node as Record<string, unknown>;
