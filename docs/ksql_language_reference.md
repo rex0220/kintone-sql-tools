@@ -7,6 +7,27 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 > 本書は言語仕様を中心に記載しています。CLI / プラグインの UI・運用オプションは補足扱いです。
 > 実行時オプションの詳細は `README.md` および `docs/ksql_cli_console_spec.md` を参照してください。
 
+> **⚠ Unreleased の破壊的変更（minor リリース）**  
+> `^3` の利用者にも自動更新で届きます。`WHERE` の `TODAY()` / `NOW()` / `LOGINUSER()` は
+> kintone REST query へ安全に押し下げられる形だけを許可し、従来 client 評価へ落ちていた形は
+> レコード取得前に `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` で拒否します。また、
+> ユーザー系・複数選択系へ型に合わない演算子を書くと、従来の silent 0 rows ではなく
+> `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で拒否します。
+>
+> 新たにエラーになる代表例は `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、
+> `WHERE $id >= TODAY()`、および押し下げ不能な `OR` / `NOT` / JOIN / 入れ子 SELECT /
+> 実体化文脈の `UNION` 枝にある `TODAY()` / `NOW()` / `LOGINUSER()` です。
+> ユーザー系・複数選択系は `in` / `not in` を使い、`WHERE` 全体または関数 leaf を
+> 押し下げ可能な形へ書き換えるか、`TODAY()` / `NOW()` を固定の日付・日時リテラルへ
+> 置き換えてください。
+>
+> **同時に利用可能な形も増えます。** 従来 kSQL で表現できなかった
+> `WHERE 作成者 in (LOGINUSER())` を追加しました。`TODAY()` / `NOW()` は相対日付関数と同じ
+> server-only の計画になり、たとえば
+> `WHERE 日付 = TODAY() AND LENGTH(件名) > 1` は日付条件を server prefilter へ押し下げ、
+> client は残余だけを評価します。B75 により whole-WHERE exact なら CTE 本体・
+> `WITH` の最終 SELECT・一時テーブル source でも使えます。
+
 ---
 
 ## 目次
@@ -636,12 +657,35 @@ SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
 - `DAYOFWEEK` / `QUARTER` / `WEEK` / `LAST_DAY` は予約語です。同名フィールドは `` `WEEK` `` のようにバッククォートで囲みます。`WEEKLY` のような長い識別子は影響を受けません。
 
 > **`CURRENT_DATE()` / `CURRENT_TIMESTAMP()` はキーワードではありません。**  
-> `()` があれば関数、なければフィールド参照として扱われます。  
-> kintone 専用の `TODAY()` / `NOW()` と異なり、SELECT 列でも使用できます。
+> `()` があれば関数、なければフィールド参照として扱われます。kSQL のスカラー関数であり、
+> kintone REST query への押し下げ経路はありません。SELECT 列でも `WHERE` でも、常に
+> **実行環境のローカルタイムゾーン**で client 評価されます。本リリースの
+> kintone query function の fail-closed 対象外です。
 
-#### kintone 相対日付関数
+#### kintone クエリ関数（server-only）
 
-次の12関数は、WHERE の比較右辺で kintone REST query へそのまま渡す **server-only** 関数です。Node / CLI / MCP / プラグインのローカル時計では評価せず、kintone サーバーが関数の値・期間と比較結果を決定します。
+`TODAY()` / `NOW()` / `LOGINUSER()` と次の相対日付12関数は、`WHERE` で kintone REST query
+へそのまま渡す **server-only** 関数です。Node / CLI / MCP / プラグインで client 評価せず、
+kintone サーバーが値・期間と比較結果を決定します。
+
+| 関数 | 対象フィールド型 | 演算子・形 |
+|---|---|---|
+| `TODAY()` | `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` | 比較右辺の `=` / `!=` / `<` / `<=` / `>` / `>=`、`BETWEEN` 境界 |
+| `NOW()` | `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` | 比較右辺の `=` / `!=` / `<` / `<=` / `>` / `>=`、`BETWEEN` 境界。**`DATE` には使用不可** |
+| `LOGINUSER()` | `CREATOR` / `MODIFIER` / `USER_SELECT` | singleton の `in (LOGINUSER())` / `not in (LOGINUSER())` のみ |
+
+```sql
+SELECT * FROM APP100 WHERE 日付 = TODAY()
+SELECT * FROM APP100 WHERE 作成日時 <= NOW()
+SELECT * FROM APP100 WHERE 作成者 in (LOGINUSER())
+SELECT * FROM APP100 WHERE 担当者 not in (LOGINUSER())
+```
+
+`LOGINUSER()` は `作成者` / `更新者` / ユーザー選択だけに使用できます。
+**グループ選択には使用できません**（kintone 公式の型別表で利用可能な関数は「なし」）。
+組織選択の `PRIMARY_ORGANIZATION()` は kSQL 未対応です。
+
+**相対日付関数（12関数）**
 
 | 分類 | 関数と引数 |
 |---|---|
@@ -660,10 +704,10 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 ```
 
 - 対象は単一の物理アプリに由来する `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
-- 相対日付関数を含む条件は、レコード取得前に kintone REST query への押し下げ計画が確定できる場合だけ実行できます。相対日付関数そのものを client の時計で評価することはありません（client fallback なし・相対日付の client 評価は常に 0 回）。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
-- **相対日付関数を使える形は次の2つだけです**。
+- kintone クエリ関数を含む条件は、レコード取得前に REST query への押し下げ計画が確定できる場合だけ実行できます。関数そのものを client 評価する **client fallback はなく**、client 評価回数は常に 0 です。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
+- **kintone クエリ関数を使える SELECT の形は次の2つです**。
 
-  1. **その SELECT の `WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等、B75 で CTE・一時テーブル source に拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。トップレベル SELECT に加え、**実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `CREATE TEMP TABLE ... AS WITH ...` の source、単一 CTE のインライン展開**でも使用できます。`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても構いません（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません。`ksql_explain` は `relative date evaluation: kintone server whole-WHERE exact`・`client residual: (none)`・`relative date client evaluations: 0` を表示）。
+  1. **その SELECT の `WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等、B75 で CTE・一時テーブル source に拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。トップレベル SELECT に加え、**実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `CREATE TEMP TABLE ... AS WITH ...` の source、単一 CTE のインライン展開**でも使用できます。`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても構いません。トップレベルの `KORDER BY` もこの whole-WHERE exact の形だけは native / Cursor とも使用できます（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません）。
 
      ```sql
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH()
@@ -671,6 +715,8 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
      SELECT 区分, COUNT(*) AS 件数 FROM APP100
      WHERE 日付 = THIS_MONTH() GROUP BY 区分                                  -- 集計クエリでも可（v3.24.0）
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH() ORDER BY 日付             -- 通常の ORDER BY も可（v3.24.0）
+     SELECT 日付 FROM APP100 WHERE 日付 = TODAY()
+     KORDER BY 日付 LIMIT 5                                                   -- KORDER も whole-WHERE exact なら可
      WITH 月別 AS (
        SELECT 区分, COUNT(*) AS 件数 FROM APP100
        WHERE 日付 = THIS_MONTH() GROUP BY 区分
@@ -680,15 +726,20 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
      SELECT * FROM APP100 WHERE 日付 = THIS_MONTH()                            -- 一時テーブル source でも可
      ```
 
-  2. **prefilter ＋残余（v3.21.0）**: 単一の物理アプリを読む SELECT で、相対日付の exact leaf が「相対日付を含まない残余」（例 `LENGTH(都道府県) > 1`・`LIKE`）と `AND` で結ばれている場合。相対日付 leaf だけを kintone REST query の prefilter として押し下げ、取得後は残余だけを client 評価します（`ksql_explain` は `where capability: SUPERSET_PREFILTER`・`server prefilter:`・`client residual:`・`relative date client evaluations: 0` を表示）。相対日付の値・比較は依然すべて kintone サーバーが決定します。`BETWEEN` 展開の各境界や複数の相対日付 leaf、`KLIKE`・押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載ります。この形は `GROUP BY` などで FULL_SCAN になっていても使用できます。
+  2. **prefilter ＋残余（v3.21.0）**: 単一の物理アプリを読む SELECT で、kintone クエリ関数の exact leaf が「関数を含まない残余」（例 `LENGTH(都道府県) > 1`・`LIKE`）と `AND` で結ばれている場合。関数 leaf だけを kintone REST query の prefilter として押し下げ、取得後は残余だけを client 評価します。関数の値・比較は依然すべて kintone サーバーが決定します。`BETWEEN` 展開の各境界や複数の関数 leaf、`KLIKE`・押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載ります。この形は `GROUP BY` などで FULL_SCAN になっていても使用できます。
 
-- 次の計画は、相対日付を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
+     ```sql
+     SELECT 日付, 件名 FROM APP100
+     WHERE 日付 = TODAY() AND LENGTH(件名) > 1   -- 日付だけ server prefilter、LENGTH だけ client
+     ```
+
+- 次の計画は、関数を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（legacy 3 関数は reason `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`、相対日付12関数は `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
 
   - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。**回避策**: 押し下げ可能な述語へ置換する（例 `都道府県 != ''`）か、上記2の形（相対日付 leaf と残余を `AND` で結ぶ）にします。
-  - `KORDER BY`（native・Cursor とも）／JOIN／`VALIDATE`／サブテーブル／入れ子 SELECT（スカラーサブクエリ等）／派生表を入力とする計画。**実体化 CTE 本体・`WITH` の最終クエリ・一時テーブル source が `UNION` の場合**（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば使用できます）。**DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、上記2の prefilter＋残余は使用できません。
+  - JOIN／`VALIDATE`／サブテーブル／入れ子 SELECT（スカラーサブクエリ等）／派生表を入力とする計画。**実体化 CTE 本体・`WITH` の最終クエリ・一時テーブル source が `UNION` の場合**（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば使用できます）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、上記2の prefilter＋残余や FULL_SCAN_EXACT は使用できません。
 - **CTE・一時テーブルに残る非対称**: 押し下げ不能な述語が `AND` で混ざる形（例 `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1`）は、トップレベルの単一物理アプリ SELECT では上記2の prefilter＋残余として使用できますが、**CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使用できません**。これらの実体化経路では、その SELECT の `WHERE` 全体が exact である必要があります。該当する場合は CTE や一時テーブルへ切り出さず、トップレベル SELECT として書いてください。
 - 一時テーブルの実体化行数には通常の `maxRecords` とは別に専用の `tempTableMaxRows`（既定 10,000）が適用されます。超過時は `onLimit` の設定にかかわらず常にエラーで、日付リテラルと相対日付で扱いは同一です。
-- 診断 reason code は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` です。
+- legacy 3 関数の診断 reason code は `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` です。相対日付12関数は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を使用します。
 - 関数名、`DAYS` / `WEEKS` / `MONTHS` / `YEARS`、曜日、`LAST` は hard keyword ではなく、該当する WHERE 値・引数位置だけで解釈する soft keyword です。同名フィールドは通常どおり使えます。関数呼び出しとの曖昧さを避ける場合は `` `FROM_TODAY` ``、`` `LAST` `` のようにバッククォートで退避してください。引用した単位・曜日・`LAST` は関数引数としては受理しません。
 
 ### 関数のネスト
@@ -703,6 +754,15 @@ SELECT ROUND(金額 * 1.1, 0) AS 税込金額 FROM APP100
 ---
 
 ## 6. WHERE 句
+
+> **⚠ Unreleased 移行注意（minor だが破壊的）:** `^3` にも自動更新で届きます。
+> `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、`WHERE $id >= TODAY()`、および
+> 押し下げ不能位置の `TODAY()` / `NOW()` / `LOGINUSER()` は取得前エラーになります。
+> ユーザー系・複数選択系は `in` / `not in` を使い、関数条件を押し下げ可能にするか、
+> 固定の日付・日時リテラルへ置換してください。一方、
+> `WHERE 作成者 in (LOGINUSER())` が新たに使えます。
+> `WHERE 日付 = TODAY() AND LENGTH(件名) > 1` は日付条件を server prefilter へ押し下げ、
+> B75 により whole-WHERE exact なら CTE 本体・一時テーブルでも使用できます。
 
 ### 比較演算子
 
@@ -727,7 +787,7 @@ WHERE 担当者 != '山田'
 
 ### 相対日付関数
 
-`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。後者の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`KORDER BY`・JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**は fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。 なお **DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）では、その `WHERE` 全体が exact な形だけが使え、prefilter＋client 残余の形は使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。後者の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**は fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ### 型付き比較（v3.0.0）
 
@@ -795,6 +855,9 @@ WHERE ステータス NOT IN ('キャンセル', '却下')
 **IN リストの値（構文）**
 
 - 単一引用符の文字列 `'...'`・数値・バッチ変数 `@名前` を指定でき、**1 要素以上が必須**です。文字列はダブルクォートでなく単一引用符です（`IN ("A")` は構文エラー）。
+- 例外として、`CREATOR` / `MODIFIER` / `USER_SELECT` では singleton の
+  `in (LOGINUSER())` / `not in (LOGINUSER())` を使用できます。文字列・数値との混在 list、
+  複数個の `LOGINUSER()`、`TODAY()` / `NOW()` / 相対日付関数は IN list に指定できません。
 - 負数リテラルも指定できます（`IN (-1, -2)`）。
 - **`IN ()`（0 要素）は書けません**（ParseError）。「空／未選択」を探すのは `IN ('')` です（後述）。
 - サブクエリを渡す `IN (SELECT ...)` は別項です（後述）。
@@ -979,28 +1042,42 @@ WHERE SUBSTRING(郵便番号, 1, 3) = '100'
 
 kintone の [クエリ関数](https://cybozu.dev/ja/kintone/docs/overview/query/#function) に対応する関数です。値・比較は kintone サーバーが決定します（server-only）。
 
-**基本の3関数**（`WHERE` の比較値のほか、`SELECT` 列や `SET @var` など式の位置でも使用可）:
+**基本の3関数**:
 
 | 関数 | 意味 |
 |------|------|
 | `TODAY()` | 今日の日付（`YYYY-MM-DD` 形式） |
 | `NOW()`   | 現在日時（ISO 8601 形式） |
-| `LOGINUSER()` | ログイン中のユーザー（kintone 環境のみ有効） |
+| `LOGINUSER()` | ログイン中のユーザー（`WHERE` では kintone server が解決） |
 
 ```sql
 WHERE 作成日時 >= TODAY()
 WHERE 期限日 < TODAY()
-WHERE 担当者 = LOGINUSER()
+WHERE 作成者 in (LOGINUSER())
+WHERE 担当者 not in (LOGINUSER())
 ```
+
+`WHERE` では15関数すべてが server-only です。`TODAY()` は日付系4型、
+`NOW()` は `DATETIME` / 作成日時 / 更新日時（**`DATE` には不可**）の比較右辺・
+`BETWEEN` 境界に使用できます。`LOGINUSER()` は作成者 / 更新者 / ユーザー選択の
+singleton `in` / `not in` だけに使用でき、**グループ選択には使用できません**。
+
+`WHERE` 以外で構文上許可される既存経路の `TODAY()` / `NOW()` は、従来どおり
+実行環境のローカル TZ で評価されます。内部のローカル評価器で `LOGINUSER()` を解決した場合は、
+プラグインを含む**全実行面で空文字**です（`SET @var = LOGINUSER()` はこの silent empty value を
+避けるため構文上拒否します）。現在の日付・日時を意図的に client のローカル TZ で評価する場合は、
+kSQL スカラー関数の `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` を使用してください。
+これらには押し下げ経路がなく、本項の fail-closed 対象外です。
 
 **相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
 
-日付系4型（`DATE` / `DATETIME` / 作成日時 / 更新日時）に対する比較右辺と `BETWEEN` 境界でのみ使用でき、kintone REST クエリへ exact pushdown します。使えるのは **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf を prefilter に押し下げ残余だけ client 評価・v3.21.0 / `SUPERSET_PREFILTER`）の2つです。後者は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`KORDER BY`・JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**はレコード取得前に fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。 なお **DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）では、その `WHERE` 全体が exact な形だけが使え、prefilter＋client 残余の形は使えません。** 関数一覧・引数・型・演算子・reason code・残る非対称は [§5「kintone 相対日付関数」](#kintone-相対日付関数) を参照してください。
+15関数共通で、使えるのは **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**関数を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（関数 leaf を prefilter に押し下げ残余だけ client 評価・`SUPERSET_PREFILTER`）の2つです。後者は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**はレコード取得前に fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML は whole-WHERE exact の形だけが使え、prefilter＋残余や FULL_SCAN_EXACT では使えません。** 型・演算子・reason code・移行方法は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ```sql
 WHERE 作成日時 < FROM_TODAY(5, DAYS)
 WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 WHERE 更新日時 >= YESTERDAY() AND LENGTH(都道府県) > 1   -- prefilter＋残余（v3.21.0）
+WHERE 日付 = TODAY() AND LENGTH(件名) > 1                 -- TODAY() も同じ prefilter
 ```
 
 > kintone クエリ関数のうち `PRIMARY_ORGANIZATION()` は未対応です。

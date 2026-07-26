@@ -24,6 +24,15 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
 
   test("instructions stay a generated catalog pointer instead of duplicating server-only details", () => {
     expect(KSQL_MCP_INSTRUCTIONS).toContain("Use ksql_docs for arguments and constraints.");
+    expect(KSQL_MCP_INSTRUCTIONS).toContain(
+      "WHERE server-only/fail-closed"
+    );
+    expect(KSQL_MCP_INSTRUCTIONS).toContain(
+      "local LOGINUSER is empty on all surfaces"
+    );
+    expect(KSQL_MCP_INSTRUCTIONS).not.toContain(
+      "LOGINUSER resolves to an empty string in Node/MCP"
+    );
     expect(KSQL_MCP_INSTRUCTIONS).not.toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
     expect(KSQL_MCP_INSTRUCTIONS).not.toContain("client fallback");
   });
@@ -84,5 +93,34 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
     for (const text of [languageSource, functionSection, whereSection]) {
       expect(text).not.toContain("一時テーブル・実体化 CTE・派生表");
     }
+  });
+
+  test("B77/B78 migration, function constraints, and KORDER correction are embedded in ksql_docs", () => {
+    const functionSection = resolveKsqlDocsSection(
+      "language-reference/05-string-number-functions"
+    );
+    const whereSection = resolveKsqlDocsSection("language-reference/06-where");
+
+    for (const text of [functionSection, whereSection]) {
+      expect(text).toContain("作成者 in (LOGINUSER())");
+      expect(text).toContain("日付 = TODAY()");
+      expect(text).toContain("server prefilter");
+      expect(text).toContain("whole-WHERE exact");
+      expect(text).toContain("KORDER BY");
+      expect(text).toContain("FULL_SCAN_EXACT");
+    }
+    for (const text of [languageSource, whereSection]) {
+      expect(text).toContain("作成者 = 'taro'");
+      expect(text).toContain("日付 = NOW()");
+      expect(text).toContain("$id >= TODAY()");
+      expect(text).toContain("minor");
+      expect(text).toContain("破壊的");
+    }
+    expect(functionSection).toContain("グループ選択には使用できません");
+    expect(functionSection).toContain("`DATE` には使用不可");
+    expect(functionSection).toContain("CURRENT_DATE()");
+    expect(functionSection).toContain("実行環境のローカルタイムゾーン");
+    expect(functionSection).toContain("WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN");
+    expect(functionSection).not.toContain("`KORDER BY`（native・Cursor とも）");
   });
 });

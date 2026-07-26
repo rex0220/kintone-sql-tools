@@ -7,15 +7,14 @@ import type {
 } from "../../types/ast";
 import type { KlikeExpr } from "../like";
 import {
-  RELATIVE_DATE_FUNCTION_NAMES,
-  isRelativeDateFunctionName,
+  SERVER_ONLY_WHERE_FUNCTION_NAMES,
+  isServerOnlyWhereFunctionName,
 } from "../relativeDateFunction";
 import {
   buildSingleTableKlikePushdownPlan,
 } from "./klikePushdownPlan";
 import { serializationContainsFunctions } from "./relativeDatePushdownGuard";
 import {
-  classifyRelativeDateBinary,
   classifyWhereCapability,
   type PredicateCapability,
   type PredicateCapabilityReason,
@@ -111,12 +110,12 @@ export function decomposeRelativeDatePrefilter(
     return reject(["NOT_DIRECT_PHYSICAL_APP"]);
   }
 
-  const occurrences = collectRelativeOccurrences(stmt.where);
+  const occurrences = collectServerFunctionOccurrences(stmt.where);
   if (occurrences.length === 0) return reject(["NO_RELATIVE_DATE"]);
 
   // capability 名だけで先に落とさず、AND-only / leaf exact の具体的な
   // decomposition failure を先に確定する。
-  const spine = collectRelativeLeavesOnAndSpine(stmt.where, resolveField);
+  const spine = collectServerFunctionLeavesOnAndSpine(stmt.where, resolveField);
   if (!spine.ok) return reject(spine.reasonCodes);
   if (!sameRelativeMultiset(occurrences, spine.leaves)) {
     return reject(["RELATIVE_DATE_LEAF_COUNT_MISMATCH"]);
@@ -143,7 +142,7 @@ export function decomposeRelativeDatePrefilter(
     testSeam.containsFunctions ?? serializationContainsFunctions;
   const confirmedLeaves: BinaryExpr[] = [];
   for (const leaf of spine.leaves) {
-    const name = relativeNameOf(leaf);
+    const name = serverFunctionNameOf(leaf);
     if (name === null) return reject(["RELATIVE_DATE_LEAF_COUNT_MISMATCH"]);
     let query: string;
     try {
@@ -174,7 +173,7 @@ export function decomposeRelativeDatePrefilter(
   } catch {
     return reject(["PREFILTER_SERIALIZATION_FAILED"]);
   }
-  const expectedNames = confirmedLeaves.map((leaf) => relativeNameOf(leaf)!);
+  const expectedNames = confirmedLeaves.map((leaf) => serverFunctionNameOf(leaf)!);
   if (
     !containsFunctions(prefilterQuery, [...new Set(expectedNames)])
     || !serializedMultisetContains(prefilterQuery, expectedNames)
@@ -185,7 +184,10 @@ export function decomposeRelativeDatePrefilter(
   const residualWhere = testSeam.rewriteResidual
     ? testSeam.rewriteResidual(stmt.where, adoptedLeaves)
     : replaceAdoptedLeaves(stmt.where, adoptedLeaves);
-  if (residualWhere !== null && collectRelativeOccurrences(residualWhere).length > 0) {
+  if (
+    residualWhere !== null
+    && collectServerFunctionOccurrences(residualWhere).length > 0
+  ) {
     return reject(["RESIDUAL_RELATIVE_DATE_REMAINED"]);
   }
   if (residualWhere === null) {
@@ -215,7 +217,7 @@ type SpineResult =
     readonly reasonCodes: readonly RelativeDatePrefilterIneligibleReason[];
   };
 
-function collectRelativeLeavesOnAndSpine(
+function collectServerFunctionLeavesOnAndSpine(
   where: WhereExpr,
   resolveField: WhereFieldSemanticsResolver
 ): SpineResult {
@@ -233,24 +235,19 @@ function collectRelativeLeavesOnAndSpine(
           visit(node.right);
           return;
         }
-        if (collectRelativeOccurrences(node).length > 0) {
+        if (collectServerFunctionOccurrences(node).length > 0) {
           failure = "RELATIVE_DATE_CONTEXT_UNSUPPORTED";
         }
         return;
       case "NOT":
-        if (collectRelativeOccurrences(node).length > 0) {
+        if (collectServerFunctionOccurrences(node).length > 0) {
           failure = "RELATIVE_DATE_CONTEXT_UNSUPPORTED";
         }
         return;
       case "BINARY": {
-        const name = relativeNameOf(node);
+        const name = serverFunctionNameOf(node);
         if (name === null) return;
-        const result = classifyRelativeDateBinary(
-          node.op,
-          node.left,
-          node.right as Extract<typeof node.right, { type: "KINTONE_FUNC" }>,
-          resolveField
-        );
+        const result = classifyWhereCapability(node, resolveField);
         if (result.capability !== "EXACT_PUSHDOWN") {
           failure = "RELATIVE_DATE_LEAF_NOT_EXACT";
           return;
@@ -259,7 +256,7 @@ function collectRelativeLeavesOnAndSpine(
         return;
       }
       case "EXISTS":
-        if (collectRelativeOccurrences(node).length > 0) {
+        if (collectServerFunctionOccurrences(node).length > 0) {
           failure = "RELATIVE_DATE_CONTEXT_UNSUPPORTED";
         }
         return;
@@ -274,17 +271,28 @@ function collectRelativeLeavesOnAndSpine(
     : { ok: false, reasonCodes: [failure] };
 }
 
-function relativeNameOf(leaf: BinaryExpr): string | null {
-  return leaf.right.type === "KINTONE_FUNC"
-    && isRelativeDateFunctionName(leaf.right.name)
-    ? leaf.right.name
-    : null;
+function serverFunctionNameOf(leaf: BinaryExpr): string | null {
+  if (
+    leaf.right.type === "KINTONE_FUNC"
+    && isServerOnlyWhereFunctionName(leaf.right.name)
+  ) {
+    return leaf.right.name;
+  }
+  if (
+    leaf.right.type === "IN_LIST"
+    && leaf.right.values.length === 1
+    && leaf.right.values[0].type === "KINTONE_FUNC"
+    && isServerOnlyWhereFunctionName(leaf.right.values[0].name)
+  ) {
+    return leaf.right.values[0].name;
+  }
+  return null;
 }
 
-function collectRelativeOccurrences(where: WhereExpr): BinaryExpr[] {
+function collectServerFunctionOccurrences(where: WhereExpr): BinaryExpr[] {
   const found: BinaryExpr[] = [];
   const visitWhere = (node: WhereExpr): void => {
-    if (node.type === "BINARY" && relativeNameOf(node) !== null) {
+    if (node.type === "BINARY" && serverFunctionNameOf(node) !== null) {
       found.push(node);
       return;
     }
@@ -457,7 +465,7 @@ function serializedMultisetContains(
 ): boolean {
   const expected = new Map<string, number>();
   for (const name of expectedNames) {
-    if (!RELATIVE_DATE_FUNCTION_NAMES.has(name)) return false;
+    if (!SERVER_ONLY_WHERE_FUNCTION_NAMES.has(name)) return false;
     expected.set(name, (expected.get(name) ?? 0) + 1);
   }
   for (const [name, count] of expected) {

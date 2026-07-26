@@ -1,7 +1,10 @@
 import { parseSqlStatement } from "../../sql";
 import { resolveFieldSemantics } from "../../fieldSemantics";
-import { classifyWhereCapability, nativeWhereOperatorsForType } from "../whereCapability";
-import type { SelectStatement } from "../../../types/ast";
+import {
+  classifyWhereCapability,
+  nativeWhereOperatorsForType,
+} from "../whereCapability";
+import type { CompareOp, SelectStatement } from "../../../types/ast";
 
 function whereOf(sql: string) {
   return (parseSqlStatement(sql) as SelectStatement).where;
@@ -44,6 +47,51 @@ test.each([
   expect(classify(sql, { x: { fieldType } }).capability).toBe(expected);
 });
 
+describe("B78 local-valid operator partial policy", () => {
+  test.each([
+    "CREATOR",
+    "MODIFIER",
+    "CHECK_BOX",
+    "MULTI_SELECT",
+  ] as const)("%s は IN / NOT IN 以外を新 reason で拒否する", (fieldType) => {
+    for (const sql of [
+      "SELECT x FROM APP1 WHERE x = 'A'",
+      "SELECT x FROM APP1 WHERE x != 'A'",
+      "SELECT x FROM APP1 WHERE x LIKE 'A'",
+      "SELECT x FROM APP1 WHERE x IS NULL",
+    ]) {
+      const result = classify(sql, { x: { fieldType } });
+      expect(result.capability).toBe("UNSUPPORTED");
+      expect(result.reasons).toContainEqual(expect.objectContaining({
+        code: "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE",
+        field: "x",
+        fieldType,
+      }));
+    }
+
+    expect(classify("SELECT x FROM APP1 WHERE x IN ('A')", { x: { fieldType } }).capability)
+      .toBe("EXACT_PUSHDOWN");
+    expect(classify("SELECT x FROM APP1 WHERE x NOT IN ('A')", { x: { fieldType } }).capability)
+      .toBe("EXACT_PUSHDOWN");
+  });
+
+  test.each([
+    ["USER_SELECT", "LOCAL_ONLY"],
+    ["ORGANIZATION_SELECT", "LOCAL_ONLY"],
+    ["GROUP_SELECT", "LOCAL_ONLY"],
+    ["STATUS_ASSIGNEE", "LOCAL_ONLY"],
+    ["STATUS", "EXACT_PUSHDOWN"],
+    ["DROP_DOWN", "LOCAL_ONLY"],
+    ["RADIO_BUTTON", "LOCAL_ONLY"],
+  ] as const)("%s の = は B78 partial policy の対象外", (fieldType, capability) => {
+    const result = classify("SELECT x FROM APP1 WHERE x = 'A'", { x: { fieldType } });
+    expect(result.capability).toBe(capability);
+    expect(result.reasons).not.toContainEqual(expect.objectContaining({
+      code: "WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE",
+    }));
+  });
+});
+
 test("AND は exact leaf を上位集合prefilterとして残し、OR は全体をlocalにする", () => {
   const fields = { n: { fieldType: "NUMBER" }, s: { fieldType: "SINGLE_LINE_TEXT" } };
   expect(classify("SELECT n FROM APP1 WHERE n > 1 AND s > '1'", fields).capability)
@@ -77,14 +125,174 @@ test("未知フィールド・未知型はfail-closedにする", () => {
     .toBe("UNSUPPORTED");
 });
 
-test.each([
-  ["TODAY", "TIME", ">", "EXACT_PUSHDOWN"],
-  ["NOW", "NUMBER", ">=", "EXACT_PUSHDOWN"],
-  ["LOGINUSER", "SINGLE_LINE_TEXT", "=", "EXACT_PUSHDOWN"],
-  ["TODAY", "SINGLE_LINE_TEXT", ">", "LOCAL_ONLY"],
-  ["NOW", "CHECK_BOX", "=", "LOCAL_ONLY"],
-  ["LOGINUSER", "FUTURE_FIELD", "=", "UNSUPPORTED"],
-] as const)("既存関数 %s は B32 の従来型×演算子分類を維持する", (name, fieldType, op, expected) => {
-  expect(classify(`SELECT x FROM APP1 WHERE x ${op} ${name}()`, { x: { fieldType } }).capability)
-    .toBe(expected);
+function classifyLegacy(
+  name: "TODAY" | "NOW" | "LOGINUSER",
+  fieldType: string,
+  op: CompareOp,
+  field = "x"
+) {
+  return classifyWhereCapability(
+    {
+      type: "BINARY",
+      op,
+      left: { type: "FIELD", tableAlias: null, field },
+      right: { type: "KINTONE_FUNC", name },
+    },
+    () => resolveFieldSemantics({ fieldType })
+  );
+}
+
+function classifyLoginUserInList(fieldType: string, op: "IN" | "NOT_IN") {
+  return classifyWhereCapability(
+    {
+      type: "BINARY",
+      op,
+      left: { type: "FIELD", tableAlias: null, field: "x" },
+      right: {
+        type: "IN_LIST",
+        values: [{ type: "KINTONE_FUNC", name: "LOGINUSER" }],
+      },
+    },
+    () => resolveFieldSemantics({ fieldType })
+  );
+}
+
+describe("B77 legacy kintone function field type × operator classifier", () => {
+  test.each([
+    ["TODAY", "DATE"],
+    ["TODAY", "DATETIME"],
+    ["TODAY", "CREATED_TIME"],
+    ["TODAY", "UPDATED_TIME"],
+    ["NOW", "DATETIME"],
+    ["NOW", "CREATED_TIME"],
+    ["NOW", "UPDATED_TIME"],
+  ] as const)("%s × %s は比較6演算子だけ exact", (name, fieldType) => {
+    for (const op of ["=", "!=", ">", "<", ">=", "<="] as const) {
+      expect(classifyLegacy(name, fieldType, op)).toEqual({
+        capability: "EXACT_PUSHDOWN",
+        reasons: [{
+          code: "WHERE_EXACT",
+          functionName: name,
+          field: "x",
+          fieldType,
+          operator: op,
+        }],
+      });
+    }
+    const invalid = classifyLegacy(name, fieldType, "LIKE");
+    expect(invalid.capability).toBe("UNSUPPORTED");
+    expect(invalid.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED",
+      functionName: name,
+      fieldType,
+      operator: "like",
+    });
+  });
+
+  test.each([
+    "CREATOR",
+    "MODIFIER",
+    "USER_SELECT",
+  ] as const)("LOGINUSER × %s は IN / NOT IN だけ exact", (fieldType) => {
+    for (const op of ["IN", "NOT_IN"] as const) {
+      expect(classifyLegacy("LOGINUSER", fieldType, op).capability).toBe("EXACT_PUSHDOWN");
+    }
+    const invalid = classifyLegacy("LOGINUSER", fieldType, "=");
+    expect(invalid.capability).toBe("UNSUPPORTED");
+    expect(invalid.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED",
+      functionName: "LOGINUSER",
+      fieldType,
+      operator: "=",
+    });
+  });
+
+  test("GROUP_SELECT × LOGINUSER は field type unsupported", () => {
+    const result = classifyLegacy("LOGINUSER", "GROUP_SELECT", "IN");
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+      functionName: "LOGINUSER",
+      fieldType: "GROUP_SELECT",
+      operator: "in",
+    });
+  });
+
+  test.each([
+    "CREATOR",
+    "MODIFIER",
+    "USER_SELECT",
+  ] as const)("singleton IN-list LOGINUSER × %s は IN / NOT IN exact", (fieldType) => {
+    for (const op of ["IN", "NOT_IN"] as const) {
+      expect(classifyLoginUserInList(fieldType, op)).toMatchObject({
+        capability: "EXACT_PUSHDOWN",
+        reasons: [{
+          code: "WHERE_EXACT",
+          functionName: "LOGINUSER",
+          fieldType,
+          operator: op === "IN" ? "in" : "not in",
+        }],
+      });
+    }
+  });
+
+  test("singleton IN-list でも GROUP_SELECT × LOGINUSER は unsupported", () => {
+    const result = classifyLoginUserInList("GROUP_SELECT", "IN");
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+        functionName: "LOGINUSER",
+        fieldType: "GROUP_SELECT",
+        operator: "in",
+      }),
+    ]));
+  });
+
+  test("DATE × NOW は field type unsupported", () => {
+    const result = classify("SELECT x FROM APP1 WHERE x = NOW()", { x: { fieldType: "DATE" } });
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+      functionName: "NOW",
+      fieldType: "DATE",
+      operator: "=",
+    });
+  });
+
+  test("$id × TODAY は field type unsupported", () => {
+    const result = classify(
+      "SELECT $id FROM APP1 WHERE $id >= TODAY()",
+      { $id: { fieldType: "__ID__" } }
+    );
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+      functionName: "TODAY",
+      field: "$id",
+      fieldType: "__ID__",
+      operator: ">=",
+    });
+  });
+
+  test("式左辺は context unsupported", () => {
+    const result = classify(
+      "SELECT x FROM APP1 WHERE UPPER(x) = TODAY()",
+      { x: { fieldType: "DATE" } }
+    );
+    expect(result.capability).toBe("UNSUPPORTED");
+    expect(result.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED",
+      functionName: "TODAY",
+      operator: "=",
+    });
+  });
+
+  test("legacy 関数の拒否は specific reason と requires-exact reason を保持する", () => {
+    const result = classify("SELECT x FROM APP1 WHERE x = NOW()", { x: { fieldType: "DATE" } });
+    expect(result.reasons.map((reason) => reason.code)).toEqual([
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+      "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN",
+    ]);
+  });
 });

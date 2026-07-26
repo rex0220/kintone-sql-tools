@@ -2628,7 +2628,10 @@ export class Parser {
   // IN リストの値
   private parseInValues(): InList["values"] {
     const values: InList["values"] = [];
-    const invalidValueMessage = "IN リストには文字列、数値、またはバッチ変数が必要です";
+    const invalidValueMessage =
+      "IN リストには文字列、数値、バッチ変数、または単独の LOGINUSER() が必要です";
+    const mixedLoginUserMessage =
+      "LOGINUSER() は IN / NOT IN リストの単独要素としてのみ使用できます";
     do {
       const tok = this.advance();
       if (tok.kind === TokenKind.STRING) {
@@ -2645,6 +2648,16 @@ export class Parser {
         values.push(makeNumberLiteral(`${sign}${number.value}`));
       } else if (tok.kind === TokenKind.VARIABLE) {
         values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
+      } else if (tok.kind === TokenKind.LOGINUSER) {
+        if (values.length > 0) {
+          throw new ParseError(mixedLoginUserMessage, tok);
+        }
+        this.expect(TokenKind.LPAREN, "LOGINUSER の直後には空引数の () が必要です");
+        this.expect(TokenKind.RPAREN, "LOGINUSER の直後には空引数の () が必要です");
+        values.push({ type: "KINTONE_FUNC", name: "LOGINUSER" });
+        if (this.peek().kind === TokenKind.COMMA) {
+          throw new ParseError(mixedLoginUserMessage, this.peek());
+        }
       } else {
         throw new ParseError(invalidValueMessage, tok);
       }

@@ -304,18 +304,18 @@ function convertInList(v: InList, op: CompareOp): string {
   }
   assertResolvedInListValues(v.values);
   const values = v.values
-    .map((item) =>
-      item.type === "STRING"
-        ? convertString(item)
-        : numberLiteralText(item)
-    )
+    .map((item) => {
+      if (item.type === "STRING") return convertString(item);
+      if (item.type === "NUMBER") return numberLiteralText(item);
+      return convertKintoneFunc(item);
+    })
     .join(",");
   return `(${values})`;
 }
 
 function assertResolvedInListValues(
   values: InList["values"]
-): asserts values is (StringLiteral | NumberLiteral)[] {
+): asserts values is Exclude<InList["values"][number], { type: "VARIABLE" }>[] {
   const unresolved = values.find((item) => item.type === "VARIABLE");
   if (unresolved?.type === "VARIABLE") {
     throw new KintoneQueryError(`未解決のバッチ変数 @${unresolved.name} があります`);

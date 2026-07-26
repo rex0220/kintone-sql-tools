@@ -34,6 +34,8 @@ import {
 import { evalGroupingRef } from "./groupingRowMeta";
 import {
   isRelativeDateFunctionName,
+  isLegacyKintoneFunctionName,
+  WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN,
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../core/relativeDateFunction";
 
@@ -284,6 +286,12 @@ function assertResolvedInListValues(
   if (unresolved?.type === "VARIABLE") {
     throw new Error(`ParseError: unresolved batch variable @${unresolved.name}.`);
   }
+  const serverOnlyFunction = values.find((item) => item.type === "KINTONE_FUNC");
+  if (serverOnlyFunction?.type === "KINTONE_FUNC") {
+    throw new Error(
+      `${serverOnlyFunction.name}: ${WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN}`
+    );
+  }
 }
 
 // ------------------------------------------------------------
@@ -454,12 +462,13 @@ function resolveKintoneFuncValue(name: string): string {
       `${name}: ${WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN}`
     );
   }
+  if (isLegacyKintoneFunctionName(name)) {
+    throw new Error(
+      `${name}: ${WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN}`
+    );
+  }
 
   switch (name) {
-    case "TODAY":
-    case "NOW":
-    case "LOGINUSER":
-      return resolveKintoneFunc(name);
     default:
       throw new Error(`InternalError: unexpected KINTONE_FUNC name: ${name}`);
   }

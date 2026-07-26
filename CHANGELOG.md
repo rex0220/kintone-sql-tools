@@ -2,12 +2,32 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## Unreleased
+## v3.25.0（2026-07-27）
+
+> **⚠ 破壊的変更（minor リリース）:** `^3` の利用者にも自動更新で届きます。`WHERE` の
+> `TODAY()` / `NOW()` / `LOGINUSER()` は、kintone REST query へ安全に押し下げられる形だけを
+> 許可し、従来 client 評価へ落ちていた形はレコード取得前に
+> `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` で拒否します。また、ユーザー系・複数選択系の
+> フィールド型に `=` / `!=` など型に合わない演算子を書くと、従来の silent 0 rows ではなく
+> `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で拒否します。
+>
+> 新たにエラーになる例は `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、
+> `WHERE $id >= TODAY()`、および押し下げ不能な `OR` / `NOT` / JOIN / 入れ子 SELECT /
+> 実体化文脈の `UNION` 枝にある `TODAY()` / `NOW()` / `LOGINUSER()` です。
+> `in` / `not in` を使う、`WHERE` 全体または関数 leaf を押し下げ可能な形にする、
+> `TODAY()` / `NOW()` を固定の日付・日時リテラルへ置換する、という移行が必要です。
+>
+> **同時に利用可能な形は増えます。** 従来 kSQL で表現できなかった
+> `WHERE 作成者 in (LOGINUSER())` を追加しました。`TODAY()` / `NOW()` は相対日付関数と同じ
+> server-only の計画へ統合され、たとえば
+> `WHERE 日付 = TODAY() AND LENGTH(件名) > 1` は `日付 = TODAY()` を server prefilter として
+> 押し下げ、client は残余だけを評価します。B75 により、whole-WHERE exact なら CTE 本体・
+> `WITH` の最終 SELECT・一時テーブル source でも使用できます。
 
 ### 機能追加（B75 相対日付を CTE・一時テーブルでも使えるように）
 
 - **その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合、実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `... AS WITH ...` の source、単一 CTE のインライン展開でも相対日付関数を使えるようにした**。集計・SIMPLE の両経路で相対日付はサーバーへそのまま渡し、client 側では評価しない。
-- JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合、および `WHERE` 全体が exact にならない形は引き続き取得前に fail-closed する（トップレベルの `UNION` は従来どおり枝ごとに判定する）。
+- JOIN、サブテーブル、入れ子 SELECT、実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合、および `WHERE` 全体が exact にならない形は引き続き取得前に fail-closed する（トップレベルの `UNION` は従来どおり枝ごとに判定する）。`KORDER BY` はトップレベル SELECT の whole-WHERE exact に限り native / Cursor の両経路で使用でき、prefilter＋残余や FULL_SCAN_EXACT では使えない。
 - DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は従来どおり whole-WHERE exact のみ可で、prefilter＋client 残余は使えない。
 - `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1` のような prefilter＋client 残余は、トップレベルの単一物理アプリ SELECT では使える一方、CTE 本体・`WITH` の最終 SELECT・一時テーブル source では引き続き使えない。該当する場合は CTE／一時テーブルへ切り出さずトップレベルで実行する。
 - 一時テーブルの実体化上限は通常の `maxRecords` ではなく専用の `tempTableMaxRows` を使い、超過時は `onLimit` の設定にかかわらず、日付リテラル／相対日付とも同じエラーになる。
@@ -26,7 +46,7 @@
 - 従来は「押し下げ不能な述語を `AND` で足すと通る（prefilter＋残余の形になるため）が、純粋に exact な条件だけだと拒否される」という逆転が起きていた。本修正はその逆転を解消する。**`WHERE` 全体を一度だけサーバーへ送り、取得後の client 側 WHERE 評価は行わない**（相対日付の client 評価は従来どおり 0 回）。
 - `ksql_explain` はこの形で `relative date evaluation: kintone server whole-WHERE exact` / `client residual: (none)` / `relative date client evaluations: 0` と押し下げ後のクエリを表示する。Phase1（SIMPLE 全体 exact）と Phase2 A（prefilter＋残余）の表示は不変。
 - `OR` を含む条件も、`WHERE` 全体が押し下げ可能であれば同様に使用できる。
-- 引き続きレコード取得前に fail-closed するもの: `KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT、JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。
+- 引き続きレコード取得前に fail-closed するもの: JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。`KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT は whole-WHERE exact に限り使用でき、FULL_SCAN_EXACT では使えない。
 - 新たに許可された形の `maxRecords` 超過時の扱いは、**同じクエリをリテラル日付で書いた場合と同一**（`onLimit=truncate` を指定していれば truncate、既定の `onLimit=error` ならエラー）。相対日付を使うことで追加の制約は課さない。一方、kintone の検索打ち切り（10 万件）は利用者が選んだ設定ではないため、従来どおり fail-closed で部分結果を返さない。
 - SemVer=minor（純加法。従来拒否されていたクエリが成功するようになるだけで、既存の成功クエリの結果は不変）。
 
@@ -61,7 +81,7 @@
 - v3.20.0 では上記のような「相対日付 exact ＋押し下げ不能残余」の AND は文全体を fail-closed していた。Phase2 A はこれを prefilter ＋残余で共存させる。相対日付の値・比較は依然すべて kintone サーバが決定し、**相対日付の client 評価は 0 回**（planner allowlist ＋ evalWhere backstop の二段で保証）。
 - `BETWEEN` 展開の各境界・複数の相対日付 leaf・`KLIKE` や押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載る。KLIKE の object identity と `appliedKlikes` 契約は不変。
 - `ksql_explain` は Phase2 の計画で `where capability: SUPERSET_PREFILTER` / `server prefilter:` / `client residual:` / `relative date client evaluations: 0` / `kintone query:` を表示する。純 exact（残余なし）の相対日付は従来どおり `EXACT_PUSHDOWN` / `client evaluation: forbidden` を表示（表示 byte 不変）。
-- 次はレコード・Cursor・mutation API の前に fail-closed を維持する（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）: 相対日付が `OR` の枝・`NOT` 配下／`KORDER BY`（native・Cursor）／`UPDATE` / `DELETE` の対象選択／**`INSERT` / `UPSERT ... SELECT` の DML source SELECT**／JOIN 後残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表。pure-exact な相対日付は従来どおり（DML source を含め）許可され、非回帰。
+- 次はレコード・Cursor・mutation API の前に fail-closed を維持する（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）: 相対日付が `OR` の枝・`NOT` 配下で whole-WHERE exact にならない形／prefilter＋残余または FULL_SCAN_EXACT の `KORDER BY`（native・Cursor）／同じく非 exact な `UPDATE` / `DELETE` の対象選択・**`INSERT` / `UPSERT ... SELECT` の DML source SELECT**／JOIN 後残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表。whole-WHERE exact な相対日付は従来どおり（KORDER / DML source を含め）許可され、非回帰。
 - Node engine・CLI・MCP・プラグインで同一の受理判定と REST クエリ。`ksql_validate` は構文・引数のみ検査し、実行可否は `ksql_query` / `ksql_explain` / 実行時の schema-aware 判定で確定する。
 - Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は対象外。
 - SemVer=minor（純加法・既存 SQL / CLI / MCP / plugin の挙動不変）。

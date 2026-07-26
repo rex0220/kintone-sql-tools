@@ -41,6 +41,15 @@ test("IN の負数は引用符なし、文字列の負数は引用符付きで�
     .toBe('金額 in (-1,1,"-1")');
 });
 
+test("LOGINUSER() singleton は IN / NOT IN の REST query byte を維持する", () => {
+  expect(whereToKintone(where(
+    "SELECT * FROM APP100 WHERE 作成者 IN (LOGINUSER())"
+  ))).toBe("作成者 in (LOGINUSER())");
+  expect(whereToKintone(where(
+    "SELECT * FROM APP100 WHERE 更新者 NOT IN (LOGINUSER())"
+  ))).toBe("更新者 not in (LOGINUSER())");
+});
+
 test("SIMPLE REST query は16桁超の精度を保ちつつ平文10進で押し下げる", () => {
   // 16桁超はbinary64で丸めずそのまま保持する。
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 = 9007199254740993")))

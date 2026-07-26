@@ -1,48 +1,91 @@
-# B70 — `engine:docs-smoke` の version pin 自動化（毎リリース手動 bump の解消）
+# B70 リリース時の版数同期をガードで守る（旧「`engine:docs-smoke` の version pin 自動化」）
 
-- 作成日: 2026-07-25
-- ステータス: **📝 起票（改善・小粒）**（2026-07-25）。B69（v3.22.0）実装中に表面化した既存 release-hygiene バグの恒久対策。
-- 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md) B70
-- 対象: `scripts/engine-docs-examples-smoke.mjs`（npm script `engine:docs-smoke`）
+- 起票: 2026-07-25
+- **2026-07-27 改題・スコープ拡大**（v3.25.0 のリリース準備で実害が出たため）
+- ステータス: 📝 **起票（優先 中）**。未着手。旧題は「`engine:docs-smoke` の version pin 自動化」。
 
-## 1. 問題
+## 1. 事象（改題の理由）
 
-`scripts/engine-docs-examples-smoke.mjs` は engine UMD version registry の docs 例を検証するため、**版数をハードコード**している。
+起票時は「`scripts/engine-docs-examples-smoke.mjs` が版数をハードコードしており毎リリース
+手動 bump が要る」というスクリプト1本の課題として扱っていた。
 
-- `const exactVersion = "3.22.0";`（line 20）
-- 例 SQL の `SELECT 'ok' AS status, 22 AS release`（line 75 / 88 / 111）と、その結果 `release` を `"22"` と突き合わせる assert（line 76 / 89 / 115）
+**v3.25.0 のリリース準備で、実際には版数のハードコードが6箇所あり、うち3箇所を漏らした。**
+自動検出できたのは1件だけで、**残り2件はどのゲートにも掛からずオーナーの指摘で発覚**した。
 
-パッケージ版数が上がるたびに、この `exactVersion` と `release` リテラル/チェックを**手動で bump しないと必ず失敗する**（`get(exactVersion)` が packed engine の新版と不一致になる）。
+| 箇所 | v3.25.0 準備時 | 検出方法 |
+|---|---|---|
+| `package.json` の `version` | ✅ | — |
+| `scripts/engine-docs-examples-smoke.mjs`（`exactVersion` ＋ `N AS release` リテラル/比較 6 箇所） | ⚠️ **1 箇所漏れ** | `engine:docs-smoke` が失敗 |
+| `release/VERSION.txt` / `release/README.txt` | ✅ | — |
+| `package-lock.json` の `version` × 2 | ⚠️ **漏れ** | **オーナー指摘** |
+| **`prod/manifest.json` の `version`** | ⚠️ **漏れ** | **オーナー指摘** |
 
-### 実害（既に発生）
+### 1.1 最も重い漏れ＝`prod/manifest.json`
 
-- **v3.20.0 / v3.21.0 のリリースで pin の bump を忘れ**、`engine:docs-smoke` が壊れたまま放置されていた（B69 実装中に検出）。
-- `engine:docs-smoke` は `npm test` / `npm run build` / `prepack` の**標準 gate に含まれていない**（`npm pack` + install を伴い重いため）。よって silently 腐り、リリース時に気づかない。
+`build.mjs` は `prod/` を `kintone-plugin-packer` でそのまま固めるだけで、
+**`prod/manifest.json` を更新しない**。過去のリリースでは毎回手動で bump されていた。
 
-## 2. 原因
+v3.25.0 では bump を忘れたため、**`ksql-plugin-v3.25.0.zip` の中身の manifest が 3.24.0**
+という状態になっていた。zip 名は正しいのでファイル一覧では気づけず、
+**kintone のプラグイン画面に v3.24.0 と表示される成果物を配布する寸前**だった。
+利用者が実際に目にする版数であり、影響は最も大きい。
 
-- 版数がスクリプト内の**定数**で、`package.json` の実際の版数と自動同期しない。
-- `release` リテラル（minor 番号を表す narrative 値）も版数に連動してハードコードされている。
+### 1.2 過去にも同種の事故がある
 
-## 3. 対策案
+`engine:docs-smoke` の pin 忘れにより **v3.20.0 / v3.21.0 で壊れたまま放置**され、
+B69 の実装中に検出して v3.22.0 で手動同期して green 化した経緯がある。
+このスクリプトは pack/install を伴い重いため標準 gate（`npm test` / `build` / `prepack`）の
+外にあり、silently 腐る。
 
-### 案A（推奨）: `package.json` から版数を実行時に読む
+## 2. 本質
 
-- `exactVersion` を `package.json` の `version` から動的に取得（`readFileSync`/`import` で `version` を読む）。以後 bump 不要。
-- `release` リテラルは版数の minor から導出するか、narrative なので**単純化**（例: `SELECT 'ok' AS status` だけにして version 検証は `version === pkg.version` と `ksql.get(pkg.version)` に集約）。
-- packed engine の版数＝現 `package.json` 版数なので、動的読み取りで常に一致。
+**`package.json` の `version` を単一の真実として、他の版数表記が一致していることを
+検査する仕組みが存在しない。** リリース工程が人手の注意力だけに依存している。
 
-### 案B（補完）: 版数整合を軽量 guard 化
+スクリプト1本の pin 自動化（旧スコープ）では、今回の2件は防げなかった。
 
-- `engine:docs-smoke` は重いため標準 gate に入れづらいが、**「pin == package.version」を検査する軽量アサーション**（pack/install なし）を `prepack` か既存 guard に加え、pin の腐りを CI で早期検出する。
-- 案A を入れれば pin 自体が消えるため、案B は将来の別種ハードコード対策としての位置づけ。
+## 3. 対策
 
-## 4. スコープ / 見積り
+### 3.1 版数同期ガード（推奨・本体）
 
-- 案A のみ: `scripts/engine-docs-examples-smoke.mjs` の 1 ファイル改修（0.25〜0.5 人日）。挙動不変（テストが版数非依存になるだけ）。
-- SQL 方言・engine・公開面への影響なし（テストスクリプトのみ）。
+`package.json` の `version` を基準に、次の一致を検査する軽量スクリプトを追加する。
 
-## 5. 備考
+| 検査対象 | 期待値 |
+|---|---|
+| `package-lock.json` の `version` および `packages[""].version` | `package.json` と一致 |
+| `prod/manifest.json` の `version` | 同上 |
+| `release/VERSION.txt` | `v` ＋ 同上 |
+| `release/README.txt` の版数表記（`ksql 配布パッケージ (vX.Y.Z)`・成果物名・手順の zip 名・manifest/MCP server version） | 同上 |
+| `scripts/engine-docs-examples-smoke.mjs` の `exactVersion` | 同上 |
 
-- B69 リリース（v3.22.0）では pin を 3.22.0 へ手動同期して green 化済み。本課題はその**恒久化**。
-- 同様のハードコード版数が他の guard/fixture にないか、着手時に横断確認する（`grep -rn "3\.2[0-9]\.0" scripts/`）。
+**実行タイミング**: `prepack` に含める（`npm pack` / `npm publish` の前に必ず走る）。
+あわせて `npm test` からも呼べる軽量チェックにしておくと、リリース前に気づける。
+
+`release/` の zip ファイル名（`ksql-plugin-vX.Y.Z.zip`）の実在確認も含めると、
+「ビルドし忘れ」も同時に検出できる。
+
+### 3.2 ハードコードそのものを減らす
+
+- **`scripts/engine-docs-examples-smoke.mjs`**: `exactVersion` を廃し
+  **実行時に `package.json` を読む**。`N AS release` のリテラルも版数から導出するか、
+  版数に依存しない固定値（例 `1 AS release`）へ単純化する。以後 bump 不要になる。
+- **`prod/manifest.json`**: `build.mjs` が `package.json` の版数で**書き換えてからパックする**。
+  これが入れば 3.1 の manifest 検査は二重の防御になる。
+- **`package-lock.json`**: `npm install --package-lock-only` をリリース手順に明記する
+  （検査で落ちれば気づけるので、手順の明記＋ガードで足りる）。
+
+### 3.3 スコープ外
+
+- `dist-engine` の UMD version registry の設計自体（現行のままでよい）
+- CI の導入可否（本リポジトリの運用方針に依存するため、まず `prepack` で足りる）
+
+## 4. 影響・規模
+
+- **テスト/スクリプトのみの改修**で、SQL・engine・公開面の挙動に影響なし
+- 想定 **0.5〜0.75 人日**（3.1 のガード＋3.2 の smoke 側 self-read＋`build.mjs` の manifest 書き換え）
+- 着手時に、他の guard / fixture に残るハードコード版数も横断確認すること
+
+## 5. 優先度
+
+小粒だが、**利用者が目にする版数を誤って配布しかけた**実績があるため、
+起票時の「低」から **中** へ引き上げる。次のリリースでも同じ漏れが起きうる。
