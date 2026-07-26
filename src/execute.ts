@@ -8939,6 +8939,41 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
 
   const lines: string[] = [];
   for (const node of plan.nodes) {
+    const fullScanExactPlan = node.fullScanExactPlan;
+    if (
+      node.allowed
+      && node.allowForm === "FULL_SCAN_EXACT"
+      && fullScanExactPlan
+    ) {
+      for (const leaf of fullScanExactPlan.prefilterPlan.exactRelativeLeaves) {
+        const functionName = leaf.right.type === "KINTONE_FUNC"
+          ? leaf.right.name
+          : "(unknown)";
+        const field = leaf.left.type === "FIELD" ? leaf.left.field : undefined;
+        const operator = relativeReasonOperator(leaf.op);
+        const detail = node.capability?.reasons.find((reason) =>
+          reason.functionName === functionName
+          && (field === undefined || reason.field === field)
+          && reason.operator === operator
+        );
+        lines.push(
+          `  relative date function: ${functionName}`,
+          "  relative date evaluation: kintone server whole-WHERE exact",
+          `  field: ${detail?.field ?? field ?? "(unknown)"} (${detail?.fieldType ?? "unknown"})`,
+          `  operator: ${detail?.operator ?? operator}`
+        );
+      }
+      // 実行時に node へ確定済みの plan をそのまま表示し、EXPLAIN 側では再計画しない。
+      const wholeWhereQuery = fullScanExactPlan.serializedWholeWhere;
+      lines.push(
+        "  where capability: EXACT_PUSHDOWN",
+        `  server predicate: ${wholeWhereQuery}`,
+        "  client residual: (none)",
+        "  relative date client evaluations: 0",
+        `  kintone query: ${wholeWhereQuery}`
+      );
+      continue;
+    }
     const prefilterPlan = node.prefilterPlan;
     if (
       node.allowed

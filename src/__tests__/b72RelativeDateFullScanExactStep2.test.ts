@@ -7,7 +7,24 @@ import {
   type SelectResult,
 } from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import { resolveFieldSemantics } from "../core/fieldSemantics";
+import {
+  buildRelativeDatePushdownPlan,
+} from "../core/optimization/relativeDatePushdownGuard";
+import {
+  planPlainGroupByResolution,
+  resolvePlainGroupBySourceSchemas,
+} from "../core/optimization/plainGroupByPlan";
+import { classifyWhereCapability } from "../core/optimization/whereCapability";
+import { parseSqlStatement } from "../core/sql";
 import * as evalWhereModule from "../engine/evalWhere";
+import type {
+  DeleteStatement,
+  SelectStatement,
+  Statement,
+  UpdateStatement,
+  WhereExpr,
+} from "../types/ast";
 
 type GetParams = Parameters<KintoneClient["getRecords"]>[0];
 
@@ -103,6 +120,51 @@ function expectNoExecutionApi(calls: ReturnType<typeof makeClient>["calls"]): vo
   expect(calls.confirm).not.toHaveBeenCalled();
 }
 
+function relativeNames(where: WhereExpr | null): string[] {
+  const names: string[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "KINTONE_FUNC" && typeof value["name"] === "string") {
+      names.push(value["name"]);
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(where);
+  return names;
+}
+
+async function sharedPlan(sql: string) {
+  const statement = parseSqlStatement(sql) as Statement;
+  const capability = (
+    target: SelectStatement | UpdateStatement | DeleteStatement
+  ) => classifyWhereCapability(target.where, (field) => {
+    const info = SOURCE_FIELDS.find((candidate) => candidate.code === field.field);
+    return info ? resolveFieldSemantics({ fieldType: info.fieldType }) : undefined;
+  });
+  return buildRelativeDatePushdownPlan(statement, {
+    select: async (select) => capability(select),
+    dml: async (dml) => capability(dml),
+  });
+}
+
+function planText(result: SelectResult): string {
+  return result.rows.map((row) => row["plan"]).join("\n");
+}
+
+function groupByPlan(sql: string) {
+  const statement = parseSqlStatement(sql) as SelectStatement;
+  const schemas = resolvePlainGroupBySourceSchemas(statement, () => ({
+    kind: "APP",
+    fieldCodes: SOURCE_FIELDS.map((field) => field.code),
+  }));
+  return planPlainGroupByResolution(statement.groupBy, statement.columns, schemas);
+}
+
 describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
   afterEach(() => {
     jest.restoreAllMocks();
@@ -160,6 +222,11 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
     expect(request.fields).toEqual(fields);
     expect(request.query).toContain("日付 = THIS_MONTH()");
     expect((request.query.match(/THIS_MONTH\(\)/g) ?? [])).toHaveLength(1);
+    if (sql.includes(" OR ")) {
+      const plan = await sharedPlan(sql);
+      expect(plan.nodes[0].prefilterPlan?.residualWhere).toBeNull();
+      expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
+    }
   });
 
   test("canonical ORDER BY は SIMPLE path の server WHERE と local sortだけを使う", async () => {
@@ -181,30 +248,45 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
 
   test("B71 ALIAS_SAFE は依存列を維持し B72 predicate を同じ request に載せる", async () => {
     const { client, calls } = makeClient();
-    const result = await execute(
-      "SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月, COUNT(*) AS c "
-      + "FROM APP100 WHERE 日付 = THIS_MONTH() GROUP BY 年月",
-      client
-    ) as SelectResult;
+    const sql = "SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月, COUNT(*) AS c "
+      + "FROM APP100 WHERE 日付 = THIS_MONTH() GROUP BY 年月";
+    expect(groupByPlan(sql).items[0]).toEqual({ kind: "ALIAS_SAFE", columnIndex: 0 });
 
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+    const result = await execute(sql, client) as SelectResult;
     expect(result.rows).toEqual([{ 年月: "2026-07", c: "3" }]);
-    expect(firstRequest(calls)).toMatchObject({
-      fields: ["日付", "$id"],
-    });
-    expect(firstRequest(calls).query).toContain("日付 = THIS_MONTH()");
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(firstRequest(calls).fields).toEqual(["日付", "$id"]);
+    expect(firstRequest(calls).query).toBe(
+      "日付 = THIS_MONTH() order by $id asc limit 500 offset 0"
+    );
+    const plan = await sharedPlan(sql);
+    expect(plan.nodes[0].prefilterPlan?.residualWhere).toBeNull();
+    expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
   });
 
   test("B71 PHYSICAL shadow は実列を強制 fetchし B72は取得列を減らさない", async () => {
     const { client, calls } = makeClient();
-    const result = await execute(
-      "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 "
-      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分",
-      client
-    ) as SelectResult;
+    const sql = "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 "
+      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分";
+    expect(groupByPlan(sql).items[0]).toMatchObject({
+      kind: "PHYSICAL",
+      fieldCode: "区分",
+    });
+    const explained = await execute(`EXPLAIN ${sql}`, client) as SelectResult;
+    expect(planText(explained)).toContain("group key 区分: PHYSICAL");
 
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+    const result = await execute(sql, client) as SelectResult;
     expect(result.rowCount).toBe(2);
+    expect(evaluator).not.toHaveBeenCalled();
     expect(firstRequest(calls).fields).toEqual(["金額", "日付", "区分", "$id"]);
-    expect(firstRequest(calls).query).toContain("日付 = THIS_MONTH()");
+    expect(firstRequest(calls).query).toBe(
+      "日付 = THIS_MONTH() order by $id asc limit 500 offset 0"
+    );
+    const plan = await sharedPlan(sql);
+    expect(plan.nodes[0].prefilterPlan?.residualWhere).toBeNull();
+    expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
   });
 
   test("maxRecords + truncate でも B72 complete-input は部分集計を返さない", async () => {
