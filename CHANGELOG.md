@@ -2,6 +2,24 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 機能追加（B72 相対日付を集計クエリでも使えるように）
+
+- **`WHERE` 全体が kintone クエリへ押し下げ可能なら、`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含む文でも相対日付関数を使えるようにした**。従来はこれらを含むと `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で取得前に拒否されていた（純加法・従来動いていたクエリの結果は変わらない）。
+
+  ```sql
+  SELECT 区分, COUNT(*) AS 件数 FROM APP100 WHERE 日付 = THIS_MONTH() GROUP BY 区分   -- 従来は拒否
+  SELECT * FROM APP100 WHERE 日付 = THIS_MONTH() ORDER BY 日付                        -- 従来は拒否
+  ```
+
+- 従来は「押し下げ不能な述語を `AND` で足すと通る（prefilter＋残余の形になるため）が、純粋に exact な条件だけだと拒否される」という逆転が起きていた。本修正はその逆転を解消する。**`WHERE` 全体を一度だけサーバーへ送り、取得後の client 側 WHERE 評価は行わない**（相対日付の client 評価は従来どおり 0 回）。
+- `ksql_explain` はこの形で `relative date evaluation: kintone server whole-WHERE exact` / `client residual: (none)` / `relative date client evaluations: 0` と押し下げ後のクエリを表示する。Phase1（SIMPLE 全体 exact）と Phase2 A（prefilter＋残余）の表示は不変。
+- `OR` を含む条件も、`WHERE` 全体が押し下げ可能であれば同様に使用できる。
+- 引き続きレコード取得前に fail-closed するもの: `KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT、JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。
+- 新たに許可された形でも `maxRecords` 超過・検索打ち切り時は fail-closed で、部分的な集計結果を返さない。
+- SemVer=minor（純加法。従来拒否されていたクエリが成功するようになるだけで、既存の成功クエリの結果は不変）。
+
 ## v3.23.0（2026-07-26）
 
 ### バグ修正（B71 `GROUP BY` のエイリアスが黙って誤集計する）
