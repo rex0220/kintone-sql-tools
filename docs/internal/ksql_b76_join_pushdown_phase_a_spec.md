@@ -192,7 +192,7 @@ JOIN 後に元 WHERE が `evalWhere` で再評価されるため余分な行は�
 | AST | 合成規則 |
 |---|---|
 | `A AND B` | 同じ target alias に属する採用可能因子を個別抽出可。E∧E=E、それ以外の E/S の積は S |
-| `A OR B` | **subtree 全体**が同一 target alias で、両辺とも E/S の場合だけ採用。E∨E=E、それ以外は S |
+| `A OR B` | **subtree 全体**が同一 target alias で、両辺とも E/S、**かつ subtree に `KLIKE` / `NOT KLIKE` を含まない**場合だけ採用。E∨E=E、それ以外は S（§5.5 参照） |
 | cross-alias `OR` | 片辺だけを押さない。subtree 全体 U |
 | `GROUP(A)` | scope と relation を変えず、括弧を保持 |
 | `NOT(A)` | Phase A の新規対象外。superset の補集合は subset になり得る |
@@ -201,6 +201,60 @@ JOIN 後に元 WHERE が `evalWhere` で再評価されるため余分な行は�
 
 同一 alias OR の一部に LOCAL_ONLY / UNSUPPORTED / U がある場合、OR 全体を押さない。
 AND は他 alias、cross-table、local-only の因子が混在しても、安全な単一 alias 因子だけを押せる。
+
+### 5.5 【訂正 2026-07-27】`KLIKE` を含む `OR` は Phase A 非採用
+
+Step 3 の実装着手時に codex が、**§5.4 初版の同一 alias `OR` 規則と既存 KLIKE residual 契約の
+衝突**を検出して停止した。指摘は正しく、仕様側を修正する。
+
+#### 5.5.1 衝突の内容
+
+```sql
+WHERE a.件名 KLIKE urgent OR a.担当者 = 佐藤
+```
+
+- §5.4 初版では同一 alias・両辺 E/S なので `OR` 全体を採用してしまう
+- TEXT `=` は `S` なので、server が JS 不一致の行を余分に返し得る
+- `evalWhere` は `appliedKlikes` に含まれる KLIKE node を**行ごとに無条件で `true`** とする
+  （`src/engine/evalWhere.ts` の `evalBinary`）
+- したがって superset で余分に取れた行も `true OR false` となり、**元 WHERE residual で除外できない**
+
+**誤結果を生む。** 次の3条件は現行 evaluator のまま同時には満たせない。
+
+1. 同一 alias `OR` は E/S なら採用
+2. 通常述語は元 WHERE 全体を residual とする
+3. KLIKE は既存の node identity ／ `appliedKlikes` 契約を維持する
+
+#### 5.5.2 Claude による裏取り
+
+```ts
+// src/engine/evalWhere.ts  evalBinary()
+if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
+  if (appliedKlikes?.has(expr)) return true;   // ← 無条件 true
+  throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
+}
+```
+
+かつ既存の押し下げは **AND スパイン限定**である（`wherePredicatePushdown.ts`: `if (where.op !== "AND") return null`）。
+**KLIKE が `OR` から押し下げられたことは一度もない。**
+
+#### 5.5.3 決定
+
+**`KLIKE` / `NOT KLIKE` を含む `OR` subtree は Phase A では採用しない。**
+通常の JS 評価可能な E/S 述語だけで構成される同一 alias `OR` のみ採用する。
+
+- これは**仕様草案に対する制限**であって、**現行挙動に対する後退ではない**。
+  KLIKE は元々 `OR` から押し下げられていないため、失われる能力はない。
+- 厳密には「KLIKE ∨ **exact のみ**」は安全だが（exact 側で取れた行は真に一致するため）、
+  監査しづらい狭い例外を作るより、**`OR` から KLIKE を一律除外する**ほうが証明が簡単で
+  v2.0.0 の `LIKE` 事故の轍を踏まない。
+- より広く許可するなら、**exact subtree 全体を消費する residual plan**、または
+  **取得経路別の一致 provenance** が必要になる。**Phase B 以降の課題**とする。
+
+#### 5.5.4 同種の危険がないかの確認事項
+
+KLIKE と同じく「**client で再評価できず、押し下げ済みを前提に `true` を返す**」述語が
+他にないかを Step 3 で確認すること。あれば同様に `OR` から除外する。
 
 ## 6. 別名スコープ分解と serializer 安全規則
 
