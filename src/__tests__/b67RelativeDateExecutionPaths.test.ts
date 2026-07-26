@@ -111,10 +111,11 @@ test.each([
   expectNoExecutionApi(calls);
 });
 
-test("CREATE TEMP TABLE materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {
+test("CREATE TEMP TABLE UNION materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {
   const { client, calls } = makeClient();
   const result = await executeBatch(
-    "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY(); "
+    "CREATE TEMP TABLE #t AS SELECT 日付 FROM APP100 WHERE 日付 = YESTERDAY() "
+    + "UNION ALL SELECT 日付 FROM APP200; "
     + "SELECT * FROM #t",
     client,
     { confirm: calls.confirm }

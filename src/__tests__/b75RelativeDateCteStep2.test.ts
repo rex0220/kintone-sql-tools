@@ -183,18 +183,26 @@ describe("B75 Step 2 inline and WITH main relative dates", () => {
     expectNoExecutionApi(calls);
   });
 
-  test("CREATE TEMP TABLE sourceはStep 3前なので依然fail-closedを維持する", async () => {
+  test("CREATE TEMP TABLE SELECT sourceはStep 3でwhole WHERE exactを許可する", async () => {
     const { client, calls } = makeClient();
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
     const result = await executeBatch(
       "CREATE TEMP TABLE #t AS SELECT 受注日 FROM APP100 "
         + "WHERE 受注日 = YESTERDAY(); SELECT * FROM #t",
-      client,
-      { confirm: calls.confirm }
+      client
     );
-    expect(result.ok).toBe(false);
-    expect(result.statements[0].error?.message)
-      .toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
-    expectNoExecutionApi(calls);
+    expect(result.ok).toBe(true);
+    expect(result.statements[0]).toMatchObject({ status: "success", rowCount: 3 });
+    expect((result.statements[1].result as SelectResult).rows).toEqual([
+      { 受注日: "2026-07-01" },
+      { 受注日: "2026-07-02" },
+      { 受注日: "2026-07-03" },
+    ]);
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(calls.records.mock.calls[0][0]).toMatchObject({
+      fields: ["受注日", "$id"],
+      query: "受注日 = YESTERDAY() order by $id asc limit 500 offset 0",
+    });
   });
 
   test.each(["truncate", "error"] as const)(

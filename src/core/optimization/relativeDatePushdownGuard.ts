@@ -189,7 +189,8 @@ function collectUnion(
   collectSelect(union.right, `${path}.right`, candidates, forceForbidden, true, allowFullScanExact);
 }
 
-function collectWith(
+/** @internal Exported only so the inherited fail-closed contract can be unit-tested directly. */
+export function collectWith(
   statement: WithStatement,
   path: string,
   candidates: WalkCandidate[],
@@ -204,13 +205,29 @@ function collectWith(
       // B75: materialized CTE bodies may use relative dates only when the whole
       // WHERE is pushed down exactly. Phase2 residuals and nested SELECTs remain
       // fail-closed because neither path has been verified for CTE materialization.
-      collectSelect(cte.query, `${path}.cte[${index}]`, candidates, false, false, true, true);
+      collectSelect(
+        cte.query,
+        `${path}.cte[${index}]`,
+        candidates,
+        inheritedForbidden,
+        false,
+        !inheritedForbidden,
+        true
+      );
     } else if (cte.query.type === "UNION") {
       collectUnion(cte.query, `${path}.cte[${index}]`, candidates, true, false);
     }
   });
   if (statement.query.type === "SELECT") {
-    collectSelect(statement.query, `${path}.main`, candidates, false, false, true, true);
+    collectSelect(
+      statement.query,
+      `${path}.main`,
+      candidates,
+      inheritedForbidden,
+      false,
+      !inheritedForbidden,
+      true
+    );
   } else {
     collectUnion(statement.query, `${path}.main`, candidates, true, false);
   }
@@ -233,9 +250,9 @@ function collectStatement(
       collectWith(statement, path, candidates, forceForbidden);
       return;
     case "CREATE_TEMP_TABLE":
-      if (statement.query.type === "WITH") collectWith(statement.query, `${path}.query`, candidates, true);
+      if (statement.query.type === "WITH") collectWith(statement.query, `${path}.query`, candidates, false);
       else if (statement.query.type === "UNION") collectUnion(statement.query, `${path}.query`, candidates, true, false);
-      else collectSelect(statement.query, `${path}.query`, candidates, true, true, false);
+      else collectSelect(statement.query, `${path}.query`, candidates, false, false, true, true);
       return;
     case "EXPLAIN":
       collectStatement(statement.query, `${path}.query`, candidates, forceForbidden);

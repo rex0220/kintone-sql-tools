@@ -439,11 +439,12 @@ describe("B72 Step 2 must-stay-rejected", () => {
     expect(calls.confirm).not.toHaveBeenCalled();
   });
 
-  test("CREATE TEMP TABLE source は batchでも records/cursor/mutation/confirm 0", async () => {
+  test("CREATE TEMP TABLE UNION source は batchでも records/cursor/mutation/confirm 0", async () => {
     const { client, calls } = makeClient();
     const result = await executeBatch(
       "CREATE TEMP TABLE #t AS SELECT 区分, COUNT(*) AS c FROM APP100 "
-      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分; SELECT * FROM #t",
+      + "WHERE 日付 = THIS_MONTH() GROUP BY 区分 "
+      + "UNION ALL SELECT 区分, COUNT(*) AS c FROM APP200 GROUP BY 区分; SELECT * FROM #t",
       client,
       { confirm: calls.confirm }
     );
