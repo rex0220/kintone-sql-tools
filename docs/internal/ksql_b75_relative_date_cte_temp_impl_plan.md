@@ -25,16 +25,41 @@ WITH cur AS (SELECT 担当者, SUM(受注金額) AS 売上 FROM APP100 WHERE 受
 > **したがって本課題は原則 guard のみの変更**。runtime・EXPLAIN・残余抑止の新規実装は不要。
 > ただし「開けた形が本当に client 残余 0 か」の検証は Step ごとに必須（下記 §3 の受入条件）。
 
+## 0.1 【訂正 2026-07-26】第1許可形も開く
+
+初版の本計画は非スコープに「第1許可形（SIMPLE＋whole exact）」を挙げていたが、**これは根拠のない過剰な制約**だった。
+第2許可形を閉じる理由（client 残余評価が残り未検証）は書いていたが、第1許可形については理由を書いていない。
+
+実装着手時に codex が「`forceForbidden=false` にすると第1許可形も同時に開くため計画と矛盾する」と指摘して停止。
+指摘は正しく、**guard の構造上フラグだけで第3許可形のみを開くことはできない**（第1許可形は
+`allowFullScanExact` 相当の gate を持たない）。新しい gate を足すことも検討したが、実測により不要と判断した。
+
+```
+WITH c AS (SELECT 日付 AS d FROM APP100 WHERE 日付 = YESTERDAY()) SELECT * FROM c
+→ q=[日付 = YESTERDAY() order by $id asc limit 500 offset 0]
+→ EXPLAIN: evaluation: kintone server / client evaluation: forbidden
+```
+
+第1許可形は SIMPLE 経路（`executeSimpleSelect`）で **client WHERE filter が存在しない**ため、
+第3許可形より厳しい形であり CTE 本体でも安全。
+
+**したがって本課題の不変条件は「CTE 本体は whole WHERE が exact に押し下げられるなら許可」**とし、
+第1・第3許可形を開き、第2許可形（client 残余が残る）のみ `allowPhase2 = false` で閉じたままとする。
+新しい gate は追加しない。
+
+> B72 では逆に Claude が過剰な制約（`RELATIVE_DATE_FULL_SCAN_EXACT` complete-input reason）を足し、
+> 実機 smoke で発覚して撤回した。**根拠を書けない制約は足さない**こと。
+
 ## 1. スコープと非スコープ
 
 ### 開ける対象（`relativeDatePushdownGuard.ts` の walk）
 
 | 経路 | 現状 | 変更 | Step |
 |---|---|---|---|
-| `collectWith()` の CTE 本体 | `forceForbidden=true`, `allowFullScanExact=false` | 第3許可形のみ開く | 1 |
+| `collectWith()` の CTE 本体 | `forceForbidden=true`, `allowFullScanExact=false` | 第1・第3許可形を開く（第2は閉じたまま） | 1 |
 | `collectWith()` のインライン経路 `buildInlinedQuery()` | `allowFullScanExact=false` | 第3許可形を開く | 2 |
-| `collectWith()` の `.main`（WITH 最終 SELECT） | `forceForbidden=true` | 第3許可形のみ開く | 2 |
-| `CREATE_TEMP_TABLE` の source | `forceForbidden=true` | 第3許可形のみ開く | 3 |
+| `collectWith()` の `.main`（WITH 最終 SELECT） | `forceForbidden=true` | 第1・第3許可形を開く | 2 |
+| `CREATE_TEMP_TABLE` の source | `forceForbidden=true` | 第1・第3許可形を開く | 3 |
 | CTE 本体が `UNION` の枝（`collectUnion`） | `forceForbidden=true` | **非スコープ** | — |
 
 ### 非スコープ（fail-closed 継続）
@@ -49,7 +74,7 @@ WITH cur AS (SELECT 担当者, SUM(受注金額) AS 売上 FROM APP100 WHERE 受
 
 ## 2. 実装ステップ
 
-### Step 1 — CTE 本体に第3許可形を開く
+### Step 1 — CTE 本体に第1・第3許可形を開く
 
 `collectWith()` の CTE ループを、`forceForbidden` を落として `allowFullScanExact` を立てる形へ。
 **`allowPhase2Prefilter` は `false` を渡し、第2許可形が同時に開かないようにする**（非スコープの明示）。
@@ -96,6 +121,21 @@ CTE 本体の中のスカラーサブクエリ等が意図せず開かないか�
 - `docs/ksql_language_reference.md` §5 の「CTE 本体では相対日付を使えない」旨の記述を更新
 - `CHANGELOG.md` / `release/README.txt` / 台帳 §2 / spec ステータス（4点同期）
 - `ksql_docs`（MCP）に反映されることを確認
+
+## 2.5 既存テストの更新（Step 1 に含む）
+
+本変更で **旧挙動（materialized CTE は fail-closed）を固定している既存テスト 4 suites / 5 tests が失敗する**。
+これらは B75 が意図して変える挙動なので、**削除せず「新しい正しい挙動」を固定する形へ書き換える**こと。
+
+| suite | テスト |
+|---|---|
+| `src/core/optimization/__tests__/b67RelativeDatePlanGuard.test.ts` | materialized CTE は plan walk で fail-closed にする／WITH は inline plan を1物理 SELECT として判定し、非 inline materialization を拒否する |
+| `src/__tests__/b72RelativeDateFullScanExactStep2.test.ts` | materialized CTE は records/cursor/mutation/confirm 0 |
+| `src/__tests__/b67RelativeDateExecutionPaths.test.ts` | materialized CTE は metadata 以外の API と confirm の前に拒否する |
+| `src/__tests__/b67RelativeDateSurfaces.test.ts` | materialized CTE は reject/reason/records API 0 が3面で一致する |
+
+書き換え後は「押し下げられること・client 評価が 0 であること・結果が正しいこと」を固定する。
+**JOIN を含む CTE 本体・UNION 枝・DML source など、依然拒否される形の fail-closed テストは残すこと。**
 
 ## 3. 受入条件（各 Step 共通）
 
