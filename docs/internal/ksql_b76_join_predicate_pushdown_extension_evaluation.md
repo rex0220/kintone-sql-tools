@@ -1,7 +1,7 @@
 # B76 JOIN クエリの述語押し下げ拡張（日付・文字列）と相対日付の JOIN 対応
 
 - 起票: 2026-07-26
-- ステータス: 📝 **計画済み・未着手（優先 中／Phase A は独立に有効）**。**2026-07-27 に実測で見直し**（§2.4）＝問題は「日付が押し下げられない」ではなく **JOIN の押し下げ能力が単一表より構造的に狭い**こと。実装計画は [B76 実装計画](ksql_b76_join_predicate_pushdown_impl_plan.md)。
+- ステータス: 📝 **計画済み・未着手（優先 中）**。**2026-07-27 実測で問題定義を見直し（§2.4）→ codex レビューで方針を A-2' に確定**。確定方針・見積もり・Step 0 論点は [B76 実装計画 §0.3](ksql_b76_join_predicate_pushdown_impl_plan.md)。**Phase A 8〜13 人日**（旧 2〜3 人日は A-1 相当の過小評価）。
 - 出典: Pro（ksql-dashboard-pro）検証報告 2026-07-26 の NG ケース ①（実エンジン v3.24.0）
 - 関連: [B75 CTE 本体](ksql_b75_relative_date_cte_temp_evaluation.md) / [B72](ksql_b72_relative_date_fullscan_exact_spec.md) / [B67 Phase2 A](ksql_b67_phase2_impl_plan.md) / 旧ドラフト [perf-where-pushdown-join.md](perf-where-pushdown-join.md)
 
@@ -100,7 +100,23 @@ Pro の現行 D10 レシピは JOIN ＋ `DATE_FORMAT(a.受注日,'%Y-%m') = DATE
 
 ## 4. 方針案（2 Phase）
 
-### 【推奨変更】Phase A の方針を A-1 から A-2 へ
+### 【2026-07-27 確定】方針は A-2'（ハイブリッド）
+
+以下の A-1 / A-2 の比較は起草時のもので、**codex レビューにより A-2 の前提の一部が否定された**。
+確定方針・却下された主張・見積もりは [実装計画 §0.3](ksql_b76_join_predicate_pushdown_impl_plan.md) を参照。
+
+**要点だけ再掲:**
+
+- 「単一表で押し下がるからセマンティクス調査は不要」は**誤り**。単一表の押し下げが示すのは
+  kintone がその述語を**受理する**ことだけで、**サーバー評価 ≡ JS 評価**ではない。
+  同値性が要るのは**押し下げた述語を client 残余から除去するとき**である。
+- `whereCapability`（REST 受理性・型妥当性）と `wherePredicatePushdown`（JOIN プレフィルタの
+  安全性）は**異なる契約**であり、統合するほうが危険。
+- **residual は既定で残す。**除去は完全同値性を証明したノードだけ。
+- **A-1 は段階案として保持**（INNER JOIN の単一別名 AND リーフ限定・residual 維持）。
+- **外部結合は Phase A のスコープ外**（B6 却下の領域）。
+
+### 【起草時の比較・記録として保持】Phase A の方針 A-1 と A-2
 
 §2.4 の実測を受け、Phase A の方針を見直す。
 
