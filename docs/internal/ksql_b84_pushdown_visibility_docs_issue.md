@@ -1,7 +1,7 @@
 # B84 どの述語が押し下がるかが公開ドキュメントに無い
 
 - 起票: 2026-07-27
-- ステータス: 📝 **評価・起票（優先 中／利用者からの明示要望あり）**。未着手。
+- ステータス: 📋 **仕様確定・実装待ち**（2026-07-28）。案 B（テストで生成・照合）を採用。→ [実装計画](ksql_b84_pushdown_visibility_spec.md)
 - 出典: Pro（ksql-dashboard-pro）返信 2026-07-27 の「確認させていただきたい 2 点」
 - 関連: [B76 Phase A spec](ksql_b76_join_pushdown_phase_a_spec.md) / [B83 MCP カタログ drift](ksql_b83_mcp_validate_columns_docs_issue.md) / [B74 相対日付 docs 是正](ksql_b74_relative_date_docs_accuracy_issue.md)
 
