@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## 次回リリース（バージョン未定）
+## v3.28.0（2026-07-27）
 
 ### 機能追加（B76 Phase B・JOIN の server-only 関数 第5許可形）
 

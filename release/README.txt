@@ -1,18 +1,18 @@
-ksql 配布パッケージ (v3.27.0)
+ksql 配布パッケージ (v3.28.0)
 
 release 成果物:
-- ksql-plugin-v3.27.0.zip
-- ksql-mcp.mcpb (manifest version 3.27.0)
-- ksql-mcp.js (MCP server version 3.27.0)
+- ksql-plugin-v3.28.0.zip
+- ksql-mcp.mcpb (manifest version 3.28.0)
+- ksql-mcp.js (MCP server version 3.28.0)
 
-1. ksql-plugin-v3.27.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.28.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-次回リリース予定（バージョン未定）: B76 Phase B（JOIN の server-only 関数・第5許可形）。
+本リリース (v3.28.0): B76 Phase B（JOIN の server-only 関数・第5許可形）。
 - alias 付き物理 APP だけを入力にする INNER JOIN で、相対日付関数と
-  TODAY() / NOW() / LOGINUSER() を kintone server へ exact に押し下げられるようにします。
+  TODAY() / NOW() / LOGINUSER() を kintone server へ exact に押し下げられるようにしました。
 - 第5-W: WHERE 全体が単一 alias に属する whole-WHERE exact。同一 alias の OR / NOT /
   whole-exact な KLIKE 共存も使用できます。client residual はありません。
 - 第5-L: AND スパイン上の exact 関数 leaf を alias ごとに採用します。複数 alias に
@@ -27,7 +27,7 @@ release 成果物:
   実際の阻害要因である関数側の WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
   （legacy 3関数では WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN）を表示します。
 
-本リリース (v3.27.0): B79+B80。
+前リリース (v3.27.0): B79+B80。
 - 注意: B79 は破壊的変更です。プラグイン / CLI / MCP で LEFT / RIGHT JOIN を含む
   クエリの検索が 10 万件で打ち切られた場合、従来の警告＋部分結果ではなく
   SearchAbortedError で終了します。
