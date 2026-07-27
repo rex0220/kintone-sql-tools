@@ -1,7 +1,7 @@
 # B80 engine ライブラリが具体的な reason を汎用 parse error へ平坦化する
 
 - 起票: 2026-07-27（B76 Phase A Step 5 の 4面 parity テスト作成中に発見）
-- ステータス: 🔍 **調査中（2026-07-27 オーナー決定＝codex が調査＋仕様起草、Claude がレビュー）**。B79 と同一リリース。
+- ステータス: 🔧 **実装完了・未リリース（2026-07-27）**。[仕様 R1](ksql_b80_engine_library_reason_spec.md)（codex 起草・Claude 承認）の Step 1〜4 完了。`statementGuard.ts` が `KlikeValidationError` を class identity で allowlist し、`code = PARSE_ERROR` と `cause` の identity を維持したまま具体的な reason を返す。B76 §17 の parity 緩和も同一 merge で撤回済み。**v3.27.0（B79 と同一リリース）予定**。
 - 関連: [B73 エラーの構造化・多言語](ksql_b73_error_structured_i18n_evaluation.md) / [B66 read-only ライブラリ](../ksql_issue_tracker.md) / [B76 spec §17](ksql_b76_join_pushdown_phase_a_spec.md)
 
 ## 1. 事象
