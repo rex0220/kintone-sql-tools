@@ -172,4 +172,11 @@ client evaluation: forbidden
 records/cursor/mutation API during EXPLAIN: none
 ```
 
-**CLI 面は実機 PASS。プラグイン面（Firefox / Chrome）は未実施。**
+**CLI 面は実機 PASS。**
+
+## 【実機・プラグイン面】v3.28.0（2026-07-27・オーナー実施）
+
+ブラウザ プラグイン `ksql-plugin-v3.28.0.zip` で上記 SQL を実施し、**オーナーが PASS を確認**した。
+
+これにより **CLI 面・プラグイン面・デプロイ済み MCP（v3.27.0 での拒否＝before）** の
+3 面で B76 Phase B の挙動を実データで確認したことになる。
