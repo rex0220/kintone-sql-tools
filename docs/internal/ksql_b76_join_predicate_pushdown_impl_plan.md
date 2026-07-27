@@ -1,7 +1,7 @@
 # B76 実装計画 — JOIN の述語押し下げ拡張（Phase A）と相対日付の JOIN 対応（Phase B）
 
 - 作成: 2026-07-26（Claude 起草・**Step 0 の調査と仕様起草は codex 担当**）
-- ステータス: 📝 **計画（未着手）**。**2026-07-27 に方針を A-1 → A-2 → A-2' へ二段階で見直し**（§0.2・§0.3）。codex レビューで A-2 の前提の一部が否定され、ハイブリッド案 A-2' に確定。B75/B77/B78 の後に着手。
+- ステータス: ✅ **Phase A リリース済み（v3.26.0・2026-07-27）**。方針は A-1 → A-2 → A-2' と二度見直し（§0.2・§0.3）。詳細仕様は [Phase A 仕様](ksql_b76_join_pushdown_phase_a_spec.md)。**Phase B は未着手**（着手前に Pro の返答を見て B73 との優先度を再評価）。
 - 評価: [B76 eval](ksql_b76_join_predicate_pushdown_extension_evaluation.md)
 
 ## 0. 本計画の性格

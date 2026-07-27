@@ -1,7 +1,7 @@
 # B76 JOIN クエリの述語押し下げ拡張（日付・文字列）と相対日付の JOIN 対応
 
 - 起票: 2026-07-26
-- ステータス: 📝 **計画済み・未着手（優先 中）**。**2026-07-27 実測で問題定義を見直し（§2.4）→ codex レビューで方針を A-2' に確定**。確定方針・見積もり・Step 0 論点は [B76 実装計画 §0.3](ksql_b76_join_predicate_pushdown_impl_plan.md)。**Phase A 8〜13 人日**（旧 2〜3 人日は A-1 相当の過小評価）。
+- ステータス: ✅ **Phase A リリース済み（v3.26.0・2026-07-27）**。実測で問題を「機構の分断」と再定義（§2.4）→ codex レビューで A-2' に確定 → Step 1〜5 で実装。Phase B は未着手。
 - 出典: Pro（ksql-dashboard-pro）検証報告 2026-07-26 の NG ケース ①（実エンジン v3.24.0）
 - 関連: [B75 CTE 本体](ksql_b75_relative_date_cte_temp_evaluation.md) / [B72](ksql_b72_relative_date_fullscan_exact_spec.md) / [B67 Phase2 A](ksql_b67_phase2_impl_plan.md) / 旧ドラフト [perf-where-pushdown-join.md](perf-where-pushdown-join.md)
 
