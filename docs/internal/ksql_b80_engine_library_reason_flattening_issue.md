@@ -1,7 +1,7 @@
 # B80 engine ライブラリが具体的な reason を汎用 parse error へ平坦化する
 
 - 起票: 2026-07-27（B76 Phase A Step 5 の 4面 parity テスト作成中に発見）
-- ステータス: 📝 **評価・起票（優先 中〜高／誤導的エラー）**。未着手。
+- ステータス: 🔍 **調査中（2026-07-27 オーナー決定＝codex が調査＋仕様起草、Claude がレビュー）**。B79 と同一リリース。
 - 関連: [B73 エラーの構造化・多言語](ksql_b73_error_structured_i18n_evaluation.md) / [B66 read-only ライブラリ](../ksql_issue_tracker.md) / [B76 spec §17](ksql_b76_join_pushdown_phase_a_spec.md)
 
 ## 1. 事象
