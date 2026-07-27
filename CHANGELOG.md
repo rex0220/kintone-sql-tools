@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## Unreleased
+## v3.26.0（2026-07-27）
 
 ### 性能改善（B76 JOIN 述語の APP 別 prefilter）
 

@@ -54,11 +54,18 @@
       "Bash(powershell -NoProfile -Command 'Add-Type -A System.IO.Compression.FileSystem; $t=Join-Path $env:TEMP '\\\\''ksqlzip2'\\\\''; Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue; [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Resolve-Path release/ksql-plugin-v3.25.0.zip\\), $t\\); [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Join-Path $t '\\\\''contents.zip'\\\\''\\), \\(Join-Path $t '\\\\''c'\\\\''\\)\\); '\\\\''zip 内 manifest version -> '\\\\'' + \\(Get-Content \\(Join-Path $t '\\\\''c/manifest.json'\\\\''\\) -Raw | ConvertFrom-Json\\).version')",
       "Bash(echo \"npm latest: $\\(npm view @rex0220/kintone-sql-tools dist-tags.latest 2>/dev/null\\)\")",
       "Bash(echo \"main: $\\(git log --oneline -1\\) / local version: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")",
-      "Bash(echo \"npm latest: $\\(npm view @rex0220/kintone-sql-tools dist-tags.latest \\) / main: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")"
+      "Bash(echo \"npm latest: $\\(npm view @rex0220/kintone-sql-tools dist-tags.latest \\) / main: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")",
+      "Bash(cd \"c:/Users/rex02/Projects/kintone-sql-tools\" && echo \"=== B75 見積もり ===\" && grep -n \"人日\" docs/internal/ksql_b75_relative_date_cte_temp_impl_plan.md | head -3 && echo \"=== B77/B78 Step 別 ===\" && sed -n '/^## 14. 実装 Step/,/^総見積/p' docs/internal/ksql_b77_b78_kintone_function_fail_closed_spec.md | grep -E \"^\\\\| [0-9]\" | sed 's/|.*人日/→/' | head -6 && grep -n \"総見積\" docs/internal/ksql_b77_b78_kintone_function_fail_closed_spec.md)",
+      "Bash(xargs echo \"Step 5 出力行数:\")",
+      "Bash(node scripts/version-sync-guard.mjs)",
+      "Bash(node -p \"'prod/manifest.json -> ' + JSON.parse\\(require\\('fs'\\).readFileSync\\('prod/manifest.json','utf8'\\)\\).version\")",
+      "Bash(powershell -NoProfile -Command 'Add-Type -A System.IO.Compression.FileSystem; $t=Join-Path $env:TEMP '\\\\''ksqlz3'\\\\''; Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue; [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Resolve-Path release/ksql-plugin-v3.26.0.zip\\), $t\\); [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Join-Path $t '\\\\''contents.zip'\\\\''\\), \\(Join-Path $t '\\\\''c'\\\\''\\)\\); '\\\\''zip 内 manifest -> '\\\\'' + \\(Get-Content \\(Join-Path $t '\\\\''c/manifest.json'\\\\''\\) -Raw | ConvertFrom-Json\\).version')",
+      "Bash(echo \"main: $\\(git log --oneline -1\\) / version: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")"
     ],
     "additionalDirectories": [
       "\\tmp",
-      "C:\\Users\\rex02\\AppData\\Local\\Temp\\claude\\c--Users-rex02-Projects-kintone-sql-tools\\6f086584-c50e-4071-a2e9-02792b494bc4\\tasks"
+      "C:\\Users\\rex02\\AppData\\Local\\Temp\\claude\\c--Users-rex02-Projects-kintone-sql-tools\\6f086584-c50e-4071-a2e9-02792b494bc4\\tasks",
+      "c:\\Users\\rex02\\Projects\\kintone-sql-tools\\docs\\internal"
     ]
   }
 }
