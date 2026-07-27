@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { measureInstructionsWordBudget } from "../instructionsBudget";
 import { resetGlobalRequestGate } from "../../api/requestGate";
 import { KINTONE_METADATA_RESOURCES, mapKintoneMetadataRequest } from "../../node/kintoneMetadata";
 import type {
@@ -107,9 +108,18 @@ describe("ksql_app_metadata MCP surface", () => {
       await client.connect(clientTransport);
       const instructions = client.getInstructions();
       expect(instructions).toBeTruthy();
-      const instructionWords = instructions?.trim().split(/\s+/).length;
-      expect(instructionWords).toBe(548);
-      expect(instructionWords).toBeLessThanOrEqual(550);
+      // B81: 予算を散文とカタログ列挙で分けて計上する。総語数だけで測ると、
+      // 抑えたい散文の冗長さと、機能追加に比例して必ず増えるカタログの規模が
+      // 同じ枠を奪い合う。カタログ列挙は「一覧は完全で IFNULL のような他方言の
+      // 関数は存在しない」と明示して捏造を防ぐ最も効いている部分なので削らない。
+      const budget = measureInstructionsWordBudget(instructions ?? "");
+      // 実測値の exact 固定。意図しない増減を fail-loud に捕まえる。
+      expect(budget).toEqual({ total: 548, catalog: 258, prose: 290 });
+      // 抑制対象は散文。超えたら意味を削らず既存の重複文を圧縮する。
+      expect(budget.prose).toBeLessThanOrEqual(320);
+      // カタログは機能追加で増えて当然。別枠にしつつ青天井は防ぐ。
+      expect(budget.catalog).toBeLessThanOrEqual(420);
+      expect(budget.total).toBeLessThanOrEqual(700);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);
       for (const key of [
         "not generic SQL",

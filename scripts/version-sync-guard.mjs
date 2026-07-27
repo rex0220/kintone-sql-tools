@@ -85,10 +85,41 @@ if (!existsSync(resolve(rootDir, pluginZip))) {
   failures.push(`${pluginZip}: expected release plugin zip to exist`);
 }
 
+// B82: リリース時だけ、公開文書に未リリース表記が残っていないかを検査する。
+// version-sync-guard は「版数の一致」を見るもので、v3.25.0 では言語リファレンスに
+// 「Unreleased の破壊的変更」が2箇所残ったまま出荷した。語の残存は別の失敗モードなので
+// ここで追加する。開発中の npm test では未リリース機能の記述が正常なため無効にし、
+// prepack（--release）からのみ有効化する。
+const releaseMode = process.argv.includes("--release");
+if (releaseMode) {
+  const staleMarkers = [
+    ["Unreleased", /Unreleased/g],
+    ["未リリース", /未リリース/g],
+    ["次回リリース", /次回リリース/g],
+  ];
+  // CHANGELOG.md は開発中に "## Unreleased" を持つのが正常なので対象外
+  // （リリース時は版数見出しへ確定させる運用）。
+  for (const relativePath of ["docs/ksql_language_reference.md", "release/README.txt"]) {
+    const lines = readText(relativePath).split(/\r?\n/);
+    for (const [label, pattern] of staleMarkers) {
+      lines.forEach((line, index) => {
+        pattern.lastIndex = 0;
+        if (!pattern.test(line)) return;
+        failures.push(
+          `${relativePath}:${index + 1}: 未リリース表記「${label}」が残っています -> ${line.trim().slice(0, 80)}`
+        );
+      });
+    }
+  }
+}
+
 if (failures.length > 0) {
   console.error(`[version-sync] ${failures.length} problem(s) found:`);
   for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
 
-console.log(`[version-sync] v${version}: all release version pins are synchronized`);
+console.log(
+  `[version-sync] v${version}: all release version pins are synchronized`
+  + (releaseMode ? " (release mode: 未リリース表記なし)" : "")
+);

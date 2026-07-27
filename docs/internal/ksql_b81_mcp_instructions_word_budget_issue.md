@@ -1,7 +1,7 @@
 # B81 MCP instructions の語数予算が構造的に枯渇する
 
 - 起票: 2026-07-27
-- ステータス: 📝 **評価・起票（優先 中／次の MCP instructions 変更をブロックする）**。未着手。
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-27）。案 D（散文とカタログで予算を分ける）を実装。
 - 出典: B76 Phase B（v3.28.0）Step 5 で instructions が **552 語**となり guard に一度失敗。短縮して 548 語で通した。
 - 関連: [B60 syntax hints](ksql_b60_mcp_syntax_hints_spec.md) / [B62 AI visibility](ksql_b62_ai_visibility_notes_issue.md) / [B67 実装計画](ksql_b67_impl_plan.md)
 
@@ -111,3 +111,48 @@ expect(totalWords).toBeLessThanOrEqual(650);
 
 なお **B73（エラーの構造化・多言語）が instructions へ追記を伴う可能性が高い**ため、
 B73 に着手するなら本課題を先に処理しておくのが望ましい。
+
+
+## 【実装・2026-07-27】案 D を実装した
+
+`src/mcp/instructionsBudget.ts` を新設し、`measureInstructionsWordBudget()` が
+`{ total, catalog, prose }` を返すようにした。**カタログ由来の語数は文面ではなく元データ**
+（`KSQL_FUNCTION_CATALOG` / `STATEMENT_SYNTAX_CATALOG` / CHECKS / CONTROL）から数える。
+
+### 起票時の見積もりを訂正
+
+起票時に「散文は P1〜P3 の 116 語」と書いたが**誤り**だった。
+**P4/P5 の説明文（`STATEMENT_SYNTAX_COMMON_NOTES` や function catalog の注記）も散文**なので、
+実測は次のとおり。
+
+| 区分 | 語数 |
+|---|---:|
+| total | 548 |
+| catalog（機能追加に比例） | **258** |
+| prose（抑制対象） | **290** |
+
+そのため §4.1 に書いた「散文 200 語」は実態に合わない。閾値は実測に合わせて設定した。
+
+### 閾値
+
+```ts
+expect(budget).toEqual({ total: 548, catalog: 258, prose: 290 }); // exact 固定は維持
+expect(budget.prose).toBeLessThanOrEqual(320);    // 抑制対象
+expect(budget.catalog).toBeLessThanOrEqual(420);  // 増えて当然・青天井は防ぐ
+expect(budget.total).toBeLessThanOrEqual(700);
+```
+
+### 破壊テストで肝心の性質を確認した
+
+関数を5個追加して再測定した結果:
+
+| | before | after |
+|---|---:|---:|
+| total | 548 | 553 |
+| catalog | 258 | **263** |
+| prose | 290 | **290（不変）** |
+
+**旧ルールでは total 553 で上限 550 を突破**していた。新ルールでは catalog 枠が動くだけで、
+**機能追加が散文の予算を食わない**。これが本課題の目的である。
+
+exact 固定は残しているので、この変更自体はテスト更新を要求する（意図した fail-loud）。

@@ -148,7 +148,7 @@ docs/ksql_language_reference.md:758  > **⚠ Unreleased 移行注意（minor だ
 **言語リファレンスの同種表記を見落とした**。version-sync-guard は**版数の一致**を
 検査するもので、**「Unreleased」という語の残存**は対象外である。
 
-### 対策案（未実装）
+### 対策案 → **B82 として実装済み（2026-07-27）**
 
 リリース時（`prepack`）に限り、**公開文書に「Unreleased」が残っていたら失敗**させる。
 
@@ -160,3 +160,9 @@ docs/ksql_language_reference.md:758  > **⚠ Unreleased 移行注意（minor だ
 
 **規模は小さい（0.25 人日程度）が、version-sync-guard に新しい失敗モードを足すため、
 リリース直前ではなく落ち着いたタイミングで入れること。**
+
+
+> **§7 は [B82](ksql_b82_release_stale_marker_guard_issue.md) として実装済み（2026-07-27）。**
+> `version-sync-guard.mjs` に `--release` モードを追加し、`prepack` からのみ有効化した。
+> 対象は言語リファレンスと `release/README.txt`、検出語は `Unreleased` / `未リリース` / `次回リリース`。
+> `npm test` は従来どおり失敗させない。

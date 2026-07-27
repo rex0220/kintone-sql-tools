@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 次回リリース（バージョン未定）
+
+### 改善（B81 MCP instructions の語数予算・B82 リリース時の未リリース表記検出）
+
+- **B81:** MCP `instructions` の語数予算を、**散文とカタログ列挙で分けて計上**するようにした。従来は総語数だけを見ていたため、抑えたい散文の冗長さと、機能追加に比例して必ず増えるカタログの規模が同じ枠を奪い合っていた。カタログ列挙は「一覧は完全で他方言の関数は存在しない」と明示して捏造を防ぐ最も効いている部分なので削らない。**公開挙動の変更なし**（テストの計上方法のみ）。
+- **B82:** リリース時（`prepack`）に限り、**公開文書に `Unreleased` / `未リリース` / `次回リリース` が残っていたらリリースを止める**ようにした。v3.25.0 でリリース済みの内容が言語リファレンスで「Unreleased の破壊的変更」のまま出荷された事故の再発防止。`npm test` は従来どおり失敗させない（開発中の未リリース記述は正常なため）。**公開挙動の変更なし**。
+
 ## v3.28.0（2026-07-27）
 
 ### 機能追加（B76 Phase B・JOIN の server-only 関数 第5許可形）
@@ -33,7 +40,7 @@
 
 - **INNER JOIN の `WHERE` から、単一 alias に属し、型と演算子の対応が確認できる述語を各 APP の records API query へ押し下げるようにした。** DATE / TIME / DATETIME 系と単一行文字列の `=`、NUMBER・`$id`、実在する選択肢の `IN` / `NOT IN`、安全な同一 alias `OR` などが対象になる。
 - **これは性能改善であり、クエリ結果の挙動変更ではない。** 押し下げ後も元の `WHERE` を client で再評価するため結果は不変で、records API から取得する候補件数だけを減らす。`EXPLAIN` は applied / candidate、`relation: exact` / `relation: superset`、非採用 reason を表示する。
-- v3.26.0 時点では LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、`KLIKE` を含む `OR`、型不明、非実在の選択肢、ユーザー選択・組織選択・グループ選択フィールドは押し下げない。相対日付関数および `LOGINUSER()` などの kintone query 関数も JOIN では使用できなかった（次回リリースの B76 Phase B で上記第5許可形を追加）。
+- v3.26.0 時点では LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、`KLIKE` を含む `OR`、型不明、非実在の選択肢、ユーザー選択・組織選択・グループ選択フィールドは押し下げない。相対日付関数および `LOGINUSER()` などの kintone query 関数も JOIN では使用できなかった（v3.28.0 の B76 Phase B で第5-W / 第5-L を追加）。
 - **`DATE_FORMAT(...)` など関数付き述語は引き続き押し下げない。** FULL_SCAN のすべての `WHERE` が最適化されるわけではない。
 
 ## v3.25.0（2026-07-27）
