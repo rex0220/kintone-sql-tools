@@ -1,7 +1,7 @@
 # B76 — JOIN 述語押し下げ Phase A 仕様 R1
 
 - 作成: 2026-07-27（codex、Step 0 調査結果）
-- ステータス: **R1（レビュー待ち・未実装）**
+- ステータス: ✅ **Phase A リリース済み（v3.26.0・2026-07-27）**。Step 1〜5 完了。feat PR #292→tag v3.26.0→GitHub Release→npm publish（latest 3.26.0）。**実機 PASS**＝プラグイン＋MCP v3.26.0（単一表 1684 件と JOIN 経由 1684 件が一致＝結果不変を実データで確認）。Phase B は未着手。
 - 対象バージョン基準: **v3.25.0**
 - 親計画: [B76 実装計画](ksql_b76_join_predicate_pushdown_impl_plan.md) §0.3
 - 関連評価: [B76 extension evaluation](ksql_b76_join_predicate_pushdown_extension_evaluation.md) §2.4

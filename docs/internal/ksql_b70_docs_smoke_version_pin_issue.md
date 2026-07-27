@@ -2,7 +2,7 @@
 
 - 起票: 2026-07-25
 - **2026-07-27 改題・スコープ拡大**（v3.25.0 のリリース準備で実害が出たため）
-- ステータス: 🔧 **実装完了・未リリース（2026-07-27）**。`scripts/version-sync-guard.mjs` を新設し `prepack` と `npm test` の双方に配線。`build.mjs` が `prod/manifest.json` を自動同期、`engine-docs-examples-smoke.mjs` のハードコードは廃止。**7 ケースの破壊テストで全箇所を検出することを確認済み**（§6）。
+- ステータス: ✅ **リリース済み（v3.26.0・2026-07-27）**。`scripts/version-sync-guard.mjs` を新設し `prepack` と `npm test` に配線。**初の実戦投入で `package.json` のみ更新した時点の 11 件を検出**し、`prod/manifest.json` は `build.mjs` が自動同期＝v3.25.0 で漏らした2箇所が予防と検出の二層で塞がれた。
 
 ## 1. 事象（改題の理由）
 
