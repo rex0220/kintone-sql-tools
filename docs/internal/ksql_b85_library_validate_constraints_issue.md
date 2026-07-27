@@ -1,7 +1,7 @@
 # B85 ライブラリの VALIDATE が制約を検証できず黙って 0 件を返す
 
 - 起票: 2026-07-28
-- ステータス: 📝 **評価・起票（優先 高／silent under-report・v3.29.0 で出荷済み）**。未着手。
+- ステータス: 🚧 **案 A・C 実装済み（未リリース）／案 B は設計確定・未着手**（2026-07-28）。
 - 出典: Pro（ksql-dashboard-pro）返信 2026-07-28「確認依頼③」
 - 関連: [B68 計画](ksql_b68_engine_library_readonly_impl_plan.md) / [B78](ksql_b78_user_field_loginuser_issue.md) / [B79](ksql_b79_outer_join_search_abort_issue.md)
 
@@ -200,3 +200,53 @@ B78（黙って 0 件）・B79（黙って誤った値）と同じ silent wrong 
 
 案 A（型へ制約を宣言）は**単なる利便性ではなく、開示を正確にするための前提**になる。
 型が宣言していれば、クライアント実装者は**何を渡せば何が検証されるか**を型から読める。
+
+---
+
+## 9. 【2026-07-28】案 A・C を実装
+
+### 宣言した制約＝`hasAuditableConstraint` が見る集合と完全一致
+
+| 宣言 | 型 |
+|---|---|
+| `required` | `boolean` |
+| `minValue` / `maxValue` | `string` |
+| `minLength` / `maxLength` | **`string`** |
+| `optionOrder` | 既存宣言 |
+
+> **§4.1 の例で `minLength?: number` と書いたのは誤り。**実コードの `KintoneFieldInfo` と
+> フォーム API 正規化後の型は **`string`** で、codex が実装時に訂正した。
+
+### 独立検証
+
+| クライアントが渡すもの | 結果 |
+|---|---|
+| 制約あり（型どおりの `ReadonlyFieldInfo` リテラル） | **2 行**・`ERR_LENGTH_MIN` ＋ `ERR_REQUIRED` |
+| 制約なし | **0 行** |
+
+**型どおりに書けること**（余剰プロパティ検査を通ること）も型レベルで確認した。
+これが通らないと、案 A の目的（自前クライアント実装者が型から気づける）が達成できない。
+
+### 公開 snapshot を拡張
+
+`engine:declaration-smoke` が **`ReadonlyFieldInfo` の全 12 プロパティ**を照合するようになった。
+**型が痩せたら落ちる**ので、将来の drift を防げる。
+
+### 案 C
+
+言語リファレンスと engine ライブラリ利用ガイドの両方へ、
+`$err_code` 別の内訳は **`COUNT(*)` ではなく `SUM($err_count)`** を使う旨と、
+KPI の `errorCount` と棒グラフの `COUNT(*)` が食い違う具体例を記載した。
+
+### 手順上のミス（記録）
+
+**案 A・C の docs 変更が、B86 起票のコミット `6da9b05` へ紛れ込んだ。**
+codex が背景で作業している最中に `git add docs/` を実行したため。
+
+内容は正しく、コミット先だけが誤っている。**履歴は書き換えず記録に留める。**
+**背景実行中は `git add` の対象を明示列挙する**こと。
+
+### 残り＝案 B
+
+**§8 の設計（「検証したもの」を開示する）は確定済み・未着手。**
+案 A だけでは、自前クライアントが制約を渡さなければ**依然として黙って 0 件**になる。

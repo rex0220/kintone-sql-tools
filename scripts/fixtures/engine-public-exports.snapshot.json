@@ -32,5 +32,19 @@
     "ReadonlyProcessStatusState",
     "RunBatchOptions",
     "RunQueryOptions"
+  ],
+  "readonlyFieldInfoProperties": [
+    "code",
+    "fieldType",
+    "inSubtable",
+    "label",
+    "maxLength",
+    "maxValue",
+    "minLength",
+    "minValue",
+    "optionOrder",
+    "required",
+    "sortKind",
+    "subtableCode"
   ]
 }

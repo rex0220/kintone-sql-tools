@@ -41,12 +41,29 @@ export interface ReadonlyAppInfo {
   description: string;
 }
 
+/**
+ * Read-only field metadata supplied to the engine.
+ *
+ * `VALIDATE` only checks constraints present in this metadata. If a BYO client
+ * omits `optionOrder`, `required`, or the min/max metadata below, those
+ * constraints are not validated and the result can silently contain zero
+ * errors. BYO clients must pass the corresponding values from
+ * `/k/v1/app/form/fields.json`.
+ *
+ * `createReadonlyKintoneClient()` supplies these values automatically, so its
+ * users do not need to change their client.
+ */
 export interface ReadonlyFieldInfo {
   code: string;
   label: string;
   fieldType: string;
   optionOrder?: Record<string, number>;
   sortKind?: "number" | "string";
+  required?: boolean;
+  minValue?: string;
+  maxValue?: string;
+  minLength?: string;
+  maxLength?: string;
   inSubtable?: boolean;
   subtableCode?: string;
 }

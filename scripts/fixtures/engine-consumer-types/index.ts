@@ -30,7 +30,16 @@ const client: ReadonlyKintoneClient = {
     return [];
   },
   async getFields() {
-    return [];
+    return [{
+      code: "name",
+      label: "Name",
+      fieldType: "SINGLE_LINE_TEXT",
+      required: true,
+      minLength: "3",
+      maxLength: "64",
+      minValue: "0",
+      maxValue: "100",
+    }];
   },
   async getNumberPrecision() {
     return { digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN" };

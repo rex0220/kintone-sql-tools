@@ -4,6 +4,10 @@
 
 ## 未リリース
 
+### 修正（B85 engine ライブラリの VALIDATE 制約メタデータ契約）
+
+- `ReadonlyFieldInfo` に `required`、`minLength`、`maxLength`、`minValue`、`maxValue` を任意プロパティとして追加した。BYO readonly client がフォーム定義の制約を渡せるようにする純加法の型修正で、`createReadonlyKintoneClient()` の既存挙動は変更しない。公開文書には、`VALIDATE` の完全性が client のメタデータに依存することと、違反内訳には `COUNT(*)` ではなく `SUM($err_count)` を使うことを追記した。
+
 ### ドキュメント（B84 押し下げ可否の公開）
 
 - 言語リファレンスに、単一表と JOIN の押し下げ機構の違い、JOIN の field vs literal におけるフィールド型 × 演算子表、`$id` と `RECORD_NUMBER` の違い、server-only 関数・`KLIKE`・関数付きフィールドの別規則を追加した。公開表は分類器ソースから導いた型集合と実分類結果をテストで照合し、実装との drift を検出する。**公開挙動の変更なし**。

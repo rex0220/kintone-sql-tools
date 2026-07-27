@@ -72,6 +72,10 @@ const leaks = declarations.flatMap(({ name, text }) =>
 assert(leaks.length === 0, `Internal declaration imports leaked:\n${leaks.join("\n")}`);
 
 const indexDeclaration = readFileSync(resolve(distDir, "index.d.ts"), "utf8");
+const publicTypesDeclaration = readFileSync(
+  resolve(distDir, "publicTypes.d.ts"),
+  "utf8"
+);
 const exportSnapshot = JSON.parse(readFileSync(exportSnapshotPath, "utf8"));
 const namedExport = indexDeclaration.match(/export\s*\{([^}]+)\}/s)?.[1] ?? "";
 const namedTypeExport =
@@ -85,6 +89,14 @@ const actualValueExports = [
   ...normalizeNames(namedExport),
 ].sort();
 const actualTypeExports = normalizeNames(namedTypeExport);
+const readonlyFieldInfoBody = publicTypesDeclaration.match(
+  /export interface ReadonlyFieldInfo\s*\{([^}]+)\}/s
+)?.[1] ?? "";
+const actualReadonlyFieldInfoProperties = readonlyFieldInfoBody
+  .split(/\r?\n/)
+  .map((line) => line.match(/^\s*([A-Za-z][A-Za-z0-9]*)(?:\?)?:/)?.[1])
+  .filter(Boolean)
+  .sort();
 assert(
   JSON.stringify(actualValueExports) ===
     JSON.stringify([...exportSnapshot.valueExports].sort()),
@@ -94,6 +106,12 @@ assert(
   JSON.stringify(actualTypeExports) ===
     JSON.stringify([...exportSnapshot.typeExports].sort()),
   `B66 type export snapshot mismatch:\n${JSON.stringify(actualTypeExports, null, 2)}`
+);
+assert(
+  JSON.stringify(actualReadonlyFieldInfoProperties) ===
+    JSON.stringify([...exportSnapshot.readonlyFieldInfoProperties].sort()),
+  `ReadonlyFieldInfo property snapshot mismatch:\n` +
+    `${JSON.stringify(actualReadonlyFieldInfoProperties, null, 2)}`
 );
 
 for (const config of ["tsconfig.nodenext.json", "tsconfig.node16.json"]) {
@@ -111,5 +129,6 @@ for (const config of ["tsconfig.nodenext.json", "tsconfig.node16.json"]) {
 console.log("[engine-declaration-smoke] internal imports: 0");
 console.log(
   `[engine-declaration-smoke] B66 public export snapshot: ` +
-  `${actualValueExports.length} values, ${actualTypeExports.length} types`
+  `${actualValueExports.length} values, ${actualTypeExports.length} types, ` +
+  `${actualReadonlyFieldInfoProperties.length} ReadonlyFieldInfo properties`
 );

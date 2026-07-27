@@ -299,6 +299,50 @@ test("VALIDATE returns validateStats and uses real optionOrder metadata shape", 
   expect(getFields).toHaveBeenCalledWith(6701);
 });
 
+test.each([
+  [
+    "constraint metadata is supplied",
+    [{
+      code: "name",
+      label: "name",
+      fieldType: "SINGLE_LINE_TEXT",
+      required: true,
+      minLength: "3",
+    }],
+    { errorRecords: 2, errorCount: 2 },
+    ["ERR_REQUIRED", "ERR_LENGTH_MIN"],
+  ],
+  [
+    "constraint metadata is omitted",
+    [{
+      code: "name",
+      label: "name",
+      fieldType: "SINGLE_LINE_TEXT",
+    }],
+    { errorRecords: 0, errorCount: 0 },
+    [],
+  ],
+] as const)(
+  "VALIDATE reflects whether BYO client %s",
+  async (_label, fields, expectedStats, expectedCodes) => {
+    const getRecords = jest.fn(async () => ({
+      records: [
+        { $id: field("1"), name: field("") },
+        { $id: field("2"), name: field("ab") },
+      ],
+    }));
+    const getFields = jest.fn(async () => fields);
+    const client = byoClient({ getRecords, getFields });
+
+    const result = await runQuery("VALIDATE APP6702", { client });
+
+    expect(result.validateStats).toEqual(expectedStats);
+    expect(result.rowCount).toBe(expectedCodes.length);
+    expect(result.rows.map((row) => row.$err_code)).toEqual(expectedCodes);
+    expect(getFields).toHaveBeenCalledWith(6702);
+  }
+);
+
 test("EXPLAIN permits field metadata only and performs no records or Cursor calls", async () => {
   const getRecords = jest.fn(async () => ({ records: [] }));
   const openCursor = jest.fn(async () => {
