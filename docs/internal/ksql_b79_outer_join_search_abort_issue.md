@@ -98,3 +98,37 @@ kintone の検索が 10 万件で打ち切られた（`searchAborted: true`）�
 
 B76 Phase A の変更が原因ではなく、**B7 以来の既存挙動**である。
 B76 Step 4 のレビュー中、「JOIN は本当に単一表より危険か」を検証する過程で発見した。
+
+
+## 7. 【2026-07-27】engine ライブラリは元から fail-closed（面ごとの差）
+
+docs 作業の着手時に codex が検出。**B79 は engine ライブラリの挙動を一切変えない。**
+
+`src/engine-library/readonlyClient.ts` は `getRecords` をラップし、
+**クエリ形に関係なく** `searchAborted: true` を `SEARCH_ABORTED` の hard error へ変換する。
+
+```ts
+getRecords: async (params) => {
+  const result = await clientCall(() => getRecords(params));
+  if (result.searchAborted === true) throw searchAborted();
+  return result;
+},
+```
+
+`docs/ksql_engine_library.md` にも明記されている。
+
+> client が `searchAborted: true` を返した場合、simple query、JOIN、GROUP BY を問わず
+> 常に `SEARCH_ABORTED` の **hard error** です。部分行や warning result は返しません。
+
+### 面ごとの挙動（B79 適用後）
+
+| 面 | 外部結合 | `INNER JOIN` / 単一表 |
+|---|---|---|
+| plugin / CLI / MCP | **エラー**（B79 で変更） | 警告＋部分結果 |
+| **engine ライブラリ** | **エラー**（元から） | **エラー**（元から） |
+
+**docs で「`INNER JOIN`・単一表は影響なし」と書くときは、
+plugin / CLI / MCP に限る旨を明示すること。** ライブラリ面では元からエラーである。
+
+ライブラリが常に厳格なのは、**プログラム API では部分結果が黙ってアプリケーション
+ロジックへ流れ込むほうが危険**だからであり、意図的な設計である（B66 のガイドに記載）。
