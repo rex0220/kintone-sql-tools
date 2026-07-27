@@ -180,3 +180,26 @@ records/cursor/mutation API during EXPLAIN: none
 
 これにより **CLI 面・プラグイン面・デプロイ済み MCP（v3.27.0 での拒否＝before）** の
 3 面で B76 Phase B の挙動を実データで確認したことになる。
+
+
+## 【実機・MCP 面】デプロイ済み MCP v3.28.0（2026-07-27）
+
+npm publish 後、VSCode 再起動でデプロイ済み MCP が v3.28.0 になった状態で再確認した。
+
+| 形 | v3.27.0 | **v3.28.0** |
+|---|---|---|
+| JOIN ＋ `LAST_YEAR()` | `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` | **18 件** |
+| 第5-W `LAST_YEAR() OR THIS_YEAR()` | 同上 | **18 件** |
+
+EXPLAIN も期待どおり。**fetch する `fields` に residual 用の `会社名` が含まれる**ことも確認した。
+
+```text
+allow form: JOIN_SERVER_FUNCTION_EXACT (leaf)
+pushdown applied: 対応日付 = LAST_YEAR()
+relation: exact
+client residual: LENGTH(a.会社名) > 1
+relative date client evaluations: 0
+fields: $id, 顧客No, 対応日付, 会社名
+```
+
+**プラグイン面・CLI 面・MCP 面の3面すべてで実機 PASS。**
