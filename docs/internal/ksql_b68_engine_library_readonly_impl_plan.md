@@ -182,8 +182,11 @@ API だけ先行させると、書き込み文が混じったバッチを受け�
 
 ### Step 3 — 一時テーブル lifecycle と上限契約（Phase B・1.5〜2.5 人日）
 
-- 呼び出し単位のメモリ実体化。`tempTableMaxRows`（既定 10,000）・最大 16 表を
+- 呼び出し単位のメモリ実体化。`tempTableMaxRows`（既定 10,000）・**同時に存在できる一時テーブル 最大 16 表**を
   **`RunBatchOptions` と型コメントで公開契約として明示**
+  - **【訂正 2026-07-27】** 初版は「1 バッチあたり最大 16 表」と書いていたが**不正確**。
+    実際は**同時数**の上限で、`DROP TEMP TABLE` すれば枠が空き累計 17 表目を作れる（既存テストが保証）。
+    **メモリ上限としては同時数が正しい意味論**（解放した分を再利用できるのは正常）。エンジン挙動は変えない。
 - 超過は常に error（truncate しない＝下流が静かに欠けた入力を受け取らないため）
 - `SET` / `DECLARE` / `ASSERT` の read-only サブセット
 - **利用者アプリのプロセス内で実体化する**点を型コメントと docs に明記
@@ -376,3 +379,73 @@ Step 2 で `runBatch` が実在した時点で案内を追加する。
 `npm test` 185 suites / 4,795 tests ＋ CLI 26 green、snapshot 22 不変、
 `engine:bundle-guard` 3 形すべて `forbidden=0`、
 `engine:declaration-smoke` green（公開 snapshot 6 values / 24 types）。
+
+---
+
+## 【Step 3 レビュー・2026-07-27】完了 ＋ 要判断の契約問題を検出
+
+### 実装の要点
+
+- `RunBatchOptions` に **`tempTableMaxRows`（既定 10,000）** と **`variables`** を追加
+- 型コメントに**既定値・超過時 error・利用者アプリのプロセス内実体化・同時 16 表・
+  `DROP` で枠を再利用できること**を明記
+- **`variables` は `DECLARE` のみ上書き可。`SET` への注入は拒否**（良い判断）
+
+### 独立検証
+
+| 形 | 挙動 |
+|---|---|
+| 一時テーブル上限超過 | `ok:false` / statuses `error,skipped` |
+| **同 `onLimitReached:"truncate"` 指定** | **同上＝truncate へ倒れない** ✅ |
+| 上限内 | `ok:true` / `success,success` |
+| 同時 17 表目 | **throw** `EXECUTION_ERROR` |
+| `ASSERT` 失敗（中間） | `ok:false` / `success,error,skipped`＝**後続は実行されない** ✅ |
+| `SET` へ `variables` 注入 | **throw** `EXECUTION_ERROR` ✅ |
+
+**失敗の扱いは2系統**である。
+
+- **実行時の文の失敗** → throw せず `ok:false` ＋ 文別 status（後続 `skipped`）
+- **構造的な失敗**（表数上限・オプション不正） → throw
+
+### 【要判断】部分結果の扱いが B79 の思想と衝突する
+
+**失敗したバッチが `ok:false` のまま部分結果を返す**ことを実測した。
+
+```
+ASSERT 失敗の 3 文バッチ → ok:false / results.length = 1 / rowCount = 5
+                            （1 文目の成功結果がそのまま入っている）
+```
+
+B79 ではライブラリ面だけ `SEARCH_ABORTED` を hard error に保つ理由をこう書いた。
+
+> プログラム API では**部分結果が黙ってアプリケーションロジックへ流れ込むほうが危険**なため、
+> 意図的に厳格な契約としている。
+
+しかし **`runBatch` は同じ危険を再導入している**。ダッシュボードが
+`const { results } = await runBatch(...)` と書いて `ok` を見なければ、
+**途中までの結果を完全なものとして描画する**。
+
+面ごとの整合も崩れている。
+
+| 失敗 | library の挙動 |
+|---|---|
+| `SEARCH_ABORTED` | **throw**（部分結果なし） |
+| `ASSERT` 失敗 / temp 上限超過 | **`ok:false` ＋ 部分結果あり** |
+
+**選択肢:**
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| **A** | 文が1つでも失敗したら **throw** する | library の既存契約（hard error）と一貫。`ok` を見落としても安全。ただし「途中まで見たい」用途を切る |
+| **B** | `ok:false` は維持しつつ、**`!ok` のとき `results` を空にする** | 部分結果を取り出せなくする。`statements[]` で失敗位置は分かる |
+| **C** | 現状維持＋docs で強く注意喚起 | 最も安いが、**B79 で「危険」と結論した形をそのまま残す** |
+
+`ASSERT` は「利用者が明示的に置いたチェック」なので、失敗を例外にするのが自然という見方もある。
+一方 temp 上限超過は**エンジン側の都合**なので throw が素直である。
+
+**Step 5（docs）より前に決めること。**公開 API の契約であり、リリース後は変えられない。
+
+### ゲート
+
+`npm test` 185 suites / 4,807 tests ＋ CLI 26 green、snapshot 22 不変、
+`engine:bundle-guard` 3 形 `forbidden=0`、`engine:declaration-smoke` green。

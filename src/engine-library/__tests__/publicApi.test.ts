@@ -66,7 +66,12 @@ test("public DTO signatures are usable without importing engine internals", () =
     cursorMaxActive: 2,
   };
   const browserOptions: CreateReadonlyKintoneClientOptions = { cursorMaxActive: 2 };
-  const batchOptions: RunBatchOptions = { client, maxRecords: 10_000 };
+  const batchOptions: RunBatchOptions = {
+    client,
+    maxRecords: 10_000,
+    variables: { min: "100" },
+    tempTableMaxRows: 20_000,
+  };
   const queryResult: QueryResult = {
     type: "query",
     rows: [{ value: "1" }],
@@ -110,6 +115,8 @@ test("public DTO signatures are usable without importing engine internals", () =
 
   expect(runOptions.client).toBe(client);
   expect(batchOptions.maxRecords).toBe(10_000);
+  expect(batchOptions.variables).toEqual({ min: "100" });
+  expect(batchOptions.tempTableMaxRows).toBe(20_000);
   expect(browserOptions.cursorMaxActive).toBe(2);
   expect(queryResult.type).toBe("query");
   expect(explainResult.type).toBe("explain");

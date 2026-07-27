@@ -92,6 +92,19 @@ export interface RunBatchOptions {
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;
   cursorMaxActive?: number;
+  /**
+   * DECLARE されたバッチ変数へ渡す文字列値。
+   * キーは @ を付けず、大文字小文字を区別しない。SET 変数には注入できない。
+   */
+  variables?: Readonly<Record<string, string>>;
+  /**
+   * CREATE TEMP TABLE 1 表あたりの実体化行数上限（既定 10,000）。
+   * 超過は onLimitReached: "truncate" でも常に error となる。
+   *
+   * 一時テーブルは利用者アプリのプロセス内メモリに runBatch 呼び出し単位で実体化される。
+   * 同時に存在できるのは最大 16 表で、DROP TEMP TABLE により解放された枠は同じバッチ内で再利用できる。
+   */
+  tempTableMaxRows?: number;
 }
 
 export interface QueryColumn {

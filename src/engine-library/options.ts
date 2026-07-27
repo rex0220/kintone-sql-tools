@@ -13,7 +13,11 @@ const COMMON_KEYS = new Set([
 ]);
 
 const RUN_KEYS = new Set([...COMMON_KEYS, "onLimitReached"]);
-const BATCH_KEYS = RUN_KEYS;
+const BATCH_KEYS = new Set([
+  ...RUN_KEYS,
+  "variables",
+  "tempTableMaxRows",
+]);
 
 function assertOptionsObject(value: unknown): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -42,6 +46,19 @@ function assertClient(value: unknown): asserts value is RunQueryOptions["client"
   ]) {
     if (typeof candidate[method] !== "function") {
       throw new TypeError(`client.${method} must be a function`);
+    }
+  }
+}
+
+function assertBatchVariables(
+  value: unknown
+): asserts value is Readonly<Record<string, string>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("variables must be an object");
+  }
+  for (const [key, variableValue] of Object.entries(value)) {
+    if (typeof variableValue !== "string") {
+      throw new TypeError(`variables.${key} must be a string`);
     }
   }
 }
@@ -128,12 +145,27 @@ export function validateBatchOptions(
     onLimitReached?: "error" | "truncate";
     fetchParallel?: number;
     cursorMaxActive?: number;
+    variables?: Readonly<Record<string, string>>;
+    tempTableMaxRows?: number;
   };
 } {
   assertOptionsObject(value);
   assertClient(value.client);
+  if (value.variables !== undefined) {
+    assertBatchVariables(value.variables);
+  }
+  if (value.tempTableMaxRows !== undefined) {
+    assertPositiveSafeInteger(value.tempTableMaxRows, "tempTableMaxRows");
+  }
+  const commonOptions = validateExecutionOptions(value, BATCH_KEYS, "runBatch");
   return {
     client: value.client,
-    executeOptions: validateExecutionOptions(value, BATCH_KEYS, "runBatch"),
+    executeOptions: {
+      ...commonOptions,
+      ...(value.variables !== undefined ? { variables: value.variables } : {}),
+      ...(value.tempTableMaxRows !== undefined
+        ? { tempTableMaxRows: value.tempTableMaxRows }
+        : {}),
+    },
   };
 }
