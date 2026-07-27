@@ -1,7 +1,7 @@
 # B68 実装計画 — engine ライブラリの read-only 拡張（許可構文を MCP READ 基準へ統一）
 
 - 作成: 2026-07-27
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-27・Step 1〜5 完了）。残るはリリースのみ。
+- ステータス: ✅ **リリース済み（v3.29.0・2026-07-28）**。tag→GitHub Release→npm publish（latest 3.29.0）まで完了。実機確認は Pro 側が本来の受入。
 - 評価: [B68 評価](ksql_b68_engine_library_readonly_extensions_evaluation.md)
 - 関連: [B66 ライブラリ](ksql_b66_engine_library_evaluation.md) / [B80 reason 保持](ksql_b80_engine_library_reason_spec.md) / [B76 Phase B](ksql_b76_join_pushdown_phase_b_spec.md) / [B79](ksql_b79_outer_join_search_abort_issue.md)
 

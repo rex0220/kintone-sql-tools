@@ -1,7 +1,7 @@
 # B81 MCP instructions の語数予算が構造的に枯渇する
 
 - 起票: 2026-07-27
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-27）。案 D（散文とカタログで予算を分ける）を実装。
+- ステータス: ✅ **リリース済み（v3.29.0・2026-07-28）**。案 D（散文とカタログで予算を分ける）を実装。上限値に外部根拠が無いことも記録済み（§7）。
 - 出典: B76 Phase B（v3.28.0）Step 5 で instructions が **552 語**となり guard に一度失敗。短縮して 548 語で通した。
 - 関連: [B60 syntax hints](ksql_b60_mcp_syntax_hints_spec.md) / [B62 AI visibility](ksql_b62_ai_visibility_notes_issue.md) / [B67 実装計画](ksql_b67_impl_plan.md)
 
