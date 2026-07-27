@@ -2,6 +2,20 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased
+
+### ⚠ 破壊的変更（B79 外部結合の検索打ち切りを fail-closed 化）
+
+- **プラグイン / CLI / MCP で、`LEFT` / `RIGHT JOIN` を含むクエリの検索が10万件で打ち切られた場合、警告付きの部分結果ではなく `SearchAbortedError` で終了するようにした。**
+- 従来は単に行が減るのではなく、結合相手を取得できなかっただけの行が null 拡張され、**「該当なし」という誤った値**を返していた。現在成功して見える該当クエリは実際には誤った値を返しているため、エラー化しても正しい結果を失わない。
+- **影響を受けないもの:** プラグイン / CLI / MCP の `INNER JOIN` と単一表は、従来どおり警告＋部分結果（行は欠落し得るが、返る行の値は正しい）。engine ライブラリも B79 による変更はなく、従来から全クエリ形で `SEARCH_ABORTED` の hard error として部分結果を返さない。プログラム API では部分結果が黙ってアプリケーションロジックへ流れ込むほうが危険なため、意図的に厳格な契約としている。
+- **移行方法:** `WHERE` で検索対象を絞る。クエリの意味を保てる場合は `INNER JOIN` へ置き換える。
+
+### バグ修正（B80 engine ライブラリの静的検証 reason）
+
+- engine ライブラリで `KLIKE` / `NOT KLIKE` の静的検証に失敗したとき、構文自体が正しくても一律に `SQL statement could not be parsed` としていた誤導的なメッセージを修正し、プラグイン / CLI / MCP と同じ具体的な reason（例: `KLIKE / NOT KLIKE は SELECT の WHERE 句でのみ使用できます`）を返すようにした。
+- エラー `code` は従来どおり `PARSE_ERROR` のまま。`code` で分岐している利用者コードは影響を受けない（非破壊）。
+
 ## v3.26.0（2026-07-27）
 
 ### 性能改善（B76 JOIN 述語の APP 別 prefilter）

@@ -10,6 +10,23 @@ release 成果物:
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
+次回リリース (Unreleased): B79+B80。
+- 注意: B79 は破壊的変更です。プラグイン / CLI / MCP で LEFT / RIGHT JOIN を含む
+  クエリの検索が 10 万件で打ち切られた場合、従来の警告＋部分結果ではなく
+  SearchAbortedError で終了します。
+- 従来は行が減るだけではなく、結合相手を取得できなかった行が null 拡張され、
+  「該当なし」という誤った値を返していました。現在成功して見える該当クエリは
+  実際には誤った値を返しているため、エラー化しても正しい結果を失いません。
+- プラグイン / CLI / MCP の INNER JOIN と単一表は従来どおり警告＋部分結果です
+  (行は欠落し得ますが、返る行の値は正しい)。engine ライブラリは B79 では変更せず、
+  元から全クエリ形で SEARCH_ABORTED の hard error です。プログラム API では部分結果が
+  黙ってアプリケーションロジックへ流れ込むほうが危険なため、意図的に厳格です。
+- 移行方法: WHERE で対象を絞るか、意味を保てる場合は INNER JOIN へ置き換えてください。
+- B80: engine ライブラリの KLIKE / NOT KLIKE 静的検証エラーが、一律の
+  "SQL statement could not be parsed" ではなく、プラグイン / CLI / MCP と同じ具体的な
+  reason (例:「KLIKE / NOT KLIKE は SELECT の WHERE 句でのみ使用できます」) を返します。
+  code は PARSE_ERROR のままなので、code で分岐する利用者コードは壊れません (非破壊)。
+
 本リリース (v3.26.0): B76 Phase A（JOIN 述語の APP 別 prefilter）。
 - 性能改善であり挙動変更はありません。押し下げ後も元の WHERE を client で再評価するため
   結果は不変で、records API から取得する候補件数だけが減ります。

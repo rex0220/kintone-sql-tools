@@ -839,7 +839,17 @@ WHERE 件名 NOT KLIKE '保留'
 - 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
 - DML では次の親レコード DML の WHERE で使用できます（v3.10.0）: **通常（APPLY なし）の親 `UPDATE` / `DELETE`**、および **APPLY 複数親 `UPDATE` の親 WHERE**。前者は WHERE 全体を kintone クエリへ exact 変換して対象を解決するため `OR` / `NOT` 配下の KLIKE も使用できます。後者は安全プレフィルタ＋残余評価のため、`OR` / `NOT` 配下など native query に完全適用できない KLIKE は使用できません。**サブテーブル `UPDATE` / `DELETE`・`REORDER`・`INSERT` / `INSERT ... SELECT`・`UPSERT` / `UPSERT ... SELECT`・独立した `VALIDATE` では引き続き使用できません**（JS 評価経路のため）。SQL `LIKE` / `NOT LIKE` は通常 DML では引き続き使用できません（JS 評価が必要）。
 - 利用可能なフィールドは[kintone公式の演算子対応表](https://cybozu.dev/ja/kintone/docs/overview/query/)に従います。文字列1行・複数行、リッチエディター、リンク、添付ファイルなどが対象です。非対応フィールドはkintone APIエラーになります。
-- kintoneはキーワード一致が10万件に達すると検索を打ち切ります。**CLI / MCP / プラグインすべてで打ち切りを検出します**（プラグインは v3.10.0 で raw fetch によりレスポンスヘッダー `X-Cybozu-Warning` を読み取ります）。SELECT では結果欠落の可能性を警告します。読み取り結果を書き込みや一時テーブル実体化に使う場合、および KLIKE を含む親 DML の対象解決では、不完全な対象集合で実行しないよう `SearchAbortedError` でエラー終了し、書き込み0件で fail-closed とします。
+- kintoneはキーワード一致が10万件に達すると検索を打ち切ります。**CLI / MCP / プラグインすべてで打ち切りを検出します**（プラグインは v3.10.0 で raw fetch によりレスポンスヘッダー `X-Cybozu-Warning` を読み取ります）。検索打ち切り後の挙動は、利用面とクエリの形で異なります。
+
+  | 利用面 | `LEFT` / `RIGHT JOIN` を含むクエリ | `INNER JOIN` / 単一表 |
+  |---|---|---|
+  | プラグイン / CLI / MCP | `SearchAbortedError`（B79 から） | 警告＋部分結果 |
+  | engine ライブラリ | `SEARCH_ABORTED` hard error（従来どおり） | `SEARCH_ABORTED` hard error（従来どおり） |
+
+  外部結合では、結合相手を取得できなかっただけの行が null 拡張され、**「該当なし」という誤った値**になり得ます。単なる行の欠落ではなく、返った行の値自体が誤るため、プラグイン / CLI / MCP でも B79 から fail-closed に変更しました。従来成功して見えた該当クエリは実際には誤った値を返していたため、エラー化によって正しい結果が失われることはありません。`WHERE` で対象を絞るか、意味を保てる場合は `INNER JOIN` へ置き換えてください。
+
+  engine ライブラリは B79 の変更対象ではなく、従来からクエリ形を問わず常に hard error です。プログラム API では部分結果が黙ってアプリケーションロジックへ流れ込むほうが危険なため、意図的に厳格な契約としています。読み取り結果を書き込みや一時テーブル実体化に使う場合、および KLIKE を含む親 DML の対象解決でも、不完全な対象集合で実行しないよう従来どおり `SearchAbortedError` でエラー終了し、書き込み0件で fail-closed とします。
+- engine ライブラリの静的検証で `KLIKE` / `NOT KLIKE` の使用位置や検索語が不正な場合、エラー `code` は従来どおり `PARSE_ERROR` のまま、`message` に具体的な reason（例: `KLIKE / NOT KLIKE は SELECT の WHERE 句でのみ使用できます`）を返します。B80 より、従来の一律な `SQL statement could not be parsed` ではなく、プラグイン / CLI / MCP と同じ reason で原因を特定できます。`code` で分岐している利用者コードへの影響はありません。
 - `KLIKE` は予約語です。同名フィールドを参照するときは `` `KLIKE` `` と記述します。
 
 ### IN / NOT IN（値リストによる一致・除外）
