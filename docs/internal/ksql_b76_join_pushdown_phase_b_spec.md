@@ -749,7 +749,7 @@ Phase A §5.5 で見つけた「`KLIKE ∨ superset` の偽陽性行が residual
 「単純な guard 解除ではないため 2〜3 人日には縮めていない」という判断も正しい。
 
 
-## 【Step 2 レビュー・2026-07-27】一時的な EXPLAIN 不整合（Step 4 で解消）
+## 【Step 2 レビュー・2026-07-27】一時的な EXPLAIN 不整合（Step 4 で解消済み）
 
 Step 2 は **第5-L の実行だけを解禁**し、**EXPLAIN は従来どおり拒否**のままである。
 したがって **Step 2 時点では「実行は成功するが EXPLAIN は拒否を返す」**という不整合が存在する。
@@ -800,3 +800,44 @@ records API 呼び出し前に「全 occurrence 適用」か「拒否」を原�
 `NOT (日付 = THIS_MONTH())` の JOIN 直列化が**単一表 B72 と完全に同一**であることを
 実測で確認した（`(日付 != THIS_MONTH())`）。第5-W は B72 が既に出荷している
 whole-WHERE exact 契約を JOIN へ広げるだけで、空セル等の意味論は既存面と共通である。
+
+
+## 【Step 4 レビュー・2026-07-27】EXPLAIN 不整合の解消を確認
+
+Step 2 から持ち越していた「実行は成功するが EXPLAIN は拒否」を Step 4 で解消した。
+`relativeDatePushdownGuard` の `statement.type !== "EXPLAIN"` を削除し、
+EXPLAIN 分析が runtime とは**別に JOIN plan を再生成していた**箇所も同じ plan 参照へ統合した。
+
+### 判定一致の独立検証（16 形・両方向）
+
+許可 11 形・拒否 5 形について、EXPLAIN の表示と実行可否を突き合わせ、
+**両方向の不一致 0** を確認した。「実行 OK / EXPLAIN NG」だけでなく
+「EXPLAIN OK / 実行 NG」も 0 である。
+
+### EXPLAIN は拒否形でも成功して rejected を表示する（§11 の契約）
+
+拒否形の EXPLAIN は throw せず、次を表示する。レビュー時にこれを throw と取り違えないこと。
+
+```text
+relative date function: THIS_MONTH
+plan status: rejected
+target alias / field: a / 日付
+reason: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+client evaluation: forbidden
+records/cursor/mutation API during EXPLAIN: none
+```
+
+GROUP_SELECT × LOGINUSER では `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED` が
+併記され、B78 の型判定が EXPLAIN 面にも現れることを確認した。
+
+### 混在時の独立集計
+
+`THIS_MONTH()` ＋ `LOGINUSER()` の同居文で
+`relative date client evaluations: 0` と `kintone function client evaluations: 0` が
+**両方**出ることを確認した（従来の一行選択 helper では表せなかった形）。
+
+### B79 契約の非回帰（§10.2）
+
+Phase B の plan が存在することを理由に INNER JOIN を新たに fail-closed にしていないことを、
+**plan あり / plan なしの INNER JOIN で searchAborted 時の結果が一致する**ことで確認した。
+LEFT JOIN の既存挙動も不変。Phase A §16 で撤回した非対称を再導入していない。

@@ -299,14 +299,16 @@ test.each([
   expectNoExecutionApi(executed.calls);
 });
 
-test("JOIN第5-Lは実行を許可するがStep 4前のEXPLAIN rejectを維持する", async () => {
+test("B76 Step 4: JOIN第5-LはEXPLAINと実行の両方で同じplanを許可する", async () => {
   const sql = "SELECT a.更新日時 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
     + "WHERE a.更新日時 >= YESTERDAY()";
   const explained = makeClient();
   const text = planText(await execute(`EXPLAIN ${sql}`, explained.client));
-  expect(text).toContain("plan status: rejected");
-  expect(text).toContain("WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN");
-  expect(text).not.toContain("kintone query:");
+  expect(text).toContain("join pushdown plan: applied (runtime metadata resolved)");
+  expect(text).toContain("allow form: JOIN_SERVER_FUNCTION_EXACT (whole-WHERE)");
+  expect(text).toContain("pushdown applied: 更新日時 >= YESTERDAY()");
+  expect(text).toContain("client residual: (none)");
+  expect(text).toContain("relative date client evaluations: 0");
   expectNoExecutionApi(explained.calls);
 
   const executed = makeClient();

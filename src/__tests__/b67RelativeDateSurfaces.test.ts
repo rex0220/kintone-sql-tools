@@ -257,7 +257,7 @@ async function captureCli(
   }
 }
 
-describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () => {
+describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
   const dir = mkdtempSync(join(tmpdir(), "ksql-b72-surfaces-"));
   const configPath = join(dir, "ksql.config.json");
 
@@ -317,6 +317,16 @@ describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () =
       "TODAY whole-WHERE exact KORDER native",
       "SELECT 日付 FROM APP100 WHERE 日付 = TODAY() KORDER BY 日付 LIMIT 5",
     ],
+    [
+      "B76 JOIN exact leaf",
+      "SELECT a.区分, COUNT(*) AS c FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() GROUP BY a.区分",
+    ],
+    [
+      "B76 JOIN mixed function sets",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() AND b.作成者 IN (LOGINUSER())",
+    ],
   ])("%s は accept/query/EXPLAIN が4面で一致する", async (_label, sql) => {
     // plugin は desktop.ts から同じ execute を直接 import するため、ここでは共有 engine 呼出しを
     // plugin surface の実行プロキシとして使う。共有 import 自体は上の静的 parity test で固定する。
@@ -339,7 +349,9 @@ describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () =
     expect(mcpResult["ok"]).toBe(true);
     expect(cli.code).toBe(0);
     expect(cliExplain.code).toBe(0);
-    expect(plugin.queries).toHaveLength(1);
+    expect(plugin.queries).toHaveLength(
+      _label === "B76 JOIN mixed function sets" ? 2 : 1
+    );
     expect(library.queries).toEqual(plugin.queries);
     expect(mcp.queries).toEqual(plugin.queries);
     expect(cli.queries).toEqual(plugin.queries);
@@ -369,6 +381,12 @@ describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () =
       "SELECT 作成者 FROM APP100 "
         + "WHERE 作成者 IN (LOGINUSER()) OR LENGTH(件名) > 1",
       "WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN",
+    ],
+    [
+      "B76 JOIN GROUP_SELECT × LOGINUSER",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE b.グループ IN (LOGINUSER())",
+      "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
     ],
   ])("%s は reason と records API 0 が4面で一致する", async (
     _label,
@@ -428,11 +446,6 @@ describe("B75+B77+B78 Step 5 plugin/CLI/MCP/engine-library surface parity", () =
     [
       "KORDER BY",
       "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH() KORDER BY $id LIMIT 10",
-    ],
-    [
-      "JOIN",
-      "SELECT a.区分, COUNT(*) AS c FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-        + "WHERE a.日付 = THIS_MONTH() GROUP BY a.区分",
     ],
     [
       "subtable",

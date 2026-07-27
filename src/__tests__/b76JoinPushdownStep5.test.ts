@@ -152,6 +152,7 @@ function normalizeProfile(text: string): string {
 
 const PLAN_FACTS = [
   "join pushdown plan:",
+  "client residual:",
   "residual:",
   "join pushdown not applied:",
   "app:",
@@ -346,7 +347,9 @@ describe("B76 Phase A Step 5 distribution parity", () => {
     expect(planFacts(libraryExplain)).toEqual(expectedPlan);
     expect(planFacts(mcpExplain)).toEqual(expectedPlan);
     expect(planFacts(cliPlanText(cliExplain.stdout))).toEqual(expectedPlan);
-    expect(expectedPlan).toContain("residual: original WHERE");
+    expect(expectedPlan).toContain(
+      "client residual: (((a.担当者 = '佐藤' OR a.日付 = '2026-07-24')) AND b.区分 IN ('A'))"
+    );
     expect(expectedPlan).toContain("relation: superset");
     expect(expectedPlan).toContain("relation: exact");
   });

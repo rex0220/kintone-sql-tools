@@ -545,11 +545,8 @@ export async function buildRelativeDatePushdownPlan(
         }
       }
       let joinServerFunctionPlan: JoinPushdownPlan | undefined;
-      // Step 4 までは EXPLAIN の第5許可形 renderer を開かない。実行許可だけを
-      // Step 2/3 で追加し、旧 EXPLAIN reject 契約を維持する。
       if (
         !allowed
-        && statement.type !== "EXPLAIN"
         && resolver.joinServerFunctionPlan
       ) {
         const candidatePlan = await resolver.joinServerFunctionPlan(select);
