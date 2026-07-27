@@ -192,7 +192,7 @@ JOIN 後に元 WHERE が `evalWhere` で再評価されるため余分な行は�
 | AST | 合成規則 |
 |---|---|
 | `A AND B` | 同じ target alias に属する採用可能因子を個別抽出可。E∧E=E、それ以外の E/S の積は S |
-| `A OR B` | **subtree 全体**が同一 target alias で、両辺とも E/S の場合だけ採用。E∨E=E、それ以外は S |
+| `A OR B` | **subtree 全体**が同一 target alias で、両辺とも E/S、**かつ subtree に `KLIKE` / `NOT KLIKE` を含まない**場合だけ採用。E∨E=E、それ以外は S（§5.5 参照） |
 | cross-alias `OR` | 片辺だけを押さない。subtree 全体 U |
 | `GROUP(A)` | scope と relation を変えず、括弧を保持 |
 | `NOT(A)` | Phase A の新規対象外。superset の補集合は subset になり得る |
@@ -201,6 +201,60 @@ JOIN 後に元 WHERE が `evalWhere` で再評価されるため余分な行は�
 
 同一 alias OR の一部に LOCAL_ONLY / UNSUPPORTED / U がある場合、OR 全体を押さない。
 AND は他 alias、cross-table、local-only の因子が混在しても、安全な単一 alias 因子だけを押せる。
+
+### 5.5 【訂正 2026-07-27】`KLIKE` を含む `OR` は Phase A 非採用
+
+Step 3 の実装着手時に codex が、**§5.4 初版の同一 alias `OR` 規則と既存 KLIKE residual 契約の
+衝突**を検出して停止した。指摘は正しく、仕様側を修正する。
+
+#### 5.5.1 衝突の内容
+
+```sql
+WHERE a.件名 KLIKE urgent OR a.担当者 = 佐藤
+```
+
+- §5.4 初版では同一 alias・両辺 E/S なので `OR` 全体を採用してしまう
+- TEXT `=` は `S` なので、server が JS 不一致の行を余分に返し得る
+- `evalWhere` は `appliedKlikes` に含まれる KLIKE node を**行ごとに無条件で `true`** とする
+  （`src/engine/evalWhere.ts` の `evalBinary`）
+- したがって superset で余分に取れた行も `true OR false` となり、**元 WHERE residual で除外できない**
+
+**誤結果を生む。** 次の3条件は現行 evaluator のまま同時には満たせない。
+
+1. 同一 alias `OR` は E/S なら採用
+2. 通常述語は元 WHERE 全体を residual とする
+3. KLIKE は既存の node identity ／ `appliedKlikes` 契約を維持する
+
+#### 5.5.2 Claude による裏取り
+
+```ts
+// src/engine/evalWhere.ts  evalBinary()
+if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
+  if (appliedKlikes?.has(expr)) return true;   // ← 無条件 true
+  throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
+}
+```
+
+かつ既存の押し下げは **AND スパイン限定**である（`wherePredicatePushdown.ts`: `if (where.op !== "AND") return null`）。
+**KLIKE が `OR` から押し下げられたことは一度もない。**
+
+#### 5.5.3 決定
+
+**`KLIKE` / `NOT KLIKE` を含む `OR` subtree は Phase A では採用しない。**
+通常の JS 評価可能な E/S 述語だけで構成される同一 alias `OR` のみ採用する。
+
+- これは**仕様草案に対する制限**であって、**現行挙動に対する後退ではない**。
+  KLIKE は元々 `OR` から押し下げられていないため、失われる能力はない。
+- 厳密には「KLIKE ∨ **exact のみ**」は安全だが（exact 側で取れた行は真に一致するため）、
+  監査しづらい狭い例外を作るより、**`OR` から KLIKE を一律除外する**ほうが証明が簡単で
+  v2.0.0 の `LIKE` 事故の轍を踏まない。
+- より広く許可するなら、**exact subtree 全体を消費する residual plan**、または
+  **取得経路別の一致 provenance** が必要になる。**Phase B 以降の課題**とする。
+
+#### 5.5.4 同種の危険がないかの確認事項
+
+KLIKE と同じく「**client で再評価できず、押し下げ済みを前提に `true` を返す**」述語が
+他にないかを Step 3 で確認すること。あれば同様に `OR` から除外する。
 
 ## 6. 別名スコープ分解と serializer 安全規則
 
@@ -292,7 +346,9 @@ schema-aware EXPLAIN と runtime は同じ解決済み AST と plan builder を�
 - JOIN、local ORDER、aggregate 等が既に完全入力を要求する場合、その既存 policy を維持する。
 - truncate が既存契約上許される経路では、「押し下げなし全件 JS」との完全結果同値を
   truncate 後の部分集合にまで主張しない。EXPLAIN は既存 limit policy を併記する。
-- `searchAborted:true` は母集合欠落なので fail-closed。警告だけで結果を確定しない。
+- ~~`searchAborted:true` は母集合欠落なので fail-closed。~~ **【撤回 2026-07-27・§16】**
+  B76 固有の fail-closed を追加しない。既存どおり警告＋部分結果とする。
+  検索打ち切りの安全性は **B79** で独立に扱う。
 - metadata 取得失敗は records fetch 前に伝播し、「型不明なので全件取得」に黙ってフォールバックしない。
 - serializer ownership guard、KLIKE unapplied gate、server-only function guard の失敗後は records /
   cursor / mutation 0、retry 0。
@@ -316,7 +372,7 @@ schema-aware EXPLAIN と runtime は同じ解決済み AST と plan builder を�
 | 13 | §0.3.6-7 | CTE・temp・subtable・inline AST | 新規対象外。effective AST / identity を別 Phase で証明する |
 | 14 | §0.3.6-8 | INNER / LEFT / RIGHT nullability | Phase A は INNER の直接物理 APP のみ。LEFT/RIGHT provenance は B6 領域へ切り出す |
 | 15 | §0.3.6-9 | EXPLAIN / runtime 同一 plan | immutable plan を validate/fetch/eval/EXPLAIN で共有。静的候補を applied と表示しない |
-| 16 | §0.3.6-10 | maxRecords / truncate / SearchAborted | 既存 complete-input policy を維持し固有非対称を足さない。SearchAborted は fail-closed |
+| 16 | §0.3.6-10 | maxRecords / truncate / SearchAborted | 既存 complete-input policy を維持し固有非対称を足さない。**SearchAborted は §8 の撤回により既存どおり警告＋部分結果**（B76 固有の fail-closed を追加しない）。検索打ち切りの安全性は **B79** で独立に扱う（§16.6 で決着） |
 | 17 | §0.3.6-11 | variable / subquery 後の再計画 | 全置換・解決後に一度だけ runtime plan を生成。未解決許可 flag を runtime で黙って無視しない |
 | 18 | §0.3.6-12 | 負の回帰 | 非実在選択肢、同名 field、複数 JOIN、LEFT/RIGHT、cross-OR、NOT、unapplied KLIKE を必須化 |
 
@@ -532,3 +588,170 @@ kintone 公式の型 × 演算子表と照合した結果、**本仕様は公式
 ### 15.5 見積もり
 
 §13 の 8〜13 人日（Step 0＋仕様 3〜5 ／ Phase A 実装 5〜8）を妥当と判断する。
+
+
+---
+
+## 16. 【決着済み】SearchAborted の扱い
+
+- 提起: 2026-07-27（Step 4 の Claude レビュー）
+- ステータス: ✅ **決着（2026-07-27）＝案 A を採用し §8 の fail-closed 条項を撤回**。
+  オーナー判断「JOIN 関連を組み込んでから再検証」に従い Step 4 完了後に再検証し、決定した。
+
+### 16.1 検出した非対称（実測）
+
+§8 の「`searchAborted:true` は fail-closed」を実装した結果、**同じ失敗モードなのに
+経路によって挙動が分かれる**状態になっている。
+
+| クエリ | 検索打ち切り時 | B76 前 |
+|---|---|---|
+| 単一表 ＋ NUMBER（押し下げあり） | 警告＋部分結果 | 同じ |
+| 単一表 ＋ 局所式 | 警告＋部分結果 | 同じ |
+| **JOIN ＋ NUMBER**（**B76 以前から押し下げ**） | **エラー** | **警告＋部分結果** |
+| JOIN ＋ TEXT（B76 で新規押し下げ） | エラー | 警告＋部分結果 |
+| **JOIN ＋ 局所式のみ（押し下げ皆無）** | **エラー** | **警告＋部分結果** |
+| LEFT JOIN | 警告＋部分結果 | 同じ |
+
+### 16.2 問題点
+
+1. **B76 以前から押し下がっていたクエリの挙動が変わる**（JOIN ＋ NUMBER）。
+   性能改善の副作用として破壊的変更が入る。
+2. **押し下げが1件も起きていないクエリまでエラーになる**（JOIN ＋ 局所式のみ）。
+   実装が `"joinPlan" in pushdownPlan` で判定しており、**plan オブジェクトの存在だけ**で
+   fail-closed が働いてしまう。B76 が関与しないクエリを壊している。
+3. **同じ失敗モードなのに INNER JOIN だけ厳しい。**
+   単一表も LEFT JOIN も警告のままで、原理的な区別がない。
+
+### 16.3 B72 との類似
+
+B72 で Claude が `RELATIVE_DATE_FULL_SCAN_EXACT` complete-input reason を足し、
+**「リテラル日付なら truncate できるのに相対日付だとできない」非対称**を作って
+実機 smoke で発覚し撤回した事例と**同じ形**である。
+
+§8 の第1項が「B76 固有の `maxRecords` / `onLimit=truncate` 非対称を追加しない」と
+truncate については明示的に戒めているのに、**`searchAborted` の条項でその戒めを破っている**。
+
+### 16.4 選択肢（再検証時に判断する）
+
+| 案 | 内容 | 影響 |
+|---|---|---|
+| **A** | §8 の fail-closed 条項を撤回し、既存どおり警告＋部分結果 | **挙動変更ゼロ**。JOIN ＋ 検索打ち切りの安全性が本当に問題なら独立課題として起票し個別判断 |
+| B | 押し下げが**実際に適用された**場合だけ fail-closed | 問題2は解消するが 1・3 は残る |
+| C | 仕様どおり維持し破壊的変更として告知 | 単一表・LEFT JOIN との一貫性を別途判断する必要があり Phase A の範囲が広がる |
+
+Claude の推奨は **A**（性能改善の副作用として破壊的変更を持ち込まない）。
+
+### 16.5 再検証のトリガ
+
+**Phase A の Step 5（release gate）で必ず本節を開くこと。**
+未決のままリリースしてはならない。
+
+
+### 16.6 再検証の結果（2026-07-27）— 案 A を採用
+
+Step 1〜4 を組み込んだ状態で再検証した。**JOIN は単一表より危険だが、危険なのは
+INNER ではなく LEFT/RIGHT である**ことが判明し、現行実装は危険度と逆向きだった。
+
+#### 実測: 右表だけ検索打ち切りでマッチ行が欠落した場合
+
+| | 結果 | 性質 |
+|---|---|---|
+| **INNER JOIN** | `rows=[]` ＋ 警告 | **行の欠落**（返る行は正しい） |
+| **LEFT JOIN** | `rows=[{"$id":"1","目標金額":""}]` ＋ 警告 | **誤った値**（正しくは `300`） |
+
+**LEFT JOIN は「行が減る」のではなく「値が間違う」。**
+結合相手が取得できなかっただけなのに **null 拡張され「該当なし」という嘘の値**を返す。
+警告文も「結果が**欠落**した可能性」としか言わず、値が誤り得ることを伝えていない。
+
+#### 危険度と実装の逆転
+
+| 危険度 | ケース | Step 4 時点の挙動 |
+|---|---|---|
+| **最も危険（誤った値）** | LEFT / RIGHT JOIN | **警告のみ** |
+| 中（行の欠落） | INNER JOIN ＋ WHERE あり | **エラー** |
+| 中（行の欠落） | INNER JOIN ＋ WHERE なし | 警告のみ |
+| 低（行の欠落） | 単一表 | 警告のみ |
+
+**最も危険なケースが警告で、それより安全なケースがエラー**という逆転。
+さらに INNER JOIN でさえ **WHERE の有無で挙動が変わる**（WHERE が無いと joinPlan が
+作られず警告経路）。恣意的である。
+
+#### 決定
+
+**案 A を採用。§8 の fail-closed 条項を撤回し、既存どおり警告＋部分結果に戻す。**
+
+- B76 は**性能改善**であり、**検索打ち切りの安全性という別問題を副作用で持ち込まない**。
+  撤回により**挙動変更はゼロ**になる。
+- **LEFT/RIGHT JOIN の誤値問題は B76 とは独立した既存バグ**であり、
+  **B79 として起票**して独立に評価・判断する。
+  （B77/B78 も B75 のレビュー中に見つけた別問題を切り出して正解だった前例がある。）
+
+#### 実装への反映
+
+`executeFullScanSelect` / `executeFullScanWithCte` の
+`const fetchClient = "joinPlan" in pushdownPlan ? wrapClientWithSearchAbort(..., true) : client`
+を `const fetchClient = client` へ戻し、EXPLAIN の
+`search abort: fail-closed` 行を削除した。
+Step 4 のテストは「JOIN plan の有無で挙動を変えず既存どおり警告を返す」ことを固定する形へ書き換えた。
+
+
+## 17. 【2026-07-27】4面 parity 条件の緩和（engine ライブラリの reason 平坦化）
+
+Step 5 着手時に codex が、**engine ライブラリだけ拒否 reason が一致しない**ことを検出して停止した。
+指摘は正しい。
+
+### 17.1 原因（B76 由来ではない）
+
+`src/engine-library/statementGuard.ts` の `parseSingleStatement()` は、
+`parseSqlStatement()` が投げた例外を正規化し、**`PARSE_ERROR` 以外は汎用 parse error へ置き換える**。
+
+```ts
+const normalized = normalizeEngineError(error);
+if (normalized.code === "PARSE_ERROR") throw normalized;
+throw parseError("SQL statement could not be parsed", error);   // ← reason が潰れる
+```
+
+`KlikeValidationError` は `name = "ArgumentError"` なので `PARSE_ERROR` にならず、
+**「SQL statement could not be parsed」という誤導的なメッセージ**になる。
+実際には**構文としては正しく parse できており**、意味的な制約で拒否されている。
+
+**B66（engine ライブラリ）以来の既存欠陥**であり、B76 の変更が原因ではない。
+B76 の parity テストを書いて初めて露出した。
+
+### 17.2 決定＝parity 条件を緩和し、修正は B80 へ
+
+engine ライブラリのエラー契約を B76 の範囲で変えるのは適切でない
+（ライブラリ利用者に見えるエラー出力の変更になるため）。
+**B80「engine ライブラリが具体的な reason を汎用 parse error へ平坦化する」として起票済み**。
+
+したがって §11 の 4面 parity 条件を次のとおり緩和する。
+
+- **拒否そのものが4面で起きること**（records API 0 を含む）は必須
+- **reason 文字列の完全一致は engine ライブラリを除く3面で要求する**。
+  ライブラリは reason を平坦化するため、**「拒否される」ことだけを固定する**
+- **EXPLAIN の APP 表記差**（CLI/MCP は `APP730@test`、plugin/engine は `APP730`）は
+  profile 表記を正規化して比較する
+
+### 17.2.1 「4面」の定義を明確化する
+
+本仕様には **2 種類の「4面」**が混在している。混乱を避けるため定義を固定する。
+
+| 呼称 | 内訳 | 用途 |
+|---|---|---|
+| **実行面 parity**（§11.5 の表） | CLI ／ MCP ／ Firefox plugin ／ Chrome plugin | **ブラウザ実機を含む**リリース gate |
+| **配布面 parity**（従来リリースの慣行） | plugin ／ CLI ／ MCP ／ **engine ライブラリ** | 配布物ごとの挙動一致 |
+
+**§17.2 の緩和は「配布面 parity」に対するもの**で、engine ライブラリだけ reason 一致を求めない。
+**§11.5 の表は engine ライブラリを含まないため、この緩和の影響を受けない。**
+
+### 17.3 B80 への申し送り
+
+本件は **B80** として独立起票した（`ksql_b80_engine_library_reason_flattening_issue.md`）。
+
+- 影響は KLIKE に限らず、`parseSqlStatement()` 内で投げられる
+  **`PARSE_ERROR` 以外の全検証エラー**が対象。着手時に網羅的な洗い出しが要る。
+- **B73（エラーの構造化・多言語）より B80 が先**であるべき。
+  B73 は「message に埋め込まれた情報の構造化」だが、B80 は
+  **そもそも面によって情報が失われている**というより手前の問題であり、
+  **構造化以前にエラーの同一性が保たれていない**。
+- **B80 が解決すれば §17.2 の緩和を撤回**し、「4面で同じ reason」を固定できる。

@@ -1,16 +1,24 @@
-ksql 配布パッケージ (v3.25.0)
+ksql 配布パッケージ (v3.26.0)
 
 release 成果物:
-- ksql-plugin-v3.25.0.zip
-- ksql-mcp.mcpb (manifest version 3.25.0)
-- ksql-mcp.js (MCP server version 3.25.0)
+- ksql-plugin-v3.26.0.zip
+- ksql-mcp.mcpb (manifest version 3.26.0)
+- ksql-mcp.js (MCP server version 3.26.0)
 
-1. ksql-plugin-v3.25.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.26.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.25.0): B75+B77+B78。
+本リリース (v3.26.0): B76 Phase A（JOIN 述語の APP 別 prefilter）。
+- 性能改善であり挙動変更はありません。押し下げ後も元の WHERE を client で再評価するため
+  結果は不変で、records API から取得する候補件数だけが減ります。
+- INNER JOIN で、型と演算子の対応が確認できる単一 alias の述語が対象です。
+  LEFT / RIGHT JOIN、cross-alias OR、NOT、cross-table 述語、KLIKE を含む OR、
+  DATE_FORMAT(...) など関数付き述語は押し下げません。
+- 相対日付関数と LOGINUSER() などの kintone query 関数は JOIN では引き続き使用できません。
+
+前リリース (v3.25.0): B75+B77+B78。
 - 注意: これは minor リリースですが破壊的変更を含み、^3 の利用者にも自動更新で届きます。
   WHERE の TODAY() / NOW() / LOGINUSER() は kintone REST query へ安全に押し下げられる形だけを
   許可し、従来 client 評価へ落ちていた形はレコード取得前に

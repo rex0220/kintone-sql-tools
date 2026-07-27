@@ -1,5 +1,10 @@
 # WHERE 条件 Push Down（JOIN 時のレコード取得最適化）
 
+> **陳腐化した履歴文書（2026-07-27）:** 本文は初期検討時の記録であり、現行仕様・設計根拠として
+> 再利用しないでください。JOIN 述語押し下げの現行契約は
+> [`ksql_b76_join_pushdown_phase_a_spec.md`](ksql_b76_join_pushdown_phase_a_spec.md) と
+> [`ksql_language_reference.md`](../ksql_language_reference.md) を参照してください。
+
 ## 背景
 
 JOIN クエリは現状 `FULL_SCAN` モードで実行され、各テーブルのレコードを全件取得したあと
