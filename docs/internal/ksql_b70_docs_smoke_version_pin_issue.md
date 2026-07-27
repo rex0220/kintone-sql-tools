@@ -132,3 +132,31 @@ B69 の実装中に検出して v3.22.0 で手動同期して green 化した経
 `package-lock.json` は `npm install --package-lock-only` が必要（ガードで検出はできる）。
 `release/` 成果物のビルドと `CHANGELOG` の版数見出し確定も手動のまま。
 **「漏れたまま配布する」ことは構造的に不可能になった**が、bump 作業自体は自動化していない。
+
+
+## 7. 【2026-07-27】残る抜け＝公開文書の「Unreleased」表記
+
+v3.27.0 の docs 作業の着手時に codex が検出。**v3.25.0 でリリース済みの B75/B77/B78 が、
+言語リファレンスでは「Unreleased の破壊的変更」のまま残っていた**（2箇所）。
+
+```
+docs/ksql_language_reference.md:10   > **⚠ Unreleased の破壊的変更（minor リリース）**
+docs/ksql_language_reference.md:758  > **⚠ Unreleased 移行注意（minor だが破壊的）:**
+```
+
+リリース時に `CHANGELOG.md` の `## Unreleased` → `## vX.Y.Z` は直したが、
+**言語リファレンスの同種表記を見落とした**。version-sync-guard は**版数の一致**を
+検査するもので、**「Unreleased」という語の残存**は対象外である。
+
+### 対策案（未実装）
+
+リリース時（`prepack`）に限り、**公開文書に「Unreleased」が残っていたら失敗**させる。
+
+- 対象: `docs/ksql_language_reference.md` / `release/README.txt`
+- `CHANGELOG.md` は開発中に `## Unreleased` を持つのが正常なので**対象外**
+  （リリース時は版数見出しへ確定させる運用）
+- **開発中の `npm test` では失敗させない**（未リリース機能の記述は正常なため）。
+  `prepack` からのみ有効にする引数か環境変数で切り替える
+
+**規模は小さい（0.25 人日程度）が、version-sync-guard に新しい失敗モードを足すため、
+リリース直前ではなく落ち着いたタイミングで入れること。**

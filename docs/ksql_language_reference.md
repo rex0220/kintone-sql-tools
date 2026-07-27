@@ -7,7 +7,7 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 > 本書は言語仕様を中心に記載しています。CLI / プラグインの UI・運用オプションは補足扱いです。
 > 実行時オプションの詳細は `README.md` および `docs/ksql_cli_console_spec.md` を参照してください。
 
-> **⚠ Unreleased の破壊的変更（minor リリース）**  
+> **⚠ v3.25.0 の破壊的変更（minor リリース）**  
 > `^3` の利用者にも自動更新で届きます。`WHERE` の `TODAY()` / `NOW()` / `LOGINUSER()` は
 > kintone REST query へ安全に押し下げられる形だけを許可し、従来 client 評価へ落ちていた形は
 > レコード取得前に `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` で拒否します。また、
@@ -755,7 +755,7 @@ SELECT ROUND(金額 * 1.1, 0) AS 税込金額 FROM APP100
 
 ## 6. WHERE 句
 
-> **⚠ Unreleased 移行注意（minor だが破壊的）:** `^3` にも自動更新で届きます。
+> **⚠ v3.25.0 移行注意（minor だが破壊的）:** `^3` にも自動更新で届きます。
 > `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、`WHERE $id >= TODAY()`、および
 > 押し下げ不能位置の `TODAY()` / `NOW()` / `LOGINUSER()` は取得前エラーになります。
 > ユーザー系・複数選択系は `in` / `not in` を使い、関数条件を押し下げ可能にするか、
