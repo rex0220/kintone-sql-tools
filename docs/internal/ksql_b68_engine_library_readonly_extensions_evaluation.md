@@ -262,3 +262,76 @@ SELECT ... FROM #cur a INNER JOIN APP4148 t ON ... WHERE a.対応日付 = LAST_Y
 **スコープ**: 用途1（KPI 表示）に必要なのは**既存レコード監査の `VALIDATE`** のみ。
 DML `... VALIDATE ONLY`（この DML は妥当かの事前検証）は read-only ダッシュボードの用途から外れるため、
 **Phase A では見送り可能**。含めるかは判断事項。
+
+### 6. Phase B の形を先に確定させた（Phase A の判断に必要だったため）
+
+「Phase B が分からないと Phase A の API を決められない」というオーナー指摘を受けて、
+戻り値の型を実コードで確認した。**これで §5 の判断が変わった。**
+
+#### 6.1 結果型の実態
+
+| 文 | 戻り値 |
+|---|---|
+| `SELECT` | `SelectResult { type:"SELECT"; rows; columns; rowCount; warnings?; metrics? }` |
+| **既存レコード `VALIDATE`** | **同じ `SelectResult`** ＋ **任意フィールド `validateStats { errorRecords, errorCount }`** |
+| DML `... VALIDATE ONLY` | **別型 `DmlValidationResult`**（`operation` / `validatedRows` / `validRows` / `invalidRows` / `errTable` / `apply` / `guards` / `applyBranches` / `deletedRows` / `diagnostic` …） |
+
+**エンジンは既存レコード VALIDATE を「行を返すクエリ」として扱っている。**
+`validateStats` は `SelectResult` の任意フィールド（`src/execute.ts`）で、CLI / MCP / batchEnvelope は
+存在するときだけ素通ししている。
+
+ライブラリの `query.ts` は `SelectResult → QueryResult` を項目ごとに写しており、
+**`validateStats` を落としている**（現状は VALIDATE 自体が拒否されるので実害はない）。
+
+#### 6.2 Phase B の API 形
+
+`src/output/batchEnvelope.ts` の `BatchEnvelope` が既に CLI / MCP 共通の形になっている。
+ライブラリはこれに倣えばよい。
+
+```ts
+runBatch(sql, client, options?): Promise<BatchResult>
+// BatchResult { type: "batch"; ok; statementCount;
+//               statements: [{ index, type, status, tempTable?, rowCount? }];
+//               results: QueryResult[] }
+```
+
+- **`results[]` の各要素は `QueryResult` を再利用**できる（VALIDATE も同じ形のため）
+- temp table は呼び出し単位のメモリ実体化。`tempTableMaxRows`（既定 10,000）・最大 16 表を
+  **公開オプションと契約として明示**する
+- 文ごとに `isReadOnlyStatement` で判定し、`APPLY` は追加ゲートで拒否・`IMPORT` は既定 off
+- `SEARCH_ABORTED` の hard error 契約は維持（構文の許可範囲とは別の軸）
+- **複文の拒否メッセージ「バッチ実行 API を使用してください」が正しくなる**（§4 の不整合が解消）
+
+#### 6.3 したがって Phase A は「純加法」でよい
+
+既存レコード VALIDATE の戻り値が `SELECT` と同型である以上、**新しい関数も判別共用体も要らない**。
+
+- ライブラリの guard を広げて `VALIDATE` を通す
+- `QueryResult` に **任意フィールド `validateStats?`** を足し、`query.ts` の写し漏れを埋める
+
+**これは既存利用者に対して完全に非破壊**である（返る型にフィールドが1つ増えるだけ・
+これまで例外だった SQL が通るようになるだけ）。そして **Phase B を縛らない**
+（`runBatch` の `results[]` が同じ `QueryResult` を使うため、むしろ噛み合う）。
+
+> **§5 の推奨を訂正する。**`explainQuery` の前例から `runValidate()` を推していたが、
+> それは**戻り値の型を確認する前の判断**だった。実際には VALIDATE は行を返すクエリであり、
+> `EXPLAIN`（行ではなくプラン文字列を返す）とは事情が違う。**関数を分ける理由がない。**
+
+#### 6.4 スコープの判断も確定する
+
+**DML `... VALIDATE ONLY` は Phase A に含めない。**
+戻り値が `DmlValidationResult` という**別型で 10 以上の追加フィールド**を持ち、
+既存レコード VALIDATE（`QueryResult` ＋ 1 フィールド）とは規模が違う。
+用途（read-only ダッシュボードの KPI 表示）からも外れる。
+
+含めるなら Phase B 以降で、`BatchResult.results[]` の判別共用体として扱うのが自然である。
+
+#### 6.5 規模の見直し
+
+| Phase | 内容 | 見積 |
+|---|---|---:|
+| **A** | guard を `dmlGuard` へ寄せる ＋ 既存レコード `VALIDATE` 解禁 ＋ `validateStats?` の写し | **1〜1.5 人日** |
+| **B** | `runBatch()` ＋ temp table lifecycle ＋ 文別 read-only 強制 ＋ 上限契約 ＋ docs（§2 の使い分け） | **3〜5 人日** |
+
+Phase A は**能力表の二重管理（§1）を解消**し、**用途1（KPI 表示）をほぼ満たす**。
+Phase B は用途2の本体で、**API 設計が主コスト**。
