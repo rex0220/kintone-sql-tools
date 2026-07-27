@@ -158,7 +158,6 @@ test("B76 Phase B Step 2: JOIN側 fetch、通常residual、appliedKlikesが同�
 
 test.each([
   ["cross-alias OR", "a.日付 = THIS_MONTH() OR b.区分 = 'A'"],
-  ["NOT", "NOT (a.日付 = THIS_MONTH())"],
 ] as const)(
   "B76 Phase B Step 2: %s はrecords API前に従来reasonで拒否する",
   async (label, predicate) => {
@@ -187,14 +186,21 @@ test.each(["LEFT", "RIGHT"] as const)(
   }
 );
 
-test("B76 Phase B Step 2: Step 3対象の複数APP関数は部分fetchせずrecords API 0", async () => {
+test("B76 Phase B Step 3: 複数APP関数を各aliasのfetchへ束縛する", async () => {
   const client = makeClient();
-  await expect(execute(
+  const result = await execute(
     `${baseSql}a.日付 = THIS_MONTH() AND b.有効日 = THIS_MONTH()`,
     client,
     { cacheContext: "b76-phase-b-step2-multiple-apps" }
-  )).rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
-  expect(client.calls).toEqual([]);
+  ) as SelectResult;
+  expect(result.rows).toEqual([
+    { $id: "1", 区分: "A" },
+    { $id: "3", 区分: "B" },
+  ]);
+  expect(withoutPaging(client.calls.find((call) => call.app === 77600)!.query))
+    .toBe("日付 = THIS_MONTH()");
+  expect(withoutPaging(client.calls.find((call) => call.app === 77601)!.query))
+    .toBe("有効日 = THIS_MONTH()");
 });
 
 test("B76 Phase B Step 2: truncateは同値literal queryと同じ既存policyを使う", async () => {

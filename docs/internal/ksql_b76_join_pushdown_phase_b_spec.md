@@ -760,3 +760,43 @@ Step 2 は **第5-L の実行だけを解禁**し、**EXPLAIN は従来どおり
 - **Step 4 の受入条件に「JOIN ＋ server-only 関数の EXPLAIN が実行と一致する」を含めること**
 
 **未解消のままリリースしてはならない。**
+
+
+## 【Step 3 レビュー・2026-07-27】klikeValidation の defer と拒否理由の変化
+
+Step 3 で第5-W を実装するにあたり、`src/core/klikeValidation.ts` の静的 KLIKE guard に
+**defer 経路**を追加した。従来この guard は FULL_SCAN の `OR` / `NOT` 配下の KLIKE を
+metadata 取得前に一律 throw していたが、第5-W の可否は **whole-WHERE exact plan が
+確定するまで判定できない**ため、候補形だけ判定を後段へ委ねる必要があった。
+
+defer の条件は次をすべて満たす場合に限定されている。
+
+- WHERE に server-only 関数 occurrence が1つ以上ある
+- `joins.length > 0` かつ全 JOIN が INNER
+- 全 source が alias 付き物理 APP（CTE・サブテーブルでない）
+
+### 安全性（独立検証済み）
+
+defer は**拒否をやめるものではない**。後段の guard と `validateKlikePushdownPlan` が
+records API 呼び出し前に「全 occurrence 適用」か「拒否」を原子的に確定する。
+
+| 形 | 結果 | fetch |
+|---|---|---|
+| 関数なしの KLIKE-in-OR | 従来どおり **KLIKE の静的拒否** | 0 |
+| 関数あり・whole exact **成立** | **第5-W で許可**（residual `null`・全 KLIKE 適用） | 1 |
+| 関数あり・whole exact **不成立** | **拒否**（第5-L で KLIKE が residual OR に残る形は作らない） | 0 |
+
+3行目が Phase A §5.5 の `true OR false` ハザードそのものであり、
+**defer 経路からも到達できないことを実測で確認した**。
+
+### 利用者から見える変化（Step 5 の docs で扱う）
+
+一部の形で**拒否理由が KLIKE 固有のメッセージから
+`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` に変わる**。
+実際の阻害要因は関数側なので改善だが、公開面の記述と整合させること。
+
+### 第5-W の `NOT` は新しい意味論面を増やしていない
+
+`NOT (日付 = THIS_MONTH())` の JOIN 直列化が**単一表 B72 と完全に同一**であることを
+実測で確認した（`(日付 != THIS_MONTH())`）。第5-W は B72 が既に出荷している
+whole-WHERE exact 契約を JOIN へ広げるだけで、空セル等の意味論は既存面と共通である。

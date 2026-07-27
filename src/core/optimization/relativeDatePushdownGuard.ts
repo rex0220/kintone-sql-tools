@@ -29,6 +29,7 @@ import type {
 import {
   isJoinServerFunctionFetchPlan,
   type JoinPushdownPlan,
+  type JoinServerFunctionVariant,
 } from "./joinPredicatePushdown";
 import type {
   PredicateCapabilityReason,
@@ -61,7 +62,7 @@ export interface RelativeDatePlanNode {
   readonly fullScanExactPlan?: RelativeDateFullScanExactPlan;
   readonly joinServerFunctionPlan?: JoinPushdownPlan;
   readonly allowForm?: "FULL_SCAN_EXACT" | "JOIN_SERVER_FUNCTION_EXACT";
-  readonly joinServerFunctionVariant?: "EXACT_LEAF";
+  readonly joinServerFunctionVariant?: JoinServerFunctionVariant;
   readonly clientWhereEvaluation: boolean;
   readonly allowed: boolean;
 }
@@ -381,7 +382,7 @@ export function allowRelativeDatePrefilterPlan(
 }
 
 /**
- * 既存第1〜第4許可形とは独立した第5-L。
+ * 既存第1〜第4許可形とは独立した第5-W / 第5-L。
  * 実 fetch query へ束縛済みの immutable plan だけを許可する。
  */
 export function allowJoinServerFunctionPlan(
@@ -544,8 +545,8 @@ export async function buildRelativeDatePushdownPlan(
         }
       }
       let joinServerFunctionPlan: JoinPushdownPlan | undefined;
-      // Step 4 までは EXPLAIN の第5-L renderer を開かない。実行許可だけを
-      // Step 2 で追加し、旧 EXPLAIN reject 契約を維持する。
+      // Step 4 までは EXPLAIN の第5許可形 renderer を開かない。実行許可だけを
+      // Step 2/3 で追加し、旧 EXPLAIN reject 契約を維持する。
       if (
         !allowed
         && statement.type !== "EXPLAIN"
@@ -576,7 +577,8 @@ export async function buildRelativeDatePushdownPlan(
           ? {
               joinServerFunctionPlan,
               allowForm: "JOIN_SERVER_FUNCTION_EXACT" as const,
-              joinServerFunctionVariant: "EXACT_LEAF" as const,
+              joinServerFunctionVariant:
+                joinServerFunctionPlan.serverFunctionCandidate!.variant,
             }
           : {}),
         clientWhereEvaluation: !allowed,

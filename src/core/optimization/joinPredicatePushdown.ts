@@ -29,6 +29,7 @@ export type JoinPushdownClassification = JoinPushdownItemRelation | "unsafe";
  * item relation の "exact" / "superset" と代入互換にしない。
  */
 export type JoinServerFunctionConsumptionRelation = "function-leaf-exact";
+export type JoinServerFunctionVariant = "EXACT_LEAF" | "WHOLE_WHERE_EXACT";
 
 export type JoinPushdownSourceKind = "APP" | "CTE" | "TEMP" | "SUBTABLE";
 
@@ -66,12 +67,12 @@ export interface JoinServerFunctionConsumption {
   readonly targetAlias: string;
   readonly appId: number;
   /** 採用・serialize・residual 除去で共有する元 leaf identity。 */
-  readonly predicate: BinaryExpr;
+  readonly predicate: WhereExpr;
   readonly functionLeaves: readonly BinaryExpr[];
   /** 同名関数も重複を保持する occurrence multiset の列挙。 */
   readonly functionOccurrences: readonly string[];
   readonly relation: JoinServerFunctionConsumptionRelation;
-  readonly consumption: "leaf";
+  readonly consumption: "leaf" | "whole-where";
   readonly serializedPredicate: string;
   readonly staticProof: {
     readonly classifier: "EXACT_PUSHDOWN";
@@ -94,7 +95,7 @@ export interface JoinServerFunctionConsumption {
 }
 
 export interface JoinServerFunctionCandidate {
-  readonly variant: "EXACT_LEAF";
+  readonly variant: JoinServerFunctionVariant;
   readonly staticContract:
     | "CONFIRMED"
     | "INCOMPLETE";
@@ -283,9 +284,13 @@ export function buildJoinPushdownPlan(
     predicate: fragment.predicate,
     relation: fragment.relation,
   }));
-  const appliedKlikes = new Set<KlikeExpr>();
-  for (const item of items) collectKlikes(item.predicate, appliedKlikes);
   const serverFunctionFoundation = buildServerFunctionFoundation(where, sources);
+  const appliedKlikes = new Set<KlikeExpr>();
+  if (serverFunctionFoundation.serverFunctionCandidate?.variant === "WHOLE_WHERE_EXACT") {
+    for (const klike of allKlikes) appliedKlikes.add(klike);
+  } else {
+    for (const item of items) collectKlikes(item.predicate, appliedKlikes);
+  }
   return Object.freeze({
     items: Object.freeze(items),
     appliedKlikes,
@@ -328,7 +333,7 @@ export function buildJoinPushdownStep2Plan(
 /**
  * 第5-L の静的 plan を alias ごとの実 fetch query へ原子的に束縛する。
  * 全 item / consumption を先に serialize・照合し、1件でも不整合なら未束縛 plan を返す。
- * Step 2 は LOGINUSER と複数 target alias を開かない。
+ * 第5-W を第5-Lより先に束縛し、whole WHERE と leaf を重複送信しない。
  */
 export function bindJoinServerFunctionFetches(
   plan: JoinPushdownPlan,
@@ -342,16 +347,10 @@ export function bindJoinServerFunctionFetches(
       plan.allServerFunctionOccurrences,
       plan.adoptedServerFunctionOccurrences
     )
-    || plan.allServerFunctionOccurrences.includes("LOGINUSER")
     || plan.allKlikes.some((klike) => !plan.appliedKlikes.has(klike))
   ) {
     return plan;
   }
-
-  const targetAliases = new Set(
-    plan.serverFunctionConsumptions.map((consumption) => consumption.targetAlias)
-  );
-  if (targetAliases.size !== 1) return plan;
 
   const queryPartsByAlias = new Map<string, string[]>();
   const append = (alias: string, query: string): void => {
@@ -361,8 +360,10 @@ export function bindJoinServerFunctionFetches(
   };
 
   try {
-    for (const item of plan.items) {
-      append(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    if (plan.serverFunctionCandidate.variant === "EXACT_LEAF") {
+      for (const item of plan.items) {
+        append(item.targetAlias, serializeJoinPushdownItem(item, sources));
+      }
     }
     for (const consumption of plan.serverFunctionConsumptions) {
       const source = sources.find((candidate) =>
@@ -435,7 +436,7 @@ export function isJoinServerFunctionFetchPlan(
   plan: JoinPushdownPlan
 ): boolean {
   if (
-    plan.serverFunctionCandidate?.variant !== "EXACT_LEAF"
+    plan.serverFunctionCandidate === null
     || plan.serverFunctionCandidate.staticContract !== "CONFIRMED"
     || plan.serverFunctionCandidate.fetchContract !== "CONFIRMED"
     || plan.serverFunctionConsumptions.length === 0
@@ -472,6 +473,18 @@ export function isJoinServerFunctionFetchPlan(
       return false;
     }
   }
+  if (
+    plan.serverFunctionCandidate.variant === "WHOLE_WHERE_EXACT"
+    && (
+      plan.serverFunctionConsumptions.length !== 1
+      || plan.serverFunctionConsumptions[0].consumption !== "whole-where"
+      || plan.residualWhere !== null
+      || plan.allKlikes.some((klike) => !plan.appliedKlikes.has(klike))
+      || countSerializedKlikes(queryForWholeWhere(plan)) !== plan.allKlikes.length
+    )
+  ) {
+    return false;
+  }
   return true;
 }
 
@@ -494,6 +507,13 @@ function buildServerFunctionFoundation(
     ...serverOnlyFunctionOccurrencesInWhere(where),
   ]);
   if (allOccurrences.length === 0) return emptyServerFunctionFoundation(where);
+
+  const wholeWhere = buildWholeWhereServerFunctionFoundation(
+    where,
+    sources,
+    allOccurrences
+  );
+  if (wholeWhere !== null) return wholeWhere;
 
   const candidates = collectServerFunctionLeavesOnAndSpine(where);
   const consumptions: JoinServerFunctionConsumption[] = [];
@@ -564,6 +584,122 @@ function buildServerFunctionFoundation(
     residualWhere,
     residualServerFunctionOccurrences: residualOccurrences,
   };
+}
+
+function buildWholeWhereServerFunctionFoundation(
+  where: WhereExpr,
+  sources: readonly JoinPushdownSource[],
+  allOccurrences: readonly string[]
+): ServerFunctionFoundation | null {
+  const owner = classifyWholeWhereExactOwner(where, sources);
+  if (owner === null) return null;
+
+  const item: JoinPushdownItem = {
+    targetAlias: owner.alias,
+    appId: owner.appId,
+    predicate: where,
+    relation: "exact",
+  };
+  let serializedPredicate: string;
+  try {
+    serializedPredicate = serializeJoinPushdownItem(item, sources);
+  } catch {
+    return null;
+  }
+  if (
+    !sameStringMultiset(
+      serverFunctionOccurrencesInSerializedQuery(serializedPredicate),
+      allOccurrences
+    )
+  ) {
+    return null;
+  }
+  const allKlikes = new Set<KlikeExpr>();
+  collectKlikes(where, allKlikes);
+  if (countSerializedKlikes(serializedPredicate) !== allKlikes.size) return null;
+
+  const functionLeaves = Object.freeze(collectServerFunctionLeaves(where));
+  const consumption: JoinServerFunctionConsumption = Object.freeze({
+    targetAlias: owner.alias,
+    appId: owner.appId,
+    predicate: where,
+    functionLeaves,
+    functionOccurrences: Object.freeze([...allOccurrences]),
+    relation: "function-leaf-exact",
+    consumption: "whole-where",
+    serializedPredicate,
+    staticProof: Object.freeze({
+      classifier: "EXACT_PUSHDOWN",
+      ownership: "OWNED",
+      serialization: "OCCURRENCE_MULTISET_EXACT",
+      residualIdentityConsumption: "CONFIRMED",
+    }),
+    fetchBinding: "PENDING_STEP_2",
+  });
+  return {
+    serverFunctionCandidate: Object.freeze({
+      variant: "WHOLE_WHERE_EXACT",
+      staticContract: "CONFIRMED",
+      fetchContract: "PENDING_STEP_2",
+    }),
+    serverFunctionConsumptions: Object.freeze([consumption]),
+    allServerFunctionOccurrences: Object.freeze([...allOccurrences]),
+    adoptedServerFunctionOccurrences: Object.freeze([...allOccurrences]),
+    residualWhere: null,
+    residualServerFunctionOccurrences: Object.freeze([]),
+  };
+}
+
+function classifyWholeWhereExactOwner(
+  where: WhereExpr,
+  sources: readonly JoinPushdownSource[]
+): Extract<JoinFieldOwner, { status: "OWNED" }> | null {
+  switch (where.type) {
+    case "BINARY": {
+      const functionOccurrences = serverOnlyFunctionOccurrencesInWhere(where);
+      if (functionOccurrences.length > 0) {
+        const classification = classifyJoinServerFunctionLeaf(where, sources);
+        return classification.relation === "function-leaf-exact"
+          ? classification.owner
+          : null;
+      }
+      const classification = classifyJoinPushdownLeaf(where, sources);
+      return classification.relation === "exact" && classification.owner !== undefined
+        ? classification.owner
+        : null;
+    }
+    case "LOGICAL": {
+      const left = classifyWholeWhereExactOwner(where.left, sources);
+      const right = classifyWholeWhereExactOwner(where.right, sources);
+      return left !== null && right !== null && sameOwner(left, right) ? left : null;
+    }
+    case "GROUP":
+    case "NOT":
+      return classifyWholeWhereExactOwner(where.expr, sources);
+    case "NULL_CHECK":
+    case "EXISTS":
+    case "BOOLEAN":
+      return null;
+  }
+}
+
+function collectServerFunctionLeaves(where: WhereExpr): BinaryExpr[] {
+  switch (where.type) {
+    case "BINARY":
+      return serverOnlyFunctionOccurrencesInWhere(where).length > 0 ? [where] : [];
+    case "LOGICAL":
+      return [
+        ...collectServerFunctionLeaves(where.left),
+        ...collectServerFunctionLeaves(where.right),
+      ];
+    case "GROUP":
+    case "NOT":
+      return collectServerFunctionLeaves(where.expr);
+    case "NULL_CHECK":
+    case "EXISTS":
+    case "BOOLEAN":
+      return [];
+  }
 }
 
 function emptyServerFunctionFoundation(
@@ -655,6 +791,17 @@ function sameStringMultiset(
     else counts.set(value, count - 1);
   }
   return counts.size === 0;
+}
+
+function countSerializedKlikes(query: string): number {
+  return [...query.matchAll(/\s(?:not\s+)?like\s/g)].length;
+}
+
+function queryForWholeWhere(plan: JoinPushdownPlan): string {
+  const consumption = plan.serverFunctionConsumptions[0];
+  return consumption === undefined
+    ? ""
+    : (plan.fetchQueriesByAlias.get(consumption.targetAlias) ?? "");
 }
 
 function collectRejections(
@@ -766,6 +913,9 @@ function assertPredicateOwnership(
     case "GROUP":
       assertPredicateOwnership(predicate.expr, item, sources);
       return;
+    case "NOT":
+      assertPredicateOwnership(predicate.expr, item, sources);
+      return;
     case "BINARY": {
       if (predicate.left.type !== "FIELD" || containsFieldReference(predicate.right)) {
         throw joinOwnershipError(item, "predicate contains a non-target or RHS field reference");
@@ -779,7 +929,6 @@ function assertPredicateOwnership(
       }
       return;
     }
-    case "NOT":
     case "NULL_CHECK":
     case "EXISTS":
     case "BOOLEAN":

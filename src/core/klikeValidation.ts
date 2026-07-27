@@ -2,6 +2,7 @@ import { resolveSelectMode } from "../converter/selectToKintone";
 import { isKlike, whereHasKlike } from "./like";
 import { buildInlinedQuery, canInlineSingleCte } from "./cteInlining";
 import { buildKlikePushdownPlan, unappliedKlikes, type KlikePushdownPlan } from "./optimization/klikePushdownPlan";
+import { serverOnlyFunctionOccurrencesInWhere } from "./optimization/relativeDateFullScanExactPlan";
 import { isSinglePositiveRecordIdWhere } from "./applyPatchScope";
 import type {
   SelectStatement,
@@ -195,6 +196,13 @@ function validateSelect(stmt: SelectStatement): void {
         validateNestedSelects(stmt);
         return;
       }
+      // B76 第5-W候補は metadata 解決後の whole-WHERE exact plan でだけ安全性を
+      // 確定できる。ここでは候補を defer し、guard と validateKlikePushdownPlan が
+      // records API 前に全 occurrence の適用または拒否を原子的に確定する。
+      if (canDeferJoinWholeWhereKlikeValidation(stmt)) {
+        validateNestedSelects(stmt);
+        return;
+      }
       throw new KlikeValidationError(
         "FULL_SCAN の KLIKE / NOT KLIKE は、物理テーブルに対する AND リーフとして必ず押し下げられる必要があります。OR / NOT 配下、CTE・一時テーブル、LEFT / RIGHT JOIN では使用できません"
       );
@@ -202,6 +210,18 @@ function validateSelect(stmt: SelectStatement): void {
   }
 
   validateNestedSelects(stmt);
+}
+
+function canDeferJoinWholeWhereKlikeValidation(stmt: SelectStatement): boolean {
+  return stmt.where !== null
+    && serverOnlyFunctionOccurrencesInWhere(stmt.where).length > 0
+    && stmt.joins.length > 0
+    && stmt.joins.every((join) => join.type === "INNER")
+    && [stmt.from, ...stmt.joins.map((join) => join.table)].every((table) =>
+      table.alias !== null
+      && table.cteName === null
+      && !table.subtableCode
+    );
 }
 
 /** 現在の SELECT スコープに属する KLIKE を検証する（内側 SELECT は別途検証）。 */

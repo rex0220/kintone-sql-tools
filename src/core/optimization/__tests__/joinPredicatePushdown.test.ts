@@ -373,7 +373,7 @@ describe("B76 §5.4 tree composition", () => {
   });
 });
 
-describe("B76 Phase B Step 1 exact function consumption foundation", () => {
+describe("B76 Phase B Step 3 exact function consumption", () => {
   test.each([
     ["DATE + relative", "a.date = THIS_MONTH()"],
     ["DATE + TODAY", "a.date >= TODAY()"],
@@ -393,7 +393,7 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
 
     const plan = buildJoinPushdownPlan(expr, [core]);
     expect(plan.serverFunctionCandidate).toEqual({
-      variant: "EXACT_LEAF",
+      variant: "WHOLE_WHERE_EXACT",
       staticContract: "CONFIRMED",
       fetchContract: "PENDING_STEP_2",
     });
@@ -401,7 +401,7 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
     expect(plan.serverFunctionConsumptions[0]).toMatchObject({
       predicate: expr,
       relation: "function-leaf-exact",
-      consumption: "leaf",
+      consumption: "whole-where",
       fetchBinding: "PENDING_STEP_2",
       staticProof: {
         classifier: "EXACT_PUSHDOWN",
@@ -441,12 +441,12 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
     const plan = buildJoinPushdownPlan(expr, [core]);
     expect(plan.allServerFunctionOccurrences).toEqual(["TODAY", "TODAY"]);
     expect(plan.adoptedServerFunctionOccurrences).toEqual(["TODAY", "TODAY"]);
-    expect(plan.serverFunctionConsumptions.map(
-      (consumption) => consumption.functionOccurrences
-    )).toEqual([["TODAY"], ["TODAY"]]);
-    expect(plan.serverFunctionConsumptions.map(
-      (consumption) => consumption.serializedPredicate
-    )).toEqual(["date >= TODAY()", "date <= TODAY()"]);
+    expect(plan.serverFunctionCandidate?.variant).toBe("WHOLE_WHERE_EXACT");
+    expect(plan.serverFunctionConsumptions).toHaveLength(1);
+    expect(plan.serverFunctionConsumptions[0].functionOccurrences)
+      .toEqual(["TODAY", "TODAY"]);
+    expect(plan.serverFunctionConsumptions[0].serializedPredicate)
+      .toBe("date >= TODAY() and date <= TODAY()");
     expect(plan.residualWhere).toBeNull();
   });
 
@@ -521,21 +521,23 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
     expect(plan.residualWhere).toBe(normalSupersetLeaf);
   });
 
-  test("OR / NOT 内の関数 leaf は第5-Lへ採用せず residual 再 walk に残す", () => {
+  test("同一aliasのexact OR / NOTは第5-Wでwhole WHEREを消費する", () => {
     for (const sql of [
       "SELECT * FROM APP100 a WHERE a.date = TODAY() OR a.date = TOMORROW()",
       "SELECT * FROM APP100 a WHERE NOT (a.date = TODAY())",
     ]) {
       const expr = where(sql);
       const plan = buildJoinPushdownPlan(expr, [core]);
-      expect(plan.serverFunctionConsumptions).toEqual([]);
-      expect(plan.serverFunctionCandidate?.staticContract).toBe("INCOMPLETE");
-      expect(plan.residualWhere).toBe(expr);
-      expect(plan.residualServerFunctionOccurrences.length).toBeGreaterThan(0);
+      expect(plan.serverFunctionCandidate?.variant).toBe("WHOLE_WHERE_EXACT");
+      expect(plan.serverFunctionConsumptions).toHaveLength(1);
+      expect(plan.serverFunctionConsumptions[0].predicate).toBe(expr);
+      expect(plan.serverFunctionConsumptions[0].consumption).toBe("whole-where");
+      expect(plan.residualWhere).toBeNull();
+      expect(plan.residualServerFunctionOccurrences).toEqual([]);
     }
   });
 
-  test("KLIKE identity は関数 leaf surgery と独立に同じ plan で維持する", () => {
+  test("whole exactのKLIKEは全identityを適用しresidual nullにする", () => {
     const expr = where(
       "SELECT * FROM APP100 a "
       + "WHERE a.date = TODAY() AND a.text KLIKE 'urgent'"
@@ -544,11 +546,12 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
     const klike = expr.right;
     const plan = buildJoinPushdownPlan(expr, [core]);
     expect(plan.appliedKlikes.has(klike as any)).toBe(true);
-    expect(plan.residualWhere).toBe(klike);
+    expect(plan.serverFunctionCandidate?.variant).toBe("WHOLE_WHERE_EXACT");
+    expect(plan.residualWhere).toBeNull();
     expect(plan.serverFunctionCandidate?.staticContract).toBe("CONFIRMED");
   });
 
-  test("第5-Lは完全なalias queryへの実fetch binding後だけ実行可能になる", () => {
+  test("第5-Wを第5-Lより優先しwhole WHEREを一度だけfetchへ束縛する", () => {
     const expr = where(
       "SELECT * FROM APP100 a "
       + "WHERE a.date = THIS_MONTH() AND a.text KLIKE 'urgent'"
@@ -558,26 +561,40 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
 
     const bound = bindJoinServerFunctionFetches(staticPlan, [core]);
     expect(isJoinServerFunctionFetchPlan(bound)).toBe(true);
+    expect(bound.serverFunctionCandidate?.variant).toBe("WHOLE_WHERE_EXACT");
     expect(bound.serverFunctionCandidate?.fetchContract).toBe("CONFIRMED");
     expect(bound.fetchQueriesByAlias.get("a")).toBe(
-      '(text like "urgent") and (date = THIS_MONTH())'
+      'date = THIS_MONTH() and text like "urgent"'
     );
     expect(bound.serverFunctionConsumptions[0].fetchBinding).toEqual({
       status: "BOUND_TO_TARGET_FETCH",
       targetAlias: "a",
       appId: 100,
-      query: '(text like "urgent") and (date = THIS_MONTH())',
+      query: 'date = THIS_MONTH() and text like "urgent"',
     });
   });
 
-  test("Step 3境界のLOGINUSERと複数target aliasはfetchへ束縛しない", () => {
+  test("第5-W不成立時は第5-Lへfallbackし通常residualを維持する", () => {
+    const expr = where(
+      "SELECT * FROM APP100 a "
+      + "WHERE a.date = THIS_MONTH() AND LENGTH(a.text) > 1"
+    );
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.serverFunctionCandidate?.variant).toBe("EXACT_LEAF");
+    expect(plan.serverFunctionConsumptions[0].consumption).toBe("leaf");
+    expect(plan.residualWhere).toBe(
+      expr.type === "LOGICAL" ? expr.right : undefined
+    );
+  });
+
+  test("LOGINUSERと複数target aliasをそれぞれのfetchへ束縛する", () => {
     const login = buildJoinPushdownPlan(
       binary("SELECT * FROM APP100 a WHERE a.creator IN (LOGINUSER())"),
       [core]
     );
     expect(isJoinServerFunctionFetchPlan(
       bindJoinServerFunctionFetches(login, [core])
-    )).toBe(false);
+    )).toBe(true);
 
     const left = source("a", 100, [{ code: "date", fieldType: "DATE" }]);
     const right = source("b", 200, [{ code: "updated", fieldType: "UPDATED_TIME" }]);
@@ -588,9 +605,13 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
       ),
       [left, right]
     );
-    expect(isJoinServerFunctionFetchPlan(
-      bindJoinServerFunctionFetches(multiple, [left, right])
-    )).toBe(false);
+    const bound = bindJoinServerFunctionFetches(multiple, [left, right]);
+    expect(isJoinServerFunctionFetchPlan(bound)).toBe(true);
+    expect(bound.serverFunctionCandidate?.variant).toBe("EXACT_LEAF");
+    expect(bound.fetchQueriesByAlias).toEqual(new Map([
+      ["a", "date = TODAY()"],
+      ["b", "updated >= NOW()"],
+    ]));
   });
 });
 
