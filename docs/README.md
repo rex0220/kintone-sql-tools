@@ -5,6 +5,7 @@
 ## 課題・改善案・Issue の管理
 
 - **[`ksql_issue_tracker.md`](ksql_issue_tracker.md)** — 課題・改善案・Issue の一括管理台帳（進捗 / 効果 / リリースバージョン）。個別文書のステータスをここに集約する。**internal 配下の仕様・課題文書はこの台帳から辿る。**
+- **[`ksql_release_history.md`](ksql_release_history.md)** — リリース済み全版の履歴（版数 / 効果 / 決定と撤回の経緯）。台帳から分割（2026-07-27）。
 
 ## 利用者向けドキュメント
 
