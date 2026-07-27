@@ -695,15 +695,15 @@ INNER ではなく LEFT/RIGHT である**ことが判明し、現行実装は危
 Step 4 のテストは「JOIN plan の有無で挙動を変えず既存どおり警告を返す」ことを固定する形へ書き換えた。
 
 
-## 17. 【2026-07-27】4面 parity 条件の緩和（engine ライブラリの reason 平坦化）
+## 17. 【2026-07-27】4面 parity 条件の一時緩和と B80 による撤回
 
 Step 5 着手時に codex が、**engine ライブラリだけ拒否 reason が一致しない**ことを検出して停止した。
 指摘は正しい。
 
-### 17.1 原因（B76 由来ではない）
+### 17.1 当時の原因（B76 由来ではない）
 
-`src/engine-library/statementGuard.ts` の `parseSingleStatement()` は、
-`parseSqlStatement()` が投げた例外を正規化し、**`PARSE_ERROR` 以外は汎用 parse error へ置き換える**。
+B80 修正前の `src/engine-library/statementGuard.ts` の `parseSingleStatement()` は、
+`parseSqlStatement()` が投げた例外を正規化し、**`PARSE_ERROR` 以外を汎用 parse error へ置き換えていた**。
 
 ```ts
 const normalized = normalizeEngineError(error);
@@ -712,23 +712,21 @@ throw parseError("SQL statement could not be parsed", error);   // ← reason �
 ```
 
 `KlikeValidationError` は `name = "ArgumentError"` なので `PARSE_ERROR` にならず、
-**「SQL statement could not be parsed」という誤導的なメッセージ**になる。
+**「SQL statement could not be parsed」という誤導的なメッセージ**になっていた。
 実際には**構文としては正しく parse できており**、意味的な制約で拒否されている。
 
 **B66（engine ライブラリ）以来の既存欠陥**であり、B76 の変更が原因ではない。
 B76 の parity テストを書いて初めて露出した。
 
-### 17.2 決定＝parity 条件を緩和し、修正は B80 へ
+### 17.2 B80 により parity 緩和を撤回済み
 
-engine ライブラリのエラー契約を B76 の範囲で変えるのは適切でない
-（ライブラリ利用者に見えるエラー出力の変更になるため）。
-**B80「engine ライブラリが具体的な reason を汎用 parse error へ平坦化する」として起票済み**。
+B76 実装時は engine ライブラリのエラー契約をこの課題の範囲で変えず、
+B80「engine ライブラリが具体的な reason を汎用 parse error へ平坦化する」へ分離した。
+B80 で class identity による allowlist と配布面 parity test を同時実装したため、
+次の緩和は**撤回済み**である。
 
-したがって §11 の 4面 parity 条件を次のとおり緩和する。
-
-- **拒否そのものが4面で起きること**（records API 0 を含む）は必須
-- **reason 文字列の完全一致は engine ライブラリを除く3面で要求する**。
-  ライブラリは reason を平坦化するため、**「拒否される」ことだけを固定する**
+- **拒否そのものが配布4面で起きること**（records API 0 を含む）を必須とする
+- **reason 文字列は engine ライブラリを含む配布4面すべてで一致を要求する**
 - **EXPLAIN の APP 表記差**（CLI/MCP は `APP730@test`、plugin/engine は `APP730`）は
   profile 表記を正規化して比較する
 
@@ -741,17 +739,18 @@ engine ライブラリのエラー契約を B76 の範囲で変えるのは適�
 | **実行面 parity**（§11.5 の表） | CLI ／ MCP ／ Firefox plugin ／ Chrome plugin | **ブラウザ実機を含む**リリース gate |
 | **配布面 parity**（従来リリースの慣行） | plugin ／ CLI ／ MCP ／ **engine ライブラリ** | 配布物ごとの挙動一致 |
 
-**§17.2 の緩和は「配布面 parity」に対するもの**で、engine ライブラリだけ reason 一致を求めない。
-**§11.5 の表は engine ライブラリを含まないため、この緩和の影響を受けない。**
+撤回対象は「配布面 parity」で engine ライブラリだけ reason 一致を求めなかった条件である。
+**§11.5 の表は engine ライブラリを含まないため、撤回前後とも影響を受けない。**
 
-### 17.3 B80 への申し送り
+### 17.3 B80 解決記録
 
-本件は **B80** として独立起票した（`ksql_b80_engine_library_reason_flattening_issue.md`）。
+本件は **B80** として解決した（`ksql_b80_engine_library_reason_flattening_issue.md`）。
 
-- 影響は KLIKE に限らず、`parseSqlStatement()` 内で投げられる
-  **`PARSE_ERROR` 以外の全検証エラー**が対象。着手時に網羅的な洗い出しが要る。
+- `parseSqlStatement()` の後段 validator を網羅監査し、SQL から到達する
+  非 parser error は現時点で **`KlikeValidationError` だけ**と確認した。
+- engine ライブラリは `code = "PARSE_ERROR"` と元 error の `cause` identity を維持し、
+  `KlikeValidationError.message` をトップレベル message に保持する。
+- B76 Step 5 の parity test は run / explain とも engine を含む配布4面で同じ reason と
+  records API 0 を要求する。
 - **B73（エラーの構造化・多言語）より B80 が先**であるべき。
-  B73 は「message に埋め込まれた情報の構造化」だが、B80 は
-  **そもそも面によって情報が失われている**というより手前の問題であり、
-  **構造化以前にエラーの同一性が保たれていない**。
-- **B80 が解決すれば §17.2 の緩和を撤回**し、「4面で同じ reason」を固定できる。
+  B80 の reason 保持を前提に、B73 で構造化を設計する。

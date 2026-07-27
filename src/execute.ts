@@ -63,6 +63,7 @@ import {
 import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
+import { statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
@@ -734,7 +735,7 @@ export async function execute(
   const guardedClient = wrapClientWithSearchAbort(
     countedClient,
     collector,
-    !isSelectLikeStatement(stmt)
+    !isSelectLikeStatement(stmt) || statementContainsOuterJoin(stmt)
   );
   const result = await executeParsedStatement(
     stmt,
@@ -861,13 +862,22 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
   };
 }
 
+const SEARCH_ABORT_FAIL_CLOSED = Symbol("searchAbortFailClosed");
+type SearchAbortGuardedClient = KintoneClient & {
+  [SEARCH_ABORT_FAIL_CLOSED]?: true;
+};
+
 function wrapClientWithSearchAbort(
   client: KintoneClient,
   collector: SearchAbortCollector,
   failClosed: boolean
 ): KintoneClient {
+  if (failClosed && (client as SearchAbortGuardedClient)[SEARCH_ABORT_FAIL_CLOSED]) {
+    return client;
+  }
   return {
     ...client,
+    ...(failClosed ? { [SEARCH_ABORT_FAIL_CLOSED]: true as const } : {}),
     getRecords: async (params) => {
       const response = await client.getRecords(params);
       if (response.searchAborted) {
@@ -1492,7 +1502,11 @@ export async function executeBatch(
       const statementClient = wrapClientWithSearchAbort(
         countedClient,
         searchAbortCollector,
-        info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
+        (
+          info.statementType !== "SELECT"
+          && info.statementType !== "UNION"
+          && info.statementType !== "WITH"
+        ) || statementContainsOuterJoin(statements[i])
       );
       const cursorScope = wrapClientWithCursorScope(statementClient);
       const outcome = await runWithDeadline(
@@ -3928,7 +3942,8 @@ async function executeFullScanSelect(
   validateKlikePushdownPlan(pushdownPlan);
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
-  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
+  // （B79 実装済み: 外部結合のみ fail-closed。outerJoinSearchAbortGuard.ts）。
   const fetchClient = client;
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
@@ -4321,7 +4336,8 @@ async function executeFullScanWithCte(
   validateKlikePushdownPlan(pushdownPlan);
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
-  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
+  // （B79 実装済み: 外部結合のみ fail-closed。outerJoinSearchAbortGuard.ts）。
   const fetchClient = client;
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。

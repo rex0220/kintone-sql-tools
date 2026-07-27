@@ -1,4 +1,5 @@
 import { parseSqlStatement } from "../core/sql";
+import { KlikeValidationError } from "../core/klikeValidation";
 import type { Statement } from "../types/ast";
 import {
   normalizeEngineError,
@@ -16,14 +17,22 @@ type StatementNode = {
   readonly right?: unknown;
 };
 
+/** Internal test seam for the parse-boundary error allowlist. */
+export function normalizeParseBoundaryError(error: unknown) {
+  if (error instanceof KlikeValidationError) {
+    return parseError(error.message, error);
+  }
+  const normalized = normalizeEngineError(error);
+  if (normalized.code === "PARSE_ERROR") return normalized;
+  return parseError("SQL statement could not be parsed", error);
+}
+
 function parseSingleStatement(sql: string): Statement {
   if (sql.trim() === "") throw parseError("SQL statement is empty");
   try {
     return parseSqlStatement(sql, { import: true });
   } catch (error) {
-    const normalized = normalizeEngineError(error);
-    if (normalized.code === "PARSE_ERROR") throw normalized;
-    throw parseError("SQL statement could not be parsed", error);
+    throw normalizeParseBoundaryError(error);
   }
 }
 

@@ -173,7 +173,8 @@ test("B76 Step 4: batch variable は値解決後の plan に入り、subquery RH
 
 test("B76 §16: SearchAborted は JOIN plan の有無で挙動を変えず既存どおり警告を返す", async () => {
   // B76 は性能改善であり、検索打ち切りの安全性という別問題を副作用で持ち込まない。
-  // JOIN plan があってもエラー化せず、単一表・LEFT JOIN と同じ警告経路を維持する。
+  // JOIN plan があってもエラー化せず、単一表・INNER JOIN と同じ警告経路を維持する。
+  // （LEFT/RIGHT JOIN は B79 で fail-closed になったため、本テストの対象は INNER JOIN。）
   const client = makeClient({ searchAborted: true });
   const result = await execute(
     `${twoTable}a.担当者 = '佐藤'`,

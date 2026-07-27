@@ -1,7 +1,7 @@
 # B79 外部結合＋検索打ち切りで誤った値を返す（silent wrong result）
 
 - 起票: 2026-07-27（B76 Phase A Step 4 のレビュー中に発見）
-- ステータス: 📝 **評価・起票（優先 高／silent wrong result）**。未着手。
+- ステータス: 🔧 **実装完了・未リリース（2026-07-27）＝案 A**。`src/core/outerJoinSearchAbortGuard.ts` を新設し AST を再帰走査して外部結合を検出、fail-closed 判定へ配線。**v3.27.0（B80 と同一リリース）予定**。
 - 関連: [B76 Phase A 仕様 §16](ksql_b76_join_pushdown_phase_a_spec.md) / B7（プラグイン検索打ち切り検出・v3.10.0）
 
 ## 1. 事象
@@ -40,7 +40,7 @@ kintone の検索が 10 万件で打ち切られた（`searchAborted: true`）�
   集計に使えば合計・平均が静かにずれる。
 - B78（ユーザー系フィールドへの `=` が黙って0件）と同じ **silent wrong result** の class。
 
-## 3. 現状の挙動の一覧
+## 3. 起票時の挙動の一覧（＝修正前）
 
 | ケース | 検索打ち切り時 | 性質 |
 |---|---|---|
@@ -48,9 +48,36 @@ kintone の検索が 10 万件で打ち切られた（`searchAborted: true`）�
 | INNER JOIN | 警告＋部分結果 | 行の欠落 |
 | **LEFT / RIGHT JOIN** | **警告＋部分結果** | **誤った値** |
 
+> **【2026-07-27 実装済み】** 現在は plugin / CLI / MCP の **LEFT / RIGHT JOIN のみエラー**。
+> 単一表・INNER JOIN は警告＋部分結果のまま。engine ライブラリは元から全形エラー（§7）。
+
 **最も危険なケースが、最も軽い扱いを受けている。**
 
-## 4. 方針案（未決）
+## 3.5 オーナー決定（2026-07-27）＝案 A
+
+**外部結合で `searchAborted` が起きたら fail-closed（エラー）とする。**
+
+- 判断基準は B78 と同じ＝**現在成功して見えるクエリは実際には誤った値を返しているので、
+  エラー化しても正しい結果を失わない**。
+- **【2026-07-27 撤回】案 B（警告文の是正）は実施しない。** 当初は「いずれの案でも必要」と
+  記載していたが、これは A/B/C を代替案として比較していたときの判断だった。**案 A で誤値を返す
+  経路が消えるため、残る警告経路（INNER JOIN・単一表）はいずれも行の欠落であり、
+  「結果が欠落した可能性」という現行文言は正確になる。** 詳細は [B79 計画 §0.1](ksql_b79_outer_join_search_abort_plan.md)。
+- **INNER JOIN と単一表は対象外**（行の欠落であり警告で足りる）。
+- B79 は **B80 と同一リリース**で出す（テーマ＝「失敗時の挙動を正直にする」）。
+  **破壊的変更を含む**ため移行案内を CHANGELOG・言語リファレンス・`release/README.txt` の3箇所へ。
+
+### 実装時の注意
+
+- B76 Phase A で INNER JOIN のみ fail-closed にして**危険度と逆向き**になり撤回した経緯がある
+  （B76 spec §16）。**同じ轍を踏まないこと**＝対象は**外部結合のみ**で、
+  INNER JOIN・単一表の警告経路は変えない。
+- B76 で `"joinPlan" in pushdownPlan` という**plan オブジェクトの存在だけ**で判定して
+  「押し下げが1件も起きていないクエリまでエラー」にしてしまった。
+  **判定条件は「外部結合であること」に紐づけ、plan の有無に依存させないこと。**
+- **B6（KLIKE 外部結合 非 nullable 側の押し下げ解禁・却下）**の記録を着手時に確認すること。
+
+## 4. 方針案（決定済み・記録として保持）
 
 | 案 | 内容 | 影響 |
 |---|---|---|
@@ -60,7 +87,7 @@ kintone の検索が 10 万件で打ち切られた（`searchAborted: true`）�
 
 **Claude の推奨は A**。B78 で「黙って0件」をエラー化したのと同じ判断基準
 （**現在成功して見えるクエリは実際には誤りなので、エラー化しても正しい結果を失わない**）が
-そのまま当てはまる。ただし B の警告文是正は**いずれの案でも必要**。
+そのまま当てはまる。**【2026-07-27 撤回】B の警告文是正は不要**＝案 A で誤値を返す経路が消えるため、残る警告経路（`INNER JOIN`・単一表）はいずれも**行の欠落**であり「結果が欠落した可能性」という現行文言が正確になる。§3.5 参照。
 
 ## 5. スコープの論点
 
@@ -74,3 +101,37 @@ kintone の検索が 10 万件で打ち切られた（`searchAborted: true`）�
 
 B76 Phase A の変更が原因ではなく、**B7 以来の既存挙動**である。
 B76 Step 4 のレビュー中、「JOIN は本当に単一表より危険か」を検証する過程で発見した。
+
+
+## 7. 【2026-07-27】engine ライブラリは元から fail-closed（面ごとの差）
+
+docs 作業の着手時に codex が検出。**B79 は engine ライブラリの挙動を一切変えない。**
+
+`src/engine-library/readonlyClient.ts` は `getRecords` をラップし、
+**クエリ形に関係なく** `searchAborted: true` を `SEARCH_ABORTED` の hard error へ変換する。
+
+```ts
+getRecords: async (params) => {
+  const result = await clientCall(() => getRecords(params));
+  if (result.searchAborted === true) throw searchAborted();
+  return result;
+},
+```
+
+`docs/ksql_engine_library.md` にも明記されている。
+
+> client が `searchAborted: true` を返した場合、simple query、JOIN、GROUP BY を問わず
+> 常に `SEARCH_ABORTED` の **hard error** です。部分行や warning result は返しません。
+
+### 面ごとの挙動（B79 適用後）
+
+| 面 | 外部結合 | `INNER JOIN` / 単一表 |
+|---|---|---|
+| plugin / CLI / MCP | **エラー**（B79 で変更） | 警告＋部分結果 |
+| **engine ライブラリ** | **エラー**（元から） | **エラー**（元から） |
+
+**docs で「`INNER JOIN`・単一表は影響なし」と書くときは、
+plugin / CLI / MCP に限る旨を明示すること。** ライブラリ面では元からエラーである。
+
+ライブラリが常に厳格なのは、**プログラム API では部分結果が黙ってアプリケーション
+ロジックへ流れ込むほうが危険**だからであり、意図的な設計である（B66 のガイドに記載）。

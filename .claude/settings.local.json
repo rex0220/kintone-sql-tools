@@ -60,12 +60,16 @@
       "Bash(node scripts/version-sync-guard.mjs)",
       "Bash(node -p \"'prod/manifest.json -> ' + JSON.parse\\(require\\('fs'\\).readFileSync\\('prod/manifest.json','utf8'\\)\\).version\")",
       "Bash(powershell -NoProfile -Command 'Add-Type -A System.IO.Compression.FileSystem; $t=Join-Path $env:TEMP '\\\\''ksqlz3'\\\\''; Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue; [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Resolve-Path release/ksql-plugin-v3.26.0.zip\\), $t\\); [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Join-Path $t '\\\\''contents.zip'\\\\''\\), \\(Join-Path $t '\\\\''c'\\\\''\\)\\); '\\\\''zip 内 manifest -> '\\\\'' + \\(Get-Content \\(Join-Path $t '\\\\''c/manifest.json'\\\\''\\) -Raw | ConvertFrom-Json\\).version')",
-      "Bash(echo \"main: $\\(git log --oneline -1\\) / version: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")"
+      "Bash(echo \"main: $\\(git log --oneline -1\\) / version: $\\(node -p \"require\\('./package.json'\\).version\"\\)\")",
+      "Bash(cd \"c:/Users/rex02/Projects/kintone-sql-tools\" && grep -n \"^## \\\\|^### \" docs/internal/ksql_b80_engine_library_reason_spec.md | head -20 && echo \"=== 影響範囲の一覧 ===\" && sed -n '/影響を受けるエラー\\\\|影響範囲/,/^## /p' docs/internal/ksql_b80_engine_library_reason_spec.md | head -30)",
+      "Bash(node -p \"'zip: ' + require\\('fs'\\).existsSync\\('release/ksql-plugin-v3.27.0.zip'\\)\")",
+      "Bash(powershell -NoProfile -Command 'Add-Type -A System.IO.Compression.FileSystem; $t=Join-Path $env:TEMP '\\\\''ksqlz4'\\\\''; Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue; [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Resolve-Path release/ksql-plugin-v3.27.0.zip\\), $t\\); [IO.Compression.ZipFile]::ExtractToDirectory\\(\\(Join-Path $t '\\\\''contents.zip'\\\\''\\), \\(Join-Path $t '\\\\''c'\\\\''\\)\\); '\\\\''zip 内 manifest -> '\\\\'' + \\(Get-Content \\(Join-Path $t '\\\\''c/manifest.json'\\\\''\\) -Raw | ConvertFrom-Json\\).version')"
     ],
     "additionalDirectories": [
       "\\tmp",
       "C:\\Users\\rex02\\AppData\\Local\\Temp\\claude\\c--Users-rex02-Projects-kintone-sql-tools\\6f086584-c50e-4071-a2e9-02792b494bc4\\tasks",
-      "c:\\Users\\rex02\\Projects\\kintone-sql-tools\\docs\\internal"
+      "c:\\Users\\rex02\\Projects\\kintone-sql-tools\\docs\\internal",
+      "C:\\Users\\rex02\\Projects\\kintone-sql-tools\\docs\\internal"
     ]
   }
 }

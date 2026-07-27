@@ -394,7 +394,7 @@ describe("B76 Phase A Step 5 distribution parity", () => {
       && !call.query.includes("区分 in"))).toBe(true);
   });
 
-  test("KLIKEを含むORは全配布面でrecords API前に拒否し、reason一致はengine以外で固定する", async () => {
+  test("KLIKEを含むORはrun/explainとも全配布面でrecords API前に拒否し、reasonが一致する", async () => {
     const sql = `${BASE}a.件名 KLIKE 'urgent' OR a.担当者 = '佐藤'`;
     const reason = "FULL_SCAN の KLIKE / NOT KLIKE";
     const firefox = makeClient();
@@ -402,28 +402,35 @@ describe("B76 Phase A Step 5 distribution parity", () => {
     const library = makeClient();
     const mcp = makeClient();
 
-    const firefoxError = await execute(sql, firefox.client)
-      .then(() => "", (error: unknown) => String(error));
-    const chromeError = await execute(sql, chrome.client)
-      .then(() => "", (error: unknown) => String(error));
-    const libraryError = await runQuery(sql, { client: library.client })
-      .then(() => "", (error: unknown) => String(error));
-    const mcpError = await mcpTools(mcp.client).query({ sql })
-      .then(() => "", (error: unknown) => String(error));
-    const cli = await captureCli(configPath, sql, false);
-    const cliError = `${cli.stdout}\n${cli.stderr}`;
+    for (const mode of ["run", "explain"] as const) {
+      const pluginSql = mode === "run" ? sql : `EXPLAIN ${sql}`;
+      const firefoxError = await execute(pluginSql, firefox.client)
+        .then(() => "", (error: unknown) => String(error));
+      const chromeError = await execute(pluginSql, chrome.client)
+        .then(() => "", (error: unknown) => String(error));
+      const libraryError = await (
+        mode === "run"
+          ? runQuery(sql, { client: library.client })
+          : explainQuery(sql, { client: library.client })
+      ).then(() => "", (error: unknown) => String(error));
+      const tools = mcpTools(mcp.client);
+      const mcpError = await (
+        mode === "run" ? tools.query({ sql }) : tools.explain({ sql })
+      ).then(() => "", (error: unknown) => String(error));
+      const cli = await captureCli(configPath, sql, mode === "explain");
+      const cliError = `${cli.stdout}\n${cli.stderr}`;
 
-    expect(firefoxError).toContain(reason);
-    expect(chromeError).toBe(firefoxError);
-    expect(mcpError).toContain(reason);
-    expect(cliError).toContain(reason);
-    expect(libraryError).toContain("SQL statement could not be parsed");
-    expect(libraryError).not.toContain(reason);
-    expect(cli.code).toBe(1);
+      expect(firefoxError).toContain(reason);
+      expect(chromeError).toBe(firefoxError);
+      expect(libraryError).toContain(reason);
+      expect(mcpError).toContain(reason);
+      expect(cliError).toContain(reason);
+      expect(cli.code).toBe(1);
+      expect(cli.calls).toEqual([]);
+    }
     expect(firefox.calls).toEqual([]);
     expect(chrome.calls).toEqual([]);
     expect(library.calls).toEqual([]);
     expect(mcp.calls).toEqual([]);
-    expect(cli.calls).toEqual([]);
   });
 });
