@@ -113,11 +113,20 @@ describe("ksql_app_metadata MCP surface", () => {
       // 同じ枠を奪い合う。カタログ列挙は「一覧は完全で IFNULL のような他方言の
       // 関数は存在しない」と明示して捏造を防ぐ最も効いている部分なので削らない。
       const budget = measureInstructionsWordBudget(instructions ?? "");
-      // 実測値の exact 固定。意図しない増減を fail-loud に捕まえる。
+
+      // ここが本体。実測値の exact 固定で、意図しない増減を必ず捕まえる。
+      // B62 502→525・B67 529→541・B76 552 と単調増加してきたので、
+      // 「気づかないうちに膨らむ」ことの検知には実績がある。
       expect(budget).toEqual({ total: 548, catalog: 258, prose: 290 });
-      // 抑制対象は散文。超えたら意味を削らず既存の重複文を圧縮する。
+
+      // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
+      // "Optional instructions for the client" と書くだけでサイズ規定を持たず、
+      // SDK も z.string().optional() で長さ制約がない。実コストも毎セッション
+      // 約 1,000 トークンで、上限まで使っても増分は数百トークンにとどまる。
+      // したがってこれは「守るべき制約」ではなく
+      // 「超えたら妥当性を再検討するトリガー」である。超過時に機械的に圧縮せず、
+      // まず上限そのものが妥当かを問い直すこと。
       expect(budget.prose).toBeLessThanOrEqual(320);
-      // カタログは機能追加で増えて当然。別枠にしつつ青天井は防ぐ。
       expect(budget.catalog).toBeLessThanOrEqual(420);
       expect(budget.total).toBeLessThanOrEqual(700);
       expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);

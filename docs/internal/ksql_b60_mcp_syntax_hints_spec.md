@@ -110,3 +110,9 @@ families or clause orders.
 - R1-Q1: **専用 module `statementSyntaxCatalog.ts` から生成**（codex 推奨採用）。
 - R1-Q2: **`ksql_query` は read-only 構文（VALIDATE ONLY / VALIDATE）のみ**（codex 推奨採用）。
 - R1-Q3: template トークン⇔example の機械照合は v1 見送り。ただし **family 全数 guard（型レベル）と expectedTypes は v1 必須**（codex 指摘採用＝completeness 宣言の根拠）。
+
+
+> **【2026-07-27 追記】本書が定めた「語数目安 ≤500・550 超は再圧縮」には根拠の記録が無い。**
+> [B81 §7](ksql_b81_mcp_instructions_word_budget_issue.md) の調査で、MCP 仕様にも SDK にも
+> instructions のサイズ規定が無いこと、実コストが毎セッション約 1,000 トークンで
+> 無視できる水準であることを確認した。上限は**守るべき制約ではなく、変化を検知するトリガー**として扱う。
