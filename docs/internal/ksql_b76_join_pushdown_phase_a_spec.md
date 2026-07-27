@@ -693,3 +693,47 @@ INNER ではなく LEFT/RIGHT である**ことが判明し、現行実装は危
 を `const fetchClient = client` へ戻し、EXPLAIN の
 `search abort: fail-closed` 行を削除した。
 Step 4 のテストは「JOIN plan の有無で挙動を変えず既存どおり警告を返す」ことを固定する形へ書き換えた。
+
+
+## 17. 【2026-07-27】4面 parity 条件の緩和（engine ライブラリの reason 平坦化）
+
+Step 5 着手時に codex が、**engine ライブラリだけ拒否 reason が一致しない**ことを検出して停止した。
+指摘は正しい。
+
+### 17.1 原因（B76 由来ではない）
+
+`src/engine-library/statementGuard.ts` の `parseSingleStatement()` は、
+`parseSqlStatement()` が投げた例外を正規化し、**`PARSE_ERROR` 以外は汎用 parse error へ置き換える**。
+
+```ts
+const normalized = normalizeEngineError(error);
+if (normalized.code === "PARSE_ERROR") throw normalized;
+throw parseError("SQL statement could not be parsed", error);   // ← reason が潰れる
+```
+
+`KlikeValidationError` は `name = "ArgumentError"` なので `PARSE_ERROR` にならず、
+**「SQL statement could not be parsed」という誤導的なメッセージ**になる。
+実際には**構文としては正しく parse できており**、意味的な制約で拒否されている。
+
+**B66（engine ライブラリ）以来の既存欠陥**であり、B76 の変更が原因ではない。
+B76 の parity テストを書いて初めて露出した。
+
+### 17.2 決定＝parity 条件を緩和し、修正は B73 へ
+
+engine ライブラリのエラー契約を B76 の範囲で変えるのは適切でない
+（ライブラリ利用者に見えるエラー出力の変更であり、**B73「エンジンエラーの構造化情報公開」の領域**）。
+
+したがって §11 の 4面 parity 条件を次のとおり緩和する。
+
+- **拒否そのものが4面で起きること**（records API 0 を含む）は必須
+- **reason 文字列の完全一致は engine ライブラリを除く3面で要求する**。
+  ライブラリは reason を平坦化するため、**「拒否される」ことだけを固定する**
+- **EXPLAIN の APP 表記差**（CLI/MCP は `APP730@test`、plugin/engine は `APP730`）は
+  profile 表記を正規化して比較する
+
+### 17.3 B73 への申し送り
+
+本件を **B73 の具体的インスタンス**として記録した。
+「message 文字列に埋め込まれた情報を構造化して公開する」だけでなく、
+**engine ライブラリが具体的な reason を汎用エラーへ平坦化してしまう**問題も
+B73 のスコープに含まれる。

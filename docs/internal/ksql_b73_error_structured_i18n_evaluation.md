@@ -53,3 +53,39 @@ class KsqlEngineError extends Error {
 - Pro の実需（どの情報が実際に必要か: 位置・トークンだけで足りるか、全エラーの多言語化が要るか）を確認。
 - Phase A だけでも Pro 側の「code に加えて位置・トークンを機械的に扱う」要件は満たせる可能性が高い → **Phase A 先行を推奨**。
 - 方向確定後に Phase1 仕様 R1 を起草。
+
+
+## 追記（2026-07-27）— engine ライブラリの reason 平坦化
+
+B76 Phase A Step 5 の 4面 parity テスト作成時に、**engine ライブラリだけ具体的な reason を
+失う**ことが判明した。B73 の具体的インスタンスとして記録する。
+
+### 事象
+
+`src/engine-library/statementGuard.ts` の `parseSingleStatement()` は、
+`parseSqlStatement()` の例外を正規化し **`PARSE_ERROR` 以外を汎用 parse error へ置き換える**。
+
+```ts
+const normalized = normalizeEngineError(error);
+if (normalized.code === "PARSE_ERROR") throw normalized;
+throw parseError("SQL statement could not be parsed", error);
+```
+
+`KlikeValidationError`（`name = "ArgumentError"`）は `PARSE_ERROR` にならないため、
+**「SQL statement could not be parsed」という誤導的メッセージ**になる。
+実際には**構文としては正しく parse できており**、意味的な制約で拒否されている。
+
+### なぜ B73 の課題か
+
+B73 は「message 文字列に埋め込まれた情報の構造化」を主眼にしていたが、
+**そもそも面によっては情報が失われている**という、より根本的な問題がここにある。
+構造化以前に、**エラーの同一性が保たれていない**。
+
+### 着手時の論点
+
+- `normalizeEngineError` が保持すべきエラー種別の範囲（`ArgumentError` 系を通すか）
+- 汎用化していた理由（内部エラーの漏洩防止か、単なる簡略化か）の確認
+- ライブラリ利用者に見えるエラー出力の変更になるため、**非破壊で行えるか**の判断
+- 4面で**同じ拒否には同じ reason** を返すという不変条件を置けるか
+
+**B76 Phase A では parity 条件を緩和して回避した**（B76 spec §17）。
