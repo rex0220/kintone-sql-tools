@@ -4,7 +4,8 @@ import {
   type ReadonlyKintoneClient,
   type ReadonlyKintoneRecord,
 } from "../index";
-import { SearchAbortedError } from "../../execute";
+import { FetchAllLimitError } from "../../api/fetchAll";
+import { AssertError, SearchAbortedError } from "../../execute";
 
 const field = (value: unknown) => ({ value });
 
@@ -110,7 +111,6 @@ test("runBatch reuses QueryResult for temp-table SELECT and VALIDATE results", a
   expect(result).toMatchObject({
     type: "batch",
     batch: true,
-    ok: true,
     statementCount: 3,
     warnings: [],
     statements: [
@@ -291,7 +291,6 @@ test("SET / DECLARE / ASSERT を read-only バッチで実行し variables は D
     }
   );
 
-  expect(result.ok).toBe(true);
   expect(result.statements.map((statement) => statement.status))
     .toEqual(["success", "success", "success", "success", "success"]);
   expect(result.results).toHaveLength(1);
@@ -315,16 +314,27 @@ test.each([
   ["中間", "SELECT 1 AS one; ASSERT 1 = 2; SELECT 2 AS two", ["success", "error", "skipped"]],
   ["末尾", "SELECT 1 AS one; SELECT 2 AS two; ASSERT 1 = 2", ["success", "success", "error"]],
 ] as const)(
-  "ASSERT 失敗はどの位置でもその文でバッチを停止する: %s",
-  async (_label, sql, statuses) => {
+  "ASSERT 失敗はどの位置でも throw し、成功済み文を含む部分結果を公開しない: %s",
+  async (_label, sql, _statuses) => {
     const tracked = trackedClient();
 
-    const result = await runBatch(sql, { client: tracked.client });
+    let failure: unknown;
+    try {
+      await runBatch(sql, { client: tracked.client });
+    } catch (error) {
+      failure = error;
+    }
 
-    expect(result.ok).toBe(false);
-    expect(result.statements.map((statement) => statement.status)).toEqual(statuses);
-    const failed = result.statements.find((statement) => statement.status === "error");
-    expect(failed?.error?.code).toBe("AssertError");
+    expect(failure).toBeInstanceOf(KsqlEngineError);
+    expect(failure).toMatchObject({
+      code: "EXECUTION_ERROR",
+      cause: expect.any(AssertError),
+      statementIndex: _label === "先頭" ? 0 : _label === "中間" ? 1 : 2,
+      statementType: "ASSERT",
+    });
+    expect(failure).not.toHaveProperty("rows");
+    expect(failure).not.toHaveProperty("results");
+    expect(failure).not.toHaveProperty("statements");
     expectNoApiCalls(tracked);
   }
 );
@@ -346,8 +356,8 @@ test.each([
     ["success", "success", "error"],
   ],
 ] as const)(
-  "tempTableMaxRows 超過は truncate 指定でもどの位置でもその文で停止する: %s",
-  async (_label, sql, statuses) => {
+  "tempTableMaxRows 超過は truncate 指定でもどの位置でも throw し、部分結果を公開しない: %s",
+  async (_label, sql, _statuses) => {
     const getRecords = jest.fn(async () => ({
       records: [
         { $id: field("1"), code: field("A") },
@@ -356,20 +366,61 @@ test.each([
     }));
     const tracked = trackedClient({ getRecords });
 
-    const result = await runBatch(sql, {
-      client: tracked.client,
-      tempTableMaxRows: 1,
-      onLimitReached: "truncate",
-    });
+    let failure: unknown;
+    try {
+      await runBatch(sql, {
+        client: tracked.client,
+        tempTableMaxRows: 1,
+        onLimitReached: "truncate",
+      });
+    } catch (error) {
+      failure = error;
+    }
 
-    expect(result.ok).toBe(false);
-    expect(result.statements.map((statement) => statement.status)).toEqual(statuses);
-    const failed = result.statements.find((statement) => statement.status === "error");
-    expect(failed?.error).toBeDefined();
-    expect(failed?.error?.message).toMatch(/上限（1 件）を超えました|temp table #overflow exceeds max rows 1/);
+    expect(failure).toBeInstanceOf(KsqlEngineError);
+    expect(failure).toMatchObject({
+      code: "FETCH_LIMIT_EXCEEDED",
+      cause: expect.any(FetchAllLimitError),
+      statementIndex: _label === "先頭" ? 0 : _label === "中間" ? 1 : 2,
+      statementType: "CREATE_TEMP_TABLE",
+    });
+    expect(failure).not.toHaveProperty("rows");
+    expect(failure).not.toHaveProperty("results");
+    expect(failure).not.toHaveProperty("statements");
     for (const api of tracked.mutationApis) expect(api).not.toHaveBeenCalled();
   }
 );
+
+test("文別クライアントエラーは code/cause identity と文診断だけを公開する", async () => {
+  const cause = { code: "GAIA_TM01", message: "request timed out", status: 503 };
+  const tracked = trackedClient({
+    getRecords: jest.fn(async () => {
+      throw cause;
+    }),
+  });
+
+  let failure: unknown;
+  try {
+    await runBatch(
+      "SELECT 1 AS before; SELECT code FROM APP6801; SELECT 2 AS after",
+      { client: tracked.client }
+    );
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(KsqlEngineError);
+  expect(failure).toMatchObject({
+    code: "CLIENT_ERROR",
+    cause,
+    statementIndex: 1,
+    statementType: "SELECT",
+  });
+  expect((failure as KsqlEngineError).cause).toBe(cause);
+  expect(failure).not.toHaveProperty("rows");
+  expect(failure).not.toHaveProperty("results");
+  expect(failure).not.toHaveProperty("statements");
+});
 
 test("一時テーブルは同時 16 表までで、DROP により空いた枠を再利用できる", async () => {
   const tracked = trackedClient();
@@ -382,7 +433,6 @@ test("一時テーブルは同時 16 表までで、DROP により空いた枠�
     [...creates, "DROP TEMP TABLE #t0", "CREATE TEMP TABLE #t16 AS SELECT 16 AS value"].join("; "),
     { client: tracked.client }
   );
-  expect(reusable.ok).toBe(true);
   expect(reusable.statementCount).toBe(18);
   expectNoApiCalls(tracked);
 

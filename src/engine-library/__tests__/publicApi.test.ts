@@ -106,7 +106,6 @@ test("public DTO signatures are usable without importing engine internals", () =
   const batchResult: BatchResult = {
     type: "batch",
     batch: true,
-    ok: true,
     statementCount: 1,
     statements: [batchStatement],
     results: [batchItem],

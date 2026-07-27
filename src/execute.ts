@@ -1321,6 +1321,8 @@ export interface BatchExecuteOptions extends ExecuteOptions {
 export interface BatchStatementError {
   code: string;
   message: string;
+  /** Original statement failure. Non-enumerable so envelope serialization stays unchanged. */
+  readonly cause?: unknown;
   /** Already committed prefix of a non-transactional APPLY statement. */
   partialSuccess?: ApplyWriteFailureDetail;
 }
@@ -1857,14 +1859,13 @@ async function runWithDeadline<T>(
  * reject するため、オブジェクト形式も解釈する（String(e) だと "[object Object]" になる）
  */
 function toBatchStatementError(e: unknown): BatchStatementError {
+  let error: BatchStatementError;
   if (e instanceof ApplyWritePartialFailureError) {
-    return { code: e.name, message: e.message, partialSuccess: e.partialSuccess };
-  }
-  if (e instanceof Error) {
+    error = { code: e.name, message: e.message, partialSuccess: e.partialSuccess };
+  } else if (e instanceof Error) {
     const name = e.name !== "Error" ? e.name : null;
-    return { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
-  }
-  if (e !== null && typeof e === "object") {
+    error = { code: name ?? codeFromMessagePrefix(e.message), message: e.message };
+  } else if (e !== null && typeof e === "object") {
     const obj = e as { message?: unknown; code?: unknown };
     const message =
       typeof obj.message === "string" && obj.message.length > 0
@@ -1874,10 +1875,18 @@ function toBatchStatementError(e: unknown): BatchStatementError {
       typeof obj.code === "string" && obj.code.length > 0
         ? obj.code
         : codeFromMessagePrefix(message);
-    return { code, message };
+    error = { code, message };
+  } else {
+    const message = String(e);
+    error = { code: codeFromMessagePrefix(message), message };
   }
-  const message = String(e);
-  return { code: codeFromMessagePrefix(message), message };
+  Object.defineProperty(error, "cause", {
+    value: e,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return error;
 }
 
 /** message の "XxxError:" 接頭辞をコードとして抽出する（なければ "Error"） */

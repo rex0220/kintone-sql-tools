@@ -158,7 +158,6 @@ export interface BatchStatementInfo {
 export interface BatchResult {
   readonly type: "batch";
   readonly batch: true;
-  readonly ok: boolean;
   readonly statementCount: number;
   readonly statements: readonly BatchStatementInfo[];
   /** 各要素の metrics は文別計測ではなく、同一のバッチ全体集計値。 */

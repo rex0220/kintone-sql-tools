@@ -46,6 +46,10 @@ const batch: Promise<BatchResult> = runBatch(
   "SELECT 'ok' AS result; SELECT 'done' AS result",
   batchOptions
 );
+batch.then((result) => {
+  // @ts-expect-error A failed batch throws, so the successful DTO has no ok flag.
+  void result.ok;
+});
 const batchItem: BatchResultItem | undefined = undefined;
 const batchStatement: BatchStatementInfo | undefined = undefined;
 const column: QueryColumn = {

@@ -449,3 +449,44 @@ B79 ではライブラリ面だけ `SEARCH_ABORTED` を hard error に保つ理�
 
 `npm test` 185 suites / 4,807 tests ＋ CLI 26 green、snapshot 22 不変、
 `engine:bundle-guard` 3 形 `forbidden=0`、`engine:declaration-smoke` green。
+
+### 【Step 3 追補・2026-07-27】案 A（失敗時は throw）を実装・完了
+
+オーナー決定は **案 A**。文が1つでも失敗したら throw する契約にした。
+
+#### 実装
+
+- 文の失敗をすべて `KsqlEngineError` として throw。**元の `code` と `cause` identity を保つ**
+- エラーに **`statementIndex`（0-based）/ `statementType`** を載せる。**rows は載せない**
+- **`ok` フィールドを公開型から削除**。throw する契約では常に `true` にしかならず、
+  呼び出し側に**決して発火しない `if (r.ok)`** を書かせるため
+- `continueOnError` 相当は公開しない（throw 契約と矛盾する）
+
+#### 共有エンジンへの最小変更（`src/execute.ts`）
+
+`executeBatch` は文別エラーを `{ code, message }` へ平坦化しており**元例外が失われていた**ため、
+`toBatchStatementError` に **non-enumerable な `cause`** を追加した。
+
+`enumerable: false` なので **envelope の JSON 出力は不変**で、CLI / MCP に影響しない。
+snapshot 22 件が不変であることが裏づけ。
+
+#### 独立検証
+
+| 形 | throw | code | index / type | 部分結果の漏洩 |
+|---|---|---|---|---|
+| `ASSERT` 先頭 / 中間 / 末尾 | ✅ | `EXECUTION_ERROR` | 0 / 1 / 2・`ASSERT` | **なし** |
+| 上限超過 先頭 / 末尾 | ✅ | `FETCH_LIMIT_EXCEEDED` | 0 / 1・`CREATE_TEMP_TABLE` | **なし** |
+| 成功時 | — | — | — | キーは `batch,results,statementCount,statements,type,warnings`＝**`ok` なし** |
+
+**エラーオブジェクトに `rows` / `results` / `statements` / `columns` が無い**ことを実測した。
+これが無いと `catch` した側が「途中まで取れたから使おう」と書けてしまい、本改修の意味が消える。
+
+`code` が保たれている点は **Pro の要件**でもある（返信 §6「エラー種別を `code` で判定している。
+今後も既存 `code` の値と意味を変えないでほしい」）。
+
+#### ゲート
+
+`npm test` 185 suites / 4,808 tests ＋ CLI 26 green、`engine:bundle-guard` 3 形 `forbidden=0`。
+
+> 既存テスト1件が落ちたのは `execute.ts` の行追加による **B65 の行番号 allowlist のずれ**で、
+> 実装の回帰ではない。**行番号を固定するテストは、無関係な変更で落ちる**という運用コストがある。

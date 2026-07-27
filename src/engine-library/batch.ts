@@ -2,7 +2,11 @@ import {
   executeBatch,
   type BatchStatementResult,
 } from "../execute";
-import { normalizeEngineError, searchAborted } from "./errors";
+import {
+  KsqlEngineError,
+  normalizeEngineError,
+  withStatementDiagnostic,
+} from "./errors";
 import { withCursorScope } from "./cursorScope";
 import { validateBatchOptions } from "./options";
 import { projectReadonlyClient } from "./readonlyClient";
@@ -16,9 +20,15 @@ import type {
   RunBatchOptions,
 } from "./publicTypes";
 
-function isSearchAbortedStatement(statement: BatchStatementResult): boolean {
-  return statement.status === "error"
-    && statement.error?.message.startsWith("SearchAbortedError:") === true;
+function toStatementFailure(statement: BatchStatementResult): KsqlEngineError {
+  const error = statement.error;
+  const normalized = error?.cause !== undefined
+    ? normalizeEngineError(error.cause)
+    : new KsqlEngineError(
+      "EXECUTION_ERROR",
+      error?.message ?? `Statement ${statement.index} failed`
+    );
+  return withStatementDiagnostic(normalized, statement.index, statement.type);
 }
 
 export async function runBatch(
@@ -37,8 +47,11 @@ export async function runBatch(
       )
     );
 
-    if (batchResult.statements.some(isSearchAbortedStatement)) {
-      throw searchAborted();
+    const failedStatement = batchResult.statements.find(
+      (statement) => statement.status === "error"
+    );
+    if (failedStatement !== undefined) {
+      throw toStatementFailure(failedStatement);
     }
 
     const results: QueryResult[] = [];
@@ -78,7 +91,6 @@ export async function runBatch(
     return {
       type: "batch",
       batch: true,
-      ok: batchResult.ok,
       statementCount: batchResult.statementCount,
       statements,
       results,

@@ -12,6 +12,10 @@ export class KsqlEngineError extends Error {
     | "CLIENT_ERROR"
     | "EXECUTION_ERROR";
   readonly cause?: unknown;
+  /** Zero-based index of the failed statement when raised by runBatch. */
+  readonly statementIndex?: number;
+  /** Parser statement type of the failed statement when raised by runBatch. */
+  readonly statementType?: string;
 
   constructor(code: KsqlEngineError["code"], message: string, cause?: unknown) {
     super(message);
@@ -20,6 +24,28 @@ export class KsqlEngineError extends Error {
     if (cause !== undefined) this.cause = cause;
     Object.setPrototypeOf(this, new.target.prototype);
   }
+}
+
+export function withStatementDiagnostic(
+  error: KsqlEngineError,
+  statementIndex: number,
+  statementType: string
+): KsqlEngineError {
+  Object.defineProperties(error, {
+    statementIndex: {
+      value: statementIndex,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    },
+    statementType: {
+      value: statementType,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    },
+  });
+  return error;
 }
 
 export function readOnlyViolation(message: string): KsqlEngineError {
