@@ -2,6 +2,17 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 次回リリース（バージョン未定）
+
+### 機能追加（B76 Phase B・JOIN の server-only 関数 第5許可形）
+
+- **alias 付き物理 APP だけを入力にする `INNER JOIN` で、相対日付12関数と `TODAY()` / `NOW()` / `LOGINUSER()` を kintone server へ exact に押し下げられるようにした。** 関数の client 評価は0回。
+- **第5-W:** `WHERE` 全体が単一 alias に属する whole-WHERE exact。同一 alias の `OR` / `NOT` と、whole-WHERE exact な `KLIKE` 共存も使用できる。`WHERE` 全体を対象 APP へ一度だけ送り、client residual は持たない。
+- **第5-L:** AND スパイン上の exact 関数 leaf を alias ごとに採用し、複数 alias に関数が分散していても各 APP へ押し下げる。関数を含まない残余だけを client 評価する。
+- `LOGINUSER()` は `CREATOR` / `MODIFIER` / `USER_SELECT` の singleton `in` / `not in` に限る。`GROUP_SELECT` は kintone 公式に対応するクエリ関数がないため使用できない。
+- **引き続き使用できない JOIN:** `LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、サブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルを JOIN 入力にする形。
+- 拒否形の `EXPLAIN` は throw せず、`plan status: rejected`、対象 alias / field、reason、`client evaluation: forbidden`、実行 API なしを表示する。一部の KLIKE 混在形は、実際の阻害要因である関数側の `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`（legacy 3関数では `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`）へ reason が変わる。
+
 ## v3.27.0（2026-07-27）
 
 ### ⚠ 破壊的変更（B79 外部結合の検索打ち切りを fail-closed 化）
@@ -22,7 +33,7 @@
 
 - **INNER JOIN の `WHERE` から、単一 alias に属し、型と演算子の対応が確認できる述語を各 APP の records API query へ押し下げるようにした。** DATE / TIME / DATETIME 系と単一行文字列の `=`、NUMBER・`$id`、実在する選択肢の `IN` / `NOT IN`、安全な同一 alias `OR` などが対象になる。
 - **これは性能改善であり、クエリ結果の挙動変更ではない。** 押し下げ後も元の `WHERE` を client で再評価するため結果は不変で、records API から取得する候補件数だけを減らす。`EXPLAIN` は applied / candidate、`relation: exact` / `relation: superset`、非採用 reason を表示する。
-- LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、`KLIKE` を含む `OR`、型不明、非実在の選択肢、ユーザー選択・組織選択・グループ選択フィールドは押し下げない。相対日付関数および `LOGINUSER()` などの kintone query 関数は JOIN では引き続き使用できない。
+- v3.26.0 時点では LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、`KLIKE` を含む `OR`、型不明、非実在の選択肢、ユーザー選択・組織選択・グループ選択フィールドは押し下げない。相対日付関数および `LOGINUSER()` などの kintone query 関数も JOIN では使用できなかった（次回リリースの B76 Phase B で上記第5許可形を追加）。
 - **`DATE_FORMAT(...)` など関数付き述語は引き続き押し下げない。** FULL_SCAN のすべての `WHERE` が最適化されるわけではない。
 
 ## v3.25.0（2026-07-27）
@@ -50,7 +61,7 @@
 ### 機能追加（B75 相対日付を CTE・一時テーブルでも使えるように）
 
 - **その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合、実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `... AS WITH ...` の source、単一 CTE のインライン展開でも相対日付関数を使えるようにした**。集計・SIMPLE の両経路で相対日付はサーバーへそのまま渡し、client 側では評価しない。
-- JOIN、サブテーブル、入れ子 SELECT、実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合、および `WHERE` 全体が exact にならない形は引き続き取得前に fail-closed する（トップレベルの `UNION` は従来どおり枝ごとに判定する）。`KORDER BY` はトップレベル SELECT の whole-WHERE exact に限り native / Cursor の両経路で使用でき、prefilter＋残余や FULL_SCAN_EXACT では使えない。
+- v3.25.0 時点では JOIN、サブテーブル、入れ子 SELECT、実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合、および `WHERE` 全体が exact にならない形は取得前に fail-closed する（トップレベルの `UNION` は従来どおり枝ごとに判定する）。`KORDER BY` はトップレベル SELECT の whole-WHERE exact に限り native / Cursor の両経路で使用でき、prefilter＋残余や FULL_SCAN_EXACT では使えない。
 - DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は従来どおり whole-WHERE exact のみ可で、prefilter＋client 残余は使えない。
 - `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1` のような prefilter＋client 残余は、トップレベルの単一物理アプリ SELECT では使える一方、CTE 本体・`WITH` の最終 SELECT・一時テーブル source では引き続き使えない。該当する場合は CTE／一時テーブルへ切り出さずトップレベルで実行する。
 - 一時テーブルの実体化上限は通常の `maxRecords` ではなく専用の `tempTableMaxRows` を使い、超過時は `onLimit` の設定にかかわらず、日付リテラル／相対日付とも同じエラーになる。
@@ -69,7 +80,7 @@
 - 従来は「押し下げ不能な述語を `AND` で足すと通る（prefilter＋残余の形になるため）が、純粋に exact な条件だけだと拒否される」という逆転が起きていた。本修正はその逆転を解消する。**`WHERE` 全体を一度だけサーバーへ送り、取得後の client 側 WHERE 評価は行わない**（相対日付の client 評価は従来どおり 0 回）。
 - `ksql_explain` はこの形で `relative date evaluation: kintone server whole-WHERE exact` / `client residual: (none)` / `relative date client evaluations: 0` と押し下げ後のクエリを表示する。Phase1（SIMPLE 全体 exact）と Phase2 A（prefilter＋残余）の表示は不変。
 - `OR` を含む条件も、`WHERE` 全体が押し下げ可能であれば同様に使用できる。
-- 引き続きレコード取得前に fail-closed するもの: JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。`KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT は whole-WHERE exact に限り使用でき、FULL_SCAN_EXACT では使えない。
+- v3.24.0 時点で引き続きレコード取得前に fail-closed するもの: JOIN、`VALIDATE`、サブテーブル、一時テーブル・実体化 CTE・派生表、および `OR` / `NOT` に絡んで `WHERE` 全体が exact にならない場合。`KORDER BY`（native / Cursor）、`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source SELECT は whole-WHERE exact に限り使用でき、FULL_SCAN_EXACT では使えない。
 - 新たに許可された形の `maxRecords` 超過時の扱いは、**同じクエリをリテラル日付で書いた場合と同一**（`onLimit=truncate` を指定していれば truncate、既定の `onLimit=error` ならエラー）。相対日付を使うことで追加の制約は課さない。一方、kintone の検索打ち切り（10 万件）は利用者が選んだ設定ではないため、従来どおり fail-closed で部分結果を返さない。
 - SemVer=minor（純加法。従来拒否されていたクエリが成功するようになるだけで、既存の成功クエリの結果は不変）。
 
@@ -104,9 +115,9 @@
 - v3.20.0 では上記のような「相対日付 exact ＋押し下げ不能残余」の AND は文全体を fail-closed していた。Phase2 A はこれを prefilter ＋残余で共存させる。相対日付の値・比較は依然すべて kintone サーバが決定し、**相対日付の client 評価は 0 回**（planner allowlist ＋ evalWhere backstop の二段で保証）。
 - `BETWEEN` 展開の各境界・複数の相対日付 leaf・`KLIKE` や押し下げ可能な安全リーフとの併用も同じ規則で prefilter に載る。KLIKE の object identity と `appliedKlikes` 契約は不変。
 - `ksql_explain` は Phase2 の計画で `where capability: SUPERSET_PREFILTER` / `server prefilter:` / `client residual:` / `relative date client evaluations: 0` / `kintone query:` を表示する。純 exact（残余なし）の相対日付は従来どおり `EXACT_PUSHDOWN` / `client evaluation: forbidden` を表示（表示 byte 不変）。
-- 次はレコード・Cursor・mutation API の前に fail-closed を維持する（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）: 相対日付が `OR` の枝・`NOT` 配下で whole-WHERE exact にならない形／prefilter＋残余または FULL_SCAN_EXACT の `KORDER BY`（native・Cursor）／同じく非 exact な `UPDATE` / `DELETE` の対象選択・**`INSERT` / `UPSERT ... SELECT` の DML source SELECT**／JOIN 後残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表。whole-WHERE exact な相対日付は従来どおり（KORDER / DML source を含め）許可され、非回帰。
+- v3.21.0 時点では次をレコード・Cursor・mutation API の前に fail-closed とした（reason `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）: 相対日付が `OR` の枝・`NOT` 配下で whole-WHERE exact にならない形／prefilter＋残余または FULL_SCAN_EXACT の `KORDER BY`（native・Cursor）／同じく非 exact な `UPDATE` / `DELETE` の対象選択・**`INSERT` / `UPSERT ... SELECT` の DML source SELECT**／JOIN 後残余／`VALIDATE`／サブテーブル／一時テーブル・実体化 CTE・派生表。whole-WHERE exact な相対日付は従来どおり（KORDER / DML source を含め）許可され、非回帰。
 - Node engine・CLI・MCP・プラグインで同一の受理判定と REST クエリ。`ksql_validate` は構文・引数のみ検査し、実行可否は `ksql_query` / `ksql_explain` / 実行時の schema-aware 判定で確定する。
-- Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は対象外。
+- v3.21.0 では Phase2 B（KORDER・DML・JOIN・VALIDATE・OR/NOT の相対日付・client 評価）は対象外。
 - SemVer=minor（純加法・既存 SQL / CLI / MCP / plugin の挙動不変）。
 
 ## v3.20.0（2026-07-24）
@@ -116,7 +127,7 @@
 - kintone のクエリ関数のうち相対日付12関数（`YESTERDAY` / `TOMORROW` / `FROM_TODAY(n, DAYS|WEEKS|MONTHS|YEARS)` / `THIS_WEEK` / `LAST_WEEK` / `NEXT_WEEK` / `THIS_MONTH` / `LAST_MONTH` / `NEXT_MONTH` / `THIS_YEAR` / `LAST_YEAR` / `NEXT_YEAR`）を `WHERE` で使えるようにした。例: `SELECT * FROM APP730 WHERE 作成日時 < FROM_TODAY(5, DAYS)`。
 - **方針＝押し下げネイティブ（server-only）**。関数を kintone REST クエリへそのまま出力し、リクエスト時刻・タイムゾーン・週境界・月末を kintone サーバが評価する。kSQL は日付へ解決しない。
 - 対象は日付系フィールド（`DATE` / `DATETIME` / 作成日時 / 更新日時）× 比較演算子（`=` `!=` `<` `<=` `>` `>=`）の `WHERE` 右辺と、`BETWEEN` の境界のみ。`IN` / `NOT IN`・非日付フィールド・関数左辺は不可。
-- **押し下げできない場合はレコード取得前に fail-closed**（client 評価にフォールバックしない）。FULL_SCAN・JOIN 残余・集約・window・DISTINCT・通常 `ORDER BY`・一時テーブル・実体化 CTE・`VALIDATE`・サブテーブル DML・`UPDATE FROM`・`APPLY`・`REORDER` で関数付き比較が残る場合は、records / Cursor / mutation を発行せずエラーにする。planner の allowlist と evalWhere の runtime backstop の二段で保証する。
+- v3.20.0 時点では、**押し下げできない場合はレコード取得前に fail-closed**（client 評価にフォールバックしない）。FULL_SCAN・JOIN 残余・集約・window・DISTINCT・通常 `ORDER BY`・一時テーブル・実体化 CTE・`VALIDATE`・サブテーブル DML・`UPDATE FROM`・`APPLY`・`REORDER` で関数付き比較が残る場合は、records / Cursor / mutation を発行せずエラーにする。planner の allowlist と evalWhere の runtime backstop の二段で保証する。
 - EXPLAIN はサーバ評価であることと押し下げ後の kintone クエリを表示し、`KORDER BY`（native / Cursor）でも同じ関数表現で押し下げる。既存の `TODAY()` / `NOW()` / `LOGINUSER()` は挙動・出力とも不変。
 - Node engine ライブラリ・CLI・MCP・プラグインで同一の受理判定と REST クエリ。`ksql_validate` は構文・引数のみ検査し、実行可否は `ksql_query` / `ksql_explain` の schema-aware 判定で確定する。
 - Phase2 対象外: `PRIMARY_ORGANIZATION()` と相対日付関数の client 評価（FULL_SCAN 対応）。

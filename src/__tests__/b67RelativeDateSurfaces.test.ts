@@ -327,6 +327,22 @@ describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
       "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
         + "WHERE a.日付 = THIS_MONTH() AND b.作成者 IN (LOGINUSER())",
     ],
+    [
+      "B76 第5-W same-alias OR",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() OR a.日付 = LAST_MONTH()",
+    ],
+    [
+      "B76 第5-W KLIKE coexistence",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() OR a.件名 KLIKE 'urgent'",
+    ],
+    [
+      "B76 第5-L multiple aliases and residual",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() AND b.作成者 IN (LOGINUSER()) "
+        + "AND LENGTH(a.件名) > 1",
+    ],
   ])("%s は accept/query/EXPLAIN が4面で一致する", async (_label, sql) => {
     // plugin は desktop.ts から同じ execute を直接 import するため、ここでは共有 engine 呼出しを
     // plugin surface の実行プロキシとして使う。共有 import 自体は上の静的 parity test で固定する。
@@ -350,7 +366,10 @@ describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
     expect(cli.code).toBe(0);
     expect(cliExplain.code).toBe(0);
     expect(plugin.queries).toHaveLength(
-      _label === "B76 JOIN mixed function sets" ? 2 : 1
+      _label === "B76 JOIN mixed function sets"
+        || _label === "B76 第5-L multiple aliases and residual"
+        ? 2
+        : 1
     );
     expect(library.queries).toEqual(plugin.queries);
     expect(mcp.queries).toEqual(plugin.queries);
@@ -388,6 +407,19 @@ describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
         + "WHERE b.グループ IN (LOGINUSER())",
       "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
     ],
+    [
+      "B76 cross-alias OR",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() OR b.作成者 IN (LOGINUSER())",
+      "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN",
+    ],
+    [
+      "B76 non-exact KLIKE-containing OR",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() "
+        + "OR (a.件名 KLIKE 'urgent' AND LENGTH(a.件名) > 1)",
+      "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN",
+    ],
   ])("%s は reason と records API 0 が4面で一致する", async (
     _label,
     sql,
@@ -413,6 +445,42 @@ describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
     expect(library.queries).toEqual([]);
     expect(mcp.queries).toEqual([]);
     expect(cliExplain.queries).toEqual([]);
+  });
+
+  test.each([
+    [
+      "cross-alias OR",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() OR b.作成者 IN (LOGINUSER())",
+    ],
+    [
+      "non-exact KLIKE-containing OR",
+      "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+        + "WHERE a.日付 = THIS_MONTH() "
+        + "OR (a.件名 KLIKE 'urgent' AND LENGTH(a.件名) > 1)",
+    ],
+  ])("B76 %s は実行時 reason と records API 0 が4面で一致する", async (_label, sql) => {
+    const reason = "WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN";
+    const plugin = makeB72Client();
+    const library = makeB72Client();
+    const mcp = makeB72Client();
+
+    const pluginError = await execute(sql, plugin.client)
+      .then(() => "", (error: unknown) => String(error));
+    const libraryError = await runQuery(sql, { client: library.client })
+      .then(() => "", (error: unknown) => String(error));
+    const mcpError = await mcpTools(mcp.client).query({ sql })
+      .then(() => "", (error: unknown) => String(error));
+    const cli = await captureCli(configPath, sql, false);
+
+    for (const text of [pluginError, libraryError, mcpError, `${cli.stdout}\n${cli.stderr}`]) {
+      expect(text).toContain(reason);
+    }
+    expect(cli.code).toBe(1);
+    expect(plugin.queries).toEqual([]);
+    expect(library.queries).toEqual([]);
+    expect(mcp.queries).toEqual([]);
+    expect(cli.queries).toEqual([]);
   });
 
   test("CREATOR × = は実行 error と records API 0 が4面で一致する", async () => {

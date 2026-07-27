@@ -841,3 +841,48 @@ GROUP_SELECT × LOGINUSER では `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED`
 Phase B の plan が存在することを理由に INNER JOIN を新たに fail-closed にしていないことを、
 **plan あり / plan なしの INNER JOIN で searchAborted 時の結果が一致する**ことで確認した。
 LEFT JOIN の既存挙動も不変。Phase A §16 で撤回した非対称を再導入していない。
+
+
+## 【Step 5 レビュー・2026-07-27】公開面の掃討結果とリリース時の残作業
+
+### docs が新たに断言した形を実挙動で裏取りした
+
+言語リファレンスの記述は「書いたが実際は違う」が最も危険なので、
+**新たに断言した拒否形を実行して確認**した。いずれも拒否・records API 0 件である。
+
+- `KORDER BY` 併用
+- JOIN 入力が CTE
+- JOIN 入力がサブテーブル
+
+許可形（alias 付き物理 APP だけの INNER JOIN ＋ 第5-W）が通ることも併せて確認した。
+
+### 公開面の掃討
+
+`JOIN` × `fail-closed` / `使用できません` / `不可` を横断検索し、
+**無限定の「JOIN では使えない」記述が 0 件**であることを確認した。
+残っているのは `v3.20.0 時点` 〜 `v3.26.0 時点` と版を明記した履歴のみである。
+
+KLIKE 節（§ FULL_SCAN 制約）にあった「OR 配下は常に不可」も、
+第5-W の whole-exact 例外を追記して矛盾を解消済み。
+
+### リリース時の残作業（B70 の版同期と同じ性質）
+
+`release/README.txt` の v3.26.0 節にあった
+「**次回リリース予定の** B76 Phase B で上記2形を追加」という前方参照は、
+Phase B が出た瞬間に誤りになるため、**版に依存しない表現へ修正済み**。
+
+リリース時には次を実施すること。
+
+1. owner の版判断を受けて version bump（`npm run version:check` が 8 箇所を検証）
+2. CHANGELOG の「次回リリース（バージョン未定）」節を実際の版へ差し替え
+3. `release/README.txt` に新しい current release 節を追加
+4. `docs/internal/evidence/b76_phase_b_browser_smoke_steps.md` の実機 smoke を
+   Firefox / Chrome の両方で実施し、**結果を追記してから**リリースする
+   （手順書は作成済み・未実施を PASS として記録しないこと）
+
+### 注意: MCP instructions の語数上限が逼迫している
+
+Phase B の docs ポインタ追加で MCP instructions が 552 語となり、
+サイズガード（上限 550 語）に一度失敗した。短縮して **548 語**で green だが、
+**余裕が 2 語しかない**。次に MCP instructions へ追記する課題では、
+先に既存記述の圧縮が必要になる可能性が高い。

@@ -10,6 +10,23 @@ release 成果物:
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
+次回リリース予定（バージョン未定）: B76 Phase B（JOIN の server-only 関数・第5許可形）。
+- alias 付き物理 APP だけを入力にする INNER JOIN で、相対日付関数と
+  TODAY() / NOW() / LOGINUSER() を kintone server へ exact に押し下げられるようにします。
+- 第5-W: WHERE 全体が単一 alias に属する whole-WHERE exact。同一 alias の OR / NOT /
+  whole-exact な KLIKE 共存も使用できます。client residual はありません。
+- 第5-L: AND スパイン上の exact 関数 leaf を alias ごとに採用します。複数 alias に
+  関数が分散していても各 APP へ押し下げ、関数を含まない残余だけを client 評価します。
+- LOGINUSER() は作成者 / 更新者 / ユーザー選択の singleton in / not in だけです。
+  グループ選択には対応する kintone 公式クエリ関数がないため使用できません。
+- 引き続き使用できない JOIN: LEFT / RIGHT JOIN、cross-alias OR、関数を含む cross-table
+  述語、whole-WHERE exact でない KLIKE-containing OR、およびサブテーブル・入れ子 SELECT・
+  派生表・CTE・一時テーブルを JOIN 入力にする形。
+- 拒否形の EXPLAIN はエラー終了せず、plan status: rejected、reason、
+  client evaluation: forbidden、実行 API なしを表示します。一部の KLIKE 混在形は、
+  実際の阻害要因である関数側の WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+  （legacy 3関数では WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN）を表示します。
+
 本リリース (v3.27.0): B79+B80。
 - 注意: B79 は破壊的変更です。プラグイン / CLI / MCP で LEFT / RIGHT JOIN を含む
   クエリの検索が 10 万件で打ち切られた場合、従来の警告＋部分結果ではなく
@@ -33,7 +50,8 @@ release 成果物:
 - INNER JOIN で、型と演算子の対応が確認できる単一 alias の述語が対象です。
   LEFT / RIGHT JOIN、cross-alias OR、NOT、cross-table 述語、KLIKE を含む OR、
   DATE_FORMAT(...) など関数付き述語は押し下げません。
-- 相対日付関数と LOGINUSER() などの kintone query 関数は JOIN では引き続き使用できません。
+- v3.26.0 時点では、相対日付関数と LOGINUSER() などの kintone query 関数は
+  JOIN で使用できませんでした（B76 Phase B で第5-W / 第5-L を追加）。
 
 前リリース (v3.25.0): B75+B77+B78。
 - 注意: これは minor リリースですが破壊的変更を含み、^3 の利用者にも自動更新で届きます。
@@ -46,7 +64,8 @@ release 成果物:
     WHERE 作成者 = 'taro'
     WHERE 日付 = NOW()
     WHERE $id >= TODAY()
-  このほか、押し下げ不能な OR / NOT / JOIN / 入れ子 SELECT / 実体化文脈の UNION 枝にある
+  このほか、v3.25.0 時点では押し下げ不能だった OR / NOT / JOIN / 入れ子 SELECT /
+  実体化文脈の UNION 枝にある
   TODAY() / NOW() / LOGINUSER() も取得前エラーになります。
 - 移行方法: ユーザー系・複数選択系は in / not in を使う、WHERE 全体または関数 leaf を
   押し下げ可能な形にする、TODAY() / NOW() を固定の日付・日時リテラルへ置換する。
@@ -64,7 +83,8 @@ v3.24.0: 相対日付を集計クエリでも使えるように (B72)。
 - 従来は「押し下げ不能な述語を AND で足すと通るのに、純粋に exact な条件だけだと拒否される」
   逆転が起きていた。本修正でこれを解消。WHERE 全体を一度だけサーバーへ送り、取得後の
   クライアント側 WHERE 評価は行わない (相対日付のクライアント評価は従来どおり 0 回)。
-- 引き続き取得前に拒否: JOIN、VALIDATE、サブテーブル、一時テーブル・実体化 CTE・派生表、
+- v3.24.0 時点で引き続き取得前に拒否: JOIN、VALIDATE、サブテーブル、
+  一時テーブル・実体化 CTE・派生表、
   OR/NOT に絡んで WHERE 全体が exact にならない場合。KORDER BY と UPDATE/DELETE の対象選択、
   INSERT/UPSERT ... SELECT の source は whole-WHERE exact に限り使用でき、prefilter＋残余や
   FULL_SCAN_EXACT では使えません。
@@ -98,9 +118,9 @@ v3.21.0: 相対日付の prefilter ＋残余 client 評価 (B67 Phase2 A)。
 - v3.20.0 では文全体を fail-closed していたケース。EXPLAIN は where capability:
   SUPERSET_PREFILTER / server prefilter / client residual / relative date client
   evaluations: 0 を表示する。
-- OR/NOT 内で whole-WHERE exact にならない相対日付、prefilter＋残余または
+- v3.21.0 時点では、OR/NOT 内で whole-WHERE exact にならない相対日付、prefilter＋残余または
   FULL_SCAN_EXACT の KORDER BY・DML の対象選択・INSERT/UPSERT ... SELECT の source、
-  JOIN・VALIDATE・派生表は従来どおり fail-closed。whole-WHERE exact な相対日付は
+  JOIN・VALIDATE・派生表を fail-closed としていました。whole-WHERE exact な相対日付は
   KORDER / DML source を含め従来どおり許可。
 - 純加法的 minor。既存 SQL、plugin、CLI、MCP、MCPB の挙動は不変。
 

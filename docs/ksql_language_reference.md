@@ -15,7 +15,8 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 > `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で拒否します。
 >
 > 新たにエラーになる代表例は `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、
-> `WHERE $id >= TODAY()`、および押し下げ不能な `OR` / `NOT` / JOIN / 入れ子 SELECT /
+> `WHERE $id >= TODAY()`、および押し下げ不能な `OR` / `NOT` / JOIN（後述の INNER JOIN
+> 第5-W / 第5-L に該当しない形）/ 入れ子 SELECT /
 > 実体化文脈の `UNION` 枝にある `TODAY()` / `NOW()` / `LOGINUSER()` です。
 > ユーザー系・複数選択系は `in` / `not in` を使い、`WHERE` 全体または関数 leaf を
 > 押し下げ可能な形へ書き換えるか、`TODAY()` / `NOW()` を固定の日付・日時リテラルへ
@@ -705,7 +706,9 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 
 - 対象は単一の物理アプリに由来する `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
 - kintone クエリ関数を含む条件は、レコード取得前に REST query への押し下げ計画が確定できる場合だけ実行できます。関数そのものを client 評価する **client fallback はなく**、client 評価回数は常に 0 です。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
-- **kintone クエリ関数を使える SELECT の形は次の2つです**。
+- **kintone クエリ関数を使える SELECT の形は次の4つです**。3・4が INNER JOIN の
+  **第5許可形**です。いずれも関数 occurrence を kintone server へ exact に適用し、
+  client 側で関数を評価しません。
 
   1. **その SELECT の `WHERE` 全体を exact pushdown できる形**（v3.24.0 で `GROUP BY` 等、B75 で CTE・一時テーブル source に拡大）。複数条件・`OR`・`BETWEEN` を含んでいても、`WHERE` 全体が kintone クエリへ完全に変換できるなら使用できます。トップレベル SELECT に加え、**実体化 CTE の本体、`WITH` の最終 SELECT、`CREATE TEMP TABLE ... AS SELECT` / `CREATE TEMP TABLE ... AS WITH ...` の source、単一 CTE のインライン展開**でも使用できます。`GROUP BY` / `SELECT DISTINCT` / 集計関数 / ウィンドウ関数 / 通常の `ORDER BY` を含んでいても構いません。トップレベルの `KORDER BY` もこの whole-WHERE exact の形だけは native / Cursor とも使用できます（`WHERE` 全体をサーバーへ渡し、取得後の client 側 WHERE 評価は行いません）。
 
@@ -733,10 +736,48 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
      WHERE 日付 = TODAY() AND LENGTH(件名) > 1   -- 日付だけ server prefilter、LENGTH だけ client
      ```
 
+  3. **第5-W（INNER JOIN・single-alias whole-WHERE exact）**: 全 source が alias 付きの
+     物理 APP で、`WHERE` 全体が単一 alias に属し、kintone query へ exact に変換できる場合。
+     同じ alias 内の `OR` / `NOT` と、whole-WHERE exact な `KLIKE` 共存も使用できます。
+     `WHERE` 全体を対象 APP に一度だけ送り、client residual はありません。
+
+     ```sql
+     SELECT a.$id, a.日付
+     FROM APP100 a INNER JOIN APP200 b ON a.$id = b.$id
+     WHERE a.日付 = THIS_MONTH() OR a.日付 = LAST_MONTH()
+     ```
+
+  4. **第5-L（INNER JOIN・AND-spine exact leaf）**: `WHERE` の AND スパインにある
+     exact な関数 leaf を alias ごとに採用し、それぞれの APP へ押し下げます。
+     複数 alias に関数が分散していても使用でき、関数を含まない残余だけを client 評価します。
+     `LOGINUSER()` は `作成者` / `更新者` / ユーザー選択の singleton
+     `in (LOGINUSER())` / `not in (LOGINUSER())` に限ります。
+
+     ```sql
+     SELECT a.$id, a.日付, b.作成者
+     FROM APP100 a INNER JOIN APP200 b ON a.$id = b.$id
+     WHERE a.日付 = THIS_MONTH()
+       AND b.作成者 in (LOGINUSER())
+       AND LENGTH(a.件名) > 1
+     ```
+
 - 次の計画は、関数を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（legacy 3 関数は reason `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`、相対日付12関数は `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
 
   - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。**回避策**: 押し下げ可能な述語へ置換する（例 `都道府県 != ''`）か、上記2の形（相対日付 leaf と残余を `AND` で結ぶ）にします。
-  - JOIN／`VALIDATE`／サブテーブル／入れ子 SELECT（スカラーサブクエリ等）／派生表を入力とする計画。**実体化 CTE 本体・`WITH` の最終クエリ・一時テーブル source が `UNION` の場合**（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば使用できます）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、上記2の prefilter＋残余や FULL_SCAN_EXACT は使用できません。
+  - `LEFT` / `RIGHT JOIN`、cross-alias `OR`、cross-table 述語に関数を含む形、
+    whole-WHERE exact でない `KLIKE` を含む `OR`。一部の KLIKE 混在形は、関数側が
+    exact でないことを示す `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`
+    （legacy 3関数では `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`）で拒否します。
+  - サブテーブル・入れ子 SELECT（スカラーサブクエリ等）・派生表・CTE・一時テーブルを
+    JOIN 入力にする形、`VALIDATE`。`GROUP_SELECT in (LOGINUSER())` は kintone 公式に
+    対応するクエリ関数がないため `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED` です。
+    **実体化 CTE 本体・`WITH` の最終クエリ・一時テーブル source が `UNION` の場合**
+    も拒否します（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば
+    使用できます）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、
+    `INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、
+    上記2の prefilter＋残余や FULL_SCAN_EXACT は使用できません。
+- 拒否形の `EXPLAIN` は throw せず、`plan status: rejected`、対象 alias / field、
+  reason、`client evaluation: forbidden`、実行 API なしを表示します。
 - **CTE・一時テーブルに残る非対称**: 押し下げ不能な述語が `AND` で混ざる形（例 `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1`）は、トップレベルの単一物理アプリ SELECT では上記2の prefilter＋残余として使用できますが、**CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使用できません**。これらの実体化経路では、その SELECT の `WHERE` 全体が exact である必要があります。該当する場合は CTE や一時テーブルへ切り出さず、トップレベル SELECT として書いてください。
 - 一時テーブルの実体化行数には通常の `maxRecords` とは別に専用の `tempTableMaxRows`（既定 10,000）が適用されます。超過時は `onLimit` の設定にかかわらず常にエラーで、日付リテラルと相対日付で扱いは同一です。
 - legacy 3 関数の診断 reason code は `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` です。相対日付12関数は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を使用します。
@@ -787,7 +828,7 @@ WHERE 担当者 != '山田'
 
 ### 相対日付関数
 
-`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。使えるのは、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）の2つです。後者の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**は fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。単一 APP では、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）で使えます。INNER JOIN では、全 source が alias 付き物理 APP のとき、**単一 alias の whole-WHERE exact（第5-W）**または**AND スパイン上の exact 関数 leaf を alias ごとに採用する形（第5-L）**で使えます。複数 alias へ分散した関数 leaf も各 APP へ押し下げ、関数を含まない残余だけを client 評価します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力がサブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルの形は fail-closed です。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ### 型付き比較（v3.0.0）
 
@@ -835,7 +876,7 @@ WHERE 件名 NOT KLIKE '保留'
   SELECT 件名, 備考 FROM APP100
   WHERE 件名 KLIKE '至急' AND 備考 LIKE '%緊急%'
   ```
-- FULL_SCANでの制約: ORまたは`NOT (...)`配下、サブテーブル、CTE／一時テーブル上のKLIKEは使用できません。JOINとの併用は、すべてのJOINが`INNER JOIN`で、KLIKEのフィールドをテーブルエイリアスで明示した場合だけ許可します。`LEFT JOIN` / `RIGHT JOIN`を含むSELECTでは、安全側にKLIKEを拒否します。直接の`NOT KLIKE`はANDリーフとして使用できます。
+- FULL_SCANでの制約: 通常は OR または`NOT (...)`配下、サブテーブル、CTE／一時テーブル上のKLIKEは使用できません。例外として、alias 付き物理 APP だけの INNER JOIN で server-only 関数を含み、単一 alias の `WHERE` 全体を exact に押し下げる第5-Wでは、OR / NOT 配下を含む全 KLIKE occurrence を同じ server query に適用して client residual を無くせるため使用できます。whole-WHERE exact でない KLIKE-containing OR は拒否します。それ以外の JOIN との併用は、すべての JOIN が `INNER JOIN` で、KLIKE のフィールドをテーブルエイリアスで明示した場合だけ許可します。`LEFT JOIN` / `RIGHT JOIN`を含むSELECTでは、安全側にKLIKEを拒否します。直接の`NOT KLIKE`はANDリーフとして使用できます。
 - 右辺は単一引用符の文字列または文字列バッチ変数に限定されます。`%` は使用できません。`_` は使用できますが、1文字ワイルドカードではなくkintone検索上の単語構成文字です。
 - DML では次の親レコード DML の WHERE で使用できます（v3.10.0）: **通常（APPLY なし）の親 `UPDATE` / `DELETE`**、および **APPLY 複数親 `UPDATE` の親 WHERE**。前者は WHERE 全体を kintone クエリへ exact 変換して対象を解決するため `OR` / `NOT` 配下の KLIKE も使用できます。後者は安全プレフィルタ＋残余評価のため、`OR` / `NOT` 配下など native query に完全適用できない KLIKE は使用できません。**サブテーブル `UPDATE` / `DELETE`・`REORDER`・`INSERT` / `INSERT ... SELECT`・`UPSERT` / `UPSERT ... SELECT`・独立した `VALIDATE` では引き続き使用できません**（JS 評価経路のため）。SQL `LIKE` / `NOT LIKE` は通常 DML では引き続き使用できません（JS 評価が必要）。
 - 利用可能なフィールドは[kintone公式の演算子対応表](https://cybozu.dev/ja/kintone/docs/overview/query/)に従います。文字列1行・複数行、リッチエディター、リンク、添付ファイルなどが対象です。非対応フィールドはkintone APIエラーになります。
@@ -1081,7 +1122,7 @@ kSQL スカラー関数の `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` を使用し
 
 **相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
 
-15関数共通で、使えるのは **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**関数を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（関数 leaf を prefilter に押し下げ残余だけ client 評価・`SUPERSET_PREFILTER`）の2つです。後者は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。JOIN・`VALIDATE`・サブテーブル・入れ子 SELECT・派生表、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**はレコード取得前に fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML は whole-WHERE exact の形だけが使え、prefilter＋残余や FULL_SCAN_EXACT では使えません。** 型・演算子・reason code・移行方法は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
+15関数共通で、単一 APP では **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**関数を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（関数 leaf を prefilter に押し下げ残余だけ client 評価・`SUPERSET_PREFILTER`）で使えます。INNER JOIN では alias 付き物理 APP だけを入力とし、単一 alias の whole-WHERE exact（第5-W）、または AND スパイン上の exact 関数 leaf を alias ごとに押し下げて関数なし残余だけを client 評価する形（第5-L）で使えます。後者は複数 alias へ分散した関数にも対応します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力が CTE・一時テーブル・サブテーブル・入れ子 SELECT・派生表の形はレコード取得前に fail-closed します。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML は whole-WHERE exact の形だけが使え、prefilter＋残余や FULL_SCAN_EXACT では使えません。** 型・演算子・reason code・移行方法は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ```sql
 WHERE 作成日時 < FROM_TODAY(5, DAYS)
@@ -1148,20 +1189,30 @@ INNER JOIN APP200 AS b ON a.注文ID = b.注文ID
 LEFT  JOIN APP300 AS c ON a.配送ID = c.配送ID
 ```
 
-> **注意:** JOIN は FULL_SCAN モードで client 側の結合と元の `WHERE` の再評価を行います。
+> **注意:** JOIN は FULL_SCAN モードで client 側の結合を行います。通常は元の `WHERE` を
+> client 側でも再評価しますが、第5-W は whole WHERE を server で exact に適用して
+> client residual を持たず、第5-L は server-only 関数 leaf を除いた残余だけを再評価します。
 > ただし、INNER JOIN で、型と演算子が対応する単一 alias の述語は、各 APP の records API
 > query へ prefilter として押し下げます。押し下げは取得件数を減らす性能最適化であり、
-> 元の `WHERE` を client で再評価するため結果は変わりません。
+> 通常述語は元の `WHERE` を client で再評価するため結果は変わりません。
 >
-> 押し下げない形は、LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、
-> `KLIKE` を含む `OR`、関数付き述語、型不明、非実在の選択肢、およびユーザー選択・
-> 組織選択・グループ選択フィールドです。相対日付関数と kintone query 関数は JOIN では
-> 引き続き使用できません。`作成者 in (LOGINUSER())` は単一 APP では使用できますが、
-> JOIN では使用できません。
+> server-only 関数は、alias 付き物理 APP だけの INNER JOIN で次の2形を使用できます。
+> **第5-W**は `WHERE` 全体が単一 alias に属する exact 形で、同一 alias の `OR` / `NOT` /
+> whole-exact な KLIKE 共存も可です。**第5-L**は AND スパインの exact 関数 leaf を
+> alias ごとに押し下げ、関数を含まない残余だけを client 評価します。複数 alias に
+> 関数が分散していても各 APP へ押し下げます。`LOGINUSER()` は作成者 / 更新者 /
+> ユーザー選択の singleton `in` / `not in` に限り、グループ選択では使用できません。
+>
+> server-only 関数を使用できない JOIN は、LEFT / RIGHT JOIN、cross-alias `OR`、
+> 関数を含む cross-table 述語、whole exact でない KLIKE-containing `OR`、および
+> サブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルを入力にする形です。
+> 通常述語の APP 別 prefilter については、型不明・非実在の選択肢・選択系フィールド等を
+> 引き続き押し下げません。
 >
 > `EXPLAIN` では、実行時メタデータで確定した `pushdown applied`、静的な
 > `pushdown candidate`、および集合関係 `relation: exact` / `relation: superset`
-> を確認できます。押し下げない場合は reason も表示します。
+> を確認できます。拒否形でも throw せず `plan status: rejected` と reason、
+> `client evaluation: forbidden`、実行 API なしを表示します。
 
 ---
 
@@ -1792,7 +1843,7 @@ SELECT * FROM 対象 WHERE 金額 > 1000
 
 ### CTE と相対日付
 
-実体化 CTE の本体、`WITH` の最終 SELECT、単一 CTE のインライン展開では、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または `WHERE` 全体が exact にならない形では使用できません。
+実体化 CTE の本体、`WITH` の最終 SELECT、単一 CTE のインライン展開では、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。これらを JOIN 入力にする形、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または `WHERE` 全体が exact にならない形では使用できません。JOIN で使える第5-W / 第5-L は、JOIN の全入力が alias 付き物理 APP の場合に限ります。
 
 ```sql
 WITH 月別 AS (
@@ -2974,7 +3025,7 @@ SELECT 部門 FROM APP200;
 
 `CREATE TEMP TABLE #名前 AS SELECT ...` で SELECT 結果をバッチ内に実体化し、後続の文から `FROM` / `JOIN` / サブクエリで参照できます。
 
-source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。JOIN、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または押し下げ不能な述語が混ざる形では使用できません。後者は一時テーブルへ切り出さずトップレベル SELECT として書きます。
+source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。一時テーブルを JOIN 入力にする形、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または押し下げ不能な述語が混ざる形では使用できません。JOIN で使える第5-W / 第5-L は、JOIN の全入力が alias 付き物理 APP の場合に限ります。後者は一時テーブルへ切り出さずトップレベル SELECT として書きます。
 
 ```sql
 -- 相関サブクエリの回避例
