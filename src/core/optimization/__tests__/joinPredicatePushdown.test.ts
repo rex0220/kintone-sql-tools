@@ -5,6 +5,7 @@ import {
   buildJoinPushdownPlan,
   buildJoinPushdownStep2Plan,
   classifyJoinPushdownLeaf,
+  classifyJoinServerFunctionLeaf,
   resolveJoinFieldOwner,
   serializeJoinPushdownItem,
   type JoinPushdownItem,
@@ -367,6 +368,182 @@ describe("B76 §5.4 tree composition", () => {
     expect(Object.isFrozen(plan.items)).toBe(true);
     expect(Object.isFrozen(plan.items[0])).toBe(true);
     expect(plan.items[0].predicate).toBe(expr);
+  });
+});
+
+describe("B76 Phase B Step 1 exact function consumption foundation", () => {
+  test.each([
+    ["DATE + relative", "a.date = THIS_MONTH()"],
+    ["DATE + TODAY", "a.date >= TODAY()"],
+    ["DATETIME + relative/TODAY/NOW", "a.datetime < NOW()"],
+    ["CREATED_TIME + relative/TODAY/NOW", "a.created >= FROM_TODAY(-7, DAYS)"],
+    ["UPDATED_TIME + relative/TODAY/NOW", "a.updated <= TODAY()"],
+    ["CREATOR + LOGINUSER singleton", "a.creator IN (LOGINUSER())"],
+    ["MODIFIER + LOGINUSER singleton", "a.modifier NOT IN (LOGINUSER())"],
+    ["USER_SELECT + LOGINUSER singleton", "a.user IN (LOGINUSER())"],
+  ] as const)("§5.1 exact row: %s", (_label, predicate) => {
+    const expr = binary(`SELECT * FROM APP100 AS a WHERE ${predicate}`);
+    const classification = classifyJoinServerFunctionLeaf(expr, [core]);
+    expect(classification).toMatchObject({
+      relation: "function-leaf-exact",
+      owner: { status: "OWNED", alias: "a", appId: 100 },
+    });
+
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.serverFunctionCandidate).toEqual({
+      variant: "EXACT_LEAF",
+      staticContract: "CONFIRMED",
+      fetchContract: "PENDING_STEP_2",
+    });
+    expect(plan.serverFunctionConsumptions).toHaveLength(1);
+    expect(plan.serverFunctionConsumptions[0]).toMatchObject({
+      predicate: expr,
+      relation: "function-leaf-exact",
+      consumption: "leaf",
+      fetchBinding: "PENDING_STEP_2",
+      staticProof: {
+        classifier: "EXACT_PUSHDOWN",
+        ownership: "OWNED",
+        serialization: "OCCURRENCE_MULTISET_EXACT",
+        residualIdentityConsumption: "CONFIRMED",
+      },
+    });
+    expect(plan.residualWhere).toBeNull();
+    expect(plan.residualServerFunctionOccurrences).toEqual([]);
+  });
+
+  test.each([
+    ["DATE × NOW", "a.date = NOW()"],
+    ["TIME × TODAY", "a.time = TODAY()"],
+    ["GROUP_SELECT × LOGINUSER", "a.teamGroup IN (LOGINUSER())"],
+    ["CREATOR wrong operator", "a.creator = LOGINUSER()"],
+  ] as const)("§5.1 unsafe row: %s", (_label, predicate) => {
+    const expr = binary(`SELECT * FROM APP100 AS a WHERE ${predicate}`);
+    expect(classifyJoinServerFunctionLeaf(expr, [core]).relation).toBe("unsafe");
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.serverFunctionConsumptions).toEqual([]);
+    expect(plan.serverFunctionCandidate).toEqual({
+      variant: "EXACT_LEAF",
+      staticContract: "INCOMPLETE",
+      fetchContract: "PENDING_STEP_2",
+    });
+    expect(plan.residualWhere).toBe(expr);
+    expect(plan.residualServerFunctionOccurrences).toHaveLength(1);
+  });
+
+  test("同名関数 occurrence multiset を重複込みで serialize・採用する", () => {
+    const expr = where(
+      "SELECT * FROM APP100 AS a "
+      + "WHERE a.date >= TODAY() AND a.date <= TODAY()"
+    );
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.allServerFunctionOccurrences).toEqual(["TODAY", "TODAY"]);
+    expect(plan.adoptedServerFunctionOccurrences).toEqual(["TODAY", "TODAY"]);
+    expect(plan.serverFunctionConsumptions.map(
+      (consumption) => consumption.functionOccurrences
+    )).toEqual([["TODAY"], ["TODAY"]]);
+    expect(plan.serverFunctionConsumptions.map(
+      (consumption) => consumption.serializedPredicate
+    )).toEqual(["date >= TODAY()", "date <= TODAY()"]);
+    expect(plan.residualWhere).toBeNull();
+  });
+
+  test("複数 APP の exact leaf を alias ごとに OWNED と証明して原子的に保持する", () => {
+    const left = source("a", 100, [{ code: "date", fieldType: "DATE" }]);
+    const right = source("b", 200, [{ code: "updated", fieldType: "UPDATED_TIME" }]);
+    const expr = where(
+      "SELECT * FROM APP100 a INNER JOIN APP200 b ON a.date = b.updated "
+      + "WHERE a.date = TODAY() AND b.updated >= NOW()"
+    );
+    const plan = buildJoinPushdownPlan(expr, [left, right]);
+    expect(plan.serverFunctionConsumptions.map((consumption) => [
+      consumption.targetAlias,
+      consumption.appId,
+      consumption.functionOccurrences,
+    ])).toEqual([
+      ["a", 100, ["TODAY"]],
+      ["b", 200, ["NOW"]],
+    ]);
+    expect(plan.serverFunctionCandidate?.staticContract).toBe("CONFIRMED");
+    expect(plan.residualWhere).toBeNull();
+  });
+
+  test("非修飾同名 field が AMBIGUOUS なら関数 leaf を採用しない", () => {
+    const left = source("a", 100, [{ code: "date", fieldType: "DATE" }]);
+    const right = source("b", 200, [{ code: "date", fieldType: "DATE" }]);
+    const expr = binary(
+      "SELECT * FROM APP100 a INNER JOIN APP200 b ON a.date = b.date "
+      + "WHERE date = TODAY()"
+    );
+    const plan = buildJoinPushdownPlan(expr, [left, right]);
+    expect(classifyJoinServerFunctionLeaf(expr, [left, right]).relation).toBe("unsafe");
+    expect(plan.serverFunctionConsumptions).toEqual([]);
+    expect(plan.serverFunctionCandidate?.staticContract).toBe("INCOMPLETE");
+    expect(plan.residualWhere).toBe(expr);
+  });
+
+  test("AND-spine surgery は採用 leaf だけを除去し、通常 local leaf identity を保つ", () => {
+    const expr = where(
+      "SELECT * FROM APP100 AS a "
+      + "WHERE a.date = THIS_MONTH() AND LENGTH(a.text) > 1"
+    );
+    if (expr.type !== "LOGICAL") throw new Error("expected AND");
+    const functionLeaf = expr.left;
+    const localLeaf = expr.right;
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.serverFunctionConsumptions[0].predicate).toBe(functionLeaf);
+    expect(plan.residualWhere).toBe(localLeaf);
+    expect(plan.residualServerFunctionOccurrences).toEqual([]);
+  });
+
+  test("通常 S predicate は item relation superset のまま residual に残る", () => {
+    const expr = where(
+      "SELECT * FROM APP100 AS a "
+      + "WHERE a.date = TODAY() AND a.text = 'A'"
+    );
+    if (expr.type !== "LOGICAL") throw new Error("expected AND");
+    const functionLeaf = expr.left;
+    const normalSupersetLeaf = expr.right;
+    const plan = buildJoinPushdownPlan(expr, [core]);
+
+    expect(plan.items).toHaveLength(1);
+    expect(plan.items[0]).toMatchObject({
+      targetAlias: "a",
+      relation: "superset",
+      predicate: normalSupersetLeaf,
+    });
+    expect(plan.serverFunctionConsumptions[0]).toMatchObject({
+      predicate: functionLeaf,
+      relation: "function-leaf-exact",
+    });
+    expect(plan.residualWhere).toBe(normalSupersetLeaf);
+  });
+
+  test("OR / NOT 内の関数 leaf は第5-Lへ採用せず residual 再 walk に残す", () => {
+    for (const sql of [
+      "SELECT * FROM APP100 a WHERE a.date = TODAY() OR a.date = TOMORROW()",
+      "SELECT * FROM APP100 a WHERE NOT (a.date = TODAY())",
+    ]) {
+      const expr = where(sql);
+      const plan = buildJoinPushdownPlan(expr, [core]);
+      expect(plan.serverFunctionConsumptions).toEqual([]);
+      expect(plan.serverFunctionCandidate?.staticContract).toBe("INCOMPLETE");
+      expect(plan.residualWhere).toBe(expr);
+      expect(plan.residualServerFunctionOccurrences.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("KLIKE identity は関数 leaf surgery と独立に同じ plan で維持する", () => {
+    const expr = where(
+      "SELECT * FROM APP100 a "
+      + "WHERE a.date = TODAY() AND a.text KLIKE 'urgent'"
+    );
+    if (expr.type !== "LOGICAL") throw new Error("expected AND");
+    const klike = expr.right;
+    const plan = buildJoinPushdownPlan(expr, [core]);
+    expect(plan.appliedKlikes.has(klike as any)).toBe(true);
+    expect(plan.residualWhere).toBe(klike);
+    expect(plan.serverFunctionCandidate?.staticContract).toBe("CONFIRMED");
   });
 });
 

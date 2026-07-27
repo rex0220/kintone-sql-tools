@@ -8,10 +8,27 @@ import { numberLiteralText } from "../../types/ast";
 import { whereToKintone } from "../../converter/whereToKintone";
 import { resolveFieldSemantics } from "../fieldSemantics";
 import { isKlike, type KlikeExpr } from "../like";
+import {
+  SERVER_ONLY_WHERE_FUNCTION_NAMES,
+} from "../relativeDateFunction";
+import {
+  serverOnlyFunctionOccurrencesInWhere,
+} from "./relativeDateFullScanExactPlan";
 import { classifyWhereCapability } from "./whereCapability";
 
-export type JoinPushdownRelation = "exact" | "superset";
-export type JoinPushdownClassification = JoinPushdownRelation | "unsafe";
+/**
+ * Phase A item 全体の server ⊇ client 集合関係。
+ * server-only 関数 leaf の消費証明とは意図的に別型にする。
+ */
+export type JoinPushdownItemRelation = "exact" | "superset";
+export type JoinPushdownRelation = JoinPushdownItemRelation;
+export type JoinPushdownClassification = JoinPushdownItemRelation | "unsafe";
+
+/**
+ * Phase B 関数 leaf 単体の6点契約のうち、Step 1 で証明できる exactness。
+ * item relation の "exact" / "superset" と代入互換にしない。
+ */
+export type JoinServerFunctionConsumptionRelation = "function-leaf-exact";
 
 export type JoinPushdownSourceKind = "APP" | "CTE" | "TEMP" | "SUBTABLE";
 
@@ -42,7 +59,39 @@ export interface JoinPushdownItem {
   readonly targetAlias: string;
   readonly appId: number;
   readonly predicate: WhereExpr;
-  readonly relation: JoinPushdownRelation;
+  readonly relation: JoinPushdownItemRelation;
+}
+
+export interface JoinServerFunctionConsumption {
+  readonly targetAlias: string;
+  readonly appId: number;
+  /** 採用・serialize・residual 除去で共有する元 leaf identity。 */
+  readonly predicate: BinaryExpr;
+  readonly functionLeaves: readonly BinaryExpr[];
+  /** 同名関数も重複を保持する occurrence multiset の列挙。 */
+  readonly functionOccurrences: readonly string[];
+  readonly relation: JoinServerFunctionConsumptionRelation;
+  readonly consumption: "leaf";
+  readonly serializedPredicate: string;
+  readonly staticProof: {
+    readonly classifier: "EXACT_PUSHDOWN";
+    readonly ownership: "OWNED";
+    readonly serialization: "OCCURRENCE_MULTISET_EXACT";
+    readonly residualIdentityConsumption: "CONFIRMED";
+  };
+  /**
+   * §2.3(4) は runtime fetch でしか確定できない。
+   * Step 1 の静的 proof を実行許可と誤認しないための明示 marker。
+   */
+  readonly fetchBinding: "PENDING_STEP_2";
+}
+
+export interface JoinServerFunctionCandidate {
+  readonly variant: "EXACT_LEAF";
+  readonly staticContract:
+    | "CONFIRMED"
+    | "INCOMPLETE";
+  readonly fetchContract: "PENDING_STEP_2";
 }
 
 export type JoinPushdownRejectionReason =
@@ -63,6 +112,12 @@ export interface JoinPushdownPlan {
   readonly appliedKlikes: ReadonlySet<KlikeExpr>;
   readonly allKlikes: readonly KlikeExpr[];
   readonly rejections: readonly JoinPushdownRejection[];
+  readonly serverFunctionCandidate: JoinServerFunctionCandidate | null;
+  readonly serverFunctionConsumptions: readonly JoinServerFunctionConsumption[];
+  readonly allServerFunctionOccurrences: readonly string[];
+  readonly adoptedServerFunctionOccurrences: readonly string[];
+  readonly residualWhere: WhereExpr | null;
+  readonly residualServerFunctionOccurrences: readonly string[];
 }
 
 export interface JoinPushdownLeafClassification {
@@ -70,10 +125,18 @@ export interface JoinPushdownLeafClassification {
   readonly owner?: Extract<JoinFieldOwner, { status: "OWNED" }>;
 }
 
+export type JoinServerFunctionLeafClassification =
+  | {
+      readonly relation: JoinServerFunctionConsumptionRelation;
+      readonly owner: Extract<JoinFieldOwner, { status: "OWNED" }>;
+      readonly functionOccurrences: readonly string[];
+    }
+  | { readonly relation: "unsafe" };
+
 interface Fragment {
   readonly owner: Extract<JoinFieldOwner, { status: "OWNED" }>;
   readonly predicate: WhereExpr;
-  readonly relation: JoinPushdownRelation;
+  readonly relation: JoinPushdownItemRelation;
 }
 
 const SELECTION_TYPES = new Set([
@@ -161,6 +224,38 @@ export function classifyJoinPushdownLeaf(
 }
 
 /**
+ * B77/B78 matrix と JOIN ownership を両方通した server-only 関数 leaf。
+ * Phase A item relation classifier とは独立した型を返す。
+ */
+export function classifyJoinServerFunctionLeaf(
+  predicate: BinaryExpr,
+  sources: readonly JoinPushdownSource[]
+): JoinServerFunctionLeafClassification {
+  const functionOccurrences = serverOnlyFunctionOccurrencesInWhere(predicate);
+  if (functionOccurrences.length === 0 || predicate.left.type !== "FIELD") {
+    return Object.freeze({ relation: "unsafe" });
+  }
+  const owner = resolveJoinFieldOwner(predicate.left, sources);
+  if (owner.status !== "OWNED" || owner.source.sourceKind !== "APP") {
+    return Object.freeze({ relation: "unsafe" });
+  }
+  const capability = classifyWhereCapability(predicate, (field) => {
+    const resolved = resolveJoinFieldOwner(field, sources);
+    if (resolved.status !== "OWNED" || resolved.source !== owner.source) return undefined;
+    const type = resolved.source.fieldTypes.get(resolved.fieldCode);
+    return type === undefined ? undefined : resolveFieldSemantics({ fieldType: type });
+  });
+  if (capability.capability !== "EXACT_PUSHDOWN") {
+    return Object.freeze({ relation: "unsafe" });
+  }
+  return Object.freeze({
+    relation: "function-leaf-exact",
+    owner,
+    functionOccurrences: Object.freeze([...functionOccurrences]),
+  });
+}
+
+/**
  * WHERE tree を alias 別の immutable plan item へ合成する。
  * AND は安全因子を個別抽出し、OR は同一 owner の subtree 全体だけを採用する。
  */
@@ -181,11 +276,13 @@ export function buildJoinPushdownPlan(
   }));
   const appliedKlikes = new Set<KlikeExpr>();
   for (const item of items) collectKlikes(item.predicate, appliedKlikes);
+  const serverFunctionFoundation = buildServerFunctionFoundation(where, sources);
   return Object.freeze({
     items: Object.freeze(items),
     appliedKlikes,
     allKlikes: Object.freeze([...allKlikes]),
     rejections: Object.freeze(collectRejections(where, sources)),
+    ...serverFunctionFoundation,
   });
 }
 
@@ -207,12 +304,196 @@ export function buildJoinPushdownStep2Plan(
     predicate: fragment.predicate,
     relation: fragment.relation,
   }));
+  const serverFunctionFoundation = emptyServerFunctionFoundation(where);
   return Object.freeze({
     items: Object.freeze(items),
     appliedKlikes: new Set<KlikeExpr>(),
     allKlikes: Object.freeze([]),
     rejections: Object.freeze(collectRejections(where, sources)),
+    ...serverFunctionFoundation,
   });
+}
+
+type ServerFunctionFoundation = Pick<
+  JoinPushdownPlan,
+  | "serverFunctionCandidate"
+  | "serverFunctionConsumptions"
+  | "allServerFunctionOccurrences"
+  | "adoptedServerFunctionOccurrences"
+  | "residualWhere"
+  | "residualServerFunctionOccurrences"
+>;
+
+function buildServerFunctionFoundation(
+  where: WhereExpr | null,
+  sources: readonly JoinPushdownSource[]
+): ServerFunctionFoundation {
+  if (where === null) return emptyServerFunctionFoundation(null);
+  const allOccurrences = Object.freeze([
+    ...serverOnlyFunctionOccurrencesInWhere(where),
+  ]);
+  if (allOccurrences.length === 0) return emptyServerFunctionFoundation(where);
+
+  const candidates = collectServerFunctionLeavesOnAndSpine(where);
+  const consumptions: JoinServerFunctionConsumption[] = [];
+  const adoptedLeaves = new Set<BinaryExpr>();
+  for (const leaf of candidates) {
+    const classification = classifyJoinServerFunctionLeaf(leaf, sources);
+    if (classification.relation !== "function-leaf-exact") continue;
+
+    const guardItem: JoinPushdownItem = {
+      targetAlias: classification.owner.alias,
+      appId: classification.owner.appId,
+      predicate: leaf,
+      relation: "exact",
+    };
+    let serializedPredicate: string;
+    try {
+      serializedPredicate = serializeJoinPushdownItem(guardItem, sources);
+    } catch {
+      continue;
+    }
+    const serializedOccurrences =
+      serverFunctionOccurrencesInSerializedQuery(serializedPredicate);
+    if (!sameStringMultiset(serializedOccurrences, classification.functionOccurrences)) {
+      continue;
+    }
+
+    adoptedLeaves.add(leaf);
+    consumptions.push(Object.freeze({
+      targetAlias: classification.owner.alias,
+      appId: classification.owner.appId,
+      predicate: leaf,
+      functionLeaves: Object.freeze([leaf]),
+      functionOccurrences: classification.functionOccurrences,
+      relation: classification.relation,
+      consumption: "leaf",
+      serializedPredicate,
+      staticProof: Object.freeze({
+        classifier: "EXACT_PUSHDOWN",
+        ownership: "OWNED",
+        serialization: "OCCURRENCE_MULTISET_EXACT",
+        residualIdentityConsumption: "CONFIRMED",
+      }),
+      fetchBinding: "PENDING_STEP_2",
+    }));
+  }
+
+  const residualWhere = removeAdoptedLeavesFromAndSpine(where, adoptedLeaves);
+  const residualOccurrences = Object.freeze(residualWhere === null
+    ? []
+    : [...serverOnlyFunctionOccurrencesInWhere(residualWhere)]);
+  const adoptedOccurrences = Object.freeze(consumptions.flatMap(
+    (consumption) => [...consumption.functionOccurrences]
+  ));
+  const staticContract =
+    sameStringMultiset(allOccurrences, adoptedOccurrences)
+      && residualOccurrences.length === 0
+      ? "CONFIRMED"
+      : "INCOMPLETE";
+  return {
+    serverFunctionCandidate: Object.freeze({
+      variant: "EXACT_LEAF",
+      staticContract,
+      fetchContract: "PENDING_STEP_2",
+    }),
+    serverFunctionConsumptions: Object.freeze(consumptions),
+    allServerFunctionOccurrences: allOccurrences,
+    adoptedServerFunctionOccurrences: adoptedOccurrences,
+    residualWhere,
+    residualServerFunctionOccurrences: residualOccurrences,
+  };
+}
+
+function emptyServerFunctionFoundation(
+  where: WhereExpr | null
+): ServerFunctionFoundation {
+  const occurrences = where === null
+    ? []
+    : serverOnlyFunctionOccurrencesInWhere(where);
+  return {
+    serverFunctionCandidate: null,
+    serverFunctionConsumptions: Object.freeze([]),
+    allServerFunctionOccurrences: Object.freeze([...occurrences]),
+    adoptedServerFunctionOccurrences: Object.freeze([]),
+    residualWhere: where,
+    residualServerFunctionOccurrences: Object.freeze([...occurrences]),
+  };
+}
+
+function collectServerFunctionLeavesOnAndSpine(
+  where: WhereExpr
+): readonly BinaryExpr[] {
+  switch (where.type) {
+    case "BINARY":
+      return serverOnlyFunctionOccurrencesInWhere(where).length > 0 ? [where] : [];
+    case "LOGICAL":
+      return where.op === "AND"
+        ? [
+          ...collectServerFunctionLeavesOnAndSpine(where.left),
+          ...collectServerFunctionLeavesOnAndSpine(where.right),
+        ]
+        : [];
+    case "GROUP":
+      return collectServerFunctionLeavesOnAndSpine(where.expr);
+    case "NOT":
+    case "NULL_CHECK":
+    case "EXISTS":
+    case "BOOLEAN":
+      return [];
+  }
+}
+
+function removeAdoptedLeavesFromAndSpine(
+  where: WhereExpr,
+  adoptedLeaves: ReadonlySet<BinaryExpr>
+): WhereExpr | null {
+  if (where.type === "BINARY") return adoptedLeaves.has(where) ? null : where;
+  if (where.type === "LOGICAL") {
+    if (where.op !== "AND") return where;
+    const left = removeAdoptedLeavesFromAndSpine(where.left, adoptedLeaves);
+    const right = removeAdoptedLeavesFromAndSpine(where.right, adoptedLeaves);
+    if (left === null) return right;
+    if (right === null) return left;
+    if (left === where.left && right === where.right) return where;
+    return { ...where, left, right };
+  }
+  if (where.type === "GROUP") {
+    const expr = removeAdoptedLeavesFromAndSpine(where.expr, adoptedLeaves);
+    if (expr === null) return null;
+    return expr === where.expr ? where : { ...where, expr };
+  }
+  return where;
+}
+
+function serverFunctionOccurrencesInSerializedQuery(query: string): string[] {
+  const matches: Array<{ readonly name: string; readonly index: number }> = [];
+  for (const name of SERVER_ONLY_WHERE_FUNCTION_NAMES) {
+    const pattern = new RegExp(`\\b${name}\\s*\\(`, "g");
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(query)) !== null) {
+      matches.push({ name, index: match.index });
+    }
+  }
+  return matches
+    .sort((left, right) => left.index - right.index)
+    .map((match) => match.name);
+}
+
+function sameStringMultiset(
+  left: readonly string[],
+  right: readonly string[]
+): boolean {
+  if (left.length !== right.length) return false;
+  const counts = new Map<string, number>();
+  for (const value of left) counts.set(value, (counts.get(value) ?? 0) + 1);
+  for (const value of right) {
+    const count = counts.get(value);
+    if (count === undefined) return false;
+    if (count === 1) counts.delete(value);
+    else counts.set(value, count - 1);
+  }
+  return counts.size === 0;
 }
 
 function collectRejections(
