@@ -227,3 +227,38 @@ SELECT ... FROM #cur a INNER JOIN APP4148 t ON ... WHERE a.対応日付 = LAST_Y
 ただし**ライブラリ面での需要か、プラグイン／MCP 面での需要か**は未確認。
 プラグインと MCP は既に両機能を持つため、**ライブラリ面（Pro が engine library を使うか）**で
 必要かどうかが Phase 分けの判断材料になる。
+
+### 4. ライブラリ面での需要が確定（2026-07-27）
+
+**ダッシュボード（Pro）は engine library を使っている**とオーナーが確認。
+§3 の「残る未確認」は解消し、**Phase A / B とも library 面の課題として確定**した。
+
+現状の拒否を実測（`guardRunQuerySql`）:
+
+| SQL | 結果 |
+|---|---|
+| `VALIDATE APP100` | `READ_ONLY_VIOLATION` |
+| `UPDATE ... VALIDATE ONLY` | `READ_ONLY_VIOLATION` |
+| `CREATE TEMP TABLE ...` | `READ_ONLY_VIOLATION` |
+| `ASSERT ...` | `READ_ONLY_VIOLATION` |
+| 複文バッチ | `PARSE_ERROR`「この API は単文のみ受け付けます（**複文はバッチ実行 API を使用してください**）」 |
+| 単文 `SELECT` | ✅ |
+
+> **副次的な発見**: 複文の拒否メッセージが「**バッチ実行 API を使用してください**」と案内するが、
+> **library にはそのような API が存在しない**（CLI / MCP 向けの共有メッセージ）。
+> B80（library だけ具体的な reason を返さない）と同種の、**面ごとの案内の不整合**である。
+> Phase B で batch API を追加すれば解消するが、Phase A 止まりなら文言の手当てが要る。
+
+### 5. Phase A の API 形状（要判断）
+
+公開 API は現在 `runQuery`（`QueryResult`）と `explainQuery`（`ExplainResult`）に分かれており、
+**種類ごとに関数を分け、結果に `type` 判別子を持たせる**設計になっている。
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| **A-1（推奨）** | **`runValidate()` を追加**し `ValidateResult { type: "validate"; rows; columns; stats }` を返す | **`explainQuery` の前例に一致**。`runQuery` の戻り値型を変えないので既存利用者に影響しない |
+| A-2 | `runQuery` を拡張し戻り値を判別共用体にする | 「SQL を1つ投げる」窓口が1つで済むが、**既存の `QueryResult` 前提コードが型エラーになり得る** |
+
+**スコープ**: 用途1（KPI 表示）に必要なのは**既存レコード監査の `VALIDATE`** のみ。
+DML `... VALIDATE ONLY`（この DML は妥当かの事前検証）は read-only ダッシュボードの用途から外れるため、
+**Phase A では見送り可能**。含めるかは判断事項。
