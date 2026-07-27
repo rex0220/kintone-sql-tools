@@ -372,7 +372,7 @@ schema-aware EXPLAIN と runtime は同じ解決済み AST と plan builder を�
 | 13 | §0.3.6-7 | CTE・temp・subtable・inline AST | 新規対象外。effective AST / identity を別 Phase で証明する |
 | 14 | §0.3.6-8 | INNER / LEFT / RIGHT nullability | Phase A は INNER の直接物理 APP のみ。LEFT/RIGHT provenance は B6 領域へ切り出す |
 | 15 | §0.3.6-9 | EXPLAIN / runtime 同一 plan | immutable plan を validate/fetch/eval/EXPLAIN で共有。静的候補を applied と表示しない |
-| 16 | §0.3.6-10 | maxRecords / truncate / SearchAborted | 既存 complete-input policy を維持し固有非対称を足さない。SearchAborted は fail-closed |
+| 16 | §0.3.6-10 | maxRecords / truncate / SearchAborted | 既存 complete-input policy を維持し固有非対称を足さない。**SearchAborted は §8 の撤回により既存どおり警告＋部分結果**（B76 固有の fail-closed を追加しない）。検索打ち切りの安全性は **B79** で独立に扱う（§16.6 で決着） |
 | 17 | §0.3.6-11 | variable / subquery 後の再計画 | 全置換・解決後に一度だけ runtime plan を生成。未解決許可 flag を runtime で黙って無視しない |
 | 18 | §0.3.6-12 | 負の回帰 | 非実在選択肢、同名 field、複数 JOIN、LEFT/RIGHT、cross-OR、NOT、unapplied KLIKE を必須化 |
 
@@ -592,7 +592,7 @@ kintone 公式の型 × 演算子表と照合した結果、**本仕様は公式
 
 ---
 
-## 16. 【未決・リリース前に必ず再検証】SearchAborted の扱い
+## 16. 【決着済み】SearchAborted の扱い
 
 - 提起: 2026-07-27（Step 4 の Claude レビュー）
 - ステータス: ✅ **決着（2026-07-27）＝案 A を採用し §8 の fail-closed 条項を撤回**。
