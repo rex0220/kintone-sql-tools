@@ -45,10 +45,24 @@ export interface JoinPushdownItem {
   readonly relation: JoinPushdownRelation;
 }
 
+export type JoinPushdownRejectionReason =
+  | "AMBIGUOUS_FIELD"
+  | "UNKNOWN_FIELD_OR_METADATA"
+  | "CROSS_ALIAS_OR"
+  | "CROSS_TABLE_BINARY"
+  | "KLIKE_OR"
+  | "NOT"
+  | "UNSAFE_RELATION";
+
+export interface JoinPushdownRejection {
+  readonly reason: JoinPushdownRejectionReason;
+}
+
 export interface JoinPushdownPlan {
   readonly items: readonly JoinPushdownItem[];
   readonly appliedKlikes: ReadonlySet<KlikeExpr>;
   readonly allKlikes: readonly KlikeExpr[];
+  readonly rejections: readonly JoinPushdownRejection[];
 }
 
 export interface JoinPushdownLeafClassification {
@@ -171,6 +185,7 @@ export function buildJoinPushdownPlan(
     items: Object.freeze(items),
     appliedKlikes,
     allKlikes: Object.freeze([...allKlikes]),
+    rejections: Object.freeze(collectRejections(where, sources)),
   });
 }
 
@@ -196,7 +211,70 @@ export function buildJoinPushdownStep2Plan(
     items: Object.freeze(items),
     appliedKlikes: new Set<KlikeExpr>(),
     allKlikes: Object.freeze([]),
+    rejections: Object.freeze(collectRejections(where, sources)),
   });
+}
+
+function collectRejections(
+  where: WhereExpr | null,
+  sources: readonly JoinPushdownSource[]
+): JoinPushdownRejection[] {
+  if (where === null) return [];
+  const reasons = new Set<JoinPushdownRejectionReason>();
+  const visit = (expr: WhereExpr): void => {
+    if (expr.type === "BINARY") {
+      if (expr.left.type !== "FIELD") {
+        reasons.add("UNSAFE_RELATION");
+        return;
+      }
+      const owner = resolveJoinFieldOwner(expr.left, sources);
+      if (owner.status === "AMBIGUOUS") {
+        reasons.add("AMBIGUOUS_FIELD");
+        return;
+      }
+      if (owner.status === "UNKNOWN") {
+        reasons.add("UNKNOWN_FIELD_OR_METADATA");
+        return;
+      }
+      if (containsFieldReference(expr.right)) {
+        reasons.add("CROSS_TABLE_BINARY");
+        return;
+      }
+      if (classifyJoinPushdownLeaf(expr, sources).relation === "unsafe") {
+        reasons.add("UNSAFE_RELATION");
+      }
+      return;
+    }
+    if (expr.type === "LOGICAL") {
+      if (expr.op === "OR") {
+        if (containsKlike(expr)) {
+          reasons.add("KLIKE_OR");
+          return;
+        }
+        const left = classifyTree(expr.left, sources);
+        const right = classifyTree(expr.right, sources);
+        if (left.length !== 1 || right.length !== 1
+          || !sameOwner(left[0].owner, right[0].owner)) {
+          reasons.add("CROSS_ALIAS_OR");
+          return;
+        }
+      }
+      visit(expr.left);
+      visit(expr.right);
+      return;
+    }
+    if (expr.type === "GROUP") {
+      visit(expr.expr);
+      return;
+    }
+    if (expr.type === "NOT") {
+      reasons.add("NOT");
+      return;
+    }
+    reasons.add("UNSAFE_RELATION");
+  };
+  visit(where);
+  return [...reasons].map((reason) => Object.freeze({ reason }));
 }
 
 /**

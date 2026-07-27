@@ -3091,6 +3091,7 @@ interface TypedPushdownMeta {
 
 interface RuntimeJoinPushdownPlan extends KlikePushdownPlan {
   readonly joinPlan: JoinPushdownPlan;
+  readonly queriesByAlias: ReadonlyMap<string, string>;
 }
 
 function buildRuntimeJoinPushdownPlan(
@@ -3122,9 +3123,10 @@ function buildRuntimeJoinPushdownPlan(
   }));
   const plan = buildJoinPushdownPlan(stmt.where, sources);
   const conditionsByAlias = new Map<string, WhereExpr>();
+  const queriesByAlias = new Map<string, string>();
   for (const item of plan.items) {
     // §6.2: alias を捨てる serializer の直前に ownership を fail-loud 再検査する。
-    serializeJoinPushdownItem(item, sources);
+    queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
     conditionsByAlias.set(item.targetAlias, item.predicate);
   }
   const mainAlias = stmt.from.alias!;
@@ -3133,6 +3135,7 @@ function buildRuntimeJoinPushdownPlan(
   joinConditions.delete(mainAlias);
   return {
     joinPlan: plan,
+    queriesByAlias,
     mainCondition,
     joinConditions,
     appliedKlikes: plan.appliedKlikes,
@@ -3923,6 +3926,9 @@ async function executeFullScanSelect(
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
+  const fetchClient = "joinPlan" in pushdownPlan
+    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
+    : client;
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
   if (prefilterPlan && allowOriginalWherePushdown) {
@@ -3938,7 +3944,7 @@ async function executeFullScanSelect(
   const mainFetch = constantFalse ? Promise.resolve([]) : fetchTableRecordsForFullScan(
     stmt,
     stmt.from,
-    client,
+    fetchClient,
     maxRecords,
     parallel,
     true,
@@ -3968,7 +3974,7 @@ async function executeFullScanSelect(
         promise: fetchTableRecordsForFullScan(
           stmt,
           join.table,
-          client,
+          fetchClient,
           maxRecords,
           parallel,
           false,
@@ -4006,7 +4012,7 @@ async function executeFullScanSelect(
       stmt,
       join,
       tables,
-      client,
+      fetchClient,
       maxRecords,
       parallel,
       options.onLimitReached ?? "error",
@@ -4018,7 +4024,7 @@ async function executeFullScanSelect(
     const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
       stmt,
       join.table,
-      client,
+      fetchClient,
       maxRecords,
       parallel,
       false,
@@ -4312,6 +4318,9 @@ async function executeFullScanWithCte(
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
+  const fetchClient = "joinPlan" in pushdownPlan
+    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
+    : client;
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
   const scalarCache = await resolveScalarColumns(
@@ -4336,7 +4345,7 @@ async function executeFullScanWithCte(
     const mainRecords = await withCompleteInputPolicy(completePolicy, () => fetchTableRecordsForFullScan(
       stmt,
       stmt.from,
-      client,
+      fetchClient,
       maxRecords,
       parallel,
       true,
@@ -4363,7 +4372,7 @@ async function executeFullScanWithCte(
         stmt,
         join,
         tables,
-        client,
+        fetchClient,
         maxRecords,
         parallel,
         effectiveOptions.onLimitReached ?? "error",
@@ -4374,7 +4383,7 @@ async function executeFullScanWithCte(
       const joinRecords = optimized ?? await fetchTableRecordsForFullScan(
         stmt,
         join.table,
-        client,
+        fetchClient,
         maxRecords,
         parallel,
         false,
@@ -8633,6 +8642,10 @@ interface ExplainWhereAnalysis {
   relativeDatePlan: RelativeDatePushdownPlan;
 }
 
+// EXPLAIN renderer は schema-aware analysis が一度だけ生成した runtime plan object を参照する。
+// renderer 側で JOIN predicate を再抽出・再分類しない。
+const explainJoinPushdownPlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+
 interface ValidateExplainInfo {
   targetFields: string[];
   fetchFields: string[];
@@ -8717,6 +8730,9 @@ async function buildExplainWhereAnalysis(
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
       }
       capabilities.set(select, capability);
+      const joinPushdownMeta = await loadTypedPushdownMeta(select, tracedClient, cacheContext);
+      const joinPushdownPlan = buildRuntimeJoinPushdownPlan(select, joinPushdownMeta);
+      if (joinPushdownPlan) explainJoinPushdownPlans.set(select, joinPushdownPlan);
       // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
       if (select.orderBy.length > 0
         || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
@@ -9656,7 +9672,31 @@ function buildSelectPlan(
     lines.push(`  kintone query: ${displayedQuery || "(なし)"}`);
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
-    const pushdownPlan = buildKlikePushdownPlan(stmt);
+    const runtimeJoinPlan = explainJoinPushdownPlans.get(stmt);
+    const pushdownPlan = runtimeJoinPlan ?? buildKlikePushdownPlan(stmt);
+    if (stmt.joins.length > 0) {
+      if (runtimeJoinPlan) {
+        lines.push("  join pushdown plan: applied (runtime metadata resolved)");
+        lines.push("  runtime plan timing: variables/subqueries resolved -> metadata resolved -> immutable plan");
+        lines.push("  EXPLAIN unresolved subqueries: not applied (records API is not called)");
+        lines.push("  residual: original WHERE");
+        lines.push(`  KLIKE applied nodes: ${runtimeJoinPlan.joinPlan.appliedKlikes.size}`);
+        for (const rejection of runtimeJoinPlan.joinPlan.rejections) {
+          lines.push(`  join pushdown not applied: ${rejection.reason}`);
+        }
+        lines.push("  search abort: fail-closed (SearchAbortedError; partial rows unavailable)");
+      } else {
+        const reason = stmt.joins.some((join) => join.type !== "INNER")
+          ? "OUTER_JOIN"
+          : [stmt.from, ...stmt.joins.map((join) => join.table)].some((table) =>
+              table.cteName !== null || Boolean(table.subtableCode)
+            )
+            ? "SOURCE_KIND"
+            : "PLAN_NOT_APPLICABLE";
+        lines.push("  join pushdown plan: not applied");
+        lines.push(`  join pushdown not applied: ${reason}`);
+      }
+    }
     // メインテーブル
     const mainFields = selectToFetchAllFields(stmt, stmt.from, plainGroupByPlan);
     const mainAliasStr = stmt.from.alias ? ` AS ${stmt.from.alias}` : "";
@@ -9673,7 +9713,13 @@ function buildSelectPlan(
       : exactOriginalWhere || "(全件取得)";
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
-    if (mainCandidate !== null) {
+    const mainJoinItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
+      item.targetAlias === stmt.from.alias
+    );
+    if (mainJoinItem) {
+      lines.push(`  pushdown applied: ${runtimeJoinPlan!.queriesByAlias.get(mainJoinItem.targetAlias)}`);
+      lines.push(`  relation: ${mainJoinItem.relation}`);
+    } else if (!runtimeJoinPlan && mainCandidate !== null) {
       lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型・実在確認待ち）`);
     }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
@@ -9692,7 +9738,13 @@ function buildSelectPlan(
         : "(全件取得)";
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
-      if (joinCandidate !== null) {
+      const joinPlanItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
+        item.targetAlias === join.table.alias
+      );
+      if (joinPlanItem) {
+        lines.push(`  pushdown applied: ${runtimeJoinPlan!.queriesByAlias.get(joinPlanItem.targetAlias)}`);
+        lines.push(`  relation: ${joinPlanItem.relation}`);
+      } else if (!runtimeJoinPlan && joinCandidate !== null) {
         lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
       }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
