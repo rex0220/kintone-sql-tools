@@ -3942,7 +3942,8 @@ async function executeFullScanSelect(
   validateKlikePushdownPlan(pushdownPlan);
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
-  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
+  // （B79 実装済み: 外部結合のみ fail-closed。outerJoinSearchAbortGuard.ts）。
   const fetchClient = client;
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
@@ -4335,7 +4336,8 @@ async function executeFullScanWithCte(
   validateKlikePushdownPlan(pushdownPlan);
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
-  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
+  // （B79 実装済み: 外部結合のみ fail-closed。outerJoinSearchAbortGuard.ts）。
   const fetchClient = client;
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
