@@ -1,16 +1,16 @@
-ksql 配布パッケージ (v3.26.0)
+ksql 配布パッケージ (v3.27.0)
 
 release 成果物:
-- ksql-plugin-v3.26.0.zip
-- ksql-mcp.mcpb (manifest version 3.26.0)
-- ksql-mcp.js (MCP server version 3.26.0)
+- ksql-plugin-v3.27.0.zip
+- ksql-mcp.mcpb (manifest version 3.27.0)
+- ksql-mcp.js (MCP server version 3.27.0)
 
-1. ksql-plugin-v3.26.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.27.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-次回リリース (Unreleased): B79+B80。
+本リリース (v3.27.0): B79+B80。
 - 注意: B79 は破壊的変更です。プラグイン / CLI / MCP で LEFT / RIGHT JOIN を含む
   クエリの検索が 10 万件で打ち切られた場合、従来の警告＋部分結果ではなく
   SearchAbortedError で終了します。
@@ -27,7 +27,7 @@ release 成果物:
   reason (例:「KLIKE / NOT KLIKE は SELECT の WHERE 句でのみ使用できます」) を返します。
   code は PARSE_ERROR のままなので、code で分岐する利用者コードは壊れません (非破壊)。
 
-本リリース (v3.26.0): B76 Phase A（JOIN 述語の APP 別 prefilter）。
+前リリース (v3.26.0): B76 Phase A（JOIN 述語の APP 別 prefilter）。
 - 性能改善であり挙動変更はありません。押し下げ後も元の WHERE を client で再評価するため
   結果は不変で、records API から取得する候補件数だけが減ります。
 - INNER JOIN で、型と演算子の対応が確認できる単一 alias の述語が対象です。
