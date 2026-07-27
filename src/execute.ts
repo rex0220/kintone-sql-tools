@@ -3926,9 +3926,10 @@ async function executeFullScanSelect(
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
-  const fetchClient = "joinPlan" in pushdownPlan
-    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
-    : client;
+  // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
+  // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  const fetchClient = client;
   const mainPushDown = pushdownPlan.mainCondition;
   const tableConditions = pushdownPlan.joinConditions;
   if (prefilterPlan && allowOriginalWherePushdown) {
@@ -4318,9 +4319,10 @@ async function executeFullScanWithCte(
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
-  const fetchClient = "joinPlan" in pushdownPlan
-    ? wrapClientWithSearchAbort(client, { aborted: false }, true)
-    : client;
+  // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
+  // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
+  // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱う。
+  const fetchClient = client;
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
   const scalarCache = await resolveScalarColumns(
@@ -9684,7 +9686,6 @@ function buildSelectPlan(
         for (const rejection of runtimeJoinPlan.joinPlan.rejections) {
           lines.push(`  join pushdown not applied: ${rejection.reason}`);
         }
-        lines.push("  search abort: fail-closed (SearchAbortedError; partial rows unavailable)");
       } else {
         const reason = stmt.joins.some((join) => join.type !== "INNER")
           ? "OUTER_JOIN"

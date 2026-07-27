@@ -1,7 +1,6 @@
 import {
   execute,
   executeBatch,
-  SearchAbortedError,
   type KintoneClient,
   type SelectResult,
 } from "../execute";
@@ -172,14 +171,17 @@ test("B76 Step 4: batch variable は値解決後の plan に入り、subquery RH
   expect(subquery.calls.some((call) => call.app === 76603)).toBe(true);
 });
 
-test("B76 Step 4: SearchAborted は JOIN plan で fail-closed にし部分 rows を返さない", async () => {
+test("B76 §16: SearchAborted は JOIN plan の有無で挙動を変えず既存どおり警告を返す", async () => {
+  // B76 は性能改善であり、検索打ち切りの安全性という別問題を副作用で持ち込まない。
+  // JOIN plan があってもエラー化せず、単一表・LEFT JOIN と同じ警告経路を維持する。
   const client = makeClient({ searchAborted: true });
-  await expect(execute(
+  const result = await execute(
     `${twoTable}a.担当者 = '佐藤'`,
     client,
     { cacheContext: "b76-step4-search-aborted" }
-  )).rejects.toBeInstanceOf(SearchAbortedError);
+  ) as SelectResult;
   expect(client.calls.length).toBeGreaterThan(0);
+  expect(result.warnings?.some((w) => w.includes("打ち切"))).toBe(true);
 });
 
 test("B76 Step 4: B76 固有の truncate 禁止を足さず既存 limit policy を維持する", async () => {

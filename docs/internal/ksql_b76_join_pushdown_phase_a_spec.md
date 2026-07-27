@@ -346,7 +346,9 @@ schema-aware EXPLAIN と runtime は同じ解決済み AST と plan builder を�
 - JOIN、local ORDER、aggregate 等が既に完全入力を要求する場合、その既存 policy を維持する。
 - truncate が既存契約上許される経路では、「押し下げなし全件 JS」との完全結果同値を
   truncate 後の部分集合にまで主張しない。EXPLAIN は既存 limit policy を併記する。
-- `searchAborted:true` は母集合欠落なので fail-closed。警告だけで結果を確定しない。
+- ~~`searchAborted:true` は母集合欠落なので fail-closed。~~ **【撤回 2026-07-27・§16】**
+  B76 固有の fail-closed を追加しない。既存どおり警告＋部分結果とする。
+  検索打ち切りの安全性は **B79** で独立に扱う。
 - metadata 取得失敗は records fetch 前に伝播し、「型不明なので全件取得」に黙ってフォールバックしない。
 - serializer ownership guard、KLIKE unapplied gate、server-only function guard の失敗後は records /
   cursor / mutation 0、retry 0。
@@ -593,8 +595,8 @@ kintone 公式の型 × 演算子表と照合した結果、**本仕様は公式
 ## 16. 【未決・リリース前に必ず再検証】SearchAborted の扱い
 
 - 提起: 2026-07-27（Step 4 の Claude レビュー）
-- ステータス: 🔴 **未決。オーナー判断＝「JOIN 関連を組み込んでから再検証」。**
-  **Phase A のリリース前に必ず本節へ戻ること。**
+- ステータス: ✅ **決着（2026-07-27）＝案 A を採用し §8 の fail-closed 条項を撤回**。
+  オーナー判断「JOIN 関連を組み込んでから再検証」に従い Step 4 完了後に再検証し、決定した。
 
 ### 16.1 検出した非対称（実測）
 
@@ -643,3 +645,51 @@ Claude の推奨は **A**（性能改善の副作用として破壊的変更を�
 
 **Phase A の Step 5（release gate）で必ず本節を開くこと。**
 未決のままリリースしてはならない。
+
+
+### 16.6 再検証の結果（2026-07-27）— 案 A を採用
+
+Step 1〜4 を組み込んだ状態で再検証した。**JOIN は単一表より危険だが、危険なのは
+INNER ではなく LEFT/RIGHT である**ことが判明し、現行実装は危険度と逆向きだった。
+
+#### 実測: 右表だけ検索打ち切りでマッチ行が欠落した場合
+
+| | 結果 | 性質 |
+|---|---|---|
+| **INNER JOIN** | `rows=[]` ＋ 警告 | **行の欠落**（返る行は正しい） |
+| **LEFT JOIN** | `rows=[{"$id":"1","目標金額":""}]` ＋ 警告 | **誤った値**（正しくは `300`） |
+
+**LEFT JOIN は「行が減る」のではなく「値が間違う」。**
+結合相手が取得できなかっただけなのに **null 拡張され「該当なし」という嘘の値**を返す。
+警告文も「結果が**欠落**した可能性」としか言わず、値が誤り得ることを伝えていない。
+
+#### 危険度と実装の逆転
+
+| 危険度 | ケース | Step 4 時点の挙動 |
+|---|---|---|
+| **最も危険（誤った値）** | LEFT / RIGHT JOIN | **警告のみ** |
+| 中（行の欠落） | INNER JOIN ＋ WHERE あり | **エラー** |
+| 中（行の欠落） | INNER JOIN ＋ WHERE なし | 警告のみ |
+| 低（行の欠落） | 単一表 | 警告のみ |
+
+**最も危険なケースが警告で、それより安全なケースがエラー**という逆転。
+さらに INNER JOIN でさえ **WHERE の有無で挙動が変わる**（WHERE が無いと joinPlan が
+作られず警告経路）。恣意的である。
+
+#### 決定
+
+**案 A を採用。§8 の fail-closed 条項を撤回し、既存どおり警告＋部分結果に戻す。**
+
+- B76 は**性能改善**であり、**検索打ち切りの安全性という別問題を副作用で持ち込まない**。
+  撤回により**挙動変更はゼロ**になる。
+- **LEFT/RIGHT JOIN の誤値問題は B76 とは独立した既存バグ**であり、
+  **B79 として起票**して独立に評価・判断する。
+  （B77/B78 も B75 のレビュー中に見つけた別問題を切り出して正解だった前例がある。）
+
+#### 実装への反映
+
+`executeFullScanSelect` / `executeFullScanWithCte` の
+`const fetchClient = "joinPlan" in pushdownPlan ? wrapClientWithSearchAbort(..., true) : client`
+を `const fetchClient = client` へ戻し、EXPLAIN の
+`search abort: fail-closed` 行を削除した。
+Step 4 のテストは「JOIN plan の有無で挙動を変えず既存どおり警告を返す」ことを固定する形へ書き換えた。
