@@ -19,6 +19,33 @@
 5. **現状の拒否**（実測）— `VALIDATE` / `CREATE TEMP TABLE` / `ASSERT` は `READ_ONLY_VIOLATION`、
    複文は `PARSE_ERROR`。**そのメッセージが案内する「バッチ実行 API」が library に存在しない。**
 
+## 0.1 【2026-07-27 オーナー補足】本課題の本質は「面をまたいだ契約の不一致」
+
+利用の実態が示された。
+
+1. **生成 AI が kSQL MCP を使って、ダッシュボードで使う SQL を作成する**
+2. **ダッシュボードはその SQL を engine library で実行する**
+
+つまり **SQL の作成面（MCP）と実行面（library）が別**である。
+
+したがって許可構文の差は「library に機能が足りない」ではなく、
+**AI が MCP で検証して通した SQL が、本番の library で落ちる**という事故になる。
+**作成面で通ることが、実行面で通ることを保証していない。**
+
+これは B76 で扱った「押し下げ能力表が2つ」と同型だが、**利用者から見た症状はより悪い**。
+押し下げの差は性能差にとどまるが、こちらは**動くはずのものが動かない**。
+
+### 0.1.1 したがって受入条件に「機械的な parity」を追加する
+
+差を埋めるだけでは、**将来また開く**。文型を片面に足したときにもう片面が置き去りになる構造は
+そのままだからである（§2.1 の一本化はこれを狙っている）。
+
+**共通の SQL コーパスに対して、MCP が受理する read-only 文は library も受理することを
+テストで固定する。**例外（`IMPORT` / `APPLY`）は**明示的な列挙**とし、
+列挙にない差が生まれたらテストが落ちるようにする。
+
+これにより「AI が MCP で書いた read-only SQL は library で必ず動く」が**契約として保証される**。
+
 ## 1. スコープ
 
 ### 1.1 対象
@@ -163,6 +190,7 @@ API だけ先行させると、書き込み文が混じったバッチを受け�
 
 - `VALIDATE` は complete-input policy により **`onLimit=truncate` が `error` へ強制**される。
   ライブラリ面でも同じであることをテストで固定
+- **§0.1.1 の parity テストを実装する**（共通コーパス・例外は明示列挙）
 - plugin / CLI / MCP / library で**許可・拒否・reason が既存方針どおり**であることを確認
 - **library だけが `SEARCH_ABORTED` hard error** という差は**維持**（§2.7）
 
@@ -191,6 +219,7 @@ SELECT ... FROM #cur a INNER JOIN APP200 t ON ... WHERE a.受注日 = THIS_MONTH
 | # | 条件 |
 |---|---|
 | 1 | ライブラリに**独自の文型列挙が残っていない**（`isReadOnlyStatement` へ一本化） |
+| **1b** | **共通コーパスで「MCP が受理する read-only 文は library も受理する」が機械的に固定**されている。例外は `IMPORT` / `APPLY` の明示列挙のみで、**列挙にない差が生まれたらテストが落ちる**（§0.1.1） |
 | 2 | 単文 `VALIDATE` が通り、`validateStats` が **`QueryResult` に載る** |
 | 3 | 既存 `runQuery` / `explainQuery` 利用者に**型・挙動の破壊がない** |
 | 4 | `runBatch` が複文・一時テーブル・`ASSERT` を実行し、`results[]` が `QueryResult` |
