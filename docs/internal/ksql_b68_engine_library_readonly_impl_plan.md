@@ -41,8 +41,20 @@
 そのままだからである（§2.1 の一本化はこれを狙っている）。
 
 **共通の SQL コーパスに対して、MCP が受理する read-only 文は library も受理することを
-テストで固定する。**例外（`IMPORT` / `APPLY`）は**明示的な列挙**とし、
-列挙にない差が生まれたらテストが落ちるようにする。
+テストで固定する。**例外は**明示的な列挙**とし、列挙にない差が生まれたらテストが落ちるようにする。
+
+**【訂正 2026-07-27】例外は3つ。**初版は `IMPORT` / `APPLY` の2つと書いたが、
+**§1.2 で非スコープとした DML `VALIDATE ONLY` と矛盾していた**（`isReadOnlyStatement()` は
+`validateOnly=true` の DML を read-only と判定するため、MCP は受理し library は拒否する）。
+
+| 例外 | 理由 |
+|---|---|
+| `IMPORT` | inline source を要求する。library は既定 off |
+| `APPLY` | `VALIDATE ONLY` 経由で分類器を通り抜けるため別ゲートで拒否 |
+| **DML `... VALIDATE ONLY`** | **「書き込みの事前検証」であって読み取りではない。**戻り値も別型 `DmlValidationResult`（追加フィールド 10 以上）。read-only データアクセスライブラリの境界として除外する |
+
+3つに共通するのは「**kintone への書き込みを前提とした文、またはその周辺**」という点である。
+**この category を外れる差が生まれたらテストが落ちる**こと。
 
 これにより「AI が MCP で書いた read-only SQL は library で必ず動く」が**契約として保証される**。
 
@@ -226,7 +238,7 @@ SELECT ... FROM #cur a INNER JOIN APP200 t ON ... WHERE a.受注日 = THIS_MONTH
 | # | 条件 |
 |---|---|
 | 1 | ライブラリに**独自の文型列挙が残っていない**（`isReadOnlyStatement` へ一本化） |
-| **1b** | **共通コーパスで「MCP が受理する read-only 文は library も受理する」が機械的に固定**されている。例外は `IMPORT` / `APPLY` の明示列挙のみで、**列挙にない差が生まれたらテストが落ちる**（§0.1.1） |
+| **1b** | **共通コーパスで「MCP が受理する read-only 文は library も受理する」が機械的に固定**されている。例外は **`IMPORT` / `APPLY` / DML `VALIDATE ONLY` の3つ**の明示列挙のみ（いずれも**書き込みを前提とした文またはその周辺**）で、**この category を外れる差が生まれたらテストが落ちる**（§0.1.1） |
 | 2 | 単文 `VALIDATE` が通り、`validateStats` が **`QueryResult` に載る** |
 | 3 | 既存 `runQuery` / `explainQuery` 利用者に**型・挙動の破壊がない** |
 | 4 | `runBatch` が複文・一時テーブル・`ASSERT` を実行し、`results[]` が `QueryResult` |

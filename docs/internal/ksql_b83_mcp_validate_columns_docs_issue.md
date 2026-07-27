@@ -65,3 +65,24 @@ $err_subtable, $err_subrow, $err_subrow_id, $err_count
 - 記述修正のみなら **0.1 人日**
 - 生成方式にするなら **0.25〜0.5 人日**
 - **公開挙動の変更なし**
+
+
+## 6. 【2026-07-27 追記】同種の drift をもう1件検出＝`UPSERT_SELECT`
+
+B68 Step 4 の parity テスト設計中に、codex が別の drift を検出した。
+
+`Statement` AST には **`UPSERT_SELECT`** が存在する（`src/types/ast.ts`）が、
+`STATEMENT_SYNTAX_CATALOG.upsert` の**例は VALUES 形だけ**で、
+そこから導ける AST 型は `UPSERT` のみである。
+
+つまり **カタログの例だけを根拠にすると AST 全文型を網羅できない**。
+
+- instructions の statement template 自体は `{VALUES...|SELECT...}` と両形を書いている
+- **不足しているのは「例」のほう**で、例から AST 型を導く用途では穴になる
+
+§4.1 に書いた「**数を手書きしている／例が実装から導けない**」という同じ根に由来する。
+本課題の再発防止（実データから生成する）を検討する際は、
+**列数だけでなくカタログの例の網羅性も対象**にすること。
+
+B68 Step 4 では型レベル網羅（`Record<Statement["type"], ...>`）で回避しており、
+**parity の目的は達成できている**。カタログ例の不足はここで扱う。
