@@ -1,7 +1,7 @@
 # B80 — engine ライブラリの静的検証 reason 保持仕様 R1
 
 - 作成日: 2026-07-27
-- ステータス: **📝 仕様 R1（codex 起草、Claude レビュー待ち）**
+- ステータス: 🔧 **Step 1〜4 実装完了・未リリース（2026-07-27）**。Step 5（docs / release 同期）は B79 と合わせて実施。B79 と同一リリース。
 - 対象: B80（B79 と同一リリース）
 - 関連: [B80 起票](ksql_b80_engine_library_reason_flattening_issue.md) /
   [B73 評価](ksql_b73_error_structured_i18n_evaluation.md) /
