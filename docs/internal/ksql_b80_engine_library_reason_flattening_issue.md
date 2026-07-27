@@ -49,9 +49,14 @@ WHERE a.件名 KLIKE 'urgent' OR a.担当者 = '佐藤'
 
 ## 3. 影響範囲
 
-`parseSqlStatement()` 内で投げられる **`PARSE_ERROR` 以外のすべての検証エラー**が対象。
-KLIKE 検証はその一例にすぎず、**他の静的検証も同じく平坦化されている可能性が高い**。
-着手時に**どの検証エラーが平坦化されるかを網羅的に洗い出すこと**。
+起票時は「KLIKE 検証はその一例にすぎず、他の静的検証も平坦化されている可能性が高い」と
+書いたが、**Step 0 の調査で `KlikeValidationError` が唯一の例外源**と判明した。
+
+`src/core/sql.ts` が `parseSqlStatement()` から呼ぶ後段検証は `validateKlikeStatement()` のみで、
+それ以外は parser 側が先に `ParseError`（＝`PARSE_ERROR`）として拒否する（Claude も独自確認）。
+**実装は class identity（`instanceof KlikeValidationError`）による allowlist で過不足がない。**
+
+網羅一覧は [B80 仕様 §5.1](ksql_b80_engine_library_reason_spec.md) の **11 条件**。
 
 ## 4. 論点
 
@@ -76,5 +81,6 @@ B73 に着手する前に本課題を片付けるほうが自然である。
 ## 6. 補足
 
 B66（engine ライブラリ・v3.19.0）以来の既存挙動であり、B76 の変更が原因ではない。
-B76 Phase A では **4面 parity 条件を緩和して回避**した（B76 spec §17）。
-本課題が解決すれば、その緩和を撤回して「4面で同じ reason」を固定できる。
+B76 Phase A では 4面 parity 条件を一時緩和して回避したが、**本課題の実装と同一 merge で撤回済み**
+（B76 spec §17）。現在は plugin / CLI / MCP / engine ライブラリの4面で
+**同じ拒否には同じ reason** を固定している。

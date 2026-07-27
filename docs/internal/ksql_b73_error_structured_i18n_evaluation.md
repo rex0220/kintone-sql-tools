@@ -88,4 +88,14 @@ B73 は「message 文字列に埋め込まれた情報の構造化」を主眼�
 - ライブラリ利用者に見えるエラー出力の変更になるため、**非破壊で行えるか**の判断
 - 4面で**同じ拒否には同じ reason** を返すという不変条件を置けるか
 
-**B76 Phase A では parity 条件を緩和して回避した**（B76 spec §17）。
+**【2026-07-27 解決済み】本件は B80 として独立起票のうえ実装済み。**
+`statementGuard.ts` は `KlikeValidationError` を class identity で allowlist し、
+`code = PARSE_ERROR` と `cause` の identity を維持したまま **具体的な reason を返す**ようになった。
+B76 Phase A で一時緩和した 4面 parity 条件も撤回済み（B76 spec §17）。
+
+**したがって B73 の前提は満たされた。** B73 は「message に埋め込まれた情報を
+`details?` として構造化公開する」ことに集中できる。
+
+**B73 着手時の追加論点**＝B80 は非破壊を優先して `code` を `PARSE_ERROR` のまま残したが、
+KLIKE の配置制約は意味的には parse error ではない。**`code` を意味的に正確にするか**を
+破壊的変更の是非として判断すること（B80 仕様の Claude レビュー §B）。
