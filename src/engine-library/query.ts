@@ -30,13 +30,16 @@ export async function runQuery(
 ): Promise<QueryResult> {
   try {
     const invocation = validateQueryOptions(options, "run");
-    guardRunQuerySql(sql);
+    const statement = guardRunQuerySql(sql);
+    const executeOptions = statement.type === "VALIDATE"
+      ? { ...invocation.executeOptions, onLimitReached: "error" as const }
+      : invocation.executeOptions;
     const result = await withCursorScope(
       invocation.client,
       (client) => execute(
         sql,
         projectReadonlyClient(client),
-        { ...invocation.executeOptions, captureColumnMeta: true }
+        { ...executeOptions, captureColumnMeta: true }
       )
     );
     assertSelectResult(result);

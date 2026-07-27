@@ -99,8 +99,10 @@ export function assertRunBatchStatement(statement: unknown): void {
 }
 
 /** Parse one complete statement and enforce the runQuery read-only/result-shape contract. */
-export function guardRunQuerySql(sql: string): void {
-  assertRunQueryStatement(parseSingleStatement(sql));
+export function guardRunQuerySql(sql: string): Statement {
+  const statement = parseSingleStatement(sql);
+  assertRunQueryStatement(statement);
+  return statement;
 }
 
 /** Parse the complete batch and enforce every statement before executeBatch can make an API call. */

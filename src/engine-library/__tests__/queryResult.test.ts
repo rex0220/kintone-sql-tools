@@ -109,7 +109,7 @@ test("runQuery copies VALIDATE stats into the stable query envelope when present
     {
       captureColumnMeta: true,
       maxRecords: 100,
-      onLimitReached: "truncate",
+      onLimitReached: "error",
       fetchParallel: 2,
       cursorMaxActive: 4,
     }
