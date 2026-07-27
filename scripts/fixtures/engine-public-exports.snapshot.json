@@ -3,11 +3,15 @@
     "KsqlEngineError",
     "createReadonlyKintoneClient",
     "explainQuery",
+    "runBatch",
     "runQuery",
     "version"
   ],
   "typeExports": [
     "CreateReadonlyKintoneClientOptions",
+    "BatchResult",
+    "BatchResultItem",
+    "BatchStatementInfo",
     "ExplainResult",
     "QueryColumn",
     "QueryMetrics",
@@ -26,6 +30,7 @@
     "ReadonlyNumberRoundingMode",
     "ReadonlyProcessStatuses",
     "ReadonlyProcessStatusState",
+    "RunBatchOptions",
     "RunQueryOptions"
   ]
 }

@@ -100,11 +100,19 @@ test.each([
 test.each([
   "",
   "   ",
-  "SELECT 1; SELECT 2",
   "SELECT 1 AS one unexpected token",
-])("empty, multiple, or trailing-token SQL is PARSE_ERROR: %p", (sql) => {
+])("empty or trailing-token SQL is PARSE_ERROR: %p", (sql) => {
   expect(() => guardRunQuerySql(sql)).toThrow(
     expect.objectContaining({ code: "PARSE_ERROR" })
+  );
+});
+
+test("runQuery directs multiple statements to runBatch", () => {
+  expect(() => guardRunQuerySql("SELECT 1; SELECT 2")).toThrow(
+    expect.objectContaining({
+      code: "PARSE_ERROR",
+      message: "This API accepts one statement; use runBatch for multiple statements",
+    })
   );
 });
 
@@ -154,6 +162,21 @@ test("all parseable non-read categories stop before execute()", async () => {
     });
   }
   expect(mockedExecute).not.toHaveBeenCalled();
+});
+
+test.each([
+  "CREATE TEMP TABLE #t AS SELECT 1",
+  "DROP TEMP TABLE #t",
+  "SET @value = 1",
+  "DECLARE @value = 1",
+  "ASSERT 1 = 1",
+])("runQuery directs batch-scoped read-only statements to runBatch: %s", (sql) => {
+  expect(() => guardRunQuerySql(sql)).toThrow(
+    expect.objectContaining({
+      code: "READ_ONLY_VIOLATION",
+      message: expect.stringContaining("use runBatch"),
+    })
+  );
 });
 
 test.each([

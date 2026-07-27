@@ -1,7 +1,8 @@
-import { parseSqlStatement } from "../core/sql";
+import { parseSqlStatement, parseSqlStatements } from "../core/sql";
 import { statementHasApplyBlocks } from "../core/applyGuard";
 import {
   getStatementType,
+  isDmlType,
   isExplainableReadOnlyStatement,
   isReadOnlyStatement,
   isRowReturningReadOnlyStatement,
@@ -29,7 +30,14 @@ function parseSingleStatement(sql: string): Statement {
   try {
     return parseSqlStatement(sql, { import: true });
   } catch (error) {
-    throw normalizeParseBoundaryError(error);
+    const normalized = normalizeParseBoundaryError(error);
+    if (normalized.message.includes("複文はバッチ実行 API を使用してください")) {
+      throw parseError(
+        "This API accepts one statement; use runBatch for multiple statements",
+        error
+      );
+    }
+    throw normalized;
   }
 }
 
@@ -39,6 +47,15 @@ function classifiedStatement(statement: unknown): Statement {
     throw readOnlyViolation("Unclassifiable statement is not allowed");
   }
   return statement as Statement;
+}
+
+function parseBatchStatements(sql: string): Statement[] {
+  if (sql.trim() === "") throw parseError("SQL statement is empty");
+  try {
+    return parseSqlStatements(sql, { import: true });
+  } catch (error) {
+    throw normalizeParseBoundaryError(error);
+  }
 }
 
 /** Internal test seam for the shared read-only classifier plus runQuery surface gates. */
@@ -56,7 +73,27 @@ export function assertRunQueryStatement(statement: unknown): void {
   }
   if (!isRowReturningReadOnlyStatement(classified)) {
     throw readOnlyViolation(
-      `${type} does not return rows; this API accepts only a single read-only query that returns rows`
+      `${type} does not return rows; use runBatch for batch-scoped or non-row-returning read-only statements`
+    );
+  }
+}
+
+/** Internal test seam for the shared read-only classifier plus runBatch surface gates. */
+export function assertRunBatchStatement(statement: unknown): void {
+  const classified = classifiedStatement(statement);
+  const target = classified.type === "EXPLAIN" ? classified.query : classified;
+  if (target.type === "IMPORT") {
+    throw readOnlyViolation("IMPORT is disabled by default in engine library batches");
+  }
+  if (!isReadOnlyStatement(classified)) {
+    throw readOnlyViolation(`${classified.type} statements are not read-only`);
+  }
+  if (statementHasApplyBlocks(classified)) {
+    throw readOnlyViolation("APPLY statements are not allowed in engine library batches");
+  }
+  if (isDmlType(classified.type)) {
+    throw readOnlyViolation(
+      "DML VALIDATE ONLY statements are not supported by runBatch"
     );
   }
 }
@@ -64,6 +101,11 @@ export function assertRunQueryStatement(statement: unknown): void {
 /** Parse one complete statement and enforce the runQuery read-only/result-shape contract. */
 export function guardRunQuerySql(sql: string): void {
   assertRunQueryStatement(parseSingleStatement(sql));
+}
+
+/** Parse the complete batch and enforce every statement before executeBatch can make an API call. */
+export function guardRunBatchSql(sql: string): void {
+  parseBatchStatements(sql).forEach(assertRunBatchStatement);
 }
 
 /** Parse, guard, and normalize the SQL passed to the engine EXPLAIN path. */

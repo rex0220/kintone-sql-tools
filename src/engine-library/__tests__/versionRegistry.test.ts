@@ -11,6 +11,7 @@ function api(version: string, marker = version): EnginePublicApi {
     createReadonlyKintoneClient: (() => marker) as (...args: never[]) => unknown,
     explainQuery: (() => marker) as (...args: never[]) => unknown,
     KsqlEngineError: class extends Error {},
+    runBatch: (() => marker) as (...args: never[]) => unknown,
     runQuery: (() => marker) as (...args: never[]) => unknown,
   };
 }

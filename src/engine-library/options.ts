@@ -1,4 +1,7 @@
-import type { RunQueryOptions } from "./publicTypes";
+import type {
+  RunBatchOptions,
+  RunQueryOptions,
+} from "./publicTypes";
 
 type QueryKind = "run" | "explain";
 
@@ -10,6 +13,7 @@ const COMMON_KEYS = new Set([
 ]);
 
 const RUN_KEYS = new Set([...COMMON_KEYS, "onLimitReached"]);
+const BATCH_KEYS = RUN_KEYS;
 
 function assertOptionsObject(value: unknown): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -42,6 +46,52 @@ function assertClient(value: unknown): asserts value is RunQueryOptions["client"
   }
 }
 
+function validateExecutionOptions(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  apiName: string
+): {
+  maxRecords?: number;
+  onLimitReached?: "error" | "truncate";
+  fetchParallel?: number;
+  cursorMaxActive?: number;
+} {
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      throw new TypeError(`Unknown ${apiName} option: ${String(key)}`);
+    }
+  }
+
+  if (value.maxRecords !== undefined) {
+    assertPositiveSafeInteger(value.maxRecords, "maxRecords");
+  }
+  if (value.fetchParallel !== undefined) {
+    assertPositiveSafeInteger(value.fetchParallel, "fetchParallel");
+  }
+  if (value.cursorMaxActive !== undefined) {
+    assertPositiveSafeInteger(value.cursorMaxActive, "cursorMaxActive");
+    if (value.cursorMaxActive > 5) {
+      throw new RangeError("cursorMaxActive must be between 1 and 5");
+    }
+  }
+  if (
+    value.onLimitReached !== undefined &&
+    value.onLimitReached !== "error" &&
+    value.onLimitReached !== "truncate"
+  ) {
+    throw new TypeError('onLimitReached must be "error" or "truncate"');
+  }
+
+  return {
+    ...(value.maxRecords !== undefined ? { maxRecords: value.maxRecords as number } : {}),
+    ...(value.fetchParallel !== undefined ? { fetchParallel: value.fetchParallel as number } : {}),
+    ...(value.cursorMaxActive !== undefined ? { cursorMaxActive: value.cursorMaxActive as number } : {}),
+    ...(value.onLimitReached !== undefined
+      ? { onLimitReached: value.onLimitReached as "error" | "truncate" }
+      : {}),
+  };
+}
+
 export function validateQueryOptions(
   value: RunQueryOptions | Omit<RunQueryOptions, "onLimitReached">,
   kind: QueryKind
@@ -56,48 +106,34 @@ export function validateQueryOptions(
 } {
   assertOptionsObject(value);
   const allowed = kind === "run" ? RUN_KEYS : COMMON_KEYS;
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !allowed.has(key)) {
-      throw new TypeError(
-        `Unknown ${kind === "run" ? "runQuery" : "explainQuery"} option: ${String(key)}`
-      );
-    }
-  }
-
   assertClient(value.client);
-
-  if (value.maxRecords !== undefined) {
-    assertPositiveSafeInteger(value.maxRecords, "maxRecords");
-  }
-  if (value.fetchParallel !== undefined) {
-    assertPositiveSafeInteger(value.fetchParallel, "fetchParallel");
-  }
-  if (value.cursorMaxActive !== undefined) {
-    assertPositiveSafeInteger(value.cursorMaxActive, "cursorMaxActive");
-    if (value.cursorMaxActive > 5) {
-      throw new RangeError("cursorMaxActive must be between 1 and 5");
-    }
-  }
-
-  const runValue = value as RunQueryOptions;
-  if (
-    kind === "run" &&
-    runValue.onLimitReached !== undefined &&
-    runValue.onLimitReached !== "error" &&
-    runValue.onLimitReached !== "truncate"
-  ) {
-    throw new TypeError('onLimitReached must be "error" or "truncate"');
-  }
+  const executeOptions = validateExecutionOptions(
+    value as unknown as Record<string, unknown>,
+    allowed,
+    kind === "run" ? "runQuery" : "explainQuery"
+  );
 
   return {
     client: value.client,
-    executeOptions: {
-      ...(value.maxRecords !== undefined ? { maxRecords: value.maxRecords } : {}),
-      ...(value.fetchParallel !== undefined ? { fetchParallel: value.fetchParallel } : {}),
-      ...(value.cursorMaxActive !== undefined ? { cursorMaxActive: value.cursorMaxActive } : {}),
-      ...(kind === "run" && runValue.onLimitReached !== undefined
-        ? { onLimitReached: runValue.onLimitReached }
-        : {}),
-    },
+    executeOptions,
+  };
+}
+
+export function validateBatchOptions(
+  value: RunBatchOptions
+): {
+  client: RunBatchOptions["client"];
+  executeOptions: {
+    maxRecords?: number;
+    onLimitReached?: "error" | "truncate";
+    fetchParallel?: number;
+    cursorMaxActive?: number;
+  };
+} {
+  assertOptionsObject(value);
+  assertClient(value.client);
+  return {
+    client: value.client,
+    executeOptions: validateExecutionOptions(value, BATCH_KEYS, "runBatch"),
   };
 }

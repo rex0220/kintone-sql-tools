@@ -86,6 +86,7 @@ const publicDeclarationFiles = [
   "index.d.ts",
   "errors.d.ts",
   "browserClient.d.ts",
+  "batch.d.ts",
   "query.d.ts",
   "publicTypes.d.ts",
 ];

@@ -2,12 +2,17 @@ import * as publicApi from "../index";
 import {
   explainQuery,
   KsqlEngineError,
+  runBatch,
   runQuery,
   version,
   type CreateReadonlyKintoneClientOptions,
   type ExplainResult,
+  type BatchResult,
+  type BatchResultItem,
+  type BatchStatementInfo,
   type QueryResult,
   type ReadonlyKintoneClient,
+  type RunBatchOptions,
   type RunQueryOptions,
 } from "../index";
 
@@ -36,10 +41,12 @@ test("runtime entry exposes only the implemented public values", () => {
     "KsqlEngineError",
     "createReadonlyKintoneClient",
     "explainQuery",
+    "runBatch",
     "runQuery",
     "version",
   ]);
   expect(runQuery).toBeInstanceOf(Function);
+  expect(runBatch).toBeInstanceOf(Function);
   expect(explainQuery).toBeInstanceOf(Function);
   expect(KsqlEngineError).toBeInstanceOf(Function);
 });
@@ -59,6 +66,7 @@ test("public DTO signatures are usable without importing engine internals", () =
     cursorMaxActive: 2,
   };
   const browserOptions: CreateReadonlyKintoneClientOptions = { cursorMaxActive: 2 };
+  const batchOptions: RunBatchOptions = { client, maxRecords: 10_000 };
   const queryResult: QueryResult = {
     type: "query",
     rows: [{ value: "1" }],
@@ -83,11 +91,29 @@ test("public DTO signatures are usable without importing engine internals", () =
       cursorRecordsScanned: 0,
     },
   };
+  const batchItem: BatchResultItem = queryResult;
+  const batchStatement: BatchStatementInfo = {
+    index: 0,
+    type: "SELECT",
+    status: "success",
+    resultIndex: 0,
+  };
+  const batchResult: BatchResult = {
+    type: "batch",
+    batch: true,
+    ok: true,
+    statementCount: 1,
+    statements: [batchStatement],
+    results: [batchItem],
+    warnings: [],
+  };
 
   expect(runOptions.client).toBe(client);
+  expect(batchOptions.maxRecords).toBe(10_000);
   expect(browserOptions.cursorMaxActive).toBe(2);
   expect(queryResult.type).toBe("query");
   expect(explainResult.type).toBe("explain");
+  expect(batchResult.type).toBe("batch");
 });
 
 test("explainQuery accepts either spelling and performs no Records GET or Cursor call", async () => {

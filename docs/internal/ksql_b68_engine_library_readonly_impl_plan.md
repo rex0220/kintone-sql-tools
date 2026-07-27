@@ -104,8 +104,10 @@ isReadOnlyStatement(stmt) = !writesKintone(stmt) && (isReadOnlyType(...) || isDm
 ### 2.4 `runBatch()` の形
 
 ```ts
-runBatch(sql: string, client: ReadonlyKintoneClient, options?: RunBatchOptions):
-  Promise<BatchResult>
+// 既存 runQuery(sql, options) / explainQuery(sql, options) と同じ呼び方に揃える。
+// client は options の中に置く。公開 API は3つとも同一規約でなければならない。
+runBatch(sql: string, options: RunBatchOptions): Promise<BatchResult>
+// RunBatchOptions = { client; maxRecords?; onLimitReached?; fetchParallel?; cursorMaxActive?; tempTableMaxRows? }
 
 interface BatchResult {
   readonly type: "batch";
@@ -117,6 +119,8 @@ interface BatchResult {
 ```
 
 - **`results[]` は `QueryResult` を再利用**する。VALIDATE も同じ形なので新しい型が要らない。
+- **【訂正 2026-07-27】** 初版は `runBatch(sql, client, options?)` と書いていたが、**既存2関数と呼び方が食い違う**ため誤り。
+  公開 API は小さいほど規約の揺れが目立つ。`runQuery` を書いた利用者が `runBatch` で間違える。
 - `BatchEnvelope`（CLI / MCP 共通）と**フィールド名を揃える**。揃えない理由がない。
 
 ### 2.5 追加ゲート（分類器だけでは足りない部分）
@@ -318,3 +322,57 @@ Step 2 で `runBatch` が実在した時点で案内を追加する。
 
 `npm test` 184 suites / 4,777 tests ＋ CLI 26 green、snapshot 22 不変、
 `engine:bundle-guard` / `engine:declaration-smoke` green、版同期 v3.28.0 green。
+
+---
+
+## 【Step 2 レビュー・2026-07-27】完了
+
+### 実装の要点
+
+- **`runBatch(sql, options)` を新設**。`executeBatch()`（`src/execute.ts`）へ read-only 制約を掛けて
+  公開する形で、**新しい実行エンジンは書いていない**
+- **read-only 強制は文単位**。バッチ全体ではなく1文ずつ `isReadOnlyStatement` ＋ 追加ゲート
+- `results[]` は `QueryResult` を再利用（要素型 `BatchResultItem` として命名・将来の
+  DML `VALIDATE ONLY` 追加余地を確保）
+- `BatchResult` は `type: "batch"` と `batch: true` の**両方**を持つ。
+  計画 §2.4 と `BatchEnvelope` で名前が違ったため両立させた
+
+### 独立検証（8 形すべて期待どおり）
+
+| # | 形 | 結果 |
+|---|---|---|
+| **Z2** | 書き込み DML 3 種 × **先頭 / 中間 / 末尾** | ✅ **全 9 通り拒否・API 呼び出し 0** |
+| **Z3** | `APPLY` ＋ `VALIDATE ONLY` × 3 位置 | ✅ 全位置で拒否・API 呼び出し 0 |
+| **Z4** | `searchAborted`（単文 / 複文 / 一時テーブル経由） | ✅ **hard error・部分結果なし** |
+| Z1 | 一時テーブルを含む複文 | ✅ `results[]` が `QueryResult` 契約を満たす |
+| Z5 | バッチ内 `VALIDATE` | ✅ **該当 result にだけ** `validateStats` |
+| Z6 | `runQuery` の拒否メッセージ | ✅ **`runBatch` を案内**（Step 1 の申し送り解消） |
+| Z7 | `IMPORT` | ✅ バッチでも既定で拒否 |
+| Z8 | `metrics` | 観察: **全 result で同一**（文別計測ではない） |
+
+**Z4 が本 Step の要**。`executeBatch()` は `SEARCH_ABORTED` を**文別エラーとして格納**するため、
+そのままだと**部分結果を返す形**になり得た。codex は検出して `KsqlEngineError` へ再昇格させており、
+**部分結果が漏れないことを実測**した（B79 の面ごとの契約を維持）。
+
+### 【訂正】`runBatch` のシグネチャ — 計画側の誤り
+
+初版の計画は `runBatch(sql, client, options?)` と書いていたが、
+**既存 `runQuery(sql, options)` / `explainQuery(sql, options)` と呼び方が食い違う**。
+
+**公開 API は小さいほど規約の揺れが目立ち、リリース後は直せない。**
+計画 §2.4 を訂正し、`runBatch(sql, options)`（`RunBatchOptions.client`）へ揃えた。
+実装は計画どおりだったので、**codex の実装ミスではない**。
+
+訂正後に**同じ 8 形を通し直して**挙動が維持されていることを確認済み。
+
+### 申し送り（Step 5 の docs で扱う）
+
+`BatchResult.results[]` の各要素の `metrics` は**バッチ全体の集計値で同一**であり、
+文別計測ではない。**型コメントには明記済み**だが、公開 docs にも書くこと。
+性能分析に使えると誤解されると、文ごとのコストを読み違える。
+
+### ゲート
+
+`npm test` 185 suites / 4,795 tests ＋ CLI 26 green、snapshot 22 不変、
+`engine:bundle-guard` 3 形すべて `forbidden=0`、
+`engine:declaration-smoke` green（公開 snapshot 6 values / 24 types）。

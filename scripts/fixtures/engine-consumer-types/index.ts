@@ -1,11 +1,16 @@
 import {
   KsqlEngineError,
   explainQuery,
+  runBatch,
   runQuery,
   version,
   type QueryColumn,
   type QueryResult,
+  type BatchResult,
+  type BatchResultItem,
+  type BatchStatementInfo,
   type ReadonlyKintoneClient,
+  type RunBatchOptions,
 } from "@rex0220/kintone-sql-tools/engine";
 
 const client: ReadonlyKintoneClient = {
@@ -36,6 +41,13 @@ const client: ReadonlyKintoneClient = {
 };
 
 const query: Promise<QueryResult> = runQuery("SELECT 'ok' AS result", { client });
+const batchOptions: RunBatchOptions = { client, maxRecords: 1000 };
+const batch: Promise<BatchResult> = runBatch(
+  "SELECT 'ok' AS result; SELECT 'done' AS result",
+  batchOptions
+);
+const batchItem: BatchResultItem | undefined = undefined;
+const batchStatement: BatchStatementInfo | undefined = undefined;
 const column: QueryColumn = {
   name: "result",
   valueType: "string",
@@ -49,6 +61,9 @@ const optionalSourceApp: number | undefined = column.sourceApp;
 const explain = explainQuery("SELECT 'ok' AS result", { client });
 const error = new KsqlEngineError("EXECUTION_ERROR", version);
 void query;
+void batch;
+void batchItem;
+void batchStatement;
 void optionalFieldType;
 void optionalSortKind;
 void optionalSourceApp;

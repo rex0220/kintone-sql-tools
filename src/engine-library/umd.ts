@@ -2,6 +2,7 @@ import {
   createReadonlyKintoneClient,
   explainQuery,
   KsqlEngineError,
+  runBatch,
   runQuery,
   version,
 } from "./index";
@@ -22,6 +23,7 @@ const publicApi = {
   createReadonlyKintoneClient,
   explainQuery,
   KsqlEngineError,
+  runBatch,
   runQuery,
 } as EnginePublicApi;
 

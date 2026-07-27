@@ -1,5 +1,6 @@
 import { KsqlEngineError } from "./errors";
 import { createReadonlyKintoneClient } from "./browserClient";
+import { runBatch } from "./batch";
 import { explainQuery, runQuery } from "./query";
 
 declare const __KSQL_ENGINE_VERSION__: string;
@@ -13,11 +14,15 @@ export {
   createReadonlyKintoneClient,
   explainQuery,
   KsqlEngineError,
+  runBatch,
   runQuery,
 };
 
 export type {
   CreateReadonlyKintoneClientOptions,
+  BatchResult,
+  BatchResultItem,
+  BatchStatementInfo,
   ExplainResult,
   QueryColumn,
   QueryMetrics,
@@ -36,5 +41,6 @@ export type {
   ReadonlyNumberRoundingMode,
   ReadonlyProcessStatuses,
   ReadonlyProcessStatusState,
+  RunBatchOptions,
   RunQueryOptions,
 } from "./publicTypes";

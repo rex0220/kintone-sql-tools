@@ -86,6 +86,14 @@ export interface RunQueryOptions {
   cursorMaxActive?: number;
 }
 
+export interface RunBatchOptions {
+  client: ReadonlyKintoneClient;
+  maxRecords?: number;
+  onLimitReached?: "error" | "truncate";
+  fetchParallel?: number;
+  cursorMaxActive?: number;
+}
+
 export interface QueryColumn {
   name: string;
   valueType: "string";
@@ -115,6 +123,34 @@ export interface QueryResult {
     errorCount: number;
   };
   metrics: QueryMetrics;
+}
+
+/** Named now so a future DML VALIDATE ONLY result can extend this union additively. */
+export type BatchResultItem = QueryResult;
+
+export interface BatchStatementInfo {
+  readonly index: number;
+  readonly type: string;
+  readonly status: "success" | "error" | "skipped";
+  readonly tempTable?: string;
+  readonly rowCount?: number;
+  readonly resultIndex?: number;
+  readonly error?: {
+    readonly code: string;
+    readonly message: string;
+  };
+  readonly skippedReason?: string;
+}
+
+export interface BatchResult {
+  readonly type: "batch";
+  readonly batch: true;
+  readonly ok: boolean;
+  readonly statementCount: number;
+  readonly statements: readonly BatchStatementInfo[];
+  /** 各要素の metrics は文別計測ではなく、同一のバッチ全体集計値。 */
+  readonly results: readonly BatchResultItem[];
+  readonly warnings: readonly string[];
 }
 
 export interface ExplainResult {

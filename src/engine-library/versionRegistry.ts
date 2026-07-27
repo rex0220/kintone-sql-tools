@@ -3,6 +3,7 @@ export type EnginePublicApi = {
   readonly createReadonlyKintoneClient: (...args: never[]) => unknown;
   readonly explainQuery: (...args: never[]) => unknown;
   readonly KsqlEngineError: unknown;
+  readonly runBatch: (...args: never[]) => unknown;
   readonly runQuery: (...args: never[]) => unknown;
 };
 
