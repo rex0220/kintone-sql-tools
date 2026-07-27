@@ -63,6 +63,7 @@ import {
 import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
+import { statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
@@ -734,7 +735,7 @@ export async function execute(
   const guardedClient = wrapClientWithSearchAbort(
     countedClient,
     collector,
-    !isSelectLikeStatement(stmt)
+    !isSelectLikeStatement(stmt) || statementContainsOuterJoin(stmt)
   );
   const result = await executeParsedStatement(
     stmt,
@@ -861,13 +862,22 @@ function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): 
   };
 }
 
+const SEARCH_ABORT_FAIL_CLOSED = Symbol("searchAbortFailClosed");
+type SearchAbortGuardedClient = KintoneClient & {
+  [SEARCH_ABORT_FAIL_CLOSED]?: true;
+};
+
 function wrapClientWithSearchAbort(
   client: KintoneClient,
   collector: SearchAbortCollector,
   failClosed: boolean
 ): KintoneClient {
+  if (failClosed && (client as SearchAbortGuardedClient)[SEARCH_ABORT_FAIL_CLOSED]) {
+    return client;
+  }
   return {
     ...client,
+    ...(failClosed ? { [SEARCH_ABORT_FAIL_CLOSED]: true as const } : {}),
     getRecords: async (params) => {
       const response = await client.getRecords(params);
       if (response.searchAborted) {
@@ -1492,7 +1502,11 @@ export async function executeBatch(
       const statementClient = wrapClientWithSearchAbort(
         countedClient,
         searchAbortCollector,
-        info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH"
+        (
+          info.statementType !== "SELECT"
+          && info.statementType !== "UNION"
+          && info.statementType !== "WITH"
+        ) || statementContainsOuterJoin(statements[i])
       );
       const cursorScope = wrapClientWithCursorScope(statementClient);
       const outcome = await runWithDeadline(
