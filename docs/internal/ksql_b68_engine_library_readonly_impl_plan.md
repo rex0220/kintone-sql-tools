@@ -549,5 +549,6 @@ codex 側も同じ破壊を実施し、**復元前後の SHA-256 一致**まで�
 
 ### ゲート
 
-`npm test` 188 suites / 4,839 tests ＋ CLI 26 green、snapshot 22 不変、
+`npm test` **186 suites / 4,813 tests** ＋ CLI 26 green、snapshot 22 不変、
+（codex 報告の 188 / 4,839 は一時テストを含んだ値。**コミット後の実測値が正**）
 `engine:bundle-guard` 3 形 `forbidden=0`、`engine:declaration-smoke` green。
