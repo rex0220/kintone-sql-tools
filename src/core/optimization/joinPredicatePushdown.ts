@@ -7,6 +7,7 @@ import type {
 import { numberLiteralText } from "../../types/ast";
 import { whereToKintone } from "../../converter/whereToKintone";
 import { resolveFieldSemantics } from "../fieldSemantics";
+import { isKlike, type KlikeExpr } from "../like";
 import { classifyWhereCapability } from "./whereCapability";
 
 export type JoinPushdownRelation = "exact" | "superset";
@@ -46,6 +47,8 @@ export interface JoinPushdownItem {
 
 export interface JoinPushdownPlan {
   readonly items: readonly JoinPushdownItem[];
+  readonly appliedKlikes: ReadonlySet<KlikeExpr>;
+  readonly allKlikes: readonly KlikeExpr[];
 }
 
 export interface JoinPushdownLeafClassification {
@@ -151,15 +154,24 @@ export function buildJoinPushdownPlan(
   where: WhereExpr | null,
   sources: readonly JoinPushdownSource[]
 ): JoinPushdownPlan {
-  if (where === null) return Object.freeze({ items: Object.freeze([]) });
-  const fragments = mergeAndFragments(classifyTree(where, sources));
+  const allKlikes = new Set<KlikeExpr>();
+  collectKlikes(where, allKlikes);
+  const fragments = where === null
+    ? []
+    : mergeAndFragments(classifyTree(where, sources));
   const items = fragments.map((fragment) => Object.freeze({
     targetAlias: fragment.owner.alias,
     appId: fragment.owner.appId,
     predicate: fragment.predicate,
     relation: fragment.relation,
   }));
-  return Object.freeze({ items: Object.freeze(items) });
+  const appliedKlikes = new Set<KlikeExpr>();
+  for (const item of items) collectKlikes(item.predicate, appliedKlikes);
+  return Object.freeze({
+    items: Object.freeze(items),
+    appliedKlikes,
+    allKlikes: Object.freeze([...allKlikes]),
+  });
 }
 
 /**
@@ -171,32 +183,20 @@ export function buildJoinPushdownStep2Plan(
   where: WhereExpr | null,
   sources: readonly JoinPushdownSource[]
 ): JoinPushdownPlan {
-  if (where === null) return Object.freeze({ items: Object.freeze([]) });
-  const fragments = mergeAndFragments(classifyStep2AndLeaves(where, sources));
+  const fragments = where === null
+    ? []
+    : mergeAndFragments(classifyStep2AndLeaves(where, sources));
   const items = fragments.map((fragment) => Object.freeze({
     targetAlias: fragment.owner.alias,
     appId: fragment.owner.appId,
     predicate: fragment.predicate,
     relation: fragment.relation,
   }));
-  return Object.freeze({ items: Object.freeze(items) });
-}
-
-/**
- * 型メタ取得前に Step 2 候補の有無だけを調べる。
- * false positive は許すが、OR / GROUP 配下を候補にして Step 3 を先行させない。
- */
-export function hasJoinPushdownStep2Candidate(where: WhereExpr | null): boolean {
-  if (where === null) return false;
-  if (where.type === "BINARY") {
-    return where.op === "="
-      && where.left.type === "FIELD"
-      && where.right.type === "STRING"
-      && where.right.value !== "";
-  }
-  return where.type === "LOGICAL"
-    && where.op === "AND"
-    && (hasJoinPushdownStep2Candidate(where.left) || hasJoinPushdownStep2Candidate(where.right));
+  return Object.freeze({
+    items: Object.freeze(items),
+    appliedKlikes: new Set<KlikeExpr>(),
+    allKlikes: Object.freeze([]),
+  });
 }
 
 /**
@@ -207,7 +207,7 @@ export function serializeJoinPushdownItem(
   item: JoinPushdownItem,
   sources: readonly JoinPushdownSource[]
 ): string {
-  assertStep2PredicateOwnership(item.predicate, item, sources);
+  assertPredicateOwnership(item.predicate, item, sources);
   return whereToKintone(item.predicate);
 }
 
@@ -233,28 +233,37 @@ function classifyStep2AndLeaves(
   }];
 }
 
-function assertStep2PredicateOwnership(
+function assertPredicateOwnership(
   predicate: WhereExpr,
   item: JoinPushdownItem,
   sources: readonly JoinPushdownSource[]
 ): void {
-  if (predicate.type === "LOGICAL" && predicate.op === "AND") {
-    assertStep2PredicateOwnership(predicate.left, item, sources);
-    assertStep2PredicateOwnership(predicate.right, item, sources);
-    return;
-  }
-  if (predicate.type !== "BINARY"
-    || predicate.op !== "="
-    || predicate.left.type !== "FIELD"
-    || predicate.right.type !== "STRING") {
-    throw joinOwnershipError(item, "predicate shape is outside the Step 2 serializer contract");
-  }
-  const owner = resolveJoinFieldOwner(predicate.left, sources);
-  if (owner.status !== "OWNED"
-    || owner.alias !== item.targetAlias
-    || owner.appId !== item.appId
-    || owner.source.sourceKind !== "APP") {
-    throw joinOwnershipError(item, `field ${predicate.left.field} is not uniquely owned by the target`);
+  switch (predicate.type) {
+    case "LOGICAL":
+      assertPredicateOwnership(predicate.left, item, sources);
+      assertPredicateOwnership(predicate.right, item, sources);
+      return;
+    case "GROUP":
+      assertPredicateOwnership(predicate.expr, item, sources);
+      return;
+    case "BINARY": {
+      if (predicate.left.type !== "FIELD" || containsFieldReference(predicate.right)) {
+        throw joinOwnershipError(item, "predicate contains a non-target or RHS field reference");
+      }
+      const owner = resolveJoinFieldOwner(predicate.left, sources);
+      if (owner.status !== "OWNED"
+        || owner.alias !== item.targetAlias
+        || owner.appId !== item.appId
+        || owner.source.sourceKind !== "APP") {
+        throw joinOwnershipError(item, `field ${predicate.left.field} is not uniquely owned by the target`);
+      }
+      return;
+    }
+    case "NOT":
+    case "NULL_CHECK":
+    case "EXISTS":
+    case "BOOLEAN":
+      throw joinOwnershipError(item, "predicate shape is outside the Phase A serializer contract");
   }
 }
 
@@ -283,6 +292,9 @@ function classifyTree(
       const left = classifyTree(where.left, sources);
       const right = classifyTree(where.right, sources);
       if (where.op === "AND") return mergeAndFragments([...left, ...right]);
+      // KLIKE は applied node が residual 評価で無条件 true になるため、
+      // exact/superset の通常述語と OR 合成できない（§5.5）。
+      if (containsKlike(where)) return [];
       if (left.length !== 1 || right.length !== 1) return [];
       const a = left[0];
       const b = right[0];
@@ -463,4 +475,41 @@ function isCanonicalDateTime(value: string): boolean {
   return Number(match[2]) <= 23
     && Number(match[3]) <= 59
     && Number(match[4]) <= 59;
+}
+
+function collectKlikes(where: WhereExpr | null, out: Set<KlikeExpr>): void {
+  if (where === null) return;
+  if (isKlike(where)) {
+    out.add(where);
+    return;
+  }
+  switch (where.type) {
+    case "LOGICAL":
+      collectKlikes(where.left, out);
+      collectKlikes(where.right, out);
+      return;
+    case "NOT":
+    case "GROUP":
+      collectKlikes(where.expr, out);
+      return;
+    case "BINARY":
+    case "NULL_CHECK":
+    case "EXISTS":
+    case "BOOLEAN":
+      return;
+  }
+}
+
+function containsKlike(where: WhereExpr): boolean {
+  const found = new Set<KlikeExpr>();
+  collectKlikes(where, found);
+  return found.size > 0;
+}
+
+function containsFieldReference(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(containsFieldReference);
+  const record = value as Record<string, unknown>;
+  if (record.type === "FIELD" || record.type === "FIELD_REF") return true;
+  return Object.values(record).some(containsFieldReference);
 }

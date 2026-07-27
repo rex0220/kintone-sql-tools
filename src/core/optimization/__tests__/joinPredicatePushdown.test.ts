@@ -307,6 +307,31 @@ describe("B76 §5.4 tree composition", () => {
     expect(plan.items).toEqual([]);
   });
 
+  test.each(["KLIKE", "NOT KLIKE"] as const)(
+    "%s を含む同一 alias OR は subtree 全体を採用しない",
+    (op) => {
+      const plan = buildJoinPushdownPlan(
+        where(`SELECT * FROM APP100 AS a WHERE a.text ${op} 'urgent' OR a.text = 'A'`),
+        [left, right]
+      );
+      expect(plan.items).toEqual([]);
+      expect(plan.appliedKlikes.size).toBe(0);
+      expect(plan.allKlikes).toHaveLength(1);
+    }
+  );
+
+  test("AND spine の KLIKE は元 node identity のまま plan に統合する", () => {
+    const expr = where(
+      "SELECT * FROM APP100 AS a WHERE a.text KLIKE 'urgent' AND a.$id = 1"
+    );
+    const klike = expr.type === "LOGICAL" ? expr.left : null;
+    const plan = buildJoinPushdownPlan(expr, [left, right]);
+    expect(plan.items).toHaveLength(1);
+    expect(klike).not.toBeNull();
+    expect(plan.appliedKlikes.has(klike as any)).toBe(true);
+    expect(plan.allKlikes[0]).toBe(klike);
+  });
+
   test("NOT は対象外、AND の他の安全因子へは影響させない", () => {
     expect(buildJoinPushdownPlan(
       where("SELECT * FROM APP100 AS a WHERE NOT (a.$id = 1)"),

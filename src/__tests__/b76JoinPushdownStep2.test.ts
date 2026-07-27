@@ -127,9 +127,9 @@ test("B76 Step 2: rows parity を保ち、main fetch だけ DATE/TIME/DATETIME/T
     "SELECT a.$id, b.件名 FROM APP76100 a INNER JOIN APP76200 b "
     + "ON a.顧客ID = b.顧客ID ";
 
-  // GROUP は Step 3 対象なので、同値な全件 baseline として pushdown されない。
+  // unsafe な OR 辺を加え、同値な全件 baseline として subtree 全体を非採用にする。
   const before = await execute(
-    `${baseSql}WHERE (${predicate})`,
+    `${baseSql}WHERE (${predicate}) OR a.$id = 0`,
     baselineClient,
     { cacheContext: "b76-step2-before" }
   ) as SelectResult;
