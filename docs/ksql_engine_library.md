@@ -216,6 +216,30 @@ guest / proxy route を推測、補正、再構築しません。`openCursor()` 
 malformed SQL は `PARSE_ERROR` です。allowlist と、write methodを持たない client
 射影の二重境界で mutation API を呼ばないようにします。
 
+### `VALIDATE` のメタデータ完全性と内訳集計
+
+既存レコードの `VALIDATE` が検証できる制約は、client の `getFields()` が返す
+`ReadonlyFieldInfo` に依存します。`required`、`minLength`、`maxLength`、
+`minValue`、`maxValue`、`optionOrder` を渡さない場合、`VALIDATE` は該当する制約を
+検証せず、違反があっても0件を返すことがあります。
+
+`createReadonlyKintoneClient()` は `/k/v1/app/form/fields.json` の制約メタデータを
+自動的に渡すため、factory 利用者の変更は不要です。BYO readonly client は同 API の
+値を `ReadonlyFieldInfo` へ渡してください。
+
+`validateStats.errorCount` は集約前の違反総数で、結果行の `$err_count` 合計と一致します。
+`$err_code` 別などの内訳は `COUNT(*)` ではなく `SUM($err_count)` で集計してください。
+サブテーブルの同一違反は1行へまとまり、本数が `$err_count` に入るためです。たとえば
+KPI カードに `errorCount`、隣の棒グラフに `$err_code` 別の `COUNT(*)` を置くと、
+同じ画面で合計が食い違って見えます。
+
+```sql
+VALIDATE APP100 INTO #err;
+SELECT $err_code, SUM($err_count) AS errorCount
+FROM #err
+GROUP BY $err_code;
+```
+
 ### `runBatch` の成功・失敗契約
 
 `runBatch()` は文が1つでも失敗したら `KsqlEngineError` を throw し、
