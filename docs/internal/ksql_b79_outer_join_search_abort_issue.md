@@ -1,7 +1,7 @@
 # B79 外部結合＋検索打ち切りで誤った値を返す（silent wrong result）
 
 - 起票: 2026-07-27（B76 Phase A Step 4 のレビュー中に発見）
-- ステータス: 🔧 **実装完了・未リリース（2026-07-27）＝案 A**。`src/core/outerJoinSearchAbortGuard.ts` を新設し AST を再帰走査して外部結合を検出、fail-closed 判定へ配線。**v3.27.0（B80 と同一リリース）予定**。
+- ステータス: ✅ **リリース済み（v3.27.0・2026-07-27）＝案 A**。feat PR #295→tag v3.27.0→GitHub Release→npm publish（latest 3.27.0）。**実機 PASS**＝ブラウザ プラグイン（`LEFT JOIN` が正常に結果を返す＝過剰拒否なし）＋デプロイ済み MCP v3.27.0。B80 と同一リリース。
 - 関連: [B76 Phase A 仕様 §16](ksql_b76_join_pushdown_phase_a_spec.md) / B7（プラグイン検索打ち切り検出・v3.10.0）
 
 ## 1. 事象
