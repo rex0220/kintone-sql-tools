@@ -265,3 +265,56 @@ SELECT ... FROM #cur a INNER JOIN APP200 t ON ... WHERE a.受注日 = THIS_MONTH
 
 **実機確認**: ダッシュボード（Pro）が engine library を使っているため、
 **リリース後に Pro 側で用途①②が実際に書けるか**を確認するのが最終ゲートになる。
+
+---
+
+## 【Step 1 レビュー・2026-07-27】完了
+
+### 実装の要点
+
+- ライブラリの手書き allowlist を廃し、**`isReadOnlyStatement()`（意味的判定）へ一本化**
+- 結果形の分類は **`isRowReturningReadOnlyStatement()` として `src/core/` に置いた**。
+  read-only かどうかの判定とは**別の軸**（何を返せるか）なので分離してある
+- `explainQuery` は **`isExplainableReadOnlyStatement()`** で従来契約を独立させた。
+  `runQuery` の拡張が EXPLAIN の受理範囲を巻き添えにしない
+- `statementHasApplyBlocks()` を **`src/core/applyGuard.ts` へ移設**し MCP と共有
+
+### 独立検証（7 形すべて期待どおり）
+
+| # | 形 | 結果 |
+|---|---|---|
+| Z1 | 単文 `VALIDATE` | ✅ 通り **`validateStats` が載る** |
+| Z2 | 通常 `SELECT` | ✅ **`validateStats` が付かない** |
+| Z3 | **`APPLY` ＋ `VALIDATE ONLY`** | ✅ **拒否・API 呼び出し 0** |
+| Z4 | 書き込み DML 3 形 | ✅ 拒否・API 呼び出し 0 |
+| Z5 | `CREATE TEMP TABLE` / `ASSERT` | ✅ 拒否・**`runBatch` を名指ししない** |
+| Z6 | `SELECT` / `SHOW APPS` / `DESCRIBE` / `EXPLAIN` | ✅ 非破壊 |
+| Z7 | `IMPORT` | ✅ 既定で拒否 |
+
+**Z3 が本 Step の核心。**`VALIDATE ONLY` を付けると `writesKintone=false` になり
+分類器を通ってしまうため、追加ゲートが無いと APPLY が素通りする。塞がっていることを実測した。
+
+### bundle 汚染がないこと
+
+`src/mcp/` を引き込んでいないことを、guard だけでなく**成果物の中身**でも確認した。
+
+| 検索語 | 件数 |
+|---|---:|
+| `ksql_app_metadata` / `ksql_mutate` / `modelcontextprotocol` / `APPLY mutation is disabled in MCP` | **すべて 0** |
+
+`engine-bundle-guard` は CJS / ESM / UMD とも `forbidden=0`。
+MCP 側の `tools.test.ts` 117 件も green で、移設による回帰なし。
+
+### 既知の一時状態（Step 2 で解消する）
+
+`runQuery` が `CREATE TEMP TABLE` 等を拒否するメッセージは、
+**まだ存在しない `runBatch` を名指ししていない**（「単文かつ行を返す read-only query のみ」）。
+Step 2 で `runBatch` が実在した時点で案内を追加する。
+
+**未解消のままリリースしないこと。**「存在しない API を案内する」不整合（§2.8）を
+直すのが本課題の一部であり、誘導先を示さない拒否メッセージは中途半端である。
+
+### ゲート
+
+`npm test` 184 suites / 4,777 tests ＋ CLI 26 green、snapshot 22 不変、
+`engine:bundle-guard` / `engine:declaration-smoke` green、版同期 v3.28.0 green。

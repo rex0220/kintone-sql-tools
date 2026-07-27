@@ -80,6 +80,7 @@ export async function runQuery(
       columns: result.columns.map((name) => toPublicColumn(name, columnMeta)),
       rowCount: result.rowCount,
       warnings: [...(result.warnings ?? [])],
+      ...(result.validateStats ? { validateStats: result.validateStats } : {}),
       metrics: mapMetrics(result.metrics),
     };
   } catch (error) {

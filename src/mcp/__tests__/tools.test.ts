@@ -1,12 +1,17 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parseSqlStatement, type ExecuteOptions, type ExecuteResult, type KintoneClient } from "../../core";
+import {
+  parseSqlStatement,
+  statementHasApplyBlocks,
+  type ExecuteOptions,
+  type ExecuteResult,
+  type KintoneClient,
+} from "../../core";
 import type { CreateKsqlRuntimeInput, KsqlRuntime, KsqlRuntimeServerOptions } from "../../node/runtime";
 import { createServer } from "../index";
 import {
   createKsqlMcpTools,
   MCP_IMPORT_SOURCE_REQUIRED_MESSAGE,
-  statementHasApplyBlocks,
   toMcpImportError,
 } from "../tools";
 import {

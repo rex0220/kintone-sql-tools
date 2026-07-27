@@ -274,6 +274,31 @@ test("BYO guest route survives projection", async () => {
   ]);
 });
 
+test("VALIDATE returns validateStats and uses real optionOrder metadata shape", async () => {
+  const getRecords = jest.fn(async () => ({
+    records: [{ $id: field("1"), choice: field("invalid") }],
+  }));
+  const getFields = jest.fn(async () => [{
+    code: "choice",
+    label: "choice",
+    fieldType: "DROP_DOWN",
+    optionOrder: { valid: 0 },
+  }]);
+  const client = byoClient({ getRecords, getFields });
+
+  const result = await runQuery("VALIDATE APP6701", { client });
+
+  expect(result.validateStats).toEqual({ errorRecords: 1, errorCount: 1 });
+  expect(result.rowCount).toBe(1);
+  expect(result.rows[0]).toMatchObject({
+    $id: "1",
+    $err_field: "choice",
+    $err_code: "ERR_CHOICE_INVALID",
+  });
+  expect(getRecords).toHaveBeenCalled();
+  expect(getFields).toHaveBeenCalledWith(6701);
+});
+
 test("EXPLAIN permits field metadata only and performs no records or Cursor calls", async () => {
   const getRecords = jest.fn(async () => ({ records: [] }));
   const openCursor = jest.fn(async () => {

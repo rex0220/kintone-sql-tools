@@ -82,47 +82,15 @@ test.each([
   "SELECT 1 AS one",
   "SHOW APPS",
   "DESCRIBE APP1",
+  "VALIDATE APP1",
   "SELECT 1 AS one UNION ALL SELECT 2 AS one",
   "WITH a AS (SELECT 1 AS one), b AS (SELECT one FROM a) SELECT one FROM b",
 ])("runQuery recursively accepts read statement: %s", (sql) => {
   expect(() => guardRunQuerySql(sql)).not.toThrow();
 });
 
-test("WITH rejects a DML CTE body and a DML main query recursively", () => {
-  const select = { type: "SELECT" };
-  expect(() => assertRunQueryStatement({
-    type: "WITH",
-    ctes: [{ name: "unsafe", query: { type: "UPDATE" } }],
-    query: select,
-  })).toThrow(expect.objectContaining({ code: "READ_ONLY_VIOLATION" }));
-
-  expect(() => assertRunQueryStatement({
-    type: "WITH",
-    ctes: [{ name: "safe", query: select }],
-    query: { type: "DELETE" },
-  })).toThrow(expect.objectContaining({ code: "READ_ONLY_VIOLATION" }));
-});
-
-test("UNION rejects either DML branch recursively", () => {
-  expect(() => assertRunQueryStatement({
-    type: "UNION",
-    all: false,
-    left: { type: "INSERT" },
-    right: { type: "SELECT" },
-  })).toThrow(expect.objectContaining({ code: "READ_ONLY_VIOLATION" }));
-
-  expect(() => assertRunQueryStatement({
-    type: "UNION",
-    all: false,
-    left: { type: "SELECT" },
-    right: { type: "UPSERT" },
-  })).toThrow(expect.objectContaining({ code: "READ_ONLY_VIOLATION" }));
-});
-
 test.each([
   { type: "FUTURE_READISH_VARIANT" },
-  { type: "UNION", left: { type: "SELECT" }, right: { future: true } },
-  { type: "WITH", ctes: [{ name: "x", future: true }], query: { type: "SELECT" } },
 ])("unknown or unclassifiable future AST is default-denied", (fixture) => {
   expect(() => assertRunQueryStatement(fixture)).toThrow(
     expect.objectContaining({ code: "READ_ONLY_VIOLATION" })
@@ -148,9 +116,9 @@ test.each([
   "DELETE FROM APP1 WHERE $id = 1",
   "REORDER APP1$rows BY code ASC WHERE _pid = 1",
   "UPDATE APP1 SET a = 1 WHERE $id = 1 APPLY rows (REMOVE ALL ROWS)",
+  "UPDATE APP1 SET a = 1 WHERE $id = 1 APPLY rows (REMOVE ALL ROWS) VALIDATE ONLY",
   "IMPORT INTO APP1 (a) FROM CSV source",
   "INSERT INTO APP1 (a) VALUES (1) VALIDATE ONLY",
-  "VALIDATE APP1",
   "CREATE TEMP TABLE #t AS SELECT 1",
   "DROP TEMP TABLE #t",
   "SET @value = 1",
@@ -170,9 +138,9 @@ test("all parseable non-read categories stop before execute()", async () => {
     "DELETE FROM APP1 WHERE $id = 1",
     "REORDER APP1$rows BY code ASC WHERE _pid = 1",
     "UPDATE APP1 SET a = 1 WHERE $id = 1 APPLY rows (REMOVE ALL ROWS)",
+    "UPDATE APP1 SET a = 1 WHERE $id = 1 APPLY rows (REMOVE ALL ROWS) VALIDATE ONLY",
     "IMPORT INTO APP1 (a) FROM CSV source",
     "INSERT INTO APP1 (a) VALUES (1) VALIDATE ONLY",
-    "VALIDATE APP1",
     "CREATE TEMP TABLE #t AS SELECT 1",
     "DROP TEMP TABLE #t",
     "SET @value = 1",

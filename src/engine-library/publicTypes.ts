@@ -110,6 +110,10 @@ export interface QueryResult {
   columns: readonly QueryColumn[];
   rowCount: number;
   warnings: readonly string[];
+  validateStats?: {
+    errorRecords: number;
+    errorCount: number;
+  };
   metrics: QueryMetrics;
 }
 

@@ -65,7 +65,7 @@ beforeEach(() => {
   mockedExecute.mockReset();
 });
 
-test("runQuery copies SELECT into the stable query envelope", async () => {
+test("runQuery copies VALIDATE stats into the stable query envelope when present", async () => {
   const internal = {
     type: "SELECT",
     rows: [{ b: 2, a: "x" }],
@@ -77,7 +77,7 @@ test("runQuery copies SELECT into the stable query envelope", async () => {
   } as unknown as SelectResult;
   mockedExecute.mockResolvedValue(internal);
 
-  const result = await runQuery("SELECT b, a FROM APP1", {
+  const result = await runQuery("VALIDATE APP1", {
     client: makeClient(),
     maxRecords: 100,
     onLimitReached: "truncate",
@@ -94,6 +94,7 @@ test("runQuery copies SELECT into the stable query envelope", async () => {
     ],
     rowCount: 1,
     warnings: ["truncated"],
+    validateStats: { errorRecords: 5, errorCount: 6 },
     metrics: {
       recordGetCalls: 3,
       fetchedRows: 123,
@@ -101,10 +102,9 @@ test("runQuery copies SELECT into the stable query envelope", async () => {
       cursorRecordsScanned: 777,
     },
   });
-  expect(result).not.toHaveProperty("validateStats");
   expect(result.metrics).not.toHaveProperty("getCalls");
   expect(mockedExecute).toHaveBeenCalledWith(
-    "SELECT b, a FROM APP1",
+    "VALIDATE APP1",
     expect.any(Object),
     {
       captureColumnMeta: true,
@@ -130,6 +130,7 @@ test("runQuery preserves columns and supplies fixed metrics for zero rows", asyn
 
   expect(result.rows).toEqual([]);
   expect(result.columns).toEqual([{ name: "empty_value", valueType: "string" }]);
+  expect(result).not.toHaveProperty("validateStats");
   expect(result.metrics).toEqual({
     recordGetCalls: 0,
     fetchedRows: 0,

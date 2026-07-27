@@ -15,10 +15,10 @@ import {
   type ExecuteResult,
   type KintoneClient,
   type SelectResult,
+  statementHasApplyBlocks,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
-import type { Statement } from "../types/ast";
 import { isRelativeDateFunctionName } from "../core/relativeDateFunction";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import { isImportCapabilityGateError } from "../import/importGateError";
@@ -330,15 +330,6 @@ function toDmlValidationPayload(result: DmlValidationResult) {
     ...(result.guards ? { guards: result.guards } : {}),
     ...(result.deletedRows ? { deletedRows: result.deletedRows } : {}),
   };
-}
-
-/** APPLY を持ち得る文種を一箇所で列挙し、将来の UPSERT 分岐追加も fail-closed にする。 */
-export function statementHasApplyBlocks(statement: Statement): boolean {
-  const target = statement.type === "EXPLAIN" ? statement.query : statement;
-  if (target.type !== "UPDATE" && target.type !== "INSERT" && target.type !== "UPSERT") return false;
-  const candidate = target as unknown as Record<string, unknown>;
-  return ["applyBlocks", "onInsertApplyBlocks", "onUpdateApplyBlocks"]
-    .some((key) => Array.isArray(candidate[key]) && candidate[key].length > 0);
 }
 
 function containsRelativeDateFunction(value: unknown): boolean {

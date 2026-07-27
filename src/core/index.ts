@@ -7,7 +7,17 @@ export { parseSqlStatement, parseSqlStatements } from "./sql";
 export { validateKlikeStatement, KlikeValidationError } from "./klikeValidation";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES, MAX_BATCH_VARIABLES } from "./batch";
 export { normalizeBatchVariableName, normalizeBatchVariables, validateDeclaredBatchVariables } from "./batchVariables";
-export { getInsertValuesCount, getStatementType, isDmlType, writesKintone, isReadOnlyStatement, requiresCompleteInput } from "./dmlGuard";
+export {
+  getInsertValuesCount,
+  getStatementType,
+  isDmlType,
+  writesKintone,
+  isReadOnlyStatement,
+  isRowReturningReadOnlyStatement,
+  isExplainableReadOnlyStatement,
+  requiresCompleteInput,
+} from "./dmlGuard";
+export { statementHasApplyBlocks } from "./applyGuard";
 export type { BatchAnalysis, StatementAnalysis, BatchVariableAnalysis } from "./batch";
 export { formatDisplayText } from "./displayFormat";
 export { resolveFieldSemantics, syntheticSemantics, withFieldSemanticSource } from "./fieldSemantics";
