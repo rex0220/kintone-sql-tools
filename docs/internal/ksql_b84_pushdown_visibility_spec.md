@@ -11,7 +11,11 @@
 
 ### 0.1 分類器を直積で叩いて表が出た
 
-`classifyJoinPushdownLeaf` へ **20 型 × 8 演算子 = 160 通り**を流し、**34ms** で表が出た。
+`classifyJoinPushdownLeaf` へ**手書きで選んだ 19 型 × 8 演算子**を流し、**34ms** で表が出た。
+
+> **【訂正 2026-07-28】** 初版は「20 型 × 160 通り」と書いたが**表は 19 行**（貼り付け時に `RECORD_NUMBER` を落とした）。
+> さらに**この 19 型は私の手書き選択**であり、**§3.1 で要求している「実装から導く」に自分で違反していた**。
+> **下表は生成が成立することを示す例示**であって、公開する型集合の正本ではない。正本の規則は §3.1。
 
 ```
 型                           =       !=        <        >       <=       >=       in   not in
@@ -87,10 +91,41 @@ Pro が「単一表では押し下がるのに JOIN では」と混乱したの�
 
 ## 3. 実装
 
-### 3.1 生成・照合テスト
+### 3.1 【2026-07-28 確定】型集合の規則
 
-- 型の集合は**実装から導く**（`classifyWhereCapability` が扱う型・`fieldTypes` に現れる型）。
-  手書き列挙にすると B83 と同じ drift を起こす
+**分類器のソースに現れる kintone フィールド型リテラルを正とする。**
+
+- 対象: `src/core/optimization/whereCapability.ts` と
+  `src/core/optimization/joinPredicatePushdown.ts`
+- **`KSQL_` 接頭辞の派生型は除外**（実フィールド型ではない）
+- 実測では **25 型**が該当した
+  （`CALC` `CATEGORY` `CHECK_BOX` `CREATED_TIME` `CREATOR` `DATE` `DATETIME` `DROP_DOWN`
+  `FILE` `GROUP_SELECT` `LINK` `MODIFIER` `MULTI_LINE_TEXT` `MULTI_SELECT` `NUMBER`
+  `ORGANIZATION_SELECT` `RADIO_BUTTON` `RECORD_NUMBER` `RICH_TEXT` `SINGLE_LINE_TEXT`
+  `STATUS` `STATUS_ASSIGNEE` `TIME` `UPDATED_TIME` `USER_SELECT`）
+
+**分類器が新しい型を扱い始めたら、表に無い型が現れてテストが落ちる。**これが §4 受入 #7 の実体である。
+
+**表に載らない型は「押し下がらない」**と文章で書く。分類器の既定が `unsafe` なので、
+**表を全 kintone 型で網羅する必要はない**。
+
+> ソース走査は脆いという見方もあるが、**本番コードに触らずに drift を止められる**利点が勝る。
+> 定数を新設して手で保守すると、B83 と同じ「手書きした事実が実装から独立する」問題を再生する。
+
+### 3.2 `RECORD_NUMBER` は表に載せる（`$id` とは別物）
+
+**`RECORD_NUMBER` は実在のフィールド型**なので表に載せる。
+一方 **`$id` はフィールド型ではなく擬似フィールド名**で、別経路（`isSafeIdComparison`）を通る。
+
+表では `RECORD_NUMBER` が「押し下がらない」と出るため、
+**`$id` は押し下がる**ことを**同じ節で明示**しないと利用者が混乱する。
+
+> 理由も添えること＝**`$id` は正準なレコード ID であると証明できる**が、
+> JOIN 中の `RECORD_NUMBER` フィールドは**別アプリ由来かもしれず**同じ保証がない。
+
+### 3.3 生成・照合テスト
+
+- **型の集合は §3.1 の規則で導く**（手書き列挙は禁止）
 - 演算子は `=` `!=` `<` `>` `<=` `>=` `in` `not in`
 - 各組み合わせで `classifyJoinPushdownLeaf` を呼び、`exact` / `superset` / `unsafe` / `-` を得る
 - **公開文書から表を抽出して照合**する。差があればテストが落ちる
@@ -98,7 +133,7 @@ Pro が「単一表では押し下がるのに JOIN では」と混乱したの�
 抽出は `docs/ksql_language_reference.md` の**マーカー付きコードブロック**を読む。
 `scripts/engine-docs-examples-smoke.mjs` が docs を読む前例がある。
 
-### 3.2 公開文書の構成
+### 3.4 公開文書の構成
 
 言語リファレンスに**押し下げの節を新設**する。現状は相対日付・KLIKE・JOIN の各節に分散しており、
 **横断的に読めない**。
@@ -110,7 +145,7 @@ Pro が「単一表では押し下がるのに JOIN では」と混乱したの�
 5. **関数で包むと押し下げ不可**＝`DATE_FORMAT(field, ...)` は kintone クエリとして表現できない
 6. **選択系は `in` を使う**＝`=` は kintone のクエリ文法に無い（B83 で言語リファレンスへ追記済み）
 
-### 3.3 読み方の補足も書く
+### 3.5 読み方の補足も書く
 
 `exact` / `superset` の違いは利用者には**実用上ほぼ同じ**（どちらも押し下がる）。
 **内部の安全性区分**なので、公開文書では **「押し下がる / 押し下がらない」の2値**に落として書き、
