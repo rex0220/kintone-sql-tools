@@ -28,6 +28,9 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
       "WHERE server-only/fail-closed"
     );
     expect(KSQL_MCP_INSTRUCTIONS).toContain(
+      "INNER JOIN direct-APP exact pushdown supported"
+    );
+    expect(KSQL_MCP_INSTRUCTIONS).toContain(
       "local LOGINUSER is empty on all surfaces"
     );
     expect(KSQL_MCP_INSTRUCTIONS).not.toContain(
@@ -122,5 +125,27 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
     expect(functionSection).toContain("実行環境のローカルタイムゾーン");
     expect(functionSection).toContain("WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN");
     expect(functionSection).not.toContain("`KORDER BY`（native・Cursor とも）");
+  });
+
+  test("B76 Phase B fifth allow-form and rejection boundary are embedded in MCP docs", () => {
+    const functionSection = resolveKsqlDocsSection(
+      "language-reference/05-string-number-functions"
+    );
+    const whereSection = resolveKsqlDocsSection("language-reference/06-where");
+    const joinSection = resolveKsqlDocsSection("language-reference/07-join");
+
+    for (const text of [languageSource, functionSection, whereSection, joinSection]) {
+      expect(text).toContain("第5-W");
+      expect(text).toContain("第5-L");
+      expect(text).toContain("cross-alias `OR`");
+      expect(text).toContain("LEFT");
+      expect(text).toContain("RIGHT");
+    }
+    expect(functionSection).toContain("使える SELECT の形は次の4つ");
+    expect(functionSection).toContain("複数 alias");
+    expect(functionSection).toContain("GROUP_SELECT");
+    expect(joinSection).toContain("plan status: rejected");
+    expect(joinSection).toContain("client evaluation: forbidden");
+    expect(joinSection).not.toContain("JOIN では使用できません");
   });
 });

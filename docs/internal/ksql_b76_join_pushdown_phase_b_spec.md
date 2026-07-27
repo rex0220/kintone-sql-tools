@@ -747,3 +747,142 @@ Phase A §5.5 で見つけた「`KLIKE ∨ superset` の偽陽性行が residual
 
 5 Step / 5.0〜7.5 人日を妥当と判断する。計画値 5〜8 人日の範囲内。
 「単純な guard 解除ではないため 2〜3 人日には縮めていない」という判断も正しい。
+
+
+## 【Step 2 レビュー・2026-07-27】一時的な EXPLAIN 不整合（Step 4 で解消済み）
+
+Step 2 は **第5-L の実行だけを解禁**し、**EXPLAIN は従来どおり拒否**のままである。
+したがって **Step 2 時点では「実行は成功するが EXPLAIN は拒否を返す」**という不整合が存在する。
+
+- **意図的なスコープ分割**であり欠陥ではない（§12 で EXPLAIN は Step 4 担当）
+- ただし **リリース前に必ず解消すること**。EXPLAIN と runtime が同じ plan を参照する契約
+  （§0.3.6-9・Phase A §7.1）は Phase B でも維持しなければならない
+- **Step 4 の受入条件に「JOIN ＋ server-only 関数の EXPLAIN が実行と一致する」を含めること**
+
+**未解消のままリリースしてはならない。**
+
+
+## 【Step 3 レビュー・2026-07-27】klikeValidation の defer と拒否理由の変化
+
+Step 3 で第5-W を実装するにあたり、`src/core/klikeValidation.ts` の静的 KLIKE guard に
+**defer 経路**を追加した。従来この guard は FULL_SCAN の `OR` / `NOT` 配下の KLIKE を
+metadata 取得前に一律 throw していたが、第5-W の可否は **whole-WHERE exact plan が
+確定するまで判定できない**ため、候補形だけ判定を後段へ委ねる必要があった。
+
+defer の条件は次をすべて満たす場合に限定されている。
+
+- WHERE に server-only 関数 occurrence が1つ以上ある
+- `joins.length > 0` かつ全 JOIN が INNER
+- 全 source が alias 付き物理 APP（CTE・サブテーブルでない）
+
+### 安全性（独立検証済み）
+
+defer は**拒否をやめるものではない**。後段の guard と `validateKlikePushdownPlan` が
+records API 呼び出し前に「全 occurrence 適用」か「拒否」を原子的に確定する。
+
+| 形 | 結果 | fetch |
+|---|---|---|
+| 関数なしの KLIKE-in-OR | 従来どおり **KLIKE の静的拒否** | 0 |
+| 関数あり・whole exact **成立** | **第5-W で許可**（residual `null`・全 KLIKE 適用） | 1 |
+| 関数あり・whole exact **不成立** | **拒否**（第5-L で KLIKE が residual OR に残る形は作らない） | 0 |
+
+3行目が Phase A §5.5 の `true OR false` ハザードそのものであり、
+**defer 経路からも到達できないことを実測で確認した**。
+
+### 利用者から見える変化（Step 5 の docs で扱う）
+
+一部の形で**拒否理由が KLIKE 固有のメッセージから
+`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` に変わる**。
+実際の阻害要因は関数側なので改善だが、公開面の記述と整合させること。
+
+### 第5-W の `NOT` は新しい意味論面を増やしていない
+
+`NOT (日付 = THIS_MONTH())` の JOIN 直列化が**単一表 B72 と完全に同一**であることを
+実測で確認した（`(日付 != THIS_MONTH())`）。第5-W は B72 が既に出荷している
+whole-WHERE exact 契約を JOIN へ広げるだけで、空セル等の意味論は既存面と共通である。
+
+
+## 【Step 4 レビュー・2026-07-27】EXPLAIN 不整合の解消を確認
+
+Step 2 から持ち越していた「実行は成功するが EXPLAIN は拒否」を Step 4 で解消した。
+`relativeDatePushdownGuard` の `statement.type !== "EXPLAIN"` を削除し、
+EXPLAIN 分析が runtime とは**別に JOIN plan を再生成していた**箇所も同じ plan 参照へ統合した。
+
+### 判定一致の独立検証（16 形・両方向）
+
+許可 11 形・拒否 5 形について、EXPLAIN の表示と実行可否を突き合わせ、
+**両方向の不一致 0** を確認した。「実行 OK / EXPLAIN NG」だけでなく
+「EXPLAIN OK / 実行 NG」も 0 である。
+
+### EXPLAIN は拒否形でも成功して rejected を表示する（§11 の契約）
+
+拒否形の EXPLAIN は throw せず、次を表示する。レビュー時にこれを throw と取り違えないこと。
+
+```text
+relative date function: THIS_MONTH
+plan status: rejected
+target alias / field: a / 日付
+reason: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+client evaluation: forbidden
+records/cursor/mutation API during EXPLAIN: none
+```
+
+GROUP_SELECT × LOGINUSER では `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED` が
+併記され、B78 の型判定が EXPLAIN 面にも現れることを確認した。
+
+### 混在時の独立集計
+
+`THIS_MONTH()` ＋ `LOGINUSER()` の同居文で
+`relative date client evaluations: 0` と `kintone function client evaluations: 0` が
+**両方**出ることを確認した（従来の一行選択 helper では表せなかった形）。
+
+### B79 契約の非回帰（§10.2）
+
+Phase B の plan が存在することを理由に INNER JOIN を新たに fail-closed にしていないことを、
+**plan あり / plan なしの INNER JOIN で searchAborted 時の結果が一致する**ことで確認した。
+LEFT JOIN の既存挙動も不変。Phase A §16 で撤回した非対称を再導入していない。
+
+
+## 【Step 5 レビュー・2026-07-27】公開面の掃討結果とリリース時の残作業
+
+### docs が新たに断言した形を実挙動で裏取りした
+
+言語リファレンスの記述は「書いたが実際は違う」が最も危険なので、
+**新たに断言した拒否形を実行して確認**した。いずれも拒否・records API 0 件である。
+
+- `KORDER BY` 併用
+- JOIN 入力が CTE
+- JOIN 入力がサブテーブル
+
+許可形（alias 付き物理 APP だけの INNER JOIN ＋ 第5-W）が通ることも併せて確認した。
+
+### 公開面の掃討
+
+`JOIN` × `fail-closed` / `使用できません` / `不可` を横断検索し、
+**無限定の「JOIN では使えない」記述が 0 件**であることを確認した。
+残っているのは `v3.20.0 時点` 〜 `v3.26.0 時点` と版を明記した履歴のみである。
+
+KLIKE 節（§ FULL_SCAN 制約）にあった「OR 配下は常に不可」も、
+第5-W の whole-exact 例外を追記して矛盾を解消済み。
+
+### リリース時の残作業（B70 の版同期と同じ性質）
+
+`release/README.txt` の v3.26.0 節にあった
+「**次回リリース予定の** B76 Phase B で上記2形を追加」という前方参照は、
+Phase B が出た瞬間に誤りになるため、**版に依存しない表現へ修正済み**。
+
+リリース時には次を実施すること。
+
+1. owner の版判断を受けて version bump（`npm run version:check` が 8 箇所を検証）
+2. CHANGELOG の「次回リリース（バージョン未定）」節を実際の版へ差し替え
+3. `release/README.txt` に新しい current release 節を追加
+4. `docs/internal/evidence/b76_phase_b_browser_smoke_steps.md` の実機 smoke を
+   Firefox / Chrome の両方で実施し、**結果を追記してから**リリースする
+   （手順書は作成済み・未実施を PASS として記録しないこと）
+
+### 注意: MCP instructions の語数上限が逼迫している
+
+Phase B の docs ポインタ追加で MCP instructions が 552 語となり、
+サイズガード（上限 550 語）に一度失敗した。短縮して **548 語**で green だが、
+**余裕が 2 語しかない**。次に MCP instructions へ追記する課題では、
+先に既存記述の圧縮が必要になる可能性が高い。

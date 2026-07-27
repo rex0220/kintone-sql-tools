@@ -274,11 +274,6 @@ test.each([
       + "WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
   ],
   [
-    "JOIN",
-    "SELECT a.更新日時 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-      + "WHERE a.更新日時 >= YESTERDAY()",
-  ],
-  [
     "VALIDATE",
     "VALIDATE APP100 WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
   ],
@@ -302,6 +297,32 @@ test.each([
   await expect(execute(sql, executed.client))
     .rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
   expectNoExecutionApi(executed.calls);
+});
+
+test("B76 Step 4: JOIN第5-LはEXPLAINと実行の両方で同じplanを許可する", async () => {
+  const sql = "SELECT a.更新日時 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+    + "WHERE a.更新日時 >= YESTERDAY()";
+  const explained = makeClient();
+  const text = planText(await execute(`EXPLAIN ${sql}`, explained.client));
+  expect(text).toContain("join pushdown plan: applied (runtime metadata resolved)");
+  expect(text).toContain("allow form: JOIN_SERVER_FUNCTION_EXACT (whole-WHERE)");
+  expect(text).toContain("pushdown applied: 更新日時 >= YESTERDAY()");
+  expect(text).toContain("client residual: (none)");
+  expect(text).toContain("relative date client evaluations: 0");
+  expectNoExecutionApi(explained.calls);
+
+  const executed = makeClient();
+  await expect(execute(sql, executed.client)).resolves.toMatchObject({
+    type: "SELECT",
+    rows: [],
+  });
+  expect(executed.calls.records).toHaveBeenCalledTimes(1);
+  expect(executed.calls.records.mock.calls[0][0].query)
+    .toContain("更新日時 >= YESTERDAY()");
+  expect(executed.calls.cursorOpen).not.toHaveBeenCalled();
+  expect(executed.calls.post).not.toHaveBeenCalled();
+  expect(executed.calls.put).not.toHaveBeenCalled();
+  expect(executed.calls.delete).not.toHaveBeenCalled();
 });
 
 function parsedWhere(sql: string): WhereExpr {

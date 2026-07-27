@@ -458,11 +458,6 @@ test.each([
       + "ON DUPLICATE (件名)",
   ],
   [
-    "9.2-4 JOIN residual",
-    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-      + "WHERE a.更新日時 >= YESTERDAY() AND LENGTH(a.件名) > 1",
-  ],
-  [
     "9.2-4 VALIDATE",
     "VALIDATE APP100 WHERE 更新日時 >= YESTERDAY() AND LENGTH(件名) > 1",
   ],
@@ -485,6 +480,36 @@ test.each([
   await expect(execute(sql, client, { confirm: calls.confirm }))
     .rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
   expectNoExecutionApi(calls);
+});
+
+test("9.2-4 JOIN residual は第5-Lで関数leafだけを消費し新しいrowsを固定する", async () => {
+  const { client, calls } = makeClient(async (params) => {
+    const source = params.app === 100
+      ? [record(1, { 更新日時: "2026-07-26T00:00:00Z", 件名: "ok" })]
+      : [record(1, {})];
+    return {
+      records: source.map((row) => Object.fromEntries(
+        params.fields.flatMap((field) =>
+          row[field] === undefined ? [] : [[field, row[field]]]
+        )
+      ) as KintoneRecord),
+    };
+  });
+  const result = await execute(
+    "SELECT a.$id FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.更新日時 >= YESTERDAY() AND LENGTH(a.件名) > 1",
+    client,
+    { confirm: calls.confirm }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ $id: "1" }]);
+  expect(calls.records.mock.calls.find(([params]) => params.app === 100)?.[0].query)
+    .toContain("更新日時 >= YESTERDAY()");
+  expect(calls.cursorOpen).not.toHaveBeenCalled();
+  expect(calls.post).not.toHaveBeenCalled();
+  expect(calls.put).not.toHaveBeenCalled();
+  expect(calls.delete).not.toHaveBeenCalled();
+  expect(calls.confirm).not.toHaveBeenCalled();
 });
 
 test("9.2-4 pure-exact SELECT-based DML source は Phase1 許可形を維持する", async () => {

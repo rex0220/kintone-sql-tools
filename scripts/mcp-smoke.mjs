@@ -506,6 +506,9 @@ async function main() {
     assert(docsChapter.content[0].text.includes("実行環境のローカルタイムゾーン"), "ksql_docs function chapter is missing CURRENT_* local-TZ semantics.");
     assert(docsChapter.content[0].text.includes("whole-WHERE exact"), "ksql_docs function chapter is missing the corrected KORDER boundary.");
     assert(docsChapter.content[0].text.includes("FULL_SCAN_EXACT"), "ksql_docs function chapter is missing the corrected KORDER rejection shapes.");
+    assert(docsChapter.content[0].text.includes("第5-W"), "ksql_docs function chapter is missing B76 Phase B fifth-W.");
+    assert(docsChapter.content[0].text.includes("第5-L"), "ksql_docs function chapter is missing B76 Phase B fifth-L.");
+    assert(docsChapter.content[0].text.includes("cross-alias `OR`"), "ksql_docs function chapter is missing B76 Phase B cross-alias rejection boundary.");
     const docsUnknown = await client.callTool({
       name: "ksql_docs",
       arguments: { section: "STDDEV" },

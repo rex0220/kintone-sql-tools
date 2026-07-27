@@ -118,7 +118,9 @@ import {
   type KlikePushdownPlan,
 } from "./core/optimization/klikePushdownPlan";
 import {
+  bindJoinServerFunctionFetches,
   buildJoinPushdownPlan,
+  isJoinServerFunctionFetchPlan,
   serializeJoinPushdownItem,
   type JoinPushdownPlan,
   type JoinPushdownSource,
@@ -196,6 +198,7 @@ import {
   allowRelativeDatePrefilterPlan,
   assertRelativeDatePushdownPlan,
   buildRelativeDatePushdownPlan,
+  type RelativeDatePlanNode,
   type RelativeDatePushdownPlan,
 } from "./core/optimization/relativeDatePushdownGuard";
 import {
@@ -961,6 +964,15 @@ async function resolveRelativeDateExecutionPlan(
         cacheContext
       );
       return decomposeRelativeDatePrefilter(select, resolver);
+    },
+    joinServerFunctionPlan: async (select) => {
+      const metadata = await loadTypedPushdownMeta(select, client, cacheContext);
+      const runtimePlan = buildRuntimeJoinPushdownPlan(select, metadata);
+      if (runtimePlan === null) return null;
+      if (isJoinServerFunctionFetchPlan(runtimePlan.joinPlan)) {
+        boundJoinRuntimePlans.set(select, runtimePlan);
+      }
+      return runtimePlan.joinPlan;
     },
   });
 }
@@ -3108,6 +3120,8 @@ interface RuntimeJoinPushdownPlan extends KlikePushdownPlan {
   readonly queriesByAlias: ReadonlyMap<string, string>;
 }
 
+const boundJoinRuntimePlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+
 function buildRuntimeJoinPushdownPlan(
   stmt: SelectStatement,
   metadata: TypedPushdownMeta
@@ -3135,12 +3149,18 @@ function buildRuntimeJoinPushdownPlan(
     ]),
     fieldOptions: metadata.fieldOptionsByApp.get(table.appId),
   }));
-  const plan = buildJoinPushdownPlan(stmt.where, sources);
+  const staticPlan = buildJoinPushdownPlan(stmt.where, sources);
+  const plan = bindJoinServerFunctionFetches(staticPlan, sources);
   const conditionsByAlias = new Map<string, WhereExpr>();
   const queriesByAlias = new Map<string, string>();
+  for (const [alias, query] of plan.fetchQueriesByAlias) {
+    queriesByAlias.set(alias, query);
+  }
   for (const item of plan.items) {
     // §6.2: alias を捨てる serializer の直前に ownership を fail-loud 再検査する。
-    queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    if (!queriesByAlias.has(item.targetAlias)) {
+      queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    }
     conditionsByAlias.set(item.targetAlias, item.predicate);
   }
   const mainAlias = stmt.from.alias!;
@@ -3937,9 +3957,25 @@ async function executeFullScanSelect(
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
 
   // 同じ計画を検証・fetch・JS 評価で共有する。
-  const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
+  const preboundJoinPlan = boundJoinRuntimePlans.get(stmt);
+  if (
+    preboundJoinPlan
+    && !isJoinServerFunctionFetchPlan(preboundJoinPlan.joinPlan)
+  ) {
+    throw new Error("InternalError: JOIN server-function fetch binding changed before records API.");
+  }
+  const pushdownPlan = preboundJoinPlan
+    ?? buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
+  const runtimeJoinPlan = "joinPlan" in pushdownPlan
+    ? pushdownPlan as RuntimeJoinPushdownPlan
+    : null;
+  const boundServerFunctionPlan =
+    runtimeJoinPlan
+    && isJoinServerFunctionFetchPlan(runtimeJoinPlan.joinPlan)
+      ? runtimeJoinPlan
+      : null;
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
   // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
@@ -3950,7 +3986,12 @@ async function executeFullScanSelect(
   if (prefilterPlan && allowOriginalWherePushdown) {
     throw new Error("internal error: relative-date prefilter must disable original WHERE pushdown.");
   }
-  const mainFetchCondition = prefilterPlan ? prefilterPlan.prefilterWhere : mainPushDown;
+  const mainFetchCondition = prefilterPlan
+    ? prefilterPlan.prefilterWhere
+    : (boundServerFunctionPlan ? null : mainPushDown);
+  const mainBoundQuery = boundServerFunctionPlan?.queriesByAlias.get(
+    stmt.from.alias!
+  ) ?? "";
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
   const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
@@ -3967,8 +4008,9 @@ async function executeFullScanSelect(
     options.onLimitReached ?? "error",
     warnings,
     mainFetchCondition,
-    allowOriginalWherePushdown,
-    plainGroupByPlan
+    boundServerFunctionPlan ? false : allowOriginalWherePushdown,
+    plainGroupByPlan,
+    mainBoundQuery
   );
 
   // JOIN テーブルを push-down の有無で振り分け
@@ -3983,8 +4025,13 @@ async function executeFullScanSelect(
       parallelJoins.push({ join, promise: Promise.resolve([]) });
       continue;
     }
-    const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
-    if (jCond !== null) {
+    const boundQuery = join.table.alias
+      ? (boundServerFunctionPlan?.queriesByAlias.get(join.table.alias) ?? "")
+      : "";
+    const jCond = boundServerFunctionPlan
+      ? null
+      : (join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null);
+    if (jCond !== null || boundQuery !== "") {
       parallelJoins.push({
         join,
         promise: fetchTableRecordsForFullScan(
@@ -3998,7 +4045,8 @@ async function executeFullScanSelect(
           warnings,
           jCond,
           true,
-          plainGroupByPlan
+          plainGroupByPlan,
+          boundQuery
         ),
       });
     } else {
@@ -4071,7 +4119,11 @@ async function executeFullScanSelect(
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
-    ...(prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : {}),
+    ...(prefilterPlan
+      ? { residualWhere: prefilterPlan.residualWhere }
+      : boundServerFunctionPlan
+        ? { residualWhere: boundServerFunctionPlan.joinPlan.residualWhere }
+        : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
   });
@@ -8748,8 +8800,11 @@ async function buildExplainWhereAnalysis(
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
       }
       capabilities.set(select, capability);
-      const joinPushdownMeta = await loadTypedPushdownMeta(select, tracedClient, cacheContext);
-      const joinPushdownPlan = buildRuntimeJoinPushdownPlan(select, joinPushdownMeta);
+      const preboundJoinPushdownPlan = boundJoinRuntimePlans.get(select);
+      const joinPushdownPlan = preboundJoinPushdownPlan ?? buildRuntimeJoinPushdownPlan(
+        select,
+        await loadTypedPushdownMeta(select, tracedClient, cacheContext)
+      );
       if (joinPushdownPlan) explainJoinPushdownPlans.set(select, joinPushdownPlan);
       // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
       if (select.orderBy.length > 0
@@ -9043,9 +9098,19 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
     const label = isRelativeDateFunctionName(plan.rejection.functionName)
       ? "relative date function"
       : "kintone function";
+    const rejectedNode = plan.nodes[plan.nodes.length - 1];
+    const detail = rejectedNode?.capability?.reasons.find((reason) =>
+      reason.functionName === plan.rejection!.functionName
+    );
+    const target = rejectedNode
+      ? findServerFunctionExplainTarget(rejectedNode.source, plan.rejection.functionName)
+      : null;
     return [
       `  ${label}: ${plan.rejection.functionName}`,
       "  plan status: rejected",
+      `  target alias / field: ${target?.alias ?? "(unknown)"} / ${
+        detail?.field ?? target?.field ?? "(unknown)"
+      }`,
       `  reason: ${plan.rejection.reasonCodes.join(", ")}`,
       "  client evaluation: forbidden",
       "  records/cursor/mutation API during EXPLAIN: none",
@@ -9054,6 +9119,51 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
 
   const lines: string[] = [];
   for (const node of plan.nodes) {
+    const joinServerFunctionPlan = node.joinServerFunctionPlan;
+    if (
+      node.allowed
+      && node.allowForm === "JOIN_SERVER_FUNCTION_EXACT"
+      && joinServerFunctionPlan
+    ) {
+      const variant = node.joinServerFunctionVariant === "WHOLE_WHERE_EXACT"
+        ? "whole-WHERE"
+        : "leaf";
+      lines.push(
+        `  allow form: JOIN_SERVER_FUNCTION_EXACT (${variant})`
+      );
+      for (const consumption of joinServerFunctionPlan.serverFunctionConsumptions) {
+        for (const leaf of consumption.functionLeaves) {
+          const functionName = serverFunctionNameOfExplainLeaf(leaf);
+          const field = leaf.left.type === "FIELD" ? leaf.left.field : "(unknown)";
+          lines.push(
+            `  ${serverFunctionLabel(functionName)}: ${functionName}`,
+            `  ${serverFunctionEvaluationLabel(functionName)}: kintone server exact JOIN prefilter`,
+            `  target alias / APP: ${consumption.targetAlias} / APP${consumption.appId}`,
+            `  field: ${field}`,
+            `  function leaf relation: ${consumption.relation}`,
+            `  consumption: ${consumption.consumption}`
+          );
+        }
+      }
+      lines.push(
+        `  client residual: ${
+          joinServerFunctionPlan.residualWhere === null
+            ? "(none)"
+            : renderRelativeDateResidualWhere(joinServerFunctionPlan.residualWhere)
+        }`
+      );
+      if (joinServerFunctionPlan.adoptedServerFunctionOccurrences.some(
+        isRelativeDateFunctionName
+      )) {
+        lines.push("  relative date client evaluations: 0");
+      }
+      if (joinServerFunctionPlan.adoptedServerFunctionOccurrences.some(
+        (name) => !isRelativeDateFunctionName(name)
+      )) {
+        lines.push("  kintone function client evaluations: 0");
+      }
+      continue;
+    }
     const fullScanExactPlan = node.fullScanExactPlan;
     if (
       node.allowed
@@ -9150,6 +9260,50 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
     }
   }
   return lines;
+}
+
+function findServerFunctionExplainTarget(
+  source: RelativeDatePlanNode["source"],
+  functionName: string
+): { readonly alias: string | null; readonly field: string } | null {
+  const where = "where" in source ? source.where : null;
+  let found: { readonly alias: string | null; readonly field: string } | null = null;
+  const visit = (value: unknown): void => {
+    if (found || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const node = value as Record<string, unknown>;
+    if (node["type"] === "BINARY") {
+      const left = node["left"] as Record<string, unknown> | undefined;
+      const right = node["right"] as Record<string, unknown> | undefined;
+      const directlyMatches = right?.["type"] === "KINTONE_FUNC"
+        && right["name"] === functionName;
+      const listMatches = right?.["type"] === "IN_LIST"
+        && Array.isArray(right["values"])
+        && right["values"].some((entry) =>
+          entry !== null
+          && typeof entry === "object"
+          && (entry as Record<string, unknown>)["type"] === "KINTONE_FUNC"
+          && (entry as Record<string, unknown>)["name"] === functionName
+        );
+      if (
+        (directlyMatches || listMatches)
+        && left?.["type"] === "FIELD"
+        && typeof left["field"] === "string"
+      ) {
+        found = {
+          alias: typeof left["tableAlias"] === "string" ? left["tableAlias"] : null,
+          field: left["field"],
+        };
+        return;
+      }
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(where);
+  return found;
 }
 
 function serverFunctionLabel(functionName: string): string {
@@ -9697,10 +9851,33 @@ function buildSelectPlan(
         lines.push("  join pushdown plan: applied (runtime metadata resolved)");
         lines.push("  runtime plan timing: variables/subqueries resolved -> metadata resolved -> immutable plan");
         lines.push("  EXPLAIN unresolved subqueries: not applied (records API is not called)");
-        lines.push("  residual: original WHERE");
+        if (runtimeJoinPlan.joinPlan.serverFunctionCandidate) {
+          lines.push(
+            `  allow form: JOIN_SERVER_FUNCTION_EXACT (${
+              runtimeJoinPlan.joinPlan.serverFunctionCandidate.variant === "WHOLE_WHERE_EXACT"
+                ? "whole-WHERE"
+                : "leaf"
+            })`
+          );
+        }
+        lines.push(
+          `  client residual: ${
+            runtimeJoinPlan.joinPlan.residualWhere === null
+              ? "(none)"
+              : renderRelativeDateResidualWhere(runtimeJoinPlan.joinPlan.residualWhere)
+          }`
+        );
         lines.push(`  KLIKE applied nodes: ${runtimeJoinPlan.joinPlan.appliedKlikes.size}`);
-        for (const rejection of runtimeJoinPlan.joinPlan.rejections) {
-          lines.push(`  join pushdown not applied: ${rejection.reason}`);
+        lines.push(
+          `  KLIKE unapplied nodes: ${
+            runtimeJoinPlan.joinPlan.allKlikes.length
+              - runtimeJoinPlan.joinPlan.appliedKlikes.size
+          }`
+        );
+        if (runtimeJoinPlan.joinPlan.residualWhere !== null) {
+          for (const rejection of runtimeJoinPlan.joinPlan.rejections) {
+            lines.push(`  join pushdown not applied: ${rejection.reason}`);
+          }
         }
       } else {
         const reason = stmt.joins.some((join) => join.type !== "INNER")
@@ -9725,17 +9902,24 @@ function buildSelectPlan(
       && !whereRequiresJsEval(stmt.where)
       ? whereToKintone(stmt.where)
       : "";
-    const mainQ = mainPushDown !== null
-      ? whereToKintone(mainPushDown)
-      : exactOriginalWhere || "(全件取得)";
+    const mainBoundQuery = stmt.from.alias
+      ? runtimeJoinPlan?.queriesByAlias.get(stmt.from.alias)
+      : undefined;
+    const mainQ = mainBoundQuery
+      || (mainPushDown !== null
+        ? whereToKintone(mainPushDown)
+        : exactOriginalWhere || "(全件取得)");
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
     const mainJoinItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
       item.targetAlias === stmt.from.alias
     );
-    if (mainJoinItem) {
-      lines.push(`  pushdown applied: ${runtimeJoinPlan!.queriesByAlias.get(mainJoinItem.targetAlias)}`);
-      lines.push(`  relation: ${mainJoinItem.relation}`);
+    const mainFunctionConsumption = runtimeJoinPlan?.joinPlan.serverFunctionConsumptions.find(
+      (consumption) => consumption.targetAlias === stmt.from.alias
+    );
+    if (mainJoinItem || mainFunctionConsumption) {
+      lines.push(`  pushdown applied: ${mainBoundQuery}`);
+      lines.push(`  relation: ${mainJoinItem?.relation ?? "exact"}`);
     } else if (!runtimeJoinPlan && mainCandidate !== null) {
       lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型・実在確認待ち）`);
     }
@@ -9750,17 +9934,25 @@ function buildSelectPlan(
         : null;
       const joinCandidate = join.table.alias && !join.table.subtableCode && join.table.cteName === null && stmt.where
         ? extractTypedPushdownCandidates(stmt.where, { tableAlias: join.table.alias }) : null;
-      const joinQ = joinPushDown !== null
-        ? whereToKintone(joinPushDown)
-        : "(全件取得)";
+      const joinBoundQuery = join.table.alias
+        ? runtimeJoinPlan?.queriesByAlias.get(join.table.alias)
+        : undefined;
+      const joinQ = joinBoundQuery
+        || (joinPushDown !== null
+          ? whereToKintone(joinPushDown)
+          : "(全件取得)");
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
       const joinPlanItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
         item.targetAlias === join.table.alias
       );
-      if (joinPlanItem) {
-        lines.push(`  pushdown applied: ${runtimeJoinPlan!.queriesByAlias.get(joinPlanItem.targetAlias)}`);
-        lines.push(`  relation: ${joinPlanItem.relation}`);
+      const joinFunctionConsumption =
+        runtimeJoinPlan?.joinPlan.serverFunctionConsumptions.find(
+          (consumption) => consumption.targetAlias === join.table.alias
+        );
+      if (joinPlanItem || joinFunctionConsumption) {
+        lines.push(`  pushdown applied: ${joinBoundQuery}`);
+        lines.push(`  relation: ${joinPlanItem?.relation ?? "exact"}`);
       } else if (!runtimeJoinPlan && joinCandidate !== null) {
         lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
       }
