@@ -91,8 +91,10 @@ export const STATEMENT_SYNTAX_CATALOG = {
     examples: [
       "UPSERT INTO APP1 (key, name) VALUES ('C001', 'Acme') "
         + "ON DUPLICATE (key) VALIDATE ONLY",
+      "UPSERT INTO APP1 (key, name) SELECT code, name FROM APP2 "
+        + "ON DUPLICATE (key) VALIDATE ONLY",
     ],
-    expectedTypes: [["UPSERT"]],
+    expectedTypes: [["UPSERT"], ["UPSERT_SELECT"]],
   },
   delete: {
     template: "DELETE: DELETE FROM APPn WHERE...",

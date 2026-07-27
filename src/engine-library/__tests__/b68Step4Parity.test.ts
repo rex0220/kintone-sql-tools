@@ -249,7 +249,7 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
     }
   });
 
-  test("catalog-derived AST types match the exhaustive corpus except the tracked UPSERT_SELECT example gap", () => {
+  test("catalog-derived AST types match the exhaustive corpus with no gap", () => {
     const corpusTypes = new Set(Object.keys(STATEMENT_CORPUS) as StatementType[]);
     const catalogTypes = new Set(
       (Object.values(STATEMENT_SYNTAX_CATALOG) as StatementSyntaxEntry[])
@@ -263,9 +263,10 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
       .filter((type) => !corpusTypes.has(type as StatementType))
       .sort();
 
-    // B68 Step 4 deliberately does not add the missing UPSERT_SELECT catalog
-    // example. Keeping the exact singleton here makes any other drift fail.
-    expect(missingFromCatalog).toEqual(["UPSERT_SELECT"]);
+    // B83 closed the UPSERT_SELECT example gap, so the catalog now covers every
+    // statement type the corpus knows. An empty array here means any new type
+    // added to the AST without a catalog example fails this test.
+    expect(missingFromCatalog).toEqual([]);
     expect(unknownToCorpus).toEqual([]);
   });
 

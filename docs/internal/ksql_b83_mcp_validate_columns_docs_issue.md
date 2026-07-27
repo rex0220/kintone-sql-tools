@@ -1,7 +1,7 @@
 # B83 MCP instructions の VALIDATE 診断列数が実態と違う
 
 - 起票: 2026-07-27
-- ステータス: 📝 **評価・起票（優先 中／docs 不正確）**。未着手。
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-28）。**単純な数値誤りではなく2形の取り違えだった**（§7）。
 - 出典: B68 の実需確認で `VALIDATE` の戻り値を実測した際に発見
 - 関連: [B74 相対日付 docs 是正](ksql_b74_relative_date_docs_accuracy_issue.md) / [B68](ksql_b68_engine_library_readonly_extensions_evaluation.md) / [B81 語数予算](ksql_b81_mcp_instructions_word_budget_issue.md)
 
@@ -86,3 +86,56 @@ B68 Step 4 の parity テスト設計中に、codex が別の drift を検出し
 
 B68 Step 4 では型レベル網羅（`Record<Statement["type"], ...>`）で回避しており、
 **parity の目的は達成できている**。カタログ例の不足はここで扱う。
+
+
+## 7. 【2026-07-28 実装】診断が変わった＝「5 は誤り」ではなく「2形の取り違え」
+
+起票時に「5 と書いてあるが実際は 9」と書いたが、**調べると 5 列の形も実在した**。
+
+| 形 | 列数 | 列 |
+|---|---:|---|
+| `VALIDATE APPn INTO #err`（既定） | **9** | `$id` `$err_field` `$err_code` `$err_message` `$err_value` `$err_subtable` `$err_subrow` `$err_subrow_id` `$err_count` |
+| **`VALIDATE APPn SUMMARY INTO #err`** | **5** | `$id` `$err_subtable` `$err_field` `$err_code` `$err_count` |
+
+`src/core/batch.ts` が `stmt.summary` で列セットを切り替えている。**実機で両方を確認済み。**
+
+### 7.1 したがって欠陥は「数が古い」ではない
+
+**`SUMMARY` 形の列数を、あたかも唯一の形であるかのように書いていた。**
+
+カタログの**テンプレートには `[SUMMARY]` があり、例も `SUMMARY` を使っている**。
+つまり AI は `SUMMARY` を知り得るが、**既定形を書くと 9 列で説明と食い違う**。
+
+### 7.2 言語リファレンスは元から正しかった
+
+`docs/ksql_language_reference.md` は「**詳細出力は固定9列**」と正しく書いており、
+`SUMMARY` の 5 列も別途記載されている。
+
+**ずれていたのは MCP の tool description だけ**である。
+起票時に「docs が実装と drift」と一般化したが、**実際は MCP 面に限定**されていた。
+
+### 7.3 実装
+
+```diff
+- can materialize its fixed five diagnostic columns with INTO #err in a batch.
++ can materialize its diagnostic columns with INTO #err in a batch (nine columns, or five with SUMMARY).
+```
+
+**数を消さず両方書いた。**「数を書かない」案も検討したが、
+**AI にとって列数は具体的なほうが有用**で、2形あることが分かれば取り違えない。
+
+### 7.4 `UPSERT_SELECT` のカタログ例も追加した
+
+`STATEMENT_SYNTAX_CATALOG.upsert` に `SELECT` 形の例と `expectedTypes` を追加した。
+
+これにより **B68 の parity テストで追跡していた「カタログ例の穴」が閉じた**。
+テストは `missingFromCatalog` の期待値を `["UPSERT_SELECT"]` から `[]` へ更新し、
+**カタログが全 AST 文型を網羅する**というより強い不変条件になった。
+
+> 穴を塞いだ結果、**それを追跡していたテストが落ちた**。
+> 追跡アサーションが正しく働いた例である。
+
+### 7.5 語数予算への影響なし
+
+該当文は **instructions ではなく `ksql_query` の tool description** にあり、
+B81 の語数予算の対象外だった。カタログ例も `template` ではないため予算に影響しない。
