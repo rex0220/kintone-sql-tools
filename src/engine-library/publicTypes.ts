@@ -86,6 +86,13 @@ export interface RunQueryOptions {
   cursorMaxActive?: number;
 }
 
+/**
+ * Options for one read-only runBatch invocation.
+ *
+ * Temporary tables and variables exist only for that invocation. A batch is
+ * fail-closed: any failed statement makes runBatch throw instead of returning
+ * a partial BatchResult.
+ */
 export interface RunBatchOptions {
   client: ReadonlyKintoneClient;
   maxRecords?: number;
@@ -131,6 +138,7 @@ export interface QueryResult {
   columns: readonly QueryColumn[];
   rowCount: number;
   warnings: readonly string[];
+  /** Present only for an existing-record VALIDATE query. */
   validateStats?: {
     errorRecords: number;
     errorCount: number;
@@ -142,8 +150,14 @@ export interface QueryResult {
 export type BatchResultItem = QueryResult;
 
 export interface BatchStatementInfo {
+  /** Zero-based statement index in the submitted batch. */
   readonly index: number;
+  /** Parser statement type, such as SELECT or CREATE_TEMP_TABLE. */
   readonly type: string;
+  /**
+   * Successful BatchResult values contain successful statements only.
+   * A statement error makes runBatch throw instead of returning this DTO.
+   */
   readonly status: "success" | "error" | "skipped";
   readonly tempTable?: string;
   readonly rowCount?: number;
@@ -155,12 +169,23 @@ export interface BatchStatementInfo {
   readonly skippedReason?: string;
 }
 
+/**
+ * Successful read-only batch result.
+ *
+ * There is intentionally no `ok` field: if any statement fails, runBatch
+ * throws KsqlEngineError and returns no partial results. The error identifies
+ * the failed statement through statementIndex and statementType.
+ */
 export interface BatchResult {
   readonly type: "batch";
   readonly batch: true;
   readonly statementCount: number;
   readonly statements: readonly BatchStatementInfo[];
-  /** 各要素の metrics は文別計測ではなく、同一のバッチ全体集計値。 */
+  /**
+   * Row-returning statement results.
+   * Every metrics object is the same batch-wide aggregate, not a per-statement
+   * measurement; do not use it to attribute cost to an individual statement.
+   */
   readonly results: readonly BatchResultItem[];
   readonly warnings: readonly string[];
 }

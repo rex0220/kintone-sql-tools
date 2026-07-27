@@ -4,6 +4,14 @@
 
 ## 次回リリース（バージョン未定）
 
+### 機能追加（B68 engine ライブラリの read-only 構文 parity）
+
+- **read-only engine ライブラリに `runBatch(sql, options)` を追加**し、MCP で作成・検証した read-only SQL をダッシュボード等の library 面でも実行できるようにした。`CREATE` / `DROP TEMP TABLE`、`SET` / `DECLARE`、`ASSERT`、`EXPLAIN` を含む複文を扱える。
+- `runQuery()` は既存レコードの `VALIDATE` を受け付け、`QueryResult.validateStats` で違反レコード数・違反数を返す。MCP が受理する read-only 文と library の受理面を共通コーパスで固定し、例外は書き込み周辺の `IMPORT` / `APPLY` / DML `VALIDATE ONLY` の3件だけとした。
+- `runBatch()` は1文でも失敗すると `KsqlEngineError` を throw し、部分結果を返さない。エラーの `statementIndex` / `statementType` で失敗位置を特定できる。成功結果に `ok` フィールドはない。
+- 一時テーブルは利用者アプリのプロセス内メモリへ実体化し、`tempTableMaxRows`（既定10,000行、`truncate` 指定でも超過は error）と同時最大16表（`DROP` で枠を再利用）を公開契約とした。`results[]` の `metrics` は文別ではなくバッチ全体の集計値。
+- **純加法・非破壊。** 既存 API の型と、従来から受理していた SQL の挙動は変更しない。書き込み DML や既存の plugin / CLI / MCP の実行契約も変更しない。
+
 ### 改善（B81 MCP instructions の語数予算・B82 リリース時の未リリース表記検出）
 
 - **B81:** MCP `instructions` の語数予算を、**散文とカタログ列挙で分けて計上**するようにした。従来は総語数だけを見ていたため、抑えたい散文の冗長さと、機能追加に比例して必ず増えるカタログの規模が同じ枠を奪い合っていた。カタログ列挙は「一覧は完全で他方言の関数は存在しない」と明示して捏造を防ぐ最も効いている部分なので削らない。**公開挙動の変更なし**（テストの計上方法のみ）。

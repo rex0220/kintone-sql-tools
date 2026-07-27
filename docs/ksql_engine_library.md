@@ -14,6 +14,8 @@ npm から取り込める plugin / bundler 環境では、依存解決と版固�
 ```js
 import {
   createReadonlyKintoneClient,
+  KsqlEngineError,
+  runBatch,
   runQuery,
   version,
 } from "@rex0220/kintone-sql-tools/engine";
@@ -26,6 +28,12 @@ const result = await runQuery(
 
 console.log(version, result.rows);
 // => 3.19.0 [{ status: "ok", release: "19" }]
+
+const batch = await runBatch(
+  "CREATE TEMP TABLE #ids AS SELECT $id FROM APP100; SELECT * FROM #ids",
+  { client }
+);
+console.log(batch.results.at(-1)?.rows);
 ```
 
 ### CommonJS
@@ -68,11 +76,13 @@ runQuery("SELECT 'ok' AS status, 19 AS release", { client })
 
 ## 公開 API
 
-value export は次の5つです。
+value export は次の6つです。
 
 - `version: string`: build 済みライブラリの版。v3.19.0 では `"3.19.0"`。
 - `createReadonlyKintoneClient(options?)`: kintone browser global を使う read-only client。
 - `runQuery(sql, options): Promise<QueryResult>`: read-only 単文を実行。
+- `runBatch(sql, options): Promise<BatchResult>`: read-only 複文を順次実行。一時テーブル、
+  `SET` / `DECLARE`、`ASSERT` を含められる。
 - `explainQuery(sql, options): Promise<ExplainResult>`: `SELECT` / `WITH` / `UNION`
   の plan を返す。SQL 先頭の `EXPLAIN` はあってもなくてもよい。
 - `KsqlEngineError`: `code`、`message`、任意の `cause` を持つ公開 error class。
@@ -80,8 +90,8 @@ value export は次の5つです。
 公開型は次の専用 DTO だけです。内部 AST、executor、DML、IMPORT、APPLY、MCP の型は
 公開しません。
 
-- query/result: `RunQueryOptions`、`QueryColumn`、`QueryMetrics`、`QueryResult`、
-  `ExplainResult`
+- query/result: `RunQueryOptions`、`RunBatchOptions`、`QueryColumn`、`QueryMetrics`、
+  `QueryResult`、`BatchResultItem`、`BatchStatementInfo`、`BatchResult`、`ExplainResult`
 - client: `ReadonlyKintoneClient`、`ReadonlyGetRecordsParams`、
   `ReadonlyGetRecordsResult`、`ReadonlyKintoneRecord`、
   `ReadonlyKintoneFieldValue`
@@ -111,6 +121,10 @@ type QueryResult = {
   }[];
   rowCount: number;
   warnings: readonly string[];
+  validateStats?: {
+    errorRecords: number;
+    errorCount: number;
+  };
   metrics: QueryMetrics;
 };
 ```
@@ -167,36 +181,102 @@ guest / proxy route を推測、補正、再構築しません。`openCursor()` 
 
 ## options
 
-`runQuery(sql, options)` と `explainQuery(sql, options)` は、実行前に未知 key と不正値を
-拒否します。暗黙の clamp は行いません。
+`runQuery(sql, options)`、`runBatch(sql, options)`、`explainQuery(sql, options)` は、
+実行前に未知 key と不正値を拒否します。暗黙の clamp は行いません。
 
 | option | 対象 | 契約 |
 |---|---|---|
-| `client` | 両方 | 必須。6 read methodを持つ client |
-| `maxRecords` | 両方 | 正の safe integer。取得上限 |
-| `onLimitReached` | `runQuery` のみ | `"error"` または `"truncate"`。完全入力が必要な query は truncate せず fail-closed |
-| `fetchParallel` | 両方 | 正の safe integer。並列取得数 |
-| `cursorMaxActive` | 両方 | 1〜5 の整数。query 内 Cursor 上限 |
+| `client` | 3 API | 必須。6 read methodを持つ client |
+| `maxRecords` | 3 API | 正の safe integer。取得上限 |
+| `onLimitReached` | `runQuery` / `runBatch` | `"error"` または `"truncate"`。完全入力が必要な query は truncate せず fail-closed |
+| `fetchParallel` | 3 API | 正の safe integer。並列取得数 |
+| `cursorMaxActive` | 3 API | 1〜5 の整数。query 内 Cursor 上限 |
+| `variables` | `runBatch` | `DECLARE` 変数への文字列注入。キーは `@` なし・大文字小文字を区別しない。`SET` 変数へは注入不可 |
+| `tempTableMaxRows` | `runBatch` | 一時テーブル1表の実体化上限。既定10,000。超過は `onLimitReached: "truncate"` でも error |
 
 `createReadonlyKintoneClient()` 自体の option は `cursorMaxActive`（1〜5）のみです。
 
 ## read-only 境界
 
-許可する単文は `SELECT`、`WITH`、`UNION [ALL]`、`SHOW APPS`、`DESCRIBE` です。
-`explainQuery()` の対象は read-only の `SELECT`、`WITH`、`UNION [ALL]` に限ります。
+利用可能な構文は API ごとに異なります。
+
+| API | 利用可能な構文 |
+|---|---|
+| `runQuery()` | 単文の `SELECT`、`WITH`、`UNION [ALL]`、`SHOW APPS`、`DESCRIBE` / `DESC`、既存レコードの `VALIDATE` |
+| `runBatch()` | 上記の行を返す文、`CREATE TEMP TABLE ... AS SELECT/WITH`、`DROP TEMP TABLE`、`SET`、`DECLARE`、`ASSERT`、`EXPLAIN` |
+| `explainQuery()` | 単文の `SELECT`、`WITH`、`UNION [ALL]`。SQL 先頭の `EXPLAIN` は任意 |
 
 次は parse できても `READ_ONLY_VIOLATION` で拒否します。
 
 - DML: `INSERT`、`UPDATE`、`UPDATE ... FROM`、`UPSERT`、`DELETE`、`REORDER`
 - `APPLY` を含む文
 - `IMPORT`
-- `VALIDATE`、DML の `VALIDATE ONLY`
-- `CREATE TEMP TABLE`、`DROP TEMP TABLE` と一時表を使う batch
-- `SET`、`DECLARE`、`ASSERT`
-- セミコロン区切りの複文
+- DML の `VALIDATE ONLY`
 
 malformed SQL は `PARSE_ERROR` です。allowlist と、write methodを持たない client
 射影の二重境界で mutation API を呼ばないようにします。
+
+### `runBatch` の成功・失敗契約
+
+`runBatch()` は文が1つでも失敗したら `KsqlEngineError` を throw し、
+`BatchResult` や途中までの `results` を返しません。成功結果に `ok` フィールドは
+ありません。失敗した文は error の `statementIndex`（0-based）と
+`statementType` で特定できます。
+
+これは、プログラム API で部分結果が完全な結果に見えたままアプリケーションロジックへ
+流れ込む事故を防ぐための fail-closed 契約です。
+
+```js
+try {
+  const batch = await runBatch(sql, { client });
+  render(batch.results);
+} catch (error) {
+  if (error instanceof KsqlEngineError) {
+    console.error(error.code, error.statementIndex, error.statementType);
+  }
+  throw error;
+}
+```
+
+`BatchResult.results[]` は行を返した文だけを `QueryResult` として格納します。
+各要素の `metrics` は**文別計測ではなく、同一のバッチ全体集計値**です。
+個々の文の性能コストとして解釈しないでください。
+
+### 一時テーブルのメモリと上限
+
+一時テーブルは `runBatch()` 呼び出し単位で、**利用者アプリのプロセス内メモリ**へ
+実体化されます。1表の上限は `tempTableMaxRows`（既定10,000行）で、超過は
+`onLimitReached: "truncate"` を指定しても常に error です。同時に存在できるのは
+最大16表です。`DROP TEMP TABLE` でメモリと枠を解放すれば、同じバッチ内で次の表に
+その枠を再利用できます。
+
+### 一時テーブル、JOIN、server-only 関数
+
+server-only 関数は、入力が物理アプリだけである間に絞り込みへ使ってください。
+物理アプリ同士を JOIN する `CREATE TEMP TABLE ... AS SELECT` の source では使えます。
+一方、実体化済みの一時テーブルが入力に1つでも含まれる SELECT / JOIN は文全体が
+対象外となり、`..._CONTEXT_UNSUPPORTED` で拒否されます。関数を物理アプリ側の列へ
+置いても許可されません。
+
+```sql
+-- OK: 物理アプリ同士を JOIN し、関数で絞ってから実体化
+CREATE TEMP TABLE #当月 AS
+  SELECT d.顧客No AS k, d.売上, c.業種
+  FROM APP100 d INNER JOIN APP200 c ON d.顧客No = c.顧客No
+  WHERE d.受注日 = THIS_MONTH();
+
+-- NG: 一時テーブルが入力に含まれる文で server-only 関数を使う
+CREATE TEMP TABLE #x AS SELECT 顧客No, 受注日 FROM APP100;
+SELECT *
+FROM #x a INNER JOIN APP200 c ON a.顧客No = c.顧客No
+WHERE c.受注日 = THIS_MONTH();
+```
+
+### 一時テーブル source の計画を読む
+
+`EXPLAIN` / `explainQuery()` は `CREATE TEMP TABLE` 自体を受け付けません。
+`AS` 以降の `SELECT`（または `WITH`）を単体で `EXPLAIN` すると、実体化前に使われる
+同じ取得・JOIN 計画を確認できます。
 
 ### 検索打ち切りと Cursor
 

@@ -72,10 +72,13 @@ try {
   );
 
   const esmSource = `
-import { createReadonlyKintoneClient, runQuery, version } from "${packageName}/engine";
+import { createReadonlyKintoneClient, runBatch, runQuery, version } from "${packageName}/engine";
 const client = createReadonlyKintoneClient();
 const result = await runQuery("SELECT 'ok' AS status, 1 AS release", { client, maxRecords: 3000, cursorMaxActive: 2 });
 if (version !== "${packageVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "1") process.exit(1);
+const batch = await runBatch("SELECT 'first' AS step; SELECT 'second' AS step", { client });
+if ("ok" in batch || batch.results.length !== 2 || batch.results[1].rows[0].step !== "second") process.exit(1);
+if (JSON.stringify(batch.results[0].metrics) !== JSON.stringify(batch.results[1].metrics)) process.exit(1);
 `;
   writeFileSync(resolve(smokeDir, "example.mjs"), esmSource, "utf8");
   run(process.execPath, ["example.mjs"], { cwd: smokeDir });
@@ -84,11 +87,14 @@ if (version !== "${packageVersion}" || result.rows[0].status !== "ok" || result.
   mkdirSync(cjsDir);
   writeFileSync(resolve(cjsDir, "package.json"), '{"type":"commonjs"}\n', "utf8");
   const cjsSource = `
-const { createReadonlyKintoneClient, runQuery, version } = require("${packageName}/engine");
+const { createReadonlyKintoneClient, runBatch, runQuery, version } = require("${packageName}/engine");
 (async () => {
   const client = createReadonlyKintoneClient();
   const result = await runQuery("SELECT 'ok' AS status, 1 AS release", { client });
   if (version !== "${packageVersion}" || result.rows[0].status !== "ok" || result.rows[0].release !== "1") process.exit(1);
+  const batch = await runBatch("SELECT 'first' AS step; SELECT 'second' AS step", { client });
+  if ("ok" in batch || batch.results.length !== 2 || batch.results[1].rows[0].step !== "second") process.exit(1);
+  if (JSON.stringify(batch.results[0].metrics) !== JSON.stringify(batch.results[1].metrics)) process.exit(1);
 })().catch((error) => { console.error(error); process.exit(1); });
 `;
   writeFileSync(resolve(cjsDir, "example.cjs"), cjsSource, "utf8");
@@ -116,6 +122,21 @@ const { createReadonlyKintoneClient, runQuery, version } = require("${packageNam
   assert(
     result.rows[0].status === "ok" && result.rows[0].release === "1",
     "UMD documentation query result mismatch"
+  );
+  const batch = await engine.runBatch(
+    "SELECT 'first' AS step; SELECT 'second' AS step",
+    { client }
+  );
+  assert(
+    !("ok" in batch) &&
+      batch.results.length === 2 &&
+      batch.results[1].rows[0].step === "second",
+    "UMD documentation batch result mismatch"
+  );
+  assert(
+    JSON.stringify(batch.results[0].metrics) ===
+      JSON.stringify(batch.results[1].metrics),
+    "UMD documentation batch metrics must be batch-wide"
   );
 
   console.log(

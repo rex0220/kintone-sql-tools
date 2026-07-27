@@ -552,3 +552,61 @@ codex 側も同じ破壊を実施し、**復元前後の SHA-256 一致**まで�
 `npm test` **186 suites / 4,813 tests** ＋ CLI 26 green、snapshot 22 不変、
 （codex 報告の 188 / 4,839 は一時テストを含んだ値。**コミット後の実測値が正**）
 `engine:bundle-guard` 3 形 `forbidden=0`、`engine:declaration-smoke` green。
+
+---
+
+## 【Step 5 レビュー・2026-07-27】完了 ＝ B68 実装完了
+
+### 書いた場所
+
+| 申し送り | 反映先 |
+|---|---|
+| (a) 一時テーブルと JOIN の使い分け | 利用ガイド §使い分けと実例 ／ 言語リファレンス §一時テーブル |
+| (b) 失敗時 throw・部分結果なし・`ok` なし | 利用ガイド §成功・失敗契約 ／ 言語リファレンス |
+| (c) `metrics` はバッチ全体集計 | 利用ガイド §結果契約 ／ 言語リファレンス |
+| (d) 一時テーブル上限・プロセス内メモリ | 公開型コメント ／ 利用ガイド ／ 言語リファレンス |
+| (e) 選択系 `=` は押し下げ対象外（**Pro 要望**） | 言語リファレンス §WHERE 句 |
+| (f) `EXPLAIN CREATE TEMP TABLE` 非対応と回避策 | 言語リファレンス ／ 利用ガイド |
+
+### 実装コードは変更していないことを確認
+
+`src/engine-library/` の3ファイルに差分が出たが、**コメント行と空行を除くと差分ゼロ**。
+型コメントの追記のみで、ロジックは不変であることを機械的に確認した。
+
+### (a) の書き方が正確
+
+見落としやすい点＝**「一時テーブルの列に関数を使わなければよい」ではない**。
+
+> 実体化済みの一時テーブルが入力に**1つでも**含まれる SELECT / JOIN は**文全体が**対象外
+
+と書かれており、実測（関数を物理アプリ側に置いても `..._CONTEXT_UNSUPPORTED` で拒否）と一致する。
+
+### ゲート（すべて自分で実行）
+
+| gate | 結果 |
+|---|---|
+| `npm test` | 186 suites / 4,813 tests ＋ CLI 26 green、snapshot 22 不変 |
+| `engine:docs-smoke` | green（packed ESM/CJS/UMD 3.28.0） |
+| `engine:pack-smoke` | green |
+| `engine:declaration-smoke` | green（6 values / 24 types） |
+| `engine:bundle-guard` | green（3 形 `forbidden=0`） |
+| `mcp:verify` | green |
+| **`version:check:release`（B82）** | **green＝未リリース表記 0**。今日実装した guard が初めて実運用で効いた |
+
+### 導線の確認
+
+利用ガイドは `README.md`（ルート）と `release/README.txt` から参照されている。
+新規追加ではなく B69 以来の既存ファイルで、**発見可能性の問題はない**。
+
+## B68 の完了状態
+
+| Step | 内容 |
+|---|---|
+| 1 | 判定を `isReadOnlyStatement` へ一本化 ＋ 単文 `VALIDATE` |
+| 2 | `runBatch()` の API と型・文単位の read-only 強制 |
+| 3 | 一時テーブル上限の公開契約 ＋ `variables` |
+| 3 追補 | **失敗時 throw**（案 A・部分結果を渡さない） |
+| 4 | **MCP と library の parity をテストで固定**（面の固定を含む） |
+| 5 | docs・smoke・release gate |
+
+**残るはリリースのみ**（版数決定 → 4点同期 → 実機確認）。

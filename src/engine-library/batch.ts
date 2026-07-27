@@ -31,6 +31,17 @@ function toStatementFailure(statement: BatchStatementResult): KsqlEngineError {
   return withStatementDiagnostic(normalized, statement.index, statement.type);
 }
 
+/**
+ * Executes a read-only multi-statement batch.
+ *
+ * In addition to the row-returning statements accepted by runQuery, this API
+ * accepts CREATE/DROP TEMP TABLE, SET, DECLARE, ASSERT, and EXPLAIN. IMPORT,
+ * APPLY, DML VALIDATE ONLY, and writing DML remain outside the library boundary.
+ *
+ * If any statement fails, this function throws KsqlEngineError without
+ * returning partial results. statementIndex and statementType identify the
+ * failed statement.
+ */
 export async function runBatch(
   sql: string,
   options: RunBatchOptions

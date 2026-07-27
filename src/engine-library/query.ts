@@ -24,6 +24,10 @@ function assertSelectResult(result: unknown): asserts result is SelectResult {
   }
 }
 
+/**
+ * Executes one row-returning read-only statement: SELECT, WITH, UNION,
+ * SHOW APPS, DESCRIBE, or existing-record VALIDATE.
+ */
 export async function runQuery(
   sql: string,
   options: RunQueryOptions
@@ -49,6 +53,10 @@ export async function runQuery(
   }
 }
 
+/**
+ * Explains one SELECT, WITH, or UNION query without reading records.
+ * CREATE TEMP TABLE is not accepted; explain its source SELECT instead.
+ */
 export async function explainQuery(
   sql: string,
   options: Omit<RunQueryOptions, "onLimitReached">

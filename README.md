@@ -10,6 +10,12 @@ kintone アプリを SQL 風の構文で操作するツールセットです。
 他の kintone プラグインやカスタマイズへ read-only kSQL エンジンを組み込む場合は、
 [エンジン・ライブラリ利用ガイド](docs/ksql_engine_library.md)を参照してください。
 
+engine ライブラリでは、`runQuery()` が単文の `SELECT` / `WITH` / `UNION` /
+`SHOW APPS` / `DESCRIBE` / 既存レコード `VALIDATE` を、`runBatch()` がそれらに加えて
+`CREATE` / `DROP TEMP TABLE`、`SET` / `DECLARE`、`ASSERT`、`EXPLAIN` を実行します。
+書き込み DML、DML `VALIDATE ONLY`、`IMPORT`、`APPLY` は対象外です。
+生成 AI が MCP で作った SQL を library で実行する場合は、この API 別の境界を確認してください。
+
 ## 機能概要
 
 - `SELECT`（JOIN/GROUP BY/HAVING/CTE/UNION）

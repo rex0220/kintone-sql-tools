@@ -955,6 +955,12 @@ FULL_SCAN の `WHERE` では、フィールド型と選択肢の実在を確認�
 存在しない選択肢、空文字、型情報・選択肢情報を取得できない場合は押し下げず、JavaScript 評価だけを行います。
 ユーザー・組織・グループ選択はこの最適化の対象外です。プロセス管理が有効で、実行ユーザーの表示言語における状態名の実在を確認できたステータスの `IN`／`NOT IN` も事前絞り込みに使用します。プロセス管理が無効、状態名が非実在、または空文字の場合は押し下げません。
 
+> **選択系フィールドの `=` と取得件数:** ドロップダウン／ラジオボタン／
+> チェックボックス／複数選択に対する `=` は、kintone のクエリ文法が
+> `in` / `not in` のみを受け付けるため、records API へ押し下げません。
+> 結果は取得後の評価で正しくなりますが、取得候補が大きく増える場合があります。
+> 同じ条件を表せるときは `IN (...)` を使用してください。
+
 > **選択系フィールドに「定義に無い選択肢値」を渡したときの注意（重要）**  
 > `DROP_DOWN`／`RADIO_BUTTON`／`CHECK_BOX`／`MULTI_SELECT`／ステータスに、そのフィールドの選択肢として**定義されていない値**を `IN`／`NOT IN` へ渡すと、その `IN` が **kintone REST へ押し下げられるか否か**で挙動が分かれます（実行モードが SIMPLE か FULL_SCAN かではありません）。
 > - **`WHERE` 全体が REST に完全押し下げされる場合**（純粋な SIMPLE のほか、`DISTINCT`／`GROUP BY`／`ORDER BY` などで実行モードが FULL_SCAN になっても、`WHERE` 自体は押し下げ可能なとき）: 定義外値が kintone に渡り、`GAIA_IQ10`（項目に「値」は存在しません）で**実行エラー**になります。
@@ -2993,6 +2999,8 @@ EXPLAIN IMPORT INTO APP100 (顧客コード, 顧客名) FROM CSV customers BY NA
 ### 制約
 
 - `EXPLAIN SHOW APPS` など、上記以外の文は非対応です
+- `EXPLAIN CREATE TEMP TABLE ... AS SELECT ...` は非対応です。`AS` 以降の
+  `SELECT`（または `WITH`）を単体で `EXPLAIN` すると、同じ取得・JOIN 計画を確認できます
 - 実データの取得・更新は行いません（metadata APIのみ）
 - 対象アプリのフォーム定義を読める権限が必要です。schema取得に失敗した場合、推定SIMPLEとして成功させず元の認証・通信エラーを返します
 - `order plan`は`CANONICAL_LOCAL`／`CANONICAL_REST_TOP_N`／`KORDER_NATIVE`を表示します
@@ -3001,9 +3009,31 @@ EXPLAIN IMPORT INTO APP100 (顧客コード, 顧客名) FROM CSV customers BY NA
 
 ## 25. バッチ実行と一時テーブル
 
-> **CLI（`-e` / `-f` / `--console`）と MCP（`ksql_query` / `ksql_validate` / `ksql_mutate` / `ksql_explain`）で利用可能**です。プラグイン UI もバッチに対応し（DML を含むバッチも実行可能）、最後に結果セットを返した文（通常は最終 SELECT）だけを表示します。詳細仕様は [ksql_batch_temp_table_spec.md](internal/ksql_batch_temp_table_spec.md) を参照してください。
+> **CLI（`-e` / `-f` / `--console`）、MCP（`ksql_query` / `ksql_validate` /
+> `ksql_mutate` / `ksql_explain`）、engine ライブラリの `runBatch()` で利用可能**です。
+> プラグイン UI もバッチに対応し（DML を含むバッチも実行可能）、最後に結果セットを
+> 返した文（通常は最終 SELECT）だけを表示します。詳細仕様は
+> [ksql_batch_temp_table_spec.md](internal/ksql_batch_temp_table_spec.md) を参照してください。
 >
 > **リラン可能な差分更新バッチの設計パターン**（ステータス駆動・件数ゲート・スナップショット・バッチ変数の活用）は [ksql_batch_recipes.md](ksql_batch_recipes.md) にまとめています。
+
+### engine ライブラリで利用できる構文
+
+| API | 構文 |
+|---|---|
+| `runQuery()` | 単文の `SELECT` / `WITH` / `UNION [ALL]` / `SHOW APPS` / `DESCRIBE` / `DESC` / 既存レコード `VALIDATE` |
+| `runBatch()` | 上記、`CREATE TEMP TABLE ... AS SELECT/WITH` / `DROP TEMP TABLE` / `SET` / `DECLARE` / `ASSERT` / `EXPLAIN` |
+| `explainQuery()` | 単文の `SELECT` / `WITH` / `UNION [ALL]` |
+
+engine ライブラリは read-only 専用です。書き込み DML、DML `VALIDATE ONLY`、
+`IMPORT`、`APPLY` は受け付けません。`runBatch()` は文が1つでも失敗したら throw し、
+部分結果を返しません。成功結果に `ok` フィールドはなく、失敗した文は error の
+`statementIndex` / `statementType` で特定します。これは部分結果が完全な結果として
+アプリケーションロジックへ流れ込む事故を防ぐためです。
+
+`results[]` の各 `metrics` は文別計測ではなく、同一の**バッチ全体集計値**です。
+文ごとの性能コストとして解釈しないでください。API と型の詳細は
+[エンジン・ライブラリ利用ガイド](ksql_engine_library.md)を参照してください。
 
 ### 複文（バッチ）
 
@@ -3025,7 +3055,30 @@ SELECT 部門 FROM APP200;
 
 `CREATE TEMP TABLE #名前 AS SELECT ...` で SELECT 結果をバッチ内に実体化し、後続の文から `FROM` / `JOIN` / サブクエリで参照できます。
 
-source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。一時テーブルを JOIN 入力にする形、`KORDER BY`、サブテーブル、入れ子 SELECT、本体そのものが `UNION` の場合、または押し下げ不能な述語が混ざる形では使用できません。JOIN で使える第5-W / 第5-L は、JOIN の全入力が alias 付き物理 APP の場合に限ります。後者は一時テーブルへ切り出さずトップレベル SELECT として書きます。
+source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。物理アプリ同士の INNER JOIN も、JOIN の全入力が alias 付き物理 APP で第5-W / 第5-L を満たせば、server-only 関数で絞ってから実体化できます。
+
+一方、**入力に一時テーブルが1つでもあれば文全体が server-only 関数の対象外**です。
+関数を一時テーブルの列へ書かなければよい、という意味ではありません。JOIN 相手の
+物理アプリ側へ関数を置いても `..._CONTEXT_UNSUPPORTED` で拒否されます。
+
+```sql
+-- OK: 物理アプリ同士を JOIN し、関数で絞ってから実体化する
+CREATE TEMP TABLE #当月 AS
+  SELECT d.顧客No AS k, d.売上, c.業種
+  FROM APP100 d INNER JOIN APP200 c ON d.顧客No = c.顧客No
+  WHERE d.受注日 = THIS_MONTH();
+
+-- NG: 実体化後。一時テーブルが入力にあるため、関数を物理 APP 側へ置いても拒否
+CREATE TEMP TABLE #x AS
+  SELECT 顧客No, 受注日 FROM APP100;
+SELECT *
+FROM #x a INNER JOIN APP200 c ON a.顧客No = c.顧客No
+WHERE c.受注日 = THIS_MONTH();
+```
+
+一時テーブルは利用者アプリのプロセス内メモリへ実体化されます。1表の上限は
+`tempTableMaxRows`（既定10,000行）で、超過は `truncate` 指定でも error です。
+同時に存在できるのは最大16表で、`DROP TEMP TABLE` すると同じバッチ内で枠を再利用できます。
 
 ```sql
 -- 相関サブクエリの回避例
