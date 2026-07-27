@@ -2,6 +2,12 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### ドキュメント（B84 押し下げ可否の公開）
+
+- 言語リファレンスに、単一表と JOIN の押し下げ機構の違い、JOIN の field vs literal におけるフィールド型 × 演算子表、`$id` と `RECORD_NUMBER` の違い、server-only 関数・`KLIKE`・関数付きフィールドの別規則を追加した。公開表は分類器ソースから導いた型集合と実分類結果をテストで照合し、実装との drift を検出する。**公開挙動の変更なし**。
+
 ## v3.29.0（2026-07-28）
 
 ### 機能追加（B68 engine ライブラリの read-only 構文 parity）
