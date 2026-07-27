@@ -101,3 +101,75 @@ Firefox と Chrome のそれぞれで、上記4 SQLについて次を記録す�
 
 両ブラウザで、許可形の実行と EXPLAIN がともに許可、拒否形の実行が拒否かつ
 EXPLAIN が `plan status: rejected` であることを release gate とする。
+
+
+---
+
+## 【実機・CLI 面】v3.28.0 / devenxyfi / APP4147・APP4148（2026-07-27）
+
+ブラウザ smoke に先立ち、**ローカル v3.28.0 ビルドの CLI で実 kintone に対して**先行検証した。
+プロファイル `dev`（devenxyfi.cybozu.com・ログインユーザー Alex2013）。
+
+- **APP4147** 活動履歴: `顧客No`(NUMBER)、`対応日付`(DATE)、`会社名`/`タイトル`(TEXT)、
+  `対応者`(USER_SELECT)、`作成者`(CREATOR)、`所属組織`(ORGANIZATION_SELECT)
+- **APP4148** 顧客: `顧客No`(RECORD_NUMBER)、`更新日時`(UPDATED_TIME)
+- 結合: `a.顧客No = t.顧客No`
+- データは 2025-08〜2025-10 の 18 件。今日（2026-07-27）基準では `THIS_MONTH()` が 0 件になるため、
+  **`LAST_YEAR()` を使う形**に組み替えている
+
+### 期待値の三点固定
+
+| 形 | 件数 |
+|---|---:|
+| 単一表 `対応日付 = LAST_YEAR()` | 18 |
+| JOIN ＋ リテラル日付 `>= 2025-01-01 and <= 2025-12-31` | 18 |
+| **JOIN ＋ `LAST_YEAR()`（v3.28.0 の新規許可）** | **18** |
+
+**v3.27.0 では同じ JOIN ＋ `LAST_YEAR()` が `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` で
+拒否される**ことも、デプロイ済み MCP v3.27.0 で確認済み（before / after の対比）。
+
+### 実行結果
+
+| # | 形 | 結果 |
+|---|---|---|
+| ① | 第5-W 同一 alias OR（`LAST_YEAR() OR THIS_YEAR()`） | **18** |
+| ② | 第5-L ＋ client 残余 `LENGTH(a.会社名) > 1` | **18** |
+| ③ | 第5-L 複数 alias（`a.対応日付 = LAST_YEAR() AND t.更新日時 <= NOW()`） | **18** |
+| ④ | `a.対応者 in (LOGINUSER())` 併用 | **0**（後述・データ由来で正） |
+| ⑤ | cross-alias OR | **拒否** `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` |
+| ⑥ | LEFT JOIN | **拒否** 同上 |
+| ⑦ | `所属組織 in (LOGINUSER())` | **拒否** `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED` |
+
+### 0 件になった 2 形を追跡した結果（いずれもデータ由来・不具合ではない）
+
+- `LENGTH(a.タイトル) > 1` が 0 件 → **`タイトル` が全レコード空**。
+  単一表でも 0、JOIN ＋ リテラル日付でも 0 で三者一致し、`LENGTH(a.会社名) > 1` は 18 件。
+  **residual は正しく評価されている。**
+- `対応者 in (LOGINUSER())` が 0 件 → 全 18 件の `対応者` は `rex0220` だが、
+  CLI プロファイルのログインユーザーは `Alex2013`。**サーバー側で正しく解決された結果の 0 件。**
+
+### EXPLAIN（実機）
+
+許可形:
+
+```text
+allow form: JOIN_SERVER_FUNCTION_EXACT (leaf)
+pushdown applied: 対応日付 = LAST_YEAR()
+relation: exact
+function leaf relation: function-leaf-exact
+consumption: leaf
+client residual: LENGTH(a.会社名) > 1
+relative date client evaluations: 0
+```
+
+拒否形（LEFT JOIN）はエラー終了せず次を表示する。
+
+```text
+relative date function: LAST_YEAR
+plan status: rejected
+reason: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN
+client evaluation: forbidden
+records/cursor/mutation API during EXPLAIN: none
+```
+
+**CLI 面は実機 PASS。プラグイン面（Firefox / Chrome）は未実施。**
