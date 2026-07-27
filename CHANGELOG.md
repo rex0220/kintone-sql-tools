@@ -2,6 +2,15 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## Unreleased
+
+### 性能改善（B76 JOIN 述語の APP 別 prefilter）
+
+- **INNER JOIN の `WHERE` から、単一 alias に属し、型と演算子の対応が確認できる述語を各 APP の records API query へ押し下げるようにした。** DATE / TIME / DATETIME 系と単一行文字列の `=`、NUMBER・`$id`、実在する選択肢の `IN` / `NOT IN`、安全な同一 alias `OR` などが対象になる。
+- **これは性能改善であり、クエリ結果の挙動変更ではない。** 押し下げ後も元の `WHERE` を client で再評価するため結果は不変で、records API から取得する候補件数だけを減らす。`EXPLAIN` は applied / candidate、`relation: exact` / `relation: superset`、非採用 reason を表示する。
+- LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、`KLIKE` を含む `OR`、型不明、非実在の選択肢、ユーザー選択・組織選択・グループ選択フィールドは押し下げない。相対日付関数および `LOGINUSER()` などの kintone query 関数は JOIN では引き続き使用できない。
+- **`DATE_FORMAT(...)` など関数付き述語は引き続き押し下げない。** FULL_SCAN のすべての `WHERE` が最適化されるわけではない。
+
 ## v3.25.0（2026-07-27）
 
 > **⚠ 破壊的変更（minor リリース）:** `^3` の利用者にも自動更新で届きます。`WHERE` の

@@ -1138,8 +1138,20 @@ INNER JOIN APP200 AS b ON a.注文ID = b.注文ID
 LEFT  JOIN APP300 AS c ON a.配送ID = c.配送ID
 ```
 
-> **注意:** JOIN を使うと全件取得（FULL_SCAN モード）になるため、  
-> 大量レコードの場合はパフォーマンスに注意してください。
+> **注意:** JOIN は FULL_SCAN モードで client 側の結合と元の `WHERE` の再評価を行います。
+> ただし、INNER JOIN で、型と演算子が対応する単一 alias の述語は、各 APP の records API
+> query へ prefilter として押し下げます。押し下げは取得件数を減らす性能最適化であり、
+> 元の `WHERE` を client で再評価するため結果は変わりません。
+>
+> 押し下げない形は、LEFT / RIGHT JOIN、cross-alias `OR`、`NOT`、cross-table 述語、
+> `KLIKE` を含む `OR`、関数付き述語、型不明、非実在の選択肢、およびユーザー選択・
+> 組織選択・グループ選択フィールドです。相対日付関数と kintone query 関数は JOIN では
+> 引き続き使用できません。`作成者 in (LOGINUSER())` は単一 APP では使用できますが、
+> JOIN では使用できません。
+>
+> `EXPLAIN` では、実行時メタデータで確定した `pushdown applied`、静的な
+> `pushdown candidate`、および集合関係 `relation: exact` / `relation: superset`
+> を確認できます。押し下げない場合は reason も表示します。
 
 ---
 
@@ -2825,7 +2837,7 @@ kSQL は以下の条件に応じて自動的に実行モードを切り替えま
 | 条件 | モード |
 |------|--------|
 | JOIN なし、GROUP BY なし、DISTINCT なし、WHERE/ORDER BY に関数・算術式なし | **SIMPLE候補**（型×演算子能力とORDER plannerで最終決定） |
-| JOIN あり / GROUP BY あり / DISTINCT / WHERE に関数・算術式・CASE WHEN / ORDER BY に算術式 | **FULL_SCAN**（全件取得して JS 処理） |
+| JOIN あり / GROUP BY あり / DISTINCT / WHERE に関数・算術式・CASE WHEN / ORDER BY に算術式 | **FULL_SCAN**（JS 処理。JOIN の安全な単一 alias 述語など、対応する prefilter は records API へ押し下げる） |
 | WHERE に IN (SELECT) / EXISTS / NOT EXISTS / スカラーサブクエリ | **FULL_SCAN** |
 | SELECT 列にスカラーサブクエリ | **FULL_SCAN** |
 | SELECT 列にウィンドウ関数 | **FULL_SCAN** |
@@ -2839,7 +2851,7 @@ FULL_SCAN モードは大量レコードの場合、時間がかかります。
 
 - エンジン既定値: **10,000 件**
 - CLI 既定値: **500 件**（`--max-records` で変更可能）
-- JOIN / GROUP BY / DISTINCT を使う場合、全テーブルを一括取得するため大量データでは時間がかかります
+- JOIN / GROUP BY / DISTINCT は client 側処理のため大量データでは時間がかかります。INNER JOIN の対応述語は各 APP へ押し下げて取得件数を減らしますが、押し下げられない APP は全件取得します
 - ローカル`ORDER BY`で上限に達した場合、`truncate`設定でも誤ったtop-Nを返さずエラーになります
 
 ### 算術は浮動小数点（IEEE 754 倍精度）
