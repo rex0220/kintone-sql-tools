@@ -2,10 +2,12 @@ import { Lexer } from "../../../lexer/lexer";
 import { Parser } from "../../../parser/parser";
 import type { BinaryExpr, SelectStatement, WhereExpr } from "../../../types/ast";
 import {
+  bindJoinServerFunctionFetches,
   buildJoinPushdownPlan,
   buildJoinPushdownStep2Plan,
   classifyJoinPushdownLeaf,
   classifyJoinServerFunctionLeaf,
+  isJoinServerFunctionFetchPlan,
   resolveJoinFieldOwner,
   serializeJoinPushdownItem,
   type JoinPushdownItem,
@@ -544,6 +546,51 @@ describe("B76 Phase B Step 1 exact function consumption foundation", () => {
     expect(plan.appliedKlikes.has(klike as any)).toBe(true);
     expect(plan.residualWhere).toBe(klike);
     expect(plan.serverFunctionCandidate?.staticContract).toBe("CONFIRMED");
+  });
+
+  test("第5-Lは完全なalias queryへの実fetch binding後だけ実行可能になる", () => {
+    const expr = where(
+      "SELECT * FROM APP100 a "
+      + "WHERE a.date = THIS_MONTH() AND a.text KLIKE 'urgent'"
+    );
+    const staticPlan = buildJoinPushdownPlan(expr, [core]);
+    expect(isJoinServerFunctionFetchPlan(staticPlan)).toBe(false);
+
+    const bound = bindJoinServerFunctionFetches(staticPlan, [core]);
+    expect(isJoinServerFunctionFetchPlan(bound)).toBe(true);
+    expect(bound.serverFunctionCandidate?.fetchContract).toBe("CONFIRMED");
+    expect(bound.fetchQueriesByAlias.get("a")).toBe(
+      '(text like "urgent") and (date = THIS_MONTH())'
+    );
+    expect(bound.serverFunctionConsumptions[0].fetchBinding).toEqual({
+      status: "BOUND_TO_TARGET_FETCH",
+      targetAlias: "a",
+      appId: 100,
+      query: '(text like "urgent") and (date = THIS_MONTH())',
+    });
+  });
+
+  test("Step 3境界のLOGINUSERと複数target aliasはfetchへ束縛しない", () => {
+    const login = buildJoinPushdownPlan(
+      binary("SELECT * FROM APP100 a WHERE a.creator IN (LOGINUSER())"),
+      [core]
+    );
+    expect(isJoinServerFunctionFetchPlan(
+      bindJoinServerFunctionFetches(login, [core])
+    )).toBe(false);
+
+    const left = source("a", 100, [{ code: "date", fieldType: "DATE" }]);
+    const right = source("b", 200, [{ code: "updated", fieldType: "UPDATED_TIME" }]);
+    const multiple = buildJoinPushdownPlan(
+      where(
+        "SELECT * FROM APP100 a INNER JOIN APP200 b ON a.date = b.updated "
+        + "WHERE a.date = TODAY() AND b.updated >= NOW()"
+      ),
+      [left, right]
+    );
+    expect(isJoinServerFunctionFetchPlan(
+      bindJoinServerFunctionFetches(multiple, [left, right])
+    )).toBe(false);
   });
 });
 

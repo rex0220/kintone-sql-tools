@@ -80,10 +80,17 @@ export interface JoinServerFunctionConsumption {
     readonly residualIdentityConsumption: "CONFIRMED";
   };
   /**
-   * §2.3(4) は runtime fetch でしか確定できない。
-   * Step 1 の静的 proof を実行許可と誤認しないための明示 marker。
+   * §2.3(4) は runtime fetch query への束縛で確定する。
+   * 静的 proof と実行許可を型で区別する。
    */
-  readonly fetchBinding: "PENDING_STEP_2";
+  readonly fetchBinding:
+    | "PENDING_STEP_2"
+    | {
+        readonly status: "BOUND_TO_TARGET_FETCH";
+        readonly targetAlias: string;
+        readonly appId: number;
+        readonly query: string;
+      };
 }
 
 export interface JoinServerFunctionCandidate {
@@ -91,7 +98,7 @@ export interface JoinServerFunctionCandidate {
   readonly staticContract:
     | "CONFIRMED"
     | "INCOMPLETE";
-  readonly fetchContract: "PENDING_STEP_2";
+  readonly fetchContract: "PENDING_STEP_2" | "CONFIRMED";
 }
 
 export type JoinPushdownRejectionReason =
@@ -118,6 +125,8 @@ export interface JoinPushdownPlan {
   readonly adoptedServerFunctionOccurrences: readonly string[];
   readonly residualWhere: WhereExpr | null;
   readonly residualServerFunctionOccurrences: readonly string[];
+  /** alias ごとに records fetch へそのまま渡す、検証済みの完全な query。 */
+  readonly fetchQueriesByAlias: ReadonlyMap<string, string>;
 }
 
 export interface JoinPushdownLeafClassification {
@@ -282,6 +291,7 @@ export function buildJoinPushdownPlan(
     appliedKlikes,
     allKlikes: Object.freeze([...allKlikes]),
     rejections: Object.freeze(collectRejections(where, sources)),
+    fetchQueriesByAlias: new Map<string, string>(),
     ...serverFunctionFoundation,
   });
 }
@@ -310,8 +320,159 @@ export function buildJoinPushdownStep2Plan(
     appliedKlikes: new Set<KlikeExpr>(),
     allKlikes: Object.freeze([]),
     rejections: Object.freeze(collectRejections(where, sources)),
+    fetchQueriesByAlias: new Map<string, string>(),
     ...serverFunctionFoundation,
   });
+}
+
+/**
+ * 第5-L の静的 plan を alias ごとの実 fetch query へ原子的に束縛する。
+ * 全 item / consumption を先に serialize・照合し、1件でも不整合なら未束縛 plan を返す。
+ * Step 2 は LOGINUSER と複数 target alias を開かない。
+ */
+export function bindJoinServerFunctionFetches(
+  plan: JoinPushdownPlan,
+  sources: readonly JoinPushdownSource[]
+): JoinPushdownPlan {
+  if (
+    plan.serverFunctionCandidate?.staticContract !== "CONFIRMED"
+    || plan.serverFunctionConsumptions.length === 0
+    || plan.residualServerFunctionOccurrences.length !== 0
+    || !sameStringMultiset(
+      plan.allServerFunctionOccurrences,
+      plan.adoptedServerFunctionOccurrences
+    )
+    || plan.allServerFunctionOccurrences.includes("LOGINUSER")
+    || plan.allKlikes.some((klike) => !plan.appliedKlikes.has(klike))
+  ) {
+    return plan;
+  }
+
+  const targetAliases = new Set(
+    plan.serverFunctionConsumptions.map((consumption) => consumption.targetAlias)
+  );
+  if (targetAliases.size !== 1) return plan;
+
+  const queryPartsByAlias = new Map<string, string[]>();
+  const append = (alias: string, query: string): void => {
+    const parts = queryPartsByAlias.get(alias);
+    if (parts) parts.push(query);
+    else queryPartsByAlias.set(alias, [query]);
+  };
+
+  try {
+    for (const item of plan.items) {
+      append(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    }
+    for (const consumption of plan.serverFunctionConsumptions) {
+      const source = sources.find((candidate) =>
+        candidate.alias === consumption.targetAlias
+        && candidate.appId === consumption.appId
+        && candidate.sourceKind === "APP"
+      );
+      if (!source) return plan;
+      const serialized = serializeJoinPushdownItem({
+        targetAlias: consumption.targetAlias,
+        appId: consumption.appId,
+        predicate: consumption.predicate,
+        relation: "exact",
+      }, sources);
+      if (
+        serialized !== consumption.serializedPredicate
+        || !sameStringMultiset(
+          serverFunctionOccurrencesInSerializedQuery(serialized),
+          consumption.functionOccurrences
+        )
+      ) {
+        return plan;
+      }
+      append(consumption.targetAlias, serialized);
+    }
+  } catch {
+    return plan;
+  }
+
+  const fetchQueriesByAlias = new Map<string, string>();
+  for (const [alias, parts] of queryPartsByAlias) {
+    fetchQueriesByAlias.set(
+      alias,
+      parts.length === 1
+        ? parts[0]
+        : parts.map((part) => `(${part})`).join(" and ")
+    );
+  }
+
+  const boundConsumptions = plan.serverFunctionConsumptions.map((consumption) => {
+    const query = fetchQueriesByAlias.get(consumption.targetAlias);
+    if (!query) return null;
+    return Object.freeze({
+      ...consumption,
+      fetchBinding: Object.freeze({
+        status: "BOUND_TO_TARGET_FETCH" as const,
+        targetAlias: consumption.targetAlias,
+        appId: consumption.appId,
+        query,
+      }),
+    });
+  });
+  if (boundConsumptions.some((consumption) => consumption === null)) return plan;
+
+  return Object.freeze({
+    ...plan,
+    serverFunctionCandidate: Object.freeze({
+      ...plan.serverFunctionCandidate,
+      fetchContract: "CONFIRMED" as const,
+    }),
+    serverFunctionConsumptions: Object.freeze(
+      boundConsumptions as JoinServerFunctionConsumption[]
+    ),
+    fetchQueriesByAlias,
+  });
+}
+
+/** 第5-L guard/runtime が共有する、実 fetch 束縛済み plan の意味検証。 */
+export function isJoinServerFunctionFetchPlan(
+  plan: JoinPushdownPlan
+): boolean {
+  if (
+    plan.serverFunctionCandidate?.variant !== "EXACT_LEAF"
+    || plan.serverFunctionCandidate.staticContract !== "CONFIRMED"
+    || plan.serverFunctionCandidate.fetchContract !== "CONFIRMED"
+    || plan.serverFunctionConsumptions.length === 0
+    || plan.residualServerFunctionOccurrences.length !== 0
+    || !sameStringMultiset(
+      plan.allServerFunctionOccurrences,
+      plan.adoptedServerFunctionOccurrences
+    )
+  ) {
+    return false;
+  }
+  if (!plan.serverFunctionConsumptions.every((consumption) => {
+    const binding = consumption.fetchBinding;
+    return binding !== "PENDING_STEP_2"
+      && binding.status === "BOUND_TO_TARGET_FETCH"
+      && binding.targetAlias === consumption.targetAlias
+      && binding.appId === consumption.appId
+      && binding.query === plan.fetchQueriesByAlias.get(consumption.targetAlias)
+      && binding.query.includes(consumption.serializedPredicate);
+  })) {
+    return false;
+  }
+  for (const [alias, query] of plan.fetchQueriesByAlias) {
+    const expected = plan.serverFunctionConsumptions
+      .filter((consumption) => consumption.targetAlias === alias)
+      .flatMap((consumption) => [...consumption.functionOccurrences]);
+    if (
+      expected.length > 0
+      && !sameStringMultiset(
+        serverFunctionOccurrencesInSerializedQuery(query),
+        expected
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 type ServerFunctionFoundation = Pick<

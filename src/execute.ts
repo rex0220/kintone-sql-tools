@@ -118,7 +118,9 @@ import {
   type KlikePushdownPlan,
 } from "./core/optimization/klikePushdownPlan";
 import {
+  bindJoinServerFunctionFetches,
   buildJoinPushdownPlan,
+  isJoinServerFunctionFetchPlan,
   serializeJoinPushdownItem,
   type JoinPushdownPlan,
   type JoinPushdownSource,
@@ -961,6 +963,15 @@ async function resolveRelativeDateExecutionPlan(
         cacheContext
       );
       return decomposeRelativeDatePrefilter(select, resolver);
+    },
+    joinServerFunctionPlan: async (select) => {
+      const metadata = await loadTypedPushdownMeta(select, client, cacheContext);
+      const runtimePlan = buildRuntimeJoinPushdownPlan(select, metadata);
+      if (runtimePlan === null) return null;
+      if (isJoinServerFunctionFetchPlan(runtimePlan.joinPlan)) {
+        boundJoinRuntimePlans.set(select, runtimePlan);
+      }
+      return runtimePlan.joinPlan;
     },
   });
 }
@@ -3108,6 +3119,8 @@ interface RuntimeJoinPushdownPlan extends KlikePushdownPlan {
   readonly queriesByAlias: ReadonlyMap<string, string>;
 }
 
+const boundJoinRuntimePlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+
 function buildRuntimeJoinPushdownPlan(
   stmt: SelectStatement,
   metadata: TypedPushdownMeta
@@ -3135,12 +3148,18 @@ function buildRuntimeJoinPushdownPlan(
     ]),
     fieldOptions: metadata.fieldOptionsByApp.get(table.appId),
   }));
-  const plan = buildJoinPushdownPlan(stmt.where, sources);
+  const staticPlan = buildJoinPushdownPlan(stmt.where, sources);
+  const plan = bindJoinServerFunctionFetches(staticPlan, sources);
   const conditionsByAlias = new Map<string, WhereExpr>();
   const queriesByAlias = new Map<string, string>();
+  for (const [alias, query] of plan.fetchQueriesByAlias) {
+    queriesByAlias.set(alias, query);
+  }
   for (const item of plan.items) {
     // §6.2: alias を捨てる serializer の直前に ownership を fail-loud 再検査する。
-    queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    if (!queriesByAlias.has(item.targetAlias)) {
+      queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+    }
     conditionsByAlias.set(item.targetAlias, item.predicate);
   }
   const mainAlias = stmt.from.alias!;
@@ -3937,9 +3956,25 @@ async function executeFullScanSelect(
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
 
   // 同じ計画を検証・fetch・JS 評価で共有する。
-  const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
+  const preboundJoinPlan = boundJoinRuntimePlans.get(stmt);
+  if (
+    preboundJoinPlan
+    && !isJoinServerFunctionFetchPlan(preboundJoinPlan.joinPlan)
+  ) {
+    throw new Error("InternalError: JOIN server-function fetch binding changed before records API.");
+  }
+  const pushdownPlan = preboundJoinPlan
+    ?? buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
+  const runtimeJoinPlan = "joinPlan" in pushdownPlan
+    ? pushdownPlan as RuntimeJoinPushdownPlan
+    : null;
+  const boundServerFunctionPlan =
+    runtimeJoinPlan
+    && isJoinServerFunctionFetchPlan(runtimeJoinPlan.joinPlan)
+      ? runtimeJoinPlan
+      : null;
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
   // 変わる非対称（B72 と同型）になり、しかも誤値を返す LEFT/RIGHT JOIN が警告のまま
   // という危険度の逆転を生むため。検索打ち切りの安全性は B79 で独立に扱った
@@ -3950,7 +3985,12 @@ async function executeFullScanSelect(
   if (prefilterPlan && allowOriginalWherePushdown) {
     throw new Error("internal error: relative-date prefilter must disable original WHERE pushdown.");
   }
-  const mainFetchCondition = prefilterPlan ? prefilterPlan.prefilterWhere : mainPushDown;
+  const mainFetchCondition = prefilterPlan
+    ? prefilterPlan.prefilterWhere
+    : (boundServerFunctionPlan ? null : mainPushDown);
+  const mainBoundQuery = boundServerFunctionPlan?.queriesByAlias.get(
+    stmt.from.alias!
+  ) ?? "";
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
   const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
@@ -3967,8 +4007,9 @@ async function executeFullScanSelect(
     options.onLimitReached ?? "error",
     warnings,
     mainFetchCondition,
-    allowOriginalWherePushdown,
-    plainGroupByPlan
+    boundServerFunctionPlan ? false : allowOriginalWherePushdown,
+    plainGroupByPlan,
+    mainBoundQuery
   );
 
   // JOIN テーブルを push-down の有無で振り分け
@@ -3983,8 +4024,13 @@ async function executeFullScanSelect(
       parallelJoins.push({ join, promise: Promise.resolve([]) });
       continue;
     }
-    const jCond = join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null;
-    if (jCond !== null) {
+    const boundQuery = join.table.alias
+      ? (boundServerFunctionPlan?.queriesByAlias.get(join.table.alias) ?? "")
+      : "";
+    const jCond = boundServerFunctionPlan
+      ? null
+      : (join.table.alias ? (tableConditions.get(join.table.alias) ?? null) : null);
+    if (jCond !== null || boundQuery !== "") {
       parallelJoins.push({
         join,
         promise: fetchTableRecordsForFullScan(
@@ -3998,7 +4044,8 @@ async function executeFullScanSelect(
           warnings,
           jCond,
           true,
-          plainGroupByPlan
+          plainGroupByPlan,
+          boundQuery
         ),
       });
     } else {
@@ -4071,7 +4118,11 @@ async function executeFullScanSelect(
     havingFieldSemanticsResolver,
     aggregateSortKindResolver,
     appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
-    ...(prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : {}),
+    ...(prefilterPlan
+      ? { residualWhere: prefilterPlan.residualWhere }
+      : boundServerFunctionPlan
+        ? { residualWhere: boundServerFunctionPlan.joinPlan.residualWhere }
+        : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
   });

@@ -74,11 +74,6 @@ function expectNoExecutionApi(calls: ReturnType<typeof makeClient>["calls"]) {
 }
 
 test.each([
-  [
-    "JOIN residual",
-    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-    + "WHERE a.日付 = YESTERDAY()",
-  ],
   ["unsupported field type", "SELECT 件名 FROM APP100 WHERE 件名 = YESTERDAY()"],
   [
     "nonexact KORDER",
@@ -109,6 +104,28 @@ test.each([
   await expect(execute(sql, client, { confirm: calls.confirm }))
     .rejects.toThrow(/YESTERDAY: WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
   expectNoExecutionApi(calls);
+});
+
+test("JOIN exact leaf は第5-L fetchでrowsを返しclient evaluator 0", async () => {
+  const { client, calls } = makeClient();
+  const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+  const result = await execute(
+    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.日付 = YESTERDAY()",
+    client,
+    { confirm: calls.confirm }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([{ 日付: "2026-07-25" }]);
+  expect(evaluator).not.toHaveBeenCalled();
+  expect(calls.records).toHaveBeenCalledTimes(2);
+  expect(calls.records.mock.calls.find(([params]) => params.app === 100)?.[0].query)
+    .toContain("日付 = YESTERDAY()");
+  expect(calls.cursorOpen).not.toHaveBeenCalled();
+  expect(calls.post).not.toHaveBeenCalled();
+  expect(calls.put).not.toHaveBeenCalled();
+  expect(calls.delete).not.toHaveBeenCalled();
+  expect(calls.confirm).not.toHaveBeenCalled();
 });
 
 test("CREATE TEMP TABLE UNION materialization は batch 内でも records/Cursor/mutation/confirm 0", async () => {

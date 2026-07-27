@@ -382,11 +382,6 @@ describe("B72 Step 2 must-stay-rejected", () => {
       "KORDER FULL_SCAN",
       "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH() KORDER BY $id LIMIT 10",
     ],
-    [
-      "JOIN",
-      "SELECT a.区分, COUNT(*) AS c FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-      + "WHERE a.日付 = THIS_MONTH() GROUP BY a.区分",
-    ],
     ["VALIDATE", "VALIDATE APP100 WHERE 日付 = THIS_MONTH()"],
     [
       "subtable",
@@ -413,6 +408,31 @@ describe("B72 Step 2 must-stay-rejected", () => {
     await expect(execute(sql, client, { confirm: calls.confirm }))
       .rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
     expectNoExecutionApi(calls);
+  });
+
+  test("JOIN集計は第5-L fetchとclient評価0で新しいrowsを固定する", async () => {
+    const { client, calls } = makeClient();
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+    const result = await execute(
+      "SELECT a.区分, COUNT(*) AS c FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.日付 = THIS_MONTH() GROUP BY a.区分",
+      client,
+      { confirm: calls.confirm }
+    ) as SelectResult;
+
+    expect(result.rows).toEqual([{ 区分: "A", c: "2" }, { 区分: "B", c: "1" }]);
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(firstRequest(calls)).toMatchObject({
+      app: 100,
+      fields: ["区分", "$id", "日付"],
+      query: "日付 = THIS_MONTH() order by $id asc limit 500 offset 0",
+    });
+    expect(calls.records).toHaveBeenCalledTimes(2);
+    expect(calls.cursorOpen).not.toHaveBeenCalled();
+    expect(calls.post).not.toHaveBeenCalled();
+    expect(calls.put).not.toHaveBeenCalled();
+    expect(calls.delete).not.toHaveBeenCalled();
+    expect(calls.confirm).not.toHaveBeenCalled();
   });
 
   test("materialized CTE は whole WHERE を押し下げ client 相対日付評価0で正しく集計する", async () => {

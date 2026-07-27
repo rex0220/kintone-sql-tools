@@ -129,11 +129,6 @@ describe("B75 Step 1 materialized CTE relative dates", () => {
 
   test.each([
     [
-      "JOINを含むCTE本体",
-      "WITH c AS (SELECT a.受注日 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-      + "WHERE a.受注日 = YESTERDAY()) SELECT * FROM c",
-    ],
-    [
       "CTE本体のUNION枝",
       "WITH c AS (SELECT 受注日 FROM APP100 WHERE 受注日 = YESTERDAY() "
       + "UNION ALL SELECT 受注日 FROM APP200) SELECT * FROM c",
@@ -158,6 +153,35 @@ describe("B75 Step 1 materialized CTE relative dates", () => {
     await expect(execute(sql, client, { confirm: calls.confirm }))
       .rejects.toThrow(/WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN/);
     expectNoExecutionApi(calls);
+  });
+
+  test("物理APP JOINを含むCTE本体は第5-Lで新しいrowsとclient評価0を固定する", async () => {
+    const { client, calls } = makeClient();
+    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+    const result = await execute(
+      "WITH c AS (SELECT a.受注日 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.受注日 = YESTERDAY()) SELECT * FROM c",
+      client,
+      { confirm: calls.confirm }
+    ) as SelectResult;
+
+    expect(result.rows).toEqual([
+      { 受注日: "2026-07-01" },
+      { 受注日: "2026-07-02" },
+      { 受注日: "2026-07-03" },
+    ]);
+    expect(evaluator).not.toHaveBeenCalled();
+    expect(calls.records).toHaveBeenCalledTimes(2);
+    expect(calls.records.mock.calls.find(([params]) => params.app === 100)?.[0])
+      .toMatchObject({
+        fields: ["受注日", "$id"],
+        query: "受注日 = YESTERDAY() order by $id asc limit 500 offset 0",
+      });
+    expect(calls.cursorOpen).not.toHaveBeenCalled();
+    expect(calls.post).not.toHaveBeenCalled();
+    expect(calls.put).not.toHaveBeenCalled();
+    expect(calls.delete).not.toHaveBeenCalled();
+    expect(calls.confirm).not.toHaveBeenCalled();
   });
 
   test.each(["truncate", "error"] as const)(

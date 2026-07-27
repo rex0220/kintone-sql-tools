@@ -179,11 +179,6 @@ test.each([
       + "WHERE NOT (日付 = TODAY() AND LENGTH(件名) > 1)",
   ],
   [
-    "JOIN residual",
-    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
-      + "WHERE a.日付 = TODAY()",
-  ],
-  [
     "non-exact KORDER",
     "SELECT 日付 FROM APP100 WHERE 日付 = TODAY() AND LENGTH(件名) > 1 "
       + "KORDER BY $id LIMIT 10",
@@ -201,6 +196,32 @@ test.each([
     expectNoExecutionApi(calls);
   }
 );
+
+test("JOIN TODAY exact leaf は第5-L fetchでrowsを返しclient evaluator 0", async () => {
+  const { client, calls } = makeClient();
+  const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
+  const result = await execute(
+    "SELECT a.日付 FROM APP100 a JOIN APP200 b ON a.$id = b.$id "
+      + "WHERE a.日付 = TODAY()",
+    client,
+    { confirm: calls.confirm }
+  ) as SelectResult;
+
+  expect(result.rows).toEqual([
+    { 日付: "2026-07-27" },
+    { 日付: "2026-07-27" },
+    { 日付: "2026-07-27" },
+  ]);
+  expect(evaluator).not.toHaveBeenCalled();
+  expect(calls.records).toHaveBeenCalledTimes(2);
+  expect(calls.records.mock.calls.find(([params]) => params.app === 100)?.[0].query)
+    .toContain("日付 = TODAY()");
+  expect(calls.cursorOpen).not.toHaveBeenCalled();
+  expect(calls.post).not.toHaveBeenCalled();
+  expect(calls.put).not.toHaveBeenCalled();
+  expect(calls.delete).not.toHaveBeenCalled();
+  expect(calls.confirm).not.toHaveBeenCalled();
+});
 
 test.each([
   ["DATE × NOW", "SELECT 日付 FROM APP100 WHERE 日付 = NOW()"],

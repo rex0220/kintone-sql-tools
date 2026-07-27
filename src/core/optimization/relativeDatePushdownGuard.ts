@@ -26,6 +26,10 @@ import type {
   RelativeDatePrefilterDecomposition,
   RelativeDatePrefilterPlan,
 } from "./relativeDatePrefilterPlan";
+import {
+  isJoinServerFunctionFetchPlan,
+  type JoinPushdownPlan,
+} from "./joinPredicatePushdown";
 import type {
   PredicateCapabilityReason,
   PredicateCapabilityResult,
@@ -55,7 +59,9 @@ export interface RelativeDatePlanNode {
   readonly prefilterPlan?: RelativeDatePrefilterPlan;
   readonly phase2PrefilterEligible?: boolean;
   readonly fullScanExactPlan?: RelativeDateFullScanExactPlan;
-  readonly allowForm?: "FULL_SCAN_EXACT";
+  readonly joinServerFunctionPlan?: JoinPushdownPlan;
+  readonly allowForm?: "FULL_SCAN_EXACT" | "JOIN_SERVER_FUNCTION_EXACT";
+  readonly joinServerFunctionVariant?: "EXACT_LEAF";
   readonly clientWhereEvaluation: boolean;
   readonly allowed: boolean;
 }
@@ -80,6 +86,9 @@ export interface RelativeDateCapabilityResolver {
   prefilterDecomposition?(
     select: SelectStatement
   ): Promise<RelativeDatePrefilterDecomposition | null>;
+  joinServerFunctionPlan?(
+    select: SelectStatement
+  ): Promise<JoinPushdownPlan | null>;
 }
 
 interface WalkCandidate {
@@ -371,6 +380,25 @@ export function allowRelativeDatePrefilterPlan(
     && select.joins.length === 0;
 }
 
+/**
+ * 既存第1〜第4許可形とは独立した第5-L。
+ * 実 fetch query へ束縛済みの immutable plan だけを許可する。
+ */
+export function allowJoinServerFunctionPlan(
+  select: SelectStatement,
+  plan: JoinPushdownPlan
+): boolean {
+  return select.where !== null
+    && select.joins.length > 0
+    && select.joins.every((join) => join.type === "INNER")
+    && [select.from, ...select.joins.map((join) => join.table)].every((table) =>
+      table.alias !== null
+      && table.cteName === null
+      && !table.subtableCode
+    )
+    && isJoinServerFunctionFetchPlan(plan);
+}
+
 function rejectedNode(candidate: WalkCandidate): RelativeDatePlanNode {
   return {
     kind: candidate.kind,
@@ -515,6 +543,23 @@ export async function buildRelativeDatePushdownPlan(
           allowed = true;
         }
       }
+      let joinServerFunctionPlan: JoinPushdownPlan | undefined;
+      // Step 4 までは EXPLAIN の第5-L renderer を開かない。実行許可だけを
+      // Step 2 で追加し、旧 EXPLAIN reject 契約を維持する。
+      if (
+        !allowed
+        && statement.type !== "EXPLAIN"
+        && resolver.joinServerFunctionPlan
+      ) {
+        const candidatePlan = await resolver.joinServerFunctionPlan(select);
+        if (
+          candidatePlan !== null
+          && allowJoinServerFunctionPlan(select, candidatePlan)
+        ) {
+          joinServerFunctionPlan = candidatePlan;
+          allowed = true;
+        }
+      }
       const node: RelativeDatePlanNode = {
         kind: candidate.kind,
         source: candidate.source,
@@ -526,6 +571,13 @@ export async function buildRelativeDatePushdownPlan(
         ...(prefilterPlan ? { prefilterPlan, phase2PrefilterEligible } : {}),
         ...(fullScanExactPlan
           ? { fullScanExactPlan, allowForm: fullScanExactPlan.allowForm }
+          : {}),
+        ...(joinServerFunctionPlan
+          ? {
+              joinServerFunctionPlan,
+              allowForm: "JOIN_SERVER_FUNCTION_EXACT" as const,
+              joinServerFunctionVariant: "EXACT_LEAF" as const,
+            }
           : {}),
         clientWhereEvaluation: !allowed,
         allowed,
