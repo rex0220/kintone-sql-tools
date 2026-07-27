@@ -157,3 +157,73 @@ Phase A だけでも「能力表が2つ」は解消できる（allowlist を捨�
 
 **実需確認は引き続き必要。** Pro がライブラリ面を使っているか、`VALIDATE` / 複文バッチの需要があるかで
 Phase A 先行か B まで行くかが変わる。Pro への報告の返信で確認するのが自然である。
+
+---
+
+## 【2026-07-27】実需が確定した（オーナー提示）
+
+長く「実需確認待ち」だった本課題に、具体的な用途が示された。
+
+1. **ダッシュボードで `VALIDATE` のチェック結果を KPI やグラフとして表示する**
+2. **一時テーブルで、複雑になりやすい複数アプリの JOIN をシンプルに管理する**
+
+これで B68 は「read-only なのに使えない機能がある」という原理的な指摘から、
+**具体的な利用形を持つ課題**になった。以下、用途ごとに実機（v3.28.0 CLI・実 kintone）で確認した結果。
+
+### 1. VALIDATE の KPI 表示は **Phase A でほぼ足りる**
+
+`VALIDATE APPn` 単体の戻り値は、診断行に加えて**集計済みの統計**を持つ。
+
+```json
+{
+  "columns": ["$id","$err_field","$err_code","$err_message","$err_value",
+              "$err_subtable","$err_subrow","$err_subrow_id","$err_count"],
+  "rows": [...], "rowCount": 0,
+  "validateStats": { "errorRecords": 0, "errorCount": 0 }
+}
+```
+
+- **`validateStats` がそのまま KPI になる**（エラーレコード数・エラー件数）。集計処理が要らない。
+- 内訳グラフ（`$err_code` 別など）も、診断行が返るので**呼び出し側の JS で集計できる**。
+- SQL 側で `GROUP BY` したい場合だけ Phase B（`VALIDATE ... INTO #err; SELECT ... GROUP BY`）が要る。
+
+**したがって用途1は、安いほうの Phase A で大half が実現する。**
+Phase B は「SQL で集計したい」という表現力の問題であり、実現可否の問題ではない。
+
+### 2. 一時テーブルによる JOIN の分解は **B76 の制約と噛み合う**
+
+**JOIN の入力が一時テーブルだと、server-only 関数（相対日付・`TODAY()` 等）は使えない**（B76 Phase B の対象外）。
+用途2をそのまま実装すると、この制約に当たる可能性がある。実機で3形を確認した。
+
+| 形 | 結果 |
+|---|---|
+| ① 作成時に相対日付 → `#cur` を素で参照 | ✅ 18 件 |
+| ② 作成時に相対日付 → **`#cur` を JOIN 入力に**（WHERE に関数なし） | ✅ 18 件 |
+| ③ `#cur` を JOIN 入力にして **WHERE 側で相対日付** | ❌ `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` |
+
+```sql
+-- ✅ 推奨: 一時テーブルを作る時点で絞る（B75 が開けた形）
+CREATE TEMP TABLE #cur AS SELECT 顧客No, 会社名 FROM APP4147 WHERE 対応日付 = LAST_YEAR();
+SELECT ... FROM #cur a INNER JOIN APP4148 t ON a.顧客No = t.顧客No;
+
+-- ❌ 拒否: 一時テーブルを JOIN 入力にしてから関数で絞る
+CREATE TEMP TABLE #cur AS SELECT 顧客No, 対応日付 FROM APP4147;
+SELECT ... FROM #cur a INNER JOIN APP4148 t ON ... WHERE a.対応日付 = LAST_YEAR();
+```
+
+**「早く絞ってから結合する」**という、性能面でも望ましい書き方が正解になる。
+ただし**知らないと ③ を書いて拒否される**ため、Phase B を出すなら
+**この使い分けを公開ドキュメントに明記すること**を受入条件に含める。
+
+### 3. 優先度の見直し
+
+実需が確定したため、**「実需確認待ち」ではなくなった**。
+
+- **Phase A**（単文 `VALIDATE` / DML `VALIDATE ONLY`）＝用途1をほぼ満たし、
+  かつ**能力表の二重管理（§1）を解消**する。**費用対効果が高い。**
+- **Phase B**（複文バッチ・一時テーブル）＝用途2の本体。API 形状の設計が主コスト。
+  ③ の使い分けを docs に含めること。
+
+ただし**ライブラリ面での需要か、プラグイン／MCP 面での需要か**は未確認。
+プラグインと MCP は既に両機能を持つため、**ライブラリ面（Pro が engine library を使うか）**で
+必要かどうかが Phase 分けの判断材料になる。
