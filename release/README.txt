@@ -1,16 +1,36 @@
-ksql 配布パッケージ (v3.28.0)
+ksql 配布パッケージ (v3.29.0)
 
 release 成果物:
-- ksql-plugin-v3.28.0.zip
-- ksql-mcp.mcpb (manifest version 3.28.0)
-- ksql-mcp.js (MCP server version 3.28.0)
+- ksql-plugin-v3.29.0.zip
+- ksql-mcp.mcpb (manifest version 3.29.0)
+- ksql-mcp.js (MCP server version 3.29.0)
 
-1. ksql-plugin-v3.28.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.29.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.28.0): B76 Phase B（JOIN の server-only 関数・第5許可形）。
+本リリース (v3.29.0): B68 engine ライブラリの read-only 拡張。
+
+- ダッシュボード等が組み込む engine ライブラリで、これまで使えなかった read-only 機能を
+  解禁しました。純加法で、既存 API の型も挙動も変わりません。
+- runQuery(): 既存レコード監査の VALIDATE が使えます。結果に validateStats
+  (errorRecords / errorCount) が載るため、そのまま KPI に使えます。
+- runBatch(): 複文と一時テーブルが使えます。CREATE / DROP TEMP TABLE、SET / DECLARE、
+  ASSERT に対応し、results[] の各要素は runQuery と同じ QueryResult です。
+- 失敗時は throw します。文が 1 つでも失敗したらエラーになり、部分結果は返しません
+  (エラーから statementIndex / statementType が読めます)。プログラム API では
+  部分結果が黙ってアプリロジックへ流れ込むほうが危険なためです。
+- 一時テーブルの上限を公開契約にしました。tempTableMaxRows 既定 10,000 行、
+  同時に存在できるのは最大 16 表 (DROP で枠が空きます)、超過は truncate 指定でも
+  エラー、実体化は利用者アプリのプロセス内メモリです。
+- MCP が read-only として受理する文は library でも受理することをテストで固定しました。
+  例外は IMPORT / APPLY / DML VALIDATE ONLY の 3 つだけです。
+- 注意: 一時テーブルを JOIN の入力にすると、その文では相対日付や LOGINUSER() などの
+  server-only 関数が使えません (関数を物理アプリ側に置いても拒否されます)。
+  絞り込みは CREATE TEMP TABLE ... AS SELECT の時点で済ませてください。
+
+前リリース (v3.28.0): B76 Phase B（JOIN の server-only 関数・第5許可形）。
 - alias 付き物理 APP だけを入力にする INNER JOIN で、相対日付関数と
   TODAY() / NOW() / LOGINUSER() を kintone server へ exact に押し下げられるようにしました。
 - 第5-W: WHERE 全体が単一 alias に属する whole-WHERE exact。同一 alias の OR / NOT /

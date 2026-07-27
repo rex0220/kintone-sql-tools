@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## 次回リリース（バージョン未定）
+## v3.29.0（2026-07-28）
 
 ### 機能追加（B68 engine ライブラリの read-only 構文 parity）
 
