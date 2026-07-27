@@ -65,3 +65,95 @@ B66 の Phase2 は **`runMutation()`（DML 書き込み）**。B68 の2項目は
 1. 実需確認（VALIDATE 監査／多段 read のライブラリ利用計画）。
 2. 方向確定なら **Phase A（VALIDATE）から Phase1 仕様 R1**（allowlist 拡張・結果 DTO・二重強制の維持・面）。
 3. Phase B（read-only バッチ）は API 形状（`runBatch`）と temp lifecycle・文別強制の設計を別途 R1。
+
+---
+
+## 【2026-07-27】案の評価: ライブラリの許可構文を「MCP の READ 系と同じ」にする
+
+オーナー提案。**許可範囲の基準を自前の列挙ではなく MCP READ 面に置く**という案。
+
+### 1. 実コード確認＝現状は「能力表が2つ」
+
+| 面 | 判定方法 |
+|---|---|
+| **MCP `ksql_query`** | `validation.isReadOnly` ＝ **`isReadOnlyStatement()`（`src/core/dmlGuard.ts`）**。文ごとに `analyzeBatch`（`src/core/batch.ts`）が分類し、バッチは `isReadOnlyBatch` |
+| **ライブラリ** | **手書きの allowlist** `assertReadStatement()`（`src/engine-library/statementGuard.ts`）。`SELECT` / `WITH` / `UNION` / `SHOW_APPS` / `DESCRIBE` のみ、かつ `parseSingleStatement` で**単文限定** |
+
+`isReadOnlyStatement()` は「**kintone の mutation API を呼ぶか**」という意味的判定である。
+
+```ts
+writesKintone(stmt)      = isDmlType(stmt.type) && !stmt.validateOnly
+isReadOnlyStatement(stmt) = !writesKintone(stmt) && (isReadOnlyType(...) || isDmlType(...))
+```
+
+**ライブラリだけが別の分類を持っている。**これは B76 で痛い目を見た「押し下げの能力表が単一表と JOIN で2つある」のと同型で、
+**片方に文型を足したときにもう片方が置き去りになる**構造である。
+
+### 2. 差分（MCP READ ⊃ ライブラリ）
+
+| 文型 | MCP READ | ライブラリ |
+|---|---|---|
+| `SELECT` / `WITH` / `UNION` | ✅ | ✅ |
+| `SHOW APPS` / `DESCRIBE` | ✅ | ✅（run のみ） |
+| `EXPLAIN` | ✅ | ✅（別経路） |
+| **`VALIDATE`（既存レコード監査）** | ✅ | ❌ |
+| **DML `... VALIDATE ONLY`** | ✅ | ❌ |
+| **`CREATE` / `DROP TEMP TABLE`** | ✅ | ❌ |
+| **`SET` / `DECLARE` 変数** | ✅ | ❌ |
+| **`ASSERT`** | ✅ | ❌ |
+| **複文バッチ** | ✅ | ❌（単文限定） |
+
+B68 が挙げた2機能（`VALIDATE`・一時テーブルバッチ）は、**この差分の部分集合**である。
+つまり本案は B68 を包含し、かつ**なぜその2つなのかを原理から説明できる**。
+
+### 3. 強い点
+
+1. **判定が意味的になる。**「一覧に載っているか」ではなく「kintone に書くか」で決まる。
+2. **新しい判定ロジックを作らない。**既存の共有 predicate をそのまま使う。
+3. **将来の read-only 文型が自動的に両面へ揃う。**能力表の二重管理が消える。
+4. **B68 Phase A / B を一つの基準の下に置ける。**
+
+### 4. ただし「guard を差し替えるだけ」では終わらない
+
+**本体のコストは API 形状である。**
+
+- `runQuery` は単一の `QueryResult { type: "query"; rows; columns; rowCount; warnings; metrics }` を返す。
+  **バッチは複数の結果セット**になるため、戻り値をそのまま流用できない。
+- **DML `VALIDATE ONLY` は行ではなく診断**を返す。`rows` に載せる形ではない。
+- ただし公開型は既に `type: "query" | "explain"` の**判別共用体**なので、
+  `"batch"` / `"validate"` を足す拡張自体は素直である。
+
+**guard の緩和は容易で、設計判断が要るのは戻り値の型と API の分け方**（`runQuery` 拡張か `runValidate` / `runBatch` 追加か）。
+
+### 5. 基準をそのまま採ると広すぎる部分（面の事情で絞る）
+
+「MCP と**完全に同一**」にするのは危険で、**MCP 側も分類器だけでは判定していない**。
+
+| 項目 | 事情 |
+|---|---|
+| **`APPLY`** | MCP は分類器とは**別の場所**で `UnsupportedError: APPLY mutation is disabled in MCP` を投げている。`VALIDATE ONLY` 経由なら `writesKintone=false` になるため、**分類器だけでは通ってしまう**。ライブラリでも同等の追加ゲートが要る |
+| **`IMPORT ... VALIDATE ONLY`** | 基準上は read-only だが inline source を要求する。MCP は `enableImport` で別途ゲート。**ライブラリは既定 off が妥当** |
+| **一時テーブルのメモリ** | 既定 10,000 行 × 最大 16 表を実体化する。MCP はサーバープロセスだが、**ライブラリは利用者アプリのプロセス内**。上限を明示的な契約として公開する必要がある |
+| **`VALIDATE` は全件読む** | complete-input policy により `onLimit=truncate` が `error` へ強制される。**利用者から見た挙動差**として説明が要る |
+
+### 6. 面ごとの差は「構文の許可範囲」とは別の軸
+
+ライブラリは `searchAborted` を**全クエリ形で hard error** にしている（B79・意図的な厳格さ）。
+これは**構文を揃えても維持する**。混同しないこと。
+
+### 7. 結論
+
+**基準としては採用を推奨する。**ただし「MCP と同一」ではなく、
+**「MCP READ を出発点にし、面の事情で明示的に絞る」**という形にする。
+
+段階案（B68 の Phase A / B を置き換える）:
+
+| Phase | 内容 | 主なコスト |
+|---|---|---|
+| **A** | 判定を `dmlGuard` へ寄せ、**単文の `VALIDATE` と DML `VALIDATE ONLY`** を解禁。`APPLY` は追加ゲートで拒否、`IMPORT` は既定 off | 診断結果の戻り値型 |
+| **B** | **複文バッチ**（temp table・`SET`/`DECLARE`・`ASSERT`）。新 API と temp lifecycle、文別 read-only 強制 | API 分割と上限契約 |
+
+Phase A だけでも「能力表が2つ」は解消できる（allowlist を捨てて共有 predicate に寄せるため）。
+
+**実需確認は引き続き必要。** Pro がライブラリ面を使っているか、`VALIDATE` / 複文バッチの需要があるかで
+Phase A 先行か B まで行くかが変わる。Pro への報告の返信で確認するのが自然である。
