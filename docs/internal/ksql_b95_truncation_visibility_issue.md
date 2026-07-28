@@ -1,7 +1,7 @@
 # B95 取得上限で打ち切られたことが結果から分からない／集計が誤った数を返す
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価・起票（優先 中）**
+- ステータス: 📋 **案 A＝仕様確定・実装待ち／案 B＝要望次第**（オーナー決定 2026-07-29）。→ [実装仕様](ksql_b95_truncation_visibility_spec.md)
 - 出典: [Pro からの報告 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3311-統合版.md) §9（依頼④）
 - 関連: [B94 `COUNT(*)` の単発取得](ksql_b94_count_star_totalcount_issue.md) / [B72 §7.2](ksql_b72_relative_date_fullscan_exact_spec.md) / [B73 エラーの構造化](ksql_b73_error_structured_i18n_evaluation.md)
 
@@ -114,7 +114,27 @@ const STATISTICAL_AGGREGATES = new Set([
 - **`truncate` は利用者が明示的に選んだもの**なので、
   「選んだのに勝手にエラーにする」と受け取られ得る
 
-### 4.3 案 C — A と B の併用（推奨）
+### 4.3 【オーナー決定 2026-07-29】案 A を実装／案 B は要望次第
+
+**案 A は `boolean` と アプリ ID の配列の両方**を返す。
+**案 B（打ち切られた入力の集計を fail-closed）は、要望が出てから判断する。**
+
+#### 両方にする根拠（実装前に確認済み）
+
+**打ち切りを検出する 3 箇所すべてでアプリ ID が判明する**ため、
+**現時点では `boolean` は配列から導ける**（食い違わない）。
+
+| 箇所 | アプリ ID |
+|---|---|
+| [execute.ts:3103](../../src/execute.ts#L3103) `executeSimpleSelect` | `stmt.from.appId` |
+| [execute.ts:4933](../../src/execute.ts#L4933) `fetchTableRecordsForFullScan` | `table.appId` |
+| [execute.ts:5177](../../src/execute.ts#L5177) `tryFetchJoinRecordsBySourceKeys` | `join.table.appId` |
+
+**それでも 2 つに分ける**＝将来アプリ ID を伴わない打ち切り経路が増えたときに
+**`limitReached` が誤りにならない**ようにするため。
+**配列が空であることを「打ち切られていない」の判定に使わせない。**
+
+### 4.4 案 C — A と B の併用（当初案）
 
 **まず案 A を出し、案 B は別途 判断する。**
 
