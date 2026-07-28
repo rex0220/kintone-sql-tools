@@ -44415,11 +44415,11 @@ var EMPTY_WILDCARD_FIELD_TYPE_POLICY = {
   UPDATED_TIME: "RECORD",
   USER_SELECT: "RECORD"
 };
-function fieldPolicy(fieldType) {
+function fieldPolicy(fieldType, fieldCode) {
   const policy = EMPTY_WILDCARD_FIELD_TYPE_POLICY[fieldType];
   if (policy === void 0) {
     throw new Error(
-      `InternalError: empty SELECT * schema policy is not defined for field type ${fieldType}.`
+      `ArgumentError: getFields returned unknown fieldType "${fieldType}" for field "${fieldCode}". getFields must return only the fields from /k/v1/app/form/fields.json; $id and $revision are synthesized by the engine and must not be added.`
     );
   }
   return policy;
@@ -44434,10 +44434,10 @@ async function deriveEmptyWildcardColumns(fields, subtableCode, loadProcessStatu
     ];
   }
   const topLevel = fields.filter((field) => !field.inSubtable);
-  const needsProcessSettings = topLevel.some((field) => fieldPolicy(field.fieldType) === "PROCESS");
+  const needsProcessSettings = topLevel.some((field) => fieldPolicy(field.fieldType, field.code) === "PROCESS");
   const processEnabled = needsProcessSettings ? (await loadProcessStatuses()).enable : false;
   const columns = topLevel.filter((field) => {
-    const policy = fieldPolicy(field.fieldType);
+    const policy = fieldPolicy(field.fieldType, field.code);
     return policy === "RECORD" || policy === "PROCESS" && processEnabled;
   }).map((field) => field.code);
   return [...columns, "$revision", "$id"];
@@ -47359,11 +47359,21 @@ function createEmptyMetrics() {
     cursorCreateOutcomeUnknown: 0,
     cursorQuarantinedCurrent: 0,
     fetchedRows: 0,
+    limitReached: false,
+    limitReachedApps: [],
     elapsedMs: 0
   };
 }
+var LIMIT_METRICS_SINK = /* @__PURE__ */ Symbol("limitMetricsSink");
+function markLimitReached(client, appId) {
+  const metrics = client[LIMIT_METRICS_SINK];
+  if (!metrics) return;
+  metrics.limitReached = true;
+  if (!metrics.limitReachedApps.includes(appId)) metrics.limitReachedApps.push(appId);
+}
 function wrapClientWithMetrics(client, metrics) {
   return {
+    [LIMIT_METRICS_SINK]: metrics,
     getRecords: async (params) => {
       metrics.getCalls += 1;
       const res = await client.getRecords(params);
@@ -47563,7 +47573,7 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
       return executeExistingRecordValidation(stmt, client, options, cacheContext);
     case "SELECT":
       return executeSelect(
-        stmt,
+        markCountTotalCountRoot(stmt),
         client,
         options,
         cacheContext,
@@ -48699,7 +48709,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
     cteCache
   );
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
-  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  const whereCapability = rememberSelectWhereCapability(stmt, await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache));
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
@@ -49125,6 +49135,7 @@ async function executeSimpleSelect(stmt, client, options, cacheContext, orderPla
         onLimit: onLimit2,
         onTruncate: (max) => {
           warnings.add(`\u53D6\u5F97\u4E0A\u9650\uFF08${max} \u4EF6\uFF09\u306B\u9054\u3057\u305F\u305F\u3081\u3001${max} \u4EF6\u3067\u6253\u3061\u5207\u3063\u3066\u8868\u793A\u3057\u3066\u3044\u307E\u3059\u3002`);
+          markLimitReached(client, stmt.from.appId);
         }
       }
     );
@@ -50010,7 +50021,55 @@ function buildSelectFieldTypeResolvers(stmt, fieldTypesByApp) {
   };
   return { row, having };
 }
+var countTotalCountRootSelects = /* @__PURE__ */ new WeakSet();
+var resolvedWhereCapabilities = /* @__PURE__ */ new WeakMap();
+function markCountTotalCountRoot(stmt) {
+  countTotalCountRootSelects.add(stmt);
+  return stmt;
+}
+function rememberSelectWhereCapability(stmt, capability) {
+  resolvedWhereCapabilities.set(stmt, capability);
+  return capability;
+}
+function isCountStarTotalCountEligible(stmt, whereCapability) {
+  if (whereCapability.capability !== "EXACT_PUSHDOWN") return false;
+  if (stmt.columns.length !== 1) return false;
+  const column = stmt.columns[0];
+  if (column?.type !== "AGGREGATE" || column.func !== "COUNT" || column.distinct || column.arg.type !== "WILDCARD") {
+    return false;
+  }
+  return !stmt.distinct && normalizeGroupingSpec(stmt).type === "NONE" && stmt.having === null && stmt.joins.length === 0 && stmt.from.cteName === null && !stmt.from.subtableCode && stmt.limit === null && stmt.offset === null;
+}
+function isValidTotalCount(value) {
+  return typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value);
+}
+async function tryCountStarWithTotalCount(stmt, client) {
+  const countColumn = stmt.columns[0];
+  if (countColumn?.type !== "AGGREGATE") return null;
+  const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+  const response = await client.getRecords({
+    app: stmt.from.appId,
+    query: `${baseQuery}${baseQuery ? " " : ""}limit 1`,
+    fields: ["$id"],
+    totalCount: true
+  });
+  if (response.searchAborted) throw new SearchAbortedError();
+  if (!isValidTotalCount(response.totalCount)) return null;
+  const column = countColumn.alias ?? "COUNT(*)";
+  return {
+    type: "SELECT",
+    rows: [{ [column]: response.totalCount }],
+    columns: [column],
+    rowCount: 1,
+    warnings: []
+  };
+}
 async function executeFullScanSelect(stmt, client, options, cacheContext, cteCache, allowOriginalWherePushdown = true, preloadedOrderMeta, prefilterPlan, plainGroupByPlan) {
+  const whereCapability = resolvedWhereCapabilities.get(stmt);
+  if (countTotalCountRootSelects.has(stmt) && whereCapability !== void 0 && isCountStarTotalCountEligible(stmt, whereCapability)) {
+    const totalCountResult = await tryCountStarWithTotalCount(stmt, client);
+    if (totalCountResult !== null) return totalCountResult;
+  }
   const maxRecords2 = options.maxRecords ?? 1e4;
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
@@ -50451,6 +50510,7 @@ async function fetchTableRecordsForFullScan(stmt, table, client, maxRecords2, pa
   const fields = selectToFetchAllFields(stmt, table, plainGroupByPlan);
   const onTruncate = (max) => {
     warnings.add(`\u53D6\u5F97\u4E0A\u9650\uFF08${max} \u4EF6\uFF09\u306B\u9054\u3057\u305F\u305F\u3081\u3001${max} \u4EF6\u3067\u6253\u3061\u5207\u3063\u3066\u8868\u793A\u3057\u3066\u3044\u307E\u3059\u3002`);
+    markLimitReached(client, table.appId);
   };
   if (!table.subtableCode) {
     const baseQuery = isMainTable && allowOriginalWherePushdown ? selectToFetchAllParams(stmt, table.appId).query : "";
@@ -50606,6 +50666,7 @@ async function tryFetchJoinRecordsBySourceKeys(stmt, join, tables, client, maxRe
   const fields = selectToFetchAllFields(stmt, join.table, plainGroupByPlan);
   const onTruncate = (max) => {
     warnings.add(`\u53D6\u5F97\u4E0A\u9650\uFF08${max} \u4EF6\uFF09\u306B\u9054\u3057\u305F\u305F\u3081\u3001${max} \u4EF6\u3067\u6253\u3061\u5207\u3063\u3066\u8868\u793A\u3057\u3066\u3044\u307E\u3059\u3002`);
+    markLimitReached(client, join.table.appId);
   };
   const chunks = splitChunks(values, JOIN_IN_CHUNK_SIZE);
   const merged = [];
@@ -54625,11 +54686,12 @@ function buildValidatePlan(stmt, label) {
   lines.push("  records/mutation API during EXPLAIN: none; violation count unavailable");
   return lines;
 }
-function buildSelectPlan(stmt, label, capabilities, orderPlans, plainGroupByPlans) {
+function buildSelectPlan(stmt, label, capabilities, orderPlans, plainGroupByPlans, allowTotalCountPlan = true) {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
   const orderPlan = orderPlans?.get(stmt) ?? (orderPlans ? [...orderPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
   const plainGroupByPlan = plainGroupByPlans?.get(stmt) ?? (plainGroupByPlans ? [...plainGroupByPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1] : void 0);
-  const mode = orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN" ? "FULL_SCAN" : resolveSelectMode(stmt);
+  const totalCountPlan = allowTotalCountPlan && whereCapability !== void 0 && isCountStarTotalCountEligible(stmt, whereCapability);
+  const mode = totalCountPlan ? "COUNT_TOTAL_COUNT" : orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN" ? "FULL_SCAN" : resolveSelectMode(stmt);
   const reasons = collectFullScanReasons(stmt);
   if (whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN") {
     reasons.push(...whereCapability.reasons.map((reason) => reason.code));
@@ -54675,6 +54737,20 @@ function buildSelectPlan(stmt, label, capabilities, orderPlans, plainGroupByPlan
         }
       }
     }
+  }
+  if (totalCountPlan) {
+    const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
+    lines.push(
+      `  kintone query: ${baseQuery}${baseQuery ? " " : ""}limit 1`
+    );
+    lines.push("  fields:        $id");
+    lines.push("  fetch API:     GET records.json (totalCount=true)");
+    lines.push("  REST execution: single GET");
+    lines.push("  record limit:  maxRecords/onLimitReached not applied");
+    lines.push("  fallback:      full record scan when totalCount is missing or invalid");
+    lines.push("  search abort:  fail-closed (SearchAbortedError)");
+    return lines;
   }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
@@ -54812,7 +54888,7 @@ function buildUnionPlan(stmt, capabilities, orderPlans, plainGroupByPlans) {
   const lines = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans, false));
   });
   return lines;
 }
@@ -54820,7 +54896,7 @@ function buildWithPlan(stmt, capabilities, orderPlans, plainGroupByPlans) {
   const lines = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans, false));
       lines.push("");
     }
   }
@@ -54839,7 +54915,7 @@ function buildWithPlan(stmt, capabilities, orderPlans, plainGroupByPlans) {
   if (canInlineSingleCte(stmt)) {
     lines.push("");
     const inlined = buildInlinedQuery(stmt);
-    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans));
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans, false));
   }
   return lines;
 }
@@ -54881,16 +54957,16 @@ function collectSubqueryPlans(stmt, capabilities, orderPlans, plainGroupByPlans)
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
           lines.push("");
-          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
           lines.push("");
-          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+          lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         }
         break;
       case "EXISTS":
         lines.push("");
-        lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+        lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         break;
       case "LOGICAL":
         visitWhere(w.left);
@@ -54910,7 +54986,7 @@ function collectSubqueryPlans(stmt, capabilities, orderPlans, plainGroupByPlans)
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
       lines.push("");
-      lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+      lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
     }
   }
   if (stmt.having) visitWhere(stmt.having);
@@ -54936,7 +55012,7 @@ function buildInsertSelectPlan(stmt, label, capabilities, orderPlans, plainGroup
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json\uFF08\u4EF6\u6570\u306F SELECT \u7D50\u679C\u306B\u4F9D\u5B58\u3001100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
   return lines;
 }
 function buildUpdatePlan(stmt, label, capabilities, orderPlans, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS, maxRecords2 = 1e4) {
@@ -54983,7 +55059,7 @@ function buildUpdatePlan(stmt, label, capabilities, orderPlans, dmlMaxRows = 100
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans));
+      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans, void 0, false));
     }
   }
   return lines;
@@ -55100,7 +55176,7 @@ function buildUpsertSelectPlan(stmt, label, capabilities, orderPlans, plainGroup
     `  api:        GET /k/v1/records.json\uFF08\u91CD\u8907\u5224\u5B9A\uFF09\u2192 POST \u307E\u305F\u306F PUT /k/v1/records.json\uFF08100 \u4EF6\u3054\u3068\u306B\u30D0\u30C3\u30C1\uFF09`,
     ``
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
   return lines;
 }
 function buildReorderPlan(stmt, label) {
@@ -56441,7 +56517,8 @@ function createNodeKintoneConnection(baseUrl, tokenResolver) {
       const queryPart = `query=${encodeURIComponent(params.query)}`;
       const appPart = `app=${encodeURIComponent(String(params.app))}`;
       const fieldParts = params.fields.map((f) => `fields[]=${encodeURIComponent(f)}`);
-      const qs = [appPart, queryPart, ...fieldParts].join("&");
+      const totalCountPart = params.totalCount === true ? ["totalCount=true"] : [];
+      const qs = [appPart, queryPart, ...fieldParts, ...totalCountPart].join("&");
       if (tokenResolver.debug) {
         tokenResolver.log?.(
           `[debug] getRecords app=${params.app} query="${params.query}" fields=${params.fields.length > 0 ? params.fields.join(",") : "(all)"} auth=${tokenResolver.auth.type}`
@@ -58656,7 +58733,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.31.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.32.0" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged families plus JOIN, aggregates, windows, subtable virtual tables, CHECK, KLIKE, KORDER BY, @variables, and LAPP_<NAME>.
 

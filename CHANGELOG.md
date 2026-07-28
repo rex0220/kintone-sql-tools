@@ -2,7 +2,16 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## 未リリース
+## v3.32.0（2026-07-29）
+
+### 追加（B95 取得上限の打ち切りを `metrics` へ構造化）
+
+- **engine ライブラリの `QueryMetrics` へ `limitReached?: boolean` と `limitReachedApps?: readonly number[]` を純加法で追加した。** 従来、`onLimitReached: "truncate"` で打ち切られたかどうかを知る手段は警告の**文言照合**しかなく、多言語化や版数変更で壊れる形だった。
+- **判定に使うのは `limitReached` のほう。** `limitReachedApps` は「どのアプリか」をメッセージに出すための補助であり、**空配列であることを「打ち切られていない」の判定に使わない**。
+- **`metrics.fetchedRows` では判定できない。** 全アプリの合算のため、JOIN では合計が `maxRecords` を超えてもどちらも打ち切られていない場合がある。打ち切りは **アプリごと**に判定される。
+- **どちらも任意プロパティ。** 公開型は利用者が構築できるため、必須プロパティの追加は破壊的変更になる。エンジンは打ち切りが無くても `false` と空配列を常に返すので、`undefined` になるのは旧版のエンジンが返した結果だけである。
+- `runBatch` では他の metrics と同じく**バッチ全体の集計値**を返す（文別には分かれない）。
+- **打ち切りの判定そのもの、警告の文言、`onLimitReached: "error"` の挙動はいずれも変更していない。** 打ち切られた入力に対する集計を fail-closed にするかどうかは別途判断する。
 
 ### 改善（B94 `SELECT COUNT(*)` を `totalCount` で単発取得）
 

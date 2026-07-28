@@ -1,9 +1,9 @@
-ksql 配布パッケージ (v3.31.1)
+ksql 配布パッケージ (v3.32.0)
 
 release 成果物:
-- ksql-plugin-v3.31.1.zip
-- ksql-mcp.mcpb (manifest version 3.31.1)
-- ksql-mcp.js (MCP server version 3.31.1)
+- ksql-plugin-v3.32.0.zip
+- ksql-mcp.mcpb (manifest version 3.32.0)
+- ksql-mcp.js (MCP server version 3.32.0)
 
 破壊的変更の移行案内 (B89 / B90):
 - engine ライブラリの runBatch と explainQuery が EXPLAIN UPDATE / DELETE / INSERT /
@@ -18,21 +18,39 @@ release 成果物:
     → NaN
     修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.31.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.32.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.31.1): B92 v3.31.0 の回帰修正（EXPLAIN と変数の算術）。
+本リリース (v3.32.0): B95 打ち切りの構造化／B94 COUNT(*) の単発取得／B93。
 
-- v3.31.0 では、変数を算術に使うバッチを EXPLAIN すると
-  variable @x is not numeric and cannot be used in arithmetic. で必ず失敗しました。
-  直接算術だけでなく、v3.30.0 まで動いていた ROUND(算術式, ...) の形も対象でした。
-- EXPLAIN は変数を評価しないため名前をプレースホルダーとして保持しますが、
-  v3.31.0 で追加した非数値チェックがそれを文字列変数と誤認していました。
-- プレースホルダーであることを内部で明示し、算術位置では名前を保った数値ノードとして
-  扱うようにしました。算術以外の位置での計画は v3.30.0 と同じです。
-- 実行時に非数値の変数を算術へ使った場合は、従来どおり停止します（v3.31.0 の意図は維持）。
+- B94: 単一アプリの SELECT COUNT(*) だけのクエリは、WHERE が完全に押し下がる場合、
+  kintone REST の totalCount で 1 回の GET で件数を返します。従来は $id を全件取得して
+  数えており、10 万件なら 200 回以上の往復が必要でした。
+- B94: この経路では maxRecords / onLimitReached を適用しません。レコード本体を取得しない
+  ためです。MCP の既定 maxRecords は 500 なので、500 件を超えるアプリの件数取得は従来
+  FetchAllLimitError で失敗していましたが、正しい総件数を返すようになります。
+- B94: 押し下げできない WHERE、JOIN、GROUP BY、COUNT(列) などは従来の全件取得のままです。
+  BYO クライアントが totalCount を返さない場合も 0 と推測せず全件取得へ落とします。
+  検索が 10 万件で打ち切られた場合は SearchAbortedError で停止します。
+- B95: 取得上限で打ち切られたかどうかを QueryMetrics.limitReached で判別できます。
+  従来は警告の文言を照合するしかなく、metrics.fetchedRows は全アプリの合算なので
+  JOIN では合計が上限を超えても打ち切られていませんでした。
+    if (result.metrics.limitReached) { ... }
+  どのアプリかは limitReachedApps に重複なし・昇順で入ります。判定には limitReached を
+  使ってください。両方とも任意プロパティなので、既存の利用者コードは変更不要です。
+- B93: BYO クライアントの getFields() が未知の fieldType を返したときのエラーが、
+  エンジンの不具合ではなくクライアント契約の違反として読める文面になります。
+  原因のフィールドコードと期待する契約を含みます。fields.json のフィールドだけを返し、
+  $id と $revision は足さないでください（エンジンが合成します）。
+
+前リリース (v3.31.1): B92 v3.31.0 の回帰修正（EXPLAIN と変数の算術）。
+
+- v3.31.0 では、変数を算術に使うバッチを EXPLAIN すると必ず失敗しました。従来から
+  動いていた ROUND(算術式, ...) の形も対象でした。EXPLAIN は変数を評価しないため
+  名前をプレースホルダーとして保持しますが、非数値チェックが文字列変数と誤認して
+  いました。実行時に非数値の変数を算術へ使った場合は従来どおり停止します。
 
 前リリース (v3.31.0): B89 explainQuery のバッチ対応／B90 変数の直接算術／B87／B88。
 
