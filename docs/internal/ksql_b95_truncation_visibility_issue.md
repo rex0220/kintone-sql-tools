@@ -1,7 +1,7 @@
 # B95 取得上限で打ち切られたことが結果から分からない／集計が誤った数を返す
 
 - 起票: 2026-07-29
-- ステータス: ✅ **案 A＝リリース済み（v3.32.0・2026-07-29）／案 B＝[B97](ksql_b97_incomplete_aggregate_failclosed_issue.md) へ独立起票（Pro が要望）**。→ [実装仕様](ksql_b95_truncation_visibility_spec.md)
+- ステータス: ✅ **案 A＝リリース済み（v3.32.0・2026-07-29）／案 B＝[B97](ksql_b97_incomplete_aggregate_failclosed_issue.md) としてリリース済み（v3.33.0）**。→ [実装仕様](ksql_b95_truncation_visibility_spec.md)
 - 出典: [Pro からの報告 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3311-統合版.md) §9（依頼④）
 - 関連: [B94 `COUNT(*)` の単発取得](ksql_b94_count_star_totalcount_issue.md) / [B72 §7.2](ksql_b72_relative_date_fullscan_exact_spec.md) / [B73 エラーの構造化](ksql_b73_error_structured_i18n_evaluation.md)
 
