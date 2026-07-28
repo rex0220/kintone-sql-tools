@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B94](ksql_b94_count_star_totalcount_issue.md)
-- ステータス: 📋 **R1・実装待ち**
+- ステータス: 📋 **R2・実装待ち**（R1 §4.3 の事実誤認を codex が実装前に指摘）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（公開型へ純加法／`maxRecords` の扱いが変わる＝§3）
 
@@ -107,13 +107,36 @@ GET /k/v1/records.json?app=N&query=<条件> limit 1&totalCount=true
 > [B85](ksql_b85_library_validate_constraints_issue.md) / [B93](ksql_b93_getfields_contract_error_issue.md) の教訓＝
 > **BYO クライアントは契約から外れる。**外れたときに**誤った件数を返す余地を作らない。**
 
-### 4.3 検索打ち切りは従来どおり fail-closed
+### 4.3 検索打ち切りは**今日と同じ扱い**にする（R2 で修正）
 
-`KLIKE` を押し下げた場合、**10 万件で検索が打ち切られる**ことがある。
-そのとき `totalCount` は**打ち切り後の値**になる。
+**R1 は「従来どおり fail-closed」と書いたが、事実誤認だった。**
 
-**既存の `searchAborted` 検出をそのまま通し、従来どおり停止する。**
-**黙って小さい件数を返さない。**
+| 経路 | 打ち切り時の現行契約 |
+|---|---|
+| **通常の `SELECT`** | **警告を付けて部分結果を返す**（[execute.ts:762](../../src/execute.ts#L762) の `failClosed = !isSelectLike || outerJoin`） |
+| DML / 外部結合 / 一部のライブラリ境界 | fail-closed |
+
+既存テストが **`SELECT … KLIKE … → 警告`** を明示的に固定している
+（[searchAbort.execute.test.ts:107](../../src/__tests__/searchAbort.execute.test.ts#L107)）。
+
+**`KLIKE` は押し下がる**（[whereCapability.ts:469](../../src/core/optimization/whereCapability.ts#L469) で
+native `like` へ写像）ため、**この経路に到達し得る。**
+
+#### 決定＝**今日と同じく警告を付ける**（新しい fail-closed を作らない）
+
+**理由**
+
+- **今日の `SELECT COUNT(*)` も、打ち切り時は誤った件数を警告付きで返している。**
+  B94 はそれを**悪化させない**（同じ警告・同じ性質の数）
+- **B94 は性能の変更であって、正しさの契約を変えるものではない。**
+  打ち切り時の `SELECT` の契約を厳しくするなら、**COUNT に限らず全 `SELECT` の判断**であり、
+  性能改善に相乗りさせるべきではない
+
+**実装＝1 回のリクエストが返す `searchAborted` を、今日と同じ警告として結果に載せる。**
+
+> **別課題の候補として記録する。**「件数は 1 つの数値で権威的に見えるのに、
+> 打ち切り時は警告だけで誤った値を返す」のは、`SELECT` 一般より危ういかもしれない。
+> **本仕様では扱わない。**
 
 ### 4.4 案 B（フォールバック）は**今回作らない**
 
@@ -143,7 +166,8 @@ GET /k/v1/records.json?app=N&query=<条件> limit 1&totalCount=true
    - `LIMIT` / `OFFSET` あり
 5. **BYO が `totalCount` を返さないとフォールバックする** — 全件取得になり、
    **件数が正しい**こと。**`0` を返さない**こと
-6. **検索打ち切りは停止する** — `searchAborted` のとき従来どおり fail-closed
+6. **検索打ち切りは今日と同じ警告になる** — `searchAborted` のとき、
+   **通常の `SELECT` と同じ警告が結果に載る**こと（新しいエラーを作らない）
 7. **`EXPLAIN` が実態を映す** — 適用される場合、計画から**全件取得しないことが読める**こと
 8. **既存テスト全 green・snapshot 22 不変**
 
