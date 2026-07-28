@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B89](ksql_b89_library_explain_batch_issue.md)
-- ステータス: 📋 **R4・実装待ち**（R1 §7・R2 §3・R3 受入 3b の誤りを codex が実装前に指摘。いずれも Claude 側）
+- ステータス: 📋 **R5・実装待ち**（R1 §7・R2 §3・R3 受入 3b・R4 §4.3 の誤りを codex が実装前に指摘。いずれも Claude 側）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor（純加法）**＝従来拒否していたものを通す方向のみ。公開型の変更なし
 
@@ -161,10 +161,42 @@ ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped)
 > **Pro は計画の中身を表示に使っていない**（「構文が通るか」「どこが悪いか」の 2 点だけ）。
 > **表現に凝る必要はない**が、将来 表示に使われる可能性は残るので**文の区切りが読める形**にする。
 
-### 4.3 エラー時
+### 4.3 エラー時＝**静的検証エラーに文の情報を載せる**（R5 で修正）
 
-**B68 が `statementIndex` / `statementType` をエラーへ載せている。**追加の対応は不要。
-Pro はこれで「3 文目の SELECT で…」と提示できると回答している。
+**R4 は「B68 が載せているので追加対応不要」と書いたが、これは誤りだった。**
+
+B68 の [`withStatementDiagnostic`](../../src/engine-library/batch.ts#L23) が働くのは
+**`executeBatch` が文別結果を返した後の実行時失敗だけ**である。
+**`analyzeBatch` が投げる静的検証エラーには届かない。**
+
+| | 現状 |
+|---|---|
+| [`BatchAnalysisError`](../../src/core/batch.ts#L44) | `statementIndex` は持つが **`statementType` が無い** |
+| [`normalizeEngineError`](../../src/engine-library/errors.ts#L90) | 素の `EXECUTION_ERROR` になり **`statementIndex` も転記されない** |
+
+**Pro が困るのはまさにここ**である。入力中の構文エラーの多くは静的検証エラーで、
+**「どの文が悪いか」が最も必要な場面**にあたる。
+
+### 4.3.1 これは B68 の既存の穴でもある
+
+**`runBatch` でも同じことが起きている。**`executeBatch` の中で `analyzeBatch` が投げると、
+文別結果を経ずに `runBatch` の catch へ抜け、**`statementIndex` が失われる。**
+
+→ **両経路（`runBatch` / `explainQuery`）へ同じ処理を入れる。**
+explain 側だけ直すと受入 4（受理集合の一致）の精神に反し、**同じ SQL で情報量が変わる。**
+
+### 4.3.2 実装
+
+**ライブラリ境界で `BatchAnalysisError` を正規化する際、
+`statementIndex`（エラーが持つ）と `statementType`（該当 AST から引く）を付与する。**
+既存の `withStatementDiagnostic` を再利用する。
+
+**公開型の変更は不要。**[`KsqlEngineError`](../../src/engine-library/errors.ts#L6) は
+既に `statementIndex?` / `statementType?` を宣言している（B68 で追加済み）。
+
+> **Pro への訂正が 1 件増える。**2026-07-29 の返信で
+> 「エラー時の文の特定は既に手当て済み」と伝えたが、**静的検証エラーでは載っていなかった。**
+> v3.31.0 の連絡で明示すること。
 
 ---
 
@@ -209,8 +241,11 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
    （`CREATE TEMP TABLE` を含むバッチでも実体化しない）
 6. **拒否がバッチでも効く** — `IMPORT` / `APPLY` / DML を含むバッチが
    **`readOnlyViolation` で拒否**され、**API 呼び出しが 0 回**であること
-7. **エラーに文番号が載る** — 複文の 2 文目が壊れている場合、
-   エラーから**その文を特定できる**ことを固定する
+7. **静的検証エラーに文の情報が載る** — 複文の 2 文目が静的検証で落ちる場合、
+   公開エラーの **`statementIndex` と `statementType` から その文を特定できる**ことを固定する。
+   **`explainQuery` と `runBatch` の両方で**固定すること（§4.3.1）
+7b. **実行時失敗の既存挙動は変えない** — B68 の `withStatementDiagnostic` が働く経路の
+   エラー内容が変わらないこと
 8. **公開型が変わらない** — `engine:declaration-smoke` の B66 snapshot が
    **6 values / 26 types / 12 ReadonlyFieldInfo properties のまま**であること
 9. **既存テスト全 green・snapshot 22 不変**
@@ -230,4 +265,6 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
   **固定文字列 `"batch-explain"` を渡しても呼び出しごとに一意な suffix が付き、実行間で共有されない**
   （[B87](ksql_b87_metadata_cache_spec.md) の実行単位スコープが効いている）。
   プロファイル分離は**呼び出し側が渡す client** が担う
-- **公開型を変えないこと**（受入 8）
+- **公開型を変えないこと**（受入 8）。`KsqlEngineError` の `statementIndex?` / `statementType?` は
+  B68 で宣言済みなので、値を載せるだけなら型は変わらない
+- **静的検証エラーの補強は `runBatch` にも入れること**（§4.3.1）。片側だけ直すと同じ SQL で情報量が変わる
