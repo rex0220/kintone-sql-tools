@@ -2,9 +2,10 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B89](ksql_b89_library_explain_batch_issue.md)
-- ステータス: 📋 **R5・実装待ち**（R1 §7・R2 §3・R3 受入 3b・R4 §4.3 の誤りを codex が実装前に指摘。いずれも Claude 側）
+- ステータス: 📋 **R6・実装待ち**（R1〜R5 の誤りを codex が実装前に指摘。いずれも Claude 側）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
-- SemVer: **minor（純加法）**＝従来拒否していたものを通す方向のみ。公開型の変更なし
+- SemVer: **minor**。公開型の変更なし。**純加法ではない**＝§2.5 で `runBatch` が
+  `EXPLAIN <DML>` を受理していたバグを塞ぐため、その1形だけ拒否側へ動く
 
 ---
 
@@ -66,6 +67,50 @@ Pro の設定画面は SQL 入力を 0.6 秒デバウンスで `explainQuery` �
 「純加法」という本仕様の前提に反する。
 
 → **受理する。実装・テストとも追加の対応は不要**（既存の処理がそのまま働く）。
+
+### 2.5 `assertRunBatchStatement` のバグを塞ぐ（R6 で追加）
+
+**`runBatch` は `EXPLAIN UPDATE ...` / `EXPLAIN DELETE ...` を受理してしまう。**
+
+[`assertRunBatchStatement`](../../src/engine-library/statementGuard.ts#L82) は
+`EXPLAIN` を展開した `target` を**`IMPORT` の判定にしか使っておらず**、
+その後の read-only / APPLY / DML の判定は**外側の `classified`** を見ている。
+
+```ts
+const target = classified.type === "EXPLAIN" ? classified.query : classified;
+if (target.type === "IMPORT") { ... }          // ← 展開後を見ている
+if (!isReadOnlyStatement(classified)) { ... }  // ← 外側を見ている（ここが穴）
+if (statementHasApplyBlocks(classified)) { ... }
+if (isDmlType(classified.type)) { ... }
+```
+
+**なぜ通ってしまうか**（コードで確認済み）:
+
+- [`isReadOnlyType("EXPLAIN")`](../../src/core/dmlGuard.ts#L41) は **true**
+- `writesKintone` は `isDmlType("EXPLAIN")` が false なので **false**
+- → `isReadOnlyStatement(EXPLAIN wrapping UPDATE)` が **true** になる
+- `isDmlType("EXPLAIN")` も false なので **DML 判定もすり抜ける**
+
+**`explainQuery` の既存テスト 3 件は `EXPLAIN <DML>` を `READ_ONLY_VIOLATION` で拒否する契約**
+であり、**そちらが意図された姿**である。
+
+→ **全判定を展開後の `target` に対して行う。**`APPLY` の判定も同様に確認すること
+（`EXPLAIN UPDATE ... APPLY ...` が同じ理由ですり抜けていないか）。
+
+#### これは純加法ではない
+
+**`runBatch` が `EXPLAIN <DML>` を拒否するようになる**＝受理範囲が 1 形だけ狭まる。
+
+許容できると判断する理由:
+
+- **engine ライブラリは read-only が契約**（B68 の目的そのもの）で、
+  read-only API で DML の計画を出せること自体が意図されていない
+- **どちらにせよ書き込みは起きない**（EXPLAIN は計画のみ）ため、
+  **誤った結果を得ていた利用者はいない**＝失われる正しい機能が無い
+- **B68 の parity テストが固定しているのは `EXPLAIN SELECT 1 AS one`** であり、
+  `EXPLAIN <DML>` は固定されていない
+
+**CHANGELOG と Pro への連絡に明記する。**
 
 ---
 
@@ -241,6 +286,10 @@ explain 側だけ直すと受入 4（受理集合の一致）の精神に反し�
    （`CREATE TEMP TABLE` を含むバッチでも実体化しない）
 6. **拒否がバッチでも効く** — `IMPORT` / `APPLY` / DML を含むバッチが
    **`readOnlyViolation` で拒否**され、**API 呼び出しが 0 回**であること
+6b. **`EXPLAIN <DML>` が両経路で拒否される**（§2.5） — `EXPLAIN UPDATE` / `EXPLAIN DELETE` /
+   `EXPLAIN INSERT` / `EXPLAIN UPSERT` が **`runBatch` でも `explainQuery` でも**
+   `READ_ONLY_VIOLATION` になること。**`EXPLAIN SELECT` は従来どおり通る**こと（B68 parity を壊さない）。
+   **`EXPLAIN ... APPLY ...` も同様にすり抜けないこと**を確認する
 7. **静的検証エラーに文の情報が載る** — 複文の 2 文目が静的検証で落ちる場合、
    公開エラーの **`statementIndex` と `statementType` から その文を特定できる**ことを固定する。
    **`explainQuery` と `runBatch` の両方で**固定すること（§4.3.1）
@@ -265,6 +314,8 @@ explain 側だけ直すと受入 4（受理集合の一致）の精神に反し�
   **固定文字列 `"batch-explain"` を渡しても呼び出しごとに一意な suffix が付き、実行間で共有されない**
   （[B87](ksql_b87_metadata_cache_spec.md) の実行単位スコープが効いている）。
   プロファイル分離は**呼び出し側が渡す client** が担う
+- **`assertRunBatchStatement` の全判定を展開後の `target` で行うこと**（§2.5）。
+  `IMPORT` の判定だけ `target` を使っている現状が穴の原因
 - **公開型を変えないこと**（受入 8）。`KsqlEngineError` の `statementIndex?` / `statementType?` は
   B68 で宣言済みなので、値を載せるだけなら型は変わらない
 - **静的検証エラーの補強は `runBatch` にも入れること**（§4.3.1）。片側だけ直すと同じ SQL で情報量が変わる
