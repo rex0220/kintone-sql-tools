@@ -1,7 +1,7 @@
 # B94 `SELECT COUNT(*)` が全件取得している（`totalCount` で 1 リクエストにできる）
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価・起票（優先 中／性能）**
+- ステータス: 📝 **評価・起票（優先 中／性能）**。**判定に使う既存の仕組みを特定済み**（2026-07-29）
 - 出典: オーナーからの指摘 2026-07-29
 - 関連: [B84 押し下げ可否の公開](ksql_b84_pushdown_visibility_spec.md)
 
@@ -62,6 +62,48 @@ GET /k/v1/records.json?app=1&query=<条件> limit 1&totalCount=true
 
 > **`COUNT(field)` は対象外。**`totalCount` はレコード件数であり、
 > フィールドが空のレコードを除外する `COUNT(列)` とは意味が違う。
+
+### 4.2 判定は**既存の仕組みがそのまま使える**（実機とコードで確認）
+
+**新しい判定を書く必要は無い。**エンジンは既に「WHERE が完全に押し下がるか」を計算し、
+**計画にも出している。**
+
+```
+-- 押し下がらない（DROP_DOWN の = は kintone が in/not in しか受けない）
+EXPLAIN SELECT COUNT(*) FROM APP4149 WHERE 商談フェーズ = '受注'
+  reason:        集計関数（COUNT / SUM 等）あり, WHERE_RESIDUAL   ← マーカー
+  kintone query: (全件取得)
+
+-- 押し下がる
+EXPLAIN SELECT COUNT(*) FROM APP4149 WHERE 売上 > 100
+  reason:        集計関数（COUNT / SUM 等）あり                    ← マーカー無し
+  kintone query: 売上 > 100
+  pushdown candidate: 売上 > 100（実行時の型・実在確認待ち）
+```
+
+**該当する仕組み**＝[`classifyWhereCapability`](../../src/core/optimization/whereCapability.ts#L128) が
+返す [`PredicateCapability`](../../src/core/optimization/whereCapability.ts#L15)。
+
+| 値 | totalCount |
+|---|---|
+| **`EXACT_PUSHDOWN`** | **使える** |
+| `SUPERSET_PREFILTER` | **使えない**（サーバーが広く返し client で絞る） |
+| `LOCAL_ONLY` / `UNSUPPORTED` | 使えない |
+
+**既に同じ判定で分岐している前例がある**ので、判定基準を新規に作らずに済む。
+
+- [`canonicalOrderPlanner`](../../src/core/optimization/canonicalOrderPlanner.ts#L101)
+  … `!== "EXACT_PUSHDOWN"` なら `WHERE_NOT_EXACT`
+- [`joinPredicatePushdown`](../../src/core/optimization/joinPredicatePushdown.ts#L228)
+  … `!== "EXACT_PUSHDOWN"` なら `unsafe()`
+
+### 4.3 判定は**実行時**に確定する（計画時ではない）
+
+押し下がる例の計画に **`pushdown candidate: …（実行時の型・実在確認待ち）`** とあるとおり、
+**押し下げの可否は実行時にフィールドの型と実在を確認して確定する。**
+
+→ **`totalCount` を使うかどうかの判断も、押し下げが確定した後に行う。**
+計画時の見込みで決めると、**実行時に候補が外れた場合に誤った件数を返す。**
 
 ### 4.1 検索打ち切りとの関係
 
