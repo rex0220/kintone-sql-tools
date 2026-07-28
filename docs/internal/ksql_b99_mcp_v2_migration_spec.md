@@ -1,0 +1,246 @@
+# 仕様: B99 — MCP サーバーを SDK v2（プロトコル 2026-07-28）へ移行する
+
+- 作成: 2026-07-29
+- 対象課題: [B99](ksql_b99_mcp_spec_2026_07_28_issue.md)（**§11 が spike 結果**）
+- ステータス: 📋 **実装待ち**
+- 分担: Claude=仕様/レビュー、codex=実装/テスト
+- SemVer: **minor**（§9 で根拠。**公開型は不変**・Node 要件は **MCP の面だけ**に閉じる）
+
+---
+
+## 1. 目的
+
+**新旧 2 世代の MCP client を、1 つの stdio サーバーで両方受けられるようにする。**
+
+`2026-07-28` で client の開幕が変わる（`initialize` が無くなる）。
+**host ごとに移行時期が違う**ため、**移行期は両方受ける必要がある**。
+
+**spike で成立を確認済み**（[B99 §11](ksql_b99_mcp_spec_2026_07_28_issue.md)）。**本仕様はその実装。**
+
+---
+
+## 2. **Node 20 は MCP の面だけに閉じる**（重要）
+
+**`package.json` の `engines` を宣言しないこと。**
+
+| 面 | Node 20 が要るか | 根拠 |
+|---|---|---|
+| **MCP サーバー** | ✅ **要る** | `@modelcontextprotocol/server@2` が `node >=20` |
+| **CLI** | ❌ **要らない** | `dist-cli/ksql.js` に MCP の import が **0 件**（実測） |
+| **engine ライブラリ** | ❌ **要らない** | 別バンドル。MCP を含まないことを guard が保証している |
+| **プラグイン** | ❌ **要らない** | ブラウザ面 |
+
+**`engines` は現在そもそも宣言されていない。**ここで `>=20` を足すと、
+**CLI 利用者と engine ライブラリ利用者（Pro を含む）に、技術的根拠のない要件を課す**ことになる。
+
+### 2.1 引き上げる箇所は 3 つだけ
+
+| | 現在 | 変更後 |
+|---|---|---|
+| [`build-mcp.mjs:23`](../../build-mcp.mjs#L23) の target | `node18` | **`node20`** |
+| [`build-mcpb.mjs:79`](../../build-mcpb.mjs#L79) の manifest | `>=18.0.0` | **`>=20.0.0`** |
+| MCP の導入文書 | — | **Node 20 必須と明記** |
+
+**`build-cli.mjs` の target（`node18`）は変えないこと。**
+
+---
+
+## 3. 依存と import
+
+```
++ @modelcontextprotocol/server@2   （runtime）
++ @modelcontextprotocol/client@2   （devDependency・v2 smoke 用）
+  @modelcontextprotocol/sdk@1.29.0 （devDependency へ移す・v1 smoke 用）
+```
+
+**`@modelcontextprotocol/sdk` を消さないこと。**
+**v1 client で dual-era を検証し続けるために残す**（§7.2）。
+
+**import 元**: `@modelcontextprotocol/server` / `@modelcontextprotocol/server/stdio`。
+
+---
+
+## 4. entry を `serveStdio` にする
+
+```ts
+// 現在（src/mcp/index.ts:278-280）
+const server = createServer(args);
+const transport = new StdioServerTransport();
+await server.connect(transport);
+
+// 変更後
+serveStdio(() => createServer(args), { transport: <§6 の transport> });
+```
+
+- **`legacy` は指定しないこと**（既定 `'serve'` が dual-era）
+- **`createServer` の中身（`registerTool` 13・`registerResource` 4）は変更しない**
+- **`instructions` は現在どおり `KSQL_MCP_INSTRUCTIONS` を渡す**
+  （spike で `server/discover` に全文載ることを確認済み）
+
+---
+
+## 5. エラー class
+
+| 現在 | 変更後 |
+|---|---|
+| `McpError(ErrorCode.InvalidParams, ...)`（`src/mcp/index.ts:101-109`） | `ProtocolError(INVALID_PARAMS, ...)` |
+
+**`data.uri` を落とさないこと**（v1・v2 client の双方で観測できることを spike で確認済み）。
+
+> **`-32002` → `-32602` の仕様変更はこちらに当てはまらない。**
+> **もともと `-32602` を使っており、`-32002` を固定した箇所は 1 つも無い。**
+
+---
+
+## 6. **`maxBufferSize` を明示する**（避けられない）
+
+**v2 の `serveStdio` も既定 10 MiB の読み取り上限を持つ**（1.30.0 と同じ・[B99 §11.4](ksql_b99_mcp_spec_2026_07_28_issue.md)）。
+**現在は上限なし**なので、**明示しないと今日受理できている入力が拒否される。**
+
+### 6.1 値の決め方＝**今日の契約を変えない**
+
+```
+IMPORT_MAX_BYTES        = 10 MiB   （src/import/sourceLoader.ts:3）
+importSources の最大    = 16       （src/mcp/schemas.ts）
+→ 生の最大            = 160 MiB
+→ base64 換算（≈4/3） ≈ 213 MiB
+→ JSON-RPC の封筒が加わる
+```
+
+**上限を宣言済みの値から導くこと。**マジックナンバーを置かない。
+
+```ts
+// 例（形は任せる）
+const MCP_STDIO_MAX_BUFFER_BYTES = Math.ceil(IMPORT_MAX_BYTES * IMPORT_MAX_SOURCES * 4 / 3) + <封筒の余裕>;
+```
+
+> **今回は「受理できる入力」を変えない。**
+> **上限を絞るかどうかは製品判断であり、プロトコル移行と混ぜない。**
+> 絞るなら別課題（メモリ使用量とのトレードオフを別途評価する）。
+
+### 6.2 境界試験を足す
+
+- **10 MiB のテキスト source 1 本**
+- **10 MiB 相当の base64 source 1 本**
+- **複数 source の合計が上限近傍**
+- **超過時に何が起きるか**（transport 切断は診断しにくいので、**利用者に読めるか**を確認する）
+
+---
+
+## 7. **test / smoke の契約を更新する**
+
+### 7.1 **書き換えを許可する 3 箇所**（これが本移行の必然）
+
+**v2 は `isError: true` と検証内容を保つが、tool result の text から v1 の接頭辞が消える。**
+
+```
+v1: MCP error -32602: Invalid arguments for tool ksql_docs: Unrecognized key: "extra"
+v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized key: "extra"
+```
+
+| 場所 | 現在 | 変更後 |
+|---|---|---|
+| [`scripts/mcp-smoke.mjs:103`](../../scripts/mcp-smoke.mjs#L103) | `text.includes("MCP error -32602")` | **`isError: true` ＋ 検証内容の部分一致** |
+| [`scripts/mcp-pack-smoke.mjs:196`](../../scripts/mcp-pack-smoke.mjs#L196) | 同上 | 同上 |
+| [`src/mcp/__tests__/docsTool.test.ts:107`](../../src/mcp/__tests__/docsTool.test.ts#L107) | `toContain("-32602")` | 同上 |
+
+**`scripts/mcp-smoke.mjs:545` は変更不要**（`-32602` **または** invalid/unknown なので v2 でも通る）。
+
+#### 7.1.1 **主張を弱めないこと**
+
+**「エラーになった」だけを見る形にしないこと。**最低でも次を保つ:
+
+- **`isError: true`**
+- **拒否がハンドラ**前**であること**（現在の smoke が確かめている性質）
+- **どのキーが拒否されたか**が文言に出ること（`Unrecognized key: "extra"` など）
+
+**code を観測できる層（client の error object）では code を検査すること。**
+**tool result の text に code を埋め込んで照合するのをやめる**——**それが今回壊れた原因**である。
+
+### 7.2 **二本立ての smoke を足す**
+
+**dual-era が成立していることを、以後ずっと検出できるようにする。**
+
+| | 使うもの | 確かめること |
+|---|---|---|
+| **v1 経路** | `@modelcontextprotocol/sdk@1.29.0` の client | `initialize` で接続でき、**tools 13・resources 2・templates 2** が見える |
+| **v2 経路** | `@modelcontextprotocol/client@2` | `server/discover` に **`instructions` が載り**、`tools/list` が **13 個を登録順**で返す |
+
+**片方だけになったら落ちること。**これが本移行の受入の中核。
+
+### 7.3 上記以外で書き換えが必要になったら**止めて報告すること**
+
+---
+
+## 8. bundle guard を新 package へ広げる
+
+**2 つある。両方直すこと。**
+
+| | 現在 | 問題 |
+|---|---|---|
+| `build-mcp.mjs` の self-contained guard | 旧 SDK と Zod の import しか見ていない | **新 package が素通りする** |
+| [`scripts/engine-bundle-guard.mjs:36-37`](../../scripts/engine-bundle-guard.mjs#L36) | `node_modules/@modelcontextprotocol/sdk/` で照合 | **`/server/` `/client/` `/core/` を捕まえない** |
+
+**engine バンドルに MCP が混ざらないことを保証しているのは後者**なので、
+**パターンを広げないと保証が抜ける。**
+
+---
+
+## 9. SemVer と移行案内
+
+**minor** とする。
+
+| | |
+|---|---|
+| 公開型 | **不変**（engine ライブラリの面は一切変わらない） |
+| CLI | **不変**（Node 18 のまま） |
+| プラグイン | **不変** |
+| **MCP サーバー** | **Node 20 が必要になる**＝**この面だけの要件変更** |
+
+**`release/README.txt` と CHANGELOG に、MCP 面の Node 20 要件を明記する。**
+**CLI と engine ライブラリには影響しないことも書く**（誤解を防ぐため）。
+
+> **オーナー確認**: Node 要件の引き上げを major にすべきという判断もあり得る。
+> **こちらは「面が MCP に閉じており、公開型も CLI も変わらない」ことから minor を推す。**
+
+---
+
+## 10. 受入条件
+
+1. **v1 client が繋がる**＝`initialize` で接続し、**tools 13・resources 2・templates 2** が見える
+2. **v2 client が繋がる**＝`server/discover` に **`KSQL_MCP_INSTRUCTIONS` が全文**載り、
+   `tools/list` が **13 個を登録順**で返す
+3. **1 と 2 が smoke で恒久的に検出される**（§7.2）
+4. **`registerTool` 13 個・`registerResource` 4 個の面が同一**（名前・順序・スキーマ）
+5. **今日受理できる import が引き続き受理される**（§6.1）＝**境界試験が通る**
+6. **`package.json` に `engines` を足していない**（§2）
+7. **`build-cli.mjs` の target が `node18` のまま**（§2.1）
+8. **engine バンドルに MCP が混ざらない**＝guard が新 package も捕まえる（§8）
+9. **bundle が `node20` target で通る**
+10. **既存テスト全 green・snapshot 22 不変**
+11. **§7.1 の 3 箇所以外に、挙動の期待を変えた書き換えが無い**
+
+---
+
+## 11. 注意点
+
+- **git 操作は一切しないこと。**
+- **`package.json` に `engines` を足さないこと**（§2。最重要）
+- **`build-cli.mjs` を変えないこと。**
+- **`@modelcontextprotocol/sdk` を削除しないこと**（devDependency として残す・§3）
+- **`createServer` の中身（tool / resource の登録）を変えないこと。**
+- **`legacy` option を指定しないこと**（既定 `'serve'`）
+- **raw `.shape` の非推奨対応をここでやらないこと**（§12）
+- **`release/README.txt` は編集しないこと**（リリース時にこちらで書く）
+- **`docs/internal/ksql_*.md` を編集しないこと。**
+- **snapshot 22 件を更新しないこと。**
+- **仕様に矛盾・不足・誤りを見つけたら、黙って直さず、止めて報告すること。**
+
+### 12. **今回やらないこと**
+
+| | 理由 |
+|---|---|
+| **raw `.shape` overload の解消** | v2 で **deprecated だが動く**。**同時にやると差分が広がり、「面が同一」の検証がしにくくなる**。**別課題** |
+| **`maxBufferSize` を絞る** | **今日の契約を変えない**（§6.1）。絞るのは製品判断で、プロトコル移行と混ぜない |
+| **`ttlMs` / `cacheScope` の作り込み** | **SDK の既定（`0` / `private`）で移行する**。最適化は実 host の cache 挙動を測ってから（[B99 §8](ksql_b99_mcp_spec_2026_07_28_issue.md)） |
+| **HTTP transport の追加** | 要望が無い |
