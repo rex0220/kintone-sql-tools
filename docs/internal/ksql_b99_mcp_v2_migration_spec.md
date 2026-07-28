@@ -51,16 +51,47 @@
 
 ## 3. 依存と import
 
+### 3.1 **すべて devDependency**（R2 で修正）
+
+**初版は `@modelcontextprotocol/server@2` を runtime dependency と書いた。誤り。**
+**codex が実装前に指摘した。**
+
+**この package は「runtime 依存ゼロ」で公開している。**
+
 ```
-+ @modelcontextprotocol/server@2   （runtime）
-+ @modelcontextprotocol/client@2   （devDependency・v2 smoke 用）
-  @modelcontextprotocol/sdk@1.29.0 （devDependency へ移す・v1 smoke 用）
+package.json の dependencies → （無し）
+@modelcontextprotocol/sdk    → devDependencies
+dist-mcp/ksql-mcp.js         → SDK をバンドル済み（自己完結）
 ```
 
-**`@modelcontextprotocol/sdk` を消さないこと。**
-**v1 client で dual-era を検証し続けるために残す**（§7.2）。
+**`scripts/mcp-pack-smoke.mjs` がこの契約を明示的に固定している。**
 
-**import 元**: `@modelcontextprotocol/server` / `@modelcontextprotocol/server/stdio`。
+```js
+assert(!existsSync(.../"node_modules"/"@modelcontextprotocol"),
+  "@modelcontextprotocol should not be installed in an --omit=dev consumer install.");
+assert(!installedPackageJson.dependencies,
+  "Published package should not declare runtime dependencies.");
+```
+
+→ **v2 も同じ扱いにする。**
+
+```
+devDependencies:
+  @modelcontextprotocol/server@2   （esbuild がバンドルする・旧 SDK と同じ扱い）
+  @modelcontextprotocol/client@2   （v2 smoke 用）
+  @modelcontextprotocol/sdk@1.29.0 （v1 smoke 用・残す）
+```
+
+> **`mcp-pack-smoke.mjs` の 2 つの assertion は変更しないこと。**
+> **「公開 package は runtime 依存ゼロ」は意図して守っている性質**であり、
+> **供給網・インストールサイズ・engine ライブラリ利用者との版衝突回避**のためにある。
+> **プロトコル移行のために壊すものではない。**
+
+### 3.2 import 元
+
+`@modelcontextprotocol/server` / `@modelcontextprotocol/server/stdio`。
+
+**`@modelcontextprotocol/sdk` を消さないこと**——v1 client で dual-era を検証し続ける（§7.2）。
 
 ---
 
@@ -251,6 +282,8 @@ v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized k
 6. **`package.json` に `engines` を足していない**（§2）
 7. **`build-cli.mjs` の target が `node18` のまま**（§2.1）
 8. **engine バンドルに MCP が混ざらない**＝guard が新 package も捕まえる（§8）
+8bis. **公開 package の runtime 依存がゼロのまま**＝`mcp-pack-smoke.mjs` の
+   `--omit=dev` と `dependencies` の 2 assertion が**無変更で通る**こと（§3.1）
 9. **bundle が `node20` target で通る**
 10. **既存テスト全 green・snapshot 22 不変**
 11. **§7.1 の 3 箇所以外に、挙動の期待を変えた書き換えが無い**
