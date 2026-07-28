@@ -97,26 +97,56 @@ serveStdio(() => createServer(args), { transport: <§6 の transport> });
 **v2 の `serveStdio` も既定 10 MiB の読み取り上限を持つ**（1.30.0 と同じ・[B99 §11.4](ksql_b99_mcp_spec_2026_07_28_issue.md)）。
 **現在は上限なし**なので、**明示しないと今日受理できている入力が拒否される。**
 
-### 6.1 値の決め方＝**今日の契約を変えない**
+### 6.1 **【オーナー決定 2026-07-29】256 MiB**（R2 で修正）
+
+**初版は「今日の契約を変えない」と書いたが、原理的に達成できない。**
+**codex が実装前に指摘した。**
+
+| 理由 | |
+|---|---|
+| `sql` に長さ制限が無い | `z.string().min(1)`（`src/mcp/schemas.ts:52`） |
+| source `name` に長さ制限が無い | 同 `:39` |
+| **text の JSON エスケープは最悪 6 倍** | 全文字が `\\uXXXX` になる場合。**160 MiB → 960 MiB** |
+
+→ **有限の上限を置く以上、「今日受理できる入力の全体」は保てない。**
+**どこまで保つかを決めるしかない。**
+
+#### 決めた線
+
+**宣言済みの上限（10 MiB × 16 source）を base64 換算（4/3）した値を覆う。**
 
 ```
-IMPORT_MAX_BYTES        = 10 MiB   （src/import/sourceLoader.ts:3）
-importSources の最大    = 16       （src/mcp/schemas.ts）
-→ 生の最大            = 160 MiB
-→ base64 換算（≈4/3） ≈ 213 MiB
-→ JSON-RPC の封筒が加わる
+IMPORT_MAX_BYTES    = 10 MiB
+importSources の最大 = 16
+  → 生の合計         160 MiB
+  → base64 換算（4/3） 213.33 MiB
+  → ＋封筒の余裕      → **256 MiB**
 ```
 
-**上限を宣言済みの値から導くこと。**マジックナンバーを置かない。
+#### **対象外と明記するもの**
+
+- **text の病的な JSON エスケープ**（制御文字で埋めた 160 MiB＝最悪 960 MiB）
+- **`sql` と source `name` の長さ**（**現在も無制限のまま。ここでは制限を新設しない**）
+
+**これらは今日も事実上メモリ枯渇で落ちる。**
+**無制限の失敗を有界にする改善**であって、実用上の受理は変わらない
+（CSV / JSON の text はエスケープがほとんど増えない）。
+
+#### 実装の形
+
+**値は宣言済みの定数から導いたうえで、選んだ上限がそれを覆っていることをテストで固定する。**
 
 ```ts
-// 例（形は任せる）
-const MCP_STDIO_MAX_BUFFER_BYTES = Math.ceil(IMPORT_MAX_BYTES * IMPORT_MAX_SOURCES * 4 / 3) + <封筒の余裕>;
+// 形は任せる。要件は 2 つ。
+// ① 宣言済みの定数から「必要な最小値」を導く
+// ② 選んだ上限（256 MiB）がそれ以上であることを **テストで固定する**
+const REQUIRED = Math.ceil(IMPORT_MAX_BYTES * IMPORT_MAX_SOURCES * 4 / 3);
+const MCP_STDIO_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
 ```
 
-> **今回は「受理できる入力」を変えない。**
-> **上限を絞るかどうかは製品判断であり、プロトコル移行と混ぜない。**
-> 絞るなら別課題（メモリ使用量とのトレードオフを別途評価する）。
+> **テストが要る理由**＝**誰かが `IMPORT_MAX_BYTES` や source 上限を引き上げたとき、
+> 上限が足りなくなったことに気づけるようにするため。**
+> **マジックナンバーを置くこと自体は許容するが、根拠との整合は機械が見張る。**
 
 ### 6.2 境界試験を足す
 
@@ -212,7 +242,8 @@ v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized k
    `tools/list` が **13 個を登録順**で返す
 3. **1 と 2 が smoke で恒久的に検出される**（§7.2）
 4. **`registerTool` 13 個・`registerResource` 4 個の面が同一**（名前・順序・スキーマ）
-5. **今日受理できる import が引き続き受理される**（§6.1）＝**境界試験が通る**
+5. **stdio の上限が 256 MiB で、宣言済みの上限（`IMPORT_MAX_BYTES` × source 上限 × 4/3）を覆っている**こと。
+   **その整合がテストで固定されている**こと（§6.1）＝**上限を引き上げた人が気づける**
 6. **`package.json` に `engines` を足していない**（§2）
 7. **`build-cli.mjs` の target が `node18` のまま**（§2.1）
 8. **engine バンドルに MCP が混ざらない**＝guard が新 package も捕まえる（§8）
@@ -241,6 +272,7 @@ v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized k
 | | 理由 |
 |---|---|
 | **raw `.shape` overload の解消** | v2 で **deprecated だが動く**。**同時にやると差分が広がり、「面が同一」の検証がしにくくなる**。**別課題** |
-| **`maxBufferSize` を絞る** | **今日の契約を変えない**（§6.1）。絞るのは製品判断で、プロトコル移行と混ぜない |
+| **import の上限自体を下げる** | **§6.1 で 256 MiB と決めた**＝**import の契約（10 MiB × 16）は触らない**。絞るなら別課題 |
+| **`sql` / source `name` に長さ制限を新設** | **§6.1 で対象外と明記した**。**現在も無制限**であり、ここで足すと別の挙動変更になる |
 | **`ttlMs` / `cacheScope` の作り込み** | **SDK の既定（`0` / `private`）で移行する**。最適化は実 host の cache 挙動を測ってから（[B99 §8](ksql_b99_mcp_spec_2026_07_28_issue.md)） |
 | **HTTP transport の追加** | 要望が無い |
