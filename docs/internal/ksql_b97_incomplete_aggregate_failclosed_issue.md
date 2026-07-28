@@ -237,7 +237,11 @@ SELECT ステータス, COUNT(*) … GROUP BY   maxRecords=500 → 499（誤り�
 **主語が「ORDER BY」と出ないこと**（受入 7）も実機で確認した。
 **エラー文面は理由・上書きの明示・元の文言の 3 段**で、原因と対処が読み取れる。
 
-
+```
+集計の正しい結果には完全な候補集合が必要です。complete input reason: AGGREGATE。
+onLimit=truncateは使用できません。取得件数が上限（3 件）を超えました。
+WHERE 句で絞り込むか、maxRecords を引き上げてください。
+```
 
 ## 10. 優先度
 
