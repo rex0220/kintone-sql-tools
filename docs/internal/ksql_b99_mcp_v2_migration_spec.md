@@ -120,7 +120,25 @@ serveStdio(() => createServer(args), { transport: <§6 の transport> });
 |---|---|
 | `McpError(ErrorCode.InvalidParams, ...)`（`src/mcp/index.ts:101-109`） | `ProtocolError(INVALID_PARAMS, ...)` |
 
-**`data.uri` を落とさないこと**（v1・v2 client の双方で観測できることを spike で確認済み）。
+### 5.1 **経路が 2 つある**（R2 で明確化）
+
+**初版は「`data.uri` を落とさないこと」と書いたが、2 つの経路を混同していた。**
+**codex が実装前に指摘した。**
+
+| URI | 経路 | `data` |
+|---|---|---|
+| どの resource / template にも一致しない | **SDK の resource-not-found** | **`{ uri }` あり** |
+| template に一致するがキーが未知 | **こちらの `invalidResourceKey()`** | **なし**（現行） |
+
+**spike で観測した `data.uri` は前者＝SDK 側の性質**であり、**こちらの handler にはもともと無い。**
+
+#### 決めたこと＝**現行維持**
+
+- **こちらの handler に `data` を新設しない**（挙動を変えない）
+- **文言と code（`INVALID_PARAMS`）を変えない**
+- **SDK 側の経路が `data.uri` を返し続けることは、二本立て smoke で確認する**（§7.2）
+
+> **`data.uri` の新設は改善だが、プロトコル移行と混ぜない。**必要なら別課題。
 
 > **`-32002` → `-32602` の仕様変更はこちらに当てはまらない。**
 > **もともと `-32602` を使っており、`-32002` を固定した箇所は 1 つも無い。**
