@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B90](ksql_b90_variable_arithmetic_issue.md)
-- ステータス: 📋 **R1・実装待ち**
+- ステータス: 📋 **R2・実装待ち**（R1 §3.2 と §7 の矛盾を codex が実装前に指摘）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**。§5 の fail-closed 化のみ挙動が変わる（誤った結果を返していたもの）
 
@@ -87,6 +87,22 @@ export type ArithNode =
 
 **したがって `selectToKintone`（押し下げ変換器）を含む下流は、解決済みリテラルしか見ない。**
 押し下げの安全性（v2.0.0 の `LIKE` 全廃など、過去に何度も事故った領域）に触れずに済む。
+
+#### 解決前に走る経路も算術オペランドには触れない（R2 で確認）
+
+`analyzeBatch`（解決前）は `validateKlikeStatement` 経由で
+[`resolveSelectMode`](../../src/converter/selectToKintone.ts#L74) に到達する。
+**ただし `resolveSelectMode` は列の型と WHERE の形しか見ず、算術オペランドの木を歩かない。**
+
+**算術を歩く 2 つの収集器**
+[`collectArithNode`](../../src/converter/selectToKintone.ts#L260) /
+[`walkArith`](../../src/converter/selectToKintone.ts#L540)
+**に到達するのは `selectToKintoneParams` / `selectToFetchAllFields` /
+`collectSelectFieldReferencesBySource`（B86 の検証・[execute.ts:3308](../../src/execute.ts#L3308)）
+だけで、いずれも解決後に走る。**
+
+→ **未解決の `VARIABLE` はこれらへ到達しない**ので、内部エラーガードを置いても
+正常系の挙動は変わらない。
 
 ### 4.1 既存の汎用走査器が算術中の変数も拾う
 
@@ -173,8 +189,10 @@ ArgumentError: variable @phase is not numeric and cannot be used in arithmetic.
 5. **配列変数は既存のエラー** — `array variable @x can only be used as IN @x.`
 6. **押し下げに変数が届かない** — 解決前に `selectToKintone` へ到達しないことを固定する。
    **変数を含む WHERE の押し下げ結果が、同じ値を直接書いた場合と一致する**ことで確認する
-7. **型の網羅** — `ArithNode` の全消費側が新しい variant を扱っていること
-   （TypeScript のビルドが通ることに加え、**到達したら内部エラーになる**ことを 1 箇所以上で固定）
+7. **型の網羅** — `ArithNode` の**全 17 消費側**（`selectToKintone` の 4 箇所を含む）が
+   新しい variant を扱っていること。TypeScript のビルドが通ることに加え、
+   **到達したら内部エラーになる**ことを 1 箇所以上で固定する。
+   **`selectToKintone` は「throw するガードを足すだけ」**で、既存の判定・変換の分岐は変えない
 8. **既存テスト全 green・snapshot 22 不変・公開型不変**
 
 ---
@@ -184,6 +202,13 @@ ArgumentError: variable @phase is not numeric and cannot be used in arithmetic.
 - **`ArithNode` の消費側で「黙って無視」しないこと。**実行時には到達しないので、
   到達したら**内部エラーで停止**させる。既定値を当てると silent wrong result になる
 - **`SCALAR_*` 文法側は変更しないこと。**受理範囲は既に変数を含む
-- **押し下げ変換器（`selectToKintone`）に手を入れないこと。**§4 のとおり解決済みリテラルしか来ない
+- **押し下げ変換器（`selectToKintone`）の**ロジック**に手を入れないこと。**
+  §4 のとおり解決済みリテラルしか来ないため、**判定・変換の分岐を足したり変えたりしない。**
+  **例外＝到達不能を確認する内部エラーガードの追加のみ可**（R2）。
+  `collectArithNode` / `walkArith` は**フィールド名の収集器**で、
+  未知のノードを**黙って読み飛ばす**構造になっている。
+  **ここで `VARIABLE` を黙殺すると「参照しているフィールドを取りこぼす」**ことになり、
+  B86 の検証漏れや取得フィールドの欠落という silent wrong result になり得る。
+  **したがって「来ないはずのものが来たら止める」ガードは入れる。**
 - **公開型を変えないこと**（`ArithNode` は内部型）
 - **§5 は Pro の依頼を超える範囲**なので、CHANGELOG と Pro への連絡に明記する

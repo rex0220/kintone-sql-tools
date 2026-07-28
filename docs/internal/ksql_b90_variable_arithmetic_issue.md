@@ -71,8 +71,9 @@ TypeScript が漏れを検出してくれるので**安全側だが、作業量�
 ### 4.2 バッチ外での扱い
 
 変数はバッチにしか存在しない。
-**単文で算術中に `@x` を書いた場合は、従来どおり明確なエラー**にする
-（`variable @x is not defined in this batch.`）。
+**単文で算術中に `@x` を書いた場合は、従来どおり明確なエラー**になる。
+**実測した文言は `ParseError: variable @x is not defined before statement 1.`**
+（`collectVariableRefs` が拾うため追加実装は不要）。
 
 ## 5. 案
 
