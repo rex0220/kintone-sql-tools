@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への確認 — 依頼③（B91）の再評価
 
 - 作成: 2026-07-29
-- ステータス: 📤 **送付待ち**
+- ステータス: ✅ **送付済み（2026-07-29）**。→ **Pro が依頼③を取り下げ**（SQL 資産 83 本を監査して該当 0 本）。[B91 §11](ksql_b91_mcp_plugin_compat_mode_issue.md) を参照
 - 対象: [B91](ksql_b91_mcp_plugin_compat_mode_issue.md)（Pro の依頼③・MCP のプラグイン互換モード）
 - 前回の往復: [v3.33.0 の連絡](ksql_pro_report_v3330.md)（送付済み） → Pro の [報告 v3.33.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3330.md)（K-37 完了・**残る依頼は③だけ**）
 
