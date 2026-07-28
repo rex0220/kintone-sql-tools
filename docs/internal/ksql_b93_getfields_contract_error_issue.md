@@ -1,7 +1,7 @@
 # B93 未知フィールド型のエラーがエンジンの不具合に見え、クライアント契約も書かれていない
 
 - 起票: 2026-07-29
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-29）
+- ステータス: ✅ **リリース済み（v3.32.0・2026-07-29）**
 - 出典: [Pro からの報告 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3311-統合版.md) §1
 - 関連: [B88 0 行 `SELECT *` の列復元](ksql_b88_empty_wildcard_schema_restore_issue.md) / [B85 VALIDATE の制約検証](ksql_b85_library_validate_constraints_issue.md) / [B73 エラーの構造化](ksql_b73_error_structured_i18n_evaluation.md)
 

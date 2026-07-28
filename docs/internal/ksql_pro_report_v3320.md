@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への連絡 — v3.32.0
 
 - 作成: 2026-07-29
-- ステータス: 📤 **内容承認済み・送付待ち**（オーナー確認 2026-07-29）
+- ステータス: ✅ **送付済み（2026-07-29）**。→ Pro の返信で [B96](ksql_b96_getrecords_response_contract_issue.md)・[B97](ksql_b97_incomplete_aggregate_failclosed_issue.md) を起票
 - 前回の往復: [v3.31.1 の連絡](ksql_pro_report_v3311.md)（送付済み） → Pro の [統合報告](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3311-統合版.md)（§1 回帰取り下げ・§9 依頼④）
 
 ## 送付前の確認
