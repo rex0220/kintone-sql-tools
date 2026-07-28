@@ -1,9 +1,9 @@
-ksql 配布パッケージ (v3.29.0)
+ksql 配布パッケージ (v3.30.0)
 
 release 成果物:
-- ksql-plugin-v3.29.0.zip
-- ksql-mcp.mcpb (manifest version 3.29.0)
-- ksql-mcp.js (MCP server version 3.29.0)
+- ksql-plugin-v3.30.0.zip
+- ksql-mcp.mcpb (manifest version 3.30.0)
+- ksql-mcp.js (MCP server version 3.30.0)
 
 破壊的変更の移行案内 (B86):
 - CTE / 一時テーブル / SHOW APPS / DESCRIBE の実体化結果で、存在しない列を参照した
@@ -20,12 +20,32 @@ release 成果物:
 - rows=[] かつ columns=[] の0行 wildcard source は、JOIN なしの読出しだけ従来挙動を
   維持します。JOIN 入力では records GET 前に schema-unavailable error になります。
 
-1. ksql-plugin-v3.29.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.30.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.29.0): B68 engine ライブラリの read-only 拡張。
+本リリース (v3.30.0): B86 実体化ソースの不存在列を fail-closed 化／B83／B84／B85。
+
+- 注意: B86 は破壊的変更です。CTE・一時テーブル・SHOW APPS / DESCRIBE の結果や
+  サブテーブル・UNION 枝・混在 JOIN で、存在しない列を参照する SQL がエラーになります。
+- 従来は不存在列を空文字として評価していました。LIKE では全件一致、= では 0 件、
+  INSERT ... SELECT では空文字レコードの書き込みが起きていました。
+  現在成功して見えるクエリは実際には誤った結果を返しているため、
+  エラー化によって正しい結果が失われることはありません。
+- 移行方法: 値のつもりで書いた裸の語は文字列リテラルとして引用してください。
+  誤 WHERE アプリ名 LIKE 顧客  →  正 WHERE アプリ名 LIKE '顧客'
+- 混在 JOIN では物理アプリ側の不存在列も同じ検査で拒否します。
+  検査に失敗した場合、レコード取得も書き込みも行いません。
+
+- B85: engine ライブラリの VALIDATE がどの制約を検証したかを開示します。
+  ReadonlyFieldInfo に required / minLength / maxLength / minValue / maxValue を
+  宣言し、validateStats.constraintMetadata に present / absent を返します。
+  createReadonlyKintoneClient の利用者は変更不要です。
+- B84: 押し下げ可否を言語リファレンスへ公開しました（実装から生成・照合）。
+- B83: MCP の VALIDATE 診断列の説明を 9 列 / SUMMARY 5 列の 2 形明記へ修正しました。
+
+前リリース (v3.29.0): B68 engine ライブラリの read-only 拡張。
 
 - ダッシュボード等が組み込む engine ライブラリで、これまで使えなかった read-only 機能を
   解禁しました。純加法で、既存 API の型も挙動も変わりません。

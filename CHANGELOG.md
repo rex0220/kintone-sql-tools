@@ -2,7 +2,7 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
-## 未リリース
+## v3.30.0（2026-07-28）
 
 ### ⚠ 破壊的変更（B86 実体化ソースの不存在列参照を fail-closed 化）
 
