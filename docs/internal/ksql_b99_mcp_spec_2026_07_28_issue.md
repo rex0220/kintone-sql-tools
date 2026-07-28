@@ -1,7 +1,7 @@
 # B99 MCP サーバーの新規格（プロトコル改訂 2026-07-28）対応
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価**（**いま着手できない**。SDK 未対応・§3）
+- ステータス: 📝 **評価（優先 中）＝R2。初版の中心的な結論が誤っていた**（codex のレビューで判明・§2）
 - 出典: オーナー指示「MCP サーバーの新規格対応」
 - 関連: [B91 MCP 互換モード（クローズ）](ksql_b91_mcp_plugin_compat_mode_issue.md)
 
@@ -9,136 +9,224 @@
 
 | | |
 |---|---|
-| SDK | `@modelcontextprotocol/sdk` **1.29.0**（依存 `^1.29.0`・npm latest は **1.30.0**） |
-| 対応プロトコル | `LATEST_PROTOCOL_VERSION = "2025-11-25"` ／ 受理は `2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05` / `2024-10-07` |
-| transport | **stdio のみ**（`StdioServerTransport`） |
-| 公開面 | **tools 13 個・resources 4 個**（`McpServer.registerTool` / `registerResource`） |
-| ログ | エラーは **stderr**（`process.stderr.write`） |
+| SDK | `@modelcontextprotocol/sdk` **1.29.0**（旧モノリシック package・npm latest は 1.30.0） |
+| 対応プロトコル | `LATEST_PROTOCOL_VERSION = "2025-11-25"` |
+| transport | **stdio のみ**（`StdioServerTransport`・引数なし） |
+| 公開面 | **tools 13 個・resources 4 個** |
+| bundle target | **Node 18**（`build-mcp.mjs:23`）／MCPB manifest も **`node >=18.0.0`**（`build-mcpb.mjs:79`） |
+| inline import | **1 source あたり 10 MiB**（`IMPORT_MAX_BYTES`・最大 16 source） |
 
-## 2. **廃止・削除予定の機能は 1 つも使っていない**（実測）
+---
 
-`src/mcp/` を検索した結果、**該当ゼロ**。
+## 2. **初版の誤りと、その原因**（R2 で修正）
 
-| 2026-07-28 で削除・非推奨 | 使用 |
+**初版は「2026-07-28 に対応した SDK が存在しないので着手できない」と結論した。誤りだった。**
+
+### 2.1 原因＝**旧 package 名だけを調べた**
+
+**SDK は v2 で package が分割されていた。**
+
+| | |
 |---|---|
-| `ping` / `logging/setLevel` | ❌ |
-| `resources/subscribe` / `unsubscribe` | ❌ |
-| Roots / Sampling / Logging（非推奨化） | ❌ |
-| Elicitation | ❌ |
-| セッション（`Mcp-Session-Id`） | ❌（stdio なのでそもそも無関係） |
-| HTTP+SSE transport（非推奨化） | ❌ |
-
-**位置としては良好。**新仕様が消すものを何も使っていない。
-
-## 3. **いま着手できない**＝SDK が新仕様に未対応
-
-**プロトコル改訂 `2026-07-28` は公開されている**が、**それを実装した SDK が存在しない。**
+| 旧 | `@modelcontextprotocol/sdk`（モノリシック・**1.30.0 で打ち止め**） |
+| 新 | **`@modelcontextprotocol/server` 2.0.0** / `@modelcontextprotocol/client` 2.0.0 / `@modelcontextprotocol/core` 2.0.0 |
 
 ```
-npm view @modelcontextprotocol/sdk dist-tags   → { "latest": "1.30.0" }
-npm view @modelcontextprotocol/sdk versions    → 79 版・2.x は 0 件
-1.30.0（2026-07-27 公開）の LATEST_PROTOCOL_VERSION → "2025-11-25"
+npm view @modelcontextprotocol/server version engines.node
+→ 2.0.0  >=20
 ```
 
-> **【調査上の注意】WebFetch の要約が「2026-07-28 対応の SDK v2.0.0 が同日公開された」と答えたが、誤りだった。**
-> **npm の実データ（`dist-tags` と 79 版の一覧）で否定できる。**
-> **今後この件を再評価するときは、要約ではなく `npm view` を根拠にすること。**
+**初版は `@modelcontextprotocol/sdk` の `dist-tags` と全 79 版を丁寧に調べ、「2.x は 0 件」を確認した。**
+**その観測自体は正しい。結論だけが誤っていた。**
 
-**仕様の「現行版」表記も揺れている**＝
-[versioning ページ](https://modelcontextprotocol.io/specification/versioning) は
-「現行は **2025-11-25**」と書きながら、本文のリンクは全部 `2026-07-28` を指している。
-**改訂が出た直後で、表記が追いついていない可能性が高い。**
+> **【教訓】「正しく調べた」と「正しいものを調べた」は別。**
+> **package 名が変わる可能性を疑わなかった。**
+> 初版は「WebFetch の要約が誤りだった」ことを教訓として書いたが、
+> **その要約（v2.0.0 が存在する）のほうが実は正しく、否定したこちらが誤っていた。**
+> **要約を実データで否定するときは、実データの探索範囲そのものを疑うこと。**
 
-→ **いま決めるべきは「対応する／しない」ではなく「何を準備し、何を待つか」。**
+### 2.2 「廃止機能を 1 つも使っていない」も誤り
 
-## 4. 2026-07-28 は何を変えるか
+**アプリコードには無いが、SDK が暗黙に実装している。**
 
-**基盤の作り直しに近い。**（[changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)）
+```
+node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js:33
+  this.setRequestHandler(PingRequestSchema, ...)
+```
 
-| # | 変更 | 影響 |
+`initialize` / `notifications/initialized` も `server/index.js` が自動登録する。
+
+→ **`ping` と initialize ライフサイクルは「使っている」。**
+**grep で該当ゼロなのは `src/` の話であって、公開しているサーバーの話ではない。**
+
+**ただし Roots / Sampling / Logging / Elicitation / `resources/subscribe` は本当に未使用**
+（codex も `src/` 全体で確認し、同意している）。
+**しかもこれらは「削除」ではなく「非推奨」**で、除去は **2027-07-28 以降**。初版はここも一緒くたにしていた。
+
+### 2.3 `@hono/node-server` は**既に bundle に入っていない**
+
+初版は「入っているなら落とせる可能性がある」と書いたが、**前提が成立しない。**
+
+```
+grep -c "hono\|createAdaptorServer" release/ksql-mcp.js → 0
+```
+
+esbuild の import graph（`write:false` で確認・codex）でも `honoNodeServerInputs: []`、
+transport は `server/stdio.js` のみ。**tree-shaking で既に落ちている。**
+
+→ **`npm audit` が報告する GHSA-frvp-7c67-39w9 は依存木の衛生問題であって、
+配布物の実行経路の脆弱性ではない。**
+
+---
+
+## 3. 2026-07-28 は何を変えるか
+
+| # | 変更 | このサーバーへの影響 |
 |---|---|---|
-| 1 | **`initialize` / `notifications/initialized` ハンドシェイクを削除**＝**ステートレス化**。各リクエストが `_meta` にプロトコル版とクライアント能力を載せる | **SDK が吸収** |
-| 2 | **セッションと `Mcp-Session-Id` を削除**（Streamable HTTP） | **無関係**（stdio） |
-| 3 | **`server/discover` をサーバーが MUST 実装** | **SDK が吸収** |
-| 4 | `resources/subscribe` を **`subscriptions/listen`** へ置換 | **無関係**（未使用） |
-| 5 | `ping` / `logging/setLevel` を削除 | **無関係**（未使用） |
-| 6 | **MRTR**＝サーバー起点リクエスト（`roots/list` / `sampling` / `elicitation`）を廃し、`InputRequiredResult` の往復へ | **無関係**（未使用） |
-| 7 | **全 result に `resultType` 必須** | **SDK が吸収** |
-| 8 | SSE の再開・再送（`Last-Event-ID`）を削除 | **無関係**（stdio） |
-| 9 | **`tools/list` / `resources/list` / `resources/read` の result に `ttlMs` と `cacheScope` が必須**（`CacheableResult`） | ⚠️ **こちらが値を決める** |
-| 10 | `tools/list` は**決定的な順序**で返すべき（SHOULD） | ✅ **既に固定順**（`registerTool` の登録順） |
-| 11 | `inputSchema` / `outputSchema` が JSON Schema 2020-12 の全キーワードを許容 | 影響なし（緩和方向） |
+| 1 | **`initialize` ハンドシェイク削除＝ステートレス化**。各リクエストの `_meta` に版・能力・識別 | **stdio でも適用される**（初版は「無関係」と誤記） |
+| 2 | セッションと `Mcp-Session-Id` 削除（HTTP） | **無関係**（stdio） |
+| 3 | **`server/discover` をサーバーが MUST 実装** | **stdio では era 判定の probe にも使われる** |
+| 4 | `resources/subscribe` → `subscriptions/listen` | 無関係（未使用） |
+| 5 | `ping` / `logging/setLevel` 削除 | **`ping` は SDK 経由で実装済み**（§2.2）。v2 で SDK ごと置き換わる |
+| 6 | **MRTR** がサーバー起点リクエストを置換 | 無関係（未使用） |
+| 7 | 全 result に `resultType` 必須 | **SDK が付与** |
+| 8 | SSE 再開・再送を削除 | **無関係**（stdio） |
+| 9 | **`ttlMs` / `cacheScope` が必須**（`CacheableResult`） | **SDK が既定値 `{ttlMs: 0, cacheScope: "private"}` を補う**→ **適合の blocker ではない** |
+| 10 | `tools/list` は決定的順序（SHOULD） | ✅ **既に満たしている**（登録順） |
 
-### 4.1 **こちらが書く必要があるのは §4-9 だけ**
+### 3.1 cacheable な operation は 6 つ（初版は 3 つしか挙げていなかった）
 
-**`ttlMs`（鮮度ヒント・ミリ秒）と `cacheScope`（`"public"` / `"private"`）**を、
-**tools / resources のそれぞれについて決める必要がある。**
+`server/discover` / `tools/list` / `prompts/list` / `resources/list` /
+**`resources/templates/list`** / `resources/read`
 
-**判断材料**:
+**初版は `server/discover` と `resources/templates/list` を落としていた。**
 
-- **tools 13 個の定義は版に固定**＝リリースしない限り変わらない → **長め・`public`** が妥当
-- **resources 4 個**は言語リファレンス・レシピ等の**静的文書** → 同上
-- **ただし `ksql_docs` などは版で内容が変わる**ので、**版が変われば別サーバー**という前提で良いか要確認
+---
 
-**これは仕様が要求する新しい値**であり、**既存の実装から導けない。**
+## 4. **本当の blocker は SDK ではなく Node 20**
 
-## 5. いま実施できること
-
-### 5.1 SDK を 1.29.0 → 1.30.0 へ上げる（プロトコルとは無関係）
-
-**1.30.0（2026-07-27）の中身は保守リリース**で、**プロトコル版は 2025-11-25 のまま。**
-
-| 変更 | こちらへの影響 |
+| | |
 |---|---|
-| **`@hono/node-server` の脆弱性対応（GHSA-frvp-7c67-39w9）** | ⚠️ **依存木に実在する**（SDK の直接依存）。**stdio なので実行経路には入らないはず**だが、**バンドルに入るかは要確認** |
-| Zod スキーマの改善 | 影響あり得る（`src/mcp/schemas.ts` が Zod） |
-| SSE keep-alive / Content-Type 検証 | **無関係**（HTTP transport のみ） |
+| v2 の要件 | **`node >=20`**（server / client / core すべて） |
+| こちらの現状 | **bundle target Node 18**／**MCPB manifest `>=18.0.0`** |
 
-**破壊的変更なし**とのこと。**`mcp:verify` で確かめれば済む規模。**
+**利用者に Node 18 が残っているかが分からない。**これが移行の実質的な判断点である。
 
-### 5.2 準備しておけること
+## 5. アプリ側に必要な変更（初版は「`ttlMs` / `cacheScope` だけ」と誤記）
 
-- **`ttlMs` / `cacheScope` の値を先に決めておく**（§4.1）。SDK 対応を待たずに議論できる
-- **`server/discover` が SDK 実装になることを前提に、こちらの `instructions` が長すぎないか見直す**
-  （discover は「能力と識別情報を 1 リクエストで返す」ので、**instructions がそこに載る可能性**がある）
+1. **依存と import の移行**（`@modelcontextprotocol/sdk` → `@modelcontextprotocol/server`）
+2. **stdio entry の作り直し**＝v2 は **`serveStdio(factory)`** が
+   **modern（`server/discover`）と legacy（`initialize`）を判定して振り分ける**。
+   **現在の `new StdioServerTransport(); server.connect(...)` を機械的に残すだけでは dual-era にならない**
+3. **Node 最低要件の引き上げ判断**（§4）
+4. **`McpError` / `ErrorCode` の移行**（`src/mcp/index.ts:101-109` で使用）。
+   **resource not found の code が `-32002` → `-32602` に変わる**ので、
+   **既存 smoke がエラーコード・文言をどこまで固定しているかの監査が要る**
+5. **smoke / pack-smoke / MCPB verify を v1 client と v2 client の両方で確認**
+6. bundle / manifest / runtime / 版数文書の同期
 
-## 6. 対応案
+**引き継げるもの**＝サーバー名・版・**`KSQL_MCP_INSTRUCTIONS`**。
+**v2 では `ServerOptions.instructions` に渡せば `server/discover` の応答に載る**
+（初版は「載る可能性がある」と弱く書いていた。**載る**）。
 
-### 6.1 案 A（推奨）— **1.30.0 だけ上げて、2026-07-28 は待つ**
+---
 
-- **SDK が対応するまで着手できない**（§3）
-- **廃止される機能を何も使っていない**ので、**待っても負債が増えない**（§2）
-- **1.30.0 は保守リリース**なので安く上げられる（§5.1）
+## 6. **1.30.0 への更新は単純ではない**（初版の「0.25 人日・安全」は誤り）
 
-### 6.2 案 B — 新仕様を先取りして自前で実装
+**1.30.0 は stdio に既定 10 MiB の読み取りバッファ上限を導入する。**
 
-**採らない。**`server/discover` も `_meta` の版交渉も **JSON-RPC 層の話**であり、
-**`McpServer` を迂回して自前で書くことになる。**SDK が対応した時点で**全部捨てる。**
+```
+1.30.0  dist/esm/shared/stdio.js:2
+  export const STDIO_DEFAULT_MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+  → 超過で ReadBuffer exceeded maximum size ... を throw
 
-### 6.3 案 C — 何もしない
+1.29.0  同ファイル → 該当 0 件（上限なし）
+```
 
-**1.30.0 の脆弱性対応を見送る理由が無い**ので、案 A のほうが良い。
+**こちらの inline import は 1 source あたり 10 MiB を許し、最大 16 source。**
 
-## 7. 決めること
+```
+src/import/sourceLoader.ts:3  IMPORT_MAX_BYTES = 10 * 1024 * 1024
+```
 
-1. **1.30.0 へ上げるか**（推奨。`mcp:verify` で確認）
-2. **`@hono/node-server` が `release/ksql-mcp.js` に実際に入っているか**を確認するか
-   （**stdio しか使わないなら bundle から落とせる可能性**があり、それ自体が別の改善になる）
-3. **`ttlMs` / `cacheScope` の方針を先に決めるか**（SDK 対応前でも決められる）
-4. **再評価の時期**＝SDK が `2026-07-28` に対応した時点。
-   **判定は `npm view @modelcontextprotocol/sdk` の実データで行う**（§3 の注意）
+**JSON-RPC の封筒が加わり、base64 なら約 4/3 に膨らむ。**
+→ **いま受理できている最大近傍の import リクエストが、更新後に transport 切断になり得る。**
 
-## 8. 規模
+**現在の `new StdioServerTransport()` は引数なし**なので、既定値がそのまま効く。
 
-- 案 A（1.30.0 へ更新＋ゲート確認）: **0.25 人日**
-- 2026-07-28 対応（SDK 対応後・`ttlMs` / `cacheScope` を含む）: **未見積もり**。SDK の形が出てから
+### 6.1 上げる場合の最低条件
 
-## 9. 優先度
+- **`maxBufferSize` を明示する**（inline import の最大メッセージ長と整合させる）
+- **境界テストを足す**＝10 MiB のテキスト source／10 MiB の base64／複数 source の合計
+- **超過時のエラーが利用者に読めるか**を確認する（transport 切断は診断しにくい）
+- `mcp:verify` だけでは足りない
 
-**低い。**
+---
 
-- **新仕様に着手できない**（SDK 未対応）
-- **廃止される機能を使っていない**ので、**待つコストがほぼゼロ**
-- **利用者からの要望も出ていない**
+## 7. 対応案（R2）
 
-**ただし 1.30.0 の脆弱性対応だけは、安いので先に済ませてよい。**
+### 7.1 案 A'（推奨）— **Node 20 を先に決め、v2 の dual-era 移行を spike する**
+
+1. **MCP / MCPB の最低要件を Node 20 にできるかを決める**（§4）
+2. **`@modelcontextprotocol/server@2.0.0` で dual-era stdio の spike**
+   〔`serveStdio(factory)`／既存の name・version・instructions を再利用／
+   tools 13・resources 4 の面の同一性／v1 client の initialize fallback／v2 client の `server/discover`〕
+3. **Node 18 の維持が必要なら**、v1 を production に残しつつ v2 を別ターゲットとして準備
+4. **1.30.0 の更新は v2 対応と切り離し、§6.1 を済ませてから**
+
+### 7.2 案 B（自前実装）— **不採用**
+
+**v2 stable が存在する以上、検討する理由がない。**
+
+### 7.3 案 C（何もしない）— **不採用**
+
+`ping` / initialize を SDK 経由で実装しており、**新仕様では消える**。放置すると v2 移行の負債になる。
+
+---
+
+## 8. `ttlMs` / `cacheScope` を決めるのに要る情報
+
+**適合のためには不要**（SDK が `{ttlMs: 0, cacheScope: "private"}` を補う・§3-9）。
+**最適化として決めるなら**、次が要る。
+
+1. **対象 host / client が result cache を実装しているか**。プロセス再起動や更新をまたいで保持するか
+2. **更新の反映遅延をどこまで許すか**（リリース後、旧 cache が何分残ってよいか）
+3. **面が caller / config で変わるか**（profile・configPath・認証主体）。**現状は固定に見える**
+4. **operation ごとの機密性**（`resources/read` の埋め込み文書に利用者固有情報が混ざらないか）
+5. **無効化の手段**（`listChanged` を送るか・再起動で client cache を落とせるか）
+6. **resource 単位の方針**（言語リファレンス索引／レシピ索引／各セクション で TTL を変えるか）
+
+**暫定方針**＝**まず SDK 既定（`0` / `private`）で移行し、実際の cache 挙動を測ってから、
+面が固定のものだけ `public` と有限 TTL を入れる。**
+stdio では共有中間者がいないので `public` / `private` の実効差は小さいが、
+**将来 HTTP 化しても安全な値にしておく。**
+
+---
+
+## 9. 優先度（R2 で 低 → **中**）
+
+**初版の「低」の根拠が 2 つとも崩れた。**
+
+| 初版の根拠 | R2 |
+|---|---|
+| SDK 未対応で着手できない | ❌ **v2 stable が公開済み** |
+| 廃止機能を何も使っていない | ❌ **`ping` / initialize を SDK 経由で実装している** |
+
+**ただし即時の本番切替を「高」にする根拠も無い。**
+
+- **versioning ページは現行を `2025-11-25` と表示したまま**（反映遅れか意図的かは不明）
+- **利用者要望が出ていない**
+- **modern-only client がいつ現れるかが分からない**
+- **Node 20 の利用者影響が分からない**
+
+→ **評価・spike は「中」。本番切替は Node 20 と host の状況を確認してから再判定。**
+
+---
+
+## 10. 分からないこと（推測で埋めない）
+
+- 対象 host（Claude Desktop / Codex ほか）が **いつ modern-only client になるか**
+- **MCP / MCPB 利用者に Node 18 が残っているか**
+- 各 host が **cache hint を実際にどう扱うか**
+- **v2 へ移した場合のコンパイルエラー・bundle サイズ・smoke の結果**（実装していないため未確認）
+- **versioning ページの `current = 2025-11-25` が反映遅れか意図的か**
