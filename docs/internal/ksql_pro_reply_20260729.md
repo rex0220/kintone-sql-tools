@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への返信 — 2026-07-29
 
 - 作成: 2026-07-29
-- ステータス: 📤 **送付可**
+- ステータス: ✅ **送付済み（2026-07-29）**。→ [Pro の回答](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260729b-送付版.md)＝質問2件とも回答あり・新規依頼なし
 - 受領した連絡: `ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260729-送付版.md`
 - 前回の連絡: [v3.30.0](ksql_pro_report_v3300.md)
 
