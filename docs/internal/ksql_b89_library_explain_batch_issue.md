@@ -1,7 +1,7 @@
 # B89 engine ライブラリの `explainQuery` がバッチを受けず、Pro の構文チェックが効かなくなる
 
 - 起票: 2026-07-29
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-29）。→ [実装仕様](ksql_b89_library_explain_batch_spec.md)
+- ステータス: ✅ **リリース済み（v3.31.0・2026-07-29）**
 - 出典: [Pro からの連絡 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260729-送付版.md) 依頼①
 - 関連: [B68 ライブラリ read-only 拡張](ksql_b68_engine_library_readonly_impl_plan.md) / [B87](ksql_b87_metadata_cache_spec.md)
 

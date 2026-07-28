@@ -1,7 +1,7 @@
 # B90 変数を算術式に直接書けない（関数で包めば動く）
 
 - 起票: 2026-07-29
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-29・案 (a) で対応）。→ [実装仕様](ksql_b90_variable_arithmetic_spec.md)
+- ステータス: ✅ **リリース済み（v3.31.0・2026-07-29）**（案 (a) で対応）
 - 出典: [Pro からの連絡 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260729-送付版.md) 依頼②
 - 関連: [バッチ変数 Phase 1a](../../../..) / [B89 explainQuery バッチ](ksql_b89_library_explain_batch_issue.md)
 
