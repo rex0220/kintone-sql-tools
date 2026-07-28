@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-28
 - 対象課題: [B88](ksql_b88_empty_wildcard_schema_restore_issue.md)
-- ステータス: 📋 **R1・実装待ち**
+- ステータス: 📋 **R2・実装待ち**（R1 の穴 2 件を codex が実装前に指摘・どちらも Claude の仕様漏れ）
 - 前提: **[B87](ksql_b87_metadata_cache_spec.md) 実装済み**（未リリース）— これが無いと本修正が列数のブレを生む
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（0 行時に列が増える方向のみ・1 行以上は不変）
@@ -28,10 +28,33 @@ SELECT * FROM #e
 
 **すべて満たすときだけ**アプリ定義から列を復元する。
 
-1. **取得結果が 0 行**
+1. **最終的な SELECT 結果が 0 行**（§2.1）
 2. **単独の `SELECT *`**（`WILDCARD` 1 つだけ。明示列との混在・`_p.*` は対象外）
 3. **JOIN が無い**
-4. **FROM が物理アプリ**（実体化ソースは v2.11.0 で解決済み）
+4. **FROM が物理アプリ または サブテーブル仮想テーブル**（§3.4）。
+   実体化ソース（`cteName != null`）は v2.11.0 で解決済みなので対象外
+
+### 2.1 「0 行」は**最終結果**で判定する
+
+**R1 では曖昧だった。**FULL_SCAN では kintone から 1 行以上取得しても、
+ローカルの `WHERE`・`LIMIT`/`OFFSET`・`DISTINCT` を経て 0 行になり得る。
+
+```sql
+SELECT * FROM APP100 WHERE UPPER(件名) = '存在しない値'
+SELECT DISTINCT * FROM APP100 LIMIT 0
+```
+
+**利用者が体験するのは「結果が空」なので、最終結果が 0 行なら復元する。**
+
+**再実行は不要である。**`sourceColumns` は
+[process.ts:1161](../../src/engine/process.ts#L1161) の
+`projected.length > 0 ? Object.keys(projected[0]) : [...(sourceColumns ?? [])]`
+**だけで使われ、他に影響しない**ことをコードで確認した。したがって
+
+> **`rows.length === 0 && columns.length === 0` になった後で列を埋める**（post-hoc fill）
+
+で足りる。**`runFullScan` をやり直してはならない。**
+この形なら「1 行以上なら追加 API 0 回」も自然に満たせる。
 
 **1 行以上のときの挙動は絶対に変えない。**列は従来どおり行データから作る。
 
@@ -71,7 +94,25 @@ SELECT * FROM #e
 **`getProcessStatuses(appId)` を使う。**ただし**呼ぶのは `getFields` の結果に
 `STATUS` か `STATUS_ASSIGNEE` が含まれるときだけ**とし、無駄な API を撃たない。
 
-### 3.4 `$revision` / `$id` は末尾へ 2 列足す
+### 3.4 サブテーブル仮想テーブル（`APPn$tbl`）
+
+**R1 では漏れていた。**`APP100$明細` も AST 上は `cteName === null` なので、
+条件をそのまま書くと**親アプリの列を復元してしまう**。
+
+**親とは別の導出規則を使う。**実測（実 kintone 2 アプリ・2/2 一致）:
+
+```
+SELECT * FROM APP424$Table  → _pid, _rid, _idx, 作業内容, 金額, 日付
+SELECT * FROM APP452$明細   → _pid, _rid, _idx, ドロップダウン_0, 数値, 文字列__1行__0, 日付
+```
+
+> **`_pid`, `_rid`, `_idx` の 3 列＋そのサブテーブルの子フィールド**（`getFields` の返り順）
+
+- 子は `inSubtable === true` かつ `subtableCode` が当該サブテーブルのもの
+- **`$id` / `$revision` は付かない**（§3.5 は親アプリ専用）
+- 親アプリの列・他のサブテーブルの子を**混ぜてはならない**
+
+### 3.5 `$revision` / `$id` は末尾へ 2 列足す（親アプリのみ）
 
 両者は `getFields` に存在しないため**位置を導出できない**。実測では
 **`$id` は 5/5 で末尾**だが、**`$revision` の位置は規則が見つからない**
@@ -88,21 +129,27 @@ SELECT * FROM #e
 
 ---
 
-## 4. 変更する供給点は 3 箇所
+## 4. 変更するのは 3 箇所（post-hoc fill）
 
-`project()` / `runFullScan()` は既に `sourceColumns` を受け取れる
-（[process.ts:1161](../../src/engine/process.ts#L1161) が 0 行時に使う）。
-**渡していないだけ**なので、渡す側を直す。
+**§2.1 のとおり 0 行かどうかは実行してみるまで決まらない**ため、
+`sourceColumns` を事前に渡すのではなく、**結果を見てから列を埋める。**
 
-| # | 箇所 | 現状 |
+対象は次の 3 箇所で、いずれも
+**`rows.length === 0 && columns.length === 0` かつ §2 の適用条件を満たすとき**だけ
+`columns` を導出結果で置き換える。
+
+| # | 箇所 | 経路 |
 |---|---|---|
-| 1 | [`executeSimpleSelect`](../../src/execute.ts#L3093) の `project(...)` | 第3引数が `undefined` |
-| 2 | [FULL_SCAN（物理）](../../src/execute.ts#L4355) の `runFullScan({...})` | `sourceColumns` 未指定 |
-| 3 | [FULL_SCAN（CTE 経路）](../../src/execute.ts#L4722) | `stmt.from.cteName != null` のときだけ供給 |
+| 1 | [`executeSimpleSelect`](../../src/execute.ts#L3093) の `project(...)` 結果 | SIMPLE |
+| 2 | [FULL_SCAN（物理）](../../src/execute.ts#L4355) の `runFullScan({...})` 結果 | FULL_SCAN |
+| 3 | [FULL_SCAN（CTE 経路）](../../src/execute.ts#L4722) の結果 | 物理ソースのとき |
 
-**3 は物理アプリ（`cteName === null`）でも供給されるよう条件を広げる。**
-
-**`project()` / `runFullScan()` の内部は変更しない。**
+- **`project()` / `runFullScan()` の内部は変更しない**
+- **`runFullScan` をやり直さない**（受入 11）
+- 3 は既存の `sourceColumns` 供給（実体化ソース）を**壊さない**こと。
+  実体化ソースは v2.11.0 の経路のまま
+- **実体化して保存する場合は、保存より前に埋める**こと
+  （`MaterializedTable.columns` が空のまま保存されると連鎖が直らない）
 
 ---
 
@@ -140,7 +187,13 @@ SELECT * FROM #e
    - 0 行だが JOIN あり
 9. **`status.json` を無駄に撃たない** — `STATUS`/`STATUS_ASSIGNEE` を持たないアプリでは
    `getProcessStatuses` が呼ばれないこと
-10. **既存テスト全 green・snapshot 22 不変**
+10. **サブテーブル仮想テーブルが正しく復元される** — 0 行の `SELECT * FROM APPn$tbl` が
+    `_pid, _rid, _idx` ＋ 当該サブテーブルの子だけを返し、**親アプリの列も他のサブテーブルの
+    子も混ざらない**こと。**`$id`/`$revision` が付かない**ことも固定する
+11. **ローカル処理で 0 行になった場合も復元される** — §2.1 の 2 例
+    （`WHERE UPPER(...)` で全件除外・`LIMIT 0`）で列が返ること。
+    **このとき `runFullScan` が 2 回実行されていない**ことも確認する
+12. **既存テスト全 green・snapshot 22 不変**
 
 ---
 
