@@ -235,6 +235,9 @@ function collectArithFields(expr: LegacyArithExpr, out: Set<string>): void {
 }
 
 function collectArithNode(node: ArithNode, out: Set<string>): void {
+  if (node.type === "VARIABLE") throw new Error(
+    `InternalError: unresolved arithmetic variable @${node.name} reached DML field collection.`
+  );
   if (node.type === "FIELD_REF")        out.add(node.field);
   else if (node.type === "ARITH")       collectArithFields(node, out);
   else if (node.type === "STRING_FUNC") collectStringFuncFields(node, out);
@@ -466,6 +469,9 @@ function evalArith(expr: LegacyArithExpr, raw: KintoneRecord): number {
 }
 
 function resolveArithOperand(operand: ArithNode, raw: KintoneRecord): number {
+  if (operand.type === "VARIABLE") throw new Error(
+    `InternalError: unresolved arithmetic variable @${operand.name} reached DML evaluation.`
+  );
   if (operand.type === "NUMBER") return operand.value;
   if (operand.type === "ARITH")  return evalArith(operand, raw); // ネスト
   if (operand.type === "STRING_FUNC") throw new DmlConvertError(

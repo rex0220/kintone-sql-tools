@@ -271,6 +271,10 @@ SELECT 金額 * 1.1 AS 税込金額 FROM APP100
 SELECT (売上 - 原価) / 売上 AS 粗利率 FROM APP100
 SELECT 数量 % 3 AS 余り FROM APP100
 
+-- 先行して定義した数値バッチ変数も直接使用可能
+SET @total = (SELECT SUM(売上) FROM APP100);
+SELECT (売上 * 100) / @total AS 構成比 FROM APP100
+
 -- 関数の結果も被演算子として使用可能
 SELECT ROUND(合計費用) / 2 AS 半額 FROM APP100
 SELECT LENGTH(顧客名) * 100 AS スコア FROM APP100
@@ -282,6 +286,8 @@ WHERE 税込金額 = 金額 * 1.1
 ```
 
 演算子の優先順位は通常の算術規則（`*` `/` > `+` `-`）に従い、カッコで明示指定できます。
+
+算術式の変数は数値でなければなりません。文字列変数を直接算術または `ROUND(算術式, ...)` の算術部分に使うと、`ArgumentError: variable @名前 is not numeric and cannot be used in arithmetic.` で停止します。未定義変数と配列変数は §25 の既存エラー規則に従います。
 
 > **WHERE 算術式は FULL_SCAN モード:** kintone API に変換できないため全件取得後 JS で評価します。
 
@@ -3266,6 +3272,7 @@ WHERE 処理ステータス = '未処理';
 | A11 | UPDATE FROM SET 値 | UPDATE FROM の SET 右辺の直接値にも使える |
 | A12 | ASSERT オペランド | 比較・BETWEEN の直接オペランドに使える |
 | A13 | SET のスカラーサブクエリ内 | 先行変数を `(SELECT ... WHERE 列 = @a)` のように参照できる。外側の SET 式とは別扱い |
+| A14 | SELECT 列の算術オペランド | `SELECT (売上 * 100) / @total AS 構成比` のように数値変数を直接使える |
 
 | ID | 使えない配置 | 境界 |
 |---|---|---|
@@ -3275,9 +3282,7 @@ WHERE 処理ステータス = '未処理';
 | R04 | 外側の SET / DECLARE 式 | `SET @b = @a / 2` と `DECLARE @b = @a` は不可。A13 の SET スカラーサブクエリ内だけが先行変数参照の例外 |
 | R05 | ASCII 規則外の変数名 | 変数名は `@[A-Za-z_][A-Za-z0-9_]{0,63}`（最大 64 文字）で、名前は小文字へ正規化される。`@max金額` は `@max` と `金額` の 2 トークンに分かれ、変数名として受理されない |
 
-変数から直接始まる一般算術式は、比較右辺・ASSERT・単独 SELECT 変数列の専用分岐では使えません（例: `金額 >= @avg / 2`）。B38 の一般スカラー式へ入る関数引数や `||` 連結では、変数を算術に参加させられる場合があります。
-
-派生値は元の SET のスカラーサブクエリ内で同時に計算する（`SET @half = (SELECT AVG(金額)/2 FROM …)`）か、条件側を変形する（`金額 * 2 >= @avg`）。既存変数から別の SET 変数を直接導出することはできない。VALUES に値を入れたい場合は temp テーブル＋`@x AS 列`（AS 必須）で実体化する。
+SELECT 列ではフィールドまたは数値から始まる算術式のオペランドとして変数を使えます。条件の比較右辺を `@avg / 2` のような一般式にすること、既存変数から別の SET 変数を直接導出すること、VALUES の直接要素に置くことは引き続きできません。SET で派生値が必要なら元のスカラーサブクエリ内で同時に計算します。
 
 #### スカラーサブクエリ代入 `SET @x = (SELECT ...)`
 
@@ -3323,7 +3328,7 @@ SELECT @batch AS バッチID, 顧客No FROM APP100 WHERE 顧客ランク IN @ran
 - `IN @list` は非空配列を通常の literal IN へ展開する。`IN (@x)` は従来どおりスカラー 1 要素で、配列展開ではない。
 - 空配列は `IN @empty`=偽、`NOT IN @empty`=真として AND/OR/NOT/括弧を簡約する。SELECT の恒偽 WHERE はレコード API を呼ばず空入力を後段へ渡す。UPDATE/DELETE/非 ALL REORDER の最終 WHERE が恒真になる場合は全件更新防止のため実行前エラー、恒偽は 0 件 no-op。
 
-**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・SELECT 列の一般式としての新しい変数展開・関数引数への `NOW()` 直接指定・`LOGINUSER()`。
+**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・関数引数への `NOW()` 直接指定・`LOGINUSER()`。
 
 > **`APP@profile` との併用**: `SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now` のように、`@profile`（アプリ指定）と `@変数` は同居できます（CLI / MCP が profile だけを先に正規化するため混同しません）。
 

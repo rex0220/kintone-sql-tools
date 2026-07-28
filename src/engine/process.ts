@@ -1389,6 +1389,9 @@ function stripParentShortcutColumns(row: ProcessRow): ProcessRow {
 /** alias なし時のデフォルトキー名: "左辺 op 右辺" */
 function arithColDefaultKey(expr: ArithNode): string {
   const nodeLabel = (n: ArithNode): string => {
+    if (n.type === "VARIABLE") throw new Error(
+      `InternalError: unresolved arithmetic variable @${n.name} reached arithmetic column labeling.`
+    );
     if (n.type === "FIELD_REF")   return n.field;
     if (n.type === "NUMBER")      return numberLiteralText(n);
     if (n.type === "STRING_FUNC") return stringFuncDefaultKey(n);

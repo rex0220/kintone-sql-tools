@@ -1,5 +1,6 @@
 import { Lexer } from "../../lexer/lexer";
 import { Parser } from "../../parser/parser";
+import { resolveBatchVariableReferences } from "../../execute";
 import type { SelectStatement } from "../../types/ast";
 import { resolveSelectMode, selectToFetchAllFields, selectToFetchAllParams, selectToKintoneParams } from "../selectToKintone";
 
@@ -17,6 +18,25 @@ test("selectToKintoneParams: qualified refs in expressions are normalized", () =
   const stmt = parseSelect("SELECT UPPER(a.担当者), a.金額 + 1 FROM APP69 AS a");
   const params = selectToKintoneParams(stmt);
   expect(params.fields).toEqual(["担当者", "金額"]);
+});
+
+test("B90: WHERE 変数の解決後 pushdown は同値の直接リテラルと一致する", () => {
+  const statements = new Parser(
+    new Lexer("SET @min = 300; SELECT 顧客名 FROM APP100 WHERE 売上 > @min").tokenize()
+  ).parseStatements();
+  const resolved = resolveBatchVariableReferences(
+    statements[1],
+    new Map([["min", { type: "number" as const, value: 300, raw: "300" }]])
+  ) as SelectStatement;
+  const literal = parseSelect("SELECT 顧客名 FROM APP100 WHERE 売上 > 300");
+  expect(selectToKintoneParams(resolved)).toEqual(selectToKintoneParams(literal));
+});
+
+test("B90: 未解決の算術変数が SELECT 消費側へ到達したら内部エラーにする", () => {
+  const stmt = parseSelect("SELECT 金額 + @rate AS total FROM APP100");
+  expect(() => selectToKintoneParams(stmt)).toThrow(
+    "InternalError: unresolved arithmetic variable @rate reached SELECT field collection."
+  );
 });
 
 test("LIKE はワイルドカードの有無にかかわらず FULL_SCAN になり kintone へ押し下げない", () => {

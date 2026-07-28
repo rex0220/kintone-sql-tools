@@ -17,7 +17,7 @@ SQL パーサーが生成する AST（抽象構文木）の型定義ファイル
 - **`Statement`** — パーサーが返すトップレベルのユニオン型。`SelectStatement` / `InsertStatement` / `UpdateStatement` / `DeleteStatement` / `UpsertStatement` / `ReorderStatement` / `WithStatement` / `UnionStatement` / `ExplainStatement` / `ShowAppsStatement` / `DescribeStatement` の11種類
 - **`SelectStatement`** — `SELECT distinct columns FROM table JOIN... WHERE... GROUP BY... HAVING... ORDER BY... LIMIT... OFFSET...` の全節を保持
 - **`WhereExpr`** — WHERE/HAVING 式のユニオン型。`BinaryExpr` / `NullCheckExpr` / `LogicalExpr` / `NotExpr` / `GroupExpr` / `ExistsExpr` の6種類
-- **`ArithNode`** — 算術式の再帰型。`FIELD_REF` / `NUMBER` / `ARITH`（ネスト）/ `STRING_FUNC` の4種類
+- **`ArithNode`** — 算術式の再帰型。`FIELD_REF` / `NUMBER` / `ARITH`（ネスト）/ `STRING_FUNC` / `VARIABLE` の5種類。`VARIABLE` は実行・計画生成前に数値リテラルへ解決され、下流到達時は内部エラー
 - **`SelectColumn`** — SELECT句の各カラム。ワイルドカード・フィールド・リテラル・集計・算術・CASE WHEN・文字列関数・スカラーサブクエリの8種類
 
 この型定義が lexer → parser → converter → engine → execute の全レイヤーをつなぐ共通言語になっています。

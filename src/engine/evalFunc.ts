@@ -21,6 +21,9 @@ import { evalCaseWhen, evalCaseWhenNullable } from "./evalWhere";
 // ============================================================
 
 export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
+  if (expr.type === "VARIABLE") throw new Error(
+    `InternalError: unresolved arithmetic variable @${expr.name} reached arithmetic evaluation.`
+  );
   if (expr.type === "NUMBER")      return expr.value;
   if (expr.type === "FIELD_REF")   return Number(resolveFieldRef(row, expr.field));
   if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row));

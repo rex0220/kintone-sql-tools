@@ -1973,8 +1973,16 @@ function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): Exclude<
 
 /** Resolve batch references, expand array IN values, and simplify predicates. */
 export function resolveBatchVariableReferences<T>(node: T, variables: Map<string, VarValue>): T {
+  return resolveBatchVariableReferencesInternal(node, variables, false);
+}
+
+function resolveBatchVariableReferencesInternal<T>(
+  node: T,
+  variables: Map<string, VarValue>,
+  numericArithmeticOperand: boolean
+): T {
   if (Array.isArray(node)) {
-    return node.map((v) => resolveBatchVariableReferences(v, variables)) as T;
+    return node.map((v) => resolveBatchVariableReferencesInternal(v, variables, false)) as T;
   }
   if (node !== null && typeof node === "object") {
     const obj = node as Record<string, unknown>;
@@ -1985,6 +1993,11 @@ export function resolveBatchVariableReferences<T>(node: T, variables: Map<string
       }
       if (value.type === "array") {
         throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
+      }
+      if (numericArithmeticOperand && value.type !== "number") {
+        throw new Error(
+          `ArgumentError: variable @${obj["name"]} is not numeric and cannot be used in arithmetic.`
+        );
       }
       return (value.type === "number"
         ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }
@@ -2000,7 +2013,15 @@ export function resolveBatchVariableReferences<T>(node: T, variables: Map<string
     }
     if (obj["type"] === "VARIABLE_IN_LIST") return obj as T;
     const resolved = Object.fromEntries(
-      Object.entries(obj).map(([key, value]) => [key, resolveBatchVariableReferences(value, variables)])
+      Object.entries(obj).map(([key, value]) => [
+        key,
+        resolveBatchVariableReferencesInternal(
+          value,
+          variables,
+          (obj["type"] === "ARITH" || obj["type"] === "SCALAR_ARITH" || obj["type"] === "AGG_ARITH")
+            && (key === "left" || key === "right")
+        ),
+      ])
     ) as Record<string, unknown>;
     if (resolved["type"] === "BINARY") {
       const right = resolved["right"] as Record<string, unknown> | undefined;
@@ -2211,6 +2232,11 @@ function withScalarProbeLimit(query: SelectStatement): { query: SelectStatement;
 
 /** ASSERT の算術式を評価する（葉は数値リテラルのみ — パーサで検証済み） */
 function evalAssertArith(node: ArithNode): number {
+  if (node.type === "VARIABLE") {
+    throw new Error(
+      `InternalError: unresolved arithmetic variable @${node.name} reached ASSERT evaluation.`
+    );
+  }
   if (node.type === "NUMBER") return node.value;
   if (node.type === "ARITH") {
     const left  = evalAssertArith(node.left);
@@ -2914,6 +2940,11 @@ function isNoFromSelect(stmt: SelectStatement): boolean {
 }
 
 function arithHasFieldRef(node: ArithNode): boolean {
+  if (node.type === "VARIABLE") {
+    throw new Error(
+      `InternalError: unresolved arithmetic variable @${node.name} reached SELECT planning.`
+    );
+  }
   if (node.type === "FIELD_REF") return true;
   if (node.type === "ARITH") return arithHasFieldRef(node.left) || arithHasFieldRef(node.right);
   if (node.type === "STRING_FUNC") return stringFuncHasFieldRef(node);
@@ -10724,6 +10755,11 @@ function collectArithRefFields(stmt: UpdateStatement): string[] {
 }
 
 function collectArithNodeRefs(node: LegacyArithExpr | ArithNode, out: Set<string>): void {
+  if (node.type === "VARIABLE") {
+    throw new Error(
+      `InternalError: unresolved arithmetic variable @${node.name} reached CHECK field collection.`
+    );
+  }
   if (node.type === "FIELD_REF") { out.add(node.field); return; }
   if (node.type === "ARITH") {
     collectArithNodeRefs(node.left, out);
@@ -10839,6 +10875,11 @@ function formatArithExprStr(expr: LegacyArithExpr): string {
 }
 
 function formatArithNodeStr(node: ArithNode): string {
+  if (node.type === "VARIABLE") {
+    throw new Error(
+      `InternalError: unresolved arithmetic variable @${node.name} reached arithmetic formatting.`
+    );
+  }
   if (node.type === "FIELD_REF") return node.field;
   if (node.type === "NUMBER")    return numberLiteralText(node);
   if (node.type === "ARITH")     return `(${formatArithExprStr(node)})`;

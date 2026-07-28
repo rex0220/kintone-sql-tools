@@ -994,12 +994,14 @@ export type ArithOp = "+" | "-" | "*" | "/" | "%";
  *   NUMBER:      数値リテラル
  *   ARITH:       ネストした算術式  例: (金額 + 消費税) * 1.1
  *   STRING_FUNC: 関数呼び出し結果を数値として使う  例: ROUND(f)/2, LENGTH(s)*100
+ *   VARIABLE:    バッチ変数参照（実行前に数値リテラルへ解決される）
  */
 export type ArithNode =
   | { type: "FIELD_REF"; field: string }
   | NumberLiteral
   | LegacyArithExpr
-  | StringFuncExpr;
+  | StringFuncExpr
+  | VariableRef;
 
 /** 後方互換エイリアス */
 export type ArithOperand = ArithNode;

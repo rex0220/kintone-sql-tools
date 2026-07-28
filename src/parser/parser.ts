@@ -1220,6 +1220,18 @@ export class Parser {
     return cols;
   }
 
+  private allowSelectArithVariable = false;
+
+  private parseSelectArith<T>(parse: () => T): T {
+    const previous = this.allowSelectArithVariable;
+    this.allowSelectArithVariable = true;
+    try {
+      return parse();
+    } finally {
+      this.allowSelectArithVariable = previous;
+    }
+  }
+
   private parseSelectColumn(): SelectColumn {
     // *
     if (this.consume(TokenKind.STAR)) {
@@ -1279,7 +1291,7 @@ export class Parser {
     if (this.tryStringFuncName() !== null) {
       const funcExpr = this.parseStringFuncExpr();
       if (this.isArithOp(this.peek().kind)) {
-        const node = this.continueArith(funcExpr);
+        const node = this.parseSelectArith(() => this.continueArith(funcExpr));
         const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
         return { type: "ARITH_COL", expr: node, alias };
       }
@@ -1329,7 +1341,7 @@ export class Parser {
       this.peek().kind === TokenKind.LPAREN ||
       this.peek().kind === TokenKind.NUMBER
     ) {
-      const node = this.parseArithAddSub();
+      const node = this.parseSelectArith(() => this.parseArithAddSub());
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "ARITH_COL", expr: node, alias };
     }
@@ -1347,7 +1359,7 @@ export class Parser {
     // 算術演算子が続く場合 → ArithColumn
     if (this.isArithOp(this.peek().kind)) {
       const left: ArithNode = { type: "FIELD_REF", field };
-      const node = this.continueArith(left);
+      const node = this.parseSelectArith(() => this.continueArith(left));
       const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
       return { type: "ARITH_COL", expr: node, alias };
     }
@@ -1689,6 +1701,10 @@ export class Parser {
     if (tok.kind === TokenKind.NUMBER) {
       this.advance();
       return makeNumberLiteral(tok.value);
+    }
+    if (this.allowSelectArithVariable && tok.kind === TokenKind.VARIABLE) {
+      this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
     }
     if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
       this.advance();

@@ -96,6 +96,68 @@ const DML_VALIDATION_META_COLUMNS = [
   "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
 ];
 
+test("B90: SET 集計値を一時表の直接算術で使い構成比を返す", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #g AS SELECT 顧客名 AS 提案商品, 売上 FROM APP100;" +
+    "SET @total = (SELECT SUM(売上) FROM #g);" +
+    "SELECT 提案商品, 売上, (売上 * 100) / @total AS 構成比 FROM #g",
+    client,
+    { cacheContext: "b90-direct-arithmetic" }
+  );
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[2].result as SelectResult).rows).toEqual([
+    { 提案商品: "A社", 売上: "100", 構成比: "11.11111111111111" },
+    { 提案商品: "B社", 売上: "300", 構成比: "33.333333333333336" },
+    { 提案商品: "C社", 売上: "500", 構成比: "55.55555555555556" },
+  ]);
+});
+
+test("B90: 数値変数は直接算術と既存 ROUND で同じ結果を返す", async () => {
+  const batch = await executeBatch(
+    "SET @total = 900;" +
+    "SELECT (売上 * 100) / @total AS direct, ROUND(売上 * 100 / @total, 1) AS rounded FROM APP100",
+    makeClient({ recordsByApp: { 100: APP1 } }),
+    { cacheContext: "b90-numeric-variable" }
+  );
+  expect(batch.ok).toBe(true);
+  expect((batch.statements[1].result as SelectResult).rows).toEqual([
+    { direct: "11.11111111111111", rounded: "11.1" },
+    { direct: "33.333333333333336", rounded: "33.3" },
+    { direct: "55.55555555555556", rounded: "55.6" },
+  ]);
+});
+
+test.each([
+  ["直接算術", "SELECT (売上 * 100) / @phase AS x FROM APP100"],
+  ["既存 ROUND", "SELECT ROUND(売上 * 100 / @phase, 1) AS x FROM APP100"],
+])("B90: 非数値変数を使う%sは変数名付きで fail-closed", async (_label, selectSql) => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  const batch = await executeBatch(
+    `DECLARE @phase = '受注'; ${selectSql}`,
+    client,
+    { cacheContext: `b90-nonnumeric-${_label}` }
+  );
+  expect(batch.ok).toBe(false);
+  expect(batch.statements[1].error?.message).toBe(
+    "ArgumentError: variable @phase is not numeric and cannot be used in arithmetic."
+  );
+  expect(client.getCalls).toHaveLength(0);
+});
+
+test("B90: 単文の未定義変数と配列変数は既存エラーを維持する", async () => {
+  const client = makeClient({ recordsByApp: { 100: APP1 } });
+  await expect(executeBatch(
+    "SELECT (売上 * 100) / @x AS ratio FROM APP100",
+    client
+  )).rejects.toThrow(/variable @x is not defined before statement 1/);
+  await expect(executeBatch(
+    "SET @x = ['1']; SELECT (売上 * 100) / @x AS ratio FROM APP100",
+    client
+  )).rejects.toThrow(/array variable @x can only be used as IN @x/);
+  expect(client.getCalls).toHaveLength(0);
+});
+
 test("B10-B: SELECT 変数列を既存 literal/number 列へ解決し CONCAT を維持する", async () => {
   const client = makeClient({ recordsByApp: { 100: APP1 } });
   const batch = await executeBatch(

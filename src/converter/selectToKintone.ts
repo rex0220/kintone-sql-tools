@@ -259,6 +259,9 @@ function collectArithFields(expr: LegacyArithExpr, out: string[]): void {
 }
 
 function collectArithNode(node: ArithNode, out: string[]): void {
+  if (node.type === "VARIABLE") throw new Error(
+    `InternalError: unresolved arithmetic variable @${node.name} reached SELECT field collection.`
+  );
   if (node.type === "FIELD_REF")        out.push(normalizeSimpleFieldRef(node.field));
   else if (node.type === "ARITH")       collectArithFields(node, out);
   else if (node.type === "STRING_FUNC") collectStringFuncFields(node, out);
@@ -538,6 +541,11 @@ function collectRequiredFieldsByTable(
   };
 
   const walkArith = (node: ArithNode, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
+    if (node.type === "VARIABLE") {
+      throw new Error(
+        `InternalError: unresolved arithmetic variable @${node.name} reached source-aware field collection.`
+      );
+    }
     if (node.type === "FIELD_REF") {
       addFieldName(node.field, phase);
       return;

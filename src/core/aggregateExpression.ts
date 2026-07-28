@@ -19,6 +19,9 @@ function quote(value: string): string {
 }
 
 function arithLabel(node: ArithNode, topLevel = false): string {
+  if (node.type === "VARIABLE") throw new Error(
+    `InternalError: unresolved arithmetic variable @${node.name} reached aggregate expression labeling.`
+  );
   if (node.type === "FIELD_REF") return node.field;
   if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "STRING_FUNC") return stringFuncLabel(node);

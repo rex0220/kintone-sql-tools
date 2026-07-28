@@ -4,6 +4,16 @@
 
 ## 未リリース
 
+### 追加（B90 SELECT 算術式でのバッチ変数）
+
+- **SELECT 列の算術式へ数値バッチ変数を直接書けるようになった。** `SET @total = (SELECT SUM(売上) FROM #g); SELECT (売上 * 100) / @total AS 構成比 FROM #g` のような全体比を、`ROUND()` で包む回避策なしに計算できる。
+- 変数は既存どおり実行・計画生成前にリテラルへ解決するため、WHERE の REST 押し下げ結果や下流の評価・変換ロジックは変更していない。未定義変数・配列変数の既存エラーも維持する。
+
+### 修正（B90 算術中の非数値変数を fail-closed 化）
+
+- **直接算術と既存の `ROUND(算術式, ...)` の両方で、非数値変数を `ArgumentError` にした。** 従来の `ROUND(売上 * 100 / @phase, 1)` は文字列変数を `NaN` として黙って返していた。今後は `variable @phase is not numeric and cannot be used in arithmetic` と変数名を示して停止する。
+- この fail-closed 化は直接算術を許可するという Pro の依頼を超える挙動変更だが、従来の `NaN` は正しい結果ではないため、B78 / B79 / B86 と同じ基準で minor の正しさ修正として扱う。数値変数の既存 `ROUND()` 結果は変わらない。
+
 ### 追加（B89 `explainQuery` のバッチ対応・受理集合を `runBatch` と統一）
 
 - **engine ライブラリの `explainQuery` が複文（バッチ）を受け付けるようになった。** 従来は `PARSE_ERROR: This API accepts one statement` を返し、正しいバッチでも構文エラーとして扱われていた。

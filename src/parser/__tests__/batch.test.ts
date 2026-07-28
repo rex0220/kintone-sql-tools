@@ -95,6 +95,20 @@ test("変数参照を WHERE / UPDATE SET / ASSERT の直接値で受理する", 
   expect((stmts[2] as AssertStatement).left).toEqual({ type: "VARIABLE", name: "x" });
 });
 
+test("B90: SELECT 算術式の直接オペランドに変数を受理する", () => {
+  const stmt = parseAll(
+    "SET @total = 400; SELECT (売上 * 100) / @Total AS 構成比 FROM APP100"
+  )[1] as SelectStatement;
+  expect(stmt.columns[0]).toMatchObject({
+    type: "ARITH_COL",
+    expr: {
+      type: "ARITH",
+      op: "/",
+      right: { type: "VARIABLE", name: "total" },
+    },
+  });
+});
+
 test("SET RHS のスカラーサブクエリを受理する", () => {
   const stmts = parseAll(
     "SET @cnt = (SELECT COUNT(*) FROM APP100 WHERE 売上 > 0); ASSERT @cnt >= 0"
