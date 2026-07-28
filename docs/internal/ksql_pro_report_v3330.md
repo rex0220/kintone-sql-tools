@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への連絡 — v3.33.0
 
 - 作成: 2026-07-29
-- ステータス: 📤 **送付待ち**
+- ステータス: ✅ **送付済み（2026-07-29）**。→ Pro は `"truncate"` へ戻し **K-37 完了**。対象外とした JOIN は [B98](ksql_b98_join_truncated_right_null_issue.md) として起票
 - 前回の往復: [v3.32.0 の連絡](ksql_pro_report_v3320.md)（送付済み） → Pro の [報告 v3.32.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3320.md)（§3 ラッパーの不具合を共有・§4 案 B の要望）
 
 ## 送付前の確認
