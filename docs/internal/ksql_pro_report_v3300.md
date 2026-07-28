@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への連絡 — v3.30.0
 
 - 作成: 2026-07-28
-- ステータス: 📤 **送付可**
+- ステータス: ✅ **送付済み（2026-07-28）**
 - 受領した返信: `ksql-dashboard-pro/docs/internal/kSQLエンジンv3290への返信-20260728.md`
 - 前回の連絡: [v3.29.0](ksql_pro_report_v3290.md)
 
