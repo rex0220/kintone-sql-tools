@@ -37,11 +37,20 @@ export const EMPTY_WILDCARD_FIELD_TYPE_POLICY = {
   USER_SELECT: "RECORD",
 } as const satisfies Record<string, EmptyWildcardFieldPolicy>;
 
-function fieldPolicy(fieldType: string): EmptyWildcardFieldPolicy {
+/**
+ * 未知の型は client 契約の違反として報告する（B93）。
+ * InternalError は「到達しないはずの不変条件が破れた＝エンジンのバグ」に使う接頭辞であり、
+ * client が返した値が原因のときに使うと、利用者が回帰と誤認して報告することになる
+ * （Pro が擬似フィールド `$id: __ID__` を注入して実際にそうなった）。
+ * どのフィールドが原因かと、期待する契約を文面に含める。
+ */
+function fieldPolicy(fieldType: string, fieldCode: string): EmptyWildcardFieldPolicy {
   const policy = (EMPTY_WILDCARD_FIELD_TYPE_POLICY as Record<string, EmptyWildcardFieldPolicy | undefined>)[fieldType];
   if (policy === undefined) {
     throw new Error(
-      `InternalError: empty SELECT * schema policy is not defined for field type ${fieldType}.`
+      `ArgumentError: getFields returned unknown fieldType "${fieldType}" for field "${fieldCode}". `
+      + "getFields must return only the fields from /k/v1/app/form/fields.json; "
+      + "$id and $revision are synthesized by the engine and must not be added."
     );
   }
   return policy;
@@ -64,13 +73,13 @@ export async function deriveEmptyWildcardColumns(
   }
 
   const topLevel = fields.filter((field) => !field.inSubtable);
-  const needsProcessSettings = topLevel.some((field) => fieldPolicy(field.fieldType) === "PROCESS");
+  const needsProcessSettings = topLevel.some((field) => fieldPolicy(field.fieldType, field.code) === "PROCESS");
   const processEnabled = needsProcessSettings
     ? (await loadProcessStatuses()).enable
     : false;
   const columns = topLevel
     .filter((field) => {
-      const policy = fieldPolicy(field.fieldType);
+      const policy = fieldPolicy(field.fieldType, field.code);
       return policy === "RECORD" || (policy === "PROCESS" && processEnabled);
     })
     .map((field) => field.code);

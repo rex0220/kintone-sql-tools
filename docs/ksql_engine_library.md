@@ -183,6 +183,29 @@ policy などの route / transport 契約は **BYO client 側の責務**です�
 guest / proxy route を推測、補正、再構築しません。`openCursor()` が返す handle の
 `close()` は idempotent にしてください。
 
+### `getFields()` の契約
+
+**`/k/v1/app/form/fields.json` が返すフィールドだけを返してください。**
+
+| | |
+|---|---|
+| **渡す** | `code` / `label` / `fieldType`、および制約メタデータ（`required` / `minLength` / `maxLength` / `minValue` / `maxValue` / `optionOrder`）。渡さないと `VALIDATE` が該当する制約を検証しません |
+| **渡さない** | **`$id` / `$revision` などの擬似フィールド。**engine が内部で合成するため、`getFields()` から返す必要はありません |
+
+**擬似フィールドを足すと、0 行の `SELECT *` で列を復元する際に未知の `fieldType` として
+`ArgumentError` で停止します**（推測で列を作らず fail-closed にしています）。
+
+```
+ArgumentError: getFields returned unknown fieldType "__ID__" for field "$id".
+  getFields must return only the fields from /k/v1/app/form/fields.json;
+  $id and $revision are synthesized by the engine and must not be added.
+```
+
+`$id` / `$revision` は `getFields()` へ足さなくても、`SELECT $id, 案件名` や
+`WHERE $id <= 10`、JOIN の結合キー押し下げはすべて動作します。
+
+`createReadonlyKintoneClient()` はこの契約を満たしているため、factory 利用者の対応は不要です。
+
 ## options
 
 `runQuery(sql, options)`、`runBatch(sql, options)`、`explainQuery(sql, options)` は、

@@ -420,5 +420,24 @@ test("B88: 未分類の将来フィールド型は空 schema を推測せず fai
     [{ code: "future", label: "future", fieldType: "FUTURE_FIELD" }],
     undefined,
     async () => ({ enable: false, states: [] })
-  )).rejects.toThrow(/policy is not defined for field type FUTURE_FIELD/);
+  )).rejects.toThrow(/unknown fieldType "FUTURE_FIELD" for field "future"/);
+});
+
+// B93: Pro が擬似フィールド $id: __ID__ を getFields へ注入し、これを v3.31.1 の回帰として
+// 報告してきた。InternalError という接頭辞と「policy is not defined」という文言が
+// エンジン側の不具合に見え、フィールドコードも出ていなかったのが原因。
+test("B93: 未知フィールド型は client 契約の違反として報告する", async () => {
+  const run = () => deriveEmptyWildcardColumns(
+    [{ code: "$id", label: "$id", fieldType: "__ID__" }],
+    undefined,
+    async () => ({ enable: false, states: [] })
+  );
+  // 原因のフィールドを名指しする（型だけでは、どれを直せばよいか分からない）
+  await expect(run()).rejects.toThrow(/unknown fieldType "__ID__" for field "\$id"/);
+  // エンジンの不変条件違反ではなく、渡された値が不正であることを示す
+  await expect(run()).rejects.toThrow(/^ArgumentError:/);
+  await expect(run()).rejects.not.toThrow(/InternalError/);
+  // 期待する契約を文面に含める（自己解決できるようにする）
+  await expect(run()).rejects.toThrow(/fields\.json/);
+  await expect(run()).rejects.toThrow(/synthesized by the engine/);
 });
