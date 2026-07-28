@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const rootDir = resolve(import.meta.dirname, "..");
@@ -110,6 +110,30 @@ if (releaseMode) {
         );
       });
     }
+  }
+
+  // B93: release/ が版ごとに肥大するのを防ぐ。README は 911 行・v1.12.0 まで遡り、
+  // プラグイン zip は 15 本 4.0MB まで溜まっていた（v3.31.1 で整理）。
+  // どちらもリリースのたびに 1 つずつ増える構造なので、手順書ではなく機械で止める。
+  // 過去版は GitHub Releases の各タグと git 履歴の二重で残るため、release/ に置き続ける必要はない。
+  const readmeLineLimit = 150;
+  const readmeLines = readme.split(/\r?\n/).length;
+  if (readmeLines > readmeLineLimit) {
+    failures.push(
+      `release/README.txt: ${readmeLines} 行（上限 ${readmeLineLimit} 行）。`
+      + "古い版の節を削り、CHANGELOG.md と GitHub Releases への案内に置き換えてください"
+    );
+  }
+
+  const expectedZip = `ksql-plugin-v${version}.zip`;
+  const staleZips = readdirSync(resolve(rootDir, "release"))
+    .filter((name) => /^ksql-plugin-v.+\.zip$/.test(name) && name !== expectedZip)
+    .sort();
+  if (staleZips.length > 0) {
+    failures.push(
+      `release/: 旧版のプラグイン zip が ${staleZips.length} 本残っています -> ${staleZips.join(", ")}。`
+      + "最新版だけを残してください（過去版は GitHub Releases の各タグに添付されています）"
+    );
   }
 }
 
