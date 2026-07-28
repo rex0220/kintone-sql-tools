@@ -80,10 +80,24 @@ describe("cli integration helpers", () => {
     const result: SelectResult = {
       type: "SELECT", columns: ["$id", "$err_count"], rowCount: 1,
       rows: [{ $id: "1", $err_count: "2" }],
-      validateStats: { errorRecords: 1, errorCount: 2 },
+      validateStats: {
+        errorRecords: 1,
+        errorCount: 2,
+        constraintMetadata: {
+          present: ["choice"],
+          absent: ["required", "length", "range"],
+        },
+      },
     };
     expect(JSON.parse(buildOutput(result, "json", false, false, {})).validateStats)
-      .toEqual({ errorRecords: 1, errorCount: 2 });
+      .toEqual({
+        errorRecords: 1,
+        errorCount: 2,
+        constraintMetadata: {
+          present: ["choice"],
+          absent: ["required", "length", "range"],
+        },
+      });
     expect(buildSelectSummary(result)).toBe("rowCount=1 errorRecords=1 errorCount=2");
 
     const summary = buildBatchStatementSummary({

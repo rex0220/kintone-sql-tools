@@ -124,6 +124,10 @@ type QueryResult = {
   validateStats?: {
     errorRecords: number;
     errorCount: number;
+    constraintMetadata?: {
+      present: ("required" | "length" | "range" | "choice")[];
+      absent: ("required" | "length" | "range" | "choice")[];
+    };
   };
   metrics: QueryMetrics;
 };
@@ -226,6 +230,30 @@ malformed SQL は `PARSE_ERROR` です。allowlist と、write methodを持た�
 `createReadonlyKintoneClient()` は `/k/v1/app/form/fields.json` の制約メタデータを
 自動的に渡すため、factory 利用者の変更は不要です。BYO readonly client は同 API の
 値を `ReadonlyFieldInfo` へ渡してください。
+
+`validateStats.constraintMetadata` は、実際の `VALIDATE` 対象フィールドについて、
+client から渡された制約メタデータの種別を開示します。`present` は含まれていた種別、
+`absent` は既知4種のうち含まれていなかった種別です。対応は
+`required`＝必須、`length`＝`minLength` / `maxLength`、`range`＝
+`minValue` / `maxValue`、`choice`＝`optionOrder` です。配列はこの順で安定します。
+
+```json
+{
+  "errorRecords": 0,
+  "errorCount": 0,
+  "constraintMetadata": {
+    "present": ["choice"],
+    "absent": ["required", "length", "range"]
+  }
+}
+```
+
+これは**入力メタデータの観測事実**であり、「アプリに制約が無い」「BYO client が
+制約を落とした」という推測や警告ではありません。たとえば上の結果は
+「選択肢だけを検証対象にして0件」までを示します。単に「0件」と読むより、
+検証範囲を同時に表示することで誤った安心を避けられます。全4種が `absent` でも
+警告は返しません。`CHECK` と NUMBER の型・精度検証は、この4種の
+フォーム制約メタデータ一覧には含みません。
 
 `validateStats.errorCount` は集約前の違反総数で、結果行の `$err_count` 合計と一致します。
 `$err_code` 別などの内訳は `COUNT(*)` ではなく `SUM($err_count)` で集計してください。

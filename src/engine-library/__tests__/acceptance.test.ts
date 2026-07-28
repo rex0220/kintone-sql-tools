@@ -288,7 +288,14 @@ test("VALIDATE returns validateStats and uses real optionOrder metadata shape", 
 
   const result = await runQuery("VALIDATE APP6701", { client });
 
-  expect(result.validateStats).toEqual({ errorRecords: 1, errorCount: 1 });
+  expect(result.validateStats).toEqual({
+    errorRecords: 1,
+    errorCount: 1,
+    constraintMetadata: {
+      present: ["choice"],
+      absent: ["required", "length", "range"],
+    },
+  });
   expect(result.rowCount).toBe(1);
   expect(result.rows[0]).toMatchObject({
     $id: "1",
@@ -309,7 +316,14 @@ test.each([
       required: true,
       minLength: "3",
     }],
-    { errorRecords: 2, errorCount: 2 },
+    {
+      errorRecords: 2,
+      errorCount: 2,
+      constraintMetadata: {
+        present: ["required", "length"],
+        absent: ["range", "choice"],
+      },
+    },
     ["ERR_REQUIRED", "ERR_LENGTH_MIN"],
   ],
   [
@@ -319,7 +333,14 @@ test.each([
       label: "name",
       fieldType: "SINGLE_LINE_TEXT",
     }],
-    { errorRecords: 0, errorCount: 0 },
+    {
+      errorRecords: 0,
+      errorCount: 0,
+      constraintMetadata: {
+        present: [],
+        absent: ["required", "length", "range", "choice"],
+      },
+    },
     [],
   ],
 ] as const)(
@@ -339,6 +360,7 @@ test.each([
     expect(result.validateStats).toEqual(expectedStats);
     expect(result.rowCount).toBe(expectedCodes.length);
     expect(result.rows.map((row) => row.$err_code)).toEqual(expectedCodes);
+    expect(result.warnings).toEqual([]);
     expect(getFields).toHaveBeenCalledWith(6702);
   }
 );

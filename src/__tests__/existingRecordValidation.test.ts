@@ -206,7 +206,15 @@ test("single result preserves fixed columns at zero errors and single INTO is re
   const result = await execute("VALIDATE APP41", valid.client, { cacheContext: "b41-empty" }) as SelectResult;
   expect(result).toMatchObject({ type: "SELECT", rowCount: 0, rows: [], columns: [
     "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
-  ], validateStats: { errorRecords: 0, errorCount: 0 } });
+  ], validateStats: {
+    errorRecords: 0,
+    errorCount: 0,
+    constraintMetadata: {
+      present: [],
+      absent: ["required", "length", "range", "choice"],
+    },
+  } });
+  expect(result).not.toHaveProperty("warnings");
   await expect(execute("VALIDATE APP41 INTO #err", valid.client, { cacheContext: "b41-single-into" }))
     .rejects.toThrow("requires a batch");
 });
@@ -223,7 +231,14 @@ test("batch INTO materializes the fixed nine columns with locator and count meta
     "$id", "$err_field", "$err_code", "$err_message", "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id", "$err_count",
   ]);
   expect((batch.statements[1].result as SelectResult).rows).toHaveLength(2);
-  expect((batch.statements[0].result as SelectResult).validateStats).toEqual({ errorRecords: 1, errorCount: 2 });
+  expect((batch.statements[0].result as SelectResult).validateStats).toEqual({
+    errorRecords: 1,
+    errorCount: 2,
+    constraintMetadata: {
+      present: ["required", "range"],
+      absent: ["length", "choice"],
+    },
+  });
   expect((batch.statements[1].result as SelectResult).validateStats).toBeUndefined();
 });
 
@@ -312,6 +327,10 @@ test("B42 omitted targets audit child cells with stable 1-based and persistent r
   expect(calls.get[0].fields).toEqual(expect.arrayContaining(["$id", "top", "T1", "T2", "whereTop"]));
   expect(calls.get[0].fields).not.toEqual(expect.arrayContaining(["req", "num", "minNum", "maxNum", "minText", "maxText", "choiceChild", "plainChild", "fileChild"]));
   expect(calls.precision).toBe(1);
+  expect(result.validateStats?.constraintMetadata).toEqual({
+    present: ["required", "length", "range", "choice"],
+    absent: [],
+  });
 });
 
 test("VALIDATE detail stats count distinct error records and pre-aggregation violations", async () => {
@@ -328,7 +347,14 @@ test("VALIDATE detail stats count distinct error records and pre-aggregation vio
     { cacheContext: "validate-stats-detail" }
   ) as SelectResult;
 
-  expect(result.validateStats).toEqual({ errorRecords: 2, errorCount: 3 });
+  expect(result.validateStats).toEqual({
+    errorRecords: 2,
+    errorCount: 3,
+    constraintMetadata: {
+      present: ["required"],
+      absent: ["length", "range", "choice"],
+    },
+  });
   expect(result.rows).toHaveLength(2);
   expect(result.rows.reduce((sum, row) => sum + Number(row.$err_count), 0)).toBe(3);
 });
@@ -386,7 +412,14 @@ test("B42 SUMMARY directly aggregates child rows and CHECK groups into the fixed
     { $id: "5", $err_subtable: "T1", $err_field: "num", $err_code: "ERR_NUMBER_INTEGER_DIGITS", $err_count: "2" },
     { $id: "5", $err_subtable: "", $err_field: "", $err_code: "ERR_CHECK", $err_count: "2" },
   ]));
-  expect(result.validateStats).toEqual({ errorRecords: 1, errorCount: 7 });
+  expect(result.validateStats).toEqual({
+    errorRecords: 1,
+    errorCount: 7,
+    constraintMetadata: {
+      present: ["required"],
+      absent: ["length", "range", "choice"],
+    },
+  });
   expect(result.rows.reduce((sum, row) => sum + Number(row.$err_count), 0)).toBe(7);
 });
 

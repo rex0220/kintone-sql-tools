@@ -72,7 +72,14 @@ test("runQuery copies VALIDATE stats into the stable query envelope when present
     columns: ["b", "a"],
     rowCount: 1,
     warnings: ["truncated"],
-    validateStats: { errorRecords: 5, errorCount: 6 },
+    validateStats: {
+      errorRecords: 5,
+      errorCount: 6,
+      constraintMetadata: {
+        present: ["choice"],
+        absent: ["required", "length", "range"],
+      },
+    },
     metrics: metrics(),
   } as unknown as SelectResult;
   mockedExecute.mockResolvedValue(internal);
@@ -94,7 +101,14 @@ test("runQuery copies VALIDATE stats into the stable query envelope when present
     ],
     rowCount: 1,
     warnings: ["truncated"],
-    validateStats: { errorRecords: 5, errorCount: 6 },
+    validateStats: {
+      errorRecords: 5,
+      errorCount: 6,
+      constraintMetadata: {
+        present: ["choice"],
+        absent: ["required", "length", "range"],
+      },
+    },
     metrics: {
       recordGetCalls: 3,
       fetchedRows: 123,

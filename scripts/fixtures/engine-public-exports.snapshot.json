@@ -31,7 +31,9 @@
     "ReadonlyProcessStatuses",
     "ReadonlyProcessStatusState",
     "RunBatchOptions",
-    "RunQueryOptions"
+    "RunQueryOptions",
+    "ValidateConstraintCategory",
+    "ValidateConstraintMetadata"
   ],
   "readonlyFieldInfoProperties": [
     "code",

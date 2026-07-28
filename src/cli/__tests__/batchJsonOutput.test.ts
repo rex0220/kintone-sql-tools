@@ -199,7 +199,14 @@ test("VALIDATE INTO: 文結果だけに統計を付け、CLIサマリとbatch JS
   const { stdout, stderr } = callWriteBatchOutput(batch, { format: "json" });
   const parsed = JSON.parse(stdout);
 
-  expect(parsed.results[0].validateStats).toEqual({ errorRecords: 1, errorCount: 1 });
+  expect(parsed.results[0].validateStats).toEqual({
+    errorRecords: 1,
+    errorCount: 1,
+    constraintMetadata: {
+      present: ["required"],
+      absent: ["length", "range", "choice"],
+    },
+  });
   expect(parsed.results[1].validateStats).toBeUndefined();
   expect(stderr).toContain("[1] VALIDATE success rowCount=1 errorRecords=1 errorCount=1");
   expect(stderr).toContain("[2] SELECT success rowCount=1");

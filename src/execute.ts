@@ -178,9 +178,12 @@ import {
 import { validateAndNormalizeDmlValue } from "./core/dmlValidation";
 import {
   buildValidationCellLocator,
+  getAuditableConstraintCategories,
   renderExistingValidationValue,
   resolveExistingValidationTargets,
+  VALIDATE_CONSTRAINT_CATEGORIES,
   type ExistingValidationTarget,
+  type ValidateConstraintCategory,
 } from "./core/existingRecordValidation";
 import {
   buildPostImageFieldIndex,
@@ -355,6 +358,10 @@ export interface SelectResult {
   validateStats?: {
     errorRecords: number;
     errorCount: number;
+    constraintMetadata?: {
+      present: ValidateConstraintCategory[];
+      absent: ValidateConstraintCategory[];
+    };
   };
   /** 実行時警告（例: 上限到達で打ち切り） */
   warnings?: string[];
@@ -1120,6 +1127,13 @@ async function executeExistingRecordValidationCore(
   const infoByCode = new Map(fieldInfos.filter((field) => !field.inSubtable).map((field) => [field.code, field]));
   const childCodes = new Set(fieldInfos.filter((field) => field.inSubtable).map((field) => field.code));
   const targets = resolveExistingValidationTargets(stmt, fieldInfos);
+  const presentConstraintCategories = new Set(
+    targets.flatMap((target) => getAuditableConstraintCategories(target.field))
+  );
+  const constraintMetadata = {
+    present: VALIDATE_CONSTRAINT_CATEGORIES.filter((category) => presentConstraintCategories.has(category)),
+    absent: VALIDATE_CONSTRAINT_CATEGORIES.filter((category) => !presentConstraintCategories.has(category)),
+  };
   const checkGroups = stmt.checkGroups ?? [];
   const checkRefs = collectCheckFieldRefs(checkGroups);
   for (const ref of checkRefs) {
@@ -1289,7 +1303,11 @@ async function executeExistingRecordValidationCore(
     columns: [...columns],
     rows,
     rowCount: rows.length,
-    validateStats: { errorRecords: errorRecordIds.size, errorCount },
+    validateStats: {
+      errorRecords: errorRecordIds.size,
+      errorCount,
+      constraintMetadata,
+    },
   };
   materializedMetaBySelectResult.set(result, existingValidationColumnMeta(stmt.summary === true));
   return result;

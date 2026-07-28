@@ -424,7 +424,15 @@ describe("MCP tools", () => {
     const executeSql = async (): Promise<ExecuteResult> => ({
       type: "SELECT", columns: ["$id", "$err_field", "$err_code", "$err_message", "$err_value"],
       rows: [{ $id: "1", $err_field: "code", $err_code: "ERR_REQUIRED", $err_message: "required", $err_value: "" }],
-      rowCount: 1, validateStats: { errorRecords: 1, errorCount: 2 },
+      rowCount: 1,
+      validateStats: {
+        errorRecords: 1,
+        errorCount: 2,
+        constraintMetadata: {
+          present: ["choice"],
+          absent: ["required", "length", "range"],
+        },
+      },
     });
     const tools = createKsqlMcpTools({ profile: "prod" }, { createRuntime, executeSql });
     const validation = await tools.validate({ sql: "VALIDATE APP100" });
@@ -436,7 +444,14 @@ describe("MCP tools", () => {
     expect(runtimeInputs[0].onLimit).toBe("error");
     expect(result).toMatchObject({
       ok: true, type: "SELECT", rowCount: 1,
-      validateStats: { errorRecords: 1, errorCount: 2 },
+      validateStats: {
+        errorRecords: 1,
+        errorCount: 2,
+        constraintMetadata: {
+          present: ["choice"],
+          absent: ["required", "length", "range"],
+        },
+      },
     });
   });
 

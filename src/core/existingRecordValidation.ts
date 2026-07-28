@@ -20,6 +20,26 @@ export interface ValidationFieldMetadataIndex {
   readonly childrenByTable: ReadonlyMap<string, readonly KintoneFieldInfo[]>;
 }
 
+export type ValidateConstraintCategory = "required" | "length" | "range" | "choice";
+
+export const VALIDATE_CONSTRAINT_CATEGORIES: readonly ValidateConstraintCategory[] = [
+  "required",
+  "length",
+  "range",
+  "choice",
+];
+
+export function getAuditableConstraintCategories(
+  field: KintoneFieldInfo
+): ValidateConstraintCategory[] {
+  return [
+    ...(field.required === true ? ["required" as const] : []),
+    ...(field.minLength !== undefined || field.maxLength !== undefined ? ["length" as const] : []),
+    ...(field.minValue !== undefined || field.maxValue !== undefined ? ["range" as const] : []),
+    ...(field.optionOrder !== undefined ? ["choice" as const] : []),
+  ];
+}
+
 /** B42/B44 共通の form metadata ownership index。 */
 export function buildValidationFieldMetadataIndex(
   fieldInfos: readonly KintoneFieldInfo[]
@@ -40,12 +60,7 @@ export function buildValidationFieldMetadataIndex(
 }
 
 export function hasAuditableConstraint(field: KintoneFieldInfo): boolean {
-  return field.required === true
-    || field.minValue !== undefined
-    || field.maxValue !== undefined
-    || field.minLength !== undefined
-    || field.maxLength !== undefined
-    || field.optionOrder !== undefined;
+  return getAuditableConstraintCategories(field).length > 0;
 }
 
 export function isExistingValidationAuditable(field: KintoneFieldInfo): boolean {

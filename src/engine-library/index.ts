@@ -43,4 +43,6 @@ export type {
   ReadonlyProcessStatusState,
   RunBatchOptions,
   RunQueryOptions,
+  ValidateConstraintCategory,
+  ValidateConstraintMetadata,
 } from "./publicTypes";

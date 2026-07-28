@@ -11,6 +11,8 @@ import {
   type BatchStatementInfo,
   type ReadonlyKintoneClient,
   type RunBatchOptions,
+  type ValidateConstraintCategory,
+  type ValidateConstraintMetadata,
 } from "@rex0220/kintone-sql-tools/engine";
 
 const client: ReadonlyKintoneClient = {
@@ -71,6 +73,11 @@ const column: QueryColumn = {
 const optionalFieldType: string | undefined = column.fieldType;
 const optionalSortKind: "number" | "string" | undefined = column.sortKind;
 const optionalSourceApp: number | undefined = column.sourceApp;
+const constraintCategory: ValidateConstraintCategory = "length";
+const constraintMetadata: ValidateConstraintMetadata = {
+  present: [constraintCategory],
+  absent: ["required", "range", "choice"],
+};
 const explain = explainQuery("SELECT 'ok' AS result", { client });
 const error = new KsqlEngineError("EXECUTION_ERROR", version);
 void query;
@@ -80,5 +87,6 @@ void batchStatement;
 void optionalFieldType;
 void optionalSortKind;
 void optionalSourceApp;
+void constraintMetadata;
 void explain;
 void error;

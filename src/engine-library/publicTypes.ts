@@ -149,6 +149,15 @@ export interface QueryMetrics {
   cursorRecordsScanned: number;
 }
 
+export type ValidateConstraintCategory = "required" | "length" | "range" | "choice";
+
+export interface ValidateConstraintMetadata {
+  /** Constraint categories present on the fields targeted by VALIDATE. */
+  present: ValidateConstraintCategory[];
+  /** Known constraint categories absent from the fields targeted by VALIDATE. */
+  absent: ValidateConstraintCategory[];
+}
+
 export interface QueryResult {
   type: "query";
   rows: readonly Readonly<Record<string, string>>[];
@@ -159,6 +168,7 @@ export interface QueryResult {
   validateStats?: {
     errorRecords: number;
     errorCount: number;
+    constraintMetadata?: ValidateConstraintMetadata;
   };
   metrics: QueryMetrics;
 }

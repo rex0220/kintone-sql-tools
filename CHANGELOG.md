@@ -6,7 +6,9 @@
 
 ### 修正（B85 engine ライブラリの VALIDATE 制約メタデータ契約）
 
-- `ReadonlyFieldInfo` に `required`、`minLength`、`maxLength`、`minValue`、`maxValue` を任意プロパティとして追加した。BYO readonly client がフォーム定義の制約を渡せるようにする純加法の型修正で、`createReadonlyKintoneClient()` の既存挙動は変更しない。公開文書には、`VALIDATE` の完全性が client のメタデータに依存することと、違反内訳には `COUNT(*)` ではなく `SUM($err_count)` を使うことを追記した。
+- `ReadonlyFieldInfo` に `required`、`minLength`、`maxLength`、`minValue`、`maxValue` を任意プロパティとして追加した。BYO readonly client がフォーム定義の制約を渡せるようにする純加法の型修正で、`createReadonlyKintoneClient()` の既存挙動は変更しない。
+- `VALIDATE` の `validateStats` に任意の `constraintMetadata` を追加し、実際の監査対象フィールドでメタデータに含まれていた制約種別を `present`、含まれていなかった既知種別を `absent` として開示する。必須・文字数・上下限・選択肢の4種を観測事実だけから返し、制約なしや BYO client の欠落を推測する警告は出さない。
+- 公開文書には、`VALIDATE` の完全性が client のメタデータに依存すること、0件時も検証範囲を併記する読み方、違反内訳には `COUNT(*)` ではなく `SUM($err_count)` を使うことを追記した。
 
 ### ドキュメント（B84 押し下げ可否の公開）
 
