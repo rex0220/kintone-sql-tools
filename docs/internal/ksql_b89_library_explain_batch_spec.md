@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B89](ksql_b89_library_explain_batch_issue.md)
-- ステータス: 📋 **R1・実装待ち**
+- ステータス: 📋 **R2・実装待ち**（R1 §7 の自己矛盾を codex が実装前に指摘）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor（純加法）**＝従来拒否していたものを通す方向のみ。公開型の変更なし
 
@@ -47,7 +47,25 @@ Pro の設定画面は SQL 入力を 0.6 秒デバウンスで `explainQuery` �
 **この挙動は単文で維持する。**
 
 **複文では `EXPLAIN` を前置きしない**（`buildBatchExplainPlans` が SQL をそのまま解析するため）。
-**複文の中に `EXPLAIN` を含む文があった場合の扱いを決めること**（§7）。
+
+### 2.4 複文の中の `EXPLAIN` は**受理する**（R2 で修正）
+
+**R1 §7 では「拒否を推奨」と書いたが、これは誤りだった。**
+`runBatch` の既存契約を確認せずに書いたもので、次の 3 点と矛盾する。
+
+1. [`assertRunBatchStatement`](../../src/engine-library/statementGuard.ts#L84) は
+   `const target = classified.type === "EXPLAIN" ? classified.query : classified;` で
+   **`EXPLAIN` を展開して受理している**
+2. [b68Step4Parity.test.ts](../../src/engine-library/__tests__/b68Step4Parity.test.ts#L104) が
+   **`EXPLAIN SELECT 1 AS one` を `runBatch` の受理対象として固定**している
+3. [`buildBatchExplainPlans`](../../src/execute.ts#L9800) は既に
+   `if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, ...)` を持つ
+
+**拒否すると受入 4（受理集合の一致）に違反する。**
+`runBatch` 側も拒否すれば集合は揃うが、**既存の受理範囲を狭める破壊的変更**になり
+「純加法」という本仕様の前提に反する。
+
+→ **受理する。実装・テストとも追加の対応は不要**（既存の処理がそのまま働く）。
 
 ---
 
@@ -143,13 +161,12 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
 
 ## 7. 注意点・決めること
 
-- **複文の中に `EXPLAIN` を含む文があった場合**をどうするか。
-  **推奨＝拒否**（`EXPLAIN` の入れ子は意味が無く、`buildBatchExplainPlans` の想定外）。
-  実装前に挙動を確認し、**仕様と違う場合は報告すること**
+- **複文の中の `EXPLAIN` は受理する**（§2.4・R2 で確定）。R1 の「拒否を推奨」は撤回した
 - **`;` の有無で単文・複文を判定しないこと**（文字列リテラル中の `;` を誤検出する）
 - **単文経路の出力を変えないこと**（受入 2）。ここが変わると Pro 以外の利用者へ影響が出る
-- **`buildBatchExplainPlans` の既定 `cacheContext` は `"batch-explain"` という固定文字列**である。
-  ライブラリから呼ぶ際は**実行ごとの分離が効くこと**を確認すること
-  （[B87](ksql_b87_metadata_cache_spec.md) で実行単位スコープ化済みだが、**引数の渡し方次第で
-  プロファイル分離が壊れる**）
+- **`cacheContext` は確認済み＝問題なし**（R2）。
+  `buildBatchExplainPlans` は内部で `createInvocationCacheContext` を通すため、
+  **固定文字列 `"batch-explain"` を渡しても呼び出しごとに一意な suffix が付き、実行間で共有されない**
+  （[B87](ksql_b87_metadata_cache_spec.md) の実行単位スコープが効いている）。
+  プロファイル分離は**呼び出し側が渡す client** が担う
 - **公開型を変えないこと**（受入 8）
