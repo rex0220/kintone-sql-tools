@@ -1,7 +1,7 @@
 # B99 MCP サーバーの新規格（プロトコル改訂 2026-07-28）対応
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価（優先 中）＝R2。初版の中心的な結論が誤っていた**（codex のレビューで判明・§2）
+- ステータス: ✅ **spike 完了・移行可能**（2026-07-29・§11）。**5 点すべて成立**。次は実装仕様。R2 の経緯は §2
 - 出典: オーナー指示「MCP サーバーの新規格対応」
 - 関連: [B91 MCP 互換モード（クローズ）](ksql_b91_mcp_plugin_compat_mode_issue.md)
 
@@ -134,9 +134,10 @@ transport は `server/stdio.js` のみ。**tree-shaking で既に落ちている
    **modern（`server/discover`）と legacy（`initialize`）を判定して振り分ける**。
    **現在の `new StdioServerTransport(); server.connect(...)` を機械的に残すだけでは dual-era にならない**
 3. **Node 最低要件の引き上げ判断**（§4）
-4. **`McpError` / `ErrorCode` の移行**（`src/mcp/index.ts:101-109` で使用）。
-   **resource not found の code が `-32002` → `-32602` に変わる**ので、
-   **既存 smoke がエラーコード・文言をどこまで固定しているかの監査が要る**
+4. **`McpError` / `ErrorCode` の移行**（`src/mcp/index.ts:101-109` で使用）→ `ProtocolError` / `INVALID_PARAMS` へ。
+   **~~resource not found の code が `-32002` → `-32602` に変わる~~ → こちらには当てはまらない**（§11.3）＝
+   **既に `ErrorCode.InvalidParams`（`-32602`）を使っており、`-32002` を固定した箇所は存在しない**。
+   **実際に壊れるのは「エラー文言の接頭辞」のほう**（§11.3）
 5. **smoke / pack-smoke / MCPB verify を v1 client と v2 client の両方で確認**
 6. bundle / manifest / runtime / 版数文書の同期
 
@@ -245,3 +246,89 @@ stdio では共有中間者がいないので `public` / `private` の実効差�
 - 各 host が **cache hint を実際にどう扱うか**
 - **v2 へ移した場合のコンパイルエラー・bundle サイズ・smoke の結果**（実装していないため未確認）
 - **versioning ページの `current = 2025-11-25` が反映遅れか意図的か**
+
+---
+
+## 11. spike 結果（2026-07-29・codex 実施）
+
+**5 点すべて成立。dual-era stdio は謳いどおり動く。**
+
+### 11.1 確かめた 5 点
+
+| # | 結果 | 実測 |
+|---|---|---|
+| ① **13 tools・4 resources が乗るか** | ✅ | **Zod は変更不要**（repo は既に `zod 4.4.3`・v2 の要件は `^4.2.0`）。strict schema と discriminated union の拒否も維持 |
+| ② **v1 client が繋がるか** | ✅ | `@modelcontextprotocol/sdk@1.29.0` の client が `initialize` で接続。tools 13・resources 2・templates 2 を取得。**`legacy` は省略（既定 `'serve'`）** |
+| ③ **v2 client が正しい面を見るか** | ✅ | `supportedVersions: ["2026-07-28"]`／**`KSQL_MCP_INSTRUCTIONS` が全文載る**／`ttlMs: 0`／`cacheScope: "private"`／`resultType: "complete"`／**`tools/list` は 13 個を登録順** |
+| ④ **bundle** | ✅ | `node20` target で通る。**2,744,642 → 2,761,641 bytes（+0.62%）**。**`@hono/node-server` は metafile・bundle 文字列とも 0 のまま** |
+| ⑤ **既存ゲートの落下点** | ✅（把握できた） | **落ちるのは 4 箇所だけ**（§11.3） |
+
+### 11.2 コード差は 3 点だけ
+
+1. import を `@modelcontextprotocol/server` / `@modelcontextprotocol/server/stdio` へ
+2. `McpError(ErrorCode.InvalidParams, ...)` → `ProtocolError(INVALID_PARAMS, ...)`
+3. `new StdioServerTransport(); server.connect(...)` → **`serveStdio(() => createServer(args))`**
+
+**`registerTool` 13 個と `registerResource` 4 個は無変更。**
+
+### 11.3 **壊れるのは 4 箇所。原因は 1 つ**
+
+**エラー**コード**ではなく、エラー**文言**の固定。**
+
+| 場所 | 固定している文字列 |
+|---|---|
+| `scripts/mcp-smoke.mjs:103` | `MCP error -32602` |
+| `scripts/mcp-pack-smoke.mjs:196` | `MCP error -32602` |
+| `src/mcp/__tests__/docsTool.test.ts:107` | `-32602` |
+| （`scripts/mcp-smoke.mjs:545` は `-32602` または invalid/unknown なので **v2 でも通る**） |
+
+**v2 は `isError: true` と検証内容を保つが、tool result の text から v1 の `MCP error -32602` 接頭辞が消える。**
+
+```
+v1: MCP error -32602: Invalid arguments for tool ksql_docs: Unrecognized key: "extra"
+v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized key: "extra"
+```
+
+> **§5-4 の想定は外れていた。**
+> **`-32002` → `-32602` の仕様変更はこちらに当てはまらない**＝
+> **もともと `ErrorCode.InvalidParams`（`-32602`）を使っており、`-32002` を固定した箇所は 1 つも無い**
+> （v1 client でも v2 client でも `-32602` を実測）。
+> **当てはまったのは「文言に code を埋め込んで固定していた」ほう。**
+
+### 11.4 spike で新たに分かったこと
+
+1. **`serveStdio` の既定読み取りバッファも 10 MiB。**
+   → **§6 の問題は 1.30.0 固有ではなく、v2 でも同じ**。
+   **inline import の最大メッセージ長に合わせて `maxBufferSize` を明示し、境界試験を足す必要がある**（どちらの道でも避けられない）
+2. **raw `.shape` を渡す overload は v2 で deprecated**（動くが非推奨）。
+   `z.object({...})` を渡す形へ直すか、別課題にするかの判断が要る
+3. **`build-mcp.mjs` の self-contained guard が旧 SDK と Zod の import しか検査していない。**
+   **新 package も禁止対象に加える必要がある**
+
+### 11.5 本番移行の作業一覧
+
+1. 依存と import を分割 package へ（runtime は `@modelcontextprotocol/server@2`）
+2. stdio entry を `serveStdio(factory)` へ
+3. エラー class の置換（`ProtocolError` / `INVALID_PARAMS` / `ResourceNotFoundError`）
+4. **Node >=20 を 4 箇所そろえる**（§4.1）
+5. **test / smoke の検証契約を更新**＝**文言の `MCP error -32602` 固定を外し、
+   code を観測できる層では code を、tool result では `isError` と検証内容を見る**
+6. **v1 の `initialize` と v2 の `server/discover` の二本立て smoke を足す**
+7. raw `.shape` の扱いを決める（同時にやるか別課題か）
+8. **`maxBufferSize` を明示し境界試験を足す**（§11.4-1）
+9. `build-mcp.mjs` の self-contained guard を新 package へ拡張
+
+### 11.6 spike の後片付け（実施済み）
+
+- `scripts/b99-spike-*.mjs` 2 本を削除
+- `npm ci` で `node_modules` を lock どおりに再構築（v2 の extraneous package を除去）
+- **`package.json` と `package-lock.json` は spike 中も無変更**（SHA256 が前後一致）
+- **復旧確認**＝196 suites / 4,982 tests green・`mcp:verify` ok
+
+### 11.7 spike でも分からなかったこと
+
+- 実 host（Claude Desktop / Codex 等）が**いつ modern-only になるか**
+- 各 host の **cache hint の実装と保持期間**
+- **Node 20 引き上げの実利用者影響**
+- **安全な `maxBufferSize` の具体値**（最大 16 source の合計 envelope を別途測る必要がある）
+- v2 の deprecated raw-shape overload が**いつ削除されるか**
