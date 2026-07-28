@@ -1,4 +1,5 @@
 import { FetchAllLimitError } from "../api/fetchAll";
+import { BatchAnalysisError } from "../core/batch";
 import { SearchAbortedError } from "../execute";
 import { LexError } from "../lexer/lexer";
 import { ParseError } from "../parser/parser";
@@ -109,4 +110,22 @@ export function normalizeEngineError(error: unknown): KsqlEngineError {
     return new KsqlEngineError("CLIENT_ERROR", errorMessage(error), error);
   }
   return new KsqlEngineError("EXECUTION_ERROR", errorMessage(error), error);
+}
+
+export function normalizeBatchBoundaryError(
+  error: unknown,
+  statements: readonly { readonly type: string }[]
+): KsqlEngineError {
+  const normalized = normalizeEngineError(error);
+  if (error instanceof BatchAnalysisError) {
+    const statement = statements[error.statementIndex];
+    if (statement !== undefined) {
+      return withStatementDiagnostic(
+        normalized,
+        error.statementIndex,
+        statement.type
+      );
+    }
+  }
+  return normalized;
 }

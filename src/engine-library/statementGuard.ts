@@ -3,7 +3,6 @@ import { statementHasApplyBlocks } from "../core/applyGuard";
 import {
   getStatementType,
   isDmlType,
-  isExplainableReadOnlyStatement,
   isReadOnlyStatement,
   isRowReturningReadOnlyStatement,
 } from "../core/dmlGuard";
@@ -85,13 +84,13 @@ export function assertRunBatchStatement(statement: unknown): void {
   if (target.type === "IMPORT") {
     throw readOnlyViolation("IMPORT is disabled by default in engine library batches");
   }
-  if (!isReadOnlyStatement(classified)) {
-    throw readOnlyViolation(`${classified.type} statements are not read-only`);
+  if (!isReadOnlyStatement(target)) {
+    throw readOnlyViolation(`${target.type} statements are not read-only`);
   }
-  if (statementHasApplyBlocks(classified)) {
+  if (statementHasApplyBlocks(target)) {
     throw readOnlyViolation("APPLY statements are not allowed in engine library batches");
   }
-  if (isDmlType(classified.type)) {
+  if (isDmlType(target.type)) {
     throw readOnlyViolation(
       "DML VALIDATE ONLY statements are not supported by runBatch"
     );
@@ -106,17 +105,41 @@ export function guardRunQuerySql(sql: string): Statement {
 }
 
 /** Parse the complete batch and enforce every statement before executeBatch can make an API call. */
-export function guardRunBatchSql(sql: string): void {
-  parseBatchStatements(sql).forEach(assertRunBatchStatement);
+export function guardRunBatchSql(sql: string): Statement[] {
+  const statements = parseBatchStatements(sql);
+  statements.forEach(assertRunBatchStatement);
+  return statements;
 }
 
-/** Parse, guard, and normalize the SQL passed to the engine EXPLAIN path. */
-export function guardExplainQuerySql(sql: string): string {
+export interface ExplainQueryGuard {
+  readonly statements: readonly Statement[];
+  readonly legacySql?: string;
+}
+
+/**
+ * Parse and guard explainQuery input using the runBatch acceptance boundary.
+ * legacySql is present only for the pre-B89 single-query execute(EXPLAIN) path.
+ */
+export function prepareExplainQuerySql(sql: string): ExplainQueryGuard {
   const trimmed = sql.trim();
-  const statement = parseSingleStatement(trimmed);
+  const statements = parseBatchStatements(trimmed);
+  statements.forEach(assertRunBatchStatement);
+  const statement = statements[0];
   const target = statement.type === "EXPLAIN" ? statement.query : statement;
-  if (!isExplainableReadOnlyStatement(target)) {
-    throw readOnlyViolation(`${target.type} statements are not allowed in explain queries`);
+  if (
+    statements.length === 1
+    && (target.type === "SELECT" || target.type === "WITH" || target.type === "UNION")
+  ) {
+    return {
+      statements,
+      legacySql: statement.type === "EXPLAIN" ? trimmed : `EXPLAIN ${trimmed}`,
+    };
   }
-  return statement.type === "EXPLAIN" ? trimmed : `EXPLAIN ${trimmed}`;
+  return { statements };
+}
+
+/** Internal compatibility seam returning the SQL selected by the guard. */
+export function guardExplainQuerySql(sql: string): string {
+  const prepared = prepareExplainQuerySql(sql);
+  return prepared.legacySql ?? sql.trim();
 }

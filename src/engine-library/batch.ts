@@ -4,6 +4,7 @@ import {
 } from "../execute";
 import {
   KsqlEngineError,
+  normalizeBatchBoundaryError,
   normalizeEngineError,
   withStatementDiagnostic,
 } from "./errors";
@@ -19,6 +20,7 @@ import type {
   ReadonlyKintoneClient,
   RunBatchOptions,
 } from "./publicTypes";
+import type { Statement } from "../types/ast";
 
 function toStatementFailure(statement: BatchStatementResult): KsqlEngineError {
   const error = statement.error;
@@ -46,9 +48,10 @@ export async function runBatch(
   sql: string,
   options: RunBatchOptions
 ): Promise<BatchResult> {
+  let parsedStatements: readonly Statement[] = [];
   try {
     const invocation = validateBatchOptions(options);
-    guardRunBatchSql(sql);
+    parsedStatements = guardRunBatchSql(sql);
     const batchResult = await withCursorScope(
       invocation.client,
       (scopedClient) => executeBatch(
@@ -108,6 +111,6 @@ export async function runBatch(
       warnings: [],
     };
   } catch (error) {
-    throw normalizeEngineError(error);
+    throw normalizeBatchBoundaryError(error, parsedStatements);
   }
 }

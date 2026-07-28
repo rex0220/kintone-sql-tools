@@ -74,15 +74,6 @@ export function isRowReturningReadOnlyStatement(stmt: Statement): boolean {
     || stmt.type === "VALIDATE";
 }
 
-/**
- * engine の EXPLAIN 経路が従来受け付けてきた read-only query 文か。
- * runQuery の拡張から explainQuery の契約を独立させる。
- */
-export function isExplainableReadOnlyStatement(stmt: Statement): boolean {
-  if (!isReadOnlyStatement(stmt)) return false;
-  return stmt.type === "SELECT" || stmt.type === "WITH" || stmt.type === "UNION";
-}
-
 export type CompleteInputReason =
   | "DML"
   | "VALIDATE"

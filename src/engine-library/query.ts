@@ -1,15 +1,19 @@
 import {
+  buildBatchExplainPlans,
   execute,
   type SelectResult,
 } from "../execute";
-import { normalizeEngineError } from "./errors";
+import {
+  normalizeBatchBoundaryError,
+  normalizeEngineError,
+} from "./errors";
 import { withCursorScope } from "./cursorScope";
 import { validateQueryOptions } from "./options";
 import { projectReadonlyClient } from "./readonlyClient";
 import { mapMetrics, toQueryResult } from "./resultMapping";
 import {
-  guardExplainQuerySql,
   guardRunQuerySql,
+  prepareExplainQuerySql,
 } from "./statementGuard";
 import type {
   ExplainResult,
@@ -17,6 +21,7 @@ import type {
   QueryResult,
   RunQueryOptions,
 } from "./publicTypes";
+import type { Statement } from "../types/ast";
 
 function assertSelectResult(result: unknown): asserts result is SelectResult {
   if (result === null || typeof result !== "object" || (result as { type?: unknown }).type !== "SELECT") {
@@ -54,32 +59,60 @@ export async function runQuery(
 }
 
 /**
- * Explains one SELECT, WITH, or UNION query without reading records.
- * CREATE TEMP TABLE is not accepted; explain its source SELECT instead.
+ * Explains read-only statements and batches without reading records.
  */
 export async function explainQuery(
   sql: string,
   options: Omit<RunQueryOptions, "onLimitReached">
 ): Promise<ExplainResult> {
+  let statements: readonly Statement[] = [];
   try {
     const invocation = validateQueryOptions(options, "explain");
+    const prepared = prepareExplainQuerySql(sql);
+    statements = prepared.statements;
+    if (prepared.legacySql !== undefined) {
+      const result = await withCursorScope(
+        invocation.client,
+        (client) => execute(
+          prepared.legacySql!,
+          projectReadonlyClient(client),
+          invocation.executeOptions
+        )
+      );
+      assertSelectResult(result);
+      const lines = result.rows.map((row) => String(row.plan ?? ""));
+      return {
+        type: "explain",
+        lines,
+        text: lines.join("\n"),
+        metrics: mapMetrics(result.metrics),
+      };
+    }
+
     const result = await withCursorScope(
       invocation.client,
-      (client) => execute(
-        guardExplainQuerySql(sql),
+      (client) => buildBatchExplainPlans(
+        sql,
         projectReadonlyClient(client),
-        invocation.executeOptions
+        undefined,
+        "batch-explain",
+        invocation.executeOptions.maxRecords,
+        invocation.executeOptions.cursorMaxActive
       )
     );
-    assertSelectResult(result);
-    const lines = result.rows.map((row) => String(row.plan ?? ""));
+    const lines = result.statements.flatMap((statement) => [
+      ...(result.statementCount > 1
+        ? [`[${statement.index + 1}] ${statement.type}`]
+        : []),
+      ...statement.plan,
+    ]);
     return {
       type: "explain",
       lines,
       text: lines.join("\n"),
-      metrics: mapMetrics(result.metrics),
+      metrics: mapMetrics(),
     };
   } catch (error) {
-    throw normalizeEngineError(error);
+    throw normalizeBatchBoundaryError(error, statements);
   }
 }

@@ -14,7 +14,6 @@ export {
   writesKintone,
   isReadOnlyStatement,
   isRowReturningReadOnlyStatement,
-  isExplainableReadOnlyStatement,
   requiresCompleteInput,
 } from "./dmlGuard";
 export { statementHasApplyBlocks } from "./applyGuard";

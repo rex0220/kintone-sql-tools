@@ -4,6 +4,22 @@
 
 ## 未リリース
 
+### 追加（B89 `explainQuery` のバッチ対応・受理集合を `runBatch` と統一）
+
+- **engine ライブラリの `explainQuery` が複文（バッチ）を受け付けるようになった。** 従来は `PARSE_ERROR: This API accepts one statement` を返し、正しいバッチでも構文エラーとして扱われていた。
+- **受理集合を `runBatch` と揃えた。** `CREATE TEMP TABLE` / `SET` / `DECLARE` / `VALIDATE` / `SHOW APPS` / `DESCRIBE` / `ASSERT` が explain できる。単文の `VALIDATE APPn` も通るようになった。**従来拒否していたものを通す方向のみ**で、既存の使い方には影響しない。
+- 複文の計画は `lines` に `[n] TYPE` の見出し付きで連結する。**単文の出力は従来どおり**（見出しを付けない）。公開型 `ExplainResult` は変更していない。
+- **単文として無意味な `SET` / `DECLARE` / `CREATE TEMP TABLE` / `DROP TEMP TABLE` は `runBatch` と同じく拒否する。** explain だけ緩めると「構文 OK と出たのに実行できない」という不整合になるため。
+
+### 修正（B89 バッチ静的検証エラーの診断情報）
+
+- **バッチの静的検証エラーに `statementIndex` と `statementType` が載るようになった。** 従来はどの文が原因か分からなかった。
+- 対象は `runBatch` と `explainQuery` の**両方**。v3.29.0（B68）で追加した文別診断は `executeBatch` が文別結果を返した後の実行時失敗にしか届いておらず、構文段階で落ちるエラーには載っていなかった。
+
+### 変更（B89 `EXPLAIN <DML>` を engine ライブラリで拒否）
+
+- **`runBatch` が `EXPLAIN UPDATE` / `EXPLAIN DELETE` / `EXPLAIN INSERT` / `EXPLAIN UPSERT` を受理していたのを拒否するようにした。** read-only ガードが `EXPLAIN` を展開せず外側の文型で判定していたための穴で、`explainQuery` は元から拒否していた。
+- **受理範囲が 1 形だけ狭まる。** engine ライブラリは read-only が契約であり、read-only API で DML の計画を出せること自体が意図されていない。**`EXPLAIN` は計画のみで書き込みは起きないため、誤った結果を得ていた利用者はいない。`EXPLAIN SELECT` は従来どおり通る。**
 ### 修正（B88 0 行 `SELECT *` の列をアプリ定義から復元）
 
 - **0 行の `SELECT * FROM APPn` が列を失わないようにした。** 従来は列名まで空になり、一時テーブル・CTE・`UNION`・`INSERT ... SELECT` へ伝播していた。「差分バッチの空日だけ落ちる」という気づきにくい壊れ方をしていた。
