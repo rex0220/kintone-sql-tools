@@ -103,7 +103,22 @@ transport は `server/stdio.js` のみ。**tree-shaking で既に落ちている
 
 ---
 
-## 4. **本当の blocker は SDK ではなく Node 20**
+## 4. ~~本当の blocker は SDK ではなく Node 20~~ → **【オーナー決定 2026-07-29】Node 20 で可**
+
+**最低要件を Node 20 へ引き上げてよい**（オーナー判断）。**これで v2 移行の判断材料が揃った。**
+
+以下は決定前の整理として残す。
+
+### 4.1 引き上げる対象（実装時に 4 点そろえる）
+
+| | 現在 | v2 後 |
+|---|---|---|
+| MCP bundle の target | `node18`（`build-mcp.mjs:23`） | **`node20`** |
+| MCPB manifest | `node >=18.0.0`（`build-mcpb.mjs:79`） | **`>=20.0.0`** |
+| `package.json` の `engines` | 要確認 | **`>=20`** |
+| 文書（導入手順・README） | 要確認 | **Node 20 必須と明記** |
+
+## 4bis. 旧整理
 
 | | |
 |---|---|
