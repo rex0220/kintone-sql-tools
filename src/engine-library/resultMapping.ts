@@ -15,6 +15,10 @@ export function mapMetrics(metrics?: ExecuteMetrics): QueryMetrics {
     fetchedRows: metrics?.fetchedRows ?? 0,
     elapsedMs: metrics?.elapsedMs ?? 0,
     cursorRecordsScanned: metrics?.cursorRecordsScanned ?? 0,
+    limitReached: metrics?.limitReached ?? false,
+    limitReachedApps: metrics
+      ? [...metrics.limitReachedApps].sort((left, right) => left - right)
+      : [],
   };
 }
 

@@ -150,8 +150,19 @@ type QueryResult = {
 存在を前提にせず、必要に応じてフォールバックしてください。
 
 `QueryMetrics` は `recordGetCalls`、`fetchedRows`、`elapsedMs`、
-`cursorRecordsScanned` の4項目です。`ExplainResult` は `lines`、`text` と
-同じ metrics shape を返します。
+`cursorRecordsScanned` に加え、取得上限による打ち切りを表す
+`limitReached?` と `limitReachedApps?` を返します。現行 engine は打ち切りが
+ない場合も `limitReached: false` と `limitReachedApps: []` を常に設定します。
+プロパティが optional なのは、旧版 engine の結果および consumer が構築する既存の
+`QueryResult` との型互換性を保つためです。
+
+打ち切りの判定には `limitReached` を使ってください。`limitReachedApps` は判明した
+アプリ ID を重複なし・昇順で示す補助情報であり、空配列かどうかを判定条件には
+しません。JOIN の上限判定はアプリごとで、`fetchedRows` の合計が `maxRecords` を
+超えただけでは `limitReached` は `true` になりません。`runBatch` の各結果では、
+ほかの metrics と同じくバッチ全体の集計値を返します。
+
+`ExplainResult` は `lines`、`text` と同じ metrics shape を返します。
 
 ## client の供給
 

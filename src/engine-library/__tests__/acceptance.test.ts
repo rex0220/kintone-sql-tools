@@ -172,6 +172,8 @@ function expectStableResult(result: QueryResult): void {
     fetchedRows: expect.any(Number),
     elapsedMs: expect.any(Number),
     cursorRecordsScanned: expect.any(Number),
+    limitReached: false,
+    limitReachedApps: [],
   });
 }
 

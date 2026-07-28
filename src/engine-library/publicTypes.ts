@@ -149,6 +149,10 @@ export interface QueryMetrics {
   fetchedRows: number;
   elapsedMs: number;
   cursorRecordsScanned: number;
+  /** 取得上限に達したか。true なら結果は全件ではない。 */
+  limitReached?: boolean;
+  /** 上限に達したアプリ ID（判明した範囲・重複なし・昇順）。 */
+  limitReachedApps?: readonly number[];
 }
 
 export type ValidateConstraintCategory = "required" | "length" | "range" | "choice";

@@ -56,6 +56,8 @@ function metrics(overrides: Partial<ExecuteMetrics> = {}): ExecuteMetrics {
     cursorCreateOutcomeUnknown: 0,
     cursorQuarantinedCurrent: 0,
     fetchedRows: 123,
+    limitReached: false,
+    limitReachedApps: [],
     elapsedMs: 45,
     ...overrides,
   };
@@ -114,6 +116,8 @@ test("runQuery copies VALIDATE stats into the stable query envelope when present
       fetchedRows: 123,
       elapsedMs: 45,
       cursorRecordsScanned: 777,
+      limitReached: false,
+      limitReachedApps: [],
     },
   });
   expect(result.metrics).not.toHaveProperty("getCalls");
@@ -150,6 +154,8 @@ test("runQuery preserves columns and supplies fixed metrics for zero rows", asyn
     fetchedRows: 0,
     elapsedMs: 0,
     cursorRecordsScanned: 0,
+    limitReached: false,
+    limitReachedApps: [],
   });
 });
 
@@ -236,6 +242,8 @@ test("explainQuery normalizes one EXPLAIN and maps plan rows to lines and text",
       fetchedRows: 0,
       elapsedMs: 45,
       cursorRecordsScanned: 0,
+      limitReached: false,
+      limitReachedApps: [],
     },
   });
   expect(mockedExecute.mock.calls[0][0]).toBe("EXPLAIN SELECT value FROM APP1");

@@ -352,6 +352,10 @@ export interface ExecuteMetrics {
   cursorQuarantinedCurrent: number;
   /** GET で取得したレコード総数（全ページ・サブクエリ含む） */
   fetchedRows: number;
+  /** 取得上限による打ち切りが発生したか */
+  limitReached: boolean;
+  /** 取得上限に達したアプリ ID（重複なし。公開時に昇順化する） */
+  limitReachedApps: number[];
   /** execute() 全体の所要時間（ミリ秒） */
   elapsedMs: number;
 }
@@ -802,8 +806,22 @@ function createEmptyMetrics(): ExecuteMetrics {
     cursorCreateOutcomeUnknown: 0,
     cursorQuarantinedCurrent: 0,
     fetchedRows: 0,
+    limitReached: false,
+    limitReachedApps: [],
     elapsedMs: 0,
   };
+}
+
+const LIMIT_METRICS_SINK = Symbol("limitMetricsSink");
+type LimitMetricsClient = KintoneClient & {
+  [LIMIT_METRICS_SINK]?: ExecuteMetrics;
+};
+
+function markLimitReached(client: KintoneClient, appId: number): void {
+  const metrics = (client as LimitMetricsClient)[LIMIT_METRICS_SINK];
+  if (!metrics) return;
+  metrics.limitReached = true;
+  if (!metrics.limitReachedApps.includes(appId)) metrics.limitReachedApps.push(appId);
 }
 
 /**
@@ -811,8 +829,12 @@ function createEmptyMetrics(): ExecuteMetrics {
  * getFields はキャッシュ（fieldInfoCache）より内側で呼ばれるため、
  * キャッシュヒット時は fieldCalls が増えない = 実際の API 呼び出し回数を表す。
  */
-function wrapClientWithMetrics(client: KintoneClient, metrics: ExecuteMetrics): KintoneClient {
+function wrapClientWithMetrics(
+  client: KintoneClient,
+  metrics: ExecuteMetrics
+): LimitMetricsClient {
   return {
+    [LIMIT_METRICS_SINK]: metrics,
     getRecords: async (params) => {
       metrics.getCalls += 1;
       const res = await client.getRecords(params);
@@ -3102,6 +3124,7 @@ async function executeSimpleSelect(
         onLimit,
         onTruncate: (max) => {
           warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
+          markLimitReached(client, stmt.from.appId);
         },
       }
     );
@@ -4932,6 +4955,7 @@ async function fetchTableRecordsForFullScan(
   const fields = selectToFetchAllFields(stmt, table, plainGroupByPlan);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
+    markLimitReached(client, table.appId);
   };
   if (!table.subtableCode) {
     const baseQuery = isMainTable && allowOriginalWherePushdown
@@ -5176,6 +5200,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   const fields = selectToFetchAllFields(stmt, join.table, plainGroupByPlan);
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
+    markLimitReached(client, join.table.appId);
   };
 
   const chunks = splitChunks(values, JOIN_IN_CHUNK_SIZE);
@@ -11006,3 +11031,11 @@ export class OperationCancelledError extends Error {
     this.name = "OperationCancelledError";
   }
 }
+
+export const __testOnlyMetricsPropagation = {
+  createEmptyMetrics,
+  markLimitReached,
+  wrapClientWithCursorScope,
+  wrapClientWithMetrics,
+  wrapClientWithSearchAbort,
+};
