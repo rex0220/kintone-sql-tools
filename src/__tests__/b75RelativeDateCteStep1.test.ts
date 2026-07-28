@@ -185,25 +185,21 @@ describe("B75 Step 1 materialized CTE relative dates", () => {
   });
 
   test.each(["truncate", "error"] as const)(
-    "materialized集計CTEの取得上限は onLimit=%s でliteral/relativeが対称",
+    "materialized集計CTEは onLimit=%s でliteral/relativeとも完全入力を要求する",
     async (onLimitReached) => {
       const relativeSql = "WITH c AS (SELECT 担当者, SUM(受注金額) AS 売上 FROM APP100 "
         + "WHERE 受注日 >= THIS_MONTH() GROUP BY 担当者) SELECT * FROM c";
       const literalSql = "WITH c AS (SELECT 担当者, SUM(受注金額) AS 売上 FROM APP100 "
         + "WHERE 受注日 >= '2026-07-01' GROUP BY 担当者) SELECT * FROM c";
       const options = { maxRecords: 2, onLimitReached };
+      const expected = onLimitReached === "truncate"
+        ? /complete input reason: GROUP_BY, AGGREGATE。onLimit=truncateは使用できません。.*上限（2 件）/
+        : /complete input reason: GROUP_BY, AGGREGATE。.*上限（2 件）/;
 
-      if (onLimitReached === "truncate") {
-        const relative = await execute(relativeSql, makeClient().client, options) as SelectResult;
-        const literal = await execute(literalSql, makeClient().client, options) as SelectResult;
-        expect(relative.rows).toEqual([{ 担当者: "佐藤", 売上: "400" }]);
-        expect(literal.rows).toEqual(relative.rows);
-      } else {
-        await expect(execute(relativeSql, makeClient().client, options))
-          .rejects.toThrow(/上限（2 件）/);
-        await expect(execute(literalSql, makeClient().client, options))
-          .rejects.toThrow(/上限（2 件）/);
-      }
+      await expect(execute(relativeSql, makeClient().client, options))
+        .rejects.toThrow(expected);
+      await expect(execute(literalSql, makeClient().client, options))
+        .rejects.toThrow(expected);
     }
   );
 });

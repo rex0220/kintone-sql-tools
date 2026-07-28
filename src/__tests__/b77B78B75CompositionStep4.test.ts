@@ -395,25 +395,21 @@ describe("B77+B78 Step 4: B75 composition contexts", () => {
   });
 
   test.each(["truncate", "error"] as const)(
-    "aggregate CTE keeps TODAY/literal onLimit=%s behavior symmetric",
+    "aggregate CTE requires complete input for TODAY/literal onLimit=%s symmetrically",
     async (onLimitReached) => {
       const todaySql = "WITH c AS (SELECT COUNT(*) AS n FROM APP100 "
         + "WHERE 日付 >= TODAY()) SELECT * FROM c";
       const literalSql = "WITH c AS (SELECT COUNT(*) AS n FROM APP100 "
         + "WHERE 日付 >= '2026-07-27') SELECT * FROM c";
       const options = { maxRecords: 2, onLimitReached };
+      const expected = onLimitReached === "truncate"
+        ? /complete input reason: AGGREGATE。onLimit=truncateは使用できません。.*上限（2 件）/
+        : /complete input reason: AGGREGATE。.*上限（2 件）/;
 
-      if (onLimitReached === "truncate") {
-        const today = await execute(todaySql, makeClient().client, options) as SelectResult;
-        const literal = await execute(literalSql, makeClient().client, options) as SelectResult;
-        expect(today.rows).toEqual([{ n: "2" }]);
-        expect(literal.rows).toEqual(today.rows);
-      } else {
-        await expect(execute(todaySql, makeClient().client, options))
-          .rejects.toThrow(/上限（2 件）/);
-        await expect(execute(literalSql, makeClient().client, options))
-          .rejects.toThrow(/上限（2 件）/);
-      }
+      await expect(execute(todaySql, makeClient().client, options))
+        .rejects.toThrow(expected);
+      await expect(execute(literalSql, makeClient().client, options))
+        .rejects.toThrow(expected);
     }
   );
 });

@@ -2895,12 +2895,34 @@ async function validateSelectGroupingPlanning(
 
 function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
   const reasonList = [...reasons].join(", ");
-  const subject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE")
+  const aggregateSubjects: readonly [CompleteInputReason, string][] = [
+    ["GROUPING_SETS", "小計・総計の正しい結果"],
+    ["STATISTICAL_AGGREGATE", "統計集約の正しい結果"],
+    ["AGGREGATE", "集計の正しい結果"],
+    ["GROUP_BY", "グループ集計の正しい結果"],
+    ["DISTINCT", "DISTINCT の正しい結果"],
+  ];
+  const hasAggregateReason = aggregateSubjects.some(([reason]) => reasons.has(reason));
+  const hasOrderReason = reasons.has("LOCAL_ORDER") || reasons.has("WINDOW_ORDER");
+  const legacySubject = reasons.size === 1 && reasons.has("STATISTICAL_AGGREGATE")
     ? "統計集約の正しい結果"
     : reasons.size === 1 && reasons.has("GROUPING_SETS")
       ? "小計・総計の正しい結果"
-      : reasons.has("GROUPING_SETS")
-        ? "クエリの正しい結果"
+      : reasons.size === 1 && reasons.has("AGGREGATE")
+        ? "集計の正しい結果"
+        : reasons.size === 1 && reasons.has("GROUP_BY")
+          ? "グループ集計の正しい結果"
+          : reasons.size === 1 && reasons.has("DISTINCT")
+            ? "DISTINCT の正しい結果"
+            : reasons.has("GROUPING_SETS")
+              ? "クエリの正しい結果"
+              : "ORDER BYの正しい結果";
+  const subject = reasons.has("DML") || reasons.has("VALIDATE")
+    ? legacySubject
+    : hasAggregateReason && hasOrderReason
+      ? "クエリの正しい結果"
+      : hasAggregateReason
+        ? aggregateSubjects.find(([reason]) => reasons.has(reason))![1]
         : "ORDER BYの正しい結果";
   return `${subject}には完全な候補集合が必要です。complete input reason: ${reasonList}。`;
 }
@@ -2912,15 +2934,15 @@ interface CompleteInputPolicy {
 }
 
 function buildCompleteInputPolicy(
-  stmt: SelectStatement,
+  stmt: SelectStatement | UnionStatement,
   options: ExecuteOptions,
   orderPlan: CanonicalOrderPlan | null
 ): CompleteInputPolicy {
   // A REST/KORDER plan consumes only the top-level order. Nested/window/B65
   // requirements remain visible through the existing recursive reason walker.
-  const reasons = orderPlan?.kind === "CANONICAL_REST_TOP_N"
+  const reasons = stmt.type === "SELECT" && (orderPlan?.kind === "CANONICAL_REST_TOP_N"
     || orderPlan?.kind === "KORDER_NATIVE"
-    || orderPlan?.kind === "KORDER_CURSOR"
+    || orderPlan?.kind === "KORDER_CURSOR")
     ? completeInputReasons({ ...stmt, orderBy: [] })
     : completeInputReasons(stmt);
   const truncateWasDisabled = reasons.size > 0 && options.onLimitReached === "truncate";
@@ -2934,11 +2956,14 @@ function buildCompleteInputPolicy(
 }
 
 function throwCompleteInputError(policy: CompleteInputPolicy, error: unknown): never {
-  if (policy.reasons.size > 0 && error instanceof FetchAllLimitError) {
+  if (policy.reasons.size > 0
+    && error instanceof FetchAllLimitError
+    && !error.completeInputWrapped) {
     throw new FetchAllLimitError(
       completeInputErrorPrefix(policy.reasons) +
       (policy.truncateWasDisabled ? "onLimit=truncateは使用できません。" : "") +
-      error.message
+      error.message,
+      true
     );
   }
   throw error;
@@ -4544,35 +4569,62 @@ async function executeUnion(
   captureColumnMeta = false,
   forLibraryCapture = false
 ): Promise<SelectResult> {
-  // 左辺（ネストした UNION 対応）と右辺を並列実行
-  const [leftResult, rightResult] = await Promise.all([
-    stmt.left.type === "UNION"
-      ? executeUnion(stmt.left, client, options, cacheContext, captureColumnMeta, forLibraryCapture)
-      : executeSelect(stmt.left, client, options, cacheContext, undefined, captureColumnMeta, forLibraryCapture),
-    executeSelect(stmt.right, client, options, cacheContext, undefined, captureColumnMeta, forLibraryCapture),
-  ]);
+  const completePolicy = buildCompleteInputPolicy(stmt, options, null);
+  return withCompleteInputPolicy(completePolicy, async () => {
+    const effectiveOptions = completePolicy.effectiveOptions;
+    // 左辺（ネストした UNION 対応）と右辺を並列実行
+    const [leftResult, rightResult] = await Promise.all([
+      stmt.left.type === "UNION"
+        ? executeUnion(
+          stmt.left,
+          client,
+          effectiveOptions,
+          cacheContext,
+          captureColumnMeta,
+          forLibraryCapture
+        )
+        : executeSelect(
+          stmt.left,
+          client,
+          effectiveOptions,
+          cacheContext,
+          undefined,
+          captureColumnMeta,
+          forLibraryCapture
+        ),
+      executeSelect(
+        stmt.right,
+        client,
+        effectiveOptions,
+        cacheContext,
+        undefined,
+        captureColumnMeta,
+        forLibraryCapture
+      ),
+    ]);
 
-  // 右辺の行を左辺のカラム名に位置対応でリマップ
-  const leftCols  = leftResult.columns;
-  const rightCols = rightResult.columns;
-  const remappedRight = rightResult.rows.map((row) => {
-    const mapped: ProcessRow = {};
-    leftCols.forEach((col, i) => {
-      mapped[col] = row[rightCols[i] ?? col] ?? "";
+    // 右辺の行を左辺のカラム名に位置対応でリマップ
+    const leftCols  = leftResult.columns;
+    const rightCols = rightResult.columns;
+    const remappedRight = rightResult.rows.map((row) => {
+      const mapped: ProcessRow = {};
+      leftCols.forEach((col, i) => {
+        mapped[col] = row[rightCols[i] ?? col] ?? "";
+      });
+      return mapped;
     });
-    return mapped;
+
+    const combined = [...leftResult.rows, ...remappedRight];
+
+    // UNION（重複排除）vs UNION ALL（そのまま）
+    const rows = stmt.all ? combined : deduplicateRows(combined, leftCols);
+
+    const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    if (captureColumnMeta) {
+      materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
+    }
+    return result;
   });
-
-  const combined = [...leftResult.rows, ...remappedRight];
-
-  // UNION（重複排除）vs UNION ALL（そのまま）
-  const rows = stmt.all ? combined : deduplicateRows(combined, leftCols);
-
-  const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
-  if (captureColumnMeta) {
-    materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
-  }
-  return result;
 }
 
 /** 行の重複を取り除く（すべてのカラム値が等しい行を1件に） */

@@ -352,7 +352,7 @@ test("B65-X01: EXPLAIN は candidate guard・完全入力・local order を静�
     "  grouping items: 1 (limit: 16)",
     "  grouping output rows: runtime checked (limit: 50000, before HAVING/DISTINCT/LIMIT)",
     "  complete input: required (onLimit=truncate disabled)",
-    "  complete input reason: GROUPING_SETS",
+    "  complete input reason: GROUPING_SETS, AGGREGATE",
     expect.stringMatching(/order plan:\s+CANONICAL_LOCAL/),
   ]));
   expect(mock.recordCalls).toBe(0);

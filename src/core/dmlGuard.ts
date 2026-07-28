@@ -80,7 +80,10 @@ export type CompleteInputReason =
   | "LOCAL_ORDER"
   | "WINDOW_ORDER"
   | "STATISTICAL_AGGREGATE"
-  | "GROUPING_SETS";
+  | "GROUPING_SETS"
+  | "AGGREGATE"
+  | "GROUP_BY"
+  | "DISTINCT";
 
 const STATISTICAL_AGGREGATES: ReadonlySet<string> = new Set([
   "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
@@ -103,6 +106,21 @@ function containsStatisticalAggregate(value: unknown, seen = new Set<object>()):
   return Object.values(record).some((child) => Array.isArray(child)
     ? child.some((entry) => containsStatisticalAggregate(entry, seen))
     : containsStatisticalAggregate(child, seen));
+}
+
+function containsAggregate(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  if ((record.type === "AGGREGATE" || record.type === "AGG_REF")
+    && typeof record.func === "string"
+    && !STATISTICAL_AGGREGATES.has(record.func)) return true;
+  if (record.type === "FIELD" && typeof record.field === "string"
+    && /^(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\(/i.test(record.field)) return true;
+  return Object.values(record).some((child) => Array.isArray(child)
+    ? child.some((entry) => containsAggregate(entry, seen))
+    : containsAggregate(child, seen));
 }
 
 /** truncate を許さず完全な入力集合を必要とする理由を返す。 */
@@ -136,6 +154,7 @@ export function completeInputReasons(stmt: Statement): Set<CompleteInputReason> 
       break;
   }
   if (containsStatisticalAggregate(stmt)) reasons.add("STATISTICAL_AGGREGATE");
+  if (containsAggregate(stmt)) reasons.add("AGGREGATE");
   return reasons;
 }
 
@@ -149,12 +168,16 @@ function unionCompleteInputReasons(stmt: UnionStatement): Set<CompleteInputReaso
     ? selectCompleteInputReasons(stmt.left)
     : unionCompleteInputReasons(stmt.left);
   addReasons(reasons, selectCompleteInputReasons(stmt.right));
+  if (!stmt.all) reasons.add("DISTINCT");
   return reasons;
 }
 
 function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputReason> {
   const reasons = new Set<CompleteInputReason>();
-  if (normalizeGroupingSpec(stmt).type === "GROUPING_SETS") reasons.add("GROUPING_SETS");
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "GROUPING_SETS") reasons.add("GROUPING_SETS");
+  if (grouping.type === "PLAIN") reasons.add("GROUP_BY");
+  if (stmt.distinct) reasons.add("DISTINCT");
   if (stmt.orderBy.length > 0) reasons.add("LOCAL_ORDER");
   for (const column of stmt.columns) {
     if (column.type === "WINDOW_COL" && column.orderBy.length > 0) reasons.add("WINDOW_ORDER");
@@ -166,6 +189,7 @@ function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputRea
   addReasons(reasons, whereCompleteInputReasons(stmt.where));
   addReasons(reasons, whereCompleteInputReasons(stmt.having));
   if (containsStatisticalAggregate(stmt)) reasons.add("STATISTICAL_AGGREGATE");
+  if (containsAggregate(stmt)) reasons.add("AGGREGATE");
   return reasons;
 }
 

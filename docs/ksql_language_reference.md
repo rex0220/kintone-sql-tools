@@ -1790,6 +1790,8 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 
 > **ORDER BYと取得上限（v3.0.0）:** ローカル`ORDER BY`は正しいtop-Nのため完全な候補集合を必要とします。上限到達時に`onLimit=truncate`で部分候補を並べ替えて返さず、エラーにします。`CANONICAL_REST_TOP_N`（初期allowlistは`$id`のみ）と`KORDER_NATIVE`は単発REST窓なので、この完全入力エラーの対象外です。
 
+> **集計・重複排除と取得上限:** 通常集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` など）、plain `GROUP BY`、`SELECT DISTINCT`、`UNION`（`ALL` なし）は完全な候補集合を必要とします。上限到達時は`onLimit=truncate`でも部分集合を畳んだ値を返さず、エラーにします。従来成功して見えた場合も結果は正しくありません（実測では、真の件数が3のlocal `LIKE` + `COUNT(*)`が`maxRecords=3`で`0`を返しました）。素の明細と`UNION ALL`は従来どおり取得行と警告を返します。完全押し下げ可能な`COUNT(*)`の単発`totalCount`取得はレコード本体を打ち切らないため、この制限の対象外です。
+
 > **SIMPLE モード（JOIN なし）:** `ORDER BY`のREST押し下げはLIMIT値だけで決めず、schema-aware plannerがWHERE・型・query形状・窓全体を検査します。それ以外は全候補取得後にcanonical順を適用します。
 > **FULL_SCAN モード（JOIN あり等）:** JS 側でスライス処理します。
 

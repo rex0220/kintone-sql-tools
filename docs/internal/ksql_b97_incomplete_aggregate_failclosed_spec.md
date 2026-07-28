@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B97](ksql_b97_incomplete_aggregate_failclosed_issue.md)
-- ステータス: 📋 **実装待ち**
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-29）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（移行案内つきの正しさ修正。B78 / B79 / B86 / B90 と同じ扱い）
 

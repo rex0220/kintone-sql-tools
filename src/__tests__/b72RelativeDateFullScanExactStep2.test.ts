@@ -296,38 +296,32 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
         + "WHERE 日付 >= THIS_MONTH() GROUP BY 区分",
       literalSql: "SELECT 区分, COUNT(*) AS c FROM APP100 "
         + "WHERE 日付 >= '2026-07-01' GROUP BY 区分",
-      truncatedRows: [{ 区分: "A", c: "2" }],
     },
     {
       name: "DISTINCT",
       relativeSql: "SELECT DISTINCT 区分 FROM APP100 WHERE 日付 >= THIS_MONTH()",
       literalSql: "SELECT DISTINCT 区分 FROM APP100 WHERE 日付 >= '2026-07-01'",
-      truncatedRows: [{ 区分: "A" }],
     },
     {
       name: "aggregate",
       relativeSql: "SELECT SUM(金額) AS total FROM APP100 WHERE 日付 >= THIS_MONTH()",
       literalSql: "SELECT SUM(金額) AS total FROM APP100 WHERE 日付 >= '2026-07-01'",
-      truncatedRows: [{ total: "30" }],
     },
   ])("$name は maxRecords overflow時も literal/relative が対称", async ({
     relativeSql,
     literalSql,
-    truncatedRows,
   }) => {
     const truncateOptions = { maxRecords: 2, onLimitReached: "truncate" as const };
-    const relativeTruncate = await execute(
+    await expect(execute(
       relativeSql,
       makeClient().client,
       truncateOptions
-    ) as SelectResult;
-    const literalTruncate = await execute(
+    )).rejects.toThrow(/上限（2 件）/);
+    await expect(execute(
       literalSql,
       makeClient().client,
       truncateOptions
-    ) as SelectResult;
-    expect(relativeTruncate.rows).toEqual(truncatedRows);
-    expect(literalTruncate.rows).toEqual(truncatedRows);
+    )).rejects.toThrow(/上限（2 件）/);
 
     const errorOptions = { maxRecords: 2, onLimitReached: "error" as const };
     await expect(execute(

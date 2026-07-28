@@ -326,7 +326,7 @@ function getLastId(records: KintoneRecord[]): number {
 // ------------------------------------------------------------
 
 export class FetchAllLimitError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly completeInputWrapped = false) {
     super(message);
     this.name = "FetchAllLimitError";
   }

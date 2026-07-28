@@ -10,13 +10,13 @@ function parse(sql: string): Statement {
 test("B65-F03: ROLLUP/GROUPING SETS だけに GROUPING_SETS complete-input reason を付ける", () => {
   expect(completeInputReasons(parse(
     "SELECT a, COUNT(*) FROM APP1 GROUP BY ROLLUP(a)"
-  ))).toEqual(new Set(["GROUPING_SETS"]));
+  ))).toEqual(new Set(["GROUPING_SETS", "AGGREGATE"]));
   expect(completeInputReasons(parse(
     "SELECT a, COUNT(*) FROM APP1 GROUP BY GROUPING SETS ((a),())"
-  ))).toEqual(new Set(["GROUPING_SETS"]));
+  ))).toEqual(new Set(["GROUPING_SETS", "AGGREGATE"]));
   expect(completeInputReasons(parse(
     "SELECT a, COUNT(*) FROM APP1 GROUP BY a"
-  ))).toEqual(new Set());
+  ))).toEqual(new Set(["GROUP_BY", "AGGREGATE"]));
 });
 
 test("B65-F06: UNION/WITH/subquery の既存再帰でも GROUPING_SETS reason を拾う", () => {

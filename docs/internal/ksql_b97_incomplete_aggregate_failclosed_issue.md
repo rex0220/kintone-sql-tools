@@ -1,7 +1,7 @@
 # B97 打ち切られた入力の集計を fail-closed にする（B95 案 B・Pro から要望）
 
 - 起票: 2026-07-29
-- ステータス: 📋 **仕様確定・実装待ち**（調査で前提が覆り、新モードではなく既存 truncate へ対象を足す）。→ [実装仕様](ksql_b97_incomplete_aggregate_failclosed_spec.md)
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-29・新モードではなく既存 truncate へ対象を足した）。→ [実装仕様](ksql_b97_incomplete_aggregate_failclosed_spec.md)
 - 出典: [Pro からの報告 v3.32.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3320.md) §4
 - 関連: [B95 案 B](ksql_b95_truncation_visibility_issue.md#42-案-b--打ち切られた入力の集計を-fail-closed-にする) / [B72 §7.2](ksql_b72_relative_date_fullscan_exact_spec.md) / [B94](ksql_b94_count_star_totalcount_issue.md)
 

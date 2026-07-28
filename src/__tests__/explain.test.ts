@@ -344,7 +344,7 @@ test("EXPLAIN STATUS ORDER BY は status metadata API 依存を表示する", as
 test("EXPLAIN FULL_SCAN — GROUP BY", async () => {
   const plan = await explain("EXPLAIN SELECT 担当者, COUNT(*) FROM APP100 GROUP BY 担当者");
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
-  const reason = plan.find((l) => l.includes("reason")) ?? "";
+  const reason = plan.find((l) => l.startsWith("  reason:        ")) ?? "";
   expect(reason).toContain("GROUP BY あり");
   expect(reason).toContain("集計関数");
 });
@@ -352,7 +352,7 @@ test("EXPLAIN FULL_SCAN — GROUP BY", async () => {
 test("EXPLAIN FULL_SCAN — DISTINCT", async () => {
   const plan = await explain("EXPLAIN SELECT DISTINCT 担当者 FROM APP100");
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
-  expect(plan.find((l) => l.includes("reason"))).toContain("DISTINCT あり");
+  expect(plan.find((l) => l.startsWith("  reason:        "))).toContain("DISTINCT あり");
 });
 
 test("EXPLAIN FULL_SCAN — WHERE 関数", async () => {
@@ -472,7 +472,7 @@ test("EXPLAIN — WHERE スカラーサブクエリ → [subquery:1]", async () 
     "EXPLAIN SELECT * FROM APP100 WHERE 金額 > (SELECT AVG(金額) FROM APP100)"
   );
   expect(plan.find((l) => l.includes("mode"))).toContain("FULL_SCAN");
-  expect(plan.find((l) => l.includes("reason"))).toContain("WHERE 句に JS 評価が必要な式");
+  expect(plan.find((l) => l.startsWith("  reason:        "))).toContain("WHERE 句に JS 評価が必要な式");
   expect(plan.some((l) => l.includes("[subquery:1]"))).toBe(true);
   // サブクエリ自身も FULL_SCAN（AVG）
   const subIdx = plan.findIndex((l) => l.includes("[subquery:1]"));
@@ -484,7 +484,7 @@ test("EXPLAIN — SELECT 列スカラーサブクエリ → [subquery:1]", async
   const plan = await explain(
     "EXPLAIN SELECT 顧客名, (SELECT COUNT(*) FROM APP100) AS 総件数 FROM APP100"
   );
-  expect(plan.find((l) => l.includes("reason"))).toContain("SELECT 列にスカラーサブクエリ");
+  expect(plan.find((l) => l.startsWith("  reason:        "))).toContain("SELECT 列にスカラーサブクエリ");
   expect(plan.some((l) => l.includes("[subquery:1]"))).toBe(true);
 });
 
@@ -1031,7 +1031,7 @@ test("B65-X01: constant-false WHERE でも grouping/guard/complete-input 静的�
     "  grouping items: 1 (limit: 16)",
     "  grouping output rows: runtime checked (limit: 50000, before HAVING/DISTINCT/LIMIT)",
     "  complete input: required (onLimit=truncate disabled)",
-    "  complete input reason: GROUPING_SETS",
+    "  complete input reason: GROUPING_SETS, AGGREGATE",
     expect.stringMatching(/order plan:\s+CANONICAL_LOCAL/),
     "  records API access: none",
   ]));

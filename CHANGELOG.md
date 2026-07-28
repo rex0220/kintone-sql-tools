@@ -8,6 +8,13 @@
 
 - **BYO client とラッパーは `getRecords()` の応答をそのまま返し、`searchAborted` を落として検索打ち切りの fail-closed を無効にしないことを engine ライブラリ文書へ明記した。** `totalCount` の欠落は全件取得へのフォールバックによる性能上の影響にとどまること、追加項目が任意プロパティである応答は `getRecords()` だけであることも併記した。**コード・公開型・挙動の変更なし。**
 
+### 修正（B97 打ち切られた入力の集計を fail-closed 化）
+
+- **`onLimitReached: "truncate"` でも、通常集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` など）、plain `GROUP BY`、`SELECT DISTINCT`、重複排除を行う `UNION` は、取得上限へ到達した場合に部分結果を返さず `FetchAllLimitError` で停止するようにした。** 素の明細と `UNION ALL` は従来どおり、取得した行と打ち切り警告を返す。
+- **移行案内:** これらのクエリが現在成功して見える場合も、返しているのは正しい集計結果ではなく、先頭から取得できた部分集合だけを畳んだ誤った値である。実測では `APP4147` の `COUNT(*) ... WHERE 顧客No LIKE '%6%'`（真の値 3）が `maxRecords=3` / truncate で **`0`** を返した。したがって今回のエラー化で正しい結果が失われることはない。完全な結果が必要な場合は WHERE で候補を絞るか `maxRecords` を引き上げること。
+- **B94 の完全押し下げ可能な `COUNT(*)` 単発取得は変更しない。** レコード本体を打ち切らず `totalCount` を取得するため、従来どおり `maxRecords` / `onLimitReached` の対象外である。
+- 集計・`GROUP BY`・`DISTINCT` を含むクエリの `EXPLAIN` に、完全入力の要求とその理由が表示されるようになった。
+
 ## v3.32.0（2026-07-29）
 
 ### 追加（B95 取得上限の打ち切りを `metrics` へ構造化）

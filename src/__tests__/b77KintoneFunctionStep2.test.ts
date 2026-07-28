@@ -305,12 +305,7 @@ test.each([
       makeClient().client,
       options
     );
-    if (onLimitReached === "truncate") {
-      await expect(functionRun).resolves.toMatchObject({ rows: [{ total: "30" }] });
-      await expect(literalRun).resolves.toMatchObject({ rows: [{ total: "30" }] });
-    } else {
-      await expect(functionRun).rejects.toThrow(/上限（2 件）/);
-      await expect(literalRun).rejects.toThrow(/上限（2 件）/);
-    }
+    await expect(functionRun).rejects.toThrow(/上限（2 件）/);
+    await expect(literalRun).rejects.toThrow(/上限（2 件）/);
   }
 );
