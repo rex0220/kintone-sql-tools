@@ -123,7 +123,7 @@ test("B95: fetchedRows total exceeding maxRecords does not imply truncation", as
 
 test("B95: reached app IDs are unique and ascending, including a repeated self JOIN app", async () => {
   const selfJoin = await runQuery(
-    "SELECT a.key FROM APP9502 a LEFT JOIN APP9502 b ON a.key = b.key",
+    "SELECT a.key FROM APP9502 a INNER JOIN APP9502 b ON a.key = b.key",
     {
       client: clientFor({ 9502: records(3) }),
       maxRecords: 2,
@@ -133,7 +133,7 @@ test("B95: reached app IDs are unique and ascending, including a repeated self J
   expect(selfJoin.metrics.limitReachedApps).toEqual([9502]);
 
   const reverseOrder = await runQuery(
-    "SELECT a.key FROM APP9502 a LEFT JOIN APP9501 b ON a.key = b.key",
+    "SELECT a.key FROM APP9502 a INNER JOIN APP9501 b ON a.key = b.key",
     {
       client: clientFor({
         9501: records(3),

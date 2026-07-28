@@ -1,4 +1,4 @@
-import type { Statement } from "../types/ast";
+import type { SelectStatement, Statement, TableRef } from "../types/ast";
 
 function isOuterJoinSelect(value: Record<string, unknown>): boolean {
   if (value["type"] !== "SELECT" || !Array.isArray(value["joins"])) return false;
@@ -24,4 +24,33 @@ export function statementContainsOuterJoin(statement: Statement): boolean {
     return Object.values(object).some(visit);
   };
   return visit(statement);
+}
+
+/**
+ * 取得中のテーブルが、この SELECT 自身の外部結合で保持されない側になるかを返す。
+ * 入れ子は走査せず、alias ではなく parser が生成した TableRef の同一性で照合する。
+ */
+export function isOuterJoinNonPreservedTable(
+  statement: SelectStatement,
+  table: TableRef,
+  isMainTable: boolean
+): boolean {
+  if (isMainTable) {
+    return table === statement.from
+      && statement.joins.some((join) => join.type === "RIGHT");
+  }
+
+  for (let index = 0; index < statement.joins.length; index += 1) {
+    const join = statement.joins[index];
+    if (join.type === "LEFT" && table === join.table) return true;
+    if (
+      join.type === "RIGHT"
+      && statement.joins
+        .slice(0, index)
+        .some((previousJoin) => table === previousJoin.table)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }

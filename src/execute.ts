@@ -63,7 +63,7 @@ import {
 import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
-import { statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
+import { isOuterJoinNonPreservedTable, statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
@@ -5008,6 +5008,16 @@ async function fetchTableRecordsForFullScan(
   const onTruncate = (max: number): void => {
     warnings.add(`取得上限（${max} 件）に達したため、${max} 件で打ち切って表示しています。`);
     markLimitReached(client, table.appId);
+    if (isOuterJoinNonPreservedTable(stmt, table, isMainTable)) {
+      throw new FetchAllLimitError(
+        "外部結合の正しい結果には完全な候補集合が必要です。" +
+        `complete input reason: OUTER_JOIN_NON_PRESERVED（APP${table.appId}）。` +
+        "onLimit=truncateは使用できません。" +
+        `取得件数が上限（${max} 件）を超えました。` +
+        "WHERE 句で絞り込むか、maxRecords を引き上げてください。",
+        true
+      );
+    }
   };
   if (!table.subtableCode) {
     const baseQuery = isMainTable && allowOriginalWherePushdown

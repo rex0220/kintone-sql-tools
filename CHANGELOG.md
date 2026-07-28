@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 修正（B98 外部結合の保持されない側の打ち切りを fail-closed 化）
+
+- **`LEFT JOIN` / `RIGHT JOIN` の保持されない側が取得上限へ達した場合、`onLimitReached: "truncate"` でも部分結果を返さず `FetchAllLimitError` で停止するようにした。** 保持側だけが打ち切られた場合は行が減るだけなので従来どおり警告付きで返し、`INNER JOIN` も従来どおりである。
+- **移行案内:** 外部結合の結合相手が打ち切られると、上限の外へ落ちた一致行と、本当に相手がいない行を結果から区別できない。実測では `APP4226 LEFT JOIN APP4225` を `maxRecords=20` / truncate で実行すると、真の値が `b01` である `B` の行が空になり、本当に相手がいない `C` の行とバイト単位で同一に見えた。完全な結果が必要な場合は WHERE で候補を絞るか `maxRecords` を引き上げること。
+
 ## v3.33.0（2026-07-29）
 
 ### 修正（B96 `getRecords()` の応答契約を文書化）

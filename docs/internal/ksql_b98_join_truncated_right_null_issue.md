@@ -1,7 +1,7 @@
 # B98 JOIN の右側が打ち切られると、一致するはずの行に `NULL` が入る
 
 - 起票: 2026-07-29
-- ステータス: 📋 **案 C' 仕様確定・実装待ち**（オーナー決定 2026-07-29）。→ [実装仕様](ksql_b98_join_truncated_right_null_spec.md)＝**保持されない側が打ち切られたときだけ止める**。実機再現済み（v3.33.0）
+- ステータス: ✅ **案 C' 実装済み（未リリース）**（2026-07-29・実機確認済み）。→ [実装仕様](ksql_b98_join_truncated_right_null_spec.md)＝**保持されない側が打ち切られたときだけ止める**。実機再現済み（v3.33.0）
 - 出典: [B97 §5](ksql_b97_incomplete_aggregate_failclosed_spec.md) で**意識的に対象外**とした残件
 - 関連: [B97](ksql_b97_incomplete_aggregate_failclosed_issue.md) / [B95](ksql_b95_truncation_visibility_issue.md) / [B72 §7.2](ksql_b72_relative_date_fullscan_exact_spec.md)
 
