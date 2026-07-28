@@ -1,7 +1,7 @@
 # B84 実装計画 — 押し下げ可否を公開文書へ（生成方式）
 
 - 作成: 2026-07-28
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-28）。
+- ステータス: ✅ **リリース済み（v3.30.0・2026-07-28）**。
 - 課題: [B84 issue](ksql_b84_pushdown_visibility_docs_issue.md)
 - 関連: [B76 Phase A spec §5.2](ksql_b76_join_pushdown_phase_a_spec.md) / [B83](ksql_b83_mcp_validate_columns_docs_issue.md) / [B60](ksql_b60_mcp_syntax_hints_spec.md)
 

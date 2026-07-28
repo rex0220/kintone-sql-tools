@@ -1,7 +1,7 @@
 # B85 ライブラリの VALIDATE が制約を検証できず黙って 0 件を返す
 
 - 起票: 2026-07-28
-- ステータス: ✅ **案 A・B・C すべて実装済み（未リリース）**（2026-07-28）。
+- ステータス: ✅ **リリース済み（v3.30.0・2026-07-28）**。案 A・B・C すべて実装。
 - 出典: Pro（ksql-dashboard-pro）返信 2026-07-28「確認依頼③」
 - 関連: [B68 計画](ksql_b68_engine_library_readonly_impl_plan.md) / [B78](ksql_b78_user_field_loginuser_issue.md) / [B79](ksql_b79_outer_join_search_abort_issue.md)
 

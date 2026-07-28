@@ -1,7 +1,7 @@
 # B83 MCP instructions の VALIDATE 診断列数が実態と違う
 
 - 起票: 2026-07-27
-- ステータス: ✅ **実装済み（未リリース）**（2026-07-28）。**単純な数値誤りではなく2形の取り違えだった**（§7）。
+- ステータス: ✅ **リリース済み（v3.30.0・2026-07-28）**。2形（9 列 / SUMMARY 5 列）明記へ修正。
 - 出典: B68 の実需確認で `VALIDATE` の戻り値を実測した際に発見
 - 関連: [B74 相対日付 docs 是正](ksql_b74_relative_date_docs_accuracy_issue.md) / [B68](ksql_b68_engine_library_readonly_extensions_evaluation.md) / [B81 語数予算](ksql_b81_mcp_instructions_word_budget_issue.md)
 
