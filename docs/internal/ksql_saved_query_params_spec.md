@@ -4,7 +4,7 @@
 - 更新履歴:
   - 2026-07-12 R2: codex レビュー反映。optional 値の未解決を禁止、カタログの条件付き version 2 移行、lexer 共通化 + parser モードを明記。保存・実行とも既存どおり単文限定であることを確認
   - 2026-07-12 R1: 初版（設計評価と codex レビュー反映）
-- ステータス: **ドラフト**
+- ステータス: ❌ **クローズ（実装しない・2026-07-29）**。中核価値「外部から動的値を安全に注入する」は `DECLARE @param` ＋ `variables` が提供済みで、**Pro が実際に採用して「変数コントロールバーの課題はエンジンへの依頼が不要になった」と報告**した（2026-07-29）。残る固有価値（カタログ永続化）にはより安い代替（保存クエリの単文制約を緩めて `DECLARE`＋`SELECT` バッチにする）が明記済み。**判断材料は出そろっており、寝かせても情報は増えない**ため閉じる。実需が出たら再起票する。
 - 対象バージョン: 未定
 - 対象機能: MCP 保存クエリ（`ksql_save_query` / `ksql_list_queries` / `ksql_get_query` / `ksql_run_saved_query`）
 - 関連実装: `src/mcp/savedQueries.ts`、`src/mcp/tools.ts`、`src/mcp/schemas.ts`、`src/lexer/`、`src/parser/`、`src/types/ast.ts`
