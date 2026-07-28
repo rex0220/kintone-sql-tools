@@ -1,31 +1,48 @@
-ksql 配布パッケージ (v3.30.0)
+ksql 配布パッケージ (v3.31.0)
 
 release 成果物:
-- ksql-plugin-v3.30.0.zip
-- ksql-mcp.mcpb (manifest version 3.30.0)
-- ksql-mcp.js (MCP server version 3.30.0)
+- ksql-plugin-v3.31.0.zip
+- ksql-mcp.mcpb (manifest version 3.31.0)
+- ksql-mcp.js (MCP server version 3.31.0)
 
-破壊的変更の移行案内 (B86):
-- CTE / 一時テーブル / SHOW APPS / DESCRIBE の実体化結果で、存在しない列を参照した
-  SELECT は、records GET、確認、POST / PUT より前に ArgumentError で終了します。
-  LIKE、=、SELECT列、式、集計、JOIN、subquery、UNION、INSERT / UPSERT ... SELECT の
-  source で共通です。混在 JOIN は実体化側と物理 APP 側の両方を検証します。
-- 従来は不存在列が空文字になり、LIKE で全件一致、= で0件、INSERT ... SELECT で
-  空文字を書き込む場合がありました。成功して見えた結果が誤っていたため、
-  migration note 付き minor の正しさ修正として扱います。
-- 値を意図した裸の語は引用してください。
-    修正前: WHERE アプリ名 LIKE 顧客
-    修正後: WHERE アプリ名 LIKE '顧客'
-  SELECT x AS y の実体化後は y、UNION 後は左枝の列名 / alias を使ってください。
-- rows=[] かつ columns=[] の0行 wildcard source は、JOIN なしの読出しだけ従来挙動を
-  維持します。JOIN 入力では records GET 前に schema-unavailable error になります。
+破壊的変更の移行案内 (B89 / B90):
+- engine ライブラリの runBatch と explainQuery が EXPLAIN UPDATE / DELETE / INSERT /
+  UPSERT を READ_ONLY_VIOLATION で拒否します。read-only ライブラリで DML の計画を出す
+  用途は元から想定しておらず、explainQuery は従来も拒否していました。EXPLAIN は計画
+  だけで書き込まないため、誤った結果を得ていた利用者はいません。EXPLAIN SELECT は
+  従来どおり通ります。
+- 算術式に非数値の変数を使うと ArgumentError で停止します。新しい直接算術だけでなく、
+  従来から動いていた ROUND(算術式, ...) などの関数経路も対象です。従来はエラーも警告も
+  なく NaN を返していました。数値変数の結果は変わりません。
+    修正前: DECLARE @phase = '受注'; SELECT ROUND(売上 * 100 / @phase, 1) FROM APPn
+    → NaN
+    修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.30.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.31.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.30.0): B86 実体化ソースの不存在列を fail-closed 化／B83／B84／B85。
+本リリース (v3.31.0): B89 explainQuery のバッチ対応／B90 変数の直接算術／B87／B88。
+
+- B89: engine ライブラリの explainQuery が複文を受け付けます。受理する文の集合を
+  runBatch と揃えたため、CREATE TEMP TABLE / SET / DECLARE / VALIDATE / SHOW APPS /
+  DESCRIBE / ASSERT を含むバッチも検証できます。単文の VALIDATE APPn も通ります。
+  複文の計画は lines に [n] TYPE の見出し付きで返し、単文の出力は変わりません。
+- B89: バッチの静的検証エラーに statementIndex と statementType が載ります。
+  runBatch と explainQuery の両方が対象です。従来はどの文が原因か分かりませんでした。
+- B90: SELECT 列の算術式へ数値バッチ変数を直接書けます。
+    SET @total = (SELECT SUM(売上) FROM #g);
+    SELECT (売上 * 100) / @total AS 構成比 FROM #g
+- B87: アプリ定義のキャッシュを実行単位にしました。kintone 側で項目を追加したり制約を
+  変更したりした結果が、プロセスを再起動しなくても次の実行から反映されます。
+  常駐プロセス (MCP サーバー・engine ライブラリ) では、1 実行 1 アプリあたり
+  fields.json の取得が 1 回増えます。1 回の実行の中での重複排除は従来どおりです。
+- B88: 0 行の SELECT * が列を失わなくなりました。一時テーブルや CTE へ伝播していたため、
+  データがある日は動き 0 件の日だけ落ちるという壊れ方をしていました。サブテーブル
+  仮想テーブルも対象です。v3.30.0 で残る限界としていた JOIN 入力のエラーも解消します。
+
+前リリース (v3.30.0): B86 実体化ソースの不存在列を fail-closed 化／B83／B84／B85。
 
 - 注意: B86 は破壊的変更です。CTE・一時テーブル・SHOW APPS / DESCRIBE の結果や
   サブテーブル・UNION 枝・混在 JOIN で、存在しない列を参照する SQL がエラーになります。
