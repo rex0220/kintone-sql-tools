@@ -73,6 +73,11 @@ release 成果物:
 - B84: 押し下げ可否を言語リファレンスへ公開しました（実装から生成・照合）。
 - B83: MCP の VALIDATE 診断列の説明を 9 列 / SUMMARY 5 列の 2 形明記へ修正しました。
 
+過去バージョンのプラグイン zip:
+- 本ディレクトリには最新版だけを置いています。
+- 過去版は GitHub Releases の各タグに添付しています。
+  https://github.com/rex0220/kintone-sql-tools/releases
+
 v3.29.0 以前の変更履歴:
 - CHANGELOG.md に全版を記載しています。
 - GitHub Releases でも版ごとに参照できます。
