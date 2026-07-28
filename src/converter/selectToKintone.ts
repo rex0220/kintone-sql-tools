@@ -352,25 +352,55 @@ interface RequiredFieldState {
   fields: Set<string>;
 }
 
-function collectRequiredFieldsByTable(
+export interface SelectFieldReferencePlan {
+  readonly bySource: ReadonlyMap<TableRef, ReadonlySet<string>>;
+  readonly unqualified: ReadonlySet<string>;
+}
+
+/** B86: SELECT が参照する列を、物理／実体化を区別せず source ごとに収集する。 */
+export function collectSelectFieldReferencesBySource(
   stmt: SelectStatement,
   plainGroupByPlan?: PlainGroupByResolutionPlan
+): SelectFieldReferencePlan {
+  const unqualified = new Set<string>();
+  const states = collectRequiredFieldsByTable(stmt, plainGroupByPlan, {
+    includeMaterialized: true,
+    unqualified,
+  });
+  return {
+    bySource: new Map(
+      [...states.entries()].map(([table, state]) => [table, new Set(state.fields)])
+    ),
+    unqualified,
+  };
+}
+
+function collectRequiredFieldsByTable(
+  stmt: SelectStatement,
+  plainGroupByPlan?: PlainGroupByResolutionPlan,
+  sourceAware?: {
+    readonly includeMaterialized: true;
+    readonly unqualified: Set<string>;
+  }
 ): Map<TableRef, RequiredFieldState> {
   const allTables = [stmt.from, ...stmt.joins.map((j) => j.table)];
   const physicalTables = [stmt.from, ...stmt.joins.map((j) => j.table)]
     .filter((t) => t.cteName === null);
+  const targetTables = sourceAware ? allTables : physicalTables;
   const states = new Map<TableRef, RequiredFieldState>();
-  for (const table of physicalTables) {
+  for (const table of targetTables) {
     states.set(table, { table, allFields: false, fields: new Set<string>() });
   }
   if (states.size === 0) return states;
 
-  const firstPhysicalTable = physicalTables[0] ?? null;
-  const subtableTable = physicalTables.find((t) => !!t.subtableCode) ?? null;
+  const firstTargetTable = targetTables[0] ?? null;
+  const subtableTable = targetTables.find((t) => !!t.subtableCode) ?? null;
   const aliasToTable = new Map<string, TableRef>();
-  for (const table of physicalTables) {
+  for (const table of targetTables) {
     if (table.alias) aliasToTable.set(table.alias, table);
-    if (!table.subtableCode) {
+    if (table.cteName !== null) {
+      aliasToTable.set(table.cteName, table);
+    } else if (!table.subtableCode) {
       aliasToTable.set(`APP${table.appId}`, table);
       aliasToTable.set(`app${table.appId}`, table);
     }
@@ -384,11 +414,11 @@ function collectRequiredFieldsByTable(
     st.allFields = true;
     st.fields.clear();
   };
-  const markAllPhysicalTables = () => {
-    for (const t of physicalTables) markAll(t);
+  const markAllTargetTables = () => {
+    for (const t of targetTables) markAll(t);
   };
   const markAllSubtableTables = () => {
-    for (const t of physicalTables) {
+    for (const t of targetTables) {
       if (t.subtableCode) markAll(t);
     }
   };
@@ -429,7 +459,7 @@ function collectRequiredFieldsByTable(
     if (rawName.endsWith(".*")) {
       const qualifier = rawName.slice(0, -2);
       if (!qualifier) {
-        markAllPhysicalTables();
+        markAllTargetTables();
         return;
       }
       if (qualifier === "_p") {
@@ -449,7 +479,7 @@ function collectRequiredFieldsByTable(
     if (phase === "groupBy" && groupResolution !== undefined) {
       if (groupResolution.kind === "PHYSICAL") {
         const source = allTables[groupResolution.sourceIndex];
-        if (source?.cteName === null) {
+        if (source && (sourceAware || source.cteName === null)) {
           addFieldToTable(source, groupResolution.fieldCode);
         }
       }
@@ -477,9 +507,14 @@ function collectRequiredFieldsByTable(
         addFieldToTable(target, field);
         return;
       }
+      if (sourceAware) return;
     }
 
-    if (firstPhysicalTable) addFieldToTable(firstPhysicalTable, rawName);
+    if (sourceAware) {
+      sourceAware.unqualified.add(rawName);
+    } else if (firstTargetTable) {
+      addFieldToTable(firstTargetTable, rawName);
+    }
   };
 
   const addFieldRef = (
@@ -497,6 +532,7 @@ function collectRequiredFieldsByTable(
         addFieldToTable(target, field);
         return;
       }
+      if (sourceAware) return;
     }
     addFieldName(field, phase);
   };
@@ -676,7 +712,7 @@ function collectRequiredFieldsByTable(
   for (const col of stmt.columns) {
     switch (col.type) {
       case "WILDCARD":
-        markAllPhysicalTables();
+        markAllTargetTables();
         break;
       case "PARENT_WILDCARD":
         markAllSubtableTables();

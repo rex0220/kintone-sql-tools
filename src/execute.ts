@@ -82,7 +82,15 @@ import {
   type GroupingFieldResolver,
   type ResolvedGroupingField,
 } from "./core/groupingValidation";
-import { resolveSelectMode, selectToKintoneParams, selectToFetchAllParams, selectToFetchAllFields, whereRequiresJsEval, SelectMode } from "./converter/selectToKintone";
+import {
+  collectSelectFieldReferencesBySource,
+  resolveSelectMode,
+  selectToKintoneParams,
+  selectToFetchAllParams,
+  selectToFetchAllFields,
+  whereRequiresJsEval,
+  SelectMode,
+} from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
 import {
   insertToPostBatches,
@@ -3121,6 +3129,200 @@ async function validateSelectFieldCodes(
   }
 }
 
+interface B86SourceSchema {
+  readonly table: TableRef;
+  readonly label: string;
+  readonly validCodes: ReadonlySet<string>;
+  readonly authoritative: boolean;
+  readonly schemaUnavailable: boolean;
+}
+
+function b86SourceLabel(table: TableRef): string {
+  return table.cteName ?? `APP${table.appId}`;
+}
+
+function b86SourceAliases(table: TableRef): string[] {
+  if (table.alias) return [table.alias];
+  if (table.cteName !== null) return [table.cteName];
+  return [`APP${table.appId}`, `app${table.appId}`];
+}
+
+function b86PhysicalFieldExists(schema: B86SourceSchema, field: string): boolean {
+  return isSystemLikeFieldCode(field) || schema.validCodes.has(field);
+}
+
+function b86FieldExists(schema: B86SourceSchema, field: string): boolean {
+  if (schema.table.cteName !== null) return schema.validCodes.has(field);
+  return b86PhysicalFieldExists(schema, field);
+}
+
+function collectB86Subqueries(stmt: SelectStatement): SelectStatement[] {
+  const queries: SelectStatement[] = [];
+  const visitWhere = (where: WhereExpr | null): void => {
+    if (where === null) return;
+    switch (where.type) {
+      case "BINARY":
+        if (where.right.type === "SUBQUERY_IN_LIST" || where.right.type === "SCALAR_SUBQUERY") {
+          queries.push(where.right.query);
+        }
+        return;
+      case "EXISTS":
+        queries.push(where.query);
+        return;
+      case "LOGICAL":
+        visitWhere(where.left);
+        visitWhere(where.right);
+        return;
+      case "NOT":
+      case "GROUP":
+        visitWhere(where.expr);
+        return;
+      case "NULL_CHECK":
+      case "BOOLEAN":
+        return;
+    }
+  };
+
+  visitWhere(stmt.where);
+  visitWhere(stmt.having);
+  for (const column of stmt.columns) {
+    if (column.type === "SCALAR_SUBQUERY_COL") {
+      queries.push(column.query);
+    } else if (column.type === "CASE_COL") {
+      for (const branch of column.expr.branches) visitWhere(branch.condition);
+    }
+  }
+  return queries;
+}
+
+async function validateB86SelectFieldCodes(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cteCache: Map<string, MaterializedTable>,
+  cacheContext: string
+): Promise<void> {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const materializedByTable = new Map<TableRef, MaterializedTable>();
+  const effectiveAliases = new Set<string>();
+
+  for (const table of tables) {
+    const alias = effectiveTableAlias(table);
+    if (alias === null) continue;
+    if (effectiveAliases.has(alias)) {
+      throw new Error(`ArgumentError: effective alias ${alias} is used by multiple tables.`);
+    }
+    effectiveAliases.add(alias);
+  }
+
+  for (const table of tables) {
+    if (table.cteName === null || table.cteName === NO_FROM_CTE_NAME) continue;
+    const materialized = cteCache.get(table.cteName);
+    if (!materialized) {
+      throw new Error(`ArgumentError: materialized source ${table.cteName} is not available.`);
+    }
+    if (materialized.rows.length > 0 && materialized.columns.length === 0) {
+      throw new Error(
+        `InternalError: materialized source ${table.cteName} has rows but no column schema.`
+      );
+    }
+    if (stmt.joins.length > 0 && materialized.rows.length === 0 && materialized.columns.length === 0) {
+      throw new Error(
+        `ArgumentError: column schema is unavailable for materialized JOIN source ${table.cteName}.`
+      );
+    }
+    materializedByTable.set(table, materialized);
+  }
+
+  const schemas = new Map<TableRef, B86SourceSchema>();
+  await Promise.all(tables.map(async (table) => {
+    const materialized = materializedByTable.get(table);
+    if (materialized) {
+      schemas.set(table, {
+        table,
+        label: b86SourceLabel(table),
+        validCodes: new Set(materialized.columns),
+        authoritative: true,
+        schemaUnavailable: materialized.rows.length === 0 && materialized.columns.length === 0,
+      });
+      return;
+    }
+    if (table.cteName === NO_FROM_CTE_NAME) return;
+    const defs = await getFieldsCached(table.appId, client, cacheContext);
+    schemas.set(table, {
+      table,
+      label: b86SourceLabel(table),
+      validCodes: new Set(defs.map((def) => def.code)),
+      authoritative: defs.length > 0,
+      schemaUnavailable: false,
+    });
+  }));
+
+  const sourceByAlias = new Map<string, B86SourceSchema>();
+  for (const schema of schemas.values()) {
+    for (const alias of b86SourceAliases(schema.table)) sourceByAlias.set(alias, schema);
+  }
+
+  // B51 の既存 JOIN-key error 契約を、records GET より前へ移して維持する。
+  for (const join of stmt.joins) {
+    for (const ref of [join.on.left, join.on.right]) {
+      if (!ref.tableAlias) continue;
+      const schema = sourceByAlias.get(ref.tableAlias);
+      if (
+        schema
+        && schema.table.cteName !== null
+        && !schema.schemaUnavailable
+        && !b86FieldExists(schema, ref.field)
+      ) {
+        throw new Error(
+          `ArgumentError: JOIN key ${ref.tableAlias}.${ref.field} is not available in the materialized table.`
+        );
+      }
+    }
+  }
+
+  const references = collectSelectFieldReferencesBySource(stmt);
+  for (const [table, fields] of references.bySource) {
+    const schema = schemas.get(table);
+    if (!schema || schema.schemaUnavailable || !schema.authoritative) continue;
+    const unknown = [...fields].filter((field) => !b86FieldExists(schema, field));
+    if (unknown.length > 0) {
+      throw new Error(
+        `ArgumentError: unknown field code(s): ${unknown.join(", ")} (${schema.label})`
+      );
+    }
+  }
+
+  for (const field of references.unqualified) {
+    const candidates = [...schemas.values()].filter((schema) => !schema.schemaUnavailable);
+    if (candidates.some((schema) => b86FieldExists(schema, field))) continue;
+    if ([...schemas.values()].some((schema) => schema.schemaUnavailable)) continue;
+    // 物理 defs=[] は従来の mock 互換 escape hatch。実体化 columns には適用しない。
+    if (candidates.some((schema) => schema.table.cteName === null && !schema.authoritative)) continue;
+    const labels = candidates.map((schema) => schema.label).join(", ");
+    throw new Error(`ArgumentError: unknown field code(s): ${field} (${labels})`);
+  }
+}
+
+async function preflightB86QueryWithCte(
+  query: SelectStatement | UnionStatement,
+  client: KintoneClient,
+  cteCache: Map<string, MaterializedTable>,
+  cacheContext: string,
+  seen = new Set<object>()
+): Promise<void> {
+  if (seen.has(query)) return;
+  seen.add(query);
+  if (query.type === "UNION") {
+    await preflightB86QueryWithCte(query.left, client, cteCache, cacheContext, seen);
+    await preflightB86QueryWithCte(query.right, client, cteCache, cacheContext, seen);
+    return;
+  }
+  await validateB86SelectFieldCodes(query, client, cteCache, cacheContext);
+  for (const subquery of collectB86Subqueries(query)) {
+    await preflightB86QueryWithCte(subquery, client, cteCache, cacheContext, seen);
+  }
+}
+
 function extractMainTypedPushdownCandidate(stmt: SelectStatement): WhereExpr | null {
   if (stmt.where === null || stmt.from.subtableCode || stmt.from.cteName !== null) return null;
 
@@ -4268,12 +4470,16 @@ async function executeQueryWithCte(
   options: ExecuteOptions,
   cteCache: Map<string, MaterializedTable>,
   cacheContext: string,
-  captureColumnMeta = false
+  captureColumnMeta = false,
+  b86PreflightComplete = false
 ): Promise<SelectResult> {
+  if (!b86PreflightComplete) {
+    await preflightB86QueryWithCte(query, client, cteCache, cacheContext);
+  }
   if (query.type === "UNION") {
     const [leftResult, rightResult] = await Promise.all([
-      executeQueryWithCte(query.left,  client, options, cteCache, cacheContext, captureColumnMeta),
-      executeQueryWithCte(query.right, client, options, cteCache, cacheContext, captureColumnMeta),
+      executeQueryWithCte(query.left,  client, options, cteCache, cacheContext, captureColumnMeta, true),
+      executeQueryWithCte(query.right, client, options, cteCache, cacheContext, captureColumnMeta, true),
     ]);
     const leftCols    = leftResult.columns;
     const rightCols   = rightResult.columns;

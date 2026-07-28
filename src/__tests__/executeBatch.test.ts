@@ -1496,14 +1496,17 @@ test("空の一時テーブルの SELECT * は実体化時の列を返す", asyn
   });
 });
 
-test("空の一時テーブルの混在 SELECT *, extra は明示列だけ返す", async () => {
+test("空の一時テーブルでも保存済み columns にない extra は拒否する", async () => {
   const r = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT a, b FROM APP300; SELECT *, extra FROM #t",
     makeClient({ recordsByApp: { 300: [] } })
   );
 
-  expect(r.ok).toBe(true);
-  expect((r.statements[1].result as SelectResult).columns).toEqual(["extra"]);
+  expect(r.ok).toBe(false);
+  expect(r.statements[1].error).toEqual({
+    code: "ArgumentError",
+    message: "ArgumentError: unknown field code(s): extra (#t)",
+  });
 });
 
 test("空の一時テーブルの SELECT * は INSERT/UPSERT を no-op で完了する", async () => {

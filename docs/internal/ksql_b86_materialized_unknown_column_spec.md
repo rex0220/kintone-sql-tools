@@ -2,9 +2,9 @@
 
 - 作成日: 2026-07-28
 - 対象: [B86 課題](ksql_b86_materialized_unknown_column_issue.md)
-- ステータス: **調査・仕様 R1（未実装）**
+- ステータス: **R1 実装済み（2026-07-28）**
 - SemVer: **minor**（破壊的変更を含む正しさ修正。§8）
-- 実装禁止状態: 本書作成時点ではコード変更なし
+- 実装結果: §9 Step 1〜4 と §10 の受入条件を反映済み
 
 ---
 
@@ -480,58 +480,58 @@ SELECT read path だけを先行すると silent wrong write が残るため、�
 
 ### 10.1 基本
 
-- [ ] `WITH a AS (SHOW APPS) ... LIKE missing` が全件を返さず、下流評価前に error。
-- [ ] 同じ query の `= missing` も error。
-- [ ] `LIKE '顧客'` は従来どおり成功。
-- [ ] `LIKE 説明` のような実在列同士比較は従来どおり成功。
-- [ ] DESCRIBE、物理由来非インライン CTE、一時テーブルで同じ。
-- [ ] 0 行でも明示列を持つ materialized source は unknown を拒否。
+- [x] `WITH a AS (SHOW APPS) ... LIKE missing` が全件を返さず、下流評価前に error。
+- [x] 同じ query の `= missing` も error。
+- [x] `LIKE '顧客'` は従来どおり成功。
+- [x] `LIKE 説明` のような実在列同士比較は従来どおり成功。
+- [x] DESCRIBE、物理由来非インライン CTE、一時テーブルで同じ。
+- [x] 0 行でも明示列を持つ materialized source は unknown を拒否。
 
 ### 10.2 alias / UNION
 
-- [ ] `SELECT x AS y` 実体化後の `y` は有効、`x` は SELECT／WHERE の双方で error。
-- [ ] UNION 各枝の unknown を枝実行前に拒否。
-- [ ] UNION 実体化結果では左枝列名だけを有効とする。
-- [ ] 不正枝があれば sibling branch の records GET も開始しない。
+- [x] `SELECT x AS y` 実体化後の `y` は有効、`x` は SELECT／WHERE の双方で error。
+- [x] UNION 各枝の unknown を枝実行前に拒否。
+- [x] UNION 実体化結果では左枝列名だけを有効とする。
+- [x] 不正枝があれば sibling branch の records GET も開始しない。
 
 ### 10.3 subquery
 
-- [ ] IN、scalar RHS、EXISTS、SELECT 列 scalar subquery 内の materialized unknown を error。
-- [ ] 不正な外側 SELECT は subquery 自体を実行しない。
-- [ ] 不正な subquery は外側 records GET 前に error。
-- [ ] `FROM (SELECT...)` は従来どおり ParseError（構文追加なし）。
+- [x] IN、scalar RHS、EXISTS、SELECT 列 scalar subquery 内の materialized unknown を error。
+- [x] 不正な外側 SELECT は subquery 自体を実行しない。
+- [x] 不正な subquery は外側 records GET 前に error。
+- [x] `FROM (SELECT...)` は従来どおり ParseError（構文追加なし）。
 
 ### 10.4 JOIN
 
-- [ ] materialized 側 unknown を records GET 前に error。
-- [ ] mixed JOIN の物理側 unknown も records GET 前に error。
-- [ ] JOIN ON unknown を records GET 前に error。
-- [ ] 有効 JOIN と曖昧性／alias 規則は不変。
-- [ ] B51 の既存 missing JOIN-key tests は message を含めて green。
+- [x] materialized 側 unknown を records GET 前に error。
+- [x] mixed JOIN の物理側 unknown も records GET 前に error。
+- [x] JOIN ON unknown を records GET 前に error。
+- [x] 有効 JOIN と曖昧性／alias 規則は不変。
+- [x] B51 の既存 missing JOIN-key tests は message を含めて green。
 
 ### 10.5 DML safety
 
-- [ ] `INSERT ... SELECT missing FROM #t` は confirm／POST 前に error。
-- [ ] UPSERT、VALIDATE ONLY、ON ERROR SKIP の source SELECT も同じ。
-- [ ] DML failure 時 POST / PUT / DELETE は 0。
-- [ ] 有効 source SELECT の DML は不変。
+- [x] `INSERT ... SELECT missing FROM #t` は confirm／POST 前に error。
+- [x] UPSERT、VALIDATE ONLY、ON ERROR SKIP の source SELECT も同じ。
+- [x] DML failure 時 POST / PUT / DELETE は 0。
+- [x] 有効 source SELECT の DML は不変。
 
 ### 10.6 `defs=[]` / schema unavailable
 
-- [ ] 物理 mock の `defs=[]` 既存互換は維持。
-- [ ] materialized `columns=["y"]` なら defs／columnMeta が空でも `x` を拒否。
-- [ ] `rows=[] && columns=[]` は B2 の既存 0 行挙動を維持。
-- [ ] `rows=[] && columns=[]` の source を JOIN 入力にした場合は、物理 records GET 前に
+- [x] 物理 mock の `defs=[]` 既存互換は維持。
+- [x] materialized `columns=["y"]` なら defs／columnMeta が空でも `x` を拒否。
+- [x] `rows=[] && columns=[]` は B2 の既存 0 行挙動を維持。
+- [x] `rows=[] && columns=[]` の source を JOIN 入力にした場合は、物理 records GET 前に
       schema-unavailable error。
-- [ ] `rows.length>0 && columns.length===0` は内部エラー。
+- [x] `rows.length>0 && columns.length===0` は内部エラー。
 
 ### 10.7 release gates
 
-- [ ] 新規 B86 tests が修正前 fail → 修正後 pass。
-- [ ] `npm test` green。
-- [ ] engine library `runQuery` / `runBatch` の error envelope を確認。
-- [ ] CLI / MCP / plugin が共有 runtime で同じ `ArgumentError`。
-- [ ] CHANGELOG、言語リファレンス、release README の migration note 同梱。
+- [x] 新規 B86 tests が修正前 fail → 修正後 pass。
+- [x] `npm test` green。
+- [x] engine library `runQuery` / `runBatch` の error envelope を確認。
+- [x] CLI / MCP / plugin が共有 runtime で同じ `ArgumentError`。
+- [x] CHANGELOG、言語リファレンス、release README の migration note 同梱。
 
 調査時ベースラインは `npm test` で **189 suites / 4,842 tests / 22 snapshots green**
 （通常 187 suites / 4,816 tests、CLI subprocess 2 suites / 26 tests）だった。

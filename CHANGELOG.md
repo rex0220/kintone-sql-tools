@@ -4,6 +4,13 @@
 
 ## 未リリース
 
+### ⚠ 破壊的変更（B86 実体化ソースの不存在列参照を fail-closed 化）
+
+- **CTE・一時テーブル・`SHOW APPS` / `DESCRIBE` の実体化結果で、存在しない列を参照した SELECT を取得・評価・書き込み前に `ArgumentError` で拒否するようにした。** `LIKE` だけでなく `=`、SELECT 射影、式、集計、CASE、GROUP BY / HAVING / ORDER BY、window、JOIN、subquery、UNION、`INSERT` / `UPSERT ... SELECT` の source が対象。
+- 従来は不存在列を空文字として評価し、`LIKE` では全件一致、`=` では0件、`INSERT ... SELECT` では空文字レコードを POST し得た。現在成功して見える該当 SQL は誤った結果または書き込みを行っていたため、B78 / B79 と同じく migration note 付き minor の正しさ修正として扱う。
+- **移行方法:** 値を意図した裸の語は文字列リテラルとして引用する。たとえば `WHERE アプリ名 LIKE 顧客` は `WHERE アプリ名 LIKE '顧客'` へ修正する。`SELECT x AS y` の実体化後は `x` でなく `y`、UNION 後は左枝の列名／alias を使う。typo・削除済み列は実体化 source の SELECT 出力へ合わせる。
+- materialized + physical APP の混在 JOIN は両 source を同じ preflight で検証し、検証失敗時は downstream records GET / confirm / POST / PUT を開始しない。`rows=[] && columns=[]` で schema を復元できない単独0行読出しだけは既存挙動を維持し、JOIN 入力では取得前に schema-unavailable error とする。
+
 ### 修正（B85 engine ライブラリの VALIDATE 制約メタデータ契約）
 
 - `ReadonlyFieldInfo` に `required`、`minLength`、`maxLength`、`minValue`、`maxValue` を任意プロパティとして追加した。BYO readonly client がフォーム定義の制約を渡せるようにする純加法の型修正で、`createReadonlyKintoneClient()` の既存挙動は変更しない。

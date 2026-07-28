@@ -1946,6 +1946,24 @@ SELECT fieldCode, label FROM フィールド
 ORDER BY fieldCode ASC
 ```
 
+### 実体化後の列実在チェック（B86）
+
+CTE・一時テーブル・`SHOW APPS` / `DESCRIBE` の結果は、実体化した SELECT の**出力列だけ**を後段から参照できます。存在しない列は空文字として評価せず、下流の records GET、DML 確認、POST / PUT より前に `ArgumentError: unknown field code(s)` で拒否します。SELECT、WHERE（`=` / `LIKE` を含む全演算子）、式、CASE、集計、GROUP BY / HAVING / ORDER BY、window、JOIN、subquery、UNION、`INSERT` / `UPSERT ... SELECT` の source で共通です。物理 APP と実体化 source を混在 JOIN した場合も両方を検証します。
+
+これは、従来の誤結果・誤書き込みをエラーへ変える破壊的な正しさ修正です。特に、値のつもりで裸の識別子を書くと列参照になります。文字列値は引用してください。
+
+```sql
+-- NG: 顧客 は列参照。実体化結果にその列がなければ ArgumentError
+WITH アプリ一覧 AS (SHOW APPS)
+SELECT * FROM アプリ一覧 WHERE アプリ名 LIKE 顧客;
+
+-- OK: 値を文字列リテラルとして引用
+WITH アプリ一覧 AS (SHOW APPS)
+SELECT * FROM アプリ一覧 WHERE アプリ名 LIKE '顧客';
+```
+
+`SELECT x AS y` を実体化した後段では `x` ではなく出力名 `y` を使います。UNION の実体化結果では左枝の列名／alias が出力 schema です。`rows=[] && columns=[]` で schema 自体を復元できない0行 wildcard source は、JOIN なしの読出しに限り既存の0行挙動を維持します。JOIN 入力では有効な JOIN key を証明できないため、物理レコード取得前に schema-unavailable error になります。
+
 **注意事項:**
 - CTE 本体のサブクエリは SIMPLE / FULL_SCAN を自動判定
 - 再帰 CTE は非対応

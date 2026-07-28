@@ -5,6 +5,21 @@ release 成果物:
 - ksql-mcp.mcpb (manifest version 3.29.0)
 - ksql-mcp.js (MCP server version 3.29.0)
 
+破壊的変更の移行案内 (B86):
+- CTE / 一時テーブル / SHOW APPS / DESCRIBE の実体化結果で、存在しない列を参照した
+  SELECT は、records GET、確認、POST / PUT より前に ArgumentError で終了します。
+  LIKE、=、SELECT列、式、集計、JOIN、subquery、UNION、INSERT / UPSERT ... SELECT の
+  source で共通です。混在 JOIN は実体化側と物理 APP 側の両方を検証します。
+- 従来は不存在列が空文字になり、LIKE で全件一致、= で0件、INSERT ... SELECT で
+  空文字を書き込む場合がありました。成功して見えた結果が誤っていたため、
+  migration note 付き minor の正しさ修正として扱います。
+- 値を意図した裸の語は引用してください。
+    修正前: WHERE アプリ名 LIKE 顧客
+    修正後: WHERE アプリ名 LIKE '顧客'
+  SELECT x AS y の実体化後は y、UNION 後は左枝の列名 / alias を使ってください。
+- rows=[] かつ columns=[] の0行 wildcard source は、JOIN なしの読出しだけ従来挙動を
+  維持します。JOIN 入力では records GET 前に schema-unavailable error になります。
+
 1. ksql-plugin-v3.29.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
