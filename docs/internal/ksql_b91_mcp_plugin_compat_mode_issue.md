@@ -1,7 +1,7 @@
 # B91 MCP にプラグイン互換モードを追加する（環境変数）
 
 - 起票: 2026-07-29
-- ステータス: 📝 **再評価済み（2026-07-29・v3.33.0 時点）。案 D（`ksql_validate` に可搬性フラグ）を推奨・オーナー判断待ち**
+- ステータス: 📤 **Pro へ確認中**（2026-07-29）。案 D（`ksql_validate` に可搬性フラグ）を提案しつつ、**クローズの可能性も聞いている**。→ [確認文](ksql_pro_inquiry_b91_20260729.md)
 - 出典: [Pro からの連絡 2026-07-29](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260729-送付版.md) 依頼③（継続）
 - 関連: [B89 explainQuery バッチ](ksql_b89_library_explain_batch_issue.md) / [B68](ksql_b68_engine_library_readonly_impl_plan.md)
 
