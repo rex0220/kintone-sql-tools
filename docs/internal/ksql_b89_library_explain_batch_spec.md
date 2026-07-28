@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B89](ksql_b89_library_explain_batch_issue.md)
-- ステータス: 📋 **R2・実装待ち**（R1 §7 の自己矛盾を codex が実装前に指摘）
+- ステータス: 📋 **R3・実装待ち**（R1 §7・R2 §3 の矛盾を codex が実装前に指摘。いずれも Claude 側の誤り）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor（純加法）**＝従来拒否していたものを通す方向のみ。公開型の変更なし
 
@@ -69,14 +69,41 @@ Pro の設定画面は SQL 入力を 0.6 秒デバウンスで `explainQuery` �
 
 ---
 
-## 3. 振り分け
+## 3. 振り分け（R3 で修正）
 
-| 入力 | 経路 |
+### 3.1 R2 の誤り
+
+**R2 §3 は「単文なら従来経路」と書いたが、これは §2.2 と両立しない。**
+
+[`parseExplain`](../../src/parser/parser.ts#L608) が `EXPLAIN` の後に許すのは
+**`SELECT` / `WITH` / `INSERT` / `UPSERT` / `UPDATE` / `DELETE` / `REORDER` /
+`VALIDATE` / `IMPORT` だけ**である。
+
+したがって `runBatch` が受理する次の単文は、**`EXPLAIN` を前置きすると parse error になる。**
+
+`SHOW APPS` / `DESCRIBE APPn` / `CREATE TEMP TABLE` / `DROP TEMP TABLE` /
+`SET` / `DECLARE` / `ASSERT`
+
+```
+explainQuery("SHOW APPS")  →  EXPLAIN SHOW APPS  →  parse error
+```
+
+**文数だけで振り分けてはならない。文型も見る。**
+
+### 3.2 振り分け規則
+
+**`EXPLAIN` を展開した実質の対象**（`EXPLAIN X` なら `X`）で判定する。
+
+| 条件 | 経路 |
 |---|---|
-| **単文** | **従来どおり**（`execute("EXPLAIN ...")`）。**出力を変えない** |
-| **複文** | [`buildBatchExplainPlans`](../../src/execute.ts#L9595) |
+| **文数 1 かつ 対象が `SELECT` / `WITH` / `UNION`** | **従来どおり**（`execute("EXPLAIN ...")`）。**出力を変えない** |
+| **それ以外**（複文、または上記以外の単文） | [`buildBatchExplainPlans`](../../src/execute.ts#L9595) |
 
-判定は**パース結果の文数**で行う（`;` の有無で判定しない。文字列リテラル中の `;` を誤検出する）。
+**従来経路は「今日すでに通っている形」だけに限定する。**
+こうすることで**受入 2（既存出力の不変）が構造的に保証される**
+（新しく受理される単文には、そもそも比較対象の旧出力が無い）。
+
+**文数の判定はパース結果で行う**（`;` の有無で判定しない。文字列リテラル中の `;` を誤検出する）。
 
 `buildBatchExplainPlans` は **metadata API 以外の実行 API を呼ばない**（レコードを読まない）。
 
@@ -86,9 +113,12 @@ Pro の設定画面は SQL 入力を 0.6 秒デバウンスで `explainQuery` �
 
 **公開型 `ExplainResult` を変えない。**`lines` に文番号付きで連結する。
 
-### 4.1 単文は現状のまま
+### 4.1 接頭辞は**文数が 2 以上のときだけ**付ける
 
-**既存利用者の `lines` を 1 文字も変えない。**文番号の接頭辞も付けない。
+**単文なら、どちらの経路を通っても接頭辞を付けない。**
+（`SHOW APPS` のように新しく受理される単文も、`buildBatchExplainPlans` 経由だが接頭辞なし）
+
+**従来経路を通る単文の `lines` / `text` は 1 文字も変えない。**
 
 ### 4.2 複文の形
 
@@ -141,6 +171,9 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
 2. **単文の出力が変わらない** — 既存の単文 explain の `lines` / `text` が**完全に不変**であること
    （既存テストが落ちないことに加え、明示的に固定する）
 3. **単文 `VALIDATE APPn` が通る** — 従来 `readOnlyViolation` だったものが成功すること
+3b. **`EXPLAIN` を前置きできない単文も通る** — `SHOW APPS` / `DESCRIBE APPn` /
+   `CREATE TEMP TABLE` / `DROP TEMP TABLE` / `SET` / `DECLARE` / `ASSERT` の**単文**が
+   `explainQuery` で成功し、**接頭辞が付かない**こと（§3.1 の parse error が起きないこと）
 4. **受理集合が `runBatch` と一致する** — **これが本仕様の中核**。
    **型レベルで網羅**し、`runBatch` が受ける文型は `explainQuery` も受け、
    `runBatch` が拒否する文型は `explainQuery` も拒否することを固定する。
@@ -162,7 +195,8 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
 ## 7. 注意点・決めること
 
 - **複文の中の `EXPLAIN` は受理する**（§2.4・R2 で確定）。R1 の「拒否を推奨」は撤回した
-- **`;` の有無で単文・複文を判定しないこと**（文字列リテラル中の `;` を誤検出する）
+- **`;` の有無で判定しないこと**（文字列リテラル中の `;` を誤検出する）
+- **文数だけで振り分けないこと**（§3.1）。`EXPLAIN` を前置きできない単文がある
 - **単文経路の出力を変えないこと**（受入 2）。ここが変わると Pro 以外の利用者へ影響が出る
 - **`cacheContext` は確認済み＝問題なし**（R2）。
   `buildBatchExplainPlans` は内部で `createInvocationCacheContext` を通すため、
