@@ -2,6 +2,12 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 修正（B96 `getRecords()` の応答契約を文書化）
+
+- **BYO client とラッパーは `getRecords()` の応答をそのまま返し、`searchAborted` を落として検索打ち切りの fail-closed を無効にしないことを engine ライブラリ文書へ明記した。** `totalCount` の欠落は全件取得へのフォールバックによる性能上の影響にとどまること、追加項目が任意プロパティである応答は `getRecords()` だけであることも併記した。**コード・公開型・挙動の変更なし。**
+
 ## v3.32.0（2026-07-29）
 
 ### 追加（B95 取得上限の打ち切りを `metrics` へ構造化）

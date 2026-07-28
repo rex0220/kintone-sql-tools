@@ -194,6 +194,32 @@ policy などの route / transport 契約は **BYO client 側の責務**です�
 guest / proxy route を推測、補正、再構築しません。`openCursor()` が返す handle の
 `close()` は idempotent にしてください。
 
+### `getRecords()` の契約
+
+**応答をそのまま返してください。`records` 以外の項目を落とさないでください。**
+
+| | |
+|---|---|
+| **必ず残す** | **`searchAborted`。**応答に含まれている値を落とすと、検索打ち切り（10 万件）に対する fail-closed が無効になり、打ち切られた結果を完全な結果として扱います。これは結果の**正しさ**に関わります |
+| **残すと速い** | `totalCount`。`params.totalCount === true` を kintone へ渡し、応答の値をそのまま返すと `SELECT COUNT(*)` を1リクエストで取得できます。落としても正しさは保たれ、全件取得へフォールバックします。影響するのは**性能**です |
+
+**キャッシュ・計測・リトライのために client を包む場合も同じです。**
+`createReadonlyKintoneClient()` を使っていても、応答を組み立て直すラッパーで項目が
+落ちることがあります。次は説明用の断片であり、単独で実行するコードではありません。
+
+```ts
+// 誤り — totalCount と searchAborted が落ちる
+return { records: [...res.records] };
+
+// 正しい — 応答をそのまま返す
+return res;
+```
+
+6 read method のうち、**追加項目が任意プロパティである応答は `getRecords()` だけ**です。
+`ReadonlyCursorPage.next` と `ReadonlyCursorHandle.totalCount` は必須なので、落とすと
+型エラーになります。`searchAborted` を保持した後の engine の挙動は
+[検索打ち切りと Cursor](#検索打ち切りと-cursor)を参照してください。
+
 ### `getFields()` の契約
 
 **`/k/v1/app/form/fields.json` が返すフィールドだけを返してください。**
@@ -368,6 +394,8 @@ WHERE c.受注日 = THIS_MONTH();
 
 client が `searchAborted: true` を返した場合、simple query、JOIN、GROUP BY を問わず
 常に `SEARCH_ABORTED` の **hard error** です。部分行や warning result は返しません。
+client が応答項目を保持する義務は
+[`getRecords()` の契約](#getrecords-の契約)を参照してください。
 
 query が開いた Cursor は、成功、query error、次ページ error のいずれでも query 終了時
 に `close()` します。close error が主 error を隠すことはありません。

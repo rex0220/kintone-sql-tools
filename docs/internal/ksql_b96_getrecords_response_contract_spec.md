@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B96](ksql_b96_getrecords_response_contract_issue.md)
-- ステータス: 📋 **実装待ち**
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-29）
 - 分担: Claude=仕様/レビュー、codex=実装
 - SemVer: **patch**（文書のみ・コードと挙動は変更しない）
 

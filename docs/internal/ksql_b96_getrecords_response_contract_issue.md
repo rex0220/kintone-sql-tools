@@ -1,7 +1,7 @@
 # B96 `getRecords()` の応答契約が文書に無く、ラッパーが `searchAborted` を落とすと fail-closed が無効になる
 
 - 起票: 2026-07-29
-- ステータス: 📋 **仕様確定・実装待ち**（案 A 採用）。→ [実装仕様](ksql_b96_getrecords_response_contract_spec.md)
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-29・案 A）。→ [実装仕様](ksql_b96_getrecords_response_contract_spec.md)
 - 出典: [Pro からの報告 v3.32.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3320.md) §3
 - 関連: [B93 `getFields` の契約](ksql_b93_getfields_contract_error_issue.md) / [B85](ksql_b85_validate_constraint_disclosure_spec.md) / [B94 `totalCount`](ksql_b94_count_star_totalcount_issue.md)
 
