@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B89](ksql_b89_library_explain_batch_issue.md)
-- ステータス: 📋 **R3・実装待ち**（R1 §7・R2 §3 の矛盾を codex が実装前に指摘。いずれも Claude 側の誤り）
+- ステータス: 📋 **R4・実装待ち**（R1 §7・R2 §3・R3 受入 3b の誤りを codex が実装前に指摘。いずれも Claude 側）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor（純加法）**＝従来拒否していたものを通す方向のみ。公開型の変更なし
 
@@ -105,6 +105,29 @@ explainQuery("SHOW APPS")  →  EXPLAIN SHOW APPS  →  parse error
 
 **文数の判定はパース結果で行う**（`;` の有無で判定しない。文字列リテラル中の `;` を誤検出する）。
 
+### 3.3 単文として無意味な文は**拒否したまま**にする（R4 で修正）
+
+**R3 の受入 3b は `CREATE TEMP TABLE` / `DROP TEMP TABLE` / `SET` / `DECLARE` の
+単文成功を要求していたが、これは誤りだった。**
+
+[`analyzeBatch`](../../src/core/batch.ts#L228) はこれらの単文を**意図的に拒否**している。
+
+```
+ArgumentError: SET variable requires a batch.
+ArgumentError: CREATE TEMP TABLE requires a batch (temp tables are batch-scoped).
+```
+
+**単文の `DROP TEMP TABLE #t` は、先行する `CREATE` が無いため未定義参照としても拒否される。**
+
+`buildBatchExplainPlans` も同じ `analyzeBatch` を通るため、
+**explain だけ通そうとすると `explainQuery` が `runBatch` の上位集合になり、受入 4 に違反する。**
+「構文 OK と出たのに実行できない」という、本課題が直そうとしているものと同じ形になる。
+
+→ **拒否したままにし、`runBatch` と同じエラーになることを受入 3c で固定する。**
+
+> `ASSERT` の単文は `analyzeBatch` の拒否対象ではなく、**実機で成功を確認済み**
+> （`ASSERT (SELECT COUNT(*) FROM APP4147) > 0` → `ok: true`）。
+
 `buildBatchExplainPlans` は **metadata API 以外の実行 API を呼ばない**（レコードを読まない）。
 
 ---
@@ -171,9 +194,11 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
 2. **単文の出力が変わらない** — 既存の単文 explain の `lines` / `text` が**完全に不変**であること
    （既存テストが落ちないことに加え、明示的に固定する）
 3. **単文 `VALIDATE APPn` が通る** — 従来 `readOnlyViolation` だったものが成功すること
-3b. **`EXPLAIN` を前置きできない単文も通る** — `SHOW APPS` / `DESCRIBE APPn` /
-   `CREATE TEMP TABLE` / `DROP TEMP TABLE` / `SET` / `DECLARE` / `ASSERT` の**単文**が
-   `explainQuery` で成功し、**接頭辞が付かない**こと（§3.1 の parse error が起きないこと）
+3b. **`EXPLAIN` を前置きできない単文も通る** — **`SHOW APPS` / `DESCRIBE APPn` / `ASSERT`** の
+   **単文**が `explainQuery` で成功し、**接頭辞が付かない**こと（§3.1 の parse error が起きないこと）
+3c. **単文として無意味な文は `runBatch` と同じように拒否される** — `SET` / `DECLARE` /
+   `CREATE TEMP TABLE` / `DROP TEMP TABLE` の**単文**が、**`runBatch` と同じエラー**で
+   拒否されること（§3.3）。**explain 側だけ緩めない**
 4. **受理集合が `runBatch` と一致する** — **これが本仕様の中核**。
    **型レベルで網羅**し、`runBatch` が受ける文型は `explainQuery` も受け、
    `runBatch` が拒否する文型は `explainQuery` も拒否することを固定する。
@@ -197,6 +222,8 @@ Pro はこれで「3 文目の SELECT で…」と提示できると回答して
 - **複文の中の `EXPLAIN` は受理する**（§2.4・R2 で確定）。R1 の「拒否を推奨」は撤回した
 - **`;` の有無で判定しないこと**（文字列リテラル中の `;` を誤検出する）
 - **文数だけで振り分けないこと**（§3.1）。`EXPLAIN` を前置きできない単文がある
+- **explain 側だけ緩めないこと**（§3.3）。`explainQuery` が `runBatch` の上位集合になると、
+  「構文 OK と出たのに実行できない」という本課題と同じ形の不整合を作る
 - **単文経路の出力を変えないこと**（受入 2）。ここが変わると Pro 以外の利用者へ影響が出る
 - **`cacheContext` は確認済み＝問題なし**（R2）。
   `buildBatchExplainPlans` は内部で `createInvocationCacheContext` を通すため、
