@@ -30,8 +30,8 @@ test("B65 consumer allowlist: production の直接 .groupBy 参照を AST 境界
     "src/core/grouping.ts:76",
     "src/core/grouping.ts:78",
     // B71 plain GROUP BY planning: AST-boundary reads, not grouping-semantics consumers.
-    "src/execute.ts:2598",
-    "src/execute.ts:2637",
+    "src/execute.ts:2615",
+    "src/execute.ts:2654",
     "src/parser/parser.ts:724",
   ].sort());
 });

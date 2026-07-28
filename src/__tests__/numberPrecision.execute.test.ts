@@ -78,7 +78,7 @@ test("VALIDATE ONLYとON ERROR SKIPは小数超過を隔離せず元値を通す
   });
 });
 
-test("同一cacheContext×appIdの複数文はin-flight Promiseを含め最大1回、別scopeは共有しない", async () => {
+test("同一バッチの複数文は最大1回、別実行と並行実行は共有しない", async () => {
   const shared = makeClient();
   await executeBatch(
     "INSERT INTO APP92007 (n) VALUES (1); INSERT INTO APP92007 (n) VALUES (2)",
@@ -94,7 +94,7 @@ test("同一cacheContext×appIdの複数文はin-flight Promiseを含め最大1�
     execute("INSERT INTO APP92008 (n) VALUES (1)", concurrent.client, { cacheContext: "b29-cache-concurrent" }),
     execute("INSERT INTO APP92008 (n) VALUES (2)", concurrent.client, { cacheContext: "b29-cache-concurrent" }),
   ]);
-  expect(concurrent.calls.settings).toBe(1);
+  expect(concurrent.calls.settings).toBe(2);
 });
 
 test("settings失敗はVALIDATE ONLY/ON ERROR SKIPでも既定値を補わず文全体をfail-closedする", async () => {

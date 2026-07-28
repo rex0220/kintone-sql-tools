@@ -720,6 +720,7 @@ export interface DmlUpdateModeSnapshotLoadInput {
 
 const defaultCacheContextByClient = new WeakMap<KintoneClient, string>();
 let nextDefaultCacheContextId = 1;
+let nextCacheInvocationId = 1;
 
 function resolveCacheContext(client: KintoneClient, explicit?: string): string {
   if (explicit) return explicit;
@@ -729,6 +730,10 @@ function resolveCacheContext(client: KintoneClient, explicit?: string): string {
     defaultCacheContextByClient.set(client, context);
   }
   return context;
+}
+
+function createInvocationCacheContext(cacheContext: string): string {
+  return `${cacheContext}\0inv:${nextCacheInvocationId++}`;
 }
 
 /**
@@ -745,29 +750,35 @@ export async function execute(
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
   const startedAt = Date.now();
-  const cacheContext = resolveCacheContext(client, options.cacheContext);
-  const stmt = parseSql(sql, options.enableImport === true);
-  const metrics = createEmptyMetrics();
-  const countedClient = wrapClientWithMetrics(client, metrics);
-  const collector: SearchAbortCollector = { aborted: false };
-  const guardedClient = wrapClientWithSearchAbort(
-    countedClient,
-    collector,
-    !isSelectLikeStatement(stmt) || statementContainsOuterJoin(stmt)
+  const cacheContext = createInvocationCacheContext(
+    resolveCacheContext(client, options.cacheContext)
   );
-  const result = await executeParsedStatement(
-    stmt,
-    guardedClient,
-    options,
-    cacheContext
-  );
-  metrics.elapsedMs = Date.now() - startedAt;
-  const finalResult = { ...attachSearchAbortWarning(result, collector), metrics };
-  if (result.type === "SELECT") {
-    const columnMeta = materializedMetaBySelectResult.get(result);
-    if (columnMeta) materializedMetaBySelectResult.set(finalResult as SelectResult, columnMeta);
+  try {
+    const stmt = parseSql(sql, options.enableImport === true);
+    const metrics = createEmptyMetrics();
+    const countedClient = wrapClientWithMetrics(client, metrics);
+    const collector: SearchAbortCollector = { aborted: false };
+    const guardedClient = wrapClientWithSearchAbort(
+      countedClient,
+      collector,
+      !isSelectLikeStatement(stmt) || statementContainsOuterJoin(stmt)
+    );
+    const result = await executeParsedStatement(
+      stmt,
+      guardedClient,
+      options,
+      cacheContext
+    );
+    metrics.elapsedMs = Date.now() - startedAt;
+    const finalResult = { ...attachSearchAbortWarning(result, collector), metrics };
+    if (result.type === "SELECT") {
+      const columnMeta = materializedMetaBySelectResult.get(result);
+      if (columnMeta) materializedMetaBySelectResult.set(finalResult as SelectResult, columnMeta);
+    }
+    return finalResult;
+  } finally {
+    releaseMetadataCacheScope(cacheContext);
   }
-  return finalResult;
 }
 
 function createEmptyMetrics(): ExecuteMetrics {
@@ -1482,113 +1493,119 @@ export async function executeBatch(
   const countedClient = wrapClientWithMetrics(client, metrics);
   const startedAt = Date.now();
   const deadline = options.timeoutMs != null ? startedAt + options.timeoutMs : null;
-  const cacheContext = resolveCacheContext(client, options.cacheContext);
+  const cacheContext = createInvocationCacheContext(
+    resolveCacheContext(client, options.cacheContext)
+  );
 
-  const tempTables = new Map<string, MaterializedTable>();
-  const variables = new Map<string, VarValue>();
-  const results: BatchStatementResult[] = [];
-  /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
-  const failed = new Set<number>();
-  /** fail-fast / timeout / assertion で中断済みなら以降の文の skippedReason */
-  let aborted: "fail-fast" | "timeout" | "assertion" | null = null;
+  try {
+    const tempTables = new Map<string, MaterializedTable>();
+    const variables = new Map<string, VarValue>();
+    const results: BatchStatementResult[] = [];
+    /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
+    const failed = new Set<number>();
+    /** fail-fast / timeout / assertion で中断済みなら以降の文の skippedReason */
+    let aborted: "fail-fast" | "timeout" | "assertion" | null = null;
 
-  for (let i = 0; i < statements.length; i++) {
-    const info = analysis.statements[i];
-    const base = { index: i, type: info.statementType };
+    for (let i = 0; i < statements.length; i++) {
+      const info = analysis.statements[i];
+      const base = { index: i, type: info.statementType };
 
-    if (aborted) {
-      results.push({ ...base, status: "skipped", skippedReason: aborted });
-      failed.add(i);
-      continue;
-    }
-
-    // 依存スキップ: 依存先（一時テーブルを CREATE した文）が success していない
-    const brokenDep = info.dependsOn.find((d) => failed.has(d));
-    if (brokenDep !== undefined) {
-      const depName =
-        analysis.statements[brokenDep].tempTablesCreated[0] ?? `statement ${brokenDep}`;
-      results.push({ ...base, status: "skipped", skippedReason: `dependency: ${depName}` });
-      failed.add(i);
-      continue;
-    }
-
-    if (deadline !== null && Date.now() >= deadline) {
-      results.push({ ...base, status: "skipped", skippedReason: "timeout" });
-      failed.add(i);
-      aborted = "timeout";
-      continue;
-    }
-
-    try {
-      const remaining = deadline !== null ? deadline - Date.now() : null;
-      // confirm に文コンテキストを注入する（呼び出し回数からの文番号推測は
-      // INSERT VALUES 非経由・0 件 UPSERT スキップで崩れるため、ここで束縛する）
-      const userConfirm = batchOptions.confirm;
-      const stmtOptions: BatchExecuteOptions = userConfirm
-        ? {
-          ...batchOptions,
-          confirm: (count, operation, detailContext) => userConfirm(count, operation, {
-            statementIndex: i,
-            statementCount: statements.length,
-            statementType: info.statementType,
-            targetAppId: info.targetAppId,
-            ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
-            ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
-            ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
-          }),
-        }
-        : batchOptions;
-      const searchAbortCollector: SearchAbortCollector = { aborted: false };
-      const statementClient = wrapClientWithSearchAbort(
-        countedClient,
-        searchAbortCollector,
-        (
-          info.statementType !== "SELECT"
-          && info.statementType !== "UNION"
-          && info.statementType !== "WITH"
-        ) || statementContainsOuterJoin(statements[i])
-      );
-      const cursorScope = wrapClientWithCursorScope(statementClient);
-      const outcome = await runWithDeadline(
-        executeBatchStatement(statements[i], info, cursorScope.client, stmtOptions, cacheContext, tempTables, variables),
-        remaining,
-        cursorScope.closeActive
-      );
-      if (outcome.result) {
-        outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+      if (aborted) {
+        results.push({ ...base, status: "skipped", skippedReason: aborted });
+        failed.add(i);
+        continue;
       }
-      results.push({ ...base, status: "success", ...outcome });
-    } catch (e) {
-      results.push({
-        ...base,
-        status: "error",
-        error: toBatchStatementError(e),
-        ...(e instanceof RejectLimitExceededError ? { result: e.diagnostic } : {}),
-      });
-      failed.add(i);
-      if (e instanceof BatchTimeoutError) {
+
+      // 依存スキップ: 依存先（一時テーブルを CREATE した文）が success していない
+      const brokenDep = info.dependsOn.find((d) => failed.has(d));
+      if (brokenDep !== undefined) {
+        const depName =
+          analysis.statements[brokenDep].tempTablesCreated[0] ?? `statement ${brokenDep}`;
+        results.push({ ...base, status: "skipped", skippedReason: `dependency: ${depName}` });
+        failed.add(i);
+        continue;
+      }
+
+      if (deadline !== null && Date.now() >= deadline) {
+        results.push({ ...base, status: "skipped", skippedReason: "timeout" });
+        failed.add(i);
         aborted = "timeout";
-      } else if (e instanceof AssertError) {
-        // ASSERT 失敗は continueOnError を無視して常に停止する（設計判断 D3:
-        // ASSERT は後続実行のゲートであり、続行を許すと存在意義が消える）
-        aborted = "assertion";
-      } else if (info.statementType === "SET_VARIABLE" || info.statementType === "DECLARE_VARIABLE") {
-        // 変数値が欠けた状態で後続を実行しない（continueOnError より優先）
-        aborted = "fail-fast";
-      } else if (!options.continueOnError) {
-        aborted = "fail-fast";
+        continue;
+      }
+
+      try {
+        const remaining = deadline !== null ? deadline - Date.now() : null;
+        // confirm に文コンテキストを注入する（呼び出し回数からの文番号推測は
+        // INSERT VALUES 非経由・0 件 UPSERT スキップで崩れるため、ここで束縛する）
+        const userConfirm = batchOptions.confirm;
+        const stmtOptions: BatchExecuteOptions = userConfirm
+          ? {
+            ...batchOptions,
+            confirm: (count, operation, detailContext) => userConfirm(count, operation, {
+              statementIndex: i,
+              statementCount: statements.length,
+              statementType: info.statementType,
+              targetAppId: info.targetAppId,
+              ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
+              ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
+              ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
+            }),
+          }
+          : batchOptions;
+        const searchAbortCollector: SearchAbortCollector = { aborted: false };
+        const statementClient = wrapClientWithSearchAbort(
+          countedClient,
+          searchAbortCollector,
+          (
+            info.statementType !== "SELECT"
+            && info.statementType !== "UNION"
+            && info.statementType !== "WITH"
+          ) || statementContainsOuterJoin(statements[i])
+        );
+        const cursorScope = wrapClientWithCursorScope(statementClient);
+        const outcome = await runWithDeadline(
+          executeBatchStatement(statements[i], info, cursorScope.client, stmtOptions, cacheContext, tempTables, variables),
+          remaining,
+          cursorScope.closeActive
+        );
+        if (outcome.result) {
+          outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+        }
+        results.push({ ...base, status: "success", ...outcome });
+      } catch (e) {
+        results.push({
+          ...base,
+          status: "error",
+          error: toBatchStatementError(e),
+          ...(e instanceof RejectLimitExceededError ? { result: e.diagnostic } : {}),
+        });
+        failed.add(i);
+        if (e instanceof BatchTimeoutError) {
+          aborted = "timeout";
+        } else if (e instanceof AssertError) {
+          // ASSERT 失敗は continueOnError を無視して常に停止する（設計判断 D3:
+          // ASSERT は後続実行のゲートであり、続行を許すと存在意義が消える）
+          aborted = "assertion";
+        } else if (info.statementType === "SET_VARIABLE" || info.statementType === "DECLARE_VARIABLE") {
+          // 変数値が欠けた状態で後続を実行しない（continueOnError より優先）
+          aborted = "fail-fast";
+        } else if (!options.continueOnError) {
+          aborted = "fail-fast";
+        }
       }
     }
-  }
 
-  metrics.elapsedMs = Date.now() - startedAt;
-  return {
-    ok: results.every((r) => r.status === "success"),
-    statementCount: statements.length,
-    statements: results,
-    analysis,
-    metrics,
-  };
+    metrics.elapsedMs = Date.now() - startedAt;
+    return {
+      ok: results.every((r) => r.status === "success"),
+      statementCount: statements.length,
+      statements: results,
+      analysis,
+      metrics,
+    };
+  } finally {
+    releaseMetadataCacheScope(cacheContext);
+  }
 }
 
 function statementHasApplyMutation(statement: Statement): boolean {
@@ -5038,6 +5055,30 @@ const sortKindCache = new Map<string, Map<number, Map<string, "number" | "string
 const fieldInfoCache = new Map<string, Map<number, Promise<KintoneFieldInfo[]>>>();
 const processStatusCache = new Map<string, Map<number, Promise<KintoneProcessStatuses>>>();
 const numberPrecisionCache = new Map<string, Map<number, Promise<NumberPrecision>>>();
+
+function releaseMetadataCacheScope(cacheContext: string): void {
+  fieldTypeCache.delete(cacheContext);
+  optionOrderCache.delete(cacheContext);
+  sortKindCache.delete(cacheContext);
+  fieldInfoCache.delete(cacheContext);
+  processStatusCache.delete(cacheContext);
+  numberPrecisionCache.delete(cacheContext);
+}
+
+/** @internal テストで実行スコープの解放を観測するための内部状態。 */
+export function __metadataCacheScopeCountsForTest(): Readonly<Record<
+  "fieldType" | "optionOrder" | "sortKind" | "fieldInfo" | "processStatus" | "numberPrecision",
+  number
+>> {
+  return {
+    fieldType: fieldTypeCache.size,
+    optionOrder: optionOrderCache.size,
+    sortKind: sortKindCache.size,
+    fieldInfo: fieldInfoCache.size,
+    processStatus: processStatusCache.size,
+    numberPrecision: numberPrecisionCache.size,
+  };
+}
 
 function getScopedCacheValue<T>(
   root: Map<string, Map<number, T>>,
@@ -9604,12 +9645,14 @@ export async function buildBatchExplainPlans(
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
 ): Promise<BatchExplainResult> {
-  const statements = parseSqlBatch(sql, enableImport);
-  const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
-  validateDeclaredBatchVariables(statements, injectedVariables);
-  const variables = new Map<string, VarValue>();
-  const plans: BatchStatementPlan[] = [];
-  for (let i = 0; i < statements.length; i++) {
+  const invocationCacheContext = createInvocationCacheContext(cacheContext);
+  try {
+    const statements = parseSqlBatch(sql, enableImport);
+    const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+    validateDeclaredBatchVariables(statements, injectedVariables);
+    const variables = new Map<string, VarValue>();
+    const plans: BatchStatementPlan[] = [];
+    for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i];
       const planStmt = stmt.type === "SET_VARIABLE"
         ? (stmt.expr.type === "SCALAR_SUBQUERY"
@@ -9617,11 +9660,11 @@ export async function buildBatchExplainPlans(
           : stmt)
         : resolveBatchVariableReferences(stmt, variables);
       validateKlikeStatement(planStmt);
-      const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, cacheContext);
+      const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, invocationCacheContext);
       const whereAnalysis = await buildExplainWhereAnalysis(
         planStmt,
         client,
-        cacheContext,
+        invocationCacheContext,
         maxRecords,
         relativeDatePlan
       );
@@ -9653,8 +9696,11 @@ export async function buildBatchExplainPlans(
           ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
           : { type: "string", value: `@${stmt.name}` });
       }
+    }
+    return { statementCount: statements.length, statements: plans };
+  } finally {
+    releaseMetadataCacheScope(invocationCacheContext);
   }
-  return { statementCount: statements.length, statements: plans };
 }
 
 function buildBatchStatementPlan(

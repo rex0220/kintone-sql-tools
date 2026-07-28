@@ -3505,7 +3505,7 @@ test("FULL_SCAN: status.json の reject をレコード取得前に伝播する"
   expect(client.getCalls).toHaveLength(0);
 });
 
-test("FULL_SCAN: status.json は同一APP/profileの同時実行でも1回だけ取得する", async () => {
+test("FULL_SCAN: status.json は同一APP/profileの同時実行でも実行ごとに取得する", async () => {
   const client = makeClient({ records: [
     makeTypedRecord({ $id: "1", ステータス: "処理中", 件名: "one" }),
   ] });
@@ -3525,7 +3525,7 @@ test("FULL_SCAN: status.json は同一APP/profileの同時実行でも1回だけ
     execute(sql, client, { cacheContext: "status-cache-profile-a" }),
     execute(sql, client, { cacheContext: "status-cache-profile-a" }),
   ]);
-  expect(statusCalls).toBe(1);
+  expect(statusCalls).toBe(2);
 });
 
 test("FULL_SCAN JOIN: STATUS候補のある側だけ status.json を取得して押し下げる", async () => {
@@ -6263,7 +6263,7 @@ test("MIN / MAX: 物理テキスト列は辞書順、NUMBER 列は従来の数�
   expect(result.metrics!.fieldCalls).toBe(1);
 });
 
-test("MIN / MAX: フォーム定義は既存 cacheContext キャッシュを共有する", async () => {
+test("MIN / MAX: フォーム定義は同じ cacheContext でも実行を跨いで再取得する", async () => {
   const client = makeClient({ records: [makeRecord({ text: "B" }), makeRecord({ text: "A" })] });
   client.getFields = async () => [
     { code: "text", label: "text", fieldType: "MULTI_LINE_TEXT" },
@@ -6275,7 +6275,7 @@ test("MIN / MAX: フォーム定義は既存 cacheContext キャッシュを共�
   expect(first.rows[0].value).toBe("A");
   expect(second.rows[0].value).toBe("B");
   expect(first.metrics!.fieldCalls).toBe(1);
-  expect(second.metrics!.fieldCalls).toBe(0);
+  expect(second.metrics!.fieldCalls).toBe(1);
 });
 
 test("MIN / MAX: CALC は sortKind を一次判定に使う", async () => {

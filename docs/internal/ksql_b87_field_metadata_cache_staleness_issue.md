@@ -1,7 +1,7 @@
 # B87 アプリ定義キャッシュが無効化されず、追加した項目が「存在しない」と拒否される
 
 - 起票: 2026-07-28
-- ステータス: 📋 **仕様確定・実装待ち（優先 中）**（2026-07-28）。→ [実装仕様](ksql_b87_metadata_cache_spec.md)
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-28）。→ [実装仕様](ksql_b87_metadata_cache_spec.md)
 - 出典: B2 schema 復元拡張の事前検証（実 kintone・オーナー指摘「あとから項目を追加したケース」）
 - 関連: [B86 実体化ソースの不存在列](ksql_b86_materialized_unknown_column_issue.md) / [B85 VALIDATE の制約検証](ksql_b85_library_validate_constraints_issue.md) / [B2 schema 復元拡張](ksql_empty_select_wildcard_pipeline_spec.md)
 
