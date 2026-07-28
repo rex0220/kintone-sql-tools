@@ -1,7 +1,7 @@
 # B97 打ち切られた入力の集計を fail-closed にする（B95 案 B・Pro から要望）
 
 - 起票: 2026-07-29
-- ステータス: 📋 **未着手**（**要望が出たので B95 案 B を独立起票**）
+- ステータス: 📋 **仕様確定・実装待ち**（調査で前提が覆り、新モードではなく既存 truncate へ対象を足す）。→ [実装仕様](ksql_b97_incomplete_aggregate_failclosed_spec.md)
 - 出典: [Pro からの報告 v3.32.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3320.md) §4
 - 関連: [B95 案 B](ksql_b95_truncation_visibility_issue.md#42-案-b--打ち切られた入力の集計を-fail-closed-にする) / [B72 §7.2](ksql_b72_relative_date_fullscan_exact_spec.md) / [B94](ksql_b94_count_star_totalcount_issue.md)
 
@@ -117,35 +117,120 @@ SELECT ステータス, COUNT(*) … GROUP BY   maxRecords=500 → 499（誤り�
 [B95 §4.2](ksql_b95_truncation_visibility_issue.md) で挙げた「選んだのに勝手にエラーにする」
 という懸念は、**新しいモードにすれば回避できる**。**Pro もモード追加を前提に書いている。**
 
-## 7. 決めること
+## 7. 調査結果（2026-07-29・codex による事実調査）
 
-1. **新しいモードにするか、既存 `"truncate"` の挙動を変えるか。**
-   **新モードを推す**＝純加法で誰も困らない。既存利用者の挙動が変わらない
-2. **「値が変わる形」の判定をどこで持つか。**
-   **既存の判定を再利用できるか**が中心。B94 で `PredicateCapability` を再利用した前例がある。
-   **新規に書くと B78 / B79 / B86 と同じ silent wrong result になる**
-3. **対象の網羅**＝集計 / `GROUP BY` / `DISTINCT` / window / ローカル絞り込み /
-   `ORDER BY` の局所ソート / `LIMIT`（局所） / JOIN の突き合わせ。**「行をそのまま返すだけ」の定義が要**
-4. **既に fail-closed のものとの関係**＝`STATISTICAL_AGGREGATES`（`STDDEV` / `VAR` / `MEDIAN` /
-   `MODE`）は従来から強制対象。**二重にならないか**
-5. **`onLimitReached` の型が変わる**（公開型）。**B95 の教訓＝公開型は利用者が構築できる**ので、
-   **リテラル union を広げる方向なら破壊的ではない**ことを確認する
-6. **MCP / CLI にも出すか**（`onLimit` パラメータ）
+**起票時の前提が覆った。「新しい判定を作る」必要は無い。**
 
-## 8. 規模（暫定）
+### 7.1 **仕組みは完成している**
+
+| | 場所 |
+|---|---|
+| 型 | `CompleteInputReason`（[dmlGuard.ts:77-83](../../src/core/dmlGuard.ts#L77)）＝`DML` / `VALIDATE` / `LOCAL_ORDER` / `WINDOW_ORDER` / `STATISTICAL_AGGREGATE` / `GROUPING_SETS` |
+| 判定 | `completeInputReasons(stmt)`（[dmlGuard.ts:108-145](../../src/core/dmlGuard.ts#L108)）＝AST を再帰的に走査。サブクエリ・CASE・CTE・UNION の枝まで届く |
+| **上書き** | `buildCompleteInputPolicy()`（[execute.ts:2914-2933](../../src/execute.ts#L2914)）＝**理由が 1 つでもあれば `truncate` を `error` へ差し替える** |
+| エラー | `FetchAllLimitError` に理由と「onLimit=truncateは使用できません。」を付けて投げ直す（[execute.ts:2936-2955](../../src/execute.ts#L2936)） |
+
+**エンジンは既に Pro が求めた線引きを持っている。**
+ローカル `ORDER BY`・window・統計集計・grouping sets は **`truncate` でもエラー**、
+**素の明細は打ち切り＋警告**。**足りないのは対象だけである。**
+
+### 7.2 **B56 が意図的に残していた**
+
+> 既存 `SUM` / `AVG` 等の truncate 契約を互換性のため変更せず、
+> **既存集計の完全入力化を別課題とし、新旧非対称は意図的**とする。
+> — [ksql_b56_statistical_aggregates_spec.md](ksql_b56_statistical_aggregates_spec.md) §76-83
+
+**B97 がその「別課題」である。**設計が本件を見越していた。
+
+### 7.3 対象外になっているもの（コードで確認）
+
+**`COUNT` / `SUM` / `AVG`・plain `GROUP BY`・`DISTINCT`・`UNION` の重複排除・
+`JOIN`・ローカル `WHERE`・`LIMIT` / `OFFSET`** はいずれも理由に含まれない
+（[dmlGuard.ts:155-169](../../src/core/dmlGuard.ts#L155)）。
+
+### 7.4 **既存テストが「誤った挙動」を成功として固定している**
+
+[`b72RelativeDateFullScanExactStep2.test.ts:292-330`](../../src/__tests__/b72RelativeDateFullScanExactStep2.test.ts#L292)
+が `maxRecords=2` / `truncate` で次を**成功値**として固定している。
+
+| | 期待している値 |
+|---|---|
+| plain `GROUP BY` + `COUNT(*)` | `[{区分:"A", c:"2"}]` |
+| `DISTINCT` | `[{区分:"A"}]` |
+| 通常 `SUM(金額)` | `[{total:"30"}]` |
+
+**§4 の `0` と同じ問題である。**
+**この 3 つを書き換えることが B97 の成果物**であり、
+**「既存テストを書き換えたら止めて報告」の例外として仕様で明示する。**
+
+### 7.5 エラーの主語に穴がある
+
+`completeInputErrorPrefix()`（[execute.ts:2896-2905](../../src/execute.ts#L2896)）は
+**`STATISTICAL_AGGREGATE` 単独と `GROUPING_SETS` 以外を全部「ORDER BY」と呼ぶ。**
+
+**理由を足すだけだと、`SELECT COUNT(*)` の失敗が
+「ORDER BYの正しい結果には…」と出て原因を取り違える。主語の追加が必須。**
+
+> **既存の粗さも判明**＝**`WINDOW_ORDER` 単独でも「ORDER BY」と出る。**
+> **本件では直さない**（範囲外。直すなら別課題）。
+
+### 7.6 その他（調査で判明した事実）
+
+- **B94 の `COUNT(*)` 単発取得は `maxRecords` / `onLimitReached` を消費しない**ため、
+  本件の影響を受けない（[execute.ts:4280-4302](../../src/execute.ts#L4280)）
+- **一時テーブルは既に `onLimitReached: "error"` 固定**（[execute.ts:1785-1799](../../src/execute.ts#L1785)）
+- **`stopAfter` による正常停止は `onTruncate` を呼ばず `limitReached` を立てない**
+  （[fetchAll.ts:118-151](../../src/api/fetchAll.ts#L118)）＝**打ち切りではないので正しい**
+- **`truncate` → `error` の上書きは 1 箇所ではない**＝VALIDATE 系は engine core・
+  engine library・MCP・CLI・プラグインの**各面でも**個別に固定している
+  （[execute.ts:1056](../../src/execute.ts#L1056) / [query.ts:36](../../src/engine-library/query.ts#L36) /
+  [tools.ts:685](../../src/mcp/tools.ts#L685) / [index.ts:1897](../../src/cli/index.ts#L1897) /
+  [desktop.ts:2058](../../src/ui/desktop.ts#L2058)）。
+  **本件は core の理由集合だけで効くので、4 面の変更は不要**
+- `boundaryErrors.test.ts:95-105` は JOIN と plain `GROUP BY` を **"complete-input plan"** と
+  呼んでいるが、**mock executor に例外を投げさせているだけで実 planner を通っていない**。
+  **B97 で plain `GROUP BY` は本当に complete-input になる**ため名前と実態が一致する
+  （JOIN のほうは一致しないまま）
+
+## 8. 決めること
+
+### 8.1 【オーナー決定 2026-07-29】**既存 `truncate` へ対象を足す**
+
+**新しいモードは足さない。**→ [実装仕様](ksql_b97_incomplete_aggregate_failclosed_spec.md)
+
+- **判定・配管・エラー文面をすべて再利用できる**（新規に書かない）
+- **Pro が求めた線引きが `truncate` でそのまま得られる**
+- **新モードだと、既存の `LOCAL_ORDER` 等（モード非依存で常にエラー）との
+  一貫性を改めて決め直す必要が出る**
+
+**既存 `truncate` 利用者の集計クエリはエラーになる**が、
+**それは今まさに誤った値を返していたもの**である（§4 の `0`）。
+**B78 / B79 / B86 / B90 と同じ理屈**で、移行案内つきの minor とする。
+
+### 8.2 残る論点（仕様で決めた）
+
+1. **原理＝「行を畳む処理」**。1 行の出力が複数の入力行についての主張になっているもの
+2. **足す理由は `AGGREGATE` / `GROUP_BY` / `DISTINCT`** の 3 つ
+3. **`UNION`（`ALL` でない）を `DISTINCT` に含める**＝枝をまたいで畳むので同じ原理。
+   含めないと「`SELECT DISTINCT` はエラーだが `UNION` は通る」という説明できない差が残る
+4. **`HAVING` に専用の理由は足さない**＝`GROUP BY` か集計が必ず伴うので二重になる
+5. **`JOIN` は対象外**＝行を畳んでいない。LEFT JOIN で右が打ち切られると `NULL` が入る
+   という**別の問題**はあるが、本件の原理では説明できない。**別課題として起票する価値はある**
+
+## 9. 規模（暫定）## 9. 規模（暫定）
 
 **1.0〜1.5 人日**と見る。判定の網羅（決めること 3）が効く。
 
 **SemVer=minor**（新モードなら純加法）。
 
-## 9. 優先度
+## 10. 優先度
 
 **急がない**（Pro は `"error"` で運用中）。
 
 **しかも B94 でエラーになる場面自体が減っている**（絞り込みの無い `COUNT(*)` が上限に
 当たらなくなったため）。**この依頼で買えるのは「明細ペインだけ行を出せるようにする」ところ。**
 
-### 9.1 **Pro 側の K-37 が本件に依存している**
+### 10.1 **Pro 側の K-37 が本件に依存している**
 
 Pro は現在 `onLimitReached: "error"` で運用しているため、**§4 の `0` は表示されない**（エラーになる）。
 
