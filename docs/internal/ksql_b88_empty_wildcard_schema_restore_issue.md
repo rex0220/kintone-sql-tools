@@ -1,7 +1,7 @@
 # B88 0 行の `SELECT *` が列を失い、空の日だけバッチが落ちる（B2 残スコープ）
 
 - 起票: 2026-07-28
-- ステータス: 📋 **仕様確定・実装待ち（優先 中）**（2026-07-28）。→ [実装仕様](ksql_b88_empty_wildcard_schema_restore_spec.md)
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-28）。→ [実装仕様](ksql_b88_empty_wildcard_schema_restore_spec.md)
 - 出典: [B86](ksql_b86_materialized_unknown_column_issue.md) §8.7 の残る限界を正式起票したもの
 - 前史: **B2 は v2.11.0 でパイプライン伝播として解決済み**。本課題は当時 §3.6 で意図的に対象外とした**連鎖の起点**にあたる
 - 関連: [B2 仕様（v2.11.0）](ksql_empty_select_wildcard_pipeline_spec.md) / [B87 キャッシュ無効化](ksql_b87_field_metadata_cache_staleness_issue.md) / [B86](ksql_b86_materialized_unknown_column_issue.md)

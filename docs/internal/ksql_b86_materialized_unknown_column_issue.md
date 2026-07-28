@@ -169,6 +169,7 @@ R1 は **JOIN なしの 0 行読み出しに限定して既存挙動を維持**�
 **JOIN 利用は取得前に schema-unavailable error** とする。
 完全解消には **B2 の schema 復元拡張**が別途必要（追加 0.75〜1.5 人日）。
 → **[B88](ksql_b88_empty_wildcard_schema_restore_issue.md) として正式起票**（2026-07-28）。列順は実測で解消済みだが **[B87](ksql_b87_field_metadata_cache_staleness_issue.md) が前提条件**。
+→ **[B88] で解消済み（未リリース・2026-07-28）**。空の実体化テーブルを JOIN 入力に使う形は通るようになり、**不存在列の参照はむしろ拒否できるようになった**（従来は schema が無く素通ししていた）。
 
 ### 8.8 `defs.length === 0` の抜け道は持ち込まない
 

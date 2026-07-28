@@ -148,6 +148,7 @@ import {
   type PlainGroupBySourceSchemaInput,
 } from "./core/optimization/plainGroupByPlan";
 import { isSystemLikeFieldCode } from "./core/systemFields";
+import { deriveEmptyWildcardColumns } from "./core/emptyWildcardSchema";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
   runFullScan,
@@ -3090,13 +3091,20 @@ async function executeSimpleSelect(
     );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
-  const { rows: projected, columns } = project(
+  const { rows: projected, columns: projectedColumns } = project(
     rows,
     stmt.columns,
     undefined,
     fieldTypeResolvers.row,
     undefined,
     projectionSemanticsResolver
+  );
+  const columns = await restoreEmptyWildcardColumns(
+    stmt,
+    projected,
+    projectedColumns,
+    client,
+    cacheContext
   );
 
   return { type: "SELECT", rows: projected, columns, rowCount: projected.length, warnings: [...warnings] };
@@ -4352,7 +4360,7 @@ async function executeFullScanSelect(
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
 
   // JS 集計パイプライン
-  const { rows, columns } = runFullScan({
+  const { rows, columns: projectedColumns } = runFullScan({
     tables,
     stmt,
     scalarCache,
@@ -4373,6 +4381,13 @@ async function executeFullScanSelect(
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
   });
+  const columns = await restoreEmptyWildcardColumns(
+    stmt,
+    rows,
+    projectedColumns,
+    client,
+    cacheContext
+  );
 
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
 }
@@ -4722,7 +4737,7 @@ async function executeFullScanWithCte(
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
     ? requireMaterializedTable(stmt.from.cteName).columns
     : undefined;
-  const { rows, columns } = runFullScan({
+  const { rows, columns: projectedColumns } = runFullScan({
     tables,
     stmt,
     scalarCache,
@@ -4741,7 +4756,39 @@ async function executeFullScanWithCte(
     resolvedGroupingSpec,
     plainGroupByPlan,
   });
+  const columns = await restoreEmptyWildcardColumns(
+    stmt,
+    rows,
+    projectedColumns,
+    client,
+    cacheContext
+  );
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
+}
+
+async function restoreEmptyWildcardColumns(
+  stmt: SelectStatement,
+  rows: readonly ProcessRow[],
+  columns: readonly string[],
+  client: KintoneClient,
+  cacheContext: string
+): Promise<string[]> {
+  if (
+    rows.length !== 0
+    || columns.length !== 0
+    || stmt.columns.length !== 1
+    || stmt.columns[0].type !== "WILDCARD"
+    || stmt.joins.length !== 0
+    || stmt.from.cteName !== null
+  ) {
+    return [...columns];
+  }
+  const fields = await getFieldsCached(stmt.from.appId, client, cacheContext);
+  return deriveEmptyWildcardColumns(
+    fields,
+    stmt.from.subtableCode,
+    () => getProcessStatusesCached(stmt.from.appId, client, cacheContext)
+  );
 }
 
 /** ProcessRow → KintoneRecord（すべての値を string として保持） */

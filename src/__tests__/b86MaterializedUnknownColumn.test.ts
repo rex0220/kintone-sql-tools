@@ -303,27 +303,31 @@ test("B86: 0行でも columns が保存済みなら不存在列を拒否する",
   expect(result.statements[1].error?.message).toMatch(/unknown field code\(s\): missing \(#t\)/);
 });
 
-test("B86: rows=[] && columns=[] の JOIN なし読出しは既存の 0 行挙動を維持する", async () => {
+test("B88: 空の物理 wildcard schema を保存し JOIN なしでも不存在列を拒否する", async () => {
   const mock = makeClient({ fields: physicalFields });
   const result = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT * FROM APP100;" +
       "SELECT missing FROM #t",
     mock.client
   );
-  expect(result.ok).toBe(true);
-  expect((result.statements[1].result as SelectResult).rows).toEqual([]);
+  expect(result.ok).toBe(false);
+  expect(result.statements[1].error?.message)
+    .toMatch(/unknown field code\(s\): missing \(#t\)/);
 });
 
-test("B86: rows=[] && columns=[] を JOIN 入力にすると downstream records GET 前に拒否する", async () => {
+test("B88: 空の物理 wildcard schema を JOIN 入力へ伝播する", async () => {
   const mock = makeClient({ fields: physicalFields });
   const result = await executeBatch(
     "CREATE TEMP TABLE #t AS SELECT * FROM APP100;" +
       "SELECT p.z FROM #t AS t INNER JOIN APP200 AS p ON t.k = p.k",
     mock.client
   );
-  expect(result.ok).toBe(false);
-  expect(result.statements[1].error?.message)
-    .toMatch(/column schema is unavailable for materialized JOIN source #t/);
+  expect(result.ok).toBe(true);
+  expect(result.statements[1].result).toMatchObject({
+    type: "SELECT",
+    rows: [],
+    columns: ["z"],
+  });
   expect(mock.getRecords.mock.calls.map(([params]) => params.app)).toEqual([100]);
 });
 

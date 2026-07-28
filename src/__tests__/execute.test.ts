@@ -5389,7 +5389,7 @@ test("INSERT INTO ... SELECT — 明示列の空ソースは insertedCount=0 の
   expect(client.putCalls).toHaveLength(0);
 });
 
-test("INSERT INTO ... SELECT * — 空ソースの列数エラーは明示列を案内する", async () => {
+test("INSERT INTO ... SELECT * — 空ソースも復元後の列数不一致を報告する", async () => {
   const client = makeClient({ recordsByApp: { 100: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
 
   await expect(
@@ -5398,9 +5398,7 @@ test("INSERT INTO ... SELECT * — 空ソースの列数エラーは明示列を
       client,
       { cacheContext: "empty-insert-wildcard-message" }
     )
-  ).rejects.toThrow(
-    "結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
-  );
+  ).rejects.toThrow("SELECT の列数（3）と INSERT のフィールド数（1）が一致しません");
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
 });

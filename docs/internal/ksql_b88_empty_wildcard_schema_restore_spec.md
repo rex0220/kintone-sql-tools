@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-28
 - 対象課題: [B88](ksql_b88_empty_wildcard_schema_restore_issue.md)
-- ステータス: 📋 **R2・実装待ち**（R1 の穴 2 件を codex が実装前に指摘・どちらも Claude の仕様漏れ）
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-28・R2 で実装）
 - 前提: **[B87](ksql_b87_metadata_cache_spec.md) 実装済み**（未リリース）— これが無いと本修正が列数のブレを生む
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（0 行時に列が増える方向のみ・1 行以上は不変）

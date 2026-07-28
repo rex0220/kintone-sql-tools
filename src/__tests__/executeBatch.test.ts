@@ -2093,7 +2093,7 @@ test("UPSERT_SELECT: 明示列の空一時テーブルは書き込みなしで�
   expect(client.putCalls).toHaveLength(0);
 });
 
-test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する", async () => {
+test("UPSERT_SELECT: 空 SELECT * も復元後の列数不一致を報告する", async () => {
   const client = makeClient({ recordsByApp: { 100: [], 400: [] }, fieldTypes: { 顧客名: "SINGLE_LINE_TEXT" } });
   const r = await executeBatch(
     "UPSERT INTO APP400 (顧客名) SELECT * FROM APP100 ON DUPLICATE (顧客名)",
@@ -2102,9 +2102,8 @@ test("UPSERT_SELECT: 空 SELECT * の列数エラーは明示列を案内する"
   );
 
   expect(r.ok).toBe(false);
-  expect(r.statements[0].error?.message).toContain(
-    "結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
-  );
+  expect(r.statements[0].error?.message)
+    .toContain("SELECT の列数（3）と UPSERT のフィールド数（1）が一致しません");
   expect(client.postCalls).toHaveLength(0);
   expect(client.putCalls).toHaveLength(0);
 });
