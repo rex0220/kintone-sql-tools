@@ -280,8 +280,11 @@ v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized k
 | プラグイン | **不変** |
 | **MCP サーバー** | **Node 20 が必要になる**＝**この面だけの要件変更** |
 
-**`release/README.txt` と CHANGELOG に、MCP 面の Node 20 要件を明記する。**
+**CHANGELOG に、MCP 面の Node 20 要件を明記する。**
 **CLI と engine ライブラリには影響しないことも書く**（誤解を防ぐため）。
+
+> **`release/README.txt` は実装では触らない。**
+> **リリース時にこちらが書く**（§11）。
 
 > **オーナー確認**: Node 要件の引き上げを major にすべきという判断もあり得る。
 > **こちらは「面が MCP に閉じており、公開型も CLI も変わらない」ことから minor を推す。**
