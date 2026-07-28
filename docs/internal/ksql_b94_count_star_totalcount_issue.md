@@ -1,0 +1,133 @@
+# B94 `SELECT COUNT(*)` が全件取得している（`totalCount` で 1 リクエストにできる）
+
+- 起票: 2026-07-29
+- ステータス: 📝 **評価・起票（優先 中／性能）**
+- 出典: オーナーからの指摘 2026-07-29
+- 関連: [B84 押し下げ可否の公開](ksql_b84_pushdown_visibility_spec.md)
+
+## 1. 現状（実機で確認・v3.31.1）
+
+```
+EXPLAIN SELECT COUNT(*) AS c FROM APP4147
+  mode:          FULL_SCAN
+  reason:        集計関数（COUNT / SUM 等）あり
+  kintone query: (全件取得)
+  fields:        $id
+```
+
+**`fields` は `$id` だけに絞られている**が、**レコードは全件取得している。**
+件数を数えるためだけに **`ceil(N / 500)` 回**（またはカーソル経由で同等）の往復が発生する。
+
+- 10 万件のアプリ → **200 回以上**の取得
+- 得たいのは**数値 1 つ**
+
+## 2. kintone REST API は 1 リクエストで返せる
+
+[複数のレコードを取得する](https://cybozu.dev/ja/kintone/docs/rest-api/records/get-records/) の
+リクエストパラメーター **`totalCount`**（真偽値）で、
+**`query` で指定した条件に一致するレコードの件数**がレスポンスの `totalCount` に返る。
+
+```
+GET /k/v1/records.json?app=1&query=<条件> limit 1&totalCount=true
+→ { "records": [...1件...], "totalCount": "123456" }
+```
+
+**アプリの規模に関係なく 1 リクエスト**で済む。
+
+## 3. 既存の配線状況（コードで確認）
+
+**部品は既にある。**
+
+| | 現状 |
+|---|---|
+| [`KintoneGetParams.totalCount`](../../src/converter/selectToKintone.ts#L48) | **型に存在する**が [常に `false`](../../src/converter/selectToKintone.ts#L156) |
+| [`nodeKintoneClient.getRecords`](../../src/cli/nodeKintoneClient.ts#L234) | **`totalCount` を送っていない**（クエリ文字列に含めない） |
+| [`nodeKintoneClient.openCursor`](../../src/cli/nodeKintoneClient.ts#L277) | **カーソル作成のレスポンスで `totalCount` を既に受け取っている**（`createKintoneCursorHandle(Number(created.totalCount), ...)`） |
+
+**カーソル経路は総件数を最初から知っている**のに、`COUNT(*)` でも全件読んでいる。
+
+## 4. 適用条件（ここを外すと誤った件数になる）
+
+**すべて満たすときだけ**適用する。1 つでも欠けたら従来どおり全件取得する。
+
+1. **`SELECT COUNT(*)` だけ**（他の列・他の集計関数を含まない）
+2. **`GROUP BY` / `HAVING` / `DISTINCT` が無い**
+3. **`JOIN` が無い**
+4. **FROM が物理アプリ**（一時テーブル・CTE・サブテーブル仮想テーブルは対象外）
+5. **`WHERE` が完全に押し下がる**（client 側の残余評価が 1 つも無い）
+
+**5 が最も重要。**ksql は `LIKE` を JS 評価に統一しており（v2.0.0）、
+関数・算術・`OR`/`NOT` の形によっては**取得後に client で絞る**。
+その場合 `totalCount` は**絞る前の件数**なので、**使うと誤った値を返す。**
+
+> **`COUNT(field)` は対象外。**`totalCount` はレコード件数であり、
+> フィールドが空のレコードを除外する `COUNT(列)` とは意味が違う。
+
+### 4.1 検索打ち切りとの関係
+
+`KLIKE`（kintone ネイティブの `like`）を押し下げた場合、
+**10 万件で検索が打ち切られる**（`X-Cybozu-Warning: Filter aborted ...`）。
+そのとき `totalCount` は**打ち切り後の値**になる。
+
+既存の打ち切り検出（レスポンスヘッダー）はそのまま効くので、
+**打ち切りを検出したら従来どおり fail-closed にする**こと。**黙って小さい件数を返さない。**
+
+## 5. 実装案
+
+### 5.1 案 A — `getRecords` に `totalCount` を送る（推奨）
+
+`limit 1` ＋ `totalCount=true` で 1 リクエスト。**最も安い。**
+
+**ただし BYO クライアントの契約に触れる。**
+`ReadonlyGetRecordsResult` へ `totalCount?` を足す必要があり、
+**公開型が変わる**（B66 の declaration snapshot が動く）。
+
+**BYO クライアントが `totalCount` を返さない場合は、従来どおり全件取得へ落とす。**
+**推測で 0 や undefined を件数にしない。**
+
+> [B85](ksql_b85_library_validate_constraints_issue.md) / [B93](ksql_b93_getfields_contract_error_issue.md) の教訓＝
+> **BYO クライアントは契約から外れる。**「返ってこなければ諦める」形にして、
+> **誤った件数を返す余地を作らない。**
+
+### 5.2 案 B — カーソルを作って `totalCount` だけ読み、すぐ閉じる
+
+**BYO クライアントの変更が不要。**`openCursor` は既に総件数を返している。
+
+- 2 リクエスト（作成＋削除）
+- **カーソルの同時利用枠を 1 つ消費する**（ホストあたり既定 2）
+
+**案 A が使えない BYO クライアント向けの代替**として有効。
+
+### 5.3 推奨
+
+**案 A を本線、案 B をフォールバックにする。**
+どちらも使えない場合は現状維持（全件取得）。**3 段階とも正しい件数を返す。**
+
+## 6. 効果
+
+| アプリの規模 | 現状 | 案 A |
+|---:|---:|---:|
+| 500 件 | 1〜2 回 | **1 回** |
+| 1 万件 | 20 回以上 | **1 回** |
+| 10 万件 | 200 回以上 | **1 回** |
+
+**ダッシュボードの KPI タイル（総件数）は典型的な用途**で、
+**ペインの数だけ全件取得が走っている**可能性がある。
+
+## 7. 規模
+
+- 調査（適用条件の判定・押し下げ完全性の既存判定を再利用できるか）: 0.25〜0.5 人日
+- 実装（案 A＋案 B のフォールバック）: 0.5〜1.0 人日
+- テスト（適用条件の直積・打ち切り時の fail-closed・BYO 未対応時のフォールバック）: 0.5 人日
+
+**合計 1.25〜2.0 人日。SemVer=minor**（公開型へ `totalCount?` を足すため純加法）。
+
+## 8. 優先度の根拠
+
+**誤った結果を返す類ではない**ので緊急ではないが、
+**効果が大きく、適用条件が明確**で、**部品が既にある**。
+
+**最大の注意点は「押し下げが完全なときだけ使う」こと。**
+ここを誤ると **B78 / B79 / B86 と同じ silent wrong result** になる。
+**件数は検算されにくい**（利用者は返ってきた数を信じる）ので、
+**押し下げ完全性の判定を新規に書かず、既存の判定を再利用する**こと。
