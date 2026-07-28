@@ -4,6 +4,15 @@
 
 ## 未リリース
 
+### 改善（B94 `SELECT COUNT(*)` を `totalCount` で単発取得）
+
+- **単一の物理アプリに対する `SELECT COUNT(*)` だけのクエリは、WHERE が実行時に完全押し下げ可能な場合、kintone REST API の `totalCount=true` を使う 1 回の GET で件数を返すようにした。** 従来は `$id` を全件取得して数えており、最大 `ceil(N / 500)` 回の往復が必要だった。
+- **この単発取得には `maxRecords` / `onLimitReached` を適用しない。** レコード本体を全件取得しないため、従来 `maxRecords` 超過で失敗していた件数取得も正しい総件数を返す。
+- `GROUP BY` / `HAVING` / `DISTINCT` / window / JOIN / CTE / 一時テーブル / サブテーブル / `LIMIT` / `OFFSET`、`COUNT(列)`、完全押し下げできない WHERE は従来の全件取得を維持する。
+- **BYO client が `totalCount` を返さない、または非負整数文字列でない値を返した場合は、`0` と推測せず従来の全件取得へフォールバックする。**
+- **検索が 10 万件で打ち切られた応答は `SearchAbortedError` で fail-closed にする。** 部分集合の件数を権威的な総件数として返さず、B72 の集計に対する既存の安全側の契約を維持する。
+- engine ライブラリの `ReadonlyGetRecordsParams` と `ReadonlyGetRecordsResult` に、それぞれ任意の `totalCount?: boolean` と `totalCount?: string` を純加法で追加した。
+
 ### 修正（B93 `getFields` の契約違反を自己解決できるエラーにする）
 
 - **BYO client の `getFields()` が未知の `fieldType` を返したときのエラーを、クライアント契約の違反として報告するようにした。** 従来は `InternalError: ... policy is not defined ...` で、**エンジン側の不具合に見えていた**。

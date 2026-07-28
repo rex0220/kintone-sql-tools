@@ -37,10 +37,16 @@ const apiUrl = (path: string) =>
 function buildRecordsRequest(
   params: Parameters<ReadonlyKintoneClient["getRecords"]>[0]
 ): { url: string; init: RequestInit } {
-  const requestParams: { app: number; query: string; fields?: string[] } = {
+  const requestParams: {
+    app: number;
+    query: string;
+    fields?: string[];
+    totalCount?: boolean;
+  } = {
     app: params.app,
     query: params.query,
     ...(params.fields.length > 0 ? { fields: params.fields } : {}),
+    ...(params.totalCount === true ? { totalCount: true } : {}),
   };
   const apiWithUrl = kintone.api as KintoneApiWithUrl;
   const getUrl = apiWithUrl.urlForGet(RECORDS_PATH, requestParams, true);
@@ -200,12 +206,13 @@ export function createReadonlyKintoneClient(
         if (!response.ok) throw await readRawFetchError(response);
         const body = await response.json() as {
           records: ReadonlyKintoneRecord[];
+          totalCount?: string;
         };
         return isSearchAbortedWarning(
           response.headers.get("X-Cybozu-Warning")
         )
-          ? { records: body.records, searchAborted: true }
-          : { records: body.records };
+          ? { ...body, searchAborted: true }
+          : body;
       } catch (error) {
         throw toDetailedApiError(error);
       }

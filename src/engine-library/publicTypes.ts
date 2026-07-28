@@ -10,10 +10,12 @@ export interface ReadonlyGetRecordsParams {
   app: number;
   query: string;
   fields: string[];
+  totalCount?: boolean;
 }
 
 export interface ReadonlyGetRecordsResult {
   records: ReadonlyKintoneRecord[];
+  totalCount?: string;
   searchAborted?: boolean;
 }
 

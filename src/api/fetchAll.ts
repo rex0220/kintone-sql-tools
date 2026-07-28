@@ -26,6 +26,8 @@ import type { KintoneRecord } from "../converter/dmlToKintone";
 /** kintone GET /k/v1/records.json のレスポンス */
 export interface KintoneGetResponse {
   records: KintoneRecord[];
+  /** totalCount=true のときに返る query 一致レコード件数 */
+  totalCount?: string;
   /** like / not like の 10 万件検索打ち切りを検出した場合に true */
   searchAborted?: boolean;
 }
@@ -37,6 +39,8 @@ export interface PageFetchParams {
   app: number;
   query: string;   // "WHERE句 order by ... limit 500 offset N" の形式
   fields: string[];
+  /** query 一致レコード件数をレスポンスへ含める */
+  totalCount?: boolean;
 }
 
 // ------------------------------------------------------------

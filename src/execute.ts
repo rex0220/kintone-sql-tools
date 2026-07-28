@@ -1043,7 +1043,7 @@ async function executeParsedStatement(
   switch (stmt.type) {
     case "VALIDATE":      return executeExistingRecordValidation(stmt, client, options, cacheContext);
     case "SELECT":        return executeSelect(
-      stmt,
+      markCountTotalCountRoot(stmt),
       client,
       options,
       cacheContext,
@@ -2519,7 +2519,7 @@ async function executeSelect(
     cteCache
   );
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
-  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  const whereCapability = rememberSelectWhereCapability(stmt, await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache));
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
@@ -4204,6 +4204,81 @@ function buildSelectFieldTypeResolvers(
   return { row, having };
 }
 
+const countTotalCountRootSelects = new WeakSet<SelectStatement>();
+const resolvedWhereCapabilities = new WeakMap<
+  SelectStatement,
+  PredicateCapabilityResult
+>();
+
+function markCountTotalCountRoot(stmt: SelectStatement): SelectStatement {
+  countTotalCountRootSelects.add(stmt);
+  return stmt;
+}
+
+function rememberSelectWhereCapability(
+  stmt: SelectStatement,
+  capability: PredicateCapabilityResult
+): PredicateCapabilityResult {
+  resolvedWhereCapabilities.set(stmt, capability);
+  return capability;
+}
+
+function isCountStarTotalCountEligible(
+  stmt: SelectStatement,
+  whereCapability: PredicateCapabilityResult
+): boolean {
+  if (whereCapability.capability !== "EXACT_PUSHDOWN") return false;
+  if (stmt.columns.length !== 1) return false;
+  const column = stmt.columns[0];
+  if (
+    column?.type !== "AGGREGATE"
+    || column.func !== "COUNT"
+    || column.distinct
+    || column.arg.type !== "WILDCARD"
+  ) {
+    return false;
+  }
+  return (
+    !stmt.distinct
+    && normalizeGroupingSpec(stmt).type === "NONE"
+    && stmt.having === null
+    && stmt.joins.length === 0
+    && stmt.from.cteName === null
+    && !stmt.from.subtableCode
+    && stmt.limit === null
+    && stmt.offset === null
+  );
+}
+
+function isValidTotalCount(value: unknown): value is string {
+  return typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value);
+}
+
+async function tryCountStarWithTotalCount(
+  stmt: SelectStatement,
+  client: KintoneClient
+): Promise<SelectResult | null> {
+  const countColumn = stmt.columns[0];
+  if (countColumn?.type !== "AGGREGATE") return null;
+  const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+  const response = await client.getRecords({
+    app: stmt.from.appId,
+    query: `${baseQuery}${baseQuery ? " " : ""}limit 1`,
+    fields: ["$id"],
+    totalCount: true,
+  });
+  if (response.searchAborted) throw new SearchAbortedError();
+  if (!isValidTotalCount(response.totalCount)) return null;
+  const column = countColumn.alias ?? "COUNT(*)";
+  return {
+    type: "SELECT",
+    rows: [{ [column]: response.totalCount }],
+    columns: [column],
+    rowCount: 1,
+    warnings: [],
+  };
+}
+
 /** FULL_SCAN モード: 全テーブルを fetchAll → runFullScan パイプライン */
 async function executeFullScanSelect(
   stmt: SelectStatement,
@@ -4216,6 +4291,15 @@ async function executeFullScanSelect(
   prefilterPlan?: RelativeDatePrefilterPlan,
   plainGroupByPlan?: PlainGroupByResolutionPlan
 ): Promise<SelectResult> {
+  const whereCapability = resolvedWhereCapabilities.get(stmt);
+  if (
+    countTotalCountRootSelects.has(stmt)
+    && whereCapability !== undefined
+    && isCountStarTotalCountEligible(stmt, whereCapability)
+  ) {
+    const totalCountResult = await tryCountStarWithTotalCount(stmt, client);
+    if (totalCountResult !== null) return totalCountResult;
+  }
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
@@ -10088,7 +10172,8 @@ function buildSelectPlan(
   label?: string,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
-  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
+  allowTotalCountPlan = true
 ): string[] {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities
     ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
@@ -10099,7 +10184,11 @@ function buildSelectPlan(
   const plainGroupByPlan = plainGroupByPlans?.get(stmt) ?? (plainGroupByPlans
     ? [...plainGroupByPlans].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
     : undefined);
-  const mode = orderPlan?.kind === "CANONICAL_LOCAL"
+  const totalCountPlan = allowTotalCountPlan && whereCapability !== undefined
+    && isCountStarTotalCountEligible(stmt, whereCapability);
+  const mode = totalCountPlan
+    ? "COUNT_TOTAL_COUNT"
+    : orderPlan?.kind === "CANONICAL_LOCAL"
     ? "FULL_SCAN"
     : whereCapability && whereCapability.capability !== "EXACT_PUSHDOWN"
       ? "FULL_SCAN"
@@ -10155,6 +10244,20 @@ function buildSelectPlan(
         }
       }
     }
+  }
+  if (totalCountPlan) {
+    const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+    lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
+    lines.push(
+      `  kintone query: ${baseQuery}${baseQuery ? " " : ""}limit 1`
+    );
+    lines.push("  fields:        $id");
+    lines.push("  fetch API:     GET records.json (totalCount=true)");
+    lines.push("  REST execution: single GET");
+    lines.push("  record limit:  maxRecords/onLimitReached not applied");
+    lines.push("  fallback:      full record scan when totalCount is missing or invalid");
+    lines.push("  search abort:  fail-closed (SearchAbortedError)");
+    return lines;
   }
   if (orderPlan) {
     lines.push(`  order plan:    ${orderPlan.kind}`);
@@ -10341,7 +10444,7 @@ function buildUnionPlan(
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans, false));
   });
   return lines;
 }
@@ -10355,7 +10458,7 @@ function buildWithPlan(
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans));
+      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans, false));
       lines.push("");
     }
   }
@@ -10374,7 +10477,7 @@ function buildWithPlan(
   if (canInlineSingleCte(stmt)) {
     lines.push("");
     const inlined = buildInlinedQuery(stmt);
-    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans));
+    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans, false));
   }
   return lines;
 }
@@ -10427,14 +10530,14 @@ function collectSubqueryPlans(
     switch (w.type) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         }
         break;
       case "EXISTS":
-        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
         break;
       case "LOGICAL":  visitWhere(w.left); visitWhere(w.right); break;
       case "NOT":
@@ -10448,7 +10551,7 @@ function collectSubqueryPlans(
 
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
-      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans));
+      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
     }
   }
 
@@ -10495,7 +10598,7 @@ function buildInsertSelectPlan(
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
   return lines;
 }
 
@@ -10557,7 +10660,7 @@ function buildUpdatePlan(
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans));
+      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans, undefined, false));
     }
   }
 
@@ -10705,7 +10808,7 @@ function buildUpsertSelectPlan(
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
     ``,
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans));
+  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
   return lines;
 }
 

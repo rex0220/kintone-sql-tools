@@ -235,7 +235,8 @@ export function createNodeKintoneConnection(
       const queryPart = `query=${encodeURIComponent(params.query)}`;
       const appPart = `app=${encodeURIComponent(String(params.app))}`;
       const fieldParts = params.fields.map((f) => `fields[]=${encodeURIComponent(f)}`);
-      const qs = [appPart, queryPart, ...fieldParts].join("&");
+      const totalCountPart = params.totalCount === true ? ["totalCount=true"] : [];
+      const qs = [appPart, queryPart, ...fieldParts, ...totalCountPart].join("&");
       if (tokenResolver.debug) {
         tokenResolver.log?.(
           `[debug] getRecords app=${params.app} query="${params.query}" fields=${params.fields.length > 0 ? params.fields.join(",") : "(all)"} auth=${tokenResolver.auth.type}`
@@ -243,7 +244,10 @@ export function createNodeKintoneConnection(
       }
       const path = `${apiBasePath}/records.json?${qs}`;
       try {
-        const response = await requestJsonResponse<{ records: Record<string, { value: string }>[] }>(
+        const response = await requestJsonResponse<{
+          records: Record<string, { value: string }>[];
+          totalCount?: string;
+        }>(
           path,
           { method: "GET" },
           params.app
@@ -258,7 +262,10 @@ export function createNodeKintoneConnection(
         if (tokenResolver.debug) {
           tokenResolver.log?.("[debug] retry with fallback query order by レコード番号 asc");
         }
-        const response = await requestJsonResponse<{ records: Record<string, { value: string }>[] }>(
+        const response = await requestJsonResponse<{
+          records: Record<string, { value: string }>[];
+          totalCount?: string;
+        }>(
           retryPath,
           { method: "GET" },
           params.app

@@ -33,10 +33,11 @@ const RECORDS_PATH = "/k/v1/records.json";
 const GET_URL_MAX_BYTES = 4096;
 
 function buildRecordsRequest(params: PageFetchParams): { url: string; init: RequestInit } {
-  const requestParams: { app: number; query: string; fields?: string[] } = {
+  const requestParams: { app: number; query: string; fields?: string[]; totalCount?: boolean } = {
     app: params.app,
     query: params.query,
     ...(params.fields.length > 0 ? { fields: params.fields } : {}),
+    ...(params.totalCount === true ? { totalCount: true } : {}),
   };
   const apiWithUrl = kintone.api as KintoneApiWithUrl;
   const getUrl = apiWithUrl.urlForGet(RECORDS_PATH, requestParams, true);
@@ -173,11 +174,12 @@ export function createKintoneClient(options: { cursorMaxActive?: number } = {}):
 
         const body = await response.json() as {
           records: Record<string, { value: string }>[];
+          totalCount?: string;
         };
         if (isSearchAbortedWarning(response.headers.get("X-Cybozu-Warning"))) {
-          return { records: body.records, searchAborted: true };
+          return { ...body, searchAborted: true };
         }
-        return { records: body.records };
+        return body;
       } catch (error) {
         throw toDetailedApiError(error);
       }
