@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B90](ksql_b90_variable_arithmetic_issue.md)
-- ステータス: 📋 **R2・実装待ち**（R1 §3.2 と §7 の矛盾を codex が実装前に指摘）
+- ステータス: 📋 **R3・実装待ち**（R1 §3.2/§7 の矛盾・R2 の消費側の数え漏れを codex が実装前に指摘）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**。§5 の fail-closed 化のみ挙動が変わる（誤った結果を返していたもの）
 
@@ -57,21 +57,27 @@ export type ArithNode =
   | VariableRef;   // ← 追加
 ```
 
-**波及先は 17 箇所・7 ファイル**（`FIELD_REF` を判別している本番コード）。
-**TypeScript が漏れを検出する**ので、網羅は型に守らせる。
+#### 波及先は **TypeScript のビルドが示す全箇所**（R3 で修正）
 
-| ファイル | 判別サイト |
-|---|---:|
-| `src/parser/parser.ts` | 4 |
-| `src/execute.ts` | 4 |
-| `src/converter/selectToKintone.ts` | 4 |
-| `src/converter/dmlToKintone.ts` | 2 |
-| `src/engine/evalWhere.ts` | 1 |
-| `src/engine/evalFunc.ts` | 1 |
-| `src/core/aggregateExpression.ts` | 1 |
+**R2 は「17 箇所・7 ファイル」と手集計の数を書いたが、これは誤りだった。**
+grep で `FIELD_REF` の判別を数えたもので、
+[`arithColDefaultKey`](../../src/engine/process.ts#L1389)（`n.type === "FIELD_REF"` と書かれており
+パターンから漏れた）を取りこぼしていた。実際に型を広げると次で落ちる。
+
+```
+src/engine/process.ts(1395,28):
+Property 'left' does not exist on type 'LegacyArithExpr | VariableRef'.
+```
+
+→ **数を仕様に書かない。網羅は TypeScript に列挙させる。**
+現時点で判明しているのは **18 箇所・8 ファイル**（`src/engine/process.ts` を含む）だが、
+**この数は参考値であり、ビルドが要求する箇所すべてが対象**である。
 
 **各所の扱いは「内部エラーで停止」**とする（§4 のとおり、実行時には到達しないため）。
 **黙って無視したり、既定値を当てたりしないこと。**
+
+**内部エラーガードの追加は、ビルドが要求するすべてのファイルで可**とする
+（`selectToKintone.ts` に限らない）。**ただしガードのみで、既存の判定・変換の分岐は変えない。**
 
 ---
 
@@ -189,10 +195,10 @@ ArgumentError: variable @phase is not numeric and cannot be used in arithmetic.
 5. **配列変数は既存のエラー** — `array variable @x can only be used as IN @x.`
 6. **押し下げに変数が届かない** — 解決前に `selectToKintone` へ到達しないことを固定する。
    **変数を含む WHERE の押し下げ結果が、同じ値を直接書いた場合と一致する**ことで確認する
-7. **型の網羅** — `ArithNode` の**全 17 消費側**（`selectToKintone` の 4 箇所を含む）が
-   新しい variant を扱っていること。TypeScript のビルドが通ることに加え、
+7. **型の網羅** — **TypeScript のビルドが要求する全消費側**が新しい variant を扱っていること
+   （数は仕様で固定しない）。ビルドが通ることに加え、
    **到達したら内部エラーになる**ことを 1 箇所以上で固定する。
-   **`selectToKintone` は「throw するガードを足すだけ」**で、既存の判定・変換の分岐は変えない
+   **手を入れるのは throw するガードだけ**で、既存の判定・変換の分岐は変えない
 8. **既存テスト全 green・snapshot 22 不変・公開型不変**
 
 ---
@@ -210,5 +216,6 @@ ArgumentError: variable @phase is not numeric and cannot be used in arithmetic.
   **ここで `VARIABLE` を黙殺すると「参照しているフィールドを取りこぼす」**ことになり、
   B86 の検証漏れや取得フィールドの欠落という silent wrong result になり得る。
   **したがって「来ないはずのものが来たら止める」ガードは入れる。**
+- **消費側の数を仕様の根拠にしないこと**（R3）。**網羅は TypeScript のビルドに列挙させる**
 - **公開型を変えないこと**（`ArithNode` は内部型）
 - **§5 は Pro の依頼を超える範囲**なので、CHANGELOG と Pro への連絡に明記する
