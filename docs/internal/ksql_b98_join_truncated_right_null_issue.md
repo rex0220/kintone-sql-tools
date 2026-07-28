@@ -211,31 +211,22 @@ SELECT ... FROM APP4226 l INNER JOIN APP4225 r ON l.キー = r.キー WHERE l.�
 - **B97 の教訓が効く場所**＝**新しい判定を書くのは silent wrong result の温床**。
   **既存の材料で足りるかを先に測る**（→ §5.3）
 
-### 5.3 実装前の調査（2026-07-29 に codex へ依頼）
+### 5.3 実装前の調査（2026-07-29・実施済み → §7）
 
 **「`onTruncate` の時点で、そのテーブルが外部結合の保持されない側かを
-判定する材料が既にあるか」**を測ってから仕様を書く。
+判定する材料が既にあるか」**を codex に測らせてから仕様を書いた。
 
 **B97 / B91 で同じやり方が 2 回とも前提を覆している**ため。
+**→ 結果は §7。設計が 3 つ決まり、うち 1 つは §5.4 の前提を覆した。**
 
-主な確認点:
+### 5.4 ~~エラー主語の規則を広げる~~ → **不要になった**（§7.4）
 
-1. `onTruncate` のスコープに join の情報があるか
-2. `RIGHT JOIN` の正規化の有無（**main が保持されない側になる形**）
-3. 複数 join / 自己結合での役割の重複
-4. keyed fetch 経路（`tryFetchJoinRecordsBySourceKeys`）で join type が分かるか
-5. **入れ子の実行**（サブクエリ・CTE・UNION 枝）で誤判定しないか
-6. **`onTruncate` から例外を投げる経路が既にあるか**
-7. テーブル単位で「保持されない側か」を返す既存の関数の有無
-8. **影響を受ける既存テストの全一覧**（打ち切られるのが保持側か否かを含む）
+**当初は「`CompleteInputReason` に `OUTER_JOIN` を足す」前提で、
+B97 のエラー主語の規則（集計系／並び系の 2 系統）に第 3 の系統が要る**と考えていた。
 
-### 5.4 あわせて決める必要があるもの
-
-**B97 で作ったエラー主語の規則を広げる。**
-
-現在は**集計系／並び系**の 2 系統で、集計系は最も具体的なものを選ぶ形。
-**`OUTER_JOIN` はどちらでもない**ので、**第 3 の系統として足し、混在時の扱いを決める**
-（「外部結合の正しい結果には…」）。
+**調査で覆った。**案 C' は **`CompleteInputReason` に足さない**
+（足すと静的判定になり案 C と同じ過剰になる・§7.4）。
+**文面は投げる場所で組み立てる**ので、**B97 の主語規則は変更不要である。**
 
 ### 5.5 見積もり
 
@@ -253,3 +244,108 @@ SELECT ... FROM APP4226 l INNER JOIN APP4225 r ON l.キー = r.キー WHERE l.�
 **ただし silent wrong result であり、B78 / B79 / B86 / B90 / B97 と同じ系列である。**
 **しかも §3.4 のとおり、利用者が結果から見分けることはできない。**
 **要望が出たら優先度を上げる。**
+
+---
+
+## 7. 調査結果（2026-07-29・codex による事実調査）
+
+**設計が 3 つ決まり、うち 1 つは §5.4 の前提を覆した。**
+
+### 7.1 **手を入れるのは 1 箇所だけ**
+
+打ち切りの検出は 3 箇所あるが、**外部結合が通るのは 1 つだけ**である。
+
+| 箇所 | 外部結合が通るか |
+|---|---|
+| [`executeSimpleSelect()`](../../src/execute.ts#L3139) | ❌ **join があれば `FULL_SCAN` へ行く**（`resolveSelectMode()`・[selectToKintone.ts:63](../../src/converter/selectToKintone.ts#L63)） |
+| **[`fetchTableRecordsForFullScan()`](../../src/execute.ts#L5008)** | ✅ **ここだけ** |
+| [`tryFetchJoinRecordsBySourceKeys()`](../../src/execute.ts#L5252) | ❌ **`join.type !== "INNER"` で `null` を返す**（[execute.ts:5211](../../src/execute.ts#L5211)） |
+
+**判定材料はスコープに揃っている**＝`fetchTableRecordsForFullScan()` の引数に
+**`stmt`（SELECT 全体）/ `table`（取得中のテーブル）/ `isMainTable`** がある
+（[execute.ts:4993](../../src/execute.ts#L4993)）。
+**呼び出し元は `stmt.from` または `join.table` のオブジェクトをそのまま渡す**ので、
+**オブジェクト同一性で特定できる**（[execute.ts:4420](../../src/execute.ts#L4420) /
+[4453](../../src/execute.ts#L4453)）。
+
+> **alias で照合してはいけない。**`alias` は `null` になり得る
+> （[ast.ts:392](../../src/types/ast.ts#L392)）。
+
+### 7.2 **保持されない側は静的に決まる。ただし `RIGHT` で逆転する**
+
+**`RIGHT JOIN` は正規化されていない**＝AST に `"RIGHT"` が残り、
+`applyJoin()` に専用分岐がある（[parser.ts:2122](../../src/parser/parser.ts#L2122) /
+[process.ts:132](../../src/engine/process.ts#L132)）。
+
+| `joins[i].type` | 保持されない側 | 根拠 |
+|---|---|---|
+| `LEFT` | **`joins[i].table`** | 左行を走査し、右に一致が無ければ空の右行を足す（[process.ts:169](../../src/engine/process.ts#L169)） |
+| `RIGHT` | **左の累積**＝`from` ＋ `joins[0..i-1].table`（**main を含む**） | 右行を全件走査し、左に一致が無ければ空の左行を足す（[process.ts:143](../../src/engine/process.ts#L143)） |
+| `INNER` | **なし** | 一致しない組は行ごと消える。偽の `NULL` を作らない |
+
+**`runFullScan()` は `stmt.joins` を先頭から順に畳む**（各回の結果が次回の左になる・
+[process.ts:1632](../../src/engine/process.ts#L1632)）。
+
+→ **`a LEFT JOIN b LEFT JOIN c` の `b` は、自分の join では保持されない側、
+`c` との join では保持側**。**どれか 1 つで保持されない側なら対象**とする。
+
+**テーブル単位で役割を返す既存関数は無い**（codex が `src` 全体を探して「無い」と報告）。
+
+### 7.3 **入れ子は安全。ただし全体走査を使うと誤爆する**
+
+**サブクエリ・CTE・UNION 枝・一時テーブル source は、それぞれ自分の `SelectStatement` を
+持って実行される**（[execute.ts:9062](../../src/execute.ts#L9062) /
+[4663](../../src/execute.ts#L4663) / [4564](../../src/execute.ts#L4564)）。
+
+**`onTruncate` のスコープにある `stmt` は、常にその取得を行っている SELECT 自身**であり、
+**外側の `joins` を見る経路は無い。**
+
+→ **判定は「その SELECT の `joins` だけ」で正しい。**
+
+> **[`statementContainsOuterJoin()`](../../src/core/outerJoinSearchAbortGuard.ts#L16) を
+> 使ってはいけない。**あれは **statement 全体を再帰走査する boolean** で、
+> **サブクエリ側の打ち切りを外側の外部結合のせいにしてしまう。**
+> （こちらは当初「既存の判定器があるから使えばいい」と考えていた。**調査で覆った。**）
+
+### 7.4 **`CompleteInputReason` に足さない**（§5.4 の前提が覆った）
+
+`CompleteInputReason` は **AST から静的に決まる**（[dmlGuard.ts:108](../../src/core/dmlGuard.ts#L108)）。
+**足すと「外部結合があれば、どこが打ち切られても常にエラー」＝案 C** になり、
+**§5.1 の過剰がそのまま出る。**
+
+→ **足さない。文面は投げる場所で組み立てる。**
+→ **結果として B97 のエラー主語の規則は変更不要**（§5.4）。
+
+### 7.5 止める経路は既にある
+
+- `fetchAll()` は **`onTruncate(maxRecords)` を同期的に呼んでから**切り詰めた配列を返す
+  （[fetchAll.ts:122](../../src/api/fetchAll.ts#L122) / [147](../../src/api/fetchAll.ts#L147) /
+  [188](../../src/api/fetchAll.ts#L188)）。**投げれば `return` の前に伝播する**
+- `executeSelect()` の `catch` が `throwCompleteInputError()` へ渡す。
+  **`FetchAllLimitError` で、かつ未ラップのときだけ**文面を足す
+  （[execute.ts:2958](../../src/execute.ts#L2958)）
+  → **B97 で足した `completeInputWrapped` を `true` にすれば二重ラップしない**
+
+### 7.6 影響を受ける既存テスト（codex が全件調べた）
+
+**外部結合 ＋ `truncate` ＋ 成功期待は 4 呼び出し。すべて `b95TruncationVisibility.test.ts`。**
+**`RIGHT JOIN` の該当は無い。**
+
+| 場所 | 打ち切られる側 | 偽の `NULL` | C' 後 |
+|---|---|---|---|
+| `:72` | **左＝保持側だけ** | **起きない** | ✅ **無変更で成功**（**案 C を採らなかった理由そのもの**） |
+| `:106` | **実際の打ち切り無し** | — | ✅ 無変更 |
+| `:124` 自己結合 | **両方**（保持されない側も） | **起きない**（両側の窓が同一） | ❌ **エラーになる** |
+| `:135` reverse-order | **両方**（保持されない側も） | **起きない**（同上） | ❌ **エラーになる** |
+
+**下 2 件は「実際には偽の `NULL` が起きていないのにエラーになる」**。
+**C' はそれを知る術がない**（保持されない側が不完全なら `NULL` が本物か検証できない）。
+**エラーにするのが正しい。**→ 仕様 §6 で書き換えを許可した。
+
+### 7.7 承知している限界（本件では直さない）
+
+- **並行して開始済みの取得は中断されない**（[execute.ts:4418](../../src/execute.ts#L4418)）。
+  **エラーにはなるので正しさの問題ではない**
+- **B95 の `limitReachedApps` は appId の集合**であり、
+  **同一 appId の main / join / 複数 alias / 入れ子を区別しない**
+  （[execute.ts:820](../../src/execute.ts#L820)）
