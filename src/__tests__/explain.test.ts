@@ -1,4 +1,11 @@
-import { execute, KintoneClient, SelectResult } from "../execute";
+import {
+  execute,
+  KintoneClient,
+  resolveBatchVariableReferences,
+  SelectResult,
+} from "../execute";
+import { Lexer } from "../lexer/lexer";
+import { Parser } from "../parser/parser";
 
 // ----------------------------------------------------------------
 // EXPLAIN は schema-aware planner として form metadata のみ読む。
@@ -13,7 +20,7 @@ function makeClient(): KintoneClient {
     async deleteRecords() { },
     async getApps()     { return []; },
     async getFields() {
-      const numberFields = ["金額", "売上", "数量", "合計費用", "上限費用"];
+      const numberFields = ["金額", "売上", "数量", "合計費用", "上限費用", "案件No", "顧客No"];
       const dateFields = ["登録日", "作成日", "受注予定日"];
       const optionFields = ["選択", "確度", "顧客ランク"];
       const textFields = [
@@ -851,6 +858,64 @@ test("バッチ EXPLAIN: SET と後続の変数参照を実行せずに計画化
     plan: expect.arrayContaining([expect.stringContaining("SET @min")]),
   });
   expect(plans.statements[1].plan.join("\n")).toContain("@min");
+});
+
+test.each([
+  ["直接算術", "(顧客No * 100) / @total AS 構成比"],
+  ["ROUND", "ROUND(顧客No * 100 / @total, 1) AS 構成比"],
+] as const)("B92: バッチ EXPLAIN は変数を使う%sを式非表示の既存計画で受理する", async (_label, expression) => {
+  const plans = await buildBatchExplainPlans(
+    "CREATE TEMP TABLE #g AS SELECT 案件No, 顧客No FROM APP4147;" +
+      "SET @total = (SELECT SUM(顧客No) FROM #g);" +
+      `SELECT 案件No, ${expression} FROM #g`
+  );
+  expect(plans.statements[2].plan).toEqual([
+    "  mode:          FULL_SCAN（一時テーブル参照）",
+    "  temp:          #g（インメモリ走査。実体化前のため行数不明）",
+    "  note:          一時テーブルへの WHERE プッシュダウンは行われない",
+  ]);
+});
+
+test.each([
+  ["直接算術", "(顧客No * 100) / @total AS 構成比"],
+  ["ROUND", "ROUND(顧客No * 100 / @total, 1) AS 構成比"],
+] as const)("B92: 算術プレースホルダーの数値ノードは raw に変数名を保持する（%s）", (_label, expression) => {
+  const [statement] = new Parser(
+    new Lexer(`SELECT 案件No, ${expression} FROM #g`).tokenize()
+  ).parseStatements();
+  const resolved = resolveBatchVariableReferences(
+    statement,
+    new Map([[
+      "total",
+      { type: "string" as const, value: "@total", placeholder: true as const },
+    ]])
+  );
+  const placeholderNodes: Array<Record<string, unknown>> = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node !== null && typeof node === "object") {
+      const record = node as Record<string, unknown>;
+      if (record["raw"] === "@total") placeholderNodes.push(record);
+      Object.values(record).forEach(visit);
+    }
+  };
+  visit(resolved);
+  expect(placeholderNodes).toEqual([
+    { type: "NUMBER", value: 0, raw: "@total" },
+  ]);
+});
+
+test("B92: 算術外の文字列プレースホルダーは文字列リテラルと同じ計画を維持する", async () => {
+  const placeholder = await buildBatchExplainPlans(
+    "DECLARE @phase = '受注'; SELECT $id FROM APP100 WHERE 状態 = @phase"
+  );
+  const literal = await buildBatchExplainPlans(
+    "SELECT $id FROM APP100 WHERE 状態 = '@phase'"
+  );
+  expect(placeholder.statements[1].plan).toEqual(literal.statements[0].plan);
 });
 
 test("バッチ EXPLAIN: 選択系 IN の文字列変数を候補表示し、値は実行しない", async () => {

@@ -70,6 +70,49 @@ test("Pro batch is explained statement-by-statement without reading records", as
   expect(tracked.getRecords).not.toHaveBeenCalled();
 });
 
+test.each([
+  ["direct arithmetic", "(顧客No * 100) / @total AS 構成比"],
+  ["ROUND", "ROUND(顧客No * 100 / @total, 1) AS 構成比"],
+] as const)(
+  "B92: explainQuery accepts Pro batch %s with the existing expression-free temp plan",
+  async (_label, expression) => {
+    const tracked = trackedClient();
+    const result = await explainQuery(
+      "CREATE TEMP TABLE #g AS SELECT 案件No, 顧客No FROM APP4147; " +
+        "SET @total = (SELECT SUM(顧客No) FROM #g); " +
+        `SELECT 案件No, ${expression} FROM #g`,
+      { client: tracked.client }
+    );
+
+    expect(result.lines.slice(-3)).toEqual([
+      "  mode:          FULL_SCAN（一時テーブル参照）",
+      "  temp:          #g（インメモリ走査。実体化前のため行数不明）",
+      "  note:          一時テーブルへの WHERE プッシュダウンは行われない",
+    ]);
+    expect(tracked.getRecords).not.toHaveBeenCalled();
+  }
+);
+
+test.each([
+  ["direct arithmetic", "SELECT 100 / @phase AS x"],
+  ["ROUND", "SELECT ROUND(100 / @phase, 1) AS x"],
+] as const)(
+  "B92: runBatch keeps B90 non-numeric runtime fail-closed for %s",
+  async (_label, selectSql) => {
+    const tracked = trackedClient();
+    await expect(runBatch(
+      `DECLARE @phase = '受注'; ${selectSql}`,
+      { client: tracked.client }
+    )).rejects.toMatchObject({
+      code: "EXECUTION_ERROR",
+      message: "ArgumentError: variable @phase is not numeric and cannot be used in arithmetic.",
+      statementIndex: 1,
+      statementType: "SELECT",
+    });
+    for (const api of tracked.apiCalls) expect(api).not.toHaveBeenCalled();
+  }
+);
+
 test("legacy single-query explain output remains byte-for-byte identical", async () => {
   const tracked = trackedClient();
   const plain = await explainQuery("SELECT 1 AS one", { client: tracked.client });

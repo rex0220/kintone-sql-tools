@@ -1433,7 +1433,7 @@ export interface BatchExecuteResult {
 }
 
 type VarValue =
-  | { type: "string"; value: string }
+  | { type: "string"; value: string; placeholder?: true }
   | { type: "number"; value: number; raw?: string }
   | { type: "array"; elements: Array<{ type: "string"; value: string }> };
 
@@ -1994,12 +1994,14 @@ function resolveBatchVariableReferencesInternal<T>(
       if (value.type === "array") {
         throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
       }
-      if (numericArithmeticOperand && value.type !== "number") {
+      if (numericArithmeticOperand && value.type !== "number" && value.placeholder !== true) {
         throw new Error(
           `ArgumentError: variable @${obj["name"]} is not numeric and cannot be used in arithmetic.`
         );
       }
-      return (value.type === "number"
+      return (numericArithmeticOperand && value.type === "string" && value.placeholder === true
+        ? { type: "NUMBER", value: 0, raw: value.value }
+        : value.type === "number"
         ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }
         : { type: "STRING", value: value.value }) as T;
     }
@@ -9772,7 +9774,7 @@ export async function buildBatchExplainPlans(
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
         variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
           ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
-          : { type: "string", value: `@${stmt.name}` });
+          : { type: "string", value: `@${stmt.name}`, placeholder: true });
       }
     }
     return { statementCount: statements.length, statements: plans };

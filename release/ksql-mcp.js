@@ -48301,12 +48301,12 @@ function resolveBatchVariableReferencesInternal(node, variables, numericArithmet
       if (value.type === "array") {
         throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
       }
-      if (numericArithmeticOperand && value.type !== "number") {
+      if (numericArithmeticOperand && value.type !== "number" && value.placeholder !== true) {
         throw new Error(
           `ArgumentError: variable @${obj["name"]} is not numeric and cannot be used in arithmetic.`
         );
       }
-      return value.type === "number" ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) } : { type: "STRING", value: value.value };
+      return numericArithmeticOperand && value.type === "string" && value.placeholder === true ? { type: "NUMBER", value: 0, raw: value.value } : value.type === "number" ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) } : { type: "STRING", value: value.value };
     }
     if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
       const value = variables.get(obj["name"]);
@@ -54357,7 +54357,7 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
         plan: statementPlan.length === 0 ? metadataPlan : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)]
       });
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
-        variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) } : { type: "string", value: `@${stmt.name}` });
+        variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) } : { type: "string", value: `@${stmt.name}`, placeholder: true });
       }
     }
     return { statementCount: statements.length, statements: plans };
@@ -58656,7 +58656,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.31.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.31.1" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged families plus JOIN, aggregates, windows, subtable virtual tables, CHECK, KLIKE, KORDER BY, @variables, and LAPP_<NAME>.
 
