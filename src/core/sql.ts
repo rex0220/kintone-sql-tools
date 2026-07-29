@@ -1,12 +1,12 @@
 import { Lexer } from "../lexer/lexer";
 import { Parser } from "../parser/parser";
 import type { Statement } from "../types/ast";
-import { validateKlikeStatement } from "./klikeValidation";
+import { validateStatementStatic } from "./statementValidation";
 
 export function parseSqlStatement(sql: string, capabilities: { import?: boolean } = {}): Statement {
   const tokens = new Lexer(sql).tokenize();
   const stmt = new Parser(tokens, capabilities).parse();
-  validateKlikeStatement(stmt);
+  validateStatementStatic(stmt);
   return stmt;
 }
 
@@ -14,6 +14,6 @@ export function parseSqlStatement(sql: string, capabilities: { import?: boolean 
 export function parseSqlStatements(sql: string, capabilities: { import?: boolean } = {}): Statement[] {
   const tokens = new Lexer(sql).tokenize();
   const statements = new Parser(tokens, capabilities).parseStatements();
-  statements.forEach(validateKlikeStatement);
+  statements.forEach(validateStatementStatic);
   return statements;
 }

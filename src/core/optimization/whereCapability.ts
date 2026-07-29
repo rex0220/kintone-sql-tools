@@ -62,11 +62,13 @@ const LEGACY_KINTONE_FUNCTION_FIELD_TYPES = new Map<string, ReadonlySet<string>>
   ["TODAY", new Set(["DATE", "DATETIME", "CREATED_TIME", "UPDATED_TIME"])],
   ["NOW", new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"])],
   ["LOGINUSER", new Set(["CREATOR", "MODIFIER", "USER_SELECT"])],
+  ["PRIMARY_ORGANIZATION", new Set(["ORGANIZATION_SELECT"])],
 ]);
 const LEGACY_KINTONE_FUNCTION_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
   ["TODAY", new Set(RANGE_AND_EQUALITY)],
   ["NOW", new Set(RANGE_AND_EQUALITY)],
   ["LOGINUSER", new Set(["in", "not in"])],
+  ["PRIMARY_ORGANIZATION", new Set(["in", "not in"])],
 ]);
 const EQUALITY_IN = ["=", "!=", "in", "not in"] as const;
 const NATIVE_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([

@@ -17,11 +17,12 @@ const resolveField = (field: { field: string }) => resolveFieldSemantics({
   fieldType: field.field === "件名" ? "SINGLE_LINE_TEXT" : "DATE",
 });
 
-test("server-only WHERE 集合は legacy 3 + relative-date 12 の15関数", () => {
+test("server-only WHERE 集合は legacy 4 + relative-date 12 の16関数", () => {
   expect([...SERVER_ONLY_WHERE_FUNCTION_NAMES]).toEqual([
     "TODAY",
     "NOW",
     "LOGINUSER",
+    "PRIMARY_ORGANIZATION",
     "YESTERDAY",
     "TOMORROW",
     "FROM_TODAY",

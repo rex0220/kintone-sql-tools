@@ -48,7 +48,7 @@ export const KSQL_FUNCTION_CATALOG = Object.freeze({
   ] as const),
   window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK"] as const),
   contextual: frozenList([
-    "TODAY", "NOW", "LOGINUSER",
+    "TODAY", "NOW", "LOGINUSER", "PRIMARY_ORGANIZATION",
     "YESTERDAY", "TOMORROW", "FROM_TODAY",
     "THIS_WEEK", "LAST_WEEK", "NEXT_WEEK",
     "THIS_MONTH", "LAST_MONTH", "NEXT_MONTH",

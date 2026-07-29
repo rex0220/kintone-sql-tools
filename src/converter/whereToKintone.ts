@@ -219,6 +219,7 @@ function convertKintoneFunc(v: KintoneFunction): string {
     case "TODAY":
     case "NOW":
     case "LOGINUSER":
+    case "PRIMARY_ORGANIZATION":
       // TODAY() / NOW() / LOGINUSER() はそのまま出力
       return `${v.name}()`;
   }

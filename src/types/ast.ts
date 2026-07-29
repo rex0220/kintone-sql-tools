@@ -596,7 +596,7 @@ export function numberLiteralText(node: NumberLiteral): string {
 /** Legacy kintone functions. Keep this runtime shape byte-for-byte stable. */
 export interface LegacyKintoneFunction {
   type: "KINTONE_FUNC";
-  name: "TODAY" | "NOW" | "LOGINUSER";
+  name: "TODAY" | "NOW" | "LOGINUSER" | "PRIMARY_ORGANIZATION";
 }
 
 export type RelativeDatePeriodUnit = "DAYS" | "WEEKS" | "MONTHS" | "YEARS";
@@ -640,9 +640,11 @@ export type RelativeDateFunction =
 
 export type KintoneFunction = LegacyKintoneFunction | RelativeDateFunction;
 
-/** The only kintone function supported as an IN-list element. */
+/** kintone functions supported as singleton IN-list elements. */
 export type InListFunction =
-  Omit<LegacyKintoneFunction, "name"> & { name: "LOGINUSER" };
+  Omit<LegacyKintoneFunction, "name"> & {
+    name: "LOGINUSER" | "PRIMARY_ORGANIZATION";
+  };
 
 /** IN (v1, v2, ...) */
 export interface InList {

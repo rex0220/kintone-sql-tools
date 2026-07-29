@@ -49,7 +49,7 @@ function relativeLeaves(where: WhereExpr | null): BinaryExpr[] {
   switch (where.type) {
     case "BINARY":
       return where.right.type === "KINTONE_FUNC"
-        && !["TODAY", "NOW", "LOGINUSER"].includes(where.right.name)
+        && !["TODAY", "NOW", "LOGINUSER", "PRIMARY_ORGANIZATION"].includes(where.right.name)
         ? [where]
         : [];
     case "LOGICAL":

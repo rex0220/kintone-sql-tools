@@ -43,3 +43,7 @@ test("legacy TODAY/NOW/LOGINUSER resolver の既存3ケースを変更しない"
     .toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   expect(resolveKintoneFunc("LOGINUSER")).toBe("");
 });
+
+test("PRIMARY_ORGANIZATION resolver は解決不能時に空文字へ fail-closed する", () => {
+  expect(resolveKintoneFunc("PRIMARY_ORGANIZATION")).toBe("");
+});

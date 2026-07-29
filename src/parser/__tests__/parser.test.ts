@@ -335,6 +335,22 @@ test("WHERE IN / NOT IN は単独の LOGINUSER() を限定 AST として受理�
   }
 });
 
+test("WHERE IN / NOT IN は単独の PRIMARY_ORGANIZATION() を限定 AST として受理する", () => {
+  for (const op of ["IN", "NOT IN"] as const) {
+    const ast = parseSelect(
+      `SELECT * FROM APP100 WHERE 担当組織 ${op} (PRIMARY_ORGANIZATION())`
+    );
+    expect(ast.where).toMatchObject({
+      type: "BINARY",
+      op: op === "IN" ? "IN" : "NOT_IN",
+      right: {
+        type: "IN_LIST",
+        values: [{ type: "KINTONE_FUNC", name: "PRIMARY_ORGANIZATION" }],
+      },
+    });
+  }
+});
+
 test.each([
   "SELECT * FROM APP100 WHERE 作成者 IN (LOGINUSER(), 'taro')",
   "SELECT * FROM APP100 WHERE 作成者 IN ('taro', LOGINUSER())",
@@ -342,6 +358,16 @@ test.each([
 ])("LOGINUSER() と他要素の混在 IN-list は parse 時に拒否する — %s", (sql) => {
   expect(() => parseSelect(sql)).toThrow(
     /LOGINUSER\(\) は IN \/ NOT IN リストの単独要素としてのみ使用できます/
+  );
+});
+
+test.each([
+  "SELECT * FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION(), 'org')",
+  "SELECT * FROM APP100 WHERE 担当組織 IN ('org', PRIMARY_ORGANIZATION())",
+  "SELECT * FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION(), PRIMARY_ORGANIZATION())",
+])("PRIMARY_ORGANIZATION() と他要素の混在 IN-list は parse 時に拒否する — %s", (sql) => {
+  expect(() => parseSelect(sql)).toThrow(
+    /PRIMARY_ORGANIZATION\(\) は IN \/ NOT IN リストの単独要素としてのみ使用できます/
   );
 });
 

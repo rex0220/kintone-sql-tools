@@ -110,6 +110,7 @@ export const enum TokenKind {
   TODAY      = "TODAY",
   NOW        = "NOW",
   LOGINUSER  = "LOGINUSER",
+  PRIMARY_ORGANIZATION = "PRIMARY_ORGANIZATION",
 
   // 文字列関数
   UPPER     = "UPPER",
@@ -270,6 +271,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["TODAY",     TokenKind.TODAY],
   ["NOW",       TokenKind.NOW],
   ["LOGINUSER", TokenKind.LOGINUSER],
+  ["PRIMARY_ORGANIZATION", TokenKind.PRIMARY_ORGANIZATION],
   ["CASE",      TokenKind.CASE],
   ["WHEN",      TokenKind.WHEN],
   ["THEN",      TokenKind.THEN],

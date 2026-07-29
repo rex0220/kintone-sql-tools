@@ -24,7 +24,9 @@ import {
   writesKintone,
 } from "./dmlGuard";
 import { assertApplyScope } from "./applyPatchScope";
-import { KlikeValidationError, validateKlikeStatement } from "./klikeValidation";
+import { KlikeValidationError } from "./klikeValidation";
+import { PrimaryOrganizationDmlValidationError } from "./primaryOrganizationDmlValidation";
+import { validateStatementStatic } from "./statementValidation";
 import { validateGroupingStatic } from "./groupingValidation";
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
@@ -212,9 +214,12 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
     }
     try {
       assertApplyScope("phase15b", stmt);
-      validateKlikeStatement(stmt);
+      validateStatementStatic(stmt);
     } catch (error) {
-      if (error instanceof KlikeValidationError) {
+      if (
+        error instanceof KlikeValidationError
+        || error instanceof PrimaryOrganizationDmlValidationError
+      ) {
         throw new BatchAnalysisError(error.message, index);
       }
       if (error instanceof Error

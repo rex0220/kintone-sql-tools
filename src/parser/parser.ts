@@ -224,6 +224,7 @@ export const PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<Token
   [TokenKind.TODAY]: "TODAY",
   [TokenKind.NOW]: "NOW",
   [TokenKind.LOGINUSER]: "LOGINUSER",
+  [TokenKind.PRIMARY_ORGANIZATION]: "PRIMARY_ORGANIZATION",
 });
 
 export function isContextualFunctionToken(kind: TokenKind): boolean {
@@ -273,7 +274,7 @@ const FUNC_CALL_PREFIX_KINDS: ReadonlySet<TokenKind> = new Set([
   TokenKind.GROUP_CONCAT, TokenKind.STDDEV_POP, TokenKind.STDDEV_SAMP,
   TokenKind.VAR_POP, TokenKind.VAR_SAMP, TokenKind.MEDIAN, TokenKind.MODE,
   TokenKind.ROW_NUMBER, TokenKind.RANK, TokenKind.DENSE_RANK,
-  TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER,
+  TokenKind.TODAY, TokenKind.NOW, TokenKind.LOGINUSER, TokenKind.PRIMARY_ORGANIZATION,
   TokenKind.UPPER, TokenKind.LOWER, TokenKind.TRIM, TokenKind.LTRIM, TokenKind.RTRIM,
   TokenKind.LENGTH, TokenKind.LENGTH_CHAR, TokenKind.SUBSTRING, TokenKind.SUBSTR, TokenKind.CONCAT,
   TokenKind.REPLACE, TokenKind.TRANSLATE, TokenKind.COALESCE, TokenKind.NULLIF, TokenKind.ISNULL,
@@ -508,6 +509,12 @@ export class Parser {
     if (contextualFunction === "LOGINUSER") {
       throw new ParseError(
         `${context} の右辺で LOGINUSER() は使用できません（実行環境共通のログインユーザー解決は未対応です）`,
+        tok
+      );
+    }
+    if (contextualFunction === "PRIMARY_ORGANIZATION") {
+      throw new ParseError(
+        `${context} の右辺で PRIMARY_ORGANIZATION() は使用できません（実行環境共通の優先組織解決は未対応です）`,
         tok
       );
     }
@@ -2673,6 +2680,24 @@ export class Parser {
         values.push({ type: "KINTONE_FUNC", name: "LOGINUSER" });
         if (this.peek().kind === TokenKind.COMMA) {
           throw new ParseError(mixedLoginUserMessage, this.peek());
+        }
+      } else if (tok.kind === TokenKind.PRIMARY_ORGANIZATION) {
+        const mixedPrimaryOrganizationMessage =
+          "PRIMARY_ORGANIZATION() は IN / NOT IN リストの単独要素としてのみ使用できます";
+        if (values.length > 0) {
+          throw new ParseError(mixedPrimaryOrganizationMessage, tok);
+        }
+        this.expect(
+          TokenKind.LPAREN,
+          "PRIMARY_ORGANIZATION の直後には空引数の () が必要です"
+        );
+        this.expect(
+          TokenKind.RPAREN,
+          "PRIMARY_ORGANIZATION の直後には空引数の () が必要です"
+        );
+        values.push({ type: "KINTONE_FUNC", name: "PRIMARY_ORGANIZATION" });
+        if (this.peek().kind === TokenKind.COMMA) {
+          throw new ParseError(mixedPrimaryOrganizationMessage, this.peek());
         }
       } else {
         throw new ParseError(invalidValueMessage, tok);

@@ -17,6 +17,7 @@ export const LEGACY_KINTONE_FUNCTION_NAMES: ReadonlySet<string> = new Set([
   "TODAY",
   "NOW",
   "LOGINUSER",
+  "PRIMARY_ORGANIZATION",
 ]);
 
 export const SERVER_ONLY_WHERE_FUNCTION_NAMES: ReadonlySet<string> = new Set([

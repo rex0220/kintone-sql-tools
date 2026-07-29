@@ -41,7 +41,7 @@ describe("B55 complete function catalog", () => {
 
   test("contextual catalog preserves the legacy prefix and lists all B67 relative-date functions", () => {
     expect(KSQL_FUNCTION_CATALOG.contextual).toEqual([
-      "TODAY", "NOW", "LOGINUSER",
+      "TODAY", "NOW", "LOGINUSER", "PRIMARY_ORGANIZATION",
       "YESTERDAY", "TOMORROW", "FROM_TODAY",
       "THIS_WEEK", "LAST_WEEK", "NEXT_WEEK",
       "THIS_MONTH", "LAST_MONTH", "NEXT_MONTH",

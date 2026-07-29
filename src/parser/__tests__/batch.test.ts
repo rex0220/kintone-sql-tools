@@ -135,6 +135,8 @@ test("SET RHS のフィールド・他変数・NULLを拒否する", () => {
   expect(() => parseOne("SET @x = NULL")).toThrow(/NULL/);
   expect(() => parseOne("SET @user = LOGINUSER()"))
     .toThrow(/SET の右辺で LOGINUSER\(\) は使用できません/);
+  expect(() => parseOne("SET @org = PRIMARY_ORGANIZATION()"))
+    .toThrow(/SET の右辺で PRIMARY_ORGANIZATION\(\) は使用できません/);
   expect(() => parseOne("SET @list = ('A', 'B')")).toThrow(ParseError);
 });
 
@@ -151,6 +153,8 @@ test("DECLARE の既定値はサブクエリ・変数・LOGINUSER を拒否す�
     .toThrow(/他の変数/);
   expect(() => parseAll("DECLARE @x = LOGINUSER(); ASSERT @x = 'x'"))
     .toThrow(/DECLARE の右辺で LOGINUSER/);
+  expect(() => parseAll("DECLARE @x = PRIMARY_ORGANIZATION(); ASSERT @x = 'x'"))
+    .toThrow(/DECLARE の右辺で PRIMARY_ORGANIZATION/);
 });
 
 // ----------------------------------------------------------------

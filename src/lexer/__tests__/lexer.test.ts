@@ -188,10 +188,11 @@ test("ブロックコメント (/* */) をスキップ", () => {
 // ----------------------------------------------------------------
 
 test("kintone 専用関数キーワード", () => {
-  expect(kinds("TODAY() NOW() LOGINUSER()")).toEqual([
+  expect(kinds("TODAY() NOW() LOGINUSER() PRIMARY_ORGANIZATION()")).toEqual([
     TokenKind.TODAY,   TokenKind.LPAREN, TokenKind.RPAREN,
     TokenKind.NOW,     TokenKind.LPAREN, TokenKind.RPAREN,
     TokenKind.LOGINUSER, TokenKind.LPAREN, TokenKind.RPAREN,
+    TokenKind.PRIMARY_ORGANIZATION, TokenKind.LPAREN, TokenKind.RPAREN,
     TokenKind.EOF,
   ]);
 });

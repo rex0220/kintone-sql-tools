@@ -50,6 +50,15 @@ test("LOGINUSER() singleton は IN / NOT IN の REST query byte を維持する"
   ))).toBe("更新者 not in (LOGINUSER())");
 });
 
+test("PRIMARY_ORGANIZATION() singleton は IN / NOT IN をそのまま出力する", () => {
+  expect(whereToKintone(where(
+    "SELECT * FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION())"
+  ))).toBe("担当組織 in (PRIMARY_ORGANIZATION())");
+  expect(whereToKintone(where(
+    "SELECT * FROM APP100 WHERE 担当組織 NOT IN (PRIMARY_ORGANIZATION())"
+  ))).toBe("担当組織 not in (PRIMARY_ORGANIZATION())");
+});
+
 test("SIMPLE REST query は16桁超の精度を保ちつつ平文10進で押し下げる", () => {
   // 16桁超はbinary64で丸めずそのまま保持する。
   expect(whereToKintone(where("SELECT * FROM APP100 WHERE 金額 = 9007199254740993")))

@@ -66,7 +66,8 @@ import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { isOuterJoinNonPreservedTable, statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { parseExactDecimal } from "./core/exactDecimal";
-import { validateKlikePushdownPlan, validateKlikeStatement } from "./core/klikeValidation";
+import { validateKlikePushdownPlan } from "./core/klikeValidation";
+import { validateStatementStatic } from "./core/statementValidation";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -1042,7 +1043,7 @@ async function executeParsedStatement(
   }
   assertApplyScope("phase15b", stmt);
   assertApplyExecutionScope("phase15b", stmt);
-  validateKlikeStatement(stmt);
+  validateStatementStatic(stmt);
   if (stmt.type !== "EXPLAIN") {
     await validateStatementGroupingPlanning(stmt, client, cacheContext);
   }
@@ -1652,7 +1653,7 @@ async function executeBatchStatement(
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-    validateKlikeStatement(resolvedStmt);
+    validateStatementStatic(resolvedStmt);
     await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
     if (resolvedStmt.expr.type === "ARRAY") {
       variables.set(stmt.name, {
@@ -1720,7 +1721,7 @@ async function executeBatchStatement(
   assertApplyScope("phase15b", resolvedStmt);
   assertApplyExecutionScope("phase15b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
-  validateKlikeStatement(resolvedStmt);
+  validateStatementStatic(resolvedStmt);
   await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
 
   if (resolvedStmt.type === "VALIDATE") {
@@ -9054,7 +9055,7 @@ function parseSql(sql: string, enableImport = false) {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
     assertApplyScope("phase15b", stmt);
-    validateKlikeStatement(stmt);
+    validateStatementStatic(stmt);
     return stmt;
   } catch (e) {
     if (e instanceof LexError || e instanceof ParseError) {
@@ -9910,7 +9911,7 @@ export async function buildBatchExplainPlans(
           ? { ...stmt, expr: resolveBatchVariableReferences(stmt.expr, variables) }
           : stmt)
         : resolveBatchVariableReferences(stmt, variables);
-      validateKlikeStatement(planStmt);
+      validateStatementStatic(planStmt);
       const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, invocationCacheContext);
       const whereAnalysis = await buildExplainWhereAnalysis(
         planStmt,

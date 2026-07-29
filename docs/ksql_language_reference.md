@@ -671,7 +671,7 @@ SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
 
 #### kintone クエリ関数（server-only）
 
-`TODAY()` / `NOW()` / `LOGINUSER()` と次の相対日付12関数は、`WHERE` で kintone REST query
+`TODAY()` / `NOW()` / `LOGINUSER()` / `PRIMARY_ORGANIZATION()` と次の相対日付12関数は、`WHERE` で kintone REST query
 へそのまま渡す **server-only** 関数です。Node / CLI / MCP / プラグインで client 評価せず、
 kintone サーバーが値・期間と比較結果を決定します。
 
@@ -680,17 +680,20 @@ kintone サーバーが値・期間と比較結果を決定します。
 | `TODAY()` | `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` | 比較右辺の `=` / `!=` / `<` / `<=` / `>` / `>=`、`BETWEEN` 境界 |
 | `NOW()` | `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` | 比較右辺の `=` / `!=` / `<` / `<=` / `>` / `>=`、`BETWEEN` 境界。**`DATE` には使用不可** |
 | `LOGINUSER()` | `CREATOR` / `MODIFIER` / `USER_SELECT` | singleton の `in (LOGINUSER())` / `not in (LOGINUSER())` のみ |
+| `PRIMARY_ORGANIZATION()` | `ORGANIZATION_SELECT` | singleton の `in (PRIMARY_ORGANIZATION())` / `not in (PRIMARY_ORGANIZATION())` のみ |
 
 ```sql
 SELECT * FROM APP100 WHERE 日付 = TODAY()
 SELECT * FROM APP100 WHERE 作成日時 <= NOW()
 SELECT * FROM APP100 WHERE 作成者 in (LOGINUSER())
 SELECT * FROM APP100 WHERE 担当者 not in (LOGINUSER())
+SELECT * FROM APP100 WHERE 担当組織 in (PRIMARY_ORGANIZATION())
 ```
 
 `LOGINUSER()` は `作成者` / `更新者` / ユーザー選択だけに使用できます。
 **グループ選択には使用できません**（kintone 公式の型別表で利用可能な関数は「なし」）。
-組織選択の `PRIMARY_ORGANIZATION()` は kSQL 未対応です。
+`PRIMARY_ORGANIZATION()` は組織選択だけに使用できます。kintone 公式の記述によると、
+優先組織が未設定のユーザーでは条件が無視されるため、kSQL はこの関数を含む DML を拒否します。
 
 **相対日付関数（12関数）**
 
@@ -756,8 +759,8 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
   4. **第5-L（INNER JOIN・AND-spine exact leaf）**: `WHERE` の AND スパインにある
      exact な関数 leaf を alias ごとに採用し、それぞれの APP へ押し下げます。
      複数 alias に関数が分散していても使用でき、関数を含まない残余だけを client 評価します。
-     `LOGINUSER()` は `作成者` / `更新者` / ユーザー選択の singleton
-     `in (LOGINUSER())` / `not in (LOGINUSER())` に限ります。
+     `LOGINUSER()` は `作成者` / `更新者` / ユーザー選択、`PRIMARY_ORGANIZATION()` は
+     組織選択の singleton `in` / `not in` に限ります。
 
      ```sql
      SELECT a.$id, a.日付, b.作成者
@@ -767,13 +770,13 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
        AND LENGTH(a.件名) > 1
      ```
 
-- 次の計画は、関数を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（legacy 3 関数は reason `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`、相対日付12関数は `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
+- 次の計画は、関数を安全に exact 押し下げしつつ残余だけを client 評価する保証がないため、レコード・Cursor・mutation API の前に fail-closed します（legacy 4 関数は reason `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`、相対日付12関数は `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`）。
 
   - 相対日付関数が `OR` の枝または `NOT` の配下にあり、**`WHERE` 全体としては exact pushdown できない**場合（`OR` の他方に `LENGTH()` などの押し下げ不能な述語があるとき等）。`OR` を含むこと自体は拒否理由ではありません。**回避策**: 押し下げ可能な述語へ置換する（例 `都道府県 != ''`）か、上記2の形（相対日付 leaf と残余を `AND` で結ぶ）にします。
   - `LEFT` / `RIGHT JOIN`、cross-alias `OR`、cross-table 述語に関数を含む形、
     whole-WHERE exact でない `KLIKE` を含む `OR`。一部の KLIKE 混在形は、関数側が
     exact でないことを示す `WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN`
-    （legacy 3関数では `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`）で拒否します。
+    （legacy 4関数では `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN`）で拒否します。
   - サブテーブル・入れ子 SELECT（スカラーサブクエリ等）・派生表・CTE・一時テーブルを
     JOIN 入力にする形、`VALIDATE`。`GROUP_SELECT in (LOGINUSER())` は kintone 公式に
     対応するクエリ関数がないため `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED` です。
@@ -781,12 +784,13 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
     も拒否します（トップレベルの `UNION` は枝ごとに判定するため、各枝が条件を満たせば
     使用できます）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、
     `INSERT` / `UPSERT ... SELECT` の source）は上記1の whole-WHERE exact のみ可**で、
-    上記2の prefilter＋残余や FULL_SCAN_EXACT は使用できません。
+    上記2の prefilter＋残余や FULL_SCAN_EXACT は使用できません。ただし
+    **`PRIMARY_ORGANIZATION()` を含む DML は whole-WHERE exact でも常に拒否します**。
 - 拒否形の `EXPLAIN` は throw せず、`plan status: rejected`、対象 alias / field、
   reason、`client evaluation: forbidden`、実行 API なしを表示します。
 - **CTE・一時テーブルに残る非対称**: 押し下げ不能な述語が `AND` で混ざる形（例 `WHERE 日付 = THIS_MONTH() AND LENGTH(件名) > 1`）は、トップレベルの単一物理アプリ SELECT では上記2の prefilter＋残余として使用できますが、**CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使用できません**。これらの実体化経路では、その SELECT の `WHERE` 全体が exact である必要があります。該当する場合は CTE や一時テーブルへ切り出さず、トップレベル SELECT として書いてください。
 - 一時テーブルの実体化行数には通常の `maxRecords` とは別に専用の `tempTableMaxRows`（既定 10,000）が適用されます。超過時は `onLimit` の設定にかかわらず常にエラーで、日付リテラルと相対日付で扱いは同一です。
-- legacy 3 関数の診断 reason code は `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` です。相対日付12関数は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を使用します。
+- legacy 4 関数の診断 reason code は `WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_CONTEXT_UNSUPPORTED`、`WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` です。相対日付12関数は `WHERE_RELATIVE_DATE_ARGUMENT_INVALID`、`WHERE_RELATIVE_DATE_FIELD_TYPE_UNSUPPORTED`、`WHERE_RELATIVE_DATE_OPERATOR_UNSUPPORTED`、`WHERE_RELATIVE_DATE_CONTEXT_UNSUPPORTED`、`WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN` を使用します。
 - 関数名、`DAYS` / `WEEKS` / `MONTHS` / `YEARS`、曜日、`LAST` は hard keyword ではなく、該当する WHERE 値・引数位置だけで解釈する soft keyword です。同名フィールドは通常どおり使えます。関数呼び出しとの曖昧さを避ける場合は `` `FROM_TODAY` ``、`` `LAST` `` のようにバッククォートで退避してください。引用した単位・曜日・`LAST` は関数引数としては受理しません。
 
 ### 関数のネスト
@@ -975,8 +979,9 @@ WHERE ステータス NOT IN ('キャンセル', '却下')
 
 - 単一引用符の文字列 `'...'`・数値・バッチ変数 `@名前` を指定でき、**1 要素以上が必須**です。文字列はダブルクォートでなく単一引用符です（`IN ("A")` は構文エラー）。
 - 例外として、`CREATOR` / `MODIFIER` / `USER_SELECT` では singleton の
-  `in (LOGINUSER())` / `not in (LOGINUSER())` を使用できます。文字列・数値との混在 list、
-  複数個の `LOGINUSER()`、`TODAY()` / `NOW()` / 相対日付関数は IN list に指定できません。
+  `LOGINUSER()`、`ORGANIZATION_SELECT` では singleton の `PRIMARY_ORGANIZATION()` を
+  `in` / `not in` に使用できます。文字列・数値との混在 list、複数個の関数、
+  `TODAY()` / `NOW()` / 相対日付関数は IN list に指定できません。
 - 負数リテラルも指定できます（`IN (-1, -2)`）。
 - **`IN ()`（0 要素）は書けません**（ParseError）。「空／未選択」を探すのは `IN ('')` です（後述）。
 - サブクエリを渡す `IN (SELECT ...)` は別項です（後述）。
@@ -1174,29 +1179,32 @@ kintone の [クエリ関数](https://cybozu.dev/ja/kintone/docs/overview/query/
 | `TODAY()` | 今日の日付（`YYYY-MM-DD` 形式） |
 | `NOW()`   | 現在日時（ISO 8601 形式） |
 | `LOGINUSER()` | ログイン中のユーザー（`WHERE` では kintone server が解決） |
+| `PRIMARY_ORGANIZATION()` | ログイン中のユーザーの優先組織（`WHERE` では kintone server が解決） |
 
 ```sql
 WHERE 作成日時 >= TODAY()
 WHERE 期限日 < TODAY()
 WHERE 作成者 in (LOGINUSER())
 WHERE 担当者 not in (LOGINUSER())
+WHERE 担当組織 in (PRIMARY_ORGANIZATION())
 ```
 
-`WHERE` では15関数すべてが server-only です。`TODAY()` は日付系4型、
+`WHERE` では16関数すべてが server-only です。`TODAY()` は日付系4型、
 `NOW()` は `DATETIME` / 作成日時 / 更新日時（**`DATE` には不可**）の比較右辺・
 `BETWEEN` 境界に使用できます。`LOGINUSER()` は作成者 / 更新者 / ユーザー選択の
 singleton `in` / `not in` だけに使用でき、**グループ選択には使用できません**。
+`PRIMARY_ORGANIZATION()` は組織選択の singleton `in` / `not in` だけに使用できます。
 
 `WHERE` 以外で構文上許可される既存経路の `TODAY()` / `NOW()` は、従来どおり
-実行環境のローカル TZ で評価されます。内部のローカル評価器で `LOGINUSER()` を解決した場合は、
-プラグインを含む**全実行面で空文字**です（`SET @var = LOGINUSER()` はこの silent empty value を
-避けるため構文上拒否します）。現在の日付・日時を意図的に client のローカル TZ で評価する場合は、
+実行環境のローカル TZ で評価されます。内部のローカル評価器で `LOGINUSER()` /
+`PRIMARY_ORGANIZATION()` を解決した場合は、プラグインを含む**全実行面で空文字**です
+（`SET` / `DECLARE` の右辺では両関数を構文上拒否します）。現在の日付・日時を意図的に client のローカル TZ で評価する場合は、
 kSQL スカラー関数の `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` を使用してください。
 これらには押し下げ経路がなく、本項の fail-closed 対象外です。
 
 **相対日付関数（12関数・`WHERE` 専用）**: `YESTERDAY()` / `TOMORROW()` / `FROM_TODAY(n, unit)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` / `NEXT_WEEK([曜日])` / `THIS_MONTH([日])` / `LAST_MONTH([日])` / `NEXT_MONTH([日])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
 
-15関数共通で、単一 APP では **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**関数を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（関数 leaf を prefilter に押し下げ残余だけ client 評価・`SUPERSET_PREFILTER`）で使えます。INNER JOIN では alias 付き物理 APP だけを入力とし、単一 alias の whole-WHERE exact（第5-W）、または AND スパイン上の exact 関数 leaf を alias ごとに押し下げて関数なし残余だけを client 評価する形（第5-L）で使えます。後者は複数 alias へ分散した関数にも対応します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力が CTE・一時テーブル・サブテーブル・入れ子 SELECT・派生表の形はレコード取得前に fail-closed します。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML は whole-WHERE exact の形だけが使え、prefilter＋残余や FULL_SCAN_EXACT では使えません。** 型・演算子・reason code・移行方法は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
+16関数共通で、単一 APP では **その SELECT の `WHERE` 全体を押し下げられる形**（`OR` 併用も全体が押し下げ可能なら可。`GROUP BY` / `DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**関数を含まない残余（例 `LENGTH(...) > 1`）と `AND` で結ばれたトップレベルの単一物理アプリ SELECT**（関数 leaf を prefilter に押し下げ残余だけ client 評価・`SUPERSET_PREFILTER`）で使えます。INNER JOIN では alias 付き物理 APP だけを入力とし、単一 alias の whole-WHERE exact（第5-W）、または AND スパイン上の exact 関数 leaf を alias ごとに押し下げて関数なし残余だけを client 評価する形（第5-L）で使えます。後者は複数 alias へ分散した関数にも対応します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力が CTE・一時テーブル・サブテーブル・入れ子 SELECT・派生表の形はレコード取得前に fail-closed します。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed します（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML は whole-WHERE exact の形だけが使え、prefilter＋残余や FULL_SCAN_EXACT では使えません。`PRIMARY_ORGANIZATION()` を含む DML は常に拒否します。** 型・演算子・reason code・移行方法は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ```sql
 WHERE 作成日時 < FROM_TODAY(5, DAYS)
@@ -1205,7 +1213,9 @@ WHERE 更新日時 >= YESTERDAY() AND LENGTH(都道府県) > 1   -- prefilter＋
 WHERE 日付 = TODAY() AND LENGTH(件名) > 1                 -- TODAY() も同じ prefilter
 ```
 
-> kintone クエリ関数のうち `PRIMARY_ORGANIZATION()` は未対応です。
+> `PRIMARY_ORGANIZATION()` は組織選択の singleton `in` / `not in` だけに使用できます。
+> kintone 公式の記述によると、優先組織が未設定のユーザーでは条件が無視されるため、
+> この関数を含む DML は常に拒否します。
 
 ---
 
@@ -1275,7 +1285,7 @@ LEFT  JOIN APP300 AS c ON a.配送ID = c.配送ID
 > whole-exact な KLIKE 共存も可です。**第5-L**は AND スパインの exact 関数 leaf を
 > alias ごとに押し下げ、関数を含まない残余だけを client 評価します。複数 alias に
 > 関数が分散していても各 APP へ押し下げます。`LOGINUSER()` は作成者 / 更新者 /
-> ユーザー選択の singleton `in` / `not in` に限り、グループ選択では使用できません。
+> ユーザー選択、`PRIMARY_ORGANIZATION()` は組織選択の singleton `in` / `not in` に限ります。
 >
 > server-only 関数を使用できない JOIN は、LEFT / RIGHT JOIN、cross-alias `OR`、
 > 関数を含む cross-table 述語、whole exact でない KLIKE-containing `OR`、および
@@ -3315,7 +3325,7 @@ SELECT * FROM APP100 WHERE 登録日 >= @since;
 - 未注入時は既定値を実行時に1回評価。CLI の `--var since=2026-07-01`、MCP `variables: { "since": "2026-07-01" }` で文字列値を上書きできる。注入時は既定値式を評価しない。
 - プラグインでも `DECLARE` 文は実行できるが注入 UI はなく、常に既定値を使う。
 - キーは `@` なし・大文字小文字を区別しない。未宣言キー、重複、不正名は API 呼び出しや DML より前にエラー。`SET` で定義した名前は注入対象にならない。
-- 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術。サブクエリ、別変数、`NULL`、`LOGINUSER()` は不可。採用値は文字列として束縛する。
+- 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術。サブクエリ、別変数、`NULL`、`LOGINUSER()`、`PRIMARY_ORGANIZATION()` は不可。採用値は文字列として束縛する。
 - `DECLARE` と使用文を含む2文以上のバッチが必要。値は EXPLAIN、結果メタデータに表示しない。CLI `--var` はプロセス一覧やシェル履歴に残り得るため秘密情報には使わない。
 
 #### SELECT 定数列と配列 IN
@@ -3330,7 +3340,7 @@ SELECT @batch AS バッチID, 顧客No FROM APP100 WHERE 顧客ランク IN @ran
 - `IN @list` は非空配列を通常の literal IN へ展開する。`IN (@x)` は従来どおりスカラー 1 要素で、配列展開ではない。
 - 空配列は `IN @empty`=偽、`NOT IN @empty`=真として AND/OR/NOT/括弧を簡約する。SELECT の恒偽 WHERE はレコード API を呼ばず空入力を後段へ渡す。UPDATE/DELETE/非 ALL REORDER の最終 WHERE が恒真になる場合は全件更新防止のため実行前エラー、恒偽は 0 件 no-op。
 
-**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・関数引数への `NOW()` 直接指定・`LOGINUSER()`。
+**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・関数引数への `NOW()` 直接指定・`LOGINUSER()`・`PRIMARY_ORGANIZATION()`。
 
 > **`APP@profile` との併用**: `SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now` のように、`@profile`（アプリ指定）と `@変数` は同居できます（CLI / MCP が profile だけを先に正規化するため混同しません）。
 

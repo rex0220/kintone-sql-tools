@@ -126,7 +126,7 @@ test("未知フィールド・未知型はfail-closedにする", () => {
 });
 
 function classifyLegacy(
-  name: "TODAY" | "NOW" | "LOGINUSER",
+  name: "TODAY" | "NOW" | "LOGINUSER" | "PRIMARY_ORGANIZATION",
   fieldType: string,
   op: CompareOp,
   field = "x"
@@ -151,6 +151,21 @@ function classifyLoginUserInList(fieldType: string, op: "IN" | "NOT_IN") {
       right: {
         type: "IN_LIST",
         values: [{ type: "KINTONE_FUNC", name: "LOGINUSER" }],
+      },
+    },
+    () => resolveFieldSemantics({ fieldType })
+  );
+}
+
+function classifyPrimaryOrganizationInList(fieldType: string, op: "IN" | "NOT_IN") {
+  return classifyWhereCapability(
+    {
+      type: "BINARY",
+      op,
+      left: { type: "FIELD", tableAlias: null, field: "x" },
+      right: {
+        type: "IN_LIST",
+        values: [{ type: "KINTONE_FUNC", name: "PRIMARY_ORGANIZATION" }],
       },
     },
     () => resolveFieldSemantics({ fieldType })
@@ -248,6 +263,42 @@ describe("B77 legacy kintone function field type × operator classifier", () => 
       }),
     ]));
   });
+
+  test("PRIMARY_ORGANIZATION × ORGANIZATION_SELECT は IN / NOT IN だけ exact", () => {
+    for (const op of ["IN", "NOT_IN"] as const) {
+      expect(classifyPrimaryOrganizationInList("ORGANIZATION_SELECT", op)).toMatchObject({
+        capability: "EXACT_PUSHDOWN",
+        reasons: [{
+          code: "WHERE_EXACT",
+          functionName: "PRIMARY_ORGANIZATION",
+          fieldType: "ORGANIZATION_SELECT",
+          operator: op === "IN" ? "in" : "not in",
+        }],
+      });
+    }
+    const invalid = classifyLegacy("PRIMARY_ORGANIZATION", "ORGANIZATION_SELECT", "=");
+    expect(invalid.capability).toBe("UNSUPPORTED");
+    expect(invalid.reasons[0]).toMatchObject({
+      code: "WHERE_KINTONE_FUNCTION_OPERATOR_UNSUPPORTED",
+      functionName: "PRIMARY_ORGANIZATION",
+      fieldType: "ORGANIZATION_SELECT",
+      operator: "=",
+    });
+  });
+
+  test.each(["USER_SELECT", "GROUP_SELECT", "SINGLE_LINE_TEXT"] as const)(
+    "singleton IN-list PRIMARY_ORGANIZATION × %s は field type unsupported",
+    (fieldType) => {
+      const result = classifyPrimaryOrganizationInList(fieldType, "IN");
+      expect(result.capability).toBe("UNSUPPORTED");
+      expect(result.reasons[0]).toMatchObject({
+        code: "WHERE_KINTONE_FUNCTION_FIELD_TYPE_UNSUPPORTED",
+        functionName: "PRIMARY_ORGANIZATION",
+        fieldType,
+        operator: "in",
+      });
+    }
+  );
 
   test("DATE × NOW は field type unsupported", () => {
     const result = classify("SELECT x FROM APP1 WHERE x = NOW()", { x: { fieldType: "DATE" } });

@@ -438,7 +438,9 @@ function evalCaseResult(
   return String(evalScalarValueExpr(result as ScalarValueExpr, row, resolveFieldType, resolveFieldSemantics));
 }
 
-export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string {
+export function resolveKintoneFunc(
+  name: "TODAY" | "NOW" | "LOGINUSER" | "PRIMARY_ORGANIZATION"
+): string {
   const now = new Date();
   switch (name) {
     case "TODAY": {
@@ -451,6 +453,7 @@ export function resolveKintoneFunc(name: "TODAY" | "NOW" | "LOGINUSER"): string 
     case "NOW":
       return now.toISOString();
     case "LOGINUSER":
+    case "PRIMARY_ORGANIZATION":
       // kintone 環境外では解決不能 → 空文字（比較が常に false になる）
       return "";
   }
