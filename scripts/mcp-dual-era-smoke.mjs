@@ -80,6 +80,10 @@ async function smokeLegacy() {
     await assertResourceNotFound(client, "v1");
     const instructions = client.getInstructions();
     assert(typeof instructions === "string" && instructions.length > 0, "v1 initialize instructions are missing.");
+    assert(
+      instructions.includes(packageVersion),
+      "v1 initialize instructions must include the package version."
+    );
     return instructions;
   } finally {
     await client.close();
@@ -103,6 +107,10 @@ async function smokeModern(legacyInstructions) {
     assert(
       discover?.instructions === legacyInstructions,
       "server/discover must expose the complete instructions text used by v1 initialize."
+    );
+    assert(
+      discover?.instructions?.includes(packageVersion),
+      "v2 server/discover instructions must include the package version."
     );
     const [tools, resources, templates] = await Promise.all([
       client.listTools(),

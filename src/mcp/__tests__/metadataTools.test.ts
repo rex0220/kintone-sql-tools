@@ -117,7 +117,7 @@ describe("ksql_app_metadata MCP surface", () => {
       // ここが本体。実測値の exact 固定で、意図しない増減を必ず捕まえる。
       // B62 502→525・B67 529→541・B76 552 と単調増加してきたので、
       // 「気づかないうちに膨らむ」ことの検知には実績がある。
-      expect(budget).toEqual({ total: 548, catalog: 258, prose: 290 });
+      expect(budget).toEqual({ total: 553, catalog: 258, prose: 295 });
 
       // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
       // "Optional instructions for the client" と書くだけでサイズ規定を持たず、
@@ -129,7 +129,7 @@ describe("ksql_app_metadata MCP surface", () => {
       expect(budget.prose).toBeLessThanOrEqual(320);
       expect(budget.catalog).toBeLessThanOrEqual(420);
       expect(budget.total).toBeLessThanOrEqual(700);
-      expect(instructions?.trim().split(/\n\n/)).toHaveLength(5);
+      expect(instructions?.trim().split(/\n\n/)).toHaveLength(6);
       for (const key of [
         "not generic SQL",
         "VALIDATE ONLY",

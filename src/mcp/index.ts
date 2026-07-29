@@ -90,7 +90,9 @@ const SERVER_VERSION = typeof __KSQL_VERSION__ === "string" ? __KSQL_VERSION__ :
 
 const FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog — Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 
-export const KSQL_MCP_INSTRUCTIONS = `kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged families plus JOIN, aggregates, windows, subtable virtual tables, CHECK, KLIKE, KORDER BY, @variables, and LAPP_<NAME>.
+export const KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
+
+kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged families plus JOIN, aggregates, windows, subtable virtual tables, CHECK, KLIKE, KORDER BY, @variables, and LAPP_<NAME>.
 
 Key rules: LIKE/NOT LIKE uses JavaScript semantics; JOIN ON allows one equality; derived tables are unsupported (use WITH/temp tables); empty numeric cells become 0 in arithmetic. APPLY supports validation, EXPLAIN, and VALIDATE ONLY; APPLY mutation is disabled in MCP.
 
