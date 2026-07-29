@@ -1,7 +1,7 @@
 # Pro への返信 — v3.34.0 報告(3 通目)への回答
 
 - 作成: 2026-07-29
-- ステータス: 📝 **送付前**（**v3.34.1 でリリース済み**・npm latest 更新済み）
+- ステータス: ✅ **送付済み（2026-07-29）**。→ Pro は 3.34.1 を取り込み、**新しい会話で 1 行目の実表示を確認**・**カナリアを畳んだ**。→ **§4 の限界の記述が誤っていた**と指摘され、[返信(4 通目)](ksql_pro_reply_v3341.md) で訂正（[B101 §7](ksql_b101_mcp_stale_process_version_issue.md)）
 - 受領: [Pro の報告 v3.34.0(3 通目)](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340c.md)
 - 前回: [返信(2 通目)](ksql_pro_reply_v3340b.md)（送付済み）
 - 関連: [B101](ksql_b101_mcp_stale_process_version_issue.md) / [実装仕様](ksql_b101_instructions_version_spec.md)
