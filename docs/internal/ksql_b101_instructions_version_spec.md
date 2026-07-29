@@ -75,6 +75,30 @@ kSQL is a SQL-like dialect for kintone, not generic SQL. ...
 > **実測が予想と違ったら、期待値を勝手に合わせず、止めて報告すること。**
 > **こちらの数え方が誤っている可能性がある。**
 
+### 4.2 段落数の exact 固定（**R2 で追記**）
+
+**同じテストに段落数の exact 固定がある。**
+
+```ts
+expect(instructions?.trim().split(/
+
+/)).toHaveLength(5);   // → 6 へ更新する
+```
+
+**初版は「語数予算の exact 値のみ」と書いた。狭すぎた。**
+**codex が実装前に指摘した。**
+
+**この assertion は語数予算と同じ「意図しない増減を捕まえる検知装置」**であり、
+**段落数そのものに独立した意味があるわけではない。**
+**段落を足すのは意図した構造変更**なので、**5 → 6 の更新はこの装置の正しい使い方**である。
+
+> **別段落にする判断は変えない。**
+> **版数はサーバーの素性であって方言の説明ではない。**
+> **先頭で目に入る形が適切で、grep もしやすい。**
+> **1 段落目に混ぜれば段落数は変わらないが、素性と方言の説明が同じ塊になる。**
+
+---
+
 ### 4.1 テスト環境と bundle で値が変わらないこと
 
 **jest では `__KSQL_VERSION__` が未定義なので `SERVER_VERSION` は `"0.0.0-dev"` になる。**
@@ -116,7 +140,7 @@ kSQL is a SQL-like dialect for kintone, not generic SQL. ...
 | ファイル | 変更 |
 |---|---|
 | `src/mcp/index.ts` | `KSQL_MCP_INSTRUCTIONS` の先頭に 1 段落 |
-| `src/mcp/__tests__/metadataTools.test.ts` | 語数予算の exact 値のみ |
+| `src/mcp/__tests__/metadataTools.test.ts` | **検知装置の exact 値のみ**＝語数予算と**段落数**（§4.2） |
 | `scripts/mcp-dual-era-smoke.mjs` | §6.1 の assertion 追加 |
 
 **これ以外の既存テスト・smoke を書き換えないこと。**
