@@ -20,7 +20,7 @@ await esbuild.build({
   outfile: resolve("dist-mcp/ksql-mcp.js"),
   bundle: true,
   platform: "node",
-  target: ["node18"],
+  target: ["node20"],
   format: "cjs",
   // サーバー申告バージョン(serverInfo.version)を package.json と同期する
   define: {
@@ -38,7 +38,7 @@ if (!current.startsWith("#!/usr/bin/env node")) {
 
 const bundled = readFileSync(outPath, "utf8");
 const forbiddenRuntimeImports = [
-  /require\(["']@modelcontextprotocol\/sdk/,
+  /require\(["']@modelcontextprotocol\//,
   /require\(["']zod(?:\/[^"']*)?["']\)/,
 ];
 if (forbiddenRuntimeImports.some((pattern) => pattern.test(bundled))) {

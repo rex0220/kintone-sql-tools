@@ -76,7 +76,7 @@ const manifest = {
     claude_desktop: ">=0.10.0",
     platforms: ["darwin", "win32"],
     runtimes: {
-      node: ">=18.0.0",
+      node: ">=20.0.0",
     },
   },
   user_config: {

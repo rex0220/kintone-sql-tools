@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import {
+  INVALID_PARAMS,
+  McpServer,
+  ProtocolError,
+  ResourceTemplate,
+} from "@modelcontextprotocol/server";
+import {
+  serveStdio,
+  StdioServerTransport,
+} from "@modelcontextprotocol/server/stdio";
 import {
   KSQL_DOCS,
   KSQL_FUNCTION_CATALOG,
@@ -11,6 +18,7 @@ import {
   resolveKsqlDocsSection,
 } from "./docsResources";
 import { createKsqlMcpTools, toErrorPayload, toToolResult } from "./tools";
+import { MCP_STDIO_MAX_BUFFER_BYTES } from "./stdioLimits";
 import { STATEMENT_SYNTAX_PARAGRAPH } from "./statementSyntaxCatalog";
 import {
   describeAppInputShape,
@@ -100,13 +108,13 @@ function staticTextResource(uri: string, text: string) {
 
 function requiredTemplateKey(value: string | string[], kind: string): string {
   if (typeof value !== "string") {
-    throw new McpError(ErrorCode.InvalidParams, `Invalid ${kind} resource key.`);
+    throw new ProtocolError(INVALID_PARAMS, `Invalid ${kind} resource key.`);
   }
   return value;
 }
 
 function invalidResourceKey(kind: string, key: string): never {
-  throw new McpError(ErrorCode.InvalidParams, `Unknown kSQL ${kind} resource key: ${key}`);
+  throw new ProtocolError(INVALID_PARAMS, `Unknown kSQL ${kind} resource key: ${key}`);
 }
 
 function toDocsSuccessResult(text: string) {
@@ -275,9 +283,11 @@ export async function main(): Promise<void> {
     printHelp();
     return;
   }
-  const server = createServer(args);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  serveStdio(() => createServer(args), {
+    transport: new StdioServerTransport(undefined, undefined, {
+      maxBufferSize: MCP_STDIO_MAX_BUFFER_BYTES,
+    }),
+  });
 }
 
 if (require.main === module) {

@@ -33,8 +33,8 @@ const inputRules = [
   ["zod", (name) =>
     name === "node_modules/zod/index.js" ||
     name.startsWith("node_modules/zod/")],
-  ["modelcontextprotocol-sdk", (name) =>
-    name.startsWith("node_modules/@modelcontextprotocol/sdk/")],
+  ["modelcontextprotocol", (name) =>
+    name.startsWith("node_modules/@modelcontextprotocol/")],
   ["cli-profile-credential", (name) =>
     name.startsWith("src/cli/") ||
     name === "src/cli/nodeKintoneClient.ts"],

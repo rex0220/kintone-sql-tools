@@ -96,15 +96,16 @@ describe("B55 ksql_docs MCP tool", () => {
       }
       expect(fetchMock).not.toHaveBeenCalled();
 
-      for (const args of [
-        { section: "recipes", extra: true },
-        { section: 1 },
-        { section: "x".repeat(129) },
-      ]) {
+      const invalidArgumentCases: Array<[Record<string, unknown>, string]> = [
+        [{ section: "recipes", extra: true }, 'Unrecognized key: "extra"'],
+        [{ section: 1 }, "expected string"],
+        [{ section: "x".repeat(129) }, "Too big"],
+      ];
+      for (const [args, rejected] of invalidArgumentCases) {
         const result = await client.callTool({ name: "ksql_docs", arguments: args });
         expect(result.isError).toBe(true);
         expect(textOf(result)).toContain("Invalid arguments");
-        expect(textOf(result)).toContain("-32602");
+        expect(textOf(result)).toContain(rejected);
       }
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {

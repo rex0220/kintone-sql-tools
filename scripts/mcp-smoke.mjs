@@ -95,15 +95,15 @@ function assertMetadataSchema(tools) {
   }
 }
 
-function assertMetadataSchemaError(result, label) {
+function assertMetadataSchemaError(result, label, rejectedKeys) {
   const text = result?.content?.find((item) => item.type === "text")?.text ?? "";
   assert(result?.isError === true, `${label} must return isError=true.`);
   assert(result?.structuredContent === undefined, `${label} must fail before the metadata handler.`);
   assert(
-    text.includes("MCP error -32602")
-      && text.includes("Input validation error")
-      && text.includes("ksql_app_metadata"),
-    `${label} must return a JSON-RPC schema error.`
+    text.includes("Input validation error")
+      && text.includes("ksql_app_metadata")
+      && rejectedKeys.every((key) => text.includes(key)),
+    `${label} must identify the rejected key in the pre-handler schema error: ${text}`
   );
 }
 
@@ -743,19 +743,31 @@ async function main() {
         path: "/k/v1/records.json",
       },
     });
-    assertMetadataSchemaError(metadataHttpAttack, "ksql_app_metadata arbitrary HTTP attack");
+    assertMetadataSchemaError(
+      metadataHttpAttack,
+      "ksql_app_metadata arbitrary HTTP attack",
+      ["method", "path"]
+    );
 
     // Pin the discriminated branches that the root tools/list schema mirrors.
     const metadataAppPreview = await client.callTool({
       name: "ksql_app_metadata",
       arguments: { resource: "app", app: 1, preview: true },
     });
-    assertMetadataSchemaError(metadataAppPreview, "ksql_app_metadata app preview branch");
+    assertMetadataSchemaError(
+      metadataAppPreview,
+      "ksql_app_metadata app preview branch",
+      ["preview"]
+    );
     const metadataLayoutLang = await client.callTool({
       name: "ksql_app_metadata",
       arguments: { resource: "layout", app: 1, lang: "ja" },
     });
-    assertMetadataSchemaError(metadataLayoutLang, "ksql_app_metadata layout lang branch");
+    assertMetadataSchemaError(
+      metadataLayoutLang,
+      "ksql_app_metadata layout lang branch",
+      ["lang"]
+    );
 
     process.stdout.write("[mcp-smoke] ok\n");
   } finally {

@@ -188,15 +188,15 @@ function assertPackedToolDescriptions(tools) {
   }
 }
 
-function assertPackedMetadataSchemaError(message, label) {
+function assertPackedMetadataSchemaError(message, label, rejectedKeys) {
   const text = message?.result?.content?.find((item) => item.type === "text")?.text ?? "";
   assert(message?.result?.isError === true, `${label} must return isError=true.`);
   assert(message?.result?.structuredContent === undefined, `${label} must fail before the metadata handler.`);
   assert(
-    text.includes("MCP error -32602")
-      && text.includes("Input validation error")
-      && text.includes("ksql_app_metadata"),
-    `${label} must return the packed JSON-RPC schema error envelope.`
+    text.includes("Input validation error")
+      && text.includes("ksql_app_metadata")
+      && rejectedKeys.every((key) => text.includes(key)),
+    `${label} must identify the rejected key in the packed pre-handler schema error: ${text}`
   );
 }
 
@@ -359,15 +359,18 @@ try {
   );
   assertPackedMetadataSchemaError(
     response("metadata-http-attack"),
-    "Packed metadata arbitrary HTTP attack"
+    "Packed metadata arbitrary HTTP attack",
+    ["method", "path"]
   );
   assertPackedMetadataSchemaError(
     response("metadata-app-preview"),
-    "Packed metadata app preview branch"
+    "Packed metadata app preview branch",
+    ["preview"]
   );
   assertPackedMetadataSchemaError(
     response("metadata-layout-lang"),
-    "Packed metadata layout lang branch"
+    "Packed metadata layout lang branch",
+    ["lang"]
   );
   const resources = response("resources-list")?.result?.resources;
   assert(

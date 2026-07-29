@@ -4,6 +4,11 @@
 
 ## 未リリース
 
+### 変更（B99 MCP SDK v2 への移行）
+
+- **MCP サーバーの実行には Node.js 20 以上が必要になった。** CLI・engine ライブラリ・プラグインには影響せず、これらの Node.js 要件や実行環境は従来どおりである。
+- **`tools/list` が返す `inputSchema` の JSON Schema 方言が draft-07 から 2020-12 へ変わった。** 13 個すべてで方言 URI（`$schema`）だけが変わり、プロパティ・必須項目・制約（`maxItems` 等）と 13 tools・4 resources の名前・順序・description は実測で完全に一致している。MCP クライアントが方言 URI を見て分岐している場合のみ影響する。
+
 ### 修正（B98 外部結合の保持されない側の打ち切りを fail-closed 化）
 
 - **`LEFT JOIN` / `RIGHT JOIN` の保持されない側が取得上限へ達した場合、`onLimitReached: "truncate"` でも部分結果を返さず `FetchAllLimitError` で停止するようにした。** 保持側だけが打ち切られた場合は行が減るだけなので従来どおり警告付きで返し、`INNER JOIN` も従来どおりである。

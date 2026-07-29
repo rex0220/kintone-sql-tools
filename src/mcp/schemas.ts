@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { KINTONE_METADATA_LANGS, KINTONE_METADATA_RESOURCES } from "../node/kintoneMetadata";
+import { MCP_IMPORT_MAX_SOURCES } from "./stdioLimits";
 
 // パラメータ説明は .describe() に書く(MCP の tools/list で JSON Schema の
 // description としてクライアントの LLM に渡る。TypeScript コメントは渡らない)
@@ -44,7 +45,7 @@ const importSources = z.array(z.object({
   if ((source.text === undefined) === (source.base64 === undefined)) {
     ctx.addIssue({ code: "custom", message: "Exactly one of text or base64 is required." });
   }
-})).max(16)
+})).max(MCP_IMPORT_MAX_SOURCES)
   .describe("IMPORT CSV/JSON named inline sources (maximum 16). Nested subtable VALIDATE ONLY/EXPLAIN is supported, but mutation is fail-closed because MCP cannot interactively display and approve parent/table delete detail. JSON drops child IDs and renumbers; cli-kintone CSV preserves matching IDs and requires REPLACE SUBTABLES. Paths are not accepted; each source is limited to 10 MiB.")
   .optional();
 

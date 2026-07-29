@@ -14,6 +14,9 @@ Claude Desktop の拡張機能画面から `.mcpb` をインストールし、�
 3. `ksql.config.json`
 4. kintone 接続用の API トークン
 
+**kSQL MCP サーバーには Node.js 20 以上が必要。**
+MCPB 版では Claude Desktop が提供する Node.js 実行環境を使うため、利用者が Node.js を別途インストールする必要は通常ないが、Claude Desktop 側の実行環境が Node.js 20 以上である必要がある。
+
 Node.js や npm は通常不要。
 MCPB 版は Claude Desktop 側の Node.js 実行環境で起動する。
 
