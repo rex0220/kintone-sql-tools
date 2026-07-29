@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-29
 - 対象課題: [B99](ksql_b99_mcp_spec_2026_07_28_issue.md)（**§11 が spike 結果**）
-- ステータス: 📋 **実装待ち**
+- ステータス: ✅ **実装済み（未リリース）**（2026-07-29・§13 に検証結果）
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（§9 で根拠。**公開型は不変**・Node 要件は **MCP の面だけ**に閉じる）
 
@@ -334,3 +334,55 @@ v2: Input validation error: Invalid arguments for tool ksql_docs: Unrecognized k
 | **`sql` / source `name` に長さ制限を新設** | **§6.1 で対象外と明記した**。**現在も無制限**であり、ここで足すと別の挙動変更になる |
 | **`ttlMs` / `cacheScope` の作り込み** | **SDK の既定（`0` / `private`）で移行する**。最適化は実 host の cache 挙動を測ってから（[B99 §8](ksql_b99_mcp_spec_2026_07_28_issue.md)） |
 | **HTTP transport の追加** | 要望が無い |
+
+
+---
+
+## 13. 実装結果（2026-07-29）
+
+**受入 1〜11 と 8bis はすべて満たした。**ゲートも全 green
+（`npm test` 4,986＋26 pass・snapshot 22 不変／`mcp:verify`／engine 3 種／`version:check`）。
+
+### 13.1 レビューで独立に確かめた 4 点
+
+| | 結果 |
+|---|---|
+| `package.json` に `engines` が無い | ✅ package・lock の root とも不存在 |
+| `dependencies` が無いまま | ✅ MCP 3 package はすべて devDependency。`mcp-pack-smoke.mjs` の 2 assertion は無変更で通る |
+| tools 13・resources 4 の面が同一 | ⚠️ **`$schema` の方言だけ変わる**（§13.2）。それ以外は完全一致 |
+| 整合テストが上限引き上げで落ちる | ✅ `IMPORT_MAX_BYTES` を 10→24 MiB にすると **2 件 fail**（導出式の床と封筒の両方） |
+
+**面の比較は報告を読むのではなく、v1（HEAD）と v2 の両方を build して
+v1 client で `tools/list` / `resources/list` / `resources/templates/list` を吐き、JSON を diff した。**
+
+### 13.2 **仕様が予見していなかった変化＝JSON Schema の方言**
+
+```
+v1: "$schema": "http://json-schema.org/draft-07/schema#"
+v2: "$schema": "https://json-schema.org/draft/2020-12/schema"
+```
+
+**diff は 13 tools すべての `$schema` 行だけ**で、
+**properties・required・`maxItems`・description・順序、および resources 2＋templates 2 は 1 バイトも違わない。**
+キーワードが同一なので意味は保たれるが、**`tools/list` に出る外向きの変化**なので CHANGELOG に明記した。
+
+> **仕様にも codex の報告にも無かった。**
+> **「面が同一」を報告で受け取らず、実際に両方から取り出して比べたから見つかった。**
+
+### 13.3 レビューで足したもの
+
+- **dual-era smoke の v2 側に resources 2・templates 2 の assertion**（v1 側にはあったが非対称だった）
+
+### 13.4 書き換えた既存 test / smoke（§7.1 の 3 箇所のみ）
+
+**いずれも `MCP error -32602` の接頭辞を、拒否されたキー名の実測に置き換えたもの**
+（`method` / `path` / `preview` / `lang` / `Unrecognized key: "extra"` / `expected string` / `Too big`）。
+**`isError: true` と handler 前拒否の主張は保っており、弱まっていない**（§7.1.1）。
+
+### 13.5 実測値
+
+| | |
+|---|---|
+| bundle | 2,744,642 → **2,756,820 bytes（+0.44%）** |
+| `maxBufferSize` | **256 MiB**（必要最小 223,696,214 bytes を覆う） |
+| `serveStdio` の戻り値 | **同期の `StdioServerHandle`**（Promise ではないので捨てても unhandled rejection にならない） |
