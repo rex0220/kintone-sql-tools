@@ -1,7 +1,7 @@
 # B101 常駐 MCP プロセスが古い版のまま答えても、利用者に分からない
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価＝R3。案 A' を推す**（§2ter）＝**標準の `_meta` は実クライアント 2 つで読めなかった**。**`instructions` なら両 era・両クライアントに届く**
+- ステータス: ✅ **案 A' 実装済み（未リリース）**（2026-07-29）＝**両 era の 1 行目が `kSQL MCP server version 3.34.0.`**（実測）。**案 B は保留**（§5）
 - 出典: [Pro の報告 v3.34.0(2 通目)](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340b.md)。
   **Pro 側は再起動という運用で解決済み**。**エンジン側に観測手段が無い**点をこちらの課題として起票する
 - 関連: [B100](ksql_b100_failclosed_message_order_issue.md) / [B98](ksql_b98_join_truncated_right_null_issue.md)

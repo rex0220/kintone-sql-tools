@@ -2,6 +2,14 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## 未リリース
+
+### 追加（B101 MCP の instructions に版数を載せる）
+
+- **MCP サーバーの `instructions` の 1 行目に、そのサーバー自身の版数を出すようにした。** `kSQL MCP server version <版数>.` の形で、v1 の `initialize` と v2 の `server/discover` の両方に載る。
+- **背景:** 常駐 MCP サーバーは `npm install` では差し替わらないため、更新後に再起動しないと古い版が答え続ける。旧版は旧版として正しく動くので、エラーも警告も出ずに古い挙動が「新版の実測」として扱われる事故が実際に起きた。MCP 標準の `_meta["io.modelcontextprotocol/serverInfo"]` は 2026-07-28 era で全応答に載るが、実クライアント 2 つではツール結果の中身しか届かず読めなかった。
+- **使い方:** 測定や検証の前に `instructions` の 1 行目を確認すること。ディスク上の版ではなく、**いま動いているプロセスの版**が分かる。ずれていた場合は MCP サーバーを再起動する。
+
 ## v3.34.0（2026-07-29）
 
 ### 変更（B99 MCP SDK v2 への移行）
