@@ -5,6 +5,7 @@
 - 出典: [Pro の報告 v3.34.0(2 通目)](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340b.md)。
   **Pro 側は再起動という運用で解決済み**。**エンジン側に観測手段が無い**点をこちらの課題として起票する
 - 関連: [B100](ksql_b100_failclosed_message_order_issue.md) / [B98](ksql_b98_join_truncated_right_null_issue.md)
+- 実装仕様: [案 A' の仕様](ksql_b101_instructions_version_spec.md)（2026-07-29・**オーナー承認**）
 - Pro への連絡: [返信(2 通目)](ksql_pro_reply_v3340b.md)（送付済み） → [Pro の報告(3 通目)](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340c.md)＝**`_meta` は届かないと判明**（§2ter）
 
 ## 1. 実際に起きたこと
