@@ -2,6 +2,20 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.35.0（2026-07-29）
+
+### 追加（B102 `PRIMARY_ORGANIZATION()` のサポート）
+
+- **kintone のクエリ関数 `PRIMARY_ORGANIZATION()` を `WHERE` で使えるようにした。** ダッシュボードから自組織のデータを抽出する用途で、`LOGINUSER()` と同じ位置づけである。**組織選択（`ORGANIZATION_SELECT`）フィールドに対する `IN` / `NOT IN` の単独要素**としてのみ使え、kintone の REST クエリへ素通しする。
+
+```sql
+SELECT 案件名 FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION())
+```
+
+- **DML の `WHERE` では使用できない。** kintone は**優先組織が設定されていない実行ユーザーに対してこの条件を無視し、他の条件を満たす全レコードを返す**（kintone 公式の記述による）。条件が消えると `DELETE` や `UPDATE` の対象が全件になるため、静的検証で拒否し、レコード取得も書き込みも行わない。`LOGINUSER()` の扱いは変えていない。
+- **注意:** 上記の理由により、`SELECT` でも**優先組織が未設定の利用者では絞り込みが効かず、全件が対象になる**。エンジンからはその判別ができないため、そのまま返す。**kintone の一覧の絞り込みと同じ挙動**である。
+- `ORGANIZATION_SELECT` 以外の型、`IN` / `NOT IN` 以外の演算子、`IN` リストで他の値と混在させた場合は、いずれもレコード取得前に拒否する。
+
 ## v3.34.1（2026-07-29）
 
 ### 追加（B101 MCP の instructions に版数を載せる）

@@ -1,11 +1,22 @@
-ksql 配布パッケージ (v3.34.1)
+ksql 配布パッケージ (v3.35.0)
 
 release 成果物:
-- ksql-plugin-v3.34.1.zip
-- ksql-mcp.mcpb (manifest version 3.34.1)
-- ksql-mcp.js (MCP server version 3.34.1)
+- ksql-plugin-v3.35.0.zip
+- ksql-mcp.mcpb (manifest version 3.35.0)
+- ksql-mcp.js (MCP server version 3.35.0)
 
-追加 (B101) ★本リリースの要点:
+追加 (B102) ★本リリースの要点:
+- kintone のクエリ関数 PRIMARY_ORGANIZATION() を WHERE で使えるようになりました。
+  ダッシュボードから自組織のデータを抽出する用途で、LOGINUSER() と同じ位置づけです。
+    SELECT 案件名 FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION())
+- 組織選択フィールドに対する IN / NOT IN の単独要素としてのみ使えます。
+- DML の WHERE では使用できません。kintone は優先組織が設定されていない実行ユーザーに
+  対してこの条件を無視し、他の条件を満たす全レコードを返します (kintone 公式の記述)。
+  条件が消えると DELETE や UPDATE の対象が全件になるため、拒否します。
+- 同じ理由で、SELECT でも優先組織が未設定の利用者では絞り込みが効きません。
+  エンジンからは判別できないためそのまま返します。kintone の一覧の絞り込みと同じです。
+
+追加 (B101) (v3.34.1):
 - MCP サーバーの instructions の 1 行目に、そのサーバー自身の版数が出るようになりました。
     kSQL MCP server version 3.34.1.
 - 常駐している MCP サーバーは npm install では差し替わりません。更新後に再起動しないと、
@@ -47,27 +58,6 @@ release 成果物:
 - 移行方法: WHERE で候補を絞るか、maxRecords を引き上げてください。
   onLimit=error を選んでいる場合、挙動は変わりません。
 
-挙動の変更の移行案内 (B97) (v3.33.0):
-- 取得上限に達したとき、集計・GROUP BY・DISTINCT・UNION (ALL なし) は
-  onLimit=truncate を選んでいてもエラーになります。従来は部分集合を畳んだ値を
-  返していました。
-- 現在成功して見えるクエリも、返しているのは正しい結果ではありません。
-  実測では、真の件数が 3 のクエリが 0 を返していました。
-    SELECT COUNT(*) FROM APP4147 WHERE 顧客No LIKE '%6%'   maxRecords=3 / truncate
-    → 0        (該当は 4 件目以降にあり、先頭 3 件だけを数えた)
-  0 は「該当なし」という完結した答えに読めるため、小さすぎる値より気づけません。
-  したがって、エラー化によって正しい結果が失われることはありません。
-- 対象外 (従来どおり取得できた行と警告を返します):
-    素の明細   SELECT 案件名 FROM APPn
-    UNION ALL
-  行そのものは本物なので、件数が足りないだけです。
-- 対象外 (そもそも取得上限を使いません):
-    完全に押し下がる COUNT(*) の単発取得 (v3.32.0 の B94)
-- 移行方法: WHERE で候補を絞るか、maxRecords を引き上げてください。
-  onLimit=error を選んでいる場合、挙動は変わりません。
-- ローカル ORDER BY・window・統計集計 (STDDEV など)・小計総計は、
-  従来から同じ理由でエラーになっていました。今回その対象が集計全般へ広がります。
-
 破壊的変更の移行案内 (B89 / B90) (v3.31.0):
 - engine ライブラリの runBatch と explainQuery が EXPLAIN UPDATE / DELETE / INSERT /
   UPSERT を READ_ONLY_VIOLATION で拒否します。read-only ライブラリで DML の計画を出す
@@ -81,12 +71,16 @@ release 成果物:
     → NaN
     修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.34.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.35.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.34.1): B101 MCP の instructions に版数を載せる。
+本リリース (v3.35.0): B102 PRIMARY_ORGANIZATION() のサポート。
+
+- B102: 上の「追加」を参照してください。DML では使用できません。
+
+前リリース (v3.34.1): B101 MCP の instructions に版数を載せる。
 
 - B101: 上の「追加」を参照してください。挙動の変更はありません。
 
