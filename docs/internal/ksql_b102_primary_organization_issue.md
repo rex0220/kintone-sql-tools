@@ -1,7 +1,7 @@
 # B102 `PRIMARY_ORGANIZATION()` — kintone 標準関数のサポート追加
 
 - 起票: 2026-07-29
-- ステータス: 📝 **評価（優先 中）＝R2。`LOGINUSER()` と同じ形＋DML だけ fail-closed**（§7）。**§6-1 を測ってから実装**
+- ステータス: ✅ **完了（v3.35.0 でリリース）**（2026-07-29）＝**`LOGINUSER()` と同じ形＋DML だけ fail-closed**（§7）。**実機確認済み**（§9）
 - 出典: オーナー指示「`PRIMARY_ORGANIZATION()` kintone 標準関数のサポート追加」
 - 実装仕様: [仕様](ksql_b102_primary_organization_spec.md)（2026-07-29・**オーナー承認**）
 - 関連: [B67 相対日付関数](ksql_b67_rest_query_functions_evaluation.md)（**この関数を Phase2 として意識的に見送った**）/
@@ -272,3 +272,48 @@ DELETE FROM APPn WHERE 担当組織 IN (PRIMARY_ORGANIZATION())
 | **ローカル評価（FULL_SCAN 対応）** | **サーバ側のユーザー文脈が要る**ため再現できない。`LOGINUSER` と同じ扱い |
 | **`ORDER BY` での使用** | kintone のクエリ関数は WHERE 用 |
 | **B54 User API の実装そのもの** | **案 C を採る場合に改めて判断する** |
+
+
+---
+
+## 9. 実装とリリース（v3.35.0・2026-07-29）
+
+**`LOGINUSER()` と同じ経路に足し、DML だけ fail-closed にした。**
+**codex の停止は 0 回。**経路を全部たどってから仕様を書いたことが効いた。
+
+### 9.1 レビューで独立に確かめた 5 点
+
+| | 結果 |
+|---|---|
+| 押し下げ | `kintone query: 担当組織 in (PRIMARY_ORGANIZATION())`・`EXACT_PUSHDOWN`・**client 評価 0** |
+| 実機 | `in`=0 / `not in`=3 — **§6 の REST 直叩きと完全一致** |
+| DML 拒否 | `DELETE` / `UPDATE` とも拒否し、**レコードは 3 件のまま残った** |
+| `LOGINUSER()` | **無傷**（押し下げも `--allow-dml` の DML も従来どおり） |
+| 型・演算子・混在 | `ORGANIZATION_SELECT` 以外／`=` 演算子／`IN` リスト混在の 3 つとも取得前に拒否 |
+
+### 9.2 語数予算
+
+**予想と完全一致**＝`{ total: 554, catalog: 259, prose: 295 }`（`catalog` だけ +1・段落数 6 のまま）。
+
+### 9.3 気づいた点
+
+**`--allow-dml` を付けずに DML を書くと、新ガードが先に立つ。**
+
+```
+DELETE ... PRIMARY_ORGANIZATION()  → 「PRIMARY_ORGANIZATION() は DML の WHERE では使用できません」
+                                     （「DML is disabled」より先に出る）
+```
+
+**既存文には影響しない**（この関数は従来パースすらできなかった）。
+**より具体的な理由が出るので、このままとする。**
+
+### 9.4 **文書に書いたこと**
+
+**DML を拒否するだけでは片手落ちになる。**
+**`SELECT` でも、優先組織が未設定の利用者では絞り込みが効かない。**
+
+**CHANGELOG・`release/README.txt`・GitHub Release の 3 つすべてに、
+「エンジンからは判別できないのでそのまま返す。kintone の一覧の絞り込みと同じ挙動」
+と明記した。**
+
+**fail-open は一貫して「kintone 公式の記述による」とし、「実測した」とは書いていない**（§6.3）。
