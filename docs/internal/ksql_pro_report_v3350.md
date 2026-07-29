@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への連絡 — v3.35.0
 
 - 作成: 2026-07-29
-- ステータス: 📝 **送付前**
+- ステータス: ✅ **送付済み（2026-07-29）**。→ Pro は 3.35.0 を取り込み、**§2 は「Pro 側で案内する」と判断**（設定画面の注意書き・レシピ D14b）。**§2.3 の判定は配布前の 1 回だけの手順へ**。→ **プラグインから優先組織を引けるかの質問**に [返信](ksql_pro_reply_v3350.md) で回答（[B102 §10](ksql_b102_primary_organization_issue.md)）
 - 前回の往復: [返信(4 通目)](ksql_pro_reply_v3341.md)（`instructions` の限界を会話単位へ訂正）
 - 関連: [B102](ksql_b102_primary_organization_issue.md)
 
