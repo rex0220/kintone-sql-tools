@@ -179,9 +179,11 @@ SELECT [DISTINCT] カラムリスト
 [WHERE 条件]
 [GROUP BY フィールドリスト]
 [HAVING 条件]
-[ORDER BY キーリスト]
+[ORDER BY キーリスト | KORDER BY キーリスト]
 [LIMIT 件数 [OFFSET スキップ数]]
 ```
+
+`ORDER BY` と `KORDER BY` は排他です。`KORDER BY` は比較意味を kintone REST API の型別順序へ切り替える別構文で、`LIMIT` が必須など固有の条件があります。詳細は §10「ORDER BY」内の「KORDER BY（kintone固有順、v3.0.0）」を参照してください。
 
 `FROM` は省略可能です（式専用 SELECT）。
 
