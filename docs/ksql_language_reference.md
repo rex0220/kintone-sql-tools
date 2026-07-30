@@ -717,6 +717,29 @@ WHERE 日付 BETWEEN FROM_TODAY(-7, DAYS) AND TODAY()
 
 - 対象は単一の物理アプリに由来する `DATE` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` フィールドだけです。比較は6種の `=` / `!=` / `<` / `<=` / `>` / `>=` を使用でき、`<>` は `!=` へ正規化されます。`BETWEEN` は両境界を `>=` / `<=` へ展開し、両方を exact pushdown できる場合だけ使用できます。
 - kintone クエリ関数を含む条件は、レコード取得前に REST query への押し下げ計画が確定できる場合だけ実行できます。関数そのものを client 評価する **client fallback はなく**、client 評価回数は常に 0 です。`ksql_validate` は構文と引数形を検査しますが、型と物理計画の可否は metadata を使う `ksql_query` / `ksql_explain` / 実行時に確定します。
+- **性能**: kintone クエリ関数は**押し下げできなければ実行できません**（client fallback なし）。
+  したがって**実行できた時点で、候補の絞り込みは kintone サーバー側で終わっています**。
+  `LIKE` のように黙って FULL_SCAN（全件取得）になることはありません。
+  同じアプリ・同じ `maxRecords` でも結果が分かれます。
+
+  ```
+  APP4148（215 件）・maxRecords=5
+
+  SELECT COUNT(*) FROM APP4148 WHERE 作成者 in (LOGINUSER())
+    → 成功。kintone 側で絞り込むため、215 件のアプリでも上限に掛からない
+
+  SELECT COUNT(*) FROM APP4148 WHERE 会社名 LIKE '%株式会社%'
+    → 上限エラー。FULL_SCAN で全件取得しようとする
+
+  SELECT COUNT(*) FROM APP4148 WHERE 会社名 LIKE '%株式会社%' OR 作成者 in (LOGINUSER())
+    → レコード取得前に拒否（WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN）
+  ```
+
+  ただし**形2（prefilter ＋残余）では、取得件数が減るのは関数条件の分だけ**です。
+  残余は client 評価なので、関数条件を満たす集合は全件取得します。
+  `EXPLAIN` の `where capability`（`EXACT_PUSHDOWN` か）、
+  `kintone query`（実際に送る query 文字列）、
+  `kintone function client evaluations`（常に 0）で確認できます。
 - **kintone クエリ関数を使える SELECT の形は次の4つです**。3・4が INNER JOIN の
   **第5許可形**です。いずれも関数 occurrence を kintone server へ exact に適用し、
   client 側で関数を評価しません。
