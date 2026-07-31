@@ -1,7 +1,7 @@
 # B107 `LAPP_<NAME>` をブラウザ向け公開 API（runQuery / runBatch）でも解決する
 
 - 起票: 2026-08-01
-- ステータス: 📋 **仕様確定・実装待ち**（2026-08-01・オーナー Go）。→ [実装仕様](ksql_b107_lapp_spec.md)
+- ステータス: ✅ **実装済み（未リリース）**（2026-08-01・実機確認済み）。→ [実装仕様](ksql_b107_lapp_spec.md)
 - 出典: [Pro の依頼 2026-08-01](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801-送付版.md)（K-87・優先 中・**急ぎではない＝Pro はテキスト置換のフォールバック案を保有**）
 - 関連: [論理アプリ参照の実装](../ksql_issue_tracker.md)（v1.13.x・CLI / MCP）/ B66 engine ライブラリ
 
