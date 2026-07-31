@@ -35,7 +35,9 @@ const OPERATORS: readonly {
 ];
 
 function sourceText(relativePath: string): string {
-  return readFileSync(resolve(process.cwd(), relativePath), "utf8");
+  // B103: 作業ツリーの行末（CRLF / LF）に依存させない。
+  // 検査対象は文書の内容であって、行末ではない。
+  return readFileSync(resolve(process.cwd(), relativePath), "utf8").replace(/\r\n/g, "\n");
 }
 
 function enclosingVariableName(node: ts.Node): string | undefined {

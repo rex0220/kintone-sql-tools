@@ -14,8 +14,11 @@ import {
 } from "../docsResources";
 import { createServer } from "../index";
 
-const languageSource = readFileSync(resolve("docs/ksql_language_reference.md"), "utf8");
-const recipesSource = readFileSync(resolve("docs/ksql_batch_recipes.md"), "utf8");
+// B103: 作業ツリーの行末に依存させない（検査対象は文書の内容）。
+const languageSource = readFileSync(resolve("docs/ksql_language_reference.md"), "utf8")
+  .replace(/\r\n/g, "\n");
+const recipesSource = readFileSync(resolve("docs/ksql_batch_recipes.md"), "utf8")
+  .replace(/\r\n/g, "\n");
 
 describe("B50 embedded documentation resources", () => {
   test("splits the two source documents into the required stable sections", () => {

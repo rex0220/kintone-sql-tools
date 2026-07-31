@@ -1,0 +1,10 @@
+# B103: 行末はリポジトリ内で LF に統一する。
+# core.autocrlf は Git for Windows の system 既定で true になるため、
+# 各自の設定に依存させず、ここで固定する。
+# index は既に全ファイル LF なので、コミット内容は変わらない。
+* text=auto eol=lf
+
+# バイナリ（eol 変換の対象外。text=auto でも自動判定されるが、明示しておく）
+*.png  binary
+*.zip  binary
+*.mcpb binary
