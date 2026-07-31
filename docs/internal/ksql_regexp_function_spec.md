@@ -522,7 +522,7 @@ UPDATE APP100 SET 電話番号 = n.正規化 FROM #norm AS n WHERE APP100.$id = 
 `evalWhere.ts:345` の `likeRegexCache` と同型:
 
 ```ts
-const regexCache = new Map<string, RegExp>();   // key = `${pattern} ${flags}`
+const regexCache = new Map<string, RegExp>();   // key = `${pattern}\0${flags}`
 const REGEX_CACHE_MAX = 200;
 ```
 
