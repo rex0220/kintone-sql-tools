@@ -1,7 +1,7 @@
 # B105 `UNION` の枝の `COUNT(*)` が単発 GET にならず、既定値では失敗する
 
 - 起票: 2026-07-31
-- ステータス: 📝 **評価（優先 中）**
+- ステータス: ✅ **完了（v3.36.0 でリリース）**（2026-07-31・実機確認済み）＝**案 A ＋ R2（定数列の併用）**
 - 出典: オーナーの実クエリ（12 アプリの件数一覧）が FULL_SCAN になった
 - 関連: [B94 `COUNT(*)` の単発取得](ksql_b94_count_star_totalcount_spec.md) / [B97 打ち切られた入力の集計を fail-closed 化](ksql_b97_incomplete_aggregate_failclosed_issue.md)
 
