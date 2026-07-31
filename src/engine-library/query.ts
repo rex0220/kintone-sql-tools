@@ -10,6 +10,11 @@ import {
 import { withCursorScope } from "./cursorScope";
 import { validateQueryOptions } from "./options";
 import { projectReadonlyClient } from "./readonlyClient";
+import {
+  appendLogicalAppDiagnostics,
+  prepareEngineLogicalApps,
+  type PreparedEngineSql,
+} from "./logicalApps";
 import { mapMetrics, toQueryResult } from "./resultMapping";
 import {
   guardRunQuerySql,
@@ -37,16 +42,23 @@ export async function runQuery(
   sql: string,
   options: RunQueryOptions
 ): Promise<QueryResult> {
+  let logicalBindings: PreparedEngineSql["logicalBindings"] = [];
   try {
     const invocation = validateQueryOptions(options, "run");
-    const statement = guardRunQuerySql(sql);
+    const preparedSql = prepareEngineLogicalApps(
+      sql,
+      invocation.client,
+      invocation.logicalApps
+    );
+    logicalBindings = preparedSql.logicalBindings;
+    const statement = guardRunQuerySql(preparedSql.sql);
     const executeOptions = statement.type === "VALIDATE"
       ? { ...invocation.executeOptions, onLimitReached: "error" as const }
       : invocation.executeOptions;
     const result = await withCursorScope(
-      invocation.client,
+      preparedSql.client,
       (client) => execute(
-        sql,
+        preparedSql.sql,
         projectReadonlyClient(client),
         { ...executeOptions, captureColumnMeta: true }
       )
@@ -54,7 +66,7 @@ export async function runQuery(
     assertSelectResult(result);
     return toQueryResult(result);
   } catch (error) {
-    throw normalizeEngineError(error);
+    throw appendLogicalAppDiagnostics(normalizeEngineError(error), logicalBindings);
   }
 }
 
@@ -66,13 +78,20 @@ export async function explainQuery(
   options: Omit<RunQueryOptions, "onLimitReached">
 ): Promise<ExplainResult> {
   let statements: readonly Statement[] = [];
+  let logicalBindings: PreparedEngineSql["logicalBindings"] = [];
   try {
     const invocation = validateQueryOptions(options, "explain");
-    const prepared = prepareExplainQuerySql(sql);
+    const preparedSql = prepareEngineLogicalApps(
+      sql,
+      invocation.client,
+      invocation.logicalApps
+    );
+    logicalBindings = preparedSql.logicalBindings;
+    const prepared = prepareExplainQuerySql(preparedSql.sql);
     statements = prepared.statements;
     if (prepared.legacySql !== undefined) {
       const result = await withCursorScope(
-        invocation.client,
+        preparedSql.client,
         (client) => execute(
           prepared.legacySql!,
           projectReadonlyClient(client),
@@ -90,9 +109,9 @@ export async function explainQuery(
     }
 
     const result = await withCursorScope(
-      invocation.client,
+      preparedSql.client,
       (client) => buildBatchExplainPlans(
-        sql,
+        preparedSql.sql,
         projectReadonlyClient(client),
         undefined,
         "batch-explain",
@@ -113,6 +132,9 @@ export async function explainQuery(
       metrics: mapMetrics(),
     };
   } catch (error) {
-    throw normalizeBatchBoundaryError(error, statements);
+    throw appendLogicalAppDiagnostics(
+      normalizeBatchBoundaryError(error, statements),
+      logicalBindings
+    );
   }
 }

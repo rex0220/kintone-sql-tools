@@ -95,17 +95,18 @@ APP80$明細@guest -- サブテーブル参照でも指定可能
 - 文字列リテラル・コメント中の `APP100@dev` は `@profile` 構文として解釈しません
 - プラグイン側では `@profile` 非対応です（`APP100@dev` を含む SQL はエラー）
 
-### CLI / MCP 拡張: 論理アプリ参照 `LAPP_<NAME>`
+### CLI / MCP / browser engine-library 拡張: 論理アプリ参照 `LAPP_<NAME>`
 
 同じ用途・同じフィールド構成のアプリで物理 ID だけが環境ごとに異なる場合、論理名を使用できます。
 
 ```sql
 SELECT * FROM LAPP_ORDERS
+SELECT * FROM LAPP_注文
 SELECT * FROM LAPP_ORDERS@prod
 SELECT * FROM LAPP_ORDERS$明細@prod
 ```
 
-`LAPP_ORDERS` は実効 profile の `logicalApps.ORDERS` に設定された物理アプリ IDへ、実行前に解決されます。`APP100` は従来どおり常に物理 ID 100 であり、暗黙に論理解決されません。
+CLI / MCP の `LAPP_ORDERS` は実効 profile の `logicalApps.ORDERS` に設定された物理アプリ IDへ、実行前に解決されます。browser engine-library では `runQuery` / `runBatch` / `explainQuery` の `logicalApps` オプションで同じ対応を渡します。`APP100` は従来どおり常に物理 ID 100 であり、暗黙に論理解決されません。
 
 ```json
 {
@@ -118,14 +119,21 @@ SELECT * FROM LAPP_ORDERS$明細@prod
 
 構文と制約:
 
-- `LAPP_` と論理名は ASCII の範囲で大小文字を区別しない
-- 論理名は `[A-Za-z][A-Za-z0-9_]{0,63}`
+- 論理名の開始文字は ASCII 英字または日本語 4 範囲（U+3040–U+30FF、U+3400–U+9FFF、U+F900–U+FAFF、U+FF01–U+FF60）。継続文字には ASCII 数字と `_` も使用可能
+- 論理名は最大 64 UTF-16 コードユニット。SQL と設定キーの両側を NFC 正規化してから `toUpperCase()` で canonical 化する（ASCII と全角英字は大小同一、かな・漢字は文字どおり区別）
+- 半角 `$` はサブテーブル区切り、半角 `@` は profile 区切りであり、論理名には含めない。全角 `＄` / `＠`、中黒 `・`、長音 `ー` は論理名の文字として扱う
+- canonical 化後に同名となる複数キーはエラー
 - config のキーは裸の論理名（`ORDERS`）。`APP100`、`100`、`LAPP_ORDERS` は禁止
 - 未定義論理名、未知 profile、`allowPhysicalAppRefs: false` の profile に対する物理参照は API 呼び出し前にエラー
 - validation は `source`、`logicalName`、内部 `mappedAppId`、最終 `appId`、`profile` を返す
 - EXPLAIN と利用者向け診断は論理名・最終物理 ID・profile を表示し、内部 mapped ID は表示しない
 - CLI の `DELETE FROM LAPP_ORDERS@prod ...` は明示 profile 制約により拒否。MCPでは許可
-- Node.js runtime（CLI / MCP）の機能であり、プラグインでは非対応
+- browser engine-library は `@profile` をサポートせず、`LAPP_X@p` / `APP100@p` を API 呼び出し前に明示エラーにする
+
+> **移行上の注意（破壊的変更）**: `LAPP_` の直後が日本語で始まる未引用の識別子は、
+> 論理アプリ参照として予約されます。従来フィールド名などに `LAPP_案件` を使っていた場合は、
+> バッククォートで `` `LAPP_案件` `` と囲んで識別子として退避してください。未定義のまま
+> 別の意味へ変わることはなく、API 呼び出し前にエラーとなります。
 
 ### フィールド名（識別子）
 

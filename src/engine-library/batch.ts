@@ -11,6 +11,11 @@ import {
 import { withCursorScope } from "./cursorScope";
 import { validateBatchOptions } from "./options";
 import { projectReadonlyClient } from "./readonlyClient";
+import {
+  appendLogicalAppDiagnostics,
+  prepareEngineLogicalApps,
+  type PreparedEngineSql,
+} from "./logicalApps";
 import { toQueryResult } from "./resultMapping";
 import { guardRunBatchSql } from "./statementGuard";
 import type {
@@ -49,13 +54,20 @@ export async function runBatch(
   options: RunBatchOptions
 ): Promise<BatchResult> {
   let parsedStatements: readonly Statement[] = [];
+  let logicalBindings: PreparedEngineSql["logicalBindings"] = [];
   try {
     const invocation = validateBatchOptions(options);
-    parsedStatements = guardRunBatchSql(sql);
-    const batchResult = await withCursorScope(
+    const preparedSql = prepareEngineLogicalApps(
+      sql,
       invocation.client,
+      invocation.logicalApps
+    );
+    logicalBindings = preparedSql.logicalBindings;
+    parsedStatements = guardRunBatchSql(preparedSql.sql);
+    const batchResult = await withCursorScope(
+      preparedSql.client,
       (scopedClient) => executeBatch(
-        sql,
+        preparedSql.sql,
         projectReadonlyClient(scopedClient),
         { ...invocation.executeOptions, captureColumnMeta: true }
       )
@@ -111,6 +123,9 @@ export async function runBatch(
       warnings: [],
     };
   } catch (error) {
-    throw normalizeBatchBoundaryError(error, parsedStatements);
+    throw appendLogicalAppDiagnostics(
+      normalizeBatchBoundaryError(error, parsedStatements),
+      logicalBindings
+    );
   }
 }

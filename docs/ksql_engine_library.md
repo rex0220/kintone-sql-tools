@@ -102,6 +102,24 @@ value export は次の6つです。
   `ReadonlyProcessStatusState`
 - browser: `CreateReadonlyKintoneClientOptions`
 
+`RunQueryOptions` と `RunBatchOptions`（および `explainQuery` の options）は、任意の
+`logicalApps?: Readonly<Record<string, number>>` を受け取ります。キーは `LAPP_` を除いた
+論理名、値は正の安全整数の物理アプリ ID です。SQL の `LAPP_<NAME>` は実行前に解決され、
+未定義名・不正キー・重複する canonical キー・不正 ID は kintone API 呼び出し前に
+名前入りエラーになります。
+
+```ts
+await runBatch(
+  "SELECT c.業種 FROM LAPP_案件管理 d JOIN LAPP_顧客管理 c ON d.顧客No_ = c.顧客No",
+  { client, logicalApps: { 案件管理: 4149, 顧客管理: 4148 } }
+);
+```
+
+論理名は NFC 正規化後に大文字化されます。ASCII / 全角英字は大小同一で、日本語名も
+利用できます。browser engine-library は `@profile` を持たないため、`LAPP_X@prod` と
+`APP1@prod` は明示エラーです。解決後の実行エラーには `LAPP_<NAME> -> APP<id>` の対応が
+併記されます。`LAPP_` を含まない通常 SQL の挙動とエラー文言は変わりません。
+
 ### 結果の値はすべて文字列
 
 `QueryResult.rows` のセルは、NUMBER、日時、集計値、record id を含めて

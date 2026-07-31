@@ -25,11 +25,11 @@ describe("logical app config", () => {
         .toThrow(/query\.dmlMaxSubtableRows.*positive safe integer/);
     }
   });
-  test("logicalApps を受理し、ASCII 大文字キーへ正規化する", () => {
+  test("logicalApps の ASCII・日本語名を受理し、canonical キーへ正規化する", () => {
     const config: KsqlConfig = {
       profiles: {
         prod: {
-          logicalApps: { orders: 1234, Customer_2: 1235 },
+          logicalApps: { orders: 1234, Customer_2: 1235, 注文: 1236 },
           allowPhysicalAppRefs: false,
         },
       },
@@ -38,6 +38,7 @@ describe("logical app config", () => {
     expect(validateKsqlConfig(config).profiles?.prod.logicalApps).toEqual({
       ORDERS: 1234,
       CUSTOMER_2: 1235,
+      注文: 1236,
     });
   });
 
@@ -47,7 +48,7 @@ describe("logical app config", () => {
     })).toThrow(/logical app key/);
   });
 
-  test.each(["_ORDERS", "ORDER-NOW", "注文", `A${"B".repeat(64)}`])(
+  test.each(["_ORDERS", "ORDER-NOW", `A${"B".repeat(64)}`])(
     "不正な論理名 %s を拒否する",
     (name) => {
       expect(() => validateKsqlConfig({
@@ -68,6 +69,15 @@ describe("logical app config", () => {
   test("大文字正規化後の同名重複を拒否する", () => {
     expect(() => validateKsqlConfig({
       profiles: { prod: { logicalApps: { orders: 1234, ORDERS: 1235 } } },
+    })).toThrow(/duplicated after case normalization/);
+  });
+
+  test("NFD キーを NFC に正規化し、NFC との重複を拒否する", () => {
+    expect(validateKsqlConfig({
+      profiles: { prod: { logicalApps: { "か\u3099くせい": 1234 } } },
+    }).profiles?.prod.logicalApps).toEqual({ がくせい: 1234 });
+    expect(() => validateKsqlConfig({
+      profiles: { prod: { logicalApps: { "か\u3099くせい": 1234, がくせい: 1235 } } },
     })).toThrow(/duplicated after case normalization/);
   });
 

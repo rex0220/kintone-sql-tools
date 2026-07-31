@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "fs";
+import { canonicalizeLogicalAppName } from "../core/logicalApps";
 
 export type OutputFormat = "table" | "json" | "jsonl" | "csv" | "markdown";
 export type OnLimitMode = "error" | "truncate";
@@ -23,7 +24,7 @@ export interface KsqlProfileConfig {
   passwordEnv?: string;
   app?: number;
   tokenMap?: Record<string, string>;
-  /** SQL 内の LAPP_<NAME> から物理アプリ ID への profile 単位 mapping。読込時にキーを ASCII 大文字化する。 */
+  /** SQL 内の LAPP_<NAME> から物理アプリ ID への profile 単位 mapping。読込時にキーを NFC・大文字化する。 */
   logicalApps?: Record<string, number>;
   /** false の場合、この profile に対する物理 APP<id> 参照を禁止する。 */
   allowPhysicalAppRefs?: boolean;
@@ -69,7 +70,6 @@ export interface KsqlProfileConfig {
   };
 }
 
-const LOGICAL_APP_NAME_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const PHYSICAL_APP_KEY_RE = /^APP\d+$/i;
 const NUMERIC_APP_KEY_RE = /^\d+$/;
 const LOGICAL_SQL_KEY_RE = /^LAPP_/i;
@@ -99,13 +99,14 @@ function normalizeLogicalApps(
         `logical app key "${rawName}" in profile "${profileName}" must be a logical name without APP, numeric, or LAPP_ syntax.`
       );
     }
-    if (!LOGICAL_APP_NAME_RE.test(rawName)) {
+    let logicalName: string;
+    try {
+      logicalName = canonicalizeLogicalAppName(rawName);
+    } catch {
       throw argumentError(
-        `logical app key "${rawName}" in profile "${profileName}" must match [A-Z][A-Z0-9_]{0,63}.`
+        `logical app key "${rawName}" in profile "${profileName}" must match the logical app name rules.`
       );
     }
-
-    const logicalName = rawName.toUpperCase();
     if (Object.prototype.hasOwnProperty.call(normalized, logicalName)) {
       throw argumentError(
         `logical app name "${logicalName}" is duplicated after case normalization in profile "${profileName}".`
@@ -130,7 +131,7 @@ function normalizeLogicalApps(
 }
 
 /**
- * 追加の論理アプリ設定を検証し、logicalApps のキーを ASCII 大文字に正規化する。
+ * 追加の論理アプリ設定を検証し、logicalApps のキーを NFC・大文字に正規化する。
  * 既存設定項目の受理範囲はこの機能追加で変更しない。
  */
 export function validateKsqlConfig(config: KsqlConfig): KsqlConfig {
@@ -206,11 +207,13 @@ export function createAppResolutionContext(
 
   return {
     resolveLogicalApp(name, profile) {
-      if (!LOGICAL_APP_NAME_RE.test(name)) {
-        throw argumentError(`logical app name "${name}" must match [A-Z][A-Z0-9_]{0,63}.`);
-      }
       const profileName = profile || defaultProfile;
-      const logicalName = name.toUpperCase();
+      let logicalName: string;
+      try {
+        logicalName = canonicalizeLogicalAppName(name);
+      } catch {
+        throw argumentError(`logical app name "${name}" must match the logical app name rules.`);
+      }
       const appId = requireProfile(profileName).logicalApps?.[logicalName];
       if (appId === undefined) {
         throw argumentError(`logical app LAPP_${logicalName}@${profileName} is not defined.`);

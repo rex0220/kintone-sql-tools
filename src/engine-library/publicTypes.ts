@@ -99,6 +99,7 @@ export interface ReadonlyKintoneClient {
 
 export interface RunQueryOptions {
   client: ReadonlyKintoneClient;
+  logicalApps?: Readonly<Record<string, number>>;
   maxRecords?: number;
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;
@@ -114,6 +115,7 @@ export interface RunQueryOptions {
  */
 export interface RunBatchOptions {
   client: ReadonlyKintoneClient;
+  logicalApps?: Readonly<Record<string, number>>;
   maxRecords?: number;
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;

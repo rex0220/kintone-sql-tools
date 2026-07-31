@@ -190,10 +190,18 @@ describe("ksql_app_metadata MCP surface", () => {
   });
 
   test("schema accepts only positive safe integer or LAPP app references", () => {
-    for (const app of [1, Number.MAX_SAFE_INTEGER, "LAPP_Orders", "lapp_a_1"]) {
+    for (const app of [
+      1,
+      Number.MAX_SAFE_INTEGER,
+      "LAPP_Orders",
+      "lapp_a_1",
+      "LAPP_注文",
+      "LAPP_案件＄明細",
+      `LAPP_A${"B".repeat(63)}`,
+    ]) {
       expect(ksqlAppMetadataInputSchema.safeParse({ resource: "fields", app }).success).toBe(true);
     }
-    for (const app of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "APP123", "SELECT * FROM APP1", "LAPP_A@prod", "LAPP_A.Subtable", "LAPP_1A"]) {
+    for (const app of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "APP123", "SELECT * FROM APP1", "LAPP_A@prod", "LAPP_A.Subtable", "LAPP_1A", `LAPP_A${"B".repeat(64)}`]) {
       expect(ksqlAppMetadataInputSchema.safeParse({ resource: "fields", app }).success).toBe(false);
     }
   });

@@ -2,11 +2,13 @@ import type {
   RunBatchOptions,
   RunQueryOptions,
 } from "./publicTypes";
+import { canonicalizeLogicalAppName } from "../core/logicalApps";
 
 type QueryKind = "run" | "explain";
 
 const COMMON_KEYS = new Set([
   "client",
+  "logicalApps",
   "maxRecords",
   "fetchParallel",
   "cursorMaxActive",
@@ -63,6 +65,32 @@ function assertBatchVariables(
   }
 }
 
+function normalizeLogicalApps(
+  value: unknown
+): Readonly<Record<string, number>> | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("logicalApps must be an object");
+  }
+  const normalized: Record<string, number> = {};
+  for (const [rawName, rawAppId] of Object.entries(value)) {
+    let logicalName: string;
+    try {
+      logicalName = canonicalizeLogicalAppName(rawName);
+    } catch {
+      throw new TypeError(`logicalApps key "${rawName}" is invalid`);
+    }
+    if (Object.prototype.hasOwnProperty.call(normalized, logicalName)) {
+      throw new TypeError(
+        `logicalApps key "${rawName}" duplicates "${logicalName}" after canonical normalization`
+      );
+    }
+    assertPositiveSafeInteger(rawAppId, `logicalApps.${rawName}`);
+    normalized[logicalName] = rawAppId;
+  }
+  return normalized;
+}
+
 function validateExecutionOptions(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -114,6 +142,7 @@ export function validateQueryOptions(
   kind: QueryKind
 ): {
   client: RunQueryOptions["client"];
+  logicalApps?: Readonly<Record<string, number>>;
   executeOptions: {
     maxRecords?: number;
     onLimitReached?: "error" | "truncate";
@@ -129,9 +158,11 @@ export function validateQueryOptions(
     allowed,
     kind === "run" ? "runQuery" : "explainQuery"
   );
+  const logicalApps = normalizeLogicalApps(value.logicalApps);
 
   return {
     client: value.client,
+    ...(logicalApps === undefined ? {} : { logicalApps }),
     executeOptions,
   };
 }
@@ -140,6 +171,7 @@ export function validateBatchOptions(
   value: RunBatchOptions
 ): {
   client: RunBatchOptions["client"];
+  logicalApps?: Readonly<Record<string, number>>;
   executeOptions: {
     maxRecords?: number;
     onLimitReached?: "error" | "truncate";
@@ -158,8 +190,10 @@ export function validateBatchOptions(
     assertPositiveSafeInteger(value.tempTableMaxRows, "tempTableMaxRows");
   }
   const commonOptions = validateExecutionOptions(value, BATCH_KEYS, "runBatch");
+  const logicalApps = normalizeLogicalApps(value.logicalApps);
   return {
     client: value.client,
+    ...(logicalApps === undefined ? {} : { logicalApps }),
     executeOptions: {
       ...commonOptions,
       ...(value.variables !== undefined ? { variables: value.variables } : {}),

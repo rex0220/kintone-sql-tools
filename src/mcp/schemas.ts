@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LOGICAL_APP_NAME_RE } from "../core/logicalApps";
 import { KINTONE_METADATA_LANGS, KINTONE_METADATA_RESOURCES } from "../node/kintoneMetadata";
 import { MCP_IMPORT_MAX_SOURCES } from "./stdioLimits";
 
@@ -11,7 +12,10 @@ const kintoneMetadataResource = z.enum(KINTONE_METADATA_RESOURCES);
 const kintoneMetadataLang = z.enum(KINTONE_METADATA_LANGS);
 const kintoneMetadataAppRef = z.union([
   z.number().int().positive(),
-  z.string().regex(/^LAPP_[A-Za-z][A-Za-z0-9_]{0,63}$/i),
+  z.string().refine(
+    (value) => /^LAPP_/i.test(value) && LOGICAL_APP_NAME_RE.test(value.slice(5)),
+    { message: "Invalid logical app reference" }
+  ),
 ]).describe("Positive kintone app ID or logical app name LAPP_<NAME>.");
 const maxRecords = z.number().int().positive()
   .describe("Maximum records fetched per SELECT (default 500).")
