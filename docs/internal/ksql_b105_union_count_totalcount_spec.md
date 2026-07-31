@@ -2,7 +2,7 @@
 
 - 作成: 2026-07-31
 - 対象課題: [B105](ksql_b105_union_count_totalcount_issue.md)（**§2 が原因・§5 が線引きの根拠**）
-- ステータス: 📋 **実装待ち**
+- ステータス: 📋 **実装待ち（R2 — 定数列の併用を追加）**
 - 分担: Claude=仕様/レビュー、codex=実装/テスト
 - SemVer: **minor**（適用範囲の拡大。公開型・既存の挙動は不変）
 
@@ -44,6 +44,82 @@ buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByP
 > **実行時と `EXPLAIN` は必ず一致させること。**
 > **B94 の受入条件 7「`EXPLAIN` が実態を映す」を引き継ぐ。**
 
+## 2bis. **【R2】定数列の併用を許す**
+
+**発端のクエリは、R1 の実装では直らなかった。**
+
+```sql
+SELECT '交通費申請' AS アプリ, COUNT(*) AS 件数 FROM APP2
+UNION ALL SELECT 'ユーザー選択', COUNT(*) FROM APP15
+...
+```
+
+**各枝に「ラベル列」がある。**
+**`isCountStarTotalCountEligible`（`src/execute.ts:4280`）が
+`stmt.columns.length !== 1` で弾く。**
+
+**これは [B94](ksql_b94_count_star_totalcount_spec.md) が「他の列との併用は対象外」と決めた条件で、
+`UNION` とは無関係である。単体の `SELECT 'a' AS k, COUNT(*) FROM APP912` も FULL_SCAN になる。**
+
+> **R1 の切り分けが不完全だった。**
+> **`UNION` 枝であることだけを見て、実際のクエリ形を条件に当てて確かめていなかった。**
+
+### 2bis.1 なぜ定数列なら許してよいか
+
+**リテラル列はレコードに一切依存しない。**
+
+**`COUNT(*)` が唯一の集計なら、出力は 1 行**であり、
+**その行は「リテラルの値」と「`totalCount`」だけで構成できる。**
+**元レコードを読む必要が無い。**
+
+**B94 が併用を外したのは、フィールド参照が `GROUP BY` なしでは意味を持たないためである。**
+**リテラルは事情が違う。**
+
+### 2bis.2 許す範囲（**リテラルだけ**）
+
+**`stmt.columns` が次を満たすときに限る。**
+
+- **`AGGREGATE` の `COUNT(*)` がちょうど 1 つ**（`distinct` でない・引数が `WILDCARD`）
+- **残りの列がすべて `LITERAL_COL`**（0 個以上）
+- **列の順序は問わない**（ラベルが前でも後でも可）
+
+**それ以外は従来どおり FULL_SCAN へ落とす。**
+
+| | |
+|---|---|
+| `ARITH_COL` / `STRFUNC_COL` / `CASE_COL` / `SCALAR_VALUE_COL` | **許さない**。定数に見えても式の評価が要る |
+| `FIELD_COL` | **許さない**（B94 の判断どおり） |
+| `TODAY()` 等の文脈関数 | **許さない**。今回は広げない |
+
+> **B94 の方針を保つ**——**迷ったら従来経路へ落とす。速さより正しさを優先する。**
+
+### 2bis.3 結果の組み立て
+
+**`tryCountStarWithTotalCount`（`src/execute.ts:4306`）が
+1 列しか組み立てていない。**
+
+**宣言順どおりに全列を組み立てること。**
+
+> **列名の規則を新しく書かないこと。**
+> **既存の経路と同じ名前になるようにすること。**
+
+### 2bis.4 **正しさの担保＝フォールバック経路との一致**
+
+**同じ SQL を 2 通りで実行し、結果が完全に一致することを検査する。**
+
+```
+① getRecords が totalCount を返す   → 単発 GET の経路
+② getRecords が totalCount を返さない → 従来の全件取得へフォールバック
+```
+
+**②は B94 が既に持っているフォールバックである。**
+**つまり従来経路が参照実装になる。**
+
+**`columns` / `rows` / `rowCount` が一致すること。**
+**ラベルが前・後・複数、別名あり・なしの各形で確かめること。**
+
+---
+
 ## 3. 変えないもの
 
 | | |
@@ -80,7 +156,11 @@ buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByP
 7. **`searchAborted` は従来どおり fail-closed**
 8. **BYO が `totalCount` を返さない場合は従来どおり全件取得へフォールバックし、
    件数が正しい**（`0` を返さない）
-9. **既存テスト全 green・snapshot 22 不変**
+9. **定数列の併用が単発 GET になる**——**発端のクエリ（ラベル＋`COUNT(*)`）が
+   既定 `maxRecords` で成功する**こと
+10. **フォールバック経路と結果が完全に一致する**（§2bis.4）＝`columns` / `rows` / `rowCount`
+11. **リテラル以外の列が混ざったら従来どおり FULL_SCAN**（§2bis.2）
+12. **既存テスト全 green・snapshot 22 不変**
 
 ## 6. テスト
 
