@@ -4277,16 +4277,16 @@ function isCountStarTotalCountEligible(
   whereCapability: PredicateCapabilityResult
 ): boolean {
   if (whereCapability.capability !== "EXACT_PUSHDOWN") return false;
-  if (stmt.columns.length !== 1) return false;
-  const column = stmt.columns[0];
-  if (
-    column?.type !== "AGGREGATE"
-    || column.func !== "COUNT"
-    || column.distinct
-    || column.arg.type !== "WILDCARD"
-  ) {
-    return false;
-  }
+  const countColumns = stmt.columns.filter(
+    (column) => column.type === "AGGREGATE"
+      && column.func === "COUNT"
+      && !column.distinct
+      && column.arg.type === "WILDCARD"
+  );
+  if (countColumns.length !== 1) return false;
+  if (stmt.columns.some(
+    (column) => column !== countColumns[0] && column.type !== "LITERAL_COL"
+  )) return false;
   return (
     !stmt.distinct
     && normalizeGroupingSpec(stmt).type === "NONE"
@@ -4307,7 +4307,7 @@ async function tryCountStarWithTotalCount(
   stmt: SelectStatement,
   client: KintoneClient
 ): Promise<SelectResult | null> {
-  const countColumn = stmt.columns[0];
+  const countColumn = stmt.columns.find((column) => column.type === "AGGREGATE");
   if (countColumn?.type !== "AGGREGATE") return null;
   const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
   const response = await client.getRecords({
@@ -4318,11 +4318,15 @@ async function tryCountStarWithTotalCount(
   });
   if (response.searchAborted) throw new SearchAbortedError();
   if (!isValidTotalCount(response.totalCount)) return null;
-  const column = countColumn.alias ?? "COUNT(*)";
+  const countKey = countColumn.alias ?? "COUNT(*)";
+  const projected = project(
+    [{ [countKey]: response.totalCount }],
+    stmt.columns
+  );
   return {
     type: "SELECT",
-    rows: [{ [column]: response.totalCount }],
-    columns: [column],
+    rows: projected.rows,
+    columns: projected.columns,
     rowCount: 1,
     warnings: [],
   };
@@ -4585,7 +4589,7 @@ async function executeUnion(
           forLibraryCapture
         )
         : executeSelect(
-          stmt.left,
+          markCountTotalCountRoot(stmt.left),
           client,
           effectiveOptions,
           cacheContext,
@@ -4594,7 +4598,7 @@ async function executeUnion(
           forLibraryCapture
         ),
       executeSelect(
-        stmt.right,
+        markCountTotalCountRoot(stmt.right),
         client,
         effectiveOptions,
         cacheContext,
@@ -10532,7 +10536,7 @@ function buildUnionPlan(
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans, false));
+    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans, true));
   });
   return lines;
 }

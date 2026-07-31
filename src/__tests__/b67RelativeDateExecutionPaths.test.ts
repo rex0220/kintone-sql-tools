@@ -231,9 +231,13 @@ test("UNION は SIMPLE / FULL_SCAN_EXACT の各 SELECT node を事前計画し�
     + "UNION ALL SELECT COUNT(*) FROM APP200 WHERE 日付 = TOMORROW()",
     mixed.client
   )).resolves.toMatchObject({ type: "SELECT" });
-  expect(mixed.calls.records).toHaveBeenCalledTimes(2);
-  expect(mixed.calls.records.mock.calls[0][0].query).toContain("YESTERDAY()");
-  expect(mixed.calls.records.mock.calls[1][0].query).toContain("TOMORROW()");
+  expect(mixed.calls.records).toHaveBeenCalledTimes(3);
+  const mixedParams = mixed.calls.records.mock.calls.map(([params]) => params);
+  expect(mixedParams.filter((params) => params.query.includes("YESTERDAY()"))).toHaveLength(1);
+  const tomorrowParams = mixedParams.filter((params) => params.query.includes("TOMORROW()"));
+  expect(tomorrowParams).toHaveLength(2);
+  expect(tomorrowParams.filter((params) => params.totalCount === true)).toHaveLength(1);
+  expect(tomorrowParams.filter((params) => params.totalCount !== true)).toHaveLength(1);
 });
 
 test("WITH inline は body/main の各 WHERE を1つの物理 REST queryへ統合する", async () => {
