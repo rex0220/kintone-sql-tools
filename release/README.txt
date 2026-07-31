@@ -1,11 +1,21 @@
-ksql 配布パッケージ (v3.35.0)
+ksql 配布パッケージ (v3.36.0)
 
 release 成果物:
-- ksql-plugin-v3.35.0.zip
-- ksql-mcp.mcpb (manifest version 3.35.0)
-- ksql-mcp.js (MCP server version 3.35.0)
+- ksql-plugin-v3.36.0.zip
+- ksql-mcp.mcpb (manifest version 3.36.0)
+- ksql-mcp.js (MCP server version 3.36.0)
 
-追加 (B102) ★本リリースの要点:
+修正 (B105) ★本リリースの要点:
+- UNION / UNION ALL の各枝の SELECT COUNT(*) が、単体と同じく totalCount の
+  単発 GET になりました。'ラベル' AS 列名 のようなリテラル列との併用も対象です。
+    SELECT '顧客管理' AS アプリ, COUNT(*) AS 件数 FROM APP100
+    UNION ALL SELECT '案件管理', COUNT(*) FROM APP200
+- 従来は UNION の枝に入れると全件取得に落ち、既定の maxRecords を超えるアプリでは
+  「完全な候補集合が必要です」のエラーで停止していました。
+- 挙動の変更: 従来エラーだった形が成功するようになります。失われる正しい結果は
+  ありません。リテラル以外の列が混ざる形は従来どおり全件取得です。
+
+追加 (B102) (v3.35.0):
 - kintone のクエリ関数 PRIMARY_ORGANIZATION() を WHERE で使えるようになりました。
   ダッシュボードから自組織のデータを抽出する用途で、LOGINUSER() と同じ位置づけです。
     SELECT 案件名 FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION())
@@ -71,12 +81,16 @@ release 成果物:
     → NaN
     修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.35.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.36.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.35.0): B102 PRIMARY_ORGANIZATION() のサポート。
+本リリース (v3.36.0): B105 UNION の枝の COUNT(*) を単発 GET に。
+
+- B105: 上の「修正」を参照してください。
+
+前リリース (v3.35.0): B102 PRIMARY_ORGANIZATION() のサポート。
 
 - B102: 上の「追加」を参照してください。DML では使用できません。
 
@@ -101,20 +115,6 @@ release 成果物:
   完全な結果として扱います。totalCount の欠落は性能だけの影響です
   (エンジンが全件取得へ落とします)。キャッシュや計測のために client を包む場合も
   同じで、createReadonlyKintoneClient を使っていても踏みます。
-
-前リリース (v3.32.0): B95 打ち切りの構造化／B94 COUNT(*) の単発取得／B93。
-
-- B94: 単一アプリの SELECT COUNT(*) だけのクエリは、WHERE が完全に押し下がる場合、
-  kintone REST の totalCount で 1 回の GET で件数を返します。この経路では
-  maxRecords / onLimitReached を適用しません。MCP の既定 maxRecords は 500 なので、
-  500 件を超えるアプリの件数取得は従来失敗していましたが、正しい総件数を返します。
-- B95: 取得上限で打ち切られたかどうかを QueryMetrics.limitReached で判別できます。
-    if (result.metrics.limitReached) { ... }
-  どのアプリかは limitReachedApps に入ります。判定には limitReached を使ってください。
-  両方とも任意プロパティなので、既存の利用者コードは変更不要です。
-- B93: BYO クライアントの getFields() が未知の fieldType を返したときのエラーが、
-  クライアント契約の違反として読める文面になります。fields.json のフィールドだけを
-  返し、$id と $revision は足さないでください（エンジンが合成します）。
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
