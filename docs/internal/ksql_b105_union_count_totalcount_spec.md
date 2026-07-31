@@ -10,8 +10,10 @@
 
 **`UNION` の枝を、[B94](ksql_b94_count_star_totalcount_spec.md) の単発 GET の対象に加える。**
 
-**適用可否の判定には一切手を入れない。**
-**変えるのは「root として登録するかどうか」だけ。**
+**R1＝`UNION` 枝を root として登録する**（§2）。
+**R2＝定数列の併用を許す**（§2bis）。**発端のクエリは R1 だけでは直らなかった。**
+
+**判定に手を入れるのは「列の条件」だけ。**それ以外は触らない（§3）。
 
 ## 2. 変更点（2 箇所だけ）
 
@@ -124,9 +126,9 @@ UNION ALL SELECT 'ユーザー選択', COUNT(*) FROM APP15
 
 | | |
 |---|---|
-| `isCountStarTotalCountEligible` | **触らない。**判定を再定義しない |
+| `isCountStarTotalCountEligible` | **列の条件だけ広げる**（§2bis.2）。**それ以外（`EXACT_PUSHDOWN`・`distinct`・`GROUP BY`・`JOIN`・CTE・`LIMIT` 等）は触らない** |
 | `EXACT_PUSHDOWN` の意味 | **触らない** |
-| `tryCountStarWithTotalCount` | **触らない**（フォールバック・`searchAborted` の fail-closed を含む） |
+| `tryCountStarWithTotalCount` | **結果の組み立てだけ広げる**（§2bis.3）。**フォールバックと `searchAborted` の fail-closed は触らない** |
 | `UNION` の重複排除・`ORDER BY`・`LIMIT` | **枝の外側**。触らない |
 | CTE 本体・一時テーブル source・サブクエリ・DML source | **B94 が明示的に対象外とした**。今回覆さない |
 
@@ -179,7 +181,8 @@ UNION ALL SELECT 'ユーザー選択', COUNT(*) FROM APP15
 
 - **B94 の方針を保つこと**——**迷ったら従来経路へ落とす。速さより正しさを優先する**
 - **件数は検算されにくい。**利用者は返ってきた数を信じる
-- **判定を新規に書かないこと。**既存の `isCountStarTotalCountEligible` を通すだけ
+- **判定を新規に書かないこと。**`isCountStarTotalCountEligible` の**列の条件だけ**を広げ、
+  **他の条件には触らない**（§2bis.2・§3）
 - **`allowTotalCountPlan` を `true` にするのは union 枝の 1 箇所だけ**
 
 ## 8. 今回やらないこと
