@@ -1,7 +1,7 @@
 # Pro（ksql-dashboard-pro）への連絡 — v3.37.0
 
 - 作成: 2026-08-01
-- ステータス: 📝 **送付前**
+- ステータス: ✅ **送付済み（2026-08-01）**
 - 前回の往復: [B107 方向確定の回答受領](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801b-送付版.md)（日本語名を希望・破壊的変更を受け入れ）
 - 関連: [B107](ksql_b107_lapp_engine_library_issue.md) / [B108](ksql_b108_inline_explain_mapped_id_issue.md)
 
