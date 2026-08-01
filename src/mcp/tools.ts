@@ -687,9 +687,11 @@ export function createKsqlMcpTools(
       if (validation.containsDml) {
         throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
       }
+      const sqlContext = validationContexts.get(validation);
+      const statements = parseSqlStatements(validation.normalizedSql, { import: importOptions.enableImport });
       const runtime = await createRuntime(serverOptions, {
         sql: input.sql,
-        sqlContext: validationContexts.get(validation),
+        sqlContext,
         profile: input.profile,
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
@@ -698,7 +700,7 @@ export function createKsqlMcpTools(
         tempTableMaxRows: input.tempTableMaxRows,
         cursorMaxActive: input.cursorMaxActive,
       });
-      const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
+      let batchResult = await executeBatchSql(runtime.sql, runtime.client, {
         maxRecords: runtime.maxRecords,
         fetchParallel: runtime.fetchParallel,
         onLimitReached: runtime.onLimit,
@@ -715,6 +717,22 @@ export function createKsqlMcpTools(
         variables: input.variables,
         ...importOptions,
       });
+      if (sqlContext) {
+        batchResult = {
+          ...batchResult,
+          statements: batchResult.statements.map((statementResult, index) =>
+            statements[index]?.type === "EXPLAIN" && statementResult.result
+              ? {
+                  ...statementResult,
+                  result: restoreSqlDiagnosticValue(
+                    statementResult.result,
+                    sqlContext.bindings
+                  ) as typeof statementResult.result,
+                }
+              : statementResult
+          ),
+        };
+      }
       return { ...buildBatchEnvelope(batchResult, { maxTotalRecords: input.maxTotalRecords }) };
     }
 
@@ -763,7 +781,10 @@ export function createKsqlMcpTools(
     if (result.type !== "SELECT") {
       throw new Error(`ArgumentError: read-only query returned unexpected result type ${result.type}.`);
     }
-    return toSelectPayload(result);
+    const payload = toSelectPayload(result);
+    return stmt.type === "EXPLAIN"
+      ? restoreSqlDiagnosticValue(payload, validationContexts.get(validation)?.bindings ?? new Map()) as Record<string, unknown>
+      : payload;
   }
 
   /**

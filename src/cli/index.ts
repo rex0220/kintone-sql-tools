@@ -1766,6 +1766,7 @@ async function run(): Promise<number> {
   let containsApplyStatement = false;
   let containsApplyMutation = false;
   let dryRunNeedsMetadata = false;
+  let parsedStatements: ReturnType<typeof parseSqlStatements> = [];
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1794,6 +1795,7 @@ async function run(): Promise<number> {
     const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     try {
       const statements = parseSqlStatements(sql, { import: importEnabled });
+      parsedStatements = statements;
       const hasApply = (statement: typeof statements[number]): boolean =>
         (statement.type === "UPDATE" || statement.type === "INSERT")
           ? (statement.applyBlocks?.length ?? 0) > 0
@@ -2322,7 +2324,7 @@ async function run(): Promise<number> {
       // バッチ実行。timeout はバッチ合計として扱う（仕様 §5.7）。
       // DML 文には文ごとの --dml-max-rows ガードを confirm 経由で適用
       //（バッチ全体の確認は上で済んでいるため、ここでは件数ガードのみ）
-      const batchResult = await executeBatch(sql!, client, {
+      let batchResult = await executeBatch(sql!, client, {
         maxRecords,
         fetchParallel,
         onLimitReached: effectiveOnLimit,
@@ -2357,6 +2359,22 @@ async function run(): Promise<number> {
           }
           : undefined,
       });
+      if (sqlDiagnosticContext) {
+        batchResult = {
+          ...batchResult,
+          statements: batchResult.statements.map((statementResult, index) =>
+            parsedStatements[index]?.type === "EXPLAIN" && statementResult.result
+              ? {
+                  ...statementResult,
+                  result: restoreSqlDiagnosticValue(
+                    statementResult.result,
+                    sqlDiagnosticContext.appBindingByMappedApp
+                  ) as typeof statementResult.result,
+                }
+              : statementResult
+          ),
+        };
+      }
       return writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
     }
 
@@ -2381,9 +2399,9 @@ async function run(): Promise<number> {
         } : {}),
         ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
       });
-    // dry-run（EXPLAIN）のプラン出力は利用者向け診断値。バッチ dry-run と同様に
+    // dry-run と文として書かれた EXPLAIN のプラン出力は利用者向け診断値。
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）
-    if (args.dryRun && sqlDiagnosticContext) {
+    if ((args.dryRun || parsedStatements[0]?.type === "EXPLAIN") && sqlDiagnosticContext) {
       result = restoreSqlDiagnosticValue(result, sqlDiagnosticContext.appBindingByMappedApp) as typeof result;
     }
     // ASSERT は mutation 出力（affected=）に流さない専用経路（バッチ強化第1弾 §2.5）

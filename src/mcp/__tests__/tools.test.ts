@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   parseSqlStatement,
   statementHasApplyBlocks,
+  type BatchExecuteResult,
   type ExecuteOptions,
   type ExecuteResult,
   type KintoneClient,
@@ -587,6 +588,77 @@ describe("MCP tools", () => {
     });
     expect(runtimeInputs[1]?.onLimit).toBe("truncate");
     expect(executeOptions?.onLimitReached).toBe("truncate");
+  });
+
+  test("query inline EXPLAIN は単文・batch の計画だけを復元し SELECT データを保持する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-inline-explain-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: { prod: { logicalApps: { ORDERS: 1234 } } },
+    }), "utf8");
+    const plan = {
+      type: "SELECT" as const,
+      columns: ["plan"],
+      rows: [{ plan: "app: APP900000000 (900000000)" }],
+      rowCount: 1,
+      warnings: [],
+    };
+    const data = {
+      type: "SELECT" as const,
+      columns: ["x"],
+      rows: [{ x: "APP900000000" }],
+      rowCount: 1,
+      warnings: [],
+    };
+    const createRuntime = async (
+      _options: KsqlRuntimeServerOptions,
+      input: CreateKsqlRuntimeInput
+    ): Promise<KsqlRuntime> => ({
+      sql: input.sql,
+      profileName: input.profile ?? "prod",
+      client: makeClient(),
+      cacheContext: "inline-explain",
+      maxRecords: input.maxRecords ?? 500,
+      fetchParallel: input.fetchParallel ?? 3,
+      onLimit: input.onLimit ?? "error",
+      timeout: input.timeout ?? 30_000,
+    });
+    const executeSql = jest.fn(async (sql: string) => /^\s*EXPLAIN\b/i.test(sql) ? plan : data);
+    const executeBatchSql = jest.fn(async (): Promise<BatchExecuteResult> => ({
+      ok: true,
+      statementCount: 2,
+      statements: [
+        { index: 0, type: "EXPLAIN", status: "success", result: plan },
+        { index: 1, type: "SELECT", status: "success", result: data },
+      ],
+      analysis: {} as BatchExecuteResult["analysis"],
+    }));
+    const tools = createKsqlMcpTools(
+      { configPath, profile: "prod" },
+      { createRuntime, executeSql, executeBatchSql }
+    );
+    try {
+      const single = await tools.query({
+        sql: "EXPLAIN SELECT COUNT(*) FROM LAPP_ORDERS",
+      });
+      expect(JSON.stringify(single)).toContain("LAPP_ORDERS@prod");
+      expect(JSON.stringify(single)).not.toContain("APP900000000");
+
+      const singleData = await tools.query({
+        sql: "SELECT 'APP900000000' AS x FROM LAPP_ORDERS LIMIT 1",
+      }) as { rows: Array<Record<string, unknown>> };
+      expect(singleData.rows).toEqual([{ x: "APP900000000" }]);
+
+      const batch = await tools.query({
+        sql: "EXPLAIN SELECT COUNT(*) FROM LAPP_ORDERS; SELECT 'APP900000000' AS x",
+      }) as { results: Array<{ rows: Array<Record<string, unknown>> }> };
+      expect(JSON.stringify(batch.results[0])).toContain("LAPP_ORDERS@prod");
+      expect(JSON.stringify(batch.results[0])).not.toContain("APP900000000");
+      expect(batch.results[1].rows).toEqual([{ x: "APP900000000" }]);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
   });
 
   test("query schema does not expose CLI-only format or per-call configPath", () => {

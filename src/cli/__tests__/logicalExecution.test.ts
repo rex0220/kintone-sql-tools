@@ -150,4 +150,91 @@ describe("CLI logical app execution", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test.each(["table", "json", "jsonl", "csv", "markdown"])(
+    "inline EXPLAIN は %s 形式で内部 mapped ID を論理名へ復元する",
+    async (format) => {
+      const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-inline-explain-"));
+      const configPath = join(dir, "ksql.config.json");
+      writeFileSync(configPath, JSON.stringify({
+        defaultProfile: "prod",
+        profiles: {
+          prod: {
+            baseUrl: "https://example.cybozu.com",
+            logicalApps: { ORDERS: 1234 },
+            tokenMap: { APP1234: "physical-1234-token" },
+          },
+        },
+      }));
+      jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const body = String(input).includes("/app/form/fields.json")
+          ? { properties: { "$id": { code: "$id", label: "Record ID", type: "__ID__" } } }
+          : { records: [] };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+      const out: string[] = [];
+      jest.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+        out.push(String(chunk));
+        return true;
+      });
+      try {
+        const code = await runWithArgv([
+          "--config", configPath,
+          "--format", format,
+          "-e", "EXPLAIN SELECT COUNT(*) FROM LAPP_ORDERS",
+        ]);
+        expect(code).toBe(0);
+        expect(out.join("")).toContain("LAPP_ORDERS@prod");
+        expect(out.join("")).not.toContain("APP900000000");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  test("batch は EXPLAIN だけを復元し SELECT データ中の mapped ID 文字列を保持する", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-inline-explain-batch-"));
+    const configPath = join(dir, "ksql.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: {
+          baseUrl: "https://example.cybozu.com",
+          logicalApps: { ORDERS: 1234 },
+          tokenMap: { APP1234: "physical-1234-token" },
+        },
+      },
+    }));
+    jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const body = String(input).includes("/app/form/fields.json")
+        ? { properties: { "$id": { code: "$id", label: "Record ID", type: "__ID__" } } }
+        : { records: [] };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const out: string[] = [];
+    jest.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      out.push(String(chunk));
+      return true;
+    });
+    try {
+      const code = await runWithArgv([
+        "--config", configPath,
+        "--format", "json",
+        "-e", "EXPLAIN SELECT COUNT(*) FROM LAPP_ORDERS; SELECT 'APP900000000' AS x",
+      ]);
+      expect(code).toBe(0);
+      const envelope = JSON.parse(out.join("")) as { results: Array<{ rows: Array<Record<string, unknown>> }> };
+      expect(JSON.stringify(envelope.results[0])).toContain("LAPP_ORDERS@prod");
+      expect(JSON.stringify(envelope.results[0])).not.toContain("APP900000000");
+      expect(envelope.results[1].rows).toEqual([{ x: "APP900000000" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
