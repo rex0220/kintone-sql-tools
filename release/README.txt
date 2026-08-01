@@ -1,11 +1,18 @@
-ksql 配布パッケージ (v3.37.0)
+ksql 配布パッケージ (v3.37.1)
 
 release 成果物:
-- ksql-plugin-v3.37.0.zip
-- ksql-mcp.mcpb (manifest version 3.37.0)
-- ksql-mcp.js (MCP server version 3.37.0)
+- ksql-plugin-v3.37.1.zip
+- ksql-mcp.mcpb (manifest version 3.37.1)
+- ksql-mcp.js (MCP server version 3.37.1)
 
-追加と破壊的変更の移行案内 (B107) ★本リリースの要点:
+修正 (B109) ★本リリースの要点:
+- engine ライブラリの explainQuery と、runBatch に EXPLAIN 文を流した場合の計画本文で、
+  論理アプリが内部の仮想 ID のまま表示されていたのを、論理名の併記
+  (LAPP_案件管理 -> APP4149 の形) に直しました。
+- v3.37.0 で CLI / MCP は修正済みで、engine ライブラリの経路だけが残っていました。
+  公開型・挙動の変更はありません。
+
+追加と破壊的変更の移行案内 (B107) (v3.37.0):
 - 論理アプリ名 LAPP_<NAME> に日本語が使えるようになりました。
     SELECT * FROM LAPP_案件管理        (CLI / MCP は config の logicalApps で解決)
 - engine ライブラリ (runQuery / runBatch / explainQuery) に logicalApps オプションが
@@ -19,7 +26,7 @@ release 成果物:
 - 名前の規則: ASCII 英字または日本語で開始・数字と _ を継続可・最大 64 UTF-16 単位・
   NFC 正規化・大小の同一視は ASCII と全角英字のみ。従来の ASCII 名は不変です。
 
-修正 (B108):
+修正 (B108) (v3.37.0):
 - EXPLAIN を文として実行したときの論理アプリ表示が、内部の仮想 ID ではなく
   論理名の併記 (LAPP_名前@profile) になりました。--dry-run と MCP の ksql_explain は
   従来から正しく、挙動の変更はありません。
@@ -70,12 +77,16 @@ release 成果物:
     → NaN
     修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.37.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.37.1.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.37.0): B107 論理アプリ名の日本語対応と engine ライブラリの logicalApps／B108。
+本リリース (v3.37.1): B109 engine ライブラリの EXPLAIN 計画本文の論理名併記。
+
+- B109: 上の「修正」を参照してください。
+
+前リリース (v3.37.0): B107 論理アプリ名の日本語対応と engine ライブラリの logicalApps／B108。
 
 - B107: 上の「追加と破壊的変更の移行案内」を参照してください。
 - B108: EXPLAIN 文の論理アプリ表示の修正です。

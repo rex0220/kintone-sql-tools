@@ -53725,34 +53725,43 @@ function buildBatchEnvelope(batch, options = {}) {
 
 // src/node/sqlDiagnostics.ts
 init_define_KSQL_DOCS();
-function restoreSqlDiagnosticValue(value, bindings) {
+
+// src/core/sqlDiagnostics.ts
+init_define_KSQL_DOCS();
+function restoreSqlDiagnosticValue(value, bindings, options = {}) {
+  const displayMode = options.logicalAppDisplay ?? "profile";
   if (typeof value === "string") {
     const dmlTarget = value.match(/^(\s*target:\s*)APP(\d+) \((\d+)\)\s*$/);
     if (dmlTarget && dmlTarget[2] === dmlTarget[3]) {
       const binding = bindings.get(Number(dmlTarget[2]));
       if (binding) {
-        const target = binding.source === "logical" ? `LAPP_${binding.logicalName} -> APP${binding.appId}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
+        const target = binding.source === "logical" ? displayMode === "physical" ? `LAPP_${binding.logicalName} -> APP${binding.appId}` : `LAPP_${binding.logicalName} -> APP${binding.appId}@${binding.profile}` : displayMode === "physical" ? `APP${binding.appId}` : `APP${binding.appId}@${binding.profile}`;
         return `${dmlTarget[1]}${target}`;
       }
     }
     let restored = value;
     for (const binding of bindings.values()) {
       const internal = `APP${binding.mappedAppId}`;
-      const display = binding.source === "logical" ? `LAPP_${binding.logicalName}@${binding.profile}` : `APP${binding.appId}@${binding.profile}`;
+      const display = binding.source === "logical" ? displayMode === "physical" ? `LAPP_${binding.logicalName} -> APP${binding.appId}` : `LAPP_${binding.logicalName}@${binding.profile}` : displayMode === "physical" ? `APP${binding.appId}` : `APP${binding.appId}@${binding.profile}`;
       restored = restored.split(`${internal} (${binding.mappedAppId})`).join(display).split(internal).join(display);
     }
     return restored;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => restoreSqlDiagnosticValue(item, bindings));
+    return value.map((item) => restoreSqlDiagnosticValue(item, bindings, options));
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, restoreSqlDiagnosticValue(item, bindings)])
+      Object.entries(value).map(([key, item]) => [
+        key,
+        restoreSqlDiagnosticValue(item, bindings, options)
+      ])
     );
   }
   return value;
 }
+
+// src/node/sqlDiagnostics.ts
 function restoreSqlContextError(err, sourceSql, context) {
   if (!(err instanceof Error)) return err;
   let message = err.message;
@@ -57015,7 +57024,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.37.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.37.1" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
 

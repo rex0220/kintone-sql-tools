@@ -2,6 +2,13 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.37.1（2026-08-01）
+
+### 修正（B109 engine ライブラリの `EXPLAIN` 計画本文の論理名併記）
+
+- **engine ライブラリの `explainQuery` と、`runBatch` に `EXPLAIN` 文を流した場合の計画本文で、論理アプリが内部の仮想 ID（`APP900000000`）のまま表示されていたのを、論理名の併記（`LAPP_案件管理 -> APP4149` の形）へ復元するようにした。** v3.37.0（B108）で CLI / MCP は修正済みで、engine ライブラリの経路だけが残っていた。ブラウザには profile の概念が無いため `@profile` は付かない。CLI / MCP の表示（`@profile` 付き）は不変。
+- 復元は `EXPLAIN` の計画出力に限定され、データ行には適用されない。公開型・挙動の変更はない。
+
 ## v3.37.0（2026-08-01）
 
 ### 追加（B107 論理アプリ名の日本語対応と、engine ライブラリの `logicalApps`）
