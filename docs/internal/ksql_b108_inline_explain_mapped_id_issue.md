@@ -1,7 +1,7 @@
 # B108 インライン `EXPLAIN` 文が論理アプリの内部 mapped ID を表示する
 
 - 起票: 2026-08-01
-- ステータス: 📝 **評価（優先 低）**
+- ステータス: 📝 **調査完了（優先 低・修正 小〜中）**（2026-08-01 実測）＝**穴は CLI 2 経路＋MCP 2 経路。修正の設計注意 2 点を §5 に記録**
 - 出典: B107 の実機検証中に発見（2026-08-01）。**B107 の回帰ではない**（ASCII 名でも同じ＝v1.13.x 以来の既存ギャップ）
 - 関連: [B107](ksql_b107_lapp_engine_library_issue.md) / `src/node/sqlDiagnostics.ts`
 
@@ -39,12 +39,44 @@ ksql --dry-run -e "SELECT COUNT(*) FROM LAPP_検証アプリ"
 
 **修正はこの経路へ同じ復元を配線するだけ**に見える（要確認）。
 
-## 4. 未確認事項（着手時に）
+## 4. 調査結果（2026-08-01・実測）
 
-1. **MCP の `ksql_explain`** が復元されているか（`src/mcp/tools.ts` は
-   `restoreSqlDiagnosticValue` を import しており、配線済みの可能性が高い。実測して確定する）
-2. バッチ内インライン `EXPLAIN` の結果オブジェクト側（JSON 出力）も同様か
-3. 既存テストがこの表示を固定していないか
+### 4.1 面ごとの実態
+
+| 経路 | 復元 | 確認方法 |
+|---|---|---|
+| CLI `--dry-run` | **される**（`LAPP_検証アプリ@dev`） | 実測 |
+| CLI インライン `EXPLAIN` 文（単文） | **されない**（`APP900000000` 露出） | 実測 |
+| CLI バッチ内 `EXPLAIN` 文 | **されない** | コード（`executeBatch` 結果に restore 無し） |
+| MCP `ksql_explain`（専用ツール） | **される**（併記あり・mapped 露出なし） | **実測**（dist-mcp＋一時 config） |
+| MCP `ksql_query` に `EXPLAIN` 文 | **されない**（mapped 露出） | **実測** |
+| MCP `ksql_query` バッチ内 `EXPLAIN` | **されない** | **実測** |
+
+**穴は「文として書いた EXPLAIN」に共通**——CLI・MCP とも、専用経路（`--dry-run` /
+`ksql_explain`）は正しく、**汎用実行へ流れた EXPLAIN だけが素通り**している。
+
+### 4.2 既存テストの固定
+
+- **露出側を固定しているテストは無い**（修正に既存テストの書き換えは不要）
+- 逆に **復元済みであることを固定するテストは複数ある**
+  （`dml_guard.e2e` の stderr・`tools.test.ts:147` の EXPLAIN ツール出力など）＝**修正の方向と一致**
+
+### 4.3 修正の設計注意（着手時に効く 2 点）
+
+1. **EXPLAIN の実行結果は `result.type` が SELECT で返る**
+   （`tools.ts:672` がそれを前提にしている）。**結果型では判別できない**ので、
+   **文の型（AST の EXPLAIN）で復元対象を選ぶ**こと
+2. **restore を全結果へ無差別に掛けないこと**＝`restoreSqlDiagnosticValue` は
+   値の全体を文字列置換で歩く。**データ行（SELECT の結果）へ掛けると、
+   利用者データに偶然含まれる文字列まで書き換えうる**。**EXPLAIN の計画出力に限定**する
+
+### 4.4 修正の縫い目（3 箇所・小〜中）
+
+| | |
+|---|---|
+| CLI 単文 | `cli/index.ts:2387` の条件を「`dryRun` **または EXPLAIN 文**」へ |
+| CLI バッチ | `:2325` の `executeBatch` 結果のうち **EXPLAIN 文由来のものだけ** restore |
+| MCP `ksql_query` | 単文・バッチ envelope の **EXPLAIN 文由来 payload だけ** restore |
 
 ## 5. 優先度の根拠
 
