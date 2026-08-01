@@ -1,7 +1,7 @@
 # Pro への返信 — `LAPP_<NAME>` のブラウザ向け公開 API 対応（K-87）
 
 - 作成: 2026-08-01
-- ステータス: 📝 **送付前**
+- ステータス: ✅ **送付済み（2026-08-01）**。→ Pro は**日本語名を希望・破壊的変更を受け入れ**（[回答](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801b-送付版.md)）→ B107 として実装・**v3.37.0 でリリース済み**。正式回答は [v3.37.0 連絡](ksql_pro_report_v3370.md)
 - 受領: [Pro の依頼 2026-08-01](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801-送付版.md)
 - 関連: [B107](ksql_b107_lapp_engine_library_issue.md)
 
