@@ -1,7 +1,7 @@
 # B108 インライン `EXPLAIN` 文が論理アプリの内部 mapped ID を表示する
 
 - 起票: 2026-08-01
-- ステータス: 📝 **調査完了（優先 低・修正 小〜中）**（2026-08-01 実測）＝**穴は CLI 2 経路＋MCP 2 経路。修正の設計注意 2 点を §5 に記録**
+- ステータス: 📋 **仕様確定・実装待ち（v3.37.0 同梱・オーナー決定）**（2026-08-01）＝仕様は §6
 - 出典: B107 の実機検証中に発見（2026-08-01）。**B107 の回帰ではない**（ASCII 名でも同じ＝v1.13.x 以来の既存ギャップ）
 - 関連: [B107](ksql_b107_lapp_engine_library_issue.md) / `src/node/sqlDiagnostics.ts`
 
@@ -84,3 +84,41 @@ ksql --dry-run -e "SELECT COUNT(*) FROM LAPP_検証アプリ"
 `--dry-run` という正しく動く代替経路がある。
 **ただし B107 で日本語論理名の利用者が増えると露出しやすくなる**ため、
 次の小修正の機会に拾う価値がある。
+
+
+---
+
+## 6. 仕様（2026-08-01・v3.37.0 同梱）
+
+**「文として書いた EXPLAIN」の 4 経路すべてで、内部 mapped ID を復元する。**
+
+### 6.1 変更点（縫い目 3 箇所・§4.4 のとおり）
+
+| 箇所 | 変更 |
+|---|---|
+| CLI 単文（`cli/index.ts:2387` 付近） | 復元条件を「`dryRun` **または文が EXPLAIN**」へ |
+| CLI バッチ（`:2325` 付近） | `executeBatch` 結果のうち **EXPLAIN 文由来の結果だけ**復元 |
+| MCP `ksql_query` | 単文・バッチ envelope とも **EXPLAIN 文由来の payload だけ**復元 |
+
+### 6.2 設計制約（§4.3 の 2 点・必須）
+
+1. **判別は文の型（AST の EXPLAIN）で行う。**実行結果は `result.type` が SELECT で
+   返るため、結果型で判別しないこと（`tools.ts:672` の前提を壊さない）
+2. **復元は EXPLAIN の計画出力に限定する。**SELECT 等のデータ行へ
+   `restoreSqlDiagnosticValue` を掛けないこと——**利用者データに偶然
+   `APP900000000` という文字列が含まれていても書き換えない**ことをテストで固定する
+
+### 6.3 受入条件
+
+1. **CLI 単文 EXPLAIN**（通常実行・全出力形式）で mapped ID が復元され、論理名が表示される
+2. **CLI バッチ内 EXPLAIN** も同様。**同じバッチ内の SELECT データ行には復元を掛けない**
+3. **MCP `ksql_query` の単文・バッチ内 EXPLAIN** も同様
+4. **データ非破壊**＝`SELECT 'APP900000000' AS x` のようなデータがそのまま返る
+5. **既存の復元経路（`--dry-run`・`ksql_explain`・バッチ dry-run）は不変**
+6. **既存テスト全 green・snapshot 22 不変・語数予算 exact 不変**
+
+### 6.4 やらないこと
+
+- `restoreSqlDiagnosticValue` 本体の変更（呼び出し側の配線だけ）
+- EXPLAIN 以外の文への復元拡大
+- エラー経路（`restoreSqlContextError`）——既に配線済み
