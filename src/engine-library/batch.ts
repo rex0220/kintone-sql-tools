@@ -14,6 +14,7 @@ import { projectReadonlyClient } from "./readonlyClient";
 import {
   appendLogicalAppDiagnostics,
   prepareEngineLogicalApps,
+  restoreLogicalAppDiagnosticValue,
   type PreparedEngineSql,
 } from "./logicalApps";
 import { toQueryResult } from "./resultMapping";
@@ -109,7 +110,10 @@ export async function runBatch(
       }
       if (statement.status === "success" && statement.result?.type === "SELECT") {
         entry.resultIndex = results.length;
-        results.push(toQueryResult(statement.result, batchResult.metrics));
+        const result = toQueryResult(statement.result, batchResult.metrics);
+        results.push(parsedStatements[statement.index]?.type === "EXPLAIN"
+          ? restoreLogicalAppDiagnosticValue(result, logicalBindings)
+          : result);
       }
       return entry;
     });

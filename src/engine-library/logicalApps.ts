@@ -3,6 +3,7 @@ import {
   normalizeSqlAppProfiles,
   type AppBinding,
 } from "../core/logicalApps";
+import { restoreSqlDiagnosticValue } from "../core/sqlDiagnostics";
 import type { KsqlEngineError } from "./errors";
 import type { ReadonlyKintoneClient } from "./publicTypes";
 
@@ -68,4 +69,15 @@ export function appendLogicalAppDiagnostics(
     .filter((value, index, values) => values.indexOf(value) === index);
   error.message = `${error.message} [logical apps: ${mappings.join(", ")}]`;
   return error;
+}
+
+export function restoreLogicalAppDiagnosticValue<T>(
+  value: T,
+  bindings: readonly Extract<AppBinding, { source: "logical" }>[]
+): T {
+  if (bindings.length === 0) return value;
+  const bindingMap = new Map(bindings.map((binding) => [binding.mappedAppId, binding]));
+  return restoreSqlDiagnosticValue(value, bindingMap, {
+    logicalAppDisplay: "physical",
+  }) as T;
 }

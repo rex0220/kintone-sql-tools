@@ -13,6 +13,7 @@ import { projectReadonlyClient } from "./readonlyClient";
 import {
   appendLogicalAppDiagnostics,
   prepareEngineLogicalApps,
+  restoreLogicalAppDiagnosticValue,
   type PreparedEngineSql,
 } from "./logicalApps";
 import { mapMetrics, toQueryResult } from "./resultMapping";
@@ -99,7 +100,10 @@ export async function explainQuery(
         )
       );
       assertSelectResult(result);
-      const lines = result.rows.map((row) => String(row.plan ?? ""));
+      const lines = restoreLogicalAppDiagnosticValue(
+        result.rows.map((row) => String(row.plan ?? "")),
+        logicalBindings
+      );
       return {
         type: "explain",
         lines,
@@ -119,12 +123,12 @@ export async function explainQuery(
         invocation.executeOptions.cursorMaxActive
       )
     );
-    const lines = result.statements.flatMap((statement) => [
+    const lines = restoreLogicalAppDiagnosticValue(result.statements.flatMap((statement) => [
       ...(result.statementCount > 1
         ? [`[${statement.index + 1}] ${statement.type}`]
         : []),
       ...statement.plan,
-    ]);
+    ]), logicalBindings);
     return {
       type: "explain",
       lines,
