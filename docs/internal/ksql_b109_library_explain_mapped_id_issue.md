@@ -1,7 +1,7 @@
 # B109 engine ライブラリの `explainQuery` / `runBatch(EXPLAIN)` が内部 mapped ID を表示する
 
 - 起票: 2026-08-01
-- ステータス: ✅ **完了（v3.37.1 でリリース）**（2026-08-01・受入 1〜6 すべて実機確認済み。codex の停止 0 回）
+- ステータス: ✅ **完了（v3.37.1 でリリース）**（2026-08-01・受入 1〜6 すべて実機確認済み。codex の停止 0 回）。**Pro も実機の実行計画ダイアログで確認 OK・自前凡例を撤去**（[報告 2026-08-01d](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801d-送付版.md)）
 - 出典: [Pro の報告 2026-08-01c](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801c-送付版.md)（K-88・**急ぎではない**＝Pro は計画ダイアログに自前の凡例を添えて回避中）
 - 関連: [B108](ksql_b108_inline_explain_mapped_id_issue.md)（CLI / MCP の同種修正・v3.37.0）/ [B107](ksql_b107_lapp_spec.md)
 
