@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-08-01
-- 現在の最新リリース: **v3.37.0**（2026-08-01・npm publish 済み）。→ [リリース履歴](ksql_release_history.md)
+- 現在の最新リリース: **v3.37.1**（2026-08-01・npm publish 済み）。→ [リリース履歴](ksql_release_history.md)
 - 次回リリース計画: **未定（未リリースの変更なし）**。残る課題はいずれも優先 低 か実需待ち（§1）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
@@ -39,7 +39,6 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B109 | engine ライブラリの `explainQuery` / `runBatch(EXPLAIN)` が内部 mapped ID を表示する | 改善 | 📝 **評価（Pro 報告・B108 の残り）**（2026-08-01・K-88）。**Pro が v3.37.0 の `logicalApps` を組み込み、設定画面に実行計画ボタンを追加した実機確認で発見**。`explainQuery` の計画本文が `APP900000000 AS APP900000000 (900000000)` と内部仮想 ID のみで、どの論理名か判別できない（**`runBatch` の EXPLAIN 文も同じ・両方こちらで再現済み**）。**原因＝B108 の仕様の範囲落ち**＝§6.1 の縫い目が CLI 2＋MCP 1 の 3 箇所だけで engine ライブラリ面が挙がっていなかった（**仕様を書いた Claude の見落とし。codex は仕様どおり**）。B107 の併記はエラー整形には配線済みで、**EXPLAIN の計画本文だけが残った**。**方針＝B108 と同じ規則を 2 経路へ配線**〔`restoreSqlDiagnosticValue` は純粋な文字列処理なので **B107 のスキャナと同じく core へ移して node は re-export**（ゼロ依存維持）／表示はライブラリの既存エラー併記と揃え `@profile` 無しの `LAPP_名前 -> APPnnnn` 相当／文の型で判別・データ行に掛けない（B108 §6.2 引き継ぎ）〕。**優先 中**＝B108 は低だったが、こちらは **Pro の実利用機能（K-88）が直接踏んでいる**。急ぎではない（Pro は自前凡例で回避中・ただし論理アプリ複数では不完全）。修正は小。 | 改善 | 中 | [B109](internal/ksql_b109_library_explain_mapped_id_issue.md) |
 | B100 | 完全入力エラーの語順 — 対処が最後の 5 文目にあり、小さい表示領域で読めない | 改善 | 📝 **評価（優先 低）**（2026-07-29）＝[Pro の報告 v3.34.0 §3](../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340.md)。**Pro は「現状のままで結構です」と明記**しているが、**測ると射程が B98 より広かった**ため起票。**【実測】完全入力を理由に止まる 9 つの形すべてが 5 文で、対処は 5 文目**（`AGGREGATE` 137 字・対処 101 字目 〜 `OUTER_JOIN_NON_PRESERVED` 163 字・対処 127 字目）。**Pro のペインは高さ 3 行程度で先頭 1〜2 文しか見えず、その範囲に対処が入らない**。**内部識別子（`complete input reason: AGGREGATE` 等）の露出も 9 形すべて**で、**B98 で始まったものではない**。**B98 が最長なのは `OUTER_JOIN_NON_PRESERVED` が最長の識別子でアプリ番号も付くため**。文面は 3 箇所（`completeInputErrorPrefix`／`throwCompleteInputError`／`FetchAllLimitError` 本文）の連結で、**語順を変えると `message` の先頭が全形で変わる**。**案 A 語順入れ替え（④⑤①②③）／案 B 識別子だけ末尾（効果が小さい）／案 C 何もしない／案 D `FetchAllLimitError` へ `reasons`・`maxRecords`・`appIds` を任意プロパティで純加法追加（[B95](internal/ksql_b95_truncation_visibility_issue.md) と同じ形）**。**見立て＝案 D + 案 A が素直だが優先度は低い**〔誤った結果を返す問題ではない（止まるべきときに止まっている）／Pro は対応不要と明言／`FetchAllLimitError` という型で判定でき表示は利用者側で吸収できる〕。**次に開くとき必要なもの＝`message` の先頭を照合しているテスト・smoke の実数**（案 A の費用がこれで決まる）。（2026-07-29・Pro の報告から起票） | 改善 | 低 | [B100](internal/ksql_b100_failclosed_message_order_issue.md) |
 | B61 | AI 行動検証シナリオセットの運用化（B60 継続） | 改善 | 📝 **評価・継続運用**。機械 guard は「カタログが正しい」まで、「AI が正しく読めるか」は行動検証でしか分からない非対称への対策（文型×依頼のシナリオ台帳）。**残＝スクリプト半自動化・Desktop 面・失敗観測→台帳追加ループの運用化**（小粒・継続タスク） | 機能 | 中 | [B61 issue](internal/ksql_b61_ai_behavior_scenario_set_issue.md) |
 | B53 | `WITH RECURSIVE` / `CYCLE` 句（再帰 CTE） | 改善 | 📝 **方向確定（2026-07-23）＝B40 と二者択一で B53 採用**（BOM 多段展開が B53 Phase1 で完結・B40 は可変長 Phase2 が別途必要）。SQL:1999 `WITH RECURSIVE`＋SQL:2016 `CYCLE`。単一再帰 CTE＋必須境界＋CYCLE 最小形・戦略 B（アプリ1回実体化＋メモリ反復）。**仕様 R2・Claude レビュー済＝実装着手可能水準で凍結・実需待ちで棚上げ**（R1→codex→レビュー→R2 で指摘4件反映済み・§13・§5.3 規模目安あり）。**実装着手は BOM/循環の具体ユースケース確認後**（見積り 18〜29 人日の大型投資・B40 と同じく資産化） | 機能 | 中 | [B53 spec R2](internal/ksql_b53_recursive_cte_cycle_phase1_spec.md) / [eval](internal/ksql_b53_recursive_cte_cycle_evaluation.md) |
@@ -57,11 +56,11 @@
 
 | バージョン | 内容 |
 |---|---|
+| **v3.37.1** | B109 engine ライブラリの `explainQuery` / `runBatch(EXPLAIN)` の計画本文に論理名を併記（B108 の残り・表示のみ） |
 | **v3.37.0** | B107 論理アプリ名の日本語対応＋engine ライブラリの `logicalApps`（**破壊的変更 1 件・移行案内あり**）／B108 EXPLAIN 文の表示修正 |
 | **v3.36.0** | B105 `UNION` の枝と定数列の `COUNT(*)` を単発 GET に／B103 行末の LF 固定／文書 3 件 |
 | **v3.35.0** | B102 `PRIMARY_ORGANIZATION()` のサポート（DML は fail-closed・SELECT は kintone の挙動へ素通し） |
 | **v3.34.1** | B101 MCP の `instructions` 1 行目に版数（常駐プロセスの版ずれ検証事故の再発防止） |
-| **v3.34.0** | B98 外部結合の保持されない側の打ち切りを fail-closed 化／B99 MCP SDK v2 へ移行（**MCP のみ Node 20 必須**） |
 
 リリース時は**履歴側へ1行追記**し、本書 §1 から該当行を落とす。ここの直近5版も合わせて更新する。
 
