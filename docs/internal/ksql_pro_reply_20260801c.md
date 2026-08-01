@@ -1,7 +1,7 @@
 # Pro への返信 — `explainQuery` の計画本文（B109 / K-88）
 
 - 作成: 2026-08-01
-- ステータス: 📝 **送付前**（v3.37.1 リリース後に送付）
+- ステータス: ✅ **送付済み（2026-08-01）**
 - 受領: [Pro の報告 2026-08-01c](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260801c-送付版.md)
 - 関連: [B109](ksql_b109_library_explain_mapped_id_issue.md)
 
