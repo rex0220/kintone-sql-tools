@@ -1,11 +1,30 @@
-ksql 配布パッケージ (v3.36.0)
+ksql 配布パッケージ (v3.37.0)
 
 release 成果物:
-- ksql-plugin-v3.36.0.zip
-- ksql-mcp.mcpb (manifest version 3.36.0)
-- ksql-mcp.js (MCP server version 3.36.0)
+- ksql-plugin-v3.37.0.zip
+- ksql-mcp.mcpb (manifest version 3.37.0)
+- ksql-mcp.js (MCP server version 3.37.0)
 
-修正 (B105) ★本リリースの要点:
+追加と破壊的変更の移行案内 (B107) ★本リリースの要点:
+- 論理アプリ名 LAPP_<NAME> に日本語が使えるようになりました。
+    SELECT * FROM LAPP_案件管理        (CLI / MCP は config の logicalApps で解決)
+- engine ライブラリ (runQuery / runBatch / explainQuery) に logicalApps オプションが
+  加わりました。SQL 中の LAPP_<NAME> を呼び出しごとのマッピングで解決します。
+    runBatch(sql, { client, logicalApps: { 案件管理: 4149 } })
+  未定義名は kintone API を呼ばずに名前入りエラーで停止します。
+- 破壊的変更: LAPP_ に日本語が続く識別子は論理アプリ参照として予約されます。
+  その名前のフィールドを SQL で使っている場合はエラーになります (fail-closed)。
+  移行方法: バッククォートで退避してください。
+    誤 WHERE LAPP_案件 = 'x'   →   正 WHERE `LAPP_案件` = 'x'
+- 名前の規則: ASCII 英字または日本語で開始・数字と _ を継続可・最大 64 UTF-16 単位・
+  NFC 正規化・大小の同一視は ASCII と全角英字のみ。従来の ASCII 名は不変です。
+
+修正 (B108):
+- EXPLAIN を文として実行したときの論理アプリ表示が、内部の仮想 ID ではなく
+  論理名の併記 (LAPP_名前@profile) になりました。--dry-run と MCP の ksql_explain は
+  従来から正しく、挙動の変更はありません。
+
+修正 (B105) (v3.36.0):
 - UNION / UNION ALL の各枝の SELECT COUNT(*) が、単体と同じく totalCount の
   単発 GET になりました。'ラベル' AS 列名 のようなリテラル列との併用も対象です。
     SELECT '顧客管理' AS アプリ, COUNT(*) AS 件数 FROM APP100
@@ -38,36 +57,6 @@ release 成果物:
   古い会話では「古い版」が見えるだけなので、誤って新しいと思い込むことはありません。
 - 挙動・公開型・ツールの面はいずれも変わりません。
 
-実行環境の要件の変更 (B99) (v3.34.0):
-- MCP サーバーの実行に Node.js 20 以上が必要になりました。
-  プロトコル改訂 2026-07-28 に対応した MCP SDK が Node.js 20 以上を要求するためです。
-- 影響するのは MCP サーバーの面だけです。
-    CLI            従来どおり Node.js 18 以上
-    engine ライブラリ 変更なし
-    プラグイン        変更なし (ブラウザで動作)
-- MCPB 版は Claude Desktop が提供する Node.js 実行環境で起動するため、
-  利用者が Node.js を別途インストールする必要は通常ありません。
-  Claude Desktop 側の実行環境が Node.js 20 以上である必要があります。
-- 公開型・SQL の挙動・ツールの面はいずれも変わりません。
-  13 のツールと 4 のリソースは、名前も順序もスキーマも従来と同一です。
-- tools/list が返す inputSchema の JSON Schema 方言のみ、
-  draft-07 から 2020-12 へ変わります。方言 URI ($schema) だけの違いで、
-  プロパティ・必須項目・制約は同一です。方言 URI を見て分岐している
-  MCP クライアントがある場合のみ影響します。
-
-挙動の変更の移行案内 (B98) (v3.34.0):
-- LEFT JOIN / RIGHT JOIN の保持されない側が取得上限に達した場合、
-  onLimit=truncate を選んでいてもエラーになります。従来は部分結果を返していました。
-- 結合相手が打ち切られると、上限の外へ落ちた一致行と、本当に相手がいない行を
-  結果から区別できません。実測では APP4226 LEFT JOIN APP4225 を
-  maxRecords=20 / truncate で実行すると、真の値が b01 である B の行が空になり、
-  本当に相手がいない C の行とバイト単位で同一に見えました。
-- 対象外 (従来どおり):
-    保持側だけが打ち切られた場合  行が減るだけなので警告付きで返します
-    INNER JOIN                   変更ありません
-- 移行方法: WHERE で候補を絞るか、maxRecords を引き上げてください。
-  onLimit=error を選んでいる場合、挙動は変わりません。
-
 破壊的変更の移行案内 (B89 / B90) (v3.31.0):
 - engine ライブラリの runBatch と explainQuery が EXPLAIN UPDATE / DELETE / INSERT /
   UPSERT を READ_ONLY_VIOLATION で拒否します。read-only ライブラリで DML の計画を出す
@@ -81,12 +70,17 @@ release 成果物:
     → NaN
     修正後: 同じ SQL が variable @phase is not numeric ... で停止
 
-1. ksql-plugin-v3.36.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.37.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.36.0): B105 UNION の枝の COUNT(*) を単発 GET に。
+本リリース (v3.37.0): B107 論理アプリ名の日本語対応と engine ライブラリの logicalApps／B108。
+
+- B107: 上の「追加と破壊的変更の移行案内」を参照してください。
+- B108: EXPLAIN 文の論理アプリ表示の修正です。
+
+前リリース (v3.36.0): B105 UNION の枝の COUNT(*) を単発 GET に。
 
 - B105: 上の「修正」を参照してください。
 
