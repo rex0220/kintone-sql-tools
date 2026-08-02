@@ -461,13 +461,44 @@ export class Parser {
   private parseDeclareVariable(): DeclareVariableStatement {
     this.advance(); // DECLARE（ソフトキーワード）
     const variable = this.expect(TokenKind.VARIABLE, "DECLARE の後には変数名（例: @name）が必要です");
+    const relativeDate = this.peek().kind === TokenKind.IDENT
+      && this.peek().value.toUpperCase() === "RELATIVE_DATE";
+    if (relativeDate) this.advance(); // RELATIVE_DATE（ソフトキーワード）
     this.expect(TokenKind.EQ);
+    if (relativeDate) {
+      return {
+        type: "DECLARE_VARIABLE",
+        name: variable.value.slice(1).toLowerCase(),
+        annotation: "RELATIVE_DATE",
+        default: this.parseRelativeDateVariableToken(),
+      };
+    }
     const expr = this.parseScalarExpr("DECLARE", false);
     if (expr.type === "SCALAR_SUBQUERY") {
       // allowScalarSubquery=false で到達しないが、型の絞り込みを明示する。
       throw new ParseError("DECLARE の既定値にスカラーサブクエリは使用できません", this.peek());
     }
     return { type: "DECLARE_VARIABLE", name: variable.value.slice(1).toLowerCase(), default: expr };
+  }
+
+  /** RELATIVE_DATE 宣言専用。WHERE と同じ関数パーサーを使い、日付系14個だけを許可する。 */
+  private parseRelativeDateVariableToken(): LegacyKintoneFunction | RelativeDateFunction {
+    const tok = this.peek();
+    const contextualFunction = PARSER_CONTEXTUAL_FUNCTION_TOKEN_MAP[tok.kind];
+    if (contextualFunction === "TODAY" || contextualFunction === "NOW") {
+      return this.parseSqlValue() as LegacyKintoneFunction;
+    }
+    if (
+      tok.kind === TokenKind.IDENT
+      && this.peekAt(1).kind === TokenKind.LPAREN
+      && isRelativeDateFunctionName(tok.value.toUpperCase())
+    ) {
+      return this.parseRelativeDateFunction();
+    }
+    throw new ParseError(
+      "RELATIVE_DATE の既定値にはサポート対象の相対日付関数トークンが必要です",
+      tok
+    );
   }
 
   /** SET / DECLARE RHS 専用。既存式パーサーで構文を読み、フィールド参照を明示的に拒否する。 */

@@ -167,6 +167,8 @@ const PLAN_FACTS = [
 
 function planFacts(text: string): string[] {
   return normalizeProfile(text)
+    // Bound surfaces alone drop this redundant same-app suffix; normalize it like @profile.
+    .replace(/\bAPP(\d+)(\s+AS\s+\S+)\s+\(\1\)/g, "APP$1$2")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => PLAN_FACTS.some((label) => line.startsWith(label)));

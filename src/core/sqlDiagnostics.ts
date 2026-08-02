@@ -32,9 +32,14 @@ export function restoreSqlDiagnosticValue(
         return `${dmlTarget[1]}${target}`;
       }
     }
-    let restored = value;
-    for (const binding of bindings.values()) {
-      const internal = `APP${binding.mappedAppId}`;
+    if (bindings.size === 0) return value;
+    const mappedIds = [...bindings.keys()].sort((a, b) => String(b).length - String(a).length);
+    const internalApp = new RegExp(
+      `APP(${mappedIds.join("|")})(?!\\d)(\\s+AS\\s+[^\\s()]+)?(?:\\s+\\(\\1\\))?`,
+      "g"
+    );
+    return value.replace(internalApp, (_match, mappedIdText: string, alias: string | undefined) => {
+      const binding = bindings.get(Number(mappedIdText))!;
       const display = binding.source === "logical"
         ? displayMode === "physical"
           ? `LAPP_${binding.logicalName} -> APP${binding.appId}`
@@ -42,11 +47,8 @@ export function restoreSqlDiagnosticValue(
         : displayMode === "physical"
           ? `APP${binding.appId}`
           : `APP${binding.appId}@${binding.profile}`;
-      restored = restored
-        .split(`${internal} (${binding.mappedAppId})`).join(display)
-        .split(internal).join(display);
-    }
-    return restored;
+      return `${display}${alias ?? ""}`;
+    });
   }
   if (Array.isArray(value)) {
     return value.map((item) => restoreSqlDiagnosticValue(item, bindings, options));

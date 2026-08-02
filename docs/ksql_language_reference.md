@@ -884,6 +884,11 @@ WHERE 担当者 != '山田'
 
 > 右辺の値にはバッチ変数 `@名前` も指定できます（→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)）。
 
+> **日時フィールドの境界:** `DATETIME` / 作成日時 / 更新日時を時刻まで含めて区切る場合は、
+> `2026-07-14T23:59:59Z` のような RFC3339 文字列を指定してください。
+> 日付だけの `'2026-07-14'` はその日の 0:00 の境界として扱われるため、`<=` では同日の
+> 0:00 より後のレコードを含みません。
+
 ### 相対日付関数
 
 `YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。単一 APP では、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）で使えます。INNER JOIN では、全 source が alias 付き物理 APP のとき、**単一 alias の whole-WHERE exact（第5-W）**または**AND スパイン上の exact 関数 leaf を alias ごとに採用する形（第5-L）**で使えます。複数 alias へ分散した関数 leaf も各 APP へ押し下げ、関数を含まない残余だけを client 評価します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力がサブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルの形は fail-closed です。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
@@ -3377,6 +3382,37 @@ SELECT * FROM APP100 WHERE 登録日 >= @since;
 - キーは `@` なし・大文字小文字を区別しない。未宣言キー、重複、不正名は API 呼び出しや DML より前にエラー。`SET` で定義した名前は注入対象にならない。
 - 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術。サブクエリ、別変数、`NULL`、`LOGINUSER()`、`PRIMARY_ORGANIZATION()` は不可。採用値は文字列として束縛する。
 - `DECLARE` と使用文を含む2文以上のバッチが必要。値は EXPLAIN、結果メタデータに表示しない。CLI `--var` はプロセス一覧やシェル履歴に残り得るため秘密情報には使わない。
+
+`RELATIVE_DATE` 注釈を付けると、文字列ではなく kintone の相対日付関数トークンを安全に束縛できます。
+
+```sql
+DECLARE @period RELATIVE_DATE = THIS_MONTH();
+SELECT * FROM APP100 WHERE 受注予定日 = @period;
+-- CLI: --var period="FROM_TODAY(-1, MONTHS)"
+-- MCP / library: variables: { "period": "THIS_YEAR()" }
+```
+
+- `RELATIVE_DATE` は変数名直後・`=` の前だけで解釈する soft keyword です。既定値は必須です。
+- 受け付けるのは日付系14個です: `TODAY()` / `NOW()` / `YESTERDAY()` / `TOMORROW()` /
+  `FROM_TODAY(n, DAYS|WEEKS|MONTHS|YEARS)` / `THIS_WEEK([曜日])` / `LAST_WEEK([曜日])` /
+  `NEXT_WEEK([曜日])` / `THIS_MONTH([日|LAST])` / `LAST_MONTH([日|LAST])` /
+  `NEXT_MONTH([日|LAST])` / `THIS_YEAR()` / `LAST_YEAR()` / `NEXT_YEAR()`。
+  引数は通常の WHERE 関数と同じ規則で検証し、トークンの前後に余分な字句は置けません。
+  `LOGINUSER()` / `PRIMARY_ORGANIZATION()`、日付文字列、任意の式は使用できません。
+- 使用位置は **WHERE の比較右辺**と **BETWEEN の境界**だけです。HAVING / CHECK / CASE・IF /
+  KLIKE / IN / SELECT 定数列 / UPDATE SET / ASSERT / 算術には置けません。
+- `RELATIVE_DATE` 変数は DML（`UPDATE` / `DELETE` / `INSERT ... SELECT` / `UPSERT`）と
+  `VALIDATE` では fail-closed です。違反・不正な注入値は変数名を含むエラーで、API 呼び出し前に停止します。
+  SQL に直接書いた相対日付関数の既存 DML 規則は変わりません。
+- 注釈なし `DECLARE` は従来どおり、注入値を常に文字列として束縛します。
+
+`TODAY()` は書く位置で評価主体が異なります。
+
+| 書き方 | 束縛・押し下げ | 時刻・TZ の基準 |
+|---|---|---|
+| `DECLARE @p = TODAY(); ... WHERE 日付 = @p` | `"YYYY-MM-DD"` の文字列リテラル | kSQL 実行環境のホスト時計・ホスト TZ |
+| `WHERE 日付 = TODAY()` | `TODAY()` のまま server へ押し下げ | kintone サーバー・利用者設定 |
+| `DECLARE @p RELATIVE_DATE = TODAY(); ... WHERE 日付 = @p` | `TODAY()` のまま server へ押し下げ | kintone サーバー・利用者設定 |
 
 #### SELECT 定数列と配列 IN
 

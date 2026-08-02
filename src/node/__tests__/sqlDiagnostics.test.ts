@@ -82,3 +82,59 @@ test("物理参照の DML target 行は APP<id>@profile（矢印なし）", () =
 
   expect(restored).toEqual({ plan: ["  target:        APP89@prod"] });
 });
+
+test("EXPLAIN の app・JOIN 行は別名を保ち、括弧内 mapped ID を1パスで除く", () => {
+  const resolution = createAppResolutionContext(validateKsqlConfig({
+    profiles: { prod: { logicalApps: { ORDERS: 1234, CUSTOMERS: 5678 } } },
+  }), "prod");
+  const result = normalizeSqlAppProfiles(
+    "SELECT * FROM LAPP_ORDERS AS o JOIN LAPP_CUSTOMERS AS c ON o.id = c.id",
+    "prod",
+    resolution
+  );
+  const [ordersId, customersId] = [...result.appBindingByMappedApp.keys()];
+  const restored = restoreSqlDiagnosticValue({
+    plan: [
+      `  app:           APP${ordersId} AS o (${ordersId})`,
+      `  JOIN:          APP${customersId} AS c (${customersId})`,
+    ],
+  }, result.appBindingByMappedApp);
+
+  expect(restored).toEqual({
+    plan: [
+      "  app:           LAPP_ORDERS@prod AS o",
+      "  JOIN:          LAPP_CUSTOMERS@prod AS c",
+    ],
+  });
+  expect(JSON.stringify(restored)).not.toMatch(/APP9000000\d+/);
+});
+
+test("物理 EXPLAIN の profile は二重化せず、別名形の括弧内 ID を除く", () => {
+  const resolution = createAppResolutionContext(validateKsqlConfig({
+    profiles: { prod: { allowPhysicalAppRefs: true } },
+  }), "prod");
+  const result = normalizeSqlAppProfiles(
+    "SELECT * FROM APP89@prod AS a JOIN APP90@prod AS b ON a.id = b.id",
+    "prod",
+    resolution
+  );
+  const restored = restoreSqlDiagnosticValue({
+    plan: ["  app:           APP89 (89)", "  JOIN:          APP90 AS b (90)"],
+  }, result.appBindingByMappedApp);
+
+  expect(restored).toEqual({
+    plan: ["  app:           APP89@prod", "  JOIN:          APP90@prod AS b"],
+  });
+});
+
+test("library physical 表示も別名を保ち、括弧内 mapped ID を除く", () => {
+  const { result } = normalized("SELECT * FROM LAPP_ORDERS@prod AS o");
+  const mappedId = [...result.appBindingByMappedApp.keys()][0];
+  const restored = restoreSqlDiagnosticValue(
+    { plan: [`  app:           APP${mappedId} AS o (${mappedId})`] },
+    result.appBindingByMappedApp,
+    { logicalAppDisplay: "physical" }
+  );
+
+  expect(restored).toEqual({ plan: ["  app:           LAPP_ORDERS -> APP1234 AS o"] });
+});

@@ -276,10 +276,14 @@ ArgumentError: getFields returned unknown fieldType "__ID__" for field "$id".
 | `onLimitReached` | `runQuery` / `runBatch` | `"error"` または `"truncate"`。完全入力が必要な query は truncate せず fail-closed |
 | `fetchParallel` | 3 API | 正の safe integer。並列取得数 |
 | `cursorMaxActive` | 3 API | 1〜5 の整数。query 内 Cursor 上限 |
-| `variables` | `runBatch` | `DECLARE` 変数への文字列注入。キーは `@` なし・大文字小文字を区別しない。`SET` 変数へは注入不可 |
+| `variables` | `runBatch` | `DECLARE` 変数への文字列注入。キーは `@` なし・大文字小文字を区別しない。`SET` 変数へは注入不可。`DECLARE @x RELATIVE_DATE` には `THIS_MONTH()` / `FROM_TODAY(-1, MONTHS)` 等の日付系関数トークンを渡せる |
 | `tempTableMaxRows` | `runBatch` | 一時テーブル1表の実体化上限。既定10,000。超過は `onLimitReached: "truncate"` でも error |
 
 `createReadonlyKintoneClient()` 自体の option は `cursorMaxActive`（1〜5）のみです。
+
+`RELATIVE_DATE` 変数は WHERE の比較右辺・BETWEEN 境界だけで使用でき、通常の相対日付関数と
+同じ exact pushdown 判定を受けます。不正トークン・配置違反は read API の前に拒否されます。
+library は read-only 境界を持つため DML へは到達しません。注釈なし `DECLARE` の文字列束縛は不変です。
 
 ## read-only 境界
 

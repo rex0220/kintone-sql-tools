@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -1460,6 +1460,7 @@ export interface BatchExecuteResult {
 type VarValue =
   | { type: "string"; value: string; placeholder?: true }
   | { type: "number"; value: number; raw?: string }
+  | { type: "relative-date"; value: KintoneFunction }
   | { type: "array"; elements: Array<{ type: "string"; value: string }> };
 
 /** バッチタイムアウト。message 接頭辞で code = TimeoutError として報告される */
@@ -1495,6 +1496,7 @@ export async function executeBatch(
   }
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
   const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
+  const relativeDateVariables = prepareRelativeDateVariables(statements, injectedVariables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
 
   if (options.continueOnError && analysis.containsDml) {
@@ -1590,7 +1592,16 @@ export async function executeBatch(
         );
         const cursorScope = wrapClientWithCursorScope(statementClient);
         const outcome = await runWithDeadline(
-          executeBatchStatement(statements[i], info, cursorScope.client, stmtOptions, cacheContext, tempTables, variables),
+          executeBatchStatement(
+            statements[i],
+            info,
+            cursorScope.client,
+            stmtOptions,
+            cacheContext,
+            tempTables,
+            variables,
+            relativeDateVariables
+          ),
           remaining,
           cursorScope.closeActive
         );
@@ -1651,7 +1662,8 @@ async function executeBatchStatement(
   options: BatchExecuteOptions,
   cacheContext: string,
   tempTables: Map<string, MaterializedTable>,
-  variables: Map<string, VarValue>
+  variables: Map<string, VarValue>,
+  relativeDateVariables: ReadonlyMap<string, KintoneFunction>
 ): Promise<Partial<BatchStatementResult>> {
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
@@ -1706,11 +1718,18 @@ async function executeBatchStatement(
   }
 
   if (stmt.type === "DECLARE_VARIABLE") {
+    if (stmt.annotation === "RELATIVE_DATE") {
+      variables.set(stmt.name, {
+        type: "relative-date",
+        value: relativeDateVariables.get(stmt.name)!,
+      });
+      return {};
+    }
     const injected = options.variables ?? {};
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
       variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
     } else {
-      const value = evaluateScalarExpr(stmt.default);
+      const value = evaluateScalarExpr(stmt.default as Exclude<ScalarExpr, ScalarSubquery>);
       variables.set(stmt.name, {
         type: "string",
         value: value.type === "number" ? (value.raw ?? String(value.value)) : value.value,
@@ -1985,7 +2004,46 @@ function parseSqlBatch(sql: string, enableImport = false): Statement[] {
   return new Parser(tokens, { import: enableImport }).parseStatements();
 }
 
-function evaluateScalarExpr(expr: Exclude<ScalarExpr, ScalarSubquery>): Exclude<VarValue, { type: "array" }> {
+function parseRelativeDateVariableValue(name: string, value: string): KintoneFunction {
+  try {
+    const statements = parseSqlBatch(`DECLARE @__b111 RELATIVE_DATE = ${value}`);
+    const declaration = statements[0];
+    if (
+      statements.length !== 1
+      || declaration?.type !== "DECLARE_VARIABLE"
+      || declaration.annotation !== "RELATIVE_DATE"
+    ) {
+      throw new Error("token was not consumed as one RELATIVE_DATE declaration");
+    }
+    return declaration.default as KintoneFunction;
+  } catch (error) {
+    const detail = error instanceof Error ? ` ${error.message}` : "";
+    throw new Error(
+      `ArgumentError: RELATIVE_DATE variable @${name} requires one supported relative-date function token.${detail}`
+    );
+  }
+}
+
+function prepareRelativeDateVariables(
+  statements: readonly Statement[],
+  injectedVariables: Readonly<Record<string, string>>
+): ReadonlyMap<string, KintoneFunction> {
+  const prepared = new Map<string, KintoneFunction>();
+  for (const stmt of statements) {
+    if (stmt.type !== "DECLARE_VARIABLE" || stmt.annotation !== "RELATIVE_DATE") continue;
+    prepared.set(
+      stmt.name,
+      Object.prototype.hasOwnProperty.call(injectedVariables, stmt.name)
+        ? parseRelativeDateVariableValue(stmt.name, injectedVariables[stmt.name])
+        : stmt.default as KintoneFunction
+    );
+  }
+  return prepared;
+}
+
+function evaluateScalarExpr(
+  expr: Exclude<ScalarExpr, ScalarSubquery>
+): Exclude<VarValue, { type: "array" } | { type: "relative-date" }> {
   switch (expr.type) {
     case "STRING":
       return { type: "string", value: expr.value };
@@ -2028,7 +2086,12 @@ function resolveBatchVariableReferencesInternal<T>(
       if (value.type === "array") {
         throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
       }
-      if (numericArithmeticOperand && value.type !== "number" && value.placeholder !== true) {
+      if (value.type === "relative-date") return value.value as T;
+      if (
+        numericArithmeticOperand
+        && value.type !== "number"
+        && !(value.type === "string" && value.placeholder === true)
+      ) {
         throw new Error(
           `ArgumentError: variable @${obj["name"]} is not numeric and cannot be used in arithmetic.`
         );
@@ -2043,6 +2106,9 @@ function resolveBatchVariableReferencesInternal<T>(
       const value = variables.get(obj["name"]);
       if (value === undefined) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);
+      if (value.type === "relative-date") {
+        throw new Error(`InternalError: RELATIVE_DATE variable @${obj["name"]} reached a SELECT column.`);
+      }
       const aliasDisplay = typeof obj["aliasDisplay"] === "string"
         ? { aliasDisplay: obj["aliasDisplay"] }
         : {};
@@ -9928,7 +9994,8 @@ export async function buildBatchExplainPlans(
   try {
     const statements = parseSqlBatch(sql, enableImport);
     const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
-    validateDeclaredBatchVariables(statements, injectedVariables);
+    const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
+    const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
     const variables = new Map<string, VarValue>();
     const plans: BatchStatementPlan[] = [];
     for (let i = 0; i < statements.length; i++) {
@@ -9971,7 +10038,9 @@ export async function buildBatchExplainPlans(
       });
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
-        variables.set(stmt.name, stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
+        variables.set(stmt.name, stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE"
+          ? { type: "relative-date", value: relativeDateVariables.get(stmt.name)! }
+          : stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
           ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
           : { type: "string", value: `@${stmt.name}`, placeholder: true });
       }
@@ -10022,6 +10091,12 @@ function buildBatchStatementPlan(
     ];
   }
   if (stmt.type === "DECLARE_VARIABLE") {
+    if (stmt.annotation === "RELATIVE_DATE") {
+      return [
+        `DECLARE @${stmt.name} RELATIVE_DATE = <relative-date token>`,
+        "  value:         外部注入があれば採用、なければ既定トークンを使用（値は非公開）",
+      ];
+    }
     return [
       `DECLARE @${stmt.name} = <default scalar expression>`,
       "  value:         外部注入があれば採用、なければ既定値を実行時に1回評価（値は非公開）",

@@ -121,8 +121,10 @@ export interface DeclareVariableStatement {
   type: "DECLARE_VARIABLE";
   /** @ を除き、小文字へ正規化した名前 */
   name: string;
+  /** 明示された相対日付トークン型。注釈なし DECLARE では存在しない。 */
+  annotation?: "RELATIVE_DATE";
   /** 外部注入が無い場合だけ評価する既定値式 */
-  default: Exclude<ScalarExpr, ScalarSubquery>;
+  default: Exclude<ScalarExpr, ScalarSubquery> | RelativeDateFunction;
 }
 
 /** SET RHS 専用。ScalarArithExpr はパーサーがフィールド参照を拒否する。 */

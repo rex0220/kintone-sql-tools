@@ -101,7 +101,7 @@ export interface BatchVariableAnalysis {
 
 export type VariableDefinitionKind = "scalar" | "array";
 export type VariableUseKind = "scalar" | "select-column" | "array-in-list";
-type VariableUse = { name: string; kind: VariableUseKind };
+type VariableUse = { name: string; kind: VariableUseKind; relativeDateAllowed: boolean };
 
 /** バッチ全体の静的解析結果 */
 export interface BatchAnalysis {
@@ -149,9 +149,11 @@ function collectRefs(node: unknown, tempRefs: Set<string>, appIds: Set<number>):
   }
 }
 
-function collectVariableRefs(node: unknown, refs: VariableUse[]): void {
+const RELATIVE_DATE_COMPARISON_OPS = new Set(["=", "!=", "<>", ">", "<", ">=", "<="]);
+
+function collectVariableRefs(node: unknown, refs: VariableUse[], inWhere = false): void {
   if (Array.isArray(node)) {
-    for (const v of node) collectVariableRefs(v, refs);
+    for (const v of node) collectVariableRefs(v, refs, inWhere);
     return;
   }
   if (node !== null && typeof node === "object") {
@@ -162,11 +164,43 @@ function collectVariableRefs(node: unknown, refs: VariableUse[]): void {
       refs.push({
         name: obj["name"],
         kind: type === "VARIABLE" ? "scalar" : type === "VARIABLE_COL" ? "select-column" : "array-in-list",
+        relativeDateAllowed: inWhere,
       });
       return;
     }
-    for (const v of Object.values(obj)) collectVariableRefs(v, refs);
+    const preservesWhereContext = type === "BINARY"
+      || type === "LOGICAL"
+      || type === "NOT"
+      || type === "GROUP"
+      || type === "NULL_CHECK"
+      || type === "BOOLEAN";
+    for (const [key, value] of Object.entries(obj)) {
+      const directVariable = value !== null
+        && typeof value === "object"
+        && (value as Record<string, unknown>)["type"] === "VARIABLE";
+      const directComparisonRight = inWhere
+        && type === "BINARY"
+        && key === "right"
+        && directVariable
+        && RELATIVE_DATE_COMPARISON_OPS.has(String(obj["op"]));
+      collectVariableRefs(
+        value,
+        refs,
+        key === "where"
+          ? true
+          : type === "BINARY" && key === "right" && directVariable
+          ? directComparisonRight
+          : preservesWhereContext
+          ? inWhere
+          : false
+      );
+    }
   }
+}
+
+function isRelativeDateDmlUse(stmt: Statement): boolean {
+  const target = stmt.type === "EXPLAIN" ? stmt.query : stmt;
+  return isDmlType(target.type) || target.type === "VALIDATE";
 }
 
 /** Apply AST-only grouping validation to every query level in a statement. */
@@ -251,7 +285,12 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
   const validationSchemas = new Map<string, string>();
   const createdOrder: string[] = [];
   const results: StatementAnalysis[] = [];
-  const variableDefs = new Map<string, { index: number; kind: VariableDefinitionKind; referencedBy: number[] }>();
+  const variableDefs = new Map<string, {
+    index: number;
+    kind: VariableDefinitionKind;
+    relativeDate: boolean;
+    referencedBy: number[];
+  }>();
   const variableOrder: string[] = [];
 
   statements.forEach((stmt, index) => {
@@ -298,6 +337,18 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
           index
         );
       }
+      if (def.relativeDate && isRelativeDateDmlUse(stmt)) {
+        throw new BatchAnalysisError(
+          `ArgumentError: RELATIVE_DATE variable @${use.name} cannot be used in DML or VALIDATE statements.`,
+          index
+        );
+      }
+      if (def.relativeDate && !use.relativeDateAllowed) {
+        throw new BatchAnalysisError(
+          `ArgumentError: RELATIVE_DATE variable @${use.name} can only be used as a WHERE comparison right operand or BETWEEN boundary.`,
+          index
+        );
+      }
       if (!referencedThisStatement.has(use.name)) {
         def.referencedBy.push(index);
         referencedThisStatement.add(use.name);
@@ -311,6 +362,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       variableDefs.set(stmt.name, {
         index,
         kind: stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? "array" : "scalar",
+        relativeDate: stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE",
         referencedBy: [],
       });
       variableOrder.push(stmt.name);
