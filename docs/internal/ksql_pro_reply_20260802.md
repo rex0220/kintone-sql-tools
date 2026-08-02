@@ -1,7 +1,7 @@
 # Pro への返信 — SELECT 別名の表示表記（B110 / K-96）
 
 - 作成: 2026-08-02
-- ステータス: 📝 **送付前**（v3.38.0 リリース後に送付）
+- ステータス: ✅ **送付済み（2026-08-02）**。→ Pro は**同日に取り込み・実機確認・出荷まで完了**（[報告 2026-08-02b](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260802b-送付版.md)・K-96 クローズ）
 - 受領: [Pro の相談 2026-08-02](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260802-送付版.md)
 - 関連: [B110](ksql_b110_alias_display_name_issue.md)
 
