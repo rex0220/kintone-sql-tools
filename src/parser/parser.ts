@@ -1250,15 +1250,15 @@ export class Parser {
     }
     if (this.isGroupingFunctionStart()) {
       const ref = this.parseGroupingRef();
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "GROUPING_COL", ref, alias };
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "GROUPING_COL", ref, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
     // `||` のない既存列は従来 AST を維持する。
     if (this.tryAggregateFunc() === null && this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
       const expr = this.parseScalarValueExpr({ allowAggregateArgs: true });
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "SCALAR_VALUE_COL", expr, alias } satisfies ScalarValueColumn;
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "SCALAR_VALUE_COL", expr, alias: parsedAlias?.alias ?? null } satisfies ScalarValueColumn, parsedAlias);
     }
 
     // Must remain after CONCAT_OP detection: @x || field keeps its legacy path.
@@ -1267,11 +1267,12 @@ export class Parser {
       if (!this.consume(TokenKind.AS)) {
         throw new ParseError("SELECT 列のバッチ変数には AS alias が必要です", this.peek());
       }
-      return {
+      const parsedAlias = this.parseAliasName();
+      return this.withAliasDisplay({
         type: "VARIABLE_COL",
         name: variable.value.slice(1).toLowerCase(),
-        alias: this.parseAliasName(),
-      } satisfies VariableColumn;
+        alias: parsedAlias.alias,
+      } satisfies VariableColumn, parsedAlias);
     }
 
     const windowFunc = this.tryWindowFunc();
@@ -1282,15 +1283,15 @@ export class Parser {
     // CASE WHEN ... END [AS alias]
     if (this.peek().kind === TokenKind.CASE) {
       const expr = this.parseCaseWhenExpr(true);
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "CASE_COL", expr, alias } satisfies CaseColumn;
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "CASE_COL", expr, alias: parsedAlias?.alias ?? null } satisfies CaseColumn, parsedAlias);
     }
 
     // IF(cond, then, else) [AS alias] → CASE WHEN として処理
     if (this.peek().kind === TokenKind.IF) {
       const expr = this.parseIfExpr(true);
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "CASE_COL", expr, alias } satisfies CaseColumn;
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "CASE_COL", expr, alias: parsedAlias?.alias ?? null } satisfies CaseColumn, parsedAlias);
     }
 
     // 文字列関数: UPPER / LOWER / TRIM / ... [AS alias]
@@ -1299,11 +1300,11 @@ export class Parser {
       const funcExpr = this.parseStringFuncExpr();
       if (this.isArithOp(this.peek().kind)) {
         const node = this.parseSelectArith(() => this.continueArith(funcExpr));
-        const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-        return { type: "ARITH_COL", expr: node, alias };
+        const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+        return this.withAliasDisplay({ type: "ARITH_COL", expr: node, alias: parsedAlias?.alias ?? null }, parsedAlias);
       }
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "STRFUNC_COL", expr: funcExpr, alias } satisfies StringFuncColumn;
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "STRFUNC_COL", expr: funcExpr, alias: parsedAlias?.alias ?? null } satisfies StringFuncColumn, parsedAlias);
     }
 
     // 集計関数: COUNT / SUM / AVG / MAX / MIN / GROUP_CONCAT
@@ -1313,18 +1314,18 @@ export class Parser {
       const ref = this.parseAggregateRef(aggFunc);
       if (this.isArithOp(this.peek().kind)) {
         const expr = this.continueAggArith(ref);
-        const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-        return { type: "ARITH_AGG_COL", expr, alias } satisfies AggArithColumn;
+        const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+        return this.withAliasDisplay({ type: "ARITH_AGG_COL", expr, alias: parsedAlias?.alias ?? null } satisfies AggArithColumn, parsedAlias);
       }
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return {
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({
         type: "AGGREGATE",
         func: ref.func,
         distinct: ref.distinct,
         arg: ref.arg,
         ...(ref.separator !== undefined ? { separator: ref.separator } : {}),
-        alias,
-      } satisfies AggregateColumn;
+        alias: parsedAlias?.alias ?? null,
+      } satisfies AggregateColumn, parsedAlias);
     }
 
     // スカラーサブクエリ: ( SELECT ... ) [AS alias]
@@ -1332,15 +1333,15 @@ export class Parser {
       this.advance(); // ( を消費
       const query = this.parseSelect();
       this.expect(TokenKind.RPAREN);
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "SCALAR_SUBQUERY_COL", query, alias };
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "SCALAR_SUBQUERY_COL", query, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
     // 文字列リテラル列: 'XXX' [AS alias]
     if (this.peek().kind === TokenKind.STRING) {
       const value = this.expect(TokenKind.STRING).value;
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "LITERAL_COL", value, alias };
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "LITERAL_COL", value, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
     // 算術式が ( または数値リテラルで始まる場合
@@ -1349,8 +1350,8 @@ export class Parser {
       this.peek().kind === TokenKind.NUMBER
     ) {
       const node = this.parseSelectArith(() => this.parseArithAddSub());
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "ARITH_COL", expr: node, alias };
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "ARITH_COL", expr: node, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
     // フィールド [AS alias]
@@ -1367,12 +1368,12 @@ export class Parser {
     if (this.isArithOp(this.peek().kind)) {
       const left: ArithNode = { type: "FIELD_REF", field };
       const node = this.parseSelectArith(() => this.continueArith(left));
-      const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-      return { type: "ARITH_COL", expr: node, alias };
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      return this.withAliasDisplay({ type: "ARITH_COL", expr: node, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
-    const alias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
-    return { type: "FIELD", field, alias };
+    const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+    return this.withAliasDisplay({ type: "FIELD", field, alias: parsedAlias?.alias ?? null }, parsedAlias);
   }
 
   private tryWindowFunc(): WindowFunc | null {
@@ -1407,8 +1408,8 @@ export class Parser {
     if (!this.consume(TokenKind.AS)) {
       throw new ParseError("ウィンドウ関数には AS alias が必要です", this.peek());
     }
-    const alias = this.parseAliasName();
-    return { type: "WINDOW_COL", func, partitionBy, orderBy, alias };
+    const parsedAlias = this.parseAliasName();
+    return this.withAliasDisplay({ type: "WINDOW_COL", func, partitionBy, orderBy, alias: parsedAlias.alias }, parsedAlias);
   }
 
   private selectColumnHasAggregate(column: SelectColumn): boolean {
@@ -3914,7 +3915,7 @@ export class Parser {
 
   // エイリアス名: IDENT / BIDENT に加え、キーワードも許容する
   // 例: SELECT SUM(金額) AS avg → "avg" は AVG キーワードだが alias として有効
-  private parseAliasName(): string {
+  private parseAliasName(): { alias: string; display: string } {
     const tok = this.peek();
     if (tok.value.startsWith("#")) {
       throw new ParseError("エイリアス名に # で始まる名前は使用できません", tok);
@@ -3925,9 +3926,26 @@ export class Parser {
       KEYWORDS.has(tok.value.toUpperCase())
     ) {
       this.advance();
-      return tok.value.toLowerCase(); // alias は小文字で統一
+      return {
+        alias: tok.value.toLowerCase(), // alias は小文字で統一
+        display: tok.value,
+      };
     }
     throw new ParseError("エイリアス名が必要です", tok);
+  }
+
+  /** 互換 snapshot を変えず、SELECT 列 AST に表示表記を保持する。 */
+  private withAliasDisplay<const T extends { alias: string | null }>(
+    column: T,
+    parsedAlias: { alias: string; display: string } | null
+  ): T & { aliasDisplay?: string } {
+    if (parsedAlias !== null) {
+      Object.defineProperty(column, "aliasDisplay", {
+        value: parsedAlias.display,
+        enumerable: false,
+      });
+    }
+    return column;
   }
 
   /** フィールド名または修飾フィールド名（alias.field）を解析する */

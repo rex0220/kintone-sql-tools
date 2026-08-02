@@ -335,6 +335,23 @@ test("WHERE IN / NOT IN は単独の LOGINUSER() を限定 AST として受理�
   }
 });
 
+test("SELECT 列別名は正規形と SQL 上の表記を両方保持する", () => {
+  const ast = parseSelect(
+    "SELECT $id AS ランクA, $id AS Ａ, $id AS `ランクC`, " +
+      "$id AS AVG, $id AS 順位 FROM APP100"
+  );
+  expect(ast.columns.map((column) => "alias" in column
+    ? { alias: column.alias, aliasDisplay: column.aliasDisplay }
+    : null
+  )).toEqual([
+    { alias: "ランクa", aliasDisplay: "ランクA" },
+    { alias: "ａ", aliasDisplay: "Ａ" },
+    { alias: "ランクc", aliasDisplay: "ランクC" },
+    { alias: "avg", aliasDisplay: "AVG" },
+    { alias: "順位", aliasDisplay: "順位" },
+  ]);
+});
+
 test("WHERE IN / NOT IN は単独の PRIMARY_ORGANIZATION() を限定 AST として受理する", () => {
   for (const op of ["IN", "NOT IN"] as const) {
     const ast = parseSelect(

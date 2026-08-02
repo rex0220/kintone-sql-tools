@@ -385,6 +385,7 @@ export interface SelectResult {
 
 /** CTE / 一時テーブルの実体化結果。空結果でも出力列を保持する。 */
 export interface MaterializedColumnMeta {
+  readonly displayName?: string;
   readonly sortKind?: "number" | "string";
   readonly fieldType?: string;
   readonly semantics?: ResolvedFieldSemantics;
@@ -1422,6 +1423,7 @@ function materializedColumnMetaEqual(
     const candidate = right.get(column);
     if (
       !candidate ||
+      candidate.displayName !== meta.displayName ||
       candidate.sortKind !== meta.sortKind ||
       candidate.fieldType !== meta.fieldType ||
       !fieldSemanticsEqual(candidate.semantics, meta.semantics)
@@ -1820,7 +1822,16 @@ async function executeBatchStatement(
   // 一時テーブルを参照する文はストアを注入して実行
   if (info.tempTablesReferenced.length > 0) {
     if (resolvedStmt.type === "SELECT" || resolvedStmt.type === "UNION") {
-      return { result: await executeQueryWithCte(resolvedStmt, client, options, tempTables, cacheContext) };
+      return {
+        result: await executeQueryWithCte(
+          resolvedStmt,
+          client,
+          options,
+          tempTables,
+          cacheContext,
+          options.captureColumnMeta === true
+        ),
+      };
     }
     if (resolvedStmt.type === "WITH") {
       return { result: await executeWith(resolvedStmt, client, options, cacheContext, tempTables) };
@@ -2032,9 +2043,12 @@ function resolveBatchVariableReferencesInternal<T>(
       const value = variables.get(obj["name"]);
       if (value === undefined) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);
+      const aliasDisplay = typeof obj["aliasDisplay"] === "string"
+        ? { aliasDisplay: obj["aliasDisplay"] }
+        : {};
       return (value.type === "number"
-        ? { type: "ARITH_COL", expr: { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }, alias: obj["alias"] }
-        : { type: "LITERAL_COL", value: value.value, alias: obj["alias"] }) as T;
+        ? { type: "ARITH_COL", expr: { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }, alias: obj["alias"], ...aliasDisplay }
+        : { type: "LITERAL_COL", value: value.value, alias: obj["alias"], ...aliasDisplay }) as T;
     }
     if (obj["type"] === "VARIABLE_IN_LIST") return obj as T;
     const resolved = Object.fromEntries(
@@ -2048,6 +2062,9 @@ function resolveBatchVariableReferencesInternal<T>(
         ),
       ])
     ) as Record<string, unknown>;
+    if (typeof obj["aliasDisplay"] === "string") {
+      resolved["aliasDisplay"] = obj["aliasDisplay"];
+    }
     if (resolved["type"] === "BINARY") {
       const right = resolved["right"] as Record<string, unknown> | undefined;
       if (right?.["type"] === "VARIABLE_IN_LIST" && typeof right["name"] === "string") {
@@ -4021,6 +4038,13 @@ function inferAggregateArgMeta(
   return mergeExpressionColumnMeta(results);
 }
 
+function withDisplayName(
+  meta: MaterializedColumnMeta | undefined,
+  displayName: string
+): MaterializedColumnMeta {
+  return { ...(meta ?? {}), displayName };
+}
+
 function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
   return stmt.columns.some((column) =>
     column.type === "FIELD"
@@ -4110,7 +4134,7 @@ async function inferSelectColumnMeta(
     for (const output of outputColumns) {
       const ref = aggregateFieldRef(output);
       const meta = withPublicSource(resolveField(ref), ref);
-      if (meta) inferred.set(output, meta);
+      inferred.set(output, withDisplayName(meta, meta?.displayName ?? output));
     }
     return inferred;
   }
@@ -4120,7 +4144,7 @@ async function inferSelectColumnMeta(
     for (const output of outputColumns) {
       const ref = aggregateFieldRef(output);
       const meta = withPublicSource(resolveField(ref), ref);
-      if (meta) inferred.set(output, meta);
+      inferred.set(output, withDisplayName(meta, meta?.displayName ?? output));
     }
   }
 
@@ -4170,7 +4194,7 @@ async function inferSelectColumnMeta(
         // サブクエリの実行値は後段で解決される。安全に型を証明できないため既定の文字列意味型を付ける。
         meta = unknownStringColumnMeta();
       }
-      if (meta) inferred.set(output, meta);
+      inferred.set(output, withDisplayName(meta, column.aliasDisplay ?? output));
     });
   return inferred;
 }
@@ -4183,20 +4207,19 @@ function mergeUnionColumnMeta(left: SelectResult, right: SelectResult): Material
     const a = leftMeta?.get(column);
     const rightColumn = right.columns[index];
     const b = rightColumn === undefined ? undefined : rightMeta?.get(rightColumn);
+    let meta: MaterializedColumnMeta;
     if (a && b) {
       const combined = mergeExpressionColumnMeta([a, b]);
       const publicSourceApp = a.publicSourceApp === b.publicSourceApp
         ? a.publicSourceApp
         : undefined;
       const { publicSourceApp: _discarded, ...withoutPublicSource } = combined;
-      merged.set(
-        column,
-        publicSourceApp === undefined
-          ? withoutPublicSource
-          : { ...withoutPublicSource, publicSourceApp }
-      );
+      meta = publicSourceApp === undefined
+        ? withoutPublicSource
+        : { ...withoutPublicSource, publicSourceApp };
     }
-    else if (a || b) merged.set(column, unknownStringColumnMeta());
+    else meta = unknownStringColumnMeta();
+    merged.set(column, withDisplayName(meta, a?.displayName ?? column));
   });
   return merged;
 }

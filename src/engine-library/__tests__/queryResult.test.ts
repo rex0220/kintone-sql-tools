@@ -98,8 +98,8 @@ test("runQuery copies VALIDATE stats into the stable query envelope when present
     type: "query",
     rows: [{ b: "2", a: "x" }],
     columns: [
-      { name: "b", valueType: "string" },
-      { name: "a", valueType: "string" },
+      { name: "b", displayName: "b", valueType: "string" },
+      { name: "a", displayName: "a", valueType: "string" },
     ],
     rowCount: 1,
     warnings: ["truncated"],
@@ -147,7 +147,7 @@ test("runQuery preserves columns and supplies fixed metrics for zero rows", asyn
   });
 
   expect(result.rows).toEqual([]);
-  expect(result.columns).toEqual([{ name: "empty_value", valueType: "string" }]);
+  expect(result.columns).toEqual([{ name: "empty_value", displayName: "empty_value", valueType: "string" }]);
   expect(result).not.toHaveProperty("validateStats");
   expect(result.metrics).toEqual({
     recordGetCalls: 0,

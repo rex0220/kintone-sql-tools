@@ -37,6 +37,7 @@ function toPublicColumn(name: string, meta: MaterializedColumnMetaMap | undefine
   const sourceApp = columnMeta?.publicSourceApp;
   return {
     name,
+    displayName: columnMeta?.displayName ?? name,
     valueType: "string" as const,
     ...(fieldType !== undefined ? { fieldType } : {}),
     ...(sortKind !== undefined ? { sortKind } : {}),

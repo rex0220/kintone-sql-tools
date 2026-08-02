@@ -1,6 +1,6 @@
 /* QueryColumn の列メタ(fieldType / sortKind / sourceApp)公開を
  * runQuery の実フロー（モック client）で検証する。 */
-import { runQuery, type QueryColumn, type ReadonlyKintoneClient } from "../index";
+import { runBatch, runQuery, type QueryColumn, type ReadonlyKintoneClient } from "../index";
 
 const records = [
   { $id: { value: "1" }, 受注金額: { value: "1000" }, ステータス: { value: "受注" }, 受注日: { value: "2026-07-01" } },
@@ -153,4 +153,76 @@ test("UNION は左右の直接参照元 app が一致するときだけ sourceAp
     fieldType: "DROP_DOWN", sortKind: "string",
   });
   expect(differentApps.columns[0]?.sourceApp).toBeUndefined();
+});
+
+test("明示別名は name を正規化したまま displayName に記述表記を保持し、行キーを変えない", async () => {
+  const result = await runQuery(
+    "SELECT $id AS ランクA, $id AS `ランクC`, $id AS AVG, $id AS Ａ FROM APP100 LIMIT 1",
+    { client: makeClient() }
+  );
+  expect(result.columns).toMatchObject([
+    { name: "ランクa", displayName: "ランクA" },
+    { name: "ランクc", displayName: "ランクC" },
+    { name: "avg", displayName: "AVG" },
+    { name: "ａ", displayName: "Ａ" },
+  ]);
+  expect(result.rows[0]).toEqual({
+    "ランクa": "1",
+    "ランクc": "1",
+    avg: "1",
+    "ａ": "1",
+  });
+  expect(result.rows[0]).not.toHaveProperty("ランクA");
+});
+
+test("別名なしの列は displayName が name と同一", async () => {
+  const result = await runQuery(
+    "SELECT $id, ステータス, COUNT(*) FROM APP100 GROUP BY $id, ステータス",
+    { client: makeClient() }
+  );
+  expect(result.columns.every((column) => column.displayName === column.name)).toBe(true);
+});
+
+test("0 行 SELECT でも AST 由来の name / displayName を返す", async () => {
+  const emptyClient: ReadonlyKintoneClient = {
+    ...makeClient(),
+    async getRecords() { return { records: [] }; },
+    async openCursor() {
+      return {
+        totalCount: 0,
+        async nextPage() { return { records: [], next: false }; },
+        async close() {},
+      };
+    },
+  };
+  const result = await runQuery(
+    "SELECT $id AS ランクA FROM APP100",
+    { client: emptyClient }
+  );
+  expect(result.rows).toEqual([]);
+  expect(result.columns[0]).toMatchObject({ name: "ランクa", displayName: "ランクA" });
+});
+
+test("UNION の displayName は第 1 枝の SELECT リストを使う", async () => {
+  const result = await runQuery(
+    "SELECT $id AS ランクA FROM APP100 UNION ALL SELECT $id AS 別名B FROM APP100",
+    { client: makeClient() }
+  );
+  expect(result.columns[0]).toMatchObject({ name: "ランクa", displayName: "ランクA" });
+  expect(result.rows.every((row) => Object.keys(row).includes("ランクa"))).toBe(true);
+});
+
+test("temp passthrough は displayName を引き継ぎ、明示再選択はその位置の表記を使う", async () => {
+  const result = await runBatch(
+    "CREATE TEMP TABLE #t AS SELECT $id AS ランクA FROM APP100; " +
+      "SELECT * FROM #t; " +
+      "SELECT ランクa FROM #t",
+    { client: makeClient() }
+  );
+  expect(result.results[0]?.columns[0]).toMatchObject({
+    name: "ランクa", displayName: "ランクA",
+  });
+  expect(result.results[1]?.columns[0]).toMatchObject({
+    name: "ランクa", displayName: "ランクa",
+  });
 });

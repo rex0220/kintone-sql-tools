@@ -132,6 +132,7 @@ type QueryResult = {
   rows: readonly Readonly<Record<string, string>>[];
   columns: readonly {
     name: string;
+    displayName?: string;
     valueType: "string";
     fieldType?: string;
     sortKind?: "number" | "string";
@@ -153,6 +154,8 @@ type QueryResult = {
 
 `QueryColumn` の追加メタはすべて optional です。
 
+- `displayName`: 表示用の列名。明示別名では SQL に書かれた表記（バッククォートを
+  除いた中身）を保持します。列の照合と `rows` のキーには `name` を使用してください。
 - `fieldType`: 元の kintone フィールド型（`NUMBER`、`DROP_DOWN`、`__ID__` など）、
   または engine が導出した擬似型（`KSQL_NUMBER`、`KSQL_STRING`、
   `KSQL_UNKNOWN` など）。

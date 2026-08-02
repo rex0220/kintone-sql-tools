@@ -48,5 +48,13 @@
     "required",
     "sortKind",
     "subtableCode"
+  ],
+  "queryColumnProperties": [
+    "displayName?",
+    "fieldType?",
+    "name",
+    "sortKind?",
+    "sourceApp?",
+    "valueType"
   ]
 }

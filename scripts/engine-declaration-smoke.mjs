@@ -97,6 +97,15 @@ const actualReadonlyFieldInfoProperties = readonlyFieldInfoBody
   .map((line) => line.match(/^\s*([A-Za-z][A-Za-z0-9]*)(?:\?)?:/)?.[1])
   .filter(Boolean)
   .sort();
+const queryColumnBody = publicTypesDeclaration.match(
+  /export interface QueryColumn\s*\{([^}]+)\}/s
+)?.[1] ?? "";
+const actualQueryColumnProperties = queryColumnBody
+  .split(/\r?\n/)
+  .map((line) => line.match(/^\s*([A-Za-z][A-Za-z0-9]*)(\?)?:/)?.slice(1, 3))
+  .filter(Boolean)
+  .map(([name, optional]) => `${name}${optional ?? ""}`)
+  .sort();
 assert(
   JSON.stringify(actualValueExports) ===
     JSON.stringify([...exportSnapshot.valueExports].sort()),
@@ -112,6 +121,12 @@ assert(
     JSON.stringify([...exportSnapshot.readonlyFieldInfoProperties].sort()),
   `ReadonlyFieldInfo property snapshot mismatch:\n` +
     `${JSON.stringify(actualReadonlyFieldInfoProperties, null, 2)}`
+);
+assert(
+  JSON.stringify(actualQueryColumnProperties) ===
+    JSON.stringify([...exportSnapshot.queryColumnProperties].sort()),
+  `QueryColumn property snapshot mismatch:\n` +
+    `${JSON.stringify(actualQueryColumnProperties, null, 2)}`
 );
 
 for (const config of ["tsconfig.nodenext.json", "tsconfig.node16.json"]) {
@@ -130,5 +145,6 @@ console.log("[engine-declaration-smoke] internal imports: 0");
 console.log(
   `[engine-declaration-smoke] B66 public export snapshot: ` +
   `${actualValueExports.length} values, ${actualTypeExports.length} types, ` +
-  `${actualReadonlyFieldInfoProperties.length} ReadonlyFieldInfo properties`
+  `${actualReadonlyFieldInfoProperties.length} ReadonlyFieldInfo properties, ` +
+  `${actualQueryColumnProperties.length} QueryColumn properties`
 );

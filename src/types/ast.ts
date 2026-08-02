@@ -236,8 +236,13 @@ export type SelectColumn =
   | ScalarSubqueryColumn    // (SELECT ...) [AS alias]
   | VariableColumn;         // @variable AS alias (batch resolver only)
 
+/** SELECT 列別名の SQL 上の表記。照合には引き続き alias の正規形を使う。 */
+export interface SelectAliasDisplay {
+  aliasDisplay?: string;
+}
+
 /** Batch-only SELECT column. Always resolved before execution. */
-export interface VariableColumn {
+export interface VariableColumn extends SelectAliasDisplay {
   type: "VARIABLE_COL";
   name: string;
   alias: string;
@@ -252,19 +257,19 @@ export interface ParentWildcardColumn {
   type: "PARENT_WILDCARD";
 }
 
-export interface FieldColumn {
+export interface FieldColumn extends SelectAliasDisplay {
   type: "FIELD";
   field: Identifier;
   alias: string | null;
 }
 
-export interface LiteralColumn {
+export interface LiteralColumn extends SelectAliasDisplay {
   type: "LITERAL_COL";
   value: string;
   alias: string | null;
 }
 
-export interface AggregateColumn {
+export interface AggregateColumn extends SelectAliasDisplay {
   type: "AGGREGATE";
   func: AggregateFunc;
   distinct: boolean;      // COUNT(DISTINCT f)
@@ -280,7 +285,7 @@ export type AggregateFunc =
 export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
 
 /** 順位系ウィンドウ関数。v1 は出力名の衝突を避けるため alias 必須。 */
-export interface WindowColumn {
+export interface WindowColumn extends SelectAliasDisplay {
   type: "WINDOW_COL";
   func: WindowFunc;
   partitionBy: FieldRef[];
@@ -289,7 +294,7 @@ export interface WindowColumn {
 }
 
 /** SELECT 句の算術式カラム: field * 1.1 AS alias / 2 * field / (a+b)*c */
-export interface ArithColumn {
+export interface ArithColumn extends SelectAliasDisplay {
   type: "ARITH_COL";
   expr: ArithNode;   // 単独数値・フィールド参照・ネスト式すべて受け入れる
   alias: string | null;
@@ -322,14 +327,14 @@ export interface StringFuncExpr {
 }
 
 /** SELECT 句の文字列関数カラム */
-export interface StringFuncColumn {
+export interface StringFuncColumn extends SelectAliasDisplay {
   type: "STRFUNC_COL";
   expr: StringFuncExpr;
   alias: string | null;
 }
 
 /** SELECT 句の汎用スカラー値式カラム。 */
-export interface ScalarValueColumn {
+export interface ScalarValueColumn extends SelectAliasDisplay {
   type: "SCALAR_VALUE_COL";
   expr: ScalarValueExpr;
   alias: string | null;
@@ -341,7 +346,7 @@ export interface GroupingRef {
   field: FieldRef;
 }
 
-export interface GroupingColumn {
+export interface GroupingColumn extends SelectAliasDisplay {
   type: "GROUPING_COL";
   ref: GroupingRef;
   alias: string | null;
@@ -354,7 +359,7 @@ export interface ScalarSubquery {
 }
 
 /** SELECT 句のスカラーサブクエリカラム: (SELECT ...) [AS alias] */
-export interface ScalarSubqueryColumn {
+export interface ScalarSubqueryColumn extends SelectAliasDisplay {
   type: "SCALAR_SUBQUERY_COL";
   query: SelectStatement;
   alias: string | null;
@@ -379,7 +384,7 @@ export interface CaseWhenExpr {
 }
 
 /** SELECT 句の CASE WHEN カラム */
-export interface CaseColumn {
+export interface CaseColumn extends SelectAliasDisplay {
   type: "CASE_COL";
   expr: CaseWhenExpr;
   alias: string | null;
@@ -1102,7 +1107,7 @@ export interface AggArithExpr {
 }
 
 /** SELECT 句の集計算術式カラム: SUM(金額) * 1.1 [AS alias] */
-export interface AggArithColumn {
+export interface AggArithColumn extends SelectAliasDisplay {
   type: "ARITH_AGG_COL";
   expr: AggOperand;
   alias: string | null;

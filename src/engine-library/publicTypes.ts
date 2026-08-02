@@ -137,6 +137,7 @@ export interface RunBatchOptions {
 
 export interface QueryColumn {
   name: string;
+  displayName?: string;
   valueType: "string";
   /** 元 kintone フィールド型または導出型（例: NUMBER / DROP_DOWN / KSQL_NUMBER / KSQL_UNKNOWN）。 */
   fieldType?: string;
