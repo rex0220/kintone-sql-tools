@@ -1,11 +1,20 @@
-ksql 配布パッケージ (v3.37.1)
+ksql 配布パッケージ (v3.38.0)
 
 release 成果物:
-- ksql-plugin-v3.37.1.zip
-- ksql-mcp.mcpb (manifest version 3.37.1)
-- ksql-mcp.js (MCP server version 3.37.1)
+- ksql-plugin-v3.38.0.zip
+- ksql-mcp.mcpb (manifest version 3.38.0)
+- ksql-mcp.js (MCP server version 3.38.0)
 
-修正 (B109) ★本リリースの要点:
+追加 (B110) ★本リリースの要点:
+- engine ライブラリの QueryColumn に displayName が加わりました。SELECT 別名に
+  書かれた表記 (大文字小文字) をそのまま持ちます。
+    SELECT $id AS ランクA ... → columns: { name: "ランクa", displayName: "ランクA" }
+- 結果行のキーと columns の name は従来どおり小文字のままで、挙動の変更はありません。
+  表の見出しやグラフの凡例に displayName を使えるようになる純追加です。
+- 別名の英字 (全角含む) が結果列名で小文字になることを言語リファレンス 1 章に
+  明記しました (バッククォートでも保持されません)。
+
+修正 (B109) (v3.37.1):
 - engine ライブラリの explainQuery と、runBatch に EXPLAIN 文を流した場合の計画本文で、
   論理アプリが内部の仮想 ID のまま表示されていたのを、論理名の併記
   (LAPP_案件管理 -> APP4149 の形) に直しました。
@@ -64,25 +73,16 @@ release 成果物:
   古い会話では「古い版」が見えるだけなので、誤って新しいと思い込むことはありません。
 - 挙動・公開型・ツールの面はいずれも変わりません。
 
-破壊的変更の移行案内 (B89 / B90) (v3.31.0):
-- engine ライブラリの runBatch と explainQuery が EXPLAIN UPDATE / DELETE / INSERT /
-  UPSERT を READ_ONLY_VIOLATION で拒否します。read-only ライブラリで DML の計画を出す
-  用途は元から想定しておらず、explainQuery は従来も拒否していました。EXPLAIN は計画
-  だけで書き込まないため、誤った結果を得ていた利用者はいません。EXPLAIN SELECT は
-  従来どおり通ります。
-- 算術式に非数値の変数を使うと ArgumentError で停止します。新しい直接算術だけでなく、
-  従来から動いていた ROUND(算術式, ...) などの関数経路も対象です。従来はエラーも警告も
-  なく NaN を返していました。数値変数の結果は変わりません。
-    修正前: DECLARE @phase = '受注'; SELECT ROUND(売上 * 100 / @phase, 1) FROM APPn
-    → NaN
-    修正後: 同じ SQL が variable @phase is not numeric ... で停止
-
-1. ksql-plugin-v3.37.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.38.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.37.1): B109 engine ライブラリの EXPLAIN 計画本文の論理名併記。
+本リリース (v3.38.0): B110 SELECT 別名の表示表記を displayName で保持。
+
+- B110: 上の「追加」を参照してください。公開型は純加法で、挙動の変更はありません。
+
+前リリース (v3.37.1): B109 engine ライブラリの EXPLAIN 計画本文の論理名併記。
 
 - B109: 上の「修正」を参照してください。
 
@@ -108,18 +108,6 @@ release 成果物:
 - B98: 上の「挙動の変更の移行案内」を参照してください。
 - B99: 上の「実行環境の要件の変更」を参照してください。MCP サーバーの実行に
   Node.js 20 以上が必要になります。CLI・engine ライブラリ・プラグインは変わりません。
-
-前リリース (v3.33.0): B97 打ち切られた入力の集計を fail-closed 化／B96。
-
-- B97: 上の「挙動の変更の移行案内」を参照してください。
-- B97: 集計・GROUP BY・DISTINCT を含むクエリの EXPLAIN に、完全な入力が必要である
-  ことと、その理由が表示されるようになります。
-- B96: getRecords() の応答契約をライブラリ文書へ明記しました。応答をそのまま返し、
-  records 以外の項目を落とさないでください。とくに searchAborted を落とすと、
-  10 万件の検索打ち切りに対する fail-closed が無効になり、打ち切られた結果を
-  完全な結果として扱います。totalCount の欠落は性能だけの影響です
-  (エンジンが全件取得へ落とします)。キャッシュや計測のために client を包む場合も
-  同じで、createReadonlyKintoneClient を使っていても踏みます。
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
