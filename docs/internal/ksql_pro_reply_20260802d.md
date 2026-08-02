@@ -1,7 +1,7 @@
 # Pro への返信 — 範囲トークンは見送り（B113 / K-6）
 
 - 作成: 2026-08-02
-- ステータス: 📝 **送付前**
+- ステータス: ✅ **送付済み（2026-08-02）**
 - 受領: [Pro の相談 2026-08-02d](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260802d-送付版.md)
 - 関連: [B113](ksql_b113_relative_date_range_token_issue.md)（クローズ・見送り）/ [B111](ksql_b111_relative_date_variable_issue.md)
 
