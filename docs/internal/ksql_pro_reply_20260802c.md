@@ -1,7 +1,7 @@
 # Pro への返信 — 相対日付変数（B111 / K-6）と EXPLAIN 表示の欠陥（B112）・v3.39.0
 
 - 作成: 2026-08-02
-- ステータス: 📝 **送付前**
+- ステータス: ✅ **送付済み（2026-08-02）**。→ Pro は同日に v3.39.0 を取り込み、バー連携まで実装（[報告 2026-08-02d](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260802d-送付版.md) が「前回のご回答」として本返信に言及）
 - 受領: [Pro の相談 2026-08-02c](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260802c-送付版.md)
 - 関連: [B111](ksql_b111_relative_date_variable_issue.md) / [B112](ksql_b112_explain_app_line_restore_issue.md)
 
