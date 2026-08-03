@@ -21,7 +21,7 @@
 ## 【返信】K-110 — v3.40.0 で入りました。ご指摘のとおり、原因はこちらの命名でした
 
 ```
-npm i @rex0220/kintone-sql-tools@3.40.0
+npm i @rex0220/kintone-sql-tools@3.41.0
 ```
 
 **「私たち自身が誤読していました」と書かれていましたが、誤読させていたのはこちらです。**
@@ -47,7 +47,7 @@ npm i @rex0220/kintone-sql-tools@3.40.0
 
 ```ts
 const { plan } = await explainQuery(sql, { client });
-plan.statements[0].fetch;                   // "none" | "exact" | "prefiltered" | "all"
+plan.statements[0].fetch;                   // "count_only" | "exact" | "prefiltered" | "all" | "none"
 plan.statements[0].sources[0].kintoneQuery; // 全件取得なら null
 ```
 
@@ -55,12 +55,12 @@ plan.statements[0].sources[0].kintoneQuery; // 全件取得なら null
 
 ## 3. ご提案から 2 点だけ形を変えました（実測が理由です）
 
-### 3.1 3 値ではなく **4 値**——`NONE`（件数のみ）を足しました
+### 3.1 3 値ではなく **5 値**——`COUNT_ONLY`（件数のみ）を足しました
 
 ```
 mode:          COUNT_TOTAL_COUNT
 kintone query: 確度 in ("A") limit 1
-fetch:         NONE (limit 1)
+fetch:         COUNT_ONLY (limit 1)
 fetch API:     GET records.json (totalCount=true)
 ```
 
@@ -68,13 +68,16 @@ fetch API:     GET records.json (totalCount=true)
 アプリの件数に関係なく **1 リクエスト・転送は `$id` だけの 1 件**です（`metrics.fetchedRows` も 1）。
 ダッシュボードのカウント系ペインはこの形が主力のはずで、`EXACT` とも `PREFILTERED` とも違います。
 
+**残る `NONE` は「kintone から取得するソースが 1 つも無い文」**（一時テーブル参照のみ）
+でだけ現れます。最悪値の順序は `NONE` < `COUNT_ONLY` < `EXACT` < `PREFILTERED` < `ALL` です。
+
 ### 3.2 スカラー 1 個ではなく **ソース単位**にしました
 
 ご提案の `fetch: "exact" | "prefiltered" | "all"` を `ExplainResult` に 1 つ置く形は、
 **次のクエリで必ず嘘になります**（実測）。
 
 ```
-[union:1]  fetch: NONE (limit 1)     ← 件数のみ（走査なし）
+[union:1]  fetch: COUNT_ONLY (limit 1)   ← 件数のみ（走査なし）
 [union:2]  fetch: ALL                ← 全件
 ```
 
@@ -103,9 +106,9 @@ cursor 利用や取得上限つきなど、**分類が増える可能性があ�
 |---|---|
 | **①人間向け 1 行** | `fetch:`（ソースごと）＋ `fetch summary:`（文ごとの最悪値） |
 | **②構造化** | `ExplainResult.plan`（純加法）。文字列解析は不要 |
-| **形の変更 2 点** | **4 値**（`NONE` を追加）・**ソース単位**（`UNION` / `JOIN` で 1 値にならない） |
+| **形の変更 2 点** | **5 値**（`COUNT_ONLY` を追加）・**ソース単位**（`UNION` / `JOIN` で 1 値にならない） |
 | **`mode`** | **改名なし**（ご希望どおり） |
 | **お願い** | `fetch` の未知の値は「未分類」として扱ってください |
 
 **MCP をお使いの場合は、更新後に再起動し、新しい会話を始めてください。**
-`instructions` の 1 行目が `kSQL MCP server version 3.40.0.` になっていれば切り替わっています。
+`instructions` の 1 行目が `kSQL MCP server version 3.41.0.` になっていれば切り替わっています。

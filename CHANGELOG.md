@@ -2,6 +2,15 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.41.0（2026-08-04）
+
+### 修正（B114 `fetch` の `NONE` を `COUNT_ONLY` へ改める）
+
+- **v3.40.0 は `COUNT(*)` の取得範囲を `NONE`（「レコードを取得しません」）と表示していたが、実際は `limit 1` の単発 GET で `$id` だけの 1 件が転送される**（`metrics.fetchedRows` も 1）。「取得しない」ではなく**「走査しない」**が正しく、同じ API で返している `fetchedRows: 1` とも矛盾していた。**`fetch: COUNT_ONLY` へ改めた。**
+- **`NONE` は残し、意味を限定した**＝**kintone から取得するソースが 1 つも無い文**（一時テーブル参照のみ・本当にゼロ）でだけ現れる。値は 5 つ（`NONE` / `COUNT_ONLY` / `EXACT` / `PREFILTERED` / `ALL`）で、最悪値の順序は `NONE` < `COUNT_ONLY` < `EXACT` < `PREFILTERED` < `ALL`。
+- engine ライブラリの `ExplainResult.plan` の型も同じ 5 値。**`"none"` は「取得ソースが無い文」でのみ現れる。** `fetch` の値は将来も増えうるため、**未知の値は未分類として扱うこと。**
+- v3.40.0 と同日のリリースで、`plan` を取り込んだ利用者はいないと見込んでいる（表示と型のみの変更で、押し下げ判定・取得動作は不変）。
+
 ## v3.40.0（2026-08-04）
 
 ### 追加（B114 `EXPLAIN` が取得範囲を名乗る）

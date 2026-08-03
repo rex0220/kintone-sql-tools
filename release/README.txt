@@ -1,17 +1,29 @@
-ksql 配布パッケージ (v3.40.0)
+ksql 配布パッケージ (v3.41.0)
 
 release 成果物:
-- ksql-plugin-v3.40.0.zip
-- ksql-mcp.mcpb (manifest version 3.40.0)
-- ksql-mcp.js (MCP server version 3.40.0)
+- ksql-plugin-v3.41.0.zip
+- ksql-mcp.mcpb (manifest version 3.41.0)
+- ksql-mcp.js (MCP server version 3.41.0)
 
-追加 (B114) ★本リリースの要点:
+修正 (B114) ★本リリースの要点:
+- v3.40.0 は COUNT(*) の取得範囲を NONE (取得しない) と表示していましたが、実際は
+  limit 1 の単発 GET で $id だけの 1 件が転送されます。「取得しない」ではなく
+  「走査しない」が正しいため、COUNT_ONLY へ改めました。
+    修正前  fetch: NONE (limit 1)
+    修正後  fetch: COUNT_ONLY (limit 1)
+- NONE は残し、意味を限定しました。kintone から取得するソースが 1 つも無い文
+  (一時テーブル参照のみ) でだけ現れます。
+- 押し下げ判定・取得動作は変わりません (表示と型のみ)。
+
+追加 (B114) (v3.40.0):
 - EXPLAIN が「kintone から何件取りに行くか」を自ら名乗るようになりました。
     mode:          FULL_SCAN
     kintone query: 確度 in ("A")
     fetch:         PREFILTERED (未確定)      ← 追加
-- 値は NONE (取得しない) / EXACT (全条件を絞り込み) / PREFILTERED (一部を絞り込み) /
-  ALL (全件取得) の 4 つで、文の先頭には最悪値の fetch summary: が出ます。
+- 値は COUNT_ONLY (件数のみ) / EXACT (全条件を絞り込み) / PREFILTERED (一部を絞り込み) /
+  ALL (全件取得) / NONE (取得ソース無し) の 5 つで、最悪値の順序は
+  NONE < COUNT_ONLY < EXACT < PREFILTERED < ALL です。文の先頭には最悪値の
+  fetch summary: が出ます。
 - mode: FULL_SCAN は「取得後に JS で全行評価する」という内部名で、取得量の話では
   ありません。GROUP BY や集計を含むクエリは、押し下げが効いていても FULL_SCAN と
   表示されます。取得量は fetch: の行で判断してください。
@@ -77,22 +89,16 @@ release 成果物:
   論理名の併記 (LAPP_名前@profile) になりました。--dry-run と MCP の ksql_explain は
   従来から正しく、挙動の変更はありません。
 
-修正 (B105) (v3.36.0):
-- UNION / UNION ALL の各枝の SELECT COUNT(*) が、単体と同じく totalCount の
-  単発 GET になりました。'ラベル' AS 列名 のようなリテラル列との併用も対象です。
-    SELECT '顧客管理' AS アプリ, COUNT(*) AS 件数 FROM APP100
-    UNION ALL SELECT '案件管理', COUNT(*) FROM APP200
-- 従来は UNION の枝に入れると全件取得に落ち、既定の maxRecords を超えるアプリでは
-  「完全な候補集合が必要です」のエラーで停止していました。
-- 挙動の変更: 従来エラーだった形が成功するようになります。失われる正しい結果は
-  ありません。リテラル以外の列が混ざる形は従来どおり全件取得です。
-
-1. ksql-plugin-v3.40.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.41.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.40.0): B114 EXPLAIN が取得範囲を名乗る。
+本リリース (v3.41.0): B114 fetch の NONE を COUNT_ONLY へ改める。
+
+- B114: 上の「修正」を参照してください。押し下げ判定・取得動作は不変です。
+
+前リリース (v3.40.0): B114 EXPLAIN が取得範囲を名乗る。
 
 - B114: 上の「追加」を参照してください。表示の追加と公開型の純加法のみです。
 
@@ -113,16 +119,6 @@ release 成果物:
 
 - B107: 上の「追加と破壊的変更の移行案内」を参照してください。
 - B108: EXPLAIN 文の論理アプリ表示の修正です。
-
-前リリース (v3.36.0): B105 UNION の枝の COUNT(*) を単発 GET に。
-
-- B105: 上の「修正」を参照してください。
-
-前リリース (v3.34.0): B98 外部結合の打ち切りを fail-closed 化／B99 MCP を SDK v2 へ移行。
-
-- B98: 上の「挙動の変更の移行案内」を参照してください。
-- B99: 上の「実行環境の要件の変更」を参照してください。MCP サーバーの実行に
-  Node.js 20 以上が必要になります。CLI・engine ライブラリ・プラグインは変わりません。
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
