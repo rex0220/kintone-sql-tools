@@ -3197,7 +3197,8 @@ fetch:         PREFILTERED (未確定)      ← 絞り込みは効いている
 
 | 値 | 意味 |
 |---|---|
-| `NONE` | **レコードを走査しません**（`COUNT(*)` を `totalCount` の単発 GET で解く場合など）。件数に関係なく **1 リクエスト**で、転送されるのは `limit 1` の 1 件だけです（`metrics.fetchedRows` は 1） |
+| `NONE` | **kintone から取得するソースが無い文**です（一時テーブルだけを参照する文など）。この値は構造化された `plan` にのみ現れ、テキストでは `fetch:` / `fetch summary:` を表示しません |
+| `COUNT_ONLY` | **レコードを走査しません**（`COUNT(*)` を `totalCount` の単発 GET で解く場合など）。件数に関係なく **1 リクエスト**で、転送されるのは `limit 1` の 1 件だけです（`metrics.fetchedRows` は 1） |
 | `EXACT` | `WHERE` 全体を kintone 側で絞り込み、**JS での追加評価はありません** |
 | `PREFILTERED` | **一部の述語だけ**を kintone 側で絞り込み、残りは JS で評価します |
 | `ALL` | **全件取得**します |
@@ -3208,7 +3209,7 @@ fetch:         PREFILTERED (未確定)      ← 絞り込みは効いている
 - `(未確定)` — **実行時の型・選択肢の実在確認で、絞り込みが落ちる可能性があります。**
   落ちた場合は全件取得になります
 
-**`fetch summary:` は文全体の最悪値**です（`NONE` < `EXACT` < `PREFILTERED` < `ALL`）。
+**`fetch summary:` は文全体の最悪値**です（`NONE` < `COUNT_ONLY` < `EXACT` < `PREFILTERED` < `ALL`）。
 kintone から取得するソースが 1 つも無い文（一時テーブルだけを参照する文など）では出ません。
 
 #### 取得のされ方はソースごとに違います
@@ -3219,7 +3220,7 @@ kintone から取得するソースが 1 つも無い文（一時テーブルだ
 ```
 [union:1]
   mode:          COUNT_TOTAL_COUNT
-  fetch:         NONE (limit 1)        ← レコードを取得しない
+  fetch:         COUNT_ONLY (limit 1)  ← 1 件だけ転送し、走査しない
 
 [union:2]
   mode:          FULL_SCAN

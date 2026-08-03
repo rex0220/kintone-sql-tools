@@ -233,12 +233,12 @@ export interface ExplainResult {
   plan?: {
     statements: readonly {
       index: number;
-      fetch: "none" | "exact" | "prefiltered" | "all";
+      fetch: "none" | "count_only" | "exact" | "prefiltered" | "all";
       sources: readonly {
         app: number;
         alias: string | null;
         role: "main" | "join" | "union" | "cte" | "subquery";
-        fetch: "none" | "exact" | "prefiltered" | "all";
+        fetch: "none" | "count_only" | "exact" | "prefiltered" | "all";
         pending: boolean;
         kintoneQuery: string | null;
         limit: number | null;

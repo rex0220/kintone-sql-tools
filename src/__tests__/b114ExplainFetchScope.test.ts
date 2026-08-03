@@ -45,7 +45,7 @@ function sourceFetch(plan: readonly string[], source: RegExp): string {
 }
 
 test.each([
-  ["COUNT_TOTAL_COUNT", "SELECT COUNT(*) FROM APP100", "fetch summary: NONE", "  fetch:         NONE (limit 1)"],
+  ["COUNT_TOTAL_COUNT", "SELECT COUNT(*) FROM APP100", "fetch summary: COUNT_ONLY", "  fetch:         COUNT_ONLY (limit 1)"],
   [
     "whole-WHERE exact",
     "SELECT 登録日 FROM APP100 WHERE 登録日 >= '2026-01-01' AND 登録日 < '2027-01-01'",
@@ -77,7 +77,7 @@ test("B114: JOIN は alias ごとに EXACT / ALL、summary は ALL", async () =>
   expect(sourceFetch(plan, /^\s*JOIN:\s+APP200 AS b/)).toBe("  fetch:         EXACT");
 });
 
-test("B114: UNION は枝ごとに NONE / ALL、summary は文全体で1行の ALL", async () => {
+test("B114: UNION は枝ごとに COUNT_ONLY / ALL、summary は文全体で1行の ALL", async () => {
   const plan = await explain(
     "SELECT COUNT(*) AS c FROM APP100 UNION ALL " +
       "SELECT COUNT(顧客名) AS c FROM APP200 WHERE 顧客名 LIKE 'A%'"
@@ -86,7 +86,7 @@ test("B114: UNION は枝ごとに NONE / ALL、summary は文全体で1行の AL
   expect(plan.filter((line) => line.startsWith("fetch summary:"))).toEqual(["fetch summary: ALL"]);
   const first = plan.indexOf("[union:1]");
   const second = plan.indexOf("[union:2]");
-  expect(plan.slice(first, second)).toContain("  fetch:         NONE (limit 1)");
+  expect(plan.slice(first, second)).toContain("  fetch:         COUNT_ONLY (limit 1)");
   expect(plan.slice(second)).toContain("  fetch:         ALL");
 });
 
@@ -101,6 +101,23 @@ test("B114: 一時テーブルだけを読む文には fetch summary / fetch を
     expect.stringMatching(/^\s*fetch:/),
   ]));
   expect(tempOnly[0]).toBe("  mode:          FULL_SCAN（一時テーブル参照）");
+});
+
+test("B114: COUNT_ONLY と物理 source なしの NONE が同じバッチで併存する", async () => {
+  const plans = await buildBatchExplainPlans(
+    "CREATE TEMP TABLE #t AS SELECT COUNT(*) AS 件数 FROM APP100; SELECT 件数 FROM #t",
+    makeClient()
+  );
+  expect(plans.statements[0].plan.some((line) =>
+    line.trim() === "fetch summary: COUNT_ONLY"
+  )).toBe(true);
+  expect(plans.statements[0].plan.some((line) =>
+    line.trim() === "fetch:         COUNT_ONLY (limit 1)"
+  )).toBe(true);
+  expect(plans.statements[1].plan).not.toEqual(expect.arrayContaining([
+    expect.stringMatching(/^fetch summary:/),
+    expect.stringMatching(/^\s*fetch:/),
+  ]));
 });
 
 test("B114: CTE の物理 source と effective plan に limit 接尾辞を出す", async () => {

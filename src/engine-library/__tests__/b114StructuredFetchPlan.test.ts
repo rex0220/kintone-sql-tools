@@ -46,9 +46,9 @@ function expectTextAndPlanAgree(result: ExplainResult): void {
 
 test.each([
   [
-    "NONE + limit",
+    "COUNT_ONLY + limit",
     "SELECT COUNT(*) FROM APP100",
-    { fetch: "none", pending: false, kintoneQuery: "limit 1", limit: 1 },
+    { fetch: "count_only", pending: false, kintoneQuery: "limit 1", limit: 1 },
   ],
   [
     "EXACT",
@@ -103,7 +103,7 @@ test("B114 structured plan: UNION keeps one ordered source per branch", async ()
   expect(result.plan?.statements[0]).toMatchObject({
     fetch: "all",
     sources: [
-      { app: 100, role: "union", fetch: "none", limit: 1 },
+      { app: 100, role: "union", fetch: "count_only", limit: 1 },
       { app: 200, role: "union", fetch: "all", kintoneQuery: null },
     ],
   });
@@ -139,6 +139,28 @@ test("B114 structured plan: CTE sources are retained and temporary-table referen
   expectTextAndPlanAgree(batch);
 });
 
+test("B114 structured plan: NONE < COUNT_ONLY and both coexist in one batch", async () => {
+  const result = await explainQuery(
+    "CREATE TEMP TABLE #t AS SELECT COUNT(*) AS 件数 FROM APP100; SELECT 件数 FROM #t",
+    { client: makeClient() }
+  );
+  expect(result.plan?.statements).toEqual([
+    {
+      index: 0,
+      fetch: "count_only",
+      sources: [expect.objectContaining({
+        app: 100,
+        role: "main",
+        fetch: "count_only",
+        limit: 1,
+      })],
+    },
+    { index: 1, fetch: "none", sources: [] },
+  ]);
+  expect(result.lines.some((line) => line.trim() === "fetch summary: COUNT_ONLY")).toBe(true);
+  expectTextAndPlanAgree(result);
+});
+
 test("B114 structured plan: scalar subquery physical sources use the subquery role", async () => {
   const result = await explainQuery(
     "SELECT 顧客名, (SELECT COUNT(*) FROM APP200) AS 件数 FROM APP100",
@@ -157,7 +179,7 @@ test("B114 structured plan: batch planner returns one entry for every statement"
     { client: makeClient() }
   );
   expect(result.plan?.statements.map(({ index, fetch }) => ({ index, fetch }))).toEqual([
-    { index: 0, fetch: "none" },
+    { index: 0, fetch: "count_only" },
     { index: 1, fetch: "all" },
   ]);
   expectTextAndPlanAgree(result);

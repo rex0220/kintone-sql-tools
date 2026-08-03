@@ -9973,7 +9973,7 @@ export interface BatchStatementPlan {
   plan: string[];
 }
 
-type ExplainFetchValue = "none" | "exact" | "prefiltered" | "all";
+type ExplainFetchValue = "none" | "count_only" | "exact" | "prefiltered" | "all";
 type ExplainFetchRole = "main" | "join" | "union" | "cte" | "subquery";
 
 interface ExplainFetchSourcePlan {
@@ -10426,13 +10426,14 @@ function buildExplainPlan(
   return includeFetchSummary ? addFetchSummary(lines, fetchCollector.sources) : lines;
 }
 
-type ExplainFetchScope = "NONE" | "EXACT" | "PREFILTERED" | "ALL";
+type ExplainFetchScope = "NONE" | "COUNT_ONLY" | "EXACT" | "PREFILTERED" | "ALL";
 
 const EXPLAIN_FETCH_VALUE_RANK: Readonly<Record<ExplainFetchValue, number>> = {
   none: 0,
-  exact: 1,
-  prefiltered: 2,
-  all: 3,
+  count_only: 1,
+  exact: 2,
+  prefiltered: 3,
+  all: 4,
 };
 
 function worstExplainFetch(sources: readonly ExplainFetchSourcePlan[]): ExplainFetchValue {
@@ -10614,7 +10615,7 @@ function buildSelectPlan(
         stmt.from.appId,
         stmt.from.alias,
         sourceRole,
-        "NONE",
+        "COUNT_ONLY",
         `${baseQuery}${baseQuery ? " " : ""}limit 1`
       );
       lines.push(renderFetchScope(source));

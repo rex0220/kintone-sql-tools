@@ -193,6 +193,11 @@ type QueryResult = {
 および consumer が構築する既存オブジェクトとの型互換性のため optional ですが、
 現行 engine は常に設定します。
 
+文と source の `fetch` は同じ 5 値 `"none" | "count_only" | "exact" |
+"prefiltered" | "all"` です。最悪値の順序は `none` < `count_only` < `exact` <
+`prefiltered` < `all` です。`none` は kintone から取得する source が無い文でのみ現れ、
+`COUNT(*)` を `totalCount` の単発 GET で解く source は `count_only` になります。
+
 物理 source がない文も `statements[]` には残り、`sources: []` と `fetch: "none"` を
 返します。一方、人間向け `text` / `lines` は、その文の `fetch summary:` を表示しません。
 これは意図的な差です。構造は取得なしという事実と文ごとの形を保持し、テキストは表示上の
