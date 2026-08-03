@@ -255,7 +255,7 @@ test("console mode shows session summary and supports history options", async ()
   expect(stdout).toContain("1. SELECT * FROM APP88");
   expect(stdout).toContain("Ctrl+C: cancel input buffer");
   expect(stdout).toContain("Ctrl+D: exit console");
-  expect(stderr).toContain("rowCount=4");
+  expect(stderr).toContain("rowCount=6");
   rmSync(homeDir, { recursive: true, force: true });
 }, 20000);
 
@@ -324,7 +324,7 @@ test("console mode supports profile/rerun/save workflow", async () => {
   expect(stdout).toContain("profile=qa");
   expect(stdout).toContain("rerun: SELECT * FROM APP88");
   expect(stdout).toContain(`saved: ${savePath}`);
-  expect(stderr).toContain("rowCount=4");
+  expect(stderr).toContain("rowCount=6");
   expect(existsSync(savePath)).toBe(true);
   expect(readFileSync(savePath, "utf-8")).toContain("plan");
 

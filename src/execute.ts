@@ -10196,7 +10196,7 @@ async function executeExplain(
     sharedPlan
   );
   const relativeLines = relativeDateExplainLines(sharedPlan);
-  const lines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed
+  const planLines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed
     ? [...explainMetadataLines(analysis), ...relativeLines]
     : [
         ...explainMetadataLines(analysis),
@@ -10209,6 +10209,7 @@ async function executeExplain(
           cursorMaxActive
         ),
       ];
+  const lines = addFetchSummary(planLines);
   return {
     type: "SELECT",
     columns: ["plan"],
@@ -10237,10 +10238,17 @@ function buildExplainPlan(
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
   maxRecords = 10_000,
-  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
+  includeFetchSummary = true
 ): string[] {
-  if (query.type === "UNION")         return buildUnionPlan(query, capabilities, orderPlans, plainGroupByPlans);
-  if (query.type === "WITH")          return buildWithPlan(query, capabilities, orderPlans, plainGroupByPlans);
+  if (query.type === "UNION") {
+    const lines = buildUnionPlan(query, capabilities, orderPlans, plainGroupByPlans);
+    return includeFetchSummary ? addFetchSummary(lines) : lines;
+  }
+  if (query.type === "WITH") {
+    const lines = buildWithPlan(query, capabilities, orderPlans, plainGroupByPlans);
+    return includeFetchSummary ? addFetchSummary(lines) : lines;
+  }
   if (query.type === "INSERT")        return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
   if (query.type === "UPSERT")        return buildUpsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
@@ -10326,7 +10334,48 @@ function buildExplainPlan(
       `  duplicateKey:  preflight before lookup/write (requires load)`,
     ];
   }
-  return buildSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
+  const lines = buildSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
+  return includeFetchSummary ? addFetchSummary(lines) : lines;
+}
+
+type ExplainFetchScope = "NONE" | "EXACT" | "PREFILTERED" | "ALL";
+
+const EXPLAIN_FETCH_SCOPE_RANK: Readonly<Record<ExplainFetchScope, number>> = {
+  NONE: 0,
+  EXACT: 1,
+  PREFILTERED: 2,
+  ALL: 3,
+};
+
+function addFetchSummary(lines: string[]): string[] {
+  const detailLines = lines.filter((line) => !line.startsWith("fetch summary:"));
+  const scopes = detailLines.flatMap((line): ExplainFetchScope[] => {
+    const match = /^\s*fetch:\s+(NONE|EXACT|PREFILTERED|ALL)(?:\s|$)/.exec(line);
+    return match ? [match[1] as ExplainFetchScope] : [];
+  });
+  if (scopes.length === 0) return detailLines;
+  const worst = scopes.reduce((left, right) =>
+    EXPLAIN_FETCH_SCOPE_RANK[left] >= EXPLAIN_FETCH_SCOPE_RANK[right] ? left : right
+  );
+  return [`fetch summary: ${worst}`, ...detailLines];
+}
+
+function pushedQueryLimit(query: string): number | null {
+  const match = /(?:^|\s)limit\s+(\d+)(?:\s|$)/i.exec(query);
+  return match ? Number(match[1]) : null;
+}
+
+function formatFetchScope(
+  scope: ExplainFetchScope,
+  query: string,
+  pending = false
+): string {
+  const limit = pushedQueryLimit(query);
+  return [
+    scope,
+    ...(limit === null ? [] : [`(limit ${limit})`]),
+    ...(pending ? ["(未確定)"] : []),
+  ].join(" ");
 }
 
 function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
@@ -10363,7 +10412,8 @@ function buildSelectPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
-  allowTotalCountPlan = true
+  allowTotalCountPlan = true,
+  emitFetch = true
 ): string[] {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities
     ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
@@ -10441,6 +10491,7 @@ function buildSelectPlan(
     lines.push(
       `  kintone query: ${baseQuery}${baseQuery ? " " : ""}limit 1`
     );
+    if (emitFetch) lines.push("  fetch:         NONE (limit 1)");
     lines.push("  fields:        $id");
     lines.push("  fetch API:     GET records.json (totalCount=true)");
     lines.push("  REST execution: single GET");
@@ -10494,6 +10545,10 @@ function buildSelectPlan(
       ? buildKorderCursorQuery(stmt)
       : params.query;
     lines.push(`  kintone query: ${displayedQuery || "(なし)"}`);
+    if (emitFetch && stmt.from.cteName === null) {
+      const fetchScope: ExplainFetchScope = displayedQuery ? "EXACT" : "ALL";
+      lines.push(`  fetch:         ${formatFetchScope(fetchScope, displayedQuery)}`);
+    }
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
     const runtimeJoinPlan = explainJoinPushdownPlans.get(stmt);
@@ -10569,6 +10624,17 @@ function buildSelectPlan(
     const mainFunctionConsumption = runtimeJoinPlan?.joinPlan.serverFunctionConsumptions.find(
       (consumption) => consumption.targetAlias === stmt.from.alias
     );
+    if (emitFetch && stmt.from.cteName === null) {
+      const mainPending = !runtimeJoinPlan && mainCandidate !== null;
+      const mainFetchScope: ExplainFetchScope = mainQ === "(全件取得)"
+        ? "ALL"
+        : mainPending
+          ? "PREFILTERED"
+          : mainJoinItem?.relation === "exact" || mainFunctionConsumption || exactOriginalWhere !== ""
+          ? "EXACT"
+          : "PREFILTERED";
+      lines.push(`  fetch:         ${formatFetchScope(mainFetchScope, mainQ, mainPending)}`);
+    }
     if (mainJoinItem || mainFunctionConsumption) {
       lines.push(`  pushdown applied: ${mainBoundQuery}`);
       lines.push(`  relation: ${mainJoinItem?.relation ?? "exact"}`);
@@ -10602,6 +10668,17 @@ function buildSelectPlan(
         runtimeJoinPlan?.joinPlan.serverFunctionConsumptions.find(
           (consumption) => consumption.targetAlias === join.table.alias
         );
+      if (emitFetch && join.table.cteName === null) {
+        const joinPending = !runtimeJoinPlan && joinCandidate !== null;
+        const joinFetchScope: ExplainFetchScope = joinQ === "(全件取得)"
+          ? "ALL"
+          : joinPending
+            ? "PREFILTERED"
+            : joinPlanItem?.relation === "exact" || joinFunctionConsumption
+            ? "EXACT"
+            : "PREFILTERED";
+        lines.push(`  fetch:         ${formatFetchScope(joinFetchScope, joinQ, joinPending)}`);
+      }
       if (joinPlanItem || joinFunctionConsumption) {
         lines.push(`  pushdown applied: ${joinBoundQuery}`);
         lines.push(`  relation: ${joinPlanItem?.relation ?? "exact"}`);
@@ -10661,7 +10738,8 @@ function buildWithPlan(
       100,
       DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
       10_000,
-      plainGroupByPlans
+      plainGroupByPlans,
+      false
     ));
   }
   if (canInlineSingleCte(stmt)) {
@@ -10788,7 +10866,9 @@ function buildInsertSelectPlan(
   lines.push(`  fields:  ${stmt.fields.join(", ")}`);
   lines.push(`  api:     POST /k/v1/records.json（件数は SELECT 結果に依存、100 件ごとにバッチ）`);
   lines.push("");
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
+  lines.push(...buildSelectPlan(
+    stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false, false
+  ));
   return lines;
 }
 
@@ -10850,7 +10930,9 @@ function buildUpdatePlan(
   for (const a of stmt.assignments) {
     if (a.value.type === "SCALAR_SUBQUERY") {
       lines.push("");
-      lines.push(...buildSelectPlan(a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans, undefined, false));
+      lines.push(...buildSelectPlan(
+        a.value.query, `[subquery: ${a.field}]`, capabilities, orderPlans, undefined, false, false
+      ));
     }
   }
 
@@ -10998,7 +11080,9 @@ function buildUpsertSelectPlan(
     `  api:        GET /k/v1/records.json（重複判定）→ POST または PUT /k/v1/records.json（100 件ごとにバッチ）`,
     ``,
   ];
-  lines.push(...buildSelectPlan(stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false));
+  lines.push(...buildSelectPlan(
+    stmt.select, "[source SELECT]", capabilities, orderPlans, plainGroupByPlans, false, false
+  ));
   return lines;
 }
 

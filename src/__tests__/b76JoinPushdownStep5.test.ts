@@ -151,6 +151,7 @@ function normalizeProfile(text: string): string {
 }
 
 const PLAN_FACTS = [
+  "fetch summary:",
   "join pushdown plan:",
   "client residual:",
   "residual:",
@@ -160,6 +161,7 @@ const PLAN_FACTS = [
   "LEFT JOIN:",
   "RIGHT JOIN:",
   "kintone query:",
+  "fetch:",
   "pushdown applied:",
   "pushdown candidate:",
   "relation:",
