@@ -9973,6 +9973,47 @@ export interface BatchStatementPlan {
   plan: string[];
 }
 
+type ExplainFetchValue = "none" | "exact" | "prefiltered" | "all";
+type ExplainFetchRole = "main" | "join" | "union" | "cte" | "subquery";
+
+interface ExplainFetchSourcePlan {
+  app: number;
+  alias: string | null;
+  role: ExplainFetchRole;
+  fetch: ExplainFetchValue;
+  pending: boolean;
+  kintoneQuery: string | null;
+  limit: number | null;
+}
+
+interface ExplainFetchStatementPlan {
+  index: number;
+  fetch: ExplainFetchValue;
+  sources: ExplainFetchSourcePlan[];
+}
+
+interface ExplainFetchPlan {
+  statements: ExplainFetchStatementPlan[];
+}
+
+interface ExplainFetchCollector {
+  sources: ExplainFetchSourcePlan[];
+}
+
+const EXPLAIN_FETCH_PLAN = Symbol("ksql.explainFetchPlan");
+type ExplainFetchPlanCarrier = {
+  [EXPLAIN_FETCH_PLAN]?: ExplainFetchPlan;
+};
+
+/** engine ライブラリ境界だけが読む。既存の CLI / MCP payload には追加しない。 */
+export function getExplainFetchPlan(result: object): ExplainFetchPlan | undefined {
+  return (result as ExplainFetchPlanCarrier)[EXPLAIN_FETCH_PLAN];
+}
+
+function setExplainFetchPlan(result: object, plan: ExplainFetchPlan): void {
+  (result as ExplainFetchPlanCarrier)[EXPLAIN_FETCH_PLAN] = plan;
+}
+
 type BatchExplainResult = {
   statementCount: number;
   statements: BatchStatementPlan[];
@@ -9998,6 +10039,7 @@ export async function buildBatchExplainPlans(
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
     const variables = new Map<string, VarValue>();
     const plans: BatchStatementPlan[] = [];
+    const fetchStatements: ExplainFetchStatementPlan[] = [];
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i];
       const planStmt = stmt.type === "SET_VARIABLE"
@@ -10014,6 +10056,7 @@ export async function buildBatchExplainPlans(
         maxRecords,
         relativeDatePlan
       );
+      const fetchCollector: ExplainFetchCollector = { sources: [] };
       const statementPlan =
         relativeDatePlan.hasServerOnlyWhereFunction && !relativeDatePlan.allowed
         ? relativeDateExplainLines(relativeDatePlan)
@@ -10025,7 +10068,8 @@ export async function buildBatchExplainPlans(
               whereAnalysis.capabilities,
               whereAnalysis.orderPlans,
               dmlMaxRows,
-              dmlMaxSubtableRows
+              dmlMaxSubtableRows,
+              fetchCollector
             ), cursorMaxActive),
           ];
       const metadataPlan = explainMetadataLines(whereAnalysis);
@@ -10036,6 +10080,11 @@ export async function buildBatchExplainPlans(
           ? metadataPlan
           : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)],
       });
+      fetchStatements.push({
+        index: i,
+        fetch: worstExplainFetch(fetchCollector.sources),
+        sources: fetchCollector.sources,
+      });
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
         variables.set(stmt.name, stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE"
@@ -10045,7 +10094,9 @@ export async function buildBatchExplainPlans(
           : { type: "string", value: `@${stmt.name}`, placeholder: true });
       }
     }
-    return { statementCount: statements.length, statements: plans };
+    const result = { statementCount: statements.length, statements: plans };
+    setExplainFetchPlan(result, { statements: fetchStatements });
+    return result;
   } finally {
     releaseMetadataCacheScope(invocationCacheContext);
   }
@@ -10057,14 +10108,17 @@ function buildBatchStatementPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  collector: ExplainFetchCollector = { sources: [] }
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch（バッチ終了時に自動破棄）`,
       `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
-      ...buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans).map((l) => `  ${l}`),
+      ...buildPlanForBatchQuery(
+        stmt.query, info, capabilities, orderPlans, collector, "main"
+      ).map((l) => `  ${l}`),
     ];
   }
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -10082,7 +10136,9 @@ function buildBatchStatementPlan(
         `SET @${stmt.name} = (SELECT ...)`,
         "  value:         サブクエリを実行時に1回評価（1行1列・バッチ内定数・結果メタデータには非公開）",
         "  subquery:",
-        ...buildPlanForBatchQuery(stmt.expr.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`),
+        ...buildPlanForBatchQuery(
+          stmt.expr.query, subInfo, capabilities, orderPlans, collector
+        ).map((l) => `  ${l}`),
       ];
     }
     return [
@@ -10104,7 +10160,11 @@ function buildBatchStatementPlan(
   }
   if (stmt.type === "SHOW_APPS") return ["SHOW APPS（アプリ一覧の取得）"];
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
-  if (stmt.type === "EXPLAIN") return buildPlanForBatchQuery(stmt.query, info, capabilities, orderPlans);
+  if (stmt.type === "EXPLAIN") {
+    return buildPlanForBatchQuery(
+      stmt.query, info, capabilities, orderPlans, collector
+    );
+  }
   if (stmt.type === "ASSERT") {
     const lines: string[] = [
       `ASSERT ${stmt.text}`,
@@ -10118,14 +10178,16 @@ function buildBatchStatementPlan(
       // 参照先で経路が変わるため per-subquery に判定する
       //（temp 参照なしの側を FULL_SCAN 表示にしない）
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
-      lines.push(...buildPlanForBatchQuery(sq.query, subInfo, capabilities, orderPlans).map((l) => `  ${l}`));
+      lines.push(...buildPlanForBatchQuery(
+        sq.query, subInfo, capabilities, orderPlans, collector
+      ).map((l) => `  ${l}`));
     });
     return lines;
   }
   if (stmt.type === "UPDATE" && (stmt.applyBlocks?.length ?? 0) > 0) {
     return buildExplainPlan(stmt, undefined, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows);
   }
-  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans);
+  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans, collector);
 }
 
 /** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
@@ -10144,11 +10206,17 @@ function buildPlanForBatchQuery(
   query: Statement | ExplainStatement["query"],
   info: BatchAnalysis["statements"][number],
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
-  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  collector: ExplainFetchCollector = { sources: [] },
+  sourceRole: ExplainFetchRole = "main"
 ): string[] {
   // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
   if (info.tempTablesReferenced.length === 0) {
-    return buildExplainPlan(query as ExplainStatement["query"], undefined, capabilities, orderPlans);
+    return buildExplainPlan(
+      query as ExplainStatement["query"], undefined, capabilities, orderPlans,
+      100, DEFAULT_APPLY_MAX_SUBTABLE_ROWS, 10_000, undefined, true, collector,
+      sourceRole
+    );
   }
   // 一時テーブル参照あり → FULL_SCAN（インメモリ）であることを明示する
   const lines: string[] = [];
@@ -10195,6 +10263,7 @@ async function executeExplain(
     maxRecords,
     sharedPlan
   );
+  const fetchCollector: ExplainFetchCollector = { sources: [] };
   const relativeLines = relativeDateExplainLines(sharedPlan);
   const planLines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed
     ? [...explainMetadataLines(analysis), ...relativeLines]
@@ -10204,18 +10273,27 @@ async function executeExplain(
         ...addCursorConcurrency(
           buildExplainPlan(
             stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
-            dmlMaxRows, dmlMaxSubtableRows, maxRecords, analysis.plainGroupByPlans
+            dmlMaxRows, dmlMaxSubtableRows, maxRecords, analysis.plainGroupByPlans,
+            true, fetchCollector
           ),
           cursorMaxActive
         ),
       ];
-  const lines = addFetchSummary(planLines);
-  return {
+  const lines = addFetchSummary(planLines, fetchCollector.sources);
+  const result: SelectResult = {
     type: "SELECT",
     columns: ["plan"],
     rows: lines.map((line) => ({ plan: line })),
     rowCount: lines.length,
   };
+  setExplainFetchPlan(result, {
+    statements: [{
+      index: 0,
+      fetch: worstExplainFetch(fetchCollector.sources),
+      sources: fetchCollector.sources,
+    }],
+  });
+  return result;
 }
 
 function addCursorConcurrency(lines: string[], cursorMaxActive: number): string[] {
@@ -10239,15 +10317,22 @@ function buildExplainPlan(
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
   maxRecords = 10_000,
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
-  includeFetchSummary = true
+  includeFetchSummary = true,
+  collector?: ExplainFetchCollector,
+  sourceRole: ExplainFetchRole = "main"
 ): string[] {
+  const fetchCollector = collector ?? { sources: [] };
   if (query.type === "UNION") {
-    const lines = buildUnionPlan(query, capabilities, orderPlans, plainGroupByPlans);
-    return includeFetchSummary ? addFetchSummary(lines) : lines;
+    const lines = buildUnionPlan(
+      query, capabilities, orderPlans, plainGroupByPlans, fetchCollector
+    );
+    return includeFetchSummary ? addFetchSummary(lines, fetchCollector.sources) : lines;
   }
   if (query.type === "WITH") {
-    const lines = buildWithPlan(query, capabilities, orderPlans, plainGroupByPlans);
-    return includeFetchSummary ? addFetchSummary(lines) : lines;
+    const lines = buildWithPlan(
+      query, capabilities, orderPlans, plainGroupByPlans, fetchCollector
+    );
+    return includeFetchSummary ? addFetchSummary(lines, fetchCollector.sources) : lines;
   }
   if (query.type === "INSERT")        return buildInsertPlan(query, label, dmlMaxRows, dmlMaxSubtableRows);
   if (query.type === "INSERT_SELECT") return buildInsertSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
@@ -10334,30 +10419,37 @@ function buildExplainPlan(
       `  duplicateKey:  preflight before lookup/write (requires load)`,
     ];
   }
-  const lines = buildSelectPlan(query, label, capabilities, orderPlans, plainGroupByPlans);
-  return includeFetchSummary ? addFetchSummary(lines) : lines;
+  const lines = buildSelectPlan(
+    query, label, capabilities, orderPlans, plainGroupByPlans,
+    true, true, fetchCollector, sourceRole
+  );
+  return includeFetchSummary ? addFetchSummary(lines, fetchCollector.sources) : lines;
 }
 
 type ExplainFetchScope = "NONE" | "EXACT" | "PREFILTERED" | "ALL";
 
-const EXPLAIN_FETCH_SCOPE_RANK: Readonly<Record<ExplainFetchScope, number>> = {
-  NONE: 0,
-  EXACT: 1,
-  PREFILTERED: 2,
-  ALL: 3,
+const EXPLAIN_FETCH_VALUE_RANK: Readonly<Record<ExplainFetchValue, number>> = {
+  none: 0,
+  exact: 1,
+  prefiltered: 2,
+  all: 3,
 };
 
-function addFetchSummary(lines: string[]): string[] {
+function worstExplainFetch(sources: readonly ExplainFetchSourcePlan[]): ExplainFetchValue {
+  return sources.reduce<ExplainFetchValue>((worst, source) =>
+    EXPLAIN_FETCH_VALUE_RANK[worst] >= EXPLAIN_FETCH_VALUE_RANK[source.fetch]
+      ? worst
+      : source.fetch
+  , "none");
+}
+
+function addFetchSummary(
+  lines: string[],
+  sources: readonly ExplainFetchSourcePlan[]
+): string[] {
   const detailLines = lines.filter((line) => !line.startsWith("fetch summary:"));
-  const scopes = detailLines.flatMap((line): ExplainFetchScope[] => {
-    const match = /^\s*fetch:\s+(NONE|EXACT|PREFILTERED|ALL)(?:\s|$)/.exec(line);
-    return match ? [match[1] as ExplainFetchScope] : [];
-  });
-  if (scopes.length === 0) return detailLines;
-  const worst = scopes.reduce((left, right) =>
-    EXPLAIN_FETCH_SCOPE_RANK[left] >= EXPLAIN_FETCH_SCOPE_RANK[right] ? left : right
-  );
-  return [`fetch summary: ${worst}`, ...detailLines];
+  if (sources.length === 0) return detailLines;
+  return [`fetch summary: ${worstExplainFetch(sources).toUpperCase()}`, ...detailLines];
 }
 
 function pushedQueryLimit(query: string): number | null {
@@ -10365,17 +10457,40 @@ function pushedQueryLimit(query: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-function formatFetchScope(
+function createExplainFetchSource(
+  collector: ExplainFetchCollector,
+  app: number,
+  alias: string | null,
+  role: ExplainFetchRole,
   scope: ExplainFetchScope,
   query: string,
   pending = false
-): string {
-  const limit = pushedQueryLimit(query);
+): ExplainFetchSourcePlan {
+  const source: ExplainFetchSourcePlan = {
+    app,
+    alias,
+    role,
+    fetch: scope.toLowerCase() as ExplainFetchValue,
+    pending,
+    kintoneQuery: query === "(全件取得)" || query === "(なし)" || query === ""
+      ? null
+      : query,
+    limit: pushedQueryLimit(query),
+  };
+  collector.sources.push(source);
+  return source;
+}
+
+function formatFetchScope(source: ExplainFetchSourcePlan): string {
   return [
-    scope,
-    ...(limit === null ? [] : [`(limit ${limit})`]),
-    ...(pending ? ["(未確定)"] : []),
+    source.fetch.toUpperCase(),
+    ...(source.limit === null ? [] : [`(limit ${source.limit})`]),
+    ...(source.pending ? ["(未確定)"] : []),
   ].join(" ");
+}
+
+function renderFetchScope(source: ExplainFetchSourcePlan): string {
+  return `  fetch:         ${formatFetchScope(source)}`;
 }
 
 function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
@@ -10413,7 +10528,9 @@ function buildSelectPlan(
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   allowTotalCountPlan = true,
-  emitFetch = true
+  emitFetch = true,
+  collector: ExplainFetchCollector = { sources: [] },
+  sourceRole: ExplainFetchRole = "main"
 ): string[] {
   const whereCapability = capabilities?.get(stmt) ?? (capabilities
     ? [...capabilities].find(([candidate]) => JSON.stringify(candidate) === JSON.stringify(stmt))?.[1]
@@ -10491,7 +10608,17 @@ function buildSelectPlan(
     lines.push(
       `  kintone query: ${baseQuery}${baseQuery ? " " : ""}limit 1`
     );
-    if (emitFetch) lines.push("  fetch:         NONE (limit 1)");
+    if (emitFetch) {
+      const source = createExplainFetchSource(
+        collector,
+        stmt.from.appId,
+        stmt.from.alias,
+        sourceRole,
+        "NONE",
+        `${baseQuery}${baseQuery ? " " : ""}limit 1`
+      );
+      lines.push(renderFetchScope(source));
+    }
     lines.push("  fields:        $id");
     lines.push("  fetch API:     GET records.json (totalCount=true)");
     lines.push("  REST execution: single GET");
@@ -10547,7 +10674,14 @@ function buildSelectPlan(
     lines.push(`  kintone query: ${displayedQuery || "(なし)"}`);
     if (emitFetch && stmt.from.cteName === null) {
       const fetchScope: ExplainFetchScope = displayedQuery ? "EXACT" : "ALL";
-      lines.push(`  fetch:         ${formatFetchScope(fetchScope, displayedQuery)}`);
+      lines.push(renderFetchScope(createExplainFetchSource(
+        collector,
+        stmt.from.appId,
+        stmt.from.alias,
+        sourceRole,
+        fetchScope,
+        displayedQuery
+      )));
     }
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
@@ -10633,7 +10767,15 @@ function buildSelectPlan(
           : mainJoinItem?.relation === "exact" || mainFunctionConsumption || exactOriginalWhere !== ""
           ? "EXACT"
           : "PREFILTERED";
-      lines.push(`  fetch:         ${formatFetchScope(mainFetchScope, mainQ, mainPending)}`);
+      lines.push(renderFetchScope(createExplainFetchSource(
+        collector,
+        stmt.from.appId,
+        stmt.from.alias,
+        sourceRole,
+        mainFetchScope,
+        mainQ,
+        mainPending
+      )));
     }
     if (mainJoinItem || mainFunctionConsumption) {
       lines.push(`  pushdown applied: ${mainBoundQuery}`);
@@ -10677,7 +10819,15 @@ function buildSelectPlan(
             : joinPlanItem?.relation === "exact" || joinFunctionConsumption
             ? "EXACT"
             : "PREFILTERED";
-        lines.push(`  fetch:         ${formatFetchScope(joinFetchScope, joinQ, joinPending)}`);
+        lines.push(renderFetchScope(createExplainFetchSource(
+          collector,
+          join.table.appId,
+          join.table.alias,
+          "join",
+          joinFetchScope,
+          joinQ,
+          joinPending
+        )));
       }
       if (joinPlanItem || joinFunctionConsumption) {
         lines.push(`  pushdown applied: ${joinBoundQuery}`);
@@ -10689,7 +10839,9 @@ function buildSelectPlan(
     }
   }
 
-  lines.push(...collectSubqueryPlans(stmt, capabilities, orderPlans, plainGroupByPlans));
+  lines.push(...collectSubqueryPlans(
+    stmt, capabilities, orderPlans, plainGroupByPlans, collector
+  ));
   return lines;
 }
 
@@ -10697,7 +10849,8 @@ function buildUnionPlan(
   stmt: UnionStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
-  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
+  collector: ExplainFetchCollector = { sources: [] }
 ): string[] {
   // UnionStatement は left / right の二分木 — 左辺を再帰的に展開して全 SELECT を収集
   const selects: SelectStatement[] = [];
@@ -10711,7 +10864,10 @@ function buildUnionPlan(
   const lines: string[] = [];
   selects.forEach((sel, i) => {
     if (i > 0) lines.push("");
-    lines.push(...buildSelectPlan(sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans, true));
+    lines.push(...buildSelectPlan(
+      sel, `[union:${i + 1}]`, capabilities, orderPlans, plainGroupByPlans,
+      true, true, collector, "union"
+    ));
   });
   return lines;
 }
@@ -10720,12 +10876,16 @@ function buildWithPlan(
   stmt: WithStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
-  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
+  collector: ExplainFetchCollector = { sources: [] }
 ): string[] {
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
-      lines.push(...buildSelectPlan(cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans, false));
+      lines.push(...buildSelectPlan(
+        cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans,
+        false, true, collector, "cte"
+      ));
       lines.push("");
     }
   }
@@ -10739,13 +10899,17 @@ function buildWithPlan(
       DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
       10_000,
       plainGroupByPlans,
-      false
+      false,
+      collector
     ));
   }
   if (canInlineSingleCte(stmt)) {
     lines.push("");
     const inlined = buildInlinedQuery(stmt);
-    lines.push(...buildSelectPlan(inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans, false));
+    lines.push(...buildSelectPlan(
+      inlined, "[effective: inlined CTE]", capabilities, orderPlans, plainGroupByPlans,
+      false, true, collector, "cte"
+    ));
   }
   return lines;
 }
@@ -10788,7 +10952,8 @@ function collectSubqueryPlans(
   stmt: SelectStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
-  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
+  collector: ExplainFetchCollector = { sources: [] }
 ): string[] {
   const lines: string[] = [];
   let idx = 1;
@@ -10798,14 +10963,14 @@ function collectSubqueryPlans(
     switch (w.type) {
       case "BINARY":
         if (w.right.type === "SCALAR_SUBQUERY") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false, true, collector, "subquery"));
         }
         if (w.right.type === "SUBQUERY_IN_LIST") {
-          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
+          lines.push(""); lines.push(...buildSelectPlan(w.right.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false, true, collector, "subquery"));
         }
         break;
       case "EXISTS":
-        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
+        lines.push(""); lines.push(...buildSelectPlan(w.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false, true, collector, "subquery"));
         break;
       case "LOGICAL":  visitWhere(w.left); visitWhere(w.right); break;
       case "NOT":
@@ -10819,7 +10984,7 @@ function collectSubqueryPlans(
 
   for (const col of stmt.columns) {
     if (col.type === "SCALAR_SUBQUERY_COL") {
-      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false));
+      lines.push(""); lines.push(...buildSelectPlan(col.query, `[subquery:${idx++}]`, capabilities, orderPlans, plainGroupByPlans, false, true, collector, "subquery"));
     }
   }
 

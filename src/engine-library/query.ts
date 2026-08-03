@@ -1,6 +1,7 @@
 import {
   buildBatchExplainPlans,
   execute,
+  getExplainFetchPlan,
   type SelectResult,
 } from "../execute";
 import {
@@ -104,10 +105,14 @@ export async function explainQuery(
         result.rows.map((row) => String(row.plan ?? "")),
         logicalBindings
       );
+      const plan = getExplainFetchPlan(result) ?? {
+        statements: [{ index: 0, fetch: "none" as const, sources: [] }],
+      };
       return {
         type: "explain",
         lines,
         text: lines.join("\n"),
+        plan,
         metrics: mapMetrics(result.metrics),
       };
     }
@@ -129,10 +134,18 @@ export async function explainQuery(
         : []),
       ...statement.plan,
     ]), logicalBindings);
+    const plan = getExplainFetchPlan(result) ?? {
+      statements: result.statements.map((statement) => ({
+        index: statement.index,
+        fetch: "none" as const,
+        sources: [],
+      })),
+    };
     return {
       type: "explain",
       lines,
       text: lines.join("\n"),
+      plan,
       metrics: mapMetrics(),
     };
   } catch (error) {

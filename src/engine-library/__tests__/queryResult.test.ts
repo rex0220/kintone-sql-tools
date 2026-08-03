@@ -237,6 +237,9 @@ test("explainQuery normalizes one EXPLAIN and maps plan rows to lines and text",
     type: "explain",
     lines: ["statement: SELECT", "records API: 0"],
     text: "statement: SELECT\nrecords API: 0",
+    plan: {
+      statements: [{ index: 0, fetch: "none", sources: [] }],
+    },
     metrics: {
       recordGetCalls: 0,
       fetchedRows: 0,

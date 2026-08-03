@@ -183,7 +183,23 @@ type QueryResult = {
 超えただけでは `limitReached` は `true` になりません。`runBatch` の各結果では、
 ほかの metrics と同じくバッチ全体の集計値を返します。
 
-`ExplainResult` は `lines`、`text` と同じ metrics shape を返します。
+`ExplainResult` は `lines`、`text` と同じ metrics shape に加え、取得計画を
+`plan?` で返します。`plan.statements[]` は文ごと、各 `sources[]` は kintone から
+取得する物理アプリだけを保持します。一時テーブルや CTE の参照は source に含めず、
+存在しないアプリ ID を補いません。`role` は文の主 FROM を表す `main`、JOIN 先の
+`join`、UNION 枝の `union`、CTE 本体の `cte`、サブクエリの `subquery` のいずれかです。
+`CREATE TEMP TABLE ... AS SELECT` の物理アプリも内側 SELECT の主 FROM なので `main` です。
+各 source は `fetch`、`pending`、`kintoneQuery`、`limit` を保持します。プロパティは旧版
+および consumer が構築する既存オブジェクトとの型互換性のため optional ですが、
+現行 engine は常に設定します。
+
+物理 source がない文も `statements[]` には残り、`sources: []` と `fetch: "none"` を
+返します。一方、人間向け `text` / `lines` は、その文の `fetch summary:` を表示しません。
+これは意図的な差です。構造は取得なしという事実と文ごとの形を保持し、テキストは表示上の
+雑音を省いています。
+
+`fetch` の値は将来増えうるため、consumer は未知の値をエラーにせず未分類として
+扱ってください。
 
 ## client の供給
 

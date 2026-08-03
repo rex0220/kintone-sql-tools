@@ -230,6 +230,21 @@ export interface ExplainResult {
   type: "explain";
   lines: readonly string[];
   text: string;
+  plan?: {
+    statements: readonly {
+      index: number;
+      fetch: "none" | "exact" | "prefiltered" | "all";
+      sources: readonly {
+        app: number;
+        alias: string | null;
+        role: "main" | "join" | "union" | "cte" | "subquery";
+        fetch: "none" | "exact" | "prefiltered" | "all";
+        pending: boolean;
+        kintoneQuery: string | null;
+        limit: number | null;
+      }[];
+    }[];
+  };
   metrics: QueryMetrics;
 }
 
