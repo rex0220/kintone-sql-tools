@@ -3197,7 +3197,7 @@ fetch:         PREFILTERED (未確定)      ← 絞り込みは効いている
 
 | 値 | 意味 |
 |---|---|
-| `NONE` | **レコードを取得しません**（`COUNT(*)` を `totalCount` の単発 GET で解く場合など） |
+| `NONE` | **レコードを走査しません**（`COUNT(*)` を `totalCount` の単発 GET で解く場合など）。件数に関係なく **1 リクエスト**で、転送されるのは `limit 1` の 1 件だけです（`metrics.fetchedRows` は 1） |
 | `EXACT` | `WHERE` 全体を kintone 側で絞り込み、**JS での追加評価はありません** |
 | `PREFILTERED` | **一部の述語だけ**を kintone 側で絞り込み、残りは JS で評価します |
 | `ALL` | **全件取得**します |

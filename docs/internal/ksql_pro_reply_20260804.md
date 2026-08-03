@@ -9,7 +9,7 @@
 
 1. **依頼どおり両方入った**（人間向け 1 行＋構造化）ことを最初に。改名していないことも
 2. **形は 3 値ではなく 4 値・スカラーではなくソース単位**——**理由を実測で示す**
-   （`COUNT(*)` は取得 0 件／`UNION` の枝で取得のされ方が違う）
+   （`COUNT(*)` は件数のみ＝1 件だけ転送／`UNION` の枝で取得のされ方が違う）
 3. **`fetch` の値は将来増えうる**ので未知の値の扱いを頼む——これは運用の契約
 4. 「読むべきは mode ではなく kintone query の行」という注意書きは**不要になった**と伝える
 5. 社内メモ（この節）を削除してから送ること
@@ -55,7 +55,7 @@ plan.statements[0].sources[0].kintoneQuery; // 全件取得なら null
 
 ## 3. ご提案から 2 点だけ形を変えました（実測が理由です）
 
-### 3.1 3 値ではなく **4 値**——`NONE`（取得 0 件）を足しました
+### 3.1 3 値ではなく **4 値**——`NONE`（件数のみ）を足しました
 
 ```
 mode:          COUNT_TOTAL_COUNT
@@ -64,8 +64,9 @@ fetch:         NONE (limit 1)
 fetch API:     GET records.json (totalCount=true)
 ```
 
-**`COUNT(*)` はレコードを 1 件も取得しません。**ダッシュボードのカウント系ペインは
-この形が主力のはずで、`EXACT` とも `PREFILTERED` とも違います。
+**`COUNT(*)` はレコードを走査しません。**`limit 1` の単発 GET で `totalCount` だけを使うため、
+アプリの件数に関係なく **1 リクエスト・転送は `$id` だけの 1 件**です（`metrics.fetchedRows` も 1）。
+ダッシュボードのカウント系ペインはこの形が主力のはずで、`EXACT` とも `PREFILTERED` とも違います。
 
 ### 3.2 スカラー 1 個ではなく **ソース単位**にしました
 
@@ -73,7 +74,7 @@ fetch API:     GET records.json (totalCount=true)
 **次のクエリで必ず嘘になります**（実測）。
 
 ```
-[union:1]  fetch: NONE (limit 1)     ← 取得 0 件
+[union:1]  fetch: NONE (limit 1)     ← 件数のみ（走査なし）
 [union:2]  fetch: ALL                ← 全件
 ```
 
