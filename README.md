@@ -62,6 +62,21 @@ node dist-cli/ksql.js --help
 npm run build:plugin
 ```
 
+### テストを実行するときは `KSQL_*` を外す
+
+CLI は**環境変数を設定ファイルより優先**します（CLI 引数 → 環境変数 → 設定ファイル）。
+シェルに `KSQL_USERNAME` / `KSQL_PASSWORD` / `KSQL_CONFIG` / `KSQL_PROFILE` などが
+残っていると、**テストが別の認証・別の設定で走り、リポジトリを変えていないのに
+落ちたり通ったりします**。
+
+```bash
+env -u KSQL_USERNAME -u KSQL_PASSWORD npm test
+```
+
+日常の CLI 利用のために `KSQL_*` を設定している場合は、上のように外して実行してください。
+**テストが落ちたら、まず `env | grep KSQL_` を確認**すると早いことがあります
+（実装が読む `KSQL_*` は 32 個あります）。
+
 ## 使い分け（CLI / Plugin）
 
 - CLI を使うケース:
