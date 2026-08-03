@@ -3169,6 +3169,78 @@ EXPLAIN IMPORT INTO APP100 (顧客コード, 顧客名) FROM CSV customers BY NA
 - 対象アプリのフォーム定義を読める権限が必要です。schema取得に失敗した場合、推定SIMPLEとして成功させず元の認証・通信エラーを返します
 - `order plan`は`CANONICAL_LOCAL`／`CANONICAL_REST_TOP_N`／`KORDER_NATIVE`を表示します
 
+### 出力の読み方
+
+計画は次の 3 つの問いに答えます。**どの行を読むかは、知りたいことで決まります。**
+
+| 知りたいこと | 読む行 |
+|---|---|
+| **kintone から何件取りに行くか** | `fetch:`（ソースごと）／`fetch summary:`（文ごと） |
+| **途中で止まらないか** | `complete input:`／`search abort:`／`onLimit=truncate:` |
+| **どの条件が押し下がったか** | `kintone query:`／`pushdown applied:`／`pushdown candidate:`／`relation:` |
+
+#### ⚠ `mode:` は取得量ではありません
+
+`mode:` は**エンジン内部の評価戦略名**です。`FULL_SCAN` は「取得したレコードを
+JS で全行評価する」という意味で、**「全件取得する」という意味ではありません。**
+
+**`GROUP BY` や集計を含むクエリは、絞り込みが効いていても `FULL_SCAN` になります。**
+取得量は `fetch:` の行で判断してください。
+
+```
+mode:          FULL_SCAN
+kintone query: 確度 in ("A")
+fetch:         PREFILTERED (未確定)      ← 絞り込みは効いている
+```
+
+#### `fetch:` — そのソースから何を取りに行くか
+
+| 値 | 意味 |
+|---|---|
+| `NONE` | **レコードを取得しません**（`COUNT(*)` を `totalCount` の単発 GET で解く場合など） |
+| `EXACT` | `WHERE` 全体を kintone 側で絞り込み、**JS での追加評価はありません** |
+| `PREFILTERED` | **一部の述語だけ**を kintone 側で絞り込み、残りは JS で評価します |
+| `ALL` | **全件取得**します |
+
+接尾辞が付くことがあります。
+
+- `(limit N)` — 押し下げたクエリが `limit` を伴います（上位 N 件・`KORDER BY` など）
+- `(未確定)` — **実行時の型・選択肢の実在確認で、絞り込みが落ちる可能性があります。**
+  落ちた場合は全件取得になります
+
+**`fetch summary:` は文全体の最悪値**です（`NONE` < `EXACT` < `PREFILTERED` < `ALL`）。
+kintone から取得するソースが 1 つも無い文（一時テーブルだけを参照する文など）では出ません。
+
+#### 取得のされ方はソースごとに違います
+
+`JOIN` や `UNION` では、**同じクエリの中でソースごとに取得のされ方が変わります。**
+だから `fetch:` はソース単位（`app:` / `JOIN:` / `[union:n]` / CTE）で出ます。
+
+```
+[union:1]
+  mode:          COUNT_TOTAL_COUNT
+  fetch:         NONE (limit 1)        ← レコードを取得しない
+
+[union:2]
+  mode:          FULL_SCAN
+  fetch:         ALL                   ← 全件取得
+```
+
+#### 安全側に倒しています
+
+分類に迷いがある場合は、**より多く取得する側**（`EXACT` より `PREFILTERED`、
+`PREFILTERED` より `ALL`）を表示します。「絞り込み済み」と表示して実際は全件だった、
+という誤りを避けるためです。
+
+#### 機械的に読む場合
+
+**計画本文の文字列を解析しないでください。**engine ライブラリでは
+`explainQuery()` の結果の `plan` に同じ内容が構造で入ります
+（→ [エンジン・ライブラリ利用ガイド](ksql_engine_library.md)）。
+
+`fetch:` / `fetch summary:` / `mode:` / `kintone query:` は安定した読みどころですが、
+**それ以外の診断行は実装の詳細**であり、予告なく増減します。
+
 ---
 
 ## 25. バッチ実行と一時テーブル

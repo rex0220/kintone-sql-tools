@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "version": "3.39.0",
+  "version": "3.40.0",
   "type": "APP",
   "name": {
     "ja": "kSQL",

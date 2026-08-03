@@ -1,11 +1,26 @@
-ksql 配布パッケージ (v3.39.0)
+ksql 配布パッケージ (v3.40.0)
 
 release 成果物:
-- ksql-plugin-v3.39.0.zip
-- ksql-mcp.mcpb (manifest version 3.39.0)
-- ksql-mcp.js (MCP server version 3.39.0)
+- ksql-plugin-v3.40.0.zip
+- ksql-mcp.mcpb (manifest version 3.40.0)
+- ksql-mcp.js (MCP server version 3.40.0)
 
-追加 (B111) ★本リリースの要点:
+追加 (B114) ★本リリースの要点:
+- EXPLAIN が「kintone から何件取りに行くか」を自ら名乗るようになりました。
+    mode:          FULL_SCAN
+    kintone query: 確度 in ("A")
+    fetch:         PREFILTERED (未確定)      ← 追加
+- 値は NONE (取得しない) / EXACT (全条件を絞り込み) / PREFILTERED (一部を絞り込み) /
+  ALL (全件取得) の 4 つで、文の先頭には最悪値の fetch summary: が出ます。
+- mode: FULL_SCAN は「取得後に JS で全行評価する」という内部名で、取得量の話では
+  ありません。GROUP BY や集計を含むクエリは、押し下げが効いていても FULL_SCAN と
+  表示されます。取得量は fetch: の行で判断してください。
+- JOIN や UNION では取得のされ方がソースごとに違うため、ソース単位で表示します。
+- engine ライブラリでは ExplainResult.plan に同じ内容が構造で入ります (純加法)。
+  表示文言を文字列解析せずに扱えます。
+- mode 行・既存の計画表示・押し下げ判定・MCP / CLI の応答形は変わりません。
+
+追加 (B111) (v3.39.0):
 - DECLARE @period RELATIVE_DATE = THIS_MONTH(); と宣言すると、注入した相対日付関数
   トークンが文字列ではなく関数として kintone へ押し下げられます。
     DECLARE @period RELATIVE_DATE = THIS_MONTH();
@@ -21,7 +36,7 @@ release 成果物:
   別物です)。この違いと、日時フィールドの境界は RFC3339 で書くことを
   言語リファレンスに明記しました。
 
-修正 (B112):
+修正 (B112) (v3.39.0):
 - EXPLAIN の app: / JOIN: 行で、別名や JOIN のある形のときに括弧内へ内部の仮想 ID が
   残っていたのを直しました (app: LAPP_案件管理@dev AS a)。物理アプリで profile が
   二重に付いていた症状 (APP4149@dev@dev) も同じ原因で、あわせて解消しています。
@@ -72,23 +87,16 @@ release 成果物:
 - 挙動の変更: 従来エラーだった形が成功するようになります。失われる正しい結果は
   ありません。リテラル以外の列が混ざる形は従来どおり全件取得です。
 
-追加 (B102) (v3.35.0):
-- kintone のクエリ関数 PRIMARY_ORGANIZATION() を WHERE で使えるようになりました。
-  ダッシュボードから自組織のデータを抽出する用途で、LOGINUSER() と同じ位置づけです。
-    SELECT 案件名 FROM APP100 WHERE 担当組織 IN (PRIMARY_ORGANIZATION())
-- 組織選択フィールドに対する IN / NOT IN の単独要素としてのみ使えます。
-- DML の WHERE では使用できません。kintone は優先組織が設定されていない実行ユーザーに
-  対してこの条件を無視し、他の条件を満たす全レコードを返します (kintone 公式の記述)。
-  条件が消えると DELETE や UPDATE の対象が全件になるため、拒否します。
-- 同じ理由で、SELECT でも優先組織が未設定の利用者では絞り込みが効きません。
-  エンジンからは判別できないためそのまま返します。kintone の一覧の絞り込みと同じです。
-
-1. ksql-plugin-v3.39.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.40.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.39.0): B111 相対日付関数を値に持つ変数／B112 EXPLAIN の表示修正。
+本リリース (v3.40.0): B114 EXPLAIN が取得範囲を名乗る。
+
+- B114: 上の「追加」を参照してください。表示の追加と公開型の純加法のみです。
+
+前リリース (v3.39.0): B111 相対日付関数を値に持つ変数／B112 EXPLAIN の表示修正。
 
 - B111: 上の「追加」を参照してください。既存 SQL の意味は変わりません。
 - B112: 上の「修正」を参照してください。表示のみです。
@@ -109,10 +117,6 @@ release 成果物:
 前リリース (v3.36.0): B105 UNION の枝の COUNT(*) を単発 GET に。
 
 - B105: 上の「修正」を参照してください。
-
-前リリース (v3.35.0): B102 PRIMARY_ORGANIZATION() のサポート。
-
-- B102: 上の「追加」を参照してください。DML では使用できません。
 
 前リリース (v3.34.0): B98 外部結合の打ち切りを fail-closed 化／B99 MCP を SDK v2 へ移行。
 
