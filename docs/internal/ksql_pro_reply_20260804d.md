@@ -1,7 +1,7 @@
 # Pro への返信 — 誤記の原因はこちらの診断でした（B118 / v3.43.0）
 
 - 作成: 2026-08-04
-- ステータス: ✅ **送付済み（2026-08-04）**。→ Pro は同日に v3.43.0 を取り込み、 の該当なしを確認（[報告 2026-08-04e](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260804e-送付版.md) が本返信を「受領した連絡」として言及）
+- ステータス: ✅ **送付済み（2026-08-04）**。→ Pro は同日に v3.43.0 を取り込み、`FORMAT(列)` の該当なしを確認（[報告 2026-08-04e](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260804e-送付版.md) が本返信を「受領した連絡」として言及）
 - 受領: [Pro の報告 2026-08-04d](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260804d-送付版.md)
 - 関連: [B118](ksql_b118_function_call_diagnostics_issue.md) / [B117](ksql_b117_date_add_month_end_issue.md)
 
