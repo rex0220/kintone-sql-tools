@@ -2462,7 +2462,9 @@ export class Parser {
         type: "FIELD",
         tableAlias: null,
         field: syntheticName,
-        ...(this.groupingFieldContext === "SELECT_CASE" ? { aggregateRef: ref } : {}),
+        ...(this.groupingFieldContext === "SELECT_CASE" || this.groupingFieldContext === "HAVING"
+          ? { aggregateRef: ref }
+          : {}),
       };
     }
 

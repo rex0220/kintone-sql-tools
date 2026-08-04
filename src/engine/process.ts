@@ -1839,7 +1839,10 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 5. HAVING
-  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, havingFieldSemanticsResolver);
+  const resolveHavingSemantics: FieldSemanticsResolver = (field) => field.aggregateRef
+    ? aggregateResultSemantics(field.aggregateRef, aggregateSortKindResolver)
+    : havingFieldSemanticsResolver?.(field);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
 
   // 6. ウィンドウ関数
   rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds, effectiveOrderSemantics);

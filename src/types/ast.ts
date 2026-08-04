@@ -506,7 +506,7 @@ export interface FieldRef {
   type: "FIELD";
   tableAlias: string | null;
   field: string;
-  /** SELECT CASE 条件内で合成フィールド名へ変換した集計の評価情報。 */
+  /** SELECT CASE 条件・HAVING で合成フィールド名へ変換した集計の評価情報。 */
   aggregateRef?: AggregateRef;
 }
 

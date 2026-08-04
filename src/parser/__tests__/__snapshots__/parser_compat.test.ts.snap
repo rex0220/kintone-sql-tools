@@ -267,6 +267,15 @@ exports[`単文互換: SELECT フル句 1`] = `
   ],
   "having": {
     "left": {
+      "aggregateRef": {
+        "arg": {
+          "field": "売上",
+          "type": "FIELD_REF",
+        },
+        "distinct": false,
+        "func": "SUM",
+        "type": "AGG_REF",
+      },
       "field": "SUM(売上)",
       "tableAlias": null,
       "type": "FIELD",
