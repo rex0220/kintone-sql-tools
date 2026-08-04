@@ -39,6 +39,7 @@ import type {
   ScalarValueExpr,
   AggregateArgExpr,
   CaseResult,
+  AggregateRef,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
@@ -71,6 +72,7 @@ import {
   attachGroupingRowMeta,
   evalGroupingRef,
 } from "./groupingRowMeta";
+import { containsAggregate } from "../core/groupingValidation";
 
 export { ProcessRow };
 
@@ -237,6 +239,7 @@ export function hasAggregateColumns(columns: SelectColumn[]): boolean {
   return columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
+    (c.type === "CASE_COL" && containsAggregate(c.expr)) ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
     (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
   );
@@ -407,7 +410,7 @@ function materializeAggregateColumns(
   columns: SelectColumn[],
   resolveAggSortKind?: AggregateSortKindResolver
 ): void {
-  for (const col of columns) {
+  for (const [columnIndex, col] of columns.entries()) {
     if (col.type === "AGGREGATE") {
       const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
       const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
@@ -425,7 +428,60 @@ function materializeAggregateColumns(
       const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
       const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
       outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
+    } else if (col.type === "CASE_COL" && containsAggregate(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      const resolvedExpr = resolveAggInCaseExpr(col.expr, groupRows, resolveAggSortKind);
+      const resolveAggregateSemantics: FieldSemanticsResolver = (field) => field.aggregateRef
+        ? aggregateResultSemantics(field.aggregateRef, resolveAggSortKind)
+        : undefined;
+      outRow[caseMaterializedKey(col.alias, columnIndex)] = evalCaseWhen(
+        resolvedExpr,
+        outRow,
+        undefined,
+        resolveAggregateSemantics
+      );
     }
+  }
+}
+
+function caseMaterializedKey(alias: string | null, columnIndex: number): string {
+  return alias ?? `__ksql_case_column_${columnIndex}`;
+}
+
+function collectAggregateRefs(node: unknown, out: AggregateRef[]): void {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((value) => collectAggregateRefs(value, out));
+    return;
+  }
+  const value = node as Record<string, unknown>;
+  if (value["type"] === "AGG_REF") {
+    out.push(value as unknown as AggregateRef);
+    return;
+  }
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+  Object.values(value).forEach((child) => collectAggregateRefs(child, out));
+}
+
+function materializeAggregateDependencies(
+  outRow: ProcessRow,
+  rows: ProcessRow[],
+  node: unknown,
+  resolveAggSortKind?: AggregateSortKindResolver
+): void {
+  const refs: AggregateRef[] = [];
+  collectAggregateRefs(node, refs);
+  for (const ref of refs) {
+    const key = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
+    if (outRow[key] !== undefined) continue;
+    outRow[key] = String(evalAggregate(
+      ref.func,
+      ref.distinct,
+      ref.arg,
+      ref.separator,
+      rows,
+      resolveAggSortKind
+    ));
   }
 }
 
@@ -492,8 +548,8 @@ function evalAggregate(
       const raw = row[arg.field];
       if (raw === undefined || (raw === "" && func !== "MIN" && func !== "MAX")) continue;
       strVal = raw;
-    } else if (arg.type === "ARITH" || arg.type === "NUMBER" || arg.type === "STRING_FUNC") {
-      // 算術式 / 関数: 数値として評価し NaN はスキップ
+    } else if (arg.type === "ARITH" || arg.type === "NUMBER") {
+      // 算術式: 数値として評価し NaN はスキップ
       const n = evalArithExpr(arg, row);
       if (isNaN(n)) continue;
       strVal = String(n);
@@ -660,6 +716,24 @@ function resolveAggregateArgSemantics(
   if (!kinds.every((kind) => kind === kinds[0])) return "string";
   const first = results[0];
   return results.every((result) => JSON.stringify(result) === JSON.stringify(first)) ? first : kinds[0];
+}
+
+function aggregateResultSemantics(
+  ref: AggregateRef,
+  resolver?: AggregateSortKindResolver
+): ResolvedFieldSemantics {
+  if (ref.func === "COUNT" || ref.func === "SUM" || ref.func === "AVG"
+    || ref.func === "STDDEV_POP" || ref.func === "STDDEV_SAMP"
+    || ref.func === "VAR_POP" || ref.func === "VAR_SAMP" || ref.func === "MEDIAN") {
+    return syntheticSemantics("number");
+  }
+  if (ref.func === "GROUP_CONCAT" || ref.func === "MODE") {
+    return syntheticSemantics("string");
+  }
+  const semantics = ref.arg.type === "WILDCARD"
+    ? "string"
+    : resolveAggregateArgSemantics(ref.arg, resolver) ?? "string";
+  return typeof semantics === "string" ? syntheticSemantics(semantics) : semantics;
 }
 
 // ============================================================
@@ -913,7 +987,9 @@ export function buildOrderByAliasEvaluator(
         break;
       }
       case "CASE_COL":
-        evaluators.set(alias, (row) => evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics));
+        evaluators.set(alias, (row) => containsAggregate(column.expr)
+          ? row[alias] ?? ""
+          : evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics));
         break;
       case "SCALAR_VALUE_COL": {
         const source = scalarValueDefaultKey(column.expr);
@@ -1066,12 +1142,14 @@ export function evaluateSelectColumnValue(
     case "ARITH_COL":
       return String(evalArithExpr(column.expr, row));
     case "CASE_COL":
-      return evalCaseWhen(
-        column.expr,
-        row,
-        context.resolveFieldType,
-        context.resolveFieldSemantics
-      );
+      return containsAggregate(column.expr)
+        ? row[caseMaterializedKey(column.alias, columnIndex)] ?? ""
+        : evalCaseWhen(
+          column.expr,
+          row,
+          context.resolveFieldType,
+          context.resolveFieldSemantics
+        );
     case "GROUPING_COL":
       return evalGroupingRef(column.ref, row);
     case "STRFUNC_COL": {
@@ -1163,17 +1241,18 @@ export function project(
   }
 
   const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
+  const defaultCaseKeys = buildDefaultCaseOutputKeys(columns);
   const hasWildcard = columns.some(
     (col) => col.type === "WILDCARD" || col.type === "PARENT_WILDCARD"
   );
-  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys);
+  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys, defaultCaseKeys);
   const orderedKeys: string[] = outputKeys ?? [];
 
   // 複数列の投影にワイルドカードが混在する場合、実データがあれば従来どおり
   // 行から列を決める。0 行では行ループが回らないため、非ワイルドカード列だけを
   // AST から復元する。* / _p.* は列リストに寄与させない。
   if (hasWildcard && rows.length === 0) {
-    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys) };
+    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys, defaultCaseKeys) };
   }
 
   const projected = rows.map((row, rowIdx) => {
@@ -1242,7 +1321,7 @@ export function project(
           break;
         }
         case "CASE_COL": {
-          const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultCaseKeys.get(colIdx) ?? "case";
           out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
@@ -1290,21 +1369,23 @@ export function project(
 /** ワイルドカードを含まない SELECT 列の出力キーを AST から算出する。 */
 function computeOutputKeys(
   columns: SelectColumn[],
-  defaultFieldKeys: Map<number, string>
+  defaultFieldKeys: Map<number, string>,
+  defaultCaseKeys: Map<number, string>
 ): string[] {
-  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys));
+  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys));
 }
 
 /** ワイルドカード混在の 0 行投影で、明示列の出力キーだけを復元する。 */
 function computeExplicitOutputKeys(
   columns: SelectColumn[],
-  defaultFieldKeys: Map<number, string>
+  defaultFieldKeys: Map<number, string>,
+  defaultCaseKeys: Map<number, string>
 ): string[] {
   const keys: string[] = [];
   const seen = new Set<string>();
   for (const [colIdx, col] of columns.entries()) {
     if (col.type === "WILDCARD" || col.type === "PARENT_WILDCARD") continue;
-    const key = computeOutputKey(col, colIdx, defaultFieldKeys);
+    const key = computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys);
     if (!seen.has(key)) {
       seen.add(key);
       keys.push(key);
@@ -1316,7 +1397,8 @@ function computeExplicitOutputKeys(
 function computeOutputKey(
   col: SelectColumn,
   colIdx: number,
-  defaultFieldKeys: Map<number, string>
+  defaultFieldKeys: Map<number, string>,
+  defaultCaseKeys: Map<number, string>
 ): string {
   switch (col.type) {
     case "VARIABLE_COL":
@@ -1332,7 +1414,7 @@ function computeOutputKey(
     case "ARITH_COL":
       return col.alias ?? arithColDefaultKey(col.expr);
     case "CASE_COL":
-      return col.alias ?? "case";
+      return col.alias ?? defaultCaseKeys.get(colIdx) ?? "case";
     case "STRFUNC_COL":
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_VALUE_COL":
@@ -1347,6 +1429,25 @@ function computeOutputKey(
     case "PARENT_WILDCARD":
       throw new Error("internal: computeOutputKey received a wildcard column");
   }
+}
+
+function buildDefaultCaseOutputKeys(columns: SelectColumn[]): Map<number, string> {
+  const used = new Set(columns.flatMap((column) =>
+    "alias" in column && column.alias !== null ? [column.alias] : []
+  ));
+  const keys = new Map<number, string>();
+  let suffix = 1;
+  for (const [columnIndex, column] of columns.entries()) {
+    if (column.type !== "CASE_COL" || column.alias !== null) continue;
+    let key: string;
+    do {
+      key = suffix === 1 ? "case" : `case_${suffix}`;
+      suffix++;
+    } while (used.has(key));
+    used.add(key);
+    keys.set(columnIndex, key);
+  }
+  return keys;
 }
 
 function buildDefaultFieldOutputKeys(columns: SelectColumn[]): Map<number, string> {
@@ -1446,6 +1547,7 @@ function scalarValueHasAggregate(expr: ScalarValueExpr): boolean {
 }
 
 function caseResultHasAggregate(result: CaseResult): boolean {
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") return true;
   if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
   return scalarValueHasAggregate(result);
 }
@@ -1481,6 +1583,7 @@ function resolveAggInScalarValue(
   resolveAggSortKind?: AggregateSortKindResolver
 ): ScalarValueExpr {
   if (expr.type === "STRING_FUNC") return resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind);
+  if (expr.type === "CASE_WHEN") return resolveAggInCaseExpr(expr, rows, resolveAggSortKind);
   if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
     return {
       ...expr,
@@ -1489,6 +1592,49 @@ function resolveAggInScalarValue(
     };
   }
   return expr;
+}
+
+function resolveAggInCaseResult(
+  result: CaseResult,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): CaseResult {
+  if (result.type === "AGG_REF") {
+    const value = evalAggregate(
+      result.func,
+      result.distinct,
+      result.arg,
+      result.separator,
+      rows,
+      resolveAggSortKind
+    );
+    return typeof value === "number"
+      ? { type: "NUMBER", value, raw: String(value) }
+      : { type: "STRING", value };
+  }
+  if (result.type === "AGG_ARITH") {
+    const value = evalAggArithExpr(result, rows, resolveAggSortKind);
+    return { type: "NUMBER", value, raw: String(value) };
+  }
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return result;
+  return resolveAggInScalarValue(result, rows, resolveAggSortKind);
+}
+
+function resolveAggInCaseExpr(
+  expr: CaseWhenExpr,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): CaseWhenExpr {
+  return {
+    ...expr,
+    branches: expr.branches.map((branch) => ({
+      ...branch,
+      result: resolveAggInCaseResult(branch.result, rows, resolveAggSortKind),
+    })),
+    elseResult: expr.elseResult === null
+      ? null
+      : resolveAggInCaseResult(expr.elseResult, rows, resolveAggSortKind),
+  };
 }
 
 function resolveAggInStringFuncExpr(

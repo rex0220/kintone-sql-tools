@@ -1,7 +1,11 @@
 # B120 `CASE` 式の中の集計関数が集計として扱われない（行が集約されない／誤診される）
 
 - 起票: 2026-08-04（**2026-08-04 に切り分けを訂正**。当初「スカラー式に集計を書けない」と書いたが誤りで、実際は `CASE` 固有だった）
-- ステータス: 🐞 **未着手（優先 高）**（2026-08-04）。**GROUP BY 無しでは集約されず全行が返る**（エラー無し・誤った結果）。GROUP BY 有りでは誤った診断で止まる。
+- ステータス: 🚧 **実装済み・リリース待ち**（2026-08-05）。案 A（`CASE` の条件・THEN・ELSE を集計検出の走査対象に追加）で実装。
+  **差し戻し 2 回**＝①CASE 条件内の集計が文字列比較（[レビュー 1](ksql_b119_b120_review_1.md) §2）②無名 CASE 列のキー衝突（同 §3）
+  ③`MIN`/`MAX` が GROUP BY 無しで文字列比較（[レビュー 2](ksql_b119_b120_review_2.md) §2）。
+  いずれも解消し、**{GROUP BY 有無} × 7 集計 × 両方向の境界**で実機確認済み。`npm test` 5297 通過。
+  **②の残り（`HAVING` の無言 0 行）は未実装**。`HAVING` は別途 [B121](ksql_b121_having_numeric_comparison_issue.md) の数値比較欠陥もあるため、そちらと併せて扱う。
 - 出典: [B119](ksql_b119_aggregate_string_function_arg_issue.md) の調査中に併発して観測（`ksql-analytics` で受注率のゼロ除算ガードを書こうとして発見）
 - 関連: [B118](ksql_b118_function_call_diagnostics_issue.md)（診断が弱く利用者が別の結論に誘導される形）/ [B119](ksql_b119_aggregate_string_function_arg_issue.md)（同日発見・同じ集計引数まわり）
 
@@ -74,8 +78,12 @@ SELECT 会社名, COUNT(*) AS 件数 FROM APP4149 GROUP BY 会社名 HAVING SUM(
 → 0 行（エラー無し）
 
 SELECT 会社名, COUNT(*) AS 件数, SUM(売上) AS 売上合計 FROM APP4149 GROUP BY 会社名 HAVING SUM(売上) > 0
-→ 10 行（正しい）
+→ 8 行（`SUM(売上)` が 0 の 2 社を除いた全社。評価されている）
 ```
+
+> 訂正（2026-08-05）: ここを当初「10 行」と書いていたが実測は 8 行。主張（SELECT に無い集計は
+> 無言で 0 行になる）は変わらない。なお `HAVING` の**数値比較そのものが壊れている**ことが
+> 別途判明した → [B121](ksql_b121_having_numeric_comparison_issue.md)。
 
 **挙動そのものは仕様どおり**。§9 に明記がある。
 

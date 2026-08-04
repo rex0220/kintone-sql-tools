@@ -372,7 +372,7 @@ export interface ScalarSubqueryColumn extends SelectAliasDisplay {
 // ------------------------------------------------------------
 
 /** CASE WHEN の THEN / ELSE 結果値 */
-export type CaseResult = ArrayLiteral | ScalarValueExpr | ArithNode;
+export type CaseResult = ArrayLiteral | ScalarValueExpr | ArithNode | AggregateRef | AggArithExpr;
 
 export interface CaseWhenClause {
   condition: WhereExpr;
@@ -506,6 +506,8 @@ export interface FieldRef {
   type: "FIELD";
   tableAlias: string | null;
   field: string;
+  /** SELECT CASE 条件内で合成フィールド名へ変換した集計の評価情報。 */
+  aggregateRef?: AggregateRef;
 }
 
 /** 関数呼び出しを LEFT に持つ WHERE 式: UPPER(f) = '...' / LENGTH(f) > 5 */

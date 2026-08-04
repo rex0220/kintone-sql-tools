@@ -1447,7 +1447,17 @@ export class Parser {
     if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
     if (column.type === "STRFUNC_COL") return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
     if (column.type === "SCALAR_VALUE_COL") return this.scalarValueHasAggregate(column.expr);
+    if (column.type === "CASE_COL") return this.nodeHasAggregate(column.expr);
     return false;
+  }
+
+  private nodeHasAggregate(node: unknown): boolean {
+    if (node === null || typeof node !== "object") return false;
+    if (Array.isArray(node)) return node.some((value) => this.nodeHasAggregate(value));
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "AGG_REF" || value["type"] === "AGG_ARITH") return true;
+    if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return false;
+    return Object.values(value).some((child) => this.nodeHasAggregate(child));
   }
 
   private stringFuncArgHasAggregate(arg: StringFuncArg): boolean {
@@ -1461,11 +1471,7 @@ export class Parser {
       return this.scalarValueHasAggregate(expr.left) || this.scalarValueHasAggregate(expr.right);
     }
     if (expr.type === "CASE_WHEN") {
-      const results = [...expr.branches.map((b) => b.result), ...(expr.elseResult ? [expr.elseResult] : [])];
-      return results.some((result) => {
-        if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
-        return this.scalarValueHasAggregate(result);
-      });
+      return this.nodeHasAggregate(expr);
     }
     return false;
   }
@@ -1777,9 +1783,9 @@ export class Parser {
     this.expect(TokenKind.LPAREN);
     const condition = this.parseCaseCondition(allowGroupingCondition);
     this.expect(TokenKind.COMMA);
-    const thenResult = this.parseCaseResult();
+    const thenResult = this.parseCaseResult(allowGroupingCondition);
     this.expect(TokenKind.COMMA);
-    const elseResult = this.parseCaseResult();
+    const elseResult = this.parseCaseResult(allowGroupingCondition);
     this.expect(TokenKind.RPAREN);
     return {
       type: "CASE_WHEN",
@@ -1796,7 +1802,7 @@ export class Parser {
       this.advance(); // WHEN を消費
       const condition = this.parseCaseCondition(allowGroupingCondition);
       this.expect(TokenKind.THEN);
-      const result = this.parseCaseResult();
+      const result = this.parseCaseResult(allowGroupingCondition);
       branches.push({ condition, result });
     }
 
@@ -1806,7 +1812,7 @@ export class Parser {
 
     let elseResult: CaseResult | null = null;
     if (this.consume(TokenKind.ELSE)) {
-      elseResult = this.parseCaseResult();
+      elseResult = this.parseCaseResult(allowGroupingCondition);
     }
 
     this.expect(TokenKind.END);
@@ -1819,7 +1825,7 @@ export class Parser {
   }
 
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
-  private parseCaseResult(): CaseResult {
+  private parseCaseResult(allowAggregateResult = false): CaseResult {
     const tok = this.peek();
     if (this.insideAggregateArg > 0 && this.tryAggregateFunc() !== null) {
       throw new ParseError("集計関数の引数内に集計関数は使用できません", tok);
@@ -1827,6 +1833,10 @@ export class Parser {
     // 配列リテラル: ['val1', 'val2'] → ArrayLiteral
     if (tok.kind === TokenKind.LBRACKET) {
       return this.parseArrayLiteral();
+    }
+    const aggregateFunc = this.tryAggregateFunc();
+    if (aggregateFunc !== null && allowAggregateResult) {
+      return this.continueAggArith(this.parseAggregateRef(aggregateFunc));
     }
     if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
       return this.parseScalarValueExpr({ allowAggregateArgs: true });
@@ -2448,7 +2458,12 @@ export class Parser {
       }
       const ref = this.parseAggregateRef(aggFunc);
       const syntheticName = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
-      return { type: "FIELD", tableAlias: null, field: syntheticName };
+      return {
+        type: "FIELD",
+        tableAlias: null,
+        field: syntheticName,
+        ...(this.groupingFieldContext === "SELECT_CASE" ? { aggregateRef: ref } : {}),
+      };
     }
 
     // CASE WHEN ... END: CASE WHEN 式を左辺として使う

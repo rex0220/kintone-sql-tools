@@ -3100,6 +3100,8 @@ function scalarValueHasFieldRef(expr: ScalarValueExpr): boolean {
     return results.some((result) => result.type !== "ARRAY" && (
       result.type === "FIELD_REF" || result.type === "ARITH"
         ? arithHasFieldRef(result)
+        : result.type === "AGG_REF" || result.type === "AGG_ARITH"
+          ? true
         : scalarValueHasFieldRef(result)
     ));
   }
@@ -3802,7 +3804,8 @@ function collectAggregateArgFieldRefs(arg: AggregateArgExpr, out: FieldRef[]): v
   }
   if (arg.type === "CASE_WHEN") {
     for (const result of [...arg.branches.map((branch) => branch.result), ...(arg.elseResult ? [arg.elseResult] : [])]) {
-      if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
+      if (result.type === "AGG_REF" || result.type === "AGG_ARITH") collectAggregateOperandRefs(result, out);
+      else if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
     }
   }
 }
@@ -3839,9 +3842,29 @@ function collectScalarAggregateRefs(expr: ScalarValueExpr, out: FieldRef[]): voi
     const results = [...expr.branches.map((branch) => branch.result), ...(expr.elseResult ? [expr.elseResult] : [])];
     for (const result of results) {
       if (result.type === "STRING_FUNC") collectStringFuncAggregateRefs(result, out);
+      else if (result.type === "AGG_REF" || result.type === "AGG_ARITH") collectAggregateOperandRefs(result, out);
       else if (result.type !== "ARRAY" && result.type !== "FIELD_REF" && result.type !== "ARITH") collectScalarAggregateRefs(result, out);
     }
   }
+}
+
+function collectCaseAggregateRefs(expr: CaseWhenExpr, out: FieldRef[]): void {
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const value = node as Record<string, unknown>;
+    if (value["type"] === "AGG_REF") {
+      const aggregate = value as unknown as Extract<AggOperand, { type: "AGG_REF" }>;
+      collectAggregateRef(aggregate.func, aggregate.arg, out);
+      return;
+    }
+    if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+    Object.values(value).forEach(visit);
+  };
+  visit(expr);
 }
 
 function collectSelectAggregateSortRefs(columns: SelectColumn[]): FieldRef[] {
@@ -3855,6 +3878,8 @@ function collectSelectAggregateSortRefs(columns: SelectColumn[]): FieldRef[] {
       collectStringFuncAggregateRefs(column.expr, refs);
     } else if (column.type === "SCALAR_VALUE_COL") {
       collectScalarAggregateRefs(column.expr, refs);
+    } else if (column.type === "CASE_COL") {
+      collectCaseAggregateRefs(column.expr, refs);
     }
   }
   return refs;
@@ -4057,6 +4082,15 @@ function caseResultColumnMeta(
 ): MaterializedColumnMeta {
   if (result.type === "STRING") return syntheticColumnMeta("string");
   if (result.type === "ARRAY") return unsupportedColumnMeta();
+  if (result.type === "AGG_REF") {
+    if (result.func === "MIN" || result.func === "MAX" || result.func === "MODE") {
+      return result.arg.type === "WILDCARD"
+        ? unknownStringColumnMeta()
+        : inferAggregateArgMeta(result.arg, resolveField);
+    }
+    return result.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
+  }
+  if (result.type === "AGG_ARITH") return syntheticColumnMeta("number");
   if (result.type === "NUMBER" || result.type === "ARITH" || result.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
   if (result.type === "FIELD_REF") return resolveField(aggregateFieldRef(result.field)) ?? unknownStringColumnMeta();

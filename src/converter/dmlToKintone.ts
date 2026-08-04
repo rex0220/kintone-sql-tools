@@ -281,6 +281,7 @@ function collectAggregateArgFields(node: AggregateArgExpr, out: Set<string>): vo
 
 function collectCaseResultFields(result: CaseResult, out: Set<string>): void {
   if (result.type === "ARRAY") return; // 配列リテラルはフィールド参照なし
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") { collectAggOperandFields(result, out); return; }
   if (result.type === "FIELD_REF" || result.type === "ARITH") { collectArithNode(result, out); return; }
   collectScalarValueFields(result, out);
 }
@@ -600,6 +601,9 @@ function evalCaseResultValue(
 ): KintoneValue {
   if (result.type === "ARRAY") {
     return convertArray(result.elements.map((e) => e.value), fieldType);
+  }
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") {
+    throw new Error("InternalError: aggregate CASE result reached DML evaluation.");
   }
   if (result.type === "STRING") {
     return convertString(result.value, fieldType);

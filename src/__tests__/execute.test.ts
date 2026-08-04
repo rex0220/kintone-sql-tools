@@ -6261,6 +6261,34 @@ test("MIN / MAX: 物理テキスト列は辞書順、NUMBER 列は従来の数�
   expect(result.metrics!.fieldCalls).toBe(1);
 });
 
+test.each([false, true])(
+  "MIN / MAX: CASE 内だけで参照しても GROUP BY=%s で引数型を解決する",
+  async (grouped) => {
+    const client = makeClient({
+      records: [
+        makeRecord({ company: "A", amount: "7100000" }),
+        makeRecord({ company: "A", amount: "7200000" }),
+      ],
+    });
+    client.getFields = async () => [
+      { code: "company", label: "company", fieldType: "SINGLE_LINE_TEXT" },
+      { code: "amount", label: "amount", fieldType: "NUMBER" },
+    ];
+
+    const result = await execute(
+      `SELECT
+        CASE WHEN MIN(amount) > 9 THEN 'yes' ELSE 'no' END AS min_gt_9,
+        CASE WHEN MAX(amount) > 100000000 THEN 'yes' ELSE 'no' END AS max_gt_100m
+      FROM APP77011${grouped ? " GROUP BY company" : ""}`,
+      client,
+      { cacheContext: `aggregate-sort-case-${grouped}` }
+    ) as SelectResult;
+
+    expect(result.rows).toEqual([{ min_gt_9: "yes", max_gt_100m: "no" }]);
+    expect(result.metrics!.fieldCalls).toBe(1);
+  }
+);
+
 test("MIN / MAX: フォーム定義は同じ cacheContext でも実行を跨いで再取得する", async () => {
   const client = makeClient({ records: [makeRecord({ text: "B" }), makeRecord({ text: "A" })] });
   client.getFields = async () => [

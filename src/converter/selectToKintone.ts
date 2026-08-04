@@ -32,6 +32,7 @@ import { whereToKintone } from "./whereToKintone";
 import { isLike } from "../core/like";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { normalizeGroupingSpec } from "../core/grouping";
+import { containsAggregate } from "../core/groupingValidation";
 import type {
   PlainGroupByResolution,
   PlainGroupByResolutionPlan,
@@ -82,6 +83,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
     c.type === "SCALAR_SUBQUERY_COL" ||
+    (c.type === "CASE_COL" && containsAggregate(c.expr)) ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
     (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
   )) return "FULL_SCAN";
@@ -305,6 +307,7 @@ function collectScalarValueFields(expr: ScalarValueExpr, out: string[]): void {
 
 function collectCaseResultScalarFields(result: CaseResult, out: string[]): void {
   if (result.type === "ARRAY") return;
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") { collectAggOperandFields(result, out); return; }
   if (result.type === "FIELD_REF" || result.type === "ARITH") { collectArithNode(result, out); return; }
   collectScalarValueFields(result, out);
 }
@@ -345,6 +348,7 @@ function scalarValueHasAggregate(expr: ScalarValueExpr): boolean {
 }
 
 function caseResultHasAggregate(result: CaseResult): boolean {
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") return true;
   if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
   return scalarValueHasAggregate(result);
 }
@@ -611,6 +615,7 @@ function collectRequiredFieldsByTable(
 
   const walkCaseResult = (result: CaseResult, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
     if (result.type === "ARRAY") return;
+    if (result.type === "AGG_REF" || result.type === "AGG_ARITH") { walkAgg(result, phase); return; }
     if (result.type === "FIELD_REF" || result.type === "ARITH") { walkArith(result, phase); return; }
     walkScalar(result, phase);
   };
@@ -628,6 +633,10 @@ function collectRequiredFieldsByTable(
     phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"
   ): void => {
     if (fv.type === "FIELD") {
+      if (fv.aggregateRef) {
+        walkAgg(fv.aggregateRef, phase);
+        return;
+      }
       addFieldRef(fv.field, fv.tableAlias, phase);
       return;
     }

@@ -70,6 +70,8 @@ function whereLabel(expr: WhereExpr): string {
 
 function caseResultLabel(result: CaseResult): string {
   if (result.type === "ARRAY") return `[${result.elements.map((entry) => quote(entry.value)).join(",")}]`;
+  if (result.type === "AGG_REF") return aggregateSyntheticName(result.func, result.distinct, result.arg);
+  if (result.type === "AGG_ARITH") return aggregateOperandLabel(result);
   if (result.type === "FIELD_REF" || result.type === "ARITH") return arithLabel(result);
   return scalarValueLabel(result);
 }

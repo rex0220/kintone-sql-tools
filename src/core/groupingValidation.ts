@@ -103,6 +103,7 @@ function collectNonAggregateFieldRefs(node: unknown, out: FieldRef[]): void {
   const type = value["type"];
   if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "GROUPING_REF"
     || type === "AGG_REF" || type === "AGG_ARITH") return;
+  if (type === "FIELD" && value["aggregateRef"] !== undefined) return;
   if (type === "FIELD" && typeof value["field"] === "string") {
     out.push({
       type: "FIELD",
@@ -130,7 +131,7 @@ export function containsAggregate(node: unknown): boolean {
 function isAggregateMaterializedAlias(column: SelectColumn): boolean {
   if (!("alias" in column) || column.alias === null) return false;
   if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
-  if (column.type === "STRFUNC_COL" || column.type === "SCALAR_VALUE_COL") {
+  if (column.type === "STRFUNC_COL" || column.type === "SCALAR_VALUE_COL" || column.type === "CASE_COL") {
     return containsAggregate(column);
   }
   return false;

@@ -38,6 +38,7 @@ import {
   WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN,
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../core/relativeDateFunction";
+import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -416,6 +417,10 @@ function evalCaseResultNullable(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string | number | null {
   if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
+  if (result.type === "AGG_REF") {
+    return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
+  }
+  if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   if (result.type === "FIELD_REF") return row[result.field] ?? "";
   if (result.type === "ARITH") return evalArithExpr(result, row);
   return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics);
@@ -428,6 +433,10 @@ function evalCaseResult(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   if (result.type === "ARRAY")       return result.elements.map((e) => e.value).join(",");
+  if (result.type === "AGG_REF") {
+    return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
+  }
+  if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   // 旧 CASE 経路が生成済み AST を受ける互換分岐。
   if ((result as { type: string }).type === "FIELD_REF") {
     return row[(result as unknown as { field: string }).field] ?? "";
