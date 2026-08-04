@@ -37,8 +37,6 @@ engine ライブラリでは、`runQuery()` が単文の `SELECT` / `WITH` / `UN
   - `allowPhysicalAppRefs: false` で、その profile の物理 `APPxxx` 直接参照を禁止可能
 - `FROM` 省略 SELECT（例: `SELECT 'xxx' AS a`）
 
-> **v3.0.0は比較・ORDER BY意味論を変更するmajor releaseです。** 数字だけの文字列、`#err`数値列の非数値、取得上限時のlocal top-N、`KORDER`予約語、EXPLAINのmetadata API利用について、[v3.0.0 移行ガイド](docs/ksql_v3_migration_guide.md)を確認してください。
-
 ## インストール
 
 ## npm（グローバル）
