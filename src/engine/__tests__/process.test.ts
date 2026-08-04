@@ -2021,7 +2021,7 @@ test("runFullScan: FORMAT — MySQL スタイル (整数桁数)", () => {
 
 test("runFullScan: FORMAT — AS が元項目名と同じでも式結果を優先", () => {
   const records = [makeRecord({ 売上: "3600000" })];
-  const stmt = parseSelect("SELECT FORMAT(売上) AS 売上 FROM APP100");
+  const stmt = parseSelect("SELECT FORMAT(売上, '#,##0') AS 売上 FROM APP100");
   const tables = new Map([[null, records]]);
   const { rows: result, columns } = runFullScan({ tables, stmt });
   expect(columns).toEqual(["売上"]);

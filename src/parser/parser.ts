@@ -310,8 +310,8 @@ function needsSpaceBetween(prev: Token, cur: Token): boolean {
 // ------------------------------------------------------------
 
 export class ParseError extends Error {
-  constructor(message: string, public readonly token: Token) {
-    super(`${message}（位置 ${token.pos}、トークン: 「${token.value}」）`);
+  constructor(public readonly rawMessage: string, public readonly token: Token) {
+    super(`${rawMessage}（位置 ${token.pos}、トークン: 「${token.value}」）`);
     this.name = "ParseError";
   }
 }
@@ -1865,18 +1865,40 @@ export class Parser {
 
     // キーワード登録なしの関数名: IDENT で名前を先読みし、直後に '(' がある場合のみ関数と判断
     if (this.peek().kind === TokenKind.IDENT) {
-      const name = this.peek().value.toUpperCase();
+      const nameToken = this.peek();
+      const name = nameToken.value.toUpperCase();
       if ((PARSER_IDENT_SCALAR_FUNCTIONS as readonly string[]).includes(name)) {
         // 1トークン先が '(' であれば関数呼び出し
         if (this.peekAt(1).kind === TokenKind.LPAREN) {
           return name as StringFuncName;
         }
       }
+      if (this.peekAt(1).kind === TokenKind.LPAREN) {
+        const hint = name === "DATE_SUB"
+          ? "。日付を減算するには DATE_ADD の加算値へ負数を指定してください"
+          : "";
+        throw new ParseError(`「${nameToken.value}」という関数はありません${hint}`, nameToken);
+      }
     }
     return null;
   }
 
   private parseStringFuncExpr(): StringFuncExpr {
+    const nameToken = this.peek();
+    const func = this.tryStringFuncName()!;
+    try {
+      return this.parseStringFuncExprBody();
+    } catch (error) {
+      if (!(error instanceof ParseError)) throw error;
+      const displayName = nameToken.value.toUpperCase();
+      const guidance = func === "DATE_ADD"
+        ? `${displayName} の構文は DATE_ADD(列, n, '単位') です。`
+        : `${displayName} の引数構文が不正です。`;
+      throw new ParseError(`${guidance}${error.rawMessage}`, error.token);
+    }
+  }
+
+  private parseStringFuncExprBody(): StringFuncExpr {
     const tokenKind = this.peek().kind; // CAST / CONVERT / FORMAT ... を記憶
     const func = this.tryStringFuncName()!; // 呼び出し元が保証
     this.advance(); // 関数名トークンを消費

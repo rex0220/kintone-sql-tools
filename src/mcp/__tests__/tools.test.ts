@@ -590,6 +590,14 @@ describe("MCP tools", () => {
     expect(executeOptions?.onLimitReached).toBe("truncate");
   });
 
+  test.each([
+    ["DATE_ADD(受注予定日, 1)", "ArgumentError: DATE_ADD expects 3 argument(s)."],
+    ["ROUND(売上, 1, 2)", "ArgumentError: ROUND expects 1 to 2 argument(s)."],
+  ])("B118: ksql_validate は %s の引数数を実行前に拒否する", async (call, message) => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    await expect(tools.validate({ sql: `SELECT ${call} FROM APP1` })).rejects.toThrow(message);
+  });
+
   test("query inline EXPLAIN は単文・batch の計画だけを復元し SELECT データを保持する", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-inline-explain-"));
     const configPath = join(dir, "ksql.config.json");

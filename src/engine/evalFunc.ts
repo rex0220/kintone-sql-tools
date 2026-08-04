@@ -14,6 +14,7 @@ import type {
 import { numberLiteralText } from "../types/ast";
 import type { FieldSemanticsResolver, FieldTypeResolver, ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
+import { assertStringFunctionArity } from "../core/functionArity";
 import { evalCaseWhen, evalCaseWhenNullable } from "./evalWhere";
 
 // ============================================================
@@ -316,6 +317,7 @@ export function evalStringFunc(
   resolveFieldType?: FieldTypeResolver,
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
+  assertStringFunctionArity(expr.func, expr.args);
   const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics));
   switch (expr.func) {
     case "UPPER":  return (args[0] ?? "").toUpperCase();
@@ -325,7 +327,6 @@ export function evalStringFunc(
     case "RTRIM":  return (args[0] ?? "").trimEnd();
     case "LENGTH": return String((args[0] ?? "").length);
     case "LENGTH_CHAR":
-      assertArity("LENGTH_CHAR", args, 1, 1);
       return String([...(args[0] ?? "")].length);
     case "SUBSTRING": {
       const str   = args[0] ?? "";
@@ -334,23 +335,19 @@ export function evalStringFunc(
       return sliceSafeRange(str, start, len !== undefined ? start + len : str.length);
     }
     case "LEFT": {
-      assertArity("LEFT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       return Number.isNaN(n) || n <= 0 ? "" : sliceSafePrefix(str, n);
     }
     case "RIGHT": {
-      assertArity("RIGHT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       return Number.isNaN(n) || n <= 0 ? "" : sliceSafeSuffix(str, n);
     }
     case "INSTR":
-      assertArity("INSTR", args, 2, 2);
       return String(args[0].indexOf(args[1]) + 1);
     case "LPAD":
     case "RPAD": {
-      assertArity(expr.func, args, 2, 3);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       if (Number.isNaN(n) || n <= 0) return "";
@@ -362,7 +359,6 @@ export function evalStringFunc(
     }
     case "GREATEST":
     case "LEAST":
-      assertArity(expr.func, args, 2);
       return selectScalarExtreme(args, expr.func === "GREATEST" ? "greatest" : "least");
     case "CONCAT":   return args.join("");
     case "REPLACE": {
@@ -372,11 +368,9 @@ export function evalStringFunc(
       return from === "" ? str : str.split(from).join(to);
     }
     case "REGEXP_LIKE": {
-      assertArity("REGEXP_LIKE", args, 2, 3);
       return compileRegexp(args[1], args[2] ?? "").test(args[0]) ? "1" : "0";
     }
     case "REGEXP_REPLACE": {
-      assertArity("REGEXP_REPLACE", args, 3, 5);
       assertRegexpReplacement(args[2]);
       const occurrence = parseRegexpOccurrence(args[4]);
       const regexp = compileRegexp(args[1], args[3] ?? "", true);
@@ -385,11 +379,9 @@ export function evalStringFunc(
         : replaceNthMatch(args[0], regexp, args[2], occurrence);
     }
     case "REGEXP_SUBSTR": {
-      assertArity("REGEXP_SUBSTR", args, 2, 3);
       return compileRegexp(args[1], args[2] ?? "").exec(args[0])?.[0] ?? "";
     }
     case "TRANSLATE": {
-      assertArity("TRANSLATE", args, 3, 3);
       const from = [...args[1]];
       const to = [...args[2]];
       if (from.length !== to.length) {
@@ -415,7 +407,6 @@ export function evalStringFunc(
     case "FLOOR": return applyRoundOp("floor", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "CEIL":  return applyRoundOp("ceil",  Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "TRUNCATE":
-      assertArity("TRUNCATE", args, 1, 2);
       return applyRoundOp("trunc", Number(args[0]), Number(args[1] ?? "0"));
     case "CAST": {
       const val      = args[0] ?? "";
@@ -446,13 +437,10 @@ export function evalStringFunc(
       return d.length >= 10 ? String(parseInt(d.slice(8, 10), 10)) : "";
     }
     case "DAYOFWEEK":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(dayOfWeekIndex(args[0]) + 1) : "";
     case "QUARTER":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(Math.ceil(Number(args[0].slice(5, 7)) / 3)) : "";
     case "WEEK":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(isoWeekNumber(args[0])) : "";
     case "DATE_FORMAT":
       return applyDateFormat(args[0] ?? "", args[1] ?? "");
@@ -461,7 +449,6 @@ export function evalStringFunc(
     case "DATE_ADD":
       return applyDateAdd(args[0] ?? "", Number(args[1] ?? "0"), (args[2] ?? "DAY").toUpperCase());
     case "LAST_DAY":
-      assertArity("LAST_DAY", args, 1, 1);
       return applyLastDay(args[0]);
     case "ABS":
       return String(Math.abs(Number(args[0] ?? "0")));
@@ -484,12 +471,6 @@ export function evalStringFunc(
     case "CURRENT_TIMESTAMP":
       return new Date().toISOString();
   }
-}
-
-function assertArity(func: string, args: readonly string[], min: number, max = Number.POSITIVE_INFINITY): void {
-  if (args.length >= min && args.length <= max) return;
-  const expected = min === max ? String(min) : max === Number.POSITIVE_INFINITY ? `${min} or more` : `${min} to ${max}`;
-  throw new Error(`ArgumentError: ${func} expects ${expected} argument(s).`);
 }
 
 // ============================================================
