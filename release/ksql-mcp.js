@@ -30911,8 +30911,9 @@ function needsSpaceBetween(prev, cur) {
   return true;
 }
 var ParseError = class extends Error {
-  constructor(message, token) {
-    super(`${message}\uFF08\u4F4D\u7F6E ${token.pos}\u3001\u30C8\u30FC\u30AF\u30F3: \u300C${token.value}\u300D\uFF09`);
+  constructor(rawMessage, token) {
+    super(`${rawMessage}\uFF08\u4F4D\u7F6E ${token.pos}\u3001\u30C8\u30FC\u30AF\u30F3: \u300C${token.value}\u300D\uFF09`);
+    this.rawMessage = rawMessage;
     this.token = token;
     this.name = "ParseError";
   }
@@ -32298,16 +32299,33 @@ var Parser = class {
     const byKind = PARSER_SCALAR_FUNCTION_TOKEN_MAP[this.peek().kind] ?? null;
     if (byKind !== null && byKind !== "LEFT" && byKind !== "RIGHT") return byKind;
     if (this.peek().kind === "IDENT" /* IDENT */) {
-      const name = this.peek().value.toUpperCase();
+      const nameToken = this.peek();
+      const name = nameToken.value.toUpperCase();
       if (PARSER_IDENT_SCALAR_FUNCTIONS.includes(name)) {
         if (this.peekAt(1).kind === "(" /* LPAREN */) {
           return name;
         }
       }
+      if (this.peekAt(1).kind === "(" /* LPAREN */) {
+        const hint = name === "DATE_SUB" ? "\u3002\u65E5\u4ED8\u3092\u6E1B\u7B97\u3059\u308B\u306B\u306F DATE_ADD \u306E\u52A0\u7B97\u5024\u3078\u8CA0\u6570\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044" : "";
+        throw new ParseError(`\u300C${nameToken.value}\u300D\u3068\u3044\u3046\u95A2\u6570\u306F\u3042\u308A\u307E\u305B\u3093${hint}`, nameToken);
+      }
     }
     return null;
   }
   parseStringFuncExpr() {
+    const nameToken = this.peek();
+    const func = this.tryStringFuncName();
+    try {
+      return this.parseStringFuncExprBody();
+    } catch (error51) {
+      if (!(error51 instanceof ParseError)) throw error51;
+      const displayName = nameToken.value.toUpperCase();
+      const guidance = func === "DATE_ADD" ? `${displayName} \u306E\u69CB\u6587\u306F DATE_ADD(\u5217, n, '\u5358\u4F4D') \u3067\u3059\u3002` : `${displayName} \u306E\u5F15\u6570\u69CB\u6587\u304C\u4E0D\u6B63\u3067\u3059\u3002`;
+      throw new ParseError(`${guidance}${error51.rawMessage}`, error51.token);
+    }
+  }
+  parseStringFuncExprBody() {
     const tokenKind = this.peek().kind;
     const func = this.tryStringFuncName();
     this.advance();
@@ -36423,9 +36441,94 @@ function walkObjects2(node, visit) {
 
 // src/core/statementValidation.ts
 init_define_KSQL_DOCS();
+
+// src/core/functionArity.ts
+init_define_KSQL_DOCS();
+function assertArity(func, args, min, max = Number.POSITIVE_INFINITY) {
+  if (args.length >= min && args.length <= max) return;
+  const expected = min === max ? String(min) : max === Number.POSITIVE_INFINITY ? `${min} or more` : `${min} to ${max}`;
+  throw new Error(`ArgumentError: ${func} expects ${expected} argument(s).`);
+}
+function assertStringFunctionArity(func, args) {
+  switch (func) {
+    case "UPPER":
+    case "LOWER":
+    case "TRIM":
+    case "LTRIM":
+    case "RTRIM":
+    case "LENGTH":
+    case "LENGTH_CHAR":
+    case "YEAR":
+    case "MONTH":
+    case "DAY":
+    case "DAYOFWEEK":
+    case "QUARTER":
+    case "WEEK":
+    case "LAST_DAY":
+    case "ABS":
+    case "SQRT":
+      return assertArity(func, args, 1, 1);
+    case "SUBSTRING":
+    case "LPAD":
+    case "RPAD":
+    case "REGEXP_LIKE":
+    case "REGEXP_SUBSTR":
+      return assertArity(func, args, 2, 3);
+    case "LEFT":
+    case "RIGHT":
+    case "INSTR":
+    case "ISNULL":
+    case "NULLIF":
+    case "MOD":
+    case "POWER":
+    case "FORMAT":
+    case "CAST":
+    case "DATE_FORMAT":
+    case "DATEDIFF":
+      return assertArity(func, args, 2, 2);
+    case "CONCAT":
+    case "COALESCE":
+    case "GREATEST":
+    case "LEAST":
+      return assertArity(func, args, 2);
+    case "REPLACE":
+    case "TRANSLATE":
+    case "DATE_ADD":
+      return assertArity(func, args, 3, 3);
+    case "REGEXP_REPLACE":
+      return assertArity(func, args, 3, 5);
+    case "ROUND":
+    case "FLOOR":
+    case "CEIL":
+    case "TRUNCATE":
+      return assertArity(func, args, 1, 2);
+    case "CURRENT_DATE":
+    case "CURRENT_TIMESTAMP":
+      return assertArity(func, args, 0, 0);
+  }
+}
+
+// src/core/statementValidation.ts
 function validateStatementStatic(stmt) {
+  validateStringFunctionArities(stmt);
   validatePrimaryOrganizationDmlStatement(stmt);
   validateKlikeStatement(stmt);
+}
+function validateStringFunctionArities(stmt) {
+  const visit = (value) => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const node = value;
+    if (node.type === "STRING_FUNC") {
+      const expr = node;
+      assertStringFunctionArity(expr.func, expr.args);
+    }
+    Object.values(node).forEach(visit);
+  };
+  visit(stmt);
 }
 
 // src/core/groupingValidation.ts
@@ -37474,6 +37577,7 @@ function replaceNthMatch(input, globalRe, replacement, n) {
   });
 }
 function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
+  assertStringFunctionArity(expr.func, expr.args);
   const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics2));
   switch (expr.func) {
     case "UPPER":
@@ -37489,7 +37593,6 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     case "LENGTH":
       return String((args[0] ?? "").length);
     case "LENGTH_CHAR":
-      assertArity("LENGTH_CHAR", args, 1, 1);
       return String([...args[0] ?? ""].length);
     case "SUBSTRING": {
       const str = args[0] ?? "";
@@ -37498,23 +37601,19 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
       return sliceSafeRange(str, start, len !== void 0 ? start + len : str.length);
     }
     case "LEFT": {
-      assertArity("LEFT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       return Number.isNaN(n) || n <= 0 ? "" : sliceSafePrefix(str, n);
     }
     case "RIGHT": {
-      assertArity("RIGHT", args, 2, 2);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       return Number.isNaN(n) || n <= 0 ? "" : sliceSafeSuffix(str, n);
     }
     case "INSTR":
-      assertArity("INSTR", args, 2, 2);
       return String(args[0].indexOf(args[1]) + 1);
     case "LPAD":
     case "RPAD": {
-      assertArity(expr.func, args, 2, 3);
       const str = args[0];
       const n = Math.trunc(Number(args[1]));
       if (Number.isNaN(n) || n <= 0) return "";
@@ -37526,7 +37625,6 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     }
     case "GREATEST":
     case "LEAST":
-      assertArity(expr.func, args, 2);
       return selectScalarExtreme(args, expr.func === "GREATEST" ? "greatest" : "least");
     case "CONCAT":
       return args.join("");
@@ -37537,22 +37635,18 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
       return from === "" ? str : str.split(from).join(to);
     }
     case "REGEXP_LIKE": {
-      assertArity("REGEXP_LIKE", args, 2, 3);
       return compileRegexp(args[1], args[2] ?? "").test(args[0]) ? "1" : "0";
     }
     case "REGEXP_REPLACE": {
-      assertArity("REGEXP_REPLACE", args, 3, 5);
       assertRegexpReplacement(args[2]);
       const occurrence = parseRegexpOccurrence(args[4]);
       const regexp = compileRegexp(args[1], args[3] ?? "", true);
       return occurrence === 0 ? args[0].replace(regexp, args[2]) : replaceNthMatch(args[0], regexp, args[2], occurrence);
     }
     case "REGEXP_SUBSTR": {
-      assertArity("REGEXP_SUBSTR", args, 2, 3);
       return compileRegexp(args[1], args[2] ?? "").exec(args[0])?.[0] ?? "";
     }
     case "TRANSLATE": {
-      assertArity("TRANSLATE", args, 3, 3);
       const from = [...args[1]];
       const to = [...args[2]];
       if (from.length !== to.length) {
@@ -37579,7 +37673,6 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     case "CEIL":
       return applyRoundOp("ceil", Number(args[0] ?? "0"), Number(args[1] ?? "0"));
     case "TRUNCATE":
-      assertArity("TRUNCATE", args, 1, 2);
       return applyRoundOp("trunc", Number(args[0]), Number(args[1] ?? "0"));
     case "CAST": {
       const val = args[0] ?? "";
@@ -37608,13 +37701,10 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
       return d.length >= 10 ? String(parseInt(d.slice(8, 10), 10)) : "";
     }
     case "DAYOFWEEK":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(dayOfWeekIndex(args[0]) + 1) : "";
     case "QUARTER":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(Math.ceil(Number(args[0].slice(5, 7)) / 3)) : "";
     case "WEEK":
-      assertArity(expr.func, args, 1, 1);
       return isValidYmd(args[0]) ? String(isoWeekNumber(args[0])) : "";
     case "DATE_FORMAT":
       return applyDateFormat(args[0] ?? "", args[1] ?? "");
@@ -37623,7 +37713,6 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     case "DATE_ADD":
       return applyDateAdd(args[0] ?? "", Number(args[1] ?? "0"), (args[2] ?? "DAY").toUpperCase());
     case "LAST_DAY":
-      assertArity("LAST_DAY", args, 1, 1);
       return applyLastDay(args[0]);
     case "ABS":
       return String(Math.abs(Number(args[0] ?? "0")));
@@ -37646,11 +37735,6 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     case "CURRENT_TIMESTAMP":
       return (/* @__PURE__ */ new Date()).toISOString();
   }
-}
-function assertArity(func, args, min, max = Number.POSITIVE_INFINITY) {
-  if (args.length >= min && args.length <= max) return;
-  const expected = min === max ? String(min) : max === Number.POSITIVE_INFINITY ? `${min} or more` : `${min} to ${max}`;
-  throw new Error(`ArgumentError: ${func} expects ${expected} argument(s).`);
 }
 function parseDateParts(s) {
   return {
@@ -57424,7 +57508,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.42.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.43.0" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
 
