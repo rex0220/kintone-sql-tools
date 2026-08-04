@@ -43,7 +43,14 @@
       "PowerShell(npx jest 2>&1)",
       "PowerShell(npm run build:plugin 2>&1)",
       "PowerShell(\\(npx tsc --noEmit 2>&1 | Measure-Object -Line\\).Lines)",
-      "PowerShell(git -C \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\" status --short)"
+      "PowerShell(git -C \"c:\\\\Users\\\\rex02\\\\Projects\\\\kintone-sql-tools\" status --short)",
+      "Bash(git grep *)",
+      "Bash(git status *)",
+      "Bash(git tag *)",
+      "Read(//tmp/**)",
+      "mcp__kintone-docs__search_docs",
+      "mcp__ksql__ksql_app_metadata",
+      "mcp__ksql__ksql_list_queries"
     ]
   }
 }
