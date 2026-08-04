@@ -182,6 +182,15 @@ ROUND(SUM(受注額) / GREATEST(SUM(売上), 1), 1)
   報告して判断を仰ぐこと
 - テストは**現行コードで落ちること**を確認してから実装に入る
 
+## 5.5 運用制約（headless で回すときの約束）
+
+- **git 操作は一切しない。** `git add` / `git commit` / `git checkout` / ブランチ操作すべて禁止。
+  コミットは Claude 側で行う（sandbox は `.git` への書き込みを拒否するため失敗もする）
+- **ビルドしない。** `npm run build*` は不要。検証は `npm test` だけで完結させる
+- **MCP ツールを呼ばない。** kSQL MCP への接続は不要。実機確認はレビュー側で行う
+- **`CHANGELOG.md`・`package.json` の版数・`docs/ksql_issue_tracker.md` は触らない**
+- 作業対象は `src/` 配下と、必要なら issue 文書 2 本のステータス行だけ
+
 ## 6. 完了の定義
 
 1. `npm test` が通る（`version:check` を含む）
