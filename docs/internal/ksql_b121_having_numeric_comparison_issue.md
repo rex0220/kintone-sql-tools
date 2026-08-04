@@ -1,10 +1,7 @@
 # B121 `HAVING` の集計比較が文字列比較になり、誤った行集合を返す
 
 - 起票: 2026-08-05
-- ステータス: 🚧 **実装済み・リリース待ち**（2026-08-05）。`HAVING` の直接参照に集計の比較型を引き渡して修正。
-  **受入 1〜4 を実機で確認**（0 行 / 8 行 / 4 行 / 8 行）。加えて **8 集計（COUNT・SUM・AVG・MIN・MAX・
-  MEDIAN・MAX(文字列)・GROUP_CONCAT）で「直接参照 = 別名参照」を突き合わせて全一致**。
-  B119/B120 の回帰も維持。`npm test` 5309 通過（失敗 2 件は既知の [B115](ksql_b115_env_dependent_test_issue.md)）。**差し戻し 0 回。**
+- ステータス: ✅ **完了（v3.44.0 でリリース）**（2026-08-05・npm publish 済み・**MCP 実機で確認**＝`HAVING COUNT(*) > 10` が 0 行）。`HAVING` の直接参照に集計の比較型を引き渡して修正。**8 集計で「直接参照 = 別名参照」を突き合わせ全一致。差し戻し 0 回。**
 - 出典: [B119/B120 のレビュー 3 回目](ksql_b119_b120_review_2.md) の追加検証中に発見（`ksql-analytics` で実測）
 - 関連: [B119](ksql_b119_aggregate_string_function_arg_issue.md) / [B120](ksql_b120_aggregate_position_diagnostics_issue.md)
   ＝**同族（集計値が文字列として比較される）**。B117・B118 から続く「静かに間違う」系

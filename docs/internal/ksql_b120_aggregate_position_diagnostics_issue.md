@@ -1,11 +1,7 @@
 # B120 `CASE` 式の中の集計関数が集計として扱われない（行が集約されない／誤診される）
 
 - 起票: 2026-08-04（**2026-08-04 に切り分けを訂正**。当初「スカラー式に集計を書けない」と書いたが誤りで、実際は `CASE` 固有だった）
-- ステータス: 🚧 **実装済み・リリース待ち**（2026-08-05）。案 A（`CASE` の条件・THEN・ELSE を集計検出の走査対象に追加）で実装。
-  **差し戻し 2 回**＝①CASE 条件内の集計が文字列比較（[レビュー 1](ksql_b119_b120_review_1.md) §2）②無名 CASE 列のキー衝突（同 §3）
-  ③`MIN`/`MAX` が GROUP BY 無しで文字列比較（[レビュー 2](ksql_b119_b120_review_2.md) §2）。
-  いずれも解消し、**{GROUP BY 有無} × 7 集計 × 両方向の境界**で実機確認済み。`npm test` 5297 通過。
-  **②の残り（`HAVING` の無言 0 行）は未実装**。`HAVING` は別途 [B121](ksql_b121_having_numeric_comparison_issue.md) の数値比較欠陥もあるため、そちらと併せて扱う。
+- ステータス: ✅ **完了（v3.44.0 でリリース）**（2026-08-05・npm publish 済み・**MCP 実機で確認**＝`CASE WHEN COUNT(*) = 0 ...` が 1 行）。案 A（`CASE` の条件・THEN・ELSE を集計検出の走査対象に追加）で実装。**レビューで 3 件差し戻し**〔①CASE 条件内の集計が文字列比較 ②無名 CASE 列のキーが固定 `case` で衝突 ③`MIN`/`MAX` が GROUP BY 無しで文字列比較〕、いずれも解消。**②の残り（`HAVING` の無言 0 行の診断）は未実装**＝[B122](ksql_b122_having_aggregate_expression_issue.md) で `HAVING` の集計式は評価されるようになったため、残るのは「SELECT に無い集計を書いた場合の診断」のみ。実需が出たら再起票する。
 - 出典: [B119](ksql_b119_aggregate_string_function_arg_issue.md) の調査中に併発して観測（`ksql-analytics` で受注率のゼロ除算ガードを書こうとして発見）
 - 関連: [B118](ksql_b118_function_call_diagnostics_issue.md)（診断が弱く利用者が別の結論に誘導される形）/ [B119](ksql_b119_aggregate_string_function_arg_issue.md)（同日発見・同じ集計引数まわり）
 
