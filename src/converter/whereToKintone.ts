@@ -169,6 +169,9 @@ function convertField(field: FieldValue): string {
       `WHERE 句の関数（${field.expr.func}）は kintone クエリに変換できません`
     );
   }
+  if (field.type === "AGG_FIELD") {
+    throw new KintoneQueryError("HAVING 句の集計算術式は kintone クエリに変換できません");
+  }
   if (field.type === "ARITH_FIELD") {
     throw new KintoneQueryError("WHERE 句の算術式は kintone クエリに変換できません");
   }

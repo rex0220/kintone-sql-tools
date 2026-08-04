@@ -2457,6 +2457,12 @@ export class Parser {
         throw new ParseError("集計関数の引数内に集計関数は使用できません", this.peek());
       }
       const ref = this.parseAggregateRef(aggFunc);
+      if (this.isArithOp(this.peek().kind)) {
+        return {
+          type: "AGG_FIELD",
+          expr: this.continueAggArith(ref),
+        };
+      }
       const syntheticName = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
       return {
         type: "FIELD",

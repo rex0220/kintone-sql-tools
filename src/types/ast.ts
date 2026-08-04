@@ -496,6 +496,7 @@ export interface GroupExpr {
 /** WHERE の左辺 */
 export type FieldValue =
   | FieldRef
+  | AggregateFieldValue
   | FuncFieldValue
   | ArithFieldValue
   | CaseFieldValue
@@ -508,6 +509,12 @@ export interface FieldRef {
   field: string;
   /** SELECT CASE 条件・HAVING で合成フィールド名へ変換した集計の評価情報。 */
   aggregateRef?: AggregateRef;
+}
+
+/** HAVING 左辺に直接書かれた集計算術式。 */
+export interface AggregateFieldValue {
+  type: "AGG_FIELD";
+  expr: AggOperand;
 }
 
 /** 関数呼び出しを LEFT に持つ WHERE 式: UPPER(f) = '...' / LENGTH(f) > 5 */

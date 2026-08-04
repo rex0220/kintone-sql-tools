@@ -644,6 +644,10 @@ function collectRequiredFieldsByTable(
       walkStringFunc(fv.expr, phase);
       return;
     }
+    if (fv.type === "AGG_FIELD") {
+      walkAgg(fv.expr, phase);
+      return;
+    }
     if (fv.type === "ARITH_FIELD") {
       walkArith(fv.expr, phase);
       return;

@@ -418,13 +418,16 @@ function materializeAggregateColumns(
       // HAVING / ORDER BY resolve aggregate expressions through the synthetic key.
       if (col.alias) outRow[syntheticKey] = value;
     } else if (col.type === "ARITH_AGG_COL") {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
       outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
     } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
       const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
       outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
     } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
       const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
       outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));

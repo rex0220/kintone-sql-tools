@@ -10,8 +10,10 @@ import type {
   StringFuncExpr,
   StringFuncArg,
   ScalarValueExpr,
+  AggOperand,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
+import { aggregateSyntheticName } from "../core/aggregateExpression";
 import type { FieldSemanticsResolver, FieldTypeResolver, ProcessRow } from "./evalWhere";
 import { selectScalarExtreme } from "../core/scalarCompare";
 import { assertStringFunctionArity } from "../core/functionArity";
@@ -704,11 +706,29 @@ export function evalStringFuncArg(
   resolveFieldType?: FieldTypeResolver,
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
-  // 集計引数は GROUP BY 評価側で事前解決される想定。
-  // ここに到達した場合は行コンテキストのみのため空文字を返して安全側に倒す。
-  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
+  // GROUP BY が SELECT に実体化した集計依存値を使って HAVING からも評価する。
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+    return String(evalMaterializedAggregateOperand(arg, row));
+  }
   if (arg.type === "NUMBER") return numberLiteralText(arg);
   return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics));
+}
+
+/** SELECT により実体化済みの合成集計キーだけを使って集計算術式を評価する。 */
+export function evalMaterializedAggregateOperand(node: AggOperand, row: ProcessRow): number | string {
+  if (node.type === "NUMBER") return node.value;
+  if (node.type === "AGG_REF") {
+    return row[aggregateSyntheticName(node.func, node.distinct, node.arg)] ?? "";
+  }
+  const left = Number(evalMaterializedAggregateOperand(node.left, row));
+  const right = Number(evalMaterializedAggregateOperand(node.right, row));
+  switch (node.op) {
+    case "+": return left + right;
+    case "-": return left - right;
+    case "*": return left * right;
+    case "/": return right !== 0 ? left / right : NaN;
+    case "%": return right !== 0 ? left % right : NaN;
+  }
 }
 
 export function resolveFieldRef(row: ProcessRow, field: string): string {

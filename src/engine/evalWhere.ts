@@ -23,7 +23,14 @@ import type {
   ScalarValueExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
-import { evalStringFunc, evalArithExpr, evalScalarValueExpr, evalScalarValueExprNullable, resolveFieldRef } from "./evalFunc";
+import {
+  evalStringFunc,
+  evalArithExpr,
+  evalMaterializedAggregateOperand,
+  evalScalarValueExpr,
+  evalScalarValueExprNullable,
+  resolveFieldRef,
+} from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
 import {
@@ -186,7 +193,7 @@ function semanticsForLeft(
     return resolveSemantics?.(left)
       ?? (fieldType ? resolveDeclaredFieldSemantics({ fieldType }) : syntheticSemantics("string"));
   }
-  if (left.type === "ARITH_FIELD") return syntheticSemantics("number");
+  if (left.type === "ARITH_FIELD" || left.type === "AGG_FIELD") return syntheticSemantics("number");
   if (left.type === "FUNC_FIELD") {
     return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(left.expr.func) ? "number" : "string");
   }
@@ -337,6 +344,7 @@ function resolveField(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
+  if (field.type === "AGG_FIELD")   return String(evalMaterializedAggregateOperand(field.expr, row));
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);

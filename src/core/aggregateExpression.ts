@@ -32,6 +32,7 @@ function arithLabel(node: ArithNode, topLevel = false): string {
 function fieldValueLabel(value: FieldValue): string {
   if (value.type === "FIELD") return value.tableAlias ? `${value.tableAlias}.${value.field}` : value.field;
   if (value.type === "FUNC_FIELD") return stringFuncLabel(value.expr);
+  if (value.type === "AGG_FIELD") return aggregateOperandLabel(value.expr);
   if (value.type === "ARITH_FIELD") return arithLabel(value.expr);
   if (value.type === "GROUPING_FIELD") {
     const field = value.ref.field;
