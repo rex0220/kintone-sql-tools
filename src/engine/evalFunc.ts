@@ -628,9 +628,21 @@ function applyDateAdd(dateStr: string, n: number, unit: string): string {
   if (!dateStr || dateStr.length < 10) return dateStr;
   const { y, mo, d } = parseDateParts(dateStr);
   const dt = new Date(Date.UTC(+y, +mo - 1, +d));
+
+  const addCalendarUnit = (applyTarget: () => void): void => {
+    const originalDay = dt.getUTCDate();
+    dt.setUTCDate(1);
+    applyTarget();
+
+    const endOfTargetMonth = new Date(dt.getTime());
+    endOfTargetMonth.setUTCMonth(endOfTargetMonth.getUTCMonth() + 1);
+    endOfTargetMonth.setUTCDate(0);
+    dt.setUTCDate(Math.min(originalDay, endOfTargetMonth.getUTCDate()));
+  };
+
   switch (unit) {
-    case "YEAR":  dt.setUTCFullYear(dt.getUTCFullYear() + n); break;
-    case "MONTH": dt.setUTCMonth(dt.getUTCMonth() + n);       break;
+    case "YEAR":  addCalendarUnit(() => dt.setUTCFullYear(dt.getUTCFullYear() + n)); break;
+    case "MONTH": addCalendarUnit(() => dt.setUTCMonth(dt.getUTCMonth() + n));       break;
     case "DAY":   dt.setUTCDate(dt.getUTCDate() + n);         break;
   }
   const ry  = String(dt.getUTCFullYear()).padStart(4, "0");

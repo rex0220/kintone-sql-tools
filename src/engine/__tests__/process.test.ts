@@ -1778,6 +1778,52 @@ test("runFullScan: DATE_ADD は単位を実行時検証し、小文字を許容�
   }
 });
 
+test.each([
+  ["2026-01-31", 1, "MONTH", "2026-02-28"],
+  ["2026-03-31", -1, "MONTH", "2026-02-28"],
+  ["2026-05-31", 1, "MONTH", "2026-06-30"],
+  ["2024-02-29", 1, "YEAR", "2025-02-28"],
+  ["2024-01-31", 13, "MONTH", "2025-02-28"],
+  ["2023-02-28", 1, "YEAR", "2024-02-28"],
+  ["2025-03-31", -13, "MONTH", "2024-02-29"],
+  ["2026-01-31T23:59:59Z", 1, "MONTH", "2026-02-28"],
+])("runFullScan: DATE_ADD は対象月に存在しない日を月末へ丸める — %s %d %s", (date, amount, unit, expected) => {
+  const stmt = parseSelect(
+    `SELECT DATE_ADD('${date}', ${amount}, '${unit}') AS value FROM APP100`
+  );
+  expect(runFullScan({ tables: new Map([[null, [makeRecord({})]]]), stmt }).rows[0]).toEqual({
+    value: expected,
+  });
+});
+
+test("runFullScan: DATE_ADD の月加算は丸めがなければ往復し、丸め後は元の日へ戻らない", () => {
+  const stmt = parseSelect(
+    "SELECT " +
+    "DATE_ADD(DATE_ADD('2026-01-15', 1, 'MONTH'), -1, 'MONTH') AS reversible, " +
+    "DATE_ADD(DATE_ADD('2026-01-31', 1, 'MONTH'), -1, 'MONTH') AS clamped " +
+    "FROM APP100"
+  );
+  expect(runFullScan({ tables: new Map([[null, [makeRecord({})]]]), stmt }).rows[0]).toEqual({
+    reversible: "2026-01-15",
+    clamped: "2026-01-28",
+  });
+});
+
+test("runFullScan: DATE_ADD の DAY 加算は月末とうるう年の境界でも従来どおり", () => {
+  const stmt = parseSelect(
+    "SELECT " +
+    "DATE_ADD('2026-01-31', 1, 'DAY') AS month_end, " +
+    "DATE_ADD('2024-02-28', 1, 'DAY') AS leap_day, " +
+    "DATE_ADD('2024-03-01', -1, 'DAY') AS negative " +
+    "FROM APP100"
+  );
+  expect(runFullScan({ tables: new Map([[null, [makeRecord({})]]]), stmt }).rows[0]).toEqual({
+    month_end: "2026-02-01",
+    leap_day: "2024-02-29",
+    negative: "2024-02-29",
+  });
+});
+
 test("runFullScan: LEFT 関数と LEFT JOIN が共存する", () => {
   const stmt = parseSelect(
     "SELECT LEFT(a.name, 2) AS short FROM APP1 AS a LEFT JOIN APP2 AS b ON a.id = b.id"
