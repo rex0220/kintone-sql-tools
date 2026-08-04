@@ -30555,6 +30555,7 @@ function arithLabel(node, topLevel = false) {
 function fieldValueLabel(value) {
   if (value.type === "FIELD") return value.tableAlias ? `${value.tableAlias}.${value.field}` : value.field;
   if (value.type === "FUNC_FIELD") return stringFuncLabel(value.expr);
+  if (value.type === "AGG_FIELD") return aggregateOperandLabel(value.expr);
   if (value.type === "ARITH_FIELD") return arithLabel(value.expr);
   if (value.type === "GROUPING_FIELD") {
     const field = value.ref.field;
@@ -30608,6 +30609,8 @@ function whereLabel(expr) {
 }
 function caseResultLabel(result) {
   if (result.type === "ARRAY") return `[${result.elements.map((entry) => quote(entry.value)).join(",")}]`;
+  if (result.type === "AGG_REF") return aggregateSyntheticName(result.func, result.distinct, result.arg);
+  if (result.type === "AGG_ARITH") return aggregateOperandLabel(result);
   if (result.type === "FIELD_REF" || result.type === "ARITH") return arithLabel(result);
   return scalarValueLabel(result);
 }
@@ -31952,7 +31955,16 @@ var Parser = class {
     if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
     if (column.type === "STRFUNC_COL") return column.expr.args.some((arg) => this.stringFuncArgHasAggregate(arg));
     if (column.type === "SCALAR_VALUE_COL") return this.scalarValueHasAggregate(column.expr);
+    if (column.type === "CASE_COL") return this.nodeHasAggregate(column.expr);
     return false;
+  }
+  nodeHasAggregate(node) {
+    if (node === null || typeof node !== "object") return false;
+    if (Array.isArray(node)) return node.some((value2) => this.nodeHasAggregate(value2));
+    const value = node;
+    if (value["type"] === "AGG_REF" || value["type"] === "AGG_ARITH") return true;
+    if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return false;
+    return Object.values(value).some((child) => this.nodeHasAggregate(child));
   }
   stringFuncArgHasAggregate(arg) {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
@@ -31964,11 +31976,7 @@ var Parser = class {
       return this.scalarValueHasAggregate(expr.left) || this.scalarValueHasAggregate(expr.right);
     }
     if (expr.type === "CASE_WHEN") {
-      const results = [...expr.branches.map((b) => b.result), ...expr.elseResult ? [expr.elseResult] : []];
-      return results.some((result) => {
-        if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
-        return this.scalarValueHasAggregate(result);
-      });
+      return this.nodeHasAggregate(expr);
     }
     return false;
   }
@@ -32225,9 +32233,9 @@ var Parser = class {
     this.expect("(" /* LPAREN */);
     const condition = this.parseCaseCondition(allowGroupingCondition);
     this.expect("," /* COMMA */);
-    const thenResult = this.parseCaseResult();
+    const thenResult = this.parseCaseResult(allowGroupingCondition);
     this.expect("," /* COMMA */);
-    const elseResult = this.parseCaseResult();
+    const elseResult = this.parseCaseResult(allowGroupingCondition);
     this.expect(")" /* RPAREN */);
     return {
       type: "CASE_WHEN",
@@ -32242,7 +32250,7 @@ var Parser = class {
       this.advance();
       const condition = this.parseCaseCondition(allowGroupingCondition);
       this.expect("THEN" /* THEN */);
-      const result = this.parseCaseResult();
+      const result = this.parseCaseResult(allowGroupingCondition);
       branches.push({ condition, result });
     }
     if (branches.length === 0) {
@@ -32250,7 +32258,7 @@ var Parser = class {
     }
     let elseResult = null;
     if (this.consume("ELSE" /* ELSE */)) {
-      elseResult = this.parseCaseResult();
+      elseResult = this.parseCaseResult(allowGroupingCondition);
     }
     this.expect("END" /* END */);
     return { type: "CASE_WHEN", branches, elseResult };
@@ -32260,13 +32268,17 @@ var Parser = class {
     return this.parseWhereExpr("SELECT_CASE");
   }
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
-  parseCaseResult() {
+  parseCaseResult(allowAggregateResult = false) {
     const tok = this.peek();
     if (this.insideAggregateArg > 0 && this.tryAggregateFunc() !== null) {
       throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", tok);
     }
     if (tok.kind === "[" /* LBRACKET */) {
       return this.parseArrayLiteral();
+    }
+    const aggregateFunc = this.tryAggregateFunc();
+    if (aggregateFunc !== null && allowAggregateResult) {
+      return this.continueAggArith(this.parseAggregateRef(aggregateFunc));
     }
     if (this.hasTopLevelTokenBeforeValueEnd("||" /* CONCAT_OP */)) {
       return this.parseScalarValueExpr({ allowAggregateArgs: true });
@@ -32791,8 +32803,19 @@ var Parser = class {
         throw new ParseError("\u96C6\u8A08\u95A2\u6570\u306E\u5F15\u6570\u5185\u306B\u96C6\u8A08\u95A2\u6570\u306F\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093", this.peek());
       }
       const ref = this.parseAggregateRef(aggFunc);
+      if (this.isArithOp(this.peek().kind)) {
+        return {
+          type: "AGG_FIELD",
+          expr: this.continueAggArith(ref)
+        };
+      }
       const syntheticName = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
-      return { type: "FIELD", tableAlias: null, field: syntheticName };
+      return {
+        type: "FIELD",
+        tableAlias: null,
+        field: syntheticName,
+        ...this.groupingFieldContext === "SELECT_CASE" || this.groupingFieldContext === "HAVING" ? { aggregateRef: ref } : {}
+      };
     }
     if (this.peek().kind === "CASE" /* CASE */) {
       const expr = this.parseCaseWhenExpr();
@@ -34995,6 +35018,9 @@ function convertField(field) {
       `WHERE \u53E5\u306E\u95A2\u6570\uFF08${field.expr.func}\uFF09\u306F kintone \u30AF\u30A8\u30EA\u306B\u5909\u63DB\u3067\u304D\u307E\u305B\u3093`
     );
   }
+  if (field.type === "AGG_FIELD") {
+    throw new KintoneQueryError("HAVING \u53E5\u306E\u96C6\u8A08\u7B97\u8853\u5F0F\u306F kintone \u30AF\u30A8\u30EA\u306B\u5909\u63DB\u3067\u304D\u307E\u305B\u3093");
+  }
   if (field.type === "ARITH_FIELD") {
     throw new KintoneQueryError("WHERE \u53E5\u306E\u7B97\u8853\u5F0F\u306F kintone \u30AF\u30A8\u30EA\u306B\u5909\u63DB\u3067\u304D\u307E\u305B\u3093");
   }
@@ -35133,6 +35159,277 @@ var KintoneQueryError = class extends Error {
   }
 };
 
+// src/core/groupingValidation.ts
+init_define_KSQL_DOCS();
+
+// src/engine/groupingRowMeta.ts
+init_define_KSQL_DOCS();
+var groupingRowMetaKey = /* @__PURE__ */ Symbol("ksql.groupingRowMeta");
+var groupingRefCanonicalIds = /* @__PURE__ */ new WeakMap();
+function attachGroupingRowMeta(row, includedCanonicalIds) {
+  Object.defineProperty(row, groupingRowMetaKey, {
+    value: { includedCanonicalIds },
+    enumerable: false,
+    configurable: false,
+    writable: false
+  });
+  return row;
+}
+function getGroupingRowMeta(row) {
+  return row[groupingRowMetaKey];
+}
+function readGroupingMembership(row) {
+  return getGroupingRowMeta(row)?.includedCanonicalIds;
+}
+function bindGroupingRefCanonicalId(ref, canonicalId) {
+  groupingRefCanonicalIds.set(ref, canonicalId);
+}
+function evalGroupingRef(ref, row) {
+  const membership = readGroupingMembership(row);
+  if (!membership) {
+    throw new Error("internal error: GROUPING() evaluation requires B65 grouping row membership.");
+  }
+  const canonicalId = groupingRefCanonicalIds.get(ref);
+  if (!canonicalId) {
+    throw new Error("internal error: GROUPING() reference was not resolved during B65 planning.");
+  }
+  return membership.has(canonicalId) ? "0" : "1";
+}
+
+// src/core/groupingValidation.ts
+var enforceGroupingPlanningCandidateLimits = (facts) => {
+  if (facts.expandedSetCount > B65_MAX_GROUPING_SETS) {
+    throw new Error(
+      `ArgumentError: B65 expanded grouping set count ${facts.expandedSetCount} exceeds limit ${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
+    );
+  }
+  if (facts.canonicalItemCount > B65_MAX_GROUPING_ITEMS) {
+    throw new Error(
+      `ArgumentError: B65 canonical grouping item count ${facts.canonicalItemCount} exceeds limit ${B65_MAX_GROUPING_ITEMS} (reason=GROUPING_ITEM_LIMIT_EXCEEDED).`
+    );
+  }
+};
+function displayField(field) {
+  return field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
+}
+function refFromName(name) {
+  const dot = name.indexOf(".");
+  return dot > 0 ? { type: "FIELD", tableAlias: name.slice(0, dot), field: name.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field: name };
+}
+function collectGroupingRefs(node, out) {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectGroupingRefs(item, out));
+    return;
+  }
+  const value = node;
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+  if (value["type"] === "GROUPING_REF") {
+    out.push(value);
+    return;
+  }
+  Object.values(value).forEach((item) => collectGroupingRefs(item, out));
+}
+function collectAggregateArgumentGroupingRefs(node, out) {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
+    return;
+  }
+  const value = node;
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+  if (value["type"] === "AGGREGATE" || value["type"] === "AGG_REF") {
+    collectGroupingRefs(value["arg"], out);
+    return;
+  }
+  Object.values(value).forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
+}
+function collectNonAggregateFieldRefs(node, out) {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectNonAggregateFieldRefs(item, out));
+    return;
+  }
+  const value = node;
+  const type = value["type"];
+  if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "GROUPING_REF" || type === "AGG_REF" || type === "AGG_ARITH") return;
+  if (type === "FIELD" && value["aggregateRef"] !== void 0) return;
+  if (type === "FIELD" && typeof value["field"] === "string") {
+    out.push({
+      type: "FIELD",
+      tableAlias: typeof value["tableAlias"] === "string" ? value["tableAlias"] : null,
+      field: value["field"]
+    });
+    return;
+  }
+  if (type === "FIELD_REF" && typeof value["field"] === "string") {
+    out.push(refFromName(value["field"]));
+    return;
+  }
+  Object.values(value).forEach((item) => collectNonAggregateFieldRefs(item, out));
+}
+function containsAggregate2(node) {
+  if (node === null || typeof node !== "object") return false;
+  if (Array.isArray(node)) return node.some(containsAggregate2);
+  const value = node;
+  if (value["type"] === "AGG_REF" || value["type"] === "AGG_ARITH") return true;
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return false;
+  return Object.values(value).some(containsAggregate2);
+}
+function isAggregateMaterializedAlias(column) {
+  if (!("alias" in column) || column.alias === null) return false;
+  if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
+  if (column.type === "STRFUNC_COL" || column.type === "SCALAR_VALUE_COL" || column.type === "CASE_COL") {
+    return containsAggregate2(column);
+  }
+  return false;
+}
+function outputAliases(columns) {
+  return new Set(columns.flatMap(
+    (column) => "alias" in column && typeof column.alias === "string" ? [column.alias] : []
+  ));
+}
+function isAggregateSyntheticReference(ref) {
+  return ref.tableAlias === null && /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN|MODE)\(/.test(ref.field);
+}
+function validateGroupingRefMembership(ref, resolve3, canonicalItems) {
+  const resolved = resolve3(ref.field);
+  if (!resolved.physical) {
+    throw new Error(`ArgumentError: B65 grouping reference ${displayField(ref.field)} must resolve to a physical APP field.`);
+  }
+  if (!canonicalItems.has(resolved.canonicalId)) {
+    throw new Error(
+      `ArgumentError: B65 GROUPING argument ${displayField(ref.field)} is not present in grouping allItems (reason=B65_GROUPING_ARG_NOT_ITEM).`
+    );
+  }
+  bindGroupingRefCanonicalId(ref, resolved.canonicalId);
+}
+function validateDependency(ref, resolve3, canonicalItems, context) {
+  const resolved = resolve3(ref);
+  if (!resolved.physical || !canonicalItems.has(resolved.canonicalId)) {
+    throw new Error(
+      `ArgumentError: B65 non-aggregate field ${displayField(ref)} in ${context} is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).`
+    );
+  }
+}
+function keyDependencies(key) {
+  if (key.type === "GROUPING_KEY") return [];
+  if (key.type === "FIELD_NAME") return [refFromName(key.name)];
+  const refs = [];
+  collectNonAggregateFieldRefs(key, refs);
+  return refs;
+}
+function validateGroupingStatic(stmt) {
+  const normalized = normalizeGroupingSpec(stmt);
+  const groupingRefs = [];
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
+  }
+  collectGroupingRefs(stmt.having, groupingRefs);
+  collectGroupingRefs(stmt.orderBy, groupingRefs);
+  const forbiddenGroupingRefs = [];
+  collectGroupingRefs(stmt.where, forbiddenGroupingRefs);
+  collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
+  for (const column of stmt.columns) {
+    if (column.type === "WINDOW_COL") collectGroupingRefs(column, forbiddenGroupingRefs);
+  }
+  if (forbiddenGroupingRefs.length > 0) {
+    throw new Error(
+      "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
+    );
+  }
+  if (normalized.type !== "GROUPING_SETS") {
+    if (groupingRefs.length > 0) {
+      throw new Error("ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
+    }
+    return;
+  }
+  if (stmt.orderMode === "KINTONE_NATIVE") {
+    throw new Error("ArgumentError: B65 KORDER BY is not supported in Phase1.");
+  }
+  if (stmt.columns.some((column) => column.type === "WINDOW_COL")) {
+    throw new Error("ArgumentError: B65 window functions are not supported in Phase1.");
+  }
+  if (stmt.columns.some(
+    (column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
+  )) {
+    throw new Error("ArgumentError: B65 wildcard projection is not supported in Phase1.");
+  }
+}
+function validateGroupingPlanning(stmt, resolve3, planningGuardHook = () => void 0) {
+  validateGroupingStatic(stmt);
+  const normalized = normalizeGroupingSpec(stmt);
+  const groupingRefs = [];
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
+  }
+  collectGroupingRefs(stmt.having, groupingRefs);
+  collectGroupingRefs(stmt.orderBy, groupingRefs);
+  if (normalized.type !== "GROUPING_SETS") {
+    return null;
+  }
+  const resolvedSpec = resolveGroupingSpec(stmt, resolve3);
+  const canonicalItems = /* @__PURE__ */ new Set();
+  const resolvedItems = [];
+  for (const item of resolvedSpec.allItems) {
+    const resolved = item;
+    if (!resolved.physical) {
+      throw new Error(`ArgumentError: B65 grouping item ${displayField(item.field)} must resolve to a physical APP field.`);
+    }
+    if (!canonicalItems.has(resolved.canonicalId)) {
+      canonicalItems.add(resolved.canonicalId);
+      resolvedItems.push(resolved);
+    }
+  }
+  planningGuardHook({
+    expandedSetCount: normalized.sets.length,
+    canonicalItemCount: canonicalItems.size
+  });
+  for (const ref of groupingRefs) {
+    validateGroupingRefMembership(ref, resolve3, canonicalItems);
+  }
+  const aliases = outputAliases(stmt.columns);
+  for (const column of stmt.columns) {
+    if (column.type === "GROUPING_COL" || column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL" || column.type === "LITERAL_COL" || column.type === "VARIABLE_COL" || column.type === "SCALAR_SUBQUERY_COL") continue;
+    const refs = [];
+    if (column.type === "FIELD") refs.push(refFromName(column.field));
+    else collectNonAggregateFieldRefs(column, refs);
+    for (const ref of refs) validateDependency(ref, resolve3, canonicalItems, "SELECT");
+  }
+  if (stmt.having) {
+    const refs = [];
+    collectNonAggregateFieldRefs(stmt.having, refs);
+    for (const ref of refs) {
+      if (ref.tableAlias === null && aliases.has(ref.field) || isAggregateSyntheticReference(ref)) continue;
+      validateDependency(ref, resolve3, canonicalItems, "HAVING");
+    }
+  }
+  for (const order of stmt.orderBy) {
+    for (const ref of keyDependencies(order.key)) {
+      if (ref.tableAlias === null && aliases.has(ref.field) || isAggregateSyntheticReference(ref)) continue;
+      validateDependency(ref, resolve3, canonicalItems, "ORDER BY");
+    }
+  }
+  const collisionKeys = /* @__PURE__ */ new Set();
+  for (const item of resolvedItems) {
+    collisionKeys.add(item.directKey);
+    if (item.unqualifiedBridgeKey !== null) collisionKeys.add(item.unqualifiedBridgeKey);
+  }
+  for (const column of stmt.columns) {
+    if (!isAggregateMaterializedAlias(column)) continue;
+    const alias = "alias" in column ? column.alias : null;
+    if (alias === null) continue;
+    if (collisionKeys.has(alias)) {
+      throw new Error(
+        `ArgumentError: B65 aggregate alias ${alias} collides with a grouping runtime key (reason=B65_AGGREGATE_ALIAS_COLLISION).`
+      );
+    }
+  }
+  return resolvedSpec;
+}
+
 // src/converter/selectToKintone.ts
 function hasWindowColumns(columns) {
   return columns.some((column) => column.type === "WINDOW_COL");
@@ -35145,7 +35442,7 @@ function resolveSelectMode(stmt) {
   if (stmt.distinct) return "FULL_SCAN";
   if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
   if (stmt.columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr)
+    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "SCALAR_SUBQUERY_COL" || c.type === "CASE_COL" && containsAggregate2(c.expr) || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr)
   )) return "FULL_SCAN";
   if (whereRequiresJsEval(stmt.where)) return "FULL_SCAN";
   if (stmt.orderBy.some((o) => o.key.type !== "FIELD_NAME")) return "FULL_SCAN";
@@ -35299,6 +35596,10 @@ function collectScalarValueFields(expr, out) {
 }
 function collectCaseResultScalarFields(result, out) {
   if (result.type === "ARRAY") return;
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") {
+    collectAggOperandFields(result, out);
+    return;
+  }
   if (result.type === "FIELD_REF" || result.type === "ARITH") {
     collectArithNode(result, out);
     return;
@@ -35336,6 +35637,7 @@ function scalarValueHasAggregate(expr) {
   return false;
 }
 function caseResultHasAggregate(result) {
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") return true;
   if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
   return scalarValueHasAggregate(result);
 }
@@ -35544,6 +35846,10 @@ function collectRequiredFieldsByTable(stmt, plainGroupByPlan, sourceAware) {
   };
   const walkCaseResult = (result, phase = "select") => {
     if (result.type === "ARRAY") return;
+    if (result.type === "AGG_REF" || result.type === "AGG_ARITH") {
+      walkAgg(result, phase);
+      return;
+    }
     if (result.type === "FIELD_REF" || result.type === "ARITH") {
       walkArith(result, phase);
       return;
@@ -35559,11 +35865,19 @@ function collectRequiredFieldsByTable(stmt, plainGroupByPlan, sourceAware) {
   };
   const walkFieldValue = (fv, phase = "select") => {
     if (fv.type === "FIELD") {
+      if (fv.aggregateRef) {
+        walkAgg(fv.aggregateRef, phase);
+        return;
+      }
       addFieldRef(fv.field, fv.tableAlias, phase);
       return;
     }
     if (fv.type === "FUNC_FIELD") {
       walkStringFunc(fv.expr, phase);
+      return;
+    }
+    if (fv.type === "AGG_FIELD") {
+      walkAgg(fv.expr, phase);
       return;
     }
     if (fv.type === "ARITH_FIELD") {
@@ -36529,276 +36843,6 @@ function validateStringFunctionArities(stmt) {
     Object.values(node).forEach(visit);
   };
   visit(stmt);
-}
-
-// src/core/groupingValidation.ts
-init_define_KSQL_DOCS();
-
-// src/engine/groupingRowMeta.ts
-init_define_KSQL_DOCS();
-var groupingRowMetaKey = /* @__PURE__ */ Symbol("ksql.groupingRowMeta");
-var groupingRefCanonicalIds = /* @__PURE__ */ new WeakMap();
-function attachGroupingRowMeta(row, includedCanonicalIds) {
-  Object.defineProperty(row, groupingRowMetaKey, {
-    value: { includedCanonicalIds },
-    enumerable: false,
-    configurable: false,
-    writable: false
-  });
-  return row;
-}
-function getGroupingRowMeta(row) {
-  return row[groupingRowMetaKey];
-}
-function readGroupingMembership(row) {
-  return getGroupingRowMeta(row)?.includedCanonicalIds;
-}
-function bindGroupingRefCanonicalId(ref, canonicalId) {
-  groupingRefCanonicalIds.set(ref, canonicalId);
-}
-function evalGroupingRef(ref, row) {
-  const membership = readGroupingMembership(row);
-  if (!membership) {
-    throw new Error("internal error: GROUPING() evaluation requires B65 grouping row membership.");
-  }
-  const canonicalId = groupingRefCanonicalIds.get(ref);
-  if (!canonicalId) {
-    throw new Error("internal error: GROUPING() reference was not resolved during B65 planning.");
-  }
-  return membership.has(canonicalId) ? "0" : "1";
-}
-
-// src/core/groupingValidation.ts
-var enforceGroupingPlanningCandidateLimits = (facts) => {
-  if (facts.expandedSetCount > B65_MAX_GROUPING_SETS) {
-    throw new Error(
-      `ArgumentError: B65 expanded grouping set count ${facts.expandedSetCount} exceeds limit ${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
-    );
-  }
-  if (facts.canonicalItemCount > B65_MAX_GROUPING_ITEMS) {
-    throw new Error(
-      `ArgumentError: B65 canonical grouping item count ${facts.canonicalItemCount} exceeds limit ${B65_MAX_GROUPING_ITEMS} (reason=GROUPING_ITEM_LIMIT_EXCEEDED).`
-    );
-  }
-};
-function displayField(field) {
-  return field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
-}
-function refFromName(name) {
-  const dot = name.indexOf(".");
-  return dot > 0 ? { type: "FIELD", tableAlias: name.slice(0, dot), field: name.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field: name };
-}
-function collectGroupingRefs(node, out) {
-  if (node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    node.forEach((item) => collectGroupingRefs(item, out));
-    return;
-  }
-  const value = node;
-  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
-  if (value["type"] === "GROUPING_REF") {
-    out.push(value);
-    return;
-  }
-  Object.values(value).forEach((item) => collectGroupingRefs(item, out));
-}
-function collectAggregateArgumentGroupingRefs(node, out) {
-  if (node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    node.forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
-    return;
-  }
-  const value = node;
-  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
-  if (value["type"] === "AGGREGATE" || value["type"] === "AGG_REF") {
-    collectGroupingRefs(value["arg"], out);
-    return;
-  }
-  Object.values(value).forEach((item) => collectAggregateArgumentGroupingRefs(item, out));
-}
-function collectNonAggregateFieldRefs(node, out) {
-  if (node === null || typeof node !== "object") return;
-  if (Array.isArray(node)) {
-    node.forEach((item) => collectNonAggregateFieldRefs(item, out));
-    return;
-  }
-  const value = node;
-  const type = value["type"];
-  if (type === "SELECT" || type === "SCALAR_SUBQUERY" || type === "GROUPING_REF" || type === "AGG_REF" || type === "AGG_ARITH") return;
-  if (type === "FIELD" && typeof value["field"] === "string") {
-    out.push({
-      type: "FIELD",
-      tableAlias: typeof value["tableAlias"] === "string" ? value["tableAlias"] : null,
-      field: value["field"]
-    });
-    return;
-  }
-  if (type === "FIELD_REF" && typeof value["field"] === "string") {
-    out.push(refFromName(value["field"]));
-    return;
-  }
-  Object.values(value).forEach((item) => collectNonAggregateFieldRefs(item, out));
-}
-function containsAggregate2(node) {
-  if (node === null || typeof node !== "object") return false;
-  if (Array.isArray(node)) return node.some(containsAggregate2);
-  const value = node;
-  if (value["type"] === "AGG_REF" || value["type"] === "AGG_ARITH") return true;
-  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return false;
-  return Object.values(value).some(containsAggregate2);
-}
-function isAggregateMaterializedAlias(column) {
-  if (!("alias" in column) || column.alias === null) return false;
-  if (column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL") return true;
-  if (column.type === "STRFUNC_COL" || column.type === "SCALAR_VALUE_COL") {
-    return containsAggregate2(column);
-  }
-  return false;
-}
-function outputAliases(columns) {
-  return new Set(columns.flatMap(
-    (column) => "alias" in column && typeof column.alias === "string" ? [column.alias] : []
-  ));
-}
-function isAggregateSyntheticReference(ref) {
-  return ref.tableAlias === null && /^(COUNT|SUM|AVG|MAX|MIN|GROUP_CONCAT|STDDEV_POP|STDDEV_SAMP|VAR_POP|VAR_SAMP|MEDIAN|MODE)\(/.test(ref.field);
-}
-function validateGroupingRefMembership(ref, resolve3, canonicalItems) {
-  const resolved = resolve3(ref.field);
-  if (!resolved.physical) {
-    throw new Error(`ArgumentError: B65 grouping reference ${displayField(ref.field)} must resolve to a physical APP field.`);
-  }
-  if (!canonicalItems.has(resolved.canonicalId)) {
-    throw new Error(
-      `ArgumentError: B65 GROUPING argument ${displayField(ref.field)} is not present in grouping allItems (reason=B65_GROUPING_ARG_NOT_ITEM).`
-    );
-  }
-  bindGroupingRefCanonicalId(ref, resolved.canonicalId);
-}
-function validateDependency(ref, resolve3, canonicalItems, context) {
-  const resolved = resolve3(ref);
-  if (!resolved.physical || !canonicalItems.has(resolved.canonicalId)) {
-    throw new Error(
-      `ArgumentError: B65 non-aggregate field ${displayField(ref)} in ${context} is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).`
-    );
-  }
-}
-function keyDependencies(key) {
-  if (key.type === "GROUPING_KEY") return [];
-  if (key.type === "FIELD_NAME") return [refFromName(key.name)];
-  const refs = [];
-  collectNonAggregateFieldRefs(key, refs);
-  return refs;
-}
-function validateGroupingStatic(stmt) {
-  const normalized = normalizeGroupingSpec(stmt);
-  const groupingRefs = [];
-  for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
-  }
-  collectGroupingRefs(stmt.having, groupingRefs);
-  collectGroupingRefs(stmt.orderBy, groupingRefs);
-  const forbiddenGroupingRefs = [];
-  collectGroupingRefs(stmt.where, forbiddenGroupingRefs);
-  collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
-  collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
-  collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
-  for (const column of stmt.columns) {
-    if (column.type === "WINDOW_COL") collectGroupingRefs(column, forbiddenGroupingRefs);
-  }
-  if (forbiddenGroupingRefs.length > 0) {
-    throw new Error(
-      "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
-    );
-  }
-  if (normalized.type !== "GROUPING_SETS") {
-    if (groupingRefs.length > 0) {
-      throw new Error("ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
-    }
-    return;
-  }
-  if (stmt.orderMode === "KINTONE_NATIVE") {
-    throw new Error("ArgumentError: B65 KORDER BY is not supported in Phase1.");
-  }
-  if (stmt.columns.some((column) => column.type === "WINDOW_COL")) {
-    throw new Error("ArgumentError: B65 window functions are not supported in Phase1.");
-  }
-  if (stmt.columns.some(
-    (column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
-  )) {
-    throw new Error("ArgumentError: B65 wildcard projection is not supported in Phase1.");
-  }
-}
-function validateGroupingPlanning(stmt, resolve3, planningGuardHook = () => void 0) {
-  validateGroupingStatic(stmt);
-  const normalized = normalizeGroupingSpec(stmt);
-  const groupingRefs = [];
-  for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
-  }
-  collectGroupingRefs(stmt.having, groupingRefs);
-  collectGroupingRefs(stmt.orderBy, groupingRefs);
-  if (normalized.type !== "GROUPING_SETS") {
-    return null;
-  }
-  const resolvedSpec = resolveGroupingSpec(stmt, resolve3);
-  const canonicalItems = /* @__PURE__ */ new Set();
-  const resolvedItems = [];
-  for (const item of resolvedSpec.allItems) {
-    const resolved = item;
-    if (!resolved.physical) {
-      throw new Error(`ArgumentError: B65 grouping item ${displayField(item.field)} must resolve to a physical APP field.`);
-    }
-    if (!canonicalItems.has(resolved.canonicalId)) {
-      canonicalItems.add(resolved.canonicalId);
-      resolvedItems.push(resolved);
-    }
-  }
-  planningGuardHook({
-    expandedSetCount: normalized.sets.length,
-    canonicalItemCount: canonicalItems.size
-  });
-  for (const ref of groupingRefs) {
-    validateGroupingRefMembership(ref, resolve3, canonicalItems);
-  }
-  const aliases = outputAliases(stmt.columns);
-  for (const column of stmt.columns) {
-    if (column.type === "GROUPING_COL" || column.type === "AGGREGATE" || column.type === "ARITH_AGG_COL" || column.type === "LITERAL_COL" || column.type === "VARIABLE_COL" || column.type === "SCALAR_SUBQUERY_COL") continue;
-    const refs = [];
-    if (column.type === "FIELD") refs.push(refFromName(column.field));
-    else collectNonAggregateFieldRefs(column, refs);
-    for (const ref of refs) validateDependency(ref, resolve3, canonicalItems, "SELECT");
-  }
-  if (stmt.having) {
-    const refs = [];
-    collectNonAggregateFieldRefs(stmt.having, refs);
-    for (const ref of refs) {
-      if (ref.tableAlias === null && aliases.has(ref.field) || isAggregateSyntheticReference(ref)) continue;
-      validateDependency(ref, resolve3, canonicalItems, "HAVING");
-    }
-  }
-  for (const order of stmt.orderBy) {
-    for (const ref of keyDependencies(order.key)) {
-      if (ref.tableAlias === null && aliases.has(ref.field) || isAggregateSyntheticReference(ref)) continue;
-      validateDependency(ref, resolve3, canonicalItems, "ORDER BY");
-    }
-  }
-  const collisionKeys = /* @__PURE__ */ new Set();
-  for (const item of resolvedItems) {
-    collisionKeys.add(item.directKey);
-    if (item.unqualifiedBridgeKey !== null) collisionKeys.add(item.unqualifiedBridgeKey);
-  }
-  for (const column of stmt.columns) {
-    if (!isAggregateMaterializedAlias(column)) continue;
-    const alias = "alias" in column ? column.alias : null;
-    if (alias === null) continue;
-    if (collisionKeys.has(alias)) {
-      throw new Error(
-        `ArgumentError: B65 aggregate alias ${alias} collides with a grouping runtime key (reason=B65_AGGREGATE_ALIAS_COLLISION).`
-      );
-    }
-  }
-  return resolvedSpec;
 }
 
 // src/core/batch.ts
@@ -37896,9 +37940,31 @@ function formatWithComma(num, digits) {
   return decStr ? `${intFmt}.${decStr}` : intFmt;
 }
 function evalStringFuncArg(arg, row, resolveFieldType, resolveFieldSemantics2) {
-  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return "";
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+    return String(evalMaterializedAggregateOperand(arg, row));
+  }
   if (arg.type === "NUMBER") return numberLiteralText(arg);
   return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics2));
+}
+function evalMaterializedAggregateOperand(node, row) {
+  if (node.type === "NUMBER") return node.value;
+  if (node.type === "AGG_REF") {
+    return row[aggregateSyntheticName(node.func, node.distinct, node.arg)] ?? "";
+  }
+  const left = Number(evalMaterializedAggregateOperand(node.left, row));
+  const right = Number(evalMaterializedAggregateOperand(node.right, row));
+  switch (node.op) {
+    case "+":
+      return left + right;
+    case "-":
+      return left - right;
+    case "*":
+      return left * right;
+    case "/":
+      return right !== 0 ? left / right : NaN;
+    case "%":
+      return right !== 0 ? left % right : NaN;
+  }
 }
 function resolveFieldRef(row, field) {
   const direct = row[field];
@@ -37994,7 +38060,7 @@ function semanticsForLeft(left, fieldType, resolveSemantics) {
   if (left.type === "FIELD") {
     return resolveSemantics?.(left) ?? (fieldType ? resolveFieldSemantics({ fieldType }) : syntheticSemantics("string"));
   }
-  if (left.type === "ARITH_FIELD") return syntheticSemantics("number");
+  if (left.type === "ARITH_FIELD" || left.type === "AGG_FIELD") return syntheticSemantics("number");
   if (left.type === "FUNC_FIELD") {
     return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(left.expr.func) ? "number" : "string");
   }
@@ -38087,6 +38153,7 @@ function evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSem
 }
 function resolveField(field, row, resolveFieldType, resolveFieldSemantics2) {
   if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row);
+  if (field.type === "AGG_FIELD") return String(evalMaterializedAggregateOperand(field.expr, row));
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics2);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
@@ -38144,12 +38211,20 @@ function evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics
 }
 function evalCaseResultNullable(result, row, resolveFieldType, resolveFieldSemantics2) {
   if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
+  if (result.type === "AGG_REF") {
+    return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
+  }
+  if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   if (result.type === "FIELD_REF") return row[result.field] ?? "";
   if (result.type === "ARITH") return evalArithExpr(result, row);
   return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics2);
 }
 function evalCaseResult(result, row, resolveFieldType, resolveFieldSemantics2) {
   if (result.type === "ARRAY") return result.elements.map((e) => e.value).join(",");
+  if (result.type === "AGG_REF") {
+    return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
+  }
+  if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   if (result.type === "FIELD_REF") {
     return row[result.field] ?? "";
   }
@@ -38415,6 +38490,10 @@ function collectAggregateArgFields2(node, out) {
 }
 function collectCaseResultFields(result, out) {
   if (result.type === "ARRAY") return;
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") {
+    collectAggOperandFields2(result, out);
+    return;
+  }
   if (result.type === "FIELD_REF" || result.type === "ARITH") {
     collectArithNode2(result, out);
     return;
@@ -38635,6 +38714,9 @@ function convertArray(elements, fieldType) {
 function evalCaseResultValue(result, row, fieldType) {
   if (result.type === "ARRAY") {
     return convertArray(result.elements.map((e) => e.value), fieldType);
+  }
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") {
+    throw new Error("InternalError: aggregate CASE result reached DML evaluation.");
   }
   if (result.type === "STRING") {
     return convertString2(result.value, fieldType);
@@ -42871,7 +42953,7 @@ function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldS
 }
 function hasAggregateColumns(columns) {
   return columns.some(
-    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(c.expr)
+    (c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "CASE_COL" && containsAggregate2(c.expr) || c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(c.expr) || c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(c.expr)
   );
 }
 function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind, resolutionPlan, aliasEvaluationContext = {}) {
@@ -42976,24 +43058,70 @@ function groupingItemValue(item, row) {
   return row[item.directKey] ?? (item.unqualifiedBridgeKey === null ? void 0 : row[item.unqualifiedBridgeKey]) ?? "";
 }
 function materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind) {
-  for (const col of columns) {
+  for (const [columnIndex, col] of columns.entries()) {
     if (col.type === "AGGREGATE") {
       const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
       const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
       outRow[col.alias ?? syntheticKey] = value;
       if (col.alias) outRow[syntheticKey] = value;
     } else if (col.type === "ARITH_AGG_COL") {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
       outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
     } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
       const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
       outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
     } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
       const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
       outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
+    } else if (col.type === "CASE_COL" && containsAggregate2(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      const resolvedExpr = resolveAggInCaseExpr(col.expr, groupRows, resolveAggSortKind);
+      const resolveAggregateSemantics = (field) => field.aggregateRef ? aggregateResultSemantics(field.aggregateRef, resolveAggSortKind) : void 0;
+      outRow[caseMaterializedKey(col.alias, columnIndex)] = evalCaseWhen(
+        resolvedExpr,
+        outRow,
+        void 0,
+        resolveAggregateSemantics
+      );
     }
+  }
+}
+function caseMaterializedKey(alias, columnIndex) {
+  return alias ?? `__ksql_case_column_${columnIndex}`;
+}
+function collectAggregateRefs(node, out) {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    node.forEach((value2) => collectAggregateRefs(value2, out));
+    return;
+  }
+  const value = node;
+  if (value["type"] === "AGG_REF") {
+    out.push(value);
+    return;
+  }
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+  Object.values(value).forEach((child) => collectAggregateRefs(child, out));
+}
+function materializeAggregateDependencies(outRow, rows, node, resolveAggSortKind) {
+  const refs = [];
+  collectAggregateRefs(node, refs);
+  for (const ref of refs) {
+    const key = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
+    if (outRow[key] !== void 0) continue;
+    outRow[key] = String(evalAggregate(
+      ref.func,
+      ref.distinct,
+      ref.arg,
+      ref.separator,
+      rows,
+      resolveAggSortKind
+    ));
   }
 }
 function evalGroupByKey(key, row, resolution, columns, aliasEvaluationContext) {
@@ -43036,7 +43164,7 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
       const raw = row[arg.field];
       if (raw === void 0 || raw === "" && func !== "MIN" && func !== "MAX") continue;
       strVal = raw;
-    } else if (arg.type === "ARITH" || arg.type === "NUMBER" || arg.type === "STRING_FUNC") {
+    } else if (arg.type === "ARITH" || arg.type === "NUMBER") {
       const n = evalArithExpr(arg, row);
       if (isNaN(n)) continue;
       strVal = String(n);
@@ -43167,6 +43295,16 @@ function resolveAggregateArgSemantics(arg, resolver) {
   if (!kinds.every((kind) => kind === kinds[0])) return "string";
   const first = results[0];
   return results.every((result) => JSON.stringify(result) === JSON.stringify(first)) ? first : kinds[0];
+}
+function aggregateResultSemantics(ref, resolver) {
+  if (ref.func === "COUNT" || ref.func === "SUM" || ref.func === "AVG" || ref.func === "STDDEV_POP" || ref.func === "STDDEV_SAMP" || ref.func === "VAR_POP" || ref.func === "VAR_SAMP" || ref.func === "MEDIAN") {
+    return syntheticSemantics("number");
+  }
+  if (ref.func === "GROUP_CONCAT" || ref.func === "MODE") {
+    return syntheticSemantics("string");
+  }
+  const semantics = ref.arg.type === "WILDCARD" ? "string" : resolveAggregateArgSemantics(ref.arg, resolver) ?? "string";
+  return typeof semantics === "string" ? syntheticSemantics(semantics) : semantics;
 }
 function applyHaving(rows, having, resolveFieldType, resolveFieldSemantics2) {
   if (having === null) return rows;
@@ -43327,7 +43465,7 @@ function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, reso
         break;
       }
       case "CASE_COL":
-        evaluators.set(alias, (row) => evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics2));
+        evaluators.set(alias, (row) => containsAggregate2(column.expr) ? row[alias] ?? "" : evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics2));
         break;
       case "SCALAR_VALUE_COL": {
         const source = scalarValueDefaultKey(column.expr);
@@ -43416,7 +43554,7 @@ function evaluateSelectColumnValue(column, row, columnIndex, context = {}) {
     case "ARITH_COL":
       return String(evalArithExpr(column.expr, row));
     case "CASE_COL":
-      return evalCaseWhen(
+      return containsAggregate2(column.expr) ? row[caseMaterializedKey(column.alias, columnIndex)] ?? "" : evalCaseWhen(
         column.expr,
         row,
         context.resolveFieldType,
@@ -43481,13 +43619,14 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, r
     return { rows: projected2, columns: cols };
   }
   const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
+  const defaultCaseKeys = buildDefaultCaseOutputKeys(columns);
   const hasWildcard = columns.some(
     (col) => col.type === "WILDCARD" || col.type === "PARENT_WILDCARD"
   );
-  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys);
+  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys, defaultCaseKeys);
   const orderedKeys = outputKeys ?? [];
   if (hasWildcard && rows.length === 0) {
-    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys) };
+    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys, defaultCaseKeys) };
   }
   const projected = rows.map((row, rowIdx) => {
     const out = {};
@@ -43554,7 +43693,7 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, r
           break;
         }
         case "CASE_COL": {
-          const key = outputKeys?.[colIdx] ?? col.alias ?? "case";
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultCaseKeys.get(colIdx) ?? "case";
           out[key] = value;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
@@ -43595,15 +43734,15 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, r
   });
   return { rows: projected, columns: orderedKeys };
 }
-function computeOutputKeys(columns, defaultFieldKeys) {
-  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys));
+function computeOutputKeys(columns, defaultFieldKeys, defaultCaseKeys) {
+  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys));
 }
-function computeExplicitOutputKeys(columns, defaultFieldKeys) {
+function computeExplicitOutputKeys(columns, defaultFieldKeys, defaultCaseKeys) {
   const keys = [];
   const seen = /* @__PURE__ */ new Set();
   for (const [colIdx, col] of columns.entries()) {
     if (col.type === "WILDCARD" || col.type === "PARENT_WILDCARD") continue;
-    const key = computeOutputKey(col, colIdx, defaultFieldKeys);
+    const key = computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys);
     if (!seen.has(key)) {
       seen.add(key);
       keys.push(key);
@@ -43611,7 +43750,7 @@ function computeExplicitOutputKeys(columns, defaultFieldKeys) {
   }
   return keys;
 }
-function computeOutputKey(col, colIdx, defaultFieldKeys) {
+function computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys) {
   switch (col.type) {
     case "VARIABLE_COL":
       throw new Error(`internal error: unresolved SELECT variable @${col.name}`);
@@ -43626,7 +43765,7 @@ function computeOutputKey(col, colIdx, defaultFieldKeys) {
     case "ARITH_COL":
       return col.alias ?? arithColDefaultKey(col.expr);
     case "CASE_COL":
-      return col.alias ?? "case";
+      return col.alias ?? defaultCaseKeys.get(colIdx) ?? "case";
     case "STRFUNC_COL":
       return col.alias ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_VALUE_COL":
@@ -43641,6 +43780,24 @@ function computeOutputKey(col, colIdx, defaultFieldKeys) {
     case "PARENT_WILDCARD":
       throw new Error("internal: computeOutputKey received a wildcard column");
   }
+}
+function buildDefaultCaseOutputKeys(columns) {
+  const used = new Set(columns.flatMap(
+    (column) => "alias" in column && column.alias !== null ? [column.alias] : []
+  ));
+  const keys = /* @__PURE__ */ new Map();
+  let suffix = 1;
+  for (const [columnIndex, column] of columns.entries()) {
+    if (column.type !== "CASE_COL" || column.alias !== null) continue;
+    let key;
+    do {
+      key = suffix === 1 ? "case" : `case_${suffix}`;
+      suffix++;
+    } while (used.has(key));
+    used.add(key);
+    keys.set(columnIndex, key);
+  }
+  return keys;
 }
 function buildDefaultFieldOutputKeys(columns) {
   const qualifierCollisionCount = /* @__PURE__ */ new Map();
@@ -43731,6 +43888,7 @@ function scalarValueHasAggregate2(expr) {
   return false;
 }
 function caseResultHasAggregate2(result) {
+  if (result.type === "AGG_REF" || result.type === "AGG_ARITH") return true;
   if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return false;
   return scalarValueHasAggregate2(result);
 }
@@ -43753,6 +43911,7 @@ function resolveAggInStringFuncArg(arg, rows, resolveAggSortKind) {
 }
 function resolveAggInScalarValue(expr, rows, resolveAggSortKind) {
   if (expr.type === "STRING_FUNC") return resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind);
+  if (expr.type === "CASE_WHEN") return resolveAggInCaseExpr(expr, rows, resolveAggSortKind);
   if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
     return {
       ...expr,
@@ -43761,6 +43920,35 @@ function resolveAggInScalarValue(expr, rows, resolveAggSortKind) {
     };
   }
   return expr;
+}
+function resolveAggInCaseResult(result, rows, resolveAggSortKind) {
+  if (result.type === "AGG_REF") {
+    const value = evalAggregate(
+      result.func,
+      result.distinct,
+      result.arg,
+      result.separator,
+      rows,
+      resolveAggSortKind
+    );
+    return typeof value === "number" ? { type: "NUMBER", value, raw: String(value) } : { type: "STRING", value };
+  }
+  if (result.type === "AGG_ARITH") {
+    const value = evalAggArithExpr(result, rows, resolveAggSortKind);
+    return { type: "NUMBER", value, raw: String(value) };
+  }
+  if (result.type === "ARRAY" || result.type === "FIELD_REF" || result.type === "ARITH") return result;
+  return resolveAggInScalarValue(result, rows, resolveAggSortKind);
+}
+function resolveAggInCaseExpr(expr, rows, resolveAggSortKind) {
+  return {
+    ...expr,
+    branches: expr.branches.map((branch) => ({
+      ...branch,
+      result: resolveAggInCaseResult(branch.result, rows, resolveAggSortKind)
+    })),
+    elseResult: expr.elseResult === null ? null : resolveAggInCaseResult(expr.elseResult, rows, resolveAggSortKind)
+  };
 }
 function resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind) {
   return {
@@ -43884,7 +44072,8 @@ function runFullScan(input) {
       }
     );
   }
-  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, havingFieldSemanticsResolver);
+  const resolveHavingSemantics = (field) => field.aggregateRef ? aggregateResultSemantics(field.aggregateRef, aggregateSortKindResolver) : havingFieldSemanticsResolver?.(field);
+  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
   rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds, effectiveOrderSemantics);
   if (stmt.distinct) {
     rows = applyDistinct(
@@ -47451,7 +47640,7 @@ function scalarValueHasFieldRef(expr) {
   }
   if (expr.type === "CASE_WHEN") {
     const results = [...expr.branches.map((branch) => branch.result), ...expr.elseResult ? [expr.elseResult] : []];
-    return results.some((result) => result.type !== "ARRAY" && (result.type === "FIELD_REF" || result.type === "ARITH" ? arithHasFieldRef(result) : scalarValueHasFieldRef(result)));
+    return results.some((result) => result.type !== "ARRAY" && (result.type === "FIELD_REF" || result.type === "ARITH" ? arithHasFieldRef(result) : result.type === "AGG_REF" || result.type === "AGG_ARITH" ? true : scalarValueHasFieldRef(result)));
   }
   return false;
 }
@@ -48003,7 +48192,8 @@ function collectAggregateArgFieldRefs(arg, out) {
   }
   if (arg.type === "CASE_WHEN") {
     for (const result of [...arg.branches.map((branch) => branch.result), ...arg.elseResult ? [arg.elseResult] : []]) {
-      if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
+      if (result.type === "AGG_REF" || result.type === "AGG_ARITH") collectAggregateOperandRefs(result, out);
+      else if (result.type !== "ARRAY") collectAggregateArgFieldRefs(result, out);
     }
   }
 }
@@ -48040,9 +48230,28 @@ function collectScalarAggregateRefs(expr, out) {
     const results = [...expr.branches.map((branch) => branch.result), ...expr.elseResult ? [expr.elseResult] : []];
     for (const result of results) {
       if (result.type === "STRING_FUNC") collectStringFuncAggregateRefs(result, out);
+      else if (result.type === "AGG_REF" || result.type === "AGG_ARITH") collectAggregateOperandRefs(result, out);
       else if (result.type !== "ARRAY" && result.type !== "FIELD_REF" && result.type !== "ARITH") collectScalarAggregateRefs(result, out);
     }
   }
+}
+function collectCaseAggregateRefs(expr, out) {
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const value = node;
+    if (value["type"] === "AGG_REF") {
+      const aggregate = value;
+      collectAggregateRef(aggregate.func, aggregate.arg, out);
+      return;
+    }
+    if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+    Object.values(value).forEach(visit);
+  };
+  visit(expr);
 }
 function collectSelectAggregateSortRefs(columns) {
   const refs = [];
@@ -48055,6 +48264,8 @@ function collectSelectAggregateSortRefs(columns) {
       collectStringFuncAggregateRefs(column.expr, refs);
     } else if (column.type === "SCALAR_VALUE_COL") {
       collectScalarAggregateRefs(column.expr, refs);
+    } else if (column.type === "CASE_COL") {
+      collectCaseAggregateRefs(column.expr, refs);
     }
   }
   return refs;
@@ -48232,6 +48443,13 @@ function stringFunctionColumnMeta(expr) {
 function caseResultColumnMeta(result, resolveField2) {
   if (result.type === "STRING") return syntheticColumnMeta("string");
   if (result.type === "ARRAY") return unsupportedColumnMeta();
+  if (result.type === "AGG_REF") {
+    if (result.func === "MIN" || result.func === "MAX" || result.func === "MODE") {
+      return result.arg.type === "WILDCARD" ? unknownStringColumnMeta() : inferAggregateArgMeta(result.arg, resolveField2);
+    }
+    return result.func === "GROUP_CONCAT" ? syntheticColumnMeta("string") : syntheticColumnMeta("number");
+  }
+  if (result.type === "AGG_ARITH") return syntheticColumnMeta("number");
   if (result.type === "NUMBER" || result.type === "ARITH" || result.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
   if (result.type === "FIELD_REF") return resolveField2(aggregateFieldRef(result.field)) ?? unknownStringColumnMeta();
@@ -57508,7 +57726,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.43.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.44.0" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
 
