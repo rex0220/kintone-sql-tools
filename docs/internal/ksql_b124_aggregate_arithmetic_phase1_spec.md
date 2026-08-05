@@ -1,6 +1,6 @@
 # B124 集計算術式の非集計オペランド Phase 1 仕様（R2）
 
-- ステータス: ✅ **実装済み**（2026-08-05・`npm test` 5,383 件成功・実機で既知期待値と一致） → [レビュー](ksql_b124_codex_review_1.md)（高 4・中 4・低 2 を**全件反映**）
+- ステータス: ✅ **v3.46.0 でリリース済み**（2026-08-05・npm publish 済み・`npm test` 5,383 件成功・MCP 再読み込み後に実機で既知期待値と一致） → [レビュー](ksql_b124_codex_review_1.md)（高 4・中 4・低 2 を**全件反映**）
 - 対象: 案 C（文書）＋ A1（`@変数`）＋ A2（`GROUP BY` キー）を **1 本の Phase 1** とする
 - 関連: [B124 起票](ksql_b124_aggregate_arithmetic_nonaggregate_operand_issue.md) /
   [B122](ksql_b122_having_aggregate_expression_issue.md)・[B121](ksql_b121_having_numeric_comparison_issue.md)（`HAVING` の非対称を潰した直後）/
