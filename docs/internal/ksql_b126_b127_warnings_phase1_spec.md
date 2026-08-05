@@ -1,6 +1,6 @@
 # B126 選択系 `=` / `!=` の押し下げ正規化 / B127 ウィンドウ既定フレームの警告 Phase 1 仕様（R4）
 
-- ステータス: 📋 **仕様 R4（codex レビュー 2 回目を反映・実装着手可能）** → [レビュー1](ksql_b126_b127_codex_review_1.md)（高4・中6・低1）/ [レビュー2](ksql_b126_b127_codex_review_2.md)（高4・中3・低1）。**いずれも全件反映**
+- ステータス: ✅ **v3.47.0 でリリース済み**（2026-08-05・npm publish 済み・MCP 再読み込み後に実機確認済み） → [レビュー1](ksql_b126_b127_codex_review_1.md)（高4・中6・低1）/ [レビュー2](ksql_b126_b127_codex_review_2.md)（高4・中3・低1）。**いずれも全件反映**
 - 出典: [ksql-analytics の依頼](../../../ksql-analytics/docs/internal/kSQLエンジンへの依頼-20260805.md) ①② / [triage](ksql_analytics_request_20260805_evaluation.md)
 
 > **R2 からの転換（オーナー判断 2026-08-05）**
