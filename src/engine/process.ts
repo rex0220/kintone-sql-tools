@@ -689,6 +689,13 @@ function evalAggArithExpr(
 ): number {
   if (node.type === "NUMBER")    return node.value;
   if (node.type === "AGG_REF")   return Number(evalAggregate(node.func, node.distinct, node.arg, node.separator, rows, resolveAggSortKind));
+  if (node.type === "AGG_GROUP_KEY") {
+    const field = node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field;
+    return Number(resolveFieldRef(rows[0] ?? {}, field));
+  }
+  if (node.type === "VARIABLE") {
+    throw new Error(`InternalError: unresolved aggregate arithmetic variable @${node.name}.`);
+  }
   // AGG_ARITH
   const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
   const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
@@ -1595,7 +1602,8 @@ function arithColDefaultKey(expr: ArithNode): string {
 /** alias なし時のデフォルトキー名: "UPPER(名前)" 形式 */
 function stringFuncDefaultKey(expr: StringFuncExpr): string {
   const argStrs = expr.args.map((a) => {
-    if (a.type === "AGG_REF" || a.type === "AGG_ARITH") return aggArithDefaultKey(a);
+    if (a.type === "AGG_REF" || a.type === "AGG_ARITH" || a.type === "AGG_GROUP_KEY") return aggArithDefaultKey(a);
+    if (a.type === "VARIABLE") return `@${a.name}`;
     return scalarValueDefaultKey(a);
   });
   return `${expr.func}(${argStrs.join(",")})`;
@@ -1616,6 +1624,7 @@ function scalarValueDefaultKey(expr: ScalarValueExpr): string {
 
 function hasAggregateInStringFuncArg(arg: StringFuncArg): boolean {
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+  if (arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") return false;
   return scalarValueHasAggregate(arg);
 }
 
@@ -1655,6 +1664,13 @@ function resolveAggInStringFuncArg(
   if (arg.type === "AGG_ARITH") {
     const value = evalAggArithExpr(arg, rows, resolveAggSortKind);
     return { type: "NUMBER", value, raw: String(value) };
+  }
+  if (arg.type === "AGG_GROUP_KEY") {
+    const field = arg.tableAlias ? `${arg.tableAlias}.${arg.field}` : arg.field;
+    return { type: "NUMBER", value: Number(resolveFieldRef(rows[0] ?? {}, field)), raw: resolveFieldRef(rows[0] ?? {}, field) };
+  }
+  if (arg.type === "VARIABLE") {
+    throw new Error(`InternalError: unresolved aggregate arithmetic variable @${arg.name}.`);
   }
   if (arg.type === "STRING_FUNC") {
     return resolveAggInStringFuncExpr(arg, rows, resolveAggSortKind);

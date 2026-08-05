@@ -707,7 +707,7 @@ export function evalStringFuncArg(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): string {
   // GROUP BY が SELECT に実体化した集計依存値を使って HAVING からも評価する。
-  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY") {
     return String(evalMaterializedAggregateOperand(arg, row));
   }
   if (arg.type === "NUMBER") return numberLiteralText(arg);
@@ -719,6 +719,13 @@ export function evalMaterializedAggregateOperand(node: AggOperand, row: ProcessR
   if (node.type === "NUMBER") return node.value;
   if (node.type === "AGG_REF") {
     return row[aggregateSyntheticName(node.func, node.distinct, node.arg)] ?? "";
+  }
+  if (node.type === "AGG_GROUP_KEY") {
+    const field = node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field;
+    return Number(resolveFieldRef(row, field));
+  }
+  if (node.type === "VARIABLE") {
+    throw new Error(`InternalError: unresolved aggregate arithmetic variable @${node.name}.`);
   }
   const left = Number(evalMaterializedAggregateOperand(node.left, row));
   const right = Number(evalMaterializedAggregateOperand(node.right, row));

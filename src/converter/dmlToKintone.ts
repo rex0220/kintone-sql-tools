@@ -248,7 +248,7 @@ function collectStringFuncFields(expr: StringFuncExpr, out: Set<string>): void {
 }
 
 function collectStringFuncArgFields(arg: StringFuncArg, out: Set<string>): void {
-  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") { collectAggOperandFields(arg, out); return; }
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") { collectAggOperandFields(arg, out); return; }
   collectScalarValueFields(arg, out);
 }
 
@@ -272,6 +272,7 @@ function collectAggOperandFields(node: AggOperand, out: Set<string>): void {
     collectAggOperandFields(node.left, out);
     collectAggOperandFields(node.right, out);
   }
+  if (node.type === "AGG_GROUP_KEY") out.add(node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field);
 }
 
 function collectAggregateArgFields(node: AggregateArgExpr, out: Set<string>): void {

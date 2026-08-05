@@ -2074,7 +2074,7 @@ export function resolveBatchVariableReferences<T>(node: T, variables: Map<string
 function resolveBatchVariableReferencesInternal<T>(
   node: T,
   variables: Map<string, VarValue>,
-  numericArithmeticOperand: boolean
+  numericArithmeticOperand: false | "ARITH" | "AGG_ARITH"
 ): T {
   if (Array.isArray(node)) {
     return node.map((v) => resolveBatchVariableReferencesInternal(v, variables, false)) as T;
@@ -2100,9 +2100,19 @@ function resolveBatchVariableReferencesInternal<T>(
         );
       }
       return (numericArithmeticOperand && value.type === "string" && value.placeholder === true
-        ? { type: "NUMBER", value: 0, raw: value.value }
+        ? {
+            type: "NUMBER",
+            value: 0,
+            raw: numericArithmeticOperand === "AGG_ARITH" ? `@${obj["name"]}` : value.value,
+          }
         : value.type === "number"
-        ? { type: "NUMBER", value: value.value, raw: value.raw ?? String(value.value) }
+        ? {
+            type: "NUMBER",
+            value: value.value,
+            raw: numericArithmeticOperand === "AGG_ARITH"
+              ? `@${obj["name"]}`
+              : value.raw ?? String(value.value),
+          }
         : { type: "STRING", value: value.value }) as T;
     }
     if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
@@ -2126,8 +2136,13 @@ function resolveBatchVariableReferencesInternal<T>(
         resolveBatchVariableReferencesInternal(
           value,
           variables,
-          (obj["type"] === "ARITH" || obj["type"] === "SCALAR_ARITH" || obj["type"] === "AGG_ARITH")
-            && (key === "left" || key === "right")
+          (key === "left" || key === "right")
+            ? obj["type"] === "AGG_ARITH"
+              ? "AGG_ARITH"
+              : (obj["type"] === "ARITH" || obj["type"] === "SCALAR_ARITH")
+                ? "ARITH"
+                : false
+            : false
         ),
       ])
     ) as Record<string, unknown>;
@@ -3103,6 +3118,8 @@ function arithHasFieldRef(node: ArithNode): boolean {
 }
 
 function stringFuncArgHasFieldRef(arg: StringFuncArg): boolean {
+  if (arg.type === "AGG_GROUP_KEY") return true;
+  if (arg.type === "VARIABLE") return false;
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
   return scalarValueHasFieldRef(arg);
 }
@@ -3816,7 +3833,11 @@ function collectAggregateArgFieldRefs(arg: AggregateArgExpr, out: FieldRef[]): v
   }
   if (arg.type === "STRING_FUNC") {
     for (const child of arg.args) {
-      if (child.type !== "AGG_REF" && child.type !== "AGG_ARITH") collectAggregateArgFieldRefs(child, out);
+      if (child.type === "AGG_GROUP_KEY") {
+        out.push({ type: "FIELD", tableAlias: child.tableAlias ?? null, field: child.field });
+      } else if (child.type !== "AGG_REF" && child.type !== "AGG_ARITH" && child.type !== "VARIABLE") {
+        collectAggregateArgFieldRefs(child, out);
+      }
     }
     return;
   }
@@ -3837,12 +3858,17 @@ function collectAggregateOperandRefs(node: AggOperand, out: FieldRef[]): void {
     collectAggregateOperandRefs(node.left, out);
     collectAggregateOperandRefs(node.right, out);
   }
+  if (node.type === "AGG_GROUP_KEY") out.push({ type: "FIELD", tableAlias: node.tableAlias ?? null, field: node.field });
 }
 
 function collectStringFuncAggregateRefs(expr: StringFuncExpr, out: FieldRef[]): void {
   for (const arg of expr.args) {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
       collectAggregateOperandRefs(arg, out);
+    } else if (arg.type === "AGG_GROUP_KEY") {
+      out.push({ type: "FIELD", tableAlias: arg.tableAlias ?? null, field: arg.field });
+    } else if (arg.type === "VARIABLE") {
+      continue;
     } else {
       collectScalarAggregateRefs(arg, out);
     }
@@ -11399,7 +11425,8 @@ function collectArithNodeRefs(node: LegacyArithExpr | ArithNode, out: Set<string
   }
   if (node.type === "STRING_FUNC") {
     for (const arg of node.args) {
-      if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
+      if (arg.type === "AGG_GROUP_KEY") out.add(arg.tableAlias ? `${arg.tableAlias}.${arg.field}` : arg.field);
+      else if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH" && arg.type !== "VARIABLE") collectScalarNodeRefs(arg, out);
     }
   }
 }
@@ -11480,7 +11507,10 @@ function updateFromEvaluationRow(
 function collectScalarNodeRefs(node: ScalarValueExpr, out: Set<string>): void {
   if (node.type === "FIELD") { out.add(node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field); return; }
   if (node.type === "STRING_FUNC") {
-    for (const arg of node.args) if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH") collectScalarNodeRefs(arg, out);
+    for (const arg of node.args) {
+      if (arg.type === "AGG_GROUP_KEY") out.add(arg.tableAlias ? `${arg.tableAlias}.${arg.field}` : arg.field);
+      else if (arg.type !== "AGG_REF" && arg.type !== "AGG_ARITH" && arg.type !== "VARIABLE") collectScalarNodeRefs(arg, out);
+    }
     return;
   }
   if (node.type === "SCALAR_ARITH" || node.type === "CONCAT_OP") {

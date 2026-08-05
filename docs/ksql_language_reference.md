@@ -1488,6 +1488,27 @@ GROUP BY 部署
 - サブクエリと集計の入れ子（`SUM(SUM(x))`）は引数に指定できません。`MODE(DISTINCT ...)` も引き続き使用できません
 - `HAVING SUM(CASE WHEN ステータス = '受注' THEN 売上 ELSE 0 END) > 1000000` も同じ書き方で使用できます。既存の算術式引数の挙動は変わりません
 
+### 集計結果の算術式
+
+集計を含む算術式は**集計関数から始まり**、被演算子には集計関数・数値リテラル・`@変数`・
+**ordinary `GROUP BY` に書いた表記と一致する列**を書けます。SELECT 列と `HAVING` の両方で使用できます。
+
+```sql
+SELECT 分類, SUM(売上) * 単価 FROM APP1 GROUP BY 分類, 単価   -- 可
+SELECT 分類, SUM(売上) * 担当者 FROM APP1 GROUP BY 分類       -- 不可（GROUP BY に無い）
+SELECT 分類, 単価 * SUM(売上) FROM APP1 GROUP BY 分類, 単価   -- 不可（集計関数始まりでない）
+```
+
+修飾名も表記を合わせる必要があります。たとえば `GROUP BY m.単価` に対して使えるのは
+`SUM(t.数量) * m.単価` であり、非修飾の `SUM(t.数量) * 単価` は使用できません。
+`GROUP BY` の式・関数・SELECT alias も、この位置のオペランドには使用できません。
+
+`ROLLUP` / `CUBE` / `GROUPING SETS` では、集計算術式にフィールドを書けません
+（小計・総計行で値が定まらないため）。
+
+**`SUM(a) * 単価` と `SUM(a * 単価)` は同じ値になるとは限りません。** 小数では丸めの位置が違い、
+非数値の列では前者が `NaN`、後者が `0` になります。
+
 ### 小計・総計（ROLLUP / CUBE / GROUPING SETS / GROUPING）
 
 `GROUP BY ROLLUP(a[, b ...])`、`GROUP BY CUBE(a[, b ...])`、`GROUP BY GROUPING SETS ((...), (...), ())` は、明細に加えて小計・総計行を同じ結果へ出力します。1 クエリで必要な階層をまとめて集計できます。
