@@ -38,7 +38,11 @@
   "readonlyFieldInfoProperties": [
     "code",
     "fieldType",
+    "hasLookup",
     "inSubtable",
+    "isCalculated",
+    "isLookupCopyTarget",
+    "isUnique",
     "label",
     "maxLength",
     "maxValue",

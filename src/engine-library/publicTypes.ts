@@ -54,6 +54,10 @@ export interface ReadonlyAppInfo {
  *
  * `createReadonlyKintoneClient()` supplies these values automatically, so its
  * users do not need to change their client.
+ *
+ * To make DESCRIBE report value-origin metadata accurately, BYO clients may
+ * also supply the four optional boolean flags below. Omitted flags are shown
+ * as empty strings for backward compatibility.
  */
 export interface ReadonlyFieldInfo {
   code: string;
@@ -66,6 +70,10 @@ export interface ReadonlyFieldInfo {
   maxValue?: string;
   minLength?: string;
   maxLength?: string;
+  hasLookup?: boolean;
+  isLookupCopyTarget?: boolean;
+  isUnique?: boolean;
+  isCalculated?: boolean;
   inSubtable?: boolean;
   subtableCode?: string;
 }

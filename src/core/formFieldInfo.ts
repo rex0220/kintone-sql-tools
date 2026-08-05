@@ -15,7 +15,9 @@ export interface FormFieldProperty {
   minLength?: string;
   maxLength?: string;
   defaultValue?: unknown;
-  lookup?: { fieldMappings?: Array<{ field?: string }> };
+  lookup?: { fieldMappings?: Array<{ field?: string }> } | null;
+  unique?: boolean;
+  expression?: string;
 }
 
 export interface ScopedSubtableFieldIndex {
@@ -67,6 +69,12 @@ function flattenFields(
       minLength: normalizeConstraintValue(field.minLength),
       maxLength: normalizeConstraintValue(field.maxLength),
       defaultValue: field.defaultValue,
+      hasLookup: Object.prototype.hasOwnProperty.call(field, "lookup"),
+      isLookupCopyTarget: lookupCopyFields.has(field.code),
+      isUnique: field.unique === true,
+      isCalculated: field.type === "CALC" || (
+        typeof field.expression === "string" && field.expression.length > 0
+      ),
       inSubtable,
       ...(subtableCode ? { subtableCode } : {}),
       writable: !lookupCopyFields.has(field.code) && !NON_WRITABLE_FIELD_TYPES.has(field.type),

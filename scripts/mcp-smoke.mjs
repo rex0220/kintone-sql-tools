@@ -217,6 +217,10 @@ function assertToolDescriptions(tools) {
     "field code",
     "label",
     "type",
+    "lookup",
+    "lookup copy target",
+    "unique",
+    "calculated",
     "ksql_app_metadata",
   ];
   const showAppsKeys = [

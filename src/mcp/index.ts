@@ -166,7 +166,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_describe_app", {
     title: "Describe kintone app",
-    description: "Return kSQL's compact field list (field code, label, and type) for a kintone app. For complete raw field constraints, layout, settings, status, views, reports, or customize metadata, use ksql_app_metadata.",
+    description: "Return kSQL's compact field list (field code, label, and type) plus value-origin flags for lookup, lookup copy target, unique, and calculated fields. For complete raw field constraints, layout, settings, status, views, reports, or customize metadata, use ksql_app_metadata.",
     inputSchema: describeAppInputShape,
   }, tools.describeAppTool);
 

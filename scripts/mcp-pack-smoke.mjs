@@ -172,7 +172,10 @@ function assertPackedToolDescriptions(tools) {
     ksql_app_metadata: [
       "fields", "constraints", "raw", "read-only", "fixed GET allowlist", "records", "mutation",
     ],
-    ksql_describe_app: ["field code", "label", "type", "ksql_app_metadata"],
+    ksql_describe_app: [
+      "field code", "label", "type", "lookup", "lookup copy target", "unique", "calculated",
+      "ksql_app_metadata",
+    ],
     ksql_validate: ["Do not use validate probing", "call ksql_docs instead"],
     ksql_query: ["ksql://language-reference", "ksql_docs when resources are unavailable", "VALIDATE ONLY [INTO #err]", "leading VALIDATE APPn ... [INTO #err]"],
     ksql_mutate: ["ksql://language-reference", "ksql_docs when resources are unavailable", "{VALUES|SELECT} CHECKS →", "ON ERROR SKIP INTO #err [REJECT LIMIT n]"],

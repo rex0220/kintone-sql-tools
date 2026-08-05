@@ -77,7 +77,10 @@ describe("ksql_app_metadata MCP surface", () => {
       expect(metadata.description).toContain(key);
     }
     const describe = registered.ksql_describe_app;
-    for (const key of ["field code", "label", "type", "ksql_app_metadata"]) {
+    for (const key of [
+      "field code", "label", "type", "lookup", "lookup copy target", "unique", "calculated",
+      "ksql_app_metadata",
+    ]) {
       expect(describe.description).toContain(key);
     }
     for (const toolName of ["ksql_query", "ksql_mutate"]) {
