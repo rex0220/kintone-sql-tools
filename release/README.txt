@@ -1,11 +1,39 @@
-ksql 配布パッケージ (v3.50.0)
+ksql 配布パッケージ (v3.51.0)
 
 release 成果物:
-- ksql-plugin-v3.50.0.zip
-- ksql-mcp.mcpb (manifest version 3.50.0)
-- ksql-mcp.js (MCP server version 3.50.0)
+- ksql-plugin-v3.51.0.zip
+- ksql-mcp.mcpb (manifest version 3.51.0)
+- ksql-mcp.js (MCP server version 3.51.0)
 
-修正 (B137 列数の違う UNION / UNION ALL をエラーにする) ★本リリースの要点:
+新機能 (B128 LAG / LEAD) ★本リリースの要点:
+- 前月比・前年同月比を SQL 側で書けるようになりました。
+    LAG(expr [, offset])  OVER (PARTITION BY ... ORDER BY ...)
+    LEAD(expr [, offset]) OVER (PARTITION BY ... ORDER BY ...)
+- 前後の行がパーティションの外なら空文字を返します。offset は省略時 1 で、
+  非負の整数リテラルだけを受け付けます。第 3 引数 (既定値) は未対応です。
+- 引数の型を引き継ぎます。CTE や一時テーブルの次の段でも、数値順・日付順・
+  選択肢の定義順など元の列の比較規則を保ちます。
+- 前月比は 3 段で書きます。ウィンドウ結果を同じ SELECT の式に含める形は
+  従来どおり拒否され、次の段へ分ける診断が出ます。
+
+    WITH 月次 AS (
+      SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月, SUM(個数) AS 出庫数
+      FROM APP4228 WHERE 入出庫区分 = '出庫' GROUP BY 年月
+    ), 前月付き AS (
+      SELECT 年月, 出庫数, LAG(出庫数) OVER (ORDER BY 年月) AS 前月 FROM 月次
+    )
+    SELECT 年月, 出庫数, 前月,
+           CASE WHEN 前月 = '' THEN ''
+                ELSE ROUND((出庫数 - 前月) * 100.0 / 前月, 1) END AS 前月比
+    FROM 前月付き ORDER BY 年月
+
+- ORDER BY が全順序と判定できないときは警告が出ます。値は正しく、
+  同順の行があるときの前後関係が未規定であることの注意です。
+
+内部 (B138 文書の構造検査):
+- docs 配下の相対リンクと課題台帳の表構造を npm test で検査するようにしました。
+  リンク切れ 184 件を 0 にしています。
+修正 (B137 列数の違う UNION / UNION ALL をエラーにする) (v3.50.0):
 - UNION / UNION ALL の左右で列数が違う場合、エラーで停止するようになりました。
   従来は右辺の列が足りないと空文字で埋め、余ると黙って捨てていたため、
   成功しても意図しない結果になり得ました。
@@ -62,44 +90,26 @@ release 成果物:
 修正 (B135 mcp:smoke の期待値ずれ・出荷物に影響なし):
 - v3.45.0 のレシピ R14 追加時に期待値が r1..r13 のまま残り、mcp:smoke が 3 版に
   わたり失敗していました。レシピ数の二重管理も解消しました。
-新機能 (B133 保存クエリの複文対応と実行時の変数注入) (v3.48.0):
-- 保存クエリは 1 文しか置けなかったため、基準日を変数にした定番クエリを保存
-  できませんでした。パラメータ化したクエリほど保存して使い回したいのに、
-  パラメータ化した途端に保存できなくなるという逆転が起きていました。
-- ksql_run_saved_query に variables を追加しました。ksql_query と同じ形で、
-  DECLARE 変数の既定値を実行時に上書きします。キーは @ を付けず、大文字小文字を
-  区別しません。
-    保存  DECLARE @d90 = '2026-05-08';
-          SELECT 製品名, SUM(個数) AS 出庫数 FROM APP4228
-          WHERE 入出庫区分 = '出庫' AND 日付 >= @d90 GROUP BY 製品名
-    実行  ksql_run_saved_query { name: "...", variables: { d90: "2026-07-20" } }
-- readOnly: true の保存クエリは複文を保存・実行できるようになりました。一時
-  テーブルを使う多段クエリも保存できます。結果は ksql_query と同じバッチ
-  エンベロープで返ります。
-- 制約の解除であって意味論の変更ではありません。単文の保存クエリは従来と
-  完全に同じです。
-- 対象外: 実書き込み DML を含むバッチ (readOnly の値によらず拒否。DML の保存
-  クエリは単文のみ) / SET への注入 (注入先は DECLARE だけ。ksql_query と同じ
-  契約で、SET だけで定義した変数に variables を渡すと未宣言変数として拒否) /
-  tempTableMaxRows などの非公開オプション (エンジン既定の上限が適用されます)。
-- カタログは手で編集できるため、保存時だけでなく実行時にも同じ判定をやり直します。
-v3.47.0 以前の各節は畳みました (B126 選択系の = / != の押し下げ /
-B127 ウィンドウ既定フレームの警告 / B132 docs セクションキーの番号 /
-B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だけの EXPLAIN)。
-内容は CHANGELOG.md と GitHub Releases にあります。
+v3.48.0 以前の各節は畳みました (B133 保存クエリの複文対応と変数注入 /
+B126 選択系の = / != の押し下げ / B127 ウィンドウ既定フレームの警告 /
+B132 docs セクションキーの番号 / B124 集計算術式 / B125 集計のウィンドウ関数 /
+B123 GROUP BY だけの EXPLAIN)。内容は CHANGELOG.md と GitHub Releases にあります。
 
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.50.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.51.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.50.0): B137 列数の違う UNION をエラーに (修正・挙動が変わります)、
-B136 の再発防止と B139 リリース時の CHANGELOG 検査 (内部)。
+本リリース (v3.51.0): B128 LAG / LEAD (新機能・前月比が SQL で書けます)、
+B138 文書の構造検査 (内部)。
 
-- B137: 上の節を参照してください。
+- B128: 上の節を参照してください。
+
+前リリース (v3.50.0): B137 列数の違う UNION をエラーに (修正・挙動が変わります)、
+B136 の再発防止と B139 リリース時の CHANGELOG 検査 (内部)。
 
 前リリース (v3.49.0): B130 DESCRIBE に「値の由来」4 列 (新機能・SELECT * は 3→7 列)、
 B129 ウィンドウ診断の改善とレシピ R15 (改善)、B136 の一部 文書の例の訂正 (修正)。

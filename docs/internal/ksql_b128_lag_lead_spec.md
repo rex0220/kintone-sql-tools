@@ -1,6 +1,6 @@
 # B128 Phase 2a `LAG` / `LEAD` 仕様（R2）
 
-- ステータス: 📋 **仕様 R2（codex レビュー 2 回目を反映）** → [レビュー2](ksql_b128_codex_review_2.md)（高 1・中 7・低 1 を**全件反映**）
+- ステータス: ✅ **v3.51.0 でリリース**（2026-08-06） → [レビュー2](ksql_b128_codex_review_2.md)（高 1・中 7・低 1 を**全件反映**）
 - 前提: [B125 Phase 1 仕様](ksql_b125_aggregate_window_phase1_spec.md)（v3.45.0 出荷済み）§10
 - 旧スコープ: [移動フレーム込みの R1](ksql_b128_window_phase2_spec.md)（⏸ 棚上げ）と
   [そのレビュー](ksql_b128_codex_review_1.md)（高 9・中 7）
