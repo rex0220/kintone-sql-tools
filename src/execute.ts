@@ -1696,13 +1696,15 @@ async function executeBatchStatement(
         const first = resolvedStmt.expr.query.columns[0];
         let numeric = first?.type === "ARITH_COL"
           || first?.type === "ARITH_AGG_COL"
-          || (first?.type === "WINDOW_COL" && (first.windowKind !== "AGGREGATE"
-            || first.aggFunc === "COUNT" || first.aggFunc === "SUM" || first.aggFunc === "AVG"))
+          || (first?.type === "WINDOW_COL" && (first.windowKind === undefined || first.windowKind === "RANKING"
+            || (first.windowKind === "AGGREGATE"
+              && (first.aggFunc === "COUNT" || first.aggFunc === "SUM" || first.aggFunc === "AVG"))))
           || (first?.type === "AGGREGATE"
             && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
               || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
               || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
         if ((first?.type === "AGGREGATE" && first.func === "MODE")
+          || (first?.type === "WINDOW_COL" && first.windowKind === "VALUE")
           || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
             && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
           const meta = (await inferSelectColumnMeta(
@@ -2542,15 +2544,32 @@ function hasDefaultRangeAggregateWindow(stmt: SelectStatement): boolean {
   );
 }
 
+function hasWindowNeedingOrderProof(stmt: SelectStatement): boolean {
+  return hasDefaultRangeAggregateWindow(stmt)
+    || stmt.columns.some((column) => column.type === "WINDOW_COL" && column.windowKind === "VALUE");
+}
+
+function canProveTotalWindowOrder(
+  stmt: SelectStatement,
+  orderBy: readonly OrderByItem[],
+  resolveField: WhereFieldSemanticsResolver,
+  context: WindowWarningContext
+): boolean {
+  if (context !== "DIRECT" || stmt.joins.length > 0 || stmt.from.cteName !== null || stmt.from.subtableCode != null) {
+    return false;
+  }
+  return orderBy.some((item) => {
+    if (item.key.type !== "FIELD_NAME") return false;
+    const ref = aggregateFieldRef(item.key.name);
+    return ref.field === "$id" || resolveField(ref)?.fieldType === "RECORD_NUMBER";
+  });
+}
+
 function collectDefaultRangeWindowWarnings(
   stmt: SelectStatement,
   resolveField: WhereFieldSemanticsResolver,
   context: WindowWarningContext
 ): string[] {
-  const canProveSinglePhysicalInput = context === "DIRECT"
-    && stmt.joins.length === 0
-    && stmt.from.cteName === null
-    && stmt.from.subtableCode == null;
   const warnings: string[] = [];
   for (const column of stmt.columns) {
     if (
@@ -2559,12 +2578,7 @@ function collectDefaultRangeWindowWarnings(
       || column.orderBy.length === 0
       || column.frame?.source !== "DEFAULT"
     ) continue;
-    const hasTotalOrderKey = canProveSinglePhysicalInput && column.orderBy.some((item) => {
-      if (item.key.type !== "FIELD_NAME") return false;
-      const ref = aggregateFieldRef(item.key.name);
-      return ref.field === "$id" || resolveField(ref)?.fieldType === "RECORD_NUMBER";
-    });
-    if (hasTotalOrderKey) continue;
+    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context)) continue;
     warnings.push(
       `${column.alias} は既定フレーム（RANGE）で評価されます。` +
       "ORDER BY の値が同じ行はすべて同じ値になります。" +
@@ -2572,12 +2586,23 @@ function collectDefaultRangeWindowWarnings(
       "ORDER BY にレコード番号などのタイブレークキーを足してください。"
     );
   }
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL" || column.windowKind !== "VALUE") continue;
+    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context)) continue;
+    warnings.push(
+      `${column.alias} の ORDER BY は全順序でないため、同順内の前後関係は未規定です。` +
+      "レコード番号等を ORDER BY に追加してください。"
+    );
+  }
   return warnings;
 }
 
 function mergeSelectWarnings(result: SelectResult, additional: readonly string[]): SelectResult {
   if (additional.length === 0) return result;
-  return { ...result, warnings: [...new Set([...(result.warnings ?? []), ...additional])] };
+  const merged = { ...result, warnings: [...new Set([...(result.warnings ?? []), ...additional])] };
+  const meta = materializedMetaBySelectResult.get(result);
+  if (meta) materializedMetaBySelectResult.set(merged, meta);
+  return merged;
 }
 
 function selectCaseConditionsNeedFieldMetadata(stmt: SelectStatement): boolean {
@@ -2603,10 +2628,12 @@ function buildHavingFieldSemanticsResolver(
     else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       semantics = syntheticSemantics("number");
     } else if (column.type === "WINDOW_COL") {
-      if (column.windowKind !== "AGGREGATE"
-        || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+      if (column.windowKind === undefined || column.windowKind === "RANKING"
+        || (column.windowKind === "AGGREGATE"
+          && (column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG"))) {
         semantics = syntheticSemantics("number");
-      } else if (column.arg.type !== "WILDCARD") {
+      } else if ((column.windowKind === "AGGREGATE" || column.windowKind === "VALUE")
+        && column.arg.type !== "WILDCARD") {
         semantics = inferAggregateArgMeta(column.arg, (ref) => {
           const resolved = rowResolver(ref);
           return resolved ? {
@@ -2747,7 +2774,7 @@ async function executeSelect(
     client,
     cacheContext,
     cteCache,
-    hasDefaultRangeAggregateWindow(stmt)
+    hasWindowNeedingOrderProof(stmt)
   );
   const defaultRangeWarnings = collectDefaultRangeWindowWarnings(
     stmt,
@@ -4293,13 +4320,18 @@ function inferWindowColumnMeta(
   column: WindowColumn,
   resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
 ): MaterializedColumnMeta {
-  if (column.windowKind !== "AGGREGATE"
-    || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
-    return syntheticColumnMeta("number");
+  if (column.windowKind === "VALUE") {
+    return inferAggregateArgMeta(column.arg, resolveField);
   }
-  return column.arg.type === "WILDCARD"
-    ? unknownStringColumnMeta()
-    : inferAggregateArgMeta(column.arg, resolveField);
+  if (column.windowKind === "AGGREGATE") {
+    if (column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+      return syntheticColumnMeta("number");
+    }
+    return column.arg.type === "WILDCARD"
+      ? unknownStringColumnMeta()
+      : inferAggregateArgMeta(column.arg, resolveField);
+  }
+  return syntheticColumnMeta("number");
 }
 
 function withDisplayName(
@@ -4317,8 +4349,10 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
       && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE"))
-    || (column.type === "WINDOW_COL" && column.windowKind === "AGGREGATE"
-      && (column.aggFunc === "MIN" || column.aggFunc === "MAX"))
+    || (column.type === "WINDOW_COL" && (
+      column.windowKind === "VALUE"
+      || (column.windowKind === "AGGREGATE" && (column.aggFunc === "MIN" || column.aggFunc === "MAX"))
+    ))
   );
 }
 
@@ -5133,7 +5167,7 @@ async function executeFullScanWithCte(
     client,
     cacheContext,
     cteCache,
-    hasDefaultRangeAggregateWindow(stmt)
+    hasWindowNeedingOrderProof(stmt)
   );
   const defaultRangeWarnings = collectDefaultRangeWindowWarnings(
     stmt,
@@ -10907,7 +10941,7 @@ function buildSelectPlan(
     }
   }
   for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL" || column.windowKind !== "AGGREGATE") continue;
+    if (column.type !== "WINDOW_COL" || column.windowKind === undefined || column.windowKind === "RANKING") continue;
     const clauses: string[] = [];
     if (column.partitionBy.length > 0) {
       clauses.push(`PARTITION BY ${column.partitionBy.map((ref) =>
@@ -10917,12 +10951,16 @@ function buildSelectPlan(
     if (column.orderBy.length > 0) {
       clauses.push(`ORDER BY ${column.orderBy.map(formatOrderByItem).join(", ")}`);
     }
-    lines.push(`  window ${column.alias}: ${column.aggFunc} OVER (${clauses.join(" ")})`);
-    lines.push(column.frame === null
-      ? "    frame: PARTITION ENTIRE"
-      : `    frame: ${column.frame.unit} UNBOUNDED PRECEDING AND CURRENT ROW${
-        column.frame.source === "DEFAULT" ? " (既定)" : ""
-      }`);
+    if (column.windowKind === "VALUE") {
+      lines.push(`  window ${column.alias}: ${column.valueFunc}(offset=${column.offset}) OVER (${clauses.join(" ")})`);
+    } else if (column.windowKind === "AGGREGATE") {
+      lines.push(`  window ${column.alias}: ${column.aggFunc} OVER (${clauses.join(" ")})`);
+      lines.push(column.frame === null
+        ? "    frame: PARTITION ENTIRE"
+        : `    frame: ${column.frame.unit} UNBOUNDED PRECEDING AND CURRENT ROW${
+          column.frame.source === "DEFAULT" ? " (既定)" : ""
+        }`);
+    }
   }
   if (totalCountPlan) {
     const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);

@@ -324,3 +324,187 @@ describe("B127: aggregate window default RANGE warnings", () => {
     expect(result.warnings).toContain(warningFor("cumulative"));
   });
 });
+
+describe("B128: LAG / LEAD execution", () => {
+  const fields: KintoneFieldInfo[] = [
+    { code: "$id", label: "$id", fieldType: "RECORD_NUMBER", sortKind: "number" },
+    { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT", sortKind: "string" },
+    { code: "d", label: "d", fieldType: "DATE", sortKind: "string" },
+    { code: "x", label: "x", fieldType: "NUMBER", sortKind: "number" },
+  ];
+
+  test("境界・offset 0/2/999・パーティション・空セルをそのまま扱う", async () => {
+    const result = await execute(
+      "SELECT k, d, " +
+        "LAG(x) OVER (PARTITION BY k ORDER BY d) AS prev, " +
+        "LEAD(x) OVER (PARTITION BY k ORDER BY d) AS next, " +
+        "LAG(x, 0) OVER (PARTITION BY k ORDER BY d) AS self, " +
+        "LAG(x, 2) OVER (PARTITION BY k ORDER BY d) AS prev2, " +
+        "LAG(x, 999) OVER (PARTITION BY k ORDER BY d) AS far FROM APP300",
+      makeClient([
+        record({ k: "A", d: "2026-01-01", x: "10" }),
+        record({ k: "A", d: "2026-02-01", x: "" }),
+        record({ k: "A", d: "2026-03-01", x: "30" }),
+        record({ k: "B", d: "2026-01-01", x: "40" }),
+      ], fields),
+      { cacheContext: "b128-value-semantics" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([
+      { k: "A", d: "2026-01-01", prev: "", next: "", self: "10", prev2: "", far: "" },
+      { k: "A", d: "2026-02-01", prev: "10", next: "30", self: "", prev2: "", far: "" },
+      { k: "A", d: "2026-03-01", prev: "", next: "", self: "30", prev2: "10", far: "" },
+      { k: "B", d: "2026-01-01", prev: "", next: "", self: "40", prev2: "", far: "" },
+    ]);
+  });
+
+  test("引数にしか現れない物理フィールドを取得する", async () => {
+    const client = makeClient([
+      record({ d: "2026-01-01", x: "10" }), record({ d: "2026-02-01", x: "20" }),
+    ], fields);
+    const result = await execute(
+      "SELECT d, LAG(x) OVER (ORDER BY d) AS prev FROM APP300",
+      client,
+      { cacheContext: "b128-required-arg" }
+    ) as SelectResult;
+    expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["d", "x"]));
+    expect(result.rows.map((row) => row.prev)).toEqual(["", "10"]);
+  });
+
+  test("LAG(NUMBER) のメタを次段 ORDER BY と MIN/MAX へ伝播する", async () => {
+    const client = makeClient([
+      record({ d: "2026-01-01", x: "2" }), record({ d: "2026-02-01", x: "10" }),
+      record({ d: "2026-03-01", x: "100" }), record({ d: "2026-04-01", x: "20" }),
+    ], fields);
+    const result = await execute(
+      "WITH w AS (SELECT LAG(x) OVER (ORDER BY d) AS prev FROM APP300) " +
+        "SELECT prev FROM w ORDER BY prev",
+      client,
+      { cacheContext: "b128-number-meta" }
+    ) as SelectResult;
+    expect(result.rows.map((row) => row.prev)).toEqual(["", "2", "10", "100"]);
+    const extremes = await execute(
+      "WITH w AS (SELECT LAG(x) OVER (ORDER BY d) AS prev FROM APP300) " +
+        "SELECT MIN(prev) AS min_prev, MAX(prev) AS max_prev FROM w WHERE prev > 0",
+      client,
+      { cacheContext: "b128-number-extremes" }
+    ) as SelectResult;
+    expect(extremes.rows).toEqual([{ min_prev: "2", max_prev: "100" }]);
+  });
+
+  test("direct APP の LAG(選択肢) を次段で定義順に並べる", async () => {
+    const result = await execute(
+      "WITH w AS (SELECT LAG(priority) OVER (ORDER BY d) AS prev FROM APP300) SELECT prev FROM w ORDER BY prev",
+      makeClient([
+        record({ d: "2026-01-01", priority: "低" }), record({ d: "2026-02-01", priority: "高" }),
+        record({ d: "2026-03-01", priority: "中" }), record({ d: "2026-04-01", priority: "低" }),
+      ], [
+        ...fields,
+        { code: "priority", label: "priority", fieldType: "DROP_DOWN", sortKind: "string", optionOrder: { 高: 0, 中: 1, 低: 2 } },
+      ]),
+      { cacheContext: "b128-option-meta" }
+    ) as SelectResult;
+    expect(result.rows.map((row) => row.prev)).toEqual(["", "高", "中", "低"]);
+  });
+
+  test.each([
+    ["DATE", ["2026-01-01", "2024-01-01", "2025-01-01", "2027-01-01"], ["", "2024-01-01", "2025-01-01", "2026-01-01"]],
+    ["SINGLE_LINE_TEXT", ["20", "3", "100", "z"], ["", "100", "20", "3"]],
+  ] as const)("LAG(%s) のメタを次段 ORDER BY へ伝播する", async (fieldType, values, expected) => {
+    const result = await execute(
+      "WITH w AS (SELECT LAG(value) OVER (ORDER BY seq) AS prev FROM APP300) SELECT prev FROM w ORDER BY prev",
+      makeClient(values.map((value, index) => record({ seq: String(index), value })), [
+        { code: "seq", label: "seq", fieldType: "NUMBER", sortKind: "number" },
+        { code: "value", label: "value", fieldType, sortKind: "string" },
+      ]),
+      { cacheContext: `b128-${fieldType.toLowerCase()}-meta` }
+    ) as SelectResult;
+    expect(result.rows.map((row) => row.prev)).toEqual(expected);
+  });
+
+  test("VALUE window は完全入力理由 WINDOW_ORDER を使う", async () => {
+    await expect(execute(
+      "SELECT LAG(x) OVER (ORDER BY d) AS prev FROM APP300",
+      makeClient(Array.from({ length: 101 }, (_, index) => record({ d: String(index), x: String(index) })), fields),
+      { cacheContext: "b128-complete-input", maxRecords: 100, onLimitReached: "truncate" }
+    )).rejects.toThrow(/WINDOW_ORDER/);
+  });
+
+  test("非全順序の VALUE window は同順内未規定を警告する", async () => {
+    const result = await execute(
+      "SELECT LAG(x) OVER (ORDER BY d) AS prev FROM APP300",
+      makeClient([], fields),
+      { cacheContext: "b128-warning" }
+    ) as SelectResult;
+    expect(result.warnings).toEqual([
+      "prev の ORDER BY は全順序でないため、同順内の前後関係は未規定です。" +
+      "レコード番号等を ORDER BY に追加してください。",
+    ]);
+  });
+
+  test("direct APP の全順序だけ警告を抑止し、JOIN / CTE では抑止しない", async () => {
+    const direct = await execute(
+      "SELECT LAG(x) OVER (ORDER BY d, $id) AS prev FROM APP300",
+      makeClient([], fields),
+      { cacheContext: "b128-warning-direct" }
+    ) as SelectResult;
+    expect(direct.warnings).toEqual([]);
+
+    const join = await execute(
+      "SELECT LAG(a.x) OVER (ORDER BY a.d, a.$id) AS prev " +
+        "FROM APP300 a JOIN APP301 b ON a.$id = b.$id",
+      makeClient([], fields),
+      { cacheContext: "b128-warning-join" }
+    ) as SelectResult;
+    expect(join.warnings?.[0]).toContain("同順内の前後関係は未規定");
+
+    const cte = await execute(
+      "WITH source AS (SELECT x, d, $id FROM APP300) " +
+        "SELECT LAG(x) OVER (ORDER BY d, $id) AS prev FROM source",
+      makeClient([], fields),
+      { cacheContext: "b128-warning-cte" }
+    ) as SelectResult;
+    expect(cte.warnings?.some((warning) => warning.includes("同順内の前後関係は未規定"))).toBe(true);
+  });
+
+  test("CASE 引数を各行 1 回評価し、LAG / LEAD と soft keyword フィールドを併用する", async () => {
+    const result = await execute(
+      "SELECT LAG, LEAD, " +
+        "LAG(CASE WHEN flag = 'Y' THEN x ELSE 0 END, 2) OVER (ORDER BY d) AS prev2, " +
+        "LEAD(x) OVER (ORDER BY d) AS next FROM APP300",
+      makeClient([
+        record({ d: "1", x: "10", flag: "Y", LAG: "field-lag-1", LEAD: "field-lead-1" }),
+        record({ d: "2", x: "20", flag: "N", LAG: "field-lag-2", LEAD: "field-lead-2" }),
+        record({ d: "3", x: "30", flag: "Y", LAG: "field-lag-3", LEAD: "field-lead-3" }),
+      ], [
+        ...fields,
+        { code: "flag", label: "flag", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "LAG", label: "LAG", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "LEAD", label: "LEAD", fieldType: "SINGLE_LINE_TEXT" },
+      ]),
+      { cacheContext: "b128-case-soft-keyword" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([
+      { LAG: "field-lag-1", LEAD: "field-lead-1", prev2: "", next: "20" },
+      { LAG: "field-lag-2", LEAD: "field-lead-2", prev2: "", next: "30" },
+      { LAG: "field-lag-3", LEAD: "field-lead-3", prev2: "10", next: "" },
+    ]);
+  });
+
+  test("順位・集計・VALUE window を別 ORDER BY で混在させ、DISTINCT を後段適用する", async () => {
+    const result = await execute(
+      "SELECT DISTINCT " +
+        "ROW_NUMBER() OVER (ORDER BY d DESC) AS rn, " +
+        "SUM(x) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS total, " +
+        "LAG(x) OVER (ORDER BY x) AS prev FROM APP300",
+      makeClient([
+        record({ d: "1", x: "10" }), record({ d: "2", x: "20" }), record({ d: "3", x: "30" }),
+      ], fields),
+      { cacheContext: "b128-window-mix-distinct" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([
+      { rn: "3", total: "10", prev: "" },
+      { rn: "2", total: "30", prev: "10" },
+      { rn: "1", total: "60", prev: "20" },
+    ]);
+  });
+});
