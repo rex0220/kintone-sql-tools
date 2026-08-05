@@ -514,11 +514,22 @@ async function main() {
       name: "ksql_docs",
       arguments: { section: "STDDEV" },
     });
+    // B135: レシピ番号はサーバが返す索引から引く。ここに r1..rN を literal で書くと
+    // レシピを足すたびに取り残され、実際 v3.45.0 の R14 追加で 3 版にわたり
+    // この assertion だけが落ち続けていた（mcp:smoke は npm test にも prepack にも無い）。
+    const recipeNumbers = [...docsIndex.content[0].text.matchAll(/^- recipes\/r(\d+)$/gm)]
+      .map((m) => Number(m[1]));
+    assert(recipeNumbers.length > 0, "ksql_docs index is missing recipe keys.");
+    const maxRecipe = Math.max(...recipeNumbers);
+    assert(
+      recipeNumbers.length === maxRecipe,
+      `recipe keys must be contiguous r1..r${maxRecipe} (found ${recipeNumbers.length}).`
+    );
     const expectedDocsError = {
       ok: false,
       error: {
         code: "ArgumentError",
-        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r14. Call ksql_docs without arguments for the full key list.",
+        message: `ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r${maxRecipe}. Call ksql_docs without arguments for the full key list.`,
       },
     };
     assert(docsUnknown.isError === true, "Unknown ksql_docs key must be an application error.");

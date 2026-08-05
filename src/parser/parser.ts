@@ -320,6 +320,18 @@ export class ParseError extends Error {
   }
 }
 
+/**
+ * ウィンドウ結果を同一 SELECT の式に使ったときの診断（B129）。
+ * 次の一手は 3 つの形（関数で包む・算術に混ぜる・CASE の中）すべて同じなので 1 文言で扱う。
+ * 位置・トークンは ParseError が末尾に付けるため、最終行は SQL ではなく文で終える。
+ */
+export const WINDOW_RESULT_IN_EXPRESSION_MESSAGE = [
+  "ウィンドウ関数の結果は同じ SELECT の式では使えません。",
+  "  × SELECT ROUND(SUM(x) OVER (), 1) AS a FROM t",
+  "  ○ WITH w AS (SELECT SUM(x) OVER () AS 総計 FROM t) SELECT ROUND(総計, 1) AS a FROM w",
+  "ウィンドウ結果を列として出し、それを使う式は次の段（CTE または一時テーブル）に書いてください",
+].join("\n");
+
 // ------------------------------------------------------------
 // Parser クラス
 // ------------------------------------------------------------
@@ -1300,7 +1312,7 @@ export class Parser {
 
     if (this.tryAggregateFunc() === null && this.hasNestedAggregateWindowInSelectColumn()) {
       throw new ParseError(
-        "ウィンドウ関数の結果を式に含めることはできません。CTE で一度実体化してください",
+        WINDOW_RESULT_IN_EXPRESSION_MESSAGE,
         this.peek()
       );
     }
@@ -1551,7 +1563,7 @@ export class Parser {
 
     if (this.isArithOp(this.peek().kind)) {
       throw new ParseError(
-        "ウィンドウ関数の結果を式に含めることはできません。CTE で一度実体化してください",
+        WINDOW_RESULT_IN_EXPRESSION_MESSAGE,
         this.peek()
       );
     }

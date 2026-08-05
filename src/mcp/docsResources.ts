@@ -82,8 +82,18 @@ export function buildKsqlDocsIndex(): string {
 
 export const KSQL_DOCS_INDEX = buildKsqlDocsIndex();
 
-const VALID_KEY_HINT =
-  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r14. "
+/**
+ * レシピ番号の上限は RECIPE_KEYS から引く（B135）。
+ * v3.45.0 で R14 を足したとき、この文字列と smoke の期待値が r13 のまま取り残され、
+ * `mcp:smoke` が 3 版にわたり失敗していた。二重管理をやめて生成側だけを正にする。
+ */
+const MAX_RECIPE_NUMBER = RECIPE_KEYS.reduce((max, key) => {
+  const n = Number.parseInt(key.slice(1), 10);
+  return Number.isFinite(n) && n > max ? n : max;
+}, 0);
+
+export const VALID_KEY_HINT =
+  `Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r${MAX_RECIPE_NUMBER}. `
   + "Call ksql_docs without arguments for the full key list.";
 
 /**
