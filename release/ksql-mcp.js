@@ -57075,7 +57075,7 @@ var saveQueryInputSchema = external_exports.object({
   name: savedQueryName,
   title: external_exports.string().min(1).describe("Human-readable title.").optional(),
   description: external_exports.string().min(1).describe("What the query does and when to use it.").optional(),
-  sql: external_exports.string().min(1).describe("kSQL text to save (single statement only)."),
+  sql: external_exports.string().min(1).describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements; DML saved queries must remain single-statement."),
   defaultProfile: external_exports.string().min(1).describe("Profile the saved query runs against by default."),
   readOnly: external_exports.boolean().describe("true for read-only queries; false marks the saved query as DML (requires mutate safety inputs at run time)."),
   allowProfileOverride: external_exports.boolean().describe("Allow overriding the profile at run time (default false).").optional(),
@@ -57093,7 +57093,8 @@ var runSavedQueryInputSchema = external_exports.object({
   timeout,
   allowDml: external_exports.literal(true).describe("Required for DML saved queries: must be true to acknowledge writes.").optional(),
   confirmText: external_exports.literal("yes").describe('Required for DML saved queries: must be the literal string "yes".').optional(),
-  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500). Saved queries are single-statement, so temp tables do not apply here. Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.").optional()
+  dmlMaxRows: external_exports.number().int().positive().describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500). Read-only saved-query batches may use temp tables with the engine default row cap. Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.").optional(),
+  variables: external_exports.record(external_exports.string(), external_exports.string()).describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.").optional()
 });
 var validateInputShape = validateInputSchema.shape;
 var explainInputShape = explainInputSchema.shape;
@@ -57150,10 +57151,14 @@ function validateSavedQueryName(name) {
   }
 }
 function assertSavedQuerySafety(input, safety) {
-  if (input.readOnly && safety.isDml) {
-    throw new Error(`ArgumentError: readOnly saved query cannot contain ${safety.statementType}.`);
+  if (input.readOnly && !safety.canRunWithQueryTool) {
+    const detail = safety.statementCount === 1 && safety.statementType ? safety.statementType : "statements that require ksql_mutate";
+    throw new Error(`ArgumentError: readOnly saved query cannot contain ${detail}.`);
   }
-  if (!input.readOnly && !safety.isDml) {
+  if (!input.readOnly && safety.statementCount > 1) {
+    throw new Error("ArgumentError: DML batches are not supported by saved queries in Phase 1.");
+  }
+  if (!input.readOnly && !safety.requiresMutationTool) {
     throw new Error("ArgumentError: readOnly: false is only allowed for DML saved queries.");
   }
 }
@@ -57287,14 +57292,6 @@ function deleteSavedQuery(catalog, name) {
 }
 
 // src/mcp/tools.ts
-function requireSingleStatement(validation, toolName) {
-  if (validation.batch) {
-    throw new Error(
-      `ArgumentError: batch SQL (multiple statements) is not supported by ${toolName} yet.`
-    );
-  }
-  return validation;
-}
 var DEFAULT_MAX_RECORDS = 500;
 var DEFAULT_ON_LIMIT = "error";
 var MCP_IMPORT_SOURCE_REQUIRED_MESSAGE = "IMPORT \u306B\u306F importSources\uFF08inline CSV/JSON\uFF09\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002";
@@ -57993,15 +57990,14 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     });
   }
   async function saveQuery(input) {
-    const validation = requireSingleStatement(
-      await validate({
-        sql: input.sql,
-        profile: input.defaultProfile
-      }),
-      "ksql_save_query"
-    );
+    const validation = await validate({
+      sql: input.sql,
+      profile: input.defaultProfile
+    });
     assertSavedQuerySafety(input, {
-      isDml: validation.isDml,
+      statementCount: validation.statementCount,
+      canRunWithQueryTool: validation.canRunWithQueryTool,
+      requiresMutationTool: validation.requiresMutationTool,
       statementType: validation.statementType
     });
     const filePath = getSavedQueryCatalogPath(serverOptions);
@@ -58043,15 +58039,14 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
     const saved = getSavedQuery(catalog, input.name);
     assertProfileOverrideAllowed(saved, input.profile);
     const profile2 = input.profile ?? saved.defaultProfile;
-    const validation = requireSingleStatement(
-      await validate({
-        sql: saved.sql,
-        profile: profile2
-      }),
-      "ksql_run_saved_query"
-    );
+    const validation = await validate({
+      sql: saved.sql,
+      profile: profile2
+    });
     assertSavedQuerySafety(saved, {
-      isDml: validation.isDml,
+      statementCount: validation.statementCount,
+      canRunWithQueryTool: validation.canRunWithQueryTool,
+      requiresMutationTool: validation.requiresMutationTool,
       statementType: validation.statementType
     });
     if (saved.readOnly) {
@@ -58061,7 +58056,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
         maxRecords: input.maxRecords,
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
-        timeout: input.timeout
+        timeout: input.timeout,
+        variables: input.variables
       }, validation);
       return {
         ok: true,
@@ -58077,7 +58073,8 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       confirmText: "yes",
       dmlMaxRows,
       fetchParallel: input.fetchParallel,
-      timeout: input.timeout
+      timeout: input.timeout,
+      variables: input.variables
     }, validation);
     return {
       ok: true,
@@ -58313,7 +58310,7 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-var SERVER_VERSION = true ? "3.47.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.48.0" : "0.0.0-dev";
 var FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog \u2014 Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 var KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
 
@@ -58406,7 +58403,7 @@ function createServer(args) {
   });
   server.registerTool("ksql_save_query", {
     title: "Save kSQL query",
-    description: "Save a validated kSQL statement into the local saved query catalog.",
+    description: "Save a validated kSQL query into the local catalog. Read-only queries may be multi-statement batches; DML saved queries remain single-statement.",
     inputSchema: saveQueryInputShape
   }, tools.saveQueryTool);
   server.registerTool("ksql_list_queries", {
@@ -58421,7 +58418,7 @@ function createServer(args) {
   }, tools.getQueryTool);
   server.registerTool("ksql_run_saved_query", {
     title: "Run saved kSQL query",
-    description: "Run a saved kSQL query. Read-only queries use ksql_query safety; DML queries require ksql_mutate safety inputs.",
+    description: "Run a saved kSQL query. Read-only queries and batches use ksql_query safety and support DECLARE variable injection; DML queries require ksql_mutate safety inputs.",
     inputSchema: runSavedQueryInputShape
   }, tools.runSavedQueryTool);
   server.registerTool("ksql_delete_query", {
