@@ -588,6 +588,64 @@ ORDER BY 製品名, 日付, レコード番号
 - `ORDER BY 日付, レコード番号` のように一意になるキーまで指定すると、同日内の順序も決定的になります。
 - 集計ウィンドウは完全入力が必要です。`maxRecords` を入力件数以上に設定し、上限到達時は部分残高を採用せずエラーとして扱います。
 
+## R15. 全体で割る（構成比・累積構成比・ABC）
+
+**ウィンドウ関数の結果は同じ SELECT の式では使えません。** 割り算・`ROUND`・`CASE` は次の段へ移します。
+総計も「1 行に畳んだ別の集計」ではなく **`SUM(x) OVER ()` で全行に載る列**として出すのが要点で、
+これで JOIN も相関サブクエリも要らなくなります。
+
+```sql
+WITH base AS (
+  SELECT 製品名, SUM(個数) AS 出庫量
+  FROM APP4228 WHERE 入出庫区分 = '出庫' GROUP BY 製品名
+), ranked AS (
+  SELECT 製品名, 出庫量,
+         SUM(出庫量) OVER () AS 総計,
+         SUM(出庫量) OVER (
+           ORDER BY 出庫量 DESC, 製品名
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS 累計
+  FROM base
+)
+SELECT 製品名, 出庫量,
+       ROUND(出庫量 * 100.0 / 総計, 1) AS 構成比,
+       ROUND(累計 * 100.0 / 総計, 1) AS 累積構成比
+FROM ranked
+ORDER BY 出庫量 DESC, 製品名
+```
+
+段の役割は 3 つに分かれます。**この分け方自体が制約への対処**です。
+
+| 段 | すること |
+|---|---|
+| `base` | 集計して粒度を決める（ここでは製品ごと） |
+| `ranked` | **ウィンドウを列として出すだけ**。式では包まない |
+| 最終 SELECT | 出た列を使って割る・丸める・区分する |
+
+- **`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` を明示します。** 既定は `RANGE` で、
+  **同額の行がすべて同じ累計値**になります（同額が並ぶと累積構成比が飛びます）。
+- **`ORDER BY` はタイまで決めます。** 上の例の `, 製品名` がそれで、
+  同額があると累積の割り当てが不定になります。
+- **`100.0` と書きます。** 整数どうしの除算にしないためです。
+- 集計ウィンドウは完全入力が必要です。`maxRecords` を入力件数以上にし、
+  上限到達時は部分結果を採らずエラーとして扱います（`onLimit=truncate` は適用されません）。
+
+ABC 区分まで付けるなら、最終段に `CASE` を足します（**累積構成比の式を `CASE` の中に直接書けます**。
+ウィンドウはもう `ranked` で列になっているためです）。
+
+```sql
+SELECT 製品名, 出庫量,
+       ROUND(累計 * 100.0 / 総計, 1) AS 累積構成比,
+       CASE WHEN 累計 * 100.0 / 総計 <= 80 THEN 'A'
+            WHEN 累計 * 100.0 / 総計 <= 95 THEN 'B'
+            ELSE 'C' END AS 区分
+FROM ranked
+ORDER BY 出庫量 DESC, 製品名
+```
+
+一時テーブルでも同じ形が書けます（`CREATE TEMP TABLE #base AS ...; CREATE TEMP TABLE #ranked AS ...; SELECT ...`）。
+**1 文で完結する CTE のほうが、保存クエリにも CLI にもそのまま載せられます。**
+
 ## 適用限界（スケール指針）
 
 判断基準は総レコード数ではなく **「日次の実変更件数が API 制限と実行時間に収まるか」** です。
