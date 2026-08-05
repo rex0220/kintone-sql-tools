@@ -2565,12 +2565,33 @@ function canProveTotalWindowOrder(
   });
 }
 
+/**
+ * タイブレークの助言（B140-C）。
+ *
+ * **実行できない助言を出さないための分岐。** CTE / 一時テーブルを読む SELECT には
+ * `レコード番号` が存在しないため、従来の文言どおりに直すと
+ * `unknown field code(s): レコード番号` で落ちる（実測・v3.51.0）。
+ * 「読み飛ばされる」より悪く、**従うと壊れる**助言になっていた。
+ */
+function tieBreakAdvice(context: WindowWarningContext, kind: "RANGE" | "VALUE"): string {
+  if (context !== "DIRECT") {
+    // CTE / 一時テーブルを読む経路。その表に レコード番号 は無いので、案内を変える。
+    // （`stmt.from.cteName` は実体化の過程でクリアされるため信号に使えない）
+    return "その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。";
+  }
+  // 物理アプリを読む経路（JOIN を含む）。レコード番号 / $id が実在する。
+  return kind === "RANGE"
+    ? "ORDER BY にレコード番号などのタイブレークキーを足してください。"
+    : "レコード番号等を ORDER BY に追加してください。";
+}
+
 function collectDefaultRangeWindowWarnings(
   stmt: SelectStatement,
   resolveField: WhereFieldSemanticsResolver,
   context: WindowWarningContext
 ): string[] {
   const warnings: string[] = [];
+
   for (const column of stmt.columns) {
     if (
       column.type !== "WINDOW_COL"
@@ -2583,7 +2604,7 @@ function collectDefaultRangeWindowWarnings(
       `${column.alias} は既定フレーム（RANGE）で評価されます。` +
       "ORDER BY の値が同じ行はすべて同じ値になります。" +
       "行ごとの値が必要なら ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW を明示するか、" +
-      "ORDER BY にレコード番号などのタイブレークキーを足してください。"
+      tieBreakAdvice(context, "RANGE")
     );
   }
   for (const column of stmt.columns) {
@@ -2591,7 +2612,7 @@ function collectDefaultRangeWindowWarnings(
     if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context)) continue;
     warnings.push(
       `${column.alias} の ORDER BY は全順序でないため、同順内の前後関係は未規定です。` +
-      "レコード番号等を ORDER BY に追加してください。"
+      tieBreakAdvice(context, "VALUE")
     );
   }
   return warnings;
