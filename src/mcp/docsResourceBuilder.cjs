@@ -173,7 +173,7 @@ function buildDocsResourceMap(languageSource, recipesSource) {
   }
   const recipeSections = parseRequiredSections(recipesSource, {
     label: "recipes",
-    count: 16,
+    count: 17,
     headingPattern: /^##\s+R([1-9]|1\d)\.\s+(.+)$/gm,
     keyFor: (number) => `r${number}`,
     uriBase: recipesUri,
