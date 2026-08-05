@@ -321,7 +321,11 @@ describe("B127: aggregate window default RANGE warnings", () => {
       makeClient([], fields),
       { cacheContext: `b127-unsafe-source-${_label}` }
     ) as SelectResult;
-    expect(result.warnings).toContain(warningFor("cumulative"));
+    // 固定するのは「抑止されないこと」。末尾のタイブレーク助言は経路で変わる（B140-C）ので、
+    // 助言そのものは専用のテストで見る。
+    expect(result.warnings?.some((warning) =>
+      warning.startsWith("cumulative は既定フレーム（RANGE）で評価されます。")
+    )).toBe(true);
   });
 });
 
@@ -464,6 +468,41 @@ describe("B128: LAG / LEAD execution", () => {
       { cacheContext: "b128-warning-cte" }
     ) as SelectResult;
     expect(cte.warnings?.some((warning) => warning.includes("同順内の前後関係は未規定"))).toBe(true);
+  });
+
+  test("B140-C: CTE / 一時テーブル経由では実行できない助言を出さない", async () => {
+    // 従来は CTE 経由でも「ORDER BY にレコード番号などのタイブレークキーを足してください」と
+    // 案内していたが、CTE には レコード番号 が無いため、従うと
+    // unknown field code(s): レコード番号 で落ちる（実測・v3.51.0）。
+    // 「読み飛ばされる」より悪く、従うと壊れる助言だった。
+    const cteAdvice = "その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。";
+    const directAdvice = "ORDER BY にレコード番号などのタイブレークキーを足してください。";
+
+    const cteValue = await execute(
+      "WITH source AS (SELECT x, d FROM APP300) " +
+        "SELECT LAG(x) OVER (ORDER BY d) AS prev FROM source",
+      makeClient([], fields),
+      { cacheContext: "b140c-cte-value" }
+    ) as SelectResult;
+    expect(cteValue.warnings?.some((w) => w.endsWith(cteAdvice))).toBe(true);
+    expect(cteValue.warnings?.some((w) => w.includes("レコード番号"))).toBe(false);
+
+    const cteRange = await execute(
+      "WITH source AS (SELECT x, d FROM APP300) " +
+        "SELECT SUM(x) OVER (ORDER BY d) AS cumulative FROM source",
+      makeClient([], fields),
+      { cacheContext: "b140c-cte-range" }
+    ) as SelectResult;
+    expect(cteRange.warnings?.some((w) => w.endsWith(cteAdvice))).toBe(true);
+    expect(cteRange.warnings?.some((w) => w.includes("レコード番号"))).toBe(false);
+
+    // direct APP は レコード番号 が実在するので従来どおり案内する（回帰）。
+    const direct = await execute(
+      "SELECT SUM(x) OVER (ORDER BY d) AS cumulative FROM APP300",
+      makeClient([], fields),
+      { cacheContext: "b140c-direct" }
+    ) as SelectResult;
+    expect(direct.warnings?.some((w) => w.endsWith(directAdvice))).toBe(true);
   });
 
   test("CASE 引数を各行 1 回評価し、LAG / LEAD と soft keyword フィールドを併用する", async () => {
