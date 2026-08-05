@@ -51,6 +51,18 @@ export type WhereFieldSemanticsResolver = (
   field: FieldRef
 ) => ResolvedFieldSemantics | undefined;
 
+export interface ChoiceEqualityRewrite {
+  readonly field: FieldRef;
+  readonly originalOperator: "=" | "!=" | "<>";
+  readonly normalizedOperator: "IN" | "NOT_IN";
+  readonly value: string;
+}
+
+export interface ChoiceEqualityNormalization {
+  readonly normalizedWhere: WhereExpr;
+  readonly rewrites: readonly ChoiceEqualityRewrite[];
+}
+
 type NativeOperator = "=" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "not in" | "like" | "not like";
 
 const RANGE_AND_EQUALITY = ["=", "!=", ">", "<", ">=", "<="] as const;
@@ -125,6 +137,66 @@ const LOCAL_COLLECTION_TYPES = new Set([
 
 export function nativeWhereOperatorsForType(fieldType: string): ReadonlySet<NativeOperator> {
   return NATIVE_OPERATORS.get(fieldType) ?? new Set();
+}
+
+/**
+ * B126: schema-aware choice equality normalization.
+ *
+ * This function is deliberately pure. The caller applies normalizedWhere only after the
+ * schema resolver (including optionOrder) is available, then shares that AST with every
+ * downstream planner, converter, and local evaluator.
+ */
+export function normalizeChoiceEquality(
+  where: WhereExpr,
+  resolveField: WhereFieldSemanticsResolver
+): ChoiceEqualityNormalization {
+  const rewrites: ChoiceEqualityRewrite[] = [];
+
+  const visit = (node: WhereExpr): WhereExpr => {
+    if (node.type === "BINARY") {
+      if (
+        (node.op === "=" || node.op === "!=" || node.op === "<>")
+        && node.left.type === "FIELD"
+        && node.right.type === "STRING"
+        && node.right.value !== ""
+      ) {
+        const semantics = resolveField(node.left);
+        if (
+          semantics !== undefined
+          && semantics.compareMode === "option"
+          && LOCAL_SCALAR_TYPES.has(semantics.fieldType)
+          && nativeWhereOperatorsForType(semantics.fieldType).has("in")
+          && semantics.optionOrder?.has(node.right.value) === true
+        ) {
+          const normalizedOperator = node.op === "=" ? "IN" : "NOT_IN";
+          rewrites.push({
+            field: node.left,
+            originalOperator: node.op,
+            normalizedOperator,
+            value: node.right.value,
+          });
+          return {
+            ...node,
+            op: normalizedOperator,
+            right: { type: "IN_LIST", values: [node.right] },
+          };
+        }
+      }
+      return node;
+    }
+    if (node.type === "LOGICAL") {
+      const left = visit(node.left);
+      const right = visit(node.right);
+      return left === node.left && right === node.right ? node : { ...node, left, right };
+    }
+    if (node.type === "GROUP" || node.type === "NOT") {
+      const expr = visit(node.expr);
+      return expr === node.expr ? node : { ...node, expr };
+    }
+    return node;
+  };
+
+  return { normalizedWhere: visit(where), rewrites };
 }
 
 export function classifyWhereCapability(
