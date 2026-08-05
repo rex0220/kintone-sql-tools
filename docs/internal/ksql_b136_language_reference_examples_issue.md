@@ -1,7 +1,7 @@
 # B136 言語リファレンスの `SHOW APPS` / `DESCRIBE` 例がそのまま実行できない
 
 - 起票: 2026-08-05
-- ステータス: 📝 **起票（実測済み・方向判断待ち）**
+- ステータス: 🐞 **例の訂正は v3.49.0 でリリース済み。再発防止（案 D）が残る**（2026-08-06）
 - 発見: [B130](ksql_b130_describe_flags_issue.md) の実装面調査中
 - 同系: [B132](../ksql_issue_tracker.md)（`ksql_docs` のセクションキー）／[B135](../ksql_issue_tracker.md)（`mcp:smoke` の期待値）
 

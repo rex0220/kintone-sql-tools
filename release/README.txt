@@ -1,11 +1,47 @@
-ksql 配布パッケージ (v3.48.0)
+ksql 配布パッケージ (v3.49.0)
 
 release 成果物:
-- ksql-plugin-v3.48.0.zip
-- ksql-mcp.mcpb (manifest version 3.48.0)
-- ksql-mcp.js (MCP server version 3.48.0)
+- ksql-plugin-v3.49.0.zip
+- ksql-mcp.mcpb (manifest version 3.49.0)
+- ksql-mcp.js (MCP server version 3.49.0)
 
-新機能 (B133 保存クエリの複文対応と実行時の変数注入) ★本リリースの要点:
+新機能 (B130 DESCRIBE に「値の由来」4 列を追加) ★本リリースの要点:
+- DESCRIBE はフィールドコード・ラベル・型だけを返しており、型からはルックアップか
+  素の文字列かが分かりませんでした。推測がしばしば当たるので、外れたときだけ
+  静かに間違います。
+    フィールドコード | ラベル | タイプ | ルックアップ | コピー元 | 重複禁止 | 計算式
+- 該当するとき文字列 YES、それ以外は空文字を返します (全列とも文字列)。
+- 出すのは「値をどう読むか」を変える情報だけです。required や maxLength などの
+  値を書くための制約は含めません (それらは ksql_app_metadata)。
+- コピー元 は、ルックアップが fieldMappings でコピーしてくる項目に立ちます。
+  GROUP BY の意味が変わるためです (マスタの現在値ではなく入力時点の値で割れます)。
+- 4 列がすべて空でも、制約や設定の確認が不要とは限りません。完全な判定材料では
+  ありません。
+- 互換性注意: SELECT * の列数が 3 から 7 に増えます。3 列だけ必要なときは
+  名指ししてください。
+    WITH d AS (DESCRIBE APP100) SELECT フィールドコード, ラベル, タイプ FROM d
+  他の表と JOIN して同名列があるときは d.ルックアップ のように修飾します。
+
+改善 (B129 ウィンドウ結果を式に使ったときの診断に「次の一手」を示す):
+- ROUND(SUM(x) OVER (), 1) のようにウィンドウ結果を同じ SELECT の式へ入れると
+  診断で止まりますが、次に何を書けばよいかが分かりませんでした。
+    × SELECT ROUND(SUM(x) OVER (), 1) AS a FROM t
+    ○ WITH w AS (SELECT SUM(x) OVER () AS 総計 FROM t)
+      SELECT ROUND(総計, 1) AS a FROM w
+- 位置・トークンの表示は従来どおり残ります。
+- レシピ R15「全体で割る (構成比・累積構成比・ABC)」も追加しました。診断文を
+  読むのは止まった人だけですが、レシピは書く前に読まれるためです。
+
+修正 (B136 の一部 言語リファレンスの例がそのまま実行できなかった):
+- SHOW APPS / DESCRIBE の例が name / fieldCode / label / type と書かれていましたが、
+  実装は アプリID / アプリ名 / 説明 / フィールドコード / ラベル / タイプ です。
+  この文書は MCP リソース ksql://language-reference の原本なので、エージェントが
+  壊れた例を写す状態でした。
+
+修正 (B135 mcp:smoke の期待値ずれ・出荷物に影響なし):
+- v3.45.0 のレシピ R14 追加時に期待値が r1..r13 のまま残り、mcp:smoke が 3 版に
+  わたり失敗していました。レシピ数の二重管理も解消しました。
+新機能 (B133 保存クエリの複文対応と実行時の変数注入) (v3.48.0):
 - 保存クエリは 1 文しか置けなかったため、基準日を変数にした定番クエリを保存
   できませんでした。パラメータ化したクエリほど保存して使い回したいのに、
   パラメータ化した途端に保存できなくなるという逆転が起きていました。
@@ -60,45 +96,24 @@ release 成果物:
 - window-functions だけ章番号が付いていませんでした。10-1-window-functions へ
   改めました。旧キーも引き続き解決できます (索引には出しません)。
 
-新機能 (B124 集計算術式に GROUP BY キーの列と @変数) (v3.46.0):
-- SUM(t.個数) * m.単価 のように、集計結果へ GROUP BY キーの列や @変数 を
-  掛けられるようになりました。
-- 集計関数から始まる形に限ります。GROUP BY に書いた表記と一致する列だけです。
-- ROLLUP / CUBE / GROUPING SETS では書けません。
-- SUM(a) * 単価 と SUM(a * 単価) は同じ値になるとは限りません。小数では丸めの
-  位置が違い、非数値の列では前者が NaN、後者が 0 になります。
+v3.46.0 以前の各節は畳みました (B124 集計算術式 / B125 集計のウィンドウ関数 /
+B123 GROUP BY だけの EXPLAIN)。内容は CHANGELOG.md と GitHub Releases にあります。
 
-新機能 (B125 集計のウィンドウ関数) (v3.45.0):
-- SUM / COUNT / AVG / MIN / MAX を OVER (...) で使えるようになりました。
-    SELECT 製品名, 日付, 個数,
-           SUM(個数) OVER (
-             PARTITION BY 製品名 ORDER BY 日付, レコード番号
-             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-           ) AS 累積在庫
-    FROM APP100
-- フレームは標準 SQL 準拠です。RANGE と ROWS は「同順の行」で結果が変わります。
-- 取得上限に達した場合、onLimit=truncate でも部分結果を返さずエラーになります。
-- 非対応: 引数の DISTINCT、GROUP_CONCAT / 統計集計の OVER、移動フレーム、
-  LAG / LEAD、GROUP BY や通常集計との併用、ウィンドウ結果を式へ入れる形。
-
-修正 (B123 GROUP BY だけの SELECT で EXPLAIN が落ちる) (v3.45.0):
-- SELECT 分類, COUNT(*) FROM APPx GROUP BY 分類 の実行計画が取れませんでした。
-  分かれ目は GROUP BY の有無ではなく「GROUP BY があり WHERE も ORDER BY も無い」こと
-  でした。現在は集計クエリも EXPLAIN を通せます。
-
-v3.44.0 以前の変更内容:
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.48.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.49.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.48.0): B133 保存クエリの複文対応と実行時の変数注入 (新機能)、
+本リリース (v3.49.0): B130 DESCRIBE に「値の由来」4 列 (新機能・SELECT * は 3→7 列)、
+B129 ウィンドウ診断の改善とレシピ R15 (改善)、B136 の一部 文書の例の訂正 (修正)、
 B135 mcp:smoke の期待値ずれ (修正・出荷物に影響なし)。
 
-- B133: 上の節を参照してください。
+- B130 / B129: 上の各節を参照してください。
+
+前リリース (v3.48.0): B133 保存クエリの複文対応と実行時の変数注入 (新機能)。
 
 前リリース (v3.47.0): B126 選択系の = / != を自動で押し下げ (改善)、
 B127 ウィンドウ既定フレームの警告 (新機能)、B132 docs セクションキーの番号 (修正)。
