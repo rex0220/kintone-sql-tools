@@ -304,6 +304,14 @@ export interface KintoneFieldInfo {
   minLength?: string;
   maxLength?: string;
   defaultValue?: unknown;
+  /** true は値が他アプリのキーであるルックアップフィールド。 */
+  hasLookup?: boolean;
+  /** true は値が同一アプリのルックアップからコピーされたスナップショット。 */
+  isLookupCopyTarget?: boolean;
+  /** true はフィールド値の重複が禁止されている。 */
+  isUnique?: boolean;
+  /** true は CALC または非空の計算式で導出されるフィールド。 */
+  isCalculated?: boolean;
   /** true の場合、サブテーブルの子フィールドとして create 検証の必須/既定値走査から除外する。 */
   inSubtable?: boolean;
   /** false は計算・システム・ルックアップコピー先等の書込不可フィールド。 */
@@ -9364,11 +9372,17 @@ async function executeDescribe(
   cacheContext: string
 ): Promise<SelectResult> {
   const fields = await getFieldsCached(stmt.appId, client, cacheContext);
-  const columns = ["フィールドコード", "ラベル", "タイプ"];
+  const columns = [
+    "フィールドコード", "ラベル", "タイプ", "ルックアップ", "コピー元", "重複禁止", "計算式",
+  ];
   const rows: ProcessRow[] = fields.map((f) => ({
     "フィールドコード": f.code,
     "ラベル":           f.label,
     "タイプ":           f.fieldType,
+    "ルックアップ":     f.hasLookup === true ? "YES" : "",
+    "コピー元":         f.isLookupCopyTarget === true ? "YES" : "",
+    "重複禁止":         f.isUnique === true ? "YES" : "",
+    "計算式":           f.isCalculated === true ? "YES" : "",
   }));
   return { type: "SELECT", rows, columns, rowCount: rows.length };
 }

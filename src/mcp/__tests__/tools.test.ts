@@ -72,7 +72,10 @@ describe("MCP tools", () => {
     for (const key of ["fields", "constraints", "raw", "fixed GET allowlist", "records", "mutation"]) {
       expect(registered.ksql_app_metadata.description).toContain(key);
     }
-    for (const key of ["field code", "label", "type", "ksql_app_metadata"]) {
+    for (const key of [
+      "field code", "label", "type", "lookup", "lookup copy target", "unique", "calculated",
+      "ksql_app_metadata",
+    ]) {
       expect(registered.ksql_describe_app.description).toContain(key);
     }
     expect(registered.ksql_query.description).toContain("ksql://language-reference");

@@ -2096,17 +2096,17 @@ SELECT * FROM 月別
 -- 名前でアプリ一覧を絞り込む
 WITH アプリ一覧 AS (SHOW APPS)
 SELECT * FROM アプリ一覧
-WHERE name LIKE '受注%'
+WHERE アプリ名 LIKE '受注%'
 
 -- テキスト系フィールドだけ抽出
 WITH フィールド AS (DESCRIBE APP100)
 SELECT * FROM フィールド
-WHERE type IN ('SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT')
+WHERE タイプ IN ('SINGLE_LINE_TEXT', 'MULTI_LINE_TEXT')
 
 -- DESC も使用可能
 WITH フィールド AS (DESC APP100)
-SELECT fieldCode, label FROM フィールド
-ORDER BY fieldCode ASC
+SELECT フィールドコード, ラベル FROM フィールド
+ORDER BY フィールドコード ASC
 ```
 
 ### 実体化後の列実在チェック（B86）
@@ -2145,9 +2145,9 @@ SHOW APPS
 
 | カラム | 内容 |
 |--------|------|
-| `appId` | アプリ ID |
-| `name` | アプリ名 |
-| `description` | 説明 |
+| `アプリID` | アプリ ID |
+| `アプリ名` | アプリ名 |
+| `説明` | 説明 |
 
 > 100 件単位で自動ページングし、最大 1,000 件まで取得します。
 
@@ -2162,17 +2162,23 @@ DESC APP100      -- 省略形（DESCRIBE と同等）
 
 | カラム | 内容 |
 |--------|------|
-| `fieldCode` | フィールドコード |
-| `label` | フィールドラベル |
-| `type` | フィールドタイプ（`SINGLE_LINE_TEXT`、`NUMBER` 等） |
+| `フィールドコード` | フィールドコード |
+| `ラベル` | フィールドラベル |
+| `タイプ` | フィールドタイプ（`SINGLE_LINE_TEXT`、`NUMBER` 等） |
+| `ルックアップ` | ルックアップフィールドなら `YES`、それ以外は空文字 |
+| `コピー元` | ルックアップからコピーされた値なら `YES`、それ以外は空文字 |
+| `重複禁止` | 値の重複が禁止されていれば `YES`、それ以外は空文字 |
+| `計算式` | 計算フィールドまたは非空の計算式を持つフィールドなら `YES`、それ以外は空文字 |
+
+値の由来を示す4列は、該当するときだけ文字列 `YES` を返します。4列がすべて空でも、完全な制約や設定の確認が不要とは限りません。必要に応じて `ksql_app_metadata` を使用してください。
 
 ```sql
 -- WITH 句と組み合わせてフィルタ
 WITH アプリ AS (SHOW APPS)
-SELECT * FROM アプリ WHERE name LIKE '受注%'
+SELECT * FROM アプリ WHERE アプリ名 LIKE '受注%'
 
 WITH フィールド AS (DESC APP100)
-SELECT * FROM フィールド WHERE type = 'NUMBER'
+SELECT * FROM フィールド WHERE タイプ = 'NUMBER'
 ```
 
 ---
@@ -3831,7 +3837,7 @@ DESC APP100
 
 -- SHOW APPS を WITH で絞り込む
 WITH アプリ AS (SHOW APPS)
-SELECT * FROM アプリ WHERE name LIKE '受注%'
+SELECT * FROM アプリ WHERE アプリ名 LIKE '受注%'
 
 -- UPSERT VALUES
 UPSERT INTO APP100 (顧客コード, 顧客名, 金額)
