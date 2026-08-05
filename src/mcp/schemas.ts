@@ -192,7 +192,7 @@ export const saveQueryInputSchema = z.object({
   title: z.string().min(1).describe("Human-readable title.").optional(),
   description: z.string().min(1).describe("What the query does and when to use it.").optional(),
   sql: z.string().min(1)
-    .describe("kSQL text to save (single statement only)."),
+    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements; DML saved queries must remain single-statement."),
   defaultProfile: z.string().min(1)
     .describe("Profile the saved query runs against by default."),
   readOnly: z.boolean()
@@ -221,7 +221,10 @@ export const runSavedQueryInputSchema = z.object({
     .describe('Required for DML saved queries: must be the literal string "yes".')
     .optional(),
   dmlMaxRows: z.number().int().positive()
-    .describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500). Saved queries are single-statement, so temp tables do not apply here. Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.")
+    .describe("Required for DML saved queries: per-statement cap on affected rows; for UPSERT it counts inserts + updates. It does NOT limit source reads of INSERT/UPSERT ... SELECT: those follow the runtime maxRecords resolution (KSQL_MAX_RECORDS / profile query.maxRecords, default 500). Read-only saved-query batches may use temp tables with the engine default row cap. Note: this tool's maxRecords / onLimit inputs apply to read-only saved queries only.")
+    .optional(),
+  variables: z.record(z.string(), z.string())
+    .describe("Batch only: string values for variables declared with DECLARE. Keys omit @ and are case-insensitive.")
     .optional(),
 });
 

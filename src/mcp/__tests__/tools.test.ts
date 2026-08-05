@@ -1617,6 +1617,178 @@ describe("MCP tools", () => {
     }
   });
 
+  test("saved query batch: DECLARE variables are injected, SET variables are not", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-saved-batch-vars-"));
+    process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 })
+    );
+
+    try {
+      await tools.saveQuery({
+        name: "variable_query",
+        sql: "DECLARE @min = '0'; CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100; SELECT 顧客名 FROM #t WHERE 売上 > @min",
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      const declared = await tools.runSavedQuery({
+        name: "variable_query",
+        variables: { Min: "200" },
+      }) as { result: { batch: boolean; results: Array<{ rows: Array<Record<string, string>> }> } };
+      expect(declared.result.batch).toBe(true);
+      expect(declared.result.results[0].rows).toEqual([{ 顧客名: "B社" }]);
+
+      await tools.saveQuery({
+        name: "variable_query",
+        sql: "SET @min = '0'; CREATE TEMP TABLE #t AS SELECT 顧客名, 売上 FROM APP100; SELECT 顧客名 FROM #t WHERE 売上 > @min",
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      await expect(tools.runSavedQuery({
+        name: "variable_query",
+        variables: { min: "200" },
+      })).rejects.toThrow(/injected variable @min is not declared/);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("saved query batch: read-only temp-table batches return envelopes and run concurrently", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-saved-batch-temp-"));
+    process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({ 100: BATCH_APP100 })
+    );
+
+    try {
+      await tools.saveQuery({
+        name: "temp_query",
+        sql: "CREATE TEMP TABLE #t AS SELECT 顧客名 FROM APP100; SELECT 顧客名 FROM #t",
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      const results = await Promise.all([
+        tools.runSavedQuery({ name: "temp_query" }),
+        tools.runSavedQuery({ name: "temp_query" }),
+      ]) as Array<{ result: { batch: boolean; statementCount: number; results: unknown[] } }>;
+      for (const result of results) {
+        expect(result.result).toMatchObject({ batch: true, statementCount: 2 });
+        expect(result.result.results).toHaveLength(1);
+      }
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("saved query batch: VALIDATE ONLY DML plus SELECT uses the read-only query path", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-saved-batch-validate-"));
+    process.env.KSQL_SAVED_QUERIES = join(dir, "queries.json");
+    const executeBatchSql = jest.fn(async (): Promise<BatchExecuteResult> => ({
+      ok: true,
+      statementCount: 2,
+      statements: [
+        { index: 0, type: "INSERT", status: "success", result: {
+          type: "VALIDATION", operation: "INSERT", validatedRows: 1, validRows: 1,
+          invalidRows: 0, errorCount: 0, columns: [], errors: [],
+        } },
+        { index: 1, type: "SELECT", status: "success", result: { type: "SELECT", columns: [], rows: [], rowCount: 0 } },
+      ],
+      analysis: {} as BatchExecuteResult["analysis"],
+    }));
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      { ...makeBatchRuntimeDeps({ 100: BATCH_APP100 }), executeBatchSql }
+    );
+
+    try {
+      await tools.saveQuery({
+        name: "validation_query",
+        sql: "INSERT INTO APP100 (顧客名) VALUES ('A社') VALIDATE ONLY; SELECT 顧客名 FROM APP100",
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      const result = await tools.runSavedQuery({ name: "validation_query" }) as {
+        result: { batch: boolean; statementCount: number };
+      };
+      expect(result.result).toMatchObject({ batch: true, statementCount: 2 });
+      expect(executeBatchSql).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("saved query batch: write batches are rejected at save and again after catalog editing", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-saved-batch-dml-"));
+    const catalogPath = join(dir, "queries.json");
+    process.env.KSQL_SAVED_QUERIES = catalogPath;
+    let executeCalls = 0;
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      executeSql: async () => {
+        executeCalls += 1;
+        return { type: "SELECT", columns: [], rows: [], rowCount: 0 };
+      },
+      executeBatchSql: async () => {
+        executeCalls += 1;
+        throw new Error("execution must not be reached");
+      },
+    });
+    const sql = "UPDATE APP100 SET code = 'x' WHERE $id = 1; SELECT * FROM APP100";
+
+    try {
+      await expect(tools.saveQuery({
+        name: "bad_readonly_batch", sql, defaultProfile: "prod", readOnly: true,
+      })).rejects.toThrow(/readOnly saved query cannot/);
+      await expect(tools.saveQuery({
+        name: "bad_dml_batch", sql, defaultProfile: "prod", readOnly: false,
+      })).rejects.toThrow(/DML batches are not supported by saved queries in Phase 1/);
+
+      await writeFile(catalogPath, JSON.stringify({
+        version: 1,
+        queries: [
+          {
+            name: "edited_readonly_dml",
+            sql: "UPDATE APP100 SET code = 'x' WHERE $id = 1",
+            defaultProfile: "prod",
+            readOnly: true,
+            createdAt: "2026-08-05T00:00:00.000Z",
+            updatedAt: "2026-08-05T00:00:00.000Z",
+          },
+          {
+            name: "edited_readonly_dml_batch",
+            sql,
+            defaultProfile: "prod",
+            readOnly: true,
+            createdAt: "2026-08-05T00:00:00.000Z",
+            updatedAt: "2026-08-05T00:00:00.000Z",
+          },
+          {
+            name: "edited_dml_batch",
+            sql,
+            defaultProfile: "prod",
+            readOnly: false,
+            createdAt: "2026-08-05T00:00:00.000Z",
+            updatedAt: "2026-08-05T00:00:00.000Z",
+          },
+        ],
+      }), "utf8");
+      await expect(tools.runSavedQuery({ name: "edited_readonly_dml" }))
+        .rejects.toThrow(/readOnly saved query cannot contain UPDATE/);
+      await expect(tools.runSavedQuery({ name: "edited_readonly_dml_batch" }))
+        .rejects.toThrow(/readOnly saved query cannot contain statements that require ksql_mutate/);
+      await expect(tools.runSavedQuery({
+        name: "edited_dml_batch",
+        allowDml: true,
+        confirmText: "yes",
+        dmlMaxRows: 1,
+      })).rejects.toThrow(/DML batches are not supported by saved queries in Phase 1/);
+      expect(executeCalls).toBe(0);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
   test("saved query tools use mcp.savedQueries.path relative to config file", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-tools-"));
     const configPath = join(dir, "config", "ksql.config.json");

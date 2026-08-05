@@ -36,8 +36,10 @@ export interface SaveQueryInput {
 }
 
 export interface SavedQuerySafety {
-  isDml: boolean;
-  statementType: string;
+  statementCount: number;
+  canRunWithQueryTool: boolean;
+  requiresMutationTool: boolean;
+  statementType?: string;
 }
 
 export interface SavedQueryCatalogPathOptions {
@@ -92,10 +94,16 @@ export function validateSavedQueryName(name: string): void {
 }
 
 export function assertSavedQuerySafety(input: SaveQueryInput, safety: SavedQuerySafety): void {
-  if (input.readOnly && safety.isDml) {
-    throw new Error(`ArgumentError: readOnly saved query cannot contain ${safety.statementType}.`);
+  if (input.readOnly && !safety.canRunWithQueryTool) {
+    const detail = safety.statementCount === 1 && safety.statementType
+      ? safety.statementType
+      : "statements that require ksql_mutate";
+    throw new Error(`ArgumentError: readOnly saved query cannot contain ${detail}.`);
   }
-  if (!input.readOnly && !safety.isDml) {
+  if (!input.readOnly && safety.statementCount > 1) {
+    throw new Error("ArgumentError: DML batches are not supported by saved queries in Phase 1.");
+  }
+  if (!input.readOnly && !safety.requiresMutationTool) {
     throw new Error("ArgumentError: readOnly: false is only allowed for DML saved queries.");
   }
 }

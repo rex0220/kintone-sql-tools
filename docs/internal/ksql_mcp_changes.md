@@ -237,8 +237,16 @@ Claude Desktop / Windows で `cwd` が `C:\WINDOWS\system32` になっても、�
 `readOnly: true` の場合:
 
 ```text
-ksql_query と同じ安全条件で実行
+ksql_query と同じ安全条件で実行。複文も可で、結果はバッチエンベロープ
 ```
+
+`ksql_run_saved_query` の `variables` には、保存 SQL の `DECLARE` 変数へ注入する文字列値を
+`@` なし・大文字小文字を区別しないキーで指定できる。未指定なら `DECLARE` の既定値を使う。
+注入対象は `DECLARE` 専用で、`SET` は宣言とみなさない。したがって `SET` だけの保存 SQL に
+`variables` を渡すと、通常の `ksql_query` と同じく未宣言変数として拒否する。
+
+read-only バッチでは一時テーブルを利用できるが、`ksql_run_saved_query` は
+`tempTableMaxRows` などの非公開 batch option を受け取らず、エンジン既定値を使う。
 
 `readOnly: false` の場合:
 
@@ -300,7 +308,7 @@ Claude Desktop 設定例:
 | `ksql_query` | read-only バッチを実行しバッチエンベロープ（`statements[]` + `results[]`）を返す。入力に `continueOnError` / `maxTotalRecords` を追加。DML 混在バッチは `ksql_mutate` へ誘導するエラー。バッチの `timeout` は合計タイムアウト |
 | `ksql_mutate` | DML バッチを受理（フェーズ2 M1）。dmlMaxRows は文ごと + 任意の dmlTotalMaxRows で合計ガード。常に fail-fast。一時テーブル経由の INSERT_SELECT に対応（M4。ソースが一時テーブルのみの場合） |
 | `ksql_explain` | バッチ入力で全文プランの配列を返す（M3）。一時テーブル参照文は FULL_SCAN（インメモリ）と行数不明を明示 |
-| `ksql_save_query` / `ksql_run_saved_query` | 保存 SQL は単文のみ（バッチは明示エラー） |
+| `ksql_save_query` / `ksql_run_saved_query` | `readOnly: true` は `canRunWithQueryTool` を満たす複文も保存・実行でき、`variables` で `DECLARE` へ実行時注入できる。実書き込み DML を含むバッチと `readOnly: false` の複文は拒否。単文 DML は従来どおり |
 
 安全制御の要点:
 
@@ -409,11 +417,11 @@ v1.7.0 の実機確認で、MCP クライアントが影響行数基準で小さ
 | 変更 | 内容 |
 | --- | --- |
 | MCP tool input | `ksql_query` / `ksql_mutate` に `tempTableMaxRows`（正整数・任意）を追加。解決順は tool input → env `KSQL_TEMP_TABLE_MAX_ROWS` → profile `query.tempTableMaxRows` → エンジン既定 `TEMP_TABLE_MAX_ROWS`（10,000） |
-| 非公開ツール | `ksql_run_saved_query` には追加しない（保存クエリは単文限定で一時テーブルが出現し得ない）。同ツールの `dmlMaxRows` describe から temp table 節を削除し「saved queries are single-statement」を明示（存在しない入力をモデルに示唆しない） |
+| 非公開ツール | `ksql_run_saved_query` には追加しない。B133 以降は read-only 保存クエリで一時テーブルを使えるが、この非公開 batch option は受け取らずエンジン既定値を使う |
 | CLI | `--temp-table-max-rows <n>` を追加（env / profile の解決は MCP と対称）。console の `:run` 子実行にも伝搬 |
 | セマンティクス不変 | 既定 10,000・**超過は `onLimit` 設定によらず常にエラー**（truncate 不適用）は変更なし。素の SELECT の `maxRecords` / `onLimit` とは独立 |
 | EXPLAIN | CREATE TEMP TABLE のプラン行を「既定上限 10,000 行、tempTableMaxRows で変更可」表記に変更（静的プランのため実効値は表示しない） |
-| smoke 回帰ガード | schema に `tempTableMaxRows`（query / mutate）、description キーに `"by default (adjustable via tempTableMaxRows)"`、run_saved_query の非公開・非言及 assertion を追加（旧バンドルで失敗することを確認後に適用） |
+| smoke 回帰ガード | schema に `tempTableMaxRows`（query / mutate）、description キーに `"by default (adjustable via tempTableMaxRows)"`、run_saved_query の入力非公開とエンジン既定上限の説明 assertion を追加 |
 | 注意 | 上限を引き上げるとバッチ内最大16テーブル × 指定値がメモリに滞留し得る（参照は常にインメモリ FULL_SCAN）。まず WHERE での絞り込みを推奨 |
 
 ## 11.12 GROUP BY なし集計の 0 件時「1 行」返却（v1.12.0）

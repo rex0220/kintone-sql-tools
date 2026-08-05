@@ -159,19 +159,6 @@ export interface BatchValidationResult extends ValidationCommon {
 
 export type ValidationResult = SingleValidationResult | BatchValidationResult;
 
-/** バッチ未対応のツールで単文入力を要求する（対応時にこのガードを外す） */
-function requireSingleStatement(
-  validation: ValidationResult,
-  toolName: string
-): SingleValidationResult {
-  if (validation.batch) {
-    throw new Error(
-      `ArgumentError: batch SQL (multiple statements) is not supported by ${toolName} yet.`
-    );
-  }
-  return validation;
-}
-
 const DEFAULT_MAX_RECORDS = 500;
 const DEFAULT_ON_LIMIT: OnLimitMode = "error";
 export const MCP_IMPORT_SOURCE_REQUIRED_MESSAGE =
@@ -1013,15 +1000,14 @@ export function createKsqlMcpTools(
   }
 
   async function saveQuery(input: SaveQueryInput): Promise<Record<string, unknown>> {
-    const validation = requireSingleStatement(
-      await validate({
-        sql: input.sql,
-        profile: input.defaultProfile,
-      }),
-      "ksql_save_query"
-    );
+    const validation = await validate({
+      sql: input.sql,
+      profile: input.defaultProfile,
+    });
     assertSavedQuerySafety(input, {
-      isDml: validation.isDml,
+      statementCount: validation.statementCount,
+      canRunWithQueryTool: validation.canRunWithQueryTool,
+      requiresMutationTool: validation.requiresMutationTool,
       statementType: validation.statementType,
     });
 
@@ -1067,15 +1053,14 @@ export function createKsqlMcpTools(
     const saved = getSavedQuery(catalog, input.name);
     assertProfileOverrideAllowed(saved, input.profile);
     const profile = input.profile ?? saved.defaultProfile;
-    const validation = requireSingleStatement(
-      await validate({
-        sql: saved.sql,
-        profile,
-      }),
-      "ksql_run_saved_query"
-    );
+    const validation = await validate({
+      sql: saved.sql,
+      profile,
+    });
     assertSavedQuerySafety(saved, {
-      isDml: validation.isDml,
+      statementCount: validation.statementCount,
+      canRunWithQueryTool: validation.canRunWithQueryTool,
+      requiresMutationTool: validation.requiresMutationTool,
       statementType: validation.statementType,
     });
 
@@ -1087,6 +1072,7 @@ export function createKsqlMcpTools(
         fetchParallel: input.fetchParallel,
         onLimit: input.onLimit,
         timeout: input.timeout,
+        variables: input.variables,
       }, validation);
       return {
         ok: true,
@@ -1105,6 +1091,7 @@ export function createKsqlMcpTools(
       dmlMaxRows,
       fetchParallel: input.fetchParallel,
       timeout: input.timeout,
+      variables: input.variables,
     }, validation);
     return {
       ok: true,

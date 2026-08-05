@@ -1,6 +1,9 @@
 # B133 保存クエリの複文対応＋実行時変数注入 Phase 1 仕様（R2）
 
-- ステータス: 📋 **仕様 R2（codex レビュー 1 回目を反映）** → [レビュー](ksql_b133_codex_review_1.md)（高 1・中 5・低 2 を**全件反映**）
+- ステータス: 🚧 **実装完了・実機検算済み（リリース待ち）**（2026-08-05） → [実装報告](ksql_b133_codex_impl_report.md) / [レビュー](ksql_b133_codex_review_1.md)（高 1・中 5・低 2 を**全件反映**）
+  - `npm test` 224 suites / 5,417 tests 全通、`mcp:verify` 3 種全通
+  - **実機（APP4228）で §3 を全件確認**。とくに §3.1＝`variables` 無し 1147 → `d90='2026-07-20'` で **99**（トマト缶）へ変わり、**日付リテラル直書きの `ksql_query` と完全一致**
+  - §5 の未確定 3 件は実装時に確定（→ 実装報告）
 - 実需: [ksql-analytics の返信 §5](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-B129-20260805.md)
 - 関連: [B4](ksql_saved_query_params_spec.md)（❌ クローズ。**そのクローズ判断の前提が一部崩れた**・§0.1）
 

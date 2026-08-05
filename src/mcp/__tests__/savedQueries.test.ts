@@ -45,6 +45,10 @@ describe("saved query catalog", () => {
       readOnly: true,
     })).not.toThrow();
     expect(() => savedQueryNameInputSchema.parse({ name: "../secret" })).toThrow();
+    expect(runSavedQueryInputSchema.parse({
+      name: "monthly_sales",
+      variables: { Since: "2026-06-01" },
+    }).variables).toEqual({ Since: "2026-06-01" });
   });
 
   test("allows server-level catalog path override through env", () => {
@@ -108,7 +112,9 @@ describe("saved query catalog", () => {
       defaultProfile: "prod",
       readOnly: true,
     }, {
-      isDml: true,
+      statementCount: 1,
+      canRunWithQueryTool: false,
+      requiresMutationTool: true,
       statementType: "UPDATE",
     })).toThrow(/readOnly saved query cannot contain UPDATE/);
 
@@ -118,9 +124,33 @@ describe("saved query catalog", () => {
       defaultProfile: "prod",
       readOnly: false,
     }, {
-      isDml: false,
+      statementCount: 1,
+      canRunWithQueryTool: true,
+      requiresMutationTool: false,
       statementType: "SELECT",
     })).toThrow(/readOnly: false is only allowed/);
+
+    expect(() => assertSavedQuerySafety({
+      name: "validation_batch",
+      sql: "INSERT INTO APP100 (code) VALUES ('A') VALIDATE ONLY; SELECT * FROM APP100",
+      defaultProfile: "prod",
+      readOnly: true,
+    }, {
+      statementCount: 2,
+      canRunWithQueryTool: true,
+      requiresMutationTool: false,
+    })).not.toThrow();
+
+    expect(() => assertSavedQuerySafety({
+      name: "dml_batch",
+      sql: "UPDATE APP100 SET code = 'x' WHERE $id = 1; SELECT * FROM APP100",
+      defaultProfile: "prod",
+      readOnly: false,
+    }, {
+      statementCount: 2,
+      canRunWithQueryTool: false,
+      requiresMutationTool: true,
+    })).toThrow(/DML batches are not supported by saved queries in Phase 1/);
   });
 
   test("blocks profile override unless the query opts in", () => {
@@ -158,6 +188,24 @@ describe("saved query catalog", () => {
       const loaded = await loadSavedQueryCatalog(filePath);
       expect(loaded.queries.map((query) => query.name)).toEqual(["a_query", "b_query"]);
       expect(getSavedQuery(loaded, "a_query").sql).toBe("SELECT * FROM APP200");
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("round-trips multi-statement SQL with newlines and comments exactly", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-saved-queries-batch-"));
+    const sql = "-- defaults\nDECLARE @since = '2026-05-08';\n/* final query */\nSELECT * FROM APP100 WHERE 日付 >= @since";
+    try {
+      const filePath = join(dir, "queries.json");
+      const { catalog } = upsertSavedQuery(emptySavedQueryCatalog(), {
+        name: "batch_query",
+        sql,
+        defaultProfile: "prod",
+        readOnly: true,
+      });
+      await saveSavedQueryCatalog(filePath, catalog);
+      expect(getSavedQuery(await loadSavedQueryCatalog(filePath), "batch_query").sql).toBe(sql);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
