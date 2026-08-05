@@ -9364,9 +9364,25 @@ async function executeUpsertSelect(
 // SHOW APPS
 // ============================================================
 
+/**
+ * `SHOW APPS` が返す列（B136）。
+ * **言語リファレンス §14 の表と突き合わせるテストがある**ので、変えるときは文書も直すこと。
+ */
+export const SHOW_APPS_COLUMNS: readonly string[] = Object.freeze([
+  "アプリID", "アプリ名", "説明",
+]);
+
+/**
+ * `DESCRIBE` / `DESC` が返す列（B130 で 3 列から 7 列へ・B136）。
+ * **言語リファレンス §14 の表と突き合わせるテストがある**ので、変えるときは文書も直すこと。
+ */
+export const DESCRIBE_COLUMNS: readonly string[] = Object.freeze([
+  "フィールドコード", "ラベル", "タイプ", "ルックアップ", "コピー元", "重複禁止", "計算式",
+]);
+
 async function executeShowApps(client: KintoneClient): Promise<SelectResult> {
   const apps = await client.getApps();
-  const columns = ["アプリID", "アプリ名", "説明"];
+  const columns = [...SHOW_APPS_COLUMNS];
   const rows: ProcessRow[] = apps.map((a) => ({
     "アプリID": String(a.appId),
     "アプリ名":  a.name,
@@ -9385,9 +9401,7 @@ async function executeDescribe(
   cacheContext: string
 ): Promise<SelectResult> {
   const fields = await getFieldsCached(stmt.appId, client, cacheContext);
-  const columns = [
-    "フィールドコード", "ラベル", "タイプ", "ルックアップ", "コピー元", "重複禁止", "計算式",
-  ];
+  const columns = [...DESCRIBE_COLUMNS];
   const rows: ProcessRow[] = fields.map((f) => ({
     "フィールドコード": f.code,
     "ラベル":           f.label,

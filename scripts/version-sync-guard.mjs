@@ -97,8 +97,21 @@ if (releaseMode) {
     ["未リリース", /未リリース/g],
     ["次回リリース", /次回リリース/g],
   ];
-  // CHANGELOG.md は開発中に "## Unreleased" を持つのが正常なので対象外
+  // CHANGELOG.md は開発中に "## Unreleased" を持つのが正常なので、上の語検査は対象外
   // （リリース時は版数見出しへ確定させる運用）。
+  //
+  // B139: そのかわり「先頭の版数見出しが今の版か」だけをリリース時に見る。
+  // v3.49.0 と v3.50.0 の実装で、リリース済みの節へ新しい記載を追加する取り違えを
+  // 2 回続けて踏んだ（どちらも手で気づいて直した）。開発中は無効なので邪魔にならない。
+  const changelogHeading = readText("CHANGELOG.md").match(/^## (?:v)?(\d+\.\d+\.\d+)/m);
+  if (!changelogHeading) {
+    failures.push("CHANGELOG.md: 版数見出し（## vX.Y.Z）が見つかりません");
+  } else if (changelogHeading[1] !== version) {
+    failures.push(
+      `CHANGELOG.md: 先頭の版数見出しが v${changelogHeading[1]} で、package.json の v${version} と違います。`
+      + "新しい版の節を先頭に作ってください（リリース済みの節へ追記しない）"
+    );
+  }
   for (const relativePath of ["docs/ksql_language_reference.md", "release/README.txt"]) {
     const lines = readText(relativePath).split(/\r?\n/);
     for (const [label, pattern] of staleMarkers) {
