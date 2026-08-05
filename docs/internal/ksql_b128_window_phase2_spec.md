@@ -1,6 +1,6 @@
 # B128 集計ウィンドウ Phase 2（移動フレーム / `LAG` / `LEAD`）仕様（R1）
 
-- ステータス: 📋 **仕様 R1（レビュー前）**
+- ステータス: ⏸ **保留（2026-08-05 オーナー判断）**。[codex レビュー](ksql_b128_codex_review_1.md) で**高 9・中 7**。**R1 のままでは実装着手不可**で、かつ**スコープ判断が先**＝`ROWS` の行数指定だけでは依頼元の実需「7 日移動平均」を満たせない（同日複数行・取引の無い日があると直近 7 行 ≠ 直近 7 日）。満たすには日次集約 CTE との組み合わせか、値指定 `RANGE`（`INTERVAL n DAY PRECEDING`）が要る。**再開時はスコープ（案 A レシピ併用 / 案 B 値指定 RANGE / 案 C LAG 先行）の決定から。**
 - 前提: [B125 Phase 1 仕様](ksql_b125_aggregate_window_phase1_spec.md)（v3.45.0 出荷済み）の §10 で
   Phase 2 と明記したもの
 - 出典: [ksql-analytics の依頼 ③](../../../ksql-analytics/docs/internal/kSQLエンジンへの依頼-20260805.md) /
