@@ -11,6 +11,7 @@ import {
   KSQL_FUNCTION_CATALOG,
   LANGUAGE_SECTION_KEYS,
   RECIPE_KEYS,
+  resolveKsqlDocsSection,
 } from "../docsResources";
 import { createServer } from "../index";
 
@@ -30,7 +31,12 @@ describe("B50 embedded documentation resources", () => {
     );
     expect(docs.languageReference.sections["02-select"].text).toContain("## 2. SELECT");
     expect(docs.languageReference.sections["10-order-by"].text).not.toContain("## 10.1 ウィンドウ関数");
-    expect(docs.languageReference.sections["window-functions"].text).toContain("SUM(個数_在庫計算用) OVER");
+    expect(docs.languageReference.sections["10-1-window-functions"].text).toContain("SUM(個数_在庫計算用) OVER");
+    // B132: 旧キー window-functions は索引には出さないが、解決だけは受け付ける。
+    expect(resolveKsqlDocsSection("language-reference/window-functions"))
+      .toBe(resolveKsqlDocsSection("language-reference/10-1-window-functions"));
+    expect(KSQL_DOCS_SECTION_KEYS).not.toContain("language-reference/window-functions");
+    expect(KSQL_DOCS_SECTION_KEYS).toContain("language-reference/10-1-window-functions");
     expect(docs.languageReference.sections["17-upsert"].text).toContain("## 17.1 VALIDATE ONLY");
     expect(docs.languageReference.sections["22-limitations"].text).toContain("## 22. 制限事項");
     expect(docs.recipes.sections.r6.text).toContain("ON ERROR SKIP");
@@ -142,7 +148,7 @@ describe("B50 embedded documentation resources", () => {
 
       for (const [uri, heading] of [
         ["ksql://language-reference/02-select", "## 2. SELECT"],
-        ["ksql://language-reference/window-functions", "## 10.1 ウィンドウ関数"],
+        ["ksql://language-reference/10-1-window-functions", "## 10.1 ウィンドウ関数"],
         ["ksql://language-reference/17-upsert", "## 17.1 VALIDATE ONLY"],
         ["ksql://language-reference/22-limitations", "## 22. 制限事項"],
         ["ksql://recipes/r6", "## R6."],

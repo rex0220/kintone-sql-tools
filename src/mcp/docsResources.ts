@@ -86,13 +86,24 @@ const VALID_KEY_HINT =
   "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r14. "
   + "Call ksql_docs without arguments for the full key list.";
 
+/**
+ * 旧キーの互換エイリアス（B132）。索引には出さず、解決だけ受け付ける。
+ * v3.45.0 で `window-functions` を番号なしで追加したため、他の 26 セクションと表記が
+ * 揃っていなかった。番号つきへ改めたが、旧キーを参照している利用側を壊さない。
+ */
+const LANGUAGE_SECTION_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  "window-functions": "10-1-window-functions",
+});
+
 export function resolveKsqlDocsSection(section?: string): string {
   if (section === undefined) return KSQL_DOCS_INDEX;
   const key = section.trim().replace(/^ksql:\/\//, "");
   if (key === "language-reference") return KSQL_DOCS.languageReference.index;
   if (key === "recipes") return KSQL_DOCS.recipes.index;
   if (key.startsWith("language-reference/")) {
-    const text = KSQL_DOCS.languageReference.sections[key.slice("language-reference/".length)]?.text;
+    const rawKey = key.slice("language-reference/".length);
+    const resolvedKey = LANGUAGE_SECTION_ALIASES[rawKey] ?? rawKey;
+    const text = KSQL_DOCS.languageReference.sections[resolvedKey]?.text;
     if (text !== undefined) return text;
   }
   if (key.startsWith("recipes/")) {
