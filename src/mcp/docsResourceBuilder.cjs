@@ -162,10 +162,12 @@ function buildDocsResourceMap(languageSource, recipesSource) {
   for (const [key, section] of Object.entries(baseLanguageSections)) {
     languageSections[key] = section;
     if (key === "10-order-by") {
-      languageSections["window-functions"] = {
+      // 章番号つきキーで他セクション（01-basic-rules 〜 26-assert）と表記を揃える。
+      // 旧キー window-functions は docsResources.ts のエイリアスで引き続き解決する。
+      languageSections["10-1-window-functions"] = {
         heading: "10.1 ウィンドウ関数",
         text: windowText,
-        uri: `${languageUri}/window-functions`,
+        uri: `${languageUri}/10-1-window-functions`,
       };
     }
   }
