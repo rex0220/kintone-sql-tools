@@ -21,7 +21,7 @@
 
 ### A-1. UPSERT / UPSERT SELECT の N+1 クエリ解消 【最優先】
 
-[execute.ts:1381](../src/execute.ts#L1381)（UPSERT）、[execute.ts:1898](../src/execute.ts#L1898)（UPSERT SELECT）
+[execute.ts:1381](../../src/execute.ts#L1381)（UPSERT）、[execute.ts:1898](../../src/execute.ts#L1898)（UPSERT SELECT）
 
 現在は **1 行ごとに** 既存レコード検索の GET を発行している。
 
@@ -44,56 +44,56 @@ for (const row of stmt.values) {
 
 ### A-2. CLI / MCP のページング並列化（`fetchParallel` 未指定）
 
-[cli/index.ts:1598](../src/cli/index.ts#L1598) 付近の `execute()` 呼び出しは `fetchParallel` を渡していないため、`fetchAll` は常に直列ページング（1 ページ 500 件ずつ順番に GET）になる。プラグイン UI は `FETCH_PARALLEL_DEFAULT = 5`（[ui/desktop.ts:114](../src/ui/desktop.ts#L114)）で 5 並列なのに、CLI / MCP だけ遅い。10,000 件（20 ページ）の取得で約 3〜5 倍の短縮が見込める。
+[cli/index.ts:1598](../../src/cli/index.ts#L1598) 付近の `execute()` 呼び出しは `fetchParallel` を渡していないため、`fetchAll` は常に直列ページング（1 ページ 500 件ずつ順番に GET）になる。プラグイン UI は `FETCH_PARALLEL_DEFAULT = 5`（[ui/desktop.ts:114](../../src/ui/desktop.ts#L114)）で 5 並列なのに、CLI / MCP だけ遅い。10,000 件（20 ページ）の取得で約 3〜5 倍の短縮が見込める。
 
 **改善案（CLI）**: `--fetch-parallel N` オプションと profile 設定（`query.fetchParallel`、環境変数 `KSQL_FETCH_PARALLEL`）を追加し、`maxRecords` / `onLimit` と同じ優先順位（引数 > 環境変数 > profile > デフォルト）で解決してデフォルト 3〜5 を `execute()` に渡す。
 
 **改善案（MCP）**: MCP は別途対応が必要。
 
-- [mcp/schemas.ts](../src/mcp/schemas.ts#L4): `maxRecords` / `onLimit` / `timeout` と並ぶ共通入力として `fetchParallel`（`z.number().int().min(1).max(10).optional()` 程度の上限付き）を `queryInputSchema` / `mutateInputSchema` / `describeAppInputSchema` / `showAppsInputSchema` / `runSavedQueryInputSchema` に追加。`ksql_mutate`（[mcp/tools.ts:366](../src/mcp/tools.ts#L366)）も UPDATE / DELETE の対象 $id 解決や UPSERT の既存判定で `fetchAll` を通るため対象に含める
-- `runSavedQuery`（[mcp/tools.ts:450](../src/mcp/tools.ts#L450)）は入力を**明示的に転送**しているため、schema 追加だけでは反映されない。read-only 経路の `query({...})`（[tools.ts:465-471](../src/mcp/tools.ts#L465-L471)）と DML 経路の `mutate({...})`（[tools.ts:481-488](../src/mcp/tools.ts#L481-L488)）の両方の転送リストに `fetchParallel: input.fetchParallel` を追加する
-- [mcp/tools.ts:331](../src/mcp/tools.ts#L331) ほか各 `executeSql()` 呼び出し: `fetchParallel: runtime.fetchParallel` を `ExecuteOptions` に渡す。runtime（[node/runtime.ts:70-81](../src/node/runtime.ts#L70-L81)）の解決順は `maxRecords` / `onLimit` / `timeout` と同じく `input.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? デフォルト` とし、CLI と優先順位を揃える
+- [mcp/schemas.ts](../../src/mcp/schemas.ts#L4): `maxRecords` / `onLimit` / `timeout` と並ぶ共通入力として `fetchParallel`（`z.number().int().min(1).max(10).optional()` 程度の上限付き）を `queryInputSchema` / `mutateInputSchema` / `describeAppInputSchema` / `showAppsInputSchema` / `runSavedQueryInputSchema` に追加。`ksql_mutate`（[mcp/tools.ts:366](../../src/mcp/tools.ts#L366)）も UPDATE / DELETE の対象 $id 解決や UPSERT の既存判定で `fetchAll` を通るため対象に含める
+- `runSavedQuery`（[mcp/tools.ts:450](../../src/mcp/tools.ts#L450)）は入力を**明示的に転送**しているため、schema 追加だけでは反映されない。read-only 経路の `query({...})`（[tools.ts:465-471](../../src/mcp/tools.ts#L465-L471)）と DML 経路の `mutate({...})`（[tools.ts:481-488](../../src/mcp/tools.ts#L481-L488)）の両方の転送リストに `fetchParallel: input.fetchParallel` を追加する
+- [mcp/tools.ts:331](../../src/mcp/tools.ts#L331) ほか各 `executeSql()` 呼び出し: `fetchParallel: runtime.fetchParallel` を `ExecuteOptions` に渡す。runtime（[node/runtime.ts:70-81](../../src/node/runtime.ts#L70-L81)）の解決順は `maxRecords` / `onLimit` / `timeout` と同じく `input.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? デフォルト` とし、CLI と優先順位を揃える
 
 ### A-3. サブクエリ解決の並列化
 
-[execute.ts:1993](../src/execute.ts#L1993) `resolveSubqueries` は WHERE 木を再帰しながら `await` で直列実行する。`IN (SELECT ...)` が複数、あるいは `EXISTS` と併用されると、その数だけ直列に待つ。
+[execute.ts:1993](../../src/execute.ts#L1993) `resolveSubqueries` は WHERE 木を再帰しながら `await` で直列実行する。`IN (SELECT ...)` が複数、あるいは `EXISTS` と併用されると、その数だけ直列に待つ。
 
-**改善案**: 木を走査して「実行すべきサブクエリのリスト」を先に収集し、`Promise.all` で並列実行してから `resolved` を書き込む。`executeUnion`（[execute.ts:507-511](../src/execute.ts#L507-L511)）の左辺・右辺、`buildOptionOrdersForSelect` / `buildSortKindsForSelect` / `resolveScalarColumns` の直列 `await`（[execute.ts:486-488](../src/execute.ts#L486-L488)）も同様に並列化できる。
+**改善案**: 木を走査して「実行すべきサブクエリのリスト」を先に収集し、`Promise.all` で並列実行してから `resolved` を書き込む。`executeUnion`（[execute.ts:507-511](../../src/execute.ts#L507-L511)）の左辺・右辺、`buildOptionOrdersForSelect` / `buildSortKindsForSelect` / `resolveScalarColumns` の直列 `await`（[execute.ts:486-488](../../src/execute.ts#L486-L488)）も同様に並列化できる。
 
 ### A-4. スカラーサブクエリ列の重複実行（コメントと実装の乖離）
 
-[execute.ts:2061-2078](../src/execute.ts#L2061-L2078) `resolveScalarColumns` の doc コメントは「同一クエリは 1 回だけ実行」とあるが、実装は**列インデックスをキー**にしているだけで、同一サブクエリが複数列にあるとその回数だけ実行される。
+[execute.ts:2061-2078](../../src/execute.ts#L2061-L2078) `resolveScalarColumns` の doc コメントは「同一クエリは 1 回だけ実行」とあるが、実装は**列インデックスをキー**にしているだけで、同一サブクエリが複数列にあるとその回数だけ実行される。
 
 **改善案**: `JSON.stringify(col.query)` をキーにした `Map<string, Promise<string>>` で重複排除し、あわせて A-3 の並列化を適用する。
 
 ### A-5. フィールド定義取得とレコード取得のオーバーラップ
 
-[execute.ts:486-488](../src/execute.ts#L486-L488)（FULL_SCAN）では、全テーブルのレコード取得が**完了した後**に `resolveScalarColumns` → `buildOptionOrdersForSelect` → `buildSortKindsForSelect` を直列で待つ。これらはレコードに依存しないため、メインフェッチの開始と同時に走らせて最後に await すればレイテンシが隠れる。
+[execute.ts:486-488](../../src/execute.ts#L486-L488)（FULL_SCAN）では、全テーブルのレコード取得が**完了した後**に `resolveScalarColumns` → `buildOptionOrdersForSelect` → `buildSortKindsForSelect` を直列で待つ。これらはレコードに依存しないため、メインフェッチの開始と同時に走らせて最後に await すればレイテンシが隠れる。
 
-SIMPLE モード（[execute.ts:325-327](../src/execute.ts#L325-L327)）では、さらに **`stmt.orderBy` が空なら optionOrders / sortKinds の取得自体が不要**（`applyOrderBy` が即 return するため）。条件付きスキップで GET `/app/form/fields` を丸ごと省ける（キャッシュ未ヒットの初回に効く）。
+SIMPLE モード（[execute.ts:325-327](../../src/execute.ts#L325-L327)）では、さらに **`stmt.orderBy` が空なら optionOrders / sortKinds の取得自体が不要**（`applyOrderBy` が即 return するため）。条件付きスキップで GET `/app/form/fields` を丸ごと省ける（キャッシュ未ヒットの初回に効く）。
 
 ### A-6. サブテーブル DML / REORDER の全件・全フィールド取得
 
-[execute.ts:1464](../src/execute.ts#L1464)（INSERT）、[execute.ts:1517](../src/execute.ts#L1517)（UPDATE）、[execute.ts:1582](../src/execute.ts#L1582)（DELETE）、[execute.ts:1774](../src/execute.ts#L1774)（REORDER）はいずれも `query: "", fields: []`（全レコード・全フィールド）で親を取得する。
+[execute.ts:1464](../../src/execute.ts#L1464)（INSERT）、[execute.ts:1517](../../src/execute.ts#L1517)（UPDATE）、[execute.ts:1582](../../src/execute.ts#L1582)（DELETE）、[execute.ts:1774](../../src/execute.ts#L1774)（REORDER）はいずれも `query: "", fields: []`（全レコード・全フィールド）で親を取得する。
 
 **改善案**:
 
 - サブテーブル INSERT は `_pid` が既知なので `$id in (対象pid...)` で親を絞り込める（50 件チャンク）。
 - UPDATE / DELETE / REORDER も、WHERE に `_pid` / `_p.フィールド` の条件があれば `$id = ...` / 親フィールド条件としてプッシュダウン可能（`extractTableCondition` の親フィールド版）。
 - `fields` は `$id, $revision, サブテーブルコード, WHERE が参照する親フィールド` に限定できる（PUT はサブテーブル全行を送るのでサブテーブル自体は必要）。
-- サブテーブル INSERT（[execute.ts:1464](../src/execute.ts#L1464)）だけは `maxRecords: 10_000, parallel: 1` の**ハードコード**で、`options.maxRecords` / `options.fetchParallel` を参照していない。他のサブテーブル DML と同じく options を尊重するのは、絞り込み実装の前にできる小修正。
+- サブテーブル INSERT（[execute.ts:1464](../../src/execute.ts#L1464)）だけは `maxRecords: 10_000, parallel: 1` の**ハードコード**で、`options.maxRecords` / `options.fetchParallel` を参照していない。他のサブテーブル DML と同じく options を尊重するのは、絞り込み実装の前にできる小修正。
 
-また [execute.ts:1553](../src/execute.ts#L1553) / [execute.ts:1605](../src/execute.ts#L1605) / [execute.ts:1794](../src/execute.ts#L1794) の `parents.find(...)` はループ内線形検索で O(親数 × 対象親数)。`Map<pid, parent>` を 1 度作れば O(1) 参照になる（`executeInsertSubtable` は既に `parentMap` を作っており、同じパターンを流用するだけ）。
+また [execute.ts:1553](../../src/execute.ts#L1553) / [execute.ts:1605](../../src/execute.ts#L1605) / [execute.ts:1794](../../src/execute.ts#L1794) の `parents.find(...)` はループ内線形検索で O(親数 × 対象親数)。`Map<pid, parent>` を 1 度作れば O(1) 参照になる（`executeInsertSubtable` は既に `parentMap` を作っており、同じパターンを流用するだけ）。
 
 ### A-7. DML バッチの往復削減（bulkRequest）
 
-INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` している（例: [execute.ts:1162-1165](../src/execute.ts#L1162-L1165)、[execute.ts:1289-1292](../src/execute.ts#L1289-L1292)）。kintone の `POST /k/v1/bulkRequest.json` を使えば 1 往復に 20 リクエスト（= 最大 2,000 レコード）をまとめられ、往復回数が 1/20 になる。
+INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` している（例: [execute.ts:1162-1165](../../src/execute.ts#L1162-L1165)、[execute.ts:1289-1292](../../src/execute.ts#L1289-L1292)）。kintone の `POST /k/v1/bulkRequest.json` を使えば 1 往復に 20 リクエスト（= 最大 2,000 レコード）をまとめられ、往復回数が 1/20 になる。
 
 留意点: bulkRequest はトランザクション的に全成功/全失敗となるため、現在の「途中まで成功」挙動と変わる。`KintoneClient` インターフェースに `bulkRequest` を追加し、対応クライアントのみ使うオプトイン設計が安全。
 
 ### A-8. SIMPLE モード `LIMIT > 500` 時の全件取得回避
 
-[execute.ts](../src/execute.ts) の `useSingleGet` でない場合、従来は WHERE 一致分を（最大 `maxRecords` まで）**全件**取得してから JS で ORDER BY / LIMIT していた。`LIMIT 1000` でも 10,000 件取得し得る。
+[execute.ts](../../src/execute.ts) の `useSingleGet` でない場合、従来は WHERE 一致分を（最大 `maxRecords` まで）**全件**取得してから JS で ORDER BY / LIMIT していた。`LIMIT 1000` でも 10,000 件取得し得る。
 
 **v2.11.0 実装済み**: `ORDER BY` が空、`LIMIT` 明示、`offset + limit <= maxRecords`、KLIKE なしの SIMPLE SELECT に限定し、`fetchAll.stopAfter` へ `offset + limit` を渡す。フェッチ順の `$id` 昇順がそのまま返却順になる安全サブセットだけを必要件数で正常終了する。`ORDER BY` 付きは JS 再ソートが全件に依存し、KLIKE は後続ページの検索打ち切り警告を検査する必要があるため対象外。詳細は [B8 仕様](ksql_limit_over_500_fetch_truncation_spec.md)。
 
@@ -107,37 +107,37 @@ INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` して�
 
 ### B-1. ORDER BY のソートキー事前計算
 
-[process.ts:390-399](../src/engine/process.ts#L390-L399) `applyOrderBy` は比較のたびに `evalOrderKey`（ARITH / 文字列関数の評価）と `Number()` 変換を実行する。n 行のソートで約 n·log n × キー数 回の式評価が走る。
+[process.ts:390-399](../../src/engine/process.ts#L390-L399) `applyOrderBy` は比較のたびに `evalOrderKey`（ARITH / 文字列関数の評価）と `Number()` 変換を実行する。n 行のソートで約 n·log n × キー数 回の式評価が走る。
 
 **改善案**: ソート前に各行のキー値（文字列と数値解釈）を配列に前計算してからソートする（decorate–sort–undecorate）。`ORDER BY DATE_FORMAT(...)` のような式キーで特に効く。
 
 ### B-2. LIKE 正規表現のキャッシュ
 
-[evalWhere.ts:237-258](../src/engine/evalWhere.ts#L237-L258) `matchLike` はワイルドカード付きパターンを**行ごとに** `new RegExp` でコンパイルする。10,000 行のフィルタで 10,000 回コンパイル。
+[evalWhere.ts:237-258](../../src/engine/evalWhere.ts#L237-L258) `matchLike` はワイルドカード付きパターンを**行ごとに** `new RegExp` でコンパイルする。10,000 行のフィルタで 10,000 回コンパイル。
 
 **改善案**: `Map<pattern, RegExp>` のモジュールレベルキャッシュ（またはサイズ上限付き）で 1 パターン 1 回にする。
 
 ### B-3. LEFT JOIN の空行テンプレートをループ外へ
 
-[process.ts:147-152](../src/engine/process.ts#L147-L152) LEFT JOIN の非マッチ時、`emptyRight` を**左行ごとに** `Object.keys(rightRows[0])` から再構築している。RIGHT JOIN 側（[process.ts:111-112](../src/engine/process.ts#L111-L112)）は既にループ外で作っており、同じ形に揃えるだけの小改修。
+[process.ts:147-152](../../src/engine/process.ts#L147-L152) LEFT JOIN の非マッチ時、`emptyRight` を**左行ごとに** `Object.keys(rightRows[0])` から再構築している。RIGHT JOIN 側（[process.ts:111-112](../../src/engine/process.ts#L111-L112)）は既にループ外で作っており、同じ形に揃えるだけの小改修。
 
 ### B-4. `flatten` の二重キー保持によるメモリ倍増
 
-[process.ts:65-68](../src/engine/process.ts#L65-L68) JOIN 時は全フィールドを `alias.field` と `field` の 2 キーで保持するため、行オブジェクトのサイズが約 2 倍になる。10,000 行 × 2 テーブル JOIN では無視できない。
+[process.ts:65-68](../../src/engine/process.ts#L65-L68) JOIN 時は全フィールドを `alias.field` と `field` の 2 キーで保持するため、行オブジェクトのサイズが約 2 倍になる。10,000 行 × 2 テーブル JOIN では無視できない。
 
 **改善案**: 非修飾フォールバックは参照時に解決する（`resolveFieldRef` は既に `field` → `alias 除去` のフォールバックを持つが、逆方向の「非修飾名 → いずれかの alias 付きキー」解決を追加する必要がある）。互換性への影響が広いので、計測してから着手するのが妥当。
 
 ### B-5. `Math.max(...nums)` / `Math.min(...nums)` のスプレッド
 
-[process.ts:278-279](../src/engine/process.ts#L278-L279) 集計 MAX / MIN は配列スプレッドで呼んでおり、要素数が数万〜十数万（`maxRecords` 引き上げ時）で `RangeError: Maximum call stack size exceeded` になり得る。**性能だけでなく障害リスク**。ループまたは `reduce` に置き換える。
+[process.ts:278-279](../../src/engine/process.ts#L278-L279) 集計 MAX / MIN は配列スプレッドで呼んでおり、要素数が数万〜十数万（`maxRecords` 引き上げ時）で `RangeError: Maximum call stack size exceeded` になり得る。**性能だけでなく障害リスク**。ループまたは `reduce` に置き換える。
 
 ### B-6. DISTINCT `*` / UNION 重複排除のキー生成
 
-[process.ts:356-359](../src/engine/process.ts#L356-L359) `SELECT DISTINCT *` は行ごとに `JSON.stringify(Object.entries(row).sort())`（ソート込み）を実行する。列名集合は全行で同一なので、**1 回だけ列リストを確定**し、以降は values を `\x00` join する形にすれば行あたりのコストが大きく下がる。[execute.ts:533-541](../src/execute.ts#L533-L541) `deduplicateRows` は既にこの形なので流用できる。
+[process.ts:356-359](../../src/engine/process.ts#L356-L359) `SELECT DISTINCT *` は行ごとに `JSON.stringify(Object.entries(row).sort())`（ソート込み）を実行する。列名集合は全行で同一なので、**1 回だけ列リストを確定**し、以降は values を `\x00` join する形にすれば行あたりのコストが大きく下がる。[execute.ts:533-541](../../src/execute.ts#L533-L541) `deduplicateRows` は既にこの形なので流用できる。
 
 ### B-7. GROUP BY 集計の 1 パス化（優先度低）
 
-[process.ts:210-222](../src/engine/process.ts#L210-L222) 集計列ごとに `groupRows` を再走査するため、コストは 行数 × 集計列数。sum / count / min / max を 1 パスで累積する集約器にすれば列数分の走査が 1 回になる。現状の行数規模では効果が小さいため、`maxRecords` を引き上げる計画がある場合のみ。
+[process.ts:210-222](../../src/engine/process.ts#L210-L222) 集計列ごとに `groupRows` を再走査するため、コストは 行数 × 集計列数。sum / count / min / max を 1 パスで累積する集約器にすれば列数分の走査が 1 回になる。現状の行数規模では効果が小さいため、`maxRecords` を引き上げる計画がある場合のみ。
 
 ---
 
@@ -145,7 +145,7 @@ INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` して�
 
 ### C-1. `fetchAll` 初回ウィンドウに `order by $id asc` が付かない
 
-[fetchAll.ts:233-238](../src/api/fetchAll.ts#L233-L238) `buildCursorQuery` は `cursorId <= 0` のとき order by を付与しない。つまり **最初の 10,000 件は順序保証なしの offset ページング**になる。kintone の既定順（レコード ID 降順）を前提にすると:
+[fetchAll.ts:233-238](../../src/api/fetchAll.ts#L233-L238) `buildCursorQuery` は `cursorId <= 0` のとき order by を付与しない。つまり **最初の 10,000 件は順序保証なしの offset ページング**になる。kintone の既定順（レコード ID 降順）を前提にすると:
 
 1. `parallel > 1` の offset ページングは、明示ソートがないと取りこぼし・重複のリスクがある
 2. 10,000 件超でカーソル切替時、`getLastId` が返すのは降順ページの末尾（= 小さい $id）であり、`$id > cursorId order by $id asc` が**既取得分を再取得**する可能性がある
@@ -153,11 +153,11 @@ INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` して�
 **改善案**: 初回から常に `order by $id asc` を付与する。`fetchAll` 経路は JS 側で再ソートするか順序不問の DML $id 取得であり、SQL の意味論上は順序保証がないため妥当だが、以下の互換性に注意:
 
 - `ORDER BY` なし SELECT の**観測上の表示順は変わる**（従来: kintone 既定の ID 降順 → 変更後: ID 昇順）。既存ユーザーへの影響を CHANGELOG に明記する
-- 既存テストは `cursorId=0` のとき order なしを期待している（[fetchAll.test.ts:34](../src/api/__tests__/fetchAll.test.ts#L34) 付近）ため、`buildCursorQuery` の修正とあわせてテスト更新が必要
+- 既存テストは `cursorId=0` のとき order なしを期待している（[fetchAll.test.ts:34](../../src/api/__tests__/fetchAll.test.ts#L34) 付近）ため、`buildCursorQuery` の修正とあわせてテスト更新が必要
 
 ### C-2. ON 最適化の重複排除キー
 
-[execute.ts:947](../src/execute.ts#L947) チャンク取得結果の dedup キーが `$id + JSON.stringify(rec)` で、レコード全体のシリアライズは不要に重い。`$id` があれば `$id` のみで一意（同一アプリ内）。`$id` が fields に含まれない場合のみフォールバックすればよい。
+[execute.ts:947](../../src/execute.ts#L947) チャンク取得結果の dedup キーが `$id + JSON.stringify(rec)` で、レコード全体のシリアライズは不要に重い。`$id` があれば `$id` のみで一意（同一アプリ内）。`$id` が fields に含まれない場合のみフォールバックすればよい。
 
 ---
 
@@ -233,7 +233,7 @@ INSERT / UPDATE / DELETE は 100 件ごとのバッチを直列 `await` して�
 
 ## 計測の提案
 
-[sharedPlanner.ts:11](../src/core/optimization/sharedPlanner.ts#L11) の `SharedFetchMetrics` には既に `fetchedRows` があるが、現状は**呼び出し側で捨てられており**どこにも露出していない。改善前後の比較のため:
+[sharedPlanner.ts:11](../../src/core/optimization/sharedPlanner.ts#L11) の `SharedFetchMetrics` には既に `fetchedRows` があるが、現状は**呼び出し側で捨てられており**どこにも露出していない。改善前後の比較のため:
 
 1. `SharedFetchMetrics` に API call 数（GET 発行回数）を追加する
 2. `execute()` 内で各フェッチの metrics を集約し、`ExecuteResult`（または warnings 相当のメタ情報）として呼び出し元へ伝搬する

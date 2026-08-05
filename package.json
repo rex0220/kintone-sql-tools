@@ -27,7 +27,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "npm run version:check && node scripts/run-tests.mjs",
+    "test": "npm run version:check && npm run docs:check && node scripts/run-tests.mjs",
     "test:parallel": "jest --maxWorkers=2 --testPathIgnorePatterns=console\\.e2e\\.test\\.ts dml_guard\\.e2e\\.test\\.ts",
     "test:subprocess": "jest --runInBand src/cli/__tests__/console.e2e.test.ts src/cli/__tests__/dml_guard.e2e.test.ts",
     "build": "npm run build:plugin && npm run build:cli && npm run build:mcp && npm run build:mcpb && npm run build:engine",
@@ -41,6 +41,7 @@
     "engine:pack-smoke": "node scripts/engine-pack-smoke.mjs",
     "engine:docs-smoke": "node scripts/engine-docs-examples-smoke.mjs",
     "version:check": "node scripts/version-sync-guard.mjs",
+    "docs:check": "node scripts/docs-check.mjs",
     "version:check:release": "node scripts/version-sync-guard.mjs --release",
     "mcp:smoke": "node scripts/mcp-smoke.mjs",
     "mcp:dual-era-smoke": "node scripts/mcp-dual-era-smoke.mjs",

@@ -58,7 +58,7 @@ flowchart TD
 
 ## [1] SQL文字列の入力
 
-CLI で `-e` オプションが指定されると、[src/cli/index.ts:1519](../src/cli/index.ts#L1519) で文字列が `sql` 変数に格納されます。
+CLI で `-e` オプションが指定されると、[src/cli/index.ts:1519](../../src/cli/index.ts#L1519) で文字列が `sql` 変数に格納されます。
 
 ```typescript
 // src/cli/index.ts
@@ -72,7 +72,7 @@ if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
 
 ## [2] APP@profile 正規化
 
-[src/cli/index.ts:1526](../src/cli/index.ts#L1526) で `normalizeSqlAppProfiles()` を呼び出します。
+[src/cli/index.ts:1526](../../src/cli/index.ts#L1526) で `normalizeSqlAppProfiles()` を呼び出します。
 
 ```typescript
 // src/cli/index.ts
@@ -86,7 +86,7 @@ sql = normalized.normalizedSql;
 
 ## [3] 字句解析（Lexer）
 
-[src/lexer/lexer.ts](../src/lexer/lexer.ts) の `Lexer` クラスがSQL文字列をトークン列に変換します。
+[src/lexer/lexer.ts](../../src/lexer/lexer.ts) の `Lexer` クラスがSQL文字列をトークン列に変換します。
 
 `parseSqlStatement()` → `execute()` の内部どちらからも `new Lexer(sql).tokenize()` が呼ばれます。
 
@@ -102,7 +102,7 @@ export function parseSqlStatement(sql: string): Statement {
 
 ### nextToken() の処理分岐
 
-[src/lexer/lexer.ts:57](../src/lexer/lexer.ts#L57)
+[src/lexer/lexer.ts:57](../../src/lexer/lexer.ts#L57)
 
 ```mermaid
 flowchart TD
@@ -144,7 +144,7 @@ flowchart TD
 
 ## [4] 構文解析（Parser）
 
-[src/parser/parser.ts](../src/parser/parser.ts) の `Parser` クラスがトークン列を AST に変換します。再帰下降法で実装されており、`parse()` が `Statement` を返します。
+[src/parser/parser.ts](../../src/parser/parser.ts) の `Parser` クラスがトークン列を AST に変換します。再帰下降法で実装されており、`parse()` が `Statement` を返します。
 
 ```typescript
 // src/parser/parser.ts
@@ -242,7 +242,7 @@ flowchart TD
 
 ## [5] execute() ルーティング
 
-[src/execute.ts:177](../src/execute.ts#L177) の `execute()` が AST の `type` フィールドで処理を振り分けます。
+[src/execute.ts:177](../../src/execute.ts#L177) の `execute()` が AST の `type` フィールドで処理を振り分けます。
 
 ```typescript
 // src/execute.ts
@@ -264,7 +264,7 @@ export async function execute(sql, client, options = {}) {
 
 ## [6] SELECT の実行モード判定
 
-[src/execute.ts:208](../src/execute.ts#L208) の `executeSelect()` が呼ばれ、まず `resolveSelectMode()` でモードを決定します。
+[src/execute.ts:208](../../src/execute.ts#L208) の `executeSelect()` が呼ばれ、まず `resolveSelectMode()` でモードを決定します。
 
 ```typescript
 // src/execute.ts
@@ -279,7 +279,7 @@ async function executeSelect(stmt, client, options, cacheContext) {
 
 ### FULL_SCAN になる条件
 
-[src/converter/selectToKintone.ts:59](../src/converter/selectToKintone.ts#L59) `resolveSelectMode()` より。
+[src/converter/selectToKintone.ts:59](../../src/converter/selectToKintone.ts#L59) `resolveSelectMode()` より。
 
 ```mermaid
 flowchart TD
@@ -316,7 +316,7 @@ flowchart TD
 
 ## [6b] FULL_SCAN モードの実行詳細
 
-[src/execute.ts:376](../src/execute.ts#L376) `executeFullScanSelect()` の処理を順番に追います。
+[src/execute.ts:376](../../src/execute.ts#L376) `executeFullScanSelect()` の処理を順番に追います。
 
 ### ステップ1: サブクエリの事前実行
 
@@ -329,7 +329,7 @@ await resolveSubqueries(stmt.having, client, options, cacheContext);
 
 ### ステップ2: WHERE プッシュダウン条件の抽出
 
-[src/core/optimization/wherePredicatePushdown.ts](../src/core/optimization/wherePredicatePushdown.ts) `extractTableCondition()` を各テーブルエイリアスに対して呼び出します。
+[src/core/optimization/wherePredicatePushdown.ts](../../src/core/optimization/wherePredicatePushdown.ts) `extractTableCondition()` を各テーブルエイリアスに対して呼び出します。
 
 ```typescript
 // src/execute.ts
@@ -371,11 +371,11 @@ for (const { join, promise } of parallelJoins) {
 }
 ```
 
-`fetchTableRecordsForFullScan()` の内部では [src/api/fetchAll.ts](../src/api/fetchAll.ts) の `fetchAll()` を呼び出します。
+`fetchTableRecordsForFullScan()` の内部では [src/api/fetchAll.ts](../../src/api/fetchAll.ts) の `fetchAll()` を呼び出します。
 
 ### ステップ3a: fetchAll() のページング
 
-[src/api/fetchAll.ts:66](../src/api/fetchAll.ts#L66)
+[src/api/fetchAll.ts:66](../../src/api/fetchAll.ts#L66)
 
 kintone の1リクエスト上限500件、offset上限10,000件を自動で処理します。
 
@@ -402,7 +402,7 @@ flowchart TD
 
 ### ステップ4: runFullScan パイプライン
 
-[src/engine/process.ts](../src/engine/process.ts) `runFullScan()` が9ステップのパイプラインを実行します。
+[src/engine/process.ts](../../src/engine/process.ts) `runFullScan()` が9ステップのパイプラインを実行します。
 
 ```typescript
 // src/execute.ts
@@ -439,7 +439,7 @@ flowchart TD
 
 #### 4-1. flatten — KintoneRecord → ProcessRow
 
-[src/engine/process.ts:59](../src/engine/process.ts#L59)
+[src/engine/process.ts:59](../../src/engine/process.ts#L59)
 
 ```typescript
 export function flatten(record: KintoneRecord, alias: string | null): ProcessRow {
@@ -462,7 +462,7 @@ kintone APIのレスポンス `{ 顧客名: { value: "田中商事" } }` を `{ 
 
 #### 4-2. JOIN
 
-[src/engine/process.ts:88](../src/engine/process.ts#L88)
+[src/engine/process.ts:88](../../src/engine/process.ts#L88)
 
 ```typescript
 export function applyJoin(leftRows, rightRows, join): ProcessRow[] {
@@ -489,7 +489,7 @@ INNER / LEFT / RIGHT JOIN に対応。右テーブルをハッシュマップで
 
 #### 4-3. filter（JS側WHERE評価）
 
-JOIN後の行に [src/engine/evalWhere.ts](../src/engine/evalWhere.ts) `evalWhere()` を適用します。
+JOIN後の行に [src/engine/evalWhere.ts](../../src/engine/evalWhere.ts) `evalWhere()` を適用します。
 
 ```typescript
 rows = rows.filter((row) => evalWhere(stmt.where, row));
@@ -519,7 +519,7 @@ flowchart TD
 
 LIKE演算は `%` を `.*` に変換した正規表現で評価します。
 
-算術式（`金額 * 1.1 > 10000`）は [src/engine/evalFunc.ts](../src/engine/evalFunc.ts) `evalArithExpr()` が評価します。
+算術式（`金額 * 1.1 > 10000`）は [src/engine/evalFunc.ts](../../src/engine/evalFunc.ts) `evalArithExpr()` が評価します。
 
 ```typescript
 // src/engine/evalFunc.ts
@@ -572,7 +572,7 @@ rows = rows.filter((row) => {
 
 #### 4-7. applyOrderBy — ソート
 
-[src/engine/process.ts](../src/engine/process.ts) `applyOrderBy()`
+[src/engine/process.ts](../../src/engine/process.ts) `applyOrderBy()`
 
 ```typescript
 rows.sort((a, b) => {
@@ -687,7 +687,7 @@ export function whereToKintone(expr: WhereExpr): string {
 
 ### buildOutput() — テキスト整形
 
-[src/cli/index.ts:791](../src/cli/index.ts#L791)
+[src/cli/index.ts:791](../../src/cli/index.ts#L791)
 
 ```typescript
 // src/cli/index.ts
@@ -725,7 +725,7 @@ export function buildOutput(result, format, noHeader, pretty, display): string {
 
 ### toCellText() → formatDisplayText()
 
-各セル値は [src/core/displayFormat.ts](../src/core/displayFormat.ts) `formatDisplayText()` で最終整形されます。
+各セル値は [src/core/displayFormat.ts](../../src/core/displayFormat.ts) `formatDisplayText()` で最終整形されます。
 
 ```typescript
 function toCellText(v: unknown, display: DisplayOptions): string {
