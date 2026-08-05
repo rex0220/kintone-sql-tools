@@ -1819,7 +1819,7 @@ LIMIT 10001
 
 ## 10.1 ウィンドウ関数
 
-順位付け・グループ内連番に加え、`SUM` / `COUNT` / `AVG` / `MIN` / `MAX` の集計ウィンドウを使用できます。ウィンドウ関数を含むSELECTは全件を取得してJSで評価するため、常にFULL_SCANモードです。集計ウィンドウは `ORDER BY` の有無にかかわらず完全入力を要求し、取得上限での truncate は部分結果を返さずエラーになります。
+順位付け・グループ内連番、`SUM` / `COUNT` / `AVG` / `MIN` / `MAX` の集計ウィンドウに加え、前後の行を参照する `LAG` / `LEAD` を使用できます。ウィンドウ関数を含むSELECTは全件を取得してJSで評価するため、常にFULL_SCANモードです。集計ウィンドウと `LAG` / `LEAD` は完全入力を要求し、取得上限での truncate は部分結果を返さずエラーになります。
 
 ```sql
 ROW_NUMBER() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
@@ -1830,6 +1830,11 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
   [PARTITION BY フィールド [, ...]]
   [ORDER BY キー [ASC|DESC] [, ...]
     [{ROWS|RANGE} BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+) AS alias
+
+{LAG|LEAD}(値式 [, offset]) OVER (
+  [PARTITION BY フィールド [, ...]]
+  ORDER BY キー [ASC|DESC] [, ...]
 ) AS alias
 ```
 
@@ -1842,6 +1847,11 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - 集計引数は通常集計と同じく、フィールド・算術式・関数・`CASE`・`||`・`@var` を指定できる。`COUNT(*)` も使用できる
 - `SUM(DISTINCT x) OVER (...)` のような引数の `DISTINCT`、`GROUP_CONCAT`・統計集計の `OVER`、ウィンドウ結果を同じ SELECT 内の式へ入れる形は未対応。CTEで一度実体化する
 - `SELECT DISTINCT` とウィンドウ列の併用は可能。ウィンドウ評価後に DISTINCT を適用する
+- `LAG(expr, n)` はソート後のパーティション内で `n` 行前、`LEAD(expr, n)` は `n` 行後の値を返す。パーティション外は空文字
+- `offset` は省略時 `1`。非負の safe integer リテラルだけを指定でき、`0` は現在行を返す。変数・式・小数・負数は使用できない
+- `LAG` / `LEAD` の第3引数（既定値）は未対応。必要なら次の段の `CASE` で空文字を置き換える
+- `LAG` / `LEAD` は `ORDER BY` 必須。全順序でない場合は同順内の前後関係が未規定になるため、レコード番号などのタイブレークキーを加える
+- `LAG` / `LEAD` は soft keyword。同名のフィールドは従来どおり参照できる
 
 ```sql
 -- 顧客ごとの受注を新しい順に採番
@@ -1849,6 +1859,28 @@ SELECT 顧客ID, 受注日, 金額,
        ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn
 FROM APP300
 ```
+
+### 前後の行を参照する `LAG` / `LEAD`
+
+前月比のようにウィンドウ結果を計算へ使う場合は、集約、`LAG`、比率計算の3段に分けます。ウィンドウ結果を同じSELECTの式へ直接入れることはできません。
+
+```sql
+WITH 月次 AS (
+  SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月, SUM(個数) AS 出庫数
+  FROM APP4228 WHERE 入出庫区分 = '出庫' GROUP BY 年月
+), 前月付き AS (
+  SELECT 年月, 出庫数,
+         LAG(出庫数) OVER (ORDER BY 年月) AS 前月
+  FROM 月次
+)
+SELECT 年月, 出庫数, 前月,
+       CASE WHEN 前月 = '' THEN ''
+            ELSE ROUND((出庫数 - 前月) * 100.0 / 前月, 1) END AS 前月比
+FROM 前月付き
+ORDER BY 年月
+```
+
+参照先のセルが空なら空文字をそのまま返します。引数はフィールドだけでなく、算術・文字列関数・`CASE`・連結を含む値式を指定できます。出力列は引数の型メタデータを引き継ぐため、次の段の `ORDER BY` や `MIN` / `MAX` も数値順・日付順・選択肢の定義順など元の列の比較規則を使用します。
 
 ### 集計ウィンドウのフレーム
 

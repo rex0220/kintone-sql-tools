@@ -1,5 +1,5 @@
 import { Lexer } from "../../lexer/lexer";
-import { Parser, ParseError } from "../parser";
+import { Parser, ParseError, WINDOW_RESULT_IN_EXPRESSION_MESSAGE } from "../parser";
 import type { SelectStatement } from "../../types/ast";
 
 function parseSelect(sql: string): SelectStatement {
@@ -144,4 +144,70 @@ describe("B129: ウィンドウ結果を式に使ったときの診断", () => {
 
 test("B125: SELECT DISTINCT と集計ウィンドウの併用を維持する", () => {
   expect(parseSelect("SELECT DISTINCT SUM(x) OVER (ORDER BY d) AS total FROM APP1").distinct).toBe(true);
+});
+
+describe("B128: LAG / LEAD value windows", () => {
+  test("LAG / LEAD と comma-aware な CASE 引数を AST に変換する", () => {
+    const stmt = parseSelect(
+      "SELECT LAG(x) OVER (PARTITION BY k ORDER BY d) AS prev, " +
+      "LEAD(CASE WHEN flag = 'Y' THEN COALESCE(a, b) ELSE c END, 2) " +
+      "OVER (ORDER BY d DESC) AS next FROM APP1"
+    );
+    expect(stmt.columns).toMatchObject([
+      {
+        type: "WINDOW_COL", windowKind: "VALUE", valueFunc: "LAG", offset: 1,
+        arg: { type: "FIELD", tableAlias: null, field: "x" },
+        partitionBy: [{ type: "FIELD", tableAlias: null, field: "k" }],
+        orderBy: [{ key: { type: "FIELD_NAME", name: "d" }, direction: "ASC" }],
+        alias: "prev",
+      },
+      {
+        type: "WINDOW_COL", windowKind: "VALUE", valueFunc: "LEAD", offset: 2,
+        arg: { type: "CASE_WHEN" },
+        orderBy: [{ key: { type: "FIELD_NAME", name: "d" }, direction: "DESC" }],
+        alias: "next",
+      },
+    ]);
+  });
+
+  test.each([
+    "SELECT LAG(x, -1) OVER (ORDER BY d) AS v FROM APP1",
+    "SELECT LAG(x, 1.5) OVER (ORDER BY d) AS v FROM APP1",
+    "SELECT LAG(x, @offset) OVER (ORDER BY d) AS v FROM APP1",
+    "SELECT LAG(x, 1 + 1) OVER (ORDER BY d) AS v FROM APP1",
+    "SELECT LAG(x, 1, 'N/A') OVER (ORDER BY d) AS v FROM APP1",
+  ])("非対応 offset/default を拒否する: %s", (sql) => {
+    expect(() => parseSelect(sql)).toThrow(ParseError);
+  });
+
+  test.each([
+    "SELECT ROUND(LAG(x) OVER (ORDER BY d), 1) AS v FROM APP1",
+    "SELECT LAG(x) OVER (ORDER BY d) * 2 AS v FROM APP1",
+    "SELECT CASE WHEN LAG(x) OVER (ORDER BY d) = 1 THEN 'Y' ELSE 'N' END AS v FROM APP1",
+  ])("B129 の指定メッセージで nested VALUE window を拒否する: %s", (sql) => {
+    expect(() => parseSelect(sql)).toThrow(WINDOW_RESULT_IN_EXPRESSION_MESSAGE);
+  });
+
+  test("LAG / LEAD は soft keyword として同名フィールド参照を維持する", () => {
+    expect(parseSelect("SELECT LAG, LEAD FROM APP1").columns).toMatchObject([
+      { type: "FIELD", field: "LAG" },
+      { type: "FIELD", field: "LEAD" },
+    ]);
+  });
+
+  test("順位・集計・VALUE window を別 ORDER BY で混在できる", () => {
+    expect(() => parseSelect(
+      "SELECT ROW_NUMBER() OVER (ORDER BY a) AS rn, " +
+      "SUM(x) OVER (ORDER BY b) AS total, LAG(x) OVER (ORDER BY c) AS prev FROM APP1"
+    )).not.toThrow();
+  });
+
+  test("VALUE window と GROUP BY / 集計関数の同一 SELECT 併用を拒否する", () => {
+    expect(() => parseSelect(
+      "SELECT k, LAG(x) OVER (ORDER BY d) AS prev FROM APP1 GROUP BY k"
+    )).toThrow(/GROUP BY \/ 集計関数/);
+    expect(() => parseSelect(
+      "SELECT SUM(x), LAG(x) OVER (ORDER BY d) AS prev FROM APP1"
+    )).toThrow(/GROUP BY \/ 集計関数/);
+  });
 });

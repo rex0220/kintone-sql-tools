@@ -286,6 +286,7 @@ export type AggregateFunc =
 
 export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
 export type WindowAggFunc = "SUM" | "COUNT" | "AVG" | "MIN" | "MAX";
+export type ValueWindowFunc = "LAG" | "LEAD";
 export type WindowFrameUnit = "ROWS" | "RANGE";
 
 export interface WindowFrame {
@@ -315,11 +316,31 @@ export interface AggregateWindowColumn extends SelectAliasDisplay {
   alias: string;
 }
 
-export type WindowColumn = RankingWindowColumn | AggregateWindowColumn;
+/** B128 Phase 2a の値参照ウィンドウ関数。 */
+export interface ValueWindowColumn extends SelectAliasDisplay {
+  type: "WINDOW_COL";
+  windowKind: "VALUE";
+  valueFunc: ValueWindowFunc;
+  arg: ScalarValueExpr;
+  offset: number;
+  partitionBy: FieldRef[];
+  orderBy: OrderByItem[];
+  alias: string;
+}
+
+export type WindowColumn = RankingWindowColumn | AggregateWindowColumn | ValueWindowColumn;
 
 /** windowKind 未設定の既存 AST も順位系として扱う。 */
 export function isRankingWindow(column: WindowColumn): column is RankingWindowColumn {
-  return column.windowKind !== "AGGREGATE";
+  return column.windowKind === undefined || column.windowKind === "RANKING";
+}
+
+export function isAggregateWindow(column: WindowColumn): column is AggregateWindowColumn {
+  return column.windowKind === "AGGREGATE";
+}
+
+export function isValueWindow(column: WindowColumn): column is ValueWindowColumn {
+  return column.windowKind === "VALUE";
 }
 
 /** SELECT 句の算術式カラム: field * 1.1 AS alias / 2 * field / (a+b)*c */

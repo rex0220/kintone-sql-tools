@@ -776,7 +776,7 @@ function collectRequiredFieldsByTable(
       case "SCALAR_SUBQUERY_COL":
         break;
       case "WINDOW_COL":
-        if (col.windowKind === "AGGREGATE" && col.arg.type !== "WILDCARD") {
+        if ((col.windowKind === "AGGREGATE" || col.windowKind === "VALUE") && col.arg.type !== "WILDCARD") {
           walkAggregateArg(col.arg, "select");
         }
         for (const ref of col.partitionBy) addFieldRef(ref.field, ref.tableAlias, "select");

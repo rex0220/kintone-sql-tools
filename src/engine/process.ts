@@ -37,12 +37,13 @@ import type {
   FieldRef,
   WindowColumn,
   AggregateWindowColumn,
+  ValueWindowColumn,
   ScalarValueExpr,
   AggregateArgExpr,
   CaseResult,
   AggregateRef,
 } from "../types/ast";
-import { isRankingWindow, numberLiteralText } from "../types/ast";
+import { isAggregateWindow, isRankingWindow, isValueWindow, numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { PlainGroupByResolutionPlan } from "../core/optimization/plainGroupByPlan";
 import {
@@ -1059,9 +1060,16 @@ export function applyWindow(
     for (const partition of partitions.values()) {
       const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics);
       const sorted = sortedResult.rows;
-      if (!isRankingWindow(window)) {
+      if (isAggregateWindow(window)) {
         applyAggregateWindow(window, sortedResult, resolveAggSortKind);
         continue;
+      }
+      if (isValueWindow(window)) {
+        applyValueWindow(window, sorted);
+        continue;
+      }
+      if (!isRankingWindow(window)) {
+        throw new Error(`InternalError: unknown window kind ${(window as { windowKind?: string }).windowKind ?? "undefined"}`);
       }
       let rank = 1;
       let denseRank = 1;
@@ -1080,6 +1088,22 @@ export function applyWindow(
     }
   }
   return rows;
+}
+
+function evaluateValueWindowArg(arg: ScalarValueExpr, row: ProcessRow): string {
+  const value = evalScalarValueExprNullable(arg, row);
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number" && !Number.isFinite(value)) return "";
+  return String(value);
+}
+
+function applyValueWindow(window: ValueWindowColumn, sorted: DecoratedSortRow[]): void {
+  const values = sorted.map((item) => evaluateValueWindowArg(window.arg, item.row));
+  const direction = window.valueFunc === "LAG" ? -1 : 1;
+  for (let index = 0; index < sorted.length; index++) {
+    const target = index + direction * window.offset;
+    sorted[index].row[window.alias] = target >= 0 && target < values.length ? values[target] : "";
+  }
 }
 
 function applyAggregateWindow(
@@ -1833,9 +1857,10 @@ function deriveOutputOrderSemantics(
     if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       result.set(column.alias, syntheticSemantics("number"));
     } else if (column.type === "WINDOW_COL") {
-      if (isRankingWindow(column) || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+      if (isRankingWindow(column) || (isAggregateWindow(column)
+        && (column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG"))) {
         result.set(column.alias, syntheticSemantics("number"));
-      } else if (column.arg.type !== "WILDCARD") {
+      } else if ((isAggregateWindow(column) || isValueWindow(column)) && column.arg.type !== "WILDCARD") {
         const semantics = resolveAggregateArgSemantics(column.arg, resolveAggSortKind) ?? "string";
         result.set(column.alias, typeof semantics === "string" ? syntheticSemantics(semantics) : semantics);
       }

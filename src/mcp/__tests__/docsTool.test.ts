@@ -86,7 +86,7 @@ describe("B55 ksql_docs MCP tool", () => {
         const normalized = section.trim();
         const error = new Error(
           `ArgumentError: Unknown ksql_docs section key: ${normalized}. `
-          + "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r15. "
+          + "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r16. "
           + "Call ksql_docs without arguments for the full key list."
         );
         const expected = toToolResult(toErrorPayload(error), true);
