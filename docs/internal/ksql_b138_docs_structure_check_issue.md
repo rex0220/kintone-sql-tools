@@ -1,7 +1,7 @@
 # B138 文書の構造検査を `npm test` に入れる（台帳の破損とリンク切れを検知する）
 
 - 起票: 2026-08-06
-- ステータス: 📝 **起票（実測済み・方向判断待ち）**
+- ステータス: ✅ **v3.51.0 でリリース**（2026-08-06）
 - 同系: [B132](../ksql_issue_tracker.md)（`ksql_docs` のキー）／[B135](../ksql_issue_tracker.md)（`mcp:smoke` の期待値）／[B136](ksql_b136_language_reference_examples_issue.md)（文書の例）
 
 ---

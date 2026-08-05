@@ -3,7 +3,7 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
-## Unreleased
+## v3.51.0（2026-08-06）
 
 ### 新機能（B128 `LAG` / `LEAD`）
 
