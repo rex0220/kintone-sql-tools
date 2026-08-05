@@ -26,12 +26,14 @@ test("B65 consumer allowlist: production の直接 .groupBy 参照を AST 境界
     });
   }
   expect(locations.sort()).toEqual([
+    // B123 EXPLAIN / dry-run metadata gate: ordinary GROUP BY requires form metadata.
+    "src/core/explainMetadata.ts:70",
     "src/core/grouping.ts:72",
     "src/core/grouping.ts:76",
     "src/core/grouping.ts:78",
     // B71 plain GROUP BY planning: AST-boundary reads, not grouping-semantics consumers.
-    "src/execute.ts:2750",
-    "src/execute.ts:2789",
-    "src/parser/parser.ts:762",
+    "src/execute.ts:2767",
+    "src/execute.ts:2806",
+    "src/parser/parser.ts:771",
   ].sort());
 });

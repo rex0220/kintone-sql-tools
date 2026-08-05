@@ -1,7 +1,7 @@
 # B123 通常の `GROUP BY` だけの SELECT は `EXPLAIN` / `--dry-run` がエラーになる
 
 - 起票: 2026-08-05
-- ステータス: 🐞 **残課題（未着手）**。原因特定済み・**実測で再現条件を確定**（v3.44.0・MCP `ksql_explain`）。修正は `selectNeedsOwnMetadata` へ 1 条件の純加法。回避策あり（`ORDER BY` を 1 つ足す）
+- ステータス: 🚧 **実装済み・リリース待ち**（2026-08-05・**実機確認済み**）。`selectNeedsOwnMetadata` に `statement.groupBy.length > 0` を追加（純加法 1 条件）。CLI `--dry-run` で `SELECT 分類, COUNT(*) FROM APP4229 GROUP BY 分類` が計画を返すことを実機で確認（`metadata API: form definition` のみ・レコード API 呼出なし）。`npm test` 5,359 件成功
 - 出典: `ksql-analytics` の在庫分析セッションで AI（Claude Code）が遭遇 → 記事の裏取り中に真因を特定（2026-08-05）
 - 関連: [B114](ksql_b114_explain_fetch_scope_issue.md)（`EXPLAIN` が取得範囲を名乗る・v3.40.0）/
   [B65](ksql_b65_rollup_grouping_sets_spec.md)（`ROLLUP` / `GROUPING SETS` は**この述語に入っている**のに通常の `GROUP BY` だけ漏れている）

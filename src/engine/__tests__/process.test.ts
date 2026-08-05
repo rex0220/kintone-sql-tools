@@ -141,6 +141,85 @@ test("DISTINCT はウィンドウ列の値をキーへ含める", () => {
   expect(applyDistinct(rows, stmt.columns)).toEqual([{ r: "1" }, { r: "3" }]);
 });
 
+test("B125: RANGE は peer グループ末尾、ROWS は各行の累積値を書き込む", () => {
+  const stmt = parseSelect(
+    "SELECT SUM(delta) OVER (PARTITION BY product ORDER BY d) AS by_day, " +
+      "SUM(delta) OVER (PARTITION BY product ORDER BY d RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS explicit_range, " +
+      "SUM(delta) OVER (PARTITION BY product ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS by_row, " +
+      "SUM(delta) OVER (PARTITION BY product ORDER BY d, seq) AS total_order " +
+      "FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { product: "A", d: "2026-03-17", seq: "1", delta: "60" },
+    { product: "A", d: "2026-03-18", seq: "2", delta: "100" },
+    { product: "A", d: "2026-03-18", seq: "3", delta: "-30" },
+    { product: "A", d: "2026-03-18", seq: "4", delta: "-20" },
+  ];
+  applyWindow(rows, stmt.columns, undefined, new Map([["seq", "number"]]));
+  expect(rows.map((row) => [row.by_day, row.explicit_range, row.by_row, row.total_order])).toEqual([
+    ["60", "60", "60", "60"],
+    ["110", "110", "160", "160"],
+    ["110", "110", "130", "130"],
+    ["110", "110", "110", "110"],
+  ]);
+});
+
+test("B125: ORDER BY 無しはパーティション全体、COUNT(field) は空値を除外する", () => {
+  const stmt = parseSelect(
+    "SELECT SUM(x) OVER (PARTITION BY k) AS total, COUNT(x) OVER (PARTITION BY k) AS count_x, " +
+      "COUNT(*) OVER (PARTITION BY k) AS count_all FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { k: "A", x: "2" }, { k: "A", x: "" }, { k: "A", x: "3" }, { k: "B", x: "7" },
+  ];
+  applyWindow(rows, stmt.columns);
+  expect(rows.map((row) => [row.total, row.count_x, row.count_all])).toEqual([
+    ["5", "2", "3"], ["5", "2", "3"], ["5", "2", "3"], ["7", "1", "1"],
+  ]);
+});
+
+test("B125: AVG と MIN/MAX は増分評価し、MIN/MAX は canonical 比較を共有する", () => {
+  const stmt = parseSelect(
+    "SELECT AVG(x) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS avg_x, " +
+      "MIN(label) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS min_label, " +
+      "MAX(label) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS max_label FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { n: "1", x: "0.1", label: "20" },
+    { n: "2", x: "0.2", label: "3" },
+    { n: "3", x: "0.3", label: "100" },
+  ];
+  applyWindow(
+    rows,
+    stmt.columns,
+    undefined,
+    new Map([["n", "number"]]),
+    undefined,
+    () => "number"
+  );
+  expect(rows.map((row) => row.avg_x)).toEqual(["0.1", "0.15000000000000002", "0.20000000000000004"]);
+  expect(rows.map((row) => [row.min_label, row.max_label])).toEqual([
+    ["20", "20"], ["3", "20"], ["3", "100"],
+  ]);
+});
+
+test("B125: 大きな相殺を含む SUM/AVG も有限値として累積する", () => {
+  const stmt = parseSelect(
+    "SELECT SUM(x) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sum_x, " +
+      "AVG(x) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS avg_x FROM APP1"
+  );
+  const rows: ProcessRow[] = [
+    { n: "1", x: "1000000000000" },
+    { n: "2", x: "-1000000000000" },
+    { n: "3", x: "0.5" },
+  ];
+  applyWindow(rows, stmt.columns, undefined, new Map([["n", "number"]]));
+  expect(Number(rows[2].sum_x)).toBeCloseTo(0.5, 12);
+  expect(Number(rows[2].avg_x)).toBeCloseTo(1 / 6, 12);
+  expect(Number.isFinite(Number(rows[2].sum_x))).toBe(true);
+  expect(Number.isFinite(Number(rows[2].avg_x))).toBe(true);
+});
+
 test("flatten: null キーは JOIN / GROUP BY / DISTINCT で通常の空文字として扱う", () => {
   const left = [flatten({ key: { value: null }, value: { value: "L" } } as unknown as KintoneRecord, "a")];
   const right = [flatten({ key: { value: null }, value: { value: "R" } } as unknown as KintoneRecord, "b")];

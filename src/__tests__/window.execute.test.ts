@@ -171,3 +171,90 @@ test("FROM なし OVER () は単一行へ 1 を付ける", async () => {
   ) as SelectResult;
   expect(result.rows).toEqual([{ rn: "1" }]);
 });
+
+test("B125: 集計引数を非表示でも取得し、既定 RANGE の peer 末尾値を返す", async () => {
+  const client = makeClient([
+    record({ product: "A", d: "2026-03-17", amount: "60" }),
+    record({ product: "A", d: "2026-03-18", amount: "100" }),
+    record({ product: "A", d: "2026-03-18", amount: "-30" }),
+    record({ product: "A", d: "2026-03-18", amount: "-20" }),
+  ], [
+    { code: "product", label: "product", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "d", label: "d", fieldType: "DATE" },
+    { code: "amount", label: "amount", fieldType: "NUMBER", sortKind: "number" },
+  ]);
+  const result = await execute(
+    "SELECT product, SUM(amount) OVER (PARTITION BY product ORDER BY d) AS total FROM APP300",
+    client,
+    { cacheContext: "b125-fetch-and-range" }
+  ) as SelectResult;
+  expect(client.getCalls[0].fields).toEqual(expect.arrayContaining(["product", "d", "amount"]));
+  expect(result.rows.map((row) => row.total)).toEqual(["60", "110", "110", "110"]);
+});
+
+test("B125: EXPLAIN は既定 RANGE と明示 RANGE を区別して表示する", async () => {
+  const result = await execute(
+    "EXPLAIN SELECT SUM(amount) OVER (ORDER BY d) AS implicit_frame, " +
+      "SUM(amount) OVER (ORDER BY d RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS explicit_frame FROM APP300",
+    makeClient([], [
+      { code: "d", label: "d", fieldType: "DATE" },
+      { code: "amount", label: "amount", fieldType: "NUMBER" },
+    ]),
+    { cacheContext: "b125-explain-frame" }
+  ) as SelectResult;
+  const plan = result.rows.map((row) => String(row.plan));
+  expect(plan).toContain("    frame: RANGE UNBOUNDED PRECEDING AND CURRENT ROW (既定)");
+  expect(plan).toContain("    frame: RANGE UNBOUNDED PRECEDING AND CURRENT ROW");
+  expect(plan.filter((line) => line.includes("(既定)"))).toHaveLength(1);
+});
+
+test("B125: MIN 集計ウィンドウを一時テーブル化しても文字列メタを保持する", async () => {
+  const client = makeClient([
+    record({ k: "A", label: "20" }), record({ k: "A", label: "30" }),
+    record({ k: "B", label: "3" }), record({ k: "B", label: "4" }),
+  ], [
+    { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "label", label: "label", fieldType: "SINGLE_LINE_TEXT", sortKind: "string" },
+  ]);
+  const result = await executeBatch(
+    "CREATE TEMP TABLE #mins AS SELECT k, MIN(label) OVER (PARTITION BY k) AS min_label FROM APP300;" +
+      "SELECT DISTINCT min_label FROM #mins ORDER BY min_label",
+    client,
+    { cacheContext: "b125-min-window-meta" }
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[1].result).toMatchObject({ rows: [{ min_label: "20" }, { min_label: "3" }] });
+});
+
+test("B125: ORDER BY 無しの集計ウィンドウは truncate で部分結果を返さない", async () => {
+  const records = Array.from({ length: 101 }, (_, index) => record({ k: String(index % 2) }));
+  await expect(execute(
+    "SELECT k, COUNT(*) OVER (PARTITION BY k) AS n FROM APP300",
+    makeClient(records, [{ code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" }]),
+    { cacheContext: "b125-complete-input", maxRecords: 100, onLimitReached: "truncate" }
+  )).rejects.toThrow(/AGGREGATE_WINDOW/);
+});
+
+test("B125: SELECT DISTINCT は集計ウィンドウ値を従来どおりキーへ含める", async () => {
+  const result = await execute(
+    "SELECT DISTINCT COUNT(*) OVER (PARTITION BY k) AS n FROM APP300 ORDER BY n",
+    makeClient([
+      record({ k: "A" }), record({ k: "A" }), record({ k: "B" }),
+    ], [{ code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" }]),
+    { cacheContext: "b125-distinct" }
+  ) as SelectResult;
+  expect(result.rows).toEqual([{ n: "1" }, { n: "2" }]);
+});
+
+test("B125: KORDER BY 併用は parser ではなく planner が拒否する", async () => {
+  const client = makeClient([], [
+    { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" },
+    { code: "x", label: "x", fieldType: "NUMBER" },
+  ]);
+  await expect(execute(
+    "SELECT k, SUM(x) OVER (PARTITION BY k) AS total FROM APP300 KORDER BY k LIMIT 1",
+    client,
+    { cacheContext: "b125-korder-rejection" }
+  )).rejects.toThrow(/KORDER_QUERY_SHAPE_UNSUPPORTED/);
+  expect(client.getCalls).toHaveLength(0);
+});

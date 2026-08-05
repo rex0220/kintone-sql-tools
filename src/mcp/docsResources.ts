@@ -46,7 +46,7 @@ export const KSQL_FUNCTION_CATALOG = Object.freeze({
     "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT",
     "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
   ] as const),
-  window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK"] as const),
+  window: frozenList(["ROW_NUMBER", "RANK", "DENSE_RANK", "SUM", "COUNT", "AVG", "MIN", "MAX"] as const),
   contextual: frozenList([
     "TODAY", "NOW", "LOGINUSER", "PRIMARY_ORGANIZATION",
     "YESTERDAY", "TOMORROW", "FROM_TODAY",
@@ -83,7 +83,7 @@ export function buildKsqlDocsIndex(): string {
 export const KSQL_DOCS_INDEX = buildKsqlDocsIndex();
 
 const VALID_KEY_HINT =
-  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r13. "
+  "Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r14. "
   + "Call ksql_docs without arguments for the full key list.";
 
 export function resolveKsqlDocsSection(section?: string): string {

@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -1686,12 +1686,15 @@ async function executeBatchStatement(
         const first = resolvedStmt.expr.query.columns[0];
         let numeric = first?.type === "ARITH_COL"
           || first?.type === "ARITH_AGG_COL"
-          || first?.type === "WINDOW_COL"
+          || (first?.type === "WINDOW_COL" && (first.windowKind !== "AGGREGATE"
+            || first.aggFunc === "COUNT" || first.aggFunc === "SUM" || first.aggFunc === "AVG"))
           || (first?.type === "AGGREGATE"
             && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
               || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
               || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
-        if (first?.type === "AGGREGATE" && first.func === "MODE") {
+        if ((first?.type === "AGGREGATE" && first.func === "MODE")
+          || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
+            && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
           const meta = (await inferSelectColumnMeta(
             resolvedStmt.expr.query,
             ["__scalar__"],
@@ -2491,8 +2494,22 @@ function buildHavingFieldSemanticsResolver(
     if (!("alias" in column) || !column.alias) continue;
     let semantics: ResolvedFieldSemantics | undefined;
     if (column.type === "FIELD") semantics = rowResolver(aggregateFieldRef(column.field));
-    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       semantics = syntheticSemantics("number");
+    } else if (column.type === "WINDOW_COL") {
+      if (column.windowKind !== "AGGREGATE"
+        || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+        semantics = syntheticSemantics("number");
+      } else if (column.arg.type !== "WILDCARD") {
+        semantics = inferAggregateArgMeta(column.arg, (ref) => {
+          const resolved = rowResolver(ref);
+          return resolved ? {
+            sortKind: resolved.compareMode === "number" || resolved.compareMode === "recordNumber" ? "number" : "string",
+            fieldType: resolved.fieldType,
+            semantics: resolved,
+          } : undefined;
+        }).semantics;
+      }
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
         if (column.arg.type !== "WILDCARD") {
@@ -2980,6 +2997,7 @@ async function validateSelectGroupingPlanning(
 function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
   const reasonList = [...reasons].join(", ");
   const aggregateSubjects: readonly [CompleteInputReason, string][] = [
+    ["AGGREGATE_WINDOW", "集計ウィンドウの正しい結果"],
     ["GROUPING_SETS", "小計・総計の正しい結果"],
     ["STATISTICAL_AGGREGATE", "統計集約の正しい結果"],
     ["AGGREGATE", "集計の正しい結果"],
@@ -4138,6 +4156,19 @@ function inferAggregateArgMeta(
   return mergeExpressionColumnMeta(results);
 }
 
+function inferWindowColumnMeta(
+  column: WindowColumn,
+  resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
+): MaterializedColumnMeta {
+  if (column.windowKind !== "AGGREGATE"
+    || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+    return syntheticColumnMeta("number");
+  }
+  return column.arg.type === "WILDCARD"
+    ? unknownStringColumnMeta()
+    : inferAggregateArgMeta(column.arg, resolveField);
+}
+
 function withDisplayName(
   meta: MaterializedColumnMeta | undefined,
   displayName: string
@@ -4153,6 +4184,8 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
     || column.type === "CASE_COL"
     || (column.type === "AGGREGATE"
       && (column.func === "MIN" || column.func === "MAX" || column.func === "MODE"))
+    || (column.type === "WINDOW_COL" && column.windowKind === "AGGREGATE"
+      && (column.aggFunc === "MIN" || column.aggFunc === "MAX"))
   );
 }
 
@@ -4285,7 +4318,7 @@ async function inferSelectColumnMeta(
       } else if (column.type === "STRFUNC_COL") {
         meta = stringFunctionColumnMeta(column.expr);
       } else if (column.type === "WINDOW_COL") {
-        meta = syntheticColumnMeta("number");
+        meta = inferWindowColumnMeta(column, resolveField);
       } else if (column.type === "CASE_COL") {
         const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
         if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
@@ -5657,8 +5690,10 @@ async function buildOrderSemanticsForSelect(
     if (!("alias" in column) || !column.alias) continue;
     let meta: MaterializedColumnMeta | undefined;
     if (column.type === "FIELD") meta = resolveField(aggregateFieldRef(column.field));
-    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+    else if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       meta = syntheticColumnMeta("number");
+    } else if (column.type === "WINDOW_COL") {
+      meta = inferWindowColumnMeta(column, resolveField);
     } else if (column.type === "GROUPING_COL") {
       meta = syntheticColumnMeta("number");
     } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta = syntheticColumnMeta("string");
@@ -10636,6 +10671,24 @@ function buildSelectPlan(
         }
       }
     }
+  }
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL" || column.windowKind !== "AGGREGATE") continue;
+    const clauses: string[] = [];
+    if (column.partitionBy.length > 0) {
+      clauses.push(`PARTITION BY ${column.partitionBy.map((ref) =>
+        ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field
+      ).join(", ")}`);
+    }
+    if (column.orderBy.length > 0) {
+      clauses.push(`ORDER BY ${column.orderBy.map(formatOrderByItem).join(", ")}`);
+    }
+    lines.push(`  window ${column.alias}: ${column.aggFunc} OVER (${clauses.join(" ")})`);
+    lines.push(column.frame === null
+      ? "    frame: PARTITION ENTIRE"
+      : `    frame: ${column.frame.unit} UNBOUNDED PRECEDING AND CURRENT ROW${
+        column.frame.source === "DEFAULT" ? " (既定)" : ""
+      }`);
   }
   if (totalCountPlan) {
     const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
