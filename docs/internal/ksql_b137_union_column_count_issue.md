@@ -1,7 +1,7 @@
 # B137 列数の違う `UNION` が静かに空文字で埋め、余りを捨てる
 
 - 起票: 2026-08-06
-- ステータス: 📝 **起票（コード確認済み・方向判断待ち）**
+- ステータス: 📋 **方向確定＝案 A（エラーにする）**（2026-08-06）。仕様 R1 待ち
 - 発見: [B130](ksql_b130_describe_flags_spec.md) の実装時。**受入条件の書き方を誤ったことで露出した**
 
 ---
@@ -82,7 +82,45 @@ B130 の受入条件に **「UNION の列数不一致が意図どおり検出さ
 | **B** | **警告を出して現状動作を維持** | 壊さないが、警告は読まれないと効かない（B127 の議論と同じ） |
 | **C** | 文書化のみ | 最も安いが「静かに間違う」は残る |
 
-**見立て＝案 A。** ただし**独立した仕様と codex レビューを経ること**。確認すべき点:
+## 4.1 他の RDBMS はすべてエラー（2026-08-06 調査）
+
+| 製品 | 挙動 |
+|---|---|
+| **MySQL** | **エラー 1222** `The used SELECT statements have a different number of columns` |
+| PostgreSQL | エラー `each UNION query must have the same number of columns` |
+| SQLite | エラー `SELECTs to the left and right of UNION do not have the same number of result columns` |
+| SQL Server | エラー `All queries combined using a UNION, INTERSECT or EXCEPT operator must have an equal number of expressions in their target lists` |
+
+標準 SQL が **union-compatible**（列数一致・対応する列の型に互換性）を要求しているため。
+**kSQL の「足りない分を空文字で埋め、余りを捨てる」は独自挙動**であり、標準的な根拠が無い。
+
+**列名を左辺から取る点は MySQL と同じ**なので、そこは変えない。
+
+### kSQL と MySQL の決定的な違い＝検出できるタイミング
+
+**MySQL は prepare 時に弾く**（スキーマが静的に分かるため）。
+**kSQL は実行後にしか分からない。**
+
+- `DESCRIBE` の列数は**バージョンで変わる**（v3.49.0 で 3 → 7 になったばかり）
+- `SHOW APPS` も同様
+- CTE 経由の `SELECT *` は実体化するまで列が確定しない
+
+**したがって kSQL では「両辺を実行してからのエラー」になる**＝API を消費してから落ちる。
+**MySQL のような安いエラーではない。** 受入条件にこれを明記すること
+（「事前に弾ける」と誤解したまま仕様を書くと実装時にまたずれる）。
+
+## 4.2 決定（2026-08-06）
+
+**案 A（エラーにする）で確定。** 根拠は 3 つ。
+
+1. **主要 4 実装がすべてエラー**にしており、padding に標準的な根拠が無い（§4.1）
+2. **破壊的変更の懸念が外れた**＝オーナー判断「**まだユーザーがいないので問題ない**」
+3. **内部にも依存が無い（測定済み）**＝B130 の実装時に codex が列数検査を入れた状態で
+   `npm test` を回し、**225 suites / 5,426 tests が全通した**。
+   **既存テストで padding に依存しているものは 1 件も無い**
+
+**それでも独立した仕様と codex レビューを経ること**（B130 で受入条件の書き方を誤って
+エンジンを変えてしまった直後なので、同じ轍を踏まない）。確認すべき点:
 
 - `UNION` と `UNION ALL` で扱いを変えるか（変えない方が素直）
 - **3 段以上の連鎖**（`A UNION B UNION C`）で左端の列数が基準になるか
