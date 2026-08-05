@@ -67,6 +67,7 @@ function valueNeedsFieldMetadata(value: unknown): boolean {
 
 function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
   return whereNeedsFieldMetadata(statement.where)
+    || statement.groupBy.length > 0
     || normalizeGroupingSpec(statement).type === "GROUPING_SETS"
     || statement.orderBy.length > 0
     || statement.columns.some((column) =>

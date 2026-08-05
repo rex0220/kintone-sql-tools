@@ -143,18 +143,35 @@ function deepFreeze(value) {
 function buildDocsResourceMap(languageSource, recipesSource) {
   const languageUri = "ksql://language-reference";
   const recipesUri = "ksql://recipes";
-  const languageSections = parseRequiredSections(languageSource, {
+  const baseLanguageSections = parseRequiredSections(languageSource, {
     label: "language reference",
     count: 26,
     headingPattern: /^##\s+([1-9]|1\d|2[0-6])\.\s+(.+)$/gm,
     keyFor: (number) => `${String(number).padStart(2, "0")}-${LANGUAGE_SLUGS[number - 1]}`,
     uriBase: languageUri,
     // Decimal H2 headings (10.1, 17.1, etc.) belong to their integer parent chapter.
-    ignoreBoundary: (heading) => /^\d+\.\d+\s+/.test(heading),
+    ignoreBoundary: (heading) => /^\d+\.\d+\s+/.test(heading)
+      && !/^10\.1\s+ウィンドウ関数\s*$/.test(heading),
   });
+  const windowText = extractH2Section(
+    languageSource,
+    "10\\.1 ウィンドウ関数",
+    "language reference"
+  );
+  const languageSections = {};
+  for (const [key, section] of Object.entries(baseLanguageSections)) {
+    languageSections[key] = section;
+    if (key === "10-order-by") {
+      languageSections["window-functions"] = {
+        heading: "10.1 ウィンドウ関数",
+        text: windowText,
+        uri: `${languageUri}/window-functions`,
+      };
+    }
+  }
   const recipeSections = parseRequiredSections(recipesSource, {
     label: "recipes",
-    count: 13,
+    count: 14,
     headingPattern: /^##\s+R([1-9]|1\d)\.\s+(.+)$/gm,
     keyFor: (number) => `r${number}`,
     uriBase: recipesUri,

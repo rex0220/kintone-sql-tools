@@ -1798,12 +1798,18 @@ LIMIT 10001
 
 ## 10.1 ウィンドウ関数
 
-順位付けとグループ内連番に、次の3関数を使用できます。ウィンドウ関数を含むSELECTは全件を取得してJSで評価するため、常にFULL_SCANモードです。
+順位付け・グループ内連番に加え、`SUM` / `COUNT` / `AVG` / `MIN` / `MAX` の集計ウィンドウを使用できます。ウィンドウ関数を含むSELECTは全件を取得してJSで評価するため、常にFULL_SCANモードです。集計ウィンドウは `ORDER BY` の有無にかかわらず完全入力を要求し、取得上限での truncate は部分結果を返さずエラーになります。
 
 ```sql
 ROW_NUMBER() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
 RANK()       OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
 DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|DESC] [, ...]]) AS alias
+
+{SUM|COUNT|AVG|MIN|MAX}(引数) OVER (
+  [PARTITION BY フィールド [, ...]]
+  [ORDER BY キー [ASC|DESC] [, ...]
+    [{ROWS|RANGE} BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]
+) AS alias
 ```
 
 - `ROW_NUMBER` — 同順位を作らず、1から連番を付ける
@@ -1811,7 +1817,10 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - `DENSE_RANK` — 同値は同順位。次の順位を飛ばさない（`1, 1, 2`）
 - `PARTITION BY` 省略時は全行を1グループとして扱う
 - `ORDER BY` 省略時、`RANK` / `DENSE_RANK` は全行1。`ROW_NUMBER` は取得順で採番する
-- `AS alias` は必須。引数、フレーム句、集計関数の `OVER` は未対応
+- `AS alias` は必須
+- 集計引数は通常集計と同じく、フィールド・算術式・関数・`CASE`・`||`・`@var` を指定できる。`COUNT(*)` も使用できる
+- `SUM(DISTINCT x) OVER (...)` のような引数の `DISTINCT`、`GROUP_CONCAT`・統計集計の `OVER`、ウィンドウ結果を同じ SELECT 内の式へ入れる形は未対応。CTEで一度実体化する
+- `SELECT DISTINCT` とウィンドウ列の併用は可能。ウィンドウ評価後に DISTINCT を適用する
 
 ```sql
 -- 顧客ごとの受注を新しい順に採番
@@ -1819,6 +1828,31 @@ SELECT 顧客ID, 受注日, 金額,
        ROW_NUMBER() OVER (PARTITION BY 顧客ID ORDER BY 受注日 DESC) AS rn
 FROM APP300
 ```
+
+### 集計ウィンドウのフレーム
+
+`ORDER BY` が無い場合はパーティション全体を集計し、全行へ同じ値を載せます。`ORDER BY` がある場合の既定は標準どおり `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` です。明示できるフレームは `ROWS` または `RANGE` の同じ固定境界だけです。
+
+前日までの残高が60で、同じ日に3件の増減がある場合、`RANGE` は同順グループ末尾の値を全peer行へ書き戻し、`ROWS` は行ごとの途中値を返します。
+
+| 日付 | 増減 | `ROWS`（明示） | `RANGE`（既定） |
+|---|---:|---:|---:|
+| 2026-03-18 | +100 | 160 | 110 |
+| 2026-03-18 | -30 | 130 | 110 |
+| 2026-03-18 | -20 | 110 | 110 |
+
+日次残高では既定 `RANGE`、取引ごとの残高では `ROWS` を明示します。全順序にしたい場合はレコード番号などのタイブレークキーも `ORDER BY` に加えます。`EXPLAIN` は実効フレームを表示し、既定 `RANGE` だけ `(既定)` を付けます。
+
+```sql
+SELECT 製品名, 日付, 個数_在庫計算用,
+       SUM(個数_在庫計算用) OVER (
+         PARTITION BY 製品名 ORDER BY 日付, レコード番号
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS 累積在庫
+FROM APP4228
+```
+
+空値・NaN のスキップと比較規則は通常集計と共通です。小数を含む `SUM` / `AVG` はウィンドウの並び順で加算するため、通常集計との比較は相対誤差 `1e-12` を目安にします。`MIN` / `MAX` は canonical 同値の値（例: 数値型の `"1"` と `"01"`）では先に走査した raw 表記を保持するため、raw 表記は不定です。
 
 `WHERE` はウィンドウ関数より先に評価されるため、同じSELECTの `WHERE rn = 1` では絞り込めません。CTEでスコープを分けると、各顧客の最新行を全列付きで1文取得できます。
 

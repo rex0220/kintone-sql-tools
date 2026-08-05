@@ -79,6 +79,7 @@ export type CompleteInputReason =
   | "VALIDATE"
   | "LOCAL_ORDER"
   | "WINDOW_ORDER"
+  | "AGGREGATE_WINDOW"
   | "STATISTICAL_AGGREGATE"
   | "GROUPING_SETS"
   | "AGGREGATE"
@@ -180,7 +181,11 @@ function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputRea
   if (stmt.distinct) reasons.add("DISTINCT");
   if (stmt.orderBy.length > 0) reasons.add("LOCAL_ORDER");
   for (const column of stmt.columns) {
-    if (column.type === "WINDOW_COL" && column.orderBy.length > 0) reasons.add("WINDOW_ORDER");
+    if (column.type === "WINDOW_COL" && column.windowKind === "AGGREGATE") {
+      reasons.add("AGGREGATE_WINDOW");
+    } else if (column.type === "WINDOW_COL" && column.orderBy.length > 0) {
+      reasons.add("WINDOW_ORDER");
+    }
     if (column.type === "SCALAR_SUBQUERY_COL") addReasons(reasons, selectCompleteInputReasons(column.query));
     if (column.type === "CASE_COL") {
       for (const branch of column.expr.branches) addReasons(reasons, whereCompleteInputReasons(branch.condition));

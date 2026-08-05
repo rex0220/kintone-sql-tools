@@ -80,3 +80,13 @@ test("SELECT しないウィンドウキーも取得フィールドへ含める"
   );
   expect(selectToFetchAllFields(stmt, stmt.from)).toEqual(expect.arrayContaining(["k", "d", "n"]));
 });
+
+test("B125: SELECT しない集計ウィンドウ引数の物理フィールドも取得する", () => {
+  const stmt = parseSelect(
+    "SELECT product, SUM(CASE WHEN enabled='yes' THEN price * qty ELSE fee END) " +
+      "OVER (ORDER BY ordered_at) AS total FROM APP100"
+  );
+  expect(selectToFetchAllFields(stmt, stmt.from)).toEqual(
+    expect.arrayContaining(["product", "enabled", "price", "qty", "fee", "ordered_at"])
+  );
+});

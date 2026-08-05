@@ -285,14 +285,41 @@ export type AggregateFunc =
   | "STDDEV_POP" | "STDDEV_SAMP" | "VAR_POP" | "VAR_SAMP" | "MEDIAN" | "MODE";
 
 export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
+export type WindowAggFunc = "SUM" | "COUNT" | "AVG" | "MIN" | "MAX";
+export type WindowFrameUnit = "ROWS" | "RANGE";
+
+export interface WindowFrame {
+  unit: WindowFrameUnit;
+  source: "DEFAULT" | "EXPLICIT";
+}
 
 /** 順位系ウィンドウ関数。v1 は出力名の衝突を避けるため alias 必須。 */
-export interface WindowColumn extends SelectAliasDisplay {
+export interface RankingWindowColumn extends SelectAliasDisplay {
   type: "WINDOW_COL";
+  windowKind?: "RANKING";
   func: WindowFunc;
   partitionBy: FieldRef[];
   orderBy: OrderByItem[];
   alias: string;
+}
+
+/** B125 Phase 1 の集計ウィンドウ関数。 */
+export interface AggregateWindowColumn extends SelectAliasDisplay {
+  type: "WINDOW_COL";
+  windowKind: "AGGREGATE";
+  aggFunc: WindowAggFunc;
+  arg: WildcardColumn | AggregateArgExpr;
+  frame: WindowFrame | null;
+  partitionBy: FieldRef[];
+  orderBy: OrderByItem[];
+  alias: string;
+}
+
+export type WindowColumn = RankingWindowColumn | AggregateWindowColumn;
+
+/** windowKind 未設定の既存 AST も順位系として扱う。 */
+export function isRankingWindow(column: WindowColumn): column is RankingWindowColumn {
+  return column.windowKind !== "AGGREGATE";
 }
 
 /** SELECT 句の算術式カラム: field * 1.1 AS alias / 2 * field / (a+b)*c */

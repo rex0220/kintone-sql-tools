@@ -31,4 +31,20 @@ describe("explainNeedsAppMetadata", () => {
       "EXPLAIN UPDATE APP88 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (PATCH SET 子 = 'x' ALL ROWS)"
     ))).toBe(true);
   });
+
+  test.each([
+    "SELECT category, COUNT(*) FROM APP88 GROUP BY category",
+    "SELECT category FROM APP88 GROUP BY category",
+    "SELECT category, COUNT(*) FROM APP88 GROUP BY category HAVING COUNT(*) > 1",
+    "SELECT a.category, COUNT(*) FROM APP88 a LEFT JOIN APP99 b ON a.id = b.id GROUP BY a.category",
+  ])("B123: 通常 GROUP BY はフォーム定義を必要とする: %s", (sql) => {
+    expect(explainNeedsAppMetadata(parseSqlStatement(sql))).toBe(true);
+  });
+
+  test.each([
+    "WITH grouped AS (SELECT category, COUNT(*) AS count FROM APP88 GROUP BY category) SELECT * FROM grouped",
+    "SELECT * FROM APP88 WHERE $id IN (SELECT $id FROM APP99 GROUP BY $id)",
+  ])("B123: CTE / サブクエリ内の通常 GROUP BY も再帰的に判定する: %s", (sql) => {
+    expect(explainNeedsAppMetadata(parseSqlStatement(sql))).toBe(true);
+  });
 });

@@ -29,3 +29,10 @@ test("B65-F06: UNION/WITH/subquery の既存再帰でも GROUPING_SETS reason �
     expect(completeInputReasons(parse(sql))).toContain("GROUPING_SETS");
   }
 });
+
+test.each([
+  "SELECT COUNT(*) OVER (PARTITION BY k) AS n FROM APP1",
+  "SELECT SUM(x) OVER (ORDER BY d) AS total FROM APP1",
+])("B125: 集計ウィンドウは ORDER BY の有無にかかわらず完全入力を要求する: %s", (sql) => {
+  expect(completeInputReasons(parse(sql))).toContain("AGGREGATE_WINDOW");
+});

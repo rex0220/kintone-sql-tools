@@ -36,12 +36,13 @@ import type {
   StringFuncExpr,
   FieldRef,
   WindowColumn,
+  AggregateWindowColumn,
   ScalarValueExpr,
   AggregateArgExpr,
   CaseResult,
   AggregateRef,
 } from "../types/ast";
-import { numberLiteralText } from "../types/ast";
+import { isRankingWindow, numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { PlainGroupByResolutionPlan } from "../core/optimization/plainGroupByPlan";
 import {
@@ -542,29 +543,9 @@ function evalAggregate(
     return func === "COUNT" ? rows.length : 0;
   }
 
-  // 各行で arg を評価する。MIN/MAX は空セルも canonical band の値として保持する。
-  const strValues: string[] = [];
-  for (const row of rows) {
-    let strVal: string;
-    if (arg.type === "FIELD_REF") {
-      // 単純フィールド参照: 空文字はスキップ（COUNT(field) の既存動作を維持）
-      const raw = row[arg.field];
-      if (raw === undefined || (raw === "" && func !== "MIN" && func !== "MAX")) continue;
-      strVal = raw;
-    } else if (arg.type === "ARITH" || arg.type === "NUMBER") {
-      // 算術式: 数値として評価し NaN はスキップ
-      const n = evalArithExpr(arg, row);
-      if (isNaN(n)) continue;
-      strVal = String(n);
-    } else {
-      const value = evalScalarValueExprNullable(arg, row);
-      if (value === null) continue;
-      if (value === "" && func !== "MIN" && func !== "MAX") continue;
-      if (typeof value === "number" && Number.isNaN(value)) continue;
-      strVal = String(value);
-    }
-    strValues.push(strVal);
-  }
+  // 各行で arg を評価する。null（スキップ）を一度だけ除去して以降の順序を維持する。
+  const strValues = aggregateRowValues(func, arg, rows)
+    .filter((value): value is string => value !== null);
 
   const statistical = func === "STDDEV_POP" || func === "STDDEV_SAMP"
     || func === "VAR_POP" || func === "VAR_SAMP" || func === "MEDIAN";
@@ -662,6 +643,35 @@ function evalAggregate(
         : variance;
     }
   }
+}
+
+/** 行位置を保ったまま集計引数を評価する。null は既存集計規則上のスキップを表す。 */
+function aggregateRowValues(
+  func: AggregateFunc,
+  arg: AggregateArgExpr,
+  rows: ProcessRow[]
+): (string | null)[] {
+  return rows.map((row): string | null => {
+    let strVal: string;
+    if (arg.type === "FIELD_REF") {
+      // 単純フィールド参照: 空文字はスキップ（COUNT(field) の既存動作を維持）
+      const raw = row[arg.field];
+      if (raw === undefined || (raw === "" && func !== "MIN" && func !== "MAX")) return null;
+      strVal = raw;
+    } else if (arg.type === "ARITH" || arg.type === "NUMBER") {
+      // 算術式: 数値として評価し NaN はスキップ
+      const n = evalArithExpr(arg, row);
+      if (isNaN(n)) return null;
+      strVal = String(n);
+    } else {
+      const value = evalScalarValueExprNullable(arg, row);
+      if (value === null) return null;
+      if (value === "" && func !== "MIN" && func !== "MAX") return null;
+      if (typeof value === "number" && Number.isNaN(value)) return null;
+      strVal = String(value);
+    }
+    return strVal;
+  });
 }
 
 function toAggregateFieldRef(field: string): FieldRef {
@@ -1024,7 +1034,8 @@ export function applyWindow(
   columns: SelectColumn[],
   optionOrders?: OptionOrderMap,
   sortKinds?: FieldSortKindMap,
-  fieldSemantics?: FieldSemanticsMap
+  fieldSemantics?: FieldSemanticsMap,
+  resolveAggSortKind?: AggregateSortKindResolver
 ): ProcessRow[] {
   const windows = columns.filter((column): column is WindowColumn => column.type === "WINDOW_COL");
   if (rows.length === 0 || windows.length === 0) return rows;
@@ -1041,6 +1052,10 @@ export function applyWindow(
     for (const partition of partitions.values()) {
       const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics);
       const sorted = sortedResult.rows;
+      if (!isRankingWindow(window)) {
+        applyAggregateWindow(window, sortedResult, resolveAggSortKind);
+        continue;
+      }
       let rank = 1;
       let denseRank = 1;
       for (let index = 0; index < sorted.length; index++) {
@@ -1058,6 +1073,73 @@ export function applyWindow(
     }
   }
   return rows;
+}
+
+function applyAggregateWindow(
+  window: AggregateWindowColumn,
+  sortedResult: DecoratedSortResult,
+  resolveAggSortKind?: AggregateSortKindResolver
+): void {
+  const sorted = sortedResult.rows;
+  const values = window.arg.type === "WILDCARD"
+    ? null
+    : aggregateRowValues(window.aggFunc, window.arg, sorted.map((item) => item.row));
+  const comparison = window.arg.type === "WILDCARD"
+    ? undefined
+    : resolveAggregateArgSemantics(window.arg, resolveAggSortKind);
+  const semantics = typeof comparison === "string"
+    ? syntheticSemantics(comparison)
+    : comparison ?? syntheticSemantics("string");
+  const output: string[] = [];
+  let count = 0;
+  let sum = 0;
+  let best: string | undefined;
+
+  for (let index = 0; index < sorted.length; index++) {
+    const value = values?.[index] ?? null;
+    if (window.arg.type === "WILDCARD") {
+      count++;
+    } else if (value !== null) {
+      if (window.aggFunc === "COUNT") {
+        count++;
+      } else if (window.aggFunc === "SUM" || window.aggFunc === "AVG") {
+        sum += Number(value);
+        count++;
+      } else if (best === undefined) {
+        best = value;
+      } else {
+        const cmp = compareCanonicalValues(value, best, semantics);
+        if ((window.aggFunc === "MAX" && cmp > 0) || (window.aggFunc === "MIN" && cmp < 0)) {
+          best = value;
+        }
+      }
+    }
+
+    const result = window.aggFunc === "COUNT"
+      ? count
+      : window.aggFunc === "SUM"
+        ? sum
+        : window.aggFunc === "AVG"
+          ? count === 0 ? 0 : sum / count
+          : best ?? 0;
+    output.push(String(result));
+  }
+
+  if (window.frame === null) {
+    const finalValue = output[output.length - 1];
+    for (const item of sorted) item.row[window.alias] = finalValue;
+    return;
+  }
+  if (window.frame.unit === "RANGE") {
+    for (let start = 0; start < sorted.length;) {
+      let end = start;
+      while (end + 1 < sorted.length && sortedResult.compare(sorted[end], sorted[end + 1]) === 0) end++;
+      for (let index = start; index <= end; index++) sorted[index].row[window.alias] = output[end];
+      start = end + 1;
+    }
+    return;
+  }
+  for (let index = 0; index < sorted.length; index++) sorted[index].row[window.alias] = output[index];
 }
 
 function resolveWindowField(row: ProcessRow, ref: FieldRef): string {
@@ -1725,12 +1807,22 @@ function mergeKnownColumns(
   ])];
 }
 
-function deriveOutputOrderSemantics(columns: SelectColumn[]): Map<string, ResolvedFieldSemantics> {
+function deriveOutputOrderSemantics(
+  columns: SelectColumn[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): Map<string, ResolvedFieldSemantics> {
   const result = new Map<string, ResolvedFieldSemantics>();
   for (const column of columns) {
     if (!("alias" in column) || !column.alias) continue;
-    if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL" || column.type === "WINDOW_COL") {
+    if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       result.set(column.alias, syntheticSemantics("number"));
+    } else if (column.type === "WINDOW_COL") {
+      if (isRankingWindow(column) || column.aggFunc === "COUNT" || column.aggFunc === "SUM" || column.aggFunc === "AVG") {
+        result.set(column.alias, syntheticSemantics("number"));
+      } else if (column.arg.type !== "WILDCARD") {
+        const semantics = resolveAggregateArgSemantics(column.arg, resolveAggSortKind) ?? "string";
+        result.set(column.alias, typeof semantics === "string" ? syntheticSemantics(semantics) : semantics);
+      }
     } else if (column.type === "AGGREGATE") {
       if (column.func === "COUNT" || column.func === "SUM" || column.func === "AVG"
         || column.func === "STDDEV_POP" || column.func === "STDDEV_SAMP"
@@ -1775,7 +1867,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     resolvedGroupingSpec,
     plainGroupByPlan,
   } = input;
-  const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns);
+  const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns, aggregateSortKindResolver);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
 
   // 1. flatten
@@ -1848,7 +1940,14 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
 
   // 6. ウィンドウ関数
-  rows = applyWindow(rows, stmt.columns, optionOrders, sortKinds, effectiveOrderSemantics);
+  rows = applyWindow(
+    rows,
+    stmt.columns,
+    optionOrders,
+    sortKinds,
+    effectiveOrderSemantics,
+    aggregateSortKindResolver
+  );
 
   // 7. DISTINCT
   if (stmt.distinct) {

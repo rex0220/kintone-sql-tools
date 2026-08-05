@@ -24,12 +24,13 @@ describe("B50 embedded documentation resources", () => {
   test("splits the two source documents into the required stable sections", () => {
     const docs = buildDocsResourceMap(languageSource, recipesSource);
 
-    expect(Object.keys(docs.languageReference.sections)).toHaveLength(26);
+    expect(Object.keys(docs.languageReference.sections)).toHaveLength(27);
     expect(Object.keys(docs.recipes.sections)).toEqual(
-      Array.from({ length: 13 }, (_, index) => `r${index + 1}`)
+      Array.from({ length: 14 }, (_, index) => `r${index + 1}`)
     );
     expect(docs.languageReference.sections["02-select"].text).toContain("## 2. SELECT");
-    expect(docs.languageReference.sections["10-order-by"].text).toContain("## 10.1 ウィンドウ関数");
+    expect(docs.languageReference.sections["10-order-by"].text).not.toContain("## 10.1 ウィンドウ関数");
+    expect(docs.languageReference.sections["window-functions"].text).toContain("SUM(個数_在庫計算用) OVER");
     expect(docs.languageReference.sections["17-upsert"].text).toContain("## 17.1 VALIDATE ONLY");
     expect(docs.languageReference.sections["22-limitations"].text).toContain("## 22. 制限事項");
     expect(docs.recipes.sections.r6.text).toContain("ON ERROR SKIP");
@@ -66,8 +67,8 @@ describe("B50 embedded documentation resources", () => {
     for (const values of Object.values(KSQL_FUNCTION_CATALOG)) {
       expect(Object.isFrozen(values)).toBe(true);
     }
-    expect(KSQL_DOCS_SECTION_KEYS).toHaveLength(41);
-    expect(new Set(KSQL_DOCS_SECTION_KEYS).size).toBe(41);
+    expect(KSQL_DOCS_SECTION_KEYS).toHaveLength(43);
+    expect(new Set(KSQL_DOCS_SECTION_KEYS).size).toBe(43);
     expect(KSQL_DOCS_SECTION_KEYS).toEqual([
       "language-reference",
       ...LANGUAGE_SECTION_KEYS.map((key) => `language-reference/${key}`),
@@ -127,9 +128,9 @@ describe("B50 embedded documentation resources", () => {
         ref: { type: "ref/resource", uri: "ksql://recipes/{recipe}" },
         argument: { name: "recipe", value: "r1" },
       });
-      expect(recipeCompletion.completion.values).toEqual(["r1", "r10", "r11", "r12", "r13"]);
+      expect(recipeCompletion.completion.values).toEqual(["r1", "r10", "r11", "r12", "r13", "r14"]);
       expect(recipeCompletion.completion.values.map((key) => `recipes/${key}`)).toEqual(
-        KSQL_DOCS_SECTION_KEYS.filter((key) => /^recipes\/r1(?:0|1|2|3)?$/.test(key))
+        KSQL_DOCS_SECTION_KEYS.filter((key) => /^recipes\/r1(?:0|1|2|3|4)?$/.test(key))
       );
 
       const index = await client.readResource({ uri: "ksql://language-reference" });
@@ -141,9 +142,11 @@ describe("B50 embedded documentation resources", () => {
 
       for (const [uri, heading] of [
         ["ksql://language-reference/02-select", "## 2. SELECT"],
+        ["ksql://language-reference/window-functions", "## 10.1 ウィンドウ関数"],
         ["ksql://language-reference/17-upsert", "## 17.1 VALIDATE ONLY"],
         ["ksql://language-reference/22-limitations", "## 22. 制限事項"],
         ["ksql://recipes/r6", "## R6."],
+        ["ksql://recipes/r14", "## R14."],
       ]) {
         const result = await client.readResource({ uri });
         expect(result.contents[0]).toMatchObject({ uri, mimeType: "text/markdown" });
