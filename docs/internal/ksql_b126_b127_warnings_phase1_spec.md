@@ -1,19 +1,16 @@
-# B126 / B127 「検出できない」を warnings で塞ぐ Phase 1 仕様（R2）
+# B126 選択系 `=` の押し下げ正規化 / B127 ウィンドウ既定フレームの警告 Phase 1 仕様（R3）
 
-- ステータス: 📋 **仕様 R2（codex レビュー 1 回目を反映）** → [レビュー](ksql_b126_b127_codex_review_1.md)（高 4・中 6・低 1 を**全件反映**）
-- 出典: [ksql-analytics の依頼](../../../ksql-analytics/docs/internal/kSQLエンジンへの依頼-20260805.md) ①② /
-  [triage](ksql_analytics_request_20260805_evaluation.md)
+- ステータス: 📋 **仕様 R3（オーナー判断で B126 を案 A 中心へ）** → [レビュー1](ksql_b126_b127_codex_review_1.md)（高 4・中 6・低 1 を全件反映済み）
+- 出典: [ksql-analytics の依頼](../../../ksql-analytics/docs/internal/kSQLエンジンへの依頼-20260805.md) ①② / [triage](ksql_analytics_request_20260805_evaluation.md)
 
-> **R1 からの主な訂正**
-> - **検出規則が広すぎた。** `native.has("in")` だけでは `USER_SELECT` / `ORGANIZATION_SELECT` /
->   `GROUP_SELECT` など**複数値型**まで拾う。これらは `IN` が集合 overlap なので、
->   **書き換えを案内すると結果が変わる**
-> - **`CHECK_BOX` / `MULTI_SELECT`（と `CREATOR` / `MODIFIER`）の `=` は residual に到達しない。**
->   `LOCAL_VALID_OPERATORS` の partial policy で**先に `UNSUPPORTED`** になる
-> - **「全件取得になります」は述語単体からは導けない。** `AND` に押し下がる述語が 1 つでもあれば
->   全体は `SUPERSET_PREFILTER`
-> - **B127 の抑止規則が誤り。** `$id` / `RECORD_NUMBER` を含んでも、**JOIN・サブテーブルで
->   行が増幅されると結果行の全順序にならない**。「狭いから安全」は成立していなかった
+> **R2 からの転換（オーナー判断 2026-08-05）**
+> **「書き換えを案内できるなら、押し下げも可能では？」** — そのとおりだった。
+> **B126 は「警告」ではなく「正規化」（案 A）を Phase 1 とする。**
+> 利用者は何も書き換えなくてよく、**警告そのものが不要になる**。
+> R2 で悩んだ JOIN の文面・重複排除・運搬経路の論点も**まとめて消える**。
+>
+> **B127（ウィンドウ既定フレーム）は性質が違うので警告のまま。** 正規化できる書き換えが無い
+> （どちらのフレームが欲しいかは利用者の意図でしか決まらない）。
 
 ---
 
@@ -21,15 +18,15 @@
 
 | 事実 | 確認 |
 |---|---|
-| `= '出庫'` は `ALL`・`WHERE_RESIDUAL`・**`warnings: []`** / `IN ('出庫')` は `PREFILTERED` | 実機 v3.46.0 |
-| `SUM(x) OVER (... ORDER BY d)` は `frame: RANGE ...(既定)` を表示するが **`warnings: []`** | 実機 v3.46.0 |
-| **`=` が早期に `UNSUPPORTED` になる型**＝`CREATOR` / `MODIFIER` / `CHECK_BOX` / `MULTI_SELECT` | `whereCapability.ts:105-110`（`LOCAL_VALID_OPERATORS`） |
-| **単一値としてローカル評価される型**＝`LOCAL_SCALAR_TYPES`（`RADIO_BUTTON` / `DROP_DOWN` / `STATUS` を含む） | `whereCapability.ts:112-119` |
-| **複数値型**＝`LOCAL_COLLECTION_TYPES`（`USER_SELECT` / `ORGANIZATION_SELECT` / `GROUP_SELECT` / `STATUS_ASSIGNEE` / `CATEGORY` ほか） | `whereCapability.ts:121-124` |
-| native に `in` があるのは上記のほか `RECORD_NUMBER` / `NUMBER` / `CALC` / `SINGLE_LINE_TEXT` 等。**これらは `=` も native なので residual に落ちない** | `whereCapability.ts:74-99` |
-| `AND` の片側が exact なら全体は `SUPERSET_PREFILTER` | `whereCapability.ts:478-497` |
-| ウィンドウは **JOIN 後の `ProcessRow[]`** を partition してソートする | `process.ts:1038-1064` |
-| JOIN planner は `RECORD_NUMBER` を `$id` と同じ canonical domain と**証明できないとして fail-closed** | `joinPredicatePushdown.ts:1036-1040` |
+| `= '出庫'` は `ALL`・`WHERE_RESIDUAL` / `IN ('出庫')` は `PREFILTERED` | 実機 v3.46.0 |
+| **`= '存在しない値'` は 0 行を返す**（正常終了・ローカル評価） | 実機 v3.46.0 |
+| **`IN ('存在しない値')` は `GAIA_IQ10` エラー**（COUNT 経路・通常経路の**両方**） | 実機 v3.46.0 |
+| 上は**既存の仕様**。「選択系フィールドに定義に無い選択肢値を渡すと `WHERE` が REST に押し下げられて `GAIA_IQ10` になり得る」 | `ksql_language_reference.md:447` |
+| **押し下げ後も元の `WHERE` を client で再評価する**（押し下げは候補集合の選択にしか影響しない） | `ksql_language_reference.md:918-923` |
+| `=` が早期に `UNSUPPORTED` になる型＝`CREATOR` / `MODIFIER` / `CHECK_BOX` / `MULTI_SELECT` | `whereCapability.ts:105-110` |
+| 単一値型＝`LOCAL_SCALAR_TYPES`（`RADIO_BUTTON` / `DROP_DOWN` / `STATUS` を含む） | `whereCapability.ts:112-119` |
+| 複数値型＝`LOCAL_COLLECTION_TYPES`（`USER_SELECT` / `ORGANIZATION_SELECT` / `GROUP_SELECT` ほか）。**`IN` は集合 overlap** | `whereCapability.ts:121-124` / `ksql_language_reference.md:1080-1081` |
+| 選択肢の実在情報は `ResolvedFieldSemantics.optionOrder` で参照できる | `core/fieldSemantics.ts:9` |
 
 ---
 
@@ -37,85 +34,90 @@
 
 | 区分 | 内容 |
 |---|---|
-| **対象** | SELECT 実行結果と `ksql_explain` の `warnings` に 1 行足す |
-| **非対象** | **意味・結果・押し下げ挙動を一切変えない**（`=`→`in` 正規化は Phase 2） |
-| **非対象** | 既定フレームの変更（標準準拠のまま）／新しいエラー・拒否 |
-| **非対象** | `ksql_validate`（フォーム定義を読まない契約） |
+| **B126** | 単一値の選択系 `=` を、**リテラルが実在する選択肢のときだけ** `in` へ正規化して押し下げる |
+| **B127** | 集計ウィンドウの既定フレーム `RANGE` を `warnings` で知らせる |
+| **非対象** | `!=` → `not in`（§2.5）／複数値型／実在しない選択肢／空文字 |
+| **非対象** | B126 の警告（正規化で問題が消えるため**出さない**） |
 
 ---
 
-## 2. B126 選択系 `=` の警告
+## 2. B126 正規化（案 A）
 
-### 2.1 検出規則（**単一値に限定**）
+### 2.1 条件（**すべて**満たすときだけ正規化する）
 
-`classifyWhereCapability` が `WHERE_RESIDUAL` を返した述語のうち、**すべて**満たすもの。
+1. `classifyWhereCapability` が `WHERE_RESIDUAL` を返す述語である
+2. `operator` が **`=`**（`!=` は対象外・§2.5）
+3. `fieldType` が **`LOCAL_SCALAR_TYPES` に属する**（＝単一値。`IN` への書き換えが等価）
+4. `nativeWhereOperatorsForType(fieldType)` が `in` を含む
+5. **`optionOrder` が取得できており、リテラルがそのキーに実在する**
+6. リテラルが**空文字でない**
 
-1. `operator` が `=` または `!=`
-2. `nativeWhereOperatorsForType(fieldType)` が `in` / `not in` を含む
-3. **`fieldType` が `LOCAL_SCALAR_TYPES` に属する**（＝単一値。`IN` への書き換えが等価）
+**1 つでも欠けたら正規化しない**（＝従来どおり residual）。fail-closed。
 
-> **条件 3 が R1 に無かった。** これが無いと `USER_SELECT` / `ORGANIZATION_SELECT` /
-> `GROUP_SELECT` / `STATUS_ASSIGNEE` / `CATEGORY` まで拾う。これらは**複数値**で
-> `IN` が集合 overlap（`ksql_language_reference.md:1080-1081`）なので、
-> **書き換えると結果が変わる**。`CHECK_BOX` / `MULTI_SELECT` は §0 のとおり
-> 手前で `UNSUPPORTED` になるため元から対象外。
->
-> 実際に該当するのは **`RADIO_BUTTON` / `DROP_DOWN` / `STATUS`** の 3 型になる見込みだが、
-> **型名はハードコードせず既存の集合で判定する**（押し下げ表が変わっても追随する）。
+### 2.2 なぜ結果が変わらないか
 
-### 2.2 文面（**述語単位の事実だけを書く**）
+- **kSQL は押し下げ後も元の `WHERE` をローカルで再評価する**（§0）。
+  したがって押し下げは「どの候補を取りに行くか」だけを変え、**返る行は変わらない**
+- 条件 3（単一値）により `in ("X")` の集合は `= 'X'` と**完全に一致**する
+  （複数値なら overlap になるので条件 3 が必須）
+
+### 2.3 条件 5 が無いと壊れるもの（**実測**）
+
+| SQL | 現状 | 条件 5 が無い正規化 |
+|---|---|---|
+| `= '出庫'`（実在） | 0 件でない結果 | 同じ結果（押し下げが効くだけ） |
+| **`= '存在しない値'`（実在しない）** | **0 行・正常終了** | **`GAIA_IQ10` エラー** |
+
+**動いていたクエリがエラーになる。** これは既存の文書化された挙動
+（`IN` に定義外の値を渡すと `GAIA_IQ10`）に自動で載せてしまうため。
+**条件 5 で実在を確かめ、実在しなければ正規化しない**＝従来どおり 0 行。
+
+### 2.4 正規化は「利用者が `IN` と書いた場合と同じ経路」に載せる
+
+正規化後の述語は、**利用者が最初から `IN ('X')` と書いた場合の AST と同一**にする。
+これにより下流（単一表 / JOIN prefilter / `COUNT_TOTAL_COUNT` / `KORDER` 等）に
+**分岐を 1 つも足さない**。`IN` が押し下がる場所では押し下がり、押し下がらない場所では
+押し下がらない。
+
+> **R2 で未確定だった「JOIN で `IN` が押し下がる条件」を調べる必要が無くなる。**
+> 警告なら「絞れます」と断定してよいかを型ごと・経路ごとに確定する必要があったが、
+> 正規化は**`IN` の挙動をそのまま継承する**だけなので、新しい約束をしない。
+
+### 2.5 `!=` を対象外にする理由
+
+`!= 'X'` → `not in ("X")` は方向が逆で、**空セル（未選択）の扱い次第で部分集合になり得る**。
+部分集合になると**行が落ちる**（ローカル再評価では取り戻せない）。
+`=` → `in` は候補集合が一致するので安全だが、`!=` は別途 superset 性の確認が要る。**Phase 2。**
+
+### 2.6 観測可能性
+
+`EXPLAIN` の `kintone query:` に `入出庫区分 in ("出庫")` が出る。
+利用者が書いた SQL と食い違って見えるので、**正規化した事実を 1 行出す**。
 
 ```
-入出庫区分 = '出庫' は kintone 側へ押し下げられません（取得候補が増えます）。
-入出庫区分 IN ('出庫') と書くと kintone 側で絞り込めます。結果は同じです。
+  pushdown normalized: 入出庫区分 = '出庫' -> 入出庫区分 in ("出庫")
 ```
-
-- **「全件取得になります」とは書かない。** `AND` に押し下がる述語が 1 つでもあれば
-  全体は `SUPERSET_PREFILTER` で、全件取得ではない（§0）
-- 「結果は同じです」は**単一値に限定した（§2.1 条件 3）から書ける**
-- `!=` は `NOT IN` を案内
-
-### 2.3 JOIN での扱い（**文面を変える**）
-
-言語リファレンス §6 は JOIN の field vs literal に別表を持ち、**JOIN では
-`IN` でも押し下がらない条件がある**。**JOIN を含む文では「絞り込めます」と断定しない。**
-
-```
-入出庫区分 = '出庫' は kintone 側へ押し下げられません。
-IN ('出庫') と書くと押し下げの候補になります（JOIN では結合先まで絞られないことがあります）。
-```
-
-**→ R3 までに、JOIN 経路で選択系 `IN` が実際に押し下がる条件を確定する（§7-1）。**
-確定するまでは **Phase 1 を単一表に限定**し、JOIN を含む文では警告を出さない案も可（§7-1）。
 
 ---
 
-## 3. B127 ウィンドウ既定フレームの警告
+## 3. B127 ウィンドウ既定フレームの警告（R2 から変更なし）
 
-### 3.1 検出規則
+### 3.1 検出
 
-集計ウィンドウ列（`windowKind === "AGGREGATE"`）のうち、
+集計ウィンドウ列（`windowKind === "AGGREGATE"`）で `orderBy.length > 0` かつ
+`frame.source === "DEFAULT"`。
 
-1. `orderBy.length > 0`
-2. `frame !== null` かつ `frame.source === "DEFAULT"`
+### 3.2 抑止（**すべて**満たすときだけ）
 
-### 3.2 抑止規則（**R1 から全面的に狭める**）
-
-**次を「すべて」満たすときだけ抑止する。**
-
-1. `ORDER BY` キーに `$id`、または `RECORD_NUMBER` 型のフィールドが含まれる
-2. **その SELECT が単一の物理アプリを入力とし、`JOIN` を含まない**
+1. `ORDER BY` キーに `$id` または `RECORD_NUMBER` 型が含まれる
+2. **単一の物理アプリを入力とし `JOIN` を含まない**
 3. **サブテーブル仮想テーブルを入力にしていない**
-4. **CTE / 一時テーブル / `UNION` など、行を増幅または一意性の来歴を失う中間結果を経ていない**
+4. **CTE / 一時テーブル / `UNION` を経ていない**
 
-> **R1 は条件 1 だけで「狭いから誤抑止は起きない」と書いたが誤り。**
-> ウィンドウは **JOIN 後の行**を評価するため、`a` の 1 行が JOIN 相手の複数行に一致すれば
-> **同じ `a.$id` が結果に複数回現れる**。サブテーブル展開でも親のレコード番号が反復する。
-> JOIN planner 自身が `RECORD_NUMBER` を `$id` と同じ canonical domain と
-> **証明できないとして fail-closed** にしている（§0）。
->
-> **抑止を誤ると「正しく書いたのに警告が出ない」ではなく「危ないのに警告が出ない」**
-> になるので、**証明できないときは抑止しない**（警告を出す）。
+> ウィンドウは **JOIN 後の行**を評価するため、1:N の JOIN やサブテーブル展開では
+> **同じ `$id` が複数回現れる**。JOIN planner 自身が `RECORD_NUMBER` を `$id` と同じ
+> canonical domain と証明できないとして fail-closed にしている。
+> **証明できないときは抑止しない**（警告を出す）。
 
 ### 3.3 文面
 
@@ -125,94 +127,65 @@ IN ('出庫') と書くと押し下げの候補になります（JOIN では結�
 ORDER BY にレコード番号などのタイブレークキーを足してください。
 ```
 
-alias を含める。**ウィンドウ列 1 つにつき 1 行。**
+alias を含める。ウィンドウ列 1 つにつき 1 行。**`UNION` / 実体化 CTE では
+子 SELECT の警告を親へ集約する**（レビュー指摘 8）。
 
 ---
 
-## 4. 警告の運搬と重複排除
+## 4. 受入条件
 
-### 4.1 置き場所（レビュー指摘 7）
-
-**converter から新しい引数で運ばない。** 分類結果は**実行 / `EXPLAIN` が既に持っている解析結果**
-（fetch plan / capability の解析結果）に載せ、そこから `warnings` を組み立てる。
-**R3 までに具体的な構造体名を確定する（§7-2）。**
-
-### 4.2 `UNION` / 実体化 CTE（レビュー指摘 8）
-
-**子 SELECT で出た警告が合成結果から失われないこと。** 現状の合成では落ちる。
-子の警告を親の `warnings` へ集約する。
-
-### 4.3 重複排除（レビュー指摘 9）
-
-`Set<string>` は**文面が同一のときだけ**重複を消す。
-**「同一フィールド・同一演算子で 1 行」を満たすには、文面生成の前に
-`(field, operator)` で一意化する。** 同じフィールドが `OR` で複数回現れても 1 行。
-
----
-
-## 5. 受入条件
-
-### 5.1 B126
+### 4.1 B126 正規化（**最重要は「壊れないこと」**）
 
 | SQL | 期待 |
 |---|---|
-| `WHERE 入出庫区分 = '出庫'`（RADIO_BUTTON・単一表） | **警告 1 行**。行数・値は不変 |
-| `WHERE 入出庫区分 IN ('出庫')` | 警告なし |
-| `WHERE 入出庫区分 != '出庫'` | 警告 1 行（`NOT IN` を案内） |
-| `WHERE 分類 = '食品'`（DROP_DOWN） | 警告 1 行 |
-| **`WHERE 担当者 = 'user1'`（USER_SELECT・複数値）** | **警告なし**（§2.1 条件 3） |
-| **`WHERE チェック = 'A'`（CHECK_BOX）** | **従来どおりエラー**（`UNSUPPORTED`・警告の話にならない） |
-| `WHERE 製品名 = '牛乳'`（SINGLE_LINE_TEXT） | 警告なし |
-| **`WHERE 入出庫区分 = '出庫' AND $id > 100`** | **警告 1 行。ただし文面に「全件取得」を含まない**（全体は `SUPERSET_PREFILTER`） |
-| 同じフィールド・同じ演算子が `OR` で 2 回 | **1 行**（§4.3） |
-| 異なる 2 フィールドが該当 | 2 行 |
-| JOIN を含む文 | **§2.3 / §7-1 の決定に従う**（受入で固定する） |
+| **`WHERE 入出庫区分 = '存在しない値'`** | **エラーにならず 0 行**（現状維持）★正規化しないこと |
+| `WHERE 入出庫区分 = '出庫'` | 押し下がる。**行数・各行の値が正規化前と完全一致** |
+| 同上 | **`IN ('出庫')` と書いた場合と `kintone query` が一致** |
+| 同上 | **`metrics.fetchedRows` が減る**（効果の直接証拠） |
+| `WHERE 入出庫区分 = ''`（空文字） | **正規化しない**（条件 6） |
+| `WHERE 入出庫区分 != '出庫'` | **正規化しない**（従来どおり residual・§2.5） |
+| `WHERE 担当者 = 'user1'`（USER_SELECT・複数値） | **正規化しない**（条件 3） |
+| `WHERE チェック = 'A'`（CHECK_BOX） | 従来どおり `UNSUPPORTED` エラー |
+| `WHERE 製品名 = '牛乳'`（SINGLE_LINE_TEXT） | 従来どおり（元から `=` が押し下がる） |
+| `optionOrder` が取れない列（CTE 由来など） | **正規化しない**（条件 5） |
+| JOIN を含む文で選択系 `=` | **`IN` と書いた場合と同じ挙動**（§2.4。押し下がるかは `IN` に従う） |
+| `COUNT(*)` で選択系 `=` | 同上 |
 
-### 5.2 B127
+### 4.2 B127 警告
 
 | SQL | 期待 |
 |---|---|
 | `SUM(x) OVER (PARTITION BY p ORDER BY 日付)`（単一表） | 警告 1 行 |
 | `... ORDER BY 日付, レコード番号`（単一表・JOIN なし） | 警告なし |
-| `... ORDER BY $id`（単一表） | 警告なし |
-| **同じ形で JOIN を含む** | **警告あり**（§3.2 条件 2・**抑止しない**） |
-| **サブテーブル仮想テーブルを入力にする** | **警告あり**（条件 3） |
-| **CTE / `UNION` を経る** | **警告あり**（条件 4） |
-| `... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | 警告なし（明示） |
-| `... RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` | 警告なし（`frame.source === "EXPLICIT"`） |
-| `SUM(x) OVER (PARTITION BY p)`（`ORDER BY` なし） | 警告なし |
-| 順位系（`ROW_NUMBER` 等） | 警告なし |
+| **同じ形で JOIN を含む** | **警告あり**（抑止しない） |
+| サブテーブル / CTE / `UNION` を経る | 警告あり |
+| `... ROWS BETWEEN ...` / `... RANGE BETWEEN ...`（明示） | 警告なし |
+| `ORDER BY` なし / 順位系 | 警告なし |
 
-### 5.3 非変更性（レビュー指摘 10・**機械的に固定する**）
+### 4.3 非変更性（両方）
 
-**警告を出す全ケースについて、修正前後で次が完全一致すること。**
-
-- 行数・各行の値・列名と順序
-- `EXPLAIN` の計画本文（`warnings` 以外の全行）
-- `metrics.fetchedRows`（**押し下げ挙動が変わっていないことの直接の証拠**）
-
-既存警告 2 件（取得上限の打ち切り・検索中断）が従来どおり出ること。
-`ksql_validate` には出ないこと。
+**警告・正規化を出す全ケースで、修正前後の行数・各行の値・列名と順序が完全一致すること。**
+`EXPLAIN` は `kintone query` と `pushdown normalized` 行以外が一致すること。
+既存警告 2 件（打ち切り・検索中断）が従来どおり出ること。`ksql_validate` は不変。
 
 ---
 
-## 6. 影響範囲
+## 5. 影響範囲
 
 | ファイル | 内容 |
 |---|---|
-| `core/optimization/whereCapability.ts` | §2.1 の 3 条件を満たすかの判定を足す（既存集合を使う） |
-| 実行 / `EXPLAIN` の解析結果を持つ構造体 | §4.1。**R3 で確定** |
-| `execute.ts` | `warnings` へ追加（`(field, operator)` 一意化のうえ） |
-| `UNION` / CTE の結果合成 | §4.2 |
-| B127 の判定 | AST ＋ **入力の形（JOIN / サブテーブル / CTE の有無）** |
+| `core/optimization/whereCapability.ts` | §2.1 の 6 条件を判定し、満たすとき **`IN_LIST` 形の述語へ書き換える** |
+| 押し下げ経路全般 | **変更不要**（§2.4。`IN` の既存経路をそのまま通る）— **要確認** |
+| `EXPLAIN` 出力 | §2.6 の 1 行 |
+| B127 の判定 | AST ＋ 入力の形（JOIN / サブテーブル / CTE の有無） |
+| `UNION` / CTE の結果合成 | B127 の警告集約 |
 
 ---
 
-## 7. 未確定（R3 までに詰める）
+## 6. 未確定（R4 までに詰める）
 
-1. **JOIN 経路で選択系の `IN` が実際に押し下がる条件**（§2.3）。
-   確定するまで **Phase 1 を単一表限定にする**案を含めて決める
-2. **警告を載せる具体的な構造体**（§4.1）。converter → execute / EXPLAIN の実際の受け渡し
-3. **`RECORD_NUMBER` 型の判定にフォーム定義が要るか**（§3.2 条件 1）。
-   要るなら `EXPLAIN` と実行のどちらで判定できるか
-4. 警告の**上限**（述語が多い文で何行まで出るか）
+1. **正規化を差し込む正確な位置。** `classifyWhereCapability` の中で AST を書き換えるのか、
+   その手前の正規化パスを設けるのか。**`EXPLAIN` と実行の両方が同じ結果になること**が条件
+2. **`optionOrder` がその位置で参照できるか**（フォーム定義の取得タイミング）
+3. B127 の抑止条件 2〜4（入力の形）を**どの情報から判定するか**
+4. `!=` の superset 性（Phase 2 の前提調査）
