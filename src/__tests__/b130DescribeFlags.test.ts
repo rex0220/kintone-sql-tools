@@ -191,26 +191,17 @@ test("B130: CTE 経由の SELECT * は7列で新列を絞り込める", async ()
   expect(filtered.rows).toEqual([{ ルックアップ: "YES" }]);
 });
 
-// B137: 列数の違う UNION は現状「右辺の不足を空文字で補い、余りを黙って捨てる」。
-// B130 の受入に「列数不一致が検出される」と書いたのは仕様の誤りで、
-// エンジンの挙動変更を B130 に混ぜないため、ここでは現状挙動だけを固定する。
-test("B130: 7列のDESCRIBEと3列SELECTのUNIONは現状どおり左辺の列で返る（B137 で別途）", async () => {
+// B137: UNION の左右は実体化後の列数が一致しなければならない。
+test("B137: 7列のDESCRIBEと3列SELECTのUNIONはエラー", async () => {
   const fields = [{
     code: "製品名", label: "製品名", fieldType: "SINGLE_LINE_TEXT", hasLookup: true,
   }] as unknown as KintoneFieldInfo[];
-  const result = await execute(
+  await expect(execute(
     "WITH d AS (DESCRIBE APP100) " +
       "SELECT * FROM d UNION ALL SELECT 'code' AS c, 'label' AS l, 'type' AS t",
     makeClient(fields),
     { cacheContext: "b130-union" }
-  ) as SelectResult;
-  expect(result.columns).toEqual(describeColumns);
-  expect(result.rows).toHaveLength(2);
-  // 右辺は 3 列しか無いので、残る 4 列は空文字で埋まる（現状挙動）
-  expect(result.rows[1]).toEqual({
-    フィールドコード: "code", ラベル: "label", タイプ: "type",
-    ルックアップ: "", コピー元: "", 重複禁止: "", 計算式: "",
-  });
+  )).rejects.toThrow("ArgumentError: UNION の左右で列数が一致しません（左 7 列 / 右 3 列）。");
 });
 
 test("B130: JOINの同名列はDESCRIBE側を修飾して参照できる", async () => {

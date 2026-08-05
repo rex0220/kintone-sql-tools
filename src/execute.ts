@@ -4855,6 +4855,17 @@ async function executeFullScanSelect(
 // UNION / UNION ALL
 // ============================================================
 
+function assertUnionColumnCount(
+  leftColumns: readonly string[],
+  rightColumns: readonly string[]
+): void {
+  if (leftColumns.length === rightColumns.length) return;
+  throw new Error(
+    `ArgumentError: UNION の左右で列数が一致しません（左 ${leftColumns.length} 列 / 右 ${rightColumns.length} 列）。\n` +
+    "UNION は列を位置で対応させるため、両辺の列数を揃えてください"
+  );
+}
+
 async function executeUnion(
   stmt: UnionStatement,
   client: KintoneClient,
@@ -4902,6 +4913,7 @@ async function executeUnion(
     // 右辺の行を左辺のカラム名に位置対応でリマップ
     const leftCols  = leftResult.columns;
     const rightCols = rightResult.columns;
+    assertUnionColumnCount(leftCols, rightCols);
     const remappedRight = rightResult.rows.map((row) => {
       const mapped: ProcessRow = {};
       leftCols.forEach((col, i) => {
@@ -5017,6 +5029,7 @@ async function executeQueryWithCte(
     ]);
     const leftCols    = leftResult.columns;
     const rightCols   = rightResult.columns;
+    assertUnionColumnCount(leftCols, rightCols);
     const remapped    = rightResult.rows.map((row) => {
       const mapped: ProcessRow = {};
       leftCols.forEach((col, i) => { mapped[col] = row[rightCols[i] ?? col] ?? ""; });
