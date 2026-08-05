@@ -30,7 +30,7 @@
 
 ## PR-0: 計測基盤
 
-**対象**: [execute.ts](../src/execute.ts)、[sharedPlanner.ts](../src/core/optimization/sharedPlanner.ts)
+**対象**: [execute.ts](../../src/execute.ts)、[sharedPlanner.ts](../../src/core/optimization/sharedPlanner.ts)
 
 **変更内容**:
 
@@ -53,9 +53,9 @@
 
 2. `SelectResult` / `InsertResult` / `UpdateResult` / `DeleteResult` / `UpsertResult` / `ReorderResult` に `metrics?: ExecuteMetrics` を追加（optional なので既存呼び出し元は無変更で通る）
 3. CLI は `--debug` 時、MCP はレスポンスのメタ情報、プラグイン UI は結果フッターに表示（表示側は別 PR に分けてもよい）
-4. `SharedFetchMetrics`（[sharedPlanner.ts:11](../src/core/optimization/sharedPlanner.ts#L11)）は現状呼び出し側で捨てられているが、PR-0 では**触らない**（計測基盤の追加に集中し、差分を最小にする）。ラッパー方式で計測が一元化されたあと、別の整理 PR で削除を検討する
+4. `SharedFetchMetrics`（[sharedPlanner.ts:11](../../src/core/optimization/sharedPlanner.ts#L11)）は現状呼び出し側で捨てられているが、PR-0 では**触らない**（計測基盤の追加に集中し、差分を最小にする）。ラッパー方式で計測が一元化されたあと、別の整理 PR で削除を検討する
 
-**テスト**: [execute.test.ts](../src/__tests__/execute.test.ts) に「SIMPLE SELECT で getCalls=1」「10,001 件 FULL_SCAN で getCalls=ページ数」等の assert を追加。
+**テスト**: [execute.test.ts](../../src/__tests__/execute.test.ts) に「SIMPLE SELECT で getCalls=1」「10,001 件 FULL_SCAN で getCalls=ページ数」等の assert を追加。
 
 **完了条件**: すべての `ExecuteResult` に metrics が入り、既存テストが無変更で通る。
 
@@ -67,23 +67,23 @@
 
 ### CLI 側
 
-**対象**: [cli/index.ts](../src/cli/index.ts)、[node/config.ts](../src/node/config.ts)、README
+**対象**: [cli/index.ts](../../src/cli/index.ts)、[node/config.ts](../../src/node/config.ts)、README
 
-1. `CliArgs`（[cli/index.ts:146](../src/cli/index.ts#L146) 付近）に `fetchParallel: number | null` を追加し、`--max-records` のパース（[cli/index.ts:314](../src/cli/index.ts#L314) 付近）と同形式で `--fetch-parallel` を追加。範囲外（1〜10 以外）は **`ArgumentError` でエラー**にする — MCP 側の `z.number().int().min(1).max(10)` と揃え、クランプの暗黙挙動を作らない
-2. 解決ロジック（[cli/index.ts:1275](../src/cli/index.ts#L1275) 付近）に追加:
+1. `CliArgs`（[cli/index.ts:146](../../src/cli/index.ts#L146) 付近）に `fetchParallel: number | null` を追加し、`--max-records` のパース（[cli/index.ts:314](../../src/cli/index.ts#L314) 付近）と同形式で `--fetch-parallel` を追加。範囲外（1〜10 以外）は **`ArgumentError` でエラー**にする — MCP 側の `z.number().int().min(1).max(10)` と揃え、クランプの暗黙挙動を作らない
+2. 解決ロジック（[cli/index.ts:1275](../../src/cli/index.ts#L1275) 付近）に追加:
 
    ```ts
    const fetchParallel = args.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? 3;
    ```
 
-3. `execute()` 呼び出し（[cli/index.ts:1598](../src/cli/index.ts#L1598)）に `fetchParallel` を渡す
-4. console モードの子プロセス引数引き継ぎ（[cli/index.ts:753](../src/cli/index.ts#L753) 付近の `pushOpt` 群）に `--fetch-parallel` を追加
-5. `KsqlProfileConfig.query`（[node/config.ts:26](../src/node/config.ts#L26)）に `fetchParallel?: number` を追加
-6. **`HELP_TEXT` と README の同期**: [help_sync.test.ts](../src/cli/__tests__/help_sync.test.ts) が README の `BEGIN_HELP_SYNC` セクションと `HELP_TEXT` の一致を検証しているため、両方を更新しないとテストが落ちる
+3. `execute()` 呼び出し（[cli/index.ts:1598](../../src/cli/index.ts#L1598)）に `fetchParallel` を渡す
+4. console モードの子プロセス引数引き継ぎ（[cli/index.ts:753](../../src/cli/index.ts#L753) 付近の `pushOpt` 群）に `--fetch-parallel` を追加
+5. `KsqlProfileConfig.query`（[node/config.ts:26](../../src/node/config.ts#L26)）に `fetchParallel?: number` を追加
+6. **`HELP_TEXT` と README の同期**: [help_sync.test.ts](../../src/cli/__tests__/help_sync.test.ts) が README の `BEGIN_HELP_SYNC` セクションと `HELP_TEXT` の一致を検証しているため、両方を更新しないとテストが落ちる
 
 ### MCP 側
 
-**対象**: [mcp/schemas.ts](../src/mcp/schemas.ts)、[node/runtime.ts](../src/node/runtime.ts)、[mcp/tools.ts](../src/mcp/tools.ts)
+**対象**: [mcp/schemas.ts](../../src/mcp/schemas.ts)、[node/runtime.ts](../../src/node/runtime.ts)、[mcp/tools.ts](../../src/mcp/tools.ts)
 
 1. schemas.ts に共通入力を追加し、5 スキーマへ配線:
 
@@ -93,7 +93,7 @@
    // / showAppsInputSchema / runSavedQueryInputSchema に追加
    ```
 
-2. `CreateKsqlRuntimeInput`（[runtime.ts:26](../src/node/runtime.ts#L26)）と `KsqlRuntime`（[runtime.ts:37](../src/node/runtime.ts#L37)）に `fetchParallel` を追加。解決は `maxRecords` と同形式（[runtime.ts:70-73](../src/node/runtime.ts#L70-L73)）:
+2. `CreateKsqlRuntimeInput`（[runtime.ts:26](../../src/node/runtime.ts#L26)）と `KsqlRuntime`（[runtime.ts:37](../../src/node/runtime.ts#L37)）に `fetchParallel` を追加。解決は `maxRecords` と同形式（[runtime.ts:70-73](../../src/node/runtime.ts#L70-L73)）:
 
    ```ts
    const fetchParallel = input.fetchParallel
@@ -102,12 +102,12 @@
      ?? 3;
    ```
 
-3. tools.ts の各 `executeSql()` 呼び出し（[tools.ts:313](../src/mcp/tools.ts#L313) / [331](../src/mcp/tools.ts#L331) / [366](../src/mcp/tools.ts#L366) ほか）に `fetchParallel: runtime.fetchParallel` を追加
-4. **`runSavedQuery` の明示転送 2 箇所**: read-only 経路の `query({...})`（[tools.ts:465-471](../src/mcp/tools.ts#L465-L471)）と DML 経路の `mutate({...})`（[tools.ts:481-488](../src/mcp/tools.ts#L481-L488)）の転送リストに `fetchParallel: input.fetchParallel` を追加
+3. tools.ts の各 `executeSql()` 呼び出し（[tools.ts:313](../../src/mcp/tools.ts#L313) / [331](../../src/mcp/tools.ts#L331) / [366](../../src/mcp/tools.ts#L366) ほか）に `fetchParallel: runtime.fetchParallel` を追加
+4. **`runSavedQuery` の明示転送 2 箇所**: read-only 経路の `query({...})`（[tools.ts:465-471](../../src/mcp/tools.ts#L465-L471)）と DML 経路の `mutate({...})`（[tools.ts:481-488](../../src/mcp/tools.ts#L481-L488)）の転送リストに `fetchParallel: input.fetchParallel` を追加
 
 **テスト**:
 
-- [tools.test.ts:138](../src/mcp/__tests__/tools.test.ts#L138) の「maxRecords/onLimit を execute options にマップする」テストと同形式で `fetchParallel` のマッピングを検証
+- [tools.test.ts:138](../../src/mcp/__tests__/tools.test.ts#L138) の「maxRecords/onLimit を execute options にマップする」テストと同形式で `fetchParallel` のマッピングを検証
 - saved query の read-only / DML 両経路で `fetchParallel` が伝搬することを検証（現行テストは DML 経路の転送漏れを検出できないため必須）
 - CLI の引数パース・環境変数・profile の優先順位テスト
 
@@ -119,7 +119,7 @@
 
 ## PR-2: C-1 — fetchAll の `order by $id asc` 常時付与
 
-**対象**: [api/fetchAll.ts](../src/api/fetchAll.ts)、[fetchAll.test.ts](../src/api/__tests__/fetchAll.test.ts)、CHANGELOG / README
+**対象**: [api/fetchAll.ts](../../src/api/fetchAll.ts)、[fetchAll.test.ts](../../src/api/__tests__/fetchAll.test.ts)、CHANGELOG / README
 
 **事前確認（実装前に必須）**: `fetchAll` / `fetchRecordsForSharedPlan` の全呼び出し箇所で、渡している `query` に `order by` / `limit` が含まれないことを確認する。現状確認済みの範囲では `executeSimpleSelect` は `whereToKintone(stmt.where)` のみ、FULL_SCAN 経路は WHERE 条件のみだが、`selectToFetchAllParams` の出力は要確認。防御として `buildCursorQuery` に「query に `order by` / `limit` が混入していたら例外」の assert を足すとよいが、**単純な substring 判定は文字列リテラルで誤検知する**（例: `メモ like "order by"`、値に `limit` を含む条件）。入れる場合は「クォート（`"..."`、`\"` エスケープ考慮）の外側にあるキーワードのみ検出」する軽量スキャナにし、誤検知ケースのテストを添える。スキャナのコストが見合わないと判断したら、防御 assert は省いて呼び出し箇所の目視確認 + 呼び出し側テストに留める。
 
@@ -139,7 +139,7 @@ export function buildCursorQuery(baseQuery: string, cursorId: number): string {
 
 なお現行実装（`${base} and ${cursor}`）にも base がトップレベル `or` を含む場合に条件の意味が変わる**潜在バグ**があり（`whereToKintone` は `A or B` を生成し得る）、本 PR の括弧付与で同時に解消される。この点もテストで固定する（`base = 'A = "1" or B = "2"'` + カーソルのケース）。
 
-**テスト**: [fetchAll.test.ts:34-45](../src/api/__tests__/fetchAll.test.ts#L34-L45) の `cursorId=0` 期待値を order 付きに更新。クエリ文字列を assert している他のテスト（[fetchAll.test.ts:197](../src/api/__tests__/fetchAll.test.ts#L197) 等、execute.test.ts にもあれば）を一括更新。加えて「10,000 件超 + カーソル切替で重複しない」シナリオテストを追加。
+**テスト**: [fetchAll.test.ts:34-45](../../src/api/__tests__/fetchAll.test.ts#L34-L45) の `cursorId=0` 期待値を order 付きに更新。クエリ文字列を assert している他のテスト（[fetchAll.test.ts:197](../../src/api/__tests__/fetchAll.test.ts#L197) 等、execute.test.ts にもあれば）を一括更新。加えて「10,000 件超 + カーソル切替で重複しない」シナリオテストを追加。
 
 **互換性**:
 
@@ -152,13 +152,13 @@ export function buildCursorQuery(baseQuery: string, cursorId: number): string {
 
 ## PR-3: B-2 / B-3 / B-5 — JS 小改善まとめ
 
-**対象**: [engine/evalWhere.ts](../src/engine/evalWhere.ts)、[engine/process.ts](../src/engine/process.ts)
+**対象**: [engine/evalWhere.ts](../../src/engine/evalWhere.ts)、[engine/process.ts](../../src/engine/process.ts)
 
-1. **B-2**: `matchLike`（[evalWhere.ts:237](../src/engine/evalWhere.ts#L237)）にモジュールレベルの `Map<string, RegExp>` キャッシュを追加。上限 200 件程度、超えたら `clear()`（LRU は不要）
-2. **B-3**: `applyJoin` の LEFT JOIN 非マッチ時の `emptyRight` 生成（[process.ts:147-152](../src/engine/process.ts#L147-L152)）をループ外へ。RIGHT JOIN 側（[process.ts:111-112](../src/engine/process.ts#L111-L112)）と同形にする
-3. **B-5**: `evalAggregate` の `Math.max(...nums)` / `Math.min(...nums)`（[process.ts:278-279](../src/engine/process.ts#L278-L279)）をループに置換
+1. **B-2**: `matchLike`（[evalWhere.ts:237](../../src/engine/evalWhere.ts#L237)）にモジュールレベルの `Map<string, RegExp>` キャッシュを追加。上限 200 件程度、超えたら `clear()`（LRU は不要）
+2. **B-3**: `applyJoin` の LEFT JOIN 非マッチ時の `emptyRight` 生成（[process.ts:147-152](../../src/engine/process.ts#L147-L152)）をループ外へ。RIGHT JOIN 側（[process.ts:111-112](../../src/engine/process.ts#L111-L112)）と同形にする
+3. **B-5**: `evalAggregate` の `Math.max(...nums)` / `Math.min(...nums)`（[process.ts:278-279](../../src/engine/process.ts#L278-L279)）をループに置換
 
-**テスト**: 既存 [process.test.ts](../src/engine/__tests__/process.test.ts) が挙動固定になっている。B-5 用に「150,000 要素の MAX/MIN が RangeError にならない」テストを追加。
+**テスト**: 既存 [process.test.ts](../../src/engine/__tests__/process.test.ts) が挙動固定になっている。B-5 用に「150,000 要素の MAX/MIN が RangeError にならない」テストを追加。
 
 **完了条件**: 既存テスト無変更で通過 + B-5 の大量要素テスト追加。
 
@@ -166,7 +166,7 @@ export function buildCursorQuery(baseQuery: string, cursorId: number): string {
 
 ## PR-4: A-4 — スカラーサブクエリの重複排除 + 並列化
 
-**対象**: [execute.ts:2061-2078](../src/execute.ts#L2061-L2078) `resolveScalarColumns`
+**対象**: [execute.ts:2061-2078](../../src/execute.ts#L2061-L2078) `resolveScalarColumns`
 
 **変更内容**:
 
@@ -195,7 +195,7 @@ for (const [i, col] of columns.entries()) {
 
 ## PR-5: A-1 — UPSERT / UPSERT SELECT の N+1 解消
 
-**対象**: [execute.ts:1352-1432](../src/execute.ts#L1352-L1432) `executeUpsert`、[execute.ts:1856-1937](../src/execute.ts#L1856-L1937) `executeUpsertSelect`
+**対象**: [execute.ts:1352-1432](../../src/execute.ts#L1352-L1432) `executeUpsert`、[execute.ts:1856-1937](../../src/execute.ts#L1856-L1937) `executeUpsertSelect`
 
 ### Step 1: characterization テスト（先行コミット）
 
@@ -208,7 +208,7 @@ for (const [i, col] of columns.entries()) {
 ### Step 2: 一括解決の実装
 
 1. 共通ヘルパー `resolveUpsertTargets(appId, keyFields, keyValuesPerRow, client, options): Map<複合キー文字列, number /* $id */>` を追加
-2. **単一キー**: 重複除去したキー値を `sqlQuote`（[execute.ts:860](../src/execute.ts#L860)）で quote し、`JOIN_IN_CHUNK_SIZE`（50）単位で `key in (...)` チャンク取得。取得 fields は `["$id", ...keyFields]`。キーごとに**最大 $id を採用**（PR-2 で固定した仕様と一致）
+2. **単一キー**: 重複除去したキー値を `sqlQuote`（[execute.ts:860](../../src/execute.ts#L860)）で quote し、`JOIN_IN_CHUNK_SIZE`（50）単位で `key in (...)` チャンク取得。取得 fields は `["$id", ...keyFields]`。キーごとに**最大 $id を採用**（PR-2 で固定した仕様と一致）
 3. **複合キー**: 第 1 キーで `in (...)` 絞り込み後、残りキーはクライアント側照合。第 1 キーは「重複値が最も少ない列」等の選定はせず、`keyFields[0]` 固定でよい（過剰設計を避ける）
 4. `executeUpsert` / `executeUpsertSelect` の行ループから GET を排除し、Map 参照に置換。以降の確認ダイアログ・POST/PUT バッチ処理は現行のまま
 5. キー値が空文字の行は現行どおり `key = ""` 検索相当の挙動を維持（チャンクから除外して個別判定 or 空文字も in に含める — kintone クエリの空文字 in の挙動を確認して決める）
@@ -223,9 +223,9 @@ for (const [i, col] of columns.entries()) {
 
 ## PR-6: A-3 — サブクエリ / UNION の並列化
 
-**対象**: [execute.ts:1993-2032](../src/execute.ts#L1993-L2032) `resolveSubqueries`、[execute.ts:507-511](../src/execute.ts#L507-L511) `executeUnion`
+**対象**: [execute.ts:1993-2032](../../src/execute.ts#L1993-L2032) `resolveSubqueries`、[execute.ts:507-511](../../src/execute.ts#L507-L511) `executeUnion`
 
-1. `resolveSubqueries` を「木を走査してサブクエリノードを収集 → `Promise.all` で実行 → `resolved` を書き込み」の 2 段階に分割。WHERE と HAVING の 2 回呼び出し（[execute.ts:387-388](../src/execute.ts#L387-L388)）も 1 つの `Promise.all` にまとめる
+1. `resolveSubqueries` を「木を走査してサブクエリノードを収集 → `Promise.all` で実行 → `resolved` を書き込み」の 2 段階に分割。WHERE と HAVING の 2 回呼び出し（[execute.ts:387-388](../../src/execute.ts#L387-L388)）も 1 つの `Promise.all` にまとめる
 2. `executeUnion` の左辺・右辺を `Promise.all` で並列実行（結果の結合順は現行どおり左→右を維持）
 
 **挙動差の注意**: 直列では最初のサブクエリのエラーだけが投げられるが、並列では `Promise.all` の最初の reject が伝播する。エラーメッセージ自体は変わらないため許容とする（テストで確認）。
@@ -236,9 +236,9 @@ for (const [i, col] of columns.entries()) {
 
 ## PR-7: A-5 — フィールド定義取得のオーバーラップ / スキップ
 
-**対象**: [execute.ts:282-333](../src/execute.ts#L282-L333) `executeSimpleSelect`、[execute.ts:376-494](../src/execute.ts#L376-L494) `executeFullScanSelect`
+**対象**: [execute.ts:282-333](../../src/execute.ts#L282-L333) `executeSimpleSelect`、[execute.ts:376-494](../../src/execute.ts#L376-L494) `executeFullScanSelect`
 
-1. **ORDER BY なし時のスキップ（全経路共通）**: `stmt.orderBy.length === 0` なら `buildOptionOrdersForSelect` / `buildSortKindsForSelect` をスキップ（`applyOrderBy` が即 return するため取得自体が無駄）。対象は SIMPLE（[execute.ts:325-327](../src/execute.ts#L325-L327)）だけでなく、**FULL_SCAN（[execute.ts:487-488](../src/execute.ts#L487-L488)）と CTE 参照経路の `executeFullScanWithCte`（[execute.ts:799-800](../src/execute.ts#L799-L800)）も同様**。3 箇所で同じ条件になるため、`buildOrderByMetaForSelect(stmt, ...)` のような共通ヘルパー（orderBy 空なら空 Map を即返す）に寄せる
+1. **ORDER BY なし時のスキップ（全経路共通）**: `stmt.orderBy.length === 0` なら `buildOptionOrdersForSelect` / `buildSortKindsForSelect` をスキップ（`applyOrderBy` が即 return するため取得自体が無駄）。対象は SIMPLE（[execute.ts:325-327](../../src/execute.ts#L325-L327)）だけでなく、**FULL_SCAN（[execute.ts:487-488](../../src/execute.ts#L487-L488)）と CTE 参照経路の `executeFullScanWithCte`（[execute.ts:799-800](../../src/execute.ts#L799-L800)）も同様**。3 箇所で同じ条件になるため、`buildOrderByMetaForSelect(stmt, ...)` のような共通ヘルパー（orderBy 空なら空 Map を即返す）に寄せる
 2. **並列化 / オーバーラップ**: orderBy がある場合、SIMPLE では 2 つを `Promise.all` に。FULL_SCAN / CTE 経路では `resolveScalarColumns` / `buildOptionOrdersForSelect` / `buildSortKindsForSelect` の Promise をメインフェッチ開始直後に生成し、`runFullScan` 直前で `await Promise.all`。`resolveSubqueries` は WHERE プッシュダウン計算より前に必要なので現行位置を維持
 
 **完了条件**: ORDER BY なしの SIMPLE / FULL_SCAN / CTE 参照 SELECT（キャッシュ未ヒット時）のいずれでも、**optionOrders / sortKinds 由来の追加 field GET が発生しない**こと。`validateSelectFieldCodes` 由来の `getFields` は残る（フィールド指定のある SELECT では validation が先に呼ぶ）ため、検証は `SELECT *`（validation がフィールドを収集しない）で `fieldCalls = 0` を確認するか、`getFieldsCached` の呼び出し元単位でモック検証する。
@@ -247,10 +247,10 @@ for (const [i, col] of columns.entries()) {
 
 ## PR-8: A-6 小修正 — Map 化と options 尊重
 
-**対象**: [execute.ts](../src/execute.ts) サブテーブル DML 各関数
+**対象**: [execute.ts](../../src/execute.ts) サブテーブル DML 各関数
 
-1. `executeUpdateSubtable`（[1553](../src/execute.ts#L1553)）/ `executeDeleteSubtable`（[1605](../src/execute.ts#L1605)）/ `executeReorder`（[1794](../src/execute.ts#L1794)）の `parents.find(...)` を、`executeInsertSubtable` と同じ `Map<pid, parent>` 方式に統一
-2. `executeInsertSubtable`（[1464](../src/execute.ts#L1464)）のハードコード `{ maxRecords: 10_000, parallel: 1 }` を `options.maxRecords ?? 10_000` / `options.fetchParallel ?? 1` に変更（シグネチャに `options: ExecuteOptions` を追加し、呼び出し元 `executeInsert` から伝搬）
+1. `executeUpdateSubtable`（[1553](../../src/execute.ts#L1553)）/ `executeDeleteSubtable`（[1605](../../src/execute.ts#L1605)）/ `executeReorder`（[1794](../../src/execute.ts#L1794)）の `parents.find(...)` を、`executeInsertSubtable` と同じ `Map<pid, parent>` 方式に統一
+2. `executeInsertSubtable`（[1464](../../src/execute.ts#L1464)）のハードコード `{ maxRecords: 10_000, parallel: 1 }` を `options.maxRecords ?? 10_000` / `options.fetchParallel ?? 1` に変更（シグネチャに `options: ExecuteOptions` を追加し、呼び出し元 `executeInsert` から伝搬）
 
 **完了条件**: 既存のサブテーブル DML テストが通過し、`executeInsertSubtable` が options を尊重する。
 
@@ -258,7 +258,7 @@ for (const [i, col] of columns.entries()) {
 
 ## PR-9: B-1 — ORDER BY ソートキー事前計算
 
-**対象**: [process.ts:382-489](../src/engine/process.ts#L382-L489) `applyOrderBy`
+**対象**: [process.ts:382-489](../../src/engine/process.ts#L382-L489) `applyOrderBy`
 
 decorate–sort–undecorate 方式に変更:
 
@@ -284,13 +284,13 @@ decorated.sort((a, b) => { /* keys[i] 同士を compareOrderValues 相当で比�
 
 ## PR-10: B-6 — DISTINCT キー生成最適化
 
-**対象**: [process.ts:342-373](../src/engine/process.ts#L342-L373) `applyDistinct` / `buildDistinctKey`
+**対象**: [process.ts:342-373](../../src/engine/process.ts#L342-L373) `applyDistinct` / `buildDistinctKey`
 
 1. **テスト先行**: キー同一性の前提を固定するテストを追加
    - 値に `\x00` を含む行同士が誤って同一視されないこと（delimiter 衝突）
    - `SELECT DISTINCT *` で行によってキー集合が異なるケース（LEFT JOIN の空埋め行等）の挙動
 2. 列リストを**呼び出しごとに 1 回だけ**確定し、行ループでは values の結合のみ行う。FIELD 列なら列名リスト、WILDCARD の場合は**全行のキー集合の union** を事前に 1 パスで確定する（初回行だけを使うと、後続行にのみ存在するキーが無視されて誤重複する）。さらに現行の `Object.entries(row)` は「キーが存在しない」と「キーが空文字」を区別するため、union キーで値を並べる際は欠損を `null`、空文字を `""` としてエンコードし（`JSON.stringify` なら両者は区別される）、この区別を維持する
-3. delimiter 衝突対策として、単純 join ではなく `JSON.stringify(values)` を使う（`deduplicateRows`（[execute.ts:533-541](../src/execute.ts#L533-L541)）の `\0` join にも同じ衝突があるため、共通ヘルパーに寄せて両方直す）
+3. delimiter 衝突対策として、単純 join ではなく `JSON.stringify(values)` を使う（`deduplicateRows`（[execute.ts:533-541](../../src/execute.ts#L533-L541)）の `\0` join にも同じ衝突があるため、共通ヘルパーに寄せて両方直す）
 
 **完了条件**: 10,000 行 DISTINCT のキー生成が「行ごとの entries + sort」なしで動き、衝突テストが通る。
 

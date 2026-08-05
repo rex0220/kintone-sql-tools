@@ -5,7 +5,7 @@
 - 出典: [Pro の報告 v3.34.0 §3](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3340.md)。
   **Pro は「現状のままで結構です」と明記している**。こちらで測ったところ**射程が B98 より広かった**ため起票する
 - 関連: [B98](ksql_b98_join_truncated_right_null_issue.md) / [B97](ksql_b97_incomplete_aggregate_failclosed_issue.md) /
-  [B90](ksql_b90_variable_arith_issue.md) / [B86](ksql_b86_materialized_missing_column_issue.md)
+  [B90](ksql_b90_variable_arithmetic_issue.md) / [B86](ksql_b86_materialized_unknown_column_issue.md)
 
 ## 1. 何が起きているか
 

@@ -3,7 +3,7 @@
 - 起票: 2026-07-29
 - ステータス: ✅ **リリース済み（v3.33.0・2026-07-29・案 A）**。→ [実装仕様](ksql_b96_getrecords_response_contract_spec.md)
 - 出典: [Pro からの報告 v3.32.0](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの報告-v3320.md) §3
-- 関連: [B93 `getFields` の契約](ksql_b93_getfields_contract_error_issue.md) / [B85](ksql_b85_validate_constraint_disclosure_spec.md) / [B94 `totalCount`](ksql_b94_count_star_totalcount_issue.md)
+- 関連: [B93 `getFields` の契約](ksql_b93_getfields_contract_error_issue.md) / [B85](ksql_b85_library_validate_constraints_issue.md) / [B94 `totalCount`](ksql_b94_count_star_totalcount_issue.md)
 
 ## 1. Pro が自分で見つけて共有してくれた
 

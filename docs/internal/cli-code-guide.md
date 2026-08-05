@@ -10,7 +10,7 @@
 
 ### src/types/
 
-#### [src/types/ast.ts](../src/types/ast.ts)
+#### [src/types/ast.ts](../../src/types/ast.ts)
 
 SQL パーサーが生成する AST（抽象構文木）の型定義ファイルです。コードを生成せず、TypeScript の型だけを定義します。
 
@@ -26,7 +26,7 @@ SQL パーサーが生成する AST（抽象構文木）の型定義ファイル
 
 ### src/lexer/
 
-#### [src/lexer/tokens.ts](../src/lexer/tokens.ts)
+#### [src/lexer/tokens.ts](../../src/lexer/tokens.ts)
 
 トークン種別の定義ファイルです。
 
@@ -34,7 +34,7 @@ SQL パーサーが生成する AST（抽象構文木）の型定義ファイル
 - **`KEYWORDS`** — 大文字に正規化したキーワード文字列 → `TokenKind` への `ReadonlyMap`。Lexer が識別子をキーワードに昇格させるときに参照する
 - **`Token`** — `{ kind, value, pos }` の構造体。`pos` はデバッグ用エラーメッセージに使用
 
-#### [src/lexer/lexer.ts](../src/lexer/lexer.ts)
+#### [src/lexer/lexer.ts](../../src/lexer/lexer.ts)
 
 SQL文字列をトークン列に変換する字句解析器です。
 
@@ -47,7 +47,7 @@ SQL文字列をトークン列に変換する字句解析器です。
 
 ### src/parser/
 
-#### [src/parser/parser.ts](../src/parser/parser.ts)
+#### [src/parser/parser.ts](../../src/parser/parser.ts)
 
 トークン列をASTに変換する構文解析器です。再帰下降法で実装されています。
 
@@ -60,7 +60,7 @@ SQL文字列をトークン列に変換する字句解析器です。
 
 ### src/execute.ts
 
-[src/execute.ts](../src/execute.ts)
+[src/execute.ts](../../src/execute.ts)
 
 SQL文字列を受け取り、kintone API を呼び出して結果を返すメイン実行エンジンです。
 
@@ -83,15 +83,15 @@ SQL文字列を受け取り、kintone API を呼び出して結果を返すメ�
 
 ### src/core/
 
-#### [src/core/index.ts](../src/core/index.ts)
+#### [src/core/index.ts](../../src/core/index.ts)
 
 UI層・CLI層に向けた公開APIのファサードです。`execute` / `parseSqlStatement` / `formatDisplayText` と主要な型を re-export します。実装ファイルへの直接依存を避けるため、上位層はこのファイルだけを import します。
 
-#### [src/core/sql.ts](../src/core/sql.ts)
+#### [src/core/sql.ts](../../src/core/sql.ts)
 
 `parseSqlStatement(sql)` の薄いラッパーです。`new Lexer(sql).tokenize()` → `new Parser(tokens).parse()` の2ステップを1関数にまとめます。CLI での DMLガード判定など、`execute` を呼ばずに AST だけ欲しい場面で使います。
 
-#### [src/core/displayFormat.ts](../src/core/displayFormat.ts)
+#### [src/core/displayFormat.ts](../../src/core/displayFormat.ts)
 
 `execute` が返す `ProcessRow` の各セル値を表示用テキストに変換します。
 
@@ -99,14 +99,14 @@ UI層・CLI層に向けた公開APIのファサードです。`execute` / `parse
 - JSON文字列を検出してパース。ユーザーオブジェクト・添付ファイル・サブテーブル・配列の各フォーマットを適用
 - `dateFormat: "local"` 指定時は UTC日時をローカルタイムゾーンに変換
 
-#### [src/core/optimization/sharedPlanner.ts](../src/core/optimization/sharedPlanner.ts)
+#### [src/core/optimization/sharedPlanner.ts](../../src/core/optimization/sharedPlanner.ts)
 
 DML実行時の共有フェッチロジックです。`execute.ts` から呼ばれます。
 
 - **`fetchRecordsForSharedPlan`** — `fetchAll` のラッパー。DML前の全件取得に使用
 - **`resolveDmlTargetIds`** — `$id` フィールドのみ取得して UPDATE/DELETE の対象IDリストを解決
 
-#### [src/core/optimization/wherePredicatePushdown.ts](../src/core/optimization/wherePredicatePushdown.ts)
+#### [src/core/optimization/wherePredicatePushdown.ts](../../src/core/optimization/wherePredicatePushdown.ts)
 
 JOIN クエリの最適化モジュールです。
 
@@ -117,7 +117,7 @@ JOIN クエリの最適化モジュールです。
 
 ### src/api/
 
-#### [src/api/fetchAll.ts](../src/api/fetchAll.ts)
+#### [src/api/fetchAll.ts](../../src/api/fetchAll.ts)
 
 kintone の1リクエスト500件制限・offset上限10,000件制限を回避して全件取得するモジュールです。
 
@@ -133,7 +133,7 @@ kintone の1リクエスト500件制限・offset上限10,000件制限を回避�
 
 SQL ASTをkintone APIのパラメータ形式に変換するレイヤーです。
 
-#### [src/converter/selectToKintone.ts](../src/converter/selectToKintone.ts)
+#### [src/converter/selectToKintone.ts](../../src/converter/selectToKintone.ts)
 
 `SelectStatement` AST をkintone GETリクエストのパラメータに変換します。
 
@@ -142,7 +142,7 @@ SQL ASTをkintone APIのパラメータ形式に変換するレイヤーです�
 - **`selectToFetchAllParams(stmt)`** — FULL_SCAN モード時に全件取得用のパラメータを生成
 - サブテーブル（`APP100$明細`）への参照も処理
 
-#### [src/converter/whereToKintone.ts](../src/converter/whereToKintone.ts)
+#### [src/converter/whereToKintone.ts](../../src/converter/whereToKintone.ts)
 
 `WhereExpr` AST をkintoneクエリ文字列に変換します。
 
@@ -151,7 +151,7 @@ SQL ASTをkintone APIのパラメータ形式に変換するレイヤーです�
 - `EXISTS` はkintoneクエリに変換不可のため `KintoneQueryError` をスロー
 - `IS NULL` → `field = ""`、`IS NOT NULL` → `field != ""` に変換（kintone構文）
 
-#### [src/converter/dmlToKintone.ts](../src/converter/dmlToKintone.ts)
+#### [src/converter/dmlToKintone.ts](../../src/converter/dmlToKintone.ts)
 
 INSERT / UPDATE / DELETE の AST をkintone APIリクエスト形式に変換します。
 
@@ -161,7 +161,7 @@ INSERT / UPDATE / DELETE の AST をkintone APIリクエスト形式に変換し
 - **`deleteToGetQuery`** / **`deleteToDeleteBatches`** — DELETE の2フェーズ処理
 - **`KintoneRecord`** — `Record<string, KintoneFieldValue>` 型。フィールド値は `{ value: string | string[] | ... }` の構造
 
-#### [src/converter/subtableAdapter.ts](../src/converter/subtableAdapter.ts)
+#### [src/converter/subtableAdapter.ts](../../src/converter/subtableAdapter.ts)
 
 親レコードのサブテーブルフィールドを仮想レコード配列に展開するアダプターです。
 
@@ -173,7 +173,7 @@ INSERT / UPDATE / DELETE の AST をkintone APIリクエスト形式に変換し
 
 kintone から全件取得したレコードをJavaScriptで処理するエンジン層です。FULL_SCAN モード時に使用されます。
 
-#### [src/engine/process.ts](../src/engine/process.ts)
+#### [src/engine/process.ts](../../src/engine/process.ts)
 
 FULL_SCAN モードの後処理パイプラインです。
 
@@ -192,7 +192,7 @@ FULL_SCAN モードの後処理パイプラインです。
 - **`runFullScan(stmt, tables, ...)`** — 上記パイプライン全体を実行するエントリポイント
 - **`ProcessRow`** — `Record<string, string>` 型。全フィールド値は文字列で統一
 
-#### [src/engine/evalWhere.ts](../src/engine/evalWhere.ts)
+#### [src/engine/evalWhere.ts](../../src/engine/evalWhere.ts)
 
 `WhereExpr` AST をJavaScript側で評価します。JOIN後フィルタや関数を含むWHEREで使用されます。
 
@@ -200,7 +200,7 @@ FULL_SCAN モードの後処理パイプラインです。
 - サブクエリ（`IN (SELECT ...)` / `EXISTS (...)`）は `execute.ts` 側で事前実行され、`ResolvedSubqueryInList` / `ResolvedExistsExpr` として `resolved` フィールドに結果が格納された状態で渡される
 - LIKE演算は `%` を `.*` に変換した正規表現で評価
 
-#### [src/engine/evalFunc.ts](../src/engine/evalFunc.ts)
+#### [src/engine/evalFunc.ts](../../src/engine/evalFunc.ts)
 
 算術式・文字列関数の評価ロジックです。`process.ts` と `evalWhere.ts` 両方から使われるため、循環参照を避ける目的で独立したモジュールとして分離されています。
 
@@ -208,7 +208,7 @@ FULL_SCAN モードの後処理パイプラインです。
 - **`evalStringFunc(expr, row)`** — UPPER / LOWER / SUBSTRING / CONCAT / COALESCE / ROUND / YEAR / DATE_FORMAT 等30種超の関数を評価
 - **`resolveFieldRef(row, field)`** — テーブルエイリアス付き/なしでフィールド値を解決
 
-#### [src/engine/pushDownNot.ts](../src/engine/pushDownNot.ts)
+#### [src/engine/pushDownNot.ts](../../src/engine/pushDownNot.ts)
 
 NOT式をド・モルガン則でリーフまで押し下げます。`whereToKintone.ts`（kintoneクエリ変換）と `evalWhere.ts`（JS評価）の両方で使用します。
 
@@ -220,19 +220,19 @@ NOT式をド・モルガン則でリーフまで押し下げます。`whereToKin
 
 kintone プラグインとして動作するUI層です（CLI とは独立）。
 
-#### [src/ui/desktop.ts](../src/ui/desktop.ts)
+#### [src/ui/desktop.ts](../../src/ui/desktop.ts)
 
 kintone プラグインのデスクトップ画面エントリポイントです。`kintone.events.on` でUIイベントを登録し、`execute()` を呼び出してSQL実行・結果表示を行います。ゲストスペース対応（URL から guestSpaceId を抽出）も担います。
 
-#### [src/ui/kintoneClient.ts](../src/ui/kintoneClient.ts)
+#### [src/ui/kintoneClient.ts](../../src/ui/kintoneClient.ts)
 
 `kintone.api()` を `KintoneClient` インターフェースに適合させるアダプターです。Node.js の `fetch` の代わりに `kintone.api()` を使う点が `nodeKintoneClient.ts` との違いです。
 
-#### [src/ui/renderResult.ts](../src/ui/renderResult.ts)
+#### [src/ui/renderResult.ts](../../src/ui/renderResult.ts)
 
 `ExecuteResult` をHTML文字列に変換するレンダラーです。SELECT結果はHTMLテーブルとして、DML結果は件数表示としてレンダリングします。`DisplayOptions` を受け取り、ユーザーフィールドや日付フィールドの表示形式を制御します。
 
-#### [src/ui/config.ts](../src/ui/config.ts)
+#### [src/ui/config.ts](../../src/ui/config.ts)
 
 プラグイン設定画面のエントリポイントです。現バージョンでは設定項目がなく、キャンセルボタンのハンドラ登録のみを行います。
 
@@ -263,8 +263,8 @@ src/parser/       (構文解析)
 
 | ファイル | 役割 |
 |---|---|
-| [src/cli/index.ts](../src/cli/index.ts) | CLIエントリポイント。引数解析・設定読込・実行フロー全体 |
-| [src/cli/nodeKintoneClient.ts](../src/cli/nodeKintoneClient.ts) | Node.js向け kintone REST API クライアント |
+| [src/cli/index.ts](../../src/cli/index.ts) | CLIエントリポイント。引数解析・設定読込・実行フロー全体 |
+| [src/cli/nodeKintoneClient.ts](../../src/cli/nodeKintoneClient.ts) | Node.js向け kintone REST API クライアント |
 
 ---
 
@@ -289,7 +289,7 @@ process.argv
 
 ## 引数解析: `parseArgs()`
 
-[src/cli/index.ts:158](../src/cli/index.ts#L158)
+[src/cli/index.ts:158](../../src/cli/index.ts#L158)
 
 `process.argv.slice(2)` の文字列配列を受け取り、`ParsedArgs` オブジェクトを返します。
 
@@ -329,13 +329,13 @@ const maxRecords = args.maxRecords          // --max-records
   ?? 500;                                  // デフォルト
 ```
 
-環境変数ヘルパーは `envString()` / `envInt()` / `envBool()` / `envFormat()` / `envOnLimit()` / `envAuth()` の6種類が定義されています（[index.ts:607-643](../src/cli/index.ts#L607-L643)）。
+環境変数ヘルパーは `envString()` / `envInt()` / `envBool()` / `envFormat()` / `envOnLimit()` / `envAuth()` の6種類が定義されています（[index.ts:607-643](../../src/cli/index.ts#L607-L643)）。
 
 ---
 
 ## APP@profile 構文: `normalizeSqlAppProfiles()`
 
-[src/cli/index.ts:525](../src/cli/index.ts#L525)
+[src/cli/index.ts:525](../../src/cli/index.ts#L525)
 
 SQL内の `APP100@prod` のような `@profile` サフィックスを解析し、プロファイルごとに異なる kintone 環境へルーティングするための前処理です。
 
@@ -357,7 +357,7 @@ SQL内の `APP100@prod` のような `@profile` サフィックスを解析し�
 
 ## HTTP クライアント: `createNodeKintoneClient()`
 
-[src/cli/nodeKintoneClient.ts:22](../src/cli/nodeKintoneClient.ts#L22)
+[src/cli/nodeKintoneClient.ts:22](../../src/cli/nodeKintoneClient.ts#L22)
 
 Node.js の `fetch()` を使って kintone REST API を呼び出す `KintoneClient` 実装です。
 
@@ -374,7 +374,7 @@ Node.js の `fetch()` を使って kintone REST API を呼び出す `KintoneClie
 
 ### CB_IL02 エラーへの自動リトライ
 
-[src/cli/nodeKintoneClient.ts:85](../src/cli/nodeKintoneClient.ts#L85)
+[src/cli/nodeKintoneClient.ts:85](../../src/cli/nodeKintoneClient.ts#L85)
 
 kintone の `CB_IL02`（ソートキー不正）エラーが発生した場合、クエリ先頭に `order by レコード番号 asc` を付加して自動リトライします。これは ORDER BY なしの offset ページングで一部環境が返すエラーへの対策です。
 
@@ -419,13 +419,13 @@ DML文（INSERT / UPDATE / DELETE / UPSERT）は複数のガードを通過す�
 
 `--yes` なしの場合、`promptDmlConfirm()` がTTYで確認プロンプトを表示します。非TTY環境（パイプ等）ではエラーになります。
 
-`parseConfirmAnswer()` は `"yes"` のみ承認します。ただし一部端末でキー入力が重複する事象（`"yyeess"` 等）に対応するため、連続する同一文字を1つに縮めた上で判定します（[index.ts:782](../src/cli/index.ts#L782)）。
+`parseConfirmAnswer()` は `"yes"` のみ承認します。ただし一部端末でキー入力が重複する事象（`"yyeess"` 等）に対応するため、連続する同一文字を1つに縮めた上で判定します（[index.ts:782](../../src/cli/index.ts#L782)）。
 
 ---
 
 ## 出力フォーマット: `buildOutput()`
 
-[src/cli/index.ts:791](../src/cli/index.ts#L791)
+[src/cli/index.ts:791](../../src/cli/index.ts#L791)
 
 `SelectResult` を指定フォーマットの文字列に変換します。
 
@@ -445,7 +445,7 @@ DML結果は `buildMutationOutput()` で同様のフォーマットに変換さ�
 
 ## インタラクティブコンソール: `runConsole()`
 
-[src/cli/index.ts:1235](../src/cli/index.ts#L1235)
+[src/cli/index.ts:1235](../../src/cli/index.ts#L1235)
 
 `--console` フラグで起動するREPLモードです。
 
@@ -514,7 +514,7 @@ DML結果は `buildMutationOutput()` で同様のフォーマットに変換さ�
 
 ## エントリポイント判定: `isDirectCliRun()`
 
-[src/cli/index.ts:1916](../src/cli/index.ts#L1916)
+[src/cli/index.ts:1916](../../src/cli/index.ts#L1916)
 
 ```typescript
 function isDirectCliRun(): boolean {
