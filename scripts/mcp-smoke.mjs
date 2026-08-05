@@ -145,10 +145,11 @@ function assertSchemas(tools) {
   const runSavedQueryProps = runSavedQuery.inputSchema?.properties ?? {};
   assert("allowDml" in runSavedQueryProps, "ksql_run_saved_query.allowDml input is missing.");
   assert("dmlMaxRows" in runSavedQueryProps, "ksql_run_saved_query.dmlMaxRows input is missing.");
+  assert("variables" in runSavedQueryProps, "ksql_run_saved_query.variables input is missing.");
   assert(!("catalogPath" in runSavedQueryProps), "ksql_run_saved_query must not expose per-call catalogPath.");
 
-  // v1.11.0: tempTableMaxRows はバッチを受けるツールのみ。保存クエリは単文限定で
-  // 一時テーブルが出現し得ないため公開しない(存在しない入力を describe で示唆もしない)
+  // B133: read-only 保存クエリはバッチを受けるが、非公開 batch option は追加せず
+  // エンジン既定値を使うため tempTableMaxRows は公開しない。
   assert("tempTableMaxRows" in queryProps, "ksql_query.tempTableMaxRows input is missing.");
   assert("tempTableMaxRows" in mutateProps, "ksql_mutate.tempTableMaxRows input is missing.");
   assert(!("tempTableMaxRows" in runSavedQueryProps), "ksql_run_saved_query must not expose tempTableMaxRows.");
@@ -313,8 +314,8 @@ function assertParamDescriptions(tools) {
     );
   }
 
-  // v1.11.0: tempTableMaxRows への言及は「その入力を実際に受け付けるツール」のみ。
-  // ksql_run_saved_query は単文限定のため、存在しない入力を describe で示唆しない
+  // B133: ksql_run_saved_query は read-only バッチを受けるが、tempTableMaxRows 自体は
+  // 公開せずエンジン既定値を使う。
   const mutateDmlMaxRowsDesc =
     getTool(tools, "ksql_mutate").inputSchema?.properties?.dmlMaxRows?.description ?? "";
   assert(
@@ -328,8 +329,8 @@ function assertParamDescriptions(tools) {
     "ksql_run_saved_query.dmlMaxRows description must not mention tempTableMaxRows (input does not exist there)."
   );
   assert(
-    savedDmlMaxRowsDesc.includes("single-statement"),
-    "ksql_run_saved_query.dmlMaxRows description must state saved queries are single-statement."
+    savedDmlMaxRowsDesc.includes("engine default row cap"),
+    "ksql_run_saved_query.dmlMaxRows description must state that read-only batch temp tables use the engine default cap."
   );
 
   // B44 Phase 16d: schema descriptions also pin the all-form APPLY boundary.
@@ -517,7 +518,7 @@ async function main() {
       ok: false,
       error: {
         code: "ArgumentError",
-        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r13. Call ksql_docs without arguments for the full key list.",
+        message: "ArgumentError: Unknown ksql_docs section key: STDDEV. Valid keys: language-reference, language-reference/<key>, recipes, recipes/r1..r14. Call ksql_docs without arguments for the full key list.",
       },
     };
     assert(docsUnknown.isError === true, "Unknown ksql_docs key must be an application error.");

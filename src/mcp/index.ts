@@ -198,7 +198,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_save_query", {
     title: "Save kSQL query",
-    description: "Save a validated kSQL statement into the local saved query catalog.",
+    description: "Save a validated kSQL query into the local catalog. Read-only queries may be multi-statement batches; DML saved queries remain single-statement.",
     inputSchema: saveQueryInputShape,
   }, tools.saveQueryTool);
 
@@ -216,7 +216,7 @@ export function createServer(args: ServerArgs): McpServer {
 
   server.registerTool("ksql_run_saved_query", {
     title: "Run saved kSQL query",
-    description: "Run a saved kSQL query. Read-only queries use ksql_query safety; DML queries require ksql_mutate safety inputs.",
+    description: "Run a saved kSQL query. Read-only queries and batches use ksql_query safety and support DECLARE variable injection; DML queries require ksql_mutate safety inputs.",
     inputSchema: runSavedQueryInputShape,
   }, tools.runSavedQueryTool);
 

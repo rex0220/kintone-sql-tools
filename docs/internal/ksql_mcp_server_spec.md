@@ -772,6 +772,9 @@ DML の対象件数確認は、`execute()` の `ExecuteOptions.confirm` コー�
 
 ### `ksql_save_query`
 
+`readOnly: true` では、`ksql_query` で実行可能な read-only 複文を保存できる。
+実書き込み DML を含むバッチは保存できず、`readOnly: false` の保存 SQL は従来どおり単文 DML に限る。
+
 入力:
 
 ```json
@@ -798,12 +801,18 @@ DML の対象件数確認は、`execute()` の `ExecuteOptions.confirm` コー�
 ### `ksql_run_saved_query`
 
 保存済み SQL を実行する。
-`readOnly: true` の保存 SQL は `ksql_query` と同じ安全条件で実行する。
+`readOnly: true` の保存 SQL は単文・複文とも `ksql_query` と同じ安全条件で実行し、
+複文の結果は `ksql_query` と同じバッチエンベロープで返す。
 `readOnly: false` の保存 SQL は `ksql_mutate` と同じく `allowDml: true`、`confirmText: "yes"`、`dmlMaxRows` を実行時に要求する。
 注意: このツールの入力 `maxRecords` / `onLimit` は **read-only 保存 SQL の実行時のみ有効**。
 DML 保存 SQL は `ksql_mutate` へ委譲され、読み取り上限は `ksql_mutate` と同じ規則
 （SELECT-based DML を含む場合は runtime `maxRecords` 解決、それ以外は `dmlMaxRows + 1`。§7.6）、
 `onLimit` は `"error"` 固定となる。
+
+read-only の複文保存 SQLでは、実行入力 `variables` に文字列 map を渡して `DECLARE` の既定値を
+上書きできる。キーは `@` を付けず、大文字小文字を区別しない。注入対象は `DECLARE` 専用であり、
+`SET` だけで定義した変数へ注入しようとすると通常の `ksql_query` と同じく未宣言変数として拒否する。
+一時テーブルを使う保存 SQL にはエンジン既定の行数上限が適用され、非公開 batch option は指定できない。
 
 ### `ksql_delete_query`
 
