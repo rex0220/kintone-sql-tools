@@ -1,7 +1,7 @@
 # B130 `DESCRIBE` に「型だけでは分からない」フラグを出す
 
 - 起票: 2026-08-05
-- ステータス: 📝 **起票（実測済み・仕様 R1 待ち）**
+- ステータス: ✅ **v3.49.0 でリリース**（2026-08-06）→ [仕様 R3](ksql_b130_describe_flags_spec.md)
 - 出典: [`ksql-analytics` からの依頼 ⑤](ksql_analytics_request_20260805_evaluation.md)
 - 関連: 記事レビューで踏んだ実例（`ksql-analytics/docs/internal/2026-08-05_qiita_kintone-inventory-analysis.md`）
 

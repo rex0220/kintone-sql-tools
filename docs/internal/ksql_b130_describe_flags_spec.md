@@ -1,6 +1,6 @@
 # B130 `DESCRIBE` に「値の由来」を出す 仕様（R3）
 
-- ステータス: 🚧 **実装完了・実機検算待ち**（2026-08-06。R3 の取り残し 3 件と §4.2-9 の誤りを実装時に検出し修正） → [依頼元の返信](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-B130-20260806.md) / [確認文](ksql_analytics_inquiry_b130_20260806.md) / [レビュー](ksql_b130_codex_review_1.md)（高 3・中 5・低 1 を**全件反映**）
+- ステータス: ✅ **v3.49.0 でリリース**（2026-08-06。R3 の取り残し 3 件と §4.2-9 の誤りを実装時に検出し修正） → [依頼元の返信](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-B130-20260806.md) / [確認文](ksql_analytics_inquiry_b130_20260806.md) / [レビュー](ksql_b130_codex_review_1.md)（高 3・中 5・低 1 を**全件反映**）
 - 起票: [B130](ksql_b130_describe_flags_issue.md)（実測済み）
 - 関連: [B136](ksql_b136_language_reference_examples_issue.md)（列表が実装と食い違っている＝本件で DESCRIBE 分を直す）
 
