@@ -2,6 +2,36 @@
 
 リリースごとの変更点。v1.9.0 以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) を参照。
 
+## v3.45.0（2026-08-05）
+
+### 新機能（B125 集計のウィンドウ関数 — 累計・累積件数）
+
+`SUM` / `COUNT` / `AVG` / `MIN` / `MAX` を `OVER (...)` で使えるようにした。従来のウィンドウ関数は順位系 3 つ（`ROW_NUMBER` / `RANK` / `DENSE_RANK`）だけで、**累積和が書けなかった**。在庫台帳の残高推移のような「1 行ずつ積み上げる」集計を、SQL の外へ出さずに書ける。
+
+```sql
+SELECT 製品名, 日付, 個数,
+       SUM(個数) OVER (
+         PARTITION BY 製品名 ORDER BY 日付, レコード番号
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS 累積在庫
+FROM APP100
+```
+
+- **フレームは標準 SQL 準拠。** `ORDER BY` があるときの既定は `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`、無いときはパーティション全体。明示できるのは `ROWS` / `RANGE` の同じ固定境界のみ。
+- **`RANGE` と `ROWS` は同順の行で結果が変わる。** 同日 3 件の台帳なら `RANGE` は 3 行とも「その日を締めた残高」、`ROWS` は「取引ごとの残高」。日次残高なら既定の `RANGE`、取引ごとなら `ROWS` を明示するか `ORDER BY` にレコード番号などのタイブレークキーを足す。**`EXPLAIN` が実効フレームを表示し、既定のときだけ `(既定)` を付ける。**
+- **完全入力を要求する。** `ORDER BY` の有無にかかわらず、取得上限での `onLimit=truncate` は部分結果を返さずエラーになる（`complete input reason: AGGREGATE_WINDOW`）。FULL_SCAN は評価場所を決めるだけで部分入力を防がないため、専用の理由を追加した。
+- 空値・`NaN` のスキップと `MIN`/`MAX` の比較規則は**通常の集計関数と共通**（行ごとの値抽出を共有する実装にした）。ただし小数を含む `SUM`/`AVG` はウィンドウの並び順で加算するため通常集計と最下位ビットが一致しないことがあり、`MIN`/`MAX` は canonical 同値の値（数値型の `"1"` と `"01"` など）で残る raw 表記が不定。
+- **`SELECT DISTINCT` との併用は従来どおり可能**（ウィンドウ評価後に DISTINCT を適用）。
+- **非対応**: 引数の `DISTINCT`（`SUM(DISTINCT x) OVER`）、`GROUP_CONCAT` / 統計集計の `OVER`、移動フレーム（`ROWS BETWEEN n PRECEDING`）、`LAG` / `LEAD`、`GROUP BY` / 通常集計との併用、ウィンドウ結果を同じ SELECT 内の式へ入れる形。いずれも専用の診断を出す。月次の累計は CTE 2 段で書く。
+- 言語リファレンス §10.1 に集計ウィンドウの節、`ksql_docs` に `window-functions` セクション（従来は `order-by` に畳まれていた）、レシピ R14「累積残高（台帳）」を追加した。
+
+### 修正（B123 通常の `GROUP BY` だけの SELECT で `EXPLAIN` / `--dry-run` がエラーになる）
+
+- `SELECT 分類, COUNT(*) FROM APPx GROUP BY 分類` の実行計画を取ろうとすると `No-op client should not be called.`（MCP）/ `DryRunError: API call should not happen in dry-run.`（CLI）で落ちていた。**分かれ目は `GROUP BY` の有無ではなく「`GROUP BY` があり、かつフィールドを参照する `WHERE` も `ORDER BY` も無い」こと**で、`ORDER BY` を 1 つ足すと通っていた。
+- 原因は、フォーム定義の要否を判定する述語が**通常の `GROUP BY` を見ていなかった**こと（B65 の `ROLLUP` / `GROUPING SETS` は入っていた）。要否が偽になるとレコード API を呼ばないためのダミークライアントが渡り、グループキーの型解決が弾かれていた。MCP と CLI が同じ述語を共有するため両方で再現していた。
+- **誤った計画を返していたわけではない**（止まるべきでないところで止まっていた）。`EXPLAIN` がレコード API を呼ばない契約は不変で、増えるのはフォーム定義の取得のみ。
+- 影響として、「JOIN や大量取得を含むクエリは `EXPLAIN` まで通す」という運用ルールが**集計クエリに対して最初から機能していなかった**。分析クエリはほぼ全部 `GROUP BY` を含むため。
+
 ## v3.44.0（2026-08-05）
 
 ### 修正（B119〜B122 集計まわりで静かに間違う 4 件）**※結果が変わります**
