@@ -1,6 +1,6 @@
 # B125 集計ウィンドウ関数 Phase 1 仕様（R2）
 
-- ステータス: ✅ **実装済み**（2026-08-05・`npm test` 5,359 件成功・実機で外部検算済み）→ [実装報告](ksql_b123_b125_codex_impl_report.md)。**§3.2 の数値例は実装レビューでさらに訂正**（80 → 110）。→ [レビュー結果](ksql_b125_codex_review_1.md)（高 6・中 5・低 1、**全件を反映**）
+- ステータス: ✅ **v3.45.0 でリリース済み**（2026-08-05・npm publish 済み・`npm test` 5,359 件成功・MCP 再読み込み後に実機で外部検算済み）→ [実装報告](ksql_b123_b125_codex_impl_report.md)。**§3.2 の数値例は実装レビューでさらに訂正**（80 → 110）。→ [レビュー結果](ksql_b125_codex_review_1.md)（高 6・中 5・低 1、**全件を反映**）
 - **フレーム既定はオーナー判断で確定（2026-08-05）＝標準どおり `RANGE`**（§3.2）
 - 前提: [ウィンドウ関数仕様](ksql_window_function_spec.md)（v1）の §8「スコープ外・後続」の実装
 - 関連: [B125 起票](ksql_b125_aggregate_window_function_issue.md) / [B124](ksql_b124_aggregate_arithmetic_nonaggregate_operand_issue.md)（独立）/
