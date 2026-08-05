@@ -287,7 +287,7 @@ function collectStringFuncFields(expr: StringFuncExpr, out: string[]): void {
 }
 
 function collectStringFuncArgFields(arg: StringFuncArg, out: string[]): void {
-  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") { collectAggOperandFields(arg, out); return; }
+  if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") { collectAggOperandFields(arg, out); return; }
   collectScalarValueFields(arg, out);
 }
 
@@ -321,6 +321,9 @@ function collectAggOperandFields(node: AggOperand, out: string[]): void {
     collectAggOperandFields(node.left, out);
     collectAggOperandFields(node.right, out);
   }
+  if (node.type === "AGG_GROUP_KEY") {
+    out.push(normalizeSimpleFieldRef(node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field));
+  }
 }
 
 function collectAggregateArgFields(node: AggregateArgExpr, out: string[]): void {
@@ -331,6 +334,7 @@ function collectAggregateArgFields(node: AggregateArgExpr, out: string[]): void 
 function hasAggregateInStringFuncExpr(expr: StringFuncExpr): boolean {
   return expr.args.some((arg) => {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+    if (arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") return false;
     return scalarValueHasAggregate(arg);
   });
 }
@@ -574,10 +578,13 @@ function collectRequiredFieldsByTable(
       walkAgg(node.left, phase);
       walkAgg(node.right, phase);
     }
+    if (node.type === "AGG_GROUP_KEY") {
+      addFieldRef(node.field, node.tableAlias ?? null, phase);
+    }
   };
 
   const walkStringArg = (arg: StringFuncArg, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
-    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") {
+    if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") {
       walkAgg(arg, phase);
       return;
     }

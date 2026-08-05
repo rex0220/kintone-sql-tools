@@ -87,7 +87,7 @@ function caseLabel(expr: Extract<ScalarValueExpr, { type: "CASE_WHEN" }>): strin
 
 function stringFuncArgLabel(arg: StringFuncArg): string {
   if (arg.type === "AGG_REF") return aggregateSyntheticName(arg.func, arg.distinct, arg.arg);
-  if (arg.type === "AGG_ARITH") return aggregateOperandLabel(arg);
+  if (arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") return aggregateOperandLabel(arg);
   return scalarValueLabel(arg);
 }
 
@@ -126,5 +126,7 @@ export function aggregateSyntheticName(
 export function aggregateOperandLabel(node: AggOperand): string {
   if (node.type === "NUMBER") return numberLiteralText(node);
   if (node.type === "AGG_REF") return aggregateSyntheticName(node.func, node.distinct, node.arg);
+  if (node.type === "AGG_GROUP_KEY") return node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field;
+  if (node.type === "VARIABLE") return `@${node.name}`;
   return `${aggregateOperandLabel(node.left)}${node.op}${aggregateOperandLabel(node.right)}`;
 }

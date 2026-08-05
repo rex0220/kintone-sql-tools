@@ -1,6 +1,6 @@
 # B124 集計算術式の非集計オペランド Phase 1 仕様（R2）
 
-- ステータス: 📋 **仕様 R2（codex レビュー 1 回目を反映）** → [レビュー](ksql_b124_codex_review_1.md)（高 4・中 4・低 2 を**全件反映**）
+- ステータス: ✅ **実装済み**（2026-08-05・`npm test` 5,383 件成功・実機で既知期待値と一致） → [レビュー](ksql_b124_codex_review_1.md)（高 4・中 4・低 2 を**全件反映**）
 - 対象: 案 C（文書）＋ A1（`@変数`）＋ A2（`GROUP BY` キー）を **1 本の Phase 1** とする
 - 関連: [B124 起票](ksql_b124_aggregate_arithmetic_nonaggregate_operand_issue.md) /
   [B122](ksql_b122_having_aggregate_expression_issue.md)・[B121](ksql_b121_having_numeric_comparison_issue.md)（`HAVING` の非対称を潰した直後）/
@@ -103,8 +103,8 @@ FROM APP4229 m LEFT JOIN APP4228 t ON m.製品名 = t.製品名
 GROUP BY m.製品番号, m.製品名, m.仕入価格
 
 -- @変数（A1）
-SET @税率 = 1.1;
-SELECT 分類, SUM(仕入価格) * @税率 AS 税込 FROM APP4229 GROUP BY 分類
+SET @rate = 1.1;
+SELECT 分類, SUM(仕入価格) * @rate AS 税込 FROM APP4229 GROUP BY 分類
 ```
 
 ---
@@ -359,6 +359,12 @@ GROUP BY m.製品番号, m.製品名, m.仕入価格
 4. `GROUP BY` に同じ列が修飾あり／なしの両方で書かれた場合の表記一致判定
 
 ---
+
+> **【実機確認で見つけた仕様サンプルの誤り 2026-08-05】** §2 / §9 の例に `SET @税率 = 1.1;` と
+> 書いていたが、**kSQL の変数名は英字または `_` 始まりでなければならない**
+> （`「@」 の直後には英字または _ で始まる変数名が必要です`）。`@rate` に修正した。
+> 言語リファレンス側は実装者が正しい例を書いており、混入していたのは本仕様だけ。
+> **B125 の §3.2 の数値例と同じ形の失敗**＝**サンプルは実行して確かめないと腐る**。
 
 ## 12. レビュー反映履歴
 

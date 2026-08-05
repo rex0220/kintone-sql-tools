@@ -61,6 +61,7 @@ import type {
   AggArithColumn,
   AggArithExpr,
   AggOperand,
+  AggGroupKeyRef,
   AggregateRef,
   GroupByKey,
   GroupingSpec,
@@ -341,6 +342,8 @@ export class Parser {
   private cteNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
   private tempTableRefs: Token[] = [];
+  /** GROUP BY を読む前に作る B124 候補 leaf の診断位置。AST 公開型へ位置情報を足さない。 */
+  private aggregateGroupKeyTokens = new WeakMap<AggGroupKeyRef, Token>();
 
   constructor(
     private readonly tokens: Token[],
@@ -1190,6 +1193,7 @@ export class Parser {
     if (grouping && orderMode === "KINTONE_NATIVE") {
       throw new ParseError("B65: KORDER BY cannot be combined with grouping sets in Phase1.", this.peek());
     }
+    this.validateAggregateGroupKeyRefs(columns, having, groupBy, grouping);
 
     return {
       type: "SELECT",
@@ -1297,6 +1301,13 @@ export class Parser {
     if (this.tryAggregateFunc() === null && this.hasNestedAggregateWindowInSelectColumn()) {
       throw new ParseError(
         "ウィンドウ関数の結果を式に含めることはできません。CTE で一度実体化してください",
+        this.peek()
+      );
+    }
+
+    if (this.isNonAggregateArithmeticStartWithAggregate()) {
+      throw new ParseError(
+        `集計算術式は集計関数から始まる必要があります（${this.peek().value}）。`,
         this.peek()
       );
     }
@@ -1579,6 +1590,7 @@ export class Parser {
 
   private stringFuncArgHasAggregate(arg: StringFuncArg): boolean {
     if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH") return true;
+    if (arg.type === "AGG_GROUP_KEY" || arg.type === "VARIABLE") return false;
     return this.scalarValueHasAggregate(arg);
   }
 
@@ -1639,7 +1651,7 @@ export class Parser {
     return this.continueAggArithMulDiv(this.parseAggPrimary());
   }
 
-  /** 集計算術式の一次式: 集計関数 / 数値リテラル / 括弧 */
+  /** 集計算術式の一次式: 集計関数 / 数値 / 変数 / GROUP BY キー候補 / 括弧 */
   private parseAggPrimary(): AggOperand {
     // 括弧
     if (this.consume(TokenKind.LPAREN)) {
@@ -1659,6 +1671,11 @@ export class Parser {
       const tok = this.advance();
       return makeNumberLiteral(tok.value);
     }
+    // バッチ変数（既存 resolver が AGG_ARITH の子を NUMBER へ置換する）
+    if (this.peek().kind === TokenKind.VARIABLE) {
+      const tok = this.advance();
+      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+    }
     // 集計関数
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
@@ -1666,7 +1683,104 @@ export class Parser {
       this.rejectAggregateWindowOutsideSelect();
       return ref;
     }
+    // ordinary GROUP BY キー候補。membership は SELECT 全体を読み終えた後に検証する。
+    if (this.peek().kind === TokenKind.IDENT || this.peek().kind === TokenKind.BIDENT) {
+      const tok = this.peek();
+      const parsed = this.parseQualifiedIdent();
+      const ref: AggGroupKeyRef = {
+        type: "AGG_GROUP_KEY",
+        field: parsed.field,
+        ...(parsed.tableAlias ? { tableAlias: parsed.tableAlias } : {}),
+      };
+      this.aggregateGroupKeyTokens.set(ref, tok);
+      return ref;
+    }
     throw new ParseError("集計算術式には集計関数または数値が必要です", this.peek());
+  }
+
+  /** B124 Phase 1 はトップレベルの非集計オペランド開始形を明示拒否する。 */
+  private isNonAggregateArithmeticStartWithAggregate(): boolean {
+    const first = this.peek();
+    if (this.tryAggregateFunc() !== null || first.kind === TokenKind.CASE || first.kind === TokenKind.IF) return false;
+    if (this.isGroupingFunctionStart()) return false;
+    if (this.tryStringFuncName() !== null) return false;
+    if (![TokenKind.IDENT, TokenKind.BIDENT, TokenKind.VARIABLE, TokenKind.LPAREN].includes(first.kind)) return false;
+    let depth = 0;
+    let sawArithmetic = false;
+    for (let index = this.pos; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (depth === 0 && index > this.pos && (
+        token.kind === TokenKind.COMMA || token.kind === TokenKind.AS || token.kind === TokenKind.FROM
+        || token.kind === TokenKind.SEMICOLON || token.kind === TokenKind.EOF
+        || token.kind === TokenKind.EQ || token.kind === TokenKind.NEQ || token.kind === TokenKind.LT_GT
+        || token.kind === TokenKind.GT || token.kind === TokenKind.LT || token.kind === TokenKind.GTE
+        || token.kind === TokenKind.LTE || token.kind === TokenKind.AND || token.kind === TokenKind.OR
+      )) break;
+      if (this.isArithOp(token.kind)) sawArithmetic = true;
+      if (PARSER_AGGREGATE_FUNCTION_TOKEN_MAP[token.kind] !== undefined
+        && this.tokens[index + 1]?.kind === TokenKind.LPAREN) return sawArithmetic;
+      if (token.kind === TokenKind.LPAREN) depth++;
+      else if (token.kind === TokenKind.RPAREN) {
+        depth--;
+        if (depth < 0) break;
+      }
+    }
+    return false;
+  }
+
+  /** SELECT ローカルの B124 leaf だけを ordinary GROUP BY の表記と照合する。 */
+  private validateAggregateGroupKeyRefs(
+    columns: SelectColumn[],
+    having: WhereExpr | null,
+    groupBy: GroupByKey[],
+    grouping: GroupingSpec | undefined
+  ): void {
+    const refs: AggGroupKeyRef[] = [];
+    const visit = (node: unknown): void => {
+      if (Array.isArray(node)) { node.forEach(visit); return; }
+      if (node === null || typeof node !== "object") return;
+      const value = node as Record<string, unknown>;
+      // 入れ子 SELECT は自身の parseSelect で既に検証済み。外側 scope へ混ぜない。
+      if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
+      if (value["type"] === "AGG_GROUP_KEY") {
+        refs.push(node as AggGroupKeyRef);
+        return;
+      }
+      Object.values(value).forEach(visit);
+    };
+    visit(columns);
+    visit(having);
+    if (refs.length === 0) return;
+
+    const first = refs[0];
+    const firstToken = this.aggregateGroupKeyTokens.get(first) ?? this.peek();
+    if (grouping !== undefined) {
+      throw new ParseError(
+        "ROLLUP / CUBE / GROUPING SETS では集計算術式にフィールドを書けません（小計・総計行で値が定まらないためです）。",
+        firstToken
+      );
+    }
+    if (groupBy.length === 0) {
+      throw new ParseError(
+        `集計算術式にフィールドを書くには GROUP BY が必要です（${this.aggregateGroupKeyDisplay(first)}）。`,
+        firstToken
+      );
+    }
+    const ordinaryNames = new Set(groupBy.filter((key): key is Extract<GroupByKey, { type: "FIELD_NAME" }> =>
+      key.type === "FIELD_NAME").map((key) => key.name));
+    for (const ref of refs) {
+      const display = this.aggregateGroupKeyDisplay(ref);
+      if (!ordinaryNames.has(display)) {
+        throw new ParseError(
+          `集計算術式のフィールド参照は GROUP BY に書いた表記と一致する列だけです（${display}）。グループ内で値が定まらないためです。`,
+          this.aggregateGroupKeyTokens.get(ref) ?? firstToken
+        );
+      }
+    }
+  }
+
+  private aggregateGroupKeyDisplay(ref: AggGroupKeyRef): string {
+    return ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
   }
 
   // ──────────────────────────────────────────────────
@@ -1957,7 +2071,7 @@ export class Parser {
     if (aggregateFunc !== null && allowAggregateResult) {
       const ref = this.parseAggregateRef(aggregateFunc);
       this.rejectAggregateWindowOutsideSelect();
-      return this.continueAggArith(ref);
+      return this.continueAggArith(ref) as AggregateRef | AggArithExpr;
     }
     if (this.hasTopLevelTokenBeforeValueEnd(TokenKind.CONCAT_OP)) {
       return this.parseScalarValueExpr({ allowAggregateArgs: true });
@@ -2549,6 +2663,12 @@ export class Parser {
   // - 集計関数（HAVING のみ）: COUNT(*) / SUM(f) ...
   // - 通常フィールド参照: [alias.]field
   private parseFieldValue(): FieldValue {
+    if (this.groupingFieldContext === "HAVING" && this.isNonAggregateArithmeticStartWithAggregate()) {
+      throw new ParseError(
+        `集計算術式は集計関数から始まる必要があります（${this.peek().value}）。`,
+        this.peek()
+      );
+    }
     if (this.isUnsupportedGroupingIdStart()) {
       throw new ParseError("B65: GROUPING_ID is not supported in Phase1.", this.peek());
     }

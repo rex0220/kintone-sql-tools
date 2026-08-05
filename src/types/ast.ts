@@ -1125,7 +1125,16 @@ export interface ReorderStatement {
 export type AggOperand =
   | AggregateRef   // SUM(金額), COUNT(*) など
   | NumberLiteral  // 数値リテラル
+  | AggGroupKeyRef // ordinary GROUP BY キーとして検証済みのフィールド参照
+  | VariableRef    // @変数（実行前に NumberLiteral へ解決）
   | AggArithExpr;  // ネスト
+
+/** ordinary GROUP BY キーとして表記一致を検証済みのフィールド参照。 */
+export interface AggGroupKeyRef {
+  type: "AGG_GROUP_KEY";
+  field: string;
+  tableAlias?: string;
+}
 
 /** 集計関数への参照（算術式の被演算子として使う） */
 export interface AggregateRef {
