@@ -258,3 +258,69 @@ test("B125: KORDER BY 併用は parser ではなく planner が拒否する", as
   )).rejects.toThrow(/KORDER_QUERY_SHAPE_UNSUPPORTED/);
   expect(client.getCalls).toHaveLength(0);
 });
+
+describe("B127: aggregate window default RANGE warnings", () => {
+  const fields: KintoneFieldInfo[] = [
+    { code: "$id", label: "$id", fieldType: "RECORD_NUMBER" },
+    { code: "d", label: "d", fieldType: "DATE" },
+    { code: "amount", label: "amount", fieldType: "NUMBER" },
+    { code: "items", label: "items", fieldType: "SUBTABLE" },
+    { code: "itemDate", label: "itemDate", fieldType: "DATE", inSubtable: true, subtableCode: "items" },
+    { code: "itemAmount", label: "itemAmount", fieldType: "NUMBER", inSubtable: true, subtableCode: "items" },
+  ];
+  const warningFor = (alias: string) =>
+    `${alias} は既定フレーム（RANGE）で評価されます。ORDER BY の値が同じ行はすべて同じ値になります。` +
+    "行ごとの値が必要なら ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW を明示するか、" +
+    "ORDER BY にレコード番号などのタイブレークキーを足してください。";
+
+  test("単一物理表の既定 RANGE は alias ごとに警告する", async () => {
+    const result = await execute(
+      "SELECT SUM(amount) OVER (ORDER BY d) AS cumulative FROM APP300",
+      makeClient([], fields),
+      { cacheContext: "b127-default-range" }
+    ) as SelectResult;
+    expect(result.warnings).toEqual([warningFor("cumulative")]);
+  });
+
+  test.each([
+    ["明示 ROWS", "SUM(amount) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"],
+    ["明示 RANGE", "SUM(amount) OVER (ORDER BY d RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"],
+    ["ORDER BY なし", "SUM(amount) OVER ()"],
+    ["順位系", "RANK() OVER (ORDER BY d)"],
+  ])("%s は警告しない", async (_label, expression) => {
+    const result = await execute(
+      `SELECT ${expression} AS w FROM APP300`,
+      makeClient([], fields),
+      { cacheContext: `b127-no-warning-${_label}` }
+    ) as SelectResult;
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("単一物理表で $id または RECORD_NUMBER を含む全順序は抑止する", async () => {
+    for (const tieBreak of ["$id", "recordNo"]) {
+      const result = await execute(
+        `SELECT SUM(amount) OVER (ORDER BY d, ${tieBreak}) AS cumulative FROM APP300`,
+        makeClient([], [
+          ...fields,
+          { code: "recordNo", label: "recordNo", fieldType: "RECORD_NUMBER" },
+        ]),
+        { cacheContext: `b127-total-order-${tieBreak}` }
+      ) as SelectResult;
+      expect(result.warnings).toEqual([]);
+    }
+  });
+
+  test.each([
+    ["JOIN", "SELECT SUM(a.amount) OVER (ORDER BY a.d, a.$id) AS cumulative FROM APP300 a JOIN APP301 b ON a.$id = b.$id"],
+    ["subtable", "SELECT SUM(itemAmount) OVER (ORDER BY itemDate, $id) AS cumulative FROM APP300$items"],
+    ["CTE", "WITH x AS (SELECT d, amount, $id FROM APP300) SELECT SUM(amount) OVER (ORDER BY d, $id) AS cumulative FROM x"],
+    ["UNION", "SELECT SUM(amount) OVER (ORDER BY d, $id) AS cumulative FROM APP300 UNION ALL SELECT SUM(amount) OVER (ORDER BY d, $id) AS cumulative FROM APP301"],
+  ])("%s 経由では全順序に見えても抑止しない", async (_label, sql) => {
+    const result = await execute(
+      sql,
+      makeClient([], fields),
+      { cacheContext: `b127-unsafe-source-${_label}` }
+    ) as SelectResult;
+    expect(result.warnings).toContain(warningFor("cumulative"));
+  });
+});

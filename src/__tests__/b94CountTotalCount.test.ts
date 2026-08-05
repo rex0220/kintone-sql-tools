@@ -196,9 +196,9 @@ test.each([
     count: "2",
   },
   {
-    name: "DROP_DOWN equality residual",
-    sql: "SELECT COUNT(*) AS c FROM APP100 WHERE 選択 = 'A'",
-    count: "2",
+    name: "DROP_DOWN unknown-option equality residual",
+    sql: "SELECT COUNT(*) AS c FROM APP100 WHERE 選択 = '存在しない値'",
+    count: "0",
   },
 ])("B94: $name は totalCount を使わず従来経路で正しく数える", async ({
   sql,

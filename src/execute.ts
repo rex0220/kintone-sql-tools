@@ -204,6 +204,8 @@ import {
 import { collectCheckFieldRefs, collectCheckComparisonFieldRefs, customCheckParseError, evaluateCustomChecks, type CheckFieldRef } from "./core/dmlCustomCheck";
 import {
   classifyWhereCapability,
+  normalizeChoiceEquality,
+  type ChoiceEqualityRewrite,
   type PredicateCapabilityResult,
   type WhereFieldSemanticsResolver,
 } from "./core/optimization/whereCapability";
@@ -1005,18 +1007,18 @@ async function resolveRelativeDateExecutionPlan(
   cacheContext: string
 ): Promise<RelativeDatePushdownPlan> {
   return buildRelativeDatePushdownPlan(stmt, {
-    select: (select) => resolveSelectWhereCapability(select, client, cacheContext),
+    select: async (select) => {
+      const { resolver } = await normalizeSelectChoiceEquality(select, client, cacheContext);
+      return classifyWhereCapability(select.where, resolver);
+    },
     dml: (dml) => resolveDmlWhereCapability(dml, client, cacheContext),
     prefilterDecomposition: async (select) => {
       if (select.where === null) return null;
-      const resolver = await buildWhereFieldSemanticsResolver(
-        select,
-        client,
-        cacheContext
-      );
+      const { resolver } = await normalizeSelectChoiceEquality(select, client, cacheContext);
       return decomposeRelativeDatePrefilter(select, resolver);
     },
     joinServerFunctionPlan: async (select) => {
+      await normalizeSelectChoiceEquality(select, client, cacheContext);
       const metadata = await loadTypedPushdownMeta(select, client, cacheContext);
       const runtimePlan = buildRuntimeJoinPushdownPlan(select, metadata);
       if (runtimePlan === null) return null;
@@ -2409,8 +2411,13 @@ async function buildWhereFieldSemanticsResolver(
     if (node === null || typeof node !== "object") return;
     const value = node as Record<string, unknown>;
     if (value["type"] === "SELECT") return;
+    const operator = String(value["op"]);
+    const right = value["right"] as Record<string, unknown> | undefined;
+    const needsOptionExistence = ["=", "!=", "<>"].includes(operator)
+      && right?.["type"] === "STRING"
+      && right["value"] !== "";
     if (value["type"] === "BINARY"
-      && [">", "<", ">=", "<="].includes(String(value["op"]))) {
+      && ([">", "<", ">=", "<="].includes(operator) || needsOptionExistence)) {
       const left = value["left"] as Record<string, unknown> | undefined;
       if (left?.["type"] === "FIELD" && typeof left["field"] === "string") {
         orderedFields.add(left["field"] as string);
@@ -2487,6 +2494,82 @@ async function buildWhereFieldSemanticsResolver(
     // JOIN の非修飾同名列は既存契約どおりローカル値として評価する。
     return matches.length > 1 ? syntheticSemantics("string") : undefined;
   };
+}
+
+const choiceEqualityRewritesBySelect = new WeakMap<
+  SelectStatement,
+  readonly ChoiceEqualityRewrite[]
+>();
+
+async function normalizeSelectChoiceEquality(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>,
+  forcePhysicalMetadata = false
+): Promise<{
+  resolver: WhereFieldSemanticsResolver;
+  rewrites: readonly ChoiceEqualityRewrite[];
+}> {
+  const resolver = await buildWhereFieldSemanticsResolver(
+    stmt, client, cacheContext, materializedTables, forcePhysicalMetadata
+  );
+  if (stmt.where === null) return { resolver, rewrites: [] };
+  const normalization = normalizeChoiceEquality(stmt.where, resolver);
+  stmt.where = normalization.normalizedWhere;
+  if (normalization.rewrites.length > 0) {
+    choiceEqualityRewritesBySelect.set(stmt, normalization.rewrites);
+  }
+  return { resolver, rewrites: normalization.rewrites };
+}
+
+type WindowWarningContext = "DIRECT" | "DERIVED";
+
+function hasDefaultRangeAggregateWindow(stmt: SelectStatement): boolean {
+  return stmt.columns.some((column) =>
+    column.type === "WINDOW_COL"
+    && column.windowKind === "AGGREGATE"
+    && column.orderBy.length > 0
+    && column.frame?.source === "DEFAULT"
+  );
+}
+
+function collectDefaultRangeWindowWarnings(
+  stmt: SelectStatement,
+  resolveField: WhereFieldSemanticsResolver,
+  context: WindowWarningContext
+): string[] {
+  const canProveSinglePhysicalInput = context === "DIRECT"
+    && stmt.joins.length === 0
+    && stmt.from.cteName === null
+    && stmt.from.subtableCode == null;
+  const warnings: string[] = [];
+  for (const column of stmt.columns) {
+    if (
+      column.type !== "WINDOW_COL"
+      || column.windowKind !== "AGGREGATE"
+      || column.orderBy.length === 0
+      || column.frame?.source !== "DEFAULT"
+    ) continue;
+    const hasTotalOrderKey = canProveSinglePhysicalInput && column.orderBy.some((item) => {
+      if (item.key.type !== "FIELD_NAME") return false;
+      const ref = aggregateFieldRef(item.key.name);
+      return ref.field === "$id" || resolveField(ref)?.fieldType === "RECORD_NUMBER";
+    });
+    if (hasTotalOrderKey) continue;
+    warnings.push(
+      `${column.alias} は既定フレーム（RANGE）で評価されます。` +
+      "ORDER BY の値が同じ行はすべて同じ値になります。" +
+      "行ごとの値が必要なら ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW を明示するか、" +
+      "ORDER BY にレコード番号などのタイブレークキーを足してください。"
+    );
+  }
+  return warnings;
+}
+
+function mergeSelectWarnings(result: SelectResult, additional: readonly string[]): SelectResult {
+  if (additional.length === 0) return result;
+  return { ...result, warnings: [...new Set([...(result.warnings ?? []), ...additional])] };
 }
 
 function selectCaseConditionsNeedFieldMetadata(stmt: SelectStatement): boolean {
@@ -2636,7 +2719,8 @@ async function executeSelect(
    *  FROM / JOIN 参照は executeQueryWithCte 側で処理済みの前提） */
   cteCache?: Map<string, MaterializedTable>,
   captureColumnMeta = false,
-  forLibraryCapture = false
+  forLibraryCapture = false,
+  windowWarningContext: WindowWarningContext = "DIRECT"
 ): Promise<SelectResult> {
   let result: SelectResult;
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
@@ -2650,6 +2734,18 @@ async function executeSelect(
     }
     return result;
   }
+  const { resolver: fieldSemanticsResolver } = await normalizeSelectChoiceEquality(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    hasDefaultRangeAggregateWindow(stmt)
+  );
+  const defaultRangeWarnings = collectDefaultRangeWindowWarnings(
+    stmt,
+    fieldSemanticsResolver,
+    windowWarningContext
+  );
   const plainGroupByPlan = await buildRuntimePlainGroupByPlan(
     stmt,
     client,
@@ -2657,7 +2753,10 @@ async function executeSelect(
     cteCache
   );
   await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
-  const whereCapability = rememberSelectWhereCapability(stmt, await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache));
+  const whereCapability = rememberSelectWhereCapability(
+    stmt,
+    classifyWhereCapability(stmt.where, fieldSemanticsResolver)
+  );
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
@@ -2766,7 +2865,7 @@ async function executeSelect(
       await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
     );
   }
-  return result;
+  return mergeSelectWarnings(result, defaultRangeWarnings);
 }
 
 /**
@@ -4777,7 +4876,8 @@ async function executeUnion(
           cacheContext,
           undefined,
           captureColumnMeta,
-          forLibraryCapture
+          forLibraryCapture,
+          "DERIVED"
         ),
       executeSelect(
         markCountTotalCountRoot(stmt.right),
@@ -4786,7 +4886,8 @@ async function executeUnion(
         cacheContext,
         undefined,
         captureColumnMeta,
-        forLibraryCapture
+        forLibraryCapture,
+        "DERIVED"
       ),
     ]);
 
@@ -4806,7 +4907,13 @@ async function executeUnion(
     // UNION（重複排除）vs UNION ALL（そのまま）
     const rows = stmt.all ? combined : deduplicateRows(combined, leftCols);
 
-    const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    const warnings = [...new Set([
+      ...(leftResult.warnings ?? []),
+      ...(rightResult.warnings ?? []),
+    ])];
+    const result: SelectResult = {
+      type: "SELECT", rows, columns: leftCols, rowCount: rows.length, warnings,
+    };
     if (captureColumnMeta) {
       materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
     }
@@ -4844,11 +4951,15 @@ async function executeWith(
   // CTE を展開して WHERE をまとめて REST API に渡す。
   // 一時テーブル注入時はインライン化しない（CTE 本体が #temp を参照し得るため）
   if ((seed == null || seed.size === 0) && canInlineSingleCte(stmt)) {
-    return executeSelect(buildInlinedQuery(stmt), client, options, cacheContext, undefined, captureColumnMeta, false);
+    return executeSelect(
+      buildInlinedQuery(stmt), client, options, cacheContext, undefined,
+      captureColumnMeta, false, "DERIVED"
+    );
   }
 
   // CTE 名 → 実体化結果のキャッシュ（一時テーブル名は # 付きのため CTE 名と衝突しない）
   const cteCache = new Map<string, MaterializedTable>(seed ?? []);
+  const warnings = new Set<string>();
 
   // 各 CTE を順番に実行し、結果をキャッシュ
   for (const cte of stmt.ctes) {
@@ -4860,6 +4971,7 @@ async function executeWith(
     } else {
       result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext, true);
     }
+    for (const warning of result.warnings ?? []) warnings.add(warning);
     cteCache.set(cte.name, {
       rows: result.rows,
       columns: result.columns,
@@ -4868,7 +4980,10 @@ async function executeWith(
   }
 
   // 最終クエリを CTE キャッシュ付きで実行
-  return executeQueryWithCte(stmt.query, client, options, cteCache, cacheContext, captureColumnMeta);
+  const result = await executeQueryWithCte(
+    stmt.query, client, options, cteCache, cacheContext, captureColumnMeta
+  );
+  return mergeSelectWarnings(result, [...warnings]);
 }
 
 /**
@@ -4901,7 +5016,13 @@ async function executeQueryWithCte(
     });
     const combined = [...leftResult.rows, ...remapped];
     const rows = query.all ? combined : deduplicateRows(combined, leftCols);
-    const result: SelectResult = { type: "SELECT", rows, columns: leftCols, rowCount: rows.length };
+    const warnings = [...new Set([
+      ...(leftResult.warnings ?? []),
+      ...(rightResult.warnings ?? []),
+    ])];
+    const result: SelectResult = {
+      type: "SELECT", rows, columns: leftCols, rowCount: rows.length, warnings,
+    };
     if (captureColumnMeta) {
       materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
     }
@@ -4919,7 +5040,9 @@ async function executeQueryWithCte(
   if (!hasCteRef) {
     // トップレベルに CTE 参照なし → 通常の SELECT 実行。
     // ただしサブクエリ内の CTE / 一時テーブル参照があり得るため cteCache は引き継ぐ
-    return executeSelect(query, client, options, cacheContext, cteCache, captureColumnMeta, false);
+    return executeSelect(
+      query, client, options, cacheContext, cteCache, captureColumnMeta, false, "DERIVED"
+    );
   }
 
   // CTE 参照あり → FULL_SCAN で CTE 行を注入
@@ -4984,6 +5107,19 @@ async function executeFullScanWithCte(
     if (table.cteName !== null) requireMaterializedTable(table.cteName);
   }
 
+  const { resolver: choiceAndWindowResolver } = await normalizeSelectChoiceEquality(
+    stmt,
+    client,
+    cacheContext,
+    cteCache,
+    hasDefaultRangeAggregateWindow(stmt)
+  );
+  const defaultRangeWarnings = collectDefaultRangeWindowWarnings(
+    stmt,
+    choiceAndWindowResolver,
+    "DERIVED"
+  );
+
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const parallel = options.fetchParallel ?? 1;
@@ -4994,7 +5130,7 @@ async function executeFullScanWithCte(
     resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
     resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
   ]);
-  const whereCapability = await resolveSelectWhereCapability(stmt, client, cacheContext, cteCache);
+  const whereCapability = classifyWhereCapability(stmt.where, choiceAndWindowResolver);
   if (whereCapability.capability === "UNSUPPORTED") {
     throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(whereCapability)}).`);
   }
@@ -5142,7 +5278,10 @@ async function executeFullScanWithCte(
     client,
     cacheContext
   );
-  return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] };
+  return mergeSelectWarnings(
+    { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [...warnings] },
+    defaultRangeWarnings
+  );
 }
 
 async function restoreEmptyWildcardColumns(
@@ -9429,6 +9568,10 @@ interface ExplainWhereAnalysis {
 // EXPLAIN renderer は schema-aware analysis が一度だけ生成した runtime plan object を参照する。
 // renderer 側で JOIN predicate を再抽出・再分類しない。
 const explainJoinPushdownPlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+const explainChoiceEqualityRewrites = new WeakMap<
+  SelectStatement,
+  readonly ChoiceEqualityRewrite[]
+>();
 
 interface ValidateExplainInfo {
   targetFields: string[];
@@ -9508,7 +9651,11 @@ async function buildExplainWhereAnalysis(
         || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
         physicalApps.forEach((appId) => fieldApps.add(appId));
       }
-      const capability = await resolveSelectWhereCapability(select, tracedClient, cacheContext);
+      const { resolver, rewrites } = await normalizeSelectChoiceEquality(
+        select, tracedClient, cacheContext
+      );
+      if (rewrites.length > 0) explainChoiceEqualityRewrites.set(select, rewrites);
+      const capability = classifyWhereCapability(select.where, resolver);
       const relativeNode = relativeNodeFor(select);
       if (capability.capability === "UNSUPPORTED" && !relativeNode) {
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
@@ -9642,7 +9789,11 @@ async function buildExplainWhereAnalysis(
   if (typeof query === "object" && query !== null && (query as { type?: string }).type === "WITH"
     && canInlineSingleCte(query as WithStatement)) {
     const inlined = buildInlinedQuery(query as WithStatement);
-    const capability = await resolveSelectWhereCapability(inlined, tracedClient, cacheContext);
+    const { resolver, rewrites } = await normalizeSelectChoiceEquality(
+      inlined, tracedClient, cacheContext
+    );
+    if (rewrites.length > 0) explainChoiceEqualityRewrites.set(inlined, rewrites);
+    const capability = classifyWhereCapability(inlined.where, resolver);
     const relativeNode = relativeNodeFor(inlined);
     if (capability.capability === "UNSUPPORTED" && !relativeNode) {
       throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
@@ -10617,6 +10768,17 @@ function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
   return lines;
 }
 
+function formatChoiceEqualityRewrite(rewrite: ChoiceEqualityRewrite): string {
+  const field = rewrite.field.tableAlias
+    ? `${rewrite.field.tableAlias}.${rewrite.field.field}`
+    : rewrite.field.field;
+  const originalValue = rewrite.value.replace(/'/g, "''");
+  const normalizedValue = rewrite.value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const normalizedOperator = rewrite.normalizedOperator === "IN" ? "in" : "not in";
+  return `  pushdown normalized: ${field} ${rewrite.originalOperator} '${originalValue}' -> ` +
+    `${field} ${normalizedOperator} ("${normalizedValue}")`;
+}
+
 function buildSelectPlan(
   stmt: SelectStatement,
   label?: string,
@@ -10658,6 +10820,11 @@ function buildSelectPlan(
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  for (const rewrite of explainChoiceEqualityRewrites.get(stmt)
+    ?? choiceEqualityRewritesBySelect.get(stmt)
+    ?? []) {
+    lines.push(formatChoiceEqualityRewrite(rewrite));
+  }
   if (groupingMetadata) {
     lines.push(`  grouping source: ${groupingMetadata.source}`);
     lines.push(
