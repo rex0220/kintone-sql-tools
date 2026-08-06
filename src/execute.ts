@@ -5449,8 +5449,24 @@ async function fetchTableRecordsForFullScan(
     return resolved.records;
   }
 
-  // サブテーブル仮想テーブルは親レコードを取得して展開する
-  const parentQuery = isMainTable ? "" : "";
+  // サブテーブル仮想テーブルは親レコードを取得して展開する。
+  //
+  // B144: 以前はここが `isMainTable ? "" : ""`（両辺とも空文字）で、親クエリを一切
+  // 組み立てていなかった。一方 EXPLAIN は WHERE 全体が exact に押し下げられる場合に
+  // `kintone query:` を表示するため、「計画は EXACT・実行は全件取得」と食い違っていた。
+  //
+  // EXPLAIN と同じ条件（WHERE 全体が EXACT_PUSHDOWN）でだけ押し下げる。exact なら
+  // 述語は親項目だけで構成されており、親を絞っても行は落ちない（`_pid` などの
+  // サブテーブル側システム列や明細項目を含む WHERE は EXACT にならない）。
+  // 取得後に元の WHERE をローカルで再評価する点は従来どおり。
+  const parentQuery = isMainTable
+    && allowOriginalWherePushdown
+    && stmt.joins.length === 0
+    && stmt.where !== null
+    && resolvedWhereCapabilities.get(stmt)?.capability === "EXACT_PUSHDOWN"
+    && !whereRequiresJsEval(stmt.where)
+    ? whereToKintone(stmt.where)
+    : "";
   const parentResolved = await fetchRecordsForSharedPlan(client.getRecords, table.appId, parentQuery, fields, {
     parallel,
     maxRecords,
