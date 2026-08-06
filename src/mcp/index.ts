@@ -18,6 +18,7 @@ import {
   resolveKsqlDocsSection,
 } from "./docsResources";
 import { createKsqlMcpTools, toErrorPayload, toToolResult } from "./tools";
+import { SERVER_VERSION } from "./serverVersion";
 import { MCP_STDIO_MAX_BUFFER_BYTES } from "./stdioLimits";
 import { STATEMENT_SYNTAX_PARAGRAPH } from "./statementSyntaxCatalog";
 import {
@@ -82,11 +83,6 @@ Nested JSON/CSV subtable mutation is fail-closed on MCP: use VALIDATE ONLY/EXPLA
 JSON child IDs are rejected and replacement renumbers all rows.
 `);
 }
-
-/** esbuild の define(build-mcp.mjs)で package.json の version が埋め込まれる。
- *  バンドル外(ts-jest 等)では未定義のため typeof ガードでフォールバックする */
-declare const __KSQL_VERSION__: string;
-const SERVER_VERSION = typeof __KSQL_VERSION__ === "string" ? __KSQL_VERSION__ : "0.0.0-dev";
 
 const FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog — Scalar: ${KSQL_FUNCTION_CATALOG.scalar.join(" ")}. Aggregate: ${KSQL_FUNCTION_CATALOG.aggregate.join(" ")}. Variance and standard-deviation aggregates use explicit POP/SAMP names; unqualified STDDEV and VARIANCE are unsupported. Window: ${KSQL_FUNCTION_CATALOG.window.join(" ")} (OVER and AS alias required). Contextual: ${KSQL_FUNCTION_CATALOG.contextual.join(" ")} (kintone predicates; WHERE server-only/fail-closed; INNER JOIN direct-APP exact pushdown supported; local LOGINUSER is empty on all surfaces). Aliases: ${KSQL_FUNCTION_CATALOG.aliases.join(" ")}. Syntax: ${KSQL_FUNCTION_CATALOG.syntax.join(" ")}. This list is complete; functions from other dialects such as IFNULL do not exist. Use ksql_docs for arguments and constraints.`;
 

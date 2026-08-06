@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildDocsResourceMap, type KsqlDocsResourceMap } from "./docsResourceBuilder.cjs";
+import { SERVER_VERSION } from "./serverVersion";
 
 declare const __KSQL_DOCS__: KsqlDocsResourceMap;
 
@@ -69,8 +70,23 @@ export const KSQL_DOCS_SECTION_KEYS = Object.freeze([
   ...RECIPE_KEYS.map((key) => `recipes/${key}`),
 ]);
 
+/**
+ * B101 再開 — 索引の先頭で常駐プロセスの版を名乗る。
+ *
+ * 版数は initialize（serverInfo.version と v3.34.1 で入れた instructions）にもあるが、
+ * どちらもセッション開始時にしか届かない。B101 §4 に限界として書いてあったとおり、
+ * 「版を確かめよう」と思った人が取りに行ける場所には無かった。
+ * ここは tool の返り値なので、いつでも取り直せる。
+ * CLI の `--version` は別プロセスの版なので、混同しないよう明記する。
+ */
+export const KSQL_DOCS_VERSION_LINE =
+  `kSQL MCP server version ${SERVER_VERSION}`
+  + " — the resident process that answered this call."
+  + " A CLI `--version` reports a different process and can disagree.";
+
 export function buildKsqlDocsIndex(): string {
   return [
+    KSQL_DOCS_VERSION_LINE,
     KSQL_DOCS.languageReference.index.trimEnd(),
     'Tool fallback example: ksql_docs {"section":"language-reference/05-string-number-functions"}',
     KSQL_DOCS.recipes.index.trimEnd(),

@@ -3,6 +3,32 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.56.3（2026-08-06）
+
+### 改善（B101 再開 — 常駐 MCP の版を `ksql_docs` で確かめられるようにする）
+
+**`ksql_docs` を引数なしで呼ぶと、索引の先頭で版を名乗ります。**
+
+```
+kSQL MCP server version 3.56.3 — the resident process that answered this call.
+A CLI `--version` reports a different process and can disagree.
+```
+
+**MCP は常駐プロセスなので、`npm install` してもクライアントを再読み込みするまで
+差し替わりません。** `ksql.js --version` は**別プロセス（CLI）の版**です。
+
+**v3.34.1 で `instructions` の 1 行目に版数を入れましたが、それだけでは足りませんでした。**
+`instructions` が文脈に入るのは**会話の開始時に 1 回**だけで、
+**「版を確かめよう」と思った人が取りに行ける場所ではありません**。
+実際に、CLI の `--version` を常駐 MCP の版だと思って測り、
+**新しいほうの版を見て「更新済み」と判断する**取り違えが起きました。
+
+**`instructions` の 1 行目は残ります。**押し付けと引き出しは別の役割です。
+
+- **版数の出所は `src/mcp/serverVersion.ts` の 1 つ**にまとめました。
+  `instructions` と索引が別々に版を書くと、片方だけ古くなります
+- **`ksql_docs` の出力はこの 1 行が増えるだけ**で、章の内容も節キーも変わりません
+
 ## v3.56.2（2026-08-06）
 
 ### 改善（B145 警告文が症状と合っていなかった）

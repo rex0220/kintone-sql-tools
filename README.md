@@ -96,6 +96,8 @@ env -u KSQL_USERNAME -u KSQL_PASSWORD npm test
 
 言語リファレンス・レシピは MCP resources（`ksql://language-reference` / `ksql://recipes`）に加えて、read-only ツール **`ksql_docs`** でも読めます。中継環境（リモート接続のプロキシ等）が resources を通さないクライアントでは、`ksql_docs` を引数なしで呼ぶと全章キーの索引が返るので、必要な章だけ `{"section":"language-reference/05-string-number-functions"}` の形で取得してください。
 
+**今つながっている MCP が何版かは、`ksql_docs` を引数なしで呼ぶと索引の先頭行で分かります**（v3.56.3〜）。**MCP は常駐プロセスなので、`npm install` してもクライアントを再読み込みするまで差し替わりません。**`ksql.js --version` は別プロセス（CLI）の版なので、常駐 MCP の版とは食い違うことがあります。**測定結果が期待と違うときは、まず索引の先頭行で版を確かめてください。**
+
 注意:
 
 - `APP@profile` と `LAPP_<NAME>[@profile]` は Node.js runtime（CLI / MCP）の拡張です。plugin 側では非対応です。
