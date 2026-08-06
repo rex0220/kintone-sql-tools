@@ -6048,8 +6048,8 @@ test("UPDATE SET スカラーサブクエリ — 非集計で 0 行返す場合�
   ).rejects.toThrow("値を返しませんでした");
 });
 
-test("UPDATE SET スカラーサブクエリ — 0 件集計は 0 に解決される（v1.12.0）", async () => {
-  // GET 1回目: MAX(合計費用) のサブクエリ → 0 件 → 0 に解決
+test("UPDATE SET スカラーサブクエリ — 0 件の MAX は空に解決される（B142 で 0 から変更）", async () => {
+  // GET 1回目: MAX(合計費用) のサブクエリ → 0 件 → 空文字に解決
   // GET 2回目: UPDATE 対象の $id 取得
   const updateRecords = [makeRecord({ $id: "1" })];
   let getCallCount = 0;
@@ -6066,7 +6066,9 @@ test("UPDATE SET スカラーサブクエリ — 0 件集計は 0 に解決さ�
   ) as UpdateResult;
 
   expect(client.putCalls).toHaveLength(1);
-  expect(client.putCalls[0].records[0].record["上限費用"].value).toBe("0");
+  // B142: 該当が 0 件のとき「最大値は 0」と書き込むのは事実に反するため空にする。
+  // 標準 SQL の MAX(空集合) = NULL に対応し、kSQL の NULL 相当は空文字。
+  expect(client.putCalls[0].records[0].record["上限費用"].value).toBe("");
 });
 
 test("UPDATE SET スカラーサブクエリ — 通常 SET との混在", async () => {

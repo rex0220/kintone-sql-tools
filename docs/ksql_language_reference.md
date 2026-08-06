@@ -1465,8 +1465,8 @@ GROUP BY 年月                              -- 式に付けたエイリアス�
 | `COUNT(フィールド)` | 空でない行数 | 空文字・NULL はスキップ |
 | `SUM(フィールド)` | 合計 | 空文字・NULL はスキップ |
 | `AVG(フィールド)` | 平均 | 空文字・NULL はスキップ |
-| `MAX(フィールド)` | 最大値 | NULL はスキップ。選択された空セルは canonical empty band の候補 |
-| `MIN(フィールド)` | 最小値 | NULL はスキップ。選択された空セルは canonical empty band の候補 |
+| `MAX(フィールド)` | 最大値 | NULL はスキップ。選択された空セルは canonical empty band の候補。値が無ければ空文字 |
+| `MIN(フィールド)` | 最小値 | NULL はスキップ。選択された空セルは canonical empty band の候補。値が無ければ空文字 |
 | `GROUP_CONCAT([DISTINCT] 引数 [SEPARATOR '区切り'])` | 文字列連結 | 空文字・NULL はスキップ |
 | `VAR_POP([DISTINCT] 引数)` | 母集団分散 | 空文字・NULL はスキップ |
 | `VAR_SAMP([DISTINCT] 引数)` | 標本分散 | 空文字・NULL はスキップ |
@@ -1504,6 +1504,16 @@ SELECT
 FROM APP100
 GROUP BY 部署
 ```
+
+> **集計する値が 1 つも無いときの戻り値。** `GROUP BY` の無い集計は、対象が 0 行でも 1 行を返します（SQL 標準と同じ）。そのときの値は関数で分かれます。
+>
+> | 関数 | 値が無いとき | 標準 SQL |
+> |---|---|---|
+> | `COUNT(*)` / `COUNT(フィールド)` | `0` | `0`（一致） |
+> | `SUM` / `AVG` | `0` | `NULL` |
+> | `MIN` / `MAX` / `MODE` / `MEDIAN` / 統計集約 | **空文字** | `NULL` |
+>
+> **空文字は kSQL の NULL 相当**です。`MIN` / `MAX` は v3.54.0 で `0` から空文字へ変わりました（→ [CHANGELOG](../CHANGELOG.md)）。`SUM` / `AVG` が `0` を返すのは、**空セルが算術で `0` になる**という kSQL 全体の規約に合わせているためです。「合計が本当に `0`」と「対象が 1 件も無い」を区別したいときは `COUNT` を併記してください。
 
 - `CASE` の `ELSE` を省略した非一致行は集計から除外されます。したがって `COUNT(CASE WHEN 条件 THEN 1 END)` は一致件数です
 - 条件に一致して選択された空セルと、明示した `ELSE ''` は、`MIN` / `MAX` では既存の canonical empty band の候補に残ります。`SUM` / `AVG` / `GROUP_CONCAT` / 統計集約 / `MODE` の空値規約は従来どおりです

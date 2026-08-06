@@ -600,14 +600,20 @@ test("空入力 + GROUP BY なし + COUNT(*) → 0 の 1 行", () => {
   expect(result[0]["cnt"]).toBe("0");
 });
 
-test("空入力 + GROUP BY なし: 全集計関数が 0 を返す", () => {
+test("空入力 + GROUP BY なし: 合算系は 0・比較系は空文字（B142）", () => {
   const stmt = parseSelect(
     "SELECT COUNT(金額) AS c, COUNT(DISTINCT 金額) AS cd, SUM(金額) AS s, AVG(金額) AS a, MAX(金額) AS mx, MIN(金額) AS mn FROM APP100"
   );
   const result = applyGroupBy([], stmt.groupBy, stmt.columns);
   expect(result).toHaveLength(1);
-  for (const key of ["c", "cd", "s", "a", "mx", "mn"]) {
+  for (const key of ["c", "cd", "s", "a"]) {
     expect(result[0][key]).toBe("0");
+  }
+  // B142 で MIN / MAX を 0 から空文字へ変更した。全値空グループが空文字を返すのに
+  // 空集合だけ 0 を返しており、値が 0 個か 1 個かで結果が割れていたため。
+  // MODE / MEDIAN / 統計集約は以前から空文字。
+  for (const key of ["mx", "mn"]) {
+    expect(result[0][key]).toBe("");
   }
 });
 
