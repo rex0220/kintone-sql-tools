@@ -7,44 +7,68 @@ import type { SelectStatement } from "../types/ast";
 import { runFullScan } from "../engine/process";
 
 /**
- * B141 の再発防止（4 回目で機械化）。
+ * B141 の再発防止。
  *
- * 言語リファレンスの「集計する値が 1 つも無いときの戻り値」の表と、エンジンの実際の
- * 戻り値が一致することを固定する。B142 で MIN / MAX を 0 から空文字へ変えたとき、
- * 同じ文書の別の表が 0 のまま残り、文書内で矛盾していた。
+ * 言語リファレンスの「集計する値が無いときの戻り値」を書いた表と、エンジンの実際の
+ * 戻り値が一致することを固定する。
  *
- * B136 の列名パリティ（b136DocsColumnParity.test.ts）と同じ形。文書が機械照合できる
- * 形で書かれていれば、挙動を変えたときに文書側が落ちる。
+ * v3.54.1 でマーカー 1 つ分の表だけを照合したところ、**同じ節にあるもう 1 つの表**
+ * （§8「0 件時の挙動」）を素通りさせ、5 回目を出した。そこで
+ * **「値が無いとき」列を持つ表をすべて自動で見つけて照合する**形にしてある。
+ * 表を新しく足しても、その列名を使う限り自動で検査対象になる。
  */
 
 const DOC = resolve(__dirname, "../../docs/ksql_language_reference.md");
 
-/** 表の 1 行から関数名と期待値を取り出す。 */
-type DocRow = { funcs: string[]; expected: string };
+/** 空集合の戻り値を書いた表だと判定する列見出し。 */
+const VALUE_COLUMN = /値が無いとき|0 件時の値/;
 
-function parseEmptySetTable(): DocRow[] {
-  const text = readFileSync(DOC, "utf8");
-  // 句読点や「（実測・vX.Y.Z）」の刻印を含めない。刻印を更新しただけで落ちないようにする。
-  const marker = "集計する値が 1 つも無いときの戻り値";
-  const start = text.indexOf(marker);
-  expect(start).toBeGreaterThan(-1);
-  // 表は marker と同じブロッククォートの中にある。`>` で始まらない行が来たら終わり
-  // （ブロッククォート内の空行も `>` 単独なので、空行では切らない）。
-  const block: string[] = [];
-  for (const line of text.slice(start).split(/\r?\n/)) {
-    if (block.length > 0 && !line.startsWith(">")) break;
-    block.push(line);
+type DocRow = { funcs: string[]; expected: string; table: string };
+
+function cellsOf(line: string): string[] {
+  return line.replace(/^>\s*/, "").split("|").map((c) => c.trim());
+}
+
+/** バッククォートで囲まれた各断片の先頭識別子を関数名として拾う。 */
+function functionsIn(cell: string): string[] {
+  const names: string[] = [];
+  for (const m of cell.matchAll(/`([^`]+)`/g)) {
+    const head = /^([A-Z_]+)/.exec(m[1]);
+    if (head) names.push(head[1]);
   }
+  return names;
+}
+
+/** 「空文字」と書いてあれば空、そうでなければ最初のバッククォート断片を値とみなす。 */
+function expectedIn(cell: string): string {
+  if (/空文字/.test(cell)) return "";
+  const first = /`([^`]*)`/.exec(cell);
+  return (first ? first[1] : cell).replace(/["'*]/g, "").trim();
+}
+
+function parseEmptySetTables(): DocRow[] {
+  const lines = readFileSync(DOC, "utf8").split(/\r?\n/);
   const rows: DocRow[] = [];
-  for (const line of block) {
-    const cells = line.replace(/^>\s*/, "").split("|").map((c) => c.trim());
-    // | 関数 | 値が無いとき | 標準 SQL | の 3 列（前後の空セルを含めて 5 要素）
-    if (cells.length !== 5 || cells[1] === "関数" || /^-+$/.test(cells[1])) continue;
-    const funcs = [...cells[1].matchAll(/`([A-Z_]+)`/g)].map((m) => m[1]);
-    if (funcs.length === 0) continue;
-    const value = cells[2];
-    const expected = /空文字/.test(value) ? "" : value.replace(/[`*]/g, "");
-    rows.push({ funcs, expected });
+  let valueIndex = -1;
+  let tableLabel = "";
+  for (const line of lines) {
+    const cells = cellsOf(line);
+    if (cells.length < 3 || !line.includes("|")) {
+      valueIndex = -1;
+      continue;
+    }
+    if (valueIndex < 0) {
+      const found = cells.findIndex((c) => VALUE_COLUMN.test(c));
+      if (found >= 0) {
+        valueIndex = found;
+        tableLabel = cells.filter(Boolean).join(" | ");
+      }
+      continue;
+    }
+    if (cells.every((c) => c === "" || /^-+$/.test(c))) continue;
+    const funcs = functionsIn(cells[1]);
+    if (funcs.length === 0 || cells[valueIndex] === undefined) continue;
+    rows.push({ funcs, expected: expectedIn(cells[valueIndex]), table: tableLabel });
   }
   return rows;
 }
@@ -60,21 +84,24 @@ function runEmpty(func: string): string {
   return runFullScan({ stmt, tables, aggregateSortKindResolver: () => "string" }).rows[0]["r"];
 }
 
-test("B141: 空集合の戻り値が、言語リファレンスの表と一致する", () => {
-  const rows = parseEmptySetTable();
-  expect(rows.length).toBeGreaterThanOrEqual(3);
-  for (const { funcs, expected } of rows) {
+const SUPPORTED = [
+  "COUNT", "SUM", "AVG", "MIN", "MAX", "MODE", "MEDIAN", "GROUP_CONCAT",
+  "VAR_POP", "VAR_SAMP", "STDDEV_POP", "STDDEV_SAMP",
+];
+
+test("B141: 空集合の戻り値が、言語リファレンスの表すべてと一致する", () => {
+  const rows = parseEmptySetTables();
+  // 「値が無いとき」列を持つ表は 2 つ以上ある（§5 の除数ガードは列名が違うので対象外）。
+  expect(new Set(rows.map((r) => r.table)).size).toBeGreaterThanOrEqual(2);
+  for (const { funcs, expected, table } of rows) {
     for (const func of funcs) {
-      expect(`${func}=${runEmpty(func)}`).toBe(`${func}=${expected}`);
+      if (!SUPPORTED.includes(func)) continue;
+      expect(`${table} / ${func}=${runEmpty(func)}`).toBe(`${table} / ${func}=${expected}`);
     }
   }
 });
 
 test("B141: 集計関数がすべて表に載っている（新しい関数を足したら落ちる）", () => {
-  const documented = new Set(parseEmptySetTable().flatMap((r) => r.funcs));
-  const supported = [
-    "COUNT", "SUM", "AVG", "MIN", "MAX", "MODE", "MEDIAN", "GROUP_CONCAT",
-    "VAR_POP", "VAR_SAMP", "STDDEV_POP", "STDDEV_SAMP",
-  ];
-  expect([...supported].filter((f) => !documented.has(f))).toEqual([]);
+  const documented = new Set(parseEmptySetTables().flatMap((r) => r.funcs));
+  expect(SUPPORTED.filter((f) => !documented.has(f))).toEqual([]);
 });
