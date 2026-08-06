@@ -539,3 +539,62 @@ SELECT 製品名, 個数, 合計 FROM m
 **codex の静的な主張（行を示せるもの）は当たり、動的な主張は外れることがある。**
 **今回も Critical 3 だけが外れ、それは「この SQL は有効形である」という実行しないと分からない主張**だった。
 **codex 自身が §4-5 で「HAVING-only aggregate の現行実測は未確認」と明記していた点は評価できる。**
+
+---
+
+## 6. 既存検査（B65）の到達範囲 — 実測（Claude・2026-08-06・APP4228）
+
+**`groupingValidation.ts` が拡張 grouping 経路で何をしているかを、実機で全数確認した。**
+**R2 のスコープはこれで決まる。**
+
+### 6.1 到達範囲の表
+
+| 検査項目 | 拡張 grouping（`ROLLUP`） | ordinary `GROUP BY` |
+|---|---|---|
+| **`SELECT` の非集計列** | ✅ エラー | ❌ **素通り** |
+| **`HAVING` の非集計列** | ✅ エラー | ❌ **素通り** |
+| **`ORDER BY` の非集計列** | ✅ エラー | ❌ **素通り** |
+| **`SELECT *`** | ✅ 拒否 | ❌ **素通り** |
+| **JOIN の修飾名** | ✅ エラー（**`t.個数` と名指し**） | ❌ **素通り** |
+| **CTE の中** | ✅ エラー | ❌ **素通り** |
+| **キーへの式**（`個数 + 1`） | ✅ **許可・値も正しい**（キー 646 → 647） | — |
+| **別名の grouping item** | ❌ **拒否**（物理フィールドのみ） | ✅ **許可**（§8 の契約・**主用途**） |
+| **式の grouping item** | ❌ **拒否**（物理フィールドのみ） | ✅ **許可** |
+
+**実測したエラー文**
+
+```
+B65 non-aggregate field 個数 in SELECT is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).
+B65 non-aggregate field 個数 in HAVING is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).
+B65 non-aggregate field 個数 in ORDER BY is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).
+B65 non-aggregate field t.個数 in SELECT is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).
+B65 wildcard projection is not supported in Phase1.
+B65 field 年月 does not exist in a physical APP source.
+```
+
+### 6.2 **R2 のスコープはこれで決まる**
+
+**句の走査・JOIN 修飾・CTE 適用・wildcard・キーへの式**——
+**R1 が設計しようとしていたものは、ほぼ全部すでにある。**
+
+**足りないのは 1 点だけ**＝**grouping item を物理フィールドしか受け付けない。**
+
+**ordinary `GROUP BY` は別名と式を許す**（§8 の契約）ので、**そこを教えれば残りは付いてくる。**
+
+**したがって R2 の中心は次になる。**
+
+> **既存検査の grouping item identity を、別名（`ALIAS_SAFE`）と式（`EXPRESSION`）へ広げ、
+> そのうえで ordinary `GROUP BY` と `GROUP BY` 無し集計で検査を有効にする。**
+
+**これは codex の Critical 2 の推奨（案 B＝plan と `stmt.groupBy[index]` から
+resolved grouping identity を構築する）とちょうど噛み合う。**
+
+### 6.3 副産物
+
+- **エラー文が内部語である**（`B65 ... (reason=...)`）。
+  **ordinary へ広げるときに R1 §4.3 の要件へ揃えれば、拡張 grouping 側も同時に良くなる**
+- **`B65 wildcard projection is not supported in Phase1.`** は
+  **開発時の Phase ラベルが利用者に漏れている**。合わせて直す
+- **`GROUP BY ROLLUP(日付)` に対する `SELECT DATE_FORMAT(日付,'%Y-%m')` は通り、値も正しい**
+  （日ごとの合計に月のラベルが付く。**見た目は紛らわしいが誤りではない**）。
+  **「キーの式は関数従属なので許す」が既に効いている**証拠で、**R2 でもこの挙動を保つ**
