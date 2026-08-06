@@ -528,6 +528,8 @@ human-readable message と machine reason は分離する。文字列transport�
 - 「フィールドが存在しない」と誤読させる表現
 - parserが受理しない `GROUP BY CASE ... END` 等
 - schema上alias衝突するため実行できない修正例
+- **集計の別名を、同じ query block が参照する物理フィールド名と衝突させる形**
+  （実行はできるが [B147](ksql_b147_aggregate_alias_shadows_key_input_issue.md) を踏む。→ §8.3 の注記）
 
 ### 8.3 単純列の骨子
 
@@ -536,7 +538,7 @@ ArgumentError: SELECT 式「個数」は集計もグループ化もされてい�
 （APP4228、非グループ化依存: 個数）。
 GROUP BY 製品名の各グループでは、どの行の個数を返すか決まりません。
   グループごとに1つの値を選ぶなら:
-    SELECT 製品名, MIN(個数) AS 個数, SUM(個数) AS 合計
+    SELECT 製品名, MIN(個数) AS 最小個数, SUM(個数) AS 合計
     FROM APP4228 GROUP BY 製品名
   個数ごとに行を分けるなら:
     SELECT 製品名, 個数, SUM(個数) AS 合計
@@ -551,7 +553,7 @@ ArgumentError: SELECT 式「個数」は集計もグループ化もされてい�
 （APP4228、非グループ化依存: 個数）。
 GROUP BY がないため入力全体が1グループになり、どの行の個数を返すか決まりません。
   全体から1つの値を選ぶなら:
-    SELECT MIN(個数) AS 個数, SUM(個数) AS 合計 FROM APP4228
+    SELECT MIN(個数) AS 最小個数, SUM(個数) AS 合計 FROM APP4228
   個数ごとに行を分けるなら:
     SELECT 個数, SUM(個数) AS 合計 FROM APP4228 GROUP BY 個数
 (reason=B65_NON_GROUPED_DEPENDENCY)
@@ -599,6 +601,10 @@ GROUP BY 製品名, 区分
 aliasがない、重複している、または物理同名フィールドへ解決される場合は、そのaliasを使う案を出さない。
 
 新しいaliasを案内する場合は、source schemaおよびSELECT出力aliasと衝突しない名前を選び、完成SQLを再parseできることを保証する。
+
+**`GROUP BY` へ列を足す案では、足した列を射影しない完成SQLを示さない。**
+示す場合は、足した列も `SELECT` に含めるか、**同じ値の行が並ぶ**旨を 1 行添える
+（`GROUP BY 製品名, 区分` に対し `区分` だけを射影すると「大」が何行も並び、利用者には壊れた表に見える。実測）。
 
 ### 8.7 scalar subquery
 
@@ -927,7 +933,7 @@ outer SELECTのgrouping identityを内側へ引き継いではならない。
 右armの違反を、左右どちらのrecords APIも呼ぶ前に検出する。
 
 ```sql
-SELECT 製品名, MIN(個数) AS 個数, SUM(個数) AS 合計
+SELECT 製品名, MIN(個数) AS 最小個数, SUM(個数) AS 合計
 FROM APP4228
 GROUP BY 製品名
 UNION ALL
@@ -1367,6 +1373,11 @@ statement全体のrecords API countと、違反query blockに起因するcount�
 
 次の各surfaceで、表示された修正SQLをそのまま再parse・実行し、成功すること。
 
+**あわせて、表示された修正SQLが次のどちらにもなっていないこと。**
+- 集計の別名が、同じ query block の参照する物理フィールド名と衝突する形（[B147](ksql_b147_aggregate_alias_shadows_key_input_issue.md)）
+- `GROUP BY` へ足した列を射影せず、同じ値の行が並ぶ形
+
+
 - `GROUP BY` あり
 - `GROUP BY` なし
 - HAVING
@@ -1516,4 +1527,16 @@ FROM APP4228 GROUP BY 製品名, 区分
 **どちらも、次に読む人が最初に思いつく形である。**
 
 **R3 は両方を踏まえたうえで、`ALIAS_SAFE` の広さ・部分木一致・移行案の実行可能性という
-「実際に踏む」側の問題を先に潰している。** **§17.2 を直せば実装に出せる。**
+「実際に踏む」側の問題を先に潰している。**
+
+### 17.6 指摘の反映（2026-08-06・Claude）
+
+**§17.2 / §17.3 を本文へ反映した。R3 はこの状態で実装依頼に出す。**
+
+| 反映先 | 内容 |
+|---|---|
+| §8.2 | 禁止リストへ「**集計の別名を、同じ query block が参照する物理フィールド名と衝突させる形**」を追加 |
+| §8.3 / §8.4 / §9.8 | 骨子と受入例の別名を `個数` → **`最小個数`** へ（§8.8 と揃えた） |
+| §8.6 | 「**`GROUP BY` へ足した列を射影しない完成SQLを示さない**」を追加 |
+| §16.5 | 受入へ「表示された修正SQLが **B147 の形** / **同じ値の行が並ぶ形** になっていないこと」を追加 |
+
