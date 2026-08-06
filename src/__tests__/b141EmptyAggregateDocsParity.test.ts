@@ -24,7 +24,8 @@ type DocRow = { funcs: string[]; expected: string };
 
 function parseEmptySetTable(): DocRow[] {
   const text = readFileSync(DOC, "utf8");
-  const marker = "**集計する値が 1 つも無いときの戻り値。**";
+  // 句読点や「（実測・vX.Y.Z）」の刻印を含めない。刻印を更新しただけで落ちないようにする。
+  const marker = "集計する値が 1 つも無いときの戻り値";
   const start = text.indexOf(marker);
   expect(start).toBeGreaterThan(-1);
   // 表は marker と同じブロッククォートの中にある。`>` で始まらない行が来たら終わり
