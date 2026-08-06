@@ -7,28 +7,6 @@ kSQL は kintone アプリを SQL ライクな構文で操作する言語です�
 > 本書は言語仕様を中心に記載しています。CLI / プラグインの UI・運用オプションは補足扱いです。
 > 実行時オプションの詳細は `README.md` および `docs/ksql_cli_console_spec.md` を参照してください。
 
-> **⚠ v3.25.0 の破壊的変更（minor リリース）**  
-> `^3` の利用者にも自動更新で届きます。`WHERE` の `TODAY()` / `NOW()` / `LOGINUSER()` は
-> kintone REST query へ安全に押し下げられる形だけを許可し、従来 client 評価へ落ちていた形は
-> レコード取得前に `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` で拒否します。また、
-> ユーザー系・複数選択系へ型に合わない演算子を書くと、従来の silent 0 rows ではなく
-> `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で拒否します。
->
-> 新たにエラーになる代表例は `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、
-> `WHERE $id >= TODAY()`、および押し下げ不能な `OR` / `NOT` / JOIN（後述の INNER JOIN
-> 第5-W / 第5-L に該当しない形）/ 入れ子 SELECT /
-> 実体化文脈の `UNION` 枝にある `TODAY()` / `NOW()` / `LOGINUSER()` です。
-> ユーザー系・複数選択系は `in` / `not in` を使い、`WHERE` 全体または関数 leaf を
-> 押し下げ可能な形へ書き換えるか、`TODAY()` / `NOW()` を固定の日付・日時リテラルへ
-> 置き換えてください。
->
-> **同時に利用可能な形も増えます。** 従来 kSQL で表現できなかった
-> `WHERE 作成者 in (LOGINUSER())` を追加しました。`TODAY()` / `NOW()` は相対日付関数と同じ
-> server-only の計画になり、たとえば
-> `WHERE 日付 = TODAY() AND LENGTH(件名) > 1` は日付条件を server prefilter へ押し下げ、
-> client は残余だけを評価します。B75 により whole-WHERE exact なら CTE 本体・
-> `WITH` の最終 SELECT・一時テーブル source でも使えます。
-
 ---
 
 ## 目次
@@ -880,14 +858,15 @@ SELECT ROUND(金額 * 1.1, 0) AS 税込金額 FROM APP100
 
 ## 6. WHERE 句
 
-> **⚠ v3.25.0 移行注意（minor だが破壊的）:** `^3` にも自動更新で届きます。
-> `WHERE 作成者 = 'taro'`、`WHERE 日付 = NOW()`、`WHERE $id >= TODAY()`、および
-> 押し下げ不能位置の `TODAY()` / `NOW()` / `LOGINUSER()` は取得前エラーになります。
-> ユーザー系・複数選択系は `in` / `not in` を使い、関数条件を押し下げ可能にするか、
-> 固定の日付・日時リテラルへ置換してください。一方、
-> `WHERE 作成者 in (LOGINUSER())` が新たに使えます。
-> `WHERE 日付 = TODAY() AND LENGTH(件名) > 1` は日付条件を server prefilter へ押し下げ、
-> B75 により whole-WHERE exact なら CTE 本体・一時テーブルでも使用できます。
+> **ユーザー系・複数選択系には `in` / `not in` を使います。** 型に合わない演算子
+> （`WHERE 作成者 = 'taro'` など）は `WHERE_OPERATOR_INVALID_FOR_FIELD_TYPE` で
+> レコード取得前に拒否します（0 件を静かに返すことはありません）。
+>
+> **`TODAY()` / `NOW()` / `LOGINUSER()` は kintone REST query へ押し下げられる形だけ**
+> 使用できます。押し下げ不能な位置に書くと
+> `WHERE_KINTONE_FUNCTION_REQUIRES_EXACT_PUSHDOWN` で拒否します（`WHERE 日付 = NOW()`
+> のような型不一致、`WHERE $id >= TODAY()` も同様）。使用できる 4 つの形は
+> [§5 kintone クエリ関数](#kintone-クエリ関数server-only)にあります。
 
 ### 比較演算子
 
@@ -1661,7 +1640,8 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 | 集計 | 0 件時の値 |
 |------|-----------|
 | `COUNT(*)` / `COUNT(f)` / `COUNT(DISTINCT f)` | `0` |
-| `SUM` / `AVG` / `MAX` / `MIN` | `0`（**標準 SQL の NULL とは異なります**） |
+| `SUM` / `AVG` | `0`（**標準 SQL の NULL とは異なります**） |
+| `MAX` / `MIN` | `""`（空文字・**v3.54.0 で `0` から変更**） |
 | `GROUP_CONCAT` | `""`（空文字） |
 | `VAR_POP` / `STDDEV_POP` / `VAR_SAMP` / `STDDEV_SAMP` / `MEDIAN` | `""`（空文字） |
 | `MODE` | `""`（空文字） |
