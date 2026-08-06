@@ -47,22 +47,22 @@ const staticRejections = [
   [
     "B65-SV02",
     withKorderGrouping,
-    "ArgumentError: B65 KORDER BY is not supported in Phase1.",
+    "ArgumentError: KORDER BY is not supported with extended grouping.",
   ],
   [
     "B65-SV03",
     withWindowGrouping,
-    "ArgumentError: B65 window functions are not supported in Phase1.",
+    "ArgumentError: window functions are not supported with extended grouping.",
   ],
   [
     "B65-SV04",
     () => parseSelect("SELECT *, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名)"),
-    "ArgumentError: B65 wildcard projection is not supported in Phase1.",
+    "ArgumentError: SELECT wildcard は集計 query では使用できません。必要な grouping 列を明示してください (reason=B65_NON_GROUPED_DEPENDENCY).",
   ],
   [
     "B65-SV05",
     () => parseSelect("SELECT GROUPING(会社名) FROM APP1 GROUP BY 会社名"),
-    "ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.",
+    "ArgumentError: GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.",
   ],
 ] as const;
 
@@ -100,7 +100,7 @@ test("B65-SV06: forbidden context の GROUPING() も static/planning 共通で�
     field: { type: "FIELD", tableAlias: null, field: "会社名" },
   } as unknown as SelectStatement["where"];
   const message =
-    "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions.";
+    "ArgumentError: GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions.";
 
   expect(() => analyzeBatch([stmt])).toThrow(message);
   expect(() => validateGroupingStatic(stmt)).toThrow(message);
@@ -186,7 +186,7 @@ test("B65-H11: 通常 GROUP BY の HAVING GROUPING は static/planning とも B6
   const stmt = parseSelect(
     "SELECT 会社名, SUM(売上) FROM APP1 GROUP BY 会社名 HAVING GROUPING(会社名)=0"
   );
-  const message = "ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.";
+  const message = "ArgumentError: GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.";
 
   expect(() => analyzeBatch([stmt])).toThrow(message);
   expect(() => validateGroupingStatic(stmt)).toThrow(message);

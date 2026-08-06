@@ -92,30 +92,23 @@ function fetchedFields(client: RegressionClient, app: number): string[][] {
 }
 
 describe("B71 Step 4 narrow ambiguity regression", () => {
-  test("GROUP BY が参照しない重複 alias は projection・ORDER BY 後勝ちを維持する", async () => {
+  test("GROUP BY が参照しない重複 alias 内の bare dependency は拒否する", async () => {
     const client = makeClient();
-    const result = await execute(
+    await expect(execute(
       "SELECT 区分, 金額 AS x, 名前 AS x, COUNT(*) AS c " +
       "FROM APP100 GROUP BY 区分 ORDER BY x ASC",
       client
-    ) as SelectResult;
-
-    expect(result.rows).toEqual([
-      { 区分: "B", x: "m", c: "1" },
-      { 区分: "A", x: "z", c: "2" },
-    ]);
-    expect(result.columns).toEqual(["区分", "x", "x", "c"]);
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
   });
 
-  test("重複 alias と同名の実列があれば PHYSICAL として受理する", async () => {
+  test("重複 alias と同名の実列は PHYSICAL とし alias 式の bare dependency を拒否する", async () => {
     const client = makeClient();
-    const result = await execute(
+    await expect(execute(
       "SELECT 金額 AS 区分, 名前 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分",
       client
-    ) as SelectResult;
-
-    expect(result.rowCount).toBe(2);
-    expect(fetchedFields(client, 100)[0]).toEqual(["金額", "名前", "区分", "$id"]);
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
   });
 
   test("DISTINCT tuple と projection key は GROUP BY 後も従来どおり", async () => {
@@ -214,17 +207,19 @@ describe("B71 Step 4 surface regression", () => {
     expect(alias.rows).toEqual([{ g: "A", c: "2" }, { g: "B", c: "1" }]);
   });
 
-  test("B59 alias shadowing・重複 alias 後勝ちを GROUP BY query でも維持する", async () => {
-    const shadow = await execute(
+  test("B59 alias shadowing・重複 alias 内の bare dependency は B148 が拒否する", async () => {
+    const shadowClient = makeClient();
+    await expect(execute(
       "SELECT 区分, 金額 AS 名前, COUNT(*) AS c FROM APP100 GROUP BY 区分 ORDER BY 名前",
-      makeClient()
-    ) as SelectResult;
-    const duplicate = await execute(
+      shadowClient
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    const duplicateClient = makeClient();
+    await expect(execute(
       "SELECT 区分, 金額 AS x, 名前 AS x, COUNT(*) AS c FROM APP100 GROUP BY 区分 ORDER BY x",
-      makeClient()
-    ) as SelectResult;
-    expect(shadow.rows.map((row) => row.区分)).toEqual(["B", "A"]);
-    expect(duplicate.rows.map((row) => row.区分)).toEqual(["B", "A"]);
+      duplicateClient
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(shadowClient.getRecords).not.toHaveBeenCalled();
+    expect(duplicateClient.getRecords).not.toHaveBeenCalled();
   });
 
   test("GROUP BY は canonical ORDER を受理し KORDER は既存 shape error で拒否する", async () => {
@@ -247,7 +242,7 @@ describe("B71 Step 4 surface regression", () => {
   ])("B65 %s の alias grouping item は既存 message で拒否する", async (_name, sql) => {
     const client = makeClient();
     await expect(execute(sql, client)).rejects.toThrow(
-      /B65 field g does not exist in a physical APP source/
+      /field g does not exist in a physical APP source/
     );
     expect(client.getRecords).not.toHaveBeenCalled();
   });
@@ -285,56 +280,57 @@ describe("B71 Step 4 surface regression", () => {
 });
 
 describe("B71 Step 4 PHYSICAL nested paths", () => {
-  test("CTE body: alias shadow より PHYSICAL を優先する", async () => {
-    const result = await execute(
+  test("CTE body: PHYSICAL shadow で残る bare dependency を拒否する", async () => {
+    const client = makeClient();
+    await expect(execute(
       "WITH c AS (" +
       "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分" +
       ") SELECT * FROM c",
-      makeClient()
-    ) as SelectResult;
-    expect(result.rowCount).toBe(2);
+      client
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
   });
 
-  test("UNION の左右 branch: alias shadow より PHYSICAL を優先する", async () => {
-    const result = await execute(
+  test("UNION の左右 branch: 左 arm の PHYSICAL shadow 違反を fetch 前に拒否する", async () => {
+    const client = makeClient();
+    await expect(execute(
       "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分 UNION ALL " +
       "SELECT 種別 AS 区分, COUNT(*) AS c FROM APP200 GROUP BY 区分",
-      makeClient()
-    ) as SelectResult;
-    expect(result.rowCount).toBe(4);
+      client
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
   });
 
-  test("scalar subquery body: alias shadow より PHYSICAL を優先する", async () => {
-    const result = await execute(
+  test("scalar subquery body: PHYSICAL shadow 違反を outer fetch 前に拒否する", async () => {
+    const client = makeClient();
+    await expect(execute(
       "SELECT (SELECT 種別 AS 区分 FROM APP200 GROUP BY 区分 LIMIT 1) AS n " +
       "FROM APP100 LIMIT 1",
-      makeClient()
-    ) as SelectResult;
-    expect(result.rows).toEqual([{ n: "L" }]);
+      client
+    )).rejects.toThrow(/非グループ化依存: 種別.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
   });
 
-  test("DML source SELECT: alias shadow より PHYSICAL を優先する", async () => {
+  test("DML source SELECT: PHYSICAL shadow 違反を mutation 前に拒否する", async () => {
     const client = makeClient();
-    const result = await execute(
+    await expect(execute(
       "INSERT INTO APP900 (区分) " +
       "SELECT 金額 AS 区分 FROM APP100 GROUP BY 区分 VALIDATE ONLY",
       client
-    );
-    expect(result).toMatchObject({ type: "VALIDATION", validatedRows: 2, errorCount: 0 });
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
+    expect(client.getRecords).not.toHaveBeenCalled();
     expect(client.postRecords).not.toHaveBeenCalled();
   });
 
-  test("CREATE TEMP TABLE AS SELECT: alias shadow より PHYSICAL を優先する", async () => {
+  test("CREATE TEMP TABLE AS SELECT: PHYSICAL shadow 違反で後続文を skip する", async () => {
     const result = await executeBatch(
       "CREATE TEMP TABLE #t AS " +
       "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分; " +
       "SELECT * FROM #t",
       makeClient()
     );
-    expect(result.statements[1]).toMatchObject({
-      status: "success",
-      result: { rowCount: 2 },
-    });
+    expect(result.statements[0]).toMatchObject({ status: "error" });
+    expect(result.statements[1]).toMatchObject({ status: "skipped" });
   });
 });
 

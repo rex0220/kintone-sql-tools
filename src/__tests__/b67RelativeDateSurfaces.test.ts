@@ -513,7 +513,7 @@ describe("B75+B77+B78+B76 plugin/CLI/MCP/engine-library surface parity", () => {
   test.each([
     [
       "KORDER BY",
-      "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH() KORDER BY $id LIMIT 10",
+      "SELECT COUNT(*) AS c FROM APP100 WHERE 日付 = THIS_MONTH() KORDER BY c LIMIT 10",
     ],
     [
       "subtable",

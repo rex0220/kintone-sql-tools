@@ -88,30 +88,39 @@ function firstFields(client: B71Client, app = 100): string[] {
 describe("B71 Step 3 schema-aware PHYSICAL / ALIAS_SAFE resolution", () => {
   test.each([
     {
-      name: "S1",
-      sql: "SELECT 金額 AS 区分, 区分 AS orig, COUNT(*) AS c FROM APP100 GROUP BY 区分",
-      fields: ["金額", "区分", "$id"],
-    },
-    {
       name: "S2",
       sql: "SELECT 区分 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分",
       fields: ["区分", "$id"],
-    },
-    {
-      name: "S3",
-      sql: "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分",
-      fields: ["金額", "区分", "$id"],
-    },
-    {
-      name: "S4",
-      sql: "SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 区分, 区分 AS orig, COUNT(*) AS c FROM APP100 GROUP BY 区分",
-      fields: ["作成日時", "区分", "$id"],
     },
   ])("$name は実列 区分 で 2 groups を作り必要列だけ fetch する", async ({ sql, fields }) => {
     const client = makeClient();
     const result = await execute(sql, client) as SelectResult;
     expect(result.rowCount).toBe(2);
     expect(firstFields(client)).toEqual(fields);
+  });
+
+  test.each([
+    {
+      name: "S1",
+      sql: "SELECT 金額 AS 区分, 区分 AS orig, COUNT(*) AS c FROM APP100 GROUP BY 区分",
+      dependency: "金額",
+    },
+    {
+      name: "S3",
+      sql: "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分",
+      dependency: "金額",
+    },
+    {
+      name: "S4",
+      sql: "SELECT DATE_FORMAT(作成日時, '%Y-%m') AS 区分, 区分 AS orig, COUNT(*) AS c FROM APP100 GROUP BY 区分",
+      dependency: "作成日時",
+    },
+  ])("$name は実列 区分 を alias より優先し非 grouping dependency を拒否する", async ({ sql, dependency }) => {
+    const client = makeClient();
+    await expect(execute(sql, client)).rejects.toThrow(
+      new RegExp(`非グループ化依存: ${dependency}.*B65_NON_GROUPED_DEPENDENCY`)
+    );
+    expect(client.getCalls).toHaveLength(0);
   });
 
   test.each([
@@ -226,7 +235,7 @@ describe("B71 Step 3 schema-aware PHYSICAL / ALIAS_SAFE resolution", () => {
     const client = makeClient();
     await expect(
       execute("SELECT GROUPING(区分) AS g FROM APP100 GROUP BY g", client)
-    ).rejects.toThrow(/B65 GROUPING\(\) requires GROUP BY ROLLUP or GROUPING SETS/);
+    ).rejects.toThrow(/GROUPING\(\) requires GROUP BY ROLLUP or GROUPING SETS/);
     expect(client.getCalls).toHaveLength(0);
   });
 
@@ -403,19 +412,16 @@ describe("B71 Step 3 nested SELECT paths", () => {
 });
 
 describe("B71 Step 2 EXPLAIN", () => {
-  test("direct APP は runtime と同じ PHYSICAL 解決と fetch fields を表示する", async () => {
+  test("direct APP は runtime と同じ PHYSICAL 解決後に bare dependency を拒否する", async () => {
     const client = makeClient();
-    const result = await execute(
+    await expect(execute(
       "EXPLAIN SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 GROUP BY 区分",
       client
-    ) as SelectResult;
-    const plan = result.rows.map((row) => row["plan"]).join("\n");
-    expect(plan).toContain("group key 区分: PHYSICAL");
-    expect(plan).toContain("fields:        金額, 区分");
+    )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
     expect(client.getCalls).toHaveLength(0);
   });
 
-  test("materialized schema 未確定時は DEFERRED とし alias を false rejection しない", async () => {
+  test("materialized schema を伝播して alias を ALIAS_SAFE と確定する", async () => {
     const client = makeClient();
     const result = await execute(
       "EXPLAIN WITH c AS (SELECT 区分 AS g FROM APP100) " +
@@ -423,7 +429,7 @@ describe("B71 Step 2 EXPLAIN", () => {
       client
     ) as SelectResult;
     const plan = result.rows.map((row) => row["plan"]).join("\n");
-    expect(plan).toContain("group key x: DEFERRED (materialized schema unavailable)");
+    expect(plan).toContain("group key x: ALIAS_SAFE (column=0)");
     expect(client.getCalls).toHaveLength(0);
   });
 });
