@@ -61,13 +61,28 @@ test("B145 案 B: 親から明細項目を選ぶと警告が出る（値は変�
   const warning = (result.warnings ?? []).find((w) => w.includes("数量"));
   expect(warning).toBeDefined();
   expect(warning).toContain("サブテーブル「テーブル」");
-  expect(warning).toContain("全行が空になります");
+  // 症状は書いた場所で変わるので、原因と代表的な現れ方を書く。
+  // 「全行が空」だけだと HAVING で 0 行を見た人が自分の話だと思わない（依頼元の指摘）。
+  expect(warning).toContain("値が取れず");
+  expect(warning).toContain("HAVING");
   // どこから選べばよいかを名指しする。
   expect(warning).toContain("APP100$テーブル");
   // FROM の差し替えだけでは足りない。$id は仮想テーブルに無く、そのまま書くと
   // 今度は $id が空になる（同じ静かな失敗を繰り返す）。codex レビューの指摘。
   expect(warning).toContain("_pid");
   expect(warning).toContain("_p.<フィールドコード>");
+});
+
+test("B145: HAVING では 0 行になる（警告だけが手がかり）", async () => {
+  // 依頼元いわく「いちばん怖い形」。0 行は分析では正当な結論に見えるので、
+  // 警告を読み飛ばすとそのままレポートに載る。値は変えないが、文面で症状を示す。
+  const result = await execute(
+    "SELECT 数値, COUNT(*) AS 件数 FROM APP100 GROUP BY 数値 HAVING MAX(数量) > 0",
+    makeClient(parentRecords())
+  ) as SelectResult;
+  expect(result.rows).toEqual([]);
+  const warning = (result.warnings ?? []).find((w) => w.includes("数量"));
+  expect(warning).toContain("HAVING");
 });
 
 test("B145 案 B: サブテーブルから選んだときは警告を出さない", async () => {
