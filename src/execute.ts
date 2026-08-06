@@ -2933,6 +2933,48 @@ async function executeSelect(
  * B71: source schema が揃った SELECT 単位で plain GROUP BY を解決する。
  * 確定した plan は fetch と pre-group 評価で共有する。
  */
+/**
+ * B145 親テーブルの GROUP BY に明細項目を書いたときの案内。
+ *
+ * plain `GROUP BY` と拡張 grouping（`ROLLUP` / `CUBE` / `GROUPING SETS` / `GROUPING()`）で
+ * 同じ文面を出す。以前は 2 か所へ別々に書いており、片方だけ古くなる形だった。
+ *
+ * 書き換え先は「その項目を持つ APP」であって `FROM` 側の APP ではない
+ * （実測: 別アプリを JOIN したとき `FROM` 側を案内し、従うと落ちた）。
+ * 候補が 1 つに定まるときだけ名指しし、複数あるときは列挙にとどめる。
+ */
+function subtableGroupingAdvice(
+  fieldName: string,
+  owners: readonly { appId: number; owner: string }[]
+): string {
+  if (owners.length === 1) {
+    const { appId, owner } = owners[0];
+    return `ArgumentError: ${fieldName} はサブテーブル「${owner}」（APP${appId}）の中の項目です。`
+      + "親テーブルの GROUP BY には指定できません。"
+      + `APP${appId}$${owner} から集計してください`
+      + "（親のレコード ID は _pid、親項目は _p.<フィールドコード> になります）。";
+  }
+  const list = owners.map(({ appId, owner }) => `APP${appId}$${owner}`).join(" / ");
+  return `ArgumentError: ${fieldName} はサブテーブルの中の項目です（${list}）。`
+    + "親テーブルの GROUP BY には指定できません。どのサブテーブルから集計するかを "
+    + "FROM で指定してください。";
+}
+
+/** 同じ (appId, owner) の重複を落とす。JOIN で同じ APP が複数回現れる形に効く。 */
+function dedupeSubtableOwners(
+  owners: readonly { appId: number; owner: string }[]
+): { appId: number; owner: string }[] {
+  const seen = new Set<string>();
+  const result: { appId: number; owner: string }[] = [];
+  for (const entry of owners) {
+    const key = `${entry.appId} ${entry.owner}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(entry);
+  }
+  return result;
+}
+
 async function buildRuntimePlainGroupByPlan(
   stmt: SelectStatement,
   client: KintoneClient,
@@ -2942,6 +2984,14 @@ async function buildRuntimePlainGroupByPlan(
   if (stmt.groupBy.length === 0) return undefined;
 
   const sources = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  // B145: 親テーブルの GROUP BY キーに明細項目を書くと UNKNOWN になる。
+  // 「存在しない」ではなく「別の表にある」ので、名指しできるよう控えておく。
+  //
+  // どの APP のサブテーブルかまで持つ。フィールドコードだけで持つと、別アプリを
+  // JOIN したときに「FROM 側の APP のサブテーブル」と誤って案内してしまう
+  // （実測: APP4229 JOIN APP4233 で `APP4229$テーブル` と案内した。APP4229 に
+  // サブテーブルは無く、従うと落ちる）。
+  const subtableOwners = new Map<string, { appId: number; owner: string }[]>();
   const inputs = await Promise.all(sources.map(async (source): Promise<PlainGroupBySourceSchemaInput> => {
     if (source.cteName !== null) {
       const materialized = materializedTables?.get(source.cteName);
@@ -2953,6 +3003,12 @@ async function buildRuntimePlainGroupByPlan(
 
     const fields = await getFieldsCached(source.appId, client, cacheContext);
     if (!source.subtableCode) {
+      for (const field of fields) {
+        if (field.inSubtable !== true || !field.subtableCode) continue;
+        const entries = subtableOwners.get(field.code) ?? [];
+        entries.push({ appId: source.appId, owner: field.subtableCode });
+        subtableOwners.set(field.code, dedupeSubtableOwners(entries));
+      }
       return {
         kind: "APP",
         fieldCodes: fields.filter((field) => !field.inSubtable).map((field) => field.code),
@@ -2980,14 +3036,15 @@ async function buildRuntimePlainGroupByPlan(
   );
   const groupBy = stmt.groupBy;
   const plan = planPlainGroupByResolution(groupBy, stmt.columns, schemas);
-  assertRuntimePlainGroupByPlan(stmt, groupBy, plan);
+  assertRuntimePlainGroupByPlan(stmt, groupBy, plan, subtableOwners);
   return plan;
 }
 
 function assertRuntimePlainGroupByPlan(
   stmt: SelectStatement,
   groupBy: readonly GroupByKey[],
-  plan: PlainGroupByResolutionPlan
+  plan: PlainGroupByResolutionPlan,
+  subtableOwners: ReadonlyMap<string, { appId: number; owner: string }[]>
 ): void {
   const physicalAppIds = [
     stmt.from,
@@ -3010,6 +3067,19 @@ function assertRuntimePlainGroupByPlan(
     const name = key?.type === "FIELD_NAME" ? key.name : "(expression)";
     if (item.kind === "UNKNOWN") {
       const appSuffix = primaryPhysicalAppId === null ? "" : ` (APP${primaryPhysicalAppId})`;
+      // B145: 明細項目は親テーブルの GROUP BY キーにできないが、存在はする。
+      // 「unknown field code(s)」だと「そんな項目は無い」と読まれるので、
+      // どの表にあるか・どう書き換えるかまで示す（SELECT 列の警告と同じ案内）。
+      //
+      // 書き換え先は「その項目を持つ APP」であって FROM 側の APP ではない。
+      // 候補が 1 つに定まるときだけ名指しし、複数あるときは列挙にとどめる。
+      // 別名で修飾した形（a.code）でも引けるよう、ドットの後ろでも探す。
+      const dot = item.name.indexOf(".");
+      const bare = dot >= 0 ? item.name.slice(dot + 1) : item.name;
+      const owners = subtableOwners.get(item.name) ?? subtableOwners.get(bare) ?? [];
+      if (owners.length > 0) {
+        throw new Error(subtableGroupingAdvice(item.name, owners));
+      }
       throw new Error(`ArgumentError: unknown field code(s): ${item.name}${appSuffix}`);
     }
     if (item.kind === "ALIAS_REJECT") {
@@ -3076,9 +3146,19 @@ async function buildGroupingFieldResolver(
     }))
   );
 
+  // B145: 親テーブルから明細項目は参照できない。ここで「存在する」と扱うと
+  // ROLLUP / CUBE / GROUPING SETS が常に空のキーで集計を通してしまい、
+  // 全レコードが 1 グループへ畳まれた表が黙って返る（plain GROUP BY は
+  // 別経路でエラーになるため、拡張 grouping だけが静かに間違っていた）。
+  const subtableFieldOf = (table: TableRef, code: string): string | null => {
+    if (table.subtableCode) return null;
+    const info = infosByApp.get(table.appId)?.get(code);
+    return info?.inSubtable === true ? (info.subtableCode ?? "") : null;
+  };
   const physicalMatch = (table: TableRef, field: string): string | null => {
     if (field === "$id") return "$id";
     const code = fieldCodeForTypeLookup(table, field);
+    if (subtableFieldOf(table, code) !== null) return null;
     return infosByApp.get(table.appId)?.has(code) ? code : null;
   };
   const materializedHas = (table: TableRef, field: string): boolean => {
@@ -3122,6 +3202,11 @@ async function buildGroupingFieldResolver(
       }
       const code = physicalMatch(table, field.field);
       if (code === null) {
+        // B145: 別名で修飾しても、明細項目なら「存在しない」ではなく別表を案内する。
+        const owner = subtableFieldOf(table, fieldCodeForTypeLookup(table, field.field));
+        if (owner !== null && owner !== "") {
+          throw new Error(subtableGroupingAdvice(field.field, [{ appId: table.appId, owner }]));
+        }
         throw new Error(`ArgumentError: B65 field ${field.tableAlias}.${field.field} does not exist in APP${table.appId}.`);
       }
       return resolved(table, tableIndex, field, code);
@@ -3144,6 +3229,17 @@ async function buildGroupingFieldResolver(
       throw new Error(
         `ArgumentError: B65 field ${field.field} resolves to a materialized CTE/temp column; physical APP fields are required.`
       );
+    }
+    // B145: 明細項目なら「存在しない」ではなく「別の表にある」ことを伝える。
+    // plain GROUP BY と同じ案内に揃える。
+    const owners = tables.flatMap((table) => {
+      if (table.cteName !== null) return [];
+      const owner = subtableFieldOf(table, fieldCodeForTypeLookup(table, field.field));
+      return owner === null || owner === "" ? [] : [{ appId: table.appId, owner }];
+    });
+    const uniqueOwners = dedupeSubtableOwners(owners);
+    if (uniqueOwners.length > 0) {
+      throw new Error(subtableGroupingAdvice(field.field, uniqueOwners));
     }
     throw new Error(`ArgumentError: B65 field ${field.field} does not exist in a physical APP source.`);
   };
