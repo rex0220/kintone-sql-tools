@@ -1,7 +1,8 @@
 # B140 CTE の `GROUP BY` キーを全順序として証明できず、主用途で毎回警告が出る
 
 - 起票: 2026-08-06
-- ステータス: 📝 **起票（実測済み）。仕様 R1 は破棄。R2 から**（2026-08-07）＝
+- ステータス: 📋 **仕様 R2・Claude レビュー済み（指摘 1 件・実装着手可）**（2026-08-07）→ [R2](ksql_b140_cte_groupby_total_order_spec_r2.md)。
+  **R1 は破棄**＝
   **[B148](ksql_b148_bare_column_group_by_issue.md)（v3.57.0）で中核の identity が実装された**（§7）
 - 発見: [B128](ksql_b128_lag_lead_spec.md)（`LAG` / `LEAD`）の実機検算中
 - 関連: [B127](../ksql_issue_tracker.md)（ウィンドウ既定フレームの警告・v3.47.0）

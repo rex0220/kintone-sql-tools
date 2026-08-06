@@ -1,6 +1,7 @@
 # B140 CTE の `GROUP BY` キーを全順序として証明する 仕様（R1）
 
-- ステータス: 📝 **仕様 R1（レビュー前）**
+- ステータス: ❌ **R1 は破棄。→ [仕様 R2](ksql_b140_cte_groupby_total_order_spec_r2.md)**（2026-08-07）。
+  **中核（どの出力が `GROUP BY` キーか）は [B148](ksql_b148_bare_column_group_by_issue.md) の実装で解けた**
 - 起票: [B140](ksql_b140_cte_groupby_total_order_issue.md)
 - 関連: [B127](../ksql_issue_tracker.md)（既定フレーム警告・v3.47.0）／
   [B128](ksql_b128_lag_lead_spec.md)（`LAG`/`LEAD`・v3.51.0）
