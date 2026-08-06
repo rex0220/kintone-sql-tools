@@ -527,14 +527,19 @@ SELECT NULLIF(業種, 'その他') AS 業種 FROM APP100   -- 'その他' を空
 >
 > ```sql
 > -- ✗ RDB の定番だが kSQL では NaN（ガードにならない）
-> SELECT 1000 / NULLIF(金額, 0) AS 単価 FROM APP100   -- 金額=0 の行は NaN
+> SELECT 1000 / NULLIF(金額, 0) AS 単価 FROM APP100   -- 金額=0 の行も、金額が空セルの行も NaN
 >
 > -- ○ NULL 置換としては正しく機能する
 > SELECT ISNULL(NULLIF(金額, 0), '未設定') AS 金額 FROM APP100   -- 金額=0 の行は「未設定」
 >
-> -- ○ ゼロ除算を避けたい場合は CASE WHEN を使う
-> SELECT CASE WHEN 金額 = 0 THEN '' ELSE 1000 / 金額 END AS 単価 FROM APP100
+> -- ✗ ゼロだけガードすると空セルがすり抜ける
+> SELECT CASE WHEN 金額 = 0 THEN '' ELSE 1000 / 金額 END AS 単価 FROM APP100   -- 金額が空セルの行は NaN
+>
+> -- ○ 空セルとゼロの両方をガードする
+> SELECT CASE WHEN 金額 = '' OR 金額 = 0 THEN '' ELSE 1000 / 金額 END AS 単価 FROM APP100
 > ```
+>
+> **`= 0` だけでは空セルを捕まえられません。** 空文字は**算術では 0 になりますが、比較では 0 と等しくない**ため、`CASE WHEN 金額 = 0` は空セルの行を `ELSE` へ落とし、そこで `Number('') = 0` によるゼロ除算が起きます。除数が空になり得る場面（`LEFT JOIN` で一致しなかった行、`LAG` / `LEAD` の端の行、`NULLIF` の結果）では `= '' OR = 0` の両方を書いてください。
 
 ### 数値関数
 
@@ -1852,6 +1857,7 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - `LAG` / `LEAD` の第3引数（既定値）は未対応。必要なら次の段の `CASE` で空文字を置き換える
 - `LAG` / `LEAD` は `ORDER BY` 必須。全順序でない場合は同順内の前後関係が未規定になるため、レコード番号などのタイブレークキーを加える
 - **CTE や一時テーブルを読む場合、その表に `レコード番号` は無い。** 元になった集約のキーなど、その表の中で一意になる列を `ORDER BY` に含める（警告の文面も経路に応じて変わる）
+- **集約結果の列は、実際に一意でも一意だと証明できない。** `GROUP BY` キーで並べていてもこの警告は出る。**値は正しく、その形では警告を消せない**（`ksql_docs` の `recipes/r16` に例がある）
 - `LAG` / `LEAD` は soft keyword。同名のフィールドは従来どおり参照できる
 
 ```sql
