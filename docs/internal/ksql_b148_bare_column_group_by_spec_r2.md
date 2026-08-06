@@ -1,6 +1,6 @@
 # B148 集計されていない列参照を標準 SQL に合わせてエラーにする 仕様（R2）
 
-- ステータス: ❌ **R2 は破棄。R3 から**（2026-08-06）→ [codex レビュー 2](ksql_b148_codex_review_2.md)。
+- ステータス: ❌ **R2 は破棄。→ [仕様 R3](ksql_b148_bare_column_group_by_spec_r3.md)**（2026-08-06）→ [codex レビュー 2](ksql_b148_codex_review_2.md)。
   **Critical 1 / High 4 / Medium 2。実測で 4/4 とも codex が正しい**。
   **Critical 1＝「identity の差し替えだけ」は不正確**（B65 検査は `GROUPING_SETS` 分岐の内側で、物理前提が構造に染み込んでいる。**共通層の分離が要る**）。
   **§8.4 は「未確定」ではなく既に `ParseError`**（集計とウィンドウの併用は禁止）
