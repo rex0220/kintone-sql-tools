@@ -1,6 +1,6 @@
 # B144 サブテーブル仮想テーブルの `EXPLAIN` が、実行しない押し下げを表示する
 
-- 状態: 🐞 **起票・原因特定まで完了。修正は未着手**（2026-08-06）
+- 状態: 🚧 **案 A で修正済み・リリース待ち**（2026-08-06）
 - 種別: 課題（`EXPLAIN` が実行と食い違う）
 - 優先: **中**（`EXPLAIN` の契約が破れており、`maxRecords` の見積りが外れる）
 - 発見: 利用者からの指摘（`SELECT COUNT(*) FROM APP4233$テーブル` が全件取得になるのに記載が無い）
@@ -89,9 +89,60 @@ query を作っているので、**片側だけが未実装のまま残ってい
 **行はレコードを取得してから展開する**ため、件数を知るだけでも全件が要る。
 **この事実自体は案 A でも変わらない**（`WHERE` で親を絞れる場合に取得量が減るだけ）。
 
+## 5.5 実装（案 A・v3.55.0）
+
+**EXPLAIN と同じ条件でだけ押し下げる**形にした。
+
+```ts
+const parentQuery = isMainTable
+  && allowOriginalWherePushdown
+  && stmt.joins.length === 0
+  && stmt.where !== null
+  && resolvedWhereCapabilities.get(stmt)?.capability === "EXACT_PUSHDOWN"
+  && !whereRequiresJsEval(stmt.where)
+  ? whereToKintone(stmt.where)
+  : "";
+```
+
+**実機（APP4233・親 14 / 明細 24）**
+
+| 形 | 変更前 | 変更後 |
+|---|---|---|
+| `_p.$id IN (1,2)`（`maxRecords=3`） | `FetchAllLimitError` | **5 行** |
+| `_p.数値 = 100`（`maxRecords=3`） | `FetchAllLimitError` | **0 行** |
+| 明細項目 `数値_0 = 5` | 全件取得・1 行 | 変わらず |
+| `_pid = 1` | 全件取得・3 件 | 変わらず |
+| 混在 `_p.数値 = 100 AND 数値_0 = 5` | 全件取得・0 行 | 変わらず |
+| 全明細 `COUNT(*)` | 24 | 変わらず |
+
+### codex レビューの結果
+
+**高重大度 2 件（同一原因）＝再現せず。**
+
+> `EXACT_PUSHDOWN` は親項目だけを含意しない。`_p` 解決でも `inSubtable` を除外していない。
+> 再現条件: `WHERE _p.<明細項目> != 5`。親取得で行を落とし得る。
+
+実機で 3 形（`_p.数値_0 != 5` / `_p.数値_0 = 5` / `_p.文字列__1行__2 = '3'`）を測ったところ、
+**いずれも `WHERE_RESIDUAL` で全件取得**になった。**`_p.<明細項目>` は解決されない。**
+
+**ただし指摘の筋は正しい**＝安全性は「解決表に明細項目が無い」ことに依存しており、
+**設計として明示されていない**。解決側が変われば静かに壊れるので、**回帰テストで固定した**。
+
+**問題なしが 3 件**（根拠行つき）。
+
+- `resolvedWhereCapabilities` は**必ず設定済みではない**が、CTE 実体化経路では
+  主表がサブテーブルなら `joins.length !== 0`、主表が CTE なら物理取得が無いため、
+  **空文字フォールバックは安全**
+- `isMainTable` / `allowOriginalWherePushdown` のガードは妥当
+- `pushDownCond` / `additionalPushQuery` は**サブテーブルで非空になる経路が無い**
+  （typed candidate も JOIN pushdown plan もサブテーブルを拒否する）
+
+**codex はコードだけを読んで推論し、実行はしていない。** 高重大度の指摘が再現しない一方で、
+**こちらが確認しきれていなかった 3 点を根拠行つきで潰せた**のが収穫。
+
 ## 6. 次に開くとき必要なもの
 
-- **`EXPLAIN` 側でサブテーブルの計画を組んでいる箇所**（実行側と別実装になっている位置）
+- ~~`EXPLAIN` 側でサブテーブルの計画を組んでいる箇所~~ → `src/execute.ts` の plan 描画（`exactOriginalWhere`）
 - **`stmt.where` から親 query へ変換してよい leaf の判定**（既存の
   `whereToKintone` / 押し下げ判定を再利用できるか）
 - サブテーブル項目の条件を **superset prefilter** として使えるか
