@@ -114,12 +114,14 @@ describe("B67 Step 7 relative-date catalog and documentation", () => {
       expect(text).toContain("KORDER BY");
       expect(text).toContain("FULL_SCAN_EXACT");
     }
+    // v3.25.0 の移行告知（"minor" / "破壊的" の文言）は v3.54.4 で言語リファレンスから
+    // 削除した（29 版前の案内で、リファレンスに置く段階を過ぎたため。移行案内は
+    // CHANGELOG と GitHub Releases にある）。拒否される代表例そのものは現行仕様として
+    // §6 に残っているので、そちらは引き続き固定する。
     for (const text of [languageSource, whereSection]) {
       expect(text).toContain("作成者 = 'taro'");
       expect(text).toContain("日付 = NOW()");
       expect(text).toContain("$id >= TODAY()");
-      expect(text).toContain("minor");
-      expect(text).toContain("破壊的");
     }
     expect(functionSection).toContain("グループ選択には使用できません");
     expect(functionSection).toContain("`DATE` には使用不可");

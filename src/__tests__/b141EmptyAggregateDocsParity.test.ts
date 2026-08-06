@@ -91,8 +91,10 @@ const SUPPORTED = [
 
 test("B141: 空集合の戻り値が、言語リファレンスの表すべてと一致する", () => {
   const rows = parseEmptySetTables();
-  // 「値が無いとき」列を持つ表は 2 つ以上ある（§5 の除数ガードは列名が違うので対象外）。
-  expect(new Set(rows.map((r) => r.table)).size).toBeGreaterThanOrEqual(2);
+  // 表の「個数」は固定しない。同じ値を書く場所は減らす方針なので、数を書くと
+  // 減らしたときにこのテストが落ちる（v3.54.1 の照合が構造ではなく現状を写して
+  // いたのと同じ失敗になる）。パーサが動いていることだけを確かめる。
+  expect(rows.length).toBeGreaterThan(0);
   for (const { funcs, expected, table } of rows) {
     for (const func of funcs) {
       if (!SUPPORTED.includes(func)) continue;
