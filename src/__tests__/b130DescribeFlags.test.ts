@@ -7,6 +7,8 @@ const describeColumns = [
   "フィールドコード",
   "ラベル",
   "タイプ",
+  // B145 で追加（v3.56.0）。明細項目ならサブテーブル名、親項目なら空文字。
+  "サブテーブル",
   "ルックアップ",
   "コピー元",
   "重複禁止",
@@ -124,7 +126,7 @@ test("B130: フォーム定義から値の由来4フラグをトップレベル�
   });
 });
 
-test("B130: DESCRIBE は既存3列を保ったまま値の由来4列を文字列で返す", async () => {
+test("B130: DESCRIBE は既存3列とサブテーブル列を保ったまま値の由来4列を文字列で返す", async () => {
   const fields = [
     {
       code: "製品名", label: "製品名", fieldType: "SINGLE_LINE_TEXT",
@@ -151,19 +153,19 @@ test("B130: DESCRIBE は既存3列を保ったまま値の由来4列を文字列
   expect(result.rows).toEqual([
     {
       フィールドコード: "製品名", ラベル: "製品名", タイプ: "SINGLE_LINE_TEXT",
-      ルックアップ: "YES", コピー元: "", 重複禁止: "", 計算式: "",
+      サブテーブル: "", ルックアップ: "YES", コピー元: "", 重複禁止: "", 計算式: "",
     },
     {
       フィールドコード: "仕入先", ラベル: "仕入先", タイプ: "SINGLE_LINE_TEXT",
-      ルックアップ: "", コピー元: "YES", 重複禁止: "", 計算式: "",
+      サブテーブル: "", ルックアップ: "", コピー元: "YES", 重複禁止: "", 計算式: "",
     },
     {
       フィールドコード: "個数_在庫計算用", ラベル: "個数_在庫計算用", タイプ: "CALC",
-      ルックアップ: "", コピー元: "", 重複禁止: "", 計算式: "YES",
+      サブテーブル: "", ルックアップ: "", コピー元: "", 重複禁止: "", 計算式: "YES",
     },
     {
       フィールドコード: "製品名_マスタ", ラベル: "製品名", タイプ: "SINGLE_LINE_TEXT",
-      ルックアップ: "", コピー元: "", 重複禁止: "YES", 計算式: "",
+      サブテーブル: "", ルックアップ: "", コピー元: "", 重複禁止: "YES", 計算式: "",
     },
   ]);
   expect(result.rows.every((row) =>
@@ -171,7 +173,7 @@ test("B130: DESCRIBE は既存3列を保ったまま値の由来4列を文字列
   )).toBe(true);
 });
 
-test("B130: CTE 経由の SELECT * は7列で新列を絞り込める", async () => {
+test("B130: CTE 経由の SELECT * は8列で新列を絞り込める", async () => {
   const fields = [{
     code: "製品名", label: "製品名", fieldType: "SINGLE_LINE_TEXT", hasLookup: true,
   }] as unknown as KintoneFieldInfo[];
@@ -192,7 +194,7 @@ test("B130: CTE 経由の SELECT * は7列で新列を絞り込める", async ()
 });
 
 // B137: UNION の左右は実体化後の列数が一致しなければならない。
-test("B137: 7列のDESCRIBEと3列SELECTのUNIONはエラー", async () => {
+test("B137: 8列のDESCRIBEと3列SELECTのUNIONはエラー", async () => {
   const fields = [{
     code: "製品名", label: "製品名", fieldType: "SINGLE_LINE_TEXT", hasLookup: true,
   }] as unknown as KintoneFieldInfo[];
@@ -201,7 +203,7 @@ test("B137: 7列のDESCRIBEと3列SELECTのUNIONはエラー", async () => {
       "SELECT * FROM d UNION ALL SELECT 'code' AS c, 'label' AS l, 'type' AS t",
     makeClient(fields),
     { cacheContext: "b130-union" }
-  )).rejects.toThrow("ArgumentError: UNION の左右で列数が一致しません（左 7 列 / 右 3 列）。");
+  )).rejects.toThrow("ArgumentError: UNION の左右で列数が一致しません（左 8 列 / 右 3 列）。");
 });
 
 test("B130: JOINの同名列はDESCRIBE側を修飾して参照できる", async () => {
@@ -231,7 +233,7 @@ test("B130: JOINの同名列はDESCRIBE側を修飾して参照できる", async
   expect(result.rows).toEqual([{ describe_flag: "YES", physical_value: "physical" }]);
 });
 
-test("B130: 0行のBYO DESCRIBEでも7列を返し、フラグ欠落時は空文字になる", async () => {
+test("B130: 0行のBYO DESCRIBEでも8列を返し、フラグ欠落時は空文字になる", async () => {
   const base: ReadonlyKintoneClient = {
     async getRecords() { return { records: [] }; },
     async openCursor() { throw new Error("unexpected cursor call"); },
@@ -258,6 +260,7 @@ test("B130: 0行のBYO DESCRIBEでも7列を返し、フラグ欠落時は空文
     フィールドコード: "plain",
     ラベル: "Plain",
     タイプ: "SINGLE_LINE_TEXT",
+    サブテーブル: "",
     ルックアップ: "",
     コピー元: "",
     重複禁止: "",

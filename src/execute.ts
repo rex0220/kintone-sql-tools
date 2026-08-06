@@ -2870,7 +2870,7 @@ async function executeSelect(
         hasKlike: whereHasKlike(stmt.where),
       })
     : null;
-  await validateSelectFieldCodes(
+  const subtableFieldWarnings = await validateSelectFieldCodes(
     stmt,
     orderPlan?.kind === "CANONICAL_LOCAL" ? "FULL_SCAN" : mode,
     client,
@@ -2926,7 +2926,7 @@ async function executeSelect(
       await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
     );
   }
-  return mergeSelectWarnings(result, defaultRangeWarnings);
+  return mergeSelectWarnings(result, [...defaultRangeWarnings, ...subtableFieldWarnings]);
 }
 
 /**
@@ -3477,7 +3477,8 @@ async function validateSelectFieldCodes(
   mode: SelectMode,
   client: KintoneClient,
   cacheContext: string
-): Promise<void> {
+): Promise<string[]> {
+  const warnings: string[] = [];
   const appToFields = new Map<number, Set<string>>();
   const addFields = (appId: number, fields: string[]) => {
     if (fields.length === 0) return;
@@ -3489,14 +3490,30 @@ async function validateSelectFieldCodes(
     for (const f of fields) target.add(f);
   };
 
+  // B145: サブテーブルではない表が参照している列だけを、あとで「明細項目では
+  // ないか」を見るために取っておく（サブテーブル仮想テーブルは明細項目を参照して
+  // 当然なので対象外）。
+  const parentTableFields = new Map<number, Set<string>>();
+  const addParentFields = (appId: number, fields: string[]) => {
+    let target = parentTableFields.get(appId);
+    if (!target) {
+      target = new Set<string>();
+      parentTableFields.set(appId, target);
+    }
+    for (const f of fields) target.add(f);
+  };
+
   if (mode === "SIMPLE") {
     const params = selectToKintoneParams(stmt);
     addFields(params.app, params.fields);
+    if (!stmt.from.subtableCode) addParentFields(params.app, params.fields);
   } else {
     const tables = [stmt.from, ...stmt.joins.map((j) => j.table)].filter((t) => t.cteName === null);
     for (const table of tables) {
       // B71 の plan で解決済みの GROUP BY field を含む、取得対象列を検証する。
-      addFields(table.appId, selectToFetchAllFields(stmt, table));
+      const fields = selectToFetchAllFields(stmt, table);
+      addFields(table.appId, fields);
+      if (!table.subtableCode) addParentFields(table.appId, fields);
     }
   }
 
@@ -3513,7 +3530,32 @@ async function validateSelectFieldCodes(
     if (unknown.length > 0) {
       throw new Error(`ArgumentError: unknown field code(s): ${unknown.join(", ")} (APP${appId})`);
     }
+
+    // B145: 親アプリから明細項目を参照しても、エラーにならず全行が空になる。
+    // DESCRIBE は明細項目も返すため、読んで書いた SQL がそのまま静かに空を返す。
+    // 値は変えず（既存の SQL を壊さない）、どの表から選ぶべきかを警告で示す。
+    const referenced = parentTableFields.get(appId);
+    if (referenced) {
+      const subtableFields = defs.filter(
+        (d) => d.inSubtable === true && referenced.has(d.code)
+      );
+      for (const field of subtableFields) {
+        const owner = field.subtableCode ?? "";
+        const source = owner ? `サブテーブル「${owner}」` : "サブテーブル";
+        warnings.push(
+          `${field.code} は${source}の中の項目です。`
+          + `APP${appId} から選ぶと、エラーにならず全行が空になります。`
+          // FROM を差し替えるだけでは足りない。$id は仮想テーブルに無く、
+          // そのまま書くと今度は $id が空になる（同じ静かな失敗を繰り返す）。
+          + (owner
+            ? `APP${appId}$${owner} から選んでください`
+            + `（親のレコード ID は _pid、親項目は _p.<フィールドコード> になります）。`
+            : "")
+        );
+      }
+    }
   }
+  return warnings;
 }
 
 interface B86SourceSchema {
@@ -9453,7 +9495,10 @@ export const SHOW_APPS_COLUMNS: readonly string[] = Object.freeze([
  * **言語リファレンス §14 の表と突き合わせるテストがある**ので、変えるときは文書も直すこと。
  */
 export const DESCRIBE_COLUMNS: readonly string[] = Object.freeze([
-  "フィールドコード", "ラベル", "タイプ", "ルックアップ", "コピー元", "重複禁止", "計算式",
+  // B145: サブテーブル列は「その項目がどの表にあるか」を示す。無いと明細項目を
+  // 親項目と取り違え、親から SELECT して全行空という結果になる（エラーも警告も出ない）。
+  "フィールドコード", "ラベル", "タイプ", "サブテーブル",
+  "ルックアップ", "コピー元", "重複禁止", "計算式",
 ]);
 
 async function executeShowApps(client: KintoneClient): Promise<SelectResult> {
@@ -9482,6 +9527,8 @@ async function executeDescribe(
     "フィールドコード": f.code,
     "ラベル":           f.label,
     "タイプ":           f.fieldType,
+    // 明細項目はサブテーブルのフィールドコード、親項目は空文字。
+    "サブテーブル":     f.inSubtable === true ? (f.subtableCode ?? "") : "",
     "ルックアップ":     f.hasLookup === true ? "YES" : "",
     "コピー元":         f.isLookupCopyTarget === true ? "YES" : "",
     "重複禁止":         f.isUnique === true ? "YES" : "",
