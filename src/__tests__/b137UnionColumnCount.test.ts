@@ -164,14 +164,15 @@ test("B137: SHOW APPS と同じ 3 列なら UNION ALL できる", async () => {
   expect(result.rowCount).toBe(2);
 });
 
-test("B137: DESCRIBE と同じ 7 列なら UNION ALL できる", async () => {
+test("B137: DESCRIBE と同じ 8 列なら UNION ALL できる", async () => {
+  // B145 でサブテーブル列が増えたため 7 → 8。
   const result = await execute(
     "WITH d AS (DESCRIBE APP100) SELECT * FROM d UNION ALL " +
-      "SELECT 'code', 'label', 'type', '', '', '', ''",
+      "SELECT 'code', 'label', 'type', '', '', '', '', ''",
     makeClient({ 100: [record({ code: "x" })] })
   ) as SelectResult;
 
-  expect(result.columns).toHaveLength(7);
+  expect(result.columns).toHaveLength(8);
   expect(result.rowCount).toBe(2);
 });
 
