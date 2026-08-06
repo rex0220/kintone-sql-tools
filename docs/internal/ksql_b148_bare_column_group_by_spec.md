@@ -1,6 +1,9 @@
 # B148 集計されていない列参照を標準 SQL に合わせてエラーにする 仕様（R1）
 
-- ステータス: 📝 **仕様 R1（レビュー前）**
+- ステータス: ❌ **R1 は破棄。R2 から**（2026-08-06）→ [codex レビュー 1](ksql_b148_codex_review_1.md)。
+  **Critical 3 / High 5 / Medium 1。うち Critical 3（`HAVING` のみ集計）は実測で前提が崩れた**（`ParseError`）。
+  **位置づけが変わった**＝**同じ規則が `groupingValidation.ts` に既にあり、拡張 grouping の経路にだけ効いている**。
+  **新しい判定器を作る話ではなく、既存検査を ordinary `GROUP BY` へ広げる話**（レビュー §5.1）
 - 起票: [B148](ksql_b148_bare_column_group_by_issue.md)
 - 方針決定: **標準 SQL に合わせる**（2026-08-06・オーナー判断）
 - 関連: [B147](ksql_b147_aggregate_alias_shadows_key_input_issue.md)（**別の欠陥**・§7）／
