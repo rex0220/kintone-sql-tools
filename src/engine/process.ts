@@ -281,8 +281,9 @@ export function applyGroupBy(
     else groups.set(key, [row]);
   }
 
-  // GROUP BY なし集計は入力 0 行でも 1 行返す（SQL 標準準拠。COUNT=0、SUM/AVG/MIN/MAX は
-  // 全値空グループと同じ 0 — 空集合だけ NULL にすると ksql 内の既存規約と不整合になる）。
+  // GROUP BY なし集計は入力 0 行でも 1 行返す（SQL 標準準拠）。戻り値は関数ごとに
+  // 全値空グループと揃える（B142）＝COUNT / SUM / AVG は 0、MIN / MAX / MODE /
+  // MEDIAN / 統計集約は空文字。空集合だけ NULL にすると ksql 内の既存規約と不整合になる。
   // 集計列の存在を条件に含めるのは applyGroupBy 単独の契約のため（runFullScan 経由では
   // hasAggregate ゲート後のみ呼ばれ常に真だが、非集計列のみの直接呼び出しで合成しない）
   if (groups.size === 0 && groupByKeys.length === 0 && hasAggregateColumns(columns)) {
@@ -599,7 +600,10 @@ function evalAggregate(
   }
   if (func === "MIN" || func === "MAX") {
     const comparableValues = eff as string[];
-    if (comparableValues.length === 0) return 0;
+    // B142 比較する値が 1 つも無ければ空文字。MODE / MEDIAN / 統計集約と揃える。
+    // 全値空グループは空文字を「値」として保持するので（canonical empty band）
+    // ここで 0 を返すと、値 0 個と値 1 個で結果が 0 と '' に割れていた。
+    if (comparableValues.length === 0) return "";
     let result = comparableValues[0];
     for (const candidate of comparableValues.slice(1)) {
       const cmp = compareCanonicalValues(candidate, result, semantics);
