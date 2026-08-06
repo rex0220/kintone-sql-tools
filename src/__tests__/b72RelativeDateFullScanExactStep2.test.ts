@@ -265,7 +265,7 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
     expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
   });
 
-  test("B71 PHYSICAL shadow は実列を強制 fetchし B72は取得列を減らさない", async () => {
+  test("B71 PHYSICAL shadow は B148 が records API 前に拒否する", async () => {
     const { client, calls } = makeClient();
     const sql = "SELECT 金額 AS 区分, COUNT(*) AS c FROM APP100 "
       + "WHERE 日付 = THIS_MONTH() GROUP BY 区分";
@@ -273,20 +273,13 @@ describe("B72 Step 2 FULL_SCAN_EXACT runtime", () => {
       kind: "PHYSICAL",
       fieldCode: "区分",
     });
-    const explained = await execute(`EXPLAIN ${sql}`, client) as SelectResult;
-    expect(planText(explained)).toContain("group key 区分: PHYSICAL");
-
-    const evaluator = jest.spyOn(evalWhereModule, "evalWhere");
-    const result = await execute(sql, client) as SelectResult;
-    expect(result.rowCount).toBe(2);
-    expect(evaluator).not.toHaveBeenCalled();
-    expect(firstRequest(calls).fields).toEqual(["金額", "日付", "区分", "$id"]);
-    expect(firstRequest(calls).query).toBe(
-      "日付 = THIS_MONTH() order by $id asc limit 500 offset 0"
+    await expect(execute(`EXPLAIN ${sql}`, client)).rejects.toThrow(
+      /非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/
     );
-    const plan = await sharedPlan(sql);
-    expect(plan.nodes[0].prefilterPlan?.residualWhere).toBeNull();
-    expect(relativeNames(plan.nodes[0].prefilterPlan?.residualWhere ?? null)).toEqual([]);
+    await expect(execute(sql, client)).rejects.toThrow(
+      /非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/
+    );
+    expect(calls.records).not.toHaveBeenCalled();
   });
 
   test.each([

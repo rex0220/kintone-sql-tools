@@ -148,7 +148,13 @@ import {
   type PlainGroupByResolutionPlan,
   type PlainGroupBySourceSchemaInput,
 } from "./core/optimization/plainGroupByPlan";
-import { isSystemLikeFieldCode } from "./core/systemFields";
+import {
+  buildOrdinaryDependencyPolicy,
+  isAggregateQueryBlock,
+  validateAggregateDependencies,
+  validateAggregateDependenciesStatic,
+} from "./core/aggregateDependencyValidation";
+import { APP_SYSTEM_FIELD_CODES, isSystemLikeFieldCode } from "./core/systemFields";
 import { deriveEmptyWildcardColumns } from "./core/emptyWildcardSchema";
 import { whereHasKlike, whereHasLike } from "./core/like";
 import {
@@ -1843,7 +1849,13 @@ async function executeBatchStatement(
 
   // EXPLAIN はプラン表示のみ（kintone アクセスなし）のため一時テーブル参照を含んでも安全
   if (stmt.type === "EXPLAIN") {
-    return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
+    const explainStmt = resolvedStmt as ExplainStatement;
+    explainMaterializedTables.set(explainStmt, tempTables);
+    try {
+      return { result: await executeParsedStatement(explainStmt, client, options, cacheContext) };
+    } finally {
+      explainMaterializedTables.delete(explainStmt);
+    }
   }
 
   // ASSERT: 成功時は result を持たせない no-result 文として扱う
@@ -2981,7 +2993,14 @@ async function buildRuntimePlainGroupByPlan(
   cacheContext: string,
   materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<PlainGroupByResolutionPlan | undefined> {
-  if (stmt.groupBy.length === 0) return undefined;
+  const normalized = normalizeGroupingSpec(stmt);
+  if (!isAggregateQueryBlock(stmt) || normalized.type === "GROUPING_SETS") {
+    return undefined;
+  }
+  // GROUP BY なし集計は identity が空なので AST-only で最終判断できる。
+  // COUNT(*) 等の正当な query にフォーム定義取得を追加しない。
+  if (normalized.type === "NONE") return undefined;
+  const groupBy = normalized.allItems;
 
   const sources = [stmt.from, ...stmt.joins.map((join) => join.table)];
   // B145: 親テーブルの GROUP BY キーに明細項目を書くと UNKNOWN になる。
@@ -3034,9 +3053,9 @@ async function buildRuntimePlainGroupByPlan(
     stmt,
     (_source, sourceIndex) => inputs[sourceIndex]
   );
-  const groupBy = stmt.groupBy;
   const plan = planPlainGroupByResolution(groupBy, stmt.columns, schemas);
   assertRuntimePlainGroupByPlan(stmt, groupBy, plan, subtableOwners);
+  validateAggregateDependencies(stmt, buildOrdinaryDependencyPolicy(stmt, plan, schemas));
   return plan;
 }
 
@@ -3124,7 +3143,12 @@ async function validateStatementGroupingPlanning(
     }
     const value = node as Record<string, unknown>;
     if (value["type"] === "SELECT") {
+      // Query-block ordering: scalar/IN/EXISTS subqueries are checked before
+      // their containing SELECT. Arrays and object properties retain parser
+      // order, so UNION arms and WITH definitions remain left-to-right.
+      for (const child of Object.values(value)) await visit(child);
       await validateSelectGroupingPlanning(node as SelectStatement, client, cacheContext);
+      return;
     }
     for (const child of Object.values(value)) await visit(child);
   };
@@ -3192,12 +3216,12 @@ async function buildGroupingFieldResolver(
     if (field.tableAlias !== null) {
       const tableIndex = tables.findIndex((table) => effectiveTableAlias(table) === field.tableAlias);
       if (tableIndex < 0) {
-        throw new Error(`ArgumentError: B65 field ${field.tableAlias}.${field.field} has an unknown table alias.`);
+        throw new Error(`ArgumentError: field ${field.tableAlias}.${field.field} has an unknown table alias.`);
       }
       const table = tables[tableIndex];
       if (table.cteName !== null) {
         throw new Error(
-          `ArgumentError: B65 field ${field.tableAlias}.${field.field} resolves to materialized source ${table.cteName}; physical APP fields are required.`
+          `ArgumentError: field ${field.tableAlias}.${field.field} resolves to materialized source ${table.cteName}; physical APP fields are required.`
         );
       }
       const code = physicalMatch(table, field.field);
@@ -3207,7 +3231,7 @@ async function buildGroupingFieldResolver(
         if (owner !== null && owner !== "") {
           throw new Error(subtableGroupingAdvice(field.field, [{ appId: table.appId, owner }]));
         }
-        throw new Error(`ArgumentError: B65 field ${field.tableAlias}.${field.field} does not exist in APP${table.appId}.`);
+        throw new Error(`ArgumentError: field ${field.tableAlias}.${field.field} does not exist in APP${table.appId}.`);
       }
       return resolved(table, tableIndex, field, code);
     }
@@ -3219,7 +3243,7 @@ async function buildGroupingFieldResolver(
     });
     const materializedMatches = tables.filter((table) => materializedHas(table, field.field));
     if (physicalMatches.length + materializedMatches.length > 1) {
-      throw new Error(`ArgumentError: B65 field ${field.field} is ambiguous across multiple sources.`);
+      throw new Error(`ArgumentError: field ${field.field} is ambiguous across multiple sources.`);
     }
     if (physicalMatches.length === 1 && materializedMatches.length === 0) {
       const match = physicalMatches[0];
@@ -3227,7 +3251,7 @@ async function buildGroupingFieldResolver(
     }
     if (materializedMatches.length === 1) {
       throw new Error(
-        `ArgumentError: B65 field ${field.field} resolves to a materialized CTE/temp column; physical APP fields are required.`
+        `ArgumentError: field ${field.field} resolves to a materialized CTE/temp column; physical APP fields are required.`
       );
     }
     // B145: 明細項目なら「存在しない」ではなく「別の表にある」ことを伝える。
@@ -3241,7 +3265,7 @@ async function buildGroupingFieldResolver(
     if (uniqueOwners.length > 0) {
       throw new Error(subtableGroupingAdvice(field.field, uniqueOwners));
     }
-    throw new Error(`ArgumentError: B65 field ${field.field} does not exist in a physical APP source.`);
+    throw new Error(`ArgumentError: field ${field.field} does not exist in a physical APP source.`);
   };
 }
 
@@ -3255,14 +3279,27 @@ async function validateSelectGroupingPlanning(
   const normalized = normalizeGroupingSpec(stmt);
   const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_')
     || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
-  if (normalized.type === "NONE" && !hasGroupingNodes) return;
-  const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
-  const resolvedSpec = validateGroupingPlanning(
-    stmt,
-    resolver,
-    enforceGroupingPlanningCandidateLimits
+  if (normalized.type === "GROUPING_SETS" || hasGroupingNodes) {
+    const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
+    const resolvedSpec = validateGroupingPlanning(
+      stmt,
+      resolver,
+      enforceGroupingPlanningCandidateLimits
+    );
+    if (resolvedSpec) resolvedGroupingSpecs.set(stmt, resolvedSpec);
+    return;
+  }
+  if (!isAggregateQueryBlock(stmt)) return;
+  if (normalized.type === "NONE") {
+    validateAggregateDependenciesStatic(stmt);
+    return;
+  }
+  const sources = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const hasUnavailableMaterializedSource = sources.some((source) =>
+    source.cteName !== null && !materializedTables?.has(source.cteName)
   );
-  if (resolvedSpec) resolvedGroupingSpecs.set(stmt, resolvedSpec);
+  if (hasUnavailableMaterializedSource) return;
+  await buildRuntimePlainGroupByPlan(stmt, client, cacheContext, materializedTables);
 }
 
 function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): string {
@@ -9854,7 +9891,8 @@ async function buildExplainWhereAnalysis(
   client: KintoneClient,
   cacheContext: string,
   maxRecords = 10_000,
-  relativeDatePlan?: RelativeDatePushdownPlan
+  relativeDatePlan?: RelativeDatePushdownPlan,
+  initialRelations?: ReadonlyMap<string, MaterializedTable>
 ): Promise<ExplainWhereAnalysis> {
   const fieldApps = new Set<number>();
   const processStatusApps = new Set<number>();
@@ -9884,6 +9922,121 @@ async function buildExplainWhereAnalysis(
     node.source === source
     || JSON.stringify(node.source) === JSON.stringify(source)
   );
+
+  const explainRelations = new Map<string, MaterializedTable>(initialRelations ?? []);
+  const explainSourceColumns = async (select: SelectStatement): Promise<string[]> => {
+    const tables = [select.from, ...select.joins.map((join) => join.table)];
+    if (tables.length > 1 && select.columns.some((column) =>
+      column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
+    )) {
+      throw new Error(
+        "ArgumentError: EXPLAIN could not determine the relation output schema for a multi-source wildcard SELECT."
+      );
+    }
+    const columns: string[] = [];
+    for (const table of tables) {
+      if (table.cteName !== null) {
+        if (table.cteName === NO_FROM_CTE_NAME) continue;
+        const relation = explainRelations.get(table.cteName);
+        if (!relation) {
+          throw new Error(
+            `ArgumentError: EXPLAIN could not determine the relation output schema for ${table.cteName}.`
+          );
+        }
+        columns.push(...relation.columns);
+        continue;
+      }
+      const fields = await getFieldsCached(table.appId, tracedClient, cacheContext);
+      if (table.subtableCode) {
+        columns.push(...fields.filter((field) =>
+          field.inSubtable && (field.subtableCode === table.subtableCode || field.subtableCode === undefined)
+        ).map((field) => field.code));
+        columns.push("_pid", "_rid", "_idx");
+        columns.push(...fields.filter((field) => !field.inSubtable).map((field) => `_p.${field.code}`));
+      } else {
+        columns.push(...fields.filter((field) => !field.inSubtable).map((field) => field.code));
+        columns.push(...APP_SYSTEM_FIELD_CODES);
+      }
+    }
+    return [...new Set(columns)];
+  };
+  const inferExplainRelationColumns = async (node: unknown): Promise<string[]> => {
+    if (node === null || typeof node !== "object") {
+      throw new Error("ArgumentError: EXPLAIN could not determine the relation output schema.");
+    }
+    const typed = node as Record<string, unknown>;
+    if (typed["type"] === "SELECT") {
+      const select = node as SelectStatement;
+      const sourceColumns = await explainSourceColumns(select);
+      if (select.columns.length === 1 && select.columns[0].type === "WILDCARD") {
+        return sourceColumns;
+      }
+      const output: string[] = [];
+      for (const column of select.columns) {
+        if (column.type === "WILDCARD") output.push(...sourceColumns);
+        else if (column.type === "PARENT_WILDCARD") {
+          output.push(...sourceColumns.filter((name) => name.startsWith("_p.")));
+        } else {
+          output.push(...project([], [column]).columns);
+        }
+      }
+      return output;
+    }
+    if (typed["type"] === "UNION") {
+      return inferExplainRelationColumns(typed["left"]);
+    }
+    if (typed["type"] === "SHOW_APPS") return [...SHOW_APPS_COLUMNS];
+    if (typed["type"] === "DESCRIBE") return [...DESCRIBE_COLUMNS];
+    throw new Error("ArgumentError: EXPLAIN could not determine the relation output schema.");
+  };
+  const preflightExplainRelations = async (node: unknown): Promise<void> => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) await preflightExplainRelations(child);
+      return;
+    }
+    const typed = node as Record<string, unknown>;
+    if (typed["type"] === "WITH") {
+      const withStatement = node as WithStatement;
+      for (const cte of withStatement.ctes) {
+        await preflightExplainRelations(cte.query);
+        const columns = await inferExplainRelationColumns(cte.query);
+        explainRelations.set(cte.name, { rows: [], columns });
+      }
+      await preflightExplainRelations(withStatement.query);
+      return;
+    }
+    if (typed["type"] === "UNION") {
+      await preflightExplainRelations(typed["left"]);
+      await preflightExplainRelations(typed["right"]);
+      return;
+    }
+    if (typed["type"] === "SELECT") {
+      const select = node as SelectStatement;
+      for (const column of select.columns) {
+        if (column.type === "SCALAR_SUBQUERY_COL") await preflightExplainRelations(column.query);
+      }
+      await preflightExplainRelations(select.where);
+      await preflightExplainRelations(select.having);
+      await validateSelectGroupingPlanning(
+        select,
+        tracedClient,
+        cacheContext,
+        explainRelations
+      );
+      const plainPlan = await buildRuntimePlainGroupByPlan(
+        select,
+        tracedClient,
+        cacheContext,
+        explainRelations
+      );
+      if (plainPlan) plainGroupByPlans.set(select, plainPlan);
+      return;
+    }
+    for (const child of Object.values(typed)) await preflightExplainRelations(child);
+  };
+
+  await preflightExplainRelations(query);
 
   const visit = async (node: unknown): Promise<void> => {
     if (node === null || typeof node !== "object") return;
@@ -10753,6 +10906,8 @@ function buildPlanForBatchQuery(
   return lines;
 }
 
+const explainMaterializedTables = new WeakMap<ExplainStatement, ReadonlyMap<string, MaterializedTable>>();
+
 async function executeExplain(
   stmt: ExplainStatement,
   client: KintoneClient,
@@ -10771,7 +10926,8 @@ async function executeExplain(
     client,
     cacheContext,
     maxRecords,
-    sharedPlan
+    sharedPlan,
+    explainMaterializedTables.get(stmt)
   );
   const fetchCollector: ExplainFetchCollector = { sources: [] };
   const relativeLines = relativeDateExplainLines(sharedPlan);
@@ -11116,6 +11272,12 @@ function buildSelectPlan(
             `  group key ${key.name}: PHYSICAL ` +
             `(source=${item.sourceIndex}, field=${item.fieldCode})`
           );
+        } else if (item.kind === "ALIAS_SAFE") {
+          lines.push(
+            `  group key ${key.name}: ALIAS_SAFE (column=${item.columnIndex})`
+          );
+        } else if (item.kind === "EXPRESSION") {
+          lines.push(`  group key ${key.name}: EXPRESSION`);
         }
       });
     } else if ([stmt.from, ...stmt.joins.map((join) => join.table)]

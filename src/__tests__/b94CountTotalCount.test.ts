@@ -222,11 +222,6 @@ test.each([
     "SELECT COUNT(*) AS c, SUM(金額) AS total FROM APP100",
     "3",
   ],
-  [
-    "他の列との併用",
-    "SELECT 件名, COUNT(*) AS c FROM APP100",
-    "3",
-  ],
 ])("B94: 対象外の %s は従来経路で正しい件数を返す", async (
   _name,
   sql,
@@ -238,6 +233,14 @@ test.each([
 
   expect(countValue(result)).toBe(count);
   expect(getRecords.mock.calls.every(([params]) => !requestedTotalCount(params))).toBe(true);
+});
+
+test("B94: COUNT(*) と bare column の併用は B148 が records API 前に拒否する", async () => {
+  const { client, getRecords } = makeClient({ totalCount: "999" });
+  await expect(execute("SELECT 件名, COUNT(*) AS c FROM APP100", client)).rejects.toThrow(
+    /非グループ化依存: 件名.*B65_NON_GROUPED_DEPENDENCY/
+  );
+  expect(getRecords).not.toHaveBeenCalled();
 });
 
 test("B94: COUNT(*) と window の併用は既存 parser 契約どおり API 前に拒否する", async () => {

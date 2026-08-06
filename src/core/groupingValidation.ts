@@ -13,6 +13,11 @@ import {
   type ResolvedGroupingSpec,
 } from "./grouping";
 import { bindGroupingRefCanonicalId } from "../engine/groupingRowMeta";
+import {
+  canonicalGroupingFieldIdentity,
+  validateAggregateDependencies,
+  validateAggregateDependenciesStatic,
+} from "./aggregateDependencyValidation";
 
 export interface ResolvedGroupingField {
   canonicalId: string;
@@ -40,13 +45,13 @@ export type GroupingPlanningGuardHook = (facts: GroupingPlanningGuardFacts) => v
 export const enforceGroupingPlanningCandidateLimits: GroupingPlanningGuardHook = (facts) => {
   if (facts.expandedSetCount > B65_MAX_GROUPING_SETS) {
     throw new Error(
-      `ArgumentError: B65 expanded grouping set count ${facts.expandedSetCount} exceeds limit ` +
+      `ArgumentError: expanded grouping set count ${facts.expandedSetCount} exceeds limit ` +
       `${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
     );
   }
   if (facts.canonicalItemCount > B65_MAX_GROUPING_ITEMS) {
     throw new Error(
-      `ArgumentError: B65 canonical grouping item count ${facts.canonicalItemCount} exceeds limit ` +
+      `ArgumentError: canonical grouping item count ${facts.canonicalItemCount} exceeds limit ` +
       `${B65_MAX_GROUPING_ITEMS} (reason=GROUPING_ITEM_LIMIT_EXCEEDED).`
     );
   }
@@ -155,11 +160,11 @@ function validateGroupingRefMembership(
 ): void {
   const resolved = resolve(ref.field);
   if (!resolved.physical) {
-    throw new Error(`ArgumentError: B65 grouping reference ${displayField(ref.field)} must resolve to a physical APP field.`);
+    throw new Error(`ArgumentError: grouping reference ${displayField(ref.field)} must resolve to a physical APP field.`);
   }
   if (!canonicalItems.has(resolved.canonicalId)) {
     throw new Error(
-      `ArgumentError: B65 GROUPING argument ${displayField(ref.field)} is not present in grouping allItems (reason=B65_GROUPING_ARG_NOT_ITEM).`
+      `ArgumentError: GROUPING argument ${displayField(ref.field)} is not present in grouping allItems (reason=B65_GROUPING_ARG_NOT_ITEM).`
     );
   }
   bindGroupingRefCanonicalId(ref, resolved.canonicalId);
@@ -174,7 +179,7 @@ function validateDependency(
   const resolved = resolve(ref);
   if (!resolved.physical || !canonicalItems.has(resolved.canonicalId)) {
     throw new Error(
-      `ArgumentError: B65 non-aggregate field ${displayField(ref)} in ${context} is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).`
+      `ArgumentError: non-aggregate field ${displayField(ref)} in ${context} is not a grouping item (reason=B65_NON_GROUPED_DEPENDENCY).`
     );
   }
 }
@@ -209,27 +214,31 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
   }
   if (forbiddenGroupingRefs.length > 0) {
     throw new Error(
-      "ArgumentError: B65 GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
+      "ArgumentError: GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
     );
   }
 
   if (normalized.type !== "GROUPING_SETS") {
     if (groupingRefs.length > 0) {
-      throw new Error("ArgumentError: B65 GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
+      throw new Error("ArgumentError: GROUPING() requires GROUP BY ROLLUP or GROUPING SETS.");
     }
+    validateAggregateDependenciesStatic(stmt);
     return;
   }
 
   if (stmt.orderMode === "KINTONE_NATIVE") {
-    throw new Error("ArgumentError: B65 KORDER BY is not supported in Phase1.");
+    throw new Error("ArgumentError: KORDER BY is not supported with extended grouping.");
   }
   if (stmt.columns.some((column) => column.type === "WINDOW_COL")) {
-    throw new Error("ArgumentError: B65 window functions are not supported in Phase1.");
+    throw new Error("ArgumentError: window functions are not supported with extended grouping.");
   }
   if (stmt.columns.some((column) =>
     column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
   )) {
-    throw new Error("ArgumentError: B65 wildcard projection is not supported in Phase1.");
+    throw new Error(
+      "ArgumentError: SELECT wildcard は集計 query では使用できません。" +
+      "必要な grouping 列を明示してください (reason=B65_NON_GROUPED_DEPENDENCY)."
+    );
   }
 }
 
@@ -262,7 +271,7 @@ export function validateGroupingPlanning(
   for (const item of resolvedSpec.allItems) {
     const resolved = item;
     if (!resolved.physical) {
-      throw new Error(`ArgumentError: B65 grouping item ${displayField(item.field)} must resolve to a physical APP field.`);
+      throw new Error(`ArgumentError: grouping item ${displayField(item.field)} must resolve to a physical APP field.`);
     }
     if (!canonicalItems.has(resolved.canonicalId)) {
       canonicalItems.add(resolved.canonicalId);
@@ -278,32 +287,12 @@ export function validateGroupingPlanning(
     validateGroupingRefMembership(ref, resolve, canonicalItems);
   }
 
-  const aliases = outputAliases(stmt.columns);
-  for (const column of stmt.columns) {
-    if (column.type === "GROUPING_COL" || column.type === "AGGREGATE"
-      || column.type === "ARITH_AGG_COL" || column.type === "LITERAL_COL"
-      || column.type === "VARIABLE_COL" || column.type === "SCALAR_SUBQUERY_COL") continue;
-    const refs: FieldRef[] = [];
-    if (column.type === "FIELD") refs.push(refFromName(column.field));
-    else collectNonAggregateFieldRefs(column, refs);
-    for (const ref of refs) validateDependency(ref, resolve, canonicalItems, "SELECT");
-  }
-
-  if (stmt.having) {
-    const refs: FieldRef[] = [];
-    collectNonAggregateFieldRefs(stmt.having, refs);
-    for (const ref of refs) {
-      if ((ref.tableAlias === null && aliases.has(ref.field)) || isAggregateSyntheticReference(ref)) continue;
-      validateDependency(ref, resolve, canonicalItems, "HAVING");
-    }
-  }
-
-  for (const order of stmt.orderBy) {
-    for (const ref of keyDependencies(order.key)) {
-      if ((ref.tableAlias === null && aliases.has(ref.field)) || isAggregateSyntheticReference(ref)) continue;
-      validateDependency(ref, resolve, canonicalItems, "ORDER BY");
-    }
-  }
+  validateAggregateDependencies(stmt, {
+    identities: new Set([...canonicalItems].map(canonicalGroupingFieldIdentity)),
+    resolveField: (ref) => resolve(ref).canonicalId,
+    sourceLabel: stmt.from.cteName ?? `APP${stmt.from.appId}`,
+    groupingLabel: `GROUP BY ${normalized.source}`,
+  });
 
   const collisionKeys = new Set<string>();
   for (const item of resolvedItems) {
@@ -316,7 +305,7 @@ export function validateGroupingPlanning(
     if (alias === null) continue;
     if (collisionKeys.has(alias)) {
       throw new Error(
-        `ArgumentError: B65 aggregate alias ${alias} collides with a grouping runtime key (reason=B65_AGGREGATE_ALIAS_COLLISION).`
+        `ArgumentError: aggregate alias ${alias} collides with a grouping runtime key (reason=B65_AGGREGATE_ALIAS_COLLISION).`
       );
     }
   }

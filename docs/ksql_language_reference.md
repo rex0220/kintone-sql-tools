@@ -1442,8 +1442,61 @@ GROUP BY 年月                              -- 式に付けたエイリアス�
 - 同名のエイリアスが複数あり、`GROUP BY` がそれをエイリアスとして解決しようとした場合（同名のフィールドがあればフィールド優先で正常に動きます）。
 - JOIN で複数のテーブルに同名フィールドがある非修飾名。テーブル別名で修飾してください。
 - `GROUPING()` 列やウィンドウ関数のエイリアス。
+- **集計もグループ化もされていない列参照**（`SELECT 製品名, 個数, SUM(個数) … GROUP BY 製品名` の `個数`）。→ [集計されていない列は書けません](#集計されていない列は書けません)（v3.57.0〜）
 
 > `GROUP BY ROLLUP(...)` / `GROUP BY GROUPING SETS (...)`（[小計・総計](#小計総計rollup--cube--grouping-sets--grouping)）の grouping item は**物理フィールドのみ**で、エイリアスは指定できません（従来どおり）。
+
+### 集計されていない列は書けません
+
+**（実測・v3.57.0）**
+
+**集計を含むクエリでは、`SELECT` / `HAVING` / `ORDER BY` に書ける列参照は次のいずれかだけです。**
+
+1. **`GROUP BY` に書いた列そのもの**
+2. **`GROUP BY` に書いた列（または式）だけから計算した式**
+3. **集計関数の引数の中**
+
+**どれにも当てはまらない列は、レコードを取得する前にエラーになります。**
+
+```sql
+SELECT 製品名, 個数, SUM(個数) AS 合計 FROM APP100 GROUP BY 製品名   -- エラー（個数）
+SELECT 製品名, 個数, SUM(個数) AS 合計 FROM APP100                   -- エラー（GROUP BY が無くても同じ）
+SELECT 製品名, SUM(個数) AS 合計 FROM APP100 GROUP BY 製品名 HAVING 個数 > 0  -- エラー
+```
+
+**`GROUP BY` が無くても集計関数があれば同じ規則が効きます**（入力全体が 1 グループになるため）。
+
+**通る形**
+
+```sql
+SELECT 製品名, SUM(個数) AS 合計 FROM APP100 GROUP BY 製品名
+SELECT DATE_FORMAT(日付,'%Y-%m') AS 年月, SUM(個数) FROM APP100 GROUP BY 年月
+SELECT 個数 + 1 AS 加算, SUM(個数) FROM APP100 GROUP BY 個数          -- キーだけから計算した式
+SELECT YEAR(日付) + 1 AS 翌年, SUM(個数) FROM APP100 GROUP BY YEAR(日付)
+SELECT 製品名, 個数 FROM APP100                                       -- 集計もグループ化も無い素の SELECT
+SELECT SUM(個数) OVER () AS 総計 FROM APP100                          -- ウィンドウだけ
+```
+
+**移行**
+
+| したいこと | 書き方 |
+|---|---|
+| グループごとに 1 つに決まる値を出す | **`MIN(<列>)`** / `MAX(<列>)` |
+| その列でも行を分ける | **`GROUP BY` に足す** |
+
+**`ANY_VALUE()` はありません。** `MIN()` / `MAX()` が同じ役割を果たします。
+
+> **v3.57.0 より前は、これらは黙って「グループの先頭レコードの値」を返していました。**
+> **`SELECT 製品名, 個数, SUM(個数) … GROUP BY 製品名` の `個数` は、
+> そのグループの 220 件のうち 1 件の値**でした。エラーも警告も出ませんでした。
+
+> **`ksql_validate` は構文と静的検査だけ**を行い、kintone のフォーム定義を読みません。
+> **同名の物理フィールドと SELECT エイリアスのどちらへ `GROUP BY` が解決されるかは、
+> フォーム定義が要る**ため、`ksql_validate` が成功しても実行時にこのエラーになることがあります。
+> **`ksql_explain` と実行は最終判断をします。**
+
+> **`ROLLUP` / `CUBE` / `GROUPING SETS` では以前からエラー**になっていました。
+> v3.57.0 で ordinary `GROUP BY` と `GROUP BY` 無し集計にも同じ規則が効きます。
 
 ### 集計関数
 

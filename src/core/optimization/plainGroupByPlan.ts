@@ -2,6 +2,7 @@ import { aggregateSyntheticName } from "../aggregateExpression";
 import { containsAggregate } from "../groupingValidation";
 import { APP_SYSTEM_FIELD_CODES } from "../systemFields";
 import type {
+  FieldRef,
   GroupByKey,
   SelectColumn,
   SelectStatement,
@@ -156,6 +157,16 @@ interface ParsedGroupName {
   readonly fieldCode: string;
 }
 
+export type PlainFieldResolution =
+  | {
+      readonly kind: "PHYSICAL";
+      readonly sourceIndex: number;
+      readonly fieldCode: string;
+      readonly runtimeKey: string;
+    }
+  | { readonly kind: "UNKNOWN"; readonly name: string }
+  | { readonly kind: "AMBIGUOUS"; readonly name: string };
+
 function parseGroupName(name: string): ParsedGroupName {
   // _p.<parent-field> は修飾名ではなく、サブテーブル仮想列そのもの。
   if (name.startsWith("_p.")) return { qualifier: null, fieldCode: name };
@@ -168,6 +179,35 @@ function parseGroupName(name: string): ParsedGroupName {
 
 function runtimeKey(source: PlainGroupBySourceSchema, fieldCode: string): string {
   return source.qualifier === null ? fieldCode : `${source.qualifier}.${fieldCode}`;
+}
+
+/**
+ * Resolve a clause field against the same source identity used by the plain
+ * GROUP BY planner. Unlike GROUP BY names, clause references never fall back
+ * to SELECT aliases here; the dependency validator handles clause aliases
+ * explicitly after applying the clause's existing namespace rules.
+ */
+export function resolvePlainFieldReference(
+  ref: FieldRef,
+  schemas: readonly PlainGroupBySourceSchema[]
+): PlainFieldResolution {
+  const name = ref.tableAlias === null ? ref.field : `${ref.tableAlias}.${ref.field}`;
+  const parsed = ref.tableAlias === null
+    ? parseGroupName(ref.field)
+    : { qualifier: ref.tableAlias, fieldCode: ref.field };
+  const candidateSources = parsed.qualifier === null
+    ? schemas
+    : schemas.filter((source) => source.qualifier === parsed.qualifier);
+  const physical = candidateSources.filter((source) => source.columns.includes(parsed.fieldCode));
+  if (physical.length > 1) return { kind: "AMBIGUOUS", name };
+  if (physical.length === 0) return { kind: "UNKNOWN", name };
+  const source = physical[0];
+  return {
+    kind: "PHYSICAL",
+    sourceIndex: source.sourceIndex,
+    fieldCode: parsed.fieldCode,
+    runtimeKey: runtimeKey(source, parsed.fieldCode),
+  };
 }
 
 function explicitAlias(column: SelectColumn): string | null {

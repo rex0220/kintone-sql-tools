@@ -43,7 +43,7 @@ export function expandCubeGroupingSets(items: readonly GroupingFieldItem[]): Gro
     if (expandedSetCount > Math.floor(B65_MAX_GROUPING_SETS / 2)) {
       const rejectedSetCount = expandedSetCount * 2;
       throw new Error(
-        `ArgumentError: B65 expanded grouping set count ${rejectedSetCount} exceeds limit ` +
+        `ArgumentError: expanded grouping set count ${rejectedSetCount} exceeds limit ` +
         `${B65_MAX_GROUPING_SETS} (reason=GROUPING_SET_LIMIT_EXCEEDED).`
       );
     }

@@ -290,24 +290,21 @@ test.each([
   expect(totalCountCalls(fallback.getRecords)).toHaveLength(1);
 });
 
-test("B105 R2: FIELD_COL が混ざると従来どおり FULL_SCAN で実行する", async () => {
+test("B105 R2: FIELD_COL が混ざると B148 が records API 前に拒否する", async () => {
   const { client, getRecords } = makeClient({ totalCounts: { 100: "999" } });
 
-  await execute("SELECT 件名, COUNT(*) AS c FROM APP100", client);
+  await expect(execute("SELECT 件名, COUNT(*) AS c FROM APP100", client)).rejects.toThrow(
+    /非グループ化依存: 件名.*B65_NON_GROUPED_DEPENDENCY/
+  );
 
-  expect(getRecords).toHaveBeenCalledTimes(1);
+  expect(getRecords).not.toHaveBeenCalled();
   expect(totalCountCalls(getRecords)).toHaveLength(0);
 });
 
 test.each([
   ["ARITH_COL", "SELECT 1 AS k, COUNT(*) AS c FROM APP100"],
   ["STRFUNC_COL", "SELECT UPPER('a') AS k, COUNT(*) AS c FROM APP100"],
-  [
-    "CASE_COL",
-    "SELECT CASE WHEN 金額 > 0 THEN 'a' ELSE 'b' END AS k, COUNT(*) AS c FROM APP100",
-  ],
   ["SCALAR_VALUE_COL", "SELECT 'a' || 'b' AS k, COUNT(*) AS c FROM APP100"],
-  ["FIELD_COL", "SELECT 件名 AS k, COUNT(*) AS c FROM APP100"],
   ["引数なし日付関数", "SELECT CURRENT_DATE() AS k, COUNT(*) AS c FROM APP100"],
 ])("B105 R2: %s が混ざると EXPLAIN は FULL_SCAN のまま", async (
   _columnType,
@@ -319,5 +316,16 @@ test.each([
 
   expect(plan).toContain("mode:          FULL_SCAN");
   expect(plan).not.toContain("COUNT_TOTAL_COUNT");
+  expect(getRecords).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["CASE_COL", "SELECT CASE WHEN 金額 > 0 THEN 'a' ELSE 'b' END AS k, COUNT(*) AS c FROM APP100", "金額"],
+  ["FIELD_COL", "SELECT 件名 AS k, COUNT(*) AS c FROM APP100", "件名"],
+])("B105 R2: %s の bare dependency は EXPLAIN でも拒否する", async (_type, sql, dependency) => {
+  const { client, getRecords } = makeClient();
+  await expect(execute(`EXPLAIN ${sql}`, client)).rejects.toThrow(
+    new RegExp(`非グループ化依存: ${dependency}.*B65_NON_GROUPED_DEPENDENCY`)
+  );
   expect(getRecords).not.toHaveBeenCalled();
 });
