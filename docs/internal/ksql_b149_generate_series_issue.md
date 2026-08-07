@@ -1,7 +1,7 @@
 # B149 `generate_series()`（数値・日付系列の生成関数）
 
 - 起票: 2026-08-07
-- ステータス: 🚧 **実装済み・最終チェック指摘 2 件（High 数値字句判定・Medium TIME 診断）修正済み（2026-08-07）・リリース待ち**
+- ステータス: ✅ **v3.59.0 でリリース（2026-08-07・npm publish はオーナー操作待ち・publish 後に常駐 MCP で実機確認）**
 - 検証: 全体テスト成功を Claude が実測（`npm test` exit 0・受入 50 件）。[最終チェック報告](ksql_b149_codex_final_check_report.md)＝警告抑止の fail-open なし・上限回避経路なし・境界ずれなし。[実装・修正報告](ksql_b149_codex_impl_report.md)
 - 仕様: [R2 正本](ksql_b149_generate_series_spec_r2.md)（codex 作・R1 は破棄）／
   [R1 レビュー](ksql_b149_codex_review_1.md)（指摘 6 件・実測付き）／[R2 検証](ksql_b149_codex_review_2.md)（全反映確認・警告文の実測照合一致）
