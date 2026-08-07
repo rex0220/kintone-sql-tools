@@ -143,7 +143,9 @@ export function completeInputReasons(stmt: Statement): Set<CompleteInputReason> 
       break;
     case "WITH":
       for (const cte of stmt.ctes) {
-        addReasons(reasons, completeInputReasons(cte.query));
+        if (cte.query.type !== "GENERATE_SERIES") {
+          addReasons(reasons, completeInputReasons(cte.query));
+        }
       }
       addReasons(reasons, completeInputReasons(stmt.query));
       break;

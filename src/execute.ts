@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -68,6 +68,7 @@ import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompar
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
+import { GENERATE_SERIES_MAX_ROWS, resolveGenerateSeries } from "./core/generateSeries";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -419,6 +420,8 @@ export interface MaterializedTable {
   readonly importRowErrors?: readonly (readonly import("./import/types").ImportRowError[])[];
   readonly importAudit?: import("./import/types").ImportColumnAudit;
   readonly recordNumberSourceValues?: readonly string[];
+  /** 直接の生成 CTE だけが持つ一意列。再実体化時には伝播しない。 */
+  readonly uniqueGeneratedColumn?: string;
 }
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
@@ -2137,7 +2140,7 @@ function resolveBatchVariableReferencesInternal<T>(
               ? `@${obj["name"]}`
               : value.raw ?? String(value.value),
           }
-        : { type: "STRING", value: value.value }) as T;
+        : { type: "STRING", value: value.value, fromVariable: true }) as T;
     }
     if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
       const value = variables.get(obj["name"]);
@@ -2565,11 +2568,18 @@ function canProveTotalWindowOrder(
   stmt: SelectStatement,
   orderBy: readonly OrderByItem[],
   resolveField: WhereFieldSemanticsResolver,
-  context: WindowWarningContext
+  context: WindowWarningContext,
+  generatedColumn?: string
 ): boolean {
-  if (context !== "DIRECT" || stmt.joins.length > 0 || stmt.from.cteName !== null || stmt.from.subtableCode != null) {
-    return false;
+  if (generatedColumn !== undefined && stmt.joins.length === 0 && stmt.from.cteName !== null) {
+    return orderBy.some((item) => {
+      if (item.key.type !== "FIELD_NAME") return false;
+      const ref = aggregateFieldRef(item.key.name);
+      if (ref.field !== generatedColumn) return false;
+      return ref.tableAlias === null || ref.tableAlias === effectiveTableAlias(stmt.from);
+    });
   }
+  if (context !== "DIRECT" || stmt.joins.length > 0 || stmt.from.cteName !== null || stmt.from.subtableCode != null) return false;
   return orderBy.some((item) => {
     if (item.key.type !== "FIELD_NAME") return false;
     const ref = aggregateFieldRef(item.key.name);
@@ -2619,7 +2629,8 @@ function tieBreakAdvice(context: WindowWarningContext, kind: "RANGE" | "VALUE"):
 function collectDefaultRangeWindowWarnings(
   stmt: SelectStatement,
   resolveField: WhereFieldSemanticsResolver,
-  context: WindowWarningContext
+  context: WindowWarningContext,
+  generatedColumn?: string
 ): string[] {
   const warnings: string[] = [];
 
@@ -2630,7 +2641,7 @@ function collectDefaultRangeWindowWarnings(
       || column.orderBy.length === 0
       || column.frame?.source !== "DEFAULT"
     ) continue;
-    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context)) continue;
+    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context, generatedColumn)) continue;
     warnings.push(
       `${column.alias} は既定フレーム（RANGE）で評価されます。` +
       "ORDER BY の値が同じ行はすべて同じ値になります。" +
@@ -2640,7 +2651,7 @@ function collectDefaultRangeWindowWarnings(
   }
   for (const column of stmt.columns) {
     if (column.type !== "WINDOW_COL" || column.windowKind !== "VALUE") continue;
-    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context)) continue;
+    if (canProveTotalWindowOrder(stmt, column.orderBy, resolveField, context, generatedColumn)) continue;
     warnings.push(
       `${column.alias} の ORDER BY は全順序でないため、同順内の前後関係は未規定です。` +
       tieBreakAdvice(context, "VALUE")
@@ -5241,6 +5252,8 @@ async function executeWith(
       result = await executeShowApps(client);
     } else if (cte.query.type === "DESCRIBE") {
       result = await executeDescribe(cte.query, client, cacheContext);
+    } else if (cte.query.type === "GENERATE_SERIES") {
+      result = executeGenerateSeries(cte.query);
     } else {
       result = await executeQueryWithCte(cte.query, client, options, cteCache, cacheContext, true);
     }
@@ -5249,6 +5262,7 @@ async function executeWith(
       rows: result.rows,
       columns: result.columns,
       columnMeta: materializedMetaBySelectResult.get(result),
+      ...(cte.query.type === "GENERATE_SERIES" ? { uniqueGeneratedColumn: cte.query.columnAlias } : {}),
     });
   }
 
@@ -5257,6 +5271,30 @@ async function executeWith(
     stmt.query, client, options, cteCache, cacheContext, captureColumnMeta
   );
   return mergeSelectWarnings(result, [...warnings]);
+}
+
+function executeGenerateSeries(stmt: GenerateSeriesStatement): SelectResult {
+  const series = resolveGenerateSeries(stmt);
+  const result: SelectResult = {
+    type: "SELECT",
+    columns: [stmt.columnAlias],
+    rows: series.values.map((value) => ({ [stmt.columnAlias]: value })),
+    rowCount: series.rowCount,
+    warnings: [],
+  };
+  const meta = series.kind === "INTEGER"
+    ? {
+        sortKind: "number" as const,
+        fieldType: "NUMBER",
+        semantics: resolveFieldSemantics({ fieldType: "NUMBER" }),
+      }
+    : {
+        sortKind: "string" as const,
+        fieldType: "DATE",
+        semantics: resolveFieldSemantics({ fieldType: "DATE" }),
+      };
+  materializedMetaBySelectResult.set(result, new Map([[stmt.columnAlias, meta]]));
+  return result;
 }
 
 /**
@@ -5391,7 +5429,10 @@ async function executeFullScanWithCte(
   const defaultRangeWarnings = collectDefaultRangeWindowWarnings(
     stmt,
     choiceAndWindowResolver,
-    "DERIVED"
+    "DERIVED",
+    stmt.joins.length === 0 && stmt.from.cteName !== null
+      ? cteCache.get(stmt.from.cteName)?.uniqueGeneratedColumn
+      : undefined
   );
 
   const maxRecords = options.maxRecords ?? 10_000;
@@ -10001,6 +10042,9 @@ async function buildExplainWhereAnalysis(
     }
     if (typed["type"] === "SHOW_APPS") return [...SHOW_APPS_COLUMNS];
     if (typed["type"] === "DESCRIBE") return [...DESCRIBE_COLUMNS];
+    if (typed["type"] === "GENERATE_SERIES") {
+      return [(node as GenerateSeriesStatement).columnAlias];
+    }
     throw new Error("ArgumentError: EXPLAIN could not determine the relation output schema.");
   };
   const preflightExplainRelations = async (node: unknown): Promise<void> => {
@@ -11612,6 +11656,24 @@ function buildWithPlan(
         false, true, collector, "cte"
       ));
       lines.push("");
+    } else if (cte.query.type === "GENERATE_SERIES") {
+      const series = resolveGenerateSeries(cte.query);
+      const step = series.kind === "DATE"
+        ? `${series.step} ${Math.abs(series.step) === 1 ? "day" : "days"}`
+        : String(series.step);
+      lines.push(
+        `[cte: ${cte.name}]`,
+        "  source:        GENERATE_SERIES",
+        `  column:        ${cte.query.columnAlias}`,
+        `  series type:   ${series.kind}`,
+        `  start:         ${series.start}`,
+        `  stop:          ${series.stop}`,
+        `  step:          ${step}`,
+        `  rows:          ${series.rowCount}`,
+        `  row guard:     ${series.rowCount} / ${GENERATE_SERIES_MAX_ROWS}`,
+        "  records API:   none",
+        ""
+      );
     }
   }
   if (stmt.query.type === "SELECT" || stmt.query.type === "UNION") {
