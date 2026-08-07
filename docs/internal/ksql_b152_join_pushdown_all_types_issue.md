@@ -80,6 +80,19 @@
   （計算値か表示値か）の実測④`numberPrecision` の CALC への適用有無の実測。
   今回の実測で①〜②の見込みは強まった。日付/日時書式は Phase 2 の canonical range と同じ扱いにできる可能性
 
+## 3.6 複数行・リッチ・添付の `like` / `is`（2026-08-07・オーナーの問いへの整理）
+
+- **`like` / `not like` は KLIKE で既に全面対応済み**＝`KLIKE_TYPES` は
+  `MULTI_LINE_TEXT` / `RICH_TEXT` / `FILE` を含み、JOIN prefilter でも **exact**。
+  kSQL の `LIKE` を押さないのは v2.0.0 の意図的分離（kintone like は単語検索・
+  添付は名前+内容検索でローカル評価不能＝KLIKE だけが対応口）
+- **`is empty` / `is not empty` は新規の拡張候補（片方向のみ）**＝kintone の「空」は
+  空白・改行・タブのみの文字列も含み、ローカルの空文字判定より**広い**。
+  → `IS NULL` → `is empty` は **superset** として押せる余地あり（残余再評価で正確化）。
+  **`IS NOT NULL` → `is not empty` は不可**（空白のみ行が欠落し superset が崩れる）。
+  対象は is を受ける型（複数行・添付など）。実需が出たら Phase 6 候補として仕様化
+- B84 表（8 比較演算子）の ✕×8 は kintone 演算子表と一致しており正当
+
 ## 4. 進め方
 
 **B151（NUMBER）と同じ回し方を Phase ごとに繰り返す**＝
