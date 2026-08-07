@@ -11,6 +11,11 @@ import {
   classifyJoinPushdownLeaf,
   type JoinPushdownSource,
 } from "../joinPredicatePushdown";
+import {
+  normalizeChoiceEquality,
+  type WhereFieldSemanticsResolver,
+} from "../whereCapability";
+import { resolveFieldSemantics } from "../../fieldSemantics";
 
 const SOURCE_PATHS = [
   "src/core/optimization/whereCapability.ts",
@@ -162,8 +167,17 @@ function source(fieldType: string): JoinPushdownSource {
 }
 
 function publicRelation(fieldType: string, op: CompareOp): string {
-  const relation = classifyJoinPushdownLeaf(
+  // 公開表は「観測可能な挙動」を写す。実行経路は WHERE を各プランナーで共有する前に
+  // B126 の選択系 = / != 正規化（in / not in へ）を通すため、表の判定も同じ順で行う。
+  // 分類器を生で呼ぶと、単一値選択系の = / != が実挙動と食い違う（✕に見える）。
+  const resolver: WhereFieldSemanticsResolver = () =>
+    resolveFieldSemantics({ fieldType, optionOrder: { A: 0 } });
+  const normalized = normalizeChoiceEquality(
     predicate(fieldType, op),
+    resolver
+  ).normalizedWhere;
+  const relation = classifyJoinPushdownLeaf(
+    normalized as BinaryExpr,
     [source(fieldType)]
   ).relation;
   return relation === "unsafe" ? "✕" : "○";
