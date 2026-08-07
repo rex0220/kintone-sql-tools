@@ -2756,7 +2756,7 @@ export class Parser {
 
     // 比較演算子
     const op = this.parseCompareOp();
-    const right = this.parseWhereSqlValue();
+    const right = this.parseWhereSqlValue(op !== "LIKE");
     return { type: "BINARY", op, left: field, right } satisfies BinaryExpr;
   }
 
@@ -2892,8 +2892,13 @@ export class Parser {
   }
 
   // 右辺の値
-  private parseWhereSqlValue(): SqlValue {
+  private parseWhereSqlValue(allowUnaryPlusNumberLiteral = true): SqlValue {
     const tok = this.peek();
+    if (allowUnaryPlusNumberLiteral && tok.kind === TokenKind.PLUS) {
+      this.advance();
+      const number = this.expect(TokenKind.NUMBER, "単項 + の直後には数値リテラルが必要です");
+      return makeNumberLiteral(`+${number.value}`);
+    }
     if (
       this.allowRelativeDateFunctions
       && tok.kind === TokenKind.IDENT
@@ -3062,17 +3067,9 @@ export class Parser {
       tok.kind === TokenKind.BIDENT ||
       tok.kind === TokenKind.LPAREN ||
       tok.kind === TokenKind.MINUS ||
-      tok.kind === TokenKind.PLUS ||
       this.tryStringFuncName() !== null
     ) {
-      const previousAllowUnaryPlusNumber = this.allowUnaryPlusNumber;
-      this.allowUnaryPlusNumber = true;
-      let expr: ArithNode;
-      try {
-        expr = this.parseArithAddSub();
-      } finally {
-        this.allowUnaryPlusNumber = previousAllowUnaryPlusNumber;
-      }
+      const expr = this.parseArithAddSub();
       // 単純な数値リテラルはそのまま NumberLiteral に
       if (expr.type === "NUMBER") return expr satisfies NumberLiteral;
       return { type: "ARITH_VALUE", expr } satisfies ArithSqlValue;

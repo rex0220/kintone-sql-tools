@@ -11,6 +11,7 @@ type GetRecordsParams = Parameters<KintoneClient["getRecords"]>[0];
 
 const MASTER = 4229;
 const TRANSACTION = 4228;
+const IN_QUERY = "個数 in (-6,10,1000)";
 
 function record(values: Readonly<Record<string, unknown>>): KintoneRecord {
   return Object.fromEntries(
@@ -127,6 +128,11 @@ const JOIN_PREFIX =
   "SELECT t.$id, t.製品名, t.個数 "
   + `FROM APP${MASTER} AS m JOIN APP${TRANSACTION} AS t ON m.製品名 = t.製品名 WHERE `;
 
+const OUTER_JOIN_SQL =
+  "SELECT m.製品名, t.個数 "
+  + `FROM APP${MASTER} AS m LEFT JOIN APP${TRANSACTION} AS t ON m.製品名 = t.製品名 `
+  + "WHERE t.個数 <= 100 ORDER BY m.$id";
+
 function joinSql(condition: string): string {
   return `${JOIN_PREFIX}${condition} ORDER BY t.$id`;
 }
@@ -149,6 +155,7 @@ function planText(result: SelectResult): string {
 
 function expectedQuery(condition: string): string {
   if (condition === "個数 = -0" || condition === "個数 = +0") return "個数 = 0";
+  if (condition === "個数 IN (-6, 10, 1e3)") return IN_QUERY;
   return condition
     .replace("1e3", "1000")
     .replace("<> ", "!= ")
@@ -236,7 +243,7 @@ describe("B151 mock-client acceptance", () => {
       ["t.個数 = 9007199254740993", "個数 = 9007199254740993"],
       ["t.個数 = 10", "個数 = 10"],
       ["t.個数 != 10", "個数 != 10"],
-      ["t.個数 IN (-6, 10, 1e3)", "個数 in (-6,10,1000)"],
+      ["t.個数 IN (-6, 10, 1e3)", IN_QUERY],
       ["t.個数 NOT IN (-6, 10, 1e3)", "個数 not in (-6,10,1000)"],
     ] as const) {
       const client = makeClient();
@@ -262,7 +269,7 @@ describe("B151 mock-client acceptance", () => {
       [`EXPLAIN ${joinSql("t.個数 IN (10, '20')")}`, "join pushdown not applied:"],
       [`EXPLAIN ${joinSql("t.個数 >= 1e-11")}`, "join pushdown not applied:"],
       [`EXPLAIN ${joinSql("t.個数 >= 1000000000000000000000000000000")}`, "join pushdown not applied:"],
-      [`EXPLAIN ${joinSql("t.個数 <= 100").replace(" JOIN ", " LEFT JOIN ")}`, "OUTER_JOIN"],
+      [`EXPLAIN ${OUTER_JOIN_SQL}`, "OUTER_JOIN"],
     ] as const;
     for (const [sql, reason] of cases) {
       const client = makeClient();

@@ -614,10 +614,12 @@ ORDER BY t.$id
 
 APP4228 側の表示は次とする。
 
+【2026-08-07 訂正】実 serializer の出力形へ統一
+
 ```text
-kintone query: 個数 in (-5, 0, 1000)
+kintone query: 個数 in (-5,0,1000)
 fetch: EXACT
-pushdown applied: 個数 in (-5, 0, 1000)
+pushdown applied: 個数 in (-5,0,1000)
 relation: exact
 ```
 
@@ -1090,8 +1092,10 @@ ORDER BY t.$id
 
 query は次とする。
 
+【2026-08-07 訂正】実 serializer の出力形へ統一
+
 ```text
-個数 in (-6, 10, 1000)
+個数 in (-6,10,1000)
 ```
 
 ### 11.14 `NOT IN`
