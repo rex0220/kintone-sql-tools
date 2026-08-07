@@ -242,4 +242,22 @@ describe("B84 JOIN field-vs-literal pushdown documentation", () => {
     expect(generated.replace(currentNumberRow, oldNumberRow)).not.toBe(documented);
     expect(documented.replace(currentNumberRow, oldNumberRow)).not.toBe(generated);
   });
+
+  test("B152 Phase 2+3 の分類器または文書の1セルを戻すとパリティが崩れる", () => {
+    const generated = generatedTable();
+    const documented = documentedTable();
+    for (const [currentRow, oldRow] of [
+      [
+        "| `DATE` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |",
+        "| `DATE` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |",
+      ],
+      [
+        "| `SINGLE_LINE_TEXT` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |",
+        "| `SINGLE_LINE_TEXT` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |",
+      ],
+    ]) {
+      expect(generated.replace(currentRow, oldRow)).not.toBe(documented);
+      expect(documented.replace(currentRow, oldRow)).not.toBe(generated);
+    }
+  });
 });

@@ -127,6 +127,9 @@ function filterRows(app: number, rawQuery: string): readonly KintoneRecord[] {
     if (query === "日付 = THIS_MONTH()") {
       return rows.filter((row) => String(row["日付"].value).startsWith("2026-07-"));
     }
+    if (query === '日付 >= "2026-07-01"') {
+      return rows.filter((row) => String(row["日付"].value) >= "2026-07-01");
+    }
   }
 
   if (app === 77611) {

@@ -337,6 +337,9 @@ TEXT/LINK の `=` / `!=` / `IN` / `NOT IN` を `exact` にする条件は、§12
 
 ### 4.5 ユーザー・組織・グループ系
 
+> **【2026-08-07・レビューで見送り確定＝GAIA_IL26 実測。B54 後に再評価】**
+> Phase 4 は今回実装せず、以下は将来の再評価用契約として保持する。
+
 対象型:
 
 - `CREATOR`
@@ -389,6 +392,9 @@ literal policy:
 
 ### 4.6 STATUS_ASSIGNEE
 
+> **【2026-08-07・レビューで見送り確定＝GAIA_IL26 実測。B54 後に再評価】**
+> classifier、where capability、process-enabled gate は今回変更しない。
+
 `STATUS_ASSIGNEE` は、プロセス管理が有効なアプリにだけ存在する record-level field として扱う。
 
 現行 `loadTypedPushdownMeta()` は `STATUS` 候補について `status.json` を取得するが、`STATUS_ASSIGNEE` について同じ有効性確認をしていない。
@@ -426,6 +432,10 @@ relation は、§12 の実機 gate を通過した型について次のとおり
 | `ORGANIZATION_SELECT` | unsafe | unsafe | unsafe | unsafe | unsafe | unsafe | exact | exact |
 | `GROUP_SELECT` | unsafe | unsafe | unsafe | unsafe | unsafe | unsafe | exact | exact |
 | `STATUS_ASSIGNEE` | unsafe | unsafe | unsafe | unsafe | unsafe | unsafe | exact | exact |
+
+> **【2026-08-07・レビューで見送り確定＝GAIA_IL26 実測。B54 後に再評価】**
+> 上表のユーザー系6型（`CREATOR` から `STATUS_ASSIGNEE`）の `IN` / `NOT IN` は
+> 今回は開放せず、実装および B84 公開表ではすべて `unsafe` / `✕` を維持する。
 
 `<>` は serializer 上 `!=` となり、relation も `!=` と同じである。
 

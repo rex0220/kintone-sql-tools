@@ -56,6 +56,9 @@ function makeClient(): KintoneClient & { readonly calls: GetRecordsParams[] } {
       if (query.includes('件名 like "urgent"')) {
         rows = rows.filter((row) => String(row["件名"]?.value).includes("urgent"));
       }
+      if (query.includes('件名 = "urgent task"')) {
+        rows = rows.filter((row) => String(row["件名"]?.value) === "urgent task");
+      }
       return { records: requestedFieldsOnly(rows, params.fields) };
     },
     async openCursor() { throw new Error("unexpected cursor call"); },
@@ -144,16 +147,16 @@ test("B76 Phase B Step 2: JOIN側 fetch、通常residual、appliedKlikesが同�
     coexistClient.calls.find((call) => call.app === 77600)!.query
   )).toBe('(件名 like "urgent") and (日付 = THIS_MONTH())');
 
-  const supersetClient = makeClient();
-  const superset = await execute(
+  const exactClient = makeClient();
+  const exact = await execute(
     `${baseSql}a.日付 = THIS_MONTH() AND a.件名 = 'urgent task'`,
-    supersetClient,
-    { cacheContext: "b76-phase-b-step2-superset-residual" }
+    exactClient,
+    { cacheContext: "b76-phase-b-step2-b152-exact" }
   ) as SelectResult;
-  expect(superset.rows).toEqual([{ $id: "1", 区分: "A" }]);
+  expect(exact.rows).toEqual([{ $id: "1", 区分: "A" }]);
   expect(withoutPaging(
-    supersetClient.calls.find((call) => call.app === 77600)!.query
-  )).toBe('(件名 = "urgent task") and (日付 = THIS_MONTH())');
+    exactClient.calls.find((call) => call.app === 77600)!.query
+  )).toBe('日付 = THIS_MONTH() and 件名 = "urgent task"');
 });
 
 test.each([

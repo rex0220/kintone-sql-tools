@@ -354,8 +354,8 @@ describe("B76 Phase A Step 5 distribution parity", () => {
     expect(expectedPlan).toContain(
       "client residual: (((a.担当者 = '佐藤' OR a.日付 = '2026-07-24')) AND b.区分 IN ('A'))"
     );
-    expect(expectedPlan).toContain("relation: superset");
     expect(expectedPlan).toContain("relation: exact");
+    expect(expectedPlan).not.toContain("relation: superset");
   });
 
   test.each([

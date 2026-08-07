@@ -508,6 +508,10 @@ WHERE t.個数 >= 100
 
 NUMBER leaf は exact でも、SINGLE_LINE_TEXT `=` が superset なら alias 全体の relation は superset となる。
 
+> **【B152 Phase 3 により失効・2026-08-07】** 非空 literal に対する
+> SINGLE_LINE_TEXT / LINK の equality・IN は exact へ昇格したため、上例の現行 relation は
+> exact である。一般則 `exact AND superset = superset` 自体は維持する。
+
 ### 7.5 residual
 
 通常述語の元 `WHERE` は残す。NUMBER exact 化を理由に residual AST から NUMBER leaf を削除しない。
@@ -771,6 +775,9 @@ CHANGELOG は次を明記する。
 - safe integer 制限を解除
 - widening なし
 - CALC、DATE/TIME/DATETIME、TEXT は対象外
+
+> **【B152 Phase 2+3 により失効・2026-08-07】** CALC は対象外のままだが、canonical
+> DATE/TIME/DATETIME 系比較と非空 TEXT/LINK equality・IN は exact 対象へ拡張された。
 - B76/B84 の旧 IEEE-754 注記が現行契約では失効
 
 ---
@@ -1504,6 +1511,9 @@ B151 は次をすべて満たした場合だけ完了とする。
 8. 桁違い、負数、指数、`+0` / `-0` が一致する。
 9. `IN` / `NOT IN` が一致する。
 10. CALC、DATE/TIME/DATETIME、TEXT は開放されない。
+
+> **【B152 Phase 2+3 により失効・2026-08-07】** 完了条件10は B151 単独時点の条件であり、
+> 同梱する B152 により DATE/TIME/DATETIME 系と TEXT/LINK の対象組は開放された。
 11. `EXPLAIN` が実行時 query、relation、fetch scope と一致する。
 12. B84 公開表が分類器から生成され、NUMBER の8セルがすべて `○` になる。
 13. `>= 5000000` を `> 4999999` へ変える案内が削除または改訂される。

@@ -139,8 +139,7 @@ test("B76 Step 4: EXPLAIN renderer は生成済み runtime plan の applied quer
   expect(text).toContain("EXPLAIN unresolved subqueries: not applied (records API is not called)");
   expect(text).toContain("pushdown applied: 担当者 = \"佐藤\"");
   expect(text).toContain("pushdown applied: 区分 in (\"A\")");
-  expect(text).toContain("relation: superset");
-  expect(text).toContain("relation: exact");
+  expect(text.match(/relation: exact/g)).toHaveLength(2);
   expect(text).toContain(
     "client residual: (a.担当者 = '佐藤' AND b.区分 IN ('A'))"
   );
