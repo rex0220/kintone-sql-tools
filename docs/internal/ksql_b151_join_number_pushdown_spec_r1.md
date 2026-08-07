@@ -364,6 +364,11 @@ NUMBER leaf が `exact` になっても、通常述語の元 `WHERE` を residua
 
 ## 5. CALC を対象外に維持する理由
 
+> **【2026-08-07・B152 オーナー判断で失効】** 単一表との一致を優先し、CALC は表示書式に
+> かかわらず8演算子を `superset` で開放する。時間書式等の順序は kintone 準拠（単一表と
+> 同一）とし、取得後に元の WHERE を再評価する。書式に合わない literal の kintone error は
+> 表面化し、silent retry しない。本節は B151 時点の見送り理由として保持する。
+
 CALC は Phase 1 に含めない。
 
 現行意味型は、CALC のフォーム設定 `format` により number または string を選ぶ。

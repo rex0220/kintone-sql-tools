@@ -108,6 +108,7 @@ const NATIVE_OPERATORS = new Map<string, ReadonlySet<NativeOperator>>([
   ["ORGANIZATION_SELECT", new Set(["in", "not in"])],
   ["GROUP_SELECT", new Set(["in", "not in"])],
   ["STATUS", new Set(EQUALITY_IN)],
+  ["STATUS_ASSIGNEE", new Set(["in", "not in"])],
 ]);
 
 /**

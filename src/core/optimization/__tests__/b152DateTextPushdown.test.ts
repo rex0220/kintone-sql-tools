@@ -148,8 +148,11 @@ describe("B152 Phase 2+3 JOIN leaf classifier", () => {
     "t.件名 = ''",
     "t.件名 IN ('A', '')",
     "t.リンク < 'A'",
-    "t.主担当 IN ('known')",
   ])("対象外は fail-closed: %s", (sqlPredicate) => {
     expect(relation(sqlPredicate)).toBe("unsafe");
+  });
+
+  test("オーナー判断後はユーザー code IN を exact にする", () => {
+    expect(relation("t.主担当 IN ('known')")).toBe("exact");
   });
 });

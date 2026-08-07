@@ -28,7 +28,7 @@ test.each([
   ["MULTI_LINE_TEXT", ["like", "not like"]],
   ["DROP_DOWN", ["in", "not in"]],
   ["STATUS", ["=", "!=", "in", "not in"]],
-  ["STATUS_ASSIGNEE", []],
+  ["STATUS_ASSIGNEE", ["in", "not in"]],
   ["FUTURE_FIELD", []],
 ] as const)("native capability matrix: %s", (fieldType, operators) => {
   expect([...nativeWhereOperatorsForType(fieldType)]).toEqual(operators);

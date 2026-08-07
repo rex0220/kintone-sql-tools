@@ -943,8 +943,9 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 - **JOIN・field vs literal:** 次表の「押し下がる」条件だけを APP ごとの prefilter に使います。
   表にないフィールド型は押し下がりません。
 
-選択系の `IN` / `NOT IN` は、空でない実在選択肢だけのリストを指定し、型情報と選択肢情報を
-取得できた場合に押し下がります。表はこの条件を満たすリテラルでの判定です。
+フォーム選択系の `IN` / `NOT IN` は、空でない実在選択肢だけのリストを指定し、型情報と
+選択肢情報を取得できた場合に押し下がります。ユーザー・組織・グループ・作業者系は
+`name` ではなく非空の `code` を逐語で指定します。表はこれらの条件を満たすリテラルでの判定です。
 
 **○ = 押し下がる／✕ = 押し下がらない**（✕ の条件は prefilter に使わず、取得後に JS で判定します）。
 単一値選択系（`RADIO_BUTTON` / `DROP_DOWN` / `STATUS`）の `=` / `!=` は、エンジンが
@@ -953,31 +954,31 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 <!-- B84_JOIN_FIELD_LITERAL_TABLE_START -->
 | フィールド型 | `=` | `!=` | `<` | `>` | `<=` | `>=` | `in` | `not in` |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `CALC` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `CALC` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
 | `CATEGORY` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `CHECK_BOX` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `CREATED_TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
-| `CREATOR` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `CREATOR` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `DATE` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `DATETIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `DROP_DOWN` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `FILE` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `GROUP_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `GROUP_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `LINK` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
-| `MODIFIER` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `MODIFIER` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `MULTI_LINE_TEXT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `MULTI_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `NUMBER` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
-| `ORGANIZATION_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `ORGANIZATION_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `RADIO_BUTTON` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
-| `RECORD_NUMBER` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `RECORD_NUMBER` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
 | `RICH_TEXT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `SINGLE_LINE_TEXT` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `STATUS` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
-| `STATUS_ASSIGNEE` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `STATUS_ASSIGNEE` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `UPDATED_TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
-| `USER_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `USER_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 <!-- B84_JOIN_FIELD_LITERAL_TABLE_END -->
 
 日付・時刻系の行は、右辺が正規形式の場合に限ります。`DATE` は実在する
@@ -990,20 +991,30 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 押し下げます。大文字小文字、全角半角、Unicode、空白は正規化せず、records API query に
 必要な `"` と `\` の escape だけを行います。範囲比較、空文字、空文字を含むリストは
 押し下げません。`LIKE` は引き続き client 評価で、kintone のキーワード検索には `KLIKE` を
-使用します。`CALC` / `RECORD_NUMBER` とユーザー・組織・グループ・作業者系の code リストは
-未開放です。ユーザー系は存在しない code が `GAIA_IL26` になるため、B54 後に再評価します。
+使用します。
+
+`CALC` / `RECORD_NUMBER` は、B151 の numeric literal policy を満たす数値、または空でない
+文字列を8演算子で押し下げます。`IN` / `NOT IN` は1件以上の同種 literal だけからなるリストが
+対象です。いずれも `relation: superset` として取得後に元の `WHERE` を再評価します。
+CALC の表示書式や RECORD_NUMBER のアプリコード形式に合わない値は、単一表と同じく kintone
+query error になります。全件取得への silent retry は行いません。
+
+ユーザー・組織・グループ・作業者系6型は、1件以上の非空 string literal code による
+`IN` / `NOT IN` を `relation: exact` で押し下げます。表示名 `name` は使いません。
+存在しない code（`GAIA_IL26` 等）やプロセス無効時の作業者など、kintone が受理しない指定は
+単一表と同じく query error として表面化し、全件取得へ retry しません。
 
 `NUMBER` 行は、直接の物理 NUMBER フィールドと、正規化後の小数部10桁以下・全体30桁以下の
 有限10進 numeric literal（`IN` / `NOT IN` は1件以上の numeric literal だけのリスト）を
 比較する場合に限ります。8演算子はいずれも `relation: exact` です。指数表記と先頭の `+` は
 plain decimal に正規化し、安全整数外も元の10進字句を保持します。アプリの `numberPrecision`
-は保存値の丸め設定であり、query literal をその設定へ丸めません。`CALC`、文字列 literal、
+は保存値の丸め設定であり、query literal をその設定へ丸めません。文字列 literal、
 許可範囲外の値、算術式・関数・`CASE` で包んだフィールドはこの NUMBER 規則の対象外です。
 
 `$id` は上表の `RECORD_NUMBER` とは別です。`$id` はフィールド型ではなく、正準なレコード ID
 であると証明できる擬似フィールド名なので、正の安全整数リテラルに対する `=` / `<` / `>` /
-`<=` / `>=` を JOIN でも押し下げます。JOIN 中の `RECORD_NUMBER` フィールドは別アプリ由来かも
-しれず、同じ保証がないため押し下げません。
+`<=` / `>=` を JOIN でも押し下げます。JOIN 中の `RECORD_NUMBER` は同じ exact 保証を持たない
+ため、別契約の `superset` として押し下げ、取得後に再評価します。
 
 フィールドを `DATE_FORMAT(field, ...)` などの関数で包む条件は kintone query として表現できず、
 押し下がりません。server-only の kintone クエリ関数は
