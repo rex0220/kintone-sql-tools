@@ -34,6 +34,26 @@ export interface JoinKeyPrefilterInput {
   readonly maxInKeys: number;
 }
 
+export const JOIN_KEY_IN_CHUNK_SIZE = 50;
+
+/** Execution と EXPLAIN で共有する JOIN キー prefilter query serializer。 */
+export function buildJoinKeyPrefilterQueries(
+  plan: JoinKeyPrefilterPlan,
+  field: string,
+  quoteValue: (value: string) => string
+): string[] {
+  if (plan.kind === "RANGE") {
+    return [`${field} >= ${quoteValue(plan.min)} and ${field} <= ${quoteValue(plan.max)}`];
+  }
+  if (plan.kind !== "IN") return [];
+  const queries: string[] = [];
+  for (let offset = 0; offset < plan.values.length; offset += JOIN_KEY_IN_CHUNK_SIZE) {
+    const chunk = plan.values.slice(offset, offset + JOIN_KEY_IN_CHUNK_SIZE);
+    queries.push(`${field} in (${chunk.map(quoteValue).join(",")})`);
+  }
+  return queries;
+}
+
 const DATETIME_TYPES = new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"]);
 
 /** kintone 実機で `in ("")` の受理を確認済みの JOIN 先フィールド型。 */
