@@ -1,5 +1,5 @@
 import { Lexer } from "../../../lexer/lexer";
-import { Parser } from "../../../parser/parser";
+import { Parser, ParseError } from "../../../parser/parser";
 import type { BinaryExpr, SelectStatement } from "../../../types/ast";
 import {
   classifyJoinPushdownLeaf,
@@ -31,6 +31,26 @@ function classify(sqlPredicate: string, fieldSource = source) {
 }
 
 describe("B151 NUMBER JOIN prefilter classifier", () => {
+  test.each([
+    "t.個数 = +5",
+    "t.個数 BETWEEN +5 AND +6",
+  ])("WHERE の単純な単項 + 数値リテラルを受理する: %s", (sqlPredicate) => {
+    expect(() => new Parser(new Lexer(
+      `SELECT * FROM APP4228 AS t WHERE ${sqlPredicate}`
+    ).tokenize()).parse()).not.toThrow();
+  });
+
+  test.each([
+    "t.個数 = +5 + 1",
+    "t.製品名 LIKE +5",
+    "t.製品名 NOT LIKE +5",
+    "t.個数 = ++5",
+  ])("WHERE の単項 + を単純な数値リテラル以外では拒否する: %s", (sqlPredicate) => {
+    expect(() => new Parser(new Lexer(
+      `SELECT * FROM APP4228 AS t WHERE ${sqlPredicate}`
+    ).tokenize()).parse()).toThrow(ParseError);
+  });
+
   test.each([
     ["999999999999.99985", true],
     ["9007199254740993", true],
