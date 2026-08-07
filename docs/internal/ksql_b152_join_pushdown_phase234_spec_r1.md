@@ -340,6 +340,11 @@ TEXT/LINK の `=` / `!=` / `IN` / `NOT IN` を `exact` にする条件は、§12
 > **【2026-08-07・レビューで見送り確定＝GAIA_IL26 実測。B54 後に再評価】**
 > Phase 4 は今回実装せず、以下は将来の再評価用契約として保持する。
 
+> **【2026-08-07・オーナー判断で撤回】** kintone のレコード取得の型×演算子表との
+> 全面整合を優先し、ユーザー系6型の `IN` / `NOT IN` を `exact` で開放する。
+> code は逐語・非空 literal のみ、`name` は使わない。存在しない code の query error は
+> 単一表と同様に表面化し、silent retry しない。
+
 対象型:
 
 - `CREATOR`
@@ -395,6 +400,10 @@ literal policy:
 > **【2026-08-07・レビューで見送り確定＝GAIA_IL26 実測。B54 後に再評価】**
 > classifier、where capability、process-enabled gate は今回変更しない。
 
+> **【2026-08-07・オーナー判断で撤回】** `STATUS_ASSIGNEE` も `IN` / `NOT IN` を
+> native capability と JOIN exact prefilter に追加する。追加 metadata 取得は行わず、
+> プロセス無効時の kintone error も単一表と同様に表面化する。
+
 `STATUS_ASSIGNEE` は、プロセス管理が有効なアプリにだけ存在する record-level field として扱う。
 
 現行 `loadTypedPushdownMeta()` は `STATUS` 候補について `status.json` を取得するが、`STATUS_ASSIGNEE` について同じ有効性確認をしていない。
@@ -437,6 +446,11 @@ relation は、§12 の実機 gate を通過した型について次のとおり
 > 上表のユーザー系6型（`CREATOR` から `STATUS_ASSIGNEE`）の `IN` / `NOT IN` は
 > 今回は開放せず、実装および B84 公開表ではすべて `unsafe` / `✕` を維持する。
 
+> **【2026-08-07・オーナー判断で上記を撤回】** ユーザー系6型は表どおり `exact` で開放する。
+> さらに `CALC` / `RECORD_NUMBER` は8演算子を `superset` で開放し、取得後に再評価する。
+> literal は B151 numeric policy の数値または非空文字列（list は非空・同種のみ）。書式・値・
+> code が不正な指定の kintone query error は表面化する。
+
 `<>` は serializer 上 `!=` となり、relation も `!=` と同じである。
 
 ### 5.1 開けない組
@@ -454,6 +468,11 @@ relation は、§12 の実機 gate を通過した型について次のとおり
 | MULTI_LINE_TEXT / RICH_TEXT / FILE | 対象比較 operator を受けない |
 | CALC | 表示書式による値領域差が未証明 |
 | RECORD_NUMBER | アプリコード付き表示値の値領域が未証明 |
+
+> **【2026-08-07・オーナー判断】** 上表の CALC / RECORD_NUMBER は「未証明だから閉じる」を
+> 撤回し、単一表との一致を優先して `superset` で開放する。CALC の時間書式等と
+> RECORD_NUMBER のアプリコード形式を含む順序は kintone 準拠（単一表と同一）とし、
+> kintone の候補取得後に元の WHERE を再評価する。
 
 ---
 
@@ -1275,6 +1294,10 @@ escape 表現の違いと値の違いを混同しない。
 - malformed record の exact 証明
 
 ### 13.3 CALC・RECORD_NUMBER を Phase 5 に残す理由
+
+> **【2026-08-07・オーナー判断で失効】** 本節の見送り判断は撤回した。単一表との一致を
+> 優先し、両型の8演算子を `superset` で開放する。書式に合わない literal は kintone error
+> とし、全件取得へ retry しない。
 
 `CALC` は表示書式により値領域が異なる。
 

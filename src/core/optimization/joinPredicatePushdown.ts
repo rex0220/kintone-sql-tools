@@ -163,6 +163,15 @@ const SELECTION_TYPES = new Set([
   "STATUS",
 ]);
 
+const USER_CODE_TYPES = new Set([
+  "CREATOR",
+  "MODIFIER",
+  "USER_SELECT",
+  "ORGANIZATION_SELECT",
+  "GROUP_SELECT",
+  "STATUS_ASSIGNEE",
+]);
+
 const KLIKE_TYPES = new Set([
   "SINGLE_LINE_TEXT",
   "LINK",
@@ -1040,9 +1049,7 @@ function classifySupportedLeaf(
   }
 
   if (fieldType === "RECORD_NUMBER") {
-    // `$id` と同じ canonical domain を証明する repo contract はまだ無い。
-    // §5.2 / §15.4 に従い、証明経路が実装されるまでは fail-closed にする。
-    return "unsafe";
+    return classifySupersetScalarOrListLiteral(predicate);
   }
 
   if (fieldType === "NUMBER") {
@@ -1066,6 +1073,19 @@ function classifySupportedLeaf(
       return "exact";
     }
     return "unsafe";
+  }
+
+  if (fieldType === "CALC") {
+    return classifySupersetScalarOrListLiteral(predicate);
+  }
+
+  if (USER_CODE_TYPES.has(fieldType)) {
+    if ((predicate.op !== "IN" && predicate.op !== "NOT_IN")
+      || predicate.right.type !== "IN_LIST"
+      || predicate.right.values.length === 0) return "unsafe";
+    return predicate.right.values.every((value) =>
+      value.type === "STRING" && value.value !== ""
+    ) ? "exact" : "unsafe";
   }
 
   if (fieldType === "SINGLE_LINE_TEXT" || fieldType === "LINK") {
@@ -1113,6 +1133,32 @@ function classifySupportedLeaf(
     ) ? "exact" : "unsafe";
   }
 
+  return "unsafe";
+}
+
+function classifySupersetScalarOrListLiteral(
+  predicate: BinaryExpr
+): JoinPushdownClassification {
+  const supportedLiteral = (value: BinaryExpr["right"]): boolean =>
+    (value.type === "NUMBER" && isJoinNumberLiteralSupported(value))
+    || (value.type === "STRING" && value.value !== "");
+  if ((predicate.op === "IN" || predicate.op === "NOT_IN")
+    && predicate.right.type === "IN_LIST") {
+    const values = predicate.right.values;
+    if (values.length > 0
+      && values.every(supportedLiteral)
+      && values.every((value) => value.type === values[0].type)) {
+      return "superset";
+    }
+  }
+  if (
+    (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>"
+      || predicate.op === "<" || predicate.op === ">"
+      || predicate.op === "<=" || predicate.op === ">=")
+    && supportedLiteral(predicate.right)
+  ) {
+    return "superset";
+  }
   return "unsafe";
 }
 

@@ -116,8 +116,8 @@ describe("B151 NUMBER JOIN prefilter classifier", () => {
     expect(classify(sqlPredicate).relation).toBe("unsafe");
   });
 
-  test("CALC と $id の既存 gate を変更しない", () => {
-    expect(classify("t.計算値 <= 100").relation).toBe("unsafe");
+  test("B152 owner decision で CALC は superset、$id gate は維持する", () => {
+    expect(classify("t.計算値 <= 100").relation).toBe("superset");
     expect(classify("t.$id = 9007199254740993").relation).toBe("unsafe");
     expect(classify("t.$id = 1").relation).toBe("exact");
   });

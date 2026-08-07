@@ -28,6 +28,10 @@
 
 ### Phase 4 — **条件発動・見送り**
 
+> **【2026-08-07・オーナー判断で撤回】** kintone の型×演算子表への全面整合を優先し、
+> ユーザー系6型の `IN` / `NOT IN` を exact で開放する。存在しない code の error は許容し、
+> silent retry しない。`STATUS_ASSIGNEE` の process gate は追加 metadata なしへ簡素化する。
+
 ```
 主担当 IN ('zz_nonexistent_user_9999')
 → kintone API error 400: GAIA_IL26「指定したユーザー（code：...）が見つかりません。」

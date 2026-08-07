@@ -86,9 +86,9 @@ const core = source("a", 100, [
 describe("B76 §5.2 leaf relation matrix", () => {
   test.each([
     ["$id", "=", "1", "exact"],
-    ["recordNo", "=", "1", "unsafe"],
+    ["recordNo", "=", "1", "superset"],
     ["number", "=", "1", "exact"],
-    ["calc", "=", "1", "unsafe"],
+    ["calc", "=", "1", "superset"],
     ["text", "=", "'A'", "exact"],
     ["link", "=", "'A'", "exact"],
     ["multi", "=", "'A'", "unsafe"],
@@ -98,12 +98,12 @@ describe("B76 §5.2 leaf relation matrix", () => {
     ["datetime", "=", "'2026-07-27T00:30:00Z'", "exact"],
     ["created", "=", "'2026-07-27T00:30:00Z'", "exact"],
     ["updated", "=", "'2026-07-27T00:30:00Z'", "exact"],
-    ["creator", "IN", "('u1')", "unsafe"],
-    ["modifier", "IN", "('u1')", "unsafe"],
-    ["user", "IN", "('u1')", "unsafe"],
-    ["organization", "IN", "('o1')", "unsafe"],
-    ["teamGroup", "IN", "('g1')", "unsafe"],
-    ["assignee", "IN", "('u1')", "unsafe"],
+    ["creator", "IN", "('u1')", "exact"],
+    ["modifier", "IN", "('u1')", "exact"],
+    ["user", "IN", "('u1')", "exact"],
+    ["organization", "IN", "('o1')", "exact"],
+    ["teamGroup", "IN", "('g1')", "exact"],
+    ["assignee", "IN", "('u1')", "exact"],
     ["category", "IN", "('c1')", "unsafe"],
   ] as const)("%s %s は %s", (field, op, rhs, expected) => {
     expect(relation(`SELECT * FROM APP100 AS a WHERE a.${field} ${op} ${rhs}`, [core]))
@@ -167,10 +167,10 @@ describe("B76 §5.2 leaf relation matrix", () => {
     }
   });
 
-  test("$id は正の安全整数 domain、RECORD_NUMBER は証明経路が無いため unsafe", () => {
+  test("$id は正の安全整数 exact、RECORD_NUMBER は superset", () => {
     expect(relation("SELECT * FROM APP100 AS a WHERE a.$id = 0", [core])).toBe("unsafe");
     expect(relation("SELECT * FROM APP100 AS a WHERE a.recordNo = 1", [core]))
-      .toBe("unsafe");
+      .toBe("superset");
   });
 
   test("canonical でない日付・時刻・日時 literal は unsafe", () => {

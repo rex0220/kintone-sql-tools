@@ -260,4 +260,61 @@ describe("B84 JOIN field-vs-literal pushdown documentation", () => {
       expect(documented.replace(currentRow, oldRow)).not.toBe(generated);
     }
   });
+
+  test("B152 owner decisions: CALC/RECORD_NUMBER superset and user-code exact", () => {
+    const relation = (fieldType: string, op: CompareOp, right: BinaryExpr["right"]) =>
+      classifyJoinPushdownLeaf({
+        type: "BINARY",
+        op,
+        left: { type: "FIELD", tableAlias: "a", field: "probe" },
+        right,
+      }, [source(fieldType)]).relation;
+    const number = (raw: string): NumberLiteral => ({ type: "NUMBER", value: Number(raw), raw });
+    const string = (value: string): StringLiteral => ({ type: "STRING", value });
+
+    for (const fieldType of ["CALC", "RECORD_NUMBER"]) {
+      expect(relation(fieldType, ">=", number("-108"))).toBe("superset");
+      expect(relation(fieldType, "=", string("CODE-1"))).toBe("superset");
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [number("1"), number("2")] }))
+        .toBe("superset");
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [] })).toBe("unsafe");
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [string("")] })).toBe("unsafe");
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [number("1"), string("2")] }))
+        .toBe("unsafe");
+    }
+
+    for (const fieldType of [
+      "CREATOR", "MODIFIER", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT",
+      "STATUS_ASSIGNEE",
+    ]) {
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [string("code")] }))
+        .toBe("exact");
+      expect(relation(fieldType, "NOT_IN", { type: "IN_LIST", values: [string("code")] }))
+        .toBe("exact");
+      expect(relation(fieldType, "IN", { type: "IN_LIST", values: [string("")] }))
+        .toBe("unsafe");
+    }
+  });
+
+  test("B152 owner decisions の公開表1セルを戻すとパリティが崩れる", () => {
+    const generated = generatedTable();
+    const documented = documentedTable();
+    for (const [currentRow, oldRow] of [
+      [
+        "| `CALC` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |",
+        "| `CALC` | ✕ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |",
+      ],
+      [
+        "| `CREATOR` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |",
+        "| `CREATOR` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ |",
+      ],
+      [
+        "| `RECORD_NUMBER` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |",
+        "| `RECORD_NUMBER` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ○ |",
+      ],
+    ]) {
+      expect(generated.replace(currentRow, oldRow)).not.toBe(documented);
+      expect(documented.replace(currentRow, oldRow)).not.toBe(generated);
+    }
+  });
 });

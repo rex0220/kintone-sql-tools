@@ -257,14 +257,9 @@ describe("B151 mock-client acceptance", () => {
     }
   });
 
-  test("§11.16-19 対象外・CALC・outer join は NUMBER exact を適用しない", async () => {
+  test("§11.16-19 対象外・outer join は NUMBER exact を適用しない", async () => {
     const cases = [
       [`EXPLAIN ${joinSql("t.個数 + 0 >= 999999999999.99985")}`, "join pushdown not applied:"],
-      [
-        "EXPLAIN SELECT a.$id, a.計算値 FROM APP100 AS a "
-          + "JOIN APP101 AS b ON a.キー = b.キー WHERE a.計算値 <= 100 ORDER BY a.$id",
-        "join pushdown not applied:",
-      ],
       [`EXPLAIN ${joinSql("t.個数 >= '100'")}`, "join pushdown not applied:"],
       [`EXPLAIN ${joinSql("t.個数 IN (10, '20')")}`, "join pushdown not applied:"],
       [`EXPLAIN ${joinSql("t.個数 >= 1e-11")}`, "join pushdown not applied:"],
@@ -276,7 +271,6 @@ describe("B151 mock-client acceptance", () => {
       const text = planText(await execute(sql, client) as SelectResult);
       expect(text).toContain(reason);
       expect(text).not.toContain("pushdown applied: 個数");
-      expect(text).not.toContain("pushdown applied: 計算値");
     }
   });
 
