@@ -36,6 +36,19 @@ export interface JoinKeyPrefilterInput {
 
 const DATETIME_TYPES = new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"]);
 
+/** kintone 実機で `in ("")` の受理を確認済みの JOIN 先フィールド型。 */
+export const JOIN_KEY_EMPTY_IN_FIELD_TYPES: ReadonlySet<string> = new Set([
+  "SINGLE_LINE_TEXT",
+  "LINK",
+  "NUMBER",
+  "CALC",
+  "DROP_DOWN",
+  "RADIO_BUTTON",
+  "CHECK_BOX",
+  "MULTI_SELECT",
+  "STATUS",
+]);
+
 function canonicalFor(fieldType: string, value: string): boolean {
   if (fieldType === "DATE") return isCanonicalJoinDate(value);
   if (fieldType === "TIME") return isCanonicalJoinTime(value);
@@ -62,7 +75,10 @@ export function planJoinKeyPrefilter(input: JoinKeyPrefilterInput): JoinKeyPrefi
     if (input.values === undefined) {
       return { kind: "FALLBACK", reason: "JOIN_KEY_VALUES_RUNTIME" };
     }
-    const values = [...new Set(input.values.filter((value) => value.length > 0))];
+    if (input.hasEmptyValue && !JOIN_KEY_EMPTY_IN_FIELD_TYPES.has(input.fieldType)) {
+      return { kind: "FALLBACK", reason: "JOIN_KEY_EMPTY_VALUE" };
+    }
+    const values = [...new Set(input.values)];
     if (values.length === 0) return { kind: "EMPTY_SOURCE" };
     if (values.length > input.maxInKeys) {
       return { kind: "FALLBACK", reason: "JOIN_KEY_LIMIT_EXCEEDED" };
