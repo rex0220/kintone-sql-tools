@@ -1,29 +1,29 @@
-ksql 配布パッケージ (v3.59.0)
+ksql 配布パッケージ (v3.60.0)
 
 release 成果物:
-- ksql-plugin-v3.59.0.zip
-- ksql-mcp.mcpb (manifest version 3.59.0)
-- ksql-mcp.js (MCP server version 3.59.0)
+- ksql-plugin-v3.60.0.zip
+- ksql-mcp.mcpb (manifest version 3.60.0)
+- ksql-mcp.js (MCP server version 3.60.0)
 
-新機能 (B149 GENERATE_SERIES 整数・日付系列の生成) ★要点:
-- WITH の中に GENERATE_SERIES(start, stop [, step]) を書くと、入力レコード無しで
-  整数または日付 (DATE) の連続系列を生成します。
-    WITH 日付系列 AS (
-      GENERATE_SERIES('2026-08-01', '2026-08-04', '1 day') AS 日付
-    ),
-    日別 AS (SELECT 日付, SUM(金額) AS 合計 FROM APP100 GROUP BY 日付)
-    SELECT s.日付, CASE WHEN d.合計 = '' THEN 0 ELSE d.合計 END AS 合計
-    FROM 日付系列 AS s LEFT JOIN 日別 AS d ON s.日付 = d.日付
-    ORDER BY s.日付
-  取引の無い日が 0 で並びます (GROUP BY はデータのある日しか行を作りません)。
-- 境界は PostgreSQL 準拠: stop ちょうどは含む / 超える値は含まない / 向きが逆なら
-  0 行 / step 0 はエラー / 負 step 可。日付 step は '1 day' / '-14 days' 形式 (day のみ)。
-- 生成上限 10,000 行 (WITH 文内の合計。LIMIT では回避できません)。
-- 月・年単位 / 小数 / DATETIME / TIME / FROM 直置きは未対応です (専用の診断が出ます)。
-- 生成列を直接読むウィンドウ (LAG の前日比など) では「全順序でない」警告が出ません。
-  JOIN などで一意性が壊れ得る形では従来どおり警告が出ます。
-- DECLARE @today = TODAY() を日付の終端に使えます。保存クエリ (read-only) でも使えます。
-- レコード API は一切呼びません (EXPLAIN 含む)。
+改善 (B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合) ★要点・結果は変わりません:
+- JOIN 内の条件も、kintone のクエリ構文が受け付ける型×演算子なら kintone 側で
+  絞り込むようになりました。従来は多くが全件取得後の JS 判定でした。
+    修正前  JOIN 内の t.個数 <= 100  → JOIN 側 fetch: ALL (全件取得)
+    修正後  JOIN 内の t.個数 <= 100  → kintone query: 個数 <= 100 / fetch: EXACT
+- 開放した組: NUMBER の全 8 演算子 / 日付・時刻・日時の 6 比較 / 文字列(1行)・リンクの
+  = != IN NOT IN / 作成者・更新者・ユーザー・組織・グループ選択・作業者の IN NOT IN
+  (以上 exact) / 計算・レコード番号の全 8 演算子 (superset = 広めに取得して再評価)。
+- 「>= 5000000 を > 4999999 へ書き換える」案内は不要になり削除しました。
+- 値が不正な指定は kintone のエラーがそのまま返ります (単一表と同一挙動)。
+  例: 存在しないユーザー code (GAIA_IL26)、プロセス管理無効アプリの作業者 (GAIA_ST02)。
+  従来の JOIN は静かに 0 行でした。単一表との一貫性を優先しています。
+- 対象外のまま: カテゴリー・複数行/リッチ/添付の比較演算子 (kintone が受けない)、
+  LIKE (JS 意味論に統一済み。kintone ネイティブ検索は KLIKE)。
+- 結果は変わりません (押し下げ後も元の WHERE を JOIN 後に再評価します)。
+
+v3.59.0 の各節は畳みました (B149 GENERATE_SERIES 整数・日付系列の生成 = WITH の中で
+系列を生成し、LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
+内容は CHANGELOG.md にあります。
 
 v3.58.0 の各節は畳みました (B147 集計・ウィンドウの別名が入力フィールドを上書きしていた
 = 挙動が変わります・CASE は分類が反転 / B140 無視してよい警告の条件を明記)。
@@ -62,12 +62,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.59.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.60.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.59.0): B149 GENERATE_SERIES 整数・日付系列の生成 (新機能・
+本リリース (v3.60.0): B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合
+(改善・結果不変・取得量削減。不正値の kintone エラーは表面化)。
+
+前リリース (v3.59.0): B149 GENERATE_SERIES 整数・日付系列の生成 (新機能・
 LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
 
 前リリース (v3.58.0): B147 集計・ウィンドウの別名が入力フィールドを上書きしていた
