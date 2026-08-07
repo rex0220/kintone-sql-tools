@@ -459,6 +459,17 @@ function rejectionFor(
 }
 
 /**
+ * buildRelativeDatePushdownPlan が resolver（＝metadata client）を呼ぶ statement かを、
+ * 同じ collector で判定する。CLI dry-run の静的経路（API 0 回・throwing client）は
+ * この判定が false の statement だけで構成されたバッチに限る。
+ */
+export function statementUsesRelativeDateResolution(statement: Statement): boolean {
+  const candidates: WalkCandidate[] = [];
+  collectStatement(statement, "statement", candidates);
+  return candidates.length > 0;
+}
+
+/**
  * Execution と EXPLAIN が共有する B67 plan walk。
  *
  * 各 SELECT node / DML target WHERE を独立に分類し、相対日付関数が
