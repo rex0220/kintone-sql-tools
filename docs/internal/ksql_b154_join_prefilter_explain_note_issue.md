@@ -1,7 +1,7 @@
 # B154 `join pushdown plan: not applied` の行が `join key prefilter` の適用と誤読される
 
 - 起票: 2026-08-08（[依頼元の v3.61.0 返信 §4](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260807-v3610.md)）
-- ステータス: 📝 **起票（表示改善・優先 低）**
+- ステータス: ✅ **v3.62.0 リリース（2026-08-08・B155 に同梱＝`not applied` 行へ but 書きを追加）**
 
 ## 1. 何が起きるか
 
