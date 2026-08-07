@@ -1,6 +1,7 @@
 # B128 集計ウィンドウ Phase 2（移動フレーム / `LAG` / `LEAD`）仕様（R1）
 
-- ステータス: ⏸ **保留（2026-08-05 オーナー判断）**。[codex レビュー](ksql_b128_codex_review_1.md) で**高 9・中 7**。**R1 のままでは実装着手不可**で、かつ**スコープ判断が先**＝`ROWS` の行数指定だけでは依頼元の実需「7 日移動平均」を満たせない（同日複数行・取引の無い日があると直近 7 行 ≠ 直近 7 日）。満たすには日次集約 CTE との組み合わせか、値指定 `RANGE`（`INTERVAL n DAY PRECEDING`）が要る。**再開時はスコープ（案 A レシピ併用 / 案 B 値指定 RANGE / 案 C LAG 先行）の決定から。**
+- ステータス: ⏸ **保留（2026-08-05 オーナー判断）**。[codex レビュー](ksql_b128_codex_review_1.md) で**高 9・中 7**。**R1 のままでは実装着手不可**で、かつ**スコープ判断が先**＝`ROWS` の行数指定だけでは依頼元の実需「7 日移動平均」を満たせない（同日複数行・取引の無い日があると直近 7 行 ≠ 直近 7 日）。満たすには日次集約 CTE との組み合わせか、値指定 `RANGE`（`INTERVAL n DAY PRECEDING`）が要る。~~**再開時はスコープ（案 A レシピ併用 / 案 B 値指定 RANGE / 案 C LAG 先行）の決定から。**~~ 案 C は [R2](ksql_b128_lag_lead_spec.md) として v3.51.0 で出荷済み。
+- **再開ライン更新（2026-08-08・[依頼元の意見](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-B128Phase2再開ライン.md)で確定）**: v3.59.0 の `GENERATE_SERIES` により案 A（0 埋め＋行数フレーム）が言語内で完結し**案 B（値指定 RANGE）は不要**——ただし**単一系列に限る**。依頼元の実需（製品別）に届く順序は **①[B158](ksql_b158_cross_join_grid_issue.md) 直積（2a 抜きでも単独で効く）→ ②[B159](ksql_b159_generate_series_month_step_issue.md) month/year step（出荷済み LAG の穴）→ ③[B160](ksql_b160_window_warning_generated_column_issue.md) 警告文言 → ④本 2a**。①②は 2a に着手しない場合でも単独で価値、逆に 2a 単独先行は依頼元は使えない。
 - 前提: [B125 Phase 1 仕様](ksql_b125_aggregate_window_phase1_spec.md)（v3.45.0 出荷済み）の §10 で
   Phase 2 と明記したもの
 - 出典: [ksql-analytics の依頼 ③](../../../ksql-analytics/docs/internal/kSQLエンジンへの依頼-20260805.md) /
