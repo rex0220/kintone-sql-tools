@@ -1,5 +1,12 @@
 import type { WhereExpr, FieldValue } from "../../types/ast";
 import { numberLiteralText } from "../../types/ast";
+import { resolveFieldSemantics } from "../fieldSemantics";
+import { classifyWhereCapability } from "./whereCapability";
+import {
+  classifySupportedLeaf,
+  isSupportedLeafMetadataCandidate,
+  type SupportedLeafRelation,
+} from "./supportedLeafPolicy";
 
 export interface SafePushdownOptions {
   /** JOIN 時に抽出対象とするテーブルエイリアス。 */
@@ -35,7 +42,20 @@ export function extractSafePushdownLeaves(
   where: WhereExpr,
   options: SafePushdownOptions = {}
 ): WhereExpr | null {
-  return extractAndLeaves(where, (expr) => isSafeComparison(expr, options));
+  return extractSafePushdownPlan(where, options).condition;
+}
+
+export interface SafePushdownExtraction {
+  readonly condition: WhereExpr | null;
+  readonly relation: Exclude<SupportedLeafRelation, "unsafe"> | null;
+}
+
+/** condition と leaf relation を同じ分類結果から構築する。 */
+export function extractSafePushdownPlan(
+  where: WhereExpr,
+  options: SafePushdownOptions = {}
+): SafePushdownExtraction {
+  return extractAndLeafPlan(where, (expr) => classifySafeComparison(expr, options));
 }
 
 /**
@@ -56,8 +76,41 @@ export function extractTypedPushdownCandidates(
 ): WhereExpr | null {
   return extractAndLeaves(
     where,
-    (expr) => isNumericCandidate(expr, options) || isSelectionInCandidate(expr, options)
+    (expr) => isSupportedLeafMetadataCandidate(expr, (field) => isTargetField(field, options))
   );
+}
+
+function extractAndLeafPlan(
+  where: WhereExpr,
+  classify: (expr: Extract<WhereExpr, { type: "BINARY" }>) => SupportedLeafRelation
+): SafePushdownExtraction {
+  switch (where.type) {
+    case "BINARY": {
+      const relation = classify(where);
+      return relation === "unsafe"
+        ? { condition: null, relation: null }
+        : { condition: where, relation };
+    }
+    case "LOGICAL": {
+      if (where.op !== "AND") return { condition: null, relation: null };
+      const left = extractAndLeafPlan(where.left, classify);
+      const right = extractAndLeafPlan(where.right, classify);
+      if (left.condition && right.condition) {
+        return {
+          condition: { ...where, left: left.condition, right: right.condition },
+          relation: left.relation === "exact" && right.relation === "exact" ? "exact" : "superset",
+        };
+      }
+      return left.condition ? left : right;
+    }
+    case "GROUP":
+      return extractAndLeafPlan(where.expr, classify);
+    case "NULL_CHECK":
+    case "NOT":
+    case "EXISTS":
+    case "BOOLEAN":
+      return { condition: null, relation: null };
+  }
 }
 
 function extractAndLeaves(
@@ -88,16 +141,26 @@ function extractAndLeaves(
   }
 }
 
-function isSafeComparison(
+function classifySafeComparison(
   expr: Extract<WhereExpr, { type: "BINARY" }>,
   options: SafePushdownOptions
-): boolean {
-  if (isKlikeComparison(expr, options)) return true;
-  if (isSafeIdComparison(expr, options)) return true;
-  if (isNumericCandidate(expr, options)) {
-    return options.fieldTypes?.get(expr.left.field) === "NUMBER";
-  }
-  return isSelectionInComparison(expr, options);
+): SupportedLeafRelation {
+  if (isKlikeComparison(expr, options)) return "exact";
+  if (isSafeIdComparison(expr, options)) return "exact";
+  if (expr.left.type !== "FIELD" || !isTargetField(expr.left, options)) return "unsafe";
+  const fieldType = options.fieldTypes?.get(expr.left.field);
+  if (fieldType === undefined || fieldType.startsWith("KSQL_")) return "unsafe";
+  const capability = classifyWhereCapability(expr, (field) => {
+    if (!isTargetField(field, options)) return undefined;
+    const type = options.fieldTypes?.get(field.field);
+    return type === undefined ? undefined : resolveFieldSemantics({ fieldType: type });
+  });
+  if (capability.capability !== "EXACT_PUSHDOWN") return "unsafe";
+  return classifySupportedLeaf(expr, {
+    fieldCode: expr.left.field,
+    fieldType,
+    fieldOptions: options.fieldOptions?.get(expr.left.field),
+  });
 }
 
 function isKlikeComparison(
@@ -109,29 +172,6 @@ function isKlikeComparison(
   if (expr.left.type !== "FIELD" || !isTargetField(expr.left, options)) return false;
   return expr.right.type === "STRING"
     || (options.allowUnresolvedKlikeVariables === true && expr.right.type === "VARIABLE");
-}
-
-const SELECTION_IN_FIELD_TYPES = new Set([
-  "DROP_DOWN",
-  "RADIO_BUTTON",
-  "CHECK_BOX",
-  "MULTI_SELECT",
-  "STATUS",
-]);
-
-function isSelectionInComparison(
-  expr: Extract<WhereExpr, { type: "BINARY" }>,
-  options: SafePushdownOptions
-): boolean {
-  if (!isSelectionInCandidate(expr, options)) return false;
-  if (expr.left.type !== "FIELD" || expr.right.type !== "IN_LIST") return false;
-  const fieldType = options.fieldTypes?.get(expr.left.field);
-  if (fieldType === undefined || !SELECTION_IN_FIELD_TYPES.has(fieldType)) return false;
-  const validOptions = options.fieldOptions?.get(expr.left.field);
-  if (validOptions === undefined) return false;
-  return expr.right.values.every((value) =>
-    value.type === "STRING" && value.value !== "" && validOptions.has(value.value)
-  );
 }
 
 function isSafeIdComparison(
@@ -169,17 +209,6 @@ function isNumericCandidate(
   return (expr.op === "<" || expr.op === ">")
     && /^[+-]?\d+$/.test(numberLiteralText(expr.right))
     && Number.isSafeInteger(expr.right.value);
-}
-
-function isSelectionInCandidate(
-  expr: Extract<WhereExpr, { type: "BINARY" }>,
-  options: PushdownCandidateOptions
-): boolean {
-  if (expr.left.type !== "FIELD" || expr.left.field === "$id") return false;
-  if (!isTargetField(expr.left, options)) return false;
-  if (expr.op !== "IN" && expr.op !== "NOT_IN") return false;
-  if (expr.right.type !== "IN_LIST" || expr.right.values.length === 0) return false;
-  return expr.right.values.every((value) => value.type === "STRING" && value.value !== "");
 }
 
 function isTargetField(

@@ -3933,6 +3933,22 @@ function extractMainTypedPushdownCandidate(stmt: SelectStatement): WhereExpr | n
   return extractTypedPushdownCandidates(stmt.where, { tableAlias: stmt.from.alias });
 }
 
+function hasPushdownPlaceholder(where: WhereExpr): boolean {
+  if (where.type === "BINARY") {
+    if (where.right.type === "STRING") return where.right.value.startsWith("@");
+    if (where.right.type === "IN_LIST") {
+      return where.right.values.some((value) =>
+        value.type === "STRING" && value.value.startsWith("@"));
+    }
+    return false;
+  }
+  if (where.type === "LOGICAL") {
+    return hasPushdownPlaceholder(where.left) || hasPushdownPlaceholder(where.right);
+  }
+  if (where.type === "GROUP" || where.type === "NOT") return hasPushdownPlaceholder(where.expr);
+  return false;
+}
+
 type FieldOptionsMap = Map<string, ReadonlySet<string>>;
 
 interface TypedPushdownMeta {
@@ -3992,11 +4008,16 @@ function buildRuntimeJoinPushdownPlan(
   const mainCondition = conditionsByAlias.get(mainAlias) ?? null;
   const joinConditions = new Map(conditionsByAlias);
   joinConditions.delete(mainAlias);
+  const relationByAlias = new Map(plan.items.map((item) => [item.targetAlias, item.relation] as const));
+  const mainRelation = relationByAlias.get(mainAlias) ?? null;
+  relationByAlias.delete(mainAlias);
   return {
     joinPlan: plan,
     queriesByAlias,
     mainCondition,
+    mainRelation,
     joinConditions,
+    joinRelations: relationByAlias,
     appliedKlikes: plan.appliedKlikes,
     allKlikes: plan.allKlikes,
   };
@@ -9971,6 +9992,7 @@ interface ExplainWhereAnalysis {
 // EXPLAIN renderer は schema-aware analysis が一度だけ生成した runtime plan object を参照する。
 // renderer 側で JOIN predicate を再抽出・再分類しない。
 const explainJoinPushdownPlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+const explainPushdownPlans = new WeakMap<SelectStatement, KlikePushdownPlan>();
 interface ExplainJoinKeyPrefilter {
   readonly plan: ReturnType<typeof planJoinKeyPrefilter>;
   readonly queries: readonly string[];
@@ -10205,12 +10227,14 @@ async function buildExplainWhereAnalysis(
         throw new Error(`ArgumentError: WHERE predicate is unsupported (${formatWhereCapabilityFailure(capability)}).`);
       }
       capabilities.set(select, capability);
+      const pushdownMetadata = await loadTypedPushdownMeta(select, tracedClient, cacheContext);
       const preboundJoinPushdownPlan = boundJoinRuntimePlans.get(select);
-      const joinPushdownPlan = preboundJoinPushdownPlan ?? buildRuntimeJoinPushdownPlan(
-        select,
-        await loadTypedPushdownMeta(select, tracedClient, cacheContext)
-      );
+      const joinPushdownPlan = preboundJoinPushdownPlan
+        ?? buildRuntimeJoinPushdownPlan(select, pushdownMetadata);
       if (joinPushdownPlan) explainJoinPushdownPlans.set(select, joinPushdownPlan);
+      const resolvedPushdownPlan = joinPushdownPlan
+        ?? buildKlikePushdownPlan(select, pushdownMetadata);
+      explainPushdownPlans.set(select, resolvedPushdownPlan);
       const joinKeyPlans = new Map<string, ExplainJoinKeyPrefilter>();
       for (const join of select.joins) {
         const joinAlias = join.table.alias;
@@ -10270,23 +10294,11 @@ async function buildExplainWhereAnalysis(
           if (runtimePlanConsumesJoin) continue;
         }
         const queries = buildJoinKeyPrefilterQueries(plan, joinField, sqlQuote);
-        const additionalCandidate = select.where
-          ? extractTypedPushdownCandidates(select.where, { tableAlias: joinAlias })
-          : null;
-        let additionalQuery: string | undefined;
-        let additionalRelation: "exact" | "superset" | undefined;
-        if (additionalCandidate) {
-          const infoByCode = new Map(targetInfos.map((info) => [info.code, info]));
-          const additionalCapability = classifyWhereCapability(additionalCandidate, (field) => {
-            const info = infoByCode.get(field.field);
-            return info?.semantics ?? (info ? resolveFieldSemantics(info) : systemColumnMeta(field.field)?.semantics);
-          });
-          if (additionalCapability.capability === "EXACT_PUSHDOWN"
-            || additionalCapability.capability === "SUPERSET_PREFILTER") {
-            additionalQuery = whereToKintone(additionalCandidate);
-            additionalRelation = additionalCapability.capability === "EXACT_PUSHDOWN" ? "exact" : "superset";
-          }
-        }
+        const additionalCondition = resolvedPushdownPlan.joinConditions.get(joinAlias);
+        const additionalQuery = additionalCondition
+          ? whereToKintone(additionalCondition)
+          : undefined;
+        const additionalRelation = resolvedPushdownPlan.joinRelations.get(joinAlias);
         joinKeyPlans.set(joinAlias, { plan, queries, additionalQuery, additionalRelation });
       }
       if (joinKeyPlans.size > 0) explainJoinKeyPrefilters.set(select, joinKeyPlans);
@@ -10898,7 +10910,8 @@ export async function buildBatchExplainPlans(
   cursorMaxActive = 2,
   enableImport = false,
   dmlMaxRows = 100,
-  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS
+  dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
+  resolveMetadata = true
 ): Promise<BatchExplainResult> {
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
@@ -10918,13 +10931,23 @@ export async function buildBatchExplainPlans(
         : resolveBatchVariableReferences(stmt, variables);
       validateStatementStatic(planStmt);
       const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, invocationCacheContext);
-      const whereAnalysis = await buildExplainWhereAnalysis(
-        planStmt,
-        client,
-        invocationCacheContext,
-        maxRecords,
-        relativeDatePlan
-      );
+      const whereAnalysis = resolveMetadata
+        ? await buildExplainWhereAnalysis(
+            planStmt,
+            client,
+            invocationCacheContext,
+            maxRecords,
+            relativeDatePlan
+          )
+        : {
+            capabilities: new Map<SelectStatement, PredicateCapabilityResult>(),
+            orderPlans: new Map<SelectStatement, CanonicalOrderPlan>(),
+            plainGroupByPlans: new Map<SelectStatement, PlainGroupByResolutionPlan>(),
+            fieldApps: new Set<number>(),
+            processStatusApps: new Set<number>(),
+            numberPrecisionApps: new Set<number>(),
+            relativeDatePlan,
+          };
       const fetchCollector: ExplainFetchCollector = { sources: [] };
       const statementPlan =
         relativeDatePlan.hasServerOnlyWhereFunction && !relativeDatePlan.allowed
@@ -11603,7 +11626,8 @@ function buildSelectPlan(
     lines.push(`  fields:        ${params.fields.length === 0 ? "(全フィールド)" : params.fields.join(", ")}`);
   } else {
     const runtimeJoinPlan = explainJoinPushdownPlans.get(stmt);
-    const pushdownPlan = runtimeJoinPlan ?? buildKlikePushdownPlan(stmt);
+    const metadataAwarePushdownPlan = explainPushdownPlans.get(stmt);
+    const pushdownPlan = metadataAwarePushdownPlan ?? buildKlikePushdownPlan(stmt);
     if (stmt.joins.length > 0) {
       if (runtimeJoinPlan) {
         lines.push("  join pushdown plan: applied (runtime metadata resolved)");
@@ -11645,7 +11669,7 @@ function buildSelectPlan(
             )
             ? "SOURCE_KIND"
             : "PLAN_NOT_APPLICABLE";
-        lines.push("  join pushdown plan: not applied");
+        lines.push("  join pushdown plan: not applied (join key/WHERE prefilters are reported per source below)");
         lines.push(`  join pushdown not applied: ${reason}`);
       }
     }
@@ -11676,7 +11700,7 @@ function buildSelectPlan(
       (consumption) => consumption.targetAlias === stmt.from.alias
     );
     if (emitFetch && stmt.from.cteName === null) {
-      const mainPending = !runtimeJoinPlan && mainCandidate !== null;
+      const mainPending = !metadataAwarePushdownPlan && mainCandidate !== null;
       const mainFetchScope: ExplainFetchScope = mainQ === "(全件取得)"
         ? "ALL"
         : mainPending
@@ -11697,7 +11721,11 @@ function buildSelectPlan(
     if (mainJoinItem || mainFunctionConsumption) {
       lines.push(`  pushdown applied: ${mainBoundQuery}`);
       lines.push(`  relation: ${mainJoinItem?.relation ?? "exact"}`);
-    } else if (!runtimeJoinPlan && mainCandidate !== null) {
+    } else if (metadataAwarePushdownPlan && mainPushDown !== null) {
+      lines.push(`  pushdown applied: ${mainQ}`);
+      lines.push(`  relation: ${pushdownPlan.mainRelation ?? "exact"}`);
+    } else if (mainCandidate !== null
+      && (!metadataAwarePushdownPlan || hasPushdownPlaceholder(mainCandidate))) {
       lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型・実在確認待ち）`);
     }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
@@ -11717,13 +11745,20 @@ function buildSelectPlan(
       const joinKey = join.table.alias
         ? explainJoinKeyPrefilters.get(stmt)?.get(join.table.alias)
         : undefined;
+      const offlineJoinKeyCandidate = !metadataAwarePushdownPlan
+        && join.type === "INNER"
+        && join.table.cteName === null
+        && !join.table.subtableCode
+        && [stmt.from, ...stmt.joins.map((candidate) => candidate.table)]
+          .some((table) => table.cteName !== null);
       const baseJoinQ = joinBoundQuery
         || (joinPushDown !== null
             ? whereToKintone(joinPushDown)
             : joinKey?.additionalQuery
               ? joinKey.additionalQuery
             : "(全件取得)");
-      const runtimeJoinKeyCandidate = joinKey?.plan.kind === "RANGE_CANDIDATE"
+      const runtimeJoinKeyCandidate = offlineJoinKeyCandidate
+        || joinKey?.plan.kind === "RANGE_CANDIDATE"
         || (joinKey?.plan.kind === "FALLBACK"
           && joinKey.plan.reason === "JOIN_KEY_VALUES_RUNTIME");
       const joinQueries = joinKey && joinKey.queries.length > 0
@@ -11743,7 +11778,7 @@ function buildSelectPlan(
         );
       if (emitFetch && join.table.cteName === null) {
         const joinPending = runtimeJoinKeyCandidate
-          || (!joinKey && !runtimeJoinPlan && joinCandidate !== null);
+          || (!joinKey && !metadataAwarePushdownPlan && joinCandidate !== null);
         const joinFetchScope: ExplainFetchScope = joinQ === "(全件取得)"
           ? "ALL"
           : joinPending
@@ -11787,10 +11822,20 @@ function buildSelectPlan(
             : "  join key prefilter: not applied");
           lines.push(`  join key prefilter reason: ${joinKey.plan.reason}`);
         }
+      } else if (offlineJoinKeyCandidate) {
+        lines.push("  join key prefilter: runtime candidate");
+        lines.push("  join key prefilter reason: JOIN_KEY_VALUES_RUNTIME");
+        if (joinCandidate !== null) {
+          lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
+        }
       } else if (joinPlanItem || joinFunctionConsumption) {
         lines.push(`  pushdown applied: ${joinBoundQuery}`);
         lines.push(`  relation: ${joinPlanItem?.relation ?? "exact"}`);
-      } else if (!runtimeJoinPlan && joinCandidate !== null) {
+      } else if (metadataAwarePushdownPlan && joinPushDown !== null) {
+        lines.push(`  pushdown applied: ${baseJoinQ}`);
+        lines.push(`  relation: ${pushdownPlan.joinRelations.get(join.table.alias!) ?? "exact"}`);
+      } else if (joinCandidate !== null
+        && (!metadataAwarePushdownPlan || hasPushdownPlaceholder(joinCandidate))) {
         lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
       }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);

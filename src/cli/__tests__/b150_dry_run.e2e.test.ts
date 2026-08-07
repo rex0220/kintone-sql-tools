@@ -31,9 +31,11 @@ describe("B150 CLI --dry-run CTE -> APP JOIN", () => {
   let configPath: string;
   const recordRequests: string[] = [];
   const fieldRequests: string[] = [];
+  const apiRequests: string[] = [];
 
   beforeAll(async () => {
     server = createServer((req, res) => {
+      apiRequests.push(req.url ?? "");
       res.setHeader("Content-Type", "application/json");
       if (req.url?.includes("/app/form/fields.json")) {
         fieldRequests.push(req.url);
@@ -119,5 +121,28 @@ describe("B150 CLI --dry-run CTE -> APP JOIN", () => {
     expect(result.stderr).not.toContain("DryRunError");
     expect(result.stdout).toContain(expected);
     expect(recordRequests).toEqual([]);
+  });
+
+  test("B155 CTE→APP＋WHERE候補はAPI 0回でexit 0になる", async () => {
+    const sql = `WITH s AS (
+  GENERATE_SERIES('2026-07-29', '2026-08-04') AS 日付
+)
+SELECT s.日付, t.$id, t.製品名, t.個数
+FROM s
+INNER JOIN APP4228 AS t ON s.日付 = t.日付
+WHERE t.製品名 = '牛乳'
+  AND t.個数 <= 100
+  AND t.入出庫区分 = '出庫'
+ORDER BY s.日付, t.$id`;
+    const before = apiRequests.length;
+    const result = await runCli(["--config", configPath, "--dry-run", "-e", sql]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("DryRunError");
+    expect(result.stdout).toContain("join key prefilter: runtime candidate");
+    expect(result.stdout).toContain(
+      'pushdown candidate: (製品名 = "牛乳" and 個数 <= 100) and 入出庫区分 = "出庫"'
+    );
+    expect(result.stdout).toContain("実行時の型・実在確認待ち");
+    expect(apiRequests).toHaveLength(before);
   });
 });

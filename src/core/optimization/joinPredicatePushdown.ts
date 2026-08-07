@@ -1,10 +1,8 @@
 import type {
   BinaryExpr,
   FieldRef,
-  NumberLiteral,
   WhereExpr,
 } from "../../types/ast";
-import { numberLiteralText } from "../../types/ast";
 import { whereToKintone } from "../../converter/whereToKintone";
 import { resolveFieldSemantics } from "../fieldSemantics";
 import { isKlike, type KlikeExpr } from "../like";
@@ -15,12 +13,7 @@ import {
   serverOnlyFunctionOccurrencesInWhere,
 } from "./relativeDateFullScanExactPlan";
 import { classifyWhereCapability } from "./whereCapability";
-import {
-  isCanonicalJoinDate,
-  isCanonicalJoinDateTime,
-  isCanonicalJoinTime,
-} from "./joinDateTimeLiteralPolicy";
-import { isJoinNumberLiteralSupported } from "./joinNumberLiteralPolicy";
+import { classifySupportedLeaf } from "./supportedLeafPolicy";
 
 /**
  * Phase A item 全体の server ⊇ client 集合関係。
@@ -155,37 +148,6 @@ interface Fragment {
   readonly relation: JoinPushdownItemRelation;
 }
 
-const SELECTION_TYPES = new Set([
-  "DROP_DOWN",
-  "RADIO_BUTTON",
-  "CHECK_BOX",
-  "MULTI_SELECT",
-  "STATUS",
-]);
-
-const USER_CODE_TYPES = new Set([
-  "CREATOR",
-  "MODIFIER",
-  "USER_SELECT",
-  "ORGANIZATION_SELECT",
-  "GROUP_SELECT",
-  "STATUS_ASSIGNEE",
-]);
-
-const KLIKE_TYPES = new Set([
-  "SINGLE_LINE_TEXT",
-  "LINK",
-  "MULTI_LINE_TEXT",
-  "RICH_TEXT",
-  "FILE",
-]);
-
-const DATETIME_TYPES = new Set([
-  "DATETIME",
-  "CREATED_TIME",
-  "UPDATED_TIME",
-]);
-
 const STEP2_EQUALITY_TYPES = new Set([
   "SINGLE_LINE_TEXT",
   "DATE",
@@ -242,7 +204,11 @@ export function classifyJoinPushdownLeaf(
   });
   if (capability.capability !== "EXACT_PUSHDOWN") return unsafe();
 
-  const relation = classifySupportedLeaf(predicate, owner, fieldType);
+  const relation = classifySupportedLeaf(predicate, {
+    fieldCode: owner.fieldCode,
+    fieldType,
+    fieldOptions: owner.source.fieldOptions?.get(owner.fieldCode),
+  });
   return relation === "unsafe"
     ? unsafe()
     : Object.freeze({ relation, owner });
@@ -1025,143 +991,6 @@ function mergeAndFragments(fragments: readonly Fragment[]): readonly Fragment[] 
   return merged;
 }
 
-function classifySupportedLeaf(
-  predicate: BinaryExpr,
-  owner: Extract<JoinFieldOwner, { status: "OWNED" }>,
-  fieldType: string
-): JoinPushdownClassification {
-  if (predicate.op === "LIKE" || predicate.op === "NOT_LIKE") return "unsafe";
-
-  if (predicate.op === "KLIKE" || predicate.op === "NOT_KLIKE") {
-    return KLIKE_TYPES.has(fieldType)
-      && predicate.right.type === "STRING"
-      && predicate.right.value !== ""
-      ? "exact"
-      : "unsafe";
-  }
-
-  if (fieldType === "__ID__" || owner.fieldCode === "$id") {
-    return isPositiveSafeInteger(predicate.right)
-      && (predicate.op === "=" || predicate.op === "<" || predicate.op === ">"
-        || predicate.op === "<=" || predicate.op === ">=")
-      ? "exact"
-      : "unsafe";
-  }
-
-  if (fieldType === "RECORD_NUMBER") {
-    return classifySupersetScalarOrListLiteral(predicate);
-  }
-
-  if (fieldType === "NUMBER") {
-    if (
-      (predicate.op === "IN" || predicate.op === "NOT_IN")
-      && predicate.right.type === "IN_LIST"
-      && predicate.right.values.length > 0
-      && predicate.right.values.every((value) =>
-        value.type === "NUMBER" && isJoinNumberLiteralSupported(value)
-      )
-    ) {
-      return "exact";
-    }
-    if (
-      (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>"
-        || predicate.op === "<" || predicate.op === ">"
-        || predicate.op === "<=" || predicate.op === ">=")
-      && predicate.right.type === "NUMBER"
-      && isJoinNumberLiteralSupported(predicate.right)
-    ) {
-      return "exact";
-    }
-    return "unsafe";
-  }
-
-  if (fieldType === "CALC") {
-    return classifySupersetScalarOrListLiteral(predicate);
-  }
-
-  if (USER_CODE_TYPES.has(fieldType)) {
-    if ((predicate.op !== "IN" && predicate.op !== "NOT_IN")
-      || predicate.right.type !== "IN_LIST"
-      || predicate.right.values.length === 0) return "unsafe";
-    return predicate.right.values.every((value) =>
-      value.type === "STRING" && value.value !== ""
-    ) ? "exact" : "unsafe";
-  }
-
-  if (fieldType === "SINGLE_LINE_TEXT" || fieldType === "LINK") {
-    if (
-      (predicate.op === "IN" || predicate.op === "NOT_IN")
-      && predicate.right.type === "IN_LIST"
-      && predicate.right.values.length > 0
-      && predicate.right.values.every((value) =>
-        value.type === "STRING" && value.value !== ""
-      )
-    ) {
-      return "exact";
-    }
-    return (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>")
-      && predicate.right.type === "STRING"
-      && predicate.right.value !== ""
-      ? "exact"
-      : "unsafe";
-  }
-
-  if (fieldType === "DATE" || fieldType === "TIME" || DATETIME_TYPES.has(fieldType)) {
-    if (
-      (predicate.op !== "=" && predicate.op !== "!=" && predicate.op !== "<>"
-        && predicate.op !== "<" && predicate.op !== ">"
-        && predicate.op !== "<=" && predicate.op !== ">=")
-      || predicate.right.type !== "STRING"
-    ) return "unsafe";
-    if (fieldType === "DATE") {
-      return isCanonicalJoinDate(predicate.right.value) ? "exact" : "unsafe";
-    }
-    if (fieldType === "TIME") {
-      return isCanonicalJoinTime(predicate.right.value) ? "exact" : "unsafe";
-    }
-    return isCanonicalJoinDateTime(predicate.right.value) ? "exact" : "unsafe";
-  }
-
-  if (SELECTION_TYPES.has(fieldType)) {
-    if ((predicate.op !== "IN" && predicate.op !== "NOT_IN")
-      || predicate.right.type !== "IN_LIST"
-      || predicate.right.values.length === 0) return "unsafe";
-    const options = owner.source.fieldOptions?.get(owner.fieldCode);
-    if (options === undefined) return "unsafe";
-    return predicate.right.values.every((value) =>
-      value.type === "STRING" && value.value !== "" && options.has(value.value)
-    ) ? "exact" : "unsafe";
-  }
-
-  return "unsafe";
-}
-
-function classifySupersetScalarOrListLiteral(
-  predicate: BinaryExpr
-): JoinPushdownClassification {
-  const supportedLiteral = (value: BinaryExpr["right"]): boolean =>
-    (value.type === "NUMBER" && isJoinNumberLiteralSupported(value))
-    || (value.type === "STRING" && value.value !== "");
-  if ((predicate.op === "IN" || predicate.op === "NOT_IN")
-    && predicate.right.type === "IN_LIST") {
-    const values = predicate.right.values;
-    if (values.length > 0
-      && values.every(supportedLiteral)
-      && values.every((value) => value.type === values[0].type)) {
-      return "superset";
-    }
-  }
-  if (
-    (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>"
-      || predicate.op === "<" || predicate.op === ">"
-      || predicate.op === "<=" || predicate.op === ">=")
-    && supportedLiteral(predicate.right)
-  ) {
-    return "superset";
-  }
-  return "unsafe";
-}
-
 function owned(
   source: JoinPushdownSource,
   fieldCode: string
@@ -1193,17 +1022,6 @@ function combineRelation(
   right: JoinPushdownRelation
 ): JoinPushdownRelation {
   return left === "exact" && right === "exact" ? "exact" : "superset";
-}
-
-function isPositiveSafeInteger(value: BinaryExpr["right"]): boolean {
-  return value.type === "NUMBER"
-    && isSafeIntegerLiteral(value)
-    && value.value > 0;
-}
-
-function isSafeIntegerLiteral(value: NumberLiteral): boolean {
-  return /^-?\d+$/.test(numberLiteralText(value))
-    && Number.isSafeInteger(value.value);
 }
 
 function collectKlikes(where: WhereExpr | null, out: Set<KlikeExpr>): void {

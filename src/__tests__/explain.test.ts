@@ -376,43 +376,37 @@ test("EXPLAIN FULL_SCAN — 単一テーブルの $id 条件だけを確定押�
   expect(query.toLowerCase()).not.toContain("like");
 });
 
-test("EXPLAIN FULL_SCAN — エイリアス経路のテキスト等値は押し下げない", async () => {
+test("EXPLAIN FULL_SCAN — エイリアス経路のテキスト等値を安全prefilterへ押し下げる", async () => {
   const plan = await explain(
     "EXPLAIN SELECT a.$id FROM APP100 AS a WHERE a.状態 = '完了' AND a.会社名 LIKE '%A%'"
   );
-  expect(plan.find((l) => l.includes("kintone query:"))).toContain("(全件取得)");
+  expect(plan.find((l) => l.includes("kintone query:"))).toContain('状態 = "完了"');
 });
 
-test("EXPLAIN FULL_SCAN — 一般数値比較は確定 query と分離して候補表示する", async () => {
+test("EXPLAIN FULL_SCAN — metadata解決済みNUMBER比較を確定queryへ含める", async () => {
   const plan = await explain(
     "EXPLAIN SELECT $id, 金額 FROM APP100 WHERE $id >= 10 AND 金額 > 1000 AND 会社名 LIKE '%A%'"
   );
   const query = plan.find((l) => l.includes("kintone query:")) ?? "";
-  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
   expect(query).toContain("$id >= 10");
-  expect(query).not.toContain("金額");
-  expect(candidate).toContain("金額 > 1000");
-  expect(candidate).toContain("実行時の型・実在確認待ち");
+  expect(query).toContain("金額 > 1000");
+  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
 });
 
-test("EXPLAIN FULL_SCAN — 選択系 IN は実行時確認前の候補として分離表示する", async () => {
+test("EXPLAIN FULL_SCAN — 選択肢metadataなしのINはfail-closedにする", async () => {
   const plan = await explain(
     "EXPLAIN SELECT $id FROM APP100 WHERE 選択 IN ('A', 'B') AND 件名 LIKE '%'"
   );
   const query = plan.find((l) => l.includes("kintone query:")) ?? "";
-  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
   expect(query).toContain("(全件取得)");
-  expect(candidate).toContain('選択 in ("A","B")');
-  expect(candidate).toContain("実行時の型・実在確認待ち");
+  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
 });
 
-test("EXPLAIN FULL_SCAN — STATUS IN をmetadata解決後に候補表示する", async () => {
+test("EXPLAIN FULL_SCAN — process metadataなしのSTATUS INはfail-closedにする", async () => {
   const plan = await explain(
     "EXPLAIN SELECT $id FROM APP100 WHERE ステータス IN ('処理中') AND 件名 LIKE '%'"
   );
-  const candidate = plan.find((l) => l.includes("pushdown candidate:")) ?? "";
-  expect(candidate).toContain('ステータス in ("処理中")');
-  expect(candidate).toContain("実行時の型・実在確認待ち");
+  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
 });
 
 test.each([
@@ -427,11 +421,11 @@ test.each([
   expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
 });
 
-test("EXPLAIN FULL_SCAN — 一般 NUMBER の包含比較は候補表示しない", async () => {
+test("EXPLAIN FULL_SCAN — 一般 NUMBER の包含比較を確定queryへ含める", async () => {
   const plan = await explain(
     "EXPLAIN SELECT $id, 金額 FROM APP100 WHERE 金額 >= 1000 AND 会社名 LIKE '%A%'"
   );
-  expect(plan.some((l) => l.includes("pushdown candidate:"))).toBe(false);
+  expect(plan.find((l) => l.includes("kintone query:"))).toContain("金額 >= 1000");
 });
 
 test("EXPLAIN FULL_SCAN — JOIN", async () => {

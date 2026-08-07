@@ -3275,7 +3275,7 @@ test.each(["'X'", "''"])(
 );
 
 test.each(["USER_SELECT", "STATUS_ASSIGNEE"])(
-  "FULL_SCAN: %s の IN は押し下げず最終JS評価に残す",
+  "FULL_SCAN: %s の非空code INを押し下げて最終JS評価も維持する",
   async (fieldType) => {
     const value = [{ code: "A", name: "Alice" }];
     const client = makeClient({ records: [makeTypedRecord({ $id: "1", 選択: value, 件名: "one" })] });
@@ -3290,7 +3290,7 @@ test.each(["USER_SELECT", "STATUS_ASSIGNEE"])(
       { cacheContext: `selection-pushdown-excluded-${fieldType}` }
     ) as SelectResult;
 
-    expect(client.getCalls[0].query).not.toContain("選択 in");
+    expect(client.getCalls[0].query).toContain('選択 in ("A")');
     expect(result.rows).toEqual([{ $id: "1" }]);
   }
 );
@@ -3609,7 +3609,7 @@ test("FULL_SCAN JOIN: 各アプリの実在選択系 IN を別々に押し下げ
 });
 
 test.each([">=", "<="])(
-  "FULL_SCAN: 一般 NUMBER の %s は型が確定しても押し下げない",
+  "FULL_SCAN: 一般 NUMBER の %s を型確定後に押し下げる",
   async (op) => {
     const client = makeClient({ records: [makeRecord({ $id: "1", 金額: "1", 会社名: "A社" })] });
     client.getFields = async () => [
@@ -3623,7 +3623,7 @@ test.each([">=", "<="])(
       { cacheContext: `numeric-inclusive-${op}` }
     );
 
-    expect(client.getCalls[0].query).not.toContain(`金額 ${op} 1`);
+    expect(client.getCalls[0].query).toContain(`金額 ${op} 1`);
   }
 );
 

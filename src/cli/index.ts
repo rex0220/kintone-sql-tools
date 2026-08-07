@@ -32,6 +32,8 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { extractTypedPushdownCandidates } from "../core/optimization/wherePredicatePushdown";
+import type { SelectStatement } from "../types/ast";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import {
   createAppResolutionContext,
@@ -1036,9 +1038,28 @@ function createDryRunClient(): KintoneClient {
     deleteRecords: notUsed,
     getApps: notUsed,
     getFields: notUsed,
-    async getProcessStatuses() { return { enable: false, states: [] }; },
-    async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
+    getProcessStatuses: notUsed,
+    getNumberPrecision: notUsed,
   };
+}
+
+function hasStaticTypedPushdownCandidate(statement: unknown): boolean {
+  if (statement === null || typeof statement !== "object") return false;
+  const node = statement as Record<string, unknown>;
+  if (node["type"] === "WITH") return hasStaticTypedPushdownCandidate(node["query"]);
+  if (node["type"] !== "SELECT") return false;
+  const select = statement as SelectStatement;
+  if (!select.where || !Array.isArray(select.joins) || select.joins.length === 0) return false;
+  if (![select.from, ...select.joins.map((join) => join.table)]
+    .some((table) => table.cteName !== null)) return false;
+  const where = select.where;
+  return select.joins.some((join) =>
+    join.type === "INNER"
+    && join.table?.alias
+    && join.table?.cteName === null
+    && !join.table?.subtableCode
+    && extractTypedPushdownCandidates(where, { tableAlias: join.table.alias }) !== null
+  );
 }
 
 async function runDiagnosticRecordGet(params: {
@@ -1766,6 +1787,7 @@ async function run(): Promise<number> {
   let containsApplyStatement = false;
   let containsApplyMutation = false;
   let dryRunNeedsMetadata = false;
+  let dryRunUsesStaticTypedPlan = false;
   let parsedStatements: ReturnType<typeof parseSqlStatements> = [];
   if (args.diagRecordId === null) {
     sql = args.executeSql;
@@ -1811,6 +1833,7 @@ async function run(): Promise<number> {
         return false;
       });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
+      dryRunUsesStaticTypedPlan = statements.some(hasStaticTypedPushdownCandidate);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
         // バッチのガード（--allow-dml / dry-run / 確認プロンプト）は
@@ -1973,7 +1996,7 @@ async function run(): Promise<number> {
   }
   const cacheContext = buildCacheContext(profileName, appBindingByMappedApp);
 
-  if (args.dryRun && !dryRunNeedsMetadata) {
+  if (args.dryRun && (!dryRunNeedsMetadata || dryRunUsesStaticTypedPlan)) {
     client = createDryRunClient();
   } else {
     for (const explicitProfile of appProfileByApp.values()) {
@@ -2228,12 +2251,12 @@ async function run(): Promise<number> {
     })));
   }
 
-  if (isBatchSql && args.dryRun) {
+  if (args.dryRun && (isBatchSql || dryRunUsesStaticTypedPlan)) {
     try {
       const plans = await buildBatchExplainPlans(
         sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
         Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
-        dmlMaxRows, dmlMaxSubtableRows
+        dmlMaxRows, dmlMaxSubtableRows, false
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
