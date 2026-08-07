@@ -1,7 +1,7 @@
 # B155 CTE→APP JOIN の取得クエリに B151/B152 で開放した WHERE 葉が合流しない
 
 - 起票: 2026-08-08（[依頼元の v3.61.0 返信 §5](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260807-v3610.md)・エンジン側で再現確認済み）
-- ステータス: 📝 **起票（評価前・優先 低〜中）**
+- ステータス: 📝 **調査完了（2026-08-08・原因確定・影響範囲は単一表 FULL_SCAN まで拡大）・方向判断待ち（案 A 推奨・優先 中）**
 - 関連: [B150](ksql_b150_cte_join_date_pushdown_issue.md)（結合キー側は解決済み）／
   [B151](ksql_b151_join_inclusive_range_pushdown_issue.md)／[B152](ksql_b152_join_pushdown_all_types_issue.md)
 
@@ -21,23 +21,43 @@ CTE→APP（日付キー・範囲 prefilter）:
 
 **結果は正しい**（残余再評価）。**取得量の削減が部分的**なだけ。
 
-## 2. 原因の仮説（再現時の計画から）
+## 2. 原因（2026-08-08 調査で確定）
 
-CTE ソースの JOIN は `join pushdown plan: not applied: SOURCE_KIND` ＝
-**B151/B152 を実装した field-vs-literal 分類器（`joinPredicatePushdown`）がこの経路では走らず**、
-CTE 結合の取得クエリへ合流する条件は**別の古い機構（選択系の typed pushdown meta＝P2a 世代）だけ**が
-収集している。**「経路ごとに揃っていない」系列（B145/B148/B150 と同族）の新標本**。
+**B76 世代の「安全な葉」規則が 2 つの実装に存在し、B151/B152 は片方しか開放していなかった。**
 
-## 3. 対応の方向（未評価）
+| 実装 | 受理する葉 | 使われる経路 |
+|---|---|---|
+| `joinPredicatePushdown.classifySupportedLeaf` | **B151/B152 で全面開放済み** | 物理→物理 JOIN の pushdown plan |
+| `wherePredicatePushdown.isSafeComparison`（旧） | KLIKE・`$id`・**NUMBER の `=` と安全整数 strict `<` `>` のみ**・選択系 IN（実在検証） | `buildKlikePushdownPlan.joinConditions` → **CTE/一時テーブル含む FULL_SCAN JOIN の per-alias 条件**（`execute.ts:5540-5542`）＋**単一表 FULL_SCAN の安全プレフィルタ** |
+
+**決定的な実測**（v3.61.0）＝同じ CTE→APP JOIN で **`個数 < 101`（旧規則の strict）は合流し、
+`個数 <= 100`（B151 で開放済みのはずの inclusive）は落ちる**。
+**B151 が撤廃した「安全整数 strict のみ」制限が、第 2 の実装に凍結されたまま生き残っていた**
+——同じ規則を 2 箇所に書くと片方だけ直る、という B141 のコード版。
+
+### 影響範囲は単一表にも及ぶ（調査で新発見）
+
+```
+SELECT $id FROM APP4228 WHERE 製品名 = '牛乳' AND 仕入先 LIKE 'zz'
+→ kintone query: (全件取得)   ※ 製品名 = '牛乳' がプレフィルタに使われない
+```
+
+LIKE 等で WHERE 全体の exact 直列化が崩れた**単一表 FULL_SCAN の「安全な条件だけ prefilter」も
+同じ旧抽出器**なので、TEXT `=`・NUMBER inclusive などが乗らない。**LIKE 併用の絞り込みは
+よくある形**のため、優先度を中へ上げる。
+
+## 3. 対応の方向（調査後）
 
 | 案 | 内容 |
 |---|---|
-| A | CTE→APP 結合の additional-push 収集を `joinPredicatePushdown` 分類器へ統一（B151/B152 の開放が自動で届く） |
+| **A（推奨）** | **`isSafeComparison` の葉判定を `classifySupportedLeaf`（B151/B152 の正）へ統一**。CTE 結合の per-alias 条件と単一表 FULL_SCAN プレフィルタの両方に B151/B152 の開放が自動で届く。必要な型メタ（fieldTypes / fieldOptions）は既に options で渡っている。B150 仕様の「型一覧を複製しない」原則をこの残存複製にも適用する形 |
 | B | 文書化のみ（依頼元は `ksql_explain` 確認を規約化済み） |
 
-依頼元の優先度は「低」（期間が乗った時点で十分絞れている）。**実装するなら案 A**＝
-統一によって B154 の `not applied` 表示問題も同時に消える可能性が高い。
+**案 A の副次効果**＝B154（`not applied` 表示の誤読）も、統一設計の中で表示を整理すれば同時に解消できる見込み。
 
 ## 4. 次の一手
 
-実需（大規模アプリでの CTE 結合の取得量）が出たら案 A を B150 方式で仕様化。
+案 A を B150 方式（codex 仕様 → 実装前実測 → 実装 → 3 経路受入）で 1 サイクル。
+受入の要＝①依頼元の (a) 形で `製品名 = '牛乳'`・`個数 <= 100` が合流する
+②単一表 FULL_SCAN（LIKE 併用）で TEXT `=` がプレフィルタに乗る
+③旧規則でしか通らなかった形の回帰なし④結果不変（3 経路一致）。
