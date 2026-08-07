@@ -4,7 +4,8 @@
 - ステータス: 📝 **評価（方向判断待ち）**
 - 出典: [ksql-analytics の返信 §3](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-B129-20260805.md)。
   B129 の Q3「3 段 CTE で書けない形はあるか」への回答で、**ウィンドウとは別種の書けない形**として挙がった
-- 関連: [B128](ksql_b128_window_phase2_spec.md)（移動平均が成立しない理由の 1 つがこれ）
+- 関連: [B128](ksql_b128_window_phase2_spec.md)（移動平均が成立しない理由の 1 つがこれ）／
+  [B149](ksql_b149_generate_series_issue.md)（**本件の具体の関数形**＝`generate_series()`。2026-08-07 起票）
 
 ---
 
