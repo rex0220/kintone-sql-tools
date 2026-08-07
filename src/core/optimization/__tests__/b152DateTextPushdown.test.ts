@@ -64,6 +64,17 @@ describe("B152 canonical date/time literal policy", () => {
     expect(isCanonicalJoinDate(value)).toBe(expected);
   });
 
+  test.each(["0001", "0099", "0100", "0999", "1000", "9999"])(
+    "DATE accepts the supported four-digit year boundary %s",
+    (year) => {
+      expect(isCanonicalJoinDate(`${year}-01-01`)).toBe(true);
+    }
+  );
+
+  test("DATE rejects year 0000", () => {
+    expect(isCanonicalJoinDate("0000-01-01")).toBe(false);
+  });
+
   test.each([
     ["00:00", true],
     ["23:59", true],
@@ -83,6 +94,17 @@ describe("B152 canonical date/time literal policy", () => {
     ["", false],
   ])("DATETIME %s -> %s", (value, expected) => {
     expect(isCanonicalJoinDateTime(value)).toBe(expected);
+  });
+
+  test.each(["0001", "0099", "0100", "0999", "1000", "9999"])(
+    "DATETIME accepts the supported four-digit year boundary %s",
+    (year) => {
+      expect(isCanonicalJoinDateTime(`${year}-01-01T00:00:00Z`)).toBe(true);
+    }
+  );
+
+  test("DATETIME rejects year 0000", () => {
+    expect(isCanonicalJoinDateTime("0000-01-01T00:00:00Z")).toBe(false);
   });
 });
 
