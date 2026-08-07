@@ -56,9 +56,9 @@ test.each([
     { fetch: "exact", pending: false, limit: null },
   ],
   [
-    "PREFILTERED + pending",
+    "metadata-resolved exact prefilter",
     "SELECT 確度, COUNT(*) FROM APP100 WHERE 確度 IN ('A') GROUP BY 確度",
-    { fetch: "prefiltered", pending: true, kintoneQuery: '確度 in ("A")', limit: null },
+    { fetch: "exact", pending: false, kintoneQuery: '確度 in ("A")', limit: null },
   ],
   [
     "ALL + null query",

@@ -2,9 +2,10 @@ import type { SelectStatement, WhereExpr } from "../../types/ast";
 import type { KlikeExpr } from "../like";
 import { isKlike } from "../like";
 import {
-  extractSafePushdownLeaves,
+  extractSafePushdownPlan,
   type SafePushdownOptions,
 } from "./wherePredicatePushdown";
+import type { SupportedLeafRelation } from "./supportedLeafPolicy";
 
 export interface KlikePushdownMetadata {
   fieldTypesByApp?: ReadonlyMap<number, ReadonlyMap<string, string>>;
@@ -22,7 +23,9 @@ export interface KlikePushdownPlanOptions extends KlikePushdownMetadata {
  */
 export interface KlikePushdownPlan {
   mainCondition: WhereExpr | null;
+  mainRelation: Exclude<SupportedLeafRelation, "unsafe"> | null;
   joinConditions: ReadonlyMap<string, WhereExpr>;
+  joinRelations: ReadonlyMap<string, Exclude<SupportedLeafRelation, "unsafe">>;
   appliedKlikes: ReadonlySet<KlikeExpr>;
   allKlikes: readonly KlikeExpr[];
 }
@@ -34,6 +37,7 @@ interface SingleTableKlikePushdownOptions extends SafePushdownOptions {
 
 export interface SingleTableKlikePushdownPlan {
   readonly condition: WhereExpr | null;
+  readonly relation: Exclude<SupportedLeafRelation, "unsafe"> | null;
   readonly appliedKlikes: ReadonlySet<KlikeExpr>;
   readonly allKlikes: readonly KlikeExpr[];
 }
@@ -46,14 +50,15 @@ export function buildSingleTableKlikePushdownPlan(
   where: WhereExpr | null,
   options: SingleTableKlikePushdownOptions = {}
 ): SingleTableKlikePushdownPlan {
-  const condition = where !== null && options.extractCondition !== false
-    ? extractSafePushdownLeaves(where, options)
-    : null;
+  const extracted = where !== null && options.extractCondition !== false
+    ? extractSafePushdownPlan(where, options)
+    : { condition: null, relation: null };
+  const { condition, relation } = extracted;
   const appliedKlikes = new Set<KlikeExpr>();
   collectKlikes(condition, appliedKlikes);
   const allKlikes = new Set<KlikeExpr>();
   collectKlikes(where, allKlikes);
-  return { condition, appliedKlikes, allKlikes: [...allKlikes] };
+  return { condition, relation, appliedKlikes, allKlikes: [...allKlikes] };
 }
 
 export function buildKlikePushdownPlan(
@@ -70,7 +75,7 @@ export function buildKlikePushdownPlan(
   const mainHasUsableAlias = stmt.joins.length === 0 || stmt.from.alias !== null;
   const mainPlan = buildSingleTableKlikePushdownPlan(stmt.where, {
     ...common,
-    extractCondition: mainIsPhysical && mainHasUsableAlias,
+    extractCondition: mainIsPhysical && mainHasUsableAlias && joinsAreSafeForKlike,
     tableAlias: stmt.from.alias ?? undefined,
     allowUnqualifiedFields: stmt.joins.length === 0,
     fieldTypes: options.fieldTypesByApp?.get(stmt.from.appId),
@@ -79,16 +84,21 @@ export function buildKlikePushdownPlan(
   const mainCondition = mainPlan.condition;
 
   const joinConditions = new Map<string, WhereExpr>();
+  const joinRelations = new Map<string, "exact" | "superset">();
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
-      if (!join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
-      const condition = extractSafePushdownLeaves(stmt.where, {
+      if (join.type !== "INNER"
+        || !join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
+      const extracted = extractSafePushdownPlan(stmt.where, {
         ...common,
         tableAlias: join.table.alias,
         fieldTypes: options.fieldTypesByApp?.get(join.table.appId),
         fieldOptions: options.fieldOptionsByApp?.get(join.table.appId),
       });
-      if (condition !== null) joinConditions.set(join.table.alias, condition);
+      if (extracted.condition !== null && extracted.relation !== null) {
+        joinConditions.set(join.table.alias, extracted.condition);
+        joinRelations.set(join.table.alias, extracted.relation);
+      }
     }
   }
 
@@ -97,7 +107,9 @@ export function buildKlikePushdownPlan(
 
   return {
     mainCondition,
+    mainRelation: mainPlan.relation,
     joinConditions,
+    joinRelations,
     appliedKlikes,
     allKlikes: mainPlan.allKlikes,
   };

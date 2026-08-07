@@ -53,10 +53,10 @@ test.each([
     "  fetch:         EXACT",
   ],
   [
-    "prefilter candidate",
+    "metadata-resolved exact prefilter",
     "SELECT 確度, COUNT(*) FROM APP100 WHERE 確度 IN ('A') GROUP BY 確度",
-    "fetch summary: PREFILTERED",
-    "  fetch:         PREFILTERED (未確定)",
+    "fetch summary: EXACT",
+    "  fetch:         EXACT",
   ],
   ["LIKE full scan", "SELECT 顧客名 FROM APP100 WHERE 顧客名 LIKE 'A%'", "fetch summary: ALL", "  fetch:         ALL"],
 ] as const)("B114: 実測4形 %s", async (_name, sql, summary, fetch) => {

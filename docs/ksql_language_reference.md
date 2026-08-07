@@ -939,9 +939,16 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 別の規則です。
 
 - **単一表:** `WHERE` 全体を kintone query へ exact に直列化できれば、フィールド型を問わず
-  押し下げます。FULL_SCAN でも安全な条件だけを prefilter に使える形があります。
+  押し下げます。FULL_SCAN でも、次表と同じ型・literal・演算子規則を満たす AND leaf だけを
+  prefilter に使えます。たとえば `製品名 = '牛乳' AND 仕入先 LIKE 'zz'` は、前者だけを
+  records API に送り、元の `WHERE` 全体を取得後に再評価します。
 - **JOIN・field vs literal:** 次表の「押し下がる」条件だけを APP ごとの prefilter に使います。
-  表にないフィールド型は押し下がりません。
+  表にないフィールド型は押し下がりません。CTE または一時テーブルと物理 APP の INNER JOIN
+  でも、物理 APP 側の直接フィールドは同じ規則で JOIN key prefilter に合流します。
+
+これらの経路は1つの leaf policyを共有します。`EXPLAIN` の `join pushdown plan: not applied` は、
+CTE・一時テーブルを含む場合に「物理 APP だけの直接 JOIN planner」が不適用であることを示し、
+続く source ごとの JOIN key / WHERE prefilter まで不適用という意味ではありません。
 
 フォーム選択系の `IN` / `NOT IN` は、空でない実在選択肢だけのリストを指定し、型情報と
 選択肢情報を取得できた場合に押し下がります。ユーザー・組織・グループ・作業者系は

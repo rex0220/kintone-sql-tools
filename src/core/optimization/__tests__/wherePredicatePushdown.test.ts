@@ -1,6 +1,8 @@
 import { Lexer } from "../../../lexer/lexer";
 import { Parser } from "../../../parser/parser";
 import type { SelectStatement } from "../../../types/ast";
+import { whereToKintone } from "../../../converter/whereToKintone";
+import { classifyJoinPushdownLeaf, type JoinPushdownSource } from "../joinPredicatePushdown";
 import {
   extractNumericPushdownCandidates,
   extractSafePushdownLeaves,
@@ -71,7 +73,7 @@ test.each([
   expect(extractSafePushdownLeaves(where(sql))).toBeNull();
 });
 
-test.each(["=", ">", "<"])(
+test.each(["=", "!=", "<>", ">", "<", ">=", "<="])(
   "NUMBER フィールドの安全な %s 比較を抽出する",
   (op) => {
     const expr = where(`SELECT * FROM APP100 WHERE 金額 ${op} 1000`);
@@ -81,12 +83,10 @@ test.each(["=", ">", "<"])(
 );
 
 test.each([
-  "SELECT * FROM APP100 WHERE 金額 >= 1000",
-  "SELECT * FROM APP100 WHERE 金額 <= 1000",
-  "SELECT * FROM APP100 WHERE 金額 != 1000",
-  "SELECT * FROM APP100 WHERE 金額 > 1.5",
-  "SELECT * FROM APP100 WHERE 金額 > 9007199254740992",
-])("NUMBER 型でも対象外の一般数値比較を押し下げない: %s", (sql) => {
+  "SELECT * FROM APP100 WHERE 金額 >= 1e-11",
+  "SELECT * FROM APP100 WHERE 金額 > 1000000000000000000000000000000",
+  "SELECT * FROM APP100 WHERE 金額 = '1000'",
+])("NUMBER 型でもliteral policy外の比較を押し下げない: %s", (sql) => {
   const expr = where(sql);
   const fieldTypes = new Map([["金額", "NUMBER"]]);
   expect(extractSafePushdownLeaves(expr, { fieldTypes })).toBeNull();
@@ -168,21 +168,62 @@ test.each([
 });
 
 test.each(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT", "STATUS_ASSIGNEE"])(
-  "%s は選択肢集合があっても押し下げない",
+  "%s の非空code listを共有policyで押し下げる",
   (fieldType) => {
     const expr = where("SELECT * FROM APP100 WHERE 選択 IN ('A')");
     expect(extractSafePushdownLeaves(expr, {
       fieldTypes: new Map([["選択", fieldType]]),
       fieldOptions: new Map([["選択", new Set(["A"])]]),
-    })).toBeNull();
+    })).toEqual(expr);
   }
 );
 
-test("選択系 IN は型メタなしの候補抽出に含め、対象外リーフは除く", () => {
+test("共有policyのstring/number listを型メタなしの候補抽出に含める", () => {
   const expr = where(
     "SELECT * FROM APP100 WHERE 選択 IN ('A') AND 他 NOT IN ('B') AND 数量 IN (1)"
   );
   const candidate = extractTypedPushdownCandidates(expr) as any;
-  expect(candidate.left.left.field).toBe("選択");
-  expect(candidate.right.left.field).toBe("他");
+  expect(candidate.left.left.left.field).toBe("選択");
+  expect(candidate.left.right.left.field).toBe("他");
+  expect(candidate.right.left.field).toBe("数量");
+});
+
+test.each([
+  ["NUMBER", "数量 <= 100"],
+  ["NUMBER", "数量 NOT IN (1, 2)"],
+  ["DATE", "数量 >= '2026-08-01'"],
+  ["TIME", "数量 < '09:30'"],
+  ["DATETIME", "数量 = '2026-08-01T00:00:00Z'"],
+  ["SINGLE_LINE_TEXT", "数量 = '牛乳'"],
+  ["LINK", "数量 IN ('A', 'B')"],
+  ["RECORD_NUMBER", "数量 >= 10"],
+  ["CALC", "数量 NOT IN (1, 2)"],
+  ["USER_SELECT", "数量 IN ('user1')"],
+] as const)("JOIN classifierとfallback extractorのparity: %s / %s", (fieldType, sqlPredicate) => {
+  const expr = where(`SELECT * FROM APP4228 t WHERE t.${sqlPredicate}`);
+  if (expr.type !== "BINARY") throw new Error("expected binary");
+  const source: JoinPushdownSource = {
+    alias: "t",
+    appId: 4228,
+    sourceKind: "APP",
+    fieldTypes: new Map([["数量", fieldType]]),
+  };
+  const direct = classifyJoinPushdownLeaf(expr, [source]);
+  const fallback = extractSafePushdownLeaves(expr, {
+    tableAlias: "t",
+    fieldTypes: source.fieldTypes,
+  });
+  expect(direct.relation === "unsafe").toBe(fallback === null);
+  expect(fallback && whereToKintone(fallback)).toBe(whereToKintone(expr));
+});
+
+test.each([
+  "数量 <= 100",
+  "数量 NOT IN (1, 2)",
+  "数量 >= '2026-08-01'",
+  "数量 = '牛乳'",
+  "数量 IN ('A', 'B')",
+])("metadata candidate helperが共有operator familyを列挙する: %s", (sqlPredicate) => {
+  const expr = where(`SELECT * FROM APP4228 WHERE ${sqlPredicate}`);
+  expect(extractTypedPushdownCandidates(expr)).toEqual(expr);
 });
