@@ -44,6 +44,8 @@ function makeClient(options: {
   sourceRows?: KintoneRecord[];
   targetRows?: KintoneRecord[];
   rangeError?: Error;
+  rejectRecords?: boolean;
+  ignoreTargetPrefilter?: boolean;
 } = {}): KintoneClient & { queries: Array<{ app: number; query: string }> } {
   const queries: Array<{ app: number; query: string }> = [];
   const rows: Record<number, KintoneRecord[]> = {
@@ -58,8 +60,11 @@ function makeClient(options: {
   return {
     queries,
     async getRecords(params) {
+      if (options.rejectRecords) throw new Error("records API must not be called by EXPLAIN");
       queries.push({ app: params.app, query: params.query });
-      const bare = stripPaging(params.query);
+      const bare = options.ignoreTargetPrefilter && params.app === TARGET
+        ? ""
+        : stripPaging(params.query);
       if (/日付 in \(/.test(bare)) {
         throw new Error("GAIA_IQ03: DATE does not accept in");
       }
@@ -108,6 +113,52 @@ INNER JOIN APP4228 AS t
 ORDER BY s.日付`;
 
 describe("B150 JOIN key range prefilter acceptance", () => {
+  test.each([
+    ["CTE", async (client: KintoneClient, cacheContext: string) => execute(
+      "WITH s AS (SELECT 日付 FROM APP4227) " +
+      "SELECT s.日付,t.個数 FROM s INNER JOIN APP4228 t ON s.日付=t.日付 ORDER BY s.日付",
+      client,
+      { cacheContext }
+    ) as Promise<SelectResult>],
+    ["一時テーブル", async (client: KintoneClient, cacheContext: string) => {
+      const batch = await executeBatch(
+        "CREATE TEMP TABLE #s AS SELECT 日付 FROM APP4227; " +
+        "SELECT s.日付,t.個数 FROM #s s INNER JOIN APP4228 t ON s.日付=t.日付 ORDER BY s.日付;",
+        client,
+        { cacheContext }
+      );
+      return batch.statements[1].result as SelectResult;
+    }],
+    ["APP→APP", async (client: KintoneClient, cacheContext: string) => execute(
+      "SELECT s.日付,t.個数 FROM APP4227 s INNER JOIN APP4228 t ON s.日付=t.日付 ORDER BY s.日付",
+      client,
+      { cacheContext }
+    ) as Promise<SelectResult>],
+  ] as const)("共通gap fixtureの %s 結果は全件取得基準と一致する", async (route, run) => {
+    const sourceRows = [
+      record("1", { 日付: "2025-08-04" }),
+      record("2", { 日付: "2025-08-06" }),
+    ];
+    const targetRows = [
+      record("11", { 日付: "2025-08-04", 個数: "4" }),
+      record("12", { 日付: "2025-08-05", 個数: "5" }),
+      record("13", { 日付: "2025-08-06", 個数: "6" }),
+    ];
+    const optimized = await run(
+      makeClient({ sourceRows, targetRows }),
+      `b150-shared-${route}-optimized`
+    );
+    const fullFetch = await run(
+      makeClient({ sourceRows, targetRows, ignoreTargetPrefilter: true }),
+      `b150-shared-${route}-full`
+    );
+    expect(optimized.rows).toEqual(fullFetch.rows);
+    expect(optimized.rows).toEqual([
+      { 日付: "2025-08-04", 個数: "4" },
+      { 日付: "2025-08-06", 個数: "6" },
+    ]);
+  });
+
   test("B150再現形は旧 in の GAIA_IQ03 条件を踏まず正しい結果を返す", async () => {
     const client = makeClient();
     const result = await execute(ACCEPTANCE_SQL, client, { cacheContext: "b150-acceptance" }) as SelectResult;
@@ -328,6 +379,66 @@ SELECT s.日付,t.個数 FROM s INNER JOIN APP4228 t ON s.日付=t.日付 WHERE 
     expect(text).toContain('pushdown applied: 数 in ("1","2")');
     expect(text).toContain("relation: exact");
     expect(inClient.queries).toEqual([]);
+  });
+
+  test.each([
+    [
+      "in",
+      "WITH s AS (SELECT '食パン' AS k) SELECT s.k FROM s INNER JOIN APP4228 AS t ON s.k = t.キー",
+      "JOIN_KEY_VALUES_RUNTIME",
+    ],
+    [
+      "range",
+      "WITH s AS (SELECT '2025-08-04' AS 日付) SELECT s.日付 FROM s INNER JOIN APP4228 AS t ON s.日付 = t.日付",
+      "JOIN_KEY_VALUES_RUNTIME",
+    ],
+    [
+      "fallback",
+      "WITH s AS (SELECT '食パン' AS k) SELECT s.k FROM s INNER JOIN APP4228 AS t ON s.k = t.メモ",
+      "JOIN_KEY_OPERATOR_UNAVAILABLE",
+    ],
+  ] as const)("CTE→APP %s EXPLAIN は records API 0 回で runtime candidate を表示する", async (_kind, sql, reason) => {
+    const client = makeClient({ rejectRecords: true });
+    const result = await execute(`EXPLAIN ${sql}`, client, { cacheContext: `b150-no-fetch-cte-${_kind}` }) as SelectResult;
+    const text = result.rows.map((row) => row.plan).join("\n");
+    expect(text).toContain(`join key prefilter reason: ${reason}`);
+    expect(client.queries).toEqual([]);
+  });
+
+  test.each([
+    ["in", "SELECT '食パン' AS k", "s.k = t.キー", "join key prefilter: in"],
+    ["range", "WITH x AS (GENERATE_SERIES('2025-08-04','2025-08-04') AS 日付) SELECT 日付 FROM x", "s.日付 = t.日付", "join key prefilter: range"],
+    ["fallback", "SELECT '食パン' AS k", "s.k = t.メモ", "join key prefilter reason: JOIN_KEY_OPERATOR_UNAVAILABLE"],
+  ] as const)("一時テーブル→APP %s EXPLAIN は records API 0 回", async (_kind, sourceSql, on, expected) => {
+    const client = makeClient({ rejectRecords: true });
+    const batch = await executeBatch(
+      `CREATE TEMP TABLE #s AS ${sourceSql}; EXPLAIN SELECT s.${_kind === "range" ? "日付" : "k"} FROM #s AS s INNER JOIN APP4228 AS t ON ${on};`,
+      client,
+      { cacheContext: `b150-no-fetch-temp-${_kind}` }
+    );
+    const text = (batch.statements[1].result as SelectResult).rows.map((row) => row.plan).join("\n");
+    expect(text).toContain(expected);
+    expect(client.queries).toEqual([]);
+  });
+
+  test.each([51, 300])("EXPLAIN の in %i件は実行と同じ50件順で全 query を逐語表示する", async (count) => {
+    const client = makeClient({ rejectRecords: true });
+    const result = await execute(
+      `EXPLAIN WITH s AS (GENERATE_SERIES(1,${count}) AS 数) ` +
+      "SELECT s.数 FROM s INNER JOIN APP4228 AS t ON s.数=t.数",
+      client,
+      { cacheContext: `b150-explain-in-chunks-${count}` }
+    ) as SelectResult;
+    const queryLines = result.rows.map((row) => row.plan)
+      .filter((line) => line.startsWith("  kintone query: 数 in ("));
+    const expected = Array.from({ length: Math.ceil(count / 50) }, (_, chunkIndex) => {
+      const start = chunkIndex * 50 + 1;
+      const end = Math.min(count, start + 49);
+      const values = Array.from({ length: end - start + 1 }, (_, index) => `"${start + index}"`);
+      return `  kintone query: 数 in (${values.join(",")})`;
+    });
+    expect(queryLines).toEqual(expected);
+    expect(client.queries).toEqual([]);
   });
 
   test.each([

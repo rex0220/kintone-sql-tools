@@ -2,13 +2,13 @@
 
 1. **Major — EXPLAIN が `in` の50件チャンク契約を再現しない**
 
-   - 箇所: [src/execute.ts:5957](C:/Users/rex02/Projects/kintone-sql-tools/src/execute.ts:5957)、[src/execute.ts:10268](C:/Users/rex02/Projects/kintone-sql-tools/src/execute.ts:10268)
+   - 箇所: [src/execute.ts:5960](../../src/execute.ts#L5960)、[src/execute.ts:10264](../../src/execute.ts#L10264)
    - 根拠: 実行時は50件ごとに複数 query へ分割する一方、EXPLAIN は全値を単一の `in (...)` に直列化する。51～300件では実行 query と EXPLAIN 表示が一致せず、B150 §1.7・§9.4の serializer 契約に反する。
    - 修正案: EXPLAIN 側も共有 helper でチャンク化し、複数 fetch query を実行順に表示する。少なくとも51件・300件の逐語テストを追加する。
 
 2. **Medium — 「3経路一致＋全件取得基準」の受入が逐語的に満たされていない**
 
-   - 箇所: [src/__tests__/b150JoinKeyRangePrefilter.test.ts:101](C:/Users/rex02/Projects/kintone-sql-tools/src/__tests__/b150JoinKeyRangePrefilter.test.ts:101)、[src/__tests__/b150JoinKeyRangePrefilter.test.ts:124](C:/Users/rex02/Projects/kintone-sql-tools/src/__tests__/b150JoinKeyRangePrefilter.test.ts:124)、[src/__tests__/b150JoinKeyRangePrefilter.test.ts:142](C:/Users/rex02/Projects/kintone-sql-tools/src/__tests__/b150JoinKeyRangePrefilter.test.ts:142)
+   - 箇所: [src/__tests__/b150JoinKeyRangePrefilter.test.ts:162](../../src/__tests__/b150JoinKeyRangePrefilter.test.ts#L162)、[src/__tests__/b150JoinKeyRangePrefilter.test.ts:175](../../src/__tests__/b150JoinKeyRangePrefilter.test.ts#L175)、[src/__tests__/b150JoinKeyRangePrefilter.test.ts:193](../../src/__tests__/b150JoinKeyRangePrefilter.test.ts#L193)
    - 根拠: CTE・一時テーブル・APP→APP は個別に確認されているが、同じキー集合・同じJOIN先データを3経路で比較しておらず、全件取得後のJOIN結果との比較もない。B150 §11.2の回帰検出力を満たさない。
    - 修正案: 同一 fixture `{2025-08-04, 2025-08-06}` とgap行を含むJOIN先を共有し、3経路の最終結果を全件取得基準と比較するパラメータ化テストを追加する。
 

@@ -69,7 +69,11 @@ import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
 import { GENERATE_SERIES_MAX_ROWS, resolveGenerateSeries } from "./core/generateSeries";
-import { planJoinKeyPrefilter } from "./core/optimization/joinKeyPrefilter";
+import {
+  buildJoinKeyPrefilterQueries,
+  JOIN_KEY_IN_CHUNK_SIZE,
+  planJoinKeyPrefilter,
+} from "./core/optimization/joinKeyPrefilter";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -5863,9 +5867,8 @@ function splitChunks<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-const JOIN_IN_CHUNK_SIZE = 50;
 const JOIN_IN_MAX_CHUNKS = 6;
-const JOIN_IN_MAX_KEYS = JOIN_IN_CHUNK_SIZE * JOIN_IN_MAX_CHUNKS;
+const JOIN_IN_MAX_KEYS = JOIN_KEY_IN_CHUNK_SIZE * JOIN_IN_MAX_CHUNKS;
 
 async function tryFetchJoinRecordsBySourceKeys(
   stmt: SelectStatement,
@@ -5954,10 +5957,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   }
   if (keyPlan.kind === "RANGE_CANDIDATE") return null;
 
-  const prefilterQueries = keyPlan.kind === "IN"
-    ? splitChunks([...keyPlan.values], JOIN_IN_CHUNK_SIZE)
-      .map((chunk) => `${joinField} in (${chunk.map(sqlQuote).join(",")})`)
-    : [`${joinField} >= ${sqlQuote(keyPlan.min)} and ${joinField} <= ${sqlQuote(keyPlan.max)}`];
+  const prefilterQueries = buildJoinKeyPrefilterQueries(keyPlan, joinField, sqlQuote);
   if (prefilterQueries.length === 0) {
     warnings.add(
       `JOINキーが 0 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
@@ -9973,7 +9973,7 @@ interface ExplainWhereAnalysis {
 const explainJoinPushdownPlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
 interface ExplainJoinKeyPrefilter {
   readonly plan: ReturnType<typeof planJoinKeyPrefilter>;
-  readonly query?: string;
+  readonly queries: readonly string[];
   readonly additionalQuery?: string;
   readonly additionalRelation?: "exact" | "superset";
 }
@@ -10261,15 +10261,15 @@ async function buildExplainWhereAnalysis(
           hasEmptyValue,
           maxInKeys: JOIN_IN_MAX_KEYS,
         });
-        // in 候補の実値が records API なしでは分からない物理 source は、
-        // 既存 field-vs-literal EXPLAIN を上書きしない。B150 の runtime candidate 表示は
-        // relation 上限を型だけで確定できる range 候補に限定する。
-        if (plan.kind === "FALLBACK" && plan.reason === "JOIN_KEY_VALUES_RUNTIME") continue;
-        const query = plan.kind === "IN"
-          ? `${joinField} in (${plan.values.map(sqlQuote).join(",")})`
-          : plan.kind === "RANGE"
-            ? `${joinField} >= ${sqlQuote(plan.min)} and ${joinField} <= ${sqlQuote(plan.max)}`
-            : undefined;
+        if (plan.kind === "FALLBACK" && plan.reason === "JOIN_KEY_VALUES_RUNTIME") {
+          const runtimePlanConsumesJoin = joinPushdownPlan?.joinPlan.items.some((item) =>
+            item.targetAlias === joinAlias
+          ) || joinPushdownPlan?.joinPlan.serverFunctionConsumptions.some((consumption) =>
+            consumption.targetAlias === joinAlias
+          );
+          if (runtimePlanConsumesJoin) continue;
+        }
+        const queries = buildJoinKeyPrefilterQueries(plan, joinField, sqlQuote);
         const additionalCandidate = select.where
           ? extractTypedPushdownCandidates(select.where, { tableAlias: joinAlias })
           : null;
@@ -10287,7 +10287,7 @@ async function buildExplainWhereAnalysis(
             additionalRelation = additionalCapability.capability === "EXACT_PUSHDOWN" ? "exact" : "superset";
           }
         }
-        joinKeyPlans.set(joinAlias, { plan, query, additionalQuery, additionalRelation });
+        joinKeyPlans.set(joinAlias, { plan, queries, additionalQuery, additionalRelation });
       }
       if (joinKeyPlans.size > 0) explainJoinKeyPrefilters.set(select, joinKeyPlans);
       // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
@@ -11723,16 +11723,17 @@ function buildSelectPlan(
             : joinKey?.additionalQuery
               ? joinKey.additionalQuery
             : "(全件取得)");
-      const joinKeyQuery = joinKey?.query;
-      const joinQ = joinKeyQuery
-        ? baseJoinQ !== "(全件取得)"
-          ? `(${joinKeyQuery}) and (${baseJoinQ})`
-          : joinKeyQuery
-        : joinKey?.plan.kind === "RANGE_CANDIDATE"
-          ? "(runtime source keys)"
-          : baseJoinQ;
+      const runtimeJoinKeyCandidate = joinKey?.plan.kind === "RANGE_CANDIDATE"
+        || (joinKey?.plan.kind === "FALLBACK"
+          && joinKey.plan.reason === "JOIN_KEY_VALUES_RUNTIME");
+      const joinQueries = joinKey && joinKey.queries.length > 0
+        ? joinKey.queries.map((query) => baseJoinQ !== "(全件取得)"
+          ? `(${query}) and (${baseJoinQ})`
+          : query)
+        : [runtimeJoinKeyCandidate ? "(runtime source keys)" : baseJoinQ];
+      const joinQ = joinQueries.join(" | ");
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
-      lines.push(`  kintone query: ${joinQ}`);
+      for (const query of joinQueries) lines.push(`  kintone query: ${query}`);
       const joinPlanItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
         item.targetAlias === join.table.alias
       );
@@ -11741,7 +11742,7 @@ function buildSelectPlan(
           (consumption) => consumption.targetAlias === join.table.alias
         );
       if (emitFetch && join.table.cteName === null) {
-        const joinPending = joinKey?.plan.kind === "RANGE_CANDIDATE"
+        const joinPending = runtimeJoinKeyCandidate
           || (!joinKey && !runtimeJoinPlan && joinCandidate !== null);
         const joinFetchScope: ExplainFetchScope = joinQ === "(全件取得)"
           ? "ALL"
@@ -11767,21 +11768,23 @@ function buildSelectPlan(
       if (joinKey) {
         if (joinKey.plan.kind === "RANGE") {
           lines.push("  join key prefilter: range");
-          lines.push(`  pushdown applied: ${joinQ}`);
+          for (const query of joinQueries) lines.push(`  pushdown applied: ${query}`);
           lines.push("  relation: superset");
         } else if (joinKey.plan.kind === "IN") {
           const relation = joinPlanItem?.relation === "superset" || joinKey.additionalRelation === "superset"
             ? "superset"
             : "exact";
           lines.push("  join key prefilter: in");
-          lines.push(`  pushdown applied: ${joinQ}`);
+          for (const query of joinQueries) lines.push(`  pushdown applied: ${query}`);
           lines.push(`  relation: ${relation}`);
         } else if (joinKey.plan.kind === "RANGE_CANDIDATE") {
           lines.push("  join key prefilter: range candidate");
           lines.push("  relation: superset");
           lines.push(`  join key prefilter reason: ${joinKey.plan.reason}`);
         } else if (joinKey.plan.kind === "FALLBACK") {
-          lines.push("  join key prefilter: not applied");
+          lines.push(joinKey.plan.reason === "JOIN_KEY_VALUES_RUNTIME"
+            ? "  join key prefilter: runtime candidate"
+            : "  join key prefilter: not applied");
           lines.push(`  join key prefilter reason: ${joinKey.plan.reason}`);
         }
       } else if (joinPlanItem || joinFunctionConsumption) {
