@@ -190,9 +190,14 @@ Pro が「単一表では押し下がるのに JOIN では」と混乱したの�
 > **【B152 Phase 2+3 により失効・2026-08-07】** 上記の旧 matrix にある日付・時刻系の
 > canonical literal 比較と SINGLE_LINE_TEXT / LINK の非空 equality・IN に関するセルは、
 > B152 で exact prefilter へ拡張された。歴史表は当時値として保持し、現行値は
-> `docs/ksql_language_reference.md` の B84 marker 内を参照する。ユーザー・組織・グループ・
-> 作業者系は存在しない code の GAIA_IL26 実測により見送り、全セル ✕ を維持する。
+> `docs/ksql_language_reference.md` の B84 marker 内を参照する。
 > 表生成方式、型集合導出、正規化後の分類、公開文書との照合という B84 の設計は維持する。
+
+> **【B152 全面整合により追記・2026-08-07（同日オーナー判断で前段の見送りを撤回）】**
+> kintone 演算子表への整合を優先し、**ユーザー・組織・グループ・作業者系 6 型の
+> `IN` / `NOT IN` を exact で開放**（存在しない code の GAIA_IL26 は単一表と同様に表面化・
+> silent retry しない）。**CALC・RECORD_NUMBER は 8 演算子を superset で開放**
+> （意味論未証明のため取得後の残余再評価が最終判定。書式・値が不正な指定は kintone エラー）。
 
 ---
 
