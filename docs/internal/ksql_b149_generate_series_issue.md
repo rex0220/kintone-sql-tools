@@ -6,7 +6,8 @@
   **JOIN 後は警告維持（実データの重複キー n=646 で発火）**・validate の静的拒否と変数保留・
   変数解決後の上限 10001 拒否・`TODAY()` 終端・EXPLAIN（`records API: none`）・
   保存クエリ round-trip（変数注入・書込承認なし・確認後削除済み）。
-  **未実施＝プラグインのブラウザ smoke のみ**（Firefox / Chrome。zip は同梱 desktop.js 再生成済み）
+  ブラウザ smoke＝**Chrome はオーナーが確認済み（2026-08-07）**。未実施は Firefox のみ
+  （zip は同梱 desktop.js 再生成済み・エンジン 4 経路の確認は通過済みでリスク低）
 - 検証: 全体テスト成功を Claude が実測（`npm test` exit 0・受入 50 件）。[最終チェック報告](ksql_b149_codex_final_check_report.md)＝警告抑止の fail-open なし・上限回避経路なし・境界ずれなし。[実装・修正報告](ksql_b149_codex_impl_report.md)
 - 仕様: [R2 正本](ksql_b149_generate_series_spec_r2.md)（codex 作・R1 は破棄）／
   [R1 レビュー](ksql_b149_codex_review_1.md)（指摘 6 件・実測付き）／[R2 検証](ksql_b149_codex_review_2.md)（全反映確認・警告文の実測照合一致）
