@@ -133,7 +133,11 @@ function expectedQuery(condition: string): string {
     .replace(/, /g, ",");
 }
 
-async function expectThreePaths(condition: string): Promise<void> {
+function resultIds(result: SelectResult): string[] {
+  return result.rows.map((row) => String(row.$id));
+}
+
+async function expectThreePaths(condition: string, expectedIds?: readonly string[]): Promise<void> {
   const pushed = makeClient();
   const residual = makeClient();
   const single = makeClient();
@@ -152,34 +156,59 @@ async function expectThreePaths(condition: string): Promise<void> {
     rows: pushedResult.rows,
     rowCount: pushedResult.rowCount,
   });
+  if (expectedIds !== undefined) {
+    expect(resultIds(pushedResult)).toEqual(expectedIds);
+    expect(resultIds(residualResult)).toEqual(expectedIds);
+    expect(resultIds(singleResult)).toEqual(expectedIds);
+  }
   const call = pushed.calls.find((candidate) => candidate.app === TRANSACTION)!;
   expect(withoutPaging(call.query)).toBe(expectedQuery(condition));
 }
 
 describe("B152 Phase 2+3 mock-client acceptance", () => {
+  const dateTimeExpectedIds = {
+    "=": ["13"],
+    "!=": ["11", "12", "14", "15", "16"],
+    "<>": ["11", "12", "14", "15", "16"],
+    "<": ["11", "12"],
+    ">": ["14", "15", "16"],
+    "<=": ["11", "12", "13"],
+    ">=": ["13", "14", "15", "16"],
+  } as const;
+
   test.each(dateTimeFields.flatMap(([field, , literal]) =>
-    ["=", "!=", "<>", "<", ">", "<=", ">="].map((op) =>
-      [`${field} ${op} '${literal}'`] as const
+    (Object.entries(dateTimeExpectedIds) as Array<
+      [keyof typeof dateTimeExpectedIds, readonly string[]]
+    >).map(([op, expectedIds]) =>
+      [`${field} ${op} '${literal}'`, expectedIds] as const
     )
-  ))("Phase 2 three paths and serializer: %s", async (condition) => {
-    await expectThreePaths(condition);
+  ))("Phase 2 three paths, fixed empty-cell IDs, and serializer: %s", async (condition, expectedIds) => {
+    await expectThreePaths(condition, expectedIds);
   });
 
   test.each([
-    ["件名 = 'B'"],
-    ["件名 != 'B'"],
-    ["件名 <> 'B'"],
-    ["件名 IN ('A', 'B')"],
-    ["件名 NOT IN ('A', 'B')"],
-    ["件名 = 'A\"B'"],
-    ["件名 = 'A\\B'"],
-    ["件名 = 'A\"\\B'"],
-    ["リンク = 'https://b.example'"],
-    ["リンク != 'https://b.example'"],
-    ["リンク <> 'https://b.example'"],
-    ["リンク IN ('https://a.example', 'https://b.example')"],
-    ["リンク NOT IN ('https://a.example', 'https://b.example')"],
-  ])("Phase 3 three paths and serializer: %s", async (condition) => {
+    ["件名 = 'B'", ["13"]],
+    ["件名 != 'B'", ["11", "12", "14", "15", "16"]],
+    ["件名 <> 'B'", ["11", "12", "14", "15", "16"]],
+    ["件名 IN ('A', 'B')", ["12", "13"]],
+    ["件名 NOT IN ('A', 'B')", ["11", "14", "15", "16"]],
+    ["リンク = 'https://b.example'", ["13"]],
+    ["リンク != 'https://b.example'", ["11", "12", "14", "15", "16"]],
+    ["リンク <> 'https://b.example'", ["11", "12", "14", "15", "16"]],
+    ["リンク IN ('https://a.example', 'https://b.example')", ["12", "13"]],
+    ["リンク NOT IN ('https://a.example', 'https://b.example')", ["11", "14", "15", "16"]],
+  ] as const)(
+    "Phase 3 three paths, fixed empty-cell IDs, and serializer: %s",
+    async (condition, expectedIds) => {
+      await expectThreePaths(condition, expectedIds);
+    }
+  );
+
+  test.each([
+    "件名 = 'A\"B'",
+    "件名 = 'A\\B'",
+    "件名 = 'A\"\\B'",
+  ])("Phase 3 three paths and escape serializer: %s", async (condition) => {
     await expectThreePaths(condition);
   });
 
