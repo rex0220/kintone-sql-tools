@@ -1,4 +1,4 @@
-# B151 仕様 R1 作成依頼（codex）
+# B151 仕様 R1 作成依頼（codex）【破棄——widening 前提が実測で覆った。[R2 依頼](ksql_b151_codex_spec_request_r2.md)が正】
 
 **仕様の作成依頼。コードは 1 行も変更しないこと。ファイルへの書き込みも不要。**
 git 操作をしないこと（`git status` も含む）。kSQL MCP を叩かないこと。`npm test` は不要。
