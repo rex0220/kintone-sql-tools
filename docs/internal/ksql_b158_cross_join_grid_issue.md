@@ -12,9 +12,12 @@
 ```
 FROM s CROSS JOIN APP4229 AS m            → ParseError: 「ON」が必要です
 FROM s INNER JOIN APP4229 AS m ON 1 = 1   → ParseError: フィールド名またはテーブル名が必要です
+FROM s, APP4229 AS m                      → ParseError: 文の区切りには ; が必要です（カンマ結合も不可）
 ```
 
-`JOIN ON` は等値 1 本・両辺とも列のため、直積が構文的に書けない。
+`JOIN ON` は等値 1 本・両辺とも列のため、直積の標準 3 形（`CROSS JOIN`・`ON 1=1`・カンマ結合）が
+すべて構文レベルで閉じている。開けるならどれを公式の入口にするかが構文論点
+（カンマ結合は SQL-92 非推奨形式で `;` 忘れの誤記とも衝突するため、明示 `CROSS JOIN` が本命）。
 
 ## 2. なぜ効くか（依頼元の分析・当方も同意）
 
