@@ -1446,6 +1446,27 @@ GROUP BY 年月                              -- 式に付けたエイリアス�
 
 > `GROUP BY ROLLUP(...)` / `GROUP BY GROUPING SETS (...)`（[小計・総計](#小計総計rollup--cube--grouping-sets--grouping)）の grouping item は**物理フィールドのみ**で、エイリアスは指定できません（従来どおり）。
 
+### SELECT 内では同じ SELECT の別名を参照しません
+
+**SELECT 式のフィールド参照は、その query block の入力列を参照します。** 同じ SELECT 句にある別の列の alias は参照しません。列を左から右へ書いた順序でも意味は変わりません。
+
+```sql
+SELECT 個数 * 2 AS 倍,
+       SUM(個数) AS 個数
+FROM APP100
+GROUP BY 製品名, 個数
+```
+
+`倍` の `個数` は入力フィールドです。集計結果の alias `個数` ではありません。ウィンドウ関数の alias も同じ SELECT の別式からは見えません。
+
+```sql
+SELECT 個数 * 2 AS 倍,
+       ROW_NUMBER() OVER (ORDER BY $id) AS 個数
+FROM APP100
+```
+
+集計・ウィンドウの alias が入力フィールドと同名でもエラーや警告にはなりません。`HAVING` とトップレベルの通常 `ORDER BY` は別の句なので、従来どおり SELECT alias を参照できます。CTE・一時テーブル・サブクエリを実体化した後は、その公開出力列が下流 query block の通常の入力列になります。
+
 ### 集計されていない列は書けません
 
 **（実測・v3.57.0）**

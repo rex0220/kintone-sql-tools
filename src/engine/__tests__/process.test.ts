@@ -460,7 +460,8 @@ test("GROUP BY + MAX / MIN", () => {
 test("typed NUMBER MIN/MAX は16桁超を厳密比較する", () => {
   const rows: ProcessRow[] = [{ 値: "9007199254740993" }, { 値: "9007199254740992" }];
   const stmt = parseSelect("SELECT MIN(値) AS mn, MAX(値) AS mx FROM APP100");
-  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
+  const grouped = applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number");
+  expect(project(grouped, stmt.columns).rows[0]).toMatchObject({
     mn: "9007199254740992", mx: "9007199254740993",
   });
 });
@@ -469,11 +470,17 @@ test("MIN / MAX: 文字列型は全文を辞書順比較し、数値型は従来
   const rows: ProcessRow[] = [{ 値: "9" }, { 値: "10" }, { 値: "0100" }];
   const stmt = parseSelect("SELECT MIN(値) AS mn, MAX(値) AS mx FROM APP100");
 
-  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "string")[0]).toMatchObject({
+  expect(project(
+    applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "string"),
+    stmt.columns
+  ).rows[0]).toMatchObject({
     mn: "0100",
     mx: "9",
   });
-  expect(applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number")[0]).toMatchObject({
+  expect(project(
+    applyGroupBy(rows, stmt.groupBy, stmt.columns, () => "number"),
+    stmt.columns
+  ).rows[0]).toMatchObject({
     mn: "9",
     mx: "0100",
   });
@@ -492,11 +499,11 @@ test("MIN / MAX: 文字列型の DISTINCT・空文字・修飾フィールドを
     seen.push(`${field.tableAlias}.${field.field}`);
     return "string";
   });
-  expect(result[0]).toMatchObject({ mn: "", mx: "B" });
+  expect(project(result, stmt.columns).rows[0]).toMatchObject({ mn: "", mx: "B" });
   expect(seen).toEqual(["a.値", "a.値"]);
 
   const empty = applyGroupBy([{ "a.値": "" }], stmt.groupBy, stmt.columns, () => "string");
-  expect(empty[0]).toMatchObject({ mn: "", mx: "" });
+  expect(project(empty, stmt.columns).rows[0]).toMatchObject({ mn: "", mx: "" });
 });
 
 test("文字列 MIN / MAX: 文字列関数へ STRING として渡し、算術では Number() 変換する", () => {
@@ -554,7 +561,7 @@ test("GROUP_CONCAT: 収集順・既定区切り・空値スキップ・DISTINCT 
     "FROM APP100 GROUP BY 種別"
   );
   const result = applyGroupBy(rows, stmt.groupBy, stmt.columns);
-  expect(result[0]).toMatchObject({
+  expect(project(result, stmt.columns).rows[0]).toMatchObject({
     all_members: "田中,鈴木,田中",
     unique_members: "田中 / 鈴木",
   });

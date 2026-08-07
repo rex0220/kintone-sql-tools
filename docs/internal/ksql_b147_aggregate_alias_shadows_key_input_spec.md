@@ -1,6 +1,6 @@
 # B147 集計の別名がキー式の入力フィールドを上書きする問題 仕様（R1）
 
-- ステータス: **R1**
+- ステータス: ✅ **実装済み（v3.58.0）**（2026-08-07）。**Claude レビュー指摘 0 件**（§13）
 - 対象: **kSQL v3.57.0**
 - 起票: [B147](ksql_b147_aggregate_alias_shadows_key_input_issue.md)
 - 関連: [B148 R3](ksql_b148_bare_column_group_by_spec_r3.md)

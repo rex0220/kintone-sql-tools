@@ -73,10 +73,99 @@ import {
 import {
   attachGroupingRowMeta,
   evalGroupingRef,
+  getGroupingRowMeta,
 } from "./groupingRowMeta";
 import { containsAggregate } from "../core/groupingValidation";
 
 export { ProcessRow };
+
+interface MaterializedSelectValues {
+  byColumn: Map<number, string>;
+  byLookupKey: Map<string, string>;
+}
+
+/**
+ * SELECT の実体化値は source row の文字列キーへ書き込まない。
+ * WeakMap により wildcard / DISTINCT の raw key 集合や公開行へ混入せず、
+ * SELECT 列位置を alias と衝突しない identity として使う。
+ */
+const materializedSelectValues = new WeakMap<ProcessRow, MaterializedSelectValues>();
+const sourceRows = new WeakMap<ProcessRow, ProcessRow>();
+
+function asProcessingRow(source: ProcessRow): ProcessRow {
+  if (sourceRows.has(source)) return source;
+  let row: ProcessRow;
+  row = new Proxy(source, {
+    get(target, property, receiver) {
+      if (typeof property !== "string" || Object.prototype.hasOwnProperty.call(target, property)) {
+        return Reflect.get(target, property, receiver);
+      }
+      return getMaterializedLookupValue(row, property);
+    },
+    has(target, property): boolean {
+      return Reflect.has(target, property)
+        || (typeof property === "string" && getMaterializedLookupValue(row, property) !== undefined);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (descriptor || typeof property !== "string") return descriptor;
+      const value = getMaterializedLookupValue(row, property);
+      return value === undefined
+        ? undefined
+        : { configurable: true, enumerable: false, writable: false, value };
+    },
+  });
+  sourceRows.set(row, source);
+  return row;
+}
+
+function sourceRowForEvaluation(row: ProcessRow): ProcessRow {
+  return sourceRows.get(row) ?? row;
+}
+
+function materializedValuesFor(row: ProcessRow): MaterializedSelectValues {
+  let values = materializedSelectValues.get(row);
+  if (!values) {
+    values = { byColumn: new Map(), byLookupKey: new Map() };
+    materializedSelectValues.set(row, values);
+  }
+  return values;
+}
+
+function setMaterializedSelectValue(
+  row: ProcessRow,
+  columnIndex: number,
+  value: string,
+  lookupKeys: readonly string[] = []
+): void {
+  const values = materializedValuesFor(row);
+  values.byColumn.set(columnIndex, value);
+  for (const key of lookupKeys) values.byLookupKey.set(key, value);
+}
+
+function getMaterializedSelectValue(row: ProcessRow, columnIndex: number): string | undefined {
+  return materializedSelectValues.get(row)?.byColumn.get(columnIndex);
+}
+
+function getMaterializedLookupValue(row: ProcessRow, key: string): string | undefined {
+  return materializedSelectValues.get(row)?.byLookupKey.get(key);
+}
+
+/** 既存の単体 helper 利用で、materialize 前提の raw row を直接渡す場合の互換読出し。 */
+function getLegacyMaterializedValue(row: ProcessRow, key: string): string | undefined {
+  return materializedSelectValues.has(row) ? undefined : row[key];
+}
+
+/** HAVING 専用: SELECT alias / aggregate synthetic key を source より優先する。 */
+function havingEvaluationRow(row: ProcessRow): ProcessRow {
+  const lookups = materializedSelectValues.get(row)?.byLookupKey;
+  if (!lookups || lookups.size === 0) return row;
+  const evaluationRow = { ...row };
+  for (const [key, value] of lookups) evaluationRow[key] = value;
+  const groupingMeta = getGroupingRowMeta(row);
+  if (groupingMeta) attachGroupingRowMeta(evaluationRow, groupingMeta.includedCanonicalIds);
+  return evaluationRow;
+}
 
 /** MIN/MAX/MODE の直接フィールド参照に比較 semantics を解決する。 */
 export type AggregateSortKindResolver =
@@ -294,7 +383,7 @@ export function applyGroupBy(
   for (const groupRows of groups.values()) {
     // 元行の全フィールドをコピー（式の再評価やフィールド参照のため）。
     // 空の仮想グループでは groupRows[0] が undefined だが、undefined のスプレッドは {} になる
-    const outRow: ProcessRow = { ...groupRows[0] };
+    const outRow = asProcessingRow({ ...groupRows[0] });
 
     // 式キーの計算値を確定値として上書き
     for (const k of groupByKeys) {
@@ -373,7 +462,7 @@ export function applyGroupingSets(
 
     const includedCanonicalIds = new Set(set.items.map((item) => item.canonicalId));
     for (const groupRows of buckets) {
-      const outRow: ProcessRow = { ...groupRows[0] };
+      const outRow = asProcessingRow({ ...groupRows[0] });
       const includedValues = new Map<string, string>();
       for (const item of set.items) {
         if (!includedValues.has(item.canonicalId)) {
@@ -417,34 +506,53 @@ function materializeAggregateColumns(
     if (col.type === "AGGREGATE") {
       const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
       const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
-      outRow[col.alias ?? syntheticKey] = value;
-      // HAVING / ORDER BY resolve aggregate expressions through the synthetic key.
-      if (col.alias) outRow[syntheticKey] = value;
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        value,
+        col.alias ? [col.alias, syntheticKey] : [syntheticKey]
+      );
     } else if (col.type === "ARITH_AGG_COL") {
       materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
-      outRow[outputKey] = String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind));
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind)),
+        [outputKey]
+      );
     } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
       materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
       const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
-      outRow[outputKey] = evalStringFunc(resolvedExpr, outRow);
+      setMaterializedSelectValue(outRow, columnIndex, evalStringFunc(resolvedExpr, outRow), [outputKey]);
     } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr)) {
       materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
       const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
-      outRow[outputKey] = String(evalScalarValueExpr(resolvedExpr, outRow));
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        String(evalScalarValueExpr(resolvedExpr, outRow)),
+        [outputKey]
+      );
     } else if (col.type === "CASE_COL" && containsAggregate(col.expr)) {
       materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
       const resolvedExpr = resolveAggInCaseExpr(col.expr, groupRows, resolveAggSortKind);
       const resolveAggregateSemantics: FieldSemanticsResolver = (field) => field.aggregateRef
         ? aggregateResultSemantics(field.aggregateRef, resolveAggSortKind)
         : undefined;
-      outRow[caseMaterializedKey(col.alias, columnIndex)] = evalCaseWhen(
+      const value = evalCaseWhen(
         resolvedExpr,
         outRow,
         undefined,
         resolveAggregateSemantics
+      );
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        value,
+        [caseMaterializedKey(col.alias, columnIndex)]
       );
     }
   }
@@ -479,8 +587,8 @@ function materializeAggregateDependencies(
   collectAggregateRefs(node, refs);
   for (const ref of refs) {
     const key = aggregateSyntheticName(ref.func, ref.distinct, ref.arg);
-    if (outRow[key] !== undefined) continue;
-    outRow[key] = String(evalAggregate(
+    if (getMaterializedLookupValue(outRow, key) !== undefined) continue;
+    const value = String(evalAggregate(
       ref.func,
       ref.distinct,
       ref.arg,
@@ -488,6 +596,7 @@ function materializeAggregateDependencies(
       rows,
       resolveAggSortKind
     ));
+    materializedValuesFor(outRow).byLookupKey.set(key, value);
   }
 }
 
@@ -656,7 +765,8 @@ function aggregateRowValues(
   arg: AggregateArgExpr,
   rows: ProcessRow[]
 ): (string | null)[] {
-  return rows.map((row): string | null => {
+  return rows.map((processingRow): string | null => {
+    const row = sourceRowForEvaluation(processingRow);
     let strVal: string;
     if (arg.type === "FIELD_REF") {
       // 単純フィールド参照: 空文字はスキップ（COUNT(field) の既存動作を維持）
@@ -772,7 +882,13 @@ export function applyHaving(
   resolveFieldSemantics?: FieldSemanticsResolver
 ): ProcessRow[] {
   if (having === null) return rows;
-  return rows.filter((row) => evalWhere(having, row, resolveFieldType, undefined, resolveFieldSemantics));
+  return rows.filter((row) => evalWhere(
+    having,
+    havingEvaluationRow(row),
+    resolveFieldType,
+    undefined,
+    resolveFieldSemantics
+  ));
 }
 
 // ============================================================
@@ -962,10 +1078,14 @@ const NUMERIC_ORDER_FUNCTIONS = new Set([
 ]);
 
 function evalOrderKey(key: OrderByKey, row: ProcessRow, aliasEvaluator?: OrderByAliasEvaluator): string {
+  const sourceRow = sourceRowForEvaluation(row);
   switch (key.type) {
-    case "FIELD_NAME": return aliasEvaluator?.(key.name, row) ?? row[key.name] ?? "";
-    case "ARITH_KEY":  return String(evalArithExpr(key.expr, row));
-    case "FUNC_KEY":   return evalStringFunc(key.expr, row);
+    case "FIELD_NAME": return aliasEvaluator?.(key.name, row)
+      ?? getMaterializedLookupValue(row, key.name)
+      ?? sourceRow[key.name]
+      ?? "";
+    case "ARITH_KEY":  return String(evalArithExpr(key.expr, sourceRow));
+    case "FUNC_KEY":   return evalStringFunc(key.expr, sourceRow);
     case "GROUPING_KEY": return evalGroupingRef(key.ref, row);
   }
 }
@@ -983,44 +1103,51 @@ export function buildOrderByAliasEvaluator(
     const alias = column.alias;
     switch (column.type) {
       case "FIELD":
-        evaluators.set(alias, (row) => resolveFieldRef(row, column.field));
+        evaluators.set(alias, (row) => resolveFieldRef(sourceRowForEvaluation(row), column.field));
         break;
       case "LITERAL_COL":
         evaluators.set(alias, () => column.value);
         break;
       case "AGGREGATE": {
-        const source = aggregateSyntheticName(column.func, column.distinct, column.arg);
-        evaluators.set(alias, (row) => row[alias] ?? row[source] ?? "0");
+        evaluators.set(alias, (row) => getMaterializedSelectValue(row, columnIndex) ?? "0");
         break;
       }
       case "ARITH_AGG_COL": {
-        const source = aggArithDefaultKey(column.expr);
-        evaluators.set(alias, (row) => row[alias] ?? row[source] ?? "0");
+        evaluators.set(alias, (row) => getMaterializedSelectValue(row, columnIndex) ?? "0");
         break;
       }
       case "WINDOW_COL":
-        evaluators.set(alias, (row) => row[alias] ?? "");
+        evaluators.set(alias, (row) => getMaterializedSelectValue(row, columnIndex) ?? "");
         break;
       case "ARITH_COL":
-        evaluators.set(alias, (row) => String(evalArithExpr(column.expr, row)));
+        evaluators.set(alias, (row) => String(evalArithExpr(column.expr, sourceRowForEvaluation(row))));
         break;
       case "STRFUNC_COL": {
         const source = stringFuncDefaultKey(column.expr);
         evaluators.set(alias, (row) => hasAggregateInStringFuncExpr(column.expr)
-          ? row[alias] ?? row[source] ?? evalStringFunc(column.expr, row, resolveFieldType, resolveFieldSemantics)
-          : evalStringFunc(column.expr, row, resolveFieldType, resolveFieldSemantics));
+          ? getMaterializedSelectValue(row, columnIndex)
+            ?? getMaterializedLookupValue(row, source)
+            ?? evalStringFunc(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics)
+          : evalStringFunc(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics));
         break;
       }
       case "CASE_COL":
         evaluators.set(alias, (row) => containsAggregate(column.expr)
-          ? row[alias] ?? ""
-          : evalCaseWhen(column.expr, row, resolveFieldType, resolveFieldSemantics));
+          ? getMaterializedSelectValue(row, columnIndex) ?? ""
+          : evalCaseWhen(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics));
         break;
       case "SCALAR_VALUE_COL": {
         const source = scalarValueDefaultKey(column.expr);
         evaluators.set(alias, (row) => scalarValueHasAggregate(column.expr)
-          ? row[alias] ?? row[source] ?? ""
-          : String(evalScalarValueExpr(column.expr, row, resolveFieldType, resolveFieldSemantics)));
+          ? getMaterializedSelectValue(row, columnIndex)
+            ?? getMaterializedLookupValue(row, source)
+            ?? ""
+          : String(evalScalarValueExpr(
+            column.expr,
+            sourceRowForEvaluation(row),
+            resolveFieldType,
+            resolveFieldSemantics
+          )));
         break;
       }
       case "SCALAR_SUBQUERY_COL":
@@ -1049,10 +1176,15 @@ export function applyWindow(
   fieldSemantics?: FieldSemanticsMap,
   resolveAggSortKind?: AggregateSortKindResolver
 ): ProcessRow[] {
-  const windows = columns.filter((column): column is WindowColumn => column.type === "WINDOW_COL");
+  const windows = columns
+    .map((column, columnIndex) => ({ column, columnIndex }))
+    .filter((item): item is { column: WindowColumn; columnIndex: number } => item.column.type === "WINDOW_COL");
   if (rows.length === 0 || windows.length === 0) return rows;
 
-  for (const window of windows) {
+  // materialized window 値を raw source row のプロパティにしない。
+  for (let index = 0; index < rows.length; index++) rows[index] = asProcessingRow(rows[index]);
+
+  for (const { column: window, columnIndex } of windows) {
     const partitions = new Map<string, ProcessRow[]>();
     for (const row of rows) {
       const key = JSON.stringify(window.partitionBy.map((ref) => resolveWindowField(row, ref)));
@@ -1065,11 +1197,11 @@ export function applyWindow(
       const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics);
       const sorted = sortedResult.rows;
       if (isAggregateWindow(window)) {
-        applyAggregateWindow(window, sortedResult, resolveAggSortKind);
+        applyAggregateWindow(window, columnIndex, sortedResult, resolveAggSortKind);
         continue;
       }
       if (isValueWindow(window)) {
-        applyValueWindow(window, sorted);
+        applyValueWindow(window, columnIndex, sorted);
         continue;
       }
       if (!isRankingWindow(window)) {
@@ -1087,7 +1219,7 @@ export function applyWindow(
           : window.func === "RANK"
             ? rank
             : denseRank;
-        sorted[index].row[window.alias] = String(value);
+        setMaterializedSelectValue(sorted[index].row, columnIndex, String(value), [window.alias]);
       }
     }
   }
@@ -1095,23 +1227,33 @@ export function applyWindow(
 }
 
 function evaluateValueWindowArg(arg: ScalarValueExpr, row: ProcessRow): string {
-  const value = evalScalarValueExprNullable(arg, row);
+  const value = evalScalarValueExprNullable(arg, sourceRowForEvaluation(row));
   if (value === null || value === undefined) return "";
   if (typeof value === "number" && !Number.isFinite(value)) return "";
   return String(value);
 }
 
-function applyValueWindow(window: ValueWindowColumn, sorted: DecoratedSortRow[]): void {
+function applyValueWindow(
+  window: ValueWindowColumn,
+  columnIndex: number,
+  sorted: DecoratedSortRow[]
+): void {
   const values = sorted.map((item) => evaluateValueWindowArg(window.arg, item.row));
   const direction = window.valueFunc === "LAG" ? -1 : 1;
   for (let index = 0; index < sorted.length; index++) {
     const target = index + direction * window.offset;
-    sorted[index].row[window.alias] = target >= 0 && target < values.length ? values[target] : "";
+    setMaterializedSelectValue(
+      sorted[index].row,
+      columnIndex,
+      target >= 0 && target < values.length ? values[target] : "",
+      [window.alias]
+    );
   }
 }
 
 function applyAggregateWindow(
   window: AggregateWindowColumn,
+  columnIndex: number,
   sortedResult: DecoratedSortResult,
   resolveAggSortKind?: AggregateSortKindResolver
 ): void {
@@ -1162,24 +1304,30 @@ function applyAggregateWindow(
 
   if (window.frame === null) {
     const finalValue = output[output.length - 1];
-    for (const item of sorted) item.row[window.alias] = finalValue;
+    for (const item of sorted) {
+      setMaterializedSelectValue(item.row, columnIndex, finalValue, [window.alias]);
+    }
     return;
   }
   if (window.frame.unit === "RANGE") {
     for (let start = 0; start < sorted.length;) {
       let end = start;
       while (end + 1 < sorted.length && sortedResult.compare(sorted[end], sorted[end + 1]) === 0) end++;
-      for (let index = start; index <= end; index++) sorted[index].row[window.alias] = output[end];
+      for (let index = start; index <= end; index++) {
+        setMaterializedSelectValue(sorted[index].row, columnIndex, output[end], [window.alias]);
+      }
       start = end + 1;
     }
     return;
   }
-  for (let index = 0; index < sorted.length; index++) sorted[index].row[window.alias] = output[index];
+  for (let index = 0; index < sorted.length; index++) {
+    setMaterializedSelectValue(sorted[index].row, columnIndex, output[index], [window.alias]);
+  }
 }
 
 function resolveWindowField(row: ProcessRow, ref: FieldRef): string {
   const name = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
-  return resolveFieldRef(row, name);
+  return resolveFieldRef(sourceRowForEvaluation(row), name);
 }
 
 // ============================================================
@@ -1229,44 +1377,56 @@ export function evaluateSelectColumnValue(
   columnIndex: number,
   context: SelectColumnEvaluationContext = {}
 ): SelectColumnValue {
+  const sourceRow = sourceRowForEvaluation(row);
   switch (column.type) {
     case "VARIABLE_COL":
       throw new Error(`internal error: unresolved SELECT variable @${column.name}`);
     case "WILDCARD": {
-      const keys = context.wildcardKeys ?? Object.keys(row);
+      const keys = context.wildcardKeys ?? Object.keys(sourceRow);
       return {
         kind: "EXPANDED",
-        entries: keys.map((key) => [key, row[key] !== undefined ? row[key] : null] as const),
+        entries: keys.map((key) => [key, sourceRow[key] !== undefined ? sourceRow[key] : null] as const),
       };
     }
     case "PARENT_WILDCARD": {
       const keys = context.parentWildcardKeys
-        ?? Object.keys(row).filter((key) => key.startsWith("_p.")).sort();
+        ?? Object.keys(sourceRow).filter((key) => key.startsWith("_p.")).sort();
       return {
         kind: "EXPANDED",
-        entries: keys.map((key) => [key, row[key] !== undefined ? row[key] : null] as const),
+        entries: keys.map((key) => [key, sourceRow[key] !== undefined ? sourceRow[key] : null] as const),
       };
     }
     case "FIELD":
-      return resolveFieldRef(row, column.field);
+      return resolveFieldRef(sourceRow, column.field);
     case "LITERAL_COL":
       return column.value;
     case "AGGREGATE": {
       const source = aggregateSyntheticName(column.func, column.distinct, column.arg);
-      return row[column.alias ?? source] ?? row[source] ?? "0";
+      return getMaterializedSelectValue(row, columnIndex)
+        ?? getMaterializedLookupValue(row, column.alias ?? source)
+        ?? getMaterializedLookupValue(row, source)
+        ?? getLegacyMaterializedValue(row, column.alias ?? source)
+        ?? getLegacyMaterializedValue(row, source)
+        ?? "0";
     }
     case "ARITH_AGG_COL": {
       const source = column.alias ?? aggArithDefaultKey(column.expr);
-      return row[source] ?? "0";
+      return getMaterializedSelectValue(row, columnIndex)
+        ?? getMaterializedLookupValue(row, source)
+        ?? getLegacyMaterializedValue(row, source)
+        ?? "0";
     }
     case "ARITH_COL":
-      return String(evalArithExpr(column.expr, row));
+      return String(evalArithExpr(column.expr, sourceRow));
     case "CASE_COL":
       return containsAggregate(column.expr)
-        ? row[caseMaterializedKey(column.alias, columnIndex)] ?? ""
+        ? getMaterializedSelectValue(row, columnIndex)
+          ?? getMaterializedLookupValue(row, caseMaterializedKey(column.alias, columnIndex))
+          ?? getLegacyMaterializedValue(row, caseMaterializedKey(column.alias, columnIndex))
+          ?? ""
         : evalCaseWhen(
           column.expr,
-          row,
+          sourceRow,
           context.resolveFieldType,
           context.resolveFieldSemantics
         );
@@ -1275,17 +1435,20 @@ export function evaluateSelectColumnValue(
     case "STRFUNC_COL": {
       const source = stringFuncDefaultKey(column.expr);
       return hasAggregateInStringFuncExpr(column.expr)
-        ? row[column.alias ?? source]
-          ?? row[source]
+        ? getMaterializedSelectValue(row, columnIndex)
+          ?? getMaterializedLookupValue(row, column.alias ?? source)
+          ?? getMaterializedLookupValue(row, source)
+          ?? getLegacyMaterializedValue(row, column.alias ?? source)
+          ?? getLegacyMaterializedValue(row, source)
           ?? evalStringFunc(
             column.expr,
-            row,
+            sourceRow,
             context.resolveFieldType,
             context.resolveFieldSemantics
           )
         : evalStringFunc(
           column.expr,
-          row,
+          sourceRow,
           context.resolveFieldType,
           context.resolveFieldSemantics
         );
@@ -1293,10 +1456,15 @@ export function evaluateSelectColumnValue(
     case "SCALAR_VALUE_COL": {
       const source = scalarValueDefaultKey(column.expr);
       return scalarValueHasAggregate(column.expr)
-        ? row[column.alias ?? source] ?? row[source] ?? ""
+        ? getMaterializedSelectValue(row, columnIndex)
+          ?? getMaterializedLookupValue(row, column.alias ?? source)
+          ?? getMaterializedLookupValue(row, source)
+          ?? getLegacyMaterializedValue(row, column.alias ?? source)
+          ?? getLegacyMaterializedValue(row, source)
+          ?? ""
         : String(evalScalarValueExpr(
           column.expr,
-          row,
+          sourceRow,
           context.resolveFieldType,
           context.resolveFieldSemantics
         ));
@@ -1304,7 +1472,10 @@ export function evaluateSelectColumnValue(
     case "SCALAR_SUBQUERY_COL":
       return context.scalarCache?.get(columnIndex) ?? "";
     case "WINDOW_COL":
-      return row[column.alias] ?? "";
+      return getMaterializedSelectValue(row, columnIndex)
+        ?? getMaterializedLookupValue(row, column.alias)
+        ?? getLegacyMaterializedValue(row, column.alias)
+        ?? "";
   }
 }
 
