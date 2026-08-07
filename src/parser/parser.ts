@@ -118,6 +118,8 @@ import type {
   ApplyOperation,
   RowSelector,
   ExpectRowsGuard,
+  GenerateSeriesStatement,
+  GenerateSeriesArgument,
 } from "../types/ast";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { NO_FROM_CTE_NAME } from "../types/ast";
@@ -447,6 +449,12 @@ export class Parser {
         if (upper === "DROP")   return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
+        if (upper === "GENERATE_SERIES") {
+          throw new ParseError(
+            "GENERATE_SERIES は WITH の CTE 本体に書いてください。例: WITH s AS (GENERATE_SERIES(1, 5)) SELECT generate_series FROM s",
+            tok
+          );
+        }
         if (upper === "IMPORT") {
           if (!this.capabilities.import) {
             throw new ParseError("IMPORT is not supported (capability is disabled).", tok);
@@ -1244,6 +1252,8 @@ export class Parser {
         query = this.parseShow();
       } else if (inner === TokenKind.DESCRIBE || inner === TokenKind.DESC) {
         query = this.parseDescribe();
+      } else if (inner === TokenKind.IDENT && this.peek().value.toUpperCase() === "GENERATE_SERIES") {
+        query = this.parseGenerateSeries();
       } else {
         query = this.tryParseUnionChain(this.parseSelect());
       }
@@ -1256,6 +1266,44 @@ export class Parser {
     const query = this.tryParseUnionChain(this.parseSelect());
     this.cteNames.clear();
     return { type: "WITH", ctes, query };
+  }
+
+  private parseGenerateSeries(): GenerateSeriesStatement {
+    const name = this.advance();
+    if (name.kind !== TokenKind.IDENT || name.value.toUpperCase() !== "GENERATE_SERIES") {
+      throw new ParseError("GENERATE_SERIES が必要です", name);
+    }
+    this.expect(TokenKind.LPAREN);
+    const args: GenerateSeriesArgument[] = [];
+    if (this.peek().kind !== TokenKind.RPAREN) {
+      do {
+        const tok = this.peek();
+        if (tok.kind === TokenKind.STRING) {
+          this.advance();
+          args.push({ type: "STRING", value: tok.value });
+          continue;
+        }
+        if (tok.kind === TokenKind.VARIABLE) {
+          this.advance();
+          args.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
+          continue;
+        }
+        let sign = "";
+        if (tok.kind === TokenKind.PLUS || tok.kind === TokenKind.MINUS) {
+          sign = tok.kind === TokenKind.MINUS ? "-" : "+";
+          this.advance();
+        }
+        const number = this.peek();
+        if (number.kind !== TokenKind.NUMBER) {
+          throw new ParseError("GENERATE_SERIES の引数には数値、文字列、またはバッチ変数を指定してください", number);
+        }
+        this.advance();
+        args.push(makeNumberLiteral(`${sign}${number.value}`));
+      } while (this.consume(TokenKind.COMMA));
+    }
+    this.expect(TokenKind.RPAREN);
+    const columnAlias = this.consume(TokenKind.AS) ? this.parseIdentifier() : "generate_series";
+    return { type: "GENERATE_SERIES", args, columnAlias };
   }
 
   // ----------------------------------------------------------
@@ -2434,6 +2482,12 @@ export class Parser {
 
   private parseTableRef(): TableRef {
     const nameTok = this.peek();
+    if (nameTok.kind === TokenKind.IDENT && nameTok.value.toUpperCase() === "GENERATE_SERIES" && this.peekAt(1).kind === TokenKind.LPAREN) {
+      throw new ParseError(
+        "GENERATE_SERIES は WITH の CTE 本体に書いてください。例: WITH s AS (GENERATE_SERIES(1, 5)) SELECT generate_series FROM s",
+        nameTok
+      );
+    }
     const name = this.parseTableName();
     // 一時テーブル参照（#name）: CTE と同じ機構（FULL_SCAN 注入）で実行される
     //（temp マーカーは IDENT のみ。バッククォートの `#x` は通常識別子として後段へ）

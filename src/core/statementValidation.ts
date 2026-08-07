@@ -2,12 +2,14 @@ import type { Statement, StringFuncExpr } from "../types/ast";
 import { validateKlikeStatement } from "./klikeValidation";
 import { validatePrimaryOrganizationDmlStatement } from "./primaryOrganizationDmlValidation";
 import { assertStringFunctionArity } from "./functionArity";
+import { validateGenerateSeriesInStatement } from "./generateSeries";
 
 /** パース後、API 呼び出し前に全実行面で共有する静的検証。 */
 export function validateStatementStatic(stmt: Statement): void {
   validateStringFunctionArities(stmt);
   validatePrimaryOrganizationDmlStatement(stmt);
   validateKlikeStatement(stmt);
+  validateGenerateSeriesInStatement(stmt);
 }
 
 function validateStringFunctionArities(stmt: Statement): void {

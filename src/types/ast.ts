@@ -180,7 +180,16 @@ export interface AssertStatement {
 /** WITH name AS (query) の1定義 */
 export interface CteDefinition {
   name: string;
-  query: SelectStatement | UnionStatement | ShowAppsStatement | DescribeStatement;
+  query: SelectStatement | UnionStatement | ShowAppsStatement | DescribeStatement | GenerateSeriesStatement;
+}
+
+export type GenerateSeriesArgument = NumberLiteral | StringLiteral | VariableRef;
+
+/** WITH name AS (GENERATE_SERIES(...)) — input record を持たない系列 CTE。 */
+export interface GenerateSeriesStatement {
+  type: "GENERATE_SERIES";
+  args: GenerateSeriesArgument[];
+  columnAlias: string;
 }
 
 export interface WithStatement {
@@ -636,6 +645,8 @@ export interface CaseSqlValue {
 export interface StringLiteral {
   type: "STRING";
   value: string;
+  /** バッチ変数から解決された値。整数文字列の受理判定にだけ使用する。 */
+  fromVariable?: true;
 }
 
 export interface NumberLiteral {

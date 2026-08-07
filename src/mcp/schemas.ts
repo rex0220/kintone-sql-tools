@@ -55,14 +55,14 @@ const importSources = z.array(z.object({
 
 export const validateInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
+    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), WITH CTE-body GENERATE_SERIES integer/DATE series, and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Literal GENERATE_SERIES arguments are checked statically, while variable-dependent type/step/row-limit decisions are deferred to execution. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
   profile,
   importSources,
 });
 
 export const explainInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); EXPLAIN performs no record or mutation API calls."),
+    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), WITH CTE-body GENERATE_SERIES integer/DATE series, and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); GENERATE_SERIES plans show type, bounds, step, rows, and the 10000-row guard. EXPLAIN performs no record or mutation API calls."),
   profile,
   maxRecords,
   cursorMaxActive,
@@ -71,7 +71,7 @@ export const explainInputSchema = z.object({
 
 export const queryInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("Read-only kSQL text. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
+    .describe("Read-only kSQL text. WITH name AS (GENERATE_SERIES(start, stop [, step]) [AS column]) creates integer/DATE series with a fixed 10000-row per-WITH total guard and no kintone API reads. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
   profile,
   maxRecords,
   fetchParallel,
@@ -192,7 +192,7 @@ export const saveQueryInputSchema = z.object({
   title: z.string().min(1).describe("Human-readable title.").optional(),
   description: z.string().min(1).describe("What the query does and when to use it.").optional(),
   sql: z.string().min(1)
-    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements; DML saved queries must remain single-statement."),
+    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements and WITH CTE-body GENERATE_SERIES integer/DATE series; DML saved queries must remain single-statement."),
   defaultProfile: z.string().min(1)
     .describe("Profile the saved query runs against by default."),
   readOnly: z.boolean()

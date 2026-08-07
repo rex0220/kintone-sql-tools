@@ -2235,6 +2235,64 @@ SELECT フィールドコード, ラベル FROM フィールド
 ORDER BY フィールドコード ASC
 ```
 
+### GENERATE_SERIES — 整数・日付系列
+
+入力レコードを使わず、整数または `DATE` の系列を作れます。`GENERATE_SERIES` を直接書けるのは `WITH` の CTE 本体だけです。`FROM GENERATE_SERIES(...)`、トップレベル直書き、SELECT 列のスカラー関数としての使用には対応しません。
+
+```text
+WITH CTE名 AS (
+  GENERATE_SERIES(start, stop [, step]) [AS 列名]
+)
+SELECT ... FROM CTE名
+```
+
+列名を省略した場合は `generate_series` です。整数の既定 step は `1`、日付の既定 step は `'1 day'` です。正負の step と明示的な `+`（`+2` / `'+2 days'`）を使用でき、`stop` にちょうど到達する値は含みます。範囲と step の向きが逆なら0行（列定義は維持）、step 0は `ArgumentError` です。
+
+```sql
+WITH n AS (GENERATE_SERIES(2, 100, 49) AS number)
+SELECT number FROM n ORDER BY number;
+-- 2, 51, 100（文字列順ではなく数値順）
+
+WITH d AS (GENERATE_SERIES('2026-08-05', '2026-08-01', '-2 days') AS 日付)
+SELECT 日付 FROM d;
+-- 2026-08-05, 2026-08-03, 2026-08-01
+```
+
+日付は実在する `YYYY-MM-DD` だけを受け付け、step の単位は `day` / `days` だけです。小数、`DATETIME`、`TIME`、`week`、`month`、`year` には対応しません。公開行の値は文字列ですが、生成時に確定した NUMBER / DATE の列メタが CTE、JOIN、後続 CTE、一時テーブルへ伝播し、比較・ソートに使われます。
+
+同じ `WITH` 文にある全生成 CTEの生成件数合計は10,000行までです。上限は全行を作る前に検査され、`LIMIT`、`WHERE`、後段集計では回避できません。同じ生成 CTEを複数回参照しても再生成しません。
+
+```sql
+DECLARE @from = '2026-08-01';
+DECLARE @today = TODAY();
+WITH d AS (GENERATE_SERIES(@from, @today) AS 日付)
+SELECT 日付 FROM d ORDER BY 日付;
+```
+
+通常のスカラー変数が具体的な日付になれば DATE 引数に使用できます。`ksql_validate` はリテラルだけで確定する型、step 0、不正日付、未対応単位、安全整数、単一・合計上限を API 0回で検査します。変数値に依存する型・step・件数は保留し、実行時に変数解決後の値で最終判定します。生成 `WITH` は read-only で、read-only 保存クエリと `ksql_run_saved_query` から利用できます。
+
+生成 CTEを JOIN なしで直接読むウィンドウで、`OVER (ORDER BY 生成列)` が生成列そのものを参照する場合、その列は一意なので既定 `RANGE` と `LAG` / `LEAD` の全順序警告を抑止します。JOIN、自己 JOIN、`UNION`、通常 CTEによる再実体化、サブテーブル展開、一時テーブル、`ORDER BY n + 0` 等では既存警告を維持します。
+
+存在しない日を0で補う完全例:
+
+```sql
+WITH 日付系列 AS (
+  GENERATE_SERIES('2026-08-01', '2026-08-04', '1 day') AS 日付
+),
+日別 AS (
+  SELECT 日付, SUM(金額) AS 合計
+  FROM APP100
+  GROUP BY 日付
+)
+SELECT s.日付,
+       CASE WHEN d.合計 = '' THEN 0 ELSE d.合計 END AS 合計
+FROM 日付系列 AS s
+LEFT JOIN 日別 AS d ON s.日付 = d.日付
+ORDER BY s.日付
+```
+
+`EXPLAIN WITH ... GENERATE_SERIES ...` は source、列名、INTEGER / DATE、start、stop、正規化した step、生成件数、10,000行ガード、records API が `none` であることを表示します。純粋な生成系列の実行と EXPLAIN はレコード、Cursor、書込、フォーム・アプリ情報 API を呼びません。
+
 ### 実体化後の列実在チェック（B86）
 
 CTE・一時テーブル・`SHOW APPS` / `DESCRIBE` の結果は、実体化した SELECT の**出力列だけ**を後段から参照できます。存在しない列は空文字として評価せず、下流の records GET、DML 確認、POST / PUT より前に `ArgumentError: unknown field code(s)` で拒否します。SELECT、WHERE（`=` / `LIKE` を含む全演算子）、式、CASE、集計、GROUP BY / HAVING / ORDER BY、window、JOIN、subquery、UNION、`INSERT` / `UPSERT ... SELECT` の source で共通です。物理 APP と実体化 source を混在 JOIN した場合も両方を検証します。
