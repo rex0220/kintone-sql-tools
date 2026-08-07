@@ -49,6 +49,23 @@
 | MULTI_LINE_TEXT / RICH_TEXT / FILE | `like` / `is` のみ | 全✕ | ✕ 正当（比較演算子を受けない。`like` 系は KLIKE が担当） |
 | 全型の `LIKE` | — | ✕ | ✕ 維持（v2.0.0 の意図的な JS 統一。KLIKE が代替） |
 
+## 3.4 方針の最終形（2026-08-07・オーナー判断＝kintone 演算子表への全面整合）
+
+**「kintone の演算子表（レコード取得操作）に記載の型×演算子は、単一表と同様に押し下げる。
+書式・値が合わない指定は kintone エラーになって構わない」**（CALC の判断を全型へ一般化）。
+
+- **Phase 4 の見送りを撤回**＝ユーザー系 6 型（CREATOR/MODIFIER/USER_SELECT/
+  ORGANIZATION_SELECT/GROUP_SELECT/STATUS_ASSIGNEE）の `in`/`not in` を開放。
+  **存在しない code の GAIA_IL26 は表面化を許容**（実測ずみ＝単一表は既に同じ挙動。
+  JOIN だけ静かに 0 行になる非対称の方を解消する）
+- **RECORD_NUMBER の 8 演算子も開放**（アプリコード形式の意味論は未証明のため
+  CALC と同じ **superset**＋残余再評価。値が合わなければ kintone エラー）
+- relation の原則＝**意味論一致を証明済みの組は exact、未証明の組は superset**
+  （superset でも取得削減は効き、正しさは残余再評価が担保）
+- 維持する ✕＝演算子が表に無い組（CATEGORY・複数行・リッチ・添付の比較演算子）と
+  LIKE（v2.0.0 の意図的 JS 統一）。日付系の canonical literal 制約は「演算子の穴」ではなく
+  リテラル形式の検査として維持
+
 ## 3.5 CALC の追加実測（2026-08-07・オーナーの問い「なぜ計算項目は押し下がらないのか」）
 
 - **単一表では CALC は既に押し下がっている**（実測＝`個数_在庫計算用 <= -100` が
