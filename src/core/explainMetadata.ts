@@ -70,6 +70,15 @@ function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
     || statement.groupBy.length > 0
     || normalizeGroupingSpec(statement).type === "GROUPING_SETS"
     || statement.orderBy.length > 0
+    // JOIN key prefilter planning selects `in`, range, or fallback from the
+    // physical JOIN target field type.  Without this guard the CLI chooses its
+    // API-rejecting dry-run client, then the shared EXPLAIN engine reaches
+    // getFields() while planning a CTE/temp -> APP JOIN.
+    || statement.joins.some((join) =>
+      join.table.appId > 0
+      && join.table.cteName === null
+      && (join.on.left.field !== "$id" || join.on.right.field !== "$id")
+    )
     || statement.columns.some((column) =>
       column.type === "WINDOW_COL" && column.orderBy.length > 0
     );

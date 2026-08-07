@@ -15,7 +15,9 @@ describe("explainNeedsAppMetadata", () => {
     "SELECT * FROM APP88 ORDER BY 郵便番号",
     "SELECT ROW_NUMBER() OVER (ORDER BY 郵便番号) AS rn FROM APP88",
     "UPDATE APP88 SET 状態 = '完了' WHERE 郵便番号 > '100'",
-  ])("型依存の WHERE / ORDER BY はフォーム定義を必要とする: %s", (sql) => {
+    "WITH s AS (SELECT '食パン' AS k) SELECT s.k FROM s INNER JOIN APP88 AS t ON s.k = t.キー",
+    "WITH s AS (GENERATE_SERIES('2025-08-04','2025-08-06') AS 日付) SELECT s.日付 FROM s INNER JOIN APP88 AS t ON s.日付 = t.日付",
+  ])("型依存の計画はフォーム定義を必要とする: %s", (sql) => {
     expect(explainNeedsAppMetadata(parseSqlStatement(sql))).toBe(true);
   });
 
