@@ -33,6 +33,7 @@ import {
   type SelectResult,
 } from "../core";
 import { extractTypedPushdownCandidates } from "../core/optimization/wherePredicatePushdown";
+import { statementUsesRelativeDateResolution } from "../core/optimization/relativeDatePushdownGuard";
 import type { SelectStatement } from "../types/ast";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import {
@@ -1833,7 +1834,10 @@ async function run(): Promise<number> {
         return false;
       });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
-      dryRunUsesStaticTypedPlan = statements.some(hasStaticTypedPushdownCandidate);
+      // 相対日付関数を含む文は EXPLAIN でも resolver（metadata API）を呼ぶため、
+      // 静的経路（throwing client・API 0 回）はバッチ全体が resolver 不要のときに限る。
+      dryRunUsesStaticTypedPlan = statements.some(hasStaticTypedPushdownCandidate)
+        && !statements.some(statementUsesRelativeDateResolution);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）
         // バッチのガード（--allow-dml / dry-run / 確認プロンプト）は

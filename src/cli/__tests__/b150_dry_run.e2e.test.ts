@@ -145,4 +145,24 @@ ORDER BY s.日付, t.$id`;
     expect(result.stdout).toContain("実行時の型・実在確認待ち");
     expect(apiRequests).toHaveLength(before);
   });
+
+  test("B155 形＋相対日付関数の単文は実 client 経路で exit 0（静的経路を選ばない）", async () => {
+    const sql = "WITH s AS (GENERATE_SERIES('2026-07-29','2026-08-04') AS 日付) "
+      + "SELECT s.日付 FROM s INNER JOIN APP4228 AS t ON s.日付 = t.日付 "
+      + "WHERE t.日付 <= TODAY() AND t.キー = 'A'";
+    const result = await runCli(["--config", configPath, "--dry-run", "-e", sql]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("DryRunError");
+    expect(recordRequests).toEqual([]);
+  });
+
+  test("B155 形と相対日付文の混在バッチは実 client 経路で exit 0", async () => {
+    const sql = "WITH s AS (GENERATE_SERIES('2026-07-29','2026-08-04') AS 日付) "
+      + "SELECT s.日付 FROM s INNER JOIN APP4228 AS t ON s.日付 = t.日付 WHERE t.キー = 'A';\n"
+      + "SELECT キー FROM APP4228 WHERE 日付 <= TODAY()";
+    const result = await runCli(["--config", configPath, "--dry-run", "-e", sql]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("DryRunError");
+    expect(recordRequests).toEqual([]);
+  });
 });
