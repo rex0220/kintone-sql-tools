@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v3.60.0)
+ksql 配布パッケージ (v3.61.0)
 
 release 成果物:
-- ksql-plugin-v3.60.0.zip
-- ksql-mcp.mcpb (manifest version 3.60.0)
-- ksql-mcp.js (MCP server version 3.60.0)
+- ksql-plugin-v3.61.0.zip
+- ksql-mcp.mcpb (manifest version 3.61.0)
+- ksql-mcp.js (MCP server version 3.61.0)
+
+修正 (B150/B153 結合キー押し下げの型対応と空キー一致) ★要点:
+- 日付キーで CTE・一時テーブルを物理アプリへ直接 JOIN すると GAIA_IQ03 の生エラーに
+  なっていたのを修正。キーの型が受ける演算子で方式を選びます:
+    in を受ける型 → 従来どおり in リスト / 日付・日時系 → min/max の範囲で絞り込み /
+    どちらも不可 → 全件取得 (エラーを出しません)。結果は変わりません。
+- 空の結合キー同士の JOIN 一致が押し下げで静かに欠落していたのを修正 (結果が変わります)。
+  空キーは in ("") として取得し、前後空白付きキーの trim も廃止して突合と意味論を統一。
+  空キー・空白キーで JOIN していた場合、欠落していた行が現れます。
 
 改善 (B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合) ★要点・結果は変わりません:
 - JOIN 内の条件も、kintone のクエリ構文が受け付ける型×演算子なら kintone 側で
@@ -62,12 +71,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.60.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.61.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.60.0): B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合
+本リリース (v3.61.0): B150/B153 結合キー押し下げの型対応 (日付キー JOIN の
+GAIA_IQ03 解消) と空キー一致の欠落修正 (結果が変わります)。
+
+前リリース (v3.60.0): B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合
 (改善・結果不変・取得量削減。不正値の kintone エラーは表面化)。
 
 前リリース (v3.59.0): B149 GENERATE_SERIES 整数・日付系列の生成 (新機能・
