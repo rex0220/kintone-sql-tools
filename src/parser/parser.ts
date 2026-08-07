@@ -3062,9 +3062,17 @@ export class Parser {
       tok.kind === TokenKind.BIDENT ||
       tok.kind === TokenKind.LPAREN ||
       tok.kind === TokenKind.MINUS ||
+      tok.kind === TokenKind.PLUS ||
       this.tryStringFuncName() !== null
     ) {
-      const expr = this.parseArithAddSub();
+      const previousAllowUnaryPlusNumber = this.allowUnaryPlusNumber;
+      this.allowUnaryPlusNumber = true;
+      let expr: ArithNode;
+      try {
+        expr = this.parseArithAddSub();
+      } finally {
+        this.allowUnaryPlusNumber = previousAllowUnaryPlusNumber;
+      }
       // 単純な数値リテラルはそのまま NumberLiteral に
       if (expr.type === "NUMBER") return expr satisfies NumberLiteral;
       return { type: "ARITH_VALUE", expr } satisfies ArithSqlValue;

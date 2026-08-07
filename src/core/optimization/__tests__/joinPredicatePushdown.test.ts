@@ -87,7 +87,7 @@ describe("B76 §5.2 leaf relation matrix", () => {
   test.each([
     ["$id", "=", "1", "exact"],
     ["recordNo", "=", "1", "unsafe"],
-    ["number", "=", "1", "superset"],
+    ["number", "=", "1", "exact"],
     ["calc", "=", "1", "unsafe"],
     ["text", "=", "'A'", "superset"],
     ["link", "=", "'A'", "unsafe"],
@@ -139,10 +139,6 @@ describe("B76 §5.2 leaf relation matrix", () => {
     "a.text != 'A'",
     "a.text <> 'A'",
     "a.date != '2026-07-27'",
-    "a.number != 1",
-    "a.number >= 1",
-    "a.number <= 1",
-    "a.number > 1.5",
     "a.$id != 1",
     "a.drop = 'A'",
     "a.drop IN ('missing')",
@@ -158,14 +154,19 @@ describe("B76 §5.2 leaf relation matrix", () => {
       .toBe("unsafe");
   });
 
-  test("NUMBER strict range は安全整数だけ superset", () => {
-    for (const op of ["<", ">"]) {
-      expect(relation(`SELECT * FROM APP100 AS a WHERE a.number ${op} 1`, [core]))
-        .toBe("superset");
-      expect(relation(
-        `SELECT * FROM APP100 AS a WHERE a.number ${op} 9007199254740992`,
-        [core]
-      )).toBe("unsafe");
+  test("B151 NUMBER は8演算子を許可10進 literalで exact にする", () => {
+    for (const predicate of [
+      "a.number = 1",
+      "a.number != 1",
+      "a.number < 1.5",
+      "a.number > 9007199254740992",
+      "a.number <= -5",
+      "a.number >= 1e3",
+      "a.number IN (-5, 0, 1e3)",
+      "a.number NOT IN (-5, 0, 1e3)",
+    ]) {
+      expect(relation(`SELECT * FROM APP100 AS a WHERE ${predicate}`, [core]))
+        .toBe("exact");
     }
   });
 

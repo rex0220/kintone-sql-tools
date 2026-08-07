@@ -15,6 +15,7 @@ import {
   serverOnlyFunctionOccurrencesInWhere,
 } from "./relativeDateFullScanExactPlan";
 import { classifyWhereCapability } from "./whereCapability";
+import { isJoinNumberLiteralSupported } from "./joinNumberLiteralPolicy";
 
 /**
  * Phase A item 全体の server ⊇ client 集合関係。
@@ -1040,12 +1041,26 @@ function classifySupportedLeaf(
   }
 
   if (fieldType === "NUMBER") {
-    if (predicate.right.type !== "NUMBER") return "unsafe";
-    if (predicate.op === "=") return "superset";
-    return (predicate.op === "<" || predicate.op === ">")
-      && isSafeIntegerLiteral(predicate.right)
-      ? "superset"
-      : "unsafe";
+    if (
+      (predicate.op === "IN" || predicate.op === "NOT_IN")
+      && predicate.right.type === "IN_LIST"
+      && predicate.right.values.length > 0
+      && predicate.right.values.every((value) =>
+        value.type === "NUMBER" && isJoinNumberLiteralSupported(value)
+      )
+    ) {
+      return "exact";
+    }
+    if (
+      (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>"
+        || predicate.op === "<" || predicate.op === ">"
+        || predicate.op === "<=" || predicate.op === ">=")
+      && predicate.right.type === "NUMBER"
+      && isJoinNumberLiteralSupported(predicate.right)
+    ) {
+      return "exact";
+    }
+    return "unsafe";
   }
 
   if (fieldType === "SINGLE_LINE_TEXT") {
