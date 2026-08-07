@@ -189,7 +189,8 @@ B152 Phase 2〜4 は、次をすべて満たす leaf に適用する。
 5. literal が型別の §4 canonical policy を通る。
 6. owner のフィールド型を metadata から確定できる。
 7. B76 の ownership、source kind、tree 合成、outer join、server-only function、KLIKE に関する既存 gate を通る。
-8. `STATUS_ASSIGNEE` はプロセス管理が有効であることまで確定できる。
+8. ~~`STATUS_ASSIGNEE` はプロセス管理が有効であることまで確定できる。~~
+   **【2026-08-07 失効・オーナー判断】** gate は課さず、プロセス無効時の kintone error を表面化する。
 9. 実行と `EXPLAIN` が同じ runtime plan と serializer を使う。
 
 次は対象外である。
@@ -404,21 +405,27 @@ literal policy:
 > native capability と JOIN exact prefilter に追加する。追加 metadata 取得は行わず、
 > プロセス無効時の kintone error も単一表と同様に表面化する。
 
+> **【2026-08-07・以下の process gate 要件は失効】** 上のオーナー判断（撤回注記）により、
+> 以下 1〜4 と末尾の「gate より先に query を生成してはならない」は**実装しない**。
+> 現行契約＝`NATIVE_OPERATORS` に `in` / `not in` を追加し、追加 metadata 取得なし・
+> プロセス無効アプリへの query は kintone error として表面化（単一表と同一）。
+> 5〜7（synthetic field を作らない・既存 validation error 維持・独自エラーを増やさない）は維持。
+
 `STATUS_ASSIGNEE` は、プロセス管理が有効なアプリにだけ存在する record-level field として扱う。
 
 現行 `loadTypedPushdownMeta()` は `STATUS` 候補について `status.json` を取得するが、`STATUS_ASSIGNEE` について同じ有効性確認をしていない。
 
-B152 では次を必須とする。
+B152 では次を必須とする（**1〜4 は上記注記により失効**）。
 
-1. `STATUS_ASSIGNEE` が候補に含まれる場合、キャッシュ付き `getProcessStatuses()` で `enable` を確認する。
-2. `enable === true` の場合だけ、JOIN source metadata に pushdown 対象として載せる。
-3. `enable === false`、応答不完全、メタ取得失敗、型不明の場合は `unsafe` とする。
-4. プロセス管理無効アプリに対して `STATUS_ASSIGNEE in (...)` を records API query へ送らない。
+1. ~~`STATUS_ASSIGNEE` が候補に含まれる場合、キャッシュ付き `getProcessStatuses()` で `enable` を確認する。~~
+2. ~~`enable === true` の場合だけ、JOIN source metadata に pushdown 対象として載せる。~~
+3. ~~`enable === false`、応答不完全、メタ取得失敗、型不明の場合は `unsafe` とする。~~
+4. ~~プロセス管理無効アプリに対して `STATUS_ASSIGNEE in (...)` を records API query へ送らない。~~
 5. 存在しない field を synthetic に作らない。
 6. SQL 自体が存在しない field を参照している場合は、既存の field validation error を維持する。
 7. 単に pushdown 判定不能な場合は元の residual 評価へ戻し、押し下げのための独自エラーを増やさない。
 
-`STATUS_ASSIGNEE` を Phase 4 で開放するため、一般 WHERE capability の `NATIVE_OPERATORS` にも `in` / `not in` を追加する。ただしプロセス有効性 gate より先に records API query を生成してはならない。
+`STATUS_ASSIGNEE` を開放するため、一般 WHERE capability の `NATIVE_OPERATORS` にも `in` / `not in` を追加する。
 
 ---
 
@@ -561,7 +568,8 @@ B151 の NUMBER policy、`$id`、既存 selection、KLIKE を回帰させない�
 - Phase 2 と Phase 3 は現行 native operator map と一致していること
 - CREATOR/MODIFIER、USER/ORGANIZATION/GROUP は現行 map を維持すること
 - `STATUS_ASSIGNEE` に `in` / `not in` を追加すること
-- `STATUS_ASSIGNEE` の process-enabled gate を capability の無条件開放と混同しないこと
+- ~~`STATUS_ASSIGNEE` の process-enabled gate を capability の無条件開放と混同しないこと~~
+  **【2026-08-07 失効・オーナー判断】** gate なしの開放が現行契約（エラーは表面化）
 - local contract と native contract の両方を通った場合だけ JOIN classifier へ進むこと
 
 ### 7.4 serializer
