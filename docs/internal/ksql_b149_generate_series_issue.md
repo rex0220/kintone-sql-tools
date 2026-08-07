@@ -1,7 +1,9 @@
 # B149 `generate_series()`（数値・日付系列の生成関数）
 
 - 起票: 2026-08-07
-- ステータス: 📝 **起票（方向判断・仕様前）**
+- ステータス: 📝 **仕様 R1 レビュー済（2026-08-07）・R1-2（ウィンドウ警告の扱い）のオーナー判断待ち → R2 依頼へ**
+- 仕様: [R1](ksql_b149_generate_series_spec_r1.md)（codex 作）／[レビュー](ksql_b149_codex_review_1.md)（Claude・実測付き・指摘 6 件）
+- 方向確定: **整数＋日付（DATE）・文 CTE 形・PG 準拠境界**（オーナー判断 2026-08-07）
 - 出典: オーナー起票（PostgreSQL 仕様の参照資料付き・2026-08-07）
 - 関連: [B134](ksql_b134_series_generation_issue.md)（需要側の台帳＝「取引の無い日を 0 として並べる」。
   方向確定＝案 A・着手は実需待ち）／[B53](ksql_b53_recursive_cte_cycle_phase1_spec.md)（再帰 CTE。
