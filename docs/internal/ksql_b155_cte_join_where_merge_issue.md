@@ -1,7 +1,7 @@
 # B155 CTE→APP JOIN の取得クエリに B151/B152 で開放した WHERE 葉が合流しない
 
 - 起票: 2026-08-08（[依頼元の v3.61.0 返信 §5](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260807-v3610.md)・エンジン側で再現確認済み）
-- ステータス: 📝 **調査完了（2026-08-08・原因確定・影響範囲は単一表 FULL_SCAN まで拡大）・方向判断待ち（案 A 推奨・優先 中）**
+- ステータス: ✅ **v3.62.0 リリース（2026-08-08・案 A＝共有 leaf policy へ統一・B154 同梱・実機確認済み）**
 - 関連: [B150](ksql_b150_cte_join_date_pushdown_issue.md)（結合キー側は解決済み）／
   [B151](ksql_b151_join_inclusive_range_pushdown_issue.md)／[B152](ksql_b152_join_pushdown_all_types_issue.md)
 

@@ -3,6 +3,46 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.62.0（2026-08-08）
+
+### 改善（B155 WHERE の絞り込みが CTE・一時テーブルの JOIN と単一表の一部に届いていなかった）**※結果は変わりません**
+
+**v3.60.0（B151/B152）で開放した型×演算子の WHERE 条件が、CTE・一時テーブルを物理アプリへ
+JOIN する形では結合キーの絞り込みと合流せず、JS 判定に落ちていました。**
+
+```sql
+WITH s AS (GENERATE_SERIES('2026-07-29','2026-08-04') AS 日付)
+SELECT s.日付, t.製品名, t.個数 FROM s INNER JOIN APP100 AS t ON s.日付 = t.日付
+WHERE t.製品名 = '牛乳' AND t.個数 <= 100 AND t.入出庫区分 = '出庫'
+--  旧: kintone query は 日付 >= "..." and 日付 <= "..." のみ（WHERE は全部 JS 判定）
+--  新: (日付 >= "..." and 日付 <= "...") and ((製品名 = "牛乳" and 個数 <= 100)
+--      and 入出庫区分 in ("出庫")) — WHERE 葉が合流（実測・実機）
+```
+
+原因は**型×演算子の安全判定が 2 実装に複製され、片方に B76 世代（v3.25.0 相当）の古い規則が
+凍結残存していたこと**です。同じ CTE JOIN で `< 101` は合流するのに `<= 100` は落ちる、という
+非対称が決定的な証拠でした。判定を共有 leaf policy（1 実装）へ統一しました。
+
+- **単一表の全件取得（LIKE 併用など exact 直列化が崩れた形）でも同じ絞り込みが効きます**
+  （`製品名 = '牛乳' AND 仕入先 LIKE '%乳業%'` → `製品名 = "牛乳"` で絞ってから LIKE を JS 判定）
+- **結果は変わりません**（絞り込みは superset・元の WHERE を取得後に再評価）
+- 実行と `EXPLAIN` は同一の計画オブジェクトを共有します（表示と実挙動の乖離を構造で防止）
+- CLI `--dry-run` は CTE→APP JOIN＋WHERE 候補の形を **API 0 回**で `pushdown candidate:` として表示
+
+### 改善（B154 `join pushdown plan: not applied` の誤読対策）
+
+`not applied` は「絞れていない」ではなく別機構（field-vs-literal JOIN pushdown）の不適用です。
+結合キー・WHERE の絞り込みは各ソース行に別途出るため、
+`not applied (join key/WHERE prefilters are reported per source below)` と但し書きを追加しました。
+取得の実態は従来どおり各ソースの `fetch:` 行が正です。
+
+### 修正（B155 の最終チェックで検出した dry-run 回帰・出荷前に修正）
+
+CLI `--dry-run` で B155 形と相対日付関数（`TODAY()` 等）が同一文・同一バッチに同居すると、
+API を呼ばない静的経路が選ばれたまま相対日付の解決がフォーム定義取得に到達し
+`DryRunError` で落ちる回帰（v3.61.0 では通っていた形）。静的経路の採用条件に
+「バッチ全体が相対日付の解決を必要としない」を追加して修正（判定は実行側と同じ collector を共有）。
+
 ## v3.61.0（2026-08-07）
 
 ### 修正（B150 日付キーの JOIN が kintone の生エラーになっていた）
