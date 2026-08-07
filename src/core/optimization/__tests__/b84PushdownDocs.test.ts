@@ -166,7 +166,7 @@ function publicRelation(fieldType: string, op: CompareOp): string {
     predicate(fieldType, op),
     [source(fieldType)]
   ).relation;
-  return relation === "unsafe" ? "押し下がらない" : "押し下がる";
+  return relation === "unsafe" ? "✕" : "○";
 }
 
 function generatedTable(): string {
