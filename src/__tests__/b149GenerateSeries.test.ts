@@ -94,6 +94,7 @@ describe("B149 GENERATE_SERIES", () => {
     ["A4", "GENERATE_SERIES(100, 2, -49) AS n", ["100", "51", "2"]],
     ["A5", "GENERATE_SERIES(35, 4, -10) AS n", ["35", "25", "15", "5"]],
     ["A7", "GENERATE_SERIES(1, 5, +2) AS n", ["1", "3", "5"]],
+    ["A8", "GENERATE_SERIES(1e2, 5e2, 1e2) AS n", ["100", "200", "300", "400", "500"]],
   ])("%s: 整数境界", async (_id, expression, expected) => {
     expect(values(await run(`WITH s AS (${expression}) SELECT n FROM s`), "n")).toEqual(expected);
   });
@@ -221,6 +222,15 @@ describe("B149 GENERATE_SERIES", () => {
     ["GENERATE_SERIES(1,'2026-08-03')", "ArgumentError: GENERATE_SERIES の start と stop は、両方を整数または両方を DATE にしてください。"],
     ["GENERATE_SERIES('2026-08-01','2026-08-03',1)", "ArgumentError: GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day 単位を指定してください。"],
   ])("§12.9 公開エラー: %s", async (expression, message) => {
+    expect((await errorFor(`WITH s AS (${expression}) SELECT generate_series FROM s`)).message).toBe(message);
+  });
+
+  test.each([
+    ["GENERATE_SERIES(1e-400, 1e-400)", "ArgumentError: GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。"],
+    ["GENERATE_SERIES(1.0000000000000000001, 2)", "ArgumentError: GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。"],
+    ["GENERATE_SERIES(9007199254740990.9, 9007199254740990.9)", "ArgumentError: GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。"],
+    ["GENERATE_SERIES('12:00', '13:00', '1 day')", "ArgumentError: GENERATE_SERIES は Phase 1 では整数と DATE のみ対応しています。DATETIME と TIME は使用できません。"],
+  ])("§12.9 丸め前の整数判定と TIME 診断: %s", async (expression, message) => {
     expect((await errorFor(`WITH s AS (${expression}) SELECT generate_series FROM s`)).message).toBe(message);
   });
 

@@ -5,6 +5,7 @@ import type {
   StringLiteral,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
+import { parseExactDecimal } from "./exactDecimal";
 
 export const GENERATE_SERIES_MAX_ROWS = 10_000;
 
@@ -90,6 +91,25 @@ function integerValue(value: number | string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+function integerNumberLiteral(arg: NumberLiteral): number | null {
+  const decimal = parseExactDecimal(arg.raw ?? String(arg.value));
+  if (decimal === null || decimal.scale > 0) return null;
+  if (decimal.sign === 0) return 0;
+  const digits = decimal.coefficient.length - decimal.scale;
+  if (digits > 16) return null;
+  const magnitude = `${decimal.coefficient}${"0".repeat(-decimal.scale)}`;
+  if (magnitude.length === 16 && magnitude > "9007199254740991") return null;
+  const value = Number(magnitude) * decimal.sign;
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function isUnsupportedTemporal(value: unknown): boolean {
+  return typeof value === "string" && (
+    /^\d{4}-\d{2}-\d{2}T/.test(value)
+    || /^\d{2}:\d{2}(?::\d{2})?$/.test(value)
+  );
+}
+
 function countRows(start: number, stop: number, step: number): number {
   if (start === stop) return 1;
   if ((start < stop && step < 0) || (start > stop && step > 0)) return 0;
@@ -111,8 +131,7 @@ function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
   const stopDate = typeof stopRaw === "string" ? dateParts(stopRaw) : null;
   const dateLikeStart = typeof startRaw === "string" && /^\d{4}-/.test(startRaw);
   const dateLikeStop = typeof stopRaw === "string" && /^\d{4}-/.test(stopRaw);
-  const datetime = [startRaw, stopRaw].some((value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value));
-  if (datetime) {
+  if ([startRaw, stopRaw].some(isUnsupportedTemporal)) {
     throw argumentError("GENERATE_SERIES は Phase 1 では整数と DATE のみ対応しています。DATETIME と TIME は使用できません。");
   }
   if (startDate || stopDate || dateLikeStart || dateLikeStop || (
@@ -133,11 +152,11 @@ function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
     const stop = stopRaw as string;
     return { kind: "DATE", start, stop, step, rowCount: countRows(dateOrdinal(start), dateOrdinal(stop), step) };
   }
-  const startInteger = typeof startRaw === "number"
-    ? integerValue(startRaw)
+  const startInteger = startArg.type === "NUMBER"
+    ? integerNumberLiteral(startArg)
     : isResolvedVariable(startArg) ? integerValue(startRaw) : null;
-  const stopInteger = typeof stopRaw === "number"
-    ? integerValue(stopRaw)
+  const stopInteger = stopArg.type === "NUMBER"
+    ? integerNumberLiteral(stopArg)
     : isResolvedVariable(stopArg) ? integerValue(stopRaw) : null;
   if (startInteger === null || stopInteger === null) {
     if ((startArg.type === "NUMBER" || isResolvedVariable(startArg)) && (stopArg.type === "NUMBER" || isResolvedVariable(stopArg))) {
@@ -146,7 +165,7 @@ function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
     throw argumentError("GENERATE_SERIES の start と stop は、両方を整数または両方を DATE にしてください。");
   }
   const resolvedStep = stepRaw === undefined ? 1
-    : typeof stepRaw === "number" ? integerValue(stepRaw)
+    : stepArg?.type === "NUMBER" ? integerNumberLiteral(stepArg)
     : isResolvedVariable(stepArg) ? integerValue(stepRaw) : null;
   if (resolvedStep === null) {
     if (stepArg?.type === "NUMBER" || isResolvedVariable(stepArg)) {
@@ -172,11 +191,11 @@ export function validateGenerateSeriesStatement(stmt: GenerateSeriesStatement): 
       if (arg?.type === "STRING" && arg.value === "") {
         throw argumentError(`GENERATE_SERIES の ${name} に空文字は指定できません。`);
       }
-      if (arg?.type === "NUMBER" && !Number.isSafeInteger(Number(numberLiteralText(arg)))) {
+      if (arg?.type === "NUMBER" && integerNumberLiteral(arg) === null) {
         throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
       }
       if (index < 2 && arg?.type === "STRING") {
-        if (/^\d{4}-\d{2}-\d{2}T/.test(arg.value)) {
+        if (isUnsupportedTemporal(arg.value)) {
           throw argumentError("GENERATE_SERIES は Phase 1 では整数と DATE のみ対応しています。DATETIME と TIME は使用できません。");
         }
         if (/^\d{4}-/.test(arg.value) && dateParts(arg.value) === null) {
@@ -186,8 +205,8 @@ export function validateGenerateSeriesStatement(stmt: GenerateSeriesStatement): 
     });
     const step = stmt.args[2];
     if (step?.type === "NUMBER") {
-      const value = Number(numberLiteralText(step));
-      if (!Number.isSafeInteger(value)) throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
+      const value = integerNumberLiteral(step);
+      if (value === null) throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
       if (value === 0) throw argumentError("GENERATE_SERIES の step に 0 は指定できません。");
     } else if (step?.type === "STRING") {
       parseDateStep(step.value);
