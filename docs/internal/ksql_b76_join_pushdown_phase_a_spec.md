@@ -163,6 +163,13 @@ Step 0 では当該テストだけを v3.25.0 worktree で再実行し、PASS
 > 現行の direct NUMBER local 比較が `parseExactDecimal()` を使う10進厳密比較であること、
 > および server/local の境界・空セル挙動が一致する実測により失効した。
 > 現行契約は B151 R1 を参照。B76 の他型・tree 合成・ownership・residual 規則は維持する。
+
+> **【B152 Phase 2+3 により失効・2026-08-07】**
+> DATE / TIME / DATETIME / CREATED_TIME / UPDATED_TIME の canonical literal 比較と、
+> SINGLE_LINE_TEXT / LINK の非空 equality・IN は、B152 で server/local の型別意味論を
+> 再確認し exact prefilter 対象へ拡張した。ユーザー・組織・グループ・作業者系は
+> 存在しない code の GAIA_IL26 実測により見送り、従来どおり対象外である。
+> 現行契約は B152 R1 を参照。ownership、tree 合成、outer join、source kind、residual 規則は維持する。
 | CALC | U | U | U | U | U | U | U | 表示・計算精度を NUMBER と同一視する根拠が不足 |
 | SINGLE_LINE_TEXT | S | U | U | U | U | U | E† | `=` は JS の byte/code-point equality が真なら同 literal の server equality も真となる方向だけを採用。正規化同値は主張しない |
 | LINK | U | U | U | U | U | U | E† | TEXT `=` へ一般化しない |

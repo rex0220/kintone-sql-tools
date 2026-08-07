@@ -89,15 +89,15 @@ describe("B76 §5.2 leaf relation matrix", () => {
     ["recordNo", "=", "1", "unsafe"],
     ["number", "=", "1", "exact"],
     ["calc", "=", "1", "unsafe"],
-    ["text", "=", "'A'", "superset"],
-    ["link", "=", "'A'", "unsafe"],
+    ["text", "=", "'A'", "exact"],
+    ["link", "=", "'A'", "exact"],
     ["multi", "=", "'A'", "unsafe"],
     ["rich", "=", "'A'", "unsafe"],
-    ["date", "=", "'2026-07-27'", "superset"],
-    ["time", "=", "'09:30'", "superset"],
-    ["datetime", "=", "'2026-07-27T00:30:00Z'", "superset"],
-    ["created", "=", "'2026-07-27T00:30:00Z'", "superset"],
-    ["updated", "=", "'2026-07-27T00:30:00Z'", "superset"],
+    ["date", "=", "'2026-07-27'", "exact"],
+    ["time", "=", "'09:30'", "exact"],
+    ["datetime", "=", "'2026-07-27T00:30:00Z'", "exact"],
+    ["created", "=", "'2026-07-27T00:30:00Z'", "exact"],
+    ["updated", "=", "'2026-07-27T00:30:00Z'", "exact"],
     ["creator", "IN", "('u1')", "unsafe"],
     ["modifier", "IN", "('u1')", "unsafe"],
     ["user", "IN", "('u1')", "unsafe"],
@@ -136,9 +136,6 @@ describe("B76 §5.2 leaf relation matrix", () => {
   test.each([
     "a.text LIKE 'A%'",
     "a.text NOT LIKE 'A%'",
-    "a.text != 'A'",
-    "a.text <> 'A'",
-    "a.date != '2026-07-27'",
     "a.$id != 1",
     "a.drop = 'A'",
     "a.drop IN ('missing')",
@@ -147,11 +144,11 @@ describe("B76 §5.2 leaf relation matrix", () => {
     expect(relation(`SELECT * FROM APP100 AS a WHERE ${predicate}`, [core])).toBe("unsafe");
   });
 
-  test("= は superset でも != は補集合方向が反転するため unsafe", () => {
+  test("B152 の逐語一致確認後は text の = / != をともに exact にする", () => {
     expect(relation("SELECT * FROM APP100 AS a WHERE a.text = 'A'", [core]))
-      .toBe("superset");
+      .toBe("exact");
     expect(relation("SELECT * FROM APP100 AS a WHERE a.text != 'A'", [core]))
-      .toBe("unsafe");
+      .toBe("exact");
   });
 
   test("B151 NUMBER は8演算子を許可10進 literalで exact にする", () => {
@@ -253,7 +250,7 @@ describe("B76 §5.4 tree composition", () => {
     { code: "text", fieldType: "SINGLE_LINE_TEXT" },
   ]);
 
-  test("E AND E = E、E/S の積は superset", () => {
+  test("B152 exact leaf と既存 exact leaf の AND は exact", () => {
     const exact = buildJoinPushdownPlan(
       where("SELECT * FROM APP100 AS a WHERE a.$id = 1 AND a.$id < 10"),
       [left, right]
@@ -266,7 +263,7 @@ describe("B76 §5.4 tree composition", () => {
       [left, right]
     );
     expect(mixed.items).toHaveLength(1);
-    expect(mixed.items[0].relation).toBe("superset");
+    expect(mixed.items[0].relation).toBe("exact");
   });
 
   test("AND は alias ごとに安全因子を個別抽出する", () => {
@@ -276,7 +273,7 @@ describe("B76 §5.4 tree composition", () => {
     );
     expect(plan.items.map((item) => [item.targetAlias, item.relation])).toEqual([
       ["a", "exact"],
-      ["b", "superset"],
+      ["b", "exact"],
     ]);
   });
 
@@ -294,13 +291,14 @@ describe("B76 §5.4 tree composition", () => {
       [left, right]
     );
     expect(mixed.items).toHaveLength(1);
-    expect(mixed.items[0].relation).toBe("superset");
+    expect(mixed.items[0].relation).toBe("exact");
 
     const unsafeSide = buildJoinPushdownPlan(
       where("SELECT * FROM APP100 AS a WHERE a.$id = 1 OR a.text != 'A'"),
       [left, right]
     );
-    expect(unsafeSide.items).toEqual([]);
+    expect(unsafeSide.items).toHaveLength(1);
+    expect(unsafeSide.items[0].relation).toBe("exact");
   });
 
   test("cross-alias OR は片辺だけを押さない", () => {
@@ -499,27 +497,27 @@ describe("B76 Phase B Step 3 exact function consumption", () => {
     expect(plan.residualServerFunctionOccurrences).toEqual([]);
   });
 
-  test("通常 S predicate は item relation superset のまま residual に残る", () => {
+  test("B152 exact predicate と server-only leaf の whole WHERE は既存第5-Wで消費する", () => {
     const expr = where(
       "SELECT * FROM APP100 AS a "
       + "WHERE a.date = TODAY() AND a.text = 'A'"
     );
     if (expr.type !== "LOGICAL") throw new Error("expected AND");
-    const functionLeaf = expr.left;
-    const normalSupersetLeaf = expr.right;
+    const normalExactLeaf = expr.right;
     const plan = buildJoinPushdownPlan(expr, [core]);
 
     expect(plan.items).toHaveLength(1);
     expect(plan.items[0]).toMatchObject({
       targetAlias: "a",
-      relation: "superset",
-      predicate: normalSupersetLeaf,
+      relation: "exact",
+      predicate: normalExactLeaf,
     });
     expect(plan.serverFunctionConsumptions[0]).toMatchObject({
-      predicate: functionLeaf,
+      predicate: expr,
       relation: "function-leaf-exact",
+      consumption: "whole-where",
     });
-    expect(plan.residualWhere).toBe(normalSupersetLeaf);
+    expect(plan.residualWhere).toBeNull();
   });
 
   test("同一aliasのexact OR / NOTは第5-Wでwhole WHEREを消費する", () => {
@@ -627,7 +625,7 @@ describe("B76 Phase A Step 2 runtime boundary / serializer guard", () => {
     { code: "time", fieldType: "TIME" },
   ]);
 
-  test("AND leaf の指定型 = だけを alias 別 superset item にする", () => {
+  test("AND leaf の指定型 = だけを alias 別 exact item にする", () => {
     const plan = buildJoinPushdownStep2Plan(
       where(
         "SELECT * FROM APP100 a WHERE "
@@ -640,8 +638,8 @@ describe("B76 Phase A Step 2 runtime boundary / serializer guard", () => {
       item.relation,
       serializeJoinPushdownItem(item, [left, right]),
     ])).toEqual([
-      ["a", "superset", 'same = "A" and date = "2026-07-27"'],
-      ["b", "superset", 'time = "09:30"'],
+      ["a", "exact", 'same = "A" and date = "2026-07-27"'],
+      ["b", "exact", 'time = "09:30"'],
     ]);
   });
 

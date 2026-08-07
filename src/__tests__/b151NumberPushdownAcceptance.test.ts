@@ -280,12 +280,12 @@ describe("B151 mock-client acceptance", () => {
     }
   });
 
-  test("§13.5 NUMBER exact と text superset の AND は PREFILTERED", async () => {
+  test("B152 後は NUMBER exact と text exact の AND も EXACT", async () => {
     const client = makeClient();
     const sql = joinSql("t.個数 >= 10 AND t.備考 = '確認'");
     const text = planText(await execute(`EXPLAIN ${sql}`, client) as SelectResult);
     expect(text).toContain('kintone query: 個数 >= 10 and 備考 = "確認"');
-    expect(text).toContain("relation: superset");
-    expect(text).toMatch(/fetch:\s+PREFILTERED/);
+    expect(text).toContain("relation: exact");
+    expect(text).toMatch(/fetch:\s+EXACT/);
   });
 });

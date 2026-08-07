@@ -166,7 +166,7 @@ test.each(["KLIKE", "NOT KLIKE"] as const)(
   }
 );
 
-test("B76 Step 3: unsafe AND 因子が混在しても安全な因子だけを各 APP に送る", async () => {
+test("B152 exact inequality を含む安全な AND 因子を各 APP に送る", async () => {
   const client = makeClient();
   const result = await execute(
     `${baseSql}a.担当者 = '佐藤' AND a.担当者 != '田中' AND b.区分 IN ('A')`,
@@ -175,7 +175,7 @@ test("B76 Step 3: unsafe AND 因子が混在しても安全な因子だけを各
   ) as SelectResult;
 
   expect(result.rows).toEqual([{ $id: "1", 区分: "A" }]);
-  expect(appQuery(client, 76300)).toBe('担当者 = "佐藤"');
+  expect(appQuery(client, 76300)).toBe('担当者 = "佐藤" and 担当者 != "田中"');
   expect(appQuery(client, 76400)).toBe('区分 in ("A")');
 });
 

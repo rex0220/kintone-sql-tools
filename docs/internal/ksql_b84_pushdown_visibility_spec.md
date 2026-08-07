@@ -186,6 +186,12 @@ Pro が「単一表では押し下がるのに JOIN では」と混乱したの�
 > **【B151 により失効・2026-08-07】** 上記の NUMBER に関する非拡張判断と
 > IEEE-754 境界の説明は、direct NUMBER の10進厳密比較と server/local 実測により失効した。
 > B151 以後は許可範囲内の numeric literal に対する8演算子を exact とする。
+
+> **【B152 Phase 2+3 により失効・2026-08-07】** 上記の旧 matrix にある日付・時刻系の
+> canonical literal 比較と SINGLE_LINE_TEXT / LINK の非空 equality・IN に関するセルは、
+> B152 で exact prefilter へ拡張された。歴史表は当時値として保持し、現行値は
+> `docs/ksql_language_reference.md` の B84 marker 内を参照する。ユーザー・組織・グループ・
+> 作業者系は存在しない code の GAIA_IL26 実測により見送り、全セル ✕ を維持する。
 > 表生成方式、型集合導出、正規化後の分類、公開文書との照合という B84 の設計は維持する。
 
 ---

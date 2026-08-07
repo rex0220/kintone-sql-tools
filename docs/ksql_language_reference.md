@@ -956,14 +956,14 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 | `CALC` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `CATEGORY` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `CHECK_BOX` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
-| `CREATED_TIME` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `CREATED_TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `CREATOR` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `DATE` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `DATETIME` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `DATE` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
+| `DATETIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `DROP_DOWN` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `FILE` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `GROUP_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `LINK` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `LINK` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `MODIFIER` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `MULTI_LINE_TEXT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `MULTI_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
@@ -972,13 +972,26 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 | `RADIO_BUTTON` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `RECORD_NUMBER` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 | `RICH_TEXT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `SINGLE_LINE_TEXT` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `SINGLE_LINE_TEXT` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `STATUS` | ○ | ○ | ✕ | ✕ | ✕ | ✕ | ○ | ○ |
 | `STATUS_ASSIGNEE` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `TIME` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
-| `UPDATED_TIME` | ○ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
+| `TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
+| `UPDATED_TIME` | ○ | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
 | `USER_SELECT` | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ | ✕ |
 <!-- B84_JOIN_FIELD_LITERAL_TABLE_END -->
+
+日付・時刻系の行は、右辺が正規形式の場合に限ります。`DATE` は実在する
+`YYYY-MM-DD`、`TIME` は `HH:mm`、`DATETIME` / `CREATED_TIME` / `UPDATED_TIME` は
+`YYYY-MM-DDTHH:mm:ssZ` だけが対象です。UTC offset、秒省略、小数秒、前後空白、空文字は
+押し下げず、取得後に判定します。
+
+`SINGLE_LINE_TEXT` / `LINK` は、空でない文字列による `=` / `!=`（`<>` を含む）と、
+1件以上の空でない文字列だけからなる `IN` / `NOT IN` を `relation: exact` として
+押し下げます。大文字小文字、全角半角、Unicode、空白は正規化せず、records API query に
+必要な `"` と `\` の escape だけを行います。範囲比較、空文字、空文字を含むリストは
+押し下げません。`LIKE` は引き続き client 評価で、kintone のキーワード検索には `KLIKE` を
+使用します。`CALC` / `RECORD_NUMBER` とユーザー・組織・グループ・作業者系の code リストは
+未開放です。ユーザー系は存在しない code が `GAIA_IL26` になるため、B54 後に再評価します。
 
 `NUMBER` 行は、直接の物理 NUMBER フィールドと、正規化後の小数部10桁以下・全体30桁以下の
 有限10進 numeric literal（`IN` / `NOT IN` は1件以上の numeric literal だけのリスト）を

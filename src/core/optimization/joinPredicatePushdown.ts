@@ -15,6 +15,11 @@ import {
   serverOnlyFunctionOccurrencesInWhere,
 } from "./relativeDateFullScanExactPlan";
 import { classifyWhereCapability } from "./whereCapability";
+import {
+  isCanonicalJoinDate,
+  isCanonicalJoinDateTime,
+  isCanonicalJoinTime,
+} from "./joinDateTimeLiteralPolicy";
 import { isJoinNumberLiteralSupported } from "./joinNumberLiteralPolicy";
 
 /**
@@ -166,7 +171,7 @@ const KLIKE_TYPES = new Set([
   "FILE",
 ]);
 
-const DATETIME_EQUALITY_TYPES = new Set([
+const DATETIME_TYPES = new Set([
   "DATETIME",
   "CREATED_TIME",
   "UPDATED_TIME",
@@ -891,13 +896,13 @@ function classifyStep2AndLeaves(
   }
   if (where.type !== "BINARY") return [];
   const classification = classifyJoinPushdownLeaf(where, sources);
-  if (classification.relation !== "superset" || classification.owner === undefined) return [];
+  if (classification.relation === "unsafe" || classification.owner === undefined) return [];
   const fieldType = classification.owner.source.fieldTypes.get(classification.owner.fieldCode);
   if (fieldType === undefined || !STEP2_EQUALITY_TYPES.has(fieldType)) return [];
   return [{
     owner: classification.owner,
     predicate: where,
-    relation: "superset",
+    relation: classification.relation,
   }];
 }
 
@@ -1063,19 +1068,38 @@ function classifySupportedLeaf(
     return "unsafe";
   }
 
-  if (fieldType === "SINGLE_LINE_TEXT") {
-    return predicate.op === "="
+  if (fieldType === "SINGLE_LINE_TEXT" || fieldType === "LINK") {
+    if (
+      (predicate.op === "IN" || predicate.op === "NOT_IN")
+      && predicate.right.type === "IN_LIST"
+      && predicate.right.values.length > 0
+      && predicate.right.values.every((value) =>
+        value.type === "STRING" && value.value !== ""
+      )
+    ) {
+      return "exact";
+    }
+    return (predicate.op === "=" || predicate.op === "!=" || predicate.op === "<>")
       && predicate.right.type === "STRING"
       && predicate.right.value !== ""
-      ? "superset"
+      ? "exact"
       : "unsafe";
   }
 
-  if (fieldType === "DATE" || fieldType === "TIME" || DATETIME_EQUALITY_TYPES.has(fieldType)) {
-    if (predicate.op !== "=" || predicate.right.type !== "STRING") return "unsafe";
-    if (fieldType === "DATE") return isCanonicalDate(predicate.right.value) ? "superset" : "unsafe";
-    if (fieldType === "TIME") return isCanonicalTime(predicate.right.value) ? "superset" : "unsafe";
-    return isCanonicalDateTime(predicate.right.value) ? "superset" : "unsafe";
+  if (fieldType === "DATE" || fieldType === "TIME" || DATETIME_TYPES.has(fieldType)) {
+    if (
+      (predicate.op !== "=" && predicate.op !== "!=" && predicate.op !== "<>"
+        && predicate.op !== "<" && predicate.op !== ">"
+        && predicate.op !== "<=" && predicate.op !== ">=")
+      || predicate.right.type !== "STRING"
+    ) return "unsafe";
+    if (fieldType === "DATE") {
+      return isCanonicalJoinDate(predicate.right.value) ? "exact" : "unsafe";
+    }
+    if (fieldType === "TIME") {
+      return isCanonicalJoinTime(predicate.right.value) ? "exact" : "unsafe";
+    }
+    return isCanonicalJoinDateTime(predicate.right.value) ? "exact" : "unsafe";
   }
 
   if (SELECTION_TYPES.has(fieldType)) {
@@ -1134,31 +1158,6 @@ function isPositiveSafeInteger(value: BinaryExpr["right"]): boolean {
 function isSafeIntegerLiteral(value: NumberLiteral): boolean {
   return /^-?\d+$/.test(numberLiteralText(value))
     && Number.isSafeInteger(value.value);
-}
-
-function isCanonicalDate(value: string): boolean {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
-  if (!match) return false;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return date.getUTCFullYear() === year
-    && date.getUTCMonth() === month - 1
-    && date.getUTCDate() === day;
-}
-
-function isCanonicalTime(value: string): boolean {
-  const match = /^(\d{2}):(\d{2})$/.exec(value);
-  return match !== null && Number(match[1]) <= 23 && Number(match[2]) <= 59;
-}
-
-function isCanonicalDateTime(value: string): boolean {
-  const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/.exec(value);
-  if (!match || !isCanonicalDate(match[1])) return false;
-  return Number(match[2]) <= 23
-    && Number(match[3]) <= 59
-    && Number(match[4]) <= 59;
 }
 
 function collectKlikes(where: WhereExpr | null, out: Set<KlikeExpr>): void {
