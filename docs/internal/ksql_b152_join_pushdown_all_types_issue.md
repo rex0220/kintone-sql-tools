@@ -1,7 +1,11 @@
 # B152 JOIN 押し下げ条件の全型棚卸し（B151 の枠組みを全フィールド型へ）
 
 - 起票: 2026-08-07（オーナー依頼「項目タイプすべての押し下げ条件を見直して」）
-- ステータス: 📝 **起票・棚卸し完了（先行実測付き）・Phase 順の方向確定待ち → 順次 B151 方式で仕様化**
+- ステータス: 📋 **仕様 R1 確定（2026-08-07・レビュー済）・Phase 2+3 を実装へ（B151 と v3.60.0 同梱）**
+- 仕様: [R1](ksql_b152_join_pushdown_phase234_spec_r1.md)（codex 作）／[レビュー](ksql_b152_codex_review_1.md)（実装前実測＝
+  Phase 2 の TIME/DATETIME 空セル両方向一致・**TEXT の `=` は大小文字・全半角を逐語区別**（両経路一致）・
+  **Phase 4 は見送り確定**＝`IN ('存在しない code')` が **GAIA_IL26 の query error** になり、
+  開放すると動いていたクエリが壊れる。code のローカル実在検証は不可＝ **B54（User API）後に再評価**）
 - 関連: [B151](ksql_b151_join_inclusive_range_pushdown_issue.md)（NUMBER＝Phase 1・実装中。本件はその親課題）／
   [B76 Phase A](ksql_b76_join_pushdown_phase_a_spec.md)／[B84](ksql_b84_pushdown_visibility_spec.md)
 
