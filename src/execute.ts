@@ -69,6 +69,7 @@ import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
 import { GENERATE_SERIES_MAX_ROWS, resolveGenerateSeries } from "./core/generateSeries";
+import { planJoinKeyPrefilter } from "./core/optimization/joinKeyPrefilter";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -5058,6 +5059,8 @@ async function executeFullScanSelect(
       parallel,
       options.onLimitReached ?? "error",
       warnings,
+      cacheContext,
+      cteCache,
       null,
       plainGroupByPlan,
       ""
@@ -5542,6 +5545,8 @@ async function executeFullScanWithCte(
         parallel,
         effectiveOptions.onLimitReached ?? "error",
         warnings,
+        cacheContext,
+        cteCache,
         pushDownCond,
         plainGroupByPlan
       );
@@ -5871,6 +5876,8 @@ async function tryFetchJoinRecordsBySourceKeys(
   parallel: number,
   onLimit: "error" | "truncate",
   warnings: Set<string>,
+  cacheContext: string,
+  materializedTables?: ReadonlyMap<string, MaterializedTable>,
   pushDownCond: WhereExpr | null = null,
   plainGroupByPlan?: PlainGroupByResolutionPlan,
   additionalPushQuery = ""
@@ -5901,17 +5908,59 @@ async function tryFetchJoinRecordsBySourceKeys(
   const sourceRows = tables.get(sourceAlias);
   if (!sourceRows) return null;
 
-  const keys = new Set<string>();
+  const sourceTable = [stmt.from, ...stmt.joins.map((candidate) => candidate.table)]
+    .find((table) => effectiveTableAlias(table) === sourceAlias);
+  const targetInfo = (await getFieldsCached(join.table.appId, client, cacheContext))
+    .find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
+  const targetMeta = targetInfo
+    ? materializedMetaFromFieldInfo(targetInfo, join.table.appId)
+    : systemColumnMeta(joinField);
+  let sourceMeta: MaterializedColumnMeta | undefined;
+  if (sourceTable?.cteName !== null && sourceTable?.cteName !== undefined) {
+    sourceMeta = materializedTables?.get(sourceTable.cteName)?.columnMeta?.get(sourceField);
+  } else if (sourceTable) {
+    const sourceInfo = (await getFieldsCached(sourceTable.appId, client, cacheContext))
+      .find((info) => info.code === fieldCodeForTypeLookup(sourceTable, sourceField));
+    sourceMeta = sourceInfo
+      ? materializedMetaFromFieldInfo(sourceInfo, sourceTable.appId)
+      : systemColumnMeta(sourceField);
+  }
+
+  const keys: string[] = [];
+  let hasEmptyValue = false;
   for (const row of sourceRows) {
     const raw = row[sourceField]?.value;
     const txt = toScalarText(raw).trim();
-    if (txt.length > 0) keys.add(txt);
+    if (raw === null || raw === undefined || txt.length === 0) hasEmptyValue = true;
+    keys.push(txt);
   }
-  const values = [...keys];
-  if (values.length === 0) return [];
-  if (values.length > JOIN_IN_MAX_KEYS) {
+  const keyPlan = planJoinKeyPrefilter({
+    fieldType: targetMeta?.fieldType,
+    sourceSemantics: sourceMeta?.semantics,
+    sourceRowCount: sourceRows.length,
+    values: keys,
+    hasEmptyValue,
+    maxInKeys: JOIN_IN_MAX_KEYS,
+  });
+  if (keyPlan.kind === "EMPTY_SOURCE") return [];
+  if (keyPlan.kind === "FALLBACK") {
+    if (keyPlan.reason === "JOIN_KEY_LIMIT_EXCEEDED") {
+      const count = new Set(keys.filter((value) => value.length > 0)).size;
+      warnings.add(
+        `JOINキーが ${count} 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
+      );
+    }
+    return null;
+  }
+  if (keyPlan.kind === "RANGE_CANDIDATE") return null;
+
+  const prefilterQueries = keyPlan.kind === "IN"
+    ? splitChunks([...keyPlan.values], JOIN_IN_CHUNK_SIZE)
+      .map((chunk) => `${joinField} in (${chunk.map(sqlQuote).join(",")})`)
+    : [`${joinField} >= ${sqlQuote(keyPlan.min)} and ${joinField} <= ${sqlQuote(keyPlan.max)}`];
+  if (prefilterQueries.length === 0) {
     warnings.add(
-      `JOINキーが ${values.length} 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
+      `JOINキーが 0 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
     );
     return null;
   }
@@ -5922,19 +5971,17 @@ async function tryFetchJoinRecordsBySourceKeys(
     markLimitReached(client, join.table.appId);
   };
 
-  const chunks = splitChunks(values, JOIN_IN_CHUNK_SIZE);
   const merged: KintoneRecord[] = [];
   const seen = new Set<string>();
 
-  for (const chunk of chunks) {
-    const inClause = `${joinField} in (${chunk.map(sqlQuote).join(",")})`;
+  for (const joinKeyQuery of prefilterQueries) {
     const pushQueries = [
       pushDownCond !== null ? whereToKintone(pushDownCond) : "",
       additionalPushQuery,
     ].filter((query) => query !== "");
     const query = pushQueries.reduce(
       (combined, pushQuery) => `(${combined}) and (${pushQuery})`,
-      inClause
+      joinKeyQuery
     );
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, join.table.appId, query, fields, {
       parallel,
@@ -9924,6 +9971,16 @@ interface ExplainWhereAnalysis {
 // EXPLAIN renderer は schema-aware analysis が一度だけ生成した runtime plan object を参照する。
 // renderer 側で JOIN predicate を再抽出・再分類しない。
 const explainJoinPushdownPlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPlan>();
+interface ExplainJoinKeyPrefilter {
+  readonly plan: ReturnType<typeof planJoinKeyPrefilter>;
+  readonly query?: string;
+  readonly additionalQuery?: string;
+  readonly additionalRelation?: "exact" | "superset";
+}
+const explainJoinKeyPrefilters = new WeakMap<
+  SelectStatement,
+  ReadonlyMap<string, ExplainJoinKeyPrefilter>
+>();
 const explainChoiceEqualityRewrites = new WeakMap<
   SelectStatement,
   readonly ChoiceEqualityRewrite[]
@@ -9979,6 +10036,7 @@ async function buildExplainWhereAnalysis(
   );
 
   const explainRelations = new Map<string, MaterializedTable>(initialRelations ?? []);
+  const staticExplainRelations = new Set<string>(initialRelations?.keys() ?? []);
   const explainSourceColumns = async (select: SelectStatement): Promise<string[]> => {
     const tables = [select.from, ...select.joins.map((join) => join.table)];
     if (tables.length > 1 && select.columns.some((column) =>
@@ -10058,6 +10116,17 @@ async function buildExplainWhereAnalysis(
       const withStatement = node as WithStatement;
       for (const cte of withStatement.ctes) {
         await preflightExplainRelations(cte.query);
+        if (cte.query.type === "GENERATE_SERIES") {
+          const generated = executeGenerateSeries(cte.query);
+          explainRelations.set(cte.name, {
+            rows: generated.rows,
+            columns: generated.columns,
+            columnMeta: materializedMetaBySelectResult.get(generated),
+            uniqueGeneratedColumn: cte.query.columnAlias,
+          });
+          staticExplainRelations.add(cte.name);
+          continue;
+        }
         const columns = await inferExplainRelationColumns(cte.query);
         explainRelations.set(cte.name, { rows: [], columns });
       }
@@ -10142,6 +10211,85 @@ async function buildExplainWhereAnalysis(
         await loadTypedPushdownMeta(select, tracedClient, cacheContext)
       );
       if (joinPushdownPlan) explainJoinPushdownPlans.set(select, joinPushdownPlan);
+      const joinKeyPlans = new Map<string, ExplainJoinKeyPrefilter>();
+      for (const join of select.joins) {
+        const joinAlias = join.table.alias;
+        if (join.type !== "INNER" || !joinAlias || join.table.subtableCode) continue;
+        const leftAlias = join.on.left.tableAlias;
+        const rightAlias = join.on.right.tableAlias;
+        if (!leftAlias || !rightAlias) continue;
+        const sourceAlias = leftAlias === joinAlias && rightAlias !== joinAlias
+          ? rightAlias
+          : rightAlias === joinAlias && leftAlias !== joinAlias
+            ? leftAlias
+            : undefined;
+        const sourceField = leftAlias === joinAlias ? join.on.right.field : join.on.left.field;
+        const joinField = leftAlias === joinAlias ? join.on.left.field : join.on.right.field;
+        if (!sourceAlias) continue;
+        const sourceTable = [select.from, ...select.joins.map((candidate) => candidate.table)]
+          .find((table) => effectiveTableAlias(table) === sourceAlias);
+        const targetInfos = await getFieldsCached(join.table.appId, tracedClient, cacheContext);
+        const targetInfo = targetInfos
+          .find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
+        const targetMeta = targetInfo
+          ? materializedMetaFromFieldInfo(targetInfo, join.table.appId)
+          : systemColumnMeta(joinField);
+        let sourceMeta: MaterializedColumnMeta | undefined;
+        let values: string[] | undefined;
+        let sourceRowCount: number | undefined;
+        let hasEmptyValue: boolean | undefined;
+        if (sourceTable?.cteName !== null && sourceTable?.cteName !== undefined) {
+          const relation = explainRelations.get(sourceTable.cteName);
+          sourceMeta = relation?.columnMeta?.get(sourceField);
+          if (staticExplainRelations.has(sourceTable.cteName) && relation) {
+            sourceRowCount = relation.rows.length;
+            values = relation.rows.map((row) => toScalarText(row[sourceField]).trim());
+            hasEmptyValue = values.some((value) => value.length === 0);
+          }
+        } else if (sourceTable) {
+          const info = (await getFieldsCached(sourceTable.appId, tracedClient, cacheContext))
+            .find((candidate) => candidate.code === fieldCodeForTypeLookup(sourceTable, sourceField));
+          sourceMeta = info
+            ? materializedMetaFromFieldInfo(info, sourceTable.appId)
+            : systemColumnMeta(sourceField);
+        }
+        const plan = planJoinKeyPrefilter({
+          fieldType: targetMeta?.fieldType,
+          sourceSemantics: sourceMeta?.semantics,
+          sourceRowCount,
+          values,
+          hasEmptyValue,
+          maxInKeys: JOIN_IN_MAX_KEYS,
+        });
+        // in 候補の実値が records API なしでは分からない物理 source は、
+        // 既存 field-vs-literal EXPLAIN を上書きしない。B150 の runtime candidate 表示は
+        // relation 上限を型だけで確定できる range 候補に限定する。
+        if (plan.kind === "FALLBACK" && plan.reason === "JOIN_KEY_VALUES_RUNTIME") continue;
+        const query = plan.kind === "IN"
+          ? `${joinField} in (${plan.values.map(sqlQuote).join(",")})`
+          : plan.kind === "RANGE"
+            ? `${joinField} >= ${sqlQuote(plan.min)} and ${joinField} <= ${sqlQuote(plan.max)}`
+            : undefined;
+        const additionalCandidate = select.where
+          ? extractTypedPushdownCandidates(select.where, { tableAlias: joinAlias })
+          : null;
+        let additionalQuery: string | undefined;
+        let additionalRelation: "exact" | "superset" | undefined;
+        if (additionalCandidate) {
+          const infoByCode = new Map(targetInfos.map((info) => [info.code, info]));
+          const additionalCapability = classifyWhereCapability(additionalCandidate, (field) => {
+            const info = infoByCode.get(field.field);
+            return info?.semantics ?? (info ? resolveFieldSemantics(info) : systemColumnMeta(field.field)?.semantics);
+          });
+          if (additionalCapability.capability === "EXACT_PUSHDOWN"
+            || additionalCapability.capability === "SUPERSET_PREFILTER") {
+            additionalQuery = whereToKintone(additionalCandidate);
+            additionalRelation = additionalCapability.capability === "EXACT_PUSHDOWN" ? "exact" : "superset";
+          }
+        }
+        joinKeyPlans.set(joinAlias, { plan, query, additionalQuery, additionalRelation });
+      }
+      if (joinKeyPlans.size > 0) explainJoinKeyPrefilters.set(select, joinKeyPlans);
       // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
       if (select.orderBy.length > 0
         || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
@@ -11566,10 +11714,23 @@ function buildSelectPlan(
       const joinBoundQuery = join.table.alias
         ? runtimeJoinPlan?.queriesByAlias.get(join.table.alias)
         : undefined;
-      const joinQ = joinBoundQuery
+      const joinKey = join.table.alias
+        ? explainJoinKeyPrefilters.get(stmt)?.get(join.table.alias)
+        : undefined;
+      const baseJoinQ = joinBoundQuery
         || (joinPushDown !== null
-          ? whereToKintone(joinPushDown)
-          : "(全件取得)");
+            ? whereToKintone(joinPushDown)
+            : joinKey?.additionalQuery
+              ? joinKey.additionalQuery
+            : "(全件取得)");
+      const joinKeyQuery = joinKey?.query;
+      const joinQ = joinKeyQuery
+        ? baseJoinQ !== "(全件取得)"
+          ? `(${joinKeyQuery}) and (${baseJoinQ})`
+          : joinKeyQuery
+        : joinKey?.plan.kind === "RANGE_CANDIDATE"
+          ? "(runtime source keys)"
+          : baseJoinQ;
       lines.push(`  ${joinType}:        APP${join.table.appId}${joinAliasStr} (${join.table.appId})`);
       lines.push(`  kintone query: ${joinQ}`);
       const joinPlanItem = runtimeJoinPlan?.joinPlan.items.find((item) =>
@@ -11580,11 +11741,16 @@ function buildSelectPlan(
           (consumption) => consumption.targetAlias === join.table.alias
         );
       if (emitFetch && join.table.cteName === null) {
-        const joinPending = !runtimeJoinPlan && joinCandidate !== null;
+        const joinPending = joinKey?.plan.kind === "RANGE_CANDIDATE"
+          || (!joinKey && !runtimeJoinPlan && joinCandidate !== null);
         const joinFetchScope: ExplainFetchScope = joinQ === "(全件取得)"
           ? "ALL"
           : joinPending
             ? "PREFILTERED"
+            : joinKey?.plan.kind === "IN"
+              && joinPlanItem?.relation !== "superset"
+              && joinKey.additionalRelation !== "superset"
+            ? "EXACT"
             : joinPlanItem?.relation === "exact" || joinFunctionConsumption
             ? "EXACT"
             : "PREFILTERED";
@@ -11598,7 +11764,27 @@ function buildSelectPlan(
           joinPending
         )));
       }
-      if (joinPlanItem || joinFunctionConsumption) {
+      if (joinKey) {
+        if (joinKey.plan.kind === "RANGE") {
+          lines.push("  join key prefilter: range");
+          lines.push(`  pushdown applied: ${joinQ}`);
+          lines.push("  relation: superset");
+        } else if (joinKey.plan.kind === "IN") {
+          const relation = joinPlanItem?.relation === "superset" || joinKey.additionalRelation === "superset"
+            ? "superset"
+            : "exact";
+          lines.push("  join key prefilter: in");
+          lines.push(`  pushdown applied: ${joinQ}`);
+          lines.push(`  relation: ${relation}`);
+        } else if (joinKey.plan.kind === "RANGE_CANDIDATE") {
+          lines.push("  join key prefilter: range candidate");
+          lines.push("  relation: superset");
+          lines.push(`  join key prefilter reason: ${joinKey.plan.reason}`);
+        } else if (joinKey.plan.kind === "FALLBACK") {
+          lines.push("  join key prefilter: not applied");
+          lines.push(`  join key prefilter reason: ${joinKey.plan.reason}`);
+        }
+      } else if (joinPlanItem || joinFunctionConsumption) {
         lines.push(`  pushdown applied: ${joinBoundQuery}`);
         lines.push(`  relation: ${joinPlanItem?.relation ?? "exact"}`);
       } else if (!runtimeJoinPlan && joinCandidate !== null) {

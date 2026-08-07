@@ -1385,6 +1385,31 @@ FROM APP100 AS a
 JOIN APP200 AS b ON a.顧客ID = b.顧客ID
 ```
 
+#### 結合キーによる取得範囲の絞り込み
+
+実体化済みの CTE・一時テーブル・先に取得した物理 APP から、alias 付き物理 APP へ
+`INNER JOIN` する場合、kSQL は結合キーの実値を使って JOIN 先の取得候補を絞ります。
+JOIN 先フィールドが `in` を受ける型では従来どおり `in (...)` を使い、50キー単位・最大300キーで
+取得します。
+
+`DATE` / `TIME` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` は `in` を受けないため、
+すべてのキーが型に対応する正規形式なら最小値・最大値による範囲 prefilter を使います。
+
+```text
+日付 >= "2025-08-04" and 日付 <= "2025-08-06"
+```
+
+この範囲は候補を広めに取得する `relation: superset` です。範囲内に実際のキー集合にない値が
+含まれても、既存の JOIN 後照合が最終結果から除外します。キーに空値または正規形式でない値が
+1件でも含まれる場合、または対象フィールドが `in` と範囲比較のどちらも受けない場合は、
+不適切な演算子を推測せず JOIN 先を全件取得します。正規形式は `DATE` が `YYYY-MM-DD`、
+`TIME` が `HH:mm`、日時系が `YYYY-MM-DDTHH:mm:ssZ` です。
+
+方式選択は records API 呼び出し前に行います。選択済みの query に対して kintone が返した認証・
+権限・値受理・検索打ち切り・通信エラーを、空 query や全件取得で silent retry はしません。
+`EXPLAIN` では `join key prefilter: in | range | not applied`、適用時の `relation`、
+フォールバック時の `join key prefilter reason` を確認できます。
+
 ### LEFT JOIN
 
 左テーブルの全行 + 結合条件を満たす右テーブルの行を返します。  
