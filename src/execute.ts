@@ -5930,7 +5930,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   let hasEmptyValue = false;
   for (const row of sourceRows) {
     const raw = row[sourceField]?.value;
-    const txt = toScalarText(raw).trim();
+    const txt = toScalarText(raw);
     if (raw === null || raw === undefined || txt.length === 0) hasEmptyValue = true;
     keys.push(txt);
   }
@@ -5945,7 +5945,7 @@ async function tryFetchJoinRecordsBySourceKeys(
   if (keyPlan.kind === "EMPTY_SOURCE") return [];
   if (keyPlan.kind === "FALLBACK") {
     if (keyPlan.reason === "JOIN_KEY_LIMIT_EXCEEDED") {
-      const count = new Set(keys.filter((value) => value.length > 0)).size;
+      const count = new Set(keys).size;
       warnings.add(
         `JOINキーが ${count} 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
       );
@@ -10243,7 +10243,7 @@ async function buildExplainWhereAnalysis(
           sourceMeta = relation?.columnMeta?.get(sourceField);
           if (staticExplainRelations.has(sourceTable.cteName) && relation) {
             sourceRowCount = relation.rows.length;
-            values = relation.rows.map((row) => toScalarText(row[sourceField]).trim());
+            values = relation.rows.map((row) => toScalarText(row[sourceField]));
             hasEmptyValue = values.some((value) => value.length === 0);
           }
         } else if (sourceTable) {

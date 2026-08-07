@@ -20,6 +20,7 @@ const fields: Readonly<Record<number, readonly KintoneFieldInfo[]>> = {
     { code: "作成日時", label: "作成日時", fieldType: "CREATED_TIME" },
     { code: "更新日時", label: "更新日時", fieldType: "UPDATED_TIME" },
     { code: "数", label: "数", fieldType: "NUMBER" },
+    { code: "レコード番号", label: "レコード番号", fieldType: "RECORD_NUMBER" },
   ],
   [TARGET]: [
     { code: "日付", label: "日付", fieldType: "DATE" },
@@ -31,6 +32,7 @@ const fields: Readonly<Record<number, readonly KintoneFieldInfo[]>> = {
     { code: "作成日時", label: "作成日時", fieldType: "CREATED_TIME" },
     { code: "更新日時", label: "更新日時", fieldType: "UPDATED_TIME" },
     { code: "数", label: "数", fieldType: "NUMBER" },
+    { code: "レコード番号", label: "レコード番号", fieldType: "RECORD_NUMBER" },
   ],
 };
 
@@ -344,5 +346,77 @@ SELECT s.日付,t.個数 FROM s INNER JOIN APP4228 t ON s.日付=t.日付 WHERE 
     expect(text).toContain("join key prefilter: not applied");
     expect(text).toContain(`join key prefilter reason: ${reason}`);
     expect(text).not.toContain("relation: superset");
+  });
+});
+
+describe("B153 empty JOIN key acceptance", () => {
+  test("空キー混在でも物理側の空キー行を取得し、空=空の一致を返す", async () => {
+    const client = makeClient({
+      sourceRows: [
+        record("1", { キー: "" }),
+        record("2", { キー: "A" }),
+      ],
+      targetRows: [
+        record("11", { キー: "", 個数: "0" }),
+        record("12", { キー: "A", 個数: "1" }),
+      ],
+    });
+    const result = await execute(
+      "SELECT s.キー,t.個数 FROM APP4227 s INNER JOIN APP4228 t ON s.キー=t.キー ORDER BY t.個数",
+      client,
+      { cacheContext: "b153-empty-mixed" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([{ キー: "", 個数: "0" }, { キー: "A", 個数: "1" }]);
+    expect(client.queries.some((call) => stripPaging(call.query) === 'キー in ("","A")')).toBe(true);
+  });
+
+  test("全キー空でも取得ゼロへ短絡せず in (\"\") を逐語送信する", async () => {
+    const client = makeClient({
+      sourceRows: [
+        record("1", { キー: "" }),
+        record("2", { キー: null }),
+        record("3", { キー: undefined }),
+      ],
+      targetRows: [record("11", { キー: "", 個数: "0" })],
+    });
+    const result = await execute(
+      "SELECT s.キー,t.個数 FROM APP4227 s INNER JOIN APP4228 t ON s.キー=t.キー",
+      client,
+      { cacheContext: "b153-empty-only" }
+    ) as SelectResult;
+    expect(result.rowCount).toBe(3);
+    expect(client.queries.some((call) => stripPaging(call.query) === 'キー in ("")')).toBe(true);
+  });
+
+  test("空値受理未確認の RECORD_NUMBER は JOIN_KEY_EMPTY_VALUE 方針で全件取得する", async () => {
+    const client = makeClient({
+      sourceRows: [record("1", { レコード番号: "" })],
+      targetRows: [record("11", { レコード番号: "", 個数: "0" })],
+    });
+    const result = await execute(
+      "SELECT s.レコード番号,t.個数 FROM APP4227 s INNER JOIN APP4228 t ON s.レコード番号=t.レコード番号",
+      client,
+      { cacheContext: "b153-record-number-fallback" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([{ レコード番号: "", 個数: "0" }]);
+    const targetQueries = client.queries
+      .filter((call) => call.app === TARGET)
+      .map((call) => stripPaging(call.query));
+    expect(targetQueries).toContain("");
+    expect(targetQueries.join("\n")).not.toContain("レコード番号 in (");
+  });
+
+  test("JOIN ローカル評価器と同じく空白キーを trim せず逐語照合する", async () => {
+    const client = makeClient({
+      sourceRows: [record("1", { キー: " " })],
+      targetRows: [record("11", { キー: " ", 個数: "1" }), record("12", { キー: "", 個数: "0" })],
+    });
+    const result = await execute(
+      "SELECT s.キー,t.個数 FROM APP4227 s INNER JOIN APP4228 t ON s.キー=t.キー",
+      client,
+      { cacheContext: "b153-whitespace" }
+    ) as SelectResult;
+    expect(result.rows).toEqual([{ キー: " ", 個数: "1" }]);
+    expect(client.queries.some((call) => stripPaging(call.query) === 'キー in (" ")')).toBe(true);
   });
 });

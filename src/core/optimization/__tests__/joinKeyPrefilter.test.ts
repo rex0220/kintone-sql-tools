@@ -1,5 +1,8 @@
 import { resolveFieldSemantics } from "../../fieldSemantics";
-import { planJoinKeyPrefilter } from "../joinKeyPrefilter";
+import {
+  JOIN_KEY_EMPTY_IN_FIELD_TYPES,
+  planJoinKeyPrefilter,
+} from "../joinKeyPrefilter";
 
 const plan = (
   fieldType: string | undefined,
@@ -21,7 +24,7 @@ describe("B150 join key prefilter planner", () => {
     (fieldType) => {
       expect(plan(fieldType, ["B", "A", "B", ""])).toEqual({
         kind: "IN",
-        values: ["B", "A"],
+        values: ["B", "A", ""],
         relation: "exact",
       });
     }
@@ -90,4 +93,46 @@ describe("B150 join key prefilter planner", () => {
       reason: "JOIN_KEY_VALUES_RUNTIME",
     });
   });
+});
+
+describe("B153 empty JOIN key policy", () => {
+  test("in (\"\") の受理確認済み型を pure policy として固定する", () => {
+    expect([...JOIN_KEY_EMPTY_IN_FIELD_TYPES]).toEqual([
+      "SINGLE_LINE_TEXT",
+      "LINK",
+      "NUMBER",
+      "CALC",
+      "DROP_DOWN",
+      "RADIO_BUTTON",
+      "CHECK_BOX",
+      "MULTI_SELECT",
+      "STATUS",
+    ]);
+  });
+
+  test.each([...JOIN_KEY_EMPTY_IN_FIELD_TYPES])(
+    "%s は空値を重複除去して in に残す",
+    (fieldType) => {
+      expect(plan(fieldType, ["", "A", ""])).toEqual({
+        kind: "IN",
+        values: ["", "A"],
+        relation: "exact",
+      });
+      expect(plan(fieldType, [""])).toEqual({
+        kind: "IN",
+        values: [""],
+        relation: "exact",
+      });
+    }
+  );
+
+  test.each(["RECORD_NUMBER", "__ID__", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"])(
+    "%s は空値を含むと全件取得へ fallback する",
+    (fieldType) => {
+      expect(plan(fieldType, ["", "A"])).toEqual({
+        kind: "FALLBACK",
+        reason: "JOIN_KEY_EMPTY_VALUE",
+      });
+    }
+  );
 });
