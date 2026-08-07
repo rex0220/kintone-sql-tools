@@ -206,4 +206,40 @@ describe("B84 JOIN field-vs-literal pushdown documentation", () => {
   test("分類器ソースから導いた型×演算子表が公開文書と一致する", () => {
     expect(documentedTable()).toBe(generatedTable());
   });
+
+  test("B151 NUMBER の追加 literal 条件を固定する", () => {
+    const numberSource = source("NUMBER");
+    const relation = (op: CompareOp, right: BinaryExpr["right"]) =>
+      classifyJoinPushdownLeaf({
+        type: "BINARY",
+        op,
+        left: { type: "FIELD", tableAlias: "a", field: "probe" },
+        right,
+      }, [numberSource]).relation;
+    const number = (raw: string): NumberLiteral => ({
+      type: "NUMBER",
+      value: Number(raw),
+      raw,
+    });
+
+    for (const raw of ["999999999999.99985", "9007199254740993", "-5", "1e3", "-0"]) {
+      expect(relation("=", number(raw))).toBe("exact");
+    }
+    expect(relation(">=", number("1e-11"))).toBe("unsafe");
+    expect(relation("IN", { type: "IN_LIST", values: [number("-5"), number("1e3")] }))
+      .toBe("exact");
+    expect(relation("NOT_IN", {
+      type: "IN_LIST",
+      values: [number("1"), { type: "STRING", value: "2" }],
+    })).toBe("unsafe");
+  });
+
+  test("分類器または文書の NUMBER 1セルを戻すとパリティが崩れる", () => {
+    const generated = generatedTable();
+    const documented = documentedTable();
+    const oldNumberRow = "| `NUMBER` | ○ | ✕ | ○ | ○ | ○ | ○ | ○ | ○ |";
+    const currentNumberRow = "| `NUMBER` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |";
+    expect(generated.replace(currentNumberRow, oldNumberRow)).not.toBe(documented);
+    expect(documented.replace(currentNumberRow, oldNumberRow)).not.toBe(generated);
+  });
 });

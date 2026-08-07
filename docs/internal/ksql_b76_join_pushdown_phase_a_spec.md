@@ -158,6 +158,11 @@ Step 0 では当該テストだけを v3.25.0 worktree で再実行し、PASS
 | `$id` / `__ID__` | E | U | E | E | U | U | U | 正の安全整数 domain。現行 safe leaf を維持 |
 | RECORD_NUMBER | E | U | E | E | U | U | U | `$id` と同じ canonical record-number domain と証明できる場合だけ |
 | NUMBER | S | U | S* | U | U | U | U | `*` strict `<` / `>` かつ右辺が安全整数。IEEE-754 境界のため inclusive は不可 |
+> **【B151 により失効・2026-08-07】**
+> NUMBER 行の「IEEE-754 境界のため inclusive は不可」と安全整数限定は、
+> 現行の direct NUMBER local 比較が `parseExactDecimal()` を使う10進厳密比較であること、
+> および server/local の境界・空セル挙動が一致する実測により失効した。
+> 現行契約は B151 R1 を参照。B76 の他型・tree 合成・ownership・residual 規則は維持する。
 | CALC | U | U | U | U | U | U | U | 表示・計算精度を NUMBER と同一視する根拠が不足 |
 | SINGLE_LINE_TEXT | S | U | U | U | U | U | E† | `=` は JS の byte/code-point equality が真なら同 literal の server equality も真となる方向だけを採用。正規化同値は主張しない |
 | LINK | U | U | U | U | U | U | E† | TEXT `=` へ一般化しない |
