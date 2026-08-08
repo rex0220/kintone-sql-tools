@@ -1047,6 +1047,9 @@ function createDryRunClient(): KintoneClient {
 function hasStaticTypedPushdownCandidate(statement: unknown): boolean {
   if (statement === null || typeof statement !== "object") return false;
   const node = statement as Record<string, unknown>;
+  if (node["type"] === "CREATE_TEMP_TABLE") {
+    return hasStaticTypedPushdownCandidate(node["query"]);
+  }
   if (node["type"] === "WITH") {
     const query = node["query"];
     const containsCross = (value: unknown): boolean => {
@@ -1866,8 +1869,13 @@ async function run(): Promise<number> {
       });
       dryRunNeedsMetadata = statements.some(explainNeedsAppMetadata);
       // 相対日付関数を含む文は EXPLAIN でも resolver（metadata API）を呼ぶため、
-      // 静的経路（throwing client・API 0 回）はバッチ全体が resolver 不要のときに限る。
+      // 静的経路（throwing client・API 0 回）は、metadata が必要な全ての文を
+      // 静的 typed plan で処理でき、かつバッチ全体が相対日付 resolver 不要のときに限る。
+      const staticEligible = statements.every((statement) =>
+        !explainNeedsAppMetadata(statement) || hasStaticTypedPushdownCandidate(statement)
+      );
       dryRunUsesStaticTypedPlan = statements.some(hasStaticTypedPushdownCandidate)
+        && staticEligible
         && !statements.some(statementUsesRelativeDateResolution);
       if (statements.length > 1) {
         // 複文バッチ（フェーズ1: read-only のみ。DML バッチはフェーズ2 M2）

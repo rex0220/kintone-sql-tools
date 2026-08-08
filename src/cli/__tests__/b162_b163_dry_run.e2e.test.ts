@@ -3,7 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { runWithArgv } from "../index";
 
-async function runCli(sql: string): Promise<{
+async function runCli(sql: string, allowFields = false): Promise<{
   code: number;
   stdout: string;
   stderr: string;
@@ -26,6 +26,14 @@ async function runCli(sql: string): Promise<{
     else if (url.includes("/records.json")) calls.records += 1;
     else calls.metadata += 1;
     if ((init?.method ?? "GET") !== "GET") calls.writes += 1;
+    if (allowFields && url.includes("/app/form/fields.json")) {
+      return new Response(JSON.stringify({
+        properties: {
+          キー: { code: "キー", label: "キー", type: "SINGLE_LINE_TEXT" },
+          製品名: { code: "製品名", label: "製品名", type: "SINGLE_LINE_TEXT" },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
     throw new Error("DryRunError: API call should not happen");
   });
   try {
@@ -45,10 +53,19 @@ async function runCli(sql: string): Promise<{
 const dir = mkdtempSync(join(tmpdir(), "ksql-b162-b163-dry-run-"));
 const config = join(dir, "ksql.config.json");
 
+function statementPlan(stdout: string, index: number, type: string): string {
+  const marker = `[${index}] ${type}\n`;
+  const start = stdout.indexOf(marker);
+  if (start < 0) return "";
+  const body = stdout.slice(start + marker.length);
+  const next = body.search(/\n\n\[\d+\] /);
+  return (next < 0 ? body : body.slice(0, next)).trimEnd();
+}
+
 beforeAll(() => {
   writeFileSync(config, JSON.stringify({
     defaultProfile: "smoke",
-    profiles: { smoke: { baseUrl: "http://127.0.0.1:1", tokenMap: { "4229": "dummy" } } },
+    profiles: { smoke: { baseUrl: "http://127.0.0.1:1", tokenMap: { "4228": "dummy", "4229": "dummy" } } },
   }));
 });
 
@@ -81,5 +98,28 @@ test("B163 CLI --dry-run は resolveMetadata=false でも static schema と grou
   expect(result.stdout).toContain("source:        temp table #t (schema from statement 1)");
   expect(result.stdout).toContain("group key 製品名: PHYSICAL (source=0, field=製品名)");
   expect(result.stdout).not.toContain("InternalError");
+  expect(result.stderr).toBe("");
+});
+
+test("B163 と metadata 必須文の混在 dry-run は通常文だけ metadata を解決し records API 0", async () => {
+  const result = await runCli(
+    "CREATE TEMP TABLE #t AS " +
+      "WITH s AS (GENERATE_SERIES('2025-08-01','2026-08-01','1 month') AS 月) " +
+      "SELECT DATE_FORMAT(s.月,'%Y-%m') AS 年月,m.製品名 AS 製品名 FROM s CROSS JOIN APP4229 AS m; " +
+      "SELECT 製品名,COUNT(*) AS 月数 FROM #t GROUP BY 製品名; " +
+      "SELECT キー FROM APP4228 WHERE 製品名 = '牛乳'",
+    true
+  );
+  expect(result.code).toBe(0);
+  expect(result.calls.records).toBe(0);
+  expect(result.calls.cursor).toBe(0);
+  expect(result.calls.writes).toBe(0);
+  expect(result.calls.metadata).toBeGreaterThan(0);
+  expect(result.stdout).toContain("schema:        年月, 製品名");
+  expect(result.stdout).toContain("group key 製品名: PHYSICAL (source=0, field=製品名)");
+  const ordinary = statementPlan(result.stdout, 3, "SELECT");
+  expect(ordinary).toContain('kintone query: 製品名 = "牛乳"');
+  expect(ordinary).not.toContain("pushdown candidate:");
+  expect(ordinary).not.toContain("(全件取得)");
   expect(result.stderr).toBe("");
 });
