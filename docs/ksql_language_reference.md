@@ -928,27 +928,60 @@ v2までは数字だけの文字列を値ベースで数値比較する経路が
 
 ### WHERE の REST 押し下げ
 
-ここでいう「押し下げ」は、`WHERE` の条件を kintone records API の query に含め、取得候補を
-サーバー側で減らす最適化です。結果の意味は変わりません。候補を広めに取得する
-`superset` を含め、押し下げ後も元の `WHERE` を client で再評価するためです。
-内部区分は `EXPLAIN` の `relation: exact` / `relation: superset` で確認できます。
+前提として、**kintone は SQL を実行しません**。kSQL エンジンは records API でレコードを
+取得し、`WHERE`・`JOIN`・集計・関数などの SQL 評価はすべてエンジン内（JavaScript）で
+行います。何もしなければ、条件がどれだけ絞り込んでいても**アプリの全レコードを転送してから**
+捨てることになります。
 
-押し下げには複数の機構があります。次の表が説明するのは、**alias 付き物理 APP だけを
-入力にする INNER JOIN で、1つのフィールドを1つのリテラル（`IN` / `NOT IN` は
-リテラルリスト）と比較する単一の条件**だけです。単一表、server-only 関数、`KLIKE` は
-別の規則です。
+「押し下げ（pushdown）」は、この構図で **kintone のクエリ構文でも表現できる条件を
+records API の `query` パラメータへ移し、転送されるレコード自体を減らす動作**です。
 
-- **単一表:** `WHERE` 全体を kintone query へ exact に直列化できれば、フィールド型を問わず
-  押し下げます。FULL_SCAN でも、次表と同じ型・literal・演算子規則を満たす AND leaf だけを
-  prefilter に使えます。たとえば `製品名 = '牛乳' AND 仕入先 LIKE 'zz'` は、前者だけを
-  records API に送り、元の `WHERE` 全体を取得後に再評価します。
-- **JOIN・field vs literal:** 次表の「押し下がる」条件だけを APP ごとの prefilter に使います。
-  表にないフィールド型は押し下がりません。CTE または一時テーブルと物理 APP の INNER JOIN
-  でも、物理 APP 側の直接フィールドは同じ規則で JOIN key prefilter に合流します。
+```
+SELECT * FROM APP100 WHERE 製品名 = '牛乳' AND 仕入先 LIKE '%乳業%'
 
-これらの経路は1つの leaf policyを共有します。`EXPLAIN` の `join pushdown plan: not applied` は、
-CTE・一時テーブルを含む場合に「物理 APP だけの直接 JOIN planner」が不適用であることを示し、
-続く source ごとの JOIN key / WHERE prefilter まで不適用という意味ではありません。
+押し下げなし: GET records.json?app=100                          → 全件転送し、WHERE 全体を JS で評価
+押し下げあり: GET records.json?app=100&query=製品名 = "牛乳"     → 転送を減らし、取得後に WHERE 全体を再評価
+```
+
+どちらも結果は同じです。候補を広めに取得する `superset` を含め、押し下げ後も
+**元の `WHERE` 全体を取得後に再評価する**ためで、正しさを担保するのは常にこの再評価です。
+押し下げの有無・広さが変えるのは、転送件数・API 呼び出し回数・`maxRecords` の当たり方だけです
+（例外は 1 つ＝押し下げた値そのものを kintone が拒否する場合で、単一表と同じ
+kintone エラーが表面化します。§内の「定義に無い選択肢値」等を参照）。
+
+#### 機構の全体像
+
+押し下げには 3 つの機構があります。
+
+1. **単一表の完全直列化**: `WHERE` 全体を kintone query へ exact に直列化できれば、
+   フィールド型を問わず押し下げます（SIMPLE モードの基本形）。
+2. **安全葉のプレフィルタ**: 全体を直列化できない形（`LIKE`・関数・JOIN など）でも、
+   `WHERE` ルートから AND と括弧だけを経由する「安全な葉」だけを先に送ります。
+   単一表 FULL_SCAN と、JOIN の各物理 APP（field vs literal・次表の規則）が対象です。
+   たとえば `製品名 = '牛乳' AND 仕入先 LIKE 'zz'` は前者だけを records API に送り、
+   元の `WHERE` 全体を取得後に再評価します。
+3. **結合キーの押し下げ**: CTE・一時テーブルを物理 APP へ INNER JOIN する形では、
+   結合キーの実値から `in` リスト、または（`in` を受けない日付系などは）min/max の範囲を
+   作って JOIN 先を絞り込みます。物理 APP 側の安全葉（機構 2 と同じ規則）も
+   この query に合流します。
+
+これらの安全葉の判定（型×演算子×literal の規則）は 1 つの leaf policy を共有します。
+次の表が説明するのは、**1 つのフィールドを 1 つのリテラル（`IN` / `NOT IN` は
+リテラルリスト）と比較する単一の条件**の判定です。server-only 関数、`KLIKE` は別の規則です。
+
+#### `EXPLAIN` の読み方（押し下げ関連の行）
+
+- **取得の実態の正は、各 source の `fetch:` 行**です（`EXACT` / `PREFILTERED` / `ALL` など）。
+  `maxRecords` の見積もりはこの行を根拠にしてください。
+- **`relation:` は「押し下げた条件が忠実に訳せたか」**（`exact`＝葉単位で等価・
+  `superset`＝広めに取得）であって、**「押し下げから漏れた条件が無いか」ではありません**。
+  `relation: exact` でも `LIKE` などの残余条件があれば、取得件数は答えより多くなります
+  （実測・v3.62.0）。
+- `pushdown applied:` は確定した query、`pushdown candidate: …（実行時の型・実在確認待ち）` は
+  metadata 未取得の静的表示です（CLI `--dry-run` など・API 0 回の面で出ます）。
+- `join pushdown plan: not applied` は、CTE・一時テーブルを含む場合に「物理 APP だけの
+  直接 JOIN planner」が不適用であることを示すだけで、続く source ごとの
+  JOIN key / WHERE prefilter まで不適用という意味ではありません（各 source 行を読みます）。
 
 フォーム選択系の `IN` / `NOT IN` は、空でない実在選択肢だけのリストを指定し、型情報と
 選択肢情報を取得できた場合に押し下がります。ユーザー・組織・グループ・作業者系は
