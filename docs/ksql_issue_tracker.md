@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-08-08
 - 現在の最新リリース: **v3.64.0**（2026-08-08・publish 済み・実機確認済み）。→ [リリース履歴](ksql_release_history.md)
-- 次回リリース計画: **未定**。残るのは **B160**（B128 2a 着手時の前提）／**B143**（低）／**B141**（散文の穴）。クローズ済みは §3。
+- 次回リリース計画: **B164**（比較位置の変数集計＝正しさ・調査から）を v3.65.0 候補。ほか **B160**（B128 2a 着手時の前提）／**B143**（低）／**B141**（散文の穴）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -39,6 +39,7 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
+| B164 | `@変数` を含む集計が比較位置（`CASE WHEN`/`HAVING`）で -Infinity になる | 課題 | 📝 **起票（2026-08-08・[依頼元の v3.64.0 返信 §3](internal/ksql_b164_variable_aggregate_comparison_issue.md)・主張 3 点を実測で逐語再現）**。**静かに間違うクラス**＝SELECT リストは正しく比較位置だけ壊れる・エラーも警告も無し・除数ガード不発火→NaN・HAVING は黙って 0 行。見立て＝計算側（変数解決後）と参照側の **canonical identity 突合の破れ**（B147/B148/B124 と同族）→ 未計算扱い→空＝最小値。**次＝codex へ原因調査依頼**。依頼元は鉄則で回避済み・優先 中申告だが正しさ優先で次サイクル筆頭。 | 正しさ | 中 | [B164](internal/ksql_b164_variable_aggregate_comparison_issue.md) |
 | B156 | `relation: exact` が「取得＝答え」と誤読される | 改善 | ✅ **案 B 実施（2026-08-08・文書のみ・エンジン不変）**＝言語リファレンス §6 に**「機構の全体像」（3 機構）と「EXPLAIN の読み方」（`fetch:` が正・`relation:` は葉の忠実度で「取得＝答え」ではない・`not applied` の意味）を新設**（オーナー指摘「押し下げの解説がいるのでは」で前倒し）。案 A（`relation:` 行への 1 語追記）は**次に同じ誤読の報告が来たら再評価**。 | 改善 | 低 | [B156](internal/ksql_b156_relation_exact_residual_note_issue.md) |
 | B160 | 全順序警告の「無視してよい条件」が 0 埋め（生成列 `ORDER BY`）を判定できない | 改善 | 📝 **起票**（2026-08-08・[依頼元の B128 意見 §3](internal/ksql_b160_window_warning_generated_column_issue.md)・実測裏取り済み・v3.59.0 返信でも既出＝2 度目）。0 埋めは JOIN を経るため v3.59.0 免除が効かず、**B140 の免除文言は非集約の 0 埋め形に判定を与えない**。単独では急がないが **B128 2a に着手するなら同梱前提**（新機能の標準形に「無視してよいと言えない警告」が必ず付くため）。 | 改善 | 低 | [B160](internal/ksql_b160_window_warning_generated_column_issue.md) |
 | B143 | `EXPLAIN` が `warnings` を返さない | 改善 | 📝 **起票のみ。文書化は v3.54.4 で実施、実装は未着手**（2026-08-06・[依頼元 §6.1](../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260806-v3543.md)）→ [B143](internal/ksql_b143_explain_warnings_issue.md)。**実測**＝CTE 上の `LAG` も既定フレームのウィンドウも、`ksql_explain` は計画の行（`window ...:` / `frame: RANGE ...`）には出すが **`warnings` は常に空**で、実行すると警告が出る。**依頼元の運用は「実行前に `ksql_explain` まで通す」**ため**「explain を通したから警告は無い」と読み違える**（**素の状態で回した別セッションが「詰まった点」の 1 番目に挙げた**）。**警告疲れ（B140）とは逆向き**＝警告が出ないことで出るはずのものを見落とす。**実装の見通し**＝生成器 `collectDefaultRangeWindowWarnings(stmt, resolveField, context)` は**書いた SQL だけで決まる**ので計画段階で判定できるはずで、**`EXPLAIN` は既にフォーム定義を読んでいる**。ただし**EXPLAIN は実行とは別経路**で、resolver がその経路にあるかは未確認。**着手前に確認＝EXPLAIN 経路に `WhereFieldSemanticsResolver` 相当があるか**（無ければ metadata の追加取得が要らないかを見る。「レコード API を呼ばない」契約は metadata だけなら保てる）。**案 A＝`EXPLAIN` でも返す**（計画と実行で同じ警告文になる利点）／**案 B＝文書化のみ（v3.54.4 で実施済み）**／案 C＝何もしない。**見立て＝案 B は入れた。案 A は resolver が既にあれば安い、無ければ見送り。****順序としては [B140](internal/ksql_b140_cte_groupby_total_order_issue.md) 案 A が先**（入れば CTE 経路の全順序警告は出なくなり、本件の価値も下がる）。 | 改善 | 低 | [B143](internal/ksql_b143_explain_warnings_issue.md) |
