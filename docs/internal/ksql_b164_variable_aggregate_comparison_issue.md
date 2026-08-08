@@ -1,7 +1,7 @@
 # B164 `@変数` を含む集計が比較位置（CASE WHEN / HAVING）で -Infinity になる
 
 - 起票: 2026-08-08（[依頼元の v3.64.0 返信 §3](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260808-v3640.md)・**主張 3 点すべて実測で逐語再現**）
-- ステータス: 📝 **原因確定（2026-08-08・[調査報告](ksql_b164_codex_investigation_report.md)）・方向判断待ち（案 A 推奨）**
+- ステータス: ✅ **v3.65.0 リリース（2026-08-08・案 A＝参照 key 再生成＋未計算参照の警告・実機確認済み）**
 - 関連: B147/B148（式の canonical identity）／B124（集計算術式の合成名キー）／
   [evalwhere-empty-cell 系](ksql_string_semantics.md)（空＝最小値の意味論）
 
