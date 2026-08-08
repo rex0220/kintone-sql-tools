@@ -1,7 +1,7 @@
 # B163 一時テーブルの GROUP BY を含むバッチ EXPLAIN が InternalError
 
 - 起票: 2026-08-08（[依頼元の v3.63.0 意見 §2](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-EXPLAIN2件.md)・実測裏取り済み）
-- ステータス: 📝 **起票（EXPLAIN 面のみ・優先 中）**
+- ステータス: ✅ **v3.64.0 リリース（2026-08-08・静的 schema ledger＋InternalError 構造的禁止・実機確認済み）**
 - 関連: B123（EXPLAIN 計画の未対応形クラス）／[B65/B148]（GROUP BY 計画の schema 依存）
 
 ## 1. 症状（実測・2026-08-08・v3.63.0）

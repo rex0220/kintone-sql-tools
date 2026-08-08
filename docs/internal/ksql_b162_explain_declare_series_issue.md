@@ -1,7 +1,7 @@
 # B162 DECLARE 変数 × GENERATE_SERIES の EXPLAIN が誤解を招く ArgumentError
 
 - 起票: 2026-08-08（[依頼元の v3.63.0 意見 §1](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-EXPLAIN2件.md)・実測裏取り済み）
-- ステータス: 📝 **起票（EXPLAIN 面のみ・優先 中）**
+- ステータス: ✅ **v3.64.0 リリース（2026-08-08・案 A 系列限定＋deferred・実機確認済み）**
 - 関連: [B149](ksql_b149_generate_series_issue.md)（variable-dependent 判定は実行へ委ねる契約）／
   B131（EXPLAIN と実行の乖離クラス）
 

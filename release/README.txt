@@ -1,31 +1,21 @@
-ksql 配布パッケージ (v3.63.0)
+ksql 配布パッケージ (v3.64.0)
 
 release 成果物:
-- ksql-plugin-v3.63.0.zip
-- ksql-mcp.mcpb (manifest version 3.63.0)
-- ksql-mcp.js (MCP server version 3.63.0)
+- ksql-plugin-v3.64.0.zip
+- ksql-mcp.mcpb (manifest version 3.64.0)
+- ksql-mcp.js (MCP server version 3.64.0)
 
-新機能 (B158 CROSS JOIN = 直積・2 軸の格子生成) ★要点:
-- 明示 CROSS JOIN で直積 (左 N 行 × 右 M 行) を生成できます。主用途は
-  GENERATE_SERIES の日付系列 × マスタの「日付 × 製品」格子で、LEFT JOIN で
-  実績を当てると「取引の無い日×製品」も 0 で並びます (レシピ R17 の製品別化)。
-    WITH d AS (GENERATE_SERIES('2026-01-01','2026-12-31') AS 日付),
-         m AS (SELECT 製品名 FROM APP200)
-    SELECT d.日付, m.製品名 FROM d CROSS JOIN m
-- 生成上限 10,000 行 (段ごとに行生成前判定・WHERE/LIMIT でも免除しません)。
-  EXPLAIN に左右行数と row guard を表示。dry-run は API 0 回。
-- 注意: CROSS が予約語になりました。同名フィールドは `CROSS` と囲ってください。
-- ON 1=1・カンマ結合は引き続き構文エラーです (開放していません)。
+改善 (B162/B163 EXPLAIN だけが通らない 2 形を解消) ★要点・実行は元から正常:
+- DECLARE 変数を GENERATE_SERIES に使うと EXPLAIN が誤解を招くエラーになっていたのを、
+  リテラル既定値に基づく条件付き計画表示に (外部注入で変わり得る旨を注記・値は非表示)。
+  静的に確定しない形は series type: deferred (variable) でエラーにせず通します。
+- 一時テーブルを GROUP BY する文を含むバッチの EXPLAIN が InternalError になっていたのを、
+  文 1 の SELECT 句から schema を静的伝播して計画表示に (行は実体化しません)。
+- どちらも EXPLAIN/dry-run 面のみ。実行・validate・records API 0 回の契約は不変です。
 
-新機能 (B159 GENERATE_SERIES の month / year step) ★要点:
-- 日付系列の step に '1 month' / '1 year' (係数・負値可) を指定できます。
-  月次 0 埋めにより「空月があると LAG が静かに 2 か月前と比べる」を防げます。
-- start は月初 (year は 1 月 1 日) 限定。月末は LAST_DAY(月)、'YYYY-MM' 文字列は
-  DATE_FORMAT(月, '%Y-%m') で変換してください (うるう年も 2024-02-29 で正しい・実測)。
-
-修正 (B157/B161 CLI --dry-run の表示・エラー):
-- 複文バッチの表示が v3.62.0 で悲観側に落ちていた回帰を修正 (表示のみ・結果不変)。
-- WITH + 物理アプリの最小形が DryRunError になる v3.61.0 以前からの穴を修正。
+v3.63.0 の各節は畳みました (B158 CROSS JOIN = 直積・2 軸格子・CROSS が予約語に /
+B159 GENERATE_SERIES month/year step = 月次 0 埋め・start は月初/年初限定 /
+B157/B161 dry-run 修正)。内容は CHANGELOG.md にあります。
 
 v3.62.0 の各節は畳みました (B155 WHERE 絞り込みを CTE・一時テーブル JOIN と単一表へ
 拡大 = 結果不変・取得量削減 / B154 EXPLAIN 但し書き)。内容は CHANGELOG.md にあります。
@@ -78,12 +68,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.63.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.64.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.63.0): B158 CROSS JOIN (新機能・直積 = 2 軸格子・CROSS が予約語に)、
+本リリース (v3.64.0): B162/B163 EXPLAIN だけが通らない 2 形を解消 (改善・実行は不変)。
+
+前リリース (v3.63.0): B158 CROSS JOIN (新機能・直積 = 2 軸格子・CROSS が予約語に)、
 B159 GENERATE_SERIES month/year step (新機能・月次 0 埋め)、B157/B161 dry-run 修正。
 
 前リリース (v3.62.0): B155 WHERE 条件の絞り込みを CTE・一時テーブルの JOIN と
@@ -103,8 +95,6 @@ LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
 
 前リリース (v3.57.0): B148 集計されていない列はエラーに (挙動が変わります)。
 
-前リリース (v3.56.1): B145 拡張 grouping で明細項目を書くとエラーに
-(挙動が変わります)、GROUP BY の案内を「別の表にある」へ。
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
