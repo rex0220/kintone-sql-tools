@@ -10216,6 +10216,10 @@ async function buildExplainWhereAnalysis(
       for (const cte of withStatement.ctes) {
         await preflightExplainRelations(cte.query);
         if (cte.query.type === "GENERATE_SERIES") {
+          if (cte.query.args.some((arg) => arg.type === "VARIABLE")) {
+            explainRelations.set(cte.name, { rows: [], columns: [cte.query.columnAlias] });
+            continue;
+          }
           const generated = executeGenerateSeries(cte.query);
           explainRelations.set(cte.name, {
             rows: generated.rows,
@@ -10256,13 +10260,19 @@ async function buildExplainWhereAnalysis(
         cacheContext,
         explainRelations
       );
-      const plainPlan = await buildRuntimePlainGroupByPlan(
-        select,
-        tracedClient,
-        cacheContext,
-        explainRelations
+      const sources = [select.from, ...select.joins.map((join) => join.table)];
+      const hasUnavailableMaterializedSource = sources.some((source) =>
+        source.cteName !== null && !explainRelations.has(source.cteName)
       );
-      if (plainPlan) plainGroupByPlans.set(select, plainPlan);
+      if (!hasUnavailableMaterializedSource) {
+        const plainPlan = await buildRuntimePlainGroupByPlan(
+          select,
+          tracedClient,
+          cacheContext,
+          explainRelations
+        );
+        if (plainPlan) plainGroupByPlans.set(select, plainPlan);
+      }
       return;
     }
     for (const child of Object.values(typed)) await preflightExplainRelations(child);
@@ -10964,6 +10974,156 @@ interface ExplainFetchCollector {
   sources: ExplainFetchSourcePlan[];
 }
 
+interface ExplainSeriesBinding {
+  readonly variableNames: ReadonlyMap<number, string>;
+  readonly defaultBoundIndexes: ReadonlySet<number>;
+}
+
+const explainSeriesBindings = new WeakMap<GenerateSeriesStatement, ExplainSeriesBinding>();
+
+type ExplainTempSchemaEntry =
+  | {
+      readonly status: "STATIC";
+      readonly columns: readonly string[];
+      readonly relation: MaterializedTable;
+      readonly producerStatement: number;
+    }
+  | {
+      readonly status: "DEFERRED";
+      readonly producerStatement: number;
+      readonly reason: "EXPLAIN_TEMP_SCHEMA_UNAVAILABLE";
+    };
+
+type ExplainStaticSchema =
+  | { readonly status: "STATIC"; readonly columns: readonly string[] }
+  | { readonly status: "DEFERRED" };
+
+/**
+ * 通常の EXPLAIN 変数解決後に、系列引数だけを条件付き既定値へ差し替える。
+ * 既定値を使えない引数は VARIABLE に戻し、値依存検査を deferred に保つ。
+ */
+function resolveExplainGenerateSeriesDefaults<T>(
+  node: T,
+  literalDefaults: ReadonlyMap<string, string>
+): T {
+  if (Array.isArray(node)) {
+    return node.map((value) => resolveExplainGenerateSeriesDefaults(value, literalDefaults)) as T;
+  }
+  if (node === null || typeof node !== "object") return node;
+  const object = node as Record<string, unknown>;
+  if (object["type"] === "GENERATE_SERIES") {
+    const variableNames = new Map<number, string>();
+    const defaultBoundIndexes = new Set<number>();
+    const args = (object["args"] as GenerateSeriesStatement["args"]).map((arg, index) => {
+      if (arg.type !== "STRING" || arg.fromVariable !== true || !arg.value.startsWith("@")) return arg;
+      const name = arg.value.slice(1);
+      variableNames.set(index, name);
+      const defaultValue = literalDefaults.get(name);
+      if (defaultValue === undefined) return { type: "VARIABLE", name } as const;
+      defaultBoundIndexes.add(index);
+      return { type: "STRING", value: defaultValue, fromVariable: true } as const;
+    });
+    const resolved = { ...object, args } as unknown as GenerateSeriesStatement;
+    explainSeriesBindings.set(resolved, { variableNames, defaultBoundIndexes });
+    return resolved as T;
+  }
+  return Object.fromEntries(Object.entries(object).map(([key, value]) => [
+    key,
+    resolveExplainGenerateSeriesDefaults(value, literalDefaults),
+  ])) as T;
+}
+
+function inferStaticExplainSchema(
+  node: SelectStatement | UnionStatement | WithStatement | GenerateSeriesStatement
+    | ShowAppsStatement | DescribeStatement,
+  relations: ReadonlyMap<string, ExplainStaticSchema>
+): ExplainStaticSchema {
+  if (node.type === "SHOW_APPS") return { status: "STATIC", columns: [...SHOW_APPS_COLUMNS] };
+  if (node.type === "DESCRIBE") return { status: "STATIC", columns: [...DESCRIBE_COLUMNS] };
+  if (node.type === "GENERATE_SERIES") {
+    return { status: "STATIC", columns: [node.columnAlias] };
+  }
+  if (node.type === "WITH") {
+    const local = new Map(relations);
+    for (const cte of node.ctes) {
+      const schema = inferStaticExplainSchema(cte.query, local);
+      local.set(cte.name, schema);
+    }
+    return inferStaticExplainSchema(node.query, local);
+  }
+  if (node.type === "UNION") {
+    const left = inferStaticExplainSchema(node.left, relations);
+    const right = inferStaticExplainSchema(node.right, relations);
+    return left.status === "STATIC" && right.status === "STATIC"
+      ? { status: "STATIC", columns: left.columns }
+      : { status: "DEFERRED" };
+  }
+
+  const sources = [node.from, ...node.joins.map((join) => join.table)];
+  const relationSources = sources.filter((source) => source.cteName !== null && source.cteName !== NO_FROM_CTE_NAME);
+  if (relationSources.some((source) => relations.get(source.cteName!)?.status !== "STATIC")) {
+    return { status: "DEFERRED" };
+  }
+  const hasWildcard = node.columns.some((column) =>
+    column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
+  );
+  if (hasWildcard) {
+    if (sources.length !== 1 || sources[0].cteName === null) return { status: "DEFERRED" };
+  }
+  const sourceColumns = relationSources.flatMap((source) => {
+    const schema = relations.get(source.cteName!);
+    return schema?.status === "STATIC" ? [...schema.columns] : [];
+  });
+  const columns: string[] = [];
+  for (const column of node.columns) {
+    if (column.type === "WILDCARD") columns.push(...sourceColumns);
+    else if (column.type === "PARENT_WILDCARD") {
+      columns.push(...sourceColumns.filter((name) => name.startsWith("_p.")));
+    } else {
+      columns.push(...project([], [column]).columns);
+    }
+  }
+  return { status: "STATIC", columns };
+}
+
+function staticSchemaRelations(
+  ledger: ReadonlyMap<string, ExplainTempSchemaEntry>
+): Map<string, MaterializedTable> {
+  return new Map([...ledger].flatMap(([name, entry]) =>
+    entry.status === "STATIC" ? [[name, entry.relation] as const] : []
+  ));
+}
+
+async function buildStaticTempPlainGroupByPlans(
+  node: unknown,
+  client: KintoneClient,
+  cacheContext: string,
+  relations: ReadonlyMap<string, MaterializedTable>
+): Promise<Map<SelectStatement, PlainGroupByResolutionPlan>> {
+  const plans = new Map<SelectStatement, PlainGroupByResolutionPlan>();
+  const visit = async (value: unknown): Promise<void> => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const child of value) await visit(child);
+      return;
+    }
+    const object = value as Record<string, unknown>;
+    if (object["type"] === "SELECT") {
+      const select = value as SelectStatement;
+      const sources = [select.from, ...select.joins.map((join) => join.table)];
+      if (sources.some((source) => source.cteName !== null)
+        && sources.every((source) => source.cteName === NO_FROM_CTE_NAME
+          || (source.cteName !== null && relations.has(source.cteName)))) {
+        const plan = await buildRuntimePlainGroupByPlan(select, client, cacheContext, relations);
+        if (plan) plans.set(select, plan);
+      }
+    }
+    for (const child of Object.values(object)) await visit(child);
+  };
+  await visit(node);
+  return plans;
+}
+
 const EXPLAIN_FETCH_PLAN = Symbol("ksql.explainFetchPlan");
 type ExplainFetchPlanCarrier = {
   [EXPLAIN_FETCH_PLAN]?: ExplainFetchPlan;
@@ -11003,24 +11163,32 @@ export async function buildBatchExplainPlans(
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
     const variables = new Map<string, VarValue>();
+    const literalDeclareDefaults = new Map<string, string>();
+    const tempSchemaLedger = new Map<string, ExplainTempSchemaEntry>();
     const plans: BatchStatementPlan[] = [];
     const fetchStatements: ExplainFetchStatementPlan[] = [];
     for (let i = 0; i < statements.length; i++) {
       const stmt = statements[i];
-      const planStmt = stmt.type === "SET_VARIABLE"
+      const placeholderResolvedStmt = stmt.type === "SET_VARIABLE"
         ? (stmt.expr.type === "SCALAR_SUBQUERY"
           ? { ...stmt, expr: resolveBatchVariableReferences(stmt.expr, variables) }
           : stmt)
         : resolveBatchVariableReferences(stmt, variables);
+      const planStmt = resolveExplainGenerateSeriesDefaults(
+        placeholderResolvedStmt,
+        literalDeclareDefaults
+      );
       validateStatementStatic(planStmt);
       const relativeDatePlan = await resolveRelativeDateExecutionPlan(planStmt, client, invocationCacheContext);
+      const initialRelations = staticSchemaRelations(tempSchemaLedger);
       const whereAnalysis = resolveMetadata
         ? await buildExplainWhereAnalysis(
             planStmt,
             client,
             invocationCacheContext,
             maxRecords,
-            relativeDatePlan
+            relativeDatePlan,
+            initialRelations
           )
         : {
             capabilities: new Map<SelectStatement, PredicateCapabilityResult>(),
@@ -11031,6 +11199,38 @@ export async function buildBatchExplainPlans(
             numberPrecisionApps: new Set<number>(),
             relativeDatePlan,
           };
+      if (!resolveMetadata) {
+        const staticPlans = await buildStaticTempPlainGroupByPlans(
+          planStmt,
+          client,
+          invocationCacheContext,
+          initialRelations
+        );
+        for (const [select, plan] of staticPlans) whereAnalysis.plainGroupByPlans.set(select, plan);
+      }
+      let createdSchema: ExplainTempSchemaEntry | undefined;
+      if (planStmt.type === "CREATE_TEMP_TABLE") {
+        const relationSchemas = new Map<string, ExplainStaticSchema>([...tempSchemaLedger].map(([name, entry]) => [
+          name,
+          entry.status === "STATIC"
+            ? { status: "STATIC", columns: entry.columns }
+            : { status: "DEFERRED" },
+        ]));
+        const inferred = inferStaticExplainSchema(planStmt.query, relationSchemas);
+        createdSchema = inferred.status === "STATIC"
+          ? {
+              status: "STATIC",
+              columns: inferred.columns,
+              relation: { rows: [], columns: [...inferred.columns] },
+              producerStatement: i + 1,
+            }
+          : {
+              status: "DEFERRED",
+              producerStatement: i + 1,
+              reason: "EXPLAIN_TEMP_SCHEMA_UNAVAILABLE",
+            };
+        tempSchemaLedger.set(planStmt.name, createdSchema);
+      }
       const fetchCollector: ExplainFetchCollector = { sources: [] };
       const statementPlan =
         relativeDatePlan.hasServerOnlyWhereFunction && !relativeDatePlan.allowed
@@ -11040,12 +11240,15 @@ export async function buildBatchExplainPlans(
             ...addCursorConcurrency(buildBatchStatementPlan(
               planStmt,
               analysis.statements[i],
-              whereAnalysis.capabilities,
-              whereAnalysis.orderPlans,
-              dmlMaxRows,
-              dmlMaxSubtableRows,
-              fetchCollector
-            ), cursorMaxActive),
+               whereAnalysis.capabilities,
+               whereAnalysis.orderPlans,
+               whereAnalysis.plainGroupByPlans,
+               dmlMaxRows,
+               dmlMaxSubtableRows,
+               fetchCollector,
+               tempSchemaLedger,
+               createdSchema
+             ), cursorMaxActive),
           ];
       const metadataPlan = explainMetadataLines(whereAnalysis);
       plans.push({
@@ -11060,13 +11263,21 @@ export async function buildBatchExplainPlans(
         fetch: worstExplainFetch(fetchCollector.sources),
         sources: fetchCollector.sources,
       });
+      if (planStmt.type === "DROP_TEMP_TABLE") tempSchemaLedger.delete(planStmt.name);
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
         variables.set(stmt.name, stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE"
           ? { type: "relative-date", value: relativeDateVariables.get(stmt.name)! }
           : stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
           ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
-          : { type: "string", value: `@${stmt.name}`, placeholder: true });
+           : { type: "string", value: `@${stmt.name}`, placeholder: true });
+        if (stmt.type === "DECLARE_VARIABLE" && stmt.annotation === undefined
+          && (stmt.default.type === "STRING" || stmt.default.type === "NUMBER")) {
+          literalDeclareDefaults.set(
+            stmt.name,
+            stmt.default.type === "STRING" ? stmt.default.value : numberLiteralText(stmt.default)
+          );
+        }
       }
     }
     const result = { statementCount: statements.length, statements: plans };
@@ -11082,17 +11293,28 @@ function buildBatchStatementPlan(
   info: BatchAnalysis["statements"][number],
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
-  collector: ExplainFetchCollector = { sources: [] }
+  collector: ExplainFetchCollector = { sources: [] },
+  tempSchemaLedger: ReadonlyMap<string, ExplainTempSchemaEntry> = new Map(),
+  createdSchema?: ExplainTempSchemaEntry
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
       `CREATE TEMP TABLE ${stmt.name}`,
       `  scope:         batch（バッチ終了時に自動破棄）`,
+      ...(createdSchema?.status === "STATIC" ? [
+        `  schema:        ${createdSchema.columns.join(", ")}`,
+        `  schema source: SELECT output of statement ${createdSchema.producerStatement}`,
+      ] : createdSchema ? [
+        "  schema:        deferred (could not be derived statically)",
+        `  plan status:   deferred (temp table schema; reason=${createdSchema.reason})`,
+      ] : []),
       `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
       ...buildPlanForBatchQuery(
-        stmt.query, info, capabilities, orderPlans, collector, "main"
+        stmt.query, info, capabilities, orderPlans, plainGroupByPlans, collector, "main",
+        tempSchemaLedger
       ).map((l) => `  ${l}`),
     ];
   }
@@ -11112,7 +11334,8 @@ function buildBatchStatementPlan(
         "  value:         サブクエリを実行時に1回評価（1行1列・バッチ内定数・結果メタデータには非公開）",
         "  subquery:",
         ...buildPlanForBatchQuery(
-          stmt.expr.query, subInfo, capabilities, orderPlans, collector
+          stmt.expr.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
+          "main", tempSchemaLedger
         ).map((l) => `  ${l}`),
       ];
     }
@@ -11137,7 +11360,8 @@ function buildBatchStatementPlan(
   if (stmt.type === "DESCRIBE") return [`DESCRIBE APP${stmt.appId}（フィールド定義の取得）`];
   if (stmt.type === "EXPLAIN") {
     return buildPlanForBatchQuery(
-      stmt.query, info, capabilities, orderPlans, collector
+      stmt.query, info, capabilities, orderPlans, plainGroupByPlans, collector,
+      "main", tempSchemaLedger
     );
   }
   if (stmt.type === "ASSERT") {
@@ -11154,15 +11378,21 @@ function buildBatchStatementPlan(
       //（temp 参照なしの側を FULL_SCAN 表示にしない）
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
       lines.push(...buildPlanForBatchQuery(
-        sq.query, subInfo, capabilities, orderPlans, collector
+        sq.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
+        "main", tempSchemaLedger
       ).map((l) => `  ${l}`));
     });
     return lines;
   }
   if (stmt.type === "UPDATE" && (stmt.applyBlocks?.length ?? 0) > 0) {
-    return buildExplainPlan(stmt, undefined, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows);
+    return buildExplainPlan(
+      stmt, undefined, capabilities, orderPlans, dmlMaxRows, dmlMaxSubtableRows,
+      10_000, plainGroupByPlans
+    );
   }
-  return buildPlanForBatchQuery(stmt, info, capabilities, orderPlans, collector);
+  return buildPlanForBatchQuery(
+    stmt, info, capabilities, orderPlans, plainGroupByPlans, collector, "main", tempSchemaLedger
+  );
 }
 
 /** AST 内に一時テーブル参照（cteName が "#" 始まり）が含まれるか */
@@ -11182,14 +11412,16 @@ function buildPlanForBatchQuery(
   info: BatchAnalysis["statements"][number],
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
+  plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   collector: ExplainFetchCollector = { sources: [] },
-  sourceRole: ExplainFetchRole = "main"
+  sourceRole: ExplainFetchRole = "main",
+  tempSchemaLedger: ReadonlyMap<string, ExplainTempSchemaEntry> = new Map()
 ): string[] {
   // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
   if (info.tempTablesReferenced.length === 0) {
     return buildExplainPlan(
       query as ExplainStatement["query"], undefined, capabilities, orderPlans,
-      100, DEFAULT_APPLY_MAX_SUBTABLE_ROWS, 10_000, undefined, true, collector,
+      100, DEFAULT_APPLY_MAX_SUBTABLE_ROWS, 10_000, plainGroupByPlans, true, collector,
       sourceRole
     );
   }
@@ -11208,6 +11440,32 @@ function buildPlanForBatchQuery(
   lines.push(
     `  temp:          ${info.tempTablesReferenced.join(", ")}（インメモリ走査。実体化前のため行数不明）`
   );
+  const entries = info.tempTablesReferenced.map((name) => [name, tempSchemaLedger.get(name)] as const);
+  for (const [name, entry] of entries) {
+    if (entry?.status === "STATIC") {
+      lines.push(`  source:        temp table ${name} (schema from statement ${entry.producerStatement})`);
+    } else {
+      lines.push(`  source:        temp table ${name}`);
+      lines.push("  schema:        deferred (could not be derived statically)");
+    }
+  }
+  lines.push("  rows:          runtime (not materialized by EXPLAIN)");
+  const directSelect = query.type === "SELECT"
+    ? query
+    : query.type === "EXPLAIN" && query.query.type === "SELECT"
+      ? query.query
+      : undefined;
+  if (directSelect) {
+    lines.push(...renderPlainGroupByExplainLines(
+      directSelect,
+      plainGroupByPlans?.get(directSelect),
+      entries.some(([, entry]) => entry?.status !== "STATIC")
+    ));
+  }
+  lines.push(entries.every(([, entry]) => entry?.status === "STATIC")
+    ? "  plan status:   static schema / runtime rows"
+    : "  plan status:   deferred (temp table schema)");
+  lines.push("  records API:   none");
   const apps = info.appIds.filter(
     (a) => (query.type !== "INSERT_SELECT" && query.type !== "UPSERT_SELECT") || a !== query.appId
   );
@@ -11511,6 +11769,38 @@ function formatChoiceEqualityRewrite(rewrite: ChoiceEqualityRewrite): string {
     `${field} ${normalizedOperator} ("${normalizedValue}")`;
 }
 
+function renderPlainGroupByExplainLines(
+  stmt: SelectStatement,
+  plainGroupByPlan: PlainGroupByResolutionPlan | undefined,
+  schemaDeferred: boolean
+): string[] {
+  const normalizedGrouping = normalizeGroupingSpec(stmt);
+  if (normalizedGrouping.type !== "PLAIN") return [];
+  const lines: string[] = [];
+  if (plainGroupByPlan) {
+    plainGroupByPlan.items.forEach((item, index) => {
+      const key = normalizedGrouping.allItems[index];
+      if (key?.type !== "FIELD_NAME") return;
+      if (item.kind === "PHYSICAL") {
+        lines.push(
+          `  group key ${key.name}: PHYSICAL (source=${item.sourceIndex}, field=${item.fieldCode})`
+        );
+      } else if (item.kind === "ALIAS_SAFE") {
+        lines.push(`  group key ${key.name}: ALIAS_SAFE (column=${item.columnIndex})`);
+      } else if (item.kind === "EXPRESSION") {
+        lines.push(`  group key ${key.name}: EXPRESSION`);
+      }
+    });
+  } else if (schemaDeferred) {
+    for (const key of normalizedGrouping.allItems) {
+      if (key.type === "FIELD_NAME") {
+        lines.push(`  group key ${key.name}: DEFERRED (temp table schema unavailable)`);
+      }
+    }
+  }
+  return lines;
+}
+
 function buildSelectPlan(
   stmt: SelectStatement,
   label?: string,
@@ -11589,37 +11879,11 @@ function buildSelectPlan(
       "before HAVING/DISTINCT/LIMIT)"
     );
   }
-  const normalizedGrouping = normalizeGroupingSpec(stmt);
-  if (normalizedGrouping.type === "PLAIN") {
-    const groupBy = normalizedGrouping.allItems;
-    if (plainGroupByPlan) {
-      plainGroupByPlan.items.forEach((item, index) => {
-        const key = groupBy[index];
-        if (key?.type !== "FIELD_NAME") return;
-        if (item.kind === "PHYSICAL") {
-          lines.push(
-            `  group key ${key.name}: PHYSICAL ` +
-            `(source=${item.sourceIndex}, field=${item.fieldCode})`
-          );
-        } else if (item.kind === "ALIAS_SAFE") {
-          lines.push(
-            `  group key ${key.name}: ALIAS_SAFE (column=${item.columnIndex})`
-          );
-        } else if (item.kind === "EXPRESSION") {
-          lines.push(`  group key ${key.name}: EXPRESSION`);
-        }
-      });
-    } else if ([stmt.from, ...stmt.joins.map((join) => join.table)]
-      .some((table) => table.cteName !== null)) {
-      for (const key of groupBy) {
-        if (key.type === "FIELD_NAME") {
-          lines.push(
-            `  group key ${key.name}: DEFERRED (materialized schema unavailable)`
-          );
-        }
-      }
-    }
-  }
+  lines.push(...renderPlainGroupByExplainLines(
+    stmt,
+    plainGroupByPlan,
+    [stmt.from, ...stmt.joins.map((join) => join.table)].some((table) => table.cteName !== null)
+  ));
   for (const column of stmt.columns) {
     if (column.type !== "WINDOW_COL" || column.windowKind === undefined || column.windowKind === "RANKING") continue;
     const clauses: string[] = [];
@@ -12035,7 +12299,9 @@ function populateWithCrossJoinExplain(stmt: WithStatement): void {
 
   for (const cte of stmt.ctes) {
     if (cte.query.type === "GENERATE_SERIES") {
-      exactRows.set(cte.name, resolveGenerateSeries(cte.query).rowCount);
+      if (!cte.query.args.some((arg) => arg.type === "VARIABLE")) {
+        exactRows.set(cte.name, resolveGenerateSeries(cte.query).rowCount);
+      }
     } else if (cte.query.type === "SELECT") {
       const rows = analyze(cte.query);
       if (rows !== null) exactRows.set(cte.name, rows);
@@ -12063,20 +12329,49 @@ function buildWithPlan(
       ));
       lines.push("");
     } else if (cte.query.type === "GENERATE_SERIES") {
-      const series = resolveGenerateSeries(cte.query);
+      const seriesStatement = cte.query;
+      const binding = explainSeriesBindings.get(seriesStatement);
+      const unresolved = seriesStatement.args.some((arg) => arg.type === "VARIABLE");
+      if (unresolved) {
+        const argumentLabel = (index: number): string => {
+          const arg = seriesStatement.args[index];
+          if (!arg) return index === 2 ? "runtime" : "deferred";
+          if (arg.type === "VARIABLE") return `@${arg.name} (runtime)`;
+          if (index < 2) return "literal";
+          return arg.type === "NUMBER" ? numberLiteralText(arg) : arg.value;
+        };
+        lines.push(
+          `[cte: ${cte.name}]`,
+          "  source:        GENERATE_SERIES",
+          `  column:        ${seriesStatement.columnAlias}`,
+          "  series type:   deferred (variable)",
+          `  start:         ${argumentLabel(0)}`,
+          `  stop:          ${argumentLabel(1)}`,
+          `  step:          ${argumentLabel(2)}`,
+          "  rows:          runtime",
+          `  row guard:     runtime / ${GENERATE_SERIES_MAX_ROWS}`,
+          "  records API:   none",
+          ""
+        );
+        continue;
+      }
+      const series = resolveGenerateSeries(seriesStatement);
       const step = series.kind === "DATE"
         ? `${series.step} ${String(series.dateUnit ?? "DAY").toLowerCase()}${Math.abs(series.step) === 1 ? "" : "s"}`
         : String(series.step);
       lines.push(
         `[cte: ${cte.name}]`,
         "  source:        GENERATE_SERIES",
-        `  column:        ${cte.query.columnAlias}`,
-        `  series type:   ${series.kind}`,
-        `  start:         ${series.start}`,
-        `  stop:          ${series.stop}`,
+        `  column:        ${seriesStatement.columnAlias}`,
+        `  series type:   ${series.kind}${binding?.defaultBoundIndexes.size ? " (DECLARE default)" : ""}`,
+        `  start:         ${binding?.variableNames.has(0) ? `@${binding.variableNames.get(0)} (DECLARE default; value hidden)` : series.start}`,
+        `  stop:          ${binding?.variableNames.has(1) ? `@${binding.variableNames.get(1)} (DECLARE default; value hidden)` : series.stop}`,
         `  step:          ${step}`,
-        `  rows:          ${series.rowCount}`,
+        `  rows:          ${series.rowCount}${binding?.defaultBoundIndexes.size ? " (DECLARE default estimate)" : ""}`,
         `  row guard:     ${series.rowCount} / ${GENERATE_SERIES_MAX_ROWS}`,
+        ...(binding?.defaultBoundIndexes.size
+          ? ["  binding:       DECLARE defaults; runtime injection may change this plan"]
+          : []),
         "  records API:   none",
         ""
       );
