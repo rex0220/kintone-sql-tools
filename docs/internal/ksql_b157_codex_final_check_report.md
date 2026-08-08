@@ -1,0 +1,7 @@
+- 重大度: 高 — [src/cli/index.ts:2003](C:/Users/rex02/Projects/kintone-sql-tools/src/cli/index.ts:2003)、[src/cli/index.ts:2263](C:/Users/rex02/Projects/kintone-sql-tools/src/cli/index.ts:2263)  
+  `throwing client + resolveMetadata=true` となる分岐は安全ではありません。例えば複文
+  `SELECT 1; WITH c AS (SELECT $id FROM APP4228) SELECT $id FROM c`
+  では、`explainNeedsAppMetadata=false`、`dryRunUsesStaticTypedPlan=false` となるため throwing client を選択しつつ `resolveMetadata=true` を渡します。[explainMetadata.ts:68](C:/Users/rex02/Projects/kintone-sql-tools/src/core/explainMetadata.ts:68) の判定は WITH の物理ソース列推論を検出しませんが、metadata 解決は [execute.ts:10105](C:/Users/rex02/Projects/kintone-sql-tools/src/execute.ts:10105) から [execute.ts:10084](C:/Users/rex02/Projects/kintone-sql-tools/src/execute.ts:10084) の `getFields()` に到達し、`DryRunError` になります。  
+  `!dryRunUsesStaticTypedPlan` 自体は正本方針および v3.61.0 相当への復帰と一致しますが、「client 選択と全分岐で対」「throwing client + true が安全」は成立していません。追加テストも指定ケースだけで、この分岐を覆っていません（[b150_dry_run.e2e.test.ts:169](C:/Users/rex02/Projects/kintone-sql-tools/src/cli/__tests__/b150_dry_run.e2e.test.ts:169)）。
+
+B155 静的経路は `throwing client + resolveMetadata=false` のままで、API 0回の非回帰テストも全API件数を検査しています。単文・MCP・実EXPLAIN経路には B157 の変更は波及していません。書き込み・git・MCP・テスト実行は行っていません。
