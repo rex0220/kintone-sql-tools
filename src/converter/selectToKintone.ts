@@ -786,6 +786,7 @@ function collectRequiredFieldsByTable(
   }
 
   for (const join of stmt.joins) {
+    if (join.type === "CROSS") continue;
     addFieldRef(join.on.left.field, join.on.left.tableAlias, "where");
     addFieldRef(join.on.right.field, join.on.right.tableAlias, "where");
   }

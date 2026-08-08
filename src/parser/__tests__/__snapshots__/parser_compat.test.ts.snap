@@ -27,6 +27,48 @@ exports[`単文互換: APPLY soft keyword alias 1`] = `
 }
 `;
 
+exports[`単文互換: CROSS JOIN 1`] = `
+{
+  "columns": [
+    {
+      "alias": null,
+      "field": "a.x",
+      "type": "FIELD",
+    },
+    {
+      "alias": null,
+      "field": "b.y",
+      "type": "FIELD",
+    },
+  ],
+  "distinct": false,
+  "from": {
+    "alias": "a",
+    "appId": 100,
+    "cteName": null,
+  },
+  "groupBy": [],
+  "having": null,
+  "joins": [
+    {
+      "on": null,
+      "table": {
+        "alias": "b",
+        "appId": 200,
+        "cteName": null,
+      },
+      "type": "CROSS",
+    },
+  ],
+  "limit": null,
+  "offset": null,
+  "orderBy": [],
+  "orderMode": "CANONICAL",
+  "type": "SELECT",
+  "where": null,
+}
+`;
+
 exports[`単文互換: DELETE 1`] = `
 {
   "appId": 100,

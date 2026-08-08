@@ -124,6 +124,17 @@ SELECT 金額, 担当者名 FROM APP100
 SELECT `受注 金額`, `order` FROM APP100
 ```
 
+### 予約語
+
+SQL 構文キーワードは未引用の識別子として使用できません。JOIN 関連の予約語は
+`INNER`、`LEFT`、`RIGHT`、`CROSS`、`JOIN`、`ON` です。同名フィールドや別名は
+バッククォートで囲みます。
+
+```sql
+SELECT `CROSS` FROM APP100
+SELECT x.`CROSS` FROM APP100 AS x
+```
+
 ### 文字列リテラル
 
 シングルクォートで囲みます。  
@@ -1404,9 +1415,40 @@ WHERE 日付 = TODAY() AND LENGTH(件名) > 1                 -- TODAY() も同�
 
 ## 7. JOIN
 
-INNER JOIN・LEFT JOIN・RIGHT JOIN に対応しています。  
+INNER JOIN・LEFT JOIN・RIGHT JOIN・CROSS JOIN に対応しています。  
 複数の JOIN を連鎖して 3テーブル以上の結合も可能です。  
-結合条件は等値結合（`ON a.フィールド = b.フィールド`）のみ対応。
+INNER / LEFT / RIGHT JOIN の結合条件は等値結合（`ON a.フィールド = b.フィールド`）のみ対応。
+
+### CROSS JOIN
+
+左右の全組み合わせ（直積）を返します。`ON` 句は指定しません。左入力を外側、右入力を
+内側として処理しますが、公開結果の順序が必要な場合は `ORDER BY` を指定してください。
+
+```sql
+WITH
+d AS (GENERATE_SERIES('2026-08-01', '2026-08-07') AS 日付),
+m AS (SELECT 製品名 FROM APP4229)
+SELECT d.日付, m.製品名
+FROM d
+CROSS JOIN m
+ORDER BY d.日付, m.製品名
+```
+
+片側が 0 行なら結果も 0 行です。各 CROSS JOIN 段の生成行数は行生成前に計算し、
+10,000 行を超える場合はエラーにします。後続の `WHERE`、`GROUP BY`、`DISTINCT`、`LIMIT`
+で減る見込みは上限判定に使いません。CROSS JOIN は完全入力を必要とするため、
+`onLimit=truncate` は無効です。
+
+物理 APP に属する安全な単一 alias の `WHERE` leaf は取得 query へ prefilter できますが、
+元の `WHERE` は JOIN 後にも再評価します。CROSS JOIN には結合キーがないため、結合キーの
+`in` / range prefilter は使用しません。
+
+`EXPLAIN` は静的に証明できる入力では左右行数・生成行数・`row guard` を確定表示し、物理 APP
+を含む場合は実行時算出式を表示します。現在の物理行数を得るために records API を呼びません。
+
+`LEFT CROSS JOIN`、`RIGHT CROSS JOIN`、`INNER CROSS JOIN`、`CROSS JOIN ... ON`、
+`INNER JOIN ... ON 1=1`、カンマ結合は対応していません。`GENERATE_SERIES` は直接テーブル位置へ
+書かず、上例のように CTE に置きます。
 
 ### INNER JOIN
 
@@ -1484,11 +1526,11 @@ LEFT  JOIN APP300 AS c ON a.配送ID = c.配送ID
 > **注意:** JOIN は FULL_SCAN モードで client 側の結合を行います。通常は元の `WHERE` を
 > client 側でも再評価しますが、第5-W は whole WHERE を server で exact に適用して
 > client residual を持たず、第5-L は server-only 関数 leaf を除いた残余だけを再評価します。
-> ただし、INNER JOIN で、型と演算子が対応する単一 alias の述語は、各 APP の records API
+> ただし、INNER / CROSS JOIN で、型と演算子が対応する単一 alias の述語は、各 APP の records API
 > query へ prefilter として押し下げます。押し下げは取得件数を減らす性能最適化であり、
 > 通常述語は元の `WHERE` を client で再評価するため結果は変わりません。
 >
-> server-only 関数は、alias 付き物理 APP だけの INNER JOIN で次の2形を使用できます。
+> server-only 関数は、alias 付き物理 APP だけの INNER / CROSS JOIN で次の2形を使用できます。
 > **第5-W**は `WHERE` 全体が単一 alias に属する exact 形で、同一 alias の `OR` / `NOT` /
 > whole-exact な KLIKE 共存も可です。**第5-L**は AND スパインの exact 関数 leaf を
 > alias ごとに押し下げ、関数を含まない残余だけを client 評価します。複数 alias に

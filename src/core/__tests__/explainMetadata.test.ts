@@ -5,6 +5,7 @@ describe("explainNeedsAppMetadata", () => {
   test.each([
     "SELECT * FROM APP88",
     "SELECT * FROM APP88 WHERE $id = 1",
+    "SELECT a.$id,b.$id FROM APP88 a CROSS JOIN APP99 b",
     "DELETE FROM APP88 WHERE $id = 1",
   ])("組み込み列だけの dry-run はフォーム定義を必要としない: %s", (sql) => {
     expect(explainNeedsAppMetadata(parseSqlStatement(sql))).toBe(false);

@@ -2551,6 +2551,13 @@ export class Parser {
       if (joinType === null) break;
 
       const table = this.parseTableRef();
+      if (joinType === "CROSS") {
+        if (this.peek().kind === TokenKind.ON) {
+          throw new ParseError("CROSS JOIN に ON 句は指定できません。", this.peek());
+        }
+        joins.push({ type: "CROSS", table, on: null });
+        continue;
+      }
       this.expect(TokenKind.ON);
       const on = this.parseJoinCondition();
       joins.push({ type: joinType, table, on });
@@ -2560,16 +2567,29 @@ export class Parser {
 
   private tryJoinType(): JoinType | null {
     if (this.consume(TokenKind.INNER)) {
+      if (this.peek().kind === TokenKind.CROSS) {
+        throw new ParseError("CROSS JOIN に INNER は指定できません。", this.peek());
+      }
       this.expect(TokenKind.JOIN);
       return "INNER";
     }
     if (this.consume(TokenKind.LEFT)) {
+      if (this.peek().kind === TokenKind.CROSS) {
+        throw new ParseError("CROSS JOIN に LEFT / RIGHT は指定できません。", this.peek());
+      }
       this.expect(TokenKind.JOIN);
       return "LEFT";
     }
     if (this.consume(TokenKind.RIGHT)) {
+      if (this.peek().kind === TokenKind.CROSS) {
+        throw new ParseError("CROSS JOIN に LEFT / RIGHT は指定できません。", this.peek());
+      }
       this.expect(TokenKind.JOIN);
       return "RIGHT";
+    }
+    if (this.consume(TokenKind.CROSS)) {
+      this.expect(TokenKind.JOIN);
+      return "CROSS";
     }
     if (this.consume(TokenKind.JOIN)) {
       return "INNER"; // JOIN 単体は INNER 扱い
@@ -4359,6 +4379,8 @@ export class Parser {
       this.advance();
       return tok.value;
     }
+    const digitPrefixed = this.tryParseDigitPrefixedIdentifier();
+    if (digitPrefixed !== null) return digitPrefixed;
     throw new ParseError(
       "フィールド名またはテーブル名が必要です",
       tok
@@ -4373,10 +4395,27 @@ export class Parser {
       this.advance();
       return tok.value;
     }
+    const digitPrefixed = this.tryParseDigitPrefixedIdentifier();
+    if (digitPrefixed !== null) return digitPrefixed;
     throw new ParseError(
       "フィールド名またはテーブル名が必要です",
       tok
     );
+  }
+
+  /** `0埋め` のように数字から始まる日本語識別子を、空白なしの場合だけ読む。 */
+  private tryParseDigitPrefixedIdentifier(): string | null {
+    const first = this.peek();
+    const second = this.peekAt(1);
+    if (first.kind !== TokenKind.NUMBER
+      || !/^\d+$/.test(first.value)
+      || second.kind !== TokenKind.IDENT
+      || second.pos !== first.pos + first.value.length) {
+      return null;
+    }
+    this.advance();
+    this.advance();
+    return first.value + second.value;
   }
 
   // DML の対象テーブル位置に一時テーブルが指定されていたら拒否する

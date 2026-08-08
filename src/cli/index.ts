@@ -1047,15 +1047,46 @@ function createDryRunClient(): KintoneClient {
 function hasStaticTypedPushdownCandidate(statement: unknown): boolean {
   if (statement === null || typeof statement !== "object") return false;
   const node = statement as Record<string, unknown>;
-  if (node["type"] === "WITH") return hasStaticTypedPushdownCandidate(node["query"]);
+  if (node["type"] === "WITH") {
+    const query = node["query"];
+    const containsCross = (value: unknown): boolean => {
+      if (value === null || typeof value !== "object") return false;
+      const item = value as Record<string, unknown>;
+      if (item["type"] === "SELECT") {
+        return Array.isArray(item["joins"])
+          && item["joins"].some((join) =>
+            typeof join === "object" && join !== null
+            && (join as Record<string, unknown>)["type"] === "CROSS"
+          );
+      }
+      if (item["type"] === "UNION") return containsCross(item["left"]) || containsCross(item["right"]);
+      return false;
+    };
+    const hasPhysicalCte = Array.isArray(node["ctes"])
+      && node["ctes"].some((cte) => {
+        if (typeof cte !== "object" || cte === null) return false;
+        const cteQuery = (cte as Record<string, unknown>)["query"];
+        if (typeof cteQuery !== "object" || cteQuery === null) return false;
+        const from = (cteQuery as Record<string, unknown>)["from"];
+        return (cteQuery as Record<string, unknown>)["type"] === "SELECT"
+          && typeof from === "object" && from !== null
+          && (from as Record<string, unknown>)["cteName"] === null;
+      });
+    return (containsCross(query) && hasPhysicalCte)
+      || hasStaticTypedPushdownCandidate(query);
+  }
   if (node["type"] !== "SELECT") return false;
   const select = statement as SelectStatement;
-  if (!select.where || !Array.isArray(select.joins) || select.joins.length === 0) return false;
+  if (!Array.isArray(select.joins) || select.joins.length === 0) return false;
   if (![select.from, ...select.joins.map((join) => join.table)]
     .some((table) => table.cteName !== null)) return false;
+  if (select.joins.some((join) => join.type === "CROSS" && join.table.cteName === null)) {
+    return true;
+  }
+  if (!select.where) return false;
   const where = select.where;
   return select.joins.some((join) =>
-    join.type === "INNER"
+    (join.type === "INNER" || join.type === "CROSS")
     && join.table?.alias
     && join.table?.cteName === null
     && !join.table?.subtableCode

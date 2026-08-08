@@ -43,7 +43,7 @@ export const STATEMENT_SYNTAX_COMMON_NOTES = [
 
 export const STATEMENT_SYNTAX_CATALOG = {
   select: {
-    template: "SELECT: SELECT[DISTINCT] cols [FROM APPn|APPn$tbl|#t[alias][INNER|LEFT|RIGHT JOIN t[alias]ON a.x=b.y]...][WHERE][GROUP BY][HAVING][ORDER BY|KORDER BY][LIMIT n[OFFSET m]]",
+    template: "SELECT: SELECT[DISTINCT] cols [FROM APPn|APPn$tbl|#t[alias][INNER|LEFT|RIGHT JOIN t[alias]ON a.x=b.y|CROSS JOIN t[alias]]...][WHERE][GROUP BY][HAVING][ORDER BY|KORDER BY][LIMIT n[OFFSET m]]",
     examples: ["SELECT 1 AS one"],
     expectedTypes: [["SELECT"]],
   },

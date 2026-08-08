@@ -7,7 +7,8 @@ import type {
 import { numberLiteralText } from "../types/ast";
 import { parseExactDecimal } from "./exactDecimal";
 
-export const GENERATE_SERIES_MAX_ROWS = 10_000;
+export const GENERATED_ROW_MAX_ROWS = 10_000;
+export const GENERATE_SERIES_MAX_ROWS = GENERATED_ROW_MAX_ROWS;
 
 export interface ResolvedSeries {
   readonly kind: "INTEGER" | "DATE";

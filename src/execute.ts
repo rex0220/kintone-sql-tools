@@ -74,6 +74,11 @@ import {
   JOIN_KEY_IN_CHUNK_SIZE,
   planJoinKeyPrefilter,
 } from "./core/optimization/joinKeyPrefilter";
+import {
+  CROSS_JOIN_MAX_ROWS,
+  planCrossJoinRows,
+  type CrossJoinRowPlan,
+} from "./core/optimization/crossJoinRowPlan";
 import { buildInlinedQuery, canInlineSingleCte } from "./core/cteInlining";
 import {
   buildGroupingExplainMetadata,
@@ -3357,7 +3362,9 @@ function completeInputErrorPrefix(reasons: ReadonlySet<CompleteInputReason>): st
             : reasons.has("GROUPING_SETS")
               ? "クエリの正しい結果"
               : "ORDER BYの正しい結果";
-  const subject = reasons.has("DML") || reasons.has("VALIDATE")
+  const subject = reasons.size === 1 && reasons.has("CROSS_JOIN")
+    ? "CROSS JOIN の正しい結果"
+    : reasons.has("DML") || reasons.has("VALIDATE")
     ? legacySubject
     : hasAggregateReason && hasOrderReason
       ? "クエリの正しい結果"
@@ -3860,6 +3867,7 @@ async function validateB86SelectFieldCodes(
 
   // B51 の既存 JOIN-key error 契約を、records GET より前へ移して維持する。
   for (const join of stmt.joins) {
+    if (join.type === "CROSS") continue;
     for (const ref of [join.on.left, join.on.right]) {
       if (!ref.tableAlias) continue;
       const schema = sourceByAlias.get(ref.tableAlias);
@@ -3969,7 +3977,7 @@ function buildRuntimeJoinPushdownPlan(
 ): RuntimeJoinPushdownPlan | null {
   if (stmt.joins.length === 0
     || stmt.where === null
-    || stmt.joins.some((join) => join.type !== "INNER")) {
+    || stmt.joins.some((join) => join.type !== "INNER" && join.type !== "CROSS")) {
     return null;
   }
 
@@ -4041,7 +4049,7 @@ async function loadTypedPushdownMeta(
   // ownership・型・選択肢実在を確定するため、各 APP の schema snapshot を揃える。
   const directInnerJoin = stmt.joins.length > 0
     && stmt.where !== null
-    && stmt.joins.every((join) => join.type === "INNER")
+    && stmt.joins.every((join) => join.type === "INNER" || join.type === "CROSS")
     && [stmt.from, ...stmt.joins.map((join) => join.table)].every((table) =>
       table.alias !== null && table.cteName === null && !table.subtableCode
     );
@@ -10008,6 +10016,17 @@ const explainChoiceEqualityRewrites = new WeakMap<
   readonly ChoiceEqualityRewrite[]
 >();
 
+interface ExplainCrossJoinStep {
+  readonly leftLabel: string;
+  readonly rightLabel: string;
+  readonly leftRows: number | null;
+  readonly rightRows: number | null;
+  readonly plan: CrossJoinRowPlan | null;
+  readonly rightRuntimeLabel: string;
+}
+
+const explainCrossJoinSteps = new WeakMap<SelectStatement, readonly ExplainCrossJoinStep[]>();
+
 interface ValidateExplainInfo {
   targetFields: string[];
   fetchFields: string[];
@@ -10059,6 +10078,64 @@ async function buildExplainWhereAnalysis(
 
   const explainRelations = new Map<string, MaterializedTable>(initialRelations ?? []);
   const staticExplainRelations = new Set<string>(initialRelations?.keys() ?? []);
+  const exactRelationRows = new Map<string, number>(
+    [...(initialRelations ?? new Map<string, MaterializedTable>())]
+      .map(([name, relation]) => [name, relation.rows.length] as const)
+  );
+  const staticSelectRows = new WeakMap<SelectStatement, number>();
+  const tableLabel = (table: TableRef): string =>
+    effectiveTableAlias(table) ?? (table.appId > 0 ? `APP${table.appId}` : "source");
+  const tableExactRows = (table: TableRef): number | null => {
+    if (table.cteName === NO_FROM_CTE_NAME) return 1;
+    if (table.cteName !== null) return exactRelationRows.get(table.cteName) ?? null;
+    return null;
+  };
+  const analyzeStaticSelectRows = (select: SelectStatement): void => {
+    let currentRows = tableExactRows(select.from);
+    let leftLabel = tableLabel(select.from);
+    const steps: ExplainCrossJoinStep[] = [];
+    for (const join of select.joins) {
+      const rightRows = tableExactRows(join.table);
+      const rightLabel = tableLabel(join.table);
+      if (join.type === "CROSS") {
+        const plan = currentRows !== null && rightRows !== null
+          ? planCrossJoinRows(currentRows, rightRows)
+          : null;
+        steps.push({
+          leftLabel,
+          rightLabel,
+          leftRows: currentRows,
+          rightRows,
+          plan,
+          rightRuntimeLabel: join.table.cteName === null
+            ? `APP${join.table.appId} fetched rows`
+            : `${rightLabel} materialized rows`,
+        });
+        currentRows = plan?.outputRows ?? null;
+        leftLabel = `${leftLabel} × ${rightLabel}`;
+      } else {
+        currentRows = null;
+        leftLabel = `${leftLabel} ${join.type} JOIN ${rightLabel}`;
+      }
+    }
+    if (steps.length > 0) explainCrossJoinSteps.set(select, steps);
+    if (isConstantFalseWhere(select.where)) currentRows = 0;
+    else if (select.where !== null) currentRows = null;
+    const grouping = normalizeGroupingSpec(select);
+    if (grouping.type !== "NONE"
+      || select.distinct
+      || select.having !== null
+      || isAggregateQueryBlock(select)
+      || select.columns.some((column) => column.type === "WINDOW_COL")) {
+      currentRows = null;
+    }
+    if (currentRows !== null) {
+      const offset = select.offset ?? 0;
+      currentRows = Math.max(0, currentRows - offset);
+      if (select.limit !== null) currentRows = Math.min(currentRows, select.limit);
+      staticSelectRows.set(select, currentRows);
+    }
+  };
   const explainSourceColumns = async (select: SelectStatement): Promise<string[]> => {
     const tables = [select.from, ...select.joins.map((join) => join.table)];
     if (tables.length > 1 && select.columns.some((column) =>
@@ -10147,10 +10224,15 @@ async function buildExplainWhereAnalysis(
             uniqueGeneratedColumn: cte.query.columnAlias,
           });
           staticExplainRelations.add(cte.name);
+          exactRelationRows.set(cte.name, generated.rows.length);
           continue;
         }
         const columns = await inferExplainRelationColumns(cte.query);
         explainRelations.set(cte.name, { rows: [], columns });
+        if (cte.query.type === "SELECT") {
+          const rowCount = staticSelectRows.get(cte.query);
+          if (rowCount !== undefined) exactRelationRows.set(cte.name, rowCount);
+        }
       }
       await preflightExplainRelations(withStatement.query);
       return;
@@ -10162,6 +10244,7 @@ async function buildExplainWhereAnalysis(
     }
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
+      analyzeStaticSelectRows(select);
       for (const column of select.columns) {
         if (column.type === "SCALAR_SUBQUERY_COL") await preflightExplainRelations(column.query);
       }
@@ -11469,6 +11552,23 @@ function buildSelectPlan(
 
   if (label) lines.push(label);
   lines.push(`  mode:          ${mode}`);
+  for (const step of explainCrossJoinSteps.get(stmt) ?? []) {
+    lines.push(`  cross join:    ${step.leftLabel} × ${step.rightLabel}`);
+    lines.push(`  left rows:     ${step.leftRows ?? "runtime (left intermediate rows)"}`);
+    lines.push(`  right rows:    ${step.rightRows ?? `runtime (${step.rightRuntimeLabel})`}`);
+    if (step.plan) {
+      lines.push(`  rows:          ${step.plan.outputRows}`);
+      lines.push(`  row guard:     ${step.plan.outputRows} / ${step.plan.limit}`);
+      lines.push("  guard timing:  before row materialization");
+    } else {
+      const left = step.leftRows === null ? "left rows" : String(step.leftRows);
+      const right = step.rightRows === null ? "right rows" : String(step.rightRows);
+      lines.push(`  rows:          runtime (${left} × ${right})`);
+      lines.push(`  row guard:     runtime checked / ${CROSS_JOIN_MAX_ROWS}`);
+      lines.push("  guard timing:  after complete source fetch, before row materialization");
+    }
+    lines.push("  records API:   none");
+  }
   for (const rewrite of explainChoiceEqualityRewrites.get(stmt)
     ?? choiceEqualityRewritesBySelect.get(stmt)
     ?? []) {
@@ -11662,7 +11762,7 @@ function buildSelectPlan(
           }
         }
       } else {
-        const reason = stmt.joins.some((join) => join.type !== "INNER")
+        const reason = stmt.joins.some((join) => join.type !== "INNER" && join.type !== "CROSS")
           ? "OUTER_JOIN"
           : [stmt.from, ...stmt.joins.map((join) => join.table)].some((table) =>
               table.cteName !== null || Boolean(table.subtableCode)
@@ -11875,6 +11975,77 @@ function buildUnionPlan(
   return lines;
 }
 
+/** metadata API を使わない CLI dry-run でも literal 系列の CROSS 計画を表示する。 */
+function populateWithCrossJoinExplain(stmt: WithStatement): void {
+  const exactRows = new Map<string, number>();
+  const labelFor = (table: TableRef): string =>
+    effectiveTableAlias(table) ?? (table.appId > 0 ? `APP${table.appId}` : "source");
+  const rowsFor = (table: TableRef): number | null => {
+    if (table.cteName === NO_FROM_CTE_NAME) return 1;
+    return table.cteName === null ? null : (exactRows.get(table.cteName) ?? null);
+  };
+  const analyze = (select: SelectStatement): number | null => {
+    let current = rowsFor(select.from);
+    let leftLabel = labelFor(select.from);
+    const steps: ExplainCrossJoinStep[] = [];
+    for (const join of select.joins) {
+      const right = rowsFor(join.table);
+      const rightLabel = labelFor(join.table);
+      if (join.type === "CROSS") {
+        const plan = current !== null && right !== null
+          ? planCrossJoinRows(current, right)
+          : null;
+        steps.push({
+          leftLabel,
+          rightLabel,
+          leftRows: current,
+          rightRows: right,
+          plan,
+          rightRuntimeLabel: join.table.cteName === null
+            ? `APP${join.table.appId} fetched rows`
+            : `${rightLabel} materialized rows`,
+        });
+        current = plan?.outputRows ?? null;
+        leftLabel = `${leftLabel} × ${rightLabel}`;
+      } else {
+        current = null;
+        leftLabel = `${leftLabel} ${join.type} JOIN ${rightLabel}`;
+      }
+    }
+    if (steps.length > 0) explainCrossJoinSteps.set(select, steps);
+    if (isConstantFalseWhere(select.where)) current = 0;
+    else if (select.where !== null) current = null;
+    if (normalizeGroupingSpec(select).type !== "NONE"
+      || select.distinct
+      || select.having !== null
+      || isAggregateQueryBlock(select)
+      || select.columns.some((column) => column.type === "WINDOW_COL")) return null;
+    if (current === null) return null;
+    current = Math.max(0, current - (select.offset ?? 0));
+    return select.limit === null ? current : Math.min(current, select.limit);
+  };
+  const analyzeQuery = (query: SelectStatement | UnionStatement): void => {
+    if (query.type === "SELECT") {
+      analyze(query);
+      return;
+    }
+    analyzeQuery(query.left);
+    analyze(query.right);
+  };
+
+  for (const cte of stmt.ctes) {
+    if (cte.query.type === "GENERATE_SERIES") {
+      exactRows.set(cte.name, resolveGenerateSeries(cte.query).rowCount);
+    } else if (cte.query.type === "SELECT") {
+      const rows = analyze(cte.query);
+      if (rows !== null) exactRows.set(cte.name, rows);
+    } else if (cte.query.type === "UNION") {
+      analyzeQuery(cte.query);
+    }
+  }
+  analyzeQuery(stmt.query);
+}
+
 function buildWithPlan(
   stmt: WithStatement,
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
@@ -11882,6 +12053,7 @@ function buildWithPlan(
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   collector: ExplainFetchCollector = { sources: [] }
 ): string[] {
+  populateWithCrossJoinExplain(stmt);
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
     if (cte.query.type === "SELECT") {
@@ -11939,7 +12111,9 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
   const r: string[] = [];
   if (stmt.from.subtableCode || stmt.joins.some((j) => j.table.subtableCode))
     r.push("サブテーブル仮想テーブル");
-  if (stmt.joins.length > 0)
+  if (stmt.joins.some((join) => join.type === "CROSS"))
+    r.push("CROSS JOIN あり");
+  if (stmt.joins.some((join) => join.type !== "CROSS"))
     r.push("JOIN あり");
   const grouping = normalizeGroupingSpec(stmt);
   if (grouping.type === "PLAIN")

@@ -65,7 +65,9 @@ export function buildKlikePushdownPlan(
   stmt: SelectStatement,
   options: KlikePushdownPlanOptions = {}
 ): KlikePushdownPlan {
-  const joinsAreSafeForKlike = stmt.joins.every((join) => join.type === "INNER");
+  const joinsAreSafeForKlike = stmt.joins.every((join) =>
+    join.type === "INNER" || join.type === "CROSS"
+  );
   const common = {
     allowKlike: joinsAreSafeForKlike,
     allowUnresolvedKlikeVariables: options.allowUnresolvedVariables,
@@ -87,7 +89,7 @@ export function buildKlikePushdownPlan(
   const joinRelations = new Map<string, "exact" | "superset">();
   if (stmt.where !== null) {
     for (const join of stmt.joins) {
-      if (join.type !== "INNER"
+      if ((join.type !== "INNER" && join.type !== "CROSS")
         || !join.table.alias || join.table.subtableCode || join.table.cteName !== null) continue;
       const extracted = extractSafePushdownPlan(stmt.where, {
         ...common,

@@ -16,6 +16,7 @@ const CASES: Array<[string, string]> = [
     "SELECT 顧客名, SUM(売上) AS 合計 FROM APP100 WHERE ステータス = '完了' GROUP BY 顧客名 HAVING SUM(売上) > 100 ORDER BY 合計 DESC LIMIT 10 OFFSET 5",
   ],
   ["JOIN + 暗黙 alias", "SELECT a.顧客名, b.部署名 FROM APP100 a INNER JOIN APP200 b ON a.部署ID = b.$id"],
+  ["CROSS JOIN", "SELECT a.x, b.y FROM APP100 a CROSS JOIN APP200 b"],
   ["WITH CTE", "WITH c1 AS (SELECT 顧客ID FROM APP100) SELECT * FROM c1"],
   ["UNION ALL", "SELECT 顧客名 FROM APP100 UNION ALL SELECT 顧客名 FROM APP200"],
   ["INSERT VALUES", "INSERT INTO APP100 (顧客名, 売上) VALUES ('A', 100), ('B', 200)"],
