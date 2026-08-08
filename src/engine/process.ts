@@ -93,6 +93,9 @@ interface MaterializedSelectValues {
 const materializedSelectValues = new WeakMap<ProcessRow, MaterializedSelectValues>();
 const sourceRows = new WeakMap<ProcessRow, ProcessRow>();
 
+export const UNRESOLVED_AGGREGATE_COMPARISON_WARNING =
+  "比較条件で参照した集計値を確認できません。SELECT リストに同じ集計式を含めてください。";
+
 function asProcessingRow(source: ProcessRow): ProcessRow {
   if (sourceRows.has(source)) return source;
   let row: ProcessRow;
@@ -155,6 +158,36 @@ function getMaterializedLookupValue(row: ProcessRow, key: string): string | unde
 /** 既存の単体 helper 利用で、materialize 前提の raw row を直接渡す場合の互換読出し。 */
 function getLegacyMaterializedValue(row: ProcessRow, key: string): string | undefined {
   return materializedSelectValues.has(row) ? undefined : row[key];
+}
+
+function warnOnUnresolvedAggregateComparisons(
+  node: unknown,
+  rows: readonly ProcessRow[],
+  warnings?: Set<string>
+): void {
+  if (!warnings || rows.length === 0) return;
+  const keys = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    if (record["type"] === "FIELD" && record["aggregateRef"] !== undefined) {
+      const ref = record["aggregateRef"] as AggregateRef;
+      keys.add(aggregateSyntheticName(ref.func, ref.distinct, ref.arg));
+      return;
+    }
+    if (record["type"] === "SELECT" || record["type"] === "SCALAR_SUBQUERY") return;
+    Object.values(record).forEach(visit);
+  };
+  visit(node);
+  if ([...keys].some((key) => rows.some((row) =>
+    getMaterializedLookupValue(row, key) === undefined && row[key] === undefined
+  ))) {
+    warnings.add(UNRESOLVED_AGGREGATE_COMPARISON_WARNING);
+  }
 }
 
 /** HAVING 専用: SELECT alias / aggregate synthetic key を source より優先する。 */
@@ -2001,6 +2034,8 @@ export interface FullScanInput {
   resolvedGroupingSpec?: ResolvedGroupingSpec;
   /** SELECT-local に確定した B71 plain GROUP BY 解決計画。 */
   plainGroupByPlan?: PlainGroupByResolutionPlan;
+  /** 実行結果へ伝播する診断。 */
+  warnings?: Set<string>;
 }
 
 function stripHiddenQualifiedColumns(
@@ -2096,6 +2131,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
     plainGroupByPlan,
+    warnings,
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns, aggregateSortKindResolver);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -2164,9 +2200,11 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   }
 
   // 5. HAVING
+  warnOnUnresolvedAggregateComparisons(stmt.columns, rows, warnings);
   const resolveHavingSemantics: FieldSemanticsResolver = (field) => field.aggregateRef
     ? aggregateResultSemantics(field.aggregateRef, aggregateSortKindResolver)
     : havingFieldSemanticsResolver?.(field);
+  warnOnUnresolvedAggregateComparisons(stmt.having, rows, warnings);
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
 
   // 6. ウィンドウ関数

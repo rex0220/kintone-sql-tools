@@ -5139,6 +5139,7 @@ async function executeFullScanSelect(
         : {}),
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
+    warnings,
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,

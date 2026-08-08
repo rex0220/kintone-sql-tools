@@ -348,6 +348,10 @@ function resolveField(
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
+  if (field.aggregateRef) {
+    const ref = field.aggregateRef;
+    return resolveFieldRef(row, aggregateSyntheticName(ref.func, ref.distinct, ref.arg));
+  }
   // エイリアス付き: "a.フィールド"
   const key = field.tableAlias
     ? `${field.tableAlias}.${field.field}`
