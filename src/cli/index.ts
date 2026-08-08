@@ -1050,17 +1050,17 @@ function hasStaticTypedPushdownCandidate(statement: unknown): boolean {
   if (node["type"] === "WITH") {
     const query = node["query"];
     const containsCross = (value: unknown): boolean => {
+      if (Array.isArray(value)) return value.some(containsCross);
       if (value === null || typeof value !== "object") return false;
       const item = value as Record<string, unknown>;
       if (item["type"] === "SELECT") {
-        return Array.isArray(item["joins"])
+        if (Array.isArray(item["joins"])
           && item["joins"].some((join) =>
             typeof join === "object" && join !== null
             && (join as Record<string, unknown>)["type"] === "CROSS"
-          );
+          )) return true;
       }
-      if (item["type"] === "UNION") return containsCross(item["left"]) || containsCross(item["right"]);
-      return false;
+      return Object.values(item).some(containsCross);
     };
     const hasPhysicalCte = Array.isArray(node["ctes"])
       && node["ctes"].some((cte) => {
@@ -1072,7 +1072,7 @@ function hasStaticTypedPushdownCandidate(statement: unknown): boolean {
           && typeof from === "object" && from !== null
           && (from as Record<string, unknown>)["cteName"] === null;
       });
-    return (containsCross(query) && hasPhysicalCte)
+    return ((containsCross(node["ctes"]) || containsCross(query)) && hasPhysicalCte)
       || hasStaticTypedPushdownCandidate(query);
   }
   if (node["type"] !== "SELECT") return false;
