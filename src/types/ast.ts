@@ -461,13 +461,19 @@ export interface TableRef {
   subtableCode?: string | null; // APP100$明細 → "明細"
 }
 
-export type JoinType = "INNER" | "LEFT" | "RIGHT";
+export type JoinType = "INNER" | "LEFT" | "RIGHT" | "CROSS";
 
-export interface JoinClause {
-  type: JoinType;
-  table: TableRef;
-  on: JoinCondition;
-}
+export type JoinClause =
+  | {
+      type: "INNER" | "LEFT" | "RIGHT";
+      table: TableRef;
+      on: JoinCondition;
+    }
+  | {
+      type: "CROSS";
+      table: TableRef;
+      on: null;
+    };
 
 /** ON a.field = b.field 形式のみサポート（Phase 1） */
 export interface JoinCondition {

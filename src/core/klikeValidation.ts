@@ -216,7 +216,7 @@ function canDeferJoinWholeWhereKlikeValidation(stmt: SelectStatement): boolean {
   return stmt.where !== null
     && serverOnlyFunctionOccurrencesInWhere(stmt.where).length > 0
     && stmt.joins.length > 0
-    && stmt.joins.every((join) => join.type === "INNER")
+    && stmt.joins.every((join) => join.type === "INNER" || join.type === "CROSS")
     && [stmt.from, ...stmt.joins.map((join) => join.table)].every((table) =>
       table.alias !== null
       && table.cteName === null

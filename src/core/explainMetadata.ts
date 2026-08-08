@@ -75,6 +75,8 @@ function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
     // API-rejecting dry-run client, then the shared EXPLAIN engine reaches
     // getFields() while planning a CTE/temp -> APP JOIN.
     || statement.joins.some((join) =>
+      join.type !== "CROSS"
+      &&
       join.table.appId > 0
       && join.table.cteName === null
       && (join.on.left.field !== "$id" || join.on.right.field !== "$id")

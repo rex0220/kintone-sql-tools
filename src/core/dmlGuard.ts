@@ -84,7 +84,8 @@ export type CompleteInputReason =
   | "GROUPING_SETS"
   | "AGGREGATE"
   | "GROUP_BY"
-  | "DISTINCT";
+  | "DISTINCT"
+  | "CROSS_JOIN";
 
 const STATISTICAL_AGGREGATES: ReadonlySet<string> = new Set([
   "STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "MEDIAN", "MODE",
@@ -177,6 +178,7 @@ function unionCompleteInputReasons(stmt: UnionStatement): Set<CompleteInputReaso
 
 function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputReason> {
   const reasons = new Set<CompleteInputReason>();
+  if (stmt.joins.some((join) => join.type === "CROSS")) reasons.add("CROSS_JOIN");
   const grouping = normalizeGroupingSpec(stmt);
   if (grouping.type === "GROUPING_SETS") reasons.add("GROUPING_SETS");
   if (grouping.type === "PLAIN") reasons.add("GROUP_BY");

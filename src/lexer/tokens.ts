@@ -51,6 +51,7 @@ export const enum TokenKind {
   INNER = "INNER",
   LEFT  = "LEFT",
   RIGHT = "RIGHT",
+  CROSS = "CROSS",
   JOIN  = "JOIN",
   ON    = "ON",
 
@@ -231,6 +232,7 @@ export const KEYWORDS: ReadonlyMap<string, TokenKind> = new Map([
   ["INNER",     TokenKind.INNER],
   ["LEFT",      TokenKind.LEFT],
   ["RIGHT",     TokenKind.RIGHT],
+  ["CROSS",     TokenKind.CROSS],
   ["JOIN",      TokenKind.JOIN],
   ["ON",        TokenKind.ON],
   ["GROUP",     TokenKind.GROUP],

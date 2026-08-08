@@ -391,7 +391,7 @@ export function allowJoinServerFunctionPlan(
 ): boolean {
   return select.where !== null
     && select.joins.length > 0
-    && select.joins.every((join) => join.type === "INNER")
+    && select.joins.every((join) => join.type === "INNER" || join.type === "CROSS")
     && [select.from, ...select.joins.map((join) => join.table)].every((table) =>
       table.alias !== null
       && table.cteName === null

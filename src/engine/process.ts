@@ -43,6 +43,7 @@ import type {
   CaseResult,
   AggregateRef,
 } from "../types/ast";
+import { planCrossJoinRows } from "../core/optimization/crossJoinRowPlan";
 import { isAggregateWindow, isRankingWindow, isValueWindow, numberLiteralText } from "../types/ast";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import type { PlainGroupByResolutionPlan } from "../core/optimization/plainGroupByPlan";
@@ -222,6 +223,19 @@ export function applyJoin(
     rightColumns?: readonly string[];
   } = {}
 ): ProcessRow[] {
+  if (join.type === "CROSS") {
+    const plan = planCrossJoinRows(leftRows.length, rightRows.length);
+    if (!plan.allowed) {
+      throw new Error(
+        `ArgumentError: CROSS JOIN の生成件数 ${plan.outputRows} 行（左 ${plan.leftRows} 行 × 右 ${plan.rightRows} 行）が上限 ${plan.limit} 行を超えています。`
+      );
+    }
+    const result: ProcessRow[] = [];
+    for (const lRow of leftRows) {
+      for (const rRow of rightRows) result.push({ ...lRow, ...rRow });
+    }
+    return result;
+  }
   const { on, type: joinType } = join;
   const leftKey  = on.left.tableAlias
     ? `${on.left.tableAlias}.${on.left.field}`

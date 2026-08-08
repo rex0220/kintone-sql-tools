@@ -273,6 +273,43 @@ test("INNER JOIN: 一致する行のみ", () => {
   expect(result[0]["b.会社"]).toBe("A社");
 });
 
+test("CROSS JOIN: 左外側・右内側の安定順で直積する", () => {
+  const cross: JoinClause = {
+    type: "CROSS",
+    table: { appId: 200, alias: "b", cteName: null },
+    on: null,
+  };
+  expect(applyJoin(
+    [{ "a.x": "1" }, { "a.x": "2" }],
+    [{ "b.y": "10" }, { "b.y": "20" }],
+    cross
+  )).toEqual([
+    { "a.x": "1", "b.y": "10" },
+    { "a.x": "1", "b.y": "20" },
+    { "a.x": "2", "b.y": "10" },
+    { "a.x": "2", "b.y": "20" },
+  ]);
+  expect(applyJoin([], [{ "b.y": "10" }], cross)).toEqual([]);
+  expect(applyJoin([{ "a.x": "1" }], [], cross)).toEqual([]);
+});
+
+test("CROSS JOIN: 超過時は行を読む前に拒否する", () => {
+  const cross: JoinClause = {
+    type: "CROSS",
+    table: { appId: 200, alias: "b", cteName: null },
+    on: null,
+  };
+  const unreadable = Object.defineProperty({}, "value", {
+    enumerable: true,
+    get: () => { throw new Error("row was materialized"); },
+  });
+  expect(() => applyJoin(
+    Array(101).fill(unreadable),
+    Array(100).fill(unreadable),
+    cross
+  )).toThrow("ArgumentError: CROSS JOIN の生成件数 10100 行（左 101 行 × 右 100 行）が上限 10000 行を超えています。");
+});
+
 test("INNER JOIN: JOIN キーのプロパティ不存在と空文字値を区別する", () => {
   const emptyValueLeft: ProcessRow[] = [{ "a.顧客ID": "", 顧客ID: "" }];
   const emptyValueRight: ProcessRow[] = [{ "b.顧客ID": "", 顧客ID: "" }];
