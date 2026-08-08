@@ -84,9 +84,13 @@ test.each([
       { client: tracked.client }
     );
 
-    expect(result.lines.slice(-3)).toEqual([
+    expect(result.lines.slice(-7)).toEqual([
       "  mode:          FULL_SCAN（一時テーブル参照）",
       "  temp:          #g（インメモリ走査。実体化前のため行数不明）",
+      "  source:        temp table #g (schema from statement 1)",
+      "  rows:          runtime (not materialized by EXPLAIN)",
+      "  plan status:   static schema / runtime rows",
+      "  records API:   none",
       "  note:          一時テーブルへの WHERE プッシュダウンは行われない",
     ]);
     expect(tracked.getRecords).not.toHaveBeenCalled();

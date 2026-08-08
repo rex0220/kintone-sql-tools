@@ -3035,6 +3035,37 @@ describe("MCP tools", () => {
     expect(result.statements[1].plan.join("\n")).toMatch(/FULL_SCAN（一時テーブル参照）/);
   });
 
+  test("B162/B163 explain: 共有 batch engine の条件付き系列と static temp schema を records API 0 で返す", async () => {
+    const records = jest.fn(async () => ({ records: [] }));
+    const runtimeClient = { ...makeClient(), getRecords: records };
+    const tools = createKsqlMcpTools({ profile: "prod" }, {
+      createRuntime: async (_options, input) => ({
+        sql: input.sql,
+        client: runtimeClient,
+        maxRecords: 10_000,
+        fetchParallel: 1,
+        onLimit: "error" as const,
+        timeout: 30_000,
+        cacheContext: "mcp-b162-b163",
+        profileName: "prod",
+      }),
+    });
+    const b162 = await tools.explain({
+      sql: "DECLARE @a='2025-08-01'; DECLARE @b='2026-08-01'; " +
+        "WITH s AS (GENERATE_SERIES(@a,@b,'1 month') AS 月) SELECT 月 FROM s",
+    }) as { statements: Array<{ plan: string[] }> };
+    expect(b162.statements[2].plan.join("\n")).toContain("rows:          13 (DECLARE default estimate)");
+
+    const b163 = await tools.explain({
+      sql: "CREATE TEMP TABLE #t AS SELECT 顧客名 AS 製品名 FROM APP100; " +
+        "SELECT 製品名,COUNT(*) AS 月数 FROM #t GROUP BY 製品名",
+    }) as { statements: Array<{ plan: string[] }> };
+    const text = b163.statements[1].plan.join("\n");
+    expect(text).toContain("source:        temp table #t (schema from statement 1)");
+    expect(text).toContain("group key 製品名: PHYSICAL (source=0, field=製品名)");
+    expect(records).not.toHaveBeenCalled();
+  });
+
   test("explain: 単文入力は従来ペイロードのまま", async () => {
     const tools = createKsqlMcpTools({ profile: "prod" });
     const result = await tools.explain({ sql: "SELECT 顧客名 FROM APP100" });

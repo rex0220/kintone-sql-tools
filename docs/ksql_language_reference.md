@@ -3680,6 +3680,27 @@ EXPLAIN IMPORT INTO APP100 (顧客コード, 顧客名) FROM CSV customers BY NA
   計画上は `frame:` / `window ...:` の行に現れますが、**`warnings` には入りません**。
   **「`EXPLAIN` が通ったから警告は無い」とは読めません。**
 
+### 未解決値と複文の一時テーブル
+
+EXPLAIN は、SQL 本文から静的に証明できる情報と、実行時にしか決まらない情報を区別します。
+未解決情報を実値・空 schema・0 行として推測せず、`deferred` または `runtime` と表示します。
+`deferred` は計画時に確定できないという意味であり、実行成功を保証するものではありません。
+
+- `GENERATE_SERIES` の引数に使う注釈なし `DECLARE` の既定値が文字列または数値リテラルなら、
+  系列引数に限って既定値に基づく条件付き計画を表示します。系列型・推定行数とともに
+  `DECLARE default`、外部注入時は計画が変わり得る旨を表示し、start/stop の既定実値や
+  外部注入値は表示しません。`SET`、関数、算術、サブクエリなど実行時評価が必要な値を含む系列は、
+  `series type: deferred (variable)`、`rows: runtime` になります。WHERE、IN、KLIKE、SELECT 列など
+  系列以外の変数用途は従来どおり placeholder/candidate として扱います。
+- 複文の dry-run / batch EXPLAIN では、先行する `CREATE TEMP TABLE ... AS SELECT` の明示出力列を
+  行を実体化せず静的 schema として記録します。後続の一時テーブル参照は schema の producer 文番号、
+  `rows: runtime`、`static schema / runtime rows` を表示し、通常の `GROUP BY` planner がその schema を
+  使用します。`DROP TEMP TABLE` 後は schema も破棄されます。wildcard など metadata なしでは安全に
+  列を決められない形は空 schema にせず `deferred (temp table schema)` と表示します。
+
+どちらの経路も records API は呼ばず、通常実行・validate の変数解決、一時テーブル実体化、
+系列検証、GROUP BY 検証の意味は変更しません。
+
 ### 出力の読み方
 
 計画は次の 3 つの問いに答えます。**どの行を読むかは、知りたいことで決まります。**
