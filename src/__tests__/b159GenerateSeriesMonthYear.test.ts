@@ -64,6 +64,8 @@ async function errorFor(sql: string, mock = client()): Promise<Error> {
   throw new Error("expected rejection");
 }
 
+const LAG_WARNING = "前 の ORDER BY は全順序でないため、同順内の前後関係は未規定です。その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。集約結果の列は一意でも証明できないため、すでに一意な場合もこの警告が出ます。元の集約のキーをすべて ORDER BY に含めているなら、この警告は無視して構いません。";
+
 describe("B159 GENERATE_SERIES month/year step", () => {
   test.each([
     ["month 正方向", "'2025-08-01','2026-08-01','1 month'", 13, "2025-08-01", "2026-08-01"],
@@ -137,6 +139,19 @@ describe("B159 GENERATE_SERIES month/year step", () => {
     expect(over.statements[2]).toMatchObject({ status: "error", error: { message: "ArgumentError: GENERATE_SERIES の生成件数 10001 行が上限 10000 行を超えています。" } });
   });
 
+  test.each([
+    ["0 month", "DECLARE @step='0 month';", "'2025-08-01','2026-08-01',@step", "'2025-08-01','2026-08-01','0 month'", "ArgumentError: GENERATE_SERIES の日付 step に 0 month は指定できません。"],
+    ["未対応単位", "DECLARE @step='1 week';", "'2025-08-01','2026-08-01',@step", "'2025-08-01','2026-08-01','1 week'", "ArgumentError: GENERATE_SERIES の日付 step は day、days、month、months、year、years のみ対応しています。"],
+    ["不正係数", "DECLARE @step='1.5 years';", "'2022-01-01','2026-01-01',@step", "'2022-01-01','2026-01-01','1.5 years'", "ArgumentError: GENERATE_SERIES の日付 step の係数には安全な整数を指定してください。"],
+    ["year 非年初アンカー", "DECLARE @start='2025-02-01';", "@start,'2026-01-01','1 year'", "'2025-02-01','2026-01-01','1 year'", "ArgumentError: GENERATE_SERIES の year step では start に年初（YYYY-01-01）を指定してください。"],
+  ])("変数解決後の逐語エラーはリテラルと同じ: %s", async (_name, declaration, variableArgs, literalArgs, message) => {
+    const batch = await executeBatch(`${declaration} WITH s AS (GENERATE_SERIES(${variableArgs}) AS d) SELECT d FROM s;`, client());
+    const variableMessage = batch.statements[1].error?.message;
+    const literalMessage = (await errorFor(`WITH s AS (GENERATE_SERIES(${literalArgs}) AS d) SELECT d FROM s`)).message;
+    expect(variableMessage).toBe(message);
+    expect(variableMessage).toBe(literalMessage);
+  });
+
   test("月・年の境界値をアンカーと行番号から生成する", async () => {
     expect(values(await run("WITH s AS (GENERATE_SERIES('0001-01-01','0001-03-01','1 month') AS d) SELECT d FROM s"), "d"))
       .toEqual(["0001-01-01", "0001-02-01", "0001-03-01"]);
@@ -182,6 +197,29 @@ describe("B159 GENERATE_SERIES month/year step", () => {
     expect(result.warnings?.join("\n")).toContain("全順序でない");
   });
 
+  test.each([
+    ["month", "'2025-08-01','2025-10-01','1 month'", ["2025-08-01", "2025-08-01", "2025-09-01"]],
+    ["year", "'2024-01-01','2026-01-01','1 year'", ["2024-01-01", "2024-01-01", "2025-01-01"]],
+  ])("%s 系列は通常 JOIN 後も全順序警告を維持する", async (_unit, args, appDates) => {
+    const mock = client({ 200: appDates.map((月) => record({ 月 })) });
+    const result = await run(`WITH s AS (GENERATE_SERIES(${args}) AS d), j AS (SELECT s.d,a.月 FROM s JOIN APP200 AS a ON s.d=a.月), w AS (SELECT d,LAG(d) OVER (ORDER BY d) AS 前 FROM j) SELECT d,前 FROM w`, mock);
+    expect(result.warnings).toEqual([LAG_WARNING]);
+  });
+
+  test.each([
+    ["month", "'2025-08-01','2025-10-01','1 month'", ["2025-08-01", "2025-08-01", "2025-09-01"]],
+    ["year", "'2024-01-01','2026-01-01','1 year'", ["2024-01-01", "2024-01-01", "2025-01-01"]],
+  ])("%s 系列は一時テーブル経由でも全順序警告を維持する", async (_unit, args, appDates) => {
+    const mock = client({ 200: appDates.map((月) => record({ 月 })) });
+    const batch = await executeBatch(
+      `CREATE TEMP TABLE #series AS WITH s AS (GENERATE_SERIES(${args}) AS d) SELECT d FROM s; ` +
+      "WITH j AS (SELECT s.d,a.月 FROM #series AS s JOIN APP200 AS a ON s.d=a.月), w AS (SELECT d,LAG(d) OVER (ORDER BY d) AS 前 FROM j) SELECT d,前 FROM w;",
+      mock,
+      { cacheContext: `b159-temp-warning-${_unit}-${Math.random()}` }
+    );
+    expect((batch.statements[1].result as SelectResult).warnings).toEqual([LAG_WARNING]);
+  });
+
   test("月次0埋め後の LAG は空月直後に0を返す", async () => {
     const mock = client({
       100: [record({ 月キー: "2025-08", 金額: "10" }), record({ 月キー: "2025-10", 金額: "30" })],
@@ -217,5 +255,13 @@ describe("B159 GENERATE_SERIES month/year step", () => {
       "records API:   none",
     ]) expect(plan).toContain(text);
     expect(mock.calls).toEqual({});
+  });
+
+  test.each([
+    ["'-1 years'", "-1 year"],
+    ["'-2 year'", "-2 years"],
+  ])("EXPLAIN step 正規化を逐語固定する: %s", async (step, normalized) => {
+    const result = await run(`EXPLAIN WITH y AS (GENERATE_SERIES('2026-01-01','2022-01-01',${step}) AS 年) SELECT 年 FROM y`);
+    expect(values(result, "plan")).toContain(`  step:          ${normalized}`);
   });
 });
