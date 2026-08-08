@@ -3,6 +3,58 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.64.0（2026-08-08）
+
+### 改善（B162 `DECLARE` 変数の系列も `EXPLAIN` が通るように）
+
+**`DECLARE` 変数を `GENERATE_SERIES` の引数に使うと、実行は正常なのに `EXPLAIN` だけが
+「実在する YYYY-MM-DD 形式の DATE を指定してください」と誤解を招くエラーになっていました。**
+「保存クエリは `DECLARE` で書く」と「本番クエリは `EXPLAIN` まで通す」が両立しませんでした。
+
+```sql
+DECLARE @m_start = '2025-08-01';
+DECLARE @m_stop  = '2026-08-01';
+WITH 月系列 AS (GENERATE_SERIES(@m_start, @m_stop, '1 month') AS 月)
+SELECT 月 FROM 月系列
+--  新: EXPLAIN が成功し、既定値に基づく条件付き計画を表示
+--      series type: DATE (DECLARE default) / rows: 13 (DECLARE default estimate)
+--      binding: DECLARE defaults; runtime injection may change this plan
+```
+
+- **リテラル既定値の場合だけ**系列引数に束縛します（外部注入で変わり得る旨を表示・
+  注入値そのものは使わず表示もしません）
+- `SET @x = TODAY()` など静的に確定しない場合は `series type: deferred (variable)` で
+  **エラーにせず**計画を返します（実行時の検証は従来どおり）
+- `WHERE` 等の変数の扱い（placeholder / `pushdown candidate` 表示）は変わりません
+
+### 改善（B163 一時テーブルの `GROUP BY` を含むバッチ `EXPLAIN` が通るように）
+
+**`CREATE TEMP TABLE ... AS SELECT` の後段で一時テーブルを `GROUP BY` する文を含むバッチの
+`EXPLAIN` が `InternalError` になっていました**（実行は正常・エンジンのバグに読める文言）。
+
+`EXPLAIN` は一時テーブルを実体化しませんが、**出力列は文 1 の SELECT 句から静的に導出できる**ため、
+schema を後続文へ伝播して通常どおり計画を表示するようにしました。
+
+```text
+CREATE TEMP TABLE #t
+  schema:        年月, 製品名
+  schema source: SELECT output of statement 1
+（後段）
+  source:        temp table #t (schema from statement 1)
+  plan status:   static schema / runtime rows
+```
+
+- 静的に導出できない形（wildcard 等）は `deferred` として**エラーにせず**通します
+- `InternalError` は利用者向け診断として出しません
+- `DROP TEMP TABLE` 後の参照・一時テーブルから一時テーブルの連鎖にも対応
+
+### 補足
+
+- どちらも **`EXPLAIN`/dry-run 面のみの改善**で、実行・`ksql_validate` の結果と
+  records API 0 回・一時テーブル非実体化の契約は変わりません
+- CLI `--dry-run` の静的経路（API 0 回）と metadata 解決の使い分けを、
+  混在バッチでも文の構成から正しく選ぶようにしました
+
 ## v3.63.0（2026-08-08）
 
 ### 新機能（B158 `CROSS JOIN` — 直積・2 軸の格子生成）
