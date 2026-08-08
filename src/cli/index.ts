@@ -2260,7 +2260,7 @@ async function run(): Promise<number> {
       const plans = await buildBatchExplainPlans(
         sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
         Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
-        dmlMaxRows, dmlMaxSubtableRows, false
+        dmlMaxRows, dmlMaxSubtableRows, !dryRunUsesStaticTypedPlan
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext

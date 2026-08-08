@@ -165,4 +165,29 @@ ORDER BY s.日付, t.$id`;
     expect(result.stderr).not.toContain("DryRunError");
     expect(recordRequests).toEqual([]);
   });
+
+  test("B157 複文バッチは metadata 解決済みの COUNT_ONLY 計画を表示する", async () => {
+    const sql = "SELECT 1 AS x; "
+      + "SELECT COUNT(*) AS 直近件数 FROM APP4228 WHERE 日付 >= TODAY()";
+    const fieldsBefore = fieldRequests.length;
+    const recordsBefore = recordRequests.length;
+    const result = await runCli(["--config", configPath, "--dry-run", "-e", sql]);
+    const kintoneQueries = result.stdout
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("kintone query:"))
+      .map((line) => line.trim())
+      .filter((line) => line !== "kintone query: (なし)")
+      .map((line) => line.replace(/ limit 1$/, ""));
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("DryRunError");
+    expect(result.stdout).toContain("fetch summary: COUNT_ONLY");
+    expect(result.stdout).toMatch(/mode:\s+COUNT_TOTAL_COUNT/);
+    expect(kintoneQueries).toEqual([
+      "kintone query: 日付 >= TODAY()",
+      "kintone query: 日付 >= TODAY()",
+    ]);
+    expect(fieldRequests.length).toBeGreaterThan(fieldsBefore);
+    expect(recordRequests).toHaveLength(recordsBefore);
+  });
 });
