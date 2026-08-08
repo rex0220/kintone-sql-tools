@@ -2831,6 +2831,7 @@ async function executeSelect(
   windowWarningContext: WindowWarningContext = "DIRECT"
 ): Promise<SelectResult> {
   let result: SelectResult;
+  const subqueryWarnings = new Set<string>();
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   if (isNoFromSelect(stmt)) {
     result = executeNoFromSelect(stmt);
@@ -2860,7 +2861,7 @@ async function executeSelect(
     cacheContext,
     cteCache
   );
-  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
+  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, subqueryWarnings, cteCache);
   const whereCapability = rememberSelectWhereCapability(
     stmt,
     classifyWhereCapability(stmt.where, fieldSemanticsResolver)
@@ -2973,7 +2974,11 @@ async function executeSelect(
       await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
     );
   }
-  return mergeSelectWarnings(result, [...defaultRangeWarnings, ...subtableFieldWarnings]);
+  return mergeSelectWarnings(result, [
+    ...subqueryWarnings,
+    ...defaultRangeWarnings,
+    ...subtableFieldWarnings,
+  ]);
 }
 
 /**
@@ -4946,8 +4951,8 @@ async function executeFullScanSelect(
 
   // サブクエリを事前実行（IN (SELECT ...) の値セットを解決）
   await Promise.all([
-    resolveSubqueries(stmt.where,  client, options, cacheContext, cteCache),
-    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.where,  client, options, cacheContext, warnings, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, warnings, cteCache),
   ]);
 
   // 一般 NUMBER 比較または選択系 IN 候補がある物理アプリだけ、押し下げ用メタを取得する。
@@ -5005,7 +5010,14 @@ async function executeFullScanSelect(
   ) ?? "";
 
   // B71: scalar subquery 内の GROUP BY plan/rejection も外側 fetch より先に確定する。
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
+  const scalarCache = await resolveScalarColumns(
+    stmt.columns,
+    client,
+    options,
+    cacheContext,
+    warnings,
+    cteCache
+  );
 
   // メインテーブルのフェッチを開始（await しない）
   const constantFalse = isConstantFalseWhere(stmt.where);
@@ -5478,9 +5490,9 @@ async function executeFullScanWithCte(
 
   // サブクエリを事前実行（サブクエリ内の CTE / 一時テーブル参照にも cteCache を引き継ぐ）
   await Promise.all([
-    resolveSubqueries(stmt.where,  client, options, cacheContext, cteCache),
-    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
-    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache),
+    resolveSubqueries(stmt.where,  client, options, cacheContext, warnings, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, warnings, cteCache),
+    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, warnings, cteCache),
   ]);
   const whereCapability = classifyWhereCapability(stmt.where, choiceAndWindowResolver);
   if (whereCapability.capability === "UNSUPPORTED") {
@@ -5530,6 +5542,7 @@ async function executeFullScanWithCte(
     client,
     effectiveOptions,
     cacheContext,
+    warnings,
     cteCache
   );
   const orderByMetaPromise = Promise.resolve(orderMeta);
@@ -9835,10 +9848,11 @@ async function resolveSubqueries(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
+  warnings: Set<string>,
   cteCache?: Map<string, MaterializedTable>
 ): Promise<void> {
   const tasks: Array<Promise<void>> = [];
-  collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
+  collectSubqueryTasks(where, client, options, cacheContext, tasks, warnings, cteCache);
   await Promise.all(tasks);
 }
 
@@ -9848,13 +9862,14 @@ async function resolveSelectCaseSubqueries(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
+  warnings: Set<string>,
   cteCache?: Map<string, MaterializedTable>
 ): Promise<void> {
   const tasks: Promise<void>[] = [];
   for (const column of stmt.columns) {
     if (column.type !== "CASE_COL") continue;
     for (const branch of column.expr.branches) {
-      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, cteCache));
+      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, warnings, cteCache));
     }
   }
   await Promise.all(tasks);
@@ -9883,6 +9898,7 @@ function collectSubqueryTasks(
   options: ExecuteOptions,
   cacheContext: string,
   tasks: Array<Promise<void>>,
+  warnings: Set<string>,
   cteCache?: Map<string, MaterializedTable>
 ): void {
   if (where === null) return;
@@ -9891,12 +9907,14 @@ function collectSubqueryTasks(
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
         tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
+          for (const warning of result.warnings ?? []) warnings.add(warning);
           const col = right.column ?? (result.columns[0] ?? "");
           (right as ResolvedSubqueryInList).resolved = new Set(result.rows.map((r) => r[col] ?? ""));
         }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
         tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
+          for (const warning of result.warnings ?? []) warnings.add(warning);
           if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
           if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
           const col = result.columns[0] ?? "";
@@ -9906,16 +9924,17 @@ function collectSubqueryTasks(
       break;
     }
     case "LOGICAL":
-      collectSubqueryTasks(where.left,  client, options, cacheContext, tasks, cteCache);
-      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.left,  client, options, cacheContext, tasks, warnings, cteCache);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, warnings, cteCache);
       break;
     case "NOT":
     case "GROUP":
-      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, warnings, cteCache);
       break;
     case "EXISTS": {
       const node = where;
       tasks.push(runSubquery(node.query, client, options, cacheContext, cteCache).then((result) => {
+        for (const warning of result.warnings ?? []) warnings.add(warning);
         (node as ResolvedExistsExpr).resolved = result.rowCount > 0;
       }));
       break;
@@ -9958,6 +9977,7 @@ async function resolveScalarColumns(
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
+  warnings: Set<string>,
   cteCache?: Map<string, MaterializedTable>
 ): Promise<Map<number, string>> {
   const byQuery = new Map<string, Promise<string>>();
@@ -9969,6 +9989,7 @@ async function resolveScalarColumns(
     let promise = byQuery.get(key);
     if (!promise) {
       promise = runSubquery(col.query, client, options, cacheContext, cteCache).then((result) => {
+        for (const warning of result.warnings ?? []) warnings.add(warning);
         if (result.rowCount === 0) throw new Error("スカラーサブクエリが値を返しませんでした");
         if (result.rowCount > 1)  throw new Error("スカラーサブクエリが複数行を返しました（1行のみ許可）");
         const firstCol = result.columns[0] ?? "";
