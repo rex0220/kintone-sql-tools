@@ -155,6 +155,35 @@ describe("B164 comparison aggregate references", () => {
     expect(result.warnings?.join(" ")).not.toMatch(/aggregateRef|synthetic|lookup|key/i);
   });
 
+  test.each([
+    [
+      "IN",
+      `SELECT $id FROM APP164 WHERE 区分 IN (` +
+        `SELECT 区分 FROM APP164 GROUP BY 区分 HAVING SUM(${variableArg})=4)`,
+    ],
+    [
+      "WHERE scalar",
+      `SELECT $id FROM APP164 WHERE 区分=(` +
+        `SELECT 区分 FROM APP164 GROUP BY 区分 HAVING SUM(${variableArg})=4 OR 区分='A')`,
+    ],
+    [
+      "EXISTS",
+      `SELECT $id FROM APP164 WHERE EXISTS (` +
+        `SELECT 区分 FROM APP164 GROUP BY 区分 HAVING SUM(${variableArg})=4)`,
+    ],
+    [
+      "SELECT scalar",
+      `SELECT (SELECT 区分 FROM APP164 GROUP BY 区分 ` +
+        `HAVING SUM(${variableArg})=4 OR 区分='A') AS 内側 FROM APP164 LIMIT 1`,
+    ],
+  ])("サブクエリ内 HAVING 非掲出の警告を外側へ併合する: %s", async (_kind, sql) => {
+    const result = await batchSelect(
+      `DECLARE @target='missing'; ${sql}`,
+      `b164-subquery-warning-${_kind}`
+    );
+    expect(result.warnings).toEqual([UNRESOLVED_AGGREGATE_COMPARISON_WARNING]);
+  });
+
   test("ORDER BY alias・window・UNION 各枝を回帰させない", async () => {
     const ordered = await batchSelect(
       `DECLARE @target='O''Reilly'; SELECT 区分, SUM(${variableArg}) AS 合計, ` +
