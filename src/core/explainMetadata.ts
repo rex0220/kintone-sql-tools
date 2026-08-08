@@ -84,6 +84,28 @@ function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
     );
 }
 
+function cteQueriesContainPhysicalSelect(ctes: unknown): boolean {
+  if (!Array.isArray(ctes)) return false;
+  const seen = new Set<object>();
+  const visit = (node: unknown): boolean => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node as object)) return false;
+    seen.add(node as object);
+    if (Array.isArray(node)) return node.some(visit);
+
+    const item = node as Record<string, unknown>;
+    if (item["type"] === "SELECT") {
+      const select = node as SelectStatement;
+      if ([select.from, ...select.joins.map((join) => join.table)]
+        .some((table) => table.appId > 0 && table.cteName === null)) {
+        return true;
+      }
+    }
+    return Object.values(item).some(visit);
+  };
+  return ctes.some((cte) => visit((cte as { query?: unknown })?.query));
+}
+
 /**
  * EXPLAIN / dry-run がフォーム定義またはプロセス設定を読む必要があるかを返す。
  * statement 全体を再帰走査するため、WITH / UNION / サブクエリ / DML を同じ規則で扱う。
@@ -98,6 +120,11 @@ export function explainNeedsAppMetadata(statement: unknown): boolean {
 
     const item = node as Record<string, unknown>;
     if (item["type"] === "VALIDATE") return true;
+    // CTE の出力列推論は、CTE 定義内の物理 APP ごとにフォーム定義を読む。
+    // WITH 本体の物理 APP は対象に含めず、非 CTE SELECT と B155 静的経路を維持する。
+    if (item["type"] === "WITH" && cteQueriesContainPhysicalSelect(item["ctes"])) {
+      return true;
+    }
     if (item["type"] === "SELECT" && selectNeedsOwnMetadata(node as SelectStatement)) {
       return true;
     }

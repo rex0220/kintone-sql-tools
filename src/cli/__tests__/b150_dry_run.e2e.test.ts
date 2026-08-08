@@ -190,4 +190,16 @@ ORDER BY s.日付, t.$id`;
     expect(fieldRequests.length).toBeGreaterThan(fieldsBefore);
     expect(recordRequests).toHaveLength(recordsBefore);
   });
+
+  test.each([
+    "WITH c AS (SELECT $id FROM APP4228) SELECT $id FROM c",
+    "SELECT 1 AS x; WITH c AS (SELECT $id FROM APP4228) SELECT $id FROM c",
+  ])("B161 CTE の物理ソース列を解決し records API を呼ばない: %s", async (sql) => {
+    const recordsBefore = recordRequests.length;
+    const result = await runCli(["--config", configPath, "--dry-run", "-e", sql]);
+
+    expect(result.code).toBe(0);
+    expect(result.stderr).not.toContain("DryRunError");
+    expect(recordRequests).toHaveLength(recordsBefore);
+  });
 });
