@@ -1,7 +1,7 @@
 # B157 CLI 複文バッチの --dry-run が metadata 解決を失い、診断と計画の kintone query が食い違う（v3.62.0 回帰）
 
 - 起票: 2026-08-08（[依頼元の v3.62.0 返信 §5](../../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260808-v3620.md)・エンジン側で再現し原因確定）
-- ステータス: 📝 **起票（原因確定・v3.62.0 回帰・表示のみ・優先 中）**
+- ステータス: ✅ **v3.63.0 リリース（2026-08-08・resolveMetadata=!dryRunUsesStaticTypedPlan・実機確認済み）**
 - 関連: [B155](ksql_b155_cte_join_where_merge_issue.md)（§5.3 静的経路の導入元）／
   [最終チェック報告](ksql_b155_final_check_report.md)（本件は取り残し）
 

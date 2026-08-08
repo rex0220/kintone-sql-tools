@@ -1,24 +1,34 @@
-ksql 配布パッケージ (v3.62.0)
+ksql 配布パッケージ (v3.63.0)
 
 release 成果物:
-- ksql-plugin-v3.62.0.zip
-- ksql-mcp.mcpb (manifest version 3.62.0)
-- ksql-mcp.js (MCP server version 3.62.0)
+- ksql-plugin-v3.63.0.zip
+- ksql-mcp.mcpb (manifest version 3.63.0)
+- ksql-mcp.js (MCP server version 3.63.0)
 
-改善 (B155 WHERE 条件の絞り込みが CTE・一時テーブルの JOIN と単一表の一部に届いていなかった)
-★要点・結果は変わりません:
-- CTE・一時テーブルを物理アプリへ JOIN する形で、v3.60.0 で開放した型×演算子の
-  WHERE 条件が結合キーの絞り込みと合流して kintone 側で効くようになりました。
-    修正前  WHERE t.個数 <= 100 → 結合キーだけで絞り込み (<= 100 は JS 判定)
-    修正後  (日付 >= "..." and 日付 <= "...") and (製品名 = "牛乳" and 個数 <= 100)
-- 同じ理由で、単一表の全件取得 (LIKE 併用など) でも安全な条件だけ先に絞り込みます。
-    例: 製品名 = '牛乳' AND 仕入先 LIKE '%乳業%' → 製品名 = "牛乳" で絞ってから LIKE を判定
-- 原因は型×演算子の判定が 2 実装に複製され、片方が古い規則のまま残っていたこと。
-  判定を 1 実装に統一しました。取得量と maxRecords の当たり方だけが変わり、
-  結果は変わりません (絞り込み後も元の WHERE を再評価します)。
-- あわせて EXPLAIN の join pushdown plan: not applied 行に但し書きを追加しました
-  (B154: 結合キー・WHERE の絞り込みは各ソース行に別途表示されるため)。
-- CLI --dry-run は CTE→APP JOIN + WHERE 候補の形を API 0 回で表示します。
+新機能 (B158 CROSS JOIN = 直積・2 軸の格子生成) ★要点:
+- 明示 CROSS JOIN で直積 (左 N 行 × 右 M 行) を生成できます。主用途は
+  GENERATE_SERIES の日付系列 × マスタの「日付 × 製品」格子で、LEFT JOIN で
+  実績を当てると「取引の無い日×製品」も 0 で並びます (レシピ R17 の製品別化)。
+    WITH d AS (GENERATE_SERIES('2026-01-01','2026-12-31') AS 日付),
+         m AS (SELECT 製品名 FROM APP200)
+    SELECT d.日付, m.製品名 FROM d CROSS JOIN m
+- 生成上限 10,000 行 (段ごとに行生成前判定・WHERE/LIMIT でも免除しません)。
+  EXPLAIN に左右行数と row guard を表示。dry-run は API 0 回。
+- 注意: CROSS が予約語になりました。同名フィールドは `CROSS` と囲ってください。
+- ON 1=1・カンマ結合は引き続き構文エラーです (開放していません)。
+
+新機能 (B159 GENERATE_SERIES の month / year step) ★要点:
+- 日付系列の step に '1 month' / '1 year' (係数・負値可) を指定できます。
+  月次 0 埋めにより「空月があると LAG が静かに 2 か月前と比べる」を防げます。
+- start は月初 (year は 1 月 1 日) 限定。月末は LAST_DAY(月)、'YYYY-MM' 文字列は
+  DATE_FORMAT(月, '%Y-%m') で変換してください (うるう年も 2024-02-29 で正しい・実測)。
+
+修正 (B157/B161 CLI --dry-run の表示・エラー):
+- 複文バッチの表示が v3.62.0 で悲観側に落ちていた回帰を修正 (表示のみ・結果不変)。
+- WITH + 物理アプリの最小形が DryRunError になる v3.61.0 以前からの穴を修正。
+
+v3.62.0 の各節は畳みました (B155 WHERE 絞り込みを CTE・一時テーブル JOIN と単一表へ
+拡大 = 結果不変・取得量削減 / B154 EXPLAIN 但し書き)。内容は CHANGELOG.md にあります。
 
 v3.61.0 の各節は畳みました (B150 結合キー押し下げの型対応 = 日付キー JOIN の
 GAIA_IQ03 解消 / B153 空キー JOIN 一致の欠落修正 = 結果が変わります)。
@@ -68,12 +78,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.62.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.63.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.62.0): B155 WHERE 条件の絞り込みを CTE・一時テーブルの JOIN と
+本リリース (v3.63.0): B158 CROSS JOIN (新機能・直積 = 2 軸格子・CROSS が予約語に)、
+B159 GENERATE_SERIES month/year step (新機能・月次 0 埋め)、B157/B161 dry-run 修正。
+
+前リリース (v3.62.0): B155 WHERE 条件の絞り込みを CTE・一時テーブルの JOIN と
 単一表の全件取得へ拡大 (改善・結果不変・取得量削減)、B154 EXPLAIN の但し書き。
 
 前リリース (v3.61.0): B150/B153 結合キー押し下げの型対応 (日付キー JOIN の
@@ -92,11 +105,6 @@ LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
 
 前リリース (v3.56.1): B145 拡張 grouping で明細項目を書くとエラーに
 (挙動が変わります)、GROUP BY の案内を「別の表にある」へ。
-
-前リリース (v3.56.0): B145 DESCRIBE に サブテーブル 列を追加
-(挙動が変わります・SELECT * が 7→8 列)、親から明細項目を選んだら警告 (改善)。
-
-前リリース (v3.54.0): B142 値が無いときの MIN / MAX が空文字に (挙動が変わります)。
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。

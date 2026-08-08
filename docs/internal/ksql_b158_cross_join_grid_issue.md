@@ -1,7 +1,7 @@
 # B158 直積（CROSS JOIN / 2 軸の格子生成）が書けない — 製品別 0 埋めの前提
 
 - 起票: 2026-08-08（[依頼元の B128 Phase 2 意見 §1-2](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-B128Phase2再開ライン.md)・実測裏取り済み）
-- ステータス: 📝 **方向確定（2026-08-08 オーナー判断＝構文は明示 `CROSS JOIN` を新設）・仕様 R1 待ち**（[依頼準備済み](ksql_b158_codex_spec_request_r1.md)・codex クレジット補充待ち）
+- ステータス: ✅ **v3.63.0 リリース（2026-08-08・[仕様 R1](ksql_b158_cross_join_spec_r1.md)どおり実装・最終チェック Major 1 件修正済み・実機確認済み）**
 - 関連: [B128 Phase 2 R1](ksql_b128_window_phase2_spec.md)（⏸ 2a の再開前提）／
   [B149](ksql_b149_generate_series_issue.md)（1 軸の 0 埋めはこれで解決済み）／B134
 

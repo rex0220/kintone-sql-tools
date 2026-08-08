@@ -1,7 +1,7 @@
 # B159 GENERATE_SERIES に month / year step が無く、月次の LAG を 0 埋めで守れない
 
 - 起票: 2026-08-08（[依頼元の B128 Phase 2 意見 §4](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-B128Phase2再開ライン.md)・実測裏取り済み）
-- ステータス: 📝 **起票（出荷済み機能の穴・優先 中・依頼元順位 2）**
+- ステータス: ✅ **v3.63.0 リリース（2026-08-08・[仕様 R1](ksql_b159_generate_series_month_step_spec_r1.md)どおり実装・空月直後の LAG=0 を実データ確認）**
 - 関連: [B149](ksql_b149_generate_series_issue.md)（日付 step は day/days のみで出荷）／
   [B128 2b LAG/LEAD](ksql_b128_lag_lead_spec.md)（v3.51.0）
 
