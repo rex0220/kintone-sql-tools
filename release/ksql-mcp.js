@@ -29764,7 +29764,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.64.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.65.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -39966,6 +39966,10 @@ function resolveField(field, row, resolveFieldType, resolveFieldSemantics2) {
   if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
   if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics2);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
+  if (field.aggregateRef) {
+    const ref = field.aggregateRef;
+    return resolveFieldRef(row, aggregateSyntheticName(ref.func, ref.distinct, ref.arg));
+  }
   const key = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
   return resolveFieldRef(row, key);
 }
@@ -44129,6 +44133,7 @@ async function deriveEmptyWildcardColumns(fields, subtableCode, loadProcessStatu
 init_define_KSQL_DOCS();
 var materializedSelectValues = /* @__PURE__ */ new WeakMap();
 var sourceRows = /* @__PURE__ */ new WeakMap();
+var UNRESOLVED_AGGREGATE_COMPARISON_WARNING = "\u6BD4\u8F03\u6761\u4EF6\u3067\u53C2\u7167\u3057\u305F\u96C6\u8A08\u5024\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002SELECT \u30EA\u30B9\u30C8\u306B\u540C\u3058\u96C6\u8A08\u5F0F\u3092\u542B\u3081\u3066\u304F\u3060\u3055\u3044\u3002";
 function asProcessingRow(source) {
   if (sourceRows.has(source)) return source;
   let row;
@@ -44176,6 +44181,31 @@ function getMaterializedLookupValue(row, key) {
 }
 function getLegacyMaterializedValue(row, key) {
   return materializedSelectValues.has(row) ? void 0 : row[key];
+}
+function warnOnUnresolvedAggregateComparisons(node, rows, warnings) {
+  if (!warnings || rows.length === 0) return;
+  const keys = /* @__PURE__ */ new Set();
+  const visit = (value) => {
+    if (value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const record2 = value;
+    if (record2["type"] === "FIELD" && record2["aggregateRef"] !== void 0) {
+      const ref = record2["aggregateRef"];
+      keys.add(aggregateSyntheticName(ref.func, ref.distinct, ref.arg));
+      return;
+    }
+    if (record2["type"] === "SELECT" || record2["type"] === "SCALAR_SUBQUERY") return;
+    Object.values(record2).forEach(visit);
+  };
+  visit(node);
+  if ([...keys].some((key) => rows.some(
+    (row) => getMaterializedLookupValue(row, key) === void 0 && row[key] === void 0
+  ))) {
+    warnings.add(UNRESOLVED_AGGREGATE_COMPARISON_WARNING);
+  }
 }
 function havingEvaluationRow(row) {
   const lookups = materializedSelectValues.get(row)?.byLookupKey;
@@ -45481,7 +45511,8 @@ function runFullScan(input) {
     tableColumns,
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
-    plainGroupByPlan
+    plainGroupByPlan,
+    warnings
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns, aggregateSortKindResolver);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -45537,7 +45568,9 @@ function runFullScan(input) {
       }
     );
   }
+  warnOnUnresolvedAggregateComparisons(stmt.columns, rows, warnings);
   const resolveHavingSemantics = (field) => field.aggregateRef ? aggregateResultSemantics(field.aggregateRef, aggregateSortKindResolver) : havingFieldSemanticsResolver?.(field);
+  warnOnUnresolvedAggregateComparisons(stmt.having, rows, warnings);
   rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
   rows = applyWindow(
     rows,
@@ -48858,6 +48891,7 @@ async function assertDmlWhereCapability(stmt, client, cacheContext) {
 }
 async function executeSelect(stmt, client, options, cacheContext, cteCache, captureColumnMeta = false, forLibraryCapture = false, windowWarningContext = "DIRECT") {
   let result;
+  const subqueryWarnings = /* @__PURE__ */ new Set();
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   if (isNoFromSelect(stmt)) {
     result = executeNoFromSelect(stmt);
@@ -48887,7 +48921,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
     cacheContext,
     cteCache
   );
-  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache);
+  await resolveSelectCaseSubqueries(stmt, client, options, cacheContext, subqueryWarnings, cteCache);
   const whereCapability = rememberSelectWhereCapability(
     stmt,
     classifyWhereCapability(stmt.where, fieldSemanticsResolver)
@@ -48978,7 +49012,11 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
       await inferSelectColumnMeta(stmt, result.columns, client, cacheContext, cteCache, forLibraryCapture)
     );
   }
-  return mergeSelectWarnings(result, [...defaultRangeWarnings, ...subtableFieldWarnings]);
+  return mergeSelectWarnings(result, [
+    ...subqueryWarnings,
+    ...defaultRangeWarnings,
+    ...subtableFieldWarnings
+  ]);
 }
 function subtableGroupingAdvice(fieldName, owners) {
   if (owners.length === 1) {
@@ -50446,8 +50484,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
   await Promise.all([
-    resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
-    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache)
+    resolveSubqueries(stmt.where, client, options, cacheContext, warnings, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, warnings, cteCache)
   ]);
   const [pushdownMeta, typedInFieldTypes, aggregateSortKindResolver] = await Promise.all([
     loadTypedPushdownMeta(stmt, client, cacheContext),
@@ -50481,7 +50519,14 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
   const mainBoundQuery = boundServerFunctionPlan?.queriesByAlias.get(
     stmt.from.alias
   ) ?? "";
-  const scalarCache = await resolveScalarColumns(stmt.columns, client, options, cacheContext, cteCache);
+  const scalarCache = await resolveScalarColumns(
+    stmt.columns,
+    client,
+    options,
+    cacheContext,
+    warnings,
+    cteCache
+  );
   const constantFalse = isConstantFalseWhere(stmt.where);
   const mainFetch = constantFalse ? Promise.resolve([]) : fetchTableRecordsForFullScan(
     stmt,
@@ -50585,7 +50630,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     appliedKlikes: prefilterPlan?.appliedKlikes ?? pushdownPlan.appliedKlikes,
     ...prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : boundServerFunctionPlan ? { residualWhere: boundServerFunctionPlan.joinPlan.residualWhere } : {},
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
-    plainGroupByPlan
+    plainGroupByPlan,
+    warnings
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -50852,9 +50898,9 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
   const warnings = /* @__PURE__ */ new Set();
   const parallel = options.fetchParallel ?? 1;
   await Promise.all([
-    resolveSubqueries(stmt.where, client, options, cacheContext, cteCache),
-    resolveSubqueries(stmt.having, client, options, cacheContext, cteCache),
-    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache)
+    resolveSubqueries(stmt.where, client, options, cacheContext, warnings, cteCache),
+    resolveSubqueries(stmt.having, client, options, cacheContext, warnings, cteCache),
+    resolveSelectCaseSubqueries(stmt, client, options, cacheContext, warnings, cteCache)
   ]);
   const whereCapability = classifyWhereCapability(stmt.where, choiceAndWindowResolver);
   if (whereCapability.capability === "UNSUPPORTED") {
@@ -50894,6 +50940,7 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     client,
     effectiveOptions,
     cacheContext,
+    warnings,
     cteCache
   );
   const orderByMetaPromise = Promise.resolve(orderMeta);
@@ -54357,17 +54404,17 @@ function parseSql(sql, enableImport = false) {
     throw e;
   }
 }
-async function resolveSubqueries(where, client, options, cacheContext, cteCache) {
+async function resolveSubqueries(where, client, options, cacheContext, warnings, cteCache) {
   const tasks = [];
-  collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache);
+  collectSubqueryTasks(where, client, options, cacheContext, tasks, warnings, cteCache);
   await Promise.all(tasks);
 }
-async function resolveSelectCaseSubqueries(stmt, client, options, cacheContext, cteCache) {
+async function resolveSelectCaseSubqueries(stmt, client, options, cacheContext, warnings, cteCache) {
   const tasks = [];
   for (const column of stmt.columns) {
     if (column.type !== "CASE_COL") continue;
     for (const branch of column.expr.branches) {
-      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, cteCache));
+      tasks.push(resolveSubqueries(branch.condition, client, options, cacheContext, warnings, cteCache));
     }
   }
   await Promise.all(tasks);
@@ -54378,19 +54425,21 @@ function runSubquery(query, client, options, cacheContext, cteCache) {
   }
   return executeSelect(query, client, options, cacheContext);
 }
-function collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCache) {
+function collectSubqueryTasks(where, client, options, cacheContext, tasks, warnings, cteCache) {
   if (where === null) return;
   switch (where.type) {
     case "BINARY": {
       const right = where.right;
       if (right.type === "SUBQUERY_IN_LIST") {
         tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
+          for (const warning of result.warnings ?? []) warnings.add(warning);
           const col = right.column ?? (result.columns[0] ?? "");
           right.resolved = new Set(result.rows.map((r) => r[col] ?? ""));
         }));
       }
       if (right.type === "SCALAR_SUBQUERY") {
         tasks.push(runSubquery(right.query, client, options, cacheContext, cteCache).then((result) => {
+          for (const warning of result.warnings ?? []) warnings.add(warning);
           if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
           if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
           const col = result.columns[0] ?? "";
@@ -54400,16 +54449,17 @@ function collectSubqueryTasks(where, client, options, cacheContext, tasks, cteCa
       break;
     }
     case "LOGICAL":
-      collectSubqueryTasks(where.left, client, options, cacheContext, tasks, cteCache);
-      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.left, client, options, cacheContext, tasks, warnings, cteCache);
+      collectSubqueryTasks(where.right, client, options, cacheContext, tasks, warnings, cteCache);
       break;
     case "NOT":
     case "GROUP":
-      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, cteCache);
+      collectSubqueryTasks(where.expr, client, options, cacheContext, tasks, warnings, cteCache);
       break;
     case "EXISTS": {
       const node = where;
       tasks.push(runSubquery(node.query, client, options, cacheContext, cteCache).then((result) => {
+        for (const warning of result.warnings ?? []) warnings.add(warning);
         node.resolved = result.rowCount > 0;
       }));
       break;
@@ -54429,7 +54479,7 @@ async function resolveSetSubqueries(assignments, client, options, cacheContext) 
     a.value = { type: "STRING", value: resolved };
   }
 }
-async function resolveScalarColumns(columns, client, options, cacheContext, cteCache) {
+async function resolveScalarColumns(columns, client, options, cacheContext, warnings, cteCache) {
   const byQuery = /* @__PURE__ */ new Map();
   const pending = [];
   for (let i = 0; i < columns.length; i++) {
@@ -54439,6 +54489,7 @@ async function resolveScalarColumns(columns, client, options, cacheContext, cteC
     let promise2 = byQuery.get(key);
     if (!promise2) {
       promise2 = runSubquery(col.query, client, options, cacheContext, cteCache).then((result) => {
+        for (const warning of result.warnings ?? []) warnings.add(warning);
         if (result.rowCount === 0) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u5024\u3092\u8FD4\u3057\u307E\u305B\u3093\u3067\u3057\u305F");
         if (result.rowCount > 1) throw new Error("\u30B9\u30AB\u30E9\u30FC\u30B5\u30D6\u30AF\u30A8\u30EA\u304C\u8907\u6570\u884C\u3092\u8FD4\u3057\u307E\u3057\u305F\uFF081\u884C\u306E\u307F\u8A31\u53EF\uFF09");
         const firstCol = result.columns[0] ?? "";

@@ -1,9 +1,18 @@
-ksql 配布パッケージ (v3.64.0)
+ksql 配布パッケージ (v3.65.0)
 
 release 成果物:
-- ksql-plugin-v3.64.0.zip
-- ksql-mcp.mcpb (manifest version 3.64.0)
-- ksql-mcp.js (MCP server version 3.64.0)
+- ksql-plugin-v3.65.0.zip
+- ksql-mcp.mcpb (manifest version 3.65.0)
+- ksql-mcp.js (MCP server version 3.65.0)
+
+修正 (B164 @変数を含む集計が比較位置で誤った値になっていた) ★要点・結果が変わります:
+- @変数を引数に含む集計を CASE WHEN / IF の条件や HAVING の比較に書くと、集計値でなく
+  「空 (すべての値より小さい)」として比較されていました。SELECT のリストは正しい値が
+  出るため気づきにくく、除数ガードの不発火 (NaN) や HAVING の行消失が実害でした。
+- 参照名を解決後の構造から再生成して修正。集計算術式・THEN/ELSE・ORDER BY・
+  ウィンドウは元から正しく不変です。
+- あわせて「計算されていない集計を比較位置で参照した」場合の警告を追加
+  (HAVING にだけ書いて SELECT に出していない等・値の挙動は互換のまま)。
 
 改善 (B162/B163 EXPLAIN だけが通らない 2 形を解消) ★要点・実行は元から正常:
 - DECLARE 変数を GENERATE_SERIES に使うと EXPLAIN が誤解を招くエラーになっていたのを、
@@ -68,12 +77,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.64.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.65.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.64.0): B162/B163 EXPLAIN だけが通らない 2 形を解消 (改善・実行は不変)。
+本リリース (v3.65.0): B164 @変数を含む集計が比較位置で誤った値になっていた (修正・結果が変わります)。
+
+前リリース (v3.64.0): B162/B163 EXPLAIN だけが通らない 2 形を解消 (改善・実行は不変)。
 
 前リリース (v3.63.0): B158 CROSS JOIN (新機能・直積 = 2 軸格子・CROSS が予約語に)、
 B159 GENERATE_SERIES month/year step (新機能・月次 0 埋め)、B157/B161 dry-run 修正。
@@ -92,9 +103,6 @@ LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
 
 前リリース (v3.58.0): B147 集計・ウィンドウの別名が入力フィールドを上書きしていた
 (挙動が変わります)、B140 無視してよい条件を書く (改善)。
-
-前リリース (v3.57.0): B148 集計されていない列はエラーに (挙動が変わります)。
-
 
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
