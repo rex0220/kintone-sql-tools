@@ -10,11 +10,19 @@ import { parseExactDecimal } from "./exactDecimal";
 export const GENERATED_ROW_MAX_ROWS = 10_000;
 export const GENERATE_SERIES_MAX_ROWS = GENERATED_ROW_MAX_ROWS;
 
+export type DateSeriesUnit = "DAY" | "MONTH" | "YEAR";
+
+export interface DateSeriesStep {
+  readonly coefficient: number;
+  readonly unit: DateSeriesUnit;
+}
+
 export interface ResolvedSeries {
   readonly kind: "INTEGER" | "DATE";
   readonly start: number | string;
   readonly stop: number | string;
   readonly step: number;
+  readonly dateUnit?: DateSeriesUnit;
   readonly rowCount: number;
   readonly values: readonly string[];
 }
@@ -24,6 +32,7 @@ interface SeriesPlan {
   readonly start: number | string;
   readonly stop: number | string;
   readonly step: number;
+  readonly dateUnit?: DateSeriesUnit;
   readonly rowCount: number;
 }
 
@@ -68,21 +77,30 @@ function dateFromOrdinal(ordinal: number): string {
   return `${String(year).padStart(4, "0")}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-function parseDateStep(value: string): number {
+function parseDateStep(value: string): DateSeriesStep {
   const trimmed = value.trim();
-  const match = /^([+-]?\d+)\s+(day|days)$/i.exec(trimmed);
+  const match = /^([+-]?\d+)\s+(day|days|month|months|year|years)$/i.exec(trimmed);
   if (!match) {
-    if (/^[+-]?\d+\s+\S+$/i.test(trimmed)) {
-      throw argumentError("GENERATE_SERIES の日付 step は day または days のみ対応しています。");
+    if (/^\S+\s+(?:day|days|month|months|year|years)$/i.test(trimmed)) {
+      throw argumentError("GENERATE_SERIES の日付 step の係数には安全な整数を指定してください。");
     }
-    throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day 単位を指定してください。");
+    if (/^[+-]?\d+\s+\S+$/i.test(trimmed)) {
+      throw argumentError("GENERATE_SERIES の日付 step は day、days、month、months、year、years のみ対応しています。");
+    }
+    throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day、month、year 単位を指定してください。");
   }
-  const step = Number(match[1]);
-  if (!Number.isSafeInteger(step)) {
-    throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
+  const coefficient = Number(match[1]);
+  if (!Number.isSafeInteger(coefficient)) {
+    throw argumentError("GENERATE_SERIES の日付 step の係数には安全な整数を指定してください。");
   }
-  if (step === 0) throw argumentError("GENERATE_SERIES の日付 step に 0 day は指定できません。");
-  return step;
+  const rawUnit = match[2].toLowerCase();
+  const unit: DateSeriesUnit = rawUnit.startsWith("month")
+    ? "MONTH"
+    : rawUnit.startsWith("year") ? "YEAR" : "DAY";
+  if (coefficient === 0) {
+    throw argumentError(`GENERATE_SERIES の日付 step に 0 ${unit.toLowerCase()} は指定できません。`);
+  }
+  return { coefficient, unit };
 }
 
 function integerValue(value: number | string): number | null {
@@ -118,6 +136,56 @@ function countRows(start: number, stop: number, step: number): number {
   return Number(distance / BigInt(Math.abs(step)) + 1n);
 }
 
+function monthIndex(parts: { year: number; month: number }): number {
+  return parts.year * 12 + parts.month - 1;
+}
+
+function validateDateAnchor(start: { year: number; month: number; day: number }, unit: DateSeriesUnit): void {
+  if (unit === "MONTH" && start.day !== 1) {
+    throw argumentError("GENERATE_SERIES の month step では start に月初（YYYY-MM-01）を指定してください。");
+  }
+  if (unit === "YEAR" && (start.month !== 1 || start.day !== 1)) {
+    throw argumentError("GENERATE_SERIES の year step では start に年初（YYYY-01-01）を指定してください。");
+  }
+}
+
+function countDateRows(
+  start: { year: number; month: number; day: number },
+  stop: { year: number; month: number; day: number },
+  step: DateSeriesStep
+): number {
+  const startOrdinal = dateOrdinal(
+    `${String(start.year).padStart(4, "0")}-${String(start.month).padStart(2, "0")}-${String(start.day).padStart(2, "0")}`
+  );
+  const stopOrdinal = dateOrdinal(
+    `${String(stop.year).padStart(4, "0")}-${String(stop.month).padStart(2, "0")}-${String(stop.day).padStart(2, "0")}`
+  );
+  if (step.unit === "DAY") return countRows(startOrdinal, stopOrdinal, step.coefficient);
+  if (startOrdinal === stopOrdinal) return 1;
+  if ((startOrdinal < stopOrdinal && step.coefficient < 0)
+    || (startOrdinal > stopOrdinal && step.coefficient > 0)) return 0;
+  if (step.unit === "MONTH") {
+    const boundary = monthIndex(stop) + (step.coefficient < 0 && stop.day !== 1 ? 1 : 0);
+    return countRows(monthIndex(start), boundary, step.coefficient);
+  }
+  const stopIsYearStart = stop.month === 1 && stop.day === 1;
+  const boundary = stop.year + (step.coefficient < 0 && !stopIsYearStart ? 1 : 0);
+  return countRows(start.year, boundary, step.coefficient);
+}
+
+function dateFromParts(year: number, month: number, day: number): string {
+  if (year < 1 || year > 9999) {
+    throw argumentError("GENERATE_SERIES の日付引数には実在する YYYY-MM-DD 形式の DATE を指定してください。");
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function dateFromMonthIndex(index: number): string {
+  const year = Math.floor(index / 12);
+  const month = index - year * 12 + 1;
+  return dateFromParts(year, month, 1);
+}
+
 function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
   if (stmt.args.length < 2 || stmt.args.length > 3) {
     throw argumentError("GENERATE_SERIES は start、stop と省略可能な step の2個または3個の引数を受け付けます。");
@@ -146,12 +214,22 @@ function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
       throw argumentError("GENERATE_SERIES の日付引数には実在する YYYY-MM-DD 形式の DATE を指定してください。");
     }
     if (stepRaw !== undefined && typeof stepRaw !== "string") {
-      throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day 単位を指定してください。");
+      throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day、month、year 単位を指定してください。");
     }
-    const step = stepRaw === undefined ? 1 : parseDateStep(stepRaw as string);
+    const dateStep = stepRaw === undefined
+      ? { coefficient: 1, unit: "DAY" as const }
+      : parseDateStep(stepRaw as string);
+    validateDateAnchor(startDate, dateStep.unit);
     const start = startRaw as string;
     const stop = stopRaw as string;
-    return { kind: "DATE", start, stop, step, rowCount: countRows(dateOrdinal(start), dateOrdinal(stop), step) };
+    return {
+      kind: "DATE",
+      start,
+      stop,
+      step: dateStep.coefficient,
+      dateUnit: dateStep.unit,
+      rowCount: countDateRows(startDate, stopDate, dateStep),
+    };
   }
   const startInteger = startArg.type === "NUMBER"
     ? integerNumberLiteral(startArg)
@@ -172,7 +250,7 @@ function planResolved(stmt: GenerateSeriesStatement): SeriesPlan {
     if (stepArg?.type === "NUMBER" || isResolvedVariable(stepArg)) {
       throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
     }
-    throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day 単位を指定してください。");
+    throw argumentError("GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day、month、year 単位を指定してください。");
   }
   const start = startInteger;
   const stop = stopInteger;
@@ -210,7 +288,12 @@ export function validateGenerateSeriesStatement(stmt: GenerateSeriesStatement): 
       if (value === null) throw argumentError("GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。");
       if (value === 0) throw argumentError("GENERATE_SERIES の step に 0 は指定できません。");
     } else if (step?.type === "STRING") {
-      parseDateStep(step.value);
+      const dateStep = parseDateStep(step.value);
+      const start = stmt.args[0];
+      if (start?.type === "STRING") {
+        const parts = dateParts(start.value);
+        if (parts) validateDateAnchor(parts, dateStep.unit);
+      }
     }
     return null;
   }
@@ -264,8 +347,22 @@ export function resolveGenerateSeries(stmt: GenerateSeriesStatement): ResolvedSe
       }
     }
   } else {
-    const startOrdinal = dateOrdinal(plan.start as string);
-    for (let index = 0; index < plan.rowCount; index++) values.push(dateFromOrdinal(startOrdinal + index * plan.step));
+    const start = dateParts(plan.start as string)!;
+    if (plan.dateUnit === "MONTH") {
+      const anchor = monthIndex(start);
+      for (let index = 0; index < plan.rowCount; index++) {
+        values.push(dateFromMonthIndex(anchor + index * plan.step));
+      }
+    } else if (plan.dateUnit === "YEAR") {
+      for (let index = 0; index < plan.rowCount; index++) {
+        values.push(dateFromParts(start.year + index * plan.step, 1, 1));
+      }
+    } else {
+      const startOrdinal = dateOrdinal(plan.start as string);
+      for (let index = 0; index < plan.rowCount; index++) {
+        values.push(dateFromOrdinal(startOrdinal + index * plan.step));
+      }
+    }
   }
   return { ...plan, values };
 }

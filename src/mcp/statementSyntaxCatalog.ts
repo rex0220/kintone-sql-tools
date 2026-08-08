@@ -52,8 +52,9 @@ export const STATEMENT_SYNTAX_CATALOG = {
     examples: [
       "WITH app_list AS (SHOW APPS), field_list AS (DESCRIBE APP1) SELECT * FROM app_list",
       "WITH days AS (GENERATE_SERIES('2026-08-01','2026-08-03') AS series_date) SELECT series_date FROM days",
+      "WITH months AS (GENERATE_SERIES('2026-01-01','2026-12-01','1 month') AS month_start) SELECT month_start FROM months",
     ],
-    expectedTypes: [["WITH"], ["WITH"]],
+    expectedTypes: [["WITH"], ["WITH"], ["WITH"]],
   },
   union: {
     template: "UNION: SELECT... UNION[ALL] SELECT...",

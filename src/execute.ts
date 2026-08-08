@@ -12065,7 +12065,7 @@ function buildWithPlan(
     } else if (cte.query.type === "GENERATE_SERIES") {
       const series = resolveGenerateSeries(cte.query);
       const step = series.kind === "DATE"
-        ? `${series.step} ${Math.abs(series.step) === 1 ? "day" : "days"}`
+        ? `${series.step} ${String(series.dateUnit ?? "DAY").toLowerCase()}${Math.abs(series.step) === 1 ? "" : "s"}`
         : String(series.step);
       lines.push(
         `[cte: ${cte.name}]`,

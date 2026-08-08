@@ -218,11 +218,15 @@ describe("B149 GENERATE_SERIES", () => {
     ["GENERATE_SERIES(1.5,5.5)", "ArgumentError: GENERATE_SERIES の数値系列は整数の start、stop、step のみを受け付けます。"],
     ["GENERATE_SERIES('2026-02-30','2026-03-02')", "ArgumentError: GENERATE_SERIES の日付引数には実在する YYYY-MM-DD 形式の DATE を指定してください。"],
     ["GENERATE_SERIES('2026-08-01T00:00:00Z','2026-08-03T00:00:00Z','1 day')", "ArgumentError: GENERATE_SERIES は Phase 1 では整数と DATE のみ対応しています。DATETIME と TIME は使用できません。"],
-    ["GENERATE_SERIES('2026-08-01','2026-08-03','1 month')", "ArgumentError: GENERATE_SERIES の日付 step は day または days のみ対応しています。"],
     ["GENERATE_SERIES(1,'2026-08-03')", "ArgumentError: GENERATE_SERIES の start と stop は、両方を整数または両方を DATE にしてください。"],
-    ["GENERATE_SERIES('2026-08-01','2026-08-03',1)", "ArgumentError: GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day 単位を指定してください。"],
+    ["GENERATE_SERIES('2026-08-01','2026-08-03',1)", "ArgumentError: GENERATE_SERIES の step が系列の型と一致しません。整数系列には整数、DATE 系列には day、month、year 単位を指定してください。"],
   ])("§12.9 公開エラー: %s", async (expression, message) => {
     expect((await errorFor(`WITH s AS (${expression}) SELECT generate_series FROM s`)).message).toBe(message);
+  });
+
+  test("B159: month step を DATE 系列として受理する", async () => {
+    expect(values(await run("WITH s AS (GENERATE_SERIES('2026-08-01','2026-10-01','1 month') AS 日付) SELECT 日付 FROM s"), "日付"))
+      .toEqual(["2026-08-01", "2026-09-01", "2026-10-01"]);
   });
 
   test.each([
@@ -277,7 +281,6 @@ describe("B149 GENERATE_SERIES", () => {
       "WITH s AS (GENERATE_SERIES(1,10001) AS n) SELECT n FROM s",
       "WITH s AS (GENERATE_SERIES(1,5,0) AS n) SELECT n FROM s",
       "WITH s AS (GENERATE_SERIES(1,'2026-08-03') AS n) SELECT n FROM s",
-      "WITH d AS (GENERATE_SERIES('2026-08-01','2026-08-03','1 month') AS 日付) SELECT 日付 FROM d",
       "WITH s AS (GENERATE_SERIES(1) AS n) SELECT n FROM s",
       "WITH s AS (GENERATE_SERIES(1,2,1,1) AS n) SELECT n FROM s",
       "WITH a AS (GENERATE_SERIES(1,6000) AS n),b AS (GENERATE_SERIES(1,5000) AS n) SELECT n FROM a",
