@@ -731,6 +731,17 @@ async function main() {
       "ksql_explain did not return a plan column."
     );
 
+    const b159Explained = await client.callTool({
+      name: "ksql_explain",
+      arguments: {
+        sql: "EXPLAIN WITH m AS (GENERATE_SERIES('2025-08-01','2026-08-01','1 months') AS month_start) SELECT month_start FROM m",
+      },
+    });
+    const b159Plan = JSON.stringify(b159Explained.structuredContent);
+    assert(b159Explained.structuredContent?.ok === true, "B159 month EXPLAIN smoke failed.");
+    assert(b159Plan.includes("step:          1 month"), "B159 EXPLAIN must normalize the month step.");
+    assert(b159Plan.includes("records API:   none"), "B159 EXPLAIN must report records API none.");
+
     const queried = await client.callTool({
       name: "ksql_query",
       arguments: { sql: "SELECT 'ok' AS result", maxRecords: 10, onLimit: "error" },

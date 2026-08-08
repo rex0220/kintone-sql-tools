@@ -2395,7 +2395,7 @@ WITH CTE名 AS (
 SELECT ... FROM CTE名
 ```
 
-列名を省略した場合は `generate_series` です。整数の既定 step は `1`、日付の既定 step は `'1 day'` です。正負の step と明示的な `+`（`+2` / `'+2 days'`）を使用でき、`stop` にちょうど到達する値は含みます。範囲と step の向きが逆なら0行（列定義は維持）、step 0は `ArgumentError` です。
+列名を省略した場合は `generate_series` です。整数の既定 step は `1`、日付の既定 step は `'1 day'` です。DATE step は `day(s)`、`month(s)`、`year(s)` を受け付けます。正負の安全な整数係数と明示的な `+`（`+2` / `'+2 months'`）を使用でき、`stop` にちょうど到達する値は含みます。範囲と step の向きが逆なら0行（列定義は維持）、step 0は `ArgumentError` です。
 
 ```sql
 WITH n AS (GENERATE_SERIES(2, 100, 49) AS number)
@@ -2405,9 +2405,27 @@ SELECT number FROM n ORDER BY number;
 WITH d AS (GENERATE_SERIES('2026-08-05', '2026-08-01', '-2 days') AS 日付)
 SELECT 日付 FROM d;
 -- 2026-08-05, 2026-08-03, 2026-08-01
+
+WITH m AS (GENERATE_SERIES('2025-08-01', '2026-08-01', '1 month') AS 月)
+SELECT 月 FROM m ORDER BY 月;
+-- 2025-08-01 ... 2026-08-01（13行）
+
+WITH y AS (GENERATE_SERIES('2026-01-01', '2022-06-30', '-1 year') AS 年)
+SELECT 年 FROM y;
+-- 2026-01-01, 2025-01-01, 2024-01-01, 2023-01-01
 ```
 
-日付は実在する `YYYY-MM-DD` だけを受け付け、step の単位は `day` / `days` だけです。小数、`DATETIME`、`TIME`、`week`、`month`、`year` には対応しません。公開行の値は文字列ですが、生成時に確定した NUMBER / DATE の列メタが CTE、JOIN、後続 CTE、一時テーブルへ伝播し、比較・ソートに使われます。
+日付は実在する `YYYY-MM-DD` だけを受け付けます。month step の start は月初（`YYYY-MM-01`）、year step の start は年初（`YYYY-01-01`）に限ります。stop は月初・年初でなくても包含境界として使え、正方向では stop が属する期間のアンカーまで、負方向では stop 以上の期間アンカーまでを返します。各月・年は start アンカーと0始まりの行番号から直接算出し、月末丸めを累積しません。小数、`DATETIME`、`TIME`、`week` には対応しません。公開行の値は文字列ですが、生成時に確定した NUMBER / DATE の列メタが CTE、JOIN、後続 CTE、一時テーブルへ伝播し、比較・ソートに使われます。
+
+月末は月初系列を `LAST_DAY` で変換し、文字列の月キーは `DATE_FORMAT(月, '%Y-%m')` で作ります。うるう年も DATE 意味論に従うため、`LAST_DAY('2024-02-01')` は `2024-02-29` です。
+
+```sql
+WITH m AS (
+  GENERATE_SERIES('2024-01-01', '2024-03-01', '1 month') AS 月初
+)
+SELECT 月初, LAST_DAY(月初) AS 月末, DATE_FORMAT(月初, '%Y-%m') AS 月キー
+FROM m ORDER BY 月初;
+```
 
 同じ `WITH` 文にある全生成 CTEの生成件数合計は10,000行までです。上限は全行を作る前に検査され、`LIMIT`、`WHERE`、後段集計では回避できません。同じ生成 CTEを複数回参照しても再生成しません。
 
@@ -2439,6 +2457,8 @@ FROM 日付系列 AS s
 LEFT JOIN 日別 AS d ON s.日付 = d.日付
 ORDER BY s.日付
 ```
+
+同じ形を月初系列に使うと、取引のない月も0行ではなく実績0の行になります。0埋め後の CTE に `LAG(実績) OVER (ORDER BY 月)` を適用すれば、空月直後は2か月前の実績ではなく、直前の空月の0を返します。
 
 `EXPLAIN WITH ... GENERATE_SERIES ...` は source、列名、INTEGER / DATE、start、stop、正規化した step、生成件数、10,000行ガード、records API が `none` であることを表示します。純粋な生成系列の実行と EXPLAIN はレコード、Cursor、書込、フォーム・アプリ情報 API を呼びません。
 
