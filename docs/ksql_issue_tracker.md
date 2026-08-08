@@ -2,7 +2,7 @@
 
 - 最終更新: 2026-08-08
 - 現在の最新リリース: **v3.62.0**（2026-08-08・publish 済み・実機確認済み）。→ [リリース履歴](ksql_release_history.md)
-- 次回リリース計画: **B157**（v3.62.0 の複文 dry-run 表示回帰・修正方針確定）を v3.62.1 候補。ほか **B143**（低）／**B141**（散文の穴）。クローズ済みは §3。
+- 次回リリース計画: **v3.63.0 ＝ B158（CROSS JOIN・仕様 R1 確定）＋ B157（実装済み）＋ B161（同梱候補）**（2026-08-08 オーナー判断＝B157 単独 patch は切らず B158 と同梱）。ほか **B143**（低）／**B141**（散文の穴）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -39,7 +39,8 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B157 | CLI 複文バッチの `--dry-run` が metadata 解決を失い、診断と計画の `kintone query:` が食い違う | 課題 | 📝 **起票・原因確定（2026-08-08・依頼元返信 §5・v3.62.0 回帰・表示のみ）**→ [B157](internal/ksql_b157_batch_dryrun_metadata_regression_issue.md)。**B155 実装が CLI バッチ dry-run へ `resolveMetadata=false` を無条件に渡すようになった**（B155 静的経路用のフラグが全バッチに効く）。単文は従来どおり解決・**複文だけ v3.61.0 から後退**。実行・結果・API 契約は不変。修正方針確定＝`!dryRunUsesStaticTypedPlan` を渡す。**B155 最終チェックの取り残し**＝混在バッチの exit 0 は測ったが前版との表示同等性を比べなかった。 | 正しさ | 中 | [B157](internal/ksql_b157_batch_dryrun_metadata_regression_issue.md) |
+| B157 | CLI 複文バッチの `--dry-run` が metadata 解決を失い、診断と計画の `kintone query:` が食い違う | 課題 | 🚧 **実装済み（2026-08-08・`b157/dev`→main・codex 実装・Claude ゲート/実機確認済み）・v3.63.0 同梱待ち（B158 と同時リリース＝オーナー判断）**→ [B157](internal/ksql_b157_batch_dryrun_metadata_regression_issue.md)。修正＝`resolveMetadata` を `!dryRunUsesStaticTypedPlan` へ（v3.62.0 回帰の回復・表示のみ）。**最終チェック（codex）が同域の既存穴 B161 を検出**（成果）。 | 正しさ | 中 | [B157](internal/ksql_b157_batch_dryrun_metadata_regression_issue.md) |
+| B161 | CTE の物理ソース列推論が dry-run の metadata 要否判定から漏れ DryRunError | 課題 | 📝 **起票・原因確定（2026-08-08・B157 最終チェックが机上で特定・Claude 実測確定）・v3.63.0 同梱候補**→ [B161](internal/ksql_b161_cte_dryrun_metadata_gap_issue.md)。**既存穴＝v3.61.0 でも再現**（worktree 実測。B157 の回帰ではない・v3.62.0 は全スキップが偶然隠していた）。他トリガの無い WITH＋物理 APP 最小形が単文・複文とも DryRunError。非 CTE 単一表は無事（実測で境界確定）。修正方針確定＝`explainNeedsAppMetadata` へ CTE 物理ソーストリガ追加（B150 修正 2 の前例・B123 族）。 | 正しさ | 中 | [B161](internal/ksql_b161_cte_dryrun_metadata_gap_issue.md) |
 | B156 | `relation: exact` が「取得＝答え」と誤読される | 改善 | ✅ **案 B 実施（2026-08-08・文書のみ・エンジン不変）**＝言語リファレンス §6 に**「機構の全体像」（3 機構）と「EXPLAIN の読み方」（`fetch:` が正・`relation:` は葉の忠実度で「取得＝答え」ではない・`not applied` の意味）を新設**（オーナー指摘「押し下げの解説がいるのでは」で前倒し）。案 A（`relation:` 行への 1 語追記）は**次に同じ誤読の報告が来たら再評価**。 | 改善 | 低 | [B156](internal/ksql_b156_relation_exact_residual_note_issue.md) |
 | B158 | 直積（`CROSS JOIN` / 2 軸の格子生成）が書けない | 改善 | 📋 **仕様 R1 確定（2026-08-08・[R1](internal/ksql_b158_cross_join_spec_r1.md)・[レビュー](internal/ksql_b158_codex_review_1.md)＝ブロッカーなし・注記 3 件）・実装 Go 待ち**。`GENERATE_SERIES` は 1 軸のみで**「日付 × 製品」の格子が作れず、製品別 0 埋めが言語内で完結しない**（`CROSS JOIN`／`ON 1=1` とも ParseError）。**B128 2a の前提であり、2a 抜きでも単独で効く**（既存の固定境界ウィンドウで製品別・暦日の残高推移が書ける）。要行数ガード＋`EXPLAIN` 生成行数表示。依頼元順位 1。 | 機能 | 中 | [B158](internal/ksql_b158_cross_join_grid_issue.md) |
 | B159 | `GENERATE_SERIES` に month / year step が無く、月次の `LAG` を 0 埋めで守れない | 課題 | 📝 **起票**（2026-08-08・[依頼元の B128 意見 §4](internal/ksql_b159_generate_series_month_step_issue.md)・実測裏取り済み）。**空月があると `LAG` は静かに 2 か月前と比べる**（エラーも警告も無し＝静かに間違うクラス）。2b 先行の根拠「13 か月歯抜けなし」はデータの性質であって保証ではない。**新機能ではなく出荷済み機能の穴を塞ぐ側**。月初アンカー限定なら月末丸めを持ち込まない見込み。依頼元順位 2。 | 正しさ | 中 | [B159](internal/ksql_b159_generate_series_month_step_issue.md) |
