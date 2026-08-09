@@ -270,12 +270,15 @@ export function applyJoin(
     return result;
   }
   const { on, type: joinType } = join;
-  const leftKey  = on.left.tableAlias
-    ? `${on.left.tableAlias}.${on.left.field}`
-    : on.left.field;
-  const rightKey = on.right.tableAlias
-    ? `${on.right.tableAlias}.${on.right.field}`
-    : on.right.field;
+  const normalizedOn = normalizeJoinConditionSides(
+    on,
+    leftRows,
+    rightRows,
+    columns.leftColumns,
+    columns.rightColumns
+  );
+  const leftKey = joinFieldKey(normalizedOn.left);
+  const rightKey = joinFieldKey(normalizedOn.right);
 
   assertJoinKeyAvailable(leftRows, leftKey, columns.leftColumns);
   assertJoinKeyAvailable(rightRows, rightKey, columns.rightColumns);
@@ -337,6 +340,55 @@ export function applyJoin(
   }
 
   return result;
+}
+
+type JoinFieldRef = Exclude<JoinClause, { type: "CROSS" }>["on"]["left"];
+
+function joinFieldKey(ref: JoinFieldRef): string {
+  return ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
+}
+
+type JoinSide = "LEFT" | "RIGHT" | "UNKNOWN";
+
+/** ON の記述順ではなく、実体化済みの左右入力への帰属で結合キーを正規化する。 */
+function normalizeJoinConditionSides(
+  on: Exclude<JoinClause, { type: "CROSS" }>["on"],
+  leftRows: readonly ProcessRow[],
+  rightRows: readonly ProcessRow[],
+  leftColumns?: readonly string[],
+  rightColumns?: readonly string[]
+): typeof on {
+  const leftSchema = leftColumns ?? Object.keys(leftRows[0] ?? {});
+  const rightSchema = rightColumns ?? Object.keys(rightRows[0] ?? {});
+  const leftAliases = qualifiedAliases(leftSchema);
+  const rightAliases = qualifiedAliases(rightSchema);
+
+  const sideFor = (ref: JoinFieldRef): JoinSide => {
+    if (ref.tableAlias) {
+      const inLeft = leftAliases.has(ref.tableAlias);
+      const inRight = rightAliases.has(ref.tableAlias);
+      if (inLeft !== inRight) return inLeft ? "LEFT" : "RIGHT";
+    }
+    const key = joinFieldKey(ref);
+    const inLeft = leftSchema.includes(key);
+    const inRight = rightSchema.includes(key);
+    return inLeft !== inRight ? (inLeft ? "LEFT" : "RIGHT") : "UNKNOWN";
+  };
+
+  const leftSide = sideFor(on.left);
+  const rightSide = sideFor(on.right);
+  return leftSide === "RIGHT" && rightSide === "LEFT"
+    ? { left: on.right, right: on.left }
+    : on;
+}
+
+function qualifiedAliases(columns: readonly string[]): ReadonlySet<string> {
+  const aliases = new Set<string>();
+  for (const column of columns) {
+    const separator = column.indexOf(".");
+    if (separator > 0) aliases.add(column.slice(0, separator));
+  }
+  return aliases;
 }
 
 /** JOIN キーの空文字値は許可し、プロパティ自体の欠落だけを拒否する。 */

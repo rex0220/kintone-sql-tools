@@ -109,6 +109,9 @@ export interface RunQueryOptions {
   client: ReadonlyKintoneClient;
   logicalApps?: Readonly<Record<string, number>>;
   maxRecords?: number;
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;
   cursorMaxActive?: number;
@@ -125,6 +128,9 @@ export interface RunBatchOptions {
   client: ReadonlyKintoneClient;
   logicalApps?: Readonly<Record<string, number>>;
   maxRecords?: number;
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;
   cursorMaxActive?: number;

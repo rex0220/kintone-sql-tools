@@ -1614,7 +1614,9 @@ mock client の全 API呼び出し回数は0。
 | CTE 列名リスト `WITH s(n) AS (...)` | 既存 CTE grammarに無い別機能であり、末尾 `AS n` で目的を満たせる |
 | `INSERT ... WITH ... SELECT` | 現行 INSERT SELECT AST の拡張を伴う。Phase 1 は一時テーブル経由を使う |
 | 利用者指定の系列上限 | API surface ごとの設定公開を伴う。初版は固定上限で安全性を優先する |
-| 再帰 CTE | B149 の実需を満たすために不要で、別件 B53 の範囲である |
+| 再帰 CTE | B149 Phase1 の範囲外。B53 Phase1 が read-only の `WITH RECURSIVE` / `CYCLE` として別に提供する |
+
+生成系列を JOIN なしで直接読む既存形だけは、厳密単調な系列として全順序警告を抑止する。JOIN 後は生成列であるだけでは免除せず、各 window partition 内で `ORDER BY` 値の組が入力行を一意に識別するとクエリ構造または保証済み制約から確認できる場合に限り警告を無視できる。元の集約キーをすべて含む形や、JOIN 後も同じ系列値が高々1行と保証できる形は肯定例である。
 
 ### 13.3 後続 Phase で拡張する場合
 

@@ -71,8 +71,9 @@ async function errorFor(sql: string, mock = client()): Promise<Error> {
   throw new Error("expected rejection");
 }
 
-const LAG_WARNING = "前 の ORDER BY は全順序でないため、同順内の前後関係は未規定です。その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。集約結果の列は一意でも証明できないため、すでに一意な場合もこの警告が出ます。元の集約のキーをすべて ORDER BY に含めているなら、この警告は無視して構いません。";
-const RANGE_WARNING = "累計 は既定フレーム（RANGE）で評価されます。ORDER BY の値が同じ行はすべて同じ値になります。行ごとの値が必要なら ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW を明示するか、その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。集約結果の列は一意でも証明できないため、すでに一意な場合もこの警告が出ます。元の集約のキーをすべて ORDER BY に含めているなら、この警告は無視して構いません。";
+const DERIVED_ORDER_ADVICE = "ウィンドウの各パーティション内で、ORDER BY の値の組が入力行を一意に識別するとクエリ構造または保証済みのデータ制約から確認できる場合に限り、この警告は無視できます。元の集約キーをすべて ORDER BY に含む形や、JOIN 後も同じ系列値が各パーティション内で高々1行と保証できる形が該当します。生成列、再帰の深さ列、または $id に由来する列であるという理由だけでは無視できません。";
+const LAG_WARNING = `前 の ORDER BY は全順序でないため、同順内の前後関係は未規定です。${DERIVED_ORDER_ADVICE}`;
+const RANGE_WARNING = `累計 は既定フレーム（RANGE）で評価されます。ORDER BY の値が同じ行はすべて同じ値になります。行ごとの値が必要なら ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW を明示するか、${DERIVED_ORDER_ADVICE}`;
 
 describe("B149 GENERATE_SERIES", () => {
   test("A1: 既定 step、stop 包含、公開結果、API 0回", async () => {

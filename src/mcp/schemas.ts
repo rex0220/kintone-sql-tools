@@ -20,6 +20,15 @@ const kintoneMetadataAppRef = z.union([
 const maxRecords = z.number().int().positive()
   .describe("Maximum records fetched per SELECT (default 500).")
   .optional();
+const recursiveCteMaxDepth = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+  .describe("Maximum recursive CTE depth (positive safe integer, default 100). Always fail-closed; explicit tool input overrides environment, profile, and engine default.")
+  .optional();
+const recursiveCteMaxRows = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+  .describe("Maximum accumulated recursive CTE result rows (positive safe integer, default 10000). Always fail-closed; explicit tool input overrides environment, profile, and engine default.")
+  .optional();
+const recursiveCteMaxExpansions = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+  .describe("Maximum recursive CTE candidate expansions after JOIN match and before recursive WHERE/CYCLE filtering (positive safe integer, default 100000). CYCLE is not this boundary; explicit tool input overrides environment, profile, and engine default.")
+  .optional();
 const fetchParallel = z.number().int().min(1).max(10)
   .describe("Number of parallel kintone record-fetch requests (1-10).")
   .optional();
@@ -55,14 +64,14 @@ const importSources = z.array(z.object({
 
 export const validateInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year, with month-start/year-start anchors), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Literal GENERATE_SERIES arguments are checked statically, while variable-dependent type/step/row-limit decisions are deferred to execution. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
+    .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), read-only WITH RECURSIVE with one UNION ALL self-reference and optional single-column CYCLE, WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year, with month-start/year-start anchors), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Recursive schema-dependent type proof and runtime boundaries are deferred to ksql_query/ksql_explain. Literal GENERATE_SERIES arguments are checked statically, while variable-dependent type/step/row-limit decisions are deferred to execution. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
   profile,
   importSources,
 });
 
 export const explainInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); GENERATE_SERIES plans show type, bounds, normalized step, rows, the 10000-row guard, and records API none. EXPLAIN performs no record or mutation API calls."),
+    .describe("kSQL text to explain. May contain multiple ;-separated statements (batch), temp tables (#name), read-only WITH RECURSIVE/CYCLE, WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value). Recursive plans show strategy, path scope, empty-key runtime check, and effective depth/rows/expansions boundaries. GENERATE_SERIES plans show type, bounds, normalized step, rows, the 10000-row guard, and records API none. EXPLAIN performs no record or mutation API calls."),
   profile,
   maxRecords,
   cursorMaxActive,
@@ -71,9 +80,12 @@ export const explainInputSchema = z.object({
 
 export const queryInputSchema = z.object({
   sql: z.string().min(1)
-    .describe("Read-only kSQL text. WITH name AS (GENERATE_SERIES(start, stop [, step]) [AS column]) creates integer/DATE series; DATE step supports signed day/month/year coefficients, with month start anchored to YYYY-MM-01 and year start to YYYY-01-01. It uses a fixed 10000-row per-WITH total guard and no kintone API reads. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
+    .describe("Read-only kSQL text. WITH RECURSIVE supports one UNION ALL recursive CTE with one self INNER JOIN and optional single-column path-scoped CYCLE; recursive DML sources, mutual/multiple recursion, and path output are unsupported. WITH name AS (GENERATE_SERIES(start, stop [, step]) [AS column]) creates integer/DATE series; DATE step supports signed day/month/year coefficients, with month start anchored to YYYY-MM-01 and year start to YYYY-01-01. It uses a fixed 10000-row per-WITH total guard and no kintone API reads. May contain multiple ;-separated statements (batch) with temp tables, e.g. CREATE TEMP TABLE #t AS SELECT ...; SELECT ... FROM #t. UPDATE/INSERT/UPSERT/multi-value APPLY VALIDATE ONLY is allowed with the fixed dmlMaxSubtableRows default 500; this schema exposes no override and never enables APPLY mutation."),
   profile,
   maxRecords,
+  recursiveCteMaxDepth,
+  recursiveCteMaxRows,
+  recursiveCteMaxExpansions,
   fetchParallel,
   onLimit,
   tempTableMaxRows,
@@ -192,7 +204,7 @@ export const saveQueryInputSchema = z.object({
   title: z.string().min(1).describe("Human-readable title.").optional(),
   description: z.string().min(1).describe("What the query does and when to use it.").optional(),
   sql: z.string().min(1)
-    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements and WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year); DML saved queries must remain single-statement."),
+    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements, Phase1 WITH RECURSIVE/CYCLE, and WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year); DML saved queries must remain single-statement and cannot use a recursive source."),
   defaultProfile: z.string().min(1)
     .describe("Profile the saved query runs against by default."),
   readOnly: z.boolean()
@@ -229,7 +241,14 @@ export const runSavedQueryInputSchema = z.object({
 });
 
 export const validateInputShape = validateInputSchema.shape;
-export const explainInputShape = explainInputSchema.shape;
+// Keep the legacy exported Zod object stable for programmatic consumers while
+// the registered MCP tool shape exposes the additive Stage 3 inputs.
+export const explainInputShape = {
+  ...explainInputSchema.shape,
+  recursiveCteMaxDepth,
+  recursiveCteMaxRows,
+  recursiveCteMaxExpansions,
+};
 export const queryInputShape = queryInputSchema.shape;
 export const mutateInputShape = mutateInputSchema.shape;
 export const describeAppInputShape = describeAppInputSchema.shape;

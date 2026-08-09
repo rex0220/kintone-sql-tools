@@ -30,6 +30,9 @@ export interface KsqlProfileConfig {
   allowPhysicalAppRefs?: boolean;
   query?: {
     maxRecords?: number;
+    recursiveCteMaxDepth?: number;
+    recursiveCteMaxRows?: number;
+    recursiveCteMaxExpansions?: number;
     /** APPLY で変更できる子行数上限（既定 100）。 */
     dmlMaxSubtableRows?: number;
     fetchParallel?: number;

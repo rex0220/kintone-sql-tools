@@ -125,7 +125,14 @@ export async function explainQuery(
         undefined,
         "batch-explain",
         invocation.executeOptions.maxRecords,
-        invocation.executeOptions.cursorMaxActive
+        invocation.executeOptions.cursorMaxActive,
+        false,
+        100,
+        undefined,
+        true,
+        invocation.executeOptions.recursiveCteMaxDepth,
+        invocation.executeOptions.recursiveCteMaxRows,
+        invocation.executeOptions.recursiveCteMaxExpansions
       )
     );
     const lines = restoreLogicalAppDiagnosticValue(result.statements.flatMap((statement) => [

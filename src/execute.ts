@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -69,6 +69,11 @@ import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
 import { GENERATE_SERIES_MAX_ROWS, resolveGenerateSeries } from "./core/generateSeries";
+import {
+  RecursiveCteLimitCounter,
+  resolveRecursiveCteLimits,
+  type RecursiveCteLimits,
+} from "./core/recursiveCte";
 import {
   buildJoinKeyPrefilterQueries,
   JOIN_KEY_IN_CHUNK_SIZE,
@@ -720,6 +725,12 @@ export interface ExecuteOptions {
   ) => Promise<boolean>;
   /** 全件取得の上限（デフォルト: 10_000） */
   maxRecords?: number;
+  /** 再帰 CTE の最大深さ（positive safe integer、既定 100） */
+  recursiveCteMaxDepth?: number;
+  /** 再帰 CTE の累積結果行数上限（positive safe integer、既定 10,000） */
+  recursiveCteMaxRows?: number;
+  /** 再帰 CTE の中間展開数上限（positive safe integer、既定 100,000） */
+  recursiveCteMaxExpansions?: number;
   /** 取得上限到達時の動作（SELECT系のみ） */
   onLimitReached?: "error" | "truncate";
   /** fetchAll の並列取得数（1 = 直列） */
@@ -785,6 +796,7 @@ export async function execute(
   client: KintoneClient,
   options: ExecuteOptions = {}
 ): Promise<ExecuteResult> {
+  resolveRecursiveCteLimits(options);
   const startedAt = Date.now();
   const cacheContext = createInvocationCacheContext(
     resolveCacheContext(client, options.cacheContext)
@@ -1132,7 +1144,10 @@ async function executeParsedStatement(
         ? resolveApplyGuardLimit(options.dmlMaxRows, "dmlMaxRows", DEFAULT_APPLY_MAX_ROWS) : DEFAULT_APPLY_MAX_ROWS,
       stmt.query.type === "UPDATE" && stmt.query.applyBlocks?.length
         ? resolveApplyGuardLimit(options.dmlMaxSubtableRows, "dmlMaxSubtableRows", DEFAULT_APPLY_MAX_SUBTABLE_ROWS) : DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
-      relativeDatePlan
+      relativeDatePlan,
+      options.recursiveCteMaxDepth,
+      options.recursiveCteMaxRows,
+      options.recursiveCteMaxExpansions
     );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -1513,6 +1528,7 @@ export async function executeBatch(
   client: KintoneClient,
   options: BatchExecuteOptions = {}
 ): Promise<BatchExecuteResult> {
+  resolveRecursiveCteLimits(options);
   const statements = parseSqlBatch(sql, options.enableImport === true);
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
@@ -2626,9 +2642,9 @@ function tieBreakAdvice(context: WindowWarningContext, kind: "RANGE" | "VALUE"):
     //   kintone   NUMBER は保存時に正規化する（'01' → '1'、'1e2' → '100'。実機で確認）
     //   空セルと 0  同順にならない（空は最小値として置かれる。実データとモックの両方）
     // つまり **kintone の NUMBER では表記違いを保持できない**ので、同順は生じない。
-    return "その表の中で一意になる列（元の集約のキーなど）を ORDER BY に含めてください。"
-      + "集約結果の列は一意でも証明できないため、すでに一意な場合もこの警告が出ます。"
-      + "元の集約のキーをすべて ORDER BY に含めているなら、この警告は無視して構いません。";
+    return "ウィンドウの各パーティション内で、ORDER BY の値の組が入力行を一意に識別するとクエリ構造または保証済みのデータ制約から確認できる場合に限り、この警告は無視できます。"
+      + "元の集約キーをすべて ORDER BY に含む形や、JOIN 後も同じ系列値が各パーティション内で高々1行と保証できる形が該当します。"
+      + "生成列、再帰の深さ列、または $id に由来する列であるという理由だけでは無視できません。";
   }
   // 物理アプリを読む経路（JOIN を含む）。レコード番号 / $id が実在する。
   return kind === "RANGE"
@@ -3019,7 +3035,7 @@ function dedupeSubtableOwners(
   const seen = new Set<string>();
   const result: { appId: number; owner: string }[] = [];
   for (const entry of owners) {
-    const key = `${entry.appId} ${entry.owner}`;
+    const key = `${entry.appId}\u0000${entry.owner}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(entry);
@@ -5179,6 +5195,66 @@ function assertUnionColumnCount(
   );
 }
 
+/** UNION と再帰 CTE が共有する、列位置による行・メタの対応付け。 */
+function alignSelectResultByPosition(
+  result: SelectResult,
+  targetColumns: readonly string[],
+  targetMeta?: MaterializedColumnMetaMap
+): SelectResult {
+  assertUnionColumnCount(targetColumns, result.columns);
+  const rows = result.rows.map((row) => {
+    const mapped: ProcessRow = {};
+    targetColumns.forEach((column, index) => {
+      mapped[column] = row[result.columns[index] ?? column] ?? "";
+    });
+    return mapped;
+  });
+  const aligned: SelectResult = {
+    ...result,
+    rows,
+    columns: [...targetColumns],
+    rowCount: rows.length,
+  };
+  const sourceMeta = materializedMetaBySelectResult.get(result);
+  if (targetMeta || sourceMeta) {
+    const meta = new Map<string, MaterializedColumnMeta>();
+    targetColumns.forEach((column, index) => {
+      const sourceColumn = result.columns[index];
+      const inferred = targetMeta?.get(column)
+        ?? (sourceColumn === undefined ? undefined : sourceMeta?.get(sourceColumn));
+      if (inferred) meta.set(column, { ...inferred, displayName: column });
+    });
+    materializedMetaBySelectResult.set(aligned, meta);
+  }
+  return aligned;
+}
+
+function combineUnionResults(
+  leftResult: SelectResult,
+  rightResult: SelectResult,
+  all: boolean,
+  captureColumnMeta: boolean
+): SelectResult {
+  const alignedRight = alignSelectResultByPosition(rightResult, leftResult.columns);
+  const combined = [...leftResult.rows, ...alignedRight.rows];
+  const rows = all ? combined : deduplicateRows(combined, leftResult.columns);
+  const warnings = [...new Set([
+    ...(leftResult.warnings ?? []),
+    ...(rightResult.warnings ?? []),
+  ])];
+  const result: SelectResult = {
+    type: "SELECT",
+    rows,
+    columns: [...leftResult.columns],
+    rowCount: rows.length,
+    warnings,
+  };
+  if (captureColumnMeta) {
+    materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
+  }
+  return result;
+}
+
 async function executeUnion(
   stmt: UnionStatement,
   client: KintoneClient,
@@ -5223,34 +5299,7 @@ async function executeUnion(
       ),
     ]);
 
-    // 右辺の行を左辺のカラム名に位置対応でリマップ
-    const leftCols  = leftResult.columns;
-    const rightCols = rightResult.columns;
-    assertUnionColumnCount(leftCols, rightCols);
-    const remappedRight = rightResult.rows.map((row) => {
-      const mapped: ProcessRow = {};
-      leftCols.forEach((col, i) => {
-        mapped[col] = row[rightCols[i] ?? col] ?? "";
-      });
-      return mapped;
-    });
-
-    const combined = [...leftResult.rows, ...remappedRight];
-
-    // UNION（重複排除）vs UNION ALL（そのまま）
-    const rows = stmt.all ? combined : deduplicateRows(combined, leftCols);
-
-    const warnings = [...new Set([
-      ...(leftResult.warnings ?? []),
-      ...(rightResult.warnings ?? []),
-    ])];
-    const result: SelectResult = {
-      type: "SELECT", rows, columns: leftCols, rowCount: rows.length, warnings,
-    };
-    if (captureColumnMeta) {
-      materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
-    }
-    return result;
+    return combineUnionResults(leftResult, rightResult, stmt.all, captureColumnMeta);
   });
 }
 
@@ -5269,6 +5318,518 @@ function deduplicateRows(rows: ProcessRow[], columns: string[]): ProcessRow[] {
 // ============================================================
 // WITH 句（CTE）
 // ============================================================
+
+function recursiveSelectOutputName(column: SelectColumn): string | null {
+  if ("alias" in column && typeof column.alias === "string") return column.alias;
+  if (column.type === "FIELD") return column.field;
+  return null;
+}
+
+function recursiveOutputColumns(cte: CteDefinition): string[] {
+  const spec = cte.recursiveSpec!;
+  if (cte.columnAliases) return [...cte.columnAliases];
+  const names = spec.seed.columns.map(recursiveSelectOutputName);
+  if (names.some((name) => name === null)) {
+    throw new Error(
+      `PlanningError: 再帰 CTE「${cte.name}」で列名リストを省略する場合、seed の式には AS 別名が必要です`
+    );
+  }
+  const columns = names as string[];
+  if (new Set(columns).size !== columns.length) {
+    throw new Error(
+      `PlanningError: 再帰 CTE「${cte.name}」で列名リストを省略する場合、seed の出力列名を重複させることはできません`
+    );
+  }
+  return columns;
+}
+
+function recursivePlanningColumnNames(stmt: SelectStatement): string[] {
+  return stmt.columns.map((column, index) => recursiveSelectOutputName(column) ?? `__b53_column_${index}`);
+}
+
+function recursiveMetaCompatible(left: MaterializedColumnMeta, right: MaterializedColumnMeta): boolean {
+  const a = left.semantics;
+  const b = right.semantics;
+  if (!a || !b || a.compareMode === "unsupported" || b.compareMode === "unsupported") return false;
+  if (a.compareMode !== b.compareMode) return false;
+  if (left.sortKind && right.sortKind && left.sortKind !== right.sortKind) return false;
+  if (a.inSubtable !== b.inSubtable || a.requiresCollectionOperators !== b.requiresCollectionOperators) return false;
+  const synthetic = (fieldType: string | undefined): boolean => fieldType === undefined || fieldType.startsWith("KSQL_");
+  if (!synthetic(left.fieldType) && !synthetic(right.fieldType) && left.fieldType !== right.fieldType) return false;
+  return true;
+}
+
+async function buildRecursiveFieldResolver(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables: ReadonlyMap<string, MaterializedTable>
+): Promise<(ref: FieldRef) => MaterializedColumnMeta | undefined> {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const physical = new Map<number, Map<string, KintoneFieldInfo>>();
+  await Promise.all(tables.filter((table) => table.cteName === null).map(async (table) => {
+    if (physical.has(table.appId)) return;
+    const infos = await getFieldsCached(table.appId, client, cacheContext);
+    physical.set(table.appId, new Map(infos.map((info) => [info.code, info])));
+  }));
+  const resolveInTable = (table: TableRef, field: string): MaterializedColumnMeta | undefined => {
+    if (table.cteName !== null) return materializedTables.get(table.cteName)?.columnMeta?.get(field);
+    const info = physical.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
+    return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(field);
+  };
+  return (ref) => {
+    if (ref.tableAlias !== null) {
+      const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
+      return table ? resolveInTable(table, ref.field) : undefined;
+    }
+    if (tables.length === 1) return resolveInTable(tables[0], ref.field);
+    const matches = tables.map((table) => resolveInTable(table, ref.field)).filter(
+      (meta): meta is MaterializedColumnMeta => meta !== undefined
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+}
+
+function validateRecursiveProjectionNode(
+  value: unknown,
+  resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined,
+  numeric = false
+): void {
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((item) => validateRecursiveProjectionNode(item, resolveField, numeric));
+    return;
+  }
+  const node = value as { type?: string; field?: unknown; tableAlias?: unknown; left?: unknown; right?: unknown };
+  if (node.type === "FIELD") {
+    const ref = typeof node.tableAlias === "string" || node.tableAlias === null
+      ? node as unknown as FieldRef
+      : aggregateFieldRef(String(node.field ?? ""));
+    const meta = resolveField(ref);
+    if (!meta?.semantics || meta.semantics.compareMode === "unsupported") {
+      throw new Error(`PlanningError: 再帰 CTE の射影列 ${ref.tableAlias ? `${ref.tableAlias}.` : ""}${ref.field} の型を証明できません`);
+    }
+    if (numeric && meta.semantics.compareMode !== "number" && meta.semantics.compareMode !== "recordNumber") {
+      throw new Error(`PlanningError: 再帰 CTE の数値演算に数値でない列 ${ref.field} は使用できません`);
+    }
+    return;
+  }
+  if (node.type === "FIELD_REF" && typeof node.field === "string") {
+    const ref = aggregateFieldRef(node.field);
+    const meta = resolveField(ref);
+    if (!meta?.semantics || meta.semantics.compareMode === "unsupported") {
+      throw new Error(`PlanningError: 再帰 CTE の射影列 ${node.field} の型を証明できません`);
+    }
+    if (numeric && meta.semantics.compareMode !== "number" && meta.semantics.compareMode !== "recordNumber") {
+      throw new Error(`PlanningError: 再帰 CTE の数値演算に数値でない列 ${node.field} は使用できません`);
+    }
+    return;
+  }
+  if (node.type === "ARITH" || node.type === "SCALAR_ARITH") {
+    validateRecursiveProjectionNode(node.left, resolveField, true);
+    validateRecursiveProjectionNode(node.right, resolveField, true);
+    return;
+  }
+  for (const child of Object.values(node)) validateRecursiveProjectionNode(child, resolveField, numeric);
+}
+
+async function inferRecursiveProjectionMeta(
+  stmt: SelectStatement,
+  outputColumns: readonly string[],
+  client: KintoneClient,
+  cacheContext: string,
+  materializedTables: ReadonlyMap<string, MaterializedTable>
+): Promise<MaterializedColumnMetaMap> {
+  const resolveField = await buildRecursiveFieldResolver(stmt, client, cacheContext, materializedTables);
+  stmt.columns.forEach((column) => validateRecursiveProjectionNode(column, resolveField));
+  const inferred = await inferSelectColumnMeta(
+    stmt,
+    recursivePlanningColumnNames(stmt),
+    client,
+    cacheContext,
+    materializedTables
+  );
+  const sourceNames = recursivePlanningColumnNames(stmt);
+  const aligned = new Map<string, MaterializedColumnMeta>();
+  outputColumns.forEach((column, index) => {
+    const meta = inferred.get(sourceNames[index]);
+    if (!meta?.semantics || meta.semantics.fieldType === "KSQL_UNKNOWN" || meta.semantics.compareMode === "unsupported") {
+      throw new Error(`PlanningError: 再帰 CTE の第 ${index + 1} 列の型を静的に証明できません`);
+    }
+    aligned.set(column, { ...meta, displayName: column });
+  });
+  return aligned;
+}
+
+interface RecursivePhysicalSource {
+  readonly name: string;
+  readonly table: MaterializedTable;
+  readonly warnings: readonly string[];
+}
+
+function recursivePhysicalSourceKey(table: TableRef): string {
+  return `${table.appId}:${table.subtableCode ?? ""}`;
+}
+
+function recursivePhysicalTables(...queries: readonly SelectStatement[]): TableRef[] {
+  const byKey = new Map<string, TableRef>();
+  for (const query of queries) {
+    for (const table of [query.from, ...query.joins.map((join) => join.table)]) {
+      if (table.cteName === null && !byKey.has(recursivePhysicalSourceKey(table))) {
+        byKey.set(recursivePhysicalSourceKey(table), table);
+      }
+    }
+  }
+  return [...byKey.values()];
+}
+
+type RecursiveSourceFields = Set<string> | null;
+
+function splitRecursiveFieldRef(field: string): { alias: string | null; field: string } {
+  const dot = field.indexOf(".");
+  return dot < 0
+    ? { alias: null, field }
+    : { alias: field.slice(0, dot), field: field.slice(dot + 1) };
+}
+
+/**
+ * Collect the physical columns needed by a recursive seed/term. `null` means
+ * fail-open: the reference could not be assigned safely, so every column must
+ * be fetched for that source rather than risking a changed result.
+ */
+function collectRecursivePhysicalSourceFields(
+  queries: readonly SelectStatement[]
+): Map<string, RecursiveSourceFields> {
+  const result = new Map<string, RecursiveSourceFields>();
+  const markAll = (tables: readonly TableRef[]): void => {
+    for (const table of tables) result.set(recursivePhysicalSourceKey(table), null);
+  };
+  for (const query of queries) {
+    const physical = physicalSelectTables(query);
+    for (const table of physical) {
+      const key = recursivePhysicalSourceKey(table);
+      if (!result.has(key)) result.set(key, new Set());
+    }
+    const addRef = (rawAlias: string | null, field: string): void => {
+      const table = rawAlias === null
+        ? (physical.length === 1 ? physical[0] : undefined)
+        : [query.from, ...query.joins.map((join) => join.table)]
+          .find((candidate) => effectiveTableAlias(candidate)?.toLowerCase() === rawAlias.toLowerCase());
+      if (!table) {
+        markAll(physical);
+        return;
+      }
+      if (table.cteName !== null) return;
+      const current = result.get(recursivePhysicalSourceKey(table));
+      if (current !== null) current?.add(field);
+    };
+    const visit = (node: unknown): void => {
+      if (node === null || node === undefined || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+      const value = node as Record<string, unknown>;
+      if (value.type === "WILDCARD" || value.type === "PARENT_WILDCARD") {
+        markAll(physical);
+        return;
+      }
+      if ((value.type === "FIELD" || value.type === "FIELD_REF") && typeof value.field === "string") {
+        const encoded = splitRecursiveFieldRef(value.field);
+        const alias = typeof value.tableAlias === "string"
+          ? value.tableAlias
+          : value.tableAlias === null
+            ? null
+            : encoded.alias;
+        addRef(alias, encoded.field);
+        return;
+      }
+      if ((value.type === "FIELD_NAME" || value.type === "GROUPING_REF") && typeof value.name === "string") {
+        // FIELD_NAME may denote a projected alias. It is unsafe to guess which
+        // physical source owns it, so retain correctness with the fail-open path.
+        markAll(physical);
+        return;
+      }
+      Object.values(value).forEach(visit);
+    };
+    visit(query.columns);
+    visit(query.where);
+    visit(normalizeGroupingSpec(query));
+    visit(query.having);
+    visit(query.orderBy);
+    for (const join of query.joins) {
+      if (join.on === null) {
+        markAll(physical);
+        continue;
+      }
+      addRef(join.on.left.tableAlias, join.on.left.field);
+      addRef(join.on.right.tableAlias, join.on.right.field);
+    }
+  }
+  return result;
+}
+
+function recursiveSourceSelect(table: TableRef, fields: RecursiveSourceFields): SelectStatement {
+  const columns: SelectStatement["columns"] = fields !== null && fields.size > 0
+    ? [...fields].map((field) => ({ type: "FIELD" as const, field, alias: null }))
+    : [{ type: "WILDCARD" }];
+  return {
+    type: "SELECT",
+    distinct: false,
+    columns,
+    from: { ...table, alias: null },
+    joins: [],
+    where: null,
+    groupBy: [],
+    having: null,
+    orderMode: "CANONICAL",
+    orderBy: [],
+    limit: null,
+    offset: null,
+  };
+}
+
+async function materializeRecursivePhysicalSources(
+  queries: readonly SelectStatement[],
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<Map<string, RecursivePhysicalSource>> {
+  const fieldsBySource = collectRecursivePhysicalSourceFields(queries);
+  const entries = await Promise.all(recursivePhysicalTables(...queries).map(async (table, index) => {
+    const result = await executeSelect(
+      recursiveSourceSelect(table, fieldsBySource.get(recursivePhysicalSourceKey(table)) ?? null),
+      client,
+      { ...options, onLimitReached: "error" },
+      cacheContext,
+      undefined,
+      true,
+      false,
+      "DERIVED"
+    );
+    const name = `__b53_source_${index}`;
+    return [recursivePhysicalSourceKey(table), {
+      name,
+      warnings: result.warnings ?? [],
+      table: {
+        rows: result.rows,
+        columns: result.columns,
+        columnMeta: materializedMetaBySelectResult.get(result),
+      },
+    }] as const;
+  }));
+  return new Map(entries);
+}
+
+function rewriteRecursivePhysicalSources(
+  stmt: SelectStatement,
+  sources: ReadonlyMap<string, RecursivePhysicalSource>
+): SelectStatement {
+  const rewrite = (table: TableRef): TableRef => {
+    if (table.cteName !== null) return table;
+    const source = sources.get(recursivePhysicalSourceKey(table));
+    if (!source) throw new Error("PlanningError: 再帰 CTE の完全実体化 source を解決できません");
+    return { appId: 0, alias: table.alias, cteName: source.name, subtableCode: null };
+  };
+  return {
+    ...stmt,
+    from: rewrite(stmt.from),
+    joins: stmt.joins.map((join) => ({ ...join, table: rewrite(join.table) })),
+  };
+}
+
+function tableMetaForJoinKey(
+  table: TableRef,
+  field: string,
+  cache: ReadonlyMap<string, MaterializedTable>
+): MaterializedColumnMeta | undefined {
+  return table.cteName === null ? undefined : cache.get(table.cteName)?.columnMeta?.get(field);
+}
+
+function recursiveJoinKey(value: string, semantics: ResolvedFieldSemantics): string {
+  if (semantics.compareMode !== "number" && semantics.compareMode !== "recordNumber") return value;
+  const decimal = parseExactDecimal(value);
+  return decimal === null
+    ? `invalid:${value}`
+    : `${decimal.sign}:${decimal.coefficient}:${decimal.scale}`;
+}
+
+function recursiveJoinSides(
+  cteName: string,
+  term: SelectStatement
+): { self: TableRef; source: TableRef; selfField: string; sourceField: string } {
+  const join = term.joins[0];
+  if (!join || join.type !== "INNER") throw new Error("PlanningError: 再帰項の INNER JOIN を解決できません");
+  const self = term.from.cteName === cteName ? term.from : join.table;
+  const source = self === term.from ? join.table : term.from;
+  const selfAlias = effectiveTableAlias(self);
+  const leftIsSelf = join.on.left.tableAlias === selfAlias;
+  const rightIsSelf = join.on.right.tableAlias === selfAlias;
+  if (leftIsSelf === rightIsSelf) throw new Error("PlanningError: 再帰項の自己参照 JOIN キーを一意に解決できません");
+  return {
+    self,
+    source,
+    selfField: leftIsSelf ? join.on.left.field : join.on.right.field,
+    sourceField: leftIsSelf ? join.on.right.field : join.on.left.field,
+  };
+}
+
+interface RecursiveFrontierRow {
+  readonly row: ProcessRow;
+  readonly path: readonly string[];
+}
+
+async function executeRecursiveCte(
+  cte: CteDefinition,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cteCache: Map<string, MaterializedTable>,
+  cacheContext: string
+): Promise<SelectResult> {
+  const spec = cte.recursiveSpec!;
+  const outputColumns = recursiveOutputColumns(cte);
+  const seedMeta = await inferRecursiveProjectionMeta(
+    spec.seed, outputColumns, client, cacheContext, cteCache
+  );
+  const planningCache = new Map(cteCache);
+  planningCache.set(cte.name, { rows: [], columns: outputColumns, columnMeta: seedMeta });
+  const termMeta = await inferRecursiveProjectionMeta(
+    spec.recursiveTerm, outputColumns, client, cacheContext, planningCache
+  );
+  outputColumns.forEach((column, index) => {
+    const left = seedMeta.get(column);
+    const right = termMeta.get(column);
+    if (!left || !right || !recursiveMetaCompatible(left, right)) {
+      throw new Error(`PlanningError: 再帰 CTE「${cte.name}」の第 ${index + 1} 列で seed と再帰項の型が一致しません`);
+    }
+  });
+  const planningSides = recursiveJoinSides(cte.name, spec.recursiveTerm);
+  const termFieldResolver = await buildRecursiveFieldResolver(
+    spec.recursiveTerm, client, cacheContext, planningCache
+  );
+  const selfJoinMeta = termFieldResolver({
+    type: "FIELD",
+    tableAlias: effectiveTableAlias(planningSides.self),
+    field: planningSides.selfField,
+  });
+  const sourceJoinMeta = termFieldResolver({
+    type: "FIELD",
+    tableAlias: effectiveTableAlias(planningSides.source),
+    field: planningSides.sourceField,
+  });
+  if (!selfJoinMeta || !sourceJoinMeta || !recursiveMetaCompatible(selfJoinMeta, sourceJoinMeta)) {
+    throw new Error(`PlanningError: 再帰 CTE「${cte.name}」の自己参照 JOIN キーの型が一致しません`);
+  }
+
+  const sources = await materializeRecursivePhysicalSources(
+    [spec.seed, spec.recursiveTerm], client, options, cacheContext
+  );
+  const runtimeCache = new Map(cteCache);
+  for (const source of sources.values()) runtimeCache.set(source.name, source.table);
+  const seedQuery = rewriteRecursivePhysicalSources(spec.seed, sources);
+  const termQuery = rewriteRecursivePhysicalSources(spec.recursiveTerm, sources);
+  const rawSeed = await executeQueryWithCte(seedQuery, client, options, runtimeCache, cacheContext, true, true);
+  const seed = alignSelectResultByPosition(rawSeed, outputColumns, seedMeta);
+  const cycle = spec.cycle;
+  const cycleMeta = cycle ? seedMeta.get(cycle.column) : undefined;
+  const resultMeta = new Map(seedMeta);
+  if (cycle) resultMeta.set(cycle.markColumn, { ...syntheticColumnMeta("string"), displayName: cycle.markColumn });
+  const resultColumns = cycle ? [...outputColumns, cycle.markColumn] : [...outputColumns];
+  const rows: ProcessRow[] = [];
+  let frontier: RecursiveFrontierRow[] = [];
+  const warnings = new Set([
+    ...(seed.warnings ?? []),
+    ...[...sources.values()].flatMap((source) => source.warnings),
+  ]);
+  const limits = new RecursiveCteLimitCounter(cte.name, resolveRecursiveCteLimits(options));
+  const append = (row: ProcessRow): void => {
+    limits.addRow();
+    rows.push(row);
+  };
+  for (const row of seed.rows) {
+    const value = cycle ? String(row[cycle.column] ?? "") : "";
+    const emitted = cycle ? { ...row, [cycle.markColumn]: cycle.defaultValue } : row;
+    append(emitted);
+    frontier.push({ row, path: cycle ? [value] : [] });
+  }
+
+  const sides = recursiveJoinSides(cte.name, termQuery);
+  const sourceTable = sides.source.cteName === null ? undefined : runtimeCache.get(sides.source.cteName);
+  if (!sourceTable) throw new Error("PlanningError: 再帰項の完全実体化 source がありません");
+  const joinMeta = tableMetaForJoinKey(sides.self, sides.selfField, planningCache)
+    ?? tableMetaForJoinKey(sides.source, sides.sourceField, runtimeCache);
+  if (!joinMeta?.semantics || joinMeta.semantics.compareMode === "unsupported") {
+    throw new Error(`PlanningError: 再帰項の JOIN キー ${sides.selfField} の型を証明できません`);
+  }
+  const sourceRowsByKey = new Map<string, ProcessRow[]>();
+  for (const sourceRow of sourceTable.rows) {
+    const value = String(sourceRow[sides.sourceField] ?? "");
+    const key = recursiveJoinKey(value, joinMeta.semantics);
+    const bucket = sourceRowsByKey.get(key);
+    if (bucket) bucket.push(sourceRow);
+    else sourceRowsByKey.set(key, [sourceRow]);
+  }
+  const sourceHasEmptyKey = sourceRowsByKey.has(recursiveJoinKey("", joinMeta.semantics));
+
+  let depth = 0;
+  let emptyKeyWarned = false;
+  while (frontier.length > 0) {
+    depth++;
+    const next: RecursiveFrontierRow[] = [];
+    for (const parent of frontier) {
+      const parentKey = String(parent.row[sides.selfField] ?? "");
+      if (!emptyKeyWarned && parentKey === "" && sourceHasEmptyKey) {
+        warnings.add(
+          `再帰 CTE「${cte.name}」の JOIN ${sides.selfField} = ${sides.sourceField} で第 ${depth} 反復に両側の空キーを検出しました。空キーどうしは一致し、ルート群を再展開し得ます。`
+        );
+        emptyKeyWarned = true;
+      }
+      const matchingSourceRows = sourceRowsByKey.get(recursiveJoinKey(parentKey, joinMeta.semantics)) ?? [];
+      for (const sourceRow of matchingSourceRows) {
+        const sourceKey = String(sourceRow[sides.sourceField] ?? "");
+        if (!compareScalarValues("=", parentKey, sourceKey, joinMeta.semantics)) continue;
+        limits.addExpansion();
+      }
+      if (matchingSourceRows.length === 0) continue;
+      const iterationCache = new Map(runtimeCache);
+      iterationCache.set(cte.name, {
+        rows: [parent.row],
+        columns: outputColumns,
+        columnMeta: seedMeta,
+      });
+      const rawCandidates = await executeQueryWithCte(
+        termQuery, client, options, iterationCache, cacheContext, true, true
+      );
+      for (const warning of rawCandidates.warnings ?? []) warnings.add(warning);
+      const candidates = alignSelectResultByPosition(rawCandidates, outputColumns, seedMeta);
+      if (candidates.rows.length > 0) limits.observeDepth(depth);
+      for (const candidate of candidates.rows) {
+        if (!cycle) {
+          append(candidate);
+          next.push({ row: candidate, path: [] });
+          continue;
+        }
+        const value = String(candidate[cycle.column] ?? "");
+        const isCycle = parent.path.some((seen) =>
+          compareScalarValues("=", seen, value, cycleMeta!.semantics)
+        );
+        append({ ...candidate, [cycle.markColumn]: isCycle ? cycle.markValue : cycle.defaultValue });
+        if (!isCycle) next.push({ row: candidate, path: [...parent.path, value] });
+      }
+    }
+    frontier = next;
+  }
+
+  const result: SelectResult = {
+    type: "SELECT",
+    rows,
+    columns: resultColumns,
+    rowCount: rows.length,
+    warnings: [...warnings],
+  };
+  materializedMetaBySelectResult.set(result, resultMeta);
+  return result;
+}
 
 async function executeWith(
   stmt: WithStatement,
@@ -5297,7 +5858,9 @@ async function executeWith(
   // 各 CTE を順番に実行し、結果をキャッシュ
   for (const cte of stmt.ctes) {
     let result: SelectResult;
-    if (cte.query.type === "SHOW_APPS") {
+    if (cte.recursiveSpec) {
+      result = await executeRecursiveCte(cte, client, options, cteCache, cacheContext);
+    } else if (cte.query.type === "SHOW_APPS") {
       result = await executeShowApps(client);
     } else if (cte.query.type === "DESCRIBE") {
       result = await executeDescribe(cte.query, client, cacheContext);
@@ -5367,27 +5930,7 @@ async function executeQueryWithCte(
       executeQueryWithCte(query.left,  client, options, cteCache, cacheContext, captureColumnMeta, true),
       executeQueryWithCte(query.right, client, options, cteCache, cacheContext, captureColumnMeta, true),
     ]);
-    const leftCols    = leftResult.columns;
-    const rightCols   = rightResult.columns;
-    assertUnionColumnCount(leftCols, rightCols);
-    const remapped    = rightResult.rows.map((row) => {
-      const mapped: ProcessRow = {};
-      leftCols.forEach((col, i) => { mapped[col] = row[rightCols[i] ?? col] ?? ""; });
-      return mapped;
-    });
-    const combined = [...leftResult.rows, ...remapped];
-    const rows = query.all ? combined : deduplicateRows(combined, leftCols);
-    const warnings = [...new Set([
-      ...(leftResult.warnings ?? []),
-      ...(rightResult.warnings ?? []),
-    ])];
-    const result: SelectResult = {
-      type: "SELECT", rows, columns: leftCols, rowCount: rows.length, warnings,
-    };
-    if (captureColumnMeta) {
-      materializedMetaBySelectResult.set(result, mergeUnionColumnMeta(leftResult, rightResult));
-    }
-    return result;
+    return combineUnionResults(leftResult, rightResult, query.all, captureColumnMeta);
   }
 
   // CTE 参照が FROM か JOIN に含まれるか確認
@@ -11176,8 +11719,14 @@ export async function buildBatchExplainPlans(
   enableImport = false,
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
-  resolveMetadata = true
+  resolveMetadata = true,
+  recursiveCteMaxDepth?: number,
+  recursiveCteMaxRows?: number,
+  recursiveCteMaxExpansions?: number
 ): Promise<BatchExplainResult> {
+  const recursiveLimits = resolveRecursiveCteLimits({
+    recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+  });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
     const statements = parseSqlBatch(sql, enableImport);
@@ -11269,7 +11818,8 @@ export async function buildBatchExplainPlans(
                dmlMaxSubtableRows,
                fetchCollector,
                tempSchemaLedger,
-               createdSchema
+                createdSchema,
+                { maxRecords, recursiveLimits }
              ), cursorMaxActive),
           ];
       const metadataPlan = explainMetadataLines(whereAnalysis);
@@ -11320,7 +11870,8 @@ function buildBatchStatementPlan(
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
   collector: ExplainFetchCollector = { sources: [] },
   tempSchemaLedger: ReadonlyMap<string, ExplainTempSchemaEntry> = new Map(),
-  createdSchema?: ExplainTempSchemaEntry
+  createdSchema?: ExplainTempSchemaEntry,
+  explainContext: RecursiveExplainContext = defaultRecursiveExplainContext()
 ): string[] {
   if (stmt.type === "CREATE_TEMP_TABLE") {
     return [
@@ -11336,7 +11887,7 @@ function buildBatchStatementPlan(
       `  rows:          実体化前のため不明（既定上限 ${TEMP_TABLE_MAX_ROWS} 行、tempTableMaxRows で変更可、超過はエラー）`,
       ...buildPlanForBatchQuery(
         stmt.query, info, capabilities, orderPlans, plainGroupByPlans, collector, "main",
-        tempSchemaLedger
+        tempSchemaLedger, explainContext
       ).map((l) => `  ${l}`),
     ];
   }
@@ -11357,7 +11908,7 @@ function buildBatchStatementPlan(
         "  subquery:",
         ...buildPlanForBatchQuery(
           stmt.expr.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
-          "main", tempSchemaLedger
+          "main", tempSchemaLedger, explainContext
         ).map((l) => `  ${l}`),
       ];
     }
@@ -11383,7 +11934,7 @@ function buildBatchStatementPlan(
   if (stmt.type === "EXPLAIN") {
     return buildPlanForBatchQuery(
       stmt.query, info, capabilities, orderPlans, plainGroupByPlans, collector,
-      "main", tempSchemaLedger
+      "main", tempSchemaLedger, explainContext
     );
   }
   if (stmt.type === "ASSERT") {
@@ -11401,7 +11952,7 @@ function buildBatchStatementPlan(
       const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
       lines.push(...buildPlanForBatchQuery(
         sq.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
-        "main", tempSchemaLedger
+        "main", tempSchemaLedger, explainContext
       ).map((l) => `  ${l}`));
     });
     return lines;
@@ -11413,7 +11964,8 @@ function buildBatchStatementPlan(
     );
   }
   return buildPlanForBatchQuery(
-    stmt, info, capabilities, orderPlans, plainGroupByPlans, collector, "main", tempSchemaLedger
+    stmt, info, capabilities, orderPlans, plainGroupByPlans, collector, "main", tempSchemaLedger,
+    explainContext
   );
 }
 
@@ -11437,14 +11989,15 @@ function buildPlanForBatchQuery(
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   collector: ExplainFetchCollector = { sources: [] },
   sourceRole: ExplainFetchRole = "main",
-  tempSchemaLedger: ReadonlyMap<string, ExplainTempSchemaEntry> = new Map()
+  tempSchemaLedger: ReadonlyMap<string, ExplainTempSchemaEntry> = new Map(),
+  explainContext: RecursiveExplainContext = defaultRecursiveExplainContext()
 ): string[] {
   // 一時テーブル参照なし → 既存の単文プラン生成をそのまま使う
   if (info.tempTablesReferenced.length === 0) {
     return buildExplainPlan(
       query as ExplainStatement["query"], undefined, capabilities, orderPlans,
-      100, DEFAULT_APPLY_MAX_SUBTABLE_ROWS, 10_000, plainGroupByPlans, true, collector,
-      sourceRole
+      100, DEFAULT_APPLY_MAX_SUBTABLE_ROWS, explainContext.maxRecords, plainGroupByPlans, true, collector,
+      sourceRole, explainContext.recursiveLimits
     );
   }
   // 一時テーブル参照あり → FULL_SCAN（インメモリ）であることを明示する
@@ -11500,6 +12053,15 @@ function buildPlanForBatchQuery(
 
 const explainMaterializedTables = new WeakMap<ExplainStatement, ReadonlyMap<string, MaterializedTable>>();
 
+interface RecursiveExplainContext {
+  readonly maxRecords: number;
+  readonly recursiveLimits: RecursiveCteLimits;
+}
+
+function defaultRecursiveExplainContext(): RecursiveExplainContext {
+  return { maxRecords: 10_000, recursiveLimits: resolveRecursiveCteLimits({}) };
+}
+
 async function executeExplain(
   stmt: ExplainStatement,
   client: KintoneClient,
@@ -11509,8 +12071,14 @@ async function executeExplain(
   dmlMaxRows = 100,
   dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
   /** Step 5 の execution と同じ walk 結果。Step 6 の表示拡張はこの値を消費する。 */
-  relativeDatePlan?: RelativeDatePushdownPlan
+  relativeDatePlan?: RelativeDatePushdownPlan,
+  recursiveCteMaxDepth?: number,
+  recursiveCteMaxRows?: number,
+  recursiveCteMaxExpansions?: number
 ): Promise<SelectResult> {
+  const recursiveLimits = resolveRecursiveCteLimits({
+    recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+  });
   const sharedPlan = relativeDatePlan
     ?? await resolveRelativeDateExecutionPlan(stmt.query, client, cacheContext);
   const analysis = await buildExplainWhereAnalysis(
@@ -11532,7 +12100,7 @@ async function executeExplain(
           buildExplainPlan(
             stmt.query, undefined, analysis.capabilities, analysis.orderPlans,
             dmlMaxRows, dmlMaxSubtableRows, maxRecords, analysis.plainGroupByPlans,
-            true, fetchCollector
+            true, fetchCollector, "main", recursiveLimits
           ),
           cursorMaxActive
         ),
@@ -11577,7 +12145,8 @@ function buildExplainPlan(
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
   includeFetchSummary = true,
   collector?: ExplainFetchCollector,
-  sourceRole: ExplainFetchRole = "main"
+  sourceRole: ExplainFetchRole = "main",
+  recursiveLimits: RecursiveCteLimits = resolveRecursiveCteLimits({})
 ): string[] {
   const fetchCollector = collector ?? { sources: [] };
   if (query.type === "UNION") {
@@ -11588,7 +12157,8 @@ function buildExplainPlan(
   }
   if (query.type === "WITH") {
     const lines = buildWithPlan(
-      query, capabilities, orderPlans, plainGroupByPlans, fetchCollector
+      query, capabilities, orderPlans, plainGroupByPlans, fetchCollector,
+      maxRecords, recursiveLimits
     );
     return includeFetchSummary ? addFetchSummary(lines, fetchCollector.sources) : lines;
   }
@@ -12339,12 +12909,35 @@ function buildWithPlan(
   capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
   orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>,
   plainGroupByPlans?: ReadonlyMap<SelectStatement, PlainGroupByResolutionPlan>,
-  collector: ExplainFetchCollector = { sources: [] }
+  collector: ExplainFetchCollector = { sources: [] },
+  maxRecords = 10_000,
+  recursiveLimits: RecursiveCteLimits = resolveRecursiveCteLimits({})
 ): string[] {
   populateWithCrossJoinExplain(stmt);
   const lines: string[] = [];
   for (const cte of stmt.ctes) {
-    if (cte.query.type === "SELECT") {
+    if (cte.recursiveSpec) {
+      const cycle = cte.recursiveSpec.cycle;
+      lines.push(
+        `recursive cte: ${cte.name}`,
+        "  strategy: B (materialize each source once, iterate in memory)",
+        "  union: UNION ALL",
+        "  self reference: once",
+        cycle
+          ? `  cycle: path-scoped on ${cycle.column}, mark ${cycle.markColumn} ('${cycle.markValue}'/'${cycle.defaultValue}'), cycle row emitted, expansion stopped`
+          : "  cycle: none (absolute limits still enforced)",
+        `  limits: depth=${recursiveLimits.depth}, rows=${recursiveLimits.rows}, expansions=${recursiveLimits.expansions} (always fail-closed)`,
+        "  complete input: required (onLimit=truncate disabled)",
+        "  empty-key recursive join: runtime checked"
+      );
+      for (const source of recursivePhysicalTables(cte.recursiveSpec.seed, cte.recursiveSpec.recursiveTerm)) {
+        const sourceName = `APP${source.appId}${source.subtableCode ? `$${source.subtableCode}` : ""}`;
+        lines.push(
+          `  source ${sourceName}: R unknown, pageSize=500, estimated calls=ceil(R/500), maxRecords=${maxRecords}`
+        );
+      }
+      lines.push("  iteration rows: unknown until execution", "  records API: none", "");
+    } else if (cte.query.type === "SELECT") {
       lines.push(...buildSelectPlan(
         cte.query, `[cte: ${cte.name}]`, capabilities, orderPlans, plainGroupByPlans,
         false, true, collector, "cte"
@@ -12407,10 +13000,12 @@ function buildWithPlan(
       orderPlans,
       100,
       DEFAULT_APPLY_MAX_SUBTABLE_ROWS,
-      10_000,
+      maxRecords,
       plainGroupByPlans,
       false,
-      collector
+      collector,
+      "main",
+      recursiveLimits
     ));
   }
   if (canInlineSingleCte(stmt)) {
