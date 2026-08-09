@@ -48,7 +48,7 @@ export const STATEMENT_SYNTAX_CATALOG = {
     expectedTypes: [["SELECT"]],
   },
   with: {
-    template: "WITH-CTE: normal_AS(SELECT|SHOW_APPS|DESCRIBE...|GENERATE_SERIES(start,stop[,step])[AS_column])[,name2_AS(...)]..._SELECT|UNION...; WITH RECURSIVE name[(cols)]_AS(seed_SELECT_UNION_ALL_recursive_SELECT_with_one_self_INNER_JOIN)[CYCLE_col_SET_mark_TO_Y_DEFAULT_N]_SELECT... Phase1 forms",
+    template: "WITH-CTE: normal_AS(SELECT|SHOW_APPS|DESCRIBE...|GENERATE_SERIES(start,stop[,step])[AS_column])[,name2_AS(...)]..._SELECT|UNION...; WITH RECURSIVE name[(cols)]_AS(seed_SELECT_UNION_ALL_recursive_SELECT_with_one_self_INNER_JOIN)[CYCLE_col_SET_mark_TO_Y_DEFAULT_N]_SELECT...",
     examples: [
       "WITH app_list AS (SHOW APPS), field_list AS (DESCRIBE APP1) SELECT * FROM app_list",
       "WITH days AS (GENERATE_SERIES('2026-08-01','2026-08-03') AS series_date) SELECT series_date FROM days",

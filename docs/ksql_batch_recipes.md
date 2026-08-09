@@ -752,7 +752,7 @@ ORDER BY `1段目`, `2段目`, `3段目`
 
 ### 再帰 CTE の基本レシピ
 
-Phase1 の再帰 CTE は read-only です。seed で起点の辺を選び、再帰項で直前の frontier と物理 source を `INNER JOIN` します。`CYCLE` は現在 path 上で同じ子コードへ戻る循環行を `Y` として1回だけ残し、その先の展開を止めます。
+再帰 CTE は read-only です。seed で起点の辺を選び、再帰項で直前の frontier と物理 source を `INNER JOIN` します。`CYCLE` は現在 path 上で同じ子コードへ戻る循環行を `Y` として1回だけ残し、その先の展開を止めます。
 
 ```sql
 WITH RECURSIVE 階層
@@ -771,7 +771,7 @@ FROM 階層
 ORDER BY 深さ, 親コード, 子コード
 ```
 
-同じノードへ別経路で到達した行は別の path occurrence として残ります。`CYCLE` は組み合わせ爆発の上限ではないため、深さ・累積結果行・累積中間展開の三境界は常に有効です。`path` 自体は Phase1 では出力できません。
+同じノードへ別経路で到達した行は別の path occurrence として残ります。`CYCLE` は組み合わせ爆発の上限ではないため、深さ・累積結果行・累積中間展開の三境界は常に有効です。`path` 自体は出力できません。
 
 ## 適用限界（スケール指針）
 

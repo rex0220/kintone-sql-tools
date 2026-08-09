@@ -2462,9 +2462,9 @@ ORDER BY s.日付
 
 `EXPLAIN WITH ... GENERATE_SERIES ...` は source、列名、INTEGER / DATE、start、stop、正規化した step、生成件数、10,000行ガード、records API が `none` であることを表示します。純粋な生成系列の実行と EXPLAIN はレコード、Cursor、書込、フォーム・アプリ情報 API を呼びません。
 
-### WITH RECURSIVE / CYCLE（Phase1）
+### WITH RECURSIVE / CYCLE（再帰 CTE）
 
-深さがデータ次第で変わる階層は、read-only の `WITH RECURSIVE` で展開できます。再帰 CTE 本体は `seed SELECT UNION ALL recursive SELECT` の2枝とし、再帰項は自己参照を1回だけ `INNER JOIN` の片側に置きます。再帰 CTE は1つの `WITH` に1個までです。CTE 列名リストは再帰 CTE にだけ指定でき、seed と再帰項の列数・位置ごとの型が一致する必要があります。後方参照、相互・多重再帰、再帰項の OUTER JOIN、2つ目の JOIN、集計、window、`DISTINCT`、subquery、`GROUP BY`、`ORDER BY`、`LIMIT` / `OFFSET`、DML source、入れ子の再帰 CTEは Phase1 の対象外です。
+深さがデータ次第で変わる階層は、read-only の `WITH RECURSIVE` で展開できます。再帰 CTE 本体は `seed SELECT UNION ALL recursive SELECT` の2枝とし、再帰項は自己参照を1回だけ `INNER JOIN` の片側に置きます。再帰 CTE は1つの `WITH` に1個までです。CTE 列名リストは再帰 CTE にだけ指定でき、seed と再帰項の列数・位置ごとの型が一致する必要があります。後方参照、相互・多重再帰、再帰項の OUTER JOIN、2つ目の JOIN、集計、window、`DISTINCT`、subquery、`GROUP BY`、`ORDER BY`、`LIMIT` / `OFFSET`、DML source、入れ子の再帰 CTE は非対応です（将来拡張の候補）。
 
 ```sql
 WITH RECURSIVE 部品展開
@@ -2483,7 +2483,7 @@ FROM 部品展開
 ORDER BY 深さ, 子品目;
 ```
 
-`CYCLE` は単一列だけを受け付け、`TO` / `DEFAULT` は異なる文字列リテラルにします。循環判定は各行の現在 path 内だけで行い、global visited 集合は使いません。同じノードへ別 path で到達した行は別の出現として残り、それぞれ再展開されます。path は内部状態であり Phase1 では出力列にできません。循環行は `TO` 値を付けて結果へ1回含めますが、次の frontier には入れません。
+`CYCLE` は単一列だけを受け付け、`TO` / `DEFAULT` は異なる文字列リテラルにします。循環判定は各行の現在 path 内だけで行い、global visited 集合は使いません。同じノードへ別 path で到達した行は別の出現として残り、それぞれ再展開されます。path は内部状態であり、出力列にはできません（将来拡張の候補）。循環行は `TO` 値を付けて結果へ1回含めますが、次の frontier には入れません。
 
 `CYCLE` は現在 path 上の循環を止めるだけで、循環のない DAG や多経路合流による組み合わせ爆発の境界ではありません。そのため次の三境界は `CYCLE` の有無にかかわらず常に有効で、外側 `LIMIT` と `onLimit=truncate` では緩和できません。上限超過時は部分結果を返さず fail-closed します。engine library の公開エラー `code` は当面 `EXECUTION_ERROR` です。
 
@@ -2517,7 +2517,7 @@ SELECT * FROM アプリ一覧 WHERE アプリ名 LIKE '顧客';
 
 **注意事項:**
 - 非再帰 CTE 本体のサブクエリは SIMPLE / FULL_SCAN を自動判定
-- 再帰 CTE は Phase1 の read-only 範囲で完全実体化してから外側 SELECT を評価
+- 再帰 CTE は read-only で、完全実体化してから外側 SELECT を評価
 
 ---
 
@@ -3591,7 +3591,7 @@ ECMAScript 正規表現はホストのブラウザ／Node とその版に依存�
 |------|------|
 | 相関サブクエリ | 非対応（非相関 IN/EXISTS は対応） |
 | INTERSECT / EXCEPT | 非対応 |
-| 再帰 CTE | Phase1 対応（read-only の `WITH RECURSIVE`、`UNION ALL` 2枝、単一自己 `INNER JOIN`、任意の単一列 `CYCLE`。再帰 DML source・相互/多重再帰・path 公開などは非対応） |
+| 再帰 CTE | 対応（read-only の `WITH RECURSIVE`、`UNION ALL` 2枝、単一自己 `INNER JOIN`、任意の単一列 `CYCLE`。再帰 DML source・相互/多重再帰・path 公開などは非対応） |
 | FULL OUTER JOIN | 非対応 |
 | UPDATE の汎用 JOIN | 非対応（`UPDATE ... FROM` の `$id`／文字列（1行）／数値キーによる単一等値のみ対応） |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
