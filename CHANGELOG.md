@@ -3,6 +3,75 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.66.0（2026-08-09）
+
+### 新機能（B53 `WITH RECURSIVE` / `CYCLE` — 再帰 CTE・Phase1）
+
+**深さがデータ次第で変わる階層（BOM 部品表・組織図・分類ツリー）を read-only の
+`WITH RECURSIVE` で展開できます。** これまで「再帰 CTE は非対応」でした。
+
+```sql
+WITH RECURSIVE 展開 AS (
+  SELECT child_code AS item_code, qty AS acc_qty, 1 AS lvl
+  FROM APP4238 WHERE parent_code = 'SET-001' AND is_active = '有効'
+  UNION ALL
+  SELECT b.child_code, e.acc_qty * b.qty, e.lvl + 1
+  FROM 展開 AS e INNER JOIN APP4238 AS b ON b.parent_code = e.item_code
+  WHERE e.lvl < 10 AND b.is_active = '有効'
+)
+SELECT item_code, SUM(acc_qty) AS 所要量
+FROM 展開 GROUP BY item_code
+```
+
+- **Phase1 の範囲**: 単一再帰 CTE・`seed UNION ALL 再帰項` の 2 枝・自己参照 1 回・
+  INNER 等値 JOIN 1 本・CTE 列名リスト（再帰 CTE のみ）・非再帰 sibling との共存・
+  外側の JOIN/集計/ORDER BY。対象外（相互再帰・OUTER JOIN・再帰項の集計等）は
+  すべて実行前に静的拒否します
+- **任意の `CYCLE` 句**（`CYCLE 列 SET mark TO 'Y' DEFAULT 'N'`）は**経路（path）単位**で
+  循環を検出して打ち切ります。共通部品を複数の親から使う「多重使用」は循環ではないため
+  打ち切りません（グローバル訪問済み判定はしません）
+- **安全境界（常時 fail-closed）**: 深さ 100・累積行 10,000・中間展開 100,000 を
+  `CYCLE` の有無に関係なく強制。超過は部分結果を返さず専用エラーで停止します。
+  env / profile / CLI（`--recursive-cte-max-*`）/ MCP / プラグイン UI で変更可
+- **API 消費は深さに依存しません**: 参照アプリを実行前に 1 回だけ完全実体化し
+  （`onLimit=truncate` は無効・取得列は必要フィールドの和集合に最小化）、反復はメモリ内。
+  `EXPLAIN` は戦略・境界・source ごとの取得見積りを表示し、records API を呼びません
+- **型の安全**: seed と再帰項の列型・JOIN キー型は実行前に静的に証明し、
+  証明できない形は planning error（黙って文字列比較にフォールバックしません）
+- **空キーの実行時警告**: 再帰 JOIN の両側に空キーが実際に現れた最初の反復で
+  警告を 1 件返します（空=空一致の意味論は JOIN 全体で不変・結果は変わりません。
+  「親コード空＝ルート」の階層で意図しない再展開に気づけます）
+- **実データ検証**: BOM 部品表（品目 110・エッジ 276・10 セット・多経路合流/レベル差/
+  小数員数の積を含む）の展開 394 行が独立算出の期待値と全一致
+
+### 修正（B166 JOIN の `ON` をテーブルと逆順に書くと落ちていた）**※書ける形が増えます**
+
+**`FROM p JOIN c ON c.x = p.y`（JOIN 側のキーを左に書く形）が
+`ArgumentError: JOIN key ... is not available in the materialized table.` で
+一律に失敗していました**（v3.65.0 以前から。誤結果ではなくエラー停止）。
+`ON` の両辺を記述順ではなく**実際のテーブル帰属**で解決するよう修正しました。
+
+- **影響していた形**: メモリ結合の全経路（物理×物理・CTE×CTE・CTE×物理・一時テーブル）で
+  `ON` の左辺に JOIN 側のキーを書いた場合のみ
+- `FROM` 側を左に書く従来の形・結合キーの押し下げ（型別選択・targeted `IN`）・
+  LEFT/RIGHT JOIN の保存側の意味は元から正しく、変わりません
+
+### 改善（B160 全順序警告の「無視してよい条件」を一般化）
+
+CTE・一時テーブル読みのウィンドウ警告の助言を、機構別の特例ではなく
+**「各パーティション内で `ORDER BY` の値の組が入力行を一意に識別できるか」**の
+単一条件へ一般化しました。集約キー全含み（従来どおり無視可）・JOIN 後の系列値・
+再帰 CTE の出力のいずれも同じ文で判定できます。生成列・深さ列・`$id` 由来という
+理由**だけ**では無視できないことも明記しました。
+
+### 改善（B165 再帰 CTE の診断とレシピ）
+
+- CTE 本体から自分自身を参照した（`RECURSIVE` なし）場合の診断を
+  「自己参照には `WITH RECURSIVE` が必要です」の専用文言にしました
+  （従来は「テーブル名は APP + 数字…」で原因に辿り着けませんでした）
+- レシピ集に「固定深さの階層は自己 JOIN で書く」と再帰 CTE の基本形を追加しました
+  （掲載 SQL は機械検証済み）
+
 ## v3.65.0（2026-08-08）
 
 ### 修正（B164 `@変数` を含む集計が比較位置で誤った値になっていた）**※結果が変わります（正しさの修正）**

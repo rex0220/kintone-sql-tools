@@ -1,26 +1,38 @@
-ksql 配布パッケージ (v3.65.0)
+ksql 配布パッケージ (v3.66.0)
 
 release 成果物:
-- ksql-plugin-v3.65.0.zip
-- ksql-mcp.mcpb (manifest version 3.65.0)
-- ksql-mcp.js (MCP server version 3.65.0)
+- ksql-plugin-v3.66.0.zip
+- ksql-mcp.mcpb (manifest version 3.66.0)
+- ksql-mcp.js (MCP server version 3.66.0)
 
-修正 (B164 @変数を含む集計が比較位置で誤った値になっていた) ★要点・結果が変わります:
-- @変数を引数に含む集計を CASE WHEN / IF の条件や HAVING の比較に書くと、集計値でなく
-  「空 (すべての値より小さい)」として比較されていました。SELECT のリストは正しい値が
-  出るため気づきにくく、除数ガードの不発火 (NaN) や HAVING の行消失が実害でした。
-- 参照名を解決後の構造から再生成して修正。集計算術式・THEN/ELSE・ORDER BY・
-  ウィンドウは元から正しく不変です。
-- あわせて「計算されていない集計を比較位置で参照した」場合の警告を追加
-  (HAVING にだけ書いて SELECT に出していない等・値の挙動は互換のまま)。
+新機能 (B53 WITH RECURSIVE / CYCLE = 再帰 CTE・Phase1) ★要点:
+- 深さがデータ次第で変わる階層 (BOM・組織図・分類) を read-only の WITH RECURSIVE で
+  展開できます。seed UNION ALL 再帰項の 2 枝・自己参照 1 回・INNER 等値 JOIN 1 本。
+  任意の CYCLE 句は経路 (path) 単位で循環を検出して打ち切ります (共通部品の
+  多重使用は循環ではないため打ち切りません)。
+- 安全境界: 深さ 100・累積行 10,000・中間展開 100,000 を常時 fail-closed で強制
+  (CYCLE の有無に関係なし・設定で変更可・部分結果は返しません)。取得は対象アプリ
+  1 回の完全実体化のみで、API 回数は深さに依存しません。
+- 実データ検証: BOM 部品表 (品目 110・エッジ 276・10 セット) の展開 394 行が
+  期待値と全一致 (多経路合流・レベル差・小数員数の積を含む)。
 
-改善 (B162/B163 EXPLAIN だけが通らない 2 形を解消) ★要点・実行は元から正常:
-- DECLARE 変数を GENERATE_SERIES に使うと EXPLAIN が誤解を招くエラーになっていたのを、
-  リテラル既定値に基づく条件付き計画表示に (外部注入で変わり得る旨を注記・値は非表示)。
-  静的に確定しない形は series type: deferred (variable) でエラーにせず通します。
-- 一時テーブルを GROUP BY する文を含むバッチの EXPLAIN が InternalError になっていたのを、
-  文 1 の SELECT 句から schema を静的伝播して計画表示に (行は実体化しません)。
-- どちらも EXPLAIN/dry-run 面のみ。実行・validate・records API 0 回の契約は不変です。
+修正 (B166 JOIN の ON をテーブルと逆順に書くと落ちていた) ★要点・書ける形が増えます:
+- FROM p JOIN c ON c.x = p.y (JOIN 側を左に書く形) が「JOIN key ... is not
+  available」で一律エラーになっていました (v3.65.0 以前から)。ON の両辺を実際の
+  テーブル帰属で解決するよう修正。FROM 側を左に書く従来の形・押し下げ・
+  LEFT/RIGHT の保存側は元から正しく不変です。
+
+改善 (B160/B165 同梱):
+- 全順序警告の「無視してよい条件」を一般化 (集約キー・生成列×JOIN・再帰出力を
+  同じ 1 条件で判定。集約キー全含みは引き続き無視可)。
+- 再帰 CTE なしで CTE 本体から自分自身を参照した場合の診断を専用文言に。
+  固定深さの自己 JOIN レシピと再帰 CTE レシピを追加。
+
+v3.65.0 の各節は畳みました (B164 @変数を含む集計の比較位置の誤り = 結果が変わる修正)。
+内容は CHANGELOG.md にあります。
+
+v3.64.0 の各節は畳みました (B162/B163 EXPLAIN だけが通らない 2 形の解消)。
+内容は CHANGELOG.md にあります。
 
 v3.63.0 の各節は畳みました (B158 CROSS JOIN = 直積・2 軸格子・CROSS が予約語に /
 B159 GENERATE_SERIES month/year step = 月次 0 埋め・start は月初/年初限定 /
@@ -77,12 +89,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.65.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.66.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.65.0): B164 @変数を含む集計が比較位置で誤った値になっていた (修正・結果が変わります)。
+本リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
+
+前リリース (v3.65.0): B164 @変数を含む集計が比較位置で誤った値になっていた (修正・結果が変わります)。
 
 前リリース (v3.64.0): B162/B163 EXPLAIN だけが通らない 2 形を解消 (改善・実行は不変)。
 
