@@ -610,7 +610,11 @@ interface CteDefinition {
 - source が `maxRecords` 内に完全取得できなければ error とし、ブラウザ独自の短縮結果を返さない。
 - engine library の単文／batch も CLI／MCP／plugin と同じ実効境界と error 正規化を使用する。
 - バッチ内の再帰 CTE は文スコープであり、次の文へ残らない。
-- 既存 temp table へ再帰結果を書き出す構文は Phase1 対象外とする。
+- **既存** temp table へ再帰結果を書き込む構文（`INSERT INTO #t ...` の source 等）は対象外とする。
+  **`CREATE TEMP TABLE #t AS WITH RECURSIVE ...` は対象（可）**＝B149 で確立した
+  「`CREATE TEMP TABLE ... AS WITH ...`」の temp 実体化契約にそのまま乗る
+  （完成した再帰結果の実体化であり反復途中の書き出しではない。実機確認 2026-08-09・
+  回帰テストは b53RecursiveCteStage2 の temp materialization 節）。
 - plugin bundle は parser、engine、EXPLAIN 文言を含むため、実装時には `prod/js/desktop.js` を正規 build で再生成する。
 
 ## 9. EXPLAIN と受入条件

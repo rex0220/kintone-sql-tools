@@ -2,6 +2,7 @@ import { FetchAllLimitError } from "../api/fetchAll";
 import type { KintoneRecord } from "../converter/dmlToKintone";
 import {
   execute,
+  executeBatch,
   getSelectColumnMeta,
   type KintoneClient,
   type KintoneFieldInfo,
@@ -358,4 +359,34 @@ describe("B53 Stage 2 §5.1/§6 absolute limits", () => {
     const error = await failure(sql(false, "SELECT parent FROM tree LIMIT 1"), mockClient({ 100: rows }), 10_003);
     expect(error).toMatchObject({ kind: "ROWS", detected: 10_001 });
   }, 30_000);
+});
+
+describe("B53 temp table materialization (CREATE TEMP TABLE ... AS WITH RECURSIVE)", () => {
+  // B149 で確立した「CREATE TEMP TABLE ... AS WITH ...」の temp 実体化契約に再帰 CTE も乗る。
+  // 仕様 §8 の対象外は「既存 temp table への書き込み（INSERT INTO #t ...）」であり、この形は対象。
+  // BOM fixture の回帰バッチ（ASSERT 突合）がこの形を前提にするため固定する。
+  test("recursive result materializes into a new temp table and later statements read it", async () => {
+    const client = mockClient({
+      100: [
+        record({ parent: "ROOT", child: "A", qty: "2" }),
+        record({ parent: "ROOT", child: "B", qty: "3" }),
+        record({ parent: "A", child: "C", qty: "4" }),
+        record({ parent: "B", child: "C", qty: "5" }),
+      ],
+    });
+    const batch = await executeBatch(
+      `CREATE TEMP TABLE #bom AS ${sql(false, "SELECT child, SUM(qty) AS total, COUNT(*) AS paths FROM tree GROUP BY child")}; ` +
+      "SELECT child, total, paths FROM #bom ORDER BY child;",
+      client,
+      { cacheContext: "b53-temp-recursive" }
+    );
+    const result = batch.statements[1].result as SelectResult;
+    expect(result.rows).toEqual([
+      { child: "A", total: "2", paths: "1" },
+      { child: "B", total: "3", paths: "1" },
+      { child: "C", total: "23", paths: "2" },
+    ]);
+    // 戦略 B: source は 1 回だけ取得（temp 実体化でも反復は API に触れない）
+    expect(client.recordCalls.get(100)).toBe(1);
+  });
 });
