@@ -2497,11 +2497,11 @@ ORDER BY 深さ, 子品目;
 
 三値は positive safe integer です。Node 系では明示 input / CLI、env、profile、engine default の順、plugin では UI / 保存値、engine default の順に解決します。再帰 query は参照アプリの完全性にも既存 `maxRecords` を使い、常に `onLimit=error` です。
 
-### 実体化後の列実在チェック（B86）
+### 実体化後の列実在チェック
 
 CTE・一時テーブル・`SHOW APPS` / `DESCRIBE` の結果は、実体化した SELECT の**出力列だけ**を後段から参照できます。存在しない列は空文字として評価せず、下流の records GET、DML 確認、POST / PUT より前に `ArgumentError: unknown field code(s)` で拒否します。SELECT、WHERE（`=` / `LIKE` を含む全演算子）、式、CASE、集計、GROUP BY / HAVING / ORDER BY、window、JOIN、subquery、UNION、`INSERT` / `UPSERT ... SELECT` の source で共通です。物理 APP と実体化 source を混在 JOIN した場合も両方を検証します。
 
-これは、従来の誤結果・誤書き込みをエラーへ変える破壊的な正しさ修正です。特に、値のつもりで裸の識別子を書くと列参照になります。文字列値は引用してください。
+これは、従来の誤結果・誤書き込みをエラーへ変える破壊的な正しさ修正です（v3.30.0・B86）。特に、値のつもりで裸の識別子を書くと列参照になります。文字列値は引用してください。
 
 ```sql
 -- NG: 顧客 は列参照。実体化結果にその列がなければ ArgumentError
