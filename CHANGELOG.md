@@ -5,7 +5,7 @@
 
 ## v3.66.0（2026-08-09）
 
-### 新機能（B53 `WITH RECURSIVE` / `CYCLE` — 再帰 CTE・Phase1）
+### 新機能（B53 `WITH RECURSIVE` / `CYCLE` — 再帰 CTE）
 
 **深さがデータ次第で変わる階層（BOM 部品表・組織図・分類ツリー）を read-only の
 `WITH RECURSIVE` で展開できます。** これまで「再帰 CTE は非対応」でした。
@@ -23,7 +23,7 @@ SELECT item_code, SUM(acc_qty) AS 所要量
 FROM 展開 GROUP BY item_code
 ```
 
-- **Phase1 の範囲**: 単一再帰 CTE・`seed UNION ALL 再帰項` の 2 枝・自己参照 1 回・
+- **今回の対応範囲**: 単一再帰 CTE・`seed UNION ALL 再帰項` の 2 枝・自己参照 1 回・
   INNER 等値 JOIN 1 本・CTE 列名リスト（再帰 CTE のみ）・非再帰 sibling との共存・
   外側の JOIN/集計/ORDER BY。対象外（相互再帰・OUTER JOIN・再帰項の集計等）は
   すべて実行前に静的拒否します

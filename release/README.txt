@@ -5,7 +5,7 @@ release 成果物:
 - ksql-mcp.mcpb (manifest version 3.66.0)
 - ksql-mcp.js (MCP server version 3.66.0)
 
-新機能 (B53 WITH RECURSIVE / CYCLE = 再帰 CTE・Phase1) ★要点:
+新機能 (B53 WITH RECURSIVE / CYCLE = 再帰 CTE) ★要点:
 - 深さがデータ次第で変わる階層 (BOM・組織図・分類) を read-only の WITH RECURSIVE で
   展開できます。seed UNION ALL 再帰項の 2 枝・自己参照 1 回・INNER 等値 JOIN 1 本。
   任意の CYCLE 句は経路 (path) 単位で循環を検出して打ち切ります (共通部品の

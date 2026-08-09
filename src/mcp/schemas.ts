@@ -204,7 +204,7 @@ export const saveQueryInputSchema = z.object({
   title: z.string().min(1).describe("Human-readable title.").optional(),
   description: z.string().min(1).describe("What the query does and when to use it.").optional(),
   sql: z.string().min(1)
-    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements, Phase1 WITH RECURSIVE/CYCLE, and WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year); DML saved queries must remain single-statement and cannot use a recursive source."),
+    .describe("kSQL text to save. Read-only saved queries may contain multiple ;-separated statements, WITH RECURSIVE/CYCLE, and WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year); DML saved queries must remain single-statement and cannot use a recursive source."),
   defaultProfile: z.string().min(1)
     .describe("Profile the saved query runs against by default."),
   readOnly: z.boolean()
