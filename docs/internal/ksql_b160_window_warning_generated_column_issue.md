@@ -1,7 +1,7 @@
 # B160 全順序警告の「無視してよい条件」が 0 埋め（生成列 ORDER BY）を判定できない
 
 - 起票: 2026-08-08（[依頼元の B128 Phase 2 意見 §3](../../../ksql-analytics/docs/internal/kSQLエンジンへの意見-20260808-B128Phase2再開ライン.md)・v3.59.0 返信でも既出・実測裏取り済み）
-- ステータス: 📝 **起票（表示/文言・優先 低。ただし B128 2a に着手するなら前提＝優先繰り上げ）**
+- ステータス: ✅ **v3.66.0 リリース済み（2026-08-09・B53 同梱・案 A の一般化を出荷＝B128 2a の前提も解消）**。**【2026-08-09】B53 仕様 R3 へ同梱＝案 A の一般化を仕様化済み**（[B53 仕様 R3 §10](ksql_b53_recursive_cte_cycle_phase1_spec_r3.md)＝B140 集約キー・B160 生成列×JOIN・B53 再帰出力の 3 形を「partition 内で `ORDER BY` 値の組が入力行を一意に識別できるか」の単一条件で判定。案 B は判定点に provenance/一意性情報が無いため不採用確定＝[調査報告 E-3](ksql_b53_b160_codex_investigation_report.md)。文言逐語テストは 8 assertion site・展開後 10 ケース）
 - 関連: [B140](ksql_b140_cte_groupby_total_order_issue.md)（「無視してよい条件」の導入元・v3.58.0）／
   [B149 §警告抑止](ksql_b149_generate_series_issue.md)（v3.59.0 免除＝生成列の直接読みのみ）
 

@@ -176,6 +176,9 @@ let latestPanelMaxRecords = 3000;
 let latestPanelOnLimit: "error" | "truncate" = "error";
 let latestPanelTempTableMaxRows: number | undefined = undefined;
 let latestPanelCursorMaxActive = 2;
+let latestPanelRecursiveCteMaxDepth = 100;
+let latestPanelRecursiveCteMaxRows = 10_000;
+let latestPanelRecursiveCteMaxExpansions = 100_000;
 
 // ============================================================
 // SQL 履歴（localStorage）
@@ -487,6 +490,9 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   let panelTempTableMaxRowsState: number | undefined =
     options.initialTempTableMaxRows ?? storedFetch?.tempTableMaxRows;
   let panelCursorMaxActiveState = storedFetch?.cursorMaxActive ?? 2;
+  let panelRecursiveCteMaxDepthState = storedFetch?.recursiveCteMaxDepth ?? 100;
+  let panelRecursiveCteMaxRowsState = storedFetch?.recursiveCteMaxRows ?? 10_000;
+  let panelRecursiveCteMaxExpansionsState = storedFetch?.recursiveCteMaxExpansions ?? 100_000;
   // 実行時は常にパネルの現在UI状態を優先する。
   // （レコード保存前に options.resolve* 側の値が古い場合でも、直近入力値で実行できるようにする）
   const resolveMaxRecords = (): number => panelMaxRecordsState;
@@ -497,6 +503,9 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
   latestPanelOnLimit = panelOnLimitState;
   latestPanelTempTableMaxRows = panelTempTableMaxRowsState;
   latestPanelCursorMaxActive = panelCursorMaxActiveState;
+  latestPanelRecursiveCteMaxDepth = panelRecursiveCteMaxDepthState;
+  latestPanelRecursiveCteMaxRows = panelRecursiveCteMaxRowsState;
+  latestPanelRecursiveCteMaxExpansions = panelRecursiveCteMaxExpansionsState;
 
   let panelLastResult: ExecuteResult | null = null;
   const panel = el("div", "ksql-panel", { id: "ksql-panel" });
@@ -643,7 +652,10 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
     panelOnLimitState,
     panelTempTableMaxRowsState,
     panelCursorMaxActiveState,
-    (maxRecords, mode, tempTableMaxRows, cursorMaxActive) => {
+    panelRecursiveCteMaxDepthState,
+    panelRecursiveCteMaxRowsState,
+    panelRecursiveCteMaxExpansionsState,
+    (maxRecords, mode, tempTableMaxRows, cursorMaxActive, recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions) => {
       panelMaxRecordsState = maxRecords;
       panelOnLimitState = mode;
       panelTempTableMaxRowsState = tempTableMaxRows;
@@ -652,9 +664,18 @@ function buildPanel(records: KintoneUiRecord[], options: PanelBuildOptions = {})
       latestPanelTempTableMaxRows = tempTableMaxRows;
       panelCursorMaxActiveState = cursorMaxActive;
       latestPanelCursorMaxActive = cursorMaxActive;
+      panelRecursiveCteMaxDepthState = recursiveCteMaxDepth;
+      panelRecursiveCteMaxRowsState = recursiveCteMaxRows;
+      panelRecursiveCteMaxExpansionsState = recursiveCteMaxExpansions;
+      latestPanelRecursiveCteMaxDepth = recursiveCteMaxDepth;
+      latestPanelRecursiveCteMaxRows = recursiveCteMaxRows;
+      latestPanelRecursiveCteMaxExpansions = recursiveCteMaxExpansions;
       // 一覧ページ（initialMaxRecords 未指定）は設定を localStorage に永続化する
       if (options.initialMaxRecords === undefined) {
-        saveFetchOptions(FETCH_OPTIONS_KEY, maxRecords, mode, tempTableMaxRows, cursorMaxActive);
+        saveFetchOptions(
+          FETCH_OPTIONS_KEY, maxRecords, mode, tempTableMaxRows, cursorMaxActive,
+          recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions
+        );
       }
       refreshOptSummary();
     }
@@ -926,6 +947,14 @@ interface StoredFetchOptions {
   /** 一時テーブル上限。undefined = エンジン既定（旧形式の保存データも undefined 扱いで後方互換） */
   tempTableMaxRows?: number;
   cursorMaxActive?: number;
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
+}
+
+function sanitizeRecursiveLimit(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function sanitizeCursorMaxActive(value: unknown): number {
@@ -939,7 +968,10 @@ function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
     if (!raw) return null;
     const obj = JSON.parse(raw) as unknown;
     if (typeof obj !== "object" || obj === null) return null;
-    const { maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive } = obj as Record<string, unknown>;
+    const {
+      maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive,
+      recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+    } = obj as Record<string, unknown>;
     if (typeof maxRecords !== "number" || maxRecords <= 0) return null;
     if (onLimitReached !== "error" && onLimitReached !== "truncate") return null;
     return {
@@ -947,6 +979,9 @@ function loadFetchOptions(storageKey: string): StoredFetchOptions | null {
       onLimitReached,
       tempTableMaxRows: sanitizeTempTableMaxRows(tempTableMaxRows),
       cursorMaxActive: sanitizeCursorMaxActive(cursorMaxActive),
+      recursiveCteMaxDepth: sanitizeRecursiveLimit(recursiveCteMaxDepth, 100),
+      recursiveCteMaxRows: sanitizeRecursiveLimit(recursiveCteMaxRows, 10_000),
+      recursiveCteMaxExpansions: sanitizeRecursiveLimit(recursiveCteMaxExpansions, 100_000),
     };
   } catch {
     return null;
@@ -958,11 +993,17 @@ function saveFetchOptions(
   maxRecords: number,
   onLimitReached: "error" | "truncate",
   tempTableMaxRows?: number,
-  cursorMaxActive = 2
+  cursorMaxActive = 2,
+  recursiveCteMaxDepth = 100,
+  recursiveCteMaxRows = 10_000,
+  recursiveCteMaxExpansions = 100_000
 ): void {
   try {
     // tempTableMaxRows が undefined のときは JSON.stringify がキーごと省略する（旧形式と同形）
-    localStorage.setItem(storageKey, JSON.stringify({ maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive }));
+    localStorage.setItem(storageKey, JSON.stringify({
+      maxRecords, onLimitReached, tempTableMaxRows, cursorMaxActive,
+      recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+    }));
   } catch {
     // noop
   }
@@ -991,7 +1032,14 @@ function buildFetchOptionsPanel(
   initialMode: "error" | "truncate",
   initialTempTableMaxRows: number | undefined,
   initialCursorMaxActive: number,
-  onChange: (maxRecords: number, mode: "error" | "truncate", tempTableMaxRows: number | undefined, cursorMaxActive: number) => void
+  initialRecursiveCteMaxDepth: number,
+  initialRecursiveCteMaxRows: number,
+  initialRecursiveCteMaxExpansions: number,
+  onChange: (
+    maxRecords: number, mode: "error" | "truncate", tempTableMaxRows: number | undefined,
+    cursorMaxActive: number, recursiveCteMaxDepth: number, recursiveCteMaxRows: number,
+    recursiveCteMaxExpansions: number
+  ) => void
 ): HTMLElement {
   const panel = el("div", "ksql-fetch-panel");
 
@@ -1036,6 +1084,21 @@ function buildFetchOptionsPanel(
   }) as HTMLInputElement;
   cursorRow.append(cursorLabel, cursorInput);
 
+  const recursiveInputs = [
+    ["再帰深さ:", "ksql-recursive-cte-max-depth-input", initialRecursiveCteMaxDepth, 1],
+    ["再帰結果行:", "ksql-recursive-cte-max-rows-input", initialRecursiveCteMaxRows, 1000],
+    ["再帰中間展開:", "ksql-recursive-cte-max-expansions-input", initialRecursiveCteMaxExpansions, 10000],
+  ].map(([labelText, id, initial, step]) => {
+    const row = el("div", "ksql-fetch-row");
+    const label = el("label", "ksql-fetch-label");
+    label.textContent = String(labelText);
+    const input = el("input", "ksql-fetch-input", {
+      type: "number", min: "1", step: String(step), value: String(initial), id: String(id),
+    }) as HTMLInputElement;
+    row.append(label, input);
+    return { row, input };
+  });
+
   const modeRow = el("div", "ksql-fetch-row");
   const modeLabel = el("span", "ksql-fetch-label");
   modeLabel.textContent = "上限到達時:";
@@ -1068,7 +1131,13 @@ function buildFetchOptionsPanel(
     const tempRows = sanitizeTempTableMaxRows(tempInput.value);
     const cursorMaxActive = sanitizeCursorMaxActive(cursorInput.value);
     cursorInput.value = String(cursorMaxActive);
-    onChange(max, mode, tempRows, cursorMaxActive);
+    const recursiveCteMaxDepth = sanitizeRecursiveLimit(recursiveInputs[0].input.value, 100);
+    const recursiveCteMaxRows = sanitizeRecursiveLimit(recursiveInputs[1].input.value, 10_000);
+    const recursiveCteMaxExpansions = sanitizeRecursiveLimit(recursiveInputs[2].input.value, 100_000);
+    recursiveInputs[0].input.value = String(recursiveCteMaxDepth);
+    recursiveInputs[1].input.value = String(recursiveCteMaxRows);
+    recursiveInputs[2].input.value = String(recursiveCteMaxExpansions);
+    onChange(max, mode, tempRows, cursorMaxActive, recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions);
   };
 
   // 一部ブラウザで number スピナーが 1 刻みになるため、100 刻みに補正する
@@ -1100,8 +1169,12 @@ function buildFetchOptionsPanel(
   tempInput.addEventListener("blur", sync);
   cursorInput.addEventListener("input", sync);
   cursorInput.addEventListener("blur", sync);
+  recursiveInputs.forEach(({ input }) => {
+    input.addEventListener("input", sync);
+    input.addEventListener("blur", sync);
+  });
 
-  panel.append(maxRow, modeRow, tempRow, tempNote, cursorRow);
+  panel.append(maxRow, modeRow, tempRow, tempNote, cursorRow, ...recursiveInputs.map(({ row }) => row));
   panel.addEventListener("change", sync);
   sync();
 
@@ -1926,10 +1999,17 @@ function isMultiStatementSql(sql: string): boolean {
 async function batchPlansToSelectResult(
   sql: string,
   client: Parameters<typeof executeBatch>[1],
-  maxRecords: number
+  options: {
+    maxRecords: number;
+    recursiveCteMaxDepth: number;
+    recursiveCteMaxRows: number;
+    recursiveCteMaxExpansions: number;
+  }
 ): Promise<SelectResult> {
   const plans = await buildBatchExplainPlans(
-    sql, client, undefined, "batch-explain", maxRecords, latestPanelCursorMaxActive, selectedImportSource !== null
+    sql, client, undefined, "batch-explain", options.maxRecords, latestPanelCursorMaxActive,
+    selectedImportSource !== null, 100, undefined, true,
+    options.recursiveCteMaxDepth, options.recursiveCteMaxRows, options.recursiveCteMaxExpansions
   );
   const rows: Array<{ plan: string }> = [];
   plans.statements.forEach((p) => {
@@ -2017,7 +2097,14 @@ function buildBatchStatementSummary(batch: BatchExecuteResult, statements: reado
 async function runBatchSql(
   sql: string,
   client: Parameters<typeof executeBatch>[1],
-  options: { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number },
+  options: {
+    maxRecords: number;
+    onLimitReached: "error" | "truncate";
+    tempTableMaxRows?: number;
+    recursiveCteMaxDepth: number;
+    recursiveCteMaxRows: number;
+    recursiveCteMaxExpansions: number;
+  },
   explainOnly: boolean
 ): Promise<BatchRunOutcome> {
   const statements = parseSqlStatements(sql, { import: selectedImportSource !== null });
@@ -2028,7 +2115,7 @@ async function runBatchSql(
   // → バッチ全体のプラン表示（metadata API のみ。2文目以降も実行しない）
   if (explainOnly || statements[0].type === "EXPLAIN") {
     return {
-      result: await batchPlansToSelectResult(sql, client, options.maxRecords),
+      result: await batchPlansToSelectResult(sql, client, options),
       note: null,
       statementSummary: [],
       cancelled: false,
@@ -2067,6 +2154,9 @@ async function runBatchSql(
     // 一時テーブル実体化上限（未指定 = エンジン既定 10,000）。実体化は
     // onLimitReached 設定によらずエンジン層で常に error（batch spec §5.6）
     tempTableMaxRows: options.tempTableMaxRows,
+    recursiveCteMaxDepth: options.recursiveCteMaxDepth,
+    recursiveCteMaxRows: options.recursiveCteMaxRows,
+    recursiveCteMaxExpansions: options.recursiveCteMaxExpansions,
     fetchParallel: FETCH_PARALLEL_DEFAULT,
     confirm: analysis.containsDml ? batchConfirmDialog : undefined,
     supportsImportConfirmDetail: true,
@@ -2175,6 +2265,9 @@ async function runSql(
         maxRecords: runtimeFetch.maxRecords,
         onLimitReached: runtimeFetch.onLimitReached,
         tempTableMaxRows: runtimeFetch.tempTableMaxRows,
+        recursiveCteMaxDepth: runtimeFetch.recursiveCteMaxDepth,
+        recursiveCteMaxRows: runtimeFetch.recursiveCteMaxRows,
+        recursiveCteMaxExpansions: runtimeFetch.recursiveCteMaxExpansions,
       }, batchExplainOnly);
       // キャンセル時は単文 DML キャンセルと同様、履歴に保存しない
       if (!skipHistory && !cancelled) saveHistory(sql, snapshotOptions, snapshotMax, snapshotMode, snapshotTempRows);
@@ -2231,6 +2324,9 @@ async function runSql(
       onLimitReached: surfaceForcesOnLimitError ? "error" : runtimeFetch.onLimitReached,
       fetchParallel: FETCH_PARALLEL_DEFAULT,
       cursorMaxActive: latestPanelCursorMaxActive,
+      recursiveCteMaxDepth: runtimeFetch.recursiveCteMaxDepth,
+      recursiveCteMaxRows: runtimeFetch.recursiveCteMaxRows,
+      recursiveCteMaxExpansions: runtimeFetch.recursiveCteMaxExpansions,
       enableImport: selectedImportSource !== null,
       importSource: selectedImportSource?.resolver,
       ...applyOptions,
@@ -2263,7 +2359,14 @@ function resolveRuntimeFetchOptions(
   /** true = 履歴・保存SQL・レコードの明示スナップショット。取得タブ表示中でも DOM 値で上書きしない
    *（maxRecords / onLimit は従来どおり DOM 優先のまま） */
   tempTableMaxRowsIsExplicit = false
-): { maxRecords: number; onLimitReached: "error" | "truncate"; tempTableMaxRows?: number } {
+): {
+  maxRecords: number;
+  onLimitReached: "error" | "truncate";
+  tempTableMaxRows?: number;
+  recursiveCteMaxDepth: number;
+  recursiveCteMaxRows: number;
+  recursiveCteMaxExpansions: number;
+} {
   const panel = resultArea.closest(".ksql-panel") as HTMLElement | null;
   const maxInput = panel?.querySelector("#ksql-max-records-input") as HTMLInputElement | null;
 
@@ -2274,18 +2377,27 @@ function resolveRuntimeFetchOptions(
       maxRecords: sanitizeMaxRecords(String(fallbackMax)),
       onLimitReached: fallbackMode,
       tempTableMaxRows: sanitizeTempTableMaxRows(fallbackTempTableMaxRows),
+      recursiveCteMaxDepth: latestPanelRecursiveCteMaxDepth,
+      recursiveCteMaxRows: latestPanelRecursiveCteMaxRows,
+      recursiveCteMaxExpansions: latestPanelRecursiveCteMaxExpansions,
     };
   }
 
   // "取得" タブが表示中 → DOM の現在値を読み取る
   const mode = readCheckedRadio(panel!, "ksql-limit-mode");
   const tempInput = panel!.querySelector("#ksql-temp-table-max-rows-input") as HTMLInputElement | null;
+  const recursiveDepthInput = panel!.querySelector("#ksql-recursive-cte-max-depth-input") as HTMLInputElement | null;
+  const recursiveRowsInput = panel!.querySelector("#ksql-recursive-cte-max-rows-input") as HTMLInputElement | null;
+  const recursiveExpansionsInput = panel!.querySelector("#ksql-recursive-cte-max-expansions-input") as HTMLInputElement | null;
   return {
     maxRecords: sanitizeMaxRecords(maxInput.value),
     onLimitReached: mode === "truncate" ? "truncate" : "error",
     tempTableMaxRows: tempTableMaxRowsIsExplicit
       ? sanitizeTempTableMaxRows(fallbackTempTableMaxRows)
       : sanitizeTempTableMaxRows(tempInput?.value),
+    recursiveCteMaxDepth: sanitizeRecursiveLimit(recursiveDepthInput?.value, latestPanelRecursiveCteMaxDepth),
+    recursiveCteMaxRows: sanitizeRecursiveLimit(recursiveRowsInput?.value, latestPanelRecursiveCteMaxRows),
+    recursiveCteMaxExpansions: sanitizeRecursiveLimit(recursiveExpansionsInput?.value, latestPanelRecursiveCteMaxExpansions),
   };
 }
 

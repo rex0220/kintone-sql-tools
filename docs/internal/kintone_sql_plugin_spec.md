@@ -89,6 +89,7 @@ AST type ごとに実行分岐
 | `UNION` / `UNION ALL` | ✅ | FULL_SCAN |
 | `WITH`（CTE） | ✅ | 単純 CTE はインライン化最適化 |
 | 複数 CTE / CTE JOIN / CTE 内 UNION | ✅ | |
+| `WITH RECURSIVE` / `CYCLE` | ✅ | Phase1 の read-only 範囲。`UNION ALL` 2枝、自己参照1回、単一列 `CYCLE` |
 | CTE 内 `SHOW APPS` / `DESCRIBE` / `DESC` | ✅ | WITH の body で使用可 |
 | `SHOW APPS` | ✅ | 最大 1,000 件（100 件単位で自動ページング） |
 | `DESCRIBE APP` / `DESC APP` | ✅ | フィールド定義一覧 |
@@ -131,6 +132,7 @@ AST type ごとに実行分岐
 | `IN (SELECT ...)` / `EXISTS` / `NOT EXISTS` / スカラーサブクエリ | **FULL_SCAN** |
 | `UNION` / `UNION ALL` | **FULL_SCAN** |
 | `WITH`（単純 CTE インライン化可能） | **SIMPLE 相当で最適化** |
+| `WITH RECURSIVE` | **FULL_SCAN**（物理 source を完全実体化し、三境界を常時適用） |
 | サブテーブル `APP100$明細` への SELECT | **FULL_SCAN** |
 
 ### 3.1 SIMPLE
@@ -182,6 +184,7 @@ AST type ごとに実行分岐
 - 実行前に対象件数を確認
 - 高コスト実行（JOIN / DISTINCT / GROUP BY 等）で警告
 - 取得上限（デフォルト 10,000 件）を超える場合はエラー
+- 再帰 CTE は深さ100・累積結果10,000行・累積中間展開100,000件を既定境界とし、`onLimit=truncate` を無効化して常に fail-closed
 
 ---
 
@@ -189,7 +192,7 @@ AST type ごとに実行分岐
 
 - 相関サブクエリ（非相関の IN/EXISTS/スカラーサブクエリは対応済み）
 - `INTERSECT` / `EXCEPT`
-- 再帰 CTE
+- 再帰 CTE の相互/多重再帰、再帰項の OUTER JOIN・複数 JOIN・集計/window/subquery、DML source、path 列の公開（Phase1 対象外）
 - `FULL OUTER JOIN`
 - `JOIN` を含む `UPDATE` / `DELETE`
 - `ROLLUP` / `CUBE` / `GROUPING SETS`
@@ -296,6 +299,9 @@ AST type ごとに実行分岐
   - `displayOptions`
   - `maxRecords`
   - `onLimitReached`
+  - `recursiveCteMaxDepth`（UI「再帰深さ」、既定100）
+  - `recursiveCteMaxRows`（UI「再帰結果行」、既定10,000）
+  - `recursiveCteMaxExpansions`（UI「再帰中間展開」、既定100,000）
 - 履歴実行時は保存時オプションを優先して再実行する。
 - 既存の文字列履歴は互換フォールバックで実行可能。
 - 履歴ドロップダウンにフィルター入力を追加。
@@ -320,3 +326,4 @@ AST type ごとに実行分岐
 - 言語仕様の詳細・具体例は `docs/ksql_language_reference.md` を一次情報とする。
 - 本仕様書は設計要約と実装境界の共有を目的とする。
 - 構文の追加・挙動変更時は、実装・テスト・言語リファレンス・本仕様書を同時更新する。
+- plugin の EXPLAIN は再帰戦略、path scope、三境界の実効値を表示し、records API を呼ばない。browser smoke では再帰 query、EXPLAIN、三境界、全順序警告文言、既存 GENERATE_SERIES 直接読みの警告抑止を確認する。

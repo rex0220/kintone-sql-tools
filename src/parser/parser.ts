@@ -1238,34 +1238,204 @@ export class Parser {
   // WITH 句（CTE）
   // ----------------------------------------------------------
 
+  /** B53 parser-private state. Kept here so earlier diagnostic source locations remain stable. */
+  private activeCteDefinition: { name: string; recursiveWith: boolean; phase: "SEED" | "RECURSIVE_TERM" } | null = null;
+  private provisionalRecursiveCte: { name: string; references: number } | null = null;
+
   private parseWith(): WithStatement {
     this.expect(TokenKind.WITH);
+    // `WITH RECURSIVE AS (...)` and `WITH RECURSIVE(cols) AS (...)` keep
+    // RECURSIVE as an ordinary CTE name. Only the clause position consumes it.
+    const recursive = this.isSoftKeyword("RECURSIVE") &&
+      this.peekAt(1).kind !== TokenKind.AS && this.peekAt(1).kind !== TokenKind.LPAREN;
+    if (recursive) this.advance();
     const ctes: CteDefinition[] = [];
+    let recursiveCount = 0;
 
-    do {
-      const name = this.parseIdentifier();
-      this.expect(TokenKind.AS);
-      this.expect(TokenKind.LPAREN);
-      let query: CteDefinition["query"];
-      const inner = this.peek().kind;
-      if (inner === TokenKind.SHOW) {
-        query = this.parseShow();
-      } else if (inner === TokenKind.DESCRIBE || inner === TokenKind.DESC) {
-        query = this.parseDescribe();
-      } else if (inner === TokenKind.IDENT && this.peek().value.toUpperCase() === "GENERATE_SERIES") {
-        query = this.parseGenerateSeries();
-      } else {
-        query = this.tryParseUnionChain(this.parseSelect());
+    try {
+      do {
+        const name = this.parseIdentifier();
+        const columnAliases = this.parseOptionalCteColumnAliases();
+        this.expect(TokenKind.AS);
+        this.expect(TokenKind.LPAREN);
+        this.activeCteDefinition = { name, recursiveWith: recursive, phase: "SEED" };
+
+        let query: CteDefinition["query"];
+        let recursiveSpec: CteDefinition["recursiveSpec"];
+        const inner = this.peek().kind;
+        if (inner === TokenKind.SHOW) {
+          query = this.parseShow();
+        } else if (inner === TokenKind.DESCRIBE || inner === TokenKind.DESC) {
+          query = this.parseDescribe();
+        } else if (inner === TokenKind.IDENT && this.peek().value.toUpperCase() === "GENERATE_SERIES") {
+          query = this.parseGenerateSeries();
+        } else if (recursive) {
+          const parsed = this.parseRecursiveCteCandidate(name);
+          query = parsed.query;
+          recursiveSpec = parsed.recursiveSpec;
+        } else {
+          query = this.tryParseUnionChain(this.parseSelect());
+        }
+        this.expect(TokenKind.RPAREN);
+
+        const cycle = recursive && this.isSoftKeyword("CYCLE") ? this.parseRecursiveCycleClause() : null;
+        if (cycle && !recursiveSpec) {
+          throw new ParseError("CYCLE 句は自己参照する再帰 CTE にだけ指定できます", this.prev());
+        }
+        if (recursiveSpec) {
+          recursiveSpec = { ...recursiveSpec, cycle };
+          this.validateRecursiveCte(name, columnAliases, recursiveSpec);
+          recursiveCount++;
+          if (recursiveCount > 1) {
+            throw new ParseError("WITH RECURSIVE で定義できる再帰 CTE は1個までです", this.prev());
+          }
+        }
+        if (columnAliases && !recursiveSpec) {
+          throw new ParseError("CTE の列名リストは WITH RECURSIVE の再帰 CTE にだけ指定できます", this.prev());
+        }
+
+        const definition: CteDefinition = { name, query };
+        if (columnAliases) definition.columnAliases = columnAliases;
+        if (recursiveSpec) definition.recursiveSpec = recursiveSpec;
+        ctes.push(definition);
+        this.activeCteDefinition = null;
+        this.provisionalRecursiveCte = null;
+        // 定義済み CTE 名を登録（後続の CTE・最終クエリで FROM に使える）
+        this.cteNames.add(name);
+      } while (this.consume(TokenKind.COMMA));
+
+      const query = this.tryParseUnionChain(this.parseSelect());
+      return recursive ? { type: "WITH", ctes, query, recursive: true } : { type: "WITH", ctes, query };
+    } finally {
+      // A failed parse must never leak either the provisional self name or completed CTE names.
+      this.activeCteDefinition = null;
+      this.provisionalRecursiveCte = null;
+      this.cteNames.clear();
+    }
+  }
+
+  private parseOptionalCteColumnAliases(): string[] | undefined {
+    if (!this.consume(TokenKind.LPAREN)) return undefined;
+    const aliases: string[] = [];
+    if (this.peek().kind === TokenKind.RPAREN) {
+      throw new ParseError("CTE の列名リストには1個以上の列名が必要です", this.peek());
+    }
+    do aliases.push(this.parseIdentifier()); while (this.consume(TokenKind.COMMA));
+    this.expect(TokenKind.RPAREN);
+    if (new Set(aliases).size !== aliases.length) {
+      throw new ParseError("CTE の列名リストに同じ列名を重複して指定できません", this.prev());
+    }
+    return aliases;
+  }
+
+  private parseRecursiveCteCandidate(name: string): {
+    query: SelectStatement | UnionStatement;
+    recursiveSpec?: NonNullable<CteDefinition["recursiveSpec"]>;
+  } {
+    const seed = this.parseSelect();
+    if (this.peek().kind !== TokenKind.UNION) return { query: seed };
+
+    this.advance();
+    const all = this.consume(TokenKind.ALL);
+    this.activeCteDefinition = { name, recursiveWith: true, phase: "RECURSIVE_TERM" };
+    this.provisionalRecursiveCte = { name, references: 0 };
+    const recursiveTerm = this.parseSelect();
+    const references = this.provisionalRecursiveCte.references;
+    this.provisionalRecursiveCte = null;
+
+    let query: SelectStatement | UnionStatement = { type: "UNION", all, left: seed, right: recursiveTerm };
+    query = this.tryParseUnionChain(query);
+    this.activeCteDefinition = { name, recursiveWith: true, phase: "SEED" };
+    if (references === 0) return { query };
+    if (!all || query.type !== "UNION" || query.left !== seed || query.right !== recursiveTerm) {
+      throw new ParseError("再帰 CTE は seed SELECT UNION ALL recursive SELECT の2分岐で指定してください", this.prev());
+    }
+    if (references !== 1) {
+      throw new ParseError("再帰項からの自己参照はちょうど1回にしてください", this.prev());
+    }
+    return {
+      query,
+      recursiveSpec: { seed, recursiveTerm, unionAll: true, cycle: null },
+    };
+  }
+
+  private parseRecursiveCycleClause(): NonNullable<CteDefinition["recursiveSpec"]>["cycle"] {
+    this.advance(); // CYCLE (soft keyword)
+    const column = this.parseIdentifier();
+    this.expect(TokenKind.SET, "CYCLE の列名の後には SET が必要です");
+    const markColumn = this.parseIdentifier();
+    if (!this.isSoftKeyword("TO")) throw new ParseError("CYCLE の mark 列の後には TO が必要です", this.peek());
+    this.advance();
+    const mark = this.expect(TokenKind.STRING, "CYCLE TO には文字列リテラルが必要です");
+    if (!this.isSoftKeyword("DEFAULT")) throw new ParseError("CYCLE TO の値の後には DEFAULT が必要です", this.peek());
+    this.advance();
+    const normal = this.expect(TokenKind.STRING, "CYCLE DEFAULT には文字列リテラルが必要です");
+    if (mark.value === normal.value) {
+      throw new ParseError("CYCLE の TO と DEFAULT には異なる文字列を指定してください", normal);
+    }
+    return { column, markColumn, markValue: mark.value, defaultValue: normal.value, exposePath: false };
+  }
+
+  private validateRecursiveCte(
+    name: string,
+    columnAliases: string[] | undefined,
+    spec: NonNullable<CteDefinition["recursiveSpec"]>
+  ): void {
+    const token = this.prev();
+    const seed = spec.seed;
+    const term = spec.recursiveTerm;
+    const { groupBy } = term;
+    if (seed.columns.length !== term.columns.length) {
+      throw new ParseError("再帰 CTE の seed と再帰項の列数を一致させてください", token);
+    }
+    if (columnAliases && columnAliases.length !== seed.columns.length) {
+      throw new ParseError("CTE の列名リストと SELECT の列数を一致させてください", token);
+    }
+    if (seed.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD") ||
+        term.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD")) {
+      throw new ParseError("再帰 CTE の seed と再帰項では列を明示的に射影してください", token);
+    }
+    if (term.distinct || groupBy.length > 0 || term.grouping !== undefined || term.having !== null ||
+        term.orderBy.length > 0 || term.orderMode !== "CANONICAL" || term.limit !== null || term.offset !== null) {
+      throw new ParseError("再帰項では DISTINCT、集計、window、GROUP BY、HAVING、ORDER BY、LIMIT、OFFSET を使用できません", token);
+    }
+    if (term.joins.length !== 1 || term.joins[0].type !== "INNER") {
+      throw new ParseError("再帰項は自己参照と物理 source または先行 CTE の INNER JOIN 1個で構成してください", token);
+    }
+    const relationNames = [term.from.cteName, term.joins[0].table.cteName];
+    if (relationNames.filter((value) => value === name).length !== 1) {
+      throw new ParseError("再帰項の INNER JOIN には自己参照をちょうど1回含めてください", token);
+    }
+    if (this.containsRecursiveForbiddenNode(term.columns) || this.containsRecursiveForbiddenNode(term.where)) {
+      throw new ParseError("再帰項では集計、window、DISTINCT、subquery を使用できません", token);
+    }
+
+    const outputNames = columnAliases ?? seed.columns.map((column) => this.selectColumnOutputName(column));
+    if (spec.cycle) {
+      const cycleMatches = outputNames.filter((value) => value === spec.cycle!.column).length;
+      if (cycleMatches !== 1) {
+        throw new ParseError("CYCLE 列は再帰 CTE の出力列1個へ一意に解決できる必要があります", token);
       }
-      this.expect(TokenKind.RPAREN);
-      ctes.push({ name, query });
-      // 定義済み CTE 名を登録（後続の CTE・最終クエリで FROM に使える）
-      this.cteNames.add(name);
-    } while (this.consume(TokenKind.COMMA));
+      if (outputNames.includes(spec.cycle.markColumn)) {
+        throw new ParseError("CYCLE の mark 列は再帰 CTE の既存出力列と同名にできません", token);
+      }
+    }
+  }
 
-    const query = this.tryParseUnionChain(this.parseSelect());
-    this.cteNames.clear();
-    return { type: "WITH", ctes, query };
+  private containsRecursiveForbiddenNode(value: unknown): boolean {
+    if (Array.isArray(value)) return value.some((item) => this.containsRecursiveForbiddenNode(item));
+    if (value === null || typeof value !== "object") return false;
+    const node = value as { type?: string; [key: string]: unknown };
+    if (node.type === "AGGREGATE" || node.type === "AGG_REF" || node.type === "ARITH_AGG_COL" ||
+        node.type === "WINDOW_COL" || node.type === "SCALAR_SUBQUERY" || node.type === "SCALAR_SUBQUERY_COL" ||
+        node.type === "SUBQUERY_IN_LIST" || node.type === "EXISTS") return true;
+    return Object.values(node).some((item) => this.containsRecursiveForbiddenNode(item));
+  }
+
+  private selectColumnOutputName(column: SelectColumn): string | null {
+    if ("alias" in column && typeof column.alias === "string") return column.alias;
+    if (column.type === "FIELD") return column.field;
+    return null;
   }
 
   private parseGenerateSeries(): GenerateSeriesStatement {
@@ -2500,6 +2670,20 @@ export class Parser {
     if (this.cteNames.has(name)) {
       const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
       return { appId: 0, alias, cteName: name };
+    }
+    if (this.activeCteDefinition?.name === name) {
+      if (this.activeCteDefinition.recursiveWith && this.activeCteDefinition.phase === "RECURSIVE_TERM" &&
+          this.provisionalRecursiveCte?.name === name) {
+        this.provisionalRecursiveCte.references++;
+        const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
+        return { appId: 0, alias, cteName: name };
+      }
+      const message = this.activeCteDefinition.recursiveWith
+        ? this.activeCteDefinition.phase === "RECURSIVE_TERM"
+          ? "再帰 CTE は seed SELECT UNION ALL recursive SELECT の2分岐で指定してください"
+          : "再帰 CTE の seed から自分自身を参照できません"
+        : "CTE の定義内から自分自身を参照しています。自己参照には `WITH RECURSIVE` が必要です";
+      throw new ParseError(message, nameTok);
     }
     const { appId, subtableCode } = extractTableRef(name, this.prev());
     if (subtableCode) {

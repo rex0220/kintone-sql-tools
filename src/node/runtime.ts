@@ -42,6 +42,9 @@ export interface CreateKsqlRuntimeInput {
   sql: string;
   profile?: string;
   maxRecords?: number;
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
   fetchParallel?: number;
   onLimit?: OnLimitMode;
   timeout?: number;
@@ -202,6 +205,10 @@ export interface KsqlRuntime {
   client: KintoneClient;
   cacheContext: string;
   maxRecords: number;
+  /** Resolved by the built-in runtime; optional for backward-compatible runtime mocks. */
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
   fetchParallel: number;
   onLimit: OnLimitMode;
   timeout: number;
@@ -399,6 +406,27 @@ export async function createKsqlRuntime(
     ?? envInt("KSQL_MAX_RECORDS")
     ?? profile.query?.maxRecords
     ?? 500;
+  const recursiveCteMaxDepth = input.recursiveCteMaxDepth
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_DEPTH")
+    ?? profile.query?.recursiveCteMaxDepth
+    ?? 100;
+  const recursiveCteMaxRows = input.recursiveCteMaxRows
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_ROWS")
+    ?? profile.query?.recursiveCteMaxRows
+    ?? 10_000;
+  const recursiveCteMaxExpansions = input.recursiveCteMaxExpansions
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_EXPANSIONS")
+    ?? profile.query?.recursiveCteMaxExpansions
+    ?? 100_000;
+  for (const [name, value] of [
+    ["recursiveCteMaxDepth", recursiveCteMaxDepth],
+    ["recursiveCteMaxRows", recursiveCteMaxRows],
+    ["recursiveCteMaxExpansions", recursiveCteMaxExpansions],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`ArgumentError: ${name} must be a positive safe integer.`);
+    }
+  }
   const fetchParallel = input.fetchParallel
     ?? envInt("KSQL_FETCH_PARALLEL")
     ?? profile.query?.fetchParallel
@@ -537,6 +565,9 @@ export async function createKsqlRuntime(
     client: gatedClient,
     cacheContext: sqlContext.cacheContext,
     maxRecords,
+    recursiveCteMaxDepth,
+    recursiveCteMaxRows,
+    recursiveCteMaxExpansions,
     fetchParallel,
     onLimit,
     timeout,

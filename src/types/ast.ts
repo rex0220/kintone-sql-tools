@@ -181,6 +181,24 @@ export interface AssertStatement {
 export interface CteDefinition {
   name: string;
   query: SelectStatement | UnionStatement | ShowAppsStatement | DescribeStatement | GenerateSeriesStatement;
+  /** B53: present only for WITH RECURSIVE definitions. Ordinary CTE shapes stay unchanged. */
+  columnAliases?: string[];
+  recursiveSpec?: RecursiveCteSpec;
+}
+
+export interface RecursiveCteCycleSpec {
+  column: string;
+  markColumn: string;
+  markValue: string;
+  defaultValue: string;
+  exposePath: false;
+}
+
+export interface RecursiveCteSpec {
+  seed: SelectStatement;
+  recursiveTerm: SelectStatement;
+  unionAll: true;
+  cycle: RecursiveCteCycleSpec | null;
 }
 
 export type GenerateSeriesArgument = NumberLiteral | StringLiteral | VariableRef;
@@ -196,6 +214,8 @@ export interface WithStatement {
   type: "WITH";
   ctes: CteDefinition[];
   query: SelectStatement | UnionStatement;
+  /** B53: omitted for ordinary WITH statements to preserve their public AST shape. */
+  recursive?: true;
 }
 
 // ------------------------------------------------------------

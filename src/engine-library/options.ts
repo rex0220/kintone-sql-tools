@@ -10,6 +10,9 @@ const COMMON_KEYS = new Set([
   "client",
   "logicalApps",
   "maxRecords",
+  "recursiveCteMaxDepth",
+  "recursiveCteMaxRows",
+  "recursiveCteMaxExpansions",
   "fetchParallel",
   "cursorMaxActive",
 ]);
@@ -100,6 +103,9 @@ function validateExecutionOptions(
   onLimitReached?: "error" | "truncate";
   fetchParallel?: number;
   cursorMaxActive?: number;
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
 } {
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string" || !allowed.has(key)) {
@@ -109,6 +115,9 @@ function validateExecutionOptions(
 
   if (value.maxRecords !== undefined) {
     assertPositiveSafeInteger(value.maxRecords, "maxRecords");
+  }
+  for (const name of ["recursiveCteMaxDepth", "recursiveCteMaxRows", "recursiveCteMaxExpansions"] as const) {
+    if (value[name] !== undefined) assertPositiveSafeInteger(value[name], name);
   }
   if (value.fetchParallel !== undefined) {
     assertPositiveSafeInteger(value.fetchParallel, "fetchParallel");
@@ -129,6 +138,9 @@ function validateExecutionOptions(
 
   return {
     ...(value.maxRecords !== undefined ? { maxRecords: value.maxRecords as number } : {}),
+    ...(value.recursiveCteMaxDepth !== undefined ? { recursiveCteMaxDepth: value.recursiveCteMaxDepth as number } : {}),
+    ...(value.recursiveCteMaxRows !== undefined ? { recursiveCteMaxRows: value.recursiveCteMaxRows as number } : {}),
+    ...(value.recursiveCteMaxExpansions !== undefined ? { recursiveCteMaxExpansions: value.recursiveCteMaxExpansions as number } : {}),
     ...(value.fetchParallel !== undefined ? { fetchParallel: value.fetchParallel as number } : {}),
     ...(value.cursorMaxActive !== undefined ? { cursorMaxActive: value.cursorMaxActive as number } : {}),
     ...(value.onLimitReached !== undefined
@@ -148,6 +160,9 @@ export function validateQueryOptions(
     onLimitReached?: "error" | "truncate";
     fetchParallel?: number;
     cursorMaxActive?: number;
+    recursiveCteMaxDepth?: number;
+    recursiveCteMaxRows?: number;
+    recursiveCteMaxExpansions?: number;
   };
 } {
   assertOptionsObject(value);
@@ -178,6 +193,9 @@ export function validateBatchOptions(
     fetchParallel?: number;
     cursorMaxActive?: number;
     variables?: Readonly<Record<string, string>>;
+    recursiveCteMaxDepth?: number;
+    recursiveCteMaxRows?: number;
+    recursiveCteMaxExpansions?: number;
     tempTableMaxRows?: number;
   };
 } {

@@ -48,13 +48,15 @@ export const STATEMENT_SYNTAX_CATALOG = {
     expectedTypes: [["SELECT"]],
   },
   with: {
-    template: "WITH-CTE: name AS(SELECT|SHOW APPS|DESCRIBE...|GENERATE_SERIES(start,stop[,step])[AS column])[,name2 AS(...)]... SELECT|UNION...",
+    template: "WITH-CTE: normal_AS(SELECT|SHOW_APPS|DESCRIBE...|GENERATE_SERIES(start,stop[,step])[AS_column])[,name2_AS(...)]..._SELECT|UNION...; WITH RECURSIVE name[(cols)]_AS(seed_SELECT_UNION_ALL_recursive_SELECT_with_one_self_INNER_JOIN)[CYCLE_col_SET_mark_TO_Y_DEFAULT_N]_SELECT... Phase1 forms",
     examples: [
       "WITH app_list AS (SHOW APPS), field_list AS (DESCRIBE APP1) SELECT * FROM app_list",
       "WITH days AS (GENERATE_SERIES('2026-08-01','2026-08-03') AS series_date) SELECT series_date FROM days",
       "WITH months AS (GENERATE_SERIES('2026-01-01','2026-12-01','1 month') AS month_start) SELECT month_start FROM months",
+      "WITH RECURSIVE tree (parent, child, depth) AS (SELECT parent, child, 1 FROM APP1 WHERE parent = 'ROOT' UNION ALL SELECT s.parent, s.child, r.depth + 1 FROM APP1 AS s INNER JOIN tree AS r ON s.parent = r.child) SELECT parent, child, depth FROM tree",
+      "WITH RECURSIVE tree (parent, child, depth) AS (SELECT parent, child, 1 FROM APP1 WHERE parent = 'ROOT' UNION ALL SELECT s.parent, s.child, r.depth + 1 FROM APP1 AS s INNER JOIN tree AS r ON s.parent = r.child) CYCLE child SET is_cycle TO 'Y' DEFAULT 'N' SELECT parent, child, depth, is_cycle FROM tree",
     ],
-    expectedTypes: [["WITH"], ["WITH"], ["WITH"]],
+    expectedTypes: [["WITH"], ["WITH"], ["WITH"], ["WITH"], ["WITH"]],
   },
   union: {
     template: "UNION: SELECT... UNION[ALL] SELECT...",

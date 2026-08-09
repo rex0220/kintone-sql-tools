@@ -141,6 +141,18 @@ Options:
   -v, --version              Show version
 `;
 
+const RECURSIVE_CTE_HELP_LINES = [
+  "  --recursive-cte-max-depth <n> Max recursive CTE depth (default: 100)",
+  "  --recursive-cte-max-rows <n> Max accumulated recursive CTE rows (default: 10000)",
+  "  --recursive-cte-max-expansions <n> Max recursive CTE candidate expansions (default: 100000)",
+].join("\n");
+
+/** Actual Stage 3 CLI help; HELP_TEXT remains the README-synchronized legacy block until Stage 4 docs sync. */
+export const CLI_HELP_TEXT = HELP_TEXT.replace(
+  "  --max-records <n>          Max records to fetch (default: 500)",
+  `  --max-records <n>          Max records to fetch (default: 500)\n${RECURSIVE_CTE_HELP_LINES}`
+);
+
 export const CLI_IMPORT_SOURCE_REQUIRED_MESSAGE =
   "IMPORT にはソースが必要です。--import-csv <name=path> または --import-json <name=path> でファイルを指定してください。";
 
@@ -173,6 +185,9 @@ interface CliConfig {
     allowPhysicalAppRefs?: boolean;
     query?: {
       maxRecords?: number;
+      recursiveCteMaxDepth?: number;
+      recursiveCteMaxRows?: number;
+      recursiveCteMaxExpansions?: number;
       /** APPLY で変更できる子行数上限（既定 100）。 */
       dmlMaxSubtableRows?: number;
       fetchParallel?: number;
@@ -222,6 +237,9 @@ interface ParsedArgs {
   dryRun: boolean;
   format: OutputFormat | null;
   maxRecords: number | null;
+  recursiveCteMaxDepth: number | null;
+  recursiveCteMaxRows: number | null;
+  recursiveCteMaxExpansions: number | null;
   fetchParallel: number | null;
   onLimit: OnLimitMode | null;
   tempTableMaxRows: number | null;
@@ -278,6 +296,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     dryRun: false,
     format: null,
     maxRecords: null,
+    recursiveCteMaxDepth: null,
+    recursiveCteMaxRows: null,
+    recursiveCteMaxExpansions: null,
     fetchParallel: null,
     onLimit: null,
     tempTableMaxRows: null,
@@ -451,6 +472,17 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const n = Number(v);
       if (!Number.isInteger(n) || n <= 0) throw new Error("ArgumentError: --max-records must be a positive integer.");
       out.maxRecords = n;
+      i++;
+      continue;
+    }
+    if (a === "--recursive-cte-max-depth" || a === "--recursive-cte-max-rows" || a === "--recursive-cte-max-expansions") {
+      const n = Number(v);
+      if (!Number.isSafeInteger(n) || n <= 0) {
+        throw new Error(`ArgumentError: ${a} must be a positive safe integer.`);
+      }
+      if (a === "--recursive-cte-max-depth") out.recursiveCteMaxDepth = n;
+      else if (a === "--recursive-cte-max-rows") out.recursiveCteMaxRows = n;
+      else out.recursiveCteMaxExpansions = n;
       i++;
       continue;
     }
@@ -1252,6 +1284,9 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   pushOpt(argv, "--token-file", base.tokenFile);
   pushOpt(argv, "--app", base.app);
   pushOpt(argv, "--max-records", base.maxRecords);
+  pushOpt(argv, "--recursive-cte-max-depth", base.recursiveCteMaxDepth);
+  pushOpt(argv, "--recursive-cte-max-rows", base.recursiveCteMaxRows);
+  pushOpt(argv, "--recursive-cte-max-expansions", base.recursiveCteMaxExpansions);
   pushOpt(argv, "--fetch-parallel", base.fetchParallel);
   pushOpt(argv, "--on-limit", base.onLimit);
   pushOpt(argv, "--temp-table-max-rows", base.tempTableMaxRows);
@@ -1780,7 +1815,7 @@ async function run(): Promise<number> {
   }
 
   if (args.help) {
-    process.stdout.write(`${HELP_TEXT}\n`);
+    process.stdout.write(`${CLI_HELP_TEXT}\n`);
     return 0;
   }
   if (args.version) {
@@ -1920,6 +1955,22 @@ async function run(): Promise<number> {
   }
 
   const maxRecords = args.maxRecords ?? envInt("KSQL_MAX_RECORDS") ?? profile.query?.maxRecords ?? 500;
+  const recursiveCteMaxDepth = args.recursiveCteMaxDepth
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_DEPTH") ?? profile.query?.recursiveCteMaxDepth ?? 100;
+  const recursiveCteMaxRows = args.recursiveCteMaxRows
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_ROWS") ?? profile.query?.recursiveCteMaxRows ?? 10_000;
+  const recursiveCteMaxExpansions = args.recursiveCteMaxExpansions
+    ?? envInt("KSQL_RECURSIVE_CTE_MAX_EXPANSIONS") ?? profile.query?.recursiveCteMaxExpansions ?? 100_000;
+  for (const [name, value] of [
+    ["recursiveCteMaxDepth", recursiveCteMaxDepth],
+    ["recursiveCteMaxRows", recursiveCteMaxRows],
+    ["recursiveCteMaxExpansions", recursiveCteMaxExpansions],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      process.stderr.write(`ArgumentError: ${name} must be a positive safe integer.\n`);
+      return 2;
+    }
+  }
   const fetchParallel = args.fetchParallel ?? envInt("KSQL_FETCH_PARALLEL") ?? profile.query?.fetchParallel ?? 3;
   const onLimit = args.onLimit ?? envOnLimit("KSQL_ON_LIMIT") ?? profile.query?.onLimit ?? "error";
   const timeout = args.timeout ?? envInt("KSQL_TIMEOUT") ?? profile.query?.timeout ?? 30000;
@@ -2299,7 +2350,8 @@ async function run(): Promise<number> {
       const plans = await buildBatchExplainPlans(
         sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
         Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
-        dmlMaxRows, dmlMaxSubtableRows, !dryRunUsesStaticTypedPlan
+        dmlMaxRows, dmlMaxSubtableRows, !dryRunUsesStaticTypedPlan,
+        recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2399,6 +2451,9 @@ async function run(): Promise<number> {
         tempTableMaxRows,
         timeoutMs: timeout,
         cursorMaxActive,
+        recursiveCteMaxDepth,
+        recursiveCteMaxRows,
+        recursiveCteMaxExpansions,
         variables: args.variables,
         enableImport: importEnabled,
         importSource,
@@ -2448,6 +2503,7 @@ async function run(): Promise<number> {
       ? await execute(`EXPLAIN ${sql}`, client, {
           maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
           dmlMaxRows, dmlMaxSubtableRows,
+          recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
         })
       : await execute(sql!, client, {
         maxRecords,
@@ -2456,6 +2512,9 @@ async function run(): Promise<number> {
         confirm: isDmlStatement ? confirm : undefined,
         cacheContext,
         cursorMaxActive,
+        recursiveCteMaxDepth,
+        recursiveCteMaxRows,
+        recursiveCteMaxExpansions,
         enableImport: importEnabled,
         importSource,
         supportsImportConfirmDetail: true,

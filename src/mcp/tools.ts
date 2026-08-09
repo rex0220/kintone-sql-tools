@@ -61,7 +61,11 @@ import {
 
 export type QueryInput = z.infer<typeof queryInputSchema>;
 export type MutateInput = z.input<typeof mutateInputSchema>;
-export type ExplainInput = z.infer<typeof explainInputSchema>;
+export type ExplainInput = z.infer<typeof explainInputSchema> & {
+  recursiveCteMaxDepth?: number;
+  recursiveCteMaxRows?: number;
+  recursiveCteMaxExpansions?: number;
+};
 export type ValidateInput = z.infer<typeof validateInputSchema>;
 export type DescribeAppInput = z.infer<typeof describeAppInputSchema>;
 export type ShowAppsInput = z.infer<typeof showAppsInputSchema>;
@@ -618,6 +622,9 @@ export function createKsqlMcpTools(
           sqlContext: normalized.sqlContext,
           profile: input.profile,
           maxRecords: input.maxRecords,
+          recursiveCteMaxDepth: input.recursiveCteMaxDepth,
+          recursiveCteMaxRows: input.recursiveCteMaxRows,
+          recursiveCteMaxExpansions: input.recursiveCteMaxExpansions,
           cursorMaxActive: input.cursorMaxActive,
         })
       : null;
@@ -633,7 +640,13 @@ export function createKsqlMcpTools(
         explainCacheContext,
         runtime?.maxRecords ?? input.maxRecords,
         runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
-        importOptions.enableImport
+        importOptions.enableImport,
+        100,
+        undefined,
+        true,
+        runtime?.recursiveCteMaxDepth ?? input.recursiveCteMaxDepth,
+        runtime?.recursiveCteMaxRows ?? input.recursiveCteMaxRows,
+        runtime?.recursiveCteMaxExpansions ?? input.recursiveCteMaxExpansions
       );
       return {
         ok: true,
@@ -648,6 +661,9 @@ export function createKsqlMcpTools(
       cacheContext: explainCacheContext,
       maxRecords: runtime?.maxRecords ?? input.maxRecords,
       cursorMaxActive: runtime?.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      recursiveCteMaxDepth: runtime?.recursiveCteMaxDepth ?? input.recursiveCteMaxDepth,
+      recursiveCteMaxRows: runtime?.recursiveCteMaxRows ?? input.recursiveCteMaxRows,
+      recursiveCteMaxExpansions: runtime?.recursiveCteMaxExpansions ?? input.recursiveCteMaxExpansions,
       ...importOptions,
     });
     if (result.type !== "SELECT") {
@@ -681,6 +697,9 @@ export function createKsqlMcpTools(
         sqlContext,
         profile: input.profile,
         maxRecords: input.maxRecords,
+        recursiveCteMaxDepth: input.recursiveCteMaxDepth,
+        recursiveCteMaxRows: input.recursiveCteMaxRows,
+        recursiveCteMaxExpansions: input.recursiveCteMaxExpansions,
         fetchParallel: input.fetchParallel,
         onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
         timeout: input.timeout,
@@ -701,6 +720,9 @@ export function createKsqlMcpTools(
         // HTTP クライアント側の per-request タイムアウトと同値になる
         timeoutMs: runtime.timeout,
         cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+        recursiveCteMaxDepth: runtime.recursiveCteMaxDepth,
+        recursiveCteMaxRows: runtime.recursiveCteMaxRows,
+        recursiveCteMaxExpansions: runtime.recursiveCteMaxExpansions,
         variables: input.variables,
         ...importOptions,
       });
@@ -735,6 +757,9 @@ export function createKsqlMcpTools(
         maxRecords: input.maxRecords ?? DEFAULT_MAX_RECORDS,
         onLimitReached: input.onLimit ?? DEFAULT_ON_LIMIT,
         cacheContext: validation.cacheContext,
+        recursiveCteMaxDepth: input.recursiveCteMaxDepth,
+        recursiveCteMaxRows: input.recursiveCteMaxRows,
+        recursiveCteMaxExpansions: input.recursiveCteMaxExpansions,
         ...importOptions,
       });
       if (result.type === "ASSERT") return toAssertPayload(result);
@@ -750,6 +775,9 @@ export function createKsqlMcpTools(
       sqlContext: validationContexts.get(validation),
       profile: input.profile,
       maxRecords: input.maxRecords,
+      recursiveCteMaxDepth: input.recursiveCteMaxDepth,
+      recursiveCteMaxRows: input.recursiveCteMaxRows,
+      recursiveCteMaxExpansions: input.recursiveCteMaxExpansions,
       fetchParallel: input.fetchParallel,
       onLimit: validation.containsValidationOnly || validation.statements.some((s) => s.statementType === "VALIDATE") ? "error" : input.onLimit,
       timeout: input.timeout,
@@ -761,6 +789,9 @@ export function createKsqlMcpTools(
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,
       cursorMaxActive: runtime.cursorMaxActive ?? input.cursorMaxActive ?? 2,
+      recursiveCteMaxDepth: runtime.recursiveCteMaxDepth,
+      recursiveCteMaxRows: runtime.recursiveCteMaxRows,
+      recursiveCteMaxExpansions: runtime.recursiveCteMaxExpansions,
       ...importOptions,
     });
     if (result.type === "ASSERT") return toAssertPayload(result);

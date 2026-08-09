@@ -2091,9 +2091,9 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - `LAG(expr, n)` はソート後のパーティション内で `n` 行前、`LEAD(expr, n)` は `n` 行後の値を返す。パーティション外は空文字
 - `offset` は省略時 `1`。非負の safe integer リテラルだけを指定でき、`0` は現在行を返す。変数・式・小数・負数は使用できない
 - `LAG` / `LEAD` の第3引数（既定値）は未対応。必要なら次の段の `CASE` で空文字を置き換える
-- `LAG` / `LEAD` は `ORDER BY` 必須。全順序でない場合は同順内の前後関係が未規定になるため、レコード番号などのタイブレークキーを加える
-- **CTE や一時テーブルを読む場合、その表に `レコード番号` は無い。** 元になった集約のキーなど、その表の中で一意になる列を `ORDER BY` に含める（警告の文面も経路に応じて変わる）
-- **集約結果の列は、実際に一意でも一意だと証明できない。** `GROUP BY` キーで並べていてもこの警告は出る。**値は正しく、その形では警告を消せない**（`ksql_docs` の `recipes/r16` に例がある）
+- `LAG` / `LEAD` は `ORDER BY` 必須。全順序でない場合は同順内の前後関係が未規定になるため、物理 APP ではレコード番号などのタイブレークキーを加える
+- **CTE・一時テーブルなどの派生 relation では、各パーティション内で `ORDER BY` の値の組が入力行を一意に識別すると、クエリ構造または保証済みのデータ制約から確認できる場合に限り警告を無視できる。** 元の集約キーをすべて含む形や、JOIN 後も同じ系列値が各パーティション内で高々1行と保証できる形が該当する
+- 生成列、再帰の深さ列、または `$id` に由来する列であるという理由だけでは警告を無視できない。エンジンが派生 relation の一意性を静的に証明できない場合は、実際には一意でも警告が残る（`ksql_docs` の `recipes/r16` に例がある）
 - `LAG` / `LEAD` は soft keyword。同名のフィールドは従来どおり参照できる
 
 ```sql
@@ -2462,6 +2462,41 @@ ORDER BY s.日付
 
 `EXPLAIN WITH ... GENERATE_SERIES ...` は source、列名、INTEGER / DATE、start、stop、正規化した step、生成件数、10,000行ガード、records API が `none` であることを表示します。純粋な生成系列の実行と EXPLAIN はレコード、Cursor、書込、フォーム・アプリ情報 API を呼びません。
 
+### WITH RECURSIVE / CYCLE（Phase1）
+
+深さがデータ次第で変わる階層は、read-only の `WITH RECURSIVE` で展開できます。再帰 CTE 本体は `seed SELECT UNION ALL recursive SELECT` の2枝とし、再帰項は自己参照を1回だけ `INNER JOIN` の片側に置きます。再帰 CTE は1つの `WITH` に1個までです。CTE 列名リストは再帰 CTE にだけ指定でき、seed と再帰項の列数・位置ごとの型が一致する必要があります。後方参照、相互・多重再帰、再帰項の OUTER JOIN、2つ目の JOIN、集計、window、`DISTINCT`、subquery、`GROUP BY`、`ORDER BY`、`LIMIT` / `OFFSET`、DML source、入れ子の再帰 CTEは Phase1 の対象外です。
+
+```sql
+WITH RECURSIVE 部品展開
+  (親品目, 子品目, 深さ, 累計員数) AS (
+  SELECT 親品目, 子品目, 1, 員数
+  FROM APP100
+  WHERE 親品目 = 'P001'
+  UNION ALL
+  SELECT c.親品目, c.子品目, r.深さ + 1, r.累計員数 * c.員数
+  FROM APP100 AS c
+  INNER JOIN 部品展開 AS r ON c.親品目 = r.子品目
+)
+CYCLE 子品目 SET is_cycle TO 'Y' DEFAULT 'N'
+SELECT 子品目, 深さ, 累計員数, is_cycle
+FROM 部品展開
+ORDER BY 深さ, 子品目;
+```
+
+`CYCLE` は単一列だけを受け付け、`TO` / `DEFAULT` は異なる文字列リテラルにします。循環判定は各行の現在 path 内だけで行い、global visited 集合は使いません。同じノードへ別 path で到達した行は別の出現として残り、それぞれ再展開されます。path は内部状態であり Phase1 では出力列にできません。循環行は `TO` 値を付けて結果へ1回含めますが、次の frontier には入れません。
+
+`CYCLE` は現在 path 上の循環を止めるだけで、循環のない DAG や多経路合流による組み合わせ爆発の境界ではありません。そのため次の三境界は `CYCLE` の有無にかかわらず常に有効で、外側 `LIMIT` と `onLimit=truncate` では緩和できません。上限超過時は部分結果を返さず fail-closed します。engine library の公開エラー `code` は当面 `EXECUTION_ERROR` です。
+
+#### 再帰 CTE の境界既定値
+
+| 設定 | 既定値 | 計測対象 |
+|---|---:|---|
+| `recursiveCteMaxDepth` | 100 | 生成された候補の再帰深さ |
+| `recursiveCteMaxRows` | 10,000 | seed、非循環行、循環 mark 行を含む累積結果行数 |
+| `recursiveCteMaxExpansions` | 100,000 | JOIN 成立後、再帰項の WHERE / CYCLE 除外前の累積候補ペア数 |
+
+三値は positive safe integer です。Node 系では明示 input / CLI、env、profile、engine default の順、plugin では UI / 保存値、engine default の順に解決します。再帰 query は参照アプリの完全性にも既存 `maxRecords` を使い、常に `onLimit=error` です。
+
 ### 実体化後の列実在チェック（B86）
 
 CTE・一時テーブル・`SHOW APPS` / `DESCRIBE` の結果は、実体化した SELECT の**出力列だけ**を後段から参照できます。存在しない列は空文字として評価せず、下流の records GET、DML 確認、POST / PUT より前に `ArgumentError: unknown field code(s)` で拒否します。SELECT、WHERE（`=` / `LIKE` を含む全演算子）、式、CASE、集計、GROUP BY / HAVING / ORDER BY、window、JOIN、subquery、UNION、`INSERT` / `UPSERT ... SELECT` の source で共通です。物理 APP と実体化 source を混在 JOIN した場合も両方を検証します。
@@ -2481,8 +2516,8 @@ SELECT * FROM アプリ一覧 WHERE アプリ名 LIKE '顧客';
 `SELECT x AS y` を実体化した後段では `x` ではなく出力名 `y` を使います。UNION の実体化結果では左枝の列名／alias が出力 schema です。`rows=[] && columns=[]` で schema 自体を復元できない0行 wildcard source は、JOIN なしの読出しに限り既存の0行挙動を維持します。JOIN 入力では有効な JOIN key を証明できないため、物理レコード取得前に schema-unavailable error になります。
 
 **注意事項:**
-- CTE 本体のサブクエリは SIMPLE / FULL_SCAN を自動判定
-- 再帰 CTE は非対応
+- 非再帰 CTE 本体のサブクエリは SIMPLE / FULL_SCAN を自動判定
+- 再帰 CTE は Phase1 の read-only 範囲で完全実体化してから外側 SELECT を評価
 
 ---
 
@@ -3556,7 +3591,7 @@ ECMAScript 正規表現はホストのブラウザ／Node とその版に依存�
 |------|------|
 | 相関サブクエリ | 非対応（非相関 IN/EXISTS は対応） |
 | INTERSECT / EXCEPT | 非対応 |
-| 再帰 CTE | 非対応 |
+| 再帰 CTE | Phase1 対応（read-only の `WITH RECURSIVE`、`UNION ALL` 2枝、単一自己 `INNER JOIN`、任意の単一列 `CYCLE`。再帰 DML source・相互/多重再帰・path 公開などは非対応） |
 | FULL OUTER JOIN | 非対応 |
 | UPDATE の汎用 JOIN | 非対応（`UPDATE ... FROM` の `$id`／文字列（1行）／数値キーによる単一等値のみ対応） |
 | トランザクション | kintone API の制約により非対応（バッチ実行も非アトミック） |
@@ -3582,6 +3617,7 @@ kSQL は以下の条件に応じて自動的に実行モードを切り替えま
 | UNION / UNION ALL | **FULL_SCAN** |
 | WITH 句（単純 CTE）— インライン化される | **SIMPLE**（kintone クエリに変換） |
 | WITH 句（GROUP BY ありの CTE・複数 CTE・CTE JOIN） | **FULL_SCAN** |
+| WITH RECURSIVE | **FULL_SCAN**（参照物理 source を完全実体化し、三境界を常時適用） |
 
 FULL_SCAN モードは大量レコードの場合、時間がかかります。
 
