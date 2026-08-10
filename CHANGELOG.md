@@ -3,6 +3,32 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.66.1（2026-08-10）
+
+### 修正（B167 バッチの `EXPLAIN` / dry-run が「物理アプリ＋一時テーブル JOIN」で失敗していた）**※EXPLAIN 面のみ・実行は元から正常**
+
+**バッチ内で物理アプリを `FROM` にして一時テーブルを JOIN の相手に置くと、
+実行は正常なのに `EXPLAIN` / `--dry-run` / プラグインの EXPLAIN だけが
+`kintone API error 400 CB_VA01（app: 最小でも1以上です。）` で失敗していました**
+（v3.61.0 からの既存問題・v3.66.0 の回帰ではありません）。
+
+```sql
+CREATE TEMP TABLE #z AS SELECT 製品名, SUM(個数) AS 在庫数 FROM APP100 GROUP BY 製品名;
+SELECT SUM(z.在庫数 * m.仕入価格) AS 在庫金額
+FROM APP200 m INNER JOIN #z z ON m.製品名 = z.製品名
+-- 旧: 実行は正常・EXPLAIN だけ CB_VA01。新: EXPLAIN も一時テーブルの schema を静的解決して成功
+```
+
+- **原因**: `EXPLAIN` の結合キー事前絞り込み表示（v3.61.0）が JOIN の相手側を
+  物理アプリと決め打ちし、一時テーブルの内部プレースホルダ（app 0）を
+  実 API へ送っていました。逆の配置（`FROM #temp JOIN 物理`）は元から正常です
+- **修正**: 一時テーブル・CTE 側は静的 schema から解決し、実 API を呼びません。
+  型メタが静的に確定しない場合の表示は従来の FALLBACK と同じです
+- **影響していた形**: バッチの `EXPLAIN` / dry-run で「物理 `FROM` ＋ `#temp`（または CTE）を
+  JOIN の相手」に置いた場合のみ。**実行・結果・records API 0 回の契約はすべて不変**です
+- 単文の `EXPLAIN WITH ...`・`FROM #temp JOIN 物理`・CTE→APP の既存表示（型別選択）は
+  元から正しく、変わりません
+
 ## v3.66.0（2026-08-09）
 
 ### 新機能（B53 `WITH RECURSIVE` / `CYCLE` — 再帰 CTE）

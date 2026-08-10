@@ -1,7 +1,7 @@
 # B167 バッチ EXPLAIN が「物理 FROM ＋ #temp を JOIN target」で app=0 の実 API を呼び CB_VA01 になる
 
 - 起票: 2026-08-10（オーナー報告・実行は正常で EXPLAIN だけ落ちる）
-- ステータス: 📋 **修正依頼済み（v3.66.1 候補）**
+- ステータス: ✅ **v3.66.1 リリース（2026-08-10・全 12 call site 監査＝要修正 1 箇所・19 テスト＋CLI e2e 恒久化・実機で逐語 2 形の dry-run 成功と実行値不変を確認）**
 - 種別: バグ（EXPLAIN/dry-run 面のみ・実行不変）／B162・B163 と同族（「実行は正常なのに EXPLAIN だけ通らない」3 例目）
 - 関連: B150（結合キー prefilter 表示の導入元）／B163（temp バッチ EXPLAIN の静的 schema）／B161（metadata 要否）
 
