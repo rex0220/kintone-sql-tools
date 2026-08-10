@@ -1,32 +1,19 @@
-ksql 配布パッケージ (v3.66.0)
+ksql 配布パッケージ (v3.66.1)
 
 release 成果物:
-- ksql-plugin-v3.66.0.zip
-- ksql-mcp.mcpb (manifest version 3.66.0)
-- ksql-mcp.js (MCP server version 3.66.0)
+- ksql-plugin-v3.66.1.zip
+- ksql-mcp.mcpb (manifest version 3.66.1)
+- ksql-mcp.js (MCP server version 3.66.1)
 
-新機能 (B53 WITH RECURSIVE / CYCLE = 再帰 CTE) ★要点:
-- 深さがデータ次第で変わる階層 (BOM・組織図・分類) を read-only の WITH RECURSIVE で
-  展開できます。seed UNION ALL 再帰項の 2 枝・自己参照 1 回・INNER 等値 JOIN 1 本。
-  任意の CYCLE 句は経路 (path) 単位で循環を検出して打ち切ります (共通部品の
-  多重使用は循環ではないため打ち切りません)。
-- 安全境界: 深さ 100・累積行 10,000・中間展開 100,000 を常時 fail-closed で強制
-  (CYCLE の有無に関係なし・設定で変更可・部分結果は返しません)。取得は対象アプリ
-  1 回の完全実体化のみで、API 回数は深さに依存しません。
-- 実データ検証: BOM 部品表 (品目 110・エッジ 276・10 セット) の展開 394 行が
-  期待値と全一致 (多経路合流・レベル差・小数員数の積を含む)。
+修正 (B167 バッチの EXPLAIN が物理アプリ + 一時テーブル JOIN で失敗) ★EXPLAIN 面のみ:
+- バッチ内で物理アプリを FROM にして #temp を JOIN の相手に置くと、実行は正常なのに
+  EXPLAIN / dry-run だけ CB_VA01 (app: 最小でも1以上) で失敗していました
+  (v3.61.0 からの既存問題)。一時テーブル・CTE 側は静的 schema から解決するよう修正。
+  実行・結果・records API 0 回の契約はすべて不変です。
 
-修正 (B166 JOIN の ON をテーブルと逆順に書くと落ちていた) ★要点・書ける形が増えます:
-- FROM p JOIN c ON c.x = p.y (JOIN 側を左に書く形) が「JOIN key ... is not
-  available」で一律エラーになっていました (v3.65.0 以前から)。ON の両辺を実際の
-  テーブル帰属で解決するよう修正。FROM 側を左に書く従来の形・押し下げ・
-  LEFT/RIGHT の保存側は元から正しく不変です。
-
-改善 (B160/B165 同梱):
-- 全順序警告の「無視してよい条件」を一般化 (集約キー・生成列×JOIN・再帰出力を
-  同じ 1 条件で判定。集約キー全含みは引き続き無視可)。
-- 再帰 CTE なしで CTE 本体から自分自身を参照した場合の診断を専用文言に。
-  固定深さの自己 JOIN レシピと再帰 CTE レシピを追加。
+v3.66.0 の各節は畳みました (B53 WITH RECURSIVE / CYCLE = 再帰 CTE・新機能 /
+B166 JOIN ON 逆順の修正 / B160 警告文言の一般化・B165 再帰診断とレシピ)。
+内容は CHANGELOG.md にあります。
 
 v3.65.0 の各節は畳みました (B164 @変数を含む集計の比較位置の誤り = 結果が変わる修正)。
 内容は CHANGELOG.md にあります。
@@ -89,12 +76,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.66.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.66.1.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
+本リリース (v3.66.1): B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正 (EXPLAIN 面のみ・実行は不変)。
+
+前リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
 
 前リリース (v3.65.0): B164 @変数を含む集計が比較位置で誤った値になっていた (修正・結果が変わります)。
 

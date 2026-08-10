@@ -29764,7 +29764,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.66.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.66.1" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -55481,9 +55481,13 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
         const joinField = leftAlias === joinAlias ? join.on.left.field : join.on.right.field;
         if (!sourceAlias) continue;
         const sourceTable = [select.from, ...select.joins.map((candidate) => candidate.table)].find((table) => effectiveTableAlias(table) === sourceAlias);
-        const targetInfos = await getFieldsCached(join.table.appId, tracedClient, cacheContext);
-        const targetInfo = targetInfos.find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
-        const targetMeta = targetInfo ? materializedMetaFromFieldInfo(targetInfo, join.table.appId) : systemColumnMeta(joinField);
+        let targetMeta;
+        if (join.table.cteName !== null) {
+          targetMeta = explainRelations.get(join.table.cteName)?.columnMeta?.get(joinField);
+        } else {
+          const targetInfo = (await getFieldsCached(join.table.appId, tracedClient, cacheContext)).find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
+          targetMeta = targetInfo ? materializedMetaFromFieldInfo(targetInfo, join.table.appId) : systemColumnMeta(joinField);
+        }
         let sourceMeta;
         let values;
         let sourceRowCount;
