@@ -10910,12 +10910,16 @@ async function buildExplainWhereAnalysis(
         if (!sourceAlias) continue;
         const sourceTable = [select.from, ...select.joins.map((candidate) => candidate.table)]
           .find((table) => effectiveTableAlias(table) === sourceAlias);
-        const targetInfos = await getFieldsCached(join.table.appId, tracedClient, cacheContext);
-        const targetInfo = targetInfos
-          .find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
-        const targetMeta = targetInfo
-          ? materializedMetaFromFieldInfo(targetInfo, join.table.appId)
-          : systemColumnMeta(joinField);
+        let targetMeta: MaterializedColumnMeta | undefined;
+        if (join.table.cteName !== null) {
+          targetMeta = explainRelations.get(join.table.cteName)?.columnMeta?.get(joinField);
+        } else {
+          const targetInfo = (await getFieldsCached(join.table.appId, tracedClient, cacheContext))
+            .find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
+          targetMeta = targetInfo
+            ? materializedMetaFromFieldInfo(targetInfo, join.table.appId)
+            : systemColumnMeta(joinField);
+        }
         let sourceMeta: MaterializedColumnMeta | undefined;
         let values: string[] | undefined;
         let sourceRowCount: number | undefined;
