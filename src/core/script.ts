@@ -91,7 +91,11 @@ export function parseScript(source: string, opts: ParseScriptOptions = {}): Pars
     const offset = sourceOffsetForNormalizedOffset(normalizedOffset, rewriteSegments, "start");
     diagnostics.push(diagnosticAt(source, offset, {
       severity: "error",
-      code: error instanceof LexError ? DiagnosticCodes.LEX_ERROR : DiagnosticCodes.PARSE_ERROR,
+      code: error instanceof LexError
+        ? DiagnosticCodes.LEX_ERROR
+        : error instanceof ParseError && error.rawMessage.includes("-- @ksql dialect: 1")
+          ? DiagnosticCodes.DIALECT1_REQUIRED
+          : DiagnosticCodes.PARSE_ERROR,
       message: error instanceof ParseError ? error.rawMessage : errorMessage(error),
       statementIndex: statementIndexAt(source, offset),
     }));

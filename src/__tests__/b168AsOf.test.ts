@@ -209,7 +209,7 @@ KEY (顧客コード);`;
     async getFields() {
       return [
         { code: "レコード番号", label: "レコード番号", fieldType: "RECORD_NUMBER" },
-        { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "顧客コード", label: "顧客コード", fieldType: "SINGLE_LINE_TEXT", isUnique: true },
         { code: "金額", label: "金額", fieldType: "NUMBER" },
         { code: "受注日", label: "受注日", fieldType: "DATE" },
         { code: "ステータス", label: "ステータス", fieldType: "SINGLE_LINE_TEXT" },

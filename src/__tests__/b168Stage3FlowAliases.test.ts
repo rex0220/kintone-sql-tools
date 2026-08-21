@@ -31,7 +31,7 @@ function client(): KintoneClient & {
     async getApps() { return []; },
     async getFields() {
       return [
-        { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT" },
+        { code: "k", label: "k", fieldType: "SINGLE_LINE_TEXT", isUnique: true },
         { code: "v", label: "v", fieldType: "SINGLE_LINE_TEXT" },
       ];
     },

@@ -192,6 +192,12 @@ import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere"
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import { parseSqlStatementsForScript } from "./core/sql";
 import { asOfVariableName, createAsOfClock } from "./core/asOfClock";
+import {
+  DIALECT1_SERVER_TIME_FUNCTION_WARNING,
+  statementHasBareServerTimeFunctionInWhere,
+  validateDialect1UpdateKey,
+} from "./core/dialect1Validation";
+export { DIALECT1_SERVER_TIME_FUNCTION_WARNING };
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
 import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
@@ -1704,6 +1710,7 @@ export async function executeBatch(
           variables,
           relativeDateVariables,
           clock: statementEvaluationContext(boundOptions),
+          dialect: meta.dialect,
         };
         const outcome = await runWithDeadline(
           executeBatchStatement(statementContext),
@@ -1760,32 +1767,6 @@ export async function executeBatch(
   }
 }
 
-export const DIALECT1_SERVER_TIME_FUNCTION_WARNING =
-  "bare の時刻依存関数は kintone サーバー評価のため as-of の対象外です。再現性が必要なら @ 付き関数を使用してください。";
-
-function statementHasBareServerTimeFunctionInWhere(statement: Statement): boolean {
-  let found = false;
-  const visit = (node: unknown): void => {
-    if (found || node === null || typeof node !== "object") return;
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    const value = node as Record<string, unknown>;
-    const where = value["where"];
-    if (where !== null && typeof where === "object") {
-      const names = serverOnlyFunctionOccurrencesInWhere(where as WhereExpr);
-      if (names.some((name) => name === "TODAY" || name === "NOW" || isRelativeDateFunctionName(name))) {
-        found = true;
-        return;
-      }
-    }
-    Object.values(value).forEach(visit);
-  };
-  visit(statement);
-  return found;
-}
-
 function statementHasApplyMutation(statement: Statement): boolean {
   if (statement.type === "UPDATE" || statement.type === "INSERT") {
     return statement.validateOnly !== true && Boolean(statement.applyBlocks?.length);
@@ -1805,6 +1786,7 @@ interface ExecutionContext {
   readonly variables: Map<string, VarValue>;
   readonly relativeDateVariables: ReadonlyMap<string, KintoneFunction>;
   readonly clock: EvaluationContext;
+  readonly dialect: 0 | 1;
 }
 
 interface BatchStatementOutcome extends Partial<BatchStatementResult> {
@@ -1818,7 +1800,7 @@ async function executeBatchStatement(
 ): Promise<BatchStatementOutcome> {
   const {
     stmt, info, client, options, cacheContext, tempTables, variables,
-    relativeDateVariables, clock,
+    relativeDateVariables, clock, dialect,
   } = context;
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
@@ -1906,6 +1888,22 @@ async function executeBatchStatement(
   assertApplyExecutionScope("phase15b", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateStatementStatic(resolvedStmt);
+  if (
+    dialect === 1
+    && (resolvedStmt.type === "INSERT" || resolvedStmt.type === "UPDATE" || resolvedStmt.type === "DELETE")
+    && resolvedStmt.subtableCode
+  ) {
+    throw new Error(
+      "ArgumentError: dialect 1 ではサブテーブル仮想テーブルへの DML はできません。SELECT は可能です。親アプリを対象にしてください。"
+    );
+  }
+  if (dialect === 1 && (resolvedStmt.type === "UPSERT" || resolvedStmt.type === "UPSERT_SELECT")) {
+    const staticIssue = validateDialect1UpdateKey(resolvedStmt)[0];
+    if (staticIssue) throw new Error(`ArgumentError: ${staticIssue.message}`);
+    const fieldInfos = await getFieldsCached(resolvedStmt.appId, client, cacheContext);
+    const schemaIssue = validateDialect1UpdateKey(resolvedStmt, fieldInfos)[0];
+    if (schemaIssue) throw new Error(`ArgumentError: ${schemaIssue.message}`);
+  }
   await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
 
   if (resolvedStmt.type === "VALIDATE") {
@@ -11947,7 +11945,7 @@ export async function buildBatchExplainPlans(
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const { statements } = parseSqlStatementsForScript(sql, { import: enableImport });
+    const { statements, meta } = parseSqlStatementsForScript(sql, { import: enableImport });
     const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
@@ -12041,12 +12039,20 @@ export async function buildBatchExplainPlans(
              ), cursorMaxActive),
           ];
       const metadataPlan = explainMetadataLines(whereAnalysis);
+      const dialect1Estimate = meta.dialect === 1
+        ? buildDialect1ApiEstimateLines(
+            planStmt,
+            analysis.statements[i],
+            maxRecords,
+            dmlMaxRows
+          )
+        : [];
       plans.push({
         index: i,
         type: analysis.statements[i].statementType,
         plan: statementPlan.length === 0
-          ? metadataPlan
-          : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1)],
+          ? [...metadataPlan, ...dialect1Estimate]
+          : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1), ...dialect1Estimate],
       });
       fetchStatements.push({
         index: i,
@@ -12076,6 +12082,92 @@ export async function buildBatchExplainPlans(
   } finally {
     releaseMetadataCacheScope(invocationCacheContext);
   }
+}
+
+function buildDialect1ApiEstimateLines(
+  statement: Statement,
+  analysis: BatchAnalysis["statements"][number],
+  maxRecords: number,
+  dmlMaxRows: number
+): string[] {
+  const lines = ["  estimated API consumption (dialect 1):"];
+  const sources = collectPhysicalExplainSources(statement);
+  if (
+    (statement.type === "UPDATE" || statement.type === "DELETE")
+    && !sources.includes(`APP${statement.appId}`)
+  ) {
+    sources.unshift(`APP${statement.appId}`);
+  }
+  const maxReadRequests = Math.ceil(maxRecords / 500);
+  for (const source of sources) {
+    lines.push(
+      `    read ${source}: 不明（上限 maxRecords=${maxRecords} と仮定: 最大 ${maxReadRequests} 回、500 件/回）`
+    );
+  }
+
+  const metadataApps = [...new Set([
+    ...analysis.appIds,
+    ...(analysis.targetAppId === null ? [] : [analysis.targetAppId]),
+  ])];
+  lines.push(
+    `    metadata: GET form fields × ${metadataApps.length} アプリ（キャッシュ済みは追加 0 回）`
+  );
+
+  if (statement.type === "UPSERT" || statement.type === "UPSERT_SELECT") {
+    if (statement.type === "UPSERT") {
+      lines.push(
+        `    UPSERT pre-read: ${Math.ceil(statement.values.length / UPSERT_IN_CHUNK_SIZE)} 回（${statement.values.length} 行、${UPSERT_IN_CHUNK_SIZE} キー/回）`
+      );
+    } else {
+      lines.push(
+        `    UPSERT pre-read: 不明（上限 dmlMaxRows=${dmlMaxRows} と仮定: 最大 ${Math.ceil(dmlMaxRows / UPSERT_IN_CHUNK_SIZE)} 回、${UPSERT_IN_CHUNK_SIZE} キー/回）`
+      );
+    }
+  }
+
+  const knownRows = statement.type === "INSERT" || statement.type === "UPSERT"
+    ? statement.values.length
+    : null;
+  if (
+    statement.type === "INSERT" || statement.type === "INSERT_SELECT"
+    || statement.type === "UPSERT" || statement.type === "UPSERT_SELECT"
+    || statement.type === "UPDATE" || statement.type === "DELETE"
+  ) {
+    lines.push(knownRows === null
+      ? `    write: 不明（上限 dmlMaxRows=${dmlMaxRows} と仮定: 最大 ${Math.ceil(dmlMaxRows / 100)} 回、100 件/HTTP リクエスト）`
+      : `    write: ${Math.ceil(knownRows / 100)} 回（${knownRows} 行、100 件/HTTP リクエスト）`);
+    lines.push("    reference: bulkRequest は未実装。書込サブリクエスト数は HTTP 書込回数と同じ");
+  }
+  return lines;
+}
+
+function collectPhysicalExplainSources(statement: Statement): string[] {
+  const sources: string[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const value = node as Record<string, unknown>;
+    if (
+      typeof value["appId"] === "number"
+      && Object.prototype.hasOwnProperty.call(value, "alias")
+      && Object.prototype.hasOwnProperty.call(value, "cteName")
+      && value["cteName"] === null
+      && value["appId"] > 0
+    ) {
+      const app = `APP${value["appId"]}`;
+      const subtable = typeof value["subtableCode"] === "string" ? `$${value["subtableCode"]}` : "";
+      const alias = typeof value["alias"] === "string" && value["alias"] !== app
+        ? ` AS ${value["alias"]}`
+        : "";
+      sources.push(`${app}${subtable}${alias}`);
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(statement);
+  return sources;
 }
 
 function buildBatchStatementPlan(
