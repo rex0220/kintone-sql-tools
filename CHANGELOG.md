@@ -3,6 +3,29 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.70.0（2026-08-21）
+
+### 機能追加（B170 ksql-flow ランナーからの依頼 E-1〜E-6 への対応）**※`/flow` への純加法のみ・dialect 0 と `/engine` は不変**
+
+ksql-flow ランナー実装（M1〜M7）からの正式依頼への対応です。着手前に依頼書を実測レビューし、
+事実前提の誤り 4 件（DML 結果の型・metrics 差分の前提・書込のキー順・UPSERT pre-read の範囲）を
+訂正のうえ実装しました。詳細な回答は ksql-flow への申し送り文書を参照。
+
+- **E-6: `explainScript` に `asOf` / `timezone` を追加**（実質バグ修正）。dialect 1 の `@NOW()` 等を
+  含むスクリプトが EXPLAIN 経路で `ParseError` になっていたのを、planner 冒頭の as-of 一括注入で解消。
+  **CLI / MCP / プラグインの batch EXPLAIN・dry-run も同時に直っています**（既定値＝実行時と同じ規則）
+- **E-3: `FlowDmlResult` 型と `isDmlResult` 型ガードを公開**。INSERT（`createdIds`/`insertedCount`）・
+  UPDATE（`updatedCount`）・DELETE（`deletedCount`）・UPSERT（`insertedCount`/`updatedCount`）の
+  discriminated union。`StatementResult.result` の型は `unknown` のまま（利用側の型を壊さない）
+- **E-5: `StatementResult.metrics` を累積値のスナップショットへ安全化**。これまで共有参照だったため
+  「過去の結果の metrics が後続実行で進み、差分が常にゼロになる」形でした。文単位の消費は
+  前回スナップショットとの差分で計算できます（**`/flow` 利用側は要確認**・`/engine` は不変）
+- **E-1: `createExecutionContext` に `onChunkWritten` コールバックを追加**。書込 API（POST/PUT/DELETE）
+  1 リクエスト成功直後に await して通知（`statementIndex`/`appId`/`operation`/`records`/`chunkIndex`/
+  単一キー UPSERT の `lastKeyValue`）。チェックポイント記録用。**書込のキー昇順整列は行いません**
+  （現状も整列されていません＝設計書 5.1-2 の前提はランナー側で再裁定）
+- E-4（`KsqlFlowError.code` の値域）は文書回答・E-2（dry-run）は設計提案 R1 を送付し往復中
+
 ## v3.69.0（2026-08-21）
 
 ### 新機能（B168 Flow dialect 1 完成＝Stage 4-6）**※opt-in・既存構文（dialect 0）は完全不変**
