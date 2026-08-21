@@ -1,15 +1,20 @@
-ksql 配布パッケージ (v3.66.1)
+ksql 配布パッケージ (v3.67.0)
 
 release 成果物:
-- ksql-plugin-v3.66.1.zip
-- ksql-mcp.mcpb (manifest version 3.66.1)
-- ksql-mcp.js (MCP server version 3.66.1)
+- ksql-plugin-v3.67.0.zip
+- ksql-mcp.mcpb (manifest version 3.67.0)
+- ksql-mcp.js (MCP server version 3.67.0)
 
-修正 (B167 バッチの EXPLAIN が物理アプリ + 一時テーブル JOIN で失敗) ★EXPLAIN 面のみ:
-- バッチ内で物理アプリを FROM にして #temp を JOIN の相手に置くと、実行は正常なのに
-  EXPLAIN / dry-run だけ CB_VA01 (app: 最小でも1以上) で失敗していました
-  (v3.61.0 からの既存問題)。一時テーブル・CTE 側は静的 schema から解決するよう修正。
-  実行・結果・records API 0 回の契約はすべて不変です。
+修正 (B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻へ) ★結果が変わる形あり:
+- これまで両関数は式評価のたびに時計を読み直していたため、複数行の SELECT では
+  行ごとに異なるミリ秒が返り、深夜 0 時を跨ぐ実行では途中で「今日」が変わる
+  非決定がありました。文の実行開始時に 1 回だけ取得した時刻へ固定します。
+- 変わらないもの: 値の形式 (YYYY-MM-DD / ISO 8601 ミリ秒付き)・タイムゾーンの扱い・
+  SET/DECLARE の NOW()/TODAY() (元から文単位 1 回評価)・WHERE 素通しの TODAY() 等
+  (kintone サーバー評価のまま)。バッチは文ごとに時刻が確定します (文間は同値にしません)。
+
+v3.66.1 の節は畳みました (B167 バッチ EXPLAIN の一時テーブル JOIN 失敗の修正 =
+EXPLAIN 面のみ・実行は不変)。内容は CHANGELOG.md にあります。
 
 v3.66.0 の各節は畳みました (B53 WITH RECURSIVE / CYCLE = 再帰 CTE・新機能 /
 B166 JOIN ON 逆順の修正 / B160 警告文言の一般化・B165 再帰診断とレシピ)。
@@ -76,12 +81,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.66.1.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.67.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.66.1): B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正 (EXPLAIN 面のみ・実行は不変)。
+本リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
+
+前リリース (v3.66.1): B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正 (EXPLAIN 面のみ・実行は不変)。
 
 前リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
 
