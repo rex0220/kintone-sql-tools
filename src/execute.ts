@@ -1767,6 +1767,192 @@ export async function executeBatch(
   }
 }
 
+/** @internal Stateful lifecycle shared by the /flow statement adapter. */
+export interface ManagedStatementExecutionContext {
+  readonly statements: readonly Statement[];
+  readonly analysis: BatchAnalysis;
+  readonly metrics: ExecuteMetrics;
+  readonly options: BatchExecuteOptions;
+  readonly client: KintoneClient;
+  readonly cacheContext: string;
+  readonly tempTables: Map<string, MaterializedTable>;
+  readonly variables: Map<string, VarValue>;
+  readonly relativeDateVariables: ReadonlyMap<string, KintoneFunction>;
+  readonly clock: EvaluationContext;
+  readonly dialect: 0 | 1;
+  readonly startedAt: number;
+  readonly deadline: number | null;
+  readonly failed: Set<number>;
+  readonly cursorCleanups: Set<() => Promise<void>>;
+  nextIndex: number;
+  aborted: "fail-fast" | "timeout" | "assertion" | "exit" | null;
+  disposed: boolean;
+  busy: boolean;
+}
+
+/** @internal Prepare the exact state consumed by executeBatchStatement(). */
+export function createManagedStatementExecutionContext(
+  statements: readonly Statement[],
+  dialect: 0 | 1,
+  client: KintoneClient,
+  options: BatchExecuteOptions = {}
+): ManagedStatementExecutionContext {
+  resolveRecursiveCteLimits(options);
+  const mutableStatements = [...statements];
+  const analysis = analyzeBatch(mutableStatements);
+  mutableStatements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
+  if (options.allowApplyMutation !== true && mutableStatements.some((statement) =>
+    statementHasMultiValueApply(statement)
+    || (statement.type === "UPSERT" && statementHasApplyMutation(statement))
+  )) {
+    throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
+  }
+  if (options.continueOnError && analysis.containsDml) {
+    throw new Error("ArgumentError: continueOnError is not allowed for batches containing DML.");
+  }
+  for (const item of analysis.statements) {
+    if (!item.isDml || item.tempTablesReferenced.length === 0) continue;
+    if (item.statementType === "INSERT_SELECT" || item.statementType === "UPSERT_SELECT") continue;
+    const statement = mutableStatements[item.index];
+    if (statement?.type === "UPDATE" && statement.from?.cteName != null) continue;
+    throw new BatchAnalysisError(
+      `ArgumentError: temp table references in ${item.statementType} are not supported yet.`,
+      item.index
+    );
+  }
+  const injectedVariables = validateDeclaredBatchVariables(mutableStatements, options.variables);
+  const relativeDateVariables = prepareRelativeDateVariables(mutableStatements, injectedVariables);
+  const normalizedOptions = { ...options, variables: injectedVariables };
+  const asOfClock = createAsOfClock(options.asOf ?? new Date(), options.timezone);
+  const variables = new Map<string, VarValue>();
+  for (const [name, value] of Object.entries(asOfClock.values)) {
+    variables.set(asOfVariableName(name as keyof typeof asOfClock.values), { type: "string", value });
+  }
+  const metrics = createEmptyMetrics();
+  const startedAt = Date.now();
+  return {
+    statements: mutableStatements,
+    analysis,
+    metrics,
+    options: normalizedOptions,
+    client: wrapClientWithMetrics(client, metrics),
+    cacheContext: createInvocationCacheContext(resolveCacheContext(client, options.cacheContext)),
+    tempTables: new Map(),
+    variables,
+    relativeDateVariables,
+    clock: statementEvaluationContext(bindStatementEvaluationContext(normalizedOptions)),
+    dialect,
+    startedAt,
+    deadline: options.timeoutMs != null ? startedAt + options.timeoutMs : null,
+    failed: new Set(),
+    cursorCleanups: new Set(),
+    nextIndex: 0,
+    aborted: null,
+    disposed: false,
+    busy: false,
+  };
+}
+
+/** @internal Execute the next statement through executeBatchStatement(). */
+export async function executeManagedStatement(
+  statement: Statement,
+  managed: ManagedStatementExecutionContext
+): Promise<BatchStatementResult> {
+  if (managed.disposed) throw new Error("ExecutionContextDisposedError: execution context is disposed.");
+  if (managed.busy) throw new Error("ExecutionContextBusyError: concurrent executeStatement calls are not allowed.");
+  const index = managed.nextIndex;
+  if (index >= managed.statements.length) {
+    throw new Error("ExecutionContextOrderError: all statements have already been executed.");
+  }
+  if (statement !== managed.statements[index]) {
+    throw new Error(`ExecutionContextOrderError: expected statement index ${index}.`);
+  }
+  managed.busy = true;
+  managed.nextIndex += 1;
+  const info = managed.analysis.statements[index];
+  const base = { index, type: info.statementType };
+  try {
+    if (managed.aborted) {
+      const result: BatchStatementResult = {
+        ...base,
+        status: "skipped",
+        skippedReason: managed.aborted,
+      };
+      if (managed.aborted !== "exit") managed.failed.add(index);
+      return result;
+    }
+    const brokenDep = info.dependsOn.find((dependency) => managed.failed.has(dependency));
+    if (brokenDep !== undefined) {
+      const dependency = managed.analysis.statements[brokenDep].tempTablesCreated[0]
+        ?? `statement ${brokenDep}`;
+      managed.failed.add(index);
+      return { ...base, status: "skipped", skippedReason: `dependency: ${dependency}` };
+    }
+    if (managed.deadline !== null && Date.now() >= managed.deadline) {
+      managed.failed.add(index);
+      managed.aborted = "timeout";
+      return { ...base, status: "skipped", skippedReason: "timeout" };
+    }
+
+    const searchAbortCollector: SearchAbortCollector = { aborted: false };
+    const statementClient = wrapClientWithSearchAbort(
+      managed.client,
+      searchAbortCollector,
+      (info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH")
+        || statementContainsOuterJoin(statement)
+    );
+    const cursorScope = wrapClientWithCursorScope(statementClient);
+    managed.cursorCleanups.add(cursorScope.closeActive);
+    const remaining = managed.deadline !== null ? managed.deadline - Date.now() : null;
+    const outcome = await runWithDeadline(
+      executeBatchStatement({
+        stmt: statement,
+        info,
+        client: cursorScope.client,
+        options: managed.options,
+        cacheContext: managed.cacheContext,
+        tempTables: managed.tempTables,
+        variables: managed.variables,
+        relativeDateVariables: managed.relativeDateVariables,
+        clock: managed.clock,
+        dialect: managed.dialect,
+      }),
+      remaining,
+      cursorScope.closeActive
+    );
+    if (outcome.result) {
+      outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+    }
+    const { exitTriggered, ...statementOutcome } = outcome;
+    if (exitTriggered) managed.aborted = "exit";
+    managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+    return { ...base, status: "success", ...statementOutcome };
+  } catch (error) {
+    managed.failed.add(index);
+    if (error instanceof BatchTimeoutError) managed.aborted = "timeout";
+    else if (error instanceof AssertError) managed.aborted = "assertion";
+    else if (info.statementType === "SET_VARIABLE" || info.statementType === "DECLARE_VARIABLE") {
+      managed.aborted = "fail-fast";
+    } else if (!managed.options.continueOnError) managed.aborted = "fail-fast";
+    managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+    return { ...base, status: "error", error: toBatchStatementError(error) };
+  } finally {
+    managed.busy = false;
+  }
+}
+
+/** @internal Release metadata scope and any cursor left active by a statement. */
+export async function disposeManagedStatementExecutionContext(
+  managed: ManagedStatementExecutionContext
+): Promise<void> {
+  if (managed.disposed) return;
+  managed.disposed = true;
+  await Promise.all([...managed.cursorCleanups].map((cleanup) => cleanup().catch(() => undefined)));
+  managed.cursorCleanups.clear();
+  releaseMetadataCacheScope(managed.cacheContext);
+  managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+}
+
 function statementHasApplyMutation(statement: Statement): boolean {
   if (statement.type === "UPDATE" || statement.type === "INSERT") {
     return statement.validateOnly !== true && Boolean(statement.applyBlocks?.length);
@@ -1776,7 +1962,8 @@ function statementHasApplyMutation(statement: Statement): boolean {
     && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
 
-interface ExecutionContext {
+/** @internal Shared statement executor input used by the Flow public adapter. */
+export interface ExecutionContext {
   readonly stmt: Statement;
   readonly info: BatchAnalysis["statements"][number];
   readonly client: KintoneClient;
@@ -1789,13 +1976,15 @@ interface ExecutionContext {
   readonly dialect: 0 | 1;
 }
 
-interface BatchStatementOutcome extends Partial<BatchStatementResult> {
+/** @internal */
+export interface BatchStatementOutcome extends Partial<BatchStatementResult> {
   /** 内部制御用。BatchStatementResult には露出しない。 */
   exitTriggered?: boolean;
 }
 
 /** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
-async function executeBatchStatement(
+/** @internal Execute one already-analyzed statement without duplicating batch semantics. */
+export async function executeBatchStatement(
   context: ExecutionContext
 ): Promise<BatchStatementOutcome> {
   const {
