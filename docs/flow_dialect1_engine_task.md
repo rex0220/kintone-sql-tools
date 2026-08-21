@@ -5,7 +5,7 @@
 **担当**: Claude Code
 **最終更新**: 2026-08-21
 
-- ステータス: 🚧 **B168 裁定済み・実装中（Stage 1）**（2026-08-21・Q1〜Q9/Q11＝[実装計画 R2](internal/ksql_b168_flow_dialect1_plan.md) §5 の推奨案で確定・Q10 は B169＝v3.67.0 で先行解消）。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
+- ステータス: ✅ **B168 完了**（2026-08-21・全 6 段実装・v3.68.0＝Stage 1-3・**v3.69.0＝Stage 4-6**・受入基準 1〜8 全達成。裁定と前提訂正・残務は [実装計画 R2](internal/ksql_b168_flow_dialect1_plan.md) を参照）。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
 
 ---
 
