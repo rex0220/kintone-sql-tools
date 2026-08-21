@@ -93,7 +93,9 @@ export async function explainScript(
       opts.resolveMetadata,
       opts.recursiveCteMaxDepth,
       opts.recursiveCteMaxRows,
-      opts.recursiveCteMaxExpansions
+      opts.recursiveCteMaxExpansions,
+      opts.asOf,
+      opts.timezone
     );
   } catch (error) {
     throw normalizeFlowError(error);
@@ -124,13 +126,26 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     }
     const handle = {} as ExecutionContext;
     const {
-      client, script: _script, statements: _statements, meta: _meta, apps: _apps, ...executeOptions
+      client, script: _script, statements: _statements, meta: _meta, apps: _apps,
+      onChunkWritten, ...executeOptions
     } = opts;
     const bindings = bindingsByStatements.get(statements as object);
     const executionClient = bindings ? routeClient(client, bindings) : client;
+    const routedOnChunkWritten = onChunkWritten && bindings
+      ? (info: import("./publicTypes").FlowChunkWrittenInfo) => onChunkWritten({
+          ...info,
+          appId: bindings.get(info.appId)?.appId ?? info.appId,
+        })
+      : onChunkWritten;
     handles.set(
       handle as object,
-      createManagedStatementExecutionContext(statements, dialect, executionClient, executeOptions)
+      createManagedStatementExecutionContext(
+        statements,
+        dialect,
+        executionClient,
+        executeOptions,
+        routedOnChunkWritten
+      )
     );
     return handle;
   } catch (error) {
@@ -159,7 +174,11 @@ export async function executeStatement(
   ) {
     kind = "EXIT_NO_DATA";
   }
-  return { ...internal, kind, metrics: managed.metrics };
+  return { ...internal, kind, metrics: snapshotMetrics(managed.metrics) };
+}
+
+function snapshotMetrics(metrics: import("./publicTypes").ExecutionMetrics): import("./publicTypes").ExecutionMetrics {
+  return { ...metrics, limitReachedApps: [...metrics.limitReachedApps] };
 }
 
 export async function disposeExecutionContext(context: ExecutionContext): Promise<void> {
@@ -220,6 +239,7 @@ function routeClient(
   };
 }
 
+export { isDmlResult } from "./publicTypes";
 export { createKintoneClient, KsqlFlowError };
 export type {
   CreateExecutionContextOptions,
@@ -230,7 +250,13 @@ export type {
   ExplainScriptOptions,
   ExplainScriptResult,
   FieldInfo,
+  FlowChunkWrittenInfo,
+  FlowDeleteResult,
+  FlowDmlResult,
+  FlowInsertResult,
   FlowKintoneClient,
+  FlowUpdateResult,
+  FlowUpsertResult,
   ParseScriptOptions,
   ParseScriptResult,
   SchemaResolver,
