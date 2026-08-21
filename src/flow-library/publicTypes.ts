@@ -104,6 +104,10 @@ export interface ValidateScriptOptions extends ParseScriptOptions {
 export interface ExplainScriptOptions extends ParseScriptOptions {
   client: FlowKintoneClient;
   variables?: Readonly<Record<string, string>>;
+  /** dialect 1 の @ 付き時刻関数が共有する explain 呼出し単位の基準時刻。 */
+  asOf?: Date;
+  /** @TODAY() などの暦日境界に使う IANA timezone。省略時はホスト timezone。 */
+  timezone?: string;
   maxRecords?: number;
   cursorMaxActive?: number;
   dmlMaxRows?: number;
@@ -140,6 +144,24 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   asOf?: Date;
   timezone?: string;
   continueOnError?: boolean;
+  /**
+   * 書込 API の各成功直後に await される。順序は現在の書込順であり、キー順は保証しない。
+   * コールバックが throw した場合、その文は error になるが、通知対象チャンクは書込済み。
+   */
+  onChunkWritten?: (info: FlowChunkWrittenInfo) => void | Promise<void>;
+}
+
+export interface FlowChunkWrittenInfo {
+  /** バッチ内の文 index（0 始まり）。 */
+  statementIndex: number;
+  /** 書込 API に渡される物理アプリ ID（LAPP は解決済み）。 */
+  appId: number;
+  operation: "INSERT" | "UPDATE" | "DELETE";
+  records: number;
+  /** その文で成功した書込 API リクエストの index（0 始まり）。 */
+  chunkIndex: number;
+  /** 単一キー UPSERT でキー値を payload から特定できる場合のみ設定される。 */
+  lastKeyValue?: string;
 }
 
 declare const executionContextBrand: unique symbol;
@@ -178,6 +200,54 @@ export interface ExecutionMetrics {
   elapsedMs: number;
 }
 
+export interface FlowInsertResult {
+  type: "INSERT";
+  createdIds: string[][];
+  insertedCount: number;
+}
+
+export interface FlowUpdateResult {
+  type: "UPDATE";
+  updatedCount: number;
+}
+
+export interface FlowDeleteResult {
+  type: "DELETE";
+  deletedCount: number;
+}
+
+export interface FlowUpsertResult {
+  type: "UPSERT";
+  insertedCount: number;
+  updatedCount: number;
+}
+
+/**
+ * /flow が安定契約とする通常 DML 結果。
+ * 実体に APPLY / IMPORT 系の任意フィールドが載っていても、それらはこの契約の対象外。
+ */
+export type FlowDmlResult =
+  | FlowInsertResult
+  | FlowUpdateResult
+  | FlowDeleteResult
+  | FlowUpsertResult;
+
+export function isDmlResult(result: unknown): result is FlowDmlResult {
+  if (result === null || typeof result !== "object") return false;
+  const value = result as Record<string, unknown>;
+  switch (value.type) {
+    case "INSERT":
+      return Array.isArray(value.createdIds)
+        && value.createdIds.every((ids) => Array.isArray(ids) && ids.every((id) => typeof id === "string"))
+        && typeof value.insertedCount === "number";
+    case "UPDATE": return typeof value.updatedCount === "number";
+    case "DELETE": return typeof value.deletedCount === "number";
+    case "UPSERT":
+      return typeof value.insertedCount === "number" && typeof value.updatedCount === "number";
+    default: return false;
+  }
+}
+
 export type StatementResultKind =
   | "STATEMENT"
   | "ASSERT_PASSED"
@@ -195,6 +265,7 @@ export interface StatementResult {
   rowCount?: number;
   error?: StatementError;
   skippedReason?: string;
+  /** コンテキスト開始から当該文終了時までの累積 deep-copy スナップショット。文単位値は前回との差分で求める。 */
   metrics: ExecutionMetrics;
 }
 

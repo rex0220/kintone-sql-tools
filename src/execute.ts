@@ -191,7 +191,7 @@ import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import { parseSqlStatementsForScript } from "./core/sql";
-import { asOfVariableName, createAsOfClock } from "./core/asOfClock";
+import { asOfFunctionNameFromVariable, asOfVariableName, createAsOfClock } from "./core/asOfClock";
 import {
   DIALECT1_SERVER_TIME_FUNCTION_WARNING,
   statementHasBareServerTimeFunctionInWhere,
@@ -1121,7 +1121,7 @@ async function executeParsedStatement(
   if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
   const unresolved = findVariableRef(stmt);
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
-    throw new Error(`ParseError: variable @${unresolved} is not defined in a batch.`);
+    throw new Error(undefinedBatchVariableMessage(unresolved, "in a batch"));
   }
   assertApplyScope("phase15b", stmt);
   assertApplyExecutionScope("phase15b", stmt);
@@ -1784,10 +1784,21 @@ export interface ManagedStatementExecutionContext {
   readonly deadline: number | null;
   readonly failed: Set<number>;
   readonly cursorCleanups: Set<() => Promise<void>>;
+  readonly onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>;
   nextIndex: number;
   aborted: "fail-fast" | "timeout" | "assertion" | "exit" | null;
   disposed: boolean;
   busy: boolean;
+}
+
+/** @internal /flow write checkpoint payload. */
+export interface ManagedChunkWrittenInfo {
+  statementIndex: number;
+  appId: number;
+  operation: "INSERT" | "UPDATE" | "DELETE";
+  records: number;
+  chunkIndex: number;
+  lastKeyValue?: string;
 }
 
 /** @internal Prepare the exact state consumed by executeBatchStatement(). */
@@ -1795,7 +1806,8 @@ export function createManagedStatementExecutionContext(
   statements: readonly Statement[],
   dialect: 0 | 1,
   client: KintoneClient,
-  options: BatchExecuteOptions = {}
+  options: BatchExecuteOptions = {},
+  onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   const mutableStatements = [...statements];
@@ -1846,6 +1858,7 @@ export function createManagedStatementExecutionContext(
     deadline: options.timeoutMs != null ? startedAt + options.timeoutMs : null,
     failed: new Set(),
     cursorCleanups: new Set(),
+    ...(onChunkWritten ? { onChunkWritten } : {}),
     nextIndex: 0,
     aborted: null,
     disposed: false,
@@ -1904,11 +1917,19 @@ export async function executeManagedStatement(
     const cursorScope = wrapClientWithCursorScope(statementClient);
     managed.cursorCleanups.add(cursorScope.closeActive);
     const remaining = managed.deadline !== null ? managed.deadline - Date.now() : null;
+    const executionClient = managed.onChunkWritten
+      ? wrapClientWithChunkWrittenCallback(
+          cursorScope.client,
+          index,
+          statement,
+          managed.onChunkWritten
+        )
+      : cursorScope.client;
     const outcome = await runWithDeadline(
       executeBatchStatement({
         stmt: statement,
         info,
-        client: cursorScope.client,
+        client: executionClient,
         options: managed.options,
         cacheContext: managed.cacheContext,
         tempTables: managed.tempTables,
@@ -1951,6 +1972,61 @@ export async function disposeManagedStatementExecutionContext(
   managed.cursorCleanups.clear();
   releaseMetadataCacheScope(managed.cacheContext);
   managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+}
+
+/** /flow 管理層だけで有効にする、書込 API 成功境界の薄い observer。 */
+function wrapClientWithChunkWrittenCallback(
+  client: KintoneClient,
+  statementIndex: number,
+  statement: Statement,
+  callback: (info: ManagedChunkWrittenInfo) => void | Promise<void>
+): KintoneClient {
+  let chunkIndex = 0;
+  const notify = async (
+    appId: number,
+    operation: ManagedChunkWrittenInfo["operation"],
+    records: number,
+    lastKeyValue?: string
+  ): Promise<void> => {
+    await callback({
+      statementIndex,
+      appId,
+      operation,
+      records,
+      chunkIndex: chunkIndex++,
+      ...(lastKeyValue === undefined ? {} : { lastKeyValue }),
+    });
+  };
+  const upsertKey = (statement.type === "UPSERT" || statement.type === "UPSERT_SELECT")
+    && statement.keyFields.length === 1
+    ? statement.keyFields[0]
+    : undefined;
+  const lastKey = (records: readonly KintoneRecord[]): string | undefined => {
+    if (upsertKey === undefined || records.length === 0) return undefined;
+    const value = records[records.length - 1][upsertKey]?.value;
+    return typeof value === "string" ? value : undefined;
+  };
+  return {
+    ...client,
+    postRecords: async (params) => {
+      const result = await client.postRecords(params);
+      await notify(params.app, "INSERT", params.records.length, lastKey(params.records));
+      return result;
+    },
+    putRecords: async (params) => {
+      await client.putRecords(params);
+      await notify(
+        params.app,
+        "UPDATE",
+        params.records.length,
+        lastKey(params.records.map((record) => record.record))
+      );
+    },
+    deleteRecords: async (params) => {
+      await client.deleteRecords(params);
+      await notify(params.app, "DELETE", params.ids.length);
+    },
+  };
 }
 
 function statementHasApplyMutation(statement: Statement): boolean {
@@ -2431,6 +2507,12 @@ export function resolveBatchVariableReferences<T>(node: T, variables: Map<string
   return resolveBatchVariableReferencesInternal(node, variables, false);
 }
 
+function undefinedBatchVariableMessage(name: string, location: string): string {
+  return asOfFunctionNameFromVariable(name) === null
+    ? `ParseError: variable @${name} is not defined ${location}.`
+    : `ParseError: @NOW() などの as-of 関数は基準時刻が初期化されていません。`;
+}
+
 function resolveBatchVariableReferencesInternal<T>(
   node: T,
   variables: Map<string, VarValue>,
@@ -2444,7 +2526,7 @@ function resolveBatchVariableReferencesInternal<T>(
     if (obj["type"] === "VARIABLE" && typeof obj["name"] === "string") {
       const value = variables.get(obj["name"]);
       if (value === undefined) {
-        throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+        throw new Error(undefinedBatchVariableMessage(obj["name"], "in this batch"));
       }
       if (value.type === "array") {
         throw new Error(`ParseError: array variable @${obj["name"]} can only be used as IN @${obj["name"]}.`);
@@ -2478,7 +2560,7 @@ function resolveBatchVariableReferencesInternal<T>(
     if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string"
         && (typeof obj["alias"] === "string" || obj["alias"] === null)) {
       const value = variables.get(obj["name"]);
-      if (value === undefined) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
+      if (value === undefined) throw new Error(undefinedBatchVariableMessage(obj["name"], "in this batch"));
       if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);
       if (value.type === "relative-date") {
         throw new Error(`InternalError: RELATIVE_DATE variable @${obj["name"]} reached a SELECT column.`);
@@ -2514,7 +2596,7 @@ function resolveBatchVariableReferencesInternal<T>(
       const right = resolved["right"] as Record<string, unknown> | undefined;
       if (right?.["type"] === "VARIABLE_IN_LIST" && typeof right["name"] === "string") {
         const value = variables.get(right["name"]);
-        if (value === undefined) throw new Error(`ParseError: variable @${right["name"]} is not defined in this batch.`);
+        if (value === undefined) throw new Error(undefinedBatchVariableMessage(right["name"], "in this batch"));
         if (value.type !== "array") {
           throw new Error(`ParseError: scalar variable @${right["name"]} cannot be used as IN @${right["name"]}; use IN (@${right["name"]}) instead.`);
         }
@@ -12127,8 +12209,12 @@ export async function buildBatchExplainPlans(
   resolveMetadata = true,
   recursiveCteMaxDepth?: number,
   recursiveCteMaxRows?: number,
-  recursiveCteMaxExpansions?: number
+  recursiveCteMaxExpansions?: number,
+  asOf?: Date,
+  timezone?: string
 ): Promise<BatchExplainResult> {
+  // executeBatch と同じく、parse / metadata API より前に呼出単位で一度だけ固定する。
+  const asOfClock = createAsOfClock(asOf ?? new Date(), timezone);
   const recursiveLimits = resolveRecursiveCteLimits({
     recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
   });
@@ -12139,6 +12225,9 @@ export async function buildBatchExplainPlans(
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
     const variables = new Map<string, VarValue>();
+    for (const [name, value] of Object.entries(asOfClock.values)) {
+      variables.set(asOfVariableName(name as keyof typeof asOfClock.values), { type: "string", value });
+    }
     const literalDeclareDefaults = new Map<string, string>();
     const tempSchemaLedger = new Map<string, ExplainTempSchemaEntry>();
     const plans: BatchStatementPlan[] = [];

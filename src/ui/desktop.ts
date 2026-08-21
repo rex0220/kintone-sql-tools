@@ -5,7 +5,6 @@
 import {
   execute,
   executeBatch,
-  buildBatchExplainPlans,
   parseSqlStatement,
   parseSqlStatementsForScript,
   analyzeBatch,
@@ -15,6 +14,7 @@ import {
   writesKintone,
   OperationCancelledError,
 } from "../core";
+import { buildPluginBatchExplainPlans } from "./batchExplain";
 import type {
   BatchExecuteResult,
   DmlConfirmContext,
@@ -2006,11 +2006,14 @@ async function batchPlansToSelectResult(
     recursiveCteMaxExpansions: number;
   }
 ): Promise<SelectResult> {
-  const plans = await buildBatchExplainPlans(
-    sql, client, undefined, "batch-explain", options.maxRecords, latestPanelCursorMaxActive,
-    selectedImportSource !== null, 100, undefined, true,
-    options.recursiveCteMaxDepth, options.recursiveCteMaxRows, options.recursiveCteMaxExpansions
-  );
+  const plans = await buildPluginBatchExplainPlans(sql, client, {
+    maxRecords: options.maxRecords,
+    cursorMaxActive: latestPanelCursorMaxActive,
+    importEnabled: selectedImportSource !== null,
+    recursiveCteMaxDepth: options.recursiveCteMaxDepth,
+    recursiveCteMaxRows: options.recursiveCteMaxRows,
+    recursiveCteMaxExpansions: options.recursiveCteMaxExpansions,
+  });
   const rows: Array<{ plan: string }> = [];
   plans.statements.forEach((p) => {
     if (p.index > 0) rows.push({ plan: "" });
