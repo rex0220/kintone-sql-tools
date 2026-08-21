@@ -131,7 +131,7 @@ const STATEMENT_CORPUS = {
     targetType: "ASSERT",
   },
   EXIT: {
-    sql: "EXIT SUCCESS IF 1 = 1, 'done'",
+    sql: "-- @ksql dialect: 1\nEXIT SUCCESS IF 1 = 1, 'done'",
     targetIndex: 0,
     targetType: "EXIT",
   },
@@ -265,8 +265,9 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
         .flat()
     );
     const missingFromCatalog = [...corpusTypes]
-      // Flow syntax is intentionally published to the MCP catalog in B168 Stage 6.
-      .filter((type) => type !== "EXIT" && !catalogTypes.has(type))
+      // B168 Stage 6 publishes Flow syntax, so EXIT now participates in the
+      // same exhaustive catalog drift guard while its /engine surface stays null.
+      .filter((type) => !catalogTypes.has(type))
       .sort();
     const unknownToCorpus = [...catalogTypes]
       .filter((type) => !corpusTypes.has(type as StatementType))
@@ -305,12 +306,12 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
     }
   });
 
-  test("every MCP read-only acceptance is accepted by runQuery/runBatch or one of exactly three write-oriented exceptions", async () => {
+  test("every MCP read-only acceptance matches /engine, except Flow-only EXIT and exactly three write-oriented exceptions", async () => {
     const tools = createKsqlMcpTools({ profile: "test" });
     const cases: readonly CorpusCase[] = [
-      // Flow dialect exposure through MCP is B168 Stage 6; Stage 2 only adds
-      // the engine/parser type and execution semantics.
-      ...Object.values(STATEMENT_CORPUS).filter((entry) => entry.targetType !== "EXIT"),
+      // B168 Stage 6 exposes EXIT through MCP. It remains intentionally absent
+      // from the unchanged /engine library surface recorded by LIBRARY_SURFACE.
+      ...Object.values(STATEMENT_CORPUS),
       APPLY_CASE,
     ];
     const observedExceptions = new Set<ParityException>();
@@ -329,6 +330,13 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
       const mcpAcceptsAsReadOnly = validation.canRunWithQueryTool;
       const acceptedByLibrary = libraryAccepts(entry.sql);
       const exception = parityException(target);
+
+      if (target.type === "EXIT") {
+        expect(mcpAcceptsAsReadOnly).toBe(true);
+        expect(acceptedByLibrary).toBe(false);
+        expect(EXPECTED_LIBRARY_SURFACE.EXIT).toBeNull();
+        continue;
+      }
 
       if (mcpAcceptsAsReadOnly && !acceptedByLibrary) {
         expect(exception).not.toBeNull();

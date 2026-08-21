@@ -29,6 +29,12 @@ describe("MCP statement syntax catalog contract", () => {
         "tempTable",
         "variables",
         "assert",
+        "flowHeader",
+        "flowAssert",
+        "flowExit",
+        "flowTempTable",
+        "flowUpsert",
+        "flowMerge",
         "reorder",
         "showDescribe",
         "explain",
@@ -87,6 +93,16 @@ describe("MCP statement syntax catalog contract", () => {
     expect(STATEMENT_SYNTAX_CATALOG.apply.examples).toHaveLength(3);
     for (const example of STATEMENT_SYNTAX_CATALOG.apply.examples) {
       expect(example).toContain("VALIDATE ONLY");
+    }
+
+    for (const id of [
+      "flowHeader", "flowAssert", "flowExit", "flowTempTable", "flowUpsert", "flowMerge",
+    ] as const) {
+      const entry = STATEMENT_SYNTAX_CATALOG[id];
+      expect(entry.template).toContain("-- @ksql dialect: 1 の宣言が必要");
+      for (const example of entry.examples) {
+        expect(example).toContain("-- @ksql dialect: 1");
+      }
     }
   });
 });

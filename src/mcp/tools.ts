@@ -19,7 +19,12 @@ import {
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
+import type { SqlRewriteSegment } from "../core/logicalApps";
 import { isRelativeDateFunctionName } from "../core/relativeDateFunction";
+import { diagnosticAt, type Diagnostic } from "../core/diagnostics";
+import { validateScriptCore } from "../core/dialect1Validation";
+import { parseScript } from "../core/script";
+import { parseScriptHeader, type ScriptHeaderMeta } from "../core/scriptHeader";
 import { restoreSqlContextError, restoreSqlDiagnosticValue } from "../node/sqlDiagnostics";
 import { isImportCapabilityGateError } from "../import/importGateError";
 import { isNoFromSelectStatement } from "../node/dmlGuard";
@@ -137,6 +142,15 @@ interface ValidationCommon {
     appId: number;
     profile: string;
   }>;
+  /** Present only when the source opts into dialect 1. */
+  diagnostics?: Diagnostic[];
+  /** Present only when the source opts into dialect 1. */
+  scriptMeta?: ScriptHeaderMeta;
+}
+
+interface Dialect1ValidationFields {
+  diagnostics: Diagnostic[];
+  scriptMeta: ScriptHeaderMeta;
 }
 
 /** 単文入力の検証結果。トップレベルのスカラーフィールドは従来互換 */
@@ -254,6 +268,25 @@ function normalizeSqlForTool(
     sqlContext,
     sourceSql: sql,
   };
+}
+
+function sourceOffsetForNormalizedOffset(
+  offset: number,
+  segments: readonly Readonly<SqlRewriteSegment>[]
+): number {
+  if (segments.length === 0) return offset;
+  for (const segment of segments) {
+    if (offset < segment.normalizedStart || offset > segment.normalizedEnd) continue;
+    const normalizedLength = segment.normalizedEnd - segment.normalizedStart;
+    const sourceLength = segment.sourceEnd - segment.sourceStart;
+    if (normalizedLength === sourceLength) {
+      return segment.sourceStart + Math.min(offset - segment.normalizedStart, sourceLength);
+    }
+    if (offset === segment.normalizedStart) return segment.sourceStart;
+    if (offset === segment.normalizedEnd) return segment.sourceEnd;
+    return segment.sourceStart;
+  }
+  return segments[segments.length - 1].sourceEnd;
 }
 
 function toValidationBinding(mappedAppId: number, binding: AppBinding) {
@@ -527,8 +560,9 @@ export function createKsqlMcpTools(
     //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
     let analysis: ReturnType<typeof analyzeBatch>;
     let statements: ReturnType<typeof parseSqlStatementsForScript>["statements"];
+    let scriptMeta: ScriptHeaderMeta;
     try {
-      ({ statements } = parseSqlStatementsForScript(normalized.normalizedSql, { import: importOptions.enableImport }));
+      ({ statements, meta: scriptMeta } = parseSqlStatementsForScript(normalized.normalizedSql, { import: importOptions.enableImport }));
       analysis = analyzeBatch(statements);
     } catch (err) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
@@ -540,6 +574,36 @@ export function createKsqlMcpTools(
       analysis.statements[index]?.isDml === true && statementHasApplyBlocks(statement)
     );
     const requiresSchemaAwareValidation = statements.some(containsRelativeDateFunction);
+    let dialect1Fields: Dialect1ValidationFields | undefined;
+    if (scriptMeta.dialect === 1) {
+      const parsed = parseScript(normalized.normalizedSql);
+      const coreDiagnostics = await validateScriptCore(
+        statements,
+        scriptMeta,
+        undefined,
+        { strict: input.strict }
+      );
+      const positioned = coreDiagnostics.map((item) => {
+        const normalizedOffset = parsed.statementRanges[item.statementIndex ?? 0]?.start ?? 0;
+        const sourceOffset = sourceOffsetForNormalizedOffset(
+          normalizedOffset,
+          normalized.sqlContext.rewriteSegments
+        );
+        return diagnosticAt(input.sql, sourceOffset, {
+          severity: item.severity,
+          code: item.code,
+          message: item.message,
+          ...(item.statementIndex !== undefined ? { statementIndex: item.statementIndex } : {}),
+        });
+      });
+      dialect1Fields = {
+        diagnostics: [
+          ...parseScriptHeader(input.sql).diagnostics.filter((item) => item.severity === "warning"),
+          ...positioned,
+        ],
+        scriptMeta,
+      };
+    }
 
     const statementValidations: StatementValidation[] = analysis.statements.map((s) => ({
       index: s.index,
@@ -575,6 +639,7 @@ export function createKsqlMcpTools(
       hasProfileSyntax: normalized.hasProfileSyntax,
       cacheContext: normalized.cacheContext,
       appBindings,
+      ...(dialect1Fields ?? {}),
       ...(requiresSchemaAwareValidation ? {
         validationScope: "syntax-and-arguments-only" as const,
         executionValidated: false as const,

@@ -88,7 +88,7 @@ const FUNCTION_CATALOG_PARAGRAPH = `Complete function catalog — Scalar: ${KSQL
 
 export const KSQL_MCP_INSTRUCTIONS = `kSQL MCP server version ${SERVER_VERSION}.
 
-kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged-families plus JOIN, aggregates, windows, subtables, CHECK, KLIKE, KORDER_BY, @variables, LAPP_<NAME>, and read-only WITH RECURSIVE/CYCLE(one-self-INNER-JOIN,no-DML-source/mutual-recursion,three-query/explain-recursiveCteMax*-boundaries) fail-closed.
+kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged-families plus JOIN, aggregates, windows, subtables, CHECK, KLIKE, KORDER_BY, @variables, LAPP_<NAME>, and read-only WITH RECURSIVE/CYCLE(one-self-INNER-JOIN,no-DML-source/mutual-recursion,three-query/explain-recursiveCteMax*-boundaries) fail-closed. Flow dialect 1 is opt-in via -- @ksql dialect: 1; see language reference §27 for headers, control, aliases, and as-of functions.
 
 Key rules: LIKE/NOT LIKE uses JavaScript semantics; JOIN ON allows one equality; derived tables are unsupported (use WITH/temp tables); empty numeric cells become 0 in arithmetic. APPLY supports validation, EXPLAIN, and VALIDATE ONLY; APPLY mutation is disabled in MCP.
 

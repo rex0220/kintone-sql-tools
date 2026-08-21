@@ -122,8 +122,9 @@ describe("ksql_app_metadata MCP surface", () => {
       // 「気づかないうちに膨らむ」ことの検知には実績がある。
       // B125: SUM / COUNT / AVG / MIN / MAX を window catalog にも公開。
       // B158: SELECT syntax catalog に CROSS JOIN 分岐を追加。
+      // B168 Stage 6b: Flow dialect 1 の 6 文型と opt-in 案内を追加。
       // B53 出荷時に文型カタログから内部用語「Phase1 forms」を除去（-2 tokens・意図した縮小）
-      expect(budget).toEqual({ total: 559, catalog: 264, prose: 295 });
+      expect(budget).toEqual({ total: 663, catalog: 347, prose: 316 });
 
       // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
       // "Optional instructions for the client" と書くだけでサイズ規定を持たず、

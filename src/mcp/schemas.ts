@@ -67,6 +67,9 @@ export const validateInputSchema = z.object({
     .describe("kSQL text to validate. May contain multiple ;-separated statements (batch), temp tables (#name), read-only WITH RECURSIVE with one UNION ALL self-reference and optional single-column CYCLE, WITH CTE-body GENERATE_SERIES integer/DATE series (DATE step: day/month/year, with month-start/year-start anchors), and every APPLY form (UPDATE/INSERT/UPSERT/multi-value); validation never enables APPLY mutation. Recursive schema-dependent type proof and runtime boundaries are deferred to ksql_query/ksql_explain. Literal GENERATE_SERIES arguments are checked statically, while variable-dependent type/step/row-limit decisions are deferred to execution. Relative-date functions are checked for syntax and argument shape only here; ksql_query/ksql_explain/runtime performs the final schema-aware decision."),
   profile,
   importSources,
+  strict: z.boolean()
+    .optional()
+    .describe("Dialect 1 static validation only: promote the bare INSERT diagnostic KSQL1305 from warning to error. Diagnostics remain in an ok:true response; validation never executes SQL or calls kintone APIs."),
 });
 
 export const explainInputSchema = z.object({
