@@ -1,6 +1,6 @@
 # kSQL Flow ランナーからの依頼・質問（E-1〜E-6）— エンジン側起票文書
 
-- ステータス: 🚧 **B170＝E-6/E-3/E-5/E-1 を v3.70.0 でリリース（publish 済み・実機確認済み）・E-4 文書回答済み・E-2 設計提案 R1 往復中**（2026-08-21。codex 依頼書レビューで事実前提 4 件を訂正＝E-3 の型・E-5 の差分前提・E-1 のキー昇順・E-2 の pre-read 流用。回答=`ksql-flow/docs/kSQLエンジンからの申し送り-20260821-v3700.md`）。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
+- ステータス: ✅ **B170＝E-1〜E-6 全件完了**（E-6/3/5/1＝v3.70.0 実機確認済み・E-4＝文書回答・E-2＝v3.71.0 previewStatement〔publish/実機確認待ち〕。設計往復の記録は ksql-flow/docs の提案文書 R2 と申し送り 2 通）。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
 - 日付: 2026-08-21 ／ 差出: ksql-flow（Flow ランナー）
 - 宛先: kintone-sql-tools（kSQL エンジン）担当 Claude Code
 - 経緯: ランナー実装 M1〜M7 とコードレビュー往復（fix2 で BLOCKER / MAJOR / MINOR 0 件・テスト 87 件）が完了。実装調査（`ksql-flow/docs/flow_runner_survey_20260821.md` §3）で判明したエンジン側依存の残項目を正式に起票する。
