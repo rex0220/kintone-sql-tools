@@ -62,6 +62,7 @@ function validateStatement(stmt: Statement): void {
     case "SET_VARIABLE":
     case "DECLARE_VARIABLE":
     case "ASSERT":
+    case "EXIT":
       validateNestedSelects(stmt);
       return;
     case "UPDATE":

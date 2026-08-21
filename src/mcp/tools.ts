@@ -301,6 +301,8 @@ function toAssertPayload(result: AssertResult) {
     ok: true,
     type: result.type,
     condition: result.condition,
+    ...(result.passed !== undefined ? { passed: result.passed } : {}),
+    ...(result.warning !== undefined ? { warning: result.warning } : {}),
   };
 }
 
@@ -377,6 +379,9 @@ function toMutationPayload(result: Exclude<ExecuteResult, SelectResult | AssertR
       ...(result.rejectLimit !== undefined ? { rejectLimit: result.rejectLimit } : {}),
       ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
     };
+  }
+  if (result.type === "EXIT") {
+    return { ok: true, type: result.type, condition: result.condition, exited: result.exited, message: result.message };
   }
   return {
     ok: true,

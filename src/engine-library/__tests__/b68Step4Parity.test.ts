@@ -130,6 +130,11 @@ const STATEMENT_CORPUS = {
     targetIndex: 0,
     targetType: "ASSERT",
   },
+  EXIT: {
+    sql: "EXIT SUCCESS IF 1 = 1, 'done'",
+    targetIndex: 0,
+    targetType: "EXIT",
+  },
   IMPORT: {
     sql: "IMPORT INTO APP1 (code) FROM CSV source VALIDATE ONLY",
     targetIndex: 0,
@@ -168,6 +173,7 @@ const EXPECTED_LIBRARY_SURFACE = {
   SET_VARIABLE: "runBatch",
   DECLARE_VARIABLE: "runBatch",
   ASSERT: "runBatch",
+  EXIT: null,
   IMPORT: null,
 } satisfies Record<StatementType, LibrarySurface | null>;
 
@@ -193,7 +199,9 @@ const EXCEPTION_REASONS = {
 function parseCase(entry: CorpusCase): Statement[] {
   return parseSqlStatements(
     entry.sql,
-    entry.importSource === undefined ? undefined : { import: true }
+    entry.targetType === "EXIT"
+      ? { dialect1: true }
+      : entry.importSource === undefined ? undefined : { import: true }
   );
 }
 
@@ -257,7 +265,8 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
         .flat()
     );
     const missingFromCatalog = [...corpusTypes]
-      .filter((type) => !catalogTypes.has(type))
+      // Flow syntax is intentionally published to the MCP catalog in B168 Stage 6.
+      .filter((type) => type !== "EXIT" && !catalogTypes.has(type))
       .sort();
     const unknownToCorpus = [...catalogTypes]
       .filter((type) => !corpusTypes.has(type as StatementType))
@@ -299,7 +308,9 @@ describe("B68 Step 4 MCP READ / engine-library syntax parity", () => {
   test("every MCP read-only acceptance is accepted by runQuery/runBatch or one of exactly three write-oriented exceptions", async () => {
     const tools = createKsqlMcpTools({ profile: "test" });
     const cases: readonly CorpusCase[] = [
-      ...Object.values(STATEMENT_CORPUS),
+      // Flow dialect exposure through MCP is B168 Stage 6; Stage 2 only adds
+      // the engine/parser type and execution semantics.
+      ...Object.values(STATEMENT_CORPUS).filter((entry) => entry.targetType !== "EXIT"),
       APPLY_CASE,
     ];
     const observedExceptions = new Set<ParityException>();

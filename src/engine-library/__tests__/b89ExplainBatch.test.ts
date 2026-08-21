@@ -241,6 +241,7 @@ const EXPLAIN_PARITY = {
     accepted: true,
   },
   ASSERT: { sql: "ASSERT 1 = 1", accepted: true },
+  EXIT: { sql: "EXIT SUCCESS IF 1 = 1, 'done'", accepted: false },
   IMPORT: {
     sql: "IMPORT INTO APP1 (code) FROM CSV source VALIDATE ONLY",
     accepted: false,
