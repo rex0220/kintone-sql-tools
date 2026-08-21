@@ -3,6 +3,35 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.68.0（2026-08-21）
+
+### 新機能（B168 Flow dialect 1 の解析基盤＝Stage 1-3）**※opt-in・既存構文は完全不変・実験的**
+
+kSQL Flow（別リポジトリのバッチ実行ランナー）向けの拡張構文 **dialect 1** の解析基盤です。
+バッチ SQL の**先頭に `-- @ksql dialect: 1` を宣言したときだけ**有効になります。
+宣言なし（dialect 0＝既定）の SQL の挙動は一切変わりません。
+
+```sql
+-- @ksql name: monthly_sales_sync
+-- @ksql dialect: 1
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 金額 < 0) = 0, '異常データがあるため中断';
+
+CREATE TEMP TABLE summary AS
+SELECT 顧客コード, SUM(金額) AS 合計 FROM APP100 GROUP BY 顧客コード;
+
+EXIT SUCCESS IF (SELECT COUNT(*) FROM summary) = 0, '対象 0 件のためスキップ';
+
+UPSERT INTO APP200 (顧客コード, 実績) SELECT 顧客コード, 合計 FROM summary KEY (顧客コード);
+```
+
+- **`-- @ksql` ヘッダ**: `name` / `depends_on` / `timeout` / `dialect` を解析（値の制約検証つき・未知キーは警告扱い）
+- **`ASSERT <条件>, 'メッセージ'` / `ASSERT WARN`**: メッセージ付きアサートと「警告して続行」（既存のメッセージ無し ASSERT は dialect 0/1 双方で従来どおり）
+- **`EXIT SUCCESS IF <条件>, 'メッセージ'`**: 正常な早期終了（成立で後続文を skip・バッチは成功扱い＝異常中断の ASSERT と区別）
+- **構文エイリアス**（パース時に既存構文へ正規化・実行系は同一）: `CREATE TEMP TABLE 裸名 AS` ≡ `#裸名`／`UPSERT ... KEY (k)` ≡ `ON DUPLICATE (k)`／`MERGE INTO ... USING ... WHEN MATCHED/NOT MATCHED` → UPSERT（単一キー等値 ON・両句の式一致が条件・片側省略は代替構文を案内するエラー）
+- dialect 0 で dialect 1 構文を使うと「`-- @ksql dialect: 1` の宣言が必要です」エラー
+- **変わらないもの**: 宣言なしの既存 SQL すべて・既存 ASSERT・エラー code・MCP/エンジンライブラリの応答形状（dialect 1 の公式 API・MCP 対応・言語リファレンス掲載・as-of 注入・validate 拡張は後続リリース。**本版の dialect 1 は実験的扱い**で、細部は後続リリースで変わる可能性があります）
+- 内部: 構造化診断（行・列付き）の基盤・文単位実行文脈の整理（B169 のクロックを統合）を同梱（挙動不変）
+
 ## v3.67.0（2026-08-21）
 
 ### 修正（B169 `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` を文単位の固定時刻評価へ）**※結果が変わる形があります**

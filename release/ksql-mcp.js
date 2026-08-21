@@ -29764,7 +29764,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.67.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.68.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -30370,7 +30370,7 @@ var Lexer = class {
   // ヘルパー
   // ----------------------------------------------------------
   makeToken(kind, value, pos) {
-    return { kind, value, pos };
+    return { kind, value, pos, end: this.pos };
   }
 };
 function isIdentStart(ch) {
@@ -30987,6 +30987,8 @@ var Parser = class {
     this.allowRelativeDateFunctions = false;
     /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
     this.cteNames = /* @__PURE__ */ new Set();
+    /** dialect 1 の裸名で宣言された一時テーブル名（参照時に # 付きへ正規化） */
+    this.bareTempTableNames = /* @__PURE__ */ new Set();
     /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
     this.tempTableRefs = [];
     /** GROUP BY を読む前に作る B124 候補 leaf の診断位置。AST 公開型へ位置情報を足さない。 */
@@ -31025,7 +31027,12 @@ var Parser = class {
   }
   /** 複文（`;` 区切り）をパースする。空文はスキップする */
   parseStatements() {
+    return this.parseStatementsWithRanges().statements;
+  }
+  /** 複文と、原文上の文ごとの文字範囲を同時に返す。 */
+  parseStatementsWithRanges() {
     const stmts = [];
+    const statementRanges = [];
     while (true) {
       while (this.peek().kind === ";" /* SEMICOLON */) this.advance();
       if (this.peek().kind === "EOF" /* EOF */) break;
@@ -31041,9 +31048,11 @@ var Parser = class {
       if (after.kind !== ";" /* SEMICOLON */ && after.kind !== "EOF" /* EOF */) {
         throw new ParseError("\u6587\u306E\u533A\u5207\u308A\u306B\u306F ; \u304C\u5FC5\u8981\u3067\u3059", after);
       }
+      const lastTok = this.prev();
+      statementRanges.push({ start: startTok.pos, end: lastTok.end ?? after.pos });
     }
     this.expect("EOF" /* EOF */);
-    return stmts;
+    return { statements: stmts, statementRanges };
   }
   // ----------------------------------------------------------
   // Statement ディスパッチ
@@ -31082,6 +31091,13 @@ var Parser = class {
         if (upper === "DROP") return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
+        if (upper === "EXIT") return this.parseExit();
+        if (upper === "MERGE") {
+          if (!this.capabilities.dialect1) {
+            throw new ParseError("MERGE \u306B\u306F -- @ksql dialect: 1 \u306E\u5BA3\u8A00\u304C\u5FC5\u8981\u3067\u3059", tok);
+          }
+          return this.parseMergeAsUpsert();
+        }
         if (upper === "GENERATE_SERIES") {
           throw new ParseError(
             "GENERATE_SERIES \u306F WITH \u306E CTE \u672C\u4F53\u306B\u66F8\u3044\u3066\u304F\u3060\u3055\u3044\u3002\u4F8B: WITH s AS (GENERATE_SERIES(1, 5)) SELECT generate_series FROM s",
@@ -31100,7 +31116,7 @@ var Parser = class {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT / EXIT \u306E\u3044\u305A\u308C\u304B\u3067\u59CB\u307E\u308B SQL \u6587\u304C\u5FC5\u8981\u3067\u3059",
       tok
     );
   }
@@ -31228,6 +31244,7 @@ var Parser = class {
     this.advance();
     this.expectSoftKeyword("TEMP", "CREATE \u306E\u5F8C\u306B\u306F TEMP TABLE \u304C\u5FC5\u8981\u3067\u3059\uFF08\u4F8B: CREATE TEMP TABLE #temp AS SELECT ...\uFF09");
     this.expectSoftKeyword("TABLE", "CREATE TEMP \u306E\u5F8C\u306B\u306F TABLE \u304C\u5FC5\u8981\u3067\u3059");
+    const bareName = this.isDialect1BareTempTableName();
     const name = this.parseTempTableName();
     this.expect("AS" /* AS */, "CREATE TEMP TABLE \u306B\u306F AS SELECT \u304C\u5FC5\u8981\u3067\u3059");
     const tok = this.peek();
@@ -31239,13 +31256,16 @@ var Parser = class {
     } else {
       throw new ParseError("CREATE TEMP TABLE ... AS \u306E\u5F8C\u306B\u306F SELECT / WITH \u304C\u5FC5\u8981\u3067\u3059", tok);
     }
+    if (bareName !== null) this.bareTempTableNames.add(bareName);
     return { type: "CREATE_TEMP_TABLE", name, query };
   }
   parseDropTempTable() {
     this.advance();
     this.expectSoftKeyword("TEMP", "DROP \u306E\u5F8C\u306B\u306F TEMP TABLE \u304C\u5FC5\u8981\u3067\u3059\uFF08\u4F8B: DROP TEMP TABLE #temp\uFF09");
     this.expectSoftKeyword("TABLE", "DROP TEMP \u306E\u5F8C\u306B\u306F TABLE \u304C\u5FC5\u8981\u3067\u3059");
+    const bareName = this.isDialect1BareTempTableName();
     const name = this.parseTempTableName();
+    if (bareName !== null) this.bareTempTableNames.delete(bareName);
     return { type: "DROP_TEMP_TABLE", name };
   }
   expectSoftKeyword(word, msg) {
@@ -31267,7 +31287,15 @@ var Parser = class {
       this.advance();
       return tok.value;
     }
+    if (this.capabilities.dialect1 && (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */)) {
+      this.advance();
+      return `#${tok.value}`;
+    }
     throw new ParseError("\u4E00\u6642\u30C6\u30FC\u30D6\u30EB\u540D\u306F # \u3067\u59CB\u307E\u308B\u5FC5\u8981\u304C\u3042\u308A\u307E\u3059\uFF08\u4F8B: #temp\uFF09", tok);
+  }
+  isDialect1BareTempTableName() {
+    const tok = this.peek();
+    return this.capabilities.dialect1 && (tok.kind === "IDENT" /* IDENT */ || tok.kind === "BIDENT" /* BIDENT */) && !tok.value.startsWith("#") ? tok.value : null;
   }
   parseShow() {
     this.advance();
@@ -31596,6 +31624,41 @@ var Parser = class {
   // ----------------------------------------------------------
   parseAssert() {
     this.expect("ASSERT" /* ASSERT */);
+    const warnTok = this.peek();
+    const warn = this.isSoftKeyword("WARN");
+    if (warn) {
+      this.requireDialect1(warnTok);
+      this.advance();
+    }
+    const condition = this.parseAssertCondition();
+    const message = this.parseFlowMessage();
+    return {
+      type: "ASSERT",
+      ...condition,
+      ...warn ? { warn: true } : {},
+      ...message !== void 0 ? { message } : {}
+    };
+  }
+  /** EXIT SUCCESS IF <ASSERT と同じ条件>, '<message>' */
+  parseExit() {
+    const exitTok = this.advance();
+    this.requireDialect1(exitTok);
+    if (!this.isSoftKeyword("SUCCESS")) {
+      throw new ParseError("EXIT \u306E\u5F8C\u306B\u306F SUCCESS \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    this.advance();
+    if (this.peek().kind !== "IF" /* IF */ && !this.isSoftKeyword("IF")) {
+      throw new ParseError("EXIT SUCCESS \u306E\u5F8C\u306B\u306F IF \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    this.advance();
+    const condition = this.parseAssertCondition();
+    if (!this.consume("," /* COMMA */)) {
+      throw new ParseError("EXIT SUCCESS IF \u306B\u306F\u672B\u5C3E\u306E\u30E1\u30C3\u30BB\u30FC\u30B8\u6587\u5B57\u5217\u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    const message = this.expect("STRING" /* STRING */, "EXIT SUCCESS IF \u306E\u30E1\u30C3\u30BB\u30FC\u30B8\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059");
+    return { type: "EXIT", ...condition, message: message.value };
+  }
+  parseAssertCondition() {
     const condStart = this.pos;
     const left = this.parseAssertOperand();
     const opTok = this.peek();
@@ -31608,7 +31671,6 @@ var Parser = class {
       const high = this.parseAssertOperand();
       this.rejectAssertCompound();
       return {
-        type: "ASSERT",
         left,
         op: "BETWEEN",
         right: null,
@@ -31627,7 +31689,6 @@ var Parser = class {
     const right = this.parseAssertOperand();
     this.rejectAssertCompound();
     return {
-      type: "ASSERT",
       left,
       op,
       right,
@@ -31635,6 +31696,17 @@ var Parser = class {
       high: null,
       text: this.renderTokenRange(condStart, this.pos)
     };
+  }
+  /** ASSERT の dialect 1 メッセージ。カンマが無ければ既存形式。 */
+  parseFlowMessage() {
+    if (!this.consume("," /* COMMA */)) return void 0;
+    this.requireDialect1(this.prev());
+    return this.expect("STRING" /* STRING */, "ASSERT \u306E\u30E1\u30C3\u30BB\u30FC\u30B8\u306B\u306F\u6587\u5B57\u5217\u30EA\u30C6\u30E9\u30EB\u304C\u5FC5\u8981\u3067\u3059").value;
+  }
+  requireDialect1(tok) {
+    if (!this.capabilities.dialect1) {
+      throw new ParseError("\u3053\u306E\u69CB\u6587\u306B\u306F -- @ksql dialect: 1 \u306E\u5BA3\u8A00\u304C\u5FC5\u8981\u3067\u3059", tok);
+    }
   }
   /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
   parseAssertOperand() {
@@ -33026,6 +33098,12 @@ var Parser = class {
       );
     }
     const name = this.parseTableName();
+    if (this.capabilities.dialect1 && this.bareTempTableNames.has(name)) {
+      const normalizedName = `#${name}`;
+      this.tempTableRefs.push({ ...this.prev(), value: normalizedName });
+      const alias2 = this.consume("AS" /* AS */) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
+      return { appId: 0, alias: alias2, cteName: normalizedName };
+    }
     if (nameTok.kind === "IDENT" /* IDENT */ && name.startsWith("#")) {
       this.tempTableRefs.push(this.prev());
       const alias2 = this.consume("AS" /* AS */) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
@@ -33066,6 +33144,7 @@ var Parser = class {
     if (k === "IDENT" /* IDENT */ || k === "BIDENT" /* BIDENT */) {
       if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "VALIDATE" && this.peekAt(1).kind === "IDENT" /* IDENT */ && this.peekAt(1).value.toUpperCase() === "ONLY") return null;
       if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "CHECK" && this.peekAt(1).kind === "WHEN" /* WHEN */) return null;
+      if (k === "IDENT" /* IDENT */ && this.peek().value.toUpperCase() === "KEY" && this.peekAt(1).kind === "(" /* LPAREN */) return null;
       return this.parseTableAliasName();
     }
     return null;
@@ -33966,6 +34045,15 @@ var Parser = class {
     };
   }
   parseOnDuplicate() {
+    if (this.capabilities.dialect1 && this.consumeSoftKeyword("KEY")) {
+      this.expect("(" /* LPAREN */, "KEY \u306E\u5F8C\u306B\u306F (\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9) \u304C\u5FC5\u8981\u3067\u3059");
+      const keyFields2 = this.parseIdentList();
+      this.expect(")" /* RPAREN */);
+      if (keyFields2.length === 0) {
+        throw new ParseError("KEY \u306B\u306F\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u6700\u4F4E 1 \u3064\u5FC5\u8981\u3067\u3059", this.prev());
+      }
+      return keyFields2;
+    }
     this.expectKeyword("ON" /* ON */, "UPSERT \u306B\u306F ON DUPLICATE (\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9) \u304C\u5FC5\u8981\u3067\u3059");
     if (!this.consume("DUPLICATE" /* DUPLICATE */)) {
       throw new ParseError("ON \u306E\u5F8C\u306B\u306F DUPLICATE \u304C\u5FC5\u8981\u3067\u3059", this.peek());
@@ -33977,6 +34065,238 @@ var Parser = class {
       throw new ParseError("ON DUPLICATE \u306B\u306F\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9\u304C\u6700\u4F4E 1 \u3064\u5FC5\u8981\u3067\u3059", this.prev());
     }
     return keyFields;
+  }
+  parseMergeAsUpsert() {
+    const mergeToken = this.advance();
+    this.expect("INTO" /* INTO */, "MERGE \u306E\u5F8C\u306B\u306F INTO \u304C\u5FC5\u8981\u3067\u3059");
+    this.rejectTempTableDml();
+    const targetName = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(targetName, this.prev());
+    if (subtableCode) {
+      throw new ParseError("MERGE \u306F\u307E\u3060\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB\u4EEE\u60F3\u30C6\u30FC\u30D6\u30EB\u306B\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u305B\u3093", this.prev());
+    }
+    this.expect("AS" /* AS */, "MERGE \u306E\u30BF\u30FC\u30B2\u30C3\u30C8\u306B\u306F AS alias \u304C\u5FC5\u8981\u3067\u3059");
+    const targetAlias = this.parseTableAliasName();
+    this.expectSoftKeyword("USING", "MERGE \u306B\u306F USING <source> AS alias \u304C\u5FC5\u8981\u3067\u3059");
+    const sourceStart = this.pos;
+    const source = this.parseTableRef();
+    const explicitSourceAlias = this.tokens.slice(sourceStart, this.pos).some((token) => token.kind === "AS" /* AS */);
+    if (!explicitSourceAlias || source.alias === null) {
+      throw new ParseError("MERGE \u306E USING \u30BD\u30FC\u30B9\u306B\u306F AS alias \u304C\u5FC5\u8981\u3067\u3059", this.peek());
+    }
+    const sourceAlias = source.alias;
+    this.expect("ON" /* ON */, "MERGE \u306B\u306F ON t.key = s.key \u306E\u5358\u4E00\u30AD\u30FC\u7B49\u5024\u304C\u5FC5\u8981\u3067\u3059");
+    const left = this.parseMergeQualifiedField("MERGE \u306E ON \u5DE6\u8FBA\u306F targetAlias.key \u306E\u5F62\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044");
+    if (!this.consume("=" /* EQ */)) {
+      throw new ParseError(
+        "MERGE \u306E ON \u306F\u5358\u4E00\u30AD\u30FC\u306E\u7B49\u5024\uFF08t.key = s.key\uFF09\u306E\u307F\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u3059\u3002\u8907\u6570\u6761\u4EF6\u3084\u975E\u7B49\u5024\u306F\u9023\u7D50\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9\u3067\u7F6E\u304D\u63DB\u3048\u3066\u304F\u3060\u3055\u3044",
+        this.peek()
+      );
+    }
+    const right = this.parseMergeQualifiedField("MERGE \u306E ON \u53F3\u8FBA\u306F sourceAlias.key \u306E\u5F62\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044");
+    if (left.alias.toLowerCase() !== targetAlias.toLowerCase() || right.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
+      throw new ParseError(
+        `MERGE \u306E ON \u306F ${targetAlias}.key = ${sourceAlias}.key \u306E\u5225\u540D\u4FEE\u98FE\u3067\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044`,
+        mergeToken
+      );
+    }
+    if (this.peek().kind === "AND" /* AND */ || this.peek().kind === "OR" /* OR */) {
+      throw new ParseError(
+        "MERGE \u306E ON \u306F\u5358\u4E00\u30AD\u30FC\u306E\u7B49\u5024\u306E\u307F\u5BFE\u5FDC\u3057\u3066\u3044\u307E\u3059\u3002\u8907\u6570\u6761\u4EF6\u306F\u9023\u7D50\u30AD\u30FC\u30D5\u30A3\u30FC\u30EB\u30C9\u3067\u7F6E\u304D\u63DB\u3048\u3066\u304F\u3060\u3055\u3044",
+        this.peek()
+      );
+    }
+    let matched = null;
+    let insertFields = null;
+    let insertValues = null;
+    while (this.peek().kind === "WHEN" /* WHEN */) {
+      const whenToken = this.advance();
+      if (this.consume("NOT" /* NOT */)) {
+        this.expectSoftKeyword("MATCHED", "WHEN NOT \u306E\u5F8C\u306B\u306F MATCHED \u304C\u5FC5\u8981\u3067\u3059");
+        if (insertFields !== null) throw new ParseError("WHEN NOT MATCHED \u53E5\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059", whenToken);
+        this.expect("THEN" /* THEN */, "WHEN NOT MATCHED \u306E\u5F8C\u306B\u306F THEN \u304C\u5FC5\u8981\u3067\u3059");
+        this.expect("INSERT" /* INSERT */, "WHEN NOT MATCHED THEN \u306E\u5F8C\u306B\u306F INSERT \u304C\u5FC5\u8981\u3067\u3059");
+        this.expect("(" /* LPAREN */, "MERGE INSERT \u306B\u306F\u5217\u30EA\u30B9\u30C8\u304C\u5FC5\u8981\u3067\u3059");
+        insertFields = this.parseIdentList();
+        this.expect(")" /* RPAREN */);
+        this.expect("VALUES" /* VALUES */, "MERGE INSERT \u306E\u5217\u30EA\u30B9\u30C8\u306E\u5F8C\u306B\u306F VALUES \u304C\u5FC5\u8981\u3067\u3059");
+        this.expect("(" /* LPAREN */, "MERGE INSERT VALUES \u306F ( \u3067\u59CB\u3081\u3066\u304F\u3060\u3055\u3044");
+        insertValues = this.parseMergeValueList();
+        this.expect(")" /* RPAREN */);
+        if (insertFields.length !== insertValues.length) {
+          throw new ParseError("MERGE INSERT \u306E\u5217\u6570\u3068 VALUES \u306E\u5024\u6570\u304C\u4E00\u81F4\u3057\u307E\u305B\u3093", whenToken);
+        }
+      } else {
+        this.expectSoftKeyword("MATCHED", "WHEN \u306E\u5F8C\u306B\u306F MATCHED \u307E\u305F\u306F NOT MATCHED \u304C\u5FC5\u8981\u3067\u3059");
+        if (matched !== null) throw new ParseError("WHEN MATCHED \u53E5\u304C\u91CD\u8907\u3057\u3066\u3044\u307E\u3059", whenToken);
+        this.expect("THEN" /* THEN */, "WHEN MATCHED \u306E\u5F8C\u306B\u306F THEN \u304C\u5FC5\u8981\u3067\u3059");
+        this.expect("UPDATE" /* UPDATE */, "WHEN MATCHED THEN \u306E\u5F8C\u306B\u306F UPDATE \u304C\u5FC5\u8981\u3067\u3059");
+        this.expect("SET" /* SET */, "WHEN MATCHED THEN UPDATE \u306E\u5F8C\u306B\u306F SET \u304C\u5FC5\u8981\u3067\u3059");
+        matched = this.parseMergeAssignments(targetAlias);
+      }
+    }
+    if (matched === null || insertFields === null || insertValues === null) {
+      throw new ParseError(
+        "WHEN MATCHED / WHEN NOT MATCHED \u306E\u4E21\u53E5\u304C\u5FC5\u8981\u3067\u3059\uFF08\u66F4\u65B0\u306E\u307F\u306F UPDATE ... FROM\u3001\u633F\u5165\u306E\u307F\u306F INSERT ... SELECT \u3092\u4F7F\u7528\u3057\u3066\u304F\u3060\u3055\u3044\uFF09",
+        this.peek()
+      );
+    }
+    if (!insertFields.some((field) => field.toLowerCase() === left.field.toLowerCase())) {
+      throw new ParseError(
+        `MERGE \u306E ON \u30AD\u30FC ${left.field} \u306F INSERT \u5217\u30EA\u30B9\u30C8\u306B\u542B\u3081\u3066\u304F\u3060\u3055\u3044`,
+        mergeToken
+      );
+    }
+    const expressions = /* @__PURE__ */ new Map();
+    insertFields.forEach((field, index) => expressions.set(field.toLowerCase(), insertValues[index]));
+    for (const assignment of matched) {
+      const key = assignment.field.toLowerCase();
+      const existing = expressions.get(key);
+      if (existing !== void 0 && !this.mergeExpressionsEqual(existing, assignment.value, sourceAlias)) {
+        throw new ParseError(
+          `MERGE \u306E\u5217 ${assignment.field} \u306F\u4E21\u53E5\u306E\u5F0F\u304C\u4E00\u81F4\u3059\u308B\u5834\u5408\u306E\u307F MERGE \u3092 UPSERT \u3078\u6B63\u898F\u5316\u3067\u304D\u307E\u3059`,
+          mergeToken
+        );
+      }
+      if (existing === void 0) {
+        insertFields.push(assignment.field);
+        insertValues.push(assignment.value);
+        expressions.set(key, assignment.value);
+      }
+    }
+    const columns = insertValues.map((value) => this.mergeValueToSelectColumn(value, sourceAlias, mergeToken));
+    const normalizedSource = source.cteName !== null ? { ...source, alias: null } : { ...source, alias: `APP${source.appId}${source.subtableCode ? `$${source.subtableCode}` : ""}` };
+    const select = {
+      type: "SELECT",
+      distinct: false,
+      columns,
+      from: normalizedSource,
+      joins: [],
+      where: null,
+      groupBy: [],
+      having: null,
+      orderMode: "CANONICAL",
+      orderBy: [],
+      limit: null,
+      offset: null
+    };
+    const checkGroups = this.parseCheckGroups();
+    const validation = this.parseDmlControlSuffix();
+    return {
+      type: "UPSERT_SELECT",
+      appId,
+      fields: insertFields,
+      select,
+      keyFields: [left.field],
+      ...checkGroups,
+      ...validation
+    };
+  }
+  parseMergeQualifiedField(message) {
+    const token = this.peek();
+    const path = this.parseFieldPath();
+    const ref = this.splitQualifiedField(path);
+    if (ref.alias === null) throw new ParseError(message, token);
+    return { alias: ref.alias, field: ref.field };
+  }
+  parseMergeAssignments(targetAlias) {
+    const assignments = [];
+    do {
+      const token = this.peek();
+      const path = this.parseFieldPath();
+      const ref = this.splitQualifiedField(path);
+      if (ref.alias !== null && ref.alias.toLowerCase() !== targetAlias.toLowerCase()) {
+        throw new ParseError(`MERGE UPDATE SET \u306E\u5DE6\u8FBA\u306F target alias ${targetAlias} \u3067\u4FEE\u98FE\u3057\u3066\u304F\u3060\u3055\u3044`, token);
+      }
+      this.expect("=" /* EQ */);
+      assignments.push({ field: ref.field, value: this.parseAssignmentValue() });
+    } while (this.consume("," /* COMMA */));
+    return assignments;
+  }
+  parseMergeValueList() {
+    const values = [];
+    if (this.peek().kind === ")" /* RPAREN */) return values;
+    do
+      values.push(this.parseAssignmentValue());
+    while (this.consume("," /* COMMA */));
+    return values;
+  }
+  mergeExpressionsEqual(left, right, sourceAlias) {
+    return this.mergeNormalizedValueEqual(
+      this.normalizeMergeValue(left, sourceAlias, true),
+      this.normalizeMergeValue(right, sourceAlias, true)
+    );
+  }
+  normalizeMergeValue(value, sourceAlias, compareLiteralValues = false) {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.normalizeMergeValue(item, sourceAlias, compareLiteralValues));
+    }
+    if (value === null || typeof value !== "object") return value;
+    const obj = value;
+    if (compareLiteralValues && obj["type"] === "NUMBER") {
+      return { type: "NUMBER", value: obj["value"] };
+    }
+    if (obj["type"] === "SOURCE_FIELD") {
+      if (String(obj["alias"]).toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { type: "FIELD_REF", field: obj["field"] };
+    }
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (ref.alias !== null && ref.alias.toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { ...obj, field: ref.field };
+    }
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") {
+      if (obj["tableAlias"].toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { ...obj, tableAlias: null };
+    }
+    return Object.fromEntries(Object.entries(obj).map(([key, child]) => [
+      key,
+      this.normalizeMergeValue(child, sourceAlias, compareLiteralValues)
+    ]));
+  }
+  mergeNormalizedValueEqual(left, right) {
+    if (left === right) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => this.mergeNormalizedValueEqual(item, right[index]));
+    }
+    if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+    const leftObj = left;
+    const rightObj = right;
+    const leftKeys = Object.keys(leftObj);
+    const rightKeys = Object.keys(rightObj);
+    return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightObj, key) && this.mergeNormalizedValueEqual(leftObj[key], rightObj[key]));
+  }
+  mergeValueToSelectColumn(value, sourceAlias, token) {
+    const normalized = this.normalizeMergeValue(value, sourceAlias);
+    if (this.mergeValueContainsInvalidSource(normalized)) {
+      throw new ParseError(`MERGE \u306E\u5F0F\u306F source alias ${sourceAlias} \u306E\u30D5\u30A3\u30FC\u30EB\u30C9\u3060\u3051\u3092\u53C2\u7167\u3057\u3066\u304F\u3060\u3055\u3044`, token);
+    }
+    const expr = normalized;
+    switch (expr["type"]) {
+      case "FIELD_REF":
+        return { type: "FIELD", field: String(expr["field"]), alias: null };
+      case "STRING":
+        return { type: "LITERAL_COL", value: String(expr["value"]), alias: null };
+      case "NUMBER":
+        return { type: "ARITH_COL", expr, alias: null };
+      case "ARITH":
+        return { type: "ARITH_COL", expr, alias: null };
+      case "STRING_FUNC":
+        return { type: "STRFUNC_COL", expr, alias: null };
+      case "CASE_VALUE":
+        return { type: "CASE_COL", expr: expr["expr"], alias: null };
+      default:
+        throw new ParseError(
+          "MERGE \u306E\u4EE3\u5165\u5F0F\u306F\u30BD\u30FC\u30B9\u30D5\u30A3\u30FC\u30EB\u30C9\u30FB\u30EA\u30C6\u30E9\u30EB\u30FB\u7B97\u8853\u5F0F\u30FB\u6587\u5B57\u5217\u95A2\u6570\u30FBCASE \u306E\u3044\u305A\u308C\u304B\u3092\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044",
+          token
+        );
+    }
+  }
+  mergeValueContainsInvalidSource(value) {
+    if (Array.isArray(value)) return value.some((item) => this.mergeValueContainsInvalidSource(item));
+    if (value === null || typeof value !== "object") return false;
+    const obj = value;
+    return obj["type"] === "INVALID_SOURCE" || Object.values(obj).some((item) => this.mergeValueContainsInvalidSource(item));
   }
   isUpsertApplyBranchStart() {
     return this.peek().kind === "ON" /* ON */ && (this.peekAt(1).kind === "INSERT" /* INSERT */ || this.peekAt(1).kind === "UPDATE" /* UPDATE */);
@@ -34798,7 +35118,7 @@ function isDmlType(type) {
   return type === "INSERT" || type === "INSERT_SELECT" || type === "UPDATE" || type === "DELETE" || type === "UPSERT" || type === "UPSERT_SELECT" || type === "REORDER" || type === "IMPORT";
 }
 function isReadOnlyType(type) {
-  return type === "SELECT" || type === "VALIDATE" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT";
+  return type === "SELECT" || type === "VALIDATE" || type === "UNION" || type === "WITH" || type === "EXPLAIN" || type === "SHOW_APPS" || type === "DESCRIBE" || type === "CREATE_TEMP_TABLE" || type === "DROP_TEMP_TABLE" || type === "SET_VARIABLE" || type === "DECLARE_VARIABLE" || type === "ASSERT" || type === "EXIT";
 }
 function writesKintone(stmt) {
   return isDmlType(stmt.type) && !("validateOnly" in stmt && stmt.validateOnly === true);
@@ -38194,6 +38514,7 @@ function validateStatement(stmt) {
     case "SET_VARIABLE":
     case "DECLARE_VARIABLE":
     case "ASSERT":
+    case "EXIT":
       validateNestedSelects(stmt);
       return;
     case "UPDATE":
@@ -46135,6 +46456,151 @@ function toFlatString(value) {
   }
 }
 
+// src/core/scriptHeader.ts
+init_define_KSQL_DOCS();
+
+// src/core/diagnostics.ts
+init_define_KSQL_DOCS();
+var DiagnosticCodes = {
+  HEADER_UNKNOWN_KEY: "KSQL1001",
+  HEADER_DUPLICATE_KEY: "KSQL1002",
+  HEADER_INVALID_NAME: "KSQL1003",
+  HEADER_INVALID_DEPENDS_ON: "KSQL1004",
+  HEADER_INVALID_TIMEOUT: "KSQL1005",
+  HEADER_INVALID_DIALECT: "KSQL1006",
+  LOGICAL_APP_UNRESOLVED: "KSQL1101",
+  LEX_ERROR: "KSQL1201",
+  PARSE_ERROR: "KSQL1202"
+};
+function sourceLocationAt(source, offset) {
+  const target = Math.max(0, Math.min(offset, source.length));
+  let line = 1;
+  let column = 1;
+  for (let i = 0; i < target; i++) {
+    const ch = source[i];
+    if (ch === "\r") {
+      if (source[i + 1] === "\n" && i + 1 < target) i++;
+      line++;
+      column = 1;
+    } else if (ch === "\n") {
+      line++;
+      column = 1;
+    } else {
+      column++;
+    }
+  }
+  return { line, column };
+}
+function diagnosticAt(source, offset, diagnostic2) {
+  return { ...diagnostic2, ...sourceLocationAt(source, offset) };
+}
+
+// src/core/scriptHeader.ts
+var HEADER_LINE_RE = /^(\s*)--\s*@ksql\s+([^:\s]+)\s*:\s*(.*)$/i;
+function parseScriptHeader(source) {
+  const meta3 = { name: null, dependsOn: [], timeout: null, dialect: 0 };
+  const diagnostics = [];
+  const seen = /* @__PURE__ */ new Set();
+  let hasDirectives = false;
+  let offset = source.charCodeAt(0) === 65279 ? 1 : 0;
+  let headerEnd = offset;
+  while (offset < source.length) {
+    const lineEnd = findLineEnd(source, offset);
+    const line = source.slice(offset, lineEnd.contentEnd);
+    if (!/^\s*--/.test(line)) break;
+    headerEnd = lineEnd.next;
+    const match = HEADER_LINE_RE.exec(line);
+    if (match) {
+      hasDirectives = true;
+      const rawKey = match[2];
+      const key = rawKey.toLowerCase();
+      const rawValue = match[3];
+      const commentAt = rawValue.indexOf("#");
+      const valuePart = commentAt < 0 ? rawValue : rawValue.slice(0, commentAt);
+      const leading = valuePart.match(/^\s*/)?.[0].length ?? 0;
+      const value = valuePart.trim();
+      const valueOffset = offset + match.index + match[0].length - rawValue.length + leading;
+      if (!isHeaderKey(key)) {
+        diagnostics.push(diagnosticAt(source, valueOffset, {
+          severity: "warning",
+          code: DiagnosticCodes.HEADER_UNKNOWN_KEY,
+          message: `Unknown @ksql header key "${rawKey}" was ignored.`
+        }));
+      } else if (seen.has(key)) {
+        diagnostics.push(diagnosticAt(source, valueOffset, {
+          severity: "warning",
+          code: DiagnosticCodes.HEADER_DUPLICATE_KEY,
+          message: `Duplicate @ksql header key "${key}" was ignored; the first value is retained.`
+        }));
+      } else {
+        seen.add(key);
+        applyHeaderValue(meta3, key, value, source, valueOffset, diagnostics);
+      }
+    }
+    offset = lineEnd.next;
+  }
+  return { meta: meta3, diagnostics, hasDirectives, headerEnd };
+}
+function isHeaderKey(value) {
+  return value === "name" || value === "depends_on" || value === "timeout" || value === "dialect";
+}
+function applyHeaderValue(meta3, key, value, source, valueOffset, diagnostics) {
+  if (key === "name") {
+    if (!value) {
+      diagnostics.push(diagnosticAt(source, valueOffset, {
+        severity: "error",
+        code: DiagnosticCodes.HEADER_INVALID_NAME,
+        message: "@ksql name must not be empty."
+      }));
+    } else {
+      meta3.name = value;
+    }
+    return;
+  }
+  if (key === "depends_on") {
+    const dependencies = value.split(",").map((item) => item.trim());
+    if (!value || dependencies.some((item) => !item)) {
+      diagnostics.push(diagnosticAt(source, valueOffset, {
+        severity: "error",
+        code: DiagnosticCodes.HEADER_INVALID_DEPENDS_ON,
+        message: "@ksql depends_on must be a comma-separated list without empty items."
+      }));
+    } else {
+      meta3.dependsOn = dependencies;
+    }
+    return;
+  }
+  if (key === "timeout") {
+    if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+      diagnostics.push(diagnosticAt(source, valueOffset, {
+        severity: "error",
+        code: DiagnosticCodes.HEADER_INVALID_TIMEOUT,
+        message: "@ksql timeout must be a positive integer."
+      }));
+    } else {
+      meta3.timeout = Number(value);
+    }
+    return;
+  }
+  if (value !== "0" && value !== "1") {
+    diagnostics.push(diagnosticAt(source, valueOffset, {
+      severity: "error",
+      code: DiagnosticCodes.HEADER_INVALID_DIALECT,
+      message: "@ksql dialect must be 0 or 1."
+    }));
+  } else {
+    meta3.dialect = Number(value);
+  }
+}
+function findLineEnd(source, start) {
+  let i = start;
+  while (i < source.length && source[i] !== "\r" && source[i] !== "\n") i++;
+  const contentEnd = i;
+  if (source[i] === "\r" && source[i + 1] === "\n") i += 2;
+  else if (i < source.length) i++;
+  return { contentEnd, next: i };
+}
+
 // src/core/dmlPrevalidation.ts
 init_define_KSQL_DOCS();
 function collectDmlPrevalidationSnapshotFields(fieldIndex) {
@@ -48175,6 +48641,8 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
       throw new Error("ArgumentError: DECLARE variable requires a batch.");
     case "ASSERT":
       return executeAssert(stmt, client, options, cacheContext);
+    case "EXIT":
+      throw new Error("ArgumentError: EXIT SUCCESS IF \u306F\u30D0\u30C3\u30C1\u5C02\u7528\u3067\u3059");
   }
 }
 var EXISTING_VALIDATION_COLUMNS = [
@@ -48442,7 +48910,16 @@ var BatchTimeoutError = class extends Error {
 };
 async function executeBatch(sql, client, options = {}) {
   resolveRecursiveCteLimits(options);
-  const statements = parseSqlBatch(sql, options.enableImport === true);
+  const header = parseScriptHeader(sql);
+  const headerError = header.diagnostics.find((diagnostic2) => diagnostic2.severity === "error");
+  if (header.hasDirectives && headerError) {
+    throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
+  }
+  const statements = parseSqlBatch(
+    header.hasDirectives ? sql.slice(header.headerEnd) : sql,
+    options.enableImport === true,
+    header.hasDirectives && header.meta.dialect === 1
+  );
   const analysis = analyzeBatch(statements);
   statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
   if (options.allowApplyMutation !== true && statements.some(
@@ -48484,7 +48961,7 @@ async function executeBatch(sql, client, options = {}) {
       const base = { index: i, type: info.statementType };
       if (aborted2) {
         results.push({ ...base, status: "skipped", skippedReason: aborted2 });
-        failed.add(i);
+        if (aborted2 !== "exit") failed.add(i);
         continue;
       }
       const brokenDep = info.dependsOn.find((d) => failed.has(d));
@@ -48522,24 +48999,29 @@ async function executeBatch(sql, client, options = {}) {
           info.statementType !== "SELECT" && info.statementType !== "UNION" && info.statementType !== "WITH" || statementContainsOuterJoin(statements[i])
         );
         const cursorScope = wrapClientWithCursorScope(statementClient);
+        const boundOptions = bindStatementEvaluationContext(stmtOptions);
+        const statementContext = {
+          stmt: statements[i],
+          info,
+          client: cursorScope.client,
+          options: boundOptions,
+          cacheContext,
+          tempTables,
+          variables,
+          relativeDateVariables,
+          clock: statementEvaluationContext(boundOptions)
+        };
         const outcome = await runWithDeadline(
-          executeBatchStatement(
-            statements[i],
-            info,
-            cursorScope.client,
-            stmtOptions,
-            cacheContext,
-            tempTables,
-            variables,
-            relativeDateVariables
-          ),
+          executeBatchStatement(statementContext),
           remaining,
           cursorScope.closeActive
         );
         if (outcome.result) {
           outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
         }
-        results.push({ ...base, status: "success", ...outcome });
+        const { exitTriggered, ...statementOutcome } = outcome;
+        results.push({ ...base, status: "success", ...statementOutcome });
+        if (exitTriggered) aborted2 = "exit";
       } catch (e) {
         results.push({
           ...base,
@@ -48561,7 +49043,7 @@ async function executeBatch(sql, client, options = {}) {
     }
     metrics.elapsedMs = Date.now() - startedAt;
     return {
-      ok: results.every((r) => r.status === "success"),
+      ok: results.every((r) => r.status === "success" || r.skippedReason === "exit"),
       statementCount: statements.length,
       statements: results,
       analysis,
@@ -48577,8 +49059,18 @@ function statementHasApplyMutation(statement) {
   }
   return statement.type === "UPSERT" && statement.validateOnly !== true && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
-async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables, relativeDateVariables) {
-  options = bindStatementEvaluationContext(options);
+async function executeBatchStatement(context) {
+  const {
+    stmt,
+    info,
+    client,
+    options,
+    cacheContext,
+    tempTables,
+    variables,
+    relativeDateVariables,
+    clock
+  } = context;
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt2 = resolveBatchVariableReferences(stmt, variables);
     validateStatementStatic(resolvedStmt2);
@@ -48618,7 +49110,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
         throw e;
       }
     } else {
-      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr, statementEvaluationContext(options)));
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr, clock));
     }
     return {};
   }
@@ -48636,7 +49128,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     } else {
       const value = evaluateScalarExpr(
         stmt.default,
-        statementEvaluationContext(options)
+        clock
       );
       variables.set(stmt.name, {
         type: "string",
@@ -48733,8 +49225,12 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     }
   }
   if (resolvedStmt.type === "ASSERT") {
-    await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
-    return {};
+    const result = await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
+    return result.warning !== void 0 ? { result } : {};
+  }
+  if (resolvedStmt.type === "EXIT") {
+    const result = await executeExit(resolvedStmt, client, options, cacheContext, tempTables);
+    return { result, ...result.exited ? { exitTriggered: true } : {} };
   }
   if (info.tempTablesReferenced.length > 0) {
     if (resolvedStmt.type === "SELECT" || resolvedStmt.type === "UNION") {
@@ -48858,9 +49354,9 @@ function safeJsonStringify(v) {
     return String(v);
   }
 }
-function parseSqlBatch(sql, enableImport = false) {
+function parseSqlBatch(sql, enableImport = false, dialect1 = false) {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens, { import: enableImport }).parseStatements();
+  return new Parser(tokens, { import: enableImport, dialect1 }).parseStatements();
 }
 function parseRelativeDateVariableValue(name, value) {
   try {
@@ -49046,6 +49542,31 @@ var ScalarSubqueryError = class extends Error {
   }
 };
 async function executeAssert(stmt, client, options, cacheContext, tempTables) {
+  const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
+  if (!evaluation.passed) {
+    if (stmt.warn === true) {
+      return {
+        type: "ASSERT",
+        condition: stmt.text,
+        passed: false,
+        warning: stmt.message ?? `assertion failed: ${stmt.text} (actual: ${evaluation.actual}).`
+      };
+    }
+    const suffix = stmt.message !== void 0 ? ` ${stmt.message}` : "";
+    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${evaluation.actual}).${suffix}`);
+  }
+  return { type: "ASSERT", condition: stmt.text };
+}
+async function executeExit(stmt, client, options, cacheContext, tempTables) {
+  const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
+  return {
+    type: "EXIT",
+    condition: stmt.text,
+    exited: evaluation.passed,
+    message: stmt.message
+  };
+}
+async function evaluateAssertCondition(stmt, client, options, cacheContext, tempTables) {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
   const semantics = stmt.left.type === "NUMBER" || stmt.left.type === "ARITH" ? syntheticSemantics("number") : syntheticSemantics("string");
   if (stmt.op === "BETWEEN") {
@@ -49054,19 +49575,16 @@ async function executeAssert(stmt, client, options, cacheContext, tempTables) {
     }
     const low = await evalAssertOperand(stmt.low, client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
-    if (!compareScalarValues(">=", left, low, semantics) || !compareScalarValues("<=", left, high, semantics)) {
-      throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
-    }
-    return { type: "ASSERT", condition: stmt.text };
+    return {
+      passed: compareScalarValues(">=", left, low, semantics) && compareScalarValues("<=", left, high, semantics),
+      actual: left
+    };
   }
   if (stmt.right === null) {
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareScalarValues(stmt.op, left, right, semantics)) {
-    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
-  }
-  return { type: "ASSERT", condition: stmt.text };
+  return { passed: compareScalarValues(stmt.op, left, right, semantics), actual: left };
 }
 async function evalAssertOperand(operand, client, options, cacheContext, tempTables) {
   switch (operand.type) {
@@ -56400,7 +56918,16 @@ async function buildBatchExplainPlans(sql, client, injectedVariables, cacheConte
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const statements = parseSqlBatch(sql, enableImport);
+    const header = parseScriptHeader(sql);
+    const headerError = header.diagnostics.find((diagnostic2) => diagnostic2.severity === "error");
+    if (header.hasDirectives && headerError) {
+      throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
+    }
+    const statements = parseSqlBatch(
+      header.hasDirectives ? sql.slice(header.headerEnd) : sql,
+      enableImport,
+      header.hasDirectives && header.meta.dialect === 1
+    );
     const analysis = analyzeBatch(statements);
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
@@ -56595,8 +57122,8 @@ function buildBatchStatementPlan(stmt, info, capabilities, orderPlans, plainGrou
   }
   if (stmt.type === "ASSERT") {
     const lines = [
-      `ASSERT ${stmt.text}`,
-      "  check:         \u5B9F\u884C\u6642\u306B\u6761\u4EF6\u8A55\u4FA1\uFF08\u4E0D\u6210\u7ACB\u306F AssertError \u3067\u30D0\u30C3\u30C1\u505C\u6B62\u3001\u4EE5\u964D\u306E\u6587\u306F skipped\uFF09"
+      `ASSERT${stmt.warn === true ? " WARN" : ""} ${stmt.text}${stmt.message !== void 0 ? `, '${stmt.message.replace(/'/g, "''")}'` : ""}`,
+      stmt.warn === true ? "  check:         \u5B9F\u884C\u6642\u306B\u6761\u4EF6\u8A55\u4FA1\uFF08\u4E0D\u6210\u7ACB\u306F\u8B66\u544A\u3068\u3057\u3066\u8A18\u9332\u3057\u3001\u5F8C\u7D9A\u6587\u3092\u7D9A\u884C\uFF09" : "  check:         \u5B9F\u884C\u6642\u306B\u6761\u4EF6\u8A55\u4FA1\uFF08\u4E0D\u6210\u7ACB\u306F AssertError \u3067\u30D0\u30C3\u30C1\u505C\u6B62\u3001\u4EE5\u964D\u306E\u6587\u306F skipped\uFF09"
     ];
     const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
       (o) => o !== null && o.type === "SCALAR_SUBQUERY"
@@ -56615,6 +57142,31 @@ function buildBatchStatementPlan(stmt, info, capabilities, orderPlans, plainGrou
         tempSchemaLedger,
         explainContext
       ).map((l) => `  ${l}`));
+    });
+    return lines;
+  }
+  if (stmt.type === "EXIT") {
+    const lines = [
+      `EXIT SUCCESS IF ${stmt.text}, '${stmt.message.replace(/'/g, "''")}'`,
+      "  check:         \u5B9F\u884C\u6642\u306B\u6761\u4EF6\u8A55\u4FA1\uFF08\u6210\u7ACB\u6642\u306F\u6B63\u5E38\u7D42\u4E86\u3057\u3001\u4EE5\u964D\u306E\u6587\u306F skippedReason: exit\uFF09"
+    ];
+    const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
+      (o) => o !== null && o.type === "SCALAR_SUBQUERY"
+    );
+    subqueries.forEach((sq, i) => {
+      lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
+      const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
+      lines.push(...buildPlanForBatchQuery(
+        sq.query,
+        subInfo,
+        capabilities,
+        orderPlans,
+        plainGroupByPlans,
+        collector,
+        "main",
+        tempSchemaLedger,
+        explainContext
+      ).map((line) => `  ${line}`));
     });
     return lines;
   }
@@ -58035,6 +58587,9 @@ function toMutationSummary(result) {
       ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
     };
   }
+  if (result.type === "EXIT") {
+    return { condition: result.condition, exited: result.exited, message: result.message };
+  }
   return { reorderedParentCount: result.reorderedParentCount };
 }
 function buildBatchEnvelope(batch, options = {}) {
@@ -58092,6 +58647,10 @@ function buildBatchEnvelope(batch, options = {}) {
         ...s.result.deletedRows ? { deletedRows: s.result.deletedRows } : {},
         ...s.result.diagnostic ? { diagnostic: s.result.diagnostic } : {}
       });
+    } else if (s.status === "success" && s.result?.type === "ASSERT") {
+      entry.condition = s.result.condition;
+      if (s.result.passed !== void 0) entry.passed = s.result.passed;
+      if (s.result.warning !== void 0) entry.warning = s.result.warning;
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
       Object.assign(entry, toMutationSummary(s.result));
     }
@@ -60539,7 +61098,9 @@ function toAssertPayload(result) {
   return {
     ok: true,
     type: result.type,
-    condition: result.condition
+    condition: result.condition,
+    ...result.passed !== void 0 ? { passed: result.passed } : {},
+    ...result.warning !== void 0 ? { warning: result.warning } : {}
   };
 }
 function toDmlValidationPayload(result) {
@@ -60611,6 +61172,9 @@ function toMutationPayload(result) {
       ...result.rejectLimit !== void 0 ? { rejectLimit: result.rejectLimit } : {},
       ...result.errTable !== void 0 ? { errTable: result.errTable } : {}
     };
+  }
+  if (result.type === "EXIT") {
+    return { ok: true, type: result.type, condition: result.condition, exited: result.exited, message: result.message };
   }
   return {
     ok: true,
