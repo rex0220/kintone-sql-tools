@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ExitStatement, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -355,6 +355,7 @@ export type ExecuteResult =
   | UpsertResult
   | ReorderResult
   | AssertResult
+  | ExitResult
   | DmlValidationResult;
 
 /** 1 回の execute() で発生した kintone API 呼び出しの計測値 */
@@ -529,6 +530,18 @@ export interface AssertResult {
   type: "ASSERT";
   /** 評価した条件（パーサが再構成した正規化テキスト） */
   condition: string;
+  /** 条件が成立したか。既存利用者には純加法。 */
+  passed?: boolean;
+  /** ASSERT WARN 不成立時の利用者向け警告。 */
+  warning?: string;
+  metrics?: ExecuteMetrics;
+}
+
+export interface ExitResult {
+  type: "EXIT";
+  condition: string;
+  exited: boolean;
+  message: string;
   metrics?: ExecuteMetrics;
 }
 
@@ -1179,6 +1192,8 @@ async function executeParsedStatement(
     case "DECLARE_VARIABLE":
       throw new Error("ArgumentError: DECLARE variable requires a batch.");
     case "ASSERT":        return executeAssert(stmt, client, options, cacheContext);
+    case "EXIT":
+      throw new Error("ArgumentError: EXIT SUCCESS IF はバッチ専用です");
   }
 }
 
@@ -1514,12 +1529,12 @@ export interface BatchStatementResult {
   /** CREATE_TEMP_TABLE の実体化行数 */
   rowCount?: number;
   error?: BatchStatementError;
-  /** "fail-fast" / "dependency: #name" / "timeout" / "assertion" */
+  /** "fail-fast" / "dependency: #name" / "timeout" / "assertion" / "exit" */
   skippedReason?: string;
 }
 
 export interface BatchExecuteResult {
-  /** 全文 success のときのみ true */
+  /** エラーがなく、skipped が正常な EXIT によるものだけなら true */
   ok: boolean;
   statementCount: number;
   statements: BatchStatementResult[];
@@ -1612,8 +1627,8 @@ export async function executeBatch(
     const results: BatchStatementResult[] = [];
     /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
     const failed = new Set<number>();
-    /** fail-fast / timeout / assertion で中断済みなら以降の文の skippedReason */
-    let aborted: "fail-fast" | "timeout" | "assertion" | null = null;
+    /** fail-fast / timeout / assertion / exit で中断済みなら以降の文の skippedReason */
+    let aborted: "fail-fast" | "timeout" | "assertion" | "exit" | null = null;
 
     for (let i = 0; i < statements.length; i++) {
       const info = analysis.statements[i];
@@ -1621,7 +1636,7 @@ export async function executeBatch(
 
       if (aborted) {
         results.push({ ...base, status: "skipped", skippedReason: aborted });
-        failed.add(i);
+        if (aborted !== "exit") failed.add(i);
         continue;
       }
 
@@ -1692,7 +1707,9 @@ export async function executeBatch(
         if (outcome.result) {
           outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
         }
-        results.push({ ...base, status: "success", ...outcome });
+        const { exitTriggered, ...statementOutcome } = outcome;
+        results.push({ ...base, status: "success", ...statementOutcome });
+        if (exitTriggered) aborted = "exit";
       } catch (e) {
         results.push({
           ...base,
@@ -1718,7 +1735,7 @@ export async function executeBatch(
 
     metrics.elapsedMs = Date.now() - startedAt;
     return {
-      ok: results.every((r) => r.status === "success"),
+      ok: results.every((r) => r.status === "success" || r.skippedReason === "exit"),
       statementCount: statements.length,
       statements: results,
       analysis,
@@ -1750,10 +1767,15 @@ interface ExecutionContext {
   readonly clock: EvaluationContext;
 }
 
+interface BatchStatementOutcome extends Partial<BatchStatementResult> {
+  /** 内部制御用。BatchStatementResult には露出しない。 */
+  exitTriggered?: boolean;
+}
+
 /** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
 async function executeBatchStatement(
   context: ExecutionContext
-): Promise<Partial<BatchStatementResult>> {
+): Promise<BatchStatementOutcome> {
   const {
     stmt, info, client, options, cacheContext, tempTables, variables,
     relativeDateVariables, clock,
@@ -1938,11 +1960,15 @@ async function executeBatchStatement(
     }
   }
 
-  // ASSERT: 成功時は result を持たせない no-result 文として扱う
-  //（`result.type !== "SELECT"` → mutation summary 経路への流入を構造的に防ぐ。仕様 §2.3）
+  // ASSERT: 既存の成立時は no-result のまま。WARN 不成立時だけ警告結果を残す。
   if (resolvedStmt.type === "ASSERT") {
-    await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
-    return {};
+    const result = await executeAssert(resolvedStmt, client, options, cacheContext, tempTables);
+    return result.warning !== undefined ? { result } : {};
+  }
+
+  if (resolvedStmt.type === "EXIT") {
+    const result = await executeExit(resolvedStmt, client, options, cacheContext, tempTables);
+    return { result, ...(result.exited ? { exitTriggered: true } : {}) };
   }
 
   // 一時テーブルを参照する文はストアを注入して実行
@@ -2362,6 +2388,46 @@ async function executeAssert(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<AssertResult> {
+  const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
+  if (!evaluation.passed) {
+    if (stmt.warn === true) {
+      return {
+        type: "ASSERT",
+        condition: stmt.text,
+        passed: false,
+        warning: stmt.message ?? `assertion failed: ${stmt.text} (actual: ${evaluation.actual}).`,
+      };
+    }
+    const suffix = stmt.message !== undefined ? ` ${stmt.message}` : "";
+    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${evaluation.actual}).${suffix}`);
+  }
+  // 既存 ASSERT 成功結果の列挙可能な形は変えない。
+  return { type: "ASSERT", condition: stmt.text };
+}
+
+async function executeExit(
+  stmt: ExitStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<ExitResult> {
+  const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
+  return {
+    type: "EXIT",
+    condition: stmt.text,
+    exited: evaluation.passed,
+    message: stmt.message,
+  };
+}
+
+async function evaluateAssertCondition(
+  stmt: AssertStatement | ExitStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<{ passed: boolean; actual: string }> {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
   const semantics = stmt.left.type === "NUMBER" || stmt.left.type === "ARITH"
     ? syntheticSemantics("number")
@@ -2374,20 +2440,18 @@ async function executeAssert(
     const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
-    if (!compareScalarValues(">=", left, low, semantics) || !compareScalarValues("<=", left, high, semantics)) {
-      throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
-    }
-    return { type: "ASSERT", condition: stmt.text };
+    return {
+      passed: compareScalarValues(">=", left, low, semantics)
+        && compareScalarValues("<=", left, high, semantics),
+      actual: left,
+    };
   }
 
   if (stmt.right === null) {
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  if (!compareScalarValues(stmt.op, left, right, semantics)) {
-    throw new AssertError(`assertion failed: ${stmt.text} (actual: ${left}).`);
-  }
-  return { type: "ASSERT", condition: stmt.text };
+  return { passed: compareScalarValues(stmt.op, left, right, semantics), actual: left };
 }
 
 /** ASSERT のオペランドを文字列値に評価する（サブクエリは 1行1列を実行時検証） */
@@ -11840,7 +11904,16 @@ export async function buildBatchExplainPlans(
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const statements = parseSqlBatch(sql, enableImport);
+    const header = parseScriptHeader(sql);
+    const headerError = header.diagnostics.find((diagnostic) => diagnostic.severity === "error");
+    if (header.hasDirectives && headerError) {
+      throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
+    }
+    const statements = parseSqlBatch(
+      header.hasDirectives ? sql.slice(header.headerEnd) : sql,
+      enableImport,
+      header.hasDirectives && header.meta.dialect === 1
+    );
     const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
@@ -12050,8 +12123,10 @@ function buildBatchStatementPlan(
   }
   if (stmt.type === "ASSERT") {
     const lines: string[] = [
-      `ASSERT ${stmt.text}`,
-      "  check:         実行時に条件評価（不成立は AssertError でバッチ停止、以降の文は skipped）",
+      `ASSERT${stmt.warn === true ? " WARN" : ""} ${stmt.text}${stmt.message !== undefined ? `, '${stmt.message.replace(/'/g, "''")}'` : ""}`,
+      stmt.warn === true
+        ? "  check:         実行時に条件評価（不成立は警告として記録し、後続文を続行）"
+        : "  check:         実行時に条件評価（不成立は AssertError でバッチ停止、以降の文は skipped）",
     ];
     const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
       (o): o is ScalarSubquery => o !== null && o.type === "SCALAR_SUBQUERY"
@@ -12065,6 +12140,24 @@ function buildBatchStatementPlan(
         sq.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
         "main", tempSchemaLedger, explainContext
       ).map((l) => `  ${l}`));
+    });
+    return lines;
+  }
+  if (stmt.type === "EXIT") {
+    const lines: string[] = [
+      `EXIT SUCCESS IF ${stmt.text}, '${stmt.message.replace(/'/g, "''")}'`,
+      "  check:         実行時に条件評価（成立時は正常終了し、以降の文は skippedReason: exit）",
+    ];
+    const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(
+      (o): o is ScalarSubquery => o !== null && o.type === "SCALAR_SUBQUERY"
+    );
+    subqueries.forEach((sq, i) => {
+      lines.push(subqueries.length > 1 ? `  subquery[${i + 1}]:` : "  subquery:");
+      const subInfo = hasTempTableRef(sq.query) ? info : { ...info, tempTablesReferenced: [] };
+      lines.push(...buildPlanForBatchQuery(
+        sq.query, subInfo, capabilities, orderPlans, plainGroupByPlans, collector,
+        "main", tempSchemaLedger, explainContext
+      ).map((line) => `  ${line}`));
     });
     return lines;
   }

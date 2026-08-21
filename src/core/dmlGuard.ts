@@ -48,7 +48,9 @@ export function isReadOnlyType(type: string): boolean {
     || type === "SET_VARIABLE"
     || type === "DECLARE_VARIABLE"
     // ASSERT は条件評価のみで kintone に書き込まない（バッチ強化第1弾 §2.3）
-    || type === "ASSERT";
+    || type === "ASSERT"
+    // EXIT は条件評価とバッチ制御のみで kintone に書き込まない
+    || type === "EXIT";
 }
 
 /** 文が実際に kintone の mutation API を呼ぶか。 */

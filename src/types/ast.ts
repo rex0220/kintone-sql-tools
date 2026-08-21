@@ -32,6 +32,7 @@ export type Statement =
   | SetVariableStatement
   | DeclareVariableStatement
   | AssertStatement
+  | ExitStatement
   | ImportStatement;
 
 // ------------------------------------------------------------
@@ -171,6 +172,23 @@ export interface AssertStatement {
   high: AssertOperand | null;
   /** 条件部の正規化テキスト（AssertError の "assertion failed: ..." メッセージ用） */
   text: string;
+  /** dialect 1: 不成立でも警告として続行する。 */
+  warn?: boolean;
+  /** dialect 1: 利用者向けのアサーションメッセージ。 */
+  message?: string;
+}
+
+/** dialect 1: 条件成立時にバッチを正常終了する。 */
+export interface ExitStatement {
+  type: "EXIT";
+  left: AssertOperand;
+  op: AssertCompareOp | "BETWEEN";
+  right: AssertOperand | null;
+  low: AssertOperand | null;
+  high: AssertOperand | null;
+  /** 条件部の正規化テキスト。 */
+  text: string;
+  message: string;
 }
 
 // ------------------------------------------------------------

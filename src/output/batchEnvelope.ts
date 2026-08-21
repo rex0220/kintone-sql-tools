@@ -96,6 +96,9 @@ function toMutationSummary(
       ...(result.errTable !== undefined ? { errTable: result.errTable } : {}),
     };
   }
+  if (result.type === "EXIT") {
+    return { condition: result.condition, exited: result.exited, message: result.message };
+  }
   return { reorderedParentCount: result.reorderedParentCount };
 }
 
@@ -167,9 +170,11 @@ export function buildBatchEnvelope(
         ...(s.result.deletedRows ? { deletedRows: s.result.deletedRows } : {}),
         ...(s.result.diagnostic ? { diagnostic: s.result.diagnostic } : {}),
       });
+    } else if (s.status === "success" && s.result?.type === "ASSERT") {
+      entry.condition = s.result.condition;
+      if (s.result.passed !== undefined) entry.passed = s.result.passed;
+      if (s.result.warning !== undefined) entry.warning = s.result.warning;
     } else if (s.status === "success" && s.result && s.result.type !== "SELECT" && s.result.type !== "ASSERT") {
-      // バッチ内 ASSERT の成功は result を持たない no-result 文のためここには来ない
-      //（ExecuteResult 型上は含まれるため型の除外も兼ねる）
       Object.assign(entry, toMutationSummary(s.result));
     }
     return entry;

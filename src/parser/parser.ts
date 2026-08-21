@@ -96,6 +96,7 @@ import type {
   AssertStatement,
   AssertOperand,
   AssertCompareOp,
+  ExitStatement,
   SetVariableStatement,
   DeclareVariableStatement,
   ScalarExpr,
@@ -469,6 +470,7 @@ export class Parser {
         if (upper === "DROP")   return this.parseDropTempTable();
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
+        if (upper === "EXIT") return this.parseExit();
         if (upper === "GENERATE_SERIES") {
           throw new ParseError(
             "GENERATE_SERIES は WITH の CTE 本体に書いてください。例: WITH s AS (GENERATE_SERIES(1, 5)) SELECT generate_series FROM s",
@@ -487,7 +489,7 @@ export class Parser {
         break;
     }
     throw new ParseError(
-      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT のいずれかで始まる SQL 文が必要です",
+      "SELECT / INSERT / UPDATE / DELETE / REORDER / VALIDATE / WITH / SHOW / DESCRIBE / EXPLAIN / CREATE TEMP TABLE / DROP TEMP TABLE / SET / DECLARE / ASSERT / EXIT のいずれかで始まる SQL 文が必要です",
       tok
     );
   }
@@ -1002,6 +1004,43 @@ export class Parser {
 
   private parseAssert(): AssertStatement {
     this.expect(TokenKind.ASSERT);
+    const warnTok = this.peek();
+    const warn = this.isSoftKeyword("WARN");
+    if (warn) {
+      this.requireDialect1(warnTok);
+      this.advance();
+    }
+    const condition = this.parseAssertCondition();
+    const message = this.parseFlowMessage();
+    return {
+      type: "ASSERT",
+      ...condition,
+      ...(warn ? { warn: true } : {}),
+      ...(message !== undefined ? { message } : {}),
+    };
+  }
+
+  /** EXIT SUCCESS IF <ASSERT と同じ条件>, '<message>' */
+  private parseExit(): ExitStatement {
+    const exitTok = this.advance(); // EXIT（ソフトキーワード）
+    this.requireDialect1(exitTok);
+    if (!this.isSoftKeyword("SUCCESS")) {
+      throw new ParseError("EXIT の後には SUCCESS が必要です", this.peek());
+    }
+    this.advance();
+    if (this.peek().kind !== TokenKind.IF && !this.isSoftKeyword("IF")) {
+      throw new ParseError("EXIT SUCCESS の後には IF が必要です", this.peek());
+    }
+    this.advance();
+    const condition = this.parseAssertCondition();
+    if (!this.consume(TokenKind.COMMA)) {
+      throw new ParseError("EXIT SUCCESS IF には末尾のメッセージ文字列が必要です", this.peek());
+    }
+    const message = this.expect(TokenKind.STRING, "EXIT SUCCESS IF のメッセージには文字列リテラルが必要です");
+    return { type: "EXIT", ...condition, message: message.value };
+  }
+
+  private parseAssertCondition(): Omit<AssertStatement, "type" | "warn" | "message"> {
     const condStart = this.pos;
     const left = this.parseAssertOperand();
 
@@ -1015,7 +1054,7 @@ export class Parser {
       const high = this.parseAssertOperand();
       this.rejectAssertCompound();
       return {
-        type: "ASSERT", left, op: "BETWEEN", right: null, low, high,
+        left, op: "BETWEEN", right: null, low, high,
         text: this.renderTokenRange(condStart, this.pos),
       };
     }
@@ -1030,9 +1069,22 @@ export class Parser {
     const right = this.parseAssertOperand();
     this.rejectAssertCompound();
     return {
-      type: "ASSERT", left, op, right, low: null, high: null,
+      left, op, right, low: null, high: null,
       text: this.renderTokenRange(condStart, this.pos),
     };
+  }
+
+  /** ASSERT の dialect 1 メッセージ。カンマが無ければ既存形式。 */
+  private parseFlowMessage(): string | undefined {
+    if (!this.consume(TokenKind.COMMA)) return undefined;
+    this.requireDialect1(this.prev());
+    return this.expect(TokenKind.STRING, "ASSERT のメッセージには文字列リテラルが必要です").value;
+  }
+
+  private requireDialect1(tok: Token): void {
+    if (!this.capabilities.dialect1) {
+      throw new ParseError("この構文には -- @ksql dialect: 1 の宣言が必要です", tok);
+    }
   }
 
   /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
