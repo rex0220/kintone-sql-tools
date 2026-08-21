@@ -1,17 +1,22 @@
-ksql 配布パッケージ (v3.67.0)
+ksql 配布パッケージ (v3.68.0)
 
 release 成果物:
-- ksql-plugin-v3.67.0.zip
-- ksql-mcp.mcpb (manifest version 3.67.0)
-- ksql-mcp.js (MCP server version 3.67.0)
+- ksql-plugin-v3.68.0.zip
+- ksql-mcp.mcpb (manifest version 3.68.0)
+- ksql-mcp.js (MCP server version 3.68.0)
 
-修正 (B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻へ) ★結果が変わる形あり:
-- これまで両関数は式評価のたびに時計を読み直していたため、複数行の SELECT では
-  行ごとに異なるミリ秒が返り、深夜 0 時を跨ぐ実行では途中で「今日」が変わる
-  非決定がありました。文の実行開始時に 1 回だけ取得した時刻へ固定します。
-- 変わらないもの: 値の形式 (YYYY-MM-DD / ISO 8601 ミリ秒付き)・タイムゾーンの扱い・
-  SET/DECLARE の NOW()/TODAY() (元から文単位 1 回評価)・WHERE 素通しの TODAY() 等
-  (kintone サーバー評価のまま)。バッチは文ごとに時刻が確定します (文間は同値にしません)。
+新機能 (B168 Flow dialect 1 の解析基盤 = Stage 1-3) ★既存構文は完全不変・opt-in:
+- バッチ SQL の先頭に -- @ksql dialect: 1 を宣言したときだけ有効になる拡張構文:
+  ASSERT <条件>, 'メッセージ' / ASSERT WARN (警告して続行) / EXIT SUCCESS IF (正常な
+  早期終了) / CREATE TEMP TABLE 裸名 AS / UPSERT ... KEY (k) / MERGE INTO (UPSERT へ
+  正規化)。-- @ksql name/depends_on/timeout ヘッダも解析します。
+- 宣言なし (dialect 0 = 既定) の SQL は一切変わりません。dialect 1 構文を宣言なしで
+  使うと「-- @ksql dialect: 1 の宣言が必要」エラーになります。
+- 言語リファレンス・MCP ツールの dialect 1 対応 (構造化 diagnostics・as-of 注入・
+  validate 拡張) は後続リリースで提供します。本版の dialect 1 は実験的扱いです。
+
+v3.67.0 の節は畳みました (B169 CURRENT_DATE/CURRENT_TIMESTAMP を文単位の固定時刻へ =
+結果が変わる形あり)。内容は CHANGELOG.md にあります。
 
 v3.66.1 の節は畳みました (B167 バッチ EXPLAIN の一時テーブル JOIN 失敗の修正 =
 EXPLAIN 面のみ・実行は不変)。内容は CHANGELOG.md にあります。
@@ -81,12 +86,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.67.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.68.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
+本リリース (v3.68.0): B168 Flow dialect 1 の解析基盤 (Stage 1-3・opt-in 新構文・既存不変・実験的)。
+
+前リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
 
 前リリース (v3.66.1): B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正 (EXPLAIN 面のみ・実行は不変)。
 
