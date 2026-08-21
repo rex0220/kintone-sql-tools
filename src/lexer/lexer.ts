@@ -348,7 +348,7 @@ export class Lexer {
   // ----------------------------------------------------------
 
   private makeToken(kind: TokenKind, value: string, pos: number): Token {
-    return { kind, value, pos };
+    return { kind, value, pos, end: this.pos };
   }
 }
 

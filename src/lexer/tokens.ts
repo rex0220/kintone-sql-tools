@@ -337,4 +337,5 @@ export interface Token {
   kind:  TokenKind;
   value: string;   // 元のテキスト（リテラルは加工済み）
   pos:   number;   // 入力文字列上の開始位置（0-indexed）
+  end?:  number;   // 入力文字列上の終了位置（exclusive。互換のため optional）
 }

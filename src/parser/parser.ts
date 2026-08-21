@@ -340,7 +340,19 @@ export const WINDOW_RESULT_IN_EXPRESSION_MESSAGE = [
 // Parser クラス
 // ------------------------------------------------------------
 
-export interface ParserCapabilities { import?: boolean; }
+export interface ParserCapabilities { import?: boolean; dialect1?: boolean; }
+
+export interface StatementRange {
+  /** Inclusive UTF-16 character offset of the statement's first token. */
+  start: number;
+  /** Exclusive UTF-16 character offset immediately before the delimiter. */
+  end: number;
+}
+
+export interface ParsedStatements {
+  statements: Statement[];
+  statementRanges: StatementRange[];
+}
 
 type GroupingFieldContext = "FORBIDDEN" | "SELECT_CASE" | "HAVING";
 
@@ -397,7 +409,13 @@ export class Parser {
 
   /** 複文（`;` 区切り）をパースする。空文はスキップする */
   parseStatements(): Statement[] {
+    return this.parseStatementsWithRanges().statements;
+  }
+
+  /** 複文と、原文上の文ごとの文字範囲を同時に返す。 */
+  parseStatementsWithRanges(): ParsedStatements {
     const stmts: Statement[] = [];
+    const statementRanges: StatementRange[] = [];
     while (true) {
       // 空文（連続する ;）をスキップ
       while (this.peek().kind === TokenKind.SEMICOLON) this.advance();
@@ -416,9 +434,11 @@ export class Parser {
       if (after.kind !== TokenKind.SEMICOLON && after.kind !== TokenKind.EOF) {
         throw new ParseError("文の区切りには ; が必要です", after);
       }
+      const lastTok = this.prev();
+      statementRanges.push({ start: startTok.pos, end: lastTok.end ?? after.pos });
     }
     this.expect(TokenKind.EOF);
-    return stmts;
+    return { statements: stmts, statementRanges };
   }
 
   // ----------------------------------------------------------
