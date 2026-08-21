@@ -135,6 +135,9 @@ const MAX_BATCH_STATEMENTS = 20;
 // BETWEEN 展開用の型エイリアス（ローカル）
 type ExpandedBetween = LogicalExpr;
 
+// MERGE はパース時に既存の UPSERT_SELECT へ完全に正規化する。
+type NormalizedMergeUpsert = UpsertSelectStatement;
+
 export const PARSER_SCALAR_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, StringFuncName>>> = Object.freeze({
   [TokenKind.UPPER]: "UPPER",
   [TokenKind.LOWER]: "LOWER",
@@ -369,6 +372,8 @@ export class Parser {
   private allowRelativeDateFunctions = false;
   /** WITH 句で定義された CTE 名のセット（parseTableRef で参照） */
   private cteNames: Set<string> = new Set();
+  /** dialect 1 の裸名で宣言された一時テーブル名（参照時に # 付きへ正規化） */
+  private bareTempTableNames: Set<string> = new Set();
   /** パース中に出現した一時テーブル参照（#name）のトークン。単文 API での拒否に使う */
   private tempTableRefs: Token[] = [];
   /** GROUP BY を読む前に作る B124 候補 leaf の診断位置。AST 公開型へ位置情報を足さない。 */
@@ -471,6 +476,12 @@ export class Parser {
         if (upper === "DECLARE") return this.parseDeclareVariable();
         if (upper === "VALIDATE") return this.parseValidate();
         if (upper === "EXIT") return this.parseExit();
+        if (upper === "MERGE") {
+          if (!this.capabilities.dialect1) {
+            throw new ParseError("MERGE には -- @ksql dialect: 1 の宣言が必要です", tok);
+          }
+          return this.parseMergeAsUpsert();
+        }
         if (upper === "GENERATE_SERIES") {
           throw new ParseError(
             "GENERATE_SERIES は WITH の CTE 本体に書いてください。例: WITH s AS (GENERATE_SERIES(1, 5)) SELECT generate_series FROM s",
@@ -634,6 +645,7 @@ export class Parser {
     this.advance(); // CREATE
     this.expectSoftKeyword("TEMP", "CREATE の後には TEMP TABLE が必要です（例: CREATE TEMP TABLE #temp AS SELECT ...）");
     this.expectSoftKeyword("TABLE", "CREATE TEMP の後には TABLE が必要です");
+    const bareName = this.isDialect1BareTempTableName();
     const name = this.parseTempTableName();
     this.expect(TokenKind.AS, "CREATE TEMP TABLE には AS SELECT が必要です");
 
@@ -646,6 +658,7 @@ export class Parser {
     } else {
       throw new ParseError("CREATE TEMP TABLE ... AS の後には SELECT / WITH が必要です", tok);
     }
+    if (bareName !== null) this.bareTempTableNames.add(bareName);
     return { type: "CREATE_TEMP_TABLE", name, query };
   }
 
@@ -653,7 +666,9 @@ export class Parser {
     this.advance(); // DROP
     this.expectSoftKeyword("TEMP", "DROP の後には TEMP TABLE が必要です（例: DROP TEMP TABLE #temp）");
     this.expectSoftKeyword("TABLE", "DROP TEMP の後には TABLE が必要です");
+    const bareName = this.isDialect1BareTempTableName();
     const name = this.parseTempTableName();
+    if (bareName !== null) this.bareTempTableNames.delete(bareName);
     return { type: "DROP_TEMP_TABLE", name };
   }
 
@@ -678,7 +693,20 @@ export class Parser {
       this.advance();
       return tok.value;
     }
+    if (this.capabilities.dialect1 && (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT)) {
+      this.advance();
+      return `#${tok.value}`;
+    }
     throw new ParseError("一時テーブル名は # で始まる必要があります（例: #temp）", tok);
+  }
+
+  private isDialect1BareTempTableName(): string | null {
+    const tok = this.peek();
+    return this.capabilities.dialect1
+      && (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT)
+      && !tok.value.startsWith("#")
+      ? tok.value
+      : null;
   }
 
   private parseShow(): ShowAppsStatement {
@@ -2731,6 +2759,12 @@ export class Parser {
       );
     }
     const name = this.parseTableName();
+    if (this.capabilities.dialect1 && this.bareTempTableNames.has(name)) {
+      const normalizedName = `#${name}`;
+      this.tempTableRefs.push({ ...this.prev(), value: normalizedName });
+      const alias = this.consume(TokenKind.AS) ? this.parseTableAliasName() : this.tryParseImplicitAlias();
+      return { appId: 0, alias, cteName: normalizedName };
+    }
     // 一時テーブル参照（#name）: CTE と同じ機構（FULL_SCAN 注入）で実行される
     //（temp マーカーは IDENT のみ。バッククォートの `#x` は通常識別子として後段へ）
     if (nameTok.kind === TokenKind.IDENT && name.startsWith("#")) {
@@ -2794,6 +2828,11 @@ export class Parser {
         k === TokenKind.IDENT &&
         this.peek().value.toUpperCase() === "CHECK" &&
         this.peekAt(1).kind === TokenKind.WHEN
+      ) return null;
+      if (
+        k === TokenKind.IDENT &&
+        this.peek().value.toUpperCase() === "KEY" &&
+        this.peekAt(1).kind === TokenKind.LPAREN
       ) return null;
       return this.parseTableAliasName();
     }
@@ -3842,6 +3881,15 @@ export class Parser {
   }
 
   private parseOnDuplicate(): string[] {
+    if (this.capabilities.dialect1 && this.consumeSoftKeyword("KEY")) {
+      this.expect(TokenKind.LPAREN, "KEY の後には (キーフィールド) が必要です");
+      const keyFields = this.parseIdentList();
+      this.expect(TokenKind.RPAREN);
+      if (keyFields.length === 0) {
+        throw new ParseError("KEY にはキーフィールドが最低 1 つ必要です", this.prev());
+      }
+      return keyFields;
+    }
     this.expectKeyword(TokenKind.ON, "UPSERT には ON DUPLICATE (キーフィールド) が必要です");
     if (!this.consume(TokenKind.DUPLICATE)) {
       throw new ParseError("ON の後には DUPLICATE が必要です", this.peek());
@@ -3853,6 +3901,260 @@ export class Parser {
       throw new ParseError("ON DUPLICATE にはキーフィールドが最低 1 つ必要です", this.prev());
     }
     return keyFields;
+  }
+
+  private parseMergeAsUpsert(): NormalizedMergeUpsert {
+    const mergeToken = this.advance(); // MERGE
+    this.expect(TokenKind.INTO, "MERGE の後には INTO が必要です");
+    this.rejectTempTableDml();
+    const targetName = this.parseIdentifier();
+    const { appId, subtableCode } = extractTableRef(targetName, this.prev());
+    if (subtableCode) {
+      throw new ParseError("MERGE はまだサブテーブル仮想テーブルに対応していません", this.prev());
+    }
+    this.expect(TokenKind.AS, "MERGE のターゲットには AS alias が必要です");
+    const targetAlias = this.parseTableAliasName();
+
+    this.expectSoftKeyword("USING", "MERGE には USING <source> AS alias が必要です");
+    const sourceStart = this.pos;
+    const source = this.parseTableRef();
+    const explicitSourceAlias = this.tokens.slice(sourceStart, this.pos).some((token) => token.kind === TokenKind.AS);
+    if (!explicitSourceAlias || source.alias === null) {
+      throw new ParseError("MERGE の USING ソースには AS alias が必要です", this.peek());
+    }
+    const sourceAlias = source.alias;
+
+    this.expect(TokenKind.ON, "MERGE には ON t.key = s.key の単一キー等値が必要です");
+    const left = this.parseMergeQualifiedField("MERGE の ON 左辺は targetAlias.key の形で指定してください");
+    if (!this.consume(TokenKind.EQ)) {
+      throw new ParseError(
+        "MERGE の ON は単一キーの等値（t.key = s.key）のみ対応しています。複数条件や非等値は連結キーフィールドで置き換えてください",
+        this.peek()
+      );
+    }
+    const right = this.parseMergeQualifiedField("MERGE の ON 右辺は sourceAlias.key の形で指定してください");
+    if (left.alias.toLowerCase() !== targetAlias.toLowerCase() || right.alias.toLowerCase() !== sourceAlias.toLowerCase()) {
+      throw new ParseError(
+        `MERGE の ON は ${targetAlias}.key = ${sourceAlias}.key の別名修飾で指定してください`,
+        mergeToken
+      );
+    }
+    if (this.peek().kind === TokenKind.AND || this.peek().kind === TokenKind.OR) {
+      throw new ParseError(
+        "MERGE の ON は単一キーの等値のみ対応しています。複数条件は連結キーフィールドで置き換えてください",
+        this.peek()
+      );
+    }
+
+    let matched: Assignment[] | null = null;
+    let insertFields: string[] | null = null;
+    let insertValues: Assignment["value"][] | null = null;
+    while (this.peek().kind === TokenKind.WHEN) {
+      const whenToken = this.advance();
+      if (this.consume(TokenKind.NOT)) {
+        this.expectSoftKeyword("MATCHED", "WHEN NOT の後には MATCHED が必要です");
+        if (insertFields !== null) throw new ParseError("WHEN NOT MATCHED 句が重複しています", whenToken);
+        this.expect(TokenKind.THEN, "WHEN NOT MATCHED の後には THEN が必要です");
+        this.expect(TokenKind.INSERT, "WHEN NOT MATCHED THEN の後には INSERT が必要です");
+        this.expect(TokenKind.LPAREN, "MERGE INSERT には列リストが必要です");
+        insertFields = this.parseIdentList();
+        this.expect(TokenKind.RPAREN);
+        this.expect(TokenKind.VALUES, "MERGE INSERT の列リストの後には VALUES が必要です");
+        this.expect(TokenKind.LPAREN, "MERGE INSERT VALUES は ( で始めてください");
+        insertValues = this.parseMergeValueList();
+        this.expect(TokenKind.RPAREN);
+        if (insertFields.length !== insertValues.length) {
+          throw new ParseError("MERGE INSERT の列数と VALUES の値数が一致しません", whenToken);
+        }
+      } else {
+        this.expectSoftKeyword("MATCHED", "WHEN の後には MATCHED または NOT MATCHED が必要です");
+        if (matched !== null) throw new ParseError("WHEN MATCHED 句が重複しています", whenToken);
+        this.expect(TokenKind.THEN, "WHEN MATCHED の後には THEN が必要です");
+        this.expect(TokenKind.UPDATE, "WHEN MATCHED THEN の後には UPDATE が必要です");
+        this.expect(TokenKind.SET, "WHEN MATCHED THEN UPDATE の後には SET が必要です");
+        matched = this.parseMergeAssignments(targetAlias);
+      }
+    }
+
+    if (matched === null || insertFields === null || insertValues === null) {
+      throw new ParseError(
+        "WHEN MATCHED / WHEN NOT MATCHED の両句が必要です（更新のみは UPDATE ... FROM、挿入のみは INSERT ... SELECT を使用してください）",
+        this.peek()
+      );
+    }
+    if (!insertFields.some((field) => field.toLowerCase() === left.field.toLowerCase())) {
+      throw new ParseError(
+        `MERGE の ON キー ${left.field} は INSERT 列リストに含めてください`,
+        mergeToken
+      );
+    }
+
+    const expressions = new Map<string, Assignment["value"]>();
+    insertFields.forEach((field, index) => expressions.set(field.toLowerCase(), insertValues![index]));
+    for (const assignment of matched) {
+      const key = assignment.field.toLowerCase();
+      const existing = expressions.get(key);
+      if (existing !== undefined && !this.mergeExpressionsEqual(existing, assignment.value, sourceAlias)) {
+        throw new ParseError(
+          `MERGE の列 ${assignment.field} は両句の式が一致する場合のみ MERGE を UPSERT へ正規化できます`,
+          mergeToken
+        );
+      }
+      if (existing === undefined) {
+        insertFields.push(assignment.field);
+        insertValues.push(assignment.value);
+        expressions.set(key, assignment.value);
+      }
+    }
+
+    const columns = insertValues.map((value) => this.mergeValueToSelectColumn(value, sourceAlias, mergeToken));
+    const normalizedSource: TableRef = source.cteName !== null
+      ? { ...source, alias: null }
+      : { ...source, alias: `APP${source.appId}${source.subtableCode ? `$${source.subtableCode}` : ""}` };
+    const select: SelectStatement = {
+      type: "SELECT",
+      distinct: false,
+      columns,
+      from: normalizedSource,
+      joins: [],
+      where: null,
+      groupBy: [],
+      having: null,
+      orderMode: "CANONICAL",
+      orderBy: [],
+      limit: null,
+      offset: null,
+    };
+    const checkGroups = this.parseCheckGroups();
+    const validation = this.parseDmlControlSuffix();
+    return {
+      type: "UPSERT_SELECT",
+      appId,
+      fields: insertFields,
+      select,
+      keyFields: [left.field],
+      ...checkGroups,
+      ...validation,
+    };
+  }
+
+  private parseMergeQualifiedField(message: string): { alias: string; field: string } {
+    const token = this.peek();
+    const path = this.parseFieldPath();
+    const ref = this.splitQualifiedField(path);
+    if (ref.alias === null) throw new ParseError(message, token);
+    return { alias: ref.alias, field: ref.field };
+  }
+
+  private parseMergeAssignments(targetAlias: string): Assignment[] {
+    const assignments: Assignment[] = [];
+    do {
+      const token = this.peek();
+      const path = this.parseFieldPath();
+      const ref = this.splitQualifiedField(path);
+      if (ref.alias !== null && ref.alias.toLowerCase() !== targetAlias.toLowerCase()) {
+        throw new ParseError(`MERGE UPDATE SET の左辺は target alias ${targetAlias} で修飾してください`, token);
+      }
+      this.expect(TokenKind.EQ);
+      assignments.push({ field: ref.field, value: this.parseAssignmentValue() });
+    } while (this.consume(TokenKind.COMMA));
+    return assignments;
+  }
+
+  private parseMergeValueList(): Assignment["value"][] {
+    const values: Assignment["value"][] = [];
+    if (this.peek().kind === TokenKind.RPAREN) return values;
+    do values.push(this.parseAssignmentValue()); while (this.consume(TokenKind.COMMA));
+    return values;
+  }
+
+  private mergeExpressionsEqual(
+    left: Assignment["value"],
+    right: Assignment["value"],
+    sourceAlias: string
+  ): boolean {
+    return this.mergeNormalizedValueEqual(
+      this.normalizeMergeValue(left, sourceAlias, true),
+      this.normalizeMergeValue(right, sourceAlias, true)
+    );
+  }
+
+  private normalizeMergeValue(value: unknown, sourceAlias: string, compareLiteralValues = false): unknown {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.normalizeMergeValue(item, sourceAlias, compareLiteralValues));
+    }
+    if (value === null || typeof value !== "object") return value;
+    const obj = value as Record<string, unknown>;
+    if (compareLiteralValues && obj["type"] === "NUMBER") {
+      return { type: "NUMBER", value: obj["value"] };
+    }
+    if (obj["type"] === "SOURCE_FIELD") {
+      if (String(obj["alias"]).toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { type: "FIELD_REF", field: obj["field"] };
+    }
+    if (obj["type"] === "FIELD_REF" && typeof obj["field"] === "string") {
+      const ref = this.splitQualifiedField(obj["field"]);
+      if (ref.alias !== null && ref.alias.toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { ...obj, field: ref.field };
+    }
+    if (obj["type"] === "FIELD" && typeof obj["tableAlias"] === "string") {
+      if (obj["tableAlias"].toLowerCase() !== sourceAlias.toLowerCase()) return { type: "INVALID_SOURCE" };
+      return { ...obj, tableAlias: null };
+    }
+    return Object.fromEntries(Object.entries(obj).map(([key, child]) => [
+      key,
+      this.normalizeMergeValue(child, sourceAlias, compareLiteralValues),
+    ]));
+  }
+
+  private mergeNormalizedValueEqual(left: unknown, right: unknown): boolean {
+    if (left === right) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right)
+        && left.length === right.length
+        && left.every((item, index) => this.mergeNormalizedValueEqual(item, right[index]));
+    }
+    if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+    const leftObj = left as Record<string, unknown>;
+    const rightObj = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftObj);
+    const rightKeys = Object.keys(rightObj);
+    return leftKeys.length === rightKeys.length
+      && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightObj, key)
+        && this.mergeNormalizedValueEqual(leftObj[key], rightObj[key]));
+  }
+
+  private mergeValueToSelectColumn(
+    value: Assignment["value"],
+    sourceAlias: string,
+    token: Token
+  ): SelectColumn {
+    const normalized = this.normalizeMergeValue(value, sourceAlias);
+    if (this.mergeValueContainsInvalidSource(normalized)) {
+      throw new ParseError(`MERGE の式は source alias ${sourceAlias} のフィールドだけを参照してください`, token);
+    }
+    const expr = normalized as Record<string, unknown>;
+    switch (expr["type"]) {
+      case "FIELD_REF": return { type: "FIELD", field: String(expr["field"]), alias: null };
+      case "STRING": return { type: "LITERAL_COL", value: String(expr["value"]), alias: null };
+      case "NUMBER": return { type: "ARITH_COL", expr: expr as unknown as NumberLiteral, alias: null };
+      case "ARITH": return { type: "ARITH_COL", expr: expr as unknown as LegacyArithExpr, alias: null };
+      case "STRING_FUNC": return { type: "STRFUNC_COL", expr: expr as unknown as StringFuncExpr, alias: null };
+      case "CASE_VALUE": return { type: "CASE_COL", expr: expr["expr"] as CaseWhenExpr, alias: null };
+      default:
+        throw new ParseError(
+          "MERGE の代入式はソースフィールド・リテラル・算術式・文字列関数・CASE のいずれかを指定してください",
+          token
+        );
+    }
+  }
+
+  private mergeValueContainsInvalidSource(value: unknown): boolean {
+    if (Array.isArray(value)) return value.some((item) => this.mergeValueContainsInvalidSource(item));
+    if (value === null || typeof value !== "object") return false;
+    const obj = value as Record<string, unknown>;
+    return obj["type"] === "INVALID_SOURCE"
+      || Object.values(obj).some((item) => this.mergeValueContainsInvalidSource(item));
   }
 
   private isUpsertApplyBranchStart(): boolean {
