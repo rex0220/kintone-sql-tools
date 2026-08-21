@@ -19,19 +19,28 @@ import { selectScalarExtreme } from "../core/scalarCompare";
 import { assertStringFunctionArity } from "../core/functionArity";
 import { evalCaseWhen, evalCaseWhenNullable } from "./evalWhere";
 
+/** 1 文の全評価位置で共有する実行時コンテキスト。 */
+export interface EvaluationContext {
+  readonly statementInstant?: Date;
+}
+
 // ============================================================
 // 算術式
 // ============================================================
 
-export function evalArithExpr(expr: ArithNode, row: ProcessRow): number {
+export function evalArithExpr(
+  expr: ArithNode,
+  row: ProcessRow,
+  context: EvaluationContext = {}
+): number {
   if (expr.type === "VARIABLE") throw new Error(
     `InternalError: unresolved arithmetic variable @${expr.name} reached arithmetic evaluation.`
   );
   if (expr.type === "NUMBER")      return expr.value;
   if (expr.type === "FIELD_REF")   return Number(resolveFieldRef(row, expr.field));
-  if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row));
-  const l = evalArithExpr(expr.left,  row);
-  const r = evalArithExpr(expr.right, row);
+  if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row, undefined, undefined, context));
+  const l = evalArithExpr(expr.left,  row, context);
+  const r = evalArithExpr(expr.right, row, context);
   switch (expr.op) {
     case "+": return l + r;
     case "-": return l - r;
@@ -46,7 +55,8 @@ export function evalScalarValueExpr(
   expr: ScalarValueExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string | number {
   switch (expr.type) {
     case "STRING": return expr.value;
@@ -54,19 +64,19 @@ export function evalScalarValueExpr(
     case "FIELD": return resolveFieldRef(row, expr.tableAlias ? `${expr.tableAlias}.${expr.field}` : expr.field);
     case "VARIABLE":
       throw new Error(`ArgumentError: unresolved variable @${expr.name} reached scalar evaluator.`);
-    case "STRING_FUNC": return evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics);
-    case "CASE_WHEN": return evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics);
+    case "STRING_FUNC": return evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics, context);
+    case "CASE_WHEN": return evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics, context);
     case "CONCAT_OP": {
       // CONCAT の空値・文字列化規則を唯一の実装として再利用する。
       return evalStringFunc({
         type: "STRING_FUNC",
         func: "CONCAT",
         args: [expr.left, expr.right],
-      }, row, resolveFieldType, resolveFieldSemantics);
+      }, row, resolveFieldType, resolveFieldSemantics, context);
     }
     case "SCALAR_ARITH": {
-      const left = Number(evalScalarValueExpr(expr.left, row, resolveFieldType, resolveFieldSemantics));
-      const right = Number(evalScalarValueExpr(expr.right, row, resolveFieldType, resolveFieldSemantics));
+      const left = Number(evalScalarValueExpr(expr.left, row, resolveFieldType, resolveFieldSemantics, context));
+      const right = Number(evalScalarValueExpr(expr.right, row, resolveFieldType, resolveFieldSemantics, context));
       switch (expr.op) {
         case "+": return left + right;
         case "-": return left - right;
@@ -83,14 +93,15 @@ export function evalScalarValueExprNullable(
   expr: ScalarValueExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string | number | null {
   switch (expr.type) {
     case "CASE_WHEN":
-      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics);
+      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics, context);
     case "SCALAR_ARITH": {
-      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics);
-      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics);
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics, context);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics, context);
       if (left === null || right === null) return null;
       const l = Number(left);
       const r = Number(right);
@@ -103,12 +114,12 @@ export function evalScalarValueExprNullable(
       }
     }
     case "CONCAT_OP": {
-      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics);
-      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics);
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics, context);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics, context);
       return `${left ?? ""}${right ?? ""}`;
     }
     default:
-      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics);
+      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics, context);
   }
 }
 
@@ -317,10 +328,11 @@ export function evalStringFunc(
   expr: StringFuncExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
   assertStringFunctionArity(expr.func, expr.args);
-  const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics));
+  const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics, context));
   switch (expr.func) {
     case "UPPER":  return (args[0] ?? "").toUpperCase();
     case "LOWER":  return (args[0] ?? "").toLowerCase();
@@ -464,14 +476,14 @@ export function evalStringFunc(
     case "SQRT":
       return String(Math.sqrt(Number(args[0] ?? "0")));
     case "CURRENT_DATE": {
-      const now = new Date();
+      const now = context.statementInstant ?? new Date();
       const y = now.getFullYear();
       const m = String(now.getMonth() + 1).padStart(2, "0");
       const d = String(now.getDate()).padStart(2, "0");
       return `${y}-${m}-${d}`;
     }
     case "CURRENT_TIMESTAMP":
-      return new Date().toISOString();
+      return (context.statementInstant ?? new Date()).toISOString();
   }
 }
 
@@ -704,14 +716,15 @@ export function evalStringFuncArg(
   arg: StringFuncArg,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
   // GROUP BY が SELECT に実体化した集計依存値を使って HAVING からも評価する。
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY") {
     return String(evalMaterializedAggregateOperand(arg, row));
   }
   if (arg.type === "NUMBER") return numberLiteralText(arg);
-  return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics));
+  return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics, context));
 }
 
 /** SELECT により実体化済みの合成集計キーだけを使って集計算術式を評価する。 */

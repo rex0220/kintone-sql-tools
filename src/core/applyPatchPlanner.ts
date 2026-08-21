@@ -7,6 +7,7 @@ import {
   toKintoneValue,
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
+import type { EvaluationContext } from "../engine/evalFunc";
 import type { AppendOperation, ExpectRowsGuard, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
 import { buildApplyMultiValueFieldPlan, type ApplyMultiValueFieldPlan } from "./applyMultiValuePlan";
 import { assertApplyTargetFieldType } from "./applyPatchScope";
@@ -83,6 +84,7 @@ export interface BuildApplyPatchPlanInput {
   readonly snapshot: KintoneRecord;
   readonly fieldInfos: readonly KintoneFieldInfo[];
   readonly metadata?: ApplyPatchMetadata;
+  readonly evaluationContext?: EvaluationContext;
 }
 
 function argument(message: string): never {
@@ -254,7 +256,9 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
-  return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+  return buildApplyPatchPlanForSnapshot(
+    statement, snapshot, metadata, parentId, input.evaluationContext
+  );
 }
 
 /**
@@ -265,14 +269,17 @@ export function buildApplyPatchPlans(
   statement: UpdateStatement,
   snapshots: readonly KintoneRecord[],
   fieldInfos: readonly KintoneFieldInfo[],
-  metadata: ApplyPatchMetadata = resolveApplyPatchMetadata(statement, fieldInfos)
+  metadata: ApplyPatchMetadata = resolveApplyPatchMetadata(statement, fieldInfos),
+  evaluationContext: EvaluationContext = {}
 ): readonly ApplyPatchPlan[] {
   const parentIds = new Set<number>();
   return snapshots.map((snapshot) => {
     const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
     if (parentIds.has(parentId)) argument(`APPLY snapshots contain duplicate parentId ${parentId}.`);
     parentIds.add(parentId);
-    return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+    return buildApplyPatchPlanForSnapshot(
+      statement, snapshot, metadata, parentId, evaluationContext
+    );
   });
 }
 
@@ -280,7 +287,8 @@ function buildApplyPatchPlanForSnapshot(
   statement: UpdateStatement,
   snapshot: KintoneRecord,
   metadata: ApplyPatchMetadata,
-  parentId: number
+  parentId: number,
+  evaluationContext: EvaluationContext = {}
 ): ApplyPatchPlan {
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
   const tablePlans: ApplyPatchTablePlan[] = [];
@@ -317,13 +325,17 @@ function buildApplyPatchPlanForSnapshot(
     // are accumulated separately and therefore cannot become visible to later operations.
     for (const [operationIndex, operation] of block.operations.entries()) {
       if (operation.kind === "APPEND") {
-        const rows = buildApplyAppendRows(operation, targetChildren, block.field);
+        const rows = buildApplyAppendRows(
+          operation, targetChildren, block.field, evaluationContext
+        );
         operationPlans.push({ kind: "APPEND", addedRows: rows.length });
         appended.push(...rows);
         continue;
       }
       if (operation.kind === "REMOVE") {
-        const indices = resolveRemoveTargets(operation, snapshotRows, childTypeResolver, block.field);
+        const indices = resolveRemoveTargets(
+          operation, snapshotRows, childTypeResolver, block.field, evaluationContext
+        );
         if (operation.expectRows) {
           assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
         }
@@ -341,7 +353,9 @@ function buildApplyPatchPlanForSnapshot(
         continue;
       }
       if (operation.kind !== "PATCH") continue;
-      const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+      const indices = resolvePatchTargets(
+        operation, snapshotRows, childTypeResolver, block.field, evaluationContext
+      );
       if (operation.expectRows) {
         assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
       }
@@ -360,7 +374,9 @@ function buildApplyPatchPlanForSnapshot(
           resolved.push({
             rowIndex,
             field: assignment.field,
-            value: evaluateSubtableAssignmentValue(assignment.value, flat, childTypeResolver),
+            value: evaluateSubtableAssignmentValue(
+              assignment.value, flat, childTypeResolver, evaluationContext
+            ),
           });
         }
       }
@@ -414,7 +430,9 @@ function buildApplyPatchPlanForSnapshot(
   for (const assignment of statement.assignments) {
     const fieldType = metadata.fieldsByCode.get(assignment.field)?.fieldType;
     parentValues[assignment.field] = {
-      value: evaluateUpdateAssignmentValue(assignment.value, parentRow, fieldType, snapshot),
+      value: evaluateUpdateAssignmentValue(
+        assignment.value, parentRow, fieldType, snapshot, evaluationContext
+      ),
     };
   }
   const postImage: Record<string, { value: unknown }> = { ...snapshot } as unknown as Record<string, { value: unknown }>;
@@ -510,10 +528,11 @@ export function normalizeApplyPatchPlan(
 export function buildApplyAppendRows(
   operation: AppendOperation,
   children: ReadonlyMap<string, KintoneFieldInfo>,
-  table: string
+  table: string,
+  evaluationContext: EvaluationContext = {}
 ): ApplyPatchPostImageRow[] {
   return operation.values.map((row) => ({
-    value: buildAppendValue(operation, row, children, table),
+    value: buildAppendValue(operation, row, children, table, evaluationContext),
   }));
 }
 
@@ -521,7 +540,8 @@ function buildAppendValue(
   operation: AppendOperation,
   row: InsertRow,
   children: ReadonlyMap<string, KintoneFieldInfo>,
-  table: string
+  table: string,
+  evaluationContext: EvaluationContext
 ): Readonly<Record<string, { readonly value: unknown }>> {
   if (row.length !== operation.fields.length) {
     return argument(`APPLY APPEND for ${table} has ${row.length} values for ${operation.fields.length} fields.`);
@@ -535,7 +555,7 @@ function buildAppendValue(
     value[field.code] = { value: sqlValue === undefined
       ? appendDefaultValue(field)
       : sqlValue.type === "CASE_VALUE"
-        ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType)
+        ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType, evaluationContext)
         : toKintoneValue(sqlValue, field.fieldType) };
   }
   return value;
@@ -552,30 +572,44 @@ function resolvePatchTargets(
   operation: PatchOperation,
   rows: readonly ApplySnapshotRow[],
   resolveFieldType: FieldTypeResolver,
-  table: string
+  table: string,
+  evaluationContext: EvaluationContext = {}
 ): number[] {
-  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+  return resolveSelectorTargets(
+    operation.selector, rows, resolveFieldType, table, evaluationContext
+  );
 }
 
 function resolveRemoveTargets(
   operation: RemoveOperation,
   rows: readonly ApplySnapshotRow[],
   resolveFieldType: FieldTypeResolver,
-  table: string
+  table: string,
+  evaluationContext: EvaluationContext = {}
 ): number[] {
-  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+  return resolveSelectorTargets(
+    operation.selector, rows, resolveFieldType, table, evaluationContext
+  );
 }
 
 function resolveSelectorTargets(
   selector: PatchOperation["selector"] | RemoveOperation["selector"],
   rows: readonly ApplySnapshotRow[],
   resolveFieldType: FieldTypeResolver,
-  table: string
+  table: string,
+  evaluationContext: EvaluationContext = {}
 ): number[] {
   if (selector.kind === "ALL_ROWS") return rows.map((_, index) => index);
   const where = selector.where;
   const indices = rows.flatMap((row, index) =>
-    evalWhere(where, flattenSubtableSnapshotRow(row, index), resolveFieldType) ? [index] : []
+    evalWhere(
+      where,
+      flattenSubtableSnapshotRow(row, index),
+      resolveFieldType,
+      undefined,
+      undefined,
+      evaluationContext
+    ) ? [index] : []
   );
   const requestedRid = exactRidSelectorValue(where);
   if (requestedRid !== null && indices.length === 0) {

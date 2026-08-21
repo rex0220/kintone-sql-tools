@@ -29,7 +29,7 @@ import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
 import { whereToKintone } from "./whereToKintone";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
-import { evalStringFunc, evalArithExpr, evalScalarValueExpr } from "../engine/evalFunc";
+import { evalStringFunc, evalArithExpr, evalScalarValueExpr, type EvaluationContext } from "../engine/evalFunc";
 import { whereHasLike } from "../core/like";
 
 function assertDmlWhereIsSafe(where: WhereExpr): void {
@@ -104,10 +104,11 @@ export interface KintoneGetForDmlParams {
 /** INSERT 文を kintone POST リクエストに変換する（100 件ごとに分割）。 */
 export function insertToPostBatches(
   stmt: InsertStatement,
-  fieldTypes: FieldTypeMap = new Map()
+  fieldTypes: FieldTypeMap = new Map(),
+  evaluationContext: EvaluationContext = {}
 ): KintonePostParams[] {
   const allRecords = stmt.values.map((row) =>
-    buildInsertRecord(stmt.fields, row, fieldTypes)
+    buildInsertRecord(stmt.fields, row, fieldTypes, evaluationContext)
   );
   return chunk(allRecords, 100).map((records) => ({
     app: stmt.appId,
@@ -118,14 +119,15 @@ export function insertToPostBatches(
 function buildInsertRecord(
   fields: string[],
   row: InsertStatement["values"][number],
-  fieldTypes: FieldTypeMap
+  fieldTypes: FieldTypeMap,
+  evaluationContext: EvaluationContext
 ): KintoneRecord {
   const record: KintoneRecord = {};
   fields.forEach((field, i) => {
     const val = row[i];
     if (val.type === "CASE_VALUE") {
       // CASE WHEN / IF: フィールド参照なしの定数条件のみ有効（空行で評価）
-      record[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field)) };
+      record[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field), evaluationContext) };
     } else {
       record[field] = { value: toKintoneValue(val, fieldTypes.get(field)) };
     }
@@ -328,7 +330,8 @@ function collectConditionFields(expr: WhereExpr, out: Set<string>): void {
 export function updateToPutBatchesArith(
   stmt: UpdateStatement,
   records: KintoneRecord[],
-  fieldTypes: FieldTypeMap = new Map()
+  fieldTypes: FieldTypeMap = new Map(),
+  evaluationContext: EvaluationContext = {}
 ): KintonePutParams[] {
   const updateRecords: KintoneUpdateRecord[] = records.map((raw) => {
     const id = Number(raw["$id"].value);
@@ -336,7 +339,7 @@ export function updateToPutBatchesArith(
     const record: KintoneRecord = {};
     for (const { field, value } of stmt.assignments) {
       record[field] = {
-        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw),
+        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw, evaluationContext),
       };
     }
     return { id, record };
@@ -355,16 +358,17 @@ export function evaluateUpdateAssignmentValue(
   value: UpdateStatement["assignments"][number]["value"],
   row: ProcessRow,
   fieldType?: string,
-  raw?: KintoneRecord
+  raw?: KintoneRecord,
+  evaluationContext: EvaluationContext = {}
 ): KintoneValue {
   if (value.type === "ARITH") {
-    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row));
+    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row, evaluationContext));
   }
   if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-    return String(evalScalarValueExpr(value, row));
+    return String(evalScalarValueExpr(value, row, undefined, undefined, evaluationContext));
   }
-  if (value.type === "STRING_FUNC") return evalStringFunc(value, row);
-  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType);
+  if (value.type === "STRING_FUNC") return evalStringFunc(value, row, undefined, undefined, evaluationContext);
+  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType, evaluationContext);
   if (value.type === "SOURCE_FIELD") {
     throw new DmlConvertError("SOURCE_FIELD は UPDATE ... FROM 専用です");
   }
@@ -375,12 +379,15 @@ export function evaluateUpdateAssignmentValue(
 export function evaluateSubtableAssignmentValue(
   value: UpdateStatement["assignments"][number]["value"],
   row: ProcessRow,
-  resolveFieldType?: import("../engine/evalWhere").FieldTypeResolver
+  resolveFieldType?: import("../engine/evalWhere").FieldTypeResolver,
+  evaluationContext: EvaluationContext = {}
 ): string {
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return numberLiteralText(value);
-  if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
+  if (value.type === "ARITH") return String(evalArithExpr(value, row, evaluationContext));
+  if (value.type === "CASE_VALUE") return evalCaseWhen(
+    value.expr, row, resolveFieldType, undefined, evaluationContext
+  );
   throw new Error(`${value.type} はサブテーブル UPDATE の値として使用できません`);
 }
 
@@ -402,7 +409,8 @@ export interface UpdateFromMatchedRecord {
 export function updateFromToPutBatches(
   stmt: UpdateStatement,
   matched: UpdateFromMatchedRecord[],
-  fieldTypes: FieldTypeMap = new Map()
+  fieldTypes: FieldTypeMap = new Map(),
+  evaluationContext: EvaluationContext = {}
 ): KintonePutParams[] {
   const updateRecords: KintoneUpdateRecord[] = matched.map(({ target, source }) => {
     const id = Number(target["$id"]?.value);
@@ -433,9 +441,13 @@ export function updateFromToPutBatches(
       } else if (value.type === "ARITH") {
         record[field] = { value: String(evalArith(value, target)) };
       } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-        record[field] = { value: String(evalScalarValueExpr(value, targetRow)) };
+        record[field] = { value: String(evalScalarValueExpr(
+          value, targetRow, undefined, undefined, evaluationContext
+        )) };
       } else if (value.type === "CASE_VALUE") {
-        record[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
+        record[field] = { value: evalCaseWhenValue(
+          value.expr, targetRow, fieldType, evaluationContext
+        ) };
       } else {
         record[field] = { value: toKintoneValue(value, fieldType) };
       }
@@ -598,7 +610,8 @@ function convertArray(elements: string[], fieldType: string | undefined): Kinton
 function evalCaseResultValue(
   result: CaseResult,
   row: ProcessRow,
-  fieldType: string | undefined
+  fieldType: string | undefined,
+  evaluationContext: EvaluationContext
 ): KintoneValue {
   if (result.type === "ARRAY") {
     return convertArray(result.elements.map((e) => e.value), fieldType);
@@ -610,12 +623,12 @@ function evalCaseResultValue(
     return convertString(result.value, fieldType);
   }
   if (result.type === "STRING_FUNC") {
-    return evalStringFunc(result, row);
+    return evalStringFunc(result, row, undefined, undefined, evaluationContext);
   }
   if (result.type === "FIELD_REF" || result.type === "ARITH") {
-    return String(evalArithExpr(result, row));
+    return String(evalArithExpr(result, row, evaluationContext));
   }
-  return String(evalScalarValueExpr(result, row));
+  return String(evalScalarValueExpr(result, row, undefined, undefined, evaluationContext));
 }
 
 function collectUpdateCheckTargetFields(stmt: UpdateStatement): string[] {
@@ -630,15 +643,16 @@ function collectUpdateCheckTargetFields(stmt: UpdateStatement): string[] {
 export function evalCaseWhenValue(
   expr: CaseWhenExpr,
   row: ProcessRow,
-  fieldType: string | undefined
+  fieldType: string | undefined,
+  evaluationContext: EvaluationContext = {}
 ): KintoneValue {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row)) {
-      return evalCaseResultValue(branch.result, row, fieldType);
+    if (evalWhere(branch.condition, row, undefined, undefined, undefined, evaluationContext)) {
+      return evalCaseResultValue(branch.result, row, fieldType, evaluationContext);
     }
   }
   if (expr.elseResult !== null) {
-    return evalCaseResultValue(expr.elseResult, row, fieldType);
+    return evalCaseResultValue(expr.elseResult, row, fieldType, evaluationContext);
   }
   return "";
 }
