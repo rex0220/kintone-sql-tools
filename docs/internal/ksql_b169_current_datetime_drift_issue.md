@@ -1,6 +1,6 @@
 # B169 `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` が式評価のたびに時計を読み直す
 
-- ステータス: ✅ **v3.67.0 リリース済み**（2026-08-21・PR #363 マージ・タグ/GitHub Release 公開済み・**npm publish（ユーザー 2FA）と実機確認は未了**。[B168 実装計画](ksql_b168_flow_dialect1_plan.md) Q10 から分離しオーナー裁定で先行対応。codex 実装・Claude レビュー＋フルゲート通過＝jest 264 suites/6,103 件・e2e 26/26・docs:check・version:check:release。実装＝Symbol キーで `ExecuteOptions` に評価コンテキストを内部束縛し文実行入口で instant を 1 回確定、評価器間は明示引数で貫通・未注入時は従来フォールバック。新規テスト [b169CurrentDatetimeDrift.test.ts](../../src/__tests__/b169CurrentDatetimeDrift.test.ts) 5 件＝受入 1〜5 を fake timers の中間時計進行で固定）
+- ステータス: ✅ **v3.67.0 リリース済み・publish 済み・実機確認済み**（2026-08-21・PR #363 マージ・タグ/GitHub Release/npm publish 完了。**実機確認**＝常駐 MCP 3.67.0（`ksql_docs` 索引先頭で版を確認）で `GENERATE_SERIES` 10,000 行の射影を `SELECT DISTINCT CURRENT_TIMESTAMP()` で潰すと **1 行**（全行同値・文開始時刻）、同一バッチの第 2 文は **51ms 後の別 instant**＝文単位確定も仕様どおり。[B168 実装計画](ksql_b168_flow_dialect1_plan.md) Q10 から分離しオーナー裁定で先行対応。codex 実装・Claude レビュー＋フルゲート通過＝jest 264 suites/6,103 件・e2e 26/26・docs:check・version:check:release。実装＝Symbol キーで `ExecuteOptions` に評価コンテキストを内部束縛し文実行入口で instant を 1 回確定、評価器間は明示引数で貫通・未注入時は従来フォールバック。新規テスト [b169CurrentDatetimeDrift.test.ts](../../src/__tests__/b169CurrentDatetimeDrift.test.ts) 5 件＝受入 1〜5 を fake timers の中間時計進行で固定）
 - 種別: 課題（正しさ） ／ 優先: 中
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
