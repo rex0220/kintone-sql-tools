@@ -1,8 +1,8 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-08-21
-- 現在の最新リリース: **v3.66.1**（2026-08-10・**B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正**＝EXPLAIN 面のみ・実行不変・publish 済み・実機確認済み＝常駐 MCP 3.66.1 で報告逐語のバッチ EXPLAIN 成功が版を証明）。→ [リリース履歴](ksql_release_history.md)
-- 次回リリース計画: **未定**。最大の進行中は **B168**（Flow dialect 1 エンジン対応・次=調査→実装計画提示）。残るのは **B143**（低）／**B141**（散文の穴）。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種（CYCLE 正例の実機化）。クローズ済みは §3。
+- 現在の最新リリース: **v3.67.0**（2026-08-21・**B169 `CURRENT_DATE()`/`CURRENT_TIMESTAMP()` を文単位の固定時刻評価へ修正**＝結果が変わる形あり・GitHub Release 公開済み・**npm publish（ユーザー 2FA）と実機確認は未了**）。→ [リリース履歴](ksql_release_history.md)
+- 次回リリース計画: **未定**。最大の進行中は **B168**（Flow dialect 1 エンジン対応・実装計画 R2 済み・**Q1〜Q9/Q11 のオーナー裁定待ち**）。残るのは **B143**（低）／**B141**（散文の穴）。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種（CYCLE 正例の実機化）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -39,7 +39,6 @@
 
 | # | 課題 / 改善案 | 種別 | 状態 | 効果 | 優先 | 文書 |
 |---|---|---|---|---|---|---|
-| B169 | `CURRENT_DATE()`/`CURRENT_TIMESTAMP()` が式評価のたびに時計を読み直す | 課題 | 🚧 **実装済み・リリース待ち**（2026-08-21・B168 調査で発見・B168 Q10 から分離しオーナー裁定で先行対応・**同日 codex 実装→Claude レビュー→フルゲート通過**＝jest 全件＋e2e 26/26＋docs:check＋version:check）。同一文内で行ごとに異なるミリ秒・深夜跨ぎスキャンで「今日」が途中で変わる非決定を、**文の実行開始時に 1 回読んで文単位固定**へ修正（値形式と TZ 扱い不変・SET/DECLARE と server-only 関数は挙動不変・未注入経路は従来フォールバック）。新規テスト 5 件（fake timers で文の途中に時計を進めて固定を証明）。**B168 Stage 4（as-of 注入）はこの配線に載る**。CHANGELOG はリリース時に記載。 | 正しさ | 中 | [B169](internal/ksql_b169_current_datetime_drift_issue.md) |
 | B168 | kSQL Flow 拡張構文（dialect 1）のエンジン側実装 | 機能 | 📋 **調査完了・実装計画 R2（codex レビュー反映済み）・オーナー裁定待ち**（2026-08-21 起票・同日調査→R1→codex レビュー（重大 6・中 9・軽微 1）→全件反映で R2・発注元＝`ksql-flow` 設計書 v2.4）。**[実装計画 R2](internal/ksql_b168_flow_dialect1_plan.md)**＝6 段構成・要判断 Q1〜Q11（ASSERT 文法統合と受入 5(d) の矛盾・MERGE 片側省略・@時刻関数・unique 検証の置き場所・bulkRequest 乖離・LAPP 解析経路ほか）。**調査で指示書の前提 4 件を訂正**＝①`SELECT INTO #t` は存在せず正は `CREATE TEMP TABLE #x AS`（エイリアス (a) はほぼ実装済み）②`ON DUPLICATE` は複合キー対応済み・updateKey API 不使用（read-then-write）③サブテーブル DML は現行の正式機能（禁止は dialect 1 ゲート限定）④bulkRequest 未実装（EXPLAIN 推定は 100 件/req の実装実態で）。`unique` はメタデータに**取得済み**（`isUnique`・消費は DESCRIBE のみ）。スコープ A〜J＝マルチステートメント解析／`-- @ksql` ヘッダ（name・depends_on・timeout・dialect）／`ASSERT`・`ASSERT WARN`／`EXIT SUCCESS IF`／構文エイリアス（`CREATE TEMP TABLE AS`→`INTO #t`・`KEY(...)`→`ON DUPLICATE`・`MERGE INTO`→UPSERT 正規化）／時刻関数の as-of 固定評価（`asOf`/`timezone` 注入）／validate 拡張（updateKey・複合キー禁止・サブテーブル DML 禁止・素の INSERT 警告・dialect ゲート）／EXPLAIN 推定 API 消費回数／公式 API 切り出し（`parseScript` 等 4 本・semver 対象・**文単位実行がランナー要件**）／MCP 対応。**絶対条件＝既存構文の後方互換を壊さない・ランナー機能（ロック/リトライ/ログ書込）を持ち込まない**。**次＝調査フェーズ（パーサー構造・時刻関数全列挙・UPSERT 内部表現・updateKey 設定の取得可否）→ 実装計画を先に提示**（コード変更はその後）。実装順 A/B→C/D→E→F→G/H→I/J。 | 機能 | 高 | [指示書](flow_dialect1_engine_task.md) |
 | B156 | `relation: exact` が「取得＝答え」と誤読される | 改善 | ✅ **案 B 実施（2026-08-08・文書のみ・エンジン不変）**＝言語リファレンス §6 に**「機構の全体像」（3 機構）と「EXPLAIN の読み方」（`fetch:` が正・`relation:` は葉の忠実度で「取得＝答え」ではない・`not applied` の意味）を新設**（オーナー指摘「押し下げの解説がいるのでは」で前倒し）。案 A（`relation:` 行への 1 語追記）は**次に同じ誤読の報告が来たら再評価**。 | 改善 | 低 | [B156](internal/ksql_b156_relation_exact_residual_note_issue.md) |
 | B143 | `EXPLAIN` が `warnings` を返さない | 改善 | 📝 **起票のみ。文書化は v3.54.4 で実施、実装は未着手**（2026-08-06・[依頼元 §6.1](../../ksql-analytics/docs/internal/kSQLエンジンへの返信-20260806-v3543.md)）→ [B143](internal/ksql_b143_explain_warnings_issue.md)。**実測**＝CTE 上の `LAG` も既定フレームのウィンドウも、`ksql_explain` は計画の行（`window ...:` / `frame: RANGE ...`）には出すが **`warnings` は常に空**で、実行すると警告が出る。**依頼元の運用は「実行前に `ksql_explain` まで通す」**ため**「explain を通したから警告は無い」と読み違える**（**素の状態で回した別セッションが「詰まった点」の 1 番目に挙げた**）。**警告疲れ（B140）とは逆向き**＝警告が出ないことで出るはずのものを見落とす。**実装の見通し**＝生成器 `collectDefaultRangeWindowWarnings(stmt, resolveField, context)` は**書いた SQL だけで決まる**ので計画段階で判定できるはずで、**`EXPLAIN` は既にフォーム定義を読んでいる**。ただし**EXPLAIN は実行とは別経路**で、resolver がその経路にあるかは未確認。**着手前に確認＝EXPLAIN 経路に `WhereFieldSemanticsResolver` 相当があるか**（無ければ metadata の追加取得が要らないかを見る。「レコード API を呼ばない」契約は metadata だけなら保てる）。**案 A＝`EXPLAIN` でも返す**（計画と実行で同じ警告文になる利点）／**案 B＝文書化のみ（v3.54.4 で実施済み）**／案 C＝何もしない。**見立て＝案 B は入れた。案 A は resolver が既にあれば安い、無ければ見送り。****順序としては [B140](internal/ksql_b140_cte_groupby_total_order_issue.md) 案 A が先**（入れば CTE 経路の全順序警告は出なくなり、本件の価値も下がる）。 | 改善 | 低 | [B143](internal/ksql_b143_explain_warnings_issue.md) |
@@ -61,11 +60,11 @@
 
 | バージョン | 内容 |
 |---|---|
+| **v3.67.0** | B169 **`CURRENT_DATE()`/`CURRENT_TIMESTAMP()` を文単位の固定時刻評価へ修正**（結果が変わる形あり＝同一文内の複数回評価・深夜跨ぎの非決定を解消。SET/DECLARE・server-only 関数・値形式・TZ は不変）。B168 調査で発見し as-of の土台として先行対応。 |
 | **v3.66.1** | B167 **バッチ EXPLAIN が「物理 FROM＋#temp JOIN target」で app=0 の実 API を呼び CB_VA01** を修正（EXPLAIN 面のみ・実行不変・v3.61.0 からの既存穴・「実行は正常なのに EXPLAIN だけ通らない」3 例目）。全 12 call site 監査・CLI e2e 恒久化。 |
 | **v3.66.0** | B53 **`WITH RECURSIVE`/`CYCLE`（再帰 CTE・Phase1）新機能**＝深さ不定の階層展開（BOM・組織図）。path スコープ循環検出・3 絶対上限常時 fail-closed・planning 時型証明・API 深さ非依存。**BOM fixture 実機 394/394 全一致**。B166 **JOIN の ON 逆順で落ちる既存バグ修正**（実測が発見・v3.65.0 以前から）。B160 全順序警告の免除文言一般化・B165 再帰診断＋レシピ同梱。 |
 | **v3.65.0** | B164 **`@変数` を含む集計が比較位置で空扱いになり静かに間違う**のを修正（結果が変わる正しさの修正・CASE/HAVING 比較のみ・SELECT リストは元から正常）。未計算集計参照の警告を新設。 |
 | **v3.64.0** | B162/B163 **「実行は正常なのに `EXPLAIN` だけ通らない」2 形を解消**（DECLARE×系列・temp GROUP BY バッチ・EXPLAIN 面のみ実行不変・情報の 3 分類原則を確立）。 |
-| **v3.63.0** | B158 **`CROSS JOIN`（直積・2 軸格子）新機能**＝依頼元 B128 意見の順位 1。「日付×製品」の 0 埋め格子が言語内で完結（R17 の製品別・暦日化）。出力 10,000 ガード・`CROSS` 予約語化。B159 **`GENERATE_SERIES` month/year step 新機能**＝順位 2。月初/年初アンカー限定・累積禁止・**空月直後の `LAG`=0** を実データ確認。B157（複文 dry-run 表示回帰）・B161（WITH+物理 APP の dry-run 既存穴）修正同梱。 |
 
 リリース時は**履歴側へ1行追記**し、本書 §1 から該当行を落とす。ここの直近5版も合わせて更新する。
 
