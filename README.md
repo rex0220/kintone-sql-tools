@@ -267,7 +267,7 @@ npm パッケージは 2 つのサブパスを **semver 対象の公開 API** �
 | サブパス | 用途 | 主な export |
 |---|---|---|
 | `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
-| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知） / `executeStatement` / `disposeExecutionContext` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
+| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
 
 `/flow` の典型的な使い方（1 文ずつ実行して結果で継続判断する）:
 

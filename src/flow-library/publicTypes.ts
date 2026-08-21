@@ -269,6 +269,35 @@ export interface StatementResult {
   metrics: ExecutionMetrics;
 }
 
+export interface PreviewStatementOptions {
+  /** Number of write-order samples to return. Defaults to 5. */
+  maxSamples?: number;
+}
+
+export interface PreviewSample {
+  kind: "insert" | "update" | "delete";
+  /** UPSERT key, or the kintone record ID for DELETE. */
+  key?: string;
+  /** Current values of assignment target fields only. */
+  before?: Record<string, string>;
+  /** Values that the DML statement would write. */
+  after?: Record<string, string>;
+}
+
+export interface PreviewResult {
+  kind: "PREVIEW";
+  operation: "INSERT" | "UPDATE" | "DELETE" | "UPSERT";
+  /** Physical kintone app ID after logical-app routing. */
+  appId: number;
+  counts: { insert: number; update: number; delete: number };
+  /** First maxSamples entries in actual write order. */
+  samples: PreviewSample[];
+  /** Record-read API calls consumed by this preview. */
+  reads: number;
+  /** Estimated 100-record write API calls for an ordinary execution. */
+  estimatedWrites: number;
+}
+
 export interface CreateKintoneClientConfig {
   baseUrl: string;
   guestSpaceId?: number;
