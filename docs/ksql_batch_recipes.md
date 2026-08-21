@@ -801,3 +801,47 @@ ORDER BY 深さ, 親コード, 子コード
   - **現在**: `UPDATE` / `DELETE` の WHERE に `LIKE` / `NOT LIKE` は使えず、`KLIKE` は**全 DML で使用不可**（いずれも**別の静的制約で実行前に拒否**される）。したがって「`LIKE` / `KLIKE` を直接含む DML」は今は書けない。
   - **将来**: 上記 fail-closed は、`KLIKE` 親レコード DML を解禁する際の安全基盤になる。
   - 実務では、大規模アプリを対象にする DML は **`$id` 範囲・`IN`・完全一致などで 10 万件未満に絞って**から処理する。
+
+## R18. Flow dialect 1 で月次同期ジョブを書く（`-- @ksql` ヘッダ・`ASSERT`/`EXIT` ゲート・`KEY()`）
+
+> `-- @ksql dialect: 1` を宣言した opt-in の拡張構文（→ 言語リファレンス §27・v3.69.0）。
+> 宣言のない既存バッチの挙動は一切変わりません。
+
+**設計原則との対応**: 冒頭の原則 6「時刻の固定」は、dialect 1 では `@NOW()` / `@MONTH_START()` が
+**スクリプト全体で単一の基準時刻**から導出されるため、`SET @now = NOW()` を書かなくても満たされます。
+「異常中断（通知対象）」と「対象 0 件の正常スキップ（通知不要）」は `ASSERT` と `EXIT SUCCESS IF` で
+語彙を分けます — 混同すると月初のたびに誤アラートが出て監視が形骸化します。
+
+```sql
+-- @ksql name: monthly_sales_sync
+-- @ksql timeout: 600
+-- @ksql dialect: 1
+
+-- 1) 業務異常ゲート（不成立なら AssertError で中断・後続は実行しない）
+ASSERT (
+  SELECT COUNT(*) FROM APP100
+  WHERE 受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START() AND 金額 < 0
+) = 0, '【異常中断】マイナスの売上データがあります';
+
+-- 2) 集計（一時テーブルは裸名で書ける。#付きの従来形と同じもの）
+CREATE TEMP TABLE summary AS
+SELECT 顧客コード, COUNT(レコード番号) AS 受注件数, SUM(金額) AS 当月売上合計
+FROM APP100
+WHERE 受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START() AND ステータス = '受注完了'
+GROUP BY 顧客コード;
+
+-- 3) 対象 0 件は「成功」として終了（後続は skippedReason: "exit" で skip）
+EXIT SUCCESS IF (SELECT COUNT(*) FROM summary) = 0, '対象 0 件のためスキップ';
+
+-- 4) 冪等な書き込み（キーは「値の重複を禁止する」設定のフィールドであること。
+--    重複禁止でない・複合キー・型不正は実行前にエラーで止まる）
+UPSERT INTO APP200 (顧客コード, 当月受注件数, 当月売上実績, 最終集計日時)
+SELECT 顧客コード, 受注件数, 当月売上合計, @NOW()
+FROM summary
+KEY (顧客コード);
+```
+
+- **バックフィル**: 公式 API（`/flow`）の `asOf` / `timezone` 注入で、過去日付の基準時刻のまま
+  同じスクリプトを再実行できます（`@MONTH_START()` 等が注入値から導出される）
+- **日時境界は半開区間**（`>= 月初 AND < 翌月初`）で書く — R7 以降の各レシピと同じ定石
+- `@` なしの `TODAY()` / `THIS_MONTH()` は kintone サーバー評価のため as-of の対象外（警告が出ます）

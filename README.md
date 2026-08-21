@@ -259,6 +259,44 @@ Options:
 6. Windows で `ksql --help` 実行時にエディタが開いてしまう
 - `.js` 関連付けの影響の可能性があります。`ksql.cmd --help` または `node dist-cli/ksql.js --help` で確認してください。
 
+## 公式 API（プログラムから使う）
+
+npm パッケージは 2 つのサブパスを **semver 対象の公開 API** として提供します。
+ここに載る export のシグネチャ・挙動の互換性は semver（破壊的変更＝メジャー、追加＝マイナー）で管理します。
+
+| サブパス | 用途 | 主な export |
+|---|---|---|
+| `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
+| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript` / `createExecutionContext` / `executeStatement` / `disposeExecutionContext` / `createKintoneClient` / `version` |
+
+`/flow` の典型的な使い方（1 文ずつ実行して結果で継続判断する）:
+
+```ts
+import { parseScript, createExecutionContext, executeStatement, disposeExecutionContext, createKintoneClient } from "@rex0220/kintone-sql-tools/flow";
+
+const client = createKintoneClient({ baseUrl, auth: { type: "apiToken", apiToken } });
+const { statements, meta, diagnostics } = parseScript(source, { apps: { 受注: 100 } });
+const ctx = createExecutionContext({ client, script: source, apps: { 受注: 100, 顧客マスタ: 200 }, asOf: new Date("2026-08-01T00:00:00+09:00"), timezone: "Asia/Tokyo" });
+try {
+  for (const stmt of statements) {
+    const result = await executeStatement(stmt, ctx);
+    // result で ASSERT 違反 / EXIT 成立 / skipped を判別して継続を判断する
+  }
+} finally {
+  await disposeExecutionContext(ctx);
+}
+```
+
+### エンジンバージョン × dialect 対応表
+
+| エンジン | dialect 0（既定・宣言なし） | dialect 1（`-- @ksql dialect: 1`） |
+|---|---|---|
+| 〜 v3.67.0 | ✅ | —（未実装） |
+| v3.68.0 | ✅ | 解析のみ（エンジン内部 API。実行できる出荷面なし・実験的） |
+| v3.69.0 〜 | ✅ | ✅ CLI / MCP / プラグイン / `/flow` で実行可 |
+
+dialect は後方互換で管理します: dialect 0 のスクリプトはどのエンジン版でも挙動不変・破壊的変更は dialect 番号の繰り上げでのみ導入します。変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
+
 ## 機密情報の取り扱い
 
 - token / password は直書きせず、環境変数または `env:` 参照を推奨します。
