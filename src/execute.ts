@@ -190,6 +190,7 @@ import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
+import { parseScriptHeader } from "./core/scriptHeader";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
 import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
@@ -1555,7 +1556,16 @@ export async function executeBatch(
   options: BatchExecuteOptions = {}
 ): Promise<BatchExecuteResult> {
   resolveRecursiveCteLimits(options);
-  const statements = parseSqlBatch(sql, options.enableImport === true);
+  const header = parseScriptHeader(sql);
+  const headerError = header.diagnostics.find((diagnostic) => diagnostic.severity === "error");
+  if (header.hasDirectives && headerError) {
+    throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
+  }
+  const statements = parseSqlBatch(
+    header.hasDirectives ? sql.slice(header.headerEnd) : sql,
+    options.enableImport === true,
+    header.hasDirectives && header.meta.dialect === 1
+  );
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
   statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
@@ -1662,17 +1672,20 @@ export async function executeBatch(
           ) || statementContainsOuterJoin(statements[i])
         );
         const cursorScope = wrapClientWithCursorScope(statementClient);
+        const boundOptions = bindStatementEvaluationContext(stmtOptions) as BatchExecuteOptions;
+        const statementContext: ExecutionContext = {
+          stmt: statements[i],
+          info,
+          client: cursorScope.client,
+          options: boundOptions,
+          cacheContext,
+          tempTables,
+          variables,
+          relativeDateVariables,
+          clock: statementEvaluationContext(boundOptions),
+        };
         const outcome = await runWithDeadline(
-          executeBatchStatement(
-            statements[i],
-            info,
-            cursorScope.client,
-            stmtOptions,
-            cacheContext,
-            tempTables,
-            variables,
-            relativeDateVariables
-          ),
+          executeBatchStatement(statementContext),
           remaining,
           cursorScope.closeActive
         );
@@ -1725,18 +1738,26 @@ function statementHasApplyMutation(statement: Statement): boolean {
     && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
 
+interface ExecutionContext {
+  readonly stmt: Statement;
+  readonly info: BatchAnalysis["statements"][number];
+  readonly client: KintoneClient;
+  readonly options: BatchExecuteOptions;
+  readonly cacheContext: string;
+  readonly tempTables: Map<string, MaterializedTable>;
+  readonly variables: Map<string, VarValue>;
+  readonly relativeDateVariables: ReadonlyMap<string, KintoneFunction>;
+  readonly clock: EvaluationContext;
+}
+
 /** 1文をバッチ文脈（一時テーブルストア付き）で実行する */
 async function executeBatchStatement(
-  stmt: Statement,
-  info: BatchAnalysis["statements"][number],
-  client: KintoneClient,
-  options: BatchExecuteOptions,
-  cacheContext: string,
-  tempTables: Map<string, MaterializedTable>,
-  variables: Map<string, VarValue>,
-  relativeDateVariables: ReadonlyMap<string, KintoneFunction>
+  context: ExecutionContext
 ): Promise<Partial<BatchStatementResult>> {
-  options = bindStatementEvaluationContext(options) as BatchExecuteOptions;
+  const {
+    stmt, info, client, options, cacheContext, tempTables, variables,
+    relativeDateVariables, clock,
+  } = context;
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
     validateStatementStatic(resolvedStmt);
@@ -1789,7 +1810,7 @@ async function executeBatchStatement(
         throw e;
       }
     } else {
-      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr, statementEvaluationContext(options)));
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr, clock));
     }
     return {};
   }
@@ -1808,7 +1829,7 @@ async function executeBatchStatement(
     } else {
       const value = evaluateScalarExpr(
         stmt.default as Exclude<ScalarExpr, ScalarSubquery>,
-        statementEvaluationContext(options)
+        clock
       );
       variables.set(stmt.name, {
         type: "string",
@@ -2085,9 +2106,9 @@ function safeJsonStringify(v: unknown): string {
   }
 }
 
-function parseSqlBatch(sql: string, enableImport = false): Statement[] {
+function parseSqlBatch(sql: string, enableImport = false, dialect1 = false): Statement[] {
   const tokens = new Lexer(sql).tokenize();
-  return new Parser(tokens, { import: enableImport }).parseStatements();
+  return new Parser(tokens, { import: enableImport, dialect1 }).parseStatements();
 }
 
 function parseRelativeDateVariableValue(name: string, value: string): KintoneFunction {
