@@ -29765,7 +29765,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.70.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.71.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -52869,11 +52869,16 @@ function lookupUpsertTarget(index, keyParts) {
   if (!index.numericKey.some(Boolean)) return void 0;
   return index.normalized.get(upsertNormalizedKey(keyParts, index.numericKey));
 }
-async function resolveUpsertTargets(appId, keyFields, rowKeyValues, client, options, fieldTypes) {
+async function resolveUpsertTargets(appId, keyFields, rowKeyValues, client, options, fieldTypes, previewFields) {
   const maxRecords2 = options.maxRecords ?? 1e4;
   const parallel = options.fetchParallel ?? 1;
   const numericKey = keyFields.map((f) => fieldTypes.get(f) === "NUMBER");
-  const index = { raw: /* @__PURE__ */ new Map(), normalized: /* @__PURE__ */ new Map(), numericKey };
+  const index = {
+    raw: /* @__PURE__ */ new Map(),
+    normalized: /* @__PURE__ */ new Map(),
+    numericKey,
+    ...previewFields ? { snapshots: /* @__PURE__ */ new Map() } : {}
+  };
   const setMax = (map2, key, id) => {
     const cur = map2.get(key);
     if (cur === void 0 || id > cur) map2.set(key, id);
@@ -52894,20 +52899,26 @@ async function resolveUpsertTargets(appId, keyFields, rowKeyValues, client, opti
     if (parts.some((p) => p === "")) perRowKeys.push(parts);
     else batchFirstKeys.add(parts[0]);
   }
-  const fields = ["$id", ...keyFields];
+  const fields = previewFields ? [.../* @__PURE__ */ new Set(["$id", ...keyFields, ...previewFields])] : ["$id", ...keyFields];
   for (const chunk3 of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
     const query = `${keyFields[0]} in (${chunk3.map(sqlQuote).join(",")})`;
     const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords: maxRecords2, parallel });
     for (const rec of records) {
       const id = Number(rec["$id"]?.value);
       if (!Number.isFinite(id)) continue;
+      index.snapshots?.set(id, rec);
       addRecordToIndex(keyFields.map((f) => toScalarText(rec[f]?.value)), id);
     }
   }
   for (const parts of perRowKeys) {
     const query = keyFields.map((f, i) => `${f} = ${sqlQuote(parts[i])}`).join(" and ");
-    const existing = await fetchAll(client.getRecords, appId, query, ["$id"], { maxRecords: maxRecords2, parallel });
+    const perRowFields = previewFields ? [.../* @__PURE__ */ new Set(["$id", ...previewFields])] : ["$id"];
+    const existing = await fetchAll(client.getRecords, appId, query, perRowFields, { maxRecords: maxRecords2, parallel });
     if (existing.length === 0) continue;
+    for (const rec of existing) {
+      const id = Number(rec["$id"]?.value);
+      if (Number.isFinite(id)) index.snapshots?.set(id, rec);
+    }
     addRecordToIndex(parts, maxRecordId(existing));
   }
   return index;
