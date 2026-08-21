@@ -3,6 +3,34 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.71.0（2026-08-22）
+
+### 機能追加（B170 E-2: `previewStatement`＝dry-run 差分プレビュー）**※`/flow` への純加法のみ・既存 API は不変**
+
+ksql-flow との設計往復（提案 R1 → 回答 → **R2 確定**）を経た契約です。ランナーの `--dry-run`
+差分プレビュー（Flow 設計書 §10.2）を解禁します。
+
+```ts
+import { previewStatement } from "@rex0220/kintone-sql-tools/flow";
+const preview = await previewStatement(stmt, ctx, { maxSamples: 5 });
+// { kind: "PREVIEW", operation, appId, counts: { insert, update, delete },
+//   samples: [{ kind, key?, before?, after? }], reads, estimatedWrites }
+```
+
+- **DML 専用**（INSERT / INSERT...SELECT / UPDATE / UPDATE...FROM / DELETE / UPSERT /
+  UPSERT...SELECT。MERGE 正規化後含む）。非 DML・`VALIDATE ONLY` / `ON ERROR SKIP` / CHECK /
+  APPLY / IMPORT・サブテーブルは対処付き `ArgumentError`（read-only 文は `executeStatement` へ）
+- **書込 API 0 回を構造的に保証**（preview 経路に書込呼出なし＋呼ばれたら throw する遮断ラッパー）
+- `counts.update` は「キー一致して UPDATE 対象となる件数」（unchanged 判定は初版対象外）。
+  `samples` は書込順先頭 N 件（既定 5・上限 50・範囲外は読取前にエラー）。before / after は
+  **代入対象列のみ**・DELETE はキー（`$id`）のみ
+- `reads`＝preview が実消費した読取 API 数（cursor 含む）。`estimatedWrites`＝本実行時の
+  100 件単位の推定書込数。**preview は読取を実消費**し、TOCTOU・kintone 自動設定値・lookup
+  連動値は保証外（参考値）
+- context の一時テーブル・変数・as-of / timezone を共有し、preview 後も同じ context で続行可能。
+  `EXIT SUCCESS IF` 成立後は全ゼロの `PreviewResult`（skipped 相当）
+- UPSERT の事前読取は preview 時のみ代入対象列を同時取得（**通常実行の取得列・書込順は不変**）
+
 ## v3.70.0（2026-08-21）
 
 ### 機能追加（B170 ksql-flow ランナーからの依頼 E-1〜E-6 への対応）**※`/flow` への純加法のみ・dialect 0 と `/engine` は不変**

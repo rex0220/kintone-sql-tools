@@ -1,19 +1,19 @@
-ksql 配布パッケージ (v3.70.0)
+ksql 配布パッケージ (v3.71.0)
 
 release 成果物:
-- ksql-plugin-v3.70.0.zip
-- ksql-mcp.mcpb (manifest version 3.70.0)
-- ksql-mcp.js (MCP server version 3.70.0)
+- ksql-plugin-v3.71.0.zip
+- ksql-mcp.mcpb (manifest version 3.71.0)
+- ksql-mcp.js (MCP server version 3.71.0)
 
-機能追加 (B170 ksql-flow ランナーからの依頼対応) ★/flow への純加法のみ:
-- explainScript に asOf / timezone を追加 (dialect 1 の @関数入りスクリプトを explain
-  できなかった実質バグの解消。CLI / MCP / プラグインの batch EXPLAIN も同時解消)。
-- FlowDmlResult 型 + isDmlResult 型ガードを公開 (DML 実行結果の安定契約)。
-- StatementResult.metrics を累積スナップショットへ安全化 (過去の結果が後続実行で
-  変わらない。文単位の値は前回スナップショットとの差分で計算)。
-- CreateExecutionContextOptions.onChunkWritten (書込チャンクごとの通知・await 対応・
-  チェックポイント記録用。書込のキー昇順整列は行いません)。
+機能追加 (B170 E-2: previewStatement = dry-run 差分プレビュー) ★/flow への純加法のみ:
+- previewStatement(statement, context, {maxSamples}) を /flow へ追加 (DML 専用)。
+  操作別件数 (insert/update/delete)・書込順先頭 N 件の before/after サンプル・
+  実消費読取 API 数・推定書込 API 数を返し、書込 API は 0 回を構造的に保証。
+- maxSamples は既定 5・上限 50。DELETE はキーのみ。unchanged 判定は初版対象外。
+- ksql-flow との設計往復 (R1→回答→R2 確定) を経た契約です。ランナーの --dry-run
+  差分プレビュー (設計書 10.2) の解禁に対応。
 
+v3.70.0 の節は畳みました (B170 E-6/E-3/E-5/E-1 = /flow 純加法 4 件)。
 v3.69.0 の節は畳みました (B168 Flow dialect 1 完成 = Stage 4-6・全面で実行可)。
 v3.68.0 の節は畳みました (B168 Stage 1-3 = dialect 1 の解析基盤・エンジン内部のみ)。
 v3.67.0 の節は畳みました (B169 CURRENT_DATE/CURRENT_TIMESTAMP を文単位の固定時刻へ =
@@ -87,12 +87,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.70.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.71.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.70.0): B170 ksql-flow 依頼対応 (/flow 純加法 = explain as-of・DML 結果型・metrics スナップショット・書込チャンク通知)。
+本リリース (v3.71.0): B170 E-2 previewStatement (dry-run 差分プレビュー・/flow 純加法・書込 0 回保証)。
+
+前リリース (v3.70.0): B170 ksql-flow 依頼対応 (/flow 純加法 = explain as-of・DML 結果型・metrics スナップショット・書込チャンク通知)。
 
 前リリース (v3.69.0): B168 Flow dialect 1 完成 (Stage 4-6・全面で実行可・公式 API /flow)。
 
