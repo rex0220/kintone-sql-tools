@@ -1962,6 +1962,143 @@ export async function executeManagedStatement(
   }
 }
 
+/** @internal Shape returned to the /flow adapter by previewManagedStatement. */
+export interface ManagedPreviewSample {
+  kind: "insert" | "update" | "delete";
+  key?: string;
+  before?: Record<string, string>;
+  after?: Record<string, string>;
+}
+
+/** @internal Shape returned to the /flow adapter by previewManagedStatement. */
+export interface ManagedPreviewResult {
+  kind: "PREVIEW";
+  operation: "INSERT" | "UPDATE" | "DELETE" | "UPSERT";
+  appId: number;
+  counts: { insert: number; update: number; delete: number };
+  samples: ManagedPreviewSample[];
+  reads: number;
+  estimatedWrites: number;
+}
+
+/** @internal Fail-closed guard used even though preview preparation has no write calls. */
+export function wrapClientWithPreviewWriteBlock(client: KintoneClient): KintoneClient {
+  const blocked = async (): Promise<never> => {
+    throw new Error("PreviewWriteBlockedError: previewStatement blocked a write API call.");
+  };
+  return {
+    ...client,
+    postRecords: blocked,
+    putRecords: blocked,
+    deleteRecords: blocked,
+  };
+}
+
+/** @internal Preview the next DML statement while preserving managed /flow lifecycle rules. */
+export async function previewManagedStatement(
+  statement: Statement,
+  managed: ManagedStatementExecutionContext,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  if (managed.disposed) throw new Error("ExecutionContextDisposedError: execution context is disposed.");
+  if (managed.busy) throw new Error("ExecutionContextBusyError: concurrent executeStatement calls are not allowed.");
+  const index = managed.nextIndex;
+  if (index >= managed.statements.length) {
+    throw new Error("ExecutionContextOrderError: all statements have already been executed.");
+  }
+  if (statement !== managed.statements[index]) {
+    throw new Error(`ExecutionContextOrderError: expected statement index ${index}.`);
+  }
+
+  managed.busy = true;
+  managed.nextIndex += 1;
+  const info = managed.analysis.statements[index];
+  const operation = previewOperation(statement);
+  const appId = previewAppId(statement);
+  const readsBefore = recordReadCalls(managed.metrics);
+  try {
+    if (managed.aborted) {
+      if (managed.aborted !== "exit") managed.failed.add(index);
+      return emptyManagedPreview(operation, appId);
+    }
+    const brokenDep = info.dependsOn.find((dependency) => managed.failed.has(dependency));
+    if (brokenDep !== undefined) {
+      managed.failed.add(index);
+      return emptyManagedPreview(operation, appId);
+    }
+    if (managed.deadline !== null && Date.now() >= managed.deadline) {
+      managed.failed.add(index);
+      managed.aborted = "timeout";
+      return emptyManagedPreview(operation, appId);
+    }
+
+    const searchAbortCollector: SearchAbortCollector = { aborted: false };
+    const statementClient = wrapClientWithSearchAbort(managed.client, searchAbortCollector, true);
+    const cursorScope = wrapClientWithCursorScope(statementClient);
+    managed.cursorCleanups.add(cursorScope.closeActive);
+    const previewClient = wrapClientWithPreviewWriteBlock(cursorScope.client);
+    const remaining = managed.deadline !== null ? managed.deadline - Date.now() : null;
+    const result = await runWithDeadline(
+      previewBatchStatement({
+        stmt: statement,
+        info,
+        client: previewClient,
+        options: managed.options,
+        cacheContext: managed.cacheContext,
+        tempTables: managed.tempTables,
+        variables: managed.variables,
+        relativeDateVariables: managed.relativeDateVariables,
+        clock: managed.clock,
+        dialect: managed.dialect,
+      }, maxSamples),
+      remaining,
+      cursorScope.closeActive
+    );
+    managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+    return { ...result, reads: recordReadCalls(managed.metrics) - readsBefore };
+  } catch (error) {
+    managed.failed.add(index);
+    if (error instanceof BatchTimeoutError) managed.aborted = "timeout";
+    else if (!managed.options.continueOnError) managed.aborted = "fail-fast";
+    managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+    throw error;
+  } finally {
+    managed.busy = false;
+  }
+}
+
+function recordReadCalls(metrics: ExecuteMetrics): number {
+  return metrics.getCalls + metrics.cursorCreateCalls + metrics.cursorGetCalls;
+}
+
+function previewOperation(statement: Statement): ManagedPreviewResult["operation"] {
+  switch (statement.type) {
+    case "INSERT":
+    case "INSERT_SELECT": return "INSERT";
+    case "UPDATE": return "UPDATE";
+    case "DELETE": return "DELETE";
+    case "UPSERT":
+    case "UPSERT_SELECT": return "UPSERT";
+    default: throw new Error("ArgumentError: previewStatement accepts DML only; send read-only statements to executeStatement.");
+  }
+}
+
+function previewAppId(statement: Statement): number {
+  if ("appId" in statement && typeof statement.appId === "number") return statement.appId;
+  throw new Error("ArgumentError: previewStatement requires a DML target app.");
+}
+
+function emptyManagedPreview(
+  operation: ManagedPreviewResult["operation"],
+  appId: number
+): ManagedPreviewResult {
+  return {
+    kind: "PREVIEW", operation, appId,
+    counts: { insert: 0, update: 0, delete: 0 },
+    samples: [], reads: 0, estimatedWrites: 0,
+  };
+}
+
 /** @internal Release metadata scope and any cursor left active by a statement. */
 export async function disposeManagedStatementExecutionContext(
   managed: ManagedStatementExecutionContext
@@ -2307,6 +2444,258 @@ export async function executeBatchStatement(
 
   // 一時テーブルと無関係な文は既存の単文実行経路をそのまま使う
   return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
+}
+
+/** Preview one DML statement with the same variable/as-of/temp-table state as batch execution. */
+async function previewBatchStatement(
+  context: ExecutionContext,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const {
+    stmt, client, options, cacheContext, tempTables, variables, dialect,
+  } = context;
+  const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
+  assertApplyScope("phase15b", resolvedStmt);
+  assertApplyExecutionScope("phase15b", resolvedStmt);
+  validateStatementStatic(resolvedStmt);
+  if (dialect === 1 && (resolvedStmt.type === "INSERT" || resolvedStmt.type === "UPDATE" || resolvedStmt.type === "DELETE")
+      && resolvedStmt.subtableCode) {
+    throw new Error("ArgumentError: previewStatement does not accept subtable targets; target the parent app instead.");
+  }
+  if (dialect === 1 && (resolvedStmt.type === "UPSERT" || resolvedStmt.type === "UPSERT_SELECT")) {
+    const staticIssue = validateDialect1UpdateKey(resolvedStmt)[0];
+    if (staticIssue) throw new Error(`ArgumentError: ${staticIssue.message}`);
+    const fieldInfos = await getFieldsCached(resolvedStmt.appId, client, cacheContext);
+    const schemaIssue = validateDialect1UpdateKey(resolvedStmt, fieldInfos)[0];
+    if (schemaIssue) throw new Error(`ArgumentError: ${schemaIssue.message}`);
+  }
+  await assertRelativeDateExecutionPlan(resolvedStmt, client, cacheContext);
+
+  switch (resolvedStmt.type) {
+    case "INSERT": return previewInsert(resolvedStmt, client, options, cacheContext, maxSamples);
+    case "INSERT_SELECT": return previewInsertSelect(
+      resolvedStmt, client, options, cacheContext, tempTables, maxSamples
+    );
+    case "UPDATE": return previewUpdate(
+      resolvedStmt, client, options, cacheContext, tempTables, maxSamples
+    );
+    case "DELETE": return previewDelete(resolvedStmt, client, options, cacheContext, maxSamples);
+    case "UPSERT": return previewUpsert(resolvedStmt, client, options, cacheContext, maxSamples);
+    case "UPSERT_SELECT": return previewUpsertSelect(
+      resolvedStmt, client, options, cacheContext, tempTables, maxSamples
+    );
+    default:
+      throw new Error("ArgumentError: previewStatement accepts DML only; send read-only statements to executeStatement.");
+  }
+}
+
+function previewBase(
+  operation: ManagedPreviewResult["operation"],
+  appId: number,
+  counts: ManagedPreviewResult["counts"],
+  samples: ManagedPreviewSample[]
+): ManagedPreviewResult {
+  const estimatedWrites = operation === "UPSERT"
+    ? Math.ceil(counts.insert / 100) + Math.ceil(counts.update / 100)
+    : Math.ceil((counts.insert + counts.update + counts.delete) / 100);
+  return { kind: "PREVIEW", operation, appId, counts, samples, reads: 0, estimatedWrites };
+}
+
+function previewRecord(record: KintoneRecord | undefined, fields: readonly string[]): Record<string, string> {
+  return Object.fromEntries(fields.map((field) => [
+    field,
+    renderValidationValue(record?.[field]?.value),
+  ]));
+}
+
+function previewKey(parts: readonly string[]): string | undefined {
+  if (parts.length === 0) return undefined;
+  return parts.length === 1 ? parts[0] : JSON.stringify(parts);
+}
+
+async function previewInsert(
+  stmt: InsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const precision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const records = insertToPostBatches(stmt, fieldTypes, statementEvaluationContext(options))
+    .flatMap((batch) => batch.records);
+  assertValidDmlRecords(records, stmt.fields, fieldInfos, precision);
+  return previewBase("INSERT", stmt.appId, { insert: records.length, update: 0, delete: 0 },
+    records.slice(0, maxSamples).map((record) => ({ kind: "insert", after: previewRecord(record, stmt.fields) })));
+}
+
+async function materializePreviewSelectRecords(
+  stmt: InsertSelectStatement | UpsertSelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable>,
+  fieldInfos: readonly KintoneFieldInfo[]
+): Promise<{ records: KintoneRecord[]; fieldTypes: FieldTypeMap }> {
+  const source = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables, fieldInfos);
+  assertNoImportRowErrors(source);
+  if (source.columns.length !== stmt.fields.length) {
+    const operation = stmt.type === "INSERT_SELECT" ? "INSERT" : "UPSERT";
+    throw new Error(`SELECT の列数（${source.columns.length}）と ${operation} のフィールド数（${stmt.fields.length}）が一致しません`);
+  }
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const records = source.rows.map((row, rowIndex) => {
+    const record: KintoneRecord = {};
+    stmt.fields.forEach((field, index) => {
+      if (source.importPresence && !source.importPresence[rowIndex]?.has(field)) return;
+      record[field] = { value: convertProcessRowValue(row[source.columns[index]] ?? "", fieldTypes.get(field)) };
+    });
+    return record;
+  });
+  return { records, fieldTypes };
+}
+
+async function previewInsertSelect(
+  stmt: InsertSelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable>,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const precision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const { records } = await materializePreviewSelectRecords(stmt, client, options, cacheContext, tempTables, fieldInfos);
+  records.forEach((record) => assertValidDmlRecords(
+    [record], stmt.fields.filter((field) => field in record), fieldInfos, precision
+  ));
+  return previewBase("INSERT", stmt.appId, { insert: records.length, update: 0, delete: 0 },
+    records.slice(0, maxSamples).map((record) => ({ kind: "insert", after: previewRecord(record, stmt.fields) })));
+}
+
+async function previewUpdate(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable>,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const fields = stmt.assignments.map((assignment) => assignment.field);
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, fields, client, cacheContext);
+  const precision = await loadNumberPrecisionForTargets(stmt.appId, fields, fieldInfos, client, cacheContext);
+  await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) {
+    return previewBase("UPDATE", stmt.appId, { insert: 0, update: 0, delete: 0 }, []);
+  }
+  const candidates = await materializeUpdateValidationCandidates(
+    stmt, client, options, cacheContext, tempTables, fields
+  );
+  const records = candidates.map((candidate) => candidate.record!);
+  assertValidDmlRecords(records, fields, fieldInfos, precision);
+  const samples = candidates.slice(0, maxSamples).map((candidate): ManagedPreviewSample => ({
+    kind: "update",
+    before: previewRecord(candidate.validationSnapshot, fields),
+    after: previewRecord(candidate.record, fields),
+  }));
+  return previewBase("UPDATE", stmt.appId, { insert: 0, update: candidates.length, delete: 0 }, samples);
+}
+
+async function previewDelete(
+  stmt: DeleteStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  await assertDmlWhereCapability(stmt, client, cacheContext);
+  if (isConstantFalseWhere(stmt.where)) {
+    return previewBase("DELETE", stmt.appId, { insert: 0, update: 0, delete: 0 }, []);
+  }
+  const params = deleteToGetQuery(stmt);
+  const resolved = await resolveDmlTargetIds(client.getRecords, params.app, params.query, {
+    maxRecords: options.maxRecords ?? 10_000,
+    parallel: options.fetchParallel ?? 1,
+  });
+  return previewBase("DELETE", stmt.appId, { insert: 0, update: 0, delete: resolved.ids.length },
+    resolved.ids.slice(0, maxSamples).map((id) => ({ kind: "delete", key: String(id) })));
+}
+
+async function previewUpsertRecords(
+  stmt: UpsertStatement | UpsertSelectStatement,
+  records: KintoneRecord[],
+  fieldTypes: FieldTypeMap,
+  fieldInfos: readonly KintoneFieldInfo[],
+  precision: NumberPrecision | undefined,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  for (const key of stmt.keyFields) {
+    if (!stmt.fields.includes(key)) throw new Error(`ON DUPLICATE のキー「${key}」が UPSERT フィールドに含まれていません`);
+  }
+  records.forEach((record) => assertValidDmlRecords(
+    [record], stmt.fields.filter((field) => field in record), fieldInfos, precision
+  ));
+  const rowKeys = records.map((record) => stmt.keyFields.map((key) => renderValidationValue(record[key]?.value)));
+  const targets = await resolveUpsertTargets(
+    stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes, stmt.fields
+  );
+  const inserts: ManagedPreviewSample[] = [];
+  const updates: ManagedPreviewSample[] = [];
+  records.forEach((record, index) => {
+    const id = lookupUpsertTarget(targets, rowKeys[index]);
+    const key = previewKey(rowKeys[index]);
+    if (id === undefined) {
+      inserts.push({ kind: "insert", ...(key === undefined ? {} : { key }), after: previewRecord(record, stmt.fields) });
+    } else {
+      updates.push({
+        kind: "update",
+        ...(key === undefined ? {} : { key }),
+        before: previewRecord(targets.snapshots?.get(id), stmt.fields),
+        after: previewRecord(record, stmt.fields),
+      });
+    }
+  });
+  return previewBase("UPSERT", stmt.appId,
+    { insert: inserts.length, update: updates.length, delete: 0 },
+    [...inserts, ...updates].slice(0, maxSamples));
+}
+
+async function previewUpsert(
+  stmt: UpsertStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const precision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
+  const records: KintoneRecord[] = stmt.values.map((row) => Object.fromEntries(stmt.fields.map((field, index) => {
+    const value = row[index];
+    return [field, { value: value.type === "CASE_VALUE"
+      ? evalCaseWhenValue(value.expr, {}, fieldTypes.get(field), statementEvaluationContext(options))
+      : toKintoneValue(value, fieldTypes.get(field)) }];
+  })));
+  return previewUpsertRecords(stmt, records, fieldTypes, fieldInfos, precision, client, options, maxSamples);
+}
+
+async function previewUpsertSelect(
+  stmt: UpsertSelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string,
+  tempTables: Map<string, MaterializedTable>,
+  maxSamples: number
+): Promise<ManagedPreviewResult> {
+  const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
+  const precision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
+  const { records, fieldTypes } = await materializePreviewSelectRecords(
+    stmt, client, options, cacheContext, tempTables, fieldInfos
+  );
+  return previewUpsertRecords(stmt, records, fieldTypes, fieldInfos, precision, client, options, maxSamples);
 }
 
 /** CREATE TEMP TABLE の AS 句（SELECT / UNION / WITH）を一時テーブルストア付きで実行する */
@@ -6761,6 +7150,8 @@ interface UpsertTargetIndex {
   normalized: Map<string, number>;
   /** キー成分ごとに数値正規化を適用するか（NUMBER フィールドのみ true） */
   numericKey: boolean[];
+  /** Preview-only snapshots keyed by $id. Ordinary execution leaves this undefined. */
+  snapshots?: Map<number, KintoneRecord>;
 }
 
 /** 数値として解釈できるキー成分は正規形に揃える（数値フィールドの表記ゆれ対策） */
@@ -6806,12 +7197,16 @@ async function resolveUpsertTargets(
   rowKeyValues: string[][],
   client: KintoneClient,
   options: ExecuteOptions,
-  fieldTypes: FieldTypeMap
+  fieldTypes: FieldTypeMap,
+  previewFields?: readonly string[]
 ): Promise<UpsertTargetIndex> {
   const maxRecords = options.maxRecords ?? 10_000;
   const parallel = options.fetchParallel ?? 1;
   const numericKey = keyFields.map((f) => fieldTypes.get(f) === "NUMBER");
-  const index: UpsertTargetIndex = { raw: new Map(), normalized: new Map(), numericKey };
+  const index: UpsertTargetIndex = {
+    raw: new Map(), normalized: new Map(), numericKey,
+    ...(previewFields ? { snapshots: new Map<number, KintoneRecord>() } : {}),
+  };
 
   const setMax = (map: Map<string, number>, key: string, id: number): void => {
     const cur = map.get(key);
@@ -6837,13 +7232,16 @@ async function resolveUpsertTargets(
   }
 
   // 第 1 キーの in (...) チャンク検索
-  const fields = ["$id", ...keyFields];
+  const fields = previewFields
+    ? [...new Set(["$id", ...keyFields, ...previewFields])]
+    : ["$id", ...keyFields];
   for (const chunk of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
     const query = `${keyFields[0]} in (${chunk.map(sqlQuote).join(",")})`;
     const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords, parallel });
     for (const rec of records) {
       const id = Number(rec["$id"]?.value);
       if (!Number.isFinite(id)) continue;
+      index.snapshots?.set(id, rec);
       addRecordToIndex(keyFields.map((f) => toScalarText(rec[f]?.value)), id);
     }
   }
@@ -6851,8 +7249,15 @@ async function resolveUpsertTargets(
   // 空文字キーを含む行は従来どおり行ごとに検索
   for (const parts of perRowKeys) {
     const query = keyFields.map((f, i) => `${f} = ${sqlQuote(parts[i])}`).join(" and ");
-    const existing = await fetchAll(client.getRecords, appId, query, ["$id"], { maxRecords, parallel });
+    const perRowFields = previewFields
+      ? [...new Set(["$id", ...previewFields])]
+      : ["$id"];
+    const existing = await fetchAll(client.getRecords, appId, query, perRowFields, { maxRecords, parallel });
     if (existing.length === 0) continue;
+    for (const rec of existing) {
+      const id = Number(rec["$id"]?.value);
+      if (Number.isFinite(id)) index.snapshots?.set(id, rec);
+    }
     addRecordToIndex(parts, maxRecordId(existing));
   }
 

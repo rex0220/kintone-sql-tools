@@ -12,6 +12,7 @@ import {
   createManagedStatementExecutionContext,
   disposeManagedStatementExecutionContext,
   executeManagedStatement,
+  previewManagedStatement,
   type ManagedStatementExecutionContext,
 } from "../execute";
 import { createKintoneClient } from "./writableClient";
@@ -24,6 +25,8 @@ import type {
   ExplainScriptResult,
   ParseScriptOptions,
   ParseScriptResult,
+  PreviewResult,
+  PreviewStatementOptions,
   Statement,
   StatementResult,
   ValidateScriptOptions,
@@ -36,6 +39,7 @@ export const version: string =
 
 const handles = new WeakMap<object, ManagedStatementExecutionContext>();
 const bindingsByStatements = new WeakMap<object, ReadonlyMap<number, AppBinding>>();
+const bindingsByContexts = new WeakMap<object, ReadonlyMap<number, AppBinding>>();
 
 export function parseScript(source: string, opts: ParseScriptOptions = {}): ParseScriptResult {
   return parseWithBindings(source, opts);
@@ -147,9 +151,73 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
         routedOnChunkWritten
       )
     );
+    if (bindings) bindingsByContexts.set(handle as object, bindings);
     return handle;
   } catch (error) {
     throw normalizeFlowError(error);
+  }
+}
+
+export async function previewStatement(
+  statement: Statement,
+  context: ExecutionContext,
+  opts: PreviewStatementOptions = {}
+): Promise<PreviewResult> {
+  const maxSamples = opts.maxSamples ?? 5;
+  if (!Number.isInteger(maxSamples) || maxSamples < 1 || maxSamples > 50) {
+    throw new KsqlFlowError(
+      "ArgumentError",
+      "ArgumentError: previewStatement maxSamples must be an integer from 1 through 50; fix the option before retrying."
+    );
+  }
+  assertPreviewStatementSupported(statement);
+  const managed = handles.get(context as object);
+  if (!managed) {
+    throw new KsqlFlowError("ExecutionContextDisposedError", "ExecutionContextDisposedError: execution context is disposed or invalid.");
+  }
+  try {
+    const result = await previewManagedStatement(statement, managed, maxSamples);
+    const physicalAppId = bindingsByContexts.get(context as object)?.get(result.appId)?.appId ?? result.appId;
+    return { ...result, appId: physicalAppId };
+  } catch (error) {
+    throw normalizeFlowError(error);
+  }
+}
+
+function assertPreviewStatementSupported(statement: Statement): void {
+  const dml = statement.type === "INSERT" || statement.type === "INSERT_SELECT"
+    || statement.type === "UPDATE" || statement.type === "DELETE"
+    || statement.type === "UPSERT" || statement.type === "UPSERT_SELECT";
+  if (!dml) {
+    const action = statement.type === "IMPORT"
+      ? "IMPORT is outside the preview contract; use executeStatement for IMPORT validation/execution."
+      : "Send read-only and control statements to executeStatement.";
+    throw new KsqlFlowError(
+      "ArgumentError",
+      `ArgumentError: previewStatement accepts INSERT, UPDATE, DELETE, and UPSERT DML only. ${action}`
+    );
+  }
+  if ("validateOnly" in statement && statement.validateOnly === true) {
+    throw new KsqlFlowError("ArgumentError", "ArgumentError: previewStatement does not accept VALIDATE ONLY; send validation DML to executeStatement.");
+  }
+  if ("onErrorSkip" in statement && statement.onErrorSkip === true) {
+    throw new KsqlFlowError("ArgumentError", "ArgumentError: previewStatement does not accept ON ERROR SKIP; remove the modifier or use executeStatement.");
+  }
+  if ("checkGroups" in statement && statement.checkGroups?.length) {
+    throw new KsqlFlowError("ArgumentError", "ArgumentError: previewStatement does not accept CHECK clauses; remove CHECK or use executeStatement.");
+  }
+  const hasApply = statement.type === "INSERT"
+    ? Boolean(statement.applyBlocks?.length)
+    : statement.type === "UPDATE"
+    ? Boolean(statement.applyBlocks?.length)
+    : statement.type === "UPSERT"
+    ? Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length)
+    : false;
+  if (hasApply) {
+    throw new KsqlFlowError("ArgumentError", "ArgumentError: previewStatement does not accept APPLY; remove APPLY or use executeStatement.");
+  }
+  if ((statement.type === "INSERT" || statement.type === "UPDATE" || statement.type === "DELETE") && statement.subtableCode) {
+    throw new KsqlFlowError("ArgumentError", "ArgumentError: previewStatement does not accept subtable targets; target the parent app instead.");
   }
 }
 
@@ -185,6 +253,7 @@ export async function disposeExecutionContext(context: ExecutionContext): Promis
   const managed = handles.get(context as object);
   if (!managed) return;
   handles.delete(context as object);
+  bindingsByContexts.delete(context as object);
   await disposeManagedStatementExecutionContext(managed);
 }
 
@@ -259,6 +328,9 @@ export type {
   FlowUpsertResult,
   ParseScriptOptions,
   ParseScriptResult,
+  PreviewResult,
+  PreviewSample,
+  PreviewStatementOptions,
   SchemaResolver,
   ScriptHeaderMeta,
   Statement,
