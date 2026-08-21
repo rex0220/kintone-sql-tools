@@ -16,6 +16,12 @@ export type StatementSyntaxId =
   | "tempTable"
   | "variables"
   | "assert"
+  | "flowHeader"
+  | "flowAssert"
+  | "flowExit"
+  | "flowTempTable"
+  | "flowUpsert"
+  | "flowMerge"
   | "reorder"
   | "showDescribe"
   | "explain";
@@ -24,7 +30,7 @@ export interface StatementSyntaxEntry {
   readonly template: string;
   readonly examples: readonly string[];
   readonly expectedTypes: readonly (readonly Statement["type"][])[];
-  readonly capabilities?: { readonly import?: boolean };
+  readonly capabilities?: { readonly import?: boolean; readonly dialect1?: boolean };
   readonly batch?: boolean;
 }
 
@@ -162,6 +168,54 @@ export const STATEMENT_SYNTAX_CATALOG = {
     template: "ASSERT: ASSERT operand op operand|ASSERT operand BETWEEN a AND b",
     examples: ["ASSERT 2 BETWEEN 1 AND 3"],
     expectedTypes: [["ASSERT"]],
+  },
+  flowHeader: {
+    template: "Flow-header (-- @ksql dialect: 1 の宣言が必要): leading -- @ksql name|depends_on|timeout|dialect headers before SQL",
+    examples: ["-- @ksql name: daily_flow\n-- @ksql dialect: 1\nSELECT 1 AS ready"],
+    expectedTypes: [["SELECT"]],
+    capabilities: { dialect1: true },
+  },
+  flowAssert: {
+    template: "Flow-ASSERT (-- @ksql dialect: 1 の宣言が必要): ASSERT [WARN] condition, 'message'",
+    examples: [
+      "-- @ksql dialect: 1\nASSERT 1 = 1, 'required invariant'",
+      "-- @ksql dialect: 1\nASSERT WARN 1 = 2, 'continue with warning'",
+    ],
+    expectedTypes: [["ASSERT"], ["ASSERT"]],
+    capabilities: { dialect1: true },
+  },
+  flowExit: {
+    template: "Flow-EXIT (-- @ksql dialect: 1 の宣言が必要): EXIT SUCCESS IF condition, 'message'",
+    examples: ["-- @ksql dialect: 1\nEXIT SUCCESS IF 1 = 1, 'nothing to do'"],
+    expectedTypes: [["EXIT"]],
+    capabilities: { dialect1: true },
+  },
+  flowTempTable: {
+    template: "Flow-temp-table (-- @ksql dialect: 1 の宣言が必要): CREATE TEMP TABLE bare_name AS SELECT...",
+    examples: [
+      "-- @ksql dialect: 1\nCREATE TEMP TABLE flow_source AS SELECT 1 AS n; SELECT n FROM flow_source",
+    ],
+    expectedTypes: [["CREATE_TEMP_TABLE", "SELECT"]],
+    capabilities: { dialect1: true },
+    batch: true,
+  },
+  flowUpsert: {
+    template: "Flow-UPSERT (-- @ksql dialect: 1 の宣言が必要): UPSERT INTO APPn(cols){VALUES...|SELECT...} KEY(key)",
+    examples: [
+      "-- @ksql dialect: 1\nUPSERT INTO APP1 (key, name) SELECT key, name FROM APP2 KEY (key)",
+    ],
+    expectedTypes: [["UPSERT_SELECT"]],
+    capabilities: { dialect1: true },
+  },
+  flowMerge: {
+    template: "Flow-MERGE (-- @ksql dialect: 1 の宣言が必要): MERGE INTO target AS t USING source AS s ON t.key=s.key WHEN MATCHED THEN UPDATE SET... WHEN NOT MATCHED THEN INSERT...",
+    examples: [
+      "-- @ksql dialect: 1\nMERGE INTO APP1 AS t USING APP2 AS s ON t.key = s.key "
+        + "WHEN MATCHED THEN UPDATE SET name = s.name "
+        + "WHEN NOT MATCHED THEN INSERT (key, name) VALUES (s.key, s.name)",
+    ],
+    expectedTypes: [["UPSERT_SELECT"]],
+    capabilities: { dialect1: true },
   },
   reorder: {
     template: "REORDER: REORDER APPn$tbl BY... WHERE...|REORDER ALL APPn$tbl BY...",
