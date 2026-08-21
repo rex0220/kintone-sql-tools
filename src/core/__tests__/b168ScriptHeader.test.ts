@@ -98,7 +98,9 @@ describe("B168 parseScript", () => {
     ]);
   });
 
-  test("acceptance sample reads four headers and reports Stage 2/3 syntax without crashing", () => {
+  // Stage 1 では「@関数未実装のため PARSE_ERROR 1 件」を期待していたが、
+  // Stage 4b（as-of 関数）で受入 2 の本来の契約（診断ゼロ）へ到達したため更新した。
+  test("acceptance sample parses with four headers and zero diagnostics (受入 2)", () => {
     const source = `-- @ksql name: monthly_sales_sync
 -- @ksql depends_on: sync_master_customers
 -- @ksql timeout: 600
@@ -128,9 +130,9 @@ KEY (顧客コード);`;
       timeout: 600,
       dialect: 1,
     });
-    expect(parsed.diagnostics).toEqual([
-      expect.objectContaining({ severity: "error", code: DiagnosticCodes.PARSE_ERROR }),
-    ]);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.statements.map((statement) => statement.type))
+      .toEqual(["ASSERT", "CREATE_TEMP_TABLE", "EXIT", "UPSERT_SELECT"]);
   });
 });
 

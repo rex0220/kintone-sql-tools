@@ -191,6 +191,7 @@ import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import { parseSqlStatementsForScript } from "./core/sql";
+import { asOfVariableName, createAsOfClock } from "./core/asOfClock";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
 import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
@@ -1464,6 +1465,10 @@ export interface BatchExecuteOptions extends ExecuteOptions {
   timeoutMs?: number;
   /** 一時テーブル実体化の行数上限（既定 TEMP_TABLE_MAX_ROWS） */
   tempTableMaxRows?: number;
+  /** dialect 1 の @ 付き時刻関数が共有するスクリプト単位の基準時刻 */
+  asOf?: Date;
+  /** @TODAY() などの暦日境界に使う IANA timezone。省略時はホスト timezone */
+  timezone?: string;
 }
 
 export interface BatchStatementError {
@@ -1541,6 +1546,8 @@ export interface BatchExecuteResult {
   /** 静的解析結果（isReadOnlyBatch / containsDml 等。呼び出し層の検証・整形用） */
   analysis: BatchAnalysis;
   metrics?: ExecuteMetrics;
+  /** スクリプト全体に対する実行時警告（重複なし） */
+  warnings?: string[];
 }
 
 type VarValue =
@@ -1570,8 +1577,13 @@ export async function executeBatch(
   client: KintoneClient,
   options: BatchExecuteOptions = {}
 ): Promise<BatchExecuteResult> {
+  // B168 F: capture exactly once, before parsing/analysis or any API call.
+  const asOfClock = createAsOfClock(options.asOf ?? new Date(), options.timezone);
   resolveRecursiveCteLimits(options);
-  const { statements } = parseSqlStatementsForScript(sql, { import: options.enableImport === true });
+  const { statements, meta } = parseSqlStatementsForScript(sql, { import: options.enableImport === true });
+  const dialect1Warnings = meta.dialect === 1 && statements.some(statementHasBareServerTimeFunctionInWhere)
+    ? [DIALECT1_SERVER_TIME_FUNCTION_WARNING]
+    : [];
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
   statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
@@ -1615,6 +1627,9 @@ export async function executeBatch(
   try {
     const tempTables = new Map<string, MaterializedTable>();
     const variables = new Map<string, VarValue>();
+    for (const [name, value] of Object.entries(asOfClock.values)) {
+      variables.set(asOfVariableName(name as keyof typeof asOfClock.values), { type: "string", value });
+    }
     const results: BatchStatementResult[] = [];
     /** success しなかった文の index（error / skipped）。依存スキップの判定に使う */
     const failed = new Set<number>();
@@ -1697,6 +1712,13 @@ export async function executeBatch(
         );
         if (outcome.result) {
           outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
+          if (
+            dialect1Warnings.length > 0
+            && statementHasBareServerTimeFunctionInWhere(statements[i])
+            && outcome.result.type === "SELECT"
+          ) {
+            outcome.result = mergeSelectWarnings(outcome.result, dialect1Warnings);
+          }
         }
         const { exitTriggered, ...statementOutcome } = outcome;
         results.push({ ...base, status: "success", ...statementOutcome });
@@ -1731,10 +1753,37 @@ export async function executeBatch(
       statements: results,
       analysis,
       metrics,
+      ...(dialect1Warnings.length > 0 ? { warnings: dialect1Warnings } : {}),
     };
   } finally {
     releaseMetadataCacheScope(cacheContext);
   }
+}
+
+export const DIALECT1_SERVER_TIME_FUNCTION_WARNING =
+  "bare の時刻依存関数は kintone サーバー評価のため as-of の対象外です。再現性が必要なら @ 付き関数を使用してください。";
+
+function statementHasBareServerTimeFunctionInWhere(statement: Statement): boolean {
+  let found = false;
+  const visit = (node: unknown): void => {
+    if (found || node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    const value = node as Record<string, unknown>;
+    const where = value["where"];
+    if (where !== null && typeof where === "object") {
+      const names = serverOnlyFunctionOccurrencesInWhere(where as WhereExpr);
+      if (names.some((name) => name === "TODAY" || name === "NOW" || isRelativeDateFunctionName(name))) {
+        found = true;
+        return;
+      }
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(statement);
+  return found;
 }
 
 function statementHasApplyMutation(statement: Statement): boolean {
@@ -2185,6 +2234,8 @@ function evaluateScalarExpr(
       }
       return { type: "number", value, raw: String(value) };
     }
+    case "VARIABLE":
+      throw new Error(`InternalError: unresolved variable @${expr.name} reached scalar evaluation.`);
   }
 }
 
@@ -2237,7 +2288,8 @@ function resolveBatchVariableReferencesInternal<T>(
           }
         : { type: "STRING", value: value.value, fromVariable: true }) as T;
     }
-    if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string" && typeof obj["alias"] === "string") {
+    if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string"
+        && (typeof obj["alias"] === "string" || obj["alias"] === null)) {
       const value = variables.get(obj["name"]);
       if (value === undefined) throw new Error(`ParseError: variable @${obj["name"]} is not defined in this batch.`);
       if (value.type === "array") throw new Error(`ParseError: array variable @${obj["name"]} cannot be used as a SELECT column.`);

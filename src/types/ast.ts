@@ -132,6 +132,7 @@ export interface DeclareVariableStatement {
 export type ScalarExpr =
   | StringLiteral
   | NumberLiteral
+  | VariableRef
   | LegacyKintoneFunction
   | StringFuncExpr
   | ScalarArithExpr
@@ -294,7 +295,8 @@ export interface SelectAliasDisplay {
 export interface VariableColumn extends SelectAliasDisplay {
   type: "VARIABLE_COL";
   name: string;
-  alias: string;
+  /** Ordinary variables require an alias; dialect-1 as-of calls may omit it. */
+  alias: string | null;
 }
 
 export interface WildcardColumn {

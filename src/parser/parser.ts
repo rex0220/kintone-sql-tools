@@ -12,6 +12,12 @@
 import { Token, TokenKind, KEYWORDS } from "../lexer/tokens";
 import { makeNumberLiteral, numberLiteralText } from "../types/ast";
 import { expandCubeGroupingSets } from "../core/grouping";
+import {
+  AS_OF_FUNCTION_NAMES,
+  asOfFunctionNameFromVariable,
+  asOfVariableName,
+  isAsOfFunctionName,
+} from "../core/asOfClock";
 import type {
   Statement,
   SelectStatement,
@@ -382,7 +388,21 @@ export class Parser {
   constructor(
     private readonly tokens: Token[],
     private readonly capabilities: ParserCapabilities = {}
-  ) {}
+  ) {
+    if (capabilities.dialect1) {
+      for (let index = 0; index + 1 < tokens.length; index++) {
+        const token = tokens[index];
+        if (token.kind !== TokenKind.VARIABLE || tokens[index + 1].kind !== TokenKind.LPAREN) continue;
+        const name = token.value.slice(1).toUpperCase();
+        if (!isAsOfFunctionName(name)) {
+          throw new ParseError(
+            `使用可能な as-of 関数は ${AS_OF_FUNCTION_NAMES.map((item) => `@${item}`).join("/")} です`,
+            token
+          );
+        }
+      }
+    }
+  }
 
   // ----------------------------------------------------------
   // 公開 API
@@ -566,6 +586,10 @@ export class Parser {
   private parseScalarExpr(context: "SET" | "DECLARE", allowScalarSubquery: boolean): ScalarExpr {
     const tok = this.peek();
     if (tok.kind === TokenKind.VARIABLE) {
+      if (this.peekAt(1).kind === TokenKind.LPAREN && this.capabilities.dialect1) {
+        this.advance();
+        return this.finishVariableReference(tok);
+      }
       throw new ParseError(`${context} の右辺では他の変数を参照できません`, tok);
     }
     if (tok.kind === TokenKind.NULL) {
@@ -1115,13 +1139,31 @@ export class Parser {
     }
   }
 
+  /** VARIABLE + `()` is the dialect-1 as-of call syntax; a bare VARIABLE stays unchanged. */
+  private finishVariableReference(tok: Token): VariableRef {
+    const ordinary = { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+    if (this.peek().kind !== TokenKind.LPAREN) return ordinary;
+    if (!this.capabilities.dialect1) return ordinary;
+
+    const name = tok.value.slice(1).toUpperCase();
+    if (!isAsOfFunctionName(name)) {
+      throw new ParseError(
+        `使用可能な as-of 関数は ${AS_OF_FUNCTION_NAMES.map((item) => `@${item}`).join("/")} です`,
+        tok
+      );
+    }
+    this.advance();
+    this.expect(TokenKind.RPAREN, `@${name} は引数なしの () で呼び出してください`);
+    return { type: "VARIABLE", name: asOfVariableName(name) };
+  }
+
   /** ASSERT のオペランド: 文字列 / スカラーサブクエリ / 数値算術式 */
   private parseAssertOperand(): AssertOperand {
     const tok = this.peek();
 
     if (tok.kind === TokenKind.VARIABLE) {
       this.advance();
-      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+      return this.finishVariableReference(tok);
     }
 
     // 文字列リテラル
@@ -1555,7 +1597,7 @@ export class Parser {
         }
         if (tok.kind === TokenKind.VARIABLE) {
           this.advance();
-          args.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
+          args.push(this.finishVariableReference(tok));
           continue;
         }
         let sign = "";
@@ -1658,15 +1700,21 @@ export class Parser {
 
     // Must remain after CONCAT_OP detection: @x || field keeps its legacy path.
     if (this.peek().kind === TokenKind.VARIABLE) {
-      const variable = this.advance();
-      if (!this.consume(TokenKind.AS)) {
-        throw new ParseError("SELECT 列のバッチ変数には AS alias が必要です", this.peek());
+      const variable = this.finishVariableReference(this.advance());
+      const asOfFunction = asOfFunctionNameFromVariable(variable.name);
+      let parsedAlias: { alias: string; display: string } | null = null;
+      if (asOfFunction === null) {
+        if (!this.consume(TokenKind.AS)) {
+          throw new ParseError("SELECT 列のバッチ変数には AS alias が必要です", this.peek());
+        }
+        parsedAlias = this.parseAliasName();
+      } else if (this.consume(TokenKind.AS)) {
+        parsedAlias = this.parseAliasName();
       }
-      const parsedAlias = this.parseAliasName();
       return this.withAliasDisplay({
         type: "VARIABLE_COL",
-        name: variable.value.slice(1).toLowerCase(),
-        alias: parsedAlias.alias,
+        name: variable.name,
+        alias: parsedAlias?.alias ?? null,
       } satisfies VariableColumn, parsedAlias);
     }
 
@@ -2076,7 +2124,7 @@ export class Parser {
     // バッチ変数（既存 resolver が AGG_ARITH の子を NUMBER へ置換する）
     if (this.peek().kind === TokenKind.VARIABLE) {
       const tok = this.advance();
-      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+      return this.finishVariableReference(tok);
     }
     // 集計関数
     const aggFunc = this.tryAggregateFunc();
@@ -2257,7 +2305,7 @@ export class Parser {
     }
     if (tok.kind === TokenKind.STRING) { this.advance(); return { type: "STRING", value: tok.value }; }
     if (tok.kind === TokenKind.NUMBER) { this.advance(); return makeNumberLiteral(tok.value); }
-    if (tok.kind === TokenKind.VARIABLE) { this.advance(); return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() }; }
+    if (tok.kind === TokenKind.VARIABLE) { this.advance(); return this.finishVariableReference(tok); }
     if (tok.kind === TokenKind.CASE) {
       if (!allowCase) throw new ParseError("このスカラー値式では CASE を使用できません", tok);
       return this.parseCaseWhenExpr();
@@ -2384,7 +2432,7 @@ export class Parser {
     }
     if (this.allowSelectArithVariable && tok.kind === TokenKind.VARIABLE) {
       this.advance();
-      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() };
+      return this.finishVariableReference(tok);
     }
     if (tok.kind === TokenKind.IDENT || tok.kind === TokenKind.BIDENT) {
       this.advance();
@@ -3103,7 +3151,7 @@ export class Parser {
     }
     if (tok.kind === TokenKind.VARIABLE) {
       this.advance();
-      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+      return this.finishVariableReference(tok);
     }
     throw new ParseError(
       "KLIKE / NOT KLIKE の右辺には文字列リテラルまたはバッチ変数が必要です",
@@ -3328,7 +3376,7 @@ export class Parser {
 
     if (tok.kind === TokenKind.VARIABLE) {
       this.advance();
-      return { type: "VARIABLE", name: tok.value.slice(1).toLowerCase() } satisfies VariableRef;
+      return this.finishVariableReference(tok);
     }
 
     // 文字列リテラル
@@ -3407,6 +3455,9 @@ export class Parser {
       TokenKind.VARIABLE,
       "IN / NOT IN の後には (値リストまたは SELECT) か配列変数が必要です"
     );
+    if (this.peek().kind === TokenKind.LPAREN && this.capabilities.dialect1) {
+      return { type: "IN_LIST", values: [this.finishVariableReference(variable)] };
+    }
     return { type: "VARIABLE_IN_LIST", name: variable.value.slice(1).toLowerCase() };
   }
 
@@ -3447,7 +3498,7 @@ export class Parser {
         const sign = tok.kind === TokenKind.MINUS ? "-" : "+";
         values.push(makeNumberLiteral(`${sign}${number.value}`));
       } else if (tok.kind === TokenKind.VARIABLE) {
-        values.push({ type: "VARIABLE", name: tok.value.slice(1).toLowerCase() });
+        values.push(this.finishVariableReference(tok));
       } else if (tok.kind === TokenKind.LOGINUSER) {
         if (values.length > 0) {
           throw new ParseError(mixedLoginUserMessage, tok);
