@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-08-21
-- 現在の最新リリース: **v3.69.0**（2026-08-21・**B168 Flow dialect 1 完成＝Stage 4-6**＝CLI/MCP/プラグインで実行可・as-of・validate/EXPLAIN 拡張・公式 API `/flow`・GitHub Release 公開済み・**npm publish（ユーザー 2FA）と実機確認は未了**）。→ [リリース履歴](ksql_release_history.md)
+- 現在の最新リリース: **v3.69.0**（2026-08-21・**B168 Flow dialect 1 完成＝Stage 4-6**＝CLI/MCP/プラグインで実行可・as-of・validate/EXPLAIN 拡張・公式 API `/flow`・**publish 済み・実機確認済み**＝常駐 MCP で v3.68.0 失敗スモークの全面動作〔裸名 TEMP・ASSERT WARN 続行・@TODAY/@MONTH_START 導出・EXIT skip・ok:true〕と `ksql_validate` の diagnostics/scriptMeta〔KSQL1001/1305 が正しい行・列〕を実測）。→ [リリース履歴](ksql_release_history.md)
 - 次回リリース計画: **未定**。B168 の残務＝発注元（`ksql-flow`）への申し送り（[計画 §6](internal/ksql_b168_flow_dialect1_plan.md)＝INTO #t 訂正・bulkRequest 乖離ほか 5 件）の正式送付。残るのは **B143**（低）／**B141**（散文の穴）。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種（CYCLE 正例の実機化）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
