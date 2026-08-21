@@ -1,21 +1,25 @@
-ksql 配布パッケージ (v3.68.0)
+ksql 配布パッケージ (v3.69.0)
 
 release 成果物:
-- ksql-plugin-v3.68.0.zip
-- ksql-mcp.mcpb (manifest version 3.68.0)
-- ksql-mcp.js (MCP server version 3.68.0)
+- ksql-plugin-v3.69.0.zip
+- ksql-mcp.mcpb (manifest version 3.69.0)
+- ksql-mcp.js (MCP server version 3.69.0)
 
-新機能 (B168 Flow dialect 1 の解析基盤 = Stage 1-3) ★既存構文は完全不変・opt-in:
-- バッチ SQL の先頭に -- @ksql dialect: 1 を宣言したときだけ有効になる拡張構文:
-  ASSERT <条件>, 'メッセージ' / ASSERT WARN (警告して続行) / EXIT SUCCESS IF (正常な
-  早期終了) / CREATE TEMP TABLE 裸名 AS / UPSERT ... KEY (k) / MERGE INTO (UPSERT へ
-  正規化)。-- @ksql name/depends_on/timeout ヘッダも解析します。
-- 宣言なし (dialect 0 = 既定) の SQL は一切変わりません。dialect 1 構文を宣言なしで
-  使うと「-- @ksql dialect: 1 の宣言が必要」エラーになります。
-- 【訂正】本版で dialect 1 を実行できるのはエンジン内部 API のみです。CLI / MCP /
-  プラグインからの実行対応・言語リファレンス・構造化 diagnostics・as-of 注入・
-  validate 拡張は後続リリースで提供します。本版はエンジン実装の先行公開 (実験的) です。
+新機能 (B168 Flow dialect 1 完成 = Stage 4-6) ★既存構文は完全不変・opt-in:
+- -- @ksql dialect: 1 を宣言したスクリプトを CLI / MCP / プラグインで実行できます
+  (v3.68.0 の「エンジン内部のみ」制限を解消)。
+- @NOW() / @TODAY() / @MONTH_START() / @NEXT_MONTH_START(): スクリプト全体で単一の
+  基準時刻 (as-of) から導出。公式 API で asOf / timezone を注入でき、バックフィルを
+  同じスクリプトで再現できます。
+- validate 拡張: updateKey 検証 (重複禁止・型)・複合キー禁止・サブテーブル DML 禁止・
+  素の INSERT 警告 (strict でエラー化)。診断は severity / コード / 行・列付き。
+- EXPLAIN にバッチの推定 API 消費 (読取 500 件/回・書込 100 件/回・不明は上限仮定表記)。
+- 公式 API @rex0220/kintone-sql-tools/flow: parseScript / validateScript /
+  explainScript / 文単位実行 (createExecutionContext ほか)・書込可能クライアント。
+- MCP: ksql_validate が dialect 1 で diagnostics / scriptMeta を返却 (dialect 0 の
+  応答は完全不変)。文型カタログ・言語リファレンス §27・レシピ R18 を追加。
 
+v3.68.0 の節は畳みました (B168 Stage 1-3 = dialect 1 の解析基盤・エンジン内部のみ)。
 v3.67.0 の節は畳みました (B169 CURRENT_DATE/CURRENT_TIMESTAMP を文単位の固定時刻へ =
 結果が変わる形あり)。内容は CHANGELOG.md にあります。
 
@@ -87,12 +91,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.68.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.69.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.68.0): B168 Flow dialect 1 の解析基盤 (Stage 1-3・opt-in 新構文・既存不変・実験的)。
+本リリース (v3.69.0): B168 Flow dialect 1 完成 (Stage 4-6 = 全面で実行可・as-of・validate/EXPLAIN 拡張・公式 API /flow)。
+
+前リリース (v3.68.0): B168 Flow dialect 1 の解析基盤 (Stage 1-3・エンジン内部のみ・実験的)。
 
 前リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
 

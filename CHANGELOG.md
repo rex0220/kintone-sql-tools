@@ -3,6 +3,35 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.69.0（2026-08-21）
+
+### 新機能（B168 Flow dialect 1 完成＝Stage 4-6）**※opt-in・既存構文（dialect 0）は完全不変**
+
+v3.68.0 で解析基盤を入れた **dialect 1** が完成し、正式提供になりました。
+`-- @ksql dialect: 1` を宣言したスクリプトを **CLI・MCP・プラグインで実行できます**
+（v3.68.0 の「エンジン内部 API のみ」制限を解消）。使い方は
+[言語リファレンス §27](docs/ksql_language_reference.md) と [レシピ R18](docs/ksql_batch_recipes.md) を参照。
+
+- **as-of 固定の時刻関数**: `@NOW()` / `@TODAY()` / `@MONTH_START()` / `@NEXT_MONTH_START()`。
+  スクリプト全体で単一の基準時刻から導出され、公式 API の `asOf` / `timezone` 注入で
+  **過去日付のバックフィルを同じスクリプトで再現**できます（省略時は実行開始時刻・ホスト TZ）。
+  `@` なしの `TODAY()` 等は kintone サーバー評価のままで、dialect 1 の WHERE で使うと警告が出ます
+- **validate 拡張**（dialect 1 のみ）: UPSERT / MERGE キーの検証（重複禁止設定・文字列(1行)/数値型）・
+  複合キー禁止・サブテーブル DML 禁止・素の `INSERT` 警告（`strict` でエラー化）。
+  診断は severity / コード（`KSQL1xxx`）/ 行・列付き。キー検証は**実行時にも書込 API の前に**働きます
+- **EXPLAIN の推定 API 消費**（dialect 1 バッチ）: 読取（500 件/回）・メタデータ・UPSERT 事前 GET・
+  書込（100 件/回）を分解表示。件数不明は「不明（上限 N と仮定）」で数字を捏造しません
+- **公式 API `@rex0220/kintone-sql-tools/flow`**（semver 対象）: `parseScript` / `validateScript` /
+  `explainScript` / **文単位実行**（`createExecutionContext` / `executeStatement` /
+  `disposeExecutionContext`）/ `createKintoneClient`（書込可能・fetch ベース）。
+  既存 `/engine` は read-only のまま 1 バイトも変わりません
+- **MCP**: `ksql_validate` が dialect 1 スクリプトで `diagnostics` / `scriptMeta` を返します
+  （**dialect 0 の応答はフィールド集合ごと完全不変**・ネットワーク 0 契約維持）。
+  `strict` 入力・文型カタログの Flow 6 文型・`ksql_docs` の §27 / R18 を追加
+- **README**: 公式 API（`/engine`・`/flow`）と**エンジンバージョン × dialect 対応表**を掲載
+- **変わらないもの**: 宣言なし（dialect 0）の SQL・応答・EXPLAIN 出力・エラー code はすべて不変
+  （dialect 0 の EXPLAIN は 1 行も変わりません）
+
 ## v3.68.0（2026-08-21）
 
 ### 新機能（B168 Flow dialect 1 の解析基盤＝Stage 1-3）**※opt-in・既存構文は完全不変・実験的**
