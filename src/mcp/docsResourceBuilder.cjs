@@ -27,6 +27,7 @@ const LANGUAGE_SLUGS = Object.freeze([
   "explain",
   "batch-temp-tables",
   "assert",
+  "flow-dialect-1",
 ]);
 
 function fail(message) {
@@ -145,8 +146,8 @@ function buildDocsResourceMap(languageSource, recipesSource) {
   const recipesUri = "ksql://recipes";
   const baseLanguageSections = parseRequiredSections(languageSource, {
     label: "language reference",
-    count: 26,
-    headingPattern: /^##\s+([1-9]|1\d|2[0-6])\.\s+(.+)$/gm,
+    count: 27,
+    headingPattern: /^##\s+([1-9]|1\d|2[0-7])\.\s+(.+)$/gm,
     keyFor: (number) => `${String(number).padStart(2, "0")}-${LANGUAGE_SLUGS[number - 1]}`,
     uriBase: languageUri,
     // Decimal H2 headings (10.1, 17.1, etc.) belong to their integer parent chapter.
@@ -173,7 +174,7 @@ function buildDocsResourceMap(languageSource, recipesSource) {
   }
   const recipeSections = parseRequiredSections(recipesSource, {
     label: "recipes",
-    count: 17,
+    count: 18,
     headingPattern: /^##\s+R([1-9]|1\d)\.\s+(.+)$/gm,
     keyFor: (number) => `r${number}`,
     uriBase: recipesUri,

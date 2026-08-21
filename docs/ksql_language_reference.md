@@ -4162,6 +4162,149 @@ ksql -e "ASSERT (SELECT COUNT(*) FROM APP1 WHERE 異常フラグ = '1') = 0"
 
 ---
 
+## 27. Flow dialect 1
+
+> バッチ実行ランナー **kSQL Flow**（別リポジトリ）のための拡張構文セットです。スクリプト先頭に `-- @ksql dialect: 1` を**宣言したときだけ**有効になり（opt-in）、宣言のないスクリプト（dialect 0＝既定）の挙動は一切変わりません。dialect 0 で本節の構文を使うと「`-- @ksql dialect: 1` の宣言が必要です」エラーになります。（v3.69.0）
+
+対応面: CLI（`-f`・コンソール）／MCP（`ksql_validate` / `ksql_explain` / `ksql_query`）／プラグイン／公式 API `@rex0220/kintone-sql-tools/flow`。
+
+### 27.1 `-- @ksql` ヘッダ
+
+ファイル先頭の連続するコメント行のうち `-- @ksql key: value` 形式を解析します。行末の `# コメント` は無視します。
+
+```sql
+-- @ksql name: monthly_sales_sync      # 論理名。省略時は null（ランナーがファイル名で補完）
+-- @ksql depends_on: job_a, job_b      # カンマ区切りの論理名リスト（エンジンは解析のみ）
+-- @ksql timeout: 600                  # 正の整数（秒）。エンジンは解析のみ
+-- @ksql dialect: 1                    # 0 または 1。省略時は 0（既存互換モード）
+```
+
+| 規則 | 挙動 |
+|---|---|
+| 未知のキー | エラーにせず**警告**（前方互換） |
+| 同一キーの重複 | 警告・**最初の値**を保持 |
+| `timeout` が正の整数でない / `dialect` が 0・1 以外 / `name`・`depends_on` が空 | エラー（実行前に停止） |
+
+### 27.2 `ASSERT <条件>, 'メッセージ'` / `ASSERT WARN` — 異常中断と警告続行
+
+既存の `ASSERT`（§26）に、**末尾のメッセージ**と **`WARN` 修飾**が加わります。条件部の文法・比較規則は §26 と同一です。
+
+```sql
+ASSERT (SELECT COUNT(*) FROM APP100 WHERE 金額 < 0) = 0,
+  '【異常中断】マイナスの売上データが存在するため処理を停止しました';
+
+ASSERT WARN (SELECT COUNT(*) FROM #summary) < 10000, '件数が想定より多い（続行します）';
+```
+
+| 形 | 不成立時 | 後続文 |
+|---|---|---|
+| `ASSERT <条件>, 'msg'` | `AssertError`（msg を含む）で**中断** | 実行しない（skip） |
+| `ASSERT WARN <条件>, 'msg'` | **警告を記録して続行** | 実行する |
+
+### 27.3 `EXIT SUCCESS IF <条件>, 'メッセージ'` — 正常な早期終了
+
+条件が成立したら、そこで**正常終了**します（後続文は `skippedReason: "exit"` で skip・バッチ全体は成功扱い）。メッセージは必須です。バッチ専用（単文実行では使えません）。
+
+```sql
+EXIT SUCCESS IF (SELECT COUNT(*) FROM #summary) = 0,
+  '集計対象となる受注データが 0 件のためスキップ';
+```
+
+> **ASSERT との書き分け（設計上の理由）**: 「対象 0 件」を ASSERT で止めると、月初や休日のたびに誤アラートが出て監視が形骸化します。**業務異常＝`ASSERT`（失敗・通知対象）／対象なし＝`EXIT SUCCESS IF`（成功・通知不要）**と語彙を分けてください。
+
+### 27.4 構文エイリアス — 既存構文への正規化
+
+以下は**パース時に既存構文と同一の内部表現へ正規化**されます（実行・EXPLAIN の挙動は既存構文と同一）。
+
+| dialect 1 の書き方 | 正規化先（既存） |
+|---|---|
+| `CREATE TEMP TABLE summary AS SELECT ...`（裸名） | `CREATE TEMP TABLE #summary AS ...`。`FROM summary` / `DROP TEMP TABLE summary` も `#summary` として解決 |
+| `UPSERT INTO APPn (...) SELECT ... KEY (キー)` | `UPSERT ... ON DUPLICATE (キー)` |
+| `MERGE INTO APPn AS t USING src AS s ON t.k = s.k WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT (...) VALUES (...)` | `UPSERT ... SELECT ... ON DUPLICATE (k)` |
+
+`MERGE` の制約:
+
+- ターゲット・`USING` ソースとも **`AS` 別名が必須**。ソースは一時テーブル・CTE・`APPn` を指定可
+- `ON` は **単一キーの等値（`t.k = s.k`）のみ**。複数条件・非等値はエラー（回避策: 連結キーフィールド）
+- **`WHEN MATCHED` / `WHEN NOT MATCHED` の両句が必須**。片側だけの MERGE はエラー（更新のみは `UPDATE ... FROM`、挿入のみは `INSERT ... SELECT` を使用）
+- 同一列に両句で**異なる式**を与えるとエラー（`s.` 修飾を除いて同じ式なら可・数値は値で比較）
+- `ON` のキー列は INSERT 列リストに含めること。サブテーブル仮想テーブルは対象外
+- `CHECK WHEN` / `VALIDATE ONLY` / `ON ERROR SKIP` は既存 UPSERT と同様に使えます
+
+### 27.5 `@NOW()` / `@TODAY()` / `@MONTH_START()` / `@NEXT_MONTH_START()` — as-of 固定の時刻関数
+
+**スクリプト全体で単一の基準時刻（as-of）**から導出される時刻関数です（引数なしの `()` 固定）。実行のたびに時計を読み直さないため、日跨ぎの長時間実行でも文の間で基準がズレず、基準時刻を注入すれば**過去日付での再集計（バックフィル）を同じスクリプトで再現**できます。
+
+| 関数 | 値 | 例 |
+|---|---|---|
+| `@NOW()` | as-of の UTC ISO 8601（ミリ秒付き） | `2026-08-21T09:00:00.000Z` |
+| `@TODAY()` | as-of をタイムゾーンで見た暦日 | `2026-08-21` |
+| `@MONTH_START()` | その暦日の月初 | `2026-08-01` |
+| `@NEXT_MONTH_START()` | 翌月初 | `2026-09-01` |
+
+- 使える場所: `WHERE` の比較・`SELECT` 列（**別名省略可**）・DML の値・`SET` / `DECLARE` の右辺など、文字列リテラルが書ける位置。評価後は通常のリテラルとして扱われ、`WHERE` の押し下げにもそのまま乗ります
+- 基準時刻とタイムゾーンの注入は公式 API（`/flow`・エンジンオプション `asOf` / `timezone`）で行います。**省略時は実行開始時刻・実行環境のタイムゾーン**です（CLI / MCP からの実行は現状この既定のみ）
+- 日時フィールドとの範囲比較は**半開区間**で書いてください: `受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START()`
+
+> **`@` なしの `TODAY()` / `NOW()` / `THIS_MONTH()` 等（§6）との違い**: `@` なしは**条件ごと kintone サーバーへ送られ、kintone の時計で評価**されます。as-of を注入しても固定されません。dialect 1 スクリプトの WHERE でこれらを使うと**警告**が出ます（再現性が必要なら `@` 付きへ。押し下げ性能を優先して意図的に使う場合は警告を無視して構いません）。
+
+### 27.6 validate 拡張と診断
+
+dialect 1 スクリプトには追加の検証が働きます。診断は `severity`（error / warning）・コード・メッセージ・位置を持ちます。
+
+| コード | 内容 | 区分 |
+|---|---|---|
+| `KSQL1001`〜`KSQL1006` | ヘッダの未知キー・重複・値不正 | 警告 / エラー |
+| `KSQL1101` | `LAPP_` 論理アプリが未解決 | エラー |
+| `KSQL1201`〜`KSQL1203` | 字句・構文エラー / dialect 1 宣言が必要 | エラー |
+| `KSQL1301` | UPSERT / MERGE の**複合キー**（回避策: 連結キーフィールド） | エラー |
+| `KSQL1302` | キーの型が文字列（1行）・数値以外 | エラー |
+| `KSQL1303` | キーが**重複禁止**設定でない（設定を取得できない環境では警告） | エラー / 警告 |
+| `KSQL1304` | サブテーブル仮想テーブルへの DML（SELECT は可） | エラー |
+| `KSQL1305` | 素の `INSERT`（冪等性のため UPSERT / MERGE を推奨。strict 指定でエラー） | 警告 / エラー |
+| `KSQL1306` | `@` なし時刻関数は as-of の対象外 | 警告 |
+
+- `KSQL1301`〜`KSQL1304` は**実行時にも書込 API を呼ぶ前に検査**され、違反はエラーで停止します（実行前は安全側に倒し、重複禁止設定を確認できない場合もエラー）
+- 複合キー・サブテーブル DML は **dialect 0 では従来どおり**使えます（本検証は dialect 1 限定）
+
+### 27.7 EXPLAIN の推定 API 消費
+
+dialect 1 バッチの `EXPLAIN` には、各文の**推定 API 消費**（HTTP リクエスト単位）が追加されます。読取（500 件/回）・フォーム情報取得・UPSERT の事前 GET（重複判定）・書込（100 件/回）を分解して表示し、実行前に件数が分からない項は「**不明（上限 N と仮定: 最大 M 回）**」の形式で示します（数字を捏造しません）。`bulkRequest` は未実装のため、書込は 1 リクエスト 100 件で数えます。
+
+### 27.8 サンプルジョブ（全部入り）
+
+```sql
+-- @ksql name: monthly_sales_sync
+-- @ksql depends_on: sync_master_customers
+-- @ksql timeout: 600
+-- @ksql dialect: 1
+
+-- Step 1: 業務異常なら中断（通知対象）
+ASSERT (
+  SELECT COUNT(*) FROM LAPP_受注
+  WHERE 受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START() AND 金額 < 0
+) = 0, '【異常中断】マイナスの売上データが存在するため処理を停止しました';
+
+-- Step 2: 一時テーブルへ集計（裸名は #付きに正規化される）
+CREATE TEMP TABLE temp_monthly_summary AS
+SELECT 顧客コード, COUNT(レコード番号) AS 受注件数, SUM(金額) AS 当月売上合計
+FROM LAPP_受注
+WHERE 受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START() AND ステータス = '受注完了'
+GROUP BY 顧客コード;
+
+-- Step 3: 対象 0 件は正常終了（通知不要）
+EXIT SUCCESS IF (SELECT COUNT(*) FROM temp_monthly_summary) = 0,
+  '集計対象となる受注データが 0 件のためスキップ';
+
+-- Step 4: キー一致で更新・なければ挿入（キーは重複禁止設定のフィールド）
+UPSERT INTO LAPP_顧客マスタ (顧客コード, 当月受注件数, 当月売上実績, 最終集計日時)
+SELECT 顧客コード, 受注件数, 当月売上合計, @NOW()
+FROM temp_monthly_summary
+KEY (顧客コード);
+```
+
+---
+
 ## クイックリファレンス
 
 ```sql
