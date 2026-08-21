@@ -5,6 +5,7 @@
 /dist-mcp
 /dist-mcpb
 /dist-engine
+/dist-flow
 
 # TypeScript build artifacts in src/
 src/**/*.js
