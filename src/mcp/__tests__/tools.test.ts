@@ -118,6 +118,25 @@ describe("MCP tools", () => {
       .toContain("final schema-aware decision");
   });
 
+  test.each(["validateTool", "explainTool", "queryTool"] as const)(
+    "B168 Stage 4a: %s は不正ヘッダを既存 error payload で返す",
+    async (toolName) => {
+      const tools = createKsqlMcpTools({ profile: "prod" });
+      const result = await tools[toolName]({
+        sql: "-- @ksql timeout: invalid\nSELECT 1",
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        ok: false,
+        error: {
+          code: "Error",
+          message: "KSQL1005: @ksql timeout must be a positive integer. (1:19)",
+        },
+      });
+    }
+  );
+
   test("logical validation payload は source/binding を公開し、EXPLAIN はmappedAppIdを公開しない", async () => {
     const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-logical-"));
     const configPath = join(dir, "ksql.config.json");
@@ -149,6 +168,32 @@ describe("MCP tools", () => {
       }]);
       expect(JSON.stringify(explanation)).not.toContain("mappedAppId");
       expect(JSON.stringify(explanation)).not.toContain("APP900000000");
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
+  });
+
+  test("B168 Stage 4a: LAPP/@profile 正規化後も先頭 dialect ヘッダを検出する", async () => {
+    const dir = await mkdtemp(join(process.cwd(), ".tmp-mcp-b168-header-"));
+    const configPath = join(dir, "ksql.config.json");
+    await writeFile(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: { logicalApps: { ORDERS: 1234 } },
+        audit: {},
+      },
+    }), "utf8");
+    const tools = createKsqlMcpTools({ configPath, profile: "prod" });
+    try {
+      const result = await tools.validate({
+        sql: "-- @ksql dialect: 1\n"
+          + "CREATE TEMP TABLE flow_rows AS SELECT * FROM LAPP_ORDERS; "
+          + "SELECT * FROM APP88@audit; "
+          + "EXIT SUCCESS IF 1 = 2, 'continue'",
+      });
+      expect(result.ok).toBe(true);
+      expect(result.statements.map((statement) => statement.statementType))
+        .toEqual(["CREATE_TEMP_TABLE", "SELECT", "EXIT"]);
     } finally {
       await rm(dir, { force: true, recursive: true });
     }
@@ -2207,6 +2252,49 @@ describe("MCP tools", () => {
     { $id: { value: "1" }, 顧客名: { value: "A社" }, 売上: { value: "100" } },
     { $id: { value: "2" }, 顧客名: { value: "B社" }, 売上: { value: "300" } },
   ];
+
+  const B168_DIALECT1_LOCAL_SCRIPT = `-- @ksql dialect: 1
+CREATE TEMP TABLE flow_rows AS
+WITH series AS (GENERATE_SERIES(1, 3) AS n)
+SELECT n FROM series;
+ASSERT (SELECT COUNT(*) FROM flow_rows) = 3, 'row count';
+ASSERT WARN 1 = 2, 'expected warning';
+EXIT SUCCESS IF (SELECT COUNT(*) FROM flow_rows) = 3, 'completed';
+SELECT n FROM flow_rows`;
+
+  test("B168 Stage 4a: validate は dialect 1 スクリプトを EXIT 込みで受理する", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.validate({ sql: B168_DIALECT1_LOCAL_SCRIPT });
+
+    expect(result.ok).toBe(true);
+    expect(result.batch).toBe(true);
+    expect(result.statements.map((statement) => statement.statementType))
+      .toEqual(["CREATE_TEMP_TABLE", "ASSERT", "ASSERT", "EXIT", "SELECT"]);
+  });
+
+  test("B168 Stage 4a: query はローカル dialect 1 バッチを WARN 続行・EXIT skip で完走する", async () => {
+    const tools = createKsqlMcpTools(
+      { profile: "prod" },
+      makeBatchRuntimeDeps({})
+    );
+    const result = await tools.query({ sql: B168_DIALECT1_LOCAL_SCRIPT }) as {
+      ok: boolean;
+      statements: Array<Record<string, unknown>>;
+      results: Array<{ rows: Array<Record<string, string>> }>;
+    };
+
+    expect(result.ok).toBe(true);
+    expect(result.statements[2]).toMatchObject({
+      type: "ASSERT", status: "success", passed: false, warning: "expected warning",
+    });
+    expect(result.statements[3]).toMatchObject({
+      type: "EXIT", status: "success", exited: true, message: "completed",
+    });
+    expect(result.statements[4]).toMatchObject({
+      type: "SELECT", status: "skipped", skippedReason: "exit",
+    });
+    expect(result.results).toEqual([]);
+  });
 
   test("query: read-only バッチを実行し §6.2 エンベロープを返す", async () => {
     const tools = createKsqlMcpTools(

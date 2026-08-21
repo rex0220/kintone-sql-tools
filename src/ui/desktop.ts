@@ -7,7 +7,7 @@ import {
   executeBatch,
   buildBatchExplainPlans,
   parseSqlStatement,
-  parseSqlStatements,
+  parseSqlStatementsForScript,
   analyzeBatch,
   getInsertValuesCount,
   getStatementType,
@@ -1982,13 +1982,13 @@ function closeHistoryDropdown(): void {
 /** 複文（バッチ）入力かどうか（パース不能な入力は false = 従来経路でエラー表示） */
 function isMultiStatementSql(sql: string): boolean {
   try {
-    return parseSqlStatements(sql, { import: selectedImportSource !== null }).length > 1;
+    return parseSqlStatementsForScript(sql, { import: selectedImportSource !== null }).statements.length > 1;
   } catch (error) {
     // 未選択の IMPORT gate で複文判定まで失敗した場合は、構文の分類だけ gate を
     // 開いて再試行する。実行時の gate は維持され、表示時にファイル選択案内へ変換する。
     if (selectedImportSource === null && isImportCapabilityGateError(error)) {
       try {
-        return parseSqlStatements(sql, { import: true }).length > 1;
+        return parseSqlStatementsForScript(sql, { import: true }).statements.length > 1;
       } catch { /* 構文自体が不正なら従来どおり単文経路でエラー表示する */ }
     }
     return false;
@@ -2107,7 +2107,7 @@ async function runBatchSql(
   },
   explainOnly: boolean
 ): Promise<BatchRunOutcome> {
-  const statements = parseSqlStatements(sql, { import: selectedImportSource !== null });
+  const { statements } = parseSqlStatementsForScript(sql, { import: selectedImportSource !== null });
   const analysis = analyzeBatch(statements);
   const applyOptions = resolvePluginApplyOptions(statements, options.maxRecords);
 

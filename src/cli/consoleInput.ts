@@ -16,9 +16,10 @@
 //   6. それ以外のパース失敗（typo 等）→ 即エラー + バッファ破棄
 // ============================================================
 
-import { Lexer, LexError } from "../lexer/lexer";
-import { Parser, ParseError } from "../parser/parser";
+import { LexError } from "../lexer/lexer";
+import { ParseError } from "../parser/parser";
 import { TokenKind } from "../lexer/tokens";
+import { parseSqlStatementsForScript } from "../core/sql";
 import { normalizeSqlAppProfiles } from "../node/appProfiles";
 
 export type ConsoleInputDecision =
@@ -102,7 +103,7 @@ function toParseInput(sql: string): string {
 
 function tryParseStatements(sql: string): ParseAttempt {
   try {
-    const stmts = new Parser(new Lexer(toParseInput(sql)).tokenize()).parseStatements();
+    const { statements: stmts } = parseSqlStatementsForScript(toParseInput(sql));
     return {
       kind: "ok",
       count: stmts.length,
@@ -117,6 +118,10 @@ function tryParseStatements(sql: string): ParseAttempt {
     if (e instanceof ParseError) {
       return { kind: "fail", continuable: e.token.kind === TokenKind.EOF, message: e.message };
     }
-    throw e;
+    return {
+      kind: "fail",
+      continuable: false,
+      message: e instanceof Error ? e.message : String(e),
+    };
   }
 }

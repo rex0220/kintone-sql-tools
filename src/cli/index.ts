@@ -15,7 +15,7 @@ import {
   ApplyWritePartialFailureError,
   OperationCancelledError,
   parseSqlStatement,
-  parseSqlStatements,
+  parseSqlStatementsForScript,
   explainNeedsAppMetadata,
   analyzeBatch,
   normalizeBatchVariableName,
@@ -1430,7 +1430,7 @@ async function confirmDmlInConsole(
   if (!opts.allowDml || opts.yes || opts.dryRun) return true;
   try {
     const normalized = normalizeSqlAppProfiles(sql, defaultProfile, resolutionContext);
-    const statements = parseSqlStatements(normalized.normalizedSql);
+    const { statements } = parseSqlStatementsForScript(normalized.normalizedSql);
 
     // バッチ: DML を含む場合はバッチ全体で1回の確認（全 DML 文の一覧を表示。仕様 §8.3）
     if (statements.length > 1) {
@@ -1858,7 +1858,7 @@ async function run(): Promise<number> {
   let containsApplyMutation = false;
   let dryRunNeedsMetadata = false;
   let dryRunUsesStaticTypedPlan = false;
-  let parsedStatements: ReturnType<typeof parseSqlStatements> = [];
+  let parsedStatements: ReturnType<typeof parseSqlStatementsForScript>["statements"] = [];
   if (args.diagRecordId === null) {
     sql = args.executeSql;
     if (!sql && args.filePath) sql = readFileSync(args.filePath, "utf-8");
@@ -1886,7 +1886,7 @@ async function run(): Promise<number> {
 
     const importEnabled = Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0;
     try {
-      const statements = parseSqlStatements(sql, { import: importEnabled });
+      const { statements } = parseSqlStatementsForScript(sql, { import: importEnabled });
       parsedStatements = statements;
       const hasApply = (statement: typeof statements[number]): boolean =>
         (statement.type === "UPDATE" || statement.type === "INSERT")
@@ -1920,7 +1920,7 @@ async function run(): Promise<number> {
         isBatchSql = true;
         batchContainsDml = batchAnalysis.containsDml;
       } else {
-        const stmt = parseSqlStatement(sql, { import: importEnabled });
+        const stmt = statements[0];
         parsedStmt = stmt;
         stmtType = getStatementType(stmt);
         isDmlStatement = writesKintone(stmt);

@@ -1,6 +1,7 @@
 import { DiagnosticCodes } from "../diagnostics";
 import { parseScript } from "../script";
 import { parseScriptHeader } from "../scriptHeader";
+import { parseSqlStatements, parseSqlStatementsForScript } from "../sql";
 
 describe("B168 script header", () => {
   test("parses all known keys, strips trailing comments, and defaults dialect to 0", () => {
@@ -130,5 +131,39 @@ KEY (顧客コード);`;
     expect(parsed.diagnostics).toEqual([
       expect.objectContaining({ severity: "error", code: DiagnosticCodes.PARSE_ERROR }),
     ]);
+  });
+});
+
+describe("B168 Stage 4a script-aware pre-parse", () => {
+  test("dialect 1 header enables Flow syntax and returns header meta", () => {
+    const parsed = parseSqlStatementsForScript([
+      "-- @ksql name: local_flow",
+      "-- @ksql dialect: 1",
+      "ASSERT WARN 1 = 2, 'warning';",
+      "EXIT SUCCESS IF 1 = 2, 'continue';",
+      "SELECT 1 AS value",
+    ].join("\n"));
+
+    expect(parsed.meta).toMatchObject({ name: "local_flow", dialect: 1 });
+    expect(parsed.statements.map((statement) => statement.type)).toEqual(["ASSERT", "EXIT", "SELECT"]);
+  });
+
+  test("headerless dialect 0 SQL is identical to parseSqlStatements", () => {
+    const sql = "ASSERT 1 = 1; SELECT 1 AS value";
+    expect(parseSqlStatementsForScript(sql)).toEqual({
+      statements: parseSqlStatements(sql),
+      meta: { name: null, dependsOn: [], timeout: null, dialect: 0 },
+    });
+  });
+
+  test("caller capabilities remain unchanged without a header", () => {
+    const sql = "CREATE TEMP TABLE flow_rows AS SELECT 1 AS value; SELECT * FROM flow_rows";
+    expect(parseSqlStatementsForScript(sql, { dialect1: true }).statements).toHaveLength(2);
+  });
+
+  test("invalid header is thrown before SQL parsing", () => {
+    expect(() => parseSqlStatementsForScript(
+      "-- @ksql timeout: invalid\nTHIS IS NOT SQL"
+    )).toThrow("KSQL1005: @ksql timeout must be a positive integer. (1:19)");
   });
 });
