@@ -189,7 +189,7 @@ import {
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
-import { evalArithExpr, evalStringFunc } from "./engine/evalFunc";
+import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
 import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
@@ -755,6 +755,24 @@ export interface ExecuteOptions {
   loadUpdateModeSnapshots?: (input: DmlUpdateModeSnapshotLoadInput) => Promise<ReadonlyMap<number, KintoneRecord>>;
 }
 
+const statementEvaluationContextKey: unique symbol = Symbol("statementEvaluationContext");
+type InternalExecuteOptions = ExecuteOptions & {
+  [statementEvaluationContextKey]?: EvaluationContext;
+};
+
+function bindStatementEvaluationContext(options: ExecuteOptions): ExecuteOptions {
+  const internal = options as InternalExecuteOptions;
+  if (internal[statementEvaluationContextKey]) return options;
+  return {
+    ...options,
+    [statementEvaluationContextKey]: { statementInstant: new Date() },
+  } as InternalExecuteOptions;
+}
+
+function statementEvaluationContext(options: ExecuteOptions): EvaluationContext {
+  return (options as InternalExecuteOptions)[statementEvaluationContextKey] ?? {};
+}
+
 export interface DmlUpdateModeSnapshotLoadInput {
   readonly appId: number;
   readonly candidates: readonly DmlValidationCandidate[];
@@ -1076,6 +1094,7 @@ async function executeParsedStatement(
   options: ExecuteOptions,
   cacheContext: string
 ): Promise<ExecuteResult> {
+  options = bindStatementEvaluationContext(options);
   const relativeDatePlan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
   // EXPLAIN は拒否計画そのものを副作用なしで表示する。実行文だけ fail-closed にする。
   if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
@@ -1288,7 +1307,14 @@ async function executeExistingRecordValidationCore(
     id: String(record["$id"]?.value ?? ""),
     record,
     flat: flatten(record, null),
-  })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
+  })).filter((row) => stmt.where === null || evalWhere(
+    stmt.where,
+    row.flat,
+    (field) => evaluationTypes.get(field.field),
+    undefined,
+    undefined,
+    statementEvaluationContext(options)
+  ));
 
   const rows: ProcessRow[] = [];
   const detailRows = new Map<string, ProcessRow>();
@@ -1710,6 +1736,7 @@ async function executeBatchStatement(
   variables: Map<string, VarValue>,
   relativeDateVariables: ReadonlyMap<string, KintoneFunction>
 ): Promise<Partial<BatchStatementResult>> {
+  options = bindStatementEvaluationContext(options) as BatchExecuteOptions;
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
     validateStatementStatic(resolvedStmt);
@@ -1762,7 +1789,7 @@ async function executeBatchStatement(
         throw e;
       }
     } else {
-      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr));
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt.expr, statementEvaluationContext(options)));
     }
     return {};
   }
@@ -1779,7 +1806,10 @@ async function executeBatchStatement(
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
       variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
     } else {
-      const value = evaluateScalarExpr(stmt.default as Exclude<ScalarExpr, ScalarSubquery>);
+      const value = evaluateScalarExpr(
+        stmt.default as Exclude<ScalarExpr, ScalarSubquery>,
+        statementEvaluationContext(options)
+      );
       variables.set(stmt.name, {
         type: "string",
         value: value.type === "number" ? (value.raw ?? String(value.value)) : value.value,
@@ -2098,7 +2128,8 @@ function prepareRelativeDateVariables(
 }
 
 function evaluateScalarExpr(
-  expr: Exclude<ScalarExpr, ScalarSubquery>
+  expr: Exclude<ScalarExpr, ScalarSubquery>,
+  evaluationContext: EvaluationContext = {}
 ): Exclude<VarValue, { type: "array" } | { type: "relative-date" }> {
   switch (expr.type) {
     case "STRING":
@@ -2106,11 +2137,11 @@ function evaluateScalarExpr(
     case "NUMBER":
       return { type: "number", value: expr.value, raw: numberLiteralText(expr) };
     case "KINTONE_FUNC":
-      return { type: "string", value: resolveKintoneFunc(expr.name) };
+      return { type: "string", value: resolveKintoneFunc(expr.name, evaluationContext) };
     case "STRING_FUNC":
-      return { type: "string", value: evalStringFunc(expr, {}) };
+      return { type: "string", value: evalStringFunc(expr, {}, undefined, undefined, evaluationContext) };
     case "ARITH": {
-      const value = evalArithExpr(expr, {});
+      const value = evalArithExpr(expr, {}, evaluationContext);
       if (!Number.isFinite(value)) {
         throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
       }
@@ -2850,7 +2881,7 @@ async function executeSelect(
   const subqueryWarnings = new Set<string>();
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   if (isNoFromSelect(stmt)) {
-    result = executeNoFromSelect(stmt);
+    result = executeNoFromSelect(stmt, options);
     if (captureColumnMeta) {
       materializedMetaBySelectResult.set(
         result,
@@ -3531,14 +3562,19 @@ function validateNoFromColumns(stmt: SelectStatement): void {
   }
 }
 
-function executeNoFromSelect(stmt: SelectStatement): SelectResult {
+function executeNoFromSelect(stmt: SelectStatement, options: ExecuteOptions): SelectResult {
   if (stmt.joins.length > 0 || stmt.where || normalizeGroupingSpec(stmt).type !== "NONE"
     || stmt.having || stmt.orderBy.length > 0 || stmt.distinct) {
     throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
   }
   validateNoFromColumns(stmt);
-  const windowed = applyWindow([{}], stmt.columns);
-  const { rows: projected, columns } = project(windowed, stmt.columns);
+  const windowed = applyWindow(
+    [{}], stmt.columns, undefined, undefined, undefined, undefined, statementEvaluationContext(options)
+  );
+  const { rows: projected, columns } = project(
+    windowed, stmt.columns, undefined, undefined, undefined, undefined, undefined,
+    statementEvaluationContext(options)
+  );
   const rows = applyLimit(projected, stmt.limit, stmt.offset);
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
@@ -3639,8 +3675,10 @@ async function executeSimpleSelect(
         stmt.columns,
         undefined,
         fieldTypeResolvers.row,
-        projectionSemanticsResolver
-      )
+        projectionSemanticsResolver,
+        statementEvaluationContext(options)
+      ),
+      statementEvaluationContext(options)
     );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -3650,7 +3688,9 @@ async function executeSimpleSelect(
     undefined,
     fieldTypeResolvers.row,
     undefined,
-    projectionSemanticsResolver
+    projectionSemanticsResolver,
+    undefined,
+    statementEvaluationContext(options)
   );
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -5168,6 +5208,7 @@ async function executeFullScanSelect(
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
     warnings,
+    evaluationContext: statementEvaluationContext(options),
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -6180,6 +6221,7 @@ async function executeFullScanWithCte(
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
     plainGroupByPlan,
+    evaluationContext: statementEvaluationContext(options),
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -7680,7 +7722,12 @@ async function materializeValidationCandidates(
     assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = stmt.values.map((row) => row.map((value, i) =>
       value.type === "CASE_VALUE"
-        ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType)
+        ? evalCaseWhenValue(
+          value.expr,
+          {},
+          infoByCode.get(stmt.fields[i])?.fieldType,
+          statementEvaluationContext(options)
+        )
         : value
     ));
   } else {
@@ -7817,7 +7864,9 @@ async function materializeUpdateValidationCandidates(
     });
     snapshotsById = indexDmlUpdateSnapshots(resolved.records);
     evaluationById = snapshotsById;
-    records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
+    records = updateToPutBatchesArith(
+      stmt, resolved.records, fieldTypes, statementEvaluationContext(options)
+    ).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt);
     if (checkTargetFields.length > 0) {
@@ -7992,7 +8041,9 @@ async function materializeUpdateFromValidationCandidates(
     stmt, from, client, options, cacheContext, tempTables, snapshotFields
   );
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  const records = updateFromToPutBatches(
+    stmt, matched, fieldTypes, statementEvaluationContext(options)
+  ).flatMap((batch) => batch.records);
   const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
   const snapshotsById = snapshotFields
     ? indexDmlUpdateSnapshots(matched.map((pair) => pair.target))
@@ -8301,7 +8352,7 @@ async function executeInsert(
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const batches = insertToPostBatches(stmt, fieldTypes);
+  const batches = insertToPostBatches(stmt, fieldTypes, statementEvaluationContext(options));
   assertValidDmlRecords(batches.flatMap((batch) => batch.records), stmt.fields, fieldInfos, numberPrecision);
   const createdIds: string[][] = [];
 
@@ -8912,7 +8963,9 @@ async function executeUpdate(
     );
     const records = resolved.records;
 
-    const batches = updateToPutBatchesArith(stmt, records, fieldTypes);
+    const batches = updateToPutBatchesArith(
+      stmt, records, fieldTypes, statementEvaluationContext(options)
+    );
     assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
 
     // 2. 実行前確認
@@ -8990,7 +9043,13 @@ async function executeApplyPatchUpdate(
     throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
   }
   requireRevision(response.records[0]);
-  const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
+  const plan = buildApplyPatchPlan({
+    statement: stmt,
+    snapshot: response.records[0],
+    fieldInfos,
+    metadata,
+    evaluationContext: statementEvaluationContext(options),
+  });
   const fieldIndex = buildPostImageFieldIndex(
     fieldInfos,
     stmt.assignments.map((assignment) => assignment.field)
@@ -9235,7 +9294,8 @@ async function selectApplyParentSnapshots(
       row,
       resolvers.fieldTypeResolver,
       selectionPlan.appliedKlikes,
-      resolvers.fieldSemanticsResolver
+      resolvers.fieldSemanticsResolver,
+      statementEvaluationContext(options)
     ))
     .map(({ snapshot }) => snapshot);
 }
@@ -9540,7 +9600,9 @@ async function executeUpdateFrom(
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
-  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  const batches = updateFromToPutBatches(
+    stmt, matched, fieldTypes, statementEvaluationContext(options)
+  );
   const targetFields = stmt.assignments.map((assignment) => assignment.field);
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, targetFields, fieldInfos, client, cacheContext);
@@ -9655,7 +9717,9 @@ async function executeUpsert(
     stmt.fields.forEach((field, i) => {
       const val = row[i];
       if (val.type === "CASE_VALUE") {
-        record[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field)) };
+        record[field] = { value: evalCaseWhenValue(
+          val.expr, {}, fieldTypes.get(field), statementEvaluationContext(options)
+        ) };
       } else {
         record[field] = { value: toKintoneValue(val, fieldTypes.get(field)) };
       }
@@ -9831,7 +9895,9 @@ async function executeUpdateSubtable(
     { maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
+  const targets = expanded.filter((r) => evalWhere(
+    stmt.where, r.flat, resolveFieldType, undefined, undefined, statementEvaluationContext(options)
+  ));
 
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "UPDATE");
@@ -9853,7 +9919,9 @@ async function executeUpdateSubtable(
       if (a.field.startsWith("_")) {
         throw new Error(`サブテーブル UPDATE でシステム列「${a.field}」は更新できません`);
       }
-      updates[a.field] = { value: evaluateSubtableAssignmentValue(a.value, t.flat, resolveFieldType) };
+      updates[a.field] = { value: evaluateSubtableAssignmentValue(
+        a.value, t.flat, resolveFieldType, statementEvaluationContext(options)
+      ) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -9906,7 +9974,9 @@ async function executeDeleteSubtable(
     { maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
+  const targets = expanded.filter((r) => evalWhere(
+    stmt.where, r.flat, resolveFieldType, undefined, undefined, statementEvaluationContext(options)
+  ));
 
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "DELETE");
@@ -10120,7 +10190,12 @@ async function executeReorder(
   const targetParentIds = stmt.all
     ? new Set(parents.map((p) => String(p["$id"]?.value ?? "")).filter((id) => id !== ""))
     : new Set(expanded.filter((r) => stmt.where && evalWhere(
-        stmt.where, r.flat, resolveFieldType, undefined, resolveReorderSemantics
+        stmt.where,
+        r.flat,
+        resolveFieldType,
+        undefined,
+        resolveReorderSemantics,
+        statementEvaluationContext(options)
       )).map((r) => r.parentId));
 
   if (options.confirm) {
@@ -10135,7 +10210,13 @@ async function executeReorder(
 
     const rows = getMutableTableRows(parent, stmt.subtableCode);
     const sortable = rows.map((row, i) => ({ row, i, flat: buildFlatRowForSort(parent, stmt.subtableCode, row, i) }));
-    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by, resolveReorderSemantics));
+    sortable.sort((a, b) => compareByOrder(
+      a.flat,
+      b.flat,
+      stmt.by,
+      resolveReorderSemantics,
+      statementEvaluationContext(options)
+    ));
     const orderedRowIds = sortable.map((x) => x.row.id ?? "");
     await client.putRecords(buildSubtableReorderPutParams(stmt.appId, pid, getRevision(parent), stmt.subtableCode, orderedRowIds));
   }
@@ -10168,11 +10249,12 @@ function compareByOrder(
   a: ProcessRow,
   b: ProcessRow,
   orderBy: ReorderStatement["by"],
-  resolveSemantics: FieldSemanticsResolver
+  resolveSemantics: FieldSemanticsResolver,
+  evaluationContext: EvaluationContext = {}
 ): number {
   for (const item of orderBy) {
-    const av = evalOrderKeyForRow(item.key, a);
-    const bv = evalOrderKeyForRow(item.key, b);
+    const av = evalOrderKeyForRow(item.key, a, evaluationContext);
+    const bv = evalOrderKeyForRow(item.key, b, evaluationContext);
     const semantics = item.key.type === "FIELD_NAME"
       ? resolveSemantics(aggregateFieldRef(item.key.name))
       : item.key.type === "ARITH_KEY"
@@ -10186,14 +10268,18 @@ function compareByOrder(
   return 0;
 }
 
-function evalOrderKeyForRow(key: OrderByKey, row: ProcessRow): string {
+function evalOrderKeyForRow(
+  key: OrderByKey,
+  row: ProcessRow,
+  evaluationContext: EvaluationContext = {}
+): string {
   switch (key.type) {
     case "FIELD_NAME":
       return row[key.name] ?? "";
     case "ARITH_KEY":
-      return String(evalArithExpr(key.expr, row));
+      return String(evalArithExpr(key.expr, row, evaluationContext));
     case "FUNC_KEY":
-      return evalStringFunc(key.expr, row);
+      return evalStringFunc(key.expr, row, undefined, undefined, evaluationContext);
     case "GROUPING_KEY":
       throw new Error("ArgumentError: GROUPING() is not supported in REORDER BY.");
   }

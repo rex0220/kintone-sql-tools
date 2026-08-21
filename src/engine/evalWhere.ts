@@ -31,6 +31,7 @@ import {
   evalScalarValueExprNullable,
   resolveFieldRef,
 } from "./evalFunc";
+import type { EvaluationContext } from "./evalFunc";
 import { likePatternHasWildcard } from "../core/like";
 import { compareScalarValues } from "../core/scalarCompare";
 import {
@@ -93,15 +94,16 @@ export function evalWhere(
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
   appliedKlikes?: ReadonlySet<object>,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): boolean {
   switch (expr.type) {
     case "BOOLEAN":   return expr.value;
-    case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+    case "BINARY":    return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
     case "NULL_CHECK": return evalNullCheck(expr, row);
-    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
-    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
-    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+    case "LOGICAL":   return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
+    case "NOT":       return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
+    case "GROUP":     return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
     case "EXISTS": {
       const exists = (expr as ResolvedExistsExpr).resolved;
       return expr.not ? !exists : exists;
@@ -118,18 +120,19 @@ function evalBinary(
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
   appliedKlikes?: ReadonlySet<object>,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): boolean {
   if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
     if (appliedKlikes?.has(expr)) return true;
     throw new Error("KLIKE / NOT KLIKE は押し下げ済み集合に含まれないため JavaScript 側では評価できません");
   }
-  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics);
+  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics, context);
   const fieldType = expr.left.type === "FIELD"
     ? resolveFieldType?.(expr.left)
     : undefined;
   const semantics = semanticsForLeft(expr.left, fieldType, resolveFieldSemantics);
-  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics);
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics, context);
 }
 
 function evalOp(
@@ -140,7 +143,8 @@ function evalOp(
   fieldType?: string,
   resolveFieldType?: FieldTypeResolver,
   semantics: ResolvedFieldSemantics = syntheticSemantics("string"),
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): boolean {
   if (op === "IN" || op === "NOT_IN") {
     let values: Set<string> | null = null;
@@ -160,12 +164,12 @@ function evalOp(
   }
 
   if (op === "LIKE") {
-    const pattern = resolveValue(right, row, resolveFieldType);
+    const pattern = resolveValue(right, row, resolveFieldType, undefined, context);
     return matchLike(leftStr, pattern);
   }
 
   if (op === "NOT_LIKE") {
-    const pattern = resolveValue(right, row, resolveFieldType);
+    const pattern = resolveValue(right, row, resolveFieldType, undefined, context);
     return !matchLike(leftStr, pattern);
   }
 
@@ -173,7 +177,7 @@ function evalOp(
     throw new Error("KLIKE / NOT KLIKE は JavaScript 側では評価できません（SIMPLE SELECT でのみ使用できます）");
   }
 
-  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics);
+  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics, context);
 
   return compareScalarValues(op, leftStr, rightStr, semantics);
 }
@@ -323,14 +327,15 @@ function evalLogical(
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
   appliedKlikes?: ReadonlySet<object>,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): boolean {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics)
-      && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context)
+      && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
   }
-  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics)
-    || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context)
+    || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics, context);
 }
 
 // ------------------------------------------------------------
@@ -341,12 +346,13 @@ function resolveField(
   field: FieldValue,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
-  if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row);
+  if (field.type === "FUNC_FIELD")  return evalStringFunc(field.expr, row, undefined, undefined, context);
   if (field.type === "AGG_FIELD")   return String(evalMaterializedAggregateOperand(field.expr, row));
-  if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics);
+  if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row, context));
+  if (field.type === "CASE_FIELD")  return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics, context);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
   if (field.aggregateRef) {
     const ref = field.aggregateRef;
@@ -363,7 +369,8 @@ function resolveValue(
   value: SqlValue,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
   switch (value.type) {
     case "VARIABLE":     throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
@@ -376,9 +383,9 @@ function resolveValue(
     case "SCALAR_SUBQUERY":   return (value as ResolvedScalarSubquery).resolved;
     case "ARITH_VALUE":
       if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
-      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
-      return String(evalArithExpr(value.expr, row));
-    case "CASE_VALUE":        return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics);
+      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row, undefined, undefined, context);
+      return String(evalArithExpr(value.expr, row, context));
+    case "CASE_VALUE":        return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics, context);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
@@ -392,15 +399,16 @@ export function evalCaseWhen(
   expr: CaseWhenExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics)) {
-      return evalCaseResult(branch.result, row, resolveFieldType, resolveFieldSemantics);
+    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, context)) {
+      return evalCaseResult(branch.result, row, resolveFieldType, resolveFieldSemantics, context);
     }
   }
   if (expr.elseResult !== null) {
-    return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics);
+    return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics, context);
   }
   return ""; // NULL 相当
 }
@@ -410,23 +418,25 @@ export function evalCaseWhenNullable(
   expr: CaseWhenExpr,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string | number | null {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics)) {
-      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics);
+    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, context)) {
+      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics, context);
     }
   }
   return expr.elseResult === null
     ? null
-    : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics);
+    : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics, context);
 }
 
 function evalCaseResultNullable(
   result: CaseResult,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string | number | null {
   if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
   if (result.type === "AGG_REF") {
@@ -434,15 +444,16 @@ function evalCaseResultNullable(
   }
   if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   if (result.type === "FIELD_REF") return row[result.field] ?? "";
-  if (result.type === "ARITH") return evalArithExpr(result, row);
-  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics);
+  if (result.type === "ARITH") return evalArithExpr(result, row, context);
+  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics, context);
 }
 
 function evalCaseResult(
   result: CaseResult,
   row: ProcessRow,
   resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  resolveFieldSemantics?: FieldSemanticsResolver,
+  context: EvaluationContext = {}
 ): string {
   if (result.type === "ARRAY")       return result.elements.map((e) => e.value).join(",");
   if (result.type === "AGG_REF") {
@@ -454,15 +465,16 @@ function evalCaseResult(
     return row[(result as unknown as { field: string }).field] ?? "";
   }
   if ((result as { type: string }).type === "ARITH") {
-    return String(evalArithExpr(result as unknown as ArithNode, row));
+    return String(evalArithExpr(result as unknown as ArithNode, row, context));
   }
-  return String(evalScalarValueExpr(result as ScalarValueExpr, row, resolveFieldType, resolveFieldSemantics));
+  return String(evalScalarValueExpr(result as ScalarValueExpr, row, resolveFieldType, resolveFieldSemantics, context));
 }
 
 export function resolveKintoneFunc(
-  name: "TODAY" | "NOW" | "LOGINUSER" | "PRIMARY_ORGANIZATION"
+  name: "TODAY" | "NOW" | "LOGINUSER" | "PRIMARY_ORGANIZATION",
+  context: EvaluationContext = {}
 ): string {
-  const now = new Date();
+  const now = context.statementInstant ?? new Date();
   switch (name) {
     case "TODAY": {
       // "YYYY-MM-DD"
