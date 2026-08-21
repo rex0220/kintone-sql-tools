@@ -1,6 +1,6 @@
 # B169 `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` が式評価のたびに時計を読み直す
 
-- ステータス: 🚧 **実装済み・リリース待ち**（2026-08-21・[B168 実装計画](ksql_b168_flow_dialect1_plan.md) Q10 から分離しオーナー裁定で先行対応。codex 実装・Claude レビュー＋フルゲート通過＝jest 全件・e2e 26/26・docs:check・version:check。実装＝Symbol キーで `ExecuteOptions` に評価コンテキストを内部束縛し文実行入口で instant を 1 回確定、評価器間は明示引数で貫通・未注入時は従来フォールバック。新規テスト [b169CurrentDatetimeDrift.test.ts](../../src/__tests__/b169CurrentDatetimeDrift.test.ts) 5 件＝受入 1〜5 を fake timers の中間時計進行で固定）
+- ステータス: ✅ **v3.67.0 リリース済み**（2026-08-21・PR #363 マージ・タグ/GitHub Release 公開済み・**npm publish（ユーザー 2FA）と実機確認は未了**。[B168 実装計画](ksql_b168_flow_dialect1_plan.md) Q10 から分離しオーナー裁定で先行対応。codex 実装・Claude レビュー＋フルゲート通過＝jest 264 suites/6,103 件・e2e 26/26・docs:check・version:check:release。実装＝Symbol キーで `ExecuteOptions` に評価コンテキストを内部束縛し文実行入口で instant を 1 回確定、評価器間は明示引数で貫通・未注入時は従来フォールバック。新規テスト [b169CurrentDatetimeDrift.test.ts](../../src/__tests__/b169CurrentDatetimeDrift.test.ts) 5 件＝受入 1〜5 を fake timers の中間時計進行で固定）
 - 種別: 課題（正しさ） ／ 優先: 中
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 
