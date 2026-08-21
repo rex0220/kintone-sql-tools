@@ -3,7 +3,8 @@
 // ============================================================
 
 export { execute, executeBatch, buildBatchExplainPlans, TEMP_TABLE_MAX_ROWS, OperationCancelledError, AssertError, RejectLimitExceededError, SearchAbortedError } from "../execute";
-export { parseSqlStatement, parseSqlStatements } from "./sql";
+export { parseSqlStatement, parseSqlStatements, parseSqlStatementsForScript } from "./sql";
+export type { ScriptSqlParseResult } from "./sql";
 export { validateKlikeStatement, KlikeValidationError } from "./klikeValidation";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES, MAX_BATCH_VARIABLES } from "./batch";
 export { normalizeBatchVariableName, normalizeBatchVariables, validateDeclaredBatchVariables } from "./batchVariables";

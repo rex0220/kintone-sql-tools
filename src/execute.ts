@@ -190,7 +190,7 @@ import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
 import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
-import { parseScriptHeader } from "./core/scriptHeader";
+import { parseSqlStatementsForScript } from "./core/sql";
 import type { KintoneRecord } from "./converter/dmlToKintone";
 import type { KintoneGetResponse } from "./api/fetchAll";
 import type { KintoneCursorHandle, KintoneCursorOpenParams } from "./api/kintoneCursor";
@@ -1571,16 +1571,7 @@ export async function executeBatch(
   options: BatchExecuteOptions = {}
 ): Promise<BatchExecuteResult> {
   resolveRecursiveCteLimits(options);
-  const header = parseScriptHeader(sql);
-  const headerError = header.diagnostics.find((diagnostic) => diagnostic.severity === "error");
-  if (header.hasDirectives && headerError) {
-    throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
-  }
-  const statements = parseSqlBatch(
-    header.hasDirectives ? sql.slice(header.headerEnd) : sql,
-    options.enableImport === true,
-    header.hasDirectives && header.meta.dialect === 1
-  );
+  const { statements } = parseSqlStatementsForScript(sql, { import: options.enableImport === true });
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
   statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
@@ -11904,16 +11895,7 @@ export async function buildBatchExplainPlans(
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const header = parseScriptHeader(sql);
-    const headerError = header.diagnostics.find((diagnostic) => diagnostic.severity === "error");
-    if (header.hasDirectives && headerError) {
-      throw new Error(`${headerError.code}: ${headerError.message} (${headerError.line}:${headerError.column})`);
-    }
-    const statements = parseSqlBatch(
-      header.hasDirectives ? sql.slice(header.headerEnd) : sql,
-      enableImport,
-      header.hasDirectives && header.meta.dialect === 1
-    );
+    const { statements } = parseSqlStatementsForScript(sql, { import: enableImport });
     const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
     const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);

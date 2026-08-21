@@ -142,3 +142,17 @@ test(":run は未完バッファをエラーとして報告する（バッファ
   const d = decideRun("CREATE TEMP TABLE #t AS SELECT * FROM");
   expect(d.kind).toBe("error");
 });
+
+test("B168 Stage 4a: :run は dialect 1 ヘッダ付き Flow バッチを受理する", () => {
+  const sql = "-- @ksql dialect: 1\n"
+    + "CREATE TEMP TABLE flow_rows AS SELECT 1 AS value; "
+    + "EXIT SUCCESS IF 1 = 2, 'continue'; SELECT * FROM flow_rows;";
+  expect(decideRun(sql)).toEqual({ kind: "execute-batch", sql });
+});
+
+test("B168 Stage 4a: 不正ヘッダはコンソールの既存 error decision で返す", () => {
+  expect(decideRun("-- @ksql timeout: invalid\nSELECT 1;")).toEqual({
+    kind: "error",
+    message: "KSQL1005: @ksql timeout must be a positive integer. (1:19)",
+  });
+});

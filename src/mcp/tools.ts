@@ -5,7 +5,7 @@ import {
   executeBatch,
   buildBatchExplainPlans,
   parseSqlStatement,
-  parseSqlStatements,
+  parseSqlStatementsForScript,
   explainNeedsAppMetadata,
   analyzeBatch,
   type BatchExecuteResult,
@@ -526,9 +526,9 @@ export function createKsqlMcpTools(
     // validate-all-first: 全文をパース・分類し、1文でも不正なら全体を拒否
     //（一時テーブルの静的解決・単文 CREATE/DROP の拒否・空入力の拒否を含む）
     let analysis: ReturnType<typeof analyzeBatch>;
-    let statements: ReturnType<typeof parseSqlStatements>;
+    let statements: ReturnType<typeof parseSqlStatementsForScript>["statements"];
     try {
-      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
+      ({ statements } = parseSqlStatementsForScript(normalized.normalizedSql, { import: importOptions.enableImport }));
       analysis = analyzeBatch(statements);
     } catch (err) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
@@ -612,9 +612,9 @@ export function createKsqlMcpTools(
     const appBindings = toExplainBindings(normalized.appBindingByMappedApp);
 
     // バッチ入力: 全文のプランを配列で返す（フェーズ2 M3。実行はしない）
-    let statements: ReturnType<typeof parseSqlStatements>;
+    let statements: ReturnType<typeof parseSqlStatementsForScript>["statements"];
     try {
-      statements = parseSqlStatements(normalized.normalizedSql, { import: importOptions.enableImport });
+      ({ statements } = parseSqlStatementsForScript(normalized.normalizedSql, { import: importOptions.enableImport }));
     } catch (err) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
       throw toMcpImportError(restored, importOptions.enableImport === true);
@@ -696,7 +696,7 @@ export function createKsqlMcpTools(
         throw new Error("ArgumentError: batch contains DML statements. Use ksql_mutate.");
       }
       const sqlContext = validationContexts.get(validation);
-      const statements = parseSqlStatements(validation.normalizedSql, { import: importOptions.enableImport });
+      const { statements } = parseSqlStatementsForScript(validation.normalizedSql, { import: importOptions.enableImport });
       const runtime = await createRuntime(serverOptions, {
         sql: input.sql,
         sqlContext,
