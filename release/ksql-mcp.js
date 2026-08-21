@@ -29764,7 +29764,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.66.1" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.67.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -39333,15 +39333,15 @@ function selectScalarExtreme(values, extreme) {
 }
 
 // src/engine/evalFunc.ts
-function evalArithExpr(expr, row) {
+function evalArithExpr(expr, row, context = {}) {
   if (expr.type === "VARIABLE") throw new Error(
     `InternalError: unresolved arithmetic variable @${expr.name} reached arithmetic evaluation.`
   );
   if (expr.type === "NUMBER") return expr.value;
   if (expr.type === "FIELD_REF") return Number(resolveFieldRef(row, expr.field));
-  if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row));
-  const l = evalArithExpr(expr.left, row);
-  const r = evalArithExpr(expr.right, row);
+  if (expr.type === "STRING_FUNC") return Number(evalStringFunc(expr, row, void 0, void 0, context));
+  const l = evalArithExpr(expr.left, row, context);
+  const r = evalArithExpr(expr.right, row, context);
   switch (expr.op) {
     case "+":
       return l + r;
@@ -39355,7 +39355,7 @@ function evalArithExpr(expr, row) {
       return r !== 0 ? l % r : NaN;
   }
 }
-function evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2) {
+function evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   switch (expr.type) {
     case "STRING":
       return expr.value;
@@ -39366,19 +39366,19 @@ function evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2
     case "VARIABLE":
       throw new Error(`ArgumentError: unresolved variable @${expr.name} reached scalar evaluator.`);
     case "STRING_FUNC":
-      return evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2);
+      return evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2, context);
     case "CASE_WHEN":
-      return evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2);
+      return evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2, context);
     case "CONCAT_OP": {
       return evalStringFunc({
         type: "STRING_FUNC",
         func: "CONCAT",
         args: [expr.left, expr.right]
-      }, row, resolveFieldType, resolveFieldSemantics2);
+      }, row, resolveFieldType, resolveFieldSemantics2, context);
     }
     case "SCALAR_ARITH": {
-      const left = Number(evalScalarValueExpr(expr.left, row, resolveFieldType, resolveFieldSemantics2));
-      const right = Number(evalScalarValueExpr(expr.right, row, resolveFieldType, resolveFieldSemantics2));
+      const left = Number(evalScalarValueExpr(expr.left, row, resolveFieldType, resolveFieldSemantics2, context));
+      const right = Number(evalScalarValueExpr(expr.right, row, resolveFieldType, resolveFieldSemantics2, context));
       switch (expr.op) {
         case "+":
           return left + right;
@@ -39394,13 +39394,13 @@ function evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2
     }
   }
 }
-function evalScalarValueExprNullable(expr, row, resolveFieldType, resolveFieldSemantics2) {
+function evalScalarValueExprNullable(expr, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   switch (expr.type) {
     case "CASE_WHEN":
-      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2);
+      return evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2, context);
     case "SCALAR_ARITH": {
-      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2);
-      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2);
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2, context);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2, context);
       if (left === null || right === null) return null;
       const l = Number(left);
       const r = Number(right);
@@ -39418,12 +39418,12 @@ function evalScalarValueExprNullable(expr, row, resolveFieldType, resolveFieldSe
       }
     }
     case "CONCAT_OP": {
-      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2);
-      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2);
+      const left = evalScalarValueExprNullable(expr.left, row, resolveFieldType, resolveFieldSemantics2, context);
+      const right = evalScalarValueExprNullable(expr.right, row, resolveFieldType, resolveFieldSemantics2, context);
       return `${left ?? ""}${right ?? ""}`;
     }
     default:
-      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2);
+      return evalScalarValueExpr(expr, row, resolveFieldType, resolveFieldSemantics2, context);
   }
 }
 function applyRoundOp(op, num, digits) {
@@ -39575,9 +39575,9 @@ function replaceNthMatch(input, globalRe, replacement, n) {
     return expandRegexpReplacement(replacement, match, captures, namedGroups);
   });
 }
-function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
+function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   assertStringFunctionArity(expr.func, expr.args);
-  const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics2));
+  const args = expr.args.map((a) => evalStringFuncArg(a, row, resolveFieldType, resolveFieldSemantics2, context));
   switch (expr.func) {
     case "UPPER":
       return (args[0] ?? "").toUpperCase();
@@ -39725,14 +39725,14 @@ function evalStringFunc(expr, row, resolveFieldType, resolveFieldSemantics2) {
     case "SQRT":
       return String(Math.sqrt(Number(args[0] ?? "0")));
     case "CURRENT_DATE": {
-      const now = /* @__PURE__ */ new Date();
+      const now = context.statementInstant ?? /* @__PURE__ */ new Date();
       const y = now.getFullYear();
       const m = String(now.getMonth() + 1).padStart(2, "0");
       const d = String(now.getDate()).padStart(2, "0");
       return `${y}-${m}-${d}`;
     }
     case "CURRENT_TIMESTAMP":
-      return (/* @__PURE__ */ new Date()).toISOString();
+      return (context.statementInstant ?? /* @__PURE__ */ new Date()).toISOString();
   }
 }
 function parseDateParts(s) {
@@ -39894,12 +39894,12 @@ function formatWithComma(num, digits) {
   const intFmt = intStr.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return decStr ? `${intFmt}.${decStr}` : intFmt;
 }
-function evalStringFuncArg(arg, row, resolveFieldType, resolveFieldSemantics2) {
+function evalStringFuncArg(arg, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   if (arg.type === "AGG_REF" || arg.type === "AGG_ARITH" || arg.type === "AGG_GROUP_KEY") {
     return String(evalMaterializedAggregateOperand(arg, row));
   }
   if (arg.type === "NUMBER") return numberLiteralText(arg);
-  return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics2));
+  return String(evalScalarValueExpr(arg, row, resolveFieldType, resolveFieldSemantics2, context));
 }
 function evalMaterializedAggregateOperand(node, row) {
   if (node.type === "NUMBER") return node.value;
@@ -39940,37 +39940,37 @@ function resolveFieldRef(row, field) {
 }
 
 // src/engine/evalWhere.ts
-function evalWhere(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
+function evalWhere(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context = {}) {
   switch (expr.type) {
     case "BOOLEAN":
       return expr.value;
     case "BINARY":
-      return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+      return evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
     case "NULL_CHECK":
       return evalNullCheck(expr, row);
     case "LOGICAL":
-      return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+      return evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
     case "NOT":
-      return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+      return !evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
     case "GROUP":
-      return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+      return evalWhere(expr.expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
     case "EXISTS": {
       const exists = expr.resolved;
       return expr.not ? !exists : exists;
     }
   }
 }
-function evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
+function evalBinary(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context = {}) {
   if (expr.op === "KLIKE" || expr.op === "NOT_KLIKE") {
     if (appliedKlikes?.has(expr)) return true;
     throw new Error("KLIKE / NOT KLIKE \u306F\u62BC\u3057\u4E0B\u3052\u6E08\u307F\u96C6\u5408\u306B\u542B\u307E\u308C\u306A\u3044\u305F\u3081 JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093");
   }
-  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics2);
+  const left = resolveField(expr.left, row, resolveFieldType, resolveFieldSemantics2, context);
   const fieldType = expr.left.type === "FIELD" ? resolveFieldType?.(expr.left) : void 0;
   const semantics = semanticsForLeft(expr.left, fieldType, resolveFieldSemantics2);
-  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics2);
+  return evalOp(expr.op, left, expr.right, row, fieldType, resolveFieldType, semantics, resolveFieldSemantics2, context);
 }
-function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics = syntheticSemantics("string"), resolveFieldSemantics2) {
+function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics = syntheticSemantics("string"), resolveFieldSemantics2, context = {}) {
   if (op === "IN" || op === "NOT_IN") {
     let values = null;
     if (right.type === "IN_LIST") {
@@ -39985,17 +39985,17 @@ function evalOp(op, leftStr, right, row, fieldType, resolveFieldType, semantics 
     return op === "IN" ? contains : !contains;
   }
   if (op === "LIKE") {
-    const pattern = resolveValue(right, row, resolveFieldType);
+    const pattern = resolveValue(right, row, resolveFieldType, void 0, context);
     return matchLike(leftStr, pattern);
   }
   if (op === "NOT_LIKE") {
-    const pattern = resolveValue(right, row, resolveFieldType);
+    const pattern = resolveValue(right, row, resolveFieldType, void 0, context);
     return !matchLike(leftStr, pattern);
   }
   if (op === "KLIKE" || op === "NOT_KLIKE") {
     throw new Error("KLIKE / NOT KLIKE \u306F JavaScript \u5074\u3067\u306F\u8A55\u4FA1\u3067\u304D\u307E\u305B\u3093\uFF08SIMPLE SELECT \u3067\u306E\u307F\u4F7F\u7528\u3067\u304D\u307E\u3059\uFF09");
   }
-  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics2);
+  const rightStr = resolveValue(right, row, resolveFieldType, resolveFieldSemantics2, context);
   return compareScalarValues(op, leftStr, rightStr, semantics);
 }
 var NUMERIC_STRING_FUNCTIONS = /* @__PURE__ */ new Set([
@@ -40107,17 +40107,17 @@ function evalNullCheck(expr, row) {
   const val = resolveField(expr.field, row);
   return expr.not ? val !== "" : val === "";
 }
-function evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
+function evalLogical(expr, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context = {}) {
   if (expr.op === "AND") {
-    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+    return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context) && evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
   }
-  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2) || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2);
+  return evalWhere(expr.left, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context) || evalWhere(expr.right, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2, context);
 }
-function resolveField(field, row, resolveFieldType, resolveFieldSemantics2) {
-  if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row);
+function resolveField(field, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
+  if (field.type === "FUNC_FIELD") return evalStringFunc(field.expr, row, void 0, void 0, context);
   if (field.type === "AGG_FIELD") return String(evalMaterializedAggregateOperand(field.expr, row));
-  if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row));
-  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics2);
+  if (field.type === "ARITH_FIELD") return String(evalArithExpr(field.expr, row, context));
+  if (field.type === "CASE_FIELD") return evalCaseWhen(field.expr, row, resolveFieldType, resolveFieldSemantics2, context);
   if (field.type === "GROUPING_FIELD") return evalGroupingRef(field.ref, row);
   if (field.aggregateRef) {
     const ref = field.aggregateRef;
@@ -40126,7 +40126,7 @@ function resolveField(field, row, resolveFieldType, resolveFieldSemantics2) {
   const key = field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field;
   return resolveFieldRef(row, key);
 }
-function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2) {
+function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   switch (value.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${value.name}.`);
@@ -40148,44 +40148,44 @@ function resolveValue(value, row, resolveFieldType, resolveFieldSemantics2) {
       return value.resolved;
     case "ARITH_VALUE":
       if (value.expr.type === "FIELD_REF") return resolveFieldRef(row, value.expr.field);
-      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row);
-      return String(evalArithExpr(value.expr, row));
+      if (value.expr.type === "STRING_FUNC") return evalStringFunc(value.expr, row, void 0, void 0, context);
+      return String(evalArithExpr(value.expr, row, context));
     case "CASE_VALUE":
-      return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics2);
+      return evalCaseWhen(value.expr, row, resolveFieldType, resolveFieldSemantics2, context);
     case "ARRAY":
       return value.elements.map((e) => e.value).join(",");
   }
 }
-function evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2) {
+function evalCaseWhen(expr, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2)) {
-      return evalCaseResult(branch.result, row, resolveFieldType, resolveFieldSemantics2);
+    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2, context)) {
+      return evalCaseResult(branch.result, row, resolveFieldType, resolveFieldSemantics2, context);
     }
   }
   if (expr.elseResult !== null) {
-    return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics2);
+    return evalCaseResult(expr.elseResult, row, resolveFieldType, resolveFieldSemantics2, context);
   }
   return "";
 }
-function evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2) {
+function evalCaseWhenNullable(expr, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2)) {
-      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics2);
+    if (evalWhere(branch.condition, row, resolveFieldType, void 0, resolveFieldSemantics2, context)) {
+      return evalCaseResultNullable(branch.result, row, resolveFieldType, resolveFieldSemantics2, context);
     }
   }
-  return expr.elseResult === null ? null : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics2);
+  return expr.elseResult === null ? null : evalCaseResultNullable(expr.elseResult, row, resolveFieldType, resolveFieldSemantics2, context);
 }
-function evalCaseResultNullable(result, row, resolveFieldType, resolveFieldSemantics2) {
+function evalCaseResultNullable(result, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   if (result.type === "ARRAY") return result.elements.map((entry) => entry.value).join(",");
   if (result.type === "AGG_REF") {
     return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
   }
   if (result.type === "AGG_ARITH") return row[aggregateOperandLabel(result)] ?? "";
   if (result.type === "FIELD_REF") return row[result.field] ?? "";
-  if (result.type === "ARITH") return evalArithExpr(result, row);
-  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics2);
+  if (result.type === "ARITH") return evalArithExpr(result, row, context);
+  return evalScalarValueExprNullable(result, row, resolveFieldType, resolveFieldSemantics2, context);
 }
-function evalCaseResult(result, row, resolveFieldType, resolveFieldSemantics2) {
+function evalCaseResult(result, row, resolveFieldType, resolveFieldSemantics2, context = {}) {
   if (result.type === "ARRAY") return result.elements.map((e) => e.value).join(",");
   if (result.type === "AGG_REF") {
     return row[aggregateSyntheticName(result.func, result.distinct, result.arg)] ?? "";
@@ -40195,12 +40195,12 @@ function evalCaseResult(result, row, resolveFieldType, resolveFieldSemantics2) {
     return row[result.field] ?? "";
   }
   if (result.type === "ARITH") {
-    return String(evalArithExpr(result, row));
+    return String(evalArithExpr(result, row, context));
   }
-  return String(evalScalarValueExpr(result, row, resolveFieldType, resolveFieldSemantics2));
+  return String(evalScalarValueExpr(result, row, resolveFieldType, resolveFieldSemantics2, context));
 }
-function resolveKintoneFunc(name) {
-  const now = /* @__PURE__ */ new Date();
+function resolveKintoneFunc(name, context = {}) {
+  const now = context.statementInstant ?? /* @__PURE__ */ new Date();
   switch (name) {
     case "TODAY": {
       const y = now.getFullYear();
@@ -40324,21 +40324,21 @@ function assertDmlWhereIsSafe(where) {
 }
 var USER_TYPES = /* @__PURE__ */ new Set(["USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"]);
 var ARRAY_TYPES = /* @__PURE__ */ new Set(["CHECK_BOX", "MULTI_SELECT"]);
-function insertToPostBatches(stmt, fieldTypes = /* @__PURE__ */ new Map()) {
+function insertToPostBatches(stmt, fieldTypes = /* @__PURE__ */ new Map(), evaluationContext = {}) {
   const allRecords = stmt.values.map(
-    (row) => buildInsertRecord(stmt.fields, row, fieldTypes)
+    (row) => buildInsertRecord(stmt.fields, row, fieldTypes, evaluationContext)
   );
   return chunk(allRecords, 100).map((records) => ({
     app: stmt.appId,
     records
   }));
 }
-function buildInsertRecord(fields, row, fieldTypes) {
+function buildInsertRecord(fields, row, fieldTypes, evaluationContext) {
   const record2 = {};
   fields.forEach((field, i) => {
     const val = row[i];
     if (val.type === "CASE_VALUE") {
-      record2[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field)) };
+      record2[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field), evaluationContext) };
     } else {
       record2[field] = { value: toKintoneValue(val, fieldTypes.get(field)) };
     }
@@ -40498,14 +40498,14 @@ function collectConditionFields(expr, out) {
       break;
   }
 }
-function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new Map()) {
+function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new Map(), evaluationContext = {}) {
   const updateRecords = records.map((raw) => {
     const id = Number(raw["$id"].value);
     const row = kintoneRecordToProcessRow(raw);
     const record2 = {};
     for (const { field, value } of stmt.assignments) {
       record2[field] = {
-        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw)
+        value: evaluateUpdateAssignmentValue(value, row, fieldTypes.get(field), raw, evaluationContext)
       };
     }
     return { id, record: record2 };
@@ -40515,25 +40515,31 @@ function updateToPutBatchesArith(stmt, records, fieldTypes = /* @__PURE__ */ new
     records: batch
   }));
 }
-function evaluateUpdateAssignmentValue(value, row, fieldType, raw) {
+function evaluateUpdateAssignmentValue(value, row, fieldType, raw, evaluationContext = {}) {
   if (value.type === "ARITH") {
-    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row));
+    return String(raw ? evalArith(value, raw) : evalArithExpr(value, row, evaluationContext));
   }
   if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-    return String(evalScalarValueExpr(value, row));
+    return String(evalScalarValueExpr(value, row, void 0, void 0, evaluationContext));
   }
-  if (value.type === "STRING_FUNC") return evalStringFunc(value, row);
-  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType);
+  if (value.type === "STRING_FUNC") return evalStringFunc(value, row, void 0, void 0, evaluationContext);
+  if (value.type === "CASE_VALUE") return evalCaseWhenValue(value.expr, row, fieldType, evaluationContext);
   if (value.type === "SOURCE_FIELD") {
     throw new DmlConvertError("SOURCE_FIELD \u306F UPDATE ... FROM \u5C02\u7528\u3067\u3059");
   }
   return toKintoneValue(value, fieldType);
 }
-function evaluateSubtableAssignmentValue(value, row, resolveFieldType) {
+function evaluateSubtableAssignmentValue(value, row, resolveFieldType, evaluationContext = {}) {
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return numberLiteralText(value);
-  if (value.type === "ARITH") return String(evalArithExpr(value, row));
-  if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, row, resolveFieldType);
+  if (value.type === "ARITH") return String(evalArithExpr(value, row, evaluationContext));
+  if (value.type === "CASE_VALUE") return evalCaseWhen(
+    value.expr,
+    row,
+    resolveFieldType,
+    void 0,
+    evaluationContext
+  );
   throw new Error(`${value.type} \u306F\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u306E\u5024\u3068\u3057\u3066\u4F7F\u7528\u3067\u304D\u307E\u305B\u3093`);
 }
 var UPDATE_FROM_UNSUPPORTED_TYPES = /* @__PURE__ */ new Set([
@@ -40544,7 +40550,7 @@ var UPDATE_FROM_UNSUPPORTED_TYPES = /* @__PURE__ */ new Set([
   "GROUP_SELECT",
   "FILE"
 ]);
-function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new Map()) {
+function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new Map(), evaluationContext = {}) {
   const updateRecords = matched.map(({ target, source }) => {
     const id = Number(target["$id"]?.value);
     if (!Number.isSafeInteger(id) || id <= 0) {
@@ -40574,9 +40580,20 @@ function updateFromToPutBatches(stmt, matched, fieldTypes = /* @__PURE__ */ new 
       } else if (value.type === "ARITH") {
         record2[field] = { value: String(evalArith(value, target)) };
       } else if (value.type === "SCALAR_ARITH" || value.type === "CONCAT_OP") {
-        record2[field] = { value: String(evalScalarValueExpr(value, targetRow)) };
+        record2[field] = { value: String(evalScalarValueExpr(
+          value,
+          targetRow,
+          void 0,
+          void 0,
+          evaluationContext
+        )) };
       } else if (value.type === "CASE_VALUE") {
-        record2[field] = { value: evalCaseWhenValue(value.expr, targetRow, fieldType) };
+        record2[field] = { value: evalCaseWhenValue(
+          value.expr,
+          targetRow,
+          fieldType,
+          evaluationContext
+        ) };
       } else {
         record2[field] = { value: toKintoneValue(value, fieldType) };
       }
@@ -40678,7 +40695,7 @@ function convertArray(elements, fieldType) {
   if (isUserType(fieldType)) return elements.map((c) => ({ code: c }));
   return elements;
 }
-function evalCaseResultValue(result, row, fieldType) {
+function evalCaseResultValue(result, row, fieldType, evaluationContext) {
   if (result.type === "ARRAY") {
     return convertArray(result.elements.map((e) => e.value), fieldType);
   }
@@ -40689,26 +40706,26 @@ function evalCaseResultValue(result, row, fieldType) {
     return convertString2(result.value, fieldType);
   }
   if (result.type === "STRING_FUNC") {
-    return evalStringFunc(result, row);
+    return evalStringFunc(result, row, void 0, void 0, evaluationContext);
   }
   if (result.type === "FIELD_REF" || result.type === "ARITH") {
-    return String(evalArithExpr(result, row));
+    return String(evalArithExpr(result, row, evaluationContext));
   }
-  return String(evalScalarValueExpr(result, row));
+  return String(evalScalarValueExpr(result, row, void 0, void 0, evaluationContext));
 }
 function collectUpdateCheckTargetFields(stmt) {
   if (!stmt.checkGroups) return [];
   const targetAlias = `app${stmt.appId}`.toLowerCase();
   return [...new Set(collectCheckFieldRefs(stmt.checkGroups).filter((ref) => ref.tableAlias === null || ref.tableAlias.toLowerCase() === targetAlias).map((ref) => ref.field).filter((field) => field !== "$id"))];
 }
-function evalCaseWhenValue(expr, row, fieldType) {
+function evalCaseWhenValue(expr, row, fieldType, evaluationContext = {}) {
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row)) {
-      return evalCaseResultValue(branch.result, row, fieldType);
+    if (evalWhere(branch.condition, row, void 0, void 0, void 0, evaluationContext)) {
+      return evalCaseResultValue(branch.result, row, fieldType, evaluationContext);
     }
   }
   if (expr.elseResult !== null) {
-    return evalCaseResultValue(expr.elseResult, row, fieldType);
+    return evalCaseResultValue(expr.elseResult, row, fieldType, evaluationContext);
   }
   return "";
 }
@@ -40987,18 +41004,30 @@ function buildApplyPatchPlan(input) {
   const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument2(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
-  return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+  return buildApplyPatchPlanForSnapshot(
+    statement,
+    snapshot,
+    metadata,
+    parentId,
+    input.evaluationContext
+  );
 }
-function buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata = resolveApplyPatchMetadata(statement, fieldInfos)) {
+function buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata = resolveApplyPatchMetadata(statement, fieldInfos), evaluationContext = {}) {
   const parentIds = /* @__PURE__ */ new Set();
   return snapshots.map((snapshot) => {
     const parentId = requirePositiveInteger(snapshot["$id"]?.value, "APPLY snapshot $id");
     if (parentIds.has(parentId)) argument2(`APPLY snapshots contain duplicate parentId ${parentId}.`);
     parentIds.add(parentId);
-    return buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId);
+    return buildApplyPatchPlanForSnapshot(
+      statement,
+      snapshot,
+      metadata,
+      parentId,
+      evaluationContext
+    );
   });
 }
-function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId) {
+function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId, evaluationContext = {}) {
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
   const tablePlans = [];
   const multiValuePlans = [];
@@ -41027,13 +41056,24 @@ function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId)
     const hasRemove = block.operations.some((operation) => operation.kind === "REMOVE");
     for (const [operationIndex, operation] of block.operations.entries()) {
       if (operation.kind === "APPEND") {
-        const rows = buildApplyAppendRows(operation, targetChildren, block.field);
+        const rows = buildApplyAppendRows(
+          operation,
+          targetChildren,
+          block.field,
+          evaluationContext
+        );
         operationPlans.push({ kind: "APPEND", addedRows: rows.length });
         appended.push(...rows);
         continue;
       }
       if (operation.kind === "REMOVE") {
-        const indices2 = resolveRemoveTargets(operation, snapshotRows, childTypeResolver, block.field);
+        const indices2 = resolveRemoveTargets(
+          operation,
+          snapshotRows,
+          childTypeResolver,
+          block.field,
+          evaluationContext
+        );
         if (operation.expectRows) {
           assertExpectRows(operation.expectRows, indices2.length, parentId, block.field, operationIndex, operation.kind);
         }
@@ -41051,7 +41091,13 @@ function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId)
         continue;
       }
       if (operation.kind !== "PATCH") continue;
-      const indices = resolvePatchTargets(operation, snapshotRows, childTypeResolver, block.field);
+      const indices = resolvePatchTargets(
+        operation,
+        snapshotRows,
+        childTypeResolver,
+        block.field,
+        evaluationContext
+      );
       if (operation.expectRows) {
         assertExpectRows(operation.expectRows, indices.length, parentId, block.field, operationIndex, operation.kind);
       }
@@ -41070,7 +41116,12 @@ function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId)
           resolved.push({
             rowIndex,
             field: assignment.field,
-            value: evaluateSubtableAssignmentValue(assignment.value, flat, childTypeResolver)
+            value: evaluateSubtableAssignmentValue(
+              assignment.value,
+              flat,
+              childTypeResolver,
+              evaluationContext
+            )
           });
         }
       }
@@ -41122,7 +41173,13 @@ function buildApplyPatchPlanForSnapshot(statement, snapshot, metadata, parentId)
   for (const assignment of statement.assignments) {
     const fieldType = metadata.fieldsByCode.get(assignment.field)?.fieldType;
     parentValues[assignment.field] = {
-      value: evaluateUpdateAssignmentValue(assignment.value, parentRow, fieldType, snapshot)
+      value: evaluateUpdateAssignmentValue(
+        assignment.value,
+        parentRow,
+        fieldType,
+        snapshot,
+        evaluationContext
+      )
     };
   }
   const postImage = { ...snapshot };
@@ -41192,12 +41249,12 @@ function normalizeApplyPatchPlan(plan, normalizedRecord) {
     postImage: normalizedRecord
   };
 }
-function buildApplyAppendRows(operation, children, table) {
+function buildApplyAppendRows(operation, children, table, evaluationContext = {}) {
   return operation.values.map((row) => ({
-    value: buildAppendValue(operation, row, children, table)
+    value: buildAppendValue(operation, row, children, table, evaluationContext)
   }));
 }
-function buildAppendValue(operation, row, children, table) {
+function buildAppendValue(operation, row, children, table, evaluationContext) {
   if (row.length !== operation.fields.length) {
     return argument2(`APPLY APPEND for ${table} has ${row.length} values for ${operation.fields.length} fields.`);
   }
@@ -41206,7 +41263,7 @@ function buildAppendValue(operation, row, children, table) {
   for (const field of children.values()) {
     if (field.fieldType === "FILE" || field.writable === false) continue;
     const sqlValue = specified.get(field.code);
-    value[field.code] = { value: sqlValue === void 0 ? appendDefaultValue(field) : sqlValue.type === "CASE_VALUE" ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType) : toKintoneValue(sqlValue, field.fieldType) };
+    value[field.code] = { value: sqlValue === void 0 ? appendDefaultValue(field) : sqlValue.type === "CASE_VALUE" ? evalCaseWhenValue(sqlValue.expr, {}, field.fieldType, evaluationContext) : toKintoneValue(sqlValue, field.fieldType) };
   }
   return value;
 }
@@ -41214,17 +41271,36 @@ function appendDefaultValue(field) {
   if (field.defaultValue !== void 0 && field.defaultValue !== null) return field.defaultValue;
   return ["CHECK_BOX", "MULTI_SELECT", "USER_SELECT", "ORGANIZATION_SELECT", "GROUP_SELECT"].includes(field.fieldType) ? [] : "";
 }
-function resolvePatchTargets(operation, rows, resolveFieldType, table) {
-  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+function resolvePatchTargets(operation, rows, resolveFieldType, table, evaluationContext = {}) {
+  return resolveSelectorTargets(
+    operation.selector,
+    rows,
+    resolveFieldType,
+    table,
+    evaluationContext
+  );
 }
-function resolveRemoveTargets(operation, rows, resolveFieldType, table) {
-  return resolveSelectorTargets(operation.selector, rows, resolveFieldType, table);
+function resolveRemoveTargets(operation, rows, resolveFieldType, table, evaluationContext = {}) {
+  return resolveSelectorTargets(
+    operation.selector,
+    rows,
+    resolveFieldType,
+    table,
+    evaluationContext
+  );
 }
-function resolveSelectorTargets(selector, rows, resolveFieldType, table) {
+function resolveSelectorTargets(selector, rows, resolveFieldType, table, evaluationContext = {}) {
   if (selector.kind === "ALL_ROWS") return rows.map((_, index) => index);
   const where = selector.where;
   const indices = rows.flatMap(
-    (row, index) => evalWhere(where, flattenSubtableSnapshotRow(row, index), resolveFieldType) ? [index] : []
+    (row, index) => evalWhere(
+      where,
+      flattenSubtableSnapshotRow(row, index),
+      resolveFieldType,
+      void 0,
+      void 0,
+      evaluationContext
+    ) ? [index] : []
   );
   const requestedRid = exactRidSelectorValue(where);
   if (requestedRid !== null && indices.length === 0) {
@@ -44557,9 +44633,16 @@ function assertJoinKeyAvailable(rows, key, savedColumns) {
     throw new Error(`ArgumentError: JOIN key ${key} is not available in the materialized table.`);
   }
 }
-function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldSemantics2) {
+function applyFilter(rows, where, resolveFieldType, appliedKlikes, resolveFieldSemantics2, evaluationContext = {}) {
   if (where === null) return rows;
-  return rows.filter((row) => evalWhere(where, row, resolveFieldType, appliedKlikes, resolveFieldSemantics2));
+  return rows.filter((row) => evalWhere(
+    where,
+    row,
+    resolveFieldType,
+    appliedKlikes,
+    resolveFieldSemantics2,
+    evaluationContext
+  ));
 }
 function hasAggregateColumns(columns) {
   return columns.some(
@@ -44593,12 +44676,28 @@ function applyGroupBy(rows, groupByKeys, columns, resolveAggSortKind, resolution
     const outRow = asProcessingRow({ ...groupRows[0] });
     for (const k of groupByKeys) {
       if (k.type === "ARITH_KEY") {
-        outRow[arithColDefaultKey(k.expr)] = String(evalArithExpr(k.expr, groupRows[0]));
+        outRow[arithColDefaultKey(k.expr)] = String(evalArithExpr(
+          k.expr,
+          groupRows[0],
+          aliasEvaluationContext.evaluationContext
+        ));
       } else if (k.type === "FUNC_KEY") {
-        outRow[stringFuncDefaultKey(k.expr)] = evalStringFunc(k.expr, groupRows[0]);
+        outRow[stringFuncDefaultKey(k.expr)] = evalStringFunc(
+          k.expr,
+          groupRows[0],
+          void 0,
+          void 0,
+          aliasEvaluationContext.evaluationContext
+        );
       }
     }
-    materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind);
+    materializeAggregateColumns(
+      outRow,
+      groupRows,
+      columns,
+      resolveAggSortKind,
+      aliasEvaluationContext.evaluationContext
+    );
     result.push(outRow);
   }
   return result;
@@ -44656,7 +44755,13 @@ function applyGroupingSets(rows, spec, columns, resolveAggSortKind, limits = {})
           outRow[item.unqualifiedBridgeKey] = value;
         }
       }
-      materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind);
+      materializeAggregateColumns(
+        outRow,
+        groupRows,
+        columns,
+        resolveAggSortKind,
+        limits.evaluationContext
+      );
       attachGroupingRowMeta(outRow, includedCanonicalIds);
       result.push(outRow);
     }
@@ -44667,11 +44772,19 @@ function groupingItemValue(item, row) {
   if (!row) return "";
   return row[item.directKey] ?? (item.unqualifiedBridgeKey === null ? void 0 : row[item.unqualifiedBridgeKey]) ?? "";
 }
-function materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind) {
+function materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortKind, evaluationContext = {}) {
   for (const [columnIndex, col] of columns.entries()) {
     if (col.type === "AGGREGATE") {
       const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
-      const value = String(evalAggregate(col.func, col.distinct, col.arg, col.separator, groupRows, resolveAggSortKind));
+      const value = String(evalAggregate(
+        col.func,
+        col.distinct,
+        col.arg,
+        col.separator,
+        groupRows,
+        resolveAggSortKind,
+        evaluationContext
+      ));
       setMaterializedSelectValue(
         outRow,
         columnIndex,
@@ -44679,38 +44792,44 @@ function materializeAggregateColumns(outRow, groupRows, columns, resolveAggSortK
         col.alias ? [col.alias, syntheticKey] : [syntheticKey]
       );
     } else if (col.type === "ARITH_AGG_COL") {
-      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind, evaluationContext);
       const outputKey = col.alias ?? aggArithDefaultKey(col.expr);
       setMaterializedSelectValue(
         outRow,
         columnIndex,
-        String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind)),
+        String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind, evaluationContext)),
         [outputKey]
       );
     } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr2(col.expr)) {
-      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind, evaluationContext);
       const outputKey = col.alias ?? stringFuncDefaultKey(col.expr);
       const resolvedExpr = resolveAggInStringFuncExpr(col.expr, groupRows, resolveAggSortKind);
-      setMaterializedSelectValue(outRow, columnIndex, evalStringFunc(resolvedExpr, outRow), [outputKey]);
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        evalStringFunc(resolvedExpr, outRow, void 0, void 0, evaluationContext),
+        [outputKey]
+      );
     } else if (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate2(col.expr)) {
-      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind, evaluationContext);
       const outputKey = col.alias ?? scalarValueDefaultKey(col.expr);
       const resolvedExpr = resolveAggInScalarValue(col.expr, groupRows, resolveAggSortKind);
       setMaterializedSelectValue(
         outRow,
         columnIndex,
-        String(evalScalarValueExpr(resolvedExpr, outRow)),
+        String(evalScalarValueExpr(resolvedExpr, outRow, void 0, void 0, evaluationContext)),
         [outputKey]
       );
     } else if (col.type === "CASE_COL" && containsAggregate2(col.expr)) {
-      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind);
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind, evaluationContext);
       const resolvedExpr = resolveAggInCaseExpr(col.expr, groupRows, resolveAggSortKind);
       const resolveAggregateSemantics = (field) => field.aggregateRef ? aggregateResultSemantics(field.aggregateRef, resolveAggSortKind) : void 0;
       const value = evalCaseWhen(
         resolvedExpr,
         outRow,
         void 0,
-        resolveAggregateSemantics
+        resolveAggregateSemantics,
+        evaluationContext
       );
       setMaterializedSelectValue(
         outRow,
@@ -44738,7 +44857,7 @@ function collectAggregateRefs(node, out) {
   if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return;
   Object.values(value).forEach((child) => collectAggregateRefs(child, out));
 }
-function materializeAggregateDependencies(outRow, rows, node, resolveAggSortKind) {
+function materializeAggregateDependencies(outRow, rows, node, resolveAggSortKind, evaluationContext = {}) {
   const refs = [];
   collectAggregateRefs(node, refs);
   for (const ref of refs) {
@@ -44750,7 +44869,8 @@ function materializeAggregateDependencies(outRow, rows, node, resolveAggSortKind
       ref.arg,
       ref.separator,
       rows,
-      resolveAggSortKind
+      resolveAggSortKind,
+      evaluationContext
     ));
     materializedValuesFor(outRow).byLookupKey.set(key, value);
   }
@@ -44781,14 +44901,20 @@ function evalGroupByKey(key, row, resolution, columns, aliasEvaluationContext) {
       `InternalError: unresolved plain GROUP BY item ${resolution.kind} reached evaluation.`
     );
   }
-  if (key.type === "FUNC_KEY") return evalStringFunc(key.expr, row);
-  return String(evalArithExpr(key.expr, row));
+  if (key.type === "FUNC_KEY") return evalStringFunc(
+    key.expr,
+    row,
+    void 0,
+    void 0,
+    aliasEvaluationContext.evaluationContext
+  );
+  return String(evalArithExpr(key.expr, row, aliasEvaluationContext.evaluationContext));
 }
-function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind) {
+function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind, evaluationContext = {}) {
   if (arg.type === "WILDCARD") {
     return func === "COUNT" ? rows.length : 0;
   }
-  const strValues = aggregateRowValues(func, arg, rows).filter((value) => value !== null);
+  const strValues = aggregateRowValues(func, arg, rows, evaluationContext).filter((value) => value !== null);
   const statistical = func === "STDDEV_POP" || func === "STDDEV_SAMP" || func === "VAR_POP" || func === "VAR_SAMP" || func === "MEDIAN";
   const numericValues = statistical ? strValues.map((value) => {
     const numeric = Number(value);
@@ -44866,7 +44992,7 @@ function evalAggregate(func, distinct, arg, separator, rows, resolveAggSortKind)
     }
   }
 }
-function aggregateRowValues(func, arg, rows) {
+function aggregateRowValues(func, arg, rows, evaluationContext = {}) {
   return rows.map((processingRow) => {
     const row = sourceRowForEvaluation(processingRow);
     let strVal;
@@ -44875,11 +45001,11 @@ function aggregateRowValues(func, arg, rows) {
       if (raw === void 0 || raw === "" && func !== "MIN" && func !== "MAX") return null;
       strVal = raw;
     } else if (arg.type === "ARITH" || arg.type === "NUMBER") {
-      const n = evalArithExpr(arg, row);
+      const n = evalArithExpr(arg, row, evaluationContext);
       if (isNaN(n)) return null;
       strVal = String(n);
     } else {
-      const value = evalScalarValueExprNullable(arg, row);
+      const value = evalScalarValueExprNullable(arg, row, void 0, void 0, evaluationContext);
       if (value === null) return null;
       if (value === "" && func !== "MIN" && func !== "MAX") return null;
       if (typeof value === "number" && Number.isNaN(value)) return null;
@@ -44892,9 +45018,17 @@ function toAggregateFieldRef(field) {
   const dot = field.indexOf(".");
   return dot > 0 ? { type: "FIELD", tableAlias: field.slice(0, dot), field: field.slice(dot + 1) } : { type: "FIELD", tableAlias: null, field };
 }
-function evalAggArithExpr(node, rows, resolveAggSortKind) {
+function evalAggArithExpr(node, rows, resolveAggSortKind, evaluationContext = {}) {
   if (node.type === "NUMBER") return node.value;
-  if (node.type === "AGG_REF") return Number(evalAggregate(node.func, node.distinct, node.arg, node.separator, rows, resolveAggSortKind));
+  if (node.type === "AGG_REF") return Number(evalAggregate(
+    node.func,
+    node.distinct,
+    node.arg,
+    node.separator,
+    rows,
+    resolveAggSortKind,
+    evaluationContext
+  ));
   if (node.type === "AGG_GROUP_KEY") {
     const field = node.tableAlias ? `${node.tableAlias}.${node.field}` : node.field;
     return Number(resolveFieldRef(rows[0] ?? {}, field));
@@ -44902,8 +45036,8 @@ function evalAggArithExpr(node, rows, resolveAggSortKind) {
   if (node.type === "VARIABLE") {
     throw new Error(`InternalError: unresolved aggregate arithmetic variable @${node.name}.`);
   }
-  const l = evalAggArithExpr(node.left, rows, resolveAggSortKind);
-  const r = evalAggArithExpr(node.right, rows, resolveAggSortKind);
+  const l = evalAggArithExpr(node.left, rows, resolveAggSortKind, evaluationContext);
+  const r = evalAggArithExpr(node.right, rows, resolveAggSortKind, evaluationContext);
   switch (node.op) {
     case "+":
       return l + r;
@@ -44947,22 +45081,24 @@ function aggregateResultSemantics(ref, resolver) {
   const semantics = ref.arg.type === "WILDCARD" ? "string" : resolveAggregateArgSemantics(ref.arg, resolver) ?? "string";
   return typeof semantics === "string" ? syntheticSemantics(semantics) : semantics;
 }
-function applyHaving(rows, having, resolveFieldType, resolveFieldSemantics2) {
+function applyHaving(rows, having, resolveFieldType, resolveFieldSemantics2, evaluationContext = {}) {
   if (having === null) return rows;
   return rows.filter((row) => evalWhere(
     having,
     havingEvaluationRow(row),
     resolveFieldType,
     void 0,
-    resolveFieldSemantics2
+    resolveFieldSemantics2,
+    evaluationContext
   ));
 }
-function applyDistinct(rows, columns, scalarCache, resolveFieldType, resolveFieldSemantics2) {
+function applyDistinct(rows, columns, scalarCache, resolveFieldType, resolveFieldSemantics2, evaluationContext = {}) {
   if (rows.length === 0) return rows;
   const keyFor = buildDistinctKeyBuilder(rows, columns, {
     scalarCache,
     resolveFieldType,
-    resolveFieldSemantics: resolveFieldSemantics2
+    resolveFieldSemantics: resolveFieldSemantics2,
+    evaluationContext
   });
   const seen = /* @__PURE__ */ new Set();
   return rows.filter((row) => {
@@ -44998,11 +45134,19 @@ function buildDistinctKeyBuilder(rows, columns, context) {
   };
   return (row) => JSON.stringify(buildDistinctTuple(columns, row, distinctContext));
 }
-function applyOrderBy(rows, orderBy, optionOrders, sortKinds, fieldSemantics2, aliasEvaluator) {
+function applyOrderBy(rows, orderBy, optionOrders, sortKinds, fieldSemantics2, aliasEvaluator, evaluationContext = {}) {
   if (orderBy.length === 0) return rows;
-  return sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics2, aliasEvaluator).rows.map((item) => item.row);
+  return sortDecoratedRows(
+    rows,
+    orderBy,
+    optionOrders,
+    sortKinds,
+    fieldSemantics2,
+    aliasEvaluator,
+    evaluationContext
+  ).rows.map((item) => item.row);
 }
-function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics2, aliasEvaluator) {
+function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantics2, aliasEvaluator, evaluationContext = {}) {
   const keyMeta = orderBy.map(({ key }) => {
     if (key.type === "ARITH_KEY") return { semantics: syntheticSemantics("number") };
     if (key.type === "FUNC_KEY") {
@@ -45028,7 +45172,7 @@ function sortDecoratedRows(rows, orderBy, optionOrders, sortKinds, fieldSemantic
   const decorated = rows.map((row) => ({
     row,
     keys: orderBy.map(({ key }, i) => {
-      const s = evalOrderKey(key, row, aliasEvaluator);
+      const s = evalOrderKey(key, row, aliasEvaluator, evaluationContext);
       return { s };
     })
   }));
@@ -45066,20 +45210,20 @@ var NUMERIC_ORDER_FUNCTIONS = /* @__PURE__ */ new Set([
   "QUARTER",
   "WEEK"
 ]);
-function evalOrderKey(key, row, aliasEvaluator) {
+function evalOrderKey(key, row, aliasEvaluator, evaluationContext = {}) {
   const sourceRow = sourceRowForEvaluation(row);
   switch (key.type) {
     case "FIELD_NAME":
       return aliasEvaluator?.(key.name, row) ?? getMaterializedLookupValue(row, key.name) ?? sourceRow[key.name] ?? "";
     case "ARITH_KEY":
-      return String(evalArithExpr(key.expr, sourceRow));
+      return String(evalArithExpr(key.expr, sourceRow, evaluationContext));
     case "FUNC_KEY":
-      return evalStringFunc(key.expr, sourceRow);
+      return evalStringFunc(key.expr, sourceRow, void 0, void 0, evaluationContext);
     case "GROUPING_KEY":
       return evalGroupingRef(key.ref, row);
   }
 }
-function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, resolveFieldSemantics2) {
+function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, resolveFieldSemantics2, evaluationContext = {}) {
   const evaluators = /* @__PURE__ */ new Map();
   for (const [columnIndex, column] of columns.entries()) {
     if (!("alias" in column) || column.alias === null) continue;
@@ -45103,15 +45247,37 @@ function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, reso
         evaluators.set(alias, (row) => getMaterializedSelectValue(row, columnIndex) ?? "");
         break;
       case "ARITH_COL":
-        evaluators.set(alias, (row) => String(evalArithExpr(column.expr, sourceRowForEvaluation(row))));
+        evaluators.set(alias, (row) => String(evalArithExpr(
+          column.expr,
+          sourceRowForEvaluation(row),
+          evaluationContext
+        )));
         break;
       case "STRFUNC_COL": {
         const source = stringFuncDefaultKey(column.expr);
-        evaluators.set(alias, (row) => hasAggregateInStringFuncExpr2(column.expr) ? getMaterializedSelectValue(row, columnIndex) ?? getMaterializedLookupValue(row, source) ?? evalStringFunc(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics2) : evalStringFunc(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics2));
+        evaluators.set(alias, (row) => hasAggregateInStringFuncExpr2(column.expr) ? getMaterializedSelectValue(row, columnIndex) ?? getMaterializedLookupValue(row, source) ?? evalStringFunc(
+          column.expr,
+          sourceRowForEvaluation(row),
+          resolveFieldType,
+          resolveFieldSemantics2,
+          evaluationContext
+        ) : evalStringFunc(
+          column.expr,
+          sourceRowForEvaluation(row),
+          resolveFieldType,
+          resolveFieldSemantics2,
+          evaluationContext
+        ));
         break;
       }
       case "CASE_COL":
-        evaluators.set(alias, (row) => containsAggregate2(column.expr) ? getMaterializedSelectValue(row, columnIndex) ?? "" : evalCaseWhen(column.expr, sourceRowForEvaluation(row), resolveFieldType, resolveFieldSemantics2));
+        evaluators.set(alias, (row) => containsAggregate2(column.expr) ? getMaterializedSelectValue(row, columnIndex) ?? "" : evalCaseWhen(
+          column.expr,
+          sourceRowForEvaluation(row),
+          resolveFieldType,
+          resolveFieldSemantics2,
+          evaluationContext
+        ));
         break;
       case "SCALAR_VALUE_COL": {
         const source = scalarValueDefaultKey(column.expr);
@@ -45119,7 +45285,8 @@ function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, reso
           column.expr,
           sourceRowForEvaluation(row),
           resolveFieldType,
-          resolveFieldSemantics2
+          resolveFieldSemantics2,
+          evaluationContext
         )));
         break;
       }
@@ -45135,7 +45302,7 @@ function buildOrderByAliasEvaluator(columns, scalarCache, resolveFieldType, reso
   }
   return (name, row) => evaluators.get(name)?.(row);
 }
-function applyWindow(rows, columns, optionOrders, sortKinds, fieldSemantics2, resolveAggSortKind) {
+function applyWindow(rows, columns, optionOrders, sortKinds, fieldSemantics2, resolveAggSortKind, evaluationContext = {}) {
   const windows = columns.map((column, columnIndex) => ({ column, columnIndex })).filter((item) => item.column.type === "WINDOW_COL");
   if (rows.length === 0 || windows.length === 0) return rows;
   for (let index = 0; index < rows.length; index++) rows[index] = asProcessingRow(rows[index]);
@@ -45148,14 +45315,28 @@ function applyWindow(rows, columns, optionOrders, sortKinds, fieldSemantics2, re
       else partitions.set(key, [row]);
     }
     for (const partition of partitions.values()) {
-      const sortedResult = sortDecoratedRows(partition, window.orderBy, optionOrders, sortKinds, fieldSemantics2);
+      const sortedResult = sortDecoratedRows(
+        partition,
+        window.orderBy,
+        optionOrders,
+        sortKinds,
+        fieldSemantics2,
+        void 0,
+        evaluationContext
+      );
       const sorted = sortedResult.rows;
       if (isAggregateWindow(window)) {
-        applyAggregateWindow(window, columnIndex, sortedResult, resolveAggSortKind);
+        applyAggregateWindow(
+          window,
+          columnIndex,
+          sortedResult,
+          resolveAggSortKind,
+          evaluationContext
+        );
         continue;
       }
       if (isValueWindow(window)) {
-        applyValueWindow(window, columnIndex, sorted);
+        applyValueWindow(window, columnIndex, sorted, evaluationContext);
         continue;
       }
       if (!isRankingWindow(window)) {
@@ -45175,14 +45356,24 @@ function applyWindow(rows, columns, optionOrders, sortKinds, fieldSemantics2, re
   }
   return rows;
 }
-function evaluateValueWindowArg(arg, row) {
-  const value = evalScalarValueExprNullable(arg, sourceRowForEvaluation(row));
+function evaluateValueWindowArg(arg, row, evaluationContext = {}) {
+  const value = evalScalarValueExprNullable(
+    arg,
+    sourceRowForEvaluation(row),
+    void 0,
+    void 0,
+    evaluationContext
+  );
   if (value === null || value === void 0) return "";
   if (typeof value === "number" && !Number.isFinite(value)) return "";
   return String(value);
 }
-function applyValueWindow(window, columnIndex, sorted) {
-  const values = sorted.map((item) => evaluateValueWindowArg(window.arg, item.row));
+function applyValueWindow(window, columnIndex, sorted, evaluationContext = {}) {
+  const values = sorted.map((item) => evaluateValueWindowArg(
+    window.arg,
+    item.row,
+    evaluationContext
+  ));
   const direction = window.valueFunc === "LAG" ? -1 : 1;
   for (let index = 0; index < sorted.length; index++) {
     const target = index + direction * window.offset;
@@ -45194,9 +45385,14 @@ function applyValueWindow(window, columnIndex, sorted) {
     );
   }
 }
-function applyAggregateWindow(window, columnIndex, sortedResult, resolveAggSortKind) {
+function applyAggregateWindow(window, columnIndex, sortedResult, resolveAggSortKind, evaluationContext = {}) {
   const sorted = sortedResult.rows;
-  const values = window.arg.type === "WILDCARD" ? null : aggregateRowValues(window.aggFunc, window.arg, sorted.map((item) => item.row));
+  const values = window.arg.type === "WILDCARD" ? null : aggregateRowValues(
+    window.aggFunc,
+    window.arg,
+    sorted.map((item) => item.row),
+    evaluationContext
+  );
   const comparison = window.arg.type === "WILDCARD" ? void 0 : resolveAggregateArgSemantics(window.arg, resolveAggSortKind);
   const semantics = typeof comparison === "string" ? syntheticSemantics(comparison) : comparison ?? syntheticSemantics("string");
   const output = [];
@@ -45288,13 +45484,14 @@ function evaluateSelectColumnValue(column, row, columnIndex, context = {}) {
       return getMaterializedSelectValue(row, columnIndex) ?? getMaterializedLookupValue(row, source) ?? getLegacyMaterializedValue(row, source) ?? "0";
     }
     case "ARITH_COL":
-      return String(evalArithExpr(column.expr, sourceRow));
+      return String(evalArithExpr(column.expr, sourceRow, context.evaluationContext));
     case "CASE_COL":
       return containsAggregate2(column.expr) ? getMaterializedSelectValue(row, columnIndex) ?? getMaterializedLookupValue(row, caseMaterializedKey(column.alias, columnIndex)) ?? getLegacyMaterializedValue(row, caseMaterializedKey(column.alias, columnIndex)) ?? "" : evalCaseWhen(
         column.expr,
         sourceRow,
         context.resolveFieldType,
-        context.resolveFieldSemantics
+        context.resolveFieldSemantics,
+        context.evaluationContext
       );
     case "GROUPING_COL":
       return evalGroupingRef(column.ref, row);
@@ -45304,12 +45501,14 @@ function evaluateSelectColumnValue(column, row, columnIndex, context = {}) {
         column.expr,
         sourceRow,
         context.resolveFieldType,
-        context.resolveFieldSemantics
+        context.resolveFieldSemantics,
+        context.evaluationContext
       ) : evalStringFunc(
         column.expr,
         sourceRow,
         context.resolveFieldType,
-        context.resolveFieldSemantics
+        context.resolveFieldSemantics,
+        context.evaluationContext
       );
     }
     case "SCALAR_VALUE_COL": {
@@ -45318,7 +45517,8 @@ function evaluateSelectColumnValue(column, row, columnIndex, context = {}) {
         column.expr,
         sourceRow,
         context.resolveFieldType,
-        context.resolveFieldSemantics
+        context.resolveFieldSemantics,
+        context.evaluationContext
       ));
     }
     case "SCALAR_SUBQUERY_COL":
@@ -45333,7 +45533,7 @@ function buildDistinctTuple(columns, row, context = {}) {
     return typeof value === "string" ? value : value.entries.map(([, entryValue]) => entryValue);
   });
 }
-function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, resolveFieldSemantics2, hiddenQualifiedAliases) {
+function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, resolveFieldSemantics2, hiddenQualifiedAliases, evaluationContext = {}) {
   if (columns.length === 1 && columns[0].type === "WILDCARD") {
     const projected2 = rows.map((row) => {
       const visible = stripHiddenQualifiedColumns(
@@ -45366,10 +45566,11 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, r
   }
   const projected = rows.map((row, rowIdx) => {
     const out = {};
-    const evaluationContext = {
+    const columnEvaluationContext = {
       scalarCache,
       resolveFieldType,
       resolveFieldSemantics: resolveFieldSemantics2,
+      evaluationContext,
       wildcardKeys: Object.keys(stripHiddenQualifiedColumns(
         stripParentShortcutColumns(row),
         hiddenQualifiedAliases
@@ -45377,7 +45578,7 @@ function project(rows, columns, scalarCache, resolveFieldType, sourceColumns2, r
       parentWildcardKeys: Object.keys(row).filter((key) => key.startsWith("_p.")).sort()
     };
     for (const [colIdx, col] of columns.entries()) {
-      const value = evaluateSelectColumnValue(col, row, colIdx, evaluationContext);
+      const value = evaluateSelectColumnValue(col, row, colIdx, columnEvaluationContext);
       switch (col.type) {
         case "VARIABLE_COL":
           break;
@@ -45769,7 +45970,8 @@ function runFullScan(input) {
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
     plainGroupByPlan,
-    warnings
+    warnings,
+    evaluationContext
   } = input;
   const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns, aggregateSortKindResolver);
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
@@ -45798,7 +46000,14 @@ function runFullScan(input) {
     knownColumns = mergeKnownColumns(knownColumns, rightColumns, rows);
   }
   const filterWhere = input.residualWhere !== void 0 ? input.residualWhere : stmt.where;
-  rows = applyFilter(rows, filterWhere, fieldTypeResolver, appliedKlikes, fieldSemanticsResolver);
+  rows = applyFilter(
+    rows,
+    filterWhere,
+    fieldTypeResolver,
+    appliedKlikes,
+    fieldSemanticsResolver,
+    evaluationContext
+  );
   const grouping = normalizeGroupingSpec(stmt);
   if (grouping.type === "GROUPING_SETS") {
     if (!resolvedGroupingSpec) {
@@ -45809,7 +46018,7 @@ function runFullScan(input) {
       resolvedGroupingSpec,
       stmt.columns,
       aggregateSortKindResolver,
-      { maxGeneratedRows: B65_MAX_GENERATED_ROWS }
+      { maxGeneratedRows: B65_MAX_GENERATED_ROWS, evaluationContext }
     );
   } else if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(
@@ -45821,21 +46030,29 @@ function runFullScan(input) {
       {
         scalarCache,
         resolveFieldType: fieldTypeResolver,
-        resolveFieldSemantics: fieldSemanticsResolver
+        resolveFieldSemantics: fieldSemanticsResolver,
+        evaluationContext
       }
     );
   }
   warnOnUnresolvedAggregateComparisons(stmt.columns, rows, warnings);
   const resolveHavingSemantics = (field) => field.aggregateRef ? aggregateResultSemantics(field.aggregateRef, aggregateSortKindResolver) : havingFieldSemanticsResolver?.(field);
   warnOnUnresolvedAggregateComparisons(stmt.having, rows, warnings);
-  rows = applyHaving(rows, stmt.having, havingFieldTypeResolver, resolveHavingSemantics);
+  rows = applyHaving(
+    rows,
+    stmt.having,
+    havingFieldTypeResolver,
+    resolveHavingSemantics,
+    evaluationContext
+  );
   rows = applyWindow(
     rows,
     stmt.columns,
     optionOrders,
     sortKinds,
     effectiveOrderSemantics,
-    aggregateSortKindResolver
+    aggregateSortKindResolver,
+    evaluationContext
   );
   if (stmt.distinct) {
     rows = applyDistinct(
@@ -45843,7 +46060,8 @@ function runFullScan(input) {
       stmt.columns,
       scalarCache,
       fieldTypeResolver,
-      fieldSemanticsResolver
+      fieldSemanticsResolver,
+      evaluationContext
     );
   }
   rows = applyOrderBy(
@@ -45852,7 +46070,14 @@ function runFullScan(input) {
     optionOrders,
     sortKinds,
     effectiveOrderSemantics,
-    buildOrderByAliasEvaluator(stmt.columns, scalarCache, fieldTypeResolver, fieldSemanticsResolver)
+    buildOrderByAliasEvaluator(
+      stmt.columns,
+      scalarCache,
+      fieldTypeResolver,
+      fieldSemanticsResolver,
+      evaluationContext
+    ),
+    evaluationContext
   );
   rows = applyLimit(rows, stmt.limit, stmt.offset);
   return project(
@@ -45862,7 +46087,8 @@ function runFullScan(input) {
     fieldTypeResolver,
     sourceColumns2,
     fieldSemanticsResolver,
-    hiddenQualifiedAliases
+    hiddenQualifiedAliases,
+    evaluationContext
   );
 }
 
@@ -47592,6 +47818,18 @@ var SearchAbortedError = class extends Error {
 var materializedMetaBySelectResult = /* @__PURE__ */ new WeakMap();
 var materializedMetaByValidationResult = /* @__PURE__ */ new WeakMap();
 var importSourceByDmlStatement = /* @__PURE__ */ new WeakMap();
+var statementEvaluationContextKey = /* @__PURE__ */ Symbol("statementEvaluationContext");
+function bindStatementEvaluationContext(options) {
+  const internal = options;
+  if (internal[statementEvaluationContextKey]) return options;
+  return {
+    ...options,
+    [statementEvaluationContextKey]: { statementInstant: /* @__PURE__ */ new Date() }
+  };
+}
+function statementEvaluationContext(options) {
+  return options[statementEvaluationContextKey] ?? {};
+}
 var defaultCacheContextByClient = /* @__PURE__ */ new WeakMap();
 var nextDefaultCacheContextId = 1;
 var nextCacheInvocationId = 1;
@@ -47841,6 +48079,7 @@ async function resolveRelativeDateExecutionPlan(stmt, client, cacheContext) {
   });
 }
 async function executeParsedStatement(stmt, client, options, cacheContext) {
+  options = bindStatementEvaluationContext(options);
   const relativeDatePlan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
   if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
   const unresolved = findVariableRef(stmt);
@@ -48055,7 +48294,14 @@ async function executeExistingRecordValidationCore(stmt, client, options, cacheC
     id: String(record2["$id"]?.value ?? ""),
     record: record2,
     flat: flatten(record2, null)
-  })).filter((row) => stmt.where === null || evalWhere(stmt.where, row.flat, (field) => evaluationTypes.get(field.field)));
+  })).filter((row) => stmt.where === null || evalWhere(
+    stmt.where,
+    row.flat,
+    (field) => evaluationTypes.get(field.field),
+    void 0,
+    void 0,
+    statementEvaluationContext(options)
+  ));
   const rows = [];
   const detailRows = /* @__PURE__ */ new Map();
   const summaryRows = /* @__PURE__ */ new Map();
@@ -48332,6 +48578,7 @@ function statementHasApplyMutation(statement) {
   return statement.type === "UPSERT" && statement.validateOnly !== true && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length);
 }
 async function executeBatchStatement(stmt, info, client, options, cacheContext, tempTables, variables, relativeDateVariables) {
+  options = bindStatementEvaluationContext(options);
   if (stmt.type === "SET_VARIABLE") {
     const resolvedStmt2 = resolveBatchVariableReferences(stmt, variables);
     validateStatementStatic(resolvedStmt2);
@@ -48371,7 +48618,7 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
         throw e;
       }
     } else {
-      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr));
+      variables.set(stmt.name, evaluateScalarExpr(resolvedStmt2.expr, statementEvaluationContext(options)));
     }
     return {};
   }
@@ -48387,7 +48634,10 @@ async function executeBatchStatement(stmt, info, client, options, cacheContext, 
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
       variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
     } else {
-      const value = evaluateScalarExpr(stmt.default);
+      const value = evaluateScalarExpr(
+        stmt.default,
+        statementEvaluationContext(options)
+      );
       variables.set(stmt.name, {
         type: "string",
         value: value.type === "number" ? value.raw ?? String(value.value) : value.value
@@ -48638,18 +48888,18 @@ function prepareRelativeDateVariables(statements, injectedVariables) {
   }
   return prepared;
 }
-function evaluateScalarExpr(expr) {
+function evaluateScalarExpr(expr, evaluationContext = {}) {
   switch (expr.type) {
     case "STRING":
       return { type: "string", value: expr.value };
     case "NUMBER":
       return { type: "number", value: expr.value, raw: numberLiteralText(expr) };
     case "KINTONE_FUNC":
-      return { type: "string", value: resolveKintoneFunc(expr.name) };
+      return { type: "string", value: resolveKintoneFunc(expr.name, evaluationContext) };
     case "STRING_FUNC":
-      return { type: "string", value: evalStringFunc(expr, {}) };
+      return { type: "string", value: evalStringFunc(expr, {}, void 0, void 0, evaluationContext) };
     case "ARITH": {
-      const value = evalArithExpr(expr, {});
+      const value = evalArithExpr(expr, {}, evaluationContext);
       if (!Number.isFinite(value)) {
         throw new Error("ArgumentError: SET scalar arithmetic produced a non-finite number.");
       }
@@ -49156,7 +49406,7 @@ async function executeSelect(stmt, client, options, cacheContext, cteCache, capt
   const subqueryWarnings = /* @__PURE__ */ new Set();
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
   if (isNoFromSelect(stmt)) {
-    result = executeNoFromSelect(stmt);
+    result = executeNoFromSelect(stmt, options);
     if (captureColumnMeta) {
       materializedMetaBySelectResult.set(
         result,
@@ -49637,13 +49887,30 @@ function validateNoFromColumns(stmt) {
     }
   }
 }
-function executeNoFromSelect(stmt) {
+function executeNoFromSelect(stmt, options) {
   if (stmt.joins.length > 0 || stmt.where || normalizeGroupingSpec(stmt).type !== "NONE" || stmt.having || stmt.orderBy.length > 0 || stmt.distinct) {
     throw new Error("ArgumentError: JOIN/WHERE/GROUP BY/HAVING/ORDER BY/DISTINCT are not supported without FROM.");
   }
   validateNoFromColumns(stmt);
-  const windowed = applyWindow([{}], stmt.columns);
-  const { rows: projected, columns } = project(windowed, stmt.columns);
+  const windowed = applyWindow(
+    [{}],
+    stmt.columns,
+    void 0,
+    void 0,
+    void 0,
+    void 0,
+    statementEvaluationContext(options)
+  );
+  const { rows: projected, columns } = project(
+    windowed,
+    stmt.columns,
+    void 0,
+    void 0,
+    void 0,
+    void 0,
+    void 0,
+    statementEvaluationContext(options)
+  );
   const rows = applyLimit(projected, stmt.limit, stmt.offset);
   return { type: "SELECT", rows, columns, rowCount: rows.length, warnings: [] };
 }
@@ -49719,8 +49986,10 @@ async function executeSimpleSelect(stmt, client, options, cacheContext, orderPla
         stmt.columns,
         void 0,
         fieldTypeResolvers.row,
-        projectionSemanticsResolver
-      )
+        projectionSemanticsResolver,
+        statementEvaluationContext(options)
+      ),
+      statementEvaluationContext(options)
     );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -49730,7 +49999,9 @@ async function executeSimpleSelect(stmt, client, options, cacheContext, orderPla
     void 0,
     fieldTypeResolvers.row,
     void 0,
-    projectionSemanticsResolver
+    projectionSemanticsResolver,
+    void 0,
+    statementEvaluationContext(options)
   );
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -50893,7 +51164,8 @@ async function executeFullScanSelect(stmt, client, options, cacheContext, cteCac
     ...prefilterPlan ? { residualWhere: prefilterPlan.residualWhere } : boundServerFunctionPlan ? { residualWhere: boundServerFunctionPlan.joinPlan.residualWhere } : {},
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
-    warnings
+    warnings,
+    evaluationContext: statementEvaluationContext(options)
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -51720,7 +51992,8 @@ async function executeFullScanWithCte(stmt, client, options, cteCache, cacheCont
     tableColumns,
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
-    plainGroupByPlan
+    plainGroupByPlan,
+    evaluationContext: statementEvaluationContext(options)
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -52846,7 +53119,12 @@ async function materializeValidationCandidates(stmt, operation, client, options,
     evaluationTypes = new Map(stmt.fields.map((field) => [field, infoByCode.get(field)?.fieldType ?? ""]));
     assertCheckComparisonTypes(stmt, evaluationTypes);
     rows = stmt.values.map((row) => row.map(
-      (value, i) => value.type === "CASE_VALUE" ? evalCaseWhenValue(value.expr, {}, infoByCode.get(stmt.fields[i])?.fieldType) : value
+      (value, i) => value.type === "CASE_VALUE" ? evalCaseWhenValue(
+        value.expr,
+        {},
+        infoByCode.get(stmt.fields[i])?.fieldType,
+        statementEvaluationContext(options)
+      ) : value
     ));
   } else {
     const selectResult = await dmlSourceMaterializer.materialize(stmt, client, options, cacheContext, tempTables, [...infoByCode.values()]);
@@ -52977,7 +53255,12 @@ async function materializeUpdateValidationCandidates(stmt, client, options, cach
     });
     snapshotsById = indexDmlUpdateSnapshots(resolved.records);
     evaluationById = snapshotsById;
-    records = updateToPutBatchesArith(stmt, resolved.records, fieldTypes).flatMap((batch) => batch.records);
+    records = updateToPutBatchesArith(
+      stmt,
+      resolved.records,
+      fieldTypes,
+      statementEvaluationContext(options)
+    ).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt);
     if (checkTargetFields.length > 0) {
@@ -53145,7 +53428,12 @@ async function materializeUpdateFromValidationCandidates(stmt, from, client, opt
     snapshotFields
   );
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const records = updateFromToPutBatches(stmt, matched, fieldTypes).flatMap((batch) => batch.records);
+  const records = updateFromToPutBatches(
+    stmt,
+    matched,
+    fieldTypes,
+    statementEvaluationContext(options)
+  ).flatMap((batch) => batch.records);
   const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
   const snapshotsById = snapshotFields ? indexDmlUpdateSnapshots(matched.map((pair) => pair.target)) : /* @__PURE__ */ new Map();
   return records.sort((a, b) => a.id - b.id).map((entry, index) => ({
@@ -53377,7 +53665,7 @@ async function executeInsert(stmt, client, options, cacheContext) {
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const batches = insertToPostBatches(stmt, fieldTypes);
+  const batches = insertToPostBatches(stmt, fieldTypes, statementEvaluationContext(options));
   assertValidDmlRecords(batches.flatMap((batch) => batch.records), stmt.fields, fieldInfos, numberPrecision);
   const createdIds = [];
   for (const batch of batches) {
@@ -53986,7 +54274,12 @@ async function executeUpdate(stmt, client, options, cacheContext, tempTables) {
       { maxRecords: maxRecords2, parallel: options.fetchParallel ?? 1 }
     );
     const records = resolved2.records;
-    const batches2 = updateToPutBatchesArith(stmt, records, fieldTypes);
+    const batches2 = updateToPutBatchesArith(
+      stmt,
+      records,
+      fieldTypes,
+      statementEvaluationContext(options)
+    );
     assertValidDmlRecords(batches2.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
     if (options.confirm) {
       const ok = await options.confirm(records.length, "UPDATE");
@@ -54043,7 +54336,13 @@ async function executeApplyPatchUpdate(stmt, client, options, cacheContext, stat
     throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
   }
   requireRevision(response.records[0]);
-  const plan = buildApplyPatchPlan({ statement: stmt, snapshot: response.records[0], fieldInfos, metadata });
+  const plan = buildApplyPatchPlan({
+    statement: stmt,
+    snapshot: response.records[0],
+    fieldInfos,
+    metadata,
+    evaluationContext: statementEvaluationContext(options)
+  });
   const fieldIndex = buildPostImageFieldIndex(
     fieldInfos,
     stmt.assignments.map((assignment) => assignment.field)
@@ -54242,7 +54541,8 @@ async function selectApplyParentSnapshots(stmt, client, options, fieldInfos, cac
     row,
     resolvers.fieldTypeResolver,
     selectionPlan.appliedKlikes,
-    resolvers.fieldSemanticsResolver
+    resolvers.fieldSemanticsResolver,
+    statementEvaluationContext(options)
   )).map(({ snapshot }) => snapshot);
 }
 function collectApplyParentWhereFields(where) {
@@ -54483,7 +54783,12 @@ function applyValidationColumnMeta(columns, fieldInfos, appId) {
 async function executeUpdateFrom(stmt, from, client, options, cacheContext, tempTables) {
   const matched = await resolveUpdateFromMatchedRecords(stmt, from, client, options, cacheContext, tempTables);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const batches = updateFromToPutBatches(stmt, matched, fieldTypes);
+  const batches = updateFromToPutBatches(
+    stmt,
+    matched,
+    fieldTypes,
+    statementEvaluationContext(options)
+  );
   const targetFields = stmt.assignments.map((assignment) => assignment.field);
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const numberPrecision = await loadNumberPrecisionForTargets(stmt.appId, targetFields, fieldInfos, client, cacheContext);
@@ -54557,7 +54862,12 @@ async function executeUpsert(stmt, client, options, cacheContext) {
     stmt.fields.forEach((field, i) => {
       const val = row[i];
       if (val.type === "CASE_VALUE") {
-        record2[field] = { value: evalCaseWhenValue(val.expr, {}, fieldTypes.get(field)) };
+        record2[field] = { value: evalCaseWhenValue(
+          val.expr,
+          {},
+          fieldTypes.get(field),
+          statementEvaluationContext(options)
+        ) };
       } else {
         record2[field] = { value: toKintoneValue(val, fieldTypes.get(field)) };
       }
@@ -54678,7 +54988,14 @@ async function executeUpdateSubtable(stmt, client, options, cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
+  const targets = expanded.filter((r) => evalWhere(
+    stmt.where,
+    r.flat,
+    resolveFieldType,
+    void 0,
+    void 0,
+    statementEvaluationContext(options)
+  ));
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "UPDATE");
     if (!ok) throw new OperationCancelledError("UPDATE", targets.length);
@@ -54698,7 +55015,12 @@ async function executeUpdateSubtable(stmt, client, options, cacheContext) {
       if (a.field.startsWith("_")) {
         throw new Error(`\u30B5\u30D6\u30C6\u30FC\u30D6\u30EB UPDATE \u3067\u30B7\u30B9\u30C6\u30E0\u5217\u300C${a.field}\u300D\u306F\u66F4\u65B0\u3067\u304D\u307E\u305B\u3093`);
       }
-      updates[a.field] = { value: evaluateSubtableAssignmentValue(a.value, t.flat, resolveFieldType) };
+      updates[a.field] = { value: evaluateSubtableAssignmentValue(
+        a.value,
+        t.flat,
+        resolveFieldType,
+        statementEvaluationContext(options)
+      ) };
     }
     byRid.set(t.rowId, updates);
   }
@@ -54741,7 +55063,14 @@ async function executeDeleteSubtable(stmt, client, options, cacheContext) {
     { maxRecords: options.maxRecords ?? 1e4, parallel: options.fetchParallel ?? 1 }
   );
   const expanded = expandRowsForSubtableDml(parents, subtableCode);
-  const targets = expanded.filter((r) => evalWhere(stmt.where, r.flat, resolveFieldType));
+  const targets = expanded.filter((r) => evalWhere(
+    stmt.where,
+    r.flat,
+    resolveFieldType,
+    void 0,
+    void 0,
+    statementEvaluationContext(options)
+  ));
   if (options.confirm) {
     const ok = await options.confirm(targets.length, "DELETE");
     if (!ok) throw new OperationCancelledError("DELETE", targets.length);
@@ -54916,7 +55245,8 @@ async function executeReorder(stmt, client, options, cacheContext) {
     r.flat,
     resolveFieldType,
     void 0,
-    resolveReorderSemantics
+    resolveReorderSemantics,
+    statementEvaluationContext(options)
   )).map((r) => r.parentId));
   if (options.confirm) {
     const ok = await options.confirm(targetParentIds.size, "UPDATE");
@@ -54928,7 +55258,13 @@ async function executeReorder(stmt, client, options, cacheContext) {
     if (!parent) continue;
     const rows = getMutableTableRows(parent, stmt.subtableCode);
     const sortable = rows.map((row, i) => ({ row, i, flat: buildFlatRowForSort(parent, stmt.subtableCode, row, i) }));
-    sortable.sort((a, b) => compareByOrder(a.flat, b.flat, stmt.by, resolveReorderSemantics));
+    sortable.sort((a, b) => compareByOrder(
+      a.flat,
+      b.flat,
+      stmt.by,
+      resolveReorderSemantics,
+      statementEvaluationContext(options)
+    ));
     const orderedRowIds = sortable.map((x) => x.row.id ?? "");
     await client.putRecords(buildSubtableReorderPutParams(stmt.appId, pid, getRevision(parent), stmt.subtableCode, orderedRowIds));
   }
@@ -54949,24 +55285,24 @@ function buildFlatRowForSort(parent, subtableCode, row, idx) {
   }
   return flat;
 }
-function compareByOrder(a, b, orderBy, resolveSemantics) {
+function compareByOrder(a, b, orderBy, resolveSemantics, evaluationContext = {}) {
   for (const item of orderBy) {
-    const av = evalOrderKeyForRow(item.key, a);
-    const bv = evalOrderKeyForRow(item.key, b);
+    const av = evalOrderKeyForRow(item.key, a, evaluationContext);
+    const bv = evalOrderKeyForRow(item.key, b, evaluationContext);
     const semantics = item.key.type === "FIELD_NAME" ? resolveSemantics(aggregateFieldRef(item.key.name)) : item.key.type === "ARITH_KEY" ? syntheticSemantics("number") : item.key.type === "FUNC_KEY" ? stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string") : syntheticSemantics("number");
     const cmp = compareCanonicalValues(av, bv, semantics ?? syntheticSemantics("string"));
     if (cmp !== 0) return item.direction === "ASC" ? cmp : -cmp;
   }
   return 0;
 }
-function evalOrderKeyForRow(key, row) {
+function evalOrderKeyForRow(key, row, evaluationContext = {}) {
   switch (key.type) {
     case "FIELD_NAME":
       return row[key.name] ?? "";
     case "ARITH_KEY":
-      return String(evalArithExpr(key.expr, row));
+      return String(evalArithExpr(key.expr, row, evaluationContext));
     case "FUNC_KEY":
-      return evalStringFunc(key.expr, row);
+      return evalStringFunc(key.expr, row, void 0, void 0, evaluationContext);
     case "GROUPING_KEY":
       throw new Error("ArgumentError: GROUPING() is not supported in REORDER BY.");
   }
