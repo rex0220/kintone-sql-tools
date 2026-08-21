@@ -97,10 +97,13 @@
 
 リスク: `KEY` ガードは共有関数 1 箇所の修正で全 call site に効くが、列別名経路（`parseAliasName` は任意キーワードを別名に取る）に同種の露出があり、テストで固定する。
 
-### Stage 4 — as-of 固定評価（F）
+### Stage 4 — as-of 固定評価（F）＋ 経路のヘッダ対応
+
+> **【v3.68.0 実機確認で追加（2026-08-21）】** CLI（`cli/index.ts:1433,1889`）・MCP（`mcp/tools.ts:531,617,699`）・プラグイン（`ui/desktop.ts`）の**事前解析が `parseSqlStatements`（ヘッダ非対応）のため、v3.68.0 では dialect 1 を実行できる出荷面が無い**（エンジン内部 `executeBatch` のみ）。オーナー裁定＝文書訂正で v3.68.0 は出荷済みとし、**本段でヘッダ対応の共通事前解析（parseScriptHeader → strip → dialect capability）へ切替える**。engine-library `/engine` の gating は Stage 6 のまま。**教訓＝「経路ごとに検査が揃っていない」の再発**（[check-sibling-path]）—出荷面をそのまま通す e2e を本段で 1 本入れる（CLI で受入 2 サンプル実行）。
 
 | 変更 | ファイル |
 |---|---|
+| **CLI/MCP/プラグインの事前解析をヘッダ対応へ**（共通ヘルパー化・dialect 0 挙動不変）＋ CLI e2e（dialect 1 スクリプトの実実行） | `src/core/sql.ts`・`src/cli/index.ts`・`src/mcp/tools.ts`・`src/ui/desktop.ts` |
 | `ExecutionContext.clock`（asOf + timezone・Stage 1 で導入済みの枠に実装を入れる）。**クロックの文単位固定と評価器への配線は [B169](ksql_b169_current_datetime_drift_issue.md)（先行実施）で完了済みの前提**で、本段は「注入された asOf でスクリプト全体の基準時刻を上書きする」層を足すだけ。省略時は従来どおり実行開始時刻 | `src/execute.ts` |
 | `resolveKintoneFunc`（SET/DECLARE の NOW/TODAY）を同じクロックへ接続（B169 の配線に相乗り） | `src/engine/evalWhere.ts:462-481` |
 | `@NOW()` / `@TODAY()` / `@MONTH_START()` / `@NEXT_MONTH_START()`（dialect 1・§5 Q3 の裁定に従う）: lexer は既に `@NOW` を VARIABLE トークン化するため「VARIABLE + `(`」をパーサーで時刻関数呼び出しに解釈（dialect 1 のみ）| `src/parser/parser.ts`・`ast.ts`・評価器 |

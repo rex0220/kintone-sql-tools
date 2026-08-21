@@ -12,8 +12,9 @@ release 成果物:
   正規化)。-- @ksql name/depends_on/timeout ヘッダも解析します。
 - 宣言なし (dialect 0 = 既定) の SQL は一切変わりません。dialect 1 構文を宣言なしで
   使うと「-- @ksql dialect: 1 の宣言が必要」エラーになります。
-- 言語リファレンス・MCP ツールの dialect 1 対応 (構造化 diagnostics・as-of 注入・
-  validate 拡張) は後続リリースで提供します。本版の dialect 1 は実験的扱いです。
+- 【訂正】本版で dialect 1 を実行できるのはエンジン内部 API のみです。CLI / MCP /
+  プラグインからの実行対応・言語リファレンス・構造化 diagnostics・as-of 注入・
+  validate 拡張は後続リリースで提供します。本版はエンジン実装の先行公開 (実験的) です。
 
 v3.67.0 の節は畳みました (B169 CURRENT_DATE/CURRENT_TIMESTAMP を文単位の固定時刻へ =
 結果が変わる形あり)。内容は CHANGELOG.md にあります。
