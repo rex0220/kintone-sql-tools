@@ -28,6 +28,7 @@ import { KlikeValidationError } from "./klikeValidation";
 import { PrimaryOrganizationDmlValidationError } from "./primaryOrganizationDmlValidation";
 import { validateStatementStatic } from "./statementValidation";
 import { validateGroupingStatic } from "./groupingValidation";
+import { asOfFunctionNameFromVariable } from "./asOfClock";
 
 /** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
 export const MAX_TEMP_TABLES = 16;
@@ -161,6 +162,7 @@ function collectVariableRefs(node: unknown, refs: VariableUse[], inWhere = false
     const type = obj["type"];
     if ((type === "VARIABLE" || type === "VARIABLE_COL" || type === "VARIABLE_IN_LIST")
         && typeof obj["name"] === "string") {
+      if (asOfFunctionNameFromVariable(obj["name"]) !== null) return;
       refs.push({
         name: obj["name"],
         kind: type === "VARIABLE" ? "scalar" : type === "VARIABLE_COL" ? "select-column" : "array-in-list",
