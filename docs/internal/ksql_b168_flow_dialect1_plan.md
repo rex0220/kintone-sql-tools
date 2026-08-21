@@ -1,6 +1,6 @@
 # B168 Flow dialect 1 エンジン実装 — 調査結果と実装計画（R2）
 
-- ステータス: ✅ **全 6 段完了・リリース済み**（2026-08-21・Stage 1-3＝v3.68.0・Stage 4-6＝**v3.69.0**（PR #375-#380）・受入基準 1〜8 全達成・**publish 済み・実機確認済み**（常駐 MCP 3.69.0 で dialect 1 スモーク全面動作と ksql_validate の diagnostics/scriptMeta を実測）。オーナー裁定＝Q1〜Q9/Q11 は §5 の推奨案・Q10 は [B169](ksql_b169_current_datetime_drift_issue.md)＝v3.67.0 で先行解消。**残務＝§6 の発注元（ksql-flow）への申し送り送付**）
+- ステータス: ✅ **全 6 段完了・リリース済み**（2026-08-21・Stage 1-3＝v3.68.0・Stage 4-6＝**v3.69.0**（PR #375-#380）・受入基準 1〜8 全達成・**publish 済み・実機確認済み**（常駐 MCP 3.69.0 で dialect 1 スモーク全面動作と ksql_validate の diagnostics/scriptMeta を実測）。オーナー裁定＝Q1〜Q9/Q11 は §5 の推奨案・Q10 は [B169](ksql_b169_current_datetime_drift_issue.md)＝v3.67.0 で先行解消。**§6 の申し送りは `ksql-flow/docs/kSQLエンジンからの申し送り-20260821-v3690.md` へ送付済み＝残務なし・完結**）
 - 指示書: [flow_dialect1_engine_task.md](../flow_dialect1_engine_task.md) ／ 発注元設計書: `ksql-flow/docs/ksql_flow_design_v2_4.md`（参照可・v2.4 と指示書は整合を確認済み）
 - 台帳: [ksql_issue_tracker.md](../ksql_issue_tracker.md)
 - 本書の役割: 指示書 §4-1「調査フェーズ → 実装計画（変更ファイル・段階分け・リスク）を先に提示」の成果物。**§5 の要判断事項に回答が出るまでコード変更しない。**
