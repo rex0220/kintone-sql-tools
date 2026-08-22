@@ -8,7 +8,7 @@ import {
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
 import type { EvaluationContext } from "../engine/evalFunc";
-import type { AppendOperation, ExpectRowsGuard, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import type { AppendOperation, ExpectRowsGuard, FieldRef, LiteralInsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
 import { buildApplyMultiValueFieldPlan, type ApplyMultiValueFieldPlan } from "./applyMultiValuePlan";
 import { assertApplyTargetFieldType } from "./applyPatchScope";
 
@@ -538,7 +538,7 @@ export function buildApplyAppendRows(
 
 function buildAppendValue(
   operation: AppendOperation,
-  row: InsertRow,
+  row: LiteralInsertRow,
   children: ReadonlyMap<string, KintoneFieldInfo>,
   table: string,
   evaluationContext: EvaluationContext

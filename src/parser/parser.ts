@@ -63,7 +63,7 @@ import type {
   OrderByItem,
   InsertStatement,
   InsertSelectStatement,
-  InsertRow,
+  InsertRow, LiteralInsertRow,
   AggArithColumn,
   AggArithExpr,
   AggOperand,
@@ -3833,7 +3833,7 @@ export class Parser {
     const values: InsertRow[] = [];
     do {
       this.expect(TokenKind.LPAREN);
-      const row = this.parseInsertRow(fields.length);
+      const row = this.parseInsertRow(fields.length, true);
       this.expect(TokenKind.RPAREN);
       values.push(row);
     } while (this.consume(TokenKind.COMMA));
@@ -3906,7 +3906,7 @@ export class Parser {
     const values: UpsertStatement["values"] = [];
     do {
       this.expect(TokenKind.LPAREN);
-      values.push(this.parseInsertRow(fields.length));
+      values.push(this.parseInsertRow(fields.length, false));
       this.expect(TokenKind.RPAREN);
     } while (this.consume(TokenKind.COMMA));
 
@@ -4254,7 +4254,9 @@ export class Parser {
     return { type: "ARRAY", elements };
   }
 
-  private parseInsertRow(expectedLen: number): InsertRow {
+  private parseInsertRow(expectedLen: number, allowAsOf: true): InsertRow;
+  private parseInsertRow(expectedLen: number, allowAsOf: false): LiteralInsertRow;
+  private parseInsertRow(expectedLen: number, allowAsOf: boolean): InsertRow {
     const row: InsertRow = [];
     do {
       if (this.peek().kind === TokenKind.LBRACKET) {
@@ -4277,8 +4279,13 @@ export class Parser {
           row.push({ type: "STRING", value: tok.value });
         } else if (tok.kind === TokenKind.NUMBER) {
           row.push(makeNumberLiteral(tok.value));
+        } else if (allowAsOf && this.isDialect1AsOfCall(tok)) {
+          row.push(this.finishVariableReference(tok));
         } else {
-          throw new ParseError("INSERT の値には文字列・数値・配列リテラル・CASE WHEN が必要です", tok);
+          const hint = this.isDialect1AsOfCall(tok)
+            ? " INSERT ... VALUES では使用できます。この文型では INSERT ... SELECT で注入してください。"
+            : "";
+          throw new ParseError(`INSERT の値には文字列・数値・配列リテラル・CASE WHEN が必要です${hint}`, tok);
         }
       }
     } while (this.consume(TokenKind.COMMA));
@@ -4290,6 +4297,14 @@ export class Parser {
       );
     }
     return row;
+  }
+
+  private isDialect1AsOfCall(tok: Token): boolean {
+    return this.capabilities.dialect1 === true
+      && tok.kind === TokenKind.VARIABLE
+      && isAsOfFunctionName(tok.value.slice(1).toUpperCase())
+      && this.peek().kind === TokenKind.LPAREN
+      && this.peekAt(1).kind === TokenKind.RPAREN;
   }
 
   // ----------------------------------------------------------
@@ -4468,10 +4483,10 @@ export class Parser {
       do fields.push(this.parseIdentifier()); while (this.consume(TokenKind.COMMA));
       this.expect(TokenKind.RPAREN);
       this.expect(TokenKind.VALUES, "APPEND のフィールド一覧の後には VALUES が必要です");
-      const values: InsertRow[] = [];
+      const values: LiteralInsertRow[] = [];
       do {
         this.expect(TokenKind.LPAREN, "APPEND VALUES の各行は ( で始めてください");
-        values.push(this.parseInsertRow(fields.length));
+        values.push(this.parseInsertRow(fields.length, false));
         this.expect(TokenKind.RPAREN);
       } while (this.consume(TokenKind.COMMA));
       return { kind: "APPEND", fields, values };

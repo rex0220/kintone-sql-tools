@@ -1062,6 +1062,23 @@ test("SET の数値式を ASSERT と WHERE へ型付きリテラルとして置�
   expect(client.getCalls[0].query).toContain("売上 > 14");
 });
 
+test("B171: 数値 SET 変数は ASSERT の大小比較で number provenance を維持する", async () => {
+  const result = await executeBatch("SET @count = 3; ASSERT @count <= 10", makeClient());
+  expect(result.ok).toBe(true);
+  expect(result.statements.map((statement) => statement.status)).toEqual(["success", "success"]);
+});
+
+test("B171: STRING DECLARE と外部注入値は大小比較で string provenance を維持する", async () => {
+  const declared = await executeBatch("DECLARE @value = '20'; ASSERT @value > '100'", makeClient());
+  expect(declared.ok).toBe(true);
+  const injected = await executeBatch(
+    "DECLARE @value = 'default'; ASSERT @value > '100'",
+    makeClient(),
+    { variables: { value: "20" } }
+  );
+  expect(injected.ok).toBe(true);
+});
+
 test("SET数値変数は2^53境界のraw lexemeを比較完了まで保持する", async () => {
   const result = await executeBatch(
     "SET @high = 9007199254740993; ASSERT @high > 9007199254740992; ASSERT @high = 9.007199254740993e15",

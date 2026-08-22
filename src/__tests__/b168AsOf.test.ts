@@ -10,12 +10,15 @@ function record(values: Record<string, string>): KintoneRecord {
 
 function client(options: { advanceOnGet?: Date; records?: KintoneRecord[] } = {}): KintoneClient & {
   queries: string[];
+  posts: Array<Parameters<KintoneClient["postRecords"]>[0]>;
 } {
   const queries: string[] = [];
+  const posts: Array<Parameters<KintoneClient["postRecords"]>[0]> = [];
   let advanced = false;
   const records = options.records ?? [record({ $id: "1", 日付: "2026-08-22" })];
   return {
     queries,
+    posts,
     async getRecords(params) {
       queries.push(params.query ?? "");
       if (!advanced && options.advanceOnGet) {
@@ -31,7 +34,10 @@ function client(options: { advanceOnGet?: Date; records?: KintoneRecord[] } = {}
         async close() { /* noop */ },
       };
     },
-    async postRecords(params) { return { ids: params.records.map((_, index) => String(index + 1)) }; },
+    async postRecords(params) {
+      posts.push(params);
+      return { ids: params.records.map((_, index) => String(index + 1)) };
+    },
     async putRecords() { /* noop */ },
     async deleteRecords() { /* noop */ },
     async getApps() { return []; },
@@ -39,6 +45,12 @@ function client(options: { advanceOnGet?: Date; records?: KintoneRecord[] } = {}
       return [
         { code: "$id", label: "レコード番号", fieldType: "RECORD_NUMBER" },
         { code: "日付", label: "日付", fieldType: "DATE" },
+        { code: "n", label: "n", fieldType: "DATETIME" },
+        { code: "d", label: "d", fieldType: "DATE" },
+        { code: "m", label: "m", fieldType: "DATE" },
+        { code: "nm", label: "nm", fieldType: "DATE" },
+        { code: "tags", label: "tags", fieldType: "MULTI_SELECT" },
+        { code: "flag", label: "flag", fieldType: "SINGLE_LINE_TEXT" },
       ];
     },
     async getProcessStatuses() { return { enable: false, states: [] }; },
@@ -77,6 +89,33 @@ test("injected asOf drives all four functions across statements while B169 remai
   } finally {
     jest.useRealTimers();
   }
+});
+
+test("B171: INSERT VALUES の as-of 4関数は実行時に同一バッチ時刻へ展開される", async () => {
+  const asOf = new Date("2026-08-21T18:00:00.123Z");
+  const mock = client();
+  const result = await executeBatch(
+    `${header}INSERT INTO APP171 (n,d,m,nm,tags,flag) VALUES (`
+      + "@NOW(),@TODAY(),@MONTH_START(),@NEXT_MONTH_START(),['A','B'],CASE WHEN missing='x' THEN 'yes' ELSE 'no' END),"
+      + "(@NOW(),@TODAY(),@MONTH_START(),@NEXT_MONTH_START(),['C'],'no')",
+    mock,
+    { asOf, timezone: "Asia/Tokyo" }
+  );
+  expect(result.statements[0]?.error).toBeUndefined();
+  expect(result.ok).toBe(true);
+  expect(mock.posts).toHaveLength(1);
+  expect(mock.posts[0].records).toEqual([
+    {
+      n: { value: asOf.toISOString() }, d: { value: "2026-08-22" },
+      m: { value: "2026-08-01" }, nm: { value: "2026-09-01" },
+      tags: { value: ["A", "B"] }, flag: { value: "no" },
+    },
+    {
+      n: { value: asOf.toISOString() }, d: { value: "2026-08-22" },
+      m: { value: "2026-08-01" }, nm: { value: "2026-09-01" },
+      tags: { value: ["C"] }, flag: { value: "no" },
+    },
+  ]);
 });
 
 test("omitted asOf is captured once at executeBatch entry", async () => {

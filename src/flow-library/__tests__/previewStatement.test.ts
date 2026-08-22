@@ -100,6 +100,32 @@ test("previews INSERT, UPDATE, and DELETE with write-order samples and no writes
   expect(deleteMock.writes).toEqual({ post: 0, put: 0, delete: 0 });
 });
 
+test("B171: previewStatement は INSERT VALUES の as-of 4関数を注入時刻へ展開する", async () => {
+  const parsed = parseScript(`-- @ksql dialect: 1
+INSERT INTO APP1 (key,value) VALUES (@TODAY(),@NOW()),(@MONTH_START(),@NEXT_MONTH_START());`);
+  expect(parsed.diagnostics).toEqual([]);
+  const mock = mockClient();
+  const context = createExecutionContext({
+    client: mock.client,
+    statements: parsed.statements,
+    meta: parsed.meta,
+    asOf: new Date("2026-08-21T18:00:00.123Z"),
+    timezone: "Asia/Tokyo",
+  });
+  try {
+    await expect(previewStatement(parsed.statements[0], context)).resolves.toMatchObject({
+      operation: "INSERT",
+      samples: [
+        { kind: "insert", after: { key: "2026-08-22", value: "2026-08-21T18:00:00.123Z" } },
+        { kind: "insert", after: { key: "2026-08-01", value: "2026-09-01" } },
+      ],
+    });
+    expect(mock.writes).toEqual({ post: 0, put: 0, delete: 0 });
+  } finally {
+    await disposeExecutionContext(context);
+  }
+});
+
 test("250-row UPSERT classifies 120 inserts and 130 updates and estimates four writes", async () => {
   const existing = Array.from({ length: 130 }, (_, index) => ({
     $id: { value: String(index + 1) },

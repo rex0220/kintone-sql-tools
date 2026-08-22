@@ -30,6 +30,19 @@ test("ASSERT WARN failure records a warning and continues", async () => {
   });
 });
 
+test("B171: ASSERT WARN の COUNT 大小比較は数値 provenance を使う", async () => {
+  const records = Array.from({ length: 12 }, (_, index) => ({ $id: { value: String(index + 1) } }));
+  const result = await executeBatch(
+    `${header}ASSERT WARN (SELECT COUNT(*) FROM APP1) <= 9, 'too many'; SELECT 1 AS continued`,
+    client(records)
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[0].result).toMatchObject({
+    type: "ASSERT", passed: false, warning: "too many",
+  });
+  expect(result.statements[1].status).toBe("success");
+});
+
 test("ASSERT failure includes its message and skips following statements", async () => {
   const result = await executeBatch(
     `${header}ASSERT 1 = 2, 'business message'; SELECT 1 AS skipped`,
@@ -63,6 +76,17 @@ test("EXIT false records the decision and continues", async () => {
   expect(result.ok).toBe(true);
   expect(result.statements[0].result).toMatchObject({ type: "EXIT", exited: false });
   expect(result.statements[1].status).toBe("success");
+});
+
+test("B171: EXIT SUCCESS IF の COUNT 大小比較は数値 provenance を使う", async () => {
+  const records = Array.from({ length: 3 }, (_, index) => ({ $id: { value: String(index + 1) } }));
+  const result = await executeBatch(
+    `${header}EXIT SUCCESS IF (SELECT COUNT(*) FROM APP1) < 10, 'small'; SELECT 1 AS skipped`,
+    client(records)
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[0].result).toMatchObject({ type: "EXIT", exited: true });
+  expect(result.statements[1]).toMatchObject({ status: "skipped", skippedReason: "exit" });
 });
 
 test("acceptance-style scalar ASSERT and EXIT run through parseScript and executeBatch", async () => {

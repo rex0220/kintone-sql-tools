@@ -850,8 +850,11 @@ export interface InsertStatement {
   checkGroups?: CheckGroup[];
 }
 
-/** 1 行分の値リスト */
-export type InsertRow = (StringLiteral | NumberLiteral | ArrayLiteral | CaseSqlValue)[];
+/** UPSERT VALUES / APPLY APPEND を含む、従来どおりリテラル限定の 1 行分の値リスト。 */
+export type LiteralInsertRow = (StringLiteral | NumberLiteral | ArrayLiteral | CaseSqlValue)[];
+
+/** 通常の INSERT VALUES は dialect 1 の as-of 内部変数を解決前に保持できる。 */
+export type InsertRow = (LiteralInsertRow[number] | VariableRef)[];
 
 // ------------------------------------------------------------
 // UPSERT
@@ -866,7 +869,7 @@ export interface UpsertStatement {
   type: "UPSERT";
   appId: number;
   fields: string[];
-  values: InsertRow[];
+  values: LiteralInsertRow[];
   /** ON DUPLICATE (フィールド名) — 重複判定キー */
   keyFields: string[];
   /** 新規親を作成する分岐のサブテーブル初期行操作。省略時は undefined。 */
@@ -1035,7 +1038,7 @@ export interface PatchOperation {
 export interface AppendOperation {
   kind: "APPEND";
   fields: string[];
-  values: InsertRow[];
+  values: LiteralInsertRow[];
 }
 
 /** v1.2 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */
