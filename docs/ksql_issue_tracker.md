@@ -1,7 +1,7 @@
 # kSQL 課題・改善案・Issue 一括管理
 
 - 最終更新: 2026-08-22
-- 現在の最新リリース: **v3.72.0**（2026-08-22・**B171 ASSERT 大小比較の辞書順修正＝fail-open ガード解消（結果が変わる・dialect 0 含む）＋ INSERT VALUES の as-of**・GitHub Release 公開済み・**npm publish（ユーザー 2FA）と実機確認は未了**）。→ [リリース履歴](ksql_release_history.md)
+- 現在の最新リリース: **v3.72.0**（2026-08-22・**B171 ASSERT 大小比較の辞書順修正＝fail-open ガード解消（結果が変わる・dialect 0 含む）＋ INSERT VALUES の as-of**・**publish 済み・実機確認済み**＝常駐 MCP で起票時 2 ケースの挙動反転を逐語再実行〔COUNT=3 の <= 10 が成立・**COUNT=12 の <= 9 が AssertError**＝fail-open 解消が版を証明〕・F-2 は報告書の再現 SQL が ksql_validate で受理〔KSQL1305 のみ〕）。→ [リリース履歴](ksql_release_history.md)
 - 次回リリース計画: **未定**。残るのは **B143**（低）／**B141**（散文の穴）。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種（CYCLE 正例の実機化）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
