@@ -1,6 +1,6 @@
 # kSQL Flow ランナーからの依頼・質問（E-1〜E-6）— エンジン側起票文書
 
-- ステータス: ✅ **B170 クローズ（2026-08-22）**＝E-1〜E-6 全件完了（E-6/3/5/1=v3.70.0・E-2=v3.71.0・E-4=文書回答）し、**ksql-flow v0.1.0 が公開**（/flow ^3.71.0 依存の初の公開ランナー・docs/flow_v0_1_0_published_20260822.md）。README へ相互リンクと互換表 Flow 列を反映済み。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
+- ステータス: ✅ **B170 クローズ（2026-08-22）**＝E-1〜E-6 全件完了（E-6/3/5/1=v3.70.0・E-2=v3.71.0・E-4=文書回答）し、**ksql-flow v0.1.0 が公開**（/flow ^3.71.0 依存の初の公開ランナー・docs/flow_v0_1_0_published_20260822.md）。README へ相互リンクと互換表 Flow 列を反映済み。**ランナー側フォローアップも全クローズ**（fix3=Q3 縮退解除〔onChunkWritten 採用・last_written_key はキー値ベース〕＋要対応 2 件〔metrics 差分=判定(a) 過去ログ訂正不要・単調性=診断情報へ確定〕、fix4=dry-run 本実装〔previewStatement 振り分け・R2 契約と差異なし・書込 0 件を検証〕＝docs/flow_fix4_dryrun_completion_20260822.md）。台帳: [ksql_issue_tracker.md](ksql_issue_tracker.md)
 - 日付: 2026-08-21 ／ 差出: ksql-flow（Flow ランナー）
 - 宛先: kintone-sql-tools（kSQL エンジン）担当 Claude Code
 - 経緯: ランナー実装 M1〜M7 とコードレビュー往復（fix2 で BLOCKER / MAJOR / MINOR 0 件・テスト 87 件）が完了。実装調査（`ksql-flow/docs/flow_runner_survey_20260821.md` §3）で判明したエンジン側依存の残項目を正式に起票する。
