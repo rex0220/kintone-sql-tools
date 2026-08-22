@@ -2222,29 +2222,9 @@ export async function executeBatchStatement(
           cacheContext,
           tempTables
         );
-        const first = resolvedStmt.expr.query.columns[0];
-        let numeric = first?.type === "ARITH_COL"
-          || first?.type === "ARITH_AGG_COL"
-          || (first?.type === "WINDOW_COL" && (first.windowKind === undefined || first.windowKind === "RANKING"
-            || (first.windowKind === "AGGREGATE"
-              && (first.aggFunc === "COUNT" || first.aggFunc === "SUM" || first.aggFunc === "AVG"))))
-          || (first?.type === "AGGREGATE"
-            && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
-              || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
-              || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
-        if ((first?.type === "AGGREGATE" && first.func === "MODE")
-          || (first?.type === "WINDOW_COL" && first.windowKind === "VALUE")
-          || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
-            && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
-          const meta = (await inferSelectColumnMeta(
-            resolvedStmt.expr.query,
-            ["__scalar__"],
-            client,
-            cacheContext,
-            tempTables
-          )).get("__scalar__");
-          numeric = meta?.semantics?.compareMode === "number" || meta?.sortKind === "number";
-        }
+        const numeric = await scalarSubqueryHasNumericResult(
+          resolvedStmt.expr.query, client, cacheContext, tempTables
+        );
         const numberValue = numeric ? Number(value) : Number.NaN;
         variables.set(stmt.name, numeric && Number.isFinite(numberValue)
           ? { type: "number", value: numberValue, raw: value }
@@ -3130,9 +3110,6 @@ async function evaluateAssertCondition(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<{ passed: boolean; actual: string }> {
   const left = await evalAssertOperand(stmt.left, client, options, cacheContext, tempTables);
-  const semantics = stmt.left.type === "NUMBER" || stmt.left.type === "ARITH"
-    ? syntheticSemantics("number")
-    : syntheticSemantics("string");
 
   if (stmt.op === "BETWEEN") {
     if (stmt.low === null || stmt.high === null) {
@@ -3142,9 +3119,9 @@ async function evaluateAssertCondition(
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
     return {
-      passed: compareScalarValues(">=", left, low, semantics)
-        && compareScalarValues("<=", left, high, semantics),
-      actual: left,
+      passed: compareScalarValues(">=", left.value, low.value, assertComparisonSemantics(left, low))
+        && compareScalarValues("<=", left.value, high.value, assertComparisonSemantics(left, high)),
+      actual: left.value,
     };
   }
 
@@ -3152,38 +3129,91 @@ async function evaluateAssertCondition(
     throw new Error("ArgumentError: malformed ASSERT statement.");
   }
   const right = await evalAssertOperand(stmt.right, client, options, cacheContext, tempTables);
-  return { passed: compareScalarValues(stmt.op, left, right, semantics), actual: left };
+  const semantics = stmt.op === "=" || stmt.op === "!=" || stmt.op === "<>"
+    ? (stmt.left.type === "NUMBER" || stmt.left.type === "ARITH"
+      ? syntheticSemantics("number")
+      : syntheticSemantics("string"))
+    : assertComparisonSemantics(left, right);
+  return {
+    passed: compareScalarValues(stmt.op, left.value, right.value, semantics),
+    actual: left.value,
+  };
 }
 
-/** ASSERT のオペランドを文字列値に評価する（サブクエリは 1行1列を実行時検証） */
+type EvaluatedAssertOperand = {
+  value: string;
+  semantics: "number" | "string";
+};
+
+function assertComparisonSemantics(
+  left: EvaluatedAssertOperand,
+  right: EvaluatedAssertOperand
+): ResolvedFieldSemantics {
+  return syntheticSemantics(left.semantics === "number" && right.semantics === "number" ? "number" : "string");
+}
+
+/** ASSERT のオペランドを値と provenance に評価する（サブクエリは 1行1列を実行時検証） */
 async function evalAssertOperand(
   operand: AssertOperand,
   client: KintoneClient,
   options: ExecuteOptions,
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
-): Promise<string> {
+): Promise<EvaluatedAssertOperand> {
   switch (operand.type) {
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
-    case "NUMBER": return numberLiteralText(operand);
-    case "STRING": return operand.value;
-    case "ARITH":  return String(evalAssertArith(operand));
+    case "NUMBER": return { value: numberLiteralText(operand), semantics: "number" };
+    case "STRING": return { value: operand.value, semantics: "string" };
+    case "ARITH":  return { value: String(evalAssertArith(operand)), semantics: "number" };
     case "SCALAR_SUBQUERY": {
       try {
-        return await evaluateScalarSubquery(
+        const value = await evaluateScalarSubquery(
           operand.query,
           client,
           options,
           cacheContext,
           tempTables
         );
+        const numeric = await scalarSubqueryHasNumericResult(
+          operand.query, client, cacheContext, tempTables
+        );
+        return { value, semantics: numeric ? "number" : "string" };
       } catch (e) {
         if (e instanceof ScalarSubqueryError) throw new AssertError(e.message);
         throw e;
       }
     }
   }
+}
+
+/** SET と ASSERT が共有する、実値推測を行わないスカラー SELECT の数値 provenance 判定。 */
+async function scalarSubqueryHasNumericResult(
+  query: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string,
+  tempTables?: Map<string, MaterializedTable>
+): Promise<boolean> {
+  const first = query.columns[0];
+  let numeric = first?.type === "ARITH_COL"
+    || first?.type === "ARITH_AGG_COL"
+    || (first?.type === "WINDOW_COL" && (first.windowKind === undefined || first.windowKind === "RANKING"
+      || (first.windowKind === "AGGREGATE"
+        && (first.aggFunc === "COUNT" || first.aggFunc === "SUM" || first.aggFunc === "AVG"))))
+    || (first?.type === "AGGREGATE"
+      && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
+        || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
+        || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
+  if ((first?.type === "AGGREGATE" && first.func === "MODE")
+    || (first?.type === "WINDOW_COL" && first.windowKind === "VALUE")
+    || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
+      && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
+    const meta = (await inferSelectColumnMeta(
+      query, ["__scalar__"], client, cacheContext, tempTables
+    )).get("__scalar__");
+    numeric = meta?.semantics?.compareMode === "number" || meta?.sortKind === "number";
+  }
+  return numeric;
 }
 
 /** スカラーサブクエリを1回実行し、厳密に1行1列の文字列値へ変換する。 */
@@ -10920,7 +10950,10 @@ function buildSubtableReorderPutParams(
   };
 }
 
-function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number; raw?: string } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr }): string {
+function valueToString(value: { type: "STRING"; value: string } | { type: "NUMBER"; value: number; raw?: string } | { type: "ARRAY"; elements: { value: string }[] } | { type: "CASE_VALUE"; expr: CaseWhenExpr } | { type: "VARIABLE"; name: string }): string {
+  if (value.type === "VARIABLE") {
+    throw new Error(`InternalError: unresolved variable @${value.name} reached INSERT evaluation.`);
+  }
   if (value.type === "STRING") return value.value;
   if (value.type === "NUMBER") return numberLiteralText(value);
   if (value.type === "CASE_VALUE") return evalCaseWhen(value.expr, {});

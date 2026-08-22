@@ -129,6 +129,46 @@ test("単文: サブクエリ成立（COUNT）", async () => {
   expect(client.getCalls.length).toBeGreaterThan(0);
 });
 
+test.each([
+  [3, "= 3", true],
+  [3, "<= 10", true],
+  [3, "< 10", true],
+  [3, "BETWEEN 0 AND 10", true],
+  [3, "<= 9", true],
+  [12, "<= 9", false],
+  [3, "> 2", true],
+] as const)("B171: COUNT=%i の実測マトリクス %s を数値比較する", async (count, condition, passed) => {
+  const records = Array.from({ length: count }, (_, index) => makeRecord({ $id: String(index + 1) }));
+  const promise = execute(`ASSERT (SELECT COUNT(*) FROM APP171) ${condition}`, makeClient({ 171: records }));
+  if (passed) await expect(promise).resolves.toMatchObject({ type: "ASSERT" });
+  else await expect(promise).rejects.toThrow(/AssertError: assertion failed/);
+});
+
+test("B171: COUNT の BETWEEN は桁違いの上限も数値比較する", async () => {
+  await expect(execute(
+    "ASSERT (SELECT COUNT(*) FROM APP100) BETWEEN 0 AND 10000",
+    makeClient({ 100: APP1 })
+  )).resolves.toMatchObject({ type: "ASSERT" });
+});
+
+test("B171: 非数値文字列・ISO日付・等値比較の既存規則を維持する", async () => {
+  await expect(execute("ASSERT '20' > '100'", makeClient())).resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT '2026-08-22' >= '2026-01-01'", makeClient())).resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT 'same' = 'same'", makeClient())).resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT 'same' != 'different'", makeClient())).resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT 'same' <> 'different'", makeClient())).resolves.toMatchObject({ type: "ASSERT" });
+});
+
+test("B171: 数値スカラーサブクエリも等値系の従来挙動を維持する", async () => {
+  const client = makeClient({ 100: APP1 });
+  await expect(execute("ASSERT (SELECT COUNT(*) FROM APP100) = 3", client))
+    .resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT (SELECT COUNT(*) FROM APP100) != 4", client))
+    .resolves.toMatchObject({ type: "ASSERT" });
+  await expect(execute("ASSERT (SELECT COUNT(*) FROM APP100) <> 4", client))
+    .resolves.toMatchObject({ type: "ASSERT" });
+});
+
 test("単文: サブクエリ不成立は actual に実測値が入る", async () => {
   const client = makeClient({ 100: APP1 });
   await expect(execute("ASSERT (SELECT COUNT(*) FROM APP100) = 0", client))
