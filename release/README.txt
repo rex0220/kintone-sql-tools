@@ -1,18 +1,23 @@
-ksql 配布パッケージ (v3.71.0)
+ksql 配布パッケージ (v3.72.0)
 
 release 成果物:
-- ksql-plugin-v3.71.0.zip
-- ksql-mcp.mcpb (manifest version 3.71.0)
-- ksql-mcp.js (MCP server version 3.71.0)
+- ksql-plugin-v3.72.0.zip
+- ksql-mcp.mcpb (manifest version 3.72.0)
+- ksql-mcp.js (MCP server version 3.72.0)
 
-機能追加 (B170 E-2: previewStatement = dry-run 差分プレビュー) ★/flow への純加法のみ:
-- previewStatement(statement, context, {maxSamples}) を /flow へ追加 (DML 専用)。
-  操作別件数 (insert/update/delete)・書込順先頭 N 件の before/after サンプル・
-  実消費読取 API 数・推定書込 API 数を返し、書込 API は 0 回を構造的に保証。
-- maxSamples は既定 5・上限 50。DELETE はキーのみ。unchanged 判定は初版対象外。
-- ksql-flow との設計往復 (R1→回答→R2 確定) を経た契約です。ランナーの --dry-run
-  差分プレビュー (設計書 10.2) の解禁に対応。
+修正 (B171 F-1: ASSERT / ASSERT WARN / EXIT の大小比較が辞書順だった) ★結果が変わります:
+- COUNT 等の数値集計サブクエリと数値の大小比較・BETWEEN が文字列（辞書順）比較に
+  なっており、件数ガードが fail-open になり得ました（例: 12 件で <= 9 が成立）。
+  両辺が数値（数値リテラル・算術式・数値変数・数値集計サブクエリ）のときだけ
+  10 進の数値比較へ修正。等値・文字列同士の辞書順（ISO 日付比較）・文字列変数は不変。
+- dialect 0 の既存 ASSERT にも同じ修正が効きます (ASSERT 導入時からの不具合)。
 
+機能追加 (B171 F-2: dialect 1 の INSERT ... VALUES で as-of 関数) ★純加法:
+- @NOW() / @TODAY() / @MONTH_START() / @NEXT_MONTH_START() を INSERT ... VALUES に
+  書けます (実行 / previewStatement / EXPLAIN の 3 面で同値展開)。UPSERT VALUES /
+  APPLY の値は対象外 (拒否時に文型限定ヒントを表示)。dialect 0 は従来どおり。
+
+v3.71.0 の節は畳みました (B170 E-2 previewStatement = dry-run 差分プレビュー)。
 v3.70.0 の節は畳みました (B170 E-6/E-3/E-5/E-1 = /flow 純加法 4 件)。
 v3.69.0 の節は畳みました (B168 Flow dialect 1 完成 = Stage 4-6・全面で実行可)。
 v3.68.0 の節は畳みました (B168 Stage 1-3 = dialect 1 の解析基盤・エンジン内部のみ)。
@@ -87,12 +92,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.71.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.72.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.71.0): B170 E-2 previewStatement (dry-run 差分プレビュー・/flow 純加法・書込 0 回保証)。
+本リリース (v3.72.0): B171 ASSERT 大小比較の辞書順不具合を修正 (結果が変わります・fail-open ガード解消) + INSERT VALUES の as-of 許可。
+
+前リリース (v3.71.0): B170 E-2 previewStatement (dry-run 差分プレビュー・/flow 純加法)。
 
 前リリース (v3.70.0): B170 ksql-flow 依頼対応 (/flow 純加法 = explain as-of・DML 結果型・metrics スナップショット・書込チャンク通知)。
 
