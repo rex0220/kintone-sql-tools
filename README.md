@@ -269,6 +269,8 @@ npm パッケージは 2 つのサブパスを **semver 対象の公開 API** �
 | `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
 | `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
 
+バッチ実行ランナー **kSQL Flow**（`/flow` API を使った公式ランナー・別リポジトリ）: https://github.com/rex0220/ksql-flow
+
 `/flow` の典型的な使い方（1 文ずつ実行して結果で継続判断する）:
 
 ```ts
@@ -289,11 +291,12 @@ try {
 
 ### エンジンバージョン × dialect 対応表
 
-| エンジン | dialect 0（既定・宣言なし） | dialect 1（`-- @ksql dialect: 1`） |
-|---|---|---|
-| 〜 v3.67.0 | ✅ | —（未実装） |
-| v3.68.0 | ✅ | 解析のみ（エンジン内部 API。実行できる出荷面なし・実験的） |
-| v3.69.0 〜 | ✅ | ✅ CLI / MCP / プラグイン / `/flow` で実行可 |
+| エンジン | dialect 0（既定・宣言なし） | dialect 1（`-- @ksql dialect: 1`） | ksql-flow |
+|---|---|---|---|
+| 〜 v3.67.0 | ✅ | —（未実装） | — |
+| v3.68.0 | ✅ | 解析のみ（エンジン内部 API。実行できる出荷面なし・実験的） | — |
+| v3.69.0 〜 v3.70.0 | ✅ | ✅ CLI / MCP / プラグイン / `/flow` で実行可 | — |
+| v3.71.0 〜 | ✅ | ✅ 同上 + `previewStatement` | **0.1.0**（要求: `^3.71.0`） |
 
 dialect は後方互換で管理します: dialect 0 のスクリプトはどのエンジン版でも挙動不変・破壊的変更は dialect 番号の繰り上げでのみ導入します。変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
 
