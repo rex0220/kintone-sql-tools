@@ -2211,8 +2211,9 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 | CLI | 500件 | `--max-records`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
 | MCP | 500件 | `ksql_query`・`ksql_explain`等のtool入力`maxRecords`／`KSQL_MAX_RECORDS`／profile `query.maxRecords` |
 | プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
+| 公式 API `/flow` | 10,000件 | `createExecutionContext`／`explainScript` の options `maxRecords`（`executeStatement`・`previewStatement` は実行コンテキストの値を共有・v3.69.0〜。→ §27.9） |
 
-値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。
+値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。**`maxRecords`だけ引き上げても、一時テーブルへ10,000行超を実体化する文は`tempTableMaxRows`で停止します**。実体化を伴うバッチでは両方を併せて指定してください（実測・v3.72.0）。
 
 > **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
 
@@ -4304,6 +4305,12 @@ SELECT 顧客コード, 受注件数, 当月売上合計, @NOW()
 FROM temp_monthly_summary
 KEY (顧客コード);
 ```
+
+### 27.9 公式 API `/flow` の実行上限オプション
+
+- **読取上限 `maxRecords`（既定 10,000）**: 文単位の読取候補行数上限。`createExecutionContext` の options で指定し、`executeStatement`／`previewStatement` は同じ実行コンテキストの値を共有します。`explainScript` は自身の options の `maxRecords` を使います（実行・preview・EXPLAIN の 3 面で同値・実測 v3.72.0）
+- **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: 超過は `onLimitReached` にかかわらず常にエラーです。`maxRecords` だけ引き上げても 10,000 行超の実体化は停止するため、実体化を伴うバッチでは両方を併せて指定してください（例: `{ maxRecords: 25000, tempTableMaxRows: 25000 }`）
+- **値の上限は設けていません**（正の整数を受理）。ただし読取は fetch-all 方式で候補行が全件メモリに載るため、「受理される」ことと「その規模で動作が実測済みである」ことは別です。大きな値を常用する場合は、呼び出し側（ランナー等）で運用上の上限を検証することを推奨します
 
 ---
 

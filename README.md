@@ -289,6 +289,15 @@ try {
 }
 ```
 
+読取上限は既定 10,000 件（`maxRecords`）です。一時テーブルの実体化には**独立の** `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が適用されるため、大きなバッチでは両方を併せて指定してください:
+
+```ts
+const ctx = createExecutionContext({ client, script: source, maxRecords: 25000, tempTableMaxRows: 25000 });
+await explainScript(source, { client, maxRecords: 25000 }); // EXPLAIN 面にも同じ上限を渡せる
+```
+
+`executeStatement` / `previewStatement` は実行コンテキストの `maxRecords` を共有します（3 面同値）。詳細は[言語リファレンス §27.9](docs/ksql_language_reference.md)。
+
 ### エンジンバージョン × dialect 対応表
 
 | エンジン | dialect 0（既定・宣言なし） | dialect 1（`-- @ksql dialect: 1`） | ksql-flow |
