@@ -1,0 +1,195 @@
+# B173 UPSERT 本実行を kintone native upsert（`updateKey` + `upsert: true`）へ — 依頼 F-7
+
+- 状態: 📋 **仕様 R2 確定・実装待ち**（2026-08-25・**codex レビュー R1 反映／確認 6 点の回答受領〔§2.5〕／実機測定 5 項目完了〔§3.2〕**）＝実装未着手。**実測で設計が 2 点変わった**＝①`record` に updateKey フィールドを含めると **kintone が拒否する**ので組み立て後に除去が要る（挿入時のキー値は `updateKey` から入るので結果は等価）②**ソース内キー重複は kintone がリクエストごと拒否する**ので適用条件⑥は外せず、**全ソースを通した重複検出**（チャンク単位では不足）が新たに要る。**次＝仕様（codex）**。依頼書の事実主張 5 件を実装・kintone 公式文書と突き合わせて検算済み（§1）。**うち 1 件は依頼書より良い方へ外れた**（内訳判別は `revision` からの推測ではなく、レスポンスの `records[].operation` で厳密に取れる）。**3 件は依頼書が見ていない穴**（①適用可能なのは素の UPSERT だけ＝CHECK / APPLY / VALIDATE ONLY / IMPORT の事前 GET は分岐以外の用途があり外せない ②UPSERT モードは **アプリのレコード追加権限**を追加で要求するため、既定 ON にすると「編集権限だけで動いていた更新専用 UPSERT」が壊れる ③**公開クライアント契約とラッパー 5 層の変更**になる＝`putRecords` は戻り値を捨てており、能力を足しても途中のラッパーが落とす・`onChunkWritten` は混在チャンクを表現できない）。**見立て＝案 C（能力検出付き opt-in・素の UPSERT 限定）**
+- 仕様: [B173 native UPSERT 仕様 **R2**](ksql_b173_native_upsert_spec.md)（2026-08-25・codex 起草／**Claude レビュー済み・指摘全件反映済み＝§16**）＝**実装着手可**。R1 の Major 1 件（`options.confirm` の欠落）と軽微 2 件を反映し、R1 §15 の未確認 6 件のうち 3 件を実機で解消して本文へ確定事実として取り込んだ。残る未確認 3 件（実クライアント経由のエラー message／追加権限なしトークン／guest space）は仕様の採否条件ではなく、実装レビューまたはリリース前に確認する
+- 種別: 改善（性能）
+- 優先: 中（依頼書と同じ。機能は成立しており API 消費削減が目的）
+- 出典: [ksql-flow の依頼 F-7](../../../ksql-flow/docs/kSQLエンジンへの依頼-20260825-F7-upsert-updateKey.md)
+- 回答: [F-7 への回答](../../../ksql-flow/docs/kSQLエンジンからの回答-20260825-F7-upsert-updateKey.md)（2026-08-25 送付）→ [確認 6 点への返信](../../../ksql-flow/docs/kSQLエンジンへの返信-20260825-F7-確認6点回答.md)（2026-08-25 受領・**6 点すべて回答済み＝仕様着手のブロッカーは解消**。反映は §2.5）
+- 関連: F-5（bulkRequest 束ね・未起票）／[B172](ksql_b172_flow_max_records_issue.md)（F-3）／[B168](ksql_b168_flow_dialect1_plan.md) 訂正 4（bulkRequest 未実装）
+
+## 1. 実測（v3.72.0 実装・2026-08-25）
+
+依頼書の事実主張を、実装と kintone 公式文書の両方に当てて測った（[[pro-request-measure-first]] の運用）。
+
+| 依頼書の主張 | 実測 |
+|---|---|
+| 現行 UPSERT は read-then-write（事前 GET でキー照合・50 キー/リクエスト） | **正しい**。`resolveUpsertTargets`（[execute.ts:7224](../../src/execute.ts#L7224)）が第 1 キーを `in (...)` で `UPSERT_IN_CHUNK_SIZE = 50`（[:7174](../../src/execute.ts#L7174)）ずつ引き、「キー → 最大 `$id`」の索引を作る |
+| XL（UPSERT 10,000 件）の事前 GET は 200 回（10,000 ÷ 50） | **正しい。ただし成立条件が 2 つある**＝①キー値がすべて非空 ②1 チャンク（50 キー）のヒットが 500 件以内。正確な式は **`ceil(非空の distinct 第 1 キー数 / 50) + 空文字を含む distinct 複合キー数`**（[:7252-7268](../../src/execute.ts#L7252) / [:7280](../../src/execute.ts#L7280)）＝**ソース内にキー重複や第 1 キーの共有があれば 200 回を下回り、空文字キーがあれば行ごとの GET が上乗せされる**。`fetchAll` は offset 方式で ≤500 件なら 1 リクエストなので、②が満たされる限り 1 チャンク = 1 GET |
+| 書込は 100 回 | **ほぼ正しい（最大 101 回）**。現行は `ceil(insert/100) + ceil(update/100)` で**新規と更新を別のリクエスト列に流す**（POST 先・PUT 後／[:10580-10588](../../src/execute.ts#L10580)）。分岐比が端数どうし（例 5,001 + 4,999）なら 51 + 50 = 101 回 |
+| 事前 GET が UPSERT の API 消費の 2/3 | **正しい**（200 / 300） |
+| `updateKey` の要件（重複禁止の「文字列（1行）」または「数値」・単一フィールド）とランナー側制約が一致 | **dialect 1 では正しい**。[`validateDialect1UpdateKey`](../../src/core/dialect1Validation.ts#L90) が①単一キー②型が `SINGLE_LINE_TEXT` / `NUMBER` ③`isUnique` を静的検証と実行前の両方で fail-closed（[execute.ts:2282-2288](../../src/execute.ts#L2282)）。`isUnique` は実クライアントが form fields API の `unique` から埋める（[formFieldInfo.ts:74](../../src/core/formFieldInfo.ts#L74)）ので実機では確実に効く。**dialect 0（MCP / CLI / プラグイン）は無制約**＝複合キーも非ユニークキーも通る |
+| 内訳（新規/更新）は `records[].revision`（revision = 1 が新規）で判別できる想定 | **推測が外れており、実際はもっと良い**。[複数のレコードを更新する](https://cybozu.dev/ja/kintone/docs/rest-api/records/update-records/) のレスポンスに **`records[].operation`（`"INSERT"` / `"UPDATE"`）が入る**。revision からの推測は不要で、受入基準 2 は厳密に満たせる |
+
+### 1.1 事前 GET は「分岐のため」だけではない — 呼び出し元ごとに用途が違う
+
+`resolveUpsertTargets` の呼び出しは **6 か所**（入口としては 5 系統。CHECK / VALIDATE ONLY / ON ERROR SKIP は同じ検証経路を共有する）。**依頼書は「事前 GET = キー存在判定」と読んでいるが、そう言えるのは 2 か所だけ**。
+
+| 呼び出し元 | 事前 GET の用途 | native 置換 |
+|---|---|---|
+| [`executeUpsert`](../../src/execute.ts#L10525)（素の UPSERT VALUES・:10544） | 分岐 + 書込先 `$id` のみ。値の検証は `assertValidDmlRecords`（[:7927](../../src/execute.ts#L7927)）で**モード非依存** | **可能**（本命） |
+| [`executeUpsertSelect`](../../src/execute.ts#L11127)（素の UPSERT SELECT・:11190） | 同上 | **可能**（本命・XL はこちら） |
+| `materializeValidationCandidates` 内のキー解決（CHECK / VALIDATE ONLY / ON ERROR SKIP が共有・[:8620](../../src/execute.ts#L8620)） | 分岐に加えて **`candidate.mode` が検証の意味を変える**＝`mode === "create"` の行だけ「payload に無い必須フィールド」「既定値の妥当性」を検査する（[dmlValidationCandidates.ts:115](../../src/core/dmlValidationCandidates.ts#L115)）。組込検証の経路自体も mode で分岐する（[同 :103](../../src/core/dmlValidationCandidates.ts#L103)） | **不可**。書く前にモードが判らないと `ERR_REQUIRED` 等を出せない＝検証が静かに緩む |
+| `prepareApplyUpsertForExecution`（APPLY UPSERT・[:8004](../../src/execute.ts#L8004)） | 既存値そのものが入力（patch を既存レコードから計算） | **不可** |
+| JSON サブテーブル IMPORT（keyFields あり・[:9301](../../src/execute.ts#L9301)） | 分岐に加えて、得た `$id` で**もう一段 GET を張り `$revision` と既存サブテーブル行を読む**（[:9307-9313](../../src/execute.ts#L9307)）。その `revision` は PUT に載る＝**楽観ロック**（[:9345](../../src/execute.ts#L9345)）。**なお `ERR_KEY_DUP_SOURCE` は GET より前に `Set` だけで検出しており、GET の用途ではない**（[:9294-9300](../../src/execute.ts#L9294)） | **不可** |
+| `previewUpsertRecords`（dry-run・[:2622](../../src/execute.ts#L2622)） | before/after スナップショットが本体 | **対象外**（依頼書 論点 1 に同意） |
+
+→ **適用範囲は「CHECK も APPLY も伴わない素の UPSERT / UPSERT SELECT」に限られる**。ここが依頼書の受入基準 1（XL 相当）と一致するかは、ランナーの XL スクリプトが CHECK を付けているかで決まる（**返信で確認する**）。
+
+**IMPORT 由来の UPSERT SELECT には明示ガードが要る**: IMPORT が生成する UPSERT SELECT は `executeUpsertSelect` を**共有**しており、区別は WeakMap（`importSourceByDmlStatement`・[:11181](../../src/execute.ts#L11181)）だけ。書込経路 2 か所を変えるだけだと **IMPORT を誤って native に載せる**。
+
+### 1.2 公開クライアント契約の変更が要る（依頼書が想定していない波及）
+
+現行の書込口は **`putRecords` が `{app, records: [{id, revision?, record}]}` を受け `Promise<void>` を返す**（[execute.ts:282](../../src/execute.ts#L282)・[converter/dmlToKintone.ts:79](../../src/converter/dmlToKintone.ts#L79)）。native upsert には `upsert: true` と `records[].updateKey` が要り、内訳を取るにはレスポンス本体が要る。つまり **`FlowKintoneClient`（[flow-library/publicTypes.ts:65](../../src/flow-library/publicTypes.ts#L65)）という公開型の変更**であり、ランナーが自前クライアントを渡している場合は**依頼元の実装にも波及する**（[[review-test-gap-division]]＝公開型の必須プロパティ追加は破壊的変更）。
+
+同梱の 3 実装の素通し具合も測った。**「渡せば届く」のは 1 つだけ**:
+
+| クライアント | `putRecords` の実装 | 新パラメータの扱い |
+|---|---|---|
+| [`flow-library/writableClient.ts:143`](../../src/flow-library/writableClient.ts#L143) | `params` をそのままボディに送る | **素通しする**（`upsert` / `updateKey` は届く。ただし戻り値は捨てている） |
+| [`cli/nodeKintoneClient.ts:337`](../../src/cli/nodeKintoneClient.ts#L337) | `{app, records}` だけ組み直す | **トップレベルの `upsert` を黙って落とす**（`records` 配列は素通しなので要素内の `updateKey` は残る） |
+| [`ui/kintoneClient.ts:229`](../../src/ui/kintoneClient.ts#L229) | `{app, records}` だけ組み直す | 同上 |
+
+`upsert: true` だけが落ちて `updateKey` が残ると「キー指定の通常更新」になり、**未存在キーの行が挿入されずエラーになる**（fail-closed ではあるが壊れる）。→ **能力検出（capability negotiation）を型で表す**のが安全＝`putRecords` を書き換えるのではなく、**任意メソッド `upsertRecords?()` を追加し、実装があるときだけ native 経路に入る**（純加法・古いクライアントは自動的に現行経路）。
+
+### 1.4 能力はラッパー 5 層を通る — 実クライアント 3 面だけでは足りない
+
+**実行入口のクライアントは素の BYO クライアントではなく、複数のラッパーを重ねたもの**。**メソッドを列挙して新オブジェクトを作るラッパーは、足した `upsertRecords?()` を黙って落とす**（＝能力検出が常に false になり native に入れない）。**スプレッドで包むラッパーは素通しさせてしまう**（＝包むはずの制御が効かない）。両方向の穴がある。
+
+| ラッパー | 作り | `upsertRecords?()` を足したときの挙動 |
+|---|---|---|
+| `wrapClientWithMetrics`（[execute.ts:918-996](../../src/execute.ts#L918)） | メソッド列挙 | **落とす**。`metrics.putCalls` 相当の計上先も無い |
+| `withRequestGate`（[api/requestGate.ts:169-188](../../src/api/requestGate.ts#L169)） | メソッド列挙 | **落とす**。書込セマフォ（`runMutation`）にも載らない |
+| `routeClient`（論理アプリ `LAPP_` 解決・[flow-library/index.ts:298-308](../../src/flow-library/index.ts#L298)） | メソッド列挙 | **落とす**。`app` の付け替えも効かない |
+| `wrapClientWithPreviewWriteBlock`（[execute.ts:1985-1995](../../src/execute.ts#L1985)） | `{...client}` スプレッド | **素通しする＝実際の穴**。`postRecords` / `putRecords` / `deleteRecords` だけを塞ぐ設計なので、**dry-run から native 書込が発射され得る** |
+| `wrapClientWithChunkWrittenCallback`（[execute.ts:2146-2167](../../src/execute.ts#L2146)） | `{...client}` スプレッド | **素通しする**＝native 書込が **`onChunkWritten` を一度も通知しない**（§1.5） |
+
+なお `projectReadonlyClient`（[engine-library/readonlyClient.ts:42-84](../../src/engine-library/readonlyClient.ts#L42)）は 6 メソッドだけを束ねた `Object.create(null)` を Proxy する作りなので、**新メソッドは構造上そもそも到達せず安全**。ただし「書込メソッドは存在しないものとして報告する」契約の一貫性のため `WRITE_METHODS`（[同 :5-9](../../src/engine-library/readonlyClient.ts#L5)）にも足すのが筋。
+
+### 1.5 `onChunkWritten`（公開契約）が混在チャンクを表現できない
+
+`FlowChunkWrittenInfo.operation` は **`"INSERT" | "UPDATE" | "DELETE"` の閉じた union**（[flow-library/publicTypes.ts:159](../../src/flow-library/publicTypes.ts#L159)）。native の 1 チャンクは INSERT と UPDATE が混ざるため、**現行の型では表せない**。`lastKeyValue` は「単一キー UPSERT でキー値を payload から特定できる場合のみ」（[同 :163](../../src/flow-library/publicTypes.ts#L163)）＝**まさに native が狙う形**で、ランナーがチェックポイント／再開に使っている可能性が高い。加えて §1.4 のとおり observer 自体が素通しされるので、**何も手当てしないと通知が消える**。
+
+決めることは 3 つ: ①`operation` に混在を表す値を足すか、チャンクを分けて 2 回通知するか ②`records` を内訳（insert/update）で返すか ③`lastKeyValue` の意味（ソース順の最終キー）を維持するか。**いずれも公開型の変更**。
+
+### 1.3 dry-run は経路不変だが `estimatedWrites` は「条件付きの契約」になる
+
+`ManagedPreviewResult.estimatedWrites` は UPSERT のときだけ `ceil(insert/100) + ceil(update/100)`（[execute.ts:2478](../../src/execute.ts#L2478)）。これは**本実行の予測値**なので、本実行が native になれば `ceil((insert + update)/100)` でないと嘘になる。**依頼書 論点 1 の「dry-run の API 消費は現行と同一」は読取については正しいが、`estimatedWrites`（公開値・ランナーの推定式 7.2 / 10.2 が読む）については誤り**。
+
+**ただし式を差し替えるだけでは済まない**。案 C では native と現行経路が**実行ごとに混在する**（能力・opt-in・キー条件・空文字キーで分岐）。`previewBase`（[:2472-2481](../../src/execute.ts#L2472)）は `counts` しか受け取らず、client も options もキー適格性も知らないので、**「この実行が native に入るか」を preview 側でも判定して分岐させる**必要がある。**判定ロジックを本実行と preview で共有する**形にしないと、2 か所が食い違って推定値が静かにずれる（[[check-sibling-path-when-fixing]] の形）。
+
+## 2. 論点への回答（依頼書 §3）
+
+1. **dry-run は対象外** — 同意。差分プレビューは既存値の読取が本体で、GET を外す余地が無い。ただし §1.3 のとおり `estimatedWrites` は追随させる。
+2. **insert / update 件数の分離** — **確実に可能**。`records[].operation` が `"INSERT"` / `"UPDATE"` を返す（§1 表）。`revision = 1` の推測は不要（そもそも「更新は必ず revision ≥ 2」なので推測でも当たるが、公式プロパティがあるなら使わない理由がない）。ただし §1.2 のとおり**戻り値を捨てている現行クライアント実装では取れない**ので、能力検出とセットにする。
+3. **権限要件の変化** — **変わる。ここが既定 ON を採らない理由**。公式文書は UPSERT モードについて「アプリのレコード編集権限＋レコードの編集権限＋フィールドの編集権限」に加えて**「アプリのレコード追加権限」も必要**と明記している。現行は**挿入対象が 0 件なら POST を一度も呼ばない**ので、**追加権限の無い API トークンでも「全件が更新に落ちる UPSERT」は成功していた**。native に切り替えると同じスクリプトが権限エラーで落ちる。エンジンはトークンの権限を事前に知る手段が無い（fail-closed の検査タイミングを前に倒せない）＝**実行時エラーとしてしか出せない**。→ opt-in が妥当。
+4. **多重ヒット解決規則の廃止** — **dialect 1 に限れば認識どおり**。`isUnique` は静的検証と実行前の両方で fail-closed（§1 表）。**ただし dialect 0 は無制約**で、複合キー・非ユニークキー・非対応型のキーがそのまま通る（現行の「最大 `$id` を選ぶ」規則はそこで生きている）。→ **native 経路は「単一キー・重複禁止・`SINGLE_LINE_TEXT` / `NUMBER`」を満たすときだけ**選ぶ。**この判定は追加 API を要しない**＝`executeUpsert` / `executeUpsertSelect` は既に `loadWritableTopLevelDmlFields`（[:7903](../../src/execute.ts#L7903)）でフォーム定義を読んでおり、キーの `isUnique` と型はその戻り値に入っている。**`isUnique` は公開型では任意プロパティ**（[flow-library/publicTypes.ts:41](../../src/flow-library/publicTypes.ts#L41)）なので、**BYO の schema resolver が省略していたら「不適格」として現行経路へ落とす**（`=== true` を要求する。dialect 1 の静的検証が未確認を warning にしているのと同じ扱いにはしない）。
+5. **適用範囲** — **opt-in を推す**（§3 案 C）。既定 ON は論点 3 の権限退行があるため採らない。dialect 0 / 1 は直交にする（判定材料はフォーム定義であって方言ではない）＝dialect 0 でも条件を満たせば使えるが、条件を満たさない dialect 0 の UPSERT は現行経路のまま。
+
+## 2.5 確認 6 点の回答（2026-08-25 受領）と設計への反映
+
+[返信](../../../ksql-flow/docs/kSQLエンジンへの返信-20260825-F7-確認6点回答.md)で 6 点すべて回答あり。**方向（素の UPSERT 限定・能力検出付き opt-in）に同意を得た。**
+
+| # | 回答 | 設計への反映 |
+|---|---|---|
+| ① | XL の UPSERT に **CHECK は付けていない**。dialect 1 は CHECK / VALIDATE ONLY / ON ERROR SKIP を**公開構文に含めていない**（検証は ASSERT に寄せている） | **適用対象になる＝受入基準 1 は成立し得る**。**ただし「常に素の UPSERT」は依頼元の公開仕様の話で、エンジンの制約ではない**＝parser の `dialect1` は**純加法**（[parser.ts:392](../../src/parser/parser.ts#L392) ほか）で CHECK を禁じる箇所は無く、**dialect 1 でも CHECK 付き UPSERT は受理される**。→ **CHECK を書いた dialect 1 スクリプトが現行経路へ落ちることをテストで固定する**（[[check-sibling-path-when-fixing]]＝前提を assumption のままにしない） |
+| ② | **同梱 `createKintoneClient` を使用**。`FlowKintoneClient` は型 import のみ・自前実装なし | **任意メソッドの純加法で足り、依頼元の対応は不要**。§1.2 の懸念（BYO クライアントへの波及）は当面消える |
+| ③ | 書込可トークンは「閲覧 + 追加 + 編集」で統一済み＝**標準構成では権限退行なし**。ただし利用者が独自に落とす可能性は否定できず **opt-in（既定 OFF）に賛成** | **既定 OFF で確定**。opt-in 時に追加権限が必須になる旨は依頼元ドキュメントにも明記される |
+| ④ | **opt-in は `/flow` 限定で十分**。CLI / プラグインへ出すかはエンジン判断に一任 | **変更範囲が縮む**＝`cli/nodeKintoneClient` と `ui/kintoneClient` は**触らない**（能力メソッドを実装しない＝自動的に現行経路）。opt-in は `CreateExecutionContextOptions` に置く。**execute と preview が同一コンテキストの options を共有するので、§1.3 の「適用可否判定を本実行と preview で共有する」が構造的に満たされる** |
+| ⑤ | `onChunkWritten` は**使用中**。依存＝通知の回数と件数／`operation === "DELETE"` の判定（INSERT と UPDATE の区別には非依存）／`lastKeyValue` は**順序保証のない診断情報**で resume には不使用。**希望は案①（混在を表す値を足す・例 `operation: "UPSERT"`＋可能なら内訳）。チャンクを 2 回通知に分ける案は不可**（チャンク数 = 100 件単位でチェックポイント頻度と進捗表示を組んでいるため） | **案①で確定**＝`operation` に混在値を追加し、`records` の内訳（insert / update）を任意プロパティで添える。`lastKeyValue` は現行意味のまま。**union の拡大は TypeScript 上は破壊的だが、新しい値は opt-in したときにしか出ない**ので実運用では純加法 |
+| ⑥ | **構文上あり得る**（定石は GROUP BY キー集計で一意だが非集約 SELECT も書ける・実行時データ依存で validate 不能）。**適用条件⑥は維持で構わない** | **条件⑥を維持**。§3.2 の 2 の実測で安全と判れば外す |
+
+**依頼元が仕様確定後に行う対応**（返信 §付随）: 推定式 7.2 / 10.2 と `estimatedWrites` の追随、公開仕様 §3.4 の更新と opt-in 時の権限要件明記、`records[].operation` への内訳取得元の切替、`verification/scale-notes.md` への日次上限カウント併記。
+
+## 3. 案
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| A | 何もしない | XL で API の約 4 割が事前 GET のまま。機能は成立しているので実害は速度と流量制限のみ |
+| B | 素の UPSERT を無条件で native へ（既定 ON） | 論点 3 の権限退行と、条件を満たさない dialect 0 キー（複合・非ユニーク）で成立しない。**採らない** |
+| **C** | **能力検出付き opt-in・素の UPSERT 限定** | **見立て**。①クライアントに任意メソッド `upsertRecords?()` があり（ラッパー 5 層を通り抜けること・§1.4）②実行オプションで opt-in され ③キーが単一・重複禁止（`isUnique === true`）・`SINGLE_LINE_TEXT`/`NUMBER` で ④CHECK / APPLY を伴わない素の UPSERT で（**IMPORT 由来を明示的に除外**・§1.1）⑤空文字キーの行が無く ⑥**ソース内にキー重複が無い**（**§3.2 の実測で「外せない」と確定**＝kintone がリクエストごと拒否する `GAIA_IQ28`。しかも kintone は 1 リクエスト内しか見ないので**全ソースを通した検出が要る**）— 6 条件すべてで native、そうでなければ現行経路。②以外は追加 API ゼロで判定できる |
+| D | C ＋ 将来的に既定 ON へ反転 | ランナーが実測してから判断。反転は**権限要件が増える破壊的変更**なのでメジャー相当の扱いが要る |
+
+### 3.1 案 C の変更範囲（見積り）
+
+**初版は「クライアント 3 面＋書込 2 か所」と見積もったが、これは過小だった**（codex レビュー R1 の指摘・§1.4 / §1.5 で実測）。
+
+- 公開型: `FlowKintoneClient` に任意メソッド 1 つ（純加法）／`KintoneClient`（[execute.ts:274](../../src/execute.ts#L274)）に同じもの／`CreateExecutionContextOptions` に opt-in フラグ 1 つ（④より `/flow` 限定）／`FlowChunkWrittenInfo` の `operation` に混在値＋内訳（⑤・**union 拡大は型上は破壊的だが opt-in 時にしか出ない**）
+- クライアント実装は **`writableClient` の 1 面のみ**（②④より `nodeKintoneClient` / `ui/kintoneClient` は**触らない**＝能力メソッド未実装で自動的に現行経路）
+- **ラッパー 5 層**（§1.4）＝`wrapClientWithMetrics`（＋metrics の計上先）／`withRequestGate`（書込セマフォ）／`routeClient`（`LAPP_` の app 付け替え）／`wrapClientWithPreviewWriteBlock`（**塞がないと dry-run から native 書込が出る**）／`wrapClientWithChunkWrittenCallback`。`projectReadonlyClient` の `WRITE_METHODS` は一貫性のため
+- 書込経路 2 か所（`executeUpsert` / `executeUpsertSelect`）＋**IMPORT 由来を除外する明示ガード**（§1.1）。**CHECK / APPLY / IMPORT / ON ERROR SKIP は経路自体は触らない**
+- **native ペイロードの組み立て**（§3.2 の 1）＝`record` から**キーフィールドを除去**し、その値を `updateKey.value` に載せる（**文字列のまま**・JS の数値に落とさない／§3.2 の 4c）
+- **全ソースを通したキー重複検出**（§3.2 の 2）＝現行の素の経路には無い処理。ローカルの `Set` 走査で API 増はゼロ。**チャンク単位ではなくソース全体**で見る
+- `previewBase` の `estimatedWrites` を**適格性判定と連動する条件付きに**（§1.3。opt-in が `CreateExecutionContextOptions` に載るので execute / preview は同じ options を見る＝判定関数を 1 つ作って両方から呼べる）
+- **CHECK 付き dialect 1 UPSERT が現行経路へ落ちること**を固定するテスト（§2.5 の ①）
+- テスト: **`insertedCount` の検索（12 ファイル）だけでは足りない**。意味が変わる契約は **GET 回数 / POST・PUT の分離と順序 / `onChunkWritten` の通知列 / preview の `estimatedWrites` / クライアントに渡る body と戻り値 / ラッパーの能力保持**。**現行経路の期待値は変えず**（opt-in なので既定は不変）、native 経路の対テストを足す
+
+### 3.3 まだ決まっていないこと（仕様で決める）
+
+- ~~`onChunkWritten` の混在チャンク表現~~ → **§2.5 の ⑤ で決着**（混在値 + 内訳・分割通知は不可・`lastKeyValue` は現状維持）
+- **部分失敗時の可観測性**。現行の素の UPSERT は POST 全部 → PUT 全部で、途中失敗なら「新規は入った / 更新は入っていない」と読めた。native はソース順の混在チャンクなので**確定済みの prefix がソース順になる**。通常のバッチエラーは partial success を持たず（`partialSuccess` は APPLY 用）、**`onChunkWritten` が唯一の成功境界**になる
+- ~~ソース内キー重複の扱い~~ → **§3.2 の 2 で決着**（条件⑥は必須・全ソースを通した検出が要る）。**残る論点は「重複を見つけたときどうするか」**＝(a) 静かに現行経路へ落とす〔互換・ただし性能が読めなくなる〕／(b) 明示エラーにする〔現行の素の経路は後勝ちで成功していたので**破壊的**〕。**見立ては (a)**（opt-in の趣旨は「速くなるなら速く」であって意味を変えることではない）
+
+### 3.2 実機測定の結果（2026-08-25 実施・完了）
+
+**測定環境**: `dev` プロファイル（`devenxyfi.cybozu.com`）に専用アプリ **APP4253「B173 native upsert 検証」** を作成（`key_text`＝文字列1行・重複禁止／`key_num`＝数値・重複禁止／`payload`）。API 呼び出し約 50 回。**5 項目すべて決着**し、**うち 2 件で設計が変わった**。
+
+| # | 測定 | 結果 | 設計への帰結 |
+|---|---|---|---|
+| **1** | `record` に updateKey フィールドを含める | **すべて拒否**。新規・更新・同値・別値の 4 ケースとも `CB_VA01`／`records[0].record[key_text]`：**「「updateKey」に指定したフィールドの値は更新できません。」** | **エンジンは `record` からキーフィールドを必ず除去する**。現行は `stmt.fields` にキーを含めることを必須にしている（[:10600](../../src/execute.ts#L10600)）ので、native 経路では組み立て後に抜く |
+| 1' | 挿入時にキー値が `updateKey` から入るか | **入る**。`updateKey:{field:key_text,value:"K1"}` + `record:{payload:"v1"}` → `operation:"INSERT"`・読み戻すと `key_text="K1"` | 除去しても**挿入結果は現行と同一**。等価性は保たれる |
+| **2** | 同一リクエスト内のキー重複 | **リクエストごと拒否**。両方新規でも既存ありでも `GAIA_IQ28`「「updateKey」に指定した条件にあてはまるレコードが重複しています。」 | **適用条件⑥は必須で、外せない**（§3.2 の当初想定「実測次第で外せる」は否定された）。**しかも現行と挙動が違う**＝現行の素の経路は「既存あり + ソース重複」で同じ `$id` を 2 回 PUT して**後勝ちで成功する**。native にすると**これまで成功していたケースが失敗する**。さらに **kintone が見るのは 1 リクエスト内だけ**なので、**エンジンは全ソースを通して重複を検出する**必要がある（100 件チャンク単位では取りこぼす）。検出はローカル処理で API 増はゼロ |
+| **3** | 空文字キー（`updateKey.value: ""`） | **拒否**。`CB_VA01`／`records[0].updateKey.value`：「必須です。」 | 適用条件⑤の根拠が固まった（現行経路へ落とす） |
+| **4a** | NUMBER キー `5` に `updateKey` `"5.0"` | **UPDATE**（レコードは 1 件のまま・値は `"5"`） | **現行エンジンの数値正規化と一致**（[:7199](../../src/execute.ts#L7199)） |
+| **4b** | 文字列キー `"001"` に `updateKey` `"1"` | **INSERT**（2 件になる） | **誤同一視しない＝現行エンジンと一致** |
+| **4c** | 安全整数超えの NUMBER キー | 既定の `numberPrecision`（`digits:16` / `decimalPlaces:4`＝整数部 12 桁）では **2^53 超はそもそも格納できない**（13 桁で「有効桁数を超えています」）。`digits:30` / `decimalPlaces:0` に変えると **`9007199254740993`（16 桁）も `12345678901234567890`（20 桁）も登録でき、`updateKey` で UPDATE に照合できた**（raw 表現のまま） | **文字列のまま送れば一致する**（JS の数値に落とさないこと）。エンジンは既に exact-decimal で扱っており整合。**NUMBER キーの上限は `numberPrecision` が決める**が、エンジンは `getNumberPrecision` を既に読んでいるので送信前に弾ける |
+| 補 | 新規と更新の混在 3 行 | `operations = ["UPDATE","INSERT","INSERT"]`・`ids = ["6","7","8"]`。**リクエストの並び順どおりに返る**（公式仕様どおり） | 内訳は**行単位で取れる**＝`onChunkWritten` の内訳（insert/update 件数）も `lastKeyValue`（ソース順の最終キー）も構成できる |
+
+**測定スクリプト**: `scratchpad/b173-measure.mjs`・`b173-measure2.mjs`（生ログは `b173-measure-out.txt` / `b173-measure2-out.txt`）。**APP4253 はレコードを全削除して残してある**（再測用。不要になれば削除可）。
+
+**当初の実機項目 5（部分失敗の残り方）は未測**。100 件チャンクを 2 つ以上作る必要があり、§3.3 の記述材料であって仕様の前提ではないため、仕様を起こしたあとに回す。
+
+### 3.2.1 当初の実機項目（記録・すべて §3.2 で決着済み）
+
+1. **`record` に updateKey フィールド自体を含めてよいか**。現行は `stmt.fields` にキーを含めることを必須にしており（[:10600](../../src/execute.ts#L10600)）、組み立てた `record` にキーの値が入る。公式サンプルは `record` にキー以外を入れている。含めて拒否されるなら除去が要り、**その場合は挿入時にキー値が `updateKey.value` から入ることの確認**もセットで要る
+2. **ソース内にキー重複があるときの挙動**。素の `executeUpsert` / 非 IMPORT の `executeUpsertSelect` は**ソース内重複を検出しない**（検出するのは CHECK / IMPORT / APPLY の経路だけ・[:11181](../../src/execute.ts#L11181)）。現行は「同じ `$id` を 2 回 PUT（後勝ち）」または「2 回 POST → 重複禁止違反でチャンク全体が失敗」。native では 1 件目 INSERT・2 件目 UPDATE になるのか、リクエストごと拒否されるのかが不明。**同一 100 件チャンク内の重複と、100 件境界をまたぐ重複を分けて測る**（native はリクエスト単位で処理されるため結果が変わり得る）
+3. **空文字キー（`updateKey.value: ""`）**。現行の素の経路は空キーでも行ごと GET で照合して更新し得る。native は拒否する見込み＝挙動が変わる（案 C の条件⑤で現行経路に落とすなら影響しないが、確認して条文にする）
+4. **NUMBER キーの表記ゆれ**。現行は `"5.0"` と `"5"` を数値正規化で同一視する（[:7199](../../src/execute.ts#L7199)・NUMBER 型のキーのみ）。kintone 側の照合が同じかは未確認。**文字列（1行）キーの `"001"` と `"1"` を同一視しないこと**、および **JavaScript の安全整数を超える NUMBER キー**（既存テストが `9007199254740993` の raw 表現維持を固定している）が `updateKey` でも同じレコードへ照合されることを併せて確認する
+5. **部分失敗の残り方**。2 チャンク目を意図的に失敗させ、①1 チャンク目が確定して残ること ②再実行で最終状態と内訳がどうなるか ③`onChunkWritten` の通知列がどうなるか を測る。書込順の変更による主要な互換差はここ（§3.3）
+
+**bulkRequest との併用（F-5）は本件の採否を決めないので、F-5 統合時の実機項目へ回す。** `bulkRequest` の実行可能 API に「複数のレコードを更新する」が含まれるため `upsert: true` 付き payload も通る見込みで、20 サブリクエスト × 100 件 = 2,000 件/リクエスト＝XL の書込 100 回 → 5 回。**ただし「いずれかが失敗すると以降は実行されず全ロールバック」**なので、失敗時の粒度が 100 件単位から 2,000 件単位へ変わる。
+
+### 3.4 効く指標が F-5 と違う — 日次 API リクエスト数を減らせるのは本件だけ
+
+【オーナー指摘 2026-08-25・**こちらの記録が誤っていた**】kintone の制限は 2 つある: **同時接続数**（1 ドメイン 100）と、**1 日に実行できる API リクエスト数**（**1 アプリあたりスタンダード 10,000 / ワイド 100,000**）。[共通仕様の「対象外の API リクエスト」](https://cybozu.dev/ja/kintone/docs/rest-api/overview/kintone-rest-api-overview/)に **`bulkRequest` 自体が列挙されている**＝封筒は数えないが**内包サブリクエストは個別にカウントされる**と読むのが自然（サブリクエストも対象外なら日次上限を無制限に迂回できてしまう）。
+
+| 指標 | B173（native upsert） | F-5（bulkRequest 束ね） |
+|---|---|---|
+| 1 日の API リクエスト数（アプリ単位） | **減る**（XL で 300 → 100） | **減らない** |
+| HTTP ラウンドトリップ・同時接続数・所要時間 | 減る | 減る（書込 100 → 5） |
+| 失敗時のロールバック粒度 | 100 件のまま | 100 件 → 2,000 件へ粗くなる |
+
+→ **依頼書の「F-5 と重畳すれば効果が最大」は所要時間については正しいが、API リクエスト数については本件単独と変わらない**。**本件の相対的な価値は依頼書の見立てより高い**（優先度の再評価材料。ただし §4 の権限退行があるため既定 ON の判断は変えない）。**`docs/flow_dialect1_engine_task.md` §2.8 の「`bulkRequest` は内包サブリクエスト数によらず 1 回」は誤りだったので訂正済み**（EXPLAIN 推定 API 消費を出すときは**どちらの指標か明示する**こと）。
+
+## 4. 受入基準（依頼書 §4）への見立て
+
+| 依頼書の基準 | 見立て |
+|---|---|
+| 1. XL 相当で事前 GET 200 回が消え、書込約 100 回になる | **満たせる見込み**（素の UPSERT なら）。**ランナーの XL スクリプトが CHECK を付けていないことが前提**（§1.1）。書込は端数次第で 100 回（現行は最大 101 回なので 1 回減ることもある） |
+| 2. 挿入 / 更新の結果件数が現行と同値 | **満たせる**（`records[].operation`・§2 の 2） |
+| 3. dry-run の差分・件数・API 消費は現行と同一 | **読取は同一。`estimatedWrites` は変わる**（§1.3）。ランナーの推定式 7.2 / 10.2 の追随は依頼書の想定どおり必要 |
+| 4. 冪等性が維持される | **維持される**。ただし現行と同じく「2 回目は全件 UPDATE」であって、書込リクエスト自体は 2 回目も同数発行される |
+
+## 5. 次にやること
+
+1. ~~返信で 6 点を確認する~~ → **完了（2026-08-25・§2.5）**
+2. ~~実機で測る~~ → **完了（2026-08-25・§3.2）**。5 項目決着。残るのは部分失敗の残り方だけで、これは仕様の前提ではない
+3. **案 C の仕様を起こす（次はこれ）**。実装は codex（[[spec-and-impl-by-codex]]）。**codex へ渡すもの**＝
+   - §2.5 の確定事項（依頼元回答＝**レビュー対象外**と明記）
+   - §1.4・§1.5 のラッパー／公開契約の実測（**再導出させない**）
+   - §3.2 の実機測定結果（**codex は実行できないので、渡さないと「含めてよい」等を仮定して外す**）
+   - 適用条件 6 つと、条件を満たさないときの fallback
+   - **受入は公開結果で観測する形にする**（結果オブジェクト・送出される例外・mock client の API 呼び出し回数。内部関数名を書かせない）
+4. ~~依頼元へ実測報告を送る~~ → **[実測報告](../../../ksql-flow/docs/kSQLエンジンからの実測報告-20260825-F7-native-upsert実機.md)を起草済み**（2026-08-25）。仕様確定後に確定した型と値を追送する
+
+**コードで決まるので実機不要**（unit / integration で足りる）: CLI・プラグインがトップレベル `upsert` を落とすこと、`writableClient` が body を素通しし戻り値を捨てること、`mode` が検証を変えること、素の UPSERT の値検証がモード非依存なこと、適格性判定が追加 API ゼロでできること、ラッパー 5 層の能力保持。
