@@ -134,7 +134,37 @@ kintone の検索索引の性質であり、`LIKE`（JS 評価・全件取得後
 2. B173 で `/flow` の**書込経路とバッチ文列を触る**ため、文列を見る検査を足す文脈が既にある
 3. 文書（案 A）は**これから書く人**にしか効かない。**既に書かれたバッチ**を救えるのは検査だけ
 
-**先に決めること**: `warning` にするか、`EXPLAIN` の注記に留めるか。**見立ては `warning`**（fail-open を静かに残すより、うるさい方が安全側）。ただし [B143](ksql_b143_explain_warnings_issue.md)（EXPLAIN が warnings を返さない）が未解決なので、**`EXPLAIN` まで通す運用の依頼元には届かない**点に注意＝B143 と併せて判断する。
+### 4.2.1 `warning` か `EXPLAIN` 注記か — **到達面を測って結論が変わった**
+
+当初の見立ては「`warning`（fail-open を静かに残すより、うるさい方が安全側）」だった。**到達面を調べたら、`warning` は肝心の `/flow` に今日届かないことが分かった**ので、**`EXPLAIN` 注記を先に入れる**へ改める。
+
+**実測（到達面）:**
+
+| 事実 | 根拠 |
+|---|---|
+| **`/flow` の `StatementResult` に `warnings` が無い** | [flow-library/publicTypes.ts:258-270](../../src/flow-library/publicTypes.ts#L258)＝`index` / `type` / `status` / `kind` / `result?: unknown` / `tempTable` / `rowCount` / `error` / `skippedReason` / `metrics` のみ |
+| **batch 経路にしか警告がマージされない** | `dialect1Warnings` を SELECT 結果へ merge するのも（[execute.ts:1720-1729](../../src/execute.ts#L1720)）、バッチ全体の `warnings` を返すのも（[同 :1763](../../src/execute.ts#L1763)）**`executeBatch` だけ**。`/flow` の managed 経路（[同 :1950](../../src/execute.ts#L1950)）は `statementOutcome` をそのまま展開するだけで**警告を付けない** |
+| **`ExplainScriptResult` には注記を置ける** | [publicTypes.ts:121-124](../../src/flow-library/publicTypes.ts#L121)＝`statements: Array<{ index; type; plan: string[] }>`。**`plan` は文字列配列なので 1 行足すのは純加法**で、公開型の変更が要らない |
+| **EXPLAIN に助言行を出す前例がある** | [execute.ts:12855](../../src/execute.ts#L12855) の `reference: bulkRequest は未実装…`。**同じ関数に足すだけ** |
+
+**比較:**
+
+| | `warning` | **`EXPLAIN` 注記** |
+|---|---|---|
+| 出るタイミング | **実行時**＝取りこぼしが起きたその時 | **実行前**＝まだ文順を直せる |
+| `/flow` に届くか | **今は届かない**（型に置き場が無い） | **届く**（`plan` に 1 行） |
+| CLI / MCP に届くか | 届く（batch envelope の `warnings`） | 届く（EXPLAIN 出力） |
+| 機械判定 | 可（型を足せば） | 不可（`plan` の文字列） |
+| 公開型の変更 | **要る**（`StatementResult` に `warnings` を純加法で追加） | **不要** |
+| [B143](ksql_b143_explain_warnings_issue.md) との関係 | **B143 の穴をそのまま踏む**＝依頼元は「実行前に `explainScript` まで通す」運用なので、EXPLAIN が warnings を返さない限り**実行するまで気づけない** | **B143 を迂回する**（EXPLAIN 自体に載せるので B143 の解決を待たない） |
+| 判定に要る情報 | 文列のみ | 文列のみ（**B143 の window 警告と違いフォーム定義が要らない**＝EXPLAIN 経路で確実に出せる） |
+
+**結論＝2 段階にする。**
+
+1. **まず `EXPLAIN` 注記**（B173 のリリースに同梱）。公開型を変えず、依頼元に今日届き、**実行前**に出る。B143 の解決を待たない
+2. **`warning` は追って**。ただし先に **`/flow` の `StatementResult` に `warnings` を足す**（純加法）か、**B143 案 A（EXPLAIN も `warnings` を返す）**のどちらかが要る。**単独で `warning` だけ入れても `/flow` には届かない**
+
+**B143 への波及**: 本件は「**フォーム定義を要さず文列だけで決まる警告**」なので、B143 案 A（EXPLAIN も warnings を返す）の**着手前確認「EXPLAIN 経路に resolver があるか」に引っかからない**。B143 が案 A を採るなら、**本件がその最初の実例になり得る**（B143 の見立て「resolver が既にあれば安い、無ければ見送り」に対して、resolver 不要な警告が 1 つある、という材料）。
 
 ### 4.3 案 C（自動待機）— **採らない**（§3）
 
