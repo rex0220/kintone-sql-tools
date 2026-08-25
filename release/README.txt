@@ -1,22 +1,28 @@
-ksql 配布パッケージ (v3.72.0)
+ksql 配布パッケージ (v3.73.0)
 
 release 成果物:
-- ksql-plugin-v3.72.0.zip
-- ksql-mcp.mcpb (manifest version 3.72.0)
-- ksql-mcp.js (MCP server version 3.72.0)
+- ksql-plugin-v3.73.0.zip
+- ksql-mcp.mcpb (manifest version 3.73.0)
+- ksql-mcp.js (MCP server version 3.73.0)
 
-修正 (B171 F-1: ASSERT / ASSERT WARN / EXIT の大小比較が辞書順だった) ★結果が変わります:
-- COUNT 等の数値集計サブクエリと数値の大小比較・BETWEEN が文字列（辞書順）比較に
-  なっており、件数ガードが fail-open になり得ました（例: 12 件で <= 9 が成立）。
-  両辺が数値（数値リテラル・算術式・数値変数・数値集計サブクエリ）のときだけ
-  10 進の数値比較へ修正。等値・文字列同士の辞書順（ISO 日付比較）・文字列変数は不変。
-- dialect 0 の既存 ASSERT にも同じ修正が効きます (ASSERT 導入時からの不具合)。
+機能追加 (B173 F-7: UPSERT を kintone native UPSERT へ) ★/flow の挙動が変わります:
+- /flow の適格な素の UPSERT VALUES / UPSERT SELECT が、既定で kintone の
+  updateKey + upsert: true を使います。事前 GET によるキー照合が不要になり、
+  UPSERT 1 万件で API 300 回 -> 100 回 (書込先アプリの日次 API 枠が 1/3)。
+- 成功時のレコード内容と insertedCount / updatedCount は従来と同じです。
+- 変わるのは 5 点: 書込順 (ソース順の混在チャンク) / 部分失敗時に確定している範囲 /
+  onChunkWritten.operation に "UPSERT" と内訳 / postCalls が 0 (putCalls へ集約・
+  nativeUpsertCalls は内数) / preview の estimatedWrites の算出式。
+- 従来経路へ戻すには createExecutionContext に enableNativeUpsert: false を渡します。
+- native の利用には対象アプリのレコード追加権限が必要です (更新だけの UPSERT でも)。
+- 変わらない形: CHECK / APPLY / VALIDATE ONLY / ON ERROR SKIP / IMPORT を伴う UPSERT、
+  複合キー・重複禁止でないキー、空文字キー、ソース内キー重複、CLI (既定 OFF)、
+  MCP、プラグイン、engine-library。いずれも従来の経路と結果のままです。
+- CLI は --allow-dml --native-upsert を明示した実行だけが同じ経路を使います。
+- EXPLAIN が native の適格性を表示します (MCP / プラグイン / CLI)。
 
-機能追加 (B171 F-2: dialect 1 の INSERT ... VALUES で as-of 関数) ★純加法:
-- @NOW() / @TODAY() / @MONTH_START() / @NEXT_MONTH_START() を INSERT ... VALUES に
-  書けます (実行 / previewStatement / EXPLAIN の 3 面で同値展開)。UPSERT VALUES /
-  APPLY の値は対象外 (拒否時に文型限定ヒントを表示)。dialect 0 は従来どおり。
-
+v3.72.0 の節は畳みました (B171 ASSERT 大小比較の辞書順修正 = fail-open 解消 /
+  B171 F-2 dialect 1 の INSERT VALUES で as-of 関数)。
 v3.71.0 の節は畳みました (B170 E-2 previewStatement = dry-run 差分プレビュー)。
 v3.70.0 の節は畳みました (B170 E-6/E-3/E-5/E-1 = /flow 純加法 4 件)。
 v3.69.0 の節は畳みました (B168 Flow dialect 1 完成 = Stage 4-6・全面で実行可)。
@@ -92,12 +98,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.72.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.73.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.72.0): B171 ASSERT 大小比較の辞書順不具合を修正 (結果が変わります・fail-open ガード解消) + INSERT VALUES の as-of 許可。
+本リリース (v3.73.0): B173 UPSERT を kintone native UPSERT へ (/flow は既定 ON・挙動が変わります・API 消費 1/3)、CLI の --native-upsert (純加法)、EXPLAIN が native 適格性を表示 (純加法)。
+
+前リリース (v3.72.0): B171 ASSERT 大小比較の辞書順不具合を修正 (結果が変わります)、
+B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
 
 前リリース (v3.71.0): B170 E-2 previewStatement (dry-run 差分プレビュー・/flow 純加法)。
 
@@ -126,15 +135,7 @@ B159 GENERATE_SERIES month/year step (新機能・月次 0 埋め)、B157/B161 d
 前リリース (v3.61.0): B150/B153 結合キー押し下げの型対応 (日付キー JOIN の
 GAIA_IQ03 解消) と空キー一致の欠落修正 (結果が変わります)。
 
-前リリース (v3.60.0): B151/B152 JOIN の押し下げを kintone 演算子表へ全面整合
-(改善・結果不変・取得量削減。不正値の kintone エラーは表面化)。
-
-前リリース (v3.59.0): B149 GENERATE_SERIES 整数・日付系列の生成 (新機能・
-LEFT JOIN で「取引の無い日を 0 として並べる」が書けます)。
-
-前リリース (v3.58.0): B147 集計・ウィンドウの別名が入力フィールドを上書きしていた
-(挙動が変わります)、B140 無視してよい条件を書く (改善)。
-
+前リリース (v3.60.0 以前) の節は畳みました。CHANGELOG.md と GitHub Releases を参照してください。
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
 - 過去版は GitHub Releases の各タグに添付しています。
