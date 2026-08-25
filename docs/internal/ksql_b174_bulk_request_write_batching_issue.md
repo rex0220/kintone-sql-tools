@@ -4,6 +4,7 @@
 - 種別: 改善（性能）
 - 優先: —（保留。起票時の依頼書の申告は「中」）
 - 出典: [ksql-flow の依頼 F-5](../../../ksql-flow/docs/kSQLエンジンへの依頼-20260823-F5-bulkRequest.md)（2026-08-23 受領・**起票が 2 日遅れた**）
+- 回答: [F-5 への回答](../../../ksql-flow/docs/kSQLエンジンからの回答-20260825-F5-bulkRequest.md)（2026-08-25 起草・**送付前**）＝保留の理由 3 つ・解除条件 4 つ・測り方（依頼元が測る場合）・回避策の負担の有無を逆質問
 - 関連: [B173](ksql_b173_native_upsert_update_key_issue.md)（F-7・native upsert。**独立だが `onChunkWritten` の設計が競合する**＝§3.3）／[B168 訂正 4](ksql_b168_flow_dialect1_plan.md)（bulkRequest 未実装の確認）／`ksql_batch_enhancement_proposals.md` §2.2（M5・2026-07-10 に「重い」と評価して保留）
 
 ## 1. 依頼の要旨
