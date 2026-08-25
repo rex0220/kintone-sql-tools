@@ -1128,10 +1128,19 @@ WHERE 件名 NOT KLIKE '保留'
     | `KLIKE 'TOKYO'` | `TOKYO TO` | ○（空白区切りの語 `TOKYO`） |
     | `KLIKE 'TOK'` / `'OKYO'` | `TOKYO TO` | ×（語の一部では一致しない） |
     | `KLIKE 'A'` | `A1` | ×（`A1` で1語） |
+    | `KLIKE 'X'` / `'Y'` / `'X-Y'` | `X-Y` | ○（**ハイフンは語を分割する**） |
+    | `KLIKE 'ALPHA'` / `'BETA'` | `ALPHA_BETA` | ×（**アンダースコアは語を分割しない**ため `ALPHA_BETA` で1語） |
+    | `KLIKE 'KSQL-FLOW-TEST-C'` | `KSQL-FLOW-TEST-C200` | ×（末尾の語 `C` が `C200` と一致しない） |
     | `KLIKE '丸の'` / `'の内'` | `丸の内` | ○（2文字以上の部分一致・中間を含む） |
     | `KLIKE '内'` | `丸の内` | ×（1文字では一致しない） |
 
-    > 上記は観測された例であり、kintoneの一致規則を網羅的に定義するものではありません。半角・全角、大小文字、記号の扱い等はkintoneの仕様に従います。
+    > 上記は観測された例であり、kintoneの一致規則を網羅的に定義するものではありません。半角・全角、大小文字、記号の扱い等はkintoneの仕様に従います。（実測・v3.72.0）
+  - **書込直後の `KLIKE` は取りこぼすことがあります。** kintoneの検索索引は書込に対して即時ではないため、**同じバッチで書いた行を直後に `KLIKE` で拾うと、一致するはずのレコードが返らない場合があります**。エラーにはならず件数が減るだけなので気づけません。
+    ```sql
+    UPSERT INTO APP100 (コード, 区分) VALUES (...) ON DUPLICATE (コード);
+    SELECT * FROM APP100 WHERE 区分 KLIKE '要確認';  -- 直前に書いた行が入らないことがある
+    ```
+    **書いた行を同じバッチで数える／絞り込む場合は `LIKE`（JavaScript評価）を使ってください。** `ASSERT` の件数ゲートを `KLIKE` で書くと、ゲートが素通りし得ます。（実測・v3.72.0）
   - 迷ったら、確実に部分一致させたい場合は `LIKE`（JavaScript評価・FULL_SCAN）を、kintone側で高速に絞り込みたい場合は `KLIKE` を使い分けてください。
 - **性能**: `LIKE` はFULL_SCANになり、AND条件に押し下げ可能な安全述語（`$id`・型確認済みNUMBERと許可範囲内の数値リテラルによる比較・`IN`・選択系 `IN` など）がなければ全件取得になります。大規模アプリでは取得上限（`maxRecords`）に達してエラーになりがちです。`KLIKE` はSIMPLEのままkintone側で検索するため、大規模アプリでも高速です（例: 数十万件規模のアプリで `都道府県 LIKE '%東京%'` は上限エラー、`都道府県 KLIKE '東京都'` は即応）。ただし下記の10万件打ち切りに注意。
 - SIMPLE SELECTでは従来どおりWHERE全体をkintoneへ渡します。FULL_SCAN SELECTでも、KLIKEがWHEREルートからANDと括弧だけを経由する安全なリーフなら、kintoneへプレフィルタ押し下げして残りの条件をJavaScriptで精製します。これによりKLIKEと`LIKE`・関数・集計・`DISTINCT`を併用できます。
