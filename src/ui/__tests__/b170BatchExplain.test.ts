@@ -28,3 +28,26 @@ test("E-6 plugin batch EXPLAIN reaches shared default as-of injection", async ()
   );
   expect(plans.statementCount).toBe(2);
 });
+
+test("B173 AC-17/21: plugin batch EXPLAIN は条件 1・2 を対象外にして文・データ適格性を表示する", async () => {
+  const getFields = jest.fn(async () => [
+    { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT", isUnique: true },
+  ]);
+  const plans = await buildPluginBatchExplainPlans(
+    "SELECT key FROM APP1 WHERE key > 'A';" +
+      "UPSERT INTO APP1 (key) VALUES ('B') ON DUPLICATE (key)",
+    { ...client, getFields },
+    {
+      maxRecords: 10_000,
+      cursorMaxActive: 2,
+      importEnabled: false,
+      recursiveCteMaxDepth: 100,
+      recursiveCteMaxRows: 10_000,
+      recursiveCteMaxExpansions: 100_000,
+    }
+  );
+  const text = plans.statements[1].plan.join("\n");
+  expect(text).toContain("native UPSERT statement/data eligibility: ELIGIBLE");
+  expect(text).toContain("native UPSERT execution surface: NOT_APPLICABLE");
+  expect(getFields).toHaveBeenCalledTimes(1);
+});

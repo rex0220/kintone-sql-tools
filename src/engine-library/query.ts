@@ -132,7 +132,10 @@ export async function explainQuery(
         true,
         invocation.executeOptions.recursiveCteMaxDepth,
         invocation.executeOptions.recursiveCteMaxRows,
-        invocation.executeOptions.recursiveCteMaxExpansions
+        invocation.executeOptions.recursiveCteMaxExpansions,
+        undefined,
+        undefined,
+        { surface: "DOCUMENT_ONLY" }
       )
     );
     const lines = restoreLogicalAppDiagnosticValue(result.statements.flatMap((statement) => [

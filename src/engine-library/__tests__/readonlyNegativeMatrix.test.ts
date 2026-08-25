@@ -77,6 +77,10 @@ test.each([
 test.each([
   "EXPLAIN UPDATE APP1 SET a = 1 WHERE $id = 1",
   "EXPLAIN IMPORT INTO APP1 (a) FROM CSV source",
+  // B173: native UPSERT の可視化は engine-library の対象外。B89 §6b の
+  // 「EXPLAIN <DML> は両経路で拒否」をここでも固定する。
+  "EXPLAIN UPSERT INTO APP1 (a) VALUES ('x') ON DUPLICATE (a)",
+  "EXPLAIN UPSERT INTO APP1 (a) SELECT a FROM APP2 ON DUPLICATE (a)",
 ] as const)("EXPLAIN non-read is rejected before engine execution: %s", async (sql) => {
   const { client, mutations } = clientWithWrites();
   await expect(explainQuery(sql, { client })).rejects.toMatchObject({

@@ -70,6 +70,20 @@ test("Pro batch is explained statement-by-statement without reading records", as
   expect(tracked.getRecords).not.toHaveBeenCalled();
 });
 
+// B173: engine-library は「/flow ジョブを書く面」ではないため、native 適格性の可視化対象から外す。
+// EXPLAIN UPSERT は B89 §6b の中核契約どおり両経路で拒否されたままにする。
+test("B173: engine-library の EXPLAIN は UPSERT を受理しない（B89 §6b の受理集合一致を維持）", async () => {
+  const tracked = trackedClient();
+  await expect(
+    explainQuery(
+      "SELECT key FROM APP1 WHERE key > 'A';" +
+        "EXPLAIN UPSERT INTO APP1 (key) VALUES ('B') ON DUPLICATE (key)",
+      { client: tracked.client }
+    )
+  ).rejects.toMatchObject({ code: "READ_ONLY_VIOLATION" });
+  for (const api of tracked.apiCalls) expect(api).not.toHaveBeenCalled();
+});
+
 test.each([
   ["direct arithmetic", "(顧客No * 100) / @total AS 構成比"],
   ["ROUND", "ROUND(顧客No * 100 / @total, 1) AS 構成比"],
@@ -324,7 +338,6 @@ test.each([
   ["UPDATE", "EXPLAIN UPDATE APP1 SET code = 'A' WHERE $id = 1"],
   ["DELETE", "EXPLAIN DELETE FROM APP1 WHERE $id = 1"],
   ["INSERT", "EXPLAIN INSERT INTO APP1 (code) VALUES ('A')"],
-  ["UPSERT", "EXPLAIN UPSERT INTO APP1 (key) VALUES ('A') ON DUPLICATE (key)"],
   [
     "APPLY",
     "EXPLAIN UPDATE APP1 SET code = 'A' WHERE $id = 1 APPLY details (REMOVE ALL ROWS) VALIDATE ONLY",
@@ -341,6 +354,23 @@ test.each([
         code: "READ_ONLY_VIOLATION",
       });
     }
+    for (const api of tracked.apiCalls) expect(api).not.toHaveBeenCalled();
+  }
+);
+
+test.each([
+  "EXPLAIN UPSERT INTO APP1 (key) VALUES ('A') ON DUPLICATE (key)",
+  "EXPLAIN UPSERT INTO APP1 (key) SELECT key FROM APP2 ON DUPLICATE (key)",
+] as const)(
+  "B173: EXPLAIN UPSERT は explainQuery / runBatch の両経路で拒否される（B89 §6b）: %s",
+  async (sql) => {
+    const tracked = trackedClient();
+    await expect(explainQuery(sql, { client: tracked.client })).rejects.toMatchObject({
+      code: "READ_ONLY_VIOLATION",
+    });
+    await expect(runBatch(sql, { client: tracked.client })).rejects.toMatchObject({
+      code: "READ_ONLY_VIOLATION",
+    });
     for (const api of tracked.apiCalls) expect(api).not.toHaveBeenCalled();
   }
 );

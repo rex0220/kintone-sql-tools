@@ -100,7 +100,13 @@ export async function explainScript(
       opts.recursiveCteMaxRows,
       opts.recursiveCteMaxExpansions,
       opts.asOf,
-      opts.timezone
+      opts.timezone,
+      {
+        surface: "FLOW",
+        enableNativeUpsert: opts.enableNativeUpsert !== false,
+        clientHasNativeUpsert: "upsertRecords" in explainClient
+          && typeof explainClient.upsertRecords === "function",
+      }
     );
   } catch (error) {
     throw normalizeFlowError(error);

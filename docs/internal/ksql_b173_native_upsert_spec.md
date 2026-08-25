@@ -1,5 +1,18 @@
 # B173 native UPSERT（`updateKey` + `upsert: true`）仕様 R5
 
+> ## 【規範的訂正 2026-08-25】engine-library は可視化の対象外
+>
+> **本文で「MCP・プラグイン・engine-library」と書かれている箇所のうち、EXPLAIN の適格性表示に関するものは「MCP・プラグイン」と読み替える。AC-17 / AC-21 も engine-library には適用しない。**
+>
+> **理由 2 点:**
+>
+> 1. **[B89](ksql_b89_library_explain_batch_spec.md) §6b が `EXPLAIN UPSERT` の拒否を名指しで固定している** — 「`EXPLAIN UPDATE` / `EXPLAIN DELETE` / `EXPLAIN INSERT` / **`EXPLAIN UPSERT`** が **`runBatch` でも `explainQuery` でも** `READ_ONLY_VIOLATION` になること」。同 §4 は「**受理集合が `runBatch` と一致する — これが本仕様の中核**」とする。engine-library で適格性を表示するには**この中核契約に例外を作る**必要があり、診断行 1 本のために払う額ではない
+> 2. **可視化の目的（起票文書 §7.3）は「`/flow` ジョブをオーサリング・検証する面で本番の挙動を読めるようにする」こと。** engine-library は**ダッシュボード等に読み取りクエリを埋め込むライブラリ**であって、ジョブを書く面ではない。**要件は目的（オーサリング／検証面）に従うべきで、実装の都合（`buildBatchExplainPlans` を共有する 5 面）に従うべきではなかった**
+>
+> **経緯**＝R3 の依頼で Claude が「非 opt-in 面（MCP・プラグイン・engine-library）」と書いたのが誤り（§17.6）。**engine-library の read-only ガード（`prepareExplainQuerySql`）は変更しない。**
+>
+> **対象面は「MCP・プラグイン・CLI」。** `src/engine-library/readonlyClient.ts` の `WRITE_METHODS` への `"upsertRecords"` 追加は**この訂正の対象外**（能力を報告しないための純加法で、可視化とは無関係）。
+
 - 状態: 仕様 R5。実装未着手。この仕様作成セッションではコード、文書、git 状態を変更していない。
 - 対象:
   - `/flow` の素の `UPSERT VALUES` / `UPSERT SELECT` 本実行、および同じ実行条件を反映する `previewStatement`。
@@ -1702,3 +1715,37 @@ CHANGELOGと依頼元通知に、成功時のレコード内容は同じであ�
 **実装依頼で codex へ渡すもの**＝この仕様 R5 の全文／起票文書 §2.5（依頼元回答＝レビュー対象外）・§3.2（実機測定）・§7（オーサリング面の論点と既定 ON の決定）／**受入は公開結果で観測する形にすること**（結果オブジェクト・送出される例外・mock client の API 呼び出し回数と順序と body。内部関数名を受入条件に書かない）。
 
 **リリース時に忘れないこと**＝§14.1 の CHANGELOG 文面（**成功時の結果は同じ／変わるのは書込順・部分失敗時の確定範囲・`onChunkWritten.operation`・API 回数内訳・`estimatedWrites`**）と §14.2 の依頼元通知（**追随作業の期限が「有効化時」から「アップグレード時」へ前倒しになる**）。
+
+### 17.6 実装フェーズ 2 のレビュー — read-only ガードの開通を戻した（2026-08-25）
+
+**codex はフェーズ 2 で `src/engine-library/statementGuard.ts` の `prepareExplainQuerySql` を変更し、`EXPLAIN UPSERT` / `EXPLAIN UPSERT_SELECT` だけを read-only ガードの対象外にした**（`guardRunBatchSql` は無傷で、影響は explain 経路に閉じていた）。**AC-17 / AC-21 を満たすためであり、codex は「要確認」として正直に報告している。**
+
+#### 争点
+
+| | 主張 |
+|---|---|
+| Claude | fail-closed の境界を表示要件のために緩めている／read-only 契約が不整合になる／誰も必要としていない／**AC-17・21 は engine-library に適用されず拒否で満たせるのでは** |
+| codex（方針レビュー） | **「AC-17 は engine-library を名指しで表示要求しており、拒否では満たせない」＝ Claude の 4 点目は誤り。** ただし **B89 の「`explainQuery` と `runBatch` の受理集合一致」に明白な例外を作っている**ので、案 2（維持）を採るなら B89・B66・公開文書・負のマトリクスの 4 つを例外契約へ書き換えること。**「コードは維持、旧不変条件は放置」は不可** |
+
+#### 決着 — **案 1（戻す）+ 仕様の訂正**
+
+**codex の指摘（4 点目は誤り）は R5 の文言に照らして正しい。しかし R5 がそう書いてあるのは Claude の誤りだった**＝R3 の依頼で「非 opt-in 面（MCP・プラグイン・engine-library）」と書き、**`buildBatchExplainPlans` を共有する 5 面という実装上の事実から、可視化が要る面を過度に一般化した**。
+
+**そして codex 自身が、Claude の弱い根拠（テスト名）より強い根拠を掘り当てていた**＝**B89 §6b が `EXPLAIN UPSERT` を名指しで拒否対象に挙げ、§4 が受理集合一致を「本仕様の中核」としている**。
+
+→ **codex が挙げた「判断を覆す条件」の 1 番目（R5 を改訂して engine-library を除外する）を適用**し、案 1 を採る。**冒頭の規範的訂正がその改訂。**
+
+#### 実施した内容
+
+| 対象 | 内容 |
+|---|---|
+| `src/engine-library/statementGuard.ts` | **revert**（ガードは元のまま） |
+| `src/engine-library/__tests__/b89ExplainBatch.test.ts` | 新規 2 テストを置換＝**`EXPLAIN UPSERT` / `EXPLAIN UPSERT SELECT` が `explainQuery` / `runBatch` の両経路で `READ_ONLY_VIOLATION` になり API 呼び出しが 0 回**であることを固定 |
+| `src/engine-library/__tests__/readonlyNegativeMatrix.test.ts` | 列に `EXPLAIN UPSERT` / `EXPLAIN UPSERT SELECT` を追加し、**「EXPLAIN non-read is rejected」という既存の不変条件を B89 §6b が求めていた形へ強めた**（従来は `EXPLAIN UPDATE` と `EXPLAIN IMPORT` だけだった） |
+| 仕様 | 冒頭に規範的訂正。対象面を **MCP・プラグイン・CLI** に改める |
+
+#### 学び
+
+**「共通の実装を持つ面」と「要件が及ぶ面」は別物。** `buildBatchExplainPlans` を 5 面が共有しているのは実装の都合であって、5 面すべてに同じ要件が及ぶ理由にはならない。**要件は目的から導く**（ここでは「`/flow` ジョブをオーサリング・検証する面」）。
+
+**また、下流へ「決まっていること」として渡す前提は、[B141](ksql_b141_doc_sql_unverified_issue.md) の 6 回目と同じ形で誤りを増幅する。** 今回も Claude が依頼文へ書いた面の一覧が、そのまま仕様の AC と実装（ガードの開通）に焼き付いた。**面の一覧のような「何に適用するか」の指定は、渡す前に既存の契約（ここでは B89）と突き合わせる。**
