@@ -3,6 +3,65 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.73.0（2026-08-25）
+
+### 機能追加（B173 F-7: UPSERT を kintone native UPSERT へ）**※ `/flow` の UPSERT は挙動が変わります**
+
+`/flow` の**適格な素の `UPSERT VALUES` / `UPSERT SELECT`** は、アップグレード後、
+**既定で** kintone の `updateKey` + `upsert: true` を使います。事前 GET による
+キー照合が不要になり、**UPSERT 1 万件で API 300 回 → 100 回**（書込先アプリの
+日次 API 枠の消費が 1/3）。
+
+**成功時のレコード内容と `insertedCount` / `updatedCount` は従来と同じです。**
+内訳はレスポンスの `records[].operation` から取るため、件数は厳密に一致します。
+
+**変わるのは次の 5 点だけです**（`/flow` で native が適用された文のみ）:
+
+| 変わるもの | 従来 | v3.73.0 |
+|---|---|---|
+| 書込順 | 新規を全部 POST → 更新を全部 PUT | **ソース順の混在チャンク** |
+| 部分失敗時に確定している範囲 | 「新規は入った／更新は入っていない」 | **ソース順の prefix** |
+| `onChunkWritten.operation` | `"INSERT"` / `"UPDATE"` | **`"UPSERT"`**＋内訳プロパティ |
+| `ExecutionMetrics` の内訳 | `postCalls` + `putCalls` | **`postCalls` が 0**・`putCalls` へ集約（`nativeUpsertCalls` は内数） |
+| preview の `estimatedWrites` | `ceil(新規/100)+ceil(更新/100)` | **`ceil(合計/100)`** |
+
+**変わらない形（安全な形の裏返し列挙）** — 次はすべて従来の経路・結果のままです:
+
+- `CHECK` / `APPLY` / `VALIDATE ONLY` / `ON ERROR SKIP` / `IMPORT` を伴う UPSERT
+- 複合キー・重複禁止でないキー・「文字列（1行）」「数値」以外のキー
+- 空文字キーを含む行・**ソース内にキーが重複する文**
+- `enableNativeUpsert: false` を渡した `/flow`
+- **CLI（既定 OFF）・MCP・プラグイン・engine-library**
+- テキストの `=` / `IN` 押し下げ、`$id` 押し下げ、`LIKE`（JS 評価）
+
+**従来経路へ戻す**には `createExecutionContext` に `enableNativeUpsert: false` を渡します。
+
+**注意**: native の利用には**対象アプリのレコード追加権限**が必要です。
+更新だけで完結する UPSERT でも要求されます（kintone の UPSERT モードの仕様）。
+編集権限だけの API トークンで運用している場合は、**アップグレード前に権限を確認**するか
+`enableNativeUpsert: false` を指定してください。
+
+### 機能追加（B173: CLI の `--native-upsert`）**※純加法**
+
+CLI は**既定 OFF** のままです。`--allow-dml --native-upsert` を明示した実行だけが
+同じ native 経路を使います。**本番と同じ API トークンを指すプロファイルでリハーサル**
+できるようにするためのフラグで、`--yes` や `--dml-max-rows` の既存ゲートは迂回しません。
+
+### 改善（B173: EXPLAIN が native の適格性を表示）**※純加法**
+
+`EXPLAIN` が「この UPSERT は native になるか」を `ELIGIBLE` / `INELIGIBLE`（理由つき）/
+`UNKNOWN`（メタデータやソース行が未取得で判定できない）で表示します。
+**opt-in を持たない面（MCP・プラグイン）でも、文とデータの条件は表示します** —
+「opt-in が無いから不適格」で理由が埋まらないようにしています。
+
+### 文書（B175: `KLIKE` の索引反映ラグ）
+
+kintone の全文検索索引は書込に対して即時ではありません。**同じバッチで書いた行を直後に
+`KLIKE` で拾うと、更新後の値で引けず、更新前の値で引けてしまう**ことがあります。
+言語リファレンスの `KLIKE` 節に注意と回避策（**書込文をバッチの最後に置く**）を追記し、
+一致規則の表に実測行 3 つ（ハイフンは語を分割する／アンダースコアは分割しない ほか）を
+加えました。エンジンの挙動は変わりません。
+
 ## v3.72.0（2026-08-22）
 
 ### 修正（B171 F-1: `ASSERT` / `ASSERT WARN` / `EXIT SUCCESS IF` の大小比較が辞書順だった）**※結果が変わります・dialect 0 含む**
