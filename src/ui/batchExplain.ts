@@ -27,6 +27,9 @@ export function buildPluginBatchExplainPlans(
     true,
     options.recursiveCteMaxDepth,
     options.recursiveCteMaxRows,
-    options.recursiveCteMaxExpansions
+    options.recursiveCteMaxExpansions,
+    undefined,
+    undefined,
+    { surface: "DOCUMENT_ONLY" }
   );
 }

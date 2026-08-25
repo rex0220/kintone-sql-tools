@@ -32,6 +32,7 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../core";
+import { withNativeUpsertExecutionOption } from "../execute";
 import { extractTypedPushdownCandidates } from "../core/optimization/wherePredicatePushdown";
 import { statementUsesRelativeDateResolution } from "../core/optimization/relativeDatePushdownGuard";
 import type { SelectStatement } from "../types/ast";
@@ -148,10 +149,16 @@ const RECURSIVE_CTE_HELP_LINES = [
 ].join("\n");
 
 /** Actual Stage 3 CLI help; HELP_TEXT remains the README-synchronized legacy block until Stage 4 docs sync. */
-export const CLI_HELP_TEXT = HELP_TEXT.replace(
-  "  --max-records <n>          Max records to fetch (default: 500)",
-  `  --max-records <n>          Max records to fetch (default: 500)\n${RECURSIVE_CTE_HELP_LINES}`
-);
+export const CLI_HELP_TEXT = HELP_TEXT
+  .replace(
+    "  --max-records <n>          Max records to fetch (default: 500)",
+    `  --max-records <n>          Max records to fetch (default: 500)\n${RECURSIVE_CTE_HELP_LINES}`
+  )
+  .replace(
+    "  --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT/REORDER execution",
+    "  --allow-dml                Enable UPDATE/DELETE/INSERT/UPSERT/REORDER execution\n" +
+      "  --native-upsert            Allow eligible plain UPSERT to use kintone native UPSERT"
+  );
 
 export const CLI_IMPORT_SOURCE_REQUIRED_MESSAGE =
   "IMPORT にはソースが必要です。--import-csv <name=path> または --import-json <name=path> でファイルを指定してください。";
@@ -267,6 +274,7 @@ interface ParsedArgs {
   debugHeaders: boolean;
   exitOnEmpty: boolean;
   allowDml: boolean;
+  nativeUpsert: boolean;
   yes: boolean;
   allowWithoutWhere: boolean;
   continueOnError: boolean;
@@ -327,6 +335,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     debugHeaders: false,
     exitOnEmpty: false,
     allowDml: false,
+    nativeUpsert: false,
     yes: false,
     allowWithoutWhere: false,
     continueOnError: false,
@@ -361,6 +370,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (a === "--debug-headers") { out.debugHeaders = true; continue; }
     if (a === "--exit-on-empty") { out.exitOnEmpty = true; continue; }
     if (a === "--allow-dml") { out.allowDml = true; continue; }
+    if (a === "--native-upsert") { out.nativeUpsert = true; continue; }
     if (a === "--yes") { out.yes = true; continue; }
     if (a === "--allow-without-where") { out.allowWithoutWhere = true; continue; }
     if (a === "--continue-on-error") { out.continueOnError = true; continue; }
@@ -1319,6 +1329,7 @@ export function buildReplExecArgv(base: ParsedArgs, sql: string, dryRun: boolean
   // REPL 側で確認済みなので、子実行では再確認を行わない。
   if (base.allowDml) argv.push("--yes");
   if (base.allowDml) argv.push("--allow-dml");
+  if (base.nativeUpsert) argv.push("--native-upsert");
   if (base.allowWithoutWhere) argv.push("--allow-without-where");
   if (base.continueOnError) argv.push("--continue-on-error");
   return argv;
@@ -1540,6 +1551,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
       `  format=${format ?? "(default)"}`,
       `  dryrun=${dryRun ? "on" : "off"}`,
       `  allow-dml=${base.allowDml ? "on" : "off"}`,
+      `  native-upsert=${base.nativeUpsert ? "on" : "off"}`,
     ].join("\n") + "\n"
   );
 
@@ -1674,6 +1686,7 @@ async function runConsole(base: ParsedArgs): Promise<number> {
             `app=${base.app ?? "(from SQL or config)"}`,
             `resolved-app-profiles=${lastResolvedProfiles}`,
             `allow-dml=${base.allowDml ? "on" : "off"}`,
+            `native-upsert=${base.nativeUpsert ? "on" : "off"}`,
             `dml-max-rows=${base.dmlMaxRows ?? "(default)"}`,
             `dml-max-subtable-rows=${base.dmlMaxSubtableRows ?? "(default)"}`,
           ];
@@ -2302,6 +2315,14 @@ async function run(): Promise<number> {
         if (!routed) throw new Error(`AuthError: profile "${pName}" is not resolved for APP${params.app}.`);
         return routed.putRecords({ ...params, app: binding.appId });
       },
+      upsertRecords: (params) => {
+        const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
+        const routed = profileClientMap.get(binding.profile);
+        if (!routed || typeof routed.upsertRecords !== "function") {
+          throw new Error(`AuthError: native UPSERT client is not resolved for APP${params.app}.`);
+        }
+        return routed.upsertRecords({ ...params, app: binding.appId });
+      },
       deleteRecords: (params) => {
         const binding = appBindingByMappedApp.get(params.app) ?? { appId: params.app, profile: profileName.toLowerCase() };
         const pName = binding.profile;
@@ -2351,7 +2372,12 @@ async function run(): Promise<number> {
         sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
         Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
         dmlMaxRows, dmlMaxSubtableRows, !dryRunUsesStaticTypedPlan,
-        recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions
+        recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+        undefined, undefined, {
+          surface: "CLI",
+          enableNativeUpsert: args.nativeUpsert,
+          clientHasNativeUpsert: true,
+        }
       );
       const out: string[] = [];
       const restoredStatements = sqlDiagnosticContext
@@ -2442,7 +2468,7 @@ async function run(): Promise<number> {
       // バッチ実行。timeout はバッチ合計として扱う（仕様 §5.7）。
       // DML 文には文ごとの --dml-max-rows ガードを confirm 経由で適用
       //（バッチ全体の確認は上で済んでいるため、ここでは件数ガードのみ）
-      let batchResult = await executeBatch(sql!, client, {
+      let batchResult = await executeBatch(sql!, client, withNativeUpsertExecutionOption({
         maxRecords,
         fetchParallel,
         onLimitReached: effectiveOnLimit,
@@ -2479,7 +2505,7 @@ async function run(): Promise<number> {
             return true;
           }
           : undefined,
-      });
+      }, args.nativeUpsert, true));
       if (sqlDiagnosticContext) {
         batchResult = {
           ...batchResult,
@@ -2500,12 +2526,12 @@ async function run(): Promise<number> {
     }
 
     let result = args.dryRun
-      ? await execute(`EXPLAIN ${sql}`, client, {
+      ? await execute(`EXPLAIN ${sql}`, client, withNativeUpsertExecutionOption({
           maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
           dmlMaxRows, dmlMaxSubtableRows,
           recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
-        })
-      : await execute(sql!, client, {
+        }, args.nativeUpsert, true))
+      : await execute(sql!, client, withNativeUpsertExecutionOption({
         maxRecords,
         fetchParallel,
         onLimitReached: effectiveOnLimit,
@@ -2523,7 +2549,7 @@ async function run(): Promise<number> {
           dmlMaxSubtableRows,
         } : {}),
         ...(containsApplyMutation ? { allowApplyMutation: true } : {}),
-      });
+      }, args.nativeUpsert, true));
     // dry-run と文として書かれた EXPLAIN のプラン出力は利用者向け診断値。
     // 内部 mapped APP 表記を元参照へ復元する（仕様 §8.1 / §9.2。DML の target: ヘッダを含む）
     if ((args.dryRun || parsedStatements[0]?.type === "EXPLAIN") && sqlDiagnosticContext) {

@@ -99,3 +99,34 @@ test("dialect 0 batch EXPLAIN adds no estimate line", async () => {
   expect(explained.statements.flatMap((statement) => statement.plan).join("\n"))
     .not.toContain("estimated API consumption");
 });
+
+test("B173 AC-16/21: batch EXPLAIN reuses cached metadata, renders FLOW eligibility, and preserves estimates", async () => {
+  const mock = client();
+  const getFields = jest.spyOn(mock, "getFields");
+  const explained = await buildBatchExplainPlans(
+    "-- @ksql dialect: 1\n" +
+      "SELECT key FROM APP1 WHERE key > 'A';" +
+      "UPSERT INTO APP1 (key,value) VALUES ('B','x') KEY (key)",
+    mock,
+    undefined,
+    "b173-batch-explain-flow",
+    10_000,
+    2,
+    false,
+    100,
+    10_000,
+    true,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { surface: "FLOW", enableNativeUpsert: true, clientHasNativeUpsert: true }
+  );
+  const upsert = explained.statements[1].plan.join("\n");
+  expect(upsert).toContain("native UPSERT eligibility: ELIGIBLE");
+  expect(upsert).toContain("UPSERT pre-read: 1 回");
+  expect(upsert).toContain("reference: bulkRequest は未実装");
+  expect(getFields).toHaveBeenCalledTimes(1);
+  expect(mock.recordCalls).not.toHaveBeenCalled();
+});

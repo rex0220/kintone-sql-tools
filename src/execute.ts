@@ -791,18 +791,38 @@ export interface ExecuteOptions {
 
 const statementEvaluationContextKey: unique symbol = Symbol("statementEvaluationContext");
 const nativeUpsertExecutionKey: unique symbol = Symbol("nativeUpsertExecution");
+const nativeUpsertExplainCapabilityKey: unique symbol = Symbol("nativeUpsertExplainCapability");
 type InternalExecuteOptions = ExecuteOptions & {
   [statementEvaluationContextKey]?: EvaluationContext;
   [nativeUpsertExecutionKey]?: boolean;
+  [nativeUpsertExplainCapabilityKey]?: boolean;
 };
 
 /** @internal Phase 2 の CLI plumbing からも使う、公開 ExecuteOptions に露出しない設定 seam。 */
-export function withNativeUpsertExecutionOption<T extends ExecuteOptions>(options: T, enabled: boolean): T {
-  return { ...options, [nativeUpsertExecutionKey]: enabled } as T;
+export function withNativeUpsertExecutionOption<T extends ExecuteOptions>(
+  options: T,
+  enabled: boolean,
+  explainClientCapability?: boolean
+): T {
+  return {
+    ...options,
+    [nativeUpsertExecutionKey]: enabled,
+    ...(explainClientCapability === undefined
+      ? {}
+      : { [nativeUpsertExplainCapabilityKey]: explainClientCapability }),
+  } as T;
 }
 
 function nativeUpsertExecutionEnabled(options: ExecuteOptions): boolean {
   return (options as InternalExecuteOptions)[nativeUpsertExecutionKey] === true;
+}
+
+function hasNativeUpsertExecutionOption(options: ExecuteOptions): boolean {
+  return nativeUpsertExecutionKey in (options as InternalExecuteOptions);
+}
+
+function nativeUpsertExplainClientCapability(options: ExecuteOptions): boolean | undefined {
+  return (options as InternalExecuteOptions)[nativeUpsertExplainCapabilityKey];
 }
 
 function bindStatementEvaluationContext(options: ExecuteOptions): ExecuteOptions {
@@ -1220,7 +1240,15 @@ async function executeParsedStatement(
       relativeDatePlan,
       options.recursiveCteMaxDepth,
       options.recursiveCteMaxRows,
-      options.recursiveCteMaxExpansions
+      options.recursiveCteMaxExpansions,
+      hasNativeUpsertExecutionOption(options)
+        ? {
+            surface: "CLI",
+            enableNativeUpsert: nativeUpsertExecutionEnabled(options),
+            clientHasNativeUpsert: nativeUpsertExplainClientCapability(options)
+              ?? clientHasNativeUpsert(client),
+          }
+        : { surface: "DOCUMENT_ONLY" }
     );
     // 一時テーブルはバッチスコープのため単文実行では拒否する（executeBatch を使う）
     case "CREATE_TEMP_TABLE":
@@ -7308,6 +7336,138 @@ export interface NativeUpsertEligibilityEvaluation {
   statement: NativeUpsertEligibilityResult<NativeUpsertStatementCondition>;
 }
 
+export interface NativeUpsertExplainOptions {
+  surface: "FLOW" | "CLI" | "DOCUMENT_ONLY";
+  enableNativeUpsert?: boolean;
+  clientHasNativeUpsert?: boolean;
+}
+
+const NATIVE_UPSERT_CONDITION_NAMES: Readonly<Record<NativeUpsertCondition, string>> = {
+  1: "CLIENT_CAPABILITY",
+  2: "OPT_IN",
+  3: "KEY_SCHEMA",
+  4: "PLAIN_UPSERT",
+  5: "EMPTY_KEY",
+  6: "SOURCE_DUPLICATE",
+};
+
+function nativeUpsertExplainReason(
+  condition: NativeUpsertCondition,
+  unknown: boolean,
+  surface: NativeUpsertExplainOptions["surface"],
+  unknownConditions: readonly NativeUpsertCondition[] = []
+): string {
+  if (unknown) {
+    if (condition === 1) return "通常実行 client の native 能力が不明";
+    if (condition === 2) return "native 設定が不明";
+    if (condition === 3) return "フォームメタデータ未取得";
+    if (condition === 5 || unknownConditions.includes(5)) return "ソース行未 materialize";
+    if (condition === 6) return "キー型情報が未確定のため重複判定不能";
+  }
+  if (condition === 1) return "client が upsertRecords 能力を持たない";
+  if (condition === 2) return surface === "CLI"
+    ? "--native-upsert が指定されていない"
+    : "enableNativeUpsert が false";
+  if (condition === 3) return "キー項目は重複禁止の SINGLE_LINE_TEXT または NUMBER ではない";
+  if (condition === 4) return "CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIP を伴う素でない UPSERT";
+  if (condition === 5) return "ソースに空文字キーがある";
+  return "ソース内に同一キーがある";
+}
+
+function renderNativeUpsertEligibilityResult(
+  label: string,
+  result: NativeUpsertEligibilityResult,
+  surface: NativeUpsertExplainOptions["surface"]
+): string {
+  if (result.status === "ELIGIBLE") {
+    return `  ${label}: ELIGIBLE（${label.includes("statement/data") ? "条件 3〜6 を" : "6 条件をすべて"}満たす）`;
+  }
+  if (result.status === "INELIGIBLE") {
+    return `  ${label}: INELIGIBLE（条件 ${result.condition}: ${NATIVE_UPSERT_CONDITION_NAMES[result.condition]} — ${nativeUpsertExplainReason(result.condition, false, surface)}）`;
+  }
+  const unknownConditionNumbers = result.unknownConditions.map(({ condition }) => condition);
+  const details = result.unknownConditions.map(({ condition }) =>
+    `条件 ${condition}: ${NATIVE_UPSERT_CONDITION_NAMES[condition]} — ${nativeUpsertExplainReason(condition, true, surface, unknownConditionNumbers)}`
+  );
+  return `  ${label}: UNKNOWN（${details.join("; ")}）`;
+}
+
+export function renderNativeUpsertEligibility(
+  evaluation: NativeUpsertEligibilityEvaluation,
+  surface: NativeUpsertExplainOptions["surface"]
+): string[] {
+  if (surface === "DOCUMENT_ONLY") {
+    return [
+      renderNativeUpsertEligibilityResult("native UPSERT statement/data eligibility", evaluation.statement, surface),
+      `  native UPSERT execution surface: NOT_APPLICABLE（この面では実行しない${evaluation.statement.status === "ELIGIBLE" ? "。/flow または CLI --native-upsert では native 候補" : ""}）`,
+    ];
+  }
+  const lines = [renderNativeUpsertEligibilityResult("native UPSERT eligibility", evaluation.execution, surface)];
+  if (evaluation.conditions[1].state === "FAIL" || evaluation.conditions[2].state === "FAIL") {
+    lines.push(renderNativeUpsertEligibilityResult("native UPSERT statement/data eligibility", evaluation.statement, surface));
+  }
+  return lines;
+}
+
+function explainNativeUpsertStatement(
+  statement: Statement
+): UpsertStatement | UpsertSelectStatement | null {
+  const candidate = statement.type === "EXPLAIN" ? statement.query : statement;
+  return candidate.type === "UPSERT" || candidate.type === "UPSERT_SELECT" ? candidate : null;
+}
+
+function nativeUpsertExplainEvaluation(
+  statement: UpsertStatement | UpsertSelectStatement,
+  fieldInfos: readonly KintoneFieldInfo[] | null,
+  options: NativeUpsertExplainOptions
+): NativeUpsertEligibilityEvaluation {
+  let rowKeyValues: readonly (readonly string[])[] | null = null;
+  if (statement.type === "UPSERT") {
+    try {
+      rowKeyValues = buildUpsertRowKeyValues(statement);
+    } catch {
+      // Planner 上で値を副作用なく確定できない場合は条件 5・6 を UNKNOWN に保つ。
+    }
+  }
+  return evaluateNativeUpsertEligibility({
+    surface: options.surface === "DOCUMENT_ONLY" ? "DOCUMENT_ONLY" : "EXECUTION",
+    clientCapability: options.surface === "DOCUMENT_ONLY"
+      ? null
+      : options.clientHasNativeUpsert ?? null,
+    enabled: options.surface === "DOCUMENT_ONLY"
+      ? null
+      : options.surface === "FLOW"
+        ? options.enableNativeUpsert !== false
+        : options.enableNativeUpsert === true,
+    statement: {
+      kind: statement.type === "UPSERT" ? "VALUES" : "SELECT",
+      keyFields: statement.keyFields,
+      hasCheck: Boolean(statement.checkGroups?.length),
+      hasApply: statement.type === "UPSERT"
+        && Boolean(statement.onInsertApplyBlocks?.length || statement.onUpdateApplyBlocks?.length),
+      validateOnly: statement.validateOnly === true,
+      onErrorSkip: statement.onErrorSkip === true,
+      importDerived: importSourceByDmlStatement.has(statement),
+    },
+    fieldInfos,
+    rowKeyValues,
+  });
+}
+
+async function nativeUpsertExplainLines(
+  statement: Statement,
+  cacheContext: string,
+  options: NativeUpsertExplainOptions
+): Promise<string[]> {
+  const upsert = explainNativeUpsertStatement(statement);
+  if (!upsert) return [];
+  const fieldInfos = await getFieldsIfCached(upsert.appId, cacheContext);
+  return renderNativeUpsertEligibility(
+    nativeUpsertExplainEvaluation(upsert, fieldInfos, options),
+    options.surface
+  );
+}
+
 /** 本実行・preview・Phase 2 EXPLAIN が共有する、副作用のない文単位評価器。 */
 export function evaluateNativeUpsertEligibility(
   input: NativeUpsertEligibilityInput
@@ -7779,6 +7939,11 @@ async function getFieldsCached(appId: number, client: KintoneClient, cacheContex
   const loading = client.getFields(appId);
   setScopedCacheValue(fieldInfoCache, cacheContext, appId, loading);
   return loading;
+}
+
+async function getFieldsIfCached(appId: number, cacheContext: string): Promise<KintoneFieldInfo[] | null> {
+  const cached = getScopedCacheValue(fieldInfoCache, cacheContext, appId);
+  return cached ? await cached : null;
 }
 
 async function getNumberPrecisionCached(
@@ -12936,7 +13101,8 @@ export async function buildBatchExplainPlans(
   recursiveCteMaxRows?: number,
   recursiveCteMaxExpansions?: number,
   asOf?: Date,
-  timezone?: string
+  timezone?: string,
+  nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" }
 ): Promise<BatchExplainResult> {
   // executeBatch と同じく、parse / metadata API より前に呼出単位で一度だけ固定する。
   const asOfClock = createAsOfClock(asOf ?? new Date(), timezone);
@@ -13050,12 +13216,17 @@ export async function buildBatchExplainPlans(
             dmlMaxRows
           )
         : [];
+      const nativeUpsertPlan = await nativeUpsertExplainLines(
+        planStmt,
+        invocationCacheContext,
+        nativeUpsertOptions
+      );
       plans.push({
         index: i,
         type: analysis.statements[i].statementType,
         plan: statementPlan.length === 0
-          ? [...metadataPlan, ...dialect1Estimate]
-          : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1), ...dialect1Estimate],
+          ? [...metadataPlan, ...nativeUpsertPlan, ...dialect1Estimate]
+          : [statementPlan[0], ...metadataPlan, ...statementPlan.slice(1), ...nativeUpsertPlan, ...dialect1Estimate],
       });
       fetchStatements.push({
         index: i,
@@ -13407,7 +13578,8 @@ async function executeExplain(
   relativeDatePlan?: RelativeDatePushdownPlan,
   recursiveCteMaxDepth?: number,
   recursiveCteMaxRows?: number,
-  recursiveCteMaxExpansions?: number
+  recursiveCteMaxExpansions?: number,
+  nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" }
 ): Promise<SelectResult> {
   const recursiveLimits = resolveRecursiveCteLimits({
     recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
@@ -13438,7 +13610,8 @@ async function executeExplain(
           cursorMaxActive
         ),
       ];
-  const lines = addFetchSummary(planLines, fetchCollector.sources);
+  const nativeUpsertPlan = await nativeUpsertExplainLines(stmt, cacheContext, nativeUpsertOptions);
+  const lines = addFetchSummary([...planLines, ...nativeUpsertPlan], fetchCollector.sources);
   const result: SelectResult = {
     type: "SELECT",
     columns: ["plan"],

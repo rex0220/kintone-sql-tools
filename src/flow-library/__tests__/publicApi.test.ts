@@ -102,6 +102,23 @@ test("explainScript exposes dialect 1 estimated API lines", async () => {
   expect(explained.statements[0].plan.join("\n")).toContain("estimated API consumption (dialect 1)");
 });
 
+test("B173 AC-21: explainScript は native UPSERT を既定 ON とし false だけを opt-out として表示する", async () => {
+  const client: FlowKintoneClient = {
+    ...mockClient(),
+    async upsertRecords() { return { records: [{ id: "1", revision: "1", operation: "INSERT" }] }; },
+  };
+  const source = "-- @ksql dialect: 1\n" +
+    "SELECT 顧客コード FROM APP2 WHERE 顧客コード > 'A';" +
+    "UPSERT INTO APP2 (顧客コード) VALUES ('B') KEY (顧客コード)";
+  const enabled = await explainScript(source, { client });
+  const disabled = await explainScript(source, { client, enableNativeUpsert: false });
+  expect(enabled.statements[1].plan.join("\n")).toContain("native UPSERT eligibility: ELIGIBLE");
+  expect(disabled.statements[1].plan.join("\n"))
+    .toContain("native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN");
+  expect(disabled.statements[1].plan.join("\n"))
+    .toContain("native UPSERT statement/data eligibility: ELIGIBLE");
+});
+
 test("statement execution shares temp/as-of, continues WARN, stops at EXIT, and rejects reuse after dispose", async () => {
   const source = `-- @ksql dialect: 1
 CREATE TEMP TABLE clock_table AS SELECT @NOW() AS captured;

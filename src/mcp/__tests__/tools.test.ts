@@ -3161,6 +3161,20 @@ SELECT n FROM flow_rows`;
     expect(result.type).toBe("SELECT"); // 従来の SelectResult 形
   });
 
+  test("B173 AC-16/17/22: MCP 単文 UPSERT EXPLAIN は従来 SELECT payload に文・データ UNKNOWN を追加する", async () => {
+    const tools = createKsqlMcpTools({ profile: "prod" });
+    const result = await tools.explain({
+      sql: "UPSERT INTO APP100 (key) VALUES ('K1') ON DUPLICATE (key)",
+    }) as { type: string; columns: string[]; rows: Array<{ plan: string }>; batch?: boolean };
+    const text = result.rows.map((row) => row.plan).join("\n");
+    expect(result.type).toBe("SELECT");
+    expect(result.columns).toEqual(["plan"]);
+    expect(result.batch).toBeUndefined();
+    expect(text).toContain("native UPSERT statement/data eligibility: UNKNOWN");
+    expect(text).toContain("native UPSERT execution surface: NOT_APPLICABLE");
+    expect(text).not.toContain("estimated API consumption");
+  });
+
   // ----------------------------------------------------------------
   // 一時テーブル経由の INSERT_SELECT（フェーズ2 M4）— 2段階 DML フロー
   // ----------------------------------------------------------------

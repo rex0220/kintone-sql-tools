@@ -130,6 +130,8 @@ export interface ValidateScriptOptions extends ParseScriptOptions {
 
 export interface ExplainScriptOptions extends ParseScriptOptions {
   client: FlowKintoneClient;
+  /** /flow 本実行を想定する native UPSERT 設定。省略時は有効、false は opt-out。 */
+  enableNativeUpsert?: boolean;
   variables?: Readonly<Record<string, string>>;
   /** dialect 1 の @ 付き時刻関数が共有する explain 呼出し単位の基準時刻。 */
   asOf?: Date;

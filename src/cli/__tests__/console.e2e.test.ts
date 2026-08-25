@@ -198,7 +198,7 @@ test("console mode shows session summary and supports history options", async ()
   const homeDir = mkdtempSync(join(tmpdir(), "ksql-home-"));
   let child;
   try {
-    child = spawn(process.execPath, [cliPath, "--console", "--dry-run", "--format", "json"], {
+    child = spawn(process.execPath, [cliPath, "--console", "--native-upsert", "--dry-run", "--format", "json"], {
       cwd: process.cwd(),
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, HOME: homeDir, USERPROFILE: homeDir },
@@ -250,6 +250,7 @@ test("console mode shows session summary and supports history options", async ()
 
   expect(result.code).toBe(0);
   expect(stdout).toContain("session:");
+  expect(stdout).toContain("native-upsert=on");
   expect(stdout).toContain("format=json");
   expect(stdout).toContain("2. SELECT * FROM APP89");
   expect(stdout).toContain("1. SELECT * FROM APP88");

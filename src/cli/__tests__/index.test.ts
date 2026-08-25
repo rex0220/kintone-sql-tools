@@ -1,5 +1,6 @@
 import {
   CLI_IMPORT_SOURCE_REQUIRED_MESSAGE,
+  CLI_HELP_TEXT,
   buildReplExecArgv,
   buildValidationOutput,
   extractAppIds,
@@ -19,16 +20,22 @@ const DML_VALIDATION_COLUMNS = [
   "$err_value", "$err_subtable", "$err_subrow", "$err_subrow_id",
 ];
 
-async function runCliCaptured(argv: string[]): Promise<{ code: number; stderr: string }> {
+async function runCliCaptured(argv: string[]): Promise<{ code: number; stderr: string; stdout: string }> {
   let stderr = "";
+  let stdout = "";
   const errSpy = jest.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
     stderr += String(chunk);
     return true;
   }) as typeof process.stderr.write);
+  const outSpy = jest.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+    stdout += String(chunk);
+    return true;
+  }) as typeof process.stdout.write);
   try {
-    return { code: await runWithArgv(argv), stderr };
+    return { code: await runWithArgv(argv), stderr, stdout };
   } finally {
     errSpy.mockRestore();
+    outSpy.mockRestore();
   }
 }
 
@@ -148,6 +155,37 @@ describe("cli helpers", () => {
     expect(args.retry).toBe(0); // 0 = リトライ無効は有効値
     expect(args.retryBaseDelay).toBe(100);
     expect(args.retryMaxDelay).toBe(2000);
+  });
+
+  test("B173 AC-20: --native-upsert は実行ごとの boolean で既定 OFF、CLI help にだけ表示する", () => {
+    expect(parseArgs(["-e", "SELECT 1"]).nativeUpsert).toBe(false);
+    expect(parseArgs(["--native-upsert", "-e", "SELECT 1"]).nativeUpsert).toBe(true);
+    expect(CLI_HELP_TEXT).toContain("--native-upsert");
+  });
+
+  test("B173 AC-15: --native-upsert 単独では DML safety gate を迂回しない", async () => {
+    const result = await runCliCaptured([
+      "--native-upsert",
+      "-e",
+      "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key)",
+    ]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("DML is disabled. Use --allow-dml");
+    expect(result.stdout).toBe("");
+  });
+
+  test("B173 AC-16/20/21/22: offline dry-run は CLI opt-in と UNKNOWN を公開 plan に反映する", async () => {
+    const sql = "UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key)";
+    const optedIn = await runCliCaptured(["--allow-dml", "--native-upsert", "--dry-run", "-e", sql]);
+    expect(optedIn.code).toBe(0);
+    expect(optedIn.stdout).toContain("native UPSERT eligibility: UNKNOWN");
+    expect(optedIn.stdout).toContain("条件 3: KEY_SCHEMA — フォームメタデータ未取得");
+    expect(optedIn.stdout).not.toContain("条件 2: OPT_IN");
+
+    const defaultOff = await runCliCaptured(["--allow-dml", "--dry-run", "-e", sql]);
+    expect(defaultOff.code).toBe(0);
+    expect(defaultOff.stdout).toContain("native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN");
+    expect(defaultOff.stdout).toContain("native UPSERT statement/data eligibility: UNKNOWN");
   });
 
   test("parseArgs は --var を正規化し、最初の = だけで分割する", () => {
@@ -282,6 +320,13 @@ describe("cli helpers", () => {
     const argvDefault = buildReplExecArgv(parseArgs(["--console"]), "SELECT 1", false, null);
     expect(argvDefault).not.toContain("--temp-table-max-rows");
     expect(argvDefault).not.toContain("--dml-max-subtable-rows");
+  });
+
+  test("B173 AC-15/20: buildReplExecArgv は session opt-in のときだけ native flag を転送する", () => {
+    const enabled = buildReplExecArgv(parseArgs(["--console", "--native-upsert"]), "SELECT 1", false, null);
+    const disabled = buildReplExecArgv(parseArgs(["--console"]), "SELECT 1", false, null);
+    expect(enabled).toContain("--native-upsert");
+    expect(disabled).not.toContain("--native-upsert");
   });
 
   test("parseArgs validates fetch-parallel range", () => {

@@ -716,7 +716,10 @@ export function createKsqlMcpTools(
         true,
         runtime?.recursiveCteMaxDepth ?? input.recursiveCteMaxDepth,
         runtime?.recursiveCteMaxRows ?? input.recursiveCteMaxRows,
-        runtime?.recursiveCteMaxExpansions ?? input.recursiveCteMaxExpansions
+        runtime?.recursiveCteMaxExpansions ?? input.recursiveCteMaxExpansions,
+        undefined,
+        undefined,
+        { surface: "DOCUMENT_ONLY" }
       );
       return {
         ok: true,

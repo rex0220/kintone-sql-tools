@@ -662,6 +662,26 @@ test("EXPLAIN UPSERT SELECT — SELECT 部分のプランも表示", async () =>
   expect(plan.slice(srcIdx).find((l) => l.includes("mode:"))).toContain("SIMPLE");
 });
 
+test("B173 AC-16/17/22: 単文 EXPLAIN は既存 SELECT 外形のまま UNKNOWN と非実行面を表示し API を増やさない", async () => {
+  const getFields = jest.fn(async () => []);
+  const getRecords = jest.fn(async () => ({ records: [] }));
+  const client: KintoneClient = { ...makeClient(), getFields, getRecords };
+  const result = await execute(
+    "EXPLAIN UPSERT INTO APP89 (顧客名) VALUES ('K1') ON DUPLICATE (顧客名)",
+    client
+  ) as SelectResult;
+  const plan = result.rows.map((row) => String(row.plan));
+  expect(result.type).toBe("SELECT");
+  expect(result.columns).toEqual(["plan"]);
+  expect(result.rowCount).toBe(result.rows.length);
+  expect(plan.join("\n")).toContain("native UPSERT statement/data eligibility: UNKNOWN");
+  expect(plan.join("\n")).toContain("条件 3: KEY_SCHEMA — フォームメタデータ未取得");
+  expect(plan.join("\n")).toContain("native UPSERT execution surface: NOT_APPLICABLE");
+  expect(plan.join("\n")).not.toContain("estimated API consumption");
+  expect(getFields).not.toHaveBeenCalled();
+  expect(getRecords).not.toHaveBeenCalled();
+});
+
 // ----------------------------------------------------------------
 // EXPLAIN REORDER
 // ----------------------------------------------------------------
