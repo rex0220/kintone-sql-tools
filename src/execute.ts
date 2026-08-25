@@ -280,6 +280,7 @@ export interface KintoneClient {
   postRecords: (params: KintonePostParams) => Promise<{ ids: string[] }>;
   /** PUT /k/v1/records.json（UPDATE） */
   putRecords: (params: KintonePutParams) => Promise<void>;
+  upsertRecords?: (params: KintoneNativeUpsertParams) => Promise<KintoneNativeUpsertResult>;
   /** DELETE /k/v1/records.json（DELETE） */
   deleteRecords: (params: KintoneDeleteParams) => Promise<void>;
   /** GET /k/v1/apps.json（SHOW APPS） */
@@ -291,6 +292,16 @@ export interface KintoneClient {
   /** GET /k/v1/app/status.json（プロセス管理設定） */
   getProcessStatuses: (appId: number) => Promise<KintoneProcessStatuses>;
 }
+
+export interface KintoneNativeUpdateKey { field: string; value: string }
+export interface KintoneNativeUpsertRecord { updateKey: KintoneNativeUpdateKey; record: KintoneRecord }
+export interface KintoneNativeUpsertParams { app: number; upsert: true; records: KintoneNativeUpsertRecord[] }
+export interface KintoneNativeUpsertRecordResult {
+  id: string;
+  revision: string;
+  operation: "INSERT" | "UPDATE";
+}
+export interface KintoneNativeUpsertResult { records: KintoneNativeUpsertRecordResult[] }
 
 export interface KintoneProcessStatuses {
   enable: boolean;
@@ -373,6 +384,8 @@ export interface ExecuteMetrics {
   postCalls: number;
   /** PUT /k/v1/records.json の呼び出し回数 */
   putCalls: number;
+  /** upsertRecords の呼出し回数。putCalls の内数。 */
+  nativeUpsertCalls: number;
   /** DELETE /k/v1/records.json の呼び出し回数 */
   deleteCalls: number;
   /** GET /k/v1/app/form/fields.json の呼び出し回数（キャッシュヒット時は増えない） */
@@ -777,9 +790,20 @@ export interface ExecuteOptions {
 }
 
 const statementEvaluationContextKey: unique symbol = Symbol("statementEvaluationContext");
+const nativeUpsertExecutionKey: unique symbol = Symbol("nativeUpsertExecution");
 type InternalExecuteOptions = ExecuteOptions & {
   [statementEvaluationContextKey]?: EvaluationContext;
+  [nativeUpsertExecutionKey]?: boolean;
 };
+
+/** @internal Phase 2 の CLI plumbing からも使う、公開 ExecuteOptions に露出しない設定 seam。 */
+export function withNativeUpsertExecutionOption<T extends ExecuteOptions>(options: T, enabled: boolean): T {
+  return { ...options, [nativeUpsertExecutionKey]: enabled } as T;
+}
+
+function nativeUpsertExecutionEnabled(options: ExecuteOptions): boolean {
+  return (options as InternalExecuteOptions)[nativeUpsertExecutionKey] === true;
+}
 
 function bindStatementEvaluationContext(options: ExecuteOptions): ExecuteOptions {
   const internal = options as InternalExecuteOptions;
@@ -873,6 +897,7 @@ function createEmptyMetrics(): ExecuteMetrics {
     getCalls: 0,
     postCalls: 0,
     putCalls: 0,
+    nativeUpsertCalls: 0,
     deleteCalls: 0,
     fieldCalls: 0,
     numberPrecisionCalls: 0,
@@ -915,7 +940,7 @@ function wrapClientWithMetrics(
   client: KintoneClient,
   metrics: ExecuteMetrics
 ): LimitMetricsClient {
-  return {
+  const wrapped: LimitMetricsClient = {
     [LIMIT_METRICS_SINK]: metrics,
     getRecords: async (params) => {
       metrics.getCalls += 1;
@@ -994,6 +1019,14 @@ function wrapClientWithMetrics(
       return client.getProcessStatuses(appId);
     },
   };
+  if (clientHasNativeUpsert(client)) {
+    wrapped.upsertRecords = (params) => {
+      metrics.putCalls += 1;
+      metrics.nativeUpsertCalls += 1;
+      return client.upsertRecords!(params);
+    };
+  }
+  return wrapped;
 }
 
 const SEARCH_ABORT_FAIL_CLOSED = Symbol("searchAbortFailClosed");
@@ -1795,10 +1828,12 @@ export interface ManagedStatementExecutionContext {
 export interface ManagedChunkWrittenInfo {
   statementIndex: number;
   appId: number;
-  operation: "INSERT" | "UPDATE" | "DELETE";
+  operation: "INSERT" | "UPDATE" | "DELETE" | "UPSERT";
   records: number;
   chunkIndex: number;
   lastKeyValue?: string;
+  insertedCount?: number;
+  updatedCount?: number;
 }
 
 /** @internal Prepare the exact state consumed by executeBatchStatement(). */
@@ -1807,7 +1842,8 @@ export function createManagedStatementExecutionContext(
   dialect: 0 | 1,
   client: KintoneClient,
   options: BatchExecuteOptions = {},
-  onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>
+  onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>,
+  enableNativeUpsert = false
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   const mutableStatements = [...statements];
@@ -1834,7 +1870,10 @@ export function createManagedStatementExecutionContext(
   }
   const injectedVariables = validateDeclaredBatchVariables(mutableStatements, options.variables);
   const relativeDateVariables = prepareRelativeDateVariables(mutableStatements, injectedVariables);
-  const normalizedOptions = { ...options, variables: injectedVariables };
+  const normalizedOptions = withNativeUpsertExecutionOption(
+    { ...options, variables: injectedVariables },
+    enableNativeUpsert
+  );
   const asOfClock = createAsOfClock(options.asOf ?? new Date(), options.timezone);
   const variables = new Map<string, VarValue>();
   for (const [name, value] of Object.entries(asOfClock.values)) {
@@ -1925,12 +1964,27 @@ export async function executeManagedStatement(
           managed.onChunkWritten
         )
       : cursorScope.client;
+    const userConfirm = managed.options.confirm;
+    const statementOptions: BatchExecuteOptions = userConfirm
+      ? {
+          ...managed.options,
+          confirm: (count, operation, detailContext) => userConfirm(count, operation, {
+            statementIndex: index,
+            statementCount: managed.statements.length,
+            statementType: info.statementType,
+            targetAppId: info.targetAppId,
+            ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
+            ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
+            ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
+          }),
+        }
+      : managed.options;
     const outcome = await runWithDeadline(
       executeBatchStatement({
         stmt: statement,
         info,
         client: executionClient,
-        options: managed.options,
+        options: statementOptions,
         cacheContext: managed.cacheContext,
         tempTables: managed.tempTables,
         variables: managed.variables,
@@ -1986,12 +2040,14 @@ export function wrapClientWithPreviewWriteBlock(client: KintoneClient): KintoneC
   const blocked = async (): Promise<never> => {
     throw new Error("PreviewWriteBlockedError: previewStatement blocked a write API call.");
   };
-  return {
+  const wrapped: KintoneClient = {
     ...client,
     postRecords: blocked,
     putRecords: blocked,
     deleteRecords: blocked,
   };
+  if (clientHasNativeUpsert(client)) wrapped.upsertRecords = blocked;
+  return wrapped;
 }
 
 /** @internal Preview the next DML statement while preserving managed /flow lifecycle rules. */
@@ -2123,7 +2179,8 @@ function wrapClientWithChunkWrittenCallback(
     appId: number,
     operation: ManagedChunkWrittenInfo["operation"],
     records: number,
-    lastKeyValue?: string
+    lastKeyValue?: string,
+    counts?: { insertedCount: number; updatedCount: number }
   ): Promise<void> => {
     await callback({
       statementIndex,
@@ -2132,6 +2189,7 @@ function wrapClientWithChunkWrittenCallback(
       records,
       chunkIndex: chunkIndex++,
       ...(lastKeyValue === undefined ? {} : { lastKeyValue }),
+      ...(counts ?? {}),
     });
   };
   const upsertKey = (statement.type === "UPSERT" || statement.type === "UPSERT_SELECT")
@@ -2143,7 +2201,7 @@ function wrapClientWithChunkWrittenCallback(
     const value = records[records.length - 1][upsertKey]?.value;
     return typeof value === "string" ? value : undefined;
   };
-  return {
+  const wrapped: KintoneClient = {
     ...client,
     postRecords: async (params) => {
       const result = await client.postRecords(params);
@@ -2164,6 +2222,21 @@ function wrapClientWithChunkWrittenCallback(
       await notify(params.app, "DELETE", params.ids.length);
     },
   };
+  if (clientHasNativeUpsert(client)) {
+    wrapped.upsertRecords = async (params) => {
+      const result = await client.upsertRecords!(params);
+      const counts = validateNativeUpsertResponse(result, params.records.length);
+      await notify(
+        params.app,
+        "UPSERT",
+        params.records.length,
+        params.records[params.records.length - 1]?.updateKey.value,
+        counts
+      );
+      return result;
+    };
+  }
+  return wrapped;
 }
 
 function statementHasApplyMutation(statement: Statement): boolean {
@@ -2473,10 +2546,13 @@ function previewBase(
   operation: ManagedPreviewResult["operation"],
   appId: number,
   counts: ManagedPreviewResult["counts"],
-  samples: ManagedPreviewSample[]
+  samples: ManagedPreviewSample[],
+  nativeUpsertEligible = false
 ): ManagedPreviewResult {
   const estimatedWrites = operation === "UPSERT"
-    ? Math.ceil(counts.insert / 100) + Math.ceil(counts.update / 100)
+    ? nativeUpsertEligible
+      ? Math.ceil((counts.insert + counts.update) / 100)
+      : Math.ceil(counts.insert / 100) + Math.ceil(counts.update / 100)
     : Math.ceil((counts.insert + counts.update + counts.delete) / 100);
   return { kind: "PREVIEW", operation, appId, counts, samples, reads: 0, estimatedWrites };
 }
@@ -2619,6 +2695,9 @@ async function previewUpsertRecords(
     [record], stmt.fields.filter((field) => field in record), fieldInfos, precision
   ));
   const rowKeys = records.map((record) => stmt.keyFields.map((key) => renderValidationValue(record[key]?.value)));
+  const nativeEligible = evaluateNativeUpsertEligibility(
+    nativeEligibilityInput(stmt, client, options, fieldInfos, rowKeys)
+  ).execution.status === "ELIGIBLE";
   const targets = await resolveUpsertTargets(
     stmt.appId, stmt.keyFields, rowKeys, client, options, fieldTypes, stmt.fields
   );
@@ -2640,7 +2719,8 @@ async function previewUpsertRecords(
   });
   return previewBase("UPSERT", stmt.appId,
     { insert: inserts.length, update: updates.length, delete: 0 },
-    [...inserts, ...updates].slice(0, maxSamples));
+    [...inserts, ...updates].slice(0, maxSamples),
+    nativeEligible);
 }
 
 async function previewUpsert(
@@ -2653,12 +2733,7 @@ async function previewUpsert(
   const fieldInfos = await loadWritableTopLevelDmlFields(stmt.appId, stmt.fields, client, cacheContext);
   const precision = await loadNumberPrecisionForTargets(stmt.appId, stmt.fields, fieldInfos, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
-  const records: KintoneRecord[] = stmt.values.map((row) => Object.fromEntries(stmt.fields.map((field, index) => {
-    const value = row[index];
-    return [field, { value: value.type === "CASE_VALUE"
-      ? evalCaseWhenValue(value.expr, {}, fieldTypes.get(field), statementEvaluationContext(options))
-      : toKintoneValue(value, fieldTypes.get(field)) }];
-  })));
+  const records = materializeUpsertValueRecords(stmt, fieldTypes, options);
   return previewUpsertRecords(stmt, records, fieldTypes, fieldInfos, precision, client, options, maxSamples);
 }
 
@@ -7200,6 +7275,187 @@ function upsertNormalizedKey(parts: string[], numericKey: boolean[]): string {
   return JSON.stringify(parts.map((p, i) => (numericKey[i] ? normalizeKeyPart(p) : p)));
 }
 
+export type NativeUpsertEligibilityStatus = "ELIGIBLE" | "INELIGIBLE" | "UNKNOWN";
+export type NativeUpsertCondition = 1 | 2 | 3 | 4 | 5 | 6;
+export type NativeUpsertStatementCondition = 3 | 4 | 5 | 6;
+type NativeUpsertConditionState = "PASS" | "FAIL" | "UNKNOWN" | "NOT_APPLICABLE";
+
+export interface NativeUpsertEligibilityInput {
+  surface: "EXECUTION" | "DOCUMENT_ONLY";
+  clientCapability: boolean | null;
+  enabled: boolean | null;
+  statement: {
+    kind: "VALUES" | "SELECT";
+    keyFields: readonly string[];
+    hasCheck: boolean;
+    hasApply: boolean;
+    validateOnly: boolean;
+    onErrorSkip: boolean;
+    importDerived: boolean;
+  };
+  fieldInfos: readonly KintoneFieldInfo[] | null;
+  rowKeyValues: readonly (readonly string[])[] | null;
+}
+
+export type NativeUpsertEligibilityResult<C extends NativeUpsertCondition = NativeUpsertCondition> =
+  | { status: "ELIGIBLE" }
+  | { status: "INELIGIBLE"; condition: C; reason: string }
+  | { status: "UNKNOWN"; unknownConditions: Array<{ condition: C; reason: string }> };
+
+export interface NativeUpsertEligibilityEvaluation {
+  conditions: Readonly<Record<NativeUpsertCondition, { state: NativeUpsertConditionState; reason: string }>>;
+  execution: NativeUpsertEligibilityResult;
+  statement: NativeUpsertEligibilityResult<NativeUpsertStatementCondition>;
+}
+
+/** 本実行・preview・Phase 2 EXPLAIN が共有する、副作用のない文単位評価器。 */
+export function evaluateNativeUpsertEligibility(
+  input: NativeUpsertEligibilityInput
+): NativeUpsertEligibilityEvaluation {
+  const keyField = input.statement.keyFields.length === 1 ? input.statement.keyFields[0] : undefined;
+  const keyInfo = keyField === undefined || input.fieldInfos === null
+    ? undefined
+    : input.fieldInfos.find((field) => field.code === keyField);
+  const supportedKeyType = keyInfo?.fieldType === "SINGLE_LINE_TEXT" || keyInfo?.fieldType === "NUMBER";
+  const schemaPass = input.fieldInfos === null ? null : Boolean(
+    keyField !== undefined && keyInfo && supportedKeyType && keyInfo.isUnique === true
+  );
+  const plain = !input.statement.hasCheck
+    && !input.statement.hasApply
+    && !input.statement.validateOnly
+    && !input.statement.onErrorSkip
+    && !(input.statement.kind === "SELECT" && input.statement.importDerived);
+  const rows = input.rowKeyValues;
+  const noEmpty = rows === null ? null : rows.every((parts) => parts.every((part) => part !== ""));
+  let noDuplicates: boolean | null = null;
+  if (rows !== null && keyField !== undefined && supportedKeyType) {
+    const seen = new Set<string>();
+    noDuplicates = true;
+    for (const parts of rows) {
+      const normalized = upsertNormalizedKey([...parts], [keyInfo!.fieldType === "NUMBER"]);
+      if (seen.has(normalized)) { noDuplicates = false; break; }
+      seen.add(normalized);
+    }
+  }
+  const state = (value: boolean | null, reason: string): { state: NativeUpsertConditionState; reason: string } => ({
+    state: value === null ? "UNKNOWN" : value ? "PASS" : "FAIL",
+    reason,
+  });
+  const conditions: Record<NativeUpsertCondition, { state: NativeUpsertConditionState; reason: string }> = {
+    1: input.surface === "DOCUMENT_ONLY"
+      ? { state: "NOT_APPLICABLE", reason: "client capability is not applicable on this surface" }
+      : state(input.clientCapability, "client does not provide upsertRecords"),
+    2: input.surface === "DOCUMENT_ONLY"
+      ? { state: "NOT_APPLICABLE", reason: "native setting is not applicable on this surface" }
+      : state(input.enabled, "native UPSERT is disabled"),
+    3: state(schemaPass, "update key schema is not a single unique text or number field"),
+    4: state(plain, "statement is not a plain UPSERT"),
+    5: state(noEmpty, "source contains an empty update key"),
+    6: state(noDuplicates, "source contains duplicate update keys"),
+  };
+  const summarize = <C extends NativeUpsertCondition>(ordered: readonly C[]): NativeUpsertEligibilityResult<C> => {
+    const failed = ordered.find((condition) => conditions[condition].state === "FAIL");
+    if (failed !== undefined) return { status: "INELIGIBLE", condition: failed, reason: conditions[failed].reason };
+    const unknownConditions = ordered
+      .filter((condition) => conditions[condition].state === "UNKNOWN")
+      .map((condition) => ({ condition, reason: conditions[condition].reason }));
+    return unknownConditions.length > 0 ? { status: "UNKNOWN", unknownConditions } : { status: "ELIGIBLE" };
+  };
+  return {
+    conditions,
+    execution: summarize([1, 2, 3, 4, 5, 6]),
+    statement: summarize([3, 4, 5, 6]),
+  };
+}
+
+function clientHasNativeUpsert(client: KintoneClient): boolean {
+  return "upsertRecords" in client && typeof client.upsertRecords === "function";
+}
+
+function nativeEligibilityInput(
+  stmt: UpsertStatement | UpsertSelectStatement,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  fieldInfos: readonly KintoneFieldInfo[],
+  rowKeyValues: readonly (readonly string[])[]
+): NativeUpsertEligibilityInput {
+  return {
+    surface: "EXECUTION",
+    clientCapability: clientHasNativeUpsert(client),
+    enabled: nativeUpsertExecutionEnabled(options),
+    statement: {
+      kind: stmt.type === "UPSERT" ? "VALUES" : "SELECT",
+      keyFields: stmt.keyFields,
+      hasCheck: Boolean(stmt.checkGroups?.length),
+      hasApply: stmt.type === "UPSERT" && Boolean(stmt.onInsertApplyBlocks?.length || stmt.onUpdateApplyBlocks?.length),
+      validateOnly: stmt.validateOnly === true,
+      onErrorSkip: stmt.onErrorSkip === true,
+      importDerived: importSourceByDmlStatement.has(stmt),
+    },
+    fieldInfos,
+    rowKeyValues,
+  };
+}
+
+export class NativeUpsertResponseError extends Error {
+  constructor() {
+    super("NativeUpsertResponseError: upsertRecords returned an invalid response.");
+    this.name = "NativeUpsertResponseError";
+  }
+}
+
+function validateNativeUpsertResponse(
+  response: KintoneNativeUpsertResult,
+  expectedRecords: number
+): { insertedCount: number; updatedCount: number } {
+  if (!response || !Array.isArray(response.records) || response.records.length !== expectedRecords) {
+    throw new NativeUpsertResponseError();
+  }
+  let insertedCount = 0;
+  let updatedCount = 0;
+  for (const record of response.records) {
+    if (!record || typeof record.id !== "string" || typeof record.revision !== "string"
+      || (record.operation !== "INSERT" && record.operation !== "UPDATE")) {
+      throw new NativeUpsertResponseError();
+    }
+    if (record.operation === "INSERT") insertedCount += 1;
+    else updatedCount += 1;
+  }
+  return { insertedCount, updatedCount };
+}
+
+async function executeNativeUpsertRecords(
+  appId: number,
+  keyField: string,
+  records: readonly KintoneRecord[],
+  rowKeyValues: readonly (readonly string[])[],
+  client: KintoneClient,
+  options: ExecuteOptions
+): Promise<UpsertResult> {
+  if (records.length === 0) return { type: "UPSERT", insertedCount: 0, updatedCount: 0 };
+  if (options.confirm) {
+    const ok = await options.confirm(records.length, "UPDATE");
+    if (!ok) throw new OperationCancelledError("UPDATE", records.length);
+  }
+  let insertedCount = 0;
+  let updatedCount = 0;
+  for (let offset = 0; offset < records.length; offset += 100) {
+    const nativeRecords = records.slice(offset, offset + 100).map((record, index) => {
+      const payload: KintoneRecord = {};
+      for (const [field, value] of Object.entries(record)) if (field !== keyField) payload[field] = value;
+      return {
+        updateKey: { field: keyField, value: rowKeyValues[offset + index][0] },
+        record: payload,
+      };
+    });
+    const response = await client.upsertRecords!({ app: appId, upsert: true, records: nativeRecords });
+    const counts = validateNativeUpsertResponse(response, nativeRecords.length);
+    insertedCount += counts.insertedCount;
+    updatedCount += counts.updatedCount;
+  }
+  return { type: "UPSERT", insertedCount, updatedCount };
+}
+
 /**
  * 行キーに対応する既存レコード $id を索引から引く。
  * 完全一致を優先し、NUMBER フィールドのキーに限り数値正規化でフォールバックする
@@ -10512,6 +10768,23 @@ async function executeDelete(
 // UPSERT
 // ============================================================
 
+function materializeUpsertValueRecords(
+  stmt: UpsertStatement,
+  fieldTypes: FieldTypeMap,
+  options: ExecuteOptions
+): KintoneRecord[] {
+  return stmt.values.map((row) => {
+    const record: KintoneRecord = {};
+    stmt.fields.forEach((field, index) => {
+      const value = row[index];
+      record[field] = { value: value.type === "CASE_VALUE"
+        ? evalCaseWhenValue(value.expr, {}, fieldTypes.get(field), statementEvaluationContext(options))
+        : toKintoneValue(value, fieldTypes.get(field)) };
+    });
+    return record;
+  });
+}
+
 /**
  * UPSERT INTO APP100 (f1, f2) VALUES (v1, v2) ON DUPLICATE (f1)
  *
@@ -10541,6 +10814,14 @@ async function executeUpsert(
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
 
   const rowKeyValues = buildUpsertRowKeyValues(stmt);
+  const nativeEligibility = evaluateNativeUpsertEligibility(
+    nativeEligibilityInput(stmt, client, options, fieldInfos, rowKeyValues)
+  );
+  if (nativeEligibility.execution.status === "ELIGIBLE") {
+    const records = materializeUpsertValueRecords(stmt, fieldTypes, options);
+    assertValidDmlRecords(records, stmt.fields, fieldInfos, numberPrecision);
+    return executeNativeUpsertRecords(stmt.appId, stmt.keyFields[0], records, rowKeyValues, client, options);
+  }
   const targetIndex = await resolveUpsertTargets(stmt.appId, stmt.keyFields, rowKeyValues, client, options, fieldTypes);
 
   stmt.values.forEach((row, rowIdx) => {
@@ -11178,6 +11459,12 @@ async function executeUpsertSelect(
   const rowKeyValues: string[][] = records.map((record) =>
     stmt.keyFields.map((key) => String(record[key]?.value ?? ""))
   );
+  const nativeEligibility = evaluateNativeUpsertEligibility(
+    nativeEligibilityInput(stmt, client, options, fieldInfos, rowKeyValues)
+  );
+  if (nativeEligibility.execution.status === "ELIGIBLE") {
+    return executeNativeUpsertRecords(stmt.appId, stmt.keyFields[0], records, rowKeyValues, client, options);
+  }
   if (importSourceByDmlStatement.has(stmt)) {
     const numericKey = stmt.keyFields.map((key) => fieldTypes.get(key) === "NUMBER");
     const sourceKeys = new Set<string>();

@@ -49,16 +49,44 @@ function mockClient(stored: Stored[] = []) {
   return { client, getRecords, writes };
 }
 
-async function previewOne(source: string, client: FlowKintoneClient, maxSamples?: number): Promise<PreviewResult> {
+async function previewOne(
+  source: string,
+  client: FlowKintoneClient,
+  maxSamples?: number,
+  enableNativeUpsert?: boolean
+): Promise<PreviewResult> {
   const parsed = parseScript(`-- @ksql dialect: 1\n${source}`);
   expect(parsed.diagnostics).toEqual([]);
-  const context = createExecutionContext({ client, statements: parsed.statements, meta: parsed.meta });
+  const context = createExecutionContext({
+    client, statements: parsed.statements, meta: parsed.meta,
+    ...(enableNativeUpsert === undefined ? {} : { enableNativeUpsert }),
+  });
   try {
     return await previewStatement(parsed.statements[0], context, maxSamples === undefined ? undefined : { maxSamples });
   } finally {
     await disposeExecutionContext(context);
   }
 }
+
+test("AC-11/19: native eligibility changes only UPSERT estimatedWrites; opt-out keeps legacy estimate", async () => {
+  const stored = [{ $id: { value: "1" }, key: { value: "A" }, value: { value: "old" } }];
+  const native = mockClient(stored);
+  native.client.upsertRecords = async () => { throw new Error("preview must not write"); };
+  const sql = "UPSERT INTO APP1 (key,value) VALUES ('A','new'),('B','new') ON DUPLICATE (key);";
+  const nativePreview = await previewOne(sql, native.client);
+  expect(nativePreview).toMatchObject({
+    counts: { insert: 1, update: 1, delete: 0 }, reads: 1, estimatedWrites: 1,
+  });
+  expect(native.writes).toEqual({ post: 0, put: 0, delete: 0 });
+
+  const legacy = mockClient(stored);
+  legacy.client.upsertRecords = async () => { throw new Error("preview must not write"); };
+  const legacyPreview = await previewOne(sql, legacy.client, undefined, false);
+  expect(legacyPreview).toMatchObject({
+    counts: { insert: 1, update: 1, delete: 0 }, reads: 1, estimatedWrites: 2,
+  });
+  expect(legacy.writes).toEqual({ post: 0, put: 0, delete: 0 });
+});
 
 test("previews INSERT, UPDATE, and DELETE with write-order samples and no writes", async () => {
   const insertMock = mockClient();

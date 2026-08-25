@@ -56,6 +56,24 @@ function makeClient() {
   });
 }
 
+test("AC-10: Node client sends native UPSERT body and preserves operation response", async () => {
+  globalThis.fetch = jest.fn(async () => jsonResponse({
+    records: [{ id: "10", revision: "2", operation: "UPDATE" }],
+  }));
+  const result = await makeClient().upsertRecords!({
+    app: 7, upsert: true,
+    records: [{ updateKey: { field: "key", value: "A" }, record: { value: { value: "x" } } }],
+  });
+  expect(result).toEqual({ records: [{ id: "10", revision: "2", operation: "UPDATE" }] });
+  const [url, init] = (globalThis.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+  expect(url).toBe("https://example.cybozu.com/k/v1/records.json");
+  expect(init.method).toBe("PUT");
+  expect(JSON.parse(String(init.body))).toEqual({
+    app: 7, upsert: true,
+    records: [{ updateKey: { field: "key", value: "A" }, record: { value: { value: "x" } } }],
+  });
+});
+
 test("X-Cybozu-Warning の既知メッセージを searchAborted に変換する", async () => {
   globalThis.fetch = jest.fn(async () => jsonResponse(
     { records: [] },

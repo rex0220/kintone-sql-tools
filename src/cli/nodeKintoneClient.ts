@@ -6,6 +6,8 @@ import type {
   KintonePostParams,
   KintoneProcessStatuses,
   KintonePutParams,
+  KintoneNativeUpsertParams,
+  KintoneNativeUpsertResult,
   PageFetchParams,
 } from "../core";
 import {
@@ -343,6 +345,17 @@ export function createNodeKintoneConnection(
             app: _params.app,
             records: _params.records,
           }),
+        },
+        _params.app
+      );
+    },
+
+    async upsertRecords(_params: KintoneNativeUpsertParams): Promise<KintoneNativeUpsertResult> {
+      return requestJson<KintoneNativeUpsertResult>(
+        `${apiBasePath}/records.json`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ app: _params.app, upsert: true, records: _params.records }),
         },
         _params.app
       );

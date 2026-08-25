@@ -21,6 +21,7 @@ import type {
   CreateExecutionContextOptions,
   Diagnostic,
   ExecutionContext,
+  ExecutionMetrics,
   ExplainScriptOptions,
   ExplainScriptResult,
   ParseScriptOptions,
@@ -131,7 +132,7 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     const handle = {} as ExecutionContext;
     const {
       client, script: _script, statements: _statements, meta: _meta, apps: _apps,
-      onChunkWritten, ...executeOptions
+      onChunkWritten, enableNativeUpsert, ...executeOptions
     } = opts;
     const bindings = bindingsByStatements.get(statements as object);
     const executionClient = bindings ? routeClient(client, bindings) : client;
@@ -148,7 +149,8 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
         dialect,
         executionClient,
         executeOptions,
-        routedOnChunkWritten
+        routedOnChunkWritten,
+        enableNativeUpsert !== false
       )
     );
     if (bindings) bindingsByContexts.set(handle as object, bindings);
@@ -295,7 +297,7 @@ function routeClient(
   bindings: ReadonlyMap<number, AppBinding>
 ): import("../execute").KintoneClient {
   const app = (mapped: number) => bindings.get(mapped)?.appId ?? mapped;
-  return {
+  const routed: import("../execute").KintoneClient = {
     getRecords: (params) => client.getRecords({ ...params, app: app(params.app) }),
     openCursor: (params) => client.openCursor({ ...params, app: app(params.app) }),
     postRecords: (params) => client.postRecords({ ...params, app: app(params.app) }),
@@ -306,6 +308,10 @@ function routeClient(
     getNumberPrecision: (appId) => client.getNumberPrecision(app(appId)),
     getProcessStatuses: (appId) => client.getProcessStatuses(app(appId)),
   };
+  if ("upsertRecords" in client && typeof client.upsertRecords === "function") {
+    routed.upsertRecords = (params) => client.upsertRecords!({ ...params, app: app(params.app) });
+  }
+  return routed;
 }
 
 export { isDmlResult } from "./publicTypes";
@@ -324,6 +330,11 @@ export type {
   FlowDmlResult,
   FlowInsertResult,
   FlowKintoneClient,
+  KintoneNativeUpdateKey,
+  KintoneNativeUpsertRecord,
+  KintoneNativeUpsertParams,
+  KintoneNativeUpsertRecordResult,
+  KintoneNativeUpsertResult,
   FlowUpdateResult,
   FlowUpsertResult,
   ParseScriptOptions,
