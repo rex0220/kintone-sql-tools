@@ -80,6 +80,51 @@ describe("CLI logical app execution", () => {
     }
   });
 
+  test("B176: runWithArgv dry-run は online batch の先頭 UPSERT target metadata だけを読み ELIGIBLE を表示する", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ksql-cli-b176-"));
+    const configPath = join(dir, "ksql.config.json");
+    writeFileSync(configPath, JSON.stringify({
+      defaultProfile: "prod",
+      profiles: {
+        prod: {
+          baseUrl: "https://example.cybozu.com",
+          tokenMap: { APP42: "target-token", APP43: "source-token" },
+        },
+      },
+    }));
+    const fetchMock = jest.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (!url.includes("/app/form/fields.json")) throw new Error("records/cursor/write API must not be called");
+      return new Response(JSON.stringify({
+        properties: {
+          key: { code: "key", label: "key", type: "SINGLE_LINE_TEXT", unique: true },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    let output = "";
+    const stdout = jest.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+      output += String(chunk);
+      return true;
+    }) as typeof process.stdout.write);
+    try {
+      const code = await runWithArgv([
+        "--config", configPath,
+        "--allow-dml", "--native-upsert", "--dry-run",
+        "-e", "UPSERT INTO APP42 (key) VALUES ('K1') ON DUPLICATE (key); SELECT key FROM APP43 ORDER BY key",
+      ]);
+      expect(code).toBe(0);
+      expect(output).toContain("native UPSERT eligibility: ELIGIBLE");
+      expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual(expect.arrayContaining([
+        expect.stringContaining("/app/form/fields.json?app=42"),
+        expect.stringContaining("/app/form/fields.json?app=43"),
+      ]));
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("app=42"))).toHaveLength(1);
+    } finally {
+      stdout.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("LAPP STATUS候補は物理APPへrouteし status.json?lang=user の表示名を使う", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ksql-cli-logical-status-"));
     const configPath = join(dir, "ksql.config.json");

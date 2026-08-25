@@ -662,8 +662,10 @@ test("EXPLAIN UPSERT SELECT — SELECT 部分のプランも表示", async () =>
   expect(plan.slice(srcIdx).find((l) => l.includes("mode:"))).toContain("SIMPLE");
 });
 
-test("B173 AC-16/17/22: 単文 EXPLAIN は既存 SELECT 外形のまま UNKNOWN と非実行面を表示し API を増やさない", async () => {
-  const getFields = jest.fn(async () => []);
+test("B176: 単文 EXPLAIN は既存 SELECT 外形のまま ELIGIBLE と非実行面を表示し form API だけを 1 回呼ぶ", async () => {
+  const getFields = jest.fn(async () => [
+    { code: "顧客名", label: "顧客名", fieldType: "SINGLE_LINE_TEXT", isUnique: true },
+  ]);
   const getRecords = jest.fn(async () => ({ records: [] }));
   const client: KintoneClient = { ...makeClient(), getFields, getRecords };
   const result = await execute(
@@ -674,11 +676,10 @@ test("B173 AC-16/17/22: 単文 EXPLAIN は既存 SELECT 外形のまま UNKNOWN 
   expect(result.type).toBe("SELECT");
   expect(result.columns).toEqual(["plan"]);
   expect(result.rowCount).toBe(result.rows.length);
-  expect(plan.join("\n")).toContain("native UPSERT statement/data eligibility: UNKNOWN");
-  expect(plan.join("\n")).toContain("条件 3: KEY_SCHEMA — フォームメタデータ未取得");
+  expect(plan.join("\n")).toContain("native UPSERT statement/data eligibility: ELIGIBLE");
   expect(plan.join("\n")).toContain("native UPSERT execution surface: NOT_APPLICABLE");
   expect(plan.join("\n")).not.toContain("estimated API consumption");
-  expect(getFields).not.toHaveBeenCalled();
+  expect(getFields).toHaveBeenCalledTimes(1);
   expect(getRecords).not.toHaveBeenCalled();
 });
 

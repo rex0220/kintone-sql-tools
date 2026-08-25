@@ -924,7 +924,7 @@ describe("MCP tools", () => {
     });
     await expect(tools.query({ sql: `${sql} VALIDATE ONLY` })).resolves.toBeDefined();
     await expect(tools.explain({ sql })).resolves.toBeDefined();
-    expect(createRuntime).toHaveBeenCalledTimes(1);
+    expect(createRuntime).toHaveBeenCalledTimes(2);
     expect(executeSql).toHaveBeenCalledTimes(2);
   });
 
@@ -3161,18 +3161,31 @@ SELECT n FROM flow_rows`;
     expect(result.type).toBe("SELECT"); // 従来の SelectResult 形
   });
 
-  test("B173 AC-16/17/22: MCP 単文 UPSERT EXPLAIN は従来 SELECT payload に文・データ UNKNOWN を追加する", async () => {
-    const tools = createKsqlMcpTools({ profile: "prod" });
-    const result = await tools.explain({
-      sql: "UPSERT INTO APP100 (key) VALUES ('K1') ON DUPLICATE (key)",
-    }) as { type: string; columns: string[]; rows: Array<{ plan: string }>; batch?: boolean };
-    const text = result.rows.map((row) => row.plan).join("\n");
-    expect(result.type).toBe("SELECT");
-    expect(result.columns).toEqual(["plan"]);
-    expect(result.batch).toBeUndefined();
-    expect(text).toContain("native UPSERT statement/data eligibility: UNKNOWN");
-    expect(text).toContain("native UPSERT execution surface: NOT_APPLICABLE");
-    expect(text).not.toContain("estimated API consumption");
+  test("B176: MCP 単文 UPSERT EXPLAIN は actual Node client で target metadata を取得して ELIGIBLE を返す", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = jest.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      properties: {
+        key: { code: "key", label: "key", type: "SINGLE_LINE_TEXT", unique: true },
+      },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    globalThis.fetch = fetchMock;
+    try {
+      const tools = createKsqlMcpTools({ profile: "prod" });
+      const result = await tools.explain({
+        sql: "UPSERT INTO APP100 (key) VALUES ('K1') ON DUPLICATE (key)",
+      }) as { type: string; columns: string[]; rows: Array<{ plan: string }>; batch?: boolean };
+      const text = result.rows.map((row) => row.plan).join("\n");
+      expect(result.type).toBe("SELECT");
+      expect(result.columns).toEqual(["plan"]);
+      expect(result.batch).toBeUndefined();
+      expect(text).toContain("native UPSERT statement/data eligibility: ELIGIBLE");
+      expect(text).toContain("native UPSERT execution surface: NOT_APPLICABLE");
+      expect(text).not.toContain("estimated API consumption");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0][0])).toContain("/k/v1/app/form/fields.json?app=100");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   // ----------------------------------------------------------------

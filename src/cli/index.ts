@@ -2103,7 +2103,8 @@ async function run(): Promise<number> {
   }
   const cacheContext = buildCacheContext(profileName, appBindingByMappedApp);
 
-  if (args.dryRun && (!dryRunNeedsMetadata || dryRunUsesStaticTypedPlan)) {
+  const fullyOfflineDryRun = args.dryRun && (!dryRunNeedsMetadata || dryRunUsesStaticTypedPlan);
+  if (fullyOfflineDryRun) {
     client = createDryRunClient();
   } else {
     for (const explicitProfile of appProfileByApp.values()) {
@@ -2371,7 +2372,7 @@ async function run(): Promise<number> {
       const plans = await buildBatchExplainPlans(
         sql!, client, args.variables, cacheContext, maxRecords, cursorMaxActive,
         Object.keys(args.importCsv).length > 0 || Object.keys(args.importJson).length > 0,
-        dmlMaxRows, dmlMaxSubtableRows, !dryRunUsesStaticTypedPlan,
+        dmlMaxRows, dmlMaxSubtableRows, !fullyOfflineDryRun,
         recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
         undefined, undefined, {
           surface: "CLI",
@@ -2530,6 +2531,7 @@ async function run(): Promise<number> {
           maxRecords, onLimitReached: onLimit, cacheContext, cursorMaxActive, enableImport: importEnabled, importSource,
           dmlMaxRows, dmlMaxSubtableRows,
           recursiveCteMaxDepth, recursiveCteMaxRows, recursiveCteMaxExpansions,
+          resolveMetadata: !fullyOfflineDryRun,
         }, args.nativeUpsert, true))
       : await execute(sql!, client, withNativeUpsertExecutionOption({
         maxRecords,

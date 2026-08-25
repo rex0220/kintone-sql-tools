@@ -747,6 +747,8 @@ export interface ExecuteOptions {
    * 関連付ける。有効時は getSelectColumnMeta(result) で取得できる。既定 false（従来動作）。
    */
   captureColumnMeta?: boolean;
+  /** EXPLAIN の metadata 解決を許可する。false は完全オフライン面向け。既定 true。 */
+  resolveMetadata?: boolean;
   /**
    * UPDATE / DELETE（および INSERT_SELECT の書き込み）実行前に呼ばれる確認コールバック。
    * false を返すとキャンセルして OperationCancelledError を投げる。
@@ -1241,6 +1243,7 @@ async function executeParsedStatement(
       options.recursiveCteMaxDepth,
       options.recursiveCteMaxRows,
       options.recursiveCteMaxExpansions,
+      options.resolveMetadata !== false,
       hasNativeUpsertExecutionOption(options)
         ? {
             surface: "CLI",
@@ -12227,6 +12230,10 @@ async function buildExplainWhereAnalysis(
       return;
     }
     const typed = node as Record<string, unknown>;
+    if (typed["type"] === "UPSERT" || typed["type"] === "UPSERT_SELECT") {
+      const upsert = node as UpsertStatement | UpsertSelectStatement;
+      await getFieldsCached(upsert.appId, tracedClient, cacheContext);
+    }
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
       await validateSelectGroupingPlanning(select, tracedClient, cacheContext);
@@ -13579,6 +13586,7 @@ async function executeExplain(
   recursiveCteMaxDepth?: number,
   recursiveCteMaxRows?: number,
   recursiveCteMaxExpansions?: number,
+  resolveMetadata = true,
   nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" }
 ): Promise<SelectResult> {
   const recursiveLimits = resolveRecursiveCteLimits({
@@ -13586,14 +13594,24 @@ async function executeExplain(
   });
   const sharedPlan = relativeDatePlan
     ?? await resolveRelativeDateExecutionPlan(stmt.query, client, cacheContext);
-  const analysis = await buildExplainWhereAnalysis(
-    stmt.query,
-    client,
-    cacheContext,
-    maxRecords,
-    sharedPlan,
-    explainMaterializedTables.get(stmt)
-  );
+  const analysis = resolveMetadata
+    ? await buildExplainWhereAnalysis(
+        stmt.query,
+        client,
+        cacheContext,
+        maxRecords,
+        sharedPlan,
+        explainMaterializedTables.get(stmt)
+      )
+    : {
+        capabilities: new Map<SelectStatement, PredicateCapabilityResult>(),
+        orderPlans: new Map<SelectStatement, CanonicalOrderPlan>(),
+        plainGroupByPlans: new Map<SelectStatement, PlainGroupByResolutionPlan>(),
+        fieldApps: new Set<number>(),
+        processStatusApps: new Set<number>(),
+        numberPrecisionApps: new Set<number>(),
+        relativeDatePlan: sharedPlan,
+      };
   const fetchCollector: ExplainFetchCollector = { sources: [] };
   const relativeLines = relativeDateExplainLines(sharedPlan);
   const planLines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed
