@@ -5,6 +5,7 @@
 - 優先: **中**（結果が静かに変わる。**踏む条件は狭いが踏めば高確率で外す**〔直後は 8 回中 6 回〕。回避は容易＝`LIKE` を使う・書込を最後に置く）
 - 影響範囲: **`KLIKE` に限定**（§1.4 で確定）。テキスト `=` / `IN` 押し下げ・`$id` 押し下げ・`LIKE`（JS 評価）・エンジン内部の読取は**すべて無影響と実測**
 - 発見の経緯: [ksql-flow の F-5 返信 §3](../../../ksql-flow/docs/kSQLエンジンへの返信-20260825-F5-AB実測.md)の副次メモ（「`like "KSQL-FLOW-TEST-C"` は語単位マッチのため `KSQL-FLOW-TEST-C200` に当たらない」）を**既知かどうか確かめに行って、別の穴が出た**
+- 仕様: [B175 EXPLAIN 注記 仕様 R1](ksql_b175_klike_index_lag_explain_spec.md)（2026-08-25・codex 起草／**Claude レビュー済み＝§13**。R2 で 3 件〔①書込文の範囲を実測に合わせて絞る ②回避策の順序 ③「旧値が残る」の追記〕、ほかにオーナー判断 1 件〔論理アプリ binding の配線を R1 に含めるか〕）
 - 関連: [KLIKE 仕様](ksql_klike_native_search_spec.md)／[LIKE を JS 判定のみに統一](ksql_like_js_default_optin_pushdown_spec.md)／[文字列の扱い（横断仕様）](ksql_string_semantics.md)
 
 ## 1. 実測（2026-08-25・APP4253）
