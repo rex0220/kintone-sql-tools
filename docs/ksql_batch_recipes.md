@@ -798,8 +798,9 @@ ORDER BY 深さ, 親コード, 子コード
 - **検索打ち切り（10 万件）の扱い（v2.10.0 以降）**: kintone は `like` / `not like` の一致候補が **10 万件に達すると検索を打ち切る**。現行の挙動を整理すると:
   - **現在**: CLI/MCP の `SELECT` はこの打ち切りを検出すると**警告付き**で返る（結果が欠落し得る）。プラグイン経路は検出しない。
   - **現在**: DML の対象取得（読取）が打ち切り信号を受けたら、**書き込み前に `SearchAbortedError` で停止**（fail-closed）＝サイレントな一部更新/削除の防止。一時テーブル実体化も同様にエラー。
-  - **現在**: `UPDATE` / `DELETE` の WHERE に `LIKE` / `NOT LIKE` は使えず、`KLIKE` は**全 DML で使用不可**（いずれも**別の静的制約で実行前に拒否**される）。したがって「`LIKE` / `KLIKE` を直接含む DML」は今は書けない。
-  - **将来**: 上記 fail-closed は、`KLIKE` 親レコード DML を解禁する際の安全基盤になる。
+  - **現在**: `UPDATE` / `DELETE` の WHERE に `LIKE` / `NOT LIKE` は使えない（静的制約で実行前に拒否）。**`KLIKE` は v3.10.0 で親レコード DML に解禁済み**＝**通常（APPLY なし）の親 `UPDATE` / `DELETE` の WHERE**と、**APPLY 複数親 `UPDATE` の親 WHERE**で使用できる。サブテーブル `UPDATE` / `DELETE`・`REORDER`・`INSERT` 系・`UPSERT` 系・独立した `VALIDATE` では引き続き使用できない（詳細は言語リファレンスの `KLIKE` 節が正）。
+  - 上記の fail-closed は、その `KLIKE` 親レコード DML の安全基盤になっている。
+  - **索引反映ラグに注意**（[B175](internal/ksql_b175_klike_index_lag_issue.md)）: kintone の全文検索索引は書込に対して即時ではない。**同一バッチで書込のあとに `KLIKE` を使うと、対象解決が更新後の値で引けず、更新前の値で引けてしまう**ことがある。`KLIKE` を含む DML では**対象の取りこぼしや、本来対象外のレコードへの更新／削除**になり得る。**書込文はバッチの最後に置く**こと。
   - 実務では、大規模アプリを対象にする DML は **`$id` 範囲・`IN`・完全一致などで 10 万件未満に絞って**から処理する。
 
 ## R18. Flow dialect 1 で月次同期ジョブを書く（`-- @ksql` ヘッダ・`ASSERT`/`EXIT` ゲート・`KEY()`）
