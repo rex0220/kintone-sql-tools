@@ -1,6 +1,6 @@
-# B173 native UPSERT（`updateKey` + `upsert: true`）仕様 R4
+# B173 native UPSERT（`updateKey` + `upsert: true`）仕様 R5
 
-- 状態: 仕様 R4。実装未着手。この仕様作成セッションではコード、文書、git 状態を変更していない。
+- 状態: 仕様 R5。実装未着手。この仕様作成セッションではコード、文書、git 状態を変更していない。
 - 対象:
   - `/flow` の素の `UPSERT VALUES` / `UPSERT SELECT` 本実行、および同じ実行条件を反映する `previewStatement`。
   - CLI の実行ごとの明示 opt-in による同じ native UPSERT 経路。
@@ -16,6 +16,12 @@
   - CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIP の各書込経路は変更しない。
   - 実機測定結果は `docs/internal/ksql_b173_native_upsert_update_key_issue.md:132-149` および同文書 §3.2 を採用し、再導出しない。
   - B173 の tracker 状態と対象は `docs/ksql_issue_tracker.md:44` を正とする。
+
+## R4 からの変更点（復元）
+
+- R3 の出力欠落で失われた R2 の列挙型受入条件を、R4 の AC-1〜AC-24 の番号体系を維持したまま AC-2 へ復元した。能力なし、schema の fail-closed、素の UPSERT 限定、空文字キーの各ケースを個別に固定した。
+- R3 の出力欠落で失われた「変更するファイル」を §13 に復元した。R2 の Production／変更しない Production／Tests を土台に、R3・R4 で追加された CLI、共有適格性評価器と renderer、単文・バッチ EXPLAIN、metrics、`/flow` の既定 ON／opt-out を反映した。
+- 上記2件以外の設計、判断、規範文言は R4 から変更していない。
 
 ## R3 からの変更点
 
@@ -1229,9 +1235,151 @@ APIトークンのスコープを問い合わせる手段がない以上、こ�
 3. 必要なら本番前にCLIの `--native-upsert` で同じSQLをリハーサルする。
 4. 問題時に `enableNativeUpsert: false` でopt-outできることを確認する。
 
-## 13. リリース付随作業
+## 13. 変更するファイル
 
-### 13.1 `CHANGELOG.md` 文面案
+### Production
+
+- `src/flow-library/publicTypes.ts`
+  - native UPSERT の公開入力・レスポンス型を追加する。
+  - `FlowKintoneClient.upsertRecords?` を追加する（`src/flow-library/publicTypes.ts:53-75`）。
+  - `CreateExecutionContextOptions.enableNativeUpsert?` を追加し、`/flow` では省略時 `true`、明示 `false` だけを opt-out とする（`src/flow-library/publicTypes.ts:126-152`）。
+  - `ExplainScriptOptions.enableNativeUpsert?` を追加し、省略時 `true` とする（`src/flow-library/publicTypes.ts:104-119`）。
+  - `FlowChunkWrittenInfo.operation` に `"UPSERT"` を追加する。
+  - `insertedCount?` / `updatedCount?` を追加する（`src/flow-library/publicTypes.ts:154-177`）。
+  - `ExecutionMetrics.nativeUpsertCalls` を追加する。`putCalls` の内数であり、すべての初期snapshotに `0` を入れる（`src/flow-library/publicTypes.ts:179-200`、`src/execute.ts:869-878`）。
+
+- `src/flow-library/writableClient.ts`
+  - `createKintoneClient` に `upsertRecords` を実装する（`src/flow-library/writableClient.ts:29-148`）。
+  - `PUT /records.json` のレスポンスを返す。
+  - 既存のguest space、認証、timeout、HTTP error変換を再利用する。
+
+- `src/flow-library/index.ts`
+  - `enableNativeUpsert` の省略を `true` に解決し、managed execution contextへ渡す（`src/flow-library/index.ts:109-152`）。
+  - `explainScript` から `ExplainScriptOptions.enableNativeUpsert` の省略時 `true` とrouted clientの実能力を共有評価器へ渡す（`src/flow-library/index.ts:76-103`）。
+  - 論理アプリroutingで、能力がある場合だけ `upsertRecords` を公開し、`app` を物理IDに置換する（`src/flow-library/index.ts:293-308`）。
+
+- `src/cli/index.ts`
+  - `--native-upsert` を実行ごとのbooleanフラグとして解析し、既定 `false` とする（引数解析の現行位置は `src/cli/index.ts:231-377`）。
+  - `buildReplExecArgv` でフラグを子実行へ転送し、REPLの状態表示に反映する（`src/cli/index.ts:1270-1324`、`:1335-1344`、`:1591-1611`、`:1779-1797`）。
+  - `--allow-dml`、`--yes`、`--dml-max-rows`、`--dml-max-subtable-rows`、バッチ確認、REPL確認を迂回させない。`--yes` だけでnativeを有効化しない（`src/cli/index.ts:349-366`、`:2410-2526`）。
+  - `--dry-run` との組み合わせでは書込を行わず、CLI面のopt-in状態をバッチEXPLAINと単文EXPLAINの共有評価器へ渡す（`src/cli/index.ts:1062-1076`、`:2348-2354`）。
+  - help、usage、未知オプション、REPL転送を担当する既存CLI契約を同期する。
+
+- `src/cli/nodeKintoneClient.ts`
+  - `createNodeKintoneClient` が返すclientに `upsertRecords` を実装する（`src/cli/nodeKintoneClient.ts:337-349`、`:457-510`）。
+  - `PUT /records.json` へ `upsert: true` と `updateKey` を含むbodyを送り、`records[].id` / `revision` / `operation` を失わず返す。
+  - 既存のbase URL、guest space、認証、HTTP error変換を再利用する。
+
+- `src/execute.ts`
+  - `KintoneClient` に任意のnative能力 `upsertRecords?` を追加する（`src/execute.ts:274-333`）。
+  - 本実行、`previewStatement`、バッチEXPLAIN、単文EXPLAINが共有する適格性評価器とrendererをこのファイルに置く。条件式と理由文を各経路へ複製しない（本実行入口は `src/execute.ts:780-861`、previewは `:1966-2088`、バッチEXPLAINは `:12637-12796`、単文 `executeExplain` は `:13111-13169`）。
+  - 素のUPSERT VALUES / SELECTにnative書込経路を追加する。
+  - CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIPを明示的に除外する。
+  - 全ソースの空文字キーと重複を、native書込開始前に文単位で検査する。
+  - キーを除いたpayloadを100件単位・ソース順で送り、元レコードを破壊しない。
+  - native書込開始前に、現行と同じ `options.confirm(total, "UPDATE", context)` を実行する。
+  - responseの検証とINSERT / UPDATE集計を行う。
+  - metrics、preview write block、chunk callbackの各wrapperで能力を条件付き転送・制御する（`src/execute.ts:914-996`、`:1984-1995`、`:2114-2167`）。
+  - `ExecutionMetrics.nativeUpsertCalls` を `putCalls` の内数として計上する（`src/execute.ts:869-878`、`:914-996`）。
+  - previewの `estimatedWrites` を共有判定に連動させる（`src/execute.ts:2472-2481`、`:2605-2644`）。
+  - `executeExplain` から共有適格性評価器とrendererを呼び、単文EXPLAINに適格性行を追加する。単文を `buildBatchExplainPlans` へ寄せず、既存の `columns: ["plan"]` と `rows`、バッチ専用見積りがない外形を維持する（`src/execute.ts:13111-13169`）。
+  - `buildBatchExplainPlans` から同じ評価器とrendererを呼び、バッチEXPLAINに適格性行を追加する。既存のdialect 1 API見積り行は削除しない（`src/execute.ts:12637-12796`、`:12803-12857`）。
+
+- `src/api/requestGate.ts`
+  - 能力がある場合だけ `upsertRecords` を `runMutation` 経由で転送し、read retryの対象にしない（`src/api/requestGate.ts:164-188`）。
+
+- `src/engine-library/readonlyClient.ts`
+  - `WRITE_METHODS` に `"upsertRecords"` を追加し、readonly clientが能力を報告しないようにする（`src/engine-library/readonlyClient.ts:5-9`、`:42-83`）。
+
+- バッチEXPLAINの各呼出元
+  - `src/mcp/tools.ts`、`src/ui/batchExplain.ts`、`src/engine-library/query.ts`、`src/flow-library/index.ts`、`src/cli/index.ts` から `surface` と面ごとのnative設定を明示する。
+  - MCP・プラグイン・engine-libraryは `DOCUMENT_ONLY`、`/flow` は既定ON、CLIは `--native-upsert` の有無を渡す（`src/mcp/tools.ts:705-720`、`src/ui/batchExplain.ts:17-30`、`src/engine-library/query.ts:120-136`、`src/flow-library/index.ts:76-103`、`src/cli/index.ts:2348-2354`）。
+  - MCPとCLIの単文EXPLAINは既存の `executeExplain` 経路を維持する。`buildBatchExplainPlans` へ統合しない（`src/mcp/tools.ts:730-745`、`src/execute.ts:13111-13169`）。
+
+### 変更しない Production ファイル
+
+- `src/core/dialect1Validation.ts`
+  - dialect 1の構文・schema検証は変更しない（`src/core/dialect1Validation.ts:90-128`）。
+  - native適格性の `isUnique === true` 判定を既存warning規則へ混ぜない。
+
+- `src/ui/kintoneClient.ts`
+  - プラグインclientに能力メソッドを追加しない。
+  - プラグインの実行は現行経路を維持する。
+  - EXPLAINは `src/ui/batchExplain.ts` から文・データ条件3〜6を表示するが、実行opt-inは追加しない（`src/ui/batchExplain.ts:17-30`）。
+
+- MCPの公開ツール入力
+  - native実行opt-inを追加しない。
+  - MCPの実行は現行経路を維持し、EXPLAINだけ文・データ条件3〜6を表示する（`src/mcp/tools.ts:705-745`）。
+
+- engine-libraryの公開実行入力
+  - native実行opt-inを追加しない。
+  - readonly契約を維持し、EXPLAINだけ文・データ条件3〜6を表示する（`src/engine-library/query.ts:120-136`、`src/engine-library/readonlyClient.ts:42-83`）。
+
+- 既存の `putRecords`
+  - トップレベル `upsert` を混ぜず、従来の更新API契約を変更しない（`src/execute.ts:274-333`、`docs/internal/ksql_b173_native_upsert_update_key_issue.md:40-52`）。
+
+### Tests
+
+既存契約の担当suiteを更新し、B173の対テストを追加する。各テストは内部関数の存在ではなく、公開結果、例外、plan行、mock clientの呼出し回数・順序・bodyで判定する。
+
+- `src/__tests__/execute.test.ts`
+  - native本実行、fallback、body、順序、結果内訳、チャンク、キーのみ、ソース重複、NUMBER raw値、`options.confirm` の引数・位置・拒否時の無書込。
+  - 能力なしで警告なし、schemaの5ケース、素のUPSERT限定の5ケース、空文字1件による文全体fallbackを個別ケースとして固定する。
+  - native開始後のAPI error、権限エラー、不正response、callback errorで現行経路へ再試行しないこと。
+
+- `src/__tests__/b95MetricsPropagation.test.ts`
+  - native 1リクエストで `putCalls` と `nativeUpsertCalls` が1ずつ増え、`postCalls` は増えないこと。
+  - rejectと後段callback errorでも減算せず、`nativeUpsertCalls <= putCalls` を保つこと。
+  - 既存snapshotの `nativeUpsertCalls: 0` と伝播を固定する。
+
+- `src/__tests__/explain.test.ts`
+  - 共有rendererの `ELIGIBLE` / `INELIGIBLE` / `UNKNOWN`、条件番号順、既知falseの優先、条件3〜6の別表示を固定する。
+  - 単文 `executeExplain` に適格性行を追加しつつ、既存の `columns: ["plan"]`、`rows`、SELECT payload、バッチ専用見積りがない外形を維持する。
+  - バッチ `buildBatchExplainPlans` の既存API見積り行を維持し、適格性行だけを追加する。
+  - metadata・ソース不足を `UNKNOWN` とし、EXPLAINのためのAPI呼出しを増やさない。
+
+- `src/flow-library/__tests__/previewStatement.test.ts`
+  - native適格時と現行経路時の条件付き `estimatedWrites`、既存のread、counts、before/after、samples、write blockを固定する。
+
+- `src/flow-library/__tests__/publicApi.test.ts`
+  - `/flow` の省略時既定ON、明示 `true`、明示 `false` opt-out、公開結果、`ExplainScriptOptions.enableNativeUpsert`、`onChunkWritten` の新しい値を固定する。
+
+- `src/flow-library/__tests__/b170FlowRequests.test.ts`
+  - 同梱 `/flow` clientのURL、method、body、response、guest space、HTTP errorを固定する。
+
+- `src/cli/__tests__/index.test.ts`
+- `src/cli/__tests__/dml_guard.e2e.test.ts`
+- `src/cli/__tests__/console.e2e.test.ts`
+  - `--native-upsert` の既定OFF、引数解析、help、REPL転送と状態表示を固定する。
+  - `--allow-dml`、`--yes`、`--dml-max-rows`、バッチ確認、REPL確認を迂回しないことを固定する。
+  - `--dry-run` との組み合わせでは書込0回で、フラグ有無をEXPLAIN表示へ反映すること。
+  - CLIのバッチEXPLAINとSQLの単文EXPLAINの双方で、面依存条件1・2と文・データ条件3〜6を仕様どおり表示すること。
+
+- `src/cli/__tests__/nodeKintoneClient.test.ts`
+  - CLI clientのnative URL、method、body、response、guest space、HTTP error、`records[].operation` 保持を固定する。
+
+- `src/mcp/__tests__/tools.test.ts`
+  - MCPの単文EXPLAINが既存SELECT payloadを維持し、条件3〜6の適格性行を追加すること。
+  - バッチ形やバッチ専用書込見積りへ変わらず、native実行opt-inを公開しないこと。
+
+- プラグインとengine-libraryのEXPLAIN担当suite
+  - MCP・プラグイン・engine-libraryで条件1・2を対象外とし、条件3〜6を `ELIGIBLE` / `INELIGIBLE` / `UNKNOWN` として表示すること。
+  - 条件3〜6の不適格理由が面依存理由に隠れず、既存SELECT等のplanが変わらないこと。
+
+- `src/api/__tests__/requestGate.test.ts`
+  - native writeがmutation gateを通り、リトライされないこと。
+  - 能力なしclientに `upsertRecords` propertyを追加しないこと。
+
+- `src/engine-library/__tests__/readonlyProjection.test.ts`
+- `src/engine-library/__tests__/readonlyBypass.test.ts`
+- `src/engine-library/__tests__/readonlyNegativeMatrix.test.ts`
+  - readonly clientがnative能力を報告せず、直接呼出しも拒否すること。
+
+必要なら、上記を横断する `/flow` 統合ケースを `src/flow-library/__tests__/b173NativeUpsert.test.ts` に新設する。
+
+## 14. リリース付随作業
+
+### 14.1 `CHANGELOG.md` 文面案
 
 B171の「※結果が変わります」の前例は `CHANGELOG.md:6-28` にある。B173では成功時のレコード内容は同じであり、観測値と部分失敗時の状態が変わるため、次のように書き分ける。
 
@@ -1255,7 +1403,7 @@ CLI は既定 OFF のままです。`--allow-dml --native-upsert` を指定し�
 
 リリース版数は実装時点で決定するため要確認。
 
-### 13.2 依頼元ksql-flowへの通知
+### 14.2 依頼元ksql-flowへの通知
 
 リリース前または遅くともリリースと同時に、依頼元へ次を通知する。
 
@@ -1277,7 +1425,7 @@ CLI は既定 OFF のままです。`--allow-dml --native-upsert` を指定し�
 - 先にCLIの `--allow-dml --native-upsert` で同じSQLをリハーサルできること。
 - 比較測定は、まず `/flow` を `enableNativeUpsert: false` にして現行経路の基準値を取り、その後falseを外してnativeを測れること。
 
-## 14. 受入条件
+## 15. 受入条件
 
 注: 現在のR3ファイルは§12から§15へ飛んでおり、AC本文が欠落している。レビュー記録から確認できる既存番号はAC-1とAC-18である。以下はR3本文の規範をAC-1〜AC-18へ復元し、今回の新規条件をAC-19以降へ追加したものとする。AC-2〜AC-17のR2原文との逐語的対応は要確認だが、規範内容を弱めてはならない。
 
@@ -1288,6 +1436,24 @@ CLI は既定 OFF のままです。`--allow-dml --native-upsert` を指定し�
 ### AC-2 6条件と判定順序
 
 本実行とpreviewは条件1〜6を固定順で評価し、1つでも不成立または判定不能なら文全体を現行経路へ戻す。EXPLAINは既知のfalseをUNKNOWNより優先し、複数falseでは最初の条件を表示する。
+
+R2で個別に固定されていた次のケースも、条件1〜6の受入条件として復元する。
+
+- **能力なし**: `enableNativeUpsert: true` でもclientに `upsertRecords` がなければ、現行経路と同じ呼出し回数、順序、body、結果になる。能力不足を示すエラーや警告は出さない。
+- **schemaのfail-closed**: 次の各ケースで `upsertRecords` は0回となり、現行経路を使う。
+  - 複合キー。
+  - `fieldType` が対応外。
+  - キーフィールドがschemaにない。
+  - `isUnique === false`。
+  - `isUnique === undefined`。
+- **素のUPSERT限定**: 次の各ケースで `upsertRecords` は0回となる。
+  - dialect 1のCHECK付きUPSERT。
+  - APPLY UPSERT。
+  - VALIDATE ONLY。
+  - ON ERROR SKIP。
+  - IMPORT由来のUPSERT SELECT。
+  - 各ケースの既存公開結果または既存エラーは変わらない。
+- **空文字**: ソース内にキー `""` が1件でもあれば、文全体で `upsertRecords` は0回となる。現行対象GETを実行し、残りの非空行も含めて現行経路で処理する。B173が新しい `CB_VA01` を発生させない。
 
 ### AC-3 現行経路の完全維持
 
@@ -1385,7 +1551,7 @@ CHANGELOGと依頼元通知に、成功時のレコード内容は同じであ�
 
 リリース前文書に、`/flow` が使用するAPIトークンについて対象アプリのレコード追加権限をアップグレード前に確認する手順を含める。CLIによる確認を補助と位置付け、権限確認の代替とは記載しない。
 
-## 15. Claudeが実機で確かめるべき未確認事項
+## 16. Claudeが実機で確かめるべき未確認事項
 
 次は仕様の採否条件ではない。実装レビューまたはリリース前に実機で確認し、レビュー記録またはリリース記録へ残す。
 
@@ -1486,64 +1652,53 @@ CHANGELOGと依頼元通知に、成功時のレコード内容は同じであ�
 上記以外の能力保持、request gate、readonly、論理アプリrouting、重複fallback、NUMBER raw body、preview write block、metricsの内数、`options.confirm` の引数はmock / integration testで決着でき、実機確認を必須としない。
 ---
 
-## 16. レビュー記録
+## 17. レビュー記録
 
 レビュー: Claude（[[spec-and-impl-by-codex]]＝codex が仕様と実装、Claude がレビュー・実測・リリース）。
 
-### 16.1 R1 → R2（2026-08-25）
+### 17.1 版ごとの経緯
 
-- **[Major] `options.confirm` の欠落** — 現行は書込直前に確認コールバックを呼び拒否時に `OperationCancelledError` を投げる（`src/execute.ts:10571-10576`・`:11201-11206`）が、R1 の native 書込ループにその段が無く受入条件にも `confirm` が 0 件だった。**R3 で CLI が opt-in 面になったため実動化した**
-- [軽微] `postCalls` が 0 になる互換ノート／preview で共有判定が実行できる根拠
-
-### 16.2 R2 → R3（2026-08-25）
-
-R3 で入ったもの＝CLI opt-in・`nativeUpsertCalls`・EXPLAIN の 3 状態・判定の 3 者共有・`confirm` の実動化。指摘は 4 件（§16.3）。
-
-### 16.3 R3 → R4 の指摘（すべて R4 で反映済み）
-
-| # | 指摘 | R4 での反映 |
+| 版 | 内容 | レビュー指摘 |
 |---|---|---|
-| **[Major]** | **非 opt-in 面で常に `INELIGIBLE` になり可視化の目的を達しない** | **面依存条件（1・2）と文・データ依存条件（3〜6）に分割**。非実行面では `execution surface: NOT_APPLICABLE` + `statement/data eligibility` の 2 行を出す。**`--native-upsert` なしの CLI でも文・データ判定を隠さない**（こちらが指摘していなかった同型のケースまで拾った） |
-| **[Major]** | **MCP 単文 EXPLAIN の経路統合はスコープ過大** | **統合しない。共有するのは適格性評価器と renderer だけ**とし `executeExplain` から呼ぶ。**既存の非対称（書込見積りが単文に出ない）は範囲外として維持** |
-| [Minor] | §12 に既定反転の想定が無い／既定の理由が「権限」で弱い | §12 に移行 5 点・opt-out・面ごとの将来方針。理由を**公開 API の契約**へ書き換え |
-| [Minor] | プラグイン対象外の理由 | CLI に対する追加価値の小ささ + 設定粒度が環境単位になる点へ差し替え。**権限は運用手順で担保**も明記 |
+| R1 | 初版（案 C・適用条件 6 つ・ラッパー方針・エラー方針） | **[Major] `options.confirm` の欠落**＋軽微 2 件 |
+| R2 | R1 の指摘を反映。実機測定 5 項目を本文へ取り込み | — |
+| R3 | **オーナー指摘 3 件**（CLI opt-in・metrics カウンタ・EXPLAIN 可視化）を反映 | **[Major] 非 opt-in 面で常に `INELIGIBLE`／[Major] 単文 EXPLAIN の経路統合がスコープ過大**＋軽微 2 件 |
+| R4 | R3 の指摘 4 件と**オーナー決定「`/flow` の既定 ON」**を反映 | **[Major] R2 の列挙型 AC と変更ファイル一覧の欠落**（R3 の出力欠落に起因） |
+| **R5** | **復元（列挙型 AC・変更するファイル）** | **指摘なし。確定。** |
 
-**オーナー決定（§7.10）＝`/flow` の既定 ON・CLI は明示フラグのまま**も R4 に反映済み。
+### 17.2 R1 の指摘（R2 で反映済み）
 
-### 16.4 R4 レビュー（2026-08-25）
+**[Major] `options.confirm` の欠落** — 現行は書込直前に確認コールバックを呼び拒否時に `OperationCancelledError` を投げる（`src/execute.ts:10571-10576`・`:11201-11206`）が、R1 の native 書込ループにその段が無く、受入条件にも `confirm` が 0 件だった。当時は opt-in が `/flow` 限定で到達面が無かったが、**R3 で CLI が opt-in 面になり実動化した**。R1 のまま実装していれば、CLI へ広げた瞬間に確認なしで書く経路ができていた。
 
-**総評: A（指摘 4 件）と B（既定 ON）はいずれも正確に反映された。ただし受入条件に取りこぼしがある。**
+### 17.3 R3 の指摘（R4 で反映済み）
 
-#### [Major] R2 の**列挙型 AC が原則 1 本に畳まれ、個別ケースの固定が失われた**
+- **[Major] 非 opt-in 面で常に `INELIGIBLE` になり可視化の目的を達しない** → **面依存条件（1・2）と文・データ依存条件（3〜6）に分割**。非実行面では `execution surface: NOT_APPLICABLE` + `statement/data eligibility` の 2 行。**`--native-upsert` なしの CLI でも文・データ判定を隠さない**（指摘していなかった同型ケースまで自発的に拾った）
+- **[Major] MCP 単文 EXPLAIN の経路統合はスコープ過大** → **統合しない。共有するのは適格性評価器と renderer だけ**とし `executeExplain` から呼ぶ。**既存の非対称（書込見積りが単文 EXPLAIN に出ない）は B173 の範囲外として維持**
+- [Minor] §12 の既定反転の想定／既定の理由を**公開 API の契約**へ書き換え
+- [Minor] プラグイン対象外の理由を差し替え＋**権限は運用手順で担保**を明記
 
-**原因＝R3 の出力が `## 13`（変更ファイル）と `## 14`（受入条件）を丸ごと落としており、Claude がそれに気づかずコミットした**（`10402c4`）。R4 はこれを検出して AC を再構成したが、**R2 の列挙が復元されていない**。
+### 17.4 R4 の指摘（R5 で復元済み）— **原因はこちらの見落とし**
 
-R2 は条件ごとに**具体的なケースを列挙**していた。R4 はそれを **AC-2（6 条件と判定順序）と AC-3（現行経路の完全維持）の原則 2 本**に畳んでいる。**原則だけでは、実装者もテストも個別ケースを書き起こせない。**
+**R3 の出力が `## 13`（変更するファイル）と `## 14`（受入条件）を丸ごと落としており、Claude がそれに気づかずコミットした**（`10402c4`）。R4 は AC を再構成したが R2 の列挙が復元されず、変更ファイル一覧は R4 にも無いままだった。
 
-**復元が要るもの**（R2 の原文は `git show 7d77f32:docs/internal/ksql_b173_native_upsert_spec.md` にある）:
+**R5 で確認した復元結果**:
 
-| R2 の AC | 失われた列挙 |
+| 復元対象 | 結果 |
 |---|---|
-| AC-2 能力なし | `enableNativeUpsert` が真でも client に `upsertRecords` が無ければ現行経路・**能力不足を示すエラーや警告を出さない** |
-| **AC-9 schema の fail-closed** | 複合キー／`fieldType` 対応外／キーが schema に無い／`isUnique === false`／**`isUnique === undefined`** の 5 ケース |
-| **AC-10 素の UPSERT 限定** | **dialect 1 の CHECK 付き UPSERT**／APPLY UPSERT／VALIDATE ONLY／ON ERROR SKIP／**IMPORT 由来の UPSERT SELECT** の 5 ケース |
-| AC-11 空文字 | 1 件でもあれば文全体で `upsertRecords` 0 回・現行対象 GET を実行・非空行も現行経路 |
+| **能力なし** | AC-2 に復元（`upsertRecords` が無ければ現行経路・**能力不足を示すエラーや警告を出さない**） |
+| **schema の fail-closed** | AC-2 に 5 ケース復元（複合キー／`fieldType` 対応外／キーが schema に無い／`isUnique === false`／**`isUnique === undefined`**） |
+| **素の UPSERT 限定** | AC-2 に 5 ケース復元（**dialect 1 の CHECK 付き UPSERT**／APPLY UPSERT／VALIDATE ONLY／ON ERROR SKIP／**IMPORT 由来の UPSERT SELECT**） |
+| **空文字** | AC-2 に復元（1 件でも文全体で 0 回・現行 GET を実行・非空行も現行経路・**新しい `CB_VA01` を発生させない**） |
+| **変更するファイル** | **§13 として復元**（Production 8 / 変更しない 2 / Tests）。R3・R4 の増分（CLI の引数解析と REPL 転送・`nodeKintoneClient`・適格性評価器と renderer・`executeExplain`・`nativeUpsertCalls`・`ExplainScriptOptions`）を含む |
 
-とくに **「dialect 1 の CHECK 付き UPSERT」と「`isUnique === undefined`」は意図的に入れたケース**。前者は起票文書 §2.5 ①（**dialect 1 でも CHECK は構文上受理される**ので方言を根拠に素の UPSERT と仮定してはならない）から、後者は §2 の 4（BYO schema resolver が省略し得るので曖昧な schema を許可しない）から来ている。**畳むと、この 2 つを固定するテストが受入から落ちる。**
+**とくに落としてはいけなかった 2 ケースが復元されていることを確認した**＝**「dialect 1 の CHECK 付き UPSERT」**（起票文書 §2.5 ①＝dialect 1 でも CHECK は構文上受理されるので方言を根拠に素の UPSERT と仮定してはならない）と**「`isUnique === undefined`」**（同 §2 の 4＝BYO schema resolver が省略し得るので曖昧な schema を許可しない）。
 
-#### [運用] AC の番号体系は **R4 の AC-1〜AC-24 で確定してよい**
+**§13 Tests が挙げるテストファイル 10 件はすべて実在を確認済み**（`b95MetricsPropagation` / `explain` / `cli/index` / `cli/nodeKintoneClient` / `cli/dml_guard.e2e` / `cli/console.e2e` / `engine-library/readonlyProjection` / `engine-library/readonlyBypass` / `flow-library/publicApi` / `api/requestGate`）。
 
-R4 は R2 と異なる番号体系になった（例: R2「AC-14 wrapper の能力保持」は R4 では AC-10）。**R2 は git 履歴にあり実装はこれからなので、R4 体系で確定して問題ない。** なお **AC-18 が両方とも `options.confirm` である点は偶然だが整合している**。
+### 17.5 確定
 
-#### 確認して問題がなかった点
+**R5 で指摘なし。実装着手可。** AC は R4 の AC-1〜AC-24 体系で確定（R2 の番号へは戻さない。R2 原文は `git show 7d77f32:docs/internal/ksql_b173_native_upsert_spec.md`）。
 
-- **§13.1 の CHANGELOG 文面案**＝B171 の「※結果が変わります」と書き分けており、**「成功時のレコード内容と `insertedCount` / `updatedCount` は従来と同じ」「変わるのは書込順・部分失敗時の確定範囲・`onChunkWritten.operation`・API 回数内訳・`estimatedWrites`」**が正確
-- **§13.2 の依頼元通知項目**＝追随作業の期限が前倒しになること、CLI でのリハーサル、`enableNativeUpsert: false` での基準値取得まで含んでいる
-- **§10.6 の CLI 表示**＝`--native-upsert` なしでも文・データ判定を出す（指摘していない同型ケースを自発的に拾った）
+**実装依頼で codex へ渡すもの**＝この仕様 R5 の全文／起票文書 §2.5（依頼元回答＝レビュー対象外）・§3.2（実機測定）・§7（オーサリング面の論点と既定 ON の決定）／**受入は公開結果で観測する形にすること**（結果オブジェクト・送出される例外・mock client の API 呼び出し回数と順序と body。内部関数名を受入条件に書かない）。
 
-### 16.5 R5 で直すこと
-
-1. **R2 の列挙型 AC（能力なし・schema fail-closed・素の UPSERT 限定・空文字）を R4 の体系へ復元する。** 原文は `git show 7d77f32:docs/internal/ksql_b173_native_upsert_spec.md`
-2. **変更ファイル一覧を復元する。確認したところ R4 にも無い。** R4 の §13 は「リリース付随作業」（CHANGELOG 文面案と依頼元通知）に使われており、**R2 にあった「変更する Production ファイル / 変更しない Production ファイル / 追加・更新するテスト」の節が R3 の欠落以降そのまま失われている**。R2 の原文（`git show 7d77f32:...` の §13）を土台に、**R3・R4 で増えた分を足して復元する**＝`src/cli/index.ts`（`--native-upsert`・REPL 転送・確認フロー）／`src/cli/nodeKintoneClient.ts`（`upsertRecords`）／適格性評価器と renderer の置き場／`executeExplain`（単文 EXPLAIN への行追加）／`ExecutionMetrics.nativeUpsertCalls`／`ExplainScriptOptions.enableNativeUpsert`。
-
-**この 2 件はいずれも「R3 の出力欠落」に起因する取りこぼしであり、設計上の誤りではない。** R5 は復元作業。
+**リリース時に忘れないこと**＝§14.1 の CHANGELOG 文面（**成功時の結果は同じ／変わるのは書込順・部分失敗時の確定範囲・`onChunkWritten.operation`・API 回数内訳・`estimatedWrites`**）と §14.2 の依頼元通知（**追随作業の期限が「有効化時」から「アップグレード時」へ前倒しになる**）。
