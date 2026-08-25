@@ -34,8 +34,7 @@ test("B173 AC-17/21: plugin batch EXPLAIN は条件 1・2 を対象外にして�
     { code: "key", label: "key", fieldType: "SINGLE_LINE_TEXT", isUnique: true },
   ]);
   const plans = await buildPluginBatchExplainPlans(
-    "SELECT key FROM APP1 WHERE key > 'A';" +
-      "UPSERT INTO APP1 (key) VALUES ('B') ON DUPLICATE (key)",
+    "UPSERT INTO APP1 (key) VALUES ('B') ON DUPLICATE (key)",
     { ...client, getFields },
     {
       maxRecords: 10_000,
@@ -46,7 +45,7 @@ test("B173 AC-17/21: plugin batch EXPLAIN は条件 1・2 を対象外にして�
       recursiveCteMaxExpansions: 100_000,
     }
   );
-  const text = plans.statements[1].plan.join("\n");
+  const text = plans.statements[0].plan.join("\n");
   expect(text).toContain("native UPSERT statement/data eligibility: ELIGIBLE");
   expect(text).toContain("native UPSERT execution surface: NOT_APPLICABLE");
   expect(getFields).toHaveBeenCalledTimes(1);

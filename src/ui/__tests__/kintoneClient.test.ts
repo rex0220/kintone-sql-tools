@@ -76,6 +76,28 @@ test("短い records GET は直列化を urlForGet に委譲して raw Fetch す
   );
 });
 
+test("B176: plugin createKintoneClient 経由の UPSERT EXPLAIN は form API だけを 1 回呼ぶ", async () => {
+  const mocked = installKintone(async (url, method) => {
+    expect(String(url)).toContain("/k/v1/app/form/fields.json");
+    expect(method).toBe("GET");
+    return {
+      properties: {
+        key: { code: "key", label: "key", type: "SINGLE_LINE_TEXT", unique: true },
+      },
+    };
+  });
+  globalThis.fetch = jest.fn(async () => { throw new Error("records API must not be called"); });
+  const result = await execute(
+    "EXPLAIN UPSERT INTO APP1 (key) VALUES ('K1') ON DUPLICATE (key)",
+    createKintoneClient(),
+    { cacheContext: "b176-plugin" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.plan).join("\n"))
+    .toContain("native UPSERT statement/data eligibility: ELIGIBLE");
+  expect(mocked.api).toHaveBeenCalledTimes(1);
+  expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
 test("空 fields は urlForGet の params から省く", async () => {
   const mocked = installKintone();
   globalThis.fetch = jest.fn(async () => jsonResponse({ records: [] }));

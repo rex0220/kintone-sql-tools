@@ -140,3 +140,22 @@ export function explainNeedsAppMetadata(statement: unknown): boolean {
   };
   return visit(statement);
 }
+
+/**
+ * native UPSERT の条件 3 を EXPLAIN で判定するため、target app のフォーム定義が
+ * 必要かを返す。CLI の完全オフライン判定とは分離して使用する。
+ */
+export function explainNeedsNativeUpsertTargetMetadata(statement: unknown): boolean {
+  const seen = new Set<object>();
+  const visit = (node: unknown): boolean => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node as object)) return false;
+    seen.add(node as object);
+    if (Array.isArray(node)) return node.some(visit);
+
+    const item = node as Record<string, unknown>;
+    if (item["type"] === "UPSERT" || item["type"] === "UPSERT_SELECT") return true;
+    return Object.values(item).some(visit);
+  };
+  return visit(statement);
+}

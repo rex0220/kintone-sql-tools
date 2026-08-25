@@ -1,5 +1,6 @@
 import {
   createExecutionContext,
+  createKintoneClient,
   disposeExecutionContext,
   executeStatement,
   parseScript,
@@ -28,6 +29,7 @@ function clientFixture(options: {
   extraFields?: Array<{ code: string; label: string; fieldType: string; isUnique?: boolean }>;
 } = {}) {
   const calls = {
+    fields: [] as number[],
     get: [] as Array<Parameters<FlowKintoneClient["getRecords"]>[0]>,
     post: [] as Array<Parameters<FlowKintoneClient["postRecords"]>[0]>,
     put: [] as Array<Parameters<FlowKintoneClient["putRecords"]>[0]>,
@@ -46,7 +48,8 @@ function clientFixture(options: {
     async putRecords(params) { calls.put.push(params); },
     async deleteRecords() {},
     async getApps() { return []; },
-    async getFields() {
+    async getFields(appId) {
+      calls.fields.push(appId);
       return [
         ...(options.includeKeySchema === false ? [] : [{
           code: "key", label: "key", fieldType: options.keyType ?? "SINGLE_LINE_TEXT",
@@ -93,8 +96,9 @@ test("AC-1/4/8/12/13: /flow default ON sends native body, aggregates response, m
   expect(result).toMatchObject({
     status: "success",
     result: { type: "UPSERT", insertedCount: 1, updatedCount: 1 },
-    metrics: { getCalls: 0, postCalls: 0, putCalls: 1, nativeUpsertCalls: 1 },
+    metrics: { fieldCalls: 1, getCalls: 0, postCalls: 0, putCalls: 1, nativeUpsertCalls: 1 },
   });
+  expect(fixture.calls.fields).toEqual([1]);
   expect(fixture.calls.native).toEqual([{
     app: 1,
     upsert: true,
@@ -151,6 +155,8 @@ test.each([
     flowOptions
   );
   expect(result).toMatchObject({ metrics: { nativeUpsertCalls: 0 } });
+  expect(result.metrics.fieldCalls).toBe(1);
+  expect(fixture.calls.fields).toEqual([1]);
   expect(fixture.calls.native).toHaveLength(0);
   if (_name === "unsupported schema" || _name === "missing schema") {
     expect(result.status).toBe("error");
@@ -232,6 +238,55 @@ test("AC-1/4: plain UPSERT SELECT uses the materialized source and skips target 
   expect(result.result).toMatchObject({ type: "UPSERT", insertedCount: 1, updatedCount: 1 });
   expect(fixture.calls.native[0].records.map((record) => record.updateKey.value)).toEqual(["S1", "S2"]);
   expect(fixture.calls.get.every((call) => call.app === 2)).toBe(true);
+});
+
+test("B176: actual /flow client -> LAPP route -> metrics -> callback を native UPSERT で通す", async () => {
+  const fetchMock = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/app/form/fields.json?app=42")) {
+      return new Response(JSON.stringify({
+        properties: {
+          key: { code: "key", label: "key", type: "SINGLE_LINE_TEXT", unique: true },
+          value: { code: "value", label: "value", type: "SINGLE_LINE_TEXT" },
+        },
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    expect(url).toContain("/records.json");
+    expect(init?.method).toBe("PUT");
+    expect(JSON.parse(String(init?.body))).toMatchObject({ app: 42, upsert: true });
+    return new Response(JSON.stringify({
+      records: [{ id: "10", revision: "1", operation: "INSERT" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as jest.MockedFunction<typeof fetch>;
+  const client = createKintoneClient({
+    baseUrl: "https://example.cybozu.com",
+    auth: { type: "apiToken", apiToken: "secret" },
+    fetch: fetchMock,
+  });
+  const parsed = parseScript(
+    "-- @ksql dialect: 1\nUPSERT INTO LAPP_TARGET (key,value) VALUES ('K1','V1') KEY (key);",
+    { apps: { TARGET: 42 } }
+  );
+  expect(parsed.diagnostics).toEqual([]);
+  const chunks: FlowChunkWrittenInfo[] = [];
+  const context = createExecutionContext({
+    client,
+    statements: parsed.statements,
+    meta: parsed.meta,
+    onChunkWritten: (info) => { chunks.push(info); },
+  });
+  try {
+    const result = await executeStatement(parsed.statements[0], context);
+    expect(result).toMatchObject({
+      status: "success",
+      result: { insertedCount: 1, updatedCount: 0 },
+      metrics: { fieldCalls: 1, getCalls: 0, nativeUpsertCalls: 1, putCalls: 1 },
+    });
+    expect(chunks).toEqual([expect.objectContaining({ appId: 42, operation: "UPSERT", records: 1 })]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  } finally {
+    await disposeExecutionContext(context);
+  }
 });
 
 test.each([

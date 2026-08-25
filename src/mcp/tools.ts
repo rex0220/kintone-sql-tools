@@ -7,6 +7,7 @@ import {
   parseSqlStatement,
   parseSqlStatementsForScript,
   explainNeedsAppMetadata,
+  explainNeedsNativeUpsertTargetMetadata,
   analyzeBatch,
   type BatchExecuteResult,
   type ExecuteOptions,
@@ -685,7 +686,10 @@ export function createKsqlMcpTools(
       throw toMcpImportError(restored, importOptions.enableImport === true);
     }
     const needsAppMetadata = normalized.appBindingByMappedApp.size > 0
-      && statements.some(explainNeedsAppMetadata);
+      && statements.some((statement) =>
+        explainNeedsAppMetadata(statement)
+        || explainNeedsNativeUpsertTargetMetadata(statement)
+      );
     const runtime = needsAppMetadata
       ? await createRuntime(serverOptions, {
           sql: input.sql,

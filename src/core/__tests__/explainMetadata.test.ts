@@ -1,4 +1,7 @@
-import { explainNeedsAppMetadata } from "../explainMetadata";
+import {
+  explainNeedsAppMetadata,
+  explainNeedsNativeUpsertTargetMetadata,
+} from "../explainMetadata";
 import { parseSqlStatement, parseSqlStatements } from "../sql";
 
 describe("explainNeedsAppMetadata", () => {
@@ -33,6 +36,15 @@ describe("explainNeedsAppMetadata", () => {
     expect(explainNeedsAppMetadata(parseSqlStatement(
       "EXPLAIN UPDATE APP88 SET 親 = 'x' WHERE $id = 1 APPLY 明細 (PATCH SET 子 = 'x' ALL ROWS)"
     ))).toBe(true);
+  });
+
+  test("B176: CLI offline helper と runtime 用 native UPSERT helper を分離する", () => {
+    const upsert = parseSqlStatement(
+      "UPSERT INTO APP88 (key) VALUES ('K1') ON DUPLICATE (key)"
+    );
+    expect(explainNeedsAppMetadata(upsert)).toBe(false);
+    expect(explainNeedsNativeUpsertTargetMetadata(upsert)).toBe(true);
+    expect(explainNeedsNativeUpsertTargetMetadata(parseSqlStatement("SELECT * FROM APP88"))).toBe(false);
   });
 
   test.each([
