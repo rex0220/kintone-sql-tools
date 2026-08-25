@@ -1,44 +1,43 @@
-# B173 native UPSERT（`updateKey` + `upsert: true`）仕様 R3
+# B173 native UPSERT（`updateKey` + `upsert: true`）仕様 R4
 
-- 状態: 仕様 R3。実装未着手。この仕様作成セッションではコード、文書、git 状態を変更していない。
+- 状態: 仕様 R4。実装未着手。この仕様作成セッションではコード、文書、git 状態を変更していない。
 - 対象:
   - `/flow` の素の `UPSERT VALUES` / `UPSERT SELECT` 本実行、および同じ実行条件を反映する `previewStatement`。
   - CLI の実行ごとの明示 opt-in による同じ native UPSERT 経路。
   - CLI、MCP、プラグイン、engine-library、`/flow` が共有する EXPLAIN の native 適格性表示。
 - 前提:
-  - 案 C「能力検出付きの opt-in・素の UPSERT 限定」を維持する。既定は OFF。
-  - opt-in を公開する面は `/flow` と CLI の2面とする。
-  - CLI の opt-in は実行ごとの明示フラグだけとし、`ksql.config.json`、環境変数、プロファイル設定には追加しない。
-  - プラグインと MCP には実行 opt-in を追加しない。
+  - 案 C「能力検出付き・素の UPSERT 限定」を維持する。
+  - `/flow` は native UPSERT を既定 ON とし、`enableNativeUpsert: false` を明示した場合だけ現行経路へ opt-out する。
+  - CLI は既定 OFF とし、実行ごとの `--native-upsert` だけを opt-in とする。
+  - プラグイン、MCP、engine-library には実行 opt-in を追加しない。
   - `putRecords` は変更せず、任意の能力メソッド `upsertRecords?` を純加法で追加する。
   - 能力メソッドを実装する同梱クライアントは `src/flow-library/writableClient.ts` と `src/cli/nodeKintoneClient.ts` の2面とする。
-  - native UPSERT はアプリのレコード追加権限を追加で要求するため、既定 ON にはしない。
   - `onChunkWritten` は native の1リクエストにつき1回通知し、INSERT/UPDATE に分割しない。
   - CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIP の各書込経路は変更しない。
   - 実機測定結果は `docs/internal/ksql_b173_native_upsert_update_key_issue.md:132-149` および同文書 §3.2 を採用し、再導出しない。
-  - B173 の tracker 状態と対象は `docs/ksql_issue_tracker.md:42` を正とする。
+  - B173 の tracker 状態と対象は `docs/ksql_issue_tracker.md:44` を正とする。
 
-## R2 からの変更点
+## R3 からの変更点
 
-- opt-in の公開範囲を `/flow` 限定から `/flow` と CLI に変更した。
-- CLI の明示フラグ名を `--native-upsert` とした。フラグは `--allow-dml`、`--yes`、`--dry-run` とは独立して扱い、既存の DML 許可・件数ガード・確認を迂回しない。
-- `--native-upsert` は REPL 起動時にも指定でき、その REPL セッション内の子実行へ `buildReplExecArgv` が明示的に転送する。セッション表示にも ON/OFF を出す。
-- CLI の `src/cli/nodeKintoneClient.ts` に `upsertRecords` を追加する。プラグインと MCP のクライアントには追加しない。
-- R2 で追加した `options.confirm` 契約を、将来の保険ではなく CLI の実動経路で必ず満たす契約へ改めた。
-- `ExecutionMetrics` に `nativeUpsertCalls` を純加法で追加する。各 native 呼出しは従来どおり `putCalls` にも計上し、`nativeUpsertCalls` は `putCalls` の内数とする。
-- `FlowUpsertResult` には引き続き native/fallback の別を露出させない。
-- native 適格性判定を本実行・`previewStatement`・EXPLAIN の3者で共有する。
-- EXPLAIN に `ELIGIBLE`、`INELIGIBLE`、`UNKNOWN` の3状態を追加する。判定材料がない場合を不適格と表示しない。
-- `ExplainScriptOptions` に `enableNativeUpsert?: boolean` を純加法で追加する。
-- MCP の単文 EXPLAIN も共通バッチ計画を通す。単文の既存レスポンス形は維持し、共通計画の1文目から従来の単文 plan を構成する。
-- `resolveMetadata: false`、CLI の完全オフライン dry-run、`UPSERT SELECT` の未 materialize ソースについて、判定不能となる条件を明文化した。
-- 適格性判定のためだけの追加 API 呼出しは禁止した。EXPLAIN は既に取得済みの metadata だけを再利用する。
+- `/flow` の `enableNativeUpsert` を既定 `true` に変更した。省略時に native を許可し、`false` を明示した場合だけ現行経路へ戻す。
+- CLI は従来どおり既定 `false` とし、`--native-upsert` による実行ごとの明示 opt-in を維持した。
+- 面ごとに既定が異なる理由を明文化した。`/flow` は公開4日で既知の利用者が1者だけであり、その利用者が追加権限を持って変更を待っている。CLI は約4か月半公開され、追加権限を持たないトークンによる既存運用を否定できない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:424-479`）。
+- EXPLAIN の判定を、面依存条件1・2と、文・データ依存条件3〜6に分けた。実行 opt-in を持たないMCP・プラグイン・engine-libraryでも、条件3〜6を独立して表示する。
+- MCP・CLIの単文EXPLAINを `buildBatchExplainPlans` へ統合しない。共有するのは適格性評価器とrendererだけとし、既存の `executeExplain` から呼び出す。
+- 単文EXPLAINに書込見積りがなく、バッチEXPLAINだけに `buildDialect1ApiEstimateLines` の見積りがある既存の非対称は、B173の範囲外として維持する（`src/execute.ts:12759-12765`、`:12803-12857`、`:13111-13169`）。
+- プラグインをopt-in対象外とする理由を、CLIに対する追加価値の小ささと、自然な設定粒度がアプリ単位＝環境単位になる点へ差し替えた。
+- 権限は検証面ではなく運用手順で担保するものとした。native有効化または `/flow` アップグレード前に、使用するAPIトークンに対象アプリのレコード追加権限があることを確認する。
+- 権限エラー時の自動fallbackは採用しない。loudに失敗させ、トークンを修正させる。
+- §12に、`/flow` のアップグレードで変わる5点、成功時のレコード内容が同じであること、opt-out、CLIの将来方針を追加した。
+- §13にCHANGELOG文面案と依頼元への通知事項を追加した。
+- §14の受入条件ではAC-1を `/flow` 省略時nativeへ書き換え、opt-outとCLI既定OFFを末尾の追加ACとして固定した。
+- §15の実機確認事項を、既定ON、面別EXPLAIN、権限運用手順に合わせて更新した。
 
 ## 1. 目的
 
-現行の素の UPSERT は、キーによる事前 GET で既存レコードを解決し、その後に新規行を POST、既存行を PUT する。`UPSERT VALUES` の現行処理は `src/execute.ts:10538-10588`、`UPSERT SELECT` は `src/execute.ts:11161-11218` にある。
+現行の素のUPSERTは、キーによる事前GETで既存レコードを解決し、その後に新規行をPOST、既存行をPUTする。`UPSERT VALUES` の現行処理は `src/execute.ts:10538-10588`、`UPSERT SELECT` は `src/execute.ts:11161-11218` にある。
 
-B173 は、明示的に opt-in され、かつ安全に適用できる文だけを、kintone の次の native UPSERT に置き換える。
+B173は、安全に適用できる文をkintoneのnative UPSERTへ置き換える。
 
 ```http
 PUT /k/v1/records.json
@@ -65,41 +64,54 @@ Content-Type: application/json
 
 目的は次の3点である。
 
-1. 既存判定のための事前 GET をなくす。
-2. `/flow` と、本番と同じ API トークンを指定できる CLI で同じ書込経路を実行可能にする。
-3. EXPLAIN で、native になるか、ならないか、現時点では決められないかを実行前に確認可能にする。
+1. 既存判定のための事前GETをなくす。
+2. `/flow` と、本番と同じAPIトークンを指定できるCLIで同じ書込経路を実行可能にする。
+3. EXPLAINで、そのSQLとデータがnative適格か、どの面で実行可能か、現時点では決められないかを実行前に確認可能にする。
 
-プラグインはセッション認証であり、本番 API トークンの権限差を原理的に再現できない。MCP はツール入力を LLM が構成するため、追加権限を要求する opt-in を裁量に開放しない。CLI はプロファイル認証で本番トークンを指定でき、同じ dialect 1 ジョブ SQL をスクリプトや CI から実行できるため、権限差を含むリハーサル面とする（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:243-294`）。
+`/flow` とCLIの既定は意図的に異なる。
 
-opt-in されていない実行、および適用条件を一つでも満たさない実行は、現在の read-then-write 経路をそのまま使用する。
+- `/flow` は2026-08-21に公開されてから4日で、既知の利用者はksql-flowだけである。その利用者はレコード追加権限を持ち、この変更を待っている。この面には既定OFFを要求する公開契約上の制約が実質ないため、既定ONとする。
+- CLIは2026-04-07から約4か月半公開され、利用者を数えられない。追加権限を持たないトークンで更新専用UPSERTを実行する既存運用が存在し得るため、既定OFFを維持する。
+- CLIの目的はCLI自体の高速化ではなく、本番と同じnative経路のリハーサルである。
+
+プラグインには実行opt-inを追加しない。native挙動のリハーサルはCLIで足り、CLIはスクリプト化してCIにも載せられる。また、プラグインの自然な設定粒度はアプリ単位＝環境単位であり、「設定した後は以後ずっと効く」形になりやすい。実行ごとのUIトグルを追加する価値もCLIに対して小さい。
+
+プラグイン利用者が通常アプリ管理権限を持つことや、セッション認証が `/flow` のAPIトークン権限を再現しないことは、プラグインを対象外にする理由にはしない。`/flow` が使うAPIトークンの権限を確認することはプラグインの役割ではない。
+
+MCPはツール入力をLLMが構成するため、追加権限を要求する実行opt-inを裁量に開放しない。ただしMCP・プラグイン・engine-libraryにも条件3〜6のEXPLAIN表示を提供し、`/flow` またはCLIでnativeになる文かを読めるようにする。
+
+`/flow` で `enableNativeUpsert: false` が指定された実行、フラグなしCLI、MCP、プラグイン、および適用条件を満たさない実行は、現在のread-then-write経路をそのまま使用する。
 
 ## 2. 非対象
 
-次は B173 の native 書込対象外とし、既存経路、結果、検証、API 順序を変更しない。
+次はB173のnative書込対象外とし、既存経路、結果、検証、API順序を変更しない。
 
-- `CHECK` 付き UPSERT
+- `CHECK` 付きUPSERT
 - `APPLY UPSERT`
 - `VALIDATE ONLY`
 - `ON ERROR SKIP`
 - `IMPORT` が内部生成する `UPSERT SELECT`
 - `previewStatement` の既存値読取、差分、件数、サンプル
 - プラグインの `src/ui/kintoneClient.ts`
-- MCP の実行クライアントとツール入力
-- engine-library の read-only 実行
-- dialect 1 の構文・静的検証規則
+- MCPの実行クライアントとツール入力
+- engine-libraryのread-only実行
+- dialect 1の構文・静的検証規則
 - `putRecords` の入力型と `Promise<void>` の戻り値
-- `ksql.config.json`、環境変数、プロファイル単位の native opt-in
+- `ksql.config.json`、環境変数、プロファイル単位のnative設定
 - `FlowUpsertResult` への経路情報追加
+- 単文EXPLAINへのdialect 1書込見積り追加
+- 単文EXPLAINとバッチEXPLAINの計画生成経路統合
+- 権限エラー時の自動fallback
 
-事前 GET は CHECK 系では検証モードの決定、APPLY では既存値、IMPORT では既存サブテーブルと revision の取得にも使われているため、native へ置換できない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:23-38`）。dialect 1 の検証も現行のままとする（`src/core/dialect1Validation.ts:90-128`）。
+事前GETは、CHECK系では検証モードの決定、APPLYでは既存値、IMPORTでは既存サブテーブルとrevisionの取得にも使われているため、nativeへ置換できない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:23-38`）。dialect 1の検証も現行のままとする（`src/core/dialect1Validation.ts:90-128`）。
 
-EXPLAIN の適格性表示は非対象ではない。MCP・プラグイン・engine-library は native を実行しないが、共通 EXPLAIN による判定の可視性は提供する。
+EXPLAINの適格性表示は非対象ではない。MCP・プラグイン・engine-libraryはnativeを実行しないが、条件3〜6について意味のある可視性を提供する。
 
 ## 3. 公開型と公開オプション
 
 ### 3.1 `FlowKintoneClient`
 
-現行の `FlowKintoneClient.putRecords` は ID 指定更新だけを受け、戻り値を返さない（`src/flow-library/publicTypes.ts:53-81`）。
+現行の `FlowKintoneClient.putRecords` はID指定更新だけを受け、戻り値を返さない（`src/flow-library/publicTypes.ts:53-81`）。
 
 変更後は次を純加法で追加する。
 
@@ -146,9 +158,9 @@ export interface FlowKintoneClient {
 - `src/flow-library/writableClient.ts` の `createKintoneClient`
 - `src/cli/nodeKintoneClient.ts` の `createNodeKintoneClient`
 
-古いクライアント、自前クライアント、プラグインクライアント、MCP の能力なしクライアントは、このメソッドを実装しなければ現在の経路を使い続ける。
+古いクライアント、自前クライアント、プラグインクライアント、MCPの能力なしクライアントは、このメソッドを実装しなければ現在の経路を使い続ける。
 
-### 3.2 `/flow` の opt-in
+### 3.2 `/flow` のopt-out
 
 `CreateExecutionContextOptions` に次を追加する。
 
@@ -158,76 +170,84 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
 
   /**
    * 素の UPSERT で kintone native UPSERT の利用を許可する。
-   * 省略時および false は現行経路。既定 false。
+   * 省略時および true は許可。false のときだけ現行経路へ戻す。
+   * 既定 true。
    */
   enableNativeUpsert?: boolean;
 }
 ```
 
-`createExecutionContext` は公開 options から managed execution context を構成し、execute と preview の双方に同じ context を渡している（`src/flow-library/index.ts:109-152`）。B173 でも同一の opt-in 値を本実行と preview から参照する。
+解決規則は次のとおり。
 
-従来の単文・バッチ core APIの公開 `ExecuteOptions` へ一般利用者向け opt-in は追加しない。CLI と `/flow` から core へ渡す値は、公開 barrel に出さない内部オプションまたは同等の private plumbing とする。これにより、MCP・プラグイン・engine-library が同名プロパティを任意に設定できる公開契約を作らない。
+```ts
+const enableNativeUpsert =
+  options.enableNativeUpsert !== false;
+```
 
-### 3.3 CLI の opt-in
+`createExecutionContext` は公開optionsからmanaged execution contextを構成し、executeとpreviewの双方に同じcontextを渡している（`src/flow-library/index.ts:109-152`）。B173でも同一の値を本実行とpreviewから参照する。
 
-CLI のフラグ名は次とする。
+従来の単文・バッチcore APIの公開 `ExecuteOptions` へ一般利用者向けopt-inは追加しない。CLIと `/flow` からcoreへ渡す値は、公開barrelに出さない内部オプションまたは同等のprivate plumbingとする。
+
+### 3.3 CLIのopt-in
+
+CLIのフラグ名は次とする。
 
 ```text
 --native-upsert
 ```
 
-意味は「この CLI 実行コンテキスト内の適格な素の UPSERT に native 経路を許可する」である。
+意味は「このCLI実行コンテキスト内の適格な素のUPSERTにnative経路を許可する」である。
 
 次を契約とする。
 
-- 既定は OFF。
-- boolean flag とし、値は取らない。
+- 既定はOFF。
+- boolean flagとし、値は取らない。
 - `ksql.config.json` には同等項目を追加しない。
 - `KSQL_NATIVE_UPSERT` などの環境変数を追加しない。
 - プロファイルから暗黙に有効化しない。
-- 同一スクリプト内に複数の UPSERT がある場合、フラグは各文へ同じ値で適用され、各文が独立して6条件を判定する。
-- UPSERT を含まない入力で指定してもエラーにはせず、実行結果に影響しない。
+- 同一スクリプト内に複数のUPSERTがある場合、各文が独立して6条件を判定する。
+- UPSERTを含まない入力で指定してもエラーにはせず、実行結果に影響しない。
 
-CLI の既存 DML 安全ゲートとは独立させる。
+CLIの既存DML安全ゲートとは独立させる。
 
-- `--native-upsert` 単独では DML を許可しない。
-- 本実行・dry-run とも、UPSERT には従来どおり `--allow-dml` が必要である（`src/cli/index.ts:2059-2077`）。
-- `--yes` は確認プロンプトを省略するだけで、native opt-in を有効化しない。
+- `--native-upsert` 単独ではDMLを許可しない。
+- 本実行・dry-runとも、UPSERTには従来どおり `--allow-dml` が必要である（`src/cli/index.ts:2059-2077`）。
+- `--yes` は確認プロンプトを省略するだけで、native opt-inを有効化しない。
 - `--native-upsert` は `--allow-without-where`、`--dml-max-rows`、`--dml-max-subtable-rows` の意味を変更しない。
-- `--native-upsert` は CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIP を native 対象に変えない。
+- CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIPをnative対象に変えない。
 
-CLI は現在、`--allow-dml` と `--yes` を別々に解析し（`src/cli/index.ts:349-366`）、DML の許可判定後に `confirm` を実行へ渡す（`src/cli/index.ts:2410-2526`）。`--native-upsert` も独立した `ParsedArgs` boolean として追加する。
+CLIは現在、`--allow-dml` と `--yes` を別々に解析し（`src/cli/index.ts:349-366`）、DMLの許可判定後に `confirm` を実行へ渡す（`src/cli/index.ts:2410-2526`）。`--native-upsert` も独立した `ParsedArgs` booleanとして追加する。
 
 ### 3.4 REPL
 
 `ksql --console --native-upsert` は許可する。
 
-この場合の「実行ごと」は、REPL の各内部子プロセスではなく、利用者が明示的に開始した REPL セッションを単位とする。
+この場合の「実行ごと」は、REPLの各内部子プロセスではなく、利用者が明示的に開始したREPLセッションを単位とする。
 
-- `buildReplExecArgv` は `base.nativeUpsert === true` の場合、子実行 argv に `--native-upsert` を追加する。
+- `buildReplExecArgv` は `base.nativeUpsert === true` の場合、子実行argvに `--native-upsert` を追加する。
 - `:run`、通常実行、`:rerun` のすべてで同じ値を転送する。
-- REPL の `session:` 表示と設定表示に `native-upsert=on|off` を追加し、セッション中に有効であることを隠さない。
-- REPL 側で DML 確認済みの子実行に `--yes` と `--allow-dml` を付ける現行契約は維持する（`src/cli/index.ts:1270-1324`）。
-- native のためだけの別確認を追加しない。
-- REPL の通常 DML 確認を拒否した場合、子実行自体を開始せず、native API も呼ばない（`src/cli/index.ts:1591-1611`、`src/cli/index.ts:1779-1797`）。
+- REPLの `session:` 表示と設定表示に `native-upsert=on|off` を追加する。
+- REPL側でDML確認済みの子実行に `--yes` と `--allow-dml` を付ける現行契約を維持する（`src/cli/index.ts:1270-1324`）。
+- nativeのためだけの別確認を追加しない。
+- REPLの通常DML確認を拒否した場合、子実行自体を開始せず、native APIも呼ばない（`src/cli/index.ts:1591-1611`、`:1779-1797`）。
 
 ### 3.5 `--dry-run`
 
 `--native-upsert --dry-run` は許可する。
 
-意味は native 実行ではなく、native を有効にした本実行を想定した適格性の予測である。
+意味はnative実行ではなく、nativeを有効にしたCLI本実行を想定した適格性の予測である。
 
-- 書込 API は呼ばない。
+- 書込APIは呼ばない。
 - `upsertRecords` は呼ばない。
 - `options.confirm` と対話確認は行わない。
-- UPSERT には従来どおり `--allow-dml` を要求する。
-- `--yes` の有無は dry-run の結果へ影響しない。
-- `--native-upsert` は EXPLAIN 判定の条件2を true として渡す。
-- dry-run 用 client 自体に `upsertRecords` は追加しない。
+- UPSERTには従来どおり `--allow-dml` を要求する。
+- `--yes` の有無はdry-run結果へ影響しない。
+- `--native-upsert` は面依存条件2をtrueとして渡す。
+- dry-run用client自体に `upsertRecords` は追加しない。
 
-`createDryRunClient` は現在9メソッドを明示列挙し、すべて例外を投げる（`src/cli/index.ts:1062-1076`）。この列挙へ `upsertRecords` を追加しない。したがって dry-run が native 書込経路へ入ることは構造的にない。
+`createDryRunClient` は全APIで例外を投げる完全オフラインclientである（`src/cli/index.ts:1062-1076`）。条件3・5・6を判定できない場合は `UNKNOWN` とし、`INELIGIBLE` と表示してはならない。
 
-EXPLAIN の条件1は「dry-run client にメソッドがあるか」ではなく、「予測対象である通常の CLI client が native 能力を持つか」を入力として受け取る。CLI 同梱 client は能力あり、dry-run client は書込不能、という2つの事実を混同しない。
+EXPLAINの条件1はdry-run clientではなく、予測対象となる通常のCLI clientの能力を入力として受け取る。
 
 ### 3.6 `ExplainScriptOptions`
 
@@ -238,8 +258,9 @@ export interface ExplainScriptOptions extends ParseScriptOptions {
   client: FlowKintoneClient;
 
   /**
-   * native UPSERT を有効にした実行を想定して適格性を判定する。
-   * 省略時および false は opt-in OFF として表示する。
+   * /flow 本実行を想定する native UPSERT 設定。
+   * 省略時および true は有効、false は opt-out。
+   * EXPLAIN 自体に書込権限を与えるものではない。
    */
   enableNativeUpsert?: boolean;
 
@@ -247,9 +268,9 @@ export interface ExplainScriptOptions extends ParseScriptOptions {
 }
 ```
 
-これは EXPLAIN の予測条件であり、書込許可ではない。`explainScript` 自体が書込 API を呼べるようにはしない。
+`explainScript` は `/flow` の予測面であるため、省略時は `true` として扱う。本実行を `enableNativeUpsert: false` で構成する利用者が同じ判定を得るには、`explainScript` にも `false` を渡す。
 
-`/flow` 利用者が本実行と同じ判定を得るには、`createExecutionContext` と `explainScript` の双方へ同じ `enableNativeUpsert` を指定する。
+MCP・プラグイン・engine-libraryから共通plannerを呼ぶ場合、`enableNativeUpsert` の省略を `/flow` の既定ONと解釈してはならない。内部では予測対象面を明示し、これらの面は条件1・2を「対象外」として条件3〜6だけを評価する。
 
 ### 3.7 `FlowChunkWrittenInfo`
 
@@ -263,23 +284,13 @@ export interface FlowChunkWrittenInfo {
   records: number;
   chunkIndex: number;
 
-  /**
-   * native UPSERT のレスポンスが INSERT と報告した件数。
-   * operation === "UPSERT" の通知にだけ設定する。
-   */
   insertedCount?: number;
-
-  /**
-   * native UPSERT のレスポンスが UPDATE と報告した件数。
-   * operation === "UPSERT" の通知にだけ設定する。
-   */
   updatedCount?: number;
-
   lastKeyValue?: string;
 }
 ```
 
-native UPSERT の通知は常に次の形とする。
+native UPSERTの通知は常に次の形とする。
 
 ```ts
 {
@@ -291,9 +302,9 @@ native UPSERT の通知は常に次の形とする。
 }
 ```
 
-`insertedCount` と `updatedCount` は型上 optional だが、`operation === "UPSERT"` の通知では両方を必ず設定する。既存の3操作では設定しない。
+`insertedCount` と `updatedCount` は型上optionalだが、`operation === "UPSERT"` の通知では両方を必ず設定する。既存の3操作では設定しない。
 
-`operation` の union 拡大は exhaustive switch を持つ利用者には型上の影響がある。ただし新値は明示 opt-in 時だけ観測され、既定 OFF の既存利用者には通知されないため、この限定された拡大を許容する。現行定義は `src/flow-library/publicTypes.ts:154-165` にある。
+`operation` のunion拡大はexhaustive switchを持つ利用者に型上の影響がある。`/flow` は公開から4日で既知の利用者が1者だけであり、その利用者には網羅switchがないことが確認されているため、既定ONでの拡大を本リリースで許容する（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:387-420`）。この変更はCHANGELOGと依頼元通知で明示する。現行定義は `src/flow-library/publicTypes.ts:154-165` にある。
 
 ### 3.8 `ExecutionMetrics`
 
@@ -326,22 +337,20 @@ putCalls
   + upsertRecords の委譲開始回数
 ```
 
-したがって常に次を満たす。
+常に次を満たす。
 
 ```text
 0 <= nativeUpsertCalls <= putCalls
 ```
 
-native 呼出しが reject した場合も、既存カウンタと同じく呼出し回数として両方を増やす。レスポンス検証エラーや callback エラーで後から文が失敗しても減算しない。
-
-現行カウンタは `src/flow-library/publicTypes.ts:179-200`、既存 PUT 計上は `src/execute.ts:968-978` にある。
+native呼出しがrejectした場合も両方を増やす。レスポンス検証エラーやcallbackエラーで後から文が失敗しても減算しない。現行カウンタは `src/flow-library/publicTypes.ts:179-200`、既存PUT計上は `src/execute.ts:968-978` にある。
 
 面ごとの見え方は次とする。
 
-- `/flow`: 各 statement result の累積 `metrics.nativeUpsertCalls` から観測できる。
-- CLI: core 内部では計上するが、CLI は現在 JSON 出力から metrics を除外しているため、新しい CLI 出力項目は追加しない（`src/cli/index.ts:780`）。事前確認は EXPLAIN、HTTP の実確認は既存 debug 手段を使う。
-- MCP・プラグイン・engine-library: native 実行 opt-in がないため通常は0。新しい公開結果項目は追加しない。
-- `FlowUpsertResult`: 引き続き経路情報を露出させない。
+- `/flow`: statement resultの累積 `metrics.nativeUpsertCalls` から観測できる。
+- CLI: core内部では計上するが、CLI JSON出力に新項目は追加しない（`src/cli/index.ts:780`）。
+- MCP・プラグイン・engine-library: native実行しないため0。
+- `FlowUpsertResult`: 経路情報を追加しない。
 
 ### 3.9 変更しない結果型
 
@@ -355,26 +364,40 @@ export interface FlowUpsertResult {
 }
 ```
 
-native か現行経路かは、DML の意味上の結果ではなく metrics と EXPLAIN で観測する。
+nativeか現行経路かは、metricsとEXPLAINで観測する。
 
-## 4. native 適用可否
+## 4. native適用可否
 
 ### 4.1 判定単位
 
 判定単位は1文全体とする。
 
-同じ文の一部だけを native、残りを現行経路に流してはならない。schema 不明、空文字、ソース重複などが1行でもあれば、その文全体を現行経路へ戻す。
-
-同一スクリプト内の別の UPSERT 文は独立して判定する。
+同じ文の一部だけをnative、残りを現行経路に流してはならない。schema不明、空文字、ソース重複などが1行でもあれば、その文全体を現行経路へ戻す。同一スクリプト内の別のUPSERT文は独立して判定する。
 
 ### 4.2 単一の共有判定
 
-本実行、`previewStatement`、EXPLAIN は、同じ評価器を共有しなければならない。3経路に条件式を複製してはならない。
+本実行、`previewStatement`、バッチEXPLAIN、単文EXPLAINは同じ評価器を共有しなければならない。条件式を複製してはならない。
 
-共有評価器は次の discriminated union 相当を返す。
+条件を次の2群に分ける。
+
+| 群 | 条件 | 性質 |
+|---|---|---|
+| 面依存 | 1 クライアント能力、2 native設定 | 実行面の構成 |
+| 文・データ依存 | 3 キーschema、4 素のUPSERT、5 空文字キー、6 ソース重複 | SQLとデータの性質 |
+
+共有評価器は各条件を `PASS`、`FAIL`、`UNKNOWN`、`NOT_APPLICABLE` の内部結果として保持し、外部表示では次の3状態を使う。
 
 ```ts
-type NativeUpsertEligibility =
+type NativeUpsertEligibilityStatus =
+  | "ELIGIBLE"
+  | "INELIGIBLE"
+  | "UNKNOWN";
+```
+
+実行可能面の評価結果は次に相当する。
+
+```ts
+type NativeUpsertExecutionEligibility =
   | { status: "ELIGIBLE" }
   | {
       status: "INELIGIBLE";
@@ -390,33 +413,54 @@ type NativeUpsertEligibility =
     };
 ```
 
-本実行と preview は全判定材料が揃った段階で呼ぶ。実行上 `UNKNOWN` が残った場合は fail-closed とし、native 不適格として現行経路へ戻す。
+文・データ依存の評価結果は同じ3状態を条件3〜6だけに適用する。
 
-EXPLAIN は部分的な入力を許す。評価規則は次とする。
+```ts
+type NativeUpsertStatementEligibility =
+  | { status: "ELIGIBLE" }
+  | {
+      status: "INELIGIBLE";
+      condition: 3 | 4 | 5 | 6;
+      reason: string;
+    }
+  | {
+      status: "UNKNOWN";
+      unknownConditions: Array<{
+        condition: 3 | 4 | 5 | 6;
+        reason: string;
+      }>;
+    };
+```
+
+評価規則は次のとおり。
 
 1. 判定可能な条件をすべて評価する。
-2. 判定可能な条件に false があれば `INELIGIBLE` とする。
-3. false が複数ある場合は、§4.3 の順序で最初の条件を表示する。
-4. false がなく、未判定条件が1つ以上あれば `UNKNOWN` とする。
-5. 6条件すべてが true の場合だけ `ELIGIBLE` とする。
+2. falseがあれば `INELIGIBLE` とする。
+3. falseが複数ある場合は§4.3の順序で最初の条件を表示する。
+4. falseがなく未判定条件があれば `UNKNOWN` とする。
+5. 対象となる全条件がtrueの場合だけ `ELIGIBLE` とする。
+6. MCP・プラグイン・engine-libraryでは条件1・2を `NOT_APPLICABLE` とし、条件3〜6の状態を表示する。
+7. 条件3〜6に既知の失敗がある場合、面依存条件が対象外でも `INELIGIBLE` と表示する。
+8. 条件3〜6がすべてtrueの場合、「opt-inのある面ではnativeになる」と表示する。
 
-これにより、条件3が不明でも条件4が明確に不適格なら `INELIGIBLE` と表示できる。一方、既知の不適格条件がない状態で metadata やソース行だけが不足している場合は `UNKNOWN` とする。
+本実行とpreviewでは6条件をすべて適用する。実行時に `UNKNOWN` が残った場合はfail-closedとし、現行経路へ戻す。
 
 共有判定の入力は少なくとも次を含む。
 
-- native 能力の有無
-- `enableNativeUpsert` の値
-- UPSERT 文の構文情報
-- IMPORT 由来かどうか
-- 対象フィールドの schema、または schema 未取得という状態
-- 評価・materialize 済みの全ソース行のキー値、またはソース未 materialize という状態
+- 予測対象面
+- native能力の有無
+- 解決済みの `enableNativeUpsert`
+- UPSERT文の構文情報
+- IMPORT由来かどうか
+- 対象フィールドのschema、またはschema未取得という状態
+- 評価・materialize済みの全ソース行のキー値、または未materializeという状態
 - キーフィールドの型
 
 本実行では、全ソースレコードの組み立てと既存の書込値検証が完了した後、既存対象を検索する直前に判定する。
 
-preview でも同じ段階で同じ判定を行う。`previewUpsertRecords` は全行の `records` と `rowKeys` を既に構築しているため、空文字とソース内重複を含む6条件を本実行と同じ入力で評価できる（`src/execute.ts:2605-2621`）。
+previewでも同じ段階で同じ判定を行う。`previewUpsertRecords` は全行の `records` と `rowKeys` を構築しているため、空文字とソース内重複を同じ入力で評価できる（`src/execute.ts:2605-2621`）。
 
-preview は判定結果が native でも既存対象 GET を省略しない。GET は `counts`、before/after、sample に必要である（`src/execute.ts:2605-2644`）。
+previewはnative適格でも既存対象GETを省略しない。GETはcounts、before/after、sampleに必要である（`src/execute.ts:2605-2644`）。
 
 ### 4.3 判定順序
 
@@ -431,160 +475,135 @@ preview は判定結果が native でも既存対象 GET を省略しない。GE
 && typeof client.upsertRecords === "function"
 ```
 
-`typeof` だけで判定してはならない。readonly client は write property の `get` をブロック関数として返す一方、`has` では存在しないと報告するためである（`src/engine-library/readonlyClient.ts:74-83`）。
+`typeof` だけで判定してはならない。readonly clientはwrite propertyのgetをブロック関数として返す一方、`has` では存在しないと報告するためである（`src/engine-library/readonlyClient.ts:74-83`）。
 
-EXPLAIN では予測対象となる通常実行 client の能力を入力にする。CLI dry-run の throwing client を通常 CLI client の能力判定に使用しない。
+EXPLAINでは予測対象となる通常実行clientの能力を入力にする。MCP・プラグイン・engine-libraryでは文・データ評価に対してこの条件を対象外とする。
 
-#### 2. 明示 opt-in
+#### 2. native設定
 
-`enableNativeUpsert === true` を要求する。`undefined`、`false`、その他の値は不適格とする。
+`/flow` では解決後の `enableNativeUpsert === true` を要求する。省略はtrue、明示falseは不適格である。
 
-CLI では `--native-upsert` がこの条件に対応する。`--allow-dml` や `--yes` から暗黙に true と推測してはならない。
+CLIでは `--native-upsert` を要求する。`--allow-dml` や `--yes` から暗黙にtrueと推測してはならない。
 
-#### 3. キー schema
+MCP・プラグイン・engine-libraryの文・データ評価では、この条件を対象外とする。
+
+#### 3. キーschema
 
 次のすべてを要求する。
 
 - `keyFields.length === 1`
-- schema にそのフィールドが存在する
+- schemaにそのフィールドが存在する
 - `fieldType` が `"SINGLE_LINE_TEXT"` または `"NUMBER"`
 - `isUnique === true`
 
-`isUnique === undefined` は実行時には不適格とする。dialect 1 の既存検証は不明な `isUnique` を warning とするが（`src/core/dialect1Validation.ts:115-126`）、native の能力選択では曖昧な schema を許可しない。
+`isUnique === undefined` は実行時には不適格とする。EXPLAINでschema自体が取得されていない場合は `UNKNOWN` とする。dialect 0 / 1自体は条件にしない（`src/core/dialect1Validation.ts:115-126`）。
 
-EXPLAIN で schema 自体が取得されていない場合は `isUnique === undefined` と同一視せず、条件3を `UNKNOWN` とする。
-
-dialect 0 / 1 自体は条件にしない。
-
-#### 4. 素の UPSERT
+#### 4. 素のUPSERT
 
 次のどちらかだけを適格とする。
 
-- CHECK、APPLY、VALIDATE ONLY、ON ERROR SKIP を伴わない `UPSERT VALUES`
-- CHECK、VALIDATE ONLY、ON ERROR SKIP を伴わず、IMPORT 由来でもない `UPSERT SELECT`
+- CHECK、APPLY、VALIDATE ONLY、ON ERROR SKIPを伴わない `UPSERT VALUES`
+- CHECK、VALIDATE ONLY、ON ERROR SKIPを伴わず、IMPORT由来でもない `UPSERT SELECT`
 
-この条件は構文木だけで判定できる。dialect 1 でも CHECK 付き UPSERTは受理されるため、dialect を根拠に素の UPSERT と仮定してはならない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:92-99`）。
+この条件は構文木だけで判定できる。dialect 1でもCHECK付きUPSERTは受理されるため、dialectを根拠に素のUPSERTと仮定してはならない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:92-99`）。
 
 #### 5. 空文字キーなし
 
 全ソース行について、評価後のキー値が `""` でないことを要求する。
 
-空文字の `updateKey.value` は kintone が `CB_VA01` で拒否する。一方、現行経路は空文字を含むキーを行ごとの GET で処理するため（`src/execute.ts:7252-7262`、`src/execute.ts:7279-7292`）、空文字を新しいエラーにはせず現行経路へ戻す。
+空文字の `updateKey.value` はkintoneが `CB_VA01` で拒否する。一方、現行経路は空文字を含むキーを行ごとのGETで処理するため、空文字を新しいエラーにはせず現行経路へ戻す（`src/execute.ts:7252-7262`、`:7279-7292`）。
 
-EXPLAIN で全ソース行が materialize されていない場合は、空文字がないと推測せず `UNKNOWN` とする。
+全ソース行がmaterializeされていないEXPLAINでは `UNKNOWN` とする。
 
 #### 6. ソース内キー重複なし
 
-評価・materialize 済みの全ソース行を一括して検査する。100件チャンクごとではなく、文のソース全体をスコープとする。
+評価・materialize済みの全ソース行を一括して検査する。100件チャンク単位ではなく、文のソース全体をスコープとする。
 
 同値性は次のとおり。
 
 - `SINGLE_LINE_TEXT`: 文字列の完全一致
-- `NUMBER`: exact-decimal 正規化後の一致
+- `NUMBER`: exact-decimal正規化後の一致
 
-NUMBER の `"5"` と `"5.0"` は重複、文字列の `"001"` と `"1"` は別キーである。現行の NUMBER 正規化規則は `src/execute.ts:7188-7212` にある。
+NUMBERの `"5"` と `"5.0"` は重複、文字列の `"001"` と `"1"` は別キーである。現行のNUMBER正規化規則は `src/execute.ts:7188-7212` にある。
 
-EXPLAIN で全ソース行が materialize されていない場合は、重複がないと推測せず `UNKNOWN` とする。
+全ソース行がmaterializeされていないEXPLAINでは `UNKNOWN` とする。
 
 ### 4.4 不適格時と判定不能時の実行
 
-本実行または preview で6条件のどれかを満たさない場合、または必要な判定材料が不足した場合は、その文全体を静かに現行経路へ戻す。
+本実行またはpreviewで条件を満たさない場合、または必要な判定材料が不足した場合は、その文全体を静かに現行経路へ戻す。
 
 - 新しい警告を出さない。
 - 新しいエラーを出さない。
-- native を一度試してから現行経路へ再試行しない。
-- 適用判定だけを目的とする API 呼出しを増やさない。
-- 現行の対象 GET、POST、PUT の順序を変えない。
+- nativeを一度試してから現行経路へ再試行しない。
+- 適用判定だけを目的とするAPI呼出しを増やさない。
+- 現行の対象GET、POST、PUTの順序を変えない。
 - `onChunkWritten` の通知列を変えない。
-- preview の `estimatedWrites` は現行式を使う。
+- previewの `estimatedWrites` は現行式を使う。
 
-schema と型は、既に書込検証で取得するフォーム定義を使う。追加の `getFields` や `getNumberPrecision` を発行してはならない。現行の書込フィールド読込位置は `src/execute.ts:10535-10544` および `src/execute.ts:11135-11141` にある。
+schemaと型は既に書込検証で取得するフォーム定義を使う。追加の `getFields` や `getNumberPrecision` を発行してはならない（`src/execute.ts:10535-10544`、`:11135-11141`）。
 
-EXPLAIN の `UNKNOWN` は表示上の状態であり、実行時に楽観的に native を選ぶ許可ではない。
+EXPLAINの `UNKNOWN` は表示上の状態であり、実行時にnativeを選ぶ許可ではない。
 
-### 4.5 EXPLAIN の入力充足
+### 4.5 EXPLAINの入力充足
 
-EXPLAIN は metadata API 以外の実行 APIを呼ばない planner である（`src/execute.ts:12636-12653`）。したがって次を契約とする。
+EXPLAINはmetadata API以外の実行APIを呼ばないplannerである（`src/execute.ts:12636-12653`）。
 
-- 条件1: 予測対象面の能力情報から判定する。
-- 条件2: EXPLAIN に渡された opt-in から判定する。
-- 条件3: planner が別目的で既に取得・キャッシュしたフォーム metadata がある場合だけ判定する。
+- 条件1: 実行可能面では予測対象clientの能力から判定する。非実行面の文・データ評価では対象外。
+- 条件2: `/flow` またはCLIの解決済み設定から判定する。非実行面では対象外。
+- 条件3: plannerが別目的で既に取得・キャッシュしたフォームmetadataがある場合だけ判定する。
 - 条件4: 構文木から常に判定する。
 - 条件5・6:
-  - `UPSERT VALUES` で、値と変数を副作用なしに確定できる場合は判定する。
-  - `UPSERT SELECT` はソース行を取得・materialize しないため `UNKNOWN` とする。
-  - 一時表や変数の値が planner 上で確定できない場合も `UNKNOWN` とする。
+  - `UPSERT VALUES` で値と変数を副作用なしに確定できる場合は判定する。
+  - `UPSERT SELECT` はソース行を取得・materializeしないため `UNKNOWN` とする。
+  - 一時表や変数の値がplanner上で確定できない場合も `UNKNOWN` とする。
 
 `resolveMetadata === false` の場合、条件3は `UNKNOWN` とする。条件3のために `getFields` を呼んではならない。
-
-`resolveMetadata === true` でも、既存 EXPLAIN 処理が当該アプリの metadata を取得しない文について、native 判定だけを理由に新しい API 呼出しを追加してはならない。その場合も条件3は `UNKNOWN` とする。
 
 ## 5. ソース内キー重複
 
 重複時は現行経路へ戻す。
 
-理由は、現行の素の UPSERT が重複を一律エラーにしていないためである。既存レコードに対する重複行は、同じ `$id` を複数回 PUT して後勝ちで成功する（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:138-145`）。opt-in は性能と書込方式の選択であり、入力契約を破壊してはならない。
+現行の素のUPSERTは重複を一律エラーにしていない。既存レコードに対する重複行は、同じ `$id` を複数回PUTして後勝ちで成功する（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:138-145`）。nativeへの切替で入力契約を破壊してはならない。
 
 重複を検出した場合:
 
-- native UPSERT は1回も呼ばない。
+- native UPSERTは1回も呼ばない。
 - 全行を現行経路で処理する。
-- 現行経路で成功するか、既存の重複禁止違反になるかも現在の結果を維持する。
-- preview の `counts` と sample は現在の既存判定から構成する。
-- preview の `estimatedWrites` は現行式を使う。
-- EXPLAIN は `INELIGIBLE` と条件6を表示する。
+- 現行経路での成功または既存エラーを維持する。
+- previewのcounts、sample、`estimatedWrites` は現行規則を使う。
+- EXPLAINの文・データ状態は `INELIGIBLE`、条件6と表示する。
+- この不適格性は面に依存せず、どの面でもnativeにならないと表示する。
 
-## 6. native ペイロード
+## 6. nativeペイロード
 
 ### 6.1 組み立て順
 
 各行について次の順に処理する。
 
-1. 現行と同じ規則で全 UPSERT フィールドを含む `KintoneRecord` を構成する。
-2. 現行のフィールド書込可否、必須、長さ、数値精度などの検証を、キーを含む元のレコードに対して実行する。
+1. 現行と同じ規則で全UPSERTフィールドを含む `KintoneRecord` を構成する。
+2. 現行のフィールド書込可否、必須、長さ、数値精度などの検証を元のレコードに対して実行する。
 3. 単一キーフィールドの値を文字列として取得する。
 4. 送信用 `record` を新しく作り、キーフィールドだけを除外する。
-5. 取り出したキー値を `updateKey.value` に設定する。
-6. `updateKey.field` にフィールドコードを設定する。
+5. キー値を `updateKey.value` に設定する。
+6. フィールドコードを `updateKey.field` に設定する。
 7. ソース順を維持したまま100件単位に分割する。
 8. 各リクエストにトップレベルの `upsert: true` を必ず設定する。
 
 元のレコードオブジェクトを破壊的に変更してはならない。
 
-キー除去の結果、送信用 `record` が空オブジェクトになっても、そのまま `record: {}` として送る。キー以外の書込フィールドがない UPSERTについて、`record: {}` の INSERT と UPDATE、および `record` 自体を省略した INSERT の3形が実機で受理されている。したがってキーのみの UPSERT も6条件を変更せず native 適格とする（`docs/internal/ksql_b173_native_upsert_update_key_issue.md §3.2`）。
-
-公開入力型では `record` を必須とするため、省略形は使わず `record: {}` を送る。
+キー除去後に送信用 `record` が空でも `record: {}` として送る。キーのみのUPSERTも6条件を変更せずnative適格とする（`docs/internal/ksql_b173_native_upsert_update_key_issue.md §3.2`）。
 
 ### 6.2 キー値
 
 `updateKey.value` は必ず文字列で送る。
 
-NUMBER キーも JavaScript の `number` に変換しない。VALUES の数値リテラルは raw 表現、SELECT の値は materialize 後の文字列表現を維持する。安全整数を超える値も、アプリの `numberPrecision` に収まる限りそのまま送る。
+NUMBERキーもJavaScriptの `number` に変換しない。VALUESの数値リテラルはraw表現、SELECTの値はmaterialize後の文字列表現を維持する。安全整数を超える値も、アプリの `numberPrecision` に収まる限りそのまま送る。
 
-現行の VALUES キー抽出は数値リテラルの raw text を維持している（`src/execute.ts:10597-10606`）。実機でも16桁・20桁の NUMBER キーを文字列のまま `updateKey` に渡せば照合できている（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:142-145`）。
+現行のVALUESキー抽出は数値リテラルのraw textを維持している（`src/execute.ts:10597-10606`）。実機でも16桁・20桁のNUMBERキーを文字列のまま渡せば照合できている（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:142-145`）。
 
 ### 6.3 キーの除去
 
 キーフィールドを `record` と `updateKey` の両方へ載せてはならない。
-
-禁止:
-
-```json
-{
-  "updateKey": {
-    "field": "key_text",
-    "value": "K1"
-  },
-  "record": {
-    "key_text": {
-      "value": "K1"
-    },
-    "payload": {
-      "value": "value-1"
-    }
-  }
-}
-```
 
 許可:
 
@@ -602,7 +621,7 @@ NUMBER キーも JavaScript の `number` に変換しない。VALUES の数値�
 }
 ```
 
-キーだけの UPSERT:
+キーのみ:
 
 ```json
 {
@@ -614,15 +633,15 @@ NUMBER キーも JavaScript の `number` に変換しない。VALUES の数値�
 }
 ```
 
-キーを `record` に含めると、kintone は INSERT、UPDATE、同値、別値のいずれも `CB_VA01` で拒否する。一方、INSERT 時のキーフィールド値は `updateKey` から登録される（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:136-145`）。
+キーを `record` に含めるとkintoneは `CB_VA01` で拒否する。INSERT時のキーフィールド値は `updateKey` から登録される（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:136-145`）。
 
 ## 7. 書込順・確認・結果
 
 ### 7.1 書込順
 
-native 適格な文では、ソース順のまま100件単位で `upsertRecords` を呼ぶ。
+native適格な文では、ソース順のまま100件単位で `upsertRecords` を呼ぶ。
 
-現行の「INSERT 全チャンクを POSTした後、UPDATE 全チャンクを PUTする」順序（`src/execute.ts:10578-10588`、`src/execute.ts:11208-11218`）とは異なる。この差は opt-in 時だけ許容する。
+現行の「INSERT全チャンクをPOSTした後、UPDATE全チャンクをPUTする」順序とは異なる（`src/execute.ts:10578-10588`、`:11208-11218`）。
 
 0行の場合は `options.confirm` と `upsertRecords` のいずれも呼ばず、次を返す。
 
@@ -636,7 +655,7 @@ native 適格な文では、ソース順のまま100件単位で `upsertRecords`
 
 ### 7.2 `options.confirm`
 
-全ソースレコードの構築、現行と同じ書込値検証、native 適格性判定が完了した後、最初の `upsertRecords` の直前に次を実行する。
+全ソースレコードの構築、書込値検証、native適格性判定が完了した後、最初の `upsertRecords` の直前に次を実行する。
 
 ```ts
 const total = records.length;
@@ -649,40 +668,25 @@ if (options.confirm && total > 0) {
 
 契約は次のとおり。
 
-- 件数は INSERT/UPDATE の内訳ではなく文全体の合計件数。
+- 件数は文全体の合計件数。
 - 第2引数は現行と同じ `"UPDATE"`。
 - 複数チャンクでも1回だけ呼ぶ。
-- `false` の場合は `OperationCancelledError("UPDATE", total)` を変更せず送出する。
-- 拒否された場合は `upsertRecords`、`postRecords`、`putRecords`、`onChunkWritten` のいずれも0回。
+- falseの場合は `OperationCancelledError("UPDATE", total)` を送出する。
+- 拒否時は `upsertRecords`、`postRecords`、`putRecords`、`onChunkWritten` のすべて0回。
 - 0件では呼ばない。
 
-現行 UPSERT VALUES / SELECT も最初の書込前に合計件数と `"UPDATE"` を渡している（`src/execute.ts:10571-10576`、`src/execute.ts:11201-11206`）。
+現行UPSERT VALUES / SELECTも合計件数と `"UPDATE"` を渡している（`src/execute.ts:10571-10576`、`:11201-11206`）。
 
-R3 では CLI が opt-in 面になったため、この契約は実動する。
-
-単文 CLI では:
-
-- `--allow-dml` がなければ native 判定より前に拒否する。
-- `--yes` がなければ既存の DML 確認を表示する。
-- `--yes` があれば確認 callback は true を返すが、`--dml-max-rows` の件数ガードは維持する。
-- 確認拒否時は API 呼出しを開始しない。
-
-バッチ CLI では:
-
-- 既存どおりバッチ全体の DML 確認を1回行う（`src/cli/index.ts:2432-2441`）。
-- 文ごとの `confirm` は件数ガードと詳細表示を維持し、追加の対話確認を行わない（`src/cli/index.ts:2442-2481`）。
-- native 適格な各 UPSERT 文でも、core の `options.confirm(total, "UPDATE", context)` 呼出し自体は省略しない。
-
-REPL では利用者確認を REPL 側で済ませ、子実行へ `--yes` を付ける現行契約を維持する。
+CLIでは既存のDML許可、確認、件数ガードを維持する。バッチでは全体確認1回と文ごとの件数ガードを維持し、coreの `options.confirm(total, "UPDATE", context)` 呼出し自体を省略しない（`src/cli/index.ts:2432-2481`）。
 
 ### 7.3 結果の内訳
 
-各 native レスポンスについて、リクエスト行と同じ順序で返る `records[]` を検査する。
+各nativeレスポンスについて、リクエスト行と同じ順序で返る `records[]` を検査する。
 
-- `operation === "INSERT"` の数を `insertedCount` に加算する。
-- `operation === "UPDATE"` の数を `updatedCount` に加算する。
-- `revision` から INSERT/UPDATE を推測しない。
-- `id` と `revision` はレスポンス契約として検査するが、`FlowUpsertResult` には追加しない。
+- `operation === "INSERT"` を `insertedCount` に加算する。
+- `operation === "UPDATE"` を `updatedCount` に加算する。
+- `revision` からINSERT/UPDATEを推測しない。
+- `id` と `revision` は検査するが、`FlowUpsertResult` には追加しない。
 
 全チャンク成功後に次を返す。
 
@@ -698,14 +702,14 @@ REPL では利用者確認を REPL 側で済ませ、子実行へ `--yes` を付
 
 ### 7.4 不正なレスポンス
 
-次のいずれかは不正なクライアントレスポンスとして fail-closed にする。
+次のいずれかはfail-closedにする。
 
 - `records` が配列でない。
 - `records.length` が送信件数と一致しない。
 - 各要素の `operation` が `"INSERT"` / `"UPDATE"` 以外。
 - `id` または `revision` が文字列でない。
 
-この場合、現行経路へ再試行しない。
+現行経路へ再試行しない。
 
 ```text
 code: NativeUpsertResponseError
@@ -714,7 +718,7 @@ message: NativeUpsertResponseError: upsertRecords returned an invalid response.
 
 ## 8. クライアントとラッパー
 
-任意メソッドは、能力のない client にラッパーが能力を付与しないよう、すべて条件付きで公開する。
+任意メソッドは、能力のないclientにラッパーが能力を付与しないよう、すべて条件付きで公開する。
 
 ### 8.1 `/flow` の `createKintoneClient`
 
@@ -723,15 +727,15 @@ message: NativeUpsertResponseError: upsertRecords returned an invalid response.
 `upsertRecords` は:
 
 - `PUT /records.json` を使用する。
-- `app`、`upsert: true`、`records` を body に送る。
+- `app`、`upsert: true`、`records` をbodyに送る。
 - レスポンスの `records` を返す。
-- guest space、認証、timeout、HTTP error は既存の共通 request 処理を使う。
+- guest space、認証、timeout、HTTP errorは既存共通処理を使う。
 
-### 8.2 CLI の `createNodeKintoneClient`
+### 8.2 CLIの `createNodeKintoneClient`
 
-`src/cli/nodeKintoneClient.ts` の同梱 client に同じ `upsertRecords` を追加する。
+`src/cli/nodeKintoneClient.ts` の同梱clientに同じ `upsertRecords` を追加する。
 
-現行 `putRecords` は `{app, records}` を再構成して送っている（`src/cli/nodeKintoneClient.ts:337-349`）。そのメソッドへトップレベル `upsert` を混ぜず、専用メソッドとして次を送る。
+現行 `putRecords` へトップレベル `upsert` を混ぜず、専用メソッドとして次を送る（`src/cli/nodeKintoneClient.ts:337-349`）。
 
 ```ts
 {
@@ -741,18 +745,16 @@ message: NativeUpsertResponseError: upsertRecords returned an invalid response.
 }
 ```
 
-戻り値は `requestJson<KintoneNativeUpsertResult>` のレスポンスを捨てずに返す。
-
-認証、トークン解決、guest space、URL、timeout、HTTP error 変換は、既存の `postRecords` / `putRecords` と同じ `requestJson` 経路を使う（`src/cli/nodeKintoneClient.ts:322-349`）。
+戻り値は `requestJson<KintoneNativeUpsertResult>` のレスポンスを返す。
 
 ### 8.3 `wrapClientWithMetrics`
 
-現行 wrapper はメソッド列挙型である（`src/execute.ts:914-996`）。
+現行wrapperはメソッド列挙型である（`src/execute.ts:914-996`）。
 
 - 内側に能力がある場合だけ外側にも `upsertRecords` を追加する。
-- 委譲前に `metrics.putCalls` と `metrics.nativeUpsertCalls` をそれぞれ1増やす。
+- 委譲前に `metrics.putCalls` と `metrics.nativeUpsertCalls` を1ずつ増やす。
 - 成功・失敗の双方を計上する。
-- 内側に能力がない場合、外側の `"upsertRecords" in client` も false。
+- 内側に能力がない場合、外側の `"upsertRecords" in client` もfalse。
 - 戻り値をそのまま返す。
 
 ### 8.4 `withRequestGate`
@@ -769,7 +771,7 @@ message: NativeUpsertResponseError: upsertRecords returned an invalid response.
 現行は論理アプリを物理アプリへ付け替えるメソッド列挙型である（`src/flow-library/index.ts:293-308`）。
 
 - 内側に能力がある場合だけ公開する。
-- `params.app` を物理アプリ ID に置換する。
+- `params.app` を物理アプリIDに置換する。
 - `upsert`、`records`、`updateKey`、`record` は変更しない。
 - 戻り値をそのまま返す。
 
@@ -777,49 +779,49 @@ message: NativeUpsertResponseError: upsertRecords returned an invalid response.
 
 現行はスプレッド後に書込メソッドを塞いでいる（`src/execute.ts:1984-1995`）。
 
-- 内側に `upsertRecords` がある場合だけ同名の blocked method で上書きする。
+- 内側に `upsertRecords` がある場合だけblocked methodで上書きする。
 - 呼ばれた場合は次を送出する。
 
 ```text
 PreviewWriteBlockedError: previewStatement blocked a write API call.
 ```
 
-- 内側に能力がない場合は blocked method 自体を追加しない。
-- preview の適格性判定は能力を保持できるが、実際に呼んではならない。
+- 内側に能力がない場合はblocked methodを追加しない。
+- previewの適格性判定は能力を保持するが、実際に呼んではならない。
 
 ### 8.7 `wrapClientWithChunkWrittenCallback`
 
-現行は POST / PUT / DELETE の成功後に通知する（`src/execute.ts:2114-2167`）。
+現行はPOST / PUT / DELETEの成功後に通知する（`src/execute.ts:2114-2167`）。
 
 - 内側に能力がある場合だけ `upsertRecords` をラップする。
-- response の構造と件数を検査する。
+- responseの構造と件数を検査する。
 - 成功した1リクエストにつき1回通知する。
 - `operation` は常に `"UPSERT"`。
 - `records` はリクエスト件数。
-- `insertedCount` / `updatedCount` は response の `operation` から集計する。
+- `insertedCount` / `updatedCount` はresponseから集計する。
 - `lastKeyValue` はリクエスト最後の `updateKey.value`。
-- callback を await してから response を返す。
-- callback が throw した場合、その文はエラーになるが対象チャンクは書込済みとする（`src/flow-library/publicTypes.ts:147-151`）。
+- callbackをawaitしてからresponseを返す。
+- callbackがthrowした場合、文はエラーになるが対象チャンクは書込済みとする（`src/flow-library/publicTypes.ts:147-151`）。
 
 ### 8.8 `projectReadonlyClient`
 
 `WRITE_METHODS` に `"upsertRecords"` を追加する（`src/engine-library/readonlyClient.ts:5-9`）。
 
-readonly client は:
+readonly clientは:
 
 - `"upsertRecords" in client === false`
-- 直接 property を取得して呼んだ場合は read-only violation
-- native 能力として検出されない
+- 直接propertyを取得して呼んだ場合はread-only violation
+- native能力として検出されない
 
 ### 8.9 スプレッド型のその他ラッパー
 
-`wrapClientWithSearchAbort` と cursor scope は client をスプレッドしているため、前段で条件付き公開された `upsertRecords` を保持する（`src/execute.ts:1004-1055`）。
+`wrapClientWithSearchAbort` とcursor scopeはclientをスプレッドするため、前段で条件付き公開された `upsertRecords` を保持する（`src/execute.ts:1004-1055`）。
 
-能力が実行入口まで失われないこと、および能力なし client へ新しい property を追加しないことを固定する。
+能力が実行入口まで失われないこと、および能力なしclientへ新しいpropertyを追加しないことを固定する。
 
 ## 9. `onChunkWritten`
 
-native 適格な3行を1回で送り、レスポンスが次の場合:
+native適格な3行を1回で送り、レスポンスが次の場合:
 
 ```json
 {
@@ -846,19 +848,19 @@ native 適格な3行を1回で送り、レスポンスが次の場合:
 }
 ```
 
-101行なら通知回数は2回で、`records` は100、1となる。INSERT と UPDATE の内訳のために通知回数を増やさない。
+101行なら通知回数は2回で、`records` は100、1となる。INSERTとUPDATEの内訳のために通知回数を増やさない。
 
-`chunkIndex` は、その文で成功通知された書込 API リクエストの0始まり index とする。失敗したリクエストには通知せず、後続も実行しない。
+`chunkIndex` は、その文で成功通知された書込APIリクエストの0始まりindexとする。失敗したリクエストには通知せず、後続も実行しない。
 
 複数リクエストの部分失敗では、先行リクエストが確定して残り、失敗した後続リクエスト内部は全件ロールバックされることを実機で確認済みである（`docs/internal/ksql_b173_native_upsert_update_key_issue.md §3.2`）。
 
-成功境界は `onChunkWritten` が通知済みのソース順 prefix とする。
+成功境界は `onChunkWritten` が通知済みのソース順prefixとする。
 
 ## 10. preview、EXPLAIN、`estimatedWrites`
 
-### 10.1 preview の読取経路
+### 10.1 previewの読取経路
 
-preview は native 適格でも、既存対象を検索して次を現在と同じ規則で構成する。
+previewはnative適格でも、既存対象を検索して次を現在と同じ規則で構成する。
 
 - `counts.insert`
 - `counts.update`
@@ -866,11 +868,11 @@ preview は native 適格でも、既存対象を検索して次を現在と同�
 - samples
 - `reads`
 
-`previewStatement` は書込を実行しない。現行 write block は `src/execute.ts:1984-1995`、UPSERT preview の GET と分類は `src/execute.ts:2605-2644` にある。
+`previewStatement` は書込を実行しない（`src/execute.ts:1984-1995`、`:2605-2644`）。
 
 ### 10.2 `estimatedWrites`
 
-共有判定が `ELIGIBLE` の場合:
+実行可能面について、共有判定が `ELIGIBLE` の場合:
 
 ```ts
 estimatedWrites =
@@ -885,33 +887,52 @@ estimatedWrites =
   + Math.ceil(counts.update / 100);
 ```
 
-UPSERT 以外の式は変更しない。現行式は `src/execute.ts:2472-2481` にある。
+UPSERT以外の式は変更しない。現行式は `src/execute.ts:2472-2481` にある。
 
-preview では通常実行クライアントの能力、同一 execution context の opt-in、既に取得済みの schema、全 materialize 行を使う。
+`/flow` は省略時にnative設定がONなので、能力ありclientと条件3〜6を満たすUPSERTではnative式を使う。`enableNativeUpsert: false`、能力なしclient、不適格、判定不能では現行式を使う。
 
-### 10.3 EXPLAIN の表示
+### 10.3 EXPLAINの表示
 
-UPSERT / UPSERT_SELECT 文の `plan` に、既存の計画行を削除・変更せず次の1行を追加する。
+UPSERT / UPSERT_SELECT文のplanに既存行を削除・変更せず適格性行を追加する。
 
-適格:
+#### 実行可能面
+
+`/flow` とCLIでは6条件の実行適格性を表示する。
 
 ```text
   native UPSERT eligibility: ELIGIBLE（6 条件をすべて満たす）
 ```
 
-不適格:
-
 ```text
   native UPSERT eligibility: INELIGIBLE（条件 3: KEY_SCHEMA — キー項目は重複禁止の SINGLE_LINE_TEXT または NUMBER ではない）
 ```
-
-判定不能:
 
 ```text
   native UPSERT eligibility: UNKNOWN（条件 3: KEY_SCHEMA — フォームメタデータ未取得; 条件 5・6: SOURCE_KEYS — ソース行未 materialize）
 ```
 
-固定状態値は `ELIGIBLE`、`INELIGIBLE`、`UNKNOWN` とする。理由文は日本語でよいが、条件番号と短い識別子を必ず含める。
+必要に応じて、文・データ条件の状態も別行で表示できる。ただし同じ評価結果からrenderし、条件式を再評価してはならない。
+
+#### 非実行面
+
+MCP・プラグイン・engine-libraryでは条件1・2を理由に `INELIGIBLE` と表示しない。条件3〜6だけを報告する。
+
+```text
+  native UPSERT statement/data eligibility: ELIGIBLE（条件 3〜6 を満たす）
+  native UPSERT execution surface: NOT_APPLICABLE（この面では実行しない。/flow または CLI --native-upsert では native 候補）
+```
+
+```text
+  native UPSERT statement/data eligibility: INELIGIBLE（条件 6: SOURCE_DUPLICATE — ソース内に同一キーがある。どの面でも native にならない）
+  native UPSERT execution surface: NOT_APPLICABLE（この面では実行しない）
+```
+
+```text
+  native UPSERT statement/data eligibility: UNKNOWN（条件 3: KEY_SCHEMA — フォームメタデータ未取得; 条件 5・6: SOURCE_KEYS — ソース行未 materialize）
+  native UPSERT execution surface: NOT_APPLICABLE（この面では実行しない）
+```
+
+固定の適格性状態値は引き続き `ELIGIBLE`、`INELIGIBLE`、`UNKNOWN` とする。`NOT_APPLICABLE` は適格性状態ではなく、面依存条件1・2がそのEXPLAIN面の評価対象外であることを表す補助値である。
 
 識別子は次を使う。
 
@@ -924,109 +945,118 @@ UPSERT / UPSERT_SELECT 文の `plan` に、既存の計画行を削除・変更�
 6 SOURCE_DUPLICATE
 ```
 
-`INELIGIBLE` は最初の既知の失敗条件だけを表示する。`UNKNOWN` は未判定条件を条件番号順にすべて表示する。
+`INELIGIBLE` は対象群で最初の既知の失敗条件だけを表示する。`UNKNOWN` は未判定条件を条件番号順にすべて表示する。
 
-注記を追加する `plan` は、内側の UPSERT 文に対応する statement plan とする。UPSERT 以外の文へ native 行を追加しない。
+既存のdialect 1 API見積りには現行経路を前提とした `UPSERT pre-read` がある（`src/execute.ts:12832-12855`）。バッチEXPLAINでは既存行を削除せず、適格性行により次の解釈を示す。
 
-既存の dialect 1 API 見積りには現行経路を前提とした `UPSERT pre-read` がある（`src/execute.ts:12832-12855`）。native 適格性行はこの既存行を削除せず、次の解釈を明示する。
-
-- `ELIGIBLE`: 本実行では既存の `UPSERT pre-read` を行わず、write は合計行数の100件チャンクになる。
-- `INELIGIBLE`: 既存の pre-read と INSERT/UPDATE 分割見積りを使う。
-- `UNKNOWN`: 表示時点では現行見積りを安全側の上限として残す。
-
-必要なら適格性行の直後に次を追加できる。
-
-```text
-    note: ELIGIBLE の場合、UPSERT pre-read は 0 回。UNKNOWN は現行経路の見積りを表示
-```
+- `ELIGIBLE`: 本実行ではpre-readを行わず、writeは合計行数の100件チャンク。
+- `INELIGIBLE`: 既存のpre-readとINSERT/UPDATE分割見積り。
+- `UNKNOWN`: 現行見積りを安全側の上限として残す。
+- 非実行面で文・データ `ELIGIBLE`: `/flow` またはopt-in CLIで、面依存条件も満たせばnative見積りになる。
 
 ### 10.4 `buildBatchExplainPlans`
 
-`buildBatchExplainPlans` は CLI、MCP、プラグイン、engine-library、`/flow` が共有している（`src/cli/index.ts:2348-2354`、`src/mcp/tools.ts:705-720`、`src/ui/batchExplain.ts:17-30`、`src/engine-library/query.ts:120-136`、`src/flow-library/index.ts:76-103`）。
+`buildBatchExplainPlans` はCLI、MCP、プラグイン、engine-library、`/flow` が共有している（`src/cli/index.ts:2348-2354`、`src/mcp/tools.ts:705-720`、`src/ui/batchExplain.ts:17-30`、`src/engine-library/query.ts:120-136`、`src/flow-library/index.ts:76-103`）。
 
-関数へ trailing optional options object または同等の純加法引数を追加し、少なくとも次を渡せるようにする。
+trailing optional options objectまたは同等の純加法引数を追加する。
 
 ```ts
 interface NativeUpsertExplainOptions {
+  surface: "FLOW" | "CLI" | "DOCUMENT_ONLY";
+
+  /**
+   * FLOW / CLI の実行設定。
+   * DOCUMENT_ONLY では条件 2 は対象外。
+   */
   enableNativeUpsert?: boolean;
 
   /**
-   * EXPLAIN が予測する通常実行 client の能力。
-   * dry-run の write-block client そのものから推測しない。
+   * FLOW / CLI が予測する通常実行 client の能力。
+   * dry-run client から推測しない。
+   * DOCUMENT_ONLY では条件 1 は対象外。
    */
   clientHasNativeUpsert?: boolean;
 }
 ```
 
-既存呼出しで省略された場合は次とする。
+呼出元はsurfaceを明示する。
 
-```ts
-enableNativeUpsert === false
-clientHasNativeUpsert
-  === ("upsertRecords" in client
-    && typeof client.upsertRecords === "function")
-```
+- `/flow`: `surface: "FLOW"`。`enableNativeUpsert` は省略時true。routed clientの実能力を渡す。
+- CLI: `surface: "CLI"`。`enableNativeUpsert` は `--native-upsert` の有無。通常CLI clientの能力を渡す。
+- MCP・プラグイン・engine-library: `surface: "DOCUMENT_ONLY"`。条件1・2を対象外とし、条件3〜6を表示する。
 
-CLI dry-run は通常 CLI client が能力を持つ事実を明示的に渡す。`/flow` は routed client の実能力と `ExplainScriptOptions.enableNativeUpsert` を渡す。
+後方互換のため既存呼出しがoptionsを省略した場合の扱いは要確認とする。実装では呼出元をすべて明示更新し、暗黙の省略値によってMCP等を `/flow` と誤判定しないことを優先する。
 
-MCP・プラグイン・engine-library は実行 opt-in を公開しないため、既定では条件1または2により `INELIGIBLE` となる。ただし同じ共通評価器と理由形式を使う。
+### 10.5 MCPの単文EXPLAIN
 
-### 10.5 MCP の単文 EXPLAIN
+MCPの単文EXPLAINは `executeSql(explainSql(...))` → `toSelectPayload` でSELECTペイロードを返す（`src/mcp/tools.ts:730-745`）。複文の `buildBatchExplainPlans` とは別の出力経路である。
 
-MCP は現在、複文だけ `buildBatchExplainPlans` を使い、単文は `executeSql(explainSql(...))` を使う（`src/mcp/tools.ts:674-745`）。
+R4ではこの経路を統合しない。
 
-R3 では単文も `buildBatchExplainPlans` を通す。
+- 単文は従来どおり `executeSql(explainSql(...))` を使う。
+- `executeExplain` からバッチと同じ共有適格性評価器とrendererを呼ぶ。
+- `executeExplain` が作る `columns: ["plan"]` と `rows` の外形を維持する（`src/execute.ts:13111-13169`）。
+- MCPの `toSelectPayload`、app binding復元、単文/バッチのレスポンス形を変更しない。
+- MCPツール入力に `enableNativeUpsert` は追加しない。
+- 単文でも条件3〜6の行を欠落させない。
+- 単文に `buildDialect1ApiEstimateLines` を追加しない。
 
-- `statements.length > 1` の分岐だけに共通 planner を置かない。
-- 単文でも `plans.statements[0].plan` を取得する。
-- MCP 単文の既存 scalar response shape は維持する。
-- バッチだけが `batch: true` と配列形を返す既存互換性は維持する。
-- 単文の app binding 復元も従来どおり行う。
-- MCP ツール入力に `enableNativeUpsert` は追加しない。
+### 10.6 CLIのEXPLAIN
 
-単文レスポンス形への正確な plan 格納方法は、現行 `toSelectPayload` の列契約との整合を実装時に確認する必要があるため要確認。ただし、単文で適格性行が欠落する実装は不受理とする。
-
-### 10.6 CLI の EXPLAIN
-
-次の双方へ `--native-upsert` を渡す。
+次の双方へCLI面の設定を渡す。
 
 - `--dry-run` が直接 `buildBatchExplainPlans` を呼ぶ経路（`src/cli/index.ts:2348-2354`）
-- SQL として書かれた `EXPLAIN UPSERT ...` の単文・バッチ経路
+- SQLとして書かれた `EXPLAIN UPSERT ...` の単文・バッチ経路
 
-CLI の単文 `EXPLAIN` が共通 planner を通らない場合は、単文 MCP と同様に共通 planner へ寄せるか、同一の共有評価器と renderer を `executeExplain` から呼ぶ。条件式や文言を複製してはならない。
+CLIの単文EXPLAINは `executeExplain` から共有評価器とrendererを呼ぶ。共通plannerへ寄せず、条件式や文言を複製しない。
 
-### 10.7 dry-run の表示例
+`--native-upsert` なしのCLIでは、条件3〜6の状態を面依存の不適格理由で隠さない。表示例:
+
+```text
+  native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — --native-upsert が指定されていない）
+  native UPSERT statement/data eligibility: ELIGIBLE（条件 3〜6 を満たす。--native-upsert 指定時は native 候補）
+```
+
+条件6も失敗する場合:
+
+```text
+  native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — --native-upsert が指定されていない）
+  native UPSERT statement/data eligibility: INELIGIBLE（条件 6: SOURCE_DUPLICATE — ソース内に同一キーがある。フラグを付けても native にならない）
+```
+
+### 10.7 dry-runの表示例
 
 ```bash
 ksql --allow-dml --native-upsert --dry-run -e \
   "UPSERT INTO APP1 (key, value) VALUES ('K1', 'v') KEY (key)"
 ```
 
-schema が取得されていない場合:
+schema未取得の場合:
 
 ```text
 native UPSERT eligibility: UNKNOWN（条件 3: KEY_SCHEMA — フォームメタデータ未取得）
 ```
 
-`UPSERT SELECT` で schema だけ判定できた場合:
+`UPSERT SELECT` でschemaだけ判定できた場合:
 
 ```text
 native UPSERT eligibility: UNKNOWN（条件 5・6: SOURCE_KEYS — UPSERT SELECT のソース行未 materialize）
 ```
 
-`--native-upsert` を省略した場合は、他条件が不明でも既知の条件2が false なので:
+`--native-upsert` を省略した場合:
 
 ```text
-native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — native UPSERT の明示 opt-in が無効）
+native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — --native-upsert が指定されていない）
+native UPSERT statement/data eligibility: UNKNOWN（条件 3: KEY_SCHEMA — フォームメタデータ未取得）
 ```
 
-「metadata 未取得」を「schema 不適格」と表示してはならない。
+「metadata未取得」を「schema不適格」と表示してはならない。
 
 ## 11. エラー
 
-### 11.1 kintone API エラー
+### 11.1 kintone APIエラー
 
-`upsertRecords` が kintone API error を返した場合、現行 wrapper の error code とトップレベル message を変更せず上位へ送る。
+`upsertRecords` がkintone API errorを返した場合、現行wrapperのerror codeとトップレベルmessageを変更せず上位へ送る。
 
 対象例:
 
@@ -1037,9 +1067,9 @@ native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — native UPSERT の�
 
 フィールド別詳細を新しい独自形式に変換しない。
 
-### 11.2 `/flow` と CLI
+### 11.2 `/flow` とCLI
 
-`/flow` の `executeStatement` は既存どおり error result に正規化する。
+`/flow` の `executeStatement` は既存どおりerror resultに正規化する。
 
 ```ts
 {
@@ -1051,71 +1081,87 @@ native UPSERT eligibility: INELIGIBLE（条件 2: OPT_IN — native UPSERT の�
 }
 ```
 
-CLI は既存の error-to-exit-code と stderr 契約を維持する。native 専用 exit code は追加しない。
+CLIは既存のerror-to-exit-codeとstderr契約を維持する。native専用exit codeは追加しない。
 
-`OperationCancelledError`、`NativeUpsertResponseError`、kintone API error のいずれでも、native 開始後に現行経路へ切り替えない。
+`OperationCancelledError`、`NativeUpsertResponseError`、kintone API errorのいずれでも、native開始後に現行経路へ切り替えない。
 
-### 11.3 native エラー後の fallback 禁止
+### 11.3 nativeエラー後のfallback禁止
 
-適格性判定で不適格または判定不能なら書込前に現行経路へ戻す。
+適格性判定で不適格または判定不能なら、書込前に現行経路へ戻す。
 
-一度でも native リクエストを開始した後は、次のいずれでも現行経路へ再試行しない。
+一度でもnativeリクエストを開始した後は、次のいずれでも現行経路へ再試行しない。
 
 - API error
+- 権限エラー
 - レスポンス不正
 - `onChunkWritten` callback error
-- CLI の出力処理 error
+- CLIの出力処理error
 
-先行チャンクが確定済みの可能性があり、再試行すると二重書込や件数誤報になるためである。実機でも、先行チャンクは確定して残り、失敗した後続リクエスト内は全ロールバックされることを確認済みである（`docs/internal/ksql_b173_native_upsert_update_key_issue.md §3.2`）。
+権限エラーが1チャンク目でall-or-nothingとなり、書込ゼロで検出できる場合でも自動fallbackしない。権限不足をloudに失敗させ、APIトークンを修正させる。静かに遅い現行経路へ落とすと、権限設定ミスと性能退行を隠すためである。
 
-通常 UPSERT のエラー結果に `partialSuccess` は追加しない。成功境界は `onChunkWritten` の通知済み prefix とする。
+先行チャンクが確定済みの可能性がある場合、再試行すると二重書込や件数誤報になる。実機でも、先行チャンクは確定して残り、失敗した後続リクエスト内は全ロールバックされることを確認済みである（`docs/internal/ksql_b173_native_upsert_update_key_issue.md §3.2`）。
+
+通常UPSERTのエラー結果に `partialSuccess` は追加しない。成功境界は `onChunkWritten` の通知済みprefixとする。
 
 ## 12. 移行と互換性
 
-### 12.1 既定 OFF
+### 12.1 `/flow` の既定ONとアップグレード影響
 
-次のいずれかでは、B173 実装前と同じ動作を保証する。
+`/flow` は `enableNativeUpsert` 省略時にnativeを許可する。
 
-- `/flow` で `enableNativeUpsert` を省略
-- `/flow` で `enableNativeUpsert: false`
-- CLI で `--native-upsert` を省略
-- client に `upsertRecords` がない
-- 6条件のどれかを満たさない
-- 実行時に必要な判定材料が揃わない
+能力のある同梱clientを使い、条件3〜6を満たす素のUPSERTは、B173を含む版へアップグレードした時点でnative経路になる。
 
-保証対象は次のすべて。
+成功時の最終レコード内容と `insertedCount` / `updatedCount` は現行経路と同じである。一方、次の5点は変わる。
 
-- UPSERT の最終レコード内容
-- `insertedCount` / `updatedCount`
-- GET / POST / PUT の回数
-- POST 全部の後に PUT 全部を行う順序
-- 各 API body
-- `onChunkWritten.operation`
-- `onChunkWritten.records`
-- `onChunkWritten.chunkIndex`
-- `onChunkWritten.lastKeyValue`
-- preview の counts、samples、reads、`estimatedWrites`
-- 既存の error code / message
-- CLI の DML 許可、確認、exit code
-- MCP・プラグイン・engine-library の実行経路
+1. 書込順  
+   現行の「新規全部をPOSTした後、更新全部をPUT」から、ソース順のINSERT/UPDATE混在チャンクへ変わる。
 
-`ExecutionMetrics.nativeUpsertCalls` の追加と EXPLAIN の適格性行は純加法の観測情報であり、DML 結果の互換性には含めない。
+2. 部分失敗時に確定している範囲  
+   現行のINSERT群・UPDATE群単位ではなく、ソース順の成功済みprefixになる。
 
-native 適格な文では INSERT 対象も HTTP PUT に統合されるため、`postCalls` は0になる。各 native 呼出しは `putCalls` と `nativeUpsertCalls` の双方に計上する。
+3. `onChunkWritten`  
+   `operation: "UPSERT"` が出現し、`insertedCount` と `updatedCount` が付く。
+
+4. `ExecutionMetrics`  
+   native適格な書込では `postCalls` が0になる。書込は `putCalls` に集約され、`nativeUpsertCalls` は `putCalls` の内数になる。
+
+5. `estimatedWrites`  
+   現行の
+
+   ```text
+   ceil(insert / 100) + ceil(update / 100)
+   ```
+
+   から、native適格時は
+
+   ```text
+   ceil((insert + update) / 100)
+   ```
+
+   へ変わる。
+
+opt-outは次のように明示する。
+
+```ts
+const context = createExecutionContext({
+  client,
+  enableNativeUpsert: false
+});
+```
+
+opt-outした `/flow` では、結果、API呼出し回数、GET→POST→PUTの順序、API body、`onChunkWritten`、preview、既存エラーをB173実装前と同じにする。`nativeUpsertCalls` の追加とEXPLAIN行は純加法の観測情報として除く。
 
 ### 12.2 古いクライアント
 
-`upsertRecords` は optional であるため、既存の自前 `FlowKintoneClient` 実装は変更不要である。
+`upsertRecords` はoptionalであるため、既存の自前 `FlowKintoneClient` 実装は変更不要である。
 
-能力を宣言していないクライアントに `/flow` の `enableNativeUpsert: true` を渡してもエラーにはせず、現行経路を使う。
+能力を宣言していないclientでは、`/flow` の既定がONでもエラーにせず現行経路を使う。
 
-既存の metrics object を手作業で構築している TypeScript 利用者にとって、新しい必須 number property は型上の影響がある。実行結果の各 metrics snapshot では必ず `nativeUpsertCalls: 0` 以上を含める。公開型の純加法を優先し、optional にはしない。
+既存のmetrics objectを手作業で構築するTypeScript利用者には、新しい必須propertyが型上の影響を持つ。各metrics snapshotでは必ず `nativeUpsertCalls: 0` 以上を含める。
 
 ### 12.3 CLI
 
-CLI 同梱 client は能力を持つが、`--native-upsert` を指定しない限り現行経路を使う。
-
-次の例だけが native を許可する。
+CLI同梱clientは能力を持つが、`--native-upsert` を指定しない限り現行経路を使う。
 
 ```bash
 ksql \
@@ -1136,172 +1182,368 @@ ksql \
   -f job.sql
 ```
 
-`--yes` を付けても native の6条件、件数ガード、能力判定は省略しない。
+`--yes` を付けても6条件、件数ガード、能力判定は省略しない。
 
-本番 `/flow` と同じ権限を検証する場合は、CLI profile が本番と同じ API トークンを参照していることを利用者が確認しなければならない。プロファイル名が同じ、または同じアプリを指すだけでは権限主体の同一性を保証しない。
+CLIの既定を将来ONへ反転させる場合はメジャー版に限る。ただしCLIの目的が本番native経路のリハーサルである限り、明示フラグのままでよく、反転を予定作業とはしない。
 
-### 12.4 プラグインと MCP
+`/flow` はR4時点で既に既定ONとするため、将来の既定反転論はない。`enableNativeUpsert: false` は退避弁として維持する。
 
-プラグイン client は `upsertRecords` を実装しない。MCP の実行入力にも opt-in を追加しない。
+### 12.4 プラグインとMCP
 
-- プラグインはセッション認証で、本番 API トークンの権限差を再現できない。
-- MCP は LLM が入力を構成するため、追加権限を要求する opt-in を公開しない。
+プラグインclientは `upsertRecords` を実装しない。MCPの実行入力にもopt-inを追加しない。
+
+- native挙動のリハーサルはCLIで足り、CLIはCIにも載せられる。
+- プラグインの自然な設定粒度はアプリ単位＝環境単位であり、継続的に有効になる設定を生みやすい。
+- MCPはLLMが実行入力を構成するため、追加権限を要求するopt-inを公開しない。
 - 両面の実行は現行経路を維持する。
-- EXPLAIN の3状態表示だけを共通提供する。
+- EXPLAINでは条件1・2を対象外とし、条件3〜6を表示する。
 
-トップレベル `upsert` を既存 `putRecords` に混ぜて渡す実装にはしない。既存 client が `{app, records}` を再構成するため追加値を落とし得ることは、起票文書で確認済みである（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:40-52`）。
+トップレベル `upsert` を既存 `putRecords` に混ぜて渡す実装にはしない（`docs/internal/ksql_b173_native_upsert_update_key_issue.md:40-52`）。
 
-### 12.5 EXPLAIN の互換性
+### 12.5 EXPLAINの互換性
 
-既存の statement count、statement type、plan 配列、MCP 単文/バッチの外形を維持する。
+既存のstatement count、statement type、plan配列、MCP単文/バッチの外形を維持する。
 
-変更は UPSERT / UPSERT_SELECT の `plan` への適格性行追加だけとする。
+変更はUPSERT / UPSERT_SELECTのplanへの適格性行追加だけとする。
 
-- SELECT、UPDATE、DELETE、INSERT などの既存 plan は変更しない。
-- `UNKNOWN` を理由に EXPLAIN 自体を error にしない。
-- metadata やソースを追加取得しない。
-- 現行の API consumption 行を削除しない。
-- 単文 MCP のレスポンスをバッチ形へ変更しない。
+- SELECT、UPDATE、DELETE、INSERT等の既存planは変更しない。
+- `UNKNOWN` を理由にEXPLAIN自体をerrorにしない。
+- metadataやソースを追加取得しない。
+- 現行のAPI consumption行を削除しない。
+- MCP単文のレスポンスをバッチ形へ変更しない。
+- 単文計画を `buildBatchExplainPlans` で作り直さない。
+- 単文に既存バッチ専用の書込見積りを追加しない。
 
-## 15. Claude が実機で確かめるべき未確認事項
+### 12.6 権限の運用手順
 
-次は仕様の採否条件ではない。実装レビューまたはリリース前に実機で確認し、結果をレビュー記録またはリリース記録へ残す。
+native UPSERTは、既存行だけを更新する場合でも対象アプリのレコード追加権限を要求する。
 
-1. `/flow` 実クライアント経由の error message
+`/flow` の既定がONになるため、B173を含む版へアップグレードする前に、`/flow` が使うAPIトークンに対象アプリのレコード追加権限があることを確認する。
 
-   `src/flow-library/writableClient.ts` の `upsertRecords` を通して `GAIA_IQ28` / `CB_VA01` を発生させ、公開されるトップレベル `message` の正確な文字列を記録する。
+APIトークンのスコープを問い合わせる手段がない以上、この確認はどの実行面でも自動代替できない。CLIで本番と同じトークンを指定できることは挙動確認の補助であり、運用上の権限確認の代替ではない。
 
-   `CB_VA01` のフィールド別 `errors[...]` を現行 wrapper が保持しない場合、トップレベル message だけで運用上十分か確認する。
+確認手順は少なくとも次を含む。
 
-2. CLI 実クライアント経由の成功レスポンスと error message
+1. `/flow` が実際に参照するAPIトークンを特定する。
+2. 対象アプリごとにレコード閲覧・追加・編集権限を確認する。
+3. 必要なら本番前にCLIの `--native-upsert` で同じSQLをリハーサルする。
+4. 問題時に `enableNativeUpsert: false` でopt-outできることを確認する。
 
-   `src/cli/nodeKintoneClient.ts` の `upsertRecords` を通して INSERT / UPDATE の混在リクエストを実行し、次を確認する。
+## 13. リリース付随作業
+
+### 13.1 `CHANGELOG.md` 文面案
+
+B171の「※結果が変わります」の前例は `CHANGELOG.md:6-28` にある。B173では成功時のレコード内容は同じであり、観測値と部分失敗時の状態が変わるため、次のように書き分ける。
+
+```md
+### 改善（B173: UPSERT を kintone native UPSERT へ）**※ `/flow` の UPSERT は挙動が変わります**
+
+`/flow` の適格な素の `UPSERT VALUES` / `UPSERT SELECT` は、アップグレード後、
+既定で kintone の `updateKey` + `upsert: true` を使います。成功時のレコード内容と
+`insertedCount` / `updatedCount` は従来と同じです。
+
+一方、書込順、部分失敗時に確定している範囲、`onChunkWritten.operation`、
+`ExecutionMetrics` の API 回数内訳、preview の `estimatedWrites` が変わります。
+
+従来経路へ戻す場合は、`createExecutionContext` に
+`enableNativeUpsert: false` を指定してください。native の利用には対象アプリの
+レコード追加権限が必要です。
+
+CLI は既定 OFF のままです。`--allow-dml --native-upsert` を指定した実行だけが
+同じ native 経路を使用します。
+```
+
+リリース版数は実装時点で決定するため要確認。
+
+### 13.2 依頼元ksql-flowへの通知
+
+リリース前または遅くともリリースと同時に、依頼元へ次を通知する。
+
+- B173を含むリリース版数。
+- 成功時のレコード内容と件数結果は同じであること。
+- アップグレードで変わる5点:
+  - 書込順
+  - 部分失敗時に確定している範囲
+  - `onChunkWritten.operation === "UPSERT"` と内訳property
+  - `postCalls === 0`、`putCalls` への集約、`nativeUpsertCalls` が内数
+  - `estimatedWrites` の算出式
+- 依頼元の追随作業:
+  - 推定式7.2 / 10.2
+  - 公開仕様§3.4
+  - 内訳取得元の `records[].operation` への切替
+- これらの期限が「nativeを有効化した時」から「B173版へアップグレードした時」へ前倒しになること。
+- アップグレード前にAPIトークンのレコード追加権限を確認すること。
+- opt-outは `enableNativeUpsert: false` であること。
+- 先にCLIの `--allow-dml --native-upsert` で同じSQLをリハーサルできること。
+- 比較測定は、まず `/flow` を `enableNativeUpsert: false` にして現行経路の基準値を取り、その後falseを外してnativeを測れること。
+
+## 14. 受入条件
+
+注: 現在のR3ファイルは§12から§15へ飛んでおり、AC本文が欠落している。レビュー記録から確認できる既存番号はAC-1とAC-18である。以下はR3本文の規範をAC-1〜AC-18へ復元し、今回の新規条件をAC-19以降へ追加したものとする。AC-2〜AC-17のR2原文との逐語的対応は要確認だが、規範内容を弱めてはならない。
+
+### AC-1 `/flow` 省略時のnative実行
+
+能力を持つ同梱 `/flow` clientで `enableNativeUpsert` を省略し、条件3〜6を満たす素のUPSERTを実行すると、事前GET、`postRecords`、通常の `putRecords` を呼ばず、`upsertRecords` をソース順の100件チャンクで呼ぶ。
+
+### AC-2 6条件と判定順序
+
+本実行とpreviewは条件1〜6を固定順で評価し、1つでも不成立または判定不能なら文全体を現行経路へ戻す。EXPLAINは既知のfalseをUNKNOWNより優先し、複数falseでは最初の条件を表示する。
+
+### AC-3 現行経路の完全維持
+
+次の実行では、結果、GET / POST / PUT回数、API body、書込順、エラー、`onChunkWritten`、previewをB173前と同じにする。
+
+- `/flow` の `enableNativeUpsert: false`
+- フラグなしCLI
+- MCP
+- プラグイン
+- 能力なしclient
+- 条件1〜6の不成立または判定不能
+- CHECK / APPLY / IMPORT / VALIDATE ONLY / ON ERROR SKIP
+
+### AC-4 nativeペイロード
+
+各行の `updateKey.field` と文字列の `updateKey.value` を正しく構成し、キーフィールドを送信用 `record` から除外し、トップレベル `upsert: true` を付ける。元レコードを破壊しない。
+
+### AC-5 キーのみUPSERT
+
+キー以外の書込フィールドがない場合も `record: {}` を送り、INSERT / UPDATEの両方を成功させる。
+
+### AC-6 NUMBERキー
+
+NUMBERキーはJavaScript numberへ変換せずraw文字列で送る。exact-decimal正規化で `"5"` と `"5.0"` を重複として扱い、安全整数超えの値を丸めない。
+
+### AC-7 ソース重複fallback
+
+同一キーが同一チャンク内または100件境界をまたいで存在する場合、native APIを0回とし、文全体を現行経路へ戻す。
+
+### AC-8 チャンクと結果内訳
+
+101行では100件、1件の順に2回native APIを呼び、全レスポンスの `records[].operation` から `insertedCount` / `updatedCount` を集計する。revisionから推測しない。
+
+### AC-9 不正レスポンス
+
+件数不一致、配列以外、不正operation、非文字列id/revisionを `NativeUpsertResponseError` とし、現行経路へ再試行しない。
+
+### AC-10 ラッパーの能力保持
+
+metrics、request gate、routing、preview write block、chunk callback、readonly、search abort、cursor scopeの各ラッパーで、能力ありclientだけが `upsertRecords` を保持する。能力なしclientへpropertyを追加しない。
+
+### AC-11 preview
+
+previewはnative適格でも書込APIを0回とし、既存GET、counts、before/after、samples、readsを維持する。native適格時だけ `estimatedWrites = ceil(total / 100)` とする。
+
+### AC-12 `onChunkWritten`
+
+nativeの成功リクエスト1回につき通知1回とし、`operation: "UPSERT"`、リクエスト件数、両内訳、最後のキー、0始まりchunk indexを返す。INSERT/UPDATE別通知へ分割しない。
+
+### AC-13 metrics
+
+native呼出しごとに `putCalls` と `nativeUpsertCalls` を1ずつ増やし、`postCalls` は増やさない。rejectや後段callback失敗でも減算せず、常に `nativeUpsertCalls <= putCalls` を満たす。
+
+### AC-14 エラーとfallback禁止
+
+native開始後のAPI error、権限エラー、レスポンスエラー、callback errorで現行経路へfallbackしない。権限エラーだけを特別扱いした自動fallbackも行わない。
+
+### AC-15 CLI安全ゲート
+
+`--native-upsert` は `--allow-dml`、`--yes`、件数ガード、バッチ確認、REPL確認を迂回しない。フラグなしでは現行経路を維持する。
+
+### AC-16 EXPLAINの3状態と追加API禁止
+
+本実行、preview、バッチEXPLAIN、単文EXPLAINが同じ評価器を共有する。EXPLAINは `ELIGIBLE` / `INELIGIBLE` / `UNKNOWN` を使い、metadataまたはソース不足を不適格と誤表示せず、判定のためのAPI呼出しを増やさない。
+
+### AC-17 非opt-in面の文・データ評価
+
+MCP・プラグイン・engine-libraryでは条件1・2を対象外とし、条件3〜6を評価する。条件3〜6適格なら `/flow` またはopt-in CLIでnative候補と表示し、条件3〜6不適格ならどの面でもnativeにならない理由を表示する。
+
+### AC-18 `options.confirm`
+
+native適格な1件以上の文では最初のnative書込直前に `options.confirm(total, "UPDATE", context)` を1回だけ呼ぶ。拒否時は `OperationCancelledError("UPDATE", total)` とし、全書込APIと `onChunkWritten` を0回にする。0件では呼ばない。
+
+### AC-19 `/flow` の明示opt-out
+
+能力を持つ同梱 `/flow` clientでも `enableNativeUpsert: false` を指定すると、条件3〜6が適格であってもnative APIを0回とし、結果、API呼出し回数、書込順、body、エラーを現行経路と同一にする。
+
+### AC-20 CLIの既定OFF
+
+CLI同梱clientが能力を持っていても、`--native-upsert` を省略した実行はnative APIを0回とする。`--allow-dml` または `--yes` だけでnativeを有効化しない。
+
+### AC-21 面別EXPLAIN既定
+
+`/flow` の `explainScript` は `enableNativeUpsert` 省略時にONとして予測し、CLIはフラグ有無を反映する。MCP・プラグイン・engine-libraryは文・データ評価として条件1・2を対象外にする。
+
+### AC-22 単文EXPLAIN経路維持
+
+MCPとCLIの単文EXPLAINは `executeExplain` から共有評価器とrendererを呼ぶ。`buildBatchExplainPlans` へ統合せず、既存SELECTペイロードと単文出力形を維持する。バッチ専用の書込見積りを単文へ追加しない。
+
+### AC-23 アップグレード互換通知
+
+CHANGELOGと依頼元通知に、成功時のレコード内容は同じであること、変わる5点、権限要件、opt-out方法、CLIリハーサル方法を含める。
+
+### AC-24 権限運用手順
+
+リリース前文書に、`/flow` が使用するAPIトークンについて対象アプリのレコード追加権限をアップグレード前に確認する手順を含める。CLIによる確認を補助と位置付け、権限確認の代替とは記載しない。
+
+## 15. Claudeが実機で確かめるべき未確認事項
+
+次は仕様の採否条件ではない。実装レビューまたはリリース前に実機で確認し、レビュー記録またはリリース記録へ残す。
+
+1. `/flow` 実クライアント経由のerror message
+
+   `src/flow-library/writableClient.ts` の `upsertRecords` を通して `GAIA_IQ28` / `CB_VA01` を発生させ、公開されるトップレベルmessageを記録する。
+
+2. CLI実クライアント経由の成功レスポンスとerror message
+
+   INSERT / UPDATE混在リクエストで次を確認する。
 
    - `records[]` がリクエスト順で返る。
    - `id` / `revision` / `operation` が失われない。
-   - `GAIA_IQ28` / `CB_VA01` の code とトップレベル message が既存 `requestJson` 経路で保持される。
-   - CLI の exit code と stderr が既存 error policy に従う。
+   - `GAIA_IQ28` / `CB_VA01` のcodeとmessageが保持される。
+   - CLIのexit codeとstderrが既存policyに従う。
 
-3. 本番と同じトークンによる CLI リハーサル
+3. CLIによる事前リハーサル
 
-   `/flow` 本番と同じ API トークンを指す CLI profile を使い、`--allow-dml --native-upsert` で同じ dialect 1 ジョブ SQLを実行する。
+   `/flow` 本番と同じAPIトークンを指すCLI profileを使い、`--allow-dml --native-upsert` で同じdialect 1ジョブSQLを実行する。
 
-   - native 経路で成功すること。
-   - 事前 GET が発生しないこと。
-   - INSERT / UPDATE の結果件数が一致すること。
-   - `--native-upsert` を外すと現行経路へ戻ること。
+   - native経路で成功する。
+   - 事前GETが発生しない。
+   - INSERT / UPDATE件数が一致する。
+   - `--native-upsert` を外すと現行経路へ戻る。
 
-4. レコード追加権限なしの全件 UPDATE
+4. レコード追加権限なしの全件UPDATE
 
-   レコード追加権限を持たず、編集権限だけを持つトークンで、既存キーだけの native UPSERT が実際に権限エラーになることを確認する。
+   編集権限だけを持つトークンで、既存キーだけのnative UPSERTが権限エラーになることを確認する。
 
-   `/flow` client と CLI client の双方で同じトークンを使い、実レスポンスの code / message と API 呼出し境界を記録する。
+   - `/flow` とCLIの双方でcode / messageを記録する。
+   - 1チャンク目が書込ゼロで失敗することを確認する。
+   - 自動fallbackが発生しないことを確認する。
+   - `enableNativeUpsert: false` またはフラグなしCLIでは現行経路が従来どおり成功することを確認する。
 
-5. CLI の確認実経路
+5. `/flow` 既定ONとopt-out
 
-   native 適格な UPSERT VALUES / SELECT について次を確認する。
+   同じSQLと同梱clientについて次を確認する。
 
-   - `--yes` なしで確認拒否した場合、native API が0回。
+   - `enableNativeUpsert` 省略時にnativeになる。
+   - `enableNativeUpsert: true` でも同じ。
+   - `enableNativeUpsert: false` で現行経路へ戻る。
+   - 成功時のレコード内容と件数結果が両経路で一致する。
+   - 5つの観測差が仕様どおりである。
+
+6. CLIの確認実経路
+
+   - `--yes` なしで確認拒否した場合、native APIが0回。
    - `--yes` ありでは確認プロンプトなしで実行される。
-   - `--dml-max-rows` 超過では `--yes` があっても書込0回。
+   - `--dml-max-rows` 超過では書込0回。
    - バッチは全体確認1回で、文ごとの件数ガードが残る。
-   - REPL はセッション表示に `native-upsert=on` を出し、子実行へフラグを転送する。
+   - REPLは `native-upsert=on` を表示し、子実行へフラグを転送する。
 
-   対話部分は CLI integration test で固定できるが、本番トークンを使った一度の確認も記録する。
+7. guest space
 
-6. guest space
+   guest space内アプリで `/flow` clientとCLI clientのnative UPSERTが既存 `apiBase` routingと同じURLへ送られ、responseを取得できることを確認する。
 
-   guest space 内アプリで `/flow` client と CLI client の native UPSERT が既存 `apiBase` routing と同じ URLへ送られ、response が取得できることを確認する。
+8. CLI dry-runと本実行の表示整合
 
-7. CLI dry-run と本実行の表示整合
+   - 完全オフラインdry-runではmetadata / source不足を `UNKNOWN` と表示する。
+   - metadataが利用できるEXPLAINでは条件3を確定する。
+   - `UPSERT SELECT` の未materialize条件5・6は `UNKNOWN`。
+   - 本実行では全材料が揃った後、共有判定どおりnativeまたはfallbackを選ぶ。
+   - `UNKNOWN` を `INELIGIBLE` と誤表示しない。
 
-   同じ SQL と profile について次を記録する。
+9. 5面のEXPLAIN到達性
 
-   - 完全オフライン dry-run では metadata / source 不足を `UNKNOWN` と表示する。
-   - metadata が利用できる EXPLAIN では条件3を確定できる。
-   - `UPSERT SELECT` の未 materialize 条件5・6は `UNKNOWN` のまま。
-   - 実行時に全材料が揃った後、native または fallback が共有判定どおり選ばれる。
-   - dry-run の `UNKNOWN` を `INELIGIBLE` と誤表示しない。
+   同じUPSERTをCLI、MCP、プラグイン、engine-library、`/flow` の各EXPLAINから通す。
 
-8. 5面の EXPLAIN 到達性
+   - `/flow` は省略時ONとして6条件を表示する。
+   - CLIはフラグ有無を反映し、フラグなしでも条件3〜6を別表示する。
+   - MCP・プラグイン・engine-libraryは条件1・2を対象外とし、条件3〜6を表示する。
+   - 条件6不適格が面依存理由で隠れない。
+   - 条件3〜6適格なら `/flow` / opt-in CLIでnative候補と表示する。
 
-   同じ UPSERT を CLI、MCP、プラグイン、engine-library、`/flow` の各 EXPLAIN から通し、適格性行が欠落しないことを確認する。
+10. 単文EXPLAINの外形
 
-   API 呼出しと client 差は mock / integration test で固定できる。実機確認が必要なのは metadata を取得する面で実フィールド定義が理由文へ正しく反映されることだけとする。
+    MCPとCLIの単文 `EXPLAIN UPSERT` について次を確認する。
 
-上記以外の能力保持、request gate、readonly、論理アプリ routing、重複 fallback、NUMBER raw body、preview write block、metrics の内数、`options.confirm` の引数、MCP 単文の外形は mock / integration test で決着でき、実機確認を必須としない。
+    - 適格性行が追加される。
+    - MCPは既存のSELECTペイロードを維持する。
+    - バッチ形へ変わらない。
+    - 既存バッチ専用書込見積りが単文へ混入しない。
+    - バッチと単文の適格性状態・理由文が同じ共有rendererから生成される。
+
+11. 依頼元アップグレードリハーサル
+
+    ksql-flowについて、`enableNativeUpsert: false` で現行基準値を取り、falseを外してnativeを測定する。
+
+    - 推定式7.2 / 10.2
+    - 公開仕様§3.4
+    - `records[].operation` による内訳
+    - `onChunkWritten.operation === "UPSERT"`
+    - metricsの変化
+    - 部分失敗時のprefix
+
+    追随作業がB173版へのアップグレード前または同時に完了していることを確認する。
+
+上記以外の能力保持、request gate、readonly、論理アプリrouting、重複fallback、NUMBER raw body、preview write block、metricsの内数、`options.confirm` の引数はmock / integration testで決着でき、実機確認を必須としない。
 ---
 
 ## 16. レビュー記録
 
-レビュー: Claude（[[spec-and-impl-by-codex]]＝codex が仕様と実装、Claude がレビュー・実測・リリース）。静的な主張は file:line を開いて突き合わせ、動的な主張は実機で測る。
+レビュー: Claude（[[spec-and-impl-by-codex]]＝codex が仕様と実装、Claude がレビュー・実測・リリース）。
 
-### 16.1 R1 レビュー（2026-08-25）→ R2 で全件反映済み
+### 16.1 R1 → R2（2026-08-25）
 
-- **[Major] `options.confirm` の欠落** — 現行は書込直前に確認コールバックを呼び拒否時に `OperationCancelledError` を投げる（`src/execute.ts:10571-10576`・`:11201-11206`）が、R1 の native 書込ループにその段が無く受入条件にも `confirm` が 0 件だった。**R3 で CLI が opt-in 面になったため、この契約は実動する**（R1 のままなら CLI へ広げた瞬間に確認なしで書く経路ができていた）
-- [軽微] `postCalls` が 0 になる互換ノート／preview で共有判定が実行できる根拠 → R2 で反映
+- **[Major] `options.confirm` の欠落** — 現行は書込直前に確認コールバックを呼び拒否時に `OperationCancelledError` を投げる（`src/execute.ts:10571-10576`・`:11201-11206`）が、R1 の native 書込ループにその段が無く受入条件にも `confirm` が 0 件だった。**R3 で CLI が opt-in 面になったため実動化した**
+- [軽微] `postCalls` が 0 になる互換ノート／preview で共有判定が実行できる根拠
 
-**評価できた点**（R3 でも不変）＝能力検出を `"upsertRecords" in client && typeof … === "function"` の両方で要求する理由（readonly client は write property の `get` を blocked 関数として返す一方 `has` は false・`src/engine-library/readonlyClient.ts:74-83`）／判定単位を 1 文全体に固定／native 開始後の fallback 禁止／既存テストの snapshot 一括更新の禁止。
+### 16.2 R2 → R3（2026-08-25）
 
-### 16.2 R3 レビュー（2026-08-25）
+R3 で入ったもの＝CLI opt-in・`nativeUpsertCalls`・EXPLAIN の 3 状態・判定の 3 者共有・`confirm` の実動化。指摘は 4 件（§16.3）。
 
-**総評: CLI opt-in・metrics カウンタ・`confirm` の実動化・EXPLAIN の 3 状態は妥当。ただし可視化に、目的を無効化する欠陥が 1 件。**
+### 16.3 R3 → R4 の指摘（すべて R4 で反映済み）
 
-#### [Major 1] 非 opt-in 面で常に `INELIGIBLE` になり、**可視化の目的を達しない**
-
-§10.4 は「MCP・プラグイン・engine-library は実行 opt-in を公開しないため、**既定では条件 1 または 2 により `INELIGIBLE`**」としている。
-
-**しかし可視化の目的（起票文書 §7.3）は「検証面で『この文は `/flow` / CLI で native になるのか』を実行前に読めるようにする」こと。** 常に「opt-in が無いから不適格」と出るなら、**その面では何も分からない**。可視化を入れる意味がほぼ消える。
-
-しかも起票文書 §7.6.4 のとおり **opt-in を出さない面ほど可視化の価値が高い**（実行しないなら、せめて本番の挙動が読めることが要る）。R3 の設計はここが逆になっている。
-
-**修正案＝条件を 2 群に分けて報告する。**
-
-| 群 | 条件 | 性質 |
+| # | 指摘 | R4 での反映 |
 |---|---|---|
-| **面依存** | 1（クライアント能力）・2（opt-in） | **実行面の構成**。MCP / プラグインでは常に不成立 |
-| **文・データ依存** | 3（キー schema）・4（素の UPSERT）・5（空文字キー）・6（ソース重複） | **その SQL とデータの性質**。面によらない |
+| **[Major]** | **非 opt-in 面で常に `INELIGIBLE` になり可視化の目的を達しない** | **面依存条件（1・2）と文・データ依存条件（3〜6）に分割**。非実行面では `execution surface: NOT_APPLICABLE` + `statement/data eligibility` の 2 行を出す。**`--native-upsert` なしの CLI でも文・データ判定を隠さない**（こちらが指摘していなかった同型のケースまで拾った） |
+| **[Major]** | **MCP 単文 EXPLAIN の経路統合はスコープ過大** | **統合しない。共有するのは適格性評価器と renderer だけ**とし `executeExplain` から呼ぶ。**既存の非対称（書込見積りが単文に出ない）は範囲外として維持** |
+| [Minor] | §12 に既定反転の想定が無い／既定の理由が「権限」で弱い | §12 に移行 5 点・opt-out・面ごとの将来方針。理由を**公開 API の契約**へ書き換え |
+| [Minor] | プラグイン対象外の理由 | CLI に対する追加価値の小ささ + 設定粒度が環境単位になる点へ差し替え。**権限は運用手順で担保**も明記 |
 
-非 opt-in 面では**面依存の 2 条件を「対象外」として扱い、文・データ依存の判定を出す**:
+**オーナー決定（§7.10）＝`/flow` の既定 ON・CLI は明示フラグのまま**も R4 に反映済み。
 
-- 「本質条件（3〜6）を満たす。**opt-in のある面（`/flow` / CLI）では native になる**」
-- 「**条件 6 で不適格（ソース重複）＝どの面でも native にならない**」
+### 16.4 R4 レビュー（2026-08-25）
 
-これで初めて、MCP でジョブを組む Claude や、プラグインで試す開発担当者に**意味のある情報**が届く。§7.7.3 のとおり**実運用でいちばん読まれるのは「不適格＋理由」**なので、その理由が「opt-in が無い」で埋まってはいけない。
+**総評: A（指摘 4 件）と B（既定 ON）はいずれも正確に反映された。ただし受入条件に取りこぼしがある。**
 
-#### [Major 2] MCP 単文 EXPLAIN の経路統合（§10.5）は**スコープ過大**
+#### [Major] R2 の**列挙型 AC が原則 1 本に畳まれ、個別ケースの固定が失われた**
 
-**「単文にも適格性を出す必要がある」という判断は正しい**（B175 と違い B173 は単文 UPSERT でも適格になり得る）。しかし手段が重い。
+**原因＝R3 の出力が `## 13`（変更ファイル）と `## 14`（受入条件）を丸ごと落としており、Claude がそれに気づかずコミットした**（`10402c4`）。R4 はこれを検出して AC を再構成したが、**R2 の列挙が復元されていない**。
 
-実装を確認した:
+R2 は条件ごとに**具体的なケースを列挙**していた。R4 はそれを **AC-2（6 条件と判定順序）と AC-3（現行経路の完全維持）の原則 2 本**に畳んでいる。**原則だけでは、実装者もテストも個別ケースを書き起こせない。**
 
-- MCP の単文 EXPLAIN は `executeSql(explainSql(...))` → `toSelectPayload` で **SELECT ペイロード**を返す（`src/mcp/tools.ts:730-745`）。`buildBatchExplainPlans` の plan 文字列配列とは**別物**
-- 単文の計画生成は `executeExplain`（`src/execute.ts:13111`）で、**`buildBatchExplainPlans` とは別実装**
-- 書込見積り行を作る `buildDialect1ApiEstimateLines`（`src/execute.ts:12803`）は **`buildBatchExplainPlans` からしか呼ばれていない**（`:12759`）＝**書込見積りが単文 EXPLAIN に出ないのは既存の非対称**
+**復元が要るもの**（R2 の原文は `git show 7d77f32:docs/internal/ksql_b173_native_upsert_spec.md` にある）:
 
-R3 はこの既存の非対称を直そうとして経路統合に踏み込んでおり、**codex 自身も「単文レスポンス形への正確な plan 格納方法は実装時に確認が必要」と書いている**。load-bearing な既存出力を作り直す risk に対して、得られるのは助言 1 行。
+| R2 の AC | 失われた列挙 |
+|---|---|
+| AC-2 能力なし | `enableNativeUpsert` が真でも client に `upsertRecords` が無ければ現行経路・**能力不足を示すエラーや警告を出さない** |
+| **AC-9 schema の fail-closed** | 複合キー／`fieldType` 対応外／キーが schema に無い／`isUnique === false`／**`isUnique === undefined`** の 5 ケース |
+| **AC-10 素の UPSERT 限定** | **dialect 1 の CHECK 付き UPSERT**／APPLY UPSERT／VALIDATE ONLY／ON ERROR SKIP／**IMPORT 由来の UPSERT SELECT** の 5 ケース |
+| AC-11 空文字 | 1 件でもあれば文全体で `upsertRecords` 0 回・現行対象 GET を実行・非空行も現行経路 |
 
-**修正案＝共有するのは判定関数であって計画生成の経路ではない。** `executeExplain` からも同じ評価器を呼んで 1 行足す。出力の形をどこも変えずに済み、CLI の単文 EXPLAIN（§10.6 で同じ論点が未決）も同時に解決する。**既存の非対称（書込見積りが単文に出ない）は B173 の範囲外として残す。**
+とくに **「dialect 1 の CHECK 付き UPSERT」と「`isUnique === undefined`」は意図的に入れたケース**。前者は起票文書 §2.5 ①（**dialect 1 でも CHECK は構文上受理される**ので方言を根拠に素の UPSERT と仮定してはならない）から、後者は §2 の 4（BYO schema resolver が省略し得るので曖昧な schema を許可しない）から来ている。**畳むと、この 2 つを固定するテストが受入から落ちる。**
 
-#### [Minor] §12 に「既定を将来反転させる想定」が無い
+#### [運用] AC の番号体系は **R4 の AC-1〜AC-24 で確定してよい**
 
-起票文書 §7.7 のとおり、**適格な UPSERT を持つ利用者はほぼ全員が有効化する**。「指定なし」は選択ではなく「まだ移行していない」状態になり、**主要な失敗モードは「有効化を忘れて黙って遅い経路を通る」**。→ §12 に寿命と反転条件を明記する。
+R4 は R2 と異なる番号体系になった（例: R2「AC-14 wrapper の能力保持」は R4 では AC-10）。**R2 は git 履歴にあり実装はこれからなので、R4 体系で確定して問題ない。** なお **AC-18 が両方とも `options.confirm` である点は偶然だが整合している**。
 
-**あわせて既定 OFF の理由を書き換える。** 現行の理由（権限要件）は**弱い**＝権限エラーは**大きく鳴る**（静かに誤らない）し、一度トークンを直せば済む。
+#### 確認して問題がなかった点
 
-**本当の理由は公開面の非破壊性**: R2 / R3 は `FlowChunkWrittenInfo.operation` の union 拡大を **「新しい値は opt-in したときにしか出ない」の一点で正当化している**（§3）。既定 ON にすると**その正当化が消え**、opt-in していない既存利用者に `"UPSERT"` が流れ込む。`postCalls` が 0 になることと `estimatedWrites` の式変更も同様。**既定 ON は B173 を全利用者にとっての破壊的リリースに変える。**
+- **§13.1 の CHANGELOG 文面案**＝B171 の「※結果が変わります」と書き分けており、**「成功時のレコード内容と `insertedCount` / `updatedCount` は従来と同じ」「変わるのは書込順・部分失敗時の確定範囲・`onChunkWritten.operation`・API 回数内訳・`estimatedWrites`」**が正確
+- **§13.2 の依頼元通知項目**＝追随作業の期限が前倒しになること、CLI でのリハーサル、`enableNativeUpsert: false` での基準値取得まで含んでいる
+- **§10.6 の CLI 表示**＝`--native-upsert` なしでも文・データ判定を出す（指摘していない同型ケースを自発的に拾った）
 
-→ **反転はメジャー版に紐づける**（起票文書 §7.7.4 の「1〜2 版後」はマイナー版を含意しており不正確なので訂正する）。なお「権限エラーなら自動 fallback」は理屈上可能（権限エラーは 1 チャンク目で起き all-or-nothing なので書込ゼロで検出できる）だが**採らない** — loud に落ちてトークンを直させるほうが、静かに遅い経路へ落ちるより良い。
+### 16.5 R5 で直すこと
 
-#### 理由の差し替え（結論は不変）
+1. **R2 の列挙型 AC（能力なし・schema fail-closed・素の UPSERT 限定・空文字）を R4 の体系へ復元する。** 原文は `git show 7d77f32:docs/internal/ksql_b173_native_upsert_spec.md`
+2. **変更ファイル一覧を復元する。確認したところ R4 にも無い。** R4 の §13 は「リリース付随作業」（CHANGELOG 文面案と依頼元通知）に使われており、**R2 にあった「変更する Production ファイル / 変更しない Production ファイル / 追加・更新するテスト」の節が R3 の欠落以降そのまま失われている**。R2 の原文（`git show 7d77f32:...` の §13）を土台に、**R3・R4 で増えた分を足して復元する**＝`src/cli/index.ts`（`--native-upsert`・REPL 転送・確認フロー）／`src/cli/nodeKintoneClient.ts`（`upsertRecords`）／適格性評価器と renderer の置き場／`executeExplain`（単文 EXPLAIN への行追加）／`ExecutionMetrics.nativeUpsertCalls`／`ExplainScriptOptions.enableNativeUpsert`。
 
-**プラグインを opt-in 対象外とする理由**（起票文書 §7.6.3）。旧理由 2 つはどちらも成立しない — 利用者が開発担当者でアプリ管理権限を持つのは**設計上の前提であって欠陥ではなく**、`/flow` の API トークン権限を確かめるのはプラグインの役割ではない。UI 作業の重さも、開発者向け面なら弱い。**新理由＝CLI の opt-in に対する追加価値が小さく、自然な設定粒度がアプリ単位（環境単位）で、退けたはずの「書いたら以後ずっと効く」形になる。**
-
-**権限の担保は運用手順が本筋**（有効化前に `/flow` が使うトークンの追加権限を確認する）。API トークンのスコープを問い合わせる手段が無い以上どの実行面でも代替できず、**CLI が本番トークンを指せるのは補助であって代替ではない**。
-
-### 16.3 R4 で直すこと
-
-1. **[Major] 非 opt-in 面の適格性表示**を、面依存条件（1・2）と文・データ依存条件（3〜6）の 2 群に分けて報告する
-2. **[Major] 単文 EXPLAIN は経路統合せず、`executeExplain` から共有評価器を呼ぶ**（MCP・CLI とも）
-3. **[Minor] §12 に既定反転の想定と条件**を追加し、**既定 OFF の理由を「公開面の非破壊性」へ書き換える**（反転はメジャー版）
-4. **[Minor] プラグイン対象外の理由**を差し替える
+**この 2 件はいずれも「R3 の出力欠落」に起因する取りこぼしであり、設計上の誤りではない。** R5 は復元作業。
