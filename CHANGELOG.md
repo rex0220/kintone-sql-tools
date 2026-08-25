@@ -3,6 +3,36 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.74.0（2026-08-25）
+
+### 修正（B176: EXPLAIN の native UPSERT 適格性が常に `UNKNOWN` だった）
+
+v3.73.0 で入れた「この UPSERT は native になるか」の表示が、**実運用では常に**
+`UNKNOWN（条件 3: KEY_SCHEMA — フォームメタデータ未取得）` を返し、`ELIGIBLE` に
+到達しませんでした。`EXPLAIN UPSERT` が対象アプリのフォーム定義を取得しないためです。
+
+**対象アプリのフォーム定義を 1 回取得して判定する**ようにしました（invocation キャッシュを
+共有し、同一アプリは 1 回）。`EXPLAIN SELECT` は以前から取得しており、**面としての
+一貫性はむしろ上がります**。**レコード API / Cursor API / mutation API は引き続き 0 回**です。
+
+**完全オフラインの `--dry-run` と `resolveMetadata: false` は従来どおり `UNKNOWN`**（判定不能
+であって不適格ではありません）。
+
+**挙動が変わる点**:
+
+- 単文 EXPLAIN で `metrics.fieldCalls` が **0 → 1**
+- EXPLAIN の出力行と `rowCount` が増える
+- **フォーム定義の取得に失敗すると `EXPLAIN UPSERT` がエラーになる**（握り潰して
+  `UNKNOWN` に降格すると、権限不足や通信障害を隠すため）
+
+**変わらない形**: native UPSERT の本体（本実行・`previewStatement`）は不変で、v3.73.0 の
+API 削減効果はそのままです。`EXPLAIN SELECT` ほか他の文型の EXPLAIN も不変です。
+
+**再発防止**: 壊れた挙動を固定していたテスト（「単文 EXPLAIN は `UNKNOWN` と非実行面を
+表示し API を増やさない」）を反転し、`ELIGIBLE` を出せていたテストから**先行 SELECT を
+削除**しました（先行 SELECT が invocation キャッシュを偶然温めていたため、実経路の欠落を
+隠していました）。実 adapter の transport 呼び出し回数を固定するテストを追加しています。
+
 ## v3.73.0（2026-08-25）
 
 ### 機能追加（B173 F-7: UPSERT を kintone native UPSERT へ）**※ `/flow` の UPSERT は挙動が変わります**

@@ -29765,7 +29765,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.73.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.74.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -43716,6 +43716,19 @@ function explainNeedsAppMetadata(statement) {
   };
   return visit(statement);
 }
+function explainNeedsNativeUpsertTargetMetadata(statement) {
+  const seen = /* @__PURE__ */ new Set();
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return false;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(visit);
+    const item = node;
+    if (item["type"] === "UPSERT" || item["type"] === "UPSERT_SELECT") return true;
+    return Object.values(item).some(visit);
+  };
+  return visit(statement);
+}
 
 // src/api/fetchAll.ts
 init_define_KSQL_DOCS();
@@ -48908,6 +48921,7 @@ async function executeParsedStatement(stmt, client, options, cacheContext) {
         options.recursiveCteMaxDepth,
         options.recursiveCteMaxRows,
         options.recursiveCteMaxExpansions,
+        options.resolveMetadata !== false,
         hasNativeUpsertExecutionOption(options) ? {
           surface: "CLI",
           enableNativeUpsert: nativeUpsertExecutionEnabled(options),
@@ -56855,6 +56869,10 @@ async function buildExplainWhereAnalysis(query, client, cacheContext, maxRecords
       return;
     }
     const typed = node;
+    if (typed["type"] === "UPSERT" || typed["type"] === "UPSERT_SELECT") {
+      const upsert = node;
+      await getFieldsCached(upsert.appId, tracedClient, cacheContext);
+    }
     if (typed["type"] === "SELECT") {
       const select = node;
       await validateSelectGroupingPlanning(select, tracedClient, cacheContext);
@@ -57898,21 +57916,29 @@ var explainMaterializedTables = /* @__PURE__ */ new WeakMap();
 function defaultRecursiveExplainContext() {
   return { maxRecords: 1e4, recursiveLimits: resolveRecursiveCteLimits({}) };
 }
-async function executeExplain(stmt, client, cacheContext, maxRecords2, cursorMaxActive2, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS, relativeDatePlan, recursiveCteMaxDepth2, recursiveCteMaxRows2, recursiveCteMaxExpansions2, nativeUpsertOptions = { surface: "DOCUMENT_ONLY" }) {
+async function executeExplain(stmt, client, cacheContext, maxRecords2, cursorMaxActive2, dmlMaxRows = 100, dmlMaxSubtableRows = DEFAULT_APPLY_MAX_SUBTABLE_ROWS, relativeDatePlan, recursiveCteMaxDepth2, recursiveCteMaxRows2, recursiveCteMaxExpansions2, resolveMetadata = true, nativeUpsertOptions = { surface: "DOCUMENT_ONLY" }) {
   const recursiveLimits = resolveRecursiveCteLimits({
     recursiveCteMaxDepth: recursiveCteMaxDepth2,
     recursiveCteMaxRows: recursiveCteMaxRows2,
     recursiveCteMaxExpansions: recursiveCteMaxExpansions2
   });
   const sharedPlan = relativeDatePlan ?? await resolveRelativeDateExecutionPlan(stmt.query, client, cacheContext);
-  const analysis = await buildExplainWhereAnalysis(
+  const analysis = resolveMetadata ? await buildExplainWhereAnalysis(
     stmt.query,
     client,
     cacheContext,
     maxRecords2,
     sharedPlan,
     explainMaterializedTables.get(stmt)
-  );
+  ) : {
+    capabilities: /* @__PURE__ */ new Map(),
+    orderPlans: /* @__PURE__ */ new Map(),
+    plainGroupByPlans: /* @__PURE__ */ new Map(),
+    fieldApps: /* @__PURE__ */ new Set(),
+    processStatusApps: /* @__PURE__ */ new Set(),
+    numberPrecisionApps: /* @__PURE__ */ new Set(),
+    relativeDatePlan: sharedPlan
+  };
   const fetchCollector = { sources: [] };
   const relativeLines = relativeDateExplainLines(sharedPlan);
   const planLines = sharedPlan.hasServerOnlyWhereFunction && !sharedPlan.allowed ? [...explainMetadataLines(analysis), ...relativeLines] : [
@@ -62145,7 +62171,9 @@ function createKsqlMcpTools(serverOptions, deps = {}) {
       const restored = restoreSqlContextError(err, normalized.sourceSql, normalized.sqlContext);
       throw toMcpImportError(restored, importOptions.enableImport === true);
     }
-    const needsAppMetadata = normalized.appBindingByMappedApp.size > 0 && statements.some(explainNeedsAppMetadata);
+    const needsAppMetadata = normalized.appBindingByMappedApp.size > 0 && statements.some(
+      (statement) => explainNeedsAppMetadata(statement) || explainNeedsNativeUpsertTargetMetadata(statement)
+    );
     const runtime = needsAppMetadata ? await createRuntime(serverOptions, {
       sql: input.sql,
       sqlContext: normalized.sqlContext,

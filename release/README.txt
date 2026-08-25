@@ -1,22 +1,27 @@
-ksql 配布パッケージ (v3.73.0)
+ksql 配布パッケージ (v3.74.0)
 
 release 成果物:
-- ksql-plugin-v3.73.0.zip
-- ksql-mcp.mcpb (manifest version 3.73.0)
-- ksql-mcp.js (MCP server version 3.73.0)
+- ksql-plugin-v3.74.0.zip
+- ksql-mcp.mcpb (manifest version 3.74.0)
+- ksql-mcp.js (MCP server version 3.74.0)
 
-機能追加 (B173 F-7: UPSERT を kintone native UPSERT へ) ★/flow の挙動が変わります:
-- /flow の適格な素の UPSERT VALUES / UPSERT SELECT が、既定で kintone の
-  updateKey + upsert: true を使います。事前 GET によるキー照合が不要になり、
-  UPSERT 1 万件で API 300 回 -> 100 回 (書込先アプリの日次 API 枠が 1/3)。
-- 成功時のレコード内容と insertedCount / updatedCount は従来と同じです。
-- 変わるのは 5 点: 書込順 (ソース順の混在チャンク) / 部分失敗時に確定している範囲 /
-  onChunkWritten.operation に "UPSERT" と内訳 / postCalls が 0 (putCalls へ集約・
-  nativeUpsertCalls は内数) / preview の estimatedWrites の算出式。
-- 従来経路へ戻すには createExecutionContext に enableNativeUpsert: false を渡します。
-- native の利用には対象アプリのレコード追加権限が必要です (更新だけの UPSERT でも)。
-- 変わらない形: CHECK / APPLY / VALIDATE ONLY / ON ERROR SKIP / IMPORT を伴う UPSERT、
-  複合キー・重複禁止でないキー、空文字キー、ソース内キー重複、CLI (既定 OFF)、
+修正 (B176: EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった):
+- v3.73.0 で入れた「この UPSERT は native になるか」の表示が、実運用では常に
+  UNKNOWN (条件 3: KEY_SCHEMA — フォームメタデータ未取得) を返し、ELIGIBLE に
+  到達しませんでした。EXPLAIN UPSERT が対象アプリのフォーム定義を取得しないためです。
+- 対象アプリのフォーム定義を 1 回取得して判定するようにしました。EXPLAIN SELECT は
+  以前から取得しており、面としての一貫性はむしろ上がります。
+- レコード API / Cursor API / mutation API は引き続き 0 回です。
+- 完全オフラインの --dry-run と resolveMetadata: false は従来どおり UNKNOWN です
+  (判定不能であって不適格ではありません)。
+- 挙動が変わる点: 単文 EXPLAIN で metrics.fieldCalls が 0 -> 1、EXPLAIN の出力行と
+  rowCount が増える、フォーム定義の取得に失敗すると EXPLAIN UPSERT がエラーになる
+  (握り潰して UNKNOWN にすると権限不足や通信障害を隠すため)。
+- native UPSERT の本体 (本実行・previewStatement) は変わりません。v3.73.0 の
+  API 削減効果はそのままです。
+
+v3.73.0 の節は畳みました (B173 native UPSERT = /flow は既定 ON・CLI は --native-upsert /
+  B175 KLIKE 索引ラグの文書化)。
   MCP、プラグイン、engine-library。いずれも従来の経路と結果のままです。
 - CLI は --allow-dml --native-upsert を明示した実行だけが同じ経路を使います。
 - EXPLAIN が native の適格性を表示します (MCP / プラグイン / CLI)。
@@ -98,12 +103,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.73.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.74.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.73.0): B173 UPSERT を kintone native UPSERT へ (/flow は既定 ON・挙動が変わります・API 消費 1/3)、CLI の --native-upsert (純加法)、EXPLAIN が native 適格性を表示 (純加法)。
+本リリース (v3.74.0): B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正
+
+前リリース (v3.73.0): B173 UPSERT を kintone native UPSERT へ (/flow は既定 ON・
+挙動が変わります・API 消費 1/3)、CLI の --native-upsert、EXPLAIN の適格性表示。
 
 前リリース (v3.72.0): B171 ASSERT 大小比較の辞書順不具合を修正 (結果が変わります)、
 B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
@@ -126,15 +134,7 @@ B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
 
 前リリース (v3.64.0): B162/B163 EXPLAIN だけが通らない 2 形を解消 (改善・実行は不変)。
 
-前リリース (v3.63.0): B158 CROSS JOIN (新機能・直積 = 2 軸格子・CROSS が予約語に)、
-B159 GENERATE_SERIES month/year step (新機能・月次 0 埋め)、B157/B161 dry-run 修正。
-
-前リリース (v3.62.0): B155 WHERE 条件の絞り込みを CTE・一時テーブルの JOIN と
-単一表の全件取得へ拡大 (改善・結果不変・取得量削減)、B154 EXPLAIN の但し書き。
-
-前リリース (v3.61.0): B150/B153 結合キー押し下げの型対応 (日付キー JOIN の
-GAIA_IQ03 解消) と空キー一致の欠落修正 (結果が変わります)。
-
+前リリース (v3.63.0 以前) の節は畳みました。CHANGELOG.md と GitHub Releases を参照してください。
 前リリース (v3.60.0 以前) の節は畳みました。CHANGELOG.md と GitHub Releases を参照してください。
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
