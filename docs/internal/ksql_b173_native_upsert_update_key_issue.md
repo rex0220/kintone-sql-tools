@@ -383,3 +383,40 @@ native は**レコード追加権限を追加で要求する**ため、既定 ON
 **フラグ名は反転に耐える形にする。** `enableNativeUpsert` なら反転後に `enableNativeUpsert: false` と書けて意味が通る。`experimental` 等の語を入れると反転時に破綻する。**R2 の命名はこの点で問題ない。**
 
 → **仕様 §12（移行と互換性）に「既定を将来反転させる想定と、その条件」を明記する。** R3 の依頼には含めていないので、**R3 レビュー時に追加する**。
+
+### 7.8 公開面の破壊的影響を受ける利用者は誰か（2026-08-25・実測）
+
+【オーナー指摘】「公開面の破壊的影響を受ける利用者は誰か」→ **数えたら、私の「全利用者にとっての破壊的リリースになる」は過大だった。**
+
+#### 7.8.1 公開エントリと利用者
+
+`@rex0220/kintone-sql-tools` の公開エントリは **`./engine`（読み取り専用）と `./flow` の 2 つ**（`package.json` の `exports`）。**B173 が触る公開型はすべて `/flow` 側。**
+
+| 利用者 | 使うエントリ | 露出 |
+|---|---|---|
+| **ksql-flow（ランナー）** | **`/flow`** | **既知では唯一の該当者** |
+| ksql-dashboard-pro | `/engine`（`createReadonlyKintoneClient` / `runQuery` / `explainQuery`） | **無関係**（読み取り専用・`putRecords` を持たない。`projectReadonlyClient` は 6 メソッドだけを束ねるので新メソッドは到達しない） |
+| ksql-analytics | 文書での言及のみ（コード import 無し＝MCP / CLI 利用） | 無関係 |
+| my-ksql-jobs | ksql-flow 経由 | 間接 |
+
+#### 7.8.2 ksql-flow の実際の使い方（実測）— **壊れない**
+
+| 公開面 | 実際の使い方 | 影響 |
+|---|---|---|
+| `FlowChunkWrittenInfo.operation` | **使用箇所は 2 つだけ**（`ksql-flow/src/executor.ts:174,181`）＝`=== "DELETE"` で削除件数を数える／ログへ素通し。**網羅 switch は無い** | **`"UPSERT"` は DELETE ではないので影響なし** |
+| 同（ログ出力先） | 素通し先は**ローカル JSONL**。**ログアプリの `LOG_APP_FIELDS` に `operation` フィールドは存在しない**（`ksql-flow/src/logapp.ts:7-34`） | **ドロップダウンの選択肢制約に当たらない** |
+| `ExecutionMetrics.postCalls` | **見ていない**。`api_calls` は `env.http.snapshot()`＝**彼ら自身の HTTP カウンタ**（`executor.ts:199,325`） | **影響なし** |
+| `records`（`written_count`） | `info.records` を累積。native でもチャンク件数の合計は同じ | 影響なし |
+
+#### 7.8.3 結論の修正 — opt-in は「実害の回避」ではなく「契約の遵守」の装置
+
+**既知の利用者に限れば、既定 ON でも壊れない。** §7.7.4 の訂正で「既定 ON は B173 を全利用者にとっての破壊的リリースに変える」と書いたのは**過大**。
+
+**残るリスクは 2 つだけ**:
+
+1. **未知の npm 利用者** — パッケージは公開され `/flow` は文書化された公開 API。**列挙できない以上「いない」とは言えない**
+2. **TypeScript の網羅 switch** — ksql-flow は書いていないが、`operation` に exhaustive switch を書いている利用者がいればコンパイルが壊れる
+
+→ **opt-in の役割は「既知の利用者を守る装置」ではなく「公開 API の契約を守る装置」。** 誰も壊れなくても、マイナー版で union を広げるのは契約違反であり、それを「新しい値は opt-in したときにしか出ない」で回避しているのが現在の設計。
+
+**既定 OFF の判断は変わらない**が、根拠は**実害の回避 → 契約の遵守**へ移る。**反転をメジャー版に紐づける結論はむしろ強まる**（メジャー版なら契約を変えてよい）。
