@@ -80,3 +80,47 @@ CLI の `--debug` でリクエストを観測した。
 - **native UPSERT の本体（B173 の中核）は影響を受けない。** 本実行と `previewStatement` は schema を持っているので適格性判定は正しく動く（v3.73.0 の API 削減効果は出る）
 - **困るのは「オーサリング中に本番の挙動を読みたい」用途だけ**（起票文書 §7.3 の目的そのもの）
 - 依頼元への通知では **「EXPLAIN で適格性を確認できます」と書かない**（B176 解消までは実質確認できないため）
+
+---
+
+## 8. 対策案（codex）と Claude レビュー（2026-08-25）
+
+[codex の対策案](ksql_b176_plan_codex.md)。**推奨は案 A**（`EXPLAIN UPSERT` でも対象アプリの `getFields` を引く）。**Claude も同意。**
+
+### 8.1 【訂正】§3 に書いた「テストで捕まらなかった理由」は**誤り**だった
+
+**§3 では「`getFields` をモックした client を渡していたので、呼び出し側が呼ぶかを検証していなかった」と書いた。これは不正確。**
+
+codex が実装を開いて特定した、より正確な事実:
+
+1. **`ELIGIBLE` を出せていたテストは、同じアプリへの先行 SELECT が invocation キャッシュを温めていた**（偶然）。適格性表示は**キャッシュを参照するだけで自分では取得しない**（`src/execute.ts:7457,7464`）。キャッシュが無ければ `null` → 条件 3 が `UNKNOWN`（`同:7475,7480`）
+   - **こちらの MCP バッチ実測（`SELECT key_text FROM APP4253 LIMIT 1;` + UPSERT）が `UNKNOWN` だったのと整合する**＝WHERE がフィールドメタデータを要さない SELECT はキャッシュを温めない
+2. **さらに悪い**＝`src/__tests__/explain.test.ts:665-681` に **「B173 AC-16/17/22: 単文 EXPLAIN は既存 SELECT 外形のまま UNKNOWN と非実行面を表示し API を増やさない」** というテストがあり、**`UNKNOWN` と `getFields` 0 回を明示的に固定している**
+
+→ **本件は「テストが見落とした」のではなく「壊れた挙動が仕様として指定され、テストで固定された」。** §3 の記述を訂正する。**予防策も変わる**＝テストを厚くするだけでは足りず、**仕様の矛盾を先に解消しないと同じ結論に戻る**。
+
+### 8.2 【訂正】§4 の「仕様の内部矛盾」の引用先が誤っていた
+
+§4 は R5 の **§7** を「API・実行契約」として引いたが、**R5 の §7 は「書込順・確認・結果」**。実際に矛盾しているのは **§4.4 / §4.5 と AC-16**（codex の指摘）。**矛盾があること自体は正しい**が、条番号を訂正する。
+
+### 8.3 codex の分析で価値が高かった点
+
+- **根本原因の特定**＝`buildExplainWhereAnalysis` の visitor に `UPSERT` / `UPSERT_SELECT` の**対象 schema を取る分岐が無い**（`src/execute.ts:12221,12230,12432`）。SELECT / VALIDATE / UPDATE / DELETE は固有処理を持つのに UPSERT だけ一般走査で終わる
+- **`resolveMetadata` は原因ではない**と切り分けた（`true` でも UPSERT target schema を読む処理が無い）。ただし修正時は**単文 EXPLAIN にも解決可否を渡せないとオフライン dry-run を維持できない**
+- **`explainNeedsAppMetadata`（`src/core/explainMetadata.ts:115,123`）が UPSERT を認識しない**。**ここを無条件に変えると CLI の `--dry-run` が認証必須になる**ので用途を分離せよ、という指摘は鋭い。こちらでは見落としていた
+- **`/flow` の LAPP 経由の native 統合テストが無い**／**本実行テストが `fieldCalls === 1` を固定していない**というテストギャップの指摘
+
+### 8.4 Claude が足す論点
+
+1. **【互換】metadata 取得失敗時に `EXPLAIN UPSERT` が新たに「失敗し得る」ようになる。** codex の推奨（SELECT EXPLAIN と同じくエラー伝播。握り潰して `UNKNOWN` にすると権限・通信障害を隠す）に**同意**するが、これは**5 面すべてでの挙動変更**なので、CHANGELOG に明記が要る
+2. **【互換】単文 `execute` の `metrics.fieldCalls` が 0 → 1 になる**（公開値）。同じく明記が要る
+3. **【版数】patch か minor か。** EXPLAIN の出力行が増え `rowCount` が変わり、API 呼び出しが 1 回増える。**動かない機能の修正だが、観測値が変わるので minor を推す**
+4. **【順序】仕様の矛盾解消を先にする。** §8.1 のとおり、テストを直す前に「EXPLAIN では metadata API を引いてよい／レコード API は引かない」と R5 を書き分けないと、`explain.test.ts:665` を反転させる根拠が無い
+
+### 8.5 次にやること（順序）
+
+1. **仕様 R5 の矛盾を解消**（§4.4 / §4.5 の「API を増やさない」を**本実行・preview に限定**し、EXPLAIN は metadata API 可・レコード API 不可と書き分ける）
+2. **`explain.test.ts:665-681` を反転**（`ELIGIBLE`・`getFields` 1 回へ）。**ここが本件の核**
+3. 案 A を実装（`buildExplainWhereAnalysis` に UPSERT 分岐・単文 EXPLAIN への解決可否 option・`explainNeedsAppMetadata` の用途分離）
+4. **再発防止テスト**＝**UPSERT 単独で開始し、実 adapter の transport 呼出し回数を固定**（先行 SELECT でキャッシュを温めない）。codex の 9 項目と面別の具体形をそのまま採る
+5. codex が挙げたテストギャップ 3 件（LAPP 経由 native / 本実行の `fieldCalls` / transport-level 通し）も同時に埋める
