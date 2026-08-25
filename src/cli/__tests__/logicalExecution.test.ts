@@ -5,7 +5,28 @@ import { resetGlobalRequestGate } from "../../api/requestGate";
 import { runWithArgv } from "../index";
 
 describe("CLI logical app execution", () => {
+  // 実行環境に KSQL_USERNAME / KSQL_PASSWORD 等があると runtime が profile より
+  // 環境変数を優先し（src/node/runtime.ts の authReq / hasUserPass）、auth が
+  // userpass へ倒れて X-Cybozu-API-Token ではなく X-Cybozu-Authorization を送る。
+  // 本 suite は tokenMap による app 別トークンの routing を見るので、環境から隔離する。
+  const ISOLATED_ENV_KEYS = [
+    "KSQL_AUTH", "KSQL_USERNAME", "KSQL_PASSWORD",
+    "KSQL_BASE_URL", "KSQL_GUEST_SPACE_ID", "KSQL_TOKEN",
+  ] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ISOLATED_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
   afterEach(() => {
+    for (const key of ISOLATED_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
     jest.restoreAllMocks();
     resetGlobalRequestGate();
   });
