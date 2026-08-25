@@ -155,7 +155,11 @@ test("acceptance sample executes one statement at a time through /flow", async (
 });
 
 test("createKintoneClient is writable and uses injected fetch", async () => {
-  const fetchMock = jest.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ ids: ["1"] }), {
+  const fetchMock = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify(
+    JSON.parse(String(init?.body ?? "{}")).upsert
+      ? { records: [{ id: "1", revision: "1", operation: "INSERT" }] }
+      : { ids: ["1"] }
+  ), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   })) as jest.MockedFunction<typeof fetch>;
@@ -166,7 +170,17 @@ test("createKintoneClient is writable and uses injected fetch", async () => {
   });
   expect(typeof client.postRecords).toBe("function");
   expect(typeof client.putRecords).toBe("function");
+  expect(typeof client.upsertRecords).toBe("function");
   expect(typeof client.deleteRecords).toBe("function");
   await expect(client.postRecords({ app: 1, records: [{}] })).resolves.toEqual({ ids: ["1"] });
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST" });
+  await expect(client.upsertRecords!({
+    app: 1, upsert: true,
+    records: [{ updateKey: { field: "key", value: "A" }, record: {} }],
+  })).resolves.toEqual({ records: [{ id: "1", revision: "1", operation: "INSERT" }] });
+  expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "PUT" });
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+    app: 1, upsert: true,
+    records: [{ updateKey: { field: "key", value: "A" }, record: {} }],
+  });
 });

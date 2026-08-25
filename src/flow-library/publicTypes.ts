@@ -50,6 +50,32 @@ export interface KintoneRecordValue {
 }
 export type KintoneRecord = Record<string, KintoneRecordValue>;
 
+export interface KintoneNativeUpdateKey {
+  field: string;
+  value: string;
+}
+
+export interface KintoneNativeUpsertRecord {
+  updateKey: KintoneNativeUpdateKey;
+  record: KintoneRecord;
+}
+
+export interface KintoneNativeUpsertParams {
+  app: number;
+  upsert: true;
+  records: KintoneNativeUpsertRecord[];
+}
+
+export interface KintoneNativeUpsertRecordResult {
+  id: string;
+  revision: string;
+  operation: "INSERT" | "UPDATE";
+}
+
+export interface KintoneNativeUpsertResult {
+  records: KintoneNativeUpsertRecordResult[];
+}
+
 export interface FlowKintoneClient {
   getRecords(params: { app: number; query: string; fields: string[]; totalCount?: boolean }): Promise<{
     records: KintoneRecord[];
@@ -66,6 +92,7 @@ export interface FlowKintoneClient {
     app: number;
     records: Array<{ id: number; revision?: number; record: KintoneRecord }>;
   }): Promise<void>;
+  upsertRecords?(params: KintoneNativeUpsertParams): Promise<KintoneNativeUpsertResult>;
   deleteRecords(params: { app: number; ids: number[] }): Promise<void>;
   getApps(): Promise<Array<{ appId: number; name: string; description: string }>>;
   getFields(appId: number): Promise<FieldInfo[]>;
@@ -144,6 +171,8 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   asOf?: Date;
   timezone?: string;
   continueOnError?: boolean;
+  /** 素の UPSERT で native UPSERT を許可する。省略時は true。 */
+  enableNativeUpsert?: boolean;
   /**
    * 書込 API の各成功直後に await される。順序は現在の書込順であり、キー順は保証しない。
    * コールバックが throw した場合、その文は error になるが、通知対象チャンクは書込済み。
@@ -156,12 +185,14 @@ export interface FlowChunkWrittenInfo {
   statementIndex: number;
   /** 書込 API に渡される物理アプリ ID（LAPP は解決済み）。 */
   appId: number;
-  operation: "INSERT" | "UPDATE" | "DELETE";
+  operation: "INSERT" | "UPDATE" | "DELETE" | "UPSERT";
   records: number;
   /** その文で成功した書込 API リクエストの index（0 始まり）。 */
   chunkIndex: number;
   /** 単一キー UPSERT でキー値を payload から特定できる場合のみ設定される。 */
   lastKeyValue?: string;
+  insertedCount?: number;
+  updatedCount?: number;
 }
 
 declare const executionContextBrand: unique symbol;
@@ -180,6 +211,8 @@ export interface ExecutionMetrics {
   getCalls: number;
   postCalls: number;
   putCalls: number;
+  /** upsertRecords の呼出し回数。putCalls の内数。 */
+  nativeUpsertCalls: number;
   deleteCalls: number;
   fieldCalls: number;
   numberPrecisionCalls: number;

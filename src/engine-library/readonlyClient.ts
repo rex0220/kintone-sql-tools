@@ -5,6 +5,7 @@ import type { ReadonlyKintoneClient } from "./publicTypes";
 const WRITE_METHODS = new Set<PropertyKey>([
   "postRecords",
   "putRecords",
+  "upsertRecords",
   "deleteRecords",
 ]);
 

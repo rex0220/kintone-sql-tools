@@ -167,7 +167,7 @@ export class RequestGate {
  * 書き込み系（postRecords / putRecords / deleteRecords）はセマフォのみ。
  */
 export function withRequestGate(client: KintoneClient, gate: RequestGate): KintoneClient {
-  return {
+  const wrapped: KintoneClient = {
     getRecords: (params) => gate.runReadOnly(() => client.getRecords(params)),
     openCursor: async (params) => {
       const handle = await gate.runCursorStep(() => client.openCursor(params));
@@ -185,6 +185,10 @@ export function withRequestGate(client: KintoneClient, gate: RequestGate): Kinto
     putRecords: (params) => gate.runMutation(() => client.putRecords(params)),
     deleteRecords: (params) => gate.runMutation(() => client.deleteRecords(params)),
   };
+  if ("upsertRecords" in client && typeof client.upsertRecords === "function") {
+    wrapped.upsertRecords = (params) => gate.runMutation(() => client.upsertRecords!(params));
+  }
+  return wrapped;
 }
 
 // ------------------------------------------------------------

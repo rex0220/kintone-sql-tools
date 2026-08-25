@@ -55,6 +55,8 @@ export type {
   KintoneAppInfo,
   KintoneFieldInfo,
   KintoneProcessStatuses,
+  KintoneNativeUpsertParams,
+  KintoneNativeUpsertResult,
   BatchExecuteOptions,
   BatchExecuteResult,
   BatchStatementResult,

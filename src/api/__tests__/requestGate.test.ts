@@ -241,6 +241,23 @@ test("withRequestGate: GET 系はリトライ付き、書き込み系はリト�
   expect(calls().postCalls).toBe(1); // リトライしない
 });
 
+test("AC-10: withRequestGate conditionally preserves native capability and does not retry it", async () => {
+  const gate = new RequestGate({ maxRetries: 3, sleep: async () => undefined });
+  const without = makeFailThenOkClient({ getRecords: 0 }).client;
+  expect("upsertRecords" in withRequestGate(without, gate)).toBe(false);
+
+  let calls = 0;
+  const capable = makeFailThenOkClient({ getRecords: 0 }).client;
+  capable.upsertRecords = async () => {
+    calls += 1;
+    throw httpError(429);
+  };
+  const gated = withRequestGate(capable, gate);
+  expect("upsertRecords" in gated).toBe(true);
+  await expect(gated.upsertRecords!({ app: 1, upsert: true, records: [] })).rejects.toThrow(/429/);
+  expect(calls).toBe(1);
+});
+
 test("runCursorStepはretryable errorでも再試行しない", async () => {
   let calls = 0;
   const gate = new RequestGate({ maxRetries: 3, sleep: async () => undefined });

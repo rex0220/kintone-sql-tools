@@ -143,6 +143,12 @@ export function createKintoneClient(config: CreateKintoneClientConfig): FlowKint
     async putRecords(params) {
       await request("/records.json", "PUT", params.app, params);
     },
+    async upsertRecords(params) {
+      return (await request<import("./publicTypes").KintoneNativeUpsertResult>(
+        "/records.json", "PUT", params.app,
+        { app: params.app, upsert: true, records: params.records }
+      )).body;
+    },
     async deleteRecords(params) {
       await request("/records.json", "DELETE", params.app, params);
     },

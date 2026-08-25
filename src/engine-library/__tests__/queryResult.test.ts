@@ -41,6 +41,7 @@ function metrics(overrides: Partial<ExecuteMetrics> = {}): ExecuteMetrics {
     getCalls: 3,
     postCalls: 8,
     putCalls: 9,
+    nativeUpsertCalls: 0,
     deleteCalls: 10,
     fieldCalls: 2,
     numberPrecisionCalls: 1,
