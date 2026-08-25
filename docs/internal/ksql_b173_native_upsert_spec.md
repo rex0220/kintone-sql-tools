@@ -569,14 +569,29 @@ EXPLAINはmetadata API以外の実行APIを呼ばないplannerである（`src/e
 
 - 条件1: 実行可能面では予測対象clientの能力から判定する。非実行面の文・データ評価では対象外。
 - 条件2: `/flow` またはCLIの解決済み設定から判定する。非実行面では対象外。
-- 条件3: plannerが別目的で既に取得・キャッシュしたフォームmetadataがある場合だけ判定する。
+- 条件3: ~~plannerが別目的で既に取得・キャッシュしたフォームmetadataがある場合だけ判定する。~~ → **【訂正 2026-08-25・B176】対象アプリのフォームmetadataを取得して判定する**（下記）。
 - 条件4: 構文木から常に判定する。
 - 条件5・6:
   - `UPSERT VALUES` で値と変数を副作用なしに確定できる場合は判定する。
   - `UPSERT SELECT` はソース行を取得・materializeしないため `UNKNOWN` とする。
   - 一時表や変数の値がplanner上で確定できない場合も `UNKNOWN` とする。
 
-`resolveMetadata === false` の場合、条件3は `UNKNOWN` とする。条件3のために `getFields` を呼んではならない。
+~~`resolveMetadata === false` の場合、条件3は `UNKNOWN` とする。条件3のために `getFields` を呼んではならない。~~
+
+> ## 【規範的訂正 2026-08-25・[B176](ksql_b176_explain_eligibility_always_unknown_issue.md)】EXPLAIN は条件 3 のために metadata API を引いてよい
+>
+> **旧規定「条件 3 のために `getFields` を呼んではならない」は、AC-16（`ELIGIBLE` を表示する）と両立しなかった。** `EXPLAIN UPSERT` は対象アプリのフォーム定義を別目的では取得しないため、旧規定のもとでは**条件 3 が常に `UNKNOWN` になり、`ELIGIBLE` に到達できない**（v3.73.0 で実際にそうなった）。
+>
+> **新規定:**
+>
+> - **EXPLAIN では、条件 3 の判定のために対象アプリの `getFields` を引いてよい**（invocation キャッシュを共有し、同一アプリは 1 回）。**`EXPLAIN SELECT` は既に引いており、面としての一貫性はむしろ上がる**
+> - **レコード API・Cursor API・mutation API は引き続き 0 回**。この境界は動かさない
+> - **`resolveMetadata === false` と、CLI の完全オフライン `--dry-run` では引かない**。材料が無いので条件 3 は `UNKNOWN`（**「判定不能」であって「不適格」ではない**）
+> - **metadata 取得が失敗した場合はエラーを伝播する**（`EXPLAIN SELECT` と同じ）。**握り潰して `UNKNOWN` に降格しない**＝権限不足や通信障害を隠すことになるため
+>
+> **本実行と `previewStatement` には旧規定がそのまま当てはまる**（§4.4 の「適用判定だけを目的とする API 呼出しを増やさない」）。**両者は書込検証で既にフォーム定義を持っているので、そもそも追加取得が要らない。**
+>
+> → **「API を増やさない」の制約は本実行・preview のもの。EXPLAIN は metadata API 可・レコード API 不可。**
 
 ## 5. ソース内キー重複
 
