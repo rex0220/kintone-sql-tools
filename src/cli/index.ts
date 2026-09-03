@@ -2,7 +2,7 @@
 // ksql CLI entrypoint (MVP: SELECT-only)
 // ============================================================
 
-import { appendFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { homedir, tmpdir } from "os";
@@ -2430,9 +2430,9 @@ async function run(): Promise<number> {
           if (sourcePath === undefined) return undefined;
           return {
             load: async () => {
-              let sourceStat: ReturnType<typeof lstatSync>;
+              let sourceStat: ReturnType<typeof statSync>;
               try {
-                sourceStat = lstatSync(sourcePath);
+                sourceStat = statSync(sourcePath);
               } catch (error) {
                 const reason = error instanceof Error ? error.message : String(error);
                 throw new FlowImportProviderError(

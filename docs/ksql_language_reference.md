@@ -3387,8 +3387,7 @@ SELECT * FROM #err;
   |---|---|
   | `ImportSourceDuplicateError` | named sourceの完全一致重複（resolver作成時に同期throw） |
   | `ImportSourceNotSuppliedError` | resolver未指定、またはsource名未登録 |
-  | `ImportSourceReadError` | raw resolver関数がthrow |
-  | `ImportSourceReadError` | loaderのread失敗または未知のreject |
+  | `ImportSourceReadError` | raw resolver関数のthrow、loaderのread失敗、または未知のreject |
   | `ImportSourceNotRegularFileError` | 呼出側が通常ファイル以外を拒否 |
   | `ImportSourceTooLargeError` | payloadが10 MiB超 |
   | `ImportSourceInvalidPayloadError` | handleの`load`が関数でない、bytes型またはencodingが不正 |
