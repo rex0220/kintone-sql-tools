@@ -1,24 +1,26 @@
-ksql 配布パッケージ (v3.75.0)
+ksql 配布パッケージ (v3.76.0)
 
 release 成果物:
-- ksql-plugin-v3.75.0.zip
-- ksql-mcp.mcpb (manifest version 3.75.0)
-- ksql-mcp.js (MCP server version 3.75.0)
+- ksql-plugin-v3.76.0.zip
+- ksql-mcp.mcpb (manifest version 3.76.0)
+- ksql-mcp.js (MCP server version 3.76.0)
 
-機能追加 (B177: /flow named IMPORT source 公開 API・既定 OFF・既存利用者は影響なし):
-- 公開 /flow API から IMPORT を使えるようにしました (kSQL-FlowNet の CSV 取込の前提)。
-  parseScript / validateScript / explainScript / createExecutionContext に共通の
-  enableImport gate を追加。省略または false は従来どおり KSQL1202 で拒否し、
-  resolver を渡すだけでは有効になりません。
-- source は path ではなく lazy loader が返す Uint8Array です (path 解決・通常ファイル・
-  symlink・allowlist・hash 検査は呼出側の責務)。CSV の文字コードは SQL ENCODING >
-  loader metadata > UTF-8、payload 上限は 10 MiB。
-- source 未供給・重複・read 不能・通常ファイル外・size 超過・不正 payload を安定
-  error code (ImportSourceNotSuppliedError 等) で分類し、失敗時の mutation API 0 を保証。
-- CLI/MCP/プラグインでも IMPORT source エラーの name / message が ImportSourceError から
-  上記の code へ細分化されます (未供給時は source 名を含む・CLI の fs 失敗は path と
-  ENOENT 等の原因を維持)。IMPORT の入力形・結果・10 MiB 上限は不変です。
+機能追加 (B178: /flow IMPORT source の materialize 通知・純加法・既定動作は不変):
+- createExecutionContext に onImportSourceMaterialized callback を追加しました
+  (kSQL-Flow Contract v1.1 の input_files[].rows を埋めるため)。IMPORT source の
+  decode と raw materialize が成功した直後、projection・validation・mutation より前に
+  1 回 await され、{ statementIndex, name, kind, rows, encoding } の 5 key だけを渡します。
+- rows は CSV = header を除く RFC 4180 data record 数 (quoted cell 内改行は 1 行・
+  subtable CSV は継続行を含む物理行)、JSON = top-level record 数。encoding は
+  SQL ENCODING > loader metadata > UTF-8 の解決後の値です。
+- maxRecords 超過・decode 失敗・source 境界エラーでは通知しません。callback の throw /
+  reject は当該文 error になり、その文の mutation API は 0 回です。
+- callback を指定しない既存利用者の結果・API 呼出し回数は v3.75.0 から変わりません。
+  CLI / MCP / プラグインは不変です。
 
+v3.75.0 の節は畳みました (B177 /flow named IMPORT source 公開 API = enableImport 既定 OFF・
+  lazy Uint8Array loader・安定 error code。CLI/MCP/プラグインの IMPORT source エラー
+  name/message は細分化)。
 v3.74.0 の節は畳みました (B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正 =
   対象アプリのフォーム定義を 1 回取得して判定。native UPSERT 本体は不変)。
 v3.73.0 の節は畳みました (B173 native UPSERT = /flow は既定 ON・CLI は --native-upsert /
@@ -104,12 +106,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.75.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.76.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.75.0): B177 /flow named IMPORT source 公開 API (既定 OFF・純加法)
+本リリース (v3.76.0): B178 /flow IMPORT source の materialize 通知 onImportSourceMaterialized (純加法)
+
+前リリース (v3.75.0): B177 /flow named IMPORT source 公開 API (既定 OFF・純加法)
 
 前リリース (v3.74.0): B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正
 
@@ -129,11 +133,9 @@ B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
 
 前リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
 
-前リリース (v3.66.1): B167 バッチ EXPLAIN の一時テーブル JOIN 失敗を修正 (EXPLAIN 面のみ・実行は不変)。
-
 前リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
 
-前リリース (v3.65.0 以前) の節は畳みました (B164 / B162・B163 ほか)。CHANGELOG.md と GitHub Releases を参照してください。
+前リリース (v3.66.1 以前) の節は畳みました (B167 / B164 / B162・B163 ほか)。CHANGELOG.md と GitHub Releases を参照してください。
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
 - 過去版は GitHub Releases の各タグに添付しています。

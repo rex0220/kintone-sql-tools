@@ -1,6 +1,6 @@
 # B178 `/flow` IMPORT source の materialize 通知（rows receipt）— 公開 API の不足
 
-- 状態: 🚧 **実装済み・レビュー済み・リリース待ち（2026-09-03・v3.76.0 予定）**＝[R1](ksql_b178_flow_import_source_materialized_receipt_spec_r1.md) どおり実装（公開型、managed context＋private Symbol seam、3 通知点、receipt、公開 API 受入）。実装報告は §6（codex がクレジット切れで停止したため Claude が代行）
+- 状態: ✅ **v3.76.0 でリリース済み（2026-09-04）**＝[R1](ksql_b178_flow_import_source_materialized_receipt_spec_r1.md) どおり実装（公開型、managed context＋private Symbol seam、3 通知点、receipt、公開 API 受入）。実装報告は §6（codex がクレジット切れで停止したため Claude が代行）
 - 種別: 改善（公開 API の純加法追加）
 - 優先: **中**（kSQL-Flow は本 API の公開まで `features.importCsv` を出さず 0.8.0 を release しない＝FlowNet 段階 1 の gate）
 - 版: **minor（v3.76.0 想定）**。既定動作は変えない
