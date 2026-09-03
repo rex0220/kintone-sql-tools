@@ -1,6 +1,6 @@
 # B178 `/flow` IMPORT source の materialize 通知（rows receipt）— 公開 API の不足
 
-- 状態: 📋 **仕様 R1 レビュー済み・実装可（2026-09-03）**＝[R1](ksql_b178_flow_import_source_materialized_receipt_spec_r1.md)（codex 起案・Claude レビュー節つき）。flownet セッションのレビュー待ち → codex 実装
+- 状態: 🚧 **実装済み・レビュー済み・リリース待ち（2026-09-03・v3.76.0 予定）**＝[R1](ksql_b178_flow_import_source_materialized_receipt_spec_r1.md) どおり実装（公開型、managed context＋private Symbol seam、3 通知点、receipt、公開 API 受入）。実装報告は §6（codex がクレジット切れで停止したため Claude が代行）
 - 種別: 改善（公開 API の純加法追加）
 - 優先: **中**（kSQL-Flow は本 API の公開まで `features.importCsv` を出さず 0.8.0 を release しない＝FlowNet 段階 1 の gate）
 - 版: **minor（v3.76.0 想定）**。既定動作は変えない
@@ -103,3 +103,50 @@ interface CreateExecutionContextOptions {
 
 - subtable CSV の継続行は `materializeCliKintoneCsvImportRecords` が `decoded.rows.forEach` で処理する（`importRecordsMaterializer.ts:85`）＝物理行に含まれる（コード上の確定。テストで固定する）。
 - kSQL-Flow 側は `statementIndex` の追加を受入済み（2026-09-03 flownet セッション回答）。同時に kSQL-Flow の Execution Result 契約は `input_files[].rows` を **optional** にする（receipt を受けた source だけ rows を記載）＝「maxRecords 超過・decode 失敗は通知なし」と整合。
+
+## 6. 実装報告（2026-09-03・Claude 代行）
+
+**経緯**: codex（`codex exec -s workspace-write`）が仕様 R1 どおり 15 ファイルを変更し targeted jest を通した後、**最終報告を書く前にワークスペースのクレジット切れで停止**（exit 2）。[B155 の前例](../ksql_release_history.md)どおり Claude が差分レビューとゲートを代行した。
+
+### 6.1 変更ファイル
+
+| ファイル | 要旨 |
+|---|---|
+| `src/flow-library/publicTypes.ts` | `FlowImportSourceMaterializedInfo`（5 key）と `CreateExecutionContextOptions.onImportSourceMaterialized?` |
+| `src/flow-library/index.ts` | option を分離して managed context へ専用引数で渡す。type export |
+| `src/execute.ts` | managed context に保持、文実行時に `statementIndex` を bind した内部 callback を private `unique symbol` で当該文 options へ付加、通知 helper、**通知点 3 箇所**（flat 共通 `materializeDmlSource` 直後／record-number UPDATE の CSV materialize 直後／subtable materializer 直後）。callback 完了後に deadline を再検査（timeout 後の detached 実行が mutation へ到達しないため） |
+| `src/import/types.ts` | 内部 `ImportMaterializationReceipt { rows, encoding }`。flat table と subtable records の戻り値に必須で保持 |
+| `src/import/materializeDmlSource.ts` / `jsonMaterializer.ts` / `importRecordsMaterializer.ts` | receipt の生成（CSV = `decoded.rows.length` と解決済み encoding／JSON = top-level 件数と `utf8`／subtable CSV = グループ化前の物理行） |
+| `src/flow-library/__tests__/importSourcePublicApi.test.ts` | 公開 API だけの受入 13 test（仕様 §6.2 の matrix・§6.3 error code 3 形・§6.4 の 5 key 固定・timeout 後の mutation 0・`onChunkWritten` との順序・同一 source 2 文・省略／no-op の非回帰） |
+| `CHANGELOG.md` / `README.md` / `docs/ksql_language_reference.md` / 仕様 R1 | 文書。R1 レビュー節の修正 3 件は本文へ反映済み |
+
+CLI/MCP/プラグインは symbol を設定しないため通知 helper は no-op。`ExecuteOptions` に公開 property は増えていない。
+
+### 6.2 ゲート（Claude 実行）
+
+| ゲート | 結果 |
+|---|---|
+| `npx jest src/flow-library/__tests__ src/import/__tests__` | 14 suites / 152 tests PASS |
+| `npm test`（version:check + docs:check + 全 suite + e2e） | 290 suites / 6,342 tests + e2e 26 PASS |
+| `npm run build:flow` + `flow:bundle-guard` | PASS。`dist-flow/flow-library/{publicTypes,index}.d.ts` に新型と option を確認 |
+| `npm run build:engine` + `engine:bundle-guard` + `engine:declaration-smoke` | PASS（engine の公開面は不変） |
+| `npx tsc --noEmit -p tsconfig.json` | `src/ui/desktop.ts` に 5 件のエラー。**main でも同じで B178 無関係**（配布物は esbuild と tsconfig.flow/engine で作られる） |
+
+### 6.3 仕様 §8 の未確認事項との対応
+
+| § 8 | 状態 |
+|---|---|
+| 1〜4（CRLF/BOM/quoted/NO HEADER） | 起票 §5 の実測で確定・受入テストで固定 |
+| 5（subtable CSV 継続行） | 受入テスト（親 1 行＋継続 1 行 → rows 2）で固定 |
+| 6（subtable の maxRecords は親数） | 未固定（現行意味論のまま。受入テスト未追加＝任意） |
+| 7（callback 未 resolve 中の mutation 0） | 受入テストで固定（gate Promise） |
+| 8（throw 後 fail-fast・再試行なし） | 受入テストで固定 |
+| 9（同一 source 2 文 → 2 回・index 相違） | 受入テストで固定 |
+| 10（VALIDATE ONLY / ON ERROR SKIP で 1 回） | 受入テストで固定 |
+| 11（`onChunkWritten` より先） | 受入テストで固定 |
+| 12（kSQL-Flow が `statementIndex` を受理） | flownet セッション回答で確定 |
+| 13（tarball の declaration・private symbol 非公開） | リリース時の `npm pack --dry-run` で確認する |
+
+### 6.4 意味が変わるため触らなかった既存テスト
+
+なし（既存テストは receipt callback の追加 assert だけ）。

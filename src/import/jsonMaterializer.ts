@@ -74,6 +74,7 @@ export function materializeJsonDmlSource(
     importPresence.push(present);
   });
   return {
+    receipt: { rows: records.length, encoding: "utf8" },
     rows,
     columns: targets.map((target) => target.code),
     columnMeta: new Map(targets.map((target) => [target.code, { fieldType: target.fieldType }])),

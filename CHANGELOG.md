@@ -3,6 +3,19 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.76.0（予定）
+
+### 機能追加（B178: `/flow` IMPORT source materialize receipt）**※ 純加法・既定動作は不変**
+
+- `FlowImportSourceMaterializedInfo` と
+  `CreateExecutionContextOptions.onImportSourceMaterialized` を公開します。
+- callbackはIMPORT sourceのraw materialize成功直後、projection・validation・mutationより前に
+  1回awaitされ、`statementIndex` / `name` / `kind` / `rows` / `encoding` の5 keyだけを返します。
+- CSVはheaderを除くRFC 4180 data record数（subtable CSVは継続行を含む）、JSONはtop-level
+  record数を通知します。CSV encodingはSQL指定、loader metadata、UTF-8既定の順で解決します。
+- callbackのthrow/rejectは既存のstatement errorへ変換され、その文のmutation APIは0回です。
+  callback省略時の結果、loader回数、kintone API回数はv3.75.0から変わりません。
+
 ## v3.75.0（2026-09-03）
 
 ### 機能追加（B177: `/flow` named IMPORT source 公開API）**※ 既定 OFF・既存利用者は影響なし**

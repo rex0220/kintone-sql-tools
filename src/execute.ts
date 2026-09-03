@@ -457,6 +457,7 @@ export interface MaterializedTable {
   readonly importRowErrors?: readonly (readonly import("./import/types").ImportRowError[])[];
   readonly importAudit?: import("./import/types").ImportColumnAudit;
   readonly recordNumberSourceValues?: readonly string[];
+  readonly receipt?: import("./import/types").ImportMaterializationReceipt;
   /** 直接の生成 CTE だけが持つ一意列。再実体化時には伝播しない。 */
   readonly uniqueGeneratedColumn?: string;
 }
@@ -792,10 +793,12 @@ export interface ExecuteOptions {
 }
 
 const statementEvaluationContextKey: unique symbol = Symbol("statementEvaluationContext");
+const importSourceMaterializedCallbackKey: unique symbol = Symbol("importSourceMaterializedCallback");
 const nativeUpsertExecutionKey: unique symbol = Symbol("nativeUpsertExecution");
 const nativeUpsertExplainCapabilityKey: unique symbol = Symbol("nativeUpsertExplainCapability");
 type InternalExecuteOptions = ExecuteOptions & {
   [statementEvaluationContextKey]?: EvaluationContext;
+  [importSourceMaterializedCallbackKey]?: (info: Omit<ManagedImportSourceMaterializedInfo, "statementIndex">) => void | Promise<void>;
   [nativeUpsertExecutionKey]?: boolean;
   [nativeUpsertExplainCapabilityKey]?: boolean;
 };
@@ -838,6 +841,15 @@ function bindStatementEvaluationContext(options: ExecuteOptions): ExecuteOptions
 
 function statementEvaluationContext(options: ExecuteOptions): EvaluationContext {
   return (options as InternalExecuteOptions)[statementEvaluationContextKey] ?? {};
+}
+
+async function notifyImportSourceMaterialized(
+  options: ExecuteOptions,
+  source: CsvDmlSource | JsonDmlSource,
+  receipt: import("./import/types").ImportMaterializationReceipt
+): Promise<void> {
+  const callback = (options as InternalExecuteOptions)[importSourceMaterializedCallbackKey];
+  if (callback) await callback({ name: source.sourceName, kind: source.kind, ...receipt });
 }
 
 export interface DmlUpdateModeSnapshotLoadInput {
@@ -1849,6 +1861,7 @@ export interface ManagedStatementExecutionContext {
   readonly failed: Set<number>;
   readonly cursorCleanups: Set<() => Promise<void>>;
   readonly onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>;
+  readonly onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>;
   nextIndex: number;
   aborted: "fail-fast" | "timeout" | "assertion" | "exit" | null;
   disposed: boolean;
@@ -1867,6 +1880,15 @@ export interface ManagedChunkWrittenInfo {
   updatedCount?: number;
 }
 
+/** @internal /flow IMPORT raw-materialization checkpoint payload. */
+interface ManagedImportSourceMaterializedInfo {
+  statementIndex: number;
+  name: string;
+  kind: "CSV" | "JSON";
+  rows: number;
+  encoding: import("./types/ast").ImportEncoding;
+}
+
 /** @internal Prepare the exact state consumed by executeBatchStatement(). */
 export function createManagedStatementExecutionContext(
   statements: readonly Statement[],
@@ -1874,7 +1896,8 @@ export function createManagedStatementExecutionContext(
   client: KintoneClient,
   options: BatchExecuteOptions = {},
   onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>,
-  enableNativeUpsert = false
+  enableNativeUpsert = false,
+  onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   const mutableStatements = [...statements];
@@ -1929,6 +1952,7 @@ export function createManagedStatementExecutionContext(
     failed: new Set(),
     cursorCleanups: new Set(),
     ...(onChunkWritten ? { onChunkWritten } : {}),
+    ...(onImportSourceMaterialized ? { onImportSourceMaterialized } : {}),
     nextIndex: 0,
     aborted: null,
     disposed: false,
@@ -1996,7 +2020,7 @@ export async function executeManagedStatement(
         )
       : cursorScope.client;
     const userConfirm = managed.options.confirm;
-    const statementOptions: BatchExecuteOptions = userConfirm
+    let statementOptions: BatchExecuteOptions = userConfirm
       ? {
           ...managed.options,
           confirm: (count, operation, detailContext) => userConfirm(count, operation, {
@@ -2010,6 +2034,19 @@ export async function executeManagedStatement(
           }),
         }
       : managed.options;
+    if (managed.onImportSourceMaterialized) {
+      statementOptions = {
+        ...statementOptions,
+        [importSourceMaterializedCallbackKey]: async (
+          materialized: Omit<ManagedImportSourceMaterializedInfo, "statementIndex">
+        ) => {
+          await managed.onImportSourceMaterialized!({ statementIndex: index, ...materialized });
+          // runWithDeadline cannot cancel the underlying Promise. Re-check here so a callback
+          // that settles after the deadline cannot let the detached execution reach mutation.
+          if (managed.deadline !== null && Date.now() >= managed.deadline) throw new BatchTimeoutError();
+        },
+      } as BatchExecuteOptions;
+    }
     const outcome = await runWithDeadline(
       executeBatchStatement({
         stmt: statement,
@@ -9670,6 +9707,7 @@ async function executeImport(
     const materialized = stmt.source.kind === "JSON"
       ? materializeJsonImportRecords(stmt.source, payload, targets, options.maxRecords ?? 10_000)
       : materializeCliKintoneCsvImportRecords(stmt.source, payload, targets, stmt.replaceSubtables ?? [], options.maxRecords ?? 10_000, stmt.recordNumberSourceHeader);
+    await notifyImportSourceMaterialized(options, stmt.source, materialized.receipt);
     const operation = stmt.source.kind === "CSV" ? "UPDATE" : stmt.keyFields ? "UPSERT" : "INSERT";
     const prepared = prepareImportRecords(materialized, targets, fieldInfos, numberPrecision, operation);
     if (stmt.source.kind === "CSV") return executeCsvSubtableReplacement(stmt, materialized, prepared, fieldInfos, client, options, tempTables);
@@ -9940,6 +9978,7 @@ async function executeImportRecordNumberUpdate(
   const sourceTable = materializeCsvDmlSource(
     stmt.source, payload, options.maxRecords ?? 10_000, stmt.fields, fieldInfos, stmt.recordNumberSourceHeader
   );
+  await notifyImportSourceMaterialized(options, stmt.source, sourceTable.receipt);
   const keyValues = sourceTable.recordNumberSourceValues;
   if (!keyValues) throw new Error("InternalError: record-number source values were not materialized.");
   // Global duplicate preflight deliberately precedes every record lookup and mutation.
@@ -10069,6 +10108,7 @@ async function materializeDmlSource(
   const raw = imported.source.kind === "JSON"
     ? materializeJsonDmlSource(imported.source, payload, jsonTargets, rowLimit)
     : materializeCsvDmlSource(imported.source, payload, rowLimit, stmt.fields, targetFields);
+  await notifyImportSourceMaterialized(options, imported.source, raw.receipt);
   imported.audit = raw.importAudit;
   if (imported.source.kind === "JSON") return raw;
   if (!imported.source.projection) return raw;

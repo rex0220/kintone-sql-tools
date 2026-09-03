@@ -3290,6 +3290,25 @@ IMPORT [UPDATE] INTO APP<n> ( <取込先> )
 resolverの存在だけではgateを開きません。loaderはparse・validate・EXPLAIN・context作成では呼ばれず、
 対象IMPORT文の実行到達時だけ呼ばれます。source名は完全一致・case-sensitiveです。
 
+`CreateExecutionContextOptions.onImportSourceMaterialized` を指定すると、sourceのdecodeとraw
+materializeが成功した直後、projection・validation・`ON ERROR SKIP`選別・確認・mutationより前に
+次の5 keyだけを持つreceiptが1回awaitされます。
+
+```ts
+{ statementIndex, name, kind, rows, encoding }
+```
+
+- `statementIndex` は対応する `StatementResult.index` と同じ0始まりです。同じsourceを複数文で
+  使った場合も文ごとに通知し、engineはdedupeしません。
+- CSVの `rows` はheaderを除くRFC 4180 data record数です。quoted cell内の改行は増分にせず、
+  subtable CSVでは親行と継続行を含む物理data record数です。1列CSVの空行は空値recordとして
+  数えますが、多列CSVの空行は列数不一致errorとなり通知しません。
+- JSONの `rows` はtop-level record数で、subtable child数ではありません。
+- CSVの `encoding` は `SQL ENCODING > loader metadata > "utf8"` の解決後、JSONは `"utf8"` です。
+- source load、payload検査、decode、materializer内検査、`maxRecords`超過で失敗した場合は通知しません。
+  callbackのthrow/rejectは既存のstatement error変換へそのまま渡り、その文のmutation APIは0回です。
+  callbackを省略した場合の結果とAPI呼出し回数は変わりません。
+
 ### CSV の取込
 
 列の対応は 3 通り:

@@ -145,7 +145,7 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     const handle = {} as ExecutionContext;
     const {
       client, script: _script, statements: _statements, meta: _meta, apps: _apps,
-      onChunkWritten, enableNativeUpsert, ...executeOptions
+      onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, ...executeOptions
     } = opts;
     const bindings = bindingsByStatements.get(statements as object);
     const executionClient = bindings ? routeClient(client, bindings) : client;
@@ -163,7 +163,8 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
         executionClient,
         executeOptions,
         routedOnChunkWritten,
-        enableNativeUpsert !== false
+        enableNativeUpsert !== false,
+        onImportSourceMaterialized
       )
     );
     if (bindings) bindingsByContexts.set(handle as object, bindings);
@@ -345,6 +346,7 @@ export type {
   FieldInfo,
   FlowImportProviderErrorCode,
   FlowImportSourceLoader,
+  FlowImportSourceMaterializedInfo,
   FlowImportSourcePayload,
   FlowImportSourceResolver,
   FlowNamedImportSource,

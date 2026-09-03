@@ -99,7 +99,7 @@ export interface FlowImportSourceMaterializedInfo {
   /** バッチ内の文 index。StatementResult.index と同じ0始まり。 */
   readonly statementIndex: number;
 
-  /** SQL の FROM CSV/JSON SOURCE で指定された source name。 */
+  /** SQL の FROM CSV <name> / FROM JSON <name> で指定された source name。 */
   readonly name: string;
 
   /** materialize した source 種別。 */
@@ -180,6 +180,8 @@ parse、validate、explain、context 作成だけでは callback を呼ばない
 | record-number update CSV | headerを除くraw data records数 |
 
 CSVの quoted cell 内改行は1つの record 内の文字であり、`rows` を増やさない。末尾改行は空のdata recordを暗黙追加する理由にしない。
+
+多列CSVの末尾または途中の空行は1 cellのrecordとしてdecodeされ、期待列数との不一致でerrorになるため通知しない。一方、1列CSVの空行は列数が一致する空値のdata recordとして数える（`code\nA\n\n` は `rows: 2`）。
 
 ### 2.5 encoding 規則
 
@@ -431,6 +433,7 @@ metadata API呼出し回数は、非回帰比較では固定するが、callback
 | quoted改行入りCSV | quoted cell内改行を別rowに数えず、callback `rows` はRFC 4180 data record数 |
 | CRLF CSV | LF版と同じdata record数を通知 |
 | 末尾改行あり／なし | 同じ論理CSV fixtureでcallback `rows` が一致 |
+| 1列CSVの末尾空行 | 空値のdata recordとして数え、`code\nA\n\n` のcallback `rows` は2 |
 | UTF-8 BOM | BOMなしfixtureと同じheader／data record数を通知 |
 | `NO HEADER COLUMNS` | 全recordsをdata rowsとして通知 |
 | SJIS・payload metadata | SQL encoding省略、payload `encoding:"sjis"` でcallback `encoding:"sjis"`。日本語fixtureの文はsuccess |
@@ -601,9 +604,9 @@ kSQL-Flow側のreceipt registry、同値検査、Execution Result `input_files`�
 
 ### 文言の修正（実装時に反映）
 
-1. §2.1 の `name` コメント「`FROM CSV/JSON SOURCE`」→ 実構文は `FROM CSV <name>` / `FROM JSON <name>`（`SOURCE` はキーワードではない）。
-2. §2.4 末尾「末尾改行は空の data record を暗黙追加する理由にしない」の直後に、上表の 2 行（多列空行＝エラー／1 列空行＝data record）を追記する。
-3. §6.2 に「1 列 CSV の末尾空行 → `rows` が +1」の固定テストを 1 行加える（先方 fixture の罠を engine 側でも固定する）。
+1. **反映済み。** §2.1 の `name` コメント「`FROM CSV/JSON SOURCE`」→ 実構文は `FROM CSV <name>` / `FROM JSON <name>`（`SOURCE` はキーワードではない）。
+2. **反映済み。** §2.4 末尾「末尾改行は空の data record を暗黙追加する理由にしない」の直後に、上表の 2 行（多列空行＝エラー／1 列空行＝data record）を追記する。
+3. **反映済み。** §6.2 に「1 列 CSV の末尾空行 → `rows` が +1」の固定テストを 1 行加える（先方 fixture の罠を engine 側でも固定する）。
 
 ### 残る未確認（§8 のうち実装後に Claude が実測するもの）
 
