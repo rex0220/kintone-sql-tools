@@ -267,7 +267,7 @@ npm パッケージは 2 つのサブパスを **semver 対象の公開 API** �
 | サブパス | 用途 | 主な export |
 |---|---|---|
 | `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
-| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
+| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createImportSourceResolver` / `FlowImportProviderError` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
 
 バッチ実行ランナー **kSQL Flow**（`/flow` API を使った公式ランナー・別リポジトリ）: https://github.com/rex0220/ksql-flow
 
@@ -288,6 +288,34 @@ try {
   await disposeExecutionContext(ctx);
 }
 ```
+
+`/flow` から named `IMPORT` source を使う場合は、全APIへ `enableImport: true` を明示し、
+pathではなくlazy loaderが返す `Uint8Array` を登録します。省略または `false` は従来どおり
+`KSQL1202` で拒否し、resolverを渡すだけでは有効になりません。
+
+```ts
+import {
+  createImportSourceResolver,
+  parseScript,
+  createExecutionContext,
+} from "@rex0220/kintone-sql-tools/flow";
+
+const capability = { enableImport: true } as const;
+const importSource = createImportSourceResolver([{
+  name: "orders",
+  loader: { async load() { return { bytes, encoding: "sjis" }; } },
+}]);
+const parsed = parseScript(sql, capability);
+const ctx = createExecutionContext({
+  ...capability, client, statements: parsed.statements, meta: parsed.meta, importSource,
+});
+```
+
+source名は完全一致・case-sensitiveです。loaderは対象文の実行到達時だけ呼ばれます。
+CSVの文字コードは `SQL ENCODING` > loader metadata > UTF-8、payload上限は10 MiBです。
+path解決、通常ファイル・symlink・allowlist・hash検査、open/readは呼出側の責務であり、
+engineはpathを受け取りません。providerは `FlowImportProviderError` でread不能または通常ファイル外を
+分類でき、その他のsource境界エラーも `StatementResult.error.code` の安定codeで返ります。
 
 読取上限は既定 10,000 件（`maxRecords`）です。一時テーブルの実体化には**独立の** `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が適用されるため、大きなバッチでは両方を併せて指定してください:
 

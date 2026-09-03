@@ -3,6 +3,20 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## Unreleased
+
+### 機能追加（`/flow` named IMPORT source 公開API）
+
+- `FlowImportSourcePayload` / `FlowImportSourceLoader` / `FlowImportSourceResolver` /
+  `FlowNamedImportSource`、`FlowImportProviderError`、`createImportSourceResolver` を公開しました。
+- `parseScript` / `validateScript` / `explainScript` / `createExecutionContext` に共通の
+  `enableImport` gateを追加しました。既定OFFで、resolverだけを渡しても有効にならず、従来の
+  `KSQL1202` を維持します。
+- sourceはpathではなくlazy loaderが返す `Uint8Array` です。CSV encodingは
+  SQL `ENCODING` > loader metadata > UTF-8、実payload上限は10 MiBです。
+- source未供給、重複、read不能、通常ファイル外、size超過、不正payloadを安定error codeで分類し、
+  失敗時のmutation API 0を保証します。既存consumerの移行は不要です。
+
 ## v3.74.0（2026-08-25）
 
 ### 修正（B176: EXPLAIN の native UPSERT 適格性が常に `UNKNOWN` だった）

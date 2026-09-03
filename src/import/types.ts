@@ -4,8 +4,8 @@ import type { DmlValidationErrorCode } from "../core/dmlValidation";
 import type { DecodedJsonValue } from "./jsonDecoder";
 
 export interface ImportSourcePayload {
-  bytes: Uint8Array;
-  encoding?: ImportEncoding;
+  readonly bytes: Uint8Array;
+  readonly encoding?: ImportEncoding;
 }
 
 export interface ImportSourceHandle {

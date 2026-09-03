@@ -17,6 +17,7 @@ import {
 } from "../execute";
 import { createKintoneClient } from "./writableClient";
 import { KsqlFlowError, normalizeFlowError } from "./errors";
+import { createImportSourceResolver, FlowImportProviderError } from "./importSources";
 import type {
   CreateExecutionContextOptions,
   Diagnostic,
@@ -92,7 +93,7 @@ export async function explainScript(
       "flow-explain",
       opts.maxRecords,
       opts.cursorMaxActive,
-      false,
+      opts.enableImport === true,
       opts.dmlMaxRows,
       opts.dmlMaxSubtableRows,
       opts.resolveMetadata,
@@ -134,6 +135,12 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
       }
       statements = opts.statements;
       dialect = opts.meta.dialect;
+    }
+    if (opts.enableImport !== true && statements.some(statementUsesImport)) {
+      throw new KsqlFlowError(
+        "KSQL1202",
+        "IMPORT is not supported (capability is disabled)."
+      );
     }
     const handle = {} as ExecutionContext;
     const {
@@ -283,6 +290,11 @@ function parseWithBindings(source: string, opts: ParseScriptOptions): ParseScrip
   return parsed;
 }
 
+function statementUsesImport(statement: Statement): boolean {
+  return statement.type === "IMPORT"
+    || (statement.type === "EXPLAIN" && statement.query.type === "IMPORT");
+}
+
 function normalizedLogicalAppResult(source: string, apps: Readonly<Record<string, number>>) {
   const resolved = new Map<string, number>();
   for (const [name, appId] of Object.entries(apps)) {
@@ -321,7 +333,7 @@ function routeClient(
 }
 
 export { isDmlResult } from "./publicTypes";
-export { createKintoneClient, KsqlFlowError };
+export { createImportSourceResolver, createKintoneClient, FlowImportProviderError, KsqlFlowError };
 export type {
   CreateExecutionContextOptions,
   CreateKintoneClientConfig,
@@ -331,6 +343,11 @@ export type {
   ExplainScriptOptions,
   ExplainScriptResult,
   FieldInfo,
+  FlowImportProviderErrorCode,
+  FlowImportSourceLoader,
+  FlowImportSourcePayload,
+  FlowImportSourceResolver,
+  FlowNamedImportSource,
   FlowChunkWrittenInfo,
   FlowDeleteResult,
   FlowDmlResult,
@@ -343,6 +360,7 @@ export type {
   KintoneNativeUpsertResult,
   FlowUpdateResult,
   FlowUpsertResult,
+  ImportEncoding,
   ParseScriptOptions,
   ParseScriptResult,
   PreviewResult,

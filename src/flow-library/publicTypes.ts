@@ -111,8 +111,35 @@ export type SchemaResolver = (
   appId: number
 ) => readonly FieldInfo[] | Promise<readonly FieldInfo[]>;
 
+export type ImportEncoding = "utf8" | "sjis";
+
+export interface FlowImportSourcePayload {
+  readonly bytes: Uint8Array;
+  readonly encoding?: ImportEncoding;
+}
+
+export interface FlowImportSourceLoader {
+  load(): Promise<FlowImportSourcePayload>;
+}
+
+/** Exact, case-sensitive SQL source name to lazy, path-free loader. */
+export type FlowImportSourceResolver = (
+  name: string
+) => FlowImportSourceLoader | undefined;
+
+export interface FlowNamedImportSource {
+  readonly name: string;
+  readonly loader: FlowImportSourceLoader;
+}
+
+export type FlowImportProviderErrorCode =
+  | "ImportSourceReadError"
+  | "ImportSourceNotRegularFileError";
+
 export interface ParseScriptOptions {
   apps?: Readonly<Record<string, number>>;
+  /** Omitted/false keeps IMPORT unavailable and preserves KSQL1202. */
+  enableImport?: boolean;
 }
 
 export interface ParseScriptResult {
@@ -173,6 +200,8 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   asOf?: Date;
   timezone?: string;
   continueOnError?: boolean;
+  /** Named, path-free source resolver. It never enables IMPORT implicitly. */
+  importSource?: FlowImportSourceResolver;
   /** 素の UPSERT で native UPSERT を許可する。省略時は true。 */
   enableNativeUpsert?: boolean;
   /**

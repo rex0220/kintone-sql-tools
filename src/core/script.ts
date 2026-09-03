@@ -15,6 +15,8 @@ import { parseScriptHeader, type ScriptHeaderMeta } from "./scriptHeader";
 export interface ParseScriptOptions {
   /** Logical application name to physical kintone application ID. */
   apps?: Readonly<Record<string, number>>;
+  /** Omitted/false keeps IMPORT unavailable. */
+  enableImport?: boolean;
 }
 
 export interface ParseScriptResult {
@@ -64,6 +66,7 @@ export function parseScript(source: string, opts: ParseScriptOptions = {}): Pars
   try {
     const parsed = new Parser(new Lexer(sql).tokenize(), {
       dialect1: header.meta.dialect === 1,
+      import: opts.enableImport === true,
     }).parseStatementsWithRanges();
     const statementRanges = parsed.statementRanges.map((range) => ({
       start: sourceOffsetForNormalizedOffset(range.start, rewriteSegments, "start"),

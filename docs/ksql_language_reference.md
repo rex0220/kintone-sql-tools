@@ -3283,6 +3283,12 @@ IMPORT [UPDATE] INTO APP<n> ( <取込先> )
 | CLI | `--import-csv <name>=<path>` / `--import-json <name>=<path>`（反復可・指定で gate ON） |
 | MCP | 引数 `importSources: [{ name, text \| base64, encoding? }]`（inline・パス不可・指定で gate ON） |
 | プラグイン | ヘッダーの「ファイルを選択」（ソース名＝拡張子を除去し、識別子に使えない文字を `_` に正規化。`sales.csv` → `sales`、`sales 2026.csv` → `sales_2026`） |
+| `/flow` 公開 API | `enableImport: true` と、`createImportSourceResolver` または `FlowImportSourceResolver` が返すlazy loader（`Uint8Array`、path不可） |
+
+`/flow` の `enableImport` は `parseScript` / `validateScript` / `explainScript` /
+`createExecutionContext` で共通です。省略または `false` は `KSQL1202` の既存fail-closed動作を維持し、
+resolverの存在だけではgateを開きません。loaderはparse・validate・EXPLAIN・context作成では呼ばれず、
+対象IMPORT文の実行到達時だけ呼ばれます。source名は完全一致・case-sensitiveです。
 
 ### CSV の取込
 
@@ -3308,7 +3314,8 @@ IMPORT INTO APP100 (顧客コード, 金額)
 FROM CSV sales NO HEADER COLUMNS (顧客コード, 金額);
 ```
 
-- CSV は RFC 4180 準拠。`ENCODING` で UTF-8 / Shift_JIS、BOM 許容。
+- CSV は RFC 4180 準拠。`ENCODING` で UTF-8 / Shift_JIS、BOM 許容。`/flow` の有効文字コードは
+  **SQL `ENCODING` > loaderの `encoding` > UTF-8** の優先順位です。
 
 ### JSON の取込
 
@@ -3370,6 +3377,20 @@ SELECT * FROM #err;
 ### 制限
 
 - **添付ファイル（FILE）は非対応**（cli-kintone を使う）。
+- source payloadは実byte長で **10 MiB以下**。`/flow` engineはpath、URL、file handleを受け取らず、
+  path解決、`lstat` / `realpath`、通常ファイル・symlink・allowlist・hash、open/readの検査は呼出側が行います。
+- `/flow` source境界の安定codeは次のとおりです。実行時エラーは
+  `StatementResult { status: "error", error: { code, message } }` で返り、decode・schema/DML検証まで
+  全て成功する前にmutation APIを呼びません。
+
+  | code | 条件 |
+  |---|---|
+  | `ImportSourceDuplicateError` | named sourceの完全一致重複（resolver作成時に同期throw） |
+  | `ImportSourceNotSuppliedError` | resolver未指定、またはsource名未登録 |
+  | `ImportSourceReadError` | loaderのread失敗または未知のreject |
+  | `ImportSourceNotRegularFileError` | 呼出側が通常ファイル以外を拒否 |
+  | `ImportSourceTooLargeError` | payloadが10 MiB超 |
+  | `ImportSourceInvalidPayloadError` | bytes型またはencodingが不正 |
 - **取込行数の上限 `maxRecords` は面・経路で異なる**（超過はサイレント切り捨てせず fail-closed）:
   - CLI = 既定 **500**（`--max-records` で拡張）。
   - プラグイン = 初期値 **3000**（UI で変更可）。
