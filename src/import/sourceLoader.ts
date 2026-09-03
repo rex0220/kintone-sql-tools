@@ -65,13 +65,22 @@ export function resolveImportSource(name: string, resolver?: ImportSourceResolve
   if (!resolver) {
     throw new ImportSourceBoundaryError(
       "ImportSourceNotSuppliedError",
-      "IMPORT source capability is not available; the named source was not supplied."
+      `the named IMPORT source ${JSON.stringify(name)} was not supplied.`
     );
   }
   try {
     const handle = resolver(name);
     if (!handle) {
-      throw new ImportSourceBoundaryError("ImportSourceNotSuppliedError", "the named IMPORT source was not supplied.");
+      throw new ImportSourceBoundaryError(
+        "ImportSourceNotSuppliedError",
+        `the named IMPORT source ${JSON.stringify(name)} was not supplied.`
+      );
+    }
+    if (typeof handle !== "object" || typeof handle.load !== "function") {
+      throw new ImportSourceBoundaryError(
+        "ImportSourceInvalidPayloadError",
+        "resolver must return a handle with a load function."
+      );
     }
     return handle;
   } catch (error) {

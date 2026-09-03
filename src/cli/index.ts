@@ -2,7 +2,7 @@
 // ksql CLI entrypoint (MVP: SELECT-only)
 // ============================================================
 
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { createInterface } from "readline";
 import { homedir, tmpdir } from "os";
@@ -33,6 +33,7 @@ import {
   type SelectResult,
 } from "../core";
 import { withNativeUpsertExecutionOption } from "../execute";
+import { FlowImportProviderError } from "../flow-library/importSources";
 import { extractTypedPushdownCandidates } from "../core/optimization/wherePredicatePushdown";
 import { statementUsesRelativeDateResolution } from "../core/optimization/relativeDatePushdownGuard";
 import type { SelectStatement } from "../types/ast";
@@ -2426,7 +2427,38 @@ async function run(): Promise<number> {
     const importSource = importEnabled
       ? (name: string) => {
           const sourcePath = args.importCsv[name] ?? args.importJson[name];
-          return sourcePath === undefined ? undefined : { load: async () => ({ bytes: new Uint8Array(readFileSync(sourcePath)) }) };
+          if (sourcePath === undefined) return undefined;
+          return {
+            load: async () => {
+              let sourceStat: ReturnType<typeof lstatSync>;
+              try {
+                sourceStat = lstatSync(sourcePath);
+              } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error);
+                throw new FlowImportProviderError(
+                  "ImportSourceReadError",
+                  `failed to inspect IMPORT source "${sourcePath}": ${reason}`,
+                  error
+                );
+              }
+              if (!sourceStat.isFile()) {
+                throw new FlowImportProviderError(
+                  "ImportSourceNotRegularFileError",
+                  `IMPORT source "${sourcePath}" is not a regular file.`
+                );
+              }
+              try {
+                return { bytes: new Uint8Array(readFileSync(sourcePath)) };
+              } catch (error) {
+                const reason = error instanceof Error ? error.message : String(error);
+                throw new FlowImportProviderError(
+                  "ImportSourceReadError",
+                  `failed to read IMPORT source "${sourcePath}": ${reason}`,
+                  error
+                );
+              }
+            },
+          };
         }
       : undefined;
     const confirm = async (count: number, operation: "UPDATE" | "DELETE" | "INSERT", context?: DmlConfirmContext): Promise<boolean> => {

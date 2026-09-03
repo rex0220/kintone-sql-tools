@@ -3387,10 +3387,11 @@ SELECT * FROM #err;
   |---|---|
   | `ImportSourceDuplicateError` | named sourceの完全一致重複（resolver作成時に同期throw） |
   | `ImportSourceNotSuppliedError` | resolver未指定、またはsource名未登録 |
+  | `ImportSourceReadError` | raw resolver関数がthrow |
   | `ImportSourceReadError` | loaderのread失敗または未知のreject |
   | `ImportSourceNotRegularFileError` | 呼出側が通常ファイル以外を拒否 |
   | `ImportSourceTooLargeError` | payloadが10 MiB超 |
-  | `ImportSourceInvalidPayloadError` | bytes型またはencodingが不正 |
+  | `ImportSourceInvalidPayloadError` | handleの`load`が関数でない、bytes型またはencodingが不正 |
 - **取込行数の上限 `maxRecords` は面・経路で異なる**（超過はサイレント切り捨てせず fail-closed）:
   - CLI = 既定 **500**（`--max-records` で拡張）。
   - プラグイン = 初期値 **3000**（UI で変更可）。

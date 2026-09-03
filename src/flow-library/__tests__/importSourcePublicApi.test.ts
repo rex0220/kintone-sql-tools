@@ -7,6 +7,7 @@ import {
   FlowImportProviderError,
   parseScript,
   validateScript,
+  type FlowImportSourceLoader,
   type FlowImportSourcePayload,
   type FlowKintoneClient,
 } from "../index";
@@ -238,6 +239,7 @@ test.each([
   ["unknown rejection", { load: async () => { throw new Error("C:\\private\\token.csv"); } }, "ImportSourceReadError"],
   ["not regular", { load: async () => { throw new FlowImportProviderError("ImportSourceNotRegularFileError", "source is not a regular file"); } }, "ImportSourceNotRegularFileError"],
   ["too large", { load: async () => ({ bytes: new Uint8Array(10 * 1024 * 1024 + 1) }) }, "ImportSourceTooLargeError"],
+  ["invalid handle", {} as FlowImportSourceLoader, "ImportSourceInvalidPayloadError"],
   ["invalid bytes", { load: async () => ({ bytes: "path.csv" } as unknown as FlowImportSourcePayload) }, "ImportSourceInvalidPayloadError"],
   ["invalid encoding", { load: async () => ({ bytes: utf8("code\nA"), encoding: "utf16" } as unknown as FlowImportSourcePayload) }, "ImportSourceInvalidPayloadError"],
 ])("%s is returned as a statement error with zero mutations", async (_label, loader, code) => {
@@ -254,9 +256,35 @@ test.each([
   expect(mock.putRecords).not.toHaveBeenCalled();
   expect(mock.deleteRecords).not.toHaveBeenCalled();
   expect(mock.upsertRecords).not.toHaveBeenCalled();
+  if (_label === "missing" || _label === "invalid handle") {
+    expect(mock.getFields).not.toHaveBeenCalled();
+  }
+  if (_label === "missing") {
+    expect(result.error?.message).toBe(
+      'ImportSourceNotSuppliedError: the named IMPORT source "source" was not supplied.'
+    );
+  }
   if (code === "ImportSourceReadError") {
     expect(result.error?.message).not.toContain("private");
     expect(Object.keys(result.error ?? {})).not.toContain("cause");
   }
+  await disposeExecutionContext(context);
+});
+
+test("a raw resolver exception becomes ImportSourceReadError before kintone API calls", async () => {
+  const sql = "IMPORT INTO APP1 (code) FROM CSV source";
+  const mock = client();
+  const parsed = parseScript(sql, { enableImport: true });
+  const context = createExecutionContext({
+    client: mock.value,
+    statements: parsed.statements,
+    meta: parsed.meta,
+    enableImport: true,
+    importSource: () => { throw new Error("resolver failure"); },
+  });
+  const result = await executeStatement(parsed.statements[0], context);
+  expect(result).toMatchObject({ status: "error", error: { code: "ImportSourceReadError" } });
+  expect(mock.getFields).not.toHaveBeenCalled();
+  expect(mock.postRecords).not.toHaveBeenCalled();
   await disposeExecutionContext(context);
 });

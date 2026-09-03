@@ -1630,7 +1630,8 @@ test("IMPORT ON ERROR SKIP/VALIDATE ONLY は不良行を#errorへ隔離し単文
 
 test("IMPORT gate/source absence fail before form API", async () => {
   const client = makeClient({ records: [] });
-  await expect(execute("IMPORT INTO APP100 (code) FROM CSV missing", client, { enableImport: true })).rejects.toThrow("capability is not available");
+  await expect(execute("IMPORT INTO APP100 (code) FROM CSV missing", client, { enableImport: true }))
+    .rejects.toThrow('ImportSourceNotSuppliedError: the named IMPORT source "missing" was not supplied.');
   expect(client.getFields).toBeDefined();
   expect(client.postCalls).toHaveLength(0);
 });

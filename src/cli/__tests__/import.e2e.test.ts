@@ -68,3 +68,47 @@ test("CLI --import-json <name>=<path> supplies a named source to IMPORT", async 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("CLI import source fs failures retain the path and OS cause", async () => {
+  postRecords.mockClear();
+  const dir = mkdtempSync(join(tmpdir(), "ksql-import-missing-"));
+  const missingPath = join(dir, "missing.csv");
+  const stderr = jest.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const code = await runWithArgv([
+      "--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy", "--app", "100",
+      "--allow-dml", "--yes", "--import-csv", `people=${missingPath}`,
+      "-e", "IMPORT INTO APP100 (code,name) FROM CSV people",
+    ]);
+    const output = stderr.mock.calls.flat().join("");
+    expect(code).toBe(1);
+    expect(output).toContain("ImportSourceReadError");
+    expect(output).toContain(missingPath);
+    expect(output).toContain("ENOENT");
+    expect(postRecords).not.toHaveBeenCalled();
+  } finally {
+    stderr.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("CLI rejects a directory import source with its path", async () => {
+  postRecords.mockClear();
+  const dir = mkdtempSync(join(tmpdir(), "ksql-import-directory-"));
+  const stderr = jest.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const code = await runWithArgv([
+      "--base-url", "https://example.cybozu.com", "--auth", "token", "--token", "dummy", "--app", "100",
+      "--allow-dml", "--yes", "--import-json", `people=${dir}`,
+      "-e", "IMPORT INTO APP100 (code,name) FROM JSON people",
+    ]);
+    const output = stderr.mock.calls.flat().join("");
+    expect(code).toBe(1);
+    expect(output).toContain("ImportSourceNotRegularFileError");
+    expect(output).toContain(dir);
+    expect(postRecords).not.toHaveBeenCalled();
+  } finally {
+    stderr.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

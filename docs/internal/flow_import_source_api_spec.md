@@ -2,7 +2,8 @@
 
 - 作成日: 2026-09-03
 - 対象: `@rex0220/kintone-sql-tools/flow`（engine リポジトリ）
-- 状態: **実装計画。kSQL-FlowNet 段階1の blocking prerequisite**
+- ステータス: 🚧 **B177 実装済み・次の機能リリースへ同梱待ち**（`flow:declaration-smoke` は任意・未実施）
+- 課題: [B177 台帳](../ksql_issue_tracker.md#1-バックログ未リリース要対応)
 - 上流要求: `C:\Users\rex02\Projects\ksql-flownet\docs\internal\csv-io-implementation-plan.md` §2.1、§3.1
 - SemVer: **minor**。既存利用者の既定動作を変えない additive な公開 API 追加
 
@@ -92,7 +93,7 @@ const importSource = (name: string) => {
 };
 ```
 
-この CLI 実装は path を engine core へ渡してはいないが、`readFileSync` の前に通常ファイルを検査せず、fs error を安定 code に正規化しない。公開 `/flow` 実装でこの CLI module を直接 import してはならない。本件は公開 `/flow` の prerequisite に限定し、公開済みCLIのerror/message契約は変更しない。kSQL-Flow 固有の allowlist、realpath、sha256、保持期限は別リポジトリの責務である。
+CLI loader は path を engine core へ渡さず、`lstatSync` で通常ファイルを確認してから `readFileSync` する。検査・read の fs failure は path と OS 原因（`ENOENT` 等）を含む `ImportSourceReadError` 相当にし、directory 等は path 入りの `ImportSourceNotRegularFileError` 相当にする。これは path を指定した CLI 呼び出し側だけの詳細であり、公開 `/flow` 境界の message に path を含めない契約は変えない。公開 `/flow` 実装でこの CLI module を直接 importしてはならない。kSQL-Flow 固有の allowlist、realpath、sha256、保持期限は別リポジトリの責務である。
 
 ### 1.5 `executeImport` と `executeOnErrorSkip`
 
@@ -250,11 +251,11 @@ kSQL-Flow は FlowNet から受けた検証済み絶対 path に対し、`lstat`
 | --- | --- | --- | --- |
 | `KSQL1202` | `enableImport !== true` で IMPORT / EXPLAIN IMPORT | parse/validate、または context 作成 | loader・kintone API・mutation 0 |
 | `ImportSourceDuplicateError` | named source 登録に完全一致する name が複数 | `createImportSourceResolver` | resolverを作らず同期 throw |
-| `ImportSourceNotSuppliedError` | SQL が参照する name を resolver が返さない、または resolver 未指定 | IMPORT 文の source 解決 | loader・当該文のkintone API・mutation 0 |
-| `ImportSourceReadError` | loader が open/read不能を報告、または未知の理由でreject | loader await | mutation 0。causeは非enumerable、pathをmessageに含めない |
+| `ImportSourceNotSuppliedError` | SQL が参照する name を resolver が返さない、または resolver 未指定 | IMPORT 文の source 解決 | message は `ImportSourceNotSuppliedError: the named IMPORT source "<name>" was not supplied.`。loader・当該文のkintone API・mutation 0 |
+| `ImportSourceReadError` | raw resolver 関数が throw、loader が open/read不能を報告、または未知の理由でreject | source 解決または loader await | mutation 0。causeは非enumerable。公開 `/flow` loader はpathをmessageに含めず、CLI fs loaderだけはpathと原因を保持 |
 | `ImportSourceNotRegularFileError` | caller が directory、device、socket等を拒否 | loader await | read完了扱いにせず mutation 0 |
 | `ImportSourceTooLargeError` | 実 payload が10 MiB超 | loader成功直後 | decode・mutation 0 |
-| `ImportSourceInvalidPayloadError` | bytesが`Uint8Array`でない、encodingが不正 | loader成功直後 | decode・mutation 0 |
+| `ImportSourceInvalidPayloadError` | resolver が返す handle の `load` が関数でない、bytesが`Uint8Array`でない、encodingが不正 | source 解決またはloader成功直後 | decode・mutation 0 |
 
 `executeStatement` は現行の managed execution 契約どおり、実行中の source errorを原則 throw せず `StatementResult { status: "error", error: { code, message } }` で返し、後続を fail-fast skip にする。登録時の重複、context引数不整合、context lifecycle errorは同期/Promise rejectionの `KsqlFlowError` とする。この境界を公開テストで固定し、呼び出し側が message の文字列照合をしなくて済むようにする。
 
@@ -359,12 +360,13 @@ mock `FlowKintoneClient` と公開 `/flow` exportだけをimportするテスト�
 | capability省略の `createExecutionContext({script})` | `KsqlFlowError.code === "KSQL1202"` |
 | capability省略でIMPORT ASTを `statements+meta` 入力 | context作成時 `KSQL1202`、resolver/load 0 |
 | source未供給 | statement `status:error`、`ImportSourceNotSuppliedError`、mutation 0 |
+| raw resolver関数がthrow | `ImportSourceReadError`、当該文のkintone API・mutation 0 |
 | named source重複 | `createImportSourceResolver` が `ImportSourceDuplicateError`、loader 0 |
 | loader read不能 | `ImportSourceReadError`、cause非列挙、messageにpath/token/cell値なし |
 | directory等 | callerの `ImportSourceNotRegularFileError` がstatement codeへ保持、mutation 0 |
 | `10 MiB + 1 byte` | `ImportSourceTooLargeError`、decode/mutation 0。metadata API回数は非契約 |
 | `10 MiB` 境界 | size理由では拒否しない |
-| bytes型不正 / encoding不正 | `ImportSourceInvalidPayloadError`、mutation 0 |
+| handleの`load`が関数でない / bytes型不正 / encoding不正 | `ImportSourceInvalidPayloadError`、mutation 0 |
 | malformed UTF-8/SJIS、RFC4180不正 | 既存 `ImportSourceError`。source transport codeと混同しない |
 
 ### 7.3 回帰・配布検証
@@ -422,7 +424,7 @@ const context = createExecutionContext({
 });
 ```
 
-実装時のkSQL-Flow側は `classifyProviderFailure` を具体化し、通常ファイル以外を `ImportSourceNotRegularFileError`、open/read不能を `ImportSourceReadError` にする。pathをerror messageへ含めず、監査用の安全な source name と内部ログのredacted識別子を分ける。`--import-csv` / `--import-json` の重複はengine helperでも二重に閉じる。
+実装時のkSQL-Flow側は `classifyProviderFailure` を具体化し、通常ファイル以外を `ImportSourceNotRegularFileError`、open/read不能を `ImportSourceReadError` にする。公開 `/flow` result のerror messageへpathを含めず、監査用の安全な source name と内部ログのredacted識別子を分ける。pathを明示入力する本リポジトリのCLI fs loaderだけは、診断のためmessageにpathと原因を保持する。`--import-csv` / `--import-json` の重複はengine helperでも二重に閉じる。
 
 内部CLI bundleの直接import、`as unknown as ExecuteOptions` 等による非公開option注入、`dist-cli/ksql.js` の関数呼出し、engineにpathを渡す独自拡張は禁止する。
 

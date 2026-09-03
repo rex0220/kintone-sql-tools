@@ -16,6 +16,9 @@
   SQL `ENCODING` > loader metadata > UTF-8、実payload上限は10 MiBです。
 - source未供給、重複、read不能、通常ファイル外、size超過、不正payloadを安定error codeで分類し、
   失敗時のmutation API 0を保証します。既存consumerの移行は不要です。
+- CLI/MCP/プラグインを含むIMPORT sourceエラーの `name` / `message` は、従来の
+  `ImportSourceError` から `ImportSourceNotSuppliedError` 等へ細分化されます。未供給時はsource名を
+  messageに含み、CLIのfs失敗は従来どおりpathと原因（`ENOENT` 等）を含む詳細を維持します。
 
 ## v3.74.0（2026-08-25）
 
