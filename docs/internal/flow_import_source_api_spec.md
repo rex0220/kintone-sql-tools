@@ -2,7 +2,7 @@
 
 - 作成日: 2026-09-03
 - 対象: `@rex0220/kintone-sql-tools/flow`（engine リポジトリ）
-- ステータス: 🚧 **B177 実装済み・次の機能リリースへ同梱待ち**（`flow:declaration-smoke` は任意・未実施）
+- ステータス: ✅ **B177 v3.75.0 でリリース済み（2026-09-03）**（`flow:declaration-smoke` は任意・未実施）
 - 課題: [B177 台帳](../ksql_issue_tracker.md#1-バックログ未リリース要対応)
 - 上流要求: `C:\Users\rex02\Projects\ksql-flownet\docs\internal\csv-io-implementation-plan.md` §2.1、§3.1
 - SemVer: **minor**。既存利用者の既定動作を変えない additive な公開 API 追加

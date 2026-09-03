@@ -3,9 +3,13 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
-## Unreleased
+## v3.75.0（2026-09-03）
 
-### 機能追加（`/flow` named IMPORT source 公開API）
+### 機能追加（B177: `/flow` named IMPORT source 公開API）**※ 既定 OFF・既存利用者は影響なし**
+
+kSQL-FlowNet の CSV 取込（段階 1）の前提として、公開 `/flow` API から `IMPORT` を使えるようにしました。
+`enableImport` を明示しない限り従来どおり `KSQL1202` で拒否され、`/engine`・CLI・MCP・プラグインの
+既存の IMPORT 入力形と結果は変わりません（変わるのは下記のエラー `name` / `message` のみ）。
 
 - `FlowImportSourcePayload` / `FlowImportSourceLoader` / `FlowImportSourceResolver` /
   `FlowNamedImportSource`、`FlowImportProviderError`、`createImportSourceResolver` を公開しました。
