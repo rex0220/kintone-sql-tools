@@ -150,3 +150,22 @@ CLI/MCP/プラグインは symbol を設定しないため通知 helper は no-o
 ### 6.4 意味が変わるため触らなかった既存テスト
 
 なし（既存テストは receipt callback の追加 assert だけ）。
+
+## 7. リリース後の codex 最終チェックと Claude の実測（2026-09-04）
+
+[codex 報告（原文）](ksql_b178_codex_final_check_report.md)。**総評＝実装の欠陥なし（Critical / 実装上の Major なし）。受入テストの補強が必要**（Major 2・Minor 3）。指摘はすべて file:line の静的根拠つきで、Claude が公開 API のテストとして実測した結果は次のとおり。
+
+| codex の指摘 | 実測（追加した受入テスト） | 結果 |
+|---|---|---|
+| Major: projection テストが修正前でも通る（raw 2 行＝projection 後 2 行） | projection が失敗する形（存在しない列）で receipt 1 回・文は error・mutation 0 | 通知は raw 直後で確定 |
+| Major: callback throw の mutation 0 が flat INSERT だけ | 7 形（flat INSERT / UPSERT / VALIDATE ONLY / ON ERROR SKIP / record-number UPDATE / subtable CSV / subtable JSON）で callback 1 回・error・mutation 0 | 5 経路すべて成立 |
+| Minor: timeout テストが callback 未到達でも通る | callback 開始を観測してから deadline 超過 → TimeoutError・mutation 0 | 成立 |
+| Minor: matrix 未収録＝subtable の maxRecords（親数）と receipt（物理行）の同時確認 | 親 1＋継続 2・`maxRecords: 1` で success・`rows: 3` | 成立 |
+| Minor: matrix 未収録＝SQL ENCODING と payload metadata の逆転で receipt が SQL 側 | UTF8/sjis・SJIS/utf8 の双方で decode 結果と receipt が SQL 優先 | 成立 |
+| Minor: matrix 未収録＝異なる 2 source の途中失敗 | 1 文目 success・2 文目 decode 失敗 → receipt は 1 文目だけ | 成立 |
+| Minor: matrix 未収録＝依存 temp 失敗後の skip | **到達不能**＝IMPORT projection は `FROM` / `JOIN` を使えない（`KSQL1202`）ため temp 依存の形が無い。「形が無いこと」をテストで固定し仕様 §6.2 に注記 | N/A |
+| Minor: 「v3.75.0 と同一」が同一版内比較 | callback 省略時の結果と API 回数を固定 golden（getFields 1 / postRecords 1 / 他 0 / loader 1）で assert | 成立（静的差分どおり） |
+
+codex が独立確認できなかった項目（read-only sandbox で jest が EPERM・`npm view` が timeout）は Claude 側の実行で代替: 全 suite は v3.76.0 リリース時に 290 suites / 6,342 tests PASS、registry は `npm view` で latest = 3.76.0 を確認済み。CLI / MCP / プラグインの v3.75.0 との同一性は静的差分（symbol 未設定で no-op）と既存回帰スイートによる。
+
+**engine の修正は不要**。追加はテスト 15 本と文書のみ（版数は据え置き・次の機能リリースへ同梱）。
