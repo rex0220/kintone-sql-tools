@@ -579,3 +579,146 @@ describe("B178 materialized source receipt public API", () => {
     await expect(run(true)).resolves.toEqual(await run(false));
   });
 });
+
+describe("B178 review follow-up (codex final check)", () => {
+  const subtableFields = [
+    { code: "code", label: "code", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    { code: "Lines", label: "Lines", fieldType: "SUBTABLE", writable: false },
+    { code: "name", label: "name", fieldType: "SINGLE_LINE_TEXT", writable: true, inSubtable: true, subtableCode: "Lines" },
+  ];
+  const subtableRecord = (ids: string[]) => ({ records: [{
+    $id: { value: "7" }, $revision: { value: "1" },
+    Lines: { value: ids.map((id) => ({ id, value: { name: { value: "old" } } })) },
+  }] as never[] });
+  const subtableCsvSql = "IMPORT UPDATE INTO APP1 (code, Lines(name) ROW ID SOURCE rid) FROM CSV source BY NAME "
+    + "MATCH RECORD NUMBER SOURCE recno REPLACE SUBTABLES (Lines) VALIDATE ONLY";
+
+  test("receipt is already delivered when the projection fails after raw materialize", async () => {
+    const observed = await executeImportWithReceipt(
+      "IMPORT INTO APP1 (code) FROM CSV source SELECT missing_column AS code",
+      { bytes: utf8("code\nA\nB") }
+    );
+    expect(observed.result).toMatchObject({ status: "error" });
+    expect(observed.receipts).toEqual([{ statementIndex: 0, name: "source", kind: "CSV", rows: 2, encoding: "utf8" }]);
+    expect(mutationCount(observed.mock)).toBe(0);
+  });
+
+  test.each([
+    ["flat INSERT", "IMPORT INTO APP1 (code,name) FROM CSV source", "code,name\nA,x", ""],
+    ["flat UPSERT", "IMPORT INTO APP1 (code,name) FROM CSV source ON DUPLICATE (code)", "code,name\nA,x", ""],
+    ["VALIDATE ONLY", "IMPORT INTO APP1 (code,name) FROM CSV source VALIDATE ONLY", "code,name\nA,x", ""],
+    ["ON ERROR SKIP", "IMPORT INTO APP1 (code,name) FROM CSV source ON ERROR SKIP INTO #err; SELECT * FROM #err", "code,name\nA,x", ""],
+    ["record-number UPDATE", "IMPORT UPDATE INTO APP1 (name) FROM CSV source BY NAME MATCH RECORD NUMBER SOURCE recno", "recno,name\n7,new", "lookup"],
+    ["subtable CSV", subtableCsvSql, "*,recno,code,rid,name\n*,7,A,101,x", "subtable"],
+    ["subtable JSON", "IMPORT INTO APP1 (code, Lines(name)) FROM JSON source VALIDATE ONLY", '[{"code":"A","Lines":[{"name":"x"}]}]', "subtable"],
+  ])("callback throw on %s leaves mutation APIs at zero", async (_label, sql, text, setup) => {
+    const mock = client();
+    if (setup === "lookup") mock.getRecords.mockResolvedValue({ records: [{ $id: { value: "7" } }] });
+    if (setup === "subtable") {
+      mock.getFields.mockResolvedValue(subtableFields);
+      mock.getRecords.mockResolvedValue(subtableRecord(["101"]));
+    }
+    const callback = jest.fn(async () => { throw Object.assign(new Error("stop"), { name: "ReceiptRejectedError" }); });
+    const parsed = parseScript(sql, { enableImport: true });
+    expect(parsed.diagnostics).toEqual([]);
+    const context = createExecutionContext({
+      client: mock.value, statements: parsed.statements, meta: parsed.meta, enableImport: true,
+      importSource: createImportSourceResolver([{ name: "source", loader: { load: async () => ({ bytes: utf8(text) }) } }]),
+      onImportSourceMaterialized: callback,
+    });
+    const result = await executeStatement(parsed.statements[0], context);
+    expect(result).toMatchObject({ status: "error", index: 0, error: { code: "ReceiptRejectedError" } });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(mutationCount(mock)).toBe(0);
+    await disposeExecutionContext(context);
+  });
+
+  test("timeout after the callback started still ends in TimeoutError with zero mutation", async () => {
+    let started = false;
+    const mock = client();
+    const parsed = parseScript("IMPORT INTO APP1 (code) FROM CSV source", { enableImport: true });
+    const context = createExecutionContext({
+      client: mock.value, statements: parsed.statements, meta: parsed.meta, enableImport: true, timeoutMs: 40,
+      importSource: createImportSourceResolver([{ name: "source", loader: { load: async () => ({ bytes: utf8("code\nA") }) } }]),
+      onImportSourceMaterialized: () => { started = true; return new Promise<void>((resolve) => setTimeout(resolve, 80)); },
+    });
+    await expect(executeStatement(parsed.statements[0], context)).resolves.toMatchObject({
+      status: "error", error: { code: "TimeoutError" },
+    });
+    expect(started).toBe(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(mutationCount(mock)).toBe(0);
+    await disposeExecutionContext(context);
+  });
+
+  test("subtable CSV: maxRecords limits parents while the receipt counts physical rows", async () => {
+    const mock = client();
+    mock.getFields.mockResolvedValue(subtableFields);
+    mock.getRecords.mockResolvedValue(subtableRecord(["101", "102", "103"]));
+    const receipts: FlowImportSourceMaterializedInfo[] = [];
+    const parsed = parseScript(subtableCsvSql, { enableImport: true });
+    const context = createExecutionContext({
+      client: mock.value, statements: parsed.statements, meta: parsed.meta, enableImport: true, maxRecords: 1,
+      importSource: createImportSourceResolver([{ name: "source", loader: { load: async () => ({ bytes: utf8("*,recno,code,rid,name\n*,7,A,101,x\n,7,A,102,y\n,7,A,103,z") }) } }]),
+      onImportSourceMaterialized: (info) => { receipts.push(info); },
+    });
+    await expect(executeStatement(parsed.statements[0], context)).resolves.toMatchObject({ status: "success", result: { validatedRows: 1 } });
+    expect(receipts).toEqual([{ statementIndex: 0, name: "source", kind: "CSV", rows: 3, encoding: "utf8" }]);
+    expect(mutationCount(mock)).toBe(0);
+    await disposeExecutionContext(context);
+  });
+
+  test.each([
+    ["SQL UTF8 over payload sjis", "IMPORT INTO APP1 (code,name) FROM CSV source ENCODING UTF8", { bytes: utf8("code,name\nA,日本"), encoding: "sjis" as const }, "utf8"],
+    ["SQL SJIS over payload utf8", "IMPORT INTO APP1 (code,name) FROM CSV source ENCODING SJIS", { bytes: sjisCsv, encoding: "utf8" as const }, "sjis"],
+  ])("receipt encoding follows SQL over payload metadata (%s)", async (_label, sql, payload, encoding) => {
+    const observed = await executeImportWithReceipt(sql, payload);
+    expect(observed.result).toMatchObject({ status: "success" });
+    expect(observed.mock.postRecords.mock.calls[0][0].records).toEqual([{ code: { value: "A" }, name: { value: "日本" } }]);
+    expect(observed.receipts).toEqual([{ statementIndex: 0, name: "source", kind: "CSV", rows: 1, encoding }]);
+  });
+
+  test("a second source that fails to decode is not notified while the first receipt stays", async () => {
+    const sql = "IMPORT INTO APP1 (code) FROM CSV good; IMPORT INTO APP1 (code) FROM CSV bad";
+    const mock = client();
+    const receipts: FlowImportSourceMaterializedInfo[] = [];
+    const parsed = parseScript(sql, { enableImport: true });
+    const context = createExecutionContext({
+      client: mock.value, statements: parsed.statements, meta: parsed.meta, enableImport: true,
+      importSource: createImportSourceResolver([
+        { name: "good", loader: { load: async () => ({ bytes: utf8("code\nA") }) } },
+        { name: "bad", loader: { load: async () => ({ bytes: new Uint8Array([0xff]) }) } },
+      ]),
+      onImportSourceMaterialized: (info) => { receipts.push(info); },
+    });
+    await expect(executeStatement(parsed.statements[0], context)).resolves.toMatchObject({ status: "success" });
+    await expect(executeStatement(parsed.statements[1], context)).resolves.toMatchObject({ status: "error", error: { code: "ImportSourceError" } });
+    expect(receipts).toEqual([{ statementIndex: 0, name: "good", kind: "CSV", rows: 1, encoding: "utf8" }]);
+    expect(mock.postRecords).toHaveBeenCalledTimes(1);
+    await disposeExecutionContext(context);
+  });
+
+  test("an IMPORT projection cannot reference a temp table, so no temp-dependency skip form exists", () => {
+    const parsed = parseScript(
+      "CREATE TEMP TABLE #t AS SELECT code FROM APP1; IMPORT INTO APP1 (code) FROM CSV source SELECT code FROM #t",
+      { enableImport: true }
+    );
+    expect(parsed.diagnostics).toEqual([expect.objectContaining({ code: "KSQL1202", message: "IMPORT projection cannot use FROM or JOIN." })]);
+  });
+
+  test("omitted callback: fixed golden of result and API counts for a one-row INSERT", async () => {
+    const mock = client();
+    const loader = { load: jest.fn(async () => ({ bytes: utf8("code\nA") })) };
+    const parsed = parseScript("IMPORT INTO APP1 (code) FROM CSV source", { enableImport: true });
+    const context = createExecutionContext({
+      client: mock.value, statements: parsed.statements, meta: parsed.meta, enableImport: true,
+      importSource: createImportSourceResolver([{ name: "source", loader }]),
+    });
+    const result = await executeStatement(parsed.statements[0], context);
+    await disposeExecutionContext(context);
+    expect(result).toMatchObject({ status: "success", index: 0, result: { type: "INSERT", insertedCount: 1 } });
+    expect(loader.load).toHaveBeenCalledTimes(1);
+    expect([mock.getFields, mock.getRecords, mock.postRecords, mock.putRecords, mock.deleteRecords, mock.upsertRecords]
+      .map((fn) => fn.mock.calls.length)).toEqual([1, 0, 1, 0, 0, 0]);
+  });
+});

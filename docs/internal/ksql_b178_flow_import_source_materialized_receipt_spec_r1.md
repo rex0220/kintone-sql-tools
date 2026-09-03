@@ -453,7 +453,7 @@ metadata API呼出し回数は、非回帰比較では固定するが、callback
 | callback正常終了まで保留 | callback Promise未resolve中はmutation mockが0回。resolve後に文が完了 |
 | callback throw後の後続文 | 先頭IMPORTはerror、後続文はskipped。後続callback 0回、mutation API 0回 |
 | EXIT後のIMPORT skip | IMPORTの `StatementResult.status:"skipped"`。callback 0回、loader 0回、mutation API 0回 |
-| 依存temp失敗後のIMPORT skip | IMPORTはskipped。callback 0回、mutation API 0回 |
+| 依存temp失敗後のIMPORT skip | **到達不能（2026-09-04 実測）**＝IMPORT projection は `FROM` / `JOIN` を使えず（`KSQL1202: IMPORT projection cannot use FROM or JOIN.`）、IMPORT 文が temp table に依存する形が無い。テストは「形が無いこと」を固定 |
 | 同一sourceを2文が参照 | callback 2回。`name/kind/rows/encoding` は同じで、`statementIndex` が各文のindexと一致 |
 | 異なる2 sourceの途中失敗 | 先に成功したsourceだけ通知。失敗中sourceと未到達sourceは通知なし |
 | callback省略 | 既存goldenと `StatementResult` および全mock API呼出し回数が一致 |
