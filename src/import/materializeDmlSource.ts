@@ -16,8 +16,9 @@ export function materializeCsvDmlSource(
   fieldInfos?: readonly KintoneFieldInfo[],
   recordNumberSourceHeader?: string
 ): ImportMaterializedTable {
+  const encoding = source.encoding ?? payload.encoding ?? "utf8";
   const decoded = decodeCsv(payload.bytes, {
-    encoding: source.encoding ?? payload.encoding ?? "utf8",
+    encoding,
     hasHeader: source.hasHeader,
     columns: source.columns,
   });
@@ -81,6 +82,7 @@ export function materializeCsvDmlSource(
       return row as Record<string, string>;
     });
     return {
+      receipt: { rows: decoded.rows.length, encoding },
       rows, columns: [...targetCodes],
       columnMeta: new Map(targetCodes.map((code) => [code, { fieldType: infoByCode.get(code)?.fieldType ?? "SINGLE_LINE_TEXT" }])),
       importRowErrors,
@@ -90,6 +92,7 @@ export function materializeCsvDmlSource(
   }
   const rows = decoded.rows.map((values) => Object.fromEntries(decoded.columns.map((column, i) => [column, values[i]])));
   return {
+    receipt: { rows: decoded.rows.length, encoding },
     rows,
     columns: decoded.columns,
     // CSV cells are decoded as strings; projections such as CAST may replace this metadata downstream.

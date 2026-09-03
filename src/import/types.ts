@@ -14,12 +14,18 @@ export interface ImportSourceHandle {
 
 export type ImportSourceResolver = (name: string) => ImportSourceHandle | undefined;
 
+export interface ImportMaterializationReceipt {
+  readonly rows: number;
+  readonly encoding: ImportEncoding;
+}
+
 export interface ImportColumnMeta {
   readonly sortKind?: "number" | "string";
   readonly fieldType?: string;
 }
 
 export interface ImportMaterializedTable {
+  receipt: ImportMaterializationReceipt;
   rows: ProcessRow[];
   columns: string[];
   columnMeta?: ReadonlyMap<string, ImportColumnMeta>;
@@ -57,4 +63,7 @@ export interface MaterializedImportRecord {
   /** CSV Phase 5D lookup-only record number; never emitted in a payload. */
   recordNumberSourceValue?: string;
 }
-export interface MaterializedImportRecords { records: readonly MaterializedImportRecord[]; }
+export interface MaterializedImportRecords {
+  receipt: ImportMaterializationReceipt;
+  records: readonly MaterializedImportRecord[];
+}

@@ -23,6 +23,7 @@ export function materializeJsonImportRecords(
   if (targetByCode.size !== targets.length) throw new ImportSourceError("IMPORT targets contain duplicates.");
   let childTotal = 0;
   return {
+    receipt: { rows: decoded.length, encoding: "utf8" },
     records: decoded.map((record, index) => {
       const parentRow = index + 1;
       for (const code of record.keys()) if (!targetByCode.has(code)) sourceFail(parentRow, code, "unknown key (not declared in INTO).");
@@ -67,8 +68,9 @@ export function materializeCliKintoneCsvImportRecords(
   maxParents: number,
   recordNumberSourceHeader?: string
 ): MaterializedImportRecords {
+  const encoding = source.encoding ?? payload.encoding ?? "utf8";
   const decoded = decodeCsv(payload.bytes, {
-    encoding: source.encoding ?? payload.encoding ?? "utf8", hasHeader: source.hasHeader, columns: source.columns,
+    encoding, hasHeader: source.hasHeader, columns: source.columns,
   });
   if (!source.hasHeader || decoded.columns[0] !== "*") throw new ImportSourceError('ERR_IMPORT_MARKER: first CSV header must be "*".');
   const indexes = new Map(decoded.columns.map((code, index) => [code, index]));
@@ -120,5 +122,5 @@ export function materializeCliKintoneCsvImportRecords(
     }
   });
   if (records.length === 0) throw new ImportSourceError("CSV has no parent rows.");
-  return { records };
+  return { receipt: { rows: decoded.rows.length, encoding }, records };
 }

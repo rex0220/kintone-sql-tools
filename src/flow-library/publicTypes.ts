@@ -132,6 +132,19 @@ export interface FlowNamedImportSource {
   readonly loader: FlowImportSourceLoader;
 }
 
+export interface FlowImportSourceMaterializedInfo {
+  /** バッチ内の文 index。StatementResult.index と同じ0始まり。 */
+  readonly statementIndex: number;
+  /** SQL の FROM CSV <name> / FROM JSON <name> で指定された source name。 */
+  readonly name: string;
+  /** materialize した source 種別。 */
+  readonly kind: "CSV" | "JSON";
+  /** decoder が返した物理 input record 数。CSV は header 除外、JSON は top-level record 数。 */
+  readonly rows: number;
+  /** SQL、payload、既定値を解決した後の有効文字コード。 */
+  readonly encoding: ImportEncoding;
+}
+
 export type FlowImportProviderErrorCode =
   | "ImportSourceReadError"
   | "ImportSourceNotRegularFileError";
@@ -202,6 +215,13 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   continueOnError?: boolean;
   /** Named, path-free source resolver. It never enables IMPORT implicitly. */
   importSource?: FlowImportSourceResolver;
+  /**
+   * IMPORT source の raw materialize 成功直後、mutation 前に1回 await される。
+   * throw/reject は当該文を error にし、その文の mutation は0回となる。
+   */
+  onImportSourceMaterialized?: (
+    info: FlowImportSourceMaterializedInfo
+  ) => void | Promise<void>;
   /** 素の UPSERT で native UPSERT を許可する。省略時は true。 */
   enableNativeUpsert?: boolean;
   /**
