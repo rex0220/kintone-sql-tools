@@ -222,6 +222,47 @@ describe("B179 /flow public CSV export API", () => {
     await disposeExecutionContext(run.context);
   });
 
+  test("an ASSERT failure after CREATE makes the sink failed, not materialized", async () => {
+    const run = prepared(
+      "-- @ksql dialect: 1\nCREATE TEMP TABLE #export AS SELECT 'A' AS code; ASSERT (SELECT 1) = 2, 'gate'; SELECT 9 AS later",
+      ["export"]
+    );
+    const results = await executeAll(run);
+    expect(results[1]).toMatchObject({ status: "error" });
+    expect(results[2]).toMatchObject({ status: "skipped", skippedReason: "assertion" });
+    expect(exportSinkStatus(run.context, "export")).toBe("failed");
+    expect(() => serializeExportSink(run.context, "export")).toThrow(expect.objectContaining({
+      code: "ExportSinkExecutionFailedError",
+    }));
+    await disposeExecutionContext(run.context);
+  });
+
+  test("a dependency skip after a failed CREATE keeps the declared sink failed", async () => {
+    const client = mockClient();
+    client.getFields.mockRejectedValueOnce(new Error("schema unavailable"));
+    const run = prepared(
+      "CREATE TEMP TABLE #base AS SELECT code FROM APP1; CREATE TEMP TABLE #export AS SELECT * FROM #base; SELECT 1 AS later",
+      ["export"],
+      client
+    );
+    const results = await executeAll(run);
+    expect(results[0]).toMatchObject({ status: "error" });
+    expect(results[1]).toMatchObject({ status: "skipped" });
+    expect(exportSinkStatus(run.context, "export")).toBe("failed");
+    await disposeExecutionContext(run.context);
+  });
+
+  test("an APP-backed SELECT keeps its API count when exportSinks is omitted", async () => {
+    const client = mockClient([{ code: { value: "A" } }]);
+    const run = prepared("SELECT code FROM APP1", undefined, client);
+    const result = (await executeAll(run))[0];
+    expect(result).toMatchObject({ status: "success", result: { rows: [{ code: "A" }] } });
+    expect([client.getRecords.mock.calls.length, client.getFields.mock.calls.length]).toEqual([1, 1]);
+    expect(serializeSelectResultAsCsv(result).text).toBe("code\r\nA\r\n");
+    expect([client.getRecords.mock.calls.length, client.getFields.mock.calls.length]).toEqual([1, 1]);
+    await disposeExecutionContext(run.context);
+  });
+
   test("temp-table row overflow fails and yields no export", async () => {
     const client = mockClient([{ code: { value: "A" } }, { code: { value: "B" } }]);
     const parsed = parseScript("CREATE TEMP TABLE #export AS SELECT code FROM APP1; SELECT 1 AS later");
