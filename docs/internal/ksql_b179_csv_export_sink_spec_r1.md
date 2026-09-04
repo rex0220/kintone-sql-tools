@@ -1029,3 +1029,13 @@ MCP／plugin配線は別issueとする。
 
 - §9-8（DATETIME の精度）: kintone の DATETIME field は秒精度の `…T03:04:00Z` だが、dialect 1 の `@NOW()` は **ミリ秒付き** `2026-09-04T00:56:07.859Z` を返す（`@TODAY()` は `YYYY-MM-DD`）。timezone 変換はミリ秒を保持する規則（§9-9）を R2 で明記する。
 - §9-3（空の複数値）: CHECK_BOX / USER_SELECT の空値は **`"[]"`（JSON 空配列の文字列）**、DATETIME の空値は `""`。§2.4 の「複数値の空配列は空セル」は `"[]"` → `""` の変換として実装する。FILE 列の値は `[{"fileKey","name","size","contentType"}]` の JSON 文字列（§2.4 どおり error で拒否）。
+
+### 消費側レビュー（flownet セッション・2026-09-04）＝R2 への追加要求
+
+骨格と Major の対応方針（単文経路も WeakMap 列 meta＋`captureColumnMeta` 常時 ON・meta 不能は InvalidTarget）を支持。追加規定:
+
+1. **EXIT との交差を明文化**（R2 必須）: (i) sink 作成済みで EXIT → 以降 skip＝「処理済み」として serialize 可。(ii) **sink 未作成のまま EXIT**＝`serializeExportSink` は error ではなく「未生成」を判別できる形（または呼出側が呼ばない判定材料の公開）にする。消費側は output_files へ載せず既存 file 不変・exit code は NO_DATA 系のまま（「対象なし月は file を配信しない」運用に直結）。
+2. encoder 契約に「encoder は表現不能文字で throw する義務を負う（検査方式は実装者責務）」の一文を置く。iconv-lite は `?` 置換で throw しないため、kSQL-Flow 側で encode→decode→比較の wrapper を実装する（CLI の round-trip 検査と同方式）。
+3. receipt の形は足りる（sha256 は戻り値 `data` から呼出側計算・`columns` は任意扱い）。
+4. atomic write 契約の統一（EPERM 時＝旧 file 維持・一時 file 削除・error）に賛成。
+5. `name=path` の判別＝「最初の `=` で分割・path に `=` を含む場合は名前付き必須」の明文化を希望。
