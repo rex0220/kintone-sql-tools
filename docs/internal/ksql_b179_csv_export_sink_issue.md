@@ -89,6 +89,8 @@
 
 **依頼元（flownet セッション・2026-09-04）の回答**: A＝**(b) encoder 注入を支持**（kSQL-Flow が iconv-lite 等を持つと確約。公開 encoder 契約は `(text: string) => Uint8Array`・失敗は throw・UTF-8 は engine 内蔵で注入不要。CLI の SJIS は Node 層で encoder を持てばよい）／B＝**10 進展開（丸めなし）**／C＝**cli-kintone 互換＝`code` の LF 連結**。R1 はこれを既定案として書き、オーナー裁定で確定する。
 
+**オーナー裁定（2026-09-04）: A＝(b) 呼出側注入・CLI だけ CP932 library を bundle（第一候補 encoding-japanese（MIT）。実装前に iconv-lite と bundle 増分を実測して最終確定）／B＝10 進展開（丸めなし）／C＝`code` の LF 連結。いずれも確定。**
+
 - **A. Shift_JIS encoder の置き場所**（§2.4）: (a) CP932 表の同梱／(b) 呼出側注入。推奨は (b)＝engine を依存ゼロ・browser-neutral のまま保ち、「表現不能文字の fail-closed」は encoder 契約（throw → 完成 bytes を返さない）で満たす。CLI は Node で encoder を持つ必要がある（(b) なら CLI にも encoder 実装が要る＝結局 (a) が要る可能性。ここを R1 で整理する）。
 - **B. 計算列の指数表記**（§2.2）: `String(number)` は `1.25e+22` を出す。上流「生値・追加丸めなし」との両立＝(i) そのまま（kintone NUMBER への再取込は指数不可）／(ii) 指数を使わない 10 進展開（丸めなし・既存 `parseExactDecimal` 系を流用）。推奨 (ii)。
 - **C. user 系の表現**: cli-kintone 互換＝`code` の LF 連結を推奨（`name` は捨てる）。
