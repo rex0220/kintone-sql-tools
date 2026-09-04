@@ -1,23 +1,25 @@
-ksql 配布パッケージ (v3.76.0)
+ksql 配布パッケージ (v3.77.0)
 
 release 成果物:
-- ksql-plugin-v3.76.0.zip
-- ksql-mcp.mcpb (manifest version 3.76.0)
-- ksql-mcp.js (MCP server version 3.76.0)
+- ksql-plugin-v3.77.0.zip
+- ksql-mcp.mcpb (manifest version 3.77.0)
+- ksql-mcp.js (MCP server version 3.77.0)
 
-機能追加 (B178: /flow IMPORT source の materialize 通知・純加法・既定動作は不変):
-- createExecutionContext に onImportSourceMaterialized callback を追加しました
-  (kSQL-Flow Contract v1.1 の input_files[].rows を埋めるため)。IMPORT source の
-  decode と raw materialize が成功した直後、projection・validation・mutation より前に
-  1 回 await され、{ statementIndex, name, kind, rows, encoding } の 5 key だけを渡します。
-- rows は CSV = header を除く RFC 4180 data record 数 (quoted cell 内改行は 1 行・
-  subtable CSV は継続行を含む物理行)、JSON = top-level record 数。encoding は
-  SQL ENCODING > loader metadata > UTF-8 の解決後の値です。
-- maxRecords 超過・decode 失敗・source 境界エラーでは通知しません。callback の throw /
-  reject は当該文 error になり、その文の mutation API は 0 回です。
-- callback を指定しない既存利用者の結果・API 呼出し回数は v3.75.0 から変わりません。
-  CLI / MCP / プラグインは不変です。
+機能追加 (B179: CSV export・名前付きシンク・純加法・既定動作は不変):
+- engine 層に RFC 4180 の CSV serializer を 1 実装 (CRLF・header あり・BOM なし)。
+  複数値は LF 連結、user/組織/グループは code、計算列の指数表記は 10 進展開、
+  DATETIME は既定 UTC・timezone 指定時だけ offset 付き。SUBTABLE/FILE 列は拒否。
+- CLI: --export-csv <name>=<path> (temp table #name・反復可) / --export-csv <path>
+  (単文 SELECT) / --export-encoding utf8|sjis / --export-timezone <zone>。SQL 全文成功後に
+  全 sink を serialize してから一時 file → fsync → rename で書きます (失敗時は旧 file 維持)。
+  Shift_JIS は表現不能文字で fail-closed (完成 file を残しません)。
+- /flow: createExecutionContext({ exportSinks }) で sink を事前宣言、exportSinkStatus /
+  serializeExportSink / serializeSelectResultAsCsv / serializeCsvExport を公開。engine は
+  path を持たず bytes と receipt { rows, columns, bytes, encoding } を返します。
+- 既存の --format csv / --output、MCP、プラグインは不変です。
 
+v3.76.0 の節は畳みました (B178 /flow IMPORT source の materialize 通知 =
+  onImportSourceMaterialized・5 key・mutation 前・throw は mutation 0)。
 v3.75.0 の節は畳みました (B177 /flow named IMPORT source 公開 API = enableImport 既定 OFF・
   lazy Uint8Array loader・安定 error code。CLI/MCP/プラグインの IMPORT source エラー
   name/message は細分化)。
@@ -106,12 +108,14 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.76.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.77.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.76.0): B178 /flow IMPORT source の materialize 通知 onImportSourceMaterialized (純加法)
+本リリース (v3.77.0): B179 CSV export (名前付きシンク・CLI --export-csv・/flow 公開 API・純加法)
+
+前リリース (v3.76.0): B178 /flow IMPORT source の materialize 通知 onImportSourceMaterialized (純加法)
 
 前リリース (v3.75.0): B177 /flow named IMPORT source 公開 API (既定 OFF・純加法)
 
@@ -131,11 +135,7 @@ B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
 
 前リリース (v3.68.0): B168 Flow dialect 1 の解析基盤 (Stage 1-3・エンジン内部のみ・実験的)。
 
-前リリース (v3.67.0): B169 CURRENT_DATE() / CURRENT_TIMESTAMP() を文単位の固定時刻評価へ修正 (結果が変わる形あり)。
-
-前リリース (v3.66.0): B53 WITH RECURSIVE / CYCLE (再帰 CTE・新機能)。B166 JOIN ON 逆順の修正・B160/B165 同梱。
-
-前リリース (v3.66.1 以前) の節は畳みました (B167 / B164 / B162・B163 ほか)。CHANGELOG.md と GitHub Releases を参照してください。
+前リリース (v3.67.0 以前) の節は畳みました (B169 固定時刻評価 / B53 再帰 CTE / B166 / B167 / B164 / B162・B163 ほか)。CHANGELOG.md と GitHub Releases を参照してください。
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
 - 過去版は GitHub Releases の各タグに添付しています。
