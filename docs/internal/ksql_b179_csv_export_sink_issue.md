@@ -114,3 +114,31 @@
 - ~~`APP$明細` 仮想テーブルの列名~~ → **実測済み**: `SELECT * FROM APP1$Lines` の columns は `["_pid","_rid","_idx", <子 field…>]`（親 ID・行 ID・行 index の順）。`$id` を選ぶと空文字（仮想テーブルには無い）。export header はこの列名のまま
 - ~~Windows での `fs.renameSync` による既存 file 上書き~~ → **実測済み（win32・Node 24）**: 同一 directory の一時 file を fsync → close → `renameSync` で既存 file を**上書きできる**（一時 file は残らない）。ただし**既存 file を他プロセスが open していると `EPERM`** で失敗する（Windows 固有・POSIX は成功する）→ 仕様は「rename 失敗時は一時 file を削除して error、既存 file は不変」を契約にし、platform 別 contract test で固定する
 - `APP$明細` 仮想テーブルの列名（親 `$id` の付与形）と export header の見え方
+
+## 6. 実装の進行（2026-09-04〜）
+
+3 段 PR（R2 §8.4）で `feature/b179-csv-export` に積む。実装は codex、レビュー・ゲート・コミットは Claude。
+
+### 6.1 PR 1: serializer（コミット c30248a）
+
+`src/export/`（types / csvSerializer / cellSerializer / decimalText / dateTimeText / encoding）。codex の最終報告どおり仕様との食い違いなし。Claude ゲート＝jest 58 PASS・strict tsc PASS・Node builtin import なし。
+
+### 6.2 PR 2: `/flow` 公開 API（Claude 代行で完了）
+
+codex（workspace-write）が実装を終え **最終報告を書く直前にワークスペースのクレジット切れで停止**（B178 と同じ形）。Claude が差分をレビューして完了扱いにした。
+
+| ファイル | 要旨 |
+|---|---|
+| `src/flow-library/publicTypes.ts` | `ExportEncoding` / `FlowCsvExport*` / `FlowExportTextEncoder` / `FlowNamedExportSink` / `FlowExportSinkStatus`（PR 1 内部型の alias）と `CreateExecutionContextOptions.exportSinks?` |
+| `src/flow-library/exportSinkContext.ts`（新規） | sink 宣言の同期検査（空名・先頭 `#`・識別子でない → `ExportSinkInvalidNameError`／宣言重複・CREATE 重複 → `ExportSinkDuplicateError`／CREATE 不存在・最終状態で DROP 済み → `ExportSinkNotFoundError`／DML の `INTO #name` → `ExportSinkInvalidTargetError`。`analyzeBatch` の live set で静的判定）と public context → managed context の WeakMap |
+| `src/flow-library/exportSinks.ts`（新規） | 公開 4 関数。`exportSinkStatus` は failed（`failed` 集合または exit 以外の abort）→ incomplete（busy または未処理文あり）→ materialized / not-created の順。`serializeSelectResultAsCsv` は engine が `SelectResult` に WeakMap で付けた列 meta（`getSelectColumnMeta`）を必ず使い、引けない結果は `ExportSinkInvalidTargetError`。`ExportSerializerError` → `KsqlFlowError`（code・message・cause 維持） |
+| `src/flow-library/index.ts` | `exportSinks` を共有 `ExecuteOptions` から分離し managed context へ専用引数で渡す。4 関数を value export・型を type export |
+| `src/execute.ts` | managed context に `exportSinks` 集合を保持。**内部 options の `captureColumnMeta` を常に true**（公開結果の shape は不変＝テストで固定） |
+| `build-flow.mjs` | `exportSinks.d.ts` と `export/types.d.ts` を配布物へ copy |
+| `src/flow-library/__tests__/exportSinkPublicApi.test.ts`（新規） | R2 §7.3 の matrix 21 test（named と単文で同一 bytes・単文の複数値/SUBTABLE/FILE・clone/JSON 復元/手組み/DML は InvalidTarget・captureColumnMeta false 指定でも meta 取得・incomplete/materialized/not-created/failed・EXIT 前後・行上限・宣言省略時の golden・status/serialize で API 回数不変・dispose 後） |
+
+Claude ゲート＝flow-library＋export の jest PASS、`build:flow` + `flow:bundle-guard` PASS、`dist-flow/flow-library/exportSinks.d.ts` は `./publicTypes` のみ参照（`../execute` の漏れなし）、`dist-flow/export/types.d.ts` が配布物に含まれる。全 suite は §6.4 に記載。
+
+### 6.3 PR 3: CLI（未着手）
+
+`--export-csv` / `--export-encoding` / `--export-timezone`、`executeBatch` の内部 entry point、CLI 限定の `encoding-japanese` bundle＋round-trip 検査、atomic write（Windows `EPERM` 契約）、README・言語リファレンス・CHANGELOG。

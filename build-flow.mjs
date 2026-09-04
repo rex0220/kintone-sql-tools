@@ -55,13 +55,18 @@ if (declaration.status !== 0) {
   throw new Error("Flow declaration build failed.");
 }
 mkdirSync(resolve(outDir, "flow-library"), { recursive: true });
+mkdirSync(resolve(outDir, "export"), { recursive: true });
 mkdirSync(resolve(outDir, "types"), { recursive: true });
-for (const name of ["index.d.ts", "errors.d.ts", "importSources.d.ts", "publicTypes.d.ts", "writableClient.d.ts"]) {
+for (const name of ["index.d.ts", "errors.d.ts", "exportSinks.d.ts", "importSources.d.ts", "publicTypes.d.ts", "writableClient.d.ts"]) {
   cpSync(
     resolve(declarationOutDir, "flow-library", name),
     resolve(outDir, "flow-library", name)
   );
 }
+cpSync(
+  resolve(declarationOutDir, "export", "types.d.ts"),
+  resolve(outDir, "export", "types.d.ts")
+);
 cpSync(
   resolve(declarationOutDir, "types", "ast.d.ts"),
   resolve(outDir, "types", "ast.d.ts")

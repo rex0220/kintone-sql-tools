@@ -18,6 +18,11 @@ import {
 import { createKintoneClient } from "./writableClient";
 import { KsqlFlowError, normalizeFlowError } from "./errors";
 import { createImportSourceResolver, FlowImportProviderError } from "./importSources";
+import {
+  normalizeExportSinkDeclarations,
+  registerExportSinkContext,
+  unregisterExportSinkContext,
+} from "./exportSinkContext";
 import type {
   CreateExecutionContextOptions,
   Diagnostic,
@@ -145,8 +150,9 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     const handle = {} as ExecutionContext;
     const {
       client, script: _script, statements: _statements, meta: _meta, apps: _apps,
-      onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, ...executeOptions
+      onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, exportSinks, ...executeOptions
     } = opts;
+    const normalizedExportSinks = normalizeExportSinkDeclarations(statements, exportSinks);
     const bindings = bindingsByStatements.get(statements as object);
     const executionClient = bindings ? routeClient(client, bindings) : client;
     const routedOnChunkWritten = onChunkWritten && bindings
@@ -155,18 +161,18 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
           appId: bindings.get(info.appId)?.appId ?? info.appId,
         })
       : onChunkWritten;
-    handles.set(
-      handle as object,
-      createManagedStatementExecutionContext(
+    const managed = createManagedStatementExecutionContext(
         statements,
         dialect,
         executionClient,
         executeOptions,
         routedOnChunkWritten,
         enableNativeUpsert !== false,
-        onImportSourceMaterialized
-      )
-    );
+        onImportSourceMaterialized,
+        normalizedExportSinks
+      );
+    handles.set(handle as object, managed);
+    registerExportSinkContext(handle, managed);
     if (bindings) bindingsByContexts.set(handle as object, bindings);
     return handle;
   } catch (error) {
@@ -270,6 +276,7 @@ export async function disposeExecutionContext(context: ExecutionContext): Promis
   if (!managed) return;
   handles.delete(context as object);
   bindingsByContexts.delete(context as object);
+  unregisterExportSinkContext(context);
   await disposeManagedStatementExecutionContext(managed);
 }
 
@@ -334,6 +341,12 @@ function routeClient(
 }
 
 export { isDmlResult } from "./publicTypes";
+export {
+  exportSinkStatus,
+  serializeCsvExport,
+  serializeExportSink,
+  serializeSelectResultAsCsv,
+} from "./exportSinks";
 export { createImportSourceResolver, createKintoneClient, FlowImportProviderError, KsqlFlowError };
 export type {
   CreateExecutionContextOptions,
@@ -341,15 +354,24 @@ export type {
   Diagnostic,
   DiagnosticCode,
   ExecutionContext,
+  ExportEncoding,
   ExplainScriptOptions,
   ExplainScriptResult,
   FieldInfo,
   FlowImportProviderErrorCode,
+  FlowCsvExportColumnMeta,
+  FlowCsvExportInput,
+  FlowCsvExportOptions,
+  FlowCsvExportReceipt,
+  FlowCsvExportResult,
+  FlowExportSinkStatus,
+  FlowExportTextEncoder,
   FlowImportSourceLoader,
   FlowImportSourceMaterializedInfo,
   FlowImportSourcePayload,
   FlowImportSourceResolver,
   FlowNamedImportSource,
+  FlowNamedExportSink,
   FlowChunkWrittenInfo,
   FlowDeleteResult,
   FlowDmlResult,

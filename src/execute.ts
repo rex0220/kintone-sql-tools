@@ -1852,6 +1852,8 @@ export interface ManagedStatementExecutionContext {
   readonly client: KintoneClient;
   readonly cacheContext: string;
   readonly tempTables: Map<string, MaterializedTable>;
+  /** @internal Exact temp-table names (including #) declared as /flow export sinks. */
+  readonly exportSinks: ReadonlySet<string>;
   readonly variables: Map<string, VarValue>;
   readonly relativeDateVariables: ReadonlyMap<string, KintoneFunction>;
   readonly clock: EvaluationContext;
@@ -1897,7 +1899,8 @@ export function createManagedStatementExecutionContext(
   options: BatchExecuteOptions = {},
   onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>,
   enableNativeUpsert = false,
-  onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>
+  onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>,
+  exportSinks: ReadonlySet<string> = new Set()
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   const mutableStatements = [...statements];
@@ -1925,7 +1928,7 @@ export function createManagedStatementExecutionContext(
   const injectedVariables = validateDeclaredBatchVariables(mutableStatements, options.variables);
   const relativeDateVariables = prepareRelativeDateVariables(mutableStatements, injectedVariables);
   const normalizedOptions = withNativeUpsertExecutionOption(
-    { ...options, variables: injectedVariables },
+    { ...options, variables: injectedVariables, captureColumnMeta: true },
     enableNativeUpsert
   );
   const asOfClock = createAsOfClock(options.asOf ?? new Date(), options.timezone);
@@ -1943,6 +1946,7 @@ export function createManagedStatementExecutionContext(
     client: wrapClientWithMetrics(client, metrics),
     cacheContext: createInvocationCacheContext(resolveCacheContext(client, options.cacheContext)),
     tempTables: new Map(),
+    exportSinks,
     variables,
     relativeDateVariables,
     clock: statementEvaluationContext(bindStatementEvaluationContext(normalizedOptions)),
