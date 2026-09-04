@@ -3,7 +3,7 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
-## Unreleased
+## v3.77.0（2026-09-04）
 
 ### 機能追加（B179: CSV export — 名前付きシンク・engine 層 serializer・`/flow` 公開 API・CLI `--export-csv`）**※ 純加法・既定動作は不変**
 
