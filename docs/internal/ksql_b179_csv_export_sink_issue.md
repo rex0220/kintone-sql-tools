@@ -1,6 +1,6 @@
 # B179 CSV export（名前付きシンク・engine 層 serializer・`/flow` 公開 API）— 段階 2
 
-- 状態: 📝 **仕様 R1 起案・Claude レビュー済み（2026-09-04）**＝[R1](ksql_b179_csv_export_sink_spec_r1.md)（codex 起案・末尾に Claude レビュー節）。Major 1 件（単文 SELECT 経路の column meta）を R2 で反映してから実装。要決定 A/B/C は依頼元回答済み・オーナー裁定待ち
+- 状態: 📋 **仕様 R2 確定・実装待ち（2026-09-04）**＝[R2](ksql_b179_csv_export_sink_spec_r2.md)（codex 起案・R1 と 2 つのレビューを反映・末尾に Claude レビュー節）。[R1](ksql_b179_csv_export_sink_spec_r1.md) は経緯として保存。要決定 A/B/C はオーナー裁定済み。CP932 library は実測で `encoding-japanese` に確定（231 KB・両 library とも表現不能文字を `?` 置換するため round-trip 検査必須）。flownet の消費側レビュー後、serializer → /flow → CLI の 3 段 PR で実装
 - 種別: 機能（engine 層に CSV serializer を 1 回だけ実装し、CLI と `/flow` から使う。公開 API は純加法）
 - 優先: **中**（kSQL-Flow Contract v1.1 の `features.resultCsv` / `output_files[]` の前提）
 - 版: **minor（v3.77.0 想定）**。既定動作は変えない
