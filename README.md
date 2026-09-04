@@ -242,6 +242,12 @@ Options:
 ```
 <!-- END_HELP_SYNC -->
 
+`--export-csv` の引数規則: 最初の `=` で `name` と `path` に分割し、`=` を含む引数は必ず名前付き（左辺が temp table
+識別子でなければ ArgumentError。`C:\...` の `:` は区切りではない）。名前なし `<path>` は単文 SELECT のときだけ・1 件だけで、
+`=` を含む path には使えない。同じ名前・同じ path の重複、`--output` と同じ path、`--dry-run` との併用は実行前に拒否。
+SQL 全文が成功した後にだけ全 sink を serialize し、同一 directory の一時 file → fsync → close → rename で書く
+（失敗時は旧 file 維持・一時 file 削除）。既存 file を他プロセスが開いている Windows では `EPERM` で失敗し旧 file が残る。
+
 ## 最低限のトラブルシュート
 
 1. `ArgumentError: no APPxxx found...`

@@ -127,6 +127,8 @@ describe("B179 CLI --export-csv", () => {
     expect(await run(["--output", target, "--export-csv", `a=${target}`, "-e", sql])).toBe(2);
     expect(await run(["--dry-run", "--export-csv", `a=${target}`, "-e", sql])).toBe(2);
     expect(existsSync(target)).toBe(false);
+    expect(getRecords).not.toHaveBeenCalled();
+    expect(getFields).not.toHaveBeenCalled();
   });
 
   test("a failing statement leaves existing files untouched and writes nothing", async () => {

@@ -163,3 +163,24 @@ codex がクレジット切れのため Claude が実装した（仕様 R2 §4.3
 ### 6.4 全 suite（PR 3 時点）
 
 `npm test`（version:check + docs:check + 全 suite + e2e）PASS。件数は §7 のリリース記録で確定する。
+
+### 6.5 kSQL-Flow 側のローカル結合（2026-09-04・flownet セッション報告）
+
+kSQL-Flow が `file:../kintone-sql-tools`（feature/b179-csv-export・e4bb63f の `dist-flow`）で export 配線を実装し、**全 365 テスト＋build＋SEA 合格・engine 側の修正不要**（ブランチ feat/contract-v1.1-export d6c7253）。公開 4 関数・`exportSinkStatus` 4 状態・encoder 契約・EPERM 契約が期待どおり。shiftJisEncoder の byte-for-byte 一致も encoding-japanese 直で確認済み。v3.77.0 公開後に registry 版へ確定 → kSQL-Flow 0.9.0 へ。
+
+## 7. リリース前の codex 最終チェックと対応（2026-09-04）
+
+[codex 報告（原文）](ksql_b179_codex_final_check_report.md)。範囲＝独立レビュー未実施の PR 3（CLI）と PR 2 の配線。**総評＝修正が必要（High 1・Medium 2・Low 1）**。全件を feature ブランチで対応した。
+
+| 重要度 | 指摘 | 対応 |
+|---|---|---|
+| High | `withBatchCompletionObserver` の observer が throw すると完成済み batch が reject になる（`executeBatch` 末尾で無保護に呼んでいた） | observer 呼出しを try/catch で隔離（batch 結果を変えない）。テスト `src/__tests__/b179BatchCompletionObserver.test.ts`（throw する observer でも `ok: true`・symbol が公開 property に出ない） |
+| Medium | 一時 file 名が衝突して `wx` が失敗しても、自分が作っていないその file を `unlink` していた | `created` フラグを `openSync` 成功後に立て、自分が作った一時 file だけ削除 |
+| Medium | `writeSync` が 0 を返すと無限ループ | 0 以下を `ExportSinkWriteError` にして cleanup へ |
+| Low | README に `=` 分割・無効左辺・drive letter・`--output` 衝突・`--dry-run` 禁止の説明が無い | README の CLI option 直後に「引数規則」段落を追加 |
+
+**fault injection のために `writeExportFileAtomically` に `ExportFileIo` seam を追加**（Node 24 の `fs` 名前空間は `jest.spyOn` で差し替えられないため）。単体テスト 7 件＝新規／置換・0 byte write・short write の継続・一時名衝突で他人の file を消さない・fsync／close／rename 失敗で旧 file 維持＋一時 file 削除。
+
+codex が挙げたテストの穴への追加: `exportSinkStatus` の ASSERT 失敗＝failed／依存 skip＝failed、APP-backed SELECT の API 回数が `exportSinks` 省略時と serialize 後で不変、`--output` 衝突・`--dry-run` で API 0 回。**適合確認済み（codex）**＝CLI の serialize 完了→書込の順序、4 状態判定、単文 SELECT の同一参照（`execute()` は複製時に meta を付け直す・`mergeSelectWarnings` も移送）、observer key の非公開、引数規則、Shift_JIS の round-trip。
+
+未実測で残すもの（codex 列挙）: Windows Node 18/20 での EPERM 挙動（24 は e2e で固定）、孤立サロゲートの SJIS、warning 付き SELECT の meta 取得（静的には移送されている）。

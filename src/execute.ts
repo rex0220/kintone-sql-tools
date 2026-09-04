@@ -1852,7 +1852,14 @@ export async function executeBatch(
     };
     // B179: the CLI export seam reads temp tables here, before the batch scope is released.
     const observer = (options as InternalExecuteOptions)[batchCompletionObserverKey];
-    if (observer) observer({ result: batchResult, tempTables });
+    if (observer) {
+      try {
+        observer({ result: batchResult, tempTables });
+      } catch {
+        // An observer failure must not turn a completed batch into a rejection; the CLI
+        // detects a missing capture and fails only the export step.
+      }
+    }
     return batchResult;
   } finally {
     releaseMetadataCacheScope(cacheContext);
