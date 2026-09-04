@@ -188,6 +188,10 @@ Options:
   --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
   --import-csv <name=path>   Supply named CSV and enable IMPORT (repeatable)
   --import-json <name=path>  Supply named JSON and enable IMPORT (repeatable)
+  --export-csv <name=path>   Export temp table #<name> as RFC 4180 CSV after the batch succeeds (repeatable)
+  --export-csv <path>        Export the result of a single SELECT as CSV (no name; path must not contain '=')
+  --export-encoding <type>   CSV export encoding: utf8 | sjis (default: utf8; unrepresentable characters fail)
+  --export-timezone <zone>   IANA timezone for DATETIME cells in CSV export (default: keep UTC)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
@@ -327,6 +331,34 @@ RFC 4180 data record数（subtable CSVは継続行を含む）、JSONはtop-leve
 CSVの `encoding` は上記優先順位の解決後、JSONは `"utf8"` です。callbackがthrow/rejectすると
 当該文はerrorになり、その文のmutation APIは0回です。通知objectのkeyは
 `statementIndex` / `name` / `kind` / `rows` / `encoding` の5つだけです。
+
+CSV export（B179）は temp table を名前付きシンクとして事前宣言し、全文実行後に serialize します。
+engine は path を持たず bytes と receipt を返すだけで、file 書込みと sha256 は呼出側の責務です:
+
+```ts
+import {
+  createExecutionContext, executeStatement, exportSinkStatus, serializeExportSink,
+  serializeSelectResultAsCsv, disposeExecutionContext,
+} from "@rex0220/kintone-sql-tools/flow";
+
+const ctx = createExecutionContext({
+  client, script: "CREATE TEMP TABLE #export AS SELECT code, amount FROM APP1; UPDATE APP1 SET 状態 = '済' WHERE ...",
+  exportSinks: [{ name: "export" }],   // #export の CREATE TEMP TABLE がちょうど 1 文なければ同期 throw
+});
+for (const statement of statements) await executeStatement(statement, ctx);   // EXIT 後の skipped も回収
+if (exportSinkStatus(ctx, "export") === "materialized") {          // not-created = EXIT で未生成（file を作らない）
+  const csv = serializeExportSink(ctx, "export", { encoding: "utf8", timezone: "Asia/Tokyo" });
+  // csv.data (Uint8Array) を書く／sha256 を取る。csv.receipt = { rows, columns, bytes, encoding }
+}
+await disposeExecutionContext(ctx);
+// 単文 SELECT: serializeSelectResultAsCsv(await executeStatement(stmt, ctx))
+```
+
+CSV は RFC 4180（CRLF・header あり・BOM なし）。複数値は LF 連結、user 系は `code`、SUBTABLE / FILE 列は
+`ExportSinkUnsupportedColumnError`、計算列の指数表記は 10 進展開、DATETIME は `timezone` 指定時だけ offset 付き。
+Shift_JIS は `encoding: "sjis"` と `encoder: { encoding: "sjis", encode(text) }` の注入で、encoder は表現不能文字で
+throw する義務を負います（encoding-japanese / iconv-lite は黙って `?` 置換するため、encode → decode → 完全一致検査を
+wrapper で行ってください）。
 
 読取上限は既定 10,000 件（`maxRecords`）です。一時テーブルの実体化には**独立の** `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が適用されるため、大きなバッチでは両方を併せて指定してください:
 

@@ -3420,6 +3420,56 @@ SELECT * FROM #err;
 
 ---
 
+## 18.2 CSV export（名前付きシンク・B179）
+
+結果を CSV file として書き出す仕組みです。serializer は engine 層に 1 実装で、CLI と `/flow` が同じ方言を使います。
+engine は path・URL・file handle を受け取らず、bytes と receipt を返すだけです（file 書込み・sha256 は呼出側）。
+
+| 面 | 使い方 |
+|---|---|
+| CLI | `--export-csv <name>=<path>`（反復可・temp table `#<name>` を書き出す）／`--export-csv <path>`（単文 SELECT のみ・path に `=` は使えない）／`--export-encoding utf8\|sjis`／`--export-timezone <IANA zone>` |
+| `/flow` | `createExecutionContext({ exportSinks: [{ name }] })` → 全文実行後 `exportSinkStatus(context, name)` → `materialized` なら `serializeExportSink(context, name, options)`。単文 SELECT は `serializeSelectResultAsCsv(statementResult, options)`、任意入力は `serializeCsvExport({ columns, rows, columnMeta }, options)` |
+| MCP・プラグイン | 対象外 |
+
+**名前付きシンク**: sink 名は temp table `#<name>` に完全一致（case-sensitive）で対応し、同じ script に `CREATE TEMP TABLE #<name>` が
+**ちょうど 1 文**なければなりません。宣言重複・CREATE 不存在／重複・最終状態で DROP 済み・DML の `INTO #name` は、
+`/flow` では context 作成時に、CLI では実行前に拒否します（kintone API 0 回）。「最後の SELECT」を暗黙に選ぶことはしません。
+
+**serialize の時点**: SQL 全文が成功した後だけです。`/flow` の `exportSinkStatus` は `materialized`（作成済み）／
+`not-created`（EXIT により CREATE に到達しなかった＝error ではなく「対象なし」）／`failed`（error・timeout・assertion・依存失敗）／
+`incomplete`（未処理の文が残る）を返します。CLI は batch が失敗すると file を作らず、既存 file も変えません。
+
+**CSV の形**: RFC 4180（`"` `,` CR LF を含む cell を `"` で囲み `"` は `""`）・record 区切り CRLF・末尾 CRLF・header 行あり・BOM なし。
+header は result 列名そのもの（直接 field 参照は正式 field code。明示 alias は既存どおり小文字化）。単文 SELECT で同名列が重複すると
+`ExportSinkDuplicateHeaderError`（temp table は定義時に重複列が 1 列へ畳まれるので注意）。
+
+**値の表現（cli-kintone 互換）**:
+
+| 列の型 | cell |
+|---|---|
+| 文字列・NUMBER・DATE・TIME | 生値そのまま |
+| CHECK_BOX / MULTI_SELECT / CATEGORY | 要素を LF で連結（空配列は空 cell） |
+| USER_SELECT / ORGANIZATION_SELECT / GROUP_SELECT / STATUS_ASSIGNEE | `code` を LF で連結（name は出力しない） |
+| 計算列の指数表記（`1.25e+22` 等） | 丸めなしで 10 進展開（`12500000000000000000000`。1,024 文字超は error） |
+| DATETIME | 既定は kintone 保持形式（UTC ISO）のまま。`timezone` 指定時だけ offset 付き ISO（ミリ秒は保持） |
+| 空・NULL・欠落 | 空文字（round-trip で区別不能） |
+| SUBTABLE / FILE | `ExportSinkUnsupportedColumnError`（サブテーブルは `APP$明細` 仮想テーブルを SELECT する。添付は対象外） |
+| 型不明の式列 | JSON に見えても解釈せず生文字列 |
+
+**文字コード**: 既定 UTF-8（BOM なし）。Shift_JIS は `/flow` では `encoder: { encoding: "sjis", encode(text): Uint8Array }` を注入し、
+encoder は表現不能文字で **throw する義務**を負います（encoding-japanese / iconv-lite は黙って `?` 置換するため、encode → decode →
+完全一致の検査を wrapper で行う）。CLI は encoding-japanese を bundle し同じ検査で fail-closed（波ダッシュ U+301C・円記号 U+00A5・
+マイナス U+2212 などは Shift_JIS に写せず error。message に行番号・列名・code point を含め、cell 全文は含めない）。
+
+**CLI の書込み**: 全 sink をメモリ上で serialize してから、target と同一 directory の一時 file へ全量 write → fsync → close → rename。
+失敗時は旧 file を維持し一時 file を削除します（Windows で既存 file を他プロセスが開いていると `EPERM` で失敗＝旧 file のまま）。
+複数 sink の rename 途中で process が落ちた場合だけ、更新済みと未更新の file が混在し得ます。
+
+**安定 code**: `ExportSinkInvalidNameError` / `ExportSinkDuplicateError` / `ExportSinkNotFoundError` / `ExportSinkInvalidTargetError` /
+`ExportSinkNotMaterializedError` / `ExportSinkExecutionIncompleteError` / `ExportSinkExecutionFailedError` / `ExportSinkDuplicateHeaderError` /
+`ExportSinkUnsupportedColumnError` / `ExportSinkInvalidValueError` / `ExportSinkInvalidTimezoneError` / `ExportSinkEncoderRequiredError` /
+`ExportSinkEncodingError` / `ExportSinkInvalidEncoderResultError`（CLI の file 失敗は `ExportSinkWriteError`）。
+
 ## 19. サブテーブル仮想テーブル
 
 サブテーブルは `APP100$明細` 形式の仮想テーブルとして操作できます。

@@ -35,6 +35,11 @@ function isIdentifierStart(codePoint: number): boolean {
     || (codePoint >= 0xff01 && codePoint <= 0xff60);
 }
 
+/** Sink name rule shared with the CLI `--export-csv <name>=<path>` parser. */
+export function isExportSinkName(name: string): boolean {
+  return !name.startsWith("#") && isTempIdentifier(name);
+}
+
 function isTempIdentifier(name: string): boolean {
   const characters = Array.from(name);
   return characters.length > 0
