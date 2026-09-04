@@ -132,6 +132,26 @@ export interface FlowNamedImportSource {
   readonly loader: FlowImportSourceLoader;
 }
 
+/** Browser-neutral CSV export types shared with the engine serializer. */
+export type ExportEncoding = import("../export/types").ExportEncoding;
+export type FlowCsvExportColumnMeta = import("../export/types").CsvExportColumnMeta;
+export type FlowCsvExportInput = import("../export/types").CsvExportInput;
+export type FlowExportTextEncoder = import("../export/types").ExportTextEncoder;
+export type FlowCsvExportOptions = import("../export/types").CsvExportOptions;
+export type FlowCsvExportReceipt = import("../export/types").CsvExportReceipt;
+export type FlowCsvExportResult = import("../export/types").CsvExportResult;
+
+export interface FlowNamedExportSink {
+  /** Exact, case-sensitive temp-table name without the leading #. */
+  readonly name: string;
+}
+
+export type FlowExportSinkStatus =
+  | "materialized"
+  | "not-created"
+  | "failed"
+  | "incomplete";
+
 export interface FlowImportSourceMaterializedInfo {
   /** バッチ内の文 index。StatementResult.index と同じ0始まり。 */
   readonly statementIndex: number;
@@ -213,6 +233,8 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   asOf?: Date;
   timezone?: string;
   continueOnError?: boolean;
+  /** Named CREATE TEMP TABLE outputs made available to the export API. */
+  exportSinks?: readonly FlowNamedExportSink[];
   /** Named, path-free source resolver. It never enables IMPORT implicitly. */
   importSource?: FlowImportSourceResolver;
   /**
